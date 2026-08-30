@@ -30,7 +30,7 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 /// `maru <exe>`를 session host로 전환하는 hidden 서브커맨드 이름. main.zig dispatch와 이 launcher가 공유하는 단일 출처다.
 pub const subcommand = entrypoint.subcommand;
 
-pub const SpawnError = error{ ForkFailed, OutOfMemory, ExecFailed, StartupFailed };
+pub const SpawnError = error{ ForkFailed, OutOfMemory, ExecFailed, StartupFailed, SharedUserNamespace };
 
 /// host helper의 argv를 조립한다(순수) —
 /// `[exe_path, "__session-host", session_dir, socket_path, 32-hex-host_id]`. exec에 넘길 NUL 종단 포인터
@@ -71,12 +71,104 @@ pub fn spawnSessionHostDetached(
 /// 앱의 persistent lifetime 계약은 `spawnSessionHostDetached`만 사용한다.
 pub fn spawnSessionHostSupervisedForTest(
     allocator: std.mem.Allocator,
+    isolated_root: [:0]const u8,
     exe_path: [:0]const u8,
     session_dir: [:0]const u8,
     socket_path: [:0]const u8,
     host_id: u128,
 ) SpawnError!c.pid_t {
     if (builtin.os.tag != .macos) return error.ForkFailed;
+    try validateIsolatedTestNamespace(isolated_root, session_dir, socket_path);
+    const host_hex = std.fmt.allocPrintSentinel(allocator, "{x:0>32}", .{host_id}, 0) catch
+        return error.OutOfMemory;
+    defer allocator.free(host_hex);
+    const args: []const [:0]const u8 = &.{ subcommand, session_dir, socket_path, host_hex };
+    var argv = allocator.alloc(?[*:0]const u8, args.len + 2) catch return error.OutOfMemory;
+    defer allocator.free(argv);
+    argv[0] = exe_path.ptr;
+    for (args, 0..) |arg, i| argv[i + 1] = arg.ptr;
+    argv[args.len + 1] = null;
+
+    var child_env = buildTestRootEnvironment(allocator, isolated_root) catch return error.OutOfMemory;
+    defer child_env.deinit(allocator);
+
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = c.setsid();
+        closeInheritedFds(null, null);
+        redirectStdioToDevNull();
+        clearSessionHostTestEnvironment();
+        _ = c.execve(exe_path.ptr, @ptrCast(argv.ptr), @ptrCast(child_env.envp.ptr));
+        std.c._exit(127);
+    }
+    return pid;
+}
+
+fn pathIsBelow(root: []const u8, path: []const u8) bool {
+    if (path.len <= root.len or !std.mem.startsWith(u8, path, root) or path[root.len] != '/')
+        return false;
+    var components = std.mem.splitScalar(u8, path[root.len + 1 ..], '/');
+    var count: usize = 0;
+    while (components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, "..")) return false;
+        count += 1;
+    }
+    return count != 0;
+}
+
+fn validateIsolatedTestNamespace(
+    isolated_root: [:0]const u8,
+    session_dir: []const u8,
+    socket_path: []const u8,
+) error{SharedUserNamespace}!void {
+    const tmp_prefix = "/tmp/";
+    if (!std.mem.startsWith(u8, isolated_root, tmp_prefix) or
+        isolated_root.len == tmp_prefix.len or
+        std.mem.indexOfScalar(u8, isolated_root[tmp_prefix.len..], '/') != null or
+        !pathIsBelow(isolated_root, session_dir) or !pathIsBelow(isolated_root, socket_path))
+        return error.SharedUserNamespace;
+
+    // `/tmp` 자체는 macOS에서 `/private/tmp` 별칭일 수 있다. 그 플랫폼 별칭은 허용하되 우리가
+    // 소유하는 leaf는 symlink가 아닌 exact owner-only directory여야 한다.
+    var root_stat: posix.Stat = undefined;
+    if (c.fstatat(posix.AT.FDCWD, isolated_root.ptr, &root_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !posix.S.ISDIR(root_stat.mode) or root_stat.uid != c.getuid() or
+        (root_stat.mode & 0o777) != 0o700)
+        return error.SharedUserNamespace;
+
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved_ptr = c.realpath(isolated_root.ptr, &resolved_buf) orelse
+        return error.SharedUserNamespace;
+    const resolved = std.mem.span(resolved_ptr);
+
+    var shared_buf: [64]u8 = undefined;
+    const shared = short_endpoint.userRootPathIn(&shared_buf, c.getuid()) catch
+        return error.SharedUserNamespace;
+    var resolved_shared_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved_shared = if (c.realpath(shared.ptr, &resolved_shared_buf)) |ptr|
+        std.mem.span(ptr)
+    else
+        shared;
+    if (std.mem.eql(u8, resolved, resolved_shared)) return error.SharedUserNamespace;
+}
+
+/// 격리 override를 모르는 frozen N-1 binary 전용. caller가 먼저 공용 namespace를 exclusive
+/// `claimEmptySharedLegacyFixture`로 소유한 경우에만 열린다. 일반/current fixture는 이 API를 쓰지 않는다.
+pub fn spawnSessionHostSupervisedLegacySharedForTest(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) SpawnError!c.pid_t {
+    if (builtin.os.tag != .macos or !builtin.is_test) return error.SharedUserNamespace;
+    const marker = c.getenv(short_endpoint.legacy_shared_fixture_env) orelse
+        return error.SharedUserNamespace;
+    if (!std.mem.eql(u8, std.mem.span(marker), short_endpoint.legacy_shared_fixture_value))
+        return error.SharedUserNamespace;
+
     const host_hex = std.fmt.allocPrintSentinel(allocator, "{x:0>32}", .{host_id}, 0) catch
         return error.OutOfMemory;
     defer allocator.free(host_hex);
@@ -98,6 +190,49 @@ pub fn spawnSessionHostSupervisedForTest(
         std.c._exit(127);
     }
     return pid;
+}
+
+const TestRootEnvironment = struct {
+    envp: []?[*:0]const u8,
+    entry: [:0]u8,
+
+    fn deinit(self: *TestRootEnvironment, allocator: std.mem.Allocator) void {
+        allocator.free(self.entry);
+        allocator.free(self.envp);
+        self.* = undefined;
+    }
+};
+
+fn buildTestRootEnvironment(
+    allocator: std.mem.Allocator,
+    isolated_root: []const u8,
+) error{OutOfMemory}!TestRootEnvironment {
+    var inherited_count: usize = 0;
+    while (c.environ[inherited_count] != null) : (inherited_count += 1) {}
+    var envp = try allocator.alloc(?[*:0]const u8, inherited_count + 2);
+    errdefer allocator.free(envp);
+    const entry = try std.fmt.allocPrintSentinel(
+        allocator,
+        "MARU_SESSION_HOST_ROOT={s}",
+        .{isolated_root},
+        0,
+    );
+    errdefer allocator.free(entry);
+
+    var written: usize = 0;
+    for (0..inherited_count) |index| {
+        const inherited = c.environ[index] orelse unreachable;
+        const text = std.mem.span(inherited);
+        if (std.mem.startsWith(u8, text, short_endpoint.root_override_env) and
+            text.len > short_endpoint.root_override_env.len and
+            text[short_endpoint.root_override_env.len] == '=') continue;
+        if (isSessionHostTestEnvironmentAssignment(text)) continue;
+        envp[written] = inherited;
+        written += 1;
+    }
+    envp[written] = entry.ptr;
+    @memset(envp[written + 1 ..], null);
+    return .{ .envp = envp, .entry = entry };
 }
 
 /// `exe_path`를 `args`(NUL 종단 슬라이스들)로 **detached** 실행한다: double-fork로 손자를 부모와 독립시키고, setsid로
@@ -336,18 +471,27 @@ fn redirectStdioToDevNull() void {
     if (fd > 2) _ = c.close(fd);
 }
 
+const session_host_test_environment_names = [_][:0]const u8{
+    "MARU_SESSION_HOST_ACTIVATION_MARKER",
+    "MARU_SESSION_HOST_PRODUCT_EXE",
+    "MARU_SESSION_HOST_REQUIRE_PRODUCT_LAUNCH_SMOKE",
+    "MARU_SESSION_HOST_RESTORE_TEST_EXE",
+    "MARU_SESSION_HOST_TEST_ONESHOT",
+    "MARU_SESSION_HOST_UPGRADE_NEW_EXE",
+    "MARU_SESSION_HOST_UPGRADE_NEXT_EXE",
+    "MARU_SESSION_HOST_UPGRADE_OLD_EXE",
+};
+
+fn isSessionHostTestEnvironmentAssignment(entry: []const u8) bool {
+    for (session_host_test_environment_names) |name| {
+        if (entry.len > name.len and std.mem.startsWith(u8, entry, name) and
+            entry[name.len] == '=') return true;
+    }
+    return false;
+}
+
 fn clearSessionHostTestEnvironment() void {
-    const names = [_][:0]const u8{
-        "MARU_SESSION_HOST_ACTIVATION_MARKER",
-        "MARU_SESSION_HOST_PRODUCT_EXE",
-        "MARU_SESSION_HOST_REQUIRE_PRODUCT_LAUNCH_SMOKE",
-        "MARU_SESSION_HOST_RESTORE_TEST_EXE",
-        "MARU_SESSION_HOST_TEST_ONESHOT",
-        "MARU_SESSION_HOST_UPGRADE_NEW_EXE",
-        "MARU_SESSION_HOST_UPGRADE_NEXT_EXE",
-        "MARU_SESSION_HOST_UPGRADE_OLD_EXE",
-    };
-    for (names) |name| _ = unsetenv(name.ptr);
+    for (session_host_test_environment_names) |name| _ = unsetenv(name.ptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,15 +546,98 @@ test "launcher: readiness envp is completed before fork and replaces ambient sta
 
 test "launcher: signed E2E supervised child has an exact waitpid owner" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var root_buf: [96]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(
+        &root_buf,
+        "/tmp/maru-supervised-test-isolated-{d}",
+        .{c.getpid()},
+    );
+    if (c.mkdir(root.ptr, 0o700) != 0) return error.IsolatedFixtureUnavailable;
+    defer _ = c.rmdir(root.ptr);
+    var session_buf: [128]u8 = undefined;
+    const session_dir = try std.fmt.bufPrintZ(&session_buf, "{s}/session-host", .{root});
+    var socket_buf: [160]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&socket_buf, "{s}/sh/unused.sock", .{root});
     const pid = try spawnSessionHostSupervisedForTest(
         testing.allocator,
+        root,
         "/usr/bin/false",
-        "/tmp",
-        "/tmp/unused.sock",
+        session_dir,
+        socket_path,
         1,
     );
     var status: c_int = undefined;
     try testing.expectEqual(pid, c.waitpid(pid, &status, 0));
+}
+
+test "launcher: product-child fixture rejects traversal and symlink aliases of the live namespace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var shared_buf: [64]u8 = undefined;
+    const shared = try short_endpoint.userRootPathIn(&shared_buf, c.getuid());
+
+    var traversal_buf: [96]u8 = undefined;
+    const traversal = try std.fmt.bufPrintZ(
+        &traversal_buf,
+        "/tmp/maru-launcher-alias/../maru-{d}",
+        .{c.getuid()},
+    );
+    var traversal_session_buf: [128]u8 = undefined;
+    const traversal_session = try std.fmt.bufPrintZ(&traversal_session_buf, "{s}/session-host", .{traversal});
+    var traversal_socket_buf: [160]u8 = undefined;
+    const traversal_socket = try std.fmt.bufPrintZ(&traversal_socket_buf, "{s}/sh/test.sock", .{traversal});
+    try std.testing.expectError(
+        error.SharedUserNamespace,
+        validateIsolatedTestNamespace(traversal, traversal_session, traversal_socket),
+    );
+
+    var isolated_buf: [96]u8 = undefined;
+    const isolated = try std.fmt.bufPrintZ(
+        &isolated_buf,
+        "/tmp/maru-launcher-isolated-{d}",
+        .{c.getpid()},
+    );
+    if (c.mkdir(isolated.ptr, 0o700) != 0) return error.IsolatedFixtureUnavailable;
+    defer _ = c.rmdir(isolated.ptr);
+    var child_traversal_buf: [160]u8 = undefined;
+    const child_traversal = try std.fmt.bufPrintZ(
+        &child_traversal_buf,
+        "{s}/../maru-{d}/session-host",
+        .{ isolated, c.getuid() },
+    );
+    var isolated_socket_buf: [160]u8 = undefined;
+    const isolated_socket = try std.fmt.bufPrintZ(&isolated_socket_buf, "{s}/sh/test.sock", .{isolated});
+    try std.testing.expectError(
+        error.SharedUserNamespace,
+        validateIsolatedTestNamespace(isolated, child_traversal, isolated_socket),
+    );
+
+    var alias_buf: [96]u8 = undefined;
+    const alias = try std.fmt.bufPrintZ(
+        &alias_buf,
+        "/tmp/maru-launcher-live-alias-{d}",
+        .{c.getpid()},
+    );
+    if (c.symlink(shared.ptr, alias) != 0) return error.SymlinkFixtureFailed;
+    defer _ = c.unlink(alias.ptr);
+    var alias_session_buf: [128]u8 = undefined;
+    const alias_session = try std.fmt.bufPrintZ(&alias_session_buf, "{s}/session-host", .{alias});
+    var alias_socket_buf: [160]u8 = undefined;
+    const alias_socket = try std.fmt.bufPrintZ(&alias_socket_buf, "{s}/sh/test.sock", .{alias});
+    try std.testing.expectError(
+        error.SharedUserNamespace,
+        validateIsolatedTestNamespace(alias, alias_session, alias_socket),
+    );
+}
+
+test "launcher: isolated exec environment drops every host test control" {
+    for (session_host_test_environment_names) |name| {
+        var assignment_buf: [128]u8 = undefined;
+        const assignment = try std.fmt.bufPrint(&assignment_buf, "{s}=ambient", .{name});
+        try std.testing.expect(isSessionHostTestEnvironmentAssignment(assignment));
+        try std.testing.expect(!isSessionHostTestEnvironmentAssignment(name));
+    }
+    try std.testing.expect(!isSessionHostTestEnvironmentAssignment("MARU_SESSION_HOST_ROOT=/tmp/example"));
+    try std.testing.expect(!isSessionHostTestEnvironmentAssignment("PATH=/usr/bin:/bin"));
 }
 
 test "launcher: spawnDetached runs a detached child without blocking the parent (marker)" {

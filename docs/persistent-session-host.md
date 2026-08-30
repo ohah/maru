@@ -6757,7 +6757,8 @@ ambiguous하게 만들어 실제 앱이 살아 있는 runtime을 복구하지 �
 테스트 실행은 사용자의 공용 `/tmp/maru-<uid>`를 **읽기·쓰기·정리 대상으로 사용하지 않는다**. `builtin.is_test`인
 프로세스는 PID별 root를 기본으로 쓰고, 제품 executable을 자식으로 띄우는 테스트는 같은
 `MARU_SESSION_HOST_ROOT`를 명시적으로 상속시켜야 한다. 테스트용 launcher API는 격리 root를 인자로 받아 이 전파를
-강제하며, root가 공용 UID namespace와 같으면 실행 전에 거부한다. 이 판정은 문자열 prefix에 머물지 않는다. root는
+강제하며, 공용 test runner가 이 환경을 만들지 못하면 어떤 테스트도 시작하지 않고 nonzero로 끝난다. root가 공용 UID
+namespace와 같으면 제품 child 실행 전에 거부한다. 이 판정은 문자열 prefix에 머물지 않는다. root는
 `/tmp` 바로 아래에 이미 존재하는 본인 소유 `0700` 실제 directory여야 하고 leaf symlink·`.`·`..` 별칭을 허용하지
 않으며, session/socket 경로도 빈 component·`.`·`..` 없이 그 root의 하위 경로여야 한다. 자식 `execve` 환경은 root
 override 하나만 새로 만들고 activation/oneshot/upgrade executable 등 테스트 제어 변수는 상속하지 않는다. macOS의 플랫폼 `/tmp`→`/private/tmp` 별칭은 두 root를

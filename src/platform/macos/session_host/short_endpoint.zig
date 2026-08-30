@@ -29,6 +29,42 @@ pub fn userRootPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {
 /// override 로 인정하면 그 변수를 실제로 설정해 둔 사용자에게서 같은 사고가 조건부로 되살아난다.
 /// 캐시는 캐시고, registry 는 registry다.
 pub const root_override_env = "MARU_SESSION_HOST_ROOT";
+pub const legacy_shared_fixture_env = "MARU_SESSION_HOST_EMPTY_SHARED_FIXTURE";
+pub const legacy_shared_fixture_value = "ephemeral-runner-v1";
+
+pub const LegacyFixtureError = error{ Disabled, SharedUserNamespace, InvalidDirectory, PathTooLong };
+
+/// Override를 모르는 frozen N-1 실행 전용이다. 공용 root가 이미 있으면 그것이 실제 앱 소유인지
+/// 구분하려 하지 않고 거부한다. 성공한 mkdir만 이 테스트가 소유하므로 release 때 전체 삭제할 수 있다.
+pub fn claimEmptySharedLegacyFixture() LegacyFixtureError!void {
+    if (!builtin.is_test) return error.Disabled;
+    const marker = std.c.getenv(legacy_shared_fixture_env) orelse return error.Disabled;
+    if (!std.mem.eql(u8, std.mem.span(marker), legacy_shared_fixture_value)) return error.Disabled;
+    var root_buf: [64]u8 = undefined;
+    const root = userRootPathIn(&root_buf, std.c.getuid()) catch return error.PathTooLong;
+    if (std.c.mkdir(root.ptr, 0o700) != 0) return error.SharedUserNamespace;
+    var dir_buf: [80]u8 = undefined;
+    const dir = socketDirPathIn(&dir_buf, std.c.getuid()) catch return error.PathTooLong;
+    if (std.c.mkdir(dir.ptr, 0o700) != 0) {
+        _ = std.c.rmdir(root.ptr);
+        return error.InvalidDirectory;
+    }
+}
+
+pub fn releaseEmptySharedLegacyFixture() void {
+    var dir_buf: [80]u8 = undefined;
+    if (socketDirPathIn(&dir_buf, std.c.getuid())) |dir| _ = std.c.rmdir(dir.ptr) else |_| {}
+    var root_buf: [64]u8 = undefined;
+    if (userRootPathIn(&root_buf, std.c.getuid())) |root| _ = std.c.rmdir(root.ptr) else |_| {}
+}
+
+pub fn sharedLegacyRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
+    return userRootPathIn(buf, std.c.getuid());
+}
+
+pub fn sharedLegacySocketPathIn(buf: []u8, host_id: u128) error{ NoSpaceLeft, InvalidHostId }![:0]u8 {
+    return socketPathIn(buf, std.c.getuid(), host_id);
+}
 
 /// 이 사용자의 **런타임 base**. manifest·lock·socket 이 함께 사는 자리이고, **캐시가 아니다**
 /// (계약 §10 — 캐시는 언제든 지워지는 데이터인데 manifest 는 지우는 순간 살아 있는 세션을 전부

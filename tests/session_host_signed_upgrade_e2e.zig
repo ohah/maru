@@ -204,6 +204,7 @@ fn run(
 
     const supervised_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
         allocator,
+        base,
         config.n1_executable,
         session_dir,
         socket_path,

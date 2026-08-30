@@ -932,6 +932,86 @@ fn readKindContains(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocat
     }
 }
 
+test "daemon stale sweep product path removes valid residue and disables only upgrade on hostile residue" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    for ([_]bool{ false, true }) |hostile| {
+        const allocator = testing.allocator;
+        var base_buf: [256]u8 = undefined;
+        const base = try std.fmt.bufPrintZ(
+            &base_buf,
+            "/tmp/maru-sh-stale-sweep-{d}-{s}",
+            .{ c.getpid(), if (hostile) "hostile" else "valid" },
+        );
+        _ = c.mkdir(base.ptr, 0o700);
+        var session_buf: [320]u8 = undefined;
+        const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
+        _ = c.mkdir(session_dir.ptr, 0o700);
+        const host_id = newHostId();
+        try short_endpoint.prepareCurrentUserNamespace();
+        var socket_buf: [128]u8 = undefined;
+        const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+        try host_manifest.prepareHostDirectory(session_dir, host_id);
+        var host_dir_buf: [768]u8 = undefined;
+        const host_dir = try host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
+        const host_fd = c.open(host_dir.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
+        if (host_fd < 0) return error.TestUnexpectedResult;
+        defer _ = c.close(host_fd);
+        const residue_name: [:0]const u8 = if (hostile)
+            "target-malformed.image"
+        else
+            "target-00000000000000000000000000000001.image";
+        const residue_fd = c.openat(host_fd, residue_name.ptr, .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .EXCL = true,
+            .CLOEXEC = true,
+            .NOFOLLOW = true,
+        }, @as(c.mode_t, 0o700));
+        if (residue_fd < 0) return error.TestUnexpectedResult;
+        _ = c.close(residue_fd);
+
+        const child = c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = c.setsid();
+            runSessionHostWithIdentityTestAuthorizer(
+                std.heap.page_allocator,
+                testing.io,
+                session_dir,
+                socket_path,
+                host_id,
+            ) catch {};
+            c._exit(0);
+        }
+        defer {
+            _ = c.kill(child, posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = c.waitpid(child, &status, 0);
+            _ = c.unlink(socket_path.ptr);
+            std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
+        }
+
+        const fd = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;
+        defer _ = c.close(fd);
+        const hello = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .hello, .request_id = 1 },
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+        );
+        defer allocator.free(hello);
+        try socket_server.writeAll(fd, hello);
+        var parser = framing.FrameParser.init(allocator);
+        defer parser.deinit();
+        const advertised = readKindContains(fd, &parser, allocator, .hello_ack, "host_exec_upgrade_v1");
+        try testing.expectEqual(!hostile, advertised);
+
+        var residue_stat: posix.Stat = undefined;
+        const residue_exists = c.fstatat(host_fd, residue_name.ptr, &residue_stat, posix.AT.SYMLINK_NOFOLLOW) == 0;
+        try testing.expectEqual(hostile, residue_exists);
+    }
+}
+
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): host는 GUI가 꺼져도 살아남아야 세션이 유지되지만,
 // **영원히 살아남으면 안 된다**. docs/session-host-upgrade.md는 "runtime count가 0이 된 뒤에만 자연 종료한다"고
 // 계약하는데 그 경로가 구현되지 않아, 자식이 0개인 host가 계속 남아 build_id가 바뀔 때마다 하나씩 쌓였다(실측:

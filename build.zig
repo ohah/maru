@@ -4277,6 +4277,23 @@ pub fn build(b: *std.Build) void {
     );
     boundary_step.dependOn(&run_session_host_upgrade_stale_sweep_boundary_tests.step);
     if (target.result.os.tag == .macos) {
+        const session_host_upgrade_stale_sweep_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"daemon stale sweep product path"},
+        });
+        const run_session_host_upgrade_stale_sweep_product_tests =
+            b.addRunArtifact(session_host_upgrade_stale_sweep_product_tests);
+        run_session_host_upgrade_stale_sweep_product_tests.addArg("--maru-expect-tests=1");
+        run_session_host_upgrade_stale_sweep_product_tests.setCwd(b.path("."));
+        session_host_upgrade_stale_sweep_step.dependOn(
+            &run_session_host_upgrade_stale_sweep_product_tests.step,
+        );
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |sweep_optimize| {
             const session_host_upgrade_stale_sweep_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{

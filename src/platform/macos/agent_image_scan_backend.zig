@@ -15,10 +15,16 @@ const std = @import("std");
 const maru = @import("maru");
 
 const index = maru.session.agent_image_index;
+const context = maru.session.agent_image_context;
 
 /// worker 가 만들어 main actor 로 넘기는 완료본. **소유가 통째로 이동한다** — 받은 쪽이 푼다.
 pub const Result = struct {
     hits: std.ArrayList(index.Hit) = .empty,
+    /// `hits` 와 **같은 순서·같은 길이**의 라벨. 「이 이미지가 무엇이었는지」(§2.2)를 스캔과 한 번에
+    /// 만든다 — 필터가 **전부**의 라벨을 필요로 하는데, main actor 에서 읽으면 실측 40.2 ms 다.
+    ///
+    /// 길이가 어긋나면 라벨이 남의 이미지에 붙는다. 그래서 `hits` 를 건드리는 자리는 이것도 같이 건든다.
+    labels: std.ArrayList(context.Label) = .empty,
     partial: bool = false,
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
@@ -27,6 +33,7 @@ pub const Result = struct {
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         self.hits.deinit(allocator);
+        self.labels.deinit(allocator);
         self.* = .{};
     }
 };
@@ -181,6 +188,42 @@ fn finish(state: *State, result: ?Result) void {
     }
 }
 
+/// 그 hit 의 라벨을 **두 조각만** 읽어 만든다 — 이미지 줄의 base64 앞부분과 그 앞선 줄들.
+/// base64 는 수 MB 라 절대 안 읽는다. 실패는 **빈 라벨**이다(없는 설명을 지어내지 않는다).
+fn readLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.Allocator) context.Label {
+    const prefix_len: usize = @intCast(@min(
+        hit.data_offset -| hit.line_offset,
+        @as(u64, context.max_prefix_bytes),
+    ));
+    const back: u64 = @min(hit.line_offset, @as(u64, context.max_prev_line_bytes));
+    const buf = allocator.alloc(u8, prefix_len + @as(usize, @intCast(back))) catch return .{};
+    defer allocator.free(buf);
+
+    var prev: []const u8 = &.{};
+    if (back > 0) {
+        const window = buf[0..@intCast(back)];
+        if (readAllAt(io, file, window, hit.line_offset - back)) {
+            prev = if (window.len > 0 and window[window.len - 1] == '\n') window[0 .. window.len - 1] else window;
+        }
+    }
+    var prefix: []const u8 = &.{};
+    if (prefix_len > 0) {
+        const slot = buf[@intCast(back)..];
+        if (readAllAt(io, file, slot, hit.line_offset)) prefix = slot;
+    }
+    return context.label(prefix, prev);
+}
+
+fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) bool {
+    var got: usize = 0;
+    while (got < dest.len) {
+        const n = file.readPositional(io, &.{dest[got..]}, offset + got) catch return false;
+        if (n == 0) return false;
+        got += n;
+    }
+    return true;
+}
+
 fn worker(job: *Job) void {
     const state = job.state;
     defer {
@@ -239,6 +282,46 @@ fn worker(job: *Job) void {
         for (result.hits.items[first_hit..]) |*h| h.file_index = @intCast(fi);
         if (scanner.partial) result.partial = true;
     }
+    // ── 라벨 패스 ────────────────────────────────────────────────────────────────────────────
+    // 스캔이 끝난 뒤 **같은 워커에서** 만든다. 파일별로 한 번만 열고 positional read 로 창을 읽는다 —
+    // hit 마다 열면 151 번 여는 셈이다.
+    if (ok) labels: {
+        result.labels.ensureTotalCapacity(state.allocator, result.hits.items.len) catch {
+            result.partial = true;
+            break :labels;
+        };
+        var open_index: ?usize = null;
+        var open_file: ?std.Io.File = null;
+        defer if (open_file) |f| f.close(io);
+
+        for (result.hits.items) |hit| {
+            if (state.cancelled_upto.load(.acquire) >= job.generation) {
+                ok = false;
+                break :labels;
+            }
+            // 파일이 바뀔 때만 다시 연다(체인은 앞에서부터 순서대로 나온다).
+            if (open_index == null or open_index.? != hit.file_index) {
+                if (open_file) |f| f.close(io);
+                open_file = null;
+                open_index = hit.file_index;
+                const path = job.chain.get(hit.file_index) orelse {
+                    result.labels.appendAssumeCapacity(.{});
+                    continue;
+                };
+                open_file = std.Io.Dir.cwd().openFile(io, path, .{
+                    .mode = .read_only,
+                    .follow_symlinks = false,
+                    .allow_directory = false,
+                }) catch null;
+            }
+            const file = open_file orelse {
+                result.labels.appendAssumeCapacity(.{});
+                continue;
+            };
+            result.labels.appendAssumeCapacity(readLabel(io, file, hit, state.allocator));
+        }
+    }
+
     const ended_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
     result.scan_ns = @intCast(@max(0, ended_ns - started_ns));
 

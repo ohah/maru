@@ -737,6 +737,21 @@ pub fn main(init: std.process.Init) !void {
         // 클리핑은 glyph를 늘릴 수 없다.
         rich_glyphs.items.len <= unclipped_glyphs.items.len;
 
+    // **제품과 같은 단계를 지난다**(2026-08-31). `appendGpuGlyphs` 는 UV 를 **자르기 전 전체 슬롯**에서
+    //굽고 `clipGlyphQuad` 는 `atlas_*_px` 만 좁힌다 — 그 둘을 맞추는 것은 `renormalizeGpuGlyphUvs` 이고,
+    // 제품에서는 `MetalFrameBuffer.replace` 가 매 프레임 부른다. Lab 은 글리프를 렌더러에 바로 넘기므로
+    // 이 호출이 없으면 **기하만 줄고 텍스처는 원본이 남아** 부분적으로 보이는 행의 글자가 잘리는 대신
+    // 찌그러진다. 파일 트리 라벨에 스크롤 clip 을 켜자 그 어긋남이 캡처에서만 드러났다.
+    //
+    // **위 `rich_text_matches_artifact` 대조 뒤에 둔다** — 그 계약은 placement→GPU **좌표** 대응이라
+    // UV 와 직교하고, 재정규화가 좌표를 바꾸지 않으므로 순서가 결과를 바꾸지는 않는다. 그래도 대조가
+    // 보는 값이 손대기 전 값이라는 것을 자리로 남긴다.
+    renderer.metal_frame.renormalizeGpuGlyphUvs(
+        rich_glyphs.items,
+        metal_fixture.atlas_width_px,
+        metal_fixture.atlas_height_px,
+    );
+
     var native: bridge.NativeResult = .{
         .status = -1,
         .renderer_created = 0,

@@ -55,7 +55,12 @@ test "product-child fixtures require an isolated root and the default suite neve
     try std.testing.expect(std.mem.indexOf(
         u8,
         runner,
-        "if (setenv(\"MARU_SESSION_HOST_ROOT\", root.ptr, 0) != 0)",
+        "if (setenv(\"MARU_SESSION_HOST_ROOT\", root.ptr, 1) != 0)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        runner,
+        "inherited roots are untrusted",
     ) != null);
 }
 
@@ -72,6 +77,22 @@ test "default product fixtures do not reconstruct uid-keyed sockets" {
     try std.testing.expect(std.mem.indexOf(u8, app_session, "socketDirPathIn(&socket_dir_buf, std.c.getuid())") == null);
     try std.testing.expect(std.mem.indexOf(u8, app_session, "socketPathIn(&socket_buf, std.c.getuid(), host_id)") == null);
     try std.testing.expect(std.mem.indexOf(u8, shutdown, "**이 테스트만 uid 기준 공용 socket 을 쓴다.**") == null);
+
+    const endpoint = try readSource(
+        allocator,
+        "src/platform/macos/session_host/short_endpoint.zig",
+    );
+    defer allocator.free(endpoint);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        endpoint,
+        "currentLoginUserOwnsSharedNamespace()",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        endpoint,
+        "if (console_stat.uid == std.c.getuid()) return error.SharedUserNamespace;",
+    ) != null);
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

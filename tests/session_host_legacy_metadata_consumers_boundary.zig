@@ -68,7 +68,8 @@ test "P3-e4d-2b legacy metadata consumers use frozen artifact and product bounda
     try std.testing.expect(std.mem.indexOf(u8, body, "metadata_n1_baseline.source_patch_sha256") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "metadata_n1_baseline.manifest_sha256") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "manifest_path") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "spawnSessionHostSupervisedForTest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "claimEmptySharedLegacyFixture") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "spawnSessionHostSupervisedLegacySharedForTest") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "ensureRestoreHostAdapterAtBase") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "term_ops.createTerm") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "agent_ops.pollAgentKinds") != null);

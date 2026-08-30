@@ -35232,6 +35232,10 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
 // fail-closed로 유지되는지를 한 흐름으로 검증한다.
 test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
     if (!is_macos) return error.SkipZigTest;
+    if (std.c.getenv(session_host.short_endpoint.legacy_shared_fixture_env) == null)
+        return error.SkipZigTest;
+    try session_host.short_endpoint.claimEmptySharedLegacyFixture();
+    defer session_host.short_endpoint.releaseEmptySharedLegacyFixture();
     // Aggregate suite는 frozen executable 입력과 역사적 uid registry namespace를 소유하지 않는다.
     // Focused build step만 세 file argument와 process-local MARU_SESSION_HOST_ROOT를 제공한다.
     if (_NSGetArgc().* < 4) return error.SkipZigTest;
@@ -35338,20 +35342,16 @@ test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
     try std.testing.expectEqual(@as(usize, 2), architecture_count);
     try std.testing.expect(saw_arm64 and saw_x86_64);
 
-    const root_env = std.c.getenv(session_host.short_endpoint.root_override_env) orelse
-        return error.MissingN1RegistryRoot;
-    const base = std.mem.span(root_env);
+    var base_buf: [64]u8 = undefined;
+    const base = try session_host.short_endpoint.sharedLegacyRootPathIn(&base_buf);
     var session_dir_buf: [256]u8 = undefined;
     const session_dir = try session_host.discovery.sessionHostDirPath(&session_dir_buf, base);
     _ = std.c.mkdir(base.ptr, 0o700);
     _ = std.c.mkdir(session_dir.ptr, 0o700);
     const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xE4D2_B001;
-    var socket_dir_buf: [160]u8 = undefined;
-    const socket_dir = try session_host.short_endpoint.socketDirPathIn(&socket_dir_buf, std.c.getuid());
-    _ = std.c.mkdir(socket_dir.ptr, 0o700);
     var socket_buf: [160]u8 = undefined;
-    const socket_path = try session_host.short_endpoint.socketPathIn(&socket_buf, std.c.getuid(), host_id);
-    const host_child = try session_host.launcher.spawnSessionHostSupervisedForTest(
+    const socket_path = try session_host.short_endpoint.sharedLegacySocketPathIn(&socket_buf, host_id);
+    const host_child = try session_host.launcher.spawnSessionHostSupervisedLegacySharedForTest(
         allocator,
         baseline,
         session_dir,

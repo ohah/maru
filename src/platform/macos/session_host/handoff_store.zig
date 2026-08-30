@@ -242,6 +242,7 @@ fn reserveWithFailpoint(
         return error.OpenFailed;
     if (c.mkdirat(owner_fd, leaf.ptr, 0o700) != 0) {
         if (posix.errno(-1) == .EXIST) return error.AlreadyExists;
+        if (posix.errno(-1) == .NOSPC) return error.InsufficientSpace;
         return error.OpenFailed;
     }
     const attempt_fd = openOwnerDirAt(owner_fd, leaf) catch |err| {
@@ -403,12 +404,14 @@ pub fn probeReservation(
         );
         if (n < 0) {
             if (posix.errno(n) == .INTR) continue;
+            if (posix.errno(n) == .NOSPC) return error.InsufficientSpace;
             return error.WriteFailed;
         }
         if (n == 0) return error.WriteFailed;
         offset += @intCast(n);
     }
-    if (c.fsync(reservation.primary_fd) != 0) return error.SyncFailed;
+    if (c.fsync(reservation.primary_fd) != 0)
+        return if (posix.errno(-1) == .NOSPC) error.InsufficientSpace else error.SyncFailed;
     var checked: usize = 0;
     var buffer: [64 * 1024]u8 = undefined;
     while (checked < sample.len) {
@@ -629,7 +632,8 @@ fn createReservedFile(dir_fd: c.fd_t, leaf: [:0]const u8, len: usize) Error!c.fd
         .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
         @as(c.mode_t, 0o600),
     );
-    if (fd < 0) return error.OpenFailed;
+    if (fd < 0)
+        return if (posix.errno(-1) == .NOSPC) error.InsufficientSpace else error.OpenFailed;
     errdefer _ = c.close(fd);
     reserveExact(fd, len) catch |err| {
         removePinnedLeaf(dir_fd, leaf, fd, null) catch return error.CleanupFailed;

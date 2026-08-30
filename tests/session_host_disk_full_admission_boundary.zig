@@ -26,6 +26,8 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
     defer allocator.free(coordinator);
     const process_test = try read(allocator, "tests/session_host_disk_full_admission_e2e.zig", 96 * 1024);
     defer allocator.free(process_test);
+    const harness = try read(allocator, "tools/ci/session-host-disk-full-admission.sh", 16 * 1024);
+    defer allocator.free(harness);
     const build = try read(allocator, "build.zig", 1024 * 1024);
     defer allocator.free(build);
 
@@ -33,7 +35,6 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
         process_test,
         "test \"actual disk full admission resumes before quiesce and keeps daemon live\"",
     ));
-    try std.testing.expect(std.mem.indexOf(u8, process_test, "posix.E.NOSPC") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "prepareUpgrade(") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "upgradeStatus(") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "runtimeInventory(") != null);
@@ -58,16 +59,23 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
         return error.MissingBudgetPrepare;
     try std.testing.expect(fill < prepare);
     try std.testing.expect(std.mem.indexOf(u8, coordinator, "posix.E.NOSPC") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        coordinator,
+        "defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, process_test, ".disk-full-fixture-") != null);
+    try std.testing.expect(std.mem.indexOf(u8, process_test, "runtime.terminate") != null);
 
     try std.testing.expectEqual(@as(usize, 1), count(loop, "processPreclosedDiskFullAdmissionFixture("));
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "runSessionHostWithDiskFullAdmissionFixture("));
     try std.testing.expect(std.mem.indexOf(u8, daemon, "MARU_SESSION_HOST_UPGRADE_DISK_FULL") == null);
     try std.testing.expect(std.mem.indexOf(u8, build, "test-session-host-upgrade-disk-full-admission") != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        build,
-        "run_disk_full_admission_process_tests.addArg(\"--maru-expect-tests=1\")",
-    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "run_disk_full_admission_process_tests.addArtifactArg") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness, "--maru-expect-tests=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness, "fixture_root=$(mktemp -d /tmp/maru-disk-full.XXXXXX)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness, "image=\"$fixture_root/fixture.dmg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness, "mktemp /tmp/maru-disk-full.XXXXXX.dmg") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         build,

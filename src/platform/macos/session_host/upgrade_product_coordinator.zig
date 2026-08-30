@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const host_log = @import("host_log.zig");
 const std = @import("std");
 const c = std.c;
+const posix = std.posix;
 const entrypoint = @import("entrypoint.zig");
 const exec_fd_set = @import("exec_fd_set.zig");
 const handoff_store = @import("handoff_store.zig");
@@ -134,7 +135,7 @@ pub fn processArmedPreclosedCleanupCollisionFixture(
     if (!builtin.is_test) @compileError("cleanup collision fixture is test-only");
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
-    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, true, replaceReservedPrimaryForFixture);
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, true, null, replaceReservedPrimaryForFixture);
 }
 
 /// 실제 kernel permission/non-empty cleanup 실패를 만드는 process E2E 전용 경로다.
@@ -145,7 +146,25 @@ pub fn processArmedPreclosedKernelCleanupFaultFixture(
     if (!builtin.is_test) @compileError("kernel cleanup fault fixture is test-only");
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
-    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, true, makeReservedAttemptReadOnlyForFixture);
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, true, null, makeReservedAttemptReadOnlyForFixture);
+}
+
+/// Target staging 뒤 실제 owner filesystem을 ENOSPC까지 채우는 process E2E 전용 경로다.
+pub fn processArmedPreclosedDiskFullAdmissionFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("disk full admission fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHooks(
+        ctx,
+        attempt_id,
+        deadline,
+        true,
+        fillOwnerVolumeUntilEnospcForFixture,
+        null,
+    );
 }
 
 fn processArmedMode(ctx: Context, attempt_id: u128, gate_preclosed: bool) Outcome {
@@ -160,12 +179,79 @@ fn processArmedWithDeadline(
     deadline: upgrade_deadline.Deadline,
     gate_preclosed: bool,
 ) Outcome {
-    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, gate_preclosed, null);
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, gate_preclosed, null, null);
 }
+
+const BeforeBudgetPrepare = *const fn (owner_dir: [:0]const u8, attempt_id: u128) error{HookFailed}!void;
 
 const AfterBudgetPrepare = *const fn (
     reservation: *budget_admission.Reservation,
 ) error{HookFailed}!void;
+
+fn diskFullFixturePath(
+    buffer: []u8,
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+) error{HookFailed}![:0]const u8 {
+    return std.fmt.bufPrintZ(
+        buffer,
+        "{s}/.disk-full-fixture-{x:0>32}",
+        .{ owner_dir, attempt_id },
+    ) catch error.HookFailed;
+}
+
+fn fillOwnerVolumeUntilEnospcForFixture(
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+) error{HookFailed}!void {
+    if (!builtin.is_test) @compileError("disk full fill is test-only");
+    var path_buf: [1024]u8 = undefined;
+    const path = try diskFullFixturePath(&path_buf, owner_dir, attempt_id);
+    _ = c.unlink(path.ptr);
+    const fd = c.open(
+        path.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fd < 0) return error.HookFailed;
+    defer _ = c.close(fd);
+
+    var bytes: [64 * 1024]u8 = undefined;
+    var state: u64 = @truncate(attempt_id ^ (attempt_id >> 64));
+    if (state == 0) state = 0x9E3779B97F4A7C15;
+    for (&bytes) |*byte| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        byte.* = @truncate(state);
+    }
+    var written: usize = 0;
+    const max_fixture_bytes: usize = 256 * 1024 * 1024;
+    var chunk_len: usize = bytes.len;
+    while (written < max_fixture_bytes) {
+        const result = c.write(fd, &bytes, chunk_len);
+        if (result > 0) {
+            written += @intCast(result);
+            continue;
+        }
+        if (result < 0 and posix.errno(result) == .INTR) continue;
+        if (result < 0 and posix.errno(result) == posix.E.NOSPC) {
+            if (chunk_len > 4096) {
+                chunk_len = 4096;
+                continue;
+            }
+            return;
+        }
+        return error.HookFailed;
+    }
+    return error.HookFailed;
+}
+
+fn removeDiskFullFixture(owner_dir: [:0]const u8, attempt_id: u128) void {
+    var path_buf: [1024]u8 = undefined;
+    const path = diskFullFixturePath(&path_buf, owner_dir, attempt_id) catch return;
+    _ = c.unlink(path.ptr);
+}
 
 fn replaceReservedPrimaryForFixture(
     reservation: *budget_admission.Reservation,
@@ -189,11 +275,12 @@ fn makeReservedAttemptReadOnlyForFixture(
     if (c.fchmod(reservation.store.attempt_fd, 0o500) != 0) return error.HookFailed;
 }
 
-fn processArmedWithDeadlineHook(
+fn processArmedWithDeadlineHooks(
     ctx: Context,
     attempt_id: u128,
     deadline: upgrade_deadline.Deadline,
     gate_preclosed: bool,
+    before_budget_prepare: ?BeforeBudgetPrepare,
     after_budget_prepare: ?AfterBudgetPrepare,
 ) Outcome {
     const execution = ctx.owner.beginExecution(attempt_id) orelse {
@@ -255,6 +342,12 @@ fn processArmedWithDeadlineHook(
             .status = .resumed,
             .reason = .state_too_large,
         });
+    var disk_full_fixture_active = false;
+    defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id);
+    if (before_budget_prepare) |hook| {
+        hook(ctx.owner_dir, attempt_id) catch return .invariant_violation;
+        disk_full_fixture_active = true;
+    }
     var budget_reservation = budget_admission.prepare(
         ctx.allocator,
         ctx.owner_dir,
@@ -1239,11 +1332,12 @@ fn runProductCoordinatorTest(cleanup_collision: bool) !void {
         .layout = layout,
     };
     const outcome = if (cleanup_collision)
-        processArmedWithDeadlineHook(
+        processArmedWithDeadlineHooks(
             context,
             attempt_id,
             try upgrade_deadline.Deadline.after(std.testing.io, upgrade_limits.pause_budget_ns),
             false,
+            null,
             replaceReservedPrimaryForFixture,
         )
     else

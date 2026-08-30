@@ -11552,10 +11552,32 @@ pub fn build(b: *std.Build) void {
             b.addRunArtifact(disk_full_admission_boundary_tests);
         run_disk_full_admission_boundary_tests.addArg("--maru-expect-tests=1");
         run_disk_full_admission_boundary_tests.setCwd(b.path("."));
+        const disk_full_admission_process_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_disk_full_admission_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
+            }),
+            .filters = &.{"actual disk full admission resumes before quiesce and keeps daemon live"},
+        });
+        const run_disk_full_admission_process_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_disk_full_admission_process_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_disk_full_admission_process_tests.addArgs(&.{
+            "/bin/sh",
+            "tools/ci/session-host-disk-full-admission.sh",
+        });
+        run_disk_full_admission_process_tests.addArtifactArg(disk_full_admission_process_tests);
+        run_disk_full_admission_process_tests.setCwd(b.path("."));
         const disk_full_admission_step = b.step(
             "test-session-host-upgrade-disk-full-admission",
             "Verify actual disk-full admission resumes before quiesce (macOS)",
         );
+        disk_full_admission_step.dependOn(&run_disk_full_admission_process_tests.step);
         disk_full_admission_step.dependOn(&run_disk_full_admission_boundary_tests.step);
         run_session_host_tests.step.dependOn(disk_full_admission_step);
 

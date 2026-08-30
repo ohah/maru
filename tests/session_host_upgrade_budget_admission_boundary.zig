@@ -96,7 +96,8 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         coordinator,
         "product coordinator cleanup identity failure overrides resumed report with invariant violation",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, coordinator, "fn processArmedWithDeadlineHook(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, coordinator, "fn processArmedWithDeadlineHooks(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, public_context, "before_budget_prepare") == null);
     try std.testing.expect(std.mem.indexOf(u8, public_context, "after_budget_prepare") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -698,6 +698,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `GITHUB_REPOSITORY_ID`·`GITHUB_REPOSITORY`에 모두 exact 일치해야 한다. 이 parser는 이미 획득한 bytes의 의미만 검증하며,
   bytes가 GitHub에서 왔다는 transport 증거나 `gh` executable의 권위를 대신하지 않는다.
 
+  현재 workflow run 응답의 의미 해석은 `release_adapter_github_run.zig`가 소유한다. `id`와
+  `run_attempt`는 JSON number인 nonzero 값으로 context의 exact build identity와 일치해야 하고, `event=push`,
+  `head_sha=<context source commit>`, REST `path=.github/workflows/release.yml`,
+  `status=in_progress`, `conclusion=null`, 빈 `pull_requests`를 함께 요구한다. `repository`와
+  `head_repository`는 둘 다 null이 아닌 `{id,name,full_name,owner.login}`을 소비해 context의 exact repository와
+  내부적으로 일치해야 한다. consumed field의 missing·duplicate·wrong wire type, fork/foreign head repository,
+  완료됐거나 아직 시작되지 않은 다른 run, PR 결속, 다른 workflow/SHA는 fail-close한다. tag ref는 ref가 포함되지 않는
+  REST `path`에 억지로 투영하지 않고, 앞서 검증한 `GITHUB_WORKFLOW_REF`의 exact tag binding을 함께 재검증한다. additive API field는
+  허용한다. focused gate `test-session-host-release-adapter-github-run`은 정상 응답, cap, malformed/duplicate/trailing,
+  모든 identity/lifecycle mismatch와 allocation fail-index를 Debug·ReleaseFast로 검증한다. 이 parser는 이미 획득한
+  REST bytes를 현재 context에 결속할 뿐 transport 권위나 현재 job의 protected `release` environment 통과를 대신하지 않는다.
+
   release 응답의 의미 해석은 `release_adapter_github_release.zig`가 소유한다. GitHub REST release schema의 `id` JSON number,
   `tag_name` string과 `draft`·`prerelease` boolean을 필수로 소비하며 missing·duplicate·wrong wire type을 거부한다.
   `immutable`은 GitHub OpenAPI가 property로 정의하지만 required 목록에는 넣지 않으므로 draft에서 absent 또는 false를 허용하고

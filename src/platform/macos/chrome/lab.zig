@@ -786,6 +786,8 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // (visual-mapping §4.1 "행 수를 세는 저장소는 한 곳에서 정한다"), Lab이 제품과 다른 화면을
     // 골든으로 굳힌다 — 캡처가 지켜야 할 것이 바로 제품 화면이다(적대적 검증 2026-08-17).
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    var caret_cols: [64]u32 = undefined;
 
     // **구문 강조 색**(§5.3). **제품과 같은 층을 지난다** — Lab이 자기 나름대로 색을 만들면
     // 캡처가 제품을 예고하지 못한다(이 파일이 크기 계산에서 이미 같은 판단을 적어 두었다).
@@ -869,6 +871,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .gutter_rows = &gutter_rows,
         .row_counts = &row_counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     return .{
@@ -948,6 +951,8 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var row_counts: [128]u32 = undefined;
     // 위와 같은 단일 출처. **비교는 좌우가 이것을 반씩 나눠 쓴다**(`diff_frame.splitScratch`).
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    var caret_cols: [64]u32 = undefined;
 
     // **오른쪽 열만 고른 상태.** 계약이 *"좌우를 걸치는 선택은 만들지 않는다"*로 정했으므로 한쪽만
     // 띠가 선다 — 2행 중간부터 4행 앞부분까지, 짝맞춤 빈 행이 있는 왼쪽과 나란히 놓여 대비된다.
@@ -984,6 +989,7 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .gutter_rows = &gutter_rows,
         .row_counts = &row_counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     return .{

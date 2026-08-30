@@ -287,6 +287,7 @@ pub fn splitScratch(s: frame.Scratch) ScratchPair {
             .gutter_rows = s.gutter_rows[0 .. s.gutter_rows.len / 2],
             .row_counts = s.row_counts[0 .. s.row_counts.len / 2],
             .count_scratch = s.count_scratch[0 .. s.count_scratch.len / 2],
+            .caret_cols = s.caret_cols[0 .. s.caret_cols.len / 2],
         },
         .second = .{
             .ops = s.ops[s.ops.len / 2 ..],
@@ -297,6 +298,7 @@ pub fn splitScratch(s: frame.Scratch) ScratchPair {
             .gutter_rows = s.gutter_rows[s.gutter_rows.len / 2 ..],
             .row_counts = s.row_counts[s.row_counts.len / 2 ..],
             .count_scratch = s.count_scratch[s.count_scratch.len / 2 ..],
+            .caret_cols = s.caret_cols[s.caret_cols.len / 2 ..],
         },
     };
 }
@@ -381,6 +383,7 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
     var gutter_rows: [128]gutter.Row = undefined;
     var counts: [128]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
     const s: frame.Scratch = .{
         .ops = &ops,
         .text_bytes = &text,
@@ -390,6 +393,7 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
 
     // 화면(20행)보다 긴 문서라야 "행이 줄었다"가 관측된다.
@@ -444,6 +448,7 @@ test "저장소가 겹치지 않는다 — 겹치면 한쪽 글자가 반대쪽 
     var gutter_rows: [16]@import("gutter.zig").Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [64]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
     const s: frame.Scratch = .{
         .ops = &ops,
         .text_bytes = &text,
@@ -453,6 +458,7 @@ test "저장소가 겹치지 않는다 — 겹치면 한쪽 글자가 반대쪽 
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     const pair = splitScratch(s);
     try testing.expect(@intFromPtr(pair.first.text_bytes.ptr) + pair.first.text_bytes.len <= @intFromPtr(pair.second.text_bytes.ptr));
@@ -472,6 +478,7 @@ test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩
     var gutter_rows: [2]@import("gutter.zig").Row = undefined;
     var counts: [2]u32 = undefined;
     var count_scratch: [8]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const left = [_][]const u8{ "aaaa", "bbbb" };
     const right = [_][]const u8{ "cccc", "dddd" };
@@ -492,6 +499,7 @@ test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
     try testing.expect(w.ops <= ops.len);
     try testing.expect(w.truncated); // 잘렸다는 사실이 조용히 사라지지 않는다
@@ -506,6 +514,7 @@ test "op 배열이 비어도 죽지 않는다" {
     var gutter_rows: [0]@import("gutter.zig").Row = undefined;
     var counts: [0]u32 = undefined;
     var count_scratch: [0]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
     const line = [_][]const u8{"x"};
     const w = build(.{
         .tab_width = frame.default_tab_width,
@@ -524,6 +533,7 @@ test "op 배열이 비어도 죽지 않는다" {
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
     try testing.expectEqual(@as(usize, 0), w.ops);
 }
@@ -539,6 +549,7 @@ test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane�
     var gutter_rows: [16]@import("gutter.zig").Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
     const scratch: frame.Scratch = .{
         .ops = &ops,
         .text_bytes = &text,
@@ -548,6 +559,7 @@ test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     const left = [_][]const u8{ "aaaa", "" };
     const right = [_][]const u8{ "", "bbbb" };
@@ -585,6 +597,7 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
     var gutter_rows: [8]@import("gutter.zig").Row = undefined;
     var counts: [8]u32 = undefined;
     var count_scratch: [64]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
     const line = [_][]const u8{"x"};
     const out = build(.{
         .tab_width = frame.default_tab_width,
@@ -603,6 +616,7 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
     try testing.expect(out.ops <= ops.len);
 }

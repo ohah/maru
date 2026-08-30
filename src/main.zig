@@ -4051,6 +4051,9 @@ fn buildComposedEditor(
     defer allocator.free(row_counts);
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    const caret_cols = try allocator.alloc(u32, 256);
+    defer allocator.free(caret_cols);
 
     // **u16 로 자른다.** 창이 아무리 커도 격자는 u16 이고, `@intCast` 로 넘기면 안전 빌드에서
     // **패닉**이다 — 휠 경로에는 이 가드를 뒀는데 여기만 빠져 있었다(적대적 검증 7회차).
@@ -4094,6 +4097,7 @@ fn buildComposedEditor(
             .gutter_rows = gutter_rows,
             .row_counts = row_counts,
             .count_scratch = count_scratch,
+            .caret_cols = caret_cols,
         },
         ops,
         tokens,
@@ -13243,6 +13247,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     defer allocator.free(row_counts);
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    const caret_cols = try allocator.alloc(u32, 256);
+    defer allocator.free(caret_cols);
 
     // 선택 마크 저장소. 행 수만큼이면 되지만 창이 커질 여지를 조금 둔다.
     const sel_cap = @as(usize, grid.rows) + 2;
@@ -13270,6 +13277,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .gutter_rows = gutter_rows,
         .row_counts = row_counts,
         .count_scratch = count_scratch,
+        .caret_cols = caret_cols,
     };
 
     // 뷰 사각은 **클라이언트 전체**다. 제품은 pane 기하에서 오지만 스모크에는 pane 이 없다.

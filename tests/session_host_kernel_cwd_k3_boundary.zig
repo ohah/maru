@@ -26,6 +26,8 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     defer allocator.free(plan);
     const matrix = try read(allocator, "docs/verification-matrix.md", 3 * 1024 * 1024);
     defer allocator.free(matrix);
+    const contract = try read(allocator, "docs/persistent-session-host.md", 2 * 1024 * 1024);
+    defer allocator.free(contract);
     const cwd_axis = try read(allocator, "tests/boundary/cwd_axis.zig", 128 * 1024);
     defer allocator.free(cwd_axis);
 
@@ -52,6 +54,9 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     ));
     try std.testing.expectEqual(@as(usize, 1), count(plan, "K3 - 제품 parity gate (완료)"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "K3 actual daemon kernel cwd parity: 구현"));
+    try std.testing.expectEqual(@as(usize, 1), count(contract, "host-backed kernel cwd parity도 K1~K3로 구현됐다"));
+    try std.testing.expect(std.mem.indexOf(u8, contract, "커널 조회는 host-backed runtime에 존재하지 않는다") == null);
+    try std.testing.expect(std.mem.indexOf(u8, contract, "host는 그 값을 재서 보내지 않는다") == null);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "daemon.runSessionHost") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "HostAdapter.initInPlace") != null);

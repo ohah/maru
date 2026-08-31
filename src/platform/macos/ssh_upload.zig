@@ -7,7 +7,23 @@
 const std = @import("std");
 // cli/ssh.zig를 직접 import하면 root와 maru 두 모듈에 중복되므로(빌드 에러) maru 모듈을 통해 쓴다.
 const ssh = @import("maru").cli.ssh;
-const agent_hooks = @import("maru").cli.agent_hooks; // 원격 `maru` 를 찾는 PATH 처방(설치와 같은 값)
+const remote_shell = @import("maru").session.remote_shell; // 원격 셸 규율(PATH 처방 · `sh` 껍데기)
+
+/// 스트리머가 원격에서 도는 **스크립트**(상수). `$1`=원격 maru 경로, `$2`=상대 디렉터리.
+///
+/// ⚠️ **PATH 를 앞에 붙인다 — 설치 명령과 같은 이유다.** `ssh host cmd` 의 PATH 는 흔히
+/// `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라 `~/.local/bin` 이나 Homebrew 의 `maru` 를 못 찾는다.
+/// 설치만 고치고 여기를 안 고치면 **설치는 되는데 스트리머가 안 뜨는** 상태가 된다 — 그러면 훅은
+/// 쌓이는데 이벤트가 하나도 안 나오고, 증상은 「배지가 안 선다」로 앞의 실패와 구분되지 않는다.
+///
+/// ⚠️ **디렉터리는 큰따옴표다.** 작은따옴표로 감싸면 `$HOME` 이 확장되지 않아 원격 maru 가 리터럴
+/// `$HOME/...` 이라는 이름의 디렉터리를 열려다 실패하고, 증상은 «hello 가 안 온다» 하나뿐이라 원인이
+/// 화면에 안 나온다(실측). 인용을 아예 빼면 홈에 공백이 있는 계정에서 인자가 쪼개진다.
+///
+/// 이 문자열 전체는 [remote_shell](../../session/remote_shell.zig) 이 `sh -c` 껍데기 안에 넣는다 —
+/// 로그인 셸이 POSIX 셸이 아닐 수 있기 때문이다(csh 실측은 그쪽 머리말).
+const stream_script = remote_shell.path_assign ++
+    "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\"";
 
 pub const UploadError = error{
     PipeFailed, // pipe(2) 실패
@@ -184,11 +200,7 @@ pub fn spawnAgentEvents(
     // 설치만 고치고 여기를 안 고치면 **설치는 되는데 스트리머가 안 뜨는** 상태가 된다 — 그러면 훅은
     // 쌓이는데 이벤트가 하나도 안 나오고, 증상은 「배지가 안 선다」로 앞의 실패와 구분되지 않는다.
     // 덮지 않고 앞에 붙이므로 사용자가 PATH 로 고른 `maru` 가 있으면 그쪽이 이긴다.
-    const cmd = try std.fmt.allocPrint(
-        allocator,
-        "PATH=\"{s}:$PATH\"; exec {s} agent-events --stdio --dir=\"$HOME/{s}\"",
-        .{ agent_hooks.remote_path_prefix, remote_maru, remote_dir_rel },
-    );
+    const cmd = try remote_shell.wrapAlloc(allocator, stream_script, &.{ remote_maru, remote_dir_rel });
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

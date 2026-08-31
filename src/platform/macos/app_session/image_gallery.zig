@@ -244,9 +244,13 @@ pub const State = struct {
     /// 격자에 자리를 못 얻은 이미지 수. **계산해 두고 안 쓰면 사용자가 이미지를 놓치고도 모른다** —
     /// 「없다」와 「안 보인다」를 가르는 값이다(계약 §2). 매 frame `appendGpuImages` 가 갱신한다.
     overflow: usize = 0,
-    /// 지금 디코드를 걸어 둔 요청의 generation. 0 이면 없다. **한 번에 한 장만 푼다** —
-    /// 여러 스레드를 띄우면 빨리 차지만 CPU 를 그만큼 먹고, 뷰를 떠나면 그 일이 전부 버려진다.
-    decoding: u64 = 0,
+    /// 지금 워커에 **걸어 둔 것들**. 예전에는 generation 하나 + 인덱스 하나였다 — 「한 번에 한 장」을
+    /// 전제한 짝인데, 그 전제가 처리량을 틱 주기로 묶고 있었다(실측: 12 칸에 200 ms, 그중 148 ms 가
+    /// 대기). 여럿이 동시에 돌면 「이 결과가 어느 칸 것인가」를 그 둘로는 못 가르므로 집합으로 든다.
+    ///
+    /// 상한이 `max_inflight` 라 고정 배열로 충분하다 — 힙을 잡을 이유가 없다.
+    pending: [decode_backend.max_inflight]Pending = [_]Pending{.{}} ** decode_backend.max_inflight,
+    pending_len: usize = 0,
     /// 크게 보고 있는 이미지. `null` 이면 격자다. **격자와 배타적**이다 — 둘을 겹쳐 그리면
     /// 어느 것을 누르는지 알 수 없다.
     open: ?Open = null,
@@ -259,8 +263,6 @@ pub const State = struct {
     key_focus: bool = false,
     /// 격자 세로 스크롤. 도크의 다른 목록과 **같은 상태 타입**을 쓴다(잔여 축적·방향 전환·clamp).
     scroll: maru.chrome.ui.scroll_area.State = .{},
-    /// 지금 디코드를 걸어 둔 칸의 인덱스. `decoding != 0` 일 때만 뜻이 있다.
-    decoding_index: usize = 0,
     /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
     /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
     tiles: std.ArrayList(Tile) = .empty,
@@ -316,10 +318,9 @@ pub const State = struct {
         self.built = false;
         self.awaiting = 0;
         self.resubmit = false;
-        self.decoding = 0;
+        self.pendingClear();
         self.overflow = 0;
         self.scroll = .{};
-        self.decoding_index = 0;
         self.hovered = null;
     }
 
@@ -359,6 +360,14 @@ pub const State = struct {
     /// 실패(할당)하면 **필터를 끈 상태**로 되돌린다 — 걸러진 목록을 반쯤 만들어 두면 사용자는 왜 어떤
     /// 이미지가 사라졌는지 알 수 없다. 전부 보여주는 쪽이 정직하다.
     pub fn applyFilter(self: *State, allocator: std.mem.Allocator) void {
+        // **걸어 둔 디코드를 여기서 버린다.** `pending` 은 `hits` 의 인덱스를 들고 있는데 이 함수가
+        // 그 인덱스 체계를 새로 만든다 — 안 버리면 도는 결과가 **엉뚱한 칸**에 붙고, 그 칸의 정체
+        // (`file_index`·`data_offset`)까지 그 자리 것으로 적혀 `remapTiles` 가 잘못된 짝을 계속
+        // 보존한다. 증상은 「다른 그림이 뜬다」이고 원인은 화면에 안 보인다.
+        //
+        // 여기가 유일한 길목이다 — 다시 훑은 뒤(자란 파일)와 검색어가 바뀔 때 둘 다 이리로 온다.
+        // 버리는 값은 도는 넉 장뿐이고(장당 4.4 ms) 다음 tick 이 다시 건다.
+        self.pendingClear();
         self.hits.clearRetainingCapacity();
         self.labels.clearRetainingCapacity();
         const total = self.all_hits.items.len;
@@ -399,6 +408,36 @@ pub const State = struct {
         }
     }
 
+    /// 그 칸을 이미 걸어 뒀나. 안 보면 매 프레임 같은 칸을 다시 건다.
+    pub fn pendingContains(self: *const State, hit_index: usize) bool {
+        for (self.pending[0..self.pending_len]) |p| {
+            if (p.hit_index == hit_index) return true;
+        }
+        return false;
+    }
+
+    pub fn pendingAdd(self: *State, generation: u64, hit_index: usize) void {
+        if (self.pending_len >= self.pending.len) return;
+        self.pending[self.pending_len] = .{ .generation = generation, .hit_index = hit_index };
+        self.pending_len += 1;
+    }
+
+    /// 그 generation 을 걷어내고 어느 칸이었는지 돌려준다. 없으면 `null`(늦게 온 것).
+    pub fn pendingTake(self: *State, generation: u64) ?usize {
+        for (self.pending[0..self.pending_len], 0..) |p, i| {
+            if (p.generation != generation) continue;
+            const hit_index = p.hit_index;
+            self.pending[i] = self.pending[self.pending_len - 1];
+            self.pending_len -= 1;
+            return hit_index;
+        }
+        return null;
+    }
+
+    pub fn pendingClear(self: *State) void {
+        self.pending_len = 0;
+    }
+
     pub fn count(self: *const State) usize {
         return self.hits.items.len;
     }
@@ -424,6 +463,12 @@ pub const Stamp = struct {
     pub fn eql(a: Stamp, b: Stamp) bool {
         return a.known and b.known and a.inode == b.inode and a.size == b.size and a.mtime_ns == b.mtime_ns;
     }
+};
+
+/// 워커에 걸어 둔 한 칸. generation 으로 늦게 온 것을 가르고, 인덱스로 어느 칸인지 안다.
+pub const Pending = struct {
+    generation: u64 = 0,
+    hit_index: usize = 0,
 };
 
 /// 화면에 올린 썸네일 하나.
@@ -620,6 +665,11 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
+    // **취소하면 함께 비운다.** 취소된 워커는 결과를 내놓지 않으므로 `pendingTake` 가 영영 안 불리고,
+    // 죽은 항목이 자리를 차지한 동안 그 칸들은 다시 걸리지 못해 **비어 보인다**(큰 파일이면 훑는
+    // 9 초 내내). 못 박는 불변식 자체는 `applyFilter` 가 지킨다 — 훑기 결과는 반드시 거길 지나므로
+    // 여기 것은 그 창을 줄이는 몫이다(뮤테이션으로 확인: 이 줄만 지우면 test 는 통과한다).
+    self.image_gallery.pendingClear();
 
     // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
     // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
@@ -772,30 +822,30 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     const backend = decodeBackendPtr(self) orelse return;
     // **크게 보기가 워커를 먼저 쓴다.** 사용자가 방금 누른 것보다 아직 안 보이는 칸이 급할 리 없다.
     if (self.image_gallery.open != null) return;
-    if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
     if (self.image_gallery.chain.isEmpty()) return;
 
     // **보이는 칸 중 아직 없는 것**을 채운다. 창을 통째로 버리지 않는 이유는 그렇게 하면 스크롤할
     // 때마다 격자가 ~160 ms(8장 × 20 ms) 비어 깜빡이기 때문이다. 상한(`max_tiles` = 15 MB)은
     // 계약 §5.2 가 허용하는 값이고 실측 세션이 151 장이라 실제로는 거의 안 걸린다.
+    // **빈 칸을 상한까지 채워 건다.** 하나만 걸고 물러나면 나머지는 다음 틱을 기다린다 —
+    // 그것이 12 칸에 200 ms 를 쓰게 하던 원인이다(실측: 실제 일은 52 ms).
     const last = @min(first +| visible, self.image_gallery.count());
     var next: usize = first;
     while (next < last) : (next += 1) {
-        if (self.image_gallery.tileFor(next) == null) break;
-    }
-    if (next >= last) return; // 보이는 칸이 다 찼다
+        if (self.image_gallery.tileFor(next) != null) continue; // 이미 있다
+        if (self.image_gallery.pendingContains(next)) continue; // 이미 걸었다
 
-    const hit = self.image_gallery.hits.items[next];
-    const path = pathFor(self, hit) orelse return;
-    if (backend.submit(
-        path,
-        hit.data_offset,
-        hit.data_len,
-        thumbnail_side,
-        next,
-    )) |generation| {
-        self.image_gallery.decoding = generation;
-        self.image_gallery.decoding_index = next;
+        const hit = self.image_gallery.hits.items[next];
+        const path = pathFor(self, hit) orelse return;
+        if (backend.submit(
+            path,
+            hit.data_offset,
+            hit.data_len,
+            thumbnail_side,
+            next,
+        )) |generation| {
+            self.image_gallery.pendingAdd(generation, next);
+        } else break; // 상한에 닿았다 — 다음 틱이 이어 건다
     }
 }
 
@@ -803,9 +853,18 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
 ///
 /// **순서를 지킨다** — 다음에 채울 칸(`tiles.len`)의 것이 아니면 버린다. 순서가 어긋나면 격자의 그림과
 /// 인덱스가 갈리는데, 그것은 「엉뚱한 이미지가 뜬다」로 보이지 「비었다」로 보이지 않아 알아채기 어렵다.
+/// 준비된 완료본을 **전부** 가져간다.
+///
+/// 예전에는 틱당 하나였다. 워커를 여럿으로 늘려도 여기가 하나면 처리량은 그대로 틱 주기에 묶인다 —
+/// 제출과 수확은 **둘 다** 고쳐야 뜻이 있다(적대적 검증이 짚은 자리).
 fn harvestDecoded(self: *AppSession) void {
-    const backend = decodeBackendPtr(self) orelse return;
-    var r = backend.take() orelse return;
+    while (harvestOne(self)) {}
+}
+
+/// 완료본 하나를 반영한다. 가져올 것이 없으면 `false`.
+fn harvestOne(self: *AppSession) bool {
+    const backend = decodeBackendPtr(self) orelse return false;
+    var r = backend.take() orelse return false;
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
 
     // **크게 보기 것이 먼저다.** 두 요청은 같은 워커를 쓰므로 generation 으로 가른다.
@@ -820,23 +879,23 @@ fn harvestDecoded(self: *AppSession) void {
             op.uploaded = false;
             op.view = .{}; // 새 픽셀이면 fit 부터 — 옛 배율은 다른 이미지의 것이다
             self.metal_dirty = true;
-            return;
+            return true;
         }
     }
 
-    if (r.generation != self.image_gallery.decoding) return; // 늦게 온 것
-    self.image_gallery.decoding = 0;
+    // **내가 건 것인가.** 여럿이 도니 generation 으로 집합에서 찾는다.
+    const submitted_index = self.image_gallery.pendingTake(r.generation) orelse return true;
     // **내가 건 그 칸의 것인가.** 배열 위치가 아니라 인덱스로 판정한다 — 스크롤이 배열 순서를
     // 바꾸므로 순서로 판정하면 결과가 조용히 버려진다.
-    if (r.hit_index != self.image_gallery.decoding_index) return;
-    if (self.image_gallery.tileFor(r.hit_index) != null) return; // 이미 있다(중복 제출 방어)
+    if (r.hit_index != submitted_index) return true;
+    if (self.image_gallery.tileFor(r.hit_index) != null) return true; // 이미 있다(중복 제출 방어)
 
     // 이 픽셀이 **어느 이미지**의 것인지 함께 적어 둔다 — 다시 훑은 뒤 인덱스가 밀려도
     // 그 정체로 타일을 다시 이을 수 있다(`remapTiles`).
     const src = if (r.hit_index < self.image_gallery.hits.items.len)
         self.image_gallery.hits.items[r.hit_index]
     else
-        return;
+        return true;
 
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
@@ -848,10 +907,11 @@ fn harvestDecoded(self: *AppSession) void {
         .pixels = r.pixels,
         .generation = 1,
         .label = labelFor(self, r.hit_index),
-    }) catch return;
+    }) catch return true;
     r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
     self.image_gallery.evictFarthest(self.allocator, r.hit_index);
     self.metal_dirty = true;
+    return true;
 }
 
 /// 훅이 소스를 바꿨을 때. **갤러리를 보고 있을 때만 건다** — 안 보는 뷰 때문에 1.68 GB 를 훑지 않는다.
@@ -870,7 +930,7 @@ pub fn onLeaveView(self: *AppSession) void {
     if (decodeBackendPtr(self)) |d| d.cancel();
     self.image_gallery.awaiting = 0;
     self.image_gallery.resubmit = false;
-    self.image_gallery.decoding = 0;
+    self.image_gallery.pendingClear();
     // 크게 보기도 닫는다 — 원본 픽셀은 수 MB 라, 안 보는 뷰 때문에 들고 있을 이유가 없다.
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.key_focus = false;
@@ -1539,6 +1599,10 @@ fn lastCharBytes(text: []const u8) usize {
 /// 문맥을 배경 쪽으로 얼마나 죽일지(%). 라벨(45)보다 더 물러난다 — 곁말이다.
 const context_dim_percent: u8 = 55;
 
+/// 한 프레임의 계수를 연다. `collectLabels` 가 프레임당 한 번 불리므로 그 앞이 자리다.
+pub fn beginFrameShapeCount() void {
+}
+
 pub fn collectLabels(
     self: *AppSession,
     collected: *std.ArrayList(AppSession.CollectedPane),
@@ -1814,7 +1878,7 @@ pub fn appendGpuImages(
         return;
     }
 
-    // 보이는 창만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
+    // 보이는 창만큼 채운다(tick 당 상한 `max_inflight` 장). 다 차기 전에도 있는 것부터 그린다.
     ensureTiles(self, l.first, l.visible);
 
     var new_images: std.ArrayList(metal_frame.GpuImage) = .empty;

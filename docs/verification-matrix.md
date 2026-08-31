@@ -2531,6 +2531,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-github-release-attestation`이 Debug·ReleaseFast에서 release/asset command, statement와
   asset set, local selection, malformed/duplicate/cap/timeout/child failure를 검증한다. CLI pin/revalidation, predecessor
   download, git resolver 조립과 workflow 배선은 여전히 후속 범위다.
+  `release_adapter_github_download.zig`는 canonical manifest의 세 asset role exact set을 role 순서로 다운로드한다. exact asset
+  name은 Go filepath glob metacharacter를 escape한 뒤 `gh release download <tag> --repo ohah/maru --pattern <literal>
+  --output -`로만 선택하며 `--dir`/clobber/latest/archive를 허용하지 않는다. exclusive 0700 work-directory와 각 0600 leaf를
+  descriptor-relative `O_EXCL|O_NOFOLLOW`로 먼저 소유하고, manifest size를 `F_PREALLOCATE`+`ftruncate`한 exact shared mapping에
+  bounded stdout을 받아 exact length/SHA-256, mapping provenance, post-write identity/link-count 1, `msync`/file+directory fsync 뒤 0400으로
+  봉인한다. 실패는 owned inode만 제거하고 residue 0을 확정하지 못하면 cleanup failure다. 성공은 세 path/identity/digest를 가진
+  move-only `DownloadedSet`으로만 반환한다. `test-session-host-release-adapter-github-download`이 Debug·ReleaseFast에서 command,
+  clean environment, actual filesystem/mapped write와 path·identity·digest 결과, glob·short/long/digest·symlink/existing
+  work-directory·timeout/child failure와 cleanup을 검증한다. CLI pin/revalidation, release verify-asset와 final workflow
+  composition은 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

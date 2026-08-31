@@ -962,6 +962,31 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. 이 gate만으로 CLI pin/revalidation, predecessor download, git resolver composition 또는
   final workflow 배선을 완료했다고 주장하지 않는다.
 
+  predecessor asset 다운로드의 command/filesystem 권위는 `release_adapter_github_download.zig`가 소유한다. caller가
+  destination filename이나 glob을 따로 고르지 못하게 canonical manifest의 세 asset role을 exact once 받아 role 순서로
+  처리한다. 각 command는 `/absolute/gh release download <canonical-tag> --repo ohah/maru --pattern <escaped-exact-name>
+  --output -`만 사용한다. pattern은 macOS/Go `filepath.Match`의 `\\`, `*`, `?`, `[`를 각각 escape해 literal asset name
+  하나만 선택하며 latest 추론, `--dir`, `--clobber`, `--skip-existing`, archive와 caller option은 금지한다. stdout은 binary
+  asset bytes이고 stderr는 `/dev/null`이다. child environment, deadline과 process-group kill/reap은 다른 GitHub leaf와 같은
+  exact `GH_TOKEN`/`GH_PROMPT_DISABLED=1` bounded process 규율을 쓴다.
+
+  downloader는 absolute absent work-directory를 parent `openat(O_NOFOLLOW)` 아래 0700 exact once로 만들고 final-address
+  handle로 parent/work directory의 device/inode를 소유한다. 각 expected asset leaf도 work directory fd에
+  `O_CREAT|O_EXCL|O_NOFOLLOW` 0600으로 먼저 만들며 manifest size만큼 macOS `F_PREALLOCATE`와 `ftruncate`를 모두 성공시킨다.
+  그 exact-size shared mapping만 bounded child stdout buffer로 제공한다. capture가 mapping 밖을 가리키거나 byte count가
+  manifest size와 다르고, EOF/exit 0가 없거나 SHA-256이 다르면 terminal failure다. 성공은 `msync`/file `fsync`, post-write
+  fstat identity/type/size/link-count exact 1, 0400 mode와 work-directory `fsync`까지 끝난 뒤에만 게시한다. 이 방식은 `gh --dir`의
+  `stat`→`O_TRUNC` pathname 재열기와 symlink 경합을 권위 경계에서 제거하고, 2 GiB급 asset을 heap buffer로 만들지 않는다.
+
+  어느 asset에서든 실패하면 같은 open directory fd와 기록한 inode로 자신이 만든 leaf만 제거하고 directory `fsync` 뒤
+  exact parent/leaf identity가 여전히 맞을 때 empty work-directory를 제거한다. cleanup을 확정하지 못하면 원래 오류를 성공이나
+  clean rollback으로 바꾸지 않고 terminal cleanup failure로 올린다. 성공 결과는 세 asset의 absolute path, device/inode,
+  size/SHA-256을 가진 move-only `DownloadedSet`이며 후속 release `verify-asset`과 manifest observation이 소비한 뒤 exact cleanup한다.
+  focused gate `test-session-host-release-adapter-github-download`은 glob metacharacter literalization, exact argv/clean environment,
+  실제 exclusive work-directory와 mapped write/path·identity·digest 결과, short/long/digest mismatch, symlink·existing
+  work-directory, timeout/child failure와 성공·실패 residue 0을 Debug·ReleaseFast에서 검증한다. 이 gate만으로
+  CLI pin/revalidation, release attestation 호출, git resolver나 final workflow composition을 완료했다고 주장하지 않는다.
+
   GitHub CLI executable 권위는 **공식 GitHub Release CI에만** 적용한다. 로컬 빌드·로컬 업그레이드와 앱 인증서 기반
   session-host upgrade 경로에는 이 계약을 요구하지 않는다. trusted release job은 repository checkout보다 먼저 GitHub가
   제공한 초기 PATH에서 `gh`의 symlink-free canonical absolute path와 lowercase SHA-256을 한 번 캡처해 immutable step output으로

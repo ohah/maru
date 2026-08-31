@@ -83,6 +83,71 @@ test "common runner binds session registry and app workspace to the same pid roo
     try std.testing.expectEqualStrings(expected, std.mem.span(app_home));
 }
 
+test "macOS product smoke children bind workspace and session registry to one fixture root" {
+    const allocator = std.testing.allocator;
+    const build = try readSource(allocator, "build.zig");
+    defer allocator.free(build);
+    const instance_lease = try readSource(allocator, "tools/test-macos-app-instance-lease.sh");
+    defer allocator.free(instance_lease);
+    const archive = try readSource(allocator, "tools/test-macos-agent-session-archive.sh");
+    defer allocator.free(archive);
+    const browser = try readSource(allocator, "tools/test-macos-browser-bounded-smoke.sh");
+    defer allocator.free(browser);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.c.getpid()") == null);
+    const product_smokes = [_][]const u8{
+        "macos_divider_smoke",
+        "macos_scrollbar_smoke",
+        "macos_tab_drag_smoke",
+        "run_session_host_r2a_checkpoint",
+        "run_session_host_r1_tombstone",
+        "run_session_host_cr6c_appkit",
+        "run_session_host_cr6d_appkit",
+        "run_session_host_cr6e_recovery",
+        "run_session_host_cr6e_c3c",
+        "macos_app_smoke",
+        "macos_app_html_smoke",
+    };
+    for (product_smokes) |name| {
+        const needle = try std.fmt.allocPrint(
+            allocator,
+            "isolateMacosProductTest(b, {s}, b.pathFromRoot(",
+            .{name},
+        );
+        defer allocator.free(needle);
+        try std.testing.expect(std.mem.indexOf(u8, build, needle) != null);
+    }
+    // C4는 한 shell 안에서 서로 다른 두 home을 실행하므로 각 exec 앞에서 세 변수를 다시 묶는다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "HOME=\\\"$success_root\\\" CFFIXED_USER_HOME=\\\"$success_root\\\" MARU_SESSION_HOST_ROOT=\\\"$success_session_root\\\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "HOME=\\\"$root\\\" CFFIXED_USER_HOME=\\\"$root\\\" MARU_SESSION_HOST_ROOT=\\\"$session_root\\\" ./zig-out/Maru.app",
+    ) != null);
+
+    try std.testing.expect(std.mem.indexOf(u8, instance_lease, "mktemp -d \"/tmp/maru-app-instance-lease.XXXXXX\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, instance_lease, "MARU_SESSION_HOST_ROOT=\"$session_root\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "mktemp -d \"/tmp/maru-agent-session-archive.XXXXXX\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "MARU_SESSION_HOST_ROOT=\"$session_root\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "mktemp -d \"/tmp/maru-browser-bounded-smoke.XXXXXX\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "MARU_SESSION_HOST_ROOT=\"$test_root/session-host-root\"") != null);
+    // HOME-derived workspace paths can be long; they must never double as a Unix socket root.
+    for ([_][]const u8{ instance_lease, archive }) |script| {
+        try std.testing.expect(std.mem.indexOf(u8, script, "MARU_SESSION_HOST_ROOT=\"$home\"") == null);
+        try std.testing.expect(std.mem.indexOf(u8, script, "MARU_SESSION_HOST_ROOT=\"$test_home\"") == null);
+    }
+}
+
 test "default product fixtures do not reconstruct uid-keyed sockets" {
     const allocator = std.testing.allocator;
     const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");

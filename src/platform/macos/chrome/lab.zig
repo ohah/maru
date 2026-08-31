@@ -630,6 +630,15 @@ const LabSyntax = struct {
 };
 
 fn editorSyntaxColors(lines: []const []const u8, tab_width: u16, grammar: maru.session.editor.language.Grammar) LabSyntax {
+    return editorSyntaxColorsBudgeted(lines, tab_width, grammar, editor_syntax.frame_parse_budget_ns);
+}
+
+fn editorSyntaxColorsBudgeted(
+    lines: []const []const u8,
+    tab_width: u16,
+    grammar: maru.session.editor.language.Grammar,
+    budget_ns: u64,
+) LabSyntax {
     const a = std.heap.page_allocator;
     var out: LabSyntax = .{ .allocator = a };
 
@@ -650,7 +659,24 @@ fn editorSyntaxColors(lines: []const []const u8, tab_width: u16, grammar: maru.s
     out.file = maru.session.editor.edit_doc.EditableFile.init(a, doc, true) catch {
         return out;
     };
-    out.state = editor_syntax.open(out.file.?.content, grammar);
+    // **끝까지 판 뒤에 색을 뜬다.** `openBudgeted` 는 한 프레임 예산(`frame_parse_budget_ns`, 4ms)만
+    // 쓰고 끊는다 — 제품은 다음 프레임에 `resumeParse` 로 이어 파서 결국 색이 붙지만, Lab 은 프레임
+    // 하나를 캡처하고 끝이라 이어 파지 않으면 **예산 안에 못 끝낸 문서만 색이 없다**. 그 판정이
+    // 기계 속도에 달려 있어서, 같은 코드가 로컬에서는 색이 있고 CI 러너에서는 없는 그림을 냈다
+    // (2026-08-31: `editor-hscroll-body`·`editor-typescript-colors` 가 CI 에서만 깨졌다 — 폰트가
+    // 아니라 이것이었다).
+    //
+    // **몰아 파는 일은 `editor_syntax` 가 이미 안다** — 같은 결함이 판정자 층에서 먼저 났고
+    // (`ES7`, CI 에서만 `expected 400, found 0`) 그때 `openParsed` 가 생겼다. Lab 은 그 지식을
+    // 복제하지 않고 **그 문을 쓴다**.
+    out.state = editor_syntax.openParsedBudgeted(out.file.?.content, grammar, budget_ns);
+    // **상한에 걸리면 죽는다.** 조용히 빠지면 색 없는 그림이 그대로 골든이 되어, 이 게이트가
+    // 지키려던 것(구문 색)이 사라진 줄도 모른다. 판정자와 캡처 하네스의 답이 갈리는 자리다.
+    if (out.state.pending) std.debug.panic(
+        "Chrome Lab: 구문 파싱이 상한 안에 안 끝났다 — 캡처가 색 없이 나갈 뻔했다",
+        .{},
+    );
+
     out.colors = editor_syntax.lineColors(
         &out.state,
         a,
@@ -1567,6 +1593,52 @@ pub fn lowerDraws(
     cell_height_px: u32,
 ) !Result {
     return .{ .raster = try lowering.lower(allocator, draws, tokens, cell_width_px, cell_height_px, true) };
+}
+
+test "Chrome Lab 은 구문 파싱을 끝까지 판 뒤에 색을 뜬다 — 기계가 느려도 같은 그림" {
+    // **왜 이 판정자가 필요한가.** `editor_syntax.open` 은 한 프레임 예산(4ms)만 쓰고 파싱을 끊는다.
+    // 제품은 다음 프레임에 `resumeParse` 로 이어 파지만 Lab 은 프레임 하나를 캡처하고 끝이라,
+    // 이어 파지 않으면 **예산 안에 못 끝낸 문서만 색이 없다**. 그 판정이 기계 속도에 달려 있어서
+    // 로컬은 초록, CI 러너는 빨강이 됐다(2026-08-31 `editor-hscroll-body`).
+    //
+    // 예산을 1ns 로 주어 「모자란 상황」을 **기계 속도에 안 기대고** 만든다.
+    // 문서가 작으면 1ns 예산으로도 파싱이 **끝나 버린다**(예산 검사 단위가 그보다 굵다).
+    // 예산이 실제로 모자라도록 충분히 크게 만든다 — 아래 ⑴ 이 그것을 확인한다.
+    const allocator = std.testing.allocator;
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+    try lines.append(allocator, "const std = @import(\"std\");");
+    try lines.append(allocator, "pub fn main() void {");
+    var i: usize = 0;
+    while (i < 4000) : (i += 1) {
+        try lines.append(allocator, "    var n: u32 = 0;");
+        try lines.append(allocator, "    while (n < 10) : (n += 1) {}");
+    }
+    try lines.append(allocator, "}");
+
+    var syn = editorSyntaxColorsBudgeted(lines.items, 4, .zig, 1);
+    defer syn.deinit();
+
+    // ⑴ **색이 붙어야 한다.** 이어 파기를 빼면 여기서 죽는다 — 그게 CI 에 나간 그림이었다.
+    var spans: usize = 0;
+    for (syn.colors) |line| spans += line.len;
+    try std.testing.expect(spans > 0);
+
+    // ⑵ **예산이 실제로 모자랐는지는 라이브러리에 직접 묻는다.** 하네스가 보고하는
+    //    하네스가 「몇 번 이어 팠다」를 스스로 보고하게 두면 그 자리를 상수로 바꾼 변이가 이
+    //    단언을 **통과시킨 채** 살아남는다(적대적 검증 2회차에서 실제로 그랬다). 같은 문서·같은
+    //    예산으로 `openBudgeted`
+    //    를 직접 열어 `pending` 이 참인 것을 본다. 0 이면 ⑴ 은 예산이 넉넉해서 통과한 것이고,
+    //    그런 테스트는 이어 파기를 빼도 초록이라 아무것도 안 지킨다.
+    var probe_doc: std.ArrayList(u8) = .empty;
+    defer probe_doc.deinit(allocator);
+    for (lines.items) |l| {
+        try probe_doc.appendSlice(allocator, l);
+        try probe_doc.append(allocator, '\n');
+    }
+    var probe = editor_syntax.openBudgeted(probe_doc.items, .zig, 1);
+    defer probe.deinit(allocator);
+    try std.testing.expect(probe.pending);
 }
 
 test "Chrome Lab has no implicit surface and fails closed for an empty synthetic frame" {

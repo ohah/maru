@@ -229,6 +229,12 @@ jobs:
       # 확인해 왔고, 그 방식이 실제로 회귀를 놓쳤다(부분적으로 보이는 행이 "잘린" 것과 "눌린" 것을
       # 구분하지 못했다). Chrome Lab이 제품 lowering을 Metal 오프스크린으로 태운 캡처를 골든과 픽셀
       # 비교한다 — 앱 번들이 필요 없어 이 job의 비용을 늘리지 않는다.
+      # 골든 비교 **전에** Lab 하네스 자신의 계약을 고정한다. 그 계약이 깨지면 골든은 「무엇이
+      # 틀렸는지」가 아니라 「그림이 다르다」만 말한다 — 실제로 2026-08-31 에 구문 파싱을 이어 파지
+      # 않는 결함이 editor 골든 여럿을 **러너 속도에 따라** 깨뜨렸고, 원인이 폰트로 오인됐다.
+      # 이 스텝은 지금까지 CI 어디에서도 안 돌았다.
+      - name: Pin Chrome Lab harness contracts
+        run: mise run test-macos-chrome-lab-smoke
       - name: Gate Session Dock visuals against golden images
         run: mise run macos-dock-visual-golden
       - name: Upload dock visual captures

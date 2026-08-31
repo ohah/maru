@@ -154,6 +154,12 @@ pub const Props = struct {
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다 —
     /// rename·검색 caret이 쓰는 값과 같은 것이라 **깜빡임 위상이 화면 안에서 하나다.**
     caret_visible: bool = true,
+    /// caret **모양**(`editor.cursor-shape`). 기본 `bar`는 지금까지의 폭 2px 막대다.
+    ///
+    /// **`block`은 셀을 채운다** — 그 자리에 글자가 있으므로 본문이 그 글자를 **배경색으로**
+    /// 그려야 읽힌다(`content.Props.invert_carets`). quad는 글자를 덮지 못하므로(draw.zig의
+    /// "quad와 text는 서로 다른 레이어") 반전 없이 채우면 커서색 위에 원래 글자색이 그대로 남는다.
+    caret_shape: CaretShape = .bar,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -258,6 +264,16 @@ pub const Scratch = struct {
     row_counts: []u32,
     /// 그 계수에 쓰는 탭 전개 버퍼. 줄마다 재사용한다.
     count_scratch: []u8,
+    /// **블록 caret이 선 열**(줄별로 잘라 쓴다). `caret_shape == .block`일 때만 채운다 —
+    /// 본문이 그 칸의 글자를 배경색으로 그려야 커서가 글자를 덮는다(`content.Row.caret_cols`).
+    ///
+    /// 모자라면 뒤쪽 커서 몇 개가 반전을 못 받는다(커서 사각은 그대로 그려진다) — 이 파일의
+    /// 다른 저장소와 같은 판단이다(*"모자라면 그 부분이 잘릴 뿐 죽지 않는다"*).
+    ///
+    /// **기본값을 두지 않는다.** `= &.{}`로 두었더니 저장소를 안 넘긴 호출자(Chrome Lab)가
+    /// **조용히 반전 없이** 그렸다 — 커서 사각은 정상이라 화면은 "블록이 나온다"로 보이고,
+    /// 판정자는 저장소를 직접 넣어서 통과했다. 빠뜨림이 컴파일 오류가 되어야 그 창이 닫힌다.
+    caret_cols: []u32,
 };
 
 /// 줄마다의 시각 행 수를 **프레임 사이에 살려 두는** 호출자 소유 캐시.
@@ -393,12 +409,14 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **gutter보다 먼저 돈다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해 나눠 본
     // 쪽만 알기 때문이다(§4 세로 축) — 둘이 각자 세면 랩된 줄에서 번호가 본문과 어긋난다.
     var n: usize = 0;
+    var caret_cols_used: usize = 0;
     while (n < scratch.content_rows.len and props.first_line + n < props.lines.len) : (n += 1) {
         const li = props.first_line + n;
         scratch.content_rows[n] = .{
             .bytes = props.lines[li],
             // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
             .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
+            .caret_cols = caretColsFor(props, scratch.caret_cols, &caret_cols_used, li),
         };
     }
     const visual_budget = @min(props.visible_rows, scratch.visual_rows.len);
@@ -849,12 +867,34 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
             if (on_screen >= layout.content.width) continue; // 이 행보다 뒤다
             const x = props.rect.x +
                 @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px));
+            // **`block`·`underline`은 글자 폭을 덮는다** — 한글·이모지는 두 칸이라 한 칸만 칠하면
+            // 글자의 절반에 걸친다. 폭은 `stepColumn`이 준다(§5.4 — 열 산술의 단일 출처. 여기서
+            // `2`를 다시 세면 탭·위험 문자에서 본문과 갈린다).
+            const cells: u32 = if (props.caret_shape == .bar or off >= line.len) 1 else cw: {
+                const st = content.stepColumn(line, off, col, props.tab_width);
+                break :cw @max(1, st.next_col -| col);
+            };
+            // 화면 오른쪽 끝을 넘지 않게 자른다 — 넘으면 이웃 pane 위로 번진다.
+            const span = @min(cells, layout.content.width - on_screen);
             // **불투명하게 그린다.** 띠·검색은 글자를 읽어야 해서 알파로 얹지만, 커서는 그 자리에
-            // 글자가 없다(글자 **사이**다) — 반투명하게 두면 배경색이 비쳐 흐릿한 막대가 된다.
-            out[n] = .{ .quad = .{
-                .rect = .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
-                .fill_role = .cursor,
-            } };
+            // 글자가 없거나(막대 — 글자 **사이**다) 본문이 그 글자를 배경색으로 그린다(`block`).
+            // 반투명하게 두면 배경색이 비쳐 흐릿해진다.
+            out[n] = .{
+                .quad = .{
+                    .rect = switch (props.caret_shape) {
+                        .bar => .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
+                        .block => .{ .x = x, .y = y, .w = span * props.cell_w_px, .h = props.cell_h_px },
+                        // **글자 밑에 붙인다** — 셀 아래쪽 `caret_width_px`만큼.
+                        .underline => .{
+                            .x = x,
+                            .y = y + @as(i32, @intCast(props.cell_h_px -| caret_width_px)),
+                            .w = span * props.cell_w_px,
+                            .h = caret_width_px,
+                        },
+                    },
+                    .fill_role = .cursor,
+                },
+            };
             n += 1;
         }
     }
@@ -862,7 +902,36 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
 }
 
 /// 커서 막대 폭(px). **셀 폭과 무관한 상수다** — 폰트를 키워도 커서가 뚱뚱해지지 않는다.
+/// `underline`의 두께도 같은 값을 쓴다 — 둘 다 "선 하나"이고 두께가 갈릴 이유가 없다.
 pub const caret_width_px: u32 = 2;
+
+/// caret 모양. 값 이름은 터미널 `cursor.shape`(`config.theme.CursorShape`)와 **같다** — 이 컴포넌트는
+/// config를 안 들여오므로(chrome은 L3) 이름만 맞추고 제품이 옮겨 담는다.
+pub const CaretShape = enum { bar, block, underline };
+
+/// 한 줄의 **블록 caret 열들**을 저장소에 담아 그 조각을 돌려준다. `block`이 아니거나 커서가
+/// 안 보이는 순간이면 빈 조각이다 — 그때는 본문이 반전할 것이 없다.
+///
+/// **열 변환은 `columnOfOffset` 하나가 한다**(§5.4). 여기서 다시 세면 탭스톱 규칙이 두 곳에 생긴다.
+fn caretColsFor(props: Props, store: []u32, used: *usize, line_idx: usize) []const u32 {
+    if (props.caret_shape != .block or !props.caret_visible) return &.{};
+    const rows = props.carets orelse return &.{};
+    if (line_idx >= rows.len) return &.{};
+    const offsets = rows[line_idx];
+    if (offsets.len == 0) return &.{};
+    const line = if (line_idx < props.lines.len) props.lines[line_idx] else return &.{};
+
+    const start = used.*;
+    for (offsets) |off| {
+        if (used.* >= store.len) break; // 저장소 끝 — 남은 커서는 반전 없이 사각만 그려진다
+        // **줄 끝의 커서는 반전할 글자가 없다.** 빈 칸을 반전 목록에 넣으면 다음 줄의 훑기가
+        // 헛돌 뿐이라 아예 안 넣는다.
+        if (off >= line.len) continue;
+        store[used.*] = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32));
+        used.* += 1;
+    }
+    return store[start..used.*];
+}
 
 /// 줄 안 byte offset이 몇 열인가. `columnsAtOffsets`를 하나짜리로 부르는 얇은 감쌈이다 —
 /// **열 계산을 여기서 다시 짜지 않는다**(§5.4: 하나의 픽셀-레이아웃 소스).
@@ -999,6 +1068,7 @@ const TestBuffers = struct {
     gutter_rows: [64]gutter.Row = undefined,
     row_counts: [64]u32 = undefined,
     count_scratch: [4096]u8 = undefined,
+    caret_cols_store: [64]u32 = undefined,
 
     fn scratch(self: *TestBuffers) Scratch {
         return .{
@@ -1010,6 +1080,7 @@ const TestBuffers = struct {
             .gutter_rows = &self.gutter_rows,
             .row_counts = &self.row_counts,
             .count_scratch = &self.count_scratch,
+            .caret_cols = &self.caret_cols_store,
         };
     }
 };
@@ -1428,6 +1499,7 @@ test "밴드는 바뀐 줄에만 서고 빈 행에는 안 선다" {
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{ "keep", "gone", "", "tail" };
     const bands = [_]RowBand{ .none, .removed, .none, .none }; // 3행은 짝을 맞추려 넣은 빈 행
@@ -1455,6 +1527,7 @@ test "밴드는 바뀐 줄에만 서고 빈 행에는 안 선다" {
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var band_quads: usize = 0;
@@ -1482,6 +1555,7 @@ test "밴드는 스크롤을 따라간다 — 표를 절대 인덱스로 읽는�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{ "a", "b", "c", "d", "e" };
     const bands = [_]RowBand{ .none, .none, .none, .added, .none }; // 4번째 줄만 추가
@@ -1509,6 +1583,7 @@ test "밴드는 스크롤을 따라간다 — 표를 절대 인덱스로 읽는�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var found: usize = 0;
@@ -1530,6 +1605,7 @@ test "랩된 줄은 이어진 조각까지 한 색이다 — 한 줄로 읽혀�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 본문 폭보다 긴 줄 하나 — 랩이 켜지면 여러 조각으로 접힌다.
     const lines = [_][]const u8{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
@@ -1558,6 +1634,7 @@ test "랩된 줄은 이어진 조각까지 한 색이다 — 한 줄로 읽혀�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var rows_painted: usize = 0;
@@ -1581,6 +1658,7 @@ test "랩된 문서에서 막대가 시각 행 자리에 선다 — 논리 줄�
     var gutter_rows: [32]gutter.Row = undefined;
     var counts: [32]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 줄마다 본문 폭의 두 배 → 랩이 켜지면 줄당 시각 행 2개.
     const long_line = "aaaaaaaaaaaaaaaaaaaa";
@@ -1596,6 +1674,7 @@ test "랩된 문서에서 막대가 시각 행 자리에 선다 — 논리 줄�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     const base: Props = .{
         .tab_width = default_tab_width,
@@ -1638,6 +1717,7 @@ test "밴드는 스크롤바보다 먼저 나온다 — 나중이면 막대 위�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
     const bands = [_]RowBand{ .removed, .none, .none, .none, .none, .none, .none, .none };
@@ -1665,6 +1745,7 @@ test "밴드는 스크롤바보다 먼저 나온다 — 나중이면 막대 위�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
     try testing.expect(w.scrollbar != null); // 막대가 실제로 그려졌다
 
@@ -1693,6 +1774,7 @@ test "막대 위치는 total_visual_rows를 받은 경로에서도 시각 행 �
     var gutter_rows: [32]gutter.Row = undefined;
     var counts: [32]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     var lines_buf: [10][]const u8 = undefined;
     for (&lines_buf) |*l| l.* = "aaaaaaaaaaaaaaaaaaaa"; // 본문 폭의 두 배 → 줄당 2행
@@ -1705,6 +1787,7 @@ test "막대 위치는 total_visual_rows를 받은 경로에서도 시각 행 �
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     var props: Props = .{
         .tab_width = default_tab_width,
@@ -1744,6 +1827,7 @@ test "바뀐 글자만 한 겹 더 진하다 — 줄 밴드 위에 그 범위만
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"const a = 1;"};
     const bands = [_]RowBand{.removed};
@@ -1774,6 +1858,7 @@ test "바뀐 글자만 한 겹 더 진하다 — 줄 밴드 위에 그 범위만
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var mark: ?draw.Op.Quad = null;
@@ -1798,6 +1883,7 @@ test "탭이 있어도 강조가 글자 위에 선다 — 열은 전개 뒤 기�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"\tx"}; // 탭(4열) 뒤 x
     const bands = [_]RowBand{.added};
@@ -1828,6 +1914,7 @@ test "탭이 있어도 강조가 글자 위에 선다 — 열은 전개 뒤 기�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
     for (ops[0..w.ops]) |op| {
         if (op != .quad or op.quad.alpha != mark_alpha) continue;
@@ -1849,6 +1936,7 @@ test "마크가 저장소보다 많으면 앞에서부터 그리고 죽지 않�
     var gutter_rows: [8]gutter.Row = undefined;
     var counts: [8]u32 = undefined;
     var count_scratch: [16]u8 = undefined; // u32 넷 = 마크 두 쌍만 들어간다
+    var caret_cols: [64]u32 = undefined;
 
     const line = "abcdefghijklmnop";
     const lines = [_][]const u8{line};
@@ -1882,6 +1970,7 @@ test "마크가 저장소보다 많으면 앞에서부터 그리고 죽지 않�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var painted: usize = 0;
@@ -1903,6 +1992,7 @@ test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
     var gutter_rows: [8]gutter.Row = undefined;
     var counts: [8]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const line = "0123456789abcdef";
     const lines = [_][]const u8{line};
@@ -1937,6 +2027,7 @@ test "가로로 밀면 강조도 함께 밀리고 본문 밖은 잘린다" {
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var found: usize = 0;
@@ -1967,6 +2058,7 @@ test "랩된 줄: 마크가 어느 조각에 있든 그 조각에 강조가 선�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 본문이 좁아 한 줄이 여러 조각으로 접힌다. 마크를 **앞뒤 양쪽**에 둔다.
     const line = "aaaaaaaaaaaaaaaaaaaa";
@@ -2000,6 +2092,7 @@ test "랩된 줄: 마크가 어느 조각에 있든 그 조각에 강조가 선�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     try testing.expect(w.visual_rows > 1); // 실제로 접혔다
@@ -2037,6 +2130,7 @@ test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 줄마다 길이가 다르다 — 표를 잘못 읽으면 열이 티 나게 어긋난다.
     const lines = [_][]const u8{ "a", "bb", "cccc", "ddddddd", "e" };
@@ -2069,6 +2163,7 @@ test "강조도 스크롤을 따라간다 — 표와 줄을 같은 절대 인덱
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     const layout = geometry.compute(40, lines.len, .{});
@@ -2096,6 +2191,7 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [128]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{ "aaa", "bbb" };
     const scratch: Scratch = .{
@@ -2107,6 +2203,7 @@ test "가로 막대는 넘칠 때만, 그리고 본문 아래 자리에 그려�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     const base: Props = .{
         .tab_width = default_tab_width,
@@ -2168,6 +2265,7 @@ test "줄 끝까지 선택해도 띠가 선다 — 캡처가 잡은 자리 (§4.
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"fn render(self: *View) void {"}; // 29 byte
     const to_eol = [_]Mark{.{ .start = 10, .len = 19 }}; // 10 + 19 == 29 = 줄 끝
@@ -2198,6 +2296,7 @@ test "줄 끝까지 선택해도 띠가 선다 — 캡처가 잡은 자리 (§4.
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var found: ?draw.Op = null;
@@ -2219,6 +2318,7 @@ test "선택 띠가 diff가 아닌 본문에도 서고, 가로 스크롤 밖은 
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{ "hello world", "second line" };
     const sel_row0 = [_]Mark{.{ .start = 6, .len = 5 }}; // "world"
@@ -2235,6 +2335,7 @@ test "선택 띠가 diff가 아닌 본문에도 서고, 가로 스크롤 밖은 
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
     const base_props: Props = .{
         .lines = &lines,
@@ -2294,6 +2395,7 @@ test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 �
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 본문 폭보다 긴 줄 하나 — 랩을 켜면 조각 둘이 된다.
     const lines = [_][]const u8{"aaaaaaaaaabbbbbbbbbb"};
@@ -2328,6 +2430,7 @@ test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 �
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     // 전제: 실제로 두 조각으로 접혔다.
@@ -2359,6 +2462,7 @@ test "CRT1 커서 수만큼 막대가 서고, blink가 꺼지면 하나도 안 �
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"abc def ghi"};
     const row_carets = [_]u32{ 0, 4, 8 };
@@ -2391,6 +2495,7 @@ test "CRT1 커서 수만큼 막대가 서고, blink가 꺼지면 하나도 안 �
             .gutter_rows = &gutter_rows,
             .row_counts = &counts,
             .count_scratch = &count_scratch,
+            .caret_cols = &caret_cols,
         });
 
         var n: usize = 0;
@@ -2439,6 +2544,7 @@ test "CRT3 랩이 걸린 줄에서 caret은 한 번만, 제 행에 선다 (§4.1
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 20칸 폭에 40자 — 두 시각 행으로 접힌다.
     const lines = [_][]const u8{"0123456789abcdefghijABCDEFGHIJklmnopqrst"};
@@ -2472,6 +2578,7 @@ test "CRT3 랩이 걸린 줄에서 caret은 한 번만, 제 행에 선다 (§4.1
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var n: usize = 0;
@@ -2486,6 +2593,172 @@ test "CRT3 랩이 걸린 줄에서 caret은 한 번만, 제 행에 선다 (§4.1
     try std.testing.expectEqual(@as(usize, 1), n);
     // **둘째 시각 행**이다 — 첫 행(y=0)에 서면 랩을 무시한 것이다.
     try std.testing.expect(y >= 16);
+}
+
+test "CRT4 모양마다 커서 사각이 다르다 — bar는 막대, block은 셀, underline은 밑선" {
+    // **모양이 안 먹으면 「설정이 있는데 아무 일도 안 난다」가 된다** — 이 저장소가 여러 번 겪은
+    // 모양이라(`resolved-config-field-with-no-consumer`) 값마다 실제 사각을 잰다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"abc"};
+    const row_carets = [_]u32{1}; // 'b' 위
+    const carets = [_][]const u32{&row_carets};
+
+    const cell_w: u16 = 8;
+    const cell_h: u16 = 16;
+
+    for ([_]CaretShape{ .bar, .block, .underline }) |shape| {
+        var sc = buf.scratch();
+        sc.caret_cols = &caret_cols;
+        const w = build(.{
+            .lines = &lines,
+            .first_line = 0,
+            .total_lines = 1,
+            .carets = &carets,
+            .caret_visible = true,
+            .caret_shape = shape,
+            .visible_rows = 2,
+            .wrap = false,
+            .tab_width = default_tab_width,
+            .rect = .{ .x = 0, .y = 0, .w = 40 * @as(u32, cell_w), .h = 32 },
+            .cell_w_px = cell_w,
+            .cell_h_px = cell_h,
+            .font_px = 16,
+            .total_cols = 40,
+            .scrollbar_gutter_px = 0,
+            .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+        }, sc);
+
+        var found: ?draw.Rect = null;
+        for (buf.ops[0..w.ops]) |op| {
+            if (op != .quad or op.quad.fill_role != .cursor) continue;
+            found = op.quad.rect;
+        }
+        const r = found orelse return error.CaretNotDrawn;
+        switch (shape) {
+            // 막대는 셀 폭과 **무관**하다 — 폰트를 키워도 안 뚱뚱해진다.
+            .bar => {
+                try std.testing.expectEqual(caret_width_px, r.w);
+                try std.testing.expectEqual(@as(u32, cell_h), r.h);
+            },
+            // 블록은 글자 한 칸을 통째로 덮는다.
+            .block => {
+                try std.testing.expectEqual(@as(u32, cell_w), r.w);
+                try std.testing.expectEqual(@as(u32, cell_h), r.h);
+            },
+            // 밑줄은 셀 **아래쪽**에 두께 `caret_width_px`로 붙는다.
+            .underline => {
+                try std.testing.expectEqual(@as(u32, cell_w), r.w);
+                try std.testing.expectEqual(caret_width_px, r.h);
+                try std.testing.expectEqual(@as(i32, @intCast(cell_h - caret_width_px)), r.y);
+            },
+        }
+    }
+}
+
+test "CRT5 block은 한글 두 칸을 덮는다 — 반 칸에 걸치지 않는다" {
+    // **EAW wide 글자에서 한 칸만 칠하면 글자 절반에 걸친다.** 폭을 `stepColumn`에서 가져오는지
+    // 재는 자리다 — 여기서 `1`을 박으면 이 판정자가 죽는다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"가나"};
+    const row_carets = [_]u32{0}; // '가' 위 (3 byte)
+    const carets = [_][]const u32{&row_carets};
+
+    var sc = buf.scratch();
+    sc.caret_cols = &caret_cols;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .carets = &carets,
+        .caret_visible = true,
+        .caret_shape = .block,
+        .visible_rows = 2,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = 40 * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, sc);
+
+    var found: ?draw.Rect = null;
+    for (buf.ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .cursor) continue;
+        found = op.quad.rect;
+    }
+    const r = found orelse return error.CaretNotDrawn;
+    try std.testing.expectEqual(@as(u32, 16), r.w); // 두 칸 = 8px × 2
+}
+
+test "CRT6 block이 선 글자는 배경색으로 그려진다 — 커서 밑에 묻히지 않는다" {
+    // **quad는 글자를 못 덮는다**(`draw.zig`: quad와 text는 서로 다른 레이어). 그래서 채우기만
+    // 하면 커서색 위에 원래 글자색이 그대로 남아 **그 한 글자만 안 읽힌다.** 터미널이 커서 칸의
+    // 전경·배경을 맞바꾸는 것과 같은 자리다.
+    //
+    // **`bar`에서는 반전이 없어야 한다** — 막대는 글자 사이에 서므로 덮는 글자가 없다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"abc"};
+    const row_carets = [_]u32{1}; // 'b' 위
+    const carets = [_][]const u32{&row_carets};
+    // **구문 강조가 걸린 칸에서도 반전이 이겨야 한다.** 지면 강조된 토큰 위에서만 커서가 글자를
+    // 못 덮어, 커서가 어디 있는지가 문법에 따라 달라진다. 'b'(열 1)에 다른 role을 씌운다.
+    const spans = [_]content.ColorSpan{.{ .start_col = 1, .end_col = 2, .role = .syntax_keyword }};
+    const line_colors = [_][]const content.ColorSpan{&spans};
+
+    for ([_]CaretShape{ .block, .bar }) |shape| {
+        var sc = buf.scratch();
+        sc.caret_cols = &caret_cols;
+        const w = build(.{
+            .lines = &lines,
+            .line_colors = &line_colors,
+            .first_line = 0,
+            .total_lines = 1,
+            .carets = &carets,
+            .caret_visible = true,
+            .caret_shape = shape,
+            .visible_rows = 2,
+            .wrap = false,
+            .tab_width = default_tab_width,
+            .rect = .{ .x = 0, .y = 0, .w = 40 * 8, .h = 32 },
+            .cell_w_px = 8,
+            .cell_h_px = 16,
+            .font_px = 16,
+            .total_cols = 40,
+            .scrollbar_gutter_px = 0,
+            .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+        }, sc);
+
+        // 'b' 를 담은 run 의 role 을 찾는다.
+        var b_role: ??tokens.ColorRole = null;
+        for (buf.ops[0..w.ops]) |op| {
+            if (op != .text) continue;
+            for (op.text.runs) |run| {
+                if (std.mem.eql(u8, run.text, "b")) b_role = run.role;
+            }
+        }
+        switch (shape) {
+            .block => {
+                const role = b_role orelse return error.CaretGlyphNotItsOwnRun;
+                try std.testing.expectEqual(@as(?tokens.ColorRole, .terminal_bg), role);
+            },
+            // **막대면 'b' 는 구문색 그대로다** — 막대는 글자 사이에 서므로 덮는 글자가 없다.
+            // 여기서 `terminal_bg`가 나오면 커서가 없는 자리까지 반전된 것이다.
+            .bar => {
+                const role = b_role orelse return error.SyntaxRunMissing;
+                try std.testing.expectEqual(@as(?tokens.ColorRole, .syntax_keyword), role);
+            },
+            .underline => unreachable,
+        }
+    }
 }
 
 test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제로 작동하는가)" {
@@ -2505,6 +2778,7 @@ test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제
     var gutter_rows: [64]gutter.Row = undefined;
     var counts: [64]u32 = undefined;
     var count_scratch: [1024]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // **막대가 실제로 설 조건을 만든다.** 처음엔 한 줄짜리 문서에 `content_max_cols`도 없이 줬는데,
     // 그러면 세로는 문서가 다 들어가서, 가로는 `showsHorizontalBar`가 `content_max_cols`를 요구해서
@@ -2544,6 +2818,7 @@ test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     // 커서가 잘렸다 — 그것이 이 판정자가 만들려는 상태다.
@@ -2573,6 +2848,7 @@ test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 �
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"row row row"}; // 0, 4, 8
     const row_marks = [_]Mark{ .{ .start = 0, .len = 3 }, .{ .start = 4, .len = 3 }, .{ .start = 8, .len = 3 } };
@@ -2606,6 +2882,7 @@ test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 �
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var normal_x: [4]i32 = undefined;
@@ -2661,6 +2938,7 @@ test "SRCH2 매치가 예산을 말려도 스크롤바는 선다 — 안 보이�
     var gutter_rows: [64]gutter.Row = undefined;
     var counts: [64]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     // 한 줄에 마크를 잔뜩 — 예산을 확실히 넘긴다.
     var many: [40]Mark = undefined;
@@ -2698,6 +2976,7 @@ test "SRCH2 매치가 예산을 말려도 스크롤바는 선다 — 안 보이�
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     // 검색 강조가 예산을 다 먹었어도 **두 막대가 그려져야 한다**.
@@ -2731,6 +3010,7 @@ test "SRCH3 예산이 말라도 **현재 매치**는 남는다 — 위치 표시
     var gutter_rows: [16]gutter.Row = undefined;
     var counts: [16]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const lines = [_][]const u8{"a a a a a"}; // 0,2,4,6,8
     const row_marks = [_]Mark{
@@ -2767,6 +3047,7 @@ test "SRCH3 예산이 말라도 **현재 매치**는 남는다 — 위치 표시
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var normal: usize = 0;
@@ -2799,6 +3080,7 @@ test "SRCH4 현재 매치가 **아래쪽 행**에 있어도 예산에 안 밀린
     var gutter_rows: [32]gutter.Row = undefined;
     var counts: [32]u32 = undefined;
     var count_scratch: [512]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
 
     const row_marks = [_]Mark{
         .{ .start = 0, .len = 1 }, .{ .start = 2, .len = 1 }, .{ .start = 4, .len = 1 },
@@ -2839,6 +3121,7 @@ test "SRCH4 현재 매치가 **아래쪽 행**에 있어도 예산에 안 밀린
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     });
 
     var normal: usize = 0;

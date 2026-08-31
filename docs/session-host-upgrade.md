@@ -698,6 +698,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `GITHUB_REPOSITORY_ID`·`GITHUB_REPOSITORY`에 모두 exact 일치해야 한다. 이 parser는 이미 획득한 bytes의 의미만 검증하며,
   bytes가 GitHub에서 왔다는 transport 증거나 `gh` executable의 권위를 대신하지 않는다.
 
+  현재 workflow run 응답의 의미 해석은 `release_adapter_github_run.zig`가 소유한다. `id`와
+  `run_attempt`는 JSON number인 nonzero 값으로 context의 exact build identity와 일치해야 하고, `event=push`,
+  `head_sha=<context source commit>`, REST `path=.github/workflows/release.yml`,
+  `status=in_progress`, `conclusion=null`, 빈 `pull_requests`를 함께 요구한다. `repository`와
+  `head_repository`는 둘 다 null이 아닌 `{id,name,full_name,owner.login}`을 소비해 context의 exact repository와
+  내부적으로 일치해야 한다. consumed field의 missing·duplicate·wrong wire type, fork/foreign head repository,
+  완료됐거나 아직 시작되지 않은 다른 run, PR 결속, 다른 workflow/SHA는 fail-close한다. tag ref는 ref가 포함되지 않는
+  REST `path`에 억지로 투영하지 않고, 앞서 검증한 `GITHUB_WORKFLOW_REF`의 exact tag binding을 함께 재검증한다. additive API field는
+  허용한다. focused gate `test-session-host-release-adapter-github-run`은 정상 응답, cap, malformed/duplicate/trailing,
+  모든 identity/lifecycle mismatch와 allocation fail-index를 Debug·ReleaseFast로 검증한다. 이 parser는 이미 획득한
+  REST bytes를 현재 context에 결속할 뿐 transport 권위나 현재 job의 protected `release` environment 통과를 대신하지 않는다.
+
   release 응답의 의미 해석은 `release_adapter_github_release.zig`가 소유한다. GitHub REST release schema의 `id` JSON number,
   `tag_name` string과 `draft`·`prerelease` boolean을 필수로 소비하며 missing·duplicate·wrong wire type을 거부한다.
   `immutable`은 GitHub OpenAPI가 property로 정의하지만 required 목록에는 넣지 않으므로 draft에서 absent 또는 false를 허용하고
@@ -928,8 +940,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   제품 rollback 증거의 집합이므로 signed frozen release provenance나 아직 목록에 없는 manifest/socket/FD 전 구간
   failure를 대신하지 않으며, 이 첫 matrix만으로 U5 failure injection 완료를 주장하지 않는다.
 - **failure matrix의 두 번째 component gate:** `test-session-host-upgrade-component-failure-matrix`는
-  `handoff_store.zig` 7개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
-  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 21개는 primary/backup
+  `handoff_store.zig` 9개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
+  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 23개는 primary/backup
   commit·reservation·residue cleanup, reserved slot/CLOEXEC rollback, discovery manifest CAS,
   target staging·pin·replacement cleanup의 현재 component seam을 고정한다. boundary inventory는 네 source의
   exact test title·개수와 named step의 네 dependency를 함께 검사한다. 이 gate는 existing component 증거가
@@ -941,7 +953,54 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   primary/backup unlink, attempt directory removal, owner directory sync 실패를 각 syscall 직전의 test-only
   one-shot seam으로 주입한다. 모든 행은 `Pair`를 publish하지 않고 caller의 `Reservation.cancel`이 열린 fd와
   owner-pinned attempt residue를 exact cleanup하는지 검증한다. 이는 syscall 경계 오류 처리 증거이지 실제 disk
-  fault를 일으킨 kernel integration test가 아니며, cleanup syscall 자체가 연속으로 실패하는 fail-stop 축은 별도다.
+  fault를 일으킨 kernel integration test가 아니다.
+  `test-session-host-upgrade-reservation-cleanup-failure` 집중 gate는 reserved primary pathname이 다른 inode로
+  교체된 뒤 `Reservation.cancel`을 실행한다. cleanup은 교체 inode를 삭제하지 않고 `CleanupFailed`를 반환하며,
+  original primary/backup, attempt/owner와 내부 readback fd를 모두 닫고 reservation을 terminal inactive로 만든다.
+  제품 coordinator가 이 오류를 `invariant_violation` 외의 retryable terminal로 축소하지 않는 source boundary도 같은
+  inventory가 고정한다. 이는 실제 pathname identity 충돌의 component 증거와 제품 mapping 경계이며, 제품 process가
+  outer loop에서 실제 fail-stop하는 E2E나 두 개 이상의 실제 kernel cleanup syscall fault 주입을 대신하지 않는다.
+  `test-session-host-upgrade-coordinator-cleanup-fail-stop` 집중 gate는 공개 `Context`를 넓히지 않는 coordinator-private
+  test hook으로 budget reservation 직후 같은 primary identity 충돌을 만든다. 실제 `processArmed` 흐름은 reserved commit
+  실패 뒤 old graph를 재개하고 terminal report를 만든 다음 reservation cleanup도 실패하므로 최종 결과를
+  `invariant_violation`으로 덮어써야 한다. 같은 named gate는 `upgrade_loop`의 exact test도 함께 실행해
+  `invariant_violation`이 retryable terminal이 아니라 `fail_stop`으로만 분류되는지 고정한다. 이는 실제 coordinator와
+  outer-loop 분류의 실행 증거지만 daemon process가 socket을 닫고 nonzero로 종료하는 process E2E는 별도다.
+  `test-session-host-upgrade-daemon-cleanup-fail-stop` 집중 gate는 그 별도 process E2E를 소유한다. 부모 test는 실제
+  fork child에서 exact-identity daemon과 제품 `SocketServer`/poll owner/coordinator를 띄우고, GUI profile client가
+  제품 `host.upgrade.prepare` wire 요청을 보낸다. child에 명시적으로 전달한 test-only fault는 budget reservation 직후
+  primary pathname을 다른 inode로 교체한다. 따라서 실제 coordinator가 old graph를 재개한 뒤 cleanup identity 실패를
+  `invariant_violation`으로 만들고, 공유 outer loop가 이를 `fail_stop`으로 분류해 daemon을 `ManifestFailed`로 반환해야 한다.
+  child wrapper는 이 exact error만 전용 nonzero exit code로 바꾸며 다른 error와 정상 반환을 별도 code로 구분한다.
+  부모는 deadline 안의 그 exact exit, 기존 sibling 연결의 typed 폐쇄 실패, listener 재접속 거부, socket pathname 부재,
+  owner lease pathname 부재를 모두 관측해야 성공한다. fault는 ambient environment나 MRSH test command가 아니라
+  `builtin.is_test`로 닫힌 fixture entrypoint의
+  typed 값으로만 전달하고, 제품 entrypoint와 공개 coordinator `Context`에는 주입 필드를 추가하지 않는다. 이 gate는
+  실제 kernel pathname 교체 한 종류와 daemon unwind를 증명하지만 disk-full, fsync, 다중 cleanup syscall fault나 실제 서명
+  release artifact를 대신하지 않는다.
+  `test-session-host-upgrade-kernel-cleanup-faults` 집중 gate는 synthetic pre-syscall failpoint 대신 실제 macOS filesystem
+  조건을 만든다. component 행은 reservation의 열린 attempt directory를 읽기 전용으로 바꾼 뒤 제품
+  `Reservation.cancel`을 호출한다. pinned primary/backup 제거는 실제 kernel에서 `EACCES`, 파일이 남은 attempt directory
+  제거는 `ENOTEMPTY`여야 하며, cleanup은 두 번째 실패 뒤에도 owner sync/close까지 진행해 aggregate `CleanupFailed`, terminal
+  inactive와 reservation fd 전량 폐쇄로 수렴해야 한다. test-only observation은 syscall 직후 errno만 기록하며 syscall 결과를
+  대신 만들거나 제품 error mapping을 바꾸지 않는다. 같은 named gate의 process 행은 budget reservation 직후 동일 권한 조건을
+  만드는 typed fixture를 실제 fork daemon의 제품 `Client.prepareUpgrade` 경로에 연결한다. daemon 행은 각 errno를 직접
+  노출한다고 주장하지 않고 coordinator `invariant_violation`→outer-loop `fail_stop`→`ManifestFailed` exact nonzero exit와 기존
+  sibling, 새 연결, socket pathname, owner lease pathname의 폐쇄를 증명한다. fixture는 `builtin.is_test`로 닫히고 ambient
+  environment, MRSH command, 공개 coordinator `Context`를 넓히지 않는다. 이 component+process 결합으로 두 개 이상의 실제
+  kernel cleanup syscall fault와 daemon fail-stop은 닫지만 disk-full, fsync fault와 실제 서명 release artifact는 여전히 별도다.
+
+  `test-session-host-upgrade-disk-full-admission` 집중 gate는 user-owned HFS+ disk image에 실제 fork daemon의 owner
+  directory를 만들고 제품 target staging이 끝난 뒤에만 coordinator-private typed fixture로 같은 volume의 bounded
+  incompressible filler를 실제 kernel `ENOSPC`까지 쓴다. 그 다음 호출은 synthetic error가 아니라 제품
+  `budget_admission.prepare`여야 하며, two-copy `F_PREALLOCATE` 또는 durable probe write가 실패해 reader pause 전에
+  `resumed/state_too_large`로 끝나야 한다. 부모는 accepted reply 뒤 새 제품 connection에서 terminal attempt status를
+  읽고, accepted drain의 기존 sibling은 typed 폐쇄되지만 새 연결의 daemon PID·listener·`host.info`·exact runtime
+  inventory가 유지되며 attempt reservation residue가 없음을 검증한다. disk image detach와 filler 정리는 harness owner가
+  exact path로 수행한다. fixture는 `builtin.is_test`로 닫고
+  ambient environment, MRSH command, 공개 coordinator `Context`와 제품 error mapping을 넓히지 않는다. 이 gate는 실제
+  write-side disk-full admission과 pre-quiesce 생존만 닫는다. ENOSPC 뒤 성공하는 fsync를 fsync fault로 세지 않으며 delayed
+  fsync fault와 실제 서명 release artifact는 여전히 별도다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

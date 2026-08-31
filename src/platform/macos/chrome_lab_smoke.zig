@@ -91,6 +91,9 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_typescript,
         .editor_selection,
         .editor_find,
+        .editor_caret_bar,
+        .editor_caret_block,
+        .editor_caret_underline,
         .editor_diff_selection,
         .editor_diff,
         .editor_diff_scrolled,
@@ -927,6 +930,9 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
     if (std.mem.eql(u8, raw, "editor-typescript")) return .editor_typescript;
     if (std.mem.eql(u8, raw, "editor-selection")) return .editor_selection;
+    if (std.mem.eql(u8, raw, "editor-caret-bar")) return .editor_caret_bar;
+    if (std.mem.eql(u8, raw, "editor-caret-block")) return .editor_caret_block;
+    if (std.mem.eql(u8, raw, "editor-caret-underline")) return .editor_caret_underline;
     if (std.mem.eql(u8, raw, "editor-diff-selection")) return .editor_diff_selection;
     if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
     if (std.mem.eql(u8, raw, "editor-diff-scrolled")) return .editor_diff_scrolled;
@@ -996,6 +1002,9 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_real_file => "editor-real-file",
         .editor_typescript => "editor-typescript",
         .editor_selection => "editor-selection",
+        .editor_caret_bar => "editor-caret-bar",
+        .editor_caret_block => "editor-caret-block",
+        .editor_caret_underline => "editor-caret-underline",
         .editor_diff_selection => "editor-diff-selection",
         .editor_diff => "editor-diff",
         .editor_diff_scrolled => "editor-diff-scrolled",

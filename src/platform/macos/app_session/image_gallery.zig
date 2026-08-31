@@ -25,8 +25,168 @@ const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
 const image_view = maru.session.image_view;
 const context = maru.session.agent_image_context;
+const context_mod = context;
 const metal_frame = maru.renderer.metal_frame;
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
+
+/// 갤러리를 보고 있는 동안 **파일이 자랐는지** 이따금 본다.
+///
+/// 훅에 기대지 않는 이유: 훅이 꺼져 있을 수 있고(계약 §4.4), 켜져 있어도 `UserPromptSubmit` 은
+/// 이미지가 파일에 적히기 **전에** 올 수 있다. `stat` 은 싸므로 직접 본다.
+///
+/// **스로틀이 필요하다**: 이 함수는 60 Hz 로 불린다. 그대로 두면 초당 60 번 파일을 연다.
+fn pollFreshness(self: *AppSession) void {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (self.image_gallery.chain.isEmpty() or !self.image_gallery.built) return;
+    if (self.image_gallery.scanning()) return;
+    // **크게 보기 중에는 미룬다.** 다시 훑으면 새 이미지가 맨 앞에 와 인덱스가 전부 밀리므로
+    // (최신 우선, §IG7) 열어 둔 칸이 다른 그림이 된다. 닫으면 다음 tick 이 잡는다 —
+    // 에이전트가 줄 하나 적었다고 보던 이미지가 바뀌는 것보다 잠깐 낡은 편이 낫다.
+    if (self.image_gallery.open != null) return;
+
+    // **단조 시계다.** 벽시계(`Clock.real`)는 NTP 보정으로 뒤로 갈 수 있고, 그러면 아래 뺄셈이
+    // 0 으로 포화해 자동 갱신이 그 시간만큼 **조용히 멈춘다**. 「얼마나 지났나」는 `awake` 가 답한다.
+    const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
+    // 그래도 뒤로 간 값이 보이면(시계 구현이 보장을 못 지키면) **밀린 것으로 보고 지금을 기준으로
+    // 다시 잡는다** — 영원히 이른 상태로 갇히지 않는다.
+    if (now_ms < self.image_gallery.last_stat_ms) self.image_gallery.last_stat_ms = now_ms;
+    if (now_ms -| self.image_gallery.last_stat_ms < freshnessIntervalMs(self)) return;
+    self.image_gallery.last_stat_ms = now_ms;
+
+    const path = activeSourcePath(self) orelse return;
+    if (!headChanged(self, path)) return;
+    refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 위 게이트를 지나간다)
+}
+
+/// 다음 신선도 검사까지 쉬는 시간(ms). **직전 스캔이 비쌌으면 그만큼 더 쉰다.**
+///
+/// 이것이 없으면 큰 세션에서 워커가 **쉬지 않는다**: 9 초짜리 스캔이 끝나는 순간 그 사이 파일이 또
+/// 자라 있어 곧바로 다시 훑는다. 대화가 이어지는 동안 코어 하나를 계속 먹는다 — 계약 §9 의 A2
+/// 「활성 세션 재읽기 폭발」이 바로 이것이고, 델타 읽기(IG2-c)를 안 했으므로 여기서 막는다.
+///
+/// 배수 10 은 **일하는 시간의 10 배는 쉰다** = 워커 점유율 상한 약 9% 라는 뜻이다. 실측 분포에
+/// 대면: 중앙 11 ms → 그대로 500 ms · p99 1,175 ms → 11.8 초 · 최대 9,007 ms → 90 초.
+/// 흔한 세션은 영향이 없고, 비싼 세션만 느리게 따라온다.
+fn freshnessIntervalMs(self: *const AppSession) i64 {
+    return restIntervalMs(self.image_gallery.scan_ns / std.time.ns_per_ms);
+}
+
+/// 위 규칙의 **순수** 부분 — 화면 없이 짚을 수 있게 갈라 둔다.
+pub fn restIntervalMs(last_scan_ms: u64) i64 {
+    const last: i64 = @intCast(@min(@as(u64, std.math.maxInt(i32)), last_scan_ms));
+    const want = @max(freshness_interval_ms, last *| freshness_rest_multiplier);
+    // **상한이 없으면 조용히 죽는다.** `scan_ns` 는 벽시계 경과라 스캔 중에 기계가 잠들면 그 시간이
+    // 통째로 들어간다 — 1 시간 자면 쉬는 시간이 10 시간이 되어 그 세션 내내 갱신이 안 온다.
+    // 상한에 걸리는 경우 점유율 보장은 깨지지만, 기능이 멈추는 것보다 낫다.
+    return @min(want, freshness_max_ms);
+}
+
+/// `restIntervalMs` 의 test 창구.
+pub fn testFreshnessIntervalMs(last_scan_ms: u64) i64 {
+    return restIntervalMs(last_scan_ms);
+}
+
+/// 신선도를 보는 **최소** 간격(ms). `stat` 은 싸지만(실측 54,296 배 저렴) 60 Hz 로 열 이유는 없다.
+/// 사람이 「방금 붙인 것이 안 보인다」고 느끼기 전에 잡히는 선이다.
+const freshness_interval_ms: i64 = 500;
+/// 직전 스캔 시간의 몇 배를 쉬는가. 위 doc 참조.
+const freshness_rest_multiplier: i64 = 10;
+/// 쉬는 시간의 **상한**(ms). 실측 최악(9,007 ms → 90 초)은 이 아래라 점유율 보장이 그대로 산다.
+/// 이 값을 넘기는 것은 병리적인 경우(스캔 중 절전)뿐이고, 그때는 「느리게라도 온다」를 택한다.
+const freshness_max_ms: i64 = 120_000;
+
+/// 크게 보기의 문맥을 **한 번** 읽는다. 실패는 빈 문맥이다 — 없는 대화를 지어내지 않는다.
+///
+/// 여기서만 파일을 연다: 격자는 문맥을 안 쓰고(라벨이 답한다), 크게 보기는 한 번에 한 장이라
+/// 열 때 한 번 읽으면 끝난다. 라벨처럼 워커가 미리 만들지 않는 이유도 그것이다 — 4,096 장어치
+/// 512 B 를 늘 들고 있을 이유가 없다(2 MB).
+fn loadOpenContext(self: *AppSession, n: usize) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    op.context_len = 0;
+    if (n >= self.image_gallery.hits.items.len) return;
+    const hit = self.image_gallery.hits.items[n];
+    const path = pathFor(self, hit) orelse return;
+
+    const back: u64 = @min(hit.line_offset, @as(u64, context_mod.max_prev_line_bytes));
+    if (back == 0) return;
+    const win = self.allocator.alloc(u8, @intCast(back)) catch return;
+    defer self.allocator.free(win);
+
+    const file = std.Io.Dir.cwd().openFile(self.io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return;
+    defer file.close(self.io);
+
+    var read: usize = 0;
+    while (read < win.len) {
+        const got = file.readPositional(self.io, &.{win[read..]}, hit.line_offset - back + read) catch break;
+        if (got == 0) break;
+        read += got;
+    }
+    if (read == 0) return;
+
+    const text = context_mod.contextText(win[0..read], &op.context);
+    op.context_len = text.len;
+}
+
+/// 다시 훑은 뒤 타일을 **새 인덱스에 다시 잇는다**. 못 찾은 타일만 버린다.
+///
+/// 타일 수는 상한이 있고(`max_tiles`) 실측 세션도 수백 장이라 선형 탐색으로 충분하다.
+fn remapTiles(self: *AppSession) void {
+    const hits = self.image_gallery.hits.items;
+    var write: usize = 0;
+    for (self.image_gallery.tiles.items) |tile| {
+        var found: ?usize = null;
+        for (hits, 0..) |hit, i| {
+            if (hit.file_index == tile.file_index and hit.data_offset == tile.data_offset) {
+                found = i;
+                break;
+            }
+        }
+        if (found) |n| {
+            var kept = tile;
+            kept.hit_index = n;
+            // **id 는 인덱스로 짓는다**(`appendGpuImages`). 자리가 바뀌었으면 새 id 로 다시 올려야
+            // 빈 칸이 안 된다 — 픽셀은 그대로라 다시 디코드하지는 않는다.
+            kept.uploaded = false;
+            kept.label = labelFor(self, n);
+            self.image_gallery.tiles.items[write] = kept;
+            write += 1;
+        } else {
+            self.allocator.free(tile.pixels); // 사라진 이미지 — 픽셀을 여기서 푼다
+        }
+    }
+    self.image_gallery.tiles.shrinkRetainingCapacity(write);
+}
+
+/// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
+fn stampOf(self: *AppSession, path: []const u8) Stamp {
+    if (!builtin.target.os.tag.isDarwin()) return .{};
+    // **열지 않는다.** 이 함수는 main actor 에서 500 ms 마다 돈다 — 스캔을 워커로 옮긴 이유(계약
+    // §4.1.1)가 「프레임에서 파일을 만지지 않는다」였고, 여는 것은 그중 가장 비싼 조각이다.
+    // `statFile` 은 POSIX 에서 syscall 하나다.
+    const st = std.Io.Dir.cwd().statFile(self.io, path, .{ .follow_symlinks = false }) catch return .{};
+    return .{
+        .inode = @intCast(st.inode),
+        .size = st.size,
+        .mtime_ns = st.mtime.nanoseconds,
+        .known = true,
+    };
+}
+
+/// 마지막으로 훑은 뒤 현재 세션 파일이 달라졌는가.
+///
+/// **못 읽는 파일은 「안 달라졌다」로 본다.** 자국이 «모름» 이면 `eql` 이 false 라 「달라졌다」가
+/// 되는데, 못 읽는 파일은 다시 훑어도 못 읽는다 — 그대로 두면 지워진 파일을 500 ms 마다 다시 훑는
+/// 무한 루프가 된다. 파일이 돌아오면 그때 자국이 서고 달라진 것으로 잡힌다.
+fn headChanged(self: *AppSession, path: []const u8) bool {
+    const now = stampOf(self, path);
+    if (!now.known) return false;
+    return !Stamp.eql(self.image_gallery.head_stamp, now);
+}
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
@@ -59,6 +219,13 @@ pub const State = struct {
     /// 마지막 스캔이 읽은 바이트와 걸린 시간. 계약 §4.1.1 의 근거가 이 자리에서 나왔다.
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
+    /// 마지막으로 훑은 **현재 세션 파일**의 자국. 이것과 지금 `stat` 이 다르면 다시 훑는다.
+    ///
+    /// **머리 파일만 든다.** 체인의 뒤쪽은 이미 끝난 세션이라 자라지 않는다(§3.3) — 지금 대화가
+    /// 붙는 곳은 언제나 첫 파일이다.
+    head_stamp: Stamp = .{},
+    /// 마지막으로 `stat` 한 tick. 매 프레임 부르지 않으려는 스로틀이다.
+    last_stat_ms: i64 = 0,
     /// 결과를 받아 반영했는가. `hits.len == 0` 과 다르다 — 이미지가 없는 파일도 훑은 것이다.
     built: bool = false,
     /// 기다리는 요청의 generation. 0 이면 기다리는 것이 없다. **늦게 온 결과를 버리는 근거**다 —
@@ -134,6 +301,7 @@ pub const State = struct {
         self.search.clear();
         self.search_active = false;
         self.chain.clear();
+        self.head_stamp = .{};
         self.partial = false;
         self.scanned_bytes = 0;
         self.scan_ns = 0;
@@ -234,10 +402,31 @@ pub const State = struct {
     }
 };
 
+/// 파일이 그때 그 파일이고 그만큼인가. 계약 §4.2 의 세 갈래를 이 셋으로 가른다.
+///
+/// **`mtime` 만으로는 모자란다**: 같은 초 안에 두 번 붙으면 못 잡는다. **`size` 만으로도 모자란다**:
+/// 파일이 교체되면서 우연히 같은 크기일 수 있다. 셋을 함께 본다.
+pub const Stamp = struct {
+    inode: u64 = 0,
+    size: u64 = 0,
+    mtime_ns: i128 = 0,
+    /// 한 번도 못 찍었으면 «모름» 이다 — 모르면 다시 훑는다(낡은 채로 두지 않는다).
+    known: bool = false,
+
+    pub fn eql(a: Stamp, b: Stamp) bool {
+        return a.known and b.known and a.inode == b.inode and a.size == b.size and a.mtime_ns == b.mtime_ns;
+    }
+};
+
 /// 화면에 올린 썸네일 하나.
 pub const Tile = struct {
-    /// 인덱스의 몇 번째 이미지인가. 격자 자리와 `hits` 를 잇는 유일한 키다.
+    /// 인덱스의 몇 번째 이미지인가. 격자 자리와 `hits` 를 잇는 키다. **다시 훑으면 밀린다** —
+    /// 새 이미지가 맨 앞에 오므로(최신 우선). 그때 아래 정체로 다시 잇는다.
     hit_index: usize,
+    /// 이 픽셀이 **어느 이미지**의 것인가. 인덱스와 달리 파일 안에서 변하지 않으므로, 다시 훑은 뒤
+    /// 타일을 버리지 않고 새 인덱스에 이어 붙일 수 있다(`remapTiles`).
+    file_index: u8 = 0,
+    data_offset: u64 = 0,
     width: u32,
     height: u32,
     /// RGBA8, **owned**. `State.dropTiles` 가 푼다.
@@ -265,6 +454,14 @@ pub const Open = struct {
     uploaded: bool = false,
     /// 이 요청의 generation. 0 이면 도는 것이 없다 — `pixels` 가 비어 있는데 이 값도 0 이면 **실패**다.
     decoding: u64 = 0,
+    /// 「그때 무슨 얘기였나」. 열 때 **한 번만** 읽는다 — 매 프레임 파일을 열면 초당 60 번 IO 다.
+    /// 빈 값은 「읽어 봤고 없었다」로 확정된 상태다(실측 6% 가 그렇다).
+    context: [context_mod.max_context_bytes]u8 = undefined,
+    context_len: usize = 0,
+
+    pub fn contextText(self: *const Open) []const u8 {
+        return self.context[0..self.context_len];
+    }
 };
 
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
@@ -399,16 +596,32 @@ pub fn refresh(self: *AppSession, force: bool) void {
         return;
     };
     const same = std.mem.eql(u8, self.image_gallery.chain.head(), path);
+    // 같은 파일을 이미 훑었거나 훑는 중이면 여기서 물러난다.
+    //
+    // **신선도는 여기서 안 본다.** 파일이 자랐는지 보는 일은 `pollFreshness` 하나가 맡는다 —
+    // 두 곳에서 같은 판정을 하면 갈리고(이 저장소에서 반복해 본 모양), 실제로 뮤테이션이 그것을
+    // 짚었다: 이 자리에 신선도 검사를 두어도 `pollFreshness` 가 `force` 로 부르므로 **test 가
+    // 지키지 못하는 코드**가 된다. 뷰에 다시 들어오면 다음 tick 의 `pollFreshness` 가 곧바로 잡는다
+    // (첫 검사는 스로틀에 안 걸린다).
     if (!force and same and (self.image_gallery.built or self.image_gallery.scanning())) return;
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
-    self.image_gallery.clear(self.allocator);
+
+    // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
+    // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
+    // 큰 세션은 9 초다. 자동으로 일어나는 일이라 사용자는 이유를 알 수 없다.
+    //
+    // 결과가 오면 `poll` 이 목록을 통째로 바꾸고 그 위에 쌓인 것(타일·크게보기·호버)도 그때 버린다.
+    // 그때까지는 조금 낡은 목록이 보인다 — 빈 화면보다 정직하다. 검색어도 자연히 남는다.
+    if (!same) self.image_gallery.clear(self.allocator);
     self.image_gallery.chain = buildChain(self, path);
     self.metal_dirty = true;
 
+    // **훑기 직전의 자국을 찍는다.** 훑은 뒤에 찍으면 그 사이 붙은 줄을 「이미 봤다」로 오해한다.
+    self.image_gallery.head_stamp = stampOf(self, path);
     if (backend.submit(self.image_gallery.chain)) |generation| {
         self.image_gallery.awaiting = generation;
     } else {
@@ -433,6 +646,7 @@ pub fn poll(self: *AppSession) void {
 
     harvestDecoded(self);
     ensureOpen(self);
+    pollFreshness(self);
 
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
@@ -459,11 +673,12 @@ pub fn poll(self: *AppSession) void {
     }
     // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부).
     self.image_gallery.applyFilter(self.allocator);
-    // **인덱스가 갈리면 그 위에 쌓인 것도 버린다.** 지금은 `refresh` 가 `clear` 를 먼저 하므로
-    // 여기 도달할 때 둘 다 비어 있지만, 그 순서에 기대면 나중에 점진 publish 를 붙이는 순간
-    // 타일과 크게 보기가 **옛 인덱스**를 가리킨 채 남는다 — 「엉뚱한 이미지가 뜬다」로 보이지
-    // 「비었다」로 보이지 않아 알아채기 어렵다. 불변식은 가정하지 말고 강제한다.
-    self.image_gallery.dropTiles(self.allocator);
+    // **타일은 버리지 않고 새 인덱스에 다시 잇는다.** 자동 갱신이 붙은 뒤로 이 길은 「같은 파일이
+    // 자랐다」에도 쓰이는데, 통째로 버리면 대화가 이어지는 내내 격자가 매 턴 비었다 다시 찬다
+    // (장당 ~20 ms). 인덱스는 밀려도 `(file_index, data_offset)` 은 그대로다.
+    remapTiles(self);
+    // 크게 보기는 그대로 버린다 — 자동 갱신은 애초에 열려 있으면 미루므로(`pollFreshness`) 여기
+    // 도달하는 것은 소스가 갈렸을 때뿐이고, 그때는 다른 세션이라 닫는 것이 맞다.
     self.image_gallery.dropOpen(self.allocator);
     // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
     // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
@@ -562,9 +777,18 @@ fn harvestDecoded(self: *AppSession) void {
     if (r.hit_index != self.image_gallery.decoding_index) return;
     if (self.image_gallery.tileFor(r.hit_index) != null) return; // 이미 있다(중복 제출 방어)
 
+    // 이 픽셀이 **어느 이미지**의 것인지 함께 적어 둔다 — 다시 훑은 뒤 인덱스가 밀려도
+    // 그 정체로 타일을 다시 이을 수 있다(`remapTiles`).
+    const src = if (r.hit_index < self.image_gallery.hits.items.len)
+        self.image_gallery.hits.items[r.hit_index]
+    else
+        return;
+
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
         .hit_index = r.hit_index,
+        .file_index = src.file_index,
+        .data_offset = src.data_offset,
         .width = r.width,
         .height = r.height,
         .pixels = r.pixels,
@@ -657,13 +881,27 @@ pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
 pub fn viewportRect(self: *const AppSession) image_view.Rect {
     const a = gridArea(self);
     const pad = gridMetrics(self).pad;
+    // **문맥 줄만큼 아래를 비운다.** 안 비우면 글자가 그림 위에 얹혀 둘 다 못 읽는다.
+    // 팬·줌은 이 사각형을 기준으로 계산하므로(`image_view`) 여기만 줄이면 나머지는 따라온다.
+    const reserved = contextRows(self) *| labelHeightPx(self);
     return .{
         .x = @floatFromInt(a.x +| pad),
         .y = @floatFromInt(a.y +| pad),
         .w = @floatFromInt(a.w -| (pad *| 2)),
-        .h = @floatFromInt(a.h -| (pad *| 2)),
+        .h = @floatFromInt(a.h -| (pad *| 2) -| reserved),
     };
 }
+
+/// 문맥에 내줄 줄 수. 없으면 0 — 빈 띠를 남기지 않는다.
+fn contextRows(self: *const AppSession) u32 {
+    const op = if (self.image_gallery.open) |*o| o else return 0;
+    if (op.contextText().len == 0) return 0;
+    return max_context_rows;
+}
+
+/// 문맥에 내줄 최대 줄 수. 실측 길이 p90 이 311 B 라 도크 폭에서 서너 줄이면 담긴다 —
+/// 그보다 키우면 그림 자리를 먹는다(크게 보기의 본체는 그림이다).
+pub const max_context_rows: u32 = 3;
 
 /// `n` 번째 이미지를 크게 연다. **픽셀은 여기서 안 푼다** — 워커에 요청만 걸고, 그동안 격자가 계속 보인다.
 /// 다 풀리기 전에 격자를 지우면 클릭이 「화면이 비었다」로 보인다.
@@ -671,6 +909,7 @@ pub fn openAt(self: *AppSession, n: usize) void {
     if (n >= self.image_gallery.count()) return;
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.open = .{ .hit_index = n };
+    loadOpenContext(self, n);
     // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
     // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
     // 이미지가 화면 밖에 있다. 여는 자리 한 곳에서 하므로 두 입구가 갈리지 않는다.
@@ -1121,6 +1360,131 @@ fn appendOpenImage(
 ///
 /// **자리는 `image_grid` 가 준다**(`labelRectAt`). 여기서 좌표를 다시 풀면 글자가 그림에서 밀린다.
 /// 크게 보기 중에는 아무것도 그리지 않는다 — 그때 격자는 화면에 없다.
+/// 크게 보기 아래에 「그때 무슨 얘기였나」를 띄운다. 격자 라벨과 **같은 그리기 경로**다.
+///
+/// 줄바꿈은 **칸 수로만** 자른다 — 낱말 경계를 찾으려면 폭을 알아야 하는데, 그 폭은 CoreText 가
+/// shaping 한 뒤에야 정해진다(비례 폰트·한글 2 칸). 여기서 흉내 내면 그린 자리와 어긋난다.
+pub fn collectOpenContext(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    const text = op.contextText();
+    if (text.len == 0) return;
+
+    const area = gridArea(self);
+    const pad = gridMetrics(self).pad;
+    const row_h = labelHeightPx(self);
+    const cols: u16 = @intCast(@min(
+        @as(u32, std.math.maxInt(u16)),
+        (area.w -| (pad *| 2)) / self.cell_width_px,
+    ));
+    if (cols == 0) return;
+
+    // 문맥은 라벨보다 **흐리게**. 그림이 주인공이고 이것은 곁말이다.
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        context_dim_percent,
+    ) };
+
+    // 뷰포트가 비워 둔 아래쪽 띠에 그린다 — `viewportRect` 와 **같은 값**(`contextRows`)을 쓴다.
+    const rows = contextRows(self);
+    var y = area.y +| area.h -| pad -| (rows *| row_h);
+    // **결정은 순수 함수가 한다.** 「어느 글자를 어느 줄에」와 「그것을 어떻게 그릴까」를 한 함수에
+    // 두었더니, 결정 쪽 결함(줄바꿈에 글자가 사라짐 · 남의 메모리 해제)을 **어떤 test 도 못 봤다** —
+    // `collectShaped` 가 CoreText 함수 포인터를 요구해 이 함수를 단위 test 로 부를 수 없기 때문이다.
+    const plan = layoutContext(text, cols, rows);
+    for (plan.lines[0..plan.count], 0..) |span, i| {
+        const raw = text[span.start..][0..span.len];
+        // «…» 는 **마지막 줄에 남는 것이 있을 때만**이다 — 줄바꿈은 자르기가 아니다.
+        const need_ellipsis = plan.ellipsis and i + 1 == plan.count;
+        const line = if (need_ellipsis)
+            std.fmt.allocPrint(self.allocator, "{s}…", .{raw[0..raw.len -| lastCharBytes(raw)]}) catch break
+        else
+            raw;
+        // **빌린 것을 풀지 않는다.** 예전에는 `truncateToCols` 가 안 넘칠 때 원본 슬라이스를 그대로
+        // 돌려주는데도 무조건 `free` 했다 — `op.context` 안을 할당자에 넘긴 것이다.
+        defer if (need_ellipsis) self.allocator.free(line);
+
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, line, dim) catch break;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = area.x +| pad,
+            .origin_y = y,
+            .colors = colors,
+        } });
+        y +|= row_h;
+    }
+}
+
+/// 문맥을 몇 줄에 어떻게 나눌까 — **순수 결정**. 화면 없이 시험할 수 있다.
+pub const ContextLayout = struct {
+    pub const Span = struct { start: usize, len: usize };
+    lines: [max_context_rows]Span = [_]Span{.{ .start = 0, .len = 0 }} ** max_context_rows,
+    count: u32 = 0,
+    /// 자리가 모자라 남는 글자가 있다 — 마지막 줄 끝에 «…» 를 붙일 근거다.
+    ellipsis: bool = false,
+};
+
+/// 텍스트를 `cols` 칸 · 최대 `rows` 줄로 나눈다.
+///
+/// **줄을 이어 붙이면 원문의 앞부분이 그대로 나온다** — 한 글자도 빠지거나 겹치지 않는다.
+/// 그 불변식이 이 함수의 계약이고, 어긴 것이 방금 고친 결함이었다.
+pub fn layoutContext(text: []const u8, cols: u16, rows: u32) ContextLayout {
+    var out: ContextLayout = .{};
+    if (cols == 0 or rows == 0 or text.len == 0) return out;
+    var at: usize = 0;
+    while (out.count < rows and out.count < max_context_rows and at < text.len) {
+        const take = wrapNextBytes(text[at..], cols);
+        if (take == 0) break;
+        out.lines[out.count] = .{ .start = at, .len = take };
+        out.count += 1;
+        at += take;
+    }
+    out.ellipsis = at < text.len;
+    return out;
+}
+
+/// `cols` 칸에 들어가는 **원문 바이트 수**. 그리기와 진행이 **같은 값**을 쓰게 하는 단일 출처다.
+///
+/// 낱말 경계는 안 찾는다 — 그러려면 shaping 뒤에야 정해지는 폭을 알아야 하고, 여기서 흉내 내면
+/// 그린 자리와 어긋난다(격자 라벨이 같은 이유로 칸 수로만 자른다).
+pub fn wrapNextBytes(text: []const u8, cols: u16) usize {
+    if (cols == 0 or text.len == 0) return 0;
+    var used: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(text.len, i + len);
+        const w = chrome.components.overlay_input.displayCols(text[i..end]);
+        if (used + w > cols) break;
+        used += w;
+        i = end;
+    }
+    // 한 글자도 못 넣었으면(칸보다 넓은 글자) 한 글자는 넣는다 — 안 그러면 영영 안 나아간다.
+    if (i == 0) {
+        const len = std.unicode.utf8ByteSequenceLength(text[0]) catch 1;
+        return @min(text.len, len);
+    }
+    return i;
+}
+
+/// 그 슬라이스의 **마지막 글자** 바이트 수. «…» 자리를 만들려고 한 글자를 물릴 때 쓴다.
+fn lastCharBytes(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var i = text.len - 1;
+    while (i > 0 and (text[i] & 0xC0) == 0x80) i -= 1;
+    return text.len - i;
+}
+
+/// 문맥을 배경 쪽으로 얼마나 죽일지(%). 라벨(45)보다 더 물러난다 — 곁말이다.
+const context_dim_percent: u8 = 55;
+
 pub fn collectLabels(
     self: *AppSession,
     collected: *std.ArrayList(AppSession.CollectedPane),

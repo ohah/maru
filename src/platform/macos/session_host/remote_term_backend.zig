@@ -4104,7 +4104,20 @@ pub const RemoteTermBackend = struct {
         // attach 대상은 이전 GUI가 남긴 snapshot을 갖고 있을 수 있다. 현재 앱의 complete snapshot을 map publication 전에
         // 확인해야 복원 직후 GUI 0으로 돌아가도 stale 알림 정책으로 동작하지 않는다. 실제 binding label은 AppSession이
         // Term을 layout에 결속한 직후 configureNotificationBinding으로 덮고, 이 단계는 안전한 runtime-ID fallback이다.
-        try rr.updateNotificationConfig(self.notification_config_generation, self.notifications_osc, "");
+        // 이 호출의 실패는 **attach 를 막을 이유가 아니다.** 위 주석대로 여기서 넣는 label 은 안전한
+        // runtime-ID fallback 이고 실제 값은 곧 binding 단계가 덮는다. 반면 여기서 error 를 올리면 창
+        // 복원이 통째로 버려진다 — 복원은 탭을 전부 빌드한 뒤 swap 하므로 surface 하나가 실패하면 그
+        // 창의 나머지도 함께 정리된다.
+        //
+        // 2026-08-30 실측: 재접속 복원에서 host 가 `invalid_generation` 으로 2 건을 거절했고, 그것만으로
+        // 창 두 개(탭 10 개·surface 22 개)가 전부 열리지 않았다. 이어서 종료 시 그 부분 상태가 workspace
+        // checkpoint 를 덮어써 배치까지 잃었다. controller_generation 은 attach 로 오르고 rollback/revoke 로
+        // 내려가므로 왕복 중 어긋나는 것은 CAS 실패와 같은 정상 경합이고, 재시도해도 로컬 값이 갱신되지
+        // 않아 수렴하지 않는다. 그래서 「거절되면 label 만 포기한다」가 맞는 처리다.
+        rr.updateNotificationConfig(self.notification_config_generation, self.notifications_osc, "") catch |err| {
+            if (err == error.OutOfMemory) return err;
+            std.log.warn("attach kept despite notification config fallback failure: error={s}", .{@errorName(err)});
+        };
         try self.runtimes.put(self.allocator, handle, .{
             .runtime = rr,
             .host_id = host_id,

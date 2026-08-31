@@ -220,6 +220,8 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         // (적대적 검증 2026-08-27이 계약 문장을 근거로 잡았다).
         .find => self.chrome_host.find.focused().setPreedit(self.allocator, bytes) catch {},
         .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
+        // 심볼 피커도 팔레트와 같은 입력 모델(overlay_input)이라 조합 표시가 같은 자리에서 온다(§7.5).
+        .symbol_picker => self.chrome_host.symbol_picker.input.setPreedit(self.allocator, bytes) catch {},
         // 커밋 상자 조합. **NFC 조합을 하지 않는다** — 주소창이 그것을 하는 이유는 codepoint당 셀
         // 하나로 그리기 때문이고(자모가 안 합쳐진다), 이 상자는 CoreText 셰이핑 경로라 NFD 자모도
         // 한 글자로 합쳐 그려진다(터미널·find와 같다).
@@ -257,6 +259,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
         .image_gallery_search => self.image_gallery.search.preedit.items.len > 0,
         .find => self.chrome_host.find.focused().preedit.items.len > 0,
         .palette => self.chrome_host.palette.input.preedit.items.len > 0,
+        .symbol_picker => self.chrome_host.symbol_picker.input.preedit.items.len > 0,
         .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
         .scm_commit => self.scm_commit_field.preedit.items.len > 0,
         .terminal => blk: {
@@ -956,6 +959,8 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         .image_gallery_search => image_gallery_ops.searchCaretRect(self),
         .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
         .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
+        // 심볼 피커도 같은 컴포넌트라 같은 caret 계산을 쓴다(§7.5).
+        .symbol_picker => chrome.components.palette.caretRect(&self.chrome_host.symbol_picker, props),
         // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
         // 렌더 "1c"와 같은 밴드·nav_end·편집폭 셈법으로 위치 단일 소스). null이면(밴드 못 찾음) 아래 폴백. web term 활성 중
         // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).

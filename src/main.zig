@@ -3109,6 +3109,28 @@ fn agentFirstGroupIndexAtOrAfter(items: []const maru.chrome.components.session_d
 /// 그대로 초록이다 — 이 포트에서 그 부류를 여러 번 겪었다. 노드 id 는 `NodeIds.item(index)` 이고
 /// 그 번호는 **투영된 목록의 인덱스**다(그 파일의 주석: *"Every projected list item gets an
 /// eight-id lane"*).
+/// 발행된 노드 하나의 rect. **스크롤바가 그려지는지**를 재려면 그 자리를 알아야 한다.
+fn agentNodeRect(built: *const agent_surface.Built, id: u64) ?maru.chrome.ui.layout.UiRect {
+    for (built.frame.tree.entries) |e| {
+        if (e.id == id) return e.rect;
+    }
+    return null;
+}
+
+/// `cells` 안에 그 사각형을 그린 셀이 있나. **그렸다는 유일한 증거**다 — 발행된 rect 만 보면
+/// "자리는 정했는데 안 그렸다" 를 못 가른다(스크롤바가 정확히 그 상태였다, §2m.94).
+///
+/// **1.5px 을 허용한다.** 발행 rect 는 레이아웃의 실수값이고 draw op 은 정수 사각형이라(그 타입이
+/// `x: i32, w: u32` 다) 마지막에 반올림이 한 번 있다 — 실측으로 thumb 이 `164.197 → 165` 였다.
+/// 그보다 좁게 잡으면 **그렸는데 못 찾는다**.
+fn cellDrawnAt(cells: []const d3d11_cells.Cell, x: f32, y: f32, w: f32, h: f32) bool {
+    for (cells) |c| {
+        if (@abs(c.rect[0] - x) < 1.5 and @abs(c.rect[1] - y) < 1.5 and
+            @abs(c.rect[2] - w) < 1.5 and @abs(c.rect[3] - h) < 1.5) return true;
+    }
+    return false;
+}
+
 fn agentItemRect(built: *const agent_surface.Built, index: usize) ?maru.chrome.ui.layout.UiRect {
     const id = maru.chrome.components.session_dock.build.NodeIds.item(index);
     for (built.frame.tree.entries) |e| {
@@ -4051,6 +4073,9 @@ fn buildComposedEditor(
     defer allocator.free(row_counts);
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    const caret_cols = try allocator.alloc(u32, 256);
+    defer allocator.free(caret_cols);
 
     // **u16 로 자른다.** 창이 아무리 커도 격자는 u16 이고, `@intCast` 로 넘기면 안전 빌드에서
     // **패닉**이다 — 휠 경로에는 이 가드를 뒀는데 여기만 빠져 있었다(적대적 검증 7회차).
@@ -4094,6 +4119,7 @@ fn buildComposedEditor(
             .gutter_rows = gutter_rows,
             .row_counts = row_counts,
             .count_scratch = count_scratch,
+            .caret_cols = caret_cols,
         },
         ops,
         tokens,
@@ -5439,6 +5465,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var ascroll_tree_off_before: u32 = 0;
     var ascroll_tree_off_after: u32 = 0;
     var ascroll_up_off: u32 = 0;
+    var bar_track_drawn = false;
+    var bar_thumb_drawn = false;
+    var bar_track_y: f32 = 0;
+    var bar_track_h: f32 = 0;
+    var bar_thumb_y_top: f32 = -1;
+    var bar_thumb_y_end: f32 = -1;
+    var bar_thumb_h: f32 = 0;
     var ascroll_view_bottom: f32 = 0;
     var agent_clip_judgeable = false;
     var agent_clip_cut: usize = 0;
@@ -6205,6 +6238,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 가르면 에이전트를 굴리는 동안 **탐색기 트리도 함께 굴러간다** — 돌아왔을 때 엉뚱한
             // 자리에 있다(§2m.84 가 누적기에서 겪은 그 실패의 뷰 판, 적대적 검증 5회차).
             ascroll_tree_off_before = dock_scroll_px;
+            // **스크롤바 — 자리와 그림을 함께 잰다.** 발행된 rect 만 보면 "자리는 정했는데 안 그렸다"
+            // 를 못 가른다(그것이 §2m.94 의 결함이었다: 폭 0 테두리 때문에 quad 를 통째로 버렸다).
+            if (agent_built) |*b| {
+                const nid = maru.chrome.components.session_dock.build.NodeIds;
+                const ox: f32 = @floatFromInt(geom.tree_content.x);
+                const oy: f32 = @floatFromInt(geom.tree_content.y);
+                if (agentNodeRect(b, nid.scroll_track)) |t| {
+                    bar_track_y = t.y;
+                    bar_track_h = t.height;
+                    bar_track_drawn = cellDrawnAt(dock_cells.items, t.x + ox, t.y + oy, t.width, t.height);
+                }
+                if (agentNodeRect(b, nid.scroll_thumb)) |t| {
+                    bar_thumb_y_top = t.y;
+                    bar_thumb_h = t.height;
+                    bar_thumb_drawn = cellDrawnAt(dock_cells.items, t.x + ox, t.y + oy, t.width, t.height);
+                }
+            }
             if (agent_built) |*b| ascroll_first_y_before = if (agentItemRect(b, 0)) |r| r.y else null;
             const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
             const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
@@ -6222,6 +6272,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 1067 and ascroll_judgeable) {
             ascroll_end_off = agent_scroll.offset_y_px;
+            if (agent_built) |*b| {
+                const nid = maru.chrome.components.session_dock.build.NodeIds;
+                if (agentNodeRect(b, nid.scroll_thumb)) |t| bar_thumb_y_end = t.y;
+            }
             if (agent_built) |*b| {
                 // **진짜 마지막 항목이어야 한다.** "rect 가 있는 마지막" 을 찾으면 꼬리 노드가
                 // 빠졌을 때 **중간 카드**를 재고도 초록이 된다 — 그 카드는 당연히 뷰포트 안이다.
@@ -10728,6 +10782,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 dock_tree_top_px != null and dock_tree_top_px.? < @as(f32, @floatFromInt(geom.tree_content.y)),
         });
         {
+            // **스크롤바가 자리를 말하는가.** 재는 것은 두 가지다:
+            // ⒜ 두 조각이 **실제로 그려졌나**(발행 rect 와 같은 셀이 있나) — 자리만 정하고 안 그리는
+            //    상태가 이 결함이었다.
+            // ⒝ **끝이 끝을 가리키나** — offset 0 이면 thumb 이 track 맨 위, 상한이면 맨 아래여야 한다.
+            //    가운데 값을 다시 계산해 견주면 **컴포넌트를 재구현**하는 꼴이라, 끝 둘만 본다.
+            const bar_top_ok = bar_thumb_y_top >= 0 and @abs(bar_thumb_y_top - bar_track_y) < 0.6;
+            const bar_end_ok = bar_thumb_y_end >= 0 and
+                @abs((bar_thumb_y_end + bar_thumb_h) - (bar_track_y + bar_track_h)) < 0.6;
+            const bar_ok = ascroll_judgeable and bar_track_drawn and bar_thumb_drawn and bar_top_ok and bar_end_ok;
+            try stdout.print("agent_bar: track_drawn={} thumb_drawn={} track=({d},{d}) thumb_y {d}->{d} thumb_h={d} agent_bar_ok={}\n", .{
+                bar_track_drawn,
+                bar_thumb_drawn,
+                bar_track_y,
+                bar_track_h,
+                bar_thumb_y_top,
+                bar_thumb_y_end,
+                bar_thumb_h,
+                bar_ok,
+            });
+        }
+        {
             // **굴러가는가, 그리고 끝에 닿는가.** 상태만 보면 속 빈다 — `offset` 을 올려 두고 그리는
             // 곳에서 안 쓰면 그대로 통과한다. 그래서 **그린 자리가 그만큼 올라갔는지**를 함께 본다.
             const moved: ?f32 = if (ascroll_first_y_before != null and ascroll_first_y_after != null)
@@ -13243,6 +13318,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     defer allocator.free(row_counts);
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
+    // 블록 caret 이 선 칸의 글자를 배경색으로 낼 자리(`frame.Scratch.caret_cols`).
+    const caret_cols = try allocator.alloc(u32, 256);
+    defer allocator.free(caret_cols);
 
     // 선택 마크 저장소. 행 수만큼이면 되지만 창이 커질 여지를 조금 둔다.
     const sel_cap = @as(usize, grid.rows) + 2;
@@ -13270,6 +13348,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .gutter_rows = gutter_rows,
         .row_counts = row_counts,
         .count_scratch = count_scratch,
+        .caret_cols = caret_cols,
     };
 
     // 뷰 사각은 **클라이언트 전체**다. 제품은 pane 기하에서 오지만 스모크에는 pane 이 없다.

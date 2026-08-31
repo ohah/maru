@@ -62,6 +62,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     _ = c.unlink(socket_path.ptr);
     const host_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
         allocator,
+        base,
         product,
         session_dir,
         socket_path,
@@ -268,6 +269,7 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
     _ = c.unlink(socket_path.ptr);
     const host_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
         allocator,
+        base,
         product,
         session_dir,
         socket_path,

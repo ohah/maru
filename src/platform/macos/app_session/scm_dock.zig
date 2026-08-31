@@ -4401,3 +4401,111 @@ test "소스 컨트롤 도크: 클릭이 키보드 소유권을 준다 — 그�
     _ = try session.handleKeyEvent(.{ .key = .end, .modifiers = .{} });
     try std.testing.expectEqual(@as(u32, 1000), session.scm_scroll.offset_y_px);
 }
+
+test "fade alpha 가 바뀌어도 발행 tree 는 불변이고, alpha 는 draw 에 닿는다(계약 §7 — SCM 축)" {
+    // **세션 도크에만 판정자가 있었다.** 두 도크는 `paintWithAlphaOverrides` 라는 같은 축을 쓰지만,
+    // SCM 쪽 배선(`view.zig` 가 `props.scrollbar_alpha` 를 실제로 넘기는지)이 끊겨도 그걸 잡을 눈이
+    // 없었다 — 적대적 검증 3회차에서 코드로만 확인하고 넘긴 자리다.
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .changes, .count = 2, .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "a.zig", .letter = 'M', .action = .stage } },
+        .{ .file = .{ .section = .changes, .path = "b.zig", .letter = 'M', .action = .stage } },
+    };
+    var items: [rows.len]component.types.Item = undefined;
+    for (rows, &items, 0..) |row, *item, index| {
+        item.* = scm_items.itemFor(row, 0, index, null, @splat(false));
+    }
+
+    var props: component.types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 480 },
+        .items = &items,
+        // 스크롤바는 **넘칠 때만** 난다(build 의 `gutter_px` 분기와 같은 사실이다).
+        .content_h_px = 4000,
+        .list_overflows = true,
+        .scrollbar_alpha = 0xFF,
+    };
+
+    const sizes = component.build.bufferSizes(&items);
+    const allocator = testing.allocator;
+    const nodes = try allocator.alloc(chrome.ui.tree.UiNode, sizes.nodes);
+    defer allocator.free(nodes);
+    const entries = try allocator.alloc(chrome.ui.tree.RectEntry, sizes.entries);
+    defer allocator.free(entries);
+    const layout_items = try allocator.alloc(chrome.ui.layout.Item, sizes.layout_items);
+    defer allocator.free(layout_items);
+    const flex_scratch = try allocator.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch);
+    defer allocator.free(flex_scratch);
+    const child_rects = try allocator.alloc(chrome.ui.layout.UiRect, sizes.child_rects);
+    defer allocator.free(child_rects);
+    const actions = try allocator.alloc(component.ids.Entry, sizes.actions);
+    defer allocator.free(actions);
+    const buffers = component.build.Buffers{
+        .nodes = nodes,
+        .entries = entries,
+        .layout_items = layout_items,
+        .flex_scratch = flex_scratch,
+        .child_rects = child_rects,
+        .actions = actions,
+    };
+
+    const full = try component.build.build(props, buffers);
+    // 다음 build 가 같은 버퍼를 덮어쓰므로 값으로 떠 둔다.
+    const full_entries = try allocator.dupe(chrome.ui.tree.RectEntry, full.tree.entries);
+    defer allocator.free(full_entries);
+    const full_actions = try allocator.dupe(component.ids.Entry, full.actions);
+    defer allocator.free(full_actions);
+    try testing.expect(full.tree.find(component.build.NodeIds.scroll_thumb) != null); // 스크롤바가 실제로 났다
+
+    // **alpha 만 다르게** 다시 만든다. fade 가 도는 매 프레임이 이 상황이다.
+    props.scrollbar_alpha = 0x4D;
+    const faint = try component.build.build(props, buffers);
+
+    // alpha 를 tree 에 실으면 여기서 false 가 되고, `publishScmDockFrame` 의 early return 이 fade 내내
+    // 무산된다 — 발행이 매 프레임 도는 값이 된다.
+    try testing.expect(frameEql(full_entries, full_actions, faint.tree.entries, faint.actions));
+
+    // **그리고 alpha 는 실제로 draw 에 닿아야 한다.** tree 불변만 재면 「아무 데도 안 얹히는」 판도
+    // 통과한다(세션 도크에서 1회차에 그렇게 잡혔다).
+    const budget = component.view.drawBufferSizes(props, faint.tree.entries.len);
+    const ops = try allocator.alloc(chrome.draw.Op, budget.ops);
+    defer allocator.free(ops);
+    const runs = try allocator.alloc(chrome.draw.Run, budget.runs);
+    defer allocator.free(runs);
+    const text_bytes = try allocator.alloc(u8, budget.text_bytes);
+    defer allocator.free(text_bytes);
+
+    const tokens = chrome.tokens.Tokens.base(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_background = .{ .r = 30, .g = 30, .b = 30 },
+        .sidebar_foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_active = .{ .r = 60, .g = 60, .b = 60 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
+        .accent = .{ .r = 16, .g = 17, .b = 18 },
+    });
+    const drawn = try component.view.view(props, faint, .{}, &tokens, .{
+        .ops = ops,
+        .runs = runs,
+        .text_bytes = text_bytes,
+    });
+
+    const thumb_rect = faint.tree.entries[faint.tree.find(component.build.NodeIds.scroll_thumb).?].rect;
+    var saw_faint = false;
+    for (drawn.ops) |op| switch (op) {
+        .quad => |q| {
+            const qx: f32 = @floatFromInt(q.rect.x);
+            const qy: f32 = @floatFromInt(q.rect.y);
+            if (@abs(qx - thumb_rect.x) < 1.5 and @abs(qy - thumb_rect.y) < 1.5) {
+                try testing.expectEqual(@as(u8, 0x4D), q.alpha);
+                saw_faint = true;
+            }
+        },
+        else => {},
+    };
+    try testing.expect(saw_faint); // thumb quad 를 실제로 찾았다 — 못 찾으면 위 단언이 헛돈다
+}

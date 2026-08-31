@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const host_log = @import("host_log.zig");
 const c = std.c;
 const posix = std.posix;
 const connection_slot = @import("connection_slot.zig");
@@ -323,7 +324,7 @@ pub const Owner = struct {
                 self.destroyAll();
                 if (!self.upgradeTeardownDrained()) {
                     if (self.repairEmptyUpgradeTeardown(armed)) return .progress;
-                    std.log.scoped(.session_host).err(
+                    host_log.line(
                         "upgrade teardown retained non-repairable authority; refusing handoff",
                         .{},
                     );
@@ -415,7 +416,7 @@ pub const Owner = struct {
     /// `redirectStderrToHostLog`가 `<session_dir>/host-<id>.log`로 돌린다.
     fn logClientClosed(index: usize, reason: ClientCloseReason) void {
         if (builtin.is_test or reason.isExpected()) return;
-        std.log.err(
+        host_log.line(
             "session host closed client connection: slot={d} reason={s}",
             .{ index, @tagName(reason) },
         );
@@ -473,7 +474,7 @@ pub const Owner = struct {
         // treats expected warning output from a passing test as a warned/failed test step, so
         // keep the production diagnostic without making the deterministic repair fixture noisy.
         if (!@import("builtin").is_test)
-            std.log.scoped(.session_host).warn(
+            host_log.line(
                 "repaired empty upgrade reactor accounting and resumed serving",
                 .{},
             );

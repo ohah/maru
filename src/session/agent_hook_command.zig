@@ -435,7 +435,18 @@ pub fn build(
         // **원격은 칸이 하나다.** 합쳐진 값이므로 두 클래스의 합집합으로 검증한다 —
         // `instance_token_class`(숫자·소문자·`_`)가 `pane_token_class`(숫자·hex)를 덮는 상위집합이다.
         // 지키는 성질은 로컬과 같다: `/` 와 `.` 가 없어 경로를 벗어나지 못한다.
-        try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+        // ⚠️ **빈 nonce 라도 tmux 안이면 적는다**(2026-08-31 실사용에서 잡았다).
+        //
+        // RA6 은 오염을 «남의 값이 온다» 로만 봤는데, 실제로 더 흔한 것은 **«아무 값도 안 온다»** 였다:
+        // tmux 서버가 `maru ssh` **전에**(또는 그 밖에서) 만들어졌으면 그 서버의 pane 자식들은 값을
+        // 아예 못 받는다. 클라이언트에는 값이 있는데 pane 에는 없다 — 실측으로 그 둘을 나란히 확인했다.
+        //
+        // 그때 여기서 그냥 나가면 **파일이 아예 안 생겨서 나중에 되찾을 대상이 없다.** 역조회 기계는
+        // 이미 있는데 쓸 기회가 없는 셈이다. 그래서 `$TMUX_PANE` 이 있으면 **그 이름으로 적어 두고**,
+        // 진짜 주인은 스트리머가 클라이언트 env 에서 되찾는다(RA6).
+        //
+        // 둘 다 없으면(= tmux 밖 + 신원 없음) 그때는 귀속할 곳이 정말 없으므로 나간다.
+        try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) [ -n \"$TMUX_PANE\" ] || exit 0 ;; esac; ", .{
             remote_pane_env,
             comptime instance_token_class.shellClass(),
         });
@@ -451,6 +462,11 @@ pub fn build(
         // 경로에 넣지 않는다는 규율이 여기서도 같다.
         try out.appendSlice(allocator, "mh_t=\"\"; if [ -n \"$TMUX_PANE\" ]; then mh_t=\"${TMUX_PANE#%}\"; " ++
             "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac; mh_t=\"_t$mh_t\"; fi; ");
+        // **이름의 앞칸이 비면 `t` 하나로 세운다.** `_t16` 처럼 밑줄로 시작하는 이름은 우리 파일 이름
+        // 규칙(`<nonce>` 또는 `<nonce>_t<pane>`)과 모양이 달라 스트리머가 읽지 않는다. 앞이 비었을
+        // 때만 밑줄을 떼어 `t16` 으로 만든다 — 그 이름도 문자 클래스를 지나고, 옆 파일이 그 pane 을
+        // 가리키므로 역조회가 주인을 되찾는다.
+        try out.print(allocator, "mh_n=\"${s}\"; [ -n \"$mh_n\" ] || mh_t=\"${{mh_t#_}}\"; ", .{remote_pane_env});
     } else try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
         pane_env,
         comptime pane_token_class.shellClass(),
@@ -502,7 +518,7 @@ pub fn build(
     // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
     if (scope == .remote) {
         // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`).
-        try out.print(allocator, "\"/${s}$mh_t.ndjson\"", .{remote_pane_env});
+        try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"");
         // **tmux 좌표를 옆 파일로 남긴다**([계획](../../docs/plans/remote-agent-state.md) RA6).
         //
         // tmux 안에서는 `LC_MARU_PANE` 이 서버 생성 시 값으로 굳어 **남의 값이 온다** — 즉 훅은 B 의
@@ -518,7 +534,7 @@ pub fn build(
         // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
         try out.appendSlice(allocator, "; printf '%s\t%s\n' \"$TMUX\" \"$TMUX_PANE\" > ");
         try appendQuoted(out, allocator, log_dir_abs);
-        try out.print(allocator, "\"/${s}$mh_t{s}\"; }} 2>/dev/null; exit 0 ", .{ remote_pane_env, tmux_sidecar_suffix });
+        try out.print(allocator, "\"/$mh_n$mh_t{s}\"; }} 2>/dev/null; exit 0 ", .{tmux_sidecar_suffix});
     } else try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
     try out.appendSlice(allocator, marker_comment);
 }
@@ -684,7 +700,12 @@ test "원격 커맨드는 칸이 하나고 경로가 평평하다 — 로컬과 
     // **tmux 칸(`$mh_t`)이 이름에 붙는다**(RA6). tmux 밖에서는 빈 문자열이라 이름이 예전과 같고, 안에서는
     // `_t<pane>` 이 붙어 **같은 서버의 pane 들이 한 파일에 안 섞인다** — 그 칸이 없던 동안 셋의 이벤트가
     // 한 파일에 쌓였다(적대적 검증이 잡고 실측이 확인했다).
-    try testing.expect(std.mem.indexOf(u8, remote, "\"/$" ++ remote_pane_env ++ "$mh_t.ndjson\"") != null);
+    // ⚠️ **경로는 `$mh_n$mh_t` 다** — env 를 직접 안 쓴다. 빈 nonce 라도 tmux 안이면 적어야 하는데
+    // (2026-08-31), 그때 이름의 앞칸이 비고 `mh_t` 가 `t<pane>` 이 된다. 그 조립을 셸 변수 둘로
+    // 나눠 두어야 네 경우(신원×tmux 안팎)가 한 형식으로 나온다.
+    try testing.expect(std.mem.indexOf(u8, remote, "\"/$mh_n$mh_t.ndjson\"") != null);
+    // 그 앞칸이 그 env 에서 온다는 것도 함께 문다 — 두 줄이 갈리면 이름이 조용히 달라진다.
+    try testing.expect(std.mem.indexOf(u8, remote, "mh_n=\"$" ++ remote_pane_env ++ "\"") != null);
     try testing.expect(std.mem.indexOf(u8, local, "/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson") != null);
 
     // 나머지 규율은 그대로다 — umask·구분자·상한 표식·조용한 실패.
@@ -1171,8 +1192,9 @@ test "원격 커맨드는 tmux pane 으로 파일 이름을 한 칸 더 가른�
     // 뗀 값도 **검증한다**. 검증 없는 env 를 경로에 넣지 않는다는 규율이 여기서도 같다.
     try testing.expect(std.mem.indexOf(u8, cmd, "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac;") != null);
     // 이벤트 로그와 옆 파일이 **같은 칸**을 쓴다 — 갈리면 옆 파일이 남의 파일을 설명한다.
-    try testing.expect(std.mem.indexOf(u8, cmd, "$LC_MARU_PANE$mh_t.ndjson") != null);
-    try testing.expect(std.mem.indexOf(u8, cmd, "$LC_MARU_PANE$mh_t" ++ tmux_sidecar_suffix) != null);
+    // 앞칸은 셸 변수(`$mh_n`)다 — 빈 nonce 라도 tmux 안이면 적어야 해서(2026-08-31) env 를 직접 안 쓴다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "$mh_n$mh_t.ndjson") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "$mh_n$mh_t" ++ tmux_sidecar_suffix) != null);
     // tmux 밖이면 그 칸이 빈 문자열이라 이름이 예전과 같다.
     try testing.expect(std.mem.indexOf(u8, cmd, "mh_t=\"\";") != null);
 
@@ -1180,4 +1202,24 @@ test "원격 커맨드는 tmux pane 으로 파일 이름을 한 칸 더 가른�
     const local = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(local);
     try testing.expect(std.mem.indexOf(u8, local, "mh_t") == null);
+}
+
+test "원격 훅은 nonce 가 비어도 tmux 안이면 적는다 — 안 적으면 되찾을 대상이 없다" {
+    // ⚠️ **RA6 이 놓친 경우다**(2026-08-31 실사용에서 잡았다). 오염을 «남의 값이 온다» 로만 봤는데,
+    // 실제로 더 흔한 것은 **«아무 값도 안 온다»** 였다: tmux 서버가 `maru ssh` 전에(또는 그 밖에서)
+    // 만들어졌으면 그 서버의 pane 자식들은 값을 아예 못 받는다(클라이언트에는 있고 pane 에는 없다 —
+    // 실측으로 나란히 확인했다).
+    //
+    // 그때 훅이 그냥 나가면 **파일이 안 생겨 나중에 되찾을 대상이 없다.** 역조회 기계는 이미 있는데
+    // 쓸 기회가 없는 셈이다.
+    const cmd = try buildAlloc("claude", "/tmp/ev", .remote);
+    defer testing.allocator.free(cmd);
+
+    // 빈 nonce 라도 **`$TMUX_PANE` 이 있으면 안 나간다**.
+    try testing.expect(std.mem.indexOf(u8, cmd, "[ -n \"$TMUX_PANE\" ] || exit 0") != null);
+    // 이름의 앞칸이 비면 밑줄을 떼어 `t<pane>` 으로 만든다 — `_t16` 은 우리 이름 규칙 밖이라 안 읽힌다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "[ -n \"$mh_n\" ] || mh_t=\"${mh_t#_}\"") != null);
+    // 이벤트 로그와 옆 파일이 **같은 이름**을 쓴다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"/$mh_n$mh_t.ndjson\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"/$mh_n$mh_t" ++ tmux_sidecar_suffix ++ "\"") != null);
 }

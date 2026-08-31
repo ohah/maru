@@ -5,8 +5,10 @@
 //! 재개하거나 authority-poisoned terminal 상태를 기록한다.
 
 const builtin = @import("builtin");
+const host_log = @import("host_log.zig");
 const std = @import("std");
 const c = std.c;
+const posix = std.posix;
 const entrypoint = @import("entrypoint.zig");
 const exec_fd_set = @import("exec_fd_set.zig");
 const handoff_store = @import("handoff_store.zig");
@@ -124,6 +126,47 @@ pub fn processArmedPreclosed(
     return processArmedMode(ctx, attempt_id, true);
 }
 
+/// Process E2E 전용이다. 제품 `Context`를 넓히지 않고 실제 preclosed coordinator에서 reservation
+/// pathname identity 충돌을 만든다. 비-test artifact가 이 선언을 참조하면 컴파일 단계에서 닫힌다.
+pub fn processArmedPreclosedCleanupCollisionFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("cleanup collision fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, true, null, replaceReservedPrimaryForFixture);
+}
+
+/// 실제 kernel permission/non-empty cleanup 실패를 만드는 process E2E 전용 경로다.
+pub fn processArmedPreclosedKernelCleanupFaultFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("kernel cleanup fault fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, true, null, makeReservedAttemptReadOnlyForFixture);
+}
+
+/// Target staging 뒤 실제 owner filesystem을 ENOSPC까지 채우는 process E2E 전용 경로다.
+pub fn processArmedPreclosedDiskFullAdmissionFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("disk full admission fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHooks(
+        ctx,
+        attempt_id,
+        deadline,
+        true,
+        fillOwnerVolumeUntilEnospcForFixture,
+        null,
+    );
+}
+
 fn processArmedMode(ctx: Context, attempt_id: u128, gate_preclosed: bool) Outcome {
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
@@ -136,17 +179,123 @@ fn processArmedWithDeadline(
     deadline: upgrade_deadline.Deadline,
     gate_preclosed: bool,
 ) Outcome {
+    return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, gate_preclosed, null, null);
+}
+
+const BeforeBudgetPrepare = *const fn (owner_dir: [:0]const u8, attempt_id: u128) error{HookFailed}!void;
+
+const AfterBudgetPrepare = *const fn (
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void;
+
+fn diskFullFixturePath(
+    buffer: []u8,
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+) error{HookFailed}![:0]const u8 {
+    return std.fmt.bufPrintZ(
+        buffer,
+        "{s}/.disk-full-fixture-{x:0>32}",
+        .{ owner_dir, attempt_id },
+    ) catch error.HookFailed;
+}
+
+fn fillOwnerVolumeUntilEnospcForFixture(
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+) error{HookFailed}!void {
+    if (!builtin.is_test) @compileError("disk full fill is test-only");
+    var path_buf: [1024]u8 = undefined;
+    const path = try diskFullFixturePath(&path_buf, owner_dir, attempt_id);
+    _ = c.unlink(path.ptr);
+    const fd = c.open(
+        path.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fd < 0) return error.HookFailed;
+    defer _ = c.close(fd);
+
+    var bytes: [64 * 1024]u8 = undefined;
+    var state: u64 = @truncate(attempt_id ^ (attempt_id >> 64));
+    if (state == 0) state = 0x9E3779B97F4A7C15;
+    for (&bytes) |*byte| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        byte.* = @truncate(state);
+    }
+    var written: usize = 0;
+    const max_fixture_bytes: usize = 256 * 1024 * 1024;
+    var chunk_len: usize = bytes.len;
+    while (written < max_fixture_bytes) {
+        const result = c.write(fd, &bytes, chunk_len);
+        if (result > 0) {
+            written += @intCast(result);
+            continue;
+        }
+        if (result < 0 and posix.errno(result) == .INTR) continue;
+        if (result < 0 and posix.errno(result) == posix.E.NOSPC) {
+            if (chunk_len > 4096) {
+                chunk_len = 4096;
+                continue;
+            }
+            return;
+        }
+        return error.HookFailed;
+    }
+    return error.HookFailed;
+}
+
+fn removeDiskFullFixture(owner_dir: [:0]const u8, attempt_id: u128) void {
+    var path_buf: [1024]u8 = undefined;
+    const path = diskFullFixturePath(&path_buf, owner_dir, attempt_id) catch return;
+    _ = c.unlink(path.ptr);
+}
+
+fn replaceReservedPrimaryForFixture(
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void {
+    const attempt_fd = reservation.store.attempt_fd;
+    if (c.renameat(attempt_fd, "primary", attempt_fd, "saved") != 0)
+        return error.HookFailed;
+    const replacement_fd = c.openat(
+        attempt_fd,
+        "primary",
+        .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (replacement_fd < 0) return error.HookFailed;
+    _ = c.close(replacement_fd);
+}
+
+fn makeReservedAttemptReadOnlyForFixture(
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void {
+    if (c.fchmod(reservation.store.attempt_fd, 0o500) != 0) return error.HookFailed;
+}
+
+fn processArmedWithDeadlineHooks(
+    ctx: Context,
+    attempt_id: u128,
+    deadline: upgrade_deadline.Deadline,
+    gate_preclosed: bool,
+    before_budget_prepare: ?BeforeBudgetPrepare,
+    after_budget_prepare: ?AfterBudgetPrepare,
+) Outcome {
     const execution = ctx.owner.beginExecution(attempt_id) orelse {
         const report = ctx.owner.status(attempt_id) orelse return .not_armed;
         if (report.status == .pending) return .not_armed;
         if (gate_preclosed and report.status == .resumed) ctx.gate.cancelClose();
         return .{ .terminal = report };
     };
-    if (!ctx.rollback_image.revalidate())
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_pre_freeze");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    }
     if (deadline.expired())
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
@@ -180,16 +329,25 @@ fn processArmedWithDeadline(
         ctx.rollback_image.record(),
         preview.sortedRuntimeIds(),
         deadline.expiresAtNs(),
-    ) catch return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-        .status = .resumed,
-        .reason = .handoff_failed,
-    });
+    ) catch {
+        noteUpgradeStage("attempt_record_build");
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
+    };
     defer ctx.allocator.free(record);
     const preview_bytes = preview.totalBytesWithAttempt(record.len) catch
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .state_too_large,
         });
+    var disk_full_fixture_active = false;
+    defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id);
+    if (before_budget_prepare) |hook| {
+        hook(ctx.owner_dir, attempt_id) catch return .invariant_violation;
+        disk_full_fixture_active = true;
+    }
     var budget_reservation = budget_admission.prepare(
         ctx.allocator,
         ctx.owner_dir,
@@ -206,6 +364,10 @@ fn processArmedWithDeadline(
         gate_preclosed,
         reportForBudgetError(err),
     );
+    if (after_budget_prepare) |hook| hook(&budget_reservation) catch {
+        budget_reservation.cancel() catch {};
+        return .invariant_violation;
+    };
     const outcome = processBudgetReserved(
         ctx,
         attempt_id,
@@ -235,17 +397,21 @@ fn processBudgetReserved(
             .status = .resumed,
             .reason = .state_too_large,
         });
-    assertNoUnexpectedInherited() catch
+    assertNoUnexpectedInherited() catch {
+        noteUpgradeStage("unexpected_inherited_fd");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    };
     var reservation: exec_fd_set.SlotReservation = .{};
-    reservation.reserve(&requested) catch
+    reservation.reserve(&requested) catch {
+        noteUpgradeStage("fd_slot_reserve");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    };
 
     var frozen = (if (gate_preclosed)
         upgrade_attempt.freezePreclosed(ctx.manager, ctx.gate, deadline)
@@ -335,11 +501,13 @@ fn processBudgetReserved(
             .status = .resumed,
             .reason = .target_invalid,
         }, deadline);
-    if (!ctx.rollback_image.revalidate())
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_post_freeze");
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .handoff_failed,
         }, deadline);
+    }
     ctx.manager.revalidateQuiescedCapture(&capture) catch
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
@@ -570,6 +738,17 @@ fn replaceAll(
     return true;
 }
 
+/// upgrade 가 **어느 단계에서** 되돌려졌는지 남긴다.
+///
+/// `handoff_failed` 하나가 이 파일에서 12 곳에 쓰인다. 그래서 `logUpgradeRollback` 이 사유를 남겨도
+/// 「exec 준비 중 어딘가」까지만 좁혀지고, rollback 이미지 검증인지 fd 슬롯 확보인지 상속 fd 검사인지는
+/// 갈리지 않는다. 2026-08-30 실측: 사용자 PTY 25 개를 쥔 host 가 업그레이드에 반복 실패해 빌드마다 새
+/// host 가 뜨고 세션이 고아가 됐는데, 이 구분이 없어 원인을 특정하지 못했다.
+fn noteUpgradeStage(stage: []const u8) void {
+    if (builtin.is_test) return;
+    host_log.line("session host upgrade stage failed: stage={s}", .{stage});
+}
+
 /// upgrade 가 **왜 되돌려졌는지** host 로그에 남긴다.
 ///
 /// 이 파일에는 `std.log` 가 한 줄도 없었다. 그래서 `redirectStderrToHostLog` 가 만든
@@ -580,7 +759,9 @@ fn replaceAll(
 /// 되돌림 사유 한 줄이 있었다면 exec 실패인지 target 문제인지 즉시 갈렸다.
 fn logUpgradeRollback(attempt_id: u128, reason: upgrade_wire.AttemptReason) void {
     if (builtin.is_test) return;
-    std.log.err(
+    // 2026-08-27 에 `std.log.err` 로 들어왔으나 그 호출이 host 를 SIGSEGV 로 죽여 로그는 계속
+    // 0 바이트였다. 이유와 대안은 `host_log` 참고.
+    host_log.line(
         "session host upgrade rolled back: attempt={x:0>32} reason={s}",
         .{ attempt_id, @tagName(reason) },
     );
@@ -718,7 +899,10 @@ fn reportForCaptureError(
 ) upgrade_wire.AttemptReport {
     return switch (err) {
         error.TooManyRuntimes, error.LimitExceeded => .{ .status = .resumed, .reason = .state_too_large },
-        error.OutOfMemory => .{ .status = .resumed, .reason = .handoff_failed },
+        error.OutOfMemory => blk: {
+            noteUpgradeStage("exec_prepare_out_of_memory");
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
         else => .{ .status = .resumed, .reason = .runtime_changed },
     };
 }
@@ -744,7 +928,10 @@ fn reportForPreflightError(err: PreflightError) upgrade_wire.AttemptReport {
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.InvalidTarget => .{ .status = .resumed, .reason = .target_invalid },
         error.ResourceExhausted => .{ .status = .resumed, .reason = .state_too_large },
-        error.Failed => .{ .status = .resumed, .reason = .handoff_failed },
+        error.Failed => blk: {
+            noteUpgradeStage("exec_failed");
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
     };
 }
 
@@ -948,7 +1135,7 @@ const TestStager = struct {
     }
 };
 
-test "product coordinator uses one graph capture then rolls back exact slots and authority on exec return" {
+fn runProductCoordinatorTest(cleanup_collision: bool) !void {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
@@ -975,7 +1162,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     defer {
         _ = lifetime_owner.unlinkOwnedWhileLocked(owner_path) catch {};
         lifetime_owner.deinit();
-        _ = c.rmdir(owner_dir.ptr);
+        std.Io.Dir.cwd().deleteTree(std.testing.io, owner_dir) catch {};
     }
     var rollback_authority = rollback_image.Authority.prepare(
         allocator,
@@ -1002,7 +1189,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
 
     var owner = upgrade_owner.UpgradeOwner.init(allocator, TestStager.ops(), null);
     defer owner.deinit();
-    const attempt_id: u128 = 0xA1;
+    const attempt_id: u128 = if (cleanup_collision) 0xA2 else 0xA1;
     const request: upgrade_wire.PrepareRequest = .{
         .attempt_id = attempt_id,
         .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
@@ -1091,7 +1278,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
             if (request_value.runtime_slots.len != 1 or
                 request_value.runtime_slots[0].runtime_id == 0 or
                 request_value.restore.role != .target or
-                request_value.restore.attempt_id != 0xA1)
+                request_value.restore.attempt_id == 0)
                 return error.ExecFailed;
             var buffers: entrypoint.RestoreArgBuffers = .{};
             const args = entrypoint.formatRestoreArgs(request_value.restore, &buffers) catch
@@ -1119,7 +1306,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     };
     const layout = findAvailableLayout(40) orelse return error.SkipZigTest;
     const requested_slots = layout.requested().?;
-    const outcome = processArmed(.{
+    const context: Context = .{
         .allocator = allocator,
         .io = std.testing.io,
         .owner = &owner,
@@ -1143,17 +1330,39 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         .session_dir = owner_dir,
         .socket_path = "/tmp/maru-0/sh/000000000000000000000000000000b2.sock",
         .layout = layout,
-    }, attempt_id);
-    const report = switch (outcome) {
-        .terminal => |value| value,
-        .not_armed, .invariant_violation => return error.TestUnexpectedResult,
     };
-    try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
-    try std.testing.expectEqual(upgrade_wire.AttemptReason.exec_failed, report.reason);
-    try std.testing.expectEqual(@as(usize, 1), fake_authority.begin_count);
-    try std.testing.expectEqual(@as(usize, 2), fake_authority.rollback_count);
-    try std.testing.expectEqual(@as(usize, 1), fake_executor.preflight_count);
-    try std.testing.expectEqual(@as(usize, 1), fake_executor.execute_count);
+    const outcome = if (cleanup_collision)
+        processArmedWithDeadlineHooks(
+            context,
+            attempt_id,
+            try upgrade_deadline.Deadline.after(std.testing.io, upgrade_limits.pause_budget_ns),
+            false,
+            null,
+            replaceReservedPrimaryForFixture,
+        )
+    else
+        processArmed(context, attempt_id);
+    if (cleanup_collision) {
+        try std.testing.expectEqual(Outcome.invariant_violation, outcome);
+        const report = owner.status(attempt_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+        try std.testing.expectEqual(upgrade_wire.AttemptReason.handoff_failed, report.reason);
+        try std.testing.expectEqual(@as(usize, 0), fake_authority.begin_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_authority.rollback_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_executor.preflight_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_executor.execute_count);
+    } else {
+        const report = switch (outcome) {
+            .terminal => |value| value,
+            .not_armed, .invariant_violation => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+        try std.testing.expectEqual(upgrade_wire.AttemptReason.exec_failed, report.reason);
+        try std.testing.expectEqual(@as(usize, 1), fake_authority.begin_count);
+        try std.testing.expectEqual(@as(usize, 2), fake_authority.rollback_count);
+        try std.testing.expectEqual(@as(usize, 1), fake_executor.preflight_count);
+        try std.testing.expectEqual(@as(usize, 1), fake_executor.execute_count);
+    }
     try std.testing.expect(gate.snapshot().open);
     try std.testing.expect(!manager.upgradeQuiesceReached());
     for (requested_slots) |slot| try std.testing.expect(!exec_fd_set.isOpen(slot));
@@ -1167,4 +1376,12 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         if (!saw_output) _ = usleep(10 * 1000);
     }
     try std.testing.expect(saw_output);
+}
+
+test "product coordinator uses one graph capture then rolls back exact slots and authority on exec return" {
+    try runProductCoordinatorTest(false);
+}
+
+test "product coordinator cleanup identity failure overrides resumed report with invariant violation" {
+    try runProductCoordinatorTest(true);
 }

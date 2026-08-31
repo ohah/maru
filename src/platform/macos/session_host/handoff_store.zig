@@ -107,15 +107,34 @@ pub const Reservation = struct {
     /// Cancels the reservation exactly once and reports any cleanup failure. Product callers must
     /// turn that failure into fail-stop instead of claiming that the old graph resumed cleanly.
     pub fn cancel(self: *Reservation) Error!void {
+        return self.cancelImpl(null);
+    }
+
+    fn cancelObserved(self: *Reservation, evidence: ?*KernelCleanupEvidence) Error!void {
+        if (!builtin.is_test) @compileError("kernel cleanup observation is test-only");
+        return self.cancelImpl(evidence);
+    }
+
+    fn cancelImpl(self: *Reservation, evidence: ?*KernelCleanupEvidence) Error!void {
         if (!self.active) return;
         var cleanup_failed = false;
         if (self.attempt_open and self.primary_open and self.primary_present) {
-            removePinnedLeaf(self.attempt_fd, "primary", self.primary_fd) catch {
+            removePinnedLeaf(
+                self.attempt_fd,
+                "primary",
+                self.primary_fd,
+                if (evidence) |value| &value.primary_remove else null,
+            ) catch {
                 cleanup_failed = true;
             };
         }
         if (self.attempt_open and self.backup_open and self.backup_present) {
-            removePinnedLeaf(self.attempt_fd, "backup", self.backup_fd) catch {
+            removePinnedLeaf(
+                self.attempt_fd,
+                "backup",
+                self.backup_fd,
+                if (evidence) |value| &value.backup_remove else null,
+            ) catch {
                 cleanup_failed = true;
             };
         }
@@ -132,14 +151,24 @@ pub const Reservation = struct {
             return error.CleanupFailed;
         };
         if (self.owner_open) {
-            if (self.attempt_present and c.unlinkat(self.owner_fd, leaf.ptr, at_removedir) != 0)
+            if (self.attempt_present and c.unlinkat(self.owner_fd, leaf.ptr, at_removedir) != 0) {
+                if (comptime builtin.is_test) {
+                    if (evidence) |value| value.attempt_remove = posix.errno(-1);
+                }
                 cleanup_failed = true;
+            }
             if (c.fsync(self.owner_fd) != 0) cleanup_failed = true;
             _ = c.close(self.owner_fd);
         }
         self.active = false;
         if (cleanup_failed) return error.CleanupFailed;
     }
+};
+
+const KernelCleanupEvidence = struct {
+    primary_remove: ?posix.E = null,
+    backup_remove: ?posix.E = null,
+    attempt_remove: ?posix.E = null,
 };
 
 pub const CommitBudget = struct {
@@ -213,6 +242,7 @@ fn reserveWithFailpoint(
         return error.OpenFailed;
     if (c.mkdirat(owner_fd, leaf.ptr, 0o700) != 0) {
         if (posix.errno(-1) == .EXIST) return error.AlreadyExists;
+        if (posix.errno(-1) == .NOSPC) return error.InsufficientSpace;
         return error.OpenFailed;
     }
     const attempt_fd = openOwnerDirAt(owner_fd, leaf) catch |err| {
@@ -323,10 +353,10 @@ fn commitReservedWithFailpoint(
     try readbackEqual(primary_read, bytes, budget);
     try readbackEqual(backup_read, bytes, budget);
     if (failpoint == .primary_unlink) return error.CleanupFailed;
-    try removePinnedLeaf(reservation.attempt_fd, "primary", reservation.primary_fd);
+    try removePinnedLeaf(reservation.attempt_fd, "primary", reservation.primary_fd, null);
     reservation.primary_present = false;
     if (failpoint == .backup_unlink) return error.CleanupFailed;
-    try removePinnedLeaf(reservation.attempt_fd, "backup", reservation.backup_fd);
+    try removePinnedLeaf(reservation.attempt_fd, "backup", reservation.backup_fd, null);
     reservation.backup_present = false;
     _ = c.close(reservation.primary_fd);
     reservation.primary_open = false;
@@ -374,12 +404,14 @@ pub fn probeReservation(
         );
         if (n < 0) {
             if (posix.errno(n) == .INTR) continue;
+            if (posix.errno(n) == .NOSPC) return error.InsufficientSpace;
             return error.WriteFailed;
         }
         if (n == 0) return error.WriteFailed;
         offset += @intCast(n);
     }
-    if (c.fsync(reservation.primary_fd) != 0) return error.SyncFailed;
+    if (c.fsync(reservation.primary_fd) != 0)
+        return if (posix.errno(-1) == .NOSPC) error.InsufficientSpace else error.SyncFailed;
     var checked: usize = 0;
     var buffer: [64 * 1024]u8 = undefined;
     while (checked < sample.len) {
@@ -454,7 +486,7 @@ fn commitWithFailpoint(
         failpoint == .primary_after_rename,
     );
     errdefer {
-        removePinnedLeaf(attempt_fd, "primary", primary_fd) catch {};
+        removePinnedLeaf(attempt_fd, "primary", primary_fd, null) catch {};
         _ = c.close(primary_fd);
     }
     const backup_fd = try writeAtomicExclusive(
@@ -466,7 +498,7 @@ fn commitWithFailpoint(
         false,
     );
     errdefer {
-        removePinnedLeaf(attempt_fd, "backup", backup_fd) catch {};
+        removePinnedLeaf(attempt_fd, "backup", backup_fd, null) catch {};
         _ = c.close(backup_fd);
     }
     if (failpoint == .corrupt_backup_after_sync) {
@@ -492,8 +524,8 @@ fn commitWithFailpoint(
 
     // read-back이 원본과 byte-identical이고 원본의 semantic decode가 위에서 성공했으므로 두 copy 모두 같은
     // logical handoff다. pathname은 inherited fd를 준비하기 전에 제거한다.
-    try removePinnedLeaf(attempt_fd, "primary", primary_fd);
-    try removePinnedLeaf(attempt_fd, "backup", backup_fd);
+    try removePinnedLeaf(attempt_fd, "primary", primary_fd, null);
+    try removePinnedLeaf(attempt_fd, "backup", backup_fd, null);
     if (c.fsync(attempt_fd) != 0) return error.SyncFailed;
     _ = c.close(attempt_fd);
     attempt_open = false;
@@ -559,7 +591,7 @@ fn writeAtomicExclusive(
     defer _ = c.close(fd);
     var tmp_exists = true;
     defer {
-        if (tmp_exists) removePinnedLeaf(dir_fd, tmp, fd) catch {};
+        if (tmp_exists) removePinnedLeaf(dir_fd, tmp, fd, null) catch {};
     }
     try checkDeadline(budget);
     try reserveExact(fd, bytes.len);
@@ -583,7 +615,7 @@ fn writeAtomicExclusive(
     tmp_exists = false;
     var final_exists = true;
     defer {
-        if (final_exists) removePinnedLeaf(dir_fd, leaf, fd) catch {};
+        if (final_exists) removePinnedLeaf(dir_fd, leaf, fd, null) catch {};
     }
     if (fail_after_rename) return error.OpenFailed;
     const read_fd = try openReadOnlyExact(dir_fd, leaf, bytes.len);
@@ -600,10 +632,11 @@ fn createReservedFile(dir_fd: c.fd_t, leaf: [:0]const u8, len: usize) Error!c.fd
         .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
         @as(c.mode_t, 0o600),
     );
-    if (fd < 0) return error.OpenFailed;
+    if (fd < 0)
+        return if (posix.errno(-1) == .NOSPC) error.InsufficientSpace else error.OpenFailed;
     errdefer _ = c.close(fd);
     reserveExact(fd, len) catch |err| {
-        removePinnedLeaf(dir_fd, leaf, fd) catch return error.CleanupFailed;
+        removePinnedLeaf(dir_fd, leaf, fd, null) catch return error.CleanupFailed;
         return err;
     };
     return fd;
@@ -717,18 +750,28 @@ fn removePinnedLeaf(
     dir_fd: c.fd_t,
     leaf: [:0]const u8,
     pinned_fd: c.fd_t,
+    kernel_error: ?*?posix.E,
 ) Error!void {
     var tomb_buf: [128]u8 = undefined;
     const tomb = std.fmt.bufPrintZ(&tomb_buf, ".{s}.remove-{d}", .{ leaf, c.getpid() }) catch
         return error.CleanupFailed;
-    if (renameatx_np(dir_fd, leaf.ptr, dir_fd, tomb.ptr, rename_excl) != 0)
+    if (renameatx_np(dir_fd, leaf.ptr, dir_fd, tomb.ptr, rename_excl) != 0) {
+        if (comptime builtin.is_test) {
+            if (kernel_error) |value| value.* = posix.errno(-1);
+        }
         return error.CleanupFailed;
+    }
     const tomb_fd = openReadOnlyExactFromPinned(dir_fd, tomb, pinned_fd) catch {
         _ = renameatx_np(dir_fd, tomb.ptr, dir_fd, leaf.ptr, rename_excl);
         return error.CleanupFailed;
     };
     defer _ = c.close(tomb_fd);
-    if (c.unlinkat(dir_fd, tomb.ptr, 0) != 0) return error.CleanupFailed;
+    if (c.unlinkat(dir_fd, tomb.ptr, 0) != 0) {
+        if (comptime builtin.is_test) {
+            if (kernel_error) |value| value.* = posix.errno(-1);
+        }
+        return error.CleanupFailed;
+    }
 }
 
 fn openReadOnlyExactFromPinned(dir_fd: c.fd_t, leaf: [:0]const u8, pinned_fd: c.fd_t) Error!c.fd_t {
@@ -1013,6 +1056,101 @@ test "reserved handoff syscall failures publish no pair and leave no attempt res
     }
 }
 
+test "reservation cleanup identity failure closes descriptors and preserves replacement" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-reservation-cleanup-failure");
+    defer test_scratch.close(std.testing.io, dir);
+    const fd_count_before = try testOpenFdCount();
+    const attempt_id: u128 = 0x1414;
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    var reservation = try reserve(dir, attempt_id, 4096, deadline);
+    const primary_fd = reservation.primary_fd;
+    const backup_fd = reservation.backup_fd;
+    const attempt_fd = reservation.attempt_fd;
+    const owner_fd = reservation.owner_fd;
+
+    if (renameatx_np(attempt_fd, "primary", attempt_fd, "saved", rename_excl) != 0)
+        return error.TestUnexpectedResult;
+    const replacement_fd = c.openat(
+        attempt_fd,
+        "primary",
+        .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (replacement_fd < 0) return error.TestUnexpectedResult;
+    var replacement_open = true;
+    defer {
+        if (replacement_open) _ = c.close(replacement_fd);
+    }
+    try std.testing.expectEqual(@as(isize, 1), c.write(replacement_fd, "b", 1));
+
+    try std.testing.expectError(error.CleanupFailed, reservation.cancel());
+    try std.testing.expect(!reservation.active);
+    try readbackEqual(replacement_fd, "b", CommitBudget.testing());
+    for ([_]c.fd_t{ primary_fd, backup_fd, attempt_fd, owner_fd }) |fd| {
+        try std.testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+    }
+    var attempt_buf: [256]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ dir, attempt_id },
+    );
+    try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) == 0);
+    var primary_path_buf: [288]u8 = undefined;
+    const primary_path = try std.fmt.bufPrintZ(&primary_path_buf, "{s}/primary", .{attempt_path});
+    var saved_path_buf: [288]u8 = undefined;
+    const saved_path = try std.fmt.bufPrintZ(&saved_path_buf, "{s}/saved", .{attempt_path});
+    var backup_path_buf: [288]u8 = undefined;
+    const backup_path = try std.fmt.bufPrintZ(&backup_path_buf, "{s}/backup", .{attempt_path});
+    try std.testing.expect(c.access(primary_path.ptr, c.F_OK) == 0);
+    try std.testing.expect(c.access(saved_path.ptr, c.F_OK) == 0);
+    try std.testing.expect(c.access(backup_path.ptr, c.F_OK) != 0);
+    _ = c.close(replacement_fd);
+    replacement_open = false;
+    try std.testing.expectEqual(fd_count_before, try testOpenFdCount());
+}
+
+test "reservation cleanup observes consecutive kernel permission and nonempty failures" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-kernel-cleanup-faults");
+    defer test_scratch.close(std.testing.io, dir);
+    const fd_count_before = try testOpenFdCount();
+    const attempt_id: u128 = 0x1515;
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    var reservation = try reserve(dir, attempt_id, 4096, deadline);
+    const primary_fd = reservation.primary_fd;
+    const backup_fd = reservation.backup_fd;
+    const attempt_fd = reservation.attempt_fd;
+    const owner_fd = reservation.owner_fd;
+    var attempt_buf: [256]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ dir, attempt_id },
+    );
+    if (c.fchmod(attempt_fd, 0o500) != 0) return error.TestUnexpectedResult;
+    var permissions_restored = false;
+    defer {
+        if (!permissions_restored) _ = c.chmod(attempt_path.ptr, 0o700);
+    }
+
+    var evidence: KernelCleanupEvidence = .{};
+    try std.testing.expectError(error.CleanupFailed, reservation.cancelObserved(&evidence));
+    try std.testing.expectEqual(posix.E.ACCES, evidence.primary_remove.?);
+    try std.testing.expectEqual(posix.E.ACCES, evidence.backup_remove.?);
+    try std.testing.expectEqual(posix.E.NOTEMPTY, evidence.attempt_remove.?);
+    try std.testing.expect(!reservation.active);
+    for ([_]c.fd_t{ primary_fd, backup_fd, attempt_fd, owner_fd }) |fd| {
+        try std.testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+    }
+    try std.testing.expect(c.chmod(attempt_path.ptr, 0o700) == 0);
+    permissions_restored = true;
+    try std.testing.expectEqual(fd_count_before, try testOpenFdCount());
+}
+
 test "partial reservation failure removes the first copy and private attempt" {
     var dir_buf: [192]u8 = undefined;
     const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-partial-reserve");
@@ -1196,7 +1334,7 @@ test "handoff store exact cleanup preserves a swapped replacement leaf" {
     try std.testing.expectEqual(@as(isize, 1), c.write(original_fd, "a", 1));
     try validateReadOnlyExact(original_fd, 1);
     if (renameatx_np(dir_fd, "leaf", dir_fd, "saved", rename_excl) != 0) return error.SkipZigTest;
-    defer removePinnedLeaf(dir_fd, "saved", original_fd) catch {};
+    defer removePinnedLeaf(dir_fd, "saved", original_fd, null) catch {};
 
     const replacement_fd = c.openat(
         dir_fd,
@@ -1206,9 +1344,9 @@ test "handoff store exact cleanup preserves a swapped replacement leaf" {
     );
     if (replacement_fd < 0) return error.SkipZigTest;
     defer _ = c.close(replacement_fd);
-    defer removePinnedLeaf(dir_fd, "leaf", replacement_fd) catch {};
+    defer removePinnedLeaf(dir_fd, "leaf", replacement_fd, null) catch {};
     try std.testing.expectEqual(@as(isize, 1), c.write(replacement_fd, "b", 1));
 
-    try std.testing.expectError(error.CleanupFailed, removePinnedLeaf(dir_fd, "leaf", original_fd));
+    try std.testing.expectError(error.CleanupFailed, removePinnedLeaf(dir_fd, "leaf", original_fd, null));
     try readbackEqual(replacement_fd, "b", CommitBudget.testing());
 }

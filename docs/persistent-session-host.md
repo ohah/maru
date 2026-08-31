@@ -6748,10 +6748,36 @@ GUI와 그것을 찾는 CLI(`maru runtime`·`maru attach`)가 **같은 함수**�
 
 그래서 격리는 **전용 변수** `MARU_SESSION_HOST_ROOT`가 소유한다. 값이 있으면 그것이 곧 base다(빈 값은 미설정과
 같게 다룬다 — 빈 경로로 registry를 열면 `/session-host`가 되어 무엇이든 될 수 있다). 테스트 전용이며
-제품 경로는 설정하지 않는다. **이 변수는 registry만 옮기고 socket은 옮기지 않는다** — endpoint는 uid로 고정이라
-위 "열쇠와 자물쇠를 한 디렉터리에" 불변식이 override 경로에서는 성립하지 않는다. 지금 소비자(테스트)는 socket
-경로를 따로 주입하므로 문제가 없으나, 이 문을 넓히려면 socket도 함께 옮겨야 한다. `XDG_CACHE_HOME`을 그대로 override로 인정하지 않는 이유는, 그 변수를 실제로 설정해
-둔 사용자 환경에서 같은 사고가 조건부로 되살아나기 때문이다 — 캐시는 캐시고 registry는 registry다.
+제품 경로는 설정하지 않는다. 이 변수는 registry와 socket을 **같은 base 아래로 함께** 옮긴다. 둘 중 하나만
+옮기면 테스트 daemon이 사용자 공용 namespace의 endpoint를 만들거나 touch하고, 그 테스트 host가 discovery를
+ambiguous하게 만들어 실제 앱이 살아 있는 runtime을 복구하지 못할 수 있다. `XDG_CACHE_HOME`을 그대로 override로
+인정하지 않는 이유는, 그 변수를 실제로 설정해 둔 사용자 환경에서 같은 사고가 조건부로 되살아나기 때문이다 —
+캐시는 캐시고, registry는 registry다.
+
+테스트 실행은 사용자의 공용 `/tmp/maru-<uid>`를 **읽기·쓰기·정리 대상으로 사용하지 않는다**. `builtin.is_test`인
+프로세스는 PID별 root를 기본으로 쓴다. 공용 test runner는 부모 셸에서 같은 이름의 변수를 상속했더라도
+그 값을 신뢰하지 않고 자기 PID별 root로 **항상 덮어쓴다**. 그렇지 않으면 개발자가 제품 root를 가리키는
+변수를 둔 셸에서 gate를 실행한 순간 테스트의 정리 코드가 실제 manifest를 지울 수 있다. 제품 executable을 자식으로 띄우는 테스트는 같은
+`MARU_SESSION_HOST_ROOT`를 명시적으로 상속시켜야 한다. 테스트용 launcher API는 격리 root를 인자로 받아 이 전파를
+강제하며, 공용 test runner가 이 환경을 만들지 못하면 어떤 테스트도 시작하지 않고 nonzero로 끝난다. root가 공용 UID
+namespace와 같으면 제품 child 실행 전에 거부한다. 이 판정은 문자열 prefix에 머물지 않는다. root는
+`/tmp` 바로 아래에 이미 존재하는 본인 소유 `0700` 실제 directory여야 하고 leaf symlink·`.`·`..` 별칭을 허용하지
+않으며, session/socket 경로도 빈 component·`.`·`..` 없이 그 root의 하위 경로여야 한다. 자식 `execve` 환경은 root
+override 하나만 새로 만들고 activation/oneshot/upgrade executable 등 테스트 제어 변수는 상속하지 않는다. macOS의 플랫폼 `/tmp`→`/private/tmp` 별칭은 두 root를
+canonicalize해 같은 기준으로 비교한다. 그렇지 않으면 `/tmp/격리/../maru-<uid>` 또는 symlink가 공용 namespace를
+가리키면서 문자열 검사만 통과할 수 있기 때문이다. 격리 override를 알지 못하는 역사적 frozen N-1
+binary의 실제 실행은 이 불변식을 만족할 수 없으므로 일반 `test-session-host`와 개발자 로컬 gate에 포함하지 않는다.
+그 호환성 증거는 로그인한 GUI 사용자의 UID와 다른 전용 OS 계정인 일회용 CI runner에서만 명시적 위험 승인과 함께 실행하며, current 코드의
+단위·wire fixture 검증과 구분해 보고한다. 테스트 성공을 위해 실제 앱의 manifest·socket·host process를 잠시라도
+빌리거나, 실행 전후 snapshot 복원으로 공유 namespace 변경을 정당화하지 않는다.
+
+같은 불변식은 앱의 재접속 열쇠인 workspace checkpoint에도 적용한다. 공용 test runner는
+`CFFIXED_USER_HOME`을 부모 값과 무관하게 같은 PID별 격리 home으로 덮어써, 테스트가 띄운 실제
+`maru-macos-app`이 사용자의 `~/Library/Application Support/maru/workspace.v1`을 읽거나 교체하지 못하게 한다.
+session-host root만 옮기고 workspace home을 그대로 두면 테스트 host 자체는 격리되어도 자식 앱 종료 시 그 격리
+host의 handle 하나가 실제 checkpoint 전체를 대체해, 살아 있는 제품 host/runtime의 재접속 정보가 사라진다.
+격리 home 주입에 실패해도 테스트를 시작하지 않는다. 셸의 `HOME`은 PTY·shell 동작 fixture의 입력일 수 있으므로
+공용 runner가 바꾸지 않으며, 제품 앱의 Application Support 저장 위치만 `CFFIXED_USER_HOME`으로 분리한다.
 
 Unix socket은 macOS `sockaddr_un.sun_path`의
 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는

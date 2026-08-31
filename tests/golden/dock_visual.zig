@@ -510,6 +510,29 @@ const cases = [_]Case{
         .contract = "본문이 gutter 오른쪽에서 줄 번호와 같은 baseline에 서고, 탭 전개·빈 줄 자리·한글 fallback이 유지된다",
         .rect = .{ .x = 56, .y = 0, .w = 320, .h = 200 },
     },
+    // **caret 모양**(`editor.cursor-shape`). 셋을 나란히 놓으면 같은 fixture에서 무엇이 달라지는지가
+    // 한눈에 갈린다 — 그것이 값 셋을 따로 캡처하는 이유다(하나만 두면 "바뀌었다"만 알고 "어떻게"는 모른다).
+    //
+    // **크롭을 본문 전체로 잡는다.** 커서는 폭이 2px(bar)이거나 셀 하나(block)라, 좁게 자르면 커서가
+    // 크롭 경계에 걸려 회귀가 안 잡히는 자리가 생긴다(`editor-hazard`가 x=16으로 첫 글자를 잘라 먹은 전례).
+    .{
+        .name = "editor-caret-bar",
+        .capture = "editor-caret-bar.ppm",
+        .contract = "bar caret이 글자 **사이**에 폭 2px 막대로 서고, 그 자리 글자는 색이 그대로다",
+        .rect = .{ .x = 56, .y = 0, .w = 320, .h = 96 },
+    },
+    .{
+        .name = "editor-caret-block",
+        .capture = "editor-caret-block.ppm",
+        .contract = "block caret이 글자 한 칸(한글은 두 칸)을 채우고, **그 칸의 글자가 배경색으로 그려져 읽힌다**",
+        .rect = .{ .x = 56, .y = 0, .w = 320, .h = 96 },
+    },
+    .{
+        .name = "editor-caret-underline",
+        .capture = "editor-caret-underline.ppm",
+        .contract = "underline caret이 글자 **밑**에 두께 2px로 붙고 글자를 가리지 않는다",
+        .rect = .{ .x = 56, .y = 0, .w = 320, .h = 96 },
+    },
     // N1 §4.2 — **표시 폭**. 이모지 ZWJ 시퀀스·스킨톤·국기·VS16·동그란 번호가 각각 2칸을 차지하는지 본다.
     //
     // fixture가 줄마다 같은 열에 `|`를 두었으므로 **폭이 틀리면 그 줄의 막대만 어긋난다**. 헤드리스

@@ -717,10 +717,8 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     self.file_tree_watch_reset_pending = true;
     // **트리를 통째로 갈았으니 따라가기 기억도 버린다**(ET-CWD — docs/file-explorer.md §1). 남겨 두면
     // "이 cwd는 이미 따라갔다"로 읽혀, 복원된 root가 활성 터미널과 다른데도 `cd` 전까지 따라가지 않는다.
-    // 재시도 one-shot도 방금 사라진 트리의 것이라 함께 버린다.
     if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
     self.file_tree_followed_cwd = null;
-    self.file_tree_auto_follow_reveal_pending = false;
     // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
     // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
     // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부

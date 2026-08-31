@@ -87,9 +87,12 @@ keybind = F4 = esc:[2J
   `session.keep-alive-after-quit`은 위 소유권 예외대로 현재 값을 보존·materialize하고, 나머지 config 파일의
   schema·특수 키·주석은 내장 기본 상태로 돌린다).
 - **편집기 전용 action**: `toggle_editor_wrap`(그 뷰의 줄 바꿈 토글)·`fold_all`·`unfold_all`·
-  `fold_level_1`·`fold_level_2`·`fold_level_3`. 레벨은 중첩 **겹수**다(1이 문서 맨 바깥이고,
-  레벨끼리는 합치지 않고 갈아 끼운다 — [visual-mapping §4.1f](native-editor-visual-mapping.md)).
-  **여섯 모두 빌트인 chord가 없다**: 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리가 없고
+  `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`. 레벨은 중첩 **겹수**다(1이 문서
+  맨 바깥이고, 레벨끼리는 합치지 않고 갈아 끼운다 —
+  [visual-mapping §4.1f](native-editor-visual-mapping.md)).
+  `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⌘⇧O`. 찾기가 모든 글자에서
+  문자열을 보는 것과 달리 **심볼 이름만** 본다 — [native-editor-ui.md §7.5](native-editor-ui.md)).
+  **일곱 모두 빌트인 chord가 없다**: 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리가 없고
   (N2의 몫), 아무 chord도 뺏지 않으려는 결정이다. 그때까지는 커맨드 팝업과 이 키바인딩으로 쓴다.
   편집기가 아닌 Term에서는 **무동작**이다(눌러도 아무 일이 없다).
 - **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:

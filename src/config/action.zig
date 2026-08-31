@@ -160,6 +160,12 @@ pub const Action = union(enum) {
     fold_level_1,
     fold_level_2,
     fold_level_3,
+    // 파일 안 심볼을 필터해 그 자리로 간다(VSCode `⌘⇧O` — Go to Symbol in File).
+    // native-editor-ui.md §7.5 「피커는 팔레트를 다시 쓴다」.
+    //
+    // **찾기(⌘F)와 다른 축이다** — 찾기는 모든 글자에서 문자열을, 이쪽은 **심볼 이름만** 본다.
+    // **기본 chord 는 아직 없다** — `editor_save` 와 같은 이유로 커맨드 팝업과 사용자 키바인딩으로 부른다.
+    toggle_symbol_picker,
     // 스크롤백 Find의 다음/이전 매치로 이동(⌘G/⌘⇧G) — **오버레이가 닫혀 있어도** 동작한다(보존된 검색어로
     // 재검색해 네비게이션, macOS Find Next 관례). dispatchAppAction이 findNavigate로 넘긴다. 오버레이가 열린
     // 동안엔 모달 라우팅이 키를 가로채므로(Enter/Shift+Enter가 next/prev) 이 액션은 닫힌 경우를 위한 것이다.
@@ -243,6 +249,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "fold_level_1")) return .fold_level_1;
     if (std.mem.eql(u8, value, "fold_level_2")) return .fold_level_2;
     if (std.mem.eql(u8, value, "fold_level_3")) return .fold_level_3;
+    if (std.mem.eql(u8, value, "toggle_symbol_picker")) return .toggle_symbol_picker;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
     if (std.mem.eql(u8, value, "find_previous")) return .find_previous;
     if (std.mem.eql(u8, value, "increase_font_size")) return .increase_font_size;

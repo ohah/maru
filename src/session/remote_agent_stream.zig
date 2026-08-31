@@ -67,7 +67,12 @@ pub fn parseFrame(line: []const u8) Frame {
     const raw = jsonStringField(line, "\"line\":\"") orelse return .ignored;
     // nonce 를 **다시 검증한다.** 이 값이 «어느 Term 인가» 를 정하므로, 선 위에서 바뀌었을 가능성을
     // 그냥 믿지 않는다(스트리머도 같은 클래스로 걸렀지만 그것은 저쪽 기계의 판정이다).
-    if (nonce.len == 0 or nonce.len > command.remote_pane_nonce_max) return .ignored;
+    // ⚠️ **파일 이름 상한으로 잰다**(`remote_pane_nonce_max` 가 아니다). 스트리머가 선에 싣는 값은
+    // `nonceFromFileName` 이 돌려준 **파일 이름**이라 tmux 안에서는 뒤에 `_t<pane>` 이 붙는데, host 소유
+    // nonce 는 이미 nonce 상한을 꽉 채운다(`host_<32hex>_<32hex>` = 70). nonce 상한으로 재면 그 프레임을
+    // 통째로 버려 **원격 pane 만 tmux 안에서 배지가 안 선다** — 저쪽(`nonceFromFileName`)은 같은 함정을
+    // 이미 고쳤는데 이쪽만 남아 있었다. 재현 조건이 좁아 눈으로는 못 찾는 자리다.
+    if (nonce.len == 0 or nonce.len > command.remote_log_name_max) return .ignored;
     if (!command.instance_token_class.accepts(nonce)) return .ignored;
     return .{ .event = .{ .nonce = nonce, .line = raw } };
 }
@@ -380,4 +385,38 @@ test "시계가 뒤로 가도 죽었다고 하지 않는다 — 포화 뺄셈이
     _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 1_000_000);
     ch.tick(0);
     try testing.expectEqual(State.open, ch.state);
+}
+
+test "parseFrame: tmux 이름(`<nonce>_t<pane>`)을 버리지 않는다" {
+    // **저쪽은 고쳤는데 이쪽만 남아 있던 자리.** 스트리머가 싣는 값은 `nonceFromFileName` 이 돌려준
+    // **파일 이름**이라 tmux 안에서는 `_t<pane>` 이 붙는다. host 소유 nonce 는 이미 nonce 상한을 꽉
+    // 채우므로(`host_<32hex>_<32hex>` = 70), nonce 상한으로 재면 그 프레임이 통째로 버려진다 —
+    // 증상은 「원격 pane 만 tmux 안에서 배지가 안 선다」라 재현 조건이 좁다.
+    const a = std.testing.allocator;
+
+    // host 소유 nonce 를 상한까지 채우고 tmux 칸을 더한다 = 실제로 선에 실리는 최악 길이.
+    var name: std.ArrayListUnmanaged(u8) = .empty;
+    defer name.deinit(a);
+    try name.appendSlice(a, "host_");
+    try name.appendNTimes(a, 'a', 32);
+    try name.append(a, '_');
+    try name.appendNTimes(a, 'b', 32);
+    try std.testing.expectEqual(command.remote_pane_nonce_max, name.items.len);
+    try name.appendSlice(a, "_t24"); // tmux 칸
+
+    const line = try std.fmt.allocPrint(a, "{{\"nonce\":\"{s}\",\"line\":\"claude\\t{{}}\"}}", .{name.items});
+    defer a.free(line);
+
+    switch (parseFrame(line)) {
+        .event => |ev| try std.testing.expectEqualStrings(name.items, ev.nonce),
+        else => return error.TestUnexpectedResult, // nonce 상한으로 재면 여기로 떨어진다
+    }
+
+    // 대조군: 파일 이름 상한을 **넘으면** 여전히 버린다(검증이 살아 있다는 확인).
+    var too_long: std.ArrayListUnmanaged(u8) = .empty;
+    defer too_long.deinit(a);
+    try too_long.appendNTimes(a, 'a', command.remote_log_name_max + 1);
+    const bad = try std.fmt.allocPrint(a, "{{\"nonce\":\"{s}\",\"line\":\"claude\\t{{}}\"}}", .{too_long.items});
+    defer a.free(bad);
+    try std.testing.expect(parseFrame(bad) == .ignored);
 }

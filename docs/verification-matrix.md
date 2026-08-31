@@ -2572,6 +2572,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-github-predecessor-assets`가 Debug·ReleaseFast에서 lightweight/annotated 성공, exact 호출·재검증,
   statement/ref/commit과 filesystem drift, copied owner, child/OOM/depth/cycle failure의 publication 0·cleanup을 검증한다. workflow
   wiring, Apple product 판정과 frozen release 제품 E2E는 후속 범위다.
+  `release_adapter_github_tag_chain_transport.zig`는 제품 annotated-tag 상한을 8 hop으로 고정하고 `tag_ref` 뒤 resolver가
+  요구한 exact `annotated_tag`만 순차 조회한다. 매 요청 전 CLI를 재검증하고 reusable JSON buffer의 borrowed parser slice를
+  fixed owned hop record로 복사하며, 최초 positive monotonic absolute deadline 하나를 ref/tag fetch와 후속 asset composition
+  전체가 공유한다. lightweight는 annotated fetch 0, commit 뒤 추가 관측 0이며 9번째/cycle/foreign/mismatch/CLI drift/deadline은
+  publication·residue 0이다. `test-session-host-release-adapter-github-tag-chain-transport`가 Debug·ReleaseFast에서 0/1/8-hop,
+  exact request/revalidation/deadline 감소, buffer reuse, 9-hop/cycle/mismatch/OOM을 검증한다. repository/run/environment/deployment와
+  workflow/U5 배선은 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

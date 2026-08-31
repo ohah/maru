@@ -1279,7 +1279,14 @@ fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
         // **행 높이의 배수가 아닌 값**이다. 배수면 첫 행이 통째로 밀려 나가 "반쯤 걸친 행"이 없고,
         // 그러면 이 시나리오가 clip 을 증언하지 못한다(내 판정자가 같은 함정을 한 번 밟았다 —
         // 스크롤을 정확히 10 행만큼 줘서 단언이 아무것도 안 보던 적이 있다).
-        .origin_shift_px = if (scenario.id == .file_tree_scrolled or scenario.id == .file_tree_over_chrome) 11 else 0,
+        .origin_shift_px = switch (scenario.id) {
+            .file_tree_scrolled => 11,
+            // **11 로는 이 시나리오가 아무것도 못 잰다.** 그 값은 글리프 **상자**만 경계를 넘기고
+            // 잉크는 안 넘긴다(상자에 여백이 있다) — 실측: clip 을 떼도 캡처가 **0 픽셀** 달랐다.
+            // 라벨의 잉크가 실제로 위 경계를 넘도록 반 행 이상 민다.
+            .file_tree_over_chrome => 20,
+            else => 0,
+        },
     };
     const sizes = file_tree.build.bufferSizes(rows.len);
     if (sizes.nodes > buffers.file_tree_nodes.len or sizes.entries > buffers.entries.len or

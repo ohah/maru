@@ -3278,6 +3278,7 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
+    logHitSnapshotDiag(self, term, y_px, off);
     // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
     clearExtraSelections(self, term);
     // **커서가 편집 아닌 이유로 움직였다 — undo 묶음을 끊는다**(§3.3). 안 끊으면 클릭 뒤 친
@@ -3287,6 +3288,54 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
     return true;
+}
+
+/// **클릭이 푼 자리를 스냅숏 신선도와 함께 남긴다**(`MARU_DEBUG=1` 일 때만).
+///
+/// **왜 있는가**: 사용자 보고(2026-08-31) — 클릭하면 캐럿이 몇 줄 아래로 간다. **간헐적이라
+/// 재현이 잡히지 않는다.** 코드를 읽어 찾은 유력 후보는 `hitTestBody` 가 스냅숏
+/// (`editor_hit_rows`·`editor_hit_lines`·`editor_hit_geom`)만 보고 **그것이 지금 화면을 설명하는지
+/// 묻지 않는다**는 것이다 — 같은 파일의 검색 reveal 경로에는 그 대조(`snapshot_is_current`)가 있고
+/// 주석이 이유까지 적어 뒀는데(*"세 재료가 전부 지난 프레임의 것이라 방금 자기가 한 스크롤을 못
+/// 본다"*), 클릭 경로만 그 방어가 없다.
+///
+/// **그런데 그 비대칭이 이 증상의 원인인지는 확정되지 않았다.** 스냅숏은 다음 렌더에 갱신되므로
+/// 한 프레임짜리 어긋남만 만들 수 있는데, 보고된 증상이 그 폭인지 모른다. 그래서 **막지 않고
+/// 찍기만 한다** — 추측으로 클릭을 버리면 멀쩡한 클릭이 씹히고, 그 편이 더 나쁘다.
+///
+/// 다음에 재현되면 이 한 줄이 답을 준다: `stale=true` 이면 스냅숏 낡음이 원인이고 그때 방어를
+/// 넣으면 된다. `stale=false` 인데 `line` 이 사용자가 누른 줄과 다르면 **원인이 다른 데 있다**.
+fn logHitSnapshotDiag(self: *AppSession, term: *Term, y_px: f64, off: usize) void {
+    if (!diag_gate.maruDebugEnabled()) return;
+    const geom = term.rt.editor_hit_geom;
+    // 검색 reveal 경로가 쓰는 것과 **같은 대조**다(`snapshot_is_current`) — 판정을 새로 적으면
+    // 두 벌이 되고, 진단이 제품과 다른 것을 재게 된다.
+    const stale = geom.top_line != term.rt.editor_first_line or
+        geom.top_piece != term.rt.editor_first_piece or
+        geom.visible_len != editorLines(term).len or
+        geom.wrap != (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) or
+        geom.tab_width != term.rt.editor_tab_width or
+        geom.cell_w_px != self.cell_width_px or
+        geom.cell_h_px != self.cell_height_px;
+    const doc = term.rt.editor_doc;
+    const line = if (doc) |d| d.file.lines.lineAt(@min(off, d.file.content.len)) else 0;
+    const row: i64 = if (geom.cell_h_px == 0) -1 else blk: {
+        const rel = @as(i64, @intFromFloat(@max(-1e9, @min(1e9, y_px)))) - @as(i64, geom.body_y);
+        break :blk @divFloor(rel, @as(i64, geom.cell_h_px));
+    };
+    editor_diag.debug(
+        "hit y={d:.1} row={d} off={d} line={d} stale={} snap_top=({d},{d}) live_top=({d},{d}) " ++
+            "snap_len={d} live_len={d} rows={d} folded={}",
+        .{
+            y_px,                     row,
+            off,                      line,
+            stale,                    geom.top_line,
+            geom.top_piece,           term.rt.editor_first_line,
+            term.rt.editor_first_piece, geom.visible_len,
+            editorLines(term).len,    term.rt.editor_hit_rows_len,
+            term.rt.editor_visible_numbers.len > 0,
+        },
+    );
 }
 
 /// 선택 드래그가 pane 밖에 머무는 동안 **한 줄씩 굴리고 선택을 늘린다**(frame-loop tick마다).

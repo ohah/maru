@@ -128,7 +128,10 @@ const inventory = [_]Entry{
     // 영어로 바꾸면 이 캡처가 증언하는 폭 산술이 통째로 다른 경우가 된다.
     // 31: caret 모양 fixture의 한글 줄("가나다 라마바"). **표시 문자열이 아니라 fixture다** —
     // `block`·`underline`이 2칸 글자를 제대로 덮는지는 ASCII만으로는 캡처에 안 나온다(§7 "표시가 아니면").
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 31 },
+    // 33: `scm-blocker` 시나리오의 안내 두 줄("커밋 메시지를 입력하세요"·"변경 사항 없음"). 같은 이유로
+    // fixture다 — **제품이 내는 문자열을 그대로 적어야** 캡처가 제품을 예고한다(`i18n.t` 로 부르면 그 키의
+    // 값이 바뀔 때 골든이 조용히 따라가 색·자리 계약이 아니라 문구를 재게 된다).
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 33 },
     // 2 → 3: `editor_typescript` 캡처 픽스처의 한국어 주석 한 줄. **표시 문자열이 아니라 그려질
     // 내용**이다 — 캡처가 한글 폭까지 잡도록 일부러 넣었다(같은 파일의 다른 둘도 같은 부류다).
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 3 },
@@ -231,7 +234,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 208;
+const header_total = 210;
 const header_config_total = 54;
 
 comptime {

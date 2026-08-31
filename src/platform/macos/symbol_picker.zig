@@ -60,30 +60,66 @@ fn containsFoldAscii(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
-/// 라벨을 `max_cols` 표시 폭에 맞춘다. **넘치면 앞을 버리고 안쪽을 남긴다**(§7.5) —
-/// `…parseSyntaxRole` 이지 `ThemeConfig ›…` 가 아니다. 가장 구체적인 것이 가장 오래 남아야 한다.
+/// 라벨을 `max_cols` 에 맞춘다 — **두 단계다**(§7.5).
+///
+/// ⑴ **체인 접두사부터 버린다.** `ThemeConfig › parseKey` 는 `parseKey` 가 된다 — 가장 구체적인 것이
+///    가장 오래 남아야 하고, 컨테이너 이름은 버려도 어느 함수인지 알 수 있다.
+/// ⑵ **그래도 넘치면 잎 이름의 꼬리를 버린다.** `…` 를 **뒤에** 붙인다.
+///
+/// **⑵의 방향이 ⑴과 반대인 것이 요점이다.** 처음에는 한 단계로 「문자열 앞을 버린다」만 두었는데,
+/// 체인이 없는 단일 이름에서는 그것이 **이름의 앞부분을 지운다** — `test "IME2 조합은…"` 가
+/// `… 조합 글자 아래에 선다` 가 되어 무엇의 판정자인지 알 수 없다. 실측에서
+/// `app_session/editor.zig` 심볼 509개 중 **242개(48%)** 가 그렇게 잘렸다. 잎을 식별하는 것은
+/// **앞부분**이고, 사용자가 검색할 때 치는 것도 앞부분이다.
 ///
 /// **cluster 가운데를 안 자른다** — UTF-8 선두 바이트까지 물러난다.
-fn fitTail(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u8 {
+fn fitLabel(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u8 {
     if (max_cols == 0) return allocator.alloc(u8, 0);
     if (displayCols(text) <= max_cols) return allocator.dupe(u8, text);
 
-    // 뒤에서부터 max_cols-1 칸을 담을 시작점을 찾는다(1칸은 "…" 몫).
-    const budget = max_cols - 1;
-    var start = text.len;
-    var cols: usize = 0;
+    // ⑴ 뒤에서부터 체인 마디를 하나씩 살려 가며 들어가는 만큼만 남긴다.
+    var leaf_start: usize = 0;
+    var it = std.mem.splitSequence(u8, text, separator);
+    var last: []const u8 = text;
+    while (it.next()) |seg| {
+        last = seg;
+        leaf_start = @intFromPtr(seg.ptr) - @intFromPtr(text.ptr);
+    }
+    // 잎 하나만으로도 들어가면, 앞 마디를 최대한 되살린다.
+    var start = leaf_start;
     while (start > 0) {
-        var prev = start - 1;
-        while (prev > 0 and (text[prev] & 0xC0) == 0x80) prev -= 1; // 선두 바이트까지
-        const w = codepointCols(text[prev..start]);
+        // 바로 앞 마디의 시작을 찾는다.
+        const prev_sep = std.mem.lastIndexOf(u8, text[0..start -| separator.len], separator);
+        const cand: usize = if (prev_sep) |k| k + separator.len else 0;
+        if (displayCols(text[cand..]) > max_cols) break;
+        start = cand;
+        if (cand == 0) break;
+    }
+    if (displayCols(text[start..]) <= max_cols) return allocator.dupe(u8, text[start..]);
+
+    // ⑵ 잎 하나도 안 들어간다 — **꼬리를 버리고 앞을 남긴다**.
+    return fitHead(allocator, text[leaf_start..], max_cols);
+}
+
+/// 앞을 남기고 꼬리를 `…` 로. 잎 이름이 혼자서도 넘칠 때 쓴다.
+fn fitHead(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u8 {
+    if (max_cols == 0) return allocator.alloc(u8, 0);
+    if (displayCols(text) <= max_cols) return allocator.dupe(u8, text);
+    const budget = max_cols - 1; // 1칸은 "…" 몫
+    var end: usize = 0;
+    var cols: usize = 0;
+    while (end < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[end]) catch 1;
+        const stop = @min(end + len, text.len);
+        const w = codepointCols(text[end..stop]);
         if (cols + w > budget) break;
         cols += w;
-        start = prev;
+        end = stop;
     }
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, text[0..end]);
     try out.appendSlice(allocator, "\u{2026}");
-    try out.appendSlice(allocator, text[start..]);
     return out.toOwnedSlice(allocator);
 }
 
@@ -150,7 +186,7 @@ pub fn filter(
         }
         if (full.items.len == 0) try full.appendSlice(allocator, name);
 
-        const label = try fitTail(allocator, full.items, label_cols);
+        const label = try fitLabel(allocator, full.items, label_cols);
         errdefer allocator.free(label);
         try out.rows.append(allocator, .{ .label = label, .offset = sym.start, .line = sym.start_row + 1 });
     }
@@ -215,12 +251,16 @@ test "SP2 중첩 심볼은 체인 전체로 보인다 — breadcrumb 과 같은 
     try testing.expectEqual(@as(u32, 2), list.rows.items[0].line);
 }
 
-test "SP3 라벨이 넘치면 앞을 버리고 안쪽을 남긴다 — 가장 구체적인 것이 남는다 (§7.5)" {
+test "SP3 넘치면 체인 접두사부터 버린다 — 잎 이름은 온전히 남는다 (§7.5)" {
     // `palette.view` 는 제목을 안 자른다. 안 자르고 넘기면 패널 밖으로 나가거나 줄 번호와 겹친다.
+    //
+    // **버리는 순서가 계약이다.** 처음에는 「문자열 앞을 버린다」 한 단계였는데, 그것은 체인이 없는
+    // 단일 이름에서 **이름의 앞부분을 지운다** — 실측에서 `app_session/editor.zig` 심볼 509개 중
+    // **242개(48%)** 가 그렇게 잘렸고 무엇의 판정자인지 알 수 없었다.
     const allocator = testing.allocator;
     const src =
         \\pub const AVeryLongContainerNameIndeed = struct {
-        \\    pub fn andAnEquallyLongMethodName() void {}
+        \\    pub fn shortName() void {}
         \\};
     ;
     var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
@@ -229,14 +269,39 @@ test "SP3 라벨이 넘치면 앞을 버리고 안쪽을 남긴다 — 가장 �
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "andAn", 20, &list);
+    try filter(allocator, syms.items, src, "shortName", 20, &list);
 
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     const label = list.rows.items[0].label;
     try testing.expect(displayCols(label) <= 20);
-    // **안쪽이 남는다** — 바깥(컨테이너)이 아니라 메서드 이름의 꼬리다.
-    try testing.expect(std.mem.endsWith(u8, label, "LongMethodName"));
-    try testing.expect(std.mem.startsWith(u8, label, "\u{2026}"));
+    // **컨테이너만 사라지고 잎은 온전하다** — `…` 조차 없다(마디 경계에서 잘렸으므로).
+    try testing.expectEqualStrings("shortName", label);
+}
+
+test "SP3b 잎 이름 하나도 안 들어가면 그때만 꼬리를 버린다 — 앞을 남긴다 (§7.5)" {
+    // ⑵단계. 방향이 ⑴과 **반대**다 — 잎을 식별하는 것은 앞부분이고, 사용자가 검색할 때 치는 것도
+    // 앞부분이다.
+    const allocator = testing.allocator;
+    const src =
+        \\test "아주 긴 판정자 이름이 패널 폭을 혼자서도 넘긴다" {
+        \\    _ = 1;
+        \\}
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+    if (syms.items.len == 0) return error.SkipZigTest;
+
+    var list: List = .{};
+    defer list.deinit(allocator);
+    try filter(allocator, syms.items, src, "", 12, &list);
+    try testing.expectEqual(@as(usize, 1), list.rows.items.len);
+
+    const label = list.rows.items[0].label;
+    try testing.expect(displayCols(label) <= 12);
+    // **앞이 남고 뒤에 `…`** — 반대가 아니다.
+    try testing.expect(std.mem.startsWith(u8, label, "아주 긴"));
+    try testing.expect(std.mem.endsWith(u8, label, "\u{2026}"));
 }
 
 test "SP4 한글 심볼도 걸리고 폭도 두 칸으로 센다 — 명령 팔레트의 ASCII 전제가 여기선 거짓이다" {
@@ -300,4 +365,97 @@ test "SP6 순서는 문서 순서다 — 일치 품질로 재정렬하지 않는
     // 알파벳순이면 aaa 가 먼저다 — 문서 순서를 지키면 zzz 가 먼저다.
     try testing.expectEqualStrings("zzzMatch", list.rows.items[0].label);
     try testing.expect(list.rows.items[0].offset < list.rows.items[1].offset);
+}
+
+test "SPBENCH 실제 파일에서 라벨 폭과 잘림을 잰다" {
+    std.debug.print("\n", .{});
+    const allocator = testing.allocator;
+    const files = [_][]const u8{ "src/config/theme.zig", "src/platform/macos/app_session/editor.zig" };
+    for (files) |path| {
+        const src = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(4 << 20)) catch continue;
+        defer allocator.free(src);
+        var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+        defer syms.deinit(allocator);
+        symbolsOf(allocator, src, &syms) catch continue;
+
+        var list: List = .{};
+        defer list.deinit(allocator);
+        filter(allocator, syms.items, src, "", 49, &list) catch continue;
+
+        var truncated: usize = 0;
+        var max_cols: usize = 0;
+        var over: usize = 0;
+        for (list.rows.items) |r| {
+            const c = displayCols(r.label);
+            if (c > max_cols) max_cols = c;
+            if (c > 49) over += 1;
+            if (std.mem.startsWith(u8, r.label, "\u{2026}")) truncated += 1;
+        }
+        std.debug.print("[{s}] 심볼 {d} · 최대 폭 {d} · 잘림 {d} · 상한 초과 {d}\n", .{
+            path, list.rows.items.len, max_cols, truncated, over,
+        });
+    }
+}
+
+test "SP12 자른 라벨은 언제나 온전한 UTF-8 이다 — 글자 가운데를 안 자른다 (§7.5)" {
+    // **깨진 글자는 화면에 그대로 뜬다.** 폭 상한만 재면 cluster 가운데를 잘라도 통과한다
+    // (뮤테이션에서 UTF-8 경계 판정을 지웠는데 아무 판정자도 안 죽었다).
+    //
+    // 한글은 3바이트라 경계를 어기면 바로 드러난다. 상한을 1칸씩 늘려 가며 **모든 자리**를 본다.
+    const allocator = testing.allocator;
+    const src =
+        \\test "가나다라마바사아자차카타파하 판정자 이름" {
+        \\    _ = 1;
+        \\}
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+    if (syms.items.len == 0) return error.SkipZigTest;
+
+    var cols: usize = 1;
+    while (cols <= 40) : (cols += 1) {
+        var list: List = .{};
+        defer list.deinit(allocator);
+        try filter(allocator, syms.items, src, "", cols, &list);
+        if (list.rows.items.len == 0) continue;
+        const label = list.rows.items[0].label;
+        try testing.expect(std.unicode.utf8ValidateSlice(label));
+        try testing.expect(displayCols(label) <= cols);
+    }
+}
+
+test "SP13 체인 접두사를 한 마디씩만 버린다 — 들어가는 만큼은 남긴다 (§7.5)" {
+    // ⑴단계가 「전부 버리고 잎만」이 아니라 **들어가는 만큼 되살린다**는 것을 잰다. 그 구별이 없으면
+    // 넓은 패널에서도 컨테이너가 사라져 같은 이름이 여럿일 때 구별이 안 된다(뮤테이션에서 그 단계를
+    // 통째로 건너뛰어도 안 죽었다).
+    const allocator = testing.allocator;
+    const src =
+        \\pub const Outer = struct {
+        \\    pub const Middle = struct {
+        \\        pub fn leaf() void {}
+        \\    };
+        \\};
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+
+    var list: List = .{};
+    defer list.deinit(allocator);
+
+    // 넉넉하면 전부 — `Outer › Middle › leaf`.
+    try filter(allocator, syms.items, src, "leaf", 60, &list);
+    try testing.expectEqual(@as(usize, 1), list.rows.items.len);
+    try testing.expectEqualStrings("Outer \u{203A} Middle \u{203A} leaf", list.rows.items[0].label);
+
+    // 한 마디만 들어갈 폭이면 **바깥 하나만** 버린다 — `Middle › leaf`.
+    try filter(allocator, syms.items, src, "leaf", 15, &list);
+    try testing.expectEqual(@as(usize, 1), list.rows.items.len);
+    try testing.expectEqualStrings("Middle \u{203A} leaf", list.rows.items[0].label);
+
+    // 더 좁으면 잎만.
+    try filter(allocator, syms.items, src, "leaf", 6, &list);
+    try testing.expectEqual(@as(usize, 1), list.rows.items.len);
+    try testing.expectEqualStrings("leaf", list.rows.items[0].label);
 }

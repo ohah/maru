@@ -660,6 +660,26 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   다음 release는 predecessor release에서 이 manifest asset을 exact 이름으로 내려받아 SHA-256과 attestation subject를 먼저
   검증한 뒤에만 내부 `assets[]`를 해석한다. manifest asset 누락·복수·이름 불일치도 publication/consumption 실패다.
 
+  이 순환의 bootstrap command/buffer 권위는 `release_adapter_github_manifest_download.zig`가 소유한다. current B
+  manifest의 이미 검증된 `predecessor.tag`와 `predecessor.manifest_sha256`만 받아 tag의 canonical version으로 provisional exact
+  `Maru-<version>-session-host-release.json` 이름을 만든다. command는 `/absolute/gh release download <predecessor-tag>
+  --repo ohah/maru --pattern <escaped-exact-name> --output -` 하나이며 latest, caller filename/flag, `--dir`, archive와 clobber는
+  없다. stdout은 `release_manifest.max_manifest_bytes` caller buffer 안에서만 빌리고 empty/cap/foreign capture, child failure와
+  digest mismatch를 모두 거부한다. 이 단계의 이름은 다운로드 선택용 provisional identity일 뿐 최종 manifest identity가 아니다.
+  manifest와 세 asset의 fixed argv·Go `filepath.Match` literal escaping은
+  `release_adapter_github_download_command.zig` 하나가 소유해 두 download 경계의 option drift를 막는다.
+  artifact attestation이 exact name/SHA subject를 검증하고 canonical bytes를 strict parse한 뒤, parsed predecessor A의
+  `release.tag`·`release.version`·manifest filename과 current B의 predecessor tag/SHA를 다시 교차검증해야만 내부 `assets[]`를
+  다음 downloader 입력으로 승격한다.
+
+  성공 결과는 digest-bound bytes와 provisional name/SHA를 빌린 slice로 반환하며 파일을 먼저 게시하지 않는다. 후속 composition은
+  같은 bytes를 파싱·attestation 검증한 뒤에만 descriptor-owned work-directory로 materialize하거나 세 asset 다운로드를 시작한다.
+  따라서 unauthenticated JSON이 pathname·asset size·digest를 filesystem allocation 권위로 바꾸지 못한다. focused gate
+  `test-session-host-release-adapter-github-manifest-download`은 exact name/argv, clean environment, supplied-buffer
+  provenance, empty/oversize/digest mismatch/timeout/child failure와 tag/SHA malformed를 Debug·ReleaseFast에서 검증한다. 이 gate만으로
+  artifact attestation, strict manifest parse/cross-binding, 세 asset download, CLI revalidation 또는 workflow composition을
+  완료했다고 주장하지 않는다.
+
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를
   typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. compatibility와 signing 관측은

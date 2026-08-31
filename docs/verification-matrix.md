@@ -2541,6 +2541,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   clean environment, actual filesystem/mapped write와 path·identity·digest 결과, glob·short/long/digest·symlink/existing
   work-directory·timeout/child failure와 cleanup을 검증한다. CLI pin/revalidation, release verify-asset와 final workflow
   composition은 후속 범위다.
+  `release_adapter_github_manifest_download.zig`는 current B manifest의 verified predecessor tag/SHA에서 provisional exact manifest
+  name을 만들고 fixed `gh release download <tag> --repo ohah/maru --pattern <literal> --output -`로만 bootstrap bytes를 얻는다.
+  이 argv와 literal pattern SSOT는 세-asset downloader도 공유하는 `release_adapter_github_download_command.zig`다.
+  `release_manifest.max_manifest_bytes` caller buffer provenance와 non-empty output/SHA-256을 닫고 inherited environment 없이 exact
+  token만 전달한다. 결과는 아직 JSON 의미나 asset allocation 권위가 아니며 후속 artifact attestation과 strict parse가 parsed
+  A tag/version/name 및 B predecessor tag/SHA를 교차검증해야 한다. `test-session-host-release-adapter-github-manifest-download`이
+  Debug·ReleaseFast에서 exact name/argv/environment, malformed identity/input bounds, foreign/empty/oversize/digest mismatch와
+  timeout/child failure를 검증한다. attestation/parse cross-binding, 세 asset download와 final workflow composition은 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

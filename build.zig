@@ -12088,6 +12088,31 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_manifest_tests.step);
         test_step.dependOn(&run_release_manifest_tests.step);
     }
+    const session_host_release_evidence_step = b.step(
+        "test-session-host-release-evidence",
+        "Validate canonical session-host release evidence in Debug and ReleaseFast",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |evidence_optimize| {
+        const release_evidence_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_evidence.zig"),
+            .target = target,
+            .optimize = evidence_optimize,
+        });
+        const release_evidence_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_evidence.zig"),
+                .target = target,
+                .optimize = evidence_optimize,
+                .imports = &.{.{ .name = "release_evidence", .module = release_evidence_mod }},
+            }),
+        });
+        const run_release_evidence_tests = b.addRunArtifact(release_evidence_tests);
+        run_release_evidence_tests.addArg("--maru-expect-tests=8");
+        run_release_evidence_tests.setCwd(b.path("."));
+        session_host_release_evidence_step.dependOn(&run_release_evidence_tests.step);
+        session_host_step.dependOn(&run_release_evidence_tests.step);
+        test_step.dependOn(&run_release_evidence_tests.step);
+    }
     const session_host_release_adapter_contract_step = b.step(
         "test-session-host-release-adapter-contract",
         "Validate the closed session-host release adapter CLI contract",

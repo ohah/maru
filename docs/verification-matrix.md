@@ -2482,7 +2482,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   결속한다. malformed URL·foreign repository/app·stale/완료 job·누락/중복 backing·0개/복수 match를 fail-close하며
   `test-session-host-release-adapter-github-deployment`가 Debug·ReleaseFast와 allocation fail-index에서 검증한다. 이 resolver도
   이미 획득한 component bytes의 의미만 증명하며 transport·pagination·workflow 배선을 대신하지 않는다.
-  실제 GitHub release/deployment 호출과 codesign·DMG 관측의 typed observation 조립, canonical summary encoding, release workflow 배선은
+  `release_adapter_github_transport.zig`는 caller 문자열 URL 대신 closed request enum에서 exact GET endpoint/header를 만들고,
+  collection에 `per_page=100`과 `--paginate --slurp`를 함께 강제한 뒤 bounded outer page를 endpoint shape에 맞게 직접 flatten한다.
+  macOS leaf는 absolute executable과 fixed argv만 공용 bounded process에 넘기고, child 환경을 exact `GH_TOKEN`과
+  `GH_PROMPT_DISABLED=1`로 교체하며 stderr를 protocol bytes에서 제외한다. token·endpoint identity·complete JSON/scalar/capture cap,
+  pagination shape/count 불일치와 child failure/timeout은 fail-close한다. `test-session-host-release-adapter-github-transport`가
+  Debug·ReleaseFast 실제 process와 injected executor에서 이를 검증한다. 이 leaf가 받는 GitHub CLI executable의 공급망 권위와
+  실제 release workflow의 선택·배선은 아직 증명하지 않는다.
+  transport와 component parser를 하나의 adapter observation으로 조립하는 executable, codesign·DMG 관측, canonical summary encoding,
+  release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte

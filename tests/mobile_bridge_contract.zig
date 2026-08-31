@@ -5393,12 +5393,58 @@ test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌�
     _ = feedControl(frame);
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteScreenShown.cells, bridge.remoteScreenShown());
+    // **커서도 그린다.** 조립기가 커서를 들고 있는데 폰이 안 꺼내 써서 원격 화면에는 커서가
+    // 아예 없었다 — 보는 사람이 그 세션이 어디에 서 있는지 알 수 없었다. 상태만 재면 «보인다»
+    // 고 해 놓고 안 그려도 초록이라, **그린 결과**를 본다.
+    try std.testing.expect(bridge.remoteCursorDrawn());
 
     // 나가면 목록으로 돌아가고, **그 화면을 그만 본다는 뜻**도 함께 선다.
     _ = bridge.maru_mobile_pop_screen();
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_remote_screen_state());
+}
+
+test "원격 화면은 run 이 든 색으로 그린다 — 색 있는 화면이 흑백으로 안 보인다" {
+    // **옛 판은 전부 `surface_fg` 한 색이었다.** host 는 색을 이미 실어 보내고 있었는데
+    // (`Run.fg`, 태그드 intent) 그리는 쪽이 안 썼다 — 색이 있는 TUI 가 통째로 흑백으로 보였다.
+    //
+    // **판정은 그린 quad 의 색으로 한다** — `remoteScreenShown()` 은 무엇을 그렸는지만 알고
+    // 무슨 색인지는 모른다. 실제로 그 값은 결함이 있는 동안에도 `.cells` 로 초록이었다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"host-backed\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const first = bridge.remoteRowCenter(0).?;
+    tapAt(first.x, first.y);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // 새빨간 글자를 실어 보낸다 — rgb intent 라 테마 해석에 안 흔들린다.
+    const tag = maru.session.screen_stream.ColorTag;
+    const red: u32 = (tag.rgb << tag.shift) | 0xFF0000;
+    const frame = try makeScreenFrameColored(std.testing.allocator, red);
+    defer std.testing.allocator.free(frame);
+    _ = feedControl(frame);
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.cells, bridge.remoteScreenShown());
+
+    // **푼 색을 본다.** 헤드리스에서는 글리프가 안 구워져 그린 quad 가 안 나오므로 픽셀로는 못
+    // 잰다 — 제품 경로가 실제로 계산한 값을 본다.
+    const fg = bridge.remoteLastFg() orelse return error.NoRemoteGlyphDrawn;
+    try std.testing.expectEqual(@as(u8, 255), fg.r);
+    try std.testing.expectEqual(@as(u8, 0), fg.g);
+    try std.testing.expectEqual(@as(u8, 0), fg.b);
 }
 
 test "원격 화면은 창을 통째로 덮는다 — 아래 터미널도 보조 키바도 비치면 안 된다" {
@@ -5478,8 +5524,13 @@ test "화면을 원할 때 그 바이트는 ndjson 파서로 안 간다" {
 
 /// `maru attach --stream` 이 흘리는 프레임 하나(한 글자 화면). 프레이밍은 세션 호스트 §8 이 정했다.
 fn makeScreenFrame(a: std.mem.Allocator) ![]u8 {
+    return makeScreenFrameColored(a, 0);
+}
+
+/// 색을 실은 프레임. `fg` 는 stream 의 **태그드 색 의도**다(0 이면 default).
+fn makeScreenFrameColored(a: std.mem.Allocator, fg: u32) ![]u8 {
     const stream = maru.session.screen_stream;
-    var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1 }};
+    var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1, .fg = fg }};
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(a);
     const meta = try stream.encodeScreenMeta(a, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{

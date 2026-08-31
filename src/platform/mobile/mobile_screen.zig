@@ -164,6 +164,12 @@ pub const Screen = struct {
     pub fn rowRuns(self: *const Screen, row: u16) []const stream.Run {
         return self.inner.rowRuns(row);
     }
+
+    /// 원격 커서(칸·보임·모양). **조립기가 이미 들고 있었는데 폰이 안 꺼내 썼다** — 그래서 원격
+    /// 화면에 커서가 아예 안 그려졌고, 보는 사람은 그 세션이 어디에 서 있는지 알 수 없었다.
+    pub fn cursor(self: *const Screen) stream.Cursor {
+        return self.inner.cursor;
+    }
 };
 
 test "이미지 재조립 상한이 폰 값이다 — 데스크톱 예산을 안 든다" {

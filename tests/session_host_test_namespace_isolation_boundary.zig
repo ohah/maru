@@ -99,8 +99,22 @@ test "macOS product smoke children bind workspace and session registry to one fi
         build,
         "fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") != null);
+    // **pid 를 안 쓴다.** 예전에는 `std.posix.system.getpid()` 를 요구했는데, `std.c.getpid` 를
+    // 참조하는 순간 build 스크립트가 libc 를 명시적으로 요구해 **Windows 빌드가 통째로 죽는다**
+    // (`build.zig` 의 그 함수 주석이 실측을 갖고 있다). 그래서 이식성 있는
+    // `std.Thread.getCurrentId()` 로 바뀌었는데 **이 게이트가 따라가지 않아** 코드와 정면으로
+    // 어긋난 채 남았다 — 두 요구가 배타적이라 어느 쪽으로도 통과할 수 없었다(2026-08-31).
+    //
+    // 지키려는 것은 «pid 를 어떻게 묻는가» 가 아니라 **«이 빌드 프로세스만의 자리를 갖는가»** 다.
+    // 그래서 그 식별자가 실제로 쓰이는지를 보고, **pid 계열은 둘 다 금지**한다 — 어느 쪽을 되살려도
+    // Windows 가 다시 죽는다.
+    // **철자가 아니라 뜻을 잰다.** 이 뿌리가 빌드 프로세스마다 유일한지가 계약이고, 그 유일성의
+    // 출처(pid·thread id)는 계약이 아니다 — 출처 철자를 박으면 이식성 수정마다 게이트가 거짓으로
+    // 빨개진다. 아래 한 줄이 그 계약이고, `getCurrentId` 는 지금의 출처일 뿐이라 함께 본다.
+    try std.testing.expect(std.mem.indexOf(u8, build, "/tmp/maru-product-test-{d}-{s}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.Thread.getCurrentId()") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "std.c.getpid()") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") == null);
     const product_smokes = [_][]const u8{
         "macos_divider_smoke",
         "macos_scrollbar_smoke",

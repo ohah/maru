@@ -404,6 +404,11 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     // 갱신한다. 화면 조회에만 맡기면, 사용자가 그 에이전트 Term 을 활성으로 한 번도 두지 않은 채
     // (예: 목록을 열자마자 diff 를 연 상태) 턴이 끝나면 폴백이 영영 비어 목록이 서지 않는다.
     git_ops.rememberAgentSession(self, identity);
+    // ⚠️ **원격 목록을 보는 동안에는 스냅샷을 뜨지 않는다**(RS2 적대적 검증 1회차 — 셋 중 가장 나쁜
+    // 자리다). 여기는 `add -A` 로 **작업트리를 통째로 임시 index 에 굳히는** 경로인데, `git_repo` 에 든
+    // 것이 원격 경로라 로컬에 우연히 같은 경로가 있으면 **그 로컬 트리**가 원격 세션의 턴 스냅샷으로
+    // 박힌다. 원격 턴의 변경분은 RS3·RS4 가 원격 축으로 다시 잇는다.
+    if (git_ops.scmTargetIsRemote(self)) return;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
     // 저장소 전환은 **그 세션의 링만** 비운다 — `RingMap.ringFor` 가 수확 시점에 판정한다(§6.1).

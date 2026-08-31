@@ -46,6 +46,7 @@ macOS 로컬 shell 1개 surface
 - [네이티브 편집기 구현 계획](plans/native-editor.md)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
+- [원격 SCM 단계 계획(RS1~RS4 — 원격 저장소 읽기·쓰기)](plans/remote-scm.md)
 - [파일 탐색기 트리 컴포넌트 이관 단계 계획](plans/file-tree-component.md)
 - [에이전트 훅 통합 단계 계획](plans/agent-hooks.md)
 - [에이전트 턴 변경분 단계 계획](plans/agent-turn-changes.md)

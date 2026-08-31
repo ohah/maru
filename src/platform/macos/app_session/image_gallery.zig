@@ -507,6 +507,13 @@ pub const Open = struct {
     uploaded: bool = false,
     /// 이 요청의 generation. 0 이면 도는 것이 없다 — `pixels` 가 비어 있는데 이 값도 0 이면 **실패**다.
     decoding: u64 = 0,
+    /// 지금 들고 있는 픽셀을 원본의 몇 분의 1 로 풀었나. **1 이면 더 선명해질 여지가 없다.**
+    decoded_subsample: u8 = 1,
+    /// 지금 도는 요청이 «원본으로 다시 풀기» 인가. 수확할 때 보던 자리를 지킬지 가른다.
+    upgrading: bool = false,
+    /// 원본으로 다시 풀기를 **이미 해 봤나**. 텍스처 상한 때문에 원본을 달라고 해도 `subsample > 1`
+    /// 로 돌아올 수 있어(계약 §5.3), `decoded_subsample` 만 보면 매 tick 다시 건다.
+    full_tried: bool = false,
     /// 「그때 무슨 얘기였나」. 열 때 **한 번만** 읽는다 — 매 프레임 파일을 열면 초당 60 번 IO 다.
     /// 빈 값은 「읽어 봤고 없었다」로 확정된 상태다(실측 6% 가 그렇다).
     context: [context_mod.max_context_bytes]u8 = undefined,
@@ -870,14 +877,33 @@ fn harvestOne(self: *AppSession) bool {
     // **크게 보기 것이 먼저다.** 두 요청은 같은 워커를 쓰므로 generation 으로 가른다.
     if (self.image_gallery.open) |*op| {
         if (op.decoding != 0 and r.generation == op.decoding) {
+            // **못 풀었으면 가진 것을 지킨다.** 승급은 덤이라, 실패했다고 보고 있던 그림을
+            // 버리면 화면이 빈다(원본 디코드는 크기 때문에 실제로 실패할 수 있다).
+            if (op.upgrading and r.pixels.len == 0) {
+                op.decoding = 0;
+                op.upgrading = false;
+                return true;
+            }
+            const was_upgrade = op.upgrading and op.pixels.len > 0 and op.width > 0 and r.width > 0;
+            const old_w = op.width;
             op.decoding = 0;
+            op.upgrading = false;
             self.allocator.free(op.pixels);
             op.width = r.width;
             op.height = r.height;
             op.pixels = r.pixels;
             r.pixels = &.{}; // 소유가 넘어갔다
+            op.decoded_subsample = r.subsample;
             op.uploaded = false;
-            op.view = .{}; // 새 픽셀이면 fit 부터 — 옛 배율은 다른 이미지의 것이다
+            if (was_upgrade) {
+                // **보던 자리를 지킨다.** 같은 그림을 더 선명하게 다시 푼 것이므로 fit 으로 되돌리면
+                // 확대해 보던 사람을 처음으로 끌고 간다. `pan` 은 화면 px 라 그대로 두고, `scale` 은
+                // 이미지 px 당 화면 px 라 텍스처가 커진 만큼 나눈다 — 그리는 크기가 그대로다.
+                op.view.scale = op.view.scale * @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(r.width));
+                op.view = image_view.clamp(op.view, viewportRect(self), op.width, op.height);
+            } else {
+                op.view = .{}; // 새 픽셀이면 fit 부터 — 옛 배율은 다른 이미지의 것이다
+            }
             self.metal_dirty = true;
             return true;
         }
@@ -1068,17 +1094,34 @@ pub fn closeOpen(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-/// 크게 보기의 원본을 워커에 건다. 워커가 바쁘면 다음 tick 이 다시 건다(`poll`).
+/// 크게 보기의 그림을 워커에 건다. 워커가 바쁘면 다음 tick 이 다시 건다(`poll`).
 ///
-/// **`target_side = 0` 이 썸네일과 다른 전부다** — 목표 크기를 안 주면 `image_scale` 이 텍스처 상한만
-/// 지키고 되도록 원본에 가깝게 푼다(계약 §5.3). 상한을 못 맞추는 이미지는 애초에 안 푼다.
+/// **먼저 뷰포트에 맞춰 푼다.** 예전에는 `target_side = 0`(원본)이었는데, 실측 최대 이미지
+/// (1440×14771 = 21.3 MP)를 열면 **85 MB** 를 상주·업로드해 400 px 도크에 그렸다 — 200 배 낭비다
+/// (계약 §5.3 이 「뷰포트 기준 상한이 후속」이라고 적어 둔 그 자리).
+///
+/// **확대하면 그때 원본으로 다시 푼다.** `scale > 1` 은 「가진 픽셀을 늘려 그리는 중」이라는 뜻이고,
+/// 그때부터는 원본이 실제로 더 보여 준다. 한 번 원본으로 올라가면 `decoded_subsample == 1` 이라
+/// 다시는 안 건다 — 되풀이가 없다.
 pub fn ensureOpen(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const op = if (self.image_gallery.open) |*o| o else return;
-    if (op.pixels.len > 0 or op.decoding != 0) return;
+    if (op.decoding != 0) return;
     if (self.image_gallery.chain.isEmpty()) return;
     if (op.hit_index >= self.image_gallery.count()) return;
     const backend = decodeBackendPtr(self) orelse return;
+
+    const have = op.pixels.len > 0;
+    // 이미 원본으로 풀었거나(더 선명해질 여지 없음) 아직 늘려 그리지 않으면 그대로 둔다.
+    const want_full = have and !op.full_tried and op.decoded_subsample > 1 and op.view.scale > 1.0;
+    if (have and !want_full) return;
+
+    const vp = viewportRect(self);
+    const target: u32 = if (want_full) 0 else blk: {
+        const side = @max(vp.w, vp.h);
+        if (!(side > 0)) break :blk 0; // 아직 자리를 모른다 — 상한만 지켜 푼다
+        break :blk @intFromFloat(side);
+    };
 
     const hit = self.image_gallery.hits.items[op.hit_index];
     const path = pathFor(self, hit) orelse return;
@@ -1086,10 +1129,12 @@ pub fn ensureOpen(self: *AppSession) void {
         path,
         hit.data_offset,
         hit.data_len,
-        0, // 원본 배율(상한 안에서)
+        target,
         op.hit_index,
     )) |generation| {
         op.decoding = generation;
+        op.upgrading = want_full;
+        if (want_full) op.full_tried = true;
     }
 }
 

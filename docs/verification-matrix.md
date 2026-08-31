@@ -974,12 +974,12 @@ aggregate core에 전달한다. canonical bytes를 expected identity에 다시 b
 identity의 GitHub provenance, signed leaf 생산, artifact attestation이나 release workflow 배선을 완료로 바꾸지 않는다.
 special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`가 소유하며 이 조립 gate의 직접 증거가 아니다.
 
-U5 Release DMG pathname/mount authority는 **구현 전**이다. 종료 gate
+U5 Release DMG pathname/mount authority는 **구현**됐다. 종료 gate
 `test-session-host-release-adapter-dmg-authority`는 `max_dmg_bytes` 이하 expected size/SHA, exclusive 0700 work-directory,
 no-follow source→0600 private DMG bounded streaming copy와 source/copy identity·SHA 결속, read-only fixed mount, exact `Maru.app/Contents/Info.plist` 및
 `Maru.app/Contents/MacOS/maru-macos-app` no-follow traversal, Apple transport 전후 mount/product identity 재검증을
-Debug·ReleaseFast에서 고정한다. actual-DMG macOS E2E는 성공과 command 실패 모두 captured `/dev/disk*` identity를 detach하고
-private mount/work-directory residue가 0임을 증명해야 한다. 이 gate가 green이어도 GitHub 관측·manifest·attestation·evidence
+Debug·ReleaseFast component 9개로 고정한다. actual-DMG macOS E2E는 성공과 Apple command 실패 모두 captured
+`/dev/disk*` identity를 detach하고 private mount/work-directory residue가 0임을 증명한다. 이 gate가 green이어도 GitHub 관측·manifest·attestation·evidence
 aggregate의 최종 조립과 release workflow 배선은 별도이며 U5 완료 판정을 바꾸지 않는다.
 
 U5의 non-empty 성공 경로는 `test-session-host-signed-upgrade`로 자동 실행할 수 있다. 이 opt-in gate는 strict

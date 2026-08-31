@@ -280,7 +280,7 @@ pub fn view(
             // 안내는 상태 진술이라 강조색을 쓰지 않는다(빈 안내와 같은 톤).
             .notice => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .muted_fg, .supporting, false),
             // **막힌 이유는 다르다.** 누른 동작이 안 됐다는 말이라 중립 진술과 같은 톤이면 안 읽힌다.
-            .blocker => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .danger_fg, .supporting, false),
+            .blocker => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .danger_text, .supporting, false),
         }
         // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
         // 겹침은 여기서 덮어서가 아니라 **`repoRow`가 그 자리의 글자를 안 그려서** 안 난다(그 함수 설명).
@@ -3728,7 +3728,7 @@ test "SCMB 막힌 이유는 붉고, 중립 안내는 흐리다" {
     const draws = try renderFixture(&storage, .{}, &items);
 
     const blocker = findText(draws, "커밋 메시지를 입력하세요") orelse return error.MissingBlocker;
-    try testing.expectEqual(tokens.ColorRole.danger_fg, blocker.role);
+    try testing.expectEqual(tokens.ColorRole.danger_text, blocker.role);
 
     const notice = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, notice.role);

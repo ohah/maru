@@ -944,6 +944,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-small-font")) return .scm_small_font;
     if (std.mem.eql(u8, raw, "dock-over-status-bar")) return .dock_over_status_bar;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
+    if (std.mem.eql(u8, raw, "scm-blocker")) return .scm_blocker;
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
     if (std.mem.eql(u8, raw, "file-tree-scrolled")) return .file_tree_scrolled;
@@ -965,6 +966,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_small_font => "scm-small-font",
         .dock_over_status_bar => "dock-over-status-bar",
         .scm_commit_edit => "scm-commit-edit",
+        .scm_blocker => "scm-blocker",
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",
         .file_tree_scrolled => "file-tree-scrolled",

@@ -114,6 +114,13 @@ pub const ScenarioId = enum {
     /// 그려지고, 그 중 무엇도 단위 테스트가 "자리"까지 보지는 못한다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다.
     scm_commit_edit,
+    /// **막힌 이유의 자리와 색**(2026-08-31 사용자 제보). 커밋이 거절되면 그 이유가 **그 저장소의
+    /// 버튼 바로 아래**에 붉게 서는지 픽셀로 본다 — 예전에는 목록 맨 위에 중립 톤으로 떠서, 아래쪽
+    /// 워크트리에서 커밋하면 어느 저장소 얘기인지도 왜 안 됐는지도 화면에서 안 이어졌다.
+    ///
+    /// **중립 안내를 같은 캡처에 둔다.** 색을 가른다는 것은 둘을 나란히 놓아야 보인다 — 하나만 찍으면
+    /// "붉다" 는 알아도 "구별된다" 는 모른다.
+    scm_blocker,
     /// **히스토리 탭**(P4·P4b) — 커밋 줄과 **펼친 커밋의 파일 줄**이 한 캡처에 든다. 이 탭에는 Lab
     /// 시나리오가 하나도 없었고(`scm_rows` 는 전부 변경 사항 탭이다), 그래서 커밋 줄의 두 단 배치·ref
     /// 칩·펼친 파일 행의 증감은 **사용자 캡처로만** 보였다. 실제로 그 목록은 파일마다 증감이 빈 채로
@@ -324,7 +331,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send => buildContextMenuFrame(scenario, tokens, buffers),
@@ -1096,7 +1103,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1297,7 +1304,18 @@ fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
 }
 
 fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
-    const items = [_]scm_dock.types.Item{
+    // **막힌 이유는 그 저장소의 버튼 아래에 선다**(2026-08-31). 목록을 짧게 두어 그 관계가 한눈에
+    // 보이게 하고, 중립 안내를 **바로 아래** 놓아 색이 갈리는지 같은 캡처에서 견준다.
+    const blocker_items = [_]scm_dock.types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/lab-fixture", .primary = true, .count = 1 } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
+        .{ .blocker = "커밋 메시지를 입력하세요" },
+        .{ .notice = "변경 사항 없음" },
+        // 두 번째 저장소 — **그 아래에는 안 선다**(사유는 한 저장소 것이다).
+        .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
+    };
+    const default_items = [_]scm_dock.types.Item{
         // 저장소·워크트리 머리 줄(P3d-②). 같은 이름의 두 줄을 사용자가 구별해야 하므로 **종류가
         // 글리프로** 보여야 하고, 접힌 줄도 개수를 갖는다 — 그 셋이 한 캡처에 든다.
         .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/lab-fixture", .primary = true, .count = 4 } },
@@ -1323,6 +1341,8 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 접힌 워크트리 — 자기 줄과 개수만 있고 그 아래 행이 없다(host가 안 넣는다).
         .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
     };
+    const items: []const scm_dock.types.Item =
+        if (scenario.id == .scm_blocker) &blocker_items else &default_items;
     const props = scm_dock.types.Props{
         // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.
         .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
@@ -1332,7 +1352,7 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 되고, 작은 셀 조합에서 실제로 2px 이 모자랐다(예약 82px 대 실제 84px).
         .advance_milli_per_point = scenario.advance_milli_per_point,
         .snapshot_generation = 1,
-        .items = &items,
+        .items = items,
         .branch = "feat/lab-fixture",
         .has_ab = true,
         .ahead = 2,

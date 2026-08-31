@@ -2501,6 +2501,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-apple-product`가 Debug·ReleaseFast에서 mismatch·duplicate·malformed·cap과 allocation
   fail-index unwind를 검증한다. 이
   component green은 실제 command argv 실행, DMG no-follow extraction 또는 receipt 진위를 증명하지 않는다.
+  `release_adapter_apple_transport.zig`는 caller가 executable/option을 고르지 못하는 closed command vocabulary로 system
+  `plutil`/`codesign`/`lipo`/`xcrun stapler`/`spctl`의 exact argv를 만들고, inherited environment가 없는 bounded child에서
+  capture 또는 exit-0 receipt를 얻어 전부 성공한 경우에만 Apple product `Captures`를 조립한다.
+  `test-session-host-release-adapter-apple-transport`가 Debug·ReleaseFast에서 exact argv·empty environment·command capture,
+  output cap·timeout·child failure와 부분 관측 비게시를 검증한다. pathname no-follow authority와 DMG extraction은 포함하지 않는다.
   transport와 component parser를 하나의 adapter observation으로 조립하는 executable, 실제 codesign·DMG 관측, canonical summary encoding,
   release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가

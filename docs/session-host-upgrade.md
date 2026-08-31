@@ -793,6 +793,20 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   bounded capture된 bytes와 command success receipt의 의미를 검증할 뿐, pathname 권위·DMG no-follow 추출·실제 command argv
   배선이나 receipt 진위를 대신하지 않는다. 성공 경로의 allocation fail-index는 전수 unwind한다.
 
+  Apple command transport는 `release_adapter_apple_transport.zig` 한 곳이 닫힌 command vocabulary와 argv를 소유한다.
+  caller는 executable이나 임의 option을 넘기지 않고, DMG 추출 경계가 먼저 만든 absolute app bundle·Info.plist·제품
+  executable·DMG pathname만 넘긴다. transport는 `/usr/bin/plutil -convert json -o - <Info.plist>`,
+  `/usr/bin/codesign -d --verbose=4 <app>`, `/usr/bin/codesign -d -r- --verbose=0 <app>`,
+  `/usr/bin/lipo -archs <executable>`의 bounded capture와
+  `/usr/bin/codesign --verify --strict --deep <app>`, `/usr/bin/xcrun stapler validate <app|dmg>`,
+  `/usr/sbin/spctl -a -t open --context context:primary-signature -v <dmg>`의 exit-0 receipt만 만든다. 모든 child는
+  inherited environment 없이 실행하며 stdin `/dev/null`, monotonic deadline, output cap, process-group kill/reap을
+  `bounded_process.zig`에서 공유한다. capture와 receipt는 모두 성공해야만 `release_adapter_apple_product.Captures`로
+  조립되며 중간 실패는 부분 관측을 반환하지 않는다. focused gate
+  `test-session-host-release-adapter-apple-transport`는 exact executable/argv/empty environment, command별 capture,
+  cap·timeout·child failure와 receipt all-or-nothing을 Debug·ReleaseFast에서 검증한다. pathname의 no-follow authority와
+  DMG mount/extraction은 별도 후속 경계이므로 transport 성공만으로 provenance를 주장하지 않는다.
+
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.

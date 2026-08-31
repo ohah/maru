@@ -524,6 +524,17 @@ const cases = [_]Case{
         .contract = "막힌 이유는 그 저장소의 커밋 버튼 바로 아래에 붉게 서고, 중립 안내는 흐린 채 그 아래이며, 다음 저장소 밑에는 안 선다",
         .rect = .{ .x = 0, .y = 120, .w = 480, .h = 115 },
     },
+    // **트리 위 고정 chrome 을 새는가**(2026-08-31 사용자 제보). 하네스가 띠를 심고 트리를 그만큼
+    // 내렸으므로, 반쯤 걸친 첫 행의 라벨이 clip 을 안 받으면 **그 띠 위에 읽히는 채로** 나타난다.
+    //
+    // **crop 은 띠와 그 아래 첫 행까지**다 — 띠만 보면 «비어 있다» 는 알아도 «트리가 제자리에 있다» 는
+    // 모르고, 그러면 트리가 통째로 사라져도 초록이 된다.
+    .{
+        .name = "file-tree-clips-at-viewport-top",
+        .capture = "file-tree-over-chrome.ppm",
+        .contract = "반쯤 걸친 첫 행의 라벨이 트리 위 고정 chrome 을 넘지 않고, 트리는 그 아래에서 제자리에 선다",
+        .rect = .{ .x = 0, .y = 0, .w = 260, .h = 60 },
+    },
     .{
         .name = "editor-caret-bar",
         .capture = "editor-caret-bar.ppm",

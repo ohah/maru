@@ -442,7 +442,13 @@ pub fn main(init: std.process.Init) !void {
     // 빈 화면이었다. 이제 편집기 시나리오는 `editor_ops.background_layer`를 그대로 태우므로,
     // 그 값이 잘못되면 **이 캡처가 통째로 빈다**(실측: non-background 9,203 → 2,391).
     const quad_layer = labQuadLayer(scenario_id);
-    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, quad_layer);
+    // **트리 위 고정 chrome 자리**(`file_tree_over_chrome`). 하네스가 띠를 심고 컴포넌트를 그만큼
+    // 내려서, 위로 새는 잉크가 **캔버스 밖이 아니라 그 띠 위**에 나타나게 한다 — `file_tree_scrolled`
+    // 는 트리를 원점에 그려 새는 것이 캡처 밖이었고, 그래서 그 결함이 6일간 초록이었다(2026-08-31).
+    //
+    // **quad·glyph·clip 이 이 값 하나를 쓴다.** 셋 중 하나만 옮기면 캡처가 제품과 다른 그림이 된다.
+    const tree_band_h: u32 = if (scenario_id == .file_tree_over_chrome) 34 else 0;
+    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, tree_band_h, &gpu_quads, quad_layer);
     // **여기까지가 컴포넌트가 낸 quad 다.** 아래에서 하네스가 심는 이웃(사이드바 밴드·상태바 띠)은
     // 컴포넌트 밖 표면이라 다른 층에 앉는다 — 그래서 층 불변식은 이 접두사에만 건다(아래 판정).
     const component_quad_count = gpu_quads.items.len;
@@ -457,6 +463,35 @@ pub fn main(init: std.process.Init) !void {
     // (§5.2)이 보는 자리를 밴드가 덮어 두 계약이 한 사각형에 섞인다 — 그러면 실패했을 때 strip이 샌 것인지
     // 밴드가 샌 것인지 사람이 캡처를 열어 봐야 안다. 절반만 덮으면 왼쪽은 밴드 경계, 오른쪽은 strip 경계를
     // 각자 순수하게 본다. 이 시나리오가 증명하는 것은 밴드의 폭이 아니라 **잘리는 y** 하나다.
+    if (scenario_id == .file_tree_over_chrome) {
+        // 트리 **위** 고정 chrome(제품의 뷰 바). `dock_over_status_bar` 가 아래쪽 경계를 보는 것과
+        // 짝이고, 이쪽이 **위쪽** 경계다 — 실제 결함이 난 자리다(2026-08-31 사용자 제보).
+        //
+        // 색은 배경·트리와 갈리게 한 단 밝힌다(세 톤이라야 경계가 보인다 — 옆 시나리오와 같은 근거).
+        const base = tokens.palette.get(.surface_bg);
+        const lift = struct {
+            fn f(v: u8, by: u32) u32 {
+                return @min(@as(u32, v) + by, 255);
+            }
+        }.f;
+        const band_bg: u32 = 0xFF00_0000 | (lift(base.r, 40) << 16) | (lift(base.g, 40) << 8) | lift(base.b, 40);
+        try gpu_quads.append(allocator, .{
+            .x = 0,
+            .y = 0,
+            .w = viewport.width,
+            .h = @floatFromInt(tree_band_h),
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = band_bg,
+            .fill_color1 = band_bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            // under — 트리 quad 보다 아래. **글자는 이 위에 그려진다**(quad 는 글자를 못 덮는다,
+            // `draw.zig`) — 그래서 라벨이 clip 을 안 받으면 이 띠 위에 **읽히는 채로** 나타난다.
+            .layer = 0,
+        });
+    }
+
     if (scenario_id == .dock_over_status_bar) {
         // 상태바 띠 — **도크 아래 이웃**이다. 도크가 자기 뷰포트에서 멈추지 않으면 목록 행이 이 띠를
         // 덮고, crop 이 그것을 본다. 색은 배경·도크와 갈리게 한 단 밝힌다(세 톤이라야 경계가 보인다).
@@ -709,7 +744,9 @@ pub fn main(init: std.process.Init) !void {
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
-            .y = @intFromFloat(@max(rect.y, 0)),
+            // **원점과 같은 값만큼 내린다.** `glyphClipFor` 는 `scroll_clipped` 글리프에 이 사각형을
+            // **그대로** 준다(원점을 안 더한다) — 제품도 host 가 `content.y` 를 더해 넘긴다.
+            .y = tree_band_h + @as(u32, @intFromFloat(@max(rect.y, 0))),
             .w = @intFromFloat(@max(rect.width, 0)),
             .h = @intFromFloat(@max(rect.height, 0)),
         };
@@ -719,7 +756,7 @@ pub fn main(init: std.process.Init) !void {
         render_frame,
         renderer_state.atlas.config,
         0,
-        0,
+        tree_band_h,
         scroll_clip,
         // artifact를 이번 프레임의 스크롤 위치에서 바로 셰이핑했으므로 차이가 없다(제품은 캐시
         // 재사용 시에만 0이 아니다).
@@ -963,6 +1000,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
     if (std.mem.eql(u8, raw, "file-tree-scrolled")) return .file_tree_scrolled;
+    if (std.mem.eql(u8, raw, "file-tree-over-chrome")) return .file_tree_over_chrome;
     if (std.mem.eql(u8, raw, "sort-toggle-hover")) return .sort_toggle_hover;
     if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
     if (std.mem.eql(u8, raw, "context-menu-checked")) return .context_menu_checked;
@@ -985,6 +1023,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",
         .file_tree_scrolled => "file-tree-scrolled",
+        .file_tree_over_chrome => "file-tree-over-chrome",
         .sort_toggle_hover => "sort-toggle-hover",
         .sort_toggle_pressed => "sort-toggle-pressed",
         .context_menu_checked => "context-menu-checked",

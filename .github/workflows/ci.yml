@@ -311,7 +311,10 @@ jobs:
     needs: changes
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
-    timeout-minutes: 20
+    # 전수 스위트가 커지면서 2026-08-31 PR #2938 콜드 러너에서 출력된 테스트는 전부 통과했지만
+    # job이 20분 18초에 취소됐다. PR 캐시는 restore-only라 재실행으로 같은 구조를 고칠 수 없다.
+    # bundled CLI 제품 gate와 같은 35분으로 성공 경로를 수용하되 실제 hang은 유한하게 닫는다.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

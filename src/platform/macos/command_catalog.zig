@@ -373,6 +373,34 @@ test "chordForGlobalAction: 사용자 global_bindings만 스캔(빌트인 기본
     try std.testing.expect(chordForGlobalAction(&bindings, .toggle_quick_terminal) == null);
 }
 
+test "KB_SYM3 팔레트가 편집기 액션의 chord 를 표시한다 — 배선하면 화면이 따라온다" {
+    // **팔레트 행의 chord 는 손으로 적는 것이 아니라 `default_app_bindings` 역스캔 결과다.**
+    // 그래서 표에 chord 를 더하면 화면이 저절로 따라오는데, 그 「저절로」가 지금까지
+    // 이 액션들에 대해 **한 번도 검증되지 않았다**(2026-08-31). 배선을 지우고도 팔레트가
+    // 전과 같아 보이면 아무도 못 알아챈다.
+    var buf: [max_chord_display_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+
+    // **`⇧⌘O` 이지 `⌘⇧O` 가 아니다** — `formatChord` 는 애플 표준 순서 `⌃⌥⇧⌘` 를 따른다.
+    // 처음에 `⌘⇧O` 로 적었다가 이 판정자에 잡혔다(2026-09-01). 문서·PR 에도 같은 오기가 있었다.
+    try std.testing.expectEqualStrings("⇧⌘O", formatChord(chordForAction(resolver, .toggle_symbol_picker).?, &buf));
+    try std.testing.expectEqualStrings("⌘Z", formatChord(chordForAction(resolver, .editor_undo).?, &buf));
+    try std.testing.expectEqualStrings("⌘S", formatChord(chordForAction(resolver, .editor_save).?, &buf));
+
+    // **chord 가 없는 편집기 액션은 null 이어야 한다** — 없는 것을 있다고 그리면 사용자가
+    // 안 되는 키를 누른다. 이 여섯이 왜 비어 있는지는 docs/configuration-input.md 가 소유한다.
+    inline for (.{ Action.fold_all, Action.fold_level_1, Action.fold_level_2, Action.fold_level_3 }) |a| {
+        try std.testing.expect(chordForAction(resolver, a) == null);
+    }
+
+    // **팔레트에 그 항목이 실제로 있다** — chord 만 맞고 행이 없으면 닿을 길이 여전히 없다.
+    var found = false;
+    for (entries) |entry| {
+        if (std.meta.eql(entry.action, Action.toggle_symbol_picker)) found = true;
+    }
+    try std.testing.expect(found);
+}
+
 test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {
     var buf: [max_chord_display_len]u8 = undefined;
     const resolver: KeyBindingResolver = .{};

@@ -3333,6 +3333,11 @@ pub const AppSession = struct {
         return debug_fixtures.maybeDebugOpenSymbolPicker(self);
     }
 
+    /// 커맨드 팔레트 캡처 훅(§7.5 chord 표시 검증). 위와 같은 자리·같은 규율이다.
+    pub fn maybeDebugOpenPalette(self: *AppSession) void {
+        return debug_fixtures.maybeDebugOpenPalette(self);
+    }
+
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
     }
@@ -5672,6 +5677,8 @@ pub const AppSession = struct {
     debug_file_panel_opened: bool = false,
     debug_symbol_picker_opened: bool = false,
     debug_symbol_picker_tries: u16 = 0,
+    debug_palette_opened: bool = false,
+    debug_palette_tries: u16 = 0,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
     debug_native_editor_opened: bool = false,
     /// 캡처 전용 훅(`MARU_OPEN_SCM_DIFF`)이 비교를 이미 열었는가. **성공했을 때만** 세운다 —
@@ -9162,7 +9169,9 @@ pub const AppSession = struct {
     /// 현재 쿼리로 카탈로그를 다시 필터해 palette_filtered를 채우고, 컴포넌트의 result_count를 동기화한다(selected는
     /// 맨 위로 — 증분 검색 관용). 타이핑·Backspace·초기 열기마다. OOM이면 목록을 비워 안전하게 둔다. find의
     /// recomputeFind에 대응(검색은 platform이, UI 동기화는 컴포넌트가).
-    fn recomputePalette(self: *AppSession) void {
+    /// 캡처 훅이 쿼리를 넣은 뒤 다시 필터하려면 이 자리가 필요하다(`recomputeSymbolPicker` 와 같은 결로 공개).
+    /// `palette.show()` 가 입력을 비우므로 **여는 것보다 먼저** 쿼리를 넣어 둘 수는 없다.
+    pub fn recomputePalette(self: *AppSession) void {
         command_palette.filter(self.allocator, self.chrome_host.palette.input.query.items, &self.palette_filtered) catch {
             self.palette_filtered.clearRetainingCapacity();
         };

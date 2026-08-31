@@ -105,7 +105,10 @@ const inventory = [_]Entry{
     // 적대적 검증이 실제로 «사유 없이 끝나는 막다른 길» 셋을 그 규칙으로 잡아냈다 — 늘어난 넷 중
     // 셋이 그것이다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 26 },
-    .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 3 },
+    // 캡처 훅이 240 tick 안에 못 열었을 때 **왜** 못 열었는지 뱉는 한 줄이 늘었다(2026-09-01).
+    // 표시가 아니라 **하니스 진단**이다 — 사용자는 이 문장을 볼 일이 없고, 조용히 포기하면
+    // 틀린 그림이 PR 의 증거가 되기 때문에 넣었다(§7 셋째 갈래).
+    .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 4 },
     // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
     // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
     // 수 있게 한 줄 찍는다 — 실패했을 때만 나오고 화면에는 영영 안 간다.
@@ -237,7 +240,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 211;
+const header_total = 212;
 const header_config_total = 54;
 
 comptime {

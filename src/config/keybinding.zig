@@ -257,6 +257,11 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'Z' } }, .action = .editor_undo }, // Cmd+Z
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'Z' } }, .action = .editor_redo }, // Cmd+Shift+Z
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'S' } }, .action = .editor_save }, // Cmd+S
+    // ⇧⌘O: 파일 안 심볼로 이동(VSCode 와 같다). 위 셋과 **같은 부류다** — 기본 표 어디에도 없어
+    // fallthrough 에서 `.ignored` 였고(누르면 아무 일도 안 일어남), 컨텍스트 게이트는 액션 쪽이
+    // 이미 갖고 있다(`symbolPickerReadiness` 가 `.not_editor` 를 먼저 답한다). `⌘O` 는
+    // `open_file_panel` 이 쓰지만 shift 유무로 modifier 를 정확 비교하므로 갈린다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'O' } }, .action = .toggle_symbol_picker }, // Cmd+Shift+O
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).
@@ -797,6 +802,105 @@ test "built-in app bindings: 편집기 편집 일습이 chord 를 갖는다 (⌘
         ResolvedKey.ignored,
         try unbound_z.resolve(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } }, &buffer, .{}),
     );
+}
+
+test "KB_SYM1 ⇧⌘O 가 심볼 피커를 부르고 ⌘O 는 그대로다 (파일 패널)" {
+    // **기능이 서 있는데 손이 안 닿는 자리를 또 만들 뻔했다** — 심볼 피커를 세우면서 chord 를 안 붙여
+    // 팔레트 전용으로 남겼다(2026-08-31). `⌘Z` 셋과 **같은 부류**라 컨텍스트 없이 붙는다.
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+
+    const o = try resolver.resolve(.{ .key = .{ .char = 'o' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.toggle_symbol_picker, o.app_action);
+
+    // **`⌘O` 를 안 뺏는다.** shift 유무는 modifier 정확 비교로 갈리므로 파일 패널이 그대로 열려야 한다 —
+    // `.eql` 이 부분 일치였다면 심볼 피커가 `⌘O` 까지 먹는다.
+    //
+    // **이 한 줄이 유일한 방어선이다** — `⌘O` 를 심볼 피커에 주는 변이를 잡는 판정자가 저장소에
+    // 이것뿐이다(KM27·KM29 로 확인, 2026-09-01). 중복으로 보여도 지우지 말 것.
+    const plain = try resolver.resolve(.{ .key = .{ .char = 'o' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.open_file_panel, plain.app_action);
+
+    // **끌 수 있어야 한다** — 새 기본 chord 가 강제가 되면 안 된다.
+    const unbound: KeyBindingResolver = .{ .unbinds = &.{
+        .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'O' } },
+    } };
+    try std.testing.expectEqual(
+        ResolvedKey.ignored,
+        try unbound.resolve(.{ .key = .{ .char = 'o' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{}),
+    );
+}
+
+/// Option 만 쓰는(수식자로 `⌘`·`⌃` 을 함께 안 쓰는) 조합인가.
+///
+/// 터미널에서 이런 조합은 **Meta/ESC 입력**이라, 빌트인이 가져가면 그 입력이 죽는다.
+/// 판정과 그 판정을 검사하는 자리가 갈라져 있어야 아래 판정자가 공허해지지 않는다.
+fn isOptionOnly(m: terminal.ModifierSet) bool {
+    return m.option and !m.command and !m.control;
+}
+
+test "KB_SYM4 ⇧⌘O 는 웹 편집 필드에 양보하지 않는다 — 양보 목록은 일곱 글자다" {
+    // **이 자리는 양쪽으로 조용히 틀릴 수 있다.** 양보 목록에 `O` 가 들어가면 웹 편집 필드에서
+    // 심볼 피커가 죽고(그 문서는 편집기가 아니니 아무 일도 안 일어나는 것처럼 보인다),
+    // `Z`·`S` 가 빠지면 주소창·CM6 의 되돌리기·저장이 편집기 액션에 뺏긴다. 둘 다 **무동작**으로
+    // 나타나서 화면만 보면 구별이 안 된다 — 그래서 여기서 목록 자체를 고정한다.
+    const resolver: KeyBindingResolver = .{};
+
+    // `⇧⌘O` 는 양보 목록 밖이라 빌트인이 가져간다. 편집기가 아닌 Term 이면 액션 쪽이 거절한다
+    // (`symbolPickerReadiness` 가 `.not_editor`) — 뺏는 것이 아니라 갈 곳이 없는 것이다.
+    const o = terminal.KeyEvent{ .key = .{ .char = 'O' }, .modifiers = .{ .command = true, .shift = true } };
+    try std.testing.expectEqual(WebKeyRoute.app_action, resolver.resolveWeb(o, true));
+
+    // 일곱 글자는 그대로 양보한다 — 이 줄이 깨지면 웹 편집이 조용히 죽는다.
+    inline for (.{ 'a', 'c', 'f', 's', 'v', 'x', 'z' }) |c| {
+        const ev = terminal.KeyEvent{ .key = .{ .char = c }, .modifiers = .{ .command = true } };
+        try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(ev, true));
+    }
+
+    // **편집 불가 문서에서는 양보가 없다** — 양보는 「편집 중일 때」의 규칙이다.
+    //
+    // **`o` 로 재면 공허하다.** `⇧⌘O` 는 애초에 양보 목록 밖이라 `editable` 이 무엇이든
+    // `.web_editor` 가 안 나온다 — 그래서 `editable` 검사를 통째로 없애는 변이가 살아남았다
+    // (KM31, 2026-09-01). **목록 안에 있는 chord 로 재야** 그 조건이 일하는지 보인다.
+    const z = terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } };
+    try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(z, true));
+    try std.testing.expect(resolver.resolveWeb(z, false) != .web_editor);
+    try std.testing.expect(resolver.resolveWeb(o, false) != .web_editor);
+}
+
+test "KB_SYM2 기본 표에 Option 단독 chord 가 없다 — 터미널 Meta 입력을 안 뺏는다" {
+    // **이 규율이 `toggle_editor_wrap` 을 막고 있다.** VSCode 는 줄바꿈 토글이 `⌥Z` 인데, Option 단독
+    // 조합은 터미널에서 Meta/ESC 입력이라 빌트인이 가져가면 그 입력이 죽는다. 지금 기본 표의 모든
+    // `⌥` 는 `⌘` 과 함께이고, 그것이 **우연이 아니라 결정**임을 여기서 고정한다
+    // (docs/configuration-input.md "편집기 전용 action").
+    //
+    // **먼저 판정기가 실제로 잡는지 본다(양성 대조).** 이 단언이 없으면 `isOptionOnly` 를 `false` 로
+    // 죽여도 아래 순회가 **공허하게 통과**한다 — 부정 단언은 검사를 끄는 것과 통과가 구별되지 않는다
+    // (변이 KM5 가 그렇게 살아남았다, 2026-08-31).
+    try std.testing.expect(isOptionOnly(.{ .option = true }));
+    try std.testing.expect(isOptionOnly(.{ .option = true, .shift = true })); // shift 는 Meta 를 안 없앤다
+    try std.testing.expect(!isOptionOnly(.{ .option = true, .command = true })); // ⌥⌘ 은 쓰고 있다
+    try std.testing.expect(!isOptionOnly(.{ .option = true, .control = true }));
+    try std.testing.expect(!isOptionOnly(.{ .command = true }));
+
+    // 그 판정기로 기본 표를 훑는다. 이 판정자가 깨지는 날은 위 결정을 바꾸는 날이고,
+    // 그때는 저 문서를 먼저 고쳐야 한다.
+    var offenders: usize = 0;
+    var scanned: usize = 0;
+    for (default_app_bindings) |binding| {
+        scanned += 1;
+        if (isOptionOnly(binding.chord.modifiers)) {
+            std.debug.print("Option 단독 chord 가 생겼다: action = {s}\n", .{@tagName(binding.action)});
+            offenders += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), offenders);
+
+    // **순회가 표를 통째로 돌았다는 증거.** `0` 은 「위반이 없다」와 「아무것도 안 봤다」가 같은 값이라
+    // **센 횟수**를 표 길이와 맞춰야 한다. 길이만 재면 빈 조각을 도는 변이가 그대로 통과한다
+    // (KM12 가 그렇게 살아남았다, 2026-08-31).
+    try std.testing.expectEqual(default_app_bindings.len, scanned);
+    try std.testing.expect(scanned > 20);
 }
 
 test "웹 편집 필드의 ⌘Z·⌘S 는 빌트인 편집기 chord 에 안 뺏긴다 (순서 계약)" {

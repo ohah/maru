@@ -1013,6 +1013,7 @@ pub export fn maru_macos_app_session_tick(
     app_session.maybeDebugOpenWebPanel(); // MARU_WEB_PANEL 시각 확인 훅 — 활성 pane에 web Term을 열고 활성화(4e-2, 본문 blank·크래시 0; env 미설정이면 무동작)
     app_session.maybeDebugOpenFilePanel(); // FP3: MARU_FILE_PANEL=<path> 창-로컬 도크 시각 픽스처.
     app_session.maybeDebugOpenSymbolPicker(); // §7.5 심볼 피커 캡처 훅 — 파일이 이미 열려 있어도 뜬다
+    app_session.maybeDebugOpenPalette(); // 커맨드 팔레트 캡처 훅 — 행에 붙는 chord 표시를 잰다
     out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
     // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.

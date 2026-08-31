@@ -1644,10 +1644,6 @@ fn lastCharBytes(text: []const u8) usize {
 /// 문맥을 배경 쪽으로 얼마나 죽일지(%). 라벨(45)보다 더 물러난다 — 곁말이다.
 const context_dim_percent: u8 = 55;
 
-/// 한 프레임의 계수를 연다. `collectLabels` 가 프레임당 한 번 불리므로 그 앞이 자리다.
-pub fn beginFrameShapeCount() void {
-}
-
 pub fn collectLabels(
     self: *AppSession,
     collected: *std.ArrayList(AppSession.CollectedPane),

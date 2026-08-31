@@ -375,6 +375,11 @@ pub const Routed = struct {
     /// 화면을 다시 안 그린다(적대적 검증에서 나온 실제 결함이다. macOS 는 같은 자리에서
     /// `dispatched.dirty` 를 보고 `metal_dirty` 를 세운다).
     dirty: bool = false,
+    /// **끄는 제스처.** intent 와 배타적이 아니다 — 그 타입 doc: *"threshold 를 넘지 않은 up 은
+    /// `action` 만, 넘은 up 은 `drag` 만 낸다"*. 스크롤바 thumb 이 이 길로 온다.
+    ///
+    /// **이 값을 버리면 막대가 안 잡힌다** — 에이전트 표면이 정확히 그 상태였다(§2m.95).
+    drag: ?interaction.DragEvent = null,
 };
 
 pub fn pointer(
@@ -397,13 +402,17 @@ pub fn pointer(
             break;
         }
     }
-    const action = dispatched.action orelse return .{ .dirty = dirty };
+    const action = dispatched.action orelse return .{ .dirty = dirty, .drag = dispatched.drag };
     // **`@constCast` 는 안전하다** — `resolve` 는 `self` 를 값으로 받고 읽기만 한다(그 함수 본문).
     // 표를 직접 훑지 않는 이유는 `enabled` 와 세대 판정이 **거기 있기** 때문이다: 손으로 훑으면
     // 꺼진 컨트롤도 눌린다(예전 스모크가 실제로 그 둘을 건너뛰고 있었다).
     var table = component.ids.Table.init(@constCast(built.frame.actions));
     table.count = built.frame.actions.len;
-    return .{ .intent = table.resolve(action, built.props.snapshot_generation), .dirty = dirty };
+    return .{
+        .intent = table.resolve(action, built.props.snapshot_generation),
+        .dirty = dirty,
+        .drag = dispatched.drag,
+    };
 }
 
 /// 한 자리를 **누르고 뗀다**. 판정 코드가 쓰는 편의 함수다.

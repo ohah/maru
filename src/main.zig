@@ -1811,7 +1811,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1152;
+const smoke_spin_cap: usize = 1166;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -3133,6 +3133,33 @@ fn cellDrawnAt(cells: []const d3d11_cells.Cell, x: f32, y: f32, w: f32, h: f32) 
             @abs(c.rect[2] - w) < 1.5 and @abs(c.rect[3] - h) < 1.5) return true;
     }
     return false;
+}
+
+/// SCM 목록의 막대 기하. **에이전트와 같은 규약**이다 — 발행된 rect 를 되읽고 거터만 metrics 에서
+/// 온다(`withHitSpan` 이 그 관계를 소유한다).
+fn scmBarGeometry(built: *const scm_surface.Built, max_offset: u32) ?maru.chrome.ui.scroll_area.ScrollbarGeometry {
+    const nid = maru.chrome.components.scm_dock.build.NodeIds;
+    var track: ?maru.chrome.ui.layout.UiRect = null;
+    var thumb: ?maru.chrome.ui.layout.UiRect = null;
+    for (built.frame.tree.entries) |e| {
+        if (e.id == nid.scroll_track) track = e.rect;
+        if (e.id == nid.scroll_thumb) thumb = e.rect;
+    }
+    const t = track orelse return null;
+    const th = thumb orelse return null;
+    const dm = maru.chrome.components.scm_dock.types.DockMetrics.resolve(1000);
+    const g = maru.chrome.ui.scroll_area.ScrollbarGeometry{
+        .track_x = t.x,
+        .track_y = t.y,
+        .track_w = t.width,
+        .track_h = t.height,
+        .hit_x = t.x,
+        .hit_w = t.width,
+        .thumb_y = th.y,
+        .thumb_h = th.height,
+        .max_offset_px = max_offset,
+    };
+    return g.withHitSpan(@floatFromInt(dm.scrollbar_width + dm.scrollbar_inset_x * 2));
 }
 
 /// 발행된 track·thumb 에서 **잡는 기하**를 만든다. 스크롤바가 없으면 `null`.
@@ -5658,6 +5685,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scm_scroll_view_h: u32 = 0;
     var scm_scroll_max: u32 = 0;
     var scm_scrolls: usize = 0;
+    var scm_bar_drag: ?struct { geom: maru.chrome.ui.scroll_area.ScrollbarGeometry, grab_dy: f32 } = null;
+    var scm_bar_drags: usize = 0;
+    var scm_bar_jumps: usize = 0;
+    var sbar_judgeable = false;
+    var sbar_thumb_start: f32 = 0;
+    var sbar_thumb_mid: f32 = 0;
+    var sbar_seen_start = false;
+    var sbar_seen_mid = false;
+    var sbar_off_end: u32 = 0;
+    // **잰 순간의 상한을 챙긴다.** 인쇄는 훨씬 뒤에 하는데 그 사이 목록이 짧아져 상한이 0 이 된다 —
+    // 살아 있는 값과 견주면 그 판정은 "지금" 을 재고 "그때" 를 못 잰다(실측: `off_end=531/0`).
+    var sbar_max_end: u32 = 0;
+    var sbar_thumb_bottom: f32 = -1;
+    var sbar_track_bottom: f32 = -1;
+    var sbar_grab_x: i32 = 0;
+    var sbar_bottom_y: i32 = 0;
+    const sbar_step_px: i32 = 40;
     var sscroll_judgeable = false;
     var sscroll_max: u32 = 0;
     var sscroll_off: u32 = 0;
@@ -7014,11 +7058,51 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
             window.postSyntheticMouseWheel(.wheel, wx, wy, -60); // 끝까지
         }
+        // ── 막대를 잡아 끈다 (W8.22 — 에이전트에 이미 있던 배선을 SCM 에도) ────────────
+        //
+        // **§2m.96 에서 배운 자리를 그대로 지킨다**: 잡는 것은 `down`(그때 `grab_dy` 를 정한다), 끄는
+        // 동안은 영역 판정 **앞**에서 답한다. 판정도 그때 세운 모양이다 — 끝만 보면 clamp 때문에
+        // `grab_dy` 가 틀려도 초록이라, **가운데를 잡고 딱 40px** 내려 thumb 도 그만큼 갔는지 본다.
+        if (smoke and spins == 1146 and dock_view == .source_control and scm_scroll_max > 0) {
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, 60); // 맨 위로
+        }
+        if (smoke and spins == 1148 and dock_view == .source_control) {
+            if (scm_built) |*b| if (scmBarGeometry(b, scm_scroll_max)) |g| {
+                sbar_judgeable = true;
+                sbar_thumb_start = g.thumb_y;
+                sbar_seen_start = true;
+                sbar_track_bottom = g.track_y + g.track_h;
+                const ox: i32 = @intCast(geom.tree_content.x);
+                const oy: i32 = @intCast(geom.tree_content.y);
+                sbar_grab_x = ox + @as(i32, @intFromFloat(g.track_x + g.track_w / 2));
+                sbar_bottom_y = oy + @as(i32, @intFromFloat(g.track_y + g.track_h));
+                const grab_y: i32 = oy + @as(i32, @intFromFloat(g.thumb_y + g.thumb_h / 2));
+                window.postSyntheticMouse(.left_down, sbar_grab_x, grab_y);
+                window.postSyntheticMouse(.moved, sbar_grab_x, grab_y + sbar_step_px);
+            };
+        }
+        if (smoke and spins == 1150 and sbar_judgeable) {
+            if (scm_built) |*b| if (scmBarGeometry(b, scm_scroll_max)) |g| {
+                sbar_thumb_mid = g.thumb_y;
+                sbar_seen_mid = true;
+            };
+            window.postSyntheticMouse(.moved, sbar_grab_x, sbar_bottom_y);
+            window.postSyntheticMouse(.left_up, sbar_grab_x, sbar_bottom_y);
+        }
+        if (smoke and spins == 1153 and sbar_judgeable) {
+            sbar_off_end = scm_scroll.offset_y_px;
+            sbar_max_end = scm_scroll_max;
+            if (scm_built) |*b| if (scmBarGeometry(b, scm_scroll_max)) |g| {
+                sbar_thumb_bottom = g.thumb_y + g.thumb_h;
+            };
+        }
         // ── 목록이 짧아지면 자리도 줄어야 한다 (적대적 검증 4회차) ────────────────────
         //
         // 파일이 스테이지되거나 되돌려지면 목록이 짧아진다. offset 이 그대로면 **빈 바닥**이 보인다.
         // 여기서는 끝까지 굴린 자리에서 status 를 짧게 갈아 끼워 그 상황을 만든다.
-        if (smoke and spins == 1141 and sscroll_judgeable and scm_status_real.len != 0) {
+        if (smoke and spins == 1155 and sscroll_judgeable and scm_status_real.len != 0) {
             sshrink_judgeable = true;
             sshrink_off_before = scm_scroll.offset_y_px;
             var synth2: std.ArrayList(u8) = .empty;
@@ -7039,7 +7123,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
-        if (smoke and spins == 1143 and sshrink_judgeable) {
+        if (smoke and spins == 1157 and sshrink_judgeable) {
             sshrink_off_after = scm_scroll.offset_y_px;
             sshrink_max_after = scm_scroll_max;
             // **안 넘치면 막대도 없어야 한다** — 중립이 `list_overflows` 로 그렇게 정한다(그 자리 주석:
@@ -7054,7 +7138,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         // 판정이 끝나면 **진짜 status 로 되돌린다**.
-        if (smoke and spins == 1145 and scm_status_real.len != 0) {
+        if (smoke and spins == 1159 and scm_status_real.len != 0) {
             allocator.free(scm_status);
             scm_status = scm_status_real;
             scm_status_real = &.{};
@@ -9150,6 +9234,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         continue;
                     }
                 }
+                // ── 소스 컨트롤 막대를 잡고 있는 동안 (W8.22) ───────────────────────────
+                //
+                // **영역 판정보다 먼저다** — 에이전트에서 배운 그대로다(§2m.96 1·2회차): 뒤에 두면
+                // 도크 밖으로 나간 순간 사이드바·터미널이 그 이벤트를 먼저 먹어 **막대를 쥔 채로 남는다**.
+                if (scm_bar_drag != null and dock_view == .source_control and m.kind != .left_down) {
+                    if (m.kind == .capture_lost) {
+                        scm_bar_drag = null;
+                        continue;
+                    }
+                    if (m.kind == .moved or m.kind == .left_up) {
+                        if (scm_built) |*b| {
+                            const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
+                            const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                            const routed = scm_surface.pointer(b, &scm_state, if (m.kind == .moved) .move else .up, lx, ly);
+                            if (routed.drag) |dev| switch (dev) {
+                                .began, .moved, .dropped => |u| if (u.payload == maru.chrome.components.scm_dock.build.scroll_drag_payload) {
+                                    if (scm_bar_drag) |drag| {
+                                        const next = drag.geom.offsetForPointer(u.y_px, drag.grab_dy);
+                                        if (scm_scroll.setOffsetPx(@intCast(next), scm_scroll_max)) {
+                                            scm_scrolls += 1;
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                        }
+                                    }
+                                },
+                                .cancelled => scm_bar_drag = null,
+                            };
+                        }
+                        if (m.kind == .left_up) scm_bar_drag = null;
+                        continue;
+                    }
+                }
                 // ── 에이전트 목록 막대를 잡고 있는 동안 (W8.22) ─────────────────────────
                 //
                 // **영역 판정보다 먼저다** — 위 스크롤바 블록과 같은 이유고, 여기 없으면 도크 밖으로
@@ -9759,6 +9874,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     // **표면이 자기 좌표로 판정한다** — `Built` 의 tree 는 뷰포트 원점(0,0) 기준이라
                     // 도크 원점을 빼고 넘긴다. 그리기에서 더한 것과 **같은 값**이다.
                     if (dock_view == .source_control and region == .dock_content) {
+                        var changed_scm = false;
                         if (scm_built) |*b| {
                             const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
                             const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
@@ -9768,8 +9884,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 .left_up => .up,
                                 else => continue,
                             };
+                            // **막대를 잡는 것은 `down` 이다.** `began` 은 threshold 를 넘은 첫 이동에
+                            // 오므로 그때 재면 이미 밀린 자리를 "잡은 자리" 로 적는다(§2m.95 에서 그렇게
+                            // thumb 이 제자리였다). 잡혔는지 판정하는 규칙은 중립이 갖고 있다 —
+                            // `trackContains` 는 보이는 막대가 아니라 **거터 전체**로 판정한다.
+                            if (m.kind == .left_down) {
+                                if (scmBarGeometry(b, scm_scroll_max)) |g| if (g.trackContains(lx, ly)) {
+                                    if (g.thumbContains(ly)) {
+                                        scm_bar_drag = .{ .geom = g, .grab_dy = @floatCast(ly - g.thumb_y) };
+                                    } else {
+                                        scm_bar_jumps += 1;
+                                        const next = g.offsetForTrackClick(ly);
+                                        if (scm_scroll.setOffsetPx(@intCast(next), scm_scroll_max)) scm_scrolls += 1;
+                                        scm_bar_drag = .{ .geom = g, .grab_dy = g.thumb_h / 2 };
+                                    }
+                                    scm_bar_drags += 1;
+                                    scm_state.invalidateTree();
+                                    changed_scm = true;
+                                };
+                            }
                             const routed = scm_surface.pointer(b, &scm_state, phase, lx, ly);
-                            var changed = routed.dirty;
+                            var changed = routed.dirty or changed_scm;
                             if (routed.intent) |intent| {
                                 if (scm_state.apply(intent)) {
                                     changed = true;
@@ -11793,6 +11928,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 alate_expanded,
                 alate_turns,
                 late_ok,
+            });
+        }
+        {
+            // **막대를 잡아 끌면 목록이 따라오는가.** 가운데를 잡고 40px 내리면 thumb 도 40px 가야
+            // 하고(그것이 "잡은 지점을 유지한다" 의 뜻), 바닥까지 끌면 offset 이 상한이고 thumb 바닥이
+            // track 바닥이다. 목표 offset 을 `offsetForPointer` 로 다시 계산해 견주지 않는다 —
+            // **같은 함수로 자기를 채점**하는 꼴이다(§2m.95 가 세운 그 규율).
+            const sbar_step_ok = sbar_seen_start and sbar_seen_mid and
+                @abs((sbar_thumb_mid - sbar_thumb_start) - @as(f32, @floatFromInt(sbar_step_px))) < 1.5;
+            const sbar_end_ok = sbar_thumb_bottom >= 0 and sbar_track_bottom >= 0 and
+                @abs(sbar_thumb_bottom - sbar_track_bottom) < 1.5;
+            const sbar_ok = sbar_judgeable and scm_bar_drags > 0 and sbar_step_ok and sbar_end_ok and
+                sbar_off_end == sbar_max_end and sbar_off_end > 0;
+            try stdout.print("scm_bar_drag: judgeable={} grabs={d} thumb {d}->{d}(step {d}) off_end={d}/{d} thumb_bottom={d} track_bottom={d} scm_bar_drag_ok={}\n", .{
+                sbar_judgeable,
+                scm_bar_drags,
+                sbar_thumb_start,
+                sbar_thumb_mid,
+                sbar_step_px,
+                sbar_off_end,
+                sbar_max_end,
+                sbar_thumb_bottom,
+                sbar_track_bottom,
+                sbar_ok,
             });
         }
         {

@@ -937,6 +937,31 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. 이 component만으로 checkout 전 CLI pin/revalidation, release attestation,
   predecessor asset download 또는 최종 executable/workflow 배선을 완료했다고 주장하지 않는다.
 
+  post-publish release attestation의 command/semantic 권위는
+  `release_adapter_github_release_attestation.zig` 한 곳이 소유한다. release 전체 검증은
+  `/absolute/gh release verify <canonical-tag> --repo ohah/maru --format json`, 각 선행 no-follow 관측에 결속할 local asset 검증은
+  `/absolute/gh release verify-asset <canonical-tag> <absolute-asset> --repo ohah/maru --format json`의 exact argv만 허용한다.
+  latest release 추론, `--jq`/`--template`, custom trusted root와 caller option은 없다. child는 artifact attestation과 같은
+  clean `GH_TOKEN`/`GH_PROMPT_DISABLED=1`, bounded stdout, positive monotonic deadline, process-group kill/reap을 사용하며
+  반환 slice는 supplied buffer 안에서만 빌린다. asset pathname은 absolute이고 basename이 expected asset name과 같아야 한다.
+
+  `--format json`의 exact object는 GitHub release attestation verifier가 검증한 certificate SAN
+  `https://dotcom.releases.github.com`, non-empty verified timestamp와 in-toto v1 statement를 가져야 한다. statement는
+  `predicateType=https://in-toto.io/attestation/release/v0.1`, exact repository/repository ID/release ID/tag와
+  `pkg:github/ohah/maru@<tag>` purl을 결속한다. subject는 purl subject exact 1개와 manifest가 열거한 asset name/SHA-256
+  exact set이어야 하며 missing/duplicate/additional asset을 거부한다. 각 `verify-asset` 결과도 같은 release statement와
+  자기 local basename/SHA subject를 모두 포함해야 한다. release predicate의 `ownerId`는 canonical nonzero인지 검사하되,
+  repository string과 immutable numeric repository ID가 이미 결속되므로 별도 owner 권위로 승격하지 않는다.
+
+  release purl subject의 SHA-1은 **tag ref digest**이지 annotated tag를 peel한 최종 source commit이라고 가정하지 않는다.
+  이 component는 verified `tag_ref_sha`를 반환하고, 후속 executable composition만 기존
+  `release_adapter_git_resolver.zig`의 exact tag chain이 manifest source commit으로 수렴한 결과와 함께
+  `ReleaseAttestation.source_commit`을 만든다. lightweight tag에서는 두 값이 같을 수 있지만 그 우연을 계약으로 쓰지 않는다.
+  focused gate `test-session-host-release-adapter-github-release-attestation`은 release/asset exact argv, clean environment,
+  release identity와 purl/tag-ref/asset set, local asset 선택, malformed/duplicate/cap/timeout/child failure를
+  Debug·ReleaseFast에서 검증한다. 이 gate만으로 CLI pin/revalidation, predecessor download, git resolver composition 또는
+  final workflow 배선을 완료했다고 주장하지 않는다.
+
   GitHub CLI executable 권위는 **공식 GitHub Release CI에만** 적용한다. 로컬 빌드·로컬 업그레이드와 앱 인증서 기반
   session-host upgrade 경로에는 이 계약을 요구하지 않는다. trusted release job은 repository checkout보다 먼저 GitHub가
   제공한 초기 PATH에서 `gh`의 symlink-free canonical absolute path와 lowercase SHA-256을 한 번 캡처해 immutable step output으로

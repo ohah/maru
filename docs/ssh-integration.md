@@ -286,13 +286,24 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 - maru가 제공하는 것은 **붙여 넣을 스니펫**이다(로컬 셸 통합의 `_maru_osc7`과 같은 percent-encoding 규약, tmux 래핑 포함). 설치는 사용자가 한 번 한다.
 - **원격 스니펫은 authority를 반드시 싣는다**(`file://${HOST}/…`). 여기서 참조하는 것은 `_maru_osc7`의 **percent-encoding 규약**이지 authority 처리가 아니다 — 그 함수는 로컬 전용이라 authority를 비우므로(§9.2), 그대로 베끼면 원격 셸이 자기 cwd를 로컬로 보고해 §9.4의 안전장치가 통째로 꺼진다(원격 경로가 로컬 파일로 resolve된다). 두 스니펫은 인코딩만 공유하고 authority 정책은 반대다.
 
+- ⚠️ **보고자가 있어도 «긴 TUI 가 붙어 있는 동안» 은 갱신되지 않는다**(2026-09-01 실사용에서 규명).
+  `precmd` 는 **프롬프트가 그려질 때** 발화하는데, `cd proj && claude` 처럼 셸이 곧바로 전면 TUI 에 자리를
+  내주면 그 뒤로 프롬프트가 없다. 그래서 maru 가 아는 cwd 는 **그 TUI 를 띄우기 직전 값**에서 멈춘다 —
+  에이전트 세션 여러 개가 사이드바에 전부 홈 디렉터리로 뜨는 모양이 이것이다.
+  **오진하기 쉽다**: 「보고자가 안 깔렸다」·「tmux 가 먹는다」로 보이지만, `<host>:` 접두가 **붙어 있다면
+  보고자는 정상**이다(빈 authority 는 §9.2 에서 로컬로 떨어져 접두가 안 붙는다). 접두 유무로 먼저 가른다.
+  구조적 한계이므로 보고자 쪽에서는 못 고친다 — 다른 소스가 필요하고, 에이전트 pane 에 한해서는 **훅
+  payload 의 `cwd`** 가 이미 매 턴 도착한다(`agent_hook_event.zig` 는 아직 그 필드를 뽑지 않는다).
+  다만 소스를 하나 더 들이려면 **`sidebarCwdPath` 한 지점**에서 우선순위를 정해야 한다 — 예전에 여기만
+  관측을 직접 읽어 「같은 화면의 두 뷰가 다른 답을 내던」 회귀가 그 자리다.
+
 ### 9.6 검증
 
 - 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host), **빈 authority는 로컬 이름이 어떤 상태(빈 값·`localhost`·다른 도메인 접미)든 로컬**(로컬 보고자 계약의 반대편). 로컬 hostname은 **캐시가 없으므로** 고정할 상태가 없다 — 대신 `localHostname`이 호출자 버퍼에 매번 조회해 쓰는 형태라는 것이 시그니처로 강제된다.
 - 셸 스크립트 단위: 생성한 `.zshenv`가 `${HOST}`를 **싣지 않고** `file://` 뒤에 바로 인코딩된 경로를 붙이는지. 실제 zsh가 무엇을 보내는지는 pty 캡처로 확인한다(`ZDOTDIR=<캐시 디렉터리> script -q out zsh -i`로 `\e]7;file://…`를 잡는다 — 2026-08-13에 이 캡처가 "로컬 셸이 hostname을 싣는다"를 확정했다).
 - 세션 재현: 저장소 안에 선 Term에 authority만 어긋난 OSC 7을 보내면 폴더줄이 `<host>:<절대경로>`가 되고 저장소 판정이 `.unknown`으로 무너지는지, 그리고 **빈 authority(로컬 보고자 형식)에서는 같은 경로가 `.repo`로 돌아오는지**를 한 테스트에서 대조한다(수정의 효과가 곧 그 대조다).
 - 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).
-- 전달 경로: in-process Term은 배선했다. **host-backed Term(`session.keep-alive-after-quit`, 기본 off)의 wire는 아직 `cwd_host`를 싣지 않는다** — 그 모드에서 host는 늘 빈 문자열이라 §9.2의 "빈 authority = 로컬"로 떨어져 이 문서 이전의 동작으로 degrade한다(새 오표시는 없고 §9.4 안전장치가 안 걸릴 뿐). 후속에서 `server.zig`·`runtime_event_wire.zig`·`runtime_metadata_wire.zig`에 필드를 더하며, 그때 `observationWireValid`의 UTF-8·크기 검증에도 포함해야 한다. **함께 고쳐야 할 두 자리**: host-backed 링크 경로(`remoteLinkSpanAt`의 hover 필터와 `linkAtFor`에 넘기는 `packLinkScopes`)는 아직 `linkScopesFromConfig`를 직접 부르므로, wire가 붙는 순간 §9.4의 파일 경로 차단이 그 모드에서만 빠진 채로 남는다.
+- 전달 경로: in-process Term과 **host-backed Term 둘 다 배선됐다**(2026-09-01 코드 대조로 정정 — 이 자리에는 「host-backed 의 wire 는 아직 `cwd_host` 를 싣지 않는다」가 남아 있었다). `cwd_host` 는 `handoff_codec.zig` 의 `tag = 90`(optional) 로 실리고, `runtime_metadata_wire.zig`·`runtime_event_wire.zig`·`server.zig` 가 나른다. 이 문서가 「후속에서 포함해야 한다」고 적었던 canonical 검증도 들어가 있다(`rangeIsCanonical(dto.cwd_host_range, …)` + 해시). 소비처도 이어져 `sidebarCwdPath` 가 `termCwdIsRemote` 일 때 `observation.cwd_host` 로 `<host>:<path>` 를 만든다. ⚠️ **그래서 아래 링크 갭은 이제 가설이 아니라 실재한다** — 이 문단이 「wire 가 붙는 순간 §9.4 의 파일 경로 차단이 그 모드에서만 빠진 채로 남는다」고 예고한 그 순간이 지났다. `remoteLinkSpanAt` 은 여전히 `linkScopesFromConfig` 를 **직접** 부르므로(`linkScopesForTerm` 이 아니다), host-backed 원격 화면에서 원격 경로가 로컬 파일로 resolve 될 수 있다. `linkAtFor` 에 넘기는 `packLinkScopes` 도 같은 자리다.
 - **순수 함수 단언만으로는 부족하다.** 폴더줄은 사이드바 **draw list 셀을 직접 읽어** 확인한다 — 조립부가 판정 함수를 안 쓰거나 줄이 빈 문자열로 접히면 단위 테스트는 통과하면서 화면엔 아무것도 안 뜬다. 로컬→원격 전이의 **대조군**을 함께 둔다: 경로가 같고 host만 바뀌는 전이는 `title_generation` bump가 없으면 observation refresh 자체가 스킵돼 옛 host가 계속 그려진다(실제로 그렇게 발견했다).
 - 수동 E2E: 원격 rc에 스니펫을 넣은 뒤 맨 `ssh`와 `maru ssh` 양쪽에서 `cd`가 폴더줄에 반영되는지, 원격 tmux에서 `allow-passthrough` on/off로 값이 오고 끊기는지, ssh를 빠져나오면 로컬 cwd 표시로 복귀하는지.
 

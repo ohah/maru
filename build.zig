@@ -12636,6 +12636,60 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_apple_product_tests.step);
         test_step.dependOn(&run_apple_product_tests.step);
     }
+    const session_host_release_adapter_apple_transport_step = b.step(
+        "test-session-host-release-adapter-apple-transport",
+        "Validate closed Apple command execution for release observations",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |apple_transport_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = apple_transport_optimize,
+        });
+        const apple_product_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_product.zig"),
+            .target = target,
+            .optimize = apple_transport_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "product_identity", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/product_identity.zig"),
+                    .target = target,
+                    .optimize = apple_transport_optimize,
+                }) },
+            },
+        });
+        const apple_transport_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_transport.zig"),
+            .target = target,
+            .optimize = apple_transport_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "bounded_process", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                    .target = target,
+                    .optimize = apple_transport_optimize,
+                    .link_libc = true,
+                }) },
+                .{ .name = "release_adapter_apple_product", .module = apple_product_mod },
+            },
+        });
+        const apple_transport_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_apple_transport.zig"),
+                .target = target,
+                .optimize = apple_transport_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }},
+            }),
+        });
+        const run_apple_transport_tests = b.addRunArtifact(apple_transport_tests);
+        run_apple_transport_tests.addArg("--maru-expect-tests=6");
+        run_apple_transport_tests.setCwd(b.path("."));
+        session_host_release_adapter_apple_transport_step.dependOn(&run_apple_transport_tests.step);
+        session_host_step.dependOn(&run_apple_transport_tests.step);
+        test_step.dependOn(&run_apple_transport_tests.step);
+    }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",

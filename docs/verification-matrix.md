@@ -2495,7 +2495,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   symlink·교체·mutation을 fail-close한다. `test-session-host-release-adapter-github-cli-authority`가 Debug·ReleaseFast에서 runner
   observation과 실제 filesystem 변조 행을 검증한다. 로컬 빌드·로컬 앱 인증서 upgrade에는 이 권위를 요구하지 않으며, focused
   gate만으로 checkout 전 capture와 transport 배선이 완료됐다고 주장하지 않는다.
-  transport와 component parser를 하나의 adapter observation으로 조립하는 executable, codesign·DMG 관측, canonical summary encoding,
+  Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
+  strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
+  Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고
+  `test-session-host-release-adapter-apple-product`가 Debug·ReleaseFast에서 mismatch·duplicate·malformed·cap과 allocation
+  fail-index unwind를 검증한다. 이
+  component green은 실제 command argv 실행, DMG no-follow extraction 또는 receipt 진위를 증명하지 않는다.
+  transport와 component parser를 하나의 adapter observation으로 조립하는 executable, 실제 codesign·DMG 관측, canonical summary encoding,
   release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

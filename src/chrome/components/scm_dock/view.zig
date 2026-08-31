@@ -87,6 +87,10 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
     bytes += count_digits * 2 + 4; // 요약 `+N -N`
     // 브랜치 줄 — 이름·아이콘 + `↑ N`/`↓ N` 둘(화살표 3바이트 + 공백 + 자릿수).
     bytes += props.branch.len + icon_bytes * 2 + (count_digits + 5) * 2 + unpushed_dot.len;
+    // 원격이면 브랜치 줄에 `user@host` 가 하나 더 붙는다(RS3b). **여기서 안 세면 도크가 통째로 빈다** —
+    // 이 함수 머리 주석이 적은 그 사고이고, 원격에서만 나므로 로컬 테스트로는 영영 안 보인다.
+    bytes += props.remote_host.len;
+    if (props.remote_host.len > 0) text_ops += 1;
     // 원격 갱신 칩 — 이제 **글자가 아니라 아이콘**이다(2026-08-20). 상태에 따라 글리프가 갈리므로
     // 둘 중 긴 쪽으로 잡는다. 모자라면 op이 하나 빠지는 게 아니라 도크가 통째로 빈다.
     bytes += @max(fetch_icon.len, fetching_icon.len);
@@ -423,7 +427,26 @@ pub fn view(
                 branch_end = @min(branch_end, rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(ahead_right)) - @as(f32, @floatFromInt(ahead_w)));
             }
             // ── 이름은 **맨 나중에**, 묶음이 정한 경계 안에서 ──────────────────────────────
-            try writer.lineWithin(rect, branch_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
+            //
+            // **원격이면 그 앞에 `user@host` 를 둔다**(RS3b — 계약 §2.3). 로컬과 원격을 눈으로 못 가르면
+            // 사고가 이름만 바꿔 돌아온다: 경로만 보면 원격 `/srv/app` 과 로컬 `/srv/app` 이 같은 값이라,
+            // 화면에 호스트가 없으면 사용자는 지금 목록이 **어느 기계의 것인지** 알 방법이 없다.
+            //
+            // 색은 `muted_fg`, 크기는 `supporting` 이다 — 브랜치 이름이 여전히 그 줄의 주인공이고
+            // 호스트는 그 이름이 **어디의 것인가**를 말하는 보조 정보다. 로컬이면 길이 0 이라 이 블록이
+            // 통째로 건너뛰어져 **화면이 한 픽셀도 안 바뀐다**.
+            var name_x = branch_x;
+            if (props.remote_host.len > 0) {
+                const host_w = writer.measureRun(props.remote_host, .supporting);
+                const host_end = branch_x + host_w;
+                // 오른쪽 묶음(↑↓·칩)을 침범하면 **호스트를 그리지 않는다** — 겹쳐 읽히느니 이름만 남는
+                // 편이 낫고, 그때는 도크가 좁다는 뜻이라 사용자가 넓히면 다시 보인다.
+                if (host_end + @as(f32, @floatFromInt(m.gap)) < branch_end) {
+                    try writer.lineWithin(rect, branch_x, host_end, props.remote_host, .muted_fg, .supporting, false);
+                    name_x = host_end + @as(f32, @floatFromInt(m.gap));
+                }
+            }
+            try writer.lineWithin(rect, name_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
         }
     }
 
@@ -2031,6 +2054,26 @@ fn renderFixtureBranch(storage: *TestStorage, items: []const types.Item, branch:
     return viewBudgeted(storage, props, frame, .{});
 }
 
+/// 원격 표시(RS3b)용 픽스처 — `renderFixtureBranch` 와 같은 결이고 `remote_host` 만 다르다.
+/// 빈 문자열이면 **로컬 화면 그대로**이므로, 같은 함수로 두 상태를 나란히 재면 차이가 곧 이 기능의 값이다.
+fn renderFixtureRemote(storage: *TestStorage, items: []const types.Item, host: []const u8) !draw.ChromeDraw {
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = items,
+        .branch = "main",
+        .remote_host = host,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    return viewBudgeted(storage, props, frame, .{});
+}
+
 fn renderFixture(storage: *TestStorage, state: interaction.InteractionState, items: []const types.Item) !draw.ChromeDraw {
     const props: types.Props = .{
         .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
@@ -2086,6 +2129,37 @@ test "이름 뒤 경로는 role 크기로 자리를 잡는다(작은 셀에서�
     try testing.expect(old_bound < drawn);
     // 그렇다고 넉넉하지도 않다(틈이 벌어지면 그것대로 읽기 나쁘다) — **총합 올림**이라 1px 미만이다.
     try testing.expect(reserved - drawn < 1.0);
+}
+
+test "원격 목록은 브랜치 줄에 `user@host` 를 적는다 — 로컬은 화면이 그대로다 (RS3b)" {
+    // **로컬과 원격을 눈으로 못 가르면 사고가 이름만 바꿔 돌아온다**(docs/plans/remote-scm.md §2.3):
+    // 경로만 보면 원격 `/srv/app` 과 로컬 `/srv/app` 이 같은 값이라, 화면에 호스트가 없으면 사용자는
+    // 지금 목록이 **어느 기계의 것인지** 알 방법이 없다 — 그 상태에서 누른 동작이 어디에 걸리는지도.
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "main.zig", .dir = "src/", .status = .modified, .letter = 'M', .action = .stage } },
+    };
+
+    var remote_storage: TestStorage = .{};
+    const remote = try renderFixtureRemote(&remote_storage, &items, "user@build-box");
+    const host = findExactText(remote, "user@build-box") orelse return error.MissingHost;
+    // 브랜치 이름이 여전히 그 줄의 주인공이다 — 호스트는 **어디의 것인가**를 말하는 보조다.
+    try testing.expectEqual(tokens.ColorRole.muted_fg, host.role);
+    try testing.expect(host.role != findExactText(remote, "main").?.role);
+    // 그리고 **같은 줄**에 선다(브랜치 이름 왼쪽). 두 글자는 role 이 달라(`supporting` 대 `control`)
+    // baseline 이 1px 어긋나므로 y 를 정확히 대조하지 않는다 — 처음에 그렇게 썼다가 378 대 379 로
+    // 빨갰다. 재야 하는 것은 「같은 줄인가」이고, 다른 줄이면 그 차이는 줄 높이만큼 벌어진다.
+    const name_y = findExactText(remote, "main").?.origin.y;
+    try testing.expect(@abs(host.origin.y - name_y) <= 2);
+    try testing.expect(host.origin.x < findExactText(remote, "main").?.origin.x);
+
+    // **로컬은 한 픽셀도 안 바뀐다.** 길이 0 이면 그리는 블록이 통째로 건너뛰어지므로, 호스트 run 이
+    // 없을 뿐 아니라 브랜치 이름의 자리도 그대로여야 한다 — 그렇지 않으면 이 기능이 로컬 화면에
+    // 비용을 물린 것이다(골든이 그것을 잡겠지만, 이유는 여기서 말해야 한다).
+    var local_storage: TestStorage = .{};
+    const local = try renderFixtureRemote(&local_storage, &items, "");
+    try testing.expect(findText(local, "user@build-box") == null);
+    // 그리고 **원격에서만** 이름이 밀린다 — 로컬 자리는 호스트가 차지하지 않는다.
+    try testing.expect(findExactText(local, "main").?.origin.x < findExactText(remote, "main").?.origin.x);
 }
 
 test "행 글자와 요약·브랜치가 한 번에 나온다" {

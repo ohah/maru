@@ -51,6 +51,7 @@ const DeploymentBranchPolicy = struct {
 const ApiEnvironment = struct {
     id: StrictU64,
     name: []const u8,
+    can_admins_bypass: ?bool = null,
     protection_rules: []const ProtectionRule,
     deployment_branch_policy: ?DeploymentBranchPolicy,
 };
@@ -58,6 +59,7 @@ const ApiEnvironment = struct {
 pub const Observation = struct {
     id: u64,
     name: []const u8,
+    can_admins_bypass: bool,
     required_reviewer_count: u8,
     prevent_self_review: bool,
     wait_timer_minutes: u32,
@@ -101,7 +103,7 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8) Error!Parse
     errdefer inner.deinit();
 
     const value = inner.value;
-    if (value.id.value == 0 or
+    if (value.id.value == 0 or value.can_admins_bypass == null or value.can_admins_bypass.? or
         !std.mem.eql(u8, value.name, contract.protected_environment_name))
         return error.EnvironmentMismatch;
 
@@ -171,6 +173,7 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8) Error!Parse
         .bound_observation = .{
             .id = value.id.value,
             .name = value.name,
+            .can_admins_bypass = value.can_admins_bypass.?,
             .required_reviewer_count = required_reviewer_count,
             .prevent_self_review = prevent_self_review,
             .wait_timer_minutes = wait_timer_minutes,

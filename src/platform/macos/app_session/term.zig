@@ -1006,18 +1006,44 @@ pub fn bracketedPasteFor(self: *AppSession, target_id: u64) ?bool {
 ///
 /// **브랜치는 캐시다.** `termGitBranch` 는 cwd 가 바뀔 때만 `.git/HEAD` 를 다시 읽으므로(사이드바가
 /// 매 프레임 쓰는 그 함수) 우클릭 경로에서 불러도 된다.
+/// 그 Term 포그라운드의 **첫** 프로세스 이름. 없으면 `null`.
+///
+/// **첫 것을 고른다.** 포그라운드 프로세스 그룹은 지금 그 pane 을 쥔 작업이다 — 셸이 놀고 있으면
+/// 셸 자신이고, 무언가 돌면 그 명령이다. 파이프라인이면 여럿인데, 목록의 첫 항목이 그 그룹의
+/// 대표(리더)라 그것을 쓴다. 여럿을 이어 붙이면 라벨이 길어져 뒤의 폴더·브랜치를 밀어낸다.
+fn foregroundName(term: *Term) ?[]const u8 {
+    const items = term.rt.observation.foreground_processes.items;
+    if (items.len == 0) return null;
+    const name = items[0].slice();
+    return if (name.len == 0) null else name;
+}
+
+/// `collectAgentTargets` 의 결과 — **실린 것**과 **자격이 있던 전체 수**.
+///
+/// 전체 수를 함께 내는 이유: 자리(`max_agent_targets`)를 넘으면 나머지가 **조용히 사라진다**.
+/// 옛 판은 그냥 `break` 였고 사용자는 아홉 번째 pane 이 목록에 없다는 것도, 왜 없는지도 몰랐다.
+/// 호출자가 머리글에 `(8/12)` 처럼 실어 그 사실을 말한다.
+pub const AgentTargets = struct {
+    items: []maru.session.agent_selection.Candidate,
+    /// 자리 제한이 없었다면 실렸을 수. `items.len` 보다 크면 잘린 것이다.
+    eligible: usize,
+};
+
 pub fn collectAgentTargets(
     self: *AppSession,
     out: []maru.session.agent_selection.Candidate,
     folder_bufs: [][std.fs.max_path_bytes]u8,
-) []maru.session.agent_selection.Candidate {
+) AgentTargets {
     var n: usize = 0;
     var order: u32 = 0;
+    var eligible: usize = 0;
     const tab = self.tabs.items[self.app_window.active_tab];
     for (tab.panes.items) |pane| {
         for (pane.terms.items) |term| {
             if (term.kind != .terminal) continue;
-            if (n >= out.len or n >= folder_bufs.len) break;
+            // **자격은 자리와 무관하게 센다** — 잘린 수를 말하려면 넘친 것도 세야 한다.
+            eligible += 1;
+            if (n >= out.len or n >= folder_bufs.len) continue;
             // **폴더와 브랜치로 가른다**(§5) — 사이드바 카드가 쓰는 그 두 축이다. 같은 정보를 두
             // 곳에서 다르게 부르면 사용자가 다른 것으로 읽는다. 폴더가 없으면(원격·비-repo) 그 자리를
             // 비우고 Term 이름으로 대신한다 — 이름조차 없는 줄을 만들지 않는다.
@@ -1029,8 +1055,14 @@ pub fn collectAgentTargets(
                     .codex => .codex,
                     .none => .shell,
                 },
-                // 실제 셸 이름(zsh 등)은 아직 안 읽는다(§한계) — 지금은 종류만 말한다.
-                .shell_name = maru.i18n.t(.ctx_target_shell),
+                // **그 pane 의 포그라운드에서 실제로 도는 것**을 말한다(zsh·vim 등). 이 값은 이미
+                // 관측 캐시에 있다 — 에이전트 종류 판정(`classifyAgentProcesses`)이 쓰는 그 목록이라
+                // 새 syscall 이 안 든다. 옛 판은 고정 문구 하나를 세워 여덟 줄이 전부 「셸」로
+                // 보였고, 그래서 **어느 줄로 보내는지 이름으로 못 갈랐다**.
+                //
+                // 못 얻는 경우(원격 pane·관측 전)에는 옛 문구로 떨어진다 — 이름 없는 줄을 만들지
+                // 않는다(`where` 폴백과 같은 규율).
+                .shell_name = foregroundName(term) orelse maru.i18n.t(.ctx_target_shell),
                 .where = folder orelse app_session_mod.termLabel(term),
                 .branch = git_ops.termGitBranch(self, term),
                 // **같은 워크스페이스의 에이전트 둘을 가르는 유일한 값**이다(§5.1). 폴더·브랜치가
@@ -1047,7 +1079,7 @@ pub fn collectAgentTargets(
     }
     const items = out[0..n];
     maru.session.agent_selection.orderCandidates(items);
-    return items;
+    return .{ .items = items, .eligible = eligible };
 }
 
 pub fn terminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {

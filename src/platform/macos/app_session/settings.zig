@@ -1471,6 +1471,46 @@ pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
 ///
 /// **선택이 없어도 복사를 낸다.** 편집기의 복사는 선택이 없으면 caret 이 있는 줄을 담으므로
 /// (문서 모델 §3.4), 그 자리에서 항목을 감추면 `⌘C` 와 메뉴가 서로 다른 말을 한다.
+/// 보내기 구획의 머리글을 만든다 — 고정 문구에 **잘린 수**와 **주 선택만 감**을 덧붙인다.
+///
+/// 자리에 안 들어가면 **덧말을 버리고 기본 문구**로 떨어진다. 잘린 머리글은 다른 말로 읽히므로
+/// 자르지 않는다(`writeLabel` 이 라벨에 쓰는 그 규율과 같다).
+/// 판정자용 진입점 — 위 머리글 조립을 제품 경로 그대로 부른다. 판정자가 이 함수를 못 부르면
+/// 「잘린 수를 말한다」는 계약을 잴 수 없고, 잴 수 없는 계약은 계약이 아니라 우연이다.
+pub fn testSendSelectionHeader(
+    self: *AppSession,
+    source: *app_session_mod.Term,
+    collected: term_ops.AgentTargets,
+) []const u8 {
+    return sendSelectionHeader(self, source, collected);
+}
+
+fn sendSelectionHeader(
+    self: *AppSession,
+    source: *app_session_mod.Term,
+    collected: term_ops.AgentTargets,
+) []const u8 {
+    const base = maru.i18n.t(.ctx_send_selection);
+    const truncated = collected.eligible > collected.items.len;
+    const multi = source.rt.editor_extra_selections.len > 0;
+    if (!truncated and !multi) return base;
+
+    // **서식은 `i18n.format` 이 푼다** — `Writer.print` 는 comptime 서식 문자열을 요구하는데
+    // `i18n.t` 는 런타임 값이다. 그리고 위치 자리표시자(`{0}`)라야 어순이 다른 언어에서 수가
+    // 제자리를 지킨다(그 계약의 판정자가 `i18n.zig` 에 있다).
+    var writer = std.Io.Writer.fixed(&self.agent_send_header_buf);
+    writer.writeAll(base) catch return base;
+    if (truncated) {
+        var tail_buf: [64]u8 = undefined;
+        writer.writeAll(maru.i18n.format(&tail_buf, maru.i18n.t(.ctx_send_selection_truncated), &.{
+            .{ .d = @intCast(collected.items.len) },
+            .{ .d = @intCast(collected.eligible) },
+        })) catch return base;
+    }
+    if (multi) writer.writeAll(maru.i18n.t(.ctx_send_selection_primary_only)) catch return base;
+    return writer.buffered();
+}
+
 pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_px: f64, y_px: f64) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 이 메뉴의 대상이 아니다(§8.1 대상 판정)
@@ -1503,10 +1543,21 @@ pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_p
     // 폴더 문자열이 살 자리 — 후보가 라벨로 굳을 때까지 살아 있어야 한다(스택이지만 이 함수가
     // 끝나기 전에 `writeLabel` 이 전부 복사한다).
     var folder_bufs: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
-    const targets = term_ops.collectAgentTargets(self, &target_buf, &folder_bufs);
+    const collected = term_ops.collectAgentTargets(self, &target_buf, &folder_bufs);
+    const targets = collected.items;
     var row: usize = 0;
     if (targets.len > 0) {
-        self.context_menu_items_buf[row] = maru.i18n.t(.ctx_send_selection);
+        // **머리글이 두 가지 사실을 진다.**
+        //
+        // ⑴ 자리를 넘겨 **잘린** 대상이 있으면 그 수를 말한다. 안 말하면 아홉 번째 pane 이 목록에
+        //    없다는 것도, 왜 없는지도 알 방법이 없다 — 옛 판은 그냥 `break` 였다.
+        // ⑵ 멀티 커서면 **주 선택만** 간다(`buildSelectionPayload` §3). 그 코드가 스스로
+        //    「조용히 첫 조각만 보내면 사용자는 나머지가 갔다고 믿는다」고 적어 두었는데, 정작
+        //    사용자에게 말하는 자리가 없었다. 여기가 그 자리다.
+        //
+        // 뒤에 줄을 못 단다 — 컴포넌트는 머리글을 **앞에서만** 세므로(위 §5 주석) 가운데·끝에
+        // 고를 수 없는 줄을 둘 방법이 없다. 그래서 머리글 자체에 싣는다.
+        self.context_menu_items_buf[row] = sendSelectionHeader(self, term, collected);
         row += 1;
         // **줄과 id 의 1:1 은 `writeRows` 가 든다** — 여기서 두 배열을 각자 채우다가 어긋났었다
         // (라벨이 자리에 안 들어가면 줄만 건너뛰고 목록에는 남겨, 그 뒤가 한 칸씩 밀렸다).

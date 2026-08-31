@@ -18,6 +18,8 @@ pub const max_manifest_asset_name_bytes: usize = 255;
 pub const PrePublish = struct {
     repo: []const u8,
     tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
     manifest: []const u8,
     evidence: []const u8,
     dmg: []const u8,
@@ -28,6 +30,8 @@ pub const PrePublish = struct {
 pub const VerifyPredecessor = struct {
     repo: []const u8,
     tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
     manifest: []const u8,
     work_dir: []const u8,
     summary_out: []const u8,
@@ -52,6 +56,8 @@ pub const Error = error{
     InvalidTag,
     InvalidVersion,
     InvalidManifestAssetName,
+    InvalidGithubCliPath,
+    InvalidGithubCliSha256,
     PathAlias,
     ManifestAssetNameTooLong,
 };
@@ -59,6 +65,8 @@ pub const Error = error{
 const Values = struct {
     repo: ?[]const u8 = null,
     tag: ?[]const u8 = null,
+    github_cli: ?[]const u8 = null,
+    github_cli_sha256: ?[]const u8 = null,
     manifest: ?[]const u8 = null,
     evidence: ?[]const u8 = null,
     dmg: ?[]const u8 = null,
@@ -111,10 +119,13 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const evidence = values.evidence orelse return error.MissingOption;
             const dmg = values.dmg orelse return error.MissingOption;
             const frozen_executable = values.frozen_executable orelse return error.MissingOption;
-            try disjointPaths(&.{ manifest, evidence, dmg, frozen_executable, summary_out });
+            const github_cli = try githubCli(&values);
+            try disjointPaths(&.{ manifest, evidence, dmg, frozen_executable, summary_out, github_cli.path });
             break :blk .{ .pre_publish = .{
                 .repo = repo,
                 .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
                 .manifest = manifest,
                 .evidence = evidence,
                 .dmg = dmg,
@@ -124,10 +135,13 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         },
         .verify_predecessor => blk: {
             const work_dir = values.work_dir orelse return error.MissingOption;
-            try disjointPaths(&.{ manifest, work_dir, summary_out });
+            const github_cli = try githubCli(&values);
+            try disjointPaths(&.{ manifest, work_dir, summary_out, github_cli.path });
             break :blk .{ .verify_predecessor = .{
                 .repo = repo,
                 .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
                 .manifest = manifest,
                 .work_dir = work_dir,
                 .summary_out = summary_out,
@@ -143,6 +157,8 @@ fn optionDestination(
 ) ?*?[]const u8 {
     if (std.mem.eql(u8, option, "--repo")) return &values.repo;
     if (std.mem.eql(u8, option, "--tag")) return &values.tag;
+    if (std.mem.eql(u8, option, "--github-cli")) return &values.github_cli;
+    if (std.mem.eql(u8, option, "--github-cli-sha256")) return &values.github_cli_sha256;
     if (std.mem.eql(u8, option, "--manifest")) return &values.manifest;
     if (std.mem.eql(u8, option, "--summary-out")) return &values.summary_out;
     return switch (phase) {
@@ -159,6 +175,17 @@ fn optionDestination(
         else
             null,
     };
+}
+
+fn githubCli(values: *const Values) Error!struct { path: []const u8, sha256: []const u8 } {
+    const path = values.github_cli orelse return error.MissingOption;
+    const sha256 = values.github_cli_sha256 orelse return error.MissingOption;
+    if (!std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, 0) != null)
+        return error.InvalidGithubCliPath;
+    if (sha256.len != 64) return error.InvalidGithubCliSha256;
+    for (sha256) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f'))
+        return error.InvalidGithubCliSha256;
+    return .{ .path = path, .sha256 = sha256 };
 }
 
 pub fn manifestAssetName(buffer: []u8, version: []const u8) Error![]const u8 {

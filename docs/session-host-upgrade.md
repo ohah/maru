@@ -812,7 +812,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.
   Environment REST 응답의 component 의미 해석은 `release_adapter_github_environment.zig`가 소유한다. exact nonzero
   environment ID와 `name=release`, `protection_rules[].{id,type}` 및 rule별 payload, nullable `deployment_branch_policy`의
-  `protected_branches`/`custom_branch_policies`를 typed observation으로 보존한다. 알려진 rule type은
+  `protected_branches`/`custom_branch_policies`와 `can_admins_bypass=false`를 typed observation으로 보존한다. 관리자 bypass가
+  허용되거나 필드가 빠진 응답은 보호 통과 증거로 사용할 수 없다. 알려진 rule type은
   `required_reviewers|wait_timer|branch_policy`로 닫고, endpoint가 나중에 추가한 rule type은 additive field처럼 허용하되
   보호 증거로 세지 않는다. consumed field의 missing·duplicate·wrong wire type, zero/duplicate rule ID, 같은 알려진 rule의
   중복, 1~43,200분 밖 wait timer, 1~6명이 아니거나 `User|Team`/nonzero ID가 아닌 reviewer, known rule에 맞지 않는
@@ -827,16 +828,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   그 job의 nonzero ID, exact source SHA, `status=in_progress`, `conclusion=null`, canonical GitHub job URL을 보존해야 한다. deployments
   응답의 후보는 exact repository URL, source SHA, `ref=<canonical-tag>`, `task=deploy`,
   `environment=original_environment=release`, nonzero deployment ID, `performed_via_github_app.slug=github-actions`에 결속한다.
-  각 후보의 statuses 응답은 newest-first 전체 이력이어야 하고, 각 status의 canonical status URL·deployment URL·repository URL이
-  그 후보와 exact하게 결속돼야 한다. 현재 job URL과 exact environment를 공유하는 `waiting` 뒤 `queued|in_progress` 전이를 포함하며
-  newest status가 `in_progress`여야 한다. 같은 job URL에 결속되는 deployment가 0개 또는
+  각 후보의 statuses 응답은 pagination이 완결된 전체 이력이어야 하고, 각 status의 canonical status URL·deployment URL·repository URL이
+  그 후보와 exact하게 결속돼야 한다. deployment status는 공식 REST vocabulary인
+  `error|failure|inactive|in_progress|queued|pending|success`만 인정한다. 현재 job URL과 exact environment를 공유하는
+  `pending`과 exact-one `in_progress`를 포함하고 attempt-scoped job 응답도 동시에 `in_progress/conclusion=null`이어야 한다.
+  REST 문서가 status 배열 정렬을 보장하지 않으므로 배열 위치나 비공식 `waiting` 값을 최신성·보호 근거로 사용하지 않는다.
+  같은 job URL에 결속되는 deployment가 0개 또는
   2개 이상이면 replay/ambiguity로 거부한다. deployment creator는 workflow를 시작한 사용자일 수 있으므로 bot identity의 근거로
-  사용하지 않고, status의 optional app도 보호 증거로 승격하지 않는다. unknown status는 wire compatibility를 위해 보존할 수 있지만
-  어느 필수 전이도 충족하지 않는다.
+  사용하지 않고, status의 optional app도 보호 증거로 승격하지 않는다. 공식 vocabulary 밖 unknown status는 미래 의미를
+  보호 권위로 오인하지 않도록 응답 전체를 fail-close한다.
 
   최종 보호 판정은 위 exact-one deployment 결속과 environment observation의 recognized protection rule 하나 이상을 모두 요구한다.
-  현재 environment 설정을 다시 읽은 사실만으로 과거 job에 정책이 적용됐다고 주장하지 않으며, deployment status의 `waiting`
-  이력으로 실제 protection wait를 교차검증한다. 반대로 pending-deployments endpoint는 보호 규칙을 통과한 뒤 job 안에서 더는 현재
+  현재 environment 설정을 다시 읽은 사실만으로 과거 job에 정책이 적용됐다고 주장하지 않으며, bypass 불가 설정과 같은 job URL의
+  공식 `pending`→현재 `in_progress` 관측으로 실제 protection 대기를 교차검증한다. 반대로 pending-deployments endpoint는 보호 규칙을 통과한 뒤 job 안에서 더는 현재
   deployment를 반환하지 않으므로 사후 증거로 쓰지 않는다. API bytes parser와 resolver는 transport authority, endpoint URL,
   pagination 완결성, 현재 실행 중인 executable 자체를 증명하지 않는다. bounded GitHub API transport와 release workflow의
   `environment: release` 배선이 추가되고 repository에 실제 recognized protection이 설정되기 전에는

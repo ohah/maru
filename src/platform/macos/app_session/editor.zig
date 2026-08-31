@@ -16392,10 +16392,18 @@ test "NS6 마지막으로 보낸 대상이 다음 메뉴의 기본 선택이다"
     defer fx.deinit(allocator);
     fx.session.surface_initialized = true;
 
+    // **대상이 둘 이상이어야 이 판정자가 무엇이라도 잰다.** 앞 판은 `targets[0]` 을 기억시켰는데,
+    // 기본값도 그 줄(머리글 다음)이라 **기억이 죽어도 단언이 통과했다** — 실제로 읽는 쪽을
+    // `if (@as(?u64, null))` 로 죽인 뮤턴트가 이 판정자를 지나 main 에 머지됐다(`fbc71126`).
+    // 그래서 pane 을 갈라 둘째 대상을 만들고, **기본값과 다른 줄**을 기억시킨다.
+    try pane_ops.splitActivePane(fx.session, .horizontal);
+
     // 기억이 없으면 첫 고를 수 있는 줄(머리글 다음)이 기본이다.
     try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
     try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.context_menu.selected);
-    const first = fx.session.editor_context_menu.?.targets[0];
+    const menu0 = fx.session.editor_context_menu.?;
+    try testing.expect(menu0.target_len >= 2); // 둘이 없으면 아래 단언이 다시 무력해진다
+    const second = menu0.targets[1];
     settings_ops.closeContextMenu(fx.session);
 
     // **없는 id 를 기억해 두면 무시된다** — 닫힌 Term 을 기억한 상태다.
@@ -16404,13 +16412,13 @@ test "NS6 마지막으로 보낸 대상이 다음 메뉴의 기본 선택이다"
     try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.context_menu.selected);
     settings_ops.closeContextMenu(fx.session);
 
-    // 살아 있는 대상을 기억하면 그 줄에서 시작한다.
-    fx.session.last_agent_target = first;
+    // 살아 있는 **둘째** 대상을 기억하면 그 줄에서 시작한다 — 기본값(1)과 갈리는 자리다.
+    fx.session.last_agent_target = second;
     try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
     const menu = fx.session.editor_context_menu.?;
     const sel = fx.session.chrome_host.context_menu.selected;
-    try testing.expect(sel >= 1 and sel - 1 < menu.target_len);
-    try testing.expectEqual(first, menu.targets[sel - 1]);
+    try testing.expectEqual(@as(usize, 2), sel); // 머리글 1 + 인덱스 1
+    try testing.expectEqual(second, menu.targets[sel - 1]);
     settings_ops.closeContextMenu(fx.session);
 }
 

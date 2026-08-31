@@ -14034,6 +14034,24 @@ pub const AppSession = struct {
         /// 접속 폭주**다(계획이 «그 목적지를 캐시해 매 접속마다 왕복하지 않는다» 로 못박은 자리다).
         /// 표는 그 목적지의 마지막 원격 pane 이 닫힐 때 비워지므로, 다시 여는 것은 **사용자 행동**이다.
         stopped: bool = false,
+        /// EOF 뒤 **다시 띄울 시각**(0 = 예약 없음). RA5-b.
+        ///
+        /// 위 `stopped` 는 「영원히 안 된다」(원격에 maru 가 없다·제한 서버·HOME 이 없다)를 뜻하고,
+        /// 이쪽은 「지금은 끊겼지만 다시 될 수 있다」를 뜻한다. **둘을 한 플래그로 뭉개면** 슬립 한 번·
+        /// 빌드 한 번에 그 목적지가 앱 수명 동안 죽는다(실사용에서 그 모양이었다).
+        retry_at_ms: u64 = 0,
+        /// 몇 번 다시 띄웠나. 상한을 넘으면 `stopped` 로 굳힌다 — 서버가 계속 거절하는 경우에
+        /// **tick 마다 fork 하는 접속 폭주**를 막는 것이 위 필드의 원래 목적이었고, 그 걱정은 백오프와
+        /// 이 상한이 함께 갚는다.
+        retries: u8 = 0,
+        /// 로그 이름별 이어읽기 위치(RA5-a 의 로컬 절반). 다시 띄울 때 `--resume=` 으로 돌려준다.
+        ///
+        /// **메모리에만 둔다.** 앱과 함께 죽어야 「앱을 새로 켰다 = 처음부터(배지를 세운다)」와
+        /// 「채널만 죽었다 = 이어서(알림 재생 없음)」가 저절로 갈린다.
+        cursors: std.StringHashMapUnmanaged(u64) = .empty,
+        /// 다시 띄우기 상한과 간격. 백오프는 2 배씩, 첫 간격은 1 초.
+        const retry_max: u8 = 6;
+        const retry_base_ms: u64 = 1_000;
         /// 개행 없이 쌓을 수 있는 상한. 스트리머의 한 줄 상한(128 KiB)과 같은 값이어야 «저쪽이 보낼 수
         /// 있는 가장 긴 줄» 을 이쪽이 못 받는 일이 안 생긴다.
         const pending_max = maru.session.remote_agent_stream.max_line_bytes;
@@ -14278,12 +14296,28 @@ pub const AppSession = struct {
             return;
         };
         defer self.allocator.free(ctl);
+        self.spawnStreamerFor(dest, host, ctl);
+    }
+
+    /// 스트리머를 한 번 띄운다. **설치 완료와 재시도가 같은 길을 탄다** — 두 길로 두면 한쪽만 커서를
+    /// 넘기거나 한쪽만 논블로킹을 거는 어긋남이 생긴다.
+    fn spawnStreamerFor(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, ctl: []const u8) void {
+        // 이어읽기 커서를 조립한다(RA5-a). 처음 띄울 때는 비어 있어 처음부터 읽는다 — 그것이 「앱을
+        // 새로 켰다」이고, 배지를 세우려면 최근 이벤트를 다시 읽어야 한다.
+        var spec: std.ArrayListUnmanaged(u8) = .empty;
+        defer spec.deinit(self.allocator);
+        var it = host.cursors.iterator();
+        while (it.next()) |e| {
+            if (spec.items.len > 0) spec.append(self.allocator, ',') catch break;
+            spec.print(self.allocator, "{s}:{d}", .{ e.key_ptr.*, e.value_ptr.* }) catch break;
+        }
         const stream = ssh_upload.spawnAgentEvents(
             self.allocator,
             ctl,
             dest,
             "maru",
             maru.session.agent_hook_command.remote_log_dir_rel,
+            spec.items,
         ) catch {
             std.log.scoped(.agent).warn("원격 이벤트 스트리머를 못 띄웠다 dest={s}", .{dest});
             host.stopped = true;
@@ -14294,6 +14328,26 @@ pub const AppSession = struct {
         setNonBlockingFd(stream.out_fd);
         host.stream = stream;
         host.stream_started = true;
+        host.retry_at_ms = 0;
+    }
+
+    /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
+    fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8) void {
+        const ras = maru.session.remote_agent_stream;
+        for (lines) |line| {
+            const cur = switch (ras.parseFrame(line)) {
+                .cursor => |c| c,
+                else => continue,
+            };
+            const gop = host.cursors.getOrPut(self.allocator, cur.name) catch continue;
+            if (!gop.found_existing) {
+                gop.key_ptr.* = self.allocator.dupe(u8, cur.name) catch {
+                    _ = host.cursors.remove(cur.name);
+                    continue;
+                };
+            }
+            gop.value_ptr.* = cur.offset;
+        }
     }
 
     /// 한 목적지의 자식 stdout 을 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다.
@@ -14304,7 +14358,16 @@ pub const AppSession = struct {
             self.pumpRemoteHookInstall(dest, host, now_ms);
             return;
         }
-        if (!host.stream_started) return; // 설치는 끝났는데 스트리머를 못 띄웠다
+        if (!host.stream_started) {
+            // 예약된 재시도가 있으면 그때 다시 띄운다(RA5-b). 없으면 예전처럼 물러난다.
+            if (host.retry_at_ms == 0 or now_ms < host.retry_at_ms) return;
+            const home = std.c.getenv("HOME") orelse return;
+            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch return;
+            defer self.allocator.free(ctl);
+            host.retry_at_ms = 0;
+            self.spawnStreamerFor(dest, host, ctl);
+            return;
+        }
         var buf: [16 * 1024]u8 = undefined;
         var eof = false;
         while (host.pending.items.len < RemoteAgentHost.pending_soft_cap) {
@@ -14342,6 +14405,8 @@ pub const AppSession = struct {
                 consumed += nl + 1;
             }
             if (count == 0) break;
+            // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
+            self.recordRemoteCursors(host, lines[0..count]);
             self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
         }
         if (consumed > 0) {
@@ -14361,11 +14426,28 @@ pub const AppSession = struct {
         // **EOF 는 조용하지 않다.** 채널을 닫으면 다음 `agentHookMode` 가 관측 모드로 강등한다(§1.2) —
         // 그 전이가 곧 사용자가 보는 «훅이 죽었다» 다. 그리고 이 목적지는 **다시 안 띄운다**.
         self.feedRemoteAgentTerms(dest, &.{}, now_ms);
-        std.log.scoped(.agent).warn("원격 이벤트 채널이 끝났다 — 관측 모드로 내린다 dest={s}", .{dest});
         ssh_upload.stopAgentEvents(host.stream);
         host.stream = .{ .pid = 0, .out_fd = -1 };
         host.stream_started = false;
-        host.stopped = true;
+
+        // **EOF 는 「영원히 안 된다」가 아니다**(RA5-b). 슬립·네트워크 끊김·원격 프로세스 교체로도 나고,
+        // 그때 ControlMaster 는 멀쩡한 경우가 많다(실측). 예전에는 여기서 `stopped` 를 세워 앱을 껐다
+        // 켜기 전까지 그 목적지가 죽었다 — 사용자에게는 「어느 순간부터 배지가 안 뜬다」로만 보였다.
+        //
+        // 그래도 **무한 재시도는 안 한다**: 서버가 계속 거절하면 그것이 tick 마다 fork 하는 접속 폭주다
+        // (`stopped` 의 원래 목적). 그래서 2 배씩 물러나며 상한까지만 시도하고, 넘으면 굳힌다.
+        if (host.retries >= RemoteAgentHost.retry_max) {
+            std.log.scoped(.agent).warn("원격 이벤트 채널이 계속 끊긴다 — 관측 모드로 내린다 dest={s}", .{dest});
+            host.stopped = true;
+            return;
+        }
+        const backoff = RemoteAgentHost.retry_base_ms << @intCast(@min(host.retries, 5));
+        host.retries += 1;
+        host.retry_at_ms = now_ms + backoff;
+        std.log.scoped(.agent).warn(
+            "원격 이벤트 채널이 끝났다 — {d} ms 뒤 다시 띄운다({d}/{d}) dest={s}",
+            .{ backoff, host.retries, RemoteAgentHost.retry_max, dest },
+        );
     }
 
     /// 줄이 없어도 그 목적지의 채널들에 **시간이 갔음을 알린다**(hello·침묵 시한 판정).
@@ -14432,6 +14514,10 @@ pub const AppSession = struct {
         ssh_upload.stopAgentEvents(host.stream);
         host.pending.deinit(self.allocator);
         host.install_out.deinit(self.allocator);
+        // 커서 키는 우리가 dupe 했다 — 표를 버리기 전에 되돌려준다.
+        var ck = host.cursors.keyIterator();
+        while (ck.next()) |k| self.allocator.free(k.*);
+        host.cursors.deinit(self.allocator);
         self.allocator.free(entry.key);
     }
 
@@ -21916,12 +22002,31 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
     session.drainRemoteAgentHost(dest, host, 300);
     try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
-    // **EOF 를 본 목적지는 다시 안 띄운다.** 이 표식이 없으면 다음 tick 의 `ensure` 가 곧바로 새
-    // `ssh` 를 fork 하고, 거절하는 서버에서는 그것이 tick 마다 도는 접속 폭주가 된다.
-    try std.testing.expect(host.stopped);
-    // 그리고 끝난 채널에는 더 읽으러 가지 않는다(닫힌 fd 를 다시 읽지 않는다).
+    // **EOF 는 「영원히 안 된다」가 아니다**(RA5-b). 예전에는 여기서 `stopped` 를 세워 앱을 껐다 켜기
+    // 전까지 그 목적지가 죽었다 — 슬립 한 번·원격 바이너리 교체 한 번이면 배지가 영영 안 돌아왔다
+    // (실사용에서 그 모양이었다). 대신 **물러났다 다시 띄운다**.
+    try std.testing.expect(!host.stopped);
+    try std.testing.expectEqual(@as(u8, 1), host.retries);
+    try std.testing.expect(host.retry_at_ms > 300); // 지금이 아니라 나중이다
+    // 원래 걱정(틱마다 fork 하는 접속 폭주)은 **백오프가 갚는다** — 아직 때가 아니면 안 띄운다.
+    const scheduled = host.retry_at_ms;
     session.drainRemoteAgentHost(dest, host, 400);
+    try std.testing.expectEqual(scheduled, host.retry_at_ms); // 예약이 그대로다 = 안 띄웠다
     try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
+
+    // **상한까지 끊기면 그때는 굳는다.** 서버가 계속 거절하는 경우를 영원히 두드리지 않는다.
+    host.retries = AppSession.RemoteAgentHost.retry_max;
+    // 다시 띄운 것처럼 두되 **읽는 쪽이 곧바로 EOF** 인 진짜 파이프를 준다 — `-1` 은 EOF 가 아니라
+    // EBADF 라 드레인이 그것을 「끝났다」로 안 읽는다(그렇게 짰다가 이 test 가 잡았다).
+    var dead_fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&dead_fds));
+    _ = std.c.close(dead_fds[1]);
+    const dfl = std.c.fcntl(dead_fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(dead_fds[0], std.c.F.SETFL, dfl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    host.stream_started = true;
+    host.stream = .{ .pid = 0, .out_fd = dead_fds[0] };
+    session.drainRemoteAgentHost(dest, host, 5_000);
+    try std.testing.expect(host.stopped);
 
     session.closeRemoteAgentHost(dest);
     try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());

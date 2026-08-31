@@ -1790,7 +1790,9 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
     const nonce = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
     for (lines) |line| {
         switch (ch.feed(line, now_ms)) {
-            .heartbeat, .ignored => {},
+            // 커서는 **host 소유**다(채널이 host 당 하나라 모든 Term 이 같은 줄을 본다) — 기억은
+            // `recordRemoteCursors` 가 한 곳에서 한다.
+            .heartbeat, .ignored, .cursor => {},
             .event => |e| {
                 // **우리 pane 의 것만 먹는다.** 채널은 host 당 하나라(RA4) 여러 pane 이 섞여 온다.
                 // 형태 검증(경로 문자·대문자 등)은 채널이 이미 했다(`parseFrame`). 여기서는 **우리

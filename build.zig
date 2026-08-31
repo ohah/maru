@@ -12781,6 +12781,104 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_apple_transport_tests.step);
         test_step.dependOn(&run_apple_transport_tests.step);
     }
+    const session_host_release_adapter_dmg_authority_step = b.step(
+        "test-session-host-release-adapter-dmg-authority",
+        "Validate private read-only DMG mount and fixed product authority",
+    );
+    if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |dmg_authority_optimize| {
+        const dmg_bounded_process_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+            .target = target,
+            .optimize = dmg_authority_optimize,
+            .link_libc = true,
+        });
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = dmg_authority_optimize,
+        });
+        const apple_product_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_product.zig"),
+            .target = target,
+            .optimize = dmg_authority_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "product_identity", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/product_identity.zig"),
+                    .target = target,
+                    .optimize = dmg_authority_optimize,
+                }) },
+            },
+        });
+        const apple_transport_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_transport.zig"),
+            .target = target,
+            .optimize = dmg_authority_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "bounded_process", .module = dmg_bounded_process_mod },
+                .{ .name = "release_adapter_apple_product", .module = apple_product_mod },
+            },
+        });
+        const dmg_authority_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_dmg_authority.zig"),
+            .target = target,
+            .optimize = dmg_authority_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "bounded_process", .module = dmg_bounded_process_mod },
+                .{ .name = "safe_open", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .target = target,
+                    .optimize = dmg_authority_optimize,
+                }) },
+                .{ .name = "release_adapter_apple_product", .module = apple_product_mod },
+                .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod },
+            },
+        });
+        const dmg_authority_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_dmg_authority.zig"),
+                .target = target,
+                .optimize = dmg_authority_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod },
+                    .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod },
+                    .{ .name = "release_adapter_apple_product", .module = apple_product_mod },
+                },
+            }),
+        });
+        const run_dmg_authority_tests = b.addRunArtifact(dmg_authority_tests);
+        run_dmg_authority_tests.addArg("--maru-expect-tests=9");
+        run_dmg_authority_tests.setCwd(b.path("."));
+        session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_tests.step);
+        session_host_step.dependOn(&run_dmg_authority_tests.step);
+        test_step.dependOn(&run_dmg_authority_tests.step);
+        macos_only_test_step.dependOn(&run_dmg_authority_tests.step);
+
+        if (dmg_authority_optimize == .Debug and target.result.os.tag == .macos) {
+            const dmg_authority_e2e_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_dmg_authority_e2e.zig"),
+                    .target = target,
+                    .optimize = .Debug,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod },
+                        .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod },
+                    },
+                }),
+            });
+            const run_dmg_authority_e2e = b.addSystemCommand(&.{ "sh", "tools/ci/session-host-release-dmg-authority.sh" });
+            run_dmg_authority_e2e.addArtifactArg(dmg_authority_e2e_tests);
+            run_dmg_authority_e2e.setCwd(b.path("."));
+            session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_e2e.step);
+            session_host_step.dependOn(&run_dmg_authority_e2e.step);
+            test_step.dependOn(&run_dmg_authority_e2e.step);
+            macos_only_test_step.dependOn(&run_dmg_authority_e2e.step);
+        }
+    };
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",

@@ -1490,7 +1490,15 @@ fn worktreeSideOn(allocator: std.mem.Allocator, job: *Job, rel_path: []const u8)
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
     const argv = git_command.buildRemoteFileRead(abs, remote, &argv_buf, &cmd_buf) orelse return error.GitFailed;
-    return runArgvWithEnv(allocator, argv, null);
+    const out = try runArgvWithEnv(allocator, argv, null);
+    // ⚠️ **잘림을 원격 상한으로 다시 판정한다**(RS3a 적대적 검증 3회차). `runArgvWithEnv` 는 로컬 상한
+    // (`max_output_bytes`, 16 MiB)으로만 보는데 원격은 그 전에 `head -c` 로 **4 MiB 에서 잘린다** —
+    // 그대로 두면 잘린 파일이 `truncated = false` 로 와서 **온전한 파일처럼** 화면에 뜬다(뷰어는 잘린
+    // 내용을 「너무 큼」으로 말할 기회를 잃는다).
+    return .{
+        .bytes = out.bytes,
+        .truncated = out.truncated or out.bytes.len >= git_command.max_remote_file_bytes,
+    };
 }
 
 fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {

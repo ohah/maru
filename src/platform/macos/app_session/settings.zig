@@ -1540,7 +1540,7 @@ pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_p
     // **마지막으로 보낸 대상이 아직 있으면 그 줄에서 시작한다**(§5 — "다음 호출의 기본값").
     // `show` 는 첫 고를 수 있는 줄을 고르므로 그 뒤에 덮어쓴다. 그 Term 이 닫혔으면 못 찾고
     // 기본값 그대로다.
-    if (@as(?u64, null)) |last| { // MUTANT: 기억 무시
+    if (self.last_agent_target) |last| {
         for (stored.targets[0..stored.target_len], 0..) |id, i| {
             if (id != last) continue;
             self.chrome_host.context_menu.selected = 1 + i; // 머리글 한 줄

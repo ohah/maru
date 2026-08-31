@@ -651,6 +651,7 @@ fn editorSyntaxColors(lines: []const []const u8, tab_width: u16, grammar: maru.s
         0,
         lines.len,
         tab_width,
+        &.{}, // Lab 은 접힘이 없다 — 두 축이 같다
     );
     return out;
 }

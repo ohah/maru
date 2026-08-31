@@ -381,12 +381,18 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     }
 
     const first = term.rt.editor_first_line;
-    if (first >= term.rt.editor_lines.len) return &.{};
+    // **길이 판정도 렌더 축이다.** 접히면 보이는 줄이 문서 줄보다 적어, 문서 수로 재면 화면 끝
+    // 근처에서 실제보다 많은 줄을 요구하게 된다.
+    const axis_len = if (term.rt.editor_visible_numbers.len > 0)
+        term.rt.editor_visible_numbers.len
+    else
+        term.rt.editor_lines.len;
+    if (first >= axis_len) return &.{};
     // 화면 높이를 모르는 자리라 **넉넉히** 잡는다 — 랩이 켜지면 논리 줄 하나가 여러 행이 되므로
     // 보이는 논리 줄은 행 수보다 적다. 남는 줄의 색은 만들어도 안 그려질 뿐이고, 모자라면 화면
     // 아래가 무색이 된다.
     const budget: usize = 256;
-    const count = @min(budget, term.rt.editor_lines.len - first);
+    const count = @min(budget, axis_len - first);
     return syntax_color.lineColors(
         &term.rt.editor_syntax,
         self.allocator,
@@ -395,6 +401,9 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         first,
         count,
         term.rt.editor_tab_width,
+        // **접힘 표를 함께 넘긴다** — 렌더가 받는 `lines` 가 접히면 보이는 줄 축이 되므로 색도
+        // 같은 축이어야 한다(그 함수의 doc). 안 넘기면 접는 순간 색만 밀린다.
+        term.rt.editor_visible_numbers,
     );
 }
 
@@ -850,22 +859,10 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
     const doc_lines = term.rt.editor_lines.len;
     for (rows, 0..) |v, i| {
         const visible_idx: usize = @as(usize, v.line) + first_line;
-        var source: usize = visible_idx;
-        if (numbers.len > 0) {
-            if (visible_idx < numbers.len) {
-                // 표에 번호가 없는 자리는 `rebuildVisible`의 방어적 꼬리 채움이다 — 그때는 앞 줄을
-                // 잇는다(그 줄이 화면에서 그 자리를 차지하고 있다).
-                var k: usize = visible_idx;
-                while (true) {
-                    if (numbers[k]) |n| {
-                        source = n - 1; // 표는 1-based
-                        break;
-                    }
-                    if (k == 0) break;
-                    k -= 1;
-                }
-            } else source = doc_lines; // 범위 밖 — 아래 가드가 막는다
-        }
+        // **되풀기는 색 경로와 같은 함수를 쓴다**(`syntax_color.sourceLineFor`). 예전에는 같은
+        // 규칙이 여기 인라인으로만 있었고, 색 쪽이 그 되풀기를 아예 안 해서 **클릭은 맞는데 색은
+        // 틀린** 반쪽 상태가 났다(사용자 보고 2026-08-31). 한 곳에 두면 그 갈림이 생길 수 없다.
+        const source: usize = syntax_color.sourceLineFor(numbers, visible_idx) orelse doc_lines;
         term.rt.editor_hit_lines[i] = @intCast(@min(source, std.math.maxInt(u32)));
     }
     term.rt.editor_hit_rows_len = rows.len;
@@ -15840,7 +15837,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
     const doc = fx.term.rt.editor_doc.?;
     const st = &fx.term.rt.editor_syntax;
     {
-        const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4);
+        const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4, &.{});
         var is_comment = false;
         for (colors[0]) |cs| if (cs.role == .syntax_comment) {
             is_comment = true;
@@ -15852,7 +15849,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
 
     // 되돌린 뒤 첫 줄은 다시 `const a = 1;`이다 — **키워드**여야 한다.
     const doc2 = fx.term.rt.editor_doc.?;
-    const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4);
+    const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4, &.{});
     try testing.expect(colors2.len >= 1);
     var is_keyword = false;
     for (colors2[0]) |cs| if (cs.role == .syntax_keyword and cs.start_col == 0) {
@@ -15881,7 +15878,7 @@ test "ES15 편집하면 색이 새 내용을 따라온다 — 트리가 낡지 �
     try testing.expect(insertText(fx.session, fx.term, "// added comment line\n"));
     const doc = fx.term.rt.editor_doc.?;
     const st = &fx.term.rt.editor_syntax;
-    const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4);
+    const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4, &.{});
     try testing.expect(colors.len >= 2);
 
     // 첫 줄은 이제 주석이다 — **주석색**이어야 한다. 트리가 낡았으면 여기가 `keyword`로 남는다.

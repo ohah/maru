@@ -267,6 +267,32 @@ fn pointOf(idx: maru.session.editor.line_index.LineIndex, offset: usize) syntax.
 ///
 /// **보이는 범위만 질의한다**(§5.3 — LSP 층에 정한 것과 같은 논리). 실측으로 전 문서 질의가
 /// 154KB에서 11ms인데 창 질의는 34~148µs다.
+/// 보이는 줄 → **원본 논리 줄**(0-based). 접힘 번호 표가 비어 있으면 두 축이 같아 항등이다.
+///
+/// **접힘이 켜지면 렌더가 받는 배열은 `editor_visible_lines`(보이는 줄)이고, 색·선택·caret 도 전부
+/// 그 축으로 맞춰 넘긴다**(`buildSelectionMarks` 주석이 그 규율의 단일 출처다). 그런데 색을 만드는
+/// 재료(구문 트리·`LineIndex`)는 **문서 축**이라, 그 사이를 건너는 자리가 필요하다 — 이 함수다.
+///
+/// **표에 번호가 없는 자리는 앞 줄을 잇는다.** `rebuildVisible` 의 방어적 꼬리 채움이 그런 자리를
+/// 남기는데, 그 줄이 화면에서 그 자리를 차지하고 있으므로 앞 줄의 것으로 읽는 편이 맞다.
+///
+/// **한 곳에 둔 이유**: 같은 되풀기를 `storeHitRows`(클릭 히트테스트)도 한다. 두 벌로 두면 하나만
+/// 고쳐질 때 "클릭은 맞는데 색은 틀린" 반쪽 상태가 된다 — 이 결함이 실제로 그 형태였다.
+pub fn sourceLineFor(visible_numbers: []const ?u32, visible_idx: usize) ?usize {
+    if (visible_numbers.len == 0) return visible_idx; // 접힘 없음 — 두 축이 같다
+    if (visible_idx >= visible_numbers.len) return null; // 범위 밖 — 호출자가 거른다
+    var k = visible_idx;
+    while (true) {
+        if (visible_numbers[k]) |n| return n - 1; // 표는 1-based
+        if (k == 0) return null;
+        k -= 1;
+    }
+}
+
+/// **돌려주는 배열은 렌더가 받는 `lines` 와 같은 축이다**(ES8 이 그 계약을 못 박았다). 접힘이
+/// 켜져 있으면 그 축은 **보이는 줄**이므로 `visible_numbers` 로 원본 줄을 되풀어 색을 놓는다 —
+/// 문서 축으로 만들면 접는 순간 색만 접힌 줄 수만큼 밀려 **엉뚱한 줄**에 칠해진다(사용자 보고
+/// 2026-08-31). 선택·caret·접힘 표식이 이미 같은 규율을 따르고 있고, 색만 밖에 있었다.
 pub fn lineColors(
     self: *State,
     allocator: std.mem.Allocator,
@@ -275,15 +301,23 @@ pub fn lineColors(
     first_line: usize,
     line_count: usize,
     tab_width: u16,
+    /// 접힘 번호 표(보이는 줄 → 1-based 원본 줄). **비어 있으면 두 축이 같다.**
+    visible_numbers: []const ?u32,
 ) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
 
-    const last_line = @min(first_line + line_count, line_idx.lineCount());
+    // 축의 길이는 **렌더가 받는 것**을 따른다 — 접히면 보이는 줄 수다.
+    const axis_len = if (visible_numbers.len > 0) visible_numbers.len else line_idx.lineCount();
+    const last_line = @min(first_line + line_count, axis_len);
     if (first_line >= last_line) return &.{};
 
-    const start_line = line_idx.line(first_line) orelse return &.{};
-    const end_line = line_idx.line(last_line - 1) orelse return &.{};
+    // 파싱 범위는 **원본 줄**로 잡는다. 접힘이 있으면 보이는 첫/끝 줄이 가리키는 원본 줄이 범위이고,
+    // 그 사이 접힌 줄도 함께 파싱된다 — 트리는 문서 전체를 보므로 그것이 자연스럽다.
+    const first_src = sourceLineFor(visible_numbers, first_line) orelse return &.{};
+    const last_src = sourceLineFor(visible_numbers, last_line - 1) orelse return &.{};
+    const start_line = line_idx.line(first_src) orelse return &.{};
+    const end_line = line_idx.line(last_src) orelse return &.{};
     const range: syntax.Range = .{
         .start = @intCast(start_line.start),
         .end = @intCast(end_line.contentEnd()),
@@ -303,9 +337,12 @@ pub fn lineColors(
     for (0..first_line) |_| self.bounds.appendAssumeCapacity(.{ 0, 0 });
 
     var si: usize = 0; // spans 를 앞으로만 훑는다
+    // **축은 보이는 줄, 재료는 원본 줄이다.** 보이는 줄은 문서 순서를 지키므로(접힘은 건너뛸 뿐
+    // 뒤섞지 않는다) 아래 `si` 의 "앞으로만 훑는다" 가 접힘에서도 성립한다.
     var li: usize = first_line;
     while (li < last_line) : (li += 1) {
-        const line = line_idx.line(li) orelse break;
+        const src = sourceLineFor(visible_numbers, li) orelse break;
+        const line = line_idx.line(src) orelse break;
         const lo = line.start;
         const hi = line.contentEnd();
 
@@ -477,7 +514,7 @@ test "ES1 zig 문서를 열면 보이는 줄에 색이 붙는다 — 배선 전�
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider != null);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
     try testing.expect(colors.len >= 2);
     try testing.expect(colors[0].len > 0);
 
@@ -501,7 +538,7 @@ test "ES2 grammar 없는 언어는 무색이다 — provider 자체가 안 선�
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider == null);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
     try testing.expectEqual(@as(usize, 0), colors.len);
 }
 
@@ -513,7 +550,7 @@ test "ES3 겹치는 캡처는 마지막이 이긴다 — 한 열에 역할이 �
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
     try testing.expect(colors.len >= 1);
 
     // 구간이 겹치지 않고 오름차순이어야 한다 — `content.Row.colors`의 계약이다.
@@ -533,7 +570,7 @@ test "ES4 탭이 있는 줄에서 색 경계가 열로 선다 — byte 가 아�
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
     try testing.expect(colors.len >= 1);
 
     var saw = false;
@@ -573,7 +610,7 @@ test "ES6 겹침에서 마지막 캡처가 이긴다 — 값으로 잰다" {
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
     try testing.expect(colors.len >= 1);
 
     var found: ?tokens.ColorRole = null;
@@ -601,7 +638,7 @@ test "ES7 저장소가 자라도 앞줄 색이 안 매달린다 — 슬라이스
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{});
     try testing.expectEqual(@as(usize, n), colors.len);
 
     // **모든 줄**에 키워드가 0~5열로 서 있어야 한다. 매달린 슬라이스면 앞줄들이 쓰레기가 된다.
@@ -626,13 +663,68 @@ test "ES8 화면이 문서 중간에서 시작해도 색이 그 줄에 붙는다
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 2, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 2, 4, &.{});
     try testing.expect(colors.len >= 5);
 
     // 앞 세 줄은 **화면 밖**이라 비어 있어야 한다(질의 범위에 없다).
     for (colors[0..3]) |cs_line| try testing.expectEqual(@as(usize, 0), cs_line.len);
 
     // 넷째 줄(색인 3)이 `const x = 1;`이다 — 키워드가 0~5열이어야 한다.
+    var ok = false;
+    for (colors[3]) |cs| {
+        if (cs.role == .syntax_keyword and cs.start_col == 0 and cs.end_col == 5) ok = true;
+    }
+    try testing.expect(ok);
+}
+
+test "ES34 접히면 색이 보이는 줄 축을 따라간다 — 문서 축으로 두면 접은 만큼 밀린다" {
+    // **사용자 보고(2026-08-31)**: 접기를 닫으면 하이라이트가 깨진다. 원인은 축이 갈린 것이었다 —
+    // 렌더가 받는 `lines` 는 접히면 `editor_visible_lines`(보이는 줄)인데 색만 문서 줄 축으로
+    // 만들어져, `frame.zig` 가 **같은 인덱스로 둘 다 읽는** 순간 색이 접힌 줄 수만큼 밀렸다.
+    //
+    // 선택·caret·접힘 표식은 이미 보이는 줄 축으로 맞춰 넘기고 있었다(`buildSelectionMarks` 주석이
+    // 그 규율의 단일 출처다). 색 하나만 그 규율 밖에 있었고, 이 판정자가 그 자리를 잡는다.
+    var doc = try openDoc("const a = 1;\n// 접힌다 1\n// 접힌다 2\nconst b = 2;\n");
+    defer doc.deinit();
+    var st = openParsed(doc.content, .zig);
+    defer st.deinit(testing.allocator);
+
+    // 가운데 두 줄(원본 2·3)이 접혀 화면에는 원본 1·4만 남은 상태의 번호 표(1-based).
+    const numbers = [_]?u32{ 1, 4 };
+
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &numbers);
+    try testing.expect(colors.len >= 2);
+
+    // 보이는 줄 0 = 원본 1(`const a = 1;`) → 0~5열이 키워드.
+    var first_ok = false;
+    for (colors[0]) |cs| {
+        if (cs.role == .syntax_keyword and cs.start_col == 0 and cs.end_col == 5) first_ok = true;
+    }
+    try testing.expect(first_ok);
+
+    // **핵심**: 보이는 줄 1 = 원본 4(`const b = 2;`)다. 문서 축이면 여기에 원본 2(주석)의 색이
+    // 와서 키워드가 없다 — 그것이 사용자가 본 "깨진 하이라이트"다.
+    var second_ok = false;
+    var has_comment = false;
+    for (colors[1]) |cs| {
+        if (cs.role == .syntax_keyword and cs.start_col == 0 and cs.end_col == 5) second_ok = true;
+        if (cs.role == .syntax_comment) has_comment = true;
+    }
+    try testing.expect(second_ok);
+    try testing.expect(!has_comment); // 접혀 화면에 없는 주석 줄의 색이 새어 나오면 안 된다
+}
+
+test "ES35 접힘 표가 비면 두 축이 같다 — 되풀기가 평소 경로를 바꾸지 않는다" {
+    // 접힘이 없는 문서가 절대 다수다. 되풀기를 넣으면서 그 경로가 달라지면 회귀가 전면적이므로,
+    // 빈 표에서 옛 동작과 같은 답을 내는지 못 박는다.
+    var doc = try openDoc("// a\n// b\n// c\nconst x = 1;\n");
+    defer doc.deinit();
+    var st = openParsed(doc.content, .zig);
+    defer st.deinit(testing.allocator);
+
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 1, 4, &.{});
+    try testing.expect(colors.len >= 4);
+    for (colors[0..3]) |cs_line| try testing.expectEqual(@as(usize, 0), cs_line.len); // 화면 밖
     var ok = false;
     for (colors[3]) |cs| {
         if (cs.role == .syntax_keyword and cs.start_col == 0 and cs.end_col == 5) ok = true;
@@ -659,7 +751,7 @@ test "ES9 여러 줄 토큰은 줄마다 자기 줄 안에서 끝난다" {
     defer st.deinit(testing.allocator);
 
     const n = doc.lines.lineCount();
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{});
 
     // **어느 줄에서도 색이 그 줄의 열 수를 안 넘는다.**
     for (colors, 0..) |cs_line, li| {
@@ -688,7 +780,7 @@ test "ES10 색이 개행을 넘지 않는다 — 줄 끝이 내용 끝이다" {
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
     try testing.expect(colors.len >= 1);
 
     // `// abc` 는 6열이다. 주석 색이 정확히 거기서 끝나야 한다.
@@ -709,7 +801,7 @@ test "ES11 앞줄 색이 다음 줄로 안 샌다 — 짧은 줄 다음에 긴 �
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
     try testing.expect(colors.len >= 2);
 
     // 첫 줄은 주석색이 4열까지다.
@@ -739,7 +831,7 @@ test "ES12 열 경계 방어가 두 겹이다 — 어느 하나를 지워도 화
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
     try testing.expect(colors.len >= 1);
     const line = doc.lines.line(0).?;
     const cols = content.lineColumnsUpTo(doc.content[line.start..line.contentEnd()], 4, @intCast(max_color_cols));

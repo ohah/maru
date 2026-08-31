@@ -158,7 +158,7 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 1;
             bytes += i18n.t(.scm_load_more).len;
         },
-        .notice => |text| {
+        .notice, .blocker => |text| {
             text_ops += 1;
             bytes += text.len;
         },
@@ -279,6 +279,8 @@ pub fn view(
             },
             // 안내는 상태 진술이라 강조색을 쓰지 않는다(빈 안내와 같은 톤).
             .notice => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .muted_fg, .supporting, false),
+            // **막힌 이유는 다르다.** 누른 동작이 안 됐다는 말이라 중립 진술과 같은 톤이면 안 읽힌다.
+            .blocker => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .danger_fg, .supporting, false),
         }
         // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
         // 겹침은 여기서 덮어서가 아니라 **`repoRow`가 그 자리의 글자를 안 그려서** 안 난다(그 함수 설명).
@@ -517,7 +519,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 히스토리 줄에는 행 동작이 없다(고르기뿐이다 — P4).
-        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice => .none,
+        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice, .blocker => .none,
     };
 }
 
@@ -3709,4 +3711,36 @@ test "브랜치 줄: 긴 이름이 오른쪽 묶음(∨·fetch)을 침범하지 
     // **이름이 오른쪽 묶음 전부의 왼쪽에서 끝난다.**
     try testing.expect(name_right <= menu_left);
     try testing.expect(name_right <= arrow_left);
+}
+
+test "SCMB 막힌 이유는 붉고, 중립 안내는 흐리다" {
+    // **둘이 같은 톤이면 «무엇이 나를 막는지»가 안 읽힌다**(사용자 제보 2026-08-31). 「변경 사항 없음」
+    // 은 상태 진술이라 흐린 채로 두고, 「커밋 메시지를 입력하세요」처럼 **누른 동작이 멈춘** 것만
+    // 붉게 낸다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "worktree-a", .branch = "fix/x", .primary = true } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0 } },
+        .{ .blocker = "커밋 메시지를 입력하세요" },
+        .{ .notice = "변경 사항 없음" },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+
+    const blocker = findText(draws, "커밋 메시지를 입력하세요") orelse return error.MissingBlocker;
+    try testing.expectEqual(tokens.ColorRole.danger_fg, blocker.role);
+
+    const notice = findText(draws, "변경 사항 없음") orelse return error.MissingNotice;
+    try testing.expectEqual(tokens.ColorRole.muted_fg, notice.role);
+
+    // **둘이 같은 role 이면 이 판정자의 제목이 거짓이다** — 위 둘을 각각 재는 것만으로는 "가른다" 를
+    // 증명하지 못한다(둘 다 같은 값으로 바뀌어도 각 단언은 통과할 수 있다).
+    try testing.expect(blocker.role != notice.role);
+
+    // 자리: 막힌 이유는 그 저장소 머리 줄 **아래**다(버튼 라벨로 찾지 않는다 — 막힘 문구에도
+    // 「커밋」이 들어 있어 같은 것을 두 번 집는다. 실제로 그 오답으로 한 번 깨졌다).
+    const repo = findText(draws, "worktree-a") orelse return error.MissingRepoRow;
+    try testing.expect(blocker.origin.y > repo.origin.y);
+    // 그리고 items 순서대로 중립 안내보다 위다 — 자리가 목록 순서를 따른다는 것.
+    try testing.expect(blocker.origin.y < notice.origin.y);
 }

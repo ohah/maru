@@ -5443,6 +5443,15 @@ pub const AppSession = struct {
     scm_write_seq: u64 = 0,
     /// 마지막 쓰기가 실패했을 때 화면에 낼 사유(redact·절단 후, 세션 allocator 소유). §5 — 실패는 사실대로.
     scm_write_error: ?[]u8 = null,
+    /// 그 사유가 **어느 저장소 것인가**(세션 allocator 소유, `null` = 저장소에 안 매인 것).
+    ///
+    /// 예전에는 이 값이 없어서 안내가 늘 **목록 맨 위**에 섰다 — 아래쪽 워크트리에서 커밋했는데 이유는
+    /// 도크 꼭대기에 떠서, 어느 저장소 얘기인지도 왜 안 됐는지도 화면에서 안 이어졌다(사용자 제보
+    /// 2026-08-31). 이제 그 저장소의 커밋 버튼 **바로 아래**에 선다.
+    scm_write_error_repo: ?[]u8 = null,
+    /// 그 사유가 **동작을 멈춘 것**인가(`true` = 붉게, `false` = 중립 안내). 커밋이 됐다는 말과 왜
+    /// 안 됐다는 말이 같은 톤이면 무엇이 나를 막는지가 안 읽힌다 — 색은 `Item.blocker` 가 소유한다.
+    scm_write_error_blocking: bool = false,
     /// 도는 **원격 갱신**의 request id(0 = 없음, P6). 쓰기와 **다른 슬롯**이다 — fetch는 index를 만지지
     /// 않으므로 §6의 직렬화 대상이 아니고, 네트워크라 오래 걸린다. 쓰기 슬롯을 쓰면 느린 원격 하나가
     /// 커밋과 목록 갱신을 통째로 붙잡는다(§6-1이 쓰기 중 읽기를 막는다).
@@ -68350,12 +68359,66 @@ test "소스 컨트롤: 커밋할 수 없으면 그 이유를 말한다(빈 메�
     scm_dock_ops.focusCommitRepo(session, "/repo");
     scm_dock_ops.submitCommit(session); // 메시지가 없다
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_need_commit_message), session.scm_write_error.?);
+    // **여기서도 소속과 심각도를 잰다.** 아래 두 번째 경로 뒤에만 재면 이 경로를 `null` 로 바꾼 변이가
+    // 살아남는다(실제로 살아남았다) — 그리고 사용자가 제보한 것이 **이 경로**다.
+    try std.testing.expect(session.scm_write_error_blocking);
+    try std.testing.expectEqualStrings("/repo", session.scm_write_error_repo.?);
 
     scm_dock_ops.insertCommitText(session, "fix: 무언가");
     scm_dock_ops.submitCommit(session); // 스테이지된 것이 없다(fixture 목록은 `.M` 하나뿐)
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_nothing_staged), session.scm_write_error.?);
     // **글자는 그대로다** — 거절이 사용자의 글을 지우면 안 된다.
     try std.testing.expectEqualStrings("fix: 무언가", session.scm_commit_field.text.items);
+
+    // **막힌 이유는 그 저장소 것이고 붉다**(사용자 제보 2026-08-31). 예전에는 소속이 없어 목록 맨
+    // 위에 섰고, 아래쪽 워크트리에서 커밋하면 이유가 도크 꼭대기에 떠서 화면이 안 이어졌다.
+    try std.testing.expect(session.scm_write_error_blocking);
+    try std.testing.expectEqualStrings("/repo", session.scm_write_error_repo.?);
+}
+
+test "소스 컨트롤: 막힌 이유는 히스토리 탭으로 따라오지 않는다 (사용자 제보 2026-08-31)" {
+    // 「커밋 메시지를 입력하세요」는 **그 상자 옆에서만** 뜻이 있다. 히스토리 탭에는 커밋 상자가 없어
+    // 읽고도 할 수 있는 것이 없고, 목록 맨 위에 붙어 히스토리를 한 줄 밀어낸다.
+    //
+    // **끝난 동작의 결과는 그대로 따라온다** — 「결과는 탭을 따라온다」(P6)가 지키려던 것은 *"내가 방금
+    // 누른 것이 어떻게 됐나"* 이고, 원격 갱신 완료 같은 것이 그 예다. 둘을 함께 재야 이 판정자가
+    // "가른다" 를 증명한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+
+    session.scm_tab = .history;
+
+    const blocked = maru.i18n.t(.scm_need_commit_message);
+    scm_dock_ops.setScmWriteBlockerForTest(session, "/repo", blocked);
+    {
+        const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+            return error.NoProjection;
+        for (projection.items) |item| switch (item) {
+            .notice, .blocker => |text| try std.testing.expect(!std.mem.eql(u8, text, blocked)),
+            else => {},
+        };
+    }
+
+    // 중립 결과는 따라온다.
+    const done = maru.i18n.t(.scm_fetch_done);
+    scm_dock_ops.setScmWriteNoticeForTest(session, done);
+    {
+        const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+            return error.NoProjection;
+        var saw = false;
+        for (projection.items) |item| switch (item) {
+            .notice => |text| if (std.mem.eql(u8, text, done)) {
+                saw = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(saw);
+    }
 }
 
 test "소스 컨트롤: 커밋 메시지 임시 파일은 저장소 밖이다" {

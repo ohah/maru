@@ -238,18 +238,24 @@ test "remoteShellCommand: 홈을 원격 셸이 펴게 두고, maru 가 없으면
     const cmd = try remoteShellCommand(a, .install, "claude", ".cache/maru/remote-agent-events");
     defer a.free(cmd);
 
+    // **로그인 셸에는 인용된 토큰만 간다** — csh/tcsh 는 `PATH=…` 를 명령으로 읽는다(실측).
+    try testing.expect(std.mem.startsWith(u8, cmd, "'sh' '-c' '"));
+    // 변하는 값은 `"$1"`·`"$2"`·`"$3"` 로 간다 — 스크립트에 끼워 넣으면 인용이 겹친다.
+    try testing.expect(std.mem.endsWith(u8, cmd, " 'install' 'claude' '.cache/maru/remote-agent-events'"));
     // 큰따옴표여야 `$HOME` 이 펴진다. 작은따옴표면 리터럴 디렉터리가 생긴다.
-    try testing.expect(std.mem.indexOf(u8, cmd, "--dir=\"$HOME/.cache/maru/remote-agent-events\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "--dir=\"$HOME/$3\"") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "--dir='") == null);
     try testing.expect(std.mem.indexOf(u8, cmd, "--scope=remote") != null);
-    try testing.expect(std.mem.indexOf(u8, cmd, "agent-hooks install") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "agent-hooks \"$1\"") != null);
     // maru 가 없을 때는 **표식을 내고 0 으로 끝난다** — 127 은 연결 끊김과 구분되지 않는다.
     try testing.expect(std.mem.indexOf(u8, cmd, no_maru_marker) != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "exit 0") != null);
+    // 표식에 `!` 가 있으면 csh 원격에서 **도착하지 않는다**(히스토리 확장).
+    try testing.expect(std.mem.indexOfScalar(u8, no_maru_marker, '!') == null);
 
     const rm = try remoteShellCommand(a, .uninstall, "codex", "x/y");
     defer a.free(rm);
-    try testing.expect(std.mem.indexOf(u8, rm, "agent-hooks uninstall --provider=codex") != null);
+    try testing.expect(std.mem.endsWith(u8, rm, " 'uninstall' 'codex' 'x/y'"));
 }
 
 test "parseOutcome: 잡음 뒤에 온 우리 줄을 찾고, 없으면 모른다고 말한다" {
@@ -292,10 +298,13 @@ test "remoteShellCommandAll: 두 provider 를 한 번에 깔고, maru 가 없으
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, cmd, "--dir=\"$HOME/"));
     try testing.expect(std.mem.indexOf(u8, cmd, "--dir='") == null);
 
+    // 스크립트는 상수라 action 은 `"$1"` 로 간다 — 두 provider 가 **같은 action** 을 받는다.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, cmd, "agent-hooks \"$1\""));
+    try testing.expect(std.mem.endsWith(u8, cmd, " 'install' '.cache/maru/remote-agent-events'"));
+
     const rm = try remoteShellCommandAll(a, .uninstall, "x/y");
     defer a.free(rm);
-    try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=claude") != null);
-    try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=codex") != null);
+    try testing.expect(std.mem.endsWith(u8, rm, " 'uninstall' 'x/y'"));
 }
 
 test "원격 명령은 PATH 를 앞에 붙여 maru 를 찾는다 — 비대화형 PATH 는 좁다" {

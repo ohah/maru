@@ -21979,6 +21979,80 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     session.closeRemoteAgentHost(dest);
 }
 
+test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상태만 채우면 화면이 그것을 안 그린다" {
+    // ⚠️ **실사용에서 정확히 이 모양이었다**(2026-08-31): 훅이 돌고 이벤트가 흐르고 알림도 오는데
+    // **왼쪽 목록만 안 바뀐다.** 사이드바·탭·도크가 「이 Term 에 에이전트가 있나」를 `agent_kind` 로
+    // 묻는데, 원격은 프로세스 트리가 안 보여 그 값이 영영 `.none` 이다(계약 §11.1 의 첫 겹) —
+    // 그래서 `agent_state` 는 옳게 채워지는데 행은 평범한 터미널로 그려진다.
+    //
+    // 훅 줄의 **provider 표식**이 그 사실을 말해 준다(그 줄을 쓴 것이 그 provider 다). 로컬에서
+    // `classifyAgentProcesses` 가 하는 일을 원격에서는 이 표식이 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+
+    // 원격 pane 의 출발점: 프로세스 트리가 안 보이니 종류를 모른다.
+    term.agent_kind = .none;
+    const before = try sidebar_ops.agentRowLabelOwned(&session, term);
+    defer a.free(before);
+
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"prompt\\\":\\\"질문\\\"}\"}",
+    }, 100);
+
+    // **종류가 섰다** — 그리고 그것이 곧 «에이전트 행» 판정이다.
+    try std.testing.expectEqual(AgentKind.claude, term.agent_kind);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    const after = try sidebar_ops.agentRowLabelOwned(&session, term);
+    defer a.free(after);
+    // 라벨이 바뀌었다 — 예전에는 둘이 같았다(둘 다 평범한 터미널 이름).
+    try std.testing.expect(!std.mem.eql(u8, before, after));
+
+    // codex 도 같은 자리에서 선다.
+    term.agent_kind = .none;
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 200);
+    try std.testing.expectEqual(AgentKind.codex, term.agent_kind);
+
+    // 모르는 표식은 종류를 **안 흔든다** — 원격이 아무 이름이나 보낼 수 있다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"gpt\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 300);
+    try std.testing.expectEqual(AgentKind.codex, term.agent_kind);
+
+    // ⚠️ **그리고 프로세스 트리 판정이 그 값을 덮으면 안 된다**(적대적 검증 2 회차). 원격 pane 의
+    // 로컬 포그라운드는 `ssh` 라 그 판정은 늘 `.none` 을 낸다 — 덮으면 배지가 떴다 사라졌다 하고,
+    // 「종류가 바뀌었다」 가지가 `agent_state` 를 `.unknown` 으로 되돌리며 대화 줄까지 지운다.
+    term.agent_state = .running;
+    agent_ops.pollAgentKinds(&session);
+    try std.testing.expectEqual(AgentKind.codex, term.agent_kind); // 그대로다
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+}
+
 test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term 을 두 소스가 쓴다" {
     // **계약 §1 의 «소스는 Term 마다 정확히 하나» 가 여기서 깨질 뻔했다.** 게이트가 꺼지면 `modeFor` 는
     // `.observe` 를 주고 그 가지는 `pollAgentState` 가 `agent_state` 를 쓴다. 그런데 채널을 계속 돌리면

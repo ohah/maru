@@ -756,7 +756,15 @@ pub fn pollAgentKinds(self: *AppSession) void {
                     term.rt.agent_observer_pgid;
                 const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
                 if (observer_probe and foreground_available) term.rt.agent_observer_pgid = pgid;
-                if ((periodic_kind_probe or pgid_changed) and foreground_available) {
+                // ⚠️ **원격 채널이 있는 Term 은 프로세스 트리로 판정하지 않는다.** 그 pane 의 로컬
+                // 포그라운드는 `ssh` 라 여기서 늘 `.none` 이 나오고, 그러면 훅 줄의 provider 로 세워 둔
+                // 값을 **매 회차 덮어쓴다** — 게다가 아래 «종류가 바뀌었다» 가지가 `agent_state` 를
+                // `.unknown` 으로 되돌리고 대화 줄까지 지운다. 배지가 떴다 사라졌다 하는 모양이 된다
+                // (적대적 검증 2 회차가 잡았다).
+                //
+                // 원격에서는 **훅 줄이 더 확실한 소스다** — 그 줄을 쓴 것이 그 provider 이기 때문이다.
+                const remote_owns_kind = term.agent_remote_channel != null;
+                if ((periodic_kind_probe or pgid_changed) and foreground_available and !remote_owns_kind) {
                     const prev = term.agent_kind;
                     term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
                     if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
@@ -1787,6 +1795,28 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                 defer un.deinit(self.allocator);
                 ras.unescapeInto(&un, self.allocator, e.line) catch continue;
                 const ev = ras.hookEventFrom(un.items) orelse continue;
+                // **이벤트가 provider 를 말해 준다 — 그것으로 `agent_kind` 를 세운다.**
+                //
+                // ⚠️ 이 한 줄이 없으면 **상태는 옳게 채워지는데 화면이 그것을 안 그린다.** 사이드바·탭·
+                // 도크가 「이 Term 에 에이전트가 있나」를 `agent_kind` 로 묻는데, 원격은 프로세스 트리가
+                // 안 보여 그 값이 영영 `.none` 이다(계약 §11.1 의 첫 겹) — 그래서 행이 평범한 터미널로
+                // 그려지고 배지도 대화 줄도 안 뜬다. 실사용에서 정확히 그 모양이었다: 이벤트는 흐르고
+                // 알림도 오는데 **왼쪽 목록만 안 바뀐다**(2026-08-31).
+                //
+                // 로컬에서는 `classifyAgentProcesses` 가 이 값을 세운다. 원격에서는 **훅 줄의 provider
+                // 표식**이 같은 사실을 더 확실하게 말해 준다 — 그 줄을 쓴 것이 그 provider 이기 때문이다.
+                const kind: AgentKind = if (std.mem.eql(u8, ev.provider, maru.session.agent_hook_command.Provider.claude.tag()))
+                    .claude
+                else if (std.mem.eql(u8, ev.provider, maru.session.agent_hook_command.Provider.codex.tag()))
+                    .codex
+                else
+                    .none;
+                if (kind != .none and term.agent_kind != kind) {
+                    term.agent_kind = kind;
+                    self.metal_dirty = true;
+                    // 행 높이가 바뀐다(에이전트 행은 상태·대화 줄을 더 쓴다) — 재투영까지 해야 한다.
+                    sidebar_ops.rebuildSidebar(self) catch {};
+                }
                 _ = applyHookEvent(self, term, ev);
             },
         }

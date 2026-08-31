@@ -7537,7 +7537,12 @@ test "원격 PATH 처방은 agent_hooks 와 git_command 가 같은 값을 쓴다
     // **값이 비어 있으면 게이트가 아무것도 안 지킨다** — 둘 다 빈 문자열이어도 위 단언은 통과한다.
     try std.testing.expect(h_end - (h + needle.len) > 20);
     // 그리고 그 처방이 실제로 쓰이는지 본다(상수만 있고 아무도 안 부르면 PATH 는 여전히 좁다).
-    try std.testing.expect(countOccurrences(git_cmd, "remote_path_prefix ++ \":$PATH\\\"; \"") >= 2);
+    try std.testing.expect(std.mem.indexOf(u8, git_cmd, "remote_path_script = \"PATH=\\\"\" ++ remote_path_prefix") != null);
+    // **두 빌더가 같은 껍데기를 지난다**(선언 1 + 호출 2).
+    try std.testing.expect(countOccurrences(git_cmd, "appendShPrologue") >= 3);
+    // **대입문을 로그인 셸에 직접 넘기지 않는다.** csh/tcsh 는 그것을 명령으로 읽어 조용히 지나가고,
+    // fish 는 `"$PATH"` 를 공백으로 이어 `/usr/bin` 을 지운다 — 둘 다 우리 CI 로는 안 잡힌다.
+    try std.testing.expect(std.mem.indexOf(u8, git_cmd, "exec \\\"$@\\\"") != null);
 }
 
 test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 않는다" {

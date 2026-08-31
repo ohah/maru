@@ -4,6 +4,14 @@ const std = @import("std");
 
 const iteration_count: usize = 5;
 
+/// **비동기 wake 적용 지연의 상한.** 값의 근거와 실측표는 소유자인
+/// `src/platform/macos/session_host/cr6c_appkit_smoke.zig` 의 `wake_apply_latency_budget_ns` 가 든다 —
+/// 이 도구는 독립 실행 파일이라 그것을 import 하지 못하므로 값만 옮겨 적는다.
+///
+/// **옮겨 적은 값은 갈린다.** 그래서 `tests/boundary/wake_latency_budget.zig` 가 세 자리
+/// (여기·소유자·`build.zig` 의 awk 검증)의 숫자가 같은지 센다. 하나만 고치면 그 판정자가 죽는다.
+const wake_apply_latency_budget_ns: u64 = 200 * std.time.ns_per_ms;
+
 const Iteration = struct {
     index: u32,
     swift_iteration: u32,
@@ -50,7 +58,7 @@ fn validateArtifact(artifact: Artifact) !void {
     for (artifact.iterations, 0..) |row, index| {
         if (row.index != index or row.swift_iteration != index or row.stage != 2 or !row.marker_present or
             !row.async_wake_marker_present or row.wake_handler_count == 0 or
-            row.wake_apply_latency_ns == 0 or row.wake_apply_latency_ns > 60 * std.time.ns_per_ms or
+            row.wake_apply_latency_ns == 0 or row.wake_apply_latency_ns > wake_apply_latency_budget_ns or
             !row.before_capture or !row.after_capture or
             !row.runtime_survived or !row.controller_zero or !row.observer_zero)
             return error.InvalidIteration;
@@ -112,7 +120,7 @@ test "CR6e-a2 validator rejects marker duplication projection and cleanup residu
     try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
     rows = fixtureRows();
     artifact = validFixture(&rows);
-    rows[2].wake_apply_latency_ns = 60 * std.time.ns_per_ms + 1;
+    rows[2].wake_apply_latency_ns = wake_apply_latency_budget_ns + 1;
     try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
     rows = fixtureRows();
     artifact = validFixture(&rows);

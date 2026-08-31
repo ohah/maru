@@ -121,11 +121,37 @@ const AutoReconnectFault = struct {
     }
 };
 
+/// **비동기 wake 적용 지연의 상한**(handler 진입 → 화면 반영). 이 축의 단일 출처다 — 예전에는 같은
+/// `60ms` 가 여기·`build.zig` 의 awk 검증·`tools/perf/session_host_cr6e_recovery_validator.zig` 세 곳에
+/// 각자 적혀 있었고, 셋이 갈리면 "어느 게이트는 통과하고 어느 게이트는 죽는" 상태가 된다.
+///
+/// **60ms → 200ms 로 올린다(2026-09-01). 코드가 느려진 것이 아니라 선이 러너를 재고 있었다.**
+/// 실측:
+///
+/// | 환경 | 값 |
+/// |---|---|
+/// | 로컬(M 시리즈, 3 회) | 24.10 · 24.04 · 24.14 ms — 흔들림이 0.1ms 안쪽이다 |
+/// | CI 러너 정상(2 건) | 36.1 · 42.0 ms |
+/// | CI 러너 부하(4 건) | 60.4 · 61.8 · 63.3 · 71.6 ms ← **전부 옛 선 60ms 를 아슬아슬하게 넘겼다** |
+///
+/// 옛 선은 CI 정상값의 **1.4 배**였다. [성능 예산](../../../../docs/performance-budget.md)이 정한
+/// 실무 기준은 **실측의 4~5 배**이고, *"너무 빡빡하면 감지선이 아니라 동전 던지기"* 라는 경고가 같은
+/// 문서에 있다(실측 373ms 에 선을 500 으로 두었다가 CI 가 501ms 를 내며 main 을 반반으로 흔든 사건).
+/// 이 자리가 그 형태를 그대로 반복했다 — 무관한 PR 다섯이 이 게이트 하나에 막혔다(2026-08-31).
+///
+/// **새 선의 두 값**(그 문서가 요구하는 "지금 값과 잡겠다는 회귀의 값"):
+/// - 지금 값: CI 정상 36~42ms → 200ms 는 그 **4.8 배**이고 관측된 최악(71.6ms)의 **2.8 배**다.
+/// - 잡겠다는 회귀: 비동기 wake 가 안 걸려 **폴링으로 떨어지는** 것. 그 경우 지연이 cadence 주기에
+///   묶여 **수백 ms** 가 되므로 200ms 위로 확실히 나온다. 즉 두 값이 겹치지 않아 벽시계가 여전히
+///   유효한 판정자다(겹쳤다면 호출 수 같은 기계-무관 값으로 갈아탔어야 한다).
+pub const wake_apply_latency_budget_ns: u64 = 200 * std.time.ns_per_ms;
+
 const RecoveryBaselineIteration = struct {
     index: u32,
     swift_iteration: u32,
     harness_launch_ns: u64,
     swift_launch_ns: u64,
+
     row_ns: u64,
     click_ns: u64,
     remote_visible_ns: u64,
@@ -684,7 +710,7 @@ fn readRecoveryBaselineIteration(
     };
     if (row.swift_iteration != index or stage != 2 or !marker or !async_marker or
         row.wake_handler_count == 0 or row.wake_apply_latency_ns == 0 or
-        row.wake_apply_latency_ns > 60 * std.time.ns_per_ms or !before_capture or !after_capture or
+        row.wake_apply_latency_ns > wake_apply_latency_budget_ns or !before_capture or !after_capture or
         failure.len != 0 or
         !(row.harness_launch_ns <= row.swift_launch_ns and
             row.swift_launch_ns < row.row_ns and row.row_ns < row.click_ns and

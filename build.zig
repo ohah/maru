@@ -2530,7 +2530,7 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_marker_present=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_async_wake_marker_present=true$' \"$summary\"; " ++
                 "/usr/bin/awk -F= '$1 == \"session_host_recovery_smoke_wake_handler_count\" && $2 + 0 > 0 { ok=1 } END { exit !ok }' \"$summary\"; " ++
-                "/usr/bin/awk -F= '$1 == \"session_host_recovery_smoke_async_wake_apply_latency_ns\" && $2 + 0 > 0 && $2 + 0 <= 60000000 { ok=1 } END { exit !ok }' \"$summary\"; " ++
+                "/usr/bin/awk -F= '$1 == \"session_host_recovery_smoke_async_wake_apply_latency_ns\" && $2 + 0 > 0 && $2 + 0 <= 200000000 { ok=1 } END { exit !ok }' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_before_capture=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_after_capture=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_failure=$' \"$summary\"; " ++
@@ -3683,6 +3683,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_conflict_marker_boundary_tests = b.addRunArtifact(conflict_marker_boundary_tests);
     run_conflict_marker_boundary_tests.setCwd(b.path("."));
+
+    // wake 지연 예산이 **세 자리에서 같은 값인가**. 그 상한은 소유자(`cr6c_appkit_smoke.zig`)·baseline
+    // validator·아래 awk 검증에 각자 적혀 있는데, validator 는 독립 실행 파일이라 import 를 못 하고
+    // awk 는 셸 문자열이라 상수를 못 참조한다 — **컴파일러가 못 잡는 자리**다. 셋이 갈리면 "어느
+    // 게이트는 통과하고 어느 게이트는 죽는" 상태가 된다.
+    const wake_budget_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/wake_latency_budget.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wake_budget_boundary_tests = b.addRunArtifact(wake_budget_boundary_tests);
+    run_wake_budget_boundary_tests.setCwd(b.path("."));
 
     // i18n 3차 방어: 표에 **아무도 안 쓰는 키**가 남지 않는가. 1차(파라미터 타입)·2차(리터럴 개수)는
     // "화면 문자열이 키를 거치는가"를 보지만, 되돌린 작업의 잔해로 남은 키는 둘 다 통과한다 — 실제로
@@ -5527,6 +5541,7 @@ pub fn build(b: *std.Build) void {
     }
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
+    boundary_step.dependOn(&run_wake_budget_boundary_tests.step);
 
     // **판정 스캐폴딩이 제품 경로에서 돌지 않는가.** 합성 앱 루프를 제품과 스모크가 같이 쓰는데,
     // 단계들이 스핀 번호로만 갈려 있어 제품 실행이 판정 각본을 그대로 따라 했다(캡처에 `MARK-ONE`

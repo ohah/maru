@@ -1396,29 +1396,66 @@ pub fn collectOpenContext(
     // 뷰포트가 비워 둔 아래쪽 띠에 그린다 — `viewportRect` 와 **같은 값**(`contextRows`)을 쓴다.
     const rows = contextRows(self);
     var y = area.y +| area.h -| pad -| (rows *| row_h);
-    var rest = text;
-    var drawn: u32 = 0;
-    while (drawn < rows and rest.len > 0) : (drawn += 1) {
-        const take = chrome.components.overlay_input.truncateToCols(self.allocator, rest, cols) catch break;
-        defer self.allocator.free(take);
-        if (take.len == 0) break;
-        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, take, dim) catch break;
+    // **결정은 순수 함수가 한다.** 「어느 글자를 어느 줄에」와 「그것을 어떻게 그릴까」를 한 함수에
+    // 두었더니, 결정 쪽 결함(줄바꿈에 글자가 사라짐 · 남의 메모리 해제)을 **어떤 test 도 못 봤다** —
+    // `collectShaped` 가 CoreText 함수 포인터를 요구해 이 함수를 단위 test 로 부를 수 없기 때문이다.
+    const plan = layoutContext(text, cols, rows);
+    for (plan.lines[0..plan.count], 0..) |span, i| {
+        const raw = text[span.start..][0..span.len];
+        // «…» 는 **마지막 줄에 남는 것이 있을 때만**이다 — 줄바꿈은 자르기가 아니다.
+        const need_ellipsis = plan.ellipsis and i + 1 == plan.count;
+        const line = if (need_ellipsis)
+            std.fmt.allocPrint(self.allocator, "{s}…", .{raw[0..raw.len -| lastCharBytes(raw)]}) catch break
+        else
+            raw;
+        // **빌린 것을 풀지 않는다.** 예전에는 `truncateToCols` 가 안 넘칠 때 원본 슬라이스를 그대로
+        // 돌려주는데도 무조건 `free` 했다 — `op.context` 안을 할당자에 넘긴 것이다.
+        defer if (need_ellipsis) self.allocator.free(line);
+
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, line, dim) catch break;
         self.collectShaped(collected, dl, builder, .{ .pane = .{
             .origin_x = area.x +| pad,
             .origin_y = y,
             .colors = colors,
         } });
         y +|= row_h;
-        // `truncateToCols` 가 «…» 를 붙일 수 있으므로 원문에서 얼마를 먹었는지는 길이로 못 센다.
-        // 마지막 줄이면 어차피 여기서 끝이고, 아니면 그만큼 잘라 이어 간다.
-        const eaten = @min(rest.len, consumedBytes(rest, cols));
-        if (eaten == 0) break;
-        rest = rest[eaten..];
     }
 }
 
-/// `cols` 칸에 들어가는 **원문 바이트 수**. 줄바꿈이 원문의 어디까지 먹었는지 세는 유일한 자리다.
-fn consumedBytes(text: []const u8, cols: u16) usize {
+/// 문맥을 몇 줄에 어떻게 나눌까 — **순수 결정**. 화면 없이 시험할 수 있다.
+pub const ContextLayout = struct {
+    pub const Span = struct { start: usize, len: usize };
+    lines: [max_context_rows]Span = [_]Span{.{ .start = 0, .len = 0 }} ** max_context_rows,
+    count: u32 = 0,
+    /// 자리가 모자라 남는 글자가 있다 — 마지막 줄 끝에 «…» 를 붙일 근거다.
+    ellipsis: bool = false,
+};
+
+/// 텍스트를 `cols` 칸 · 최대 `rows` 줄로 나눈다.
+///
+/// **줄을 이어 붙이면 원문의 앞부분이 그대로 나온다** — 한 글자도 빠지거나 겹치지 않는다.
+/// 그 불변식이 이 함수의 계약이고, 어긴 것이 방금 고친 결함이었다.
+pub fn layoutContext(text: []const u8, cols: u16, rows: u32) ContextLayout {
+    var out: ContextLayout = .{};
+    if (cols == 0 or rows == 0 or text.len == 0) return out;
+    var at: usize = 0;
+    while (out.count < rows and out.count < max_context_rows and at < text.len) {
+        const take = wrapNextBytes(text[at..], cols);
+        if (take == 0) break;
+        out.lines[out.count] = .{ .start = at, .len = take };
+        out.count += 1;
+        at += take;
+    }
+    out.ellipsis = at < text.len;
+    return out;
+}
+
+/// `cols` 칸에 들어가는 **원문 바이트 수**. 그리기와 진행이 **같은 값**을 쓰게 하는 단일 출처다.
+///
+/// 낱말 경계는 안 찾는다 — 그러려면 shaping 뒤에야 정해지는 폭을 알아야 하고, 여기서 흉내 내면
+/// 그린 자리와 어긋난다(격자 라벨이 같은 이유로 칸 수로만 자른다).
+pub fn wrapNextBytes(text: []const u8, cols: u16) usize {
+    if (cols == 0 or text.len == 0) return 0;
     var used: u32 = 0;
     var i: usize = 0;
     while (i < text.len) {
@@ -1429,7 +1466,20 @@ fn consumedBytes(text: []const u8, cols: u16) usize {
         used += w;
         i = end;
     }
-    return if (i == 0) text.len else i;
+    // 한 글자도 못 넣었으면(칸보다 넓은 글자) 한 글자는 넣는다 — 안 그러면 영영 안 나아간다.
+    if (i == 0) {
+        const len = std.unicode.utf8ByteSequenceLength(text[0]) catch 1;
+        return @min(text.len, len);
+    }
+    return i;
+}
+
+/// 그 슬라이스의 **마지막 글자** 바이트 수. «…» 자리를 만들려고 한 글자를 물릴 때 쓴다.
+fn lastCharBytes(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var i = text.len - 1;
+    while (i > 0 and (text[i] & 0xC0) == 0x80) i -= 1;
+    return text.len - i;
 }
 
 /// 문맥을 배경 쪽으로 얼마나 죽일지(%). 라벨(45)보다 더 물러난다 — 곁말이다.

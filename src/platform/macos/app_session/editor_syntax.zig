@@ -55,6 +55,12 @@ pub const State = struct {
     symbols: std.ArrayList(syntax.Provider.Symbol) = .empty,
     /// 헤더 밴드에 그릴 `경로 › 바깥 › 안쪽` 한 줄. 프레임마다 다시 굳힌다(§7.5 — 조회이지 저장이 아니다).
     crumb: std.ArrayList(u8) = .empty,
+    /// 위 문자열 안 **마디 경계**(오름차순 byte offset, 길이 = 마디 수 + 1). 첫 값은 경로가 끝나고
+    /// 첫 심볼이 시작하는 자리다 — 밴드가 이것으로 마디별 열 범위를 재고, 그 열이 곧 클릭 대상이다
+    /// (native-editor-ui.md §7.5 「체인 항목을 누르면 형제가 뜬다」).
+    crumb_bounds: std.ArrayList(usize) = .empty,
+    /// 그 마디들이 **어느 심볼**인가(`symbols` 안 인덱스). 클릭하면 그 심볼의 형제를 연다.
+    crumb_syms: std.ArrayList(usize) = .empty,
 
     /// 루프 **중간에** 나갈 때 버퍼를 비우고 경로만 돌려준다.
     ///
@@ -63,6 +69,8 @@ pub const State = struct {
     /// 그린다. 빈 것과 틀린 것 중에는 빈 것이 낫다 — `ES28` 이 이 자리를 잡았다.
     fn bailOut(self: *State, path: []const u8) []const u8 {
         self.crumb.clearRetainingCapacity();
+        self.crumb_bounds.clearRetainingCapacity();
+        self.crumb_syms.clearRetainingCapacity();
         return path;
     }
 
@@ -77,6 +85,8 @@ pub const State = struct {
         self.bounds.deinit(allocator);
         self.symbols.deinit(allocator);
         self.crumb.deinit(allocator);
+        self.crumb_bounds.deinit(allocator);
+        self.crumb_syms.deinit(allocator);
         self.* = .{};
     }
 };
@@ -764,6 +774,8 @@ pub fn breadcrumb(
     // `crumb.items` 를 돌려주도록 고치면 화면에 옛 심볼이 뜬다. 여기서 비우면 그 길이 아예 없다
     // (뮤테이션에서 그 모양 둘이 살아남아 이렇게 옮겼다).
     self.crumb.clearRetainingCapacity();
+    self.crumb_bounds.clearRetainingCapacity();
+    self.crumb_syms.clearRetainingCapacity();
 
     const prov = if (self.provider) |*p| p else return path;
     prov.symbols(allocator, &self.symbols);
@@ -780,8 +792,13 @@ pub fn breadcrumb(
         // 그 상태로 자르면 패닉이거나 엉뚱한 글자다 — 둘 다 "지금 어디" 라는 질문에 거짓말이다.
         if (sym.name_end > source.len or sym.name_start >= sym.name_end) return self.bailOut(path);
         self.crumb.appendSlice(allocator, chain_separator) catch return self.bailOut(path);
+        // **마디 시작은 구분자 뒤다** — 클릭 대상은 이름이지 구분자가 아니다.
+        self.crumb_bounds.append(allocator, self.crumb.items.len) catch return self.bailOut(path);
+        self.crumb_syms.append(allocator, si) catch return self.bailOut(path);
         self.crumb.appendSlice(allocator, source[sym.name_start..sym.name_end]) catch return self.bailOut(path);
     }
+    // 마지막 마디의 끝 = 문자열 끝. 경계 배열은 **길이 = 마디 수 + 1** 이어야 구간이 닫힌다.
+    self.crumb_bounds.append(allocator, self.crumb.items.len) catch return self.bailOut(path);
     return self.crumb.items;
 }
 
@@ -947,4 +964,40 @@ test "ES29 값을 못 만든 호출은 버퍼를 비워 둔다 — 옛 체인이
     defer m.deinit(testing.allocator);
     _ = breadcrumb(&m, testing.allocator, "c.md", md, 3);
     try testing.expectEqual(@as(usize, 0), m.crumb.items.len);
+}
+
+test "ES33 체인을 못 만들면 마디 경계도 비운다 — 지난 프레임 자리가 안 남는다 (§7.5)" {
+    // **경계는 클릭 대상이다.** 체인을 못 만들었는데 경계가 남으면, 화면에 없는 마디를 누른 것으로
+    // 처리해 **엉뚱한 심볼의 형제 목록**이 뜬다. `crumb` 만 비우고 경계를 안 비우면 그 상태가 된다
+    // (뮤테이션에서 그 두 줄을 지웠는데 아무 판정자도 안 죽었다).
+    const src =
+        \\pub const Widget = struct {
+        \\    pub fn drawTheWholeThing(self: Widget) void {
+        \\        _ = self;
+        \\    }
+        \\};
+    ;
+    var st = openParsed(src, .zig);
+    defer st.deinit(testing.allocator);
+    const path = "a.zig";
+
+    // 먼저 체인을 만들어 경계를 채운다.
+    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
+    try testing.expect(st.crumb_bounds.items.len > 0);
+    try testing.expect(st.crumb_syms.items.len > 0);
+
+    // **낡은 트리 갈래**(원본이 줄어 이름 범위가 밖) — `bailOut` 으로 나간다.
+    const name_pos = std.mem.indexOf(u8, src, "drawTheWholeThing").?;
+    const shrunk = src[0 .. name_pos + 5];
+    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, shrunk, name_pos));
+
+    // 경계·심볼 인덱스가 **함께** 비었다.
+    try testing.expectEqual(@as(usize, 0), st.crumb_bounds.items.len);
+    try testing.expectEqual(@as(usize, 0), st.crumb_syms.items.len);
+
+    // 체인이 아예 없는 자리(문서 끝)에서도 같다.
+    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
+    try testing.expect(st.crumb_bounds.items.len > 0);
+    _ = breadcrumb(&st, testing.allocator, path, src, src.len);
+    try testing.expectEqual(@as(usize, 0), st.crumb_bounds.items.len);
 }

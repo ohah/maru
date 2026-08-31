@@ -15,8 +15,20 @@ const overlay_input = @import("overlay_input.zig"); // 검색어·조합 입력 
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
 
-/// 프롬프트 접두("> ") 칸 수 — ASCII라 칸 수=바이트 수. caret/title 좌표의 단일 출처.
-const prompt_cols: u32 = 2;
+/// 기본 프롬프트 접두. `State.prompt` 가 이것을 덮을 수 있다.
+const default_prompt: []const u8 = "> ";
+
+/// 프롬프트가 차지하는 **칸 수**. caret/title 좌표의 단일 출처다.
+///
+/// **바이트 길이가 아니라 표시 폭이다.** 기본 `"> "` 는 ASCII 라 둘이 같지만, host 가 범위를 알리는
+/// 문구(예: 형제 목록)를 넣으면 한글이 올 수 있고 그때 한 글자가 두 칸이다(native-editor-ui.md §7.5).
+/// 결과 행의 들여쓰기 — **프롬프트 폭을 따라가지 않는다**. 범위 문구가 길어지면 목록이 통째로 밀려
+/// 라벨이 그만큼 잘린다(그 폭은 이미 좁다). 프롬프트는 첫 줄만의 것이다.
+const row_indent_cols: u32 = 2;
+
+fn promptCols(state: *const State) u32 {
+    return @intCast(overlay_input.displayCols(state.promptText()));
+}
 
 /// 한 번에 보일 결과 행 수 상한. host가 이 수만큼 윈도우잉해 Row를 만든다(컴포넌트는 받은 만큼만 그린다).
 pub const max_visible: usize = 10;
@@ -29,6 +41,13 @@ pub const State = struct {
     input: overlay_input.OverlayInput = .{},
     selected: usize = 0,
     result_count: usize = 0,
+    /// 프롬프트 문구. 비면 기본(`"> "`)이다. **host 가 목록의 범위를 여기에 적는다** — 무엇의 목록인지
+    /// 모르면 「왜 이 목록만 나오나」가 된다(native-editor-ui.md §7.5).
+    prompt: []const u8 = "",
+
+    pub fn promptText(self: *const State) []const u8 {
+        return if (self.prompt.len > 0) self.prompt else default_prompt;
+    }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.input.deinit(allocator);
@@ -128,7 +147,7 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     // caret 위치는 view의 tail 창 배치와 **같은 단일 출처**(inputLineView)에서 얻는다 — 긴 검색어가 패널을 넘치면
     // caret은 창 오른쪽 끝(= query 끝)으로 오고, 넘치지 않으면 prompt_cols+queryCols(기존과 동일). row0엔 우측 요소가
     // 없어 텍스트 영역은 패널 폭 전체(find와 달리 카운터 예약 없음).
-    const line = overlay_input.inputLineView(&state.input, prompt_cols, lay.panel_cols);
+    const line = overlay_input.inputLineView(&state.input, promptCols(state), lay.panel_cols);
     if (line.caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
     return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
@@ -178,8 +197,8 @@ pub fn view(
     // row0: "> " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는 query
     // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다). 긴 검색어가 패널을 넘치면 inputLineView가
     // tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다(find와 같은 규칙).
-    const line = overlay_input.inputLineView(&state.input, prompt_cols, lay.panel_cols);
-    const prompt_runs = try overlay_input.promptRuns(arena, "> ", line); // 프롬프트+(…?)+query+preedit run 조립(find와 공유)
+    const line = overlay_input.inputLineView(&state.input, promptCols(state), lay.panel_cols);
+    const prompt_runs = try overlay_input.promptRuns(arena, state.promptText(), line); // 프롬프트+(…?)+query+preedit run 조립(find와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 결과 행: 제목(col 2부터) + 우측 정렬 바인딩 표시. 폭은 EAW(displayCols)로 — 한글 제목/바인딩도 안 잘린다.
@@ -187,12 +206,12 @@ pub fn view(
         const row_y = y + @as(i32, @intCast((1 + i) * @as(usize, ch)));
         const title_runs = try arena.alloc(draw.Run, 1);
         title_runs[0] = .{ .text = row.title };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = x + @as(i32, @intCast(prompt_cols * cw)), .y = row_y }, .runs = title_runs, .role = .surface_fg } });
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = x + @as(i32, @intCast(row_indent_cols * cw)), .y = row_y }, .runs = title_runs, .role = .surface_fg } });
 
         if (row.binding.len > 0) {
             const bind_cols = overlay_input.displayCols(row.binding);
             // 패널 우측에서 한 칸 안쪽. 제목과 안 겹치게 패널에 들어갈 때만 그린다.
-            if (bind_cols + prompt_cols + 1 < usable_cols) {
+            if (bind_cols + row_indent_cols + 1 < usable_cols) {
                 const bind_runs = try arena.alloc(draw.Run, 1);
                 bind_runs[0] = .{ .text = row.binding };
                 const bx = x + @as(i32, @intCast((usable_cols - bind_cols - 1) * cw));

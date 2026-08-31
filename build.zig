@@ -3237,7 +3237,9 @@ pub fn build(b: *std.Build) void {
     // 뿌리로 하는 실행을 따로 걸어 편집기 L2 판정자를 **실제로** 돌린다.
     const editor_core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL" },
+        // `CT*` 는 밴드 마디의 열 범위(`platform/cell_text.zig` — §7.5). **`maru` 모듈이라 여기서
+        // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT" },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));

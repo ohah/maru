@@ -158,12 +158,46 @@ fn isWide(cp: u21) bool {
 /// **줄 번호 자리를 뗀 뒤** 넘긴다(§7.5 — `palette.view` 는 제목과 우측 텍스트의 겹침을 안 본다).
 ///
 /// **순서는 문서 순서다**(§7.5) — 일치 품질로 재정렬하지 않는다.
+/// **형제 범위**(§7.5 「체인 항목을 누르면 형제가 뜬다」). `null` 이면 파일 전체다.
+///
+/// **부모는 목록이 말한다** — 심볼 목록은 문서 순서이고 깊이가 실려 있으므로, 그 항목의 **바로 앞에
+/// 있는 더 얕은 심볼**이 부모다. 별도 부모 포인터를 만들지 않는다(실측: 실제 파일 전수 대조에서
+/// 부모 범위가 자식을 감싸지 않는 경우 0건).
+pub const Scope = struct {
+    /// 이 심볼과 부모를 공유하는 것만 낸다.
+    sibling_of: usize,
+};
+
+/// 형제 판정 — `sibling_of` 와 **같은 부모, 같은 깊이**인가.
+fn isSibling(symbols: []const syntax.Provider.Symbol, of: usize, i: usize) bool {
+    if (of >= symbols.len or i >= symbols.len) return false;
+    const target = symbols[of];
+    const cand = symbols[i];
+    if (cand.depth != target.depth) return false;
+    if (target.depth == 0) return true; // 최상위끼리는 부모가 없다 — 전부 형제다
+    return parentOf(symbols, of) == parentOf(symbols, i);
+}
+
+/// 바로 앞의 더 얕은 심볼. 최상위면 `null`.
+fn parentOf(symbols: []const syntax.Provider.Symbol, i: usize) ?usize {
+    if (i >= symbols.len) return null;
+    const d = symbols[i].depth;
+    if (d == 0) return null;
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        if (symbols[j].depth < d) return j;
+    }
+    return null;
+}
+
 pub fn filter(
     allocator: std.mem.Allocator,
     symbols: []const syntax.Provider.Symbol,
     source: []const u8,
     query: []const u8,
     label_cols: usize,
+    scope: ?Scope,
     out: *List,
 ) !void {
     out.clear(allocator);
@@ -172,6 +206,9 @@ pub fn filter(
         if (sym.name_end > source.len or sym.name_start >= sym.name_end) continue;
         const name = source[sym.name_start..sym.name_end];
         if (!containsFoldAscii(name, query)) continue;
+        if (scope) |sc| {
+            if (!isSibling(symbols, sc.sibling_of, i)) continue;
+        }
 
         // **체인은 `chainAt(sym.start)` 으로 구한다**(§7.5) — 심볼의 시작 offset 은 그 심볼과 모든
         // 조상 안에 있으므로 커서용 조회가 행 라벨에도 그대로 쓰인다. 두 번째 조회를 만들지 않는다.
@@ -222,7 +259,7 @@ test "SP1 쿼리가 심볼 이름만 좁힌다 — 주석·문자열 속 같은 
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "draw", 60, &list);
+    try filter(allocator, syms.items, src, "draw", 60, null, &list);
 
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     try testing.expectEqualStrings("drawBox", list.rows.items[0].label);
@@ -243,7 +280,7 @@ test "SP2 중첩 심볼은 체인 전체로 보인다 — breadcrumb 과 같은 
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "draw", 60, &list);
+    try filter(allocator, syms.items, src, "draw", 60, null, &list);
 
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     try testing.expectEqualStrings("Widget \u{203A} draw", list.rows.items[0].label);
@@ -269,7 +306,7 @@ test "SP3 넘치면 체인 접두사부터 버린다 — 잎 이름은 온전히
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "shortName", 20, &list);
+    try filter(allocator, syms.items, src, "shortName", 20, null, &list);
 
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     const label = list.rows.items[0].label;
@@ -294,7 +331,7 @@ test "SP3b 잎 이름 하나도 안 들어가면 그때만 꼬리를 버린다 �
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "", 12, &list);
+    try filter(allocator, syms.items, src, "", 12, null, &list);
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
 
     const label = list.rows.items[0].label;
@@ -320,7 +357,7 @@ test "SP4 한글 심볼도 걸리고 폭도 두 칸으로 센다 — 명령 팔�
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "판정", 60, &list);
+    try filter(allocator, syms.items, src, "판정", 60, null, &list);
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
 
     // 한글은 두 칸이다 — 「한글 판정자」는 한글 5자와 공백 하나라 5 × 2 + 1 = 11칸.
@@ -338,7 +375,7 @@ test "SP5 행은 문서 내용을 안 빌린다 — 사본이라 원본이 사�
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src_owned, "", 60, &list);
+    try filter(allocator, syms.items, src_owned, "", 60, null, &list);
     try testing.expectEqual(@as(usize, 2), list.rows.items.len);
 
     // **원본을 지운다.** 라벨이 슬라이스였다면 여기서부터 해제된 메모리다.
@@ -359,42 +396,12 @@ test "SP6 순서는 문서 순서다 — 일치 품질로 재정렬하지 않는
 
     var list: List = .{};
     defer list.deinit(allocator);
-    try filter(allocator, syms.items, src, "match", 60, &list);
+    try filter(allocator, syms.items, src, "match", 60, null, &list);
 
     try testing.expectEqual(@as(usize, 2), list.rows.items.len);
     // 알파벳순이면 aaa 가 먼저다 — 문서 순서를 지키면 zzz 가 먼저다.
     try testing.expectEqualStrings("zzzMatch", list.rows.items[0].label);
     try testing.expect(list.rows.items[0].offset < list.rows.items[1].offset);
-}
-
-test "SPBENCH 실제 파일에서 라벨 폭과 잘림을 잰다" {
-    std.debug.print("\n", .{});
-    const allocator = testing.allocator;
-    const files = [_][]const u8{ "src/config/theme.zig", "src/platform/macos/app_session/editor.zig" };
-    for (files) |path| {
-        const src = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(4 << 20)) catch continue;
-        defer allocator.free(src);
-        var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
-        defer syms.deinit(allocator);
-        symbolsOf(allocator, src, &syms) catch continue;
-
-        var list: List = .{};
-        defer list.deinit(allocator);
-        filter(allocator, syms.items, src, "", 49, &list) catch continue;
-
-        var truncated: usize = 0;
-        var max_cols: usize = 0;
-        var over: usize = 0;
-        for (list.rows.items) |r| {
-            const c = displayCols(r.label);
-            if (c > max_cols) max_cols = c;
-            if (c > 49) over += 1;
-            if (std.mem.startsWith(u8, r.label, "\u{2026}")) truncated += 1;
-        }
-        std.debug.print("[{s}] 심볼 {d} · 최대 폭 {d} · 잘림 {d} · 상한 초과 {d}\n", .{
-            path, list.rows.items.len, max_cols, truncated, over,
-        });
-    }
 }
 
 test "SP12 자른 라벨은 언제나 온전한 UTF-8 이다 — 글자 가운데를 안 자른다 (§7.5)" {
@@ -417,7 +424,7 @@ test "SP12 자른 라벨은 언제나 온전한 UTF-8 이다 — 글자 가운�
     while (cols <= 40) : (cols += 1) {
         var list: List = .{};
         defer list.deinit(allocator);
-        try filter(allocator, syms.items, src, "", cols, &list);
+        try filter(allocator, syms.items, src, "", cols, null, &list);
         if (list.rows.items.len == 0) continue;
         const label = list.rows.items[0].label;
         try testing.expect(std.unicode.utf8ValidateSlice(label));
@@ -445,17 +452,101 @@ test "SP13 체인 접두사를 한 마디씩만 버린다 — 들어가는 만�
     defer list.deinit(allocator);
 
     // 넉넉하면 전부 — `Outer › Middle › leaf`.
-    try filter(allocator, syms.items, src, "leaf", 60, &list);
+    try filter(allocator, syms.items, src, "leaf", 60, null, &list);
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     try testing.expectEqualStrings("Outer \u{203A} Middle \u{203A} leaf", list.rows.items[0].label);
 
     // 한 마디만 들어갈 폭이면 **바깥 하나만** 버린다 — `Middle › leaf`.
-    try filter(allocator, syms.items, src, "leaf", 15, &list);
+    try filter(allocator, syms.items, src, "leaf", 15, null, &list);
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     try testing.expectEqualStrings("Middle \u{203A} leaf", list.rows.items[0].label);
 
     // 더 좁으면 잎만.
-    try filter(allocator, syms.items, src, "leaf", 6, &list);
+    try filter(allocator, syms.items, src, "leaf", 6, null, &list);
     try testing.expectEqual(@as(usize, 1), list.rows.items.len);
     try testing.expectEqualStrings("leaf", list.rows.items[0].label);
+}
+
+test "SP14 형제는 같은 부모의 같은 깊이다 — 남의 자식이 안 섞인다 (§7.5)" {
+    const allocator = testing.allocator;
+    const src =
+        \\pub const A = struct {
+        \\    pub fn a1() void {}
+        \\    pub fn a2() void {}
+        \\};
+        \\pub const B = struct {
+        \\    pub fn b1() void {}
+        \\};
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+
+    // `a1` 의 인덱스를 찾는다.
+    var a1: ?usize = null;
+    for (syms.items, 0..) |s, i| {
+        if (std.mem.eql(u8, src[s.name_start..s.name_end], "a1")) a1 = i;
+    }
+    const target = a1 orelse return error.SkipZigTest;
+
+    var list: List = .{};
+    defer list.deinit(allocator);
+    try filter(allocator, syms.items, src, "", 60, .{ .sibling_of = target }, &list);
+
+    // **A 의 자식 둘만** — B 의 자식도, A·B 자신도 아니다.
+    try testing.expectEqual(@as(usize, 2), list.rows.items.len);
+    try testing.expectEqualStrings("A \u{203A} a1", list.rows.items[0].label);
+    try testing.expectEqualStrings("A \u{203A} a2", list.rows.items[1].label);
+}
+
+test "SP15 최상위끼리는 전부 형제다 — 부모가 없다 (§7.5)" {
+    const allocator = testing.allocator;
+    const src =
+        \\pub const A = struct {
+        \\    pub fn a1() void {}
+        \\};
+        \\pub const B = struct {};
+        \\pub fn top() void {}
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+
+    var a: ?usize = null;
+    for (syms.items, 0..) |s, i| {
+        if (std.mem.eql(u8, src[s.name_start..s.name_end], "A")) a = i;
+    }
+    const target = a orelse return error.SkipZigTest;
+
+    var list: List = .{};
+    defer list.deinit(allocator);
+    try filter(allocator, syms.items, src, "", 60, .{ .sibling_of = target }, &list);
+
+    // 최상위 셋(A·B·top)만 — `a1` 은 깊이가 달라 안 든다.
+    try testing.expectEqual(@as(usize, 3), list.rows.items.len);
+    for (list.rows.items) |r| try testing.expect(std.mem.indexOf(u8, r.label, "a1") == null);
+}
+
+test "SP16 범위가 있어도 쿼리는 그대로 좁힌다 — 둘은 곱해진다 (§7.5)" {
+    const allocator = testing.allocator;
+    const src =
+        \\pub const A = struct {
+        \\    pub fn drawOne() void {}
+        \\    pub fn drawTwo() void {}
+        \\    pub fn other() void {}
+        \\};
+    ;
+    var syms: std.ArrayList(syntax.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    try symbolsOf(allocator, src, &syms);
+    var one: ?usize = null;
+    for (syms.items, 0..) |s, i| {
+        if (std.mem.eql(u8, src[s.name_start..s.name_end], "drawOne")) one = i;
+    }
+    const target = one orelse return error.SkipZigTest;
+
+    var list: List = .{};
+    defer list.deinit(allocator);
+    try filter(allocator, syms.items, src, "draw", 60, .{ .sibling_of = target }, &list);
+    try testing.expectEqual(@as(usize, 2), list.rows.items.len);
 }

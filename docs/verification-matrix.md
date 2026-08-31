@@ -2564,6 +2564,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   publication 전에는 filesystem allocation/download 권위가 아니다. `test-session-host-release-adapter-github-manifest-attestation`이
   Debug·ReleaseFast에서 parse/cross-binding, existing verifier composition, file drift, copied owner, mismatch/child/allocation failure의
   publication 0과 unwind를 검증한다. predecessor asset download/release verify-asset/git resolver/final workflow는 후속 범위다.
+  `release_adapter_github_predecessor_assets.zig`는 move-only authenticated A manifest만 asset allocation 권위로 받아 기존
+  downloader·release attestation·git resolver를 조립한다. CLI는 각 외부 호출 직전, 다운로드 set은 각 release/asset 검증 전후에
+  path/device/inode/type/link-count/mode/size/SHA-256과 work-directory pathname identity를 재검증한다. release purl SHA-1은 첫
+  tag-ref target에 결속하고 annotated chain은 resolver가 manifest source commit까지 별도로 peel한다. 전 호출과 수렴 뒤에만
+  move-only authenticated asset owner를 게시하며 실패는 residue 0 또는 terminal cleanup failure다.
+  `test-session-host-release-adapter-github-predecessor-assets`가 Debug·ReleaseFast에서 lightweight/annotated 성공, exact 호출·재검증,
+  statement/ref/commit과 filesystem drift, copied owner, child/OOM/depth/cycle failure의 publication 0·cleanup을 검증한다. workflow
+  wiring, Apple product 판정과 frozen release 제품 E2E는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

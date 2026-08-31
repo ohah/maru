@@ -1040,6 +1040,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   work-directory, timeout/child failure와 성공·실패 residue 0을 Debug·ReleaseFast에서 검증한다. 이 gate만으로
   CLI pin/revalidation, release attestation 호출, git resolver나 final workflow composition을 완료했다고 주장하지 않는다.
 
+  predecessor asset composition은 인증된 A manifest만 세 asset의 allocation 권위로 받아 기존 downloader, release
+  attestation verifier와 git resolver를 조립한다. composition은 CLI pathname을 각 download·release verify·세
+  verify-asset 호출 직전에 재검증하고, downloader가 게시한 exact path/device/inode/size/SHA-256과 owner-only work-directory를
+  각 외부 검증 전후에 다시 관측한다. pathname 교체, hard link 추가, mode 변경, 내용 mutation, work-directory rename/replacement는
+  검증 결과가 성공이어도 terminal failure다. release 전체 statement와 세 verify-asset statement는 모두 manifest의 immutable
+  release ID/tag와 exact asset set에 결속해야 한다.
+
+  release purl의 SHA-1은 첫 tag ref 관측의 target object SHA와 exact 일치해야 하며 annotated tag를 peel한 source commit으로
+  해석하지 않는다. 기존 bounded git resolver만 ref/tag observation chain을 소비해 manifest의 source commit으로 수렴시킨다.
+  모든 호출·재관측·resolver 수렴이 끝난 뒤에만 final-address move-only `AuthenticatedPredecessorAssets`를 게시한다. 이 owner는
+  인증된 세 local asset과 source commit을 조회하고 exact cleanup할 유일한 권위다. 어느 단계에서든 실패하면 이미 만든
+  `DownloadedSet`을 exact cleanup하며, cleanup을 확정하지 못하면 원래 검증 오류보다 cleanup failure를 우선한다. focused gate
+  `test-session-host-release-adapter-github-predecessor-assets`는 lightweight/annotated tag 성공, exact 호출 순서와 CLI/file
+  revalidation, release/asset/ref/commit mismatch, pathname·inode·mode·digest drift, copied owner, child/OOM/depth/cycle failure의
+  publication 0과 residue 0을 Debug·ReleaseFast에서 검증한다. 이 gate는 checkout 전 CLI capture나 release workflow wiring,
+  Apple product 판정과 최종 U5 frozen release E2E를 대신하지 않는다.
+
   GitHub CLI executable 권위는 **공식 GitHub Release CI에만** 적용한다. 로컬 빌드·로컬 업그레이드와 앱 인증서 기반
   session-host upgrade 경로에는 이 계약을 요구하지 않는다. trusted release job은 repository checkout보다 먼저 GitHub가
   제공한 초기 PATH에서 `gh`의 symlink-free canonical absolute path와 lowercase SHA-256을 한 번 캡처해 immutable step output으로

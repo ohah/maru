@@ -2515,6 +2515,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   pagination shape/count 불일치와 child failure/timeout은 fail-close한다. `test-session-host-release-adapter-github-transport`가
   Debug·ReleaseFast 실제 process와 injected executor에서 이를 검증한다. 이 leaf가 받는 GitHub CLI executable의 공급망 권위와
   실제 release workflow의 선택·배선은 아직 증명하지 않는다.
+  `release_adapter_github_attestation.zig`는 artifact attestation에 한해 exact `gh attestation verify` argv와 clean token
+  environment/bounded stdout을 소유하고, exact-one JSON result의 verified certificate summary를 trusted repository/source/tag/
+  workflow/run-attempt/GitHub-hosted runner에 결속한다. SLSA v1 statement는 subject 이름/SHA exact-one과 certificate/context
+  교차검증에만 쓰고 workflow-controlled predicate를 독립 권위로 승격하지 않는다.
+  `test-session-host-release-adapter-github-attestation`이 Debug·ReleaseFast에서 command와 semantic authority의 성공 및
+  identity/run/subject mismatch, duplicate/malformed/cap/timeout/child failure를 검증한다. CLI pathname pin/revalidation과 이
+  transport의 최종 조립, release attestation·predecessor download·workflow 배선은 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

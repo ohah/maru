@@ -5,6 +5,13 @@ export MARU_WEB_PANEL=1
 export MARU_TEST_BROWSER_CAP=1
 export MARU_MACOS_APP_SMOKE_MS=90000
 
+test_root=$(mktemp -d "/tmp/maru-browser-bounded-smoke.XXXXXX")
+trap 'rm -rf "$test_root"' EXIT HUP INT TERM
+export HOME="$test_root"
+export CFFIXED_USER_HOME="$test_root"
+export MARU_SESSION_HOST_ROOT="$test_root/session-host-root"
+mkdir -p "$MARU_SESSION_HOST_ROOT"
+
 rm -f zig-out/maru-macos-app/app.summary.txt
 ./zig-out/bin/maru-macos-app >/tmp/maru-browser-bounded-smoke.log
 

@@ -5447,6 +5447,53 @@ test "원격 화면은 run 이 든 색으로 그린다 — 색 있는 화면이 
     try std.testing.expectEqual(@as(u8, 0), fg.b);
 }
 
+test "원격 화면은 배경색과 반전을 그린다 — 선택·강조가 안 사라진다" {
+    // `Run.bg` 도 실려 오는데 안 쓰면 **반전(inverse)으로 표시한 선택·강조가 통째로 안 보인다**.
+    // 색을 실어 보내면서 그 플래그만 버리면 화면이 거짓말을 한다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"host-backed\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const first = bridge.remoteRowCenter(0).?;
+    tapAt(first.x, first.y);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    const tag = maru.session.screen_stream.ColorTag;
+    const red: u32 = (tag.rgb << tag.shift) | 0xFF0000;
+    const green: u32 = (tag.rgb << tag.shift) | 0x00FF00;
+
+    // ⑴ 배경색을 실으면 칠한다.
+    const frame = try makeScreenFrameStyled(std.testing.allocator, red, green, 0);
+    defer std.testing.allocator.free(frame);
+    _ = feedControl(frame);
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+    const bg = bridge.remoteLastBg() orelse return error.NoRemoteBgDrawn;
+    try std.testing.expectEqual(@as(u8, 0), bg.r);
+    try std.testing.expectEqual(@as(u8, 255), bg.g);
+
+    // ⑵ **반전이면 두 색이 맞바뀐다.** 글자가 초록, 배경이 빨강이어야 한다.
+    // (채널을 다시 여닫지 않는다 — 이미 열린 채로 다음 프레임을 흘리면 된다.)
+    const inv_frame = try makeScreenFrameStyled(std.testing.allocator, red, green, maru.session.screen_stream.StyleFlags.inverse);
+    defer std.testing.allocator.free(inv_frame);
+    _ = feedControl(inv_frame);
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+    const inv_fg = bridge.remoteLastFg() orelse return error.NoRemoteGlyphDrawn;
+    const inv_bg = bridge.remoteLastBg() orelse return error.NoRemoteBgDrawn;
+    try std.testing.expectEqual(@as(u8, 255), inv_fg.g); // 글자가 초록
+    try std.testing.expectEqual(@as(u8, 255), inv_bg.r); // 배경이 빨강
+}
+
 test "원격 화면은 창을 통째로 덮는다 — 아래 터미널도 보조 키바도 비치면 안 된다" {
     // **실기에서 잡은 결함이다**(시뮬레이터 캡처). 밀린 화면은 터미널 chrome **위에** 서는데,
     // 이 화면만 창 전체를 안 칠했다. 그래서 원격 글자가 폰 자기 터미널 글자와 겹쳐 찍혔고
@@ -5529,8 +5576,13 @@ fn makeScreenFrame(a: std.mem.Allocator) ![]u8 {
 
 /// 색을 실은 프레임. `fg` 는 stream 의 **태그드 색 의도**다(0 이면 default).
 fn makeScreenFrameColored(a: std.mem.Allocator, fg: u32) ![]u8 {
+    return makeScreenFrameStyled(a, fg, 0, 0);
+}
+
+/// 색과 style flag 를 실은 프레임. `fg`·`bg` 는 stream 의 **태그드 색 의도**다(0 이면 default).
+fn makeScreenFrameStyled(a: std.mem.Allocator, fg: u32, bg: u32, flags: u32) ![]u8 {
     const stream = maru.session.screen_stream;
-    var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1, .fg = fg }};
+    var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1, .fg = fg, .bg = bg, .style_flags = flags }};
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(a);
     const meta = try stream.encodeScreenMeta(a, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{

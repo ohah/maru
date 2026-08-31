@@ -920,6 +920,7 @@ pub export fn maru_mobile_term_rows() u32 {
 
 const control = @import("mobile_control.zig");
 const screen = @import("mobile_screen.zig");
+const stream_flags = maru.session.screen_stream.StyleFlags;
 
 /// 화면이 그릴 세션 목록의 상한. **폰 화면에 그 이상은 안 들어간다** — 넘으면 앞에서부터
 /// 담고(파서가 그렇게 한다) 개수로 드러난다.
@@ -4679,10 +4680,30 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
             // **run 이 든 색을 쓴다.** 옛 판은 전부 `surface_fg` 한 색이라 색이 있는 화면이
             // 통째로 흑백으로 보였다 — host 는 색을 이미 실어 보내고 있었다(`Run.fg`, 태그드
             // intent). 푸는 규칙은 폰의 로컬 터미널이 쓰는 `resolveColor` 와 **같은 것**을 쓴다.
-            const fg = resolveColor(remoteColorIntent(r.fg), tk.get(.surface_fg));
+            // **반전(inverse)은 두 색을 맞바꾼다.** 그걸 안 보면 선택·강조가 통째로 안 보인다 —
+            // 색을 실어 보내면서 그 플래그만 버리면 화면이 거짓말을 한다.
+            const inverse = (r.style_flags & stream_flags.inverse) != 0;
+            const fg_intent = remoteColorIntent(if (inverse) r.bg else r.fg);
+            const bg_intent = remoteColorIntent(if (inverse) r.fg else r.bg);
+            const fg = resolveColor(fg_intent, if (inverse) tk.get(.surface_bg) else tk.get(.surface_fg));
             // **푼 색을 남긴다**(판정용). 헤드리스에서는 글리프가 안 구워져 quad 가 안 나오므로
             // 그린 픽셀로는 못 잰다 — 대신 **제품 경로가 실제로 계산한 값**을 본다(불리언 깃발이
             // 아니라 값이라, 옛 한 색으로 되돌리는 변이가 이 값을 바꾼다).
+
+            // **배경은 run 단위로 한 번 칠한다** — 셀마다 칠하면 같은 색 quad 가 run 길이만큼
+            // 늘어난다. 기본 배경이면 안 칠한다: 창은 이미 `surface_bg` 로 덮여 있고, 안 칠하면
+            // 그만큼 quad 가 준다(빈칸 글자를 안 그리는 것과 같은 규율).
+            const bg_is_default = !inverse and bg_intent == .default;
+            if (!bg_is_default) {
+                const run_cells: i32 = @intCast(r.count * @max(1, r.width));
+                const bx = ox + col * cell_w;
+                const bw = @min(run_cells * cell_w, @as(i32, @intFromFloat(win.x + win.w)) - bx);
+                if (bw > 0) {
+                    const bg = resolveColor(bg_intent, if (inverse) tk.get(.surface_fg) else tk.get(.surface_bg));
+                    push(.{ .x = bx, .y = oy + @as(i32, row) * line_h, .w = @intCast(bw), .h = @intCast(line_h) }, bg, 0xFF, 0, 0);
+                    remote_last_bg = bg;
+                }
+            }
             var k: u32 = 0;
             while (k < r.count) : (k += 1) {
                 // 화면 밖으로 나가면 그만 그린다 — 둘러보기(팬)는 후속이다(§8 한계).
@@ -4717,6 +4738,13 @@ var remote_last_fg: ?color.Rgb = null;
 
 pub fn remoteLastFg() ?color.Rgb {
     return remote_last_fg;
+}
+
+/// 마지막으로 칠한 원격 **배경색**(판정용). `null` 이면 기본 배경뿐이라 안 칠했다.
+var remote_last_bg: ?color.Rgb = null;
+
+pub fn remoteLastBg() ?color.Rgb {
+    return remote_last_bg;
 }
 
 /// 원격 커서를 실제로 그렸나(판정용). 상태만 재면 «보인다» 고 해 놓고 안 그려도 초록이다.

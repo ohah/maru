@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 // build.zig.zon의 .version을 버전 단일 출처로 읽는다(인앱 새 버전 안내가 이 값과 GitHub
 // releases/latest tag를 비교 — distribution.md). 릴리스 시 .version만 올리면 앱 버전도 따라간다.
 const build_zig_zon = @import("build.zig.zon");
+const product_identity = @import("src/platform/macos/product_identity.zig");
 
 /// Zig 0.16 Build의 test-server IPC 대신 project-owned simple runner를 쓴다.
 /// `simple_test_runner`는 standard terminal runner와 같은 test/leak/log failure
@@ -97,6 +98,8 @@ pub fn build(b: *std.Build) void {
     macos_info_plist_generate.addFileArg(b.path("src/platform/macos/MaruAppHost-Info.plist.in"));
     const macos_info_plist = macos_info_plist_generate.addOutputFileArg("MaruAppHost-Info.plist");
     macos_info_plist_generate.addArg(build_zig_zon.version);
+    macos_info_plist_generate.addArg(product_identity.bundle_id);
+    macos_info_plist_generate.addArg(product_identity.bundle_version);
     macos_info_plist_generate.setCwd(b.path("."));
 
     // macOS에서 os_version_min을 박으면 Zig가 cross-compile로 보고(std.Target.Query.isNative()=false)
@@ -12609,7 +12612,14 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_product.zig"),
             .target = target,
             .optimize = apple_product_optimize,
-            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "product_identity", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/product_identity.zig"),
+                    .target = target,
+                    .optimize = apple_product_optimize,
+                }) },
+            },
         });
         const apple_product_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

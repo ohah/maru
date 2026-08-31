@@ -189,9 +189,13 @@ pub fn spawnRemoteCommand(
 /// 파서(`agent_events.parseResumeEntry`)가 이미 이름을 토큰 클래스로 걸렀지만, 여기서 **다시** 본다 —
 /// 그쪽은 「이 값이 우리 로그를 가리키나」를 묻고 이쪽은 「이 값을 셸에 줘도 되나」를 묻는다. 두 질문이
 /// 같은 답을 낸다고 가정하면, 한쪽 규칙이 느슨해지는 날 다른 쪽이 조용히 뚫린다.
+/// `--resume` 문자열 상한. **호출자가 이 값에 맞춰 커서 개수를 묶는다**(`RemoteAgentHost.cursor_max`
+/// 옆의 comptime 검사) — 넘으면 이어읽기를 조용히 포기하므로, 그 조용함을 컴파일 시점으로 옮긴다.
+pub const resume_spec_max: usize = 4096;
+
 fn resumeIsShellSafe(spec: []const u8) bool {
     if (spec.len == 0) return true;
-    if (spec.len > 4096) return false; // 상한이 없으면 명령줄이 무한히 길어진다
+    if (spec.len > resume_spec_max) return false; // 상한이 없으면 명령줄이 무한히 길어진다
     for (spec) |c| switch (c) {
         'a'...'z', '0'...'9', '_', ':', ',' => {},
         else => return false,

@@ -14048,7 +14048,28 @@ pub const AppSession = struct {
         ///
         /// **메모리에만 둔다.** 앱과 함께 죽어야 「앱을 새로 켰다 = 처음부터(배지를 세운다)」와
         /// 「채널만 죽었다 = 이어서(알림 재생 없음)」가 저절로 갈린다.
-        cursors: std.StringHashMapUnmanaged(u64) = .empty,
+        ///
+        /// ⚠️ **개수를 묶는다**(적대적 검증 1 회차). 스트리머는 원격 디렉터리 **전체**를 훑어 옛 pane 의
+        /// 로그까지 커서를 내고, 그 파일들은 1 MiB 전에는 안 지워지며 tmux pane 번호는 단조 증가한다.
+        /// 안 묶으면 `--resume` 문자열이 자라 `resumeIsShellSafe` 의 상한(4 KiB)을 넘고, 그러면 조용히
+        /// 처음부터 읽어 **알림이 재생된다** — 이 기능이 막으려던 바로 그것이다. host 소유 nonce 는 한
+        /// 항목이 77 바이트라 53 개면 넘는다.
+        cursors: std.StringHashMapUnmanaged(Cursor) = .empty,
+        /// 커서 하나. `seen_ms` 는 **밀어낼 것을 고르는 데만** 쓴다(가장 오래 안 본 것부터).
+        const Cursor = struct { offset: u64, seen_ms: u64 };
+        /// 동시에 기억할 로그 수. 한 pane 이 하나씩 쓰므로 이만큼이면 실사용을 덮는다.
+        ///
+        /// ⚠️ **이 값이 `--resume` 예산을 정한다.** 누가 여기를 올리면 문자열이 `resumeIsShellSafe` 의
+        /// 상한을 넘고, 그러면 조용히 처음부터 읽어 알림이 재생된다 — 화면에는 아무 단서가 없다.
+        /// 그래서 관계를 **컴파일 시점에 묶는다**(적대적 검증 2 회차).
+        const cursor_max: usize = 32;
+        comptime {
+            const name_max = maru.session.agent_hook_command.remote_log_name_max;
+            const digits = 20; // u64 십진 최대 자릿수
+            const per_entry = name_max + 1 + digits + 1; // `<이름>:<offset>` + 구분자
+            if (cursor_max * per_entry > ssh_upload.resume_spec_max)
+                @compileError("커서 상한이 --resume 예산을 넘는다 — cursor_max 를 줄이거나 예산을 올려라");
+        }
         /// 다시 띄우기 상한과 간격. 백오프는 2 배씩, 첫 간격은 1 초.
         const retry_max: u8 = 6;
         const retry_base_ms: u64 = 1_000;
@@ -14306,11 +14327,25 @@ pub const AppSession = struct {
         // 새로 켰다」이고, 배지를 세우려면 최근 이벤트를 다시 읽어야 한다.
         var spec: std.ArrayListUnmanaged(u8) = .empty;
         defer spec.deinit(self.allocator);
+        var built = true;
         var it = host.cursors.iterator();
         while (it.next()) |e| {
-            if (spec.items.len > 0) spec.append(self.allocator, ',') catch break;
-            spec.print(self.allocator, "{s}:{d}", .{ e.key_ptr.*, e.value_ptr.* }) catch break;
+            if (spec.items.len > 0) spec.append(self.allocator, ',') catch {
+                built = false;
+                break;
+            };
+            spec.print(self.allocator, "{s}:{d}", .{ e.key_ptr.*, e.value_ptr.offset }) catch {
+                built = false;
+                break;
+            };
         }
+        // **반쯤 지은 이어읽기는 안 보낸다**(적대적 검증 5 회차). `,` 를 붙인 뒤 실패하면 끝에 쉼표가
+        // 남는데, 그것은 셸 검사(`resumeIsShellSafe`)를 통과하고 **원격의 구조 검사에서 죽는다** —
+        // 스트리머가 곧바로 usage_error 로 나가 EOF → 재시도 → 결국 영구 포기가 된다. 증상은 「배지가
+        // 안 뜬다」 하나뿐이라 원인이 화면에 안 나온다.
+        //
+        // 같은 규칙을 **저쪽 것으로** 다시 본다 — 두 벌로 두면 한쪽이 바뀌는 날 조용히 갈린다.
+        if (!built or !maru.cli.agent_events.resumeIsWellFormed(spec.items)) spec.clearRetainingCapacity();
         const stream = ssh_upload.spawnAgentEvents(
             self.allocator,
             ctl,
@@ -14319,8 +14354,10 @@ pub const AppSession = struct {
             maru.session.agent_hook_command.remote_log_dir_rel,
             spec.items,
         ) catch {
-            std.log.scoped(.agent).warn("원격 이벤트 스트리머를 못 띄웠다 dest={s}", .{dest});
-            host.stopped = true;
+            // **기동 실패도 EOF 와 같은 부류다**(적대적 검증 4 회차). fork 가 한 번 밀린 것으로 그
+            // 목적지를 앱 수명 동안 죽이면, 방금 EOF 에서 고친 영구 차단을 형제 경로가 그대로 재현한다.
+            // 같은 예산·같은 백오프를 쓰고, 상한을 넘겨야 굳는다.
+            self.scheduleStreamerRetry(dest, host, "원격 이벤트 스트리머를 못 띄웠다");
             return;
         };
         // **논블로킹으로 둔다.** 안 그러면 자식이 조용한 동안 tick 이 통째로 멈춘다 — 스트리머는
@@ -14332,21 +14369,38 @@ pub const AppSession = struct {
     }
 
     /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
-    fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8) void {
+    fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8, now_ms: u64) void {
         const ras = maru.session.remote_agent_stream;
         for (lines) |line| {
             const cur = switch (ras.parseFrame(line)) {
                 .cursor => |c| c,
                 else => continue,
             };
-            const gop = host.cursors.getOrPut(self.allocator, cur.name) catch continue;
-            if (!gop.found_existing) {
-                gop.key_ptr.* = self.allocator.dupe(u8, cur.name) catch {
-                    _ = host.cursors.remove(cur.name);
-                    continue;
-                };
+            if (host.cursors.getPtr(cur.name)) |slot| {
+                slot.* = .{ .offset = cur.offset, .seen_ms = now_ms };
+                continue;
             }
-            gop.value_ptr.* = cur.offset;
+            // 새 이름이다. 자리가 없으면 **가장 오래 안 본 것**을 밀어낸다 — 그 로그는 이미 안 도는
+            // pane 의 것일 가능성이 높고, 틀렸더라도 그 하나만 처음부터 읽는다(전부가 아니다).
+            if (host.cursors.count() >= RemoteAgentHost.cursor_max) {
+                var oldest_key: ?[]const u8 = null;
+                var oldest_ms: u64 = std.math.maxInt(u64);
+                var it = host.cursors.iterator();
+                while (it.next()) |e| {
+                    if (e.value_ptr.seen_ms < oldest_ms) {
+                        oldest_ms = e.value_ptr.seen_ms;
+                        oldest_key = e.key_ptr.*;
+                    }
+                }
+                if (oldest_key) |k| {
+                    if (host.cursors.fetchRemove(k)) |old| self.allocator.free(old.key);
+                }
+            }
+            const key = self.allocator.dupe(u8, cur.name) catch continue;
+            host.cursors.put(self.allocator, key, .{ .offset = cur.offset, .seen_ms = now_ms }) catch {
+                self.allocator.free(key);
+                continue;
+            };
         }
     }
 
@@ -14405,8 +14459,14 @@ pub const AppSession = struct {
                 consumed += nl + 1;
             }
             if (count == 0) break;
+            // **줄이 왔다 = 채널이 산다.** 재시도 예산을 되돌린다(적대적 검증 3 회차).
+            //
+            // 안 되돌리면 `retries` 가 **오직 증가만** 해서, 슬립·빌드로 며칠에 걸쳐 여섯 번 끊긴
+            // 목적지가 그 뒤로 영영 안 붙는다 — 재접속을 넣고도 오늘 이전과 같은 상태가 된다.
+            // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
+            host.retries = 0;
             // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
-            self.recordRemoteCursors(host, lines[0..count]);
+            self.recordRemoteCursors(host, lines[0..count], now_ms);
             self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
         }
         if (consumed > 0) {
@@ -14433,20 +14493,30 @@ pub const AppSession = struct {
         // **EOF 는 「영원히 안 된다」가 아니다**(RA5-b). 슬립·네트워크 끊김·원격 프로세스 교체로도 나고,
         // 그때 ControlMaster 는 멀쩡한 경우가 많다(실측). 예전에는 여기서 `stopped` 를 세워 앱을 껐다
         // 켜기 전까지 그 목적지가 죽었다 — 사용자에게는 「어느 순간부터 배지가 안 뜬다」로만 보였다.
-        //
-        // 그래도 **무한 재시도는 안 한다**: 서버가 계속 거절하면 그것이 tick 마다 fork 하는 접속 폭주다
-        // (`stopped` 의 원래 목적). 그래서 2 배씩 물러나며 상한까지만 시도하고, 넘으면 굳힌다.
+        self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 끝났다");
+    }
+
+    /// 다시 띄울 시각을 예약한다 — **EOF 와 기동 실패가 같은 규칙을 쓴다**(적대적 검증 4 회차).
+    ///
+    /// **무한 재시도는 안 한다**: 서버가 계속 거절하면 그것이 tick 마다 fork 하는 접속 폭주이고
+    /// (`stopped` 의 원래 목적), 그래서 2 배씩 물러나며 상한까지만 시도한다. 넘으면 굳히고 **사용자에게
+    /// 말한다**(RA5-c) — 그때부터는 스스로 안 돌아오는데 화면에는 「배지가 안 뜬다」로만 보인다.
+    ///
+    /// 예산은 `recordRemoteCursors` 옆에서 되돌린다(줄이 오면 = 채널이 산다). 그래서 이 값은 「연달아
+    /// 실패한 횟수」이지 「살아온 동안의 총합」이 아니다.
+    fn scheduleStreamerRetry(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, why: []const u8) void {
         if (host.retries >= RemoteAgentHost.retry_max) {
-            std.log.scoped(.agent).warn("원격 이벤트 채널이 계속 끊긴다 — 관측 모드로 내린다 dest={s}", .{dest});
+            std.log.scoped(.agent).warn("{s} — 계속 실패해 관측 모드로 내린다 dest={s}", .{ why, dest });
             host.stopped = true;
+            self.showNoticeKey(.agent_remote_channel_gave_up);
             return;
         }
         const backoff = RemoteAgentHost.retry_base_ms << @intCast(@min(host.retries, 5));
         host.retries += 1;
-        host.retry_at_ms = now_ms + backoff;
+        host.retry_at_ms = self.awakeMs() + backoff;
         std.log.scoped(.agent).warn(
-            "원격 이벤트 채널이 끝났다 — {d} ms 뒤 다시 띄운다({d}/{d}) dest={s}",
-            .{ backoff, host.retries, RemoteAgentHost.retry_max, dest },
+            "{s} — {d} ms 뒤 다시 띄운다({d}/{d}) dest={s}",
+            .{ why, backoff, host.retries, RemoteAgentHost.retry_max, dest },
         );
     }
 

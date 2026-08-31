@@ -13313,6 +13313,26 @@ fn runAgentEvents(
         routes.deinit(allocator);
     }
     var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
+    // **이어읽기**(RA5-a). 로컬이 기억해 둔 위치를 받아 그 자리부터 읽는다 — 채널만 죽었다 살아난
+    // 경우에 이미 흘린 이벤트를 다시 흘리지 않는다(그러면 완료 알림이 재생된다). 비면 처음부터이고,
+    // 그것이 **앱을 새로 켠** 경우다(배지를 세우려면 최근 이벤트를 다시 읽어야 한다).
+    //
+    // `seen_size` 는 `offset` 과 같게 둔다 — 「그때 그만큼 봤다」가 우리가 아는 전부이고, 파일이 그
+    // 사이 줄었으면 `advance` 가 다음 회차에 0 으로 되돌린다.
+    if (opts.resume_spec.len > 0) {
+        var it = std.mem.splitScalar(u8, opts.resume_spec, ',');
+        while (it.next()) |field| {
+            const entry = ae.parseResumeEntry(field) orelse continue; // 인자 해석이 이미 걸렀다
+            const gop = cursors.getOrPut(allocator, entry.name) catch continue;
+            if (!gop.found_existing) {
+                gop.key_ptr.* = allocator.dupe(u8, entry.name) catch {
+                    _ = cursors.remove(entry.name);
+                    continue;
+                };
+            }
+            gop.value_ptr.* = .{ .offset = entry.offset, .seen_size = entry.offset };
+        }
+    }
     defer {
         var it = cursors.keyIterator();
         while (it.next()) |k| allocator.free(k.*);
@@ -13473,6 +13493,14 @@ fn runAgentEvents(
             }
             const next: ae.Cursor = .{ .offset = cur.offset + consumed, .seen_size = size };
             gop.value_ptr.* = next;
+            // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
+            // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이
+            // 흘러 선이 시끄러워진다.
+            if (consumed > 0) {
+                frame.clearRetainingCapacity();
+                try ae.formatCursor(&frame, allocator, emit_nonce, next.offset);
+                try stdout.writeAll(frame.items);
+            }
 
             // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
             // 실패는 조용히 지나간다: 못 비워도 이벤트는 계속 흐르고, 다음 회차에 다시 시도한다.
@@ -13484,6 +13512,11 @@ fn runAgentEvents(
                     // 하겠지만, 여기서 함께 두어야 «비웠는데 커서가 남아» 새 이벤트를 건너뛰는 한
                     // 회차가 안 생긴다.
                     gop.value_ptr.* = .{ .offset = 0, .seen_size = 0 };
+                    // **비웠다는 것도 알린다.** 로컬이 옛 offset 을 든 채 재접속하면 새 파일의 앞을
+                    // 건너뛴다 — `advance` 의 회전 감지가 결국 되돌리지만, 그 한 회차를 안 만든다.
+                    frame.clearRetainingCapacity();
+                    ae.formatCursor(&frame, allocator, emit_nonce, 0) catch continue;
+                    stdout.writeAll(frame.items) catch continue;
                 } else |_| {}
             }
         }

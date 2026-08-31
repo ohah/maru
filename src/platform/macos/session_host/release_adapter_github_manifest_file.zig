@@ -56,6 +56,8 @@ pub const ManifestFile = struct {
     dir_name: [std.fs.max_name_bytes:0]u8 = @splat(0),
     file_name: [std.fs.max_name_bytes:0]u8 = @splat(0),
     file_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
+    parent_device: u64 = 0,
+    parent_inode: u64 = 0,
     dir_device: u64 = 0,
     dir_inode: u64 = 0,
     file_device: u64 = 0,
@@ -73,6 +75,51 @@ pub const ManifestFile = struct {
             .size = self.file_size,
             .sha256 = &self.sha256,
         };
+    }
+
+    pub fn revalidate(self: *const ManifestFile) Error!Observation {
+        const observed = self.observation() orelse return error.ChangedDuringWrite;
+        const work_path = std.mem.sliceTo(&self.work_path, 0);
+        const slash = std.mem.lastIndexOfScalar(u8, work_path, '/') orelse return error.ChangedDuringWrite;
+        var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+        const parent_path = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{work_path[0..slash]}) catch return error.ChangedDuringWrite;
+        const current_parent = safe_open.openAbsoluteNoFollow(parent_path, true) catch return error.ChangedDuringWrite;
+        defer _ = c.close(current_parent);
+        var parent_stat: posix.Stat = undefined;
+        var dir_by_name: posix.Stat = undefined;
+        if (c.fstat(current_parent, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or
+            parent_stat.dev != self.parent_device or parent_stat.ino != self.parent_inode or
+            c.fstatat(current_parent, self.dir_name[0..].ptr, &dir_by_name, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+            !posix.S.ISDIR(dir_by_name.mode) or dir_by_name.dev != self.dir_device or dir_by_name.ino != self.dir_inode or
+            dir_by_name.mode & 0o777 != 0o700)
+            return error.ChangedDuringWrite;
+        var dir_stat: posix.Stat = undefined;
+        if (self.dir_fd < 0 or c.fstat(self.dir_fd, &dir_stat) != 0 or !posix.S.ISDIR(dir_stat.mode) or
+            dir_stat.dev != self.dir_device or dir_stat.ino != self.dir_inode or dir_stat.mode & 0o777 != 0o700)
+            return error.ChangedDuringWrite;
+        const fd = c.openat(self.dir_fd, self.file_name[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (fd < 0) return error.ChangedDuringWrite;
+        defer _ = c.close(fd);
+        var stat: posix.Stat = undefined;
+        if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.dev != self.file_device or
+            stat.ino != self.file_inode or stat.size != self.file_size or stat.nlink != 1 or stat.mode & 0o777 != 0o400)
+            return error.ChangedDuringWrite;
+        var bytes: [manifest.max_manifest_bytes]u8 = undefined;
+        var count: usize = 0;
+        while (count < self.file_size) {
+            const amount = c.pread(fd, bytes[count..].ptr, self.file_size - count, @intCast(count));
+            if (amount < 0) {
+                if (posix.errno(-1) == .INTR) continue;
+                return error.ChangedDuringWrite;
+            }
+            if (amount == 0) return error.ChangedDuringWrite;
+            count += @intCast(amount);
+        }
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes[0..count], &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &hex, &self.sha256)) return error.ChangedDuringWrite;
+        return observed;
     }
 
     pub fn cleanup(self: *ManifestFile) Error!void {
@@ -145,6 +192,10 @@ fn createWorkDir(file: *ManifestFile, path: [:0]const u8) Error!void {
     const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
     file.parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidPath;
     file.owner = file;
+    var parent_stat: posix.Stat = undefined;
+    if (c.fstat(file.parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode)) return error.CreateFailed;
+    file.parent_device = @intCast(parent_stat.dev);
+    file.parent_inode = @intCast(parent_stat.ino);
     if (c.mkdirat(file.parent_fd, file.dir_name[0..].ptr, 0o700) != 0) {
         const err: Error = if (posix.errno(-1) == .EXIST) error.DestinationExists else error.CreateFailed;
         _ = c.close(file.parent_fd);

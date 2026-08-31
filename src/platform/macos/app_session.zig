@@ -1237,6 +1237,24 @@ pub fn linkScopesForTerm(self: *const AppSession, term: *const Term) terminal.Li
     return scopes;
 }
 
+/// `linkScopesForTerm` 의 **surface 판**. host-backed 경로는 `Term` 이 아니라 `Surface` 만 손에 쥐는데,
+/// 원격 cwd 차단(§9.4)은 Term 의 관측값으로 판정하므로 그 짝을 찾아 같은 규칙을 태운다.
+///
+/// **직접 `linkScopesFromConfig` 를 부르면 안 된다.** 예전에 host-backed 링크 경로 둘이 그렇게 해서,
+/// `cwd_host` wire 가 붙는 순간 §9.4 의 파일 경로 차단이 **그 모드에서만** 빠진 채로 남았다
+/// (ssh-integration.md §9.6 이 그 일을 미리 예고해 두었다). 못 찾으면 설정 그대로 — 그 경우는
+/// 「Term 이 없다」이지 「원격이 아니다」가 아니지만, 없는 Term 의 관측값을 지어낼 수는 없다.
+pub fn linkScopesForSurfaceId(self: *const AppSession, surface_id: u64) terminal.LinkScopes {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.surfaceId() == surface_id) return linkScopesForTerm(self, term);
+            }
+        }
+    }
+    return settings_ops.linkScopesFromConfig(self);
+}
+
 pub fn sidebarCwdPath(self: *AppSession, term: *Term) ![]const u8 {
     // cwd 해석은 **소스 컨트롤 뷰·파일 탐색기와 같은 지점**을 쓴다(docs/editor-surface-dock.md §3.5의 2단 규칙).
     // 예전에는 여기만 관측(OSC 7)을 직접 읽어, OSC 7이 없는 Term에서 같은 화면의 두 뷰가 서로 다른 답을 냈다.
@@ -15123,7 +15141,7 @@ pub const AppSession = struct {
     /// 분리(docs/link-detection.md §원격(host-backed) 세션). OSC 8(scope=osc8)은 프리셋과 무관하게 항상 통과한다.
     /// **호출자가 `lockCore`를 보유해야 한다** — 반환 span은 값 복사지만 순회하는 `links` 슬라이스가 화면 소스를 alias한다.
     fn remoteLinkSpanAt(self: *const AppSession, surface: *maru.session.Surface, row: usize, col: u16) ?terminal.SelectionSpan {
-        const scopes = settings_ops.linkScopesFromConfig(self);
+        const scopes = linkScopesForSurfaceId(self, surface.id);
         for (surface.renderSnapshot().links) |link| {
             if (!link.scope.enabledIn(scopes)) continue;
             const s = link.span.start;
@@ -15224,7 +15242,7 @@ pub const AppSession = struct {
         // 열리는 곳"을 유지한다. capability 없는 구 host면 backend가 null을 줘 일반 클릭으로 흐른다.
         if (is_macos and s.remote != null) {
             if (app_remote_backend) |*rb| {
-                if (rb.linkAtFor(s.id, cell.row, cell.col, packLinkScopes(settings_ops.linkScopesFromConfig(self)))) |link| {
+                if (rb.linkAtFor(s.id, cell.row, cell.col, packLinkScopes(linkScopesForTerm(self, hit.term)))) |link| {
                     self.url_buffer = link.text; // owned(host 추출 바이트) — 다음 urlAt까지 유효.
                     self.url_kind = link.kind;
                     return self.url_buffer;
@@ -76070,4 +76088,83 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
     //     화면에 그려지는 크기가 같다.
     try std.testing.expect(o.view.scale > 0);
     try std.testing.expect(o.view.scale < 1.0);
+}
+
+test "linkScopesForSurfaceId: host-backed 경로도 원격 cwd면 파일 경로 스코프를 끈다" {
+    // **§9.4 의 표는 전수여야 한다.** host-backed 링크 경로 둘(`remoteLinkSpanAt` 의 hover 필터와
+    // `linkAtFor` 에 넘기는 `packLinkScopes`)이 `linkScopesFromConfig` 를 직접 불러, `cwd_host` wire 가
+    // 붙는 순간 그 모드에서만 차단이 빠져 있었다 — 원격 경로가 로컬 파일로 resolve 될 수 있었다
+    // (ssh-integration.md §9.6 이 예고한 그대로다). 두 경로는 `Surface` 만 쥐므로 id 로 Term 을 찾는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    session.loaded_config.config.input.link_detection = .full;
+
+    const term = pane_ops.activePane(session).activeTerm();
+    const sid = term.surfaceId();
+
+    // ── 로컬: surface 판이 Term 판과 **같은 답**을 낸다(대조군 — 이 함수가 그냥 설정을 돌려주면 안 된다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/proj\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    {
+        const by_term = linkScopesForTerm(session, term);
+        const by_sid = linkScopesForSurfaceId(session, sid);
+        try std.testing.expectEqual(by_term, by_sid);
+        try std.testing.expect(by_sid.absolute_path and by_sid.home_path);
+    }
+
+    // ── 원격: 파일 경로 4종이 꺼지고 웹·스킴은 남는다.
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/srv/app\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    {
+        const by_sid = linkScopesForSurfaceId(session, sid);
+        try std.testing.expect(!by_sid.absolute_path and !by_sid.bare_relative);
+        try std.testing.expect(!by_sid.dot_relative and !by_sid.home_path);
+        try std.testing.expect(by_sid.web and by_sid.extra_schemes);
+    }
+
+    // ── 못 찾는 id 는 설정 그대로다(닫힌 Term 의 늦은 hover 가 여기로 온다).
+    {
+        const unknown = linkScopesForSurfaceId(session, sid +% 4242);
+        const cfg = settings_ops.linkScopesFromConfig(session);
+        try std.testing.expectEqual(cfg, unknown);
+    }
+}
+
+test "linkScopes 경계: 설정 스코프를 날것으로 쓰는 곳은 래퍼 둘뿐이다" {
+    // **판정자만으로는 배선을 못 지킨다.** 바로 위 test 는 `linkScopesForSurfaceId` 가 원격에서 파일
+    // 경로를 끄는지를 보지만, 호출부가 그 함수를 **쓰는지**는 안 본다 — 누가 `linkScopesFromConfig` 로
+    // 되돌려도 그 test 는 통과한다. 실제로 host-backed 경로 둘이 그 상태로 남아 있었고, `cwd_host` wire 가
+    // 붙는 순간 §9.4 의 원격 경로 차단이 그 모드에서만 빠졌다(ssh-integration.md §9.6).
+    //
+    // 그래서 **호출부를 세어 못 박는다.** 날것을 쓰는 자리는 래퍼 둘의 내부뿐이고, 셋째가 생기면 여기서
+    // 깨져 「그 자리도 Term 을 봐야 하는가」를 반드시 묻게 된다.
+    const src = @embedFile("app_session.zig");
+
+    var raw: usize = 0;
+    var i: usize = 0;
+    // ⚠️ **바늘을 쪼개 둔다.** 통짜로 쓰면 이 test 의 리터럴 자신이 소스에서 한 번 더 잡혀
+    // 개수가 늘 하나 많다(처음에 그렇게 «3» 이 나왔다).
+    const needle = "settings_ops.linkScopesFromConfig(" ++ "self)";
+    while (std.mem.indexOfPos(u8, src, i, needle)) |at| {
+        raw += 1;
+        i = at + needle.len;
+    }
+    // 1) `linkScopesForTerm` 안, 2) `linkScopesForSurfaceId` 의 «못 찾았다» 폴백.
+    try std.testing.expectEqual(@as(usize, 2), raw);
+
+    // 두 래퍼가 실제로 있는지도 함께 본다 — 이름이 바뀌면 위 개수만으로는 뜻이 없다.
+    try std.testing.expect(std.mem.indexOf(u8, src, "pub fn linkScopesForTerm(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "pub fn linkScopesForSurfaceId(") != null);
 }

@@ -933,10 +933,25 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   stale success, symlink/path 교체와 기존 output overwrite를 거부한다. evidence 전체 상한은 `release_manifest.max_evidence_bytes`, scalar 상한은
   `release_manifest.max_scalar_string_bytes`를 재사용하고 gate별 배열은 제품 상수에서 유도한 exact bound를 가진다.
 
+  executable filesystem 조립 owner는
+  `src/platform/macos/session_host/release_evidence_files.zig` 하나다. caller가 profile과 typed release identity를 선택하면
+  이 owner가 A의 `default_false_baseline`·`signed_app_quit_reattach` 또는 B의 `signed_upgrade_one`·
+  `signed_upgrade_near_max` leaf를 각각 `readInputAlloc(max_evidence_bytes)`로 완전히 읽고, 열린 fd에서 얻은
+  `(device,inode)`가 전부 서로 다른지 확인한다. symlink·special file·oversize·read 중 identity/size/time drift·hardlink alias,
+  잘못된 leaf/profile binding 또는 allocation failure에서는 output 경로를 열지 않는다. 모든 leaf가 canonical aggregate bytes로
+  조립되고 expected release identity에 다시 bind된 뒤에만 `publishSummaryExclusive`를 exact once 호출한다. output은 absolute
+  absent leaf여야 하며 기존 파일·symlink를 덮어쓰지 않는다. publication 실패나 parent fsync 실패는 성공으로 바꾸지 않으며,
+  기존 file adapter의 temp cleanup/rollback 규율을 그대로 따른다. 이 owner는 환경변수·GitHub API·Apple command를 읽지 않고,
+  caller가 준 identity를 provenance로 승격하지도 않는다. trusted context/manifest/attestation과의 결합은 후속 workflow owner다.
+
   focused gate `test-session-host-release-evidence`는 A/B canonical round-trip, 모든 scope의
   duplicate/unknown/missing/type/cap, UUID 형식, profile-role/predecessor, leaf 누락·중복·교환, stale run/attempt,
   A/B candidate swap, 1/near-max count·set digest와 leaf/aggregate allocation fail-index를 Debug·ReleaseFast로
   검증한다. 이 component green은 실제 signed app gate 실행, artifact attestation 또는 release workflow 배선을 대신하지 않는다.
+  focused gate `test-session-host-release-evidence-files`는 두 profile의 실제 file 조립/publication, leaf inode alias와 symlink,
+  malformed·candidate/predecessor mismatch, 기존 output 보존, allocation fail-index에서 publication 0을 Debug·ReleaseFast 및
+  macOS actual filesystem으로 검증한다. special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`의 독립
+  계약이며 조립 gate가 중복해 완료를 주장하지 않는다. 이 gate도 caller identity의 GitHub provenance나 signed leaf 생산을 증명하지 않는다.
   manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이 aggregate를 생성하고 artifact
   attestation을 발급한다. attestation 검증은 repository·workflow·source commit·run identity와 subject digest를 모두 policy
   input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.

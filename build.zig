@@ -16,6 +16,14 @@ fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step
     return b.addTest(configured);
 }
 
+/// 실제 제품 바이너리를 실행하는 테스트는 workspace와 session-host namespace를 한 root에 묶는다.
+/// 제품 바이너리는 `builtin.is_test == false`라 이 주입이 없으면 실제 `/tmp/maru-<uid>`를 사용한다.
+fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void {
+    run.setEnvironmentVariable("HOME", home);
+    run.setEnvironmentVariable("CFFIXED_USER_HOME", home);
+    run.setEnvironmentVariable("MARU_SESSION_HOST_ROOT", b.fmt("/tmp/maru-product-test-{d}-{s}", .{ std.posix.system.getpid(), tag }));
+}
+
 fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Compile) void {
     if (b.sysroot) |sdk| {
         compile.root_module.addSystemFrameworkPath(.{
@@ -2161,8 +2169,7 @@ pub fn build(b: *std.Build) void {
         // 맞닿아 있을 때만 판정할 수 있다.
         macos_divider_smoke.setEnvironmentVariable("MARU_WEB_PANEL", "1");
         macos_divider_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
-        macos_divider_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
-        macos_divider_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
+        isolateMacosProductTest(b, macos_divider_smoke, b.pathFromRoot("zig-out/maru-macos-app/divider-home"), "divider");
         macos_divider_smoke.step.dependOn(&macos_app_bundle.step);
         macos_divider_smoke.step.dependOn(&file_panel_web_build.step);
         macos_divider_smoke.step.dependOn(&macos_divider_smoke_fixture.step);
@@ -2217,8 +2224,7 @@ pub fn build(b: *std.Build) void {
         macos_scrollbar_smoke.setEnvironmentVariable("MARU_SCROLLBAR_SMOKE", "1");
         // 도크가 present돼야 탐색기가 열린다. 그 훅이 파일 패널 경로다.
         macos_scrollbar_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/scroll-fixture.md"));
-        macos_scrollbar_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/scroll-home"));
-        macos_scrollbar_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/scroll-home"));
+        isolateMacosProductTest(b, macos_scrollbar_smoke, b.pathFromRoot("zig-out/maru-macos-app/scroll-home"), "scrollbar");
         macos_scrollbar_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_scrollbar_smoke.step.dependOn(&macos_app_bundle.step);
         macos_scrollbar_smoke.step.dependOn(&file_panel_web_build.step);
@@ -2257,8 +2263,7 @@ pub fn build(b: *std.Build) void {
         macos_tab_drag_smoke.setCwd(b.path("."));
         macos_tab_drag_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "20000");
         macos_tab_drag_smoke.setEnvironmentVariable("MARU_TAB_DRAG_SMOKE", "1");
-        macos_tab_drag_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"));
-        macos_tab_drag_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"));
+        isolateMacosProductTest(b, macos_tab_drag_smoke, b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"), "tab-drag");
         macos_tab_drag_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_tab_drag_smoke.step.dependOn(&macos_app_bundle.step);
         macos_tab_drag_smoke.step.dependOn(&file_panel_web_build.step);
@@ -2345,14 +2350,7 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home/restore.marker"),
         );
-        run_session_host_r2a_checkpoint.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"),
-        );
-        run_session_host_r2a_checkpoint.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_r2a_checkpoint, b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"), "r2a");
         run_session_host_r2a_checkpoint.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         run_session_host_r2a_checkpoint.step.dependOn(&macos_app_bundle.step);
         run_session_host_r2a_checkpoint.step.dependOn(&file_panel_web_build.step);
@@ -2393,14 +2391,7 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE",
             "maru-test-only-v1",
         );
-        run_session_host_r1_tombstone.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"),
-        );
-        run_session_host_r1_tombstone.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_r1_tombstone, b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"), "r1");
         run_session_host_r1_tombstone.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         run_session_host_r1_tombstone.step.dependOn(&macos_app_bundle.step);
         run_session_host_r1_tombstone.step.dependOn(&file_panel_web_build.step);
@@ -2423,10 +2414,10 @@ pub fn build(b: *std.Build) void {
         session_host_c4_quit_cancel_fixture.setCwd(b.path("."));
         const run_session_host_c4_quit_cancel = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            "success_root=\"$PWD/zig-out/maru-macos-app/session-host-c4-success-home\"; success_parent=\"$success_root/Library/Application Support/maru\"; " ++
+            "success_root=\"$PWD/zig-out/maru-macos-app/session-host-c4-success-home\"; success_session_root=\"/tmp/maru-product-c4-success-$$\"; success_parent=\"$success_root/Library/Application Support/maru\"; " ++
                 "success_checkpoint=\"$success_parent/workspace.v1\"; success_log=\"$success_root/app.stderr\"; " ++
                 "success_inode=$(/usr/bin/stat -f '%i' \"$success_checkpoint\"); " ++
-                "HOME=\"$success_root\" CFFIXED_USER_HOME=\"$success_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$success_log\" & success_pid=$!; " ++
+                "HOME=\"$success_root\" CFFIXED_USER_HOME=\"$success_root\" MARU_SESSION_HOST_ROOT=\"$success_session_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$success_log\" & success_pid=$!; " ++
                 "trap 'kill -KILL \"$success_pid\" 2>/dev/null || true; wait \"$success_pid\" 2>/dev/null || true' EXIT; " ++
                 "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit finished' \"$success_log\"; do " ++
                 "kill -0 \"$success_pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
@@ -2437,10 +2428,10 @@ pub fn build(b: *std.Build) void {
                 "test \"$(/usr/bin/stat -f '%i' \"$success_checkpoint\")\" != \"$success_inode\"; " ++
                 "/usr/bin/grep -Eq '^maru\\.workspace\\.v1$' \"$success_checkpoint\"; " ++
                 "test ! -e \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
-                "root=zig-out/maru-macos-app/session-host-c4-home; parent=\"$root/Library/Application Support/maru\"; " ++
+                "root=zig-out/maru-macos-app/session-host-c4-home; session_root=\"/tmp/maru-product-c4-failure-$$\"; parent=\"$root/Library/Application Support/maru\"; " ++
                 "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++
                 "checkpoint_inode=$(/usr/bin/stat -f '%i' \"$checkpoint\"); lease_inode=$(/usr/bin/stat -f '%i' \"$lease\"); " ++
-                "./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$log\" & pid=$!; " ++
+                "HOME=\"$root\" CFFIXED_USER_HOME=\"$root\" MARU_SESSION_HOST_ROOT=\"$session_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$log\" & pid=$!; " ++
                 "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; chflags nouchg \"$checkpoint\" 2>/dev/null || true' EXIT; " ++
                 "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit cancelled' \"$log\"; do " ++
                 "kill -0 \"$pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
@@ -2501,14 +2492,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        run_session_host_cr6c_appkit.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
-        );
-        run_session_host_cr6c_appkit.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_cr6c_appkit, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"), "cr6c");
         run_session_host_cr6c_appkit.setEnvironmentVariable(
             "MARU_CONFIG",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home/.config/maru/config"),
@@ -2574,14 +2558,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "25000");
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        run_session_host_cr6d_appkit.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
-        );
-        run_session_host_cr6d_appkit.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_cr6d_appkit, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"), "cr6d");
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_CONFIG",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home/.config/maru/config"),
@@ -2670,14 +2647,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        run_session_host_cr6e_recovery.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
-        );
-        run_session_host_cr6e_recovery.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_cr6e_recovery, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"), "cr6e");
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_CONFIG",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home/.config/maru/config"),
@@ -2750,14 +2720,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        run_session_host_cr6e_c3c.setEnvironmentVariable(
-            "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
-        );
-        run_session_host_cr6e_c3c.setEnvironmentVariable(
-            "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
-        );
+        isolateMacosProductTest(b, run_session_host_cr6e_c3c, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"), "cr6e-c3c");
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_CONFIG",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home/.config/maru/config"),
@@ -2813,8 +2776,7 @@ pub fn build(b: *std.Build) void {
         // 예산을 넉넉히 준다. 15초는 cold helper가 느린 러너에서 편집 단계를 잘라 false-fail을 낸다.
         macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "30000");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL_EDIT_SMOKE", "1");
-        macos_app_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
-        macos_app_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
+        isolateMacosProductTest(b, macos_app_smoke, b.pathFromRoot("zig-out/maru-macos-app/home"), "file-panel");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/markdown-preview.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
@@ -2888,8 +2850,7 @@ pub fn build(b: *std.Build) void {
         macos_app_html_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         // markdown 스모크와 같은 이유로 전용 HOME에 가둔다 — 사용자 workspace가 복원되면 그 창의 파일
         // 패널이 함께 열려 probe가 스모크 대상이 아닌 패널을 본다.
-        macos_app_html_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
-        macos_app_html_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
+        isolateMacosProductTest(b, macos_app_html_smoke, b.pathFromRoot("zig-out/maru-macos-app/home"), "html-panel");
         macos_app_html_smoke.step.dependOn(&macos_app_smoke_assert.step);
         const macos_app_html_smoke_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -2951,6 +2912,24 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
+
+    // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`
+    // 라 `if (target.result.os.tag == .macos)` 안의 아티팩트를 **컴파일조차 하지 않는다** — 그 게이트
+    // 열셋은 CI 어디에서도 안 돌고 개발자 로컬에만 있었다(`zig build test` 에 붙는 스텝 65개 중 20%).
+    //
+    // **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
+    // 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로 깨졌는데,
+    // CI 는 계속 초록이었다. 로컬에서 `mise run check` 를 돌린 사람만 봤다.
+    //
+    // macOS 잡에서 `zig build test-macos-only` 하나로 그 열셋을 돈다. **`test` 전체를 macOS 에서
+    // 다시 돌리지 않는 이유**는 나머지 52개가 ubuntu `check` 잡에서 이미 돌기 때문이다 — 같은 일을
+    // 두 번 하면 macOS 러너 시간만 먹는다.
+    //
+    // 등록을 빠뜨리면 그 게이트는 다시 CI 밖이 된다. `tests/boundary/imports.zig` 가 짝을 센다.
+    const macos_only_test_step = b.step(
+        "test-macos-only",
+        "Run the gates that only exist on macOS (the ubuntu check job cannot build them)",
+    );
 
     // **파일 트리 백엔드는 모든 호스트에서 테스트한다**(W8.1, 계약 §2m). 이 파일은
     // `src/platform/macos/` 에 있지만 macOS 프레임워크를 하나도 안 쓴다 — 순수 Zig + std 이고
@@ -3228,7 +3207,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -3326,6 +3305,7 @@ pub fn build(b: *std.Build) void {
         const run_file_panel_termination_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_file_panel_termination_policy_tests.addFileArg(file_panel_termination_policy_test_bin);
         test_step.dependOn(&run_file_panel_termination_policy_tests.step);
+        macos_only_test_step.dependOn(&run_file_panel_termination_policy_tests.step);
 
         // 종료 단계 계측은 실제 종료(앱 죽이기) 없이는 재현할 수 없어서, 시간 측정은 host가 하고 모으고
         // 표현하는 규칙만 순수 타입으로 떼어 여기서 증명한다(요약 필드 이름·순서·반올림 고정).
@@ -3343,6 +3323,7 @@ pub fn build(b: *std.Build) void {
         const run_termination_timing_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_termination_timing_tests.addFileArg(termination_timing_test_bin);
         test_step.dependOn(&run_termination_timing_tests.step);
+        macos_only_test_step.dependOn(&run_termination_timing_tests.step);
 
         // 종료 중 창을 미리 숨기면 isKeyWindow가 전부 false가 되어 workspace 활성 창 마커가 사라진다. 실제 숨김은
         // 앱을 죽여야 재현되므로 판정 규칙만 순수 타입으로 떼어 여기서 고정한다(같은 회귀의 재발 방지).
@@ -3360,6 +3341,7 @@ pub fn build(b: *std.Build) void {
         const run_termination_window_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_termination_window_policy_tests.addFileArg(termination_window_policy_test_bin);
         test_step.dependOn(&run_termination_window_policy_tests.step);
+        macos_only_test_step.dependOn(&run_termination_window_policy_tests.step);
 
         const web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{
             "xcrun",
@@ -3376,6 +3358,7 @@ pub fn build(b: *std.Build) void {
         const run_web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_web_panel_hit_test_geometry_tests.addFileArg(web_panel_hit_test_geometry_test_bin);
         test_step.dependOn(&run_web_panel_hit_test_geometry_tests.step);
+        macos_only_test_step.dependOn(&run_web_panel_hit_test_geometry_tests.step);
 
         const browser_result_registry_tests = b.addSystemCommand(&.{
             "xcrun",
@@ -3392,6 +3375,7 @@ pub fn build(b: *std.Build) void {
         const run_browser_result_registry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_browser_result_registry_tests.addFileArg(browser_result_registry_test_bin);
         test_step.dependOn(&run_browser_result_registry_tests.step);
+        macos_only_test_step.dependOn(&run_browser_result_registry_tests.step);
 
         const control_socket_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -3404,6 +3388,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_control_socket_tests = b.addRunArtifact(control_socket_tests);
         test_step.dependOn(&run_control_socket_tests.step);
+        macos_only_test_step.dependOn(&run_control_socket_tests.step);
         // control_server.zig(Track C A2b)는 앱 전역 라이브 컨트롤 소켓 + accept 스레드 + 메인 marshal 큐다.
         // control_socket과 같은 이유로 **macOS에서만** test step에 배선한다(실 unix socket·스레드·peer-cred).
         const control_server_tests = addProjectTest(b, .{
@@ -3417,6 +3402,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_control_server_tests = b.addRunArtifact(control_server_tests);
         test_step.dependOn(&run_control_server_tests.step);
+        macos_only_test_step.dependOn(&run_control_server_tests.step);
     }
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
@@ -4480,6 +4466,23 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
+    const session_host_ci_budget_step = b.step(
+        "test-session-host-ci-budget",
+        "Session-host Debug CI completion budget contract",
+    );
+    const session_host_ci_budget_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_ci_budget_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_ci_budget_tests = b.addRunArtifact(session_host_ci_budget_tests);
+    run_session_host_ci_budget_tests.addArg("--maru-expect-tests=1");
+    run_session_host_ci_budget_tests.setCwd(b.path("."));
+    session_host_ci_budget_step.dependOn(&run_session_host_ci_budget_tests.step);
+    boundary_step.dependOn(&run_session_host_ci_budget_tests.step);
+
     // AppKit wake source 의 감시 집합이 pump 집합을 벗어나지 않는지 지킨다. 벗어나면 아무도 읽지 않는
     // fd 가 레벨 트리거로 메인 큐를 영원히 깨워 유휴 CPU 가 84% 가 된다(실측 2026-08-29). 같은 유휴
     // pump 주제라 E3c 게이트에 함께 건다 — 그 게이트의 CPU 판정자는 별도 client 프로세스를 재느라
@@ -4704,7 +4707,7 @@ pub fn build(b: *std.Build) void {
     const run_session_host_test_namespace_isolation_boundary_tests = b.addRunArtifact(
         session_host_test_namespace_isolation_boundary_tests,
     );
-    run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=4");
     run_session_host_test_namespace_isolation_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_test_namespace_isolation_boundary_tests.step);
     const session_host_legacy_metadata_consumers_step = b.step(
@@ -5250,7 +5253,20 @@ pub fn build(b: *std.Build) void {
                         .{ .name = "syntax", .module = syntax_mod },
                     },
                 }),
-                .filters = &.{"G2"},
+                // **부분문자열 매칭이다 — 접두사가 아니다.** `"G2"` 로 두었더니 이미지 갤러리
+                // 판정자(`… (IG2-a)`·`(IG2 적대적)`)가 그 안의 `G2` 에 걸려 **아홉 개가 더**
+                // 컴파일됐다(2026-08-31, `--maru-expect-tests=6` 가 잡았다: `compiled 15`).
+                //
+                // 그 아홉은 이 스텝이 지키려는 축(keep-alive config override 보존)과 무관하고,
+                // 실 AppKit 프레임워크를 링크한 이 무거운 아티팩트에서 매번 다시 돈다.
+                //
+                // **이름을 통째로 적는다.** 짧은 접두사는 다음에 `?G2*` 를 짓는 사람이 또 밟는다 —
+                // 이 저장소의 다른 필터들도 같은 이유로 전체 이름을 적는다.
+                .filters = &.{
+                    "G2 keep-alive row Reset과 Backspace는 live snapshot과 write-back queue를 바꾸지 않는다",
+                    "G2 stale Window 전체 Reset은 app-global keep-alive snapshot과 같은 override를 쓴다",
+                    "G2 전체 Reset atomic replace 실패는 keep-alive provenance와 기존 대상에 mutation 0이다",
+                },
             });
             retention_app_tests.root_module.linkFramework("AppKit", .{});
             retention_app_tests.root_module.linkFramework("Metal", .{});
@@ -5269,6 +5285,7 @@ pub fn build(b: *std.Build) void {
             run_retention_app_tests.setCwd(b.path("."));
             session_host_config_override_retention_step.dependOn(&run_retention_app_tests.step);
             test_step.dependOn(&run_retention_app_tests.step);
+            macos_only_test_step.dependOn(&run_retention_app_tests.step);
         }
     }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
@@ -12653,6 +12670,7 @@ pub fn build(b: *std.Build) void {
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);
+            macos_only_test_step.dependOn(&run_checkpoint_file_tests.step);
 
             const checkpoint_file_boundary_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -12686,6 +12704,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_turn_authority_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_turn_authority_tests.step);
+        macos_only_test_step.dependOn(&run_external_turn_authority_tests.step);
         session_host_step.dependOn(&run_external_turn_authority_tests.step);
 
         // The stable external-pump storage is intentionally not re-exported by the session_host
@@ -12707,6 +12726,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_pump_storage_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_pump_storage_tests.step);
+        macos_only_test_step.dependOn(&run_external_pump_storage_tests.step);
         session_host_step.dependOn(&run_external_pump_storage_tests.step);
 
         // `zig build ... -- --test-filter` passes arguments to a run artifact and does not
@@ -13666,6 +13686,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_rx_turn_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_rx_turn_tests.step);
+        macos_only_test_step.dependOn(&run_external_rx_turn_tests.step);
         session_host_step.dependOn(&run_external_rx_turn_tests.step);
 
         // C3 collector fixtures inject authority/read callbacks without making the transport-only
@@ -13686,6 +13707,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_rx_read_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_rx_read_tests.step);
+        macos_only_test_step.dependOn(&run_external_rx_read_tests.step);
         session_host_step.dependOn(&run_external_rx_read_tests.step);
     }
 

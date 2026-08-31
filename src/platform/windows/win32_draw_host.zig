@@ -421,6 +421,18 @@ pub fn uploadFrameRegions(pipeline: *d3d11_cells.CellPipeline, frame: renderer.R
 ///
 /// 그라디언트·테두리는 이 셰이더에 없으므로 **세어서 남긴다**(`dropped`) — 조용히 단색으로 그리면
 /// 화면이 틀린 채로 그럴듯해진다.
+/// 이 quad 가 **그릴 테두리**를 갖고 있나. 역할만으로 판정하면 안 된다 — `PaintStyle` 은 기본
+/// 역할(`.divider`)을 늘 싣고 **폭이 0** 인 경우가 흔하다. 그것까지 "테두리 있음" 으로 세면 이 셰이더가
+/// 못 그리는 것으로 오해해 **quad 를 통째로 버린다**: 실측으로 에이전트 목록의 **스크롤바 track·thumb
+/// 둘 다** 그렇게 사라졌다(§2m.94 — 굴러가는데 막대가 안 보였다).
+fn hasDrawableBorder(q: chrome.draw.Op.Quad) bool {
+    if (q.border_role == null) return false;
+    for (q.border_widths) |w| {
+        if (w != 0) return true;
+    }
+    return false;
+}
+
 /// 두 사각형의 교집합. 겹치지 않으면 `null` — 호출부가 그 op 을 버린다.
 fn intersect(a: chrome.draw.Rect, b: chrome.draw.Rect) ?chrome.draw.Rect {
     const x0 = @max(a.x, b.x);
@@ -450,7 +462,7 @@ pub fn appendChromeOps(
             },
             .clip => continue,
             .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            .quad => |q| if (q.gradient == .solid and q.border_role == null) blk: {
+            .quad => |q| if (q.gradient == .solid and !hasDrawableBorder(q)) blk: {
                 // **quad 는 자기 뷰포트를 싣고 온다**(`draw.Op.Quad.clip` — published tree 의
                 // `effective_clip` 그대로). 그것을 안 쓰면 스크롤 목록의 배경·pill 이 헤더 위로
                 // 올라온다 — 목록이 굴러가기 시작한 순간 보였다(§2m.92).

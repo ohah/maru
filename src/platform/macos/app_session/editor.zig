@@ -19,6 +19,7 @@ const command_catalog = @import("../command_catalog.zig");
 const Term = app_session_mod.Term;
 const Pane = app_session_mod.Pane;
 const pane_ops = @import("pane.zig");
+const symbol_picker = @import("../symbol_picker.zig");
 const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
 const find_ops = @import("find.zig");
@@ -361,9 +362,19 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     //
     // **여기 두는 이유**: 이 함수가 색을 만드는 유일한 자리이고 프레임마다 불린다. 별도 tick 훅을
     // 두면 "언제 이어 파는가"의 출처가 둘이 된다.
+    // **파기 전에 pending 을 기억한다.** 아래 `resumeParse` 는 **아직 파는 중**일 때 참이라, 그
+    // 반환값만 보면 **끝나는 프레임을 놓친다** — 그런데 목록이 채워지는 것이 바로 그 프레임이다
+    // (`SP11` 이 그 자리를 잡았다: 훅을 참 갈래에만 두었더니 목록이 영영 비었다).
+    const was_pending = term.rt.editor_syntax.pending;
     if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
         self.metal_dirty = true;
-    } else {
+    }
+    // **피커가 열려 있고 방금 전까지 파던 중이었으면 목록을 다시 만든다**(§7.5 저하 — 「아직 모른다」의
+    // 기제). 파싱이 끝나는 순간 검색어는 그대로라 아무것도 재필터를 촉발하지 않는다. `pending` 이
+    // 풀린 다음 프레임부터는 `was_pending` 이 거짓이라 안 돈다 — 상주 비용이 아니라 **여는 순간의
+    // 짧은 창**이다.
+    if (was_pending and self.chrome_host.symbol_picker.open) recomputeSymbolPicker(self);
+    if (!term.rt.editor_syntax.pending) {
         // **파싱이 끝난 프레임에 접힘을 구문 층으로 덮는다**(§4). 여는 자리에서는 트리가 아직
         // 없을 수 있어(§2.1a) 들여쓰기로 세웠고, 여기가 그 두 번째 갱신 시점이다.
         promoteFoldRangesToSyntax(self, term);
@@ -16751,4 +16762,275 @@ test "NAV9 스택은 상한에서 오래된 것부터 버린다 — 오래 켠 �
 
     // **오래된 쪽을 버렸다** — 맨 아래가 0번 자리가 아니다.
     try testing.expect(fx.session.editor_nav_back.items[0].offset > 1);
+}
+
+// ── 심볼 피커(§7.5 「피커는 팔레트를 다시 쓴다」) ──────────────────────────────
+
+/// 라벨이 쓸 수 있는 표시 폭. **줄 번호 자리를 먼저 뗀다** — `palette.view` 는 제목과 우측 텍스트의
+/// 겹침을 안 보므로, 안 떼면 긴 체인이 줄 번호 위에 겹쳐 그려진다(§7.5).
+fn symbolLabelCols(self: *AppSession) usize {
+    _ = self;
+    // 패널은 최대 60칸이고 프롬프트가 2칸이다. 줄 번호는 최대 7자리(1,000,000줄)로 잡고 여백 2칸을 둔다.
+    return 60 - 2 - 7 - 2;
+}
+
+/// 지금 활성 편집기의 심볼로 피커 목록을 다시 만든다. **행은 값으로 굳는다**(§7.5 — 공유 버퍼의
+/// 인덱스를 들지 않는다).
+pub fn recomputeSymbolPicker(self: *AppSession) void {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) {
+        self.symbol_picker_rows.clear(self.allocator);
+        self.chrome_host.symbol_picker.setResultCount(0);
+        return;
+    }
+    const doc = term.rt.editor_doc orelse {
+        self.symbol_picker_rows.clear(self.allocator);
+        self.chrome_host.symbol_picker.setResultCount(0);
+        return;
+    };
+    const st = &term.rt.editor_syntax;
+    const prov = if (st.provider) |*p| p else {
+        self.symbol_picker_rows.clear(self.allocator);
+        self.chrome_host.symbol_picker.setResultCount(0);
+        return;
+    };
+    prov.symbols(self.allocator, &st.symbols);
+    symbol_picker.filter(
+        self.allocator,
+        st.symbols.items,
+        doc.file.content,
+        self.chrome_host.symbol_picker.input.query.items,
+        symbolLabelCols(self),
+        &self.symbol_picker_rows,
+    ) catch {
+        self.symbol_picker_rows.clear(self.allocator);
+    };
+    self.chrome_host.symbol_picker.selected = 0; // 쿼리 변경 시 선택 맨 위(팔레트와 같은 규율)
+    self.chrome_host.symbol_picker.setResultCount(self.symbol_picker_rows.rows.items.len);
+}
+
+/// 「없다」와 「아직 모른다」를 가른다(§7.5 저하 표).
+pub const SymbolPickerReadiness = enum {
+    /// 편집기가 아니다 — 열지 않는다.
+    not_editor,
+    /// 파싱이 예산에 걸려 있다 — **연다**(곧 채워진다).
+    pending,
+    /// grammar 없음·심볼 종류가 빈 언어 — 「이 파일에는 심볼이 없다」.
+    none,
+    ready,
+};
+
+pub fn symbolPickerReadiness(self: *AppSession) SymbolPickerReadiness {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return .not_editor;
+    _ = term.rt.editor_doc orelse return .not_editor;
+    const st = &term.rt.editor_syntax;
+    // **pending 을 먼저 본다.** 그 동안은 트리가 없어 목록이 비는데, 그것을 「없다」로 부르면
+    // 읽는 중인 파일에 거짓말한다(§7.5 — 두 상태가 같은 신호다).
+    if (st.pending) return .pending;
+    if (st.provider == null) return .none;
+    if (self.symbol_picker_rows.rows.items.len == 0 and
+        self.chrome_host.symbol_picker.input.query.items.len == 0) return .none;
+    return .ready;
+}
+
+/// 피커를 연다/닫는다. **편집기가 아니거나 심볼이 없으면 열지 않고 알린다**(§7.5).
+pub fn toggleSymbolPicker(self: *AppSession) void {
+    if (self.chrome_host.symbol_picker.open) {
+        self.chrome_host.symbol_picker.hide();
+        self.metal_dirty = true;
+        return;
+    }
+    self.dismissMessageOverlays(); // 단일-오버레이 불변식
+    self.chrome_host.symbol_picker.show();
+    recomputeSymbolPicker(self);
+    switch (symbolPickerReadiness(self)) {
+        .not_editor, .none => {
+            self.chrome_host.symbol_picker.hide();
+            self.showNoticeKey(.symbol_picker_empty);
+        },
+        .pending, .ready => {},
+    }
+    self.metal_dirty = true;
+}
+
+/// 고른 심볼로 간다. **닫고 나서 간다**(§7.5) — 이동이 포커스·스크롤을 움직이므로 오버레이가 떠
+/// 있는 채로 하면 방금 간 자리를 피커가 덮는다. **일치가 없으면 닫기만 한다.**
+pub fn acceptSymbolPicker(self: *AppSession) void {
+    const rows = self.symbol_picker_rows.rows.items;
+    const idx = self.chrome_host.symbol_picker.selected;
+    const target: ?u32 = if (idx < rows.len) rows[idx].offset else null;
+    self.chrome_host.symbol_picker.hide();
+    if (target) |off| navigateTo(self, .{ .offset = off }) catch {};
+    self.metal_dirty = true;
+}
+
+test "SP7 피커는 편집기에서만 열린다 — 터미널에는 문서가 없다 (§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 편집기이고 심볼이 있으면 열린다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\npub fn beta() void {}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    try testing.expectEqual(@as(usize, 2), fx.session.symbol_picker_rows.rows.items.len);
+    toggleSymbolPicker(fx.session); // 닫는다
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+
+    // 편집기가 아니면 안 열린다.
+    fx.term.kind = .terminal;
+    defer fx.term.kind = .editor;
+    toggleSymbolPicker(fx.session);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+}
+
+test "SP8 「아직 모른다」와 「없다」를 가른다 — 읽는 중인 파일에 없다고 하지 않는다 (§7.5)" {
+    // **문서를 쓰다가 잡은 구멍이다.** `symbols()` 는 트리가 없으면 빈 목록을 내므로 파싱 미완과
+    // 심볼 없음이 **같은 신호**다. 그것을 뭉개면 읽는 중인 파일에 「심볼이 없다」고 거짓말한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 500) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+
+    // ① 예산에 끊긴 상태 — **「아직 모른다」다.**
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest; // 너무 빨라 못 끊었다
+    try testing.expectEqual(SymbolPickerReadiness.pending, symbolPickerReadiness(fx.session));
+
+    // 그리고 **열린다** — 아무 일도 안 일어나는 것이 가장 나쁘다.
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+
+    // ② 다 파싱하면 목록이 찬다.
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    recomputeSymbolPicker(fx.session);
+    try testing.expectEqual(SymbolPickerReadiness.ready, symbolPickerReadiness(fx.session));
+    try testing.expect(fx.session.symbol_picker_rows.rows.items.len > 0);
+
+    // ③ grammar 가 없으면 **「없다」다.**
+    fx.session.chrome_host.symbol_picker.hide();
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = .{};
+    recomputeSymbolPicker(fx.session);
+    try testing.expectEqual(SymbolPickerReadiness.none, symbolPickerReadiness(fx.session));
+    toggleSymbolPicker(fx.session);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open); // 열지 않는다
+}
+
+test "SP9 고르면 닫고 나서 간다 — 오버레이가 방금 간 자리를 덮지 않는다 (§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\n\npub fn beta() void {\n    const x = 1;\n    _ = x;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    const rows = fx.session.symbol_picker_rows.rows.items;
+    try testing.expect(rows.len >= 2);
+
+    // 두 번째(beta)를 고른다.
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    const want = rows[1].offset;
+    acceptSymbolPicker(fx.session);
+
+    // **닫혔다.**
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+    // **그리고 갔다** — §5.2 경로를 탔으므로 되돌아가기 스택도 쌓였다.
+    try testing.expectEqual(@as(usize, want), (fx.term.rt.editor_selection orelse return error.NoSel).focus);
+    try testing.expect(fx.session.editor_nav_back.items.len > 0);
+}
+
+test "SP10 일치가 없으면 Enter 는 닫기만 한다 — 안 고른 자리로 가지 않는다 (§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\npub fn beta() void {}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    toggleSymbolPicker(fx.session);
+
+    // 아무것도 안 걸리는 쿼리.
+    try fx.session.chrome_host.symbol_picker.input.query.appendSlice(allocator, "zzzznope");
+    recomputeSymbolPicker(fx.session);
+    try testing.expectEqual(@as(usize, 0), fx.session.symbol_picker_rows.rows.items.len);
+
+    const before = (fx.term.rt.editor_selection orelse return error.NoSel).focus;
+    acceptSymbolPicker(fx.session);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open); // 닫혔고
+    try testing.expectEqual(before, (fx.term.rt.editor_selection orelse return error.NoSel).focus); // 안 움직였다
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len); // 스택도 안 쌓였다
+}
+
+test "SP11 파싱이 끝나면 프레임이 목록을 채운다 — 검색어가 그대로여도 (§7.5)" {
+    // **「아직 모른다」의 기제를 재는 자리다.** 파싱이 끝나는 순간 검색어는 그대로라 아무것도
+    // 재필터를 촉발하지 않는다 — `resumeParse` 가 도는 자리가 그것을 맡는다. `SP8` 은
+    // `recomputeSymbolPicker` 를 **손으로** 부르므로 그 배선을 안 탄다(뮤테이션에서 그 줄을 지워도
+    // 안 죽었다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 500) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
+
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.symbol_picker_rows.rows.items.len); // 아직 모른다
+
+    // **프레임만 돌린다** — 재필터를 손으로 부르지 않는다.
+    var frames: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and frames < 2000) : (frames += 1) {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.NoFrame;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(!fx.term.rt.editor_syntax.pending);
+    try testing.expect(frames > 0); // 실제로 나뉘었다
+
+    // 목록이 **저절로** 찼다.
+    try testing.expect(fx.session.symbol_picker_rows.rows.items.len > 0);
+    try testing.expectEqual(fx.session.symbol_picker_rows.rows.items.len, fx.session.chrome_host.symbol_picker.result_count);
 }

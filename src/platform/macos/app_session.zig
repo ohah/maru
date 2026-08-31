@@ -96,6 +96,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+const symbol_picker = @import("symbol_picker.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
@@ -2135,6 +2136,7 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .confirm => .{ .routes_text = .confirm },
         .find => .{ .routes_text = .find },
         .palette => .{ .routes_text = .palette },
+        .symbol_picker => .{ .routes_text = .symbol_picker },
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
         .notice => .{ .transient_toast = .notice },
@@ -3325,6 +3327,10 @@ pub const AppSession = struct {
         return debug_fixtures.maybeDebugOpenFilePanel(self);
     }
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
+        return debug_fixtures.maybeDebugOpenSymbolPicker(self);
+    }
+
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
     }
@@ -4429,6 +4435,12 @@ pub const AppSession = struct {
     /// **항목이 Term 포인터가 아니라 `surface_id` 인 이유**는 그 Term 이 닫힐 수 있어서다.
     /// 되돌아갈 때 `termBySurfaceId` 로 되찾고 **못 찾으면 버리고 다음으로 간다** — 닫힌 파일을
     /// 되살리는 것은 「이동」이 아니라 「열기」다.
+    /// 심볼 피커의 굳힌 행(§7.5). **공유 심볼 버퍼의 인덱스가 아니라 값이다** — breadcrumb 이 그
+    /// 버퍼를 프레임마다 다시 채우므로 인덱스를 들면 그 수명에 매달린다.
+    symbol_picker_rows: symbol_picker.List = .{},
+    symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
+    symbol_picker_followed_selected: ?usize = null,
+
     editor_nav_back: std.ArrayList(editor_ops.NavMark) = .empty,
     /// 뒤로 간 뒤 다시 앞으로 갈 자리. **새로 이동하면 통째로 버린다**(브라우저와 같은 규약) —
     /// 안 버리면 「앞으로」가 가지 않은 미래를 가리킨다.
@@ -5577,10 +5589,6 @@ pub const AppSession = struct {
     /// 다음 `provideFileTreeRootPick`가 **자동 따라가기**임을 알리는 one-shot. 그 호출이 소비한다.
     /// 자동 경로는 실패해도 알림을 띄우지 않는다 — 사용자가 시킨 적 없는 동작의 실패를 알릴 이유가 없다.
     file_tree_root_auto_follow: bool = false,
-    /// 자동 root 전환이 **커밋된 직후 한 번** reveal을 다시 시도하게 하는 one-shot. 전환은 비동기라 요청
-    /// 시점엔 새 root가 없어 그때의 reveal이 거절됐다 — 이게 없으면 깊은 하위 디렉터리에서 `cd` 했을 때
-    /// 트리가 저장소 루트에 접힌 채 멈춘다. one-shot이라 심볼릭 링크로 계속 거절돼도 루프가 되지 않는다.
-    file_tree_auto_follow_reveal_pending: bool = false,
     file_tree_root_picker_inflight: FileTreeRootOperation = .none,
     file_tree_root_validation: ?PendingFileTreeRootValidation = null,
     file_tree_root_request_id: u64 = 0,
@@ -5634,6 +5642,8 @@ pub const AppSession = struct {
     /// 같은 host를 가리키므로 슬롯 하나로 충분하다).
     restore_gone_host_id: u128 = 0,
     debug_file_panel_opened: bool = false,
+    debug_symbol_picker_opened: bool = false,
+    debug_symbol_picker_tries: u16 = 0,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
     debug_native_editor_opened: bool = false,
     /// 캡처 전용 훅(`MARU_OPEN_SCM_DIFF`)이 비교를 이미 열었는가. **성공했을 때만** 세운다 —
@@ -8230,11 +8240,12 @@ pub const AppSession = struct {
     /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu/settings)와 그 platform 부수상태를 닫는다 — 새
     /// 모달을 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
     /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
-    fn dismissMessageOverlays(self: *AppSession) void {
+    pub fn dismissMessageOverlays(self: *AppSession) void {
         self.chrome_host.notice.dismiss();
         self.chrome_host.find.hide();
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
         self.chrome_host.palette.hide();
+        self.chrome_host.symbol_picker.hide(); // §7.5 — 같은 불변식 아래 산다
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
@@ -9089,6 +9100,7 @@ pub const AppSession = struct {
             .fold_level_1 => _ = editor_ops.foldLevel(self, 1),
             .fold_level_2 => _ = editor_ops.foldLevel(self, 2),
             .fold_level_3 => _ = editor_ops.foldLevel(self, 3),
+            .toggle_symbol_picker => editor_ops.toggleSymbolPicker(self), // §7.5 — 편집기 아님·심볼 없음이면 안 연다
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),
@@ -10635,6 +10647,11 @@ pub const AppSession = struct {
             // 생길 때 조용히 빠진다. 대신 렌더 직전 `followPaletteSelection`이 **값 비교**로 잡는다.
             .palette_selection_changed => {},
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
+            // 심볼 피커(§7.5) — 팔레트와 같은 모양이되 확정이 §5.2 이동으로 간다.
+            .symbol_picker_close => {}, // hide 는 컴포넌트가 이미 했다
+            .symbol_picker_query_changed => editor_ops.recomputeSymbolPicker(self),
+            .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
+            .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
             .context_menu_accept => settings_ops.acceptContextMenu(self), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
                 self.context_menu_target = null;
@@ -11507,7 +11524,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.settings.open;
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -13003,7 +13020,7 @@ pub const AppSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -13088,7 +13105,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, symbol_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -13103,6 +13120,7 @@ pub const AppSession = struct {
         if (image_gallery_ops.searchOwnsInput(self)) return .image_gallery_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
+        if (self.chrome_host.symbol_picker.open) return .symbol_picker;
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
         // (평문 타이핑이 IME→routeCommittedText 경로라 handleKeyEvent 인터셉트만으론 안 잡혔던 버그). 모달·rename·find·
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
@@ -13186,6 +13204,10 @@ pub const AppSession = struct {
             },
             .palette => if (self.chrome_host.palette.input.commitPreedit(self.allocator)) {
                 self.recomputePalette(); // 필터가 바뀜
+                self.metal_dirty = true;
+            },
+            .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
+                editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
                 self.metal_dirty = true;
             },
         }
@@ -18084,6 +18106,10 @@ pub const AppSession = struct {
                             } else |_| {}
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
                             image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
+                            // 크게 보기 아래 「그때 무슨 얘기였나」. 터미널이 alt screen 이라 그 이력을
+                            // 안 갖고 있고 훅·CLI 어디에도 「그 자리로 가라」가 없으므로, 트랜스크립트를
+                            // 읽는 갤러리가 직접 보여준다(실측 94%에서 나오고 전부 라벨과 다른 정보다).
+                            image_gallery_ops.collectOpenContext(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -19001,31 +19027,60 @@ pub const AppSession = struct {
     /// 팔레트 선택이 창 밖이면 **최소로** 당긴다. 창 안이면 움직이지 않는다 — 휠·드래그로 굴린 자리를
     /// 존중하는 것이 offset을 저장하게 된 이유다(SV5d).
     fn followPaletteSelection(self: *AppSession) void {
+        followListSelection(
+            self.chrome_host.palette.selected,
+            self.palette_filtered.items.len,
+            @max(self.cell_height_px, 1),
+            &self.palette_scroll,
+            &self.palette_followed_selected,
+        );
+    }
+
+    /// 심볼 피커도 같은 역학을 쓴다(native-editor-ui.md §7.5 「목록이 화면보다 길다」).
+    fn followSymbolPickerSelection(self: *AppSession) void {
+        followListSelection(
+            self.chrome_host.symbol_picker.selected,
+            self.symbol_picker_rows.rows.items.len,
+            @max(self.cell_height_px, 1),
+            &self.symbol_picker_scroll,
+            &self.symbol_picker_followed_selected,
+        );
+    }
+
+    /// **목록 피커의 스크롤 따라가기 — 단일 출처.** 명령 팔레트와 심볼 피커가 함께 쓴다.
+    ///
+    /// **새 추상화 층을 만들지 않고 인자로 받게만 했다**(§7.5). 이 역학에 명령에 관한 내용이 하나도
+    /// 없는데(선택·전체 수·셀 높이·스크롤 상태뿐) 피커마다 복사하면 저장소가 반복해서 지적하는
+    /// 「같은 규율이 두 자리에」가 된다.
+    fn followListSelection(
+        selected: usize,
+        total: usize,
+        ch: u32,
+        scroll: *chrome.ui.scroll_area.State,
+        followed: *?usize,
+    ) void {
         // 선택이 그대로면 아무것도 하지 않는다 — 휠·드래그로 굴린 자리를 지킨다. 이 한 줄이 없으면
         // 매 프레임 당겨 휠이 무효화된다(제품에서 실측).
-        const selected_now = self.chrome_host.palette.selected;
-        if (self.palette_followed_selected) |seen| {
-            if (seen == selected_now) return;
+        if (followed.*) |seen| {
+            if (seen == selected) return;
         }
-        self.palette_followed_selected = selected_now;
-        const ch = @max(self.cell_height_px, 1);
-        const total = self.palette_filtered.items.len;
+        followed.* = selected;
         const visible = @min(total, chrome.components.palette.max_visible);
         if (total <= visible or visible == 0) {
-            self.palette_scroll = .{};
+            scroll.* = .{};
             return;
         }
         const max_offset: u32 = @intCast((total - visible) * ch);
-        const top: u32 = @intCast(@min(self.chrome_host.palette.selected, total -| 1) * ch);
+        const top: u32 = @intCast(@min(selected, total -| 1) * ch);
         const bottom = top + ch;
-        var offset = @min(self.palette_scroll.offset_y_px, max_offset);
+        var offset = @min(scroll.offset_y_px, max_offset);
         const viewport_h: u32 = @intCast(visible * ch);
         if (top < offset) {
             offset = top;
         } else if (bottom > offset + viewport_h) {
             offset = bottom - viewport_h;
         }
-        self.palette_scroll.offset_y_px = @min(offset, max_offset);
+        scroll.offset_y_px = @min(offset, max_offset);
     }
 
     /// 이름 앞에 running이면 "● "(1칸 정적 플래그 + 공백)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
@@ -20166,6 +20221,30 @@ pub const AppSession = struct {
         return rows;
     }
 
+    /// 심볼 피커의 가시 행. 팔레트와 **같은 윈도잉**이되 행의 출처가 다르다 — 라벨은 이미 굳어 있고
+    /// (§7.5 — 공유 버퍼를 안 본다) 줄 번호가 우측 보조 텍스트로 간다.
+    fn buildSymbolPickerRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
+        const Row = chrome.components.palette.Row;
+        const rows_all = self.symbol_picker_rows.rows.items;
+        const max_visible = chrome.components.palette.max_visible;
+        const total = rows_all.len;
+        const visible_count = @min(total, max_visible);
+        const ch = @max(self.cell_height_px, 1);
+        const win_start = @min(self.symbol_picker_scroll.offset_y_px / ch, total -| visible_count);
+        const rows = try arena.alloc(Row, visible_count);
+        var i: usize = 0;
+        while (i < visible_count) : (i += 1) {
+            const fi = win_start + i;
+            const src = rows_all[fi];
+            rows[i] = .{
+                .title = src.label,
+                .binding = try std.fmt.allocPrint(arena, "{d}", .{src.line}),
+                .selected = (fi == self.chrome_host.symbol_picker.selected),
+            };
+        }
+        return rows;
+    }
+
     /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
@@ -20190,6 +20269,11 @@ pub const AppSession = struct {
             self.followPaletteSelection(); // 선택이 바뀌었으면 창을 당긴다(값 비교 — 위 필드 주석)
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
+        }
+        if (self.chrome_host.symbol_picker.open) {
+            self.followSymbolPickerSelection(); // 팔레트와 같은 역학(§7.5)
+            const rows = try self.buildSymbolPickerRows(arena);
+            try self.chrome_host.collectSymbolPickerDraws(rows, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
@@ -20640,6 +20724,7 @@ pub const AppSession = struct {
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
+        self.symbol_picker_rows.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
@@ -43181,8 +43266,8 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 }
 
-// 적대적 검증이 잡은 셋을 고정한다. 셋 다 "조용히 안 따라간다"로만 드러나 눈으로는 구분되지 않는다.
-test "file tree ET-CWD: 자동 root 전환은 mutation 중엔 미루고, 미룬 cwd를 다시 시도하며, one-shot이 다른 cwd에 삼켜지지 않는다" {
+// 적대적 검증이 잡은 넷을 고정한다. 전부 "조용히 안 따라간다"로만 드러나 눈으로는 구분되지 않는다.
+test "file tree ET-CWD: 자동 root 전환은 mutation·비탐색기 view에서 미루고, 미룬 cwd를 다시 시도한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -43219,19 +43304,51 @@ test "file tree ET-CWD: 자동 root 전환은 mutation 중엔 미루고, 미룬 
 
     session.file_tree_edit_inflight = false;
     try file_panel_ops.updateFileTree(session); // 같은 cwd 그대로 — 이제는 걸려야 한다
-    const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pending.auto);
-    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?);
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto);
+        try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?);
+    }
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(away));
 
-    // ③ **커밋 뒤 재시도 one-shot은 그 cwd의 것이다.** 도크가 숨어 있으면 소비되지 않고 남는데, 그 사이
-    //    `cd`가 일어나면 다른 cwd가 그것을 먹고 자기 전환을 억제당한 채 followed로 표시돼 버렸다.
-    session.file_tree_root_validation = null; // 검증 완료를 흉내내고
-    session.file_tree_auto_follow_reveal_pending = true; // one-shot만 남긴다
-    try testWriteActiveTermCwd(session, other); // 그 사이 다른 곳으로 이동
+    // ③ **탐색기를 보고 있지 않으면 미룬다.** 트리가 화면에 없는데 root를 갈면 보이지도 않는 접힘·스크롤을
+    //    버리고 `dock-tree-roots` 영속까지 덮는다. reveal 모델에서는 비파괴적이라 상관없었지만 이제
+    //    모든 `cd`가 교체라 이 게이트가 유일한 방어다(file-explorer.md §1.1).
+    session.dock.view = .source_control;
+    try testWriteActiveTermCwd(session, other);
     try file_panel_ops.updateFileTree(session);
-    const after = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(after.auto); // one-shot에 삼켜지지 않고 제 전환을 건다
-    try std.testing.expectEqualStrings(other, session.file_tree_followed_cwd.?);
+    try std.testing.expect(session.file_tree_root_validation == null);
+    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?); // 표시하지 않는다 → 재시도가 남는다
+    try std.testing.expect(session.file_tree.rootIsExactly(away)); // 트리는 그대로다
+
+    //    **미룰 때는 스크롤 pending도 끈다.** 살려 두면 지금 cwd와 무관한 옛 대상으로 스크롤한다 —
+    //    이 단언이 없으면 그 클리어를 지워도 테스트가 통과한다(적대적 검증 1회차).
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+
+    // ④ **제출 자체가 실패해도 재시도로 남긴다.** `provideFileTreeRootPick`은 backend busy·할당 실패·
+    //    request id 소진에서 검증을 안 세우고 조용히 빠져나온다(자동 경로라 알림도 없다). 그때 이 cwd를
+    //    "따라간 것"으로 표시하면 다음 `cd` 전까지 영영 재시도되지 않는다 — §1.1의 규율과 같은 상황인데
+    //    실패 지점만 한 단계 안쪽이다(적대적 검증 2회차가 잡은 실제 버그).
+    session.dock.view = .explorer;
+    const saved_request_id = session.file_tree_root_request_id;
+    session.file_tree_root_request_id = std.math.maxInt(u64); // request id 소진 경로를 강제한다
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null); // 검증은 안 걸렸고
+    try std.testing.expectEqual(FileTreeRootOutcome.request_id_exhausted, file_panel_ops.fileTreeRootOutcome(session));
+    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?); // followed로 표시하지 않는다
+    session.file_tree_root_request_id = saved_request_id;
+    session.file_tree_root_outcome = .none;
+
+    // ⑤ 조건이 풀리면 **`cd` 없이도** 그 tick이 밀린 전환을 건다.
+    try file_panel_ops.updateFileTree(session);
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto);
+        try std.testing.expectEqualStrings(other, session.file_tree_followed_cwd.?);
+    }
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(other));
 }
 
 fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
@@ -43242,9 +43359,11 @@ fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
     try pane_ops.activePane(session).activeTerm().surface.core.write(bytes);
 }
 
-test "file tree ET-CWD follows the active pane observation and keeps an old reveal inert for an outside cwd" {
-    // 활성 pane의 OSC 7 관측만 소비하고, root 밖 CWD는 root/watch/persistence를 바꾸지 않으며 이전
-    // file-open/reveal intent를 새 CWD의 scroll 대상으로 오인하지 않는 제품 경로 회귀다.
+test "file tree ET-CWD: root는 활성 pane cwd를 그대로 따라간다 (하위·형제·상위·홈 구분 없이)" {
+    // 2026-08-31 사용자 결정(docs/file-explorer.md §1)의 제품 경로 회귀다. 앞의 두 판은 root **밖**일
+    // 때만(그것도 저장소 루트로) 갈아끼웠고, 그래서 홈이 한 번 root가 되면 그 아래 어디로 `cd` 해도
+    // 빠져나오지 못했다. 이 테스트가 닫는 것은 **하위로 들어갈 때도 교체된다**는 것 — 옛 계약에서는
+    // 정확히 그 경우가 reveal(무교체)이었다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -43253,6 +43372,11 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(session.io, "project", .default_dir);
+    // **project를 실제 저장소로 만든다.** 이게 없으면 `repoRootFor`가 어차피 null을 돌려줘 cwd로 떨어지고,
+    // 그러면 "저장소 루트로 올려 세우지 않는다"는 이 슬라이스의 절반이 **테스트로 고정되지 않는다** —
+    // `followRootSwitch`에 옛 `repoRootFor(cwd) orelse cwd`를 되돌려 놔도 초록이었다(적대적 검증 1회차).
+    // `repoRootFor`는 `<dir>/.git`의 존재만 보므로 빈 디렉터리로 충분하다.
+    try tmp.dir.createDir(session.io, "project/.git", .default_dir);
     try tmp.dir.createDir(session.io, "project/one", .default_dir);
     try tmp.dir.createDir(session.io, "project/two", .default_dir);
     try tmp.dir.createDir(session.io, "outside", .default_dir);
@@ -43269,105 +43393,93 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
 
     file_panel_ops.activateFilePanelDockControl(session);
     try session.file_tree.replaceExplicitRoots(&.{project});
-    const root_generation = session.file_tree.rootGeneration();
-    const root_count = session.file_tree.rootCount();
     const initial_scan = session.file_tree.takeScanRequest().?;
     allocator.free(initial_scan);
-    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeScanIdentity(project), &.{
-        .{ .name = "one", .kind = .directory, .identity = try testFileTreeIdentity(one) },
-        .{ .name = "two", .kind = .directory, .identity = try testFileTreeIdentity(two) },
-    });
-    session.file_tree_rows_dirty = true;
-    session.file_tree_watch_reset_pending = false;
 
-    // updateFileTree는 renderer보다 먼저 run한다. 따라서 내부에서 observation을 refresh하지 않으면 OSC 7이
-    // 아직 Term cache에 안 들어와 이 첫 reveal을 놓친다.
+    // ① **이미 그 자리면 아무것도 하지 않는다.** 복원된 root가 마침 터미널 cwd와 같은, 앱을 켤 때마다
+    //    도는 경로다. 가드가 없으면 시작하자마자 재스캔·watcher 재등록이 헛돌아 트리가 이유 없이 깜빡인다.
+    //    updateFileTree는 renderer보다 먼저 run하므로, 내부에서 observation을 refresh하지 않으면 이 OSC 7이
+    //    아직 Term cache에 안 들어와 첫 따라가기를 통째로 놓친다.
+    const generation_before = session.file_tree.rootGeneration();
+    try testWriteActiveTermCwd(session, project);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null);
+    try std.testing.expectEqualStrings(project, session.file_tree_followed_cwd.?);
+    try std.testing.expectEqual(generation_before, session.file_tree.rootGeneration());
+
+    // ② **하위로 들어가도 교체하고, 저장소 루트로 올려 세우지 않는다** — 이 슬라이스의 핵심 둘이 여기서
+    //    함께 닫힌다. 옛 계약에서는 root 안이라 reveal만 했고(교체 없음), 그 앞 판은 교체하되 `project`(=
+    //    저장소 루트)를 세웠다. 지금은 `one`이 그대로 root다.
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
-    // 비동기 `one` scan이 이 tick 전에 끝났다면 reveal intent는 정상적으로 이미 소멸한다. 남아 있는 경우에만
-    // 이전 target인지 확인한다. 여기서 닫아야 하는 계약은 root 밖 `outside`가 기존 intent를 덮지 않는다는 것이다.
-    if (session.file_tree.revealTarget()) |target| {
-        try std.testing.expectEqualStrings(one, target);
-        try std.testing.expect(!std.mem.eql(u8, outside, target));
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto); // 사용자 조작이 아니라 따라가기다
+        try std.testing.expectEqual(FileTreeRootOperation.replace, pending.operation);
+        try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     }
-    // one은 초기 viewport 안의 행이다. follow가 보이는 대상을 다시 위로 당기면 사용자의 탐색 위치를
-    // 빼앗으므로 pending을 끝내고 scroll=0을 보존해야 한다.
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.file_tree_scroll.offset_y_px);
-    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
-    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(one)); // ★ 트리 최상위가 곧 cwd다
+    try std.testing.expect(!session.file_tree.rootIsExactly(project)); // ★ 저장소 루트로 올라가지 않았다
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
 
-    // 관측은 tick마다 같은 CWD를 되풀이한다. 같은 값에서 rows 재투영이나 scroll을 다시 걸면 사용자가
-    // 탐색 중인 위치를 빼앗으므로, raw scroll과 dirty/pending 상태가 그대로여야 한다.
-    session.file_tree_scroll.offset_y_px = 2 * file_tree_dock_ops.fileTreeRowHeightPx(session);
+    // ③ 관측은 tick마다 같은 cwd를 되풀이한다. 같은 값에서 또 교체를 걸면 트리가 매 프레임 재구성된다.
+    //    **교체가 없다는 것만으로는 부족하다** — `followed_cwd` 대조를 지워도 `rootIsExactly`가 참이라
+    //    교체는 여전히 안 걸리고, 대신 매 tick 재투영과 스크롤 보정이 돈다(사용자에게는 트리가 계속
+    //    깜빡이고 스크롤이 안 잡히는 것으로 보인다). 그래서 그 둘을 함께 고정한다(적대적 검증 1회차).
+    session.file_tree_rows_dirty = false;
+    session.file_tree_follow_scroll_pending = false;
     try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null);
     try std.testing.expect(!session.file_tree_rows_dirty);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqual(2 * file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
 
-    // **root 밖 CWD는 root 전환을 건다**(2026-08-11 결정 — docs/file-explorer.md §1). 예전에는 무동작이었다.
-    // 전환은 사용자가 "폴더 열기…"로 고를 때와 같은 검증 파이프라인을 타므로 **비동기**다 — 이 시점의 트리는
-    // 아직 그대로이고, 바뀐 것은 "자동 전환이 걸렸다"는 사실이다. 그 사실을 단언하지 않으면 이 테스트는
-    // 옛 계약("root 밖 무동작")을 그대로 통과시켜 회귀를 못 잡는다.
+    // ④ 형제로 이동 — 공통 조상으로 올려 세우지 않고 그 폴더 자체가 root다.
+    try testWriteActiveTermCwd(session, two);
+    try file_panel_ops.updateFileTree(session);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
+
+    // ⑤ 상위로 이동(`cd ..`)도 같다. 옛 계약에서는 root 밖이라 교체됐지만 저장소 루트로 올라갔다 —
+    //    지금은 저장소 여부를 묻지 않으므로 그 폴더가 그대로 선다.
+    try testWriteActiveTermCwd(session, project);
+    try file_panel_ops.updateFileTree(session);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(project));
+
+    // ⑥ 완전히 다른 가지로 나가도 같은 한 규칙이다.
     try testWriteActiveTermCwd(session, outside);
     try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    if (session.file_tree.revealTarget()) |target| {
-        try std.testing.expectEqualStrings(one, target);
-        try std.testing.expect(!std.mem.eql(u8, outside, target));
-    }
-    const auto_pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(auto_pending.auto); // 사용자 조작이 아니라 따라가기다
-    try std.testing.expectEqual(FileTreeRootOperation.replace, auto_pending.operation);
-    // 아직 적용 전이라 트리·watcher는 그대로다(적용은 검증 완료 뒤 `updateFileTree`가 한다).
-    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
-    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(outside));
 
-    // **사용자 조작이 자동 전환을 밀어낸다.** 자동 검증이 슬롯을 잡은 채로 폴더 열기를 거절하면, 사용자는
-    // 방금 누른 메뉴가 왜 안 먹는지 알 수 없다(docs/file-explorer.md §1.1).
+    // ⑦ **사용자 조작이 자동 전환을 밀어낸다.** 자동 검증이 슬롯을 잡은 채로 폴더 열기를 거절하면,
+    //    사용자는 방금 누른 메뉴가 왜 안 먹는지 알 수 없다(docs/file-explorer.md §1.1).
+    try testWriteActiveTermCwd(session, one);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation != null);
     file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expect(session.file_tree_root_validation == null); // 자동 검증은 자리를 내준다
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
     file_panel_ops.provideFileTreeRootPick(session, &.{}); // picker 취소로 정리
     session.file_tree_root_outcome = .none;
 
-    // 기존 file-open intent와 같은 CWD로 돌아와도 root 밖 거부와 혼동하면 안 된다. offscreen scroll 위치를
-    // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다. fixture의 행은
-    // root+자식 둘뿐이므로 실제 도크 높이를 그대로 쓰면 raw scroll이 먼저 0으로 clamp되어 offscreen
-    // 전제가 성립하지 않는다. 이 구간만 한 행 viewport로 고정해 제품의 clamp→follow 순서를 검증한다.
-    const saved_backing_height_px = session.backing_height_px;
-    // 고정 chrome 높이를 공식으로 다시 쓰지 않고 **실제 기하에서 읽는다**. 예전에는
-    // `titlebar_strip_px + paneBarHeightPx()`로 적어 뒀는데, 그 둘은 도크 기하의 입력이 아니게 됐다
-    // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
-    // 상태바가 창 바닥을 먹으므로 그만큼 더 줘야 **한 행 viewport**라는 이 셋업의 의도가 유지된다. 안 더하면
-    // 도크가 22px 짧아져 뷰 바가 접히고(낮은 도크 규칙) 본문이 오히려 커진다 — 전제가 뒤집힌다.
-    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) + session.statusBarHeightPx();
-    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), dock_ops.dockGeometry(session).tree_content.h);
-    session.file_tree_scroll.offset_y_px = 6 * file_tree_dock_ops.fileTreeRowHeightPx(session);
-    try testWriteActiveTermCwd(session, one);
-    try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    // 한 행 viewport라 index 1을 넣는 최소 이동은 그 행의 top(= 한 행 높이)이다.
-    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
-    session.backing_height_px = saved_backing_height_px;
-
-    // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
+    // ⑧ 새 split pane을 active로 바꾸면 이전 pane의 cwd가 아니라 새 active Term의 cwd만 따라간다.
+    //    도크는 창 전역인데 cwd는 Term별이라, 이 축이 갈리면 트리가 어느 pane의 것인지 알 수 없다.
     try pane_ops.splitActivePane(session, .horizontal);
     try testWriteActiveTermCwd(session, two);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
 
-    // 파일/브라우저 Term은 CWD가 없으므로 직전 local CWD와 Tree 상태를 지우지 않는다.
+    // ⑨ 파일/브라우저 Term은 cwd가 없으므로 직전 값을 지우지 않는다 — 문서를 보다 터미널로 돌아왔을 때
+    //    트리가 리셋되면 안 된다.
     session.dispatchAppAction(.new_web_tab);
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
 }
 
 fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
@@ -43654,7 +43766,7 @@ test "file tree는 retained 첫 scan을 게시하고 stale namespace 행 activat
     try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# replacement" });
     // **탐색기의 "활성 터미널 따라가기"를 이 구간에서 끈다.** root pick commit이 도크를 펴고
     // (`file_panel.zig`의 committed 갈래가 `dock.presented = true`), **같은 `updateFileTree` 호출** 꼬리에서
-    // `followActiveTerminalCwd`가 돈다. 터미널 cwd는 이 임시 root **밖**(테스트 프로세스의 저장소)이라
+    // `followActiveTerminalCwd`가 돈다. 터미널 cwd는 이 임시 root가 **아니라** 테스트 프로세스의 저장소라
     // `followRootSwitch`가 root를 갈아끼우고, 그러면 `same.md`가 영영 안 나와 폴링이 소진된다. 그건 제품이
     // 맞게 동작한 것이지(docs/file-explorer.md §1) 이 테스트의 주제가 아니다.
     //
@@ -70735,6 +70847,8 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .image_gallery_search,
         .find,
         .palette,
+        // 심볼 피커도 텍스트를 받는 모달이라 터미널이 first responder 를 내줘야 한다(§7.5).
+        .symbol_picker,
         .addr_edit,
         .scm_commit,
         .file_tree,
@@ -70752,6 +70866,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .settings => session.chrome_host.settings.open = true,
         .find => session.chrome_host.find.open = true,
         .palette => session.chrome_host.palette.open = true,
+        .symbol_picker => session.chrome_host.symbol_picker.open = true,
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,
@@ -74962,4 +75077,263 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
         const l = image_gallery_ops.gridLayout(session);
         try std.testing.expect(session.image_gallery.scroll.offset_y_px <= l.max_scroll);
     }
+}
+
+test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 보여준다 (IG13)" {
+    // **터미널은 그 이력을 안 갖고 있다.** Claude·Codex 는 alt screen 전체화면 TUI 라 스크롤백이
+    // 없고(maru core.zig §alternate_scroll), 훅은 관찰 전용이며(9 개 이벤트 전부 알림), CLI 제어
+    // 표면에도 뷰포트가 없다(Codex app-server 요청 93 개 실측). 그래서 「그 자리로 스크롤」은
+    // 원리적으로 불가능하고, **트랜스크립트를 읽는 갤러리가 직접 보여주는 것**이 유일한 길이다.
+    //
+    // 순수 파서가 도는 것과 **그게 화면까지 가는 것**은 다른 사실이다(IG5-c 가 밟은 길) —
+    // 여기서는 제품 경로로 연 뒤 상태와 레이아웃을 함께 짚는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 라벨은 `dock.png`(무엇인가), 문맥은 그 앞의 대화(어떤 얘기였나) — **둘은 다른 정보다**.
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\"," ++
+        "\"text\":\"사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다\"}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_A\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/u/shots/dock.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_A\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // 격자에서는 라벨이 「무엇인가」에 답한다.
+    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
+
+    // ── 크게 보기를 열면 문맥이 실린다.
+    const vp_before = image_gallery_ops.viewportRect(session);
+    image_gallery_ops.openAt(session, 0);
+    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    try std.testing.expectEqualStrings(
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        op.contextText(),
+    );
+    // **라벨과 다른 정보다** — 같으면 굳이 띄울 이유가 없다(실측에서도 겹침 0%였다).
+    try std.testing.expect(!std.mem.eql(u8, op.contextText(), "dock.png"));
+
+    // ── 문맥이 있으면 그림 자리가 그만큼 줄어든다. 안 줄이면 글자가 그림 위에 얹힌다.
+    const vp_after = image_gallery_ops.viewportRect(session);
+    try std.testing.expect(vp_after.h < vp_before.h);
+
+    // ── 문맥이 없으면 빈 띠를 남기지 않는다.
+    op.context_len = 0;
+    const vp_none = image_gallery_ops.viewportRect(session);
+    try std.testing.expectEqual(vp_before.h, vp_none.h);
+}
+
+test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
+    // 실측 6% 는 앞에 읽을 텍스트가 없다. 그때 빈 값이어야 하고, 화면도 그림만 남아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 앞선 줄이 아예 없다(파일 첫 줄이 이미지다).
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    const vp_before = image_gallery_ops.viewportRect(session);
+    image_gallery_ops.openAt(session, 0);
+    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    try std.testing.expectEqualStrings("", op.contextText());
+    // 빈 띠를 남기지 않는다 — 그림이 그만큼 커야 한다.
+    try std.testing.expectEqual(vp_before.h, image_gallery_ops.viewportRect(session).h);
+}
+
+test "이미지 갤러리: 문맥 줄바꿈이 글자를 흘리지 않는다 (IG13 적대적)" {
+    // **적대적 검증이 잡은 결함이다.** 그리기는 `truncateToCols`(`cols-1` 칸 + «…»)를, 진행은 별도
+    // 계산(`cols` 칸)을 썼다 — 그 사이 글자가 **안 그려진 채 건너뛰어졌다**. 게다가 그 함수는
+    // 안 넘치면 원본 슬라이스를 그대로 돌려주므로 `free` 하면 남의 메모리를 푼다(마지막 줄은 언제나
+    // 그 경로였다).
+    //
+    // 이제 한 함수(`wrapNextBytes`)가 그리기와 진행 둘 다 답한다. 그 불변식을 여기서 짚는다:
+    // **줄을 이어 붙이면 원문이 그대로 나온다** — 한 글자도 빠지거나 겹치지 않는다.
+    const g = image_gallery_ops;
+    const texts = [_][]const u8{
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        "abcdefghijklmnopqrstuvwxyz 0123456789",
+        "한글과 ASCII 가 섞인 문장 mixed width text 입니다",
+        "짧다",
+        "",
+    };
+    for (texts) |text| {
+        var cols: u16 = 1;
+        while (cols <= 40) : (cols += 1) {
+            var rest: []const u8 = text;
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(std.testing.allocator);
+            var guard: usize = 0;
+            while (rest.len > 0) {
+                guard += 1;
+                try std.testing.expect(guard <= text.len + 1); // **반드시 나아간다**
+                const take = g.wrapNextBytes(rest, cols);
+                try std.testing.expect(take > 0);
+                try std.testing.expect(take <= rest.len);
+                try joined.appendSlice(std.testing.allocator, rest[0..take]);
+                rest = rest[take..];
+            }
+            // ① 이어 붙이면 원문이다 — 흘린 글자도, 겹친 글자도 없다.
+            try std.testing.expectEqualStrings(text, joined.items);
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄바꿈이 UTF-8 을 쪼개지 않는다 (IG13 적대적)" {
+    // 바이트로 자르면 한글이 깨진다. 칸이 글자보다 좁아도(1 칸에 2 칸짜리 한글) 한 글자는 통째로 낸다 —
+    // 안 그러면 영영 안 나아가서 무한 루프가 된다.
+    const g = image_gallery_ops;
+    const text: []const u8 = "한글만있는문장입니다";
+    var cols: u16 = 1;
+    while (cols <= 8) : (cols += 1) {
+        var rest: []const u8 = text;
+        while (rest.len > 0) {
+            const take = g.wrapNextBytes(rest, cols);
+            try std.testing.expect(take > 0);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(rest[0..take]));
+            rest = rest[take..];
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄 나누기가 원문을 잃지 않는다 (IG13 적대적)" {
+    // **이 계약을 어긴 것이 방금 고친 결함이었다.** 그리기는 `cols-1` 칸 + «…», 진행은 `cols` 칸을
+    // 써서 그 사이 글자가 안 그려진 채 건너뛰어졌다. 그리고 그 결함은 **어떤 test 도 못 봤다** —
+    // 그리는 함수가 CoreText 함수 포인터를 요구해 단위 test 로 부를 수 없었기 때문이다.
+    //
+    // 그래서 「어느 글자를 어느 줄에」를 순수 함수(`layoutContext`)로 갈랐다. 여기서 그 계약을 짚는다:
+    // **줄을 이어 붙이면 원문의 앞부분이 그대로 나온다.**
+    const g = image_gallery_ops;
+    const texts = [_][]const u8{
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        "abcdefghijklmnopqrstuvwxyz 0123456789 the quick brown fox",
+        "한글과 ASCII 가 섞인 문장 mixed width text 입니다",
+        "짧다",
+        "",
+        // **이모지·ZWJ·결합 문자**(적대적 9 회차). 대화에는 이런 것이 그대로 들어온다 —
+        // 코드포인트 단위로 나아가므로 «반드시 나아간다» 와 «UTF-8 이 온전하다» 가 여기서도 서야 한다.
+        "빌드 통과 ✅ 이제 배포합니다 🚀",
+        "가족 👨‍👩‍👧‍👦 이모지는 ZWJ 로 이어 붙은 여러 코드포인트다",
+        "결합 문자 é(U+0065 U+0301)와 깃발 🇰🇷 도 섞는다",
+        "\u{1F600}\u{1F601}\u{1F602}\u{1F603}",
+    };
+    for (texts) |text| {
+        var cols: u16 = 1;
+        while (cols <= 40) : (cols += 1) {
+            var rows: u32 = 1;
+            while (rows <= g.max_context_rows) : (rows += 1) {
+                const plan = g.layoutContext(text, cols, rows);
+                try std.testing.expect(plan.count <= rows);
+
+                // ① 줄들이 **원문을 앞에서부터 빈틈없이** 덮는다.
+                var at: usize = 0;
+                for (plan.lines[0..plan.count]) |span| {
+                    try std.testing.expectEqual(at, span.start); // 건너뛴 글자가 없다
+                    try std.testing.expect(span.len > 0); // 반드시 나아간다
+                    at += span.len;
+                }
+                try std.testing.expect(at <= text.len);
+
+                // ② 「남는 것이 있다」와 «…» 가 일치한다.
+                try std.testing.expectEqual(at < text.len, plan.ellipsis);
+
+                // ③ 다 담겼으면 줄이 원문 전체다.
+                if (!plan.ellipsis) try std.testing.expectEqual(text.len, at);
+
+                // ④ 각 줄은 UTF-8 이 온전하다 — 바이트로 자르면 한글이 깨진다.
+                for (plan.lines[0..plan.count]) |span| {
+                    try std.testing.expect(std.unicode.utf8ValidateSlice(text[span.start..][0..span.len]));
+                }
+            }
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄 나누기가 폭 0·줄 0 에서 멈춘다 (IG13 적대적)" {
+    // 좁은 도크에서 `cols` 가 0 이 될 수 있다. 그때 무한 루프나 빈 줄을 만들지 않는다.
+    const g = image_gallery_ops;
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 0, 3).count);
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 10, 0).count);
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("", 10, 3).count);
+    // 칸보다 넓은 글자(1 칸에 2 칸짜리 한글)도 한 글자는 낸다 — 안 그러면 영영 안 나아간다.
+    const one = g.layoutContext("한", 1, 3);
+    try std.testing.expectEqual(@as(u32, 1), one.count);
+    try std.testing.expectEqual(@as(usize, 3), one.lines[0].len);
 }

@@ -186,9 +186,9 @@ pub fn verify(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, 
     return verifyWith(&executor, allocator, executable, token, artifact_path, expected, output, budget_ns);
 }
 
-const BoundedExecutor = struct {
+pub const BoundedExecutor = struct {
     io: std.Io,
-    fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
+    pub fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
         const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
         var args_storage: [max_args][arg_bytes]u8 = undefined;

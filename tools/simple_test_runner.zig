@@ -26,7 +26,7 @@ const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
-/// 이 test 프로세스와 **그 자식들**이 사용자의 공용 session-host registry 를 절대 건드리지 않게 한다.
+/// 이 test 프로세스와 **그 자식들**이 사용자의 session-host registry와 workspace를 절대 건드리지 않게 한다.
 ///
 /// 왜 runner 인가. 격리를 라이브러리 기본값(`builtin.is_test`)만으로 하면 test 프로세스 자신만 옮겨가고,
 /// test 가 spawn 하는 **제품 바이너리**(`MARU_SESSION_HOST_PRODUCT_EXE` 계열)는 `is_test` 가 false 라
@@ -38,9 +38,11 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 /// 복구 세션을 adopt 하지 못하고 크래시 로그도 없이 종료**됐다. 두 번 반복된 사고다.
 ///
 /// inherited roots are untrusted: 부모 셸의 값이 제품 root를 가리킬 수 있으므로 언제나 이 process의
-/// PID root로 덮어쓴다. 실패하면 test process는 시작하지 않는다. 라이브러리의 `builtin.is_test`
-/// 기본값은 이 process만 보호하며, 환경을 못 받은 제품 child는 사용자 공용 namespace로 돌아가므로
-/// 여기서 계속 실행할 안전한 fallback은 없다.
+/// PID root로 덮어쓴다. 같은 이유로 AppKit/Foundation이 workspace checkpoint 위치를 정할 때 보는
+/// `CFFIXED_USER_HOME`도 덮어쓴다. `HOME`까지 바꾸면 PTY·shell fixture의 의미가 달라지므로 건드리지 않는다.
+/// 어느 주입이든 실패하면 test process는 시작하지 않는다. 라이브러리의 `builtin.is_test` 기본값은 이
+/// process만 보호하며, 환경을 못 받은 제품 child는 사용자 공용 namespace와 workspace로 돌아가므로 여기서
+/// 계속 실행할 안전한 fallback은 없다.
 fn isolateSessionHostRoot() error{IsolationFailed}!void {
     // **macOS 전용이다.** session host 자체가 macOS 기능이고, 무엇보다 `setenv` 는 libc 심볼이라
     // libc 를 링크하지 않는 Linux test 바이너리에서는 **링크 단계에서 실패한다**(CI 의 ubuntu 오라클
@@ -50,6 +52,8 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
     const root = std.fmt.bufPrintZ(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}) catch
         return error.IsolationFailed;
     if (setenv("MARU_SESSION_HOST_ROOT", root.ptr, 1) != 0)
+        return error.IsolationFailed;
+    if (setenv("CFFIXED_USER_HOME", root.ptr, 1) != 0)
         return error.IsolationFailed;
 }
 

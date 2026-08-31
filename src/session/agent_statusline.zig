@@ -73,10 +73,21 @@ pub const session_dir_rel = "agent-sessions";
 /// **훅 설치와 트랜스크립트 읽기가 이 한 판정을 공유해야 한다** — 한쪽만 `<home>/.claude`로 고정하면
 /// `CLAUDE_CONFIG_DIR`을 쓰는 사용자에게 훅은 엉뚱한 곳에 설치되고 대화 줄은 영원히 빈다.
 pub fn configDir(buf: []u8, config_dir_env: ?[]const u8, home: ?[]const u8) ?[]const u8 {
-    if (config_dir_env) |dir| {
-        if (dir.len > 0) return std.fmt.bufPrint(buf, "{s}", .{dir}) catch null;
-    }
-    return std.fmt.bufPrint(buf, "{s}/.claude", .{home orelse return null}) catch null;
+    const resolved = blk: {
+        if (config_dir_env) |dir| {
+            if (dir.len > 0) break :blk std.fmt.bufPrint(buf, "{s}", .{dir}) catch null;
+        }
+        break :blk std.fmt.bufPrint(buf, "{s}/.claude", .{home orelse return null}) catch null;
+    } orelse return null;
+    // ⚠️ **절대경로가 아니면 없는 것으로 본다.** 소비자가 `openDirAbsolute` 로 여는데 그 함수는 상대경로에
+    // `assert` 로 **죽는다** — `catch` 로 못 막는 종류다. HOME 이 상대경로인 환경에서 실제로 앱 전체가
+    // abort 했다(제품 스모크 `macos-session-host-c4-quit-cancel-smoke` 가 HOME 을 `zig-out/…` 상대경로로
+    // 띄운다 — 2026-08-31 CI 와 로컬에서 같은 자리에서 죽었다).
+    //
+    // 값 자체로도 그것이 맞다: 이 경로는 **다른 프로세스**(claude CLI)가 해석하는 자리라, 우리 cwd 에
+    // 따라 달라지는 상대경로면 훅을 설치해서도 안 된다.
+    if (!std.fs.path.isAbsolute(resolved)) return null;
+    return resolved;
 }
 
 test "configDir는 CLAUDE_CONFIG_DIR 우선, 없으면 home 기준" {
@@ -86,6 +97,11 @@ test "configDir는 CLAUDE_CONFIG_DIR 우선, 없으면 home 기준" {
     // 빈 값은 "설정하지 않음"과 같게 본다 — 빈 경로에 설치하면 루트에 파일을 만든다.
     try testing.expectEqualStrings("/Users/a/.claude", configDir(&buf, "", "/Users/a").?);
     try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, null, null));
+    // **상대경로는 없는 것으로 본다.** 소비자가 `openDirAbsolute` 로 여는데 그 함수는 상대경로에 assert 로
+    // 죽는다(`catch` 가 못 막는다) — HOME 이 상대경로인 제품 스모크에서 앱이 통째로 abort 했다.
+    try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, null, "zig-out/home"));
+    try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, "relative/claude", "/Users/a"));
+    try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, null, "."));
 }
 
 /// `settings.json`의 `statusLine.command`가 **우리 스크립트**를 가리키는가. 경로 끝의 파일명으로 판정한다 —

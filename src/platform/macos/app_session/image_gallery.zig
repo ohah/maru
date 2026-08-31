@@ -536,6 +536,9 @@ fn buildChain(self: *AppSession, head_path: []const u8) index.Chain {
         const parent_id = readCodexParentId(self, cur, &id_buf);
         if (parent_id.len == 0) break;
 
+        // `openDirAbsolute` 는 상대경로에 **assert 로 죽는다**(`catch` 가 못 막는다). `root_path` 는 HOME 에서
+        // 만든 것이라 그 env 가 상대경로면 앱이 abort 한다 — agent.zig 가 같은 이유로 같은 가드를 둔다.
+        if (!std.fs.path.isAbsolute(root_path)) break;
         const root = std.Io.Dir.openDirAbsolute(io, root_path, .{}) catch break;
         defer root.close(io);
         var rel_buf: [std.fs.max_path_bytes]u8 = undefined;

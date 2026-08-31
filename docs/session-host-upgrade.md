@@ -807,6 +807,33 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   cap·timeout·child failure와 receipt all-or-nothing을 Debug·ReleaseFast에서 검증한다. pathname의 no-follow authority와
   DMG mount/extraction은 별도 후속 경계이므로 transport 성공만으로 provenance를 주장하지 않는다.
 
+  DMG pathname 권위와 추출 수명은 `release_adapter_dmg_authority.zig` 한 곳이 소유한다. caller는 absolute candidate
+  DMG와 absolute absent work-directory, manifest가 선언한 expected size/SHA-256만 넘긴다. authority는
+  [GitHub Release의 단일 asset 한도](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)보다
+  작은 값만 받는 `max_dmg_bytes`를 소유한다. work-directory를 exclusive 0700으로 만들고, candidate의
+  모든 pathname component를 `openat(O_NOFOLLOW)`로 내려가 연 regular fd에서 0600 `candidate.dmg` 복사본을
+  bounded streaming write·`fsync`한다. 복사 전후 source fd의 device/inode/type/size/time identity와 복사본의 size/SHA-256을
+  대조하므로 `hdiutil`이 caller pathname을 다시 열지 않는다. 원본 DMG와 private 복사본이 완전히 결속되기 전에는 mount
+  command를 실행하지 않는다.
+
+  authority는 private `mount` leaf를 0700으로 만든 뒤 `/usr/bin/hdiutil attach -readonly -nobrowse -noautoopen
+  -mountpoint <mount> <private-candidate>`만 clean environment·bounded output·deadline으로 실행한다. 성공 뒤 mountpoint의
+  `statfs`가 read-only이고 mount source가 `/dev/disk*`인 exact filesystem identity와 mount root device/inode를 보존한다.
+  제품 경로는 exact `Maru.app/Contents/Info.plist`와 `Maru.app/Contents/MacOS/maru-macos-app`뿐이며, mount root부터 각
+  component를 `openat(O_NOFOLLOW)`로 순회해 directory/regular-file type과 같은 mounted filesystem을 확인한다. symlink,
+  hardlink executable, extra path 선택, writable mount, mount/source identity drift는 fail-close한다. Apple transport 전후에
+  mount filesystem·root·Info.plist·executable identity를 다시 확인하며, 어느 command가 실패해도 부분 `Captures`를
+  반환하지 않는다.
+
+  성공·실패·timeout 모두 `/usr/bin/hdiutil detach <captured-device>`를 먼저 시도하고, detach 뒤 같은 filesystem이 더는
+  private mountpoint에 결속되지 않았음을 확인한 다음 자신이 만든 empty mount/work-directory만 exact device/inode로
+  제거한다. attach가 command failure를 반환했더라도 mountpoint가 실제 mount가 됐으면 같은 정리를 수행한다. detach 또는
+  directory 정리가 실패하면 앞선 검증 성공을 반환하지 않는다. focused gate
+  `test-session-host-release-adapter-dmg-authority`는 fake runner로 exact argv·clean environment·성공/실패 cleanup과
+  pre/post identity drift를 Debug·ReleaseFast에서 고정하고, macOS actual-DMG E2E로 read-only mount, fixed product
+  no-follow traversal, device-identity detach와 residue 0을 검증한다. 이 경계만으로 GitHub 관측·manifest·attestation·evidence
+  aggregate의 최종 조립이나 release workflow 배선을 주장하지 않는다.
+
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.

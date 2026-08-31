@@ -42,6 +42,7 @@ pub const Identity = struct {
 pub const Input = struct {
     bytes: []u8,
     size: u64,
+    mode: u32,
     sha256: [64]u8,
     identity: Identity,
 
@@ -87,6 +88,7 @@ pub fn readInputAlloc(
     }
     var after: posix.Stat = undefined;
     if (c.fstat(fd, &after) != 0 or before.dev != after.dev or before.ino != after.ino or
+        before.mode != after.mode or
         before.size != after.size or before.mtimespec.sec != after.mtimespec.sec or
         before.mtimespec.nsec != after.mtimespec.nsec or
         before.ctimespec.sec != after.ctimespec.sec or
@@ -96,6 +98,7 @@ pub fn readInputAlloc(
     return .{
         .bytes = bytes,
         .size = @intCast(size),
+        .mode = @intCast(before.mode),
         .sha256 = std.fmt.bytesToHex(digest, .lower),
         .identity = .{ .device = @intCast(before.dev), .inode = @intCast(before.ino) },
     };

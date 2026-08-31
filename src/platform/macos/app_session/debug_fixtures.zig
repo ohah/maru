@@ -1300,6 +1300,28 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
 ///
 /// **사용자와 같은 경로를 태운다**(`toggleSymbolPicker`) — 상태를 심지 않으므로 저하 판정
 /// (편집기 아님·심볼 없음·파싱 미완)도 제품이 정한 대로 돈다.
+/// MARU_OPEN_COMMAND_PALETTE=1 — 커맨드 팔레트를 연 화면을 캡처한다.
+/// MARU_OPEN_COMMAND_PALETTE_QUERY=<쿼리> 로 필터해서 한 무리만 남길 수 있다.
+///
+/// **팔레트는 편집기 액션 여섯이 닿는 유일한 길이다**(나머지는 chord 가 없다 —
+/// docs/configuration-input.md "편집기 전용 action"). 그 행에 chord 가 제대로 뜨는지는
+/// `default_app_bindings` 역스캔 결과라, 표를 고치면 화면이 따라 바뀐다.
+pub fn maybeDebugOpenPalette(self: *AppSession) void {
+    if (std.c.getenv("MARU_OPEN_COMMAND_PALETTE") == null) return;
+    // 심볼 피커 훅과 같은 이유로 **한 번만 열지 않는다** — 나중에 뜨는 알림이 배타적으로 닫는다.
+    if (self.chrome_host.palette.open) return;
+    if (self.debug_palette_opened) return;
+    self.debug_palette_tries +%= 1;
+    if (self.debug_palette_tries > 240) self.debug_palette_opened = true; // 4초쯤이면 포기
+
+    self.dispatchAppAction(.toggle_command_palette);
+    if (std.c.getenv("MARU_OPEN_COMMAND_PALETTE_QUERY")) |qv| {
+        self.chrome_host.palette.input.query.appendSlice(self.allocator, std.mem.span(qv)) catch {};
+        self.recomputePalette();
+    }
+    self.metal_dirty = true;
+}
+
 pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
     if (!self.dock_initialized) return;
     if (std.c.getenv("MARU_OPEN_SYMBOL_PICKER") == null) return;
@@ -1309,7 +1331,18 @@ pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
     if (self.chrome_host.symbol_picker.open) return;
     if (self.debug_symbol_picker_opened) return;
     self.debug_symbol_picker_tries +%= 1;
-    if (self.debug_symbol_picker_tries > 240) self.debug_symbol_picker_opened = true; // 4초쯤이면 포기
+    if (self.debug_symbol_picker_tries > 240) {
+        // **조용히 포기하면 안 된다.** 못 연 채로 찍힌 그림이 PR 의 증거가 되고, 그때
+        // 「파싱이 아직이다」·「다른 오버레이가 닫았다」·「심볼이 0개다」가 구별되지 않는다
+        // (옆 축의 Lab 골든이 같은 이유로 색 없는 그림을 골든으로 굳혔다, 2026-08-31).
+        const term = pane_ops.activePane(self).activeTerm();
+        const st = &term.rt.editor_syntax;
+        std.debug.print(
+            "MARU_OPEN_SYMBOL_PICKER: 240 tick 안에 못 열었다 — pending={} symbols={d} crumb={d} open={}\n",
+            .{ st.pending, st.symbols.items.len, st.crumb_syms.items.len, self.chrome_host.symbol_picker.open },
+        );
+        self.debug_symbol_picker_opened = true;
+    }
 
     // MARU_OPEN_SYMBOL_PICKER_SIBLING=<마디 번호> — 그 체인 마디를 **누른 것처럼** 형제 목록을 연다
     // (§7.5 「체인 항목을 누르면 형제가 뜬다」). 밴드 클릭은 포인터로만 일어나므로 캡처 하니스에서는

@@ -160,7 +160,7 @@ pub const Action = union(enum) {
     fold_level_1,
     fold_level_2,
     fold_level_3,
-    // 파일 안 심볼을 필터해 그 자리로 간다(VSCode `⌘⇧O` — Go to Symbol in File).
+    // 파일 안 심볼을 필터해 그 자리로 간다(VSCode `⇧⌘O` — Go to Symbol in File).
     // native-editor-ui.md §7.5 「피커는 팔레트를 다시 쓴다」.
     //
     // **찾기(⌘F)와 다른 축이다** — 찾기는 모든 글자에서 문자열을, 이쪽은 **심볼 이름만** 본다.

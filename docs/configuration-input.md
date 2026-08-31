@@ -90,10 +90,25 @@ keybind = F4 = esc:[2J
   `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`. 레벨은 중첩 **겹수**다(1이 문서
   맨 바깥이고, 레벨끼리는 합치지 않고 갈아 끼운다 —
   [visual-mapping §4.1f](native-editor-visual-mapping.md)).
-  `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⌘⇧O`. 찾기가 모든 글자에서
+  `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⇧⌘O`. 찾기가 모든 글자에서
   문자열을 보는 것과 달리 **심볼 이름만** 본다 — [native-editor-ui.md §7.5](native-editor-ui.md)).
-  **일곱 모두 빌트인 chord가 없다**: 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리가 없고
-  (N2의 몫), 아무 chord도 뺏지 않으려는 결정이다. 그때까지는 커맨드 팝업과 이 키바인딩으로 쓴다.
+  **`toggle_symbol_picker`만 빌트인 chord가 있다 — `⇧⌘O`**(2026-08-31). 나머지 여섯은 아직 없고,
+  **이유는 하나가 아니다**:
+
+  | 이유 | 해당 action | 무엇이 막고 있나 |
+  |---|---|---|
+  | **뺏을 것이 없다** | `toggle_symbol_picker` | `⇧⌘O`가 기본 표 어디에도 없다. 배선 전에는 `resolve`의 fallthrough에서 `.ignored`라 **누르면 아무 일도 안 일어나는** 상태였다 |
+  | **Option 단독은 터미널 입력이다** | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
+  | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
+
+  **컨텍스트가 필요한 부류와 섞지 않는다.** 「편집기 Term 컨텍스트가 서야 한다」는 조건은
+  **이미 남이 쓰는 chord를 양보받을 때**의 것이고(`⌘C` — 터미널 선택이 쓴다, native-editor §9.1),
+  비어 있는 chord에는 해당하지 않는다. **컨텍스트 게이트는 액션 쪽이 이미 갖고 있다** —
+  `toggle_symbol_picker`는 `symbolPickerReadiness`가 `.not_editor`를 먼저 답하므로 터미널 Term에서
+  눌러도 전과 같다. 이 구분을 2026-08-27에 `⌘Z`·`⌘⇧Z`·`⌘S`가 먼저 세웠다
+  (docs/plans/native-editor.md "키 chord").
+
+  나머지 여섯은 그때까지 커맨드 팝업과 이 키바인딩으로 쓴다.
   편집기가 아닌 Term에서는 **무동작**이다(눌러도 아무 일이 없다).
 - **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:
   `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어

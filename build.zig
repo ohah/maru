@@ -5266,7 +5266,20 @@ pub fn build(b: *std.Build) void {
                         .{ .name = "syntax", .module = syntax_mod },
                     },
                 }),
-                .filters = &.{"G2"},
+                // **부분문자열 매칭이다 — 접두사가 아니다.** `"G2"` 로 두었더니 이미지 갤러리
+                // 판정자(`… (IG2-a)`·`(IG2 적대적)`)가 그 안의 `G2` 에 걸려 **아홉 개가 더**
+                // 컴파일됐다(2026-08-31, `--maru-expect-tests=6` 가 잡았다: `compiled 15`).
+                //
+                // 그 아홉은 이 스텝이 지키려는 축(keep-alive config override 보존)과 무관하고,
+                // 실 AppKit 프레임워크를 링크한 이 무거운 아티팩트에서 매번 다시 돈다.
+                //
+                // **이름을 통째로 적는다.** 짧은 접두사는 다음에 `?G2*` 를 짓는 사람이 또 밟는다 —
+                // 이 저장소의 다른 필터들도 같은 이유로 전체 이름을 적는다.
+                .filters = &.{
+                    "G2 keep-alive row Reset과 Backspace는 live snapshot과 write-back queue를 바꾸지 않는다",
+                    "G2 stale Window 전체 Reset은 app-global keep-alive snapshot과 같은 override를 쓴다",
+                    "G2 전체 Reset atomic replace 실패는 keep-alive provenance와 기존 대상에 mutation 0이다",
+                },
             });
             retention_app_tests.root_module.linkFramework("AppKit", .{});
             retention_app_tests.root_module.linkFramework("Metal", .{});

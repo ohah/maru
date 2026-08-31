@@ -2418,7 +2418,12 @@ pub fn build(b: *std.Build) void {
                 "success_checkpoint=\"$success_parent/workspace.v1\"; success_log=\"$success_root/app.stderr\"; " ++
                 "success_inode=$(/usr/bin/stat -f '%i' \"$success_checkpoint\"); " ++
                 "HOME=\"$success_root\" CFFIXED_USER_HOME=\"$success_root\" MARU_SESSION_HOST_ROOT=\"$success_session_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$success_log\" & success_pid=$!; " ++
-                "trap 'kill -KILL \"$success_pid\" 2>/dev/null || true; wait \"$success_pid\" 2>/dev/null || true' EXIT; " ++
+                // **실패하면 앱 stderr 를 뱉는다.** 이 스모크는 앱 로그를 파일로 받아 놓고 `sh -eu` 로
+                // 첫 실패에 즉시 죽는데, 그 로그를 **한 번도 안 찍었다** — CI 에 남는 것은
+                // `Abort trap: 6` 한 줄뿐이라 앱이 왜 죽었는지(패닉 문구·스택)를 알 길이 없었다
+                // (2026-08-31: 무관한 PR 둘이 이 잡에 막혔는데 원인을 못 짚었다).
+                "trap 'rc=$?; kill -KILL \"$success_pid\" 2>/dev/null || true; wait \"$success_pid\" 2>/dev/null || true; " ++
+                "if test \"$rc\" -ne 0; then echo \"--- success app.stderr ---\" >&2; cat \"$success_log\" >&2 || true; fi' EXIT; " ++
                 "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit finished' \"$success_log\"; do " ++
                 "kill -0 \"$success_pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
                 "attempt=0; while kill -0 \"$success_pid\" 2>/dev/null; do attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
@@ -2432,7 +2437,10 @@ pub fn build(b: *std.Build) void {
                 "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++
                 "checkpoint_inode=$(/usr/bin/stat -f '%i' \"$checkpoint\"); lease_inode=$(/usr/bin/stat -f '%i' \"$lease\"); " ++
                 "HOME=\"$root\" CFFIXED_USER_HOME=\"$root\" MARU_SESSION_HOST_ROOT=\"$session_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$log\" & pid=$!; " ++
-                "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; chflags nouchg \"$checkpoint\" 2>/dev/null || true' EXIT; " ++
+                // 위와 같은 이유로 취소 픽스처도 실패하면 앱 stderr 를 뱉는다.
+                "trap 'rc=$?; kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; " ++
+                "chflags nouchg \"$checkpoint\" 2>/dev/null || true; " ++
+                "if test \"$rc\" -ne 0; then echo \"--- cancel app.stderr ---\" >&2; cat \"$log\" >&2 || true; fi' EXIT; " ++
                 "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit cancelled' \"$log\"; do " ++
                 "kill -0 \"$pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
                 "sleep 0.2; kill -0 \"$pid\"; " ++

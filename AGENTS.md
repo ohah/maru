@@ -60,7 +60,7 @@
 - [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md) — 절별 소유: [kind 분기](docs/file-panel-kinds.md)·[웹 스택과 렌더](docs/file-panel-web-stack.md)·[리치 편집 모드](docs/file-panel-rich-edit.md)·[도크 UI](docs/file-panel-dock-ui.md)·[테스트·검증](docs/file-panel-verification.md)
 - [파일 탐색기(도크 트리·watcher·root)](docs/file-explorer.md) — [행 렌더 컴포넌트 이관 계획](docs/plans/file-tree-component.md)
 - [선택 영역을 에이전트에 보내기(파일 패널 → 터미널 CLI)](docs/send-selection-to-agent.md)
-- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)·[에이전트 훅 통합(provider 훅 수신·모드)](docs/agent-hooks.md)·[에이전트 턴 변경분(훅 경계·AI 소행·영속성)](docs/agent-turn-changes.md)·[턴 변경분 단계 계획](docs/plans/agent-turn-changes.md)
+- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md) — 절별 소유: [권장 구조](docs/editor-surface-structure.md)·[도크 소스 컨트롤 뷰](docs/editor-surface-dock.md)·[소스 컨트롤 쓰기·원격](docs/editor-surface-dock-write.md)·[diff/git·빌드·LSP](docs/editor-surface-tooling.md)·[단계 계획](docs/plans/editor-surface.md)·[소스 컨트롤 도크 2판 계획](docs/plans/scm-dock.md)·[에이전트 훅 통합(provider 훅 수신·모드)](docs/agent-hooks.md)·[에이전트 턴 변경분(훅 경계·AI 소행·영속성)](docs/agent-turn-changes.md)·[턴 변경분 단계 계획](docs/plans/agent-turn-changes.md)·[원격 SCM(활성 pane 이 원격이면 그 저장소를 본다)](docs/plans/remote-scm.md)
 - [네이티브 편집기(등폭 GPU 텍스트 뷰·편집·diff)](docs/native-editor.md) — 절별 소유: [레이어 배치](docs/native-editor-layering.md)·[문서 모델](docs/native-editor-document-model.md)·[시각 매핑](docs/native-editor-visual-mapping.md)·[diff·떠 있는 UI·설정](docs/native-editor-ui.md)
 
 ## 설계 문서

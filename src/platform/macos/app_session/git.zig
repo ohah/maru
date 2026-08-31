@@ -59,6 +59,54 @@ pub fn pumpBaseReread(self: *AppSession) void {
     refreshGitStatus(self);
 }
 
+/// 활성 Term 이 원격이면 그 **SCM 대상**(목적지 · control socket · 원격 cwd). 로컬이면 null.
+///
+/// RS2 — [계획](../../../../docs/plans/remote-scm.md). 여기가 「원격을 본다」를 정하는 **유일한 자리**다:
+/// 목록 읽기도, 뒤따를 diff·쓰기도 이 판정 하나를 공유해야 「목록은 원격인데 클릭은 로컬」이 원리적으로
+/// 불가능해진다.
+///
+/// **control socket 이 실제로 있어야 한다.** 없으면 `ssh` 가 새 연결을 시도하며 비밀번호를 물을 수 있고,
+/// 그러면 그 읽기는 영영 안 끝난다(계약 §2.2 ⑸). 그때는 원격 SCM 이 **꺼진 채로** 남는 편이 맞다.
+///
+/// 슬라이스는 전부 호출자가 준 버퍼를 가리킨다 — 관측 캐시를 그대로 들고 나가면 다음
+/// `refreshTermObservation` 이 그 밑을 바꾼다.
+pub fn remoteScmTarget(
+    self: *AppSession,
+    dest_buf: []u8,
+    ctl_buf: []u8,
+    cwd_buf: []u8,
+) ?struct { dest: []const u8, ctl: []const u8, cwd: []const u8 } {
+    if (builtin.os.tag != .macos) return null;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return null;
+    term_ops.refreshTermObservation(self, term, false, false);
+    if (term.rt.observation.availability == .unavailable) return null;
+    if (!term.rt.observation.ssh_remote_dest_present) return null;
+
+    const dest = term.rt.observation.ssh_remote_dest.items;
+    if (dest.len == 0 or dest.len > dest_buf.len) return null;
+    // **원격 경로는 관측(OSC 7)만이 안다.** 커널 조회는 로컬 ssh 클라이언트의 cwd 라 여기서 쓰면 안 된다
+    // (§9.4 가 링크 감지에서 막은 그 함정).
+    const cwd = term.rt.observation.cwd.items;
+    if (cwd.len == 0 or cwd.len > cwd_buf.len) return null;
+    if (!std.fs.path.isAbsolute(cwd)) return null;
+
+    const home_z = std.c.getenv("HOME") orelse return null;
+    const home = std.mem.span(home_z);
+    if (home.len == 0) return null;
+    const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home, dest) catch return null;
+    defer self.allocator.free(ctl);
+    if (ctl.len > ctl_buf.len) return null;
+    // 소켓이 **지금 있는가**. `maru ssh` 가 세션마다 만들고 끊기면 사라진다.
+    _ = std.Io.Dir.cwd().statFile(self.io, ctl, .{ .follow_symlinks = false }) catch return null;
+
+    @memcpy(dest_buf[0..dest.len], dest);
+    @memcpy(ctl_buf[0..ctl.len], ctl);
+    @memcpy(cwd_buf[0..cwd.len], cwd);
+    return .{ .dest = dest_buf[0..dest.len], .ctl = ctl_buf[0..ctl.len], .cwd = cwd_buf[0..cwd.len] };
+}
+
 pub fn refreshGitStatus(self: *AppSession) void {
     if (self.dock.view != .source_control) return;
     // 목록을 다시 읽는 시점은 **비활성 저장소들의 머리 줄도** 다시 읽을 시점이다(P3d-③) — 그쪽은
@@ -67,14 +115,23 @@ pub fn refreshGitStatus(self: *AppSession) void {
     scm_dock_ops.markRepoStatusStale(self);
     if (self.git_inflight != 0) return;
     if (self.scm_write_inflight != 0) return; // 위와 같은 이유(§6-1)
+    var dest_buf: [max_remote_dest_bytes]u8 = undefined;
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (remoteScmTarget(self, &dest_buf, &ctl_buf, &remote_cwd_buf)) |r| {
+        // **원격 cwd 를 그대로 대상으로 쓴다.** `git -C <cwd>` 가 상위 저장소를 스스로 찾으므로 목록에는
+        // 루트가 필요 없다. 루트가 필요한 것은 파일 절대경로를 만드는 자리(diff·열기)이고 그것은 RS3 다.
+        submitGitRead(self, r.cwd, .{ .dest = r.dest, .control_path = r.ctl });
+        return;
+    }
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = gitRepoRoot(self, &repo_buf) orelse return;
-    submitGitRead(self, repo);
+    submitGitRead(self, repo, null);
 }
 
 /// **이미 해석한 저장소로** 읽기를 건다. `gitRepoRoot`를 다시 부르지 않는 진입점이라, 저장소를 방금 판정한
 /// 호출자(`followActiveTerminalRepo`)가 같은 walk-up과 같은 기록을 두 번 하지 않는다.
-fn submitGitRead(self: *AppSession, repo: []const u8) void {
+fn submitGitRead(self: *AppSession, repo: []const u8, remote: ?git_command.Remote) void {
     if (self.dock.view != .source_control) return;
     if (self.git_inflight != 0) return;
     // **쓰기가 도는 동안 읽기를 걸지 않는다**(쓰기 문서 §6-1). 겹치면 `index.lock`에서 뒤엣것이 즉시
@@ -84,7 +141,11 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
     // **기억·감시를 실행 파일 탐색보다 먼저** 한다. git이 없어 아래에서 돌아가더라도 "지금 보는 저장소"는
     // 확정된 사실이고, 여기서 안 남기면 호출자가 매 tick 다시 "저장소가 바뀌었다"로 읽어 무효화가 반복된다.
     rememberGitRepo(self, repo);
-    ensureGitWatch(self, repo);
+    rememberGitRepoDest(self, if (remote) |r| r.dest else null);
+    // **원격은 감시하지 않는다.** `.git` 을 지켜보는 것은 로컬 파일시스템 감시자이고, 원격 경로를 주면
+    // 로컬에 우연히 있는 같은 경로를 감시하게 된다 — 남의 저장소가 바뀔 때마다 원격 목록을 다시 읽는다.
+    // 원격 목록의 갱신은 포커스 전환과 사용자의 새로고침이 맡는다(RS2 의 알려진 한계).
+    if (remote == null) ensureGitWatch(self, repo);
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
@@ -102,12 +163,52 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
     // 이 하나가 ahead/behind·merge-base·브랜치 범위 셋의 왼쪽이라 여기서 갈리면 화면의 숫자와
     // 그 아래 목록이 서로 다른 질문의 답이 된다.
     const base = scm_dock_ops.scmBaseRefFor(self, repo);
-    if (self.git_backend.?.submit(git_exe, repo, base, self.git_request_seq)) {
+    if (self.git_backend.?.submit(git_exe, repo, base, self.git_request_seq, remote)) {
         self.git_inflight = self.git_request_seq;
         // **여기서만 내린다**(§3.5). 고른 기준이 실제로 argv에 실린 자리가 여기이고, 위의 어느 이른
         // 반환이든 그 선택은 아직 화면에 닿지 않았다 — 그때 플래그를 내리면 조용히 잊는 것이다.
         self.scm_base_reread_pending = false;
     }
+}
+
+/// 원격 목적지(`user@host`)의 상한. `ssh` 가 받는 값이고 관측에서 오므로 넉넉히 잡되 유계로 둔다.
+pub const max_remote_dest_bytes: usize = 256;
+
+/// 지금 보는 저장소를 **통째로 놓는다**(경로 + 호스트). 원격↔로컬 전환에서 한쪽만 놓으면 짝이 어긋난
+/// 상태가 남는다.
+fn forgetGitRepo(self: *AppSession) void {
+    if (self.git_repo) |path| self.allocator.free(path);
+    self.git_repo = null;
+    rememberGitRepoDest(self, null); // 안내 정리는 그 함수가 진다(같은 판정을 두 곳에 두지 않는다)
+}
+
+/// 그 목록이 어느 호스트의 것인지 기억한다(null = 로컬). `rememberGitRepo` 와 **같은 자리에서** 부른다 —
+/// 둘이 갈리면 경로만 맞고 호스트가 낡은 상태가 생기고, 그것이 곧 원격 목록에 로컬 동작을 거는 길이다.
+pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
+    const want = dest orelse {
+        const had = self.git_repo_dest;
+        if (had) |old| self.allocator.free(old);
+        self.git_repo_dest = null;
+        // **양방향이다**(적대적 검증 4회차 — 판정자가 잡았다). 로컬 → 원격만 치우고 반대를 빼먹으면,
+        // 원격에서 낸 「원격 세션이라 아직 목록만 읽습니다」가 **로컬 목록 위에** 그대로 남는다.
+        if (had != null) scm_dock_ops.clearScmWriteError(self);
+        return;
+    };
+    if (self.git_repo_dest) |current| {
+        if (std.mem.eql(u8, current, want)) return;
+        self.allocator.free(current);
+    }
+    // **호스트가 바뀌면 직전 동작 결과 줄을 버린다**(적대적 검증 2회차). `rememberGitRepo` 가 같은 일을
+    // 하지만 그쪽은 **경로**로만 판정해서, 로컬 `/srv/app` → 원격 `/srv/app` 처럼 경로가 같고 호스트만
+    // 바뀌는 전환을 못 본다 — 그때 「원격 세션이라 아직 목록만 읽습니다」가 로컬 목록 위에 그대로 남는다.
+    scm_dock_ops.clearScmWriteError(self);
+    self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
+}
+
+/// 지금 목록이 **원격의 것인가**. 로컬 경로로 해석하면 안 되는 자리(파일 열기·감시·쓰기·턴 스냅샷)가
+/// 전부 이 하나를 묻는다.
+pub fn scmTargetIsRemote(self: *const AppSession) bool {
+    return self.git_repo_dest != null;
 }
 
 /// 목록을 읽은 저장소를 기억한다. 같은 값이면 다시 할당하지 않는다.
@@ -193,6 +294,26 @@ pub fn isGitInternalPath(path: []const u8) bool {
 /// 저장소를 보여 준다. 둘을 같은 null로 받던 동안 이 함수는 구별할 수 없어 둘 다 유지했다(사용자 보고 2026-08-12).
 pub fn followActiveTerminalRepo(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    // ① **활성 Term 이 원격이면 그쪽이 대상이다**(RS2). 여기서 로컬 순위로 내려가면 원격 pane 을 보는
+    // 동안 화면에 로컬 저장소가 남는다 — 그 상태에서 누른 스테이지가 보고 있지도 않은 파일을 바꾼다.
+    var dest_buf: [max_remote_dest_bytes]u8 = undefined;
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (remoteScmTarget(self, &dest_buf, &ctl_buf, &remote_cwd_buf)) |r| {
+        const same_host = if (self.git_repo_dest) |d| std.mem.eql(u8, d, r.dest) else false;
+        const same_path = if (self.git_repo) |p| std.mem.eql(u8, p, r.cwd) else false;
+        if (same_host and same_path) return; // 바뀔 때만
+        clearScmResult(self);
+        submitGitRead(self, r.cwd, .{ .dest = r.dest, .control_path = r.ctl });
+        return;
+    }
+    // ② **원격을 보다 로컬로 돌아왔다.** 목록도 기억도 함께 놓는다 — `git_repo` 에 남은 **원격 경로**를
+    // 그대로 두면 아래 2 순위가 그것을 로컬 경로로 walk-up 해, 로컬에 우연히 같은 경로가 있으면
+    // **남의 저장소를 원격인 척** 보여 준다(§9.4 와 같은 함정).
+    if (scmTargetIsRemote(self)) {
+        clearScmResult(self);
+        forgetGitRepo(self);
+    }
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = switch (gitRepoTarget(self, &repo_buf)) {
         .repo => |found| found,
@@ -216,7 +337,7 @@ pub fn followActiveTerminalRepo(self: *AppSession) void {
     clearScmResult(self);
     // 이미 해석한 저장소를 그대로 넘긴다 — `refreshGitStatus`를 부르면 같은 walk-up을 한 번 더 한다.
     // 기억·감시 이동도 저쪽이 (실행 파일 탐색보다 먼저) 하므로 여기서 중복하지 않는다.
-    submitGitRead(self, repo);
+    submitGitRead(self, repo, null);
 }
 
 /// 화면에 남은 목록·실패·선택·in-flight를 버린다. **저장소가 갈릴 때와 "저장소 없음"으로 판정될 때가 같은 정리를
@@ -664,6 +785,10 @@ pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
         if (repoRootForCached(self, cwd, buf)) |found| return .{ .repo = found };
         return .none;
     }
+    // **원격 목록을 보는 동안에는 로컬 순위로 내려가지 않는다**(RS2). `git_repo` 에 든 것이 원격 경로라
+    // 로컬 walk-up 은 뜻이 없고, 우연히 같은 경로가 로컬에 있으면 남의 저장소를 답한다. 「모른다」가
+    // 정확한 답이고, 호출자는 그때 직전 판단을 유지한다.
+    if (scmTargetIsRemote(self)) return .unknown;
     // **2순위도 캐시를 거친다.** diff를 열어 둔 상태(활성 Term이 파일 Term)는 흔한데, 그때 1순위가 null이라
     // 매 tick 여기로 내려온다 — 캐시 없이 두면 walk-up syscall이 그 상태에서 프레임마다 그대로 돈다.
     if (self.git_repo) |current| {

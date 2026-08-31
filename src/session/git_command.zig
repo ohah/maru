@@ -6,6 +6,9 @@
 //!
 //! **읽기 전용 계약**(§6 — 각 항목이 아래 상수 하나와 1:1이다):
 //! - 셸·alias를 거치지 않는다. `sh -c`도, `git` alias 확장도 없다 — 호출자는 이 argv를 그대로 `execve`한다.
+//!   **예외 하나: 원격(SSH)**. `ssh <dest> <cmd>` 는 원격 로그인 셸에 문자열을 넘기므로 이 조항이 원격에서만
+//!   성립하지 않는다. 그 예외는 아래 «원격(SSH) 실행» 절 안으로 좁혀 두었고(인용·검증·덮어쓰기 보존),
+//!   계약은 [docs/plans/remote-scm.md](../../docs/plans/remote-scm.md) §2.2 가 소유한다.
 //! - repository config가 **외부 프로세스를 실행하지 못하게** 한다: external diff·textconv·pager·hook·credential helper를
 //!   전부 빈 값으로 덮어쓴다. 악성 저장소가 `diff.external=curl …`을 넣어 둬도 우리가 실행하지 않는다.
 //! - **index를 건드리지 않는다**: `GIT_OPTIONAL_LOCKS=0`. 이게 없으면 `git status`가 index를 refresh하며 `index.lock`을

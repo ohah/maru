@@ -57,6 +57,11 @@
 
 ## 4. 원격은 fetch만 우리가 실행한다
 
+> **여기서 「원격」은 `origin` 이다**(로컬 저장소의 remote). **SSH 원격 호스트의 저장소에 쓰는 축**은 다른
+> 문제이고 [remote-scm.md](plans/remote-scm.md)가 소유한다 — 그쪽은 RS4까지 가면 stage·commit·discard를 전부
+> ControlMaster 위에서 실행한다. 그때까지 원격 목록을 보는 동안에는 이 절의 쓰기가 **거부되고 이유를 말한다**
+> (`scm_remote_read_only`) — 로컬 index에 걸리면 보고 있지도 않은 파일이 바뀌기 때문이다.
+
 | 명령 | 누가 실행하나 | 왜 |
 |---|---|---|
 | `fetch` | **maru**(`fetch --prune`) | 읽기 방향이라 저장소가 안 바뀌고, 실패해도 로컬 상태가 그대로다 |

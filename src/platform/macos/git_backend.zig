@@ -214,6 +214,29 @@ const Job = struct {
     /// `check-ignore` 가 물어볼 경로들(owned, 저장소 루트 기준 상대경로). 다른 작업은 쓰지 않는다.
     /// 한 배치는 `git_command.check_ignore_batch` 이하다 — 호출자가 그만큼씩 끊어 넣는다.
     ignore_paths: [][]u8 = &.{},
+    /// 원격(SSH) 실행 대상(owned, RS2 — [계획](../../../docs/plans/remote-scm.md)). 둘 다 비어 있으면
+    /// **로컬**이다.
+    ///
+    /// **목록 읽기 job 만 채운다.** diff·쓰기·브랜치는 RS3·RS4 가 같은 자리에 붙인다 — 지금 그쪽 job 은
+    /// 이 필드를 안 쓰므로(빈 슬라이스) 해제할 것도 없다.
+    remote_dest: []u8 = &.{},
+    remote_ctl: []u8 = &.{},
+
+    /// 이 job 이 원격이면 그 대상. 둘 중 하나라도 비면 **로컬로 본다** — 반쪽짜리 원격 대상으로
+    /// 명령을 만드느니 로컬로 도는 편이 낫다는 뜻이 아니라, `buildRemote` 가 그 값을 거부하기 때문에
+    /// 애초에 그 상태를 만들지 않는다(호출자가 쌍으로 넣는다).
+    fn remoteTarget(self: *const Job) ?git_command.Remote {
+        if (self.remote_dest.len == 0 or self.remote_ctl.len == 0) return null;
+        return .{ .dest = self.remote_dest, .control_path = self.remote_ctl };
+    }
+
+    /// 원격 문자열을 해제한다(로컬 job 이면 무동작).
+    fn freeRemote(self: *Job, allocator: std.mem.Allocator) void {
+        if (self.remote_dest.len > 0) allocator.free(self.remote_dest);
+        if (self.remote_ctl.len > 0) allocator.free(self.remote_ctl);
+        self.remote_dest = &.{};
+        self.remote_ctl = &.{};
+    }
 
     const DiffTarget = struct {
         rel_path: []u8,
@@ -396,6 +419,10 @@ pub const Backend = struct {
         /// 비교의 **기준**(빈 값이면 `origin/HEAD`). 세 명령이 이 하나를 쓴다(§3.5).
         base: []const u8,
         request_id: u64,
+        /// 원격(SSH) 대상. null 이면 로컬이다(RS2 — [계획](../../../docs/plans/remote-scm.md)).
+        /// 호출자는 **control socket 이 실제로 있는지 먼저 확인**해 넘긴다 — 없으면 ssh 가 새 연결을
+        /// 시도하며 비밀번호를 물을 수 있고, 그러면 이 읽기는 영영 안 끝난다.
+        remote: ?git_command.Remote,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -432,7 +459,16 @@ pub const Backend = struct {
             state.allocator.dupe(u8, base) catch &.{}
         else
             &.{};
+        // 원격이면 대상을 **쌍으로** 싣는다. 한쪽만 실리면 `remoteTarget` 이 로컬로 읽어, 원격을 보는
+        // 화면에 로컬 저장소가 뜬다 — 그래서 하나라도 복사에 실패하면 둘 다 비운다(로컬로 도는 대신
+        // 이 읽기가 실패하도록 아래 `runOn` 이 거부하는 편이 낫지만, 그 판단은 argv 층 몫이다).
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch &.{};
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch &.{};
+            if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
+        }
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
+            job.freeRemote(state.allocator);
             state.allocator.free(job.git_exe);
             state.allocator.free(job.repo);
             state.allocator.destroy(job);
@@ -1440,7 +1476,7 @@ fn worker(job: *Job) void {
             // 기준 이름 자체를 묻는 읽기에는 기준을 안 넘긴다 — 그 답이 곧 기본값이다.
             else => null,
         };
-        if (runWithArg(state.allocator, pair[0], job.git_exe, job.repo, arg)) |out| {
+        if (runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, arg)) |out| {
             @field(result, pair[1]) = out.bytes;
             // **선택 명령의 잘림도 화면에 말한다**(적대적 검증 2026-08-14). 여기서 삼키면 `numstat_head`가
             // 상한에 걸렸을 때 앞쪽 파일만 숫자를 갖고 나머지는 조용히 빈 채로 남는다 — 사용자는 그것을
@@ -1450,7 +1486,7 @@ fn worker(job: *Job) void {
     }
     inline for (required_reads) |pair| {
         if (ok) {
-            const out = run(state.allocator, pair[0], job.git_exe, job.repo) catch null;
+            const out = runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, null) catch null;
             if (out) |o| {
                 @field(result, pair[1]) = o.bytes;
                 if (o.truncated) truncated = true;
@@ -1460,6 +1496,7 @@ fn worker(job: *Job) void {
     result.ok = ok;
     result.truncated = truncated;
     if (job.base.len > 0) state.allocator.free(job.base);
+    job.freeRemote(state.allocator);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -1490,7 +1527,32 @@ fn runWithArg(
     repo: []const u8,
     arg: ?[]const u8,
 ) !Output {
-    return runWithEnv(allocator, kind, git_exe, repo, arg, null);
+    return runOn(allocator, null, kind, git_exe, repo, arg);
+}
+
+/// 로컬이면 argv 를 그대로, **원격이면 `buildRemote` 로 감싸** 실행한다(RS2 — [계획](../../../docs/plans/remote-scm.md)).
+///
+/// **감싸는 자리를 여기 하나로 둔다.** kind 마다 감싸면 하나를 빠뜨리는 순간 그 명령만 로컬에서 돌아
+/// **목록은 원격인데 증감은 로컬 것**이 된다 — 화면에서는 구별되지 않는 종류의 거짓말이다.
+///
+/// 조립이 거절되면(`null`) `error.GitFailed` 다. 거절은 곧 「그 값으로는 원격에 아무것도 보내지 않는다」
+/// 이므로(제어문자·수상한 dest·버퍼 초과), 로컬로 **폴백하지 않는다** — 폴백은 원격을 보는 사용자에게
+/// 로컬 저장소를 보여 주는 바로 그 사고다.
+fn runOn(
+    allocator: std.mem.Allocator,
+    remote: ?git_command.Remote,
+    kind: git_command.Kind,
+    git_exe: []const u8,
+    repo: []const u8,
+    arg: ?[]const u8,
+) !Output {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const local = git_command.build(kind, git_exe, repo, arg, &argv_buf);
+    const target = remote orelse return runArgvWithEnv(allocator, local, null);
+    var remote_buf: [git_command.max_argv][]const u8 = undefined;
+    var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+    const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return error.GitFailed;
+    return runArgvWithEnv(allocator, argv, null);
 }
 
 /// `index_file`이 있으면 `GIT_INDEX_FILE`로 걸어 **그 index에만** 쓰게 한다(턴 스냅샷). 진짜 index를 안 건드리는

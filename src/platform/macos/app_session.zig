@@ -5372,6 +5372,13 @@ pub const AppSession = struct {
     /// Term이 되어 cwd 폴백이 빈 값을 보고 null이 된다(그래서 두 번째 행부터 안 열렸다). 목록과 그 목록에서 연
     /// 비교는 **같은 저장소**를 봐야 한다는 계약이기도 하다.
     git_repo: ?[]u8 = null,
+    /// 그 목록이 **어느 호스트의 것인가**(RS2 — [계획](../../../docs/plans/remote-scm.md)). null 이면
+    /// 로컬이다.
+    ///
+    /// **`git_repo` 와 반드시 짝으로 읽는다.** 경로만 보면 원격 `/srv/app` 과 로컬 `/srv/app` 이 같은
+    /// 값이라, 원격 목록을 보는 동안 로컬 파일을 열거나 스테이지하는 사고가 **경로 비교만으로는 막히지
+    /// 않는다**(§9.4 가 링크 감지에서 겪은 것과 같은 함정).
+    git_repo_dest: ?[]u8 = null,
     /// 목록 스크롤과 선택 행. 둘 다 창 상태다 — 목록은 매번 새로 계산되므로 저장하지 않는다.
     /// 스크롤 단위는 **backing pixel**이다(SV3a — 탐색기와 같은 좌표계). 브랜치 헤더 한 줄은 이
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
@@ -20505,6 +20512,8 @@ pub const AppSession = struct {
         self.git_watch_path = null;
         if (self.git_repo) |path| self.allocator.free(path);
         self.git_repo = null;
+        if (self.git_repo_dest) |dest| self.allocator.free(dest);
+        self.git_repo_dest = null;
         if (self.turn_index_path) |path| self.allocator.free(path);
         self.turn_index_path = null;
         // 그림자 사본은 힙이다 — 링(고정 배열)과 달리 여기서 반드시 푼다.
@@ -65675,6 +65684,80 @@ test "소스 컨트롤: 원격 세션 터미널은 로컬 저장소를 가리키
     // 원격 host가 보고한 OSC 7도 마찬가지다 — authority가 로컬이 아니면 그 경로는 원격 것이다.
     try term.surface.core.write("\x1b]7;file://build-box.example.com/srv/app\x07");
     try std.testing.expect(git_ops.activeTerminalCwd(session, &buf) == null);
+}
+
+// ── 원격 SCM 가드 (RS2) ───────────────────────────────────────────────────────
+//
+// [계획](../../../docs/plans/remote-scm.md) §2.1 — 원격 목록을 보는 동안 **로컬에 손이 가면 안 된다.**
+// 적대적 검증 3 회에서 실제로 새던 자리를 그대로 고정한다: ⑴ 자동 읽기(히스토리·파일 목록·턴 스냅샷)가
+// `git_repo` 의 원격 경로로 **로컬 git** 을 불렀고 ⑵ 쓰기는 인텐트 밖(키 입력 커밋·base 메뉴)으로도
+// 들어왔으며 ⑶ 호스트만 바뀌는 전환(로컬 `/srv/app` → 원격 `/srv/app`)을 경로 비교가 못 봤다.
+//
+// **경로를 로컬에도 있을 법한 값으로 둔다** — 이 계약이 막으려는 상황이 정확히 그것이다.
+test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다 (RS2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true; // 실제 git 을 안 띄운다(판정 대상은 라우팅이다)
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    try std.testing.expect(git_ops.scmTargetIsRemote(session));
+
+    // ⑴ **저장소 판정이 로컬 순위로 안 내려간다.** 내려가면 원격 경로를 로컬에 대고 walk-up 해,
+    //    로컬에 같은 경로가 있으면 남의 저장소를 원격인 척 답한다.
+    //
+    // **활성 Term 을 실제로 원격으로 몬다**(관측 캐시를 손으로 쓰지 않고 maru ssh 진입 통지로).
+    // 판정자를 처음 썼을 때 이 단계가 없어 빨갛게 났는데, 그 실패가 가드의 전제를 정확히 드러냈다:
+    // 활성 Term 이 로컬이면 **1 순위가 답하는 것이 맞고**(그때는 `followActiveTerminalRepo` 가 곧
+    // 로컬로 갈아탄다), 가드가 필요한 상태는 **1 순위가 비는 원격 Term** 하나뿐이다.
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &probe)),
+    );
+
+    // ⑵ **분류는 순수 함수가 진다**(exhaustive switch — 인텐트가 늘면 컴파일이 깨져 분류를 강제한다).
+    const Intent = maru.chrome.components.scm_dock.ids.Intent;
+    const touches = [_]Intent{
+        .{ .open_row = .{ .repo_index = 0, .model_index = 0 } },
+        .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
+        .{ .commit = 0 },
+        .{ .stage_all_repo = 0 },
+        .fetch_remote,
+        .{ .open_commit_file = 0 },
+    };
+    for (touches) |intent| try std.testing.expect(scm_dock_ops.intentTouchesLocalRepo(intent));
+    // 화면만 바꾸는 것과 원격에서도 뜻이 같은 것은 통과시킨다 — 막으면 원격에서 탭 전환도 안 된다.
+    const passes = [_]Intent{ .{ .select_tab = .history }, .{ .toggle_repo = 0 }, .{ .refresh_repo = 0 }, .scroll_thumb };
+    for (passes) |intent| try std.testing.expect(!scm_dock_ops.intentTouchesLocalRepo(intent));
+
+    scm_dock_ops.clearScmWriteError(session);
+    scm_dock_ops.applyScmDockIntent(session, .{ .commit = 0 });
+    // **조용한 무동작이 아니라 이유를 말한다**(도크의 다른 거절과 같은 규율).
+    try std.testing.expect(session.scm_write_error != null);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_read_only), session.scm_write_error.?);
+
+    // ⑶ **자동 경로도 안 돈다.** 인텐트를 안 거치고 tick 이 굴리는 셋이다.
+    scm_dock_ops.pumpScmLog(session);
+    scm_dock_ops.pumpCommitFiles(session);
+    try std.testing.expect(session.scm_log_repo == null); // 로컬 히스토리를 읽지 않았다
+    try std.testing.expect(session.scm_commit_files_inflight == 0);
+
+    // ⑷ **로컬로 돌아오면 원격 안내를 치운다.** 남기면 로컬 목록 위에 「원격 세션이라…」가 뜬다.
+    git_ops.rememberGitRepoDest(session, null);
+    try std.testing.expect(!git_ops.scmTargetIsRemote(session));
+    try std.testing.expect(session.scm_write_error == null);
 }
 
 test "소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면 목록·감시를 그쪽으로 옮긴다" {

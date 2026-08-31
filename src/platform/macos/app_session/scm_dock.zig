@@ -1790,7 +1790,52 @@ pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
     if (!pointInCommitBox(self, x_px, y_px)) blurCommit(self);
 }
 
+/// 이 인텐트가 **로컬 저장소에 작용하나**(RS2 — [계획](../../../../docs/plans/remote-scm.md)).
+///
+/// 원격 목록을 보는 동안 이런 인텐트가 통과하면, 화면은 원격인데 손은 **로컬 파일**에 간다 —
+/// 스테이지·되돌리기가 보고 있지도 않은 파일을 바꾸고, 행 클릭은 로컬에 우연히 같은 경로가 있으면
+/// 남의 파일을 연다(§9.4 가 링크 감지에서 막은 함정, 그리고 이 계획이 선 이유).
+///
+/// **exhaustive switch 다.** 인텐트가 하나 늘면 여기서 컴파일이 깨져 분류를 강제한다 — 목록을 손으로
+/// 적어 두면 새 동작이 조용히 원격에서 로컬을 만지는 쪽으로 샌다. 화면만 바꾸는 것(접기·탭·스크롤)과
+/// 원격에서도 뜻이 그대로인 것(새로고침 — 원격이면 원격을 다시 읽는다)은 통과시킨다.
+pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
+    return switch (intent) {
+        // 로컬 파일·로컬 index 를 만진다.
+        .open_row,
+        .row_action,
+        .section_action,
+        .commit,
+        .commit_focus,
+        .stage_all_repo,
+        .fetch_remote,
+        .open_remote_menu,
+        .open_turn_file,
+        .open_commit_file,
+        => true,
+        // 화면 상태만 바꾸거나, 원격에서도 같은 뜻으로 도는 것.
+        .toggle_section,
+        .expand_section,
+        .toggle_repo,
+        .select_commit,
+        .select_turn,
+        .load_more_commits,
+        .select_tab,
+        .refresh_repo,
+        .scroll_thumb,
+        .scroll_track,
+        => false,
+    };
+}
+
 pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void {
+    // **원격 목록을 보는 동안 로컬을 만지는 동작은 여기서 끊는다**(RS2). 진입점 한 겹에서 막는 이유는
+    // 하위 경로가 열 곳이 넘어 하나라도 빠뜨리면 그 자리가 곧 사고이기 때문이다 — 그리고 「조용히
+    // 무동작」이 아니라 **이유를 말한다**(도크의 다른 거절과 같은 규율).
+    if (git_ops.scmTargetIsRemote(self) and intentTouchesLocalRepo(intent)) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
+        return;
+    }
     switch (intent) {
         .toggle_section => |section| {
             const index = sectionIndex(section);
@@ -2140,6 +2185,10 @@ pub fn applyBaseMenuSelectionForTest(self: *AppSession, ref: []const u8) void {
 }
 
 fn setScmBase(self: *AppSession, ref: ?[]const u8) void {
+    // 이 메뉴는 **인텐트를 안 거친다**(상태바 브랜치 항목 → `openBaseMenu` → 선택 콜백). 원격일 때
+    // 통과하면 원격 경로를 키로 기준을 적어, 로컬에 같은 경로가 있으면 그쪽 기준을 덮는다
+    // (적대적 검증 3회차).
+    if (git_ops.scmTargetIsRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
     const repo = self.git_repo orelse return;
     // **거절당하면 그 사실을 적는다**(적대적 검증 2026-08-19). 조용히 돌아가면 사용자는 메뉴에서 이름을
     // 골랐는데 화면이 그대로인 것만 본다 — 같은 값을 다시 골라도 아무 일이 없다(상태가 이미 그 값이거나,
@@ -2394,6 +2443,9 @@ fn dropCommitFiles(self: *AppSession) void {
 /// 공짜로 띄우는 일이다(§6 비용 규율, 히스토리 목록과 같은 판단).
 pub fn pumpCommitFiles(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    // **원격 목록을 보는 동안 로컬 git 으로 파일 목록을 읽지 않는다**(RS2 적대적 검증 1회차) —
+    // `git_repo` 에 든 것이 원격 경로라, 로컬에 같은 경로가 있으면 남의 저장소를 읽어 그 화면에 싣는다.
+    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_commit_files_inflight != 0) return;
     // 두 탭이 **같은 슬롯**을 쓴다(한 번에 하나만 펼친다). 무엇을 읽을지는 지금 보고 있는 탭이 정한다.
     const key: []const u8 = switch (self.scm_tab) {
@@ -2908,6 +2960,13 @@ fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
 /// 쓰기 하나를 건다. **in-flight 하나**(§6) — 도는 동안 눌린 것은 흘린다(큐를 쌓으면 오래된 클릭이
 /// 뒤늦게 저장소를 바꾼다).
 fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8) bool {
+    // **두 번째 겹**(RS2 적대적 검증 3회차). 인텐트 게이트가 첫 겹이지만 쓰기를 거는 길이 그것만이
+    // 아니다 — 커밋은 키 입력 경로에서도 들어온다(`settleCommitInput`). 로컬 index 를 만지는 자리마다
+    // 묻는 대신, **그 자리로 들어가는 마지막 문**에서 한 번 더 본다.
+    if (git_ops.scmTargetIsRemote(self)) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
+        return false;
+    }
     if (self.scm_write_inflight != 0) return false;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
@@ -3569,6 +3628,10 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_write_seq += 1;
+    if (git_ops.scmTargetIsRemote(self)) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only)); // 위와 같은 두 번째 겹
+        return;
+    }
     if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq)) {
         deleteCommitMessageFile(path);
         return;

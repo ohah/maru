@@ -505,6 +505,9 @@ const Table = struct {
     /// 고른 기준을 **기억하지 못했다**(기억할 저장소 수 상한). 조용히 돌아가면 사용자는 "골랐는데
     /// 아무 일도 안 일어난다"만 겪는다 — 그것이 이 기능의 가장 나쁜 실패다(§3.5).
     scm_base_limit: [:0]const u8,
+    /// 원격(SSH) 저장소를 보는 동안 아직 못 하는 동작을 눌렀을 때(RS2 — docs/plans/remote-scm.md).
+    /// **「안 됩니다」가 아니라 「아직」이다** — RS3·RS4 가 diff 와 쓰기를 원격으로 잇는다.
+    scm_remote_read_only: [:0]const u8,
     /// 명령을 넣을 터미널이 없다(활성 surface가 터미널이 아니다).
     scm_no_terminal: [:0]const u8,
     scm_changes: [:0]const u8,
@@ -1245,6 +1248,7 @@ const en: Table = .{
     .scm_menu_pick_base = "Choose base branch…",
     .scm_base_default = "Default (origin/HEAD)",
     .scm_base_limit = "Too many repositories remembered, so the base branch was not changed",
+    .scm_remote_read_only = "This is a remote session, so the list is read-only for now",
     .scm_no_terminal = "No terminal to type into",
     .scm_changes = "Changes",
     .scm_history = "History",
@@ -1830,6 +1834,7 @@ const ko: Table = .{
     .scm_menu_pick_base = "기준 브랜치 고르기…",
     .scm_base_default = "기본값(origin/HEAD)",
     .scm_base_limit = "기억하는 저장소가 너무 많아 기준을 바꾸지 못했습니다",
+    .scm_remote_read_only = "원격 세션이라 아직 목록만 읽습니다",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

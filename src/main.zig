@@ -8,6 +8,10 @@ const maru = @import("maru");
 /// 가 2026-08-25 에 실제로 옮겨 보고 **"옮기지 않는다"** 로 닫았다(파일 이동이 아니라 빌드 그래프
 /// 변경이다: 모듈 루트·wasm 배럴·자기 의존·셋째 파일). 새 빚은 이 주석 한 줄로 갚는다.
 const agent_archive_backend = @import("platform/macos/agent_session_archive_backend.zig");
+/// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 폴더의 OS 중립 파일이고(§3.4 의 결정),
+/// **그 안에 지켜야 할 계약이 하나 있다**: 턴 텍스트는 worker 경계를 넘기 전에 민감 내용 가드와
+/// PII 익명화를 지난다(`redactTurns`). 여기서 직접 파일을 읽어 파싱하면 그 계약을 우회한다.
+const agent_detail_backend = @import("platform/macos/agent_session_archive_detail_backend.zig");
 const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
@@ -1807,7 +1811,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1090;
+const smoke_spin_cap: usize = 1132;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -3175,6 +3179,35 @@ const AgentCard = struct {
     messages: []const u8,
     age: []const u8,
     model: []const u8,
+    /// **펼칠 때 읽을 파일의 신원.** 경로만으로는 부족하다 — 스캔 뒤에 그 자리가 다른 파일로 바뀌었을
+    /// 수 있고, 백엔드가 `inode`·`device` 로 그것을 **거절**한다(그 타입 doc: *"a later explicit reveal
+    /// can reject a replacement instead of opening an arbitrary new file"*).
+    source_path: []const u8,
+    inode: std.Io.File.INode,
+    device: u64,
+    scan_provider: maru.session.agent_session_archive.Provider,
+};
+
+/// 지금 펼친 카드 **하나**의 상세. 중립이 펼침을 하나로 못 박아 뒀다(`Props.expanded_identity` —
+/// *"펼침은 최대 하나다"*), 그래서 여기도 하나다.
+///
+/// **문자열은 이 arena 가 소유한다.** 백엔드가 준 `Detail` 은 받아서 바로 해제하고, 화면이 가리키는
+/// 것은 여기 복사본이다 — 안 그러면 다음 요청이 그 메모리를 지운다.
+const AgentDetail = struct {
+    /// 어느 카드의 것인가. 목록이 다시 그려져도 이 값으로 짝을 찾는다.
+    identity: u64 = 0,
+    request_id: u64 = 0,
+    state: maru.chrome.components.session_dock.types.DetailState = .loading,
+    turns: []maru.chrome.components.session_dock.types.Turn = &.{},
+    action_records: u32 = 0,
+    arena: ?std.heap.ArenaAllocator = null,
+
+    fn clear(self: *AgentDetail) void {
+        if (self.arena) |*a| a.deinit();
+        self.arena = null;
+        self.turns = &.{};
+        self.action_records = 0;
+    }
 };
 
 /// 재투영에 필요한 것 전부. 문자열은 전부 앱 수명 arena 소유다.
@@ -3201,11 +3234,114 @@ const AgentArchive = struct {
 ///
 /// `scratch` 는 이 호출에서만 사는 arena(투영이 거기 쌓인다), `persist` 는 항목이 가리키는 문자열의
 /// 주인이다 — 다만 문자열은 이미 `AgentArchive` 가 들고 있으므로 여기서는 **빌려 쓴다**.
+/// 지금 펼친 카드의 상세면 그것을, 아니면 `null`. **두 상태가 갈리는 순간을 한 곳에서 막는다** —
+/// `expanded_identity` 는 클릭이 바꾸고 상세는 백엔드가 채우므로, 서로 다른 카드를 가리키는 프레임이
+/// 생길 수 있다. 그때 상세를 붙이면 **엉뚱한 카드가 남의 대화를 보인다.**
+/// 펼친 카드의 상세를 **요청**한다. 보냈으면 `true`.
+///
+/// **`allocator` 는 백엔드를 만든 그 할당자여야 한다** — worker 가 `Source` 를 자기 것으로 삼아
+/// 그 할당자로 해제한다. 섞으면 다른 할당자가 안 준 것을 돌려받는다(실측 §2m.97).
+///
+/// **백엔드가 파일 신원을 다시 본다** — 스캔 때 본 `inode`·`device` 와 다르면 `stale` 로 거절한다.
+/// 그래서 경로만 넘기지 않고 셋을 함께 넘긴다(그 타입 doc 의 이유 그대로).
+/// **"못 보냈다" 에는 두 뜻이 있다.** 그 둘을 하나로 접으면 다시 보낼 수 없는 요청을 **매 프레임
+/// 영원히** 다시 보낸다(적대적 검증 7회차) — 그때마다 경로를 복사했다 버린다.
+const DetailSubmit = enum {
+    sent,
+    /// 앞의 읽기가 아직 안 끝났다 — **나중에 다시 보내면 된다**.
+    busy,
+    /// 보낼 수 없다(백엔드가 없거나 카드가 없거나 메모리가 없다) — 다시 보내도 같다.
+    impossible,
+};
+
+fn requestAgentDetail(
+    allocator: std.mem.Allocator,
+    backend: *?agent_detail_backend.Backend,
+    archive: *const AgentArchive,
+    identity: u64,
+    request_id: u64,
+) DetailSubmit {
+    const be = if (backend.*) |*b| b else return .impossible;
+    if (identity >= archive.cards.len) return .impossible;
+    const card = archive.cards[identity];
+    const path = allocator.dupe(u8, card.source_path) catch return .impossible;
+    const source = agent_detail_backend.Source{
+        .provider = card.scan_provider,
+        .source_path = path,
+        .inode = card.inode,
+        .device = card.device,
+    };
+    if (!be.submit(source, request_id)) {
+        // **거절이면 우리가 돌려준다** — 그 함수 계약이 그렇다(*"Caller owns source on false"*).
+        allocator.free(path);
+        return .busy;
+    }
+    return .sent;
+}
+
+/// 백엔드가 낸 상세를 화면이 쓸 자리로 옮긴다. **문자열을 복사한다** — 결과는 이 자리에서 해제한다.
+///
+/// **할당자가 둘이다.** `res` 는 백엔드가 자기 것으로 만들었으므로 **그 할당자로 돌려줘야 한다**
+/// (섞으면 계량 할당자가 자기가 안 준 것을 빼서 정수 언더플로로 죽는다 — 실측 §2m.97). 화면이 오래
+/// 들 복사본은 그와 별개의 `store` 에 둔다.
+fn takeAgentDetail(
+    res_allocator: std.mem.Allocator,
+    store: std.mem.Allocator,
+    backend: *?agent_detail_backend.Backend,
+    det: *AgentDetail,
+) bool {
+    const be = if (backend.*) |*b| b else return false;
+    var res = be.takeResult() orelse return false;
+    defer res.deinit(res_allocator);
+    // **늦게 온 답은 버린다.** 사용자가 그 사이 다른 카드를 폈으면 이 대화는 남의 것이다.
+    if (res.request_id != det.request_id) return false;
+    det.clear();
+    switch (res.state) {
+        .stale => det.state = .stale,
+        .unavailable => det.state = .unavailable,
+        .ready => {
+            const parsed = res.detail orelse {
+                det.state = .unavailable;
+                return true;
+            };
+            var arena = std.heap.ArenaAllocator.init(store);
+            const a = arena.allocator();
+            const turns = a.alloc(maru.chrome.components.session_dock.types.Turn, parsed.turns.items.len) catch {
+                arena.deinit();
+                det.state = .unavailable;
+                return true;
+            };
+            for (parsed.turns.items, 0..) |t, i| {
+                turns[i] = .{
+                    .role = switch (t.role) {
+                        .user => .user,
+                        .assistant => .assistant,
+                    },
+                    .text = a.dupe(u8, t.text) catch "",
+                };
+            }
+            det.arena = arena;
+            det.turns = turns;
+            det.action_records = parsed.action_records;
+            det.state = .ready;
+        },
+    }
+    return true;
+}
+
+fn agentOpenDetail(det: *const AgentDetail, expanded: ?u64) ?*const AgentDetail {
+    const id = expanded orelse return null;
+    if (det.identity != id) return null;
+    return det;
+}
+
 fn projectAgentItems(
     scratch: std.mem.Allocator,
     persist: std.mem.Allocator,
     archive: *const AgentArchive,
     out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+    /// 펼친 카드의 상세. **`null` 이면 아무 카드도 안 펼친 것**이다.
+    open: ?*const AgentDetail,
 ) !void {
     out.clearRetainingCapacity();
     if (archive.view_items.len == 0) return;
@@ -3262,12 +3398,29 @@ fn projectAgentItems(
         .card => |ri| {
             if (ri >= archive.cards.len) continue;
             const c = archive.cards[ri];
+            // **펼친 카드만 `expanded` 를 든다.** `build.zig` 가 그 필드 하나로 높이 갈래를 타고
+            // (§2m.93 1회차), 스크롤 투영도 같은 규칙을 쓴다 — 여기서 조건이 갈리면 재는 길이와
+            // 그리는 길이가 어긋난다.
+            const expanded: ?maru.chrome.components.session_dock.types.Expanded = if (open) |od| blk: {
+                if (od.identity != ri) break :blk null;
+                break :blk .{
+                    .state = od.state,
+                    .turns = od.turns,
+                    .action_record_count = od.action_records,
+                    // **아직 아무 것도 못 한다.** 버튼을 살려 두면 눌리는데 아무 일도 안 나는
+                    // 죽은 컨트롤이 된다 — 그것이 이 슬라이스가 갚는 결함의 모양이다.
+                    .resume_enabled = false,
+                    .reveal_enabled = false,
+                    .focus_live_enabled = false,
+                };
+            } else null;
             try out.append(persist, .{ .card = .{
                 .identity = ri,
                 .provider = c.provider,
                 .title = c.title,
                 .summary = c.summary,
                 .metadata = .{ .messages = c.messages, .age = c.age, .model = c.model },
+                .expanded = expanded,
             } });
         },
     };
@@ -3285,6 +3438,8 @@ fn applyAgentIntent(
     state: *agent_surface.State,
     items: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
     intent: maru.chrome.components.session_dock.ids.Intent,
+    /// 펼친 카드의 상세 — 재투영이 그것을 카드에 붙인다.
+    open: ?*const AgentDetail,
 ) bool {
     switch (intent) {
         .select_card => |identity| {
@@ -3306,7 +3461,7 @@ fn applyAgentIntent(
             } else {
                 archive.collapsed.append(persist, key) catch return false;
             }
-            projectAgentItems(scratch, persist, archive, items) catch return false;
+            projectAgentItems(scratch, persist, archive, items, open) catch return false;
             state.invalidateTree();
             return true;
         },
@@ -3317,7 +3472,7 @@ fn applyAgentIntent(
                 .newest_first => .oldest_first,
                 .oldest_first => .newest_first,
             };
-            projectAgentItems(scratch, persist, archive, items) catch return false;
+            projectAgentItems(scratch, persist, archive, items, open) catch return false;
             state.invalidateTree();
             return true;
         },
@@ -3487,6 +3642,10 @@ fn drainAgentItemsInner(
             .messages = messages,
             .age = try persist.dupe(u8, age_src),
             .model = try persist.dupe(u8, p.model),
+            .source_path = try persist.dupe(u8, rec.source_path),
+            .inode = rec.inode,
+            .device = rec.device,
+            .scan_provider = p.provider,
         };
     }
     archive.view_items = vi;
@@ -3494,7 +3653,11 @@ fn drainAgentItemsInner(
     // **첫 화면도 같은 함수가 만든다** — 접기 뒤와 다른 코드로 만들면 그 둘이 갈린다.
     var proj_arena = std.heap.ArenaAllocator.init(scan);
     defer proj_arena.deinit();
-    try projectAgentItems(proj_arena.allocator(), persist, archive, out);
+    // **스냅샷이 바뀌면 펼침은 버린다.** 카드 identity 는 레코드 번호이고 새 훑기는 그 번호를 다시
+    // 매긴다 — 그대로 두면 **다른 세션의 상세**가 펼쳐진 채로 남는다. 중립 타입이 그 규칙을 적어
+    // 뒀다(`Expanded`: *"snapshot 교체로 … 바뀌면 detail/action capture 와 함께 atomic 하게 지운다"*).
+    // 호출부가 같은 자리에서 `expanded_identity` 와 상세를 함께 지운다.
+    try projectAgentItems(proj_arena.allocator(), persist, archive, out, null);
     return "";
 }
 /// 상태바 항목 하나 — **아이콘(선택) + 글자**. 정체는 중립 `ItemId` 가 갖는다(슬롯 인덱스를 id 로
@@ -5559,6 +5722,56 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **arena 가 아니다.** 이력이 크면 훑기가 이 기계에서 40 MB 를 쓰는데 arena 는 그것을 안 돌려준다
     // — 앱 수명으로 올리는 순간 그 40 MB 가 창에 눌러앉는다.
     var agent_counting = CountingAllocator{ .child = allocator };
+    var agent_detail_be: ?agent_detail_backend.Backend = null;
+    defer if (agent_detail_be) |*b| b.deinit();
+    var agent_detail: AgentDetail = .{};
+    defer agent_detail.clear();
+    var agent_detail_requests: usize = 0;
+    // **아직 보내지 못한 요청이 있다.** 백엔드는 한 번에 하나만 읽고, 그 함수 doc 이 나머지를 이렇게
+    // 정해 뒀다 — *"a later disclosure can show loading immediately and **retry** after this bounded
+    // read publishes"*. 그 재시도를 안 하면 빨리 두 번 펼친 사용자는 **영영 `unavailable`** 인 카드를
+    // 본다(적대적 검증 1회차).
+    var agent_detail_pending = false;
+    var agent_detail_retries: usize = 0;
+    var agent_detail_results: usize = 0;
+    var adet_judgeable = false;
+    var adet_card_h_before: f32 = -1;
+    var adet_card_h_after: f32 = -1;
+    var adet_state_after: maru.chrome.components.session_dock.types.DetailState = .loading;
+    var adet_turns: usize = 0;
+    var adet_text_before: usize = 0;
+    var adet_text_after: usize = 0;
+    var adet_expand_index: usize = 0;
+    var adet_turn_shown = false;
+    // 펼치기 **전**의 그린 글자. 턴이 화면에 새로 들어왔는지는 이것과 견줘야 안다 — 카드 요약이
+    // 첫 턴과 같은 글자일 수 있어(실측) "찾았다" 만으로는 빈 대화도 통과한다.
+    var adet_before_buf: [8192]u8 = undefined;
+    var adet_before_len: usize = 0;
+    var aretry_judgeable = false;
+    var aretry_refused = false;
+    var aretry_state: maru.chrome.components.session_dock.types.DetailState = .loading;
+    var aretry_turns: usize = 0;
+    var aretry_second_id: u64 = 0;
+    var aretry_expand_index: usize = 0;
+    var aretry_card_h: f32 = -1;
+    var asnap_judgeable = false;
+    var asnap_expanded_before: ?u64 = null;
+    var asnap_req_before: u64 = 0;
+    var asnap_expanded_after: ?u64 = null;
+    var asnap_req_after: u64 = 0;
+    var asnap_det_identity_after: u64 = 0;
+    var asnap_applies_before: usize = 0;
+    var aclosed_judgeable = false;
+    var aclosed_turns: usize = 999;
+    var aexp_scroll_judgeable = false;
+    var aexp_max: u32 = 0;
+    var aexp_off: u32 = 0;
+    var aexp_last_bottom: f32 = -1;
+    var aexp_view_bottom: f32 = -1;
+    var aexp_content_h: u32 = 0;
+    var alate_judgeable = false;
+    var alate_turns: usize = 999;
+    var alate_expanded: ?u64 = 0;
     var agent_backend: ?agent_archive_backend.Backend = null;
     defer if (agent_backend) |*b| b.deinit();
     var agent_items: std.ArrayList(maru.chrome.components.session_dock.types.Item) = .empty;
@@ -5631,6 +5844,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **홈은 중립이 정한다**(`user_paths.homeDirFor`) — Windows 는 `HOME` 이 없어 `%USERPROFILE%`
         // 로 간다. 여기서 손으로 고르면 그 규칙이 두 곳이 된다(그 함수 doc 이 왜 이렇게 되는지 적어 뒀다).
         if (home_dir) |home| {
+            // **상세는 스캔과 다른 백엔드다.** 스캔은 홈 전체를 훑고, 이것은 파일 하나의 꼬리만
+            // 읽는다(512 KB 상한) — 같은 worker 에 얹으면 훑는 20 초 동안 펼침이 안 열린다.
+            agent_detail_be = agent_detail_backend.Backend.init(agent_counting.allocator(), io) catch null;
             agent_backend = agent_archive_backend.Backend.init(agent_counting.allocator(), io) catch null;
             if (agent_backend) |*b| {
                 agent_list_reason = submitAgentScan(agent_counting.allocator(), b, home);
@@ -6390,6 +6606,282 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 제스처는 시작한 곳이 소유한다. 영역으로 가르면 밖에서 뗀 up 이 이 코드에 안 와
         // **계속 쥔 채로** 남고, 다음에 도크 위를 지나가기만 해도 목록이 튄다.
+        // ── 카드를 펼치면 대화가 뜬다 (W8.22 — 죽은 컨트롤이었다) ──────────────────────
+        //
+        // **셰브런을 눌러도 아무 일도 안 났다**: Windows 는 `Item.card.expanded` 를 아무 데서도 안
+        // 채우고 있었다(§2m.93 1회차 보고). 여기서는 카드 하나를 눌러 **높이가 자라고 글자가 는다**를
+        // 잰다 — 그 둘이 "정말 열렸다" 의 관측점이다.
+        if (smoke and spins == 1084 and dock_view == .agent_sessions and agent_items.items.len > 1) {
+            if (agent_built) |*b| {
+                // **보이는 카드**를 고른다. 앞 단계가 목록을 굴려 놓아서 첫 카드는 뷰포트 위로 나가
+                // 있을 수 있고, 그 자리를 누르면 아무 인텐트도 안 난다 — 실제로 그렇게 조용히
+                // 아무 일도 안 일어났다(그룹 머리는 펼침이 없으므로 함께 거른다).
+                const vp = maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree);
+                var idx: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] != .card) continue;
+                    const rr = agentItemRect(b, idx) orelse continue;
+                    const v = vp orelse break;
+                    if (rr.y >= v.y and rr.y + rr.height <= v.y + v.height) break;
+                }
+                if (idx < agent_items.items.len) {
+                    if (agentItemRect(b, idx)) |r| {
+                        adet_judgeable = true;
+                        adet_expand_index = idx;
+                        adet_card_h_before = r.height;
+                        adet_text_before = b.text.len;
+                        adet_before_len = @min(b.text.len, adet_before_buf.len);
+                        @memcpy(adet_before_buf[0..adet_before_len], b.text[0..adet_before_len]);
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        // 상세는 **비동기**다 — 온 뒤에 잰다. 안 오면 그대로 `loading` 이 찍혀 무엇이 막혔는지 보인다.
+        if (smoke and spins == 1088 and adet_judgeable) {
+            adet_state_after = agent_detail.state;
+            adet_turns = agent_detail.turns.len;
+            if (agent_built) |*b| {
+                adet_text_after = b.text.len;
+                if (agentItemRect(b, adet_expand_index)) |r| adet_card_h_after = r.height;
+                // **대화가 화면에 있는가.** 개수·길이만 보면 속 빈다 — 빈 대화를 실어도 펼친 카드의
+                // 라벨 때문에 글자가 늘어 통과했다(실측). 턴의 앞부분을 **그린 글자에서** 찾는다.
+                if (agent_detail.turns.len > 0) {
+                    const t = agent_detail.turns[agent_detail.turns.len - 1].text;
+                    var take: usize = @min(t.len, 12);
+                    while (take > 0 and (t[take - 1] & 0xC0) == 0x80) take -= 1; // 글자 경계
+                    if (take > 0) {
+                        const needle = t[0..take];
+                        adet_turn_shown = std.mem.count(u8, b.text, needle) >
+                            std.mem.count(u8, adet_before_buf[0..adet_before_len], needle);
+                    }
+                }
+            }
+        }
+        // ── 앞의 읽기가 끝나기 전에 다른 카드를 펴면 (적대적 검증 1·2회차) ────────────
+        //
+        // 백엔드는 **한 번에 하나만** 읽는다. 그 사이 다른 카드를 펴면 제출이 거절되는데, 그것을
+        // 실패로 적으면 그 카드는 **영영 안 열린다**. 그 상태를 손으로는 못 만들어서(읽기가 밀리초다)
+        // 백엔드가 시험용으로 둔 게이트로 첫 읽기를 붙잡는다.
+        // 앞 판정이 펼쳐 둔 카드를 **접는다** — 펼친 카드가 390px 라 뷰포트를 채워, 두 장을 함께
+        // 고를 수가 없다(실측 `seen=1`).
+        if (smoke and spins == 1089 and adet_judgeable) {
+            if (agent_built) |*b| if (agentItemRect(b, adet_expand_index)) |r| {
+                const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                window.postSyntheticMouse(.left_down, cx, cy);
+                window.postSyntheticMouse(.left_up, cx, cy);
+            };
+        }
+        // **접은 카드의 대화는 안 들고 있어야 한다** — 화면에 없는 남의 대화를 프로세스가 계속 쥐고
+        // 있을 이유가 없다(적대적 검증 5회차). 위에서 접었으니 그 직후에 잰다.
+        if (smoke and spins == 1090 and adet_judgeable) {
+            aclosed_judgeable = agent_state.expanded_identity == null;
+            aclosed_turns = agent_detail.turns.len;
+        }
+        if (smoke and spins == 1090 and dock_view == .agent_sessions) {
+            if (agent_detail_be) |*b| b.setTestGate(true);
+        }
+        if (smoke and spins == 1091 and dock_view == .agent_sessions) {
+            if (agent_built) |*b| {
+                const vp = maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree);
+                var idx: usize = 0;
+                var seen: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] != .card) continue;
+                    const rr = agentItemRect(b, idx) orelse continue;
+                    const v = vp orelse break;
+                    // **머리만 보이면 된다.** 앞 판정이 첫 카드를 펼쳐 놓아 그 다음 카드는 통째로는
+                    // 안 들어온다 — 통째를 요구하면 고를 것이 없어 판정이 통째로 안 선다.
+                    if (rr.y < v.y or rr.y + 24 > v.y + v.height) continue;
+                    seen += 1;
+                    // **아래 카드를 먼저 편다.** 그것이 펼쳐져도 **위 카드의 자리는 안 밀리므로**,
+                    // 다음 단계에서 위 카드를 그대로 누를 수 있다(반대로 하면 아래 카드가 화면 밖으로
+                    // 밀려 나가 못 누른다 — 적대적 검증 2회차에서 그렇게 판정이 안 섰다).
+                    if (seen == 2) break;
+                }
+                if (idx < agent_items.items.len) {
+                    if (agentItemRect(b, idx)) |r| {
+                        aretry_judgeable = true;
+                        aretry_expand_index = idx;
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        // 카드 **머리**를 누른다 — 아래쪽은 뷰포트 밖일 수 있다.
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        // **앞 읽기가 게이트에 걸린 채로** 다른 카드를 편다 — 제출이 거절되는 그 순간이다.
+        if (smoke and spins == 1092 and aretry_judgeable) {
+            if (agent_built) |*b| {
+                const vp = maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree);
+                var idx: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] != .card) continue;
+                    const rr = agentItemRect(b, idx) orelse continue;
+                    const v = vp orelse break;
+                    if (rr.y < v.y or rr.y + 24 > v.y + v.height) continue;
+                    break; // 맨 위 카드
+                }
+                if (idx < agent_items.items.len) {
+                    if (agentItemRect(b, idx)) |r| {
+                        aretry_expand_index = idx;
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        // 눌린 직후: 제출이 거절됐는가(게이트가 앞 읽기를 붙잡고 있다). 그리고 게이트를 푼다.
+        if (smoke and spins == 1093 and aretry_judgeable) {
+            aretry_refused = agent_detail_pending;
+            aretry_second_id = agent_detail.identity;
+            if (agent_detail_be) |*b| b.setTestGate(false);
+        }
+        // 풀린 뒤 재시도가 서고 상세가 와야 한다.
+        //
+        // **고정 스핀으로 읽으면 안 된다** — 비동기라 한 스핀 차이로 `loading` 을 읽는다(실측: 결과가
+        // 1098 에 왔는데 1097 에 읽어 세 번 연속 빨갰다). 준비될 때까지 갱신하고, 끝내 안 오면 그대로
+        // `loading` 이 남아 판정이 빨개진다 — 그 성질은 그대로다.
+        if (smoke and spins >= 1095 and spins <= 1102 and aretry_judgeable and aretry_state != .ready) {
+            aretry_state = agent_detail.state;
+            aretry_turns = agent_detail.turns.len;
+            if (agent_built) |*b| {
+                if (agentItemRect(b, aretry_expand_index)) |r| aretry_card_h = r.height;
+            }
+        }
+        // ── 새 스냅샷이 오면 펼침을 버리는가 (적대적 검증 3·4회차) ────────────────────
+        //
+        // 카드 identity 는 **레코드 번호**라 새 훑기가 그 번호를 다시 매긴다. 펼침을 그대로 두면 같은
+        // 번호의 **다른 세션**이 펼쳐진 채로 남고, 날아오던 답까지 그 자리에 붙는다.
+        if (smoke and spins == 1098 and aretry_judgeable and agent_detail.state == .ready) {
+            asnap_judgeable = true;
+            asnap_expanded_before = agent_state.expanded_identity;
+            asnap_req_before = agent_detail.request_id;
+            asnap_applies_before = agent_applies;
+            if (agent_backend) |*b| if (home_dir) |home| {
+                _ = submitAgentScan(agent_counting.allocator(), b, home);
+            };
+        }
+        if (smoke and spins == 1103 and asnap_judgeable) {
+            asnap_expanded_after = agent_state.expanded_identity;
+            asnap_req_after = agent_detail.request_id;
+            asnap_det_identity_after = agent_detail.identity;
+        }
+        // ── 펼친 카드가 있어도 투영이 맞는가 (적대적 검증 6회차) ─────────────────────
+        //
+        // 항목 높이 규칙(`session_dock/scroll.zig`)이 `card.expanded` 로 갈래를 탄다. **Windows 가
+        // 그 필드를 채우기 시작한 지금이 그 규칙이 처음 실전에 쓰이는 자리다** — 규칙과 실제 레이아웃이
+        // 갈리면 끝까지 굴려도 마지막 카드에 못 닿거나 빈 바닥이 보인다. 끝까지 굴려 바닥을 견준다.
+        // **다시 하나 펼친다** — 앞 판정(스냅샷)이 새 목록을 받으며 펼침을 버렸다. 그것이 옳은 동작이라
+        // 여기서는 새로 펼치고 시작한다.
+        if (smoke and spins == 1104 and dock_view == .agent_sessions and agent_state.expanded_identity == null) {
+            if (agent_built) |*b| {
+                const vp = maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree);
+                var idx: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] != .card) continue;
+                    const rr = agentItemRect(b, idx) orelse continue;
+                    const v = vp orelse break;
+                    if (rr.y < v.y or rr.y + 24 > v.y + v.height) continue;
+                    break;
+                }
+                if (idx < agent_items.items.len) {
+                    if (agentItemRect(b, idx)) |r| {
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        if (smoke and spins == 1108 and dock_view == .agent_sessions and agent_state.expanded_identity != null) {
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -60); // 끝까지
+        }
+        if (smoke and spins == 1112 and dock_view == .agent_sessions and agent_state.expanded_identity != null) {
+            aexp_scroll_judgeable = true;
+            aexp_max = agent_scroll_max;
+            aexp_off = agent_scroll.offset_y_px;
+            if (agent_built) |*b| {
+                const last = agent_opts.items.len -| 1;
+                if (agentItemRect(b, last)) |r| aexp_last_bottom = r.y + r.height;
+                if (maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree)) |vp| {
+                    aexp_view_bottom = vp.y + vp.height;
+                }
+                aexp_content_h = b.props.scroll_content_height_px;
+            }
+        }
+        // ── 접은 뒤 도착한 답이 대화를 도로 채우는가 (적대적 검증 9회차) ─────────────
+        //
+        // 게이트로 읽기를 붙잡아 **답이 늦게 오는** 상황을 만든다. 그 사이 접으면, 도착한 답은
+        // 버려져야 한다 — 아무도 안 보는 대화를 들고 있을 이유가 없다.
+        // **맨 위로 되돌린다.** 앞 판정(6회차)이 끝까지 굴려 놓아 카드 머리가 화면 밖이고, 그러면
+        // 누르는 자리가 엉뚱해 접기가 조용히 안 일어난다(실측: `expanded` 가 안 바뀌었다).
+        if (smoke and spins == 1113 and dock_view == .agent_sessions) {
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, 60);
+        }
+        if (smoke and spins == 1115 and dock_view == .agent_sessions) {
+            if (agent_detail_be) |*b| b.setTestGate(true);
+        }
+        if (smoke and spins == 1116 and dock_view == .agent_sessions) {
+            if (agent_built) |*b| {
+                const vp = maru.chrome.components.session_dock.build.scrollTextViewport(b.frame.tree);
+                var idx: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] != .card) continue;
+                    const rr = agentItemRect(b, idx) orelse continue;
+                    const v = vp orelse break;
+                    if (rr.y < v.y or rr.y + 24 > v.y + v.height) continue;
+                    break;
+                }
+                if (idx < agent_items.items.len) {
+                    if (agentItemRect(b, idx)) |r| {
+                        alate_judgeable = true;
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                        // 펼치고(요청은 게이트에 걸린다) — 다음 스핀에 접는다.
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        if (smoke and spins == 1118 and alate_judgeable and agent_state.expanded_identity != null) {
+            if (agent_built) |*b| {
+                // **펼친 카드를 identity 로 찾는다.** `expanded` 필드로 찾으면 그 프레임의 투영이
+                // 아직 안 돌았을 때 못 찾고 조용히 아무것도 안 한다(실측: 접기가 안 일어났다).
+                const open_id = agent_state.expanded_identity.?;
+                var idx: usize = 0;
+                while (idx < agent_items.items.len) : (idx += 1) {
+                    if (agent_items.items[idx] == .card and agent_items.items[idx].card.identity == open_id) break;
+                }
+                if (idx < agent_items.items.len) if (agentItemRect(b, idx)) |r| {
+                    const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                    const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + 12)));
+                    window.postSyntheticMouse(.left_down, cx, cy);
+                    window.postSyntheticMouse(.left_up, cx, cy);
+                };
+            }
+        }
+        if (smoke and spins == 1120 and alate_judgeable) {
+            if (agent_detail_be) |*b| b.setTestGate(false); // 이제 답이 온다
+        }
+        if (smoke and spins == 1126 and alate_judgeable) {
+            alate_turns = agent_detail.turns.len;
+            alate_expanded = agent_state.expanded_identity;
+        }
         if (smoke and spins == 1076 and bdrag_judgeable) {
             if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
                 esc_judgeable = true;
@@ -8089,8 +8581,56 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **옵션도 새 목록을 봐야 한다** — 슬라이스를 안 갱신하면 빈 목록이 그대로 남는다.
                 agent_opts.items = agent_items.items;
                 agent_opts.sort_order = agent_archive.sort;
+                // **새 스냅샷은 카드 번호를 다시 매긴다** — 펼침을 그대로 두면 다른 세션의 상세가
+                // 펼쳐진 채로 남는다(`Expanded` 의 계약). 상세와 identity 를 함께 버린다.
+                agent_state.expanded_identity = null;
+                agent_detail.clear();
+                // **날아오던 답도 무효로 만든다.** 번호를 안 바꾸면 그 답이 도착해 `det` 를 채우고,
+                // 사용자가 **같은 레코드 번호**의 카드를 다시 펼치는 순간 그것이 붙는다 — 새 스냅샷의
+                // 그 번호는 **다른 세션**이다(identity 가 레코드 번호라서 재사용된다). 번호를 올려
+                // 두면 `takeAgentDetail` 이 "늦게 온 답" 으로 버린다(적대적 검증 3회차).
+                agent_detail.identity = 0;
+                agent_detail_requests += 1;
+                agent_detail.request_id = agent_detail_requests;
+                agent_detail_pending = false;
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
+        }
+        // ── 펼친 카드의 상세 받기 (W8.22) ──────────────────────────────────────────────
+        //
+        // **매 프레임 받는다.** 스캔과 같은 규율이다 — 펼친 자리에서 기다리면 그동안 창이 멈춘다.
+        // 늦게 온 답(사용자가 그 사이 다른 카드를 폈다)은 `takeAgentDetail` 이 버린다.
+        // **못 보낸 요청을 다시 보낸다.** 앞의 읽기가 끝나면 자리가 빈다 — 그때 다시 보내지 않으면
+        // 그 카드는 영영 `loading` 이다(적대적 검증 1회차).
+        if (agent_detail_pending) {
+            if (agent_state.expanded_identity) |id| {
+                switch (requestAgentDetail(agent_counting.allocator(), &agent_detail_be, &agent_archive, id, agent_detail.request_id)) {
+                    .sent => {
+                        agent_detail_pending = false;
+                        agent_detail_retries += 1;
+                    },
+                    .busy => {}, // 다음 프레임에 다시
+                    .impossible => {
+                        // **다시 보내도 같다** — 매 프레임 두드리지 않고 그렇게 보인다.
+                        agent_detail_pending = false;
+                        agent_detail.state = .unavailable;
+                    },
+                }
+            } else {
+                // 그 사이 접었다 — 보낼 것이 없다.
+                agent_detail_pending = false;
+            }
+        }
+        if (takeAgentDetail(agent_counting.allocator(), allocator, &agent_detail_be, &agent_detail)) {
+            agent_detail_results += 1;
+            agent_archive.query = agent_search.query.items;
+            var da = std.heap.ArenaAllocator.init(allocator);
+            defer da.deinit();
+            projectAgentItems(da.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+            agent_opts.items = agent_items.items;
+            agent_state.invalidateTree();
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            agent_redraws += 1;
         }
         // 이력이 아직 안 왔고 올 가능성이 있으면 단계 번호를 멈춰 세운다 — 상한을 둔다(이력이
         // 없는 기계에서 영영 안 오면 스모크가 통째로 멈춘다).
@@ -8243,7 +8783,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         agent_archive.query = agent_search.query.items;
                         var qa = std.heap.ArenaAllocator.init(allocator);
                         defer qa.deinit();
-                        projectAgentItems(qa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items) catch {};
+                        projectAgentItems(qa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
                         agent_opts.items = agent_items.items;
                         agent_opts.search = agent_search.query.items;
                         agent_opts.search_preedit = agent_search.preedit.items;
@@ -8954,7 +9494,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                                 var intent_arena = std.heap.ArenaAllocator.init(allocator);
                                 defer intent_arena.deinit();
-                                if (applyAgentIntent(intent_arena.allocator(), agent_arena.allocator(), &agent_archive, &agent_state, &agent_items, intent)) {
+                                // **펼치면 그때 읽는다.** 목록을 훑을 때 전부 읽으면 세션마다 파일을
+                                // 열어야 하고(§2m.86 이 20 초를 잰 그 훑기에 얹힌다), 사용자가 안 펼친
+                                // 카드의 대화까지 프로세스에 들인다.
+                                const was_open = agent_state.expanded_identity;
+                                if (applyAgentIntent(intent_arena.allocator(), agent_arena.allocator(), &agent_archive, &agent_state, &agent_items, intent, agentOpenDetail(&agent_detail, agent_state.expanded_identity))) {
                                     changed = true;
                                     agent_applied_intents += 1;
                                     // **항목이 바뀌면 옵션도 그것을 봐야 한다** — 표면은 `opts.items`
@@ -8963,6 +9507,39 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // **라벨도 함께 옮긴다** — 목록만 뒤집고 이 값을 두면 헤더가
                                     // 거짓말을 한다("Newest first" 라고 적힌 채 오래된 것이 위에).
                                     agent_opts.sort_order = agent_archive.sort;
+                                }
+                                if (agent_state.expanded_identity != was_open) {
+                                    // 접었거나 다른 카드로 옮겼다 — 옛 상세는 이제 남의 것이다.
+                                    agent_detail.clear();
+                                    agent_detail.state = .loading;
+                                    agent_detail_pending = false;
+                                    // **날아오던 답도 함께 무효로 만든다.** 번호를 그대로 두면 접은 뒤에
+                                    // 도착한 답이 `det` 를 도로 채워, **아무도 안 보는 대화**를 프로세스가
+                                    // 계속 든다(적대적 검증 9회차 — 5회차가 세운 성질이 비동기 경로에서
+                                    // 깨져 있었다). 번호를 올리면 "늦게 온 답" 으로 버려진다.
+                                    agent_detail_requests += 1;
+                                    agent_detail.request_id = agent_detail_requests;
+                                    agent_detail.identity = 0;
+                                    if (agent_state.expanded_identity) |id| {
+                                        agent_detail.identity = id;
+                                        // **거절은 실패가 아니다** — 앞의 읽기가 아직 안 끝났다는 뜻이라
+                                        // 나중에 다시 보낸다. 보낼 수 **없는** 것은 그렇게 보인다.
+                                        switch (requestAgentDetail(agent_counting.allocator(), &agent_detail_be, &agent_archive, id, agent_detail.request_id)) {
+                                            .sent => agent_detail.state = .loading,
+                                            .busy => {
+                                                agent_detail_pending = true;
+                                                agent_detail.state = .loading;
+                                            },
+                                            .impossible => agent_detail.state = .unavailable,
+                                        }
+                                    }
+                                    agent_archive.query = agent_search.query.items;
+                                    var pa = std.heap.ArenaAllocator.init(allocator);
+                                    defer pa.deinit();
+                                    projectAgentItems(pa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+                                    agent_opts.items = agent_items.items;
+                                    agent_state.invalidateTree();
+                                    changed = true;
                                 }
                             }
                             if (changed) {
@@ -11002,6 +11579,92 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_top_spill > 0 and dock_cells_outside == 0 and
                 dock_tree_top_px != null and dock_tree_top_px.? < @as(f32, @floatFromInt(geom.tree_content.y)),
         });
+        {
+            // **접은 뒤 온 답을 버렸는가.** 무장은 *"정말 접혀 있다"* 이고, 그때 들고 있는 대화가 0
+            // 이어야 한다. 화면에 안 보인다는 것만으로는 부족하다 — 프로세스가 들고 있으면 든 것이다.
+            const late_ok = alate_judgeable and alate_expanded == null and alate_turns == 0;
+            try stdout.print("agent_detail_late: judgeable={} expanded={?d} turns={d} agent_detail_late_ok={}\n", .{
+                alate_judgeable,
+                alate_expanded,
+                alate_turns,
+                late_ok,
+            });
+        }
+        {
+            // **펼친 카드를 넣고도 끝이 맞는가.** 높이 규칙과 실제 레이아웃이 갈리면 여기가 어긋난다 —
+            // 재는 것은 *"끝까지 굴렸을 때 마지막 항목의 바닥이 뷰포트 바닥에 오는가"* 다.
+            const exp_at_end = aexp_max > 0 and aexp_off == aexp_max;
+            const exp_aligned = aexp_last_bottom >= 0 and aexp_view_bottom >= 0 and
+                @abs(aexp_last_bottom - aexp_view_bottom) < 1.5;
+            const exp_ok = aexp_scroll_judgeable and exp_at_end and exp_aligned;
+            try stdout.print("agent_detail_scroll: judgeable={} content_h={d} off={d}/{d} last_bottom={d} view_bottom={d} agent_detail_scroll_ok={}\n", .{
+                aexp_scroll_judgeable,
+                aexp_content_h,
+                aexp_off,
+                aexp_max,
+                aexp_last_bottom,
+                aexp_view_bottom,
+                exp_ok,
+            });
+        }
+        {
+            // **새 스냅샷이 펼침을 버렸는가.** 무장 조건은 *"펼친 채로 시작했고, 실제로 새 목록이
+            // 적용됐다"* 다 — 훑기가 안 끝났으면 잴 것이 없다.
+            const snap_applied = agent_applies > asnap_applies_before;
+            const snap_ok = asnap_judgeable and snap_applied and asnap_expanded_before != null and
+                asnap_expanded_after == null and asnap_det_identity_after == 0 and
+                asnap_req_after > asnap_req_before;
+            try stdout.print("agent_detail_snapshot: judgeable={} applied={} expanded {?d}->{?d} req {d}->{d} det_id={d} agent_detail_snapshot_ok={}\n", .{
+                asnap_judgeable,
+                snap_applied,
+                asnap_expanded_before,
+                asnap_expanded_after,
+                asnap_req_before,
+                asnap_req_after,
+                asnap_det_identity_after,
+                snap_ok,
+            });
+        }
+        {
+            // **거절당한 요청이 다시 서는가.** 무장 조건은 *"실제로 거절됐다"*(`refused`)다 — 게이트가
+            // 안 걸렸으면 그냥 성공했을 테고, 그때 초록은 아무 말도 안 한 것이다.
+            const retry_ok = aretry_judgeable and aretry_refused and agent_detail_retries > 0 and
+                aretry_state == .ready and aretry_turns > 0 and aretry_card_h > 100;
+            try stdout.print("agent_detail_retry: judgeable={} refused={} retries={d} state={s} turns={d} card_h={d} agent_detail_retry_ok={}\n", .{
+                aretry_judgeable,
+                aretry_refused,
+                agent_detail_retries,
+                @tagName(aretry_state),
+                aretry_turns,
+                aretry_card_h,
+                retry_ok,
+            });
+        }
+        {
+            // **펼치면 정말 열리는가.** 상태만 보면 속 빈다 — `expanded` 를 붙여 놓고 그리지 않아도
+            // `ready` 다. 그래서 **그 카드의 높이가 자랐는지**와 **그린 글자가 늘었는지**를 함께 본다
+            // (대화 턴이 그 자리에 실제로 들어갔다는 뜻).
+            const adet_grew = adet_card_h_before > 0 and adet_card_h_after > adet_card_h_before + 1.0;
+            const adet_more_text = adet_text_after > adet_text_before;
+            // 접으면 대화를 놓는다 — 무장은 "정말 접혔다" 이고, 그때 들고 있는 턴이 0 이어야 한다.
+            const adet_closed_ok = aclosed_judgeable and aclosed_turns == 0;
+            const adet_ok = adet_judgeable and adet_state_after == .ready and adet_turns > 0 and
+                adet_grew and adet_more_text and adet_turn_shown and adet_closed_ok;
+            try stdout.print("agent_detail: judgeable={} requests={d} results={d} state={s} turns={d}(shown={}) card_h {d}->{d} text {d}->{d} closed_turns={d} agent_detail_ok={}\n", .{
+                adet_judgeable,
+                agent_detail_requests,
+                agent_detail_results,
+                @tagName(adet_state_after),
+                adet_turns,
+                adet_turn_shown,
+                adet_card_h_before,
+                adet_card_h_after,
+                adet_text_before,
+                adet_text_after,
+                aclosed_turns,
+                adet_ok,
+            });
+        }
         {
             // **thumb 밖을 누르면 그 자리로 가는가.** 재는 것은 *"누른 자리에 thumb 가운데가 온다"* 다 —
             // `offsetForTrackClick` 의 계약이 그것이고(그 함수 doc: 이후 드래그와 같은 매핑을 쓰므로

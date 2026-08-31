@@ -7428,6 +7428,202 @@ up 을 잃은 뒤 들어오는 down 이 삼켜지는 것(도크가 잠깐 안 �
   색이 안 변한다.
 - **키보드(Page/Home/End)**·**SCM 목록**(계획서 W8.22).
 
+### 2m.97 카드를 펼치면 대화가 뜬다 — 그 길에서 **패닉 하나와 할당자 어긋남 하나** (W8.22, 실측 2026-08-31)
+
+§2m.93 1회차가 보고만 하고 넘어간 것을 갚는다: Windows 는 `Item.card.expanded` 를 **아무 데서도 안
+채우고** 있었다. 셰브런은 그려지고 눌리고 상태(`expanded_identity`)까지 바뀌는데 **화면은 그대로**였다 —
+§2m.31 이 이름 붙인 *"그려지는데 안 눌리는"* 의 짝, **눌리는데 안 그려지는** 죽은 컨트롤이다.
+
+## 읽는 것은 우리가 만들지 않는다
+
+상세는 파일 꼬리를 읽어 파싱해야 하는데, 그 길에는 **지켜야 할 계약**이 있다:
+
+> Detail text crosses the worker/main boundary only after the repository-wide sensitive-content guard
+> and PII anonymizer. Ambiguous sensitive text is replaced rather than partially shown.
+> — `agent_session_archive_detail_backend.zig`
+
+여기서 직접 열어 파싱하면 그 가드를 **우회한다**. 그래서 스캔이 쓰는 것과 같은 폴더의 그 백엔드를
+그대로 쓴다(§3.4 가 "OS 중립인데 macOS 폴더에 있다" 로 정리해 둔 파일들이다). Windows 에서 컴파일도
+된다 — 실측으로 확인하고 붙였다.
+
+## 붙이자 **그 자리에서 죽었다**
+
+```text
+thread 63988 panic: reached unreachable code
+std/Io/Threaded.zig:9944: .PENDING => unreachable, // unrecoverable: wrong File nonblocking flag
+  … readSource → agent_session_archive_detail_backend.zig:204 readPositionalAll
+```
+
+**같은 결함이 옆 파일에 이미 있었고 고쳐져 있었다**(2026-08-25, 스캔 백엔드). std 가 Windows 에서
+`follow_symlinks = false` 로 열면 핸들을 **비동기**로 만들면서 플래그는 `nonblocking = false` 로 준다 —
+그러면 positional read 가 동기 분기로 가 `PENDING` 을 `unreachable` 로 받는다. 스캔 쪽은 실제 핸들 모드에
+플래그를 맞춰(`nonblocking = true`) 비동기 분기로 보내고 있었고, **상세 백엔드는 그 규약을 안 쓰고 있었다.**
+
+두 벌로 적히지 않게 `positionalReadable` 로 뽑아 둘이 같은 것을 쓴다 — 설명도 그 함수로 옮겼다.
+
+## 할당자가 어긋나 계량이 언더플로했다
+
+그 다음 실행은 이렇게 죽었다:
+
+```text
+panic: integer overflow   src/main.zig:  self.live = self.live + delta_add - delta_sub;
+```
+
+요청의 `Source.source_path` 를 **일반 할당자**로 만들어 보냈는데, worker 는 그것을 자기 것으로 삼아
+**백엔드를 만든 할당자**(계량 allocator)로 해제한다. 안 준 것을 뺀 계량이 0 밑으로 내려갔다. 결과를
+받는 쪽도 같다 — `Result` 는 백엔드 할당자로 돌려주고, 화면이 오래 들 복사본만 별도 arena 에 둔다.
+두 자리 모두 함수 doc 에 그 이유를 적었다.
+
+## 화면과 상태가 갈리지 않게
+
+- **펼침은 최대 하나**(중립 `Props.expanded_identity` 의 계약)라 상세도 하나만 든다.
+- **늦게 온 답은 버린다** — 그 사이 다른 카드를 폈으면 그 대화는 남의 것이다(`request_id` 대조).
+- **새 스냅샷이 오면 펼침을 버린다.** 카드 identity 는 레코드 번호이고 새 훑기가 그 번호를 다시
+  매긴다 — 안 버리면 **다른 세션의 상세**가 펼쳐진 채로 남는다. 중립 타입이 그 규칙을 적어 뒀다
+  (`Expanded`: *"snapshot 교체로 … 바뀌면 detail/action capture 와 함께 atomic 하게 지운다"*).
+- 화면에 붙일 때도 `expanded_identity` 와 상세의 identity 가 **같을 때만** 붙인다(`agentOpenDetail`).
+
+## 판정 — **상태가 아니라 화면**을 재야 했다
+
+```text
+agent_detail: judgeable=true requests=2 results=2 state=ready turns=3(shown=true) card_h 86->390 text 646->907 agent_detail_ok=true
+```
+
+세 번 고쳐 세웠다. 그 과정이 판정의 성질을 그대로 보여 준다:
+
+1. **`state == .ready and turns > 0`** — 둘 다 **내 상태**다. 대화를 안 실어도 초록이었다.
+2. **그린 글자가 늘었나** — 빈 대화를 실어도 펼친 카드의 라벨("Recent conversation" 등) 때문에 늘어
+   여전히 초록이었다(`text 646->725`).
+3. **턴의 앞부분이 그린 글자에 새로 들어왔나** — 처음엔 첫 턴을 썼는데 **카드 요약과 같은 글자**라
+   접힌 상태에서도 이미 있었다. 이제 **마지막 턴**을 쓰고, 펼치기 **전후의 등장 횟수**를 견준다.
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| 상세를 아예 안 붙인다(**옛 동작**) | `card_h 86->86`, `text` 그대로 |
+| 대화를 안 싣는다(`turns = &.{}`) | `shown=false` — 카드는 자라는데 **대화가 없다** |
+
+## 아직 아닌 것
+
+- **버튼 셋은 죽여 뒀다**(`resume`·`reveal`·`focus live`). 살려 두면 눌리는데 아무 일도 안 나는 —
+  이 슬라이스가 갚은 바로 그 — 죽은 컨트롤이 된다.
+- **`stale`·`unavailable` 갈래는 실기로 못 봤다.** 배선은 있고(백엔드가 inode·device 로 거절한다)
+  스모크는 정상 파일만 연다.
+- **가상화가 없어** 펼친 카드가 길어도 목록 전체를 매 프레임 조립한다(§2m.92 의 그 한계 그대로).
+
+### 2m.98 카드 상세 적대적 검증 5회 — **거절·재사용되는 번호·닫은 뒤에 남는 대화** (실측 2026-08-31)
+
+§2m.97 이 초록으로 끝난 뒤 다섯 번 두들겼다. **셋이 결함이었고 둘은 판정이 그 길을 안 밟은 것**이었다.
+
+## 1회차 — 거절당한 요청이 **영영 안 열렸다**
+
+백엔드는 **한 번에 하나만** 읽는다. 빨리 두 장을 펼치면 둘째 제출이 거절되는데, 그것을 실패로 적어
+`state = .unavailable` 로 두고 있었다. 그러면 그 카드는 **다시는 안 열린다**. 그 함수 doc 이 나머지를
+이미 정해 뒀다:
+
+> One in-flight detail read is intentionally enough: a later disclosure can show loading immediately
+> and **retry** after this bounded read publishes.
+
+거절은 실패가 아니라 *"자리가 아직 안 비었다"* 다. `pending` 을 세우고 자리가 비면 다시 보낸다.
+
+## 2회차 — 그 길을 판정이 **안 밟았다**(그리고 두 번 헛디뎠다)
+
+읽기가 밀리초라 손으로는 그 상태를 못 만든다. 백엔드가 시험용으로 둔 게이트(`setTestGate`)로 첫 읽기를
+붙잡아 만들었다. 판정을 세우며 두 번 헛디뎠고, 둘 다 **화면 기하** 때문이었다:
+
+- 펼친 카드가 390px 라 뷰포트(307px)를 채워 **두 장을 함께 고를 수가 없었다**(`seen=1`) → 앞 판정이
+  펼쳐 둔 카드를 먼저 **접는다**.
+- 아래 카드를 나중에 누르려 하면 앞 카드가 펼쳐지며 **화면 밖으로 밀려난다** → **아래를 먼저** 펴고
+  위 카드로 거절을 만든다(위 카드의 자리는 안 밀린다).
+
+```text
+agent_detail_retry: judgeable=true refused=true retries=1 state=ready turns=3 card_h=390 ok=true
+```
+
+무장 조건이 `refused` 다 — 게이트가 안 걸렸으면 그냥 성공했을 테고, 그때 초록은 아무 말도 안 한 것이다.
+
+## 3회차 — 새 스냅샷이 와도 **날아오던 답의 번호를 안 바꿨다**
+
+펼침과 상세는 지우는데 `request_id` 는 그대로였다. 그러면 in-flight 답이 도착해 `det` 를 채우고,
+사용자가 **같은 레코드 번호**의 카드를 다시 펼치는 순간 그것이 붙는다 — 새 스냅샷의 그 번호는
+**다른 세션**이다(identity 가 레코드 번호라 재사용된다). 번호를 올려 두면 "늦게 온 답" 으로 버려진다.
+
+## 4회차 — 그 자리도 판정이 없었다
+
+새로고침을 제출해 스냅샷 교체를 만들고 잰다:
+
+```text
+agent_detail_snapshot: judgeable=true applied=true expanded 9->null req 6->7 det_id=0 ok=true
+```
+
+번호를 안 올리는 뮤턴트가 `req 4->4 det_id=9` 로 빨개진다 — **옛 신원이 살아남는다**.
+
+## 5회차 — **접은 카드의 대화를 계속 들고 있었다**
+
+접으면 화면에서 사라지지만 프로세스는 그 대화를 쥔 채였다. 화면에 없는 남의 대화를 들고 있을 이유가
+없다(위생이자 프라이버시다). 접을 때 함께 놓고, 그 사실을 잰다 — 뮤턴트에서 `closed_turns=3` 이다.
+
+> 이 저장소의 앱은 `smp_allocator` 를 쓴다(누수 검출이 없다). 그래서 이런 종류는 **상태로** 재야 한다.
+
+## 남은 자리
+
+- **`stale`·`unavailable` 갈래는 실기로 못 봤다** — 배선은 있고 스모크는 정상 파일만 연다.
+- **버튼 셋**(resume·reveal·focus live)은 여전히 죽여 뒀다(§2m.97).
+
+### 2m.99 카드 상세 적대적 검증 6~10회 — **비동기의 꼬리들** (실측 2026-08-31)
+
+§2m.98 의 다섯 번에 이어 다섯 번 더 두들겼다. 이번에 나온 것은 전부 **비동기라서 생기는 꼬리**다.
+
+## 6회차 — 펼친 카드를 넣고도 스크롤 투영이 맞는가
+
+§2m.93 1회차가 고친 높이 규칙(`card.expanded` 하나로 갈래를 탄다)이 **이제야 실전에 쓰인다** —
+그때까지 Windows 는 그 필드를 안 채웠기 때문이다. 펼친 채로 끝까지 굴려 바닥을 견줬다:
+
+```text
+agent_detail_scroll: content_h=878 off=571/571 last_bottom=517 view_bottom=517 ok=true
+```
+
+펼침 높이를 모르는 뮤턴트는 `content_h=574 last_bottom=821 > 517` — **마지막 카드에 못 닿는다.**
+
+## 7회차 — 보낼 수 **없는** 요청을 매 프레임 영원히 다시 보냈다
+
+§2m.98 1회차가 세운 재시도가 *"못 보냈다"* 를 하나로 접고 있었다. **백엔드가 없거나 카드 번호가
+범위 밖이면 다시 보내도 같은데**, 그것까지 재시도로 돌려 매 프레임 경로를 복사했다 버렸다. 셋으로
+가른다 — `sent`·`busy`(나중에 다시)·`impossible`(그렇게 보인다).
+
+## 8회차 — 거른 목록에서 펼치면 엉뚱한 세션이 열리는가 → **구조적으로 아니다**
+
+identity 는 `view_items[i].record_index` 이고 요청은 `archive.cards[identity]` 를 읽는다. 검색은 목록만
+줄이고 정렬은 순서만 뒤집으며, 둘 다 `record_index` 를 그대로 나른다 — **한 색인 공간**이라 갈릴 자리가
+없다(두 자리를 읽어 확인). 억지 판정을 만들지 않고 **재현 안 됨으로 남긴다.**
+
+## 9회차 — **접은 뒤 도착한 답이 대화를 도로 채웠다**
+
+§2m.98 5회차가 세운 성질(*"접은 카드의 대화는 안 들고 있다"*)이 **비동기 경로에서 깨져 있었다**.
+접을 때 `clear()` 는 했지만 `request_id` 를 안 올려, 날아오던 답이 `det` 를 도로 채웠다. 화면에는
+안 보이지만 **프로세스는 남의 대화를 들고 있다** — 5회차가 위생·프라이버시로 세운 바로 그 자리다.
+
+게이트로 답을 늦춰 그 상황을 만들고 잰다:
+
+```text
+agent_detail_late: expanded=null turns=0 ok=true      (뮤턴트: expanded=null turns=3)
+```
+
+## 10회차 — 앞선 판정들을 망가뜨리지 않았는가
+
+판정이 63 개로 늘었고 **빨강 0**, 세 번 돌려 같다. 그 과정에서 판정 자체의 함정을 셋 더 지났다 —
+전부 **화면 기하와 비동기 시점**이다:
+
+- **고정 스핀으로 비동기 결과를 읽으면 안 된다.** 결과가 1098 에 오는데 1097 에 읽어 세 번 연속
+  빨갰다 — 준비될 때까지 갱신하도록 바꿨다(안 오면 여전히 빨갛다).
+- **앞 단계가 굴려 놓은 자리에서 누르면 조용히 아무 일도 안 난다.** 카드 머리가 화면 밖이면 클릭이
+  엉뚱한 데로 간다 — 시작 전에 맨 위로 되돌린다.
+- **`expanded` 필드로 카드를 찾으면 그 프레임의 투영이 아직 안 돌았을 때 못 찾는다** — identity 로 찾는다.
+
+## 남은 자리
+
+- **`stale`·`unavailable` 갈래는 여전히 실기로 못 봤다**(§2m.97 의 그 한계 그대로).
+- **`impossible` 갈래도 못 봤다** — 백엔드 생성 실패를 스모크가 만들 수 없다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

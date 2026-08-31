@@ -811,6 +811,40 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs),
   [deployments와 statuses](https://docs.github.com/en/rest/deployments/deployments)다.
 
+  bounded GitHub API transport의 OS 중립 요청 SSOT는
+  `release_adapter_github_transport.zig`다. 호출자는 임의 URL, HTTP method, header, `jq` 식을 문자열로 넘기지 않고
+  `repository`, `workflow_run`, `draft_release`, `published_release`, `tag_ref`, `annotated_tag`, `environment`,
+  `attempt_jobs`, `deployments`, `deployment_statuses`의 닫힌 request kind와 앞 단계에서 검증한 typed ID/tag/SHA만 넘긴다.
+  각 kind는 exact `repos/ohah/maru/...` REST endpoint, `GET`, `github.com`,
+  `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`과 고정 query를 만든다. 숫자는 canonical
+  nonzero decimal, tag와 SHA는 공통 identity parser를 다시 통과해야 하며 slash, `..`, `%`, query/fragment를 caller가
+  주입할 자리는 없다. collection endpoint는 `per_page=100`과 `gh api --paginate --slurp`를 항상 함께 쓰며, `gh`가
+  `--slurp`와 `--jq` 동시 사용을 거부하므로 jq/template을 넘기지 않는다. 대신 transport가 bounded outer page array를
+  파싱해 array page는 한 array로, jobs page는 모든 page의 동일 `total_count`가 실제 합친 `jobs` 개수와도 정확히 같은
+  object 하나로 직렬화한다. transport는 합쳐진 root가
+  `release_adapter_github_json.max_response_bytes` 이하인 완전한 JSON 하나일 때만 반환하고, endpoint별 component parser가
+  기존 `max_collection_entries=100`을 적용한다. 따라서 pagination을 생략한 첫 page, 101번째 항목, 두 root/trailing bytes는
+  component 권위로 승격되지 않는다. transport가 JSON 의미와 collection 상한을 두 번째로 해석하지 않는다.
+
+  macOS 실행 leaf는 caller PATH나 shell을 쓰지 않고 workflow가 넘긴 absolute GitHub CLI executable과 transport가 만든
+  fixed argv만 `bounded_process.zig`에 준다. 인증은 GitHub Actions가 step의 `GH_TOKEN`으로 제공하며 token은 option/header/argv,
+  stdout/stderr, summary에 넣지 않는다. child 환경은 inherited environment가 아니라 exact `GH_TOKEN`과
+  `GH_PROMPT_DISABLED=1`만으로 다시 만든다. JSON 권위 입력은 bounded stdout만이며 stderr는 `/dev/null`로 분리한다. 둘을
+  합치면 성공한 `gh`의 경고 한 줄도 JSON에 섞이고, 반대로 진단 text를 REST bytes로 오인할 수 있기 때문이다. stdin
+  `/dev/null`, positive monotonic deadline, process-group kill/reap은 기존 bounded process 규율을 재사용한다. 실행 결과는
+  executor에 제공한 bounded stdout 버퍼에서 빌린 slice만 인정하며 외부 storage를 capture로 승격하지 않는다.
+  missing/empty/control/NUL/4 KiB 초과 token, relative executable, unknown request,
+  nonzero exit, timeout, output cap은 terminal failure다. transport 단독 성공은 고정 호출이 낸 REST-shaped bytes를 bounded하게
+  획득했다는 뜻이며, caller가 넘긴 executable pathname의 공급망 provenance나 release workflow 배선을 혼자 증명하지 않는다.
+  두 권위가 후속 배선에서 함께 검증된 뒤에만 이 bytes를 authenticated GitHub observation으로 승격한다. `GH_TOKEN` 환경 전달과
+  pagination flag의 근거는 GitHub의
+  [workflow에서 GitHub CLI 사용](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-github-cli)과
+  [`gh api` 명세](https://cli.github.com/manual/gh_api)다.
+  focused gate `test-session-host-release-adapter-github-transport`는 exact argv와 clean environment, 모든 request kind,
+  pagination flags/직접 flattening과 count 완결성, `--slurp`+`--jq` 금지, token 비노출, malformed identity,
+  supplied-buffer provenance, cap/timeout/child failure를
+  Debug·ReleaseFast에서 검증한다.
+
   A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
   default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과
   동일 `test_uuid`를 결속한다. manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이

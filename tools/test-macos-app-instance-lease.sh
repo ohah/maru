@@ -15,7 +15,7 @@ case "$app_executable" in
         ;;
 esac
 
-test_root=$(mktemp -d "${TMPDIR:-/tmp}/maru-app-instance-lease.XXXXXX")
+test_root=$(mktemp -d "/tmp/maru-app-instance-lease.XXXXXX")
 winner_pid=
 cleanup() {
     if [ -n "$winner_pid" ] && kill -0 "$winner_pid" 2>/dev/null; then
@@ -27,9 +27,10 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 test_home=$test_root/home
+session_root=$test_root/session-host-root
 run_dir=$test_root/run
 workspace_dir="$test_home/Library/Application Support/maru"
-mkdir -p "$workspace_dir" "$run_dir" "$test_root/config" "$test_root/cache"
+mkdir -p "$workspace_dir" "$run_dir" "$test_root/config" "$test_root/cache" "$session_root"
 lock_path="$test_home/Library/Application Support/maru/workspace.v1.lock"
 printf 'maru.workspace.v1\nsentinel=true\n' >"$workspace_dir/workspace.v1"
 printf '# sentinel-config\nsession.keep-alive-after-quit = false\n' >"$test_root/config/config.toml"
@@ -43,6 +44,7 @@ launch() {
         cd "$run_dir"
         HOME="$test_home" \
         CFFIXED_USER_HOME="$test_home" \
+        MARU_SESSION_HOST_ROOT="$session_root" \
         XDG_CONFIG_HOME="$test_root/config" \
         XDG_CACHE_HOME="$test_root/cache" \
         MARU_CONFIG="$test_root/config/config.toml" \
@@ -61,6 +63,7 @@ launch() {
     exec env \
         HOME="$test_home" \
         CFFIXED_USER_HOME="$test_home" \
+        MARU_SESSION_HOST_ROOT="$session_root" \
         XDG_CONFIG_HOME="$test_root/config" \
         XDG_CACHE_HOME="$test_root/cache" \
         MARU_CONFIG="$test_root/config/config.toml" \

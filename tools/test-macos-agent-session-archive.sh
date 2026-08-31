@@ -9,6 +9,8 @@ app_path=${1:?Maru app executable path is required}
 # Resolve once here instead of relying on the build runner's current directory.
 workspace=$(pwd -P)
 root="$workspace/zig-out/maru-agent-session-archive-smoke"
+session_root=$(mktemp -d "/tmp/maru-agent-session-archive.XXXXXX")
+trap 'rm -rf "$session_root"' EXIT HUP INT TERM
 home="$root/home"
 bin="$root/bin"
 marker="$root/fake-provider.verdict"
@@ -114,6 +116,7 @@ run_scenario() {
     esac
     HOME="$home" \
     CFFIXED_USER_HOME="$home" \
+    MARU_SESSION_HOST_ROOT="$session_root" \
     MARU_CONFIG="$font_config" \
     MARU_MACOS_APP_SMOKE_MS=15000 \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE=1 \

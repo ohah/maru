@@ -7444,6 +7444,63 @@ test "Zig 는 플랫폼 접근성 어휘를 갖지 않는다 — 투영은 adapt
 //
 // 새 도크를 더하면 여기서 실패한다. 그때 할 일은 목록에 파일을 더하는 것이거나(스크롤 목록이면),
 // 왜 뷰포트가 없어도 되는지를 적는 것이다(고정 밴드면 — 사이드바 검색 줄이 그런 경우다).
+// **macOS 에서만 만들어지는 게이트는 `test-macos-only` 에도 등록해야 한다.**
+//
+// `mise run check` 를 도는 CI 잡은 `ubuntu-latest` 라 `if (target.result.os.tag == .macos)` 안의
+// 아티팩트를 **컴파일조차 하지 않는다.** 그래서 그 게이트들은 `zig build test` 에 붙어 있어도 CI
+// 어디에서도 안 돌고, 개발자 로컬에서 `mise run check` 를 돌린 사람만 본다.
+//
+// **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가 이미지
+// 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로 깨졌는데 CI 는 계속
+// 초록이었다.
+//
+// 그래서 macOS 잡이 `zig build test-macos-only` 로 그것들을 돈다. 등록을 빠뜨리면 그 게이트는 **다시
+// CI 밖**이 되므로, 여기서 짝이 맞는지 센다.
+test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(allocator, "build.zig");
+    defer allocator.free(source);
+
+    var in_macos: usize = 0; // 0 = 밖, 그 외 = 블록이 시작한 중괄호 깊이 + 1
+    var depth: usize = 0;
+    var paired: usize = 0;
+    var unpaired: usize = 0;
+    var pending_pair = false;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null and
+            std.mem.indexOf(u8, line, "if (") != null)
+        {
+            in_macos = depth + 1;
+        }
+        for (line) |c| {
+            if (c == '{') depth += 1;
+            if (c == '}' and depth > 0) depth -= 1;
+        }
+        if (in_macos != 0 and depth < in_macos) in_macos = 0;
+
+        if (pending_pair) {
+            if (std.mem.indexOf(u8, line, "macos_only_test_step.dependOn(") != null) {
+                paired += 1;
+            } else {
+                unpaired += 1;
+            }
+            pending_pair = false;
+        }
+        if (in_macos != 0 and std.mem.indexOf(u8, line, "test_step.dependOn(") != null and
+            std.mem.indexOf(u8, line, "macos_only_test_step") == null)
+        {
+            pending_pair = true;
+        }
+    }
+    if (pending_pair) unpaired += 1;
+
+    // 짝이 안 맞는 것이 하나라도 있으면 그 게이트는 CI 밖이다.
+    try std.testing.expectEqual(@as(usize, 0), unpaired);
+    // **0개를 세고도 초록이 되지 않게** — 블록 탐지가 깨지면 `paired` 가 0 이 된다.
+    try std.testing.expect(paired >= 13);
+}
+
 test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
     const allocator = std.testing.allocator;
 

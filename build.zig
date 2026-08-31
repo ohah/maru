@@ -2951,6 +2951,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
 
+    // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`
+    // 라 `if (target.result.os.tag == .macos)` 안의 아티팩트를 **컴파일조차 하지 않는다** — 그 게이트
+    // 열셋은 CI 어디에서도 안 돌고 개발자 로컬에만 있었다(`zig build test` 에 붙는 스텝 65개 중 20%).
+    //
+    // **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
+    // 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로 깨졌는데,
+    // CI 는 계속 초록이었다. 로컬에서 `mise run check` 를 돌린 사람만 봤다.
+    //
+    // macOS 잡에서 `zig build test-macos-only` 하나로 그 열셋을 돈다. **`test` 전체를 macOS 에서
+    // 다시 돌리지 않는 이유**는 나머지 52개가 ubuntu `check` 잡에서 이미 돌기 때문이다 — 같은 일을
+    // 두 번 하면 macOS 러너 시간만 먹는다.
+    //
+    // 등록을 빠뜨리면 그 게이트는 다시 CI 밖이 된다. `tests/boundary/imports.zig` 가 짝을 센다.
+    const macos_only_test_step = b.step(
+        "test-macos-only",
+        "Run the gates that only exist on macOS (the ubuntu check job cannot build them)",
+    );
+
     // **파일 트리 백엔드는 모든 호스트에서 테스트한다**(W8.1, 계약 §2m). 이 파일은
     // `src/platform/macos/` 에 있지만 macOS 프레임워크를 하나도 안 쓴다 — 순수 Zig + std 이고
     // 갈리는 것은 리프 열기 한 자리(`openLeafNoFollow`)뿐이다. 그런데 테스트가 `app_session` 모듈에
@@ -3325,6 +3343,7 @@ pub fn build(b: *std.Build) void {
         const run_file_panel_termination_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_file_panel_termination_policy_tests.addFileArg(file_panel_termination_policy_test_bin);
         test_step.dependOn(&run_file_panel_termination_policy_tests.step);
+        macos_only_test_step.dependOn(&run_file_panel_termination_policy_tests.step);
 
         // 종료 단계 계측은 실제 종료(앱 죽이기) 없이는 재현할 수 없어서, 시간 측정은 host가 하고 모으고
         // 표현하는 규칙만 순수 타입으로 떼어 여기서 증명한다(요약 필드 이름·순서·반올림 고정).
@@ -3342,6 +3361,7 @@ pub fn build(b: *std.Build) void {
         const run_termination_timing_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_termination_timing_tests.addFileArg(termination_timing_test_bin);
         test_step.dependOn(&run_termination_timing_tests.step);
+        macos_only_test_step.dependOn(&run_termination_timing_tests.step);
 
         // 종료 중 창을 미리 숨기면 isKeyWindow가 전부 false가 되어 workspace 활성 창 마커가 사라진다. 실제 숨김은
         // 앱을 죽여야 재현되므로 판정 규칙만 순수 타입으로 떼어 여기서 고정한다(같은 회귀의 재발 방지).
@@ -3359,6 +3379,7 @@ pub fn build(b: *std.Build) void {
         const run_termination_window_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_termination_window_policy_tests.addFileArg(termination_window_policy_test_bin);
         test_step.dependOn(&run_termination_window_policy_tests.step);
+        macos_only_test_step.dependOn(&run_termination_window_policy_tests.step);
 
         const web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{
             "xcrun",
@@ -3375,6 +3396,7 @@ pub fn build(b: *std.Build) void {
         const run_web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_web_panel_hit_test_geometry_tests.addFileArg(web_panel_hit_test_geometry_test_bin);
         test_step.dependOn(&run_web_panel_hit_test_geometry_tests.step);
+        macos_only_test_step.dependOn(&run_web_panel_hit_test_geometry_tests.step);
 
         const browser_result_registry_tests = b.addSystemCommand(&.{
             "xcrun",
@@ -3391,6 +3413,7 @@ pub fn build(b: *std.Build) void {
         const run_browser_result_registry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_browser_result_registry_tests.addFileArg(browser_result_registry_test_bin);
         test_step.dependOn(&run_browser_result_registry_tests.step);
+        macos_only_test_step.dependOn(&run_browser_result_registry_tests.step);
 
         const control_socket_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -3403,6 +3426,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_control_socket_tests = b.addRunArtifact(control_socket_tests);
         test_step.dependOn(&run_control_socket_tests.step);
+        macos_only_test_step.dependOn(&run_control_socket_tests.step);
         // control_server.zig(Track C A2b)는 앱 전역 라이브 컨트롤 소켓 + accept 스레드 + 메인 marshal 큐다.
         // control_socket과 같은 이유로 **macOS에서만** test step에 배선한다(실 unix socket·스레드·peer-cred).
         const control_server_tests = addProjectTest(b, .{
@@ -3416,6 +3440,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_control_server_tests = b.addRunArtifact(control_server_tests);
         test_step.dependOn(&run_control_server_tests.step);
+        macos_only_test_step.dependOn(&run_control_server_tests.step);
     }
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
@@ -5298,6 +5323,7 @@ pub fn build(b: *std.Build) void {
             run_retention_app_tests.setCwd(b.path("."));
             session_host_config_override_retention_step.dependOn(&run_retention_app_tests.step);
             test_step.dependOn(&run_retention_app_tests.step);
+            macos_only_test_step.dependOn(&run_retention_app_tests.step);
         }
     }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
@@ -12682,6 +12708,7 @@ pub fn build(b: *std.Build) void {
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);
+            macos_only_test_step.dependOn(&run_checkpoint_file_tests.step);
 
             const checkpoint_file_boundary_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -12715,6 +12742,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_turn_authority_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_turn_authority_tests.step);
+        macos_only_test_step.dependOn(&run_external_turn_authority_tests.step);
         session_host_step.dependOn(&run_external_turn_authority_tests.step);
 
         // The stable external-pump storage is intentionally not re-exported by the session_host
@@ -12736,6 +12764,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_pump_storage_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_pump_storage_tests.step);
+        macos_only_test_step.dependOn(&run_external_pump_storage_tests.step);
         session_host_step.dependOn(&run_external_pump_storage_tests.step);
 
         // `zig build ... -- --test-filter` passes arguments to a run artifact and does not
@@ -13695,6 +13724,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_rx_turn_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_rx_turn_tests.step);
+        macos_only_test_step.dependOn(&run_external_rx_turn_tests.step);
         session_host_step.dependOn(&run_external_rx_turn_tests.step);
 
         // C3 collector fixtures inject authority/read callbacks without making the transport-only
@@ -13715,6 +13745,7 @@ pub fn build(b: *std.Build) void {
         );
         run_external_rx_read_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_rx_read_tests.step);
+        macos_only_test_step.dependOn(&run_external_rx_read_tests.step);
         session_host_step.dependOn(&run_external_rx_read_tests.step);
     }
 

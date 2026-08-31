@@ -196,7 +196,12 @@ jobs:
     # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
     # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
     # 여유를 두되 무한정 매달리지는 않게 한다.
-    timeout-minutes: 25
+    #
+    # 25 → 32. macOS 전용 게이트 열셋(아래 "Run the gates that only exist on macOS")이 붙었다 —
+    # 웜 캐시 로컬 실측 2분 38초. 콜드 러너는 그 열셋을 처음 컴파일하므로 더 들고, 같은 비율로 여유를
+    # 둔다. **이 잡이 이 저장소에서 macOS 게이트를 보는 유일한 자리**라 시간이 모자라 잘리면 그 축이
+    # 통째로 안 돌게 되므로 넉넉히 잡는다.
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -275,6 +280,18 @@ jobs:
       # socket/WebKit flaky에 묻히지 않게 격리하는 전용 게이트이고(위 주석), 이 스텝은 전수 그물이다.
       - name: Run the macOS AppSession test suite
         run: mise run test-macos-app-host-abi
+      # **`mise run check` 를 도는 위 `check` job 은 ubuntu 다.** 그래서 `build.zig` 의
+      # `if (target.result.os.tag == .macos)` 안에서 만들어지는 게이트 열셋은 **컴파일조차 되지 않아**
+      # CI 어디에서도 안 돌았다 — `zig build test` 에 붙는 스텝 65개 중 20%가 개발자 로컬에만 있었다.
+      #
+      # **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
+      # 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로
+      # 깨졌는데도 CI 는 계속 초록이었고, 로컬에서 `mise run check` 를 돌린 사람만 봤다.
+      #
+      # `test` 전체를 여기서 다시 돌리지 않는다 — 나머지 52개는 ubuntu `check` 가 이미 돌고, 겹쳐
+      # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
+      - name: Run the gates that only exist on macOS
+        run: zig build test-macos-only
       # Swift 앱 호스트가 링크하는 **바로 그 정적 라이브러리**를 컴파일한다. 위 스텝이 이걸 대신하지
       # 못한다 — `build.zig` 에서 테스트 바이너리(1139행)와 이 라이브러리(1399행)는 각자 `imports` 를
       # 가진 별개 모듈이라, 라이브러리 쪽 배선만 빠지면 테스트 빌드는 초록인 채 앱만 안 빌드된다.

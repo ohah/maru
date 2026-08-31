@@ -12595,6 +12595,37 @@ pub fn build(b: *std.Build) void {
             macos_only_test_step.dependOn(&run_authority_tests.step);
         }
     }
+    const session_host_release_adapter_apple_product_step = b.step(
+        "test-session-host-release-adapter-apple-product",
+        "Validate Apple signing and notarization product observations",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |apple_product_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = apple_product_optimize,
+        });
+        const apple_product_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_product.zig"),
+            .target = target,
+            .optimize = apple_product_optimize,
+            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+        });
+        const apple_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_apple_product.zig"),
+                .target = target,
+                .optimize = apple_product_optimize,
+                .imports = &.{.{ .name = "release_adapter_apple_product", .module = apple_product_mod }},
+            }),
+        });
+        const run_apple_product_tests = b.addRunArtifact(apple_product_tests);
+        run_apple_product_tests.addArg("--maru-expect-tests=7");
+        run_apple_product_tests.setCwd(b.path("."));
+        session_host_release_adapter_apple_product_step.dependOn(&run_apple_product_tests.step);
+        session_host_step.dependOn(&run_apple_product_tests.step);
+        test_step.dependOn(&run_apple_product_tests.step);
+    }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",

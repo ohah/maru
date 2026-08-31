@@ -16410,12 +16410,114 @@ test "NS5 후보는 그 창의 터미널만이고 편집기는 대상이 아니�
 
     var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
     var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
-    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders).items;
     try testing.expect(targets.len > 0);
     for (targets) |c| try testing.expect(c.surface_id != fx.term.surface.id);
 }
 
 // ── NS6: 라벨 표기와 마지막 대상 ──────────────────────────────────────────────────────────────
+
+test "NS9 대상 줄은 그 pane 에서 실제로 도는 것을 말한다 — 전부 «셸» 이 아니다" {
+    // 옛 판은 고정 문구 하나를 세워 여덟 줄이 전부 같은 이름이었다. 그러면 라벨의 첫 자리가
+    // 대상을 **못 가른다**. 이 값은 이미 관측 캐시에 있다(에이전트 종류 판정이 쓰는 그 목록).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    pane_ops.newTermInActivePane(fx.session) catch {};
+
+    // 관측에 이름을 심는다 — 제품이 읽는 그 자리다.
+    const pane = pane_ops.activePane(fx.session);
+    var planted: bool = false;
+    for (pane.terms.items) |t| {
+        if (t.kind != .terminal) continue;
+        var name: maru.pty.types.ForegroundProcessName = .{};
+        const want = "fish";
+        @memcpy(name.bytes[0..want.len], want);
+        name.len = want.len;
+        // **비우고 심는다.** 픽스처가 실제 자식을 띄우므로 목록에 이미 이름이 있고(관측이 실제로
+        // 도는 증거다 — 첫 회차에 `bash` 가 나왔다), 뒤에 붙이면 첫 항목이 안 바뀐다.
+        t.rt.observation.foreground_processes.clearRetainingCapacity();
+        try t.rt.observation.foreground_processes.append(allocator, name);
+        planted = true;
+        break;
+    }
+    // 심을 자리가 없으면 이 판정자는 아무것도 안 잰다.
+    try testing.expect(planted);
+
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    var saw = false;
+    for (collected.items) |c| {
+        if (std.mem.eql(u8, c.shell_name, "fish")) saw = true;
+        // 옛 판은 **전부** 고정 문구였다 — 하나라도 그 문구면 그 줄은 대상을 못 가른다.
+        try testing.expect(!std.mem.eql(u8, c.shell_name, maru.i18n.t(.ctx_target_shell)));
+    }
+    try testing.expect(saw);
+}
+
+test "NS8 멀티 커서면 주 선택만 간다고 말한다 — 나머지가 갔다고 믿게 두지 않는다" {
+    // `buildSelectionPayload` 가 스스로 적어 둔 위험이다 — 「조용히 첫 조각만 보내면 사용자는
+    // 나머지가 갔다고 믿는다」. 코드는 그래서 **주 선택만** 보내는데, 정작 그 사실을 말하는 자리가
+    // 없었다. 머리글이 그 말을 진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    pane_ops.newTermInActivePane(fx.session) catch {};
+
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+
+    // 커서 하나면 그 말을 안 한다 — 늘 붙이면 경고가 소음이 된다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    const single = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    try testing.expect(std.mem.indexOf(u8, single, maru.i18n.t(.ctx_send_selection_primary_only)) == null);
+
+    // 커서가 여럿이면 말한다.
+    fx.term.rt.editor_extra_selections = try allocator.alloc(editor_selection.Selection, 1);
+    defer {
+        allocator.free(fx.term.rt.editor_extra_selections);
+        fx.term.rt.editor_extra_selections = &.{};
+    }
+    fx.term.rt.editor_extra_selections[0] = editor_selection.Selection.at(1);
+    const multi = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    try testing.expect(std.mem.indexOf(u8, multi, maru.i18n.t(.ctx_send_selection_primary_only)) != null);
+}
+
+test "NS7 자리를 넘긴 대상은 조용히 사라지지 않는다 — 머리글이 잘린 수를 말한다" {
+    // **옛 판은 그냥 `break` 였다.** 아홉 번째 pane 은 목록에 없고, 없다는 것도 왜 없는지도 알
+    // 방법이 없었다. 컴포넌트가 머리글을 앞에서만 세므로 뒤에 줄을 못 달아 **머리글 자체**에 싣는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 자리(8)보다 많은 터미널을 만든다.
+    var made: usize = 0;
+    while (made < app_session_mod.max_agent_targets + 2) : (made += 1) {
+        pane_ops.newTermInActivePane(fx.session) catch break;
+    }
+
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    // **자격은 자리와 무관하게 센다** — 이게 0 이면 아래 판정이 아무것도 안 잰다.
+    try testing.expect(collected.eligible > collected.items.len);
+
+    const header = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    // 기본 문구로 끝나면 잘린 사실을 안 말한 것이다.
+    try testing.expect(!std.mem.eql(u8, header, maru.i18n.t(.ctx_send_selection)));
+    try testing.expect(std.mem.startsWith(u8, header, maru.i18n.t(.ctx_send_selection)));
+    // 두 수가 **실제로** 들어갔다.
+    var want: [32]u8 = undefined;
+    const shown = try std.fmt.bufPrint(&want, "{d}", .{collected.items.len});
+    try testing.expect(std.mem.indexOf(u8, header, shown) != null);
+    const total = try std.fmt.bufPrint(&want, "{d}", .{collected.eligible});
+    try testing.expect(std.mem.indexOf(u8, header, total) != null);
+}
 
 test "NS6 표시된 줄과 저장된 대상은 1:1 이다 — 라벨이 하나 빠져도 안 어긋난다" {
     // **적대적 검증이 잡은 결함이다.** 라벨을 못 만든 대상을 목록에는 남기고 줄만 건너뛰면, 그 뒤
@@ -16449,7 +16551,7 @@ test "NS6 라벨은 폴더와 브랜치로 가른다 — 사이드바가 쓰는 
 
     var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
     var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
-    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders).items;
     try testing.expect(targets.len > 0);
 
     // `where` 가 비어 있으면 라벨이 이름만 남아 여러 대상을 못 가른다 — 그 자리가 §5 의 핵심이다.

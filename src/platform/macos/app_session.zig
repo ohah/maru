@@ -4977,6 +4977,8 @@ pub const AppSession = struct {
     /// 128 에서 256 으로 올렸다 — 종류 기호와 pane 이름이 붙으면서(2026-08-31) 긴 경로 + 긴
     /// 브랜치 + 한글 pane 이름이 겹칠 때 넘칠 수 있게 됐고, 넘치면 **그 대상을 못 고른다**.
     agent_target_label_buf: [max_agent_targets][256]u8 = undefined,
+    /// 보내기 머리글을 조립할 자리. 잘린 수(`8/12`)와 멀티 커서 경고가 붙어 고정 문구가 아니다.
+    agent_send_header_buf: [160]u8 = undefined,
     /// 편집기 본문 우클릭 메뉴(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
     /// native-editor-ui.md §8.1). 다른 메뉴들과 `chrome_host.context_menu` 를 공유하되 이 값이
     /// non-null 이면 그 분기다.

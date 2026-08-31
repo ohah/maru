@@ -522,6 +522,10 @@ const Table = struct {
     ctx_select_all: [:0]const u8,
     /// 편집기 우클릭 메뉴의 보내기 구획 머리글(NS5 — docs/send-selection-to-agent.md §5.1).
     ctx_send_selection: [:0]const u8,
+    /// 대상이 자리(`max_agent_targets`)를 넘어 잘렸을 때 머리글에 붙는 꼬리. `{0}`=실린 수, `{1}`=전체 수.
+    ctx_send_selection_truncated: [:0]const u8,
+    /// 멀티 커서일 때 머리글에 붙는 꼬리 — **주 선택만 간다**는 사실을 말한다.
+    ctx_send_selection_primary_only: [:0]const u8,
     /// 보내기 대상 줄에서 **에이전트가 아닌** Term 을 부르는 말(§5 — 일반 셸도 후보다).
     ctx_target_shell: [:0]const u8,
     ctx_open_link: [:0]const u8,
@@ -1045,6 +1049,8 @@ const en: Table = .{
     .ctx_cut = "Cut",
     .ctx_select_all = "Select All",
     .ctx_send_selection = "Send selection to",
+    .ctx_send_selection_truncated = " ({0} of {1} shown)",
+    .ctx_send_selection_primary_only = " — primary selection only",
     .ctx_target_shell = "Shell",
     .ctx_open_link = "Open Link",
     .ctx_copy_link = "Copy Link Address",
@@ -1631,6 +1637,8 @@ const ko: Table = .{
     .ctx_cut = "잘라내기",
     .ctx_select_all = "전체 선택",
     .ctx_send_selection = "선택 영역 보내기",
+    .ctx_send_selection_truncated = " ({0}/{1} 표시)",
+    .ctx_send_selection_primary_only = " — 주 선택만",
     .ctx_target_shell = "셸",
     .ctx_open_link = "링크 열기",
     .ctx_copy_link = "주소 복사",

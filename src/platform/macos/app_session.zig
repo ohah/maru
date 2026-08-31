@@ -73832,9 +73832,12 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
 
     // **최신이 먼저다**(IG7) — 뒤에 온 도구 읽기가 첫 칸이다.
     // 도구 읽기 = **직전 줄**의 file_path 파일명.
-    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
+    //
+    // 배열 위치가 아니라 **인덱스로 찾는다**. 여럿이 동시에 풀리므로 완료 순서가 제출 순서와
+    // 다르고, 그리기도 `hit_index` 로 자리를 잡는다 — 배열 순서에는 뜻이 없다.
+    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tileFor(0).?.label.text());
     // 붙여넣기 = 같은 줄 텍스트, 상용구는 벗겨진다.
-    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tiles.items[1].label.text());
+    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tileFor(1).?.label.text());
 
     // 격자가 라벨 자리를 실제로 잡는다 — 안 그러면 글자를 그릴 곳이 없다.
     const area = image_gallery_ops.gridArea(session);
@@ -73912,14 +73915,17 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     }
     try std.testing.expectEqual(@as(usize, 30), session.image_gallery.count());
 
-    // ── ① **최신이 먼저다.** 첫 타일이 마지막 이미지(n29)여야 한다.
+    // ── ① **최신이 먼저다.** 0 번 칸이 마지막 이미지(n29)여야 한다.
+    //
+    // 「첫 타일」이 아니라 **0 번 칸**을 기다린다 — 여럿이 동시에 풀려 배열에 먼저 담기는 것이
+    // 0 번이라는 보장이 없다(그리기는 `hit_index` 로 자리를 잡으므로 순서는 무관하다).
     {
         var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        while (spins < 200_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqualStrings("n29", session.image_gallery.tiles.items[0].label.text());
+    try std.testing.expectEqualStrings("n29", session.image_gallery.tileFor(0).?.label.text());
 
     // ── ② 스크롤할 곳이 있다(30장이 한 화면에 안 들어간다).
     const l0 = image_gallery_ops.gridLayout(session);
@@ -75625,4 +75631,266 @@ test "이미지 갤러리: 문맥 줄 나누기가 폭 0·줄 0 에서 멈춘다
     const one = g.layoutContext("한", 1, 3);
     try std.testing.expectEqual(@as(u32, 1), one.count);
     try std.testing.expectEqual(@as(usize, 3), one.lines[0].len);
+}
+
+test "이미지 갤러리: 한 틱에 여러 장을 동시에 건다 (IG14)" {
+    // 사용자 보고: 「이미지가 많으면 목록에서 느려지는 게 체감된다」.
+    //
+    // 원인은 디코드 자체가 아니라 **제출이 틱에 묶여 있던 것**이었다. 한 번에 한 장만 걸면
+    // 보이는 12 칸을 채우는 데 12 틱(200 ms)이 필요하다 — 실제 디코드 일은 그 4 분의 1이다.
+    //
+    // 그래서 여기서 재는 것은 시간이 아니라 **동시에 걸린 개수**다. `ensureTiles` 안에서 동기적으로
+    // 정해지므로 기계 속도와 무관하다(수확은 다음 틱 첫머리라 이 사이에 끼어들지 않는다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    // 상한이 1 이면 「동시에」가 성립하지 않는다 — 계약을 먼저 못 박는다.
+    try std.testing.expect(agent_image_decode_backend.max_inflight > 1);
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |i| {
+        const b = try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"n{d}\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{s}\"}}}}]}}}}\n",
+            .{ i, png_b64 },
+        );
+        defer allocator.free(b);
+        try doc.appendSlice(allocator, b);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = doc.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 40), session.image_gallery.count());
+
+    // 빈 칸이 넉넉하다 — 40 장이 한 화면에 다 들어가지 않는다.
+    const l = image_gallery_ops.gridLayout(session);
+    try std.testing.expect(l.visible >= 2);
+
+    // 한 틱을 돌린다. 「한 번에 한 장」이던 시절에는 이 값이 **1 을 넘을 수 없었다**.
+    _ = session.tick() catch {};
+    try std.testing.expect(session.image_gallery.pending_len >= 2);
+}
+
+test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대적)" {
+    // **여럿으로 늘리며 잃은 자가치유.** 슬롯이 하나였을 때는 취소된 요청이 남아 있어도 다음 제출이
+    // 그 자리를 덮어썼다. 집합이 되면서 그 성질이 사라졌다 — 취소된 워커는 결과를 내놓지 않으므로
+    // 집합에서 걷히지 않고, 죽은 항목이 자리를 다 차지하면 새 제출이 기록되지 못해 오는 결과마다
+    // 「늦게 온 것」으로 버려진다. 증상은 **썸네일이 영영 안 뜨는 것**이고, 원인은 화면에 안 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |i| {
+        const b = try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"n{d}\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{s}\"}}}}]}}}}\n",
+            .{ i, png_b64 },
+        );
+        defer allocator.free(b);
+        try doc.appendSlice(allocator, b);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = doc.items });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.jsonl", .data = doc.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path_a = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path_a);
+    const path_b = try std.fmt.allocPrint(allocator, "{s}/b.jsonl", .{root});
+    defer allocator.free(path_b);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path_a));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // ── ① 자리를 **가득** 채운 채로 소스를 바꾼다(그래야 죽은 항목이 전부를 막는다).
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(
+        @as(usize, agent_image_decode_backend.max_inflight),
+        session.image_gallery.pending_len,
+    );
+
+    // ── ② 다른 세션으로 갈린다 — 도는 디코드는 옛 파일의 오프셋이라 전부 취소된다.
+    try std.testing.expect(term.agent_image_source.set(path_b));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // ── ③ 다시 채워진다. 비우지 않으면 여기서 **한 장도** 안 온다.
+    {
+        var spins: usize = 0;
+        while (spins < 1_500_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expect(session.image_gallery.tileFor(0) != null);
+}
+
+test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다 (IG14 적대적)" {
+    // **인덱스 체계가 바뀌는 곳은 다시 훑기만이 아니다.** 검색어를 한 글자 칠 때마다 `applyFilter`
+    // 가 `hits` 를 새로 만드는데, 그때 워커에 걸어 둔 것들은 **옛 인덱스**를 들고 있다. 안 버리면
+    // 도는 결과가 엉뚱한 칸에 붙는다 — 게다가 그 칸의 정체까지 그 자리 것으로 적혀 `remapTiles` 가
+    // 잘못된 짝을 계속 보존한다. 메타데이터로는 안 보이고 **픽셀에만** 드러나는 종류다.
+    //
+    // 그래서 정사각(2×2)과 가로로 긴(4×2)을 섞어 둔다. 필터 전 0 번은 정사각, 필터 뒤 0 번은
+    // 가로로 긴 것이 되게 배치했으므로, 남의 그림이 붙으면 **비율**로 드러난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const sq_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=";
+    const wide_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    // 파일 순서 0..5. 갤러리는 **최신이 먼저**라 뒤집히므로 필터 전 0 번은 마지막 줄(`sq5`)이고,
+    // "wide" 로 거르면 0 번은 `wide4` 가 된다.
+    for ([_][2][]const u8{
+        .{ "wide0", wide_b64 },
+        .{ "sq1", sq_b64 },
+        .{ "wide2", wide_b64 },
+        .{ "sq3", sq_b64 },
+        .{ "wide4", wide_b64 },
+        .{ "sq5", sq_b64 },
+    }) |entry| {
+        const b = try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{s}\"}}}}]}}}}\n",
+            .{ entry[0], entry[1] },
+        );
+        defer allocator.free(b);
+        try doc.appendSlice(allocator, b);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = doc.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
+    try std.testing.expectEqualStrings("sq5", session.image_gallery.labels.items[0].text());
+
+    // ── ① 0 번(정사각)을 **걸어 둔 채로** 검색어를 친다. 훑기가 끝난 그 tick 이 이미 앞 칸들을
+    //     워커에 걸었고, 디코드는 ms 단위라 아직 안 왔다. 여기서 한 tick 이라도 더 돌리면 그 사이
+    //     수확돼 전제가 사라진다.
+    try std.testing.expect(session.image_gallery.pendingContains(0));
+
+    session.image_gallery.key_focus = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.image_gallery.search_active);
+    for ("wide") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
+    try std.testing.expectEqualStrings("wide4", session.image_gallery.labels.items[0].text());
+
+    // ── ② 0 번 칸이 차기를 기다린다.
+    {
+        var spins: usize = 0;
+        while (spins < 1_500_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    const t0 = session.image_gallery.tileFor(0) orelse return error.TestUnexpectedResult;
+
+    // ── ③ **가로로 긴 것이어야 한다.** 걸어 둔 것을 안 버리면 옛 0 번(정사각 `sq5`)의 픽셀이
+    //     여기 붙는다 — 라벨은 `wide4` 인데 그림은 `sq5` 다.
+    try std.testing.expect(t0.width > t0.height);
 }

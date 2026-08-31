@@ -276,6 +276,11 @@ fn pointOf(idx: maru.session.editor.line_index.LineIndex, offset: usize) syntax.
 /// **표에 번호가 없는 자리는 앞 줄을 잇는다.** `rebuildVisible` 의 방어적 꼬리 채움이 그런 자리를
 /// 남기는데, 그 줄이 화면에서 그 자리를 차지하고 있으므로 앞 줄의 것으로 읽는 편이 맞다.
 ///
+/// **거슬러 올라가도 못 찾으면 항등이다 — `null` 이 아니다.** `null` 은 **범위 밖** 하나만 뜻한다.
+/// 둘을 뭉치면 표 앞쪽이 전부 비어 있을 때 그 행이 통째로 거부되는데, 이 함수를 꺼내기 전
+/// `storeHitRows` 는 그 경우 `visible_idx` 를 그대로 썼다 — 중복을 없애면서 **동작을 바꾸면** 그것은
+/// 리팩터링이 아니다(적대적 검증 1회차가 잡았다).
+///
 /// **한 곳에 둔 이유**: 같은 되풀기를 `storeHitRows`(클릭 히트테스트)도 한다. 두 벌로 두면 하나만
 /// 고쳐질 때 "클릭은 맞는데 색은 틀린" 반쪽 상태가 된다 — 이 결함이 실제로 그 형태였다.
 pub fn sourceLineFor(visible_numbers: []const ?u32, visible_idx: usize) ?usize {
@@ -284,7 +289,7 @@ pub fn sourceLineFor(visible_numbers: []const ?u32, visible_idx: usize) ?usize {
     var k = visible_idx;
     while (true) {
         if (visible_numbers[k]) |n| return n - 1; // 표는 1-based
-        if (k == 0) return null;
+        if (k == 0) return visible_idx; // 앞이 전부 비었다 — 옛 동작 그대로 항등이다
         k -= 1;
     }
 }
@@ -712,6 +717,26 @@ test "ES34 접히면 색이 보이는 줄 축을 따라간다 — 문서 축으�
     }
     try testing.expect(second_ok);
     try testing.expect(!has_comment); // 접혀 화면에 없는 주석 줄의 색이 새어 나오면 안 된다
+}
+
+test "ES36 되풀기는 범위 밖에서만 null 이다 — 못 찾으면 항등으로 떨어진다" {
+    // **적대적 검증 1회차가 잡은 회귀.** 되풀기를 `storeHitRows` 에서 꺼내 공유하면서 "거슬러
+    // 올라가도 못 찾음" 을 `null` 로 돌려줬더니, 호출자가 그것을 범위 밖과 같이 다뤄 **그 행이
+    // 통째로 거부**됐다 — 꺼내기 전 동작은 `visible_idx` 를 그대로 쓰는 것이었다. 중복을 없애는
+    // 변경이 동작을 바꾸면 그것은 리팩터링이 아니다.
+    //
+    // 그래서 `null` 의 뜻은 **범위 밖** 하나뿐이다.
+    const numbers = [_]?u32{ null, null, 3 };
+    try testing.expectEqual(@as(?usize, 0), sourceLineFor(&numbers, 0)); // 앞이 비었다 → 항등
+    try testing.expectEqual(@as(?usize, 1), sourceLineFor(&numbers, 1)); // 거슬러도 못 찾음 → 항등
+    try testing.expectEqual(@as(?usize, 2), sourceLineFor(&numbers, 2)); // 3 - 1
+    try testing.expectEqual(@as(?usize, null), sourceLineFor(&numbers, 3)); // 범위 밖만 null
+    try testing.expectEqual(@as(?usize, 7), sourceLineFor(&.{}, 7)); // 표 없음 → 두 축이 같다
+
+    // 꼬리가 비면 **앞 줄을 잇는다**(그 줄이 화면에서 그 자리를 차지한다).
+    const tail = [_]?u32{ 1, null, null };
+    try testing.expectEqual(@as(?usize, 0), sourceLineFor(&tail, 1));
+    try testing.expectEqual(@as(?usize, 0), sourceLineFor(&tail, 2));
 }
 
 test "ES35 접힘 표가 비면 두 축이 같다 — 되풀기가 평소 경로를 바꾸지 않는다" {

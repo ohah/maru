@@ -25,6 +25,13 @@ const remote_shell = @import("maru").session.remote_shell; // 원격 셸 규율(
 const stream_script = remote_shell.path_assign ++
     "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\"";
 
+/// 이어읽기 커서를 함께 넘기는 갈래([계획](../../../docs/plans/remote-agent-state.md) RA5-a).
+///
+/// **커서는 `"$3"` 으로 간다** — `remote_shell` 이 작은따옴표로 감싸므로 값이 셸에 해석되지 않고
+/// `tokenIsSafe` 가 제어 문자를 막는다. 선을 타고 온 값이어도 인용 규칙이 그대로 지켜진다.
+const stream_resume_script = remote_shell.path_assign ++
+    "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\" --resume=\"$3\"";
+
 pub const UploadError = error{
     PipeFailed, // pipe(2) 실패
     ForkFailed, // fork(2) 실패
@@ -177,6 +184,21 @@ pub fn spawnRemoteCommand(
     return .{ .pid = pid, .out_fd = out_pipe[0] };
 }
 
+/// 이어읽기 커서를 **셸 문자열에 넣어도 되는가**. 통과 조건은 «셸이 특별하게 볼 글자가 하나도 없다» 다.
+///
+/// 파서(`agent_events.parseResumeEntry`)가 이미 이름을 토큰 클래스로 걸렀지만, 여기서 **다시** 본다 —
+/// 그쪽은 「이 값이 우리 로그를 가리키나」를 묻고 이쪽은 「이 값을 셸에 줘도 되나」를 묻는다. 두 질문이
+/// 같은 답을 낸다고 가정하면, 한쪽 규칙이 느슨해지는 날 다른 쪽이 조용히 뚫린다.
+fn resumeIsShellSafe(spec: []const u8) bool {
+    if (spec.len == 0) return true;
+    if (spec.len > 4096) return false; // 상한이 없으면 명령줄이 무한히 길어진다
+    for (spec) |c| switch (c) {
+        'a'...'z', '0'...'9', '_', ':', ',' => {},
+        else => return false,
+    };
+    return true;
+}
+
 pub fn spawnAgentEvents(
     allocator: std.mem.Allocator,
     ctl: []const u8,
@@ -185,6 +207,13 @@ pub fn spawnAgentEvents(
     /// **원격 홈 기준 상대 경로**다(`agent_hook_command.remote_log_dir_rel`). 절대 경로가 아니다 —
     /// 저쪽 홈이 어디인지는 이쪽이 모르고, 안다고 가정하면 틀린다.
     remote_dir_rel: []const u8,
+    /// 이어읽기 커서(`<이름>:<offset>` 을 `,` 로 이은 것, RA5-a). 비면 안 붙인다 = 처음부터.
+    ///
+    /// ⚠️ **이 값은 선을 타고 온 것에서 나왔다.** 아래 인용 주석이 「우리 상수 하나라서 안전하다」고
+    /// 적어 둔 전제가 여기서 깨지므로, **조립 직전에 다시 검증한다**(`resumeIsShellSafe`). 통과 못 하면
+    /// 이어읽기를 포기하고 처음부터 읽는다 — 알림이 한 번 재생되는 것이 셸에 남의 문자열을 넣는 것보다
+    /// 훨씬 싸다.
+    resume_spec: []const u8,
 ) !Stream {
     // `<maru> agent-events --stdio --dir="$HOME/<rel>"`.
     //
@@ -200,7 +229,15 @@ pub fn spawnAgentEvents(
     // 설치만 고치고 여기를 안 고치면 **설치는 되는데 스트리머가 안 뜨는** 상태가 된다 — 그러면 훅은
     // 쌓이는데 이벤트가 하나도 안 나오고, 증상은 「배지가 안 선다」로 앞의 실패와 구분되지 않는다.
     // 덮지 않고 앞에 붙이므로 사용자가 PATH 로 고른 `maru` 가 있으면 그쪽이 이긴다.
-    const cmd = try remote_shell.wrapAlloc(allocator, stream_script, &.{ remote_maru, remote_dir_rel });
+    const safe_resume: []const u8 = if (resumeIsShellSafe(resume_spec)) resume_spec else "";
+    // **이어읽기가 있을 때만 그 스크립트를 쓴다.** `--resume` 은 새 플래그라, 원격 maru 가 옛것이면
+    // 모르는 플래그로 보고 usage_error 로 나간다 — 첫 기동까지 그것을 요구하면 **원격을 안 올린
+    // 사용자는 배지를 통째로 잃는다**. 첫 기동은 늘 커서가 비므로 옛 스크립트를 타고, 재접속(새 동작)
+    // 에서만 새 플래그를 쓴다. 원격이 옛것이면 그 재접속만 실패해 백오프 뒤 notice 로 드러난다.
+    const cmd = if (safe_resume.len == 0)
+        try remote_shell.wrapAlloc(allocator, stream_script, &.{ remote_maru, remote_dir_rel })
+    else
+        try remote_shell.wrapAlloc(allocator, stream_resume_script, &.{ remote_maru, remote_dir_rel, safe_resume });
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

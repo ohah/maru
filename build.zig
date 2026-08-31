@@ -12971,7 +12971,7 @@ pub fn build(b: *std.Build) void {
                 }),
             });
             const run_download_tests = b.addRunArtifact(download_tests);
-            run_download_tests.addArg("--maru-expect-tests=8");
+            run_download_tests.addArg("--maru-expect-tests=9");
             run_download_tests.setCwd(b.path("."));
             session_host_release_adapter_github_download_step.dependOn(&run_download_tests.step);
             session_host_step.dependOn(&run_download_tests.step);
@@ -13002,9 +13002,14 @@ pub fn build(b: *std.Build) void {
             const manifest_file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_file.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const authenticated_manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_attestation.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod } } });
             const composition_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_git_resolver", .module = resolver_mod }, .{ .name = "release_adapter_github_download", .module = download_mod }, .{ .name = "release_adapter_github_release_attestation", .module = release_attestation_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod } } });
-            const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
-            const run = b.addRunArtifact(tests); run.addArg("--maru-expect-tests=4"); run.setCwd(b.path("."));
-            session_host_release_adapter_github_predecessor_assets_step.dependOn(&run.step); session_host_step.dependOn(&run.step); test_step.dependOn(&run.step); macos_only_test_step.dependOn(&run.step);
+            const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
+            const run = b.addRunArtifact(tests);
+            run.addArg("--maru-expect-tests=8");
+            run.setCwd(b.path("."));
+            session_host_release_adapter_github_predecessor_assets_step.dependOn(&run.step);
+            session_host_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+            macos_only_test_step.dependOn(&run.step);
         }
     }
     if (target.result.os.tag == .macos) {

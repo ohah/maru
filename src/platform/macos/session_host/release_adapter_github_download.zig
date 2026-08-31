@@ -42,6 +42,7 @@ pub const Error = error{
     SizeMismatch,
     DigestMismatch,
     ChangedDuringDownload,
+    FileChanged,
     SyncFailed,
     CleanupFailed,
 } || process.Error;
@@ -103,6 +104,44 @@ pub const DownloadedSet = struct {
             };
         }
         return null;
+    }
+
+    pub fn revalidate(self: *const DownloadedSet) Error!void {
+        if (self.owner != self or self.parent_fd < 0 or self.dir_fd < 0 or self.file_count != max_assets)
+            return error.FileChanged;
+        const work_path = std.mem.sliceTo(&self.work_path, 0);
+        var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&path_storage, "{s}", .{work_path}) catch return error.FileChanged;
+        const reopened = safe_open.openAbsoluteNoFollow(path_z, true) catch return error.FileChanged;
+        defer _ = c.close(reopened);
+        var path_dir: posix.Stat = undefined;
+        var held_dir: posix.Stat = undefined;
+        if (c.fstat(reopened, &path_dir) != 0 or c.fstat(self.dir_fd, &held_dir) != 0 or
+            !posix.S.ISDIR(path_dir.mode) or path_dir.dev != self.dir_device or path_dir.ino != self.dir_inode or
+            held_dir.dev != self.dir_device or held_dir.ino != self.dir_inode or held_dir.mode & 0o777 != 0o700)
+            return error.FileChanged;
+        for (self.files[0..self.file_count]) |*record| {
+            if (!record.present) return error.FileChanged;
+            const fd = c.openat(self.dir_fd, record.name[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+            if (fd < 0) return error.FileChanged;
+            defer _ = c.close(fd);
+            var observed: posix.Stat = undefined;
+            if (c.fstat(fd, &observed) != 0 or !posix.S.ISREG(observed.mode) or observed.dev != record.device or
+                observed.ino != record.inode or observed.size != record.size or observed.nlink != 1 or observed.mode & 0o777 != 0o400)
+                return error.FileChanged;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            var bytes: [64 * 1024]u8 = undefined;
+            while (true) {
+                const read_count = c.read(fd, &bytes, bytes.len);
+                if (read_count < 0) return error.FileChanged;
+                if (read_count == 0) break;
+                hasher.update(bytes[0..@intCast(read_count)]);
+            }
+            var digest: [32]u8 = undefined;
+            hasher.final(&digest);
+            const hex = std.fmt.bytesToHex(digest, .lower);
+            if (!std.mem.eql(u8, &hex, &record.sha256)) return error.FileChanged;
+        }
     }
 
     pub fn cleanup(self: *DownloadedSet) Error!void {
@@ -314,9 +353,9 @@ fn validScalar(value: []const u8) bool {
     return true;
 }
 
-const BoundedExecutor = struct {
+pub const BoundedExecutor = struct {
     io: std.Io,
-    fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
+    pub fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
         const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
         var args_storage: [max_args][manifest.max_scalar_string_bytes + 1]u8 = undefined;

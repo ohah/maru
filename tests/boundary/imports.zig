@@ -7444,6 +7444,91 @@ test "Zig 는 플랫폼 접근성 어휘를 갖지 않는다 — 투영은 adapt
 //
 // 새 도크를 더하면 여기서 실패한다. 그때 할 일은 목록에 파일을 더하는 것이거나(스크롤 목록이면),
 // 왜 뷰포트가 없어도 되는지를 적는 것이다(고정 밴드면 — 사이드바 검색 줄이 그런 경우다).
+// **macOS 에서만 만들어지는 게이트는 `test-macos-only` 에도 등록해야 한다.**
+//
+// `mise run check` 를 도는 CI 잡은 `ubuntu-latest` 라 `if (target.result.os.tag == .macos)` 안의
+// 아티팩트를 **컴파일조차 하지 않는다.** 그래서 그 게이트들은 `zig build test` 에 붙어 있어도 CI
+// 어디에서도 안 돌고, 개발자 로컬에서 `mise run check` 를 돌린 사람만 본다.
+//
+// **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가 이미지
+// 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로 깨졌는데 CI 는 계속
+// 초록이었다.
+//
+// 그래서 macOS 잡이 `zig build test-macos-only` 로 그것들을 돈다. 등록을 빠뜨리면 그 게이트는 **다시
+// CI 밖**이 되므로, 여기서 짝이 맞는지 센다.
+test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(allocator, "build.zig");
+    defer allocator.free(source);
+
+    var in_macos: usize = 0; // 0 = 밖, 그 외 = 블록이 시작한 중괄호 깊이 + 1
+    var depth: usize = 0;
+    var paired: usize = 0;
+    var unpaired: usize = 0;
+    var pending_pair = false;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null and
+            std.mem.indexOf(u8, line, "if (") != null)
+        {
+            in_macos = depth + 1;
+        }
+        for (line) |c| {
+            if (c == '{') depth += 1;
+            if (c == '}' and depth > 0) depth -= 1;
+        }
+        if (in_macos != 0 and depth < in_macos) in_macos = 0;
+
+        if (pending_pair) {
+            if (std.mem.indexOf(u8, line, "macos_only_test_step.dependOn(") != null) {
+                paired += 1;
+            } else {
+                unpaired += 1;
+            }
+            pending_pair = false;
+        }
+        if (in_macos != 0 and std.mem.indexOf(u8, line, "test_step.dependOn(") != null and
+            std.mem.indexOf(u8, line, "macos_only_test_step") == null)
+        {
+            pending_pair = true;
+        }
+    }
+    if (pending_pair) unpaired += 1;
+
+    // 짝이 안 맞는 것이 하나라도 있으면 그 게이트는 CI 밖이다.
+    try std.testing.expectEqual(@as(usize, 0), unpaired);
+    // **0개를 세고도 초록이 되지 않게** — 블록 탐지가 깨지면 `paired` 가 0 이 된다.
+    try std.testing.expect(paired >= 13);
+}
+
+// **`openDirAbsolute` 는 상대경로에 `assert` 로 죽는다** — `catch` 가 못 막는 종류다(std 의 계약이다).
+//
+// 에이전트 경로가 여는 디렉터리는 전부 `HOME`·`CLAUDE_CONFIG_DIR` 에서 만든 것이라, 그 env 가 상대경로면
+// **앱이 통째로 abort** 한다. 2026-08-31 에 실제로 그랬다: 제품 스모크가 HOME 을 `zig-out/…` 상대경로로
+// 띄우는데 `removeAgentStatuslineHook` 이 SIGABRT 를 냈고, main 이 그 상태로 빨간 채 **무관한 PR 셋**이
+// 같은 자리에서 막혔다(#2947·#2944·#2935).
+//
+// 그래서 **여는 자리를 함수 하나로 모았다**(`openAgentDirAbsolute`). 호출부마다 `isAbsolute` 를 적는
+// 규율은 새로 여는 자리 하나가 밖에 남는 순간 깨지고, 그 하나가 곧 abort 다 — 규율을 주석이 아니라
+// 게이트가 진다.
+test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 않는다" {
+    const allocator = std.testing.allocator;
+
+    const agent_src = try readZigFileZ(allocator, "src/platform/macos/app_session/agent.zig");
+    defer allocator.free(agent_src);
+    // 직접 호출은 **헬퍼 정의 한 줄뿐**이어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(agent_src, "std.Io.Dir.openDirAbsolute("));
+    try std.testing.expect(countOccurrences(agent_src, "if (!std.fs.path.isAbsolute(path)) return null;") == 1);
+    // 그리고 그 헬퍼가 실제로 쓰여야 한다 — 정의만 있고 아무도 안 부르면 게이트가 초록인 채 규율이 없다.
+    try std.testing.expect(countOccurrences(agent_src, "openAgentDirAbsolute(self,") >= 7);
+
+    // 갤러리는 자리가 하나라 인라인 가드를 쓴다 — **그 가드가 있는지**를 센다.
+    const gallery_src = try readZigFileZ(allocator, "src/platform/macos/app_session/image_gallery.zig");
+    defer allocator.free(gallery_src);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "std.Io.Dir.openDirAbsolute("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "if (!std.fs.path.isAbsolute(root_path)) break;"));
+}
+
 test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
     const allocator = std.testing.allocator;
 

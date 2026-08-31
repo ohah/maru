@@ -269,6 +269,12 @@ pub const Routed = struct {
     /// **그림이 달라졌다.** intent 가 없어도 참일 수 있다 — 호버가 들고 나는 것도 그림이 바뀌는
     /// 일이다. 이것을 안 보면 마우스를 올려도 아무 표시가 안 난다(§2m.35 가 겪은 결함).
     dirty: bool = false,
+    /// **끄는 제스처.** intent 와 배타적이 아니다 — 그 타입 doc 이 적어 뒀다: *"threshold 를 넘지 않은
+    /// up 은 `action` 만, 넘은 up 은 `drag` 만 낸다"*. 스크롤바 thumb 이 바로 이 길로 온다(무엇으로
+    /// 옮길지는 payload 가 말하고, 좌표를 offset 으로 바꾸는 규칙은 `scroll_area` 가 소유한다).
+    ///
+    /// **이 값을 버리면 막대가 안 잡힌다** — 실측으로 `intent=null` 만 셋 오고 목록은 그대로였다.
+    drag: ?interaction.DragEvent = null,
 };
 
 pub fn pointer(
@@ -293,13 +299,17 @@ pub fn pointer(
             break;
         }
     }
-    const action = dispatched.action orelse return .{ .dirty = dirty };
+    const action = dispatched.action orelse return .{ .dirty = dirty, .drag = dispatched.drag };
     // **`@constCast` 는 안전하다** — `resolve` 는 `self` 를 값으로 받고 읽기만 한다(SCM 표면의 그
     // 주석과 같은 이유). 표를 손으로 훑지 않는 이유는 `enabled` 와 **세대 판정**이 거기 있기
     // 때문이다: 직접 훑으면 꺼진 컨트롤도 눌리고, 옛 프레임의 action 도 살아난다.
     var table = component.ids.Table.init(@constCast(built.frame.actions));
     table.count = built.frame.actions.len;
-    return .{ .intent = table.resolve(action, built.props.snapshot_generation), .dirty = dirty };
+    return .{
+        .intent = table.resolve(action, built.props.snapshot_generation),
+        .dirty = dirty,
+        .drag = dispatched.drag,
+    };
 }
 
 /// 누르고 떼는 한 벌 — 판정이 쓰기 좋게 묶어 둔다(`.up` 만 보내면 클릭이 안 난다: §2m.35).

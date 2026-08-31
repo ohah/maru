@@ -362,6 +362,19 @@ fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
 ///   막으려던 그것이다(실측: `Stop` 직후 677건 중 1건).
 ///
 /// `capture_id == 0` 은 「사본 없음」이다(관측 모드·훅 없는 세션·붙일 것이 없던 턴).
+/// `std.Io.Dir.openDirAbsolute` 는 **상대경로에 `assert` 로 죽는다** — `catch` 가 못 막는 종류다.
+/// 이 파일이 여는 경로는 전부 `HOME`·`CLAUDE_CONFIG_DIR` 에서 만든 것이라, 그 env 가 상대경로면 **앱이
+/// 통째로 abort** 한다. 실제로 그렇게 죽었다(2026-08-31: 제품 스모크 `macos-session-host-c4-quit-cancel-smoke`
+/// 가 HOME 을 `zig-out/…` 상대경로로 띄우는데, 그 실행에서 `removeAgentStatuslineHook` 이 SIGABRT 를 냈고
+/// CI 의 세 PR 이 같은 자리에서 빨갰다).
+///
+/// **여는 자리를 하나로 모은다.** 호출부마다 `isAbsolute` 를 적으면 새로 여는 자리 하나가 그 규율 밖에
+/// 남고, 그 하나가 곧 abort 다 — 규율을 주석이 아니라 **함수**가 진다.
+fn openAgentDirAbsolute(self: *AppSession, path: []const u8, options: std.Io.Dir.OpenOptions) ?std.Io.Dir {
+    if (!std.fs.path.isAbsolute(path)) return null;
+    return std.Io.Dir.openDirAbsolute(self.io, path, options) catch null;
+}
+
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts, capture_id: turn_capture.Id) void {
     if (builtin.is_test) {
         test_turn_snapshot_calls += 1;
@@ -944,7 +957,7 @@ pub fn removeAgentStatuslineHook(self: *AppSession) void {
     // **claude 가 설치돼 있을 때만 손댄다.** 디렉터리가 없으면 claude 를 쓰지 않는 사람이므로 만들지 않는다.
     var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
-    const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
+    const dir_handle = openAgentDirAbsolute(self, claude_dir, .{}) orelse return;
     dir_handle.close(self.io);
     const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
     const hooks_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
@@ -1078,7 +1091,7 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
     const a = arena_state.allocator();
 
     const log_dir = agentHookLogDir(a) orelse return;
-    var dir = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{ .iterate = true }) catch return;
+    var dir = openAgentDirAbsolute(self, log_dir, .{ .iterate = true }) orelse return;
     defer dir.close(self.io);
 
     // **훑고 나서 지운다.** 순회 중에 지우면 readdir이 뒤 항목을 건너뛸 수 있어 매번 몇 개씩 남는다.
@@ -1122,7 +1135,7 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
     for (doomed.items) |name| dir.deleteFile(self.io, name) catch {};
     for (doomed_dirs.items) |name| {
         const sub = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ log_dir, name }, 0) catch continue;
-        var sub_handle = std.Io.Dir.openDirAbsolute(self.io, sub, .{ .iterate = true }) catch continue;
+        var sub_handle = openAgentDirAbsolute(self, sub, .{ .iterate = true }) orelse continue;
         var sub_doomed: std.ArrayListUnmanaged([]const u8) = .empty;
         var sub_it = sub_handle.iterate();
         while (sub_it.next(self.io) catch break) |sub_entry| {
@@ -1211,7 +1224,7 @@ fn reconcileProviderHooks(
     const env_value = if (std.c.getenv(install.configDirEnv(provider))) |v| std.mem.span(v) else null;
     const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
     const config_dir = install.configDir(provider, &config_dir_buf, env_value, home) orelse return;
-    const dir_handle = std.Io.Dir.openDirAbsolute(self.io, config_dir, .{}) catch return;
+    const dir_handle = openAgentDirAbsolute(self, config_dir, .{}) orelse return;
     dir_handle.close(self.io);
 
     // **로그 디렉터리를 먼저 만든다.** 훅은 디렉터리를 만들지 않고 없으면 조용히 아무것도 적지 않는다
@@ -1237,7 +1250,7 @@ fn reconcileProviderHooks(
         _ = std.c.chmod(log_dir.ptr, 0o700);
         // **만들지 못했으면 설치하지 않는다.** 훅만 걸고 디렉터리가 없으면 이벤트가 0인 채로 도는, 진단하기 가장
         // 나쁜 상태가 된다(그 조용함은 훅 커맨드의 의도된 성질이라 사용자에게 아무 신호도 가지 않는다).
-        const log_dir_handle = std.Io.Dir.openDirAbsolute(self.io, log_dir, .{}) catch return;
+        const log_dir_handle = openAgentDirAbsolute(self, log_dir, .{}) orelse return;
         log_dir_handle.close(self.io);
     }
 
@@ -1608,7 +1621,7 @@ pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) 
     const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
     var path_buf: [2048]u8 = undefined;
     const dir_path = std.fmt.bufPrint(&path_buf, "{s}/projects/{s}", .{ claude_dir, slug }) catch return false;
-    const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return false;
+    const dir = openAgentDirAbsolute(self, dir_path, .{}) orelse return false;
     defer dir.close(self.io);
 
     // **신원이 곧 파일명이다** — `CLAUDE_CODE_SESSION_ID`가 그대로 `<id>.jsonl`이다(provider가 자식 env로 밝힌
@@ -1652,7 +1665,7 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
     const home = std.mem.span(home_z);
     var path_buf: [2048]u8 = undefined;
     const root_path = std.fmt.bufPrint(&path_buf, "{s}/.codex/sessions", .{home}) catch return false;
-    const root = std.Io.Dir.openDirAbsolute(self.io, root_path, .{}) catch return false;
+    const root = openAgentDirAbsolute(self, root_path, .{}) orelse return false;
     defer root.close(self.io);
 
     // **신원이 파일명에 박혀 있다** — rollout 파일명이 `rollout-<ts>-<thread_id>.jsonl`이고 `CODEX_THREAD_ID`가
@@ -2145,7 +2158,7 @@ pub fn cleanupOwnedAgentHookLogs(self: *AppSession) void {
     // 이미 닫힌 Term 의 파일과 회전 흔적이 남았다. 이 칸은 **이 프로세스만** 쓰므로(이름이 pid) 통째로
     // 지우는 것이 안전하고, 계약 §4.2 의 «소비 즉시 비우는 큐» 와도 맞는다.
     _ = event; // 회전 접미도 아래 통짜 삭제에 함께 걸린다.
-    var handle = std.Io.Dir.openDirAbsolute(self.io, dir, .{ .iterate = true }) catch return;
+    var handle = openAgentDirAbsolute(self, dir, .{ .iterate = true }) orelse return;
     defer handle.close(self.io);
     var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
     var it = handle.iterate();

@@ -239,7 +239,7 @@ host PID CPU를 대신 쓰면 이 gate를 충족하지 않는다.
 | --- | --- |
 | 1·10·15 runtime, 60 idle frames | frame=60; selected owner=`runtime_count * 60`; applied metadata/screen/ended=0; `pumpDelta`, timestamp seal, registry visit, socket read와 client CPU를 raw 기록 |
 | 100 runtime, 60 idle frames | selected owner=`max_owners_per_frame * 60`; 모든 runtime이 round-robin에서 최소 한 번 선택; applied event=0; counter와 client CPU raw 기록 |
-| 100 runtime 중 한 target marker | target screen output event exact 1 이상, sibling output event=0; GUI enqueue turn + host delivery 20ms + GUI apply turn·dispatch를 합성한 end-to-end tail ≤60ms |
+| 100 runtime 중 한 target marker | 왕복을 **40회** 재고 회차마다 target screen output event exact 1 이상, sibling output event=0. **성능 계약은 프레임 턴 수가 진다** — 마커를 보기까지 도는 턴의 p95 ≤ **6**(실측 p95 3·max 3, 잡으려는 회귀는 전달이 폴링으로 떨어져 턴이 수십으로 뛰는 것). 벽시계는 재앙 감지선으로 남겨 지연 p95 ≤ **200ms**·max ≤ **500ms**(실측 p95 27~43ms 의 4.6~7배 — 옛 60ms 는 실측의 1.4배라 [위 규율](#원칙)이 「감지선이 아니라 동전 던지기」라 부르는 상태였다) |
 | cleanup | host/runtime/client child 전부 reap, fd/socket/directory residue 0, 계측 counter owner 해제 뒤 재사용 0 |
 | AppKit native wake reconciliation | steady-state exact identity에서 새 Array/Set/String backing allocation 0; original borrowed fd read/close 0; source별 CLOEXEC duplicate를 cancel handler가 exact 1 close; identity 변경 시 old source cancel exact 1; actual handler 진입→Metal frame 뒤 screen probe 관측 ≤60ms(반복 raw 표본 기록) |
 

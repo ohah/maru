@@ -13,6 +13,10 @@ const posix = std.posix;
 const runtime_counts = [_]u32{ 1, 10, 15, 100 };
 const idle_frame_count: u32 = 60;
 const frame_interval_us: c_uint = 16_667;
+/// 마커 왕복을 몇 번 재는가. **p95 가 뜻을 가지려면 표본이 그만큼 있어야 한다** — 40 이면
+/// nearest-rank p95 가 index 37 이라 가장 나쁜 둘을 버린다(`session_host_slow_observer_validator`
+/// 가 같은 근거로 40 을 쓴다). 한 번만 재던 옛 판은 공유 러너의 스케줄링 한 번에 빨개졌다.
+const marker_sample_count: usize = 40;
 const artifact_path = "tests/artifacts/perf/session-host-client-idle-pump-macos.json";
 
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -52,7 +56,12 @@ const Artifact = struct {
     marker_runtime_count: u32,
     marker_target_output_events: u64,
     marker_sibling_output_events: u64,
-    marker_latency_ns: u64,
+    marker_sample_count: u32,
+    marker_latency_samples_ns: []const u64,
+    /// 회차마다 마커를 보기까지 돈 **프레임 턴 수**. 벽시계와 달리 **기계 속도와 무관**하다 —
+    /// 러너가 느리면 턴 하나가 길어질 뿐 턴 수는 그대로다. 전달이 폴링으로 떨어지는 회귀는
+    /// 여기서 턴 수가 뛴다.
+    marker_frame_samples: []const u32,
     marker_readable_wake_count: u32,
     marker_timer_timeout_count: u32,
     marker_frame_count: u32,
@@ -312,34 +321,55 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
     if (backend.wakeSources(&wake_sources) != 1) return error.InvalidWakeSourceInventory;
     const wake_fd = wake_sources[0].fd;
     if (wake_fd < 0) return error.InvalidWakeSourceInventory;
-    const marker_started = monotonicNow(io);
-    try surface_runtime.writeInput(1, .{ .bytes = "MARU_E3C_MARKER\n" });
+    // **마커 왕복을 여러 번 잰다.** 한 번만 재면 그 값 하나가 상한과 직접 대결하고, 공유 러너의
+    // 스케줄링이 한 번 튀는 것과 제품이 느려진 것을 구별할 수 없다. 회차마다 `settle` 로 조용한
+    // 상태에서 시작하고, 회차별 계수는 누적한다 — 아래 회계식은 그 누적에서도 성립한다
+    // (회차마다 「마지막 프레임 빼고 한 번씩 기다렸다」이므로 합은 `frames - 회차 수`다).
+    var marker_latencies: [marker_sample_count]u64 = undefined;
+    var marker_frame_turns: [marker_sample_count]u32 = undefined;
     var marker_target: u64 = 0;
     var marker_siblings: u64 = 0;
-    var marker_finished: u64 = 0;
     var marker_frames: u32 = 0;
     var marker_readable_wakes: u32 = 0;
     var marker_timer_timeouts: u32 = 0;
     var marker_max_frame_elapsed_ns: u64 = 0;
-    while (marker_frames < 120 and marker_target == 0) : (marker_frames += 1) {
-        const frame_started = monotonicNow(io);
-        const result = try runFrame(&backend, &pumps);
-        marker_max_frame_elapsed_ns = @max(
-            marker_max_frame_elapsed_ns,
-            monotonicNow(io) - frame_started,
-        );
-        marker_target += result.target;
-        marker_siblings += result.siblings;
-        if (marker_target != 0) {
-            marker_finished = monotonicNow(io);
-        } else if (try waitReadableWake(wake_fd)) {
-            marker_readable_wakes += 1;
-        } else {
-            marker_timer_timeouts += 1;
+    var marker_selected_owners: u64 = 0;
+    var marker_pump_deltas: u64 = 0;
+    var marker_seals: u64 = 0;
+    for (&marker_latencies, &marker_frame_turns) |*latency, *turns| {
+        try settle(&evidence_owner, &backend, &pumps);
+        const round_started = monotonicNow(io);
+        try surface_runtime.writeInput(1, .{ .bytes = "MARU_E3C_MARKER\n" });
+        var round_target: u64 = 0;
+        var round_finished: u64 = 0;
+        var round_frames: u32 = 0;
+        while (round_frames < 120 and round_target == 0) : (round_frames += 1) {
+            const frame_started = monotonicNow(io);
+            const result = try runFrame(&backend, &pumps);
+            marker_max_frame_elapsed_ns = @max(
+                marker_max_frame_elapsed_ns,
+                monotonicNow(io) - frame_started,
+            );
+            round_target += result.target;
+            marker_siblings += result.siblings;
+            if (round_target != 0) {
+                round_finished = monotonicNow(io);
+            } else if (try waitReadableWake(wake_fd)) {
+                marker_readable_wakes += 1;
+            } else {
+                marker_timer_timeouts += 1;
+            }
         }
+        if (round_target == 0) return error.MarkerDeadlineExceeded;
+        latency.* = round_finished - round_started;
+        turns.* = round_frames;
+        marker_target += round_target;
+        marker_frames += round_frames;
+        const round_counters = try evidence_owner.snapshot();
+        marker_selected_owners += round_counters.selected_owners;
+        marker_pump_deltas += round_counters.pump_delta_entries;
+        marker_seals += round_counters.timestamp_seals;
     }
-    if (marker_target == 0) return error.MarkerDeadlineExceeded;
-    const marker_counters = try evidence_owner.snapshot();
 
     try session_host.client_idle_pump_evidence.uninstall(&evidence_owner);
     backend.deinit();
@@ -363,7 +393,7 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
     if (!generation_backed) return error.LegacyAttachmentObserved;
 
     try writeArtifact(allocator, io, .{
-        .schema = "maru.session-host-client-idle-pump-macos.v3",
+        .schema = "maru.session-host-client-idle-pump-macos.v4",
         .scenario = "generation-backed-gui-client-idle-pump",
         .build_mode = "ReleaseFast",
         .sample_api = "proc_pid_rusage:RUSAGE_INFO_V4",
@@ -374,14 +404,16 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
         .marker_runtime_count = 100,
         .marker_target_output_events = marker_target,
         .marker_sibling_output_events = marker_siblings,
-        .marker_latency_ns = marker_finished - marker_started,
+        .marker_sample_count = marker_latencies.len,
+        .marker_latency_samples_ns = &marker_latencies,
+        .marker_frame_samples = &marker_frame_turns,
         .marker_readable_wake_count = marker_readable_wakes,
         .marker_timer_timeout_count = marker_timer_timeouts,
         .marker_frame_count = marker_frames,
         .marker_max_frame_elapsed_ns = marker_max_frame_elapsed_ns,
-        .marker_selected_owner_count = marker_counters.selected_owners,
-        .marker_pump_delta_count = marker_counters.pump_delta_entries,
-        .marker_timestamp_seal_count = marker_counters.timestamp_seals,
+        .marker_selected_owner_count = marker_selected_owners,
+        .marker_pump_delta_count = marker_pump_deltas,
+        .marker_timestamp_seal_count = marker_seals,
         .host_reaped = host_reaped,
         .client_fds_closed = client_fds_closed,
         .socket_removed = socket_removed,

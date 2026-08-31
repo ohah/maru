@@ -4745,7 +4745,7 @@ pub fn build(b: *std.Build) void {
     const run_session_host_test_namespace_isolation_boundary_tests = b.addRunArtifact(
         session_host_test_namespace_isolation_boundary_tests,
     );
-    run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=3");
+    run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=4");
     run_session_host_test_namespace_isolation_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_test_namespace_isolation_boundary_tests.step);
     const session_host_legacy_metadata_consumers_step = b.step(

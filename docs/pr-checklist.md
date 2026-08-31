@@ -81,6 +81,25 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 
 일회성 분류(`duplicate`·`invalid`·`question`·`wontfix`·`good first issue`·`help wanted`)는 이슈용이며 PR 필수 라벨로 치지 않는다.
 
+## CI 게이트 — 무엇이 머지를 막나 (2026-08-31 사용자 결정)
+
+**required check 는 다섯이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·
+`file explorer macOS product path` · `web build and security fixtures`.
+
+**session-host 잡 셋은 required 에서 빠졌고, PR 에서 아예 돌지 않는다**(`session host macOS (Debug)` ·
+`session host bundled CLI macOS` · `session host slow observer macOS`). push(main)·수동 실행에서만 돈다.
+
+왜: 셋 다 **실제 프로세스를 띄우고 타이밍에 매달리는** 게이트라 러너 부하에 취약하고, 그 취약함이
+무관한 PR 을 막아 왔다 — 2026-08-31 에 자식 대기 hang 하나가 32분을 태우고 **PR 다섯을 연달아
+취소**시켰다. main 에서 돌므로 회귀는 몇 시간 안에 드러나고, required 가 아니라서 그때도 다른 PR 을
+막지 않는다.
+
+**`file explorer macOS product path` 는 남겼다** — 골든·CoreText·provider 무변경·AppSession 전수·
+`test-macos-only` 가 전부 그 잡에 묶여 있어 **macOS 제품 경로를 지키는 유일한 required 게이트**다.
+
+되돌리려면 ⑴ 그 셋의 `if:` 에서 `github.event_name != 'pull_request'` 를 빼고 ⑵ branch protection 의
+required 목록에 다시 넣는다(저장소 설정이라 코드에는 없다).
+
 이 규칙은 `.github/workflows/pr-metadata.yml`가 확인한다. 체크 실패가 실제로 머지를 막으려면 GitHub branch protection에서 `PR metadata / require label and assignee=ohah`를 required check로 지정한다(저장소 설정이라 코드에는 없다).
 
 이 워크플로에는 **concurrency(취소)를 두지 않는다.** PR 생성 시 `opened`+`labeled`(라벨 수만큼)+`assigned`가 같은 head SHA에서 거의 동시에 터지는데, concurrency로 묶으면 GitHub이 형제/중간 run을 취소하고 — 그 취소된 run이 required 컨텍스트를 **CANCELLED**로 남겨 — 형제 run이 SUCCESS여도 머지가 BLOCKED된다("체크 전부 green인데 머지 안 됨"의 원인). 묶지 않으면 모든 run이 SUCCESS로 끝나 이 문제가 사라진다(이 job은 5초 read-only라 중복 실행이 싸다). 자세한 근거는 워크플로 주석 참고. ci.yml·performance.yml은 ref 기준 group이라 취소가 항상 이전 커밋(cross-SHA) 대상이라 안전하다.

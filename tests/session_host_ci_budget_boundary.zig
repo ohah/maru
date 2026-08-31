@@ -1,7 +1,11 @@
 //! Session-host Debug 전수 스위트의 CI 시간 예산과 문서 SSOT가 함께 움직이는지 고정한다.
 //!
 //! 이 게이트가 없으면 테스트 수가 늘어 성공 경로가 20분을 넘겨도 workflow 상한만 오래된 채 남고,
-//! assertion 실패가 아닌 `The operation was canceled`가 required check를 막는다.
+//! assertion 실패가 아닌 `The operation was canceled`가 그 잡의 신호를 통째로 덮는다.
+//!
+//! **2026-08-31 부터 이 잡은 required 도 아니고 PR 에서 돌지도 않는다**(사용자 결정 — 실제 프로세스를
+//! 띄우는 게이트라 러너 부하에 취약했고, 그 취약함이 무관한 PR 을 막았다). 그래도 예산은 그대로
+//! 지킨다: push(main) 에서 도는 신호가 `canceled` 로 덮이면 **회귀가 있었는지조차 알 수 없다.**
 
 const std = @import("std");
 
@@ -16,7 +20,7 @@ fn jobBody(workflow: []const u8, name: []const u8, next_name: []const u8) ![]con
     return tail[0..end];
 }
 
-test "session host Debug required job owns the measured 35 minute completion budget" {
+test "session host Debug job owns the measured 35 minute completion budget" {
     const allocator = std.testing.allocator;
     const workflow = try read(allocator, ".github/workflows/ci.yml", 256 * 1024);
     defer allocator.free(workflow);

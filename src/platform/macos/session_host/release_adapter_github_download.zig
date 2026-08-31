@@ -10,6 +10,7 @@ const manifest = @import("release_manifest");
 const identity = @import("release_adapter_identity");
 const process = @import("bounded_process");
 const safe_open = @import("safe_open");
+const download_command = @import("release_adapter_github_download_command");
 
 const max_assets = @typeInfo(manifest.AssetRole).@"enum".fields.len;
 const max_args = 9;
@@ -50,12 +51,8 @@ pub const Expected = struct {
     assets: []const manifest.Asset,
 };
 
-pub const PlanStorage = struct {
-    args: [max_args][]const u8 = undefined,
-    pattern: [manifest.max_asset_name_bytes * 2]u8 = undefined,
-};
-
-pub const Plan = struct { args: []const []const u8 };
+pub const PlanStorage = download_command.PlanStorage;
+pub const Plan = download_command.Plan;
 
 const FileRecord = struct {
     role: manifest.AssetRole = .universal_dmg,
@@ -149,20 +146,7 @@ pub const DownloadedSet = struct {
 
 pub fn plan(storage: *PlanStorage, tag: []const u8, asset: manifest.Asset) Error!Plan {
     if (!identity.canonicalTag(tag) or !validAsset(asset)) return error.InvalidExpected;
-    var used: usize = 0;
-    for (asset.name) |byte| {
-        if (byte == '\\' or byte == '*' or byte == '?' or byte == '[') {
-            if (used == storage.pattern.len) return error.InvalidExpected;
-            storage.pattern[used] = '\\';
-            used += 1;
-        }
-        if (used == storage.pattern.len) return error.InvalidExpected;
-        storage.pattern[used] = byte;
-        used += 1;
-    }
-    const values = [_][]const u8{ "release", "download", tag, "--repo", "ohah/maru", "--pattern", storage.pattern[0..used], "--output", "-" };
-    for (values, 0..) |value, index| storage.args[index] = value;
-    return .{ .args = &storage.args };
+    return download_command.plan(storage, tag, asset.name) catch return error.InvalidExpected;
 }
 
 pub fn validateExpected(expected: Expected) Error!void {

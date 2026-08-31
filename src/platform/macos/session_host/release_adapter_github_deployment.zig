@@ -250,21 +250,31 @@ fn statusesBind(
     var statuses = try parse([]const ApiStatus, allocator, bytes);
     defer statuses.deinit();
     if (statuses.value.len == 0 or statuses.value.len > max_collection_entries) return false;
+    var current_count: u8 = 0;
+    var saw_pending = false;
     for (statuses.value, 0..) |status, index| {
-        if (status.id.value == 0 or status.state.len == 0 or
+        if (status.id.value == 0 or !knownStatus(status.state) or
             !statusAuthorityMatches(status, deployment)) return error.DeploymentMismatch;
         for (statuses.value[0..index]) |earlier| {
             if (earlier.id.value == status.id.value) return error.DeploymentMismatch;
         }
+        if (statusForJob(status, "in_progress", job_url)) {
+            current_count = std.math.add(u8, current_count, 1) catch
+                return error.DeploymentMismatch;
+        }
+        if (statusForJob(status, "pending", job_url)) saw_pending = true;
     }
+    return current_count == 1 and saw_pending;
+}
 
-    const newest = statuses.value[0];
-    if (!statusForJob(newest, "in_progress", job_url)) return false;
-    var saw_waiting = false;
-    for (statuses.value[1..]) |status| {
-        if (statusForJob(status, "waiting", job_url)) saw_waiting = true;
-    }
-    return saw_waiting;
+fn knownStatus(state: []const u8) bool {
+    return std.mem.eql(u8, state, "error") or
+        std.mem.eql(u8, state, "failure") or
+        std.mem.eql(u8, state, "inactive") or
+        std.mem.eql(u8, state, "in_progress") or
+        std.mem.eql(u8, state, "queued") or
+        std.mem.eql(u8, state, "pending") or
+        std.mem.eql(u8, state, "success");
 }
 
 fn statusAuthorityMatches(status: ApiStatus, deployment: ApiDeployment) bool {
@@ -293,7 +303,7 @@ fn statusForJob(status: ApiStatus, state: []const u8, job_url: []const u8) bool 
 }
 
 fn recognizedProtection(environment: github_environment.Observation) bool {
-    if (environment.id == 0 or
+    if (environment.id == 0 or environment.can_admins_bypass or
         !std.mem.eql(u8, environment.name, contract.protected_environment_name)) return false;
     if (environment.required_reviewer_count > 6 or
         (environment.required_reviewer_count == 0 and environment.prevent_self_review) or

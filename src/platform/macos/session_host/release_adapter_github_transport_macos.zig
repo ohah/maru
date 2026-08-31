@@ -65,10 +65,10 @@ fn borrowedFrom(captured: []const u8, supplied: []const u8) bool {
     return captured_start >= supplied_start and captured_end <= supplied_end;
 }
 
-const BoundedExecutor = struct {
+pub const BoundedExecutor = struct {
     io: std.Io,
 
-    fn capture(
+    pub fn capture(
         self: *@This(),
         executable: []const u8,
         child_args: []const []const u8,

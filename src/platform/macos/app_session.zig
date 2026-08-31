@@ -16890,6 +16890,9 @@ pub const AppSession = struct {
         agent_dock.updateAgentSessionArchive(self); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
         agent_dock.updateAgentSessionArchiveDetail(self); // inline detail worker 결과만 drain; open/read/parse는 worker 전용
         agent_dock.refreshAgentSessionArchiveProjectScopeForFocus(self); // active-surface id 비교만; root I/O는 worker
+        // 갤러리의 **범위도 활성 pane 이다**(docs/agent-image-gallery.md §2.1) — 스코프 칩·저장소와 같은
+        // 축으로 따라간다. 여기서도 비교는 surface id 하나이고 스캔 자체는 worker 가 한다.
+        image_gallery_ops.refreshForFocus(self);
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
@@ -74491,6 +74494,128 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
 
     // **여기가 이 test 의 물음이다.** 2 장이면 갤러리가 따라온 것이고, 1 장이면 낡은 것이다.
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+}
+
+// [사용자 보고 2026-08-31] 「변경사항이나 오른쪽 도크가 활성 pane 기준으로 갱신되지 않는다」.
+//
+// 계약 §2.1 은 «포커스가 다른 pane 으로 가면 내용이 따라 바뀐다» 인데 **그 축이 배선돼 있지 않았다.**
+// 갱신을 거는 자리가 뷰 진입(`onEnterView`)·훅(`onSourceChanged`)·`pollFreshness` 셋뿐이었고, 셋 중
+// 어느 것도 「지금 보고 있는 pane 이 바뀌었나」를 묻지 않는다. 그래서 포커스 이동이 세 방향으로 샜다:
+//
+//  ⑴ 빈 갤러리(에이전트 없는 pane) → 에이전트 pane: `chain` 이 비어 `pollFreshness` 가 즉시 물러난다
+//     — **영영** 안 채워지고, 뷰를 껐다 켜야 나왔다.
+//  ⑵ 에이전트 pane → 없는 pane: 소스가 null 이라 역시 물러난다 — **옛 pane 의 이미지가 남는다.**
+//  ⑶ 에이전트 pane → 다른 에이전트 pane: 자국이 달라 잡히기는 하나 **휴지기 뒤**다(최소 500 ms,
+//     직전 스캔이 비쌌으면 최대 90 초 — `restIntervalMs`).
+//
+// 셋을 한 test 에 담는다 — 하나만 짚으면 나머지 둘로 회귀가 돌아온다.
+//
+// **⑶ 은 「한 tick 안에」로 잰다.** 여러 tick 을 기다리면 `pollFreshness` 가 대신 잡아 포커스 훅이
+// 없어도 초록이 된다. 단언 직전에 자국 시각을 «방금» 으로 맞춰 그 경로를 휴지기 안에 가두고, 그래야
+// 이 test 가 재는 것이 포커스 훅 하나로 좁혀진다.
+test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본다 (§2.1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+    const Gallery = struct {
+        /// 스캔이 끝나 그 장수가 뜰 때까지. 워커가 실제로 돌아야 하므로 tick 과 sleep 을 섞는다.
+        fn scanned(sess: *AppSession, want: usize) !void {
+            for (0..5_000) |_| {
+                _ = sess.tick() catch {};
+                if (sess.image_gallery.built and sess.image_gallery.count() == want) return;
+                std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            return error.ScanNeverFinished;
+        }
+
+        /// 「자국을 방금 찍었다」로 만들어 `pollFreshness` 를 휴지기 안에 가둔다 — 그 경로가 대신
+        /// 답하면 포커스 훅이 없어도 아래 단언이 통과한다.
+        fn sealFreshness(sess: *AppSession) void {
+            sess.image_gallery.last_stat_ms = @intCast(@divFloor(std.Io.Clock.awake.now(sess.io).nanoseconds, std.time.ns_per_ms));
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]},\"timestamp\":\"2026-08-30T01:00:00.000Z\"}\n";
+    // 두 세션을 **장수로도** 가른다 — 경로 단언과 함께 보면 「무엇을 보고 있나」가 두 축으로 고정된다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = one });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.jsonl", .data = one ++ one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path_a = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path_a);
+    const path_b = try std.fmt.allocPrint(allocator, "{s}/b.jsonl", .{root});
+    defer allocator.free(path_b);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    // ── pane A: 1 장짜리 세션. 소스를 세우는 것은 훅이므로 그 자리(`onSourceChanged`)로 민다.
+    const pane_a = pane_ops.activePane(session);
+    try std.testing.expect(pane_a.activeTerm().agent_image_source.set(path_a));
+    image_gallery_ops.onSourceChanged(session);
+    try Gallery.scanned(session, 1);
+
+    // ── pane B: 나눠 연 pane 의 세션은 2 장이다(split 은 새 pane 을 활성으로 만든다).
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
+    try std.testing.expect(pane_b != pane_a);
+    try std.testing.expect(pane_b.activeTerm().agent_image_source.set(path_b));
+    image_gallery_ops.onSourceChanged(session);
+    try Gallery.scanned(session, 2);
+
+    // ── ⑶ 포커스만 A 로 되돌린다. 소스는 이미 서 있으므로 여기서 재는 것은 **포커스 훅 하나**다.
+    Gallery.sealFreshness(session);
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, pane_a));
+    _ = session.tick() catch {};
+    try std.testing.expectEqualStrings(path_a, session.image_gallery.chain.head());
+    try Gallery.scanned(session, 1);
+
+    // ── ⑵ 에이전트가 안 붙은 pane 으로 가면 **비운다.** 남겨 두면 사용자는 그 이미지를 지금 보는
+    //     터미널의 것으로 읽는다. `pollFreshness` 는 이 방향을 원리적으로 못 잡는다(소스가 null 이라
+    //     그 함수가 그 자리에서 물러난다) — 그래서 여기는 자국을 봉인하지 않아도 훅만 잰다.
+    try pane_ops.splitActivePane(session, .vertical);
+    const pane_c = pane_ops.activePane(session);
+    try std.testing.expect(pane_c != pane_a and pane_c != pane_b);
+    try std.testing.expect(pane_c.activeTerm().agent_image_source.isEmpty());
+    _ = session.tick() catch {};
+    try std.testing.expect(session.image_gallery.chain.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+
+    // ── ⑴ 그 빈 상태에서 다시 에이전트 pane 으로. 옛 동작에서 **영영 안 채워지던** 자리다.
+    //
+    // **빈 상태를 앞 단계에 기대지 않는다.** ⑵ 가 비워 준 것을 그대로 쓰면 이 단언은 「⑵ 가 돌았다」
+    // 위에 서게 되어, 훅을 떼어도 갤러리가 b 를 든 채라 **그대로 통과한다**(적대적 검증에서 실제로
+    // 초록이었다). 뷰를 나갔다 들어와 «에이전트 없는 pane 에서 갤러리를 열었다» 를 제품 경로로 다시
+    // 만든다 — 그러면 이 단언 하나가 ⑴ 방향을 단독으로 잡는다.
+    dock_ops.setDockView(session, .explorer);
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(session.image_gallery.chain.isEmpty());
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, pane_b));
+    _ = session.tick() catch {};
+    try std.testing.expectEqualStrings(path_b, session.image_gallery.chain.head());
+    try Gallery.scanned(session, 2);
 }
 
 test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 보기 중에는 미룬다 (IG2-b)" {

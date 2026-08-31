@@ -194,6 +194,14 @@ pub const State = struct {
     /// 이 인덱스를 만든(또는 만들고 있는) 파일 **묶음**. 첫 파일이 현재 세션이고, 재개면 부모가
     /// 뒤에 붙는다(§3.3). 활성 Term 의 것과 첫 파일이 다르면 무효다.
     chain: index.Chain = .{},
+    /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
+    /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
+    /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
+    /// 탭이 0 개인 창도 그 값을 낸다(`activeSourceSurfaceId`).
+    ///
+    /// **`clear` 가 지우지 않는다.** 소스를 비우는 것은 「그 pane 에 볼 것이 없다」이지 「그 pane 을
+    /// 안 보고 있다」가 아니다 — 여기서 함께 지우면 같은 pane 에 머무는 내내 매 tick 다시 훑는다.
+    focus_surface_id: u64 = 0,
     /// 스캔이 찾은 **전부**. 필터의 원본이라 여기서는 아무것도 빼지 않는다.
     all_hits: std.ArrayList(index.Hit) = .empty,
     all_labels: std.ArrayList(context.Label) = .empty,
@@ -628,6 +636,49 @@ pub fn refresh(self: *AppSession, force: bool) void {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
         self.image_gallery.resubmit = true;
     }
+}
+
+/// **포커스가 다른 pane 으로 가면 그 pane 의 세션으로 갈아탄다**(계약 §2.1 — 「포커스가 다른 pane 으로
+/// 가면 내용이 따라 바뀐다」).
+///
+/// 이 훅이 없던 동안 갤러리를 갱신하는 자리는 둘뿐이었고(뷰 진입·`pollFreshness`), 후자는 **같은 파일이
+/// 자랐나**를 묻는 자리라 포커스 이동을 세 방향 모두 놓쳤다:
+///
+///  ⑴ 에이전트가 안 붙은 pane 에서는 `chain` 이 비어 즉시 물러난다 → 에이전트 pane 으로 옮겨도
+///     **영영 안 채워진다**(뷰를 껐다 켜야 했다).
+///  ⑵ 반대 방향은 `activeSourcePath` 가 null 이라 역시 물러난다 → **옛 pane 의 이미지가 남는다.**
+///  ⑶ 양쪽 다 에이전트면 자국이 달라 잡히기는 하나 **휴지기 뒤**다 — 최소 500 ms 이고 직전 스캔이
+///     비쌌으면 최대 90 초다(`restIntervalMs`).
+///
+/// 그래서 **활성 surface id** 하나를 보고 바뀐 순간에 건다. 에이전트 세션 도크가 스코프를 같은 방식으로
+/// 따라가고(`refreshAgentSessionArchiveProjectScopeForFocus`), 소스 컨트롤은 `followActiveTerminalRepo`
+/// 로 같은 일을 한다 — 도크의 세 뷰가 같은 축을 쓴다.
+///
+/// **비운다/채운다를 여기서 가르지 않는다.** `refresh` 가 「소스가 없으면 비운다」 갈래를 이미 갖고
+/// 있으므로 그 판정을 여기 복사하지 않는다 — 두 자리에 두면 한쪽만 고쳐진다.
+pub fn refreshForFocus(self: *AppSession) void {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    const surface_id = activeSourceSurfaceId(self);
+    if (self.image_gallery.focus_surface_id == surface_id) return;
+    self.image_gallery.focus_surface_id = surface_id;
+    refresh(self, false);
+}
+
+/// 뷰로 들어올 때 한 번 훑는다(계약 §4.1) — **그리고 그 순간의 pane 을 기록한다.** 기록하지 않으면
+/// 곧바로 다음 tick 의 `refreshForFocus` 가 같은 소스로 스캔을 한 번 더 건다(1.68 GB 짜리 파일이 있다).
+pub fn onEnterView(self: *AppSession) void {
+    self.image_gallery.focus_surface_id = activeSourceSurfaceId(self);
+    refresh(self, false);
+}
+
+/// 지금 갤러리가 보는 pane 의 surface id. `activeSourcePath` 와 **같은 축**(활성 pane 의 활성 Term)을
+/// 봐야 「소스를 고른 pane」과 「바뀌었나를 재는 pane」이 갈리지 않는다.
+///
+/// 탭이 0 개인 창은 `0` 이다 — merge·이동으로 비워진 뒤 Swift 가 닫기 전 tick 이 있고, 그때
+/// `activePane()` 이 빈 리스트를 인덱싱해 패닉한다(`activeSourcePath` 가 같은 가드를 두는 그 이유다).
+fn activeSourceSurfaceId(self: *AppSession) u64 {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
+    return pane_ops.activePane(self).activeTerm().surface.id;
 }
 
 /// tick 마다 부른다. 완료본을 가져오고, 못 걸었던 요청을 다시 건다.

@@ -12478,6 +12478,76 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_github_deployment_tests.step);
         test_step.dependOn(&run_github_deployment_tests.step);
     }
+    const session_host_release_adapter_github_transport_step = b.step(
+        "test-session-host-release-adapter-github-transport",
+        "Validate closed bounded GitHub REST transport requests for the release adapter",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_transport_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = github_transport_optimize,
+        });
+        const github_transport_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_transport.zig"),
+            .target = target,
+            .optimize = github_transport_optimize,
+            .imports = &.{
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = github_transport_optimize,
+                    }),
+                },
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = github_transport_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+            },
+        });
+        const github_transport_macos_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_transport_macos.zig"),
+            .target = target,
+            .optimize = github_transport_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "release_adapter_github_transport", .module = github_transport_mod },
+                .{
+                    .name = "bounded_process",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                        .target = target,
+                        .optimize = github_transport_optimize,
+                    }),
+                },
+            },
+        });
+        const github_transport_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_transport.zig"),
+                .target = target,
+                .optimize = github_transport_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_github_transport", .module = github_transport_mod },
+                    .{ .name = "release_adapter_github_transport_macos", .module = github_transport_macos_mod },
+                },
+            }),
+        });
+        const run_github_transport_tests = b.addRunArtifact(github_transport_tests);
+        run_github_transport_tests.addArg("--maru-expect-tests=11");
+        run_github_transport_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_transport_step.dependOn(&run_github_transport_tests.step);
+        session_host_step.dependOn(&run_github_transport_tests.step);
+        test_step.dependOn(&run_github_transport_tests.step);
+    }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",
@@ -12638,7 +12708,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
-        run_bounded_process_tests.addArg("--maru-expect-tests=4");
+        run_bounded_process_tests.addArg("--maru-expect-tests=6");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         session_host_step.dependOn(&run_bounded_process_tests.step);

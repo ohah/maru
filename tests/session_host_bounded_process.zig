@@ -17,6 +17,23 @@ test "bounded process captures merged stdout and stderr at the exact byte cap" {
     );
 }
 
+test "bounded process stdout-only capture never admits stderr into protocol bytes" {
+    var output: [4]u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf json; printf warning >&2" };
+    const environment = [_:null]?[*:0]const u8{};
+    try std.testing.expectEqualStrings(
+        "json",
+        try process.runCaptureEnvironmentStdout(
+            std.testing.io,
+            shell,
+            &argv,
+            &environment,
+            &output,
+            std.time.ns_per_s,
+        ),
+    );
+}
+
 test "bounded process rejects cap plus one without publishing a prefix" {
     var output: [4]u8 = undefined;
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde" };
@@ -67,4 +84,21 @@ test "bounded process timeout kills a descendant that retains the capture pipe" 
     const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
     try std.testing.expect(elapsed >= 50 * std.time.ns_per_ms);
     try std.testing.expect(elapsed < std.time.ns_per_s);
+}
+
+test "bounded process can replace inherited environment exactly" {
+    var output: [64]u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '%s|%s' \"$ONLY_CHILD\" \"${HOME-unset}\"" };
+    const environment = [_:null]?[*:0]const u8{"ONLY_CHILD=present"};
+    try std.testing.expectEqualStrings(
+        "present|unset",
+        try process.runCaptureEnvironment(
+            std.testing.io,
+            shell,
+            &argv,
+            &environment,
+            &output,
+            std.time.ns_per_s,
+        ),
+    );
 }

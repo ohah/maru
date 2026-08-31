@@ -71,5 +71,10 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     try std.testing.expect(std.mem.indexOf(u8, body, "cwd_host.items") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "ssh_remote_dest_present") != null);
 
-    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, ".fns = &.{ \"termCwd\", \"termCwdForDisplay\" }"));
+    // **커널 축 둘이 그 파일의 재고에 그대로 있는가.** 접두를 붙여 세지 않는 이유가 있다: 같은 파일의
+    // 재고에는 커널 cwd 와 **무관한 이름**이 늘 수 있다. 실제로 `remoteScmTarget`(RS2 — 원격 SCM)이
+    // 늘었는데, 그 함수는 관측(OSC 7)만 읽고 **커널 조회를 하지 않아** K3 의 축과 다른 축이다.
+    // 여기서 재고 줄 전체를 대조하면 그런 무관한 증가마다 이 게이트가 빨개지고, 그 빨강은 K3 가
+    // 지키려는 사실(커널 축이 둘로 유지된다)에 대해 아무것도 말하지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, "\"termCwd\", \"termCwdForDisplay\" }"));
 }

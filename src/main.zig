@@ -1811,7 +1811,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1132;
+const smoke_spin_cap: usize = 1146;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4529,6 +4529,12 @@ const ScmDockInputs = struct {
     /// 누른 자리와 열리는 자리가 안 갈린다.
     built: *?scm_surface.Built,
     clip: *ListClip,
+    /// 목록 스크롤. **규칙은 중립이 소유한다**(`chrome.ui.scroll_area`) — 에이전트 목록과 같다.
+    scroll: *maru.chrome.ui.scroll_area.State,
+    /// 지난 프레임이 발행한 목록 뷰포트 높이(첫 프레임은 0).
+    viewport_h: *u32,
+    /// 지난 투영이 낸 상한 — 휠이 쓴다.
+    max_offset: *u32,
 };
 
 /// 뷰 스위처 바 — **칸 세 개와 지금 뷰의 강조**. 아이콘은 아직 안 그린다(⒞3) — 칸이 눌리고 내용이
@@ -4790,7 +4796,17 @@ fn appendScmDockCells(
         .cell_h = cell_h,
         .viewport_w = area.w,
         .viewport_h = area.h,
-    }, scm.state, scm.opts) catch return;
+    }, scm.state, blk: {
+        var o = scm.opts;
+        o.scroll_offset_px = scm.scroll.offset_y_px;
+        o.list_viewport_h = scm.viewport_h.*;
+        break :blk o;
+    }) catch return;
+    // **상한이 줄면 지금 자리도 줄여야 한다** — 파일이 스테이지되어 목록이 짧아졌는데 offset 이 그대로면
+    // 빈 바닥이 보인다(중립 `scroll_area.State.clamp` 가 그 규칙을 갖고 있다).
+    scm.scroll.clamp(built.scroll_max_offset_px);
+    scm.max_offset.* = built.scroll_max_offset_px;
+    if (built.list_viewport_h_px != 0) scm.viewport_h.* = built.list_viewport_h_px;
     // **버리지 않고 슬롯에 둔다** — 이 표면의 히트테스트는 `Built` 안의 published tree 를 본다.
     // 버리면 화면에는 그려지는데 **눌리지 않는** 죽은 컨트롤이 된다(§2m.31 이 이름 붙인 실패).
     if (scm.built.*) |*old_built| old_built.deinit();
@@ -5635,6 +5651,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         scm_status = readRepoStatus(io, allocator, repo) catch &.{};
     }
     var scm_clip: ListClip = .{};
+    var scm_scroll: maru.chrome.ui.scroll_area.State = .{};
+    var scm_scroll_view_h: u32 = 0;
+    var scm_scroll_max: u32 = 0;
+    var scm_scrolls: usize = 0;
+    var sscroll_judgeable = false;
+    var sscroll_max: u32 = 0;
+    var sscroll_off: u32 = 0;
+    var sscroll_first_y_before: f32 = 0;
+    var sscroll_first_y_after: f32 = 0;
+    // **음수가 정상값이다** — 굴리면 첫 행이 뷰포트 위로 올라간다. 그래서 "값이 있나" 를 부호로 물으면
+    // 안 된다(실측: `-132` 을 "없다" 로 읽어 판정이 빨갰다).
+    var sscroll_before_seen = false;
+    var sscroll_after_seen = false;
+    var sscroll_last_bottom: f32 = -1;
+    var sscroll_view_bottom: f32 = -1;
     var agent_clip: ListClip = .{};
     var agent_scroll: maru.chrome.ui.scroll_area.State = .{};
     var agent_scroll_view_h: u32 = 0;
@@ -5864,7 +5895,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .tokens = &scm_tokens,
         .items = agent_items.items,
     };
-    const scm_opts = scm_surface.Options{
+    var scm_opts = scm_surface.Options{
         .status_text = scm_status,
         .font_family = cfg.font.family,
         .font_fallback = cfg.font.fallback,
@@ -6006,7 +6037,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var view_bar_glyph_top: ?f32 = null;
     defer if (view_bar_frame) |*f| f.deinit(allocator);
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -6486,7 +6517,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 1061 and dock_view == .agent_sessions) agent_clip.reset();
         // 한 번 더 짓게 만든다(창을 건드리지 않고 목록만 다시 그린다).
         if (smoke and spins == 1062 and dock_view == .agent_sessions) {
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             agent_clip_judgeable = true;
             agent_clip_overflow = agent_scroll_max;
             agent_clip_cut = agent_clip.cut;
@@ -6881,6 +6912,101 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 1126 and alate_judgeable) {
             alate_turns = agent_detail.turns.len;
             alate_expanded = agent_state.expanded_identity;
+        }
+        // ── 소스 컨트롤 목록이 굴러가는가 (W8.22) ──────────────────────────────────────
+        //
+        // **저장소를 건드리지 않는다.** 이 판정은 넘치는 목록이 필요한데, 파일을 만들면 사용자의 작업
+        // 트리를 바꾼다 — 그래서 `git status` 원문을 **메모리에서** 길게 지어 표면에 넘긴다(그 표면의
+        // 입력이 그 문자열 하나다). 디스크는 안 만진다.
+        if (smoke and spins == 1130 and geom.view_bar.w != 0) {
+            const bar_s = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_s, cell_w, 1)) |rs| {
+                window.postSyntheticMouse(.left_down, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
+                window.postSyntheticMouse(.left_up, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
+            }
+        }
+        if (smoke and spins == 1132 and dock_view == .source_control) {
+            var synth: std.ArrayList(u8) = .empty;
+            defer synth.deinit(allocator);
+            synth.appendSlice(allocator, "# branch.oid aaaa\n# branch.head smoke\n") catch {};
+            var f: usize = 0;
+            while (f < 40) : (f += 1) {
+                var line_buf: [96]u8 = undefined;
+                const line = std.fmt.bufPrint(&line_buf, "1 .M N... 100644 100644 100644 aaa bbb src/smoke_{d}.zig\n", .{f}) catch break;
+                synth.appendSlice(allocator, line) catch break;
+            }
+            if (synth.items.len > 0) {
+                const owned: []u8 = allocator.dupe(u8, synth.items) catch &[_]u8{};
+                if (owned.len > 0) {
+                    // **소유권을 한 자리에 유지한다** — 이 변수의 `defer` 가 하나만 놓는다.
+                    if (scm_status.len != 0) allocator.free(scm_status);
+                    scm_status = owned;
+                    scm_opts.status_text = scm_status;
+                    scm_state.invalidateTree();
+                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                }
+            }
+        }
+        // **"모두 보기" 를 누른다.** 섹션은 기본 10행까지만 보이므로(중립 `default_section_rows` — 그
+        // 값의 doc: *"섹션이 스크롤 저 아래로 밀려 있는지조차 모르게 된다"*) 그대로는 안 넘친다.
+        // 넘치는 상태는 사용자가 그 줄을 눌러 만드는 것이고, 판정도 그 길을 밟는다.
+        if (smoke and spins == 1133 and dock_view == .source_control) {
+            if (scm_built) |*b| {
+                var idx: usize = 0;
+                while (idx < b.items.len) : (idx += 1) {
+                    if (b.items[idx] == .more) break;
+                }
+                if (idx < b.items.len) {
+                    for (b.frame.tree.entries) |e| {
+                        if (e.id != maru.chrome.components.scm_dock.build.NodeIds.item(idx)) continue;
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(e.rect.x + e.rect.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(e.rect.y + e.rect.height / 2)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                }
+            }
+        }
+        if (smoke and spins == 1135 and dock_view == .source_control and scm_scroll_max > 0) {
+            sscroll_judgeable = true;
+            sscroll_max = scm_scroll_max;
+            if (scm_built) |*b| {
+                for (b.frame.tree.entries) |e| {
+                    if (e.id == maru.chrome.components.scm_dock.build.NodeIds.item(0)) {
+                        sscroll_first_y_before = e.rect.y;
+                        sscroll_before_seen = true;
+                    }
+                }
+            }
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -1);
+        }
+        if (smoke and spins == 1137 and sscroll_judgeable) {
+            sscroll_off = scm_scroll.offset_y_px;
+            if (scm_built) |*b| {
+                for (b.frame.tree.entries) |e| {
+                    if (e.id == maru.chrome.components.scm_dock.build.NodeIds.item(0)) {
+                        sscroll_first_y_after = e.rect.y;
+                        sscroll_after_seen = true;
+                    }
+                }
+            }
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -60); // 끝까지
+        }
+        if (smoke and spins == 1140 and sscroll_judgeable) {
+            if (scm_built) |*b| {
+                // **끝은 막대가 말한다.** 행 rect 로 재려면 그 목록의 id 규칙에 기대야 하는데(실측으로
+                // 안 맞았다), 발행된 thumb·track 은 어느 목록이든 같은 사실을 말한다 — 끝까지 굴리면
+                // thumb 바닥이 track 바닥이다. 스크롤바가 그려지는지도 함께 재진다.
+                const nid = maru.chrome.components.scm_dock.build.NodeIds;
+                for (b.frame.tree.entries) |e| {
+                    if (e.id == nid.scroll_thumb) sscroll_last_bottom = e.rect.y + e.rect.height;
+                    if (e.id == nid.scroll_track) sscroll_view_bottom = e.rect.y + e.rect.height;
+                }
+            }
         }
         if (smoke and spins == 1076 and bdrag_judgeable) {
             if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
@@ -8015,7 +8141,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             aime_items_before = b.items.len;
             agent_search.setPreedit(allocator, "\u{3134}" ++ "\u{3161}") catch {};
             agent_opts.search_preedit = agent_search.preedit.items;
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
         };
         if (smoke and spins == 760 and aime_judgeable) {
             if (agent_built) |*b| {
@@ -8593,7 +8719,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_detail_requests += 1;
                 agent_detail.request_id = agent_detail_requests;
                 agent_detail_pending = false;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         // ── 펼친 카드의 상세 받기 (W8.22) ──────────────────────────────────────────────
@@ -8629,7 +8755,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             projectAgentItems(da.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
             agent_opts.items = agent_items.items;
             agent_state.invalidateTree();
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             agent_redraws += 1;
         }
         // 이력이 아직 안 왔고 올 가능성이 있으면 단계 번호를 멈춰 세운다 — 상한을 둔다(이력이
@@ -8642,7 +8768,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".")) {
             tree_scan_applied += 1;
             if (tree_expand_submit_spin != null and tree_expand_apply_spin == null) tree_expand_apply_spin = spins;
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
         }
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
@@ -8670,7 +8796,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                     dock_rebuild_failures += 1;
                 };
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
@@ -8789,7 +8915,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         agent_opts.search_preedit = agent_search.preedit.items;
                         agent_opts.search_focused = agent_search_focused;
                         agent_state.invalidateTree();
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                         agent_redraws += 1;
                     }
                     continue;
@@ -8868,7 +8994,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         agent_search.setPreedit(allocator, text) catch {};
                         preedit_to_search += 1;
                         agent_opts.search_preedit = agent_search.preedit.items;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                     },
                     .terminal => {
                         if (app_window.active()) |active| {
@@ -8940,7 +9066,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     dock_scroll_px = next;
                                     dock_scrolls += 1;
                                     bar_drag_moves += 1;
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                 }
                             } else if (next != sidebar_scroll_px) {
                                 sidebar_scroll_px = next;
@@ -8981,7 +9107,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         const next = drag.geom.offsetForPointer(u.y_px, drag.grab_dy);
                                         if (agent_scroll.setOffsetPx(@intCast(next), agent_scroll_max)) {
                                             agent_scrolls += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                             agent_redraws += 1;
                                         }
                                     }
@@ -9008,7 +9134,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             bar_track_clicks += 1;
                             if (on_dock) {
                                 dock_scroll_px = next;
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                             } else {
                                 sidebar_scroll_px = next;
                                 sidebar_redraws += 1;
@@ -9056,7 +9182,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -9321,7 +9447,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     const unit_px: f64 = @as(f64, @floatFromInt(wheel_lines_per_notch *| cell_h)) / 120.0;
                     if (agent_scroll.scrollByWheel(@floatFromInt(m.wheel_delta), unit_px, agent_scroll_max)) {
                         agent_scrolls += 1;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                    }
+                }
+                // ── 소스 컨트롤 목록 스크롤 (W8.22) ────────────────────────────────
+                //
+                // 에이전트 목록과 **같은 규칙**이다 — 잔여·clamp·투영을 중립이 들고, 여기서는 눈금과
+                // 상한만 준다. 뷰마다 주인이 다르므로 갈래를 가른다(§2m.96 5회차가 그 누수를 잡았다).
+                if (region == .dock_content and m.kind == .wheel and dock_view == .source_control) {
+                    const unit_px: f64 = @as(f64, @floatFromInt(wheel_lines_per_notch *| cell_h)) / 120.0;
+                    if (scm_scroll.scrollByWheel(@floatFromInt(m.wheel_delta), unit_px, scm_scroll_max)) {
+                        scm_scrolls += 1;
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                     }
                 }
                 if (region == .dock_content and m.kind == .wheel and dock_view == .explorer) {
@@ -9338,7 +9475,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (clamped != dock_scroll_px) {
                             dock_scroll_px = clamped;
                             dock_scrolls += 1;
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                         }
                     }
                     continue;
@@ -9367,6 +9504,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 남은 조각만큼 더/덜 움직인다 — §2m.84 가 표면 사이에서 겪은
                                     // 그 실패의 뷰 판이다(적대적 검증 3회차).
                                     agent_scroll.dropWheelResidue();
+                                    scm_scroll.dropWheelResidue();
                                     // **쥔 것도 놓는다.** 뷰가 바뀌면 그 막대는 화면에 없다 — 안 놓으면
                                     // 돌아왔을 때 지나가기만 해도 목록이 튄다(적대적 검증 4회차).
                                     agent_bar_drag = null;
@@ -9375,7 +9513,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -9470,7 +9608,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         agent_opts.search_preedit = agent_search.preedit.items;
                                         agent_opts.search_focused = true;
                                         agent_state.invalidateTree();
-                                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                         agent_redraws += 1;
                                         if (search_focused) {
                                             search_focused = false;
@@ -9543,7 +9681,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                 agent_redraws += 1;
                             }
                         }
@@ -9572,7 +9710,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -9666,7 +9804,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (toggleTreeRow(allocator, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path, &submitted)) {
                                             if (submitted and tree_expand_submit_spin == null) tree_expand_submit_spin = spins;
                                             dock_row_toggles += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                         }
                                     };
                                 }
@@ -10111,7 +10249,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -10174,7 +10312,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (dock_scroll_px > dock_max) {
                 dock_scroll_px = dock_max;
                 dock_clamps += 1;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         // ── 눈이 따라간다 (W8.18a) ──────────────────────────────────────────────────────
@@ -10333,7 +10471,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             } else |_| editor_build_failures += 1;
             if (atlas_w != atlas_before_w or atlas_h != atlas_before_h) {
                 editor_atlas_growths += 1;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
             }
         } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
@@ -11588,6 +11726,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 alate_expanded,
                 alate_turns,
                 late_ok,
+            });
+        }
+        {
+            // **소스 컨트롤 목록이 굴러가는가.** 에이전트와 같은 것을 잰다 — 상태만 보면 속 빈다:
+            // 그린 자리(발행된 첫 행의 y)가 그만큼 올라갔는지, 끝까지 굴리면 마지막 행의 바닥이
+            // 뷰포트 바닥에 오는지.
+            const s_moved = sscroll_before_seen and sscroll_after_seen and
+                @abs((sscroll_first_y_before - sscroll_first_y_after) - @as(f32, @floatFromInt(sscroll_off))) < 1.5;
+            const s_end = sscroll_last_bottom >= 0 and sscroll_view_bottom >= 0 and
+                @abs(sscroll_last_bottom - sscroll_view_bottom) < 1.5;
+            const s_ok = sscroll_judgeable and sscroll_off > 0 and s_moved and s_end and scm_scrolls > 0;
+            try stdout.print("scm_scroll: judgeable={} max={d} off={d} first_y {d}->{d} thumb_bottom={d} track_bottom={d} scrolls={d} scm_scroll_ok={}\n", .{
+                sscroll_judgeable,
+                sscroll_max,
+                sscroll_off,
+                sscroll_first_y_before,
+                sscroll_first_y_after,
+                sscroll_last_bottom,
+                sscroll_view_bottom,
+                scm_scrolls,
+                s_ok,
             });
         }
         {

@@ -160,6 +160,10 @@ pub const ColorRole = enum {
     /// 흘리는 대신 이 토큰 층이 보수적 폴백을 소유한다.
     danger_bg,
     danger_fg,
+    /// **패널 배경 위의 «막혔다» 글자.** `danger_fg`(흰색)는 *붉은 배경 위의* 글자색이라 이 자리에
+    /// 쓰면 중립 안내와 구별이 안 된다 — 실제로 그렇게 썼다가 캡처가 순백으로 나왔다(2026-08-31).
+    /// `danger_bg`(붉은 면)도 아니다. 이 role 은 **면 없이 붉은 글자**다.
+    danger_text,
     /// git 상태 색(소스 컨트롤 목록의 상태 문자·아이콘). **`danger_*`와 같은 규율**로 이 층이 보수적
     /// 폴백을 소유한다 — `ThemeColors`에 semantic 입력(성공/경고)이 아직 없기 때문이고, 생기면 이
     /// 매핑만 바뀐다(컴포넌트 코드는 역할만 읽으므로 불변).
@@ -432,6 +436,11 @@ pub const Tokens = struct {
         // replace this mapping once, without changing Card variants or Metal lowering.
         palette.set(.danger_bg, .{ .r = 176, .g = 52, .b = 60 });
         palette.set(.danger_fg, .{ .r = 255, .g = 255, .b = 255 });
+        // 위 둘과 같은 자리의 보수적 폴백이다(`ThemeColors.error` 가 생기면 셋이 함께 바뀐다).
+        // 어두운 패널에서 **대비 6.7**(실측, 배경 rgb(10,10,10)) — AA(4.5) 위이고 붉은 것이 또렷하다.
+        // `git_deleted_fg`(199,84,80)보다 밝다: 그쪽은 파일 행의 상태색이라 목록에 묻혀도 되지만,
+        // 이 글자는 **동작이 멈췄다**는 말이라 먼저 읽혀야 한다.
+        palette.set(.danger_text, .{ .r = 224, .g = 120, .b = 118 });
         // 고친 것은 **테마 accent**를 쓴다 — 목록에서 가장 흔한 상태이고, 창 전체의 시그니처 색과 같은
         // 계열이어야 도크만 남의 팔레트로 보이지 않는다(VS Code도 M을 노랑/앰버 계열로 둔다).
         palette.set(.git_modified_fg, theme.accent);

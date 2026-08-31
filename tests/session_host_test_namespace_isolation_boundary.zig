@@ -99,7 +99,15 @@ test "macOS product smoke children bind workspace and session registry to one fi
         build,
         "fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") != null);
+    // **pid 를 `std.posix`·`std.c` 로 묻지 않는다.** 그 참조 하나가 빌드 스크립트에 libc 를 명시적으로
+    // 요구하게 만들어(`dependency on libc must be explicitly specified`) **Windows 호스트에서 build.zig
+    // 자체가 안 열린다** — 이 함수가 macOS 전용인 것과 무관하다(build.zig 는 모든 호스트가 컴파일한다).
+    // 실측 2026-08-31: 로컬 Windows 빌드가 `zig build` 부터 죽었고, Windows 러너가 없어 CI 는 못 봤다.
+    //
+    // 이 게이트가 지키려는 것은 **「이 빌드 프로세스만의 자리」가 있다**는 사실이지 그 자리를 무엇으로
+    // 만드는가가 아니다. 그래서 이식성 있는 식별자를 요구하고, libc 를 끌어오는 두 형태를 금지한다.
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.Thread.getCurrentId()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") == null);
     try std.testing.expect(std.mem.indexOf(u8, build, "std.c.getpid()") == null);
     const product_smokes = [_][]const u8{
         "macos_divider_smoke",

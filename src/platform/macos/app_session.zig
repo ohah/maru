@@ -22856,13 +22856,24 @@ test "훅 턴 시각: 중단 뒤 새 프롬프트는 옛 턴의 시각을 물려
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-ts" });
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-1" });
     try std.testing.expect(term.agent_hook_progress.turn_open);
-    const first_open = term.agent_hook_turn_opened_wall_ns;
-    try std.testing.expect(first_open != 0);
+    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != 0);
 
     // **`Stop` 없이** 턴 2 가 시작된다(= 중단된 턴 뒤의 새 프롬프트). 옛 시각을 물려받으면 안 된다.
+    //
+    // **두 시각을 «다르다» 로 비교하지 않는다.** 옛 판은 턴 1 의 값을 들고 있다가
+    // `!= first_open` 을 단언했는데, 두 프롬프트가 **같은 클럭 눈금 안**에 들어오면 올바르게
+    // 다시 찍고도 값이 같아진다 — 빠른 기계에서만 깨지는 단언이다(`docs/performance-budget.md`
+    // 가 말하는 「기계 속도에 답이 달린 판정」의 한 종류다).
+    //
+    // 대신 **클럭이 낼 수 없는 표식**으로 덮고, 다시 찍혔는지를 값의 크기로 본다. 물려받는
+    // 회귀는 표식을 그대로 남기므로 해상도와 무관하게 잡힌다.
+    const sentinel: i96 = 1;
+    term.agent_hook_turn_opened_wall_ns = sentinel;
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-2" });
     try std.testing.expect(term.agent_hook_progress.turn_open);
-    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != first_open);
+    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != sentinel);
+    // 그리고 **실제 벽시계**를 찍었다 — 아무 상수나 넣은 것이 아니다(2020-01-01 이후).
+    try std.testing.expect(term.agent_hook_turn_opened_wall_ns > 1_577_836_800 * @as(i96, std.time.ns_per_s));
 
     // 턴이 닫히면 0 으로 돌아간다 — «열려 있지 않다» 를 시각으로 주장하지 않는다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .stop, .session_id = "S-ts", .turn_key = "turn-2" });

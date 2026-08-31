@@ -117,6 +117,9 @@ const Table = struct {
     app_file_send_start_failed: [:0]const u8,
     app_file_send_failed: [:0]const u8,
     app_image_send_sync_failed: [:0]const u8,
+    /// 원격 에이전트 상태 채널을 여러 번 다시 붙어도 계속 끊겨 포기했다(RA5-b/c).
+    /// **조용히 내리지 않는다** — 사용자에게는 「어느 순간부터 배지가 안 뜬다」로만 보이기 때문이다.
+    agent_remote_channel_gave_up: [:0]const u8,
     app_image_send_too_large: [:0]const u8,
     app_image_send_prepare_failed: [:0]const u8,
     app_image_send_oom: [:0]const u8,
@@ -867,6 +870,7 @@ const en: Table = .{
     .app_file_send_start_failed = "Could not start the remote file transfer. Check the file size and permissions.",
     .app_file_send_failed = "The remote file transfer failed. Check the SSH connection and try again.",
     .app_image_send_sync_failed = "Could not sync session info. Try the image transfer again.",
+    .agent_remote_channel_gave_up = "Lost the remote agent status channel. Session badges stop updating until you reopen the remote pane.",
     .app_image_send_too_large = "The remote image transfer limit is 16MB. It did not fall back to a local paste.",
     .app_image_send_prepare_failed = "Could not prepare the remote image transfer. It did not fall back to a local paste.",
     .app_image_send_oom = "Not enough memory to prepare the remote image transfer. It did not fall back to a local paste.",
@@ -1455,6 +1459,7 @@ const ko: Table = .{
     .app_file_send_start_failed = "원격 파일 전송을 시작하지 못했습니다. 파일 크기와 접근 권한을 확인해주세요.",
     .app_file_send_failed = "원격 파일 전송에 실패했습니다. SSH 연결을 확인한 뒤 다시 시도해주세요.",
     .app_image_send_sync_failed = "세션 정보를 동기화하지 못했습니다. 이미지 전송을 다시 시도해주세요.",
+    .agent_remote_channel_gave_up = "원격 에이전트 상태 채널이 끊겼습니다. 그 원격 팬을 다시 열기 전까지 세션 배지가 갱신되지 않습니다.",
     .app_image_send_too_large = "원격 이미지 전송 한도는 16MB입니다. 로컬 붙여넣기로 전환하지 않았습니다.",
     .app_image_send_prepare_failed = "원격 이미지 전송을 준비하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.",
     .app_image_send_oom = "원격 이미지 전송을 준비할 메모리가 부족합니다. 로컬 붙여넣기로 전환하지 않았습니다.",

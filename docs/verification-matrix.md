@@ -966,6 +966,14 @@ typed nested observation에 결속하고 ephemeral leaf SHA나 raw base64를 dur
 artifact attestation과 release workflow 배선은 여전히 미구현이므로 이 component green만으로 U5 release나 G3 준비·출하를
 주장하지 않는다.
 
+U5 Release evidence filesystem 조립은 `release_evidence_files.zig`가 profile별 exact leaf를
+`release_adapter_files.readInputAlloc`로 bounded no-follow read하고 opened `(device,inode)` distinctness를 확인한 뒤 OS 중립
+aggregate core에 전달한다. canonical bytes를 expected identity에 다시 bind한 뒤에만 absent output에
+`publishSummaryExclusive`하며, symlink·hardlink alias·malformed/mismatch·기존 output·allocation failure에서는 publication 0이다.
+`test-session-host-release-evidence-files`가 이를 actual macOS filesystem의 Debug·ReleaseFast gate로 검증한다. 이 행은 caller
+identity의 GitHub provenance, signed leaf 생산, artifact attestation이나 release workflow 배선을 완료로 바꾸지 않는다.
+special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`가 소유하며 이 조립 gate의 직접 증거가 아니다.
+
 U5의 non-empty 성공 경로는 `test-session-host-signed-upgrade`로 자동 실행할 수 있다. 이 opt-in gate는 strict
 same-designated-requirement signer인 caller-attested frozen N-1/current executable을 받아 echo를 끈 실제 PTY shell의
 pre/post child output, 동일 host/child PID·host/runtime ID, epoch/build 전진과 `committed/none`, capability 유지,

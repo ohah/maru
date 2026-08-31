@@ -1,6 +1,6 @@
 //! macOS 외부 관측 명령의 단일 bounded process 실행 경계.
 //!
-//! Release adapter와 upgrade codesign은 같은 fork/exec, merged capture, monotonic deadline,
+//! Release adapter와 upgrade codesign은 같은 fork/exec, bounded capture, monotonic deadline,
 //! process-group kill 규율을 공유한다. 성공은 exact exit 0과 pipe EOF를 모두 관측한 뒤에만 반환한다.
 
 const std = @import("std");
@@ -8,8 +8,14 @@ const c = std.c;
 const posix = std.posix;
 
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn execve(
+    path: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) c_int;
 
 const poll_quantum_ms: c_int = 50;
+const CaptureMode = enum { merged, stdout_only };
 
 pub const Error = error{
     InvalidExecutable,
@@ -31,6 +37,42 @@ pub fn runCapture(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
+    return runCaptureOptionalEnvironment(io, executable, argv, null, output, budget_ns, .merged);
+}
+
+/// Runs with exactly `environment`; no parent variable survives into the child.
+pub fn runCaptureEnvironment(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, output, budget_ns, .merged);
+}
+
+/// Runs with exactly `environment`, captures bounded stdout, and sends stderr to `/dev/null`.
+pub fn runCaptureEnvironmentStdout(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, output, budget_ns, .stdout_only);
+}
+
+fn runCaptureOptionalEnvironment(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: ?[*:null]const ?[*:0]const u8,
+    output: []u8,
+    budget_ns: i128,
+    capture_mode: CaptureMode,
+) Error![]const u8 {
     if (executable.len < 2 or executable[0] != '/' or
         std.mem.indexOfScalar(u8, executable, 0) != null) return error.InvalidExecutable;
     if (budget_ns <= 0 or output.len == 0) return error.InvalidBudget;
@@ -48,7 +90,7 @@ pub fn runCapture(
         _ = c.close(pipe_fds[1]);
         return error.ForkFailed;
     }
-    if (pid == 0) childExec(executable, argv, pipe_fds);
+    if (pid == 0) childExec(executable, argv, environment, pipe_fds, capture_mode);
 
     _ = c.close(pipe_fds[1]);
     if (!establishProcessGroup(pid)) {
@@ -132,16 +174,23 @@ pub fn runCapture(
 fn childExec(
     executable: [:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
+    environment: ?[*:null]const ?[*:0]const u8,
     pipe_fds: [2]c.fd_t,
+    capture_mode: CaptureMode,
 ) noreturn {
     if (c.setpgid(0, 0) != 0) c._exit(126);
-    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
     if (dev_null < 0 or c.dup2(dev_null, 0) < 0 or
-        c.dup2(pipe_fds[1], 1) < 0 or c.dup2(pipe_fds[1], 2) < 0) c._exit(126);
+        c.dup2(pipe_fds[1], 1) < 0 or
+        c.dup2(if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
     _ = c.close(dev_null);
     _ = c.close(pipe_fds[0]);
     _ = c.close(pipe_fds[1]);
-    _ = execv(executable.ptr, argv);
+    if (environment) |envp| {
+        _ = execve(executable.ptr, argv, envp);
+    } else {
+        _ = execv(executable.ptr, argv);
+    }
     c._exit(126);
 }
 

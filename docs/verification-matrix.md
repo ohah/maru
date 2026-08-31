@@ -2439,7 +2439,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   다시 승인하기 전에는 아래 trust 결정이나 제품 config 구현을 시작하지 않으며, component 선결조건의 기존 자동 gate만 보존한다.
 - **확정한 trust 결속:** environment 설정 REST나 deployment의 `sha/ref/environment`만으로 protection 통과를 주장하지 않는다.
   attempt-scoped jobs의 exact current `run_id/run_attempt/job` URL과 deployment status의 같은 job URL을 결속하고,
-  `waiting` 뒤 `queued|in_progress` 전이 및 newest `in_progress`를 environment의 recognized protection rule과 함께 요구한다.
+  관리자 bypass 불가, 공식 `pending` 이력과 exact-one `in_progress`를 environment의 recognized protection rule과 함께 요구한다.
+  REST가 보장하지 않는 배열 순서나 비공식 `waiting` 상태는 권위로 사용하지 않는다.
   component resolver만으로는 transport·pagination·현재 실행 executable·workflow 배선을 증명하지 않으므로 이 네 권위까지
   실제 adapter가 결속하기 전에는 `protected_environment=true`를 만들지 않는다.
 - **선결조건 상태: 부분 구현, 외부 gate 미준비.** G3 제품 config 코드는 provisioned `Session host product / default-on` runner와 immutable
@@ -2488,14 +2489,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   direct commit과 nested chain의 exact manifest commit 수렴, self/earlier cycle, depth exhaustion, foreign current/commit,
   replay·copied resolver/backing·cross-resolver reuse·owner/backing overlap·결속 뒤 descriptor drift를 terminal fail-close한다. `test-session-host-release-adapter-git-resolver`가 이를
   Debug·ReleaseFast에서 검증한다. 제품 최대 깊이 선택과 API 호출은 아직 없다. 이 역시 component 의미 검증이다.
-  environment 응답은 `release_adapter_github_environment.zig`가 exact nonzero `release` identity, rule ID/type와 rule별
+  environment 응답은 `release_adapter_github_environment.zig`가 exact nonzero `release` identity, 관리자 bypass 불가, rule ID/type와 rule별
   effective payload를 typed fact로 보존한다. wait timer는 1~43,200분, reviewer는 1~6개의 exact `User|Team`+nonzero ID,
   branch policy는 rule/object 동시 존재와 두 mode exact-one을 요구한다. unknown future rule은 파싱 호환성을 위해 보존하되
   보호 증거로 세지 않는다. `test-session-host-release-adapter-github-environment`가 malformed/missing/type/duplicate/trailing,
   foreign/zero identity, duplicate/incoherent/empty policy와 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 parser는
   configured environment component만 증명하며 current workflow run/job이 그 protection을 통과했다는 증거는 아니다.
   `release_adapter_github_deployment.zig`는 attempt-scoped jobs, source/tag/environment로 좁힌 deployments와 각 status 전체 이력을
-  함께 해석해 exact release signing job과 `waiting` 뒤 `queued|in_progress` 전이를 가진 deployment 하나만 environment observation에
+  함께 해석해 exact release signing job과 공식 `pending` 및 exact-one `in_progress`를 가진 deployment 하나만 environment observation에
   결속한다. malformed URL·foreign repository/app·stale/완료 job·누락/중복 backing·0개/복수 match를 fail-close하며
   `test-session-host-release-adapter-github-deployment`가 Debug·ReleaseFast와 allocation fail-index에서 검증한다. 이 resolver도
   이미 획득한 component bytes의 의미만 증명하며 transport·pagination·workflow 배선을 대신하지 않는다.

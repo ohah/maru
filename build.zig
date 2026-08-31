@@ -12780,6 +12780,54 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-cli-authority",
         "Validate official Release CI GitHub CLI executable authority",
     );
+    const session_host_release_adapter_github_manifest_download_step = b.step(
+        "test-session-host-release-adapter-github-manifest-download",
+        "Validate bounded predecessor manifest bootstrap downloads",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |manifest_download_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+        });
+        const manifest_download_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_download.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "release_adapter_identity", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                    .target = target,
+                    .optimize = manifest_download_optimize,
+                }) },
+                .{ .name = "bounded_process", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                    .target = target,
+                    .optimize = manifest_download_optimize,
+                }) },
+            },
+        });
+        const manifest_download_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_manifest_download.zig"),
+                .target = target,
+                .optimize = manifest_download_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_manifest", .module = release_manifest_mod },
+                    .{ .name = "release_adapter_github_manifest_download", .module = manifest_download_mod },
+                },
+            }),
+        });
+        const run_manifest_download_tests = b.addRunArtifact(manifest_download_tests);
+        run_manifest_download_tests.addArg("--maru-expect-tests=7");
+        run_manifest_download_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_manifest_download_step.dependOn(&run_manifest_download_tests.step);
+        session_host_step.dependOn(&run_manifest_download_tests.step);
+        test_step.dependOn(&run_manifest_download_tests.step);
+    }
     const session_host_release_adapter_github_download_step = b.step(
         "test-session-host-release-adapter-github-download",
         "Validate descriptor-owned predecessor release asset downloads",

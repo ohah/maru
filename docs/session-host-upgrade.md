@@ -741,6 +741,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   validate_release_manifest pre-publish \
     --repo ohah/maru \
     --tag v<version> \
+    --github-cli <pre-checkout-canonical-absolute-path> \
+    --github-cli-sha256 <pre-checkout-lowercase-sha256> \
     --manifest <canonical-manifest-path> \
     --evidence <evidence-summary-path> \
     --dmg <universal-dmg-path> \
@@ -750,6 +752,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   validate_release_manifest verify-predecessor \
     --repo ohah/maru \
     --tag v<version> \
+    --github-cli <pre-checkout-canonical-absolute-path> \
+    --github-cli-sha256 <pre-checkout-lowercase-sha256> \
     --manifest <downloaded-predecessor-manifest-path> \
     --work-dir <new-empty-directory> \
     --summary-out <new-summary-path>
@@ -844,6 +848,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   pagination flags/직접 flattening과 count 완결성, `--slurp`+`--jq` 금지, token 비노출, malformed identity,
   supplied-buffer provenance, cap/timeout/child failure를
   Debug·ReleaseFast에서 검증한다.
+
+  GitHub CLI executable 권위는 **공식 GitHub Release CI에만** 적용한다. 로컬 빌드·로컬 업그레이드와 앱 인증서 기반
+  session-host upgrade 경로에는 이 계약을 요구하지 않는다. trusted release job은 repository checkout보다 먼저 GitHub가
+  제공한 초기 PATH에서 `gh`의 symlink-free canonical absolute path와 lowercase SHA-256을 한 번 캡처해 immutable step output으로
+  넘긴다. checkout 뒤의 repository 파일이나 PATH 재탐색으로 executable을 선택하지 않는다. adapter는 두 CLI option을 모든 phase에서
+  필수로 받고, `GITHUB_WORKFLOW_SHA`가 검증된 source commit과 같으며 `RUNNER_ENVIRONMENT=github-hosted`, `RUNNER_OS=macOS`,
+  `RUNNER_ARCH=ARM64`인 exact runner authority만 허용한다. path는 absolute·canonical·symlink-free regular executable이어야 하고
+  expected SHA-256과 같은 열린 파일의 device/inode/size/digest를 기록한다. transport에 넘기기 직전 pathname을 다시 열어 같은
+  identity와 digest인지 검사하며 교체·mutation·symlink를 fail-close한다. 이 revalidation은 fresh GitHub-hosted runner의 trusted
+  workflow 경계 안에서만 권위가 있다. self-hosted runner나 임의 로컬 환경을 GitHub service provenance로 승격하지 않는다.
+
+  focused gate `test-session-host-release-adapter-github-cli-authority`는 OS 중립 runner observation과 CLI/path/digest 계약,
+  macOS 실제 filesystem의 symlink·교체·내용 변경 fail-close를 Debug·ReleaseFast에서 검증한다. component 성공만으로 protected
+  workflow가 checkout 전 capture를 실제 수행했거나 transport 호출과 결합됐다고 주장하지 않는다. 그 결합은 release workflow
+  wiring gate가 별도로 소유한다.
 
   A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
   default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과

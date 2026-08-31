@@ -2489,6 +2489,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   pagination shape/count 불일치와 child failure/timeout은 fail-close한다. `test-session-host-release-adapter-github-transport`가
   Debug·ReleaseFast 실제 process와 injected executor에서 이를 검증한다. 이 leaf가 받는 GitHub CLI executable의 공급망 권위와
   실제 release workflow의 선택·배선은 아직 증명하지 않는다.
+  `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
+  path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
+  leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해
+  symlink·교체·mutation을 fail-close한다. `test-session-host-release-adapter-github-cli-authority`가 Debug·ReleaseFast에서 runner
+  observation과 실제 filesystem 변조 행을 검증한다. 로컬 빌드·로컬 앱 인증서 upgrade에는 이 권위를 요구하지 않으며, focused
+  gate만으로 checkout 전 capture와 transport 배선이 완료됐다고 주장하지 않는다.
   transport와 component parser를 하나의 adapter observation으로 조립하는 executable, codesign·DMG 관측, canonical summary encoding,
   release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가

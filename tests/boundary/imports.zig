@@ -7561,6 +7561,62 @@ test "스크롤 뷰포트를 내는 컴포넌트는 자기 글자에 scroll_clip
     }
 }
 
+// **fork 한 자식을 마감 없이 기다리지 않는다.**
+//
+// `external_loop_owner.zig` 의 판정자들은 실제 `openpty` 위에서 역압·부분 프레임처럼 **막히는 상태를
+// 일부러 만든다.** 그래서 자식이 pty 쓰기에서 멈추는 것이 정상 경로에 있고, 부모가 마감 없이 기다리면
+// 그 순간 **테스트가 아니라 잡이 죽는다** — CI 에서 `actual openpty stdout backpressure preserves one
+// immutable partial frame` 이 **32분** 매달려 잡이 취소됐고, 그 잡이 무관한 PR 다섯을 연달아 막았다
+// (2026-08-31). 정리 로그에 자식 프로세스 둘이 고아로 남아 있었다.
+//
+// 마감이 있으면 같은 상황이 **몇 초짜리 읽을 수 있는 실패**가 된다. 기다리는 자리는 둘뿐이고
+// (`expectChildExitZero` · `waitChildTestDeadline`) 둘 다 `waitChildTestDeadline` 을 지난다.
+//
+// **`WNOHANG` 없는 `waitpid` 는 딱 한 번 허용된다** — `waitChildTestDeadline` 이 `SIGKILL` 을 보낸
+// 직후 거두는 자리다. 그건 막히지 않는다(SIGKILL 은 못 막는다).
+test "fork 한 자식은 마감 없이 기다리지 않는다" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(allocator, "src/platform/macos/session_host/external_loop_owner.zig");
+    defer allocator.free(source);
+
+    // **문자열 하나를 대조하지 않는다.** 옛 형태(`_ = c.waitpid(child, &status, 0);`)만 막았더니
+    // 변수 이름만 바꾼 변이가 그대로 살아남았다 — 규칙을 재야 한다.
+    //
+    // 규칙: **블로킹 `waitpid`(`WNOHANG` 없이)는 바로 앞에서 `SIGKILL` 을 보낸 자리에서만 허용한다.**
+    // SIGKILL 은 못 막으므로 그 대기는 반드시 끝난다. 그 밖의 자리는 마감 있는 대기를 써야 한다.
+    var blocking: usize = 0;
+    var sanctioned: usize = 0;
+    var nohang: usize = 0;
+    var recent_kill: usize = 0; // SIGKILL 을 본 뒤 몇 줄 지났나(0 = 아직 안 봄)
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        // 주석은 규칙이 아니라 설명이다.
+        const is_comment = std.mem.startsWith(u8, trimmed, "//");
+        if (!is_comment and std.mem.indexOf(u8, line, "posix.SIG.KILL") != null) {
+            recent_kill = 1;
+        } else if (recent_kill > 0 and recent_kill < 4) {
+            recent_kill += 1;
+        } else {
+            recent_kill = 0;
+        }
+        if (is_comment) continue;
+        if (std.mem.indexOf(u8, line, "c.waitpid(") == null) continue;
+        if (std.mem.indexOf(u8, line, "NOHANG") != null) {
+            nohang += 1;
+            continue;
+        }
+        blocking += 1;
+        if (recent_kill > 0) sanctioned += 1;
+    }
+
+    // 블로킹 대기는 **전부** SIGKILL 직후여야 한다.
+    try std.testing.expectEqual(blocking, sanctioned);
+    // **0 개를 세고도 초록이 되지 않게** — 스캔이 깨지면 셋 다 0 이 된다.
+    try std.testing.expect(blocking >= 2);
+    try std.testing.expect(nohang >= 1);
+}
+
 test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
     const allocator = std.testing.allocator;
 

@@ -1430,7 +1430,7 @@ test "p5c3c-3b actual openpty integrated owner commits raw and restores exact AN
     defer std.testing.allocator.free(output);
     try readExactTestFd(master, output);
 
-    const wait_status = try waitChildTestDeadline(child, 5_000);
+    const wait_status = try waitChildTestDeadline(child, child_wait_timeout_ms);
     try std.testing.expect(c.W.IFEXITED(wait_status));
     try std.testing.expectEqual(@as(c_int, 0), c.W.EXITSTATUS(wait_status));
     try std.testing.expectEqualSlices(
@@ -1853,14 +1853,9 @@ test "p5c3c-3b actual poll loop restores tty before forwarding termination signa
         return error.TestUnexpectedResult;
     }
 
-    var status: c_int = 0;
-    while (true) {
-        const waited = c.waitpid(child, &status, 0);
-        if (waited == child) break;
-        if (waited < 0 and posix.errno(waited) == .INTR) continue;
-        return error.TestUnexpectedResult;
-    }
-    const wait_status: u32 = @bitCast(status);
+    // **여기도 마감을 건다**(위 `expectChildExitZero` 와 같은 이유). 이 판정자는 자식이 신호로
+    // 죽기를 기다리는데, 그 신호가 안 닿거나 자식이 pty 에서 막히면 무한히 앉아 있게 된다.
+    const wait_status = try waitChildTestDeadline(child, child_wait_timeout_ms);
     child_reaped = true;
     try std.testing.expect(c.W.IFSIGNALED(wait_status));
     try std.testing.expectEqual(posix.SIG.TERM, c.W.TERMSIG(wait_status));
@@ -1914,15 +1909,22 @@ fn readExactTestFd(fd: c.fd_t, destination: []u8) !void {
     }
 }
 
+/// 자식을 기다리는 **모든** 자리가 쓰는 마감(ms). 한 곳에 둔다 — 값이 갈리면 "여기는 왜 다른가" 가
+/// 판정마다 생기고, 그 답을 아무도 안 적는다.
+const child_wait_timeout_ms: i64 = 5_000;
+
+/// 자식이 0으로 끝났는지 본다. **반드시 마감을 건다.**
+///
+/// 예전에는 블로킹 `waitpid`(`WNOHANG` 없이)로 **무한히** 기다렸다. 이 파일의 판정자들은 실제
+/// `openpty` 위에서 역압·부분 프레임 같은 **막히는 상태를 일부러 만들기** 때문에, 자식이 pty 쓰기에서
+/// 멈추면 부모가 영원히 앉아 있는다 — CI 에서 `actual openpty stdout backpressure preserves one
+/// immutable partial frame` 이 **32분** 매달려 잡이 통째로 취소됐고(2026-08-31), 정리 로그에 자식
+/// 프로세스 둘이 고아로 남았다. 그 잡이 무관한 PR 다섯을 연달아 막았다.
+///
+/// 마감이 있으면 같은 상황이 **몇 초짜리 읽을 수 있는 실패**가 된다 — `waitChildTestDeadline` 이
+/// 자식을 죽이고 `TestTimedOut` 을 낸다. 이 파일의 다른 판정자는 이미 그쪽을 쓰고 있었다.
 fn expectChildExitZero(child: c.pid_t) !void {
-    var status: c_int = 0;
-    while (true) {
-        const waited = c.waitpid(child, &status, 0);
-        if (waited == child) break;
-        if (waited < 0 and posix.errno(waited) == .INTR) continue;
-        return error.TestUnexpectedResult;
-    }
-    const wait_status: u32 = @bitCast(status);
+    const wait_status = try waitChildTestDeadline(child, child_wait_timeout_ms);
     try std.testing.expect(c.W.IFEXITED(wait_status));
     try std.testing.expectEqual(@as(c_int, 0), c.W.EXITSTATUS(wait_status));
 }

@@ -668,9 +668,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   digest mismatch를 모두 거부한다. 이 단계의 이름은 다운로드 선택용 provisional identity일 뿐 최종 manifest identity가 아니다.
   manifest와 세 asset의 fixed argv·Go `filepath.Match` literal escaping은
   `release_adapter_github_download_command.zig` 하나가 소유해 두 download 경계의 option drift를 막는다.
-  artifact attestation이 exact name/SHA subject를 검증하고 canonical bytes를 strict parse한 뒤, parsed predecessor A의
-  `release.tag`·`release.version`·manifest filename과 current B의 predecessor tag/SHA를 다시 교차검증해야만 내부 `assets[]`를
-  다음 downloader 입력으로 승격한다.
+  predecessor A의 `build.run_id`·`build.run_attempt`는 artifact attestation certificate의 exact run identity를 검증하는 데 필요하지만
+  current B의 `predecessor`에는 없으므로, attestation보다 먼저 canonical bytes를 strict/intrinsic parse해 unauthenticated candidate를
+  만든다. 이 parse는 pathname·size·asset download 권위를 게시하지 않는다. candidate A의 role=A와 predecessor 부재,
+  `release.id`·`release.tag`·`source.commit`을 current B의 predecessor release ID/tag/commit에, provisional filename을 A의
+  canonical `release.version`에, file SHA를 B의 `manifest_sha256`에 먼저 교차검증한다. 그 candidate에서 만든 exact repository/tag/
+  source/build context와 fixed file name/SHA subject로 artifact attestation을 검증하고 file identity를 호출 전후 재검증한 뒤에만
+  authenticated manifest로 승격한다. 그 뒤에만 내부 `assets[]`를 다음 downloader 입력으로 사용할 수 있다.
 
   성공 결과는 digest-bound bytes와 provisional name/SHA를 빌린 slice로 반환하며 파일을 먼저 게시하지 않는다. artifact
   attestation CLI는 absolute path를 요구하므로 후속 `release_adapter_github_manifest_file.zig`가 같은 bytes를 내용과 무관한
@@ -693,6 +697,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   filesystem publication 0을 Debug·ReleaseFast에서 검증한다. write·pathname identity drift 주입과 cleanup 불확실성의 foreign-entry
   보존은 이 gate가 아직 증명하지 않으므로 후속 composition gate 전에는 검증 완료로 세지 않는다.
   이 gate만으로 artifact attestation이나 manifest parse/cross-binding을 완료했다고 주장하지 않는다.
+
+  manifest attestation composition의 단일 소유자는 `release_adapter_github_manifest_attestation.zig`다. 입력은 current B의 verified
+  `predecessor`, 별도 GitHub context 검증에서 얻은 protected predecessor tag context, bootstrap의 bounded bytes와 `ManifestFile`
+  capability, checkout 전에 pin한 GitHub CLI authority 및 exact token/deadline이다.
+  composition은 `release_manifest.parseCanonical`과 `release_adapter_github_attestation.verifyWith`를 재사용하며 JSON parser, attestation
+  command 또는 certificate predicate를 다시 구현하지 않는다. composition은 attestation 호출 직전에 CLI authority를 다시 검증한다.
+  unauthenticated `release_manifest.Parsed`와 attestation `Observed`는
+  성공 전 외부에 노출하지 않고 모든 mismatch·allocation·child failure에서 함께 deinit한다. 성공 결과는 final-address owner에 결속된
+  move-only `AuthenticatedManifest` 하나이며, 그 owner만 parsed manifest를 조회하고 후속 asset expectation을 만들 수 있다. copied/
+  moved-from owner, role B candidate, candidate predecessor 존재, B↔A release/tag/commit/SHA/name mismatch, file identity drift, attestation
+  subject/run/repository/workflow mismatch는 publication 0이다. caller는 성공·실패 뒤 `ManifestFile.cleanup` 권위를 별도로 보존한다.
+  focused gate `test-session-host-release-adapter-github-manifest-attestation`은 strict candidate parse와 B↔A cross-binding, exact 기존
+  attestation call, pre/post file revalidation, move-only publication, mismatch/child failure/allocation unwind를 Debug·ReleaseFast에서
+  검증한다. 이 gate만으로 세 predecessor asset download·release `verify-asset`, git resolver 또는 final workflow 배선을 완료했다고
+  주장하지 않는다.
 
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를

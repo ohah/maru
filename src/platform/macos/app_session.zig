@@ -75032,3 +75032,123 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     // 빈 띠를 남기지 않는다 — 그림이 그만큼 커야 한다.
     try std.testing.expectEqual(vp_before.h, image_gallery_ops.viewportRect(session).h);
 }
+
+test "이미지 갤러리: 문맥 줄바꿈이 글자를 흘리지 않는다 (IG13 적대적)" {
+    // **적대적 검증이 잡은 결함이다.** 그리기는 `truncateToCols`(`cols-1` 칸 + «…»)를, 진행은 별도
+    // 계산(`cols` 칸)을 썼다 — 그 사이 글자가 **안 그려진 채 건너뛰어졌다**. 게다가 그 함수는
+    // 안 넘치면 원본 슬라이스를 그대로 돌려주므로 `free` 하면 남의 메모리를 푼다(마지막 줄은 언제나
+    // 그 경로였다).
+    //
+    // 이제 한 함수(`wrapNextBytes`)가 그리기와 진행 둘 다 답한다. 그 불변식을 여기서 짚는다:
+    // **줄을 이어 붙이면 원문이 그대로 나온다** — 한 글자도 빠지거나 겹치지 않는다.
+    const g = image_gallery_ops;
+    const texts = [_][]const u8{
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        "abcdefghijklmnopqrstuvwxyz 0123456789",
+        "한글과 ASCII 가 섞인 문장 mixed width text 입니다",
+        "짧다",
+        "",
+    };
+    for (texts) |text| {
+        var cols: u16 = 1;
+        while (cols <= 40) : (cols += 1) {
+            var rest: []const u8 = text;
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(std.testing.allocator);
+            var guard: usize = 0;
+            while (rest.len > 0) {
+                guard += 1;
+                try std.testing.expect(guard <= text.len + 1); // **반드시 나아간다**
+                const take = g.wrapNextBytes(rest, cols);
+                try std.testing.expect(take > 0);
+                try std.testing.expect(take <= rest.len);
+                try joined.appendSlice(std.testing.allocator, rest[0..take]);
+                rest = rest[take..];
+            }
+            // ① 이어 붙이면 원문이다 — 흘린 글자도, 겹친 글자도 없다.
+            try std.testing.expectEqualStrings(text, joined.items);
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄바꿈이 UTF-8 을 쪼개지 않는다 (IG13 적대적)" {
+    // 바이트로 자르면 한글이 깨진다. 칸이 글자보다 좁아도(1 칸에 2 칸짜리 한글) 한 글자는 통째로 낸다 —
+    // 안 그러면 영영 안 나아가서 무한 루프가 된다.
+    const g = image_gallery_ops;
+    const text: []const u8 = "한글만있는문장입니다";
+    var cols: u16 = 1;
+    while (cols <= 8) : (cols += 1) {
+        var rest: []const u8 = text;
+        while (rest.len > 0) {
+            const take = g.wrapNextBytes(rest, cols);
+            try std.testing.expect(take > 0);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(rest[0..take]));
+            rest = rest[take..];
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄 나누기가 원문을 잃지 않는다 (IG13 적대적)" {
+    // **이 계약을 어긴 것이 방금 고친 결함이었다.** 그리기는 `cols-1` 칸 + «…», 진행은 `cols` 칸을
+    // 써서 그 사이 글자가 안 그려진 채 건너뛰어졌다. 그리고 그 결함은 **어떤 test 도 못 봤다** —
+    // 그리는 함수가 CoreText 함수 포인터를 요구해 단위 test 로 부를 수 없었기 때문이다.
+    //
+    // 그래서 「어느 글자를 어느 줄에」를 순수 함수(`layoutContext`)로 갈랐다. 여기서 그 계약을 짚는다:
+    // **줄을 이어 붙이면 원문의 앞부분이 그대로 나온다.**
+    const g = image_gallery_ops;
+    const texts = [_][]const u8{
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        "abcdefghijklmnopqrstuvwxyz 0123456789 the quick brown fox",
+        "한글과 ASCII 가 섞인 문장 mixed width text 입니다",
+        "짧다",
+        "",
+        // **이모지·ZWJ·결합 문자**(적대적 9 회차). 대화에는 이런 것이 그대로 들어온다 —
+        // 코드포인트 단위로 나아가므로 «반드시 나아간다» 와 «UTF-8 이 온전하다» 가 여기서도 서야 한다.
+        "빌드 통과 ✅ 이제 배포합니다 🚀",
+        "가족 👨‍👩‍👧‍👦 이모지는 ZWJ 로 이어 붙은 여러 코드포인트다",
+        "결합 문자 é(U+0065 U+0301)와 깃발 🇰🇷 도 섞는다",
+        "\u{1F600}\u{1F601}\u{1F602}\u{1F603}",
+    };
+    for (texts) |text| {
+        var cols: u16 = 1;
+        while (cols <= 40) : (cols += 1) {
+            var rows: u32 = 1;
+            while (rows <= g.max_context_rows) : (rows += 1) {
+                const plan = g.layoutContext(text, cols, rows);
+                try std.testing.expect(plan.count <= rows);
+
+                // ① 줄들이 **원문을 앞에서부터 빈틈없이** 덮는다.
+                var at: usize = 0;
+                for (plan.lines[0..plan.count]) |span| {
+                    try std.testing.expectEqual(at, span.start); // 건너뛴 글자가 없다
+                    try std.testing.expect(span.len > 0); // 반드시 나아간다
+                    at += span.len;
+                }
+                try std.testing.expect(at <= text.len);
+
+                // ② 「남는 것이 있다」와 «…» 가 일치한다.
+                try std.testing.expectEqual(at < text.len, plan.ellipsis);
+
+                // ③ 다 담겼으면 줄이 원문 전체다.
+                if (!plan.ellipsis) try std.testing.expectEqual(text.len, at);
+
+                // ④ 각 줄은 UTF-8 이 온전하다 — 바이트로 자르면 한글이 깨진다.
+                for (plan.lines[0..plan.count]) |span| {
+                    try std.testing.expect(std.unicode.utf8ValidateSlice(text[span.start..][0..span.len]));
+                }
+            }
+        }
+    }
+}
+
+test "이미지 갤러리: 문맥 줄 나누기가 폭 0·줄 0 에서 멈춘다 (IG13 적대적)" {
+    // 좁은 도크에서 `cols` 가 0 이 될 수 있다. 그때 무한 루프나 빈 줄을 만들지 않는다.
+    const g = image_gallery_ops;
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 0, 3).count);
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 10, 0).count);
+    try std.testing.expectEqual(@as(u32, 0), g.layoutContext("", 10, 3).count);
+    // 칸보다 넓은 글자(1 칸에 2 칸짜리 한글)도 한 글자는 낸다 — 안 그러면 영영 안 나아간다.
+    const one = g.layoutContext("한", 1, 3);
+    try std.testing.expectEqual(@as(u32, 1), one.count);
+    try std.testing.expectEqual(@as(usize, 3), one.lines[0].len);
+}

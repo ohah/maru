@@ -1033,6 +1033,12 @@ pub fn collectAgentTargets(
                 .shell_name = maru.i18n.t(.ctx_target_shell),
                 .where = folder orelse app_session_mod.termLabel(term),
                 .branch = git_ops.termGitBranch(self, term),
+                // **같은 워크스페이스의 에이전트 둘을 가르는 유일한 값**이다(§5.1). 폴더·브랜치가
+                // 같으면 그 두 줄은 이 이름으로만 구분된다.
+                //
+                // **`where` 가 이미 이름으로 떨어졌으면 비운다** — 폴더를 못 얻어 `termLabel` 로
+                // 대신한 경우인데, 그대로 두면 `셀 — 편집기 2 → 편집기 2` 처럼 같은 말이 두 번 선다.
+                .pane = if (folder == null) "" else app_session_mod.termLabel(term),
                 .order = order,
             };
             n += 1;

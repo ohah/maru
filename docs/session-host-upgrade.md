@@ -790,6 +790,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   숫자를 만들지 않는다. caller가 선택할 제품 최대 깊이와 실제 API 호출 배선이 추가되기 전에는 source provenance가 완료됐다고
   주장하지 않는다.
 
+  GitHub tag-chain transport composition은 제품 정책 상한을 annotated tag object **8개**로 고정한다. Maru release의 정상
+  lightweight/단일 annotated tag를 수용하면서, attacker-controlled nested chain이 순차 API 호출과 파싱 비용을 무한히 늘리지
+  못하게 하는 별도 상한이다. 첫 `tag_ref`와 각 `annotated_tag` 요청 직전에 checkout 전 pin된 CLI를 재검증하고, transport가
+  반환한 bytes를 기존 Git ref/tag parser로 즉시 typed observation으로 만든다. parser 결과의 borrowed slice는 다음 요청에
+  재사용되는 JSON buffer에 남기지 않고 fixed owned hop record로 복사한 뒤, 기존 resolver와 predecessor asset composition에만
+  제공한다.
+
+  최초 호출에서 만든 positive monotonic absolute deadline 하나를 모든 ref/tag fetch와 후속 세 asset download, release verify,
+  세 verify-asset이 공유한다. hop이나 command마다 원래 budget을 새로 부여하지 않으며 CLI revalidation 뒤 남은 시간이 0이면
+  child를 시작하지 않는다. lightweight tag는 annotated request 0회, annotated chain은 resolver가 요구한 exact object만 최대
+  8회 요청하고 commit 도달 뒤 추가 caller observation이나 API 호출을 허용하지 않는다. 9번째 tag, cycle, foreign current object,
+  manifest commit 불일치, CLI/path 교체, timeout과 borrowed-buffer mutation은 publication 0·download residue 0으로 fail-close한다.
+  focused gate `test-session-host-release-adapter-github-tag-chain-transport`는 exact request sequence, 0/1/8-hop 성공, 9-hop/cycle/
+  mismatch, CLI revalidation 횟수, single-deadline 감소·만료, response-buffer reuse와 allocation failure를 Debug·ReleaseFast에서
+  검증한다. 이 composition은 repository/run/environment/deployment 관측, checkout 전 capture 자체, release workflow wiring과
+  frozen U5 제품 E2E를 대신하지 않는다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

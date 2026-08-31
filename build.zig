@@ -12642,6 +12642,77 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_github_transport_tests.step);
         test_step.dependOn(&run_github_transport_tests.step);
     }
+    const session_host_release_adapter_github_attestation_step = b.step(
+        "test-session-host-release-adapter-github-attestation",
+        "Validate certificate-bound GitHub artifact attestation authority",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |attestation_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = attestation_optimize,
+        });
+        const identity_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+            .target = target,
+            .optimize = attestation_optimize,
+        });
+        const context_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
+            .target = target,
+            .optimize = attestation_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "release_adapter_identity", .module = identity_mod },
+            },
+        });
+        const attestation_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"),
+            .target = target,
+            .optimize = attestation_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_identity", .module = identity_mod },
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = attestation_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+                .{
+                    .name = "bounded_process",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                        .target = target,
+                        .optimize = attestation_optimize,
+                    }),
+                },
+            },
+        });
+        const attestation_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_attestation.zig"),
+                .target = target,
+                .optimize = attestation_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_github_attestation", .module = attestation_mod },
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                },
+            }),
+        });
+        const run_attestation_tests = b.addRunArtifact(attestation_tests);
+        run_attestation_tests.addArg("--maru-expect-tests=9");
+        run_attestation_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_attestation_step.dependOn(&run_attestation_tests.step);
+        session_host_step.dependOn(&run_attestation_tests.step);
+        test_step.dependOn(&run_attestation_tests.step);
+    }
     const session_host_release_adapter_github_cli_authority_step = b.step(
         "test-session-host-release-adapter-github-cli-authority",
         "Validate official Release CI GitHub CLI executable authority",

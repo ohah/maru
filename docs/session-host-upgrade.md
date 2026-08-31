@@ -778,6 +778,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process
   group 전체를 SIGKILL하고 direct child를 reap한 뒤 fail-close한다. upgrade codesign도 이 동일 실행 경계를 사용한다.
 
+  Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
+  `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
+  `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및
+  strict signature·stapler·Gatekeeper command의 성공 receipt를 받아 manifest의 `Signing`과 제품 관측을 직접 만든다.
+  codesign detail은 `Identifier`와 `TeamIdentifier`를 exact 1회 요구하고 `not set`·빈 값·제어문자를 거부한다. designated
+  requirement는 exact 1개 `designated =>` line이어야 하며 Apple anchor와 같은 team OU를 포함해야 한다. 따옴표 밖의
+  disjunction·negation은 필수 절을 우회할 수 있으므로 거부하고, canonical line의 SHA-256만 manifest에 보존한다. plist JSON은
+  exact `CFBundleIdentifier`, `CFBundleShortVersionString`, `CFBundleVersion`을
+  consumed-field duplicate/missing/type/cap 관점에서 fail-close하고 `product_identity.bundle_id`·`bundle_version`이 소유하는
+  product identity, codesign identifier 및 release version과 교차검증한다.
+  architecture output은 `arm64 x86_64` exact 정렬 집합만 허용한다. strict signature, app/DMG stapler validate와 DMG
+  Gatekeeper assessment receipt가 모두 true일 때만 `notarization=accepted`, `stapled=true`를 만든다. 이 component는 이미
+  bounded capture된 bytes와 command success receipt의 의미를 검증할 뿐, pathname 권위·DMG no-follow 추출·실제 command argv
+  배선이나 receipt 진위를 대신하지 않는다. 성공 경로의 allocation fail-index는 전수 unwind한다.
+
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.

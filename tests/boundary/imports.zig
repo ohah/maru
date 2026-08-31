@@ -7511,38 +7511,57 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
 // 그래서 **여는 자리를 함수 하나로 모았다**(`openAgentDirAbsolute`). 호출부마다 `isAbsolute` 를 적는
 // 규율은 새로 여는 자리 하나가 밖에 남는 순간 깨지고, 그 하나가 곧 abort 다 — 규율을 주석이 아니라
 // 게이트가 진다.
-// **원격 PATH 처방은 한 값이어야 한다.**
+// **원격 셸 규율의 사본을 만들지 않는다.**
 //
-// non-interactive ssh 의 PATH 는 로그인 셸보다 좁아(`/usr/bin:/bin:/usr/sbin:/sbin` — 2026-09-01 실측)
-// Homebrew·`~/.local/bin` 에 깐 실행 파일이 안 잡힌다. `cli/agent_hooks.zig` 가 그 함정을 먼저 겪고
-// 처방(PATH 접두)을 남겼고, 원격 SCM(`session/git_command.zig`)이 같은 처방을 쓴다.
+// 두 가지가 함께 걸린다. ⑴ 비대화형 ssh 의 PATH 는 로그인 셸보다 좁고(`/usr/bin:/bin:/usr/sbin:/sbin`
+// — 2026-09-01 실측) ⑵ **로그인 셸이 POSIX 셸이라는 보장이 없다**(csh/tcsh 는 `PATH=…; cmd` 를 명령으로
+// 읽고 조용히 지나가며 **exit 0** 을 낸다; fish 는 `"$PATH"` 를 공백으로 이어 `/usr/bin` 을 지운다).
 //
-// 그 주석이 남긴 말이 이 게이트의 이유다: **「한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.」**
-// 두 값이 갈리면 한쪽 축만 고쳐지고 다른 축은 조용히 옛 목록으로 남는다 — 그 어긋남은 **그런 원격을
-// 가진 사용자에게만** 보이므로 우리 CI 로는 영영 안 잡힌다.
-test "원격 PATH 처방은 agent_hooks 와 git_command 가 같은 값을 쓴다" {
+// 이 처방이 **세 곳에 따로** 적혀 있었다 — 원격 SCM · 훅 설치 · 이벤트 스트리머. 값은 판정자로 묶여
+// 있었지만 판정자는 **값**만 볼 뿐 **형태**를 못 봐서, 형태가 틀린 채 셋이 나란히 초록이었다.
+// 그래서 `session/remote_shell.zig` 하나가 소유하고, 이 게이트는 **사본이 다시 생기는 것**을 막는다.
+//
+// 그 파일들의 주석이 이미 이유를 적고 있다: **「한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.」**
+test "원격 셸 규율은 remote_shell 하나가 소유한다" {
     const allocator = std.testing.allocator;
+    const owner = try readZigFileZ(allocator, "src/session/remote_shell.zig");
+    defer allocator.free(owner);
+
+    // 처방을 **여기서만** 정의한다. 값이 비어도 통과하지 않도록 길이를 함께 센다.
+    const needle = "pub const path_prefix = \"";
+    const at = std.mem.indexOf(u8, owner, needle) orelse return error.PathPrefixMissing;
+    const end = std.mem.indexOfScalarPos(u8, owner, at + needle.len, '"') orelse return error.PathPrefixUnterminated;
+    try std.testing.expect(end - (at + needle.len) > 20);
+    // **덮지 않고 앞에 붙인다** — `$PATH` 가 뒤에 와야 사용자가 고른 실행 파일이 이긴다.
+    try std.testing.expect(std.mem.indexOf(u8, owner, "++ \":$PATH\\\"; \"") != null);
+    // **로그인 셸에는 인용된 토큰만 준다.** 확장은 `sh` 안에서만 일어난다.
+    try std.testing.expect(std.mem.indexOf(u8, owner, "quoteAppend(out, at, \"sh\")") != null);
+    // 실제 토큰은 `"$@"` 로 받는다 — 스크립트에 끼워 넣으면 인용이 겹쳐 **다른 명령**이 된다.
+    try std.testing.expect(std.mem.indexOf(u8, owner, "exec \\\"$@\\\"") != null);
+
+    // 사용처는 **자기 사본을 두지 않는다.** 셋 다 소유자를 지난다.
+    for ([_][]const u8{
+        "src/session/git_command.zig",
+        "src/cli/agent_hooks.zig",
+        "src/platform/macos/ssh_upload.zig",
+        "src/cli/ssh.zig",
+    }) |path| {
+        const user = try readZigFileZ(allocator, path);
+        defer allocator.free(user);
+        try std.testing.expect(std.mem.indexOf(u8, user, "remote_shell.") != null);
+        // `PATH="…"` 를 직접 적은 자리가 남아 있으면 그 파일은 소유자를 안 지난 것이다.
+        try std.testing.expect(std.mem.indexOf(u8, user, "PATH=\\\"{s}") == null);
+    }
+
+    // 우리가 **고르는** 값에는 `!` 를 쓰지 않는다. csh/tcsh 의 히스토리 확장은 작은따옴표 안에서도,
+    // 비대화형에서도, `sh -c` 껍데기 안에서도 일어나 표식을 통째로 삼킨다(옛 `!maru-not-installed` 는
+    // csh 원격에서 `Event not found` 가 되어 **도착하지 않았고**, exit 0 이라 「설치됐다」로 읽혔다).
     const hooks = try readZigFileZ(allocator, "src/cli/agent_hooks.zig");
     defer allocator.free(hooks);
-    const git_cmd = try readZigFileZ(allocator, "src/session/git_command.zig");
-    defer allocator.free(git_cmd);
-
-    const needle = "pub const remote_path_prefix = \"";
-    const h = std.mem.indexOf(u8, hooks, needle) orelse return error.HooksPrefixMissing;
-    const g = std.mem.indexOf(u8, git_cmd, needle) orelse return error.GitCommandPrefixMissing;
-    const h_end = std.mem.indexOfScalarPos(u8, hooks, h + needle.len, '"') orelse return error.HooksPrefixUnterminated;
-    const g_end = std.mem.indexOfScalarPos(u8, git_cmd, g + needle.len, '"') orelse return error.GitCommandPrefixUnterminated;
-    try std.testing.expectEqualStrings(hooks[h + needle.len .. h_end], git_cmd[g + needle.len .. g_end]);
-
-    // **값이 비어 있으면 게이트가 아무것도 안 지킨다** — 둘 다 빈 문자열이어도 위 단언은 통과한다.
-    try std.testing.expect(h_end - (h + needle.len) > 20);
-    // 그리고 그 처방이 실제로 쓰이는지 본다(상수만 있고 아무도 안 부르면 PATH 는 여전히 좁다).
-    try std.testing.expect(std.mem.indexOf(u8, git_cmd, "remote_path_script = \"PATH=\\\"\" ++ remote_path_prefix") != null);
-    // **두 빌더가 같은 껍데기를 지난다**(선언 1 + 호출 2).
-    try std.testing.expect(countOccurrences(git_cmd, "appendShPrologue") >= 3);
-    // **대입문을 로그인 셸에 직접 넘기지 않는다.** csh/tcsh 는 그것을 명령으로 읽어 조용히 지나가고,
-    // fish 는 `"$PATH"` 를 공백으로 이어 `/usr/bin` 을 지운다 — 둘 다 우리 CI 로는 안 잡힌다.
-    try std.testing.expect(std.mem.indexOf(u8, git_cmd, "exec \\\"$@\\\"") != null);
+    const mark = "pub const no_maru_marker = \"";
+    const m = std.mem.indexOf(u8, hooks, mark) orelse return error.MarkerMissing;
+    const m_end = std.mem.indexOfScalarPos(u8, hooks, m + mark.len, '"') orelse return error.MarkerUnterminated;
+    try std.testing.expect(std.mem.indexOfScalar(u8, hooks[m + mark.len .. m_end], '!') == null);
 }
 
 test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 않는다" {

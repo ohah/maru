@@ -17,6 +17,7 @@
 //!   설정으로 원격을 건드리게 만드는 경로를 명시적으로 닫는다.
 
 const std = @import("std");
+const remote_shell = @import("remote_shell.zig");
 const git_log = @import("git_log.zig"); // 커밋 목록 `--format`의 단일 출처(파싱과 같은 상수)
 
 /// 뷰가 필요로 하는 읽기 명령. 셋을 합쳐 네 섹션과 행의 증감을 채운다(§3.5).
@@ -470,37 +471,10 @@ pub const max_remote_command_bytes: usize = 8 * 1024;
 /// 비밀번호를 묻는 대신 실패해야 한다.
 pub const remote_argv_len: usize = 8;
 
-/// 원격 명령 앞에 붙이는 **PATH 접두**. `cli/agent_hooks.zig` 의 `remote_path_prefix` 와 **같은 값이어야
-/// 한다** — 그쪽이 먼저 겪고 남긴 처방이고, 경계 판정자가 두 값이 어긋나지 않는지 센다.
-///
-/// **왜 필요한가**(실측 2026-09-01): non-interactive ssh 의 PATH 는 로그인 셸보다 좁다.
-///
-/// ```
-/// ssh -S <ctl> <dest> 'echo $PATH'  →  /usr/bin:/bin:/usr/sbin:/sbin
-/// ```
-///
-/// Homebrew 나 `~/.local/bin` 에 깐 git 은 **그 목록에 없다.** 접두가 없으면 그런 원격에서 원격 SCM 이
-/// 통째로 실패하는데, argv 판정자는 문자열만 보므로 그것을 못 잡는다. `agent_hooks` 가 같은 함정을
-/// 겪고 남긴 말 그대로다: **「한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.」**
-///
-/// **덮지 않고 앞에 붙인다** — 사용자가 PATH 로 고른 git 이 있으면 그쪽이 이긴다.
-pub const remote_path_prefix = "$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin";
-
-/// 접두를 **`sh -c` 안에서** 돌린다. 로그인 셸에 `PATH=…; cmd` 를 직접 넘기면 안 된다 —
-/// ssh 는 명령을 **사용자의 로그인 셸**에 넘기는데 그것이 POSIX 셸이라는 보장이 없다(실측 2026-09-01):
-///
-/// ```
-/// csh/tcsh:  PATH="…:$PATH"; 'echo' 'ok'
-///            → stderr: `PATH=…: Command not found.`  PATH 는 **안 바뀐다**(조용히)
-/// fish:      "$PATH" 는 **리스트를 공백으로** 잇는다 → `/usr/bin` 이 통째로 사라질 수 있다
-/// ```
-///
-/// 그래서 로그인 셸에는 **전부 인용된 토큰만** 준다: `'sh' '-c' '<이 스크립트>' 'sh' <토큰들>`.
-/// 확장은 전부 `sh` 안에서 일어나고, 그 `sh` 는 정의상 POSIX 다. 실제 명령 토큰은 `"$@"` 로 받으므로
-/// **인용이 한 겹으로 끝난다**(스크립트 안에 다시 넣으면 토큰마다 `'\''` 가 겹쳐 버퍼가 터진다).
-///
-/// bash·zsh·csh·tcsh·ksh·dash 여섯에서 공백과 작은따옴표가 든 경로로 확인했다.
-pub const remote_path_script = "PATH=\"" ++ remote_path_prefix ++ ":$PATH\"; exec \"$@\"";
+/// 원격 명령의 셸 규율은 [remote_shell](remote_shell.zig) 이 소유한다 — PATH 처방과 `sh` 껍데기가
+/// 왜 그 형태인지(csh·fish 실측 포함) 그쪽 머리말에 있다. 여기서 다시 정의하지 않는다: 같은 처방을
+/// 세 곳에 적어 두었다가 **세 곳이 나란히 틀렸다.**
+const remote_path_script = remote_shell.exec_args_script;
 
 /// 원격에서 부를 git. **PATH 로 찾는다** — 로컬은 절대경로 계약이지만(§6 PATH hijack) 원격의 설치
 /// 위치는 우리가 모른다(계약 §2.2 ⑷). 그 대신 원격 명령의 모든 토큰은 우리가 만든 것이고 사용자 입력이
@@ -511,53 +485,9 @@ pub const remote_git_exe = "git";
 ///
 /// 인용만으로도 셸에는 안전하지만, 그런 값이 왔다는 것 자체가 관측(OSC 7 경로·dest)이 오염됐다는
 /// 뜻이다 — 그때 할 일은 「안전하게 실행」이 아니라 실행하지 않는 것이다.
-/// ⚠️ **`!` 는 여기서 막지 않는다 — 막을 수 없어서가 아니라 막는 편이 더 나쁘기 때문이다**(실측 2026-09-01).
-///
-/// csh/tcsh 는 히스토리 확장을 **작은따옴표 안에서도, 비대화형에서도, `sh -c` 껍데기 안에서도** 한다 —
-/// 로그인 셸이 우리 문자열을 **먼저** 파싱하기 때문이다:
-///
-/// ```
-/// csh -c "'echo' '!x'"                  → x: Event not found.
-/// csh -c "'sh' '-c' '…' 'sh' '!x'"      → x: Event not found.   (껍데기도 못 막는다)
-/// ```
-///
-/// 그래서 원격 로그인 셸이 csh/tcsh 이고 **경로에 `!` 가 있으면** 그 명령은 실패한다. 다만 비대화형
-/// 셸의 히스토리는 비어 있어 **다른 명령으로 바뀌지는 않는다** — 「Event not found」로 서고 끝난다.
-///
-/// 토큰에서 `!` 를 거부하면 **압도적 다수인 POSIX 셸 원격에서도** 그 경로를 못 읽게 된다. 안전이 느는
-/// 것도 아니다(오발이 아니라 실패다). 그래서 **허용하고, 한계로 적는다.**
-pub fn remoteTokenIsSafe(token: []const u8) bool {
-    for (token) |c| {
-        if (c < 0x20 or c == 0x7f) return false;
-    }
-    return true;
-}
+pub const remoteTokenIsSafe = remote_shell.tokenIsSafe;
 
-/// 한 토큰을 작은따옴표로 감싸 `out[at..]` 에 쓴다. 내부 `'` 는 `'\''` 로 닫았다 다시 연다 —
-/// POSIX 셸에서 작은따옴표 안은 **어떤 확장도 일어나지 않으므로**, 이 한 규칙이 공백·`;`·`$(…)`·백틱·
-/// 와일드카드를 전부 무력화한다. 넘치면 null(호출자가 명령을 포기한다).
-fn quoteAppend(out: []u8, at: usize, token: []const u8) ?usize {
-    var n = at;
-    if (n >= out.len) return null;
-    out[n] = '\'';
-    n += 1;
-    for (token) |c| {
-        if (c == '\'') {
-            const esc = "'\\''";
-            if (n + esc.len > out.len) return null;
-            @memcpy(out[n..][0..esc.len], esc);
-            n += esc.len;
-            continue;
-        }
-        if (n >= out.len) return null;
-        out[n] = c;
-        n += 1;
-    }
-    if (n >= out.len) return null;
-    out[n] = '\'';
-    n += 1;
-    return n;
-}
+const quoteAppend = remote_shell.quoteAppend;
 
 /// 로컬 argv 를 **원격에서 같은 뜻이 되는 한 줄**로 인용해 `cmd_buf` 에 쓰고, 그것을 실어 나를 `ssh`
 /// argv 를 `buf` 에 채운다. 할당하지 않는다.
@@ -571,21 +501,6 @@ fn quoteAppend(out: []u8, at: usize, token: []const u8) ?usize {
 ///
 /// null 인 경우는 셋뿐이고 전부 **실행하지 않는 편이 옳은** 상태다: 토큰에 제어문자가 있다 · `dest` 나
 /// `control_path` 가 모양을 못 갖췄다 · 명령이 `cmd_buf` 를 넘는다.
-/// `'sh' '-c' '<스크립트>' 'sh'` 까지를 적는다. 뒤에 오는 토큰은 그 `sh` 의 `"$@"` 가 된다.
-/// 두 빌더가 **이 함수 하나**를 지난다 — 두 벌이면 한쪽만 고쳐지고 다른 쪽은 옛 껍데기로 남는다.
-fn appendShPrologue(cmd_buf: []u8, start: usize) ?usize {
-    var n = quoteAppend(cmd_buf, start, "sh") orelse return null;
-    inline for (.{ "-c", remote_path_script, "sh" }) |token| {
-        if (n >= cmd_buf.len) return null;
-        cmd_buf[n] = ' ';
-        n += 1;
-        n = quoteAppend(cmd_buf, n, token) orelse return null;
-    }
-    if (n >= cmd_buf.len) return null;
-    cmd_buf[n] = ' ';
-    n += 1;
-    return n;
-}
 
 pub fn buildRemote(
     local_argv: []const []const u8,
@@ -598,7 +513,7 @@ pub fn buildRemote(
 
     var n: usize = 0;
     // **POSIX sh 를 한 겹 씌운다**(근거는 `remote_path_script` 주석) — 로그인 셸은 인용된 토큰만 본다.
-    n = appendShPrologue(cmd_buf, n) orelse return null;
+    n = remote_shell.appendShPrologue(cmd_buf, n, remote_path_script) orelse return null;
     n = quoteAppend(cmd_buf, n, "env") orelse return null;
     for (env_overrides) |override| {
         if (!remoteTokenIsSafe(override.name) or !remoteTokenIsSafe(override.value)) return null;
@@ -685,7 +600,7 @@ pub fn buildRemoteFileRead(
     if (!remoteTokenIsSafe(abs_path)) return null;
     var n: usize = 0;
     // 위와 같은 껍데기 — `head` 는 보통 `/usr/bin` 에 있지만 규율을 두 갈래로 두지 않는다.
-    n = appendShPrologue(cmd_buf, n) orelse return null;
+    n = remote_shell.appendShPrologue(cmd_buf, n, remote_path_script) orelse return null;
     n = quoteAppend(cmd_buf, n, "head") orelse return null;
     if (n >= cmd_buf.len) return null;
     cmd_buf[n] = ' ';

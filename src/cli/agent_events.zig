@@ -51,6 +51,12 @@ pub const Options = struct {
     /// 하트비트 주기(ms). **0 이면 안 보낸다** — 그러면 소비자가 사망을 침묵으로 재지 못한다는 뜻이라
     /// 시험용 외에는 쓰지 않는다.
     heartbeat_ms: u32 = 5_000,
+    /// 이어읽기 커서(`<이름>:<offset>` 을 `,` 로 이은 것). 비면 처음부터 읽는다.
+    ///
+    /// **로컬이 주는 값이다**(RA5-a). 원격 파일에 굳히지 않는 이유는 「앱을 새로 켰다」와 「채널만 죽었다
+    /// 살아났다」를 구분해야 하기 때문이다 — 앞은 다시 읽어야 배지가 서고, 뒤는 다시 읽으면 알림이
+    /// 재생된다. 로컬 기억은 앱과 함께 죽으므로 그 구분이 저절로 선다.
+    resume_spec: []const u8 = "",
 };
 
 /// `agent-events` 뒤 인자를 해석한다. **모르는 플래그는 오류다** — 조용히 무시하면 오타가 «기본값으로
@@ -58,6 +64,8 @@ pub const Options = struct {
 pub fn parseArgs(args: []const []const u8) Mode {
     var dir: ?[]const u8 = null;
     var hb: u32 = 5_000;
+    // 이어읽기 커서(RA5-a). 비면 처음부터 — **앱을 새로 켠 경우가 그것**이라 기본값이 맞다.
+    var resume_spec: []const u8 = "";
     var saw_stdio = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -70,12 +78,15 @@ pub fn parseArgs(args: []const []const u8) Mode {
             dir = a["--dir=".len..];
         } else if (std.mem.startsWith(u8, a, "--heartbeat-ms=")) {
             hb = std.fmt.parseInt(u32, a["--heartbeat-ms=".len..], 10) catch return .usage_error;
+        } else if (std.mem.startsWith(u8, a, "--resume=")) {
+            resume_spec = a["--resume=".len..];
         } else return .usage_error;
     }
     if (!saw_stdio) return .usage_error;
     const d = dir orelse return .usage_error;
     if (d.len == 0 or !std.fs.path.isAbsolute(d)) return .usage_error; // 상대 경로는 cwd 에 끌려간다
-    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb } };
+    if (!resumeIsWellFormed(resume_spec)) return .usage_error;
+    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb, .resume_spec = resume_spec } };
 }
 
 /// 디렉터리 항목이 **우리 로그**인가. 맞으면 그 nonce 를 돌려준다.
@@ -129,6 +140,42 @@ pub fn formatEvent(
 /// `255` 를 이미 쓰고 다중화 경합으로도 255 가 난다. 어느 경우에도 stderr 는 비어 있었다).
 pub fn formatHeartbeat(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, seq: u64) !void {
     try out.print(allocator, "{{\"hb\":{d}}}\n", .{seq});
+}
+
+/// 커서 한 조각: `{"cur":"<이름>","at":<offset>}`([계획](../../docs/plans/remote-agent-state.md) RA5-a).
+///
+/// **이름을 이스케이프하지 않는다** — 파일 이름 토큰 클래스(숫자·소문자·`_`)만 통과하므로 JSON 문자열에
+/// 그대로 실을 수 있다. 그 클래스 밖이면 애초에 우리 로그가 아니라 훑지도 않는다(`nonceFromFileName`).
+pub fn formatCursor(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    offset: u64,
+) !void {
+    try out.print(allocator, "{{\"cur\":\"{s}\",\"at\":{d}}}\n", .{ name, offset });
+}
+
+/// `--resume=` 한 칸(`<이름>:<offset>`)을 푼다. 모양이 틀리면 `null`.
+pub const ResumeEntry = struct { name: []const u8, offset: u64 };
+
+pub fn parseResumeEntry(field: []const u8) ?ResumeEntry {
+    const sep = std.mem.indexOfScalar(u8, field, ':') orelse return null;
+    const name = field[0..sep];
+    if (name.len == 0 or name.len > command.remote_log_name_max) return null;
+    if (!command.instance_token_class.accepts(name)) return null;
+    const offset = std.fmt.parseInt(u64, field[sep + 1 ..], 10) catch return null;
+    return .{ .name = name, .offset = offset };
+}
+
+/// `--resume=` 전체가 성한지. **인자 해석 때 본다** — 망가진 값으로 돌기 시작하면 「왜 처음부터 다시
+/// 읽지」를 나중에 화면에서 되짚어야 한다. 빈 값은 「이어읽기 없음」이라 성한 것으로 친다.
+pub fn resumeIsWellFormed(spec: []const u8) bool {
+    if (spec.len == 0) return true;
+    var it = std.mem.splitScalar(u8, spec, ',');
+    while (it.next()) |field| {
+        if (parseResumeEntry(field) == null) return false;
+    }
+    return true;
 }
 
 /// 한 파일의 읽기 커서. **파일마다 따로 든다** — 디렉터리 전체를 훑으므로 하나로 두면 pane 이 섞인다
@@ -366,4 +413,63 @@ test "역조회 시한은 하트비트를 굶기지 않는다 — 그러면 채�
     try testing.expect(lookup_deadline_ms < Options_default.heartbeat_ms);
     // 그리고 소비자의 침묵 시한보다 훨씬 짧아야 한 번의 지연이 강등으로 안 번진다.
     try testing.expect(lookup_deadline_ms * 3 < 15_000);
+}
+
+test "formatCursor: 이어읽기 위치를 프레임으로 싣는다" {
+    const a = testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try formatCursor(&out, a, "host_abc_def_t24", 4096);
+    try testing.expectEqualStrings("{\"cur\":\"host_abc_def_t24\",\"at\":4096}\n", out.items);
+}
+
+test "parseResumeEntry: 이름과 offset 을 가르고, 성하지 않으면 버린다" {
+    const ok = parseResumeEntry("t24:4096") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("t24", ok.name);
+    try testing.expectEqual(@as(u64, 4096), ok.offset);
+
+    // 0 은 정당한 값이다 — 「처음부터」를 명시한 것이다.
+    const zero = parseResumeEntry("t24:0") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 0), zero.offset);
+
+    try testing.expect(parseResumeEntry("t24") == null); // 구분자 없음
+    try testing.expect(parseResumeEntry(":4096") == null); // 이름 없음
+    try testing.expect(parseResumeEntry("t24:") == null); // offset 없음
+    try testing.expect(parseResumeEntry("t24:-1") == null); // 음수
+    try testing.expect(parseResumeEntry("t24:99999999999999999999999") == null); // u64 초과
+    // **경로를 벗어나는 글자는 이름이 될 수 없다** — 이 값이 파일 이름으로 쓰이므로 여기서 막는다.
+    try testing.expect(parseResumeEntry("../etc:1") == null);
+    try testing.expect(parseResumeEntry("a/b:1") == null);
+}
+
+test "parseResumeEntry: 파일 이름 상한까지 받는다 — tmux 칸이 붙어도 안 버린다" {
+    // nonce 상한으로 재면 tmux 안의 host 소유 pane 이 통째로 빠진다(`nonceFromFileName` 과 같은 함정).
+    const a = testing.allocator;
+    var name: std.ArrayListUnmanaged(u8) = .empty;
+    defer name.deinit(a);
+    try name.appendNTimes(a, 'a', command.remote_log_name_max);
+    const field = try std.fmt.allocPrint(a, "{s}:7", .{name.items});
+    defer a.free(field);
+    try testing.expect(parseResumeEntry(field) != null);
+
+    var over: std.ArrayListUnmanaged(u8) = .empty;
+    defer over.deinit(a);
+    try over.appendNTimes(a, 'a', command.remote_log_name_max + 1);
+    const bad = try std.fmt.allocPrint(a, "{s}:7", .{over.items});
+    defer a.free(bad);
+    try testing.expect(parseResumeEntry(bad) == null);
+}
+
+test "parseArgs: --resume 을 받고, 망가진 값은 시작 전에 거른다" {
+    // 빈 값 = 이어읽기 없음(앱을 새로 켠 경우) — 기본값이 그것이다.
+    try testing.expectEqualStrings("", parseArgs(&.{ "--stdio", "--dir=/tmp/ev" }).stdio.resume_spec);
+
+    const m = parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=t5:10,t8:20" });
+    try testing.expectEqualStrings("t5:10,t8:20", m.stdio.resume_spec);
+
+    // **망가진 값으로 돌기 시작하지 않는다** — 그러면 「왜 처음부터 다시 읽지」를 나중에 화면에서
+    // 되짚어야 한다.
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=t5" }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=t5:10," }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=../x:1" }) == .usage_error);
 }

@@ -55,6 +55,12 @@ pub const Frame = union(enum) {
     event: struct { nonce: []const u8, line: []const u8 },
     /// 하트비트를 봤다(살아 있다).
     heartbeat,
+    /// 이 이름의 로그를 여기까지 읽었다([계획](../../docs/plans/remote-agent-state.md) RA5-a).
+    ///
+    /// **로컬이 기억했다가 재접속 때 `--resume=` 으로 돌려준다.** 원격 파일에 굳히지 않는 이유는
+    /// 「앱을 새로 켰다」와 「채널만 죽었다 살아났다」를 갈라야 하기 때문이다 — 앞은 다시 읽어야 배지가
+    /// 서고, 뒤는 다시 읽으면 완료 알림이 재생된다. 로컬 기억은 앱과 함께 죽으므로 그 구분이 저절로 선다.
+    cursor: struct { name: []const u8, offset: u64 },
     /// 이 줄에서 얻을 것이 없다(잡음·모르는 모양).
     ignored,
 };
@@ -63,6 +69,7 @@ pub const Frame = union(enum) {
 pub fn parseFrame(line: []const u8) Frame {
     if (line.len == 0 or line.len > max_line_bytes) return .ignored;
     if (std.mem.startsWith(u8, line, "{\"hb\":")) return .heartbeat;
+    if (std.mem.startsWith(u8, line, "{\"cur\":")) return parseCursor(line);
     const nonce = jsonStringField(line, "\"nonce\":\"") orelse return .ignored;
     const raw = jsonStringField(line, "\"line\":\"") orelse return .ignored;
     // nonce 를 **다시 검증한다.** 이 값이 «어느 Term 인가» 를 정하므로, 선 위에서 바뀌었을 가능성을
@@ -75,6 +82,22 @@ pub fn parseFrame(line: []const u8) Frame {
     if (nonce.len == 0 or nonce.len > command.remote_log_name_max) return .ignored;
     if (!command.instance_token_class.accepts(nonce)) return .ignored;
     return .{ .event = .{ .nonce = nonce, .line = raw } };
+}
+
+/// 커서 프레임을 푼다. **이름을 다시 검증한다** — 이 값이 「어느 로그인가」를 정하므로 선 위에서
+/// 바뀌었을 가능성을 그냥 믿지 않는다(`event` 와 같은 규율).
+fn parseCursor(line: []const u8) Frame {
+    const name = jsonStringField(line, "\"cur\":\"") orelse return .ignored;
+    if (name.len == 0 or name.len > command.remote_log_name_max) return .ignored;
+    if (!command.instance_token_class.accepts(name)) return .ignored;
+    const at_key = "\"at\":";
+    const at = std.mem.indexOf(u8, line, at_key) orelse return .ignored;
+    var end = at + at_key.len;
+    while (end < line.len and line[end] >= '0' and line[end] <= '9') end += 1;
+    const digits = line[at + at_key.len .. end];
+    if (digits.len == 0) return .ignored;
+    const offset = std.fmt.parseInt(u64, digits, 10) catch return .ignored;
+    return .{ .cursor = .{ .name = name, .offset = offset } };
 }
 
 /// `"<key>":"..."` 의 값 구간을 찾는다(이스케이프를 **풀지 않고** 그대로 돌려준다).
@@ -313,6 +336,7 @@ test "RA4 가 실제로 뱉은 wire 를 그대로 먹는다 — 두 층의 계�
         now += 100;
         switch (ch.feed(line, now)) {
             .heartbeat => beats += 1,
+            .cursor => {}, // 이 판정자는 이어읽기를 안 본다 — RA5-a 전용 test 가 따로 있다
             .event => |e| {
                 events += 1;
                 var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -419,4 +443,29 @@ test "parseFrame: tmux 이름(`<nonce>_t<pane>`)을 버리지 않는다" {
     const bad = try std.fmt.allocPrint(a, "{{\"nonce\":\"{s}\",\"line\":\"claude\\t{{}}\"}}", .{too_long.items});
     defer a.free(bad);
     try std.testing.expect(parseFrame(bad) == .ignored);
+}
+
+test "parseFrame: 커서 프레임을 이름과 위치로 푼다" {
+    switch (parseFrame("{\"cur\":\"t24\",\"at\":4096}")) {
+        .cursor => |c| {
+            try std.testing.expectEqualStrings("t24", c.name);
+            try std.testing.expectEqual(@as(u64, 4096), c.offset);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // 0 은 정당하다 — 「처음부터」를 명시한 값이다.
+    switch (parseFrame("{\"cur\":\"t24\",\"at\":0}")) {
+        .cursor => |c| try std.testing.expectEqual(@as(u64, 0), c.offset),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // **성하지 않으면 버린다** — 이 값이 「어느 로그를 어디서부터」를 정하므로 그냥 믿지 않는다.
+    try std.testing.expect(parseFrame("{\"cur\":\"t24\"}") == .ignored); // 위치 없음
+    try std.testing.expect(parseFrame("{\"cur\":\"\",\"at\":1}") == .ignored); // 이름 없음
+    try std.testing.expect(parseFrame("{\"cur\":\"../etc\",\"at\":1}") == .ignored); // 경로를 벗어난다
+    try std.testing.expect(parseFrame("{\"cur\":\"t24\",\"at\":x}") == .ignored); // 숫자가 아니다
+
+    // 이벤트·하트비트와 섞이지 않는다(같은 스트림을 나눠 쓴다).
+    try std.testing.expect(parseFrame("{\"hb\":7}") == .heartbeat);
 }

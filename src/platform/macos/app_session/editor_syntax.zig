@@ -151,7 +151,13 @@ pub const frame_parse_budget_ns: u64 = 4 * std.time.ns_per_ms;
 /// **여는 파싱도 예산을 든다**(§2.1a). 690KB `build.zig`는 한 프레임에 못 판다 — 그동안 무색으로
 /// 그리고 다음 프레임에 이어 판다.
 pub fn open(source: []const u8, g: editor_language.Grammar) State {
-    var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(g), frame_parse_budget_ns) };
+    return openBudgeted(source, g, frame_parse_budget_ns);
+}
+
+/// 파싱 예산을 지정해 연다. 제품은 `open`(프레임 예산)만 쓴다 — 이 문은 **캡처 하네스의 판정자**가
+/// 「예산 안에 못 끝내는 기계」를 기계 속도에 안 기대고 결정적으로 만들려고 있다.
+pub fn openBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u64) State {
+    var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(g), budget_ns) };
     st.pending = st.provider != null and st.provider.?.tree == null and source.len > 0;
     return st;
 }
@@ -496,7 +502,17 @@ fn roleOf(capture: []const u8) ?tokens.ColorRole {
 /// 상한을 두는 이유는 방어다. `resumeParse` 는 provider 가 없으면 스스로 접고, 있으면 매 호출마다
 /// 파서가 앞으로 나아가므로 끝난다 — 그래도 무한 루프로 판정자가 멈추는 것보다 실패가 낫다.
 fn openParsed(source: []const u8, g: editor_language.Grammar) State {
-    var st = open(source, g);
+    return openParsedBudgeted(source, g, frame_parse_budget_ns);
+}
+
+/// `openParsed` 를 **예산을 지정해** 부른다. 프레임 하나만 그리는 캡처 하네스(Chrome Lab)와,
+/// 「예산이 모자란 기계」를 기계 속도에 안 기대고 만들려는 판정자가 쓴다.
+///
+/// **`state.pending` 이 참인 채로 돌아올 수 있다** — 상한(100_000 회)에 걸린 경우다. 호출자가
+/// 그것을 보고 정할 일이다: 판정자는 그냥 재면 되고(그 상태로도 값이 나온다), **캡처 하네스는
+/// 죽어야 한다** — 색 없는 그림이 조용히 골든이 되면 게이트가 지키려던 것이 사라진다.
+pub fn openParsedBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u64) State {
+    var st = openBudgeted(source, g, budget_ns);
     var rounds: usize = 0;
     while (st.pending and rounds < 100_000) : (rounds += 1) _ = resumeParse(&st, source);
     return st;

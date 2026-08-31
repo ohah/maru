@@ -255,6 +255,13 @@ pub const Item = union(enum) {
     /// 눌러도 아무 일이 없어 "고장"으로 읽힌다).
     load_more,
     notice: []const u8,
+    /// **동작이 멈춘 이유**(커밋 메시지가 비었다·스테이지된 것이 없다 …). `notice` 와 자리는 같지만
+    /// **색이 다르다**(`danger_fg`) — 「변경 사항 없음」 같은 중립 진술과 한 톤이면 *무엇이 나를 막고
+    /// 있는지*가 안 읽힌다(사용자 제보 2026-08-31).
+    ///
+    /// **왜 `notice` 에 bool 을 달지 않았나**: 그러면 모든 생성 자리가 그 값을 정해야 하고, 안 정하면
+    /// 조용히 중립이 된다. 종류를 나누면 부르는 쪽이 고를 수밖에 없다.
+    blocker: []const u8,
 };
 
 /// 목록 위의 요약 줄. 아직 커밋·필터가 없으므로 **숫자만** 싣는다.
@@ -551,7 +558,7 @@ pub const DockMetrics = struct {
             .section => self.section_h,
             .file => self.row_h,
             // "모두 보기"와 안내는 파일 행과 같은 높이를 쓴다(줄이 하나이므로).
-            .more, .notice => self.row_h,
+            .more, .notice, .blocker => self.row_h,
         };
     }
 

@@ -334,9 +334,13 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 그것도 없다(②b).
     const items = arena.alloc(component.types.Item, total_rows + notice_rows + repos.entries.len * 4) catch return null;
     var n: usize = 0;
+    // **저장소에 매인 사유는 여기 안 선다** — 그 저장소의 커밋 버튼 아래로 간다(아래 `.blocker`).
+    // 여기 남는 것은 어느 저장소에도 안 매인 것(원격 갱신 결과 등)이다.
     if (self.scm_write_error) |err| {
-        items[n] = .{ .notice = err };
-        n += 1;
+        if (self.scm_write_error_repo == null) {
+            items[n] = if (self.scm_write_error_blocking) .{ .blocker = err } else .{ .notice = err };
+            n += 1;
+        }
     }
     var model_start: usize = 0;
     var model_end: usize = 0;
@@ -403,6 +407,18 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             },
         };
         n += 1;
+
+        // **막힌 이유는 그 저장소의 버튼 바로 아래에 선다**(사용자 제보 2026-08-31). 예전에는 목록 맨
+        // 위였는데, 아래쪽 워크트리에서 커밋하면 이유가 도크 꼭대기에 떠서 **어느 저장소 얘기인지도
+        // 왜 안 됐는지도** 화면에서 안 이어졌다. 방금 누른 버튼 밑이 그 답이 있어야 할 자리다.
+        if (self.scm_write_error) |err| blk: {
+            if (!self.scm_write_error_blocking) break :blk;
+            const owner = self.scm_write_error_repo orelse break :blk;
+            if (!std.mem.eql(u8, owner, entry.path)) break :blk;
+            if (n >= items.len) break :blk;
+            items[n] = .{ .blocker = err };
+            n += 1;
+        }
 
         const rows = if (repo_model) |rm| rm.rows else &[_]scm_view.Row{};
         // **변경이 없다는 말은 그 그룹의 줄이다**(②b). 스크롤 영역 위쪽에 그리면 그 자리에 머리 줄이
@@ -578,11 +594,17 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const evicted_rows: usize = if (evicted and rows.len > 0) 1 else 0;
     // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
     // 따라온다**).
-    const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
+    //
+    // **막힌 이유는 따라오지 않는다**(사용자 제보 2026-08-31). 「커밋 메시지를 입력하세요」는 그 상자
+    // 옆에서만 뜻이 있는데, 이 탭에는 커밋 상자가 없어 **읽고도 할 수 있는 것이 없다** — 게다가 그 말이
+    // 목록 맨 위에 붙어 히스토리를 한 줄 밀어낸다. 「결과는 탭을 따라온다」가 지키려던 것은 *"내가 방금
+    // 누른 것이 어떻게 됐나"* 이고, 그것은 **끝난 동작의 결과**(원격 갱신 완료 등)를 말한다.
+    const carries_across_tabs = self.scm_write_error != null and !self.scm_write_error_blocking;
+    const action_rows: usize = if (carries_across_tabs) 1 else 0;
     const items = arena.alloc(component.types.Item, rows.len + notice_rows + missed_rows + evicted_rows + action_rows + file_rows) catch return null;
     var n: usize = 0;
-    if (self.scm_write_error) |err| {
-        items[n] = .{ .notice = err };
+    if (carries_across_tabs) {
+        items[n] = .{ .notice = self.scm_write_error.? };
         n += 1;
     }
     if (missed > 0 and n < items.len) {
@@ -901,7 +923,12 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // — 브랜치 줄은 `branch`가 빈 이 탭에 서지 않으므로 `가져오기`도 여기서는 tree에 **없다**(아래
     // `.branch = ""`). 그래도 이 줄이 필요한 이유는 **커밋한 직후 여기로 옮겨 방금 만든 커밋을 확인하는**
     // 흐름이다: 옮기는 순간 결과가 사라지면 커밋이 됐는지 알 길이 없다.
-    const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
+    //
+    // **막힌 이유는 따라오지 않는다**(사용자 제보 2026-08-31). 바로 위 문단이 지키려는 것은 *"커밋이
+    // 됐는지"* 이고, 「커밋 메시지를 입력하세요」는 **그 상자 옆에서만** 뜻이 있다 — 이 탭에는 상자가
+    // 없어 읽고도 할 수 있는 것이 없고, 목록 맨 위에 붙어 히스토리를 한 줄 밀어낸다.
+    const carries_across_tabs = self.scm_write_error != null and !self.scm_write_error_blocking;
+    const action_rows: usize = if (carries_across_tabs) 1 else 0;
     // **상한만큼 읽었으면 더 있을 수 있다** — 그때만 "더 보기"를 세운다. 끝까지 읽었는데 세우면
     // 눌러도 아무 일이 없어 고장으로 읽힌다.
     const more_rows: usize = if (count >= self.scm_log_limit) 1 else 0;
@@ -909,8 +936,8 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const truncated_rows: usize = if (self.scm_log_truncated) 1 else 0;
     const items = arena.alloc(component.types.Item, count + notice_rows + action_rows + more_rows + truncated_rows + commit_file_rows) catch return null;
     var n: usize = 0;
-    if (self.scm_write_error) |err| {
-        items[n] = .{ .notice = err };
+    if (carries_across_tabs) {
+        items[n] = .{ .notice = self.scm_write_error.? };
         n += 1;
     }
     if (count == 0) {
@@ -2901,6 +2928,12 @@ pub fn clearScmWriteError(self: *AppSession) void {
         self.allocator.free(err);
         self.scm_write_error = null;
     }
+    // 사유와 그 **소속**은 함께 산다 — 하나만 남으면 다음 안내가 엉뚱한 저장소 아래에 선다.
+    if (self.scm_write_error_repo) |repo| {
+        self.allocator.free(repo);
+        self.scm_write_error_repo = null;
+    }
+    self.scm_write_error_blocking = false;
 }
 
 /// 끝난 쓰기를 거둔다. **성공이든 실패든 목록을 다시 읽는다** — 성공이면 사실이 바뀌었고, 실패면 우리가
@@ -3499,14 +3532,14 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     // 저장소의 `status`이고, 파일 줄도 그 출력에서 나온다. 아직 그 저장소를 못 읽었을 때만 막는다:
     // 그때는 스테이지 여부도 목록도 모르므로 "무엇을 커밋하는지" 모르는 채 실행하는 것이 된다.
     if (repoStatusTextFor(self, repo_path) == null and !isCurrentRepo(self, repo_path)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_repo_unread));
+        setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_repo_unread));
         return;
     }
     // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
     _ = self.scm_commit_field.commitPreedit(self.allocator);
     const message = std.mem.trim(u8, self.scm_commit_field.text.items, " \t\r\n");
     if (message.len == 0) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_need_commit_message));
+        setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_need_commit_message));
         return;
     }
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
@@ -3515,7 +3548,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     if (!model.has_staged) {
         // **감추지 않고 이유를 말한다.** 버튼은 꺼진 색이지만 눌리기는 하므로, 눌렀는데 아무 일도
         // 없으면 사용자는 앱이 멈춘 줄 안다.
-        setScmWriteNotice(self, maru.i18n.t(.scm_nothing_staged));
+        setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_nothing_staged));
         return;
     }
 
@@ -3523,7 +3556,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     const path = commitMessagePath(self, &path_buf) orelse return;
     // 메시지는 **원문 그대로** 쓴다(끝에 개행 하나만 보장 — git이 마지막 줄을 삼키지 않게).
     writeCommitMessageFile(self, path, self.scm_commit_field.text.items) catch {
-        setScmWriteNotice(self, maru.i18n.t(.scm_commit_msg_write_failed));
+        setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_commit_msg_write_failed));
         return;
     };
 
@@ -3597,12 +3630,37 @@ pub fn setScmWriteNoticeForTest(self: *AppSession, text: []const u8) void {
     setScmWriteNotice(self, text);
 }
 
+pub fn setScmWriteBlockerForTest(self: *AppSession, repo_path: ?[]const u8, text: []const u8) void {
+    setScmWriteBlocker(self, repo_path, text);
+}
+
+/// 지금 탭의 목록을 판정자가 그대로 본다. **제품이 그리는 것과 같은 함수**를 지난다 — 테스트가 자기
+/// 목록을 만들면 "무엇이 화면에 서는가" 를 안 재게 된다.
+pub fn projectTabForTest(self: *AppSession, arena: std.mem.Allocator) ?Projection {
+    return projectTab(self, arena);
+}
+
 /// 실패가 아니라 **안내**를 목록 위 한 줄로 낸다(빈 메시지·스테이지 0건처럼 git을 부르기도 전에 끝난
 /// 경우). `scm_write_error`와 같은 자리를 쓰는 이유는 사용자가 방금 누른 동작의 결과를 같은 곳에서
 /// 읽기 때문이다.
 fn setScmWriteNotice(self: *AppSession, text: []const u8) void {
     clearScmWriteError(self);
     self.scm_write_error = self.allocator.dupe(u8, text) catch null;
+    self.metal_dirty = true;
+}
+
+/// **동작이 멈춘 이유**를 그 저장소 자리에 낸다(사용자 제보 2026-08-31).
+///
+/// `setScmWriteNotice` 와 두 가지가 다르다 — 붉게 그려지고(`Item.blocker`), 그 저장소의 커밋 버튼
+/// **바로 아래**에 선다. 「커밋했습니다」와 「왜 안 됐습니다」가 같은 톤·같은 자리면 사용자는 누른
+/// 동작이 됐는지 아닌지를 화면에서 못 읽는다.
+///
+/// `repo_path` 가 `null` 이면 저장소에 안 매인 것이라 예전처럼 목록 맨 위에 서되, 색은 붉다.
+fn setScmWriteBlocker(self: *AppSession, repo_path: ?[]const u8, text: []const u8) void {
+    clearScmWriteError(self);
+    self.scm_write_error = self.allocator.dupe(u8, text) catch null;
+    if (repo_path) |path| self.scm_write_error_repo = self.allocator.dupe(u8, path) catch null;
+    self.scm_write_error_blocking = true;
     self.metal_dirty = true;
 }
 

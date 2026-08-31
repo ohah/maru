@@ -2256,7 +2256,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
 
     // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
     // (내용을 고정하면 이 파일을 고칠 때마다 테스트가 깨진다).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .staged, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .staged, 1, null, ""));
     const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var staged_result = staged;
     defer staged_result.deinit(worker_allocator);
@@ -2264,7 +2264,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
     try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .unstaged, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .unstaged, 2, null, ""));
     const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var unstaged_result = unstaged;
     defer unstaged_result.deinit(worker_allocator);
@@ -2272,7 +2272,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
 
     // untracked는 왼쪽이 **없는 것이 정상**이다 — 실패로 접지 않는다.
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .untracked, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .untracked, 3, null, ""));
     const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var untracked_result = untracked;
     defer untracked_result.deinit(worker_allocator);
@@ -2281,7 +2281,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(untracked_result.modified.len > 0);
 
     // 없는 경로는 실패를 **결과로** 싣는다(in-flight가 풀려야 화면이 "여는 중"에 안 갇힌다).
-    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", "", .staged, 4));
+    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", "", .staged, 4, null, ""));
     const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var missing_result = missing;
     defer missing_result.deinit(worker_allocator);
@@ -2317,12 +2317,12 @@ test "diff 왼쪽 rev 는 hex 만 받는다(end-to-end — 인자 주입 차단)
     // 대조군이 없으면 경로가 통째로 죽어도(예: spec 을 아무도 안 만들어도) 이 테스트는 초록이다.
     var head_buf: [64]u8 = undefined;
     const head_oid = headOid(exe, repo, &head_buf) orelse return error.SkipZigTest;
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", head_oid, "", .commit, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", head_oid, "", .commit, 1, null, ""));
     var good = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer good.deinit(worker_allocator);
     try testing.expect(good.modified.len > 0); // `<oid>:build.zig`
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", "", .commit, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", "", .commit, 2, null, ""));
     var bad = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer bad.deinit(worker_allocator);
     try testing.expectEqual(@as(usize, 0), bad.original.len);
@@ -2372,7 +2372,7 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .conflict, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .conflict, 1, null, ""));
     var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer result.deinit(worker_allocator);
 

@@ -470,6 +470,27 @@ pub const max_remote_command_bytes: usize = 8 * 1024;
 /// 비밀번호를 묻는 대신 실패해야 한다.
 pub const remote_argv_len: usize = 8;
 
+/// 원격 명령 앞에 붙이는 **PATH 접두**. `cli/agent_hooks.zig` 의 `remote_path_prefix` 와 **같은 값이어야
+/// 한다** — 그쪽이 먼저 겪고 남긴 처방이고, 경계 판정자가 두 값이 어긋나지 않는지 센다.
+///
+/// **왜 필요한가**(실측 2026-09-01): non-interactive ssh 의 PATH 는 로그인 셸보다 좁다.
+///
+/// ```
+/// ssh -S <ctl> <dest> 'echo $PATH'  →  /usr/bin:/bin:/usr/sbin:/sbin
+/// ```
+///
+/// Homebrew 나 `~/.local/bin` 에 깐 git 은 **그 목록에 없다.** 접두가 없으면 그런 원격에서 원격 SCM 이
+/// 통째로 실패하는데, argv 판정자는 문자열만 보므로 그것을 못 잡는다. `agent_hooks` 가 같은 함정을
+/// 겪고 남긴 말 그대로다: **「한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.」**
+///
+/// **덮지 않고 앞에 붙인다** — 사용자가 PATH 로 고른 git 이 있으면 그쪽이 이긴다.
+pub const remote_path_prefix = "$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin";
+
+/// 원격에 git 이 없을 때 셸이 내는 종료 코드. **stdout 을 오염시키지 않는다** — 마커를 찍으면 그 바이트가
+/// status 파서로 들어가므로, 「없다」는 사실은 종료 코드로만 말한다(실측: 없는 명령은 127, ssh 전송 실패는
+/// 255라 둘이 갈린다).
+pub const remote_command_not_found_exit: u8 = 127;
+
 /// 원격에서 부를 git. **PATH 로 찾는다** — 로컬은 절대경로 계약이지만(§6 PATH hijack) 원격의 설치
 /// 위치는 우리가 모른다(계약 §2.2 ⑷). 그 대신 원격 명령의 모든 토큰은 우리가 만든 것이고 사용자 입력이
 /// 토큰 자리에 들어가지 않는다.
@@ -534,6 +555,12 @@ pub fn buildRemote(
     // dest·control socket 검증은 `remoteArgv` 가 진다(두 빌더가 같은 판정을 공유한다).
 
     var n: usize = 0;
+    // **PATH 접두를 먼저 깐다**(실측 근거는 `remote_path_prefix` 주석). 인용하지 않는다 — `$PATH` 가
+    // **원격 셸에서 펼쳐져야** 하기 때문이고, 그 값은 우리가 만든 상수라 사용자 입력이 아니다.
+    const path_prefix = "PATH=\"" ++ remote_path_prefix ++ ":$PATH\"; ";
+    if (n + path_prefix.len > cmd_buf.len) return null;
+    @memcpy(cmd_buf[n..][0..path_prefix.len], path_prefix);
+    n += path_prefix.len;
     n = quoteAppend(cmd_buf, n, "env") orelse return null;
     for (env_overrides) |override| {
         if (!remoteTokenIsSafe(override.name) or !remoteTokenIsSafe(override.value)) return null;
@@ -619,6 +646,11 @@ pub fn buildRemoteFileRead(
     if (abs_path.len == 0 or abs_path[0] != '/') return null;
     if (!remoteTokenIsSafe(abs_path)) return null;
     var n: usize = 0;
+    // 위와 같은 접두 — `head` 는 보통 `/usr/bin` 에 있지만 규율을 두 갈래로 두지 않는다.
+    const path_prefix = "PATH=\"" ++ remote_path_prefix ++ ":$PATH\"; ";
+    if (n + path_prefix.len > cmd_buf.len) return null;
+    @memcpy(cmd_buf[n..][0..path_prefix.len], path_prefix);
+    n += path_prefix.len;
     n = quoteAppend(cmd_buf, n, "head") orelse return null;
     if (n >= cmd_buf.len) return null;
     cmd_buf[n] = ' ';
@@ -1377,7 +1409,14 @@ test "원격 argv: 로컬이 닫아 둔 구멍이 원격에서도 닫혀 있다"
         const q = std.fmt.bufPrint(&quoted, "'{s}={s}'", .{ override.name, override.value }) catch return error.Unexpected;
         try std.testing.expect(std.mem.indexOf(u8, line, q) != null);
     }
-    try std.testing.expect(std.mem.startsWith(u8, line, "'env' "));
+    // **PATH 접두가 맨 앞에 온다**(RS4 §6.5). 없으면 Homebrew·`~/.local/bin` 에 깐 git 이 있는 원격에서
+    // 명령이 통째로 실패한다 — argv 판정자는 문자열만 보므로 **여기서 세지 않으면 아무도 안 본다.**
+    var prefix_buf: [256]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "PATH=\"{s}:$PATH\"; ", .{remote_path_prefix}) catch return error.Unexpected;
+    try std.testing.expect(std.mem.startsWith(u8, line, prefix));
+    // `$PATH` 는 **인용하지 않는다** — 원격 셸에서 펼쳐져야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, line, ":$PATH\"") != null);
+    try std.testing.expect(std.mem.startsWith(u8, line[prefix.len..], "'env' "));
     try std.testing.expect(std.mem.indexOf(u8, line, "'-C' '/srv/app'") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "'status'") != null);
 }
@@ -1402,12 +1441,17 @@ test "원격 argv: 셸 메타문자가 든 경로도 한 인자로 도착한다"
     // **셸 규칙 그대로 읽는다**: 인용 밖의 `\\` 는 다음 한 글자를 리터럴로 만든다 — `'\\''` 가 정확히
     // 그 셋(닫기 · 이스케이프된 따옴표 · 열기)이라, 그 백슬래시를 모르면 검사기가 자기 인용 규약을
     // 오해한다(적대적 검증 1 회차에서 이 검사기가 먼저 틀렸다).
+    // **접두는 인용 밖이다**(의도적 — `$PATH` 가 펼쳐져야 한다). 그 구간을 지나고서 센다.
+    var prefix_buf: [256]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "PATH=\"{s}:$PATH\"; ", .{remote_path_prefix}) catch return error.Unexpected;
+    try std.testing.expect(std.mem.startsWith(u8, line, prefix));
+    const body = line[prefix.len..];
     var in_quote = false;
     var i: usize = 0;
-    while (i < line.len) {
-        const c = line[i];
+    while (i < body.len) {
+        const c = body[i];
         if (!in_quote and c == '\\') {
-            try std.testing.expect(i + 1 < line.len); // 끊긴 이스케이프는 셸이 다음 줄을 기다린다
+            try std.testing.expect(i + 1 < body.len); // 끊긴 이스케이프는 셸이 다음 줄을 기다린다
             i += 2; // 이스케이프된 한 글자는 리터럴이다
             continue;
         }
@@ -1466,7 +1510,10 @@ test "원격 파일 읽기: 원격에서 자르고, 절대경로만 받는다 (R
     var size_buf: [24]u8 = undefined;
     const size = try std.fmt.bufPrint(&size_buf, "'{d}'", .{max_remote_file_bytes});
     try std.testing.expect(std.mem.indexOf(u8, line, size) != null);
-    try std.testing.expect(std.mem.startsWith(u8, line, "'head' '-c' "));
+    var fr_prefix_buf: [256]u8 = undefined;
+    const fr_prefix = std.fmt.bufPrint(&fr_prefix_buf, "PATH=\"{s}:$PATH\"; ", .{remote_path_prefix}) catch return error.Unexpected;
+    try std.testing.expect(std.mem.startsWith(u8, line, fr_prefix)); // 같은 접두를 쓴다(규율을 두 갈래로 두지 않는다)
+    try std.testing.expect(std.mem.startsWith(u8, line[fr_prefix.len..], "'head' '-c' "));
     // `--` 로 옵션 해석을 끊고, 경로는 같은 인용 규칙을 쓴다(작은따옴표 안은 확장이 없다).
     try std.testing.expect(std.mem.indexOf(u8, line, "'--' '/srv/app/src/it'\\''s here.zig'") != null);
 

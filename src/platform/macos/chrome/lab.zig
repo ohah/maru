@@ -101,6 +101,14 @@ pub const ScenarioId = enum {
     /// 도크에서 정확히 그 결함이 사용자 캡처로 드러났고(`scm_scrolled` 가 그때 생겼다), 트리도 같은
     /// 창 산술을 쓴다. 스크롤이 없는 `file_tree_rows` 로는 이 상태를 만들 수 없다.
     file_tree_scrolled,
+    /// **트리 위 고정 chrome 을 새는지 픽셀로 본다**(2026-08-31 사용자 제보). `file_tree_scrolled` 는
+    /// 트리를 원점에 그려서 **위로 새는 잉크가 캔버스 밖**이라 캡처에 안 잡힌다 — 그 결함이 6일간
+    /// 초록이었던 이유다.
+    ///
+    /// 이 시나리오는 하네스가 **띠를 심고 트리를 그만큼 내려** 그 자리를 만든다(`dock_over_status_bar`
+    /// 가 아래쪽 경계를 그렇게 본다 — 이쪽은 **위쪽** 경계다). 반쯤 걸친 첫 행의 라벨이 clip 을 안
+    /// 받으면 그 띠 위에 그려지고, crop 이 그것을 본다.
+    file_tree_over_chrome,
     /// 세션 기록 헤더의 **정렬 토글에 호버**한 상태. 이 토글은 `.ghost`라 평소에는 label만 보이고 면·테두리가
     /// 없다 — 즉 **호버·pressed 때만 존재하는 그림**이고, 그 그림을 보던 골든이 하나도 없었다. 실제로
     /// 목록 행용 hover 토큰(활성보다 밝게 잡은 색)이 그대로 깔려 작은 pill 하나만 튀는 상태가 사용자
@@ -333,7 +341,7 @@ pub fn buildFrame(
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
-        .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
+        .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -1104,7 +1112,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1271,7 +1279,7 @@ fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
         // **행 높이의 배수가 아닌 값**이다. 배수면 첫 행이 통째로 밀려 나가 "반쯤 걸친 행"이 없고,
         // 그러면 이 시나리오가 clip 을 증언하지 못한다(내 판정자가 같은 함정을 한 번 밟았다 —
         // 스크롤을 정확히 10 행만큼 줘서 단언이 아무것도 안 보던 적이 있다).
-        .origin_shift_px = if (scenario.id == .file_tree_scrolled) 11 else 0,
+        .origin_shift_px = if (scenario.id == .file_tree_scrolled or scenario.id == .file_tree_over_chrome) 11 else 0,
     };
     const sizes = file_tree.build.bufferSizes(rows.len);
     if (sizes.nodes > buffers.file_tree_nodes.len or sizes.entries > buffers.entries.len or

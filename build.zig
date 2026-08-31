@@ -12089,7 +12089,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
-        run_release_adapter_contract_tests.addArg("--maru-expect-tests=8");
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=9");
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
         session_host_step.dependOn(&run_release_adapter_contract_tests.step);
@@ -12547,6 +12547,53 @@ pub fn build(b: *std.Build) void {
         session_host_release_adapter_github_transport_step.dependOn(&run_github_transport_tests.step);
         session_host_step.dependOn(&run_github_transport_tests.step);
         test_step.dependOn(&run_github_transport_tests.step);
+    }
+    const session_host_release_adapter_github_cli_authority_step = b.step(
+        "test-session-host-release-adapter-github-cli-authority",
+        "Validate official Release CI GitHub CLI executable authority",
+    );
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |authority_optimize| {
+            const authority_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "release_adapter_files",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
+                        .target = target,
+                        .optimize = authority_optimize,
+                        .link_libc = true,
+                        .imports = &.{.{
+                            .name = "safe_open",
+                            .module = b.createModule(.{
+                                .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                                .target = target,
+                                .optimize = authority_optimize,
+                            }),
+                        }},
+                    }),
+                }},
+            });
+            const authority_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_github_cli_authority.zig"),
+                    .target = target,
+                    .optimize = authority_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "release_adapter_github_cli_authority", .module = authority_mod }},
+                }),
+            });
+            const run_authority_tests = b.addRunArtifact(authority_tests);
+            run_authority_tests.addArg("--maru-expect-tests=5");
+            run_authority_tests.setCwd(b.path("."));
+            session_host_release_adapter_github_cli_authority_step.dependOn(&run_authority_tests.step);
+            session_host_step.dependOn(&run_authority_tests.step);
+            test_step.dependOn(&run_authority_tests.step);
+            macos_only_test_step.dependOn(&run_authority_tests.step);
+        }
     }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",

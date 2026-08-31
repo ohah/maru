@@ -4970,7 +4970,13 @@ pub const AppSession = struct {
     last_agent_target: ?u64 = null,
     /// 보내기 대상 줄의 라벨 버퍼 — **행마다 자기 칸**이다. 하나를 돌려 쓰면 다음 행이 앞 행을 덮어
     /// 메뉴가 같은 이름을 여러 줄 보여 준다(항목 표는 슬라이스만 빌린다).
-    agent_target_label_buf: [max_agent_targets][128]u8 = undefined,
+    /// 보내기 대상 줄의 라벨 버퍼. **자리에 안 들어가면 그 대상이 목록에서 빠진다**
+    /// (`agent_selection.writeLabel` 이 자르지 않고 `null` 을 준다 — 잘린 라벨은 다른 대상으로
+    /// 읽히기 때문이다). 그래서 이 크기는 곧 **고를 수 있는 대상의 범위**다.
+    ///
+    /// 128 에서 256 으로 올렸다 — 종류 기호와 pane 이름이 붙으면서(2026-08-31) 긴 경로 + 긴
+    /// 브랜치 + 한글 pane 이름이 겹칠 때 넘칠 수 있게 됐고, 넘치면 **그 대상을 못 고른다**.
+    agent_target_label_buf: [max_agent_targets][256]u8 = undefined,
     /// 편집기 본문 우클릭 메뉴(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
     /// native-editor-ui.md §8.1). 다른 메뉴들과 `chrome_host.context_menu` 를 공유하되 이 값이
     /// non-null 이면 그 분기다.

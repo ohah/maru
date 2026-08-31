@@ -109,6 +109,23 @@ pub const CandidateKind = enum(u8) {
             .shell => null,
         };
     }
+
+    /// 줄 맨 앞 **종류 기호**(사용자 요청 2026-08-31 — "클로드인지 코덱스인지 아이콘이나 색으로").
+    ///
+    /// **왜 기호인가**: 컨텍스트 메뉴는 문자열 배열만 받고 행마다 색이 하나다(`context_menu.view`).
+    /// 색으로 가르려면 그 컴포넌트에 항목별 role 을 들이는 확장이 필요한데, 그것은 모든 소비처에
+    /// 영향이 간다. 기호는 **켜짐 표시(`check_glyph`)가 이미 쓰는 자리**라 컴포넌트가 그대로다.
+    ///
+    /// **번역하지 않는다** — 기호는 번역 단위가 아니다(같은 규율이 `context_menu` 주석에 있다).
+    /// **셸에도 기호를 준다**: 빈 칸을 두면 에이전트 줄과 셸 줄의 글자가 좌우로 어긋나 목록이
+    /// 들쭉날쭉해진다(켜짐 표시가 꺼진 줄에 같은 폭의 공백을 넣는 것과 같은 이유다).
+    pub fn glyph(self: CandidateKind) []const u8 {
+        return switch (self) {
+            .claude => "◆",
+            .codex => "◇",
+            .shell => "○",
+        };
+    }
 };
 
 pub const Candidate = struct {
@@ -128,6 +145,10 @@ pub const Candidate = struct {
     where: []const u8 = "",
     /// 저장소 브랜치. 없으면 라벨에서 괄호를 뺀다.
     branch: ?[]const u8 = null,
+    /// 그 Term 의 **화면 이름**(탭에 뜨는 그것). 같은 워크스페이스에 에이전트가 둘 이상 떠 있으면
+    /// 폴더·브랜치가 같아 **줄이 구분되지 않는다** — 그때 이 값만이 둘을 가른다(사용자 요청
+    /// 2026-08-31). 비어 있으면 라벨에서 화살표째 뺀다.
+    pane: []const u8 = "",
 };
 
 /// 후보를 §5 순서로 **제자리 정렬**한다 — 에이전트 먼저, 그 안에서는 **화면 순서**(`order`).
@@ -150,10 +171,17 @@ pub fn orderCandidates(items: []Candidate) void {
 /// 쓰는 것과 같아야 한다. 같은 정보를 두 곳에서 다르게 부르면 사용자가 다른 것으로 읽는다.
 pub fn writeLabel(out: []u8, c: Candidate) ?[]const u8 {
     var writer = std.Io.Writer.fixed(out);
+    // **종류 기호가 맨 앞이다.** 눈이 줄을 훑을 때 먼저 닿는 자리이고, 폭이 고정이라 아래 글자들이
+    // 같은 열에서 시작한다.
+    writer.writeAll(c.kind.glyph()) catch return null;
+    writer.writeAll(" ") catch return null;
     const head = c.kind.agentName() orelse c.shell_name;
     writer.writeAll(head) catch return null;
     if (c.where.len > 0) writer.print(" — {s}", .{c.where}) catch return null;
     if (c.branch) |b| if (b.len > 0) writer.print(" ({s})", .{b}) catch return null;
+    // **pane 이름은 맨 뒤다.** 앞의 것들이 "어느 저장소인가" 를 답하고, 이것이 "그 안 어느 줄인가"
+    // 를 답한다 — 좁은 것에서 넓은 것으로 읽히면 눈이 되돌아가야 한다.
+    if (c.pane.len > 0) writer.print(" → {s}", .{c.pane}) catch return null;
     return writer.buffered();
 }
 
@@ -364,22 +392,66 @@ test "같은 입력은 언제나 같은 순서를 낸다 — 정렬의 안정성
 test "라벨은 §5 모양이고, 없는 축은 자리도 안 만든다" {
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "Claude — maru (feat/rich)",
+        "◆ Claude — maru (feat/rich)",
         writeLabel(&buf, .{ .surface_id = 1, .kind = .claude, .where = "maru", .branch = "feat/rich" }).?,
     );
     // 브랜치가 없으면 **빈 괄호를 남기지 않는다** — `maru ()` 는 저장소가 아닌 것처럼 읽힌다.
     try testing.expectEqualStrings(
-        "Codex — maru",
+        "◇ Codex — maru",
         writeLabel(&buf, .{ .surface_id = 2, .kind = .codex, .where = "maru", .branch = null }).?,
     );
     try testing.expectEqualStrings(
-        "Codex — maru",
+        "◇ Codex — maru",
         writeLabel(&buf, .{ .surface_id = 2, .kind = .codex, .where = "maru", .branch = "" }).?,
     );
     // 셸은 이름을 호출자가 준다.
     try testing.expectEqualStrings(
-        "zsh — ~/work/maru",
+        "○ zsh — ~/work/maru",
         writeLabel(&buf, .{ .surface_id = 3, .kind = .shell, .shell_name = "zsh", .where = "~/work/maru" }).?,
+    );
+}
+
+test "종류 기호가 맨 앞에 서고 셋이 서로 다르다 — 셸도 자리를 차지한다" {
+    // 사용자 요청(2026-08-31): 클로드인지 코덱스인지 한눈에 갈리게. 컨텍스트 메뉴가 문자열만
+    // 받으므로 기호로 가른다(§5.1).
+    //
+    // **셸에도 기호를 주는 것이 계약이다.** 빈 칸을 두면 에이전트 줄과 셸 줄의 글자가 좌우로
+    // 어긋나 목록이 들쭉날쭉해진다 — 켜짐 표시가 꺼진 줄에 같은 폭의 공백을 넣는 것과 같은 이유다.
+    try testing.expect(!std.mem.eql(u8, CandidateKind.claude.glyph(), CandidateKind.codex.glyph()));
+    try testing.expect(!std.mem.eql(u8, CandidateKind.codex.glyph(), CandidateKind.shell.glyph()));
+    try testing.expect(CandidateKind.shell.glyph().len > 0);
+
+    var buf: [128]u8 = undefined;
+    const label = writeLabel(&buf, .{ .surface_id = 1, .kind = .claude, .where = "maru" }).?;
+    try testing.expect(std.mem.startsWith(u8, label, CandidateKind.claude.glyph()));
+}
+
+test "pane 이름이 맨 뒤에 붙는다 — 같은 저장소의 두 에이전트를 가르는 유일한 값이다" {
+    // 사용자 요청(2026-08-31): 워크스페이스와 pane 이름이 보이게. 폴더·브랜치가 같으면 그 두 줄은
+    // 이것으로만 구분된다.
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "◆ Claude — maru5 (main) → 편집기 2",
+        writeLabel(&buf, .{
+            .surface_id = 1,
+            .kind = .claude,
+            .where = "maru5",
+            .branch = "main",
+            .pane = "편집기 2",
+        }).?,
+    );
+
+    // **같은 저장소의 둘이 실제로 갈린다** — 이 판정이 없으면 pane 을 빼도 앞 판정자들이 통과한다.
+    var buf_a: [128]u8 = undefined;
+    var buf_b: [128]u8 = undefined;
+    const a = writeLabel(&buf_a, .{ .surface_id = 1, .kind = .claude, .where = "maru5", .branch = "main", .pane = "터미널 1" }).?;
+    const b = writeLabel(&buf_b, .{ .surface_id = 2, .kind = .claude, .where = "maru5", .branch = "main", .pane = "터미널 2" }).?;
+    try testing.expect(!std.mem.eql(u8, a, b));
+
+    // 비어 있으면 **화살표째 뺀다** — `maru5 → ` 로 끝나는 줄은 잘린 것처럼 읽힌다.
+    try testing.expectEqualStrings(
+        "◆ Claude — maru5",
+        writeLabel(&buf, .{ .surface_id = 1, .kind = .claude, .where = "maru5", .pane = "" }).?,
     );
 }
 
@@ -407,8 +479,11 @@ test "줄과 id 는 같은 걸음으로 늘어난다 — 라벨이 빠져도 안
     // **남은 둘의 라벨과 id 가 짝이다** — 빠진 것이 뒤 줄을 밀지 않았다.
     try testing.expectEqual(@as(u64, 11), ids[0]);
     try testing.expectEqual(@as(u64, 33), ids[1]);
-    try testing.expect(std.mem.startsWith(u8, labels[0], "Claude"));
-    try testing.expect(std.mem.startsWith(u8, labels[1], "z"));
+    // 기호가 맨 앞이므로 이름은 그 뒤다(§5.1) — 상수로 조립해 기호가 바뀌어도 이 판정이 안 깨진다.
+    try testing.expect(std.mem.startsWith(u8, labels[0], CandidateKind.claude.glyph()));
+    try testing.expect(std.mem.indexOf(u8, labels[0], "Claude") != null);
+    try testing.expect(std.mem.startsWith(u8, labels[1], CandidateKind.shell.glyph()));
+    try testing.expect(std.mem.indexOf(u8, labels[1], "z") != null); // 이 픽스처의 셸 이름
 }
 
 test "출력 배열이 짧으면 거기서 멈춘다 — 넘겨 쓰지 않는다" {

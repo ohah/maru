@@ -7511,6 +7511,35 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
 // 그래서 **여는 자리를 함수 하나로 모았다**(`openAgentDirAbsolute`). 호출부마다 `isAbsolute` 를 적는
 // 규율은 새로 여는 자리 하나가 밖에 남는 순간 깨지고, 그 하나가 곧 abort 다 — 규율을 주석이 아니라
 // 게이트가 진다.
+// **원격 PATH 처방은 한 값이어야 한다.**
+//
+// non-interactive ssh 의 PATH 는 로그인 셸보다 좁아(`/usr/bin:/bin:/usr/sbin:/sbin` — 2026-09-01 실측)
+// Homebrew·`~/.local/bin` 에 깐 실행 파일이 안 잡힌다. `cli/agent_hooks.zig` 가 그 함정을 먼저 겪고
+// 처방(PATH 접두)을 남겼고, 원격 SCM(`session/git_command.zig`)이 같은 처방을 쓴다.
+//
+// 그 주석이 남긴 말이 이 게이트의 이유다: **「한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.」**
+// 두 값이 갈리면 한쪽 축만 고쳐지고 다른 축은 조용히 옛 목록으로 남는다 — 그 어긋남은 **그런 원격을
+// 가진 사용자에게만** 보이므로 우리 CI 로는 영영 안 잡힌다.
+test "원격 PATH 처방은 agent_hooks 와 git_command 가 같은 값을 쓴다" {
+    const allocator = std.testing.allocator;
+    const hooks = try readZigFileZ(allocator, "src/cli/agent_hooks.zig");
+    defer allocator.free(hooks);
+    const git_cmd = try readZigFileZ(allocator, "src/session/git_command.zig");
+    defer allocator.free(git_cmd);
+
+    const needle = "pub const remote_path_prefix = \"";
+    const h = std.mem.indexOf(u8, hooks, needle) orelse return error.HooksPrefixMissing;
+    const g = std.mem.indexOf(u8, git_cmd, needle) orelse return error.GitCommandPrefixMissing;
+    const h_end = std.mem.indexOfScalarPos(u8, hooks, h + needle.len, '"') orelse return error.HooksPrefixUnterminated;
+    const g_end = std.mem.indexOfScalarPos(u8, git_cmd, g + needle.len, '"') orelse return error.GitCommandPrefixUnterminated;
+    try std.testing.expectEqualStrings(hooks[h + needle.len .. h_end], git_cmd[g + needle.len .. g_end]);
+
+    // **값이 비어 있으면 게이트가 아무것도 안 지킨다** — 둘 다 빈 문자열이어도 위 단언은 통과한다.
+    try std.testing.expect(h_end - (h + needle.len) > 20);
+    // 그리고 그 처방이 실제로 쓰이는지 본다(상수만 있고 아무도 안 부르면 PATH 는 여전히 좁다).
+    try std.testing.expect(countOccurrences(git_cmd, "remote_path_prefix ++ \":$PATH\\\"; \"") >= 2);
+}
+
 test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 않는다" {
     const allocator = std.testing.allocator;
 

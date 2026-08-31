@@ -7501,6 +7501,34 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
     try std.testing.expect(paired >= 13);
 }
 
+// **`openDirAbsolute` 는 상대경로에 `assert` 로 죽는다** — `catch` 가 못 막는 종류다(std 의 계약이다).
+//
+// 에이전트 경로가 여는 디렉터리는 전부 `HOME`·`CLAUDE_CONFIG_DIR` 에서 만든 것이라, 그 env 가 상대경로면
+// **앱이 통째로 abort** 한다. 2026-08-31 에 실제로 그랬다: 제품 스모크가 HOME 을 `zig-out/…` 상대경로로
+// 띄우는데 `removeAgentStatuslineHook` 이 SIGABRT 를 냈고, main 이 그 상태로 빨간 채 **무관한 PR 셋**이
+// 같은 자리에서 막혔다(#2947·#2944·#2935).
+//
+// 그래서 **여는 자리를 함수 하나로 모았다**(`openAgentDirAbsolute`). 호출부마다 `isAbsolute` 를 적는
+// 규율은 새로 여는 자리 하나가 밖에 남는 순간 깨지고, 그 하나가 곧 abort 다 — 규율을 주석이 아니라
+// 게이트가 진다.
+test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 않는다" {
+    const allocator = std.testing.allocator;
+
+    const agent_src = try readZigFileZ(allocator, "src/platform/macos/app_session/agent.zig");
+    defer allocator.free(agent_src);
+    // 직접 호출은 **헬퍼 정의 한 줄뿐**이어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(agent_src, "std.Io.Dir.openDirAbsolute("));
+    try std.testing.expect(countOccurrences(agent_src, "if (!std.fs.path.isAbsolute(path)) return null;") == 1);
+    // 그리고 그 헬퍼가 실제로 쓰여야 한다 — 정의만 있고 아무도 안 부르면 게이트가 초록인 채 규율이 없다.
+    try std.testing.expect(countOccurrences(agent_src, "openAgentDirAbsolute(self,") >= 7);
+
+    // 갤러리는 자리가 하나라 인라인 가드를 쓴다 — **그 가드가 있는지**를 센다.
+    const gallery_src = try readZigFileZ(allocator, "src/platform/macos/app_session/image_gallery.zig");
+    defer allocator.free(gallery_src);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "std.Io.Dir.openDirAbsolute("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "if (!std.fs.path.isAbsolute(root_path)) break;"));
+}
+
 test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
     const allocator = std.testing.allocator;
 

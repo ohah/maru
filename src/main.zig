@@ -1807,7 +1807,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1074;
+const smoke_spin_cap: usize = 1090;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -3129,6 +3129,30 @@ fn cellDrawnAt(cells: []const d3d11_cells.Cell, x: f32, y: f32, w: f32, h: f32) 
             @abs(c.rect[2] - w) < 1.5 and @abs(c.rect[3] - h) < 1.5) return true;
     }
     return false;
+}
+
+/// 발행된 track·thumb 에서 **잡는 기하**를 만든다. 스크롤바가 없으면 `null`.
+///
+/// **되읽어서 만든다** — 그리는 자리와 잡는 자리의 단일 출처가 발행된 tree 이기 때문이다. 여기서 다시
+/// 계산하면 컴포넌트가 자리를 옮기는 순간 둘이 갈린다. 거터(잡는 폭)만 metrics 에서 오는데, 그것은
+/// tree entry 에 **그린 rect 만** 실리기 때문이고 `withHitSpan` 이 그 관계를 소유한다.
+fn agentBarGeometry(built: *const agent_surface.Built, max_offset: u32) ?maru.chrome.ui.scroll_area.ScrollbarGeometry {
+    const nid = maru.chrome.components.session_dock.build.NodeIds;
+    const track = agentNodeRect(built, nid.scroll_track) orelse return null;
+    const thumb = agentNodeRect(built, nid.scroll_thumb) orelse return null;
+    const dm = maru.chrome.components.session_dock.types.DockMetrics.resolve(1000);
+    const g = maru.chrome.ui.scroll_area.ScrollbarGeometry{
+        .track_x = track.x,
+        .track_y = track.y,
+        .track_w = track.width,
+        .track_h = track.height,
+        .hit_x = track.x,
+        .hit_w = track.width,
+        .thumb_y = thumb.y,
+        .thumb_h = thumb.height,
+        .max_offset_px = max_offset,
+    };
+    return g.withHitSpan(@floatFromInt(dm.scrollbarMetrics().gutterPx()));
 }
 
 fn agentItemRect(built: *const agent_surface.Built, index: usize) ?maru.chrome.ui.layout.UiRect {
@@ -5472,6 +5496,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var bar_thumb_y_top: f32 = -1;
     var bar_thumb_y_end: f32 = -1;
     var bar_thumb_h: f32 = 0;
+    // 막대를 잡고 있는 동안의 **기하와 잡은 지점**. 기하를 잡을 때 한 번 얼려 둔다 — thumb 은 끄는
+    // 동안 움직이므로 매 프레임 다시 읽으면 자기 움직임을 다시 입력으로 먹는다.
+    var agent_bar_drag: ?struct { geom: maru.chrome.ui.scroll_area.ScrollbarGeometry, grab_dy: f32 } = null;
+    var agent_bar_drags: usize = 0;
+    var agent_bar_jumps: usize = 0;
+    var bdrag_judgeable = false;
+    var bdrag_off_before: u32 = 0;
+    var bdrag_off_after: u32 = 0;
+    var bdrag_thumb_bottom: f32 = -1;
+    var bdrag_track_bottom: f32 = -1;
+    var bdrag_moves_before: usize = 0;
+    var bdrag_thumb_start: f32 = -1;
+    var bdrag_thumb_mid: f32 = -1;
+    var bdrag_grab_x: i32 = 0;
+    var bdrag_bottom_y: i32 = 0;
+    const bdrag_step_px: i32 = 40;
+    var esc_judgeable = false;
+    var esc_off_start: u32 = 0;
+    var esc_off_dragging: u32 = 0;
+    var esc_off_after: u32 = 0;
+    var esc_off_released: u32 = 0;
+    var bjump_judgeable = false;
+    var bjump_off_before: u32 = 0;
+    var bjump_off_after: u32 = 0;
+    var bjump_jumps_before: usize = 0;
+    var bjump_press_y: f32 = -1;
+    var bjump_thumb_mid: f32 = -1;
     var ascroll_view_bottom: f32 = 0;
     var agent_clip_judgeable = false;
     var agent_clip_cut: usize = 0;
@@ -6297,7 +6348,94 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 1070 and ascroll_judgeable) {
             ascroll_up_off = agent_scroll.offset_y_px;
+            // ── 막대를 잡아 끈다 (W8.22) ────────────────────────────────────────────
+            //
+            // **위로 한 눈금 되돌린 자리에서 시작한다** — 이미 상한이면 끌어도 안 움직여 판정이
+            // 공짜로 참이 된다(적대적 검증 5회차가 같은 함정을 잡았다).
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                bdrag_judgeable = true;
+                bdrag_off_before = agent_scroll.offset_y_px;
+                bdrag_moves_before = agent_scrolls;
+                bdrag_track_bottom = g.track_y + g.track_h;
+                bdrag_thumb_start = g.thumb_y;
+                const ox: i32 = @intCast(geom.tree_content.x);
+                const oy: i32 = @intCast(geom.tree_content.y);
+                // thumb **한가운데**를 잡는다 — 잡은 지점을 유지하는지 보려면 끝이 아니라 가운데여야
+                // 한다(끝을 잡으면 `grab_dy` 를 0 으로 두는 결함과 구별이 안 된다).
+                bdrag_grab_x = ox + @as(i32, @intFromFloat(g.track_x + g.track_w / 2));
+                bdrag_bottom_y = oy + @as(i32, @intFromFloat(g.track_y + g.track_h));
+                const grab_y: i32 = oy + @as(i32, @intFromFloat(g.thumb_y + g.thumb_h / 2));
+                window.postSyntheticMouse(.left_down, bdrag_grab_x, grab_y);
+                // **딱 40px 만 내린다.** thumb 도 정확히 그만큼 움직여야 한다 — 그것이 "잡은 지점을
+                // 유지한다" 의 뜻이고, 끝(바닥)만 보면 clamp 때문에 `grab_dy` 가 틀려도 초록이 된다.
+                window.postSyntheticMouse(.moved, bdrag_grab_x, grab_y + bdrag_step_px);
+            };
             ascroll_tree_off_after = dock_scroll_px;
+        }
+        if (smoke and spins == 1072 and bdrag_judgeable) {
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                bdrag_thumb_mid = g.thumb_y;
+            };
+            // 이어서 바닥까지 — 끝은 clamp 가 정한다.
+            window.postSyntheticMouse(.moved, bdrag_grab_x, bdrag_bottom_y);
+            window.postSyntheticMouse(.left_up, bdrag_grab_x, bdrag_bottom_y);
+        }
+        if (smoke and spins == 1075 and bdrag_judgeable) {
+            bdrag_off_after = agent_scroll.offset_y_px;
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                bdrag_thumb_bottom = g.thumb_y + g.thumb_h;
+            };
+        }
+        // ── 막대를 잡고 **도크 밖에서** 떼면 놓아야 한다 (적대적 검증 1회차) ──────────
+        //
+        // 제스처는 시작한 곳이 소유한다. 영역으로 가르면 밖에서 뗀 up 이 이 코드에 안 와
+        // **계속 쥔 채로** 남고, 다음에 도크 위를 지나가기만 해도 목록이 튄다.
+        if (smoke and spins == 1076 and bdrag_judgeable) {
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                esc_judgeable = true;
+                esc_off_start = agent_scroll.offset_y_px;
+                const oy: i32 = @intCast(geom.tree_content.y);
+                const grab_y: i32 = oy + @as(i32, @intFromFloat(g.thumb_y + g.thumb_h / 2));
+                window.postSyntheticMouse(.left_down, bdrag_grab_x, grab_y);
+                // **터미널 쪽으로** 나가면서 위로 60px — 잡고 있으면 목록이 따라와야 한다.
+                window.postSyntheticMouse(.moved, 40, grab_y - 60);
+            };
+        }
+        if (smoke and spins == 1077 and esc_judgeable) {
+            esc_off_dragging = agent_scroll.offset_y_px;
+            window.postSyntheticMouse(.left_up, 40, 200); // 도크 **밖**에서 뗀다
+        }
+        if (smoke and spins == 1078 and esc_judgeable) {
+            // **뗀 직후의 자리**가 기준이다 — 뗀 지점이 track 밖이면 그 자리로 가는 것이 맞다.
+            esc_off_released = agent_scroll.offset_y_px;
+            // 떼고 나서 도크 위를 지나가기만 한다 — 아직 쥐고 있다면 여기서 튄다.
+            window.postSyntheticMouse(.moved, bdrag_grab_x, @intCast(geom.tree_content.y + geom.tree_content.h - 2));
+        }
+        if (smoke and spins == 1079 and esc_judgeable) esc_off_after = agent_scroll.offset_y_px;
+        // ── track 을 눌러 뛴다 (적대적 검증 3회차 — 그 길에 판정이 없었다) ─────────────
+        //
+        // thumb **밖**을 누르면 그 자리로 간다. 끌지 않고 누르기만 하는 이 길은 드래그 판정이
+        // 안 밟는다 — `offsetForTrackClick` 이 통째로 죽어 있어도 초록이었다.
+        if (smoke and spins == 1081 and bdrag_judgeable) {
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                bjump_judgeable = true;
+                bjump_off_before = agent_scroll.offset_y_px;
+                bjump_jumps_before = agent_bar_jumps;
+                // **thumb 바로 아래**의 빈 track. 두 함정 사이를 골라야 한다(적대적 검증 3회차):
+                // 너무 위면 thumb **안**이라 잡기가 되고(`jumps=0`), 너무 아래면 그 자리에 가운데를
+                // 놓으려다 상한에 걸려 clamp 가 선다(5.35px 어긋났다).
+                const py = g.thumb_y + g.thumb_h + 26;
+                bjump_press_y = py;
+                const oy: i32 = @intCast(geom.tree_content.y);
+                window.postSyntheticMouse(.left_down, bdrag_grab_x, oy + @as(i32, @intFromFloat(py)));
+                window.postSyntheticMouse(.left_up, bdrag_grab_x, oy + @as(i32, @intFromFloat(py)));
+            };
+        }
+        if (smoke and spins == 1083 and bjump_judgeable) {
+            bjump_off_after = agent_scroll.offset_y_px;
+            if (agent_built) |*b| if (agentBarGeometry(b, agent_scroll_max)) |g| {
+                bjump_thumb_mid = g.thumb_y + g.thumb_h / 2;
+            };
         }
         if (smoke and spins == 1058 and dock_scroll_click_sent) {
             dock_scroll_clicked_row = dock_last_row;
@@ -8279,6 +8417,42 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         continue;
                     }
                 }
+                // ── 에이전트 목록 막대를 잡고 있는 동안 (W8.22) ─────────────────────────
+                //
+                // **영역 판정보다 먼저다** — 위 스크롤바 블록과 같은 이유고, 여기 없으면 도크 밖으로
+                // 나간 순간 사이드바·터미널 핸들러가 그 이벤트를 먼저 먹는다: 밖에서 뗀 up 이 안 와
+                // **막대를 쥔 채로 남고**, 다음에 도크 위를 지나가기만 해도 목록이 튄다(적대적 검증
+                // 1·2회차 — 2회차에서야 판정이 그 경로를 밟았다).
+                if (agent_bar_drag != null and dock_view == .agent_sessions and m.kind != .left_down) {
+                    if (m.kind == .capture_lost) {
+                        agent_bar_drag = null;
+                        continue;
+                    }
+                    if (m.kind == .moved or m.kind == .left_up) {
+                        if (agent_built) |*b| {
+                            const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
+                            const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                            // **중립에도 그대로 넘긴다** — 우리가 삼키면 그쪽 capture 가 안 닫혀 다음
+                            // 클릭이 옛 제스처의 꼬리를 문다.
+                            const routed = agent_surface.pointer(b, &agent_state, if (m.kind == .moved) .move else .up, lx, ly);
+                            if (routed.drag) |dev| switch (dev) {
+                                .began, .moved, .dropped => |u| if (u.payload == maru.chrome.components.session_dock.build.scroll_drag_payload) {
+                                    if (agent_bar_drag) |drag| {
+                                        const next = drag.geom.offsetForPointer(u.y_px, drag.grab_dy);
+                                        if (agent_scroll.setOffsetPx(@intCast(next), agent_scroll_max)) {
+                                            agent_scrolls += 1;
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            agent_redraws += 1;
+                                        }
+                                    }
+                                },
+                                .cancelled => agent_bar_drag = null,
+                            };
+                        }
+                        if (m.kind == .left_up) agent_bar_drag = null;
+                        continue;
+                    }
+                }
                 if (m.kind == .left_down) {
                     const py: f64 = @floatFromInt(m.y_px);
                     const on_dock = if (dock_bar) |b| barHit(b, m.x_px, m.y_px) else false;
@@ -8653,6 +8827,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 남은 조각만큼 더/덜 움직인다 — §2m.84 가 표면 사이에서 겪은
                                     // 그 실패의 뷰 판이다(적대적 검증 3회차).
                                     agent_scroll.dropWheelResidue();
+                                    // **쥔 것도 놓는다.** 뷰가 바뀌면 그 막대는 화면에 없다 — 안 놓으면
+                                    // 돌아왔을 때 지나가기만 해도 목록이 튄다(적대적 검증 4회차).
+                                    agent_bar_drag = null;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
                                     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
@@ -8675,6 +8852,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (agent_built) |*b| {
                             const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
                             const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                            // **캡처를 잃는 것도 끝이다.** 알트탭·다른 창이 가져가면 up 이 안 온다 —
+                            // 그때 안 놓으면 막대를 쥔 채로 남는다(적대적 검증 1회차).
+                            if (m.kind == .capture_lost) {
+                                agent_bar_drag = null;
+                                continue;
+                            }
                             const kind: maru.chrome.ui.interaction.UiPointerPhase = switch (m.kind) {
                                 .moved => .move,
                                 .left_down => .down,
@@ -8683,8 +8866,46 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             };
                             const routed = agent_surface.pointer(b, &agent_state, kind, lx, ly);
                             var changed = routed.dirty;
+                            // ── 막대를 잡아 끈다 (W8.22) ───────────────────────────────────
+                            //
+                            // **intent 가 아니라 drag 로 온다.** 중립이 그렇게 갈라 뒀다 — threshold 를
+                            // 넘은 up 은 `action` 을 안 내고 `drag` 만 낸다. 그래서 이 갈래는 intent
+                            // 블록 **밖**에 있어야 한다(안에 두면 끄는 동안 아무것도 안 온다).
+                            //
+                            // 잡은 지점(`grab_dy`)은 **시작할 때 한 번** 정한다. 매번 다시 재면 thumb 이
+                            // 제 움직임을 다시 입력으로 먹어 끌수록 어긋난다.
+                            // **잡은 지점은 `down` 에서 정한다.** `began` 은 threshold 를 넘은 **첫
+                            // 이동**에 오므로 그때 재면 이미 그만큼 밀린 자리를 "잡은 자리" 로 적는다 —
+                            // 실측으로 40px 내려도 thumb 이 제자리였다. down 좌표는 우리가 갖고 있고,
+                            // 잡았는지 판정하는 규칙은 중립이 갖고 있다(`trackContains` — 보이는 막대가
+                            // 아니라 **거터 전체**로 판정한다).
+                            if (m.kind == .left_down) {
+                                if (agentBarGeometry(b, agent_scroll_max)) |g| if (g.trackContains(lx, ly)) {
+                                    if (g.thumbContains(ly)) {
+                                        agent_bar_drag = .{ .geom = g, .grab_dy = @floatCast(ly - g.thumb_y) };
+                                    } else {
+                                        // **track 을 누르면 그 자리로 뛴다** — 이어서 끌면 같은 매핑을
+                                        // 쓰므로 위치가 안 튄다(`offsetForTrackClick` 의 계약).
+                                        agent_bar_jumps += 1;
+                                        const next = g.offsetForTrackClick(ly);
+                                        if (agent_scroll.setOffsetPx(@intCast(next), agent_scroll_max)) {
+                                            agent_scrolls += 1;
+                                            changed = true;
+                                        }
+                                        agent_bar_drag = .{ .geom = g, .grab_dy = g.thumb_h / 2 };
+                                    }
+                                    agent_bar_drags += 1;
+                                };
+                            }
+                            // **끄는 동안의 이동·뗌은 여기 안 온다** — 영역 판정 앞의 블록이 먼저
+                            // 답하고 `continue` 한다(제스처는 시작한 곳이 소유한다). 여기 남는 것은
+                            // 잡기(`down`)뿐이다.
                             if (routed.intent) |intent| {
                                 agent_pointer_intents += 1;
+                                // **막대 인텐트는 여기서 안 쓴다.** 누르는 순간 위에서 이미 답했다 —
+                                // 그 인텐트(`scroll_track`·`scroll_thumb`)는 up 에 오고, 그때 다시
+                                // 뛰면 끌어서 놓은 자리를 **누른 자리로 되돌린다**.
+                                if (intent == .scroll_track or intent == .scroll_thumb) {}
                                 // ── 새로고침 (W8.12) ───────────────────────────────────────
                                 //
                                 // **비동기가 되어서야 배선할 수 있는 인텐트다.** 훑기를 그 자리에서
@@ -10781,6 +11002,68 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_top_spill > 0 and dock_cells_outside == 0 and
                 dock_tree_top_px != null and dock_tree_top_px.? < @as(f32, @floatFromInt(geom.tree_content.y)),
         });
+        {
+            // **thumb 밖을 누르면 그 자리로 가는가.** 재는 것은 *"누른 자리에 thumb 가운데가 온다"* 다 —
+            // `offsetForTrackClick` 의 계약이 그것이고(그 함수 doc: 이후 드래그와 같은 매핑을 쓰므로
+            // 눌렀다 끌어도 안 튄다), offset 값을 다시 계산해 견주면 같은 함수로 자기를 채점한다.
+            const bjump_moved = bjump_off_after != bjump_off_before;
+            const bjump_centered = bjump_thumb_mid >= 0 and bjump_press_y >= 0 and
+                @abs(bjump_thumb_mid - bjump_press_y) < 1.5;
+            const bjump_ok = bjump_judgeable and agent_bar_jumps > bjump_jumps_before and bjump_moved and bjump_centered;
+            try stdout.print("agent_bar_jump: judgeable={} jumps={d} off {d}->{d} press_y={d} thumb_mid={d} agent_bar_jump_ok={}\n", .{
+                bjump_judgeable,
+                agent_bar_jumps,
+                bjump_off_before,
+                bjump_off_after,
+                bjump_press_y,
+                bjump_thumb_mid,
+                bjump_ok,
+            });
+        }
+        {
+            // **잡은 것을 놓았나.** 도크 밖에서 뗀 뒤 도크 위를 지나가기만 했을 때 목록이 그대로여야
+            // 한다. 그 전에 **밖에서도 따라왔는지**(`dragging != start`)를 함께 본다 — 안 그러면
+            // "아무 데서도 안 움직인다" 도 초록이 된다.
+            const esc_followed = esc_off_dragging != esc_off_start;
+            const esc_released = esc_off_after == esc_off_released;
+            const esc_ok = esc_judgeable and esc_followed and esc_released;
+            try stdout.print("agent_bar_escape: judgeable={} off {d}->{d}(outside) ->{d}(released) ->{d}(after hover) agent_bar_escape_ok={}\n", .{
+                esc_judgeable,
+                esc_off_start,
+                esc_off_dragging,
+                esc_off_released,
+                esc_off_after,
+                esc_ok,
+            });
+        }
+        {
+            // **막대를 잡아 끌면 목록이 따라오는가.** 재는 것은 *"내가 놓은 자리로 갔는가"* 다:
+            // thumb 을 잡고 track **바닥**에 놓았으니 offset 은 상한이고 thumb 바닥은 track 바닥이다.
+            //
+            // 가운데 자리를 `offsetForPointer` 로 다시 계산해 견주면 **같은 함수로 자기를 채점**하는
+            // 꼴이라 끝을 쓴다 — 끝은 pointer 좌표가 아니라 **기하**가 정한다.
+            const drag_moved = agent_scrolls > bdrag_moves_before;
+            // **잡은 지점을 유지했나** — 포인터가 40px 내려갔으면 thumb 도 40px 내려가야 한다.
+            const step_ok = bdrag_thumb_start >= 0 and bdrag_thumb_mid >= 0 and
+                @abs((bdrag_thumb_mid - bdrag_thumb_start) - @as(f32, @floatFromInt(bdrag_step_px))) < 1.5;
+            const drag_end_ok = bdrag_thumb_bottom >= 0 and bdrag_track_bottom >= 0 and
+                @abs(bdrag_thumb_bottom - bdrag_track_bottom) < 1.5;
+            const drag_ok = bdrag_judgeable and agent_bar_drags > 0 and drag_moved and step_ok and
+                bdrag_off_after == ascroll_max and bdrag_off_after > bdrag_off_before and drag_end_ok;
+            try stdout.print("agent_bar_drag: judgeable={} grabs={d} off {d}->{d}(max {d}) thumb {d}->{d}(step {d}) thumb_bottom={d} track_bottom={d} agent_bar_drag_ok={}\n", .{
+                bdrag_judgeable,
+                agent_bar_drags,
+                bdrag_off_before,
+                bdrag_off_after,
+                ascroll_max,
+                bdrag_thumb_start,
+                bdrag_thumb_mid,
+                bdrag_step_px,
+                bdrag_thumb_bottom,
+                bdrag_track_bottom,
+                drag_ok,
+            });
+        }
         {
             // **스크롤바가 자리를 말하는가.** 재는 것은 두 가지다:
             // ⒜ 두 조각이 **실제로 그려졌나**(발행 rect 와 같은 셀이 있나) — 자리만 정하고 안 그리는

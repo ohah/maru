@@ -2556,6 +2556,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-github-manifest-file`이 Debug·ReleaseFast actual filesystem에서 success/copy/existing/symlink,
   digest/name/empty/cap의 publication 0과 success cleanup residue 0을 검증한다. write/pathname identity drift 주입과 cleanup
   불확실성의 foreign-entry 보존, attestation과 strict parse/cross-binding은 후속 범위다.
+  `release_adapter_github_manifest_attestation.zig`는 B predecessor에 없는 A build run identity를 얻기 위해 bounded A bytes를 먼저
+  strict/intrinsic parse하되 unauthenticated candidate로만 보유한다. role=A/predecessor 부재와 B↔A release ID/tag/source commit/
+  manifest SHA/canonical filename을 교차검증하고, candidate repository/tag/source/build로 기존 artifact attestation verifier를 호출하며
+  protected predecessor tag context를 candidate repository/tag/source/build에 결속하고 fixed manifest file identity를 호출 전후
+  재검증한 뒤에만 move-only `AuthenticatedManifest`를 게시한다. candidate의 `assets[]`는 이
+  publication 전에는 filesystem allocation/download 권위가 아니다. `test-session-host-release-adapter-github-manifest-attestation`이
+  Debug·ReleaseFast에서 parse/cross-binding, existing verifier composition, file drift, copied owner, mismatch/child/allocation failure의
+  publication 0과 unwind를 검증한다. predecessor asset download/release verify-asset/git resolver/final workflow는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

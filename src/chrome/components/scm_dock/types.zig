@@ -312,6 +312,15 @@ pub const Props = struct {
     content_first_item_origin_y_px: i32 = 0,
     /// 브랜치 줄. 없으면(저장소를 못 잡음) 빈 문자열이고 그 줄을 그리지 않는다.
     branch: []const u8 = "",
+    /// 이 목록이 **원격 호스트의 것**이면 `user@host`, 로컬이면 빈 문자열(RS3b —
+    /// docs/plans/remote-scm.md §2.3).
+    ///
+    /// **로컬과 원격을 눈으로 못 가르면 사고가 이름만 바꿔 돌아온다.** 경로만 보면 원격 `/srv/app` 과
+    /// 로컬 `/srv/app` 이 같은 값이라, 화면에 호스트가 없으면 사용자는 지금 보는 목록이 어느 기계의
+    /// 것인지 알 방법이 없다 — 그 상태에서 누른 스테이지가 어디에 걸리는지도 모른다.
+    ///
+    /// **로컬에서는 빈 문자열이라 화면이 한 픽셀도 안 바뀐다**(그리는 쪽이 길이 0을 건너뛴다).
+    remote_host: []const u8 = "",
     ahead: u32 = 0,
     behind: u32 = 0,
     has_ab: bool = false,

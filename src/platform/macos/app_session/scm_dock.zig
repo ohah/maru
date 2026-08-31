@@ -244,6 +244,9 @@ fn changedFileCount(self: *AppSession) u32 {
 }
 
 pub const Projection = struct {
+    /// 이 목록이 **어느 호스트의 것인가**(RS3b). 로컬이면 빈 문자열이다 — 그리는 쪽이 길이 0 을
+    /// 건너뛰므로 로컬 화면은 한 픽셀도 안 바뀐다.
+    remote_host: []const u8 = "",
     items: []const component.types.Item,
     scroll: chrome.ui.scroll_area.Projection,
     branch: []const u8,
@@ -469,6 +472,10 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .items = items[0..n],
         .scroll = scroll,
         .branch = branch,
+        // **어느 기계의 목록인가**(RS3b — 계약 §2.3). 로컬이면 null 이라 빈 문자열이 가고, 그러면 그리는
+        // 쪽이 통째로 건너뛰어 화면이 그대로다. 값의 출처는 목록을 읽을 때 박아 둔 `git_repo_dest` 하나다 —
+        // 여기서 활성 Term 을 다시 물으면 **화면의 목록과 다른 호스트**를 적을 수 있다.
+        .remote_host = self.git_repo_dest orelse "",
         .ahead = if (ab) |v| v.ahead else model.head.ahead,
         .behind = if (ab) |v| v.behind else model.head.behind,
         .has_ab = ab != null or model.head.has_ab,
@@ -1299,6 +1306,7 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         .list_overflows = self.scm_list_overflows,
         .content_first_item_origin_y_px = projection.scroll.first_origin_y_px,
         .branch = projection.branch,
+        .remote_host = projection.remote_host,
         .ahead = projection.ahead,
         .behind = projection.behind,
         .has_ab = projection.has_ab,

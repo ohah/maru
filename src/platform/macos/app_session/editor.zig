@@ -3327,12 +3327,12 @@ fn logHitSnapshotDiag(self: *AppSession, term: *Term, y_px: f64, off: usize) voi
         "hit y={d:.1} row={d} off={d} line={d} stale={} snap_top=({d},{d}) live_top=({d},{d}) " ++
             "snap_len={d} live_len={d} rows={d} folded={}",
         .{
-            y_px,                     row,
-            off,                      line,
-            stale,                    geom.top_line,
-            geom.top_piece,           term.rt.editor_first_line,
-            term.rt.editor_first_piece, geom.visible_len,
-            editorLines(term).len,    term.rt.editor_hit_rows_len,
+            y_px,                                   row,
+            off,                                    line,
+            stale,                                  geom.top_line,
+            geom.top_piece,                         term.rt.editor_first_line,
+            term.rt.editor_first_piece,             geom.visible_len,
+            editorLines(term).len,                  term.rt.editor_hit_rows_len,
             term.rt.editor_visible_numbers.len > 0,
         },
     );

@@ -4676,19 +4676,67 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
         if (runs.len == 0) continue;
         var col: i32 = 0;
         for (runs) |r| {
+            // **run 이 든 색을 쓴다.** 옛 판은 전부 `surface_fg` 한 색이라 색이 있는 화면이
+            // 통째로 흑백으로 보였다 — host 는 색을 이미 실어 보내고 있었다(`Run.fg`, 태그드
+            // intent). 푸는 규칙은 폰의 로컬 터미널이 쓰는 `resolveColor` 와 **같은 것**을 쓴다.
+            const fg = resolveColor(remoteColorIntent(r.fg), tk.get(.surface_fg));
+            // **푼 색을 남긴다**(판정용). 헤드리스에서는 글리프가 안 구워져 quad 가 안 나오므로
+            // 그린 픽셀로는 못 잰다 — 대신 **제품 경로가 실제로 계산한 값**을 본다(불리언 깃발이
+            // 아니라 값이라, 옛 한 색으로 되돌리는 변이가 이 값을 바꾼다).
             var k: u32 = 0;
             while (k < r.count) : (k += 1) {
                 // 화면 밖으로 나가면 그만 그린다 — 둘러보기(팬)는 후속이다(§8 한계).
                 if (ox + col * cell_w > @as(i32, @intFromFloat(win.x + win.w))) break;
                 if (r.grapheme.len > 0 and r.grapheme[0] != ' ') {
-                    pushText(r.grapheme, ox + col * cell_w, oy + @as(i32, row) * line_h, line_h, tk.get(.surface_fg));
+                    pushText(r.grapheme, ox + col * cell_w, oy + @as(i32, row) * line_h, line_h, fg);
+                    remote_last_fg = fg;
                     drawn += 1;
                 }
                 col += @intCast(@max(1, r.width));
             }
         }
     }
+
+    // **커서를 그린다.** 조립기가 이미 들고 있는데 폰이 안 꺼내 써서 원격 화면에는 커서가 아예
+    // 없었고, 보는 사람은 그 세션이 어디에 서 있는지 알 수 없었다. 읽기 전용이라 깜빡이지
+    // 않는다 — 깜빡임은 조종하는 화면의 신호고, 여기서 흉내 내면 칠 수 있다고 읽힌다.
+    const cur = scr.cursor();
+    if (cur.visible and cur.row < rows_fit) {
+        const cx = ox + @as(i32, cur.col) * cell_w;
+        if (cx <= @as(i32, @intFromFloat(win.x + win.w))) {
+            push(.{ .x = cx, .y = oy + @as(i32, cur.row) * line_h, .w = @intCast(cell_w), .h = @intCast(line_h) }, tk.get(.surface_fg), 0x66, 0, 0);
+            remote_cursor_drawn = true;
+        } else remote_cursor_drawn = false;
+    } else remote_cursor_drawn = false;
+
     remote_screen_shown = if (drawn > 0) .cells else .blank;
+}
+
+/// 마지막으로 그린 원격 글자의 **푼 색**(판정용). `null` 이면 글자를 안 그렸다.
+var remote_last_fg: ?color.Rgb = null;
+
+pub fn remoteLastFg() ?color.Rgb {
+    return remote_last_fg;
+}
+
+/// 원격 커서를 실제로 그렸나(판정용). 상태만 재면 «보인다» 고 해 놓고 안 그려도 초록이다.
+var remote_cursor_drawn: bool = false;
+
+pub fn remoteCursorDrawn() bool {
+    return remote_cursor_drawn;
+}
+
+/// 화면 stream 의 태그드 색 의도를 코어 `Color` 로 푼다.
+///
+/// **매핑은 경계마다 각자 한다** — `screen_stream` 이 스스로 「terminal.Color 를 모른다: 태그 값만
+/// SSOT 로 정의하고 매핑은 host/client 경계가 각자 한다」고 적어 두었다. macOS 재접속 렌더에도
+/// 같은 모양의 짝(`session_host/remote_screen.unpackColorIntent`)이 있다.
+fn remoteColorIntent(v: u32) terminal.types.Color {
+    return switch (maru.session.screen_stream.decodeColor(v)) {
+        .default => .default,
+        .indexed => |index| .{ .indexed = index },
+        .rgb => |c| .{ .rgb = .{ .r = c.r, .g = c.g, .b = c.b } },
+    };
 }
 
 /// 원격 화면이 무엇을 보였나(판정용). 그린 결과를 남긴다 — 상태만 재면 화면이 비어도 초록이다.

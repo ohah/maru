@@ -4479,6 +4479,23 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
+    const session_host_ci_budget_step = b.step(
+        "test-session-host-ci-budget",
+        "Session-host Debug CI completion budget contract",
+    );
+    const session_host_ci_budget_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_ci_budget_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_ci_budget_tests = b.addRunArtifact(session_host_ci_budget_tests);
+    run_session_host_ci_budget_tests.addArg("--maru-expect-tests=1");
+    run_session_host_ci_budget_tests.setCwd(b.path("."));
+    session_host_ci_budget_step.dependOn(&run_session_host_ci_budget_tests.step);
+    boundary_step.dependOn(&run_session_host_ci_budget_tests.step);
+
     // AppKit wake source 의 감시 집합이 pump 집합을 벗어나지 않는지 지킨다. 벗어나면 아무도 읽지 않는
     // fd 가 레벨 트리거로 메인 큐를 영원히 깨워 유휴 CPU 가 84% 가 된다(실측 2026-08-29). 같은 유휴
     // pump 주제라 E3c 게이트에 함께 건다 — 그 게이트의 CPU 판정자는 별도 client 프로세스를 재느라

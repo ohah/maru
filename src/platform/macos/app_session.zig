@@ -9791,6 +9791,21 @@ pub const AppSession = struct {
                 return;
             };
         }
+        // ⚠️ **원격 비교인데 소켓이 없으면 읽지 않는다**(RS3a 적대적 검증 2회차). 예전에는 여기서
+        // `remote = null` 로 떨어졌는데, 그러면 **원격 경로를 로컬 git 에 넘긴다** — 로컬에 같은 경로가
+        // 있으면 남의 파일 내용이 「원격 비교」로 뜬다. RS2 가 목록에서 막은 사고가 diff 로 돌아온 것이다.
+        //
+        // 소켓은 `maru ssh` 세션이 살아 있는 동안만 있다. 끊긴 뒤 열면 **실패로 표시**하는 것이 맞다 —
+        // 그 화면은 이유를 말하고, 로컬 파일을 원격인 척 보여 주지 않는다.
+        var remote_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const remote_target: ?git_command.Remote = if (entry.diff_remote_dest.len > 0) blk: {
+            const ctl = git_ops.remoteControlSocketFor(self, entry.diff_remote_dest, &remote_ctl_buf) orelse {
+                entry.diff_failed = true;
+                entry.diff_request_id = 0;
+                return;
+            };
+            break :blk .{ .dest = entry.diff_remote_dest, .control_path = ctl };
+        } else null;
         self.git_request_seq += 1;
         entry.diff_request_id = self.git_request_seq;
         if (!self.git_backend.?.submitDiff(
@@ -9813,13 +9828,9 @@ pub const AppSession = struct {
             if (entry.diff_base == .turn_range) entry.diff_right_oid else "",
             entry.diff_base,
             entry.diff_request_id,
-            // **entry 가 든 쌍을 그대로 쓴다**(RS3). 여기서 세션 상태를 다시 읽으면, diff 를 열어 둔 채
+            // **entry 가 든 쌍을 그대로 쓴다**(RS3a). 여기서 세션 상태를 다시 읽으면, diff 를 열어 둔 채
             // 다른 pane 으로 옮겼을 때 그 비교가 **다른 호스트의 것**으로 해석된다.
-            if (entry.diff_remote_dest.len > 0) blk: {
-                var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const ctl = git_ops.remoteControlSocketFor(self, entry.diff_remote_dest, &ctl_buf) orelse break :blk null;
-                break :blk .{ .dest = entry.diff_remote_dest, .control_path = ctl };
-            } else null,
+            remote_target,
             entry.diff_remote_root,
         )) {
             // 이미 다른 본문을 읽는 중이다. 다음 tick에서 다시 건다(그때 슬롯이 빈다).

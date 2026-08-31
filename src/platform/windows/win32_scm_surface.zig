@@ -168,6 +168,11 @@ pub const Built = struct {
     ops_text: usize,
     ops_fill: usize,
     ops_dropped: usize,
+    /// 이번 투영이 낸 스크롤 상한. **휠이 이 값을 쓴다** — 휠은 짓는 자리 밖에서 오므로 그때 투영을
+    /// 다시 할 수 없다.
+    scroll_max_offset_px: u32 = 0,
+    /// 발행된 **목록 뷰포트 높이**. 다음 프레임의 투영이 이것을 쓴다(위 `Options.list_viewport_h`).
+    list_viewport_h_px: u32 = 0,
     atlas_region_uploads: usize,
     stats: maru.renderer.RenderFrameStats,
 
@@ -183,6 +188,18 @@ pub const Options = struct {
     font_fallback: []const u8,
     font_size_pt: f32,
     tokens: *const maru.chrome.Tokens,
+    /// 목록 스크롤 — **셋이 한 벌이다**(에이전트 도크와 같은 모양, §2m.92).
+    ///
+    /// Windows 는 **가상화를 안 한다**: 목록을 전부 넘기고 첫 항목의 origin 을 `-offset` 으로 준다.
+    /// 그러면 발행 rect 가 **이미 스크롤된 자리**라 히트테스트가 offset 을 따로 빼지 않아도 된다.
+    scroll_offset_px: u32 = 0,
+    /// 지난 프레임이 발행한 **목록 뷰포트 높이**. 투영은 짓기 전에 필요한데 그 높이는 짓고 나야 나온다
+    /// (탭 줄·요약 줄·브랜치 줄이 목록 위아래를 차지한다). 0 이면 첫 프레임이라 표면 높이를 쓴다.
+    ///
+    /// **여기서 고정 chrome 을 빼서 계산하지 않는다** — macOS 가 그렇게 하는데 그 함수 주석이
+    /// *"하나라도 빠뜨리면 목록이 자기 자리보다 크다고 믿고 스크롤 범위가 어긋난다"* 고 적어 뒀다.
+    /// 발행된 값을 되읽으면 그 목록이 하나다.
+    list_viewport_h: u32 = 0,
 };
 
 /// 상태 → 화면. **매번 처음부터 짓는다** — 부분 갱신을 하려면 무엇이 바뀌었는지를 두 번째로 알아야
@@ -221,6 +238,15 @@ pub fn build(
         items[i] = maru.scm_items.itemFor(row, 0, i, state.selected, state.collapsed);
     }
 
+    // ── 스크롤 투영 ─────────────────────────────────────────────────────────────────────────
+    //
+    // **높이 규칙은 중립이 소유한다**(`DockMetrics.itemHeight`) — 이 자리는 그 답을 모아 길이와 상한을
+    // 낼 뿐이다. 길이를 안 주면 스크롤바가 "얼마나 긴 목록의 어디" 를 모른다.
+    const dm = component.types.DockMetrics.resolve(1000);
+    const list = maru.chrome.components.scm_dock.scroll.Items{ .items = items, .metrics = dm };
+    const list_view_h: u32 = if (opts.list_viewport_h != 0) opts.list_viewport_h else view_h;
+    const proj = list.project(list_view_h, opts.scroll_offset_px);
+
     // ── 항목 → tree ──────────────────────────────────────────────────────────────────────────
     const bs = component.build.bufferSizes(items);
     const props = component.types.Props{
@@ -233,6 +259,11 @@ pub fn build(
         .has_ab = model.head.has_ab,
         .changed_file_count = scm_view.changedFileCount(opts.status_text),
         .snapshot_generation = state.generation,
+        .scroll_offset_px = proj.offset_y_px,
+        .content_h_px = proj.content_height_px,
+        .content_first_item_origin_y_px = -@as(i32, @intCast(proj.offset_y_px)),
+        // **넘칠 때만 거터를 준다** — 그 자리 주석이 사용자 지적으로 그렇게 정해 뒀다.
+        .list_overflows = proj.max_offset_px > 0,
     };
     const frame = component.build.build(props, .{
         .nodes = try a.alloc(maru.chrome.ui.tree.UiNode, bs.nodes),
@@ -322,6 +353,12 @@ pub fn build(
         .ops_text = counted.text,
         .ops_fill = counted.fill,
         .ops_dropped = counted.dropped,
+        .scroll_max_offset_px = proj.max_offset_px,
+        // **되읽어서 알린다** — 여기서 고정 chrome 을 빼면 그 산수의 주인이 둘이 된다.
+        .list_viewport_h_px = if (component.build.scrollTextViewport(frame.tree)) |vp|
+            @intFromFloat(@max(vp.height, 0))
+        else
+            0,
         .atlas_region_uploads = uploads,
         .stats = maru.renderer.renderFrameStats(render_frame, ctx.renderer_state.atlas.entryCount()),
     };

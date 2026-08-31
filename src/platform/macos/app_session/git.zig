@@ -212,9 +212,17 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
 ///
 /// **루트가 없으면 목적지도 안 박는다.** 둘은 한 쌍이고, 목적지만 있으면 작업트리 쪽을 못 읽는 채로
 /// 「원격 diff」라고 주장하게 된다 — 그 상태는 화면에서 실패와 구별되지 않는다.
-fn stampDiffRemote(self: *AppSession, entry: *dock_panel.Entry) void {
+fn stampDiffRemote(self: *AppSession, entry: *dock_panel.Entry, repo: []const u8) void {
     const dest = self.git_repo_dest orelse return;
     const root = self.git_repo_remote_root orelse return;
+    // ⚠️ **그 비교가 선 저장소가 활성 원격 저장소일 때만 박는다**(적대적 검증 8회차).
+    //
+    // 목록은 저장소를 여럿 싣고(§3.5.1c), **비활성 저장소 행**도 파일 줄을 낸다 — 그 행을 열면
+    // `repo_override` 로 다른 경로가 온다. 활성 목적지를 무조건 박으면 **로컬 저장소 행에 원격 표식**이
+    // 붙고, 그 비교는 원격에서 `<원격 루트>/<rel>` 을 읽으려 든다: 없으면 실패하고, 원격에 우연히 같은
+    // 경로가 있으면 **남의 파일**을 그 자리에 보여 준다.
+    const current = self.git_repo orelse return;
+    if (!std.mem.eql(u8, current, repo)) return;
     const owned_dest = self.allocator.dupe(u8, dest) catch return;
     const owned_root = self.allocator.dupe(u8, root) catch {
         self.allocator.free(owned_dest);
@@ -1121,7 +1129,7 @@ pub fn openCommitDiffTerm(
     entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
     entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
-    stampDiffRemote(self, entry);
+    stampDiffRemote(self, entry, repo);
     // **이 비교가 어느 커밋인지**는 열 때 정해 들고 다닌다 — 나중에 다시 구하면 그 사이 다른 커밋을
     // 펼쳤을 때 남의 커밋을 읽는다.
     entry.diff_commit_oid = self.allocator.dupe(u8, commit_oid) catch &.{};
@@ -1151,7 +1159,7 @@ pub fn openTurnDiffTerm(
     entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
     entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
-    stampDiffRemote(self, entry);
+    stampDiffRemote(self, entry, repo);
     entry.diff_commit_oid = self.allocator.dupe(u8, base_tree) catch &.{};
     entry.diff_right_oid = self.allocator.dupe(u8, head_tree) catch &.{};
     self.requestDiffContent(entry);
@@ -1199,7 +1207,7 @@ pub fn openDiffTerm(
     // **저장소 루트는 호출자에게서 받는다.** 여기서 다시 구하면 방금 활성화된 diff 웹 Term의 cwd(빈 값)를 보고
     // null이 되어 영영 실패로 굳는다(리뷰에서 잡힌 결함) — 목록을 만든 그 루트를 그대로 쓴다.
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
-    stampDiffRemote(self, entry);
+    stampDiffRemote(self, entry, repo);
     self.requestDiffContent(entry);
     // 재시도 창(6초)은 **요청 시점**부터 흐른다. 네이티브가 아니면 무동작이다.
     editor_diff_ops.markRequested(self, opened.term);

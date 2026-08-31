@@ -426,6 +426,161 @@ pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, paths: []const []
     return buf[0..n];
 }
 
+// ── 원격(SSH) 실행 ────────────────────────────────────────────────────────────
+//
+// RS1 — [계획](../../docs/plans/remote-scm.md). 활성 pane 이 원격이면 도크는 **그 원격 저장소**를 본다.
+// 그러려면 같은 argv 를 원격에서 돌려야 하는데, `ssh <dest> <command>` 는 **원격 로그인 셸**에 문자열
+// 하나를 넘긴다 — 이 모듈 머리의 「셸을 거치지 않는다」 조항이 원격에서만 성립하지 않는다.
+//
+// 그래서 예외를 **이 절 안으로 좁힌다**: 인용·검증·덮어쓰기 보존을 여기 순수 함수가 전부 지고, L4 는
+// 결과 argv 를 그대로 exec 한다. 안전 조건이 실행 코드에 흩어지지 않아야 헤드리스로 전수 고정된다.
+
+/// 원격 실행 대상. `dest` 는 `user@host`, `control_path` 는 `maru ssh` 가 만들어 둔 ControlMaster 소켓이다
+/// (둘 다 L4 가 runtime observation 에서 얻는다 — `remoteUploadContextFor` 와 같은 출처).
+///
+/// **새 연결을 열지 않는다**: `-S <control_path>` 로만 붙는다. 소켓이 없으면 ssh 가 직접 연결을 시도하며
+/// 비밀번호를 물을 수 있으므로, **호출자가 소켓 존재를 먼저 확인한다**(계약 §2.2 ⑸).
+pub const Remote = struct {
+    dest: []const u8,
+    control_path: []const u8,
+};
+
+/// 원격 명령 문자열 상한. `check-ignore` 처럼 경로가 여럿 붙는 kind 가 가장 길고, 경로마다 인용이
+/// 붙으므로 로컬 argv 보다 커진다. 넘으면 **자르지 않고 명령을 만들지 않는다** — 잘린 셸 명령은
+/// 「덜 실행되는 것」이 아니라 **다른 명령**이다.
+pub const max_remote_command_bytes: usize = 8 * 1024;
+
+/// 원격 argv 는 항상 이 길이·이 모양이다 — 토큰 여덟 개다:
+/// `/usr/bin/env ssh -o BatchMode=yes -S <ctl> <dest> <cmd>`.
+///
+/// **`env` 를 앞에 두는 이유**: 실행 층은 `execve(argv[0])` 라 argv[0] 이 **절대경로**여야 하는데
+/// (`git_backend.spawnCapture`), `ssh` 의 설치 위치는 시스템마다 다르다(`/usr/bin` · brew). `env(1)` 가
+/// PATH 에서 찾게 한다 — `ssh_upload.zig` 가 같은 이유로 같은 모양을 쓴다.
+///
+/// `BatchMode=yes` 는 이 모듈의 「프롬프트 없음」 조항을 전송 층까지 잇는다 — 소켓이 사라진 순간
+/// 비밀번호를 묻는 대신 실패해야 한다.
+pub const remote_argv_len: usize = 8;
+
+/// 원격에서 부를 git. **PATH 로 찾는다** — 로컬은 절대경로 계약이지만(§6 PATH hijack) 원격의 설치
+/// 위치는 우리가 모른다(계약 §2.2 ⑷). 그 대신 원격 명령의 모든 토큰은 우리가 만든 것이고 사용자 입력이
+/// 토큰 자리에 들어가지 않는다.
+pub const remote_git_exe = "git";
+
+/// 원격 명령에 실을 수 있는 토큰인가. 제어문자가 하나라도 있으면 **거부**한다.
+///
+/// 인용만으로도 셸에는 안전하지만, 그런 값이 왔다는 것 자체가 관측(OSC 7 경로·dest)이 오염됐다는
+/// 뜻이다 — 그때 할 일은 「안전하게 실행」이 아니라 실행하지 않는 것이다.
+pub fn remoteTokenIsSafe(token: []const u8) bool {
+    for (token) |c| {
+        if (c < 0x20 or c == 0x7f) return false;
+    }
+    return true;
+}
+
+/// 한 토큰을 작은따옴표로 감싸 `out[at..]` 에 쓴다. 내부 `'` 는 `'\''` 로 닫았다 다시 연다 —
+/// POSIX 셸에서 작은따옴표 안은 **어떤 확장도 일어나지 않으므로**, 이 한 규칙이 공백·`;`·`$(…)`·백틱·
+/// 와일드카드를 전부 무력화한다. 넘치면 null(호출자가 명령을 포기한다).
+fn quoteAppend(out: []u8, at: usize, token: []const u8) ?usize {
+    var n = at;
+    if (n >= out.len) return null;
+    out[n] = '\'';
+    n += 1;
+    for (token) |c| {
+        if (c == '\'') {
+            const esc = "'\\''";
+            if (n + esc.len > out.len) return null;
+            @memcpy(out[n..][0..esc.len], esc);
+            n += esc.len;
+            continue;
+        }
+        if (n >= out.len) return null;
+        out[n] = c;
+        n += 1;
+    }
+    if (n >= out.len) return null;
+    out[n] = '\'';
+    n += 1;
+    return n;
+}
+
+/// 로컬 argv 를 **원격에서 같은 뜻이 되는 한 줄**로 인용해 `cmd_buf` 에 쓰고, 그것을 실어 나를 `ssh`
+/// argv 를 `buf` 에 채운다. 할당하지 않는다.
+///
+/// **`local_argv[0]`(로컬 git 절대경로)은 버린다** — 원격에서는 `remote_git_exe` 다. 나머지 토큰
+/// (`-C <repo>` · config 덮어쓰기 · 서브커맨드 · 인자)은 **하나도 빠짐없이** 그대로 실린다: 로컬에서 닫아
+/// 둔 구멍(pager·hook·external diff·credential helper)이 원격에서 열리면 안 된다.
+///
+/// **env 도 함께 싣는다**(`env K=V … git …`). 원격 셸은 우리 프로세스의 env 를 물려받지 않으므로,
+/// 여기서 안 실으면 `GIT_OPTIONAL_LOCKS=0` 같은 조항이 원격에서만 조용히 사라진다.
+///
+/// null 인 경우는 셋뿐이고 전부 **실행하지 않는 편이 옳은** 상태다: 토큰에 제어문자가 있다 · `dest` 나
+/// `control_path` 가 모양을 못 갖췄다 · 명령이 `cmd_buf` 를 넘는다.
+pub fn buildRemote(
+    local_argv: []const []const u8,
+    remote: Remote,
+    buf: *[max_argv][]const u8,
+    cmd_buf: []u8,
+) ?[]const []const u8 {
+    if (local_argv.len < 2) return null; // 최소 `git -C <repo>` 는 있어야 한다
+    // dest 가 `-` 로 시작하면 ssh 가 **옵션으로 읽는다.** `--` 를 믿지 않고 여기서 거부한다.
+    if (remote.dest.len == 0 or remote.dest[0] == '-') return null;
+    if (!remoteTokenIsSafe(remote.dest)) return null;
+    // control socket 은 우리가 만든 절대경로여야 한다(`controlSocketPath`).
+    if (remote.control_path.len == 0 or remote.control_path[0] != '/') return null;
+    if (!remoteTokenIsSafe(remote.control_path)) return null;
+
+    var n: usize = 0;
+    n = quoteAppend(cmd_buf, n, "env") orelse return null;
+    for (env_overrides) |override| {
+        if (!remoteTokenIsSafe(override.name) or !remoteTokenIsSafe(override.value)) return null;
+        // `K=V` 를 **한 토큰으로** 인용한다 — 셸이 인용을 벗기면 env(1) 가 그대로 한 인자로 받는다.
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = ' ';
+        n += 1;
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = '\'';
+        n += 1;
+        for (override.name) |c| {
+            if (n >= cmd_buf.len) return null;
+            cmd_buf[n] = c;
+            n += 1;
+        }
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = '=';
+        n += 1;
+        for (override.value) |c| {
+            if (c == '\'') return null; // env 값에 작은따옴표는 이 저장소에 없다 — 생기면 그때 인용을 늘린다
+            if (n >= cmd_buf.len) return null;
+            cmd_buf[n] = c;
+            n += 1;
+        }
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = '\'';
+        n += 1;
+    }
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    n = quoteAppend(cmd_buf, n, remote_git_exe) orelse return null;
+    for (local_argv[1..]) |token| {
+        if (!remoteTokenIsSafe(token)) return null;
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = ' ';
+        n += 1;
+        n = quoteAppend(cmd_buf, n, token) orelse return null;
+    }
+
+    buf[0] = "/usr/bin/env"; // execve 가 받는 절대경로 — env(1) 가 PATH 에서 ssh 를 찾는다
+    buf[1] = "ssh";
+    buf[2] = "-o";
+    buf[3] = "BatchMode=yes";
+    buf[4] = "-S";
+    buf[5] = remote.control_path;
+    buf[6] = remote.dest;
+    buf[7] = cmd_buf[0..n];
+    return buf[0..remote_argv_len];
+}
+
 pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8, buf: *[max_argv][]const u8) []const []const u8 {
     var n: usize = 0;
     buf[n] = git_exe;
@@ -1114,4 +1269,115 @@ test "check-ignore argv: 고정 접두 뒤에 경로가 붙고 배치 한도를 
     try std.testing.expect(clamped.len <= max_argv);
     try std.testing.expectEqual(check_ignore_batch, clamped.len - (clamped.len - check_ignore_batch));
     try std.testing.expect(check_ignore_batch > 0);
+}
+
+// ── 원격 argv (RS1) ───────────────────────────────────────────────────────────
+//
+// 이 저장소가 **원격 셸에 명령 문자열을 만들어 보내는 첫 자리**다(계획 §4). 그래서 인용·검증·덮어쓰기
+// 보존을 전수로 짚는다 — 배선(RS2~RS4)은 여기서 만든 argv 를 나르기만 한다.
+
+test "원격 argv: 로컬이 닫아 둔 구멍이 원격에서도 닫혀 있다" {
+    var buf: [max_argv][]const u8 = undefined;
+    var local_buf: [max_argv][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const local = build(.status, "/opt/homebrew/bin/git", "/srv/app", null, &local_buf);
+    const argv = buildRemote(local, .{ .dest = "user@build-box", .control_path = "/Users/me/.cache/maru/ctl-ab" }, &buf, &cmd) orelse
+        return error.RemoteArgvRefused;
+
+    try std.testing.expectEqual(remote_argv_len, argv.len);
+    // argv[0] 은 **절대경로**여야 한다 — 실행 층이 `execve(argv[0])` 이다(PATH 검색은 env(1) 몫).
+    try std.testing.expectEqualStrings("/usr/bin/env", argv[0]);
+    try std.testing.expect(std.fs.path.isAbsolute(argv[0]));
+    try std.testing.expectEqualStrings("ssh", argv[1]);
+    try std.testing.expectEqualStrings("-o", argv[2]);
+    try std.testing.expectEqualStrings("BatchMode=yes", argv[3]); // 소켓이 없으면 묻지 말고 실패한다
+    try std.testing.expectEqualStrings("-S", argv[4]);
+    try std.testing.expectEqualStrings("/Users/me/.cache/maru/ctl-ab", argv[5]);
+    try std.testing.expectEqualStrings("user@build-box", argv[6]);
+
+    const line = argv[7];
+    // 로컬 절대경로 git 은 버리고 원격은 PATH 로 찾는다(계약 §2.2 ⑷).
+    try std.testing.expect(std.mem.indexOf(u8, line, "/opt/homebrew/bin/git") == null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "'git'") != null);
+    // **config 덮어쓰기가 하나도 빠지면 안 된다** — 빠진 하나가 곧 원격에서만 열리는 구멍이다.
+    for (config_overrides) |override| {
+        var quoted: [128]u8 = undefined;
+        const q = std.fmt.bufPrint(&quoted, "'{s}'", .{override}) catch return error.Unexpected;
+        try std.testing.expect(std.mem.indexOf(u8, line, q) != null);
+    }
+    // env 도 같은 이유로 전수로 본다(원격 셸은 우리 env 를 물려받지 않는다).
+    for (env_overrides) |override| {
+        var quoted: [128]u8 = undefined;
+        const q = std.fmt.bufPrint(&quoted, "'{s}={s}'", .{ override.name, override.value }) catch return error.Unexpected;
+        try std.testing.expect(std.mem.indexOf(u8, line, q) != null);
+    }
+    try std.testing.expect(std.mem.startsWith(u8, line, "'env' "));
+    try std.testing.expect(std.mem.indexOf(u8, line, "'-C' '/srv/app'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "'status'") != null);
+}
+
+test "원격 argv: 셸 메타문자가 든 경로도 한 인자로 도착한다" {
+    var buf: [max_argv][]const u8 = undefined;
+    var local_buf: [max_argv][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    // 공백·`;`·`$( )`·백틱·와일드카드·작은따옴표가 전부 든 경로. 작은따옴표 안에서는 어떤 확장도
+    // 일어나지 않으므로, 유일하게 다뤄야 하는 것이 그 따옴표 자신이다.
+    const nasty = "/srv/it's here; rm -rf $(echo x) `id` *";
+    const local = build(.status, "/usr/bin/git", nasty, null, &local_buf);
+    const argv = buildRemote(local, .{ .dest = "user@host", .control_path = "/tmp/ctl" }, &buf, &cmd) orelse
+        return error.RemoteArgvRefused;
+    const line = argv[7];
+
+    // `'` 는 `'\''` 로 닫았다 다시 연다 — 그 밖의 문자는 손대지 않는다.
+    try std.testing.expect(std.mem.indexOf(u8, line, "'/srv/it'\\''s here; rm -rf $(echo x) `id` *'") != null);
+    // 인용을 벗어난 곳에 위험한 문자가 남아 있지 않은지 **직접 센다**: 명령 전체에서 작은따옴표 밖의
+    // 문자는 우리가 넣은 공백뿐이어야 한다.
+    //
+    // **셸 규칙 그대로 읽는다**: 인용 밖의 `\\` 는 다음 한 글자를 리터럴로 만든다 — `'\\''` 가 정확히
+    // 그 셋(닫기 · 이스케이프된 따옴표 · 열기)이라, 그 백슬래시를 모르면 검사기가 자기 인용 규약을
+    // 오해한다(적대적 검증 1 회차에서 이 검사기가 먼저 틀렸다).
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < line.len) {
+        const c = line[i];
+        if (!in_quote and c == '\\') {
+            try std.testing.expect(i + 1 < line.len); // 끊긴 이스케이프는 셸이 다음 줄을 기다린다
+            i += 2; // 이스케이프된 한 글자는 리터럴이다
+            continue;
+        }
+        if (c == '\'') {
+            in_quote = !in_quote;
+            i += 1;
+            continue;
+        }
+        if (!in_quote) try std.testing.expectEqual(@as(u8, ' '), c);
+        i += 1;
+    }
+    try std.testing.expect(!in_quote); // 따옴표가 짝을 이룬다
+}
+
+test "원격 argv: 못 믿을 입력이면 명령을 만들지 않는다" {
+    var buf: [max_argv][]const u8 = undefined;
+    var local_buf: [max_argv][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const ok_remote: Remote = .{ .dest = "user@host", .control_path = "/tmp/ctl" };
+
+    // ⑴ 경로에 제어문자(개행) — 인용해도 실행하지 않는다. 관측이 오염됐다는 뜻이다.
+    const local_nl = build(.status, "git", "/srv/a\nb", null, &local_buf);
+    try std.testing.expect(buildRemote(local_nl, ok_remote, &buf, &cmd) == null);
+
+    // ⑵ dest 가 `-` 로 시작하면 ssh 가 옵션으로 읽는다.
+    const local = build(.status, "git", "/srv/app", null, &local_buf);
+    try std.testing.expect(buildRemote(local, .{ .dest = "-oProxyCommand=id", .control_path = "/tmp/ctl" }, &buf, &cmd) == null);
+    try std.testing.expect(buildRemote(local, .{ .dest = "", .control_path = "/tmp/ctl" }, &buf, &cmd) == null);
+    try std.testing.expect(buildRemote(local, .{ .dest = "user@ho\x01st", .control_path = "/tmp/ctl" }, &buf, &cmd) == null);
+
+    // ⑶ control socket 은 우리가 만든 절대경로다 — 상대경로·빈 값·제어문자는 거부.
+    try std.testing.expect(buildRemote(local, .{ .dest = "user@host", .control_path = "ctl" }, &buf, &cmd) == null);
+    try std.testing.expect(buildRemote(local, .{ .dest = "user@host", .control_path = "" }, &buf, &cmd) == null);
+    try std.testing.expect(buildRemote(local, .{ .dest = "user@host", .control_path = "/tmp/c\ttl" }, &buf, &cmd) == null);
+
+    // ⑷ 버퍼가 모자라면 **자르지 않는다** — 잘린 셸 명령은 덜 실행되는 것이 아니라 다른 명령이다.
+    var tiny: [16]u8 = undefined;
+    try std.testing.expect(buildRemote(local, ok_remote, &buf, &tiny) == null);
 }

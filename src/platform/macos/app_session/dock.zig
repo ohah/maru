@@ -496,8 +496,9 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
     if (view == .source_control) git_ops.refreshGitStatus(self);
     // 갤러리는 **들어올 때 한 번** 훑는다(계약 §4.1) — 소스 컨트롤·아카이브와 같은 자리·같은 규율이다.
-    // 폴링하지 않는다: 파일이 자란 것은 훅이 알려 준다.
-    if (view == .image_gallery) image_gallery_ops.refresh(self, false);
+    // 폴링하지 않는다: 파일이 자란 것은 훅이 알려 준다. 진입 시점의 활성 pane 도 함께 적어 둔다 —
+    // 그래야 tick 의 `refreshForFocus` 가 같은 소스를 한 번 더 훑지 않는다(계약 §2.1).
+    if (view == .image_gallery) image_gallery_ops.onEnterView(self);
     if (view == .agent_sessions) {
         agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
         self.agent_session_archive_project_scope_surface_id = term_ops.activeSurface(self).id;

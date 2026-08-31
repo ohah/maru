@@ -81,6 +81,12 @@ pub const Kind = enum {
     /// 브랜치를 **바꾸는 일은 우리가 하지 않는다** — 고른 이름을 활성 터미널에 `git switch <name>`으로 넣어
     /// 주고 실행은 사용자 셸이 한다(hook·dirty tree·충돌이 평소처럼 사용자에게 보인다).
     branches,
+    /// **저장소 루트**(`rev-parse --show-toplevel`). 로컬은 walk-up 으로 알지만 **원격은 물어봐야 한다** —
+    /// 원격 경로를 로컬 파일시스템에 대고 걸을 수 없기 때문이다(RS3 — [계획](../../docs/plans/remote-scm.md)).
+    ///
+    /// 목록(`status`)은 루트 없이도 `-C <cwd>` 로 돌지만, **작업트리 파일을 읽으려면** 루트가 있어야
+    /// 상대경로를 절대경로로 만들 수 있다. 그래서 이 읽기는 원격 diff 가 생기면서 필요해졌다.
+    repo_root,
     /// 이 저장소에 등록된 **원격 이름들**(`git remote`). 도크의 `Fetch` 버튼을 켤지 정하는 유일한 사실이다
     /// (§3.5 — "원격 없는 저장소의 Fetch"는 **비활성으로 보여 주고 이유를 말한다"). 없는 것을 눌러 보고
     /// 실패로 배우게 하지 않는다.
@@ -525,12 +531,7 @@ pub fn buildRemote(
     cmd_buf: []u8,
 ) ?[]const []const u8 {
     if (local_argv.len < 2) return null; // 최소 `git -C <repo>` 는 있어야 한다
-    // dest 가 `-` 로 시작하면 ssh 가 **옵션으로 읽는다.** `--` 를 믿지 않고 여기서 거부한다.
-    if (remote.dest.len == 0 or remote.dest[0] == '-') return null;
-    if (!remoteTokenIsSafe(remote.dest)) return null;
-    // control socket 은 우리가 만든 절대경로여야 한다(`controlSocketPath`).
-    if (remote.control_path.len == 0 or remote.control_path[0] != '/') return null;
-    if (!remoteTokenIsSafe(remote.control_path)) return null;
+    // dest·control socket 검증은 `remoteArgv` 가 진다(두 빌더가 같은 판정을 공유한다).
 
     var n: usize = 0;
     n = quoteAppend(cmd_buf, n, "env") orelse return null;
@@ -573,6 +574,16 @@ pub fn buildRemote(
         n = quoteAppend(cmd_buf, n, token) orelse return null;
     }
 
+    return remoteArgv(remote, buf, cmd_buf[0..n]);
+}
+
+/// 이미 만들어 둔 **원격 명령 한 줄**을 실어 나를 `ssh` argv. `buildRemote` 와 `buildRemoteFileRead` 가
+/// 이 자리를 공유한다 — 전송 옵션(`BatchMode`·`-S`)이 두 벌이 되면 한쪽만 고쳐져 새 연결이 열린다.
+fn remoteArgv(remote: Remote, buf: *[max_argv][]const u8, command: []const u8) ?[]const []const u8 {
+    if (remote.dest.len == 0 or remote.dest[0] == '-') return null;
+    if (!remoteTokenIsSafe(remote.dest)) return null;
+    if (remote.control_path.len == 0 or remote.control_path[0] != '/') return null;
+    if (!remoteTokenIsSafe(remote.control_path)) return null;
     buf[0] = "/usr/bin/env"; // execve 가 받는 절대경로 — env(1) 가 PATH 에서 ssh 를 찾는다
     buf[1] = "ssh";
     buf[2] = "-o";
@@ -580,8 +591,54 @@ pub fn buildRemote(
     buf[4] = "-S";
     buf[5] = remote.control_path;
     buf[6] = remote.dest;
-    buf[7] = cmd_buf[0..n];
+    buf[7] = command;
     return buf[0..remote_argv_len];
+}
+
+/// 원격 파일 읽기의 상한(바이트). **원격에서 자른다** — 로컬은 받은 뒤 `max_output_bytes` 로 자르지만,
+/// 원격은 그 전에 바이트가 **링크를 다 건너온다.** 느린 ssh 에서 큰 파일 하나가 세션을 멎게 하는 것이
+/// 그 차이다(§4 드롭 업로드가 16 MiB 상한을 둔 것과 같은 이유).
+///
+/// diff 뷰어가 실제로 그리는 크기보다 넉넉하되 유계다. 잘렸는지는 **호출자가 길이로 판정한다**(로컬의
+/// `truncated` 와 같은 규율).
+pub const max_remote_file_bytes: usize = 4 << 20;
+
+/// 원격의 **작업트리 파일 한 개**를 읽는 명령(RS3 — [계획](../../docs/plans/remote-scm.md)).
+///
+/// **git 으로는 못 읽는다.** `git show :<path>` 는 index 이고 `HEAD:<path>` 는 커밋이다 — 작업트리의
+/// 지금 내용을 내는 git 명령이 없다. 그래서 이 한 자리에서만 git 이 아닌 명령을 원격에 보낸다.
+///
+/// `head -c <N> -- '<abs>'`: `--` 로 옵션 해석을 끊고, 경로는 `buildRemote` 와 **같은 인용 규칙**을 쓴다.
+/// 절대경로만 받는다 — 상대경로는 원격 로그인 셸의 cwd(홈)에 걸려 **다른 파일**을 읽는다.
+pub fn buildRemoteFileRead(
+    abs_path: []const u8,
+    remote: Remote,
+    buf: *[max_argv][]const u8,
+    cmd_buf: []u8,
+) ?[]const []const u8 {
+    if (abs_path.len == 0 or abs_path[0] != '/') return null;
+    if (!remoteTokenIsSafe(abs_path)) return null;
+    var n: usize = 0;
+    n = quoteAppend(cmd_buf, n, "head") orelse return null;
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    n = quoteAppend(cmd_buf, n, "-c") orelse return null;
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    var size_buf: [24]u8 = undefined;
+    const size = std.fmt.bufPrint(&size_buf, "{d}", .{max_remote_file_bytes}) catch return null;
+    n = quoteAppend(cmd_buf, n, size) orelse return null;
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    n = quoteAppend(cmd_buf, n, "--") orelse return null;
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    n = quoteAppend(cmd_buf, n, abs_path) orelse return null;
+    return remoteArgv(remote, buf, cmd_buf[0..n]);
 }
 
 pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8, buf: *[max_argv][]const u8) []const []const u8 {
@@ -667,6 +724,12 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
         },
         .snapshot_write_tree => {
             buf[n] = "write-tree";
+            n += 1;
+        },
+        .repo_root => {
+            buf[n] = "rev-parse";
+            n += 1;
+            buf[n] = "--show-toplevel";
             n += 1;
         },
         .remotes => {
@@ -1383,4 +1446,36 @@ test "원격 argv: 못 믿을 입력이면 명령을 만들지 않는다" {
     // ⑷ 버퍼가 모자라면 **자르지 않는다** — 잘린 셸 명령은 덜 실행되는 것이 아니라 다른 명령이다.
     var tiny: [16]u8 = undefined;
     try std.testing.expect(buildRemote(local, ok_remote, &buf, &tiny) == null);
+}
+
+test "원격 파일 읽기: 원격에서 자르고, 절대경로만 받는다 (RS3)" {
+    var buf: [max_argv][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const remote: Remote = .{ .dest = "user@host", .control_path = "/tmp/ctl" };
+
+    const argv = buildRemoteFileRead("/srv/app/src/it's here.zig", remote, &buf, &cmd) orelse
+        return error.RemoteArgvRefused;
+    // 전송 옵션은 `buildRemote` 와 **같은 자리**에서 온다(두 벌이면 한쪽만 고쳐져 새 연결이 열린다).
+    try std.testing.expectEqual(remote_argv_len, argv.len);
+    try std.testing.expectEqualStrings("/usr/bin/env", argv[0]);
+    try std.testing.expectEqualStrings("BatchMode=yes", argv[3]);
+    try std.testing.expectEqualStrings("/tmp/ctl", argv[5]);
+
+    const line = argv[7];
+    // **원격에서 자른다** — 로컬은 받은 뒤 자르지만 원격은 그 전에 링크를 다 건너온다.
+    var size_buf: [24]u8 = undefined;
+    const size = try std.fmt.bufPrint(&size_buf, "'{d}'", .{max_remote_file_bytes});
+    try std.testing.expect(std.mem.indexOf(u8, line, size) != null);
+    try std.testing.expect(std.mem.startsWith(u8, line, "'head' '-c' "));
+    // `--` 로 옵션 해석을 끊고, 경로는 같은 인용 규칙을 쓴다(작은따옴표 안은 확장이 없다).
+    try std.testing.expect(std.mem.indexOf(u8, line, "'--' '/srv/app/src/it'\\''s here.zig'") != null);
+
+    // 상대경로는 **원격 로그인 셸의 cwd(홈)** 에 걸려 다른 파일을 읽는다 — 만들지 않는다.
+    try std.testing.expect(buildRemoteFileRead("src/main.zig", remote, &buf, &cmd) == null);
+    try std.testing.expect(buildRemoteFileRead("", remote, &buf, &cmd) == null);
+    // 제어문자는 `buildRemote` 와 같은 이유로 거부한다(관측이 오염됐다는 뜻이다).
+    try std.testing.expect(buildRemoteFileRead("/srv/a\nb", remote, &buf, &cmd) == null);
+    // dest·socket 검증도 같은 자리를 지난다.
+    try std.testing.expect(buildRemoteFileRead("/srv/app", .{ .dest = "-oProxyCommand=id", .control_path = "/tmp/ctl" }, &buf, &cmd) == null);
+    try std.testing.expect(buildRemoteFileRead("/srv/app", .{ .dest = "user@host", .control_path = "ctl" }, &buf, &cmd) == null);
 }

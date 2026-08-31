@@ -5387,6 +5387,13 @@ pub const AppSession = struct {
     /// 값이라, 원격 목록을 보는 동안 로컬 파일을 열거나 스테이지하는 사고가 **경로 비교만으로는 막히지
     /// 않는다**(§9.4 가 링크 감지에서 겪은 것과 같은 함정).
     git_repo_dest: ?[]u8 = null,
+    /// 원격 저장소의 **루트**(RS3). `git_repo_dest` 가 있을 때만 뜻이 있다. 목록 읽기와 **같은 왕복**에서
+    /// 받아 온다(`rev-parse --show-toplevel`) — 따로 물으면 왕복이 늘고, 그 사이 pane 이 바뀌면 루트와
+    /// 목록이 다른 저장소의 것이 된다.
+    ///
+    /// 이 값이 필요한 이유는 하나다: diff 의 **오른쪽(작업트리)** 은 git 으로 못 읽어 파일을 직접 읽어야
+    /// 하고, 그러려면 저장소 루트 기준 상대경로를 절대경로로 만들어야 한다.
+    git_repo_remote_root: ?[]u8 = null,
     /// 목록 스크롤과 선택 행. 둘 다 창 상태다 — 목록은 매번 새로 계산되므로 저장하지 않는다.
     /// 스크롤 단위는 **backing pixel**이다(SV3a — 탐색기와 같은 좌표계). 브랜치 헤더 한 줄은 이
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
@@ -9734,6 +9741,8 @@ pub const AppSession = struct {
         if (entry.diff_rel_path.len > 0) self.allocator.free(entry.diff_rel_path);
         if (entry.diff_orig_rel_path.len > 0) self.allocator.free(entry.diff_orig_rel_path);
         if (entry.diff_repo.len > 0) self.allocator.free(entry.diff_repo);
+        if (entry.diff_remote_dest.len > 0) self.allocator.free(entry.diff_remote_dest); // RS3
+        if (entry.diff_remote_root.len > 0) self.allocator.free(entry.diff_remote_root);
         if (entry.diff_commit_oid.len > 0) self.allocator.free(entry.diff_commit_oid); // P4b
         if (entry.diff_right_oid.len > 0) self.allocator.free(entry.diff_right_oid); // P5
         entry.diff_commit_oid = &.{};
@@ -9741,6 +9750,8 @@ pub const AppSession = struct {
         entry.diff_rel_path = &.{};
         entry.diff_orig_rel_path = &.{};
         entry.diff_repo = &.{};
+        entry.diff_remote_dest = &.{};
+        entry.diff_remote_root = &.{};
     }
 
     /// 본문 두 쪽만 푼다. **`diff_rel_path`는 남긴다** — 새로 고칠 때 다시 읽을 대상이 그 값이다.
@@ -9802,6 +9813,14 @@ pub const AppSession = struct {
             if (entry.diff_base == .turn_range) entry.diff_right_oid else "",
             entry.diff_base,
             entry.diff_request_id,
+            // **entry 가 든 쌍을 그대로 쓴다**(RS3). 여기서 세션 상태를 다시 읽으면, diff 를 열어 둔 채
+            // 다른 pane 으로 옮겼을 때 그 비교가 **다른 호스트의 것**으로 해석된다.
+            if (entry.diff_remote_dest.len > 0) blk: {
+                var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const ctl = git_ops.remoteControlSocketFor(self, entry.diff_remote_dest, &ctl_buf) orelse break :blk null;
+                break :blk .{ .dest = entry.diff_remote_dest, .control_path = ctl };
+            } else null,
+            entry.diff_remote_root,
         )) {
             // 이미 다른 본문을 읽는 중이다. 다음 tick에서 다시 건다(그때 슬롯이 빈다).
             entry.diff_request_id = 0;
@@ -20522,6 +20541,8 @@ pub const AppSession = struct {
         self.git_repo = null;
         if (self.git_repo_dest) |dest| self.allocator.free(dest);
         self.git_repo_dest = null;
+        if (self.git_repo_remote_root) |root| self.allocator.free(root);
+        self.git_repo_remote_root = null;
         if (self.turn_index_path) |path| self.allocator.free(path);
         self.turn_index_path = null;
         // 그림자 사본은 힙이다 — 링(고정 배열)과 달리 여기서 반드시 푼다.
@@ -65739,16 +65760,26 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     // ⑵ **분류는 순수 함수가 진다**(exhaustive switch — 인텐트가 늘면 컴파일이 깨져 분류를 강제한다).
     const Intent = maru.chrome.components.scm_dock.ids.Intent;
     const touches = [_]Intent{
-        .{ .open_row = .{ .repo_index = 0, .model_index = 0 } },
         .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
         .{ .commit = 0 },
         .{ .stage_all_repo = 0 },
         .fetch_remote,
-        .{ .open_commit_file = 0 },
     };
     for (touches) |intent| try std.testing.expect(scm_dock_ops.intentTouchesLocalRepo(intent));
     // 화면만 바꾸는 것과 원격에서도 뜻이 같은 것은 통과시킨다 — 막으면 원격에서 탭 전환도 안 된다.
-    const passes = [_]Intent{ .{ .select_tab = .history }, .{ .toggle_repo = 0 }, .{ .refresh_repo = 0 }, .scroll_thumb };
+    //
+    // **비교 열기 셋은 RS3 에서 통과 쪽으로 넘어왔다** — 좌우 모두 원격에서 읽고 그 Term 은 저장이 막혀
+    // 있다(`saveDocument` 가 diff Term 을 거부한다). RS2 에서 막았던 것은 「아직 못 읽는다」였지 계약이
+    // 아니었다.
+    const passes = [_]Intent{
+        .{ .open_row = .{ .repo_index = 0, .model_index = 0 } },
+        .{ .open_commit_file = 0 },
+        .{ .open_turn_file = 0 },
+        .{ .select_tab = .history },
+        .{ .toggle_repo = 0 },
+        .{ .refresh_repo = 0 },
+        .scroll_thumb,
+    };
     for (passes) |intent| try std.testing.expect(!scm_dock_ops.intentTouchesLocalRepo(intent));
 
     scm_dock_ops.clearScmWriteError(session);

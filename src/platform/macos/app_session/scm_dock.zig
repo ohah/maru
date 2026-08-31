@@ -1801,8 +1801,7 @@ pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
 /// 원격에서도 뜻이 그대로인 것(새로고침 — 원격이면 원격을 다시 읽는다)은 통과시킨다.
 pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
     return switch (intent) {
-        // 로컬 파일·로컬 index 를 만진다.
-        .open_row,
+        // 로컬 index·로컬 파일을 **바꾼다**. 원격 라우팅은 RS4 다.
         .row_action,
         .section_action,
         .commit,
@@ -1810,10 +1809,15 @@ pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
         .stage_all_repo,
         .fetch_remote,
         .open_remote_menu,
-        .open_turn_file,
-        .open_commit_file,
         => true,
         // 화면 상태만 바꾸거나, 원격에서도 같은 뜻으로 도는 것.
+        //
+        // **비교 열기 셋은 RS3 에서 이쪽으로 넘어왔다** — 원격 diff 를 실제로 읽을 수 있게 됐기 때문이다
+        // (좌우 모두 원격에서 읽고, 그 Term 은 읽기 전용이다). 막아 두면 원격에서 「목록은 보이는데 아무것도
+        // 못 연다」가 되는데, 그건 RS2 의 한계였지 계약이 아니다.
+        .open_row,
+        .open_turn_file,
+        .open_commit_file,
         .toggle_section,
         .expand_section,
         .toggle_repo,

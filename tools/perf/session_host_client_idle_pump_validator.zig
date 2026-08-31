@@ -76,12 +76,20 @@ fn validateArtifact(artifact: Artifact) !void {
         return error.InvalidIdentity;
     if (artifact.scale_samples.len != expected_runtime_counts.len) return error.InvalidScaleRows;
     for (artifact.scale_samples, expected_runtime_counts) |sample, expected_runtime_count| {
-        if (sample.runtime_count != expected_runtime_count or sample.frame_count != idle_frame_count or
-            sample.observation_ns < idle_observation_min_ns or
-            sample.observation_ns > idle_observation_max_ns or
-            sample.cpu_total_delta_ns != sample.cpu_user_delta_ns + sample.cpu_system_delta_ns or
-            sample.cpu_total_delta_ns > idle_client_cpu_cap_ns)
-            return error.InvalidScaleRow;
+        // **여기도 모양과 시간이 섞여 있었다.** `error.InvalidScaleRow` 하나 뒤에 다섯 조건이
+        // 묶여 있어서, 빨간 런이 「이 행이 틀렸다」까지만 말하고 **행이 잘못 만들어진 것**과
+        // **러너가 느려 창이 늘어난 것**을 못 갈랐다. 마커와 같은 병이라 같이 가른다.
+        if (sample.runtime_count != expected_runtime_count) return error.ScaleRowRuntimeCountMismatch;
+        if (sample.frame_count != idle_frame_count) return error.ScaleRowFrameCountMismatch;
+        // 산술 항등식 — 어느 기계에서나 성립한다.
+        if (sample.cpu_total_delta_ns != sample.cpu_user_delta_ns + sample.cpu_system_delta_ns)
+            return error.ScaleRowCpuSplitMismatch;
+        // **여기부터가 측정값이다.** 관측 창은 `usleep` 하한이라 러너가 늘일 수 있고(공유 러너에서
+        // 60번의 16.7ms 대기가 5.55s 로 늘어난 적이 있다), CPU 상한은 실제 일의 예산이다. 셋을
+        // 갈라 두어야 빨간 런에서 「늘어졌다」와 「일을 너무 했다」가 구별된다.
+        if (sample.observation_ns < idle_observation_min_ns) return error.ScaleRowObservationTooShort;
+        if (sample.observation_ns > idle_observation_max_ns) return error.ScaleRowObservationTooLong;
+        if (sample.cpu_total_delta_ns > idle_client_cpu_cap_ns) return error.ScaleRowCpuOverCap;
         const expected_selected_owner_count: u64 =
             @as(u64, @min(expected_runtime_count, max_owners_per_frame)) * idle_frame_count;
         if (sample.selected_owner_count != expected_selected_owner_count or
@@ -95,20 +103,58 @@ fn validateArtifact(artifact: Artifact) !void {
         if (sample.client_slot_registry_visit_count != 0 or sample.socket_read_attempt_count != 0)
             return error.UnexpectedIdleWork;
     }
-    if (artifact.marker_runtime_count != 100 or artifact.marker_target_output_events == 0 or
-        artifact.marker_sibling_output_events != 0 or artifact.marker_latency_ns == 0 or
-        artifact.marker_frame_count == 0 or
-        artifact.marker_max_frame_elapsed_ns == 0 or
-        artifact.marker_readable_wake_count + artifact.marker_timer_timeout_count !=
-            artifact.marker_frame_count - 1 or
-        artifact.marker_pump_delta_count < artifact.marker_selected_owner_count or
-        artifact.marker_pump_delta_count > artifact.marker_selected_owner_count + artifact.marker_frame_count or
-        artifact.marker_pump_delta_count != artifact.marker_timestamp_seal_count or
-        artifact.marker_latency_ns > marker_latency_cap_ns)
-        return error.InvalidMarker;
+    try validateMarker(artifact);
     if (!artifact.host_reaped or !artifact.client_fds_closed or
         !artifact.socket_removed or !artifact.directory_removed)
         return error.CleanupIncomplete;
+}
+
+/// The marker round: one enqueue at the GUI boundary, pumped until the target runtime sees it.
+///
+/// **Each condition gets its own error.** They used to be eleven `or` terms behind a single
+/// `error.InvalidMarker`, so a red run said only "the marker is wrong" — it could not say whether
+/// the run was mis-shaped (no frames, sibling leakage, seal drift) or merely *slow*. Those need
+/// opposite responses: the first is a product defect, the second is a timing cap that a shared CI
+/// runner can breach without anything being broken. Telling them apart is the whole point.
+///
+/// **Order is load-bearing.** `marker_frame_count == 0` must be rejected before the wake
+/// accounting below, which subtracts one from it — the old single `if` was safe only because `or`
+/// short-circuits. Splitting the terms without keeping this first would turn an empty run into a
+/// `u32` underflow instead of a diagnosis.
+fn validateMarker(artifact: Artifact) !void {
+    // Identity of the marker scenario: it runs against the largest scale row.
+    if (artifact.marker_runtime_count != 100) return error.MarkerRuntimeCountMismatch;
+
+    // The marker must actually arrive, and only at its target.
+    if (artifact.marker_target_output_events == 0) return error.MarkerTargetSawNoOutput;
+    if (artifact.marker_sibling_output_events != 0) return error.MarkerSiblingSawOutput;
+
+    // Shape of the run. Zero here means the measurement never happened — a missing number, not a
+    // fast one, and it must never read as "well under the cap".
+    if (artifact.marker_frame_count == 0) return error.MarkerNoFrames;
+    if (artifact.marker_latency_ns == 0) return error.MarkerLatencyMissing;
+    if (artifact.marker_max_frame_elapsed_ns == 0) return error.MarkerFrameElapsedMissing;
+
+    // Every frame but the last blocked exactly once — on a readable wake or on the timer. The last
+    // frame is the one that saw the marker, so it never waited.
+    if (artifact.marker_readable_wake_count + artifact.marker_timer_timeout_count !=
+        artifact.marker_frame_count - 1)
+        return error.MarkerWakeAccountingMismatch;
+
+    // Pump deltas track selected owners, with at most one extra entry per frame.
+    if (artifact.marker_pump_delta_count < artifact.marker_selected_owner_count)
+        return error.MarkerPumpDeltaBelowOwners;
+    if (artifact.marker_pump_delta_count >
+        artifact.marker_selected_owner_count + artifact.marker_frame_count)
+        return error.MarkerPumpDeltaAboveOwners;
+    if (artifact.marker_pump_delta_count != artifact.marker_timestamp_seal_count)
+        return error.MarkerSealCountMismatch;
+
+    // **The only timing condition.** Everything above is a shape invariant that holds on any
+    // machine; this one is a measurement compared against a cap, so it is the one that a slow
+    // shared runner can trip on its own. Keeping it alone under its own name is what lets a red
+    // run be read without opening the artifact.
+    if (artifact.marker_latency_ns > marker_latency_cap_ns) return error.MarkerLatencyOverCap;
 }
 
 fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
@@ -178,9 +224,88 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         .directory_removed = true,
     };
     try validateArtifact(artifact);
-    artifact.marker_latency_ns = marker_latency_cap_ns + 1;
-    try std.testing.expectError(error.InvalidMarker, validateArtifact(artifact));
-    artifact.marker_latency_ns = std.time.ns_per_ms;
+    // **조건마다 자기 오류를 낸다.** 열한 개가 `or` 하나에 묶여 있던 동안에는 빨간 런이
+    // 「마커가 틀렸다」까지만 말했고, **모양이 깨진 것**과 **느린 것**을 못 갈랐다. 아래가 그
+    // 구분을 고정한다 — 둘을 다시 합치면 여기서 깨진다.
+    const Case = struct {
+        name: []const u8,
+        want: anyerror,
+        apply: *const fn (*Artifact) void,
+    };
+    const cases = [_]Case{
+        .{ .name = "runtime count", .want = error.MarkerRuntimeCountMismatch, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_runtime_count = 99;
+            }
+        }.f },
+        .{ .name = "target saw nothing", .want = error.MarkerTargetSawNoOutput, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_target_output_events = 0;
+            }
+        }.f },
+        .{ .name = "sibling saw output", .want = error.MarkerSiblingSawOutput, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_sibling_output_events = 1;
+            }
+        }.f },
+        // **빈 런은 underflow 가 아니라 진단이 되어야 한다.** 이 갈래가 아래 wake 회계보다
+        // 먼저 서지 않으면 `marker_frame_count - 1` 이 u32 를 넘어간다.
+        .{ .name = "no frames", .want = error.MarkerNoFrames, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_frame_count = 0;
+            }
+        }.f },
+        .{ .name = "latency missing", .want = error.MarkerLatencyMissing, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_latency_ns = 0;
+            }
+        }.f },
+        .{ .name = "frame elapsed missing", .want = error.MarkerFrameElapsedMissing, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_max_frame_elapsed_ns = 0;
+            }
+        }.f },
+        .{
+            .name = "wake accounting",
+            .want = error.MarkerWakeAccountingMismatch,
+            .apply = struct {
+                fn f(a: *Artifact) void {
+                    a.marker_frame_count = 3; // 두 번 기다렸어야 하는데 0 으로 적혀 있다
+                }
+            }.f,
+        },
+        .{ .name = "pump delta below owners", .want = error.MarkerPumpDeltaBelowOwners, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_pump_delta_count = a.marker_selected_owner_count - 1;
+            }
+        }.f },
+        .{ .name = "pump delta above owners", .want = error.MarkerPumpDeltaAboveOwners, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_pump_delta_count = a.marker_selected_owner_count + a.marker_frame_count + 1;
+            }
+        }.f },
+        .{ .name = "seal count", .want = error.MarkerSealCountMismatch, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_timestamp_seal_count = a.marker_pump_delta_count + 1;
+            }
+        }.f },
+        // **유일한 시간 조건.** 위 열은 어느 기계에서나 성립하는 모양 불변식이고, 이것만이
+        // 느린 러너가 혼자 밟을 수 있는 상한이다.
+        .{ .name = "latency over cap", .want = error.MarkerLatencyOverCap, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_latency_ns = marker_latency_cap_ns + 1;
+            }
+        }.f },
+    };
+    for (cases) |case| {
+        var drifted = artifact;
+        case.apply(&drifted);
+        std.testing.expectError(case.want, validateArtifact(drifted)) catch |err| {
+            std.debug.print("marker 조건 «{s}» 가 자기 오류를 안 냈다\n", .{case.name});
+            return err;
+        };
+    }
+
     artifact.client_fds_closed = false;
     try std.testing.expectError(error.CleanupIncomplete, validateArtifact(artifact));
     artifact.client_fds_closed = true;
@@ -192,8 +317,19 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
     drifted_rows[2].cpu_total_delta_ns = idle_client_cpu_cap_ns + 1;
     drifted_rows[2].cpu_user_delta_ns = drifted_rows[2].cpu_total_delta_ns;
     drifted_rows[2].cpu_system_delta_ns = 0;
-    try std.testing.expectError(error.InvalidScaleRow, validateArtifact(artifact));
+    try std.testing.expectError(error.ScaleRowCpuOverCap, validateArtifact(artifact));
     drifted_rows[2] = rows[2];
     drifted_rows[2].observation_ns = idle_observation_max_ns + 1;
-    try std.testing.expectError(error.InvalidScaleRow, validateArtifact(artifact));
+    try std.testing.expectError(error.ScaleRowObservationTooLong, validateArtifact(artifact));
+    drifted_rows[2].observation_ns = idle_observation_min_ns - 1;
+    try std.testing.expectError(error.ScaleRowObservationTooShort, validateArtifact(artifact));
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].runtime_count = 999;
+    try std.testing.expectError(error.ScaleRowRuntimeCountMismatch, validateArtifact(artifact));
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].frame_count = idle_frame_count + 1;
+    try std.testing.expectError(error.ScaleRowFrameCountMismatch, validateArtifact(artifact));
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].cpu_system_delta_ns += 1; // 합이 안 맞는다
+    try std.testing.expectError(error.ScaleRowCpuSplitMismatch, validateArtifact(artifact));
 }

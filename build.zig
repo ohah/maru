@@ -12780,6 +12780,62 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-cli-authority",
         "Validate official Release CI GitHub CLI executable authority",
     );
+    const session_host_release_adapter_github_download_step = b.step(
+        "test-session-host-release-adapter-github-download",
+        "Validate descriptor-owned predecessor release asset downloads",
+    );
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |download_optimize| {
+            const release_manifest_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+                .target = target,
+                .optimize = download_optimize,
+            });
+            const download_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_download.zig"),
+                .target = target,
+                .optimize = download_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_manifest", .module = release_manifest_mod },
+                    .{ .name = "release_adapter_identity", .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = download_optimize,
+                    }) },
+                    .{ .name = "bounded_process", .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                        .target = target,
+                        .optimize = download_optimize,
+                    }) },
+                    .{ .name = "safe_open", .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                        .target = target,
+                        .optimize = download_optimize,
+                    }) },
+                },
+            });
+            const download_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_github_download.zig"),
+                    .target = target,
+                    .optimize = download_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_manifest", .module = release_manifest_mod },
+                        .{ .name = "release_adapter_github_download", .module = download_mod },
+                    },
+                }),
+            });
+            const run_download_tests = b.addRunArtifact(download_tests);
+            run_download_tests.addArg("--maru-expect-tests=8");
+            run_download_tests.setCwd(b.path("."));
+            session_host_release_adapter_github_download_step.dependOn(&run_download_tests.step);
+            session_host_step.dependOn(&run_download_tests.step);
+            test_step.dependOn(&run_download_tests.step);
+            macos_only_test_step.dependOn(&run_download_tests.step);
+        }
+    }
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |authority_optimize| {
             const authority_mod = b.createModule(.{

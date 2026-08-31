@@ -106,6 +106,22 @@ test "predecessor download writes exact mapped assets and cleanup removes owned 
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "work", .{}));
 }
 
+test "downloaded set rejects work directory pathname replacement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var fake = Fake{};
+    var set: download.DownloadedSet = .{};
+    try download.downloadAllWith(&set, &fake, "/opt/trusted/gh", "secret-token", try absolute(&tmp, "work", &path_buf), expected(), std.time.ns_per_s);
+    try tmp.dir.rename("work", tmp.dir, "owned-work", std.testing.io);
+    try tmp.dir.createDir(std.testing.io, "work", .default_dir);
+    try std.testing.expectError(error.FileChanged, set.revalidate());
+    try tmp.dir.deleteDir(std.testing.io, "work");
+    try tmp.dir.rename("owned-work", tmp.dir, "work", std.testing.io);
+    try set.revalidate();
+    try set.cleanup();
+}
+
 test "predecessor download short output fails and leaves no residue" {
     try expectFailureNoResidue(.short, error.SizeMismatch);
 }

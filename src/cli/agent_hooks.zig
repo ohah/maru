@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const command = @import("../session/agent_hook_command.zig");
+const remote_shell = @import("../session/remote_shell.zig");
 
 pub const Action = enum { install, uninstall };
 
@@ -76,6 +77,22 @@ pub fn parseArgs(args: []const []const u8) Mode {
     return .{ .run = .{ .action = action, .provider = p, .dir = d } };
 }
 
+/// 원격에서 도는 **스크립트**(상수). 변하는 값은 `"$1"`·`"$2"` 로 받는다 — 문자열 안에 끼워 넣으면
+/// 껍데기 인용이 한 겹 더 겹치고, 그 겹침을 빠뜨리면 **다른 명령**이 된다.
+///
+/// ⚠️ **작은따옴표를 쓰지 않는다.** 스크립트 전체가 다시 작은따옴표로 감싸이므로, 안에 `'` 가 있으면
+/// 토큰마다 `'\''` 가 붙어 읽을 수 없게 된다. 큰따옴표로 충분하다 — `$HOME` 이 확장되어야 하는 자리라
+/// 어차피 큰따옴표였다.
+const install_script = remote_shell.path_assign ++
+    "command -v maru >/dev/null 2>&1 || { printf \"%s\\n\" \"" ++ no_maru_marker ++ "\"; exit 0; }; " ++
+    "maru agent-hooks \"$1\" --provider=\"$2\" --scope=remote --dir=\"$HOME/$3\"";
+
+/// 두 provider 판. `$1`=action, `$2`=dir.
+const install_all_script = remote_shell.path_assign ++
+    "command -v maru >/dev/null 2>&1 || { printf \"%s\\n\" \"" ++ no_maru_marker ++ "\"; exit 0; }; " ++
+    "maru agent-hooks \"$1\" --provider=claude --scope=remote --dir=\"$HOME/$2\"; " ++
+    "maru agent-hooks \"$1\" --provider=codex --scope=remote --dir=\"$HOME/$2\"";
+
 /// 로컬이 ControlMaster 위에서 실행할 **원격 명령 문자열**([계획](../../docs/plans/remote-agent-state.md)
 /// RA3 배선). 이 문자열은 원격 셸이 받으므로 인용 규칙이 전부다.
 ///
@@ -92,12 +109,7 @@ pub fn remoteShellCommand(
     provider_tag: []const u8,
     remote_dir_rel: []const u8,
 ) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "PATH=\"{s}:$PATH\"; command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
-            "maru agent-hooks {s} --provider={s} --scope=remote --dir=\"$HOME/{s}\"",
-        .{ remote_path_prefix, no_maru_marker, @tagName(action), provider_tag, remote_dir_rel },
-    );
+    return remote_shell.wrapAlloc(allocator, install_script, &.{ @tagName(action), provider_tag, remote_dir_rel });
 }
 
 /// **두 provider 를 한 번의 왕복으로** 깐다.
@@ -112,31 +124,23 @@ pub fn remoteShellCommandAll(
     action: Action,
     remote_dir_rel: []const u8,
 ) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "PATH=\"{s}:$PATH\"; command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
-            "maru agent-hooks {s} --provider=claude --scope=remote --dir=\"$HOME/{s}\"; " ++
-            "maru agent-hooks {s} --provider=codex --scope=remote --dir=\"$HOME/{s}\"",
-        .{ remote_path_prefix, no_maru_marker, @tagName(action), remote_dir_rel, @tagName(action), remote_dir_rel },
-    );
+    return remote_shell.wrapAlloc(allocator, install_all_script, &.{ @tagName(action), remote_dir_rel });
 }
 
 /// 원격에 `maru` 가 없을 때 나가는 표식. **`exit 0` 으로 끝낸다** — 셸이 «명령 없음» 으로 주는 127 은
 /// 「연결이 끊겼다」와 구분되지 않기 때문이다(스트리머가 종료 코드를 못 믿는 것과 같은 이유).
-/// 원격에서 `maru` 를 찾기 전에 **PATH 앞에 붙이는 자리들**.
-///
-/// ⚠️ **`ssh host cmd` 의 PATH 는 로그인 셸보다 좁다.** 흔히 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라
-/// 사용자가 `~/.local/bin` 이나 Homebrew 에 깐 `maru` 가 **안 잡힌다.** 그러면 우리 명령의 첫 줄이
-/// 표식을 내고 로컬은 「원격에 maru 가 없다」로 축을 안 연다 — 실제로 그렇게 한 번 안 열렸다
-/// (2026-08-30 실측: `maru` 가 `~/.local/bin/maru` 에 있는데 비대화형 PATH 에서 못 찾았다).
-///
-/// tmux 역조회 스크립트는 **같은 함정을 이미 배워** 이 처방을 쓰고 있었는데(RA6), `maru` 를 찾는
-/// 자리에는 안 옮겨져 있었다. 한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.
-///
-/// **PATH 를 덮지 않고 앞에 붙인다** — 사용자가 PATH 로 고른 `maru` 가 있으면 그쪽이 이긴다.
-pub const remote_path_prefix = "$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin";
+/// PATH 처방과 `sh` 껍데기는 [remote_shell](../session/remote_shell.zig) 이 소유한다.
+/// 스트리머(`ssh_upload.zig`)도 같은 자리를 쓴다 — 셋이 따로 적혀 있다가 셋 다 틀렸다.
+pub const remote_path_prefix = remote_shell.path_prefix;
 
-pub const no_maru_marker = "!maru-not-installed";
+/// ⚠️ **`!` 로 시작하면 안 된다.** csh/tcsh 는 히스토리 확장을 작은따옴표 안에서도, 비대화형에서도,
+/// `sh -c` 껍데기 안에서도 한다(로그인 셸이 우리 문자열을 **먼저** 파싱하므로 껍데기가 닿지 못한다).
+/// 옛 표식 `!maru-not-installed` 는 그래서 csh 원격에서 **`maru: Event not found.` 로 바뀌어** 도착했고,
+/// 뒤 명령은 `;` 뒤에서 그대로 돌아 **exit 0** 이었다 — 로컬은 「설치됐다」로 읽었다. 위 주석이 약속한
+/// 「조용히 «설치했다» 로 넘어가지 않는다」가 정확히 그 자리에서 깨졌다(실측 2026-09-01).
+///
+/// 토큰의 `!` 는 못 막지만(사용자 경로다) **우리가 고르는 값**은 고를 수 있다.
+pub const no_maru_marker = "--maru-not-installed--";
 
 /// 훅 파일 락을 기다리는 시간.
 ///

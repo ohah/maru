@@ -19,6 +19,7 @@
 //! command 안전 처리(bootstrapEligible)는 했다.
 
 const std = @import("std");
+const remote_shell = @import("../session/remote_shell.zig");
 const builtin = @import("builtin");
 
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
@@ -306,12 +307,23 @@ pub fn sanitizeDropFilename(allocator: std.mem.Allocator, path: []const u8) ![]u
 /// 업로드 전에 7일 지난 파일을 정리한다(`find -mtime +7 -delete`) — 저장 디렉터리가 paste/drop마다 무한
 /// 누적되는 걸 막는 보존 정책(사용자 결정 2026-06-21, 7일). maru가 만든 dropped/만 건드리고, 진행 중
 /// 파일(7일 이내)은 남기며, find 실패는 무시한다(업로드 자체는 계속). dropped/는 디렉터리당 1회 mkdir.
+/// 드롭 수신 **스크립트**(상수). `$1` = 정규화한 파일명(`sanitizeDropFilename`).
+///
+/// ⚠️ **작은따옴표를 쓰지 않는다.** 이 문자열 전체가 다시 작은따옴표로 감싸이므로(아래), 안에 `'` 가
+/// 있으면 토큰마다 `'\''` 가 붙어 읽을 수 없게 된다. `printf "%s"` 로 충분하다.
+///
+/// **PATH 처방은 안 붙인다** — `mkdir`·`find`·`cat`·`printf` 는 어느 원격에서나 기본 PATH 에 있다.
+/// 처방은 「사용자가 깐 실행 파일을 찾아야 하는」 자리(원격 git·원격 maru)만의 것이다.
+const upload_script =
+    "d=\"$HOME/.cache/maru/dropped\"; mkdir -p \"$d\" && find \"$d\" -type f -mtime +7 -delete 2>/dev/null; " ++
+    "cat > \"$d/$1\" && printf \"%s\" \"$d/$1\"";
+
+/// ⚠️ **원격 로그인 셸이 POSIX 셸이라는 보장이 없다.** 예전에는 위 스크립트를 그대로 넘겼는데,
+/// csh/tcsh 는 `d="…"` 를 **명령으로** 읽어 `Command not found` 를 내고 뒤이어 `$d` 가 정의되지 않아
+/// 업로드가 통째로 실패했다(실측 2026-09-01). 껍데기·인용 규율은
+/// [session/remote_shell.zig](../session/remote_shell.zig) 하나가 소유한다.
 pub fn uploadShellCommand(allocator: std.mem.Allocator, remote_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "d=\"$HOME/.cache/maru/dropped\"; mkdir -p \"$d\" && find \"$d\" -type f -mtime +7 -delete 2>/dev/null; cat > \"$d/{s}\" && printf '%s' \"$d/{s}\"",
-        .{ remote_name, remote_name },
-    );
+    return remote_shell.wrapAlloc(allocator, upload_script, &.{remote_name});
 }
 
 pub const ParseError = error{MissingDestination};
@@ -839,11 +851,16 @@ test "uploadShellCommand: mkdir + cat + 원격 절대경로 echo" {
     const a = std.testing.allocator;
     const cmd = try uploadShellCommand(a, "img.png");
     defer a.free(cmd);
+    // **로그인 셸에는 인용된 토큰만 간다** — csh/tcsh 는 `d="…"` 를 명령으로 읽는다(실측).
+    try std.testing.expect(std.mem.startsWith(u8, cmd, "'sh' '-c' '"));
+    try std.testing.expect(std.mem.endsWith(u8, cmd, " 'img.png'")); // 파일명은 `$1` 로 간다
     try std.testing.expect(std.mem.indexOf(u8, cmd, "mkdir -p \"$d\"") != null); // 저장 디렉터리 생성
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "cat > \"$d/img.png\"") != null); // stdin→파일
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "printf '%s' \"$d/img.png\"") != null); // 원격 절대경로 반환
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "cat > \"$d/$1\"") != null); // stdin→파일
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "printf \"%s\" \"$d/$1\"") != null); // 원격 절대경로 반환
     try std.testing.expect(std.mem.indexOf(u8, cmd, ".cache/maru/dropped") != null); // 저장 위치
     try std.testing.expect(std.mem.indexOf(u8, cmd, "find \"$d\" -type f -mtime +7 -delete") != null); // 7일 보존 정리
+    // 작은따옴표가 스크립트 안에 있으면 껍데기 인용이 겹쳐 읽을 수 없게 된다.
+    try std.testing.expect(std.mem.indexOf(u8, upload_script, "'") == null);
 }
 
 test "wrapper 스크립트: keepalive는 0이면 안 붙고, 세션 세 갈래 모두 싣는다" {

@@ -59,18 +59,29 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     const end = std.mem.indexOfPos(u8, tail, 1, "\npub fn ") orelse tail.len;
     const fn_body = tail[0..end];
 
-    // 큰따옴표로 감싼 `$HOME/` 이어야 한다.
-    try std.testing.expect(std.mem.indexOf(u8, fn_body, "--dir=\\\"$HOME/{s}\\\"") != null);
-    // 그리고 작은따옴표 형태는 남아 있으면 안 된다.
-    try std.testing.expect(std.mem.indexOf(u8, fn_body, "--dir='") == null);
     // 받는 값이 **상대 경로**임을 이름으로도 못박는다 — 절대 경로를 넘기면 `$HOME` 이 앞에 또 붙는다.
     try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_dir_rel") != null);
+    // **명령 문자열을 직접 조립하지 않는다.** 로그인 셸이 POSIX 셸이 아닐 수 있어 껍데기가 필요하고,
+    // 그 규율은 `session/remote_shell.zig` 하나가 소유한다(2026-09-01: 같은 처방이 세 곳에 따로
+    // 적혀 있다가 **세 곳이 나란히 틀렸다**).
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_shell.wrapAlloc(allocator, stream_script") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "allocPrint") == null);
 
+    // 스크립트 상수 쪽을 이어서 본다 — 큰따옴표 `$HOME/`, 작은따옴표 금지, PATH 가 **맨 앞**.
+    const script = readDecl(body, "const stream_script") orelse return error.StreamScriptMissing;
+    try std.testing.expect(std.mem.indexOf(u8, script, "--dir=\\\"$HOME/$2\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "--dir='") == null);
     // ⚠️ **스트리머도 PATH 를 앞에 붙여야 한다.** 설치만 고치고 여기를 빠뜨리면 «설치는 되는데
     // 스트리머가 안 뜨는» 상태가 되고, 증상은 앞의 실패와 구분되지 않는다(둘 다 「배지가 안 선다」).
-    // 값은 설치와 **같은 상수**여야 한다 — 두 곳에 따로 적으면 한쪽만 고쳐진다.
-    try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_path_prefix") != null);
-    // **한 문자열로 순서까지 함께 문다.** 따로 찾으면 위 문서 주석에 있는 `agent-events --stdio` 가
-    // 먼저 걸려 «PATH 가 뒤에 있다» 고 잘못 읽는다(실제로 그렇게 한 번 빨갰다).
-    try std.testing.expect(std.mem.indexOf(u8, fn_body, "PATH=\\\"{s}:$PATH\\\"; exec {s} agent-events --stdio") != null);
+    // 값은 설치와 **같은 자리**에서 온다 — 두 곳에 따로 적으면 한쪽만 고쳐진다.
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, script, " \n"), "remote_shell.path_assign ++"));
+}
+
+/// `<name> = ` 로 시작하는 선언의 본문(세미콜론까지)을 돌려준다. 판정자가 **주석이 아니라 값**을
+/// 보게 하려고 선언 단위로 자른다.
+fn readDecl(src: []const u8, name: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, src, name) orelse return null;
+    const eq = std.mem.indexOfScalarPos(u8, src, at, '=') orelse return null;
+    const end = std.mem.indexOfScalarPos(u8, src, eq, ';') orelse return null;
+    return src[eq + 1 .. end];
 }

@@ -326,6 +326,11 @@ pub const Provider = struct {
     parser: *c.TSParser,
     tree: ?*c.TSTree = null,
     slot: Slot,
+    /// **마지막 파싱에 실제로 준 예산.** 판정자가 「이 문서를 연 경로가 예산을 걸었는가」를
+    /// **시간 없이** 물을 수 있어야 한다 — 그 질문을 「4ms 안에 못 끝냈다」로 재면 답이 기계
+    /// 속도에 달리고, 빠른 기계에서 그 단언이 거짓이 된다(`ES21`·`ES22` 가 그랬다).
+    /// `0` 은 「취소 안 함」이라는 뜻이다(`onProgress` 참조) — 상한 없음과 구별된다.
+    budget_ns: u64 = 0,
 
     /// 문서 하나를 맡는다. **§5.3의 `init(문서 bytes, 언어)` 그대로다** — 언어만 받고 내용을
     /// 나중에 넣는 형태였다가 계약에 맞췄다(이름과 인자가 계약과 갈리면 문서를 읽고 코드를 찾는
@@ -361,6 +366,7 @@ pub const Provider = struct {
     /// 하나이고 그것은 `TSInput`(콜백)만 받는다 — 문자열 변형이 없다. 그래서 슬라이스를 한 번에
     /// 돌려주는 reader를 얹는다(조각내지 않는다 — 우리 버퍼는 이미 연속이다).
     fn parseBudgeted(self: *Provider, source: []const u8, old_tree: ?*c.TSTree, budget_ns: u64) ParseStatus {
+        self.budget_ns = budget_ns;
         var ctx: ParseCtx = .{ .source = source, .deadline_ns = monotonicNs() + budget_ns, .budget_ns = budget_ns };
         const input: c.TSInput = .{
             .payload = &ctx,

@@ -12847,6 +12847,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-manifest-file",
         "Validate descriptor-owned predecessor manifest files",
     );
+    const session_host_release_adapter_github_manifest_attestation_step = b.step(
+        "test-session-host-release-adapter-github-manifest-attestation",
+        "Validate predecessor manifest attestation composition",
+    );
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |manifest_file_optimize| {
             const release_manifest_mod = b.createModule(.{
@@ -12887,6 +12891,29 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_manifest_file_tests.step);
             test_step.dependOn(&run_manifest_file_tests.step);
             macos_only_test_step.dependOn(&run_manifest_file_tests.step);
+        }
+    }
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |attestation_optimize| {
+            const release_manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = attestation_optimize });
+            const identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"), .target = target, .optimize = attestation_optimize });
+            const context_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
+            const bounded_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"), .target = target, .optimize = attestation_optimize });
+            const json_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }} });
+            const attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
+            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = attestation_optimize });
+            const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }} });
+            const cli_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });
+            const file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_file.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
+            const composition_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_attestation.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_authority_mod }, .{ .name = "release_adapter_github_manifest_file", .module = file_mod } } });
+            const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_manifest_attestation.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_github_manifest_file", .module = file_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = composition_mod } } }) });
+            const run = b.addRunArtifact(tests);
+            run.addArg("--maru-expect-tests=8");
+            run.setCwd(b.path("."));
+            session_host_release_adapter_github_manifest_attestation_step.dependOn(&run.step);
+            session_host_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+            macos_only_test_step.dependOn(&run.step);
         }
     }
     if (target.result.os.tag == .macos) {

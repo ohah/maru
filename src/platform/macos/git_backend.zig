@@ -2158,7 +2158,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submit(exe, repo, "", 7));
+    try testing.expect(backend.submit(exe, repo, "", 7, null)); // 로컬(RS2 — 원격이면 `Remote` 를 넘긴다)
 
     // git status는 큰 저장소에서 수백 ms 걸린다. 10초까지 기다린 뒤에도 없으면 배관이 끊긴 것으로 본다.
     var spins: usize = 0;

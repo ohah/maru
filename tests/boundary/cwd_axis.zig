@@ -81,9 +81,19 @@ const inventory = [_]Entry{
     },
     .{
         .path = "src/platform/macos/app_session/git.zig",
-        .fns = &.{ "termCwd", "termCwdForDisplay" },
+        .fns = &.{ "remoteScmTarget", "termCwd", "termCwdForDisplay" },
         .aliases = 0,
-        .why = "축 자체 — `termCwd`와 `termCwdForDisplay`의 1단(OSC 7)을 읽는 바로 그 두 줄이다.",
+        .why =
+        \\축 자체 — `termCwd`와 `termCwdForDisplay`의 1단(OSC 7)을 읽는 바로 그 두 줄이다.
+        \\
+        \\`remoteScmTarget`(RS2 — docs/plans/remote-scm.md)은 **축의 반대편**이라 여기 있다. 축은 원격에서
+        \\의도적으로 null 을 낸다(그 경로를 로컬에 대고 해석하면 남의 저장소를 만진다 — §9.4). 그래서
+        \\「원격 저장소를 본다」는 질문에는 축이 답할 수 없고, 원격 cwd 를 아는 유일한 자리가 관측이다.
+        \\
+        \\**직독이 여기 하나로 묶여 있는 것이 이 함수의 값어치다**: 원격 판정이 한 곳이라 목록·diff·쓰기가
+        \\같은 쌍을 보고, 「목록은 원격인데 클릭은 로컬」이 원리적으로 불가능해진다. 다른 곳에서 원격 cwd 를
+        \\또 직독하면 그 보장이 깨지므로, 그때는 이 함수를 부르지 재고를 늘리지 않는다.
+        ,
     },
     .{
         .path = "src/platform/macos/app_session/agent.zig",

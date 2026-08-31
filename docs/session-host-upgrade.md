@@ -893,11 +893,53 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   workflow가 checkout 전 capture를 실제 수행했거나 transport 호출과 결합됐다고 주장하지 않는다. 그 결합은 release workflow
   wiring gate가 별도로 소유한다.
 
-  A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
-  default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과
-  동일 `test_uuid`를 결속한다. manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이
-  생성하고 artifact attestation을 발급한다. attestation 검증은 repository·workflow·source commit과 subject digest를 모두
-  policy input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.
+  release evidence의 canonical bytes는 OS 중립
+  `src/platform/macos/session_host/release_evidence.zig` 한 곳이 소유한다. schema는 exact
+  `maru.session-host-release-evidence.v1`이고 profile은 `baseline_a | upgrade_b`의 닫힌 union이다. G3의
+  `default=false→true` migration evidence는 이 schema에 optional field로 섞지 않고
+  [별도 이니셔티브](persistent-session-host.md#session-default-g3-frozen-release-migration)가 소유한다. 따라서 U5 frozen
+  release 호환성 증거를 아직 승인되지 않은 default 전환에 종속시키지 않고, 나중의 G3 release는 U5 `upgrade_b` evidence와
+  자기 default-migration evidence를 모두 요구한다.
+
+  evidence root key는 writer가 아래 표 순서로 쓰며 parser는 모든 scope의 duplicate·unknown·missing key, trailing value,
+  잘못된 UTF-8·wire type·정수 overflow와 noncanonical writer bytes를 거부한다. `result`는 caller 입력 bool이 아니라 모든
+  profile 불변식이 성립한 성공 writer만 exact `passed`로 만든다.
+
+  | scope | 필수 필드 | 불변식 |
+  | --- | --- | --- |
+  | root | `schema`, `profile`, `role`, `test_uuid`, `repository`, `release`, `source`, `build`, `candidate`, `gates`, `result` | `baseline_a↔role=a`, `upgrade_b↔role=b`; B만 `predecessor` 추가 |
+  | `test_uuid` | canonical lowercase RFC 4122 UUID v4 string | trusted run이 candidate attestation과 draft 생성 뒤 한 번 만들고 모든 gate에 전달하는 correlation일 뿐 권위가 아님 |
+  | `repository` | `id`, `owner`, `name` | manifest 및 GitHub API observation과 exact 일치 |
+  | `release` | `id`, `tag`, `version` | 이미 만든 exact draft와 manifest release에 결속 |
+  | `source` | `commit`, `tree` | manifest source와 exact 일치 |
+  | `build` | `workflow_ref`, `run_id`, `run_attempt` | 현재 trusted tag run 및 aggregate attestation과 exact 일치 |
+  | `candidate` | `dmg_sha256`, `executable_sha256` | manifest의 exact universal DMG와 frozen product executable asset에 결속 |
+  | B 전용 `predecessor` | `release_id`, `tag`, `commit`, `manifest_sha256`, `dmg_sha256`, `executable_sha256` | published immutable A manifest/release/asset과 exact 일치; current/old swap 거부 |
+  | A `gates` | `default_false_baseline`, `signed_app_quit_reattach` | 둘 다 같은 A candidate와 `test_uuid`를 관측하고 exact `passed` |
+  | B `gates` | `signed_upgrade_one`, `signed_upgrade_near_max` | 둘 다 같은 A predecessor/B candidate와 `test_uuid`; runtime count는 각각 exact 1과 `max_runtime_count - 1` |
+  | root `result` | string | exact `passed`; 어느 gate라도 누락·실패·교환·candidate mismatch면 aggregate publication 0 |
+
+  gate 입력 leaf는 staging artifact일 뿐 durable authority나 별도 Release asset이 아니다. `release_evidence.zig`가 각 exact
+  leaf schema를 직접 strict parse하고 필요한 typed 관측값을 `gates` nested object에 canonical하게 보존한다. leaf SHA만 남겨
+  사라진 bytes를 나중에 검증할 수 없게 만들거나, raw leaf를 base64 scalar로 넣어 scalar cap을 우회하지 않는다. A의 두 gate는
+  signed app bundle/DMG와 frozen executable 모두를 candidate에 결속한다. B의 두 gate는 현재
+  `maru.session-host-signed-upgrade-e2e.v1`의 후속 v2가 내는 PID/runtime/epoch/screen/input/reap 관측을 보존하고
+  1-runtime과 near-max artifact를 바꿔 끼우지 못하게 runtime count와 runtime-set digest를 profile policy에서 검증한다.
+
+  `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
+  digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical
+  aggregate bytes만 반환하고 filesystem을 열거나 publication 성공을 주장하지 않는다. 후속 executable adapter가 기존
+  `release_adapter_files.zig`의 no-follow input 및 exclusive atomic publication 규율로 leaf 입력과 aggregate 출력을 다뤄
+  stale success, symlink/path 교체와 기존 output overwrite를 거부한다. evidence 전체 상한은 `release_manifest.max_evidence_bytes`, scalar 상한은
+  `release_manifest.max_scalar_string_bytes`를 재사용하고 gate별 배열은 제품 상수에서 유도한 exact bound를 가진다.
+
+  focused gate `test-session-host-release-evidence`는 A/B canonical round-trip, 모든 scope의
+  duplicate/unknown/missing/type/cap, UUID 형식, profile-role/predecessor, leaf 누락·중복·교환, stale run/attempt,
+  A/B candidate swap, 1/near-max count·set digest와 leaf/aggregate allocation fail-index를 Debug·ReleaseFast로
+  검증한다. 이 component green은 실제 signed app gate 실행, artifact attestation 또는 release workflow 배선을 대신하지 않는다.
+  manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이 aggregate를 생성하고 artifact
+  attestation을 발급한다. attestation 검증은 repository·workflow·source commit·run identity와 subject digest를 모두 policy
+  input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.
 
   publish 순서는 닫혀 있다. trusted tag workflow가 후보 bytes에 artifact attestation을 발급하고 draft release ID를 얻은 뒤,
   그 후보로 제품 gate를 실행해 evidence를 만든다. 그 다음에야 release ID와 evidence digest를 담은 manifest를 생성·attest하고

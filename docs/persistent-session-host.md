@@ -7813,18 +7813,24 @@ Workspace 토글과 외부 config reload만 app-global snapshot을 새 `explicit
 absent/valid/invalid, exact-one/duplicate init, 실제 atomic replace 실패와 dirty/remove queue 0을 검증하고, AppHost source-order
 fixture와 실제 fresh process는 `lease → G2 bootstrap → AppKit/AppSession` 순서 및 두 번째 instance의 config I/O 0을 검증한다.
 
-**별도 이니셔티브 — G3 frozen-release default migration 계약.** G3는 P1~P5 완료 조건이나 현재 실행 순서가 아니다. 사용자가
+#### Session default G3 frozen-release migration
+
+별도 이니셔티브의 frozen-release default migration 계약이다. G3는 P1~P5 완료 조건이나 현재 실행 순서가 아니다. 사용자가
 default-on을 다시 승인한 뒤에만 [upgrade release provenance](session-host-upgrade.md#u5--제품-활성화)가
 지목한 exact immutable A와 provisioned `Session host product / default-on` runner가 모두 존재할 때만 코드를 시작한다. B의
 SemVer가 A에 산술적으로 인접하다는 가정이나 `latest` 조회는 migration 권위가 아니다. B manifest의 exact predecessor
 release ID·tag·commit·manifest SHA-256만 A 선택 권위이며, B→A rollback도 그 exact A 하나만 지원한다.
 
-⚠️ **protected-environment 통과 증거는 아직 설계 결정이 남았다.** GitHub environment REST 응답은 protection
-설정 사실만 제공하고, deployment 응답의 `sha/ref/environment`도 현재 `run_id/run_attempt/job`이 그 규칙을 통과했다는
-결속이 아니다. 둘을 조합해 `protected_environment=true`를 만들면 다른 run의 deployment를 현재 run 증거로 재사용하는
-거짓 양성이 열린다. 따라서 release adapter는 이 두 REST 응답만으로 해당 bool을 발행하지 않는다. current job에 결속된
-OIDC/attestation 증거를 검증할지, exact workflow를 신뢰 경계로 삼을지 사용자와 정한 뒤 제품 adapter를 연다. 이 결정
-전의 parser/component green은 G3 외부 gate 준비로 세지 않는다.
+protected-environment 통과 증거는 environment 설정 REST나 deployment의 `sha/ref/environment`만으로 만들지 않는다.
+attempt-scoped jobs의 exact current `run_id/run_attempt/job` URL과 deployment status의 같은 job URL, `waiting` 뒤
+`queued|in_progress` 전이, newest `in_progress`, environment의 recognized protection rule을 함께 요구한다. component
+resolver만으로는 transport·pagination·현재 실행 executable·workflow 배선을 증명하지 않으므로 이 네 권위까지 실제 adapter가
+결속하기 전에는 `protected_environment=true`를 만들 수 없다. 이 계약은
+[검증 매트릭스](verification-matrix.md#session-default-g3-frozen-release-migration)의 상태 설명과 동일하다.
+
+G3 evidence는 U5 `maru.session-host-release-evidence.v1`의 `upgrade_b` profile을 변형하거나 optional gate를 추가하지 않는다.
+G3 release는 검증된 `upgrade_b` evidence에 더해 config/topology/tombstone/Quit/Notification matrix를 소유하는 별도
+default-migration evidence를 요구한다. 따라서 U5 parser 구현만으로 default-on이 승인·구현·출하됐다고 주장하지 않는다.
 
 B bootstrap은 L0 app-instance lease 뒤, AppKit/첫 Window/첫 `AppSession` 전에 G2 owner의 같은 exact-once entry를 사용한다.
 파일을 두 번 읽거나 Window별로 migration하지 않는다. migration 결과는 아래 닫힌 표 하나다.

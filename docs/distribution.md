@@ -179,6 +179,11 @@ draft 재다운로드 검증 → publish → release attestation 검증` 순서�
 asset 교체·삭제·`--clobber`를 허용하지 않는다. immutable release 설정은 이 draft-first workflow와 validator가 먼저 배포된
 뒤 켠다.
 
+U5 제품 호환성 evidence는 `maru.session-host-release-evidence.v1`의 `baseline_a | upgrade_b` profile만 사용한다.
+`upgrade_b`는 signed 1-runtime과 near-max 제품 migration을 결속하며 default-on config matrix를 optional field로 받지 않는다.
+별도 G3 default-on release는 이 U5 evidence를 재사용하되 자기 config/topology/tombstone/Quit/Notification evidence를 추가로
+요구한다. 따라서 U5 evidence 구현이나 green만으로 default 전환을 출하하지 않는다.
+
 서명·공증·Aqua/Notification/localhost sshd 자격은 fork PR, `pull_request_target`, caller가 임의 ref를 고를 수 있는 수동
 실행에 노출하지 않는다. G3 source는 현재 release 백로그이며, 사용자 재승인·immutable A·provisioned runner가 모두 준비된 뒤에만
 일반 PR로 merge하고 exact `main` commit을

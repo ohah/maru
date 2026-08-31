@@ -12790,6 +12790,20 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = manifest_download_optimize,
         });
+        const manifest_download_identity_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+        });
+        const manifest_download_command_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_download_command.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "release_adapter_identity", .module = manifest_download_identity_mod },
+            },
+        });
         const manifest_download_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_download.zig"),
             .target = target,
@@ -12797,11 +12811,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "release_manifest", .module = release_manifest_mod },
-                .{ .name = "release_adapter_identity", .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
-                    .target = target,
-                    .optimize = manifest_download_optimize,
-                }) },
+                .{ .name = "release_adapter_identity", .module = manifest_download_identity_mod },
+                .{ .name = "release_adapter_github_download_command", .module = manifest_download_command_mod },
                 .{ .name = "bounded_process", .module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
                     .target = target,
@@ -12839,6 +12850,20 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = download_optimize,
             });
+            const download_identity_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                .target = target,
+                .optimize = download_optimize,
+            });
+            const download_command_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_download_command.zig"),
+                .target = target,
+                .optimize = download_optimize,
+                .imports = &.{
+                    .{ .name = "release_manifest", .module = release_manifest_mod },
+                    .{ .name = "release_adapter_identity", .module = download_identity_mod },
+                },
+            });
             const download_mod = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_download.zig"),
                 .target = target,
@@ -12846,11 +12871,8 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "release_manifest", .module = release_manifest_mod },
-                    .{ .name = "release_adapter_identity", .module = b.createModule(.{
-                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
-                        .target = target,
-                        .optimize = download_optimize,
-                    }) },
+                    .{ .name = "release_adapter_identity", .module = download_identity_mod },
+                    .{ .name = "release_adapter_github_download_command", .module = download_command_mod },
                     .{ .name = "bounded_process", .module = b.createModule(.{
                         .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
                         .target = target,

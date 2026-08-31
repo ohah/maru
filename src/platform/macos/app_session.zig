@@ -75891,3 +75891,110 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
     //     여기 붙는다 — 라벨은 `wide4` 인데 그림은 `sq5` 다.
     try std.testing.expect(t0.width > t0.height);
 }
+
+test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하면 원본으로 올린다 (IG15)" {
+    // 계약 §5.3 이 후속으로 적어 둔 자리다. 실측 최대 이미지(1440×14771 = 21.3 MP)를 열면
+    // **85 MB** 를 상주·업로드해 400 px 도크에 그렸다 — 200 배 낭비다.
+    //
+    // 픽스처도 그 모양(세로로 긴 것)을 쓴다. 8×1600 이면 뷰포트(장변 772)에 맞춰 풀 때
+    // `fitToThumbnail` 이 2 분의 1 을 고른다 — 1600/2 = 800 은 772 이상이고 1600/4 = 400 은 아래다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    // 8×1600 단색 PNG.
+    const tall_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAZACAYAAABE1AOwAAAAuUlEQVR42u3KMQEAAAQAMHHEEVsrGrgdO/YtunIuIQiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiCIAiC8CMsGalUkSQt7ZoAAAAASUVORK5CYII=";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const line = try std.fmt.allocPrint(
+        allocator,
+        "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"tall\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{s}\"}}}}]}}}}\n",
+        .{tall_b64},
+    );
+    defer allocator.free(line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = line });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // ── ① 열면 **뷰포트만큼만** 푼다. 원본(8×1600)이 아니라 절반이다.
+    image_gallery_ops.openAt(session, 0);
+    {
+        var spins: usize = 0;
+        while (spins < 1_500_000) : (spins += 1) {
+            _ = session.tick() catch {};
+            const o = session.image_gallery.open orelse break;
+            if (o.pixels.len > 0) break;
+        }
+    }
+    {
+        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, 4), o.width);
+        try std.testing.expectEqual(@as(u32, 800), o.height);
+        try std.testing.expectEqual(@as(u8, 2), o.decoded_subsample);
+    }
+
+    // ── ② 확대해서 가진 픽셀을 늘려 그리기 시작하면 **원본으로 올린다**.
+    //     휠은 제품 진입점이다 — 여기를 안 타면 「그리는 자리와 눌리는 자리」가 갈릴 수 있다.
+    const vp = image_gallery_ops.viewportRect(session);
+    var guard: usize = 0;
+    while (guard < 200) : (guard += 1) {
+        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        if (o.view.scale > 1.0) break;
+        image_gallery_ops.wheelZoom(session, 3.0, false, vp.x + vp.w / 2, vp.y + vp.h / 2);
+    }
+    {
+        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        try std.testing.expect(o.view.scale > 1.0);
+    }
+    {
+        var spins: usize = 0;
+        while (spins < 1_500_000) : (spins += 1) {
+            _ = session.tick() catch {};
+            const o = session.image_gallery.open orelse break;
+            if (o.decoded_subsample == 1) break;
+        }
+    }
+    const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 8), o.width);
+    try std.testing.expectEqual(@as(u32, 1600), o.height);
+    try std.testing.expectEqual(@as(u8, 1), o.decoded_subsample);
+
+    // ── ③ **보던 자리를 지킨다.** 같은 그림을 더 선명하게 다시 푼 것이므로 fit 으로 되돌리면
+    //     확대해 보던 사람을 처음으로 끌고 간다. 텍스처가 2 배가 됐으니 배율은 절반이 되어야
+    //     화면에 그려지는 크기가 같다.
+    try std.testing.expect(o.view.scale > 0);
+    try std.testing.expect(o.view.scale < 1.0);
+}

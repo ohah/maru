@@ -31,6 +31,9 @@ pub const Result = struct {
     height: u32 = 0,
     /// RGBA8. **길이 0 이면 「못 풀었다」**는 뜻이고, 그 칸은 그리지 않는다(자리는 차지한다).
     pixels: []u8 = &.{},
+    /// 원본을 몇 분의 1 로 줄여 풀었나. **1 이면 원본 그대로**다 — 크게 보기가 「더 선명하게 다시
+    /// 풀 여지가 있나」를 이 값으로 판정한다(원본 크기를 따로 들고 다니지 않아도 된다).
+    subsample: u8 = 1,
     generation: u64 = 0,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -300,6 +303,7 @@ fn worker(job: *Job) void {
             image_scale.default_max_pixels,
         ) orelse break :decode;
         const img = image_decode.decode(state.allocator, raw, fit.subsample) catch break :decode;
+        result.subsample = fit.subsample;
         result.width = img.width;
         result.height = img.height;
         result.pixels = img.pixels; // 소유 이동

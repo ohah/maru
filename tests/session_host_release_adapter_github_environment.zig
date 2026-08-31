@@ -6,7 +6,7 @@ const std = @import("std");
 const github_environment = @import("release_adapter_github_environment");
 
 const protected_valid =
-    \\{"id":161088068,"name":"release","url":"https://api.github.test/environments/release",
+    \\{"id":161088068,"name":"release","can_admins_bypass":false,"url":"https://api.github.test/environments/release",
     \\ "protection_rules":[
     \\   {"id":3736,"type":"wait_timer","wait_timer":30},
     \\   {"id":3755,"type":"required_reviewers","prevent_self_review":true,
@@ -22,6 +22,7 @@ test "release environment preserves recognized protection and branch policy fact
     const observation = parsed.observation();
     try std.testing.expectEqual(@as(u64, 161088068), observation.id);
     try std.testing.expectEqualStrings("release", observation.name);
+    try std.testing.expect(!observation.can_admins_bypass);
     try std.testing.expectEqual(@as(u8, 1), observation.required_reviewer_count);
     try std.testing.expect(observation.prevent_self_review);
     try std.testing.expectEqual(@as(u32, 30), observation.wait_timer_minutes);
@@ -33,7 +34,7 @@ test "release environment preserves recognized protection and branch policy fact
 
 test "an exact environment without configured protection remains an unprotected fact" {
     const bytes =
-        \\{"id":8,"name":"release","protection_rules":[],"deployment_branch_policy":null,
+        \\{"id":8,"name":"release","can_admins_bypass":false,"protection_rules":[],"deployment_branch_policy":null,
         \\ "created_at":"2026-08-27T00:00:00Z"}
     ;
     var parsed = try github_environment.parseAndBind(std.testing.allocator, bytes);
@@ -59,6 +60,7 @@ test "malformed missing wrong-type duplicate and trailing JSON fail closed" {
     const cases = [_][]const u8{
         "{",
         "{\"id\":1,\"name\":\"release\",\"deployment_branch_policy\":null}",
+        "{\"id\":1,\"name\":\"release\",\"can_admins_bypass\":\"false\",\"protection_rules\":[],\"deployment_branch_policy\":null}",
         "{\"id\":\"1\",\"name\":\"release\",\"protection_rules\":[],\"deployment_branch_policy\":null}",
         "{\"id\":1,\"name\":\"release\",\"protection_rules\":{},\"deployment_branch_policy\":null}",
         "{\"id\":1,\"name\":\"release\",\"protection_rules\":[],\"deployment_branch_policy\":false}",
@@ -77,8 +79,9 @@ test "malformed missing wrong-type duplicate and trailing JSON fail closed" {
 
 test "foreign identity duplicate rules and incoherent branch policy fail closed" {
     const cases = [_][]const u8{
-        "{\"id\":0,\"name\":\"release\",\"protection_rules\":[],\"deployment_branch_policy\":null}",
-        "{\"id\":1,\"name\":\"staging\",\"protection_rules\":[],\"deployment_branch_policy\":null}",
+        "{\"id\":0,\"name\":\"release\",\"can_admins_bypass\":false,\"protection_rules\":[],\"deployment_branch_policy\":null}",
+        "{\"id\":1,\"name\":\"staging\",\"can_admins_bypass\":false,\"protection_rules\":[],\"deployment_branch_policy\":null}",
+        "{\"id\":1,\"name\":\"release\",\"can_admins_bypass\":true,\"protection_rules\":[],\"deployment_branch_policy\":null}",
         "{\"id\":1,\"name\":\"release\",\"protection_rules\":[{\"id\":2,\"type\":\"wait_timer\"},{\"id\":2,\"type\":\"future\"}],\"deployment_branch_policy\":null}",
         "{\"id\":1,\"name\":\"release\",\"protection_rules\":[{\"id\":2,\"type\":\"wait_timer\"},{\"id\":3,\"type\":\"wait_timer\"}],\"deployment_branch_policy\":null}",
         "{\"id\":1,\"name\":\"release\",\"protection_rules\":[{\"id\":2,\"type\":\"branch_policy\"}],\"deployment_branch_policy\":null}",

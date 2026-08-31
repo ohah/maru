@@ -23,6 +23,7 @@ const expected: context_mod.Context = .{
 const environment: github_environment.Observation = .{
     .id = 161_088_068,
     .name = "release",
+    .can_admins_bypass = false,
     .required_reviewer_count = 1,
     .prevent_self_review = true,
     .wait_timer_minutes = 0,
@@ -44,9 +45,9 @@ const deployments =
 ;
 
 const statuses =
-    \\[{"id":9005,"state":"in_progress","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9005","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"},
-    \\ {"id":9004,"state":"queued","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9004","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"},
-    \\ {"id":9003,"state":"waiting","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9003","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"}]
+    \\[{"id":9004,"state":"queued","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9004","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"},
+    \\ {"id":9003,"state":"pending","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9003","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"},
+    \\ {"id":9005,"state":"in_progress","environment":"release","log_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","target_url":"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140","url":"https://api.github.com/repos/ohah/maru/deployments/5659920837/statuses/9005","deployment_url":"https://api.github.com/repos/ohah/maru/deployments/5659920837","repository_url":"https://api.github.com/repos/ohah/maru"}]
 ;
 
 test "current attempt job binds exactly one protected release deployment" {
@@ -67,7 +68,7 @@ test "current attempt job binds exactly one protected release deployment" {
     try std.testing.expectEqual(environment.id, observation.environment_id);
 }
 
-test "recognized environment protection and actual waiting history are both mandatory" {
+test "non-bypass environment protection and official pending history are both mandatory" {
     const backing = [_]github_deployment.StatusBacking{.{ .deployment_id = 5_659_920_837, .bytes = statuses }};
     var unprotected = environment;
     unprotected.required_reviewer_count = 0;
@@ -91,20 +92,31 @@ test "recognized environment protection and actual waiting history are both mand
         forged,
     ));
 
-    const no_wait = std.mem.replaceOwned(
+    var bypassable = environment;
+    bypassable.can_admins_bypass = true;
+    try std.testing.expectError(error.UnprotectedEnvironment, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        deployments,
+        &backing,
+        expected,
+        bypassable,
+    ));
+
+    const no_pending = std.mem.replaceOwned(
         u8,
         std.testing.allocator,
         statuses,
-        "\"state\":\"waiting\"",
+        "\"state\":\"pending\"",
         "\"state\":\"queued\"",
     ) catch unreachable;
-    defer std.testing.allocator.free(no_wait);
-    const no_wait_backing = [_]github_deployment.StatusBacking{.{ .deployment_id = 5_659_920_837, .bytes = no_wait }};
+    defer std.testing.allocator.free(no_pending);
+    const no_pending_backing = [_]github_deployment.StatusBacking{.{ .deployment_id = 5_659_920_837, .bytes = no_pending }};
     try std.testing.expectError(error.DeploymentMismatch, github_deployment.parseAndBind(
         std.testing.allocator,
         jobs,
         deployments,
-        &no_wait_backing,
+        &no_pending_backing,
         expected,
         environment,
     ));
@@ -164,7 +176,7 @@ test "foreign replayed and ambiguous job or deployment identity fails closed" {
     ));
 }
 
-test "status backing identity coverage and newest lifecycle fail closed" {
+test "status backing identity coverage and order-independent exact current lifecycle fail closed" {
     const missing = [_]github_deployment.StatusBacking{};
     try std.testing.expectError(error.DeploymentMismatch, github_deployment.parseAndBind(
         std.testing.allocator,
@@ -194,6 +206,39 @@ test "status backing identity coverage and newest lifecycle fail closed" {
         jobs,
         deployments,
         &completed_backing,
+        expected,
+        environment,
+    ));
+
+    const unknown = try std.mem.replaceOwned(u8, std.testing.allocator, statuses, "\"state\":\"queued\"", "\"state\":\"future\"");
+    defer std.testing.allocator.free(unknown);
+    const unknown_backing = [_]github_deployment.StatusBacking{.{ .deployment_id = 5_659_920_837, .bytes = unknown }};
+    try std.testing.expectError(error.DeploymentMismatch, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        deployments,
+        &unknown_backing,
+        expected,
+        environment,
+    ));
+
+    const duplicate_current = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        statuses,
+        "\"state\":\"queued\"",
+        "\"state\":\"in_progress\"",
+    );
+    defer std.testing.allocator.free(duplicate_current);
+    const duplicate_current_backing = [_]github_deployment.StatusBacking{.{
+        .deployment_id = 5_659_920_837,
+        .bytes = duplicate_current,
+    }};
+    try std.testing.expectError(error.DeploymentMismatch, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        deployments,
+        &duplicate_current_backing,
         expected,
         environment,
     ));

@@ -326,7 +326,15 @@ jobs:
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    # **PR 에서는 안 돈다**(2026-08-31 사용자 결정). 이 잡은 필수 체크에서도 빠졌다 — 그러면 PR 을 막지
+    # 않으면서 러너만 태우므로, 아예 push(main)·수동 실행에서만 돌린다.
+    #
+    # 왜 이 셋인가: 실제 프로세스를 띄우고 타이밍에 매달리는 게이트라 **러너 부하에 취약**하고, 그 취약함이
+    # 무관한 PR 을 막아 왔다(2026-08-31: 자식 대기 hang 하나가 32분을 태우고 PR 다섯을 연달아 취소시켰다).
+    # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
+    #
+    # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
+    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     # 전수 스위트가 커지면서 2026-08-31 PR #2938 콜드 러너에서 출력된 테스트는 전부 통과했지만
     # job이 20분 18초에 취소됐다. PR 캐시는 restore-only라 재실행으로 같은 구조를 고칠 수 없다.
@@ -377,7 +385,15 @@ jobs:
   session-host-bundled-cli-macos:
     name: session host bundled CLI macOS
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    # **PR 에서는 안 돈다**(2026-08-31 사용자 결정). 이 잡은 필수 체크에서도 빠졌다 — 그러면 PR 을 막지
+    # 않으면서 러너만 태우므로, 아예 push(main)·수동 실행에서만 돌린다.
+    #
+    # 왜 이 셋인가: 실제 프로세스를 띄우고 타이밍에 매달리는 게이트라 **러너 부하에 취약**하고, 그 취약함이
+    # 무관한 PR 을 막아 왔다(2026-08-31: 자식 대기 hang 하나가 32분을 태우고 PR 다섯을 연달아 취소시켰다).
+    # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
+    #
+    # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
+    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     # P5d 게이트는 `macos_app_bundle_command` 에 의존해 **ReleaseFast 앱 번들을 빌드**한다
     # (build.zig `run_session_host_p5d.step.dependOn`). 그래서 `app_host_abi.zig` 처럼 앱 루트에
@@ -521,7 +537,15 @@ jobs:
   session-host-slow-observer-macos:
     name: session host slow observer macOS
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    # **PR 에서는 안 돈다**(2026-08-31 사용자 결정). 이 잡은 필수 체크에서도 빠졌다 — 그러면 PR 을 막지
+    # 않으면서 러너만 태우므로, 아예 push(main)·수동 실행에서만 돌린다.
+    #
+    # 왜 이 셋인가: 실제 프로세스를 띄우고 타이밍에 매달리는 게이트라 **러너 부하에 취약**하고, 그 취약함이
+    # 무관한 PR 을 막아 왔다(2026-08-31: 자식 대기 hang 하나가 32분을 태우고 PR 다섯을 연달아 취소시켰다).
+    # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
+    #
+    # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
+    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:

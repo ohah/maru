@@ -16029,6 +16029,25 @@ test "ES23 접힘이 구문 층으로 승격된다 — 들여쓰기가 못 잡�
     try testing.expect(found);
 }
 
+test "ES37 여는 경로가 예산을 건다 — 프레임 하나를 통째로 먹지 않는다 (§2.1a)" {
+    // **「§2.1a 가 제품에 닿았는가」를 재는 자리는 여기다.** `ES21`·`ES22` 는 그 문장을 자기 주석에
+    // 적어 두었지만 실제로는 **자기가 `syntax_color.open` 을 직접 불러** 상태를 만든다 — 제품
+    // 호출처(`finishAttach`)를 예산 0(무제한)으로 바꿔도 그 둘은 그대로 초록이었다(적대적 검증
+    // 3회차에서 그 변이가 살아남았다). `PaneFixture` 는 `openPathInActivePane` 을 타므로 여기서
+    // 읽는 값이 **제품이 건 예산**이다.
+    //
+    // **시간으로 재지 않는다.** 「4ms 안에 못 끝냈다」로 물으면 답이 기계 속도에 달려 빠른 기계에서
+    // 거짓이 된다 — 그 병이 오늘 CI 를 여러 번 빨갛게 했다. provider 가 마지막 파싱에 쓴 예산을
+    // 그대로 들고 있으므로 **구조로** 묻는다. `0` 은 「취소 안 함」이라 상한 없음과 구별된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const prov = fx.term.rt.editor_syntax.provider orelse return error.NoProvider;
+    try testing.expectEqual(syntax_color.frame_parse_budget_ns, prov.budget_ns);
+}
+
 test "ES24 문서와 줄 배열이 갈리면 승격하지 않는다 — 엉뚱한 줄이 접힌다" {
     // 트리는 문서에서, 범위는 `rt.editor_lines` 에서 나온다. 제품에서는 같은 문서지만 그 둘이 갈린
     // 상태에서 덮으면 **화살표가 엉뚱한 줄에 서고 접으면 다른 줄이 사라진다**.
@@ -16077,8 +16096,11 @@ test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 �
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
 
-    // ⑴ 한 프레임에 안 끝났다.
-    try testing.expect(fx.term.rt.editor_syntax.pending);
+    // ⑴ **한 프레임에 안 끝났다.** 이건 예산(4ms) 대 기계 속도라 **빠른 기계에서는 안 끊긴다** —
+    //    그때는 제품이 틀린 게 아니라 이 시나리오가 성립하지 않은 것이므로 건너뛴다. 하드 단언이면
+    //    빠른 기계에서 거짓 빨강이 된다. 같은 파일의 `SP` 판정자 둘이 이미 이렇게 처리한다.
+    //    **「제품이 예산을 걸었는가」는 시간이 아니라 구조로 `ES37` 이 잰다.**
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
     try testing.expect(fx.term.rt.editor_syntax.provider.?.tree == null); // 그동안 무색이다(§5)
 
     // ⑵ 프레임을 돌리면 이어 판다. 무한이 아니라 **유한 프레임 안에** 끝나야 한다.
@@ -16113,7 +16135,9 @@ test "ES22 파싱이 남아 있으면 다음 프레임을 부른다 — idle ski
     const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
-    try testing.expect(fx.term.rt.editor_syntax.pending);
+    // 남은 파싱이 있어야 「다음 프레임을 부른다」를 잴 수 있다 — 빠른 기계에서는 안 끊기므로
+    // 그 시나리오가 성립하지 않는다(`ES21` 과 같은 이유).
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
 
     fx.session.metal_dirty = false;
     var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse

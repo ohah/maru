@@ -180,6 +180,7 @@ fn forgetGitRepo(self: *AppSession) void {
     if (self.git_repo) |path| self.allocator.free(path);
     self.git_repo = null;
     rememberGitRepoDest(self, null); // 안내 정리는 그 함수가 진다(같은 판정을 두 곳에 두지 않는다)
+    rememberRemoteRepoRoot(self, null); // 루트도 함께 놓는다 — 셋이 한 쌍이다(경로·호스트·루트)
 }
 
 /// 그 목록이 어느 호스트의 것인지 기억한다(null = 로컬). `rememberGitRepo` 와 **같은 자리에서** 부른다 —
@@ -203,6 +204,58 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     // 바뀌는 전환을 못 본다 — 그때 「원격 세션이라 아직 목록만 읽습니다」가 로컬 목록 위에 그대로 남는다.
     scm_dock_ops.clearScmWriteError(self);
     self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
+}
+
+/// 이 비교가 **어느 호스트의 것인지** 열 때 박는다(RS3). `diff_repo` 와 같은 규율이다 — 나중에 세션
+/// 상태를 다시 읽으면, diff 를 열어 둔 채 다른 pane 으로 옮겼을 때 그 비교가 **다른 호스트의 것**으로
+/// 해석된다. 경로만 보면 원격 `/srv/app` 과 로컬 `/srv/app` 이 같은 값이라 그 오해는 조용히 일어난다.
+///
+/// **루트가 없으면 목적지도 안 박는다.** 둘은 한 쌍이고, 목적지만 있으면 작업트리 쪽을 못 읽는 채로
+/// 「원격 diff」라고 주장하게 된다 — 그 상태는 화면에서 실패와 구별되지 않는다.
+fn stampDiffRemote(self: *AppSession, entry: *dock_panel.Entry) void {
+    const dest = self.git_repo_dest orelse return;
+    const root = self.git_repo_remote_root orelse return;
+    const owned_dest = self.allocator.dupe(u8, dest) catch return;
+    const owned_root = self.allocator.dupe(u8, root) catch {
+        self.allocator.free(owned_dest);
+        return;
+    };
+    entry.diff_remote_dest = owned_dest;
+    entry.diff_remote_root = owned_root;
+}
+
+/// 그 목적지의 **control socket 경로**(있을 때만). `remoteScmTarget` 이 활성 Term 에서 대상을 고르는
+/// 자리라면, 이쪽은 **이미 정해진 목적지**의 소켓을 되찾는 자리다 — diff 는 열 때 박아 둔 호스트를 쓰므로
+/// 활성 Term 을 다시 묻지 않는다(그 사이 pane 이 바뀌었을 수 있다).
+///
+/// 소켓이 없으면 null — 없는 채로 ssh 를 부르면 새 연결을 열며 비밀번호를 물어 그 읽기가 안 끝난다.
+pub fn remoteControlSocketFor(self: *AppSession, dest: []const u8, buf: []u8) ?[]const u8 {
+    if (builtin.os.tag != .macos) return null;
+    if (dest.len == 0) return null;
+    const home_z = std.c.getenv("HOME") orelse return null;
+    const home = std.mem.span(home_z);
+    if (home.len == 0) return null;
+    const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home, dest) catch return null;
+    defer self.allocator.free(ctl);
+    if (ctl.len > buf.len) return null;
+    _ = std.Io.Dir.cwd().statFile(self.io, ctl, .{ .follow_symlinks = false }) catch return null;
+    @memcpy(buf[0..ctl.len], ctl);
+    return buf[0..ctl.len];
+}
+
+/// 원격 저장소 루트를 기억한다(null = 없음/로컬). `git_repo_dest` 와 **같은 규율**이다 — 짝이 어긋나면
+/// 원격 목록을 보면서 옛 루트로 파일을 열게 된다.
+pub fn rememberRemoteRepoRoot(self: *AppSession, root: ?[]const u8) void {
+    const want = root orelse {
+        if (self.git_repo_remote_root) |old| self.allocator.free(old);
+        self.git_repo_remote_root = null;
+        return;
+    };
+    if (self.git_repo_remote_root) |current| {
+        if (std.mem.eql(u8, current, want)) return;
+        self.allocator.free(current);
+    }
+    self.git_repo_remote_root = self.allocator.dupe(u8, want) catch null;
 }
 
 /// 지금 목록이 **원격의 것인가**. 로컬 경로로 해석하면 안 되는 자리(파일 열기·감시·쓰기·턴 스냅샷)가
@@ -516,6 +569,10 @@ pub fn drainGitStatus(self: *AppSession) void {
             continue;
         }
         self.git_failed = false;
+        // **원격 저장소 루트를 목록과 같은 결과에서 받는다**(RS3). 이 값이 있어야 diff 가 상대경로를
+        // 절대경로로 만들어 작업트리 파일을 읽는다. 로컬 결과에는 비어 있고, 그때는 기억을 비운다 —
+        // 남겨 두면 로컬 목록을 보는 동안 옛 원격 루트가 살아 있어 그 쌍으로 파일을 열 수 있다.
+        rememberRemoteRepoRoot(self, if (result.repo_root.len > 0) result.repo_root else null);
         if (self.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
         self.git_result = result;
         // 새 결과에는 새 워크트리 목록이 실려 있을 수 있다 — 목록 캐시를 그 자리에서 무효화한다
@@ -1064,6 +1121,7 @@ pub fn openCommitDiffTerm(
     entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
     entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
+    stampDiffRemote(self, entry);
     // **이 비교가 어느 커밋인지**는 열 때 정해 들고 다닌다 — 나중에 다시 구하면 그 사이 다른 커밋을
     // 펼쳤을 때 남의 커밋을 읽는다.
     entry.diff_commit_oid = self.allocator.dupe(u8, commit_oid) catch &.{};
@@ -1093,6 +1151,7 @@ pub fn openTurnDiffTerm(
     entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
     entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
+    stampDiffRemote(self, entry);
     entry.diff_commit_oid = self.allocator.dupe(u8, base_tree) catch &.{};
     entry.diff_right_oid = self.allocator.dupe(u8, head_tree) catch &.{};
     self.requestDiffContent(entry);
@@ -1140,6 +1199,7 @@ pub fn openDiffTerm(
     // **저장소 루트는 호출자에게서 받는다.** 여기서 다시 구하면 방금 활성화된 diff 웹 Term의 cwd(빈 값)를 보고
     // null이 되어 영영 실패로 굳는다(리뷰에서 잡힌 결함) — 목록을 만든 그 루트를 그대로 쓴다.
     entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
+    stampDiffRemote(self, entry);
     self.requestDiffContent(entry);
     // 재시도 창(6초)은 **요청 시점**부터 흐른다. 네이티브가 아니면 무동작이다.
     editor_diff_ops.markRequested(self, opened.term);

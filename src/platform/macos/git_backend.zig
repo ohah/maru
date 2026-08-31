@@ -94,6 +94,13 @@ pub const max_inflight: usize = 1;
 pub const max_output_bytes: usize = 16 << 20;
 
 pub const Result = struct {
+    /// **원격 저장소 루트**(`rev-parse --show-toplevel`, RS3). 로컬 읽기에서는 비어 있다 — 로컬은
+    /// walk-up 으로 이미 안다. 원격은 물어봐야 하고, 그 답이 있어야 상대경로를 절대경로로 만들어
+    /// **작업트리 파일을 읽을 수 있다**(diff 오른쪽).
+    ///
+    /// **목록과 같은 왕복에 실어 온다.** 따로 물으면 원격 왕복이 하나 더 늘고, 그 사이에 사용자가
+    /// 다른 pane 으로 옮기면 루트와 목록이 다른 저장소의 것이 된다.
+    repo_root: []u8 = &.{},
     /// `git status --porcelain=v2 --branch` 출력.
     status: []u8 = &.{},
     /// `git diff --numstat HEAD` 출력 — **목록 행의 증감**(행의 기본 비교와 같은 범위). unborn 저장소에서는
@@ -127,6 +134,7 @@ pub const Result = struct {
     request_id: u64 = 0,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        allocator.free(self.repo_root);
         allocator.free(self.status);
         allocator.free(self.numstat_head);
         allocator.free(self.numstat_staged);
@@ -221,6 +229,9 @@ const Job = struct {
     /// 이 필드를 안 쓰므로(빈 슬라이스) 해제할 것도 없다.
     remote_dest: []u8 = &.{},
     remote_ctl: []u8 = &.{},
+    /// 원격 **저장소 루트**(RS3). diff 의 오른쪽(작업트리)은 git 으로 못 읽어 파일을 직접 읽는데, 그때
+    /// 상대경로를 절대경로로 만드는 데 쓴다. 목록 읽기에서 받아 둔 값을 호출자가 그대로 넘긴다.
+    remote_root: []u8 = &.{},
 
     /// 이 job 이 원격이면 그 대상. 둘 중 하나라도 비면 **로컬로 본다** — 반쪽짜리 원격 대상으로
     /// 명령을 만드느니 로컬로 도는 편이 낫다는 뜻이 아니라, `buildRemote` 가 그 값을 거부하기 때문에
@@ -234,8 +245,10 @@ const Job = struct {
     fn freeRemote(self: *Job, allocator: std.mem.Allocator) void {
         if (self.remote_dest.len > 0) allocator.free(self.remote_dest);
         if (self.remote_ctl.len > 0) allocator.free(self.remote_ctl);
+        if (self.remote_root.len > 0) allocator.free(self.remote_root);
         self.remote_dest = &.{};
         self.remote_ctl = &.{};
+        self.remote_root = &.{};
     }
 
     const DiffTarget = struct {
@@ -626,6 +639,10 @@ pub const Backend = struct {
         right_rev: []const u8,
         base: dock_panel.DiffBase,
         request_id: u64,
+        /// 원격(SSH) 대상과 그 저장소 루트(RS3). null 이면 로컬이다. 루트는 **작업트리 쪽**을 읽을 때만
+        /// 쓰이며, 비어 있으면 그 쪽을 읽지 않는다(왼쪽만 뜬 diff 가 되고, 그것이 정직하다).
+        remote: ?git_command.Remote,
+        remote_root: []const u8,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -648,6 +665,14 @@ pub const Backend = struct {
         job.diff.?.orig_rel_path = state.allocator.dupe(u8, orig_rel_path) catch return self.releaseDiffJob(job);
         job.diff.?.left_rev = state.allocator.dupe(u8, left_rev) catch return self.releaseDiffJob(job);
         job.diff.?.right_rev = state.allocator.dupe(u8, right_rev) catch return self.releaseDiffJob(job);
+        // 원격이면 대상을 **셋 다** 싣는다(목적지·소켓·루트). 하나라도 복사에 실패하면 전부 비운다 —
+        // 반쪽 원격 대상으로는 `runOn` 이 로컬로 돌아, 원격 diff 를 보는 화면에 로컬 파일이 실린다.
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch &.{};
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch &.{};
+            job.remote_root = state.allocator.dupe(u8, remote_root) catch &.{};
+            if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
+        }
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -661,6 +686,7 @@ pub const Backend = struct {
             if (d.orig_rel_path.len > 0) state.allocator.free(d.orig_rel_path);
             if (d.left_rev.len > 0) state.allocator.free(d.left_rev);
         }
+        job.freeRemote(state.allocator);
         if (job.repo.len > 0) state.allocator.free(job.repo);
         if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
         state.allocator.destroy(job);
@@ -1330,7 +1356,7 @@ fn diffWorker(job: *Job) void {
             if (out.truncated) truncated = true;
             had_side = true;
         } else |_| {}
-    } else if (worktreeSide(state.allocator, job.repo, target.rel_path)) |out| {
+    } else if (worktreeSideOn(state.allocator, job, target.rel_path)) |out| {
         result.modified = out.bytes;
         if (out.truncated) truncated = true;
         had_side = true;
@@ -1349,6 +1375,7 @@ fn finishDiff(state: *State, job: *Job, target: Job.DiffTarget, result_in: DiffR
     if (target.orig_rel_path.len > 0) state.allocator.free(target.orig_rel_path);
     if (target.left_rev.len > 0) state.allocator.free(target.left_rev);
     if (target.right_rev.len > 0) state.allocator.free(target.right_rev);
+    job.freeRemote(state.allocator);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -1416,7 +1443,7 @@ fn commitSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !Output 
     const path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
     const trimmed = std.mem.trim(u8, rev, " \t\r\n"); // merge-base 출력은 개행으로 끝난다
     const spec = git_command.commitBlobSpec(trimmed, path, &spec_buf) orelse return error.BadRev;
-    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+    return runOn(allocator, job.remoteTarget(), .show_blob, job.git_exe, job.repo, spec);
 }
 
 /// 그 커밋의 **부모** 쪽 blob. 루트 커밋에서는 git이 실패하고 그게 곧 "왼쪽이 없다"이다.
@@ -1427,7 +1454,7 @@ fn commitParentSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !O
     const path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
     const trimmed = std.mem.trim(u8, rev, " \t\r\n");
     const spec = git_command.commitParentBlobSpec(trimmed, path, &spec_buf) orelse return error.BadRev;
-    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+    return runOn(allocator, job.remoteTarget(), .show_blob, job.git_exe, job.repo, spec);
 }
 
 fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide) !Output {
@@ -1437,7 +1464,7 @@ fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide)
     const path = if (side == .head and target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
     if (!repo_path.isSafeRelative(path)) return error.UnsafePath;
     const spec = git_command.blobSpec(side, path, &spec_buf) orelse return error.PathTooLong;
-    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+    return runOn(allocator, job.remoteTarget(), .show_blob, job.git_exe, job.repo, spec);
 }
 
 /// 작업트리 파일은 git을 거치지 않고 그대로 읽는다 — 같은 바이트이고 프로세스를 하나 덜 띄운다.
@@ -1446,6 +1473,26 @@ fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide)
 /// `a`가 `/etc`를 가리킴) 저장소 밖이 열린다. diff는 남의 코드를 보려고 만든 기능이라 **적대적 저장소를 여는 것이
 /// 정상 사용**이고(§6), 읽은 내용은 신뢰 origin 웹뷰로 들어간다. 파일 패널의 다른 읽기 경로도 component마다
 /// no-follow를 강제한다 — diff만 예외로 둘 이유가 없다.
+/// diff 의 **오른쪽(작업트리)** — 로컬이면 파일을 직접 열고, 원격이면 ssh 로 읽는다(RS3).
+///
+/// **git 으로는 못 읽는다**: `git show :<path>` 는 index 이고 `HEAD:<path>` 는 커밋이라, 작업트리의 지금
+/// 내용을 내는 git 명령이 없다. 그래서 원격에서 이 한 자리만 git 이 아닌 명령을 쓴다
+/// (`git_command.buildRemoteFileRead` — 인용·상한은 그쪽이 소유한다).
+///
+/// **루트가 없으면 읽지 않는다.** 원격 루트는 목록 읽기와 같은 왕복에서 받아 오는데(RS3), 그것이 비어
+/// 있으면 상대경로를 절대경로로 만들 수 없다. 추측해서 여는 것보다 **오른쪽이 없는 diff** 가 정직하다.
+fn worktreeSideOn(allocator: std.mem.Allocator, job: *Job, rel_path: []const u8) !Output {
+    const remote = job.remoteTarget() orelse return worktreeSide(allocator, job.repo, rel_path);
+    if (!repo_path.isSafeRelative(rel_path)) return error.UnsafePath;
+    if (job.remote_root.len == 0) return error.GitFailed;
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ job.remote_root, rel_path }) catch return error.GitFailed;
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+    const argv = git_command.buildRemoteFileRead(abs, remote, &argv_buf, &cmd_buf) orelse return error.GitFailed;
+    return runArgvWithEnv(allocator, argv, null);
+}
+
 fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
     if (!repo_path.isSafeRelative(rel_path)) return error.UnsafePath;
     const fd = try safe_open.openNoFollow(repo, rel_path);
@@ -1482,6 +1529,16 @@ fn worker(job: *Job) void {
             // 상한에 걸렸을 때 앞쪽 파일만 숫자를 갖고 나머지는 조용히 빈 채로 남는다 — 사용자는 그것을
             // "안 바뀐 파일"로 읽는다. 실패(그 값이 없는 것)와 잘림(값이 반만 있는 것)은 다른 상태다.
             if (out.truncated) truncated = true;
+        } else |_| {}
+    }
+    // **원격이면 루트를 함께 묻는다**(RS3). 로컬은 walk-up 으로 이미 알아 물을 필요가 없고, 원격은
+    // 이 왕복에 얹지 않으면 diff 를 열 때 왕복이 하나 더 늘어난다 — 그 사이 pane 이 바뀌면 루트와
+    // 목록이 **다른 저장소**의 것이 된다.
+    if (job.remoteTarget() != null) {
+        if (runOn(state.allocator, job.remoteTarget(), .repo_root, job.git_exe, job.repo, null)) |out| {
+            defer state.allocator.free(out.bytes);
+            const trimmed = std.mem.trim(u8, out.bytes, " \t\r\n");
+            if (trimmed.len > 0) result.repo_root = state.allocator.dupe(u8, trimmed) catch &.{};
         } else |_| {}
     }
     inline for (required_reads) |pair| {

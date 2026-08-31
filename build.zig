@@ -12113,6 +12113,57 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_evidence_tests.step);
         test_step.dependOn(&run_release_evidence_tests.step);
     }
+    const session_host_release_evidence_files_step = b.step(
+        "test-session-host-release-evidence-files",
+        "Validate no-follow session-host release evidence publication on macOS",
+    );
+    if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |evidence_files_optimize| {
+        const release_evidence_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_evidence.zig"),
+            .target = target,
+            .optimize = evidence_files_optimize,
+        });
+        const release_adapter_files_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
+            .target = target,
+            .optimize = evidence_files_optimize,
+            .imports = &.{.{
+                .name = "safe_open",
+                .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .target = target,
+                    .optimize = evidence_files_optimize,
+                }),
+            }},
+        });
+        const release_evidence_files_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_evidence_files.zig"),
+            .target = target,
+            .optimize = evidence_files_optimize,
+            .imports = &.{
+                .{ .name = "release_evidence", .module = release_evidence_mod },
+                .{ .name = "release_adapter_files", .module = release_adapter_files_mod },
+            },
+        });
+        const release_evidence_files_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_evidence_files.zig"),
+                .target = target,
+                .optimize = evidence_files_optimize,
+                .imports = &.{
+                    .{ .name = "release_evidence", .module = release_evidence_mod },
+                    .{ .name = "release_evidence_files", .module = release_evidence_files_mod },
+                    .{ .name = "release_adapter_files", .module = release_adapter_files_mod },
+                },
+            }),
+        });
+        const run_release_evidence_files_tests = b.addRunArtifact(release_evidence_files_tests);
+        run_release_evidence_files_tests.addArg("--maru-expect-tests=6");
+        run_release_evidence_files_tests.setCwd(b.path("."));
+        session_host_release_evidence_files_step.dependOn(&run_release_evidence_files_tests.step);
+        session_host_step.dependOn(&run_release_evidence_files_tests.step);
+        test_step.dependOn(&run_release_evidence_files_tests.step);
+    };
     const session_host_release_adapter_contract_step = b.step(
         "test-session-host-release-adapter-contract",
         "Validate the closed session-host release adapter CLI contract",

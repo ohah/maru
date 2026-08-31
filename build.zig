@@ -21,7 +21,14 @@ fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step
 fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void {
     run.setEnvironmentVariable("HOME", home);
     run.setEnvironmentVariable("CFFIXED_USER_HOME", home);
-    run.setEnvironmentVariable("MARU_SESSION_HOST_ROOT", b.fmt("/tmp/maru-product-test-{d}-{s}", .{ std.posix.system.getpid(), tag }));
+    // **pid 를 `std.posix` 로 물으면 Windows 에서 빌드가 통째로 안 된다.** `std.c.getpid` 를 참조하는
+    // 순간 빌드 스크립트가 libc 를 명시적으로 요구하고(`error: dependency on libc must be explicitly
+    // specified`), 이 함수가 macOS 전용인 것과 무관하게 **build.zig 를 읽는 모든 호스트**가 그 참조를
+    // 컴파일한다. Windows 러너가 없어 CI 는 이것을 못 본다(실측 2026-08-31: 로컬 Windows 빌드가
+    // `zig build` 부터 죽었다).
+    //
+    // 필요한 것은 "이 빌드 프로세스만의 자리" 하나뿐이므로 이식성 있는 식별자를 쓴다.
+    run.setEnvironmentVariable("MARU_SESSION_HOST_ROOT", b.fmt("/tmp/maru-product-test-{d}-{s}", .{ std.Thread.getCurrentId(), tag }));
 }
 
 fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Compile) void {

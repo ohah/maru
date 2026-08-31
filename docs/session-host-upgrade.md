@@ -909,6 +909,34 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   supplied-buffer provenance, cap/timeout/child failure를
   Debug·ReleaseFast에서 검증한다.
 
+  artifact attestation의 command/semantic 권위는
+  `release_adapter_github_attestation.zig` 한 곳이 소유한다. command는 caller가 flag나 predicate를 고르지 못하게
+  `/absolute/gh attestation verify <absolute-artifact>`와 exact `--repo ohah/maru`,
+  `--signer-workflow ohah/maru/.github/workflows/release.yml`, `--signer-digest <source commit>`,
+  `--source-digest <source commit>`, `--source-ref refs/tags/<canonical tag>`, `--deny-self-hosted-runners`,
+  `--predicate-type https://slsa.dev/provenance/v1`, `--format json`을 고정한다. 실행 leaf는 REST transport와 같은
+  inherited-environment 0, exact `GH_TOKEN`/`GH_PROMPT_DISABLED=1`, stdin `/dev/null`, bounded stdout, positive monotonic
+  deadline과 process-group kill/reap을 사용한다. stdout slice는 caller가 제공한 bounded buffer 안에서 빌린 값만
+  인정한다.
+
+  성공 JSON은 `gh attestation verify --format json`의 exact-one result array여야 한다. semantic authority는
+  `verificationResult.signature.certificate`의 GitHub OIDC issuer, exact workflow SAN/build signer/config URI,
+  `githubWorkflowTrigger=push`, workflow SHA/repository/ref, `runnerEnvironment=github-hosted`, source repository
+  URI/digest/ref/numeric repository ID, public visibility와
+  `runInvocationURI=https://github.com/ohah/maru/actions/runs/<run_id>/attempts/<run_attempt>`를 trusted context에
+  exact 결속한다. 이 값들은 verified certificate summary에서만 권위로 사용한다. statement는 exact in-toto v1,
+  SLSA provenance v1, subject 이름/SHA-256 exact-one과 certificate/context에 맞는 build definition·run invocation을
+  요구하지만 workflow가 쓸 수 있는 predicate field를 독립 권위로 승격하지 않는다. verified timestamp는 non-empty여야
+  한다. duplicate/missing/wrong type/additional verified result, 다른 run/attempt·workflow/ref/repository/runner,
+  subject 추가·교환과 malformed/trailing/cap 초과 JSON은 terminal failure다.
+
+  이 계약은 GitHub CLI 공식 `attestation verify`가 certificate extensions에 적용하는 repository/source/signer/runner
+  policy와 JSON exporter의 verified certificate summary를 함께 사용한다. focused gate
+  `test-session-host-release-adapter-github-attestation`은 exact argv·clean environment·buffer provenance와 정상
+  certificate/statement, 모든 identity/run/subject mismatch, duplicate/malformed/cap/timeout/child failure를
+  Debug·ReleaseFast에서 검증한다. 이 component만으로 checkout 전 CLI pin/revalidation, release attestation,
+  predecessor asset download 또는 최종 executable/workflow 배선을 완료했다고 주장하지 않는다.
+
   GitHub CLI executable 권위는 **공식 GitHub Release CI에만** 적용한다. 로컬 빌드·로컬 업그레이드와 앱 인증서 기반
   session-host upgrade 경로에는 이 계약을 요구하지 않는다. trusted release job은 repository checkout보다 먼저 GitHub가
   제공한 초기 PATH에서 `gh`의 symlink-free canonical absolute path와 lowercase SHA-256을 한 번 캡처해 immutable step output으로

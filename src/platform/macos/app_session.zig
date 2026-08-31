@@ -4442,6 +4442,8 @@ pub const AppSession = struct {
     symbol_picker_rows: symbol_picker.List = .{},
     /// 목록 범위 — null 이면 파일 전체, 값이면 그 심볼의 형제만(§7.5).
     symbol_picker_scope: ?symbol_picker.Scope = null,
+    /// 형제 목록 프롬프트(부모 이름 + 구분자) — 문서 내용을 빌리지 않는 **사본**이다(§7.5).
+    symbol_picker_prompt: std.ArrayList(u8) = .empty,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
 
@@ -20761,6 +20763,7 @@ pub const AppSession = struct {
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
         self.symbol_picker_rows.deinit(self.allocator);
+        self.symbol_picker_prompt.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);

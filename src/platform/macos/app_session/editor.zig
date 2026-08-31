@@ -17082,8 +17082,10 @@ pub fn openSiblingPicker(self: *AppSession, sym_idx: usize) void {
     self.dismissMessageOverlays();
     self.symbol_picker_scope = .{ .sibling_of = sym_idx };
     self.chrome_host.symbol_picker.show();
-    // **범위를 프롬프트가 말한다**(§7.5) — 전체 목록과 같은 프롬프트면 왜 이것만 나오는지 알 수 없다.
-    self.chrome_host.symbol_picker.prompt = maru.i18n.t(.symbol_picker_siblings_prompt);
+    // **범위를 프롬프트가 말한다**(§7.5) — 「형제」 같은 관계 이름이 아니라 **부모 이름**을 쓴다.
+    // 사용자가 묻는 것은 「왜 이 목록만 나오나」이고, 그 답은 관계가 아니라 **어느 컨테이너 안인가**다.
+    // 체인과 같은 구분자를 써서 breadcrumb 과 이어 읽힌다.
+    setSiblingPrompt(self, sym_idx);
     recomputeSymbolPicker(self);
     switch (symbolPickerReadiness(self)) {
         .not_editor, .none => {
@@ -17206,16 +17208,19 @@ test "SP19 체인 마디를 누르면 형제 목록이 뜬다 — 전체가 아�
     try testing.expectEqual(all_n, fx.session.symbol_picker_rows.rows.items.len);
 }
 
-test "SP20 프롬프트가 범위를 말한다 — 전체와 형제가 구별된다 (§7.5)" {
-    // 목록만 보면 「필터로 좁혀진 것」과 「범위가 형제로 한정된 것」이 같아 보인다. 무엇의 목록인지
-    // 모르면 「왜 이것만 나오나」가 된다 — 프롬프트가 그 자리다.
+test "SP20 프롬프트가 부모 이름을 말한다 — 관계가 아니라 범위다 (§7.5)" {
+    // 목록만 보면 「필터로 좁혀진 것」과 「범위가 한정된 것」이 같아 보인다. 사용자가 묻는 것은
+    // 「왜 이 목록만 나오나」이고, 그 답은 **어느 컨테이너 안인가**다 — 「형제」 같은 관계 이름은
+    // 그 질문에 답하지 않는다(사용자 지적, 2026-08-31).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\n");
+    // **`Outer` 를 0번이 아닌 자리에 둔다.** 부모가 목록의 첫 심볼이면 「부모를 찾았다」와
+    // 「목록의 처음까지 갔다」가 같은 자리라 구별되지 않는다.
+    _ = insertText(fx.session, fx.term, "pub fn head() void {}\npub const Outer = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\npub fn top() void {}\n");
     const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
@@ -17226,24 +17231,93 @@ test "SP20 프롬프트가 범위를 말한다 — 전체와 형제가 구별된
 
     // 전체 — 기본 프롬프트다.
     toggleSymbolPicker(fx.session);
-    try testing.expectEqualStrings("", fx.session.chrome_host.symbol_picker.prompt);
     try testing.expectEqualStrings("> ", fx.session.chrome_host.symbol_picker.promptText());
     toggleSymbolPicker(fx.session);
 
-    // 형제 — 다른 프롬프트다.
+    recomputeSymbolPicker(fx.session);
     var a1: ?usize = null;
-    for (fx.term.rt.editor_syntax.symbols.items, 0..) |s, i| {
-        if (std.mem.eql(u8, doc.file.content[s.name_start..s.name_end], "a1")) a1 = i;
+    var a2: ?usize = null;
+    var top_idx: ?usize = null;
+    for (fx.term.rt.editor_syntax.symbols.items, 0..) |sy, i| {
+        const nm = doc.file.content[sy.name_start..sy.name_end];
+        if (std.mem.eql(u8, nm, "a1")) a1 = i;
+        if (std.mem.eql(u8, nm, "a2")) a2 = i;
+        if (std.mem.eql(u8, nm, "top")) top_idx = i;
     }
-    const target = a1 orelse return error.SkipZigTest;
-    openSiblingPicker(fx.session, target);
-    try testing.expect(fx.session.chrome_host.symbol_picker.prompt.len > 0);
-    try testing.expect(!std.mem.eql(u8, "> ", fx.session.chrome_host.symbol_picker.promptText()));
 
-    // **다시 전체로 열면 되돌아온다** — 안 되돌리면 그 뒤로 늘 「형제」라고 거짓말한다.
+    // **부모가 있으면 그 이름이다** — `Outer ›`.
+    openSiblingPicker(fx.session, a1 orelse return error.SkipZigTest);
+    try testing.expectEqualStrings("Outer \u{203A} ", fx.session.chrome_host.symbol_picker.promptText());
+    fx.session.chrome_host.symbol_picker.hide();
+
+    // **앞에 형제가 있어도 부모다.** `a1` 만 보면 「바로 앞 심볼」과 「부모」가 같은 자리라
+    // 둘이 구별되지 않는다 — `a2` 의 바로 앞은 형제 `a1` 이고, 그 이름이 뜨면 틀린 것이다.
+    openSiblingPicker(fx.session, a2 orelse return error.SkipZigTest);
+    try testing.expectEqualStrings("Outer \u{203A} ", fx.session.chrome_host.symbol_picker.promptText());
+    fx.session.chrome_host.symbol_picker.hide();
+
+    // **최상위면 부모가 없다** — 그 사실을 말한다(관계 이름이 아니라).
+    openSiblingPicker(fx.session, top_idx orelse return error.SkipZigTest);
+    const top_prompt = fx.session.chrome_host.symbol_picker.promptText();
+    try testing.expect(std.mem.endsWith(u8, top_prompt, syntax_color.chain_separator));
+    // **`indexOf` 로는 모자라다** — 앞선 프롬프트가 안 지워지고 남아도 「들어 있기는」 하다.
+    // 프롬프트는 **덮어쓰는 것**이지 쌓는 것이 아니므로 첫 글자부터 대조한다.
+    try testing.expect(std.mem.startsWith(u8, top_prompt, maru.i18n.t(.symbol_picker_top_level)));
+
+    // **다시 전체로 열면 되돌아온다** — 안 되돌리면 그 뒤로 늘 그 범위라고 거짓말한다.
     fx.session.chrome_host.symbol_picker.hide();
     toggleSymbolPicker(fx.session);
     try testing.expectEqualStrings("> ", fx.session.chrome_host.symbol_picker.promptText());
+}
+
+test "SP24 심볼 목록이 문서보다 낡아도 프롬프트가 문서 밖을 안 읽는다 (§7.5)" {
+    // 밴드에 굳은 체인을 **누르는 사이** 문서가 바뀔 수 있다(§4.1g — 굳힌 것을 읽는 대가다).
+    // 그러면 심볼의 이름 범위가 줄어든 문서 밖을 가리키고, 그 슬라이스를 그대로 뜨면 읽기가
+    // 문서를 넘어간다. 「이름을 모른다」로 떨어져야지 넘어가면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Outer = struct {\n    pub fn a1() void {}\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    recomputeSymbolPicker(fx.session);
+
+    var a1: ?usize = null;
+    for (fx.term.rt.editor_syntax.symbols.items, 0..) |sy, i| {
+        if (std.mem.eql(u8, doc.file.content[sy.name_start..sy.name_end], "a1")) a1 = i;
+    }
+    const target = a1 orelse return error.SkipZigTest;
+
+    // **목록은 그대로 두고 문서만 줄인다** — 다시 파싱하기 전의 그 한 프레임이다.
+    const st = &fx.term.rt.editor_syntax;
+    const parent = blk: {
+        var j = target;
+        while (j > 0) {
+            j -= 1;
+            if (st.symbols.items[j].depth < st.symbols.items[target].depth) break :blk j;
+        }
+        return error.SkipZigTest; // 부모가 없으면 이 판정자가 볼 것이 없다
+    };
+    try testing.expect(st.symbols.items[parent].name_end <= doc.file.content.len); // 지금은 안쪽이다
+    const shrunk = st.symbols.items[parent].name_start; // 부모 이름 **직전**까지만 남긴다
+    const live = &fx.term.rt.editor_doc.?;
+    const whole = live.file.content;
+    live.file.content = whole[0..shrunk];
+
+    // 넘어가지 않고 「부모를 모른다」로 떨어진다 — 최상위와 같은 문구다.
+    openSiblingPicker(fx.session, target);
+    const prompt = fx.session.chrome_host.symbol_picker.promptText();
+    live.file.content = whole; // 해제는 원래 길이로 해야 한다 — 줄인 채 두면 teardown 이 거짓말한다
+    try testing.expect(std.mem.startsWith(u8, prompt, maru.i18n.t(.symbol_picker_top_level)));
+    try testing.expect(std.mem.endsWith(u8, prompt, syntax_color.chain_separator));
 }
 
 test "SP21 형제 피커도 단일-오버레이 불변식을 지킨다 — 남의 오버레이를 닫는다 (§7.5)" {
@@ -17345,4 +17419,49 @@ test "SP23 형제 피커도 「없다」면 열지 않는다 — 빈 목록을 �
     openSiblingPicker(fx.session, 0);
     try testing.expect(!fx.session.chrome_host.symbol_picker.open); // 안 열린다
     try testing.expectEqual(@as(?symbol_picker.Scope, null), fx.session.symbol_picker_scope); // 범위도 풀린다
+}
+
+/// 형제 목록의 프롬프트를 **부모 이름**으로 세운다(§7.5). 부모가 없으면(최상위) 그 사실을 말한다.
+///
+/// **버퍼를 들고 있는 이유**는 부모 이름이 문서 내용을 빌리는 슬라이스라, 문서가 바뀌면 매달리기
+/// 때문이다 — 심볼 피커의 행이 라벨을 사본으로 드는 것과 같은 규율이다.
+fn setSiblingPrompt(self: *AppSession, sym_idx: usize) void {
+    const term = pane_ops.activePane(self).activeTerm();
+    const st = &term.rt.editor_syntax;
+    const buf = &self.symbol_picker_prompt;
+    buf.clearRetainingCapacity();
+
+    const parent_name: ?[]const u8 = blk: {
+        const doc = term.rt.editor_doc orelse break :blk null;
+        if (sym_idx >= st.symbols.items.len) break :blk null;
+        const d = st.symbols.items[sym_idx].depth;
+        // **부모는 「바로 앞의 더 얕은 심볼」이다** — 목록이 문서 순서라 그렇다(§7.5 심볼 목록 층).
+        // `<` 이지 `<=` 가 아니다: 같은 깊이의 앞 심볼은 **형제**고, 그것을 이름으로 쓰면
+        // 「어느 컨테이너 안인가」에 형제 이름으로 답하는 거짓말이 된다.
+        // 최상위(`d == 0`)는 `p.depth < 0` 이 없으므로 이 순회가 그대로 null 을 낸다 —
+        // 따로 앞질러 막지 않는다(막아 봐야 뜻이 같아 판정자가 그 줄을 못 지킨다).
+        var j = sym_idx;
+        while (j > 0) {
+            j -= 1;
+            const p = st.symbols.items[j];
+            if (p.depth < d) {
+                // 심볼 목록이 문서보다 **낡았을 수 있다** — 굳힌 체인을 누르는 사이 문서가
+                // 바뀌면 이름 범위가 문서 밖을 가리킨다. 그때는 이름이 없는 것으로 친다.
+                if (p.name_end > doc.file.content.len or p.name_start >= p.name_end) break :blk null;
+                break :blk doc.file.content[p.name_start..p.name_end];
+            }
+        }
+        break :blk null;
+    };
+
+    const name = parent_name orelse maru.i18n.t(.symbol_picker_top_level);
+    buf.appendSlice(self.allocator, name) catch {
+        self.chrome_host.symbol_picker.prompt = "";
+        return;
+    };
+    buf.appendSlice(self.allocator, syntax_color.chain_separator) catch {
+        self.chrome_host.symbol_picker.prompt = "";
+        return;
+    };
+    self.chrome_host.symbol_picker.prompt = buf.items;
 }

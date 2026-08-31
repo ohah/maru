@@ -86,6 +86,57 @@ pub fn appendEllipsizedTitle(
     return layout.endCol();
 }
 
+/// 그린 글자의 **byte 범위 → 열** 을 함께 낸다. `appendEllipsizedTitle` 과 **같은 `plan`** 을 쓰므로
+/// 「그려진 것 = 재어진 것」이 구조로 보장된다.
+///
+/// **왜 필요한가**: 한 문자열로 넘긴 라벨 안의 조각(예: breadcrumb 심볼 체인의 마디)을 클릭 대상으로
+/// 쓰려면 그 조각이 **몇 열에 그려졌는지** 알아야 한다. 클릭 시점에 다시 계산하면 그 사이 폭·생략이
+/// 달라져 어긋난다(native-editor-visual-mapping.md §4.1g 가 그 결함을 값으로 치렀다 — 「기하를 클릭
+/// 시점에 다시 구했더니 답의 80%가 달랐다」).
+///
+/// `spans[i]` 는 `bounds[i]..bounds[i+1]` byte 구간이 차지한 열 범위다. **생략돼 안 그려진 구간은
+/// 빈 범위**(`start == end`)다 — 「보이는 것 = 클릭되는 것」이고, 안 보이는 것은 누를 수 없다.
+pub const ColSpan = struct { start: u16, end: u16 };
+
+pub fn appendEllipsizedTitleSpans(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    pool: *std.ArrayList(u32),
+    title: []const u8,
+    row: u16,
+    start_col: u16,
+    end_col: u16,
+    style: terminal.Style,
+    widen_icons: bool,
+    anchor: text_layout.Anchor,
+    /// 오름차순 byte 경계. 길이 `n+1` 이면 `spans` 는 `n` 개를 받는다.
+    bounds: []const usize,
+    spans: []ColSpan,
+) !u16 {
+    for (spans) |*sp| sp.* = .{ .start = 0, .end = 0 };
+    var layout = text_layout.plan(title, start_col, end_col, anchor, wideIconPredicate(widen_icons));
+    while (layout.next()) |item| switch (item) {
+        .ellipsis => |col| try cells.append(allocator, .{ .row = row, .col = col, .codepoint = text_layout.ellipsis_glyph, .width = 1, .style = style }),
+        .cluster => |c| {
+            try appendCluster(allocator, cells, pool, title, c, row, style);
+            // 이 cluster 가 어느 구간에 드는가 — 구간은 오름차순이라 선형으로 찾아도 전체 O(글자+구간)다.
+            var i: usize = 0;
+            while (i + 1 < bounds.len and i < spans.len) : (i += 1) {
+                if (c.start >= bounds[i] and c.start < bounds[i + 1]) {
+                    if (spans[i].start == spans[i].end) {
+                        spans[i] = .{ .start = c.col, .end = c.col + c.cols };
+                    } else {
+                        spans[i].end = @max(spans[i].end, c.col + c.cols);
+                        spans[i].start = @min(spans[i].start, c.col);
+                    }
+                    break;
+                }
+            }
+        },
+    };
+    return layout.endCol();
+}
+
 /// `text_layout`이 잡아 준 grapheme cluster **하나**를 셀 하나로 방출한다(docs/grapheme-clustering.md §3.1a CG1).
 /// base 코드포인트는 셀에, 나머지(NFD 한글 V·T, 결합 악센트, VS16 같은 GB9 Extend)는 `pool`에 실어
 /// `grapheme_offset/count`로 가리킨다 — 터미널 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 같은 모양이고,
@@ -1330,4 +1381,131 @@ test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image �
         try std.testing.expect(cell.col >= slot_start);
         try std.testing.expect(cell.col < slot_start + dock_view_bar.slot_cols);
     }
+}
+
+// ── 판정자 ────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "CT1 마디의 열 범위가 그 글자 전부를 덮는다 — 첫 글자만이 아니다" {
+    // 클릭 대상이 **마디 전체**여야 한다. 첫 글자만 덮으면 이름 가운데를 눌러도 안 잡힌다
+    // (뮤테이션에서 넓히는 줄을 지웠는데 아무 판정자도 안 죽었다).
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "abc" ++ "XY" ++ "defg"; // 세 마디: [0,3) [3,5) [5,9)
+    const bounds = [_]usize{ 0, 3, 5, 9 };
+    var spans: [3]ColSpan = undefined;
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 40, .{}, false, .head, &bounds, &spans);
+
+    // ASCII 라 한 글자 = 한 칸이고 0열부터 그린다.
+    try testing.expectEqual(@as(u16, 0), spans[0].start);
+    try testing.expectEqual(@as(u16, 3), spans[0].end); // "abc" 세 칸 전부
+    try testing.expectEqual(@as(u16, 3), spans[1].start);
+    try testing.expectEqual(@as(u16, 5), spans[1].end); // "XY" 두 칸
+    try testing.expectEqual(@as(u16, 5), spans[2].start);
+    try testing.expectEqual(@as(u16, 9), spans[2].end);
+}
+
+test "CT2 마디 경계 글자가 이웃으로 안 샌다 — 구간은 반열림이다" {
+    // `[start, end)` 가 아니라 `[start, end]` 로 재면 경계 글자가 **두 마디에** 들어 한 칸이 겹친다.
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "ab" ++ "cd";
+    const bounds = [_]usize{ 0, 2, 4 };
+    var spans: [2]ColSpan = undefined;
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 40, .{}, false, .head, &bounds, &spans);
+
+    // **겹치지 않는다** — 앞 마디의 끝이 뒤 마디의 시작이다.
+    try testing.expectEqual(spans[0].end, spans[1].start);
+    try testing.expectEqual(@as(u16, 2), spans[0].end);
+    try testing.expectEqual(@as(u16, 4), spans[1].end);
+}
+
+test "CT3 안 그려진 마디는 빈 범위다 — 생략된 앞부분" {
+    // `.tail` 앵커로 좁게 그리면 **앞 마디가 사라진다**. 그때 그 마디의 범위는 비어야 한다
+    // (「보이는 것 = 클릭되는 것」).
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "aaaaaaaaaa" ++ "bbb"; // 두 마디, 앞이 길다
+    const bounds = [_]usize{ 0, 10, 13 };
+    var spans: [2]ColSpan = undefined;
+    // **4칸만 준다** — `…` 한 칸을 빼면 꼬리 3칸이 정확히 `bbb` 라 앞 마디가 **통째로** 사라진다.
+    // (5칸이면 `a` 하나가 살아남아 앞 마디도 열을 갖는다 — 처음에 그렇게 적었다가 틀렸다.)
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 4, .{}, false, .tail, &bounds, &spans);
+
+    try testing.expectEqual(spans[0].start, spans[0].end); // 빈 범위
+    try testing.expect(spans[1].end > spans[1].start); // 뒤 마디는 그려졌다
+}
+
+test "CT4 한글 마디는 두 칸씩 센다 — 클릭 자리가 글자와 맞는다" {
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "가나" ++ "ab"; // 한글 두 자(4칸) + ASCII 두 자(2칸)
+    const bounds = [_]usize{ 0, 6, 8 }; // 한글은 3바이트씩
+    var spans: [2]ColSpan = undefined;
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 40, .{}, false, .head, &bounds, &spans);
+
+    try testing.expectEqual(@as(u16, 0), spans[0].start);
+    try testing.expectEqual(@as(u16, 4), spans[0].end); // 두 글자 × 2칸
+    try testing.expectEqual(@as(u16, 4), spans[1].start);
+    try testing.expectEqual(@as(u16, 6), spans[1].end);
+}
+
+test "CT5 한 글자짜리 마디도 폭이 맞는다 — 넓은 글자는 두 칸이다" {
+    // **여러 글자 마디로는 이 결함이 안 보인다.** 두 번째 cluster 가 `end` 를 다시 넓혀 가리기
+    // 때문이다(뮤테이션에서 첫 갈래의 폭을 1로 바꿨는데 `CT4` 가 통과했다).
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "가" ++ "ab"; // 마디 하나가 **한 글자**(3바이트, 2칸)
+    const bounds = [_]usize{ 0, 3, 5 };
+    var spans: [2]ColSpan = undefined;
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 40, .{}, false, .head, &bounds, &spans);
+
+    try testing.expectEqual(@as(u16, 0), spans[0].start);
+    try testing.expectEqual(@as(u16, 2), spans[0].end); // 한 글자이지만 **두 칸**
+    try testing.expectEqual(@as(u16, 2), spans[1].start);
+}
+
+test "CT6 호출자가 더러운 버퍼를 줘도 답이 같다 — 함수가 스스로 비운다" {
+    // 이 함수는 프레임마다 **재사용되는 버퍼**를 받는다. 스스로 비우지 않으면 지난 프레임 값이
+    // 섞여 클릭 자리가 어긋난다. `undefined` 는 debug 에서 `0xAA` 로 채워져 `start == end` 가 우연히
+    // 참이 되므로 그 결함을 **가린다** — 그래서 여기서는 **서로 다른 값**을 심어 넘긴다.
+    const allocator = testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+
+    const text = "ab" ++ "cd";
+    const bounds = [_]usize{ 0, 2, 4 };
+    var spans = [_]ColSpan{
+        .{ .start = 77, .end = 99 }, // 지난 프레임의 값인 셈
+        .{ .start = 12, .end = 34 },
+    };
+    _ = try appendEllipsizedTitleSpans(allocator, &cells, &pool, text, 0, 0, 40, .{}, false, .head, &bounds, &spans);
+
+    try testing.expectEqual(@as(u16, 0), spans[0].start);
+    try testing.expectEqual(@as(u16, 2), spans[0].end);
+    try testing.expectEqual(@as(u16, 2), spans[1].start);
+    try testing.expectEqual(@as(u16, 4), spans[1].end);
 }

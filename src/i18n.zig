@@ -219,6 +219,9 @@ const Table = struct {
     dbg_editor_not_utf8: [:0]const u8,
     /// 심볼 피커: 이 파일에는 갈 심볼이 없다(§7.5 저하 표 — 「없다」와 「아직 모른다」는 다르다).
     symbol_picker_empty: [:0]const u8,
+    /// 심볼 피커 프롬프트: 목록이 **그 심볼의 형제**로 좁혀졌다(§7.5). 무엇의 목록인지 안 보이면
+    /// 「왜 이 목록만 나오나」가 된다.
+    symbol_picker_siblings_prompt: [:0]const u8,
     dbg_editor_too_large: [:0]const u8,
     dbg_editor_unreadable: [:0]const u8,
     dbg_editor_oom: [:0]const u8,
@@ -953,6 +956,7 @@ const en: Table = .{
     .fp_abort_edit_check = "Could not check the edit state, so the file change was cancelled.",
     .dbg_editor_not_utf8 = "Native editor: not UTF-8, so it was not opened.",
     .symbol_picker_empty = "This file has no symbols to jump to.",
+    .symbol_picker_siblings_prompt = "siblings> ",
     .dbg_editor_too_large = "Native editor: the file exceeds the read limit.",
     .dbg_editor_unreadable = "Native editor: could not read the file.",
     .dbg_editor_oom = "Native editor: out of memory.",
@@ -1537,6 +1541,7 @@ const ko: Table = .{
     .fp_abort_edit_check = "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.",
     .dbg_editor_not_utf8 = "네이티브 편집기: UTF-8이 아니라 열지 않았습니다.",
     .symbol_picker_empty = "이 파일에는 갈 심볼이 없습니다.",
+    .symbol_picker_siblings_prompt = "형제> ",
     .dbg_editor_too_large = "네이티브 편집기: 파일이 읽기 상한을 넘었습니다.",
     .dbg_editor_unreadable = "네이티브 편집기: 파일을 읽지 못했습니다.",
     .dbg_editor_oom = "네이티브 편집기: 메모리가 모자랍니다.",

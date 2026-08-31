@@ -5760,6 +5760,9 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_syntax.deinit(self.allocator);
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
+    // 체인 마디의 열 범위도 문서와 함께 죽는다(§7.5) — 렌더가 채우는 파생값이라 문서가 없으면
+    // 가리킬 것이 없다. `SP18` 이 이 자리를 잡았다(픽스처가 심은 값이 누수로 드러났다).
+    term.rt.editor_crumb_spans.deinit(self.allocator);
     if (term.rt.editor_hit_rows.len > 0) self.allocator.free(term.rt.editor_hit_rows);
     term.rt.editor_hit_rows = &.{};
     if (term.rt.editor_hit_lines.len > 0) self.allocator.free(term.rt.editor_hit_lines);
@@ -16801,6 +16804,7 @@ pub fn recomputeSymbolPicker(self: *AppSession) void {
         doc.file.content,
         self.chrome_host.symbol_picker.input.query.items,
         symbolLabelCols(self),
+        self.symbol_picker_scope,
         &self.symbol_picker_rows,
     ) catch {
         self.symbol_picker_rows.clear(self.allocator);
@@ -16842,7 +16846,9 @@ pub fn toggleSymbolPicker(self: *AppSession) void {
         return;
     }
     self.dismissMessageOverlays(); // 단일-오버레이 불변식
+    self.symbol_picker_scope = null; // 전체 범위
     self.chrome_host.symbol_picker.show();
+    self.chrome_host.symbol_picker.prompt = ""; // 기본 프롬프트로 되돌린다
     recomputeSymbolPicker(self);
     switch (symbolPickerReadiness(self)) {
         .not_editor, .none => {
@@ -17033,4 +17039,310 @@ test "SP11 파싱이 끝나면 프레임이 목록을 채운다 — 검색어가
     // 목록이 **저절로** 찼다.
     try testing.expect(fx.session.symbol_picker_rows.rows.items.len > 0);
     try testing.expectEqual(fx.session.symbol_picker_rows.rows.items.len, fx.session.chrome_host.symbol_picker.result_count);
+}
+
+/// 체인 마디의 **열 범위**를 담을 버퍼(§7.5). 렌더가 채우고 클릭이 읽는다 — 프레임마다 재사용한다.
+///
+/// **여기 두는 이유**: 클릭이 읽는 값은 §4.1g 의 규율대로 **렌더가 굳힌 것**이어야 한다. 그리는 자리에서
+/// 바로 채우므로 두 값이 갈릴 수 없다.
+pub fn crumbSpanBuf(self: *AppSession, term: *Term, n: usize) []maru.cell_text.ColSpan {
+    const buf = &term.rt.editor_crumb_spans;
+    if (buf.items.len < n) {
+        buf.resize(self.allocator, n) catch return &.{};
+    }
+    return buf.items[0..@min(n, buf.items.len)];
+}
+
+/// 창 좌표가 체인의 어느 마디 위인가 — 그 마디가 가리키는 **심볼 인덱스**를 돌려준다.
+///
+/// **모드 선택기 뒤에 본다**(§7.5). 두 대상이 같은 한 줄에 있고 체인이 왼쪽 전부를 차지하므로,
+/// 순서를 뒤집으면 모드 글자 위 클릭이 체인으로 샌다.
+///
+/// **안 그려진 마디는 안 잡는다** — 빈 열 범위다(「보이는 것 = 클릭되는 것」).
+pub fn crumbSegmentAt(self: *AppSession, term: *Term, band: maru.session.SplitRect, x_px: f64, y_px: f64) ?usize {
+    if (self.cell_width_px == 0) return null;
+    if (y_px < @as(f64, @floatFromInt(band.y)) or y_px >= @as(f64, @floatFromInt(band.y + band.h))) return null;
+    const rel = x_px - @as(f64, @floatFromInt(band.x));
+    if (rel < 0) return null;
+    const col: u16 = @intFromFloat(rel / @as(f64, @floatFromInt(self.cell_width_px)));
+
+    const spans = term.rt.editor_crumb_spans.items;
+    const syms = term.rt.editor_syntax.crumb_syms.items;
+    for (spans[0..@min(spans.len, syms.len)], 0..) |sp, i| {
+        if (sp.start == sp.end) continue; // 안 그려진 마디
+        if (col >= sp.start and col < sp.end) return syms[i];
+    }
+    return null;
+}
+
+/// 체인 마디를 눌렀을 때 — **그 심볼의 형제만** 담은 피커를 연다(§7.5).
+///
+/// **열린 뒤에는 피커와 같은 것이다** — 키·필터·확정(§5.2 이동)·닫는 순서가 전부 그쪽 계약이다.
+pub fn openSiblingPicker(self: *AppSession, sym_idx: usize) void {
+    self.dismissMessageOverlays();
+    self.symbol_picker_scope = .{ .sibling_of = sym_idx };
+    self.chrome_host.symbol_picker.show();
+    // **범위를 프롬프트가 말한다**(§7.5) — 전체 목록과 같은 프롬프트면 왜 이것만 나오는지 알 수 없다.
+    self.chrome_host.symbol_picker.prompt = maru.i18n.t(.symbol_picker_siblings_prompt);
+    recomputeSymbolPicker(self);
+    switch (symbolPickerReadiness(self)) {
+        .not_editor, .none => {
+            self.chrome_host.symbol_picker.hide();
+            self.symbol_picker_scope = null;
+            self.showNoticeKey(.symbol_picker_empty);
+        },
+        .pending, .ready => {},
+    }
+    self.metal_dirty = true;
+}
+
+test "SP17 체인 마디의 열 범위를 렌더가 굳힌다 — 클릭이 그것을 읽는다 (§7.5)" {
+    // §4.1g 의 규율: **클릭 시점에 다시 계산하지 않는다.** 밴드는 폭·생략이 프레임마다 달라질 수
+    // 있어 같은 함정이 있다 — 그래서 그리는 자리에서 굳히고 여기서는 읽기만 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        _ = x;\n    }\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    const inside = std.mem.indexOf(u8, doc.file.content, "var x").?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(inside);
+
+    // 체인이 두 마디다 — `Widget › draw`.
+    const label = headerBreadcrumb(fx.session, fx.term, "a.zig");
+    try testing.expect(std.mem.indexOf(u8, label, "Widget") != null);
+    const bounds = fx.term.rt.editor_syntax.crumb_bounds.items;
+    try testing.expectEqual(@as(usize, 3), bounds.len); // 마디 둘 → 경계 셋
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_syntax.crumb_syms.items.len);
+
+    // **경계가 실제 이름 자리다** — 그 구간을 잘라 보면 심볼 이름이다.
+    try testing.expectEqualStrings("Widget", label[bounds[0]..(bounds[1] - syntax_color.chain_separator.len)]);
+    try testing.expectEqualStrings("draw", label[bounds[1]..bounds[2]]);
+}
+
+test "SP18 안 그려진 마디는 클릭 대상이 아니다 — 보이는 것 = 클릭되는 것 (§7.5)" {
+    // 빈 열 범위는 잡히면 안 된다. 그러지 않으면 **화면에 없는 것을 눌러** 엉뚱한 목록이 뜬다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 열 범위를 손으로 심는다 — 하나는 그려졌고(5..10) 하나는 안 그려졌다(0..0).
+    try fx.term.rt.editor_crumb_spans.resize(allocator, 2);
+    fx.term.rt.editor_crumb_spans.items[0] = .{ .start = 0, .end = 0 };
+    fx.term.rt.editor_crumb_spans.items[1] = .{ .start = 5, .end = 10 };
+    try fx.term.rt.editor_syntax.crumb_syms.resize(allocator, 2);
+    fx.term.rt.editor_syntax.crumb_syms.items[0] = 7;
+    fx.term.rt.editor_syntax.crumb_syms.items[1] = 9;
+
+    // **밴드 원점을 0 이 아니게 둔다.** 사이드바가 있으면 밴드는 화면 왼쪽에 안 붙는데, `x = 0` 으로
+    // 재면 가로 원점을 빼는지 안 빼는지 **구별되지 않는다**(뮤테이션에서 그 뺄셈을 지웠는데 안 죽었다).
+    const band: maru.session.SplitRect = .{ .x = 300, .y = 40, .w = 800, .h = 20 };
+    const cw: f64 = @floatFromInt(@max(fx.session.cell_width_px, 1));
+
+    const bx: f64 = @floatFromInt(band.x);
+    const by: f64 = @floatFromInt(band.y);
+
+    // 그려진 마디 안 — 그 심볼이 나온다(**밴드 원점을 더한 창 좌표**로 준다).
+    try testing.expectEqual(@as(?usize, 9), crumbSegmentAt(fx.session, fx.term, band, bx + 6 * cw + 1, by + 5));
+    // 그려진 범위 밖 — 없다.
+    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx + 12 * cw + 1, by + 5));
+    // **빈 범위(0..0)는 어떤 좌표로도 안 잡힌다.**
+    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx, by + 5));
+    // **밴드 왼쪽 바깥** — 원점을 안 빼면 여기가 마디 안으로 잘못 잡힌다.
+    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, 6 * cw + 1, by + 5));
+    // 밴드 밖 세로.
+    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx + 6 * cw + 1, by + 50));
+}
+
+test "SP19 체인 마디를 누르면 형제 목록이 뜬다 — 전체가 아니다 (§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\npub const B = struct {\n    pub fn b1() void {}\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+
+    // 전체 범위로 열면 다섯(A·a1·a2·B·b1).
+    toggleSymbolPicker(fx.session);
+    const all_n = fx.session.symbol_picker_rows.rows.items.len;
+    try testing.expect(all_n >= 5);
+    toggleSymbolPicker(fx.session);
+
+    // `a1` 을 가리키는 마디를 누른 셈 치고 연다.
+    const st = &fx.term.rt.editor_syntax;
+    var a1: ?usize = null;
+    for (st.symbols.items, 0..) |s, i| {
+        if (std.mem.eql(u8, doc.file.content[s.name_start..s.name_end], "a1")) a1 = i;
+    }
+    const target = a1 orelse return error.SkipZigTest;
+    openSiblingPicker(fx.session, target);
+
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    // **A 의 자식 둘만** — 전체보다 적다.
+    try testing.expectEqual(@as(usize, 2), fx.session.symbol_picker_rows.rows.items.len);
+    try testing.expect(fx.session.symbol_picker_rows.rows.items.len < all_n);
+
+    // 닫고 전체로 열면 범위가 풀린다.
+    fx.session.chrome_host.symbol_picker.hide();
+    toggleSymbolPicker(fx.session);
+    try testing.expectEqual(@as(?symbol_picker.Scope, null), fx.session.symbol_picker_scope);
+    try testing.expectEqual(all_n, fx.session.symbol_picker_rows.rows.items.len);
+}
+
+test "SP20 프롬프트가 범위를 말한다 — 전체와 형제가 구별된다 (§7.5)" {
+    // 목록만 보면 「필터로 좁혀진 것」과 「범위가 형제로 한정된 것」이 같아 보인다. 무엇의 목록인지
+    // 모르면 「왜 이것만 나오나」가 된다 — 프롬프트가 그 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+
+    // 전체 — 기본 프롬프트다.
+    toggleSymbolPicker(fx.session);
+    try testing.expectEqualStrings("", fx.session.chrome_host.symbol_picker.prompt);
+    try testing.expectEqualStrings("> ", fx.session.chrome_host.symbol_picker.promptText());
+    toggleSymbolPicker(fx.session);
+
+    // 형제 — 다른 프롬프트다.
+    var a1: ?usize = null;
+    for (fx.term.rt.editor_syntax.symbols.items, 0..) |s, i| {
+        if (std.mem.eql(u8, doc.file.content[s.name_start..s.name_end], "a1")) a1 = i;
+    }
+    const target = a1 orelse return error.SkipZigTest;
+    openSiblingPicker(fx.session, target);
+    try testing.expect(fx.session.chrome_host.symbol_picker.prompt.len > 0);
+    try testing.expect(!std.mem.eql(u8, "> ", fx.session.chrome_host.symbol_picker.promptText()));
+
+    // **다시 전체로 열면 되돌아온다** — 안 되돌리면 그 뒤로 늘 「형제」라고 거짓말한다.
+    fx.session.chrome_host.symbol_picker.hide();
+    toggleSymbolPicker(fx.session);
+    try testing.expectEqualStrings("> ", fx.session.chrome_host.symbol_picker.promptText());
+}
+
+test "SP21 형제 피커도 단일-오버레이 불변식을 지킨다 — 남의 오버레이를 닫는다 (§7.5)" {
+    // 밴드 클릭으로 여는 경로라 **다른 오버레이가 떠 있는 채로** 불릴 수 있다. 안 닫으면 둘이 한
+    // 오버레이 그리드에 겹쳐 raster 되어 글자가 포개진다(`dismissMessageOverlays` 머리말이 그
+    // 사고를 적어 뒀다). 뮤테이션에서 그 호출을 지웠는데 아무 판정자도 안 죽었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+
+    // **심볼 목록을 먼저 채운다** — `State.symbols` 는 `recomputeSymbolPicker`·`breadcrumb` 이 채우는
+    // 파생값이라, 파싱만 끝냈다고 차 있지 않다(처음에 그것을 빠뜨려 판정자가 SKIP 으로 조용히 넘어갔다).
+    recomputeSymbolPicker(fx.session);
+    var a1: ?usize = null;
+    for (fx.term.rt.editor_syntax.symbols.items, 0..) |s, i| {
+        if (std.mem.eql(u8, doc.file.content[s.name_start..s.name_end], "a1")) a1 = i;
+    }
+    const target = a1 orelse return error.SkipZigTest;
+
+    // **다른 오버레이를 먼저 띄운다.**
+    fx.session.chrome_host.palette.show();
+    try testing.expect(fx.session.chrome_host.palette.open);
+
+    openSiblingPicker(fx.session, target);
+
+    // 형제 피커가 떴고, **명령 팔레트는 닫혔다**.
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    try testing.expect(!fx.session.chrome_host.palette.open);
+}
+
+test "SP22 누른 마디가 가리키는 심볼이 화면의 그 이름이다 — 하나 밀리면 남의 형제가 뜬다 (§7.5)" {
+    // `crumb_syms[i]` 는 **i 번째 마디가 어느 심볼인가**다. 하나만 밀려도 클릭이 **엉뚱한 심볼**의
+    // 형제를 열고, 목록이 그럴듯해서 **틀린 줄 모른다**(뮤테이션에서 `si +| 1` 로 담았는데 아무
+    // 판정자도 안 죽었다). 그래서 마디 글자와 그 심볼 이름을 **직접 대조**한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        _ = x;\n    }\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    const inside = std.mem.indexOf(u8, doc.file.content, "var x").?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(inside);
+
+    const label = headerBreadcrumb(fx.session, fx.term, "a.zig");
+    const st = &fx.term.rt.editor_syntax;
+    const bounds = st.crumb_bounds.items;
+    const syms = st.crumb_syms.items;
+    try testing.expectEqual(syms.len + 1, bounds.len);
+    try testing.expect(syms.len >= 2);
+
+    // **마디 i 의 글자 == 그 심볼의 이름**이어야 한다.
+    for (syms, 0..) |sym_idx, i| {
+        try testing.expect(sym_idx < st.symbols.items.len);
+        const sym = st.symbols.items[sym_idx];
+        const name = doc.file.content[sym.name_start..sym.name_end];
+        // 마디 구간에서 뒤따르는 구분자를 뺀다(마지막 마디는 구분자가 없다).
+        var seg = label[bounds[i]..bounds[i + 1]];
+        if (i + 1 < syms.len) seg = seg[0 .. seg.len - syntax_color.chain_separator.len];
+        try testing.expectEqualStrings(name, seg);
+    }
+}
+
+test "SP23 형제 피커도 「없다」면 열지 않는다 — 빈 목록을 띄우지 않는다 (§7.5)" {
+    // 전체 피커와 **같은 판정**을 쓴다는 계약이다. 안 보면 grammar 없는 문서에서 **빈 오버레이**가
+    // 뜬다(뮤테이션에서 그 갈래의 `hide()` 를 지웠는데 아무 판정자도 안 죽었다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {}\n");
+
+    // **provider 를 없앤다** — grammar 없는 문서와 같은 상태다.
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = .{};
+    recomputeSymbolPicker(fx.session);
+    try testing.expectEqual(SymbolPickerReadiness.none, symbolPickerReadiness(fx.session));
+
+    openSiblingPicker(fx.session, 0);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open); // 안 열린다
+    try testing.expectEqual(@as(?symbol_picker.Scope, null), fx.session.symbol_picker_scope); // 범위도 풀린다
 }

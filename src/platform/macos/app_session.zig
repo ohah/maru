@@ -1685,6 +1685,8 @@ const TermRuntime = struct {
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
     editor_syntax: editor_ops.syntax_color.State = .{},
+    /// 체인 마디의 열 범위 — **렌더가 굳히고 클릭이 읽는다**(§7.5·§4.1g).
+    editor_crumb_spans: std.ArrayList(maru.cell_text.ColSpan) = .empty,
     /// 마지막으로 그린 프레임이 센 **문서 전체 시각 행 수**(랩 포함). 0이면 아직 안 그렸다.
     ///
     /// **렌더만 접힘을 안다.** 스크롤 입력은 논리 줄만 아는데, 랩된 문서에서 "화면에 다 들어가는가"는
@@ -4438,6 +4440,8 @@ pub const AppSession = struct {
     /// 심볼 피커의 굳힌 행(§7.5). **공유 심볼 버퍼의 인덱스가 아니라 값이다** — breadcrumb 이 그
     /// 버퍼를 프레임마다 다시 채우므로 인덱스를 들면 그 수명에 매달린다.
     symbol_picker_rows: symbol_picker.List = .{},
+    /// 목록 범위 — null 이면 파일 전체, 값이면 그 심볼의 형제만(§7.5).
+    symbol_picker_scope: ?symbol_picker.Scope = null,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
 
@@ -12658,6 +12662,9 @@ pub const AppSession = struct {
                             }
                             if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |mode| {
                                 file_panel_ops.setFilePanelMode(self, entry, mode);
+                            } else if (editor_ops.crumbSegmentAt(self, pane_ops.activePane(self).activeTerm(), band.band, x_px, y_px)) |sym_idx| {
+                                // **모드 선택기 뒤에 본다**(§7.5) — 두 대상이 같은 한 줄에 있다.
+                                editor_ops.openSiblingPicker(self, sym_idx);
                             }
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
@@ -17917,9 +17924,17 @@ pub const AppSession = struct {
                         // **폭이 모자라면 경로가 먼저 깎인다** — 아래 빌더가 `.head` 로 생략해서 꼬리를
                         // 지키므로, 한 문자열로 넘기는 것이 곧 그 우선순위다(파일 이름은 pane 탭에도 있어
                         // 중복이지만 심볼은 다른 데 없다).
+                        // **마디 열 범위를 이 프레임에 굳힌다**(§7.5) — 그리는 것과 재는 것이 같은
+                        // `plan` 을 타므로 「그려진 것 = 클릭되는 것」이다.
+                        const band_term = lr.leaf.activeTerm();
+                        const band_label = editor_ops.headerBreadcrumb(self, band_term, bandPathFor(self, band.entry));
+                        const seg_bounds = band_term.rt.editor_syntax.crumb_bounds.items;
+                        const seg_spans = editor_ops.crumbSpanBuf(self, band_term, seg_bounds.len -| 1);
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
-                            editor_ops.headerBreadcrumb(self, lr.leaf.activeTerm(), bandPathFor(self, band.entry)),
+                            band_label,
+                            seg_bounds,
+                            seg_spans,
                             band.entry.kind,
                             band.entry.mode,
                             band.entry.dirty,

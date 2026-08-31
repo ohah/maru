@@ -558,6 +558,11 @@ pub fn buildPaneGripDrawList(
 pub fn buildFilePanelHeaderDrawList(
     allocator: std.mem.Allocator,
     path: []const u8,
+    /// 라벨 안 조각의 오름차순 byte 경계(체인 마디 — §7.5 「체인 항목을 누르면 형제가 뜬다」).
+    /// 비면 아무것도 재지 않는다.
+    seg_bounds: []const usize,
+    /// 위 경계가 그려진 **열 범위**를 받는다(길이 = `seg_bounds.len -| 1`). 안 그려진 마디는 빈 범위다.
+    seg_spans: []cell_text.ColSpan,
     kind: dock_panel.EntryKind,
     mode: dock_panel.Mode,
     dirty: bool,
@@ -579,8 +584,25 @@ pub fn buildFilePanelHeaderDrawList(
             // **`.head` 였고, 그것이 정반대였다.** `app_session` 의 옛 주석이 *"넘칠 때 앞을 생략하므로
             // `.head`"* 라고 적어 두었는데 `text_layout.plan` 은 그 반대다 — `.head` 는 선두를 고정하고
             // 마지막 칸을 `…` 로 만든다. 주석을 근거로 §7.5 의 우선순위를 적었다가 `BAND1` 이 잡았다.
-            if (header.control_start > 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, &pool, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .tail);
+            if (header.control_start > 1) {
+                // **마디 경계를 함께 넘겨 열 범위를 받아 둔다**(§7.5). 그리는 것과 재는 것이 **같은
+                // `plan`** 을 타므로 「그려진 것 = 클릭되는 것」이 구조로 보장된다 — 클릭 시점에 다시
+                // 계산하면 그 사이 폭·생략이 달라져 어긋난다(§4.1g).
+                _ = try cell_text.appendEllipsizedTitleSpans(
+                    allocator,
+                    &cells,
+                    &pool,
+                    path,
+                    0,
+                    1,
+                    header.control_start,
+                    .{ .foreground = fg },
+                    false,
+                    .tail,
+                    seg_bounds,
+                    seg_spans,
+                );
+            }
             for (dock_layout.modesForKind(kind)) |descriptor| {
                 const range = dock_layout.headerModeCellRange(header, kind, descriptor.mode) orelse continue;
                 if (range.end > range.start + 1)
@@ -2292,7 +2314,7 @@ test "file panel header draws source mode and dirty marker in the reserved contr
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    var dl = try buildFilePanelHeaderDrawList(allocator, "/tmp/doc.md", .markdown, .source_edit, true, false, 48, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, "/tmp/doc.md", &.{}, &.{}, .markdown, .source_edit, true, false, 48, dim, bright);
     defer dl.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
     var saw_dirty = false;
@@ -2972,7 +2994,7 @@ test "BAND1 밴드가 좁으면 경로가 먼저 깎이고 심볼이 남는다 (
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
     const label = "src/config/theme.zig \u{203A} ThemeConfig \u{203A} parseSyntaxRole";
 
-    var dl = try buildFilePanelHeaderDrawList(allocator, label, .text, .source_edit, false, false, 30, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 30, dim, bright);
     defer dl.deinit(allocator);
     const layout = dock_layout.headerCellLayout(30, false, false).?;
     const drawn = try bandTextAlloc(allocator, dl, layout.control_start);
@@ -2991,7 +3013,7 @@ test "BAND2 넓으면 경로와 심볼이 함께 보인다 — 좁을 때만 깎
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
     const label = "a.zig \u{203A} Widget \u{203A} draw";
 
-    var dl = try buildFilePanelHeaderDrawList(allocator, label, .text, .source_edit, false, false, 60, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 60, dim, bright);
     defer dl.deinit(allocator);
     const layout = dock_layout.headerCellLayout(60, false, false).?;
     const drawn = try bandTextAlloc(allocator, dl, layout.control_start);

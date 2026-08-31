@@ -1310,6 +1310,24 @@ pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
     if (self.debug_symbol_picker_opened) return;
     self.debug_symbol_picker_tries +%= 1;
     if (self.debug_symbol_picker_tries > 240) self.debug_symbol_picker_opened = true; // 4초쯤이면 포기
+
+    // MARU_OPEN_SYMBOL_PICKER_SIBLING=<마디 번호> — 그 체인 마디를 **누른 것처럼** 형제 목록을 연다
+    // (§7.5 「체인 항목을 누르면 형제가 뜬다」). 밴드 클릭은 포인터로만 일어나므로 캡처 하니스에서는
+    // 그 화면을 얻을 방법이 없다 — 전체 피커를 강제하는 것과 같은 자리다.
+    //
+    // **체인이 설 때까지 기다린다.** `crumb_syms` 는 밴드를 그려야 채워지는 파생값이라 첫 tick 에는
+    // 비어 있다 — 그때 전체 피커를 열어 버리면 위 `open` 가드에 걸려 **영영 형제로 안 바뀐다**
+    // (실제로 캡처가 전체 목록으로 나왔다).
+    if (std.c.getenv("MARU_OPEN_SYMBOL_PICKER_SIBLING")) |nv| {
+        const n = std.fmt.parseInt(usize, std.mem.span(nv), 10) catch 0;
+        const term = pane_ops.activePane(self).activeTerm();
+        const crumb = term.rt.editor_syntax.crumb_syms.items;
+        if (n >= crumb.len) return; // 아직 체인이 없다 — 다음 tick 에 다시 본다
+        editor_ops.openSiblingPicker(self, crumb[n]);
+        self.metal_dirty = true;
+        return;
+    }
+
     editor_ops.toggleSymbolPicker(self);
     // MARU_OPEN_SYMBOL_PICKER_QUERY=<쿼리> — 필터된 목록을 캡처한다.
     if (std.c.getenv("MARU_OPEN_SYMBOL_PICKER_QUERY")) |qv| {

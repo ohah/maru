@@ -99,7 +99,8 @@ test "macOS product smoke children bind workspace and session registry to one fi
         build,
         "fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.Thread.getCurrentId()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "std.posix.system.getpid()") == null);
     try std.testing.expect(std.mem.indexOf(u8, build, "std.c.getpid()") == null);
     const product_smokes = [_][]const u8{
         "macos_divider_smoke",

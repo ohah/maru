@@ -672,13 +672,27 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `release.tag`·`release.version`·manifest filename과 current B의 predecessor tag/SHA를 다시 교차검증해야만 내부 `assets[]`를
   다음 downloader 입력으로 승격한다.
 
-  성공 결과는 digest-bound bytes와 provisional name/SHA를 빌린 slice로 반환하며 파일을 먼저 게시하지 않는다. 후속 composition은
-  같은 bytes를 파싱·attestation 검증한 뒤에만 descriptor-owned work-directory로 materialize하거나 세 asset 다운로드를 시작한다.
-  따라서 unauthenticated JSON이 pathname·asset size·digest를 filesystem allocation 권위로 바꾸지 못한다. focused gate
+  성공 결과는 digest-bound bytes와 provisional name/SHA를 빌린 slice로 반환하며 파일을 먼저 게시하지 않는다. artifact
+  attestation CLI는 absolute path를 요구하므로 후속 `release_adapter_github_manifest_file.zig`가 같은 bytes를 내용과 무관한
+  fixed exact name 아래 먼저 materialize한다. JSON parse나 내부 `assets[]` 해석 전에 이 파일을 만드는 것은 허용하되, 경로·상한은
+  bootstrap의 canonical tag/name과 `max_manifest_bytes`만 결정하고 JSON 내용은 filesystem allocation 권위로 쓰지 않는다.
+  focused gate
   `test-session-host-release-adapter-github-manifest-download`은 exact name/argv, clean environment, supplied-buffer
   provenance, empty/oversize/digest mismatch/timeout/child failure와 tag/SHA malformed를 Debug·ReleaseFast에서 검증한다. 이 gate만으로
   artifact attestation, strict manifest parse/cross-binding, 세 asset download, CLI revalidation 또는 workflow composition을
   완료했다고 주장하지 않는다.
+
+  manifest file owner는 absolute absent work-directory를 no-follow parent 아래 0700으로 exact once 만들고 provisional exact manifest
+  leaf를 `O_CREAT|O_EXCL|O_NOFOLLOW` 0600으로 연다. bounded bytes 길이만큼 `F_PREALLOCATE`+`ftruncate`한 뒤 complete write,
+  SHA 재검증, file/directory `fsync`, post-write pathname↔fd identity/type/size/link-count 1과 0400 mode를 봉인한다. 성공은
+  absolute path/device/inode/size/SHA를 가진 move-only `ManifestFile`이고 artifact attestation과 strict parse/cross-binding이 끝난 뒤
+  같은 open directory capability로 explicit cleanup한다. 어느 단계든 실패하면 기록한 inode만 제거하고 directory/parent를
+  동기화한다. pathname이 기록한 inode와 달라졌거나 cleanup 권위를 확증할 수 없으면 foreign entry를 지우지 않고 terminal
+  `CleanupFailed`로 남긴다. focused gate `test-session-host-release-adapter-github-manifest-file`은 actual exclusive file
+  bytes/mode/identity와 성공 cleanup residue 0, copied-owner 거부, existing/symlink destination, digest/foreign-name/empty/oversize의
+  filesystem publication 0을 Debug·ReleaseFast에서 검증한다. write·pathname identity drift 주입과 cleanup 불확실성의 foreign-entry
+  보존은 이 gate가 아직 증명하지 않으므로 후속 composition gate 전에는 검증 완료로 세지 않는다.
+  이 gate만으로 artifact attestation이나 manifest parse/cross-binding을 완료했다고 주장하지 않는다.
 
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를

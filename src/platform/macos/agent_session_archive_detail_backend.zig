@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const archive = maru.session.agent_session_archive;
 const detail = maru.session.agent_session_archive_detail;
+const scan_backend = @import("agent_session_archive_backend.zig");
 const redact = maru.redact;
 
 pub const max_tail_bytes: usize = 512 * 1024;
@@ -189,8 +190,12 @@ fn waitForTestGate(state: *WorkerState) void {
 }
 
 fn readSource(state: *WorkerState, source: Source, request_id: u64) Result {
-    const file = std.Io.Dir.cwd().openFile(state.io, source.source_path, .{ .follow_symlinks = false }) catch
+    const opened = std.Io.Dir.cwd().openFile(state.io, source.source_path, .{ .follow_symlinks = false }) catch
         return .{ .request_id = request_id, .state = .unavailable };
+    // **Windows 에서 핸들 모드와 플래그가 어긋난다** — 그대로 positional read 를 하면 `PENDING` 을
+    // `unreachable` 로 받아 **프로세스가 죽는다**. 옆 백엔드가 2026-08-25 에 같은 자리에서 겪고 규약을
+    // 적어 뒀는데 이 파일은 그것을 안 쓰고 있었다(실측: 카드를 펼치는 순간 패닉, §2m.97).
+    const file = scan_backend.positionalReadable(opened);
     defer file.close(state.io);
     const stat = file.stat(state.io) catch return .{ .request_id = request_id, .state = .unavailable };
     if (stat.kind != .file) return .{ .request_id = request_id, .state = .unavailable };

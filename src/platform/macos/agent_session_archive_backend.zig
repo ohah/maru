@@ -36,6 +36,25 @@ const codex_worker_verdict_bytes: usize = 512 * 1024;
 /// 손상되거나 비정상적으로 많은 디렉터리에서 무한히 세지 않도록 끊는다. UI는 초과를 `999+`로 보인다.
 pub const max_subagent_count: u32 = 999;
 
+/// **std 가 Windows 에서 핸들 모드와 플래그를 어긋나게 준다.** `dirOpenFileWindows` 는
+/// `follow_symlinks = false` 일 때 `NtCreateFile` 을 `.IO = .ASYNCHRONOUS` 로 부르면서도 언제나
+/// `.flags = .{ .nonblocking = false }` 를 돌려준다(zig 0.16.0 `std/Io/Threaded.zig:5033` 과
+/// 그 함수의 두 return). 그러면 `readFilePositionalWindows` 가 동기 분기로 가고, 비동기 핸들이
+/// 낸 `PENDING` 을 `unreachable` 로 받아 **프로세스가 죽는다**. 어느 값이 맞는지는 std 자신이
+/// 정해 뒀다 — `File.Flags.nonblocking` 의 doc 이 `true` 를 *"windows: opened with
+/// MODE.IO.ASYNCHRONOUS"* 로 정의한다. 즉 아래가 그 규약이고, 어긴 것은 반환값이다. 이 경로가 Windows 에서 처음
+/// 돌자 그 자리에서 패닉했다(실측 2026-08-25). 그 함수의 비동기 분기는 `PENDING` 을 제대로
+/// 기다리므로, **실제 핸들 모드에 플래그를 맞춰** 그쪽으로 보낸다. `follow_symlinks` 를 켜서
+/// 동기 핸들을 받는 길도 있지만 그것은 위 대조를 무력화하므로 택하지 않는다.
+///
+/// **이 규약을 쓰는 자리가 둘이다** — 목록 스캔과 펼침 상세. 두 벌로 적으면 한쪽만 고쳐지고, 그
+/// 증상은 "그 기능만 쓰면 프로세스가 죽는다" 라 눈으로 잘 안 걸린다(실측: 상세 백엔드가 정확히 그
+/// 상태였다 — Windows 에서 카드를 펼치는 순간 패닉했다, §2m.97).
+pub fn positionalReadable(opened: std.Io.File) std.Io.File {
+    if (builtin.os.tag != .windows) return opened;
+    return .{ .handle = opened.handle, .flags = .{ .nonblocking = true } };
+}
+
 pub const Record = struct {
     parsed: archive.Parsed,
     /// Absolute provider-log pathname kept only in the in-process snapshot.
@@ -724,20 +743,7 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
         .follow_symlinks = false,
         .allow_directory = false,
     }) catch return;
-    // **std 가 Windows 에서 핸들 모드와 플래그를 어긋나게 준다.** `dirOpenFileWindows` 는
-    // `follow_symlinks = false` 일 때 `NtCreateFile` 을 `.IO = .ASYNCHRONOUS` 로 부르면서도 언제나
-    // `.flags = .{ .nonblocking = false }` 를 돌려준다(zig 0.16.0 `std/Io/Threaded.zig:5033` 과
-    // 그 함수의 두 return). 그러면 `readFilePositionalWindows` 가 동기 분기로 가고, 비동기 핸들이
-    // 낸 `PENDING` 을 `unreachable` 로 받아 **프로세스가 죽는다**. 어느 값이 맞는지는 std 자신이
-    // 정해 뒀다 — `File.Flags.nonblocking` 의 doc 이 `true` 를 *"windows: opened with
-    // MODE.IO.ASYNCHRONOUS"* 로 정의한다. 즉 아래가 그 규약이고, 어긴 것은 반환값이다. 이 경로가 Windows 에서 처음
-    // 돌자 그 자리에서 패닉했다(실측 2026-08-25). 그 함수의 비동기 분기는 `PENDING` 을 제대로
-    // 기다리므로, **실제 핸들 모드에 플래그를 맞춰** 그쪽으로 보낸다. `follow_symlinks` 를 켜서
-    // 동기 핸들을 받는 길도 있지만 그것은 위 대조를 무력화하므로 택하지 않는다.
-    const file: std.Io.File = if (builtin.os.tag == .windows)
-        .{ .handle = opened.handle, .flags = .{ .nonblocking = true } }
-    else
-        opened;
+    const file = positionalReadable(opened);
     defer file.close(io);
     const stat = file.stat(io) catch return;
     if (stat.inode != candidate.inode or openedDevice(file) != candidate.device) return;

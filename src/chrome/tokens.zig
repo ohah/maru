@@ -4,7 +4,8 @@
 //! 단일 출처: docs/chrome-strategy.md §5.1, docs/layering-and-portability.md §6.
 
 const std = @import("std");
-const Rgb = @import("../color.zig").Rgb;
+const color = @import("../color.zig");
+const Rgb = color.Rgb;
 
 /// rich 토큰 색 파생(neutral — config의 appearance.lighten을 chrome이 import 못 하므로 여기 둔다). 채널별 ±delta를
 /// [0,255]로 clamp. rich가 tui의 sidebar_active-공유 role을 분리할 때만 쓴다(tui는 안 씀 — 원본 테마 색 그대로).
@@ -440,7 +441,18 @@ pub const Tokens = struct {
         // 어두운 패널에서 **대비 6.7**(실측, 배경 rgb(10,10,10)) — AA(4.5) 위이고 붉은 것이 또렷하다.
         // `git_deleted_fg`(199,84,80)보다 밝다: 그쪽은 파일 행의 상태색이라 목록에 묻혀도 되지만,
         // 이 글자는 **동작이 멈췄다**는 말이라 먼저 읽혀야 한다.
-        palette.set(.danger_text, .{ .r = 224, .g = 120, .b = 118 });
+        //
+        // **밝은 프리셋에서는 그 값이 안 읽힌다.** 흰 패널 위 대비가 **2.95**(실측)로 AA(4.5) 아래다 —
+        // 어두운 테마 하나만 보고 고른 값이었다. 색상을 버리지 않고 **최소한만** 보정하도록
+        // `color.contrastFloor` 에 맡긴다(팔레트 선보정·렌더 per-cell 하한이 쓰는 그 함수다 —
+        // 대비 수식의 단일 출처). 어두운 배경에서는 이미 6.7 이라 **무동작**이고, 밝은 배경에서만
+        // 검은 쪽으로 내려간다.
+        palette.set(.danger_text, color.contrastFloor(
+            .{ .r = 224, .g = 120, .b = 118 },
+            color.relativeLuminance(theme.sidebar_background),
+            4.5,
+            .both,
+        ));
         // 고친 것은 **테마 accent**를 쓴다 — 목록에서 가장 흔한 상태이고, 창 전체의 시그니처 색과 같은
         // 계열이어야 도크만 남의 팔레트로 보이지 않는다(VS Code도 M을 노랑/앰버 계열로 둔다).
         palette.set(.git_modified_fg, theme.accent);
@@ -619,6 +631,45 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
     inline for ([_]Tokens{ Tokens.base(c.theme(c.rgb(238, 232, 213))), Tokens.rich(c.theme(c.rgb(238, 232, 213))) }) |tk| {
         try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg)));
         try std.testing.expect(tk.get(.keycap_bg).r < tk.get(.surface_bg).r); // 밝은 패널 → 더 어둡게
+    }
+}
+
+test "danger_text 는 어두운·밝은 패널 양쪽에서 AA(4.5) 를 넘는다" {
+    // **어두운 테마 하나만 보고 고른 색이었다.** `rgb(224,120,118)` 은 어두운 패널에서 대비 6.7 인데
+    // 흰 패널 위에서는 **2.95** 로 AA 아래였다 — 밝은 프리셋(`solarized-light` 등)에서 「막힌 이유」가
+    // 안 읽힌다. 지금은 `color.contrastFloor` 가 배경을 보고 최소한만 보정한다.
+    //
+    // **역할이 중요하다.** 이 글자는 동작이 멈췄다는 말이라 목록에 묻히면 안 된다 — 그래서 하한을
+    // 3.0(큰 글자 기준)이 아니라 본문 AA 인 4.5 로 둔다.
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+        fn theme(bg: Rgb) ThemeColors {
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9), .diff_added = rgb(64, 160, 64), .diff_removed = rgb(176, 64, 64) };
+        }
+        fn ratio(fg: Rgb, bg: Rgb) f32 {
+            return color.contrastRatio(color.relativeLuminance(fg), color.relativeLuminance(bg));
+        }
+    };
+    const backgrounds = [_]Rgb{
+        c.rgb(10, 10, 10), // 기본 어두운 패널
+        c.rgb(20, 20, 20),
+        c.rgb(238, 232, 213), // solarized-light 계열
+        c.rgb(255, 255, 255), // 순백 — 옛 값이 2.95 로 떨어지던 자리
+    };
+    for (backgrounds) |bg| {
+        inline for ([_]bool{ false, true }) |rich| {
+            const tk = if (rich) Tokens.rich(c.theme(bg)) else Tokens.base(c.theme(bg));
+            const got = c.ratio(tk.get(.danger_text), bg);
+            if (got < 4.5) {
+                std.debug.print("danger_text 대비 {d:.2} — 배경 rgb({d},{d},{d}), rich={}\n", .{ got, bg.r, bg.g, bg.b, rich });
+                return error.DangerTextBelowAa;
+            }
+            // 색상을 잃지 않았는가 — 붉은 채널이 나머지보다 높아야 «위험» 으로 읽힌다.
+            const t = tk.get(.danger_text);
+            try std.testing.expect(t.r > t.g and t.r > t.b);
+        }
     }
 }
 

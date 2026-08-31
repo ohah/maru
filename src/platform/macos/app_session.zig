@@ -14044,6 +14044,15 @@ pub const AppSession = struct {
         /// **tick 마다 fork 하는 접속 폭주**를 막는 것이 위 필드의 원래 목적이었고, 그 걱정은 백오프와
         /// 이 상한이 함께 갚는다.
         retries: u8 = 0,
+        /// 이번에 띄운 스트리머의 `hello` 를 봤나. **커서는 이 뒤의 줄만 믿는다**(적대적 검증).
+        ///
+        /// 채널(`Channel.feed`)은 `hello` 전 모든 줄을 삼킨다 — `ForceCommand`·`command=` 서버는 우리
+        /// 명령을 **갈아치우고** 임의 출력을 내놓기 때문이다. 그런데 커서 기록은 채널을 안 거치고
+        /// `parseFrame` 을 직접 부르므로 그 관문 밖이었다. 그 출력에서 커서를 믿으면 **엉뚱한 offset 으로
+        /// 이어읽어 진짜 이벤트를 건너뛴다** — 증상은 「배지가 안 뜬다」 하나뿐이다.
+        ///
+        /// 커서가 host 소유라 관문도 여기 둔다. 다시 띄울 때마다 새 스트리머의 `hello` 를 다시 본다.
+        saw_hello: bool = false,
         /// 로그 이름별 이어읽기 위치(RA5-a 의 로컬 절반). 다시 띄울 때 `--resume=` 으로 돌려준다.
         ///
         /// **메모리에만 둔다.** 앱과 함께 죽어야 「앱을 새로 켰다 = 처음부터(배지를 세운다)」와
@@ -14366,12 +14375,23 @@ pub const AppSession = struct {
         host.stream = stream;
         host.stream_started = true;
         host.retry_at_ms = 0;
+        host.saw_hello = false; // 새 스트리머의 `hello` 를 다시 본다
+        // ⚠️ **죽은 스트림의 꼬리를 버린다**(적대적 검증 5 회차). `pending` 은 개행 없이 끊긴 조각을
+        // 들고 있는데, 안 비우면 새 스트림의 첫 줄 앞에 그것이 붙어 `hello` 가 깨진다 — 그러면 관문을
+        // 영영 못 지나 커서도 채널도 안 서고, 침묵 시한 뒤 또 EOF 가 나 결국 포기로 간다.
+        // 즉 **재접속이 스스로를 막는다**. 새 자식의 바이트는 새 줄에서 시작한다.
+        host.pending.clearRetainingCapacity();
     }
 
     /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
     fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8, now_ms: u64) void {
         const ras = maru.session.remote_agent_stream;
         for (lines) |line| {
+            if (!host.saw_hello) {
+                // 채널과 **같은 판정**을 쓴다(`Channel.feed` 의 `waiting_hello`).
+                if (std.mem.startsWith(u8, line, "{\"hello\":\"maru-agent-events\"")) host.saw_hello = true;
+                continue;
+            }
             const cur = switch (ras.parseFrame(line)) {
                 .cursor => |c| c,
                 else => continue,
@@ -14415,10 +14435,21 @@ pub const AppSession = struct {
         if (!host.stream_started) {
             // 예약된 재시도가 있으면 그때 다시 띄운다(RA5-b). 없으면 예전처럼 물러난다.
             if (host.retry_at_ms == 0 or now_ms < host.retry_at_ms) return;
-            const home = std.c.getenv("HOME") orelse return;
-            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch return;
-            defer self.allocator.free(ctl);
+            // ⚠️ **예약을 먼저 지운다.** 아래 둘은 「영원히 안 된다」이고(설치 경로도 같은 조건에서
+            // `stopped` 를 세운다), 예약을 남긴 채 빠져나가면 때가 이미 지났으므로 **매 tick 다시
+            // 시도한다** — 로그도 notice 도 없이 영원히다(적대적 검증이 잡았다).
             host.retry_at_ms = 0;
+            const home = std.c.getenv("HOME") orelse {
+                std.log.scoped(.agent).warn("HOME 이 없어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
+                host.stopped = true;
+                return;
+            };
+            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch {
+                std.log.scoped(.agent).warn("control socket 경로를 못 만들어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
+                host.stopped = true;
+                return;
+            };
+            defer self.allocator.free(ctl);
             self.spawnStreamerFor(dest, host, ctl);
             return;
         }
@@ -76342,4 +76373,121 @@ test "linkScopes 경계: 설정 스코프를 날것으로 쓰는 곳은 래퍼 �
     // 두 래퍼가 실제로 있는지도 함께 본다 — 이름이 바뀌면 위 개수만으로는 뜻이 없다.
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn linkScopesForTerm(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn linkScopesForSurfaceId(") != null);
+}
+
+test "원격 커서는 hello 뒤의 줄만 믿는다 — 제한 서버 출력으로 이어읽기를 오염시키지 않는다" {
+    // `ForceCommand`·`command=` 서버는 우리 명령을 **갈아치우고** 임의 출력을 낸다(계약 §8.7). 채널은
+    // 그래서 `hello` 전 모든 줄을 삼키는데, 커서 기록은 채널을 안 거치고 `parseFrame` 을 직접 부르므로
+    // 그 관문 **밖**이었다. 그 출력에서 커서를 믿으면 엉뚱한 offset 으로 이어읽어 진짜 이벤트를
+    // 건너뛴다 — 증상은 「배지가 안 뜬다」 하나뿐이라 원인이 화면에 안 나온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] }, .install_done = true, .stream_started = true });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    // ── ① `hello` **전**에 커서 모양의 줄이 와도 안 믿는다(제한 서버가 낼 수 있는 출력이다).
+    const before = "{\"cur\":\"t7\",\"at\":999999}\n";
+    try std.testing.expect(std.c.write(fds[1], before.ptr, before.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 100);
+    try std.testing.expectEqual(@as(usize, 0), host.cursors.count());
+
+    // ── ② `hello` 뒤의 같은 모양은 믿는다.
+    const after = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++ "{\"cur\":\"t7\",\"at\":68}\n";
+    try std.testing.expect(std.c.write(fds[1], after.ptr, after.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 200);
+    try std.testing.expectEqual(@as(usize, 1), host.cursors.count());
+    try std.testing.expectEqual(@as(u64, 68), host.cursors.get("t7").?.offset);
+
+    _ = std.c.close(fds[1]);
+    session.closeRemoteAgentHost(dest);
+}
+
+test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물려준다" {
+    // `pending` 은 개행 없이 끊긴 조각을 든다. 재기동 때 안 비우면 새 스트림의 첫 줄 앞에 그것이 붙어
+    // **`hello` 가 깨진다** — 그러면 커서 관문도 채널도 영영 안 열리고, 침묵 시한 뒤 또 EOF 가 나
+    // 결국 포기로 간다. 즉 **재접속이 스스로를 막는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] }, .install_done = true, .stream_started = true });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    // ① 개행 없이 끊긴 꼬리를 남긴 채 자식이 죽는다.
+    const half = "{\"hello\":\"maru-agent-eve";
+    try std.testing.expect(std.c.write(fds[1], half.ptr, half.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 100);
+    try std.testing.expect(host.pending.items.len > 0); // 꼬리가 남아 있다
+    _ = std.c.close(fds[1]);
+    session.drainRemoteAgentHost(dest, host, 200); // EOF → 재시도 예약
+
+    // ② 다시 띄운다(제품과 같은 자리를 지나되 ssh 는 안 띄운다 — 파이프로 대신한다).
+    var fds2: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds2));
+    const fl2 = std.c.fcntl(fds2[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds2[0], std.c.F.SETFL, fl2 | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    host.pending.clearRetainingCapacity(); // `spawnStreamerFor` 가 하는 그 일
+    host.saw_hello = false;
+    host.stream = .{ .pid = 0, .out_fd = fds2[0] };
+    host.stream_started = true;
+
+    // ③ 새 스트림의 `hello` 가 **온전히** 읽힌다 — 꼬리가 남았다면 앞이 붙어 안 읽힌다.
+    const fresh = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++ "{\"cur\":\"t7\",\"at\":42}\n";
+    try std.testing.expect(std.c.write(fds2[1], fresh.ptr, fresh.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 300);
+    try std.testing.expect(host.saw_hello);
+    try std.testing.expectEqual(@as(u64, 42), host.cursors.get("t7").?.offset);
+
+    _ = std.c.close(fds2[1]);
+    session.closeRemoteAgentHost(dest);
 }

@@ -64,6 +64,9 @@ test "artifact attestation argv is closed and token-free" {
     for (want, plan.args) |left, right| try std.testing.expectEqualStrings(left, right);
     for (plan.args) |arg| try std.testing.expect(std.mem.indexOf(u8, arg, "secret-token") == null);
     try std.testing.expectError(error.InvalidPath, attestation.plan(&storage, "relative.dmg", expected()));
+    var invented_historical = expected();
+    invented_historical.tag_protection = .historical_unavailable;
+    try std.testing.expectError(error.InvalidExpected, attestation.plan(&storage, "/tmp/Maru.dmg", invented_historical));
 }
 
 test "held-directory artifact argv accepts only exact dot slash basename" {

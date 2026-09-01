@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const safe_open = @import("safe_open");
+const release_files = @import("release_adapter_files");
 const bounded_process = @import("bounded_process");
 const apple_product = @import("release_adapter_apple_product");
 const apple_transport = @import("release_adapter_apple_transport");
@@ -15,7 +16,7 @@ const darwin = @cImport({
     @cInclude("sys/mount.h");
 });
 
-pub const max_dmg_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
+pub const max_dmg_bytes = release_files.max_release_asset_bytes;
 pub const max_path_bytes: usize = 4 * 1024;
 pub const max_args: usize = 7;
 pub const ArgsStorage = [max_args][]const u8;

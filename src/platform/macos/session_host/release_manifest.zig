@@ -568,7 +568,7 @@ fn equalCompatibility(a: Compatibility, b: Compatibility) bool {
         a.handoff_reader_max == b.handoff_reader_max and a.app_host_abi == b.app_host_abi;
 }
 
-fn equalSigning(a: Signing, b: Signing) bool {
+pub fn equalSigning(a: Signing, b: Signing) bool {
     if (!std.mem.eql(u8, a.bundle_id, b.bundle_id) or
         !std.mem.eql(u8, a.bundle_short_version, b.bundle_short_version) or
         !std.mem.eql(u8, a.bundle_version, b.bundle_version) or

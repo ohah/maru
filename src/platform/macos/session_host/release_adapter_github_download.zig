@@ -11,11 +11,11 @@ const identity = @import("release_adapter_identity");
 const process = @import("bounded_process");
 const safe_open = @import("safe_open");
 const download_command = @import("release_adapter_github_download_command");
+const release_files = @import("release_adapter_files");
 
 const max_assets = @typeInfo(manifest.AssetRole).@"enum".fields.len;
 const max_args = 9;
 const max_token_bytes = manifest.max_scalar_string_bytes;
-const max_asset_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
 const ms_sync: i32 = 0x10;
 const f_preallocate: c_int = 42;
 const f_allocate_all: c_uint = 0x00000004;
@@ -339,7 +339,7 @@ fn reserveExact(fd: c.fd_t, len: usize) Error!void {
 }
 
 fn validAsset(asset: manifest.Asset) bool {
-    return asset.size > 0 and asset.size <= max_asset_bytes and identity.lowerHex(asset.sha256, 64) and validComponent(asset.name);
+    return asset.size > 0 and asset.size <= release_files.max_release_asset_bytes and identity.lowerHex(asset.sha256, 64) and validComponent(asset.name);
 }
 
 fn validComponent(value: []const u8) bool {

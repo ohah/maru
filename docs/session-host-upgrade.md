@@ -807,6 +807,27 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   검증한다. 이 composition은 repository/run/environment/deployment 관측, checkout 전 capture 자체, release workflow wiring과
   frozen U5 제품 E2E를 대신하지 않는다.
 
+  Current GitHub authority composition은 실행 프로세스에서 이미 strict parse된 `release_adapter_context.Context`와 checkout 전
+  pin된 CLI를 받아 repository → workflow run → `release` environment → attempt jobs → source/tag/environment deployments 순서로
+  closed REST request를 실행한다. 각 request 직전에 CLI pathname authority를 재검증하고 최초 positive monotonic absolute
+  deadline 하나를 모든 request가 공유한다. 각 scalar response는 다음 request가 reusable response buffer를 덮기 전에 component
+  parser가 allocation-owned typed observation으로 바꾸며, caller 문자열이나 REST 배열 순서를 권위로 사용하지 않는다.
+
+  deployment join은 `release_adapter_github_deployment`가 두 단계로 소유한다. `prepare`는 attempt jobs와 deployments를 한 번만
+  strict parse해 exact release job과 최대 `max_collection_entries` candidate deployment ID의 fixed ordered set을 소유한다.
+  composition은 그 ID마다 `deployment_statuses`를 exact 1회 조회하고, `finish`는 candidate별 status backing의 누락·추가·중복을
+  거부한 뒤 configured environment protection, exact job URL, official pending 이력과 exact-one in_progress를 한 deployment에
+  결속한다. 성공 전에는 `protected_environment=true`를 만들지 않는다.
+
+  결과는 final-address owner에 결속된 move-only `CurrentGitHubAuthority` 하나로만 게시하며 repository ID, run ID/attempt,
+  source commit, job/deployment/environment ID와 affirmative protected-environment fact를 함께 보존한다. 이미 게시된 result,
+  context/repository/run/environment/deployment mismatch, recognized protection 부재, 0개·복수 deployment match, candidate/status
+  backing drift, response cap·pagination shape, CLI 교체, timeout, child/allocation failure는 첫 외부 호출 전 또는 publication 0으로
+  fail-close한다. focused gate `test-session-host-release-adapter-github-current-authority`는 exact request/revalidation sequence,
+  reusable buffer overwrite, status 0/1/100 경계, backing 누락·추가·중복, owner copy, single-deadline 감소·만료와 전 allocation
+  fail-index를 Debug·ReleaseFast에서 검증한다. predecessor tag-chain/asset authority와 current authority의 최종 release command
+  조립, checkout 전 capture 자체, Apple product 관측과 frozen U5 제품 E2E는 후속 범위다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

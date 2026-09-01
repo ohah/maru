@@ -66316,6 +66316,135 @@ test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (R
     try std.testing.expect(busy(.current, true, Sem.unknown));
 }
 
+// **도크 뷰는 저마다 «활성 pane 을 어떻게 따라가는가» 를 답해야 한다.**
+//
+// 사용자가 이 축을 처음 신고한 이유가 그것이다(2026-08-31): 이미지 갤러리에는 그 답이 **없어서**,
+// pane 을 옮겨도 그리드가 옛 pane 의 것으로 남았다. 나머지 셋은 각자 답을 갖고 있었는데 **함수 이름도
+// 파일도 서로 달라**, 뷰를 더하는 사람이 「여기도 필요하다」를 알 길이 없었다.
+//
+// 그래서 분류를 **컴파일 오류로** 강제한다. `dock_panel.View` 에 값이 늘면 아래 switch 가 깨지고,
+// 더한 사람은 그 자리를 **찾아 읽게** 된다 — 런타임 판정자는 그 사람이 안 돌리면 그만이다.
+// (RS4c 에서 죽은 인텐트 가드를 지우며 강제력을 판정자로 옮긴 것과 같은 모양이다.)
+test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서 컴파일이 깨진다" {
+    const allocator = std.testing.allocator;
+
+    // 각 뷰의 **추종 진입점**. 값이 빈 문자열인 뷰는 없다 — 「이 뷰는 pane 과 무관하다」를 주장하려면
+    // 그 이유를 여기 적고 판정을 바꿔야 하고, 그것 자체가 리뷰거리다.
+    // ⚠️ **함수가 있는 것만으로는 부족하다**(적대적 검증 1회차). tick 호출만 지우면 그 뷰는 추종을
+    // **멈추는데** 컴파일은 통과한다 — 사용자가 처음 신고한 상태가 정확히 그것이다. 그래서 «어디서
+    // 부르는가»도 함께 센다.
+    // ⚠️ **호출 문자열을 리터럴로 두면 판정자가 자기 자신을 매치한다**(적대적 검증 2회차). 두 뷰의
+    // tick 호출부는 `app_session.zig` — **이 판정자가 사는 바로 그 파일**이라, needle 이 판정자 자신의
+    // 리터럴에 걸려 제품에서 호출을 지워도 초록이었다. 그래서 **런타임에 이어 붙인다** — 완성된
+    // 문자열은 이 소스 어디에도 리터럴로 없다.
+    const Entry = struct {
+        file: []const u8,
+        follow: []const u8,
+        call_file: []const u8,
+        call_mod: []const u8,
+        call_fn: []const u8,
+    };
+    const View = maru.session.dock_panel.View;
+    var seen: usize = 0;
+    inline for (@typeInfo(View).@"enum".fields) |field| {
+        const view: View = @enumFromInt(field.value);
+        const entry: Entry = switch (view) {
+            // 탐색기 root 는 활성 pane 터미널의 cwd 를 따라간다(ET-CWD).
+            .explorer => .{
+                .file = "src/platform/macos/app_session/file_panel.zig",
+                .follow = "pub fn followActiveTerminalCwd(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session/file_panel.zig",
+                .call_mod = "    ",
+                .call_fn = "followActiveTerminalCwd(self);",
+            },
+            // 목록의 저장소는 활성 pane 의 (경로, 호스트)를 따라간다(RS2).
+            .source_control => .{
+                .file = "src/platform/macos/app_session/git.zig",
+                .follow = "pub fn followActiveTerminalRepo(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session/git.zig",
+                .call_mod = "    ",
+                .call_fn = "followActiveTerminalRepo(self);",
+            },
+            // scope root 스냅샷이 활성 surface 를 따라간다.
+            .agent_sessions => .{
+                .file = "src/platform/macos/app_session/agent_dock.zig",
+                .follow = "pub fn refreshAgentSessionArchiveProjectScopeForFocus(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session.zig",
+                .call_mod = "agent_dock.",
+                .call_fn = "refreshAgentSessionArchiveProjectScopeForFocus(self);",
+            },
+            // 격자의 소스 세션 목록이 활성 pane 을 따라간다(IG1 §2.1).
+            .image_gallery => .{
+                .file = "src/platform/macos/app_session/image_gallery.zig",
+                .follow = "pub fn refreshForFocus(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session.zig",
+                .call_mod = "image_gallery_ops.",
+                .call_fn = "refreshForFocus(self);",
+            },
+        };
+        const raw = try std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            entry.file,
+            allocator,
+            .limited(8 * 1024 * 1024),
+        );
+        defer allocator.free(raw);
+        const src = raw;
+        var needle_buf: [160]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&needle_buf, "{s}{s}", .{ entry.call_mod, entry.call_fn });
+        // **그 함수가 실제로 있는가.** 이름만 적어 두고 지워지면 이 판정자가 잡는다.
+        try std.testing.expect(std.mem.indexOf(u8, src, entry.follow) != null);
+        // **그리고 실제로 불리는가.** 이것이 없으면 「함수는 남았는데 아무도 안 부른다」가 초록으로
+        // 지나간다 — 뷰가 옛 pane 에 멈춘 채로.
+        if (std.mem.eql(u8, entry.call_file, entry.file)) {
+            try std.testing.expect(std.mem.indexOf(u8, src, needle) != null);
+        } else {
+            const caller_raw = try std.Io.Dir.cwd().readFileAlloc(
+                std.Io.Threaded.global_single_threaded.io(),
+                entry.call_file,
+                allocator,
+                .limited(8 * 1024 * 1024),
+            );
+            defer allocator.free(caller_raw);
+            try std.testing.expect(std.mem.indexOf(u8, caller_raw, needle) != null);
+        }
+        seen += 1;
+    }
+    // 뷰가 늘었는데 위 switch 만 채우고 이 숫자를 안 고치는 일은 없다 — switch 가 exhaustive 라
+    // 컴파일이 먼저 깨진다. 이 단언은 **분류가 통째로 비는** 경우(필드 0개)를 막는다.
+    try std.testing.expectEqual(@typeInfo(View).@"enum".fields.len, seen);
+    try std.testing.expect(seen >= 4);
+
+    // **넷이 같은 자리에서 돈다**(적대적 검증 3회차). `runFramePreHousekeeping` 이 매 프레임 넷을 굴리므로,
+    // 도크를 접은 채 pane 을 옮겼다가 다시 열어도 **다음 프레임에 스스로 낫는다** — 뷰 진입 갱신이 없는
+    // `explorer` 가 뒤처지지 않는 근거가 그것이다.
+    //
+    // 그 자리가 갈리면(누가 한 뷰만 다른 주기로 옮기면) 그 뷰만 조용히 늦는다 — 화면에서 「가끔 안
+    // 바뀐다」로 보이고, 그것이 이 축에서 사용자가 처음 신고한 증상이다.
+    {
+        const app_src = try std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            "src/platform/macos/app_session.zig",
+            allocator,
+            .limited(8 * 1024 * 1024),
+        );
+        defer allocator.free(app_src);
+        const at = std.mem.indexOf(u8, app_src, "fn runFramePreHousekeeping") orelse
+            return error.HousekeepingMissing;
+        const end = std.mem.indexOfPos(u8, app_src, at, "\n    }\n") orelse app_src.len;
+        const body = app_src[at..end];
+        // 넷 중 둘은 이 파일에서 직접, 둘은 각자 모듈의 pump 함수 안에서 불린다.
+        for ([_][]const u8{
+            "updateFileTree", //     → followActiveTerminalCwd
+            "drainGitStatus", //     → followActiveTerminalRepo
+            "ProjectScopeForFocus", //  agent_sessions
+            "refreshForFocus", //       image_gallery
+        }) |needle_frag| {
+            try std.testing.expect(std.mem.indexOf(u8, body, needle_frag) != null);
+        }
+    }
+}
+
 test "원격 목록은 로컬 git 이 없어도 읽는다 (적대적 검증 5회차)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -13639,7 +13639,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
-        run_bounded_process_tests.addArg("--maru-expect-tests=6");
+        run_bounded_process_tests.addArg("--maru-expect-tests=8");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         session_host_step.dependOn(&run_bounded_process_tests.step);

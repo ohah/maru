@@ -96,3 +96,28 @@ test "release adapter publishes summary and work directory only to absent destin
     defer std.testing.allocator.free(victim);
     try std.testing.expectEqualStrings("untouched", victim);
 }
+
+test "owned summary publication returns the exact published inode authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "owned-summary.json", &path_buf);
+    const bytes = "{\"result\":\"passed\"}\n";
+
+    var published: files.PinnedReleaseFile = .{};
+    try files.publishSummaryOwnedExclusive(&published, path, bytes);
+    const observation = published.value() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, bytes.len), observation.size);
+    var expected_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &expected_digest, .{});
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(expected_digest, .lower), &observation.sha256);
+    try std.testing.expectEqual(observation, try published.revalidate(path));
+
+    var copied = published;
+    try std.testing.expectError(error.InvalidOwner, copied.revalidate(path));
+    try std.testing.expectError(error.InvalidOwner, files.publishSummaryOwnedExclusive(&copied, path, bytes));
+    try published.deinit();
+    const durable = try tmp.dir.readFileAlloc(std.testing.io, "owned-summary.json", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(durable);
+    try std.testing.expectEqualStrings(bytes, durable);
+}

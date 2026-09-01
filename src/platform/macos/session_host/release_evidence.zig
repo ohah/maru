@@ -163,6 +163,7 @@ pub const Value = union(Profile) {
 pub const UpgradeExpected = struct {
     common: Common,
     predecessor: Predecessor,
+    designated_requirement_sha256: []const u8,
 };
 
 pub const Expected = union(Profile) {
@@ -335,7 +336,10 @@ pub fn bind(value: Value, expected: Expected) Error!void {
         },
         .upgrade_b => |actual| switch (expected) {
             .upgrade_b => |wanted| if (!equalCommon(rootCommon(actual.*), wanted.common) or
-                !equalPredecessor(actual.predecessor, wanted.predecessor)) return error.BindingMismatch,
+                !equalPredecessor(actual.predecessor, wanted.predecessor) or
+                !lowerHex(wanted.designated_requirement_sha256, 64) or
+                !std.mem.eql(u8, actual.gates.signed_upgrade_one.signer_requirement_sha256, wanted.designated_requirement_sha256) or
+                !std.mem.eql(u8, actual.gates.signed_upgrade_near_max.signer_requirement_sha256, wanted.designated_requirement_sha256)) return error.BindingMismatch,
             else => return error.BindingMismatch,
         },
     }

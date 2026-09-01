@@ -20,6 +20,7 @@ pub const BaselineRequest = struct {
 pub const UpgradeRequest = struct {
     common: evidence.Common,
     predecessor: evidence.Predecessor,
+    designated_requirement_sha256: []const u8,
     one_path: [:0]const u8,
     near_max_path: [:0]const u8,
     output_path: [:0]const u8,
@@ -65,6 +66,7 @@ pub fn publishUpgrade(allocator: std.mem.Allocator, request: UpgradeRequest) Err
     try evidence.bind(parsed.value(), .{ .upgrade_b = .{
         .common = request.common,
         .predecessor = request.predecessor,
+        .designated_requirement_sha256 = request.designated_requirement_sha256,
     } });
     try files.publishSummaryExclusive(request.output_path, aggregate);
 }

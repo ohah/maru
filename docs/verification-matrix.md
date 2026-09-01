@@ -2730,6 +2730,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   exact created-ID cleanup-required를, 결속 전에는 ID 없는 remote-state-unknown terminal을 남긴다. focused gate는 Debug·ReleaseFast에서 exact argv/environment/deadline/CLI revalidation,
   malformed/drift/existing/child failure, copied owner와 allocation fail-index를 검증한다. 실제 GitHub mutation 성공, evidence/manifest
   authoring, draft asset attach와 publish는 후속 workflow gate가 소유한다.
+  `release_adapter_candidate_files.zig`는 pre-draft `CandidateAttestation`의 held-file/attestation view를 raw pathname 재-pin 없이
+  revalidate하고 trusted tag context와 move-only draft ID/tag/source에 결속한다. success owner는 final-address attestation owner를
+  빌리며 자신이 먼저 cleanup되어야 한다. focused gate는 Debug·ReleaseFast에서 copied/pre-owned/stale attestation, context/draft/name,
+  pathname replacement·in-place mutation, owner lifetime과 publication 0을 검증한다. Apple signing, DMG 내부 executable equality와
+  evidence/manifest authoring은 이 gate의 완료 범위가 아니다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

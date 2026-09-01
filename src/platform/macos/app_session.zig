@@ -1209,6 +1209,15 @@ pub fn localHostname(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
 pub fn termCwdIsRemote(term: *const Term) bool {
     var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined; // 이름은 여기서만 살아 있으면 된다(비교에 바로 쓴다)
     if (term.rt.observation.availability == .unavailable) return false;
+    // **`maru ssh` 가 알려 준 목적지도 근거다**(A). OSC 5379 로 온 dest 가 있으면 그 pane 은 원격이다 —
+    // 원격 셸에 OSC 7 보고자가 없어도 그렇다. 예전에는 authority 하나만 봐서, 보고자를 안 깐 사용자의
+    // 원격 pane 이 **로컬로 판정됐다**: 화면의 절대 경로가 로컬 파일로 열리고(§9.4 가 닫아 둔 길),
+    // 새 탭이 로컬 경로를 물려받았다.
+    //
+    // **cwd 가 비어도 원격이다.** 그 상태는 「원격인데 경로를 아직 모른다」이지 「로컬」이 아니다 —
+    // ssh 진입이 stale 로컬 값을 버리므로(B) 그 구간이 실제로 생긴다. 아래 `cwd` 검사보다 **먼저**
+    // 두어야 그 구간이 로컬로 새지 않는다.
+    if (term.rt.observation.ssh_remote_dest_present) return true;
     if (term.rt.observation.cwd.items.len == 0) return false;
     return !terminal.TerminalCore.hostIsLocal(term.rt.observation.cwd_host.items, localHostname(&host_buf));
 }
@@ -1255,6 +1264,20 @@ pub fn linkScopesForSurfaceId(self: *const AppSession, surface_id: u64) terminal
     return settings_ops.linkScopesFromConfig(self);
 }
 
+/// 원격 경로 앞에 붙일 **호스트 이름**. OSC 7 authority 가 있으면 그것이고, 없으면 `maru ssh` 가 알려 준
+/// 목적지에서 뽑는다(A).
+///
+/// **`user@host` 에서 `host` 만 쓴다** — 폴더줄은 좁고, 사용자 이름은 「어느 기계인가」를 말하지 않는다.
+/// 포트(`host:2222`)가 붙어 오면 그대로 둔다: 잘라 내면 서로 다른 두 목적지가 같은 이름으로 보인다.
+/// 둘 다 없으면 빈 문자열이고, 그때는 호출자가 애초에 원격으로 판정하지 않는다.
+fn termDisplayHost(term: *const Term) []const u8 {
+    const authority = term.rt.observation.cwd_host.items;
+    if (authority.len > 0) return authority;
+    const dest = term.rt.observation.ssh_remote_dest.items;
+    if (dest.len == 0) return "";
+    return if (std.mem.lastIndexOfScalar(u8, dest, '@')) |at| dest[at + 1 ..] else dest;
+}
+
 pub fn sidebarCwdPath(self: *AppSession, term: *Term) ![]const u8 {
     // cwd 해석은 **소스 컨트롤 뷰·파일 탐색기와 같은 지점**을 쓴다(docs/editor-surface-dock.md §3.5의 2단 규칙).
     // 예전에는 여기만 관측(OSC 7)을 직접 읽어, OSC 7이 없는 Term에서 같은 화면의 두 뷰가 서로 다른 답을 냈다.
@@ -1266,7 +1289,7 @@ pub fn sidebarCwdPath(self: *AppSession, term: *Term) ![]const u8 {
     // 남의 홈을 자기 홈처럼 보여 주고(로컬 $HOME과 우연히 겹치면 조용히 틀린다), host가 없으면 사용자가 그 경로를
     // 로컬에서 열려다 실패한다. `host:path`는 scp/rsync 관례라 원격임이 즉시 읽힌다.
     if (termCwdIsRemote(term))
-        return std.fmt.allocPrint(allocator, "{s}:{s}", .{ term.rt.observation.cwd_host.items, cwd });
+        return std.fmt.allocPrint(allocator, "{s}:{s}", .{ termDisplayHost(term), cwd });
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
     if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
@@ -77052,4 +77075,72 @@ test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박�
 
     // 그 자리에서 훅이 남긴 세부가 버려진다 — cwd 도 그 목록이다.
     try std.testing.expect(term.agent_hook_cwd.isEmpty());
+}
+
+test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 파일을 열지 않는다 (A)" {
+    // 예전에는 원격 판정의 근거가 OSC 7 authority **하나**였다. 그래서 원격 셸에 보고자를 안 깐
+    // 사용자의 pane 이 **로컬로 판정**됐고, 화면의 절대 경로가 로컬 파일로 열렸다(§9.4 가 닫아 둔 길).
+    // `maru ssh` 는 OSC 5379 로 목적지를 알려 주므로 그 사실을 이미 알 수 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    session.loaded_config.config.input.link_detection = .full;
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // ── ① 로컬 셸이 보고해 둔 값이 있다(대조군: 지금은 로컬이다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///Users/me/local\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(!termCwdIsRemote(term));
+
+    // ── ② `maru ssh` 가 목적지를 알린다. **보고자는 없다** — 그래도 원격이다.
+    //     그리고 B 가 stale 로컬 cwd 를 함께 버리므로 「원격인데 경로는 모른다」가 된다.
+    try term_ops.activeSurface(session).core.write("\x1b]5379;ssh;me@build-box\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len);
+
+    // 파일 경로 스코프가 꺼진다 — 이것이 이 슬라이스의 안전 이득이다.
+    const scopes = linkScopesForTerm(session, term);
+    try std.testing.expect(!scopes.absolute_path and !scopes.home_path);
+    try std.testing.expect(!scopes.dot_relative and !scopes.bare_relative);
+    try std.testing.expect(scopes.web and scopes.extra_schemes); // 웹은 남는다
+
+    // 경로를 모르니 폴더줄은 **빈다**(거짓말하지 않는다).
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expectEqualStrings("", shown);
+    }
+
+    // ── ③ 훅이 작업 디렉터리를 알려 주면 그때 그린다 — host 는 **목적지에서** 뽑는다.
+    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expectEqualStrings("build-box:/srv/app/proj", shown); // `me@` 는 뗀다
+    }
+
+    // ── ④ ssh 를 빠져나오면 다시 로컬이다(그 뒤 프롬프트가 cwd 를 채운다).
+    try term_ops.activeSurface(session).core.write("\x1b]5379;ssh-end\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///Users/me/local\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(!termCwdIsRemote(term));
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "build-box") == null);
+    }
 }

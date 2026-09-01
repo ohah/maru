@@ -70200,6 +70200,48 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
     try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.screen, term.agent_state_origin);
 }
 
+test "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 낡은 값이 배지가 되지 않게 (§1.1)" {
+    // `.observe` 분기는 진행 중 세부·작업 디렉터리·자식 셈을 버리는데 **훅 상태만 빠져 있었다.**
+    // 남기면 훅 소스가 돌아온 순간 낡은 값이 그대로 배지가 된다 — 설정을 껐다 켜거나 로그가 사라졌다
+    // 돌아오는 사이 에이전트가 턴을 끝냈어도 배지는 옛 `running` 이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .claude;
+    term.rt.observation.availability = .current;
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    term.agent_hook_log_present = true;
+    term.agent_hook_state = .running;
+    term.agent_hook_progress.reset();
+
+    // 훅 소스가 끊긴다(사용자가 게이트를 껐다 — 로그가 사라진 경우도 같은 분기다).
+    session.loaded_config.config.sidebar.agent_hooks = false;
+    agent_ops.pollAgentConsumer(session, term, false, true);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(session, term));
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_hook_state);
+
+    // 돌아온다. 낡은 `running` 이 살아나면 안 되고, 첫 훅 이벤트가 올 때까지는 화면이 답한다(§1.1 B0).
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(session, term));
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+    try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n❯ \r\n");
+    term.rt.observation.observer_generation +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expectEqualStrings("B0", term.agent_state_rule);
+}
+
 test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)" {
     // **generation 을 올리지 않는 것이 이 판정자의 요점이다.** codex 오류 턴은 훅이 running 에 멈춘 채
     // 화면만 idle 이고 **출력이 끊긴** 상태다. 예전 fast-path 는 정확히 그 상태를 「다시 볼 것 없다」로

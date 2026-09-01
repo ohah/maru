@@ -15681,6 +15681,14 @@ pub const AppSession = struct {
         const term = pane_ops.activePane(self).activeTerm();
         term_ops.refreshTermObservation(self, term, false, false);
         if (term.kind != .terminal or term.rt.observation.availability == .unavailable) return &.{};
+        // **사이드바와 같은 값을 쓴다**(적대적 검증 2 회차). 이 자리는 `termCwdForDisplay` 를 안 거치는
+        // 직접 소비처라, 훅 cwd 를 안 보면 **같은 pane 인데 사이드바는 실제 경로·창 제목은 홈**이 된다 —
+        // 「같은 화면의 두 뷰가 다른 답을 낸다」가 그것이다.
+        //
+        // 여기서 훅 값을 써도 안전한 이유는 §9.4 가 이 소비처를 「표시 전용이고 파일시스템에 닿지
+        // 않는다」로 분류해 두었기 때문이다(host 접두가 없는 것도 그 표의 알려진 후속이다).
+        if (termCwdIsRemote(term) and term.agent_hook_cwd.fresh(self.awakeMs()))
+            return term.agent_hook_cwd.text();
         return term.rt.observation.cwd.items;
     }
 
@@ -76592,7 +76600,7 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
     }
 
     // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → 폴더줄이 그것으로 바뀐다.
-    term.agent_hook_cwd.set("/srv/app/proj");
+    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -76603,14 +76611,14 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
 
     // ── ③ **잘린 경로·상대 경로는 안 담는다.** 담으면 남의 디렉터리를 가리킨다.
     term.agent_hook_cwd.clear();
-    term.agent_hook_cwd.set("relative/path");
+    term.agent_hook_cwd.set("relative/path", session.awakeMs());
     try std.testing.expect(term.agent_hook_cwd.isEmpty());
 
     // ── ④ 대조군: 로컬 pane 은 이 값을 안 본다(커널 조회가 이미 정확하다).
     try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp\x07");
     term_ops.refreshTermObservation(session, term, false, false);
     try std.testing.expect(!termCwdIsRemote(term));
-    term.agent_hook_cwd.set("/srv/app/proj");
+    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -76639,7 +76647,7 @@ test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박�
     _ = try session.resize(800, 600, 1000);
 
     const term = pane_ops.activePane(session).activeTerm();
-    term.agent_hook_cwd.set("/srv/app/proj");
+    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
     try std.testing.expect(!term.agent_hook_cwd.isEmpty());
 
     // 훅 모드가 아니다(로그도 없고 에이전트도 없고 원격 채널도 없다) → 관측 모드로 내려간다.

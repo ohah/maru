@@ -747,8 +747,10 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
         //
         // **이 한 지점에서 정한다.** 사이드바·SCM·파일 탐색기가 모두 이 함수를 지나므로 두 뷰가
         // 다른 답을 내지 않는다(예전에 그 자리만 관측을 직접 읽어 갈렸던 회귀가 이 함수의 존재 이유다).
-        const hook_cwd = term.agent_hook_cwd.text();
-        const cwd = if (hook_cwd.len > 0) hook_cwd else term.rt.observation.cwd.items;
+        // **신선할 때만 믿는다**(적대적 검증 4 회차). 원격에는 「에이전트가 사라졌다」 신호가 없어,
+        // 안 만료시키면 끝난 뒤에도 이 값이 살아 있는 OSC 7 을 영영 덮는다.
+        const hook_fresh = term.agent_hook_cwd.fresh(self.awakeMs());
+        const cwd = if (hook_fresh) term.agent_hook_cwd.text() else term.rt.observation.cwd.items;
         if (cwd.len == 0 or cwd.len > buf.len) return null;
         @memcpy(buf[0..cwd.len], cwd);
         return buf[0..cwd.len];

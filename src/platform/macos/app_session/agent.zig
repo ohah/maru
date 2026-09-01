@@ -2045,7 +2045,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // **훅이 알려 준 작업 디렉터리를 담는다.** 원격 pane 에서 OSC 7 은 `precmd` 라 전면 TUI 가 붙어
     // 있는 동안 발화하지 못해 값이 접속 직전에서 멈춘다(ssh-integration.md §9.5) — 훅은 그 구간에도
     // **매 턴** 오므로 이 값이 그 자리를 메운다. 로컬은 커널 조회가 이미 정확해서 소비하지 않는다.
-    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd);
+    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd, self.awakeMs());
     captureBeforeForEvent(self, term, ev);
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지

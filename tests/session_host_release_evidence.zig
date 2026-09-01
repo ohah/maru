@@ -43,6 +43,14 @@ fn predecessor() evidence.Predecessor {
     };
 }
 
+fn upgradeExpected(requirement: []const u8) evidence.UpgradeExpected {
+    return .{
+        .common = common(),
+        .predecessor = predecessor(),
+        .designated_requirement_sha256 = requirement,
+    };
+}
+
 fn defaultLeaf() []const u8 {
     const json =
         \\{"schema":"maru.session-host-default-false-baseline.v1","test_uuid":"123e4567-e89b-42d3-a456-426614174000","result":"passed","candidate_dmg_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","candidate_executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_default":false,"explicit_override_present":false,"signed_product":true}
@@ -85,8 +93,25 @@ test "upgrade B leaves assemble one and near-max without swapping identities" {
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
     defer parsed.deinit();
-    try evidence.bind(parsed.value(), .{ .upgrade_b = .{ .common = common(), .predecessor = predecessor() } });
+    try evidence.bind(parsed.value(), .{ .upgrade_b = upgradeExpected(sha_f) });
     try std.testing.expectEqual(evidence.Profile.upgrade_b, parsed.profile());
+}
+
+test "upgrade B rejects two leaves that agree on a foreign signer requirement" {
+    const bytes = try evidence.assembleUpgrade(
+        std.testing.allocator,
+        common(),
+        predecessor(),
+        upgradeLeaf(1),
+        upgradeLeaf(evidence.near_max_runtime_count),
+    );
+    defer std.testing.allocator.free(bytes);
+    var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expectError(
+        error.BindingMismatch,
+        evidence.bind(parsed.value(), .{ .upgrade_b = upgradeExpected(sha_d) }),
+    );
 }
 
 test "aggregate parser rejects duplicate unknown missing trailing and noncanonical bytes" {
@@ -172,6 +197,7 @@ test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
     try std.testing.expectError(error.BindingMismatch, evidence.bind(parsed.value(), .{ .upgrade_b = .{
         .common = common(),
         .predecessor = wrong_predecessor,
+        .designated_requirement_sha256 = sha_f,
     } }));
 }
 

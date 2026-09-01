@@ -74549,6 +74549,86 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
     try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.agent_image_source.path());
 }
 
+test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는다 (IG-원격)" {
+    // 훅이 준 `transcript_path` 는 **저쪽 기계**의 경로다. 스캐너·디코더는 `Dir.cwd().openFile` 로
+    // **로컬**을 열므로, 같은 모양의 경로가 이쪽에도 있으면 그 파일이 **실제로 열려** 다른 대화의
+    // 이미지가 이 세션 이름표 밑에 뜬다(양쪽 macOS·같은 사용자 이름이면 흔한 모양이다).
+    //
+    // 그래서 이 test 는 그 파일을 **진짜로 만들어 두고** 본다 — 경로가 없어서 못 읽는 것과
+    // 「원격이라 안 읽는 것」은 다른 사실이고, 없는 경로로 시험하면 둘을 구분하지 못한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // **구조는 실측, 값은 합성**(계획 §P2) — 사용자 기록을 fixture 로 쓰지 않는다(계약 §6).
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"이거 봐주세요\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AAAABBBB\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/t.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const Wait = struct {
+        fn until(sess: *AppSession) !void {
+            var spins: usize = 0;
+            while (spins < 200_000) : (spins += 1) {
+                _ = sess.tick() catch {};
+                if (sess.image_gallery.built) return;
+            }
+            return error.ScanNeverFinished;
+        }
+    };
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // ── ① 대조군: 로컬 pane 이면 그 파일을 읽는다. 이것이 서야 ② 의 0 이 «원격이라서» 가 된다.
+    _ = term.agent_image_source.set(path);
+    image_gallery_ops.refresh(session, false);
+    try Wait.until(session);
+    try std.testing.expect(session.image_gallery.count() > 0);
+
+    // ── ② 같은 pane 이 원격이 되면 **안 읽는다**. 채널이 원격의 증거다(계약 §11.1).
+    //    소스 경로는 ① 그대로다 — 파일은 여전히 거기 있는데도 안 읽는 것이 요점이다.
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+
+    // ── ③ 그리고 「없다」가 아니라 「못 읽는다」라고 말한다. 원격에는 에이전트가 **있으므로**
+    //    「에이전트가 없습니다」는 거짓이고, 사용자를 훅 설치 점검으로 헛돌게 한다.
+    {
+        var buf: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.image_gallery_remote_unsupported),
+            image_gallery_ops.noticeText(session, &buf),
+        );
+    }
+
+    // ── ④ ssh 를 빠져나오면 다시 읽는다 — **래치가 아니다**. 이 저장소에서 반복해 낸 결함이
+    //    「한 번 막히면 영영 막히는 것」이라 그 축을 여기서 못 박는다.
+    term.agent_remote_channel = null;
+    image_gallery_ops.refresh(session, false);
+    try Wait.until(session);
+    try std.testing.expect(session.image_gallery.count() > 0);
+}
+
 test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-c)" {
     // **순수 파서가 도는 것과 «그 라벨이 타일에 붙는 것» 은 다른 사실이다.** 배선이 빠지면
     // agent_image_context 의 test 는 전부 통과하는데 화면에는 그림만 남는다.

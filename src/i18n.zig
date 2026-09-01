@@ -353,10 +353,13 @@ const Table = struct {
     cfg_sidebar_show_branch: [:0]const u8,
     cfg_sidebar_show_folder: [:0]const u8,
     cfg_sidebar_agent_hooks: [:0]const u8,
-    /// 이미지 갤러리 도크(docs/agent-image-gallery.md §2). **셋을 가른다** — 「에이전트가 없다」·
-    /// 「훑었는데 없다」·「못 봤다」. 한 문구로 접으면 사용자가 «이미지가 없는 것» 과 «갤러리가 고장난 것» 을
+    /// 이미지 갤러리 도크(docs/agent-image-gallery.md §2). **넷을 가른다** — 「에이전트가 없다」·
+    /// 「원격이라 못 읽는다」·「훑었는데 없다」·「못 봤다」. 한 문구로 접으면 사용자가 «이미지가 없는 것» 과 «갤러리가 고장난 것» 을
     /// 구분할 수 없다(SCM 도크의 3-상태 안내와 같은 규율).
     image_gallery_no_agent: [:0]const u8,
+    /// 원격 pane 이라 **읽을 수 없다** — 「없다」와 다르다. 에이전트는 거기서 돌고 있고(사이드바 배지가
+    /// 그 증거다) 대화 파일만 저쪽 기계에 있다. 「없습니다」로 접으면 사용자가 훅 설치부터 다시 훑는다.
+    image_gallery_remote_unsupported: [:0]const u8,
     image_gallery_empty: [:0]const u8,
     image_gallery_partial: [:0]const u8,
     /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
@@ -1321,6 +1324,7 @@ const en: Table = .{
     .cfg_sidebar_show_folder = "Show folder path on sidebar cards",
     .cfg_sidebar_agent_hooks = "Install provider hooks for agent state, notifications and turns",
     .image_gallery_no_agent = "No agent session in this pane",
+    .image_gallery_remote_unsupported = "Remote session — the gallery cannot read it yet",
     .image_gallery_empty = "No images in this session",
     .image_gallery_partial = "Could not read the whole session",
     .image_gallery_scanning = "Scanning…",
@@ -1915,6 +1919,7 @@ const ko: Table = .{
     .cfg_sidebar_show_folder = "사이드바 카드에 폴더 경로 표시",
     .cfg_sidebar_agent_hooks = "에이전트 상태·알림·턴을 받는 provider 훅 설치",
     .image_gallery_no_agent = "이 pane에 에이전트 세션이 없습니다",
+    .image_gallery_remote_unsupported = "원격 세션입니다 — 갤러리는 아직 원격을 읽지 못합니다",
     .image_gallery_empty = "이 세션에는 이미지가 없습니다",
     .image_gallery_partial = "세션을 다 읽지 못했습니다",
     .image_gallery_scanning = "세는 중…",

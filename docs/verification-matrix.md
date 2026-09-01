@@ -2735,6 +2735,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   빌리며 자신이 먼저 cleanup되어야 한다. focused gate는 Debug·ReleaseFast에서 copied/pre-owned/stale attestation, context/draft/name,
   pathname replacement·in-place mutation, owner lifetime과 publication 0을 검증한다. Apple signing, DMG 내부 executable equality와
   evidence/manifest authoring은 이 gate의 완료 범위가 아니다.
+  `release_adapter_candidate_product.zig`는 final-address candidate file owner가 차용한 pre-draft attestation의 DMG/frozen 관측만 사용해 기존 DMG authority에 exact
+  expected size/SHA와 tag version을 넘기고, Apple 관측 전후 source를 revalidate한다. DMG 내부 executable SHA는 held frozen SHA와
+  exact 일치해야 하며 signing은 owned Apple observation에서만 유도한다. focused gate는 Debug·ReleaseFast actual filesystem과 injected
+  observer로 shared deadline, exact input derivation, path/work alias, copied/pre-owned owner, source mutation·observer failure·digest mismatch와
+  allocation unwind publication 0을 검증한다. 실제 mount/command residue, GitHub artifact attestation과 evidence authoring은 별도 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

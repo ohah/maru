@@ -5792,6 +5792,16 @@ pub fn build(b: *std.Build) void {
     github_release_publication_step.dependOn(&github_release_publication_contract.step);
     test_step.dependOn(&github_release_publication_contract.step);
 
+    const session_host_release_workflow_contract = b.addSystemCommand(&.{ "sh", "tools/test-session-host-release-workflow.sh" });
+    session_host_release_workflow_contract.setCwd(b.path("."));
+    session_host_release_workflow_contract.stdio = .inherit;
+    const session_host_release_workflow_step = b.step(
+        "check-session-host-release-workflow",
+        "Check checkout-before-trust release workflow regressions",
+    );
+    session_host_release_workflow_step.dependOn(&session_host_release_workflow_contract.step);
+    test_step.dependOn(&session_host_release_workflow_contract.step);
+
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 

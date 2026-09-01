@@ -13294,9 +13294,9 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_current_asset_attestation_tests.step);
             test_step.dependOn(&run_current_asset_attestation_tests.step);
             macos_only_test_step.dependOn(&run_current_asset_attestation_tests.step);
-            const current_compatibility_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_compatibility.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod } } }) });
+            const current_compatibility_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_compatibility.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod } } }) });
             const run_current_compatibility_tests = b.addRunArtifact(current_compatibility_tests);
-            run_current_compatibility_tests.addArg("--maru-expect-tests=6");
+            run_current_compatibility_tests.addArg("--maru-expect-tests=7");
             run_current_compatibility_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_compatibility_step.dependOn(&run_current_compatibility_tests.step);
             session_host_step.dependOn(&run_current_compatibility_tests.step);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const manifest = @import("release_manifest");
+const deadline_mod = @import("release_adapter_deadline");
 const composition = @import("release_adapter_github_current_compatibility");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const current_product = @import("release_adapter_github_current_product");
@@ -10,6 +11,8 @@ const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".*
 const Current = struct {
     copied: bool = false,
     drift: bool = false,
+    invalid: bool = false,
+    revalidations: usize = 0,
     const Candidate = struct { compatibility: manifest.Compatibility };
     const View = struct { manifest: *const Candidate };
     const candidate = Candidate{ .compatibility = expected };
@@ -17,6 +20,10 @@ const Current = struct {
     pub fn value(self: *const @This()) ?View {
         if (self.copied) return null;
         return .{ .manifest = if (self.drift) &drifted else &candidate };
+    }
+    pub fn revalidate(self: *@This()) !void {
+        self.revalidations += 1;
+        if (self.copied or self.invalid) return error.InvalidOwner;
     }
 };
 
@@ -53,15 +60,33 @@ const Product = struct {
 const Probe = struct {
     output: []const u8 = "{\"mrsh_major\":2,\"screen_codec\":2,\"handoff_reader_min\":1,\"handoff_reader_max\":1,\"app_host_abi\":180}\n",
     calls: usize = 0,
+    budget_ns: i128 = 0,
+    mutate_current: ?*Current = null,
+    foreign_output: ?[]const u8 = null,
     pub fn run(self: *@This(), _: std.Io, executable: [:0]const u8, directory_fd: std.c.fd_t, relative_executable: [:0]const u8, buffer: []u8, budget_ns: i128) ![]const u8 {
         try std.testing.expectEqualStrings("/tmp/frozen-maru", executable);
         try std.testing.expectEqual(@as(std.c.fd_t, 77), directory_fd);
         try std.testing.expectEqualStrings("./frozen-maru", relative_executable);
         try std.testing.expect(budget_ns > 0);
         self.calls += 1;
+        self.budget_ns = budget_ns;
+        if (self.mutate_current) |current| current.invalid = true;
+        if (self.foreign_output) |foreign| return foreign;
         if (self.output.len > buffer.len) return error.OutputTooLarge;
         @memcpy(buffer[0..self.output.len], self.output);
         return buffer[0..self.output.len];
+    }
+};
+
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
     }
 };
 
@@ -79,6 +104,87 @@ test "canonical frozen probe publishes exact manifest compatibility and sha" {
     var copied = result;
     try std.testing.expect(copied.value() == null);
     try result.deinit();
+}
+
+test "shared deadline brackets product authority probe and final publication" {
+    var probe = Probe{};
+    var current = Current{};
+    var product = Product{};
+    var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
+    var result: composition.CurrentCompatibility = .{};
+    var output: [composition.max_probe_bytes]u8 = undefined;
+    try composition.composeUntilWith(&probe, &deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result);
+    try std.testing.expectEqual(@as(usize, 3), deadline.cursor);
+    try std.testing.expectEqual(@as(i128, 70), probe.budget_ns);
+    try std.testing.expectEqual(@as(usize, 2), current.revalidations);
+    try result.deinit();
+
+    probe = .{};
+    product = .{};
+    deadline = .{ .values = &.{ 100, 70, 0 } };
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&probe, &deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 2), product.calls);
+    try std.testing.expect(result.value() == null);
+
+    probe = .{};
+    product = .{};
+    deadline = .{ .values = &.{ 100, 0 } };
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&probe, &deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), product.calls);
+    try std.testing.expect(result.value() == null);
+
+    probe = .{};
+    product = .{};
+    deadline = .{ .values = &.{0} };
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&probe, &deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), product.calls);
+    try std.testing.expect(result.value() == null);
+
+    current = .{};
+    probe = .{ .mutate_current = &current };
+    product = .{};
+    deadline = .{ .values = &.{ 100, 70, 40 } };
+    try std.testing.expectError(error.InvalidCurrent, composition.composeUntilWith(&probe, &deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+    try std.testing.expectEqual(@as(usize, 2), deadline.cursor);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(result.value() == null);
+
+    var copied = Current{ .copied = true };
+    var untouched = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidCurrent, composition.composeUntilWith(&probe, &untouched, std.testing.io, &copied, &product, "/tmp/frozen-maru", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), untouched.cursor);
+
+    const result_deadline: *SharedDeadline = @ptrCast(&result);
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, result_deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+
+    const current_deadline: *SharedDeadline = @ptrCast(@alignCast(&current));
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, current_deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+
+    const product_deadline: *SharedDeadline = @ptrCast(@alignCast(&product));
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, product_deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output, &result));
+
+    var output_deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const output_deadline: *SharedDeadline = @ptrCast(&output_deadline_storage);
+    output_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, output_deadline, std.testing.io, &current, &product, "/tmp/frozen-maru", &output_deadline_storage, &result));
+    try std.testing.expectEqual(@as(usize, 0), output_deadline.cursor);
+
+    var path_deadline_storage: [@sizeOf(SharedDeadline) + 1]u8 align(@alignOf(SharedDeadline)) =
+        .{0} ** (@sizeOf(SharedDeadline) + 1);
+    const path_deadline: *SharedDeadline = @ptrCast(&path_deadline_storage);
+    path_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, path_deadline, std.testing.io, &current, &product, path_deadline_storage[0..@sizeOf(SharedDeadline) :0], &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), path_deadline.cursor);
+
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    var empty_current: current_input.CurrentManifestInput = .{};
+    var empty_product: current_product.CurrentProduct = .{};
+    try std.testing.expectError(error.InvalidCurrent, composition.composeUntil(std.testing.io, &empty_current, &empty_product, "/tmp/frozen-maru", &output, &real_deadline, &result));
 }
 
 test "strict probe parser rejects field shape canonical and range drift" {
@@ -143,6 +249,12 @@ test "capture storage cannot overlap current product or frozen pathname authorit
     var pathname_storage: ["/tmp/frozen-maru".len:0]u8 = "/tmp/frozen-maru".*;
     try std.testing.expectError(error.InvalidOwner, composition.composeWith(&probe, std.testing.io, &current_value, &product, &pathname_storage, pathname_storage[0..], 1, &result));
     try std.testing.expectEqual(@as(usize, 0), probe.calls);
+
+    probe = .{ .foreign_output = "{\"mrsh_major\":2,\"screen_codec\":2,\"handoff_reader_min\":1,\"handoff_reader_max\":1,\"app_host_abi\":180}\n" };
+    var output: [composition.max_probe_bytes]u8 = undefined;
+    try std.testing.expectError(error.InvalidProbe, composition.composeWith(&probe, std.testing.io, &current_value, &product, "/tmp/frozen-maru", &output, 1, &result));
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }
 
 test "production owner types instantiate the compatibility boundary" {

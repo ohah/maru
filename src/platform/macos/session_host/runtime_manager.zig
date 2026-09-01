@@ -4940,9 +4940,13 @@ test "P4 E2b runtime manager shares one canonical observation per cadence epoch"
     const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
     surface.lockCore(std.testing.io);
     surface.core.write(
-        "\x1b]7;file://localhost/tmp/metadata-repo\x07" ++
+        // ⚠️ **순서는 제품 순서다**: `5379`(ssh 진입) → 그 세션의 `OSC 7` → 제목.
+        // 래퍼는 `exec` 직전에 5379 를 보내므로 그 앞의 OSC 7 은 「ssh 직전 로컬 셸」의 것이고 진입과
+        // 함께 무효가 된다(`dispatchMaru` — ssh-integration.md §9.6). 이 test 가 무는 것은 **한 cadence
+        // epoch 에 관측이 하나** 라는 것이지 순서가 아니다.
+        "\x1b]5379;ssh;user@workbox\x07" ++
+            "\x1b]7;file://localhost/tmp/metadata-repo\x07" ++
             "\x1b]2;metadata-title\x07" ++
-            "\x1b]5379;ssh;user@workbox\x07" ++
             "\x1b]133;C\x07",
     ) catch |err| {
         surface.unlockCore(std.testing.io);

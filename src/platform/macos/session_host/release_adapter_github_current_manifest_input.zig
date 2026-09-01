@@ -13,6 +13,7 @@ const file_mod = @import("release_adapter_github_manifest_file");
 const authenticated_mod = @import("release_adapter_github_current_manifest_attestation");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const candidate_mod = @import("release_adapter_github_current_manifest_candidate");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const Error = error{
     InvalidOwner,
@@ -45,7 +46,12 @@ pub const CurrentManifestInput = struct {
 
     /// Revalidates the descriptor-owned attested leaf and its owned canonical byte copy.
     pub fn revalidate(self: *const @This()) Error!void {
-        if (self.owner != self or self.authenticated.value() == null) return error.InvalidOwner;
+        if (self.owner != self) return error.InvalidOwner;
+        try validatePrepared(self);
+    }
+
+    fn validatePrepared(self: *const @This()) Error!void {
+        if (self.authenticated.value() == null) return error.InvalidOwner;
         const input = self.input orelse return error.InvalidOwner;
         const observed = self.file.revalidate() catch return error.InvalidManifestInput;
         if (input.bytes.len != input.size or observed.size != input.size or
@@ -156,6 +162,66 @@ pub fn authenticateCandidateWith(
 ) !void {
     try prepareCandidate(allocator, context, current, candidate, workdir, result);
     authenticated_mod.authenticateWith(attestor, authority, executor, allocator, context, current, result.input.?.bytes, &result.file, executable, token, output, budget_ns, &result.authenticated) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    result.owner = result;
+}
+
+pub fn authenticateCandidateUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    current: *const current_mod.CurrentReleaseAuthority,
+    candidate: *candidate_mod.CurrentManifestCandidate,
+    workdir: [:0]const u8,
+    cli: Cli,
+    token: []const u8,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *CurrentManifestInput,
+) !void {
+    try prepareCandidate(allocator, context, current, candidate, workdir, result);
+    authenticated_mod.authenticateUntil(io, allocator, context, current, result.input.?.bytes, &result.file, .{ .path = cli.path, .pinned = cli.pinned }, token, output, deadline, &result.authenticated) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    try publishUntil(deadline, result, allocator);
+}
+
+pub fn authenticateCandidateUntilWith(
+    attestor: anytype,
+    authority: anytype,
+    executor: anytype,
+    deadline: anytype,
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    current: *const current_mod.CurrentReleaseAuthority,
+    candidate: *candidate_mod.CurrentManifestCandidate,
+    workdir: [:0]const u8,
+    executable: [:0]const u8,
+    token: []const u8,
+    output: []u8,
+    result: *CurrentManifestInput,
+) !void {
+    try prepareCandidate(allocator, context, current, candidate, workdir, result);
+    authenticated_mod.authenticateUntilWith(attestor, authority, executor, deadline, allocator, context, current, result.input.?.bytes, &result.file, executable, token, output, &result.authenticated) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    try publishUntil(deadline, result, allocator);
+}
+
+fn publishUntil(deadline: anytype, result: *CurrentManifestInput, allocator: std.mem.Allocator) !void {
+    _ = deadline.remaining() catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    result.validatePrepared() catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    _ = deadline.remaining() catch |err| {
         abort(result, allocator) catch return error.CleanupFailed;
         return err;
     };

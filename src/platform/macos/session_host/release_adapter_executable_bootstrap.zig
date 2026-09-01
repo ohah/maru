@@ -25,6 +25,7 @@ pub const PrePublish = struct {
     evidence: []const u8,
     dmg: []const u8,
     frozen_executable: []const u8,
+    work_dir: []const u8,
     summary_out: []const u8,
 };
 
@@ -155,6 +156,7 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .evidence = value.evidence,
                 .dmg = value.dmg,
                 .frozen_executable = value.frozen_executable,
+                .work_dir = value.work_dir,
                 .summary_out = value.summary_out,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),

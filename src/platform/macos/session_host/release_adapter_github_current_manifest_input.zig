@@ -42,6 +42,19 @@ pub const CurrentManifestInput = struct {
         return if (self.input) |input| input.bytes else null;
     }
 
+    /// Revalidates the descriptor-owned attested leaf and its owned canonical byte copy.
+    pub fn revalidate(self: *const @This()) Error!void {
+        if (self.owner != self or self.authenticated.value() == null) return error.InvalidOwner;
+        const input = self.input orelse return error.InvalidOwner;
+        const observed = self.file.revalidate() catch return error.InvalidManifestInput;
+        if (input.bytes.len != input.size or observed.size != input.size or
+            !std.mem.eql(u8, observed.sha256, &input.sha256)) return error.InvalidManifestInput;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(input.bytes, &digest, .{});
+        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &digest_hex, &input.sha256)) return error.InvalidManifestInput;
+    }
+
     /// Cleanup can be retried when filesystem removal fails. Owned input bytes and parsed
     /// attestation state are released once; the descriptor owner remains live until its directory
     /// has actually disappeared.

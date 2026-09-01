@@ -59,6 +59,12 @@ pub const CurrentProduct = struct {
         return self.frozen.parent_fd;
     }
 
+    pub fn revalidateHeld(self: *const @This()) !View {
+        const current = self.value() orelse return error.InvalidOwner;
+        const frozen = self.frozen.revalidateHeld() catch return error.FrozenChanged;
+        return .{ .frozen = frozen, .apple = current.apple };
+    }
+
     pub fn validatePathMutationSeal(self: *const @This(), seal: files.PathMutationSeal) !void {
         return self.frozen.validatePathMutationSeal(seal);
     }

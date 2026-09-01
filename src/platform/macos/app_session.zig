@@ -70154,6 +70154,101 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
 // [E1 §6.1] **트리거까지** 제품 경로로 몬다: 실제 claude 화면(실행 중 footer → 프롬프트 상자)을 term 코어에 흘려
 // `pollAgentState`가 running → idle을 판정하고, 그 순간 스냅샷이 찍히는지 본다. 위 테스트가 "찍힌 뒤"를 보고
 // 이 테스트가 "언제 찍는가"를 봐서, 에이전트 없이 §6.1 전 구간이 닫힌다.
+test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 풀린다 (§1.1 C1 · 제품 경로)" {
+    // **순수 판정자로는 못 잡는 사슬을 본다**: 화면 판정 → `screen_visible_blocker` → 중재 → 배지.
+    // 사용자가 보고한 「엔터를 눌러도 진행중으로 안 바뀐다」가 바로 이 사슬이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .claude;
+    term.rt.observation.availability = .current;
+    // 훅 모드로 세운다(계약 §1.2 의 세 입력).
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    term.agent_hook_log_present = true;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(session, term));
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+
+    // ① 승인 대기 — 훅이 그렇게 말했고 화면에도 그 chrome 이 있다.
+    term.agent_hook_state = .blocked;
+    try surface.core.write("\x1b[2J\x1b[H  Would you like to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n");
+    term.rt.observation.observer_generation +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expect(term.agent_screen_visible_blocker);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
+
+    // ② 사용자가 승인했다. **훅은 그것을 모른다**(provider 가 해제 이벤트를 안 준다) — 훅 자리는 그대로
+    //    `blocked` 다. 화면에서 chrome 이 사라지는 것이 유일한 근거이고, C1 이 그것으로 푼다.
+    try surface.core.write("\r\n" ** 60);
+    try surface.core.write("● 작업을 시작합니다\r\n  esc to interrupt\r\n");
+    term.rt.observation.observer_generation +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expect(!term.agent_screen_visible_blocker);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_hook_state); // 훅은 여전히
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state); // 배지는 풀렸다
+    try std.testing.expectEqualStrings("C1", term.agent_state_rule);
+    try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.screen, term.agent_state_origin);
+}
+
+test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)" {
+    // **generation 을 올리지 않는 것이 이 판정자의 요점이다.** codex 오류 턴은 훅이 running 에 멈춘 채
+    // 화면만 idle 이고 **출력이 끊긴** 상태다. 예전 fast-path 는 정확히 그 상태를 「다시 볼 것 없다」로
+    // 읽어 화면 관측을 얼렸고, C2 카운터가 1 에서 멈춰 **영영 안 닫혔다**(§9-10 이 안 닫힌 채였다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .codex;
+    term.rt.observation.availability = .current;
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    term.agent_hook_log_present = true;
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+
+    // 훅은 running 에 멈췄다(codex 오류 턴 — `Stop` 도 `StopFailure` 도 오지 않는다).
+    term.agent_hook_state = .running;
+    try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n› \r\n  Context 2% used\r\n");
+    term.rt.observation.observer_generation +%= 1;
+
+    // 1회차 — 화면은 idle 이지만 훅을 아직 못 덮는다.
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expect(term.agent_screen_visible_idle);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqualStrings("C2-pending", term.agent_state_rule);
+
+    // 2회차·3회차 — **출력이 없으므로 generation 을 올리지 않는다.** 그래도 화면을 다시 읽어야 한다.
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqualStrings("C2-pending", term.agent_state_rule);
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expectEqualStrings("C2", term.agent_state_rule);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_hook_state); // 훅은 여전히
+
+    // 닫힌 뒤에는 다시 건너뛴다 — 그 구간에만 더 본다(§1.1 C2 의 대가).
+    const seq_after = term.agent_screen_seq;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_after, term.agent_screen_seq);
+}
+
 test "에이전트 화면이 running → idle이 되는 순간 작업트리가 굳는다" {
     // **이 테스트도 턴 스냅샷을 실제로 찍겠다고 밝힌다**(`test_allow_turn_snapshot`) — 링이 채워지는지
     // 보는 테스트라 게이트를 켜야 한다. 앞서 하나만 켜고 이 자리를 놓쳐 CI 가 빨개졌다.

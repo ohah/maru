@@ -1468,6 +1468,11 @@ pub fn build(b: *std.Build) void {
             "turning the agent hooks gate off removes what we installed and nothing else",
             "hook mode fills state and conversation from the event log, and only then",
             "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알림은 훅만 낸다",
+            // §1.1 의 C1·C2 를 **제품 사슬**(화면 판정 → 중재 → 배지)에서 본다. 순수 판정자는 권위표만
+            // 보고, 그 사이 배선이 끊겨도 초록이다 — 실제로 fast-path 가 C2 를 굶기는 동안 게이트가
+            // 초록이었다.
+            "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 풀린다 (§1.1 C1 · 제품 경로)",
+            "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)",
             "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리킨다 — 제품 spawn 으로 건넌다",
             "host 가 만드는 칸과 GUI 가 읽는 칸이 같은 경로다 — 두 모듈이 같은 이름을 짓는다",
             "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 GUI 가 띄웠다",
@@ -1498,11 +1503,11 @@ pub fn build(b: *std.Build) void {
     // **+10 은 원격(ssh) 축이다**(docs/plans/remote-agent-state.md RA5). 그 열을 여기 적기 전까지는
     // 그 판정자들이 **어느 게이트에도 안 매달려 있었다** — 파일에 있으니 도는 줄 알았는데 이름 필터는
     // 0개 매치도 초록이라, 정확히 이 주석이 경고하는 사고가 원격 축에서 한 번 더 날 뻔했다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=33");
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=35");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=33");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=35");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

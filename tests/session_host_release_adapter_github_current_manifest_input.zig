@@ -9,6 +9,7 @@ const manifest = @import("release_manifest");
 const context_mod = @import("release_adapter_context");
 const current_mod = @import("release_adapter_github_current_release_authority");
 const attestation = @import("release_adapter_github_attestation");
+const candidate_mod = @import("release_adapter_github_current_manifest_candidate");
 const composition = @import("release_adapter_github_current_manifest_input");
 
 const file_name = "Maru-1.2.3-session-host-release.json";
@@ -106,6 +107,54 @@ test "canonical pathname publishes owned bytes private file and attestation desp
     try std.testing.expectEqualStrings(fixture.bytes, result.bytes().?);
     var copied = result;
     try std.testing.expect(copied.value() == null);
+}
+
+test "authenticated candidate transfers the exact single-read input without reopening pathname" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var current = currentAuthority();
+    current.owner = &current;
+    var candidate_owner: candidate_mod.CurrentManifestCandidate = .{};
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    const original_pointer = candidate_owner.bytes().?.ptr;
+    var attestor = Attestor{ .original = std.mem.sliceTo(&fixture.manifest_path, 0) };
+    var authority = Authority{};
+    var executor = Executor{};
+    var output: [8192]u8 = undefined;
+    var result: composition.CurrentManifestInput = .{};
+    try composition.authenticateCandidateWith(&attestor, &authority, &executor, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result);
+    defer result.deinit(std.testing.allocator) catch {};
+    try std.testing.expect(attestor.seen_private);
+    try std.testing.expectEqual(original_pointer, result.bytes().?.ptr);
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expectError(error.InvalidOwner, candidate_owner.takeInput());
+}
+
+test "candidate is preserved before consume and cleanup owns failures after consume" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var current = currentAuthority();
+    var candidate_owner: candidate_mod.CurrentManifestCandidate = .{};
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    var attestor = Attestor{ .fail = true };
+    var authority = Authority{};
+    var executor = Executor{};
+    var output: [8192]u8 = undefined;
+    var result: composition.CurrentManifestInput = .{};
+    try std.testing.expectError(error.InvalidCurrent, composition.authenticateCandidateWith(&attestor, &authority, &executor, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result));
+    try std.testing.expect(candidate_owner.value() != null);
+    current.owner = &current;
+    current.release_id = 999;
+    try std.testing.expectError(error.InvalidCurrent, composition.authenticateCandidateWith(&attestor, &authority, &executor, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result));
+    try std.testing.expect(candidate_owner.value() != null);
+    current.release_id = candidate().release.id;
+    try std.testing.expectError(error.ChildFailed, composition.authenticateCandidateWith(&attestor, &authority, &executor, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result));
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expect(result.bytes() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "private", .{}));
 }
 
 test "noncanonical relative empty symlink directory and oversized inputs publish nothing" {

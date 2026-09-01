@@ -9,6 +9,7 @@ const environment = @import("release_adapter_github_environment");
 const deployment = @import("release_adapter_github_deployment");
 const transport_macos = @import("release_adapter_github_transport_macos");
 const cli_authority = @import("release_adapter_github_cli_authority");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const max_total_commands: usize = 5 + deployment.max_collection_entries;
 pub const Error = error{ InvalidOwner, ClockFailed, TimedOut };
@@ -80,19 +81,32 @@ pub fn authenticate(io: std.Io, allocator: std.mem.Allocator, expected: context_
     return authenticateWith(&authority, &executor, &clock, allocator, expected, cli.path, token, response, budget_ns, result);
 }
 
+pub fn authenticateUntil(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, deadline: *deadline_mod.Deadline, result: *CurrentGitHubAuthority) !void {
+    var authority = RealAuthority{ .pinned = cli.pinned };
+    var executor = transport_macos.BoundedExecutor{ .io = io };
+    return authenticateUntilWith(&authority, &executor, deadline, allocator, expected, cli.path, token, response, result);
+}
+
 pub fn authenticateWith(authority: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, result: *CurrentGitHubAuthority) !void {
     if (result.owner != null) return error.InvalidOwner;
     if (budget_ns <= 0) return error.TimedOut;
     const started = try clock.now();
-    const deadline = std.math.add(i128, started, budget_ns) catch return error.TimedOut;
-    var bounded = DeadlineExecutor(@TypeOf(executor), @TypeOf(clock)){ .executor = executor, .clock = clock, .deadline = deadline };
+    if (started < 0) return error.ClockFailed;
+    const expires = std.math.add(i128, started, budget_ns) catch return error.TimedOut;
+    if (expires <= started) return error.TimedOut;
+    var deadline = BudgetDeadline(@TypeOf(clock)){ .clock = clock, .started = started, .expires = expires };
+    return authenticateUntilWith(authority, executor, &deadline, allocator, expected, executable, token, response, result);
+}
 
-    const repository_bytes = try fetch(authority, &bounded, allocator, executable, token, .repository, response, budget_ns);
+pub fn authenticateUntilWith(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, result: *CurrentGitHubAuthority) !void {
+    if (result.owner != null) return error.InvalidOwner;
+
+    const repository_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .repository, response);
     var parsed_repository = try repository.parseAndBind(allocator, repository_bytes, expected.repository);
     defer parsed_repository.deinit();
     const repository_id = parsed_repository.repository().id;
 
-    const run_bytes = try fetch(authority, &bounded, allocator, executable, token, .{ .workflow_run = expected.build.run_id }, response, budget_ns);
+    const run_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .workflow_run = expected.build.run_id }, response);
     var parsed_run = try run.parseAndBind(allocator, run_bytes, expected);
     defer parsed_run.deinit();
     const run_observation = parsed_run.observation().*;
@@ -100,18 +114,18 @@ pub fn authenticateWith(authority: anytype, executor: anytype, clock: anytype, a
     if (run_observation.source_commit.len != source_commit.len) return error.RunMismatch;
     @memcpy(&source_commit, run_observation.source_commit);
 
-    const environment_bytes = try fetch(authority, &bounded, allocator, executable, token, .environment, response, budget_ns);
+    const environment_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .environment, response);
     var parsed_environment = try environment.parseAndBind(allocator, environment_bytes);
     defer parsed_environment.deinit();
 
     var prepared: deployment.Prepared = .{};
-    const jobs_bytes = try fetch(authority, &bounded, allocator, executable, token, .{ .attempt_jobs = .{ .run_id = expected.build.run_id, .attempt = expected.build.run_attempt } }, response, budget_ns);
+    const jobs_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .attempt_jobs = .{ .run_id = expected.build.run_id, .attempt = expected.build.run_attempt } }, response);
     try prepared.prepareJobs(allocator, jobs_bytes, expected);
     defer prepared.deinit() catch {};
-    const deployments_bytes = try fetch(authority, &bounded, allocator, executable, token, .{ .deployments = .{ .source_sha = expected.source_commit } }, response, budget_ns);
+    const deployments_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .deployments = .{ .source_sha = expected.source_commit } }, response);
     try prepared.prepareDeployments(allocator, deployments_bytes, expected);
     for (try prepared.candidateIds()) |deployment_id| {
-        const status_bytes = try fetch(authority, &bounded, allocator, executable, token, .{ .deployment_statuses = deployment_id }, response, budget_ns);
+        const status_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .deployment_statuses = deployment_id }, response);
         try prepared.acceptStatuses(allocator, deployment_id, status_bytes);
     }
     const deployment_observation = try prepared.finish(parsed_environment.observation().*);
@@ -127,23 +141,23 @@ pub fn authenticateWith(authority: anytype, executor: anytype, clock: anytype, a
     result.owner = result;
 }
 
-fn fetch(authority: anytype, executor: anytype, allocator: std.mem.Allocator, executable: [:0]const u8, token: []const u8, request: transport_macos.Request, response: []u8, budget_ns: i128) ![]const u8 {
+fn fetchUntil(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, executable: [:0]const u8, token: []const u8, request: transport_macos.Request, response: []u8) ![]const u8 {
+    _ = try deadline.remaining();
     try authority.revalidate(allocator, executable);
+    const budget_ns = try deadline.remaining();
     return transport_macos.fetchWith(executor, allocator, executable, token, request, response, budget_ns);
 }
 
-fn DeadlineExecutor(comptime Executor: type, comptime Clock: type) type {
+fn BudgetDeadline(comptime Clock: type) type {
     return struct {
-        executor: Executor,
         clock: Clock,
-        deadline: i128,
-        fn remaining(self: *@This()) !i128 {
+        started: i128,
+        expires: i128,
+        pub fn remaining(self: *@This()) !i128 {
             const now = try self.clock.now();
-            if (now >= self.deadline) return error.TimedOut;
-            return self.deadline - now;
-        }
-        pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, child_environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
-            return self.executor.capture(executable, args, child_environment, output, try self.remaining());
+            if (now < self.started) return error.ClockFailed;
+            if (now >= self.expires) return error.TimedOut;
+            return self.expires - now;
         }
     };
 }

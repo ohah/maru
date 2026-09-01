@@ -5,6 +5,8 @@ const manifest = @import("release_manifest");
 const identity = @import("release_adapter_identity");
 const process = @import("bounded_process");
 const download_command = @import("release_adapter_github_download_command");
+const cli_authority = @import("release_adapter_github_cli_authority");
+const deadline_mod = @import("release_adapter_deadline");
 
 const max_args = 9;
 const max_token_bytes = manifest.max_scalar_string_bytes;
@@ -16,6 +18,7 @@ pub const Error = error{
     InvalidBudget,
     InvalidOutput,
     InvalidCapture,
+    InvalidOwner,
     EmptyManifest,
     DigestMismatch,
 } || process.Error;
@@ -41,7 +44,22 @@ pub const Observed = struct {
     bytes: []const u8,
 };
 
+pub const Cli = struct {
+    path: [:0]const u8,
+    pinned: *const cli_authority.PinnedExecutable,
+};
+
+const RealAuthority = struct {
+    pinned: *const cli_authority.PinnedExecutable,
+    fn revalidate(self: *@This(), allocator: std.mem.Allocator, path: [:0]const u8) !void {
+        try cli_authority.revalidate(allocator, path, self.pinned);
+    }
+};
+
 pub fn plan(storage: *PlanStorage, expected: Expected) Error!Plan {
+    const storage_bytes = std.mem.asBytes(storage);
+    if (rangesOverlap(storage_bytes, expected.tag) or rangesOverlap(storage_bytes, expected.sha256))
+        return error.InvalidOwner;
     try validateExpected(expected);
     const name = std.fmt.bufPrint(&storage.name, "Maru-{s}-session-host-release.json", .{expected.tag[1..]}) catch
         return error.InvalidExpected;
@@ -58,10 +76,8 @@ pub fn fetchWith(
     output: []u8,
     budget_ns: i128,
 ) Error!Observed {
-    if (!validAbsoluteExecutable(executable)) return error.InvalidExecutable;
-    if (!validScalar(token)) return error.InvalidToken;
+    try validateInputs(storage, executable, token, expected, output);
     if (budget_ns <= 0) return error.InvalidBudget;
-    if (output.len == 0 or output.len > manifest.max_manifest_bytes) return error.InvalidOutput;
     const request = try plan(storage, expected);
     var token_storage: ["GH_TOKEN=".len + max_token_bytes]u8 = undefined;
     const token_entry = std.fmt.bufPrint(&token_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
@@ -89,6 +105,52 @@ pub fn fetchWith(
     return .{ .name = request.name, .sha256 = expected.sha256, .bytes = captured };
 }
 
+pub fn fetchUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storage: *PlanStorage,
+    cli: Cli,
+    token: []const u8,
+    expected_value: Expected,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+) !Observed {
+    const pinned_bytes = std.mem.asBytes(cli.pinned);
+    if (rangesOverlap(std.mem.asBytes(deadline), pinned_bytes) or
+        rangesOverlap(std.mem.asBytes(storage), pinned_bytes) or
+        rangesOverlap(cli.path, pinned_bytes) or rangesOverlap(token, pinned_bytes) or
+        rangesOverlap(expected_value.tag, pinned_bytes) or rangesOverlap(expected_value.sha256, pinned_bytes) or
+        rangesOverlap(output, pinned_bytes)) return error.InvalidOwner;
+    var authority = RealAuthority{ .pinned = cli.pinned };
+    var executor = BoundedExecutor{ .io = io };
+    return fetchUntilWith(&authority, &executor, deadline, allocator, storage, cli.path, token, expected_value, output);
+}
+
+pub fn fetchUntilWith(
+    authority: anytype,
+    executor: anytype,
+    deadline: anytype,
+    allocator: std.mem.Allocator,
+    storage: *PlanStorage,
+    executable: [:0]const u8,
+    token: []const u8,
+    expected_value: Expected,
+    output: []u8,
+) !Observed {
+    try validateInputs(storage, executable, token, expected_value, output);
+    const deadline_bytes = std.mem.asBytes(deadline);
+    if (rangesOverlap(deadline_bytes, std.mem.asBytes(storage)) or
+        rangesOverlap(deadline_bytes, executable) or rangesOverlap(deadline_bytes, token) or
+        rangesOverlap(deadline_bytes, expected_value.tag) or rangesOverlap(deadline_bytes, expected_value.sha256) or
+        rangesOverlap(deadline_bytes, output)) return error.InvalidOwner;
+    _ = try deadline.remaining();
+    try authority.revalidate(allocator, executable);
+    const budget = try deadline.remaining();
+    const observed = try fetchWith(executor, storage, executable, token, expected_value, output, budget);
+    _ = try deadline.remaining();
+    return observed;
+}
+
 pub fn fetch(
     io: std.Io,
     storage: *PlanStorage,
@@ -105,6 +167,26 @@ pub fn fetch(
 fn validateExpected(expected: Expected) Error!void {
     if (!identity.canonicalTag(expected.tag) or !identity.lowerHex(expected.sha256, 64))
         return error.InvalidExpected;
+}
+
+fn validateInputs(storage: *const PlanStorage, executable: []const u8, token: []const u8, expected_value: Expected, output: []u8) Error!void {
+    const storage_bytes = std.mem.asBytes(storage);
+    if (rangesOverlap(storage_bytes, executable) or rangesOverlap(storage_bytes, token) or
+        rangesOverlap(storage_bytes, expected_value.tag) or rangesOverlap(storage_bytes, expected_value.sha256) or
+        rangesOverlap(storage_bytes, output) or rangesOverlap(output, executable) or
+        rangesOverlap(output, token) or rangesOverlap(output, expected_value.tag) or
+        rangesOverlap(output, expected_value.sha256)) return error.InvalidOwner;
+    if (!validAbsoluteExecutable(executable)) return error.InvalidExecutable;
+    if (!validScalar(token)) return error.InvalidToken;
+    if (output.len == 0 or output.len > manifest.max_manifest_bytes) return error.InvalidOutput;
+    try validateExpected(expected_value);
+}
+
+fn rangesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_end = std.math.add(usize, @intFromPtr(left.ptr), left.len) catch return true;
+    const right_end = std.math.add(usize, @intFromPtr(right.ptr), right.len) catch return true;
+    return @intFromPtr(left.ptr) < right_end and @intFromPtr(right.ptr) < left_end;
 }
 
 fn validAbsoluteExecutable(value: []const u8) bool {

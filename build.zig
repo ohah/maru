@@ -13000,7 +13000,8 @@ pub fn build(b: *std.Build) void {
         run_manifest_download_tests.setCwd(b.path("."));
         session_host_release_adapter_github_manifest_download_step.dependOn(&run_manifest_download_tests.step);
         session_host_step.dependOn(&run_manifest_download_tests.step);
-        if (posix_host_tests) test_step.dependOn(&run_manifest_download_tests.step);
+        if (macos_host_tests) test_step.dependOn(&run_manifest_download_tests.step);
+        macos_only_test_step.dependOn(&run_manifest_download_tests.step);
     }
     const session_host_release_adapter_github_download_step = b.step(
         "test-session-host-release-adapter-github-download",

@@ -544,10 +544,23 @@ pub fn requireDistinct(identities: []const Identity) Error!void {
 }
 
 pub fn publishSummaryExclusive(path: [:0]const u8, bytes: []const u8) Error!void {
+    var published: PinnedReleaseFile = .{};
+    try publishSummaryOwnedExclusive(&published, path, bytes);
+    try published.deinit();
+}
+
+/// Publishes a summary without reopening it to derive manifest metadata. The held temporary-file
+/// descriptor becomes the final leaf descriptor after the exclusive rename, so size and digest
+/// authority cross the publication boundary without a pathname TOCTOU window.
+pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const u8, bytes: []const u8) Error!void {
+    if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
     if (bytes.len == 0 or bytes.len > summary_cap) return error.TooLarge;
     var leaf_buf: [std.fs.max_name_bytes:0]u8 = undefined;
     const parent = try openParent(path, &leaf_buf);
-    defer _ = c.close(parent.fd);
+    var keep_parent = false;
+    defer {
+        if (!keep_parent) _ = c.close(parent.fd);
+    }
     var existing: posix.Stat = undefined;
     if (c.fstatat(parent.fd, parent.leaf.ptr, &existing, posix.AT.SYMLINK_NOFOLLOW) == 0)
         return error.DestinationExists;
@@ -562,7 +575,7 @@ pub fn publishSummaryExclusive(path: [:0]const u8, bytes: []const u8) Error!void
         temp = std.fmt.bufPrintZ(&temp_buf, ".maru-release-summary-{x}.tmp", .{nonce}) catch
             return error.CreateFailed;
         fd = c.openat(parent.fd, temp.ptr, .{
-            .ACCMODE = .WRONLY,
+            .ACCMODE = .RDWR,
             .CREAT = true,
             .EXCL = true,
             .CLOEXEC = true,
@@ -572,10 +585,15 @@ pub fn publishSummaryExclusive(path: [:0]const u8, bytes: []const u8) Error!void
         if (posix.errno(-1) != .EXIST) return error.CreateFailed;
     }
     if (fd < 0) return error.CreateFailed;
-    var published = false;
+    var temp_exists = true;
+    var final_exists = false;
+    var keep_fd = false;
     defer {
-        if (fd >= 0) _ = c.close(fd);
-        if (!published) _ = c.unlinkat(parent.fd, temp.ptr, 0);
+        var removed = false;
+        if (temp_exists) removed = unlinkHeldLeaf(parent.fd, temp, fd);
+        if (final_exists) removed = unlinkHeldLeaf(parent.fd, parent.leaf, fd) or removed;
+        if (removed) _ = c.fsync(parent.fd);
+        if (!keep_fd) _ = c.close(fd);
     }
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -588,18 +606,65 @@ pub fn publishSummaryExclusive(path: [:0]const u8, bytes: []const u8) Error!void
         offset += @intCast(count);
     }
     if (c.fchmod(fd, 0o600) != 0 or c.fsync(fd) != 0) return error.SyncFailed;
-    const closing_fd = fd;
-    fd = -1;
-    if (c.close(closing_fd) != 0) return error.SyncFailed;
+    var before_stat: posix.Stat = undefined;
+    if (c.fstat(fd, &before_stat) != 0) return error.ReadFailed;
+    const before = try releaseFingerprint(before_stat, false);
+    if (before.link_count != 1 or before.size != bytes.len or before.mode & 0o777 != 0o600)
+        return error.FileChanged;
+    const digest = try hashExact(fd, before.size);
     if (renameatx_np(parent.fd, temp.ptr, parent.fd, parent.leaf.ptr, rename_excl) != 0) {
         if (posix.errno(-1) == .EXIST) return error.DestinationExists;
         return error.PublishFailed;
     }
-    published = true;
-    if (c.fsync(parent.fd) != 0) {
-        if (c.unlinkat(parent.fd, parent.leaf.ptr, 0) == 0) _ = c.fsync(parent.fd);
-        return error.SyncFailed;
-    }
+    temp_exists = false;
+    final_exists = true;
+    if (c.fsync(parent.fd) != 0) return error.SyncFailed;
+
+    const final_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+    defer _ = c.close(final_fd);
+    var held_stat: posix.Stat = undefined;
+    var final_stat: posix.Stat = undefined;
+    var parent_stat: posix.Stat = undefined;
+    if (c.fstat(fd, &held_stat) != 0 or c.fstat(final_fd, &final_stat) != 0 or c.fstat(parent.fd, &parent_stat) != 0)
+        return error.FileChanged;
+    const held = releaseFingerprint(held_stat, false) catch return error.FileChanged;
+    const reopened = releaseFingerprint(final_stat, false) catch return error.FileChanged;
+    const final_digest = hashExact(fd, held.size) catch return error.FileChanged;
+    // rename may legitimately advance ctime, so bind the pre-rename observation by inode, size,
+    // mode and a second digest while requiring the post-rename held/reopened fingerprints exactly.
+    if (before.identity.device != held.identity.device or before.identity.inode != held.identity.inode or
+        before.size != held.size or before.mode != held.mode or !sameFingerprint(held, reopened) or held.link_count != 1 or held.size != bytes.len or
+        held.mode & 0o777 != 0o600 or !std.mem.eql(u8, &digest, &final_digest))
+        return error.FileChanged;
+    const parent_fingerprint = directoryFingerprint(parent_stat) catch return error.FileChanged;
+    var path_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+    result.* = .{
+        .owner = result,
+        .fd = fd,
+        .parent_fd = parent.fd,
+        .path_len = path.len,
+        .path_sha256 = path_digest,
+        .fingerprint = held,
+        .parent_fingerprint = parent_fingerprint,
+        .sha256 = digest,
+        .executable = false,
+    };
+    keep_fd = true;
+    keep_parent = true;
+    final_exists = false;
+}
+
+/// A failed publication may race with a pathname replacement. Only remove the leaf if it still
+/// names the inode held by this operation; leaving residue is safer than deleting foreign data.
+fn unlinkHeldLeaf(parent_fd: c.fd_t, leaf: [:0]const u8, held_fd: c.fd_t) bool {
+    var held: posix.Stat = undefined;
+    var path: posix.Stat = undefined;
+    if (c.fstat(held_fd, &held) != 0 or
+        c.fstatat(parent_fd, leaf.ptr, &path, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        held.dev != path.dev or held.ino != path.ino)
+        return false;
+    return c.unlinkat(parent_fd, leaf.ptr, 0) == 0;
 }
 
 pub fn createWorkDirExclusive(path: [:0]const u8) Error!void {

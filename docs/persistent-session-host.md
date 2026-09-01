@@ -53,9 +53,26 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > `runtime-handle + runtime-state="ended"`를 owned 상태로 반복 저장하고, 두 번째 이후 재실행에서 host
 > probe·attach·새 셸 spawn 0을 자동 gate로 고정하는 durable tombstone이다.
 >
-> **후속/백로그**(2026-08-24 코드 대조로 정리): incremental checkpoint, GUI 부재 시 OS 배너, **기본값 `true`
-> 전환**. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료 여부는 각 절의 "구현 상태" 표식으로
-> 구분한다**(표식 없는 서술은 목표 설계).
+> **후속/백로그**(2026-09-01 코드 대조로 정리 — 앞선 2026-08-24 목록의 셋 중 **둘은 이미 닫혀 있었다**):
+> **기본값 `true` 전환**(사용자 결정 + 아래 G3 릴리스 A/B 계약). 이 문서는 그 목표 상태를 함께 기술한다 —
+> **구현 완료 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
+>
+> ✅ **닫힌 둘**(옛 목록에 남아 있던 것):
+> - **incremental checkpoint** — 신호(`AppSession.workspaceChanged(kind)`)부터 구동(디바운스 500 ms·재시도
+>   1 s→30 s)과 원자적 발행(`platform/macos/workspace_checkpoint_file.zig`)까지 배선돼 있고(§GUI process
+>   crash-consistent manifest 의 「구현 상태(2026-08-28)」), crash 축도 **단계별 주입으로 검증한다** —
+>   `PublishPhase{temp_closed, replaced}` 각 지점에서 죽인 뒤 다음 발행이 온전히 커밋되는지 본다
+>   (`tests/workspace_checkpoint_file.zig` 의 `crashAtPhase`). 남은 것은 구현이 아니라 **서명 `.app` 전체
+>   종료·재실행 아티팩트**이며, 그것이 아래 P4 gate 문장이 가리키는 대상이다.
+> - **GUI 부재 시 OS 배너** — 데몬이 직접 게시한다. `session_host/notification_os_delivery.zig`(P4 N2b2,
+>   OS 중립 상태 머신) → `notification_macos_adapter.zig` → C seam `session_host_notification_adapter.h`
+>   → **ObjC `session_host_notification_adapter.m` 의 `UNUserNotificationCenter`**.
+>   ⚠️ `session_host/*.zig` 만 grep 하면 `UNUserNotification` 이 0건이라 미구현으로 오판한다 — 실제 게시는
+>   **ObjC 로 한 디렉터리 위**에 있다.
+>
+> ⚠️ **낡은 백로그는 없는 결함보다 비싸다.** 이 목록이 옛 상태로 남아 있던 탓에 이미 닫힌 항목을 남은
+> 블로커로 세어 우선순위를 잘못 매기는 일이 **반복해서** 일어났다(바로 아래 「옛 목록에 남아 있던 셋」
+> 문단이 같은 사고를 기록한다). 항목을 지울 때는 **무엇이 적혀 있었는지**를 남긴다.
 >
 > ✅ **켠 경로를 CI 가 검증한다(2026-08-27 — `session-host-keepalive-macos`).** 하루 전까지 이 자리에는
 > 「그 스모크는 실 AppKit 창이 필요해 CI 에서 못 돈다」고 적혀 있었는데, **한 번도 시도한 적이 없는

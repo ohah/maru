@@ -90,6 +90,19 @@ pub const Parsed = struct {
     }
 };
 
+pub const ParsedDraftCollection = struct {
+    inner: std.json.Parsed([]ApiRelease),
+    bound_observation: Observation,
+
+    pub fn deinit(self: *ParsedDraftCollection) void {
+        self.inner.deinit();
+    }
+
+    pub fn observation(self: *const ParsedDraftCollection) *const Observation {
+        return &self.bound_observation;
+    }
+};
+
 /// Parses one complete bounded response and binds it to the exact release identity and lifecycle
 /// expected by the current adapter phase. Returned slices remain valid until `Parsed.deinit`.
 pub fn parseAndBind(
@@ -98,7 +111,7 @@ pub fn parseAndBind(
     expected: Expected,
 ) Error!Parsed {
     github_json.validateCompleteResponse(bytes) catch |err| return err;
-    if (!validExpected(expected)) return error.ReleaseMismatch;
+    if (!validExpected(expected) or expected.publication != .published_immutable) return error.ReleaseMismatch;
 
     var inner = std.json.parseFromSlice(ApiRelease, allocator, bytes, .{
         .allocate = .alloc_always,
@@ -126,6 +139,49 @@ pub fn parseAndBind(
     };
 }
 
+/// Draft releases are not returned by GitHub's release-by-tag endpoint. An authenticated caller
+/// with push access must consume the complete paginated release listing and find one exact ID/tag
+/// pair; response order and "latest" position are never authority.
+pub fn parseDraftCollectionAndBind(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected: Expected,
+) Error!ParsedDraftCollection {
+    github_json.validateCompleteResponse(bytes) catch |err| return err;
+    if (!validExpected(expected) or expected.publication != .draft) return error.ReleaseMismatch;
+
+    var inner = std.json.parseFromSlice([]ApiRelease, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .@"error",
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidJson,
+    };
+    errdefer inner.deinit();
+
+    var matched: ?usize = null;
+    for (inner.value, 0..) |value, index| {
+        if (value.id.value == 0) return error.ReleaseMismatch;
+        const same_id = value.id.value == expected.id;
+        const same_tag = std.mem.eql(u8, value.tag_name, expected.tag);
+        if (same_id != same_tag) return error.ReleaseMismatch;
+        if (same_id) {
+            if (matched != null or !publicationMatches(value, .draft)) return error.ReleaseMismatch;
+            matched = index;
+        }
+    }
+    const index = matched orelse return error.ReleaseMismatch;
+    return .{
+        .inner = inner,
+        .bound_observation = .{
+            .id = inner.value[index].id.value,
+            .tag = inner.value[index].tag_name,
+            .publication = .draft,
+        },
+    };
+}
+
 fn validExpected(expected: Expected) bool {
     return expected.id != 0 and
         expected.tag.len <= github_json.max_scalar_string_bytes and
@@ -149,5 +205,14 @@ pub fn parseAndBindForTest(
     expected: Expected,
 ) !void {
     var parsed = try parseAndBind(allocator, bytes, expected);
+    parsed.deinit();
+}
+
+pub fn parseDraftCollectionAndBindForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected: Expected,
+) !void {
+    var parsed = try parseDraftCollectionAndBind(allocator, bytes, expected);
     parsed.deinit();
 }

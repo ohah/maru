@@ -835,6 +835,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   중간·최종 만료 cleanup, product wrapper
   compile을 Debug·ReleaseFast actual filesystem에서 검증한다.
 
+  전체 predecessor transport의 executable `authenticateUntil`은 상위 phase의 final-address `Deadline` pointer를 받아 tag ref와
+  최대 8개 annotated-tag request에서 CLI 재검증 전후 확인하고, resolver 성공 뒤 같은 pointer를 predecessor-assets
+  `composeUntilWith`에 그대로 전달한다. transport는 remaining scalar를 downstream budget으로 바꾸거나 새 expiry를 만들지 않는다.
+  tag response buffer는 result/authenticated owner, CLI path/token/workdir와 겹칠 수 없다. sink/result/manifest/alias preflight 실패는 deadline·CLI·child 접근 0이고, tag 구간 만료는 assets sink 0, assets 구간 만료는 기존
+  download cleanup으로 residue 0이다. 기존 clock+budget entrypoint는 독립 gate 호환용으로 남는다. focused tag-chain gate는
+  0/1/8-hop과 downstream command가 하나의 injected deadline identity와 non-increasing child budget을 공유하는지,
+  result/token/workdir alias 0-call, tag→asset 경계 만료와 product wrapper compile을 Debug·ReleaseFast에서 검증한다.
+
   Current GitHub authority composition은 실행 프로세스에서 이미 strict parse된 `release_adapter_context.Context`와 checkout 전
   pin된 CLI를 받아 repository → workflow run → `release` environment → attempt jobs → source/tag/environment deployments 순서로
   closed REST request를 실행한다. 각 request 직전에 CLI pathname authority를 재검증하고 최초 positive monotonic absolute

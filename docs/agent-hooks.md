@@ -371,6 +371,44 @@ C2 가 닫는 것은 codex 오류 턴이고(§9-10), 그 자리는 지금 «다�
 그리고 **화면 스냅샷이 없으면 C2 가 아예 못 센다**(`observation.availability != .current` 면 `pollAgentState`
 가 즉시 반환한다). 이때는 훅만 있는 상태이므로 B 로 남는다 — 잘못된 idle 이 아니라 «예전과 같음» 이다.
 
+### 1.7 실측 — 실제 codex 화면으로 권위표를 돌렸다 (2026-09-01)
+
+문서와 판정자만으로는 «화면이 실제로 그렇게 보이는가» 를 모른다. codex v0.150.1 을 실제로 띄워
+(120×40 PTY) 화면을 0.4~0.5초 간격으로 뜨고, 그 텍스트를 우리 `agent_observer.detect` 와 권위표에
+그대로 넣었다. tail 규격은 제품과 같은 **마지막 48행**이다.
+
+**⑴ C2 오탐 — 없었다.** 「도는 턴이 화면에서 잠깐 idle 로 보여 C2 가 잘못 접는가」가 유일하게 남아
+있던 위험이었다.
+
+| 시나리오 | 실행 구간 | 결과 |
+| --- | --- | --- |
+| `sleep 12 && echo DONE` | 37프레임(약 18.5초) | **전부 `running`**(`rule=working_footer`), `visible_idle` 0회 |
+| `find /usr/share \| head -20000 \| wc -l` | 16프레임(약 6.4초) | **전부 `running`**, `visible_idle` 0회 |
+
+`Working (4s • esc to interrupt)` footer 와 `› Ask Codex to do anything` 프롬프트가 **한 화면에 같이
+보이는데도** footer 규칙이 이긴다. 즉 C2 가 세기 시작하는 조건 자체가 정상 실행 중에는 서지 않는다 —
+C2 는 훅이 멈춘 자리(§9-10 의 오류 턴)에서만 일한다는 설계가 실측으로 확인됐다.
+
+**⑵ C1 — 실제 승인 화면과 그 뒤 화면으로 확인했다.** 훅이 `blocked` 에 머문다는 전제를 두고 두 화면을
+권위표에 넣었다.
+
+    승인 화면  state=blocked  visible_blocker=true   rule=confirmation_prompt  → 판정 blocked (B)
+    해제 화면  state=idle     visible_blocker=false  rule=live_prompt          → 판정 running (C1)
+
+해제 화면이 **`idle` 인데도 판정이 `running`** 이다 — §1.1 이 「C1 은 idle 을 내지 않는다」로 못 박은
+C2 우회 방지가 실제 화면에서 그대로 작동했다.
+
+**이 실측이 증명하지 못하는 것.**
+
+- 캡처는 `tmux capture-pane` 이고 maru 의 렌더 경로가 아니다. 같은 평문 화면이지만 **같은 함수가 뜬
+  것은 아니다**(제품은 `dumpRecentText`).
+- **claude 는 재지 않았다.** C2 가 닫는 자리가 codex 오류 턴이라 codex 를 먼저 봤다.
+- **승인을 «수락» 하는 경로는 안 쟀다.** 승인 프롬프트를 띄우려면 위험한 명령이 필요해(codex 는
+  네트워크·`/tmp` 쓰기 정도로는 묻지 않는다) 띄운 뒤 **취소**했다. C1 이 보는 것은 «chrome 이 화면에서
+  사라졌는가» 하나이므로 수락·취소가 같은 입력이지만, 수락 직후의 화면은 여전히 미실측이다.
+- **시계열이 이어진 한 벌이 아니다.** 승인 소멸 순간을 담은 연속 캡처는 못 얻어(캡처 창이 먼저 끝났다)
+  전·후 두 화면으로 확인했다.
+
 ## 2. 이벤트 세트
 
 **여기서 «세트» 는 «우리가 거는 것» 이다** — provider 가 **가진** 이벤트는 훨씬 많다. 공개 스펙 기준 claude 는

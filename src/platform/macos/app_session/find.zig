@@ -34,8 +34,9 @@ fn activeEditorTerm(self: *AppSession) ?*Term {
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return null;
-    if (term.rt.editor_diff != null) return null; // 비교 뷰 — 위 문단
-    if (term.rt.editor_lines.len == 0) return null; // 아직 안 열렸다
+    // **비교 뷰도 검색한다**(§5.1 「비교 뷰 검색」 — 2026-09-01). 어느 열인지는
+    // `editor_diff.diffSearchSide` 가 답한다(선택이 있는 열, 없으면 왼쪽).
+    if (editor_ops.findLines(term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
     return term;
 }
 
@@ -69,7 +70,7 @@ pub fn wantedEditorFindSource(self: *AppSession) u64 {
 fn recomputeEditorFind(self: *AppSession, term: *Term) void {
     maru.session.editor.find.findMatches(
         self.allocator,
-        term.rt.editor_lines,
+        editor_ops.findLines(term),
         self.chrome_host.find.input.query.items,
         // 토글은 **편집기 타깃에만** 산다(§5.1) — 스크롤백·웹은 이 값을 안 읽는다.
         .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word },
@@ -205,6 +206,11 @@ pub fn toggleFindInSelection(self: *AppSession) void {
         self.chrome_host.find.in_selection = null;
         refilterAfterRuleChange(self);
         return;
+    }
+    // **비교 뷰에서는 안 켜진다**(§5.1). 이 토글은 **문서 offset 축**을 전제하는데 비교 뷰의 매치는
+    // 정렬된 행 배열 축이라 `matchRange` 가 성립하지 않는다 — 켜 두면 거르기가 엉뚱한 수를 낸다.
+    if (activeEditorTerm(self)) |t| {
+        if (t.rt.editor_diff != null) return;
     }
     // **찾기를 열 때 떠 둔 선택을 쓴다** — 지금의 선택은 이미 첫 매치로 옮겨져 있다(§5.1).
     // **빈 범위면 켜지지 않는다.** 「그 안에서만」이 문서 전체와 같은 말이 되는데, 그때 토글이

@@ -70,18 +70,38 @@ const FileFingerprint = struct {
     changed_nsec: i64,
 };
 
+const DirectoryFingerprint = struct {
+    identity: Identity,
+    mode: u32,
+    modified_sec: i64,
+    modified_nsec: i64,
+    changed_sec: i64,
+    changed_nsec: i64,
+};
+
+pub const PathMutationSeal = struct {
+    identity: Identity,
+    mode: u32,
+    modified_sec: i64,
+    modified_nsec: i64,
+    changed_sec: i64,
+    changed_nsec: i64,
+};
+
 /// Final-address descriptor owner for the large frozen executable asset. Unlike `Input`, this
 /// keeps no heap copy: the held fd and a streaming digest are the authority consumed later.
 pub const PinnedExecutableFile = struct {
     owner: ?*PinnedExecutableFile = null,
     fd: c.fd_t = -1,
+    parent_fd: c.fd_t = -1,
     path_len: usize = 0,
     path_sha256: [32]u8 = @splat(0),
     fingerprint: FileFingerprint = undefined,
+    parent_fingerprint: DirectoryFingerprint = undefined,
     sha256: [64]u8 = @splat(0),
 
     pub fn value(self: *const @This()) ?ExecutableObservation {
-        if (self.owner != self or self.fd < 0) return null;
+        if (self.owner != self or self.fd < 0 or self.parent_fd < 0) return null;
         return .{
             .identity = self.fingerprint.identity,
             .size = self.fingerprint.size,
@@ -91,9 +111,25 @@ pub const PinnedExecutableFile = struct {
     }
 
     pub fn deinit(self: *@This()) Error!void {
-        if (self.owner != self or self.fd < 0) return error.InvalidOwner;
+        if (self.owner != self or self.fd < 0 or self.parent_fd < 0) return error.InvalidOwner;
         _ = c.close(self.fd);
+        _ = c.close(self.parent_fd);
         self.* = .{};
+    }
+
+    pub fn pathMutationSeal(self: *const @This()) Error!PathMutationSeal {
+        if (self.value() == null) return error.InvalidOwner;
+        var stat: posix.Stat = undefined;
+        if (c.fstat(self.parent_fd, &stat) != 0) return error.FileChanged;
+        return mutationSeal(try directoryFingerprint(stat));
+    }
+
+    pub fn validatePathMutationSeal(self: *const @This(), seal: PathMutationSeal) Error!void {
+        if (self.value() == null) return error.InvalidOwner;
+        var stat: posix.Stat = undefined;
+        if (c.fstat(self.parent_fd, &stat) != 0) return error.FileChanged;
+        if (!sameMutationSeal(seal, mutationSeal(try directoryFingerprint(stat))))
+            return error.FileChanged;
     }
 };
 
@@ -168,9 +204,18 @@ pub fn pinExecutable(
     expected: ExecutableExpected,
     max_bytes: u64,
 ) Error!void {
-    if (result.owner != null or result.fd >= 0) return error.InvalidOwner;
+    if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
     if (expected.size == 0 or max_bytes == 0 or expected.size > max_bytes or
         !identity.lowerHex(&expected.sha256, 64)) return error.InvalidExpected;
+    var leaf_storage: [std.fs.max_name_bytes:0]u8 = undefined;
+    const parent = try openParent(path, &leaf_storage);
+    var keep_parent = false;
+    defer {
+        if (!keep_parent) _ = c.close(parent.fd);
+    }
+    var parent_before_stat: posix.Stat = undefined;
+    if (c.fstat(parent.fd, &parent_before_stat) != 0) return error.ReadFailed;
+    const parent_before = try directoryFingerprint(parent_before_stat);
     const fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.UnsafePath;
     var keep = false;
     defer {
@@ -179,22 +224,34 @@ pub fn pinExecutable(
     var before_stat: posix.Stat = undefined;
     if (c.fstat(fd, &before_stat) != 0) return error.ReadFailed;
     const before = try executableFingerprint(before_stat);
+    var leaf_stat: posix.Stat = undefined;
+    if (c.fstatat(parent.fd, parent.leaf.ptr, &leaf_stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
+        return error.FileChanged;
+    const leaf = try executableFingerprint(leaf_stat);
+    if (!sameFingerprint(before, leaf)) return error.FileChanged;
     if (before.size != expected.size) return error.SizeMismatch;
     const actual = try hashExact(fd, expected.size);
     var after_stat: posix.Stat = undefined;
     if (c.fstat(fd, &after_stat) != 0) return error.ReadFailed;
     const after = try executableFingerprint(after_stat);
     if (!sameFingerprint(before, after)) return error.FileChanged;
+    var parent_after_stat: posix.Stat = undefined;
+    if (c.fstat(parent.fd, &parent_after_stat) != 0 or
+        !sameDirectoryFingerprint(parent_before, try directoryFingerprint(parent_after_stat)))
+        return error.FileChanged;
     if (!std.mem.eql(u8, &actual, &expected.sha256)) return error.DigestMismatch;
     result.* = .{
         .owner = result,
         .fd = fd,
+        .parent_fd = parent.fd,
         .path_len = path.len,
         .fingerprint = before,
+        .parent_fingerprint = parent_before,
         .sha256 = actual,
     };
     std.crypto.hash.sha2.Sha256.hash(path, &result.path_sha256, .{});
     keep = true;
+    keep_parent = true;
 }
 
 pub fn revalidateExecutable(
@@ -205,6 +262,11 @@ pub fn revalidateExecutable(
     var path_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
     if (path.len != pinned.path_len or !std.mem.eql(u8, &path_digest, &pinned.path_sha256))
+        return error.FileChanged;
+
+    var parent_before_stat: posix.Stat = undefined;
+    if (c.fstat(pinned.parent_fd, &parent_before_stat) != 0 or
+        !sameDirectoryAuthority(pinned.parent_fingerprint, directoryFingerprint(parent_before_stat) catch return error.FileChanged))
         return error.FileChanged;
 
     const current_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
@@ -237,6 +299,10 @@ pub fn revalidateExecutable(
     if (c.fstat(final_fd, &final_stat) != 0) return error.FileChanged;
     const final = executableFingerprint(final_stat) catch return error.FileChanged;
     if (!sameFingerprint(pinned.fingerprint, final)) return error.FileChanged;
+    var parent_after_stat: posix.Stat = undefined;
+    if (c.fstat(pinned.parent_fd, &parent_after_stat) != 0 or
+        !sameDirectoryAuthority(pinned.parent_fingerprint, directoryFingerprint(parent_after_stat) catch return error.FileChanged))
+        return error.FileChanged;
     return expected;
 }
 
@@ -261,6 +327,48 @@ fn sameFingerprint(left: FileFingerprint, right: FileFingerprint) bool {
         left.size == right.size and left.mode == right.mode and left.link_count == right.link_count and
         left.modified_sec == right.modified_sec and left.modified_nsec == right.modified_nsec and
         left.changed_sec == right.changed_sec and left.changed_nsec == right.changed_nsec;
+}
+
+fn directoryFingerprint(stat: posix.Stat) Error!DirectoryFingerprint {
+    if (!posix.S.ISDIR(stat.mode)) return error.UnsafePath;
+    return .{
+        .identity = .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino) },
+        .mode = @intCast(stat.mode),
+        .modified_sec = stat.mtimespec.sec,
+        .modified_nsec = stat.mtimespec.nsec,
+        .changed_sec = stat.ctimespec.sec,
+        .changed_nsec = stat.ctimespec.nsec,
+    };
+}
+
+fn sameDirectoryFingerprint(left: DirectoryFingerprint, right: DirectoryFingerprint) bool {
+    return left.identity.device == right.identity.device and left.identity.inode == right.identity.inode and
+        left.mode == right.mode and left.modified_sec == right.modified_sec and
+        left.modified_nsec == right.modified_nsec and left.changed_sec == right.changed_sec and
+        left.changed_nsec == right.changed_nsec;
+}
+
+fn sameDirectoryAuthority(left: DirectoryFingerprint, right: DirectoryFingerprint) bool {
+    return left.identity.device == right.identity.device and left.identity.inode == right.identity.inode and
+        left.mode == right.mode;
+}
+
+fn mutationSeal(value: DirectoryFingerprint) PathMutationSeal {
+    return .{
+        .identity = value.identity,
+        .mode = value.mode,
+        .modified_sec = value.modified_sec,
+        .modified_nsec = value.modified_nsec,
+        .changed_sec = value.changed_sec,
+        .changed_nsec = value.changed_nsec,
+    };
+}
+
+fn sameMutationSeal(left: PathMutationSeal, right: PathMutationSeal) bool {
+    return left.identity.device == right.identity.device and left.identity.inode == right.identity.inode and
+        left.mode == right.mode and left.modified_sec == right.modified_sec and
+        left.modified_nsec == right.modified_nsec and left.changed_sec == right.changed_sec and
+        left.changed_nsec == right.changed_nsec;
 }
 
 fn hashExact(fd: c.fd_t, expected_size: u64) Error![64]u8 {

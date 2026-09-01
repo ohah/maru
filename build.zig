@@ -13232,7 +13232,7 @@ pub fn build(b: *std.Build) void {
             macos_only_test_step.dependOn(&run_current_tests.step);
             const current_release_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_release_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_release_authority", .module = current_release_authority_mod } } }) });
             const run_current_release_tests = b.addRunArtifact(current_release_tests);
-            run_current_release_tests.addArg("--maru-expect-tests=5");
+            run_current_release_tests.addArg("--maru-expect-tests=6");
             run_current_release_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_release_authority_step.dependOn(&run_current_release_tests.step);
             session_host_step.dependOn(&run_current_release_tests.step);

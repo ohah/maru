@@ -412,18 +412,27 @@ codex 를 돌린 뒤, 원격에서 캡처한 70프레임을 같은 판정기에 
 C2 가 선 곳은 명령 전과 완료 후뿐이고 둘 다 실제로 idle 이다. SSH `capture-pane` 왕복은 10~20ms 였다
 (ControlMaster 재사용, localhost 라 네트워크 RTT 는 0 에 가깝다 — 실제 원격은 여기에 RTT 가 더해진다).
 
-**⚠️ 그리고 실측이 화면 규칙의 버그를 찾았다 — 이 문서 범위 밖이지만 여기 적어 둔다.**
+**⚠️ 실측 도구가 제품과 다르면 «없는 버그»를 만든다 — 실제로 한 번 만들었다.**
 
-원격 codex 가 시작할 때 뜬 **업데이트 선택 화면이 `idle` 로 판정된다.** 기존 판정자는 통과하는데,
-그 fixture 가 실제 화면과 다르기 때문이다.
+원격 codex 가 시작할 때 뜬 업데이트 선택 화면이 `idle` 로 판정돼 「배지가 거짓말한다」고 적었다가
+**철회했다.** 원인은 화면 규칙이 아니라 캡처 방식이었다.
 
-    fixture(손으로 씀)  "1. Update now\n2. Skip\nPress enter to continue"          → blocked ✅
-    실제 화면(실측)      "› 1. Update now (runs `npm install -g @openai/codex`)"     → idle    ❌
-                          ^^^ 이 프롬프트 마커를 `live_prompt` 규칙이 입력창으로 읽는다
+    tmux capture-pane 그대로(물리 bottom)  → state=idle    rule=live_prompt
+    제품과 같게 trailing blank 를 자른 뒤   → state=blocked rule=confirmation_prompt ✅
 
-사용자가 그 화면에서 입력을 기다리는데 배지는 「완료」로 보인다. **손으로 쓴 fixture 는 이 부류를
-못 잡는다** — 실제 화면에만 있는 `› ` 마커가 규칙의 우선순위를 뒤집기 때문이다. 수정은
-`agent_observer` 규칙 쪽 일이라 별도로 다룬다.
+`confirmation_prompt` 는 `"press enter to continue"` 를 이미 gate 에 갖고 있고 `max_lines_from_bottom = 6`
+으로 **현재성**을 본다. codex 는 fullscreen TUI 라 화면 아래를 빈 행으로 채우는데, `tmux capture-pane` 은
+그 빈 행까지 그대로 준다 — 그러면 그 문구의 하단 거리가 31 이 되어 거리 게이트를 벗어난다. 제품은
+`TerminalCore.dumpRecentTextUtf8` 이 **마지막 텍스트 행을 찾아 거기서부터** 뜨므로(주석에 그 이유가
+「fullscreen TUI 가 resize 뒤 아래 행을 비워 두는 경우(실측 Codex)」로 적혀 있다) 이 문제가 없다.
+
+**그래서 이 절의 실측은 전부 trailing blank 를 자른 뒤 다시 돌렸다.** C2 결론은 바뀌지 않았다 —
+로컬 running 37 / idle 33, 원격 running 42 / idle 28 로 같고, **실행 중(state=running) 프레임에서 C2 가
+발화한 횟수는 0** 이다.
+
+**다음에 같은 실측을 하는 사람에게**: 캡처를 판정기에 넣기 전에 **꼬리의 빈 행을 잘라라.** 안 자르면
+거리 게이트를 쓰는 규칙(`confirmation_prompt`·`interrupted_prompt` 등)이 전부 조용히 빗나가고, 그 자리를
+`live_prompt` 가 채워 «도는 화면이 idle 로 보인다» 는 그럴듯한 거짓 보고가 나온다.
 
 **이 실측이 증명하지 못하는 것.**
 

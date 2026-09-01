@@ -1391,6 +1391,24 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   workflow가 checkout 전 capture를 실제 수행했거나 transport 호출과 결합됐다고 주장하지 않는다. 그 결합은 release workflow
   wiring gate가 별도로 소유한다.
 
+  release executable bootstrap의 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_executable_bootstrap.zig`다. bootstrap은 기존
+  `release_adapter_contract.parseArgs`로 command를 먼저 닫고, 기존 `release_adapter_environment`의 exact process context와
+  `release_adapter_github_cli_authority`의 runner observation을 읽는다. command의 repository와 tag는 context의 typed
+  repository owner/name과 protected tag에 exact 교차결속하며, 불일치하면 CLI pathname을 열기 전에 실패한다. 그 뒤에만
+  command가 요구한 checkout 전 canonical absolute `gh` path와 lowercase SHA-256을 bounded NUL-terminated storage로 복사해
+  pin한다. 성공 결과는 copy를 거부하는 final-address owner로만 게시하며 parsed phase command에서는 CLI path/digest를 제거한다.
+  후속 phase는 owner 검증 view가 보존한 exact CLI path만 재검증·실행한다. bootstrap은 token을 읽거나 GitHub API를 호출하거나 manifest/local asset/work-dir/
+  summary pathname을 열지 않는다. 따라서 parse/context/runner/cross-binding 실패는 filesystem observation 0이고 CLI pin 실패도
+  phase orchestration이나 output publication으로 진행하지 않는다.
+
+  focused gate `test-session-host-release-adapter-executable-bootstrap`은 기존 parser를 통과한 두 command의 exact
+  context/runner/CLI 결속, context보다 먼저 CLI를 열지 않는 ordering, repository/tag drift, foreign/self-hosted runner,
+  non-executable·digest mismatch와 bounded path copy를 Debug·ReleaseFast actual filesystem에서 검증한다. product entrypoint가
+  process environment를 읽도록 컴파일되는 것도 고정하지만 로컬 셸을 trusted runner oracle로 취급하지 않는다. 이 gate는
+  GitHub API token capture, 두 phase의 전체 owner orchestration, workflow의 checkout 전 CLI capture, GitHub Release publication
+  또는 frozen U5 제품 E2E를 대신하지 않는다.
+
   release evidence의 canonical bytes는 OS 중립
   `src/platform/macos/session_host/release_evidence.zig` 한 곳이 소유한다. schema는 exact
   `maru.session-host-release-evidence.v1`이고 profile은 `baseline_a | upgrade_b`의 닫힌 union이다. G3의

@@ -2641,6 +2641,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   Debug·ReleaseFast actual filesystem에서 success/move-only cleanup, four-source inode distinct, path/role/size/digest drift,
   symlink/alias/mutation/collision, allocation-free fixed storage, I/O failure publication 0과 cleanup retry를 검증한다. GitHub attestation, compatibility,
   final observation과 workflow/U5 배선은 후속이다.
+  Bounded process held-directory substrate는 async-signal-safe fork child의 `fchdir`와 fd 3 이상 전량 폐쇄를 사용해
+  caller의 valid open directory fd가 가리키는 exact vnode를 child cwd로 고정한다. 기존 non-directory 실행도 stdio 외 ambient
+  descriptor가 외부 verifier로 새지 않고, parent fd의 flags/identity/ownership은 바꾸지 않는다.
+  `test-session-host-bounded-process`가 Debug·ReleaseFast actual process에서 exact `./leaf` read, sibling ambient fd 비상속,
+  regular/stdio/closed fd pre-spawn 거부와 parent owner 불변을 기존 timeout/cap/status/environment 행과 함께 검증한다. 이 substrate는
+  current asset attestation semantic composition과 workflow/U5 배선을 대신하지 않는다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

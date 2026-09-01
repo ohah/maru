@@ -996,8 +996,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   성공은 세 private leaf의 진단용 pathname/device/inode/size/SHA, held directory fd와 cleanup authority를 한 final-address move-only
   `CurrentAssetFiles`로 게시한다. 진단용 absolute pathname은 child 입력 권위가 아니다. 후속 attestation composition은 이 owner가 살아 있는
-  동안 held directory fd에서 explicit non-CLOEXEC child lease를 만들고, `bounded_process`가 그 exact fd 하나만 상속하도록 허용한 뒤
-  `/dev/fd/<lease-fd>/<manifest-exact-name>`만 child argv에 넣어야 한다. child 종료 뒤 lease를 exact once 회수하고 held directory와 세 leaf의
+  동안 `bounded_process`의 explicit held-directory API가 spawn file action `fchdir`로 child cwd를 그 exact directory vnode에 고정한 뒤
+  `./<manifest-exact-name>`만 child argv에 넣어야 한다. child 종료 뒤 held directory와 세 leaf의
   identity를 다시 검증하기 전에는 attestation 성공을 게시하지 않는다. 현재 `bounded_process`의 우연한 open-fd 상속이나 private directory의
   ordinary absolute pathname을 이 계약의 대체물로 쓰지 않는다. 복사된
   owner, pre-owned destination, relative/aliased path, symlink·non-regular source, role/name/size/digest drift, pathname 교체·in-place mutation,
@@ -1018,6 +1018,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `bounded_process.zig`에 넘기고 stdin은 `/dev/null`, stdout/stderr는 하나의 exact-cap pipe로 제한한다. 성공은 monotonic
   deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process
   group 전체를 SIGKILL하고 direct child를 reap한 뒤 fail-close한다. upgrade codesign도 이 동일 실행 경계를 사용한다.
+
+  current asset attestation을 위한 descriptor-bound cwd도 `bounded_process.zig`가 소유한다. 새 explicit held-directory 실행 API는
+  caller의 valid open directory fd 하나를 async-signal-safe fork child에서 `fchdir`해 child cwd를 exact vnode에 고정한다.
+  child는 stdin/stdout/stderr를 결속한 뒤 fd 3 이상을 전부 닫아 ambient fd를 상속하지 않는다. macOS `/dev/fd/<n>`은
+  directory descendant traversal을 제공하지 않으므로 `/dev/fd/<n>/<leaf>`를 권위 경로로 쓰지 않는다. caller directory fd의
+  close-on-exec flag와 identity는 parent에서 바꾸지 않고 child 종료 뒤에도 caller가 소유한다. regular/stdio/closed fd,
+  file-action/attribute/spawn 실패는 fork되지 않은 typed failure로 fail-close한다.
+
+  focused gate `test-session-host-bounded-process`는 기존 cap/status/timeout/clean-environment 행과 함께 실제 temporary directory fd가
+  child cwd로 고정되어 `./leaf`만 읽히는지, parent fd의 `FD_CLOEXEC`와 identity가 보존되는지, 별도 ambient sentinel fd가 child에서
+  닫히는지, invalid/stdio fd가 fork 전에 거부되는지를 Debug·ReleaseFast 실제 process에서 검증한다. 이 substrate만으로
+  `CurrentAssetFiles`와 artifact attestation의 semantic composition 또는 workflow/U5 배선을 완료했다고 주장하지 않는다.
 
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,

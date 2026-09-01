@@ -2483,6 +2483,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   retry authority를 보존하며 private cleanup 뒤 live deadline 최종 검증·deadline cleanup·성공 publication·observation 해제 순서는
   `test-session-host-release-adapter-pre-publish-phase`가 Debug·ReleaseFast에서 검증한다. production adapter 타입 배선과 frozen U5
   E2E는 이 transaction gate의 범위 밖이다.
+  verify-predecessor phase transaction은 failure-pristine deadline 뒤 published role-A manifest와 immutable asset owner에서 summary bytes를 먼저 준비하되 output을
+  열지 않고, 모든 private owner와 workspace cleanup, live deadline 최종 검증과 deadline cleanup이 성공한 뒤에만 exact-one publish한다. 실패하면서 retry 권위를 남긴
+  attempted owner를 포함한 단계별 reverse cleanup,
+  cleanup failure와 final deadline 만료의 publication 0, retry authority, deadline과 prepared bytes exact release는
+  `test-session-host-release-adapter-verify-predecessor-phase`가 Debug·ReleaseFast에서 검증한다. leaf 의미, production executable과
+  workflow/U5 E2E는 이 gate의 범위 밖이다.
   production `Execution`은 bootstrap의 pre-publish command/context/pinned CLI와 validated token만 받아 shared deadline/workspace 및
   기존 production `...Until` leaf를 transaction에 연결하고 private cleanup 뒤 `Execution` 자체가 소유한 live deadline만 최종 검증한다. foreign/expired deadline은 publication 0이며 ordinary failure는 empty state로 돌아가고 cleanup 실패만 caller-owned
   execution에 retry authority를 남기며 result/bootstrap/token/context/command/buffer/Apple storage alias를 side effect 전에 거부하는 계약은 `test-session-host-release-adapter-pre-publish-product`가 Debug·ReleaseFast에서

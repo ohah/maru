@@ -1326,6 +1326,25 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   temp write/fsync/rename/rollback fault matrix를 중복해 이 gate의 완료로 주장하지 않는다. 이 composition도 CLI option
   parsing, 전체 phase orchestration, workflow command ordering과 GitHub release publication을 대신하지 않는다.
 
+  `verify-predecessor` phase transaction의 단일 순서 소유자는
+  `src/platform/macos/session_host/release_adapter_verify_predecessor_phase.zig`다. validated token과 positive budget 뒤 같은
+  final-address deadline을 시작한다. `startDeadline`은 실패 시 owner를 게시하지 않는 failure-pristine leaf여야 하며 그 첫 실패에는
+  cleanup 대상이 없다. private workspace, current published role-A manifest candidate/materialization/attestation,
+  immutable release·tag-chain·asset authentication을 닫힌 순서로 실행한다. 성공 owner에서 canonical summary bytes를 먼저 준비하되
+  아직 output pathname은 열지 않는다. 그 뒤 asset, authenticated manifest, materialized file, candidate, workspace를 역순으로
+  정리하고 live deadline을 최종 검증한 다음 deadline을 정리한다. 이 순서가 완전히 성공한 경우에만 prepared bytes를
+  exclusive·atomic publish한다. 따라서 만료된 transaction이나 private cleanup
+  failure와 `passed` summary가 공존하지 않으며 publication failure도 validation 성공으로 바뀌지 않는다.
+
+  각 단계 실패는 뒤 단계와 summary prepare/publish 0이고 실패하면서 retry 권위를 남긴 attempted owner까지 역순으로 best-effort
+  정리한다. cleanup failure는 원래
+  오류보다 우선하며 실패한 owner의 retry authority를 보존한다. prepared summary bytes는 transaction이 유일하게 소유하고 publish
+  성공·실패 모두 exact once 해제한다. focused gate `test-session-host-release-adapter-verify-predecessor-phase`는 exact step order와
+  shared deadline identity, 모든 fail-index에서 attempted owner를 포함한 reverse cleanup, prepare 뒤 cleanup failure publication 0,
+  final deadline 만료의 publication 0과 deadline/prepared bytes 해제, cleanup·최종 deadline 검증 완료 뒤 exact-one
+  publication과 prepared bytes 해제를 Debug·ReleaseFast에서 검증한다. 이 gate는 leaf 의미 검증, production executable 배선,
+  workflow ordering 또는 frozen U5 E2E를 대신하지 않는다.
+
   pre-publish phase transaction의 단일 순서 소유자는
   `src/platform/macos/session_host/release_adapter_pre_publish_phase.zig`다. validated token과 positive budget을 받은 뒤 deadline과
   private workspace를 exact once 만들고, current authority/candidate/input, predecessor input/tag-assets, current product/evidence/

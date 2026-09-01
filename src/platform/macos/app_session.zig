@@ -8296,15 +8296,15 @@ pub const AppSession = struct {
         // 그러니 여기 적힌 것을 「돌아갈 자리」로 읽는 사용자에게 그것이 남의 기계임을 말해야 한다.
         if (cwd.len > 0) {
             const shown = cwd[0..terminal.width.truncateToBoundary(cwd, max_value_bytes)];
-            if (termCwdIsRemote(term)) {
+            // **접두를 먼저 만들고 형식 문자열은 하나로 둔다.** 갈래마다 `w.print` 를 두면 같은 한국어
+            // 리터럴이 셋으로 늘어 i18n 원장이 빨개진다 — 그 게이트가 잡아 줬다.
+            var host_buf: [std.posix.HOST_NAME_MAX + std.fs.max_path_bytes]u8 = undefined;
+            const line = if (termCwdIsRemote(term)) blk: {
                 const host = termDisplayHost(term);
-                if (host.len > 0)
-                    w.print("    마지막 위치: {s}:{s}\r\n", .{ host, shown }) catch {}
-                else
-                    w.print("    마지막 위치: {s}\r\n", .{shown}) catch {};
-            } else {
-                w.print("    마지막 위치: {s}\r\n", .{shown}) catch {};
-            }
+                if (host.len == 0) break :blk shown; // host 를 못 구하면 경로만 — 없는 이름을 지어내지 않는다
+                break :blk std.fmt.bufPrint(&host_buf, "{s}:{s}", .{ host, shown }) catch shown;
+            } else shown;
+            w.print("    마지막 위치: {s}\r\n", .{line}) catch {};
         }
         w.writeAll("    ⏎ 이 자리에서 새 셸 시작\x1b[0m\r\n") catch {};
         const text = w.buffered();

@@ -1001,6 +1001,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   failure다. 저장장치가 unlink/fsync까지 함께 실패한 경우에는 이미 게시된 이름의 부재를 거짓 보장하지 않는다. summary는
   audit 결과일 뿐 다음 command의 권위 입력이 아니다. 별도 observation JSON input 포맷을 만들지 않는다.
 
+  pre-publish workspace filesystem owner는 `release_adapter_pre_publish_workspace.zig` 한 곳이다. caller의 absolute absent root를
+  no-follow parent 아래 0700으로 만들고 parent/root의 device·inode와 held fd를 final-address move-only owner에 보존한다. 하위 단계는
+  caller 문자열이나 ambient temp 경로를 다시 조합하지 않고 이 owner가 revalidation 뒤 내주는 exact `current-manifest`,
+  `predecessor-manifest`, `predecessor-assets`, `dmg`, `current-assets`
+  absent-child pathname만 받는다. child pathname은 권위 자체가 아니라 각 child owner가 descriptor-relative exclusive 생성할 입력이며,
+  workspace owner는 생성 직후 root descriptor에서 identity를 먼저 봉인하고 pathname을 재검증한다. pathname stat 실패도 봉인된
+  descriptor와 이름의 exact identity가 다시 일치할 때만 생성 root를 제거한다. child가 모두 정리된 뒤 exact empty root만 제거하고
+  parent를 sync한다. copied/pre-owned owner, relative/root·leaf
+  alias, parent/root replacement, unexpected entry와 cleanup 실패는 fail-close하며 cleanup 실패 시 같은 owner가 retry 권위를 보존한다.
+  focused gate `test-session-host-release-adapter-pre-publish-workspace`는 실제 macOS filesystem에서 root mode/identity, 다섯 canonical child,
+  copy·replacement·occupied-child 거부, 성공 cleanup과 retry를 Debug·ReleaseFast로 검증한다. 이 substrate만으로 전체 phase orchestration이나
+  child owner cleanup, workflow wiring과 frozen U5 E2E가 완료됐다고 주장하지 않는다.
+
   로컬 artifact는 pathname을 `stat`한 뒤 다시 열지 않는다. absolute path의 모든 component와 final을
   `openat(O_NOFOLLOW)`로 내려가며, 최종 regular fd 하나에서 bounded bytes·size·SHA-256·device/inode identity를 만든다. 서로 다른
   option이 같은 device/inode를 가리키면 hardlink라도 alias로 거부한다. summary는 같은 방식으로 연 parent fd 아래 0600 temp를

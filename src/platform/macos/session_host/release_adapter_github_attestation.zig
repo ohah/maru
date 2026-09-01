@@ -53,6 +53,20 @@ pub fn plan(storage: *ArgsStorage, artifact_path: []const u8, expected: Expected
     try validateExpected(expected);
     if (artifact_path.len < 2 or artifact_path[0] != '/' or !validScalar(artifact_path))
         return error.InvalidPath;
+    return planValidated(storage, artifact_path, expected);
+}
+
+/// Builds the same closed verifier command for a child whose cwd is a held directory vnode.
+pub fn planDirectory(storage: *ArgsStorage, artifact_path: []const u8, expected: Expected) Error!Plan {
+    try validateExpected(expected);
+    if (artifact_path.len < 3 or !std.mem.startsWith(u8, artifact_path, "./") or
+        !std.mem.eql(u8, artifact_path[2..], std.fs.path.basename(artifact_path)) or
+        std.mem.eql(u8, artifact_path[2..], ".") or std.mem.eql(u8, artifact_path[2..], "..") or
+        !validScalar(artifact_path)) return error.InvalidPath;
+    return planValidated(storage, artifact_path, expected);
+}
+
+fn planValidated(storage: *ArgsStorage, artifact_path: []const u8, expected: Expected) Error!Plan {
     const source_ref = std.fmt.bufPrint(&storage.source_ref, "refs/tags/{s}", .{expected.context.tag}) catch
         return error.InvalidExpected;
     const values = [_][]const u8{
@@ -181,6 +195,20 @@ pub fn verifyWith(executor: anytype, allocator: std.mem.Allocator, executable: [
     return parseAndBind(allocator, captured, expected);
 }
 
+pub fn verifyDirectoryWith(executor: anytype, allocator: std.mem.Allocator, executable: []const u8, token: []const u8, directory_fd: std.c.fd_t, artifact_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
+    if (!validScalar(token)) return error.InvalidToken;
+    if (budget_ns <= 0) return error.InvalidBudget;
+    if (output.len == 0 or output.len > max_response_bytes) return error.ResponseTooLarge;
+    var storage: ArgsStorage = undefined;
+    const request = try planDirectory(&storage, artifact_path, expected);
+    var token_storage: ["GH_TOKEN=".len + max_token_bytes]u8 = undefined;
+    const token_entry = std.fmt.bufPrint(&token_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
+    const environment = [_][]const u8{ token_entry, "GH_PROMPT_DISABLED=1" };
+    const captured = try executor.captureDirectory(executable, request.args, &environment, directory_fd, output, budget_ns);
+    if (!borrowedFrom(captured, output)) return error.InvalidCapture;
+    return parseAndBind(allocator, captured, expected);
+}
+
 pub fn verify(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, token: []const u8, artifact_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
     var executor = BoundedExecutor{ .io = io };
     return verifyWith(&executor, allocator, executable, token, artifact_path, expected, output, budget_ns);
@@ -189,6 +217,14 @@ pub fn verify(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, 
 pub const BoundedExecutor = struct {
     io: std.Io,
     pub fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
+        return self.captureOptionalDirectory(executable, child_args, environment, null, output, budget_ns);
+    }
+
+    pub fn captureDirectory(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, directory_fd: std.c.fd_t, output: []u8, budget_ns: i128) Error![]const u8 {
+        return self.captureOptionalDirectory(executable, child_args, environment, directory_fd, output, budget_ns);
+    }
+
+    fn captureOptionalDirectory(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, directory_fd: ?std.c.fd_t, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
         const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
         var args_storage: [max_args][arg_bytes]u8 = undefined;
@@ -198,7 +234,10 @@ pub const BoundedExecutor = struct {
         var environment_bytes: [2]["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         var envp: [2:null]?[*:0]const u8 = @splat(null);
         for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintZ(&environment_bytes[index], "{s}", .{entry}) catch return error.InvalidToken).ptr;
-        return process.runCaptureEnvironmentStdout(self.io, executable_z, &argv, &envp, output, budget_ns);
+        return if (directory_fd) |fd|
+            process.runCaptureEnvironmentStdoutDirectory(self.io, executable_z, &argv, &envp, fd, output, budget_ns)
+        else
+            process.runCaptureEnvironmentStdout(self.io, executable_z, &argv, &envp, output, budget_ns);
     }
 };
 

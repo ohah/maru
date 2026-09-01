@@ -12936,6 +12936,33 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "release_adapter_identity", .module = manifest_download_identity_mod },
             },
         });
+        const manifest_download_deadline_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_deadline.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+            .link_libc = true,
+        });
+        const manifest_download_files_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "safe_open", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .target = target,
+                    .optimize = manifest_download_optimize,
+                }) },
+                .{ .name = "release_adapter_identity", .module = manifest_download_identity_mod },
+            },
+        });
+        const manifest_download_cli_authority_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"),
+            .target = target,
+            .optimize = manifest_download_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "release_adapter_files", .module = manifest_download_files_mod }},
+        });
         const manifest_download_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_download.zig"),
             .target = target,
@@ -12945,6 +12972,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "release_manifest", .module = release_manifest_mod },
                 .{ .name = "release_adapter_identity", .module = manifest_download_identity_mod },
                 .{ .name = "release_adapter_github_download_command", .module = manifest_download_command_mod },
+                .{ .name = "release_adapter_deadline", .module = manifest_download_deadline_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = manifest_download_cli_authority_mod },
                 .{ .name = "bounded_process", .module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
                     .target = target,
@@ -12961,11 +12990,13 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "release_manifest", .module = release_manifest_mod },
                     .{ .name = "release_adapter_github_manifest_download", .module = manifest_download_mod },
+                    .{ .name = "release_adapter_deadline", .module = manifest_download_deadline_mod },
+                    .{ .name = "release_adapter_github_cli_authority", .module = manifest_download_cli_authority_mod },
                 },
             }),
         });
         const run_manifest_download_tests = b.addRunArtifact(manifest_download_tests);
-        run_manifest_download_tests.addArg("--maru-expect-tests=7");
+        run_manifest_download_tests.addArg("--maru-expect-tests=10");
         run_manifest_download_tests.setCwd(b.path("."));
         session_host_release_adapter_github_manifest_download_step.dependOn(&run_manifest_download_tests.step);
         session_host_step.dependOn(&run_manifest_download_tests.step);

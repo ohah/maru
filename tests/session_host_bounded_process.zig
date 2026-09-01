@@ -182,6 +182,40 @@ test "bounded process binds one directory as child cwd without mutating parent a
     );
 }
 
+test "bounded process executes a leaf from the held directory after pathname ancestor replacement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "held", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held/probe", .data = "#!/bin/sh\nprintf held-image\n" });
+    var probe_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const probe_path = try temporaryPath(&tmp, "held/probe", &probe_path_storage);
+    try std.testing.expectEqual(@as(c_int, 0), c.chmod(probe_path.ptr, 0o700));
+    var directory_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const directory_path = try temporaryPath(&tmp, "held", &directory_path_storage);
+    const directory_fd = c.open(directory_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
+    try std.testing.expect(directory_fd >= 3);
+    defer _ = c.close(directory_fd);
+    try tmp.dir.rename("held", tmp.dir, "held-moved", std.testing.io);
+    try tmp.dir.createDir(std.testing.io, "held", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held/probe", .data = "#!/bin/sh\nexit 9\n" });
+    var replacement_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const replacement_path = try temporaryPath(&tmp, "held/probe", &replacement_path_storage);
+    try std.testing.expectEqual(@as(c_int, 0), c.chmod(replacement_path.ptr, 0o700));
+    const relative: [:0]const u8 = "./probe";
+    const argv = [_:null]?[*:0]const u8{"probe"};
+    const environment = [_:null]?[*:0]const u8{};
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "held-image",
+        try process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, relative, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+    );
+    const invalid: [:0]const u8 = "./nested/probe";
+    try std.testing.expectError(
+        error.InvalidExecutable,
+        process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, invalid, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+    );
+}
+
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);

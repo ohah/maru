@@ -1000,6 +1000,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   zero-residue는 기존 DMG authority component/E2E gate가 계속 소유한다. 이 gate만으로 compatibility/evidence/세 asset attestation,
   final manifest observation, summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  전체 pre-publish phase용 executable entrypoint `observeUntil`은 앞 단계와 같은 final-address `Deadline` pointer를 받는다.
+  result/current/path/manifest asset preflight는 deadline 접근 전에 끝내고, frozen executable pin 전에 같은 deadline을 확인한다.
+  pin과 첫 filesystem revalidation 뒤에는 다시 remaining을 구해 그 fresh 값만 DMG/Apple observer child budget으로 전달한다.
+  product composition은 새 시작 시각·expiry를 만들거나 pin 전 remaining을 재사용하지 않는다. preflight 실패는 deadline·pin·observer
+  접근 0이고, pin 구간 중 만료는 observer 0과 held fd cleanup, publication 0으로 닫힌다. observer 성공 뒤에도 frozen
+  executable을 다시 검증하고 결과 owner를 게시하기 직전 같은 deadline을 확인한다. 이 때 만료하면
+  Apple observation과 held frozen fd를 모두 cleanup하고 publication 0을 유지한다. 기존 budget entrypoint는 독립 leaf gate 호환용으로
+  남는다. observer 전후 current manifest의 owned bytes·private leaf 결속도 재검증해 child 중 manifest drift가 stale
+  signing/asset 기대값으로 게시되지 않게 한다. focused gate는 exact deadline object identity, pin 전후 남은 값이
+  늘어나지 않음, stale budget 비전달, preflight·중간·최종 만료 cleanup, 실제 child 중
+  current bytes mutation publication 0과 product wrapper compile을 Debug·ReleaseFast actual filesystem에서 검증한다.
+  deadline storage는 result/current/pathname storage 및 production Apple transport storage와 겹칠 수 없으며 이 alias는
+  deadline·filesystem·observer 접근 전에 거부한다.
+  compatibility `...Until` 이관과 전체 owner는 후속 범위다.
+
   current evidence provenance composition의 단일 소유자는
   `src/platform/macos/session_host/release_adapter_github_current_evidence.zig`다. 입력은 move-only
   `CurrentManifestInput` B, 그 B의 predecessor와 이미 교차결속된 move-only `AuthenticatedManifest` A, 그리고 caller의 evidence

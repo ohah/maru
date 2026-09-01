@@ -1655,6 +1655,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   workflow가 checkout 전 capture를 실제 수행했거나 transport 호출과 결합됐다고 주장하지 않는다. 그 결합은 release workflow
   wiring gate가 별도로 소유한다.
 
+  release workflow의 checkout 전 CLI capture 계약은 `.github/workflows/release.yml`과
+  `tools/test-session-host-release-workflow.sh`가 함께 소유한다. release job의 첫 repository-content 접근보다 앞선
+  `Capture trusted GitHub CLI before checkout` step은 초기 runner PATH에서 `gh`를 exact once 찾고, symlink를 해소한 canonical
+  absolute path가 regular executable인지 확인한 뒤 lowercase SHA-256을 계산한다. 두 값은 같은 step의 immutable output으로만
+  게시하며 `GITHUB_ENV`, repository pathname 또는 checkout 뒤 PATH 재탐색으로 넘기지 않는다. job은 exact
+  `environment: release`, `runs-on: macos-15`를 사용하고 checkout은 이 capture 뒤에만 온다. focused gate
+  `check-session-host-release-workflow`는 trigger가 tag-only인지, 모든 Action이 commit SHA에 고정됐는지와 함께 capture→checkout
+  순서, exact command/output vocabulary, environment와 runner를 실제 workflow bytes에서 검증한다. 이 gate는 아직 captured output을
+  validator argv에 소비하거나 manifest/evidence를 만들고 release를 publish하는 전체 workflow 배선을 완료했다고 주장하지 않는다.
+
   release executable bootstrap의 단일 소유자는
   `src/platform/macos/session_host/release_adapter_executable_bootstrap.zig`다. bootstrap은 기존
   `release_adapter_contract.parseArgs`로 command를 먼저 닫고, 기존 `release_adapter_environment`의 exact process context와

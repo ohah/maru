@@ -12284,6 +12284,32 @@ pub fn build(b: *std.Build) void {
         if (macos_host_tests) test_step.dependOn(&run_workspace_tests.step);
         macos_only_test_step.dependOn(&run_workspace_tests.step);
     }
+    const session_host_release_adapter_pre_publish_phase_step = b.step(
+        "test-session-host-release-adapter-pre-publish-phase",
+        "Validate pre-publish transaction ordering and cleanup",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |phase_optimize| {
+        const phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_pre_publish_phase.zig"),
+            .target = target,
+            .optimize = phase_optimize,
+        });
+        const phase_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_pre_publish_phase.zig"),
+                .target = target,
+                .optimize = phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_pre_publish_phase", .module = phase_mod }},
+            }),
+        });
+        const run_phase_tests = b.addRunArtifact(phase_tests);
+        run_phase_tests.addArg("--maru-expect-tests=4");
+        run_phase_tests.setCwd(b.path("."));
+        session_host_release_adapter_pre_publish_phase_step.dependOn(&run_phase_tests.step);
+        session_host_step.dependOn(&run_phase_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_phase_tests.step);
+        macos_only_test_step.dependOn(&run_phase_tests.step);
+    }
     const session_host_release_adapter_context_step = b.step(
         "test-session-host-release-adapter-context",
         "Validate bounded GitHub Actions identity context for the release adapter",

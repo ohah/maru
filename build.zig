@@ -13115,6 +13115,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-current-manifest-candidate",
         "Run current GitHub manifest candidate ownership tests",
     );
+    const session_host_release_adapter_deadline_step = b.step(
+        "test-session-host-release-adapter-deadline",
+        "Run release adapter absolute deadline ownership tests",
+    );
     const session_host_release_adapter_github_current_product_step = b.step(
         "test-session-host-release-adapter-github-current-product",
         "Run authenticated current local product composition tests",
@@ -13150,6 +13154,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |composition_optimize| {
             const manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = composition_optimize });
+            const deadline_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_deadline.zig"), .target = target, .optimize = composition_optimize, .link_libc = true });
             const identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"), .target = target, .optimize = composition_optimize });
             const bounded_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"), .target = target, .optimize = composition_optimize });
             const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = composition_optimize });
@@ -13194,6 +13199,14 @@ pub fn build(b: *std.Build) void {
             const summary_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_summary.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_github_current_observation", .module = current_observation_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const summary_publication_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_summary_publication.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_summary", .module = summary_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_github_current_observation", .module = current_observation_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
+            const deadline_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_deadline.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_deadline", .module = deadline_mod }} }) });
+            const run_deadline_tests = b.addRunArtifact(deadline_tests);
+            run_deadline_tests.addArg("--maru-expect-tests=5");
+            run_deadline_tests.setCwd(b.path("."));
+            session_host_release_adapter_deadline_step.dependOn(&run_deadline_tests.step);
+            session_host_step.dependOn(&run_deadline_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_deadline_tests.step);
+            macos_only_test_step.dependOn(&run_deadline_tests.step);
             const run = b.addRunArtifact(tests);
             run.addArg("--maru-expect-tests=8");
             run.setCwd(b.path("."));

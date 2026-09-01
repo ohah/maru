@@ -66480,11 +66480,13 @@ test "원격 pane 은 목록을 못 읽어도 로컬 저장소로 안 떨어진�
     session.git_backend.?.state.?.shutting_down = true;
 
     // 로컬 순위가 **답을 줄 수 있는** 상태를 만든다 — 그래야 「안 내려간다」가 뜻을 갖는다.
-    // (이 저장소 루트를 탐색기 root 로 두면 3 순위가 그것을 찾는다.)
+    //
+    // 2 순위(직전 저장소)를 쓴다. `file_tree` 에 직접 심으면 안 된다 — 스모크 세션은 그 트리를
+    // 초기화하지 않아 `deinit` 이 건너뛰고, 심은 경로가 **샌다**(CI 의 DebugAllocator 가 잡았다).
+    // `rememberGitRepo` 는 제품 함수라 그 문자열의 수명을 세션이 진다.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const here_len = try std.process.currentPath(session.io, &cwd_buf);
-    const here = cwd_buf[0..here_len];
-    try session.file_tree.replaceExplicitRoots(&.{here});
+    git_ops.rememberGitRepo(session, cwd_buf[0..here_len]);
 
     var probe: [std.fs.max_path_bytes]u8 = undefined;
     // 전제: pane 이 로컬이면 로컬 순위가 답한다(이 판정자가 뒤집는 것이 그 답이라는 확인).

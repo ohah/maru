@@ -17712,7 +17712,7 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
         .command = "/bin/sh",
         .args = &.{
             "-c",
-            "printf '\\033]7;file://localhost/tmp/remote-meta\\007\\033]2;remote-title\\007\\033]5379;ssh;user@workbox\\007'; exec /bin/cat",
+            "printf '\\033]5379;ssh;user@workbox\\007\\033]7;file://localhost/tmp/remote-meta\\007\\033]2;remote-title\\007'; exec /bin/cat",
         },
     }, .{ .cols = 40, .rows = 10 });
     defer rr.deinit();
@@ -17826,6 +17826,13 @@ test "remote runtime: two runtimes sharing one connection both receive their own
     try testing.expect(f2); // rr2도 — 남의 pump에 배치를 뺏기지 않았다(demux).
 }
 
+// ⚠️ **픽스처의 순서는 제품 순서다**: `5379`(ssh 진입) → 그 세션의 `OSC 7` → 제목.
+//
+// 예전에는 `OSC 7 → 제목 → 5379` 였는데, 그 순서는 제품에서 일어나지 않는다 — `maru ssh` 래퍼는
+// **exec 직전**에 5379 를 보내므로 그 앞의 OSC 7 은 「ssh 를 치기 직전 로컬 셸」의 것이고, 진입과 함께
+// 무효가 된다(`dispatchMaru` — ssh-integration.md §9.6). 그 규칙이 들어오면서 옛 순서는 「cwd 가 남아
+// 있다」를 더 이상 만족하지 못한다. 이 test 가 무는 것은 **런타임별 메타데이터 격리**이지 순서가 아니라,
+// 순서만 실제와 맞췄다.
 test "P3-e4d-1 actual metadata events stay isolated and reattach starts current" {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -17889,11 +17896,11 @@ test "P3-e4d-1 actual metadata events stay isolated and reattach starts current"
     var command_a_buf: [2048]u8 = undefined;
     const command_a = try std.fmt.bufPrint(
         &command_a_buf,
-        "printf '\\033]7;file://localhost/tmp/e4d-a0\\007\\033]2;e4d-a0\\007\\033]5379;ssh;a0\\007A0\\n'; " ++
+        "printf '\\033]5379;ssh;a0\\007\\033]7;file://localhost/tmp/e4d-a0\\007\\033]2;e4d-a0\\007A0\\n'; " ++
             "IFS= read -r _ < '{s}'; " ++
-            "printf '\\033]7;file://localhost/tmp/e4d-a1\\007\\033]2;e4d-a1\\007\\033]5379;ssh;a1\\007A1\\n'; " ++
+            "printf '\\033]5379;ssh;a1\\007\\033]7;file://localhost/tmp/e4d-a1\\007\\033]2;e4d-a1\\007A1\\n'; " ++
             "IFS= read -r _ < '{s}'; " ++
-            "printf '\\033]7;file://localhost/tmp/e4d-a2\\007\\033]2;e4d-a2\\007\\033]5379;ssh;a2\\007A2\\n'; " ++
+            "printf '\\033]5379;ssh;a2\\007\\033]7;file://localhost/tmp/e4d-a2\\007\\033]2;e4d-a2\\007A2\\n'; " ++
             "stty -icanon -echo min 0 time 30 2>/dev/null; printf '\\033]11;?\\033\\\\'; " ++
             "dd bs=64 count=1 >/dev/null 2>/dev/null; : > '{s}'; exec /bin/cat",
         .{ fifo_a, fifo_a, detached_commit },
@@ -17901,9 +17908,9 @@ test "P3-e4d-1 actual metadata events stay isolated and reattach starts current"
     var command_b_buf: [1536]u8 = undefined;
     const command_b = try std.fmt.bufPrint(
         &command_b_buf,
-        "printf '\\033]7;file://localhost/tmp/e4d-b0\\007\\033]2;e4d-b0\\007\\033]5379;ssh;b0\\007B0\\n'; " ++
+        "printf '\\033]5379;ssh;b0\\007\\033]7;file://localhost/tmp/e4d-b0\\007\\033]2;e4d-b0\\007B0\\n'; " ++
             "IFS= read -r _ < '{s}'; " ++
-            "printf '\\033]7;file://localhost/tmp/e4d-b1\\007\\033]2;e4d-b1\\007\\033]5379;ssh;b1\\007B1\\n'; " ++
+            "printf '\\033]5379;ssh;b1\\007\\033]7;file://localhost/tmp/e4d-b1\\007\\033]2;e4d-b1\\007B1\\n'; " ++
             "exec /bin/cat",
         .{fifo_b},
     );

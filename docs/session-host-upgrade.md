@@ -851,6 +851,27 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. current manifest artifact attestation, local asset/Apple product 관측, summary publication,
   executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
 
+  Current manifest attestation composition의 단일 소유자는
+  `release_adapter_github_current_manifest_attestation.zig`다. 입력은 strict context, 앞 단계의 move-only
+  `CurrentReleaseAuthority`, current B의 canonical manifest bytes, 그 bytes를 기존 0700 descriptor-owned workdir의 canonical
+  `Maru-<version>-session-host-release.json` 0400·link-count-1 leaf로 materialize한 `ManifestFile`, checkout 전 pin한 CLI와
+  token/deadline이다. caller가 준 원래 pathname을 `gh attestation verify`에 직접 넘기지 않는다. 원래 pathname은 검사 전후에
+  교체했다가 되돌릴 수 있으므로 attestation child가 읽은 inode를 증명하지 못하기 때문이다. composition은 새 filesystem reader나
+  attestation parser를 만들지 않고 `release_manifest.parseCanonical`, `release_adapter_context.bindManifest`,
+  `release_adapter_github_attestation.verifyWith`, `ManifestFile.revalidate`를 재사용한다.
+
+  외부 호출 전에 candidate가 role B이며 predecessor를 가지는지, context와 repository/tag/source/build가 일치하는지,
+  current authority의 repository/run/attempt/source/release ID/tag/protected-environment가 candidate와 exact 일치하는지,
+  canonical filename과 computed manifest SHA-256이 `ManifestFile` observation에 일치하는지 모두 닫는다. attestation 직전 pinned CLI를
+  재검증하고, certificate·subject name/SHA·run attempt 검증 뒤 같은 directory capability로 file identity/type/mode/link-count/size/
+  digest를 다시 확인한다. 성공은 parsed manifest와 current authority identity를 final-address owner에 함께 결속한 move-only
+  `AuthenticatedCurrentManifest` 하나로만 게시한다. pre-owned/copied result, role A·predecessor 부재, context/current authority/file/
+  attestation drift, CLI 교체, timeout, child/allocation failure는 publication 0이며 `ManifestFile.cleanup` 권위는 caller에게 남긴다.
+  focused gate `test-session-host-release-adapter-github-current-manifest-attestation`은 fail-closed call order, before/after file drift,
+  authority의 각 identity/protection mismatch, role/context/name mismatch, attestation failure, copied owner와 전 allocation fail-index를
+  Debug·ReleaseFast에서 검증한다. certificate·subject 세부 변조는 재사용하는 artifact-attestation gate가 소유한다. caller pathname read/materialization, local asset/Apple product 관측, summary publication,
+  executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

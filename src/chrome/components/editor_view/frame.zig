@@ -138,6 +138,14 @@ pub const Props = struct {
     /// **"보이는 줄 축"**이라 부른다. 컴포넌트는 접힘을 모르니 그 이름을 쓸 수 없을 뿐 **같은
     /// 것**이다 — §4.1g가 이 두 이름을 섞어 여러 번 틀린 이력이 있어 여기 적어 둔다.
     search_marks: ?[]const []const Mark = null,
+    /// 검색 결과가 있는 **줄 인덱스** 전체(§4.1a 「검색 결과 마커」). `search_marks` 는 **보이는 줄만**
+    /// 담아 화면 밖 매치를 말하지 못하므로 축이 다른 입력이 필요하다. 찾기가 닫히면 빈 조각이다.
+    ///
+    /// **줄로 받아 여기서 시각 행으로 옮긴다.** 제품이 미리 옮기면 랩 계수(`RowCache`)를 두 곳에서
+    /// 읽게 되고, 그러면 마커와 thumb 이 **다른 축**을 쓸 수 있다(§4.1a 가 금지하는 그것).
+    search_marker_lines: []const u32 = &.{},
+    /// `search_marker_lines` 안에서 현재 일치의 인덱스.
+    search_marker_current: ?usize = null,
     /// 그 중 **지금 보고 있는 매치**. `search_marks` 안에 이미 들어 있고 이것은 어느 것인지만
     /// 가리킨다 — 따로 담으면 두 목록이 어긋날 수 있고, 그러면 색이 둘인 매치나 색이 없는 매치가 난다.
     search_current: ?CurrentMatch = null,
@@ -241,8 +249,12 @@ pub const search_alpha: u8 = 92; // ≈36%
 /// 테마에 따라 두 색이 가까울 수 있다(사용자 테마는 우리가 못 고른다).
 pub const search_current_alpha: u8 = 153; // ≈60%
 
-/// 검색 강조가 남겨 두어야 하는 op 수 — 세로·가로 스크롤바가 각각 하나씩 쓴다
-/// (`scrollbar.build`/`buildHorizontal`의 `.ops = 1`). 자세한 이유는 `build`의 호출부에 있다.
+/// 검색 강조가 남겨 두어야 하는 op 수 — 세로·가로 스크롤바가 각각 **thumb 하나씩**만 쓴다.
+///
+/// **검색 마커 몫은 여기서 예약하지 않는다**(§4.1a 「검색 결과 마커」). 한 번 그 몫(`marker_budget`)을
+/// 더해 봤더니 op 버퍼가 작은 프레임에서 **커서가 통째로 안 그려졌다**(`CRT4`·`CRT5`) — 마커는
+/// 부가 표시이고 커서·thumb 은 조작의 근거라, 뺏는 쪽이 뒤바뀌면 안 된다. 대신 `scrollbar.build`
+/// 가 **남은 자리 안에서만** 마커를 그리고 thumb 자리는 언제나 지킨다(`n + 1 >= out.len` 가드).
 pub const scrollbar_reserve_ops: usize = 2;
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
@@ -646,6 +658,21 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const caret_room = (scratch.ops.len -| caret_base) -| scrollbar_reserve_ops;
     const caret_ops = paintCarets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[caret_base..][0..caret_room]);
 
+    // **줄 → 시각 행.** thumb 과 같은 `RowCache` 를 읽어 축을 하나로 묶는다(§4.1a).
+    // 캐시가 없으면(랩 꺼짐·아직 안 셈) 줄 인덱스가 곧 시각 행이다 — `total_visual` 도 같은 근사를 쓴다.
+    var marker_rows: [scrollbar.marker_budget]u32 = undefined;
+    var marker_n: usize = 0;
+    var marker_current: ?usize = null;
+    for (props.search_marker_lines, 0..) |line, i| {
+        if (marker_n >= marker_rows.len) break;
+        const row = if (cache) |c| c.rowsBefore(@min(line, props.lines.len)) else line;
+        if (props.search_marker_current) |cur| {
+            if (cur == i) marker_current = marker_n;
+        }
+        marker_rows[marker_n] = row;
+        marker_n += 1;
+    }
+
     const sw = scrollbar.build(.{
         .content = .{
             .x = @floatFromInt(props.rect.x),
@@ -660,6 +687,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
+        .match_rows = marker_rows[0..marker_n],
+        .current_match = marker_current,
     }, scratch.ops[caret_base + caret_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────

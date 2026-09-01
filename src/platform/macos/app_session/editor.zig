@@ -440,6 +440,10 @@ pub fn buildPaneOps(
     /// 이 Term이 검색 대상이 아니다(활성이 아닌 pane — 그쪽까지 칠하면 어디를 검색 중인지 흐려진다).
     search_marks: ?[]const []const chrome_editor.frame.Mark,
     search_current: ?chrome_editor.frame.CurrentMatch,
+    /// 검색 결과가 있는 **보이는 줄** 전체와 그 중 현재 매치(§4.1a 막대 마커). 위 `search_marks` 는
+    /// 화면 안만 담아 **화면 밖 매치를 말하지 못한다** — 그 답이 이 목록의 존재 이유다.
+    search_marker_lines: []const u32,
+    search_marker_current: ?usize,
     /// 줄별 **구문 강조 색**(§5.3 1층). `lines`와 같은 축이고, 비어 있으면 무색이다 —
     /// grammar가 없거나 아직 안 판 문서가 그렇다.
     line_colors: []const []const chrome_editor.content.ColorSpan,
@@ -469,7 +473,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .line_colors = line_colors },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors },
         .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1127,6 +1131,28 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         const vm = currentVisibleMatch(self, term) orelse break :blk null;
         break :blk .{ .line = vm.row, .start = vm.start };
     };
+    // **막대 마커는 「보이는 줄」 축으로 낸다**(§4.1a). 강조(`find_marks`)는 화면 안만 담아서
+    // 화면 **밖** 매치가 어디 있는지 말하지 못한다 — 그 답이 이 목록의 존재 이유다.
+    //
+    // **찾기가 닫히면 빈 조각이다.** 목록이 없는데 표시가 남으면 그것은 거짓이다.
+    var marker_line_buf: [chrome_editor.scrollbar.marker_budget]u32 = undefined;
+    var marker_lines: []const u32 = &.{};
+    var marker_current: ?usize = null;
+    if (isFindTarget(self, term) and self.chrome_host.find.open) {
+        var k: usize = 0;
+        const cur_idx = self.chrome_host.find.current;
+        for (self.editor_find_matches.items, 0..) |m, i| {
+            if (k >= marker_line_buf.len) break;
+            // 접혀 숨은 매치는 **접힌 줄 자리**에 찍는다(§4.1a) — 카운터에는 들어 있는데 마커만
+            // 빠지면 「셋이라는데 두 개만 보인다」가 된다. 가면 펴지므로 도착하는 자리가 맞다.
+            const row = visibleRowOfDocLine(term, m.line) orelse continue;
+            if (i == cur_idx) marker_current = k;
+            marker_line_buf[k] = row;
+            k += 1;
+        }
+        marker_lines = marker_line_buf[0..k];
+    }
+
     // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
     const preedit_rows = preeditLines(self, term, lines);
     defer if (preedit_rows) |rows| freePreeditLines(self, term, rows);
@@ -1135,7 +1161,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1152,7 +1178,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을

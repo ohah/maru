@@ -1057,6 +1057,30 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied owner와 allocation/command 실패의 publication 0·observation cleanup을 검증한다. 이 gate만으로 release `verify`/
   `verify-asset`, compatibility, final `release_manifest.Observation`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  frozen executable compatibility observation의 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_github_current_compatibility.zig`다. 입력은 authenticated
+  `CurrentManifestInput` B, final-address `CurrentProduct`, caller의 frozen executable absolute pathname과 단일 positive monotonic
+  budget뿐이다. caller가 compatibility 값이나 executable SHA를 별도 scalar로 제출하지 않는다. composition은
+  `CurrentProduct.revalidate`로 held fd·pathname·manifest asset SHA와 held parent-directory identity·mode·mtime·ctime을 먼저
+  결속한다. ordinary pathname 재해석은 상위 디렉터리 교체에 취약하므로, 이 probe만은 held parent-directory fd를 받은 뒤
+  single-purpose adapter process에서 `fork`, child의 `fchdir`, pre-fork `getdtablesize` 상한까지 ambient fd `close`, exact
+  `./<basename>` `execve` 순서로 실행한다.
+  fork child는 allocator, logger, lock 또는 다른 비동기-signal-unsafe application 코드를 호출하지 않고 descriptor/process syscall만
+  수행한다. argv[0]은 진단용 frozen absolute pathname을 유지하지만 실행 권위는 held directory vnode와 exact leaf다. child 종료 뒤 parent
+  directory fingerprint까지 다시 같아야 하므로 실행 구간의 leaf 교체·복원도 publication 전에 거부한다. hidden probe는 frozen image에 컴파일된
+  `protocol.version_major`, `screen_stream.codec_version`, `handoff_codec.reader_min/reader_max`, `app_session.abi_version`만 canonical
+  bounded JSON 한 개로 stdout에 쓰며 argument, stdin, 환경 또는 filesystem을 compatibility 권위로 사용하지 않는다.
+
+  probe stdout은 duplicate·unknown·missing field, trailing value, noncanonical integer와 zero/range overflow를 모두 거부하고
+  `release_manifest.Compatibility`로 한 번만 materialize한다. child 종료 뒤 `CurrentProduct.revalidate`를 다시 수행하며 pre/post
+  executable identity·size·SHA가 같고 parsed compatibility가 B manifest와 exact 일치할 때만 frozen SHA와 compatibility를
+  `CurrentCompatibility` final-address move-only owner로 게시한다. copied/pre-owned owner, manifest/product/path drift, executable
+  replacement·in-place mutation, timeout·output cap·child failure, malformed/noncanonical stdout와 compatibility mismatch는 publication
+  0이다. focused gate `test-session-host-release-adapter-github-current-compatibility`는 actual separate process와 injected probe로
+  exact argv/clean environment, canonical success, pre/post frozen revalidation, caller scalar 0, owner misuse, parser field/range drift,
+  mutation·timeout·child failure의 publication 0을 Debug·ReleaseFast에서 검증한다. 이 gate만으로 final
+  `release_manifest.Observation`, release `verify`/`verify-asset`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

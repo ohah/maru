@@ -2612,6 +2612,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mutation 격리, attestor private pathname, basename/symlink/type/size/read/materialization/attestation 실패의 publication·residue 0,
   copied/pre-owned owner와 allocation unwind를 검증한다. local DMG/frozen executable·Apple product 관측,
   summary·executable·workflow 배선과 frozen U5 E2E는 후속 범위다.
+  Frozen executable pathname authority는 전체 binary를 heap에 복사하지 않고 기존 release adapter file SSOT의
+  `PinnedExecutableFile`에 no-follow executable fd를 보존한다. manifest expected size/SHA-256과 제품 상한을 64 KiB stack-buffer
+  streaming hash로 결속하고, 후속 관측 전후 pathname hash·reopened pathname fd·held fd의 identity/type/mode/link-count/size/time/
+  digest를 재검증한다. `test-session-host-release-adapter-frozen-executable-authority`가 Debug·ReleaseFast actual filesystem에서
+  move-only owner, invalid type/mode/expected values, symlink·pathname replacement·in-place mutation을 검증한다. DMG 내부 executable
+  동일성, Apple product/current manifest composition, summary·executable·workflow 배선과 frozen U5 E2E는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

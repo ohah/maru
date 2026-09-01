@@ -833,7 +833,11 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   조립, checkout 전 capture 자체, Apple product 관측과 frozen U5 제품 E2E는 후속 범위다.
 
   Current release authority composition은 이 current authority와 current canonical manifest를 한 번에 결속한다.
-  외부 호출 전 `release_adapter_context.bindManifest`로 repository/tag/source/build를 교차검증하고, current authority
+  후속 executable pre-publish owner는 caller가 임의로 만든 parsed manifest를 받지 않는다. 먼저
+  `release_adapter_github_current_manifest_candidate.zig`가 absolute canonical manifest pathname을
+  `release_adapter_files.readInputAlloc`로 딱 한 번 no-follow bounded read하고, 그 owned bytes를
+  `release_manifest.parseCanonical`로 해석해 final-address move-only `CurrentManifestCandidate`로 게시한다.
+  외부 호출 전 이 candidate의 parsed manifest로 `release_adapter_context.bindManifest`를 수행해 repository/tag/source/build를 교차검증하고, current authority
   전체를 로컬 final-address owner에 성공시킨 뒤 authenticated paginated release 목록에서 exact manifest release ID/tag의
   mutable draft를 하나 찾고,
   `tag_ref` → 최대 8개 annotated-tag object를 조회해 manifest source commit으로 수렴시킨다. tag chain의
@@ -874,18 +878,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   Current manifest pathname composition의 단일 소유자는
   `release_adapter_github_current_manifest_input.zig`다. 입력 manifest pathname은 absolute path와 canonical
-  `Maru-<context version>-session-host-release.json` basename을 먼저 요구하고, `release_adapter_files.readInputAlloc`로 모든
-  component를 no-follow 순회해 하나의 regular fd에서 `max_manifest_bytes` 이하 bytes·size·SHA-256·device/inode를 만든다.
+  `Maru-<context version>-session-host-release.json` basename을 먼저 요구한다. 현재 leaf entrypoint는 pathname을 직접 읽는다.
+  후속 executable composition 배선에서는 이 entrypoint를 호출하지 않고, current release authority와 결속한 바로 그
+  `CurrentManifestCandidate`를 consume하는 entrypoint로 이관한다. 그 entrypoint는 candidate가 소유하던 original input
+  bytes·size·SHA-256·device/inode를 복사하거나 pathname을 다시 열지 않고 이전받는다.
   그 owned bytes와 computed digest만 `release_adapter_github_manifest_file.materialize`에 넘겨 caller가 지정한 absent
   work-directory 아래 0700 directory와 0400·link-count-1 canonical leaf를 만든다. 원래 pathname은 이후 attestation child나
   다른 parser에 다시 넘기지 않으며, 원본이 read 뒤 교체·삭제되어도 private leaf와 owned bytes가 같은 candidate를 가리킨다.
 
-  성공은 original input bytes, cleanup 가능한 `ManifestFile`, 앞 단계의 `AuthenticatedCurrentManifest`를 final-address
+  candidate-consume 이관 뒤 성공은 original input bytes, cleanup 가능한 `ManifestFile`, 앞 단계의 `AuthenticatedCurrentManifest`를 final-address
   move-only `CurrentManifestInput` 하나가 함께 소유할 때만 게시한다. pre-owned/copied result, noncanonical basename,
-  symlink·non-regular·empty·oversize, destination collision, materialization/attestation 실패는 authenticated result 0이고,
+  symlink·non-regular·empty·oversize·canonical parse 실패, already-consumed/copied candidate, destination collision,
+  materialization/attestation 실패는 authenticated result 0이고,
   이미 만든 private file/work-directory와 input allocation을 역순으로 회수한다. cleanup 자체가 실패하면 성공으로 위장하지 않고
   같은 owner가 재시도 권위를 보존한다. focused gate
-  `test-session-host-release-adapter-github-current-manifest-input`은 실제 macOS filesystem에서 canonical 성공, attestor가 보는
+  `test-session-host-release-adapter-github-current-manifest-candidate`는 실제 macOS filesystem에서 canonical single-read 성공,
+  basename/input/parse 실패, copied/pre-owned/consumed owner와 전 allocation fail-index를 검증한다.
+  `test-session-host-release-adapter-github-current-manifest-input`은 실제 macOS filesystem에서 candidate consume 성공, attestor가 보는
   private path와 read 뒤 original mutation 격리, basename/input/path/materialization 실패, attestation 실패 뒤 residue 0,
   copied/pre-owned owner와 전 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 composition은 local DMG/frozen
   executable·Apple product 관측, summary publication, executable/workflow 배선과 frozen U5 제품 E2E를 대신하지 않는다.

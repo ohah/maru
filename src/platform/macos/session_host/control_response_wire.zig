@@ -22,10 +22,22 @@ pub const ResyncRequest = struct {
 
 pub const DetachRequest = struct { stream_id: u64 };
 
+/// observer 가 **자기가 그릴 수 있는 격자** 를 알린다(S11-6). 리사이즈를 «부르는» 것이 아니다 —
+/// 무엇을 할지는 host 가 정한다. 그래서 `lifecycle` 도, controller 자격도 필요하지 않다.
+///
+/// 둘 다 0 이면 **선언을 거둔다**(붙어 있되 크기에 영향을 안 준다). 한쪽만 0 인 것은 뜻이 없어
+/// 정규형이 아니다 — client 쪽 프레임 디코더가 이미 버리므로 여기까지 오지 않는다.
+pub const DeclareViewportRequest = struct {
+    stream_id: u64,
+    cols: u16,
+    rows: u16,
+};
+
 pub const WireRequest = union(enum) {
     resize: ResizeRequest,
     resync: struct { stream_id: u64 },
     detach: DetachRequest,
+    declare_viewport: DeclareViewportRequest,
 
     pub fn isCanonical(self: WireRequest) bool {
         return switch (self) {
@@ -33,6 +45,8 @@ pub const WireRequest = union(enum) {
                 value.rows >= 1 and value.client_sequence != 0,
             .resync => |value| value.stream_id != 0,
             .detach => |value| value.stream_id != 0,
+            .declare_viewport => |value| value.stream_id != 0 and
+                (value.cols == 0) == (value.rows == 0),
         };
     }
 };
@@ -41,6 +55,7 @@ pub const ControlRequest = union(enum) {
     resize: ResizeRequest,
     resync: ResyncRequest,
     detach: DetachRequest,
+    declare_viewport: DeclareViewportRequest,
 
     pub fn isCanonical(self: ControlRequest) bool {
         return switch (self) {
@@ -48,6 +63,8 @@ pub const ControlRequest = union(enum) {
                 value.rows >= 1 and value.client_sequence != 0,
             .resync => |value| value.stream_id != 0 and value.recovery_authority.isCanonical(),
             .detach => |value| value.stream_id != 0,
+            .declare_viewport => |value| value.stream_id != 0 and
+                (value.cols == 0) == (value.rows == 0),
         };
     }
 };
@@ -56,12 +73,14 @@ pub const ControlExpectation = union(enum) {
     resize: struct { client_sequence: u64 },
     resync: recovery.ControlAuthority,
     detach,
+    declare_viewport,
 
     pub fn isCanonical(self: ControlExpectation) bool {
         return switch (self) {
             .resize => |value| value.client_sequence != 0,
             .resync => |key| key.isCanonical(),
             .detach => true,
+            .declare_viewport => true,
         };
     }
 };
@@ -84,6 +103,7 @@ pub fn expectationDigest(expectation: ControlExpectation) [32]u8 {
             hasher.update(&.{@intFromEnum(authority.origin)});
         },
         .detach => {},
+        .declare_viewport => {},
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -128,6 +148,14 @@ pub fn encodeParams(buffer: []u8, request: WireRequest) EncodeError!EncodedParam
                 .{value.stream_id},
             ) catch return error.BufferTooSmall,
         },
+        .declare_viewport => |value| .{
+            .method = "runtime.declare_viewport",
+            .params = std.fmt.bufPrint(
+                buffer,
+                "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d}}}",
+                .{ value.stream_id, value.cols, value.rows },
+            ) catch return error.BufferTooSmall,
+        },
     };
 }
 
@@ -137,16 +165,19 @@ pub fn encodeRequest(buffer: []u8, request: ControlRequest) EncodeError!EncodedR
         .resize => |value| .{ .resize = value },
         .resync => |value| .{ .resync = .{ .stream_id = value.stream_id } },
         .detach => |value| .{ .detach = value },
+        .declare_viewport => |value| .{ .declare_viewport = value },
     };
     const expectation: ControlExpectation = switch (request) {
         .resize => |value| .{ .resize = .{ .client_sequence = value.client_sequence } },
         .resync => |value| .{ .resync = value.recovery_authority },
         .detach => .detach,
+        .declare_viewport => .declare_viewport,
     };
     const prefix = switch (wire) {
         .resize => "{\"method\":\"runtime.resize\",\"params\":",
         .resync => "{\"method\":\"runtime.resync\",\"params\":",
         .detach => "{\"method\":\"runtime.detach\",\"params\":",
+        .declare_viewport => "{\"method\":\"runtime.declare_viewport\",\"params\":",
     };
     if (buffer.len <= prefix.len) return error.BufferTooSmall;
     @memcpy(buffer[0..prefix.len], prefix);
@@ -208,7 +239,7 @@ pub fn decodeResizeResponse(
 ) ResponseError!ResizeReply {
     const expected_sequence = switch (expectation) {
         .resize => |value| value.client_sequence,
-        .resync, .detach => return error.Malformed,
+        .resync, .detach, .declare_viewport => return error.Malformed,
     };
     if (expected_sequence == 0) return error.Malformed;
     var parsed = try parseRoot(allocator, payload);
@@ -272,13 +303,64 @@ pub fn decodeResyncEnvelope(
     if (value != .bool or !value.bool) return error.Malformed;
 }
 
+/// host 가 그 선언을 어떻게 다뤘는가. **버림과 무변화를 가른다** — 「한쪽만 0 이라 버렸다」를
+/// 「같은 값이라 아무것도 안 했다」로 접으면 client 는 자기 선언이 통했는지 모른다.
+pub const DeclareViewportOutcome = enum {
+    declared,
+    withdrawn,
+    unchanged,
+    invalid,
+
+    pub fn wireName(self: DeclareViewportOutcome) []const u8 {
+        return switch (self) {
+            .declared => "declared",
+            .withdrawn => "withdrawn",
+            .unchanged => "unchanged",
+            .invalid => "invalid",
+        };
+    }
+
+    pub fn fromWireName(text: []const u8) ?DeclareViewportOutcome {
+        inline for (std.enums.values(DeclareViewportOutcome)) |value|
+            if (std.mem.eql(u8, text, value.wireName())) return value;
+        return null;
+    }
+};
+
+pub fn decodeDeclareViewportResponse(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    expectation: ControlExpectation,
+) ResponseError!DeclareViewportOutcome {
+    switch (expectation) {
+        .resize, .detach, .resync => return error.Malformed,
+        .declare_viewport => {},
+    }
+    var parsed = try parseRoot(allocator, payload);
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.Malformed,
+    };
+    try rejectErrorEnvelope(root);
+    if (root.count() != 1) return error.Malformed;
+    const result = switch (root.get("result") orelse return error.Malformed) {
+        .object => |object| object,
+        else => return error.Malformed,
+    };
+    if (result.count() != 1) return error.Malformed;
+    const value = result.get("declared") orelse return error.Malformed;
+    if (value != .string) return error.Malformed;
+    return DeclareViewportOutcome.fromWireName(value.string) orelse error.Malformed;
+}
+
 pub fn decodeResyncResponse(
     allocator: std.mem.Allocator,
     payload: []const u8,
     expectation: ControlExpectation,
 ) ResponseError!void {
     switch (expectation) {
-        .resize, .detach => return error.Malformed,
+        .resize, .detach, .declare_viewport => return error.Malformed,
         .resync => |authority| if (!authority.isCanonical()) return error.Malformed,
     }
     return decodeResyncEnvelope(allocator, payload);

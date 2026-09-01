@@ -630,6 +630,28 @@ pub const ExternalPumpOwner = struct {
         }, now_ns);
     }
 
+    /// observer 가 자기 뷰포트를 알린다(S11-6). `admitDetach` 와 같은 자리를 쓴다 — 공개 루프가
+    /// stream_id·generation 을 스스로 지어내지 못하게 owner 가 채운다.
+    pub fn admitDeclareViewport(
+        self: *ExternalPumpOwner,
+        cols: u16,
+        rows: u16,
+        now_ns: i128,
+    ) client_external_pump.ControlAdmissionResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .{ .terminal = .invariant_failure };
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .{ .terminal = .invariant_failure };
+        return self.storage.admitControl(.{
+            .request = .{ .declare_viewport = .{
+                .stream_id = self.attachment.state.stream_id,
+                .cols = cols,
+                .rows = rows,
+            } },
+            .expected_controller_generation = self.attachment.state.controller_generation,
+        }, now_ns);
+    }
+
     pub fn pollHint(self: *const ExternalPumpOwner) PollHintResult {
         if (!self.addressValid() or self.lifecycle != .live)
             return .moved_or_stale;
@@ -1925,7 +1947,10 @@ test "p5c3c-2b3 actual external attach prepare drives one owner pump control and
     );
     var prepared = switch (prepared_result) {
         .prepared => |value| value,
-        .failed => return error.TestUnexpectedResult,
+        .failed => |f| {
+            std.debug.print("2b3 prepare failed: code={s} stage={s}\n", .{ @tagName(f.code), @tagName(f.stage) });
+            return error.TestUnexpectedResult;
+        },
     };
     defer prepared.deinit();
     var owner: ExternalPumpOwner = .{};

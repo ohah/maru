@@ -84,6 +84,7 @@ pub fn prepareAdmission(
         .resize => kind != .resize,
         .resync => kind != .resync,
         .detach => kind != .detach,
+        .declare_viewport => kind != .declare_viewport,
     })
         return .invalid;
     const deadline_ns = std.math.add(i128, now_ns, timeout_ns) catch

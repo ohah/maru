@@ -9,6 +9,7 @@ const apple = @import("release_adapter_apple_product");
 const apple_transport = @import("release_adapter_apple_transport");
 const dmg_authority = @import("release_adapter_dmg_authority");
 const current_input = @import("release_adapter_github_current_manifest_input");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const DmgExpected = dmg_authority.ExpectedDmg;
 
@@ -117,6 +118,22 @@ pub fn observe(
     return observeWith(&observer, allocator, io, current, paths, budget_ns, result);
 }
 
+pub fn observeUntil(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    current: *const current_input.CurrentManifestInput,
+    paths: Paths,
+    storage: *apple_transport.Storage,
+    deadline: *deadline_mod.Deadline,
+    result: *CurrentProduct,
+) !void {
+    const storage_bytes = std.mem.asBytes(storage);
+    if (aliasesMutableAuthority(storage_bytes, deadline, current, paths, result, true))
+        return error.InvalidOwner;
+    var observer = RealObserver{ .storage = storage };
+    return observeUntilWith(&observer, deadline, allocator, io, current, paths, result);
+}
+
 pub fn observeWith(
     observer: anytype,
     allocator: std.mem.Allocator,
@@ -126,12 +143,27 @@ pub fn observeWith(
     budget_ns: i128,
     result: *CurrentProduct,
 ) !void {
+    var fixed = FixedBudget{ .value = budget_ns };
+    return observeUntilWith(observer, &fixed, allocator, io, current, paths, result);
+}
+
+pub fn observeUntilWith(
+    observer: anytype,
+    deadline: anytype,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    current: *const current_input.CurrentManifestInput,
+    paths: Paths,
+    result: *CurrentProduct,
+) !void {
+    if (aliasesMutableAuthority(std.mem.asBytes(deadline), deadline, current, paths, result, false))
+        return error.InvalidOwner;
     if (result.owner != null or result.frozen.owner != null or result.frozen.fd >= 0 or result.frozen.parent_fd >= 0 or
         result.apple_observed != null) return error.InvalidOwner;
     const authenticated = current.value() orelse return error.InvalidCurrent;
-    const private_manifest = current.file.revalidate() catch return error.InvalidCurrent;
+    current.revalidate() catch return error.InvalidCurrent;
+    const private_manifest = current.file.observation() orelse return error.InvalidCurrent;
     try validatePaths(paths, private_manifest);
-    if (budget_ns <= 0) return error.InvalidAsset;
 
     const dmg_asset = assetForRole(authenticated.manifest.assets, .universal_dmg) orelse
         return error.InvalidAsset;
@@ -142,6 +174,7 @@ pub fn observeWith(
     if (!std.mem.eql(u8, std.fs.path.basename(paths.dmg), dmg_asset.name) or
         !std.mem.eql(u8, std.fs.path.basename(paths.frozen_executable), frozen_asset.name))
         return error.InvalidPath;
+    _ = try deadline.remaining();
 
     var frozen_sha: [64]u8 = undefined;
     @memcpy(&frozen_sha, frozen_asset.sha256);
@@ -153,6 +186,7 @@ pub fn observeWith(
     defer if (frozen_owned) result.frozen.deinit() catch {};
     _ = files.revalidateExecutable(&result.frozen, paths.frozen_executable) catch
         return error.FrozenChanged;
+    const budget_ns = try deadline.remaining();
 
     var dmg_sha_value: [64]u8 = undefined;
     @memcpy(&dmg_sha_value, dmg_asset.sha256);
@@ -169,10 +203,47 @@ pub fn observeWith(
         !manifest.equalSigning(authenticated.manifest.signing, observed.signing()))
         return error.ProductMismatch;
 
+    current.revalidate() catch return error.InvalidCurrent;
+    _ = try deadline.remaining();
     result.apple_observed = observed;
     result.owner = result;
     observed_owned = false;
     frozen_owned = false;
+}
+
+const FixedBudget = struct {
+    value: i128,
+
+    pub fn remaining(self: *@This()) Error!i128 {
+        if (self.value <= 0) return error.InvalidAsset;
+        return self.value;
+    }
+};
+
+fn aliasesMutableAuthority(
+    candidate: []const u8,
+    deadline: anytype,
+    current: *const current_input.CurrentManifestInput,
+    paths: Paths,
+    result: *CurrentProduct,
+    include_deadline: bool,
+) bool {
+    if ((include_deadline and rangesOverlap(candidate, std.mem.asBytes(deadline))) or
+        rangesOverlap(candidate, std.mem.asBytes(current)) or
+        rangesOverlap(candidate, std.mem.asBytes(result))) return true;
+    inline for (.{ paths.dmg, paths.dmg_work, paths.frozen_executable }) |path| {
+        if (rangesOverlap(candidate, path)) return true;
+    }
+    return false;
+}
+
+fn rangesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch return true;
+    return left_start < right_end and right_start < left_end;
 }
 
 fn validatePaths(paths: Paths, private_manifest: anytype) Error!void {

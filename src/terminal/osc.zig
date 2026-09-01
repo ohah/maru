@@ -322,7 +322,33 @@ pub fn dispatchMaru(self: *TerminalCore, body: []const u8) void {
     const dup = self.allocator.dupe(u8, dest) catch return; // OOM이면 기존 dest 유지
     if (self.ssh_remote_dest) |old| self.allocator.free(old);
     self.ssh_remote_dest = dup;
-    if (changed) self.bumpTitleGeneration();
+    if (changed) {
+        // **ssh 에 들어가면 기록된 cwd 는 더 이상 이 pane 의 것이 아니다.**
+        //
+        // 그 값은 **ssh 를 치기 직전** 로컬 셸이 보고한 경로다. 원격 셸에 OSC 7 보고자가 없으면 그
+        // 값이 세션 내내 남아, 소비처들이 그것을 **지금 이 터미널의 cwd** 로 읽는다 — 새 탭이 그리로
+        // 열리고, 화면의 상대 경로가 그 기준으로 resolve 되고, 폴더줄이 남의 디렉터리를 가리킨다
+        // (ssh-integration.md §9.4 가 원격 cwd 에 대해 닫아 둔 길이, 여기서는 「원격인 줄 모르는 채」로
+        // 열려 있었다).
+        //
+        // 지우면 그 자리들이 **모른다** 로 떨어져 안전한 기본값(워크스페이스 root·감지 안 함·빈 줄)을
+        // 쓴다. ssh 를 빠져나오면 로컬 셸의 `precmd` 보고자가 다음 프롬프트에서 곧바로 다시 채운다.
+        //
+        // ⚠️ 이것만으로 §9.4 보호가 켜지지는 **않는다** — `termCwdIsRemote` 는 authority 로만 판정하고
+        // 빈 cwd 는 「로컬」로 떨어지므로, 화면의 **절대 경로**는 여전히 로컬 파일로 열린다. 그 구멍은
+        // 원격 판정을 `ssh_remote_dest` 까지 넓히는 후속이 닫는다(적대적 검증이 이 순서를 확정했다).
+        clearCwd(self);
+        self.bumpTitleGeneration();
+    }
+}
+
+/// 기록된 cwd 와 그 authority 를 버린다. **소유한 메모리를 푼다** — 두 값은 한 쌍이라 함께 지운다
+/// (하나만 지우면 「host 는 아는데 경로는 모른다」 는 없는 상태가 된다).
+fn clearCwd(self: *TerminalCore) void {
+    if (self.cwd) |c| self.allocator.free(c);
+    self.cwd = null;
+    if (self.cwd_host) |h| self.allocator.free(h);
+    self.cwd_host = null;
 }
 
 /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.

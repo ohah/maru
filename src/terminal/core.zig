@@ -8968,3 +8968,51 @@ test "abort된 시퀀스 뒤 OSC 본문이 화면 텍스트로 새지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, row.items, "777") == null);
     try std.testing.expect(std.mem.indexOf(u8, row.items, "notify") == null);
 }
+
+// ssh 에 들어가면 기록된 cwd 는 **더 이상 이 pane 의 것이 아니다**. 그 값은 ssh 를 치기 직전 로컬 셸이
+// 보고한 경로라, 원격에 OSC 7 보고자가 없으면 세션 내내 남아 소비처들이 그것을 «지금 이 터미널의 cwd»
+// 로 읽는다 — 새 탭이 그리로 열리고, 상대 경로가 그 기준으로 resolve 되고, 폴더줄이 남의 디렉터리를
+// 가리킨다(ssh-integration.md §9.4 가 원격 cwd 에 닫아 둔 길이 「원격인 줄 모르는 채」 열려 있었다).
+test "OSC 5379 ssh: 진입하면 로컬이 기록한 cwd 를 버린다 — 그 값은 이제 이 pane 의 것이 아니다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    // 로컬 셸이 보고해 둔 값.
+    try core.write("\x1b]7;file:///Users/me/local\x1b\\");
+    try std.testing.expectEqualStrings("/Users/me/local", core.currentCwd());
+
+    // ssh 진입 → 그 값은 무효다.
+    try core.write("\x1b]5379;ssh;me@build-box\x07");
+    try std.testing.expectEqualStrings("", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost()); // 쌍으로 지운다
+    try std.testing.expectEqualStrings("me@build-box", core.sshRemoteDest().?);
+
+    // 원격 보고자가 있으면 그 값이 채운다(원격 세션의 진짜 cwd).
+    try core.write("\x1b]7;file://build-box/srv/app\x1b\\");
+    try std.testing.expectEqualStrings("/srv/app", core.currentCwd());
+    try std.testing.expectEqualStrings("build-box", core.currentCwdHost());
+
+    // ssh 종료 뒤에는 로컬 셸의 다음 프롬프트가 다시 채운다.
+    try core.write("\x1b]5379;ssh-end\x07");
+    try core.write("\x1b]7;file:///Users/me/local\x1b\\");
+    try std.testing.expectEqualStrings("/Users/me/local", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+}
+
+test "OSC 5379 ssh: 같은 목적지를 다시 통지해도 cwd 를 안 버린다" {
+    // 진입 뒤 원격 보고자가 채운 값을, 같은 dest 의 재통지가 지우면 안 된다 — `maru ssh` 래퍼가 한 번만
+    // 보내지만 멱등이어야 하고, 지우면 매 통지마다 폴더줄이 깜빡인다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]5379;ssh;me@build-box\x07");
+    try core.write("\x1b]7;file://build-box/srv/app\x1b\\");
+    try std.testing.expectEqualStrings("/srv/app", core.currentCwd());
+
+    try core.write("\x1b]5379;ssh;me@build-box\x07"); // 같은 값 = 변화 없음
+    try std.testing.expectEqualStrings("/srv/app", core.currentCwd());
+
+    // **다른 목적지로 갈아타면 버린다** — 그 경로는 앞 호스트의 것이다.
+    try core.write("\x1b]5379;ssh;me@other-box\x07");
+    try std.testing.expectEqualStrings("", core.currentCwd());
+}

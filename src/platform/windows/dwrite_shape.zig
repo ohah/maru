@@ -518,6 +518,36 @@ fn decodeUtf16At(s: [*]const u16, len: u32, i: usize) u32 {
 
 /// 팩토리와 컬렉션을 들고 있는 셰이퍼. **한 번 만들어 재사용한다** — 팩토리·컬렉션 생성은 프레임마다
 /// 할 일이 아니다(§2m.15 가 컬렉션을 2ms 로 쟀다).
+/// `CreateFontFallback` 을 실제로 부른 횟수. **판정이 이것을 본다** — 캐시가 도는지는 시간으로 재면
+/// 기계마다 흔들리지만 이 수는 흔들리지 않는다("도크를 세 번 다시 그려도 폴백은 한 번만 짓는다").
+pub var fallback_builds: usize = 0;
+
+/// 캐시 키의 모양: `primary ++ 0 ++ fallback_csv`.
+///
+/// **구분자가 필요하다.** 그냥 이어 붙이면 `("ab", "c")` 와 `("a", "bc")` 가 같은 키가 되어, 폰트를
+/// 바꿨는데 **옛 폴백 목록을 계속 쓰는** 상태가 된다 — 화면에서는 "글꼴을 바꿨는데 일부 글자만 안
+/// 바뀐다" 로 보인다. face 이름과 CSV 어디에도 0 바이트가 없으므로 이 구분자는 모호하지 않다.
+pub fn fallbackKeyLen(primary: []const u8, fallback_csv: []const u8) usize {
+    return primary.len + 1 + fallback_csv.len;
+}
+
+pub fn writeFallbackKey(out: []u8, primary: []const u8, fallback_csv: []const u8) void {
+    @memcpy(out[0..primary.len], primary);
+    out[primary.len] = 0;
+    @memcpy(out[primary.len + 1 ..], fallback_csv);
+}
+
+pub fn fallbackKeyMatches(key: []const u8, primary: []const u8, fallback_csv: []const u8) bool {
+    if (key.len != fallbackKeyLen(primary, fallback_csv)) return false;
+    if (!std.mem.eql(u8, key[0..primary.len], primary)) return false;
+    if (key[primary.len] != 0) return false;
+    return std.mem.eql(u8, key[primary.len + 1 ..], fallback_csv);
+}
+
+/// 셰이핑된 런 수. **판정의 무장 조건이다** — 이것이 안 늘었으면 "폴백을 안 지었다" 는 사실이 공허하다
+/// (아무것도 안 그린 프레임도 0 을 낸다).
+pub var shape_calls: usize = 0;
+
 pub const Shaper = struct {
     allocator: std.mem.Allocator,
     factory: *IDWriteFactory2,
@@ -525,6 +555,15 @@ pub const Shaper = struct {
     system: *IDWriteFontCollection,
     /// 번들 폰트만 담은 컬렉션(§2m.15). 없으면 `null` — 시스템 폰트로만 간다.
     bundled: ?*anyopaque,
+    /// **폴백 목록을 런마다 짓지 않는다.** `CreateFontFallback` 은 시스템 폰트 목록을 훑어 한 번에
+    /// ~270µs 든다(실측) — 도크를 한 번 다시 그리는 데 그것만으로 15ms 가 나갔다(§2m.106).
+    ///
+    /// **키는 그것을 만든 두 문자열**(주 face 이름 + 폴백 CSV)이다. 그 둘이 같으면 만들어지는 목록도
+    /// 같다 — `fallbackCandidates` 가 그 둘에서만 답을 낸다. 크기·굵기는 폴백에 안 들어가므로 키가
+    /// 아니다(그것들은 format 이 갖는다).
+    fallback_key: ?[]u8 = null,
+    /// 캐시된 `IDWriteFontFallback`. **소유권이 여기 있다** — `destroy` 가 놓는다.
+    fallback_obj: ?*anyopaque = null,
 
     pub fn create(allocator: std.mem.Allocator) Error!*Shaper {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
@@ -548,11 +587,15 @@ pub const Shaper = struct {
             .system = system,
             // 번들 컬렉션이 없어도 선다 — 시스템 폰트로만 간다(§2m.15 의 규약).
             .bundled = dwrite_font.createBundledCollectionRaw(raw.?),
+            .fallback_key = null,
+            .fallback_obj = null,
         };
         return self;
     }
 
     pub fn destroy(self: *Shaper) void {
+        if (self.fallback_key) |key| self.allocator.free(key);
+        d3d11.releaseOpt(self.fallback_obj);
         d3d11.releaseOpt(self.bundled);
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.system)));
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.factory)));
@@ -563,6 +606,7 @@ pub const Shaper = struct {
     pub fn shape(self: *Shaper, req: Request, out: []GlyphRecord) Error!ShapeResult {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         if (req.text.len == 0) return .{ .primary_found = true };
+        shape_calls += 1;
         // **앞을 자르는 말줄임은 아직 없다.** 조용히 뒤를 자르면 입력 줄에서 사용자가 자기 입력을 못 본다.
         if (req.anchor_tail and req.max_width_px > 0) return error.UnsupportedHeadTrim;
 
@@ -656,10 +700,52 @@ pub const Shaper = struct {
     ///
     /// **format 에 박는다**(`IDWriteTextFormat1`, 슬롯 34). layout 에 박아도(슬롯 78) 되지만, format 은
     /// 한 번 만들어 재사용하므로 런마다 QI 를 안 해도 된다. 둘 다 실측으로 확인했다.
+    ///
+    /// **목록 자체는 캐시한다.** 짓는 값이 `(primary, fallback_csv)` 에서만 나오므로 같은 짝이면 같은
+    /// 목록이다 — 그런데 런마다 다시 지으면 그것만으로 한 프레임이 날아간다(§2m.106 의 실측).
     fn attachFallback(self: *Shaper, fmt: *IDWriteTextFormat, primary: []const u8, fallback_csv: []const u8) Error!void {
+        if (self.cachedFallback(primary, fallback_csv)) |fb| return setFallback(fmt, fb);
+        const fb = self.buildFallback(primary, fallback_csv) orelse return;
+        // **캐시에 실으면 소유권이 Shaper 로 간다.** 못 실으면(키를 못 담았다) 예전처럼 쓰고 놓는다 —
+        // 느려질 뿐 답은 같다.
+        if (self.rememberFallback(primary, fallback_csv, fb)) {
+            setFallback(fmt, fb);
+        } else {
+            defer d3d11.releaseOpt(@as(?*anyopaque, fb));
+            setFallback(fmt, fb);
+        }
+    }
+
+    /// 키가 맞으면 캐시된 목록. **빌린 포인터**다 — 호출자가 놓지 않는다.
+    fn cachedFallback(self: *const Shaper, primary: []const u8, fallback_csv: []const u8) ?*anyopaque {
+        const key = self.fallback_key orelse return null;
+        const obj = self.fallback_obj orelse return null;
+        if (!fallbackKeyMatches(key, primary, fallback_csv)) return null;
+        return obj;
+    }
+
+    /// 캐시에 싣는다. 실었으면 `true`(소유권을 가져갔다), 못 실었으면 `false`.
+    ///
+    /// **옛것은 새 키를 담는 데 성공한 뒤에 놓는다** — 먼저 놓고 할당이 실패하면 캐시가 빈 채로
+    /// 남아 다음 런이 또 짓는다(그리고 그 사이 아무도 안 쓰던 객체를 잃는다).
+    fn rememberFallback(self: *Shaper, primary: []const u8, fallback_csv: []const u8, fb: *anyopaque) bool {
+        const key = self.allocator.alloc(u8, fallbackKeyLen(primary, fallback_csv)) catch return false;
+        writeFallbackKey(key, primary, fallback_csv);
+        if (self.fallback_key) |old| self.allocator.free(old);
+        // **같은 포인터면 안 놓는다.** 키가 안 맞아 새로 지었는데 COM 이 우연히 같은 객체를 돌려주면,
+        // 놓는 순간 참조가 0 이 되어 방금 실은 것이 죽는다. 실제로 그럴 일은 없다고 보지만 그 판정을
+        // COM 구현에 맡길 이유가 없다 — 한 줄이면 그 가정 자체가 사라진다.
+        if (self.fallback_obj != fb) d3d11.releaseOpt(self.fallback_obj);
+        self.fallback_key = key;
+        self.fallback_obj = fb;
+        return true;
+    }
+
+    /// 후보 목록에서 `IDWriteFontFallback` 을 짓는다. **여기가 비싼 자리다**(실측 ~270µs).
+    fn buildFallback(self: *Shaper, primary: []const u8, fallback_csv: []const u8) ?*anyopaque {
         var builder_raw: ?*IDWriteFontFallbackBuilder = null;
-        if (d3d11.failed(self.factory.vtable.CreateFontFallbackBuilder(self.factory, &builder_raw))) return;
-        const builder = builder_raw orelse return;
+        if (d3d11.failed(self.factory.vtable.CreateFontFallbackBuilder(self.factory, &builder_raw))) return null;
+        const builder = builder_raw orelse return null;
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(builder)));
 
         // 전 범위를 후보 순서대로 건다 — CoreText 의 `kCTFontCascadeListAttribute` 와 같은 모양이다.
@@ -687,10 +773,17 @@ pub const Shaper = struct {
         }
 
         var fallback: ?*anyopaque = null;
-        if (d3d11.failed(builder.vtable.CreateFontFallback(builder, &fallback))) return;
-        defer d3d11.releaseOpt(fallback);
-        const fb = fallback orelse return;
+        if (d3d11.failed(builder.vtable.CreateFontFallback(builder, &fallback))) return null;
+        fallback_builds += 1;
+        return fallback;
+    }
 
+    /// 목록 하나를 format 에 박는다.
+    ///
+    /// **수명 관계가 한 방향이다**: format 은 `shape` 한 번 안에서 만들어져 그 안에서 놓인다(그 함수의
+    /// `defer`). 캐시된 목록은 `Shaper` 가 산 동안 산다 — 즉 **목록이 format 보다 항상 오래 산다**.
+    /// 그래서 이 자리는 COM 참조 세기의 세부(누가 `AddRef` 하는가)에 기대지 않는다.
+    fn setFallback(fmt: *IDWriteTextFormat, fb: *anyopaque) void {
         const unk: *const *const IUnknownVTable = @ptrCast(@alignCast(fmt));
         var f1_raw: ?*anyopaque = null;
         if (d3d11.failed(unk.*.QueryInterface(@ptrCast(fmt), &IID_IDWriteTextFormat1, &f1_raw))) return;
@@ -858,6 +951,26 @@ fn faceHasTable(face: *IDWriteFontFace, tag: *const [4]u8) bool {
     if (d3d11.failed(face.vtable.TryGetFontTable(face, t, &data, &size, &ctx, &exists))) return false;
     if (ctx) |p| face.vtable.ReleaseFontTable(face, p);
     return exists != 0;
+}
+
+test "폴백 캐시 키: 이어 붙인 두 문자열이 서로를 못 흉내 낸다" {
+    var buf: [32]u8 = undefined;
+    const key = buf[0..fallbackKeyLen("ab", "c")];
+    writeFallbackKey(key, "ab", "c");
+    try std.testing.expect(fallbackKeyMatches(key, "ab", "c"));
+
+    // **구분자가 없으면 이 둘이 같은 키다.** 그러면 폰트를 바꿨는데 옛 폴백 목록을 계속 쓴다 —
+    // 화면에서는 "글꼴을 바꿨는데 일부 글자만 안 바뀐다" 로 보인다.
+    try std.testing.expect(!fallbackKeyMatches(key, "a", "bc"));
+    try std.testing.expect(!fallbackKeyMatches(key, "abc", ""));
+    try std.testing.expect(!fallbackKeyMatches(key, "", "abc"));
+
+    // 빈 CSV 도 온전한 키다(폴백을 안 준 설정) — 길이가 1 이라 «키가 없다» 와 안 헷갈린다.
+    const empty = buf[0..fallbackKeyLen("Menlo", "")];
+    writeFallbackKey(empty, "Menlo", "");
+    try std.testing.expect(fallbackKeyMatches(empty, "Menlo", ""));
+    try std.testing.expect(!fallbackKeyMatches(empty, "Menlo", "Arial"));
+    try std.testing.expect(!fallbackKeyMatches(empty, "Menl", "o"));
 }
 
 test "셰이퍼: 빈 family 는 터미널 티어가 아니라 번들 기본으로 간다" {

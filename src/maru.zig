@@ -27,6 +27,9 @@ pub const d3d11_cells = if (builtin.os.tag == .windows) @import("platform/window
 pub const win32_text = if (builtin.os.tag == .windows) @import("platform/windows/win32_text.zig") else struct {};
 pub const win32_terminal = if (builtin.os.tag == .windows) @import("platform/windows/win32_terminal.zig") else struct {};
 pub const win32_keys = if (builtin.os.tag == .windows) @import("platform/windows/win32_keys.zig") else struct {};
+/// **셰이퍼 백엔드.** 배럴에 있어야 하는 이유는 위와 같다 — `text_shaper` 이음매가 같은 파일을
+/// 끌어오므로 호출자가 상대 경로로 또 가져가면 한 파일이 두 모듈에 들어간다.
+pub const dwrite_shape = if (builtin.os.tag == .windows) @import("platform/windows/dwrite_shape.zig") else struct {};
 pub const win32_clipboard = if (builtin.os.tag == .windows) @import("platform/windows/win32_clipboard.zig") else struct {};
 pub const win32_mouse = if (builtin.os.tag == .windows) @import("platform/windows/win32_mouse.zig") else struct {};
 pub const win32_draw_host = if (builtin.os.tag == .windows) @import("platform/windows/win32_draw_host.zig") else struct {}; // 표면 스모크가 공유하는 창·스왑체인·아틀라스·표현 절차

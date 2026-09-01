@@ -19,9 +19,14 @@ pub const Target = struct {
         return self.stream_id != 0 and self.controller_generation != 0;
     }
 
+    /// **controller generation 을 요구하는 것은 controller 자격이 필요한 control 뿐이다.**
+    /// 예전에는 `.detach` 만 예외였는데, observer 가 보낼 수 있는 control 이 둘로 늘었다(S11-6).
+    /// controller 가 없는 세션(headless keep-alive)에 붙은 observer 는 이 값이 **0** 이라, 예외에
+    /// 안 들면 요청이 `.invalid` 로 떨어지고 그 결과가 `admitControl` 의 **기본값**인
+    /// `invariant_failure` 로 나온다 — 「선언이 그냥 안 먹는다」로만 보이는 조용한 실패다.
     pub fn isCanonicalFor(self: Target, kind: ControlKind) bool {
         return self.stream_id != 0 and
-            (self.controller_generation != 0 or kind == .detach);
+            (self.controller_generation != 0 or !kind.requiresController());
     }
 };
 
@@ -343,4 +348,28 @@ test "control deadline is live through deadline minus one and expires exactly at
     try std.testing.expect(!deadlineExpired(in_flight, in_flight.deadline_ns - 1));
     try std.testing.expect(deadlineExpired(in_flight, in_flight.deadline_ns));
     try std.testing.expect(deadlineExpired(in_flight, in_flight.deadline_ns + 1));
+}
+
+test "S11-6 controller 가 없어도(generation 0) observer 의 control 은 정규형이다" {
+    const T = std.testing;
+    // **controller 가 없는 세션에 붙은 observer 는 이 값이 0 이다** — 폰만 붙는 headless
+    // keep-alive 가 정확히 그 모양이다. 예전에는 `.detach` 만 예외라, 뷰포트 선언이 여기서
+    // `.invalid` 로 떨어지고 그 결과가 `admitControl` 의 **기본값**인 `invariant_failure` 로
+    // 나왔다 — client 는 그것을 terminal 로 읽어 선언 채널을 영영 닫았다(실 host attach 로 확인,
+    // 2026-09-02). 「선언이 그냥 안 먹는다」로만 보이는 조용한 실패다.
+    const no_controller = Target{ .stream_id = 7, .controller_generation = 0 };
+    try T.expect(no_controller.isCanonicalFor(.declare_viewport));
+    try T.expect(no_controller.isCanonicalFor(.detach));
+    // **크기를 바꾸는 것은 여전히 controller generation 을 요구한다.**
+    try T.expect(!no_controller.isCanonicalFor(.resize));
+    try T.expect(!no_controller.isCanonicalFor(.resync));
+
+    // controller 가 있으면 넷 다 정규형이다.
+    const with_controller = Target{ .stream_id = 7, .controller_generation = 3 };
+    inline for (.{ .declare_viewport, .detach, .resize, .resync }) |kind|
+        try T.expect(with_controller.isCanonicalFor(kind));
+
+    // stream_id 0 은 어느 종류로도 아니다.
+    const no_stream = Target{ .stream_id = 0, .controller_generation = 3 };
+    try T.expect(!no_stream.isCanonicalFor(.declare_viewport));
 }

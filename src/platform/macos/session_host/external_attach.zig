@@ -127,6 +127,8 @@ fn prepareWithTransition(
 
     const requested_mode: remote_attachment.Mode = switch (request.intent) {
         // `--stream` 도 observer 다 — 입력·resize 를 안 보내므로 남의 조종을 안 건드린다(§8).
+        // 뷰포트 «선언» 하나는 보내지만(S11-6) 그것은 mutation 을 부르는 것이 아니라 자기 크기를
+        // 알리는 것이고, 무엇을 할지는 host 가 정한다.
         .read_only, .take_over, .stream => .observer,
         .default_controller => .controller,
     };

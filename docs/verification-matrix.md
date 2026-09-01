@@ -2740,6 +2740,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   exact 일치해야 하며 signing은 owned Apple observation에서만 유도한다. focused gate는 Debug·ReleaseFast actual filesystem과 injected
   observer로 shared deadline, exact input derivation, path/work alias, copied/pre-owned owner, source mutation·observer failure·digest mismatch와
   allocation unwind publication 0을 검증한다. 실제 mount/command residue, GitHub artifact attestation과 evidence authoring은 별도 gate다.
+  `release_adapter_github_source_tree.zig`는 trusted tag context의 exact source commit을 기존 pinned CLI·token·phase deadline으로
+  GitHub Git commit object에 조회하고, 응답 top-level commit SHA와 nested tree SHA를 strict parse해 final-address owner로 게시한다.
+  로컬 checkout·ambient `git`·caller tree scalar는 authority가 아니다. focused gate는 Debug·ReleaseFast에서 closed endpoint,
+  deadline/CLI pre-post 순서, foreign capture와 output/authority alias, malformed·duplicate·missing·commit/tree drift, copied/pre-owned
+  owner와 allocation fail-index publication 0을 검증한다. evidence aggregate/manifest writer와 release publication은 별도 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

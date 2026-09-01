@@ -13431,6 +13431,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-files",
         "Validate session-host release adapter file authorities on macOS",
     );
+    const session_host_release_adapter_frozen_executable_authority_step = b.step(
+        "test-session-host-release-adapter-frozen-executable-authority",
+        "Validate frozen executable pathname authority on macOS",
+    );
     if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |files_optimize| {
         const release_adapter_files_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
@@ -13459,6 +13463,20 @@ pub fn build(b: *std.Build) void {
         session_host_release_adapter_files_step.dependOn(&run_release_adapter_files_tests.step);
         session_host_step.dependOn(&run_release_adapter_files_tests.step);
         test_step.dependOn(&run_release_adapter_files_tests.step);
+        const frozen_executable_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_frozen_executable_authority.zig"),
+                .target = target,
+                .optimize = files_optimize,
+                .imports = &.{.{ .name = "release_adapter_files", .module = release_adapter_files_mod }},
+            }),
+        });
+        const run_frozen_executable_tests = b.addRunArtifact(frozen_executable_tests);
+        run_frozen_executable_tests.addArg("--maru-expect-tests=6");
+        run_frozen_executable_tests.setCwd(b.path("."));
+        session_host_release_adapter_frozen_executable_authority_step.dependOn(&run_frozen_executable_tests.step);
+        session_host_step.dependOn(&run_frozen_executable_tests.step);
+        test_step.dependOn(&run_frozen_executable_tests.step);
     };
     const session_host_bounded_process_step = b.step(
         "test-session-host-bounded-process",

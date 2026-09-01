@@ -2711,6 +2711,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   symlink·교체·mutation을 fail-close한다. `test-session-host-release-adapter-github-cli-authority`가 Debug·ReleaseFast에서 runner
   observation과 실제 filesystem 변조 행을 검증한다. 로컬 빌드·로컬 앱 인증서 upgrade에는 이 권위를 요구하지 않으며, focused
   gate만으로 checkout 전 capture와 transport 배선이 완료됐다고 주장하지 않는다.
+  `check-session-host-release-workflow`는 실제 `.github/workflows/release.yml` bytes에서 tag-only trigger, protected `release`
+  environment, macOS ARM64 runner label, checkout 전 exact-one GitHub CLI capture, canonical regular executable와 lowercase SHA-256의
+  step-output handoff, pinned Action과 `GITHUB_ENV` 미사용을 정적으로 고정한다. repository checkout이 capture보다 앞서거나 checkout
+  뒤 PATH를 다시 조회하는 변경은 fail-close한다. 이 gate는 실제 GitHub service provenance, captured output의 validator argv 소비,
+  manifest/evidence 생성·attestation·publication 또는 signed frozen U5 E2E를 대신하지 않는다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

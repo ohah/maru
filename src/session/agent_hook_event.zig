@@ -80,6 +80,18 @@ pub const Event = struct {
     kind: Kind = .unknown,
     session_id: []const u8 = "",
     transcript_path: []const u8 = "",
+    /// 훅이 돈 **작업 디렉터리**. 두 provider 가 모두 싣는다 — codex 는 스키마가 직접 못 박고
+    /// (`codex-rs/hooks/src/schema.rs`, `deny_unknown_fields`; 계약 §3 이 인용한 그 목록에 `cwd` 가 있다),
+    /// claude 는 실측 payload 에 있다.
+    ///
+    /// **왜 필요한가**: 원격 pane 의 cwd 는 OSC 7 로만 오는데, 그 보고자는 `precmd` 라 **프롬프트가
+    /// 그려질 때만** 발화한다. `cd proj && claude` 처럼 셸이 곧바로 전면 TUI 에 자리를 내주면 그 뒤로
+    /// 프롬프트가 없어 값이 **그 직전**에서 멈춘다 — 에이전트 세션들이 사이드바에 전부 홈으로 뜨는
+    /// 모양이 이것이다(ssh-integration.md §9.5). 훅은 그 구간에도 **매 턴** 오므로 이 값이 산다.
+    ///
+    /// ⚠️ **소비는 한 지점에서 정한다**(`sidebarCwdPath`). 예전에 그 자리만 관측을 직접 읽어 「같은
+    /// 화면의 두 뷰가 다른 답을 내던」 회귀가 있었다 — 소스를 하나 더 들이면 그 함정이 되살아난다.
+    cwd: []const u8 = "",
     /// 턴 식별자. Claude는 `prompt_id`, Codex는 `turn_id`로 온다 — 같은 자리에 담는다.
     turn_key: []const u8 = "",
     tool_name: []const u8 = "",
@@ -303,6 +315,8 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.session_id = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "transcript_path")) {
             ev.transcript_path = scan.stringValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "cwd")) {
+            ev.cwd = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "prompt_id") or std.mem.eql(u8, key, "turn_id")) {
             ev.turn_key = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "tool_name")) {
@@ -835,6 +849,9 @@ test "실측 payload 모양을 그대로 읽는다 — SessionStart" {
     try testing.expectEqual(Kind.session_start, ev.kind);
     try testing.expectEqualStrings("9efa0c23", ev.session_id);
     try testing.expectEqualStrings("/x/y.jsonl", ev.transcript_path);
+    // **작업 디렉터리도 뽑는다.** 픽스처에는 예전부터 있었는데 단언이 없어, 필드만 있고 추출을 안 해도
+    // 아무도 몰랐다. 이 값은 원격 pane 에서 OSC 7 이 멈춘 구간을 메운다(ssh-integration.md §9.5).
+    try testing.expectEqualStrings("/w", ev.cwd);
     try testing.expectEqualStrings("startup", ev.source);
 }
 

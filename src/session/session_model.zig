@@ -160,6 +160,9 @@ pub fn Model(comptime Rt: type) type {
             /// 바뀌면 소비처가 아니라 `pollAgentConsumer` 가 비운다(남은 값이 다른 소스의 배지
             /// 옆에 붙으면 그것이 곧 두 소스 혼합이다).
             agent_hook_tool: agent_hook_mode.ToolLabel = .{},
+            /// 훅이 알려 준 작업 디렉터리. **원격 pane 에서 OSC 7 이 멈춘 구간을 메운다** —
+            /// 그 보고자는 `precmd` 라 전면 TUI 가 붙어 있는 동안 발화하지 못한다.
+            agent_hook_cwd: agent_hook_mode.CwdLabel = .{},
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},

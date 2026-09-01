@@ -13217,7 +13217,7 @@ pub fn build(b: *std.Build) void {
             macos_only_test_step.dependOn(&run.step);
             const tag_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_tag_chain_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_tag_chain_transport", .module = tag_chain_mod } } }) });
             const run_tag_tests = b.addRunArtifact(tag_tests);
-            run_tag_tests.addArg("--maru-expect-tests=7");
+            run_tag_tests.addArg("--maru-expect-tests=8");
             run_tag_tests.setCwd(b.path("."));
             session_host_release_adapter_github_tag_chain_transport_step.dependOn(&run_tag_tests.step);
             session_host_step.dependOn(&run_tag_tests.step);

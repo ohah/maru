@@ -2745,6 +2745,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   로컬 checkout·ambient `git`·caller tree scalar는 authority가 아니다. focused gate는 Debug·ReleaseFast에서 closed endpoint,
   deadline/CLI pre-post 순서, foreign capture와 output/authority alias, malformed·duplicate·missing·commit/tree drift, copied/pre-owned
   owner와 allocation fail-index publication 0을 검증한다. evidence aggregate/manifest writer와 release publication은 별도 gate다.
+  `release_adapter_candidate_evidence_identity.zig`는 trusted context·canonical UUID v4·revalidated candidate product·source-tree
+  owner만 받아 release ID/version, commit/tree, build와 candidate/signing digest를 `evidence.Common` 기반 final-address storage로
+  복사한다. UUID/common 검증은 `release_evidence.validateCommon`을 SSOT로 사용하며 후속 소비 전 product/tree를 다시 검증한다.
+  focused gate는 Debug·ReleaseFast에서 exact derivation, copied/pre-owned owner, UUID/context/product/tree/path drift와 owner storage
+  독립성을 검증한다. profile/predecessor, leaf aggregate publication과 attestation은 별도 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

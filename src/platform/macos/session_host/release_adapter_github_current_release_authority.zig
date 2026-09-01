@@ -48,6 +48,16 @@ pub const CurrentReleaseAuthority = struct {
         if (self.owner != self) return error.InvalidOwner;
         self.* = .{};
     }
+
+    /// Keeps every downstream current-manifest consumer on the same authenticated identity check.
+    pub fn bindManifest(self: *const CurrentReleaseAuthority, candidate: manifest.Manifest) !void {
+        const current = self.value() orelse return error.InvalidOwner;
+        if (candidate.role != .b or candidate.predecessor == null or
+            current.repository_id != candidate.repository.id or current.run_id != candidate.build.run_id or
+            current.run_attempt != candidate.build.run_attempt or !std.mem.eql(u8, current.source_commit, candidate.source.commit) or
+            current.release_id != candidate.release.id or !std.mem.eql(u8, current.tag, candidate.release.tag) or
+            !current.protected_environment) return error.CurrentAuthorityMismatch;
+    }
 };
 
 pub const Cli = struct { path: [:0]const u8, pinned: *const PinnedExecutable };

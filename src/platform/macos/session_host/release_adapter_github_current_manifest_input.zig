@@ -12,6 +12,7 @@ const current_mod = @import("release_adapter_github_current_release_authority");
 const file_mod = @import("release_adapter_github_manifest_file");
 const authenticated_mod = @import("release_adapter_github_current_manifest_attestation");
 const cli_authority = @import("release_adapter_github_cli_authority");
+const candidate_mod = @import("release_adapter_github_current_manifest_candidate");
 
 pub const Error = error{
     InvalidOwner,
@@ -115,6 +116,78 @@ pub fn authenticatePathWith(
         return err;
     };
     result.owner = result;
+}
+
+pub fn authenticateCandidate(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    current: *const current_mod.CurrentReleaseAuthority,
+    candidate: *candidate_mod.CurrentManifestCandidate,
+    workdir: [:0]const u8,
+    cli: Cli,
+    token: []const u8,
+    output: []u8,
+    budget_ns: i128,
+    result: *CurrentManifestInput,
+) !void {
+    try prepareCandidate(allocator, context, current, candidate, workdir, result);
+    authenticated_mod.authenticate(io, allocator, context, current, result.input.?.bytes, &result.file, .{ .path = cli.path, .pinned = cli.pinned }, token, output, budget_ns, &result.authenticated) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    result.owner = result;
+}
+
+pub fn authenticateCandidateWith(
+    attestor: anytype,
+    authority: anytype,
+    executor: anytype,
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    current: *const current_mod.CurrentReleaseAuthority,
+    candidate: *candidate_mod.CurrentManifestCandidate,
+    workdir: [:0]const u8,
+    executable: [:0]const u8,
+    token: []const u8,
+    output: []u8,
+    budget_ns: i128,
+    result: *CurrentManifestInput,
+) !void {
+    try prepareCandidate(allocator, context, current, candidate, workdir, result);
+    authenticated_mod.authenticateWith(attestor, authority, executor, allocator, context, current, result.input.?.bytes, &result.file, executable, token, output, budget_ns, &result.authenticated) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
+    result.owner = result;
+}
+
+fn prepareCandidate(
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    current: *const current_mod.CurrentReleaseAuthority,
+    candidate: *candidate_mod.CurrentManifestCandidate,
+    workdir: [:0]const u8,
+    result: *CurrentManifestInput,
+) !void {
+    if (result.owner != null or result.input != null or result.file.owner != null or
+        result.authenticated.owner != null or result.authenticated.parsed != null or
+        result.authenticated.observed != null) return error.InvalidOwner;
+    const parsed = candidate.value() orelse return error.InvalidManifestInput;
+    context_mod.bindManifest(context, parsed.*) catch return error.InvalidManifestInput;
+    current.bindManifest(parsed.*) catch return error.InvalidCurrent;
+
+    var name_storage: [manifest.max_asset_name_bytes]u8 = undefined;
+    const name = canonicalName(context.tag, &name_storage) catch return error.InvalidManifestInput;
+    result.input = candidate.takeInput() catch return error.InvalidManifestInput;
+    file_mod.materialize(&result.file, workdir, .{
+        .name = name,
+        .sha256 = &result.input.?.sha256,
+        .bytes = result.input.?.bytes,
+    }) catch |err| {
+        abort(result, allocator) catch return error.CleanupFailed;
+        return err;
+    };
 }
 
 fn prepare(

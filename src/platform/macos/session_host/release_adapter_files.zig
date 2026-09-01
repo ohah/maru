@@ -20,6 +20,7 @@ extern "c" fn renameatx_np(
 
 const rename_excl: c_uint = 0x00000004;
 const summary_cap: usize = 1024 * 1024;
+pub const max_release_asset_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
 
 pub const Error = error{
     InvalidOwner,

@@ -766,7 +766,11 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   release 응답의 의미 해석은 `release_adapter_github_release.zig`가 소유한다. GitHub REST release schema의 `id` JSON number,
   `tag_name` string과 `draft`·`prerelease` boolean을 필수로 소비하며 missing·duplicate·wrong wire type을 거부한다.
   `immutable`은 GitHub OpenAPI가 property로 정의하지만 required 목록에는 넣지 않으므로 draft에서 absent 또는 false를 허용하고
-  true는 거부한다. draft 후보는 exact nonzero release ID와 canonical tag가 일치하고
+  true는 거부한다. GitHub의 tag-name endpoint는 published release 전용이므로 current draft는 그 endpoint에서 조회하지 않는다.
+  checkout 전 pin한 CLI와 push 권한 token으로 paginated `GET /repos/ohah/maru/releases?per_page=100` 전체를 받고, REST 배열
+  순서나 첫 page/latest를 신뢰하지 않은 채 exact nonzero release ID와 canonical tag가 같은 draft를 정확히 하나 찾는다.
+  목록 전체가 bounded capture/flattening 상한을 넘거나 exact match가 없거나 복수면 fail-close한다. draft 후보는
+  collection parser로만 만들며 scalar release parser는 published immutable predecessor만 받는다.
   `draft=true`, `prerelease=false`여야 한다. published predecessor는 manifest가 지목한 exact ID·tag와 일치하고
   `draft=false`, `prerelease=false`, `immutable=true`여야 한다. GitHub OpenAPI에서 `immutable`이 required field로
   선언되지 않았으므로 predecessor 응답에서 absent이면 Maru가 immutability를 추정하지 않고 거부한다. 근거는 GitHub REST API의
@@ -827,6 +831,25 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   reusable buffer overwrite, status 0/1/100 경계, backing 누락·추가·중복, owner copy, single-deadline 감소·만료와 전 allocation
   fail-index를 Debug·ReleaseFast에서 검증한다. predecessor tag-chain/asset authority와 current authority의 최종 release command
   조립, checkout 전 capture 자체, Apple product 관측과 frozen U5 제품 E2E는 후속 범위다.
+
+  Current release authority composition은 이 current authority와 current canonical manifest를 한 번에 결속한다.
+  외부 호출 전 `release_adapter_context.bindManifest`로 repository/tag/source/build를 교차검증하고, current authority
+  전체를 로컬 final-address owner에 성공시킨 뒤 authenticated paginated release 목록에서 exact manifest release ID/tag의
+  mutable draft를 하나 찾고,
+  `tag_ref` → 최대 8개 annotated-tag object를 조회해 manifest source commit으로 수렴시킨다. tag chain의
+  fixed owned hop·cycle/depth/replay 정책은 predecessor와 current가 공유하는 하나의 helper가 소유하고,
+  current composition이 동일한 resolver loop를 복제하지 않는다.
+
+  최초 positive monotonic absolute deadline 하나를 repository/run/environment/deployment/status, draft release,
+  ref/tag 전체가 공유하며 모든 request 직전 CLI pathname authority를 재검증한다. 성공은 move-only
+  `CurrentReleaseAuthority` 하나로만 게시하고 current authority의 ID 전체, draft release ID/tag,
+  exact source commit과 protected-environment fact를 함께 보존한다. pre-owned/copied result, manifest/context drift,
+  mutable draft가 아닌 release, 9번째 tag, cycle/foreign commit, response backing overwrite, CLI 교체, timeout,
+  child/allocation failure는 부분 current authority를 외부에 남기지 않고 publication 0으로 fail-close한다.
+  focused gate `test-session-host-release-adapter-github-current-release-authority`는 exact 전체 request/revalidation 순서,
+  lightweight/1/8-hop, 9-hop/cycle/mismatch, reusable buffer, 단일 deadline, copied owner와 전 allocation fail-index를
+  Debug·ReleaseFast에서 검증한다. current manifest artifact attestation, local asset/Apple product 관측, summary publication,
+  executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
 
   ```text
   validate_release_manifest pre-publish \
@@ -968,12 +991,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   bounded GitHub API transport의 OS 중립 요청 SSOT는
   `release_adapter_github_transport.zig`다. 호출자는 임의 URL, HTTP method, header, `jq` 식을 문자열로 넘기지 않고
-  `repository`, `workflow_run`, `draft_release`, `published_release`, `tag_ref`, `annotated_tag`, `environment`,
+  `repository`, `workflow_run`, `draft_releases`, `published_release`, `tag_ref`, `annotated_tag`, `environment`,
   `attempt_jobs`, `deployments`, `deployment_statuses`의 닫힌 request kind와 앞 단계에서 검증한 typed ID/tag/SHA만 넘긴다.
   각 kind는 exact `repos/ohah/maru/...` REST endpoint, `GET`, `github.com`,
   `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`과 고정 query를 만든다. 숫자는 canonical
   nonzero decimal, tag와 SHA는 공통 identity parser를 다시 통과해야 하며 slash, `..`, `%`, query/fragment를 caller가
-  주입할 자리는 없다. collection endpoint는 `per_page=100`과 `gh api --paginate --slurp`를 항상 함께 쓰며, `gh`가
+  주입할 자리는 없다. `draft_releases`는 tag-name endpoint가 아니라 exact repository release 목록 collection이다.
+  collection endpoint는 `per_page=100`과 `gh api --paginate --slurp`를 항상 함께 쓰며, `gh`가
   `--slurp`와 `--jq` 동시 사용을 거부하므로 jq/template을 넘기지 않는다. 대신 transport가 bounded outer page array를
   파싱해 array page는 한 array로, jobs page는 모든 page의 동일 `total_count`가 실제 합친 `jobs` 개수와도 정확히 같은
   object 하나로 직렬화한다. transport는 합쳐진 root가

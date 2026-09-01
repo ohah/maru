@@ -2484,7 +2484,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   불일치를 fail-close하며 `test-session-host-release-adapter-github-repository`가 Debug·ReleaseFast 및 allocation fail-index로 검증한다.
   이는 이미 캡처된 bytes의 component 의미 검증이며 GitHub transport나 `gh` executable 권위는 증명하지 않는다.
   `release_adapter_github_release.zig`는 같은 envelope에서 release REST 응답의 exact nonzero numeric ID, canonical tag와 boolean
-  `draft`·`prerelease`·`immutable`을 duplicate·wrong wire type까지 닫는다. draft 후보는
+  `draft`·`prerelease`·`immutable`을 duplicate·wrong wire type까지 닫는다. tag-name endpoint는 published release 전용이므로
+  current draft는 authenticated paginated release 목록 전체에서 exact ID+tag match를 하나만 찾고 order/latest/page truncation을
+  권위로 쓰지 않는다. draft는 collection parser 전용이고 scalar parser는 published immutable predecessor만 받는다. draft 후보는
   `draft=true`·`prerelease=false`와 absent/false immutable만, published predecessor는 `false/false/true`만 허용하며 predecessor
   응답이 `immutable`을 생략해도 불변성을 추정하지 않는다.
   `test-session-host-release-adapter-github-release`가 두 상태, additive field, cap, malformed/missing/type/duplicate/trailing,
@@ -2587,7 +2589,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `CurrentGitHubAuthority`의 repository/run/job/deployment/environment ID, source commit과 `protected_environment=true`로만
   게시된다. `test-session-host-release-adapter-github-current-authority`가 Debug·ReleaseFast에서 exact request/revalidation,
   reusable buffer, 0/1/100 candidate, status backing mismatch, owner copy, deadline/CLI/child/OOM failure의 publication 0을 검증한다.
-  predecessor authority와의 최종 command/workflow 조립, Apple product 관측과 frozen U5 E2E는 후속 범위다.
+  current release authority composition은 context↔manifest를 외부 호출 전 결속하고, 이 current authority 전체 뒤
+  authenticated paginated 목록의 exact-one mutable draft release와 최대 8-hop tag chain을 manifest release/source에 교차검증한다. predecessor와 current는
+  fixed owned hop·resolver·cycle/depth 정책의 하나의 helper를 공유하며, 전 request가 하나의 absolute deadline과
+  request 직전 CLI 재검증을 공유한다. 성공은 current authority ID, draft release ID/tag, source commit,
+  protected-environment fact를 move-only `CurrentReleaseAuthority`로만 함께 게시하고 중간 current authority를 노출하지
+  않는다. `test-session-host-release-adapter-github-current-release-authority`가 Debug·ReleaseFast에서 exact 전체 sequence,
+  lightweight/1/8-hop, 9-hop/cycle/mismatch, buffer overwrite, single deadline, owner copy·CLI/child/OOM publication 0을 검증한다.
+  current manifest artifact attestation, 최종 command/workflow 조립, Apple product 관측과 frozen U5 E2E는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

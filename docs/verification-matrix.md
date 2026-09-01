@@ -2560,6 +2560,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   A tag/version/name 및 B predecessor tag/SHA를 교차검증해야 한다. `test-session-host-release-adapter-github-manifest-download`이
   Debug·ReleaseFast에서 exact name/argv/environment, malformed identity/input bounds, foreign/empty/oversize/digest mismatch와
   timeout/child failure를 검증한다. attestation/parse cross-binding, 세 asset download와 final workflow composition은 후속 범위다.
+  executable `fetchUntil`은 같은 final-address deadline을 pinned CLI 재검증 전후와 `Observed` publication 직전에 확인하고
+  두 번째 fresh remaining만 manifest download child에 전달한다. malformed preflight는 deadline·CLI·child 0, 재검증 중
+  또는 child 후 만료는 publication 0이며 focused gate가
+  injected exact 순서와 product wrapper compile을 두 optimize mode에서 함께 고정한다.
   `release_adapter_github_manifest_file.zig`는 attestation CLI에 줄 fixed provisional manifest file만 소유한다. absolute absent
   0700 work-directory와 exact-name 0600 leaf를 descriptor-relative exclusive/no-follow로 만들고 bounded bootstrap bytes 길이를
   preallocate·truncate·complete write한 뒤 SHA, pathname↔fd identity/type/size/link-count 1, 0400 mode와 file/directory fsync를 봉인한다.

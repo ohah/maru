@@ -683,8 +683,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   focused gate
   `test-session-host-release-adapter-github-manifest-download`은 exact name/argv, clean environment, supplied-buffer
   provenance, empty/oversize/digest mismatch/timeout/child failure와 tag/SHA malformed를 Debug·ReleaseFast에서 검증한다. 이 gate만으로
-  artifact attestation, strict manifest parse/cross-binding, 세 asset download, CLI revalidation 또는 workflow composition을
+  artifact attestation, strict manifest parse/cross-binding, 세 asset download 또는 workflow composition을
   완료했다고 주장하지 않는다.
+
+  전체 pre-publish owner가 쓰는 `fetchUntil`은 tag/SHA/token/output preflight와 pinned CLI owner를 포함한 모든 borrowed/mutable
+  input의 메모리 disjoint 검증을 deadline·filesystem·child 접근 전에 끝내고, 같은
+  final-address `Deadline`을 pinned CLI 재검증 전후에 확인한다. child에는 재검증 뒤 얻은 fresh remaining만 전달하며 scalar로 새
+  expiry를 만들지 않는다. preflight 실패는 deadline·CLI·child 0이고, 재검증 중 만료는 child 0·downloaded bytes publication 0이다.
+  child 뒤 supplied-buffer provenance·length·digest를 검증한 후에도 `Observed`를 반환하기 직전 같은 deadline을 한 번 더
+  확인하며, 만료하면 caller-owned output buffer를 권위로 승격하지 않고 publication 0으로 닫는다. 기존 budget
+  `fetch`는 독립 leaf 호환용으로 남는다. focused gate는 exact deadline identity, pre/post/publication 순서, 늘어나지 않는
+  child budget, 중간·최종 만료와 product wrapper compile을 Debug·ReleaseFast에서 검증한다.
 
   manifest file owner는 absolute absent work-directory를 no-follow parent 아래 0700으로 exact once 만들고 provisional exact manifest
   leaf를 `O_CREAT|O_EXCL|O_NOFOLLOW` 0600으로 연다. bounded bytes 길이만큼 `F_PREALLOCATE`+`ftruncate`한 뒤 complete write,

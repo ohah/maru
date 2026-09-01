@@ -695,6 +695,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `fetch`는 독립 leaf 호환용으로 남는다. focused gate는 exact deadline identity, pre/post/publication 순서, 늘어나지 않는
   child budget, 중간·최종 만료와 product wrapper compile을 Debug·ReleaseFast에서 검증한다.
 
+  predecessor manifest input composition의 단일 소유자는
+  `release_adapter_github_predecessor_manifest_input.zig`다. authenticated current B에서 predecessor tag·release ID·commit·manifest
+  SHA를 유도하고 current owner를 재검증한 뒤, workspace owner가 내준 exact `predecessor-manifest` absent child에서만
+  download `fetchUntil` → descriptor-owned materialize → canonical A candidate parse/cross-bind → artifact `authenticateUntil`을 실행한다.
+  download와 attestation은 같은 final-address deadline과 pinned CLI를 공유한다. A attestation context는 downloaded canonical
+  candidate의 repository/source/build에서 내부 유도하되 B predecessor와 role-A/predecessor-absent/digest/name 결속을 통과하기 전에는
+  권위로 게시하지 않는다. 과거 workflow의 `protected_tag` 상태는 현재 context나 현재 ruleset에서 소급 증명할 수 없으므로 predecessor
+  소비 조건으로 만들지 않는다. 대신 authenticated current B가 exact A release ID/tag/commit/manifest SHA를 보증하고, A manifest
+  artifact attestation이 그 canonical bytes와 repository/tag/source/build를 증명하며, 후속 release/asset attestation이 published immutable
+  release와 열거 asset을 다시 결속한다. current publication admission의 protected tag 요구는 그대로 유지한다. 성공은 authenticated A와
+  exact file cleanup authority만 final-address move-only owner에 남기며 caller buffer는
+  즉시 재사용할 수 있다. invalid/copied current·pre-owned result·foreign workspace는 deadline/CLI/download/filesystem 0이고,
+  parse/cross-bind/attestation 실패는 materialized file과 directory residue 0으로 정리한다. cleanup 실패는 성공으로 숨기지 않고 같은
+  owner가 retry 권위를 보존한다. focused gate `test-session-host-release-adapter-github-predecessor-manifest-input`은 actual filesystem,
+  buffer reuse, shared deadline identity, current/A drift, 각 단계 실패 cleanup과 product wrapper compile을 Debug·ReleaseFast로 검증한다.
+  predecessor assets, 전체 pre-publish orchestration과 workflow/U5 E2E는 후속 범위다.
+
   manifest file owner는 absolute absent work-directory를 no-follow parent 아래 0700으로 exact once 만들고 provisional exact manifest
   leaf를 `O_CREAT|O_EXCL|O_NOFOLLOW` 0600으로 연다. bounded bytes 길이만큼 `F_PREALLOCATE`+`ftruncate`한 뒤 complete write,
   SHA 재검증, file/directory `fsync`, post-write pathname↔fd identity/type/size/link-count 1과 0400 mode를 봉인한다. 성공은
@@ -708,8 +725,9 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   이 gate만으로 artifact attestation이나 manifest parse/cross-binding을 완료했다고 주장하지 않는다.
 
   manifest attestation composition의 단일 소유자는 `release_adapter_github_manifest_attestation.zig`다. 입력은 current B의 verified
-  `predecessor`, 별도 GitHub context 검증에서 얻은 protected predecessor tag context, bootstrap의 bounded bytes와 `ManifestFile`
-  capability, checkout 전에 pin한 GitHub CLI authority 및 exact token/deadline이다.
+  `predecessor`, bootstrap의 bounded bytes와 `ManifestFile` capability, checkout 전에 pin한 GitHub CLI authority 및 exact
+  token/deadline이다. predecessor의 repository/tag/source/build context는 strict candidate에서 내부 유도하며, historical
+  `protected_tag` 값을 입력받거나 참으로 합성하지 않는다.
   composition은 `release_manifest.parseCanonical`과 `release_adapter_github_attestation.verifyWith`를 재사용하며 JSON parser, attestation
   command 또는 certificate predicate를 다시 구현하지 않는다. composition은 attestation 호출 직전에 CLI authority를 다시 검증한다.
   unauthenticated `release_manifest.Parsed`와 attestation `Observed`는

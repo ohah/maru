@@ -979,6 +979,36 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   artifact attestation, frozen executable compatibility observation, 세 current asset attestation, final
   `release_manifest.Observation`, workflow 배선 또는 frozen U5 E2E를 대신하지 않는다.
 
+  current asset private-file composition의 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_github_current_asset_files.zig`다. 후속 GitHub artifact attestation 경계에 caller의
+  DMG/frozen executable/evidence pathname을 직접 넘기지 않는다. child가 pathname을 여는 동안 같은 이름을 교체했다가 검증 뒤 되돌리면
+  호출 전후 `stat`·hash만으로 child가 읽은 inode를 증명할 수 없기 때문이다. 입력은 authenticated `CurrentManifestInput` B,
+  final-address `CurrentProduct`, final-address `CurrentEvidence`, caller의 DMG와 frozen executable absolute pathname, 그리고 absent private
+  work-directory pathname뿐이다. caller가 asset name/size/SHA나 summary bytes를 별도 제출하지 않는다.
+
+  composition은 B manifest의 exact 세 asset role을 이름 순서가 아니라 role exact-once로 유도한다. frozen source는
+  `CurrentProduct.revalidate`로 held fd와 caller pathname을 먼저 결속하고, DMG source는 모든 path component를 no-follow로 열어 manifest
+  size/SHA와 streaming hash를 결속하며, evidence source는 `CurrentEvidence`가 이미 소유한 bytes/size/SHA를 사용한다. current manifest
+  input, DMG source, held frozen source, evidence source는 opened `(device,inode)` exact distinct여야 한다. 그 뒤 absent 0700 work-directory에
+  manifest의 exact asset basename 세 개를 0400·link-count-1 regular private leaf로 complete copy하고 file·directory·parent를 sync한다.
+  large DMG/frozen bytes는 heap에 올리지 않고 64 KiB fixed buffer로 복사하며, source와 destination의 size/SHA 및 source fingerprint를 복사
+  전후 다시 대조한다. private leaf는 원래 caller pathname과 다른 inode여야 한다.
+
+  성공은 세 private leaf의 진단용 pathname/device/inode/size/SHA, held directory fd와 cleanup authority를 한 final-address move-only
+  `CurrentAssetFiles`로 게시한다. 진단용 absolute pathname은 child 입력 권위가 아니다. 후속 attestation composition은 이 owner가 살아 있는
+  동안 held directory fd에서 explicit non-CLOEXEC child lease를 만들고, `bounded_process`가 그 exact fd 하나만 상속하도록 허용한 뒤
+  `/dev/fd/<lease-fd>/<manifest-exact-name>`만 child argv에 넣어야 한다. child 종료 뒤 lease를 exact once 회수하고 held directory와 세 leaf의
+  identity를 다시 검증하기 전에는 attestation 성공을 게시하지 않는다. 현재 `bounded_process`의 우연한 open-fd 상속이나 private directory의
+  ordinary absolute pathname을 이 계약의 대체물로 쓰지 않는다. 복사된
+  owner, pre-owned destination, relative/aliased path, symlink·non-regular source, role/name/size/digest drift, pathname 교체·in-place mutation,
+  short/extra write, destination collision, copy·sync 실패는 결과를 게시하지 않는다. 이 filesystem owner는 heap allocation 없이
+  fixed storage만 사용한다. cleanup 실패는 성공이나 residue 0으로 위장하지
+  않고 같은 owner가 exact retry authority를 보존한다. focused gate
+  `test-session-host-release-adapter-github-current-asset-files`는 Debug·ReleaseFast actual filesystem에서 three-role success, move-only cleanup,
+  source mutation/swap/alias, occupied·symlink destination, digest/size/role drift, copied/pre-owned owner, short/extra copy와 sync
+  failure의 publication 0·cleanup retry를 검증한다. 이 gate는 GitHub attestation command/semantic verification, compatibility, final
+  observation, workflow 배선 또는 frozen U5 E2E를 대신하지 않는다.
+
   `release_evidence.UpgradeExpected`는 manifest signing의 `designated_requirement_sha256`도 포함한다. canonical aggregate의 one/near-max
   두 signed-upgrade leaf는 서로 같은 requirement digest를 갖는 것뿐 아니라 이 exact expected digest와도 같아야 한다. 이전처럼 두
   leaf가 같은 foreign signer를 함께 기록하면 통과하는 상태는 허용하지 않는다. `release_evidence.bind`가 manifest/Apple product에서

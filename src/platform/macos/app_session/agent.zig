@@ -1603,6 +1603,15 @@ fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.age
 /// 버퍼가 상한보다 하나 큰 이유는 `adoptHookSessionIdentity` 와 같다: 넘치는 값이 상한에 딱 맞게 잘려
 /// **통과해 버리는** 것을 막는다. `Source.set` 이 그 길이를 거절해 **비운다** — 자른 경로는 없는 파일이거나
 /// 더 나쁘게는 다른 파일이다.
+/// 이 pane 이 **지금** 원격인가 — 그 대화 파일은 이쪽 기계에 없다는 뜻이다.
+///
+/// **채널이 열렸다는 사실이 원격의 증거다**(계약 §11.1). ssh 너머는 `agent_kind` 가 영영 `none` 이고
+/// 로컬 로그 파일도 없어서 그 둘로는 판정할 수 없다. ssh 를 빠져나오면 채널을 **떼어 내므로**
+/// (`app_session.zig` 의 `remoteUploadContextFor` 분기) 이 값은 래치가 아니다.
+pub fn isRemoteAgentPane(term: *const Term) bool {
+    return term.agent_remote_channel != null;
+}
+
 fn adoptHookImageSource(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
     if (ev.transcript_path.len == 0) return;
     var buf: [maru.session.agent_image_index.max_source_path_bytes + 1]u8 = undefined;

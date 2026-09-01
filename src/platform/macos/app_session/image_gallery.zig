@@ -194,6 +194,10 @@ pub const State = struct {
     /// 이 인덱스를 만든(또는 만들고 있는) 파일 **묶음**. 첫 파일이 현재 세션이고, 재개면 부모가
     /// 뒤에 붙는다(§3.3). 활성 Term 의 것과 첫 파일이 다르면 무효다.
     chain: index.Chain = .{},
+    /// 이 갤러리가 선 pane 이 **원격**인가. `activeSourcePath` 가 매번 다시 정하는 **파생 값**이므로
+    /// `clear` 는 건드리지 않는다 — 스캔 결과가 아니라 pane 의 성질이다. 문구가 「없다」와
+    /// 「못 읽는다」를 가르는 데 쓴다.
+    source_remote: bool = false,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -550,6 +554,15 @@ pub const gallery_open_image_id: u32 = gallery_image_id_base +| 0x10000;
 fn activeSourcePath(self: *AppSession) ?[]const u8 {
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();
+    // **원격 pane 의 대화는 읽지 않는다.** 훅이 준 `transcript_path` 는 **저쪽 기계**의 경로인데
+    // 스캐너·디코더는 `Dir.cwd().openFile` 로 **로컬**을 연다. 같은 모양의 홈 경로가 로컬에 있으면
+    // (양쪽 macOS·같은 사용자 이름) 그 파일이 **실제로 열려** 다른 대화의 이미지가 이 세션 이름표
+    // 밑에 뜬다. `Source.set` 의 「추측한 경로로 남의 파일을 읽지 않는다」와 같은 규율이다.
+    //
+    // **판정은 여기 한 곳이다.** 채택하는 쪽에도 두면 둘이 갈린다(바로 아래 `refresh` 주석의 그 이유).
+    // 한 곳이라서 ssh **이전**에 담아 둔 로컬 소스가 남아 있는 경우까지 같이 막힌다.
+    self.image_gallery.source_remote = agent_ops.isRemoteAgentPane(term);
+    if (self.image_gallery.source_remote) return null;
     // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
     // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
     agent_ops.adoptFallbackImageSource(self, term);
@@ -2018,7 +2031,8 @@ pub fn appendGpuImages(
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.
 ///
-/// **넷을 가른다** — 「에이전트가 없다」·「세는 중」·「훑었는데 없다」·「못 봤다」. 접으면 사용자가
+/// **다섯을 가른다** — 「에이전트가 없다」·「원격이라 못 읽는다」·「세는 중」·「훑었는데 없다」·
+/// 「못 봤다」. 접으면 사용자가
 /// «이미지가 없는 것» 과 «아직 세는 중» 과 «갤러리가 고장난 것» 을 구분할 수 없다.
 pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // **검색줄이 가장 먼저다.** 타이핑 중인데 「12장 중 8장」이 떠 있으면 자기가 친 글자를 못 본다.
@@ -2030,7 +2044,13 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 도는 것이 없는데 픽셀도 없다 = 못 풀었다. 조용히 닫으면 클릭이 안 먹은 것처럼 보인다.
         if (op.decoding == 0) return maru.i18n.t(.image_gallery_open_failed);
     }
-    if (self.image_gallery.chain.isEmpty()) return maru.i18n.t(.image_gallery_no_agent);
+    if (self.image_gallery.chain.isEmpty()) {
+        // **「없다」와 「못 읽는다」는 다르다.** 원격 pane 에는 에이전트가 **있는데도**(사이드바 배지가
+        // 그것을 보여준다) 갤러리가 그 파일을 못 연다. 거기에 「에이전트가 없습니다」라고 하면
+        // 사용자는 훅이 깨진 줄 알고 설치부터 다시 훑는다 — 실제로 그 길을 걸어 본 뒤에 나눈다.
+        if (self.image_gallery.source_remote) return maru.i18n.t(.image_gallery_remote_unsupported);
+        return maru.i18n.t(.image_gallery_no_agent);
+    }
     if (self.image_gallery.scanning()) return maru.i18n.t(.image_gallery_scanning);
     const n = self.image_gallery.count();
     // **「못 읽었다」는 찾은 것이 있을 때만 말한다**(사용자 보고). 대화 기록이 비어 있으면 스캔이

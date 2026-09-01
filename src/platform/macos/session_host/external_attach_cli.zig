@@ -252,6 +252,14 @@ fn runStreamRequest(
             try stderr.print("maru attach: stream poll failed ({s})\n", .{@errorName(err)});
             return .protocol;
         };
+        // **소비자가 끊긴 것을 «쓸 때» 말고도 안다.** `broken` 은 쓰기 실패로만 섰는데, 조용한
+        // 세션은 보낼 것이 없어 **한 번도 안 쓴다** — 그래서 폰이 화면을 나가도 이 프로세스가
+        // 영영 살아 registry 의 observer 자리를 붙들었다(실기 2026-09-01: 고아 여섯, 부모가
+        // `launchd`, 28분째. `observers` 수가 그만큼 부풀어 있었다).
+        if (consumerIsGone(sink.fd)) {
+            sink.broken = true;
+            break;
+        }
         const turn: attach_pump.TurnInput = .{
             .readable = ready > 0 and fds[0].revents & posix.POLL.IN != 0,
             .writable = ready > 0 and fds[0].revents & posix.POLL.OUT != 0,
@@ -293,6 +301,30 @@ fn streamNowNs() i128 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return 0;
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
+/// stdout 의 소비자가 갔는가. **블로킹하지 않는다**(timeout 0).
+///
+/// **`events` 를 비워 두면 macOS 는 아무것도 안 알려 준다.** POSIX 는 `POLLHUP` 이 `events` 와
+/// 무관하게 보고된다고 하지만, 이 플랫폼의 파이프에서는 **실측으로 그렇지 않았다** —
+/// `events=0` 이면 `ready=0`·`revents=0` 이고, `events=POLLOUT` 이라야 `revents=POLLHUP` 이 온다
+/// (2026-09-01 실측). 그래서 쓰기 관심을 걸어 두고 **끊김만** 읽는다.
+///
+/// 소비자가 살아 있으면서 느린 경우(파이프가 참) `POLLOUT` 이 안 오는데, 그때는 끊김 비트도
+/// 없으므로 **살아 있는 것으로 본다** — 느린 것과 사라진 것을 섞지 않는다.
+fn consumerIsGone(fd: c.fd_t) bool {
+    var probe = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+    const ready = posix.poll(&probe, 0) catch return false;
+    if (ready <= 0) return false;
+    return consumerGone(probe[0].revents);
+}
+
+/// `revents` 가 「소비자가 갔다」를 뜻하는가.
+///
+/// **`POLL.OUT` 은 종료 신호가 아니다** — 그것은 「쓸 수 있다」이고, 끊김 셋만 본다:
+/// 상대가 닫음(`HUP`), 오류(`ERR`), fd 가 유효하지 않음(`NVAL`).
+fn consumerGone(revents: i16) bool {
+    return revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0;
 }
 
 /// poll 한 번의 상한. host 가 조용해도 주기적으로 깨어나 `broken`(소비자가 끊었나)을 본다.
@@ -464,4 +496,48 @@ test "p5c3c-3b public attach maps cleanup outcomes to stable exits" {
     try std.testing.expectEqual(attach_cli.ExitCode.runtime_not_found, runResultExit(.host_error, .runtime_ended));
     try std.testing.expectEqual(attach_cli.ExitCode.busy, runResultExit(.host_error, .resource_exhausted));
     try std.testing.expectEqual(attach_cli.ExitCode.protocol, runResultExit(.deadline, .deadline_exceeded));
+}
+
+test "S11 소비자가 끊긴 것을 «쓰지 않고도» 안다 — 조용한 세션의 고아를 막는다" {
+    const T = std.testing;
+    // **실기에서 잡은 결함이다**(2026-09-01). `broken` 이 쓰기 실패로만 서서, 조용한 세션에 붙은
+    // `--stream` 이 폰이 나간 뒤에도 영영 살아 registry 의 observer 자리를 붙들었다(고아 여섯,
+    // 부모가 `launchd`, 28분째).
+    //
+    // 끊김 셋은 각각 「소비자가 갔다」다.
+    try T.expect(consumerGone(posix.POLL.HUP));
+    try T.expect(consumerGone(posix.POLL.ERR));
+    try T.expect(consumerGone(posix.POLL.NVAL));
+    try T.expect(consumerGone(posix.POLL.HUP | posix.POLL.IN));
+
+    // **`IN` 은 종료 신호가 아니다.** stdout 에서 읽을 것은 없고, 그것으로 끝내면 엉뚱한 자리에서
+    // 죽는다. 아무 일도 없는 것(0)도 마찬가지다.
+    try T.expect(!consumerGone(0));
+    try T.expect(!consumerGone(posix.POLL.IN));
+    try T.expect(!consumerGone(posix.POLL.OUT));
+
+    // 살아 있는 소비자는 «갔다» 가 아니다 — 반대 방향도 잰다.
+    var live: [2]c.fd_t = undefined;
+    try T.expectEqual(@as(c_int, 0), c.pipe(&live));
+    defer _ = c.close(live[0]);
+    defer _ = c.close(live[1]);
+    try T.expect(!consumerIsGone(live[1]));
+}
+
+test "S11 파이프의 읽는 쪽을 닫으면 poll 이 끊김을 알려 준다 — 커널 계약 확인" {
+    const T = std.testing;
+    // 위 판정은 **커널이 그렇게 알려 준다**는 전제 위에 선다. 그 전제를 여기서 실제 파이프로
+    // 확인한다 — 안 그러면 「HUP 을 보면 된다」가 이 플랫폼에서 사실인지 아무도 모른다.
+    var ends: [2]c.fd_t = undefined;
+    try T.expectEqual(@as(c_int, 0), c.pipe(&ends));
+    const write_end: c.fd_t = ends[1];
+    _ = c.close(ends[0]); // 읽는 쪽을 닫는다 = 소비자가 갔다
+    defer _ = c.close(write_end);
+
+    // **`events=0` 이면 macOS 는 아무것도 안 알려 준다**(실측) — 그래서 헬퍼가 `POLLOUT` 을 건다.
+    var quiet = [_]posix.pollfd{.{ .fd = write_end, .events = 0, .revents = 0 }};
+    try T.expectEqual(@as(usize, 0), try posix.poll(&quiet, 0));
+
+    // 쓰기 관심을 걸면 `POLLHUP` 이 온다.
+    try T.expect(consumerIsGone(write_end));
 }

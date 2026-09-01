@@ -14115,6 +14115,26 @@ pub fn build(b: *std.Build) void {
                 session_host_3b_step.dependOn(&run_tests.step);
             }
         }
+        // **위 3b 아티팩트는 `p5c3c-3b` 로 걸러 돈다** — 그래서 같은 파일에 있어도 이름이 안 맞는
+        // 테스트는 컴파일만 되고 **한 번도 안 돈다**(실제로 S11 판정자 둘이 그 상태였다). 소비자
+        // 끊김 판정은 그 게이트의 관심사가 아니므로 자기 아티팩트로 따로 돈다.
+        const attach_stream_consumer_tests = addProjectTest(b, .{
+            .name = "maru-attach-stream-consumer",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/external_attach_cli.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"S11"},
+        });
+        const run_attach_stream_consumer_tests = b.addRunArtifact(attach_stream_consumer_tests);
+        run_attach_stream_consumer_tests.addArg("--maru-expect-tests=2");
+        run_attach_stream_consumer_tests.setCwd(b.path("."));
+        test_step.dependOn(&run_attach_stream_consumer_tests.step);
+        macos_only_test_step.dependOn(&run_attach_stream_consumer_tests.step);
+
         const session_host_3b_sentinel = b.addExecutable(.{
             .name = "maru-session-host-3b-sentinel",
             .root_module = b.createModule(.{

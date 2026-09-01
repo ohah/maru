@@ -11,10 +11,16 @@ pub const max_token_bytes = github_json.max_scalar_string_bytes;
 pub const max_args: usize = 18;
 const arg_bytes: usize = context_mod.max_value_bytes + 32;
 
+pub const TagProtection = enum {
+    current_required,
+    historical_unavailable,
+};
+
 pub const Expected = struct {
     context: context_mod.Context,
     subject_name: []const u8,
     subject_sha256: []const u8,
+    tag_protection: TagProtection = .current_required,
 };
 
 pub const ArgsStorage = struct {
@@ -242,7 +248,11 @@ pub const BoundedExecutor = struct {
 };
 
 fn validateExpected(expected: Expected) Error!void {
-    if (expected.context.repository.id == 0 or !std.mem.eql(u8, expected.context.repository.owner, "ohah") or !std.mem.eql(u8, expected.context.repository.name, "maru") or !identity.canonicalTag(expected.context.tag) or !identity.lowerHex(expected.context.source_commit, 40) or !expected.context.protected_tag or expected.context.build.run_id == 0 or expected.context.build.run_attempt == 0 or !identity.lowerHex(expected.subject_sha256, 64) or expected.subject_name.len == 0 or std.mem.indexOfScalar(u8, expected.subject_name, '/') != null or !validScalar(expected.subject_name)) return error.InvalidExpected;
+    const protection_matches = switch (expected.tag_protection) {
+        .current_required => expected.context.protected_tag,
+        .historical_unavailable => !expected.context.protected_tag,
+    };
+    if (expected.context.repository.id == 0 or !std.mem.eql(u8, expected.context.repository.owner, "ohah") or !std.mem.eql(u8, expected.context.repository.name, "maru") or !identity.canonicalTag(expected.context.tag) or !identity.lowerHex(expected.context.source_commit, 40) or !protection_matches or expected.context.build.run_id == 0 or expected.context.build.run_attempt == 0 or !identity.lowerHex(expected.subject_sha256, 64) or expected.subject_name.len == 0 or std.mem.indexOfScalar(u8, expected.subject_name, '/') != null or !validScalar(expected.subject_name)) return error.InvalidExpected;
     var workflow_storage: [context_mod.max_value_bytes]u8 = undefined;
     const workflow = std.fmt.bufPrint(
         &workflow_storage,

@@ -5,7 +5,7 @@
 //! never become release authority.
 
 const std = @import("std");
-const manifest = @import("release_manifest.zig");
+const manifest = @import("release_manifest");
 const upgrade_limits = @import("upgrade_limits.zig");
 
 pub const schema = "maru.session-host-release-evidence.v1";

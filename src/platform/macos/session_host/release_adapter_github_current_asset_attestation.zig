@@ -8,6 +8,7 @@ const attestation = @import("release_adapter_github_attestation");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const asset_files = @import("release_adapter_github_current_asset_files");
+const deadline_mod = @import("release_adapter_deadline");
 
 const role_order = [_]manifest.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
 
@@ -101,6 +102,65 @@ pub fn compose(io: std.Io, allocator: std.mem.Allocator, current: *const current
     return composeWith(&authority, &verifier, &executor, &clock, allocator, current, private, cli.path, token, output, budget_ns, result);
 }
 
+pub fn composeUntil(io: std.Io, allocator: std.mem.Allocator, current: *const current_input.CurrentManifestInput, private: *asset_files.CurrentAssetFiles, cli: Cli, token: []const u8, output: []u8, deadline: *deadline_mod.Deadline, result: *CurrentAssetAttestations) !void {
+    var authority = RealAuthority{ .pinned = cli.pinned };
+    var verifier = RealVerifier{};
+    var executor = attestation.BoundedExecutor{ .io = io };
+    return composeUntilWith(&authority, &verifier, &executor, deadline, allocator, current, private, cli.path, token, output, result);
+}
+
+pub fn composeUntilWith(authority: anytype, verifier: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, current: anytype, private: anytype, executable: [:0]const u8, token: []const u8, output: []u8, result: *CurrentAssetAttestations) !void {
+    const deadline_bytes = std.mem.asBytes(deadline);
+    if (!pristine(result) or rangesOverlap(std.mem.asBytes(result), output) or
+        rangesOverlap(deadline_bytes, std.mem.asBytes(result)) or
+        rangesOverlap(deadline_bytes, std.mem.asBytes(current)) or
+        rangesOverlap(deadline_bytes, std.mem.asBytes(private)) or
+        rangesOverlap(deadline_bytes, executable) or rangesOverlap(deadline_bytes, token) or
+        rangesOverlap(deadline_bytes, output) or
+        rangesOverlap(std.mem.asBytes(current), output) or
+        rangesOverlap(std.mem.asBytes(private), output) or
+        rangesOverlap(executable, output) or rangesOverlap(token, output)) return error.InvalidOwner;
+    const current_view = current.value() orelse return error.InvalidCurrent;
+    const candidate = current_view.manifest;
+    if (!validCurrent(candidate, current_view.authority)) return error.InvalidCurrent;
+    var published = false;
+    defer if (!published) cleanup(result, allocator);
+    const context: context_mod.Context = .{
+        .repository = candidate.repository,
+        .tag = candidate.release.tag,
+        .source_commit = candidate.source.commit,
+        .build = candidate.build,
+        .protected_tag = true,
+    };
+
+    for (role_order, 0..) |role, index| {
+        // The shared owner is checked on both sides of mutable authority
+        // revalidation so its elapsed time can never become a child extension.
+        _ = try deadline.remaining();
+        const before = private.revalidate() catch return error.InvalidAssets;
+        const expected_asset = assetForRole(candidate.assets, role) orelse return error.InvalidCurrent;
+        const before_asset = before.asset(role) orelse return error.InvalidAssets;
+        if (!validAsset(before_asset, expected_asset)) return error.InvalidAssets;
+        try authority.revalidate(allocator, executable);
+        const budget_ns = try deadline.remaining();
+        var relative_storage: [std.fs.max_name_bytes + 3]u8 = undefined;
+        const relative = std.fmt.bufPrint(&relative_storage, "./{s}", .{expected_asset.name}) catch return error.InvalidAssets;
+        var observed = try verifier.verify(executor, allocator, executable, token, before.directory_fd, relative, .{
+            .context = context,
+            .subject_name = expected_asset.name,
+            .subject_sha256 = expected_asset.sha256,
+        }, output, budget_ns);
+        errdefer observed.deinit(allocator);
+        const after = private.revalidate() catch return error.InvalidAssets;
+        const after_asset = after.asset(role) orelse return error.InvalidAssets;
+        if (after.directory_fd != before.directory_fd or !validAsset(after_asset, expected_asset)) return error.InvalidAssets;
+        result.observed[index] = observed;
+    }
+    _ = try deadline.remaining();
+    try publish(candidate, result);
+    published = true;
+}
+
 pub fn composeWith(authority: anytype, verifier: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, current: anytype, private: anytype, executable: [:0]const u8, token: []const u8, output: []u8, budget_ns: i128, result: *CurrentAssetAttestations) !void {
     if (!pristine(result) or rangesOverlap(std.mem.asBytes(result), output) or
         rangesOverlap(std.mem.asBytes(current), output) or
@@ -143,6 +203,11 @@ pub fn composeWith(authority: anytype, verifier: anytype, executor: anytype, clo
         if (after.directory_fd != before.directory_fd or !validAsset(after_asset, expected_asset)) return error.InvalidAssets;
         result.observed[index] = observed;
     }
+    try publish(candidate, result);
+    published = true;
+}
+
+fn publish(candidate: *const manifest.Manifest, result: *CurrentAssetAttestations) Error!void {
     if (candidate.release.tag.len > result.tag.len or candidate.source.commit.len != result.source_commit.len or
         candidate.build.workflow_ref.len > result.workflow_ref.len)
         return error.InvalidCurrent;
@@ -156,7 +221,6 @@ pub fn composeWith(authority: anytype, verifier: anytype, executor: anytype, clo
     result.workflow_ref_len = candidate.build.workflow_ref.len;
     @memcpy(result.workflow_ref[0..result.workflow_ref_len], candidate.build.workflow_ref);
     result.owner = result;
-    published = true;
 }
 
 fn pristine(result: *const CurrentAssetAttestations) bool {

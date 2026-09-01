@@ -782,6 +782,11 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         term.agent_screen_state = .unknown;
                         term.agent_screen_visible_blocker = false;
                         term.agent_screen_visible_idle = false;
+                        term.agent_screen_origin = .screen;
+                        // **관측 카운터도 0 으로 되돌린다.** C1 의 미관측 가드가 `screen_seq != 0` 으로
+                        // 「화면을 봤다」를 판단하므로, 지난 프로세스의 값이 남으면 새 프로세스에서 화면을
+                        // 한 번도 안 읽었는데도 **승인 대기가 즉시 풀린다**(적대적 검증이 잡았다).
+                        term.agent_screen_seq = 0;
                         // 중재기의 연속 셈도 버린다 — 지난 프로세스의 관측으로 새 프로세스를 접지 않는다.
                         term.agent_arbiter.reset();
                         term.agent_stabilizer.reset();
@@ -2596,6 +2601,25 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_state = verdict.state;
     term.agent_state_origin = verdict.origin;
     term.agent_state_rule = verdict.rule;
+
+    // **뒤집힌 전이도 턴 끝이면 작업트리를 굳힌다**(§1.3 · 적대적 검증이 잡았다).
+    //
+    // 스냅샷을 찍던 세 자리가 전부 **훅 전이** 기준이라, C2 가 닫은 턴(codex 오류 턴)은 아무도 안 찍었다 —
+    // 「배지는 풀리는데 그 턴에 바뀐 파일은 통째로 사라진다」. 예전 §9-10 의 손해가 형태만 바꿔 남아
+    // 있었던 것이다.
+    //
+    // **`origin == .screen` 일 때만 찍는다.** 훅이 닫은 전이는 위 세 자리가 이미 찍었고, 여기서 또 찍으면
+    // 같은 턴 끝에 `git write-tree` 가 두 번 **동기로** 돈다(§1.3 이 막으려던 그것).
+    // ⚠️ **훅이 있을 때만이다.** 훅이 없는 Term(§1.1 A)은 `origin` 이 어차피 화면이고 그쪽은
+    // `pollAgentState` 가 이미 찍는다 — `has_hook` 을 빼면 A 경로에서 같은 턴 끝을 **두 번** 찍는다
+    // (이 블록을 처음 쓸 때 실제로 그랬다).
+    if (has_hook and verdict.origin == .screen and
+        maru.session.turn_snapshot.isTurnEnd(turnStateOf(before), turnStateOf(verdict.state)))
+    {
+        // **턴 키를 싣지 않는다.** 이 턴이 어떻게 끝났는지는 훅만 아는데 그 훅이 안 왔기 때문에 C2 가
+        // 필요했다 — 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
+        captureTurnSnapshot(self, term.surfaceId(), .{}, 0);
+    }
     if (verdict.state != before) {
         if (displayed) self.metal_dirty = true;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(

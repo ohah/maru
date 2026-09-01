@@ -162,6 +162,14 @@ pub const Arbiter = struct {
         // 연속이 끊겼다. C2 는 «연속» 이라야 하므로 여기서 0 으로 돌린다.
         self.idle_confirmations = 0;
 
+        // B0 — **훅이 아직 모르면 화면이 답한다.** 로그 파일은 생겼는데 우리가 그 이벤트를 아직 못 읽은
+        // 구간이 있고(그리고 훅이 유실된 구간도), 그때 `hook` 은 `.unknown` 이다. 아래 D2·B 는 「훅이
+        // 안다」를 전제하므로 그대로 두면 **화면이 승인 프롬프트를 보고 있는데 배지가 `unknown` 이다.**
+        // §1 이 「훅이 유실됐을 때 화면이 그대로 본다」고 적은 자리이기도 하다.
+        if (hook == .unknown and in.screen != .unknown) {
+            return .{ .state = in.screen, .origin = in.screen_origin, .rule = "B0" };
+        }
+
         // D2 — 훅이 도는 동안 화면만 blocked 다. **무시한다.**
         //
         // 스크롤백에 남은 옛 승인 문구를 지금 요구로 읽는 오탐이 이 자리에서 걸린다. 승인 요구는
@@ -377,6 +385,21 @@ test "AR-D1 자식이 끝난 뒤에야 C2 가 세기 시작한다" {
     try testing.expectEqualStrings("C2-pending", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 6 }).rule);
     try testing.expectEqualStrings("C2-pending", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 7 }).rule);
     try testing.expectEqualStrings("C2", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 8 }).rule);
+}
+
+test "AR-B0 훅이 아직 모르면 화면이 답한다 — 훅 자리가 unknown 인 구간" {
+    // 로그 파일은 생겼는데 이벤트를 아직 못 읽은 구간(그리고 훅이 유실된 구간)이 있다. 그때 D2·B 를
+    // 그대로 태우면 화면이 승인 프롬프트를 보고 있는데 배지가 unknown 이 된다.
+    var a: Arbiter = .{};
+    const v = a.arbitrate(.{ .hook = .unknown, .screen = .blocked, .screen_seq = 1, .screen_visible_blocker = true });
+    try testing.expectEqual(State.blocked, v.state);
+    try testing.expectEqual(Origin.screen, v.origin);
+    try testing.expectEqualStrings("B0", v.rule);
+
+    // 화면도 모르면 그대로 unknown 이다 — 없는 근거를 지어내지 않는다.
+    const both = a.arbitrate(.{ .hook = .unknown, .screen = .unknown, .screen_seq = 2 });
+    try testing.expectEqual(State.unknown, both.state);
+    try testing.expectEqualStrings("B", both.rule);
 }
 
 test "AR-D2 훅이 도는 동안 화면만 blocked 면 배지가 안 바뀐다 — 스크롤백 오탐" {

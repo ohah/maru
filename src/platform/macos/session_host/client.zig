@@ -7698,6 +7698,11 @@ pub const Client = struct {
         scope: *GenerationAllocatorScope,
     ) (ClientError || generation_batch_registry.Error)!void {
         const active = self.active_generation_allocator_scope orelse return error.InvalidState;
+        // 2026-09-01: sleep/wake 뒤 `local_invariant_violation` 으로 연결이 poison 됐는데 **어느 축이
+        // 깨졌는지 로그에 없었다.** `firstInvalidAxis` 와 `logCanonicalScopeInvalid` 는 바로 그 진단을
+        // 위해 존재하는데 `canonicalEventAllocator` 한 곳에서만 쓰이고, 이 경로는 축을 버리는
+        // `validForClient` 를 불러 결론만 남겼다. 판정은 그대로 두고(같은 순서·같은 조건) 사유만 적는다.
+        if (active.firstInvalidAxis(self)) |axis| logCanonicalScopeInvalid(axis);
         if (!scope.rawDiscriminatorsValid() or scope.lifecycle != .active or
             !active.validForClient(self) or
             !active.matchesToken(scope) or
@@ -9733,8 +9738,11 @@ pub const Client = struct {
     pub fn commitPreparedExecutionRecoveryCleanupNoFail(self: *Client) void {
         const active_scope = self.active_generation_allocator_scope orelse
             @panic("prepared execution recovery allocator scope missing");
-        if (active_scope.purpose != .rpc_execute or !active_scope.validForClient(self))
+        if (active_scope.purpose != .rpc_execute or !active_scope.validForClient(self)) {
+            // 죽기 전에 축을 남긴다 — panic 메시지만으로는 여덟 축 중 무엇이 깨졌는지 알 수 없다.
+            if (active_scope.firstInvalidAxis(self)) |axis| logCanonicalScopeInvalid(axis);
             @panic("prepared execution recovery allocator scope drifted");
+        }
         self.screen_inbox.generation_batch_accounting.ledger.?.endAllocatorScope(
             active_scope.client_addr,
             active_scope.token_addr,

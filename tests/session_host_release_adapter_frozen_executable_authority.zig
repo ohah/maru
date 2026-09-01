@@ -171,3 +171,25 @@ test "preowned and copied cleanup owners cannot consume the descriptor" {
     try pinned.deinit();
     try std.testing.expectError(error.InvalidOwner, pinned.deinit());
 }
+
+test "held-only final revalidation hashes the pinned vnode without caller pathname authority" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var pinned: files.PinnedExecutableFile = .{};
+    try files.pinExecutable(&pinned, std.mem.sliceTo(&fixture.path, 0), fixture.expected, payload_len);
+    defer pinned.deinit() catch {};
+    const before = pinned.value().?;
+    const held = try pinned.revalidateHeld();
+    try std.testing.expectEqual(before.identity, held.identity);
+    try std.testing.expectEqualStrings(&before.sha256, &held.sha256);
+    var copied = pinned;
+    try std.testing.expectError(error.InvalidOwner, copied.revalidateHeld());
+
+    const changed = [_]u8{0xff};
+    const write_fd = c.open(fixture.path[0..].ptr, .{ .ACCMODE = .WRONLY }, @as(c.mode_t, 0));
+    if (write_fd < 0) return error.MutationFailed;
+    defer _ = c.close(write_fd);
+    if (c.pwrite(write_fd, &changed, changed.len, 0) != changed.len) return error.MutationFailed;
+    try std.testing.expectError(error.FileChanged, pinned.revalidateHeld());
+}

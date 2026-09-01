@@ -4500,6 +4500,28 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
+    // `ssh-integration.md` §9.4 의 「원격 cwd 소비처」 표가 코드와 같은 상태를 말하는지 센다.
+    // **그 표는 두 번 낡았다** — 「창 제목이 `currentCwd` 를 쓴다」는 옛 배선인데 코드만 정정됐고,
+    // 그 행을 읽은 사람이 「host 접두 후속이 남았다」고 판단했다(소비자가 0 인 자리였다).
+    // 문장을 대조하는 것이 아니라 **그 문장이 참인지**를 소스에서 되짚는다.
+    const ssh_remote_cwd_doc_step = b.step(
+        "test-ssh-remote-cwd-doc",
+        "ssh-integration.md §9.4 remote-cwd consumer table matches the code",
+    );
+    const ssh_remote_cwd_doc_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/ssh_remote_cwd_doc_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ssh_remote_cwd_doc_tests = b.addRunArtifact(ssh_remote_cwd_doc_tests);
+    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-tests=1");
+    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-passed=1");
+    run_ssh_remote_cwd_doc_tests.setCwd(b.path("."));
+    ssh_remote_cwd_doc_step.dependOn(&run_ssh_remote_cwd_doc_tests.step);
+    boundary_step.dependOn(&run_ssh_remote_cwd_doc_tests.step);
+
     const session_host_ci_budget_step = b.step(
         "test-session-host-ci-budget",
         "Session-host Debug CI completion budget contract",

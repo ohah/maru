@@ -1665,6 +1665,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   순서, exact command/output vocabulary, environment와 runner를 실제 workflow bytes에서 검증한다. 이 gate는 아직 captured output을
   validator argv에 소비하거나 manifest/evidence를 만들고 release를 publish하는 전체 workflow 배선을 완료했다고 주장하지 않는다.
 
+  publication transcript의 `candidate_attested`는 draft보다 먼저 성립한다. 이 권위는
+  `release_adapter_candidate_attestation.zig`의 final-address move-only `CandidateAttestation`이 단독 소유한다. 입력은 trusted tag
+  `Context`, universal DMG/frozen executable의 absolute pathname, checkout 전 고정한 GitHub CLI, validated token과 같은 release
+  phase `Deadline`뿐이며 draft/release ID나 caller-provided size/SHA/subject는 받지 않는다. exact basename은 tag version에서 유도하고
+  두 file을 no-follow held fd와 parent-directory authority로 pin한 뒤 distinct inode, nonzero 공통 asset cap, frozen execute bit를
+  확인한다.
+
+  attestation은 canonical DMG→frozen 순서다. 각 child 전에 같은 CLI와 held file을 재검증하고 fresh remaining만 전달하며 verifier의
+  repository/tag/source/build와 subject basename/SHA를 trusted context와 pinned file에서 직접 유도한다. 각 child 뒤 file을 다시
+  revalidate하고 두 owned observation을 얻은 뒤에도 같은 deadline을 마지막으로 확인해야만 owner를 게시한다. 어느 CLI/file/context/
+  subject drift, timeout, child/OOM 실패에서도 partial observation을 역순 해제하고 fd authority를 닫아 publication 0으로 끝낸다.
+  성공 owner는 두 held file과 exact attestation observations를 보존하며 후속 draft-bound candidate owner는 raw pathname을 다시 pin하지
+  않고 이 owner를 revalidate해 소비한다. focused gate `test-session-host-release-adapter-candidate-attestation`은 actual filesystem과
+  injected authority/verifier로 exact order/deadline, draft 입력 0, copied/pre-owned owner, alias/mutation, final expiry와 allocation unwind를
+  Debug·ReleaseFast에서 검증한다. 이 gate만으로 draft 생성, Apple product, evidence/manifest authoring이나 workflow/U5 E2E를 완료했다고
+  주장하지 않는다.
+
   release executable bootstrap의 단일 소유자는
   `src/platform/macos/session_host/release_adapter_executable_bootstrap.zig`다. bootstrap은 기존
   `release_adapter_contract.parseArgs`로 command를 먼저 닫고, 기존 `release_adapter_environment`의 exact process context와

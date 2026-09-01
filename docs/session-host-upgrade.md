@@ -1107,6 +1107,26 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   mutation과 copied/pre-owned owner를 Debug·ReleaseFast로 검증한다. Apple signing·DMG 내부 executable equality와 evidence/manifest
   authoring은 후속 candidate product owner가 소비한다.
 
+  pre-manifest Apple 제품 권위는 `release_adapter_candidate_product.zig`의 final-address move-only `CandidateProduct`가 소유한다.
+  입력은 final-address `CandidateFiles`, 그 owner가 pin한 동일 DMG/frozen pathname, absent private DMG work pathname과 같은 release phase
+  `Deadline`뿐이다. caller가 DMG size/SHA, executable SHA, version, signing이나 success receipt를 별도 제출하지 않는다. candidate files를
+  child 전 재검증하고 그 view에서 DMG expected size/SHA와 tag version을 유도해
+  `release_adapter_dmg_authority.observeUntil`을 실행한다. attach와 각 Apple 판정 명령은 같은 phase deadline에서 매번 fresh
+  remaining을 얻어 시작하며, 이미 mount된 뒤 phase deadline이 끝나도 detach를 생략하지 않는다. detach만 상위 25분 job timeout 안의
+  고정 4분 cleanup reserve를 사용하고 새 제품 판정은 수행하지 않는다. 남은 최소 1분은 process-group kill/reap과 private filesystem
+  cleanup 여유이며 detach reserve로 전용할 수 없다.
+  그 authority가 read-only private DMG mount, fixed product path, codesign/plist/lipo/staple/Gatekeeper 관측과 detach/cleanup을 소유한다.
+
+  Apple observation과 detach/cleanup 뒤 같은 phase deadline을 다시 통과한 다음 `CandidateFiles`를 revalidate하고, DMG 내부 executable
+  SHA가 held frozen executable SHA와 exact 일치해야
+  한다. 성공 결과는 release ID/tag/source, candidate DMG/frozen 관측과 owned `apple_product.Observed`를 결속하며 signing은 이 owner의
+  `Observed.signing()`에서만 유도한다. copied/pre-owned owner, files/path/work alias, deadline 만료, source mutation, Apple observation 실패,
+  internal/frozen digest mismatch, cleanup 실패에서는 publication 0이다. focused gate
+  `test-session-host-release-adapter-candidate-product`는 injected observer와 actual candidate filesystem으로 exact expectation/version/deadline,
+  명령별 fresh remaining, deadline 만료 뒤 detach-only cleanup reserve, pre/post revalidation, copied owner,
+  mutation·mismatch·failure와 allocation unwind를 Debug·ReleaseFast에서 검증한다. 실제 hdiutil/Apple
+  command와 mount residue 0은 기존 DMG authority E2E가 소유하고, candidate artifact attestation과 evidence authoring은 후속 gate다.
+
   current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
   `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
   composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B

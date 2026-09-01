@@ -781,6 +781,22 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   별도 workflow contract fixture는 draft 생성 전 publish, evidence 전 manifest 생성, 누락 asset, mutable A, `--clobber`, 임의 ref와
   unpinned third-party action을 거부한다.
 
+  validator executable은 `release_adapter_executable_bootstrap.current`로 command/context/pre-checkout CLI를 먼저 인증하고 exact
+  `GH_TOKEN`을 읽은 뒤에만 phase storage와 product execution을 연다. command union이 `pre_publish`이면
+  `release_adapter_pre_publish_product.run`, `verify_predecessor`이면
+  `release_adapter_verify_predecessor_product.run`을 exact once 호출하며 fallback, 두 phase 연속 실행, caller-selected driver는 없다.
+  두 phase는 executable SSOT `phase_budget_ns = 20 * std.time.ns_per_min`을 공유한다. budget은 CLI option이나 환경변수로 완화하지
+  않고 release workflow의 validator step/job timeout은 최소 25분으로 두어 process-group kill/reap과 private cleanup 여유를 남긴다.
+  timeout은 summary publication 0인 재시도 가능한 release validation 실패이며 이미 공개된 release 성공으로 바꾸지 않는다.
+
+  caller-owned `Storage`는 GitHub capture, manifest download, artifact attestation, compatibility와 Apple command capture를 각 하위
+  component 상한에서 고정 배열로 분리하고 서로 alias하지 않는다. executable은 stdout에 validation JSON이나 token을 쓰지 않고 성공은
+  command의 exclusive `summary-out` 파일로만 관측한다. bootstrap/token/product 실패는 nonzero exit이며 product가 cleanup retry authority를
+  반환하면 process exit 전에 `retryCleanup`을 exact once 시도하고, 재실패는 성공으로 바꾸지 않는다. focused gate
+  `test-session-host-release-validator-executable`은 bootstrap→token→exact phase dispatch 순서, 고정 budget/storage caps, phase 교환·fallback 0,
+  product failure 전파와 real production types compile을 Debug·ReleaseFast에서 검증한다. 실제 GitHub/Apple child와 workflow ordering은
+  후속 release workflow/U5 gate가 소유한다.
+
   adapter CLI는 다음 두 command만 허용한다. 모든 option은 exact 1회이며 순서는 자유지만 unknown/duplicate/missing option,
   positional argument, 빈 값, symlink/non-regular input, 기존 output을 거부한다. artifact path는 CLI가 받고 GitHub identity를
   caller가 문자열로 주입하지 않는다. repository ID·owner/name, tag/ref, source SHA, workflow ref, run ID/attempt, event 종류는

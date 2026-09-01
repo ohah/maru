@@ -14201,7 +14201,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"S11"},
         });
         const run_attach_stream_consumer_tests = b.addRunArtifact(attach_stream_consumer_tests);
-        run_attach_stream_consumer_tests.addArg("--maru-expect-tests=2");
+        run_attach_stream_consumer_tests.addArg("--maru-expect-tests=6");
         run_attach_stream_consumer_tests.setCwd(b.path("."));
         test_step.dependOn(&run_attach_stream_consumer_tests.step);
         macos_only_test_step.dependOn(&run_attach_stream_consumer_tests.step);

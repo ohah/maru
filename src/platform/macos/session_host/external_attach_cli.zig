@@ -144,6 +144,65 @@ test "어떤 코드와 단계 조합도 그 버퍼 안에 들어간다" {
 pub const stream_magic = "MRSS";
 pub const stream_header_bytes = stream_magic.len + 1 + 3 + 4;
 
+/// client→host 프레이밍(§8 S11-6): `"MRSV" | cols:u16 LE | rows:u16 LE`.
+///
+/// **stdout 의 `MRSS` 와 대칭으로 magic 을 둔다** — 셸이 끼워 넣은 잡음과 가르는 같은 이유다.
+/// 이 방향은 예전에 안 쓰였다(`--stream` 은 observer 라 입력을 안 보낸다). 뷰포트 선언 하나만
+/// 이 자리를 쓴다 — client 가 resize 를 **부르는** 것이 아니라 자기 크기를 **알리는** 것이고,
+/// 무엇을 할지는 host 가 정한다.
+pub const viewport_magic = "MRSV";
+pub const viewport_frame_bytes = viewport_magic.len + 2 + 2;
+
+/// 한 프레임을 읽은 결과.
+pub const ViewportFrame = struct {
+    cols: u16,
+    rows: u16,
+
+    /// 둘 다 0 이면 **선언을 거둔다**(붙어 있되 크기에 영향을 안 준다).
+    pub fn isWithdrawal(self: ViewportFrame) bool {
+        return self.cols == 0 and self.rows == 0;
+    }
+};
+
+pub const ViewportParse = union(enum) {
+    /// 프레임 하나를 읽었다. `consumed` 만큼 버퍼를 앞으로 민다.
+    frame: struct { value: ViewportFrame, consumed: usize },
+    /// 아직 프레임 하나가 안 찼다 — 더 기다린다.
+    incomplete,
+    /// 이 바이트는 우리 프레임이 아니다. `skip` 만큼 버리고 다시 본다.
+    ///
+    /// **끊지 않는다.** 옛 client·셸 잡음이 섞여도 조용히 무시해야 한다(하위호환).
+    skip: usize,
+};
+
+/// client→host 버퍼에서 뷰포트 선언을 하나 읽는다.
+///
+/// **한쪽만 0 인 것은 버린다** — 「폭이 0 인 화면」은 뜻이 없고, 조용히 반쪽만 받으면 그 client 는
+/// 자기가 뭘 요청했는지 모른다. 버리되 끊지는 않는다(위 `skip` 과 같은 규율).
+pub fn parseViewport(buf: []const u8) ViewportParse {
+    if (buf.len == 0) return .incomplete;
+    // magic 을 찾는다. 앞이 안 맞으면 그만큼 버린다 — 다음 바이트부터 다시 본다.
+    if (!std.mem.startsWith(u8, buf, viewport_magic)) {
+        if (std.mem.indexOf(u8, buf, viewport_magic)) |at| return .{ .skip = at };
+        // magic 이 **걸쳐** 있을 수 있다 — 뒤에 붙을 조각과 합쳐야 완성되는 접두를 남긴다.
+        // 그냥 「마지막 3바이트를 남긴다」로 하면 두 가지가 틀린다: ⑴ magic 접두가 아닌 바이트를
+        // 붙들고, ⑵ 버퍼가 3바이트 이하면 `skip = 0` 이 되어 **호출자가 영영 돈다**(적대적 검증
+        // 1회차에서 실제로 그 자리가 났다). 그래서 접두가 되는 **가장 긴 꼬리**만 남기고,
+        // 그게 버퍼 전부면 `skip` 이 아니라 `incomplete` 다.
+        var keep: usize = @min(buf.len, viewport_magic.len - 1);
+        while (keep > 0) : (keep -= 1) {
+            if (std.mem.eql(u8, buf[buf.len - keep ..], viewport_magic[0..keep])) break;
+        }
+        const drop = buf.len - keep;
+        return if (drop == 0) .incomplete else .{ .skip = drop };
+    }
+    if (buf.len < viewport_frame_bytes) return .incomplete;
+    const cols = std.mem.readInt(u16, buf[4..6], .little);
+    const rows = std.mem.readInt(u16, buf[6..8], .little);
+    if ((cols == 0) != (rows == 0)) return .{ .skip = viewport_frame_bytes };
+    return .{ .frame = .{ .value = .{ .cols = cols, .rows = rows }, .consumed = viewport_frame_bytes } };
+}
+
 /// stdout 으로 레코드 덩어리를 내보내는 sink. **부분 쓰기와 EPIPE 를 여기서 끝낸다** — 소비자가
 ///먼저 끊는 것은 정상 종료이고(폰이 화면을 나갔다), 그때 이 프로세스도 조용히 끝나야 한다.
 const StdoutStreamSink = struct {
@@ -540,4 +599,133 @@ test "S11 파이프의 읽는 쪽을 닫으면 poll 이 끊김을 알려 준다 
 
     // 쓰기 관심을 걸면 `POLLHUP` 이 온다.
     try T.expect(consumerIsGone(write_end));
+}
+
+test "S11-6 뷰포트 프레임을 읽는다 — 정상·미완·거둠" {
+    const T = std.testing;
+    var buf: [viewport_frame_bytes]u8 = undefined;
+    @memcpy(buf[0..4], viewport_magic);
+    std.mem.writeInt(u16, buf[4..6], 50, .little);
+    std.mem.writeInt(u16, buf[6..8], 37, .little);
+
+    switch (parseViewport(&buf)) {
+        .frame => |f| {
+            try T.expectEqual(@as(u16, 50), f.value.cols);
+            try T.expectEqual(@as(u16, 37), f.value.rows);
+            try T.expectEqual(viewport_frame_bytes, f.consumed);
+            try T.expect(!f.value.isWithdrawal());
+        },
+        else => return error.ExpectedFrame,
+    }
+
+    // 덜 온 것은 **기다린다** — 버리면 다음 바이트가 와도 영영 못 맞춘다.
+    try T.expect(parseViewport(buf[0 .. viewport_frame_bytes - 1]) == .incomplete);
+    try T.expect(parseViewport("") == .incomplete);
+
+    // 둘 다 0 이면 거둠.
+    std.mem.writeInt(u16, buf[4..6], 0, .little);
+    std.mem.writeInt(u16, buf[6..8], 0, .little);
+    switch (parseViewport(&buf)) {
+        .frame => |f| try T.expect(f.value.isWithdrawal()),
+        else => return error.ExpectedFrame,
+    }
+}
+
+test "S11-6 우리 프레임이 아닌 바이트는 버리되 끊지 않는다" {
+    const T = std.testing;
+    // 셸 잡음이 앞에 붙어도 magic 을 찾아 맞춘다.
+    var noisy: [4 + viewport_frame_bytes]u8 = undefined;
+    @memcpy(noisy[0..4], "junk");
+    @memcpy(noisy[4..8], viewport_magic);
+    std.mem.writeInt(u16, noisy[8..10], 44, .little);
+    std.mem.writeInt(u16, noisy[10..12], 20, .little);
+    switch (parseViewport(&noisy)) {
+        .skip => |n| {
+            try T.expectEqual(@as(usize, 4), n);
+            switch (parseViewport(noisy[n..])) {
+                .frame => |f| try T.expectEqual(@as(u16, 44), f.value.cols),
+                else => return error.ExpectedFrame,
+            }
+        },
+        else => return error.ExpectedSkip,
+    }
+
+    // **magic 이 걸쳐 있으면 남긴다** — 마지막 3바이트를 버리면 다음 조각이 와도 못 맞춘다.
+    switch (parseViewport("xxMR")) {
+        .skip => |n| try T.expectEqual(@as(usize, 2), n),
+        else => return error.ExpectedSkip,
+    }
+
+    // **한쪽만 0 인 것은 버린다.** 「폭이 0 인 화면」은 뜻이 없다.
+    var half: [viewport_frame_bytes]u8 = undefined;
+    @memcpy(half[0..4], viewport_magic);
+    std.mem.writeInt(u16, half[4..6], 0, .little);
+    std.mem.writeInt(u16, half[6..8], 37, .little);
+    switch (parseViewport(&half)) {
+        .skip => |n| try T.expectEqual(viewport_frame_bytes, n),
+        else => return error.ExpectedSkip,
+    }
+}
+
+test "S11-6 어떤 입력에도 진전이 있다 — 호출자가 영영 돌지 않는다" {
+    const T = std.testing;
+    // **`skip = 0` 은 진전이 아니다.** 호출자는 `skip` 만큼 버리고 다시 부르므로 0 이면 같은
+    // 버퍼로 무한히 돈다. 「마지막 3바이트를 남긴다」는 첫 판이 정확히 그 값을 냈다.
+    var prng = std.Random.DefaultPrng.init(0x511a);
+    const rnd = prng.random();
+    var buf: [24]u8 = undefined;
+    var i: usize = 0;
+    while (i < 200_000) : (i += 1) {
+        const len = rnd.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..len]) |*b| {
+            // magic 조각이 자주 나오도록 알파벳을 좁힌다 — 그래야 걸친 경우가 실제로 생긴다.
+            b.* = "MRSVx"[rnd.intRangeAtMost(usize, 0, 4)];
+        }
+        switch (parseViewport(buf[0..len])) {
+            .frame => |f| try T.expect(f.consumed > 0),
+            .skip => |n| {
+                // 버릴 것이 있다고 했으면 **실제로 있어야** 한다.
+                try T.expect(n > 0);
+                try T.expect(n <= len);
+            },
+            // 기다린다고 했으면 남은 것이 **magic 접두**여야 한다 — 아니면 영영 안 맞는다.
+            .incomplete => {
+                if (len == 0) continue;
+                const keep = @min(len, viewport_frame_bytes);
+                try T.expect(std.mem.startsWith(u8, viewport_magic, buf[0..@min(len, viewport_magic.len)]) or len >= viewport_magic.len);
+                _ = keep;
+            },
+        }
+    }
+}
+
+test "S11-6 한 번에 여러 프레임이 와도 차례로 읽는다" {
+    const T = std.testing;
+    // 회전 애니메이션은 선언을 **연달아** 보낸다 — 한 read 에 둘이 들어오는 것이 정상이다.
+    // `consumed` 를 안 쓰고 버퍼를 통째로 버리면 뒤엣것(=최신 값)을 잃는다.
+    var buf: [viewport_frame_bytes * 2]u8 = undefined;
+    @memcpy(buf[0..4], viewport_magic);
+    std.mem.writeInt(u16, buf[4..6], 50, .little);
+    std.mem.writeInt(u16, buf[6..8], 37, .little);
+    @memcpy(buf[8..12], viewport_magic);
+    std.mem.writeInt(u16, buf[12..14], 44, .little);
+    std.mem.writeInt(u16, buf[14..16], 20, .little);
+
+    var rest: []const u8 = &buf;
+    var seen: [2]u16 = .{ 0, 0 };
+    var n: usize = 0;
+    while (n < 2) {
+        switch (parseViewport(rest)) {
+            .frame => |f| {
+                seen[n] = f.value.cols;
+                n += 1;
+                rest = rest[f.consumed..];
+            },
+            else => return error.ExpectedFrame,
+        }
+    }
+    try T.expectEqual(@as(u16, 50), seen[0]);
+    try T.expectEqual(@as(u16, 44), seen[1]);
+    // 다 읽으면 더 없다.
+    try T.expect(parseViewport(rest) == .incomplete);
 }

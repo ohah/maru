@@ -76,7 +76,7 @@ pub const PreparedControllerTransition = struct {
     /// Release keeps the controller attached as an observer. Its replacement list is prepared off
     /// to the side so a failed cross-fd publish can free it and leave allocator state/semantics
     /// untouched; commit swaps it without allocation.
-    release_observers: ?[]StreamId = null,
+    release_observers: ?[]ObserverSlot = null,
     consumed: bool = false,
 };
 
@@ -183,6 +183,45 @@ pub fn gridSizeAllowed(cols: u16, rows: u16) bool {
     return @as(usize, clampCols(cols)) * @as(usize, clampRows(rows)) <= max_grid_cells;
 }
 
+/// client 가 «자기가 그릴 수 있는 격자» 로 알린 크기(S11-6). 창 크기가 아니라 **그리는 격자**다 —
+/// 창 폭으로 선언하면 세션이 client 가 못 그리는 열까지 갖게 되어 리사이즈를 하고도 오른쪽이 잘린다.
+pub const Viewport = struct {
+    cols: u16,
+    rows: u16,
+};
+
+/// 붙어 있는 observer 하나.
+///
+/// **선언을 이 슬롯이 든다 — 전역 표에 id 로 넣지 않는다.** client 가 `SIGKILL` 로 죽거나 전파가
+/// 끊겨 채널이 반쯤 닫혀도, 슬롯이 사라질 때 선언도 함께 사라져야 한다. 전역 표면 그 세션은
+/// 영영 작은 채로 남는다(S11-6). 그래서 `observers` 는 `StreamId` 가 아니라 이 구조체를 든다 —
+/// 평행 배열로 두면 controller release 가 배열을 통째로 갈아 끼우는 자리에서 조용히 어긋난다.
+pub const ObserverSlot = struct {
+    stream: StreamId,
+    /// `null` 은 **「선언한 적이 없다」**다. 「0 을 선언했다」와 겹쳐 쓰지 않는다 — 선언이 하나도
+    /// 없으면 host 는 아무것도 안 바꾸고 기준 크기도 안 잡는다.
+    declared: ?Viewport = null,
+};
+
+/// `declareViewport` 의 결과. **버림과 무변화를 가른다** — 「한쪽만 0 이라 버렸다」를 「같은 값이라
+/// 아무것도 안 했다」로 접으면 client 는 자기 선언이 통했는지 모른다.
+pub const DeclareViewportOutcome = enum {
+    /// 새 값이 슬롯에 들어갔다.
+    declared,
+    /// 선언을 거뒀다(둘 다 0). 이 슬롯은 이제 크기에 영향을 안 준다.
+    withdrawn,
+    /// 직전과 같아 아무것도 안 했다. **리사이즈 폭풍을 여기서 접는다.**
+    unchanged,
+    /// 한쪽만 0 이라 버렸다. 슬롯은 그대로다.
+    invalid,
+};
+
+fn sameObserverStreams(a: []const ObserverSlot, b: []const ObserverSlot) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x.stream != y.stream) return false;
+    return true;
+}
+
 /// runtime 하나의 소유·구독·크기 상태. `runtime`은 server가 실 `LivePtySession`/`TerminalCore` handle을 실어 두는
 /// opaque 슬롯이다(state machine은 이 값을 해석하지 않는다).
 pub const RuntimeEntry = struct {
@@ -201,24 +240,24 @@ pub const RuntimeEntry = struct {
     /// 0"이라는 두 의미로 겹쳐 쓰지 않기 위한 명시 sentinel이다 — 그래야 seq 0을 유효한 첫 값으로 받되 seq 0 재전송은
     /// stale로 막는다. controller가 바뀌면(controller/takeover 획득) `controller_sequence`와 함께 false로 리셋한다.
     resize_seq_seen: bool = false,
-    observers: std.ArrayListUnmanaged(StreamId) = .empty,
+    observers: std.ArrayListUnmanaged(ObserverSlot) = .empty,
     /// server가 실 runtime handle을 실어 두는 opaque 슬롯. state machine은 미해석.
     runtime: ?*anyopaque = null,
 
     fn isAttached(self: *const RuntimeEntry, stream: StreamId) bool {
         if (self.controller == stream) return true;
-        for (self.observers.items) |o| if (o == stream) return true;
+        for (self.observers.items) |o| if (o.stream == stream) return true;
         return false;
     }
 
     fn hasObserver(self: *const RuntimeEntry, stream: StreamId) bool {
-        for (self.observers.items) |observer| if (observer == stream) return true;
+        for (self.observers.items) |observer| if (observer.stream == stream) return true;
         return false;
     }
 
     fn removeObserver(self: *RuntimeEntry, stream: StreamId) bool {
         for (self.observers.items, 0..) |o, i| {
-            if (o == stream) {
+            if (o.stream == stream) {
                 _ = self.observers.orderedRemove(i);
                 return true;
             }
@@ -436,7 +475,7 @@ pub const TerminalRuntimeRegistry = struct {
     fn capabilitiesOf(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) u8 {
         const entry = self.entries.get(id) orelse return 0;
         if (entry.controller == stream) return Capability.observe | Capability.input | Capability.resize;
-        for (entry.observers.items) |o| if (o == stream) return Capability.observe;
+        for (entry.observers.items) |o| if (o.stream == stream) return Capability.observe;
         return 0;
     }
 
@@ -646,11 +685,14 @@ pub const TerminalRuntimeRegistry = struct {
             1,
         ) catch return error.ControllerGenerationExhausted;
         const replacement = self.allocator.alloc(
-            StreamId,
+            ObserverSlot,
             entry.observers.items.len + 1,
         ) catch return error.OutOfMemory;
         @memcpy(replacement[0..entry.observers.items.len], entry.observers.items);
-        replacement[replacement.len - 1] = target.value;
+        // **물러나는 controller 는 선언 없이 observer 가 된다.** controller 는 제 크기를 스스로
+        // 정하는 쪽이라 「선언」이라는 개념이 없다 — 여기서 뭔가를 실으면 그것이 곧 자기 자신을
+        // 좁히는 선언이 된다.
+        replacement[replacement.len - 1] = .{ .stream = target.value };
         return .{
             .runtime_id = id,
             .target = target,
@@ -703,10 +745,12 @@ pub const TerminalRuntimeRegistry = struct {
                     return error.StaleControllerTransition;
                 if (entry.controller != prepared.target.value or
                     replacement.len != entry.observers.items.len + 1 or
-                    replacement[replacement.len - 1] != prepared.target.value)
+                    replacement[replacement.len - 1].stream != prepared.target.value)
                     return error.StaleControllerTransition;
-                if (!std.mem.eql(
-                    StreamId,
+                // **신원만 견준다 — 선언은 안 본다.** 준비와 커밋 사이에 어떤 observer 가 제
+                // 뷰포트를 알려 왔다고 해서 controller 인수인계가 무효가 되면 안 된다. 이 검사가
+                // 지키는 것은 「그 사이에 붙거나 떨어진 자가 있는가」다.
+                if (!sameObserverStreams(
                     replacement[0..entry.observers.items.len],
                     entry.observers.items,
                 )) return error.StaleControllerTransition;
@@ -723,10 +767,13 @@ pub const TerminalRuntimeRegistry = struct {
 
         switch (prepared.kind) {
             .takeover => {
+                // **controller 가 되면 그 자의 선언이 사라진다.** controller 는 제 크기를 스스로
+                // 정하므로 알릴 대상이 없다 — 슬롯이 없어지니 선언도 함께 없어진다(S11-6 의 수명
+                // 규칙 그대로다).
                 const removed = entry.removeObserver(prepared.target.value);
                 std.debug.assert(removed);
                 if (entry.controller) |old|
-                    entry.observers.appendAssumeCapacity(old);
+                    entry.observers.appendAssumeCapacity(.{ .stream = old });
                 entry.controller = prepared.target.value;
             },
             .release => {
@@ -794,8 +841,59 @@ pub const TerminalRuntimeRegistry = struct {
         return self.commitPreparedResize(prepared);
     }
 
+    /// 뷰포트 선언을 그 observer 슬롯에 적는다(S11-6). **크기는 여기서 안 바꾼다** — 무엇을 할지는
+    /// 조정 규칙이 정하고, 이 함수는 「누가 무엇을 알렸나」만 든다.
+    pub fn declareViewportSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+        cols: u16,
+        rows: u16,
+    ) RegistryError!DeclareViewportOutcome {
+        return self.declareViewport(id, subscription.value, cols, rows);
+    }
+
+    fn declareViewport(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        stream: StreamId,
+        cols: u16,
+        rows: u16,
+    ) RegistryError!DeclareViewportOutcome {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        // **선언할 수 있는 것은 붙어 있는 observer 뿐이다.** controller 도 여기서 걸린다 —
+        // `attach` 가 controller 를 `observers` 에 넣지 않으므로 이 루프가 못 찾는다. 자기 크기를
+        // 스스로 정하는 쪽이라 알릴 대상도 없다. 따로 가드를 두지 않는다(변이 검사에서 그 가드가
+        // 닿지 않는 코드임을 확인했다 — 2026-09-01).
+        const slot = blk: {
+            for (entry.observers.items) |*o| if (o.stream == stream) break :blk o;
+            return error.NotObserver;
+        };
+
+        // **한쪽만 0 인 것은 버린다.** 「폭이 0 인 화면」은 뜻이 없고, 조용히 반쪽만 받으면 그
+        // client 는 자기가 뭘 요청했는지 모른다. 버리되 끊지는 않는다.
+        if ((cols == 0) != (rows == 0)) return .invalid;
+
+        // 둘 다 0 이면 **선언을 거둔다** — 붙어 있되 크기에 영향을 안 준다.
+        const next: ?Viewport = if (cols == 0) null else .{ .cols = cols, .rows = rows };
+        const before = slot.declared;
+        slot.declared = next;
+
+        if (before == null and next == null) return .unchanged;
+        if (before) |b| if (next) |n| {
+            if (b.cols == n.cols and b.rows == n.rows) return .unchanged;
+        };
+        return if (next == null) .withdrawn else .declared;
+    }
+
+    /// 지금 붙어 있는 observer 들의 슬롯. `runtime get` 이 「누가 무엇을 선언했나」를 싣는다.
+    pub fn observerSlots(self: *TerminalRuntimeRegistry, id: RuntimeId) RegistryError![]const ObserverSlot {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        return entry.observers.items;
+    }
+
     fn appendObserver(allocator: std.mem.Allocator, entry: *RuntimeEntry, stream: StreamId) RegistryError!void {
-        entry.observers.append(allocator, stream) catch return error.OutOfMemory;
+        entry.observers.append(allocator, .{ .stream = stream }) catch return error.OutOfMemory;
     }
 };
 
@@ -1421,4 +1519,113 @@ test "registry: restored generation is bounded by the JSON wire counter" {
         ),
     );
     try testing.expect(registry.get(0xBB) == null);
+}
+
+test "S11-6 선언은 슬롯이 든다 — 채널이 닫히면 선언도 사라진다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 7, .observer);
+
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 7, 50, 37));
+    const declared = (try reg.observerSlots(1))[0].declared.?;
+    try testing.expectEqual(@as(u16, 50), declared.cols);
+    try testing.expectEqual(@as(u16, 37), declared.rows);
+
+    // **폰이 죽거나 전파가 끊겨 채널이 닫힌다.** 이때 선언이 어딘가에 남으면 그 세션은 영영 작은
+    // 채로 굳는다 — 전역 표로 두지 않고 슬롯에 실은 이유가 이것이다.
+    _ = try reg.detach(1, 7);
+    try testing.expectEqual(@as(usize, 0), (try reg.observerSlots(1)).len);
+
+    // 같은 stream id 가 다시 붙어도 **남의(옛) 선언을 물려받지 않는다**.
+    _ = try reg.attach(1, 7, .observer);
+    try testing.expectEqual(@as(?Viewport, null), (try reg.observerSlots(1))[0].declared);
+}
+
+test "S11-6 거둠·버림·무변화를 가른다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 7, .observer);
+
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 7, 50, 37));
+    // **폭풍을 여기서 접는다** — 회전 애니메이션·폰트 슬라이더가 같은 값을 연달아 보낸다.
+    try testing.expectEqual(DeclareViewportOutcome.unchanged, try reg.declareViewport(1, 7, 50, 37));
+    // 한 축만 달라도 새 선언이다.
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 7, 50, 40));
+
+    // **한쪽만 0 은 버린다 — 그리고 슬롯은 그대로다.** 조용히 반쪽만 받으면 그 client 는 자기가
+    // 뭘 요청했는지 모른다.
+    try testing.expectEqual(DeclareViewportOutcome.invalid, try reg.declareViewport(1, 7, 0, 40));
+    try testing.expectEqual(DeclareViewportOutcome.invalid, try reg.declareViewport(1, 7, 50, 0));
+    try testing.expectEqual(@as(u16, 50), (try reg.observerSlots(1))[0].declared.?.cols);
+    try testing.expectEqual(@as(u16, 40), (try reg.observerSlots(1))[0].declared.?.rows);
+
+    // 둘 다 0 이면 거둔다 — 붙어 있되 크기에 영향을 안 준다.
+    try testing.expectEqual(DeclareViewportOutcome.withdrawn, try reg.declareViewport(1, 7, 0, 0));
+    try testing.expectEqual(@as(?Viewport, null), (try reg.observerSlots(1))[0].declared);
+    // 거둔 뒤 또 거두는 것은 아무 일도 아니다.
+    try testing.expectEqual(DeclareViewportOutcome.unchanged, try reg.declareViewport(1, 7, 0, 0));
+}
+
+test "S11-6 선언할 수 있는 것은 붙어 있는 observer 뿐이다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 11, .controller);
+    _ = try reg.attach(1, 7, .observer);
+
+    // **controller 는 선언하지 않는다** — 제 크기를 스스로 정하는 쪽이라 알릴 대상이 없다.
+    try testing.expectError(error.NotObserver, reg.declareViewport(1, 11, 50, 37));
+    // 안 붙은 자도 못 한다.
+    try testing.expectError(error.NotObserver, reg.declareViewport(1, 99, 50, 37));
+    try testing.expectError(error.RuntimeNotFound, reg.declareViewport(2, 7, 50, 37));
+}
+
+test "S11-6 controller 인수인계가 남의 선언을 안 건드린다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 11, .controller);
+    _ = try reg.attach(1, 7, .observer);
+    _ = try reg.attach(1, 8, .observer);
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 7, 50, 37));
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 8, 44, 30));
+
+    // controller 가 물러난다 — observer 배열이 통째로 갈아 끼워지는 자리다. 선언이 평행 배열에
+    // 있었다면 여기서 조용히 어긋난다.
+    const sub = subscription_identity.SubscriptionId{ .value = 11 };
+    var prepared = try reg.prepareControllerRelease(1, sub);
+    _ = try reg.commitControllerTransition(&prepared);
+
+    const slots = try reg.observerSlots(1);
+    try testing.expectEqual(@as(usize, 3), slots.len);
+    for (slots) |slot| switch (slot.stream) {
+        7 => try testing.expectEqual(@as(u16, 50), slot.declared.?.cols),
+        8 => try testing.expectEqual(@as(u16, 44), slot.declared.?.cols),
+        // **물러난 controller 는 선언 없이 들어온다.** 여기서 뭔가 실리면 그것이 곧 자기 자신을
+        // 좁히는 선언이 된다.
+        11 => try testing.expectEqual(@as(?Viewport, null), slot.declared),
+        else => return error.UnexpectedObserver,
+    };
+}
+
+test "S11-6 준비와 커밋 사이에 온 선언은 인수인계를 무효로 만들지 않는다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 11, .controller);
+    _ = try reg.attach(1, 7, .observer);
+
+    const sub = subscription_identity.SubscriptionId{ .value = 11 };
+    var prepared = try reg.prepareControllerRelease(1, sub);
+
+    // **그 사이에 폰이 회전한다.** 이 검증이 지키는 것은 「붙거나 떨어진 자가 있는가」이지
+    // 「누가 무엇을 알렸는가」가 아니다 — 선언까지 견주면 화면 한 번 돌린 것이 controller
+    // 인수인계를 깨뜨린다.
+    try testing.expectEqual(DeclareViewportOutcome.declared, try reg.declareViewport(1, 7, 50, 37));
+
+    _ = try reg.commitControllerTransition(&prepared);
+    try testing.expectEqual(@as(?StreamId, null), reg.get(1).?.controller);
+    try testing.expectEqual(@as(usize, 2), (try reg.observerSlots(1)).len);
 }

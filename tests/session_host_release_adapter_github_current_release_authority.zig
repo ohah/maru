@@ -50,6 +50,15 @@ const Clock = struct {
         return out;
     }
 };
+const SharedDeadline = struct {
+    calls: usize = 0,
+    fail_at: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        self.calls += 1;
+        if (self.calls == self.fail_at) return error.TimedOut;
+        return 20_000 - @as(i128, @intCast(self.calls * 100));
+    }
+};
 
 const Authority = struct {
     calls: usize = 0,
@@ -87,6 +96,24 @@ const CurrentSource = struct {
             .source => out.source_commit[0] = 'f',
             .unprotected => out.protected_environment = false,
         }
+        out.owner = out;
+    }
+
+    pub fn authenticateUntil(self: *@This(), authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, _: context_mod.Context, executable: [:0]const u8, _: []const u8, response: []u8, out: anytype) !void {
+        self.calls += 1;
+        if (self.fail) return error.CurrentRejected;
+        _ = try deadline.remaining();
+        try authority.revalidate(allocator, executable);
+        const budget = try deadline.remaining();
+        _ = try executor.capture(executable, &.{"current-authority"}, &.{}, response, budget);
+        out.repository_id = expected.repository.id;
+        out.run_id = expected.build.run_id;
+        out.run_attempt = expected.build.run_attempt;
+        @memcpy(&out.source_commit, commit);
+        out.job_id = 90_618_357_140;
+        out.deployment_id = 5_659_920_000;
+        out.environment_id = 161_088_068;
+        out.protected_environment = true;
         out.owner = out;
     }
 };
@@ -250,4 +277,49 @@ test "pre-owned copy CLI replacement and deadline publish nothing" {
 
 test "every successful allocation failure unwinds without publication" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationHarness, .{});
+}
+
+test "current authority draft and tag chain share one absolute deadline" {
+    var response: [65536]u8 = undefined;
+    for ([_]usize{ 0, 1, 8 }) |depth| {
+        var source = CurrentSource{};
+        var authority = Authority{};
+        var executor = Executor{ .depth = depth };
+        var deadline = SharedDeadline{};
+        var result: composition.CurrentReleaseAuthority = .{};
+        try composition.authenticateUntilWith(&source, &authority, &executor, &deadline, std.testing.allocator, expected, candidate(), "/opt/trusted/gh", "token", &response, &result);
+        try std.testing.expectEqual((depth + 3) * 2 + 1, deadline.calls);
+        try std.testing.expectEqual(depth + 3, executor.calls);
+        for (executor.budgets[0..executor.calls], 1..) |budget, index|
+            try std.testing.expectEqual(20_000 - @as(i128, @intCast(index * 200)), budget);
+        try result.deinit();
+    }
+
+    var source = CurrentSource{};
+    var authority = Authority{};
+    var executor = Executor{ .depth = 1 };
+    var deadline = SharedDeadline{ .fail_at = 6 };
+    var result: composition.CurrentReleaseAuthority = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&source, &authority, &executor, &deadline, std.testing.allocator, expected, candidate(), "/opt/trusted/gh", "token", &response, &result));
+    try std.testing.expectEqual(@as(usize, 2), executor.calls);
+    try std.testing.expectEqual(@as(usize, 3), authority.calls);
+    try std.testing.expect(result.value() == null);
+
+    source = .{};
+    authority = .{};
+    executor = .{ .depth = 1 };
+    deadline = .{ .fail_at = 5 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&source, &authority, &executor, &deadline, std.testing.allocator, expected, candidate(), "/opt/trusted/gh", "token", &response, &result));
+    try std.testing.expectEqual(@as(usize, 2), executor.calls);
+    try std.testing.expectEqual(@as(usize, 2), authority.calls);
+    try std.testing.expect(result.value() == null);
+
+    source = .{};
+    authority = .{};
+    executor = .{ .depth = 1 };
+    deadline = .{ .fail_at = 9 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&source, &authority, &executor, &deadline, std.testing.allocator, expected, candidate(), "/opt/trusted/gh", "token", &response, &result));
+    try std.testing.expectEqual(@as(usize, 4), executor.calls);
+    try std.testing.expectEqual(@as(usize, 4), authority.calls);
+    try std.testing.expect(result.value() == null);
 }

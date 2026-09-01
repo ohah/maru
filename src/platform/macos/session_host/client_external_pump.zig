@@ -544,7 +544,7 @@ fn controlGenerationMatches(
 ) bool {
     return switch (authority) {
         .tracked => |generation| expected == generation,
-        .untracked => kind == .detach and expected == 0,
+        .untracked => !kind.requiresController() and expected == 0,
     };
 }
 pub const f3c1_contract_version: u16 = 2;
@@ -2030,7 +2030,21 @@ const PreparedWholeDrainPermit = struct {
 const ControlSemanticValue = union(enum) {
     resize: control_response_wire.ResizeReply,
     resync_ack,
+    /// 뷰포트 선언의 응답(S11-6). **의미 커밋이 없다** — host 가 슬롯에 적었다는 확인일 뿐이고,
+    /// 크기·복구 상태를 건드리지 않는다. 그래서 아래 커밋 갈래에서 아무 일도 하지 않는다.
+    declare_viewport_ack: DeclareViewportAck,
 };
+/// host 가 선언을 어떻게 받았는가.
+///
+/// **거절은 이 스트림의 끝이 아니다.** attach 는 build 가 아니라 `protocol_major`·`screen_codec`
+/// 으로 거르므로, **같은 major 의 옛 host** 에 새 client 가 붙을 수 있다. 그 host 는
+/// `runtime.declare_viewport` 를 몰라 `invalid_request` 를 낸다 — 그때 terminal 로 올리면
+/// 「폰이 회전했다」는 이유로 화면이 통째로 사라진다. 모양이 **망가진** 응답만 terminal 이다.
+const DeclareViewportAck = union(enum) {
+    accepted: control_response_wire.DeclareViewportOutcome,
+    refused,
+};
+
 const PreparedControlSemanticVerdictLifecycle = enum { empty, prepared, consumed_tombstone };
 const PreparedControlSemanticVerdict = struct {
     saved_self_addr: usize = 0,
@@ -5207,6 +5221,15 @@ fn writeControlSemanticValue(
     writer.writeU8(@intFromEnum(std.meta.activeTag(value)));
     switch (value) {
         .resync_ack => {},
+        // **결과를 봉인에 싣는다.** 안 실으면 `declared` 와 `invalid` 가 같은 봉인을 내어,
+        // 응답이 바뀌어도 무결성 검사가 알아채지 못한다. 거절도 자기 자리를 갖는다.
+        .declare_viewport_ack => |ack| {
+            writer.writeU8(@intFromEnum(std.meta.activeTag(ack)));
+            switch (ack) {
+                .accepted => |outcome| writer.writeU8(@intFromEnum(outcome)),
+                .refused => {},
+            }
+        },
         .resize => |reply| {
             writer.writeU8(@intFromEnum(std.meta.activeTag(reply)));
             switch (reply) {
@@ -9580,6 +9603,10 @@ pub const ExternalPumpStorage = struct {
             },
             .detach => self.semantic_state == .active and
                 self.semantic_state.active == .valid,
+            // **controller 자격을 안 본다.** observer 가 자기 격자를 알리는 것이라, controller
+            // 를 요구하면 이 기능이 제 목적을 잃는다(폰은 언제나 observer 다).
+            .declare_viewport => self.semantic_state == .active and
+                self.semantic_state.active == .valid,
         };
     }
 
@@ -9806,6 +9833,40 @@ pub const ExternalPumpStorage = struct {
                     scratch,
                     .runtime_ended,
                 ),
+                .declare_viewport => {
+                    const outcome = control_response_wire.decodeDeclareViewportResponse(
+                        completed_before.payload.allocator,
+                        payload,
+                        completed_before.expectation,
+                    ) catch |err| switch (err) {
+                        // **host 가 안 받는 것은 이 스트림의 끝이 아니다**(위 `DeclareViewportAck`).
+                        error.Rejected,
+                        error.RuntimeNotFound,
+                        error.ResourceExhausted,
+                        => break :decode .{ .declare_viewport_ack = .refused },
+                        error.OutOfMemory, error.Malformed => {
+                            const current = self.completedSemanticPreparationCurrent(
+                                lease,
+                                scratch,
+                                summary,
+                                completed_digest,
+                                correlation_digest,
+                                parser_seal,
+                                tx_generation,
+                            );
+                            if (!current) return .not_ready;
+                            return self.publishControlSemanticTerminalPreparation(
+                                lease,
+                                scratch,
+                                switch (err) {
+                                    error.OutOfMemory => .resource_exhausted,
+                                    else => .protocol_error,
+                                },
+                            );
+                        },
+                    };
+                    break :decode .{ .declare_viewport_ack = .{ .accepted = outcome } };
+                },
             }
         };
 
@@ -16016,13 +16077,15 @@ pub const ExternalPumpStorage = struct {
                 .resize => .resize,
                 .resync => .resync,
                 .detach => .detach,
+                .declare_viewport => .declare_viewport,
             };
             const target_stream_id = switch (spec.request) {
                 .resize => |request| request.stream_id,
                 .resync => |request| request.stream_id,
                 .detach => |request| request.stream_id,
+                .declare_viewport => |request| request.stream_id,
             };
-            if ((control_kind != .detach and authority.role != .controller) or
+            if ((control_kind.requiresController() and authority.role != .controller) or
                 authority.flow != .clear or
                 target_stream_id != self.evidence_snapshot.stream_id or
                 !controlGenerationMatches(
@@ -16071,6 +16134,11 @@ pub const ExternalPumpStorage = struct {
                     },
                 },
                 .detach => if (active != .valid) {
+                    result = .backpressure;
+                    break :control;
+                },
+                // 선언은 `detach` 와 같은 자리를 쓴다 — 화면 의미 상태가 온전할 때만 보낸다.
+                .declare_viewport => if (active != .valid) {
                     result = .backpressure;
                     break :control;
                 },
@@ -19762,6 +19830,9 @@ pub const ExternalPumpStorage = struct {
                     ) != .consumed_resync_cleaned) return false;
                 },
                 .detach => return false,
+                // **의미 커밋이 없다.** 아래 공통 회수(retire)만 돌면 된다 — 크기도 복구 상태도
+                // 안 건드리므로 kind 전용으로 할 일이 없다.
+                .declare_viewport => {},
             },
         }
         if (!self.retireCommittedControlDrainEvidence(lease, scratch))
@@ -29788,13 +29859,24 @@ test "f3c2 maximum request ID succeeds on wire then next admission emits no wire
     try std.testing.expect(posix.errno(-1) == .AGAIN);
 }
 
-test "f3c1 actual resize and resync responses prepare typed pairs" {
+test "f3c1 actual resize, resync and declare_viewport responses prepare typed pairs" {
     const cases = [_]struct {
         request_kind: client_pump.ControlKind,
         payload: []const u8,
+        expect_refused: bool = false,
     }{
         .{ .request_kind = .resize, .payload = "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}" },
         .{ .request_kind = .resync, .payload = "{\"result\":{\"resync\":true}}" },
+        // S11-6: 뷰포트 선언도 이 경로로 응답을 받는다 — observer 가 보내지만 응답 짝을 만드는
+        // 것은 resize·resync 와 같다.
+        .{ .request_kind = .declare_viewport, .payload = "{\"result\":{\"declared\":\"declared\"}}" },
+        // **같은 major 의 옛 host** 는 이 메서드를 몰라 `invalid_request` 를 낸다. 그것으로 스트림이
+        // 끝나면 폰이 회전한 것만으로 화면이 사라진다 — 짝은 만들어지되 `refused` 여야 한다.
+        .{
+            .request_kind = .declare_viewport,
+            .payload = "{\"error\":\"invalid_request\"}",
+            .expect_refused = true,
+        },
     };
     for (cases) |case| {
         var fixture = try TestClient.init();
@@ -29824,6 +29906,11 @@ test "f3c1 actual resize and resync responses prepare typed pairs" {
             // Terminal detach retires correlation when its frame is sent and never prepares a
             // response pair, so it is outside this resize/resync response-only fixture.
             .detach => unreachable,
+            .declare_viewport => .{ .declare_viewport = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 50,
+                .rows = 37,
+            } },
         };
         const result = try prepareF3c1ActualResponse(
             &storage,
@@ -29855,6 +29942,15 @@ test "f3c1 actual resize and resync responses prepare typed pairs" {
             .resize => try std.testing.expect(scratch.control_semantic_verdict.value == .resize),
             .resync => try std.testing.expect(scratch.control_semantic_verdict.value == .resync_ack),
             .detach => unreachable,
+            .declare_viewport => if (case.expect_refused)
+                try std.testing.expect(
+                    scratch.control_semantic_verdict.value.declare_viewport_ack == .refused,
+                )
+            else
+                try std.testing.expectEqual(
+                    control_response_wire.DeclareViewportOutcome.declared,
+                    scratch.control_semantic_verdict.value.declare_viewport_ack.accepted,
+                ),
         }
         try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
     }
@@ -47555,4 +47651,18 @@ test "f3c2 maximum resync correlation retires without wrap and blocks next admis
     try std.testing.expectEqual(tx_generation_before, external.tx_queue_generation);
     try std.testing.expect(std.meta.eql(request_ids_before, storage.owner_request_ids.?));
     try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+}
+
+test "S11-6 controller generation 을 모르는 client 도 선언은 보낸다" {
+    const T = std.testing;
+    // `--stream` observer 는 controller generation 을 안 들 수 있다(`untracked`). 그 상태에서
+    // 막으면 폰이 붙자마자 선언을 못 보낸다 — `detach` 가 이미 같은 이유로 열려 있다.
+    try T.expect(controlGenerationMatches(.declare_viewport, .untracked, 0));
+    try T.expect(controlGenerationMatches(.detach, .untracked, 0));
+    // **크기를 바꾸는 것은 여전히 막힌다.**
+    try T.expect(!controlGenerationMatches(.resize, .untracked, 0));
+    try T.expect(!controlGenerationMatches(.resync, .untracked, 0));
+    // generation 을 아는 client 는 값이 맞아야 한다 — 종류와 무관하다.
+    try T.expect(controlGenerationMatches(.declare_viewport, .{ .tracked = 4 }, 4));
+    try T.expect(!controlGenerationMatches(.declare_viewport, .{ .tracked = 4 }, 5));
 }

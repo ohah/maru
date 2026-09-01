@@ -203,6 +203,182 @@ pub fn parseViewport(buf: []const u8) ViewportParse {
     return .{ .frame = .{ .value = .{ .cols = cols, .rows = rows }, .consumed = viewport_frame_bytes } };
 }
 
+/// stdin 으로 들어오는 뷰포트 선언을 모아 host 로 넘기는 자리(S11-6).
+///
+/// **EOF 는 「더 이상 선언이 없다」이지 「끝내라」가 아니다.** 폰이 화면을 보내 주는 쪽(stdout)은
+/// 그대로 살아 있는데 여기서 끝내면, 선언을 한 번도 안 보내는 옛 client 가 붙자마자 죽는다.
+/// host 가 선언 하나를 받아 준 결과. `ExternalPumpOwner` 를 안 걸치고 판정할 수 있게 좁혔다.
+const ViewportAdmit = enum {
+    admitted,
+    /// 역압·경합 — **실패가 아니다.** 다음 선언이 곧 온다.
+    retry,
+    /// 이 채널로는 더 못 보낸다.
+    terminal,
+};
+
+/// 선언을 실제로 host 로 넘기는 자리. 제품은 owner 를, 판정자는 기록기를 끼운다.
+const ViewportSink = struct {
+    ctx: *anyopaque,
+    send: *const fn (ctx: *anyopaque, cols: u16, rows: u16) ViewportAdmit,
+};
+
+const ViewportInbox = struct {
+    /// 프레임 하나(8바이트)를 못 채운 조각을 든다. **두 배를 두는 이유**: 한 번의 read 가 프레임
+    /// 여럿과 잡음을 섞어 준다 — 남는 조각은 언제나 프레임 하나보다 짧으므로 이 크기면 충분하다.
+    buf: [viewport_frame_bytes * 2]u8 = undefined,
+    len: usize = 0,
+    closed: bool = false,
+    /// **보내는 데 성공한** 마지막 값. 같은 값을 다시 안 보낸다 — 회전 애니메이션·폰트 슬라이더가
+    /// 같은 선언을 연달아 낸다.
+    last: ?ViewportFrame = null,
+    /// 아직 host 가 못 받아 준 **가장 최근** 선언. **control 은 한 번에 하나만 in-flight** 라
+    /// (`prepareAdmission`: `.in_flight => .backpressure`), 폭풍에서는 첫 것만 통하고 나머지가
+    /// 전부 역압을 받는다. 그것을 버리면 세션이 **첫 값**에 굳는다 — 계약은 「다음 tick 에
+    /// 마지막 값만」이다. 그래서 최신 값 하나만 들고 다음 tick 에 다시 낸다.
+    pending: ?ViewportFrame = null,
+
+    /// 들어온 바이트를 삼키고 새 선언을 sink 로 넘긴다. **fd 도 host 도 안 걸친다.**
+    fn ingest(self: *ViewportInbox, bytes: []const u8, sink: ViewportSink) void {
+        // **닫힌 뒤에는 아무것도 안 보낸다.** 제품 루프는 `closed` 면 stdin 을 폴링에서 빼므로
+        // 여기로 바이트가 더 오지 않지만, 그 사실을 이 자리에서도 지킨다 — 닫힌 채널로 보내면
+        // pump 가 그때 죽는다.
+        if (self.closed) return;
+        var rest = bytes;
+        while (rest.len != 0) {
+            const room = self.buf.len - self.len;
+            if (room == 0) {
+                // 잡음만 오는 채널에서도 앞으로 나아간다 — 프레임 하나보다 짧은 꼬리만 남긴다.
+                const keep = viewport_frame_bytes - 1;
+                std.mem.copyForwards(u8, self.buf[0..keep], self.buf[self.len - keep ..]);
+                self.len = keep;
+            }
+            const take = @min(self.buf.len - self.len, rest.len);
+            @memcpy(self.buf[self.len..][0..take], rest[0..take]);
+            self.len += take;
+            rest = rest[take..];
+            if (!self.consume(sink)) return;
+        }
+    }
+
+    /// 버퍼에 찬 것을 프레임 단위로 소비한다. 더 보낼 수 없으면 `false`.
+    fn consume(self: *ViewportInbox, sink: ViewportSink) bool {
+        var at: usize = 0;
+        var open = true;
+        while (at < self.len) {
+            switch (parseViewport(self.buf[at..self.len])) {
+                .incomplete => break,
+                .skip => |bytes| at += bytes,
+                .frame => |f| {
+                    at += f.consumed;
+                    // **지금 «원하는» 값과 견준다** — 보낸 값이 아니라. `pending` 이 있으면 그것이
+                    // 최신 의도다. 보낸 값하고만 견주면, 되돌아온 선언이 걸러지면서 낡은 `pending`
+                    // 이 살아남아 **엉뚱한 크기로 끝난다**.
+                    if (self.pending orelse self.last) |prev|
+                        if (prev.cols == f.value.cols and prev.rows == f.value.rows) continue;
+                    if (!self.offer(f.value, sink)) {
+                        open = false;
+                        break;
+                    }
+                },
+            }
+        }
+        const left = self.len - at;
+        if (left != 0 and at != 0)
+            std.mem.copyForwards(u8, self.buf[0..left], self.buf[at..self.len]);
+        self.len = left;
+        return open;
+    }
+
+    /// 값 하나를 host 로 밀어 본다. 못 보내면 `pending` 에 남겨 다음 tick 에 다시 낸다.
+    /// 채널이 닫히면 `false`.
+    fn offer(self: *ViewportInbox, value: ViewportFrame, sink: ViewportSink) bool {
+        switch (sink.send(sink.ctx, value.cols, value.rows)) {
+            // **보낸 뒤에야 「마지막」이 된다.** 먼저 적어 두면 역압으로 못 보낸 값이 보낸 것으로
+            // 남아, 다음에 같은 값이 와도 걸러져 **영영 안 간다**.
+            .admitted => {
+                self.last = value;
+                self.pending = null;
+            },
+            // **덮어쓴다** — 마지막 값이 이겨야 한다.
+            .retry => self.pending = value,
+            .terminal => {
+                self.closed = true;
+                return false;
+            },
+        }
+        return true;
+    }
+
+    /// 다음 tick 에 밀린 선언을 다시 낸다. 없으면 아무 일도 안 한다.
+    fn flush(self: *ViewportInbox, sink: ViewportSink) void {
+        if (self.closed) return;
+        const value = self.pending orelse return;
+        // 그 사이 host 가 이미 그 값을 받았다면 보낼 것이 없다.
+        if (self.last) |prev|
+            if (prev.cols == value.cols and prev.rows == value.rows) {
+                self.pending = null;
+                return;
+            };
+        _ = self.offer(value, sink);
+    }
+
+    /// 밀린 선언을 host 로 다시 낸다(제품 경로).
+    fn retryPending(
+        self: *ViewportInbox,
+        owner: *external_pump_owner.ExternalPumpOwner,
+        stderr: *std.Io.Writer,
+    ) !void {
+        if (self.closed or self.pending == null) return;
+        var owner_sink = OwnerViewportSink{ .owner = owner };
+        self.flush(.{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
+        if (owner_sink.failed) |reason|
+            try stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)});
+    }
+
+    fn drain(
+        self: *ViewportInbox,
+        owner: *external_pump_owner.ExternalPumpOwner,
+        stderr: *std.Io.Writer,
+    ) !void {
+        var scratch: [viewport_frame_bytes * 8]u8 = undefined;
+        const n = posix.read(posix.STDIN_FILENO, &scratch) catch |err| switch (err) {
+            error.WouldBlock => return,
+            error.ConnectionResetByPeer, error.NotOpenForReading => {
+                self.closed = true;
+                return;
+            },
+            else => return err,
+        };
+        // **EOF 는 「더 이상 선언이 없다」이지 「끝내라」가 아니다.** 화면을 나르는 stdout 은
+        // 그대로 살아 있다 — 여기서 끝내면 선언을 한 번도 안 보내는 옛 client 가 붙자마자 죽는다.
+        if (n == 0) {
+            self.closed = true;
+            return;
+        }
+        var owner_sink = OwnerViewportSink{ .owner = owner };
+        self.ingest(scratch[0..n], .{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
+        if (owner_sink.failed) |reason|
+            try stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)});
+    }
+};
+
+const OwnerViewportSink = struct {
+    owner: *external_pump_owner.ExternalPumpOwner,
+    failed: ?client_pump.TerminalReason = null,
+
+    fn send(ctx: *anyopaque, cols: u16, rows: u16) ViewportAdmit {
+        const self: *OwnerViewportSink = @ptrCast(@alignCast(ctx));
+        return switch (self.owner.admitDeclareViewport(cols, rows, streamNowNs())) {
+            .admitted => .admitted,
+            .backpressure, .busy => .retry,
+            .terminal => |reason| {
+                self.failed = reason;
+                return .terminal;
+            },
+        };
+    }
+};
+
 /// stdout 으로 레코드 덩어리를 내보내는 sink. **부분 쓰기와 EPIPE 를 여기서 끝낸다** — 소비자가
 ///먼저 끊는 것은 정상 종료이고(폰이 화면을 나갔다), 그때 이 프로세스도 조용히 끝나야 한다.
 const StdoutStreamSink = struct {
@@ -301,16 +477,34 @@ fn runStreamRequest(
     // 안 보내면 첫 snapshot 뒤로 아무것도 안 오고, 조용히 멈춘 것처럼 보인다(실기에서 잡았다).
     // 규칙은 ANSI 루프(`notePumpResult`)와 같다: 권위가 확인된 턴에서만 관심사를 내린다.
     var write_interest = false;
+
+    // **stdin 은 뷰포트 선언이 들어오는 길이다**(S11-6). 이 방향은 예전에 안 쓰였다 — observer 라
+    // 입력을 안 보낸다. 선언만 이 자리를 쓴다.
+    var viewport: ViewportInbox = .{};
     while (!sink.broken) {
-        var fds = [_]posix.pollfd{.{
-            .fd = socket_fd,
-            .events = posix.POLL.IN | (if (write_interest) posix.POLL.OUT else @as(i16, 0)),
-            .revents = 0,
-        }};
+        var fds = [_]posix.pollfd{
+            .{
+                .fd = socket_fd,
+                .events = posix.POLL.IN | (if (write_interest) posix.POLL.OUT else @as(i16, 0)),
+                .revents = 0,
+            },
+            .{
+                // **닫힌 stdin 을 계속 폴링하지 않는다** — 그러면 `POLLHUP` 이 매 턴 즉시 돌아와
+                // 이 루프가 바쁘게 돈다. 닫힌 뒤에는 `-1` 로 두어 커널이 무시하게 한다.
+                .fd = if (viewport.closed) -1 else posix.STDIN_FILENO,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            },
+        };
         const ready = posix.poll(&fds, stream_poll_timeout_ms) catch |err| {
             try stderr.print("maru attach: stream poll failed ({s})\n", .{@errorName(err)});
             return .protocol;
         };
+        if (ready > 0 and fds[1].revents != 0)
+            viewport.drain(&owner, stderr) catch |err| {
+                try stderr.print("maru attach: viewport read failed ({s})\n", .{@errorName(err)});
+                return .protocol;
+            };
         // **소비자가 끊긴 것을 «쓸 때» 말고도 안다.** `broken` 은 쓰기 실패로만 섰는데, 조용한
         // 세션은 보낼 것이 없어 **한 번도 안 쓴다** — 그래서 폰이 화면을 나가도 이 프로세스가
         // 영영 살아 registry 의 observer 자리를 붙들었다(실기 2026-09-01: 고아 여섯, 부모가
@@ -331,6 +525,12 @@ fn runStreamRequest(
             StreamApplyContext.apply,
         );
         if (result.terminal != null) return .success; // host 가 끝났다 — 정상 종료다.
+        // **밀린 선언을 다음 tick 에 다시 낸다.** pump 가 한 턴 돌아 in-flight control 이 끝났을
+        // 수 있다 — 그러니 여기서 낸다. 이것이 없으면 폭풍의 마지막 값이 영영 안 간다.
+        viewport.retryPending(&owner, stderr) catch |err| {
+            try stderr.print("maru attach: viewport retry failed ({s})\n", .{@errorName(err)});
+            return .protocol;
+        };
         // 이어받은 화면 배치는 별도 경로로 한 번 더 끌어온다(ANSI 루프와 같은 순서).
         if (result.inherited_work_ready) {
             switch (owner.pumpCommittedScreen(io)) {
@@ -728,4 +928,194 @@ test "S11-6 한 번에 여러 프레임이 와도 차례로 읽는다" {
     try T.expectEqual(@as(u16, 44), seen[1]);
     // 다 읽으면 더 없다.
     try T.expect(parseViewport(rest) == .incomplete);
+}
+
+/// 판정자용 기록기 — 무엇이 host 로 갔는지, 그리고 host 가 못 받아 줄 때 어떻게 되는지 본다.
+const RecordingViewportSink = struct {
+    sent: [16]ViewportFrame = undefined,
+    count: usize = 0,
+    verdict: ViewportAdmit = .admitted,
+
+    fn send(ctx: *anyopaque, cols: u16, rows: u16) ViewportAdmit {
+        const self: *RecordingViewportSink = @ptrCast(@alignCast(ctx));
+        if (self.verdict == .admitted) {
+            self.sent[self.count] = .{ .cols = cols, .rows = rows };
+            self.count += 1;
+        }
+        return self.verdict;
+    }
+
+    fn sink(self: *RecordingViewportSink) ViewportSink {
+        return .{ .ctx = self, .send = RecordingViewportSink.send };
+    }
+};
+
+fn viewportBytes(out: []u8, cols: u16, rows: u16) []const u8 {
+    @memcpy(out[0..4], viewport_magic);
+    std.mem.writeInt(u16, out[4..6], cols, .little);
+    std.mem.writeInt(u16, out[6..8], rows, .little);
+    return out[0..viewport_frame_bytes];
+}
+
+test "S11-6 같은 선언은 한 번만 간다 — 회전·슬라이더의 폭풍을 여기서 접는다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+
+    // 값이 달라지면 다시 간다.
+    inbox.ingest(viewportBytes(&buf, 44, 30), rec.sink());
+    try T.expectEqual(@as(usize, 2), rec.count);
+    try T.expectEqual(@as(u16, 44), rec.sent[1].cols);
+
+    // 되돌아와도 간다 — 「마지막 값과 다르다」가 기준이지 「본 적 있다」가 아니다.
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    try T.expectEqual(@as(usize, 3), rec.count);
+}
+
+test "S11-6 역압으로 못 보낸 값은 다음에 다시 간다 — 영영 막히지 않는다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+
+    // host 가 지금은 못 받는다.
+    rec.verdict = .retry;
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    try T.expectEqual(@as(usize, 0), rec.count);
+
+    // **여기가 함정이다.** 못 보낸 값을 「마지막」으로 적어 두면, 폰이 같은 값을 다시 보내도
+    // 중복으로 걸러져 그 크기가 영영 안 간다 — 폰은 선언했다고 믿고 host 는 못 들은 상태로 굳는다.
+    // 같은 값이 다시 와도 지금은 «원하는 값» 과 같아 안 보내지만, 그것이 **버려진 것은 아니다** —
+    // 다음 tick 에 나간다.
+    rec.verdict = .admitted;
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    inbox.flush(rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+    try T.expectEqual(@as(u16, 50), rec.sent[0].cols);
+    try T.expectEqual(@as(u16, 37), rec.sent[0].rows);
+
+    // 나간 뒤에는 다시 안 낸다.
+    inbox.flush(rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+}
+
+test "S11-6 프레임이 조각나 와도 이어 읽고, 잡음은 건너뛴다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+    const frame = viewportBytes(&buf, 50, 37);
+
+    // 셸이 끼운 잡음 뒤에 프레임이 **한 바이트씩** 온다.
+    inbox.ingest("hello", rec.sink());
+    for (frame) |byte| inbox.ingest(&[_]u8{byte}, rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+    try T.expectEqual(@as(u16, 37), rec.sent[0].rows);
+
+    // magic 이 조각 경계에 걸쳐도 이어진다.
+    var other: [viewport_frame_bytes]u8 = undefined;
+    const next = viewportBytes(&other, 44, 30);
+    inbox.ingest(next[0..2], rec.sink());
+    inbox.ingest(next[2..], rec.sink());
+    try T.expectEqual(@as(usize, 2), rec.count);
+    try T.expectEqual(@as(u16, 44), rec.sent[1].cols);
+}
+
+test "S11-6 잡음만 쏟아져도 버퍼가 막히지 않는다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+
+    // 버퍼(16바이트)보다 훨씬 많은 잡음. 앞으로 못 나아가면 여기서 프레임을 영영 못 읽는다.
+    var noise: [256]u8 = undefined;
+    for (&noise, 0..) |*b, i| b.* = @intCast('a' + (i % 26));
+    inbox.ingest(&noise, rec.sink());
+    try T.expectEqual(@as(usize, 0), rec.count);
+
+    // 잡음 뒤에 온 진짜 프레임은 읽힌다.
+    var buf: [viewport_frame_bytes]u8 = undefined;
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+}
+
+test "S11-6 host 가 채널을 닫으면 더 안 보내고, 그 사실을 든다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+
+    rec.verdict = .terminal;
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    try T.expect(inbox.closed);
+
+    rec.verdict = .admitted;
+    inbox.ingest(viewportBytes(&buf, 44, 30), rec.sink());
+    // `closed` 면 제품 루프가 stdin 을 폴링에서 빼므로 여기로 바이트가 더 오지 않는다. 그래도
+    // 들어온다면 보내지 않는 편이 안전하다 — 닫힌 채널로 보내면 pump 가 그때 죽는다.
+    try T.expectEqual(@as(usize, 0), rec.count);
+}
+
+test "S11-6 폭풍에서 «마지막» 값이 간다 — 첫 값이 이기면 안 된다" {
+    const T = std.testing;
+    // **control 은 한 번에 하나만 in-flight 다**(`prepareAdmission`: `.in_flight => .backpressure`).
+    // 그래서 회전 애니메이션처럼 선언이 연달아 오면 첫 것만 통하고 나머지는 역압을 받는다.
+    // 그것을 그냥 버리면 세션이 **첫 값**에 굳는다 — 문서는 「다음 tick 에 마지막 값만」이다.
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+
+    inbox.ingest(viewportBytes(&buf, 60, 40), rec.sink()); // 통과
+    try T.expectEqual(@as(usize, 1), rec.count);
+
+    rec.verdict = .retry; // 이제 in-flight 라 못 받는다
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink());
+    inbox.ingest(viewportBytes(&buf, 44, 30), rec.sink());
+    try T.expectEqual(@as(usize, 1), rec.count);
+
+    // 다음 tick 에 자리가 난다. **마지막 값**이 가야 한다.
+    rec.verdict = .admitted;
+    inbox.flush(rec.sink());
+    try T.expectEqual(@as(usize, 2), rec.count);
+    try T.expectEqual(@as(u16, 44), rec.sent[1].cols);
+    try T.expectEqual(@as(u16, 30), rec.sent[1].rows);
+
+    // 보냈으면 더 보낼 것이 없다.
+    inbox.flush(rec.sink());
+    try T.expectEqual(@as(usize, 2), rec.count);
+}
+
+test "S11-6 되돌아온 선언이 낡은 밀린 값을 밀어낸다" {
+    const T = std.testing;
+    var inbox: ViewportInbox = .{};
+    var rec: RecordingViewportSink = .{};
+    var buf: [viewport_frame_bytes]u8 = undefined;
+
+    inbox.ingest(viewportBytes(&buf, 60, 40), rec.sink()); // 통과 — last = 60x40
+    try T.expectEqual(@as(usize, 1), rec.count);
+
+    rec.verdict = .retry;
+    inbox.ingest(viewportBytes(&buf, 50, 37), rec.sink()); // 밀림 — pending = 50x37
+
+    // **폰이 원래 크기로 돌아온다.** 이 값은 「보낸 값」과 같지만 「지금 원하는 값」과는 다르다.
+    // 보낸 값하고만 견주면 여기서 걸러지고, 낡은 `pending`(50x37) 이 살아남아 다음 tick 에
+    // **엉뚱한 크기**로 나간다.
+    inbox.ingest(viewportBytes(&buf, 60, 40), rec.sink());
+
+    rec.verdict = .admitted;
+    inbox.flush(rec.sink());
+
+    // host 는 이미 60x40 을 들고 있다 — 그것이 폰이 원하는 값이니 **보낼 것이 없다**.
+    try T.expectEqual(@as(usize, 1), rec.count);
+    try T.expectEqual(@as(?ViewportFrame, null), inbox.pending);
+    try T.expectEqual(@as(u16, 60), inbox.last.?.cols);
+    // **낡은 값이 나가면 안 된다.** 보낸 값하고만 견주면 여기서 50x37 이 나가고, 폰은 60x40 을
+    // 보는데 세션만 50열로 굳는다.
+    for (rec.sent[0..rec.count]) |sent|
+        try T.expect(!(sent.cols == 50 and sent.rows == 37));
 }

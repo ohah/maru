@@ -31,13 +31,17 @@ pub const Request = union(enum) {
         runtime_id: u128,
         assume_yes: bool,
     },
+    /// 「누가 무엇을 선언했나」(S11-6). **사용자가 직접 부르는 명령이 아니다** — `runtime get` 이
+    /// 뒤이어 한 번 더 부른다. `runtime.get` 응답 모양을 안 넓히려고 갈랐다(그쪽은 adopt 가 쓰는
+    /// exact 재검증이라 소비자들이 필드 수를 정확히 센다).
+    runtime_viewports: struct { runtime_id: u128 },
 
     pub fn output(self: Request) Output {
         return switch (self) {
             .host_status => |value| value,
             .runtime_list => |value| value,
             .runtime_get => |value| value.output,
-            .runtime_end => .text,
+            .runtime_end, .runtime_viewports => .text,
         };
     }
 
@@ -47,6 +51,7 @@ pub const Request = union(enum) {
             .runtime_list => "runtime.list",
             .runtime_get => "runtime.get",
             .runtime_end => "runtime.terminate",
+            .runtime_viewports => "runtime.viewports",
         };
     }
 };
@@ -161,6 +166,7 @@ pub fn paramsJson(
         .host_status, .runtime_list => null,
         .runtime_get => |value| try runtimeIdParams(allocator, value.runtime_id),
         .runtime_end => |value| try runtimeIdParams(allocator, value.runtime_id),
+        .runtime_viewports => |value| try runtimeIdParams(allocator, value.runtime_id),
     };
 }
 
@@ -227,10 +233,29 @@ pub const RuntimeMeta = struct {
     /// 상한을 넘으면 UTF-8 경계에서 자른다(host 도 같은 상한으로 자르지만, 그 값을 믿지 않는다).
     title: [host_protocol.max_title_bytes]u8 = @splat(0),
     title_len: usize = 0,
+    /// observer 들이 알린 격자(S11-6). **`runtime get` 에만 실린다** — 세션이 왜 작아졌는지
+    /// 짚으려면 「누가 무엇을 선언했나」가 있어야 한다. 상한을 넘는 것은 버리고 개수만 센다.
+    declared: [max_declared_viewports]DeclaredViewport = undefined,
+    declared_len: usize = 0,
+    /// 실제로 선언한 observer 수. `declared_len` 보다 클 수 있다(상한을 넘은 만큼).
+    declared_total: usize = 0,
 
     pub fn titleText(self: *const RuntimeMeta) []const u8 {
         return self.title[0..self.title_len];
     }
+
+    pub fn declaredViewports(self: *const RuntimeMeta) []const DeclaredViewport {
+        return self.declared[0..self.declared_len];
+    }
+};
+
+/// 한 줄에 적어 보일 만한 수. 넘으면 개수로만 알린다.
+pub const max_declared_viewports: usize = 8;
+
+pub const DeclaredViewport = struct {
+    stream_id: u64,
+    cols: u16,
+    rows: u16,
 };
 
 /// 상한 안으로 자르되 UTF-8 경계를 지킨다 — 바이트로 자르면 깨진 시퀀스를 화면에 그린다.
@@ -246,6 +271,7 @@ pub const Result = union(enum) {
     runtime_list: []RuntimeMeta,
     runtime_get: RuntimeMeta,
     runtime_end: [32]u8,
+    runtime_viewports: DeclaredViewports,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -253,8 +279,20 @@ pub const Result = union(enum) {
             .runtime_list => |items| allocator.free(items),
             .runtime_get => {},
             .runtime_end => {},
+            .runtime_viewports => {},
         }
         self.* = undefined;
+    }
+};
+
+/// 한 runtime 의 선언들. 상한을 넘는 것은 `total` 로만 센다.
+pub const DeclaredViewports = struct {
+    items: [max_declared_viewports]DeclaredViewport = undefined,
+    len: usize = 0,
+    total: usize = 0,
+
+    pub fn view(self: *const DeclaredViewports) []const DeclaredViewport {
+        return self.items[0..self.len];
     }
 };
 
@@ -298,6 +336,7 @@ pub fn decodeResponse(
             envelope.value,
             get.runtime_id,
         ) },
+        .runtime_viewports => .{ .runtime_viewports = try decodeViewports(allocator, envelope.value) },
         .runtime_end => |end| .{ .runtime_end = try decodeRuntimeEnd(
             allocator,
             envelope.value,
@@ -446,6 +485,24 @@ fn decodeRuntimeGet(
     return result;
 }
 
+fn decodeViewports(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) DecodeError!DeclaredViewports {
+    const Wire = struct {
+        result: struct { declared: []const DeclaredViewport },
+    };
+    var parsed = std.json.parseFromValue(Wire, allocator, value, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Malformed;
+    defer parsed.deinit();
+    const list = parsed.value.result.declared;
+    var out: DeclaredViewports = .{ .total = list.len };
+    out.len = @min(list.len, max_declared_viewports);
+    @memcpy(out.items[0..out.len], list[0..out.len]);
+    return out;
+}
+
 fn decodeRuntimeMeta(wire: anytype) ?RuntimeMeta {
     var meta: RuntimeMeta = .{
         .runtime_id = copyCanonicalId(wire.runtime_id) orelse return null,
@@ -492,8 +549,14 @@ pub fn render(result: Result, output: Output, writer: *std.Io.Writer) !void {
             if (items.len == 0) return writer.writeAll("No persistent runtimes.\n");
             for (items) |item| try renderRuntimeLine(item, writer);
         },
-        .runtime_get => |item| try renderRuntimeLine(item, writer),
+        .runtime_get => |item| {
+            try renderRuntimeLine(item, writer);
+            try renderDeclaredViewports(item, writer);
+        },
         .runtime_end => |runtime_id| try writer.print("Ended runtime {s}.\n", .{&runtime_id}),
+        // **혼자서는 안 그린다.** 이 결과는 `runtime get` 이 자기 줄 아래에 붙여 내는 재료다 —
+        // 따로 그리면 같은 정보가 두 모양으로 갈린다.
+        .runtime_viewports => {},
     }
 }
 
@@ -512,6 +575,23 @@ fn renderRuntimeLine(item: RuntimeMeta, writer: *std.Io.Writer) !void {
     // **없으면 자리도 안 만든다** — 빈 `title=` 을 적으면 "제목이 빈 세션" 으로 읽힌다.
     if (item.title_len > 0) try writer.print("  title={s}", .{item.titleText()});
     try writer.writeAll("\n");
+}
+
+/// 「누가 무엇을 선언했나」. **선언이 없으면 한 줄도 안 낸다** — 이 기능을 안 쓰는 세션의 출력이
+/// 예전과 같아야 한다.
+fn renderDeclaredViewports(item: RuntimeMeta, writer: *std.Io.Writer) !void {
+    if (item.declared_total == 0) return;
+    for (item.declaredViewports()) |view|
+        try writer.print(
+            "  declared stream={d} {d}x{d}\n",
+            .{ view.stream_id, view.cols, view.rows },
+        );
+    // **감춘 것을 감추지 않는다.** 상한에서 잘렸으면 몇이 안 보이는지 적는다.
+    if (item.declared_total > item.declared_len)
+        try writer.print(
+            "  declared +{d} more\n",
+            .{item.declared_total - item.declared_len},
+        );
 }
 
 fn renderJson(result: Result, writer: *std.Io.Writer) !void {
@@ -537,35 +617,54 @@ fn renderJson(result: Result, writer: *std.Io.Writer) !void {
             try writer.writeAll("]}");
         },
         .runtime_get => |item| try writeRuntimeJson(item, writer),
-        .runtime_end => return error.JsonOutputUnsupported,
+        .runtime_end, .runtime_viewports => return error.JsonOutputUnsupported,
     }
     try writer.writeByte('\n');
 }
 
 fn writeRuntimeJson(item: RuntimeMeta, writer: *std.Io.Writer) !void {
     var json: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try json.beginObject();
+    try json.objectField("runtime_id");
+    try json.write(&item.runtime_id);
+    try json.objectField("cols");
+    try json.write(item.cols);
+    try json.objectField("rows");
+    try json.write(item.rows);
+    try json.objectField("resize_generation");
+    try json.write(item.resize_generation);
+    try json.objectField("has_controller");
+    try json.write(item.has_controller);
+    try json.objectField("observer_count");
+    try json.write(item.observer_count);
     // **없으면 키도 안 낸다** — `"title":""` 은 "제목이 빈 세션" 이라는 다른 말이고, 소비자가
-    // 그것을 값으로 읽는다(폰 목록이 빈 줄을 그린다).
+    // 그것을 값으로 읽는다(폰 목록이 빈 줄을 그린다). 선언도 같은 규칙이다.
     if (item.title_len > 0) {
-        try json.write(.{
-            .runtime_id = &item.runtime_id,
-            .cols = item.cols,
-            .rows = item.rows,
-            .resize_generation = item.resize_generation,
-            .has_controller = item.has_controller,
-            .observer_count = item.observer_count,
-            .title = item.titleText(),
-        });
-    } else {
-        try json.write(.{
-            .runtime_id = &item.runtime_id,
-            .cols = item.cols,
-            .rows = item.rows,
-            .resize_generation = item.resize_generation,
-            .has_controller = item.has_controller,
-            .observer_count = item.observer_count,
-        });
+        try json.objectField("title");
+        try json.write(item.titleText());
     }
+    // **텍스트만 보여 주면 관측 구멍이다** — 스크립트가 `--json` 으로 「왜 작아졌나」를 못 읽는다.
+    if (item.declared_total > 0) {
+        try json.objectField("declared");
+        try json.beginArray();
+        for (item.declaredViewports()) |view| {
+            try json.beginObject();
+            try json.objectField("stream_id");
+            try json.write(view.stream_id);
+            try json.objectField("cols");
+            try json.write(view.cols);
+            try json.objectField("rows");
+            try json.write(view.rows);
+            try json.endObject();
+        }
+        try json.endArray();
+        // **감춘 것을 감추지 않는다** — 상한에서 잘렸으면 몇인지 기계도 알아야 한다.
+        if (item.declared_total > item.declared_len) {
+            try json.objectField("declared_total");
+            try json.write(item.declared_total);
+        }
+    }
+    try json.endObject();
 }
 
 test "runtime CLI parser exposes only implemented read commands and canonical IDs" {
@@ -877,4 +976,131 @@ test "runtime CLI response inventory bound is the shared protocol limit" {
             &remote,
         ),
     );
+}
+
+test "S11-6 runtime get 이 누가 무엇을 선언했는지 보인다" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var meta: RuntimeMeta = .{
+        .runtime_id = "000000000000000000000000000000bb".*,
+        .cols = 80,
+        .rows = 24,
+        .resize_generation = 3,
+        .has_controller = true,
+        .observer_count = 2,
+    };
+    meta.declared[0] = .{ .stream_id = 7, .cols = 50, .rows = 37 };
+    meta.declared_len = 1;
+    meta.declared_total = 1;
+    try render(.{ .runtime_get = meta }, .text, &out.writer);
+    try std.testing.expectEqualStrings(
+        "000000000000000000000000000000bb  80x24  controller=yes  observers=2  resize-generation=3\n" ++
+            "  declared stream=7 50x37\n",
+        out.written(),
+    );
+}
+
+test "S11-6 선언이 없으면 출력이 예전과 같다 — 그리고 잘린 것은 감추지 않는다" {
+    const T = std.testing;
+    {
+        var out: std.Io.Writer.Allocating = .init(T.allocator);
+        defer out.deinit();
+        const meta: RuntimeMeta = .{
+            .runtime_id = "000000000000000000000000000000bb".*,
+            .cols = 80,
+            .rows = 24,
+            .resize_generation = 0,
+            .has_controller = false,
+            .observer_count = 0,
+        };
+        try render(.{ .runtime_get = meta }, .text, &out.writer);
+        // **이 기능을 안 쓰는 세션은 한 줄도 늘지 않는다.**
+        try T.expectEqualStrings(
+            "000000000000000000000000000000bb  80x24  controller=no  observers=0  resize-generation=0\n",
+            out.written(),
+        );
+    }
+    {
+        var out: std.Io.Writer.Allocating = .init(T.allocator);
+        defer out.deinit();
+        var meta: RuntimeMeta = .{
+            .runtime_id = "000000000000000000000000000000bb".*,
+            .cols = 80,
+            .rows = 24,
+            .resize_generation = 0,
+            .has_controller = false,
+            .observer_count = 20,
+        };
+        for (0..max_declared_viewports) |i|
+            meta.declared[i] = .{ .stream_id = i + 1, .cols = 50, .rows = 37 };
+        meta.declared_len = max_declared_viewports;
+        meta.declared_total = 11;
+        try render(.{ .runtime_get = meta }, .text, &out.writer);
+        // **감춘 것을 감추지 않는다** — 상한에서 잘렸으면 몇이 안 보이는지 적는다.
+        try T.expect(std.mem.endsWith(u8, out.written(), "  declared +3 more\n"));
+    }
+}
+
+test "S11-6 --json 도 선언을 싣는다 — 텍스트만 보여 주면 스크립트가 못 읽는다" {
+    const T = std.testing;
+    {
+        var out: std.Io.Writer.Allocating = .init(T.allocator);
+        defer out.deinit();
+        var meta: RuntimeMeta = .{
+            .runtime_id = "000000000000000000000000000000bb".*,
+            .cols = 80,
+            .rows = 24,
+            .resize_generation = 3,
+            .has_controller = true,
+            .observer_count = 2,
+        };
+        meta.declared[0] = .{ .stream_id = 7, .cols = 50, .rows = 37 };
+        meta.declared_len = 1;
+        meta.declared_total = 1;
+        try render(.{ .runtime_get = meta }, .json, &out.writer);
+        try T.expectEqualStrings(
+            "{\"runtime_id\":\"000000000000000000000000000000bb\",\"cols\":80,\"rows\":24," ++
+                "\"resize_generation\":3,\"has_controller\":true,\"observer_count\":2," ++
+                "\"declared\":[{\"stream_id\":7,\"cols\":50,\"rows\":37}]}\n",
+            out.written(),
+        );
+    }
+    {
+        // 선언이 없으면 **키도 안 낸다** — 이 기능을 안 쓰는 세션의 JSON 은 예전과 같아야 한다.
+        var out: std.Io.Writer.Allocating = .init(T.allocator);
+        defer out.deinit();
+        const meta: RuntimeMeta = .{
+            .runtime_id = "000000000000000000000000000000bb".*,
+            .cols = 80,
+            .rows = 24,
+            .resize_generation = 0,
+            .has_controller = false,
+            .observer_count = 0,
+        };
+        try render(.{ .runtime_get = meta }, .json, &out.writer);
+        try T.expectEqualStrings(
+            "{\"runtime_id\":\"000000000000000000000000000000bb\",\"cols\":80,\"rows\":24," ++
+                "\"resize_generation\":0,\"has_controller\":false,\"observer_count\":0}\n",
+            out.written(),
+        );
+    }
+    {
+        // 잘렸으면 기계도 알아야 한다.
+        var out: std.Io.Writer.Allocating = .init(T.allocator);
+        defer out.deinit();
+        var meta: RuntimeMeta = .{
+            .runtime_id = "000000000000000000000000000000bb".*,
+            .cols = 80,
+            .rows = 24,
+            .resize_generation = 0,
+            .has_controller = false,
+            .observer_count = 20,
+        };
+        for (0..max_declared_viewports) |i|
+            meta.declared[i] = .{ .stream_id = i + 1, .cols = 50, .rows = 37 };
+        meta.declared_len = max_declared_viewports;
+        meta.declared_total = 11;
+        try render(.{ .runtime_get = meta }, .json, &out.writer);
+        try T.expect(std.mem.endsWith(u8, out.written(), ",\"declared_total\":11}\n"));
+    }
 }

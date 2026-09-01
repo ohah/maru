@@ -17,6 +17,7 @@ const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const reg = @import("registry.zig");
 const core_command_wire = @import("core_command_wire.zig");
+const control_response_wire = @import("control_response_wire.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const host_identity = @import("host_identity.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -1205,6 +1206,8 @@ pub const Connection = struct {
             .runtime_select_op => self.dispatchSelectOp(frame.header.request_id, params),
             .runtime_find => self.dispatchFind(frame.header.request_id, params),
             .runtime_resize => self.dispatchResize(frame.header.request_id, params),
+            .runtime_declare_viewport => self.dispatchDeclareViewport(frame.header.request_id, params),
+            .runtime_viewports => self.dispatchViewports(frame.header.request_id, params),
             .runtime_notification => self.dispatchNotification(frame.header.request_id, params),
             .notification_config_update => self.dispatchNotificationConfigUpdate(frame.header.request_id, params),
         };
@@ -2574,6 +2577,42 @@ pub const Connection = struct {
     /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
     /// 크기가 바뀔 때만 owner가 response+event 전체를 선예약한 뒤 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에
     /// 적용하고 registry를 commit한다. observer의 resize는 unauthorized, stale sequence는 `{stale:true}`.
+    /// observer 가 **자기가 그릴 수 있는 격자** 를 알린다(S11-6). controller 자격을 안 본다 —
+    /// 이 요청은 크기를 **안 바꾼다**. 무엇을 할지는 조정 규칙이 정하고, 여기서는 「누가 무엇을
+    /// 알렸나」만 그 attach 슬롯에 적는다.
+    ///
+    /// **stream 은 이 연결의 attach 표에서 찾는다.** 그래서 남의 슬롯에는 못 적고, 이 연결이
+    /// 끊기면 슬롯과 함께 선언도 사라진다.
+    fn dispatchDeclareViewport(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        _ = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
+        const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+
+        const outcome = self.registry.declareViewportSubscription(
+            sub.runtime_id,
+            sub.subscription_id,
+            cols,
+            rows,
+        ) catch |e| switch (e) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            // controller 이거나 안 붙은 자다 — 선언할 슬롯이 없다.
+            error.NotObserver => return self.replyError(request_id, .unauthorized),
+            else => return self.replyError(request_id, .internal),
+        };
+        const wire_outcome: control_response_wire.DeclareViewportOutcome = switch (outcome) {
+            .declared => .declared,
+            .withdrawn => .withdrawn,
+            .unchanged => .unchanged,
+            .invalid => .invalid,
+        };
+        const body = try self.stringify(.{ .result = .{ .declared = wire_outcome.wireName() } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
     fn dispatchResize(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         _ = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
@@ -3311,10 +3350,38 @@ pub const Connection = struct {
     /// 정확히 요구하며 fail-close** 한다("accepts only exact … envelope"). 그 strict 방어는 응답
     /// 드리프트를 잡으려고 일부러 그렇게 둔 것이라, 목록에 title 을 실으려고 그것을 느슨하게
     /// 만들지 않는다. 사람이 세션을 고르는 자리는 `runtime.list` 다(§8).
+    /// **`runtime.get` 의 모양은 안 넓힌다.** 이 응답은 adopt 가 「그 runtime 이 맞는가」를 다시
+    /// 보는 **exact 재검증** 이고(§recovery), 소비자 둘이 결과 필드 수를 **정확히 여섯으로** 센다
+    /// (`attach_product_resolver.decodeMembership`·`recovered_session_adopt`). 게다가 그 resolve
+    /// 는 build_id 를 고정하기 **전에** 도는 단계라, 여기에 필드를 하나 더하면 옛 client 가
+    /// 「denied at resolve」 대신 뜻 없는 protocol 오류로 죽는다. 뷰포트 선언은 `runtime.viewports`
+    /// 가 따로 낸다(S11-6).
     fn runtimeMetaJson(self: *Connection, entry: *reg.RuntimeEntry) HandleError![]u8 {
         const id_hex = try self.hex128(entry.id);
         defer self.allocator.free(id_hex);
         return self.stringify(.{ .result = runtimeMetaValue(id_hex, entry) });
+    }
+
+    /// 「누가 무엇을 선언했나」(S11-6). 세션이 왜 작아졌는지 사람이 짚는 자리다.
+    fn dispatchViewports(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const id_hex = if (params) |p| strField(p, "runtime_id") else null;
+        const id = if (id_hex) |h| parseHex128(h) else null;
+        if (id == null) return self.replyError(request_id, .invalid_request);
+        const slots = self.registry.observerSlots(id.?) catch |e| switch (e) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            else => return self.replyError(request_id, .internal),
+        };
+        const declared = try self.allocator.alloc(DeclaredViewportWire, slots.len);
+        defer self.allocator.free(declared);
+        var count: usize = 0;
+        for (slots) |slot| {
+            const view = slot.declared orelse continue;
+            declared[count] = .{ .stream_id = slot.stream, .cols = view.cols, .rows = view.rows };
+            count += 1;
+        }
+        const body = try self.stringify(.{ .result = .{ .declared = declared[0..count] } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
     }
 
     /// title 하나를 위해 observation 을 뜬다. **실패는 title 없음으로 접는다** — 목록 조회가
@@ -3418,6 +3485,14 @@ pub const Connection = struct {
 /// **`runtime.get` 이 쓰는 정확히 6필드 모양이다.** 그 응답의 소비자는 기계이고
 /// (`attach_product_resolver.decodeMembership`·`recovered_session_adopt`) **필드 수 6을 정확히
 /// 요구하며 fail-close** 한다. 여기에 필드를 더하면 attach 와 recovery adopt 가 함께 진다.
+/// 한 observer 가 알린 격자. **선언한 슬롯만 실린다** — 선언이 없는 observer 는 아무 영향이 없고,
+/// 빈 값으로 실으면 「0열을 선언했다」로 읽힌다.
+const DeclaredViewportWire = struct {
+    stream_id: u64,
+    cols: u16,
+    rows: u16,
+};
+
 const RuntimeMetaWire = struct {
     runtime_id: []const u8,
     cols: u16,
@@ -3692,6 +3767,8 @@ const RequestMethod = enum {
     runtime_select_op,
     runtime_find,
     runtime_resize,
+    runtime_declare_viewport,
+    runtime_viewports,
     runtime_notification,
     notification_config_update,
 
@@ -3722,6 +3799,8 @@ const RequestMethod = enum {
             .runtime_select_op => "runtime.select_op",
             .runtime_find => "runtime.find",
             .runtime_resize => "runtime.resize",
+            .runtime_declare_viewport => "runtime.declare_viewport",
+            .runtime_viewports => "runtime.viewports",
             .runtime_notification => "runtime.notification",
             .notification_config_update => "config.update",
         };
@@ -3738,7 +3817,7 @@ const RequestPolicy = enum { admin_read, admin_mutation, privileged };
 
 fn requestPolicy(method: RequestMethod) RequestPolicy {
     return switch (method) {
-        .host_info, .runtime_list, .runtime_inventory, .runtime_get => .admin_read,
+        .host_info, .runtime_list, .runtime_inventory, .runtime_get, .runtime_viewports => .admin_read,
         .runtime_terminate => .admin_mutation,
         .host_upgrade_prepare,
         .host_upgrade_status,
@@ -3760,6 +3839,7 @@ fn requestPolicy(method: RequestMethod) RequestPolicy {
         .runtime_select_op,
         .runtime_find,
         .runtime_resize,
+        .runtime_declare_viewport,
         .runtime_notification,
         .notification_config_update,
         => .privileged,
@@ -4720,7 +4800,8 @@ test "server: every canonical request method has one exhaustive admin policy" {
         if (requestPolicy(method) == .admin_read) admin_reads += 1;
         if (requestPolicy(method) == .admin_mutation) admin_mutations += 1;
     }
-    try testing.expectEqual(@as(usize, 4), admin_reads);
+    // S11-6 이 다섯 번째 admin read 를 더했다(`runtime.viewports`).
+    try testing.expectEqual(@as(usize, 5), admin_reads);
     try testing.expectEqual(@as(usize, 1), admin_mutations);
     try testing.expect(parseRequestMethod("runtime.future_method") == null);
 }
@@ -4802,7 +4883,7 @@ test "server: admin runtime end requires exact membership and preallocates succe
     try testing.expectEqual(@as(u128, 0xAA), fake.terminated_id);
 }
 
-test "server: all four admin read methods share the canonical dispatcher" {
+test "server: every admin read method shares the canonical dispatcher" {
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
     defer registry.deinit();
     const cases = [_]struct {
@@ -4817,6 +4898,10 @@ test "server: all four admin read methods share the canonical dispatcher" {
         },
         .{
             .payload = "{\"method\":\"runtime.get\",\"params\":{\"runtime_id\":\"00000000000000000000000000000001\"}}",
+            .expected = "runtime_not_found",
+        },
+        .{
+            .payload = "{\"method\":\"runtime.viewports\",\"params\":{\"runtime_id\":\"00000000000000000000000000000001\"}}",
             .expected = "runtime_not_found",
         },
     };
@@ -8174,4 +8259,81 @@ test "server: notification consumption is authorized by the exact stream subscri
     }
     try testing.expectEqual(@as(usize, 2), fake.notification_calls);
     try testing.expectEqual(@as(usize, 2), fake.notification_commit_calls);
+}
+
+/// admin 연결은 요청 하나에 `reply_and_close` 다 — 한 번 물을 때마다 새 연결이다.
+fn adminAskOnce(
+    registry: *reg.TerminalRuntimeRegistry,
+    payload: []const u8,
+    out: *[]u8,
+) !void {
+    var admission: AdminAdmission = .{};
+    var conn = Connection.init(testing.allocator, 0xAA, registry);
+    conn.admin_admission = &admission;
+    conn.host_status = .{ .manifest_capable = true };
+    defer conn.deinit();
+    const hello = try feedJson(
+        &conn,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (hello.frame) |f| f.deinit(testing.allocator);
+    const response = try feedJson(&conn, .request, 2, payload);
+    defer if (response.frame) |f| f.deinit(testing.allocator);
+    const frame = response.frame orelse return error.TestUnexpectedResult;
+    out.* = try testing.allocator.dupe(u8, frame.payload);
+}
+
+test "S11-6 서버가 선언을 받아 적고 그대로 되돌려 준다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(0xAA, 80, 24);
+    try entry.observers.append(testing.allocator, .{ .stream = 7 });
+    const ask = "{\"method\":\"runtime.viewports\",\"params\":{\"runtime_id\":\"000000000000000000000000000000aa\"}}";
+
+    // 선언이 없으면 빈 목록이다 — 「선언한 적 없음」과 「0 을 선언함」을 겹쳐 쓰지 않는다.
+    var empty: []u8 = undefined;
+    try adminAskOnce(&registry, ask, &empty);
+    defer testing.allocator.free(empty);
+    try testing.expectEqualStrings("{\"result\":{\"declared\":[]}}", empty);
+
+    // 슬롯에 적힌 선언이 그대로 실린다.
+    entry.observers.items[0].declared = .{ .cols = 50, .rows = 37 };
+    var filled: []u8 = undefined;
+    try adminAskOnce(&registry, ask, &filled);
+    defer testing.allocator.free(filled);
+    try testing.expectEqualStrings(
+        "{\"result\":{\"declared\":[{\"stream_id\":7,\"cols\":50,\"rows\":37}]}}",
+        filled,
+    );
+}
+
+test "S11-6 runtime.get 의 모양은 그대로다 — adopt 가 필드 수를 정확히 센다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(0xAA, 80, 24);
+    try entry.observers.append(testing.allocator, .{
+        .stream = 7,
+        .declared = .{ .cols = 50, .rows = 37 },
+    });
+
+    var got: []u8 = undefined;
+    try adminAskOnce(
+        &registry,
+        "{\"method\":\"runtime.get\",\"params\":{\"runtime_id\":\"000000000000000000000000000000aa\"}}",
+        &got,
+    );
+    defer testing.allocator.free(got);
+
+    // **선언이 있어도 `runtime.get` 에는 안 실린다.** 이 응답은 adopt 의 exact 재검증이고,
+    // 소비자 둘(`attach_product_resolver.decodeMembership`·`recovered_session_adopt`)이 결과
+    // 필드 수를 **정확히 여섯으로** 센다. 하나만 더 실어도 attach 가 `protocol` 로 죽는다
+    // (실기 2026-09-01: `code=protocol stage=resolve`).
+    try testing.expect(std.mem.indexOf(u8, got, "declared") == null);
+    try testing.expectEqualStrings(
+        "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"cols\":80,\"rows\":24," ++
+            "\"resize_generation\":0,\"has_controller\":false,\"observer_count\":1}}",
+        got,
+    );
 }

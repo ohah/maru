@@ -6508,11 +6508,50 @@ delta 가 먼저 도착하면 base 가 어긋나 `GenerationGap` 이 난다.
 줄어드는 동안 GUI 가 그 사실을 알린다. 무엇으로 알릴지는 chrome 의 결정이라 여기서 못박지 않되,
 **아무 신호 없이 줄이지 않는다**는 것은 이 계약의 일부다.
 
-#### 관측
+#### wire — client → host 의 두 번째 다리
 
-`maru runtime get` 이 지금 크기와 함께 **누가 무엇을 선언했는지**와 **기준 크기**를 싣는다. 셋이
-같이 있어야 「왜 작아졌나」와 「떨어지면 어디로 돌아가나」를 한 번에 읽는다. 하나라도 빠지면
-사람이 원인을 못 짚는다.
+폰이 stdin 으로 보낸 `MRSV` 는 `maru attach --stream` 이 읽는다. 그 프로세스가 host **데몬**에
+전하는 다리가 하나 더 필요하고, 그것은 **attach 를 든 그 연결**로만 갈 수 있다 — 서버는 stream 을
+그 연결의 attach 표에서 찾으므로, 다른 연결로 부르면 남의 슬롯을 건드릴 수 있게 되고 슬롯 수명
+규칙(채널이 닫히면 선언도 사라진다)이 깨진다.
+
+그래서 기존 control 어휘(`resize`·`resync`·`detach`)에 **`declare_viewport` 하나를 더한다**.
+`detach` 와 같은 급이다 — **controller 자격을 안 본다**. observer 가 보낼 수 있는 control 이 이제
+둘이므로, 흩어진 `!= .detach` 조건 대신 `ControlKind.requiresController()` 하나가 답한다.
+
+**거절은 스트림의 끝이 아니다.** attach 는 build 가 아니라 `protocol_major`·`screen_codec` 으로
+거른다(build_id 를 맞추는 것은 **앱이 host 를 재사용할 때**인 `findCurrentManifestHost` 다). 그리고
+**새 메서드를 더할 때 major 를 올리지 않는 것이 이 wire 의 명시된 관례다** — `protocol.zig` 가
+`runtime.spawn_full` 을 두고 그렇게 적어 두었다: 「구 v2 host 가 unknown method 로 거부하게 한다.
+major 를 올리면 이미 살아 있는 v2 host/runtime 에도 attach 할 수 없다」. 즉 **같은 major 의 옛
+host 에 새 client 가 붙는 것은 사고가 아니라 계약이 예상하는 경우**이고, 그 host 는 이 메서드를
+몰라 `invalid_request` 를 낸다. 그 응답을 terminal 로 올리면 **「폰이 회전했다」는 이유로 화면이 통째로
+사라진다**(적대적 검증 2회차). 그래서 거절·`runtime_not_found`·자원 고갈은 **조용한 확인**으로 접고,
+모양이 **망가진** 응답만 terminal 이다. wire 의 「알 수 없는 magic 은 버리되 끊지 않는다」와 같은
+규율을 한 층 아래에서도 지키는 것이다.
+
+**밀린 선언은 다음 tick 에 다시 낸다.** control 은 **한 번에 하나만 in-flight** 라, 회전 애니메이션
+처럼 선언이 연달아 오면 첫 것만 통하고 나머지가 전부 역압을 받는다. 그것을 버리면 세션이 **첫
+값**에 굳어 「마지막 값만 적용」이 뒤집힌다(적대적 검증 1회차). client 는 아직 못 보낸 **가장 최근**
+값 하나만 들고 다음 tick 에 다시 낸다 — 그리고 새로 온 선언은 「보낸 값」이 아니라 **「지금 원하는
+값」**(밀린 값이 있으면 그것)과 견줘 중복을 가른다. 보낸 값하고만 견주면 폰이 원래 크기로 돌아올 때
+그 선언이 걸러지고 **낡은 밀린 값이 살아남아** 엉뚱한 크기로 끝난다.
+
+#### 관측 — `runtime.get` 은 안 넓힌다
+
+`runtime.get` 의 응답 모양은 **못 넓힌다**. 그것은 adopt 가 「그 runtime 이 맞는가」를 다시 보는
+**exact 재검증**이고, 소비자 둘(`attach_product_resolver.decodeMembership`·`recovered_session_adopt`)
+이 결과 필드 수를 **정확히 여섯으로** 센다. 게다가 그 resolve 는 build_id 를 고정하기 **전에**
+도는 단계라, 필드를 하나 더하면 옛 client 가 「denied at resolve」 대신 뜻 없는 protocol 오류로
+죽는다(실기 2026-09-01: 필드를 더했더니 `code=protocol stage=resolve` 로 attach 가 통째로 막혔다).
+
+그래서 선언은 **`runtime.viewports`** 라는 별도 admin read 가 낸다. `maru runtime get` 명령은 그것을
+한 번 더 물어 자기 줄 아래에 붙여 낸다 — 사람이 읽는 자리는 하나다. **그 조회의 실패는 「선언이
+없다」로 접는다**: 부가 정보 때문에 `runtime get` 이 통째로 지면 안 되고, 이 명령을 모르는 옛
+host 에 붙으면 실제로 그렇게 된다.
+
+지금 크기와 **누가 무엇을 선언했는지**와 **기준 크기**가 같이 있어야 「왜 작아졌나」와 「떨어지면
+어디로 돌아가나」를 한 번에 읽는다. 하나라도 빠지면 사람이 원인을 못 짚는다.
 
 attach client의 기본 local escape는 2-key chord `Ctrl-\`, `d`다. `Ctrl-\`, `Ctrl-\`는 literal `Ctrl-\` 하나를
 runtime input으로 보낸다. 일반 키는 지연 없이 binary input frame으로 전달하며 escape 첫 키만 짧은 chord timeout을 가진다.

@@ -121,6 +121,19 @@ pub const ControlKind = enum {
     resize,
     resync,
     detach,
+    declare_viewport,
+
+    /// **controller 자격이 있어야 보낼 수 있는가.** observer 도 보낼 수 있는 것이 둘이다 —
+    /// 떨어지겠다는 `detach`, 그리고 자기가 그릴 수 있는 격자를 알리는 `declare_viewport`
+    /// (S11-6: client 는 «알릴» 뿐 mutation 을 부르지 않는다). 부정 조건을 늘려 적지 않고
+    /// 여기서 한 번에 답한다 — 갈래가 늘 때마다 흩어진 `!= .detach` 를 전부 찾아야 하면
+    /// 하나를 빠뜨린다.
+    pub fn requiresController(self: ControlKind) bool {
+        return switch (self) {
+            .resize, .resync => true,
+            .detach, .declare_viewport => false,
+        };
+    }
 };
 
 pub const AuthorityState = union(enum) {
@@ -1595,4 +1608,14 @@ test "client pump terminal outcomes expose no poll interest" {
     try std.testing.expect(!expired.read_interest);
     try std.testing.expect(!expired.write_interest);
     try std.testing.expect(!expired.control_ready);
+}
+
+test "S11-6 observer 가 보낼 수 있는 control 은 detach 와 declare_viewport 둘뿐이다" {
+    const T = std.testing;
+    // **이 표가 곧 정책이다.** 폰은 언제나 observer 라, 선언에 controller 자격을 요구하면 기능이
+    // 통째로 죽는다 — 그런데 그 실패는 「선언이 그냥 안 먹는다」로만 보여서 눈에 안 띈다.
+    try T.expect(ControlKind.resize.requiresController());
+    try T.expect(ControlKind.resync.requiresController());
+    try T.expect(!ControlKind.detach.requiresController());
+    try T.expect(!ControlKind.declare_viewport.requiresController());
 }

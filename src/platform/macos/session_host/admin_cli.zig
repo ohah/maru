@@ -86,8 +86,53 @@ pub fn runRequest(
 
     var result_call = try callCurrent(allocator, exe, base, request, stderr, stdout, null);
     defer result_call.result.deinit(allocator);
+    // **`runtime get` 은 한 번 더 묻는다**(S11-6): 「누가 무엇을 선언했나」. `runtime.get` 의 응답
+    // 모양은 adopt 가 쓰는 exact 재검증이라 넓히지 못한다 — 그래서 별도 조회다.
+    if (request == .runtime_get) {
+        if (tryViewports(allocator, exe, base, request.runtime_get.runtime_id)) |declared| {
+            result_call.result.runtime_get.declared_len = declared.len;
+            result_call.result.runtime_get.declared_total = declared.total;
+            @memcpy(
+                result_call.result.runtime_get.declared[0..declared.len],
+                declared.view(),
+            );
+        }
+    }
     try runtime_cli.render(result_call.result, request.output(), stdout);
     try stdout.flush();
+}
+
+/// **실패는 「선언이 없다」로 접는다.** 이 조회는 부가 정보라, 이것 때문에 `runtime get` 이 통째로
+/// 지면 안 된다 — 이 명령을 모르는 옛 host 에 붙으면 실제로 그렇게 된다.
+fn tryViewports(
+    allocator: std.mem.Allocator,
+    exe: [:0]const u8,
+    base: []const u8,
+    runtime_id: u128,
+) ?runtime_cli.DeclaredViewports {
+    var client = switch (admin_client.connectCurrent(allocator, exe, base)) {
+        .connected => |value| value,
+        .unavailable => return null,
+    };
+    defer client.deinit();
+    const request: runtime_cli.Request = .{ .runtime_viewports = .{ .runtime_id = runtime_id } };
+    const params = runtime_cli.paramsJson(allocator, request) catch return null;
+    defer if (params) |owned| allocator.free(owned);
+    const payload = client.call(request.method(), params) catch return null;
+    defer allocator.free(payload);
+    var remote: ?runtime_cli.RemoteError = null;
+    var decoded = runtime_cli.decodeResponse(
+        allocator,
+        request,
+        payload,
+        null,
+        &remote,
+    ) catch return null;
+    defer decoded.deinit(allocator);
+    return switch (decoded) {
+        .runtime_viewports => |value| value,
+        else => null,
+    };
 }
 
 const CallResult = struct {

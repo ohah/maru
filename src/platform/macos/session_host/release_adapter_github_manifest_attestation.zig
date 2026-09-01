@@ -9,7 +9,6 @@ const manifest_file = @import("release_adapter_github_manifest_file");
 const deadline_mod = @import("release_adapter_deadline");
 
 pub const Error = error{ InvalidPredecessor, FileChanged, InvalidOwner };
-pub const TrustedContext = context.Context;
 
 pub const AuthenticatedManifest = struct {
     owner: ?*AuthenticatedManifest = null,
@@ -46,7 +45,6 @@ const RealAuthority = struct {
 pub fn authenticate(
     io: std.Io,
     allocator: std.mem.Allocator,
-    trusted_context: TrustedContext,
     predecessor: manifest.Predecessor,
     bytes: []const u8,
     file: *const manifest_file.ManifestFile,
@@ -58,13 +56,12 @@ pub fn authenticate(
 ) !void {
     var authority = RealAuthority{ .pinned = cli.pinned };
     var executor = attestation.BoundedExecutor{ .io = io };
-    return authenticateWith(&authority, &executor, allocator, trusted_context, predecessor, bytes, file, cli.path, token, output, budget_ns, result);
+    return authenticateWith(&authority, &executor, allocator, predecessor, bytes, file, cli.path, token, output, budget_ns, result);
 }
 
 pub fn authenticateUntil(
     io: std.Io,
     allocator: std.mem.Allocator,
-    trusted_context: TrustedContext,
     predecessor: manifest.Predecessor,
     bytes: []const u8,
     file: *const manifest_file.ManifestFile,
@@ -80,14 +77,13 @@ pub fn authenticateUntil(
         return error.InvalidOwner;
     var authority = RealAuthority{ .pinned = cli.pinned };
     var executor = attestation.BoundedExecutor{ .io = io };
-    return authenticateUntilWith(&authority, &executor, deadline, allocator, trusted_context, predecessor, bytes, file, cli.path, token, output, result);
+    return authenticateUntilWith(&authority, &executor, deadline, allocator, predecessor, bytes, file, cli.path, token, output, result);
 }
 
 pub fn authenticateWith(
     authority: anytype,
     executor: anytype,
     allocator: std.mem.Allocator,
-    trusted_context: TrustedContext,
     predecessor: manifest.Predecessor,
     bytes: []const u8,
     file: *const manifest_file.ManifestFile,
@@ -98,7 +94,7 @@ pub fn authenticateWith(
     result: *AuthenticatedManifest,
 ) !void {
     var fixed = FixedBudget{ .value = budget_ns };
-    return authenticateUntilWith(authority, executor, &fixed, allocator, trusted_context, predecessor, bytes, file, executable, token, output, result);
+    return authenticateUntilWith(authority, executor, &fixed, allocator, predecessor, bytes, file, executable, token, output, result);
 }
 
 pub fn authenticateUntilWith(
@@ -106,7 +102,6 @@ pub fn authenticateUntilWith(
     executor: anytype,
     deadline: anytype,
     allocator: std.mem.Allocator,
-    trusted_context: TrustedContext,
     predecessor: manifest.Predecessor,
     bytes: []const u8,
     file: *const manifest_file.ManifestFile,
@@ -117,15 +112,21 @@ pub fn authenticateUntilWith(
 ) !void {
     const deadline_bytes = std.mem.asBytes(deadline);
     const result_bytes = std.mem.asBytes(result);
-    if (aliasesInputs(deadline_bytes, trusted_context, predecessor, bytes, file, executable, token, output, result, true) or
-        aliasesInputs(result_bytes, trusted_context, predecessor, bytes, file, executable, token, output, result, false))
+    if (aliasesInputs(deadline_bytes, predecessor, bytes, file, executable, token, output, result, true) or
+        aliasesInputs(result_bytes, predecessor, bytes, file, executable, token, output, result, false))
         return error.InvalidOwner;
     if (result.owner != null or result.parsed != null or result.observed != null) return error.InvalidOwner;
     var parsed = try manifest.parseCanonical(allocator, bytes);
     errdefer parsed.deinit();
     const candidate = parsed.value();
-    context.bindManifest(trusted_context, candidate.*) catch return error.InvalidPredecessor;
-    if (!trusted_context.protected_tag) return error.InvalidPredecessor;
+    const candidate_context: context.Context = .{
+        .repository = candidate.repository,
+        .tag = candidate.release.tag,
+        .source_commit = candidate.source.commit,
+        .build = candidate.build,
+        .protected_tag = false,
+    };
+    context.bindManifest(candidate_context, candidate.*) catch return error.InvalidPredecessor;
     const before = file.revalidate() catch return error.FileChanged;
     var name_storage: [manifest.max_asset_name_bytes]u8 = undefined;
     const expected_name = std.fmt.bufPrint(&name_storage, "Maru-{s}-session-host-release.json", .{candidate.release.version}) catch return error.InvalidPredecessor;
@@ -140,9 +141,10 @@ pub fn authenticateUntilWith(
         !std.mem.eql(u8, before.sha256, predecessor.manifest_sha256) or
         !std.mem.eql(u8, std.fs.path.basename(before.path), expected_name)) return error.InvalidPredecessor;
     const expected: attestation.Expected = .{
-        .context = trusted_context,
+        .context = candidate_context,
         .subject_name = expected_name,
         .subject_sha256 = predecessor.manifest_sha256,
+        .tag_protection = .historical_unavailable,
     };
     _ = try deadline.remaining();
     try authority.revalidate(allocator, executable);
@@ -166,7 +168,6 @@ const FixedBudget = struct {
 
 fn aliasesInputs(
     candidate: []const u8,
-    trusted_context: TrustedContext,
     predecessor: manifest.Predecessor,
     bytes: []const u8,
     file: *const manifest_file.ManifestFile,
@@ -181,11 +182,6 @@ fn aliasesInputs(
         rangesOverlap(candidate, bytes) or rangesOverlap(candidate, executable) or
         rangesOverlap(candidate, token) or rangesOverlap(candidate, output)) return true;
     inline for (.{
-        trusted_context.repository.owner,
-        trusted_context.repository.name,
-        trusted_context.tag,
-        trusted_context.source_commit,
-        trusted_context.build.workflow_ref,
         predecessor.tag,
         predecessor.commit,
         predecessor.manifest_sha256,

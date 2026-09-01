@@ -1100,6 +1100,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied owner와 allocation/command 실패의 publication 0·observation cleanup을 검증한다. 이 gate만으로 release `verify`/
   `verify-asset`, compatibility, final `release_manifest.Observation`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  전체 pre-publish phase가 호출하는 executable entrypoint `composeUntil`은 앞 단계에서 시작한 final-address `Deadline` pointer를
+  그대로 받는다. 각 role은 같은 deadline을 private filesystem과 CLI authority 재검증 전에 확인하고, 두 재검증이 끝난 뒤 다시
+  확인해 얻은 fresh remaining만 attestation child budget으로 전달한다. role별 시작 시각·expiry를 만들거나 앞에서 읽은 remaining을
+  재사용하지 않는다. current/result preflight 실패는 deadline·filesystem·CLI·child 접근 0이고, 재검증 중 만료는 해당 child와 뒤 role
+  실행 0, 이미 얻은 observation 전부 cleanup, publication 0으로 닫힌다. 세 role을 모두 검증한 뒤에도
+  결과 owner를 게시하기 직전 같은 deadline을 확인하며, 이 때 만료하면 세 observation을 모두 cleanup하고
+  publication 0을 유지한다. 기존 budget entrypoint는 독립 leaf gate 호환용으로 남는다. focused gate는 세 role의 exact
+  deadline object identity, 늘어나지 않는 fresh child budget, 중간·최종 만료와 product wrapper compile을 Debug·ReleaseFast에서
+  검증한다. Apple product·compatibility `...Until` 이관과 전체 owner는 후속 범위다.
+
   frozen executable compatibility observation의 단일 소유자는
   `src/platform/macos/session_host/release_adapter_github_current_compatibility.zig`다. 입력은 authenticated
   `CurrentManifestInput` B, final-address `CurrentProduct`, caller의 frozen executable absolute pathname과 단일 positive monotonic

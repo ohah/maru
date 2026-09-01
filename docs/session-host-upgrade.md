@@ -1324,6 +1324,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   이 transaction gate는 각 leaf의 의미 검증을 복제하지 않으며 production adapter 타입 배선과 signed frozen U5 E2E는 별도 gate가
   소유한다.
 
+  production pre-publish execution owner는
+  `src/platform/macos/session_host/release_adapter_pre_publish_product.zig`의 final-address `Execution`이다. executable bootstrap의
+  exact `pre_publish` command/context/pinned CLI, validated borrowed token, positive phase budget, caller-owned bounded buffers와 Apple
+  transport storage만 입력으로 받고 transaction의 각 step을 기존 production `...Until` entrypoint에 직접 연결한다. `Execution` storage는
+  bootstrap/token/context/command/buffer/Apple storage와 겹칠 수 없으며 이 alias preflight는 deadline·filesystem·child보다 먼저다. workspace의
+  다섯 child pathname 외 경로를 만들지 않으며 current manifest/evidence/DMG/frozen executable/summary pathname은 bootstrap command
+  외 scalar 입력으로 다시 받지 않는다. private cleanup 뒤 `validatePublication`이 `Execution` 자체가 소유한 live deadline만
+  받아 fresh remaining을 확인하며 foreign/expired deadline은 publication 0으로 거부하고,
+  deadline cleanup 뒤 무효 capability를 summary publisher에 넘기지 않는다. 성공하면 모든 private owner와 deadline을 비우고 summary 하나만 남긴다. ordinary 실패도
+  cleanup 성공 뒤 empty execution으로 돌아가며, cleanup 실패 때만 live child owner와 cleanup용 allocator context를 같은 caller-owned
+  `Execution`에 보존한다. token/bootstrap/buffer/Apple storage/budget borrow는 실패 즉시 지운다. caller는 `retryCleanup`으로 foreign entry를 지우지 않은 채 남은 owner들을 다시 정리해야 하며 그 전에는
+  execution을 재사용하거나 summary 성공으로 처리할 수 없다. focused product gate는 invalid/copied/pre-owned execution의 side effect
+  0, exact production type surface, transaction delegation, owned deadline의 foreign/expiry 거부, 성공/ordinary-failure empty state와 cleanup-failure retry state를
+  Debug·ReleaseFast에서 검증한다. 실제 GitHub/Apple child 성공은 release workflow wiring과 frozen U5 E2E가 소유한다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

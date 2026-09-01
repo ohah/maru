@@ -1807,6 +1807,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   B가 A를 소비할 때는 이 post-publish release attestation까지 필수다. 공개 뒤 검증 실패는 asset 교체나 `--clobber`로
   복구하지 않고 그 release를 실패 기록으로 보존한 채 새 version으로 다시 출하한다.
 
+  draft release ID의 최초 권위는 shell의 `gh release create` stdout이나 caller scalar가 아니다.
+  `release_adapter_github_draft_creation.zig`의 final-address move-only `DraftAuthority`가 단일 소유자다. trusted context와 checkout 전
+  pin한 CLI, validated token, 같은 release phase `Deadline`만 받아 exact repository endpoint에 mutable draft를 한 번 생성한다.
+  closed request는 exact tag, source commit, title, `draft=true`, `prerelease=false`, release-note generation만 전달하며 caller가 endpoint,
+  method, field name 또는 기존 release ID를 고르지 못한다. CLI authority와 deadline은 child 전후에 재검증하고 bounded response는
+  strict JSON으로 parse해 nonzero ID, exact tag/source/title, draft/prerelease/immutable state를 current context와 결속한다. 이미 존재하는
+  release, duplicate/missing/wrong-type field, foreign target, child failure, timeout, copied/pre-owned result는 authority publication 0이다.
+  child가 성공을 반환한 뒤 로컬 parsing·publication이 실패하면 remote draft가 남을 수 있으므로 자동 재생성·기존 release 재사용·삭제로
+  성공을 합성하지 않는다. strict response에서 ID까지 결속한 뒤의 로컬 publication 실패는 exact created ID를 보존한
+  terminal cleanup-required 상태로, 응답이 malformed이거나 ID 결속 전에 allocation이 실패한 경우는 ID를 추측하지 않는
+  terminal remote-state-unknown 상태로 workflow를 멈추고 사람이 감사한 뒤 처리한다.
+  focused gate `test-session-host-release-adapter-github-draft-creation`은 exact mutation argv, clean environment, response binding,
+  shared deadline, CLI drift, remote-created 뒤 local failure의 비재시도 상태와 allocation fail-index를 Debug·ReleaseFast에서 검증한다.
+  이 owner가 생기기 전에는 evidence/manifest authoring이나 validator workflow 배선을 완료했다고 주장하지 않는다.
+
   이 순서의 policy도 manifest parser와 같은 `release_manifest.zig`가 typed `PublicationObservation`으로 단일 소유하며,
   외부 공개 진입점 `parseAndValidatePublication`이 canonical manifest/evidence와 publication transcript를 함께 판정한다.
   관측은 trusted tag push·protected tag/environment·third-party Action pin 여부, fork PR/`pull_request_target`/임의 ref와

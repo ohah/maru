@@ -2723,6 +2723,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   Debug·ReleaseFast actual filesystem+injected attestor에서 distinct inode/cap/execute bit, exact order와 감소 budget, copied/pre-owned owner,
   path/context/subject mutation, 중간·최종 expiry, partial observation/OOM unwind의 publication 0을 검증한다. draft 생성과 post-draft release
   ID 결속, Apple product/evidence/manifest/workflow는 후속 gate다.
+  `release_adapter_github_draft_creation.zig`는 checkout 전 pinned CLI와 trusted context를 사용해 exact repository release endpoint에
+  mutable draft를 한 번 생성하고 response의 nonzero ID·tag·target source·title·draft/prerelease/immutable state를 final-address
+  `DraftAuthority`로 결속한다. mutation endpoint/method/fields는 closed vocabulary이며 기존 release 재사용, caller-provided ID,
+  재시도와 `--clobber`는 금지한다. remote create 뒤 local parse/OOM이 실패하면 성공이나 부재를 가장하지 않고, ID 결속 뒤에는
+  exact created-ID cleanup-required를, 결속 전에는 ID 없는 remote-state-unknown terminal을 남긴다. focused gate는 Debug·ReleaseFast에서 exact argv/environment/deadline/CLI revalidation,
+  malformed/drift/existing/child failure, copied owner와 allocation fail-index를 검증한다. 실제 GitHub mutation 성공, evidence/manifest
+  authoring, draft asset attach와 publish는 후속 workflow gate가 소유한다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

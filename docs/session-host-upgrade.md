@@ -822,6 +822,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   검증한다. 이 composition은 repository/run/environment/deployment 관측, checkout 전 capture 자체, release workflow wiring과
   frozen U5 제품 E2E를 대신하지 않는다.
 
+  predecessor asset composition의 executable `composeUntil`은 tag-chain과 같은 final-address `Deadline` pointer를 받는다.
+  기존 `downloadAllWith`, release `verify`, 세 `verify-asset`의 parser·filesystem owner·cleanup 순서는 바꾸지 않고, 공통 guarded
+  executor가 각 command마다 같은 deadline을 CLI 재검증 전후 확인한다. child에는 두 번째 fresh remaining만 전달하며 leaf가 받은
+  원래 budget scalar나 앞 command remaining을 재사용하지 않는다. 외부 capture output은 result/authenticated owner,
+  CLI path/token/workdir와 tag/ref observation storage 어느 것과도 겹칠 수 없다. authenticated/result/alias preflight 실패는 deadline·CLI·child 접근
+  0이고, 어느 command 재검증 중 만료해도 후속 child 0, download directory residue 0, publication 0으로 닫힌다. 모든
+  download/release/asset attestation과 tag resolver 수렴 후에도 guarded executor의 publication gate가 같은 deadline을 한 번 더
+  확인한다. 만료하면 owned download set을 cleanup하고 directory residue 0과 result publication 0을 유지한다. 기존
+  budget entrypoint는 독립 leaf gate 호환용으로 남는다. focused predecessor-assets gate는 7개 command의 exact deadline
+  identity와 command 전후 14회+publication 1회 확인, 늘어나지 않는 budget, result/token/workdir alias 0-call,
+  중간·최종 만료 cleanup, product wrapper
+  compile을 Debug·ReleaseFast actual filesystem에서 검증한다.
+
   Current GitHub authority composition은 실행 프로세스에서 이미 strict parse된 `release_adapter_context.Context`와 checkout 전
   pin된 CLI를 받아 repository → workflow run → `release` environment → attempt jobs → source/tag/environment deployments 순서로
   closed REST request를 실행한다. 각 request 직전에 CLI pathname authority를 재검증하고 최초 positive monotonic absolute

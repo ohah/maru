@@ -97,6 +97,51 @@ pub const Manifest = struct {
     predecessor: ?Predecessor = null,
 };
 
+/// Returns whether caller-controlled mutable storage overlaps the manifest value or any backing
+/// allocation referenced by it. The schema owns this exhaustive inventory so compositions cannot
+/// drift when a field is added.
+pub fn aliasesStorage(value: *const Manifest, candidate: []const u8) bool {
+    if (rangesOverlap(candidate, std.mem.asBytes(value))) return true;
+    inline for (.{
+        value.schema,
+        value.repository.owner,
+        value.repository.name,
+        value.release.tag,
+        value.release.version,
+        value.source.commit,
+        value.source.tree,
+        value.build.workflow_ref,
+        value.signing.bundle_id,
+        value.signing.bundle_short_version,
+        value.signing.bundle_version,
+        value.signing.team_id,
+        value.signing.designated_requirement_sha256,
+        value.signing.notarization,
+        value.evidence.test_uuid,
+        value.evidence.summary_name,
+        value.evidence.summary_sha256,
+        value.evidence.result,
+    }) |bytes| if (rangesOverlap(candidate, bytes)) return true;
+    if (rangesOverlap(candidate, std.mem.sliceAsBytes(value.signing.architectures)) or
+        rangesOverlap(candidate, std.mem.sliceAsBytes(value.assets))) return true;
+    for (value.signing.architectures) |architecture|
+        if (rangesOverlap(candidate, architecture)) return true;
+    for (value.assets) |asset|
+        if (rangesOverlap(candidate, asset.name) or rangesOverlap(candidate, asset.sha256)) return true;
+    if (value.predecessor) |predecessor| {
+        inline for (.{ predecessor.tag, predecessor.commit, predecessor.manifest_sha256 }) |bytes|
+            if (rangesOverlap(candidate, bytes)) return true;
+    }
+    return false;
+}
+
+fn rangesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_end = std.math.add(usize, @intFromPtr(left.ptr), left.len) catch return true;
+    const right_end = std.math.add(usize, @intFromPtr(right.ptr), right.len) catch return true;
+    return @intFromPtr(left.ptr) < right_end and @intFromPtr(right.ptr) < left_end;
+}
+
 pub const Parsed = struct {
     inner: std.json.Parsed(Manifest),
 
@@ -308,6 +353,7 @@ pub fn parseCanonical(allocator: std.mem.Allocator, bytes: []const u8) ParseErro
     var inner = std.json.parseFromSlice(Manifest, allocator, bytes, .{
         .duplicate_field_behavior = .@"error",
         .ignore_unknown_fields = false,
+        .allocate = .alloc_always,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,

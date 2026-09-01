@@ -19,6 +19,7 @@ const darwin = @cImport({
 pub const max_dmg_bytes = release_files.max_release_asset_bytes;
 pub const max_path_bytes: usize = 4 * 1024;
 pub const max_args: usize = 7;
+pub const cleanup_budget_ns: i128 = 4 * std.time.ns_per_min;
 pub const ArgsStorage = [max_args][]const u8;
 const command_output_bytes: usize = 16 * 1024;
 
@@ -272,6 +273,80 @@ pub fn observe(
     );
 }
 
+/// Runs product-admission commands against one absolute phase deadline. Once a mount exists,
+/// detach is the only command allowed to use the separate bounded cleanup reserve.
+pub fn observeUntil(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    candidate_path: [:0]const u8,
+    work_path: [:0]const u8,
+    expected: ExpectedDmg,
+    expected_version: []const u8,
+    apple_storage: *apple_transport.Storage,
+    deadline: anytype,
+) !apple_product.Observed {
+    var system = SystemOps{ .io = io };
+    var apple_runner = AppleRunner{ .io = io };
+    return observeUntilInner(allocator, io, &system, &apple_runner, candidate_path, work_path, expected, expected_version, apple_storage, deadline);
+}
+
+pub fn observeUntilWithForTest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ops: anytype,
+    apple_runner: anytype,
+    candidate_path: [:0]const u8,
+    work_path: [:0]const u8,
+    expected: ExpectedDmg,
+    expected_version: []const u8,
+    apple_storage: *apple_transport.Storage,
+    deadline: anytype,
+) !apple_product.Observed {
+    if (!builtin.is_test) @compileError("deadline-aware DMG authority seam is test-only");
+    return observeUntilInner(allocator, io, ops, apple_runner, candidate_path, work_path, expected, expected_version, apple_storage, deadline);
+}
+
+fn observeUntilInner(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ops: anytype,
+    apple_runner: anytype,
+    candidate_path: [:0]const u8,
+    work_path: [:0]const u8,
+    expected: ExpectedDmg,
+    expected_version: []const u8,
+    apple_storage: *apple_transport.Storage,
+    deadline: anytype,
+) !apple_product.Observed {
+    const GuardedOps = struct {
+        inner: @TypeOf(ops),
+        deadline: @TypeOf(deadline),
+
+        fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
+            return self.inner.capture(executable, args, environment, output, try self.deadline.remaining());
+        }
+
+        fn captureCleanup(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
+            return self.inner.capture(executable, args, environment, output, cleanup_budget_ns);
+        }
+
+        fn probe(self: *@This(), path: []const u8) !MountProbe {
+            return self.inner.probe(path);
+        }
+    };
+    const GuardedAppleRunner = struct {
+        inner: @TypeOf(apple_runner),
+        deadline: @TypeOf(deadline),
+
+        pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
+            return self.inner.capture(executable, args, environment, output, try self.deadline.remaining());
+        }
+    };
+    var guarded_ops = GuardedOps{ .inner = ops, .deadline = deadline };
+    var guarded_apple = GuardedAppleRunner{ .inner = apple_runner, .deadline = deadline };
+    return observeWith(allocator, io, &guarded_ops, &guarded_apple, candidate_path, work_path, expected, expected_version, apple_storage, 1);
+}
+
 /// Actual hdiutil/filesystem E2E만 Apple command 의미를 대체한다. 제품 artifact가 이 seam을 호출하면 컴파일을 막는다.
 pub fn observeWithAppleRunnerForTest(
     allocator: std.mem.Allocator,
@@ -507,7 +582,11 @@ fn detachAndCleanup(ops: anytype, staged: *Staged, device: []const u8, baseline:
     var args: ArgsStorage = undefined;
     var output: [command_output_bytes]u8 = undefined;
     const detach = try planDetachTarget(&args, device);
-    _ = ops.capture(detach.executable, detach.args, &.{}, &output, budget_ns) catch return error.DetachFailed;
+    const capture = if (@hasDecl(@TypeOf(ops.*), "captureCleanup"))
+        ops.captureCleanup(detach.executable, detach.args, &.{}, &output, budget_ns)
+    else
+        ops.capture(detach.executable, detach.args, &.{}, &output, budget_ns);
+    _ = capture catch return error.DetachFailed;
     const after = ops.probe(staged.mountPath()) catch return error.DetachFailed;
     if (!sameFilesystem(baseline, after)) return error.DetachFailed;
     staged.cleanup(true) catch return error.CleanupFailed;

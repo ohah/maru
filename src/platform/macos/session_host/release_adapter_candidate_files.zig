@@ -7,6 +7,8 @@ const attestation_mod = @import("release_adapter_candidate_attestation");
 const draft_mod = @import("release_adapter_github_draft_creation");
 const identity = @import("release_adapter_identity");
 
+pub const max_tag_bytes = context_mod.max_value_bytes;
+
 pub const Paths = attestation_mod.Paths;
 pub const BuildView = struct { workflow_ref: []const u8, run_id: u64, run_attempt: u64 };
 pub const View = struct { release_id: u64, tag: []const u8, source_commit: []const u8, build: BuildView, dmg: files.ExecutableObservation, frozen: files.ExecutableObservation };

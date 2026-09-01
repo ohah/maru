@@ -22,21 +22,30 @@ const predecessor_valid =
     \\ "draft":false,"prerelease":false,"immutable":true,"assets":[]}
 ;
 
+fn collection(storage: []u8, value: []const u8) ![]const u8 {
+    if (value.len + 2 > storage.len) return error.NoSpaceLeft;
+    storage[0] = '[';
+    @memcpy(storage[1 .. value.len + 1], value);
+    storage[value.len + 1] = ']';
+    return storage[0 .. value.len + 2];
+}
+
 test "draft and immutable published release responses bind exact identity and state" {
-    var draft = try github_release.parseAndBind(std.testing.allocator, draft_valid, draft_expected);
-    defer draft.deinit();
-    try std.testing.expectEqual(draft_expected.id, draft.observation().id);
-    try std.testing.expectEqualStrings(draft_expected.tag, draft.observation().tag);
-    try std.testing.expectEqual(github_release.Publication.draft, draft.observation().publication);
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseAndBind(std.testing.allocator, draft_valid, draft_expected));
+    const draft_collection = "[" ++ predecessor_valid ++ "," ++ draft_valid ++ "]";
+    var listed_draft = try github_release.parseDraftCollectionAndBind(std.testing.allocator, draft_collection, draft_expected);
+    defer listed_draft.deinit();
+    try std.testing.expectEqual(draft_expected.id, listed_draft.observation().id);
+    try std.testing.expectEqualStrings(draft_expected.tag, listed_draft.observation().tag);
 
     const draft_without_optional_immutable =
         \\{"id":91,"tag_name":"v1.2.3",
         \\ "target_commitish":"0123456789abcdef0123456789abcdef01234567",
         \\ "draft":true,"prerelease":false}
     ;
-    var compatible_draft = try github_release.parseAndBind(
+    var compatible_draft = try github_release.parseDraftCollectionAndBind(
         std.testing.allocator,
-        draft_without_optional_immutable,
+        "[" ++ draft_without_optional_immutable ++ "]",
         draft_expected,
     );
     compatible_draft.deinit();
@@ -54,7 +63,7 @@ test "response cap is enforced before parsing" {
     const oversized = " " ** (github_release.max_response_bytes + 1);
     try std.testing.expectError(
         error.ResponseTooLarge,
-        github_release.parseAndBind(std.testing.allocator, oversized, draft_expected),
+        github_release.parseDraftCollectionAndBind(std.testing.allocator, oversized, draft_expected),
     );
 }
 
@@ -71,7 +80,7 @@ test "malformed missing wrong-type duplicate and trailing JSON fail closed" {
         draft_valid ++ "null",
     };
     for (cases, 0..) |bytes, index| {
-        if (github_release.parseAndBind(std.testing.allocator, bytes, draft_expected)) |parsed_value| {
+        if (github_release.parseDraftCollectionAndBind(std.testing.allocator, bytes, draft_expected)) |parsed_value| {
             var parsed = parsed_value;
             parsed.deinit();
             std.debug.print("unexpected accepted invalid JSON case {d}\n", .{index});
@@ -89,9 +98,10 @@ test "zero and foreign release identity fail closed" {
         "{\"id\":91,\"tag_name\":\"v9.9.9\",\"target_commitish\":\"0123456789abcdef0123456789abcdef01234567\",\"draft\":true,\"prerelease\":false,\"immutable\":false}",
     };
     for (cases) |bytes| {
+        var storage: [1024]u8 = undefined;
         try std.testing.expectError(
             error.ReleaseMismatch,
-            github_release.parseAndBind(std.testing.allocator, bytes, draft_expected),
+            github_release.parseDraftCollectionAndBind(std.testing.allocator, try collection(&storage, bytes), draft_expected),
         );
     }
 
@@ -102,15 +112,35 @@ test "zero and foreign release identity fail closed" {
     for (invalid_expected) |expected| {
         try std.testing.expectError(
             error.ReleaseMismatch,
-            github_release.parseAndBind(std.testing.allocator, draft_valid, expected),
+            github_release.parseDraftCollectionAndBind(std.testing.allocator, "[" ++ draft_valid ++ "]", expected),
         );
     }
     const oversized_tag = "v" ++ ("1" ** github_release.max_response_bytes) ++ ".2.3";
-    try std.testing.expectError(error.ReleaseMismatch, github_release.parseAndBind(std.testing.allocator, draft_valid, .{
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(std.testing.allocator, "[" ++ draft_valid ++ "]", .{
         .id = draft_expected.id,
         .tag = oversized_tag,
         .publication = .draft,
     }));
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(
+        std.testing.allocator,
+        "[" ++ predecessor_valid ++ "]",
+        draft_expected,
+    ));
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(
+        std.testing.allocator,
+        "[" ++ draft_valid ++ "," ++ draft_valid ++ "]",
+        draft_expected,
+    ));
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(
+        std.testing.allocator,
+        "[" ++ draft_valid ++ ",{\"id\":91,\"tag_name\":\"v9.9.9\",\"draft\":true,\"prerelease\":false}]",
+        draft_expected,
+    ));
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(
+        std.testing.allocator,
+        "[" ++ draft_valid ++ ",{\"id\":92,\"tag_name\":\"v1.2.3\",\"draft\":true,\"prerelease\":false}]",
+        draft_expected,
+    ));
 }
 
 test "draft prerelease and immutable state mismatches fail closed" {
@@ -120,9 +150,10 @@ test "draft prerelease and immutable state mismatches fail closed" {
         "{\"id\":91,\"tag_name\":\"v1.2.3\",\"target_commitish\":\"0123456789abcdef0123456789abcdef01234567\",\"draft\":true,\"prerelease\":false,\"immutable\":true}",
     };
     for (cases) |bytes| {
+        var storage: [1024]u8 = undefined;
         try std.testing.expectError(
             error.ReleaseMismatch,
-            github_release.parseAndBind(std.testing.allocator, bytes, draft_expected),
+            github_release.parseDraftCollectionAndBind(std.testing.allocator, try collection(&storage, bytes), draft_expected),
         );
     }
 
@@ -151,6 +182,11 @@ test "every successful allocation is covered by fail-index testing" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         github_release.parseAndBindForTest,
-        .{ draft_valid, draft_expected },
+        .{ predecessor_valid, github_release.Expected{ .id = 73, .tag = "v1.1.0", .publication = .published_immutable } },
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        github_release.parseDraftCollectionAndBindForTest,
+        .{ "[" ++ predecessor_valid ++ "," ++ draft_valid ++ "]", draft_expected },
     );
 }

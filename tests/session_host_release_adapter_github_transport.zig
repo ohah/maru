@@ -13,7 +13,6 @@ test "GitHub transport closes every scalar endpoint" {
     const cases = [_]struct { request: transport.Request, expected: []const u8 }{
         .{ .request = .repository, .expected = "repos/ohah/maru" },
         .{ .request = .{ .workflow_run = 333 }, .expected = "repos/ohah/maru/actions/runs/333" },
-        .{ .request = .{ .draft_release = "v1.2.3" }, .expected = "repos/ohah/maru/releases/tags/v1.2.3" },
         .{ .request = .{ .published_release = "v1.2.3" }, .expected = "repos/ohah/maru/releases/tags/v1.2.3" },
         .{ .request = .{ .tag_ref = "v1.2.3" }, .expected = "repos/ohah/maru/git/ref/tags/v1.2.3" },
         .{ .request = .{ .annotated_tag = sha }, .expected = "repos/ohah/maru/git/tags/" ++ sha },
@@ -30,6 +29,11 @@ test "GitHub transport closes every scalar endpoint" {
 
 test "GitHub transport closes collection queries and flattening" {
     const cases = [_]struct { request: transport.Request, expected: []const u8, shape: transport.PageShape }{
+        .{
+            .request = .draft_releases,
+            .expected = "repos/ohah/maru/releases?per_page=100",
+            .shape = .array,
+        },
         .{
             .request = .{ .attempt_jobs = .{ .run_id = 333, .attempt = 2 } },
             .expected = "repos/ohah/maru/actions/runs/333/attempts/2/jobs?per_page=100",
@@ -59,7 +63,7 @@ test "GitHub transport rejects noncanonical identity before argv construction" {
     var storage: transport.EndpointStorage = undefined;
     try std.testing.expectError(error.InvalidId, transport.plan(&storage, .{ .workflow_run = 0 }));
     try std.testing.expectError(error.InvalidId, transport.plan(&storage, .{ .attempt_jobs = .{ .run_id = 1, .attempt = 0 } }));
-    try std.testing.expectError(error.InvalidTag, transport.plan(&storage, .{ .draft_release = "v1.2.3/extra" }));
+    try std.testing.expectError(error.InvalidTag, transport.plan(&storage, .{ .published_release = "v1.2.3/extra" }));
     try std.testing.expectError(error.InvalidSha, transport.plan(&storage, .{ .annotated_tag = "ABC" }));
 }
 

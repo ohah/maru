@@ -8149,6 +8149,82 @@ shaper_cache_same: judgeable=true glyphs=3 built true/false equal=true via_fallb
   `via_fallback` 이 선다. 한글 face 가 없는 Windows 에서는 **빨개진다** — 그때 `via_fallback=false` 가
   이유를 그대로 말하므로 조용히 공허해지는 것보다 낫다(그것이 이 자리를 그렇게 둔 이유다).
 
+### 2m.108 게이트가 **상시 빨갰다** — 그물이 찢어져 있으면 진짜 실패가 안 보인다 (실측 2026-09-01)
+
+Windows 러너는 두지 않기로 했다(계획서). 그러면 **로컬 `mise run check` 가 유일한 그물**인데, 그것을
+돌려 보니 13 개가 항상 빨갰다. 그 잡음 속에서 §2m.106(복사가 깨진 것)을 손으로 골라내야 했고,
+같은 회차에 i18n 원장 실패 하나는 **놓쳤다**(초록 줄만 세는 필터로 봤다 — CI 가 잡았다).
+
+> **상시 빨간 게이트는 게이트가 아니다.** 「빨갛다」가 정보를 안 주면 사람은 그것을 안 본다.
+
+## 무엇이 빨갰나 — 세어 봤다
+
+`mise run check` 를 통째로 받아 실패만 추렸다(13 개, 네 갈래):
+
+| 갈래 | 수 | 원인 |
+|---|---|---|
+| `tests/session_host_release_adapter_*` (5 종 × Debug·ReleaseFast) | 10 | `bounded_process.zig` 의 `fork`·`kill` — POSIX 전용 |
+| `tools/check-agent-hook-command.sh` | 1 | 로그 파일이 `0600` 인지 보는데 NTFS 에서는 `rw-r--r--` |
+| `tests/e2e/headless.zig` | 1 | `argv` 에 `/bin/sh` 를 박아 놨다 → `FileNotFound` |
+| `src/syntax/tree_sitter.zig` | 1 | `std.c.clock_gettime` — POSIX 전용 |
+
+## 규칙은 이미 있었다 — 40 자리가 그것을 안 따랐을 뿐이다
+
+`build.zig` 에 이 문장이 이미 적혀 있다(2026 이전, Windows 실측까지 함께):
+
+> L4 테스트가 기본 `test` 그래프에 무조건 걸려 있으면 macOS 밖에서는 **중립 레이어의 회귀를 볼 방법이
+> 없다** — 빌드가 L4 에서 먼저 죽어 중립 테스트까지 못 간다.
+
+그 자리에 `macos_host_tests` 게이트가 있고, session_host 테스트 **40 개 중 하나**만 그것을 쓰고 있었다.
+나머지 39 는 나중에 추가되며 게이트 없이 걸렸다.
+
+**그런데 `macos_host_tests` 를 그대로 쓰면 안 된다.** 그 술어는 Linux 도 거르는데, session_host L4 는
+Linux 에서 **컴파일되고 CI 의 `check` job 이 실제로 그것들을 돌린다** — 조이면 오늘 돌고 있는 커버리지가
+사라진다. 여기서 막으려는 것은 그것이 아니라 *"Windows 에서 컴파일 실패로 먼저 죽는다"* 하나다.
+그래서 한 칸 느슨한 짝을 세웠다:
+
+```zig
+const posix_host_tests = target.result.os.tag != .windows;
+```
+
+40 자리를 그것으로 감쌌다. **전용 step 은 그대로다** — `zig build test-session-host…` 로 부르면
+Windows 에서도 그대로 돌고, 그때는 왜 안 되는지가 곧바로 보인다(숨기는 것이 아니라 **기본 그래프에서
+빼는** 것이다).
+
+**값을 치렀다 — 얼마인지 재 두었다.** Windows 의 `mise run check` 에서 테스트 아티팩트가
+**52 → 26**, 그 안의 통과 판정이 **1649 → 1477** 이 된다(실측). 잃은 172 개는 session_host 의
+JSON 파싱·매니페스트 검증 같은 **순수 로직**이고, Linux CI 의 `check` job 이 PR 마다 그것을 전부
+돌린다 — 즉 Windows 에서 또 도는 것의 한계 가치는 0 에 가깝고, 덫이 돌아오는 값은 이번에 겪은 그대로다.
+**주 테스트 바이너리는 그대로다**(3958 passed — 이 게이트가 안 건드린다).
+
+> 더 아끼고 싶으면 실패하는 5 개 root 만 거는 길도 있다. 그러면 172 개를 지키는 대신 **다음에
+> POSIX 호출 하나가 더해지는 순간 같은 자리가 다시 빨개진다** — 그리고 그것을 더하는 사람에게는
+> Windows 를 생각할 이유가 없다. 그래서 묶음으로 걸었다.
+
+## 셋은 고치고 하나는 보고한다
+
+- **e2e 는 고쳤다.** `/bin/sh` 를 박은 자리를 호스트로 갈랐다(`cmd.exe /c echo`). 이 층이 재는 것
+  — *"진짜 프로세스의 바이트가 코어를 지나 화면이 된다"* — 은 Windows 에서도 재야 할 사실이라
+  **끄지 않고 옮겼다.** `cmd` 는 CRLF 를 내지만 CR 은 코어가 캐리지 리턴으로 먹어 화면 글자는 같다.
+- **훅 스크립트는 그 한 줄만 건너뛴다.** POSIX 모드가 없는 호스트(MSYS/MinGW/Cygwin)에서 `ls -l` 은
+  `chmod`·`umask` 를 안 비춘다 — 그 자리는 셸 검사로 **증명할 수도 반증할 수도 없다.** 나머지 검사
+  아홉은 그대로 돈다. **`ok` 가 아니라 `SKIP` 으로 적는다**: 안 잰 것을 초록으로 세면 다음 사람이
+  「여기는 지켜진다」로 읽는다.
+- **`src/syntax/tree_sitter.zig` 는 보고만 한다.** 중립 파일이 `std.c.clock_gettime` 을 직접 부른다
+  (`monotonicNs`) — 이 저장소의 다른 모든 자리는 `std.Io.Clock.awake.now(io)` 를 쓰고, `std.time` 에는
+  0.16 에서 시계가 없다(상수뿐 — 확인했다). 즉 **호출자가 `io` 를 준다**가 이 저장소의 사실상 규칙이고,
+  그걸 따르려면 `tree_sitter.zig` 와 호출자 두 자리(`app_session/editor_syntax.zig`)의 서명이 바뀐다.
+  macOS 게이트를 여기서 못 돌리므로 **결정과 함께 사용자에게 올린다.**
+
+  **지금 제품에는 영향이 없다** — Windows 제품은 `syntax` 를 아예 안 쓴다(`grep` 실측 0 건).
+  **W8.17(편집기)이 그 자리를 밟는다.**
+
+## 남은 하나를 왜 그냥 안 껐나
+
+끌 수는 있다(`posix_host_tests` 를 그 타깃에도 걸면 된다). 하지만 그것은 **중립 레이어**의 테스트라,
+끄는 순간 Windows 에서 중립 회귀를 못 보게 된다 — 이 절이 고치려던 바로 그 문제를 한 칸 옮기는 것뿐이다.
+그래서 **빨간 채로 남기고 이름을 붙였다.**
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

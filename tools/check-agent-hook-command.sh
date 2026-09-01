@@ -79,6 +79,17 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 # 돌고 있었다), 그러면 «몇 개가 도는지»를 아무도 믿지 않게 된다.
 checks=0
 pass() { checks=$((checks + 1)); echo "  ok  $1"; }
+# **건너뛴 것은 초록이 아니다.** 안 잰 검사를 `ok` 로 적으면 다음 사람이 «여기는 지켜진다» 로 읽는다.
+# 그래서 세지 않고 다른 낱말로 적는다.
+skip() { echo "  SKIP $1"; }
+
+# 이 호스트가 POSIX 파일 권한을 갖는가. Git Bash/MSYS 는 NTFS 위라 `chmod`·`umask` 가 `ls -l` 에
+# 반영되지 않는다(실측: `umask 022` 로 돌린 커맨드의 결과가 `rw-r--r--` 로 보인다 — 커맨드가
+# `umask 077` 을 하든 말든 같다). 그 자리는 **셸 검사로 증명할 수도 반증할 수도 없다.**
+posix_modes=yes
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) posix_modes=no ;;
+esac
 
 payload='{"hook_event_name":"Stop","session_id":"s1","last_assistant_message":"끝"}'
 
@@ -93,12 +104,18 @@ pass "append 형식"
 echo "1b) 로그 파일 권한이 0600 이다 — payload 에 소스와 명령 원문이 실린다"
 # **넉넉한 umask 에서 돌린다.** 기본 umask 가 이미 077 인 환경에서 돌리면 커맨드에 `umask` 가 없어도
 # 통과해 검사가 아무것도 증명하지 못한다(같은 함정을 동시 append 검사에서 한 번 겪었다).
-rm -f "$evdir/9.ndjson"
-printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=9 /bin/sh -c "umask 022; $cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
-mode=$(ls -l "$evdir/9.ndjson" | cut -c2-10)
-[ "$mode" = "rw-------" ] || fail "로그 파일 권한이 rw------- 여야 하는데 $mode 다(umask 가 빠졌다)"
-rm -f "$evdir/9.ndjson"
-pass "로그 파일 권한(넉넉한 umask 에서도 0600)"
+if [ "$posix_modes" = no ]; then
+  # **«안 된다» 가 아니라 «못 잰다» 다.** Windows 에서 이 성질이 지켜지는지는 이 게이트가 답할 수
+  # 없다 — 답하려면 ACL 을 봐야 하고, 그것은 훅 커맨드의 계약을 다시 정하는 일이다(보고만 한다).
+  skip "로그 파일 권한 — 이 호스트에 POSIX 모드가 없다(Windows 에서 지켜지는지는 **안 쟀다**)"
+else
+  rm -f "$evdir/9.ndjson"
+  printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=9 /bin/sh -c "umask 022; $cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
+  mode=$(ls -l "$evdir/9.ndjson" | cut -c2-10)
+  [ "$mode" = "rw-------" ] || fail "로그 파일 권한이 rw------- 여야 하는데 $mode 다(umask 가 빠졌다)"
+  rm -f "$evdir/9.ndjson"
+  pass "로그 파일 권한(넉넉한 umask 에서도 0600)"
+fi
 
 echo "2) pane 식별자가 없으면 아무것도 쓰지 않고 0 으로 끝난다"
 printf '%s\n' "$payload" | env -u MARU_HOOK_PANE MARU_HOOK_INSTANCE=$inst /bin/sh -c "$cmd" || fail "가드 경로가 0 으로 끝나지 않았다"

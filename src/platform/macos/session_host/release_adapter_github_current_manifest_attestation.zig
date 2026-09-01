@@ -84,12 +84,8 @@ pub fn authenticateWith(attestor: anytype, authority: anytype, executor: anytype
     errdefer parsed.deinit();
     const candidate = parsed.value();
     context_mod.bindManifest(context, candidate.*) catch return error.InvalidManifest;
+    current.bindManifest(candidate.*) catch return error.InvalidCurrent;
     const current_view = current.value() orelse return error.InvalidCurrent;
-    if (candidate.role != .b or candidate.predecessor == null or
-        current_view.repository_id != candidate.repository.id or current_view.run_id != candidate.build.run_id or
-        current_view.run_attempt != candidate.build.run_attempt or !std.mem.eql(u8, current_view.source_commit, candidate.source.commit) or
-        current_view.release_id != candidate.release.id or !std.mem.eql(u8, current_view.tag, candidate.release.tag) or
-        !current_view.protected_environment) return error.InvalidCurrent;
     const before = file.revalidate() catch return error.FileChanged;
     var name_storage: [manifest.max_asset_name_bytes]u8 = undefined;
     const name = std.fmt.bufPrint(&name_storage, "Maru-{s}-session-host-release.json", .{candidate.release.version}) catch return error.InvalidManifest;

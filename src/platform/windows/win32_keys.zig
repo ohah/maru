@@ -204,6 +204,26 @@ pub fn isCopyChord(ev: input.KeyEvent) bool {
     return ev.modifiers.command and ev.modifiers.shift;
 }
 
+/// 이 키가 **목록을 굴리는 넷** 중 하나인가(`PageUp`/`PageDown`/`Home`/`End`).
+///
+/// **수식키가 하나라도 붙으면 아니다** — `⌘Home` 같은 조합은 다른 주인이 있다
+/// (docs/key-input-and-shortcuts.md 의 순서표). 여기서 안 거르면 목록이 그 조합까지 삼킨다.
+///
+/// **소유권은 안 본다.** *"도크가 지금 키를 들고 있는가"* 는 호출자의 상태다. 그것을 여기로 끌고 오면
+/// 이 규칙이 순수하지 않게 되고, 그러면 판정할 자리가 **이벤트 루프뿐**이 된다 — 지금은 아래 단위
+/// 테스트가 넷과 수식키 가드를 직접 잰다.
+pub fn listScrollStep(ev: input.KeyEvent) ?maru.chrome.ui.scroll_area.KeyStep {
+    if (ev.modifiers.command or ev.modifiers.control or ev.modifiers.option or ev.modifiers.shift)
+        return null;
+    return switch (ev.key) {
+        .page_up => .page_up,
+        .page_down => .page_down,
+        .home => .home,
+        .end => .end,
+        else => null,
+    };
+}
+
 // ── IME 조합 문자열 변환 ─────────────────────────────────────────────────────────────────────
 
 /// IME 조합 문자열(UTF-16LE)을 UTF-8로 옮긴다. 담을 수 있는 만큼만 쓰고 **쓴 바이트 수**를 돌려준다.
@@ -283,6 +303,25 @@ test "isCopyChord: 붙여넣기와 같은 자리에서 판정한다" {
     // 복사와 붙여넣기가 서로를 삼키지 않는다.
     try testing.expect(!isCopyChord(.{ .key = .{ .char = 'v' }, .modifiers = .{ .command = true, .shift = true } }));
     try testing.expect(!isPasteChord(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true, .shift = true } }));
+}
+
+test "listScrollStep: 넷만 · 수식키가 붙으면 아니다" {
+    try testing.expectEqual(maru.chrome.ui.scroll_area.KeyStep.page_up, listScrollStep(.{ .key = .page_up, .modifiers = .{} }).?);
+    try testing.expectEqual(maru.chrome.ui.scroll_area.KeyStep.page_down, listScrollStep(.{ .key = .page_down, .modifiers = .{} }).?);
+    try testing.expectEqual(maru.chrome.ui.scroll_area.KeyStep.home, listScrollStep(.{ .key = .home, .modifiers = .{} }).?);
+    try testing.expectEqual(maru.chrome.ui.scroll_area.KeyStep.end, listScrollStep(.{ .key = .end, .modifiers = .{} }).?);
+
+    // 그 밖의 키는 목록의 것이 아니다 — 화살표까지 가져가면 셸의 히스토리 이동을 잃는다.
+    try testing.expect(listScrollStep(.{ .key = .arrow_up, .modifiers = .{} }) == null);
+    try testing.expect(listScrollStep(.{ .key = .enter, .modifiers = .{} }) == null);
+    try testing.expect(listScrollStep(.{ .key = .{ .char = 'g' }, .modifiers = .{} }) == null);
+
+    // **수식키 넷 다 막는다.** 하나라도 새면 그 조합의 주인이 목록에 먹힌다.
+    try testing.expect(listScrollStep(.{ .key = .end, .modifiers = .{ .command = true } }) == null);
+    try testing.expect(listScrollStep(.{ .key = .end, .modifiers = .{ .control = true } }) == null);
+    try testing.expect(listScrollStep(.{ .key = .end, .modifiers = .{ .option = true } }) == null);
+    // `Shift+PageUp` 은 스크롤백의 것이다(설정과 무관하게 — key-input 문서의 그 줄).
+    try testing.expect(listScrollStep(.{ .key = .page_up, .modifiers = .{ .shift = true } }) == null);
 }
 
 test "compositionTextFromUtf16: 한글 조합이 UTF-8 3바이트로 온다" {

@@ -43,16 +43,6 @@ fn candidate() manifest.Manifest {
     };
 }
 
-fn trustedContext() composition.TrustedContext {
-    return .{
-        .repository = .{ .id = 12345, .owner = "ohah", .name = "maru" },
-        .tag = "v1.2.3",
-        .source_commit = commit,
-        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 333, .run_attempt = 2 },
-        .protected_tag = true,
-    };
-}
-
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
@@ -130,7 +120,7 @@ fn expectCandidateRejected(value: manifest.Manifest, file_name: []const u8) !voi
     var executor = Never{};
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try std.testing.expectError(error.InvalidPredecessor, composition.authenticateWith(&authority, &executor, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.InvalidPredecessor, composition.authenticateWith(&authority, &executor, std.testing.allocator, .{
         .release_id = value.release.id,
         .tag = value.release.tag,
         .commit = value.source.commit,
@@ -145,7 +135,7 @@ fn authenticateAllocationCase(allocator: std.mem.Allocator, bytes: []const u8, s
     var executor = Attesting{ .sha = sha };
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try composition.authenticateWith(&authority, &executor, allocator, trustedContext(), .{
+    try composition.authenticateWith(&authority, &executor, allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -170,7 +160,7 @@ test "predecessor cross-binding rejects release drift before attestation" {
     var authority = Authority{};
     var output: [1024]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try std.testing.expectError(error.InvalidPredecessor, composition.authenticateWith(&authority, &fake, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.InvalidPredecessor, composition.authenticateWith(&authority, &fake, std.testing.allocator, .{
         .release_id = 78,
         .tag = "v1.2.3",
         .commit = commit,
@@ -199,7 +189,7 @@ test "manifest revalidation detects content drift before attestation" {
     var authority = Authority{};
     var output: [1024]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &fake, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &fake, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -210,7 +200,7 @@ test "manifest revalidation detects content drift before attestation" {
     try std.testing.expectEqual(@as(c_int, 0), c.chmod(observed_z.ptr, 0o400));
     try tmp.dir.rename("work", tmp.dir, "owned-work", std.testing.io);
     try tmp.dir.createDir(std.testing.io, "work", .default_dir);
-    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &fake, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &fake, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -238,7 +228,7 @@ test "exact authority and attestation publish one authenticated manifest" {
     var executor = Attesting{ .sha = &sha };
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try composition.authenticateWith(&authority, &executor, std.testing.allocator, trustedContext(), .{
+    try composition.authenticateWith(&authority, &executor, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -270,7 +260,7 @@ test "shared deadline brackets CLI attestation and final publication" {
     var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result);
+    try composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result);
     try std.testing.expectEqual(@as(usize, 3), deadline.cursor);
     try std.testing.expectEqual(@as(i128, 70), executor.budget_ns);
     try result.deinit(std.testing.allocator);
@@ -278,7 +268,7 @@ test "shared deadline brackets CLI attestation and final publication" {
     authority = .{};
     executor = .{ .sha = &sha };
     deadline = .{ .values = &.{ 100, 70, 0 } };
-    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
     try std.testing.expectEqual(@as(usize, 1), authority.calls);
     try std.testing.expectEqual(@as(usize, 1), executor.calls);
     try std.testing.expect(result.value() == null);
@@ -286,7 +276,7 @@ test "shared deadline brackets CLI attestation and final publication" {
     authority = .{};
     executor = .{ .sha = &sha };
     deadline = .{ .values = &.{ 100, 0 } };
-    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
     try std.testing.expectEqual(@as(usize, 1), authority.calls);
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
     try std.testing.expect(result.value() == null);
@@ -294,35 +284,35 @@ test "shared deadline brackets CLI attestation and final publication" {
     authority = .{};
     executor = .{ .sha = &sha };
     deadline = .{ .values = &.{0} };
-    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
     try std.testing.expectEqual(@as(usize, 0), authority.calls);
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
     try std.testing.expect(result.value() == null);
 
     const result_deadline: *SharedDeadline = @ptrCast(@alignCast(&result));
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, result_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, result_deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
 
     const file_deadline: *SharedDeadline = @ptrCast(@alignCast(&file));
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, file_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, file_deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
 
     var output_deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
     const output_deadline: *SharedDeadline = @ptrCast(&output_deadline_storage);
     output_deadline.* = .{ .values = &.{100} };
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, output_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output_deadline_storage, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, output_deadline, std.testing.allocator, predecessor, bytes, &file, "/opt/trusted/gh", "token", &output_deadline_storage, &result));
     try std.testing.expectEqual(@as(usize, 0), output_deadline.cursor);
 
     var scalar_deadline = SharedDeadline{ .values = &.{100} };
     var aliased_predecessor = predecessor;
     aliased_predecessor.tag = std.mem.asBytes(&scalar_deadline);
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, &scalar_deadline, std.testing.allocator, trustedContext(), aliased_predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, &scalar_deadline, std.testing.allocator, aliased_predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
     try std.testing.expectEqual(@as(usize, 0), scalar_deadline.cursor);
 
     var real_deadline: deadline_mod.Deadline = .{};
     try deadline_mod.start(100, &real_deadline);
     defer real_deadline.deinit() catch unreachable;
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, trustedContext(), predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(@alignCast(&result)) }, "token", &output, &real_deadline, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(@alignCast(&result)) }, "token", &output, &real_deadline, &result));
     result.owner = &result;
-    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, trustedContext(), predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = undefined }, "token", &output, &real_deadline, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = undefined }, "token", &output, &real_deadline, &result));
 }
 
 test "post-attestation file drift publishes nothing and preserves cleanup authority" {
@@ -343,7 +333,7 @@ test "post-attestation file drift publishes nothing and preserves cleanup author
     var executor = Attesting{ .sha = &sha, .mutate_after = true };
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &executor, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.FileChanged, composition.authenticateWith(&authority, &executor, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -370,7 +360,7 @@ test "child and allocation failure publish nothing" {
     var executor = Attesting{ .sha = &sha, .fail = true };
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    try std.testing.expectError(error.ChildFailed, composition.authenticateWith(&authority, &executor, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.ChildFailed, composition.authenticateWith(&authority, &executor, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -380,7 +370,7 @@ test "child and allocation failure publish nothing" {
     var storage: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     authority.calls = 0;
-    try std.testing.expectError(error.OutOfMemory, composition.authenticateWith(&authority, &executor, fixed.allocator(), trustedContext(), .{
+    try std.testing.expectError(error.OutOfMemory, composition.authenticateWith(&authority, &executor, fixed.allocator(), .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,
@@ -389,7 +379,7 @@ test "child and allocation failure publish nothing" {
     try std.testing.expectEqual(@as(usize, 0), authority.calls);
 }
 
-test "CLI authority failure prevents attestation and product wrapper is compiled" {
+test "historical protected tag is not invented and CLI authority failure prevents attestation" {
     _ = composition.authenticate;
     const bytes = try manifest.writeCanonical(std.testing.allocator, candidate());
     defer std.testing.allocator.free(bytes);
@@ -406,17 +396,7 @@ test "CLI authority failure prevents attestation and product wrapper is compiled
     var executor = Never{};
     var output: [8192]u8 = undefined;
     var result: composition.AuthenticatedManifest = .{};
-    var unprotected = trustedContext();
-    unprotected.protected_tag = false;
-    try std.testing.expectError(error.InvalidPredecessor, composition.authenticateWith(&authority, &executor, std.testing.allocator, unprotected, .{
-        .release_id = 77,
-        .tag = "v1.2.3",
-        .commit = commit,
-        .manifest_sha256 = &sha,
-    }, bytes, &file, "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result));
-    try std.testing.expectEqual(@as(usize, 0), authority.calls);
-    authority.fail = true;
-    try std.testing.expectError(error.ExecutableChanged, composition.authenticateWith(&authority, &executor, std.testing.allocator, trustedContext(), .{
+    try std.testing.expectError(error.ExecutableChanged, composition.authenticateWith(&authority, &executor, std.testing.allocator, .{
         .release_id = 77,
         .tag = "v1.2.3",
         .commit = commit,

@@ -2487,10 +2487,9 @@ pub var test_hook_calls: usize = 0;
 
 pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     if (builtin.is_test) test_observe_calls += 1;
-    // **다시 그릴지는 여기서 정하지 않는다**(§1.6-⑴). 화면 상태가 바뀌어도 권위표가 배지를 그대로 두는
-    // 경우가 있다(D1·D2) — 그때 dirty 를 세우면 아무것도 안 바뀐 프레임을 다시 그린다.
-    // 판단은 `arbitrateAgentState` 가 결과 전이를 보고 한다. 시그니처는 호출부 계약이라 남긴다.
-    _ = displayed;
+    // **다시 그릴지는 이 함수가 정하지 않는다**(§1.6-⑴). 화면 상태가 바뀌어도 권위표가 배지를 그대로
+    // 두는 경우가 있어(D1·D2) 여기서 dirty 를 세우면 아무것도 안 바뀐 프레임을 다시 그린다. 판단은
+    // 아래 `arbitrateAgentState` 가 **결과 전이**를 보고 한다.
     const agent: maru.session.agent_observer.Agent = switch (term.agent_kind) {
         .none => return,
         .claude => .claude,
@@ -2542,6 +2541,9 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
             .{ @tagName(previous), @tagName(current), detection.rule_id, detection.visible_idle, detection.visible_blocker, detection.visible_running, activity_age_ms },
         );
     }
+    // **화면 자리를 채웠으면 배지까지 간다**(§1.6-⑴-a). 이 함수를 직접 부르는 경로가 있어 여기서 안
+    // 돌리면 그쪽 배지가 안 움직인다. 소비자가 한 번 더 부르지만 **C2 의 셈은 `screen_seq` 가 지킨다**.
+    arbitrateAgentState(self, term, displayed);
 }
 
 /// 화면 판정이 어느 근거로 섰는지를 `Origin` 으로 옮긴다(§1.4).

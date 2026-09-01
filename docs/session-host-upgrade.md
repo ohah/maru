@@ -878,15 +878,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   Current manifest pathname composition의 단일 소유자는
   `release_adapter_github_current_manifest_input.zig`다. 입력 manifest pathname은 absolute path와 canonical
-  `Maru-<context version>-session-host-release.json` basename을 먼저 요구한다. 현재 leaf entrypoint는 pathname을 직접 읽는다.
-  후속 executable composition 배선에서는 이 entrypoint를 호출하지 않고, current release authority와 결속한 바로 그
-  `CurrentManifestCandidate`를 consume하는 entrypoint로 이관한다. 그 entrypoint는 candidate가 소유하던 original input
+  `Maru-<context version>-session-host-release.json` basename을 먼저 요구한다. 독립 leaf 검증용 pathname entrypoint와 별도로,
+  executable composition이 사용할 entrypoint는 current release authority와 결속한 바로 그
+  `CurrentManifestCandidate`를 consume한다. `CurrentReleaseAuthority.bindManifest`가 role B·predecessor 존재와
+  repository/run/source/release/tag/protected environment를 exact 비교하고, mismatch에서는 candidate를 그대로 보존한다. 이
+  preflight를 통과한 뒤에만 candidate가 소유하던 original input
   bytes·size·SHA-256·device/inode를 복사하거나 pathname을 다시 열지 않고 이전받는다.
   그 owned bytes와 computed digest만 `release_adapter_github_manifest_file.materialize`에 넘겨 caller가 지정한 absent
   work-directory 아래 0700 directory와 0400·link-count-1 canonical leaf를 만든다. 원래 pathname은 이후 attestation child나
   다른 parser에 다시 넘기지 않으며, 원본이 read 뒤 교체·삭제되어도 private leaf와 owned bytes가 같은 candidate를 가리킨다.
 
-  candidate-consume 이관 뒤 성공은 original input bytes, cleanup 가능한 `ManifestFile`, 앞 단계의 `AuthenticatedCurrentManifest`를 final-address
+  성공은 original input bytes, cleanup 가능한 `ManifestFile`, 앞 단계의 `AuthenticatedCurrentManifest`를 final-address
   move-only `CurrentManifestInput` 하나가 함께 소유할 때만 게시한다. pre-owned/copied result, noncanonical basename,
   symlink·non-regular·empty·oversize·canonical parse 실패, already-consumed/copied candidate, destination collision,
   materialization/attestation 실패는 authenticated result 0이고,

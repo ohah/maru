@@ -1300,6 +1300,41 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
 ///
 /// **사용자와 같은 경로를 태운다**(`toggleSymbolPicker`) — 상태를 심지 않으므로 저하 판정
 /// (편집기 아님·심볼 없음·파싱 미완)도 제품이 정한 대로 돈다.
+/// MARU_OPEN_FIND=<검색어> — 편집기 찾기를 그 검색어로 연다.
+/// MARU_FIND_RULES=case,word — 규칙 토글을 켠 상태로 만든다(§5.1 표시 검증).
+///
+/// **파일이 열리고 편집기 타깃이 설 때까지 기다린다** — 규칙 표시는 `target == .editor` 일 때만
+/// 뜨므로, 그 전에 켜면 캡처에 안 남는다(심볼 피커 훅이 같은 이유로 재시도한다).
+pub fn maybeDebugOpenFind(self: *AppSession) void {
+    const q = std.c.getenv("MARU_OPEN_FIND") orelse return;
+    if (self.debug_find_opened) return;
+    self.debug_find_tries +%= 1;
+    if (self.debug_find_tries > 240) {
+        std.debug.print("MARU_OPEN_FIND: gave up; target={s} open={}\n", .{
+            @tagName(self.chrome_host.find.target), self.chrome_host.find.open,
+        });
+        self.debug_find_opened = true;
+        return;
+    }
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return; // 아직 파일이 안 열렸다 — 다음 tick 에 다시 본다
+
+    if (!self.chrome_host.find.open) find_ops.toggleFind(self);
+    if (!self.chrome_host.find.open) return;
+    if (self.chrome_host.find.target != .editor) return; // tick 이 타깃을 세울 때까지 기다린다
+
+    self.chrome_host.find.input.query.clearRetainingCapacity();
+    self.chrome_host.find.input.query.appendSlice(self.allocator, std.mem.span(q)) catch {};
+    if (std.c.getenv("MARU_FIND_RULES")) |rv| {
+        const rules = std.mem.span(rv);
+        self.chrome_host.find.match_case = std.mem.indexOf(u8, rules, "case") != null;
+        self.chrome_host.find.whole_word = std.mem.indexOf(u8, rules, "word") != null;
+    }
+    find_ops.recomputeFind(self);
+    self.debug_find_opened = true;
+    self.metal_dirty = true;
+}
+
 /// MARU_OPEN_COMMAND_PALETTE=1 — 커맨드 팔레트를 연 화면을 캡처한다.
 /// MARU_OPEN_COMMAND_PALETTE_QUERY=<쿼리> 로 필터해서 한 무리만 남길 수 있다.
 ///

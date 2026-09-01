@@ -22,6 +22,8 @@
 
 const std = @import("std");
 const terminal = @import("../../terminal.zig");
+/// 낱말 경계의 단일 출처(§3.2) — 더블클릭이 잡는 범위와 같은 것을 쓴다.
+const editor_selection = @import("selection.zig");
 
 /// 한 매치 — **줄 안의 byte 범위**다. 렌더가 요구하는 축이 그것이고(`frame.Mark`), §3.1의 문서
 /// offset은 `line_index`가 줄 시작을 알므로 언제든 더해 얻는다.
@@ -50,7 +52,7 @@ pub const Match = struct {
 ///      부채가 아닌 것을 적는** 일이라 목록이 거짓말하게 된다.
 ///   2. **할당이 사라진다.** 검색어는 입력 상자 한 줄이라 짧고, 매번 다시 디코드해도 비용이
 ///      후보 위치당 needle 길이뿐이다 — 순진한 부분 문자열 탐색이 원래 하는 그 일이다.
-fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8) ?usize {
+fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options) ?usize {
     var i = from;
     var n: usize = 0;
     while (n < needle_utf8.len) {
@@ -63,11 +65,25 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8) ?usize {
         // 못 읽는 자리는 **이 시작점의 불일치**다. 호출자가 `stepBytes`로 1 byte만 밀어 다음
         // 자리를 다시 보므로, 여기서 몇 byte를 봤는지 알릴 필요가 없다.
         const have = std.unicode.utf8Decode(line[i .. i + hl]) catch return null;
-        if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
+        if (opts.match_case) {
+            if (have != want) return null;
+        } else if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
         i += hl;
         n += nl;
     }
+    // **낱말 경계는 마지막에 본다.** 시작과 끝을 다 알아야 「이 범위가 낱말 하나와 같은가」를
+    // 물을 수 있다. 판정은 `selection.wordRangeAt` 이 소유한다(§3.2 더블클릭이 잡는 그 범위) —
+    // 여기서 `isWordByte` 를 다시 쓰면 앱 안에 낱말 규칙이 둘이 된다.
+    if (opts.whole_word and !isWholeWord(line, from, i)) return null;
     return i;
+}
+
+/// `line[lo..hi]` 가 그 자리의 **낱말과 정확히 같은가**. `occurrence.seedIsWord` 와 같은 판정이고,
+/// 같은 소유자(`selection.wordRangeAt`)를 쓴다.
+fn isWholeWord(line: []const u8, lo: usize, hi: usize) bool {
+    if (lo >= hi or hi > line.len) return false;
+    const w = editor_selection.wordRangeAt(line, lo);
+    return w.lo == lo and w.hi == hi;
 }
 
 /// 다음 코드포인트 경계까지의 byte 수 — **읽을 수 있을 때만** 그 길이다.
@@ -98,10 +114,22 @@ fn stepBytes(s: []const u8, i: usize) usize {
 /// 여기 오는 줄은 성한 것이지만, 그 검사가 파일 전체를 보는 것이라 **이 함수 혼자로는 보장이
 /// 아니다** — 그리고 N2에서 편집이 붙으면 `editor_lines`가 그 검사를 안 지나는 순간이 온다.
 /// 초판은 이 걱정을 doc에 적어 두고 **구현이 그 걱정을 못 막았다**(`stepBytes`의 표).
+/// 검색 규칙 토글(§5.1). **편집기 타깃에만 산다** — 스크롤백·웹은 이 값을 안 본다.
+///
+/// 기본값 둘 다 `false` 가 **종전 동작**이다: 대소문자 무시, 낱말 경계 안 봄.
+pub const Options = struct {
+    /// 켜면 대소문자를 **가린다**. 끄면 `foldCase` 로 접어 비교한다(터미널과 같은 규칙).
+    match_case: bool = false,
+    /// 켜면 매치가 **낱말 하나와 정확히 같을 때만** 센다. 판정은 `selection.wordRangeAt` 이
+    /// 소유한다 — 더블클릭이 잡는 그 범위와 **같은 것**이어야 앱 안에 낱말 규칙이 둘 안 생긴다.
+    whole_word: bool = false,
+};
+
 pub fn findMatches(
     allocator: std.mem.Allocator,
     lines: []const []const u8,
     needle_utf8: []const u8,
+    opts: Options,
     out: *std.ArrayList(Match),
 ) !void {
     out.clearRetainingCapacity();
@@ -113,7 +141,7 @@ pub fn findMatches(
     for (lines, 0..) |line, li| {
         var i: usize = 0;
         while (i < line.len) {
-            if (matchAt(line, i, needle_utf8)) |end| {
+            if (matchAt(line, i, needle_utf8, opts)) |end| {
                 try out.append(allocator, .{
                     .line = @intCast(li),
                     .start = @intCast(i),
@@ -134,10 +162,79 @@ pub fn findMatches(
 const testing = std.testing;
 
 fn collect(lines: []const []const u8, needle: []const u8) !std.ArrayList(Match) {
+    return collectOpts(lines, needle, .{});
+}
+
+fn collectOpts(lines: []const []const u8, needle: []const u8, opts: Options) !std.ArrayList(Match) {
     var out: std.ArrayList(Match) = .empty;
     errdefer out.deinit(testing.allocator);
-    try findMatches(testing.allocator, lines, needle, &out);
+    try findMatches(testing.allocator, lines, needle, opts, &out);
     return out;
+}
+
+test "FND20 대소문자를 가리면 접힌 짝이 빠진다 — 끄면 종전 그대로 (§5.1)" {
+    // **기본값이 종전 동작**이라는 것이 이 판정자의 절반이다. 옵션을 더하면서 안 켠 사용자의
+    // 결과가 달라지면 그것은 기능이 아니라 회귀다.
+    const lines = [_][]const u8{"Foo foo FOO fOo"};
+
+    var off = try collectOpts(&lines, "foo", .{});
+    defer off.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 4), off.items.len); // 넷 다 — 종전과 같다
+
+    var on = try collectOpts(&lines, "foo", .{ .match_case = true });
+    defer on.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), on.items.len);
+    try testing.expectEqual(@as(u32, 4), on.items[0].start); // 두 번째 `foo` 하나만
+
+    // **대문자 검색어도 같은 규칙이다** — 한쪽만 접으면 「Foo 로 찾으면 foo 가 걸리는데 그 반대는
+    // 안 되는」 비대칭이 생긴다.
+    var upper = try collectOpts(&lines, "FOO", .{ .match_case = true });
+    defer upper.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), upper.items.len);
+    try testing.expectEqual(@as(u32, 8), upper.items[0].start);
+}
+
+test "FND21 낱말 단위는 안에 박힌 것을 뺀다 — 더블클릭이 잡는 낱말과 같다 (§5.1)" {
+    // 이것이 이 옵션의 존재 이유다: `id` 로 찾으면 `width`·`valid`·`invalid` 가 다 걸려
+    // 코드에서 식별자를 정확히 찾을 방법이 없었다.
+    const lines = [_][]const u8{"id width valid invalid id_x x_id id"};
+
+    var off = try collectOpts(&lines, "id", .{});
+    defer off.deinit(testing.allocator);
+    try testing.expect(off.items.len > 3); // 박힌 것까지 다 — 종전과 같다
+
+    var on = try collectOpts(&lines, "id", .{ .whole_word = true });
+    defer on.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), on.items.len); // 맨 앞과 맨 뒤의 홀로 선 `id` 둘
+    try testing.expectEqual(@as(u32, 0), on.items[0].start);
+    try testing.expectEqual(@as(u32, 33), on.items[1].start);
+
+    // **`_` 는 낱말 글자다** — `id_x`·`x_id` 는 낱말 하나라 그 안의 `id` 는 안 잡힌다.
+    // 이 규칙을 여기서 새로 정하지 않는다: `selection.wordRangeAt` 이 소유하고
+    // 더블클릭이 잡는 범위와 **같은 것**이다(§3.2).
+    const w = editor_selection.wordRangeAt(lines[0], 23);
+    try testing.expectEqual(@as(usize, 23), w.lo);
+    try testing.expectEqual(@as(usize, 27), w.hi); // `id_x` 통째로
+}
+
+test "FND22 두 옵션은 곱해진다 — 켠 것만큼만 좁아진다 (§5.1)" {
+    // 둘을 따로 재면 「하나를 켜면 다른 하나도 켜지는」 배선 실수를 못 본다.
+    const lines = [_][]const u8{"Id id ID id_x"};
+
+    var both = try collectOpts(&lines, "id", .{ .match_case = true, .whole_word = true });
+    defer both.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), both.items.len); // 소문자이면서 홀로 선 것 하나
+    try testing.expectEqual(@as(u32, 3), both.items[0].start);
+
+    // 낱말만: 대소문자는 안 가리므로 셋(`Id`·`id`·`ID`), `id_x` 안은 제외
+    var word_only = try collectOpts(&lines, "id", .{ .whole_word = true });
+    defer word_only.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), word_only.items.len);
+
+    // 대소문자만: 낱말을 안 보므로 `id` 와 `id_x` 안의 `id` 둘
+    var case_only = try collectOpts(&lines, "id", .{ .match_case = true });
+    defer case_only.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), case_only.items.len);
 }
 
 test "FND1: 한 줄에 여러 매치가 각각 선다" {
@@ -247,11 +344,11 @@ test "FND8: 재사용하는 out은 이전 결과를 남기지 않는다" {
     var out: std.ArrayList(Match) = .empty;
     defer out.deinit(testing.allocator);
     const lines = [_][]const u8{"aaa bbb"};
-    try findMatches(testing.allocator, &lines, "a", &out);
+    try findMatches(testing.allocator, &lines, "a", .{}, &out);
     try testing.expectEqual(@as(usize, 3), out.items.len);
-    try findMatches(testing.allocator, &lines, "b", &out);
+    try findMatches(testing.allocator, &lines, "b", .{}, &out);
     try testing.expectEqual(@as(usize, 3), out.items.len);
-    try findMatches(testing.allocator, &lines, "zzz", &out);
+    try findMatches(testing.allocator, &lines, "zzz", .{}, &out);
     try testing.expectEqual(@as(usize, 0), out.items.len);
 }
 

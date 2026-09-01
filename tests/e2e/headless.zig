@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const artifacts = @import("test_support");
 
@@ -13,8 +14,16 @@ test "headless E2E feeds real command stdout into TerminalCore" {
     // require PTY, AppKit, Metal, or screenshots, so a failure points at either
     // process I/O or terminal-core state instead of the whole app at once.
     const allocator = std.testing.allocator;
+    // **셸 이름을 호스트에서 고른다.** `/bin/sh` 를 박아 두면 Windows 에서 `FileNotFound` 로 죽고,
+    // 그러면 이 층이 재는 것("진짜 프로세스의 바이트가 코어를 지나 화면이 된다")을 그 호스트에서는
+    // 통째로 못 잰다 — 게이트가 상시 빨개져 **진짜 실패와 구별이 안 된다**(§2m.108).
+    // `cmd` 는 CRLF 를 내지만 CR 은 코어가 캐리지 리턴으로 먹으므로 화면 글자는 같다.
+    const argv: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "cmd.exe", "/c", "echo hello maru" }
+    else
+        &.{ "/bin/sh", "-c", "printf 'hello maru\\n'" };
     const result = try std.process.run(allocator, std.testing.io, .{
-        .argv = &.{ "/bin/sh", "-c", "printf 'hello maru\\n'" },
+        .argv = argv,
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     });

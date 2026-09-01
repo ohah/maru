@@ -2928,6 +2928,15 @@ pub fn build(b: *std.Build) void {
     // 돌린다. 실측(Windows): 이 게이트로 `zig build test`가 중립 361개를 돌린다(게이트 전에는 0개 — 컴파일 실패).
     const macos_host_tests = target.result.os.tag == .macos;
 
+    // 같은 규율의 **한 칸 느슨한** 판. session_host L4 는 Linux 에서도 컴파일되고 CI 의 `check` job 이
+    // 실제로 그것들을 돌린다 — 즉 `macos_host_tests` 로 조이면 **오늘 돌고 있는 Linux 커버리지가
+    // 사라진다.** 여기서 막으려는 것은 그것이 아니라 *"Windows 에서 `zig build test` 가 L4 컴파일
+    // 실패로 먼저 죽는다"* 하나다(실측: `bounded_process.zig` 의 `fork`·`kill` — §2m.108).
+    //
+    // **더 조이고 싶으면 이 한 줄만 `macos_host_tests` 로 바꾸면 된다.** 그 선택은 Linux 커버리지를
+    // 무엇으로 대신할지와 함께 정할 일이라 이 슬라이스에서 하지 않는다.
+    const posix_host_tests = target.result.os.tag != .windows;
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
 
@@ -12086,7 +12095,7 @@ pub fn build(b: *std.Build) void {
         run_release_manifest_tests.setCwd(b.path("."));
         session_host_release_manifest_step.dependOn(&run_release_manifest_tests.step);
         session_host_step.dependOn(&run_release_manifest_tests.step);
-        test_step.dependOn(&run_release_manifest_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_manifest_tests.step);
     }
     const session_host_release_evidence_step = b.step(
         "test-session-host-release-evidence",
@@ -12117,7 +12126,7 @@ pub fn build(b: *std.Build) void {
         run_release_evidence_tests.setCwd(b.path("."));
         session_host_release_evidence_step.dependOn(&run_release_evidence_tests.step);
         session_host_step.dependOn(&run_release_evidence_tests.step);
-        test_step.dependOn(&run_release_evidence_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_evidence_tests.step);
     }
     const session_host_release_evidence_files_step = b.step(
         "test-session-host-release-evidence-files",
@@ -12184,7 +12193,7 @@ pub fn build(b: *std.Build) void {
         run_release_evidence_files_tests.setCwd(b.path("."));
         session_host_release_evidence_files_step.dependOn(&run_release_evidence_files_tests.step);
         session_host_step.dependOn(&run_release_evidence_files_tests.step);
-        test_step.dependOn(&run_release_evidence_files_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_evidence_files_tests.step);
     };
     const session_host_release_adapter_contract_step = b.step(
         "test-session-host-release-adapter-contract",
@@ -12209,7 +12218,7 @@ pub fn build(b: *std.Build) void {
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
         session_host_step.dependOn(&run_release_adapter_contract_tests.step);
-        test_step.dependOn(&run_release_adapter_contract_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_adapter_contract_tests.step);
     }
     const session_host_release_adapter_context_step = b.step(
         "test-session-host-release-adapter-context",
@@ -12253,7 +12262,7 @@ pub fn build(b: *std.Build) void {
         run_release_adapter_context_tests.setCwd(b.path("."));
         session_host_release_adapter_context_step.dependOn(&run_release_adapter_context_tests.step);
         session_host_step.dependOn(&run_release_adapter_context_tests.step);
-        test_step.dependOn(&run_release_adapter_context_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_adapter_context_tests.step);
     }
     const session_host_release_adapter_environment_step = b.step(
         "test-session-host-release-adapter-environment",
@@ -12305,7 +12314,7 @@ pub fn build(b: *std.Build) void {
         run_release_adapter_environment_tests.setCwd(b.path("."));
         session_host_release_adapter_environment_step.dependOn(&run_release_adapter_environment_tests.step);
         session_host_step.dependOn(&run_release_adapter_environment_tests.step);
-        test_step.dependOn(&run_release_adapter_environment_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_adapter_environment_tests.step);
     }
     const session_host_release_adapter_github_repository_step = b.step(
         "test-session-host-release-adapter-github-repository",
@@ -12350,7 +12359,7 @@ pub fn build(b: *std.Build) void {
         run_github_repository_tests.setCwd(b.path("."));
         session_host_release_adapter_github_repository_step.dependOn(&run_github_repository_tests.step);
         session_host_step.dependOn(&run_github_repository_tests.step);
-        test_step.dependOn(&run_github_repository_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_repository_tests.step);
     }
     const session_host_release_adapter_github_run_step = b.step(
         "test-session-host-release-adapter-github-run",
@@ -12417,7 +12426,7 @@ pub fn build(b: *std.Build) void {
         run_github_run_tests.setCwd(b.path("."));
         session_host_release_adapter_github_run_step.dependOn(&run_github_run_tests.step);
         session_host_step.dependOn(&run_github_run_tests.step);
-        test_step.dependOn(&run_github_run_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_run_tests.step);
     }
     const session_host_release_adapter_github_release_step = b.step(
         "test-session-host-release-adapter-github-release",
@@ -12466,7 +12475,7 @@ pub fn build(b: *std.Build) void {
         run_github_release_tests.setCwd(b.path("."));
         session_host_release_adapter_github_release_step.dependOn(&run_github_release_tests.step);
         session_host_step.dependOn(&run_github_release_tests.step);
-        test_step.dependOn(&run_github_release_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_release_tests.step);
     }
     const session_host_release_adapter_github_environment_step = b.step(
         "test-session-host-release-adapter-github-environment",
@@ -12518,7 +12527,7 @@ pub fn build(b: *std.Build) void {
         run_github_environment_tests.setCwd(b.path("."));
         session_host_release_adapter_github_environment_step.dependOn(&run_github_environment_tests.step);
         session_host_step.dependOn(&run_github_environment_tests.step);
-        test_step.dependOn(&run_github_environment_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_environment_tests.step);
     }
     const session_host_release_adapter_github_deployment_step = b.step(
         "test-session-host-release-adapter-github-deployment",
@@ -12592,7 +12601,7 @@ pub fn build(b: *std.Build) void {
         run_github_deployment_tests.setCwd(b.path("."));
         session_host_release_adapter_github_deployment_step.dependOn(&run_github_deployment_tests.step);
         session_host_step.dependOn(&run_github_deployment_tests.step);
-        test_step.dependOn(&run_github_deployment_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_deployment_tests.step);
     }
     const session_host_release_adapter_github_transport_step = b.step(
         "test-session-host-release-adapter-github-transport",
@@ -12662,7 +12671,7 @@ pub fn build(b: *std.Build) void {
         run_github_transport_tests.setCwd(b.path("."));
         session_host_release_adapter_github_transport_step.dependOn(&run_github_transport_tests.step);
         session_host_step.dependOn(&run_github_transport_tests.step);
-        test_step.dependOn(&run_github_transport_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_transport_tests.step);
     }
     const session_host_release_adapter_github_attestation_step = b.step(
         "test-session-host-release-adapter-github-attestation",
@@ -12733,7 +12742,7 @@ pub fn build(b: *std.Build) void {
         run_attestation_tests.setCwd(b.path("."));
         session_host_release_adapter_github_attestation_step.dependOn(&run_attestation_tests.step);
         session_host_step.dependOn(&run_attestation_tests.step);
-        test_step.dependOn(&run_attestation_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_attestation_tests.step);
     }
     const session_host_release_adapter_github_release_attestation_step = b.step(
         "test-session-host-release-adapter-github-release-attestation",
@@ -12796,7 +12805,7 @@ pub fn build(b: *std.Build) void {
         run_release_attestation_tests.setCwd(b.path("."));
         session_host_release_adapter_github_release_attestation_step.dependOn(&run_release_attestation_tests.step);
         session_host_step.dependOn(&run_release_attestation_tests.step);
-        test_step.dependOn(&run_release_attestation_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_attestation_tests.step);
     }
     const session_host_release_adapter_github_cli_authority_step = b.step(
         "test-session-host-release-adapter-github-cli-authority",
@@ -12859,7 +12868,7 @@ pub fn build(b: *std.Build) void {
         run_manifest_download_tests.setCwd(b.path("."));
         session_host_release_adapter_github_manifest_download_step.dependOn(&run_manifest_download_tests.step);
         session_host_step.dependOn(&run_manifest_download_tests.step);
-        test_step.dependOn(&run_manifest_download_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_manifest_download_tests.step);
     }
     const session_host_release_adapter_github_download_step = b.step(
         "test-session-host-release-adapter-github-download",
@@ -12911,7 +12920,7 @@ pub fn build(b: *std.Build) void {
             run_manifest_file_tests.setCwd(b.path("."));
             session_host_release_adapter_github_manifest_file_step.dependOn(&run_manifest_file_tests.step);
             session_host_step.dependOn(&run_manifest_file_tests.step);
-            test_step.dependOn(&run_manifest_file_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_manifest_file_tests.step);
             macos_only_test_step.dependOn(&run_manifest_file_tests.step);
         }
     }
@@ -12934,7 +12943,7 @@ pub fn build(b: *std.Build) void {
             run.setCwd(b.path("."));
             session_host_release_adapter_github_manifest_attestation_step.dependOn(&run.step);
             session_host_step.dependOn(&run.step);
-            test_step.dependOn(&run.step);
+            if (posix_host_tests) test_step.dependOn(&run.step);
             macos_only_test_step.dependOn(&run.step);
         }
     }
@@ -13009,7 +13018,7 @@ pub fn build(b: *std.Build) void {
             run_download_tests.setCwd(b.path("."));
             session_host_release_adapter_github_download_step.dependOn(&run_download_tests.step);
             session_host_step.dependOn(&run_download_tests.step);
-            test_step.dependOn(&run_download_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_download_tests.step);
             macos_only_test_step.dependOn(&run_download_tests.step);
         }
     }
@@ -13090,7 +13099,7 @@ pub fn build(b: *std.Build) void {
             run.setCwd(b.path("."));
             session_host_release_adapter_github_predecessor_assets_step.dependOn(&run.step);
             session_host_step.dependOn(&run.step);
-            test_step.dependOn(&run.step);
+            if (posix_host_tests) test_step.dependOn(&run.step);
             macos_only_test_step.dependOn(&run.step);
             const tag_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_tag_chain_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_tag_chain_transport", .module = tag_chain_mod } } }) });
             const run_tag_tests = b.addRunArtifact(tag_tests);
@@ -13098,7 +13107,7 @@ pub fn build(b: *std.Build) void {
             run_tag_tests.setCwd(b.path("."));
             session_host_release_adapter_github_tag_chain_transport_step.dependOn(&run_tag_tests.step);
             session_host_step.dependOn(&run_tag_tests.step);
-            test_step.dependOn(&run_tag_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_tag_tests.step);
             macos_only_test_step.dependOn(&run_tag_tests.step);
             const current_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_authority", .module = current_authority_mod } } }) });
             const run_current_tests = b.addRunArtifact(current_tests);
@@ -13106,7 +13115,7 @@ pub fn build(b: *std.Build) void {
             run_current_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_authority_step.dependOn(&run_current_tests.step);
             session_host_step.dependOn(&run_current_tests.step);
-            test_step.dependOn(&run_current_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_tests.step);
             macos_only_test_step.dependOn(&run_current_tests.step);
             const current_release_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_release_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_release_authority", .module = current_release_authority_mod } } }) });
             const run_current_release_tests = b.addRunArtifact(current_release_tests);
@@ -13114,7 +13123,7 @@ pub fn build(b: *std.Build) void {
             run_current_release_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_release_authority_step.dependOn(&run_current_release_tests.step);
             session_host_step.dependOn(&run_current_release_tests.step);
-            test_step.dependOn(&run_current_release_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_release_tests.step);
             macos_only_test_step.dependOn(&run_current_release_tests.step);
             const current_manifest_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_manifest_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_release_authority", .module = current_release_authority_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_current_manifest_attestation", .module = current_manifest_attestation_mod } } }) });
             const run_current_manifest_tests = b.addRunArtifact(current_manifest_tests);
@@ -13122,7 +13131,7 @@ pub fn build(b: *std.Build) void {
             run_current_manifest_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_manifest_attestation_step.dependOn(&run_current_manifest_tests.step);
             session_host_step.dependOn(&run_current_manifest_tests.step);
-            test_step.dependOn(&run_current_manifest_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_manifest_tests.step);
             macos_only_test_step.dependOn(&run_current_manifest_tests.step);
             const current_manifest_input_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_manifest_input.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_release_authority", .module = current_release_authority_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod } } }) });
             const run_current_manifest_input_tests = b.addRunArtifact(current_manifest_input_tests);
@@ -13130,7 +13139,7 @@ pub fn build(b: *std.Build) void {
             run_current_manifest_input_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_manifest_input_step.dependOn(&run_current_manifest_input_tests.step);
             session_host_step.dependOn(&run_current_manifest_input_tests.step);
-            test_step.dependOn(&run_current_manifest_input_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_manifest_input_tests.step);
             macos_only_test_step.dependOn(&run_current_manifest_input_tests.step);
             const current_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod } } }) });
             const run_current_product_tests = b.addRunArtifact(current_product_tests);
@@ -13138,7 +13147,7 @@ pub fn build(b: *std.Build) void {
             run_current_product_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_product_step.dependOn(&run_current_product_tests.step);
             session_host_step.dependOn(&run_current_product_tests.step);
-            test_step.dependOn(&run_current_product_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_product_tests.step);
             macos_only_test_step.dependOn(&run_current_product_tests.step);
             const current_evidence_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_evidence.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_current_evidence", .module = current_evidence_mod } } }) });
             const run_current_evidence_tests = b.addRunArtifact(current_evidence_tests);
@@ -13146,7 +13155,7 @@ pub fn build(b: *std.Build) void {
             run_current_evidence_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_evidence_step.dependOn(&run_current_evidence_tests.step);
             session_host_step.dependOn(&run_current_evidence_tests.step);
-            test_step.dependOn(&run_current_evidence_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_current_evidence_tests.step);
             macos_only_test_step.dependOn(&run_current_evidence_tests.step);
         }
     }
@@ -13196,7 +13205,7 @@ pub fn build(b: *std.Build) void {
             run_authority_tests.setCwd(b.path("."));
             session_host_release_adapter_github_cli_authority_step.dependOn(&run_authority_tests.step);
             session_host_step.dependOn(&run_authority_tests.step);
-            test_step.dependOn(&run_authority_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_authority_tests.step);
             macos_only_test_step.dependOn(&run_authority_tests.step);
         }
     }
@@ -13236,7 +13245,7 @@ pub fn build(b: *std.Build) void {
         run_apple_product_tests.setCwd(b.path("."));
         session_host_release_adapter_apple_product_step.dependOn(&run_apple_product_tests.step);
         session_host_step.dependOn(&run_apple_product_tests.step);
-        test_step.dependOn(&run_apple_product_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_apple_product_tests.step);
     }
     const session_host_release_adapter_apple_transport_step = b.step(
         "test-session-host-release-adapter-apple-transport",
@@ -13290,7 +13299,7 @@ pub fn build(b: *std.Build) void {
         run_apple_transport_tests.setCwd(b.path("."));
         session_host_release_adapter_apple_transport_step.dependOn(&run_apple_transport_tests.step);
         session_host_step.dependOn(&run_apple_transport_tests.step);
-        test_step.dependOn(&run_apple_transport_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_apple_transport_tests.step);
     }
     const session_host_release_adapter_dmg_authority_step = b.step(
         "test-session-host-release-adapter-dmg-authority",
@@ -13382,7 +13391,7 @@ pub fn build(b: *std.Build) void {
         run_dmg_authority_tests.setCwd(b.path("."));
         session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_tests.step);
         session_host_step.dependOn(&run_dmg_authority_tests.step);
-        test_step.dependOn(&run_dmg_authority_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_dmg_authority_tests.step);
         macos_only_test_step.dependOn(&run_dmg_authority_tests.step);
 
         if (dmg_authority_optimize == .Debug and target.result.os.tag == .macos) {
@@ -13403,7 +13412,7 @@ pub fn build(b: *std.Build) void {
             run_dmg_authority_e2e.setCwd(b.path("."));
             session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_e2e.step);
             session_host_step.dependOn(&run_dmg_authority_e2e.step);
-            test_step.dependOn(&run_dmg_authority_e2e.step);
+            if (posix_host_tests) test_step.dependOn(&run_dmg_authority_e2e.step);
             macos_only_test_step.dependOn(&run_dmg_authority_e2e.step);
         }
     };
@@ -13454,7 +13463,7 @@ pub fn build(b: *std.Build) void {
         run_github_git_tests.setCwd(b.path("."));
         session_host_release_adapter_github_git_step.dependOn(&run_github_git_tests.step);
         session_host_step.dependOn(&run_github_git_tests.step);
-        test_step.dependOn(&run_github_git_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_github_git_tests.step);
     }
     const session_host_release_adapter_git_resolver_step = b.step(
         "test-session-host-release-adapter-git-resolver",
@@ -13513,7 +13522,7 @@ pub fn build(b: *std.Build) void {
         run_git_resolver_tests.setCwd(b.path("."));
         session_host_release_adapter_git_resolver_step.dependOn(&run_git_resolver_tests.step);
         session_host_step.dependOn(&run_git_resolver_tests.step);
-        test_step.dependOn(&run_git_resolver_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_git_resolver_tests.step);
     }
     const session_host_release_adapter_files_step = b.step(
         "test-session-host-release-adapter-files",
@@ -13560,7 +13569,7 @@ pub fn build(b: *std.Build) void {
         run_release_adapter_files_tests.setCwd(b.path("."));
         session_host_release_adapter_files_step.dependOn(&run_release_adapter_files_tests.step);
         session_host_step.dependOn(&run_release_adapter_files_tests.step);
-        test_step.dependOn(&run_release_adapter_files_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_release_adapter_files_tests.step);
         const frozen_executable_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_release_adapter_frozen_executable_authority.zig"),
@@ -13574,7 +13583,7 @@ pub fn build(b: *std.Build) void {
         run_frozen_executable_tests.setCwd(b.path("."));
         session_host_release_adapter_frozen_executable_authority_step.dependOn(&run_frozen_executable_tests.step);
         session_host_step.dependOn(&run_frozen_executable_tests.step);
-        test_step.dependOn(&run_frozen_executable_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_frozen_executable_tests.step);
     };
     const session_host_bounded_process_step = b.step(
         "test-session-host-bounded-process",
@@ -13599,7 +13608,7 @@ pub fn build(b: *std.Build) void {
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         session_host_step.dependOn(&run_bounded_process_tests.step);
-        test_step.dependOn(&run_bounded_process_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_bounded_process_tests.step);
     };
     const workspace_checkpoint_step = b.step(
         "test-workspace-checkpoint-coordinator",
@@ -13751,7 +13760,7 @@ pub fn build(b: *std.Build) void {
             external_turn_authority_tests,
         );
         run_external_turn_authority_tests.setCwd(b.path("."));
-        test_step.dependOn(&run_external_turn_authority_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_external_turn_authority_tests.step);
         macos_only_test_step.dependOn(&run_external_turn_authority_tests.step);
         session_host_step.dependOn(&run_external_turn_authority_tests.step);
 
@@ -13773,7 +13782,7 @@ pub fn build(b: *std.Build) void {
             external_pump_storage_tests,
         );
         run_external_pump_storage_tests.setCwd(b.path("."));
-        test_step.dependOn(&run_external_pump_storage_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_external_pump_storage_tests.step);
         macos_only_test_step.dependOn(&run_external_pump_storage_tests.step);
         session_host_step.dependOn(&run_external_pump_storage_tests.step);
 
@@ -14788,7 +14797,7 @@ pub fn build(b: *std.Build) void {
             external_rx_turn_tests,
         );
         run_external_rx_turn_tests.setCwd(b.path("."));
-        test_step.dependOn(&run_external_rx_turn_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_external_rx_turn_tests.step);
         macos_only_test_step.dependOn(&run_external_rx_turn_tests.step);
         session_host_step.dependOn(&run_external_rx_turn_tests.step);
 
@@ -14809,7 +14818,7 @@ pub fn build(b: *std.Build) void {
             external_rx_read_tests,
         );
         run_external_rx_read_tests.setCwd(b.path("."));
-        test_step.dependOn(&run_external_rx_read_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_external_rx_read_tests.step);
         macos_only_test_step.dependOn(&run_external_rx_read_tests.step);
         session_host_step.dependOn(&run_external_rx_read_tests.step);
     }

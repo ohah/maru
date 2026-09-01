@@ -14,6 +14,7 @@ test "GitHub transport closes every scalar endpoint" {
         .{ .request = .repository, .expected = "repos/ohah/maru" },
         .{ .request = .{ .workflow_run = 333 }, .expected = "repos/ohah/maru/actions/runs/333" },
         .{ .request = .{ .published_release = "v1.2.3" }, .expected = "repos/ohah/maru/releases/tags/v1.2.3" },
+        .{ .request = .{ .commit = sha }, .expected = "repos/ohah/maru/git/commits/" ++ sha },
         .{ .request = .{ .tag_ref = "v1.2.3" }, .expected = "repos/ohah/maru/git/ref/tags/v1.2.3" },
         .{ .request = .{ .annotated_tag = sha }, .expected = "repos/ohah/maru/git/tags/" ++ sha },
         .{ .request = .environment, .expected = "repos/ohah/maru/environments/release" },
@@ -65,6 +66,7 @@ test "GitHub transport rejects noncanonical identity before argv construction" {
     try std.testing.expectError(error.InvalidId, transport.plan(&storage, .{ .attempt_jobs = .{ .run_id = 1, .attempt = 0 } }));
     try std.testing.expectError(error.InvalidTag, transport.plan(&storage, .{ .published_release = "v1.2.3/extra" }));
     try std.testing.expectError(error.InvalidSha, transport.plan(&storage, .{ .annotated_tag = "ABC" }));
+    try std.testing.expectError(error.InvalidSha, transport.plan(&storage, .{ .commit = "ABC" }));
 }
 
 test "GitHub transport argv is fixed and never contains the token" {

@@ -121,7 +121,11 @@ fn collidingPlainCommandChars() []const u21 {
 fn addIfColliding(chord: keybinding.KeyChord, buf: []u21, n: *usize) void {
     comptime {
         if (!chord.modifiers.command) return;
-        if (chord.modifiers.shift) return; // plain Cmd 만 본다
+        // **plain `Cmd+<c>` 만 본다.** shift 만 걸러 두었더니 `⌥⌘C`(찾기 대소문자 토글)가 들어와
+        // `c` 를 밀린 글자로 세웠고, 그 결과 **`Ctrl+Shift+C` 가 복사가 아니게 됐다** — 위 표에서
+        // `Ctrl+Shift+<c>` 는 밀린 글자면 **plain** `Cmd+<c>` 를 뜻하기 때문이다(`shift` 가 안 선다).
+        // `⌥⌘` 조합은 그 밀어내기 규칙의 대상이 아니다: 그쪽은 `Ctrl+Alt` 가 받는 자리다.
+        if (chord.modifiers.shift or chord.modifiers.option or chord.modifiers.control) return;
         if (chord.key != .char) return;
         const c = foldLower(chord.key.char);
         if (!shellTakesControl(c)) return;
@@ -289,6 +293,42 @@ test "isPasteChord: Ctrl+Shift+V 와 Shift+Insert 를 받고 셸 키는 안 가�
     try testing.expect(!isPasteChord(.{ .key = .{ .char = 'v' }, .modifiers = .{} }));
     // 다른 글자의 Ctrl+Shift 도 아니다.
     try testing.expect(!isPasteChord(.{ .key = .{ .char = 'p' }, .modifiers = .{ .command = true, .shift = true } }));
+}
+
+test "밀린 글자 목록은 **plain** Cmd 만 센다 — ⌥⌘·⇧⌘ 를 세면 복사가 죽는다" {
+    // 이 규칙이 어긋난 자국이 실제로 있었다: `⌥⌘C`(찾기 대소문자 토글)가 표에 들어오자 `c` 가
+    // 밀린 글자가 됐고, 위 표대로 `Ctrl+Shift+C` 가 **plain** `Cmd+C` 를 뜻하게 되면서
+    // (`shift` 가 안 선다) `isCopyChord` 가 거짓이 됐다 — 즉 **Windows 에서 복사가 안 됐다.**
+    //
+    // 아래 `isCopyChord` 테스트가 그 증상을 잡지만, 여기서는 **원인**을 잰다. 오늘의 바인딩 표를
+    // 베끼지 않고 `addIfColliding` 에 chord 를 직접 먹여 규칙만 본다.
+    const collides = struct {
+        fn f(comptime chord: keybinding.KeyChord) usize {
+            // `addIfColliding` 은 본문이 통째로 `comptime` 이라 런타임 호출로는 값을 못 낸다 —
+            // 호출자도 comptime 이어야 한다.
+            return comptime blk: {
+                var buf: [8]u21 = undefined;
+                var n: usize = 0;
+                addIfColliding(chord, &buf, &n);
+                break :blk n;
+            };
+        }
+    }.f;
+
+    // plain `Cmd+C` 는 민다 — 셸이 `Ctrl+C` 를 가져가므로 그 자리를 `Ctrl+Shift` 로 옮겨야 한다.
+    try std.testing.expectEqual(@as(usize, 1), collides(.{ .modifiers = .{ .command = true }, .key = .{ .char = 'C' } }));
+
+    // 수식키가 더 붙은 것은 **밀어내기의 대상이 아니다** — `⌘⇧` 는 `Ctrl+Alt` 가, `⌥⌘` 는 그 자체가
+    // 다른 자리다. 여기에 하나라도 새면 `Ctrl+Shift+<그 글자>` 의 뜻이 통째로 뒤바뀐다.
+    try std.testing.expectEqual(@as(usize, 0), collides(.{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'C' } }));
+    try std.testing.expectEqual(@as(usize, 0), collides(.{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'C' } }));
+    try std.testing.expectEqual(@as(usize, 0), collides(.{ .modifiers = .{ .command = true, .control = true }, .key = .{ .char = 'C' } }));
+
+    // 셸이 안 가져가는 글자는 애초에 밀 이유가 없다(`Ctrl+,` 자리 — `controlByte` 가 없다).
+    try std.testing.expectEqual(@as(usize, 0), collides(.{ .modifiers = .{ .command = true }, .key = .{ .char = ',' } }));
+
+    // 그리고 **오늘의 표에서도** 그 성질이 서 있어야 한다: `⌥⌘C` 뿐인 `c` 는 밀리지 않는다.
+    for (displaced_plain_chars) |c| try std.testing.expect(c != 'c');
 }
 
 test "isCopyChord: 붙여넣기와 같은 자리에서 판정한다" {

@@ -41,16 +41,30 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 | 중재 방식 | 출처 도장(`origin`) + `updatedAt` 비교 | 중재 자체가 없다 |
 | 흔들림 대책 | stale guard | 시간 기반 **비대칭** 확인 |
 
-herdr 쪽이 특히 눈여겨볼 만한데, **한때 상태 훅을 쓰다가 걷어냈다**. 지금 코드에 남은 것은 제거
-목록이고(`HOOK_REMOVALS`: `PermissionRequest`→blocked, `Stop`→idle, `PreToolUse`·`UserPromptSubmit`
-→working), 설치하는 훅은 `SessionStart` 하나뿐이며 그 스크립트는 상태가 아니라 세션 신원을 보낸다.
-23개 provider 전부 같은 모양이고 `report_agent_state`에 해당하는 경로는 존재하지 않는다.
+herdr 쪽이 특히 눈여겨볼 만한데, **provider마다 답이 다르고 claude·codex는 상태 훅을 걷어낸
+쪽이다**. asset 17개를 전수로 확인한 결과 상태(`pane.report_agent` + `params.state`)를 보내는 것은
+kimi·pi·omp·opencode·kilo·mastracode 여섯뿐이고, claude·codex·cursor·copilot·devin·droid·grok·
+antigravity 여덟은 세션 신원(`pane.report_agent_session`)만 보낸다. 걷어낸 흔적이 상수로 남아 있다
+— `HOOK_REMOVALS`(claude: `PermissionRequest`→blocked, `Stop`→idle, `PreToolUse`·`UserPromptSubmit`
+→working)와 `*_REMOVED_LIFECYCLE_HOOK_EVENTS`(copilot 9개, droid 9개, devin 6개). 왜 걷어냈는지는
+히스토리가 squash되어 남아 있지 않다.
+
+**그러니 herdr도 훅을 버린 것이 아니라 훅에서 «상태»만 뺐다.** 세션 신원은 여전히 훅으로만 받는다 —
+`session_id`와 `transcript_path`는 화면에 나오지 않기 때문이다.
 
 그러면서도 herdr의 화면 판정 플래그 이름은 우리 `agent_observer`의 것과 같다
 (`visible_blocker`·`visible_idle`·`visible_working`·`skip_state_update`) — 훅을 버린 쪽조차 화면
 판정은 우리와 같은 모양으로 풀었다는 뜻이다. 그리고 그 대신 시간으로 흔들림을 잡는데, **지연을 한
 방향에만 건다**: `working`→`idle`만 100ms 간격 3회 확인(700ms 상한)으로 미루고, `blocked` 해제나
 `working` 진입은 즉시 반영한다. 프로세스가 죽으면 확인 없이 바로 `idle`이다.
+
+**대신 herdr가 포기한 것이 있다 — 서브에이전트다.** claude 훅 스크립트는 자식 이벤트를 명시적으로
+버리고(`is_subagent = bool(hook_input.get("agent_id"))` → 즉시 종료), `SubagentStop`은 제거 목록에
+있다. 화면 쪽에도 개수를 세는 장치가 없고 provider manifest에 문자열 규칙이 있을 뿐이다(grok의
+`"⠧ Waiting on subagent…"`, kiro의 `subagent_approval`). 즉 **«자식이 돌고 있다»는 알아도 «몇이
+남았는지»는 모른다.** 우리 `agent_hook_mode`가 `background_tasks_raw`에서 `liveSubagentIds`로
+살아 있는 자식 id 집합을 뽑아 세는 것과 다르다 — 계약 §2가 이 셈을 요구하는 이유는 자식이 도는 동안
+lead의 `Stop`이 턴 끝이 아니기 때문이고, 그 판별은 화면에 근거가 없다.
 
 **그래서 모드를 가르는 쪽이 우리뿐**이고, 그 선택으로 얻는 것이 위 문단의 진단 가능성이다.
 

@@ -19,6 +19,17 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
 }
 
+/// 함수 하나의 본문을 자른다. **`max` 를 넘으면 실패한다** — 경계 문자열이 안 맞으면 슬라이스가 파일
+/// 끝까지 달아나고, 그러면 아래 needle 들이 **아무 데서나** 걸려 판정자가 통째로 초록이 된다
+/// (적대적 검증 1회차: 경계를 지워도 통과했다). 「못 찾았다」와 「달아났다」를 함께 막는다.
+fn bodyOf(src: []const u8, head: []const u8, close: []const u8, max: usize) ![]const u8 {
+    const at = std.mem.indexOf(u8, src, head) orelse return error.FunctionMissing;
+    const end = std.mem.indexOfPos(u8, src, at, close) orelse return error.FunctionUnterminated;
+    const body = src[at..end];
+    if (body.len > max) return error.FunctionBodyRunaway;
+    return body;
+}
+
 test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     const allocator = std.testing.allocator;
     const doc = try read(allocator, "docs/ssh-integration.md", 512 * 1024);
@@ -34,9 +45,7 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     // ── ⑴ 창 제목은 **cwd 를 안 쓴다.** `windowTitle()` 이 OSC 0/2 관측에서 만든다 ────────────
     //
     // 표가 「`currentCwd` → Swift」라고 적고 있던 자리다. 코드가 그 사실을 먼저 정정했다.
-    const wt = std.mem.indexOf(u8, workspace, "pub fn windowTitle") orelse return error.WindowTitleMissing;
-    const wt_end = std.mem.indexOfPos(u8, workspace, wt, "\n}\n") orelse workspace.len;
-    const wt_body = workspace[wt..wt_end];
+    const wt_body = try bodyOf(workspace, "pub fn windowTitle", "\n}\n", 2048);
     try std.testing.expect(std.mem.indexOf(u8, wt_body, "observation.window_title") != null);
     try std.testing.expect(std.mem.indexOf(u8, wt_body, "currentCwd") == null); // 다시 엮이면 표도 고쳐야 한다
     try std.testing.expect(std.mem.indexOf(u8, doc, "| 창 제목 | **cwd 를 안 쓴다.**") != null);
@@ -47,17 +56,33 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     const abi = try read(allocator, "src/platform/macos/app_host_abi.zig", 4 * 1024 * 1024);
     defer allocator.free(abi);
     try std.testing.expect(std.mem.indexOf(u8, abi, "pub export fn maru_macos_app_session_cwd") != null);
-    const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift", 8 * 1024 * 1024);
-    defer allocator.free(swift);
-    try std.testing.expect(std.mem.indexOf(u8, swift, "maru_macos_app_session_cwd(") == null);
+    // ⚠️ **Swift 파일은 하나가 아니다**(적대적 검증 2회차 — 16 개다). `MaruAppHost.swift` 만 보고
+    //    「소비자 0」이라고 하면, 다른 파일이 부르는 순간 그 주장이 거짓이 되는데 판정자는 초록이다.
+    //    디렉터리를 훑어 **전수**로 센다.
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src/platform/macos", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var it = dir.iterate();
+    var swift_seen: usize = 0;
+    while (try it.next(std.testing.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".swift")) continue;
+        const body = try dir.readFileAlloc(std.testing.io, entry.name, allocator, .limited(8 * 1024 * 1024));
+        defer allocator.free(body);
+        swift_seen += 1;
+        if (std.mem.indexOf(u8, body, "maru_macos_app_session_cwd(") != null) {
+            std.debug.print("소비자가 생겼다: {s} — §9.4 표의 그 행을 고쳐야 한다\n", .{entry.name});
+            return error.CwdAbiConsumerAppeared;
+        }
+    }
+    // **훑은 파일이 0 이면 경로가 바뀐 것이다** — 0 을 통과시키면 「아무도 안 부른다」와 「아무것도 안
+    // 봤다」가 구분되지 않는다.
+    try std.testing.expect(swift_seen >= 10);
 
     // ── ⑶ 표시 축의 규율: 원격 경로는 `<host>:<path>` ────────────────────────────────────────
     //
     // 폴더줄이 그 규율을 지고, 판정은 `termCwdIsRemote` + `termDisplayHost` **하나**를 공유한다 —
     // 재구현하면 두 뷰가 같은 경로를 다르게 적는다(실제로 종료 안내가 그랬다).
-    const sb = std.mem.indexOf(u8, app, "pub fn sidebarCwdPath") orelse return error.SidebarMissing;
-    const sb_end = std.mem.indexOfPos(u8, app, sb, "\n}\n") orelse app.len;
-    const sb_body = app[sb..sb_end];
+    const sb_body = try bodyOf(app, "pub fn sidebarCwdPath", "\n}\n", 4096);
     try std.testing.expect(std.mem.indexOf(u8, sb_body, "termCwdIsRemote(term)") != null);
     try std.testing.expect(std.mem.indexOf(u8, sb_body, "termDisplayHost(term)") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "`<host>:<path>` 로 적는다") != null);
@@ -65,12 +90,10 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     // ── ⑷ 쓰기 축의 규율: 원격 cwd 를 **로컬 spawn 에 안 넘긴다** ─────────────────────────────
     //
     // 표의 두 행(새 탭 상속·종료 Term 되살리기)이 주장하는 사실이다.
-    const fresh = std.mem.indexOf(u8, app, "fn respawnEndedPlaceholder") orelse return error.RespawnMissing;
-    const fresh_end = std.mem.indexOfPos(u8, app, fresh, "\n    }\n") orelse app.len;
-    try std.testing.expect(std.mem.indexOf(u8, app[fresh..fresh_end], "if (!termCwdIsRemote(tomb))") != null);
+    const respawn_body = try bodyOf(app, "fn respawnEndedPlaceholder", "\n    }\n", 8192);
+    try std.testing.expect(std.mem.indexOf(u8, respawn_body, "if (!termCwdIsRemote(tomb))") != null);
     const term = try read(allocator, "src/platform/macos/app_session/term.zig", 4 * 1024 * 1024);
     defer allocator.free(term);
-    const ft = std.mem.indexOf(u8, term, "pub fn focusedTermCwd") orelse return error.FocusedCwdMissing;
-    const ft_end = std.mem.indexOfPos(u8, term, ft, "\n}\n") orelse term.len;
-    try std.testing.expect(std.mem.indexOf(u8, term[ft..ft_end], "termCwdIsRemote(term)") != null);
+    const ft_body = try bodyOf(term, "pub fn focusedTermCwd", "\n}\n", 2048);
+    try std.testing.expect(std.mem.indexOf(u8, ft_body, "termCwdIsRemote(term)") != null);
 }

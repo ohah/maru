@@ -813,6 +813,11 @@ test "release manifest canonical A and B round trip" {
         var parsed = try parseCanonical(std.testing.allocator, bytes);
         defer parsed.deinit();
         try std.testing.expectEqual(role, parsed.value().role);
+        @memset(bytes, 0xaa);
+        try std.testing.expectEqualStrings("ohah", parsed.value().repository.owner);
+        try std.testing.expectEqualStrings("arm64", parsed.value().signing.architectures[0]);
+        try std.testing.expectEqualStrings("Maru.dmg", parsed.value().assets[0].name);
+        if (role == .b) try std.testing.expectEqualStrings("v0.0.9", parsed.value().predecessor.?.tag);
     }
 }
 

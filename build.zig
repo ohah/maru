@@ -12635,6 +12635,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-transport",
         "Validate closed bounded GitHub REST transport requests for the release adapter",
     );
+    const session_host_release_adapter_token_environment_step = b.step(
+        "test-session-host-release-adapter-token-environment",
+        "Validate exact GH_TOKEN process capture for the release adapter",
+    );
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_transport_optimize| {
         const release_manifest_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
@@ -12700,6 +12704,35 @@ pub fn build(b: *std.Build) void {
         session_host_release_adapter_github_transport_step.dependOn(&run_github_transport_tests.step);
         session_host_step.dependOn(&run_github_transport_tests.step);
         if (posix_host_tests) test_step.dependOn(&run_github_transport_tests.step);
+
+        const token_environment_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_token_environment.zig"),
+            .target = target,
+            .optimize = github_transport_optimize,
+            .link_libc = true,
+            .imports = &.{.{
+                .name = "release_adapter_github_transport",
+                .module = github_transport_mod,
+            }},
+        });
+        const token_environment_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_token_environment.zig"),
+                .target = target,
+                .optimize = github_transport_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_token_environment", .module = token_environment_mod },
+                    .{ .name = "release_adapter_github_transport", .module = github_transport_mod },
+                },
+            }),
+        });
+        const run_token_environment_tests = b.addRunArtifact(token_environment_tests);
+        run_token_environment_tests.addArg("--maru-expect-tests=5");
+        run_token_environment_tests.setCwd(b.path("."));
+        session_host_release_adapter_token_environment_step.dependOn(&run_token_environment_tests.step);
+        session_host_step.dependOn(&run_token_environment_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_token_environment_tests.step);
     }
     const session_host_release_adapter_github_attestation_step = b.step(
         "test-session-host-release-adapter-github-attestation",

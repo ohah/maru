@@ -165,6 +165,11 @@ pub const Screen = struct {
         return self.inner.rowRuns(row);
     }
 
+    /// 원격 화면의 행 수. 창이 그보다 낮으면 그리는 쪽이 **아래 몇 행**을 고른다(S11-6).
+    pub fn rowCount(self: *const Screen) u16 {
+        return self.inner.rowCount();
+    }
+
     /// 원격 커서(칸·보임·모양). **조립기가 이미 들고 있었는데 폰이 안 꺼내 썼다** — 그래서 원격
     /// 화면에 커서가 아예 안 그려졌고, 보는 사람은 그 세션이 어디에 서 있는지 알 수 없었다.
     pub fn cursor(self: *const Screen) stream.Cursor {

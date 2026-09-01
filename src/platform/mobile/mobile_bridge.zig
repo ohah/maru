@@ -4670,10 +4670,30 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     const oy = @as(i32, @intFromFloat(win.y + set_head_h + 1));
     const rows_fit: u16 = @intCast(@max(0, @divTrunc(@as(i32, @intFromFloat(win.h - set_head_h - 1)), line_h)));
 
+    // **아래를 기준으로 그린다**(S11-6). 원격 화면이 창보다 높으면 위부터 그리는 것은 **프롬프트가
+    // 있는 아래쪽을 버리는** 것이다 — 사용자가 방금 친 명령의 결과를 못 본다. 터미널은 최신 출력이
+    // 아래에 있으므로, 넘치면 **오래된 위쪽**을 버린다.
+    //
+    // 세로를 이렇게 풀기 때문에 세션 크기 조정은 **열만** 한다(맥 창이 높을 때 행까지 맞추면
+    // 그쪽이 스무 행 넘게 잃는다 — 계약 참조).
+    // **판정용 값은 프레임마다 비운다.** 안 비우면 아무것도 안 그린 프레임에서 **지난 프레임의
+    // 값**이 읽혀 판정자가 거짓으로 통과한다(적대적 검증 8회차 — 「그린 결과를 남긴다」는 말은
+    // 「이번에 그린 것」이어야 뜻이 있다).
+    remote_last_src_row = 0;
+    remote_last_fg = null;
+    remote_last_bg = null;
+    remote_cursor_drawn = false;
+
+    const total_rows = scr.rowCount();
+    const first_row: u16 = if (total_rows > rows_fit) total_rows - rows_fit else 0;
+    remote_first_row = first_row;
+
     var drawn: usize = 0;
     var row: u16 = 0;
     while (row < rows_fit) : (row += 1) {
-        const runs = scr.rowRuns(row);
+        const src_row = first_row + row;
+        if (src_row >= total_rows) break;
+        const runs = scr.rowRuns(src_row);
         if (runs.len == 0) continue;
         var col: i32 = 0;
         for (runs) |r| {
@@ -4711,6 +4731,10 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
                 if (r.grapheme.len > 0 and r.grapheme[0] != ' ') {
                     pushText(r.grapheme, ox + col * cell_w, oy + @as(i32, row) * line_h, line_h, fg);
                     remote_last_fg = fg;
+                    // **어느 «원본» 행을 그렸는지 남긴다**(판정용). `first_row` 가 맞다는 것만으로는
+                    // 부족하다 — 그 값을 쓰지 않고 위에서 가져오는 판이 통과한다(적대적 검증 4회차에서
+                    // 그 변이가 실제로 살아남았다).
+                    remote_last_src_row = src_row;
                     drawn += 1;
                 }
                 col += @intCast(@max(1, r.width));
@@ -4722,10 +4746,15 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     // 없었고, 보는 사람은 그 세션이 어디에 서 있는지 알 수 없었다. 읽기 전용이라 깜빡이지
     // 않는다 — 깜빡임은 조종하는 화면의 신호고, 여기서 흉내 내면 칠 수 있다고 읽힌다.
     const cur = scr.cursor();
-    if (cur.visible and cur.row < rows_fit) {
+    // 커서도 **같은 기준**으로 옮긴다 — 안 옮기면 글자는 아래를 보여 주면서 커서만 위쪽 좌표에
+    // 서서 엉뚱한 자리를 가리킨다.
+    // **행이 없으면 커서도 없다.** `Cursor.visible` 의 기본값이 `true` 라, `rows = 0` 인 화면에서는
+    // 글자를 하나도 안 그리면서 **커서만 떠 있게** 된다(적대적 검증 2회차).
+    if (total_rows > 0 and cur.visible and cur.row >= first_row and cur.row - first_row < rows_fit) {
+        const cur_row: u16 = cur.row - first_row;
         const cx = ox + @as(i32, cur.col) * cell_w;
         if (cx <= @as(i32, @intFromFloat(win.x + win.w))) {
-            push(.{ .x = cx, .y = oy + @as(i32, cur.row) * line_h, .w = @intCast(cell_w), .h = @intCast(line_h) }, tk.get(.surface_fg), 0x66, 0, 0);
+            push(.{ .x = cx, .y = oy + @as(i32, cur_row) * line_h, .w = @intCast(cell_w), .h = @intCast(line_h) }, tk.get(.surface_fg), 0x66, 0, 0);
             remote_cursor_drawn = true;
         } else remote_cursor_drawn = false;
     } else remote_cursor_drawn = false;
@@ -4738,6 +4767,21 @@ var remote_last_fg: ?color.Rgb = null;
 
 pub fn remoteLastFg() ?color.Rgb {
     return remote_last_fg;
+}
+
+/// 마지막으로 그린 글자의 **원본 행**(판정용). 「아래를 그렸나」는 이 값으로만 판정된다.
+var remote_last_src_row: u16 = 0;
+
+pub fn remoteLastSrcRow() u16 {
+    return remote_last_src_row;
+}
+
+/// 마지막으로 그린 원격 화면의 **첫 행 인덱스**(판정용). 창보다 높은 화면에서 아래를 기준으로
+/// 그렸는지는 이 값으로만 보인다 — 그린 픽셀로는 「무엇이 안 그려졌나」를 못 잰다.
+var remote_first_row: u16 = 0;
+
+pub fn remoteFirstRow() u16 {
+    return remote_first_row;
 }
 
 /// 마지막으로 칠한 원격 **배경색**(판정용). `null` 이면 기본 배경뿐이라 안 칠했다.

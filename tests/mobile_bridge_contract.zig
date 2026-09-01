@@ -5447,6 +5447,55 @@ test "원격 화면은 run 이 든 색으로 그린다 — 색 있는 화면이 
     try std.testing.expectEqual(@as(u8, 0), fg.b);
 }
 
+test "원격 화면이 창보다 높으면 아래를 보여 준다 — 프롬프트가 잘리지 않는다" {
+    // **위부터 그리면 프롬프트가 있는 아래쪽을 버린다** — 사용자가 방금 친 명령의 결과를 못 본다.
+    // 터미널은 최신 출력이 아래에 있으므로 넘치면 **오래된 위쪽**을 버려야 한다(S11-6).
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"host-backed\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const first = bridge.remoteRowCenter(0).?;
+    tapAt(first.x, first.y);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // 창에 들어가는 것보다 **훨씬 높은** 화면을 보낸다.
+    const tall: u16 = 200;
+    const frame = try makeTallScreenFrame(std.testing.allocator, tall);
+    defer std.testing.allocator.free(frame);
+    _ = feedControl(frame);
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.cells, bridge.remoteScreenShown());
+
+    // **첫 행이 0 이 아니다** — 0 이면 위부터 그린 것이고 아래가 잘린 것이다.
+    const first_row = bridge.remoteFirstRow();
+    try std.testing.expect(first_row > 0);
+    // **그리고 그 값이 실제로 쓰였다.** 첫 행만 맞고 내용은 위에서 가져오는 판이 있어서
+    // (적대적 검증 4회차에서 그 변이가 살아남았다) 마지막으로 그린 **원본 행**을 직접 본다 —
+    // 아래를 그렸다면 그것은 마지막 행이다.
+    try std.testing.expectEqual(@as(u16, tall - 1), bridge.remoteLastSrcRow());
+    // 그리고 **마지막 행이 창 안에 든다** — 프롬프트가 보인다는 뜻이다.
+    try std.testing.expect(bridge.remoteCursorDrawn());
+
+    // **행이 없으면 커서도 없다.** `Cursor.visible` 기본값이 `true` 라, 그냥 두면 빈 화면에
+    // 커서만 떠 있다(적대적 검증 2회차).
+    const empty = try makeEmptyScreenFrame(std.testing.allocator);
+    defer std.testing.allocator.free(empty);
+    _ = feedControl(empty);
+    _ = bridge.maru_mobile_build(402, 874, fake_ms);
+    try std.testing.expect(!bridge.remoteCursorDrawn());
+}
+
 test "원격 화면은 배경색과 반전을 그린다 — 선택·강조가 안 사라진다" {
     // `Run.bg` 도 실려 오는데 안 쓰면 **반전(inverse)으로 표시한 선택·강조가 통째로 안 보인다**.
     // 색을 실어 보내면서 그 플래그만 버리면 화면이 거짓말을 한다.
@@ -5577,6 +5626,61 @@ fn makeScreenFrame(a: std.mem.Allocator) ![]u8 {
 /// 색을 실은 프레임. `fg` 는 stream 의 **태그드 색 의도**다(0 이면 default).
 fn makeScreenFrameColored(a: std.mem.Allocator, fg: u32) ![]u8 {
     return makeScreenFrameStyled(a, fg, 0, 0);
+}
+
+/// **행이 하나도 없는** 프레임. `rows = 0` 이면 그릴 글자가 없다 — 커서도 없어야 한다.
+fn makeEmptyScreenFrame(a: std.mem.Allocator) ![]u8 {
+    const stream = maru.session.screen_stream;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(a);
+    const meta = try stream.encodeScreenMeta(a, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 1,
+        .rows = 0,
+        .active_screen = 0,
+        // `visible` 기본값이 `true` 라 **아무것도 안 실어도** 커서가 보인다고 말한다 — 그것이 함정이다.
+        .cursor = .{ .col = 0, .row = 0, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer a.free(meta);
+    try stream.appendRecord(&body, a, meta);
+    const out = try a.alloc(u8, 12 + body.items.len);
+    @memset(out[0..12], 0);
+    @memcpy(out[0..4], "MRSS");
+    out[4] = 0;
+    std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
+    @memcpy(out[12..], body.items);
+    return out;
+}
+
+/// 행이 여럿인 프레임. 각 행에 그 번호를 글자로 적어 **어느 행이 그려졌는지** 가릴 수 있게 한다.
+fn makeTallScreenFrame(a: std.mem.Allocator, rows: u16) ![]u8 {
+    const stream = maru.session.screen_stream;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(a);
+    const meta = try stream.encodeScreenMeta(a, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 1,
+        .rows = rows,
+        .active_screen = 0,
+        // 커서는 **마지막 행**에 둔다 — 프롬프트가 서는 자리다.
+        .cursor = .{ .col = 0, .row = rows - 1, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer a.free(meta);
+    try stream.appendRecord(&body, a, meta);
+    var r: u16 = 0;
+    while (r < rows) : (r += 1) {
+        var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1 }};
+        const row = try stream.encodeRow(a, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = r, .runs = &runs });
+        defer a.free(row);
+        try stream.appendRecord(&body, a, row);
+    }
+    const out = try a.alloc(u8, 12 + body.items.len);
+    @memset(out[0..12], 0);
+    @memcpy(out[0..4], "MRSS");
+    out[4] = 0;
+    std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
+    @memcpy(out[12..], body.items);
+    return out;
 }
 
 /// 색과 style flag 를 실은 프레임. `fg`·`bg` 는 stream 의 **태그드 색 의도**다(0 이면 default).

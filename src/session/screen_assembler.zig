@@ -267,6 +267,12 @@ pub const ScreenAssembler = struct {
         self.link_spans = ls.spans;
     }
 
+    /// 화면의 행 수. **그리는 쪽이 «아래 몇 행» 을 고르려면 전체를 알아야 한다** — 창보다 높은
+    /// 화면에서 위부터 그리면 프롬프트가 있는 아래쪽이 안 보인다.
+    pub fn rowCount(self: *const ScreenAssembler) u16 {
+        return self.rows_count;
+    }
+
     /// 이 행의 runs(렌더 입력). 범위를 벗어나면 빈 슬라이스.
     pub fn rowRuns(self: *const ScreenAssembler, row: u16) []const Run {
         if (row >= self.rows_count) return &.{};

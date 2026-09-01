@@ -1094,6 +1094,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast로 검증한다. 이 gate만으로 DMG 내부 executable과의 동일성, Apple product 관측, current manifest composition,
   summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  manifest를 만들기 전 release candidate file 권위는 `release_adapter_candidate_files.zig`의 final-address move-only
+  `CandidateFiles`가 소유한다. 입력은 trusted tag `Context`, move-only `DraftAuthority`, final-address pre-draft
+  `CandidateAttestation`과 그 owner가 이미 pin한 두 exact pathname뿐이다. caller가 size/SHA, release ID/tag/source, asset name이나
+  attestation 성공 bool을 별도 scalar로 제출하지 않으며 raw pathname을 다시 pin하거나 large asset을 heap copy하지 않는다.
+
+  composition은 attestation owner를 revalidate해 held fd digest·fingerprint·parent authority와 exact pathname identity를 다시 대조하고,
+  그 view의 tag/source/build와 context, draft의 ID/tag/source를 교차결속한 뒤에만 owner를 게시한다. 성공 `CandidateFiles`는 attestation
+  owner를 빌리므로 그 owner가 더 오래 살아야 하며 cleanup은 `CandidateFiles`를 먼저 닫고 `CandidateAttestation`의 fd authority를
+  나중에 닫는다. copied/pre-owned/stale attestation owner, context/draft/path drift, pathname 교체와 in-place mutation에서는 publication
+  0이다. focused gate `test-session-host-release-adapter-candidate-files`는 exact success/revalidation, owner lifetime, context/draft/path drift,
+  mutation과 copied/pre-owned owner를 Debug·ReleaseFast로 검증한다. Apple signing·DMG 내부 executable equality와 evidence/manifest
+  authoring은 후속 candidate product owner가 소비한다.
+
   current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
   `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
   composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B

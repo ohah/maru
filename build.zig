@@ -12310,6 +12310,32 @@ pub fn build(b: *std.Build) void {
         if (posix_host_tests) test_step.dependOn(&run_phase_tests.step);
         macos_only_test_step.dependOn(&run_phase_tests.step);
     }
+    const session_host_release_adapter_verify_predecessor_phase_step = b.step(
+        "test-session-host-release-adapter-verify-predecessor-phase",
+        "Validate predecessor verification transaction ordering and cleanup",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |verify_phase_optimize| {
+        const verify_phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_verify_predecessor_phase.zig"),
+            .target = target,
+            .optimize = verify_phase_optimize,
+        });
+        const verify_phase_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_verify_predecessor_phase.zig"),
+                .target = target,
+                .optimize = verify_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_verify_predecessor_phase", .module = verify_phase_mod }},
+            }),
+        });
+        const run_verify_phase_tests = b.addRunArtifact(verify_phase_tests);
+        run_verify_phase_tests.addArg("--maru-expect-tests=5");
+        run_verify_phase_tests.setCwd(b.path("."));
+        session_host_release_adapter_verify_predecessor_phase_step.dependOn(&run_verify_phase_tests.step);
+        session_host_step.dependOn(&run_verify_phase_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_verify_phase_tests.step);
+        macos_only_test_step.dependOn(&run_verify_phase_tests.step);
+    }
     const session_host_release_adapter_context_step = b.step(
         "test-session-host-release-adapter-context",
         "Validate bounded GitHub Actions identity context for the release adapter",

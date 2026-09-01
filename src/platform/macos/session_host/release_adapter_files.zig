@@ -131,6 +131,26 @@ pub const PinnedExecutableFile = struct {
         if (!sameMutationSeal(seal, mutationSeal(try directoryFingerprint(stat))))
             return error.FileChanged;
     }
+
+    /// Revalidates the held executable and parent vnode without reopening a caller pathname.
+    pub fn revalidateHeld(self: *const @This()) Error!ExecutableObservation {
+        const expected = self.value() orelse return error.InvalidOwner;
+        var before_stat: posix.Stat = undefined;
+        var parent_stat: posix.Stat = undefined;
+        if (c.fstat(self.fd, &before_stat) != 0 or c.fstat(self.parent_fd, &parent_stat) != 0)
+            return error.FileChanged;
+        const before = try executableFingerprint(before_stat);
+        if (!sameFingerprint(self.fingerprint, before) or
+            !sameDirectoryAuthority(self.parent_fingerprint, try directoryFingerprint(parent_stat)))
+            return error.FileChanged;
+        const digest = hashExact(self.fd, expected.size) catch return error.FileChanged;
+        var after_stat: posix.Stat = undefined;
+        if (c.fstat(self.fd, &after_stat) != 0) return error.FileChanged;
+        const after = try executableFingerprint(after_stat);
+        if (!sameFingerprint(self.fingerprint, after) or !std.mem.eql(u8, &digest, &self.sha256))
+            return error.FileChanged;
+        return expected;
+    }
 };
 
 pub const Input = struct {

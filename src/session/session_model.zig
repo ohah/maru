@@ -16,6 +16,7 @@ const agent_observer = @import("agent_observer.zig");
 const agent_transcript_mod = @import("agent_transcript.zig");
 const agent_hook_event = @import("agent_hook_event.zig");
 const agent_hook_mode = @import("agent_hook_mode.zig");
+const agent_state_arbiter = @import("agent_state_arbiter.zig");
 const agent_hook_command = @import("agent_hook_command.zig"); // RA5: 원격 pane 신원 상수·대조
 const remote_agent_stream = @import("remote_agent_stream.zig"); // RA5: 원격 이벤트 채널 수명
 const agent_image_index = @import("agent_image_index.zig");
@@ -91,8 +92,35 @@ pub fn Model(comptime Rt: type) type {
             git_branch_polled_ns: i128 = 0,
             /// 포그라운드가 어떤 에이전트 CLI인지(파생값). pollAgentKinds가 ≈0.5s마다 proc_name으로 갱신.
             agent_kind: AgentKind = .none,
-            /// 터미널 observer가 foreground/screen/OSC/activity로 판정한 현재 상태와 전이 안정화 상태.
+            /// **권위표가 낸 결과**(docs/agent-hooks.md §1.1). 배지·사이드바가 읽는 값이다.
+            ///
+            /// 예전에는 이 자리 하나를 훅과 화면이 **번갈아 직접** 썼다. 훅은 그것을 상태 기계의 입력으로도
+            /// 쓰므로(`advance(current = agent_state)`) 화면이 덮으면 기계가 오염됐다 — 중재가 아니라
+            /// 마지막에 쓴 쪽이 이기는 덮어쓰기였다. 그래서 소스별 자리를 따로 두고(`agent_hook_state`·
+            /// `agent_screen_state`) 이 필드는 **중재 결과만** 담는다(§1.6-⑴).
             agent_state: agent_observer.State = .unknown,
+            /// 훅 payload 만으로 세운 상태(§1.1 의 `hook`). `agent_hook_mode.advance` 의 입력이자 출력이라
+            /// **화면이 절대 건드리면 안 된다.**
+            agent_hook_state: agent_observer.State = .unknown,
+            /// 화면·OSC 만으로 세운 상태(§1.1 의 `screen`). `Stabilizer` 를 통과한 값이다.
+            agent_screen_state: agent_observer.State = .unknown,
+            /// 화면 판정이 함께 낸 신뢰도 플래그. 권위표의 C1·C2 가 이 둘로 선다.
+            agent_screen_visible_blocker: bool = false,
+            agent_screen_visible_idle: bool = false,
+            /// 화면 상태를 세운 근거(§1.4). A 경로에서 그대로 결과의 출처가 된다.
+            agent_screen_origin: agent_state_arbiter.Origin = .screen,
+            /// 화면을 새로 판정한 횟수. 중재기가 «같은 관측을 두 번 세지 않게» 하는 입력이다 — 한 tick 에
+            /// 중재가 여러 번 불릴 수 있어(원격 채널 드레인 + 폴링 소비자) 호출을 세면 C2 임계가 몇 배
+            /// 빨리 온다.
+            agent_screen_seq: u64 = 0,
+            /// 이 Term 의 중재기. C2 의 연속 셈을 들고 있어 **Term 마다 하나**여야 한다.
+            agent_arbiter: agent_state_arbiter.Arbiter = .{},
+            /// 마지막 판정의 출처·규칙(§1.4 — 진단용). 배지 옆에 소스를 밝힐 수 있어야 버그 보고가 성립한다.
+            agent_state_origin: agent_state_arbiter.Origin = .hook,
+            agent_state_rule: []const u8 = "",
+            /// 훅이 연 턴의 일련번호. `turn_key` 가 바뀔 때 올린다 — C2 의 연속 셈을 언제 버릴지의 유일한
+            /// 입력이고, 안 올리면 C2 가 한 번 성공한 뒤 다음 턴을 즉시 접는다(§1.6-⑵-a).
+            agent_hook_turn_seq: u64 = 0,
             agent_stabilizer: agent_observer.Stabilizer = .{},
             /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
             agent_screen_generation: u64 = 0,

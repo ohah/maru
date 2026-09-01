@@ -1055,9 +1055,9 @@ pub const SidebarConfig = struct {
     /// `config.toml` 신뢰 블록). 되돌릴 수 있다 — 끄면 **우리 표식이 붙은 항목만** 거두고 사용자 항목은
     /// 순서까지 보존한다(§2a). 그 되돌림도 제품 경로 게이트가 실제로 «켰다 → 껐다» 를 돌려 확인한다.
     ///
-    /// ⚠️ 남은 위험 하나: **codex 의 오류 턴**(§9-10). codex 에는 `StopFailure` 가 없어, 오류로 끝난 턴에
-    /// `Stop` 이 오지 않으면 그 pane 배지가 안 풀린다. 지금은 이 키를 끄는 것이 즉시 회피책이다 —
-    /// **§1.1 의 C2 가 붙으면 그 회피가 필요 없어진다**(화면 idle 이 그 턴을 닫는다).
+    /// codex 의 오류 턴(§9-10)은 **더 이상 이 키로 회피하지 않는다**(2026-09-01). codex 에는
+    /// `StopFailure` 가 없어 오류로 끝난 턴에 `Stop` 이 오지 않지만, §1.1 의 C2 가 화면 idle 로 그 턴을
+    /// 닫는다 — 폴링 500ms × 연속 3회라 약 1.5초 늦되 배지가 거짓말하지는 않는다.
     agent_hooks: bool = true,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width

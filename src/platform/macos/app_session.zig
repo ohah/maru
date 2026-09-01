@@ -22528,12 +22528,15 @@ test "원격 nonce 는 로컬 훅 이름과 같은 두 값에서 나온다 — �
     try std.testing.expect(hc.parseRemotePaneNonce(got) != null);
 }
 
-test "hook mode runs exactly one source and takes over notifications" {
+test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알림은 훅만 낸다" {
     // **계약 §1의 핵심 규칙을 그 자리에서 본다.** 앞선 제품 테스트는 `pollAgentHookEvents` 를 직접 불러
     // 소비자 분기·OSC 차단·알림 방출이라는 세 seam 을 건너뛰었다 — 뮤테이션 셋이 모두 «못 잡음» 으로
-    // 그것을 드러냈다(분기를 지워 두 소스를 함께 돌려도, 훅 모드에서 OSC 를 방출해도, 훅 알림을 안 내도
-    // 통과했다). 그래서 여기서는 **실제 tick 경로**(`pollAgentKinds`)와 **실제 드레인**(`pendingNotification`)
-    // 을 부른다.
+    // 그것을 드러냈다. 그래서 여기서는 **실제 tick 경로**(`pollAgentKinds`)와 **실제 드레인**
+    // (`pendingNotification`) 을 부른다.
+    //
+    // **2026-09-01 개정**: 예전 이름은 「exactly one source」였고 훅 Term 에서 `test_observe_calls == 0`
+    // 을 단언했다. §1 이 뒤집히며 그 단언도 뒤집힌다 — 훅 Term 도 화면을 함께 읽고(§1.1) 권위표가 둘을
+    // 중재한다. **바뀌지 않은 것은 알림이다**(§1.1.1): 훅이 도는 Term 에서 OSC 9/777 은 여전히 안 나간다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -22603,7 +22606,8 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.test_hook_calls = 0;
     agent_ops.pollAgentConsumer(&session, term, false, true);
     try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
-    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls);
+    // **훅 Term 도 화면을 읽는다**(§1.1) — 예전에는 0 이었다. 이 1 이 곧 「두 소스가 함께 돈다」다.
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_observe_calls);
     try std.testing.expect(term.agent_hook_log_present);
 
     // ── ⓿b **실제 제품 순서: 파일이 없는 채 시작해 훅이 만든 뒤 전환된다** ─────────────────
@@ -22630,7 +22634,7 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.test_hook_calls = 0;
     agent_ops.pollAgentConsumer(&session, term, false, true);
     try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
-    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls); // 관측은 그 tick 부터 멎는다
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_observe_calls); // 훅이 서도 화면은 계속 읽는다(§1.1)
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 
     // ── ① 소비자는 정확히 하나다 ──────────────────────────────────────────────────────────────
@@ -22643,7 +22647,7 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.test_hook_calls = 0;
     agent_ops.pollAgentConsumer(&session, term, false, true);
     try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
-    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls); // **섞이지 않는다**
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_observe_calls); // **함께 돈다 — 섞이는 것이 아니라 중재된다**(§1.1)
 
     // 게이트를 끄면 반대가 된다 — 훅은 안 돌고 관측만 돈다.
     session.loaded_config.config.sidebar.agent_hooks = false;
@@ -23982,7 +23986,10 @@ test "hook mode fills state and conversation from the event log, and only then" 
         });
         const rotated_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, rotated_rel });
         defer a.free(rotated_abs);
-        term.agent_state = .running; // 턴이 돌던 중에 회전이 있었다
+        // 턴이 돌던 중에 회전이 있었다. **훅 자리를 세운다**(§1.6-⑴) — `agent_state` 는 권위표가 내는
+        // 결과라 직접 쓰면 다음 판정이 그것을 덮는다. 「턴이 돌고 있다」를 말하는 자리는 훅 쪽이다.
+        term.agent_hook_state = .running;
+        term.agent_state = .running;
         agent_ops.test_turn_snapshot_calls = 0;
         agent_ops.drainRotatedAgentHookLogForTest(&session, term, rotated_abs);
         try std.testing.expectEqualStrings("회전본에 남아 있던 응답", term.agent_transcript.owned.reply());

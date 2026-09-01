@@ -778,6 +778,12 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
                         // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
                         term.agent_state = .unknown;
+                        term.agent_hook_state = .unknown;
+                        term.agent_screen_state = .unknown;
+                        term.agent_screen_visible_blocker = false;
+                        term.agent_screen_visible_idle = false;
+                        // 중재기의 연속 셈도 버린다 — 지난 프로세스의 관측으로 새 프로세스를 접지 않는다.
+                        term.agent_arbiter.reset();
                         term.agent_stabilizer.reset();
                         term.agent_screen_generation = 0;
                         term.agent_last_output_ms = 0;
@@ -1717,8 +1723,15 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
     // `log_present` 를 세우는 곳은 `pollAgentHookEvents` 뿐인데 그 함수는 **이미 훅 모드일 때만** 불린다.
     // 그래서 새 Term 은 훅이 로그를 계속 쓰는데도 영영 관측 모드에 남는다 — 게이트를 켠 의미가 없다.
     refreshAgentHookLogPresence(self, term);
+    // **두 소스를 한 판정으로 합친다**(§1.1). 예전에는 이 분기가 배타라 훅 Term 에서 `pollAgentState` 가
+    // 아예 안 돌았고, 그래서 승인 해제·codex 오류 턴·훅 유실이 구조적으로 못 메워졌다. 지금은 훅이 있어도
+    // 화면을 함께 읽고 §1.1 권위표가 둘을 중재한다.
     switch (agentHookMode(self, term)) {
-        .hook => pollAgentHookEvents(self, term, displayed),
+        .hook => {
+            pollAgentHookEvents(self, term, displayed);
+            // **transcript 는 안 읽는다** — 훅 payload 가 그 자리를 채운다(문서 머리말).
+            if (observation_current) pollAgentState(self, term, displayed);
+        },
         .observe => {
             // 훅 모드에서 남은 **진행 중 세부**를 버린다. 남겨 두면 관측 소스가 그린 배지 옆에 훅이
             // 적은 문구가 붙는다 — 그것이 곧 계약 §1 이 금지하는 «한 Term 두 소스» 다.
@@ -1736,6 +1749,8 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             }
         },
     }
+    // **배지로 나갈 값은 여기서만 정해진다**(§1.6-⑴). 위 두 경로는 각자 자기 자리에만 썼다.
+    arbitrateAgentState(self, term, displayed);
 }
 
 /// 훅이 이 pane 의 로그를 **한 번이라도 썼는지** 본다(계약 §1.2의 유일한 동적 입력).
@@ -1832,14 +1847,22 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
             },
         }
     }
+    // **원격 이벤트도 배지까지 가야 한다**(§1.6-⑴). `applyHookEvent` 는 훅 자리만 쓰므로, 여기서
+    // 권위표를 돌리지 않으면 원격 pane 의 배지가 영영 안 움직인다. C2 의 셈은 `screen_seq` 가 그대로라
+    // 늘지 않는다 — 중재를 한 번 더 부르는 것과 화면을 한 번 더 보는 것은 다르다.
+    arbitrateAgentState(self, term, true);
     ch.tick(now_ms);
 }
 
-/// 훅 이벤트 로그를 읽어 `term.agent_state` 를 채운다(계약 §4). 관측 모드의 `pollAgentState` 와 **같은 자리에
-/// 같은 값을 쓰는** 대신 소스만 다르다 — 그래서 사이드바·탭 라벨은 아무것도 바뀌지 않는다.
+/// 훅 이벤트 로그를 읽어 **`term.agent_hook_state`** 를 채운다(계약 §4).
 ///
-/// **이 함수가 훅 모드의 유일한 상태 소스다.** 같은 tick 에서 `pollAgentState` 를 함께 부르면 두 소스가 한
-/// Term 에 섞이고, 그 증상은 «배지가 가끔 틀림» 이라 재현되지 않는다(계약 §1이 금지하는 그것).
+/// **배지로 나가는 값은 여기서 정해지지 않는다**(§1.1 · 2026-09-01 개정). 예전에는 이 함수가 훅 모드의
+/// 유일한 상태 소스라 `term.agent_state` 를 직접 썼는데, 그러면 승인 해제·codex 오류 턴·훅 유실을
+/// 구조적으로 못 메웠다(§1 의 «훅만 보면 비는 자리 셋»). 지금은 같은 tick 에서 `pollAgentState` 도 함께
+/// 돌고, 두 자리를 §1.1 권위표가 중재한다(`arbitrateAgentState`).
+///
+/// 그래도 **자리는 섞이지 않는다.** 이 함수는 훅 자리만 읽고 훅 자리만 쓴다 — `advance` 가 그 값을
+/// 입력으로도 쓰기 때문에 화면이 끼어들면 상태 기계가 오염된다(§1.6-⑴).
 pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void {
     if (builtin.is_test) test_hook_calls += 1;
     if (!is_macos) return;
@@ -1931,7 +1954,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         const open_ms = @divFloor(now_ns - term.agent_hook_turn_opened_wall_ns, std.time.ns_per_ms);
         if (open_ms >= turn_open_warn_ms) std.log.scoped(.agenthook).info(
             "hook turn still open: {d}ms (state={s})",
-            .{ open_ms, @tagName(term.agent_state) },
+            .{ open_ms, @tagName(term.agent_hook_state) },
         );
     }
     // **backlog 는 상태만 세우고 알리지 않는다**(계약 §4). 그 이벤트는 창이 없던 시간의 것이라 «지금 막
@@ -1953,6 +1976,10 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // lead 이벤트에서만 키를 채택하므로 `progress.turnKey()` 가 언제나 lead 의 현재 키다 — 알림 본문이
     // 「자식이 아니라 lead 의 것이어야 한다」로 이미 판정된 것과 같은 함정, 같은 답이다.
     if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), if (turn_ended) batch_facts.facts() else .{}, batch_capture);
+    // **훅 자리를 채웠으면 배지까지 간다**(§1.6-⑴). 이 함수를 직접 부르는 경로(원격 드레인·제품 게이트)가
+    // 있어 여기서 안 돌리면 그쪽 배지가 안 움직인다. 소비자가 화면을 읽은 뒤 한 번 더 부르지만 **C2 의
+    // 셈은 `screen_seq` 가 지킨다** — 중재를 다시 부르는 것과 화면을 다시 보는 것은 다르다.
+    arbitrateAgentState(self, term, displayed);
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -2047,7 +2074,9 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // **매 턴** 오므로 이 값이 그 자리를 메운다. 로컬은 커널 조회가 이미 정확해서 소비하지 않는다.
     if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd, self.awakeMs());
     captureBeforeForEvent(self, term, ev);
-    const prev_state = term.agent_state;
+    // **훅 자리만 읽고 훅 자리만 쓴다**(§1.6-⑴). 이 값은 `advance` 의 입력이자 출력이라 화면이 끼어들면
+    // 상태 기계가 오염된다 — 배지에 나가는 값은 권위표를 통과한 `agent_state` 다.
+    const prev_state = term.agent_hook_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
     // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).
     const turn_open_before = term.agent_hook_progress.turn_open;
@@ -2055,7 +2084,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     const key_before_src = term.agent_hook_progress.turnKey();
     @memcpy(key_before_buf[0..key_before_src.len], key_before_src);
     const key_before = key_before_buf[0..key_before_src.len];
-    term.agent_state = mode_mod.advance(&term.agent_hook_progress, term.agent_state, ev);
+    term.agent_hook_state = mode_mod.advance(&term.agent_hook_progress, term.agent_hook_state, ev);
 
     // 턴이 **열리는 순간**을 찍는다(session_model 의 필드 주석 — provider payload 에 시각이 없다).
     //
@@ -2069,6 +2098,10 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     const open_now = term.agent_hook_progress.turn_open;
     const key_now = term.agent_hook_progress.turnKey();
     const turn_changed = !std.mem.eql(u8, key_before, key_now);
+    // **권위표의 C2 가 언제 셈을 버릴지의 유일한 입력이다**(§1.6-⑵-a). 안 올리면 C2 가 한 번 성공한 뒤
+    // 카운터가 임계에 남아, 새 턴의 첫 판정에서 화면이 아직 이전 idle chrome 을 들고 있는 동안 **확인
+    // 절차 없이 완료**가 된다(적대적 검증 R8 에서 재현한 그 버그다). 턴 정체가 바뀌면 새 턴이다.
+    if (turn_changed) term.agent_hook_turn_seq +%= 1;
     if (open_now != turn_open_before or (open_now and turn_changed)) {
         term.agent_hook_turn_opened_wall_ns = if (open_now and !term.agent_hook_backlog_catchup)
             @intCast(std.Io.Clock.real.now(self.io).nanoseconds)
@@ -2096,7 +2129,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // 특히 그렇다), 그때마다 찍으면 `git write-tree` 가 그 수만큼 **동기로** 돈다. 배치 안의 이벤트는
     // 모두 **같은 작업트리**를 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 늘고 얻는 것이 없다.
     // 호출자가 배치 끝에서 한 번 찍는다.
-    const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(term.agent_state));
+    const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(term.agent_hook_state));
     // **세션 base(턴 0)** — 타임라인은 스냅샷 **두 개**라야 완료 턴 하나를 낸다. base 가 없으면 그 세션의
     // 첫 턴이 화면에 아예 안 뜬다(두 번째 턴이 끝나야 보인다). `previous == .running` 인 `SessionStart`
     // 는 위 `turn_end` 가 이미 잡으므로 여기서 빠진다 — 둘은 상호배타다(`opensSessionBase` 주석의 표).
@@ -2107,7 +2140,9 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // **세션이 (재)시작되며 만든 전이는 알리지 않는다**(§6). `resume`·컨텍스트 압축은 턴 중간에도
     // `SessionStart` 를 만드는데, 그것이 상태를 «대기» 로 놓는 것은 «턴이 끝났다» 가 아니라 «다시
     // 시작했다» 다. 배지는 그대로 바뀌고 알림만 가려진다.
-    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, term.agent_state);
+    // **알림은 훅 전이에만 붙는다**(§1.1.1). C1·C2 가 만든 전이에 걸면 codex 오류 턴에 「완료」가
+    // 나간다 — 화면은 «끝났다» 는 알아도 «어떻게 끝났는지» 는 모른다(계약 §2).
+    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, term.agent_hook_state);
     switch (notice) {
         .none => {},
         // 턴 끝은 같은 전이지만 **오류로 끝난 턴을 «완료» 라 부르지 않는다**(계약 §2). 그 사실은
@@ -2301,6 +2336,9 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
         // 그 세션의 첫 턴이 영영 안 뜬다.
         if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), if (rotated_turn_end) rotated_facts.facts() else .{}, rotated_capture);
+        // **건진 이벤트도 배지까지 간다**(§1.6-⑴). `applyHookEvent` 는 훅 자리만 쓰므로 여기서 권위표를
+        // 안 돌리면 회전본으로 끝난 턴의 배지가 «진행 중» 에 남는다.
+        arbitrateAgentState(self, term, true);
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
@@ -2323,7 +2361,7 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
         .none => return null,
         // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
         .done, .failed => {},
-        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
+        .attention => switch (mode_mod.attentionDebounce(term.agent_hook_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
             .wait => return null,
             .drop => {
                 term.agent_hook_notice.clear();
@@ -2449,6 +2487,10 @@ pub var test_hook_calls: usize = 0;
 
 pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     if (builtin.is_test) test_observe_calls += 1;
+    // **다시 그릴지는 여기서 정하지 않는다**(§1.6-⑴). 화면 상태가 바뀌어도 권위표가 배지를 그대로 두는
+    // 경우가 있다(D1·D2) — 그때 dirty 를 세우면 아무것도 안 바뀐 프레임을 다시 그린다.
+    // 판단은 `arbitrateAgentState` 가 결과 전이를 보고 한다. 시그니처는 호출부 계약이라 남긴다.
+    _ = displayed;
     const agent: maru.session.agent_observer.Agent = switch (term.agent_kind) {
         .none => return,
         .claude => .claude,
@@ -2460,7 +2502,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     const now_ms = self.awakeMs();
     const activity_age_ms = now_ms -| term.agent_last_output_ms;
     const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
-    if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active and
+    if (generation == term.agent_screen_generation and term.agent_screen_state == .idle and !output_active and
         !term.agent_stabilizer.needsExpiryProbe()) return;
     const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, agent_screen_tail_rows, agent_screen_tail_bytes) catch null;
     defer if (screen) |owned| self.allocator.free(owned);
@@ -2473,21 +2515,77 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .output_active = output_active,
     });
     observation.clearAgentProgress(self.allocator);
-    const previous = term.agent_state;
+    // **화면 자리만 쓴다**(§1.6-⑴). 배지로 나가는 값은 권위표를 통과한 뒤 `arbitrateAgentState` 가 정한다.
+    const previous = term.agent_screen_state;
     const current = term.agent_stabilizer.observe(detection, now_ms);
-    term.agent_state = current;
+    term.agent_screen_state = current;
+    term.agent_screen_seq +%= 1; // 새 관측 하나 — C2 가 세는 단위다
+    term.agent_screen_visible_blocker = detection.visible_blocker;
+    term.agent_screen_visible_idle = detection.visible_idle;
+    term.agent_screen_origin = screenOriginOf(detection.rule_id);
     // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
-    if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
-        // **관측 모드에는 턴 키가 없다** — 그 축은 훅 payload 만 가진 것이라(계약 §3.1) 화면 관측으로는
+    //
+    // ⚠️ **훅이 있는 Term 에서는 여기서 찍지 않는다**(§1.3). 예전에는 이 함수가 훅 Term 에서 아예 안
+    // 불려 배타가 구조로 보장됐는데, §1.1 이 화면 입력을 켜면서 그 전제가 사라졌다. 두 소스가 같은 턴
+    // 끝에 각자 `git write-tree` 를 동기로 돌리면 「같은 tree 면 스킵」 규칙이 그 사이 변경을 못 흡수한다.
+    if (agentHookMode(self, term) != .hook and
+        maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current)))
+    {
+        // **화면 관측에는 턴 키가 없다** — 그 축은 훅 payload 만 가진 것이라(계약 §3.1) 화면으로는
         // 알 길이 없다. 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
-        // 관측 모드에는 훅이 없어 사본이 없다(계약 §6) — 0을 넘긴다.
+        // 훅이 없으니 사본도 없다(계약 §6) — 0을 넘긴다.
         captureTurnSnapshot(self, term.surfaceId(), .{}, 0);
     }
     if (current != previous) {
-        if (displayed) self.metal_dirty = true;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
             "agent previous={s} state={s} rule={s} idle={} blocker={} running={} activity_age_ms={d}",
             .{ @tagName(previous), @tagName(current), detection.rule_id, detection.visible_idle, detection.visible_blocker, detection.visible_running, activity_age_ms },
+        );
+    }
+}
+
+/// 화면 판정이 어느 근거로 섰는지를 `Origin` 으로 옮긴다(§1.4).
+///
+/// **규칙 id 를 보는 것이 region 을 보는 것보다 정확하다** — 같은 region 에서도 title 규칙과 화면 규칙이
+/// 함께 나오고, 우리가 알고 싶은 것은 «무엇이 이 상태를 만들었나» 이기 때문이다.
+fn screenOriginOf(rule_id: []const u8) maru.session.agent_state_arbiter.Origin {
+    if (std.mem.eql(u8, rule_id, "pty_activity")) return .pty;
+    if (std.mem.startsWith(u8, rule_id, "progress_")) return .osc_progress;
+    if (std.mem.endsWith(u8, rule_id, "_title")) return .osc_title;
+    return .screen;
+}
+
+/// 훅과 화면 두 자리를 §1.1 권위표에 넣어 배지로 나갈 값을 정한다.
+///
+/// **여기가 `agent_state` 를 쓰는 유일한 자리다.** 두 소스가 각자 그 필드를 쓰던 것이 §1.6-⑴ 이 지적한
+/// 덮어쓰기였고, 그것을 없애는 것이 이 함수의 존재 이유다.
+fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
+    const before = term.agent_state;
+    const has_hook = agentHookMode(self, term) == .hook;
+    const verdict = term.agent_arbiter.arbitrate(.{
+        .hook = if (has_hook) term.agent_hook_state else null,
+        .hook_child_count = @intCast(term.agent_hook_progress.childCount()),
+        .screen = term.agent_screen_state,
+        .screen_visible_blocker = term.agent_screen_visible_blocker,
+        .screen_visible_idle = term.agent_screen_visible_idle,
+        .screen_origin = term.agent_screen_origin,
+        .process_exited = false,
+        .hook_turn_seq = term.agent_hook_turn_seq,
+        .screen_seq = term.agent_screen_seq,
+    });
+    term.agent_state = verdict.state;
+    term.agent_state_origin = verdict.origin;
+    term.agent_state_rule = verdict.rule;
+    if (verdict.state != before) {
+        if (displayed) self.metal_dirty = true;
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
+            "arbitrate {s} -> {s} origin={s} rule={s} hook={s} screen={s} children={d}",
+            .{
+                @tagName(before),                      @tagName(verdict.state),
+                @tagName(verdict.origin),              verdict.rule,
+                @tagName(term.agent_hook_state),       @tagName(term.agent_screen_state),
+                term.agent_hook_progress.childCount(),
+            },
         );
     }
 }

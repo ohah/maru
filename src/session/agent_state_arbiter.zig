@@ -54,6 +54,12 @@ pub const Input = struct {
     /// 화면은 폴링 주기(500ms) 동안 이전 idle chrome 을 들고 있다 — 그 첫 판정에서 카운터가 4가 되어
     /// **확인 절차 없이 완료**가 된다. 새 턴은 처음부터 세야 한다.
     hook_turn_seq: u64 = 0,
+    /// 화면을 **새로 읽은 횟수**. 호출자가 실제로 화면을 판정할 때마다 올린다.
+    ///
+    /// **C2 는 중재 호출이 아니라 화면 관측을 센다.** 한 tick 에 중재가 여러 번 불릴 수 있고(원격 채널
+    /// 드레인과 폴링 소비자가 각자 부른다) 그때마다 세면 임계에 **몇 배 빨리** 닿는다 — 「연속 3회 관측」
+    /// 이라는 말이 「연속 3회 호출」로 조용히 바뀐다. 이 값이 그대로면 C2 는 세지 않고 직전 판단을 잇는다.
+    screen_seq: u64 = 0,
 };
 
 pub const Verdict = struct {
@@ -71,6 +77,8 @@ pub const Arbiter = struct {
     idle_confirmations: u8 = 0,
     /// 마지막으로 본 `Input.hook_turn_seq`. 턴이 바뀌면 위 셈을 버린다(그 필드의 주석 참고).
     last_turn_seq: u64 = 0,
+    /// 마지막으로 **센** 화면 관측의 `screen_seq`. 같은 관측을 두 번 세지 않게 한다.
+    last_counted_screen_seq: u64 = 0,
 
     /// 화면 idle 이 훅 running 을 덮으려면 필요한 연속 관측 수(§1.1 C2).
     ///
@@ -121,11 +129,16 @@ pub const Arbiter = struct {
 
         // C1 — 훅이 blocked 인데 화면에 승인 chrome 이 없다. 승인은 풀렸다.
         //
+        // ⚠️ **화면을 한 번이라도 읽었어야 한다**(`screen_seq != 0`). C1 은 chrome 의 **부재**로 서는
+        // 유일한 규칙이라, 「화면에 없다」와 「화면을 아직 안 봤다」가 같은 값(`false`)으로 온다. 구분하지
+        // 않으면 화면을 못 읽은 Term(원격 채널만 있는 pane, 훅 이벤트만 처리한 tick)에서 **승인 대기가
+        // 뜨자마자 풀린다.** C2 는 `visible_idle == true` 가 관측을 스스로 증명하므로 이 가드가 필요 없다.
+        //
         // **결과가 running 이지 화면 상태가 아니다.** 승인이 풀린 순간 화면이 이미 idle chrome 을 보이더라도
         // 여기서는 running 까지만 간다. 화면 상태를 그대로 실으면 blocked → idle 이 **한 tick 에** 일어나
         // C2 의 연속 확인을 통째로 우회한다. 훅은 승인 요청 직전에 running 이었으므로(`PreToolUse`) 그
         // 자리로 돌리는 것이 사실에도 맞다.
-        if (hook == .blocked and !in.screen_visible_blocker) {
+        if (hook == .blocked and in.screen_seq != 0 and !in.screen_visible_blocker) {
             self.idle_confirmations = 0;
             return .{ .state = .running, .origin = .screen, .rule = "C1" };
         }
@@ -133,7 +146,12 @@ pub const Arbiter = struct {
         // C2 — 훅은 running 인데 자식이 없고 화면이 idle 을 **연속으로** 보인다. codex 오류 턴이 여기서
         // 닫힌다(§9-10 — codex 에는 `StopFailure` 가 없어 `Stop` 이 오지 않는다).
         if (hook == .running and in.hook_child_count == 0 and in.screen_visible_idle) {
-            self.idle_confirmations +|= 1;
+            // **같은 화면 관측을 두 번 세지 않는다**(`Input.screen_seq` 주석). 중재가 다시 불렸을 뿐이면
+            // 셈은 그대로 두고 지금까지의 판단을 잇는다.
+            if (in.screen_seq != self.last_counted_screen_seq) {
+                self.last_counted_screen_seq = in.screen_seq;
+                self.idle_confirmations +|= 1;
+            }
             if (self.idle_confirmations >= idle_confirmations_required) {
                 return .{ .state = .idle, .origin = .screen, .rule = "C2" };
             }
@@ -177,15 +195,31 @@ test "AR-B 훅이 있으면 훅이 상태를 세운다" {
 
 test "AR-C1 승인 chrome 이 사라지면 blocked 가 즉시 풀린다 — 지연 없다" {
     var a: Arbiter = .{};
-    const v = a.arbitrate(.{ .hook = .blocked, .screen_visible_blocker = false });
+    const v = a.arbitrate(.{ .hook = .blocked, .screen_seq = 1, .screen_visible_blocker = false });
     try testing.expectEqual(State.running, v.state);
     try testing.expectEqual(Origin.screen, v.origin);
     try testing.expectEqualStrings("C1", v.rule);
 }
 
+test "AR-C1 화면을 한 번도 안 읽었으면 blocked 를 풀지 않는다 — 부재와 미관측은 다르다" {
+    // C1 은 chrome 의 **부재**로 서는 유일한 규칙이라 「없다」와 「안 봤다」가 같은 false 로 온다.
+    // 구분하지 않으면 원격 채널만 있는 pane 이나 훅 이벤트만 처리한 tick 에서 승인 대기가 뜨자마자
+    // 풀린다(제품 게이트가 실제로 그렇게 깨졌다).
+    var a: Arbiter = .{};
+    const unseen = a.arbitrate(.{ .hook = .blocked, .screen_seq = 0 });
+    try testing.expectEqual(State.blocked, unseen.state);
+    try testing.expectEqual(Origin.hook, unseen.origin);
+    try testing.expectEqualStrings("B", unseen.rule);
+
+    // 화면을 한 번 읽고 거기 chrome 이 없으면 그때는 푼다.
+    const seen = a.arbitrate(.{ .hook = .blocked, .screen_seq = 1 });
+    try testing.expectEqual(State.running, seen.state);
+    try testing.expectEqualStrings("C1", seen.rule);
+}
+
 test "AR-C1 승인 chrome 이 아직 보이면 blocked 가 유지된다" {
     var a: Arbiter = .{};
-    const v = a.arbitrate(.{ .hook = .blocked, .screen_visible_blocker = true });
+    const v = a.arbitrate(.{ .hook = .blocked, .screen_seq = 1, .screen_visible_blocker = true });
     try testing.expectEqual(State.blocked, v.state);
     try testing.expectEqual(Origin.hook, v.origin);
 }
@@ -197,6 +231,7 @@ test "AR-C1 은 idle 을 내지 않는다 — 화면이 이미 idle 이어도 ru
     const v = a.arbitrate(.{
         .hook = .blocked,
         .screen = .idle,
+        .screen_seq = 1,
         .screen_visible_blocker = false,
         .screen_visible_idle = true,
     });
@@ -206,16 +241,22 @@ test "AR-C1 은 idle 을 내지 않는다 — 화면이 이미 idle 이어도 ru
 
 test "AR-C2 화면 idle 두 번으로는 훅 running 을 못 덮고 세 번째에 덮는다" {
     var a: Arbiter = .{};
-    const in: Input = .{ .hook = .running, .hook_child_count = 0, .screen_visible_idle = true };
+    var seq: u64 = 0;
+    seq += 1;
+    var in: Input = .{ .hook = .running, .hook_child_count = 0, .screen_visible_idle = true, .screen_seq = seq };
 
     const first = a.arbitrate(in);
     try testing.expectEqual(State.running, first.state);
     try testing.expectEqualStrings("C2-pending", first.rule);
 
+    seq += 1;
+    in.screen_seq = seq;
     const second = a.arbitrate(in);
     try testing.expectEqual(State.running, second.state);
     try testing.expectEqualStrings("C2-pending", second.rule);
 
+    seq += 1;
+    in.screen_seq = seq;
     const third = a.arbitrate(in);
     try testing.expectEqual(State.idle, third.state);
     try testing.expectEqual(Origin.screen, third.origin);
@@ -224,12 +265,11 @@ test "AR-C2 화면 idle 두 번으로는 훅 running 을 못 덮고 세 번째�
 
 test "AR-C2 연속이 끊기면 다시 처음부터 센다" {
     var a: Arbiter = .{};
-    const idle_in: Input = .{ .hook = .running, .screen_visible_idle = true };
-    _ = a.arbitrate(idle_in);
-    _ = a.arbitrate(idle_in);
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 1 });
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 2 });
     // 한 tick 이라도 idle chrome 이 아니면 «연속» 이 아니다.
-    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = false });
-    const after = a.arbitrate(idle_in);
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = false, .screen_seq = 3 });
+    const after = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 4 });
     try testing.expectEqual(State.running, after.state);
     try testing.expectEqualStrings("C2-pending", after.rule);
 }
@@ -256,13 +296,11 @@ test "AR-D1 자식이 살아 있으면 화면 idle 이 몇 번 와도 running �
 
 test "AR-D1 자식이 끝난 뒤에야 C2 가 세기 시작한다" {
     var a: Arbiter = .{};
-    const with_child: Input = .{ .hook = .running, .hook_child_count = 1, .screen_visible_idle = true };
-    for (0..5) |_| _ = a.arbitrate(with_child);
+    for (0..5) |i| _ = a.arbitrate(.{ .hook = .running, .hook_child_count = 1, .screen_visible_idle = true, .screen_seq = i + 1 });
     // 자식이 사라진 순간부터 «처음부터» 세 번이다 — D1 이 도는 동안 센 것이 넘어오면 안 된다.
-    const no_child: Input = .{ .hook = .running, .hook_child_count = 0, .screen_visible_idle = true };
-    try testing.expectEqualStrings("C2-pending", a.arbitrate(no_child).rule);
-    try testing.expectEqualStrings("C2-pending", a.arbitrate(no_child).rule);
-    try testing.expectEqualStrings("C2", a.arbitrate(no_child).rule);
+    try testing.expectEqualStrings("C2-pending", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 6 }).rule);
+    try testing.expectEqualStrings("C2-pending", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 7 }).rule);
+    try testing.expectEqualStrings("C2", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 8 }).rule);
 }
 
 test "AR-D2 훅이 도는 동안 화면만 blocked 면 배지가 안 바뀐다 — 스크롤백 오탐" {
@@ -284,19 +322,36 @@ test "AR-C2 한 번 닫힌 뒤 새 턴은 처음부터 센다 — 지난 턴의 
     // 적대적 검증 R8 에서 실제로 재현된 버그다. 카운터가 3 에 남은 채 새 턴이 열리면 화면이 아직
     // 이전 idle chrome 을 들고 있는 첫 판정에서 곧바로 4가 되어 «확인 없이 완료» 가 됐다.
     var a: Arbiter = .{};
-    const in_turn1: Input = .{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 1 };
-    _ = a.arbitrate(in_turn1);
-    _ = a.arbitrate(in_turn1);
-    try testing.expectEqualStrings("C2", a.arbitrate(in_turn1).rule);
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 1, .screen_seq = 1 });
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 1, .screen_seq = 2 });
+    try testing.expectEqualStrings("C2", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 1, .screen_seq = 3 }).rule);
 
     // 사용자가 새 프롬프트를 넣었다(`UserPromptSubmit` → turn_key 변경). 화면은 폴링 주기 동안 아직
     // 이전 idle chrome 을 들고 있다.
-    const in_turn2: Input = .{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 2 };
-    const first = a.arbitrate(in_turn2);
+    const first = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 2, .screen_seq = 4 });
     try testing.expectEqual(State.running, first.state);
     try testing.expectEqualStrings("C2-pending", first.rule);
-    try testing.expectEqualStrings("C2-pending", a.arbitrate(in_turn2).rule);
-    try testing.expectEqualStrings("C2", a.arbitrate(in_turn2).rule);
+    try testing.expectEqualStrings("C2-pending", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 2, .screen_seq = 5 }).rule);
+    try testing.expectEqualStrings("C2", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 2, .screen_seq = 6 }).rule);
+}
+
+test "AR-C2 같은 화면 관측을 두 번 세지 않는다 — 중재가 여러 번 불려도 임계는 관측 수로 온다" {
+    // 한 tick 에 중재가 두 번 불릴 수 있다(원격 채널 드레인 + 폴링 소비자). 호출을 세면 「연속 3회
+    // 관측」이 「연속 3회 호출」로 바뀌어 임계에 몇 배 빨리 닿는다.
+    var a: Arbiter = .{};
+    var seq: u64 = 0;
+    var ticks: u32 = 0;
+    while (ticks < 2) : (ticks += 1) {
+        seq += 1; // 화면을 한 번 읽었다
+        const in: Input = .{ .hook = .running, .screen_visible_idle = true, .screen_seq = seq };
+        // 같은 tick 에서 세 번 중재해도 관측은 한 번이다.
+        try testing.expectEqualStrings("C2-pending", a.arbitrate(in).rule);
+        try testing.expectEqualStrings("C2-pending", a.arbitrate(in).rule);
+        try testing.expectEqualStrings("C2-pending", a.arbitrate(in).rule);
+    }
+    // 세 번째 **관측**에서 비로소 닫힌다.
+    seq += 1;
+    try testing.expectEqualStrings("C2", a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = seq }).rule);
 }
 
 test "AR 훅 idle 은 화면 running 으로 되돌지 않는다 — 일부러 비운 자리다(§1)" {
@@ -314,13 +369,12 @@ test "AR 뒤집힌 판정은 출처가 화면이다 — 뒤집힌 사실이 로�
     var a: Arbiter = .{};
     // C1 과 C2 는 훅을 덮은 경우다. 그때 origin 이 hook 으로 남으면 «훅이 이 배지를 만들었다» 는
     // 거짓이 되고, §1.4 가 뒤집기를 열거로 제한한 의미가 절반 사라진다.
-    try testing.expectEqual(Origin.screen, a.arbitrate(.{ .hook = .blocked }).origin);
+    try testing.expectEqual(Origin.screen, a.arbitrate(.{ .hook = .blocked, .screen_seq = 1 }).origin);
 
     a.reset();
-    const idle_in: Input = .{ .hook = .running, .screen_visible_idle = true };
-    _ = a.arbitrate(idle_in);
-    _ = a.arbitrate(idle_in);
-    try testing.expectEqual(Origin.screen, a.arbitrate(idle_in).origin);
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 1 });
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 2 });
+    try testing.expectEqual(Origin.screen, a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 3 }).origin);
 }
 
 test "AR 상태 이름이 아니라 전이를 잠근다 — blocked 해제는 어떤 이름으로 와도 같은 자리에서 풀린다" {
@@ -330,7 +384,7 @@ test "AR 상태 이름이 아니라 전이를 잠근다 — blocked 해제는 �
     var a: Arbiter = .{};
     var seen_release = false;
     for ([_]State{ .blocked, .running, .idle, .unknown }) |hook_state| {
-        const v = a.arbitrate(.{ .hook = hook_state, .screen_visible_blocker = false });
+        const v = a.arbitrate(.{ .hook = hook_state, .screen_seq = 1, .screen_visible_blocker = false });
         if (hook_state == .blocked) {
             try testing.expectEqualStrings("C1", v.rule);
             seen_release = true;

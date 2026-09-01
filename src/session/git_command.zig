@@ -501,7 +501,6 @@ const quoteAppend = remote_shell.quoteAppend;
 ///
 /// null 인 경우는 셋뿐이고 전부 **실행하지 않는 편이 옳은** 상태다: 토큰에 제어문자가 있다 · `dest` 나
 /// `control_path` 가 모양을 못 갖췄다 · 명령이 `cmd_buf` 를 넘는다.
-
 pub fn buildRemote(
     local_argv: []const []const u8,
     remote: Remote,

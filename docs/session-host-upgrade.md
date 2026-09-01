@@ -1127,6 +1127,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   mutation·mismatch·failure와 allocation unwind를 Debug·ReleaseFast에서 검증한다. 실제 hdiutil/Apple
   command와 mount residue 0은 기존 DMG authority E2E가 소유하고, candidate artifact attestation과 evidence authoring은 후속 gate다.
 
+  evidence와 manifest가 공유하는 source tree 권위는
+  `release_adapter_github_source_tree.zig`의 final-address move-only `SourceTreeAuthority`가 소유한다. 입력은 trusted tag
+  `Context`, checkout 전에 pin한 GitHub CLI, validated token, caller-owned bounded response storage와 같은 release phase
+  `Deadline`뿐이다. 로컬 checkout, ambient `git`, caller-provided tree SHA를 권위로 사용하지 않는다. adapter는 context의 exact
+  source commit으로만 `GET /repos/ohah/maru/git/commits/{commit}`을 구성하고, 응답의 top-level `sha`가 그 commit과 exact
+  일치하며 `tree.sha`가 lowercase 40-hex일 때만 commit/tree pair를 게시한다.
+
+  context/result/output alias와 malformed·duplicate/missing/wrong-type response는 child 전에 또는 parse 단계에서 fail-close한다.
+  같은 deadline은 CLI 재검증 전, GitHub child budget 산출 전, child와 CLI 재검증 뒤 최종 publication 전에 확인한다. child가
+  반환한 bytes는 caller output storage에서 빌린 exact slice여야 하며 foreign capture를 parse하지 않는다. copied/pre-owned owner,
+  context/commit/tree drift, CLI 교체, timeout과 allocation failure에서는 publication 0이다. focused gate
+  `test-session-host-release-adapter-github-source-tree`는 exact closed request와 deadline 순서, strict binding, capture/alias,
+  copied owner와 allocation unwind를 Debug·ReleaseFast에서 검증한다. 이 gate는 evidence leaf 실행·aggregate authoring,
+  manifest authoring, asset attach/publish 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
+
   current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
   `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
   composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B

@@ -2564,6 +2564,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   두 번째 fresh remaining만 manifest download child에 전달한다. malformed preflight는 deadline·CLI·child 0, 재검증 중
   또는 child 후 만료는 publication 0이며 focused gate가
   injected exact 순서와 product wrapper compile을 두 optimize mode에서 함께 고정한다.
+  predecessor manifest input composition은 authenticated current B에서 predecessor expectation을 유도하고 exact workspace
+  `predecessor-manifest` child에서 download→materialize→canonical A cross-bind→attestation을 같은 deadline/CLI로 실행한다. historical
+  protected-tag 상태는 합성하지 않고 B의 exact A endorsement와 A manifest artifact attestation을 결속하며, current publication의
+  protected-tag admission은 유지한다. 성공 owner는 authenticated A와 descriptor cleanup만 보존해 caller buffer reuse와 copy 거부를
+  고정하고, 중간 실패는 actual filesystem residue 0이다.
+  `test-session-host-release-adapter-github-predecessor-manifest-input`이 두 optimize mode에서 이 ordering·cleanup·제품 wrapper를 검증한다.
   `release_adapter_github_manifest_file.zig`는 attestation CLI에 줄 fixed provisional manifest file만 소유한다. absolute absent
   0700 work-directory와 exact-name 0600 leaf를 descriptor-relative exclusive/no-follow로 만들고 bounded bootstrap bytes 길이를
   preallocate·truncate·complete write한 뒤 SHA, pathname↔fd identity/type/size/link-count 1, 0400 mode와 file/directory fsync를 봉인한다.
@@ -2574,7 +2580,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `release_adapter_github_manifest_attestation.zig`는 B predecessor에 없는 A build run identity를 얻기 위해 bounded A bytes를 먼저
   strict/intrinsic parse하되 unauthenticated candidate로만 보유한다. role=A/predecessor 부재와 B↔A release ID/tag/source commit/
   manifest SHA/canonical filename을 교차검증하고, candidate repository/tag/source/build로 기존 artifact attestation verifier를 호출하며
-  protected predecessor tag context를 candidate repository/tag/source/build에 결속하고 fixed manifest file identity를 호출 전후
+  candidate repository/tag/source/build에서 historical protected-tag 값을 합성하지 않고 fixed manifest file identity를 호출 전후
   재검증한 뒤에만 move-only `AuthenticatedManifest`를 게시한다. candidate의 `assets[]`는 이
   publication 전에는 filesystem allocation/download 권위가 아니다. `test-session-host-release-adapter-github-manifest-attestation`이
   Debug·ReleaseFast에서 parse/cross-binding, existing verifier composition, file drift, copied owner, mismatch/child/allocation failure의

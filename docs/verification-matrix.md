@@ -2716,6 +2716,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   step-output handoff, pinned Action과 `GITHUB_ENV` 미사용을 정적으로 고정한다. repository checkout이 capture보다 앞서거나 checkout
   뒤 PATH를 다시 조회하는 변경은 fail-close한다. 이 gate는 실제 GitHub service provenance, captured output의 validator argv 소비,
   manifest/evidence 생성·attestation·publication 또는 signed frozen U5 E2E를 대신하지 않는다.
+  `release_adapter_candidate_attestation.zig`는 draft/release ID 없이 trusted tag context와 exact universal DMG/frozen executable pathname만
+  받아 두 asset을 no-follow held fd로 pin하고 canonical DMG→frozen 순서로 GitHub artifact attestation에 결속한다. subject name/SHA와
+  repository/tag/source/build는 caller scalar가 아니라 context와 held-file view에서 유도한다. 같은 final-address deadline과 pinned CLI를
+  두 child 전체가 공유하고 각 command 전후 file/CLI authority 및 마지막 publication 시각을 재검증한다. focused gate는
+  Debug·ReleaseFast actual filesystem+injected attestor에서 distinct inode/cap/execute bit, exact order와 감소 budget, copied/pre-owned owner,
+  path/context/subject mutation, 중간·최종 expiry, partial observation/OOM unwind의 publication 0을 검증한다. draft 생성과 post-draft release
+  ID 결속, Apple product/evidence/manifest/workflow는 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

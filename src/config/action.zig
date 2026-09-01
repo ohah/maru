@@ -122,6 +122,9 @@ pub const Action = union(enum) {
     /// 찾기의 낱말 단위 토글(§5.1 — VSCode `⌥⌘W`). 낱말 판정은
     /// `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다(더블클릭이 잡는 그 범위).
     toggle_find_whole_word,
+    /// 찾기를 **켤 때의 선택 범위 안으로** 한정한다(§5.1 — VSCode `⌥⌘L`). 범위는 **사본**이라
+    /// 그 뒤 선택이 움직여도 안 흔들린다(현재 일치가 선택을 옮기는 계약과 충돌하지 않게).
+    toggle_find_in_selection,
     // 활성 편집기 뷰의 랩(긴 줄 자동 줄바꿈)을 뒤집는다(visual-mapping §4 "가로 스크롤이 기본이고 랩은 토글").
     // **기본 chord가 없다** — VSCode의 `⌥Z`를 그대로 두면 터미널의 Meta-z를 전역으로 가져간다. 키 계약의
     // context-aware resolver에는 파일 트리·웹 편집기 컨텍스트만 있고 **편집기 Term 컨텍스트가 아직 없어서**,
@@ -246,6 +249,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_find_replace")) return .toggle_find_replace;
     if (std.mem.eql(u8, value, "toggle_find_match_case")) return .toggle_find_match_case;
     if (std.mem.eql(u8, value, "toggle_find_whole_word")) return .toggle_find_whole_word;
+    if (std.mem.eql(u8, value, "toggle_find_in_selection")) return .toggle_find_in_selection;
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;

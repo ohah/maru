@@ -35,9 +35,14 @@ fn counterCols(state: *const State) u32 {
 /// `W` 는 낱말 단위. VSCode 의 `Aa`·`ab|` 버튼과 같은 뜻이다.
 fn ruleFlags(state: *const State) []const u8 {
     if (state.target != .editor) return "";
+    // 켠 순서가 아니라 **고정된 순서**로 적는다 — 토글 순서에 따라 문구가 흔들리면 눈이 그 자리를 잃는다.
+    if (state.match_case and state.whole_word and state.in_selection != null) return "Aa W Sel ";
     if (state.match_case and state.whole_word) return "Aa W ";
+    if (state.match_case and state.in_selection != null) return "Aa Sel ";
+    if (state.whole_word and state.in_selection != null) return "W Sel ";
     if (state.match_case) return "Aa ";
     if (state.whole_word) return "W ";
+    if (state.in_selection != null) return "Sel ";
     return "";
 }
 
@@ -115,6 +120,12 @@ pub const State = struct {
     match_case: bool = false,
     /// 낱말 단위로만 세는가(§5.1). 판정은 `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다.
     whole_word: bool = false,
+    /// 「선택 영역 내에서만」의 범위 — **켤 때 뜬 사본**이다(§5.1). 문서 offset `[start, end)`.
+    ///
+    /// **살아 있는 선택을 읽지 않는 이유**: 위 §5.1 이 *"현재 일치는 primary selection 을 옮긴다"* 로
+    /// 정했으므로, 살아 있는 선택을 읽으면 첫 Enter 가 범위를 그 매치 하나로 쪼그라뜨린다.
+    /// `null` 이면 꺼진 것이고, 문서가 바뀌면 제품이 버린다.
+    in_selection: ?struct { start: usize, end: usize } = null,
     /// 마지막 네비게이션 방향(Enter/↓=앞, Shift+Enter/↑=뒤). 페이지 검색은 매치 리스트가 없어 `current`가
     /// 안 움직이므로(match_count=0) 방향을 여기서만 알 수 있다 — host가 `.find_navigated`를 받아 어느 쪽으로
     /// 보낼지 정할 때 읽는다. 스크롤백에선 안 쓴다(current가 이미 방향을 담는다).
@@ -722,7 +733,24 @@ test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라�
         counterCols(&s),
     );
 
+    // **「선택 영역 내에서만」도 같은 자리에 뜬다** — 안 보이면 켠 줄 모르고
+    // 「왜 이것밖에 안 나오나」가 된다(§5.1).
+    s.match_case = false;
+    s.whole_word = false;
+    s.in_selection = .{ .start = 0, .end = 10 };
+    try std.testing.expectEqualStrings("Sel ", ruleFlags(&s));
+    s.match_case = true;
+    try std.testing.expectEqualStrings("Aa Sel ", ruleFlags(&s));
+    s.whole_word = true;
+    try std.testing.expectEqualStrings("Aa W Sel ", ruleFlags(&s));
+    s.match_case = false;
+    try std.testing.expectEqualStrings("W Sel ", ruleFlags(&s));
+    s.whole_word = false;
+    s.in_selection = null;
+
     // **편집기가 아니면 안 그린다.** 스크롤백·웹은 이 값을 안 읽으므로 그리면 거짓말이다.
+    s.match_case = true;
+    s.whole_word = true;
     s.target = .scrollback;
     try std.testing.expectEqualStrings("", ruleFlags(&s));
     try std.testing.expectEqual(plain_cols, counterCols(&s));

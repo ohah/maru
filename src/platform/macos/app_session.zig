@@ -4495,6 +4495,9 @@ pub const AppSession = struct {
     symbol_picker_scope: ?symbol_picker.Scope = null,
     /// 형제 목록 프롬프트(부모 이름 + 구분자) — 문서 내용을 빌리지 않는 **사본**이다(§7.5).
     symbol_picker_prompt: std.ArrayList(u8) = .empty,
+    /// 찾기를 **여는 순간**의 편집기 선택(§5.1 「선택 영역 내에서만」). 그때 떠 두지 않으면
+    /// 검색어 한 글자에 선택이 첫 매치로 옮겨져(`revealCurrentFindMatch`) 범위를 잃는다.
+    find_selection_at_open: ?struct { start: usize, end: usize } = null,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
 
@@ -9203,6 +9206,7 @@ pub const AppSession = struct {
             // 편집기 문서가 아니면 무동작 — 액션 쪽이 게이트를 갖는다(§5.1).
             .toggle_find_match_case => find_ops.toggleFindMatchCase(self),
             .toggle_find_whole_word => find_ops.toggleFindWholeWord(self),
+            .toggle_find_in_selection => find_ops.toggleFindInSelection(self),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
@@ -42214,6 +42218,217 @@ test "EF25 규칙 토글의 가로채기가 사용자 rebind 를 따른다 — c
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'k' }, .modifiers = .{ .command = true, .shift = true } });
     try std.testing.expect(session.chrome_host.find.match_case);
     try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+}
+
+test "EF26 선택 영역 내에서만 — 범위는 사본이라 Enter 가 파괴하지 않는다 (§5.1)" {
+    // **이 판정자가 이 슬라이스의 이유다.** §5.1 은 *"현재 일치는 primary selection 을 옮긴다"* 로
+    // 정해져 있다 — 그래서 「선택 안에서만」이 **살아 있는 선택**을 읽으면 첫 Enter 가 범위를
+    // 그 매치 하나로 쪼그라뜨리고 두 번째 Enter 는 갈 곳이 없다. 범위를 **사본**으로 드는 것이
+    // 그 충돌을 가르는 유일한 방법이고, 여기서 그것을 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    // `aa` 다섯 — 앞 셋만 선택 범위에 든다.
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa aa aa\naa aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // 첫 줄(`aa aa aa` = 0..8)을 고른다.
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(0, 8);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 5), session.editor_find_matches.items.len); // 전체
+
+    // **⌥⌘L — 범위 안 셋으로 좁아진다.**
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.in_selection != null);
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+
+    // **Enter 로 오가도 범위가 안 무너진다.** 살아 있는 선택을 읽었다면 여기서 1 이 된다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+
+    // **끄면 전체로 돌아온다.**
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.in_selection == null);
+    try std.testing.expectEqual(@as(usize, 5), session.editor_find_matches.items.len);
+}
+
+test "EF28 범위 경계가 반열린 구간이다 — 걸친 매치는 안 든다 (§5.1)" {
+    // **경계를 밟는 픽스처가 없으면 `>=`·`<=` 를 어느 쪽으로 밀어도 안 잡힌다**(변이 G1·G2).
+    // 그리고 이것은 사용자에게 보이는 차이다: 선택 끝에 **반쯤 걸친** 매치를 바꾸면 고르지도
+    // 않은 글자가 고쳐진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    // **한 칸 차이를 만들려면 검색어가 한 글자여야 한다.** 두 글자짜리는 겹치지 않아 매치가
+    // 두 칸씩 떨어지고, 그러면 `>=`/`<=` 를 한 칸 밀어도 결과가 안 바뀐다(첫 픽스처가 그랬다).
+    // `aaaa` 에서 `a` 는 0..1 · 1..2 · 2..3 · 3..4 이고, 범위 **1..3** 은 가운데 둘만 담는다 —
+    // `end` 를 한 칸 넘보면 3..4 가, `start` 를 한 칸 물리면 0..1 이 곧바로 들어온다.
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aaaa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(1, 3);
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 4), session.editor_find_matches.items.len);
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(u32, 1), session.editor_find_matches.items[0].start);
+    try std.testing.expectEqual(@as(u32, 2), session.editor_find_matches.items[1].start);
+}
+
+test "EF29 선택 범위 토글도 편집기 찾기일 때만 먹는다 — 팔레트 경로 포함 (§5.1)" {
+    // chord 는 `findRuleChordIntercept` 가 먼저 걸러 주지만 **팔레트는 `dispatchAppAction` 으로
+    // 곧장 들어온다** — 게이트가 액션 쪽에도 있어야 하고, 그것을 재는 판정자가 없으면 액션 쪽
+    // 게이트를 지워도 아무도 안 잡는다(변이 G4).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "abab ab\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(2, 4);
+    session.dispatchAppAction(.toggle_find);
+    for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    session.chrome_host.find.target = .scrollback;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.in_selection == null);
+
+    session.dispatchAppAction(.toggle_find_in_selection); // 팔레트 경로
+    try std.testing.expect(session.chrome_host.find.in_selection == null);
+}
+
+test "EF27 빈 선택이면 안 켜지고, 편집이 들어오면 범위를 버린다 (§5.1)" {
+    // ⑴ 빈 선택에서 켜지면 「그 안에서만」이 문서 전체와 같은 말인데 사용자는 좁혀진 줄 안다.
+    // ⑵ 편집 뒤에도 범위를 들고 있으면 굳혀 둔 offset 이 **다른 글자**를 가리킨다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa aa aa\naa aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // ⑴ **빈 선택(caret 만)으로 열면 켤 것이 없다.** 범위는 **여는 순간** 뜨므로 그 전에 세운다.
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(3);
+    session.dispatchAppAction(.toggle_find);
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.in_selection == null);
+    try std.testing.expectEqual(@as(usize, 5), session.editor_find_matches.items.len);
+
+    // ⑵ **범위를 갖고 다시 열면 켜진다.** 그리고 편집이 들어오면 버린다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(0, 8);
+    session.dispatchAppAction(.toggle_find);
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.in_selection != null);
+
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    _ = editor_ops.insertText(session, term, "X");
+    try std.testing.expect(session.chrome_host.find.in_selection == null); // 버렸다
+    // **떠 둔 값도 버려야 한다.** 이것만 남기면 편집 뒤 `⌥⌘L` 이 **편집 전 offset** 으로 켜져,
+    // 사용자가 고른 적 없는 자리에 검색이 갇힌다(변이 G6).
+    try std.testing.expect(session.find_selection_at_open == null);
+
+    // ⑶ **찾기를 닫으면 굳혀 둔 선택도 버린다.** 남기면 다음에 ⌘F 를 눌렀을 때 **지난번 범위**로
+    // 켜져, 사용자가 고르지도 않은 자리에 검색이 갇힌다.
+    //
+    // 위 ⑵ 가 찾기를 **열어 둔 채** 끝났다 — 여기서 바로 토글하면 열리는 것이 아니라 닫힌다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(0, 8);
+    session.dispatchAppAction(.toggle_find); // 열고
+    try std.testing.expect(session.find_selection_at_open != null);
+    session.dispatchAppAction(.toggle_find); // 닫는다
+    try std.testing.expect(session.find_selection_at_open == null);
+    try std.testing.expect(session.chrome_host.find.in_selection == null);
+
+    // ⑷ **빈 선택으로 열면 그 상태가 「없음」이다** — 위 ⑴ 은 토글 결과만 봤고, 여기서는
+    // **떠 둔 값 자체**를 본다(둘 다 없어야 「빈 범위면 안 켜진다」가 성립한다).
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(3);
+    try std.testing.expect(!session.chrome_host.find.open); // ⑶ 이 닫아 두었다
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.find_selection_at_open == null);
 }
 
 test "EF14 ⌥⌘F가 바꾸기 줄을 연다 — 키 경로 전체 (§5.1)" {

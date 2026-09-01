@@ -267,6 +267,7 @@ pub const default_app_bindings = [_]AppBinding{
     // 아니면 무동작). `⌘C` 는 터미널 선택이 쓰지만 `⌥⌘C` 는 비어 있어 뺏는 것이 없다.
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'C' } }, .action = .toggle_find_match_case }, // Cmd+Opt+C
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'W' } }, .action = .toggle_find_whole_word }, // Cmd+Opt+W
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'L' } }, .action = .toggle_find_in_selection }, // Cmd+Opt+L
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).

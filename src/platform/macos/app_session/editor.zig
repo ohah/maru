@@ -2852,7 +2852,17 @@ pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void 
 /// 검색 매치들을 문서 offset 범위로 편다. 매치는 `(줄, 줄 안 offset)`이고 편집은 문서 offset을
 /// 받는다(§3.1) — 그 환산을 **한 곳**에 둔다. 줄 번호가 범위 밖이면 그 매치를 버린다(목록이
 /// 편집보다 낡은 순간).
-fn matchRange(doc: Opened, m: maru.session.editor.find.Match) ?struct { start: usize, end: usize } {
+/// 문서 offset 범위 — **익명 구조체로 두지 않는다.** 같은 모양이라도 선언 자리가 다르면 Zig 는
+/// 다른 타입으로 보므로, 공개 겉껍질이 속을 그대로 못 돌려준다.
+pub const DocRange = struct { start: usize, end: usize };
+
+/// 매치의 **문서 offset 범위**. 「선택 영역 내에서만」이 거를 때도 같은 변환을 쓴다(§5.1) —
+/// 두 번째 변환을 만들면 두 축이 갈린다.
+pub fn matchRangePublic(doc: Opened, m: maru.session.editor.find.Match) ?DocRange {
+    return matchRange(doc, m);
+}
+
+fn matchRange(doc: Opened, m: maru.session.editor.find.Match) ?DocRange {
     const line = doc.file.lines.line(m.line) orelse return null;
     const start = line.start + m.start;
     if (start > doc.file.content.len) return null;
@@ -5548,6 +5558,11 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 /// 여기서 또 손대면 그 매핑을 덮어쓴다.
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     const doc = term.rt.editor_doc orelse return;
+
+    // **문서가 바뀌면 「선택 영역 내에서만」의 범위를 버린다**(§5.1). 굳혀 둔 offset 이 이제 다른
+    // 글자를 가리킨다 — 따라가게 만들면 마커·매치·범위 셋이 각각 다른 시점을 말한다. 여기가
+    // 맞는 자리인 이유는 위 주석 그대로다: **편집 경로 여섯이 전부 이 함수를 지난다.**
+    find_ops.dropFindSelectionRange(self);
 
     // **구문 트리에 편집을 알린다 — 여기가 유일한 자리다**(§5.3 `onEdit`). 제품의 편집 경로
     // 여섯이 전부 이 함수를 지나므로 통지도 한 곳이면 된다. 알리지 않으면 §5.3이 적었듯

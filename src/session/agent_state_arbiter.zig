@@ -175,7 +175,83 @@ pub const Arbiter = struct {
     }
 };
 
+/// 화면 스캔을 건너뛰어도 되는지(§1.1 C2 · 적대적 검증 2026-09-01).
+///
+/// **왜 순수 층에 있나**: 이 판단이 틀리면 C2 가 조용히 굶는다 — 배지가 「진행 중」에 남는 증상만 보이고
+/// 원인은 「화면을 안 읽었다」라 재현이 어렵다. 호출부(`pollAgentState`)의 if 문 안에 두면 판정자를 세울
+/// 자리가 없어, 실제로 그 상태로 한 번 커밋됐다. herdr 도 같은 판단을 순수 층에 둔다
+/// (`should_skip_idle_screen_scan` — 같은 문제를 같은 모양으로 풀었다).
+pub const ScanSkip = struct {
+    hook: ?State = null,
+    hook_child_count: u32 = 0,
+    screen: State = .unknown,
+    idle_confirmations: u8 = 0,
+    /// 화면 내용이 그대로인가(TerminalCore write seq 가 안 움직였다).
+    generation_same: bool = false,
+    output_active: bool = false,
+    /// `Stabilizer` 가 근거 만료를 확인해야 한다고 말하는가.
+    expiry_probe: bool = false,
+
+    pub fn canSkip(self: ScanSkip) bool {
+        // **C2 가 세는 중이면 못 건너뛴다.** 아래 「화면이 idle 이고 출력도 없다」가 곧 C2 가 세는 상황이라
+        // (codex 오류 턴은 훅이 running 에 멈춘 채 화면만 idle 이고 출력이 끊긴 상태다), 그냥 두면 첫 관측
+        // 뒤 화면이 얼어붙어 카운터가 1 에서 멈추고 C2 가 영영 임계에 못 간다.
+        if (self.c2Counting()) return false;
+        return self.generation_same and self.screen == .idle and !self.output_active and !self.expiry_probe;
+    }
+
+    /// C2 가 지금 세고 있는가 — 그 조건은 권위표의 C2 와 **같아야 한다**(§1.1).
+    pub fn c2Counting(self: ScanSkip) bool {
+        const hook = self.hook orelse return false;
+        return hook == .running and self.screen == .idle and self.hook_child_count == 0 and
+            self.idle_confirmations < Arbiter.idle_confirmations_required;
+    }
+};
+
 const testing = std.testing;
+
+test "AR-SKIP C2 가 세는 동안에는 화면 스캔을 못 건너뛴다 — 건너뛰면 C2 가 굶는다" {
+    // codex 오류 턴: 훅은 running 에 멈췄고 화면은 idle chrome 이며 출력이 끊겼다. 예전 fast-path 는
+    // 정확히 이 상태를 「다시 볼 것 없다」로 읽어 screen_seq 를 얼렸고, C2 카운터가 1 에서 멈췄다.
+    const counting: ScanSkip = .{
+        .hook = .running,
+        .screen = .idle,
+        .idle_confirmations = 1,
+        .generation_same = true,
+        .output_active = false,
+    };
+    try testing.expect(counting.c2Counting());
+    try testing.expect(!counting.canSkip());
+}
+
+test "AR-SKIP C2 가 닫히면 다시 건너뛴다 — 그 구간에만 더 본다" {
+    var done: ScanSkip = .{
+        .hook = .running,
+        .screen = .idle,
+        .idle_confirmations = Arbiter.idle_confirmations_required,
+        .generation_same = true,
+    };
+    try testing.expect(!done.c2Counting());
+    try testing.expect(done.canSkip());
+    // 자식이 있으면 애초에 D1 이라 C2 가 안 센다 — 그때도 건너뛴다.
+    done.idle_confirmations = 0;
+    done.hook_child_count = 2;
+    try testing.expect(!done.c2Counting());
+    try testing.expect(done.canSkip());
+}
+
+test "AR-SKIP 훅이 없으면 C2 축이 없다 — 예전 규칙 그대로다" {
+    const no_hook: ScanSkip = .{ .hook = null, .screen = .idle, .generation_same = true };
+    try testing.expect(!no_hook.c2Counting());
+    try testing.expect(no_hook.canSkip());
+}
+
+test "AR-SKIP 화면이 바뀌었거나 출력이 흐르면 건너뛰지 않는다 — 기존 조건은 그대로다" {
+    try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = false }).canSkip());
+    try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .output_active = true }).canSkip());
+    try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .expiry_probe = true }).canSkip());
+    try testing.expect(!(ScanSkip{ .screen = .running, .generation_same = true }).canSkip());
+}
 
 test "AR-A 훅 소스가 없으면 화면이 상태를 세운다 — 출처도 화면 것이 그대로 간다" {
     var a: Arbiter = .{};

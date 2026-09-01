@@ -484,6 +484,37 @@ pub fn attentionDebounce(state_now: State, since_ms: u64, now_ms: u64) Debounce 
 ///
 /// 왜 있어야 하나: 훅 모드는 화면·프로세스 관측을 끄므로(§1.1) 이 자리를 비워 두면 배지가 «진행중» 한
 /// 마디만 말한다. 훅을 켠 사용자가 정보를 **잃는다** — 그러면 켤 이유가 없다(§8).
+/// 훅이 알려 준 **작업 디렉터리**를 그 Term 에 들고 있는다.
+///
+/// `ToolLabel` 과 같은 모양이되 상한만 다르다 — 경로는 사이드바 한 줄보다 길 수 있고, 잘린 경로는
+/// 「틀린 경로」라 표시에 쓰면 안 된다(그래서 넘치면 **안 담는다**).
+pub const CwdLabel = struct {
+    pub const max_text = 512;
+
+    len: usize = 0,
+    buf: [max_text]u8 = undefined,
+
+    pub fn text(self: *const CwdLabel) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn isEmpty(self: *const CwdLabel) bool {
+        return self.len == 0;
+    }
+
+    /// **절대 경로만, 상한 안에서만 담는다.** 상대 경로는 어느 기준인지 이쪽이 모르고, 잘린 절대
+    /// 경로는 남의 디렉터리를 가리킨다 — 둘 다 「모른다」로 두는 편이 안전하다.
+    pub fn set(self: *CwdLabel, path: []const u8) void {
+        if (path.len == 0 or path.len > max_text or path[0] != '/') return;
+        @memcpy(self.buf[0..path.len], path);
+        self.len = path.len;
+    }
+
+    pub fn clear(self: *CwdLabel) void {
+        self.len = 0;
+    }
+};
+
 pub const ToolLabel = struct {
     /// 사이드바 한 줄에 곁들이는 값이라 길 필요가 없다. 넘치면 자른다(버리지 않는다).
     pub const max_text = 120;
@@ -1767,4 +1798,39 @@ test "원격이 켜지면 다른 셋이 무엇이든 게이트만 본다" {
     }
     // 채널이 죽으면 원격 Term 은 로컬 로그가 없으므로 즉시 관측 모드로 내려간다.
     try testing.expectEqual(Mode.observe, modeFor(.{ .remote_channel_open = false, .gate_on = true }));
+}
+
+test "CwdLabel: 절대 경로만·상한 안에서만 담고, 못 담으면 앞 값을 지키지 않는다" {
+    var l: CwdLabel = .{};
+    try testing.expect(l.isEmpty());
+
+    l.set("/a/b");
+    try testing.expectEqualStrings("/a/b", l.text());
+
+    // **상한을 정확히 채우는 것은 담는다**(경계 한 칸 차이가 잘린 경로를 만든다).
+    var exact: [CwdLabel.max_text]u8 = undefined;
+    exact[0] = '/';
+    @memset(exact[1..], 'a');
+    l.set(&exact);
+    try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
+
+    // **넘치면 안 담는다.** 잘라 담으면 그 값은 «남의 디렉터리» 를 가리킨다 — 표시에도 판정에도 쓰면
+    // 안 되므로 「모른다」로 두는 편이 맞다. 그리고 앞 값은 그대로 남는다(마지막으로 아는 좋은 값).
+    var over: [CwdLabel.max_text + 1]u8 = undefined;
+    over[0] = '/';
+    @memset(over[1..], 'b');
+    l.set(&over);
+    try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
+    try testing.expectEqual(@as(u8, 'a'), l.text()[1]); // 앞 값이 그대로다
+
+    // 상대 경로도 안 담는다 — 어느 기준인지 이쪽이 모른다.
+    l.set("relative/x");
+    try testing.expectEqual(@as(u8, 'a'), l.text()[1]);
+
+    // 빈 값도 안 담는다.
+    l.set("");
+    try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
+
+    l.clear();
+    try testing.expect(l.isEmpty());
 }

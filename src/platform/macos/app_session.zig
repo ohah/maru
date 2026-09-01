@@ -76557,3 +76557,95 @@ test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물�
     _ = std.c.close(fds2[1]);
     session.closeRemoteAgentHost(dest);
 }
+
+test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 구간을 메운다" {
+    // OSC 7 보고자는 `precmd` 라 **프롬프트가 그려질 때만** 발화한다. `cd proj && claude` 처럼 셸이
+    // 곧바로 전면 TUI 에 자리를 내주면 그 뒤로 프롬프트가 없어 값이 접속 직전에서 멈춘다 — 에이전트
+    // 세션들이 사이드바에 전부 홈으로 뜨던 모양이 이것이다(ssh-integration.md §9.5). 훅은 그 구간에도
+    // 매 턴 오므로 그 값이 이 자리를 메운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // ── ① 원격 pane 이고, OSC 7 은 홈에서 멈춰 있다(전면 TUI 가 붙기 직전 값).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/Users/me\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "/Users/me") != null);
+    }
+
+    // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → 폴더줄이 그것으로 바뀐다.
+    term.agent_hook_cwd.set("/srv/app/proj");
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "/srv/app/proj") != null);
+        // host 접두는 그대로다 — 원격이라는 사실이 사라지면 §9.4 안전장치가 통째로 꺼진다.
+        try std.testing.expect(std.mem.indexOf(u8, shown, "build-box:") != null);
+    }
+
+    // ── ③ **잘린 경로·상대 경로는 안 담는다.** 담으면 남의 디렉터리를 가리킨다.
+    term.agent_hook_cwd.clear();
+    term.agent_hook_cwd.set("relative/path");
+    try std.testing.expect(term.agent_hook_cwd.isEmpty());
+
+    // ── ④ 대조군: 로컬 pane 은 이 값을 안 본다(커널 조회가 이미 정확하다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(!termCwdIsRemote(term));
+    term.agent_hook_cwd.set("/srv/app/proj");
+    {
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "/srv/app/proj") == null);
+    }
+}
+
+test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박이지 않는다" {
+    // 안 버리면 에이전트를 끝내고 평범한 셸로 돌아온 뒤에도 폴더줄이 **옛 경로에 붙박인다** —
+    // 그때부터는 OSC 7 이 제대로 갱신되는데 그것을 무시하게 되고, 그 모양이 계약 §1 이 금지하는
+    // «한 Term 두 소스» 다. `agent_hook_tool` 을 버리는 그 자리에서 함께 버린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_hook_cwd.set("/srv/app/proj");
+    try std.testing.expect(!term.agent_hook_cwd.isEmpty());
+
+    // 훅 모드가 아니다(로그도 없고 에이전트도 없고 원격 채널도 없다) → 관측 모드로 내려간다.
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(session, term));
+    agent_ops.pollAgentConsumer(session, term, true, true);
+
+    // 그 자리에서 훅이 남긴 세부가 버려진다 — cwd 도 그 목록이다.
+    try std.testing.expect(term.agent_hook_cwd.isEmpty());
+}

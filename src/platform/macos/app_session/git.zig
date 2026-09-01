@@ -741,7 +741,14 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
     term_ops.refreshTermObservation(self, term, false, false);
     if (app_session_mod.termCwdIsRemote(term)) {
         if (term.rt.observation.availability == .unavailable) return null;
-        const cwd = term.rt.observation.cwd.items;
+        // **훅이 더 최근을 안다.** OSC 7 은 `precmd` 라 전면 TUI(claude·codex) 가 붙어 있는 동안
+        // 발화하지 못해 접속 직전 값에서 멈춘다 — 에이전트 세션이 전부 홈으로 뜨던 것이 그것이다
+        // (ssh-integration.md §9.5). 훅 값은 매 턴 오므로 있으면 그쪽을 쓴다.
+        //
+        // **이 한 지점에서 정한다.** 사이드바·SCM·파일 탐색기가 모두 이 함수를 지나므로 두 뷰가
+        // 다른 답을 내지 않는다(예전에 그 자리만 관측을 직접 읽어 갈렸던 회귀가 이 함수의 존재 이유다).
+        const hook_cwd = term.agent_hook_cwd.text();
+        const cwd = if (hook_cwd.len > 0) hook_cwd else term.rt.observation.cwd.items;
         if (cwd.len == 0 or cwd.len > buf.len) return null;
         @memcpy(buf[0..cwd.len], cwd);
         return buf[0..cwd.len];

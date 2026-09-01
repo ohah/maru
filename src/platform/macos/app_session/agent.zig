@@ -1723,6 +1723,10 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             // 훅 모드에서 남은 **진행 중 세부**를 버린다. 남겨 두면 관측 소스가 그린 배지 옆에 훅이
             // 적은 문구가 붙는다 — 그것이 곧 계약 §1 이 금지하는 «한 Term 두 소스» 다.
             term.agent_hook_tool.clear();
+            // **작업 디렉터리도 버린다**(적대적 검증 1 회차). 안 버리면 에이전트를 끝내고 평범한 셸로
+            // 돌아온 뒤에도 폴더줄이 **옛 경로에 붙박인다** — 그때부터는 OSC 7 이 제대로 갱신되는데
+            // 그것을 무시하게 되고, 그 모양이 바로 이 블록이 금지하는 «한 Term 두 소스» 다.
+            term.agent_hook_cwd.clear();
             // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
             // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
             term.agent_hook_progress.reset();
@@ -2038,6 +2042,10 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
     adoptHookSessionIdentity(self, term, ev);
     adoptHookImageSource(self, term, ev);
+    // **훅이 알려 준 작업 디렉터리를 담는다.** 원격 pane 에서 OSC 7 은 `precmd` 라 전면 TUI 가 붙어
+    // 있는 동안 발화하지 못해 값이 접속 직전에서 멈춘다(ssh-integration.md §9.5) — 훅은 그 구간에도
+    // **매 턴** 오므로 이 값이 그 자리를 메운다. 로컬은 커널 조회가 이미 정확해서 소비하지 않는다.
+    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd);
     captureBeforeForEvent(self, term, ev);
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지

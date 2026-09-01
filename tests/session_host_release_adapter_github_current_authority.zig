@@ -28,6 +28,15 @@ const Clock = struct {
         return out;
     }
 };
+const SharedDeadline = struct {
+    calls: usize = 0,
+    fail_at: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        self.calls += 1;
+        if (self.calls == self.fail_at) return error.TimedOut;
+        return 10_000 - @as(i128, @intCast(self.calls * 100));
+    }
+};
 const Authority = struct {
     calls: usize = 0,
     fail_at: usize = 0,
@@ -164,6 +173,13 @@ test "CLI replacement deadline and allocation failure publish nothing" {
     clock = .{ .step = 600 };
     try std.testing.expectError(error.TimedOut, composition.authenticateWith(&authority, &executor, &clock, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, 1000, &result));
     try std.testing.expect(result.value() == null);
+    authority = .{};
+    executor = .{ .deployments = 1 };
+    clock = .{ .step = -1 };
+    try std.testing.expectError(error.ClockFailed, composition.authenticateWith(&authority, &executor, &clock, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, 1000, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expect(result.value() == null);
     var bytes: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&bytes);
     authority = .{};
@@ -183,4 +199,35 @@ test "copied result never exposes authority" {
     defer result.deinit() catch {};
     var copied = result;
     try std.testing.expect(copied.value() == null);
+}
+
+test "shared absolute deadline is consumed once before every request without restart" {
+    var authority = Authority{};
+    var executor = Executor{ .deployments = 1 };
+    var deadline = SharedDeadline{};
+    var response: [65536]u8 = undefined;
+    var result: composition.CurrentGitHubAuthority = .{};
+    try composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, &result);
+    try std.testing.expectEqual(@as(usize, 12), deadline.calls);
+    try std.testing.expectEqual(deadline.calls / 2, executor.calls);
+    for (executor.budgets[0..executor.calls], 1..) |budget, index|
+        try std.testing.expectEqual(10_000 - @as(i128, @intCast(index * 200)), budget);
+
+    try result.deinit();
+    result = .{};
+    authority = .{};
+    executor = .{ .deployments = 1 };
+    deadline = .{ .fail_at = 6 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, &result));
+    try std.testing.expectEqual(@as(usize, 2), executor.calls);
+    try std.testing.expectEqual(executor.calls + 1, authority.calls);
+    try std.testing.expect(result.value() == null);
+
+    authority = .{};
+    executor = .{ .deployments = 1 };
+    deadline = .{ .fail_at = 5 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, &result));
+    try std.testing.expectEqual(@as(usize, 2), authority.calls);
+    try std.testing.expectEqual(@as(usize, 2), executor.calls);
+    try std.testing.expect(result.value() == null);
 }

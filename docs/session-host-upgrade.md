@@ -855,6 +855,15 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. current manifest artifact attestation, local asset/Apple product 관측, summary publication,
   executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
 
+  executable용 current release `...Until` entrypoint는 앞 단계의 current GitHub authority, mutable draft release 조회와
+  shared `release_adapter_github_tag_authority` resolver까지 같은 final-address `Deadline` pointer로 연결한다. draft·tag ref·각
+  annotated tag request는 CLI revalidation 전후 remaining을 확인하고 두 번째 값만 child budget으로 전달하며, tag resolver가
+  depth마다 budget이나 expiry를 다시 만들지 않는다. 중간 만료는 이후 tag/API request 0, partial current/release/tag authority 0으로
+  닫힌다. tag resolution 뒤에도 같은 deadline을 다시 확인한 뒤에만 최종 authority를 게시하므로 마지막 parse·cleanup 중 만료 역시
+  publication 0이다. 기존 budget entrypoint는 독립 gate 호환용으로 남지만 전체 executable owner는 호출하지 않는다. focused current-release
+  gate는 current authority부터 0/1/8-hop tag chain까지 하나의 injected deadline이 계속 감소하는지와 revalidation 중 만료를
+  Debug·ReleaseFast에서 검증한다. manifest/asset attestation, Apple product와 compatibility의 `...Until` 이관은 후속 범위다.
+
   Current manifest attestation composition의 단일 소유자는
   `release_adapter_github_current_manifest_attestation.zig`다. 입력은 strict context, 앞 단계의 move-only
   `CurrentReleaseAuthority`, current B의 canonical manifest bytes, 그 bytes를 기존 0700 descriptor-owned workdir의 canonical

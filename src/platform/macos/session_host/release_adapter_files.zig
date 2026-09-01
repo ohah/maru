@@ -153,6 +153,91 @@ pub const PinnedExecutableFile = struct {
     }
 };
 
+/// Manifest-independent authority for one large release asset.
+pub const PinnedReleaseFile = struct {
+    owner: ?*PinnedReleaseFile = null,
+    fd: c.fd_t = -1,
+    parent_fd: c.fd_t = -1,
+    path_len: usize = 0,
+    path_sha256: [32]u8 = @splat(0),
+    fingerprint: FileFingerprint = undefined,
+    parent_fingerprint: DirectoryFingerprint = undefined,
+    sha256: [64]u8 = @splat(0),
+    executable: bool = false,
+
+    pub fn value(self: *const @This()) ?ExecutableObservation {
+        if (self.owner != self or self.fd < 0 or self.parent_fd < 0) return null;
+        return .{ .identity = self.fingerprint.identity, .size = self.fingerprint.size, .mode = self.fingerprint.mode, .sha256 = self.sha256 };
+    }
+
+    pub fn revalidate(self: *const @This(), path: [:0]const u8) Error!ExecutableObservation {
+        const expected = self.value() orelse return error.InvalidOwner;
+        var path_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+        if (path.len != self.path_len or !std.mem.eql(u8, &path_digest, &self.path_sha256)) return error.FileChanged;
+        const current_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+        defer _ = c.close(current_fd);
+        var held_stat: posix.Stat = undefined;
+        var path_stat: posix.Stat = undefined;
+        var parent_stat: posix.Stat = undefined;
+        if (c.fstat(self.fd, &held_stat) != 0 or c.fstat(current_fd, &path_stat) != 0 or c.fstat(self.parent_fd, &parent_stat) != 0) return error.FileChanged;
+        const held = releaseFingerprint(held_stat, self.executable) catch return error.FileChanged;
+        const reopened = releaseFingerprint(path_stat, self.executable) catch return error.FileChanged;
+        if (!sameFingerprint(self.fingerprint, held) or !sameFingerprint(self.fingerprint, reopened) or
+            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_stat) catch return error.FileChanged)) return error.FileChanged;
+        const digest = hashExact(self.fd, expected.size) catch return error.FileChanged;
+        var after: posix.Stat = undefined;
+        if (c.fstat(self.fd, &after) != 0 or !sameFingerprint(self.fingerprint, releaseFingerprint(after, self.executable) catch return error.FileChanged) or
+            !std.mem.eql(u8, &digest, &self.sha256)) return error.FileChanged;
+        return expected;
+    }
+
+    pub fn deinit(self: *@This()) Error!void {
+        if (self.owner != self or self.fd < 0 or self.parent_fd < 0) return error.InvalidOwner;
+        _ = c.close(self.fd);
+        _ = c.close(self.parent_fd);
+        self.* = .{};
+    }
+};
+
+pub fn pinReleaseFileObserved(result: *PinnedReleaseFile, path: [:0]const u8, require_executable: bool, max_bytes: u64) Error!void {
+    if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
+    if (max_bytes == 0) return error.InvalidExpected;
+    var leaf_storage: [std.fs.max_name_bytes:0]u8 = undefined;
+    const parent = try openParent(path, &leaf_storage);
+    var keep_parent = false;
+    defer {
+        if (!keep_parent) _ = c.close(parent.fd);
+    }
+    var parent_stat: posix.Stat = undefined;
+    if (c.fstat(parent.fd, &parent_stat) != 0) return error.ReadFailed;
+    const parent_fingerprint = try directoryFingerprint(parent_stat);
+    const fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.UnsafePath;
+    var keep_fd = false;
+    defer {
+        if (!keep_fd) _ = c.close(fd);
+    }
+    var before_stat: posix.Stat = undefined;
+    var leaf_stat: posix.Stat = undefined;
+    if (c.fstat(fd, &before_stat) != 0 or c.fstatat(parent.fd, parent.leaf.ptr, &leaf_stat, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.ReadFailed;
+    const before = try releaseFingerprint(before_stat, require_executable);
+    const leaf = try releaseFingerprint(leaf_stat, require_executable);
+    if (!sameFingerprint(before, leaf)) return error.FileChanged;
+    if (before.link_count != 1) return error.PathAlias;
+    if (before.size == 0 or before.size > max_bytes) return error.TooLarge;
+    const digest = try hashExact(fd, before.size);
+    var after_stat: posix.Stat = undefined;
+    var parent_after: posix.Stat = undefined;
+    if (c.fstat(fd, &after_stat) != 0 or c.fstat(parent.fd, &parent_after) != 0 or
+        !sameFingerprint(before, try releaseFingerprint(after_stat, require_executable)) or
+        !sameDirectoryFingerprint(parent_fingerprint, try directoryFingerprint(parent_after))) return error.FileChanged;
+    var path_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+    result.* = .{ .owner = result, .fd = fd, .parent_fd = parent.fd, .path_len = path.len, .path_sha256 = path_digest, .fingerprint = before, .parent_fingerprint = parent_fingerprint, .sha256 = digest, .executable = require_executable };
+    keep_fd = true;
+    keep_parent = true;
+}
+
 pub const Input = struct {
     bytes: []u8,
     size: u64,
@@ -340,6 +425,13 @@ fn executableFingerprint(stat: posix.Stat) Error!FileFingerprint {
         .changed_sec = stat.ctimespec.sec,
         .changed_nsec = stat.ctimespec.nsec,
     };
+}
+
+fn releaseFingerprint(stat: posix.Stat, require_executable: bool) Error!FileFingerprint {
+    if (!posix.S.ISREG(stat.mode)) return error.NotRegular;
+    if (require_executable and stat.mode & 0o111 == 0) return error.NotExecutable;
+    if (stat.size < 0) return error.SizeMismatch;
+    return .{ .identity = .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino) }, .size = @intCast(stat.size), .mode = @intCast(stat.mode), .link_count = @intCast(stat.nlink), .modified_sec = stat.mtimespec.sec, .modified_nsec = stat.mtimespec.nsec, .changed_sec = stat.ctimespec.sec, .changed_nsec = stat.ctimespec.nsec };
 }
 
 fn sameFingerprint(left: FileFingerprint, right: FileFingerprint) bool {

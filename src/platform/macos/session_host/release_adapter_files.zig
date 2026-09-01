@@ -8,6 +8,7 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 const safe_open = @import("safe_open");
+const identity = @import("release_adapter_identity");
 
 extern "c" fn renameatx_np(
     from_dir_fd: c_int,
@@ -21,10 +22,16 @@ const rename_excl: c_uint = 0x00000004;
 const summary_cap: usize = 1024 * 1024;
 
 pub const Error = error{
+    InvalidOwner,
+    InvalidExpected,
     UnsafePath,
     NotRegular,
+    NotExecutable,
     TooLarge,
+    SizeMismatch,
+    DigestMismatch,
     ReadFailed,
+    FileChanged,
     ChangedDuringRead,
     PathAlias,
     DestinationExists,
@@ -37,6 +44,56 @@ pub const Error = error{
 pub const Identity = struct {
     device: u64,
     inode: u64,
+};
+
+pub const ExecutableExpected = struct {
+    size: u64,
+    sha256: [64]u8,
+};
+
+pub const ExecutableObservation = struct {
+    identity: Identity,
+    size: u64,
+    mode: u32,
+    sha256: [64]u8,
+};
+
+const FileFingerprint = struct {
+    identity: Identity,
+    size: u64,
+    mode: u32,
+    link_count: u64,
+    modified_sec: i64,
+    modified_nsec: i64,
+    changed_sec: i64,
+    changed_nsec: i64,
+};
+
+/// Final-address descriptor owner for the large frozen executable asset. Unlike `Input`, this
+/// keeps no heap copy: the held fd and a streaming digest are the authority consumed later.
+pub const PinnedExecutableFile = struct {
+    owner: ?*PinnedExecutableFile = null,
+    fd: c.fd_t = -1,
+    path_len: usize = 0,
+    path_sha256: [32]u8 = @splat(0),
+    fingerprint: FileFingerprint = undefined,
+    sha256: [64]u8 = @splat(0),
+
+    pub fn value(self: *const @This()) ?ExecutableObservation {
+        if (self.owner != self or self.fd < 0) return null;
+        return .{
+            .identity = self.fingerprint.identity,
+            .size = self.fingerprint.size,
+            .mode = self.fingerprint.mode,
+            .sha256 = self.sha256,
+        };
+    }
+
+    pub fn deinit(self: *@This()) Error!void {
+        if (self.owner != self or self.fd < 0) return error.InvalidOwner;
+        _ = c.close(self.fd);
+        self.* = .{};
+    }
 };
 
 pub const Input = struct {
@@ -102,6 +159,138 @@ pub fn readInputAlloc(
         .sha256 = std.fmt.bytesToHex(digest, .lower),
         .identity = .{ .device = @intCast(before.dev), .inode = @intCast(before.ino) },
     };
+}
+
+pub fn pinExecutable(
+    result: *PinnedExecutableFile,
+    path: [:0]const u8,
+    expected: ExecutableExpected,
+    max_bytes: u64,
+) Error!void {
+    if (result.owner != null or result.fd >= 0) return error.InvalidOwner;
+    if (expected.size == 0 or max_bytes == 0 or expected.size > max_bytes or
+        !identity.lowerHex(&expected.sha256, 64)) return error.InvalidExpected;
+    const fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.UnsafePath;
+    var keep = false;
+    defer {
+        if (!keep) _ = c.close(fd);
+    }
+    var before_stat: posix.Stat = undefined;
+    if (c.fstat(fd, &before_stat) != 0) return error.ReadFailed;
+    const before = try executableFingerprint(before_stat);
+    if (before.size != expected.size) return error.SizeMismatch;
+    const actual = try hashExact(fd, expected.size);
+    var after_stat: posix.Stat = undefined;
+    if (c.fstat(fd, &after_stat) != 0) return error.ReadFailed;
+    const after = try executableFingerprint(after_stat);
+    if (!sameFingerprint(before, after)) return error.FileChanged;
+    if (!std.mem.eql(u8, &actual, &expected.sha256)) return error.DigestMismatch;
+    result.* = .{
+        .owner = result,
+        .fd = fd,
+        .path_len = path.len,
+        .fingerprint = before,
+        .sha256 = actual,
+    };
+    std.crypto.hash.sha2.Sha256.hash(path, &result.path_sha256, .{});
+    keep = true;
+}
+
+pub fn revalidateExecutable(
+    pinned: *const PinnedExecutableFile,
+    path: [:0]const u8,
+) Error!ExecutableObservation {
+    const expected = pinned.value() orelse return error.InvalidOwner;
+    var path_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+    if (path.len != pinned.path_len or !std.mem.eql(u8, &path_digest, &pinned.path_sha256))
+        return error.FileChanged;
+
+    const current_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+    defer _ = c.close(current_fd);
+    var held_before_stat: posix.Stat = undefined;
+    var path_before_stat: posix.Stat = undefined;
+    if (c.fstat(pinned.fd, &held_before_stat) != 0 or c.fstat(current_fd, &path_before_stat) != 0)
+        return error.FileChanged;
+    const held_before = executableFingerprint(held_before_stat) catch return error.FileChanged;
+    const path_before = executableFingerprint(path_before_stat) catch return error.FileChanged;
+    if (!sameFingerprint(pinned.fingerprint, held_before) or
+        !sameFingerprint(pinned.fingerprint, path_before)) return error.FileChanged;
+
+    const actual = hashExact(pinned.fd, expected.size) catch return error.FileChanged;
+    var held_after_stat: posix.Stat = undefined;
+    var path_after_stat: posix.Stat = undefined;
+    if (c.fstat(pinned.fd, &held_after_stat) != 0 or c.fstat(current_fd, &path_after_stat) != 0)
+        return error.FileChanged;
+    const held_after = executableFingerprint(held_after_stat) catch return error.FileChanged;
+    const path_after = executableFingerprint(path_after_stat) catch return error.FileChanged;
+    if (!sameFingerprint(pinned.fingerprint, held_after) or
+        !sameFingerprint(pinned.fingerprint, path_after) or
+        !std.mem.eql(u8, &actual, &expected.sha256)) return error.FileChanged;
+
+    // Reopen after hashing as well. The later composition consumes only this pinned observation,
+    // never the pathname, but this closes a replacement that races the first reopen.
+    const final_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+    defer _ = c.close(final_fd);
+    var final_stat: posix.Stat = undefined;
+    if (c.fstat(final_fd, &final_stat) != 0) return error.FileChanged;
+    const final = executableFingerprint(final_stat) catch return error.FileChanged;
+    if (!sameFingerprint(pinned.fingerprint, final)) return error.FileChanged;
+    return expected;
+}
+
+fn executableFingerprint(stat: posix.Stat) Error!FileFingerprint {
+    if (!posix.S.ISREG(stat.mode)) return error.NotRegular;
+    if (stat.mode & 0o111 == 0) return error.NotExecutable;
+    if (stat.size < 0) return error.SizeMismatch;
+    return .{
+        .identity = .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino) },
+        .size = @intCast(stat.size),
+        .mode = @intCast(stat.mode),
+        .link_count = @intCast(stat.nlink),
+        .modified_sec = stat.mtimespec.sec,
+        .modified_nsec = stat.mtimespec.nsec,
+        .changed_sec = stat.ctimespec.sec,
+        .changed_nsec = stat.ctimespec.nsec,
+    };
+}
+
+fn sameFingerprint(left: FileFingerprint, right: FileFingerprint) bool {
+    return left.identity.device == right.identity.device and left.identity.inode == right.identity.inode and
+        left.size == right.size and left.mode == right.mode and left.link_count == right.link_count and
+        left.modified_sec == right.modified_sec and left.modified_nsec == right.modified_nsec and
+        left.changed_sec == right.changed_sec and left.changed_nsec == right.changed_nsec;
+}
+
+fn hashExact(fd: c.fd_t, expected_size: u64) Error![64]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var offset: u64 = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+    while (offset < expected_size) {
+        const wanted: usize = @intCast(@min(@as(u64, buffer.len), expected_size - offset));
+        const count = c.pread(fd, &buffer, wanted, @intCast(offset));
+        if (count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (count == 0) return error.SizeMismatch;
+        const len: usize = @intCast(count);
+        hash.update(buffer[0..len]);
+        offset += len;
+    }
+    var extra: [1]u8 = undefined;
+    while (true) {
+        const count = c.pread(fd, &extra, 1, @intCast(expected_size));
+        if (count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (count != 0) return error.SizeMismatch;
+        break;
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 pub fn requireDistinct(identities: []const Identity) Error!void {

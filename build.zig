@@ -12839,6 +12839,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-cli-authority",
         "Validate official Release CI GitHub CLI executable authority",
     );
+    const session_host_release_adapter_executable_bootstrap_step = b.step(
+        "test-session-host-release-adapter-executable-bootstrap",
+        "Validate trusted Release CI executable bootstrap ordering",
+    );
     const session_host_release_adapter_github_manifest_download_step = b.step(
         "test-session-host-release-adapter-github-manifest-download",
         "Validate bounded predecessor manifest bootstrap downloads",
@@ -13272,6 +13276,11 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |authority_optimize| {
+            const authority_identity_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+            });
             const authority_mod = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"),
                 .target = target,
@@ -13293,11 +13302,7 @@ pub fn build(b: *std.Build) void {
                             }),
                         }, .{
                             .name = "release_adapter_identity",
-                            .module = b.createModule(.{
-                                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
-                                .target = target,
-                                .optimize = authority_optimize,
-                            }),
+                            .module = authority_identity_mod,
                         } },
                     }),
                 }},
@@ -13318,6 +13323,64 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_authority_tests.step);
             if (posix_host_tests) test_step.dependOn(&run_authority_tests.step);
             macos_only_test_step.dependOn(&run_authority_tests.step);
+
+            const bootstrap_manifest_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+            });
+            const bootstrap_context_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+                .imports = &.{
+                    .{ .name = "release_manifest", .module = bootstrap_manifest_mod },
+                    .{ .name = "release_adapter_identity", .module = authority_identity_mod },
+                },
+            });
+            const bootstrap_environment_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_environment.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "release_adapter_context", .module = bootstrap_context_mod }},
+            });
+            const bootstrap_contract_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+            });
+            const bootstrap_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_executable_bootstrap.zig"),
+                .target = target,
+                .optimize = authority_optimize,
+                .imports = &.{
+                    .{ .name = "release_adapter_contract", .module = bootstrap_contract_mod },
+                    .{ .name = "release_adapter_context", .module = bootstrap_context_mod },
+                    .{ .name = "release_adapter_environment", .module = bootstrap_environment_mod },
+                    .{ .name = "release_adapter_github_cli_authority", .module = authority_mod },
+                },
+            });
+            const bootstrap_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_executable_bootstrap.zig"),
+                    .target = target,
+                    .optimize = authority_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod },
+                        .{ .name = "release_adapter_context", .module = bootstrap_context_mod },
+                        .{ .name = "release_adapter_github_cli_authority", .module = authority_mod },
+                    },
+                }),
+            });
+            const run_bootstrap_tests = b.addRunArtifact(bootstrap_tests);
+            run_bootstrap_tests.addArg("--maru-expect-tests=5");
+            run_bootstrap_tests.setCwd(b.path("."));
+            session_host_release_adapter_executable_bootstrap_step.dependOn(&run_bootstrap_tests.step);
+            session_host_step.dependOn(&run_bootstrap_tests.step);
+            if (posix_host_tests) test_step.dependOn(&run_bootstrap_tests.step);
+            macos_only_test_step.dependOn(&run_bootstrap_tests.step);
         }
     }
     const session_host_release_adapter_apple_product_step = b.step(

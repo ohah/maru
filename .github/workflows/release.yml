@@ -28,8 +28,34 @@ concurrency:
 jobs:
   universal-dmg:
     name: universal dmg (signed + notarized)
-    runs-on: macos-14 # Apple Silicon — arm64 네이티브 + x86_64 cross
+    environment: release
+    # Apple Silicon — arm64 네이티브 + x86_64 cross.
+    runs-on: macos-15
     steps:
+      # Repository bytes가 PATH나 executable digest를 바꾸기 전에 runner-provided gh를 고정한다.
+      # 후속 validator는 환경변수나 PATH를 다시 읽지 않고 이 step output만 argv로 소비한다.
+      - name: Capture trusted GitHub CLI before checkout
+        id: trusted-gh
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovered=$(command -v gh)
+          canonical=$(/usr/bin/realpath "$discovered")
+          case "$canonical" in
+            /*) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$canonical" != *$'\n'* && "$canonical" != *$'\r'* ]]
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          case "$sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#sha256}" = 64
+          printf 'path=%s\n' "$canonical" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false

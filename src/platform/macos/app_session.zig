@@ -8287,8 +8287,25 @@ pub const AppSession = struct {
         // 빈 값은 줄을 아예 생략한다 — "마지막 제목: " 같은 빈 라벨은 정보가 아니라 잡음이다.
         if (title.len > 0)
             w.print("    마지막 제목: {s}\r\n", .{title[0..terminal.width.truncateToBoundary(title, max_value_bytes)]}) catch {};
-        if (cwd.len > 0)
-            w.print("    마지막 위치: {s}\r\n", .{cwd[0..terminal.width.truncateToBoundary(cwd, max_value_bytes)]}) catch {};
+        // ⚠️ **원격 cwd 는 `<host>:<path>` 로 적는다** — 폴더줄(`sidebarCwdPath`)과 **같은 규율**이다.
+        // 그쪽 주석이 이유를 적고 있다: host 가 없으면 사용자가 그 경로를 **로컬에서 열려다 실패한다.**
+        // 여기만 규율에서 빠져 있어, 같은 경로가 한 화면에서 두 가지로 보였다(폴더줄은 `host:` 를 붙이고
+        // 이 줄은 안 붙였다) — 그리고 틀린 쪽이 이쪽이다.
+        //
+        // 이 값을 실제로 쓰는 자리(⏎ 재시작 = `respawnEndedPlaceholder`)는 원격이면 cwd 를 **안 쓴다**.
+        // 그러니 여기 적힌 것을 「돌아갈 자리」로 읽는 사용자에게 그것이 남의 기계임을 말해야 한다.
+        if (cwd.len > 0) {
+            const shown = cwd[0..terminal.width.truncateToBoundary(cwd, max_value_bytes)];
+            if (termCwdIsRemote(term)) {
+                const host = termDisplayHost(term);
+                if (host.len > 0)
+                    w.print("    마지막 위치: {s}:{s}\r\n", .{ host, shown }) catch {}
+                else
+                    w.print("    마지막 위치: {s}\r\n", .{shown}) catch {};
+            } else {
+                w.print("    마지막 위치: {s}\r\n", .{shown}) catch {};
+            }
+        }
         w.writeAll("    ⏎ 이 자리에서 새 셸 시작\x1b[0m\r\n") catch {};
         const text = w.buffered();
         if (text.len == 0) return; // 한 줄도 못 썼으면 래치를 세우지 않는다 — 다음 호출이 다시 시도한다.
@@ -66832,6 +66849,42 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
 // 어긋난다). 그래서 재현은 후자로 만들고, 그 상태가 화면 표시부터 저장소 판정·안내 문구까지 어떻게 한 줄기로
 // 무너지는지를 고정한다. 대조군은 **빈 authority** — maru의 로컬 셸 통합이 보내는 형식이고(shell_integration.zig),
 // 로컬 이름이 어떤 상태든 로컬로 읽혀 같은 경로가 정상으로 돌아온다. 그 대조가 곧 이 수정의 효과다.
+// **원격 경로를 화면에 적는 자리는 전부 `<host>:` 를 붙인다.**
+//
+// 폴더줄이 그 규율을 세우고 이유까지 적어 두었다: host 가 없으면 사용자가 그 경로를 **로컬에서 열려다
+// 실패한다**(`host:path` 는 scp/rsync 관례라 원격임이 즉시 읽힌다). 그런데 종료 placeholder 안내는
+// 그 규율에서 **빠져 있었다** — 같은 원격 경로가 한 화면에서 두 가지로 보였고, 틀린 쪽이 그쪽이었다.
+//
+// 이 판정자는 「원격 pane 인데 로컬 것처럼 보여 준다」는 **같은 뿌리**를 센다. 이 저장소에서 그 뿌리가
+// 반복해 나왔다(목록 안내 · diff 표식 · 쓰기 대상 · 갱신 대상 · 읽기 실패 사유 · 갤러리 대화).
+test "원격 경로를 적는 자리는 전부 host 를 붙인다" {
+    const allocator = std.testing.allocator;
+    const src = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        "src/platform/macos/app_session.zig",
+        allocator,
+        .limited(8 * 1024 * 1024),
+    );
+    defer allocator.free(src);
+
+    // 폴더줄: 원격이면 `<host>:<path>`.
+    const sidebar_at = std.mem.indexOf(u8, src, "pub fn sidebarCwdPath") orelse return error.SidebarMissing;
+    const sidebar_end = std.mem.indexOfPos(u8, src, sidebar_at, "\n}\n") orelse src.len;
+    try std.testing.expect(std.mem.indexOf(u8, src[sidebar_at..sidebar_end], "termCwdIsRemote(term)") != null);
+
+    // 종료 안내: **같은 규율**을 지난다. 이것이 없으면 그 줄이 원격 경로를 로컬처럼 적는다.
+    const ended_at = std.mem.indexOf(u8, src, "pub fn writeEndedPlaceholderGuidance") orelse
+        return error.EndedGuidanceMissing;
+    const ended_end = std.mem.indexOfPos(u8, src, ended_at, "\n    }\n") orelse src.len;
+    const ended = src[ended_at..ended_end];
+    try std.testing.expect(std.mem.indexOf(u8, ended, "termCwdIsRemote(term)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ended, "termDisplayHost(term)") != null);
+    // 그리고 **그 값을 실제로 쓰는 자리**는 원격이면 cwd 를 안 쓴다 — 안내가 「돌아갈 자리」로 읽히므로.
+    const respawn_at = std.mem.indexOf(u8, src, "fn respawnEndedPlaceholder") orelse return error.RespawnMissing;
+    const respawn_end = std.mem.indexOfPos(u8, src, respawn_at, "\n    }\n") orelse src.len;
+    try std.testing.expect(std.mem.indexOf(u8, src[respawn_at..respawn_end], "if (!termCwdIsRemote(tomb))") != null);
+}
+
 test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통째로 원격 취급된다(2026-08-13 재현)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

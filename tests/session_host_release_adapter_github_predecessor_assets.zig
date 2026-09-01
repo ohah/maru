@@ -4,6 +4,7 @@ const std = @import("std");
 const c = std.c;
 const manifest = @import("release_manifest");
 const git = @import("release_adapter_github_git");
+const deadline_mod = @import("release_adapter_deadline");
 const authenticated_manifest = @import("release_adapter_github_manifest_attestation");
 const composition = @import("release_adapter_github_predecessor_assets");
 
@@ -42,9 +43,11 @@ const Authority = struct {
 };
 const Executor = struct {
     calls: usize = 0,
+    budgets: [7]i128 = @splat(0),
     response: []const u8 = valid_json,
     mutate_on_asset: bool = false,
-    pub fn capture(self: *@This(), _: []const u8, args: []const []const u8, _: []const []const u8, output: []u8, _: i128) ![]const u8 {
+    pub fn capture(self: *@This(), _: []const u8, args: []const []const u8, _: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
+        self.budgets[self.calls] = budget_ns;
         self.calls += 1;
         if (std.mem.eql(u8, args[1], "download")) {
             const pattern = args[6];
@@ -59,6 +62,18 @@ const Executor = struct {
             self.mutate_on_asset = false;
         }
         return output[0..self.response.len];
+    }
+};
+
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
     }
 };
 
@@ -91,6 +106,130 @@ test "lightweight tag publishes exact authenticated predecessor assets" {
     var copied = result;
     try std.testing.expect(copied.value() == null);
     try result.cleanup();
+}
+
+test "shared deadline spans seven commands and final publication while expiry removes downloads" {
+    var manifest_storage = candidate();
+    var architecture_storage = [_][]const u8{ "arm64", "x86_64" };
+    var asset_storage = [_]manifest.Asset{manifest_storage.assets[0]};
+    var predecessor_storage: manifest.Predecessor = .{ .release_id = 1, .tag = "v1.2.2", .commit = commit, .manifest_sha256 = a_sha };
+    manifest_storage.signing.architectures = &architecture_storage;
+    manifest_storage.assets = &asset_storage;
+    manifest_storage.predecessor = predecessor_storage;
+    try std.testing.expect(manifest.aliasesStorage(&manifest_storage, std.mem.asBytes(&manifest_storage)));
+    try std.testing.expect(manifest.aliasesStorage(&manifest_storage, std.mem.asBytes(&architecture_storage)));
+    try std.testing.expect(manifest.aliasesStorage(&manifest_storage, std.mem.asBytes(&asset_storage)));
+    try std.testing.expect(manifest.aliasesStorage(&manifest_storage, std.mem.asBytes(&predecessor_storage)) == false);
+    try std.testing.expect(manifest.aliasesStorage(&manifest_storage, predecessor_storage.tag));
+
+    var auth = FakeAuthenticated{ .value_storage = candidate() };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var authority = Authority{};
+    var executor = Executor{};
+    var deadline = SharedDeadline{ .values = &.{ 100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86 } };
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedPredecessorAssets = .{};
+    const work = try absolute(&tmp, "assets", &path);
+    try composition.composeUntilWith(&authority, &executor, &deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", work, &output, &result);
+    try std.testing.expectEqual(@as(usize, 15), deadline.cursor);
+    try std.testing.expectEqualSlices(i128, &.{ 99, 97, 95, 93, 91, 89, 87 }, &executor.budgets);
+    try result.cleanup();
+
+    authority = .{};
+    executor = .{};
+    deadline = .{ .values = &.{ 100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 0 } };
+    const final_expired_work = try absolute(&tmp, "final-expired-assets", &path);
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &executor, &deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", final_expired_work, &output, &result));
+    try std.testing.expectEqual(@as(usize, 7), authority.calls);
+    try std.testing.expectEqual(@as(usize, 7), executor.calls);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "final-expired-assets", .{}));
+
+    authority = .{};
+    executor = .{};
+    deadline = .{ .values = &.{ 100, 99, 98, 97, 96, 95, 94, 0 } };
+    const expired_work = try absolute(&tmp, "expired-assets", &path);
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &executor, &deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", expired_work, &output, &result));
+    try std.testing.expectEqual(@as(usize, 4), authority.calls);
+    try std.testing.expectEqual(@as(usize, 3), executor.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "expired-assets", .{}));
+
+    authority = .{};
+    executor = .{};
+    deadline = .{ .values = &.{0} };
+    const unopened_work = try absolute(&tmp, "unopened-assets", &path);
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &executor, &deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", unopened_work, &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "unopened-assets", .{}));
+
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    var absent: authenticated_manifest.AuthenticatedManifest = .{};
+    var pinned_storage: [256]u8 align(16) = undefined;
+    try std.testing.expectError(error.InvalidManifest, composition.composeUntil(std.testing.io, std.testing.allocator, &absent, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(&pinned_storage) }, "token", "/tmp/not-created", &output, &real_deadline, &result));
+
+    var untouched_deadline = SharedDeadline{ .values = &.{100} };
+    const result_alias = std.mem.asBytes(&result);
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &untouched_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", result_alias, &result));
+    var token_storage: [5]u8 = "token".*;
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &untouched_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", &token_storage, "/tmp/not-created", &token_storage, &result));
+    var work_storage: [16:0]u8 = "/tmp/not-created".*;
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &untouched_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", &work_storage, work_storage[0..], &result));
+    try std.testing.expectEqual(@as(usize, 0), untouched_deadline.cursor);
+
+    const result_deadline: *SharedDeadline = @ptrCast(@alignCast(&result));
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, result_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &output, &result));
+
+    const authenticated_deadline: *SharedDeadline = @ptrCast(@alignCast(&auth));
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, authenticated_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &output, &result));
+
+    var deadline_token_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const token_deadline: *SharedDeadline = @ptrCast(&deadline_token_storage);
+    token_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, token_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", &deadline_token_storage, "/tmp/not-created", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), token_deadline.cursor);
+
+    var deadline_work_storage: [@sizeOf(SharedDeadline) + 1:0]u8 align(@alignOf(SharedDeadline)) = @splat(0);
+    const work_deadline: *SharedDeadline = @ptrCast(&deadline_work_storage);
+    work_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, work_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", deadline_work_storage[0..@sizeOf(SharedDeadline) :0], &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), work_deadline.cursor);
+
+    var deadline_output_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const output_deadline: *SharedDeadline = @ptrCast(&deadline_output_storage);
+    output_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, output_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &deadline_output_storage, &result));
+    try std.testing.expectEqual(@as(usize, 0), output_deadline.cursor);
+
+    var manifest_output_alias = FakeAuthenticated{ .value_storage = candidate() };
+    manifest_output_alias.value_storage.release.tag = output[0..1];
+    var manifest_alias_deadline = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &manifest_alias_deadline, std.testing.allocator, &manifest_output_alias, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), manifest_alias_deadline.cursor);
+
+    var owned_manifest_deadline = SharedDeadline{ .values = &.{100} };
+    var manifest_deadline_alias = FakeAuthenticated{ .value_storage = candidate() };
+    manifest_deadline_alias.value_storage.signing.team_id = std.mem.asBytes(&owned_manifest_deadline);
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &owned_manifest_deadline, std.testing.allocator, &manifest_deadline_alias, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), owned_manifest_deadline.cursor);
+
+    var token_result: composition.AuthenticatedPredecessorAssets = .{};
+    var independent_deadline = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &independent_deadline, std.testing.allocator, &auth, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", std.mem.asBytes(&token_result), "/tmp/not-created", &output, &token_result));
+    try std.testing.expectEqual(@as(usize, 0), independent_deadline.cursor);
+
+    var manifest_result: composition.AuthenticatedPredecessorAssets = .{};
+    var manifest_result_alias = FakeAuthenticated{ .value_storage = candidate() };
+    manifest_result_alias.value_storage.evidence.test_uuid = std.mem.asBytes(&manifest_result);
+    independent_deadline = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &executor, &independent_deadline, std.testing.allocator, &manifest_result_alias, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, "/opt/trusted/gh", "token", "/tmp/not-created", &output, &manifest_result));
+    try std.testing.expectEqual(@as(usize, 0), independent_deadline.cursor);
+
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntil(std.testing.io, std.testing.allocator, &absent, .{ .tag = "v1.2.3", .target = .{ .kind = .commit, .sha = commit } }, &.{}, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(@alignCast(&real_deadline)) }, "token", "/tmp/not-created", &output, &real_deadline, &result));
 }
 
 test "annotated tag ref digest remains distinct and converges through resolver" {

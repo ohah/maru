@@ -9,6 +9,22 @@ pub const Side = enum { right, bottom };
 /// 도크가 담는 뷰. 도크는 하나이고 그 안에서 무엇을 그릴지만 고른다(docs/file-explorer.md §3.5) — 폭·접기·포커스·
 /// 영속은 뷰와 무관하게 도크가 계속 소유한다. 새 뷰를 더할 때 workspace 리더는 **모르는 값을 `explorer`로 clamp**해
 /// 옛 버전이 새 파일을 만나도 창을 통째로 버리지 않는다.
+/// ⚠️ **뷰를 더하면 「활성 pane 을 어떻게 따라가는가」를 답해야 한다.**
+///
+/// 사용자가 이 축을 신고한 이유가 그것이다(2026-08-31): 이미지 갤러리에는 그 답이 **없어서**, pane 을
+/// 옮겨도 격자가 옛 pane 의 것으로 남았다. 나머지 셋은 답을 갖고 있었는데 **함수 이름도 파일도 서로
+/// 달라**, 더하는 사람이 「여기도 필요하다」를 알 길이 없었다.
+///
+/// | 뷰 | 추종 진입점 |
+/// | --- | --- |
+/// | `explorer` | `app_session/file_panel.zig` · `followActiveTerminalCwd` |
+/// | `source_control` | `app_session/git.zig` · `followActiveTerminalRepo` |
+/// | `agent_sessions` | `app_session/agent_dock.zig` · `refreshAgentSessionArchiveProjectScopeForFocus` |
+/// | `image_gallery` | `app_session/image_gallery.zig` · `refreshForFocus` |
+///
+/// 이 표를 판정자가 **exhaustive switch 로** 물고 있다(`app_session.zig` — 「도크 뷰는 전부 활성 pane 을
+/// 따라간다」). 값이 늘면 **거기서 컴파일이 깨진다** — 런타임 판정자는 그 사람이 안 돌리면 그만이라,
+/// 강제력을 컴파일러에 둔다.
 pub const View = enum {
     explorer,
     source_control,

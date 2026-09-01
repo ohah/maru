@@ -47,6 +47,13 @@ pub const Input = struct {
     /// 화면 상태를 세운 근거. A 경로에서 그대로 `Verdict.origin` 이 된다.
     screen_origin: Origin = .screen,
     process_exited: bool = false,
+    /// 훅이 연 **턴**의 일련번호. 호출자가 `turn_key`(claude `prompt_id`·codex `turn_id`)가 바뀔 때 올린다.
+    ///
+    /// **이것이 없으면 C2 가 한 번 성공한 뒤 다음 턴을 즉시 접는다**(적대적 검증 R8 에서 실제로 재현했다).
+    /// C2 가 idle 을 낸 뒤 카운터는 3 에 남아 있고, 사용자가 새 프롬프트를 넣어 훅이 running 이 되어도
+    /// 화면은 폴링 주기(500ms) 동안 이전 idle chrome 을 들고 있다 — 그 첫 판정에서 카운터가 4가 되어
+    /// **확인 절차 없이 완료**가 된다. 새 턴은 처음부터 세야 한다.
+    hook_turn_seq: u64 = 0,
 };
 
 pub const Verdict = struct {
@@ -62,6 +69,8 @@ pub const Verdict = struct {
 pub const Arbiter = struct {
     /// C2 가 본 연속 idle 관측 수. **연속이라야 한다** — 중간에 다른 화면이 한 번이라도 끼면 0으로 돌아간다.
     idle_confirmations: u8 = 0,
+    /// 마지막으로 본 `Input.hook_turn_seq`. 턴이 바뀌면 위 셈을 버린다(그 필드의 주석 참고).
+    last_turn_seq: u64 = 0,
 
     /// 화면 idle 이 훅 running 을 덮으려면 필요한 연속 관측 수(§1.1 C2).
     ///
@@ -80,6 +89,13 @@ pub const Arbiter = struct {
 
     /// §1.1 권위표. **순서가 곧 계약이다** — 아래 주석의 행 이름이 문서의 행과 1:1 로 대응한다.
     pub fn arbitrate(self: *Arbiter, in: Input) Verdict {
+        // 턴이 바뀌었으면 C2 의 연속 셈을 버린다. **모든 규칙보다 먼저다** — 아래 어느 분기가 이기든
+        // 그 셈은 지난 턴의 것이고, 지난 턴의 관측으로 이번 턴을 접으면 안 된다.
+        if (in.hook_turn_seq != self.last_turn_seq) {
+            self.idle_confirmations = 0;
+            self.last_turn_seq = in.hook_turn_seq;
+        }
+
         // C3 — 프로세스가 죽었으면 훅도 화면도 필요 없다. 확인 절차 없이 즉시 idle.
         if (in.process_exited) {
             self.idle_confirmations = 0;
@@ -262,6 +278,36 @@ test "AR 훅이 없을 때는 화면 blocked 가 그대로 간다 — D2 는 훅
     const v = a.arbitrate(.{ .hook = null, .screen = .blocked, .screen_visible_blocker = true });
     try testing.expectEqual(State.blocked, v.state);
     try testing.expectEqualStrings("A", v.rule);
+}
+
+test "AR-C2 한 번 닫힌 뒤 새 턴은 처음부터 센다 — 지난 턴의 셈으로 이번 턴을 접지 않는다" {
+    // 적대적 검증 R8 에서 실제로 재현된 버그다. 카운터가 3 에 남은 채 새 턴이 열리면 화면이 아직
+    // 이전 idle chrome 을 들고 있는 첫 판정에서 곧바로 4가 되어 «확인 없이 완료» 가 됐다.
+    var a: Arbiter = .{};
+    const in_turn1: Input = .{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 1 };
+    _ = a.arbitrate(in_turn1);
+    _ = a.arbitrate(in_turn1);
+    try testing.expectEqualStrings("C2", a.arbitrate(in_turn1).rule);
+
+    // 사용자가 새 프롬프트를 넣었다(`UserPromptSubmit` → turn_key 변경). 화면은 폴링 주기 동안 아직
+    // 이전 idle chrome 을 들고 있다.
+    const in_turn2: Input = .{ .hook = .running, .screen_visible_idle = true, .hook_turn_seq = 2 };
+    const first = a.arbitrate(in_turn2);
+    try testing.expectEqual(State.running, first.state);
+    try testing.expectEqualStrings("C2-pending", first.rule);
+    try testing.expectEqualStrings("C2-pending", a.arbitrate(in_turn2).rule);
+    try testing.expectEqualStrings("C2", a.arbitrate(in_turn2).rule);
+}
+
+test "AR 훅 idle 은 화면 running 으로 되돌지 않는다 — 일부러 비운 자리다(§1)" {
+    // 대칭을 맞추고 싶어지는 자리다. 넣으면 훅 `Stop` 직후 화면에 남은 running 잔상이 배지를 되돌려
+    // **매 턴 끝마다 깜빡인다.** 훅의 Stop 은 정확한 신호이고 화면의 running 잔상은 흔하므로, 이 방향은
+    // 화면을 믿을 근거가 C1·C2 보다 약하다. 이 판정자가 그 «개선» 을 막는다.
+    var a: Arbiter = .{};
+    const v = a.arbitrate(.{ .hook = .idle, .screen = .running });
+    try testing.expectEqual(State.idle, v.state);
+    try testing.expectEqual(Origin.hook, v.origin);
+    try testing.expectEqualStrings("B", v.rule);
 }
 
 test "AR 뒤집힌 판정은 출처가 화면이다 — 뒤집힌 사실이 로그에 남아야 한다" {

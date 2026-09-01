@@ -153,7 +153,8 @@ pub const PinnedExecutableFile = struct {
     }
 };
 
-/// Manifest-independent authority for one large release asset.
+/// Manifest-independent authority for one large release asset. It derives size and digest from a
+/// held no-follow fd, so pre-manifest composition never needs caller-provided file observations.
 pub const PinnedReleaseFile = struct {
     owner: ?*PinnedReleaseFile = null,
     fd: c.fd_t = -1,
@@ -180,15 +181,25 @@ pub const PinnedReleaseFile = struct {
         var held_stat: posix.Stat = undefined;
         var path_stat: posix.Stat = undefined;
         var parent_stat: posix.Stat = undefined;
-        if (c.fstat(self.fd, &held_stat) != 0 or c.fstat(current_fd, &path_stat) != 0 or c.fstat(self.parent_fd, &parent_stat) != 0) return error.FileChanged;
+        if (c.fstat(self.fd, &held_stat) != 0 or c.fstat(current_fd, &path_stat) != 0 or c.fstat(self.parent_fd, &parent_stat) != 0)
+            return error.FileChanged;
         const held = releaseFingerprint(held_stat, self.executable) catch return error.FileChanged;
         const reopened = releaseFingerprint(path_stat, self.executable) catch return error.FileChanged;
         if (!sameFingerprint(self.fingerprint, held) or !sameFingerprint(self.fingerprint, reopened) or
-            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_stat) catch return error.FileChanged)) return error.FileChanged;
+            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_stat) catch return error.FileChanged))
+            return error.FileChanged;
         const digest = hashExact(self.fd, expected.size) catch return error.FileChanged;
         var after: posix.Stat = undefined;
         if (c.fstat(self.fd, &after) != 0 or !sameFingerprint(self.fingerprint, releaseFingerprint(after, self.executable) catch return error.FileChanged) or
             !std.mem.eql(u8, &digest, &self.sha256)) return error.FileChanged;
+        const final_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+        defer _ = c.close(final_fd);
+        var final_stat: posix.Stat = undefined;
+        var parent_final: posix.Stat = undefined;
+        if (c.fstat(final_fd, &final_stat) != 0 or c.fstat(self.parent_fd, &parent_final) != 0 or
+            !sameFingerprint(self.fingerprint, releaseFingerprint(final_stat, self.executable) catch return error.FileChanged) or
+            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_final) catch return error.FileChanged))
+            return error.FileChanged;
         return expected;
     }
 
@@ -219,7 +230,8 @@ pub fn pinReleaseFileObserved(result: *PinnedReleaseFile, path: [:0]const u8, re
     }
     var before_stat: posix.Stat = undefined;
     var leaf_stat: posix.Stat = undefined;
-    if (c.fstat(fd, &before_stat) != 0 or c.fstatat(parent.fd, parent.leaf.ptr, &leaf_stat, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.ReadFailed;
+    if (c.fstat(fd, &before_stat) != 0 or c.fstatat(parent.fd, parent.leaf.ptr, &leaf_stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
+        return error.ReadFailed;
     const before = try releaseFingerprint(before_stat, require_executable);
     const leaf = try releaseFingerprint(leaf_stat, require_executable);
     if (!sameFingerprint(before, leaf)) return error.FileChanged;
@@ -431,7 +443,16 @@ fn releaseFingerprint(stat: posix.Stat, require_executable: bool) Error!FileFing
     if (!posix.S.ISREG(stat.mode)) return error.NotRegular;
     if (require_executable and stat.mode & 0o111 == 0) return error.NotExecutable;
     if (stat.size < 0) return error.SizeMismatch;
-    return .{ .identity = .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino) }, .size = @intCast(stat.size), .mode = @intCast(stat.mode), .link_count = @intCast(stat.nlink), .modified_sec = stat.mtimespec.sec, .modified_nsec = stat.mtimespec.nsec, .changed_sec = stat.ctimespec.sec, .changed_nsec = stat.ctimespec.nsec };
+    return .{
+        .identity = .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino) },
+        .size = @intCast(stat.size),
+        .mode = @intCast(stat.mode),
+        .link_count = @intCast(stat.nlink),
+        .modified_sec = stat.mtimespec.sec,
+        .modified_nsec = stat.mtimespec.nsec,
+        .changed_sec = stat.ctimespec.sec,
+        .changed_nsec = stat.ctimespec.nsec,
+    };
 }
 
 fn sameFingerprint(left: FileFingerprint, right: FileFingerprint) bool {

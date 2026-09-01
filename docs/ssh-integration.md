@@ -275,6 +275,7 @@ flowchart TD
 | git 브랜치 조회 | 쓰지 않는다(로컬 `.git` 없음) |
 | 창 제목 | **cwd 를 안 쓴다.** `windowTitle()` 이 `observation.window_title`(OSC 0/2)에서 만들고, 비면 앱 이름이다 |
 | `maru_macos_app_session_cwd` ABI | **제품 소비자가 0 이다**(헤더 선언만 있고 Swift 호출자가 없다 — 2026-08-12·2026-09-01 두 번 확인). 소비자가 생기면 그때 축부터 정한다: 이 ABI 는 관측만 보므로 OSC 7 이 없는 Term 에서 빈 값이고, 「이 터미널이 서 있는 폴더」가 필요하면 `git_ops.termCwd`(OSC 7 → 커널 2 단)를 써야 한다. 표시용이면 `<host>:` 접두 규율(아래)을 함께 따른다 |
+| 종료 placeholder 안내(`마지막 위치`) | **`<host>:<path>` 로 적는다.** 그 줄은 바로 아래가 `⏎ 이 자리에서 새 셸 시작` 이라 **「돌아갈 자리」로 읽히는데**, ⏎(`respawnEndedPlaceholder`)는 원격 cwd 를 **안 쓴다**(위 행) — 안내가 가리키는 자리와 실제로 열리는 자리가 다르다. 그 어긋남을 사용자가 알 방법이 host 표기뿐이다 |
 | 컨트롤 플레인 DTO의 `cwd` | 그대로 싣는다 — host 필드가 없어 외부 소비자가 로컬로 오인할 수 있다(후속, `control-plane.md` 계약) |
 | 드롭 업로드 대상 경로 | 무관 — 원격이 `$HOME` 기준으로 스스로 정한다(§4) |
 
@@ -285,8 +286,9 @@ flowchart TD
 
 **규율(표시 축)**: 원격 경로를 **화면에 적는** 자리는 `<host>:<path>` 로 적는다. host 가 없으면
 사용자가 그 경로를 로컬에서 열려다 실패하고, `host:path` 는 scp/rsync 관례라 원격임이 즉시 읽힌다.
-지금 그 규율을 지나는 자리는 폴더줄(`sidebarCwdPath`)이고, 판정은 `termCwdIsRemote` +
-`termDisplayHost` 하나를 공유한다 — 재구현하면 두 뷰가 같은 경로를 다르게 적는다.
+지금 그 규율을 지나는 자리는 **둘**이다 — 폴더줄(`sidebarCwdPath`)과 종료 안내
+(`writeEndedPlaceholderGuidance`). 판정은 `termCwdIsRemote` + `termDisplayHost` **하나**를 공유한다 —
+재구현하면 두 뷰가 같은 경로를 다르게 적는다(실제로 종료 안내가 그렇게 빠져 있었다).
 
 ### 9.5 원격 보고자는 사용자 몫이다
 

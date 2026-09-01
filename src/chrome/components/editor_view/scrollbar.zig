@@ -43,7 +43,22 @@ pub const Props = struct {
     first_visual_row: u32,
     cell_h_px: u16,
     metrics: scroll_area.ScrollbarMetrics,
+    /// 검색 결과의 **시각 행** 목록(§4.1a 「검색 결과 마커」). 오름차순일 필요는 없다.
+    /// 비어 있으면 마커를 안 그린다 — 찾기가 닫히면 호출자가 빈 조각을 준다.
+    match_rows: []const u32 = &.{},
+    /// `match_rows` 안에서 **현재 일치**의 인덱스. 그 하나만 다른 색으로 그린다.
+    current_match: ?usize = null,
 };
+
+/// 마커 색 — 본문 강조와 **같은 role** 을 쓴다(§4.1a). 다른 색을 쓰면 「이 표시가 그 매치」라는
+/// 연결이 끊어진다.
+pub const marker_role: tokens.ColorRole = .search_match;
+pub const marker_current_role: tokens.ColorRole = .search_match_current;
+/// 마커 하나의 높이(px). 1px 이면 레티나에서 사실상 안 보이고, 두꺼우면 이웃과 뭉친다.
+pub const marker_h_px: i32 = 2;
+/// 그릴 마커 수의 상한. 픽셀 행으로 합쳐도 남으면 그 위는 안 그린다 — 막대 높이를 넘는 마커는
+/// 어차피 구별되지 않는다(§4.1a).
+pub const marker_budget: usize = 256;
 
 pub const Written = struct {
     ops: usize,
@@ -71,11 +86,60 @@ pub fn build(props: Props, out: []draw.Op) Written {
 
     if (out.len == 0) return .{ .ops = 0, .geometry = bar };
 
+    // **마커를 thumb 보다 먼저 깐다.** thumb 이 반투명이라 아래에 깔면 겹쳐도 비쳐 보인다(§4.1a) —
+    // 위에 그리면 thumb 이 지나갈 때 마커가 그것을 가려 막대가 어디 있는지 알 수 없다.
+    //
+    // **슬롯에 표시한 뒤 한 번에 낸다.** 목록을 그대로 훑으며 그리면 상한에 걸렸을 때 **문서 앞부분만**
+    // 찍혀 아래쪽이 비고, 그것은 「거기엔 매치가 없다」는 거짓말이 된다. 막대를 `marker_budget` 칸으로
+    // 나눠 표시하면 매치가 몇 개든 **전 구간이 고르게** 덮인다(§4.1a 「같은 픽셀 행은 하나로 합친다」).
+    var n: usize = 0;
+    // 목록이 비면 아래 순회가 아무것도 표시하지 않아 op 도 0 이다 — 앞질러 막지 않는다
+    // (막아 봐야 뜻이 같아 판정자가 그 줄을 못 지킨다). `total_visual_rows` 는 나눗셈의 분모라 필요하다.
+    if (props.total_visual_rows > 0) {
+        const track_y: i32 = @intFromFloat(@round(bar.track_y));
+        const track_h: i32 = @intFromFloat(@round(bar.track_h));
+        const usable = @max(track_h - marker_h_px, 0);
+        const slots = @min(@as(usize, @intCast(@max(@divTrunc(usable, marker_h_px), 1))), marker_budget);
+
+        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재
+        for (props.match_rows, 0..) |row, i| {
+            // 슬롯을 `slots - 1` 로 clamp 하므로 행을 따로 clamp 하지 않는다 — 문서 밖 행이
+            // 와도 마지막 슬롯에 떨어질 뿐이다(둘 다 막으면 뒤엣것이 판정자에 안 잡힌다).
+            const slot = @min(
+                (@as(usize, row) * slots) / @as(usize, props.total_visual_rows),
+                slots - 1,
+            );
+            const is_current = props.current_match != null and props.current_match.? == i;
+            // **현재 일치가 이긴다.** 같은 슬롯에 여럿이 겹치면 그 하나는 반드시 보여야 한다 —
+            // 사용자가 지금 어디를 보고 있는지가 이 표시의 첫 질문이다.
+            if (is_current or hit[slot] == 0) hit[slot] = if (is_current) 2 else 1;
+        }
+        for (hit[0..slots], 0..) |mark, slot| {
+            if (mark == 0) continue;
+            // **thumb 자리를 남긴다**(`n + 1`). 마커가 버퍼를 다 먹으면 막대 자체가 안 그려져
+            // 스크롤할 것이 있는지조차 화면이 말하지 못한다 — 마커는 부가 표시고 thumb 은 조작의 근거다.
+            // `slots <= marker_budget` 이므로 상한은 슬롯 수가 이미 지킨다 — 여기서는
+            // **op 자리**만 본다. thumb 자리를 남긴다(`n + 1`): 마커가 버퍼를 다 먹으면 막대가
+            // 안 그려져 스크롤할 것이 있는지조차 화면이 말하지 못한다.
+            if (n + 1 >= out.len) break;
+            out[n] = .{ .quad = .{
+                .rect = .{
+                    .x = @intFromFloat(@round(bar.track_x)),
+                    .y = track_y + @divTrunc(@as(i32, @intCast(slot)) * usable, @as(i32, @intCast(slots))),
+                    .w = @intFromFloat(@round(bar.track_w)),
+                    .h = marker_h_px,
+                },
+                .fill_role = if (mark == 2) marker_current_role else marker_role,
+            } };
+            n += 1;
+        }
+    }
+
     // **`fill`이 아니라 `quad`다.** `fill`은 셀 격자로 내려가는데(`metal_lowering.paintRectBg`)
     // 스크롤바는 §4.1a대로 **격자 밖**(본문 오른쪽 gutter)에 서므로 열 인덱스가 범위를 벗어나
     // **조용히 버려진다** — 실제로 그 상태로 캡처가 나왔고 픽셀이 하나도 없었다. `quad`는 GPU로
     // 직접 내려가 격자와 무관하다(둥근 모서리·헤어라인이 같은 이유로 이 길을 쓴다).
-    out[0] = .{
+    out[n] = .{
         .quad = .{
             .rect = .{
                 .x = @intFromFloat(@round(bar.track_x)),
@@ -89,7 +153,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
             .corner_radii = .{ 4, 4, 4, 4 },
         },
     };
-    return .{ .ops = 1, .geometry = bar };
+    return .{ .ops = n + 1, .geometry = bar };
 }
 
 /// **가로 막대의 기하.** 세로(`scroll_area.ScrollbarGeometry`)와 축이 뒤집혀 있어 이름을 따로 둔다 —
@@ -289,6 +353,140 @@ fn testProps(total: u32, first: u32) Props {
         .cell_h_px = 16,
         .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
     };
+}
+
+test "SBM1 마커는 thumb 아래에 깔린다 — 겹쳐도 비쳐 보인다 (§4.1a)" {
+    // thumb 이 반투명이라 **먼저 그린 것이 비친다.** 순서가 뒤집히면 thumb 이 지나갈 때 마커가
+    // 가려져, 정작 「지금 보는 자리 근처에 매치가 있나」를 답하지 못한다.
+    var ops: [8]draw.Op = undefined;
+    var p = testProps(100, 0);
+    const rows = [_]u32{ 10, 50, 90 };
+    p.match_rows = &rows;
+    const w = build(p, &ops);
+    try testing.expectEqual(@as(usize, 4), w.ops); // 마커 셋 + thumb 하나
+
+    // 마지막 op 이 thumb 이다.
+    try testing.expectEqual(thumb_role, ops[3].quad.fill_role);
+    try testing.expectEqual(thumb_alpha, ops[3].quad.alpha);
+    // 앞의 셋은 마커다.
+    for (ops[0..3]) |op| {
+        try testing.expectEqual(marker_role, op.quad.fill_role);
+        try testing.expectEqual(@as(u32, @intCast(marker_h_px)), op.quad.rect.h);
+    }
+
+    // **막대와 같은 x·폭이다** — 옆에 열을 내면 본문이 그만큼 좁아진다(§4.1a).
+    try testing.expectEqual(ops[3].quad.rect.x, ops[0].quad.rect.x);
+    try testing.expectEqual(ops[3].quad.rect.w, ops[0].quad.rect.w);
+}
+
+test "SBM2 마커 자리는 thumb 과 같은 축에서 나온다 — 위/가운데/아래 (§4.1a)" {
+    // 논리 줄로 내면 랩된 문서에서 마커와 thumb 이 **다른 자리를 가리킨다** — 마커로 겨냥해
+    // thumb 을 끌면 엉뚱한 데로 간다. 둘 다 시각 행 / totalRows 를 쓴다는 것이 이 표시의 전제다.
+    var ops: [8]draw.Op = undefined;
+    var p = testProps(100, 0);
+    const rows = [_]u32{ 0, 50, 99 };
+    p.match_rows = &rows;
+    const w = build(p, &ops);
+    const bar = w.geometry.?;
+    const track_y: i32 = @intFromFloat(@round(bar.track_y));
+    const track_h: i32 = @intFromFloat(@round(bar.track_h));
+
+    try testing.expectEqual(track_y, ops[0].quad.rect.y); // 첫 행 → 맨 위
+    try testing.expect(ops[1].quad.rect.y > ops[0].quad.rect.y);
+    try testing.expect(ops[2].quad.rect.y > ops[1].quad.rect.y);
+    try testing.expect(ops[2].quad.rect.y + marker_h_px <= track_y + track_h); // 밖으로 안 나간다
+
+    // **나눗셈의 분모는 `usable`(= track_h - marker_h_px)이다.** `track_h` 로 나누면 마지막 슬롯이
+    // 마커 높이만큼 아래로 밀려 막대 끝을 넘본다 — 위 부등식만으로는 그 차이가 안 잡힌다.
+    const usable = track_h - marker_h_px;
+    const slots: i32 = @intCast(@min(@as(usize, @intCast(@max(@divTrunc(usable, marker_h_px), 1))), marker_budget));
+    const last_slot = @divTrunc(@as(i32, 99) * slots, 100);
+    try testing.expectEqual(track_y + @divTrunc(last_slot * usable, slots), ops[2].quad.rect.y);
+}
+
+test "SBM3 현재 일치는 다른 색이고 겹쳐도 살아남는다 (§4.1a)" {
+    // 같은 슬롯에 여럿이 겹치면 **현재 하나는 반드시 보여야 한다** — 사용자가 지금 어디를 보고
+    // 있는지가 이 표시의 첫 질문이다.
+    var ops: [8]draw.Op = undefined;
+    var p = testProps(100, 0);
+    const near = [_]u32{ 50, 50, 50 }; // 셋이 같은 자리
+    p.match_rows = &near;
+    p.current_match = 2;
+    const w = build(p, &ops);
+    try testing.expectEqual(@as(usize, 2), w.ops); // 합쳐서 마커 하나 + thumb
+    try testing.expectEqual(marker_current_role, ops[0].quad.fill_role);
+}
+
+test "SBM4 매치가 아무리 많아도 전 구간을 고르게 덮는다 — 앞부분만 찍지 않는다 (§4.1a)" {
+    // **상한에 걸렸을 때가 위험하다.** 목록을 그대로 훑으며 그리면 문서 앞부분만 찍히고
+    // 아래쪽이 비어 「거기엔 매치가 없다」는 거짓말이 된다.
+    var ops: [marker_budget + 4]draw.Op = undefined;
+    var rows: [4000]u32 = undefined;
+    for (&rows, 0..) |*r, i| r.* = @intCast(i * 2); // 0..7998 에 고루 퍼진 매치 4000개
+    var p = testProps(8000, 0);
+    p.match_rows = &rows;
+    const w = build(p, &ops);
+    try testing.expect(w.ops <= marker_budget + 1);
+
+    const bar = w.geometry.?;
+    const track_y: i32 = @intFromFloat(@round(bar.track_y));
+    const track_h: i32 = @intFromFloat(@round(bar.track_h));
+
+    // **마지막 마커가 막대 아래쪽에 있다** — 앞부분만 찍었다면 여기서 위에 몰려 있다.
+    const last = ops[w.ops - 2].quad.rect.y; // 끝에서 둘째(마지막은 thumb)
+    try testing.expect(last > track_y + @divTrunc(track_h, 2));
+
+    // 마커가 하나도 안 빠진 것은 아니다 — 첫 마커는 맨 위다.
+    try testing.expectEqual(track_y, ops[0].quad.rect.y);
+}
+
+test "SBM7 문서 밖 행이 와도 넘치지 않는다 — 마지막 슬롯에 떨어진다 (§4.1a)" {
+    // **목록이 문서보다 낡을 수 있다.** 편집을 하면 매치 목록은 다음 재검색까지 옛 문서의 것이고,
+    // 그 사이 문서가 짧아지면 행 번호가 범위를 넘는다. 슬롯을 clamp 하지 않으면 `hit[slot]` 이
+    // 배열 밖을 짚어 **패닉**한다 — 화면이 틀리는 것이 아니라 앱이 죽는다.
+    var ops: [8]draw.Op = undefined;
+    var p = testProps(100, 0);
+    const rows = [_]u32{ 100, 500, 99999 }; // 전부 문서 밖
+    p.match_rows = &rows;
+    const w = build(p, &ops);
+
+    const bar = w.geometry.?;
+    const track_y: i32 = @intFromFloat(@round(bar.track_y));
+    const track_h: i32 = @intFromFloat(@round(bar.track_h));
+    // 셋이 같은 마지막 슬롯으로 합쳐진다 — 마커 하나 + thumb.
+    try testing.expectEqual(@as(usize, 2), w.ops);
+    try testing.expect(ops[0].quad.rect.y + marker_h_px <= track_y + track_h);
+    // **막대 아래쪽이다** — 문서 밖이면 「끝」으로 치는 것이 사용자가 읽는 뜻과 가깝다.
+    try testing.expect(ops[0].quad.rect.y > track_y + @divTrunc(track_h, 2));
+}
+
+test "SBM6 자리가 모자라면 마커를 줄이고 thumb 을 지킨다 (§4.1a)" {
+    // **여기가 뒤바뀌면 막대가 통째로 사라진다.** 마커가 op 버퍼를 다 먹으면 thumb 이 안 그려지고,
+    // 그러면 스크롤할 것이 있는지조차 화면이 말하지 못한다 — 마커는 부가 표시이고 thumb 은
+    // 조작의 근거다. 넉넉한 버퍼만 쓰는 판정자로는 이 경계가 한 번도 안 밟힌다.
+    var rows: [64]u32 = undefined;
+    for (&rows, 0..) |*r, i| r.* = @intCast(i * 10);
+    var p = testProps(1000, 0);
+    p.match_rows = &rows;
+
+    // 자리가 셋뿐이면 마커 둘 + thumb 하나다.
+    var tight: [3]draw.Op = undefined;
+    const w = build(p, &tight);
+    try testing.expectEqual(@as(usize, 3), w.ops);
+    try testing.expectEqual(thumb_role, tight[2].quad.fill_role); // 마지막은 언제나 thumb
+
+    // 자리가 하나뿐이면 마커는 못 그려도 **thumb 은 그려진다.**
+    var one: [1]draw.Op = undefined;
+    const w1 = build(p, &one);
+    try testing.expectEqual(@as(usize, 1), w1.ops);
+    try testing.expectEqual(thumb_role, one[0].quad.fill_role);
+}
+
+test "SBM5 목록이 비면 마커를 안 그린다 — 찾기가 닫히면 표시도 없다 (§4.1a)" {
+    var ops: [8]draw.Op = undefined;
+    const w = build(testProps(100, 0), &ops); // match_rows 기본값 = 빈 조각
+    try testing.expectEqual(@as(usize, 1), w.ops); // thumb 만
+    try testing.expectEqual(thumb_role, ops[0].quad.fill_role);
 }
 
 test "문서가 화면에 다 들어가면 그리지 않는다" {

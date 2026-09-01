@@ -30,6 +30,9 @@ pub const Side = struct {
     /// 비교 뷰 검색은 어느 쪽을 검색하는지부터 정해야 하고, 그것은 가로 스크롤·히트테스트가
     /// 좌우를 가른 뒤의 일이다(같은 슬라이스에 든다).
     search_marks: ?[]const []const frame.Mark = null,
+    /// 검색 결과가 있는 줄(§4.1a 막대 마커). 비교 뷰는 축이 둘이라 각 side 가 자기 것을 든다.
+    search_marker_lines: []const u32 = &.{},
+    search_marker_current: ?usize = null,
     search_current: ?frame.CurrentMatch = null,
 
     /// 그 쪽 **행**들의 표시 텍스트. 좌우 길이가 같아야 같은 인덱스가 같은 높이다.
@@ -252,6 +255,8 @@ pub fn buildSide(
         .row_cache = side.row_cache,
         .selection_marks = side.selection_marks,
         .search_marks = side.search_marks,
+        .search_marker_lines = side.search_marker_lines,
+        .search_marker_current = side.search_marker_current,
         .search_current = side.search_current,
         .row_bands = side.bands,
         .row_marks = side.marks,

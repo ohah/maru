@@ -1712,7 +1712,7 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // **결과를 상태로 확인한다.** 종료 코드만 보면 `add` 가 아무것도 안 해도 통과한다. 스테이지한 뒤
     // 다시 읽어 그 파일이 **staged 축**으로 옮겨졌는지 본다.
-    var write_out = git_backend_mod.runWriteSync(allocator, .stage, "git", repo, &.{"alpha.txt"}, null) catch |err| {
+    var write_out = git_backend_mod.runWriteSync(allocator, .stage, "git", repo, &.{"alpha.txt"}, null, null) catch |err| {
         try stderr.print("maru win32-git-smoke: stage failed({s})\n", .{@errorName(err)});
         try stderr.flush();
         return error.UnknownCommand;
@@ -15749,7 +15749,7 @@ fn applyWrite(
         one[0] = p;
         break :blk one[0..1];
     } else &.{};
-    const out = git_backend_mod.runWriteSync(allocator, write.kind, git_exe, repo, paths, null) catch |err| {
+    const out = git_backend_mod.runWriteSync(allocator, write.kind, git_exe, repo, paths, null, null) catch |err| {
         try stderr.print("maru win32-scm-write-smoke[{s}]: {s} failed({s})\n", .{ label, @tagName(write.kind), @errorName(err) });
         return false;
     };

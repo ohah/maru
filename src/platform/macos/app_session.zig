@@ -5467,6 +5467,11 @@ pub const AppSession = struct {
     scm_selected_repo: ?[]u8 = null,
     /// 방금 건 쓰기가 향한 저장소. 끝난 뒤 **그 저장소를** 다시 읽어야 화면이 사실을 따라간다.
     scm_write_repo: ?[]u8 = null,
+    /// 마지막 쓰기가 향한 **호스트**(RS4a 8회차). `scm_write_repo` 와 **쌍이다** — 경로만 보면 원격
+    /// `/srv/app` 과 로컬 `/srv/app` 이 같은 값이라, 쓰기가 원격으로 간 사이 활성이 로컬로 바뀌면
+    /// 「같은 저장소」로 읽혀 **로컬 목록 위에 원격 쓰기의 결과**가 붙는다. RS2 2회차가 목록 축에서
+    /// 잡은 것과 같은 부류다(그쪽은 안내 줄, 이쪽은 갱신 대상).
+    scm_write_dest: ?[]u8 = null,
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
     scm_collapsed: [scm_view.section_count]bool = @splat(false),
@@ -20761,6 +20766,7 @@ pub const AppSession = struct {
         if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
+        if (self.scm_write_dest) |dest| self.allocator.free(dest); //  그 저장소의 호스트(RS4a 8회차)
         if (self.scm_fetch_repo) |path| self.allocator.free(path); // 도는 fetch가 향한 저장소(P6)
         for (self.scm_base_entries[0..self.scm_base_len]) |entry| { // 고른 비교 기준들(§3.5)
             self.allocator.free(entry.repo);
@@ -65792,11 +65798,13 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
 
     // ⑵ **분류는 순수 함수가 진다**(exhaustive switch — 인텐트가 늘면 컴파일이 깨져 분류를 강제한다).
     const Intent = maru.chrome.components.scm_dock.ids.Intent;
+    //
+    // **RS4a 에서 스테이지 계열이 통과 쪽으로 넘어갔다** — 원격 index 를 실제로 바꿀 수 있게 됐다.
+    // 남은 셋은 아직 못 보내는 것들이고, 각자 **다른 이유**로 남아 있다(RS4b·RS4c).
     const touches = [_]Intent{
-        .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
-        .{ .commit = 0 },
-        .{ .stage_all_repo = 0 },
-        .fetch_remote,
+        .{ .commit = 0 }, //     메시지 파일이 로컬에 있다 — 원격은 stdin(RS4b)
+        .fetch_remote, //        우리 ssh 에는 agent 도 tty 도 없다 — 주입으로 간다(RS4c)
+        .open_remote_menu,
     };
     for (touches) |intent| try std.testing.expect(scm_dock_ops.intentTouchesLocalRepo(intent));
     // 화면만 바꾸는 것과 원격에서도 뜻이 같은 것은 통과시킨다 — 막으면 원격에서 탭 전환도 안 된다.
@@ -65812,8 +65820,25 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         .{ .toggle_repo = 0 },
         .{ .refresh_repo = 0 },
         .scroll_thumb,
+        // RS4a — 이제 원격으로 **간다**(막는 것이 아니라 라우팅한다).
+        .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
+        .{ .section_action = .{ .repo_index = 0, .section = .changes } },
+        .{ .stage_all_repo = 0 },
     };
     for (passes) |intent| try std.testing.expect(!scm_dock_ops.intentTouchesLocalRepo(intent));
+
+    // ⑵-b **RS4a 4회차 — 비활성 «로컬» 저장소 행이 원격으로 날아가지 않는다.**
+    //
+    // 목록은 저장소를 여럿 싣고(§3.5.1c) 비활성 행도 동작 버튼을 낸다. 활성 목적지를 무조건 붙이면
+    // **로컬 저장소 행의 스테이지가 원격으로** 간다 — 원격에 우연히 같은 경로가 있으면 **남의 index 를
+    // 바꾼다.** RS3 8회차가 diff 에서 잡은 함정이고, 쓰기는 보여 주는 것이 아니라 **바꾼다.**
+    {
+        var ctl_probe: [std.fs.max_path_bytes]u8 = undefined;
+        // 활성 저장소(원격)와 **다른** 경로 → 로컬이어야 한다.
+        try std.testing.expect(git_ops.writeTargetFor(session, "/other/local-repo", &ctl_probe) == .local);
+        // 활성 저장소와 같은 경로인데 control socket 이 없다 → **보내지 않는다**(로컬로 떨어뜨리지 않는다).
+        try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app", &ctl_probe) == .unavailable);
+    }
 
     scm_dock_ops.clearScmWriteError(session);
     scm_dock_ops.applyScmDockIntent(session, .{ .commit = 0 });
@@ -65831,6 +65856,40 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     git_ops.rememberGitRepoDest(session, null);
     try std.testing.expect(!git_ops.scmTargetIsRemote(session));
     try std.testing.expect(session.scm_write_error == null);
+}
+
+test "원격 쓰기 뒤 갱신: 경로가 같아도 호스트가 다르면 다른 저장소다 (RS4a 8회차)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    // 원격 `/srv/app` 에 쓰기를 걸었다.
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    scm_dock_ops.rememberWriteRepoForTest(session, "/srv/app", "user@build-box");
+    try std.testing.expect(scm_dock_ops.activeIsWriteTargetForTest(session, "/srv/app"));
+
+    // ⚠️ 그 쓰기가 도는 동안 pane 이 **로컬** `/srv/app` 으로 바뀌었다. 경로는 같다.
+    git_ops.rememberGitRepoDest(session, null);
+    try std.testing.expect(!scm_dock_ops.activeIsWriteTargetForTest(session, "/srv/app"));
+
+    // 반대 방향도 같다 — 로컬에 쓰고 원격을 보고 있으면 그것도 다른 기계다.
+    scm_dock_ops.rememberWriteRepoForTest(session, "/srv/app", null);
+    try std.testing.expect(scm_dock_ops.activeIsWriteTargetForTest(session, "/srv/app"));
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    try std.testing.expect(!scm_dock_ops.activeIsWriteTargetForTest(session, "/srv/app"));
+
+    // 다른 호스트끼리도 갈린다(둘 다 원격인데 기계가 다르다).
+    scm_dock_ops.rememberWriteRepoForTest(session, "/srv/app", "user@other-box");
+    try std.testing.expect(!scm_dock_ops.activeIsWriteTargetForTest(session, "/srv/app"));
 }
 
 test "소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면 목록·감시를 그쪽으로 옮긴다" {

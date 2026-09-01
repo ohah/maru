@@ -232,6 +232,32 @@ fn stampDiffRemote(self: *AppSession, entry: *dock_panel.Entry, repo: []const u8
     entry.diff_remote_root = owned_root;
 }
 
+/// **이 저장소에 쓰기를 걸 때 어디로 보내는가**(RS4a). 셋으로 답한다:
+///
+/// - `.local` — 로컬 git 으로 그대로 간다.
+/// - `.remote` — 그 목적지·소켓으로 보낸다.
+/// - `.unavailable` — **보내지 않는다.** 원격 저장소인데 control socket 이 없다. 로컬로 떨어뜨리면
+///   원격 경로를 로컬 git 에 넘기는데, 로컬에 우연히 같은 경로가 있으면 **남의 파일을 바꾼다.**
+///   읽기(RS3 6회차)에서는 남의 파일을 *보여* 줬고, 쓰기는 *바꾼다* — 더 나쁘다.
+///
+/// ⚠️ **활성 목적지를 무조건 쓰지 않는다**(RS3 8회차와 같은 함정). 목록은 저장소를 여럿 싣고
+/// **비활성 저장소 행**도 동작 버튼을 낸다 — 그 행은 `repo_override` 로 다른 경로를 준다. 활성 목적지를
+/// 무조건 붙이면 **로컬 저장소 행의 스테이지가 원격으로** 날아간다. 그래서 `repo` 가 **활성 저장소와
+/// 같을 때만** 원격이다.
+pub const WriteTarget = union(enum) {
+    local,
+    remote: struct { dest: []const u8, control_path: []const u8 },
+    unavailable,
+};
+
+pub fn writeTargetFor(self: *AppSession, repo: []const u8, ctl_buf: []u8) WriteTarget {
+    const dest = self.git_repo_dest orelse return .local;
+    const current = self.git_repo orelse return .local;
+    if (!std.mem.eql(u8, current, repo)) return .local; // 비활성(로컬) 저장소 행
+    const ctl = remoteControlSocketFor(self, dest, ctl_buf) orelse return .unavailable;
+    return .{ .remote = .{ .dest = dest, .control_path = ctl } };
+}
+
 /// 그 목적지의 **control socket 경로**(있을 때만). `remoteScmTarget` 이 활성 Term 에서 대상을 고르는
 /// 자리라면, 이쪽은 **이미 정해진 목적지**의 소켓을 되찾는 자리다 — diff 는 열 때 박아 둔 호스트를 쓰므로
 /// 활성 Term 을 다시 묻지 않는다(그 사이 pane 이 바뀌었을 수 있다).

@@ -3344,25 +3344,28 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
 }
 
-/// 하네스(`~/.rs4b`)가 서 있으면 그 경로들을, 없으면 null. **없는 것을 있다고 치고 통과시키지 않는다.**
-fn rs4bHarness(buf: *[2][std.fs.max_path_bytes]u8) ?struct { ctl: []const u8, repo: []const u8 } {
-    const home_z = std.c.getenv("HOME") orelse return null;
-    const home = std.mem.span(home_z);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const ctl = std.fmt.bufPrint(&buf[0], "{s}/.rs4b/c", .{home}) catch return null;
-    _ = std.Io.Dir.cwd().statFile(io, ctl, .{ .follow_symlinks = false }) catch return null;
-    const repo = std.fmt.bufPrint(&buf[1], "{s}/.rs4b/repo", .{home}) catch return null;
-    _ = std.Io.Dir.cwd().statFile(io, repo, .{}) catch return null;
-    return .{ .ctl = ctl, .repo = repo };
+/// 원격 SCM 판정자가 쓰는 **실물 SSH 하네스**. `tools/remote-scm/ssh_harness.sh` 가 env 로 준다.
+///
+/// ⚠️ **없으면 건너뛴다 — 없는 것을 있다고 치고 통과시키지 않는다.** 개발자 기계에서 손으로 돌릴 때는
+/// 그 스크립트를 거치지 않으면 이 판정자들이 조용히 안 돈다. 그것이 맞다: 원격 판정을 **가짜 대상**으로
+/// 통과시키면 그 초록은 아무것도 뜻하지 않는다.
+fn remoteScmHarness() ?struct { dest: []const u8, ctl: []const u8, repo: []const u8 } {
+    const dest_z = std.c.getenv("MARU_REMOTE_SCM_DEST") orelse return null;
+    const ctl_z = std.c.getenv("MARU_REMOTE_SCM_CTL") orelse return null;
+    const repo_z = std.c.getenv("MARU_REMOTE_SCM_REPO") orelse return null;
+    const dest = std.mem.span(dest_z);
+    const ctl = std.mem.span(ctl_z);
+    const repo = std.mem.span(repo_z);
+    if (dest.len == 0 or ctl.len == 0 or repo.len == 0) return null;
+    return .{ .dest = dest, .ctl = ctl, .repo = repo };
 }
 
 test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr 를 쏟아도 안 멈춘다 (RS4b)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    var path_bufs: [2][std.fs.max_path_bytes]u8 = undefined;
-    const hx = rs4bHarness(&path_bufs) orelse return error.SkipZigTest;
+    const hx = remoteScmHarness() orelse return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const remote: git_write_command.Remote = .{ .dest = "127.0.0.1", .control_path = hx.ctl };
+    const remote: git_write_command.Remote = .{ .dest = hx.dest, .control_path = hx.ctl };
 
     // ⚠️ **이 판정자가 «멈추면» 그것이 실패다.** stdin 을 다 쓴 뒤에야 stderr 를 읽는 구현에서는,
     // hook 이 파이프를 채우는 순간 둘 다 선다 — 우리는 write 에서, 자식은 write 에서.

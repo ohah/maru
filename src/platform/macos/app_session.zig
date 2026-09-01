@@ -66208,40 +66208,30 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         std.meta.activeTag(git_ops.gitRepoTarget(session, &probe)),
     );
 
-    // ⑵ **분류는 순수 함수가 진다**(exhaustive switch — 인텐트가 늘면 컴파일이 깨져 분류를 강제한다).
+    // ⑵ **인텐트가 늘면 여기서 컴파일이 깨진다**(exhaustive switch). RS2 는 진입점 가드가 그 역할을
+    //    했는데, RS4a~c 가 모든 동작을 원격으로 보내면서 그 가드는 **아무것도 안 막게 됐고** 그래서
+    //    지웠다 — 안 막는 게이트는 「여기서 지킨다」고 거짓말한다. 강제력만 이리로 옮겼다.
+    //
+    //    새 인텐트를 더하는 사람은 **그것이 원격에서 무엇을 하는지** 여기 적어야 한다.
     const Intent = maru.chrome.components.scm_dock.ids.Intent;
-    //
-    // **RS4a 에서 스테이지 계열이 통과 쪽으로 넘어갔다** — 원격 index 를 실제로 바꿀 수 있게 됐다.
-    // 남은 셋은 아직 못 보내는 것들이고, 각자 **다른 이유**로 남아 있다(RS4b·RS4c).
-    // **RS4b 에서 커밋도 통과 쪽으로 넘어갔다** — 메시지가 stdin 으로 간다(§6.2).
-    // 남은 둘은 **우리가 실행할 수 없어서** 남는다: 우리 ssh 에는 agent 도 tty 도 없다(RS4c).
-    const touches = [_]Intent{
-        .fetch_remote,
-        .open_remote_menu,
-    };
-    for (touches) |intent| try std.testing.expect(scm_dock_ops.intentTouchesLocalRepo(intent));
-    // 화면만 바꾸는 것과 원격에서도 뜻이 같은 것은 통과시킨다 — 막으면 원격에서 탭 전환도 안 된다.
-    //
-    // **비교 열기 셋은 RS3 에서 통과 쪽으로 넘어왔다** — 좌우 모두 원격에서 읽고 그 Term 은 저장이 막혀
-    // 있다(`saveDocument` 가 diff Term 을 거부한다). RS2 에서 막았던 것은 「아직 못 읽는다」였지 계약이
-    // 아니었다.
-    const passes = [_]Intent{
-        .{ .open_row = .{ .repo_index = 0, .model_index = 0 } },
-        .{ .open_commit_file = 0 },
-        .{ .open_turn_file = 0 },
-        .{ .select_tab = .history },
-        .{ .toggle_repo = 0 },
-        .{ .refresh_repo = 0 },
-        .scroll_thumb,
-        // RS4a — 이제 원격으로 **간다**(막는 것이 아니라 라우팅한다).
-        .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
-        .{ .section_action = .{ .repo_index = 0, .section = .changes } },
-        .{ .stage_all_repo = 0 },
-        // RS4b — 커밋도 원격으로 간다.
-        .{ .commit = 0 },
-        .{ .commit_focus = 0 },
-    };
-    for (passes) |intent| try std.testing.expect(!scm_dock_ops.intentTouchesLocalRepo(intent));
+    const classify = struct {
+        fn call(intent: Intent) void {
+            switch (intent) {
+                // 원격으로 **보낸다**(대상은 `writeTargetFor` 가 그 행의 저장소로 정한다).
+                .row_action, .section_action, .stage_all_repo => {}, // RS4a — 원격 index
+                .commit, .commit_focus => {}, //                        RS4b — 메시지는 stdin
+                // 우리가 **실행하지 않고** 활성 pane 에 넣는다 — 우리 ssh 에는 agent 도 tty 도 없다.
+                .fetch_remote, .open_remote_menu => {}, //               RS4c
+                // 원격에서 **읽는다**(RS2·RS3).
+                .open_row, .open_turn_file, .open_commit_file, .refresh_repo => {},
+                // 화면 상태만 바꾼다 — 호스트와 무관하다.
+                .toggle_section, .expand_section, .toggle_repo => {},
+                .select_commit, .select_turn, .load_more_commits, .select_tab => {},
+                .scroll_thumb, .scroll_track => {},
+            }
+        }
+    }.call;
+    classify(.{ .commit = 0 });
 
     // ⑵-b **RS4a 4회차 — 비활성 «로컬» 저장소 행이 원격으로 날아가지 않는다.**
     //
@@ -66275,6 +66265,85 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     git_ops.rememberGitRepoDest(session, null);
     try std.testing.expect(!git_ops.scmTargetIsRemote(session));
     try std.testing.expect(session.scm_write_error == null);
+}
+
+test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    // ⑴ **분류가 «막는다»에서 «보낸다»로 넘어왔다.** 우리 ssh 명령에는 agent 도 tty 도 없어 인증이
+    //    필요한 원격에서 **항상** 실패하는데, 그것을 「막힘」으로 두면 원격에서는 영영 못 가져온다.
+    // (분류의 강제력은 「원격 목록을 보는 동안…」 판정자의 exhaustive switch 가 진다.)
+
+    // ⑵ **원격이면 백엔드로 안 간다.** 갔다면 `SSH_AUTH_SOCK` 없이 도는 fetch 가 되고, 인증이 필요한
+    //    원격에서는 그것이 곧 「늘 실패」다.
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    // **활성 Term 을 실제로 그 원격으로 몬다**(관측 캐시를 손으로 쓰지 않고 `maru ssh` 진입 통지로).
+    // 이게 없으면 pane 은 로컬이라 주입이 늘 거절되고, 그러면 ⑵·⑶ 이 아무것도 안 본다.
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    // **원격이 있다는 것을 이미 안다**(그 전에는 「모른다」라서 아무 말도 하지 않는 것이 맞다 —
+    // 그 규율은 로컬과 원격이 같다).
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"),
+        .remotes = try git_backend_mod.worker_allocator.dupe(u8, "origin\n"),
+        .ok = true,
+    };
+    scm_dock_ops.clearScmWriteError(session);
+    const before = session.scm_fetch_seq;
+    scm_dock_ops.submitFetchForTest(session);
+    try std.testing.expectEqual(before, session.scm_fetch_seq); // 백엔드 요청이 안 늘었다
+    try std.testing.expectEqual(@as(u64, 0), session.scm_fetch_inflight);
+
+    // ⑶ **조용한 무동작이 아니다.** 결과를 우리가 모르므로 그 사실을 말한다 — 안 그러면 사용자는
+    //    목록이 곧 갱신될 것으로 읽는다.
+    try std.testing.expect(session.scm_write_error != null);
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.scm_remote_fetch_injected),
+        session.scm_write_error.?,
+    );
+
+    // ⑷ **엉뚱한 기계에 넣지 않는다**(적대적 검증 2회차). 목록의 호스트가 활성 pane 의 호스트와
+    //    다르면, 거기 넣은 `git fetch` 는 **다른 저장소**를 가져오고 `git push` 는 **다른 저장소에 쓴다.**
+    //    (`followActiveTerminalRepo` 가 도크가 보일 때만 도는 탓에 그 어긋남이 실제로 생길 수 있다.)
+    git_ops.rememberGitRepoDest(session, "user@other-box"); // 목록만 다른 기계로
+    scm_dock_ops.clearScmWriteError(session);
+    scm_dock_ops.submitFetchForTest(session);
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.scm_inject_host_mismatch),
+        session.scm_write_error.?,
+    );
+    // **넣지 못했으면 넣었다고 말하지 않는다** — 거절 사유가 그대로 남아 있다(덮어쓰면 화면이 거짓말한다).
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        session.scm_write_error.?,
+        maru.i18n.t(.scm_remote_fetch_injected),
+    ));
+
+    // ⑸ **주입 자리는 하나다.** `push`·`pull` 과 `fetch` 가 같은 함수를 지나야 「push 는 그 pane 에,
+    //    fetch 는 다른 pane 에」가 원리적으로 불가능해진다(§6.4 — 주입 시점에 활성 pane 을 다시 묻는다).
+    const src = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        "src/platform/macos/app_session/scm_dock.zig",
+        allocator,
+        .limited(4 * 1024 * 1024),
+    );
+    defer allocator.free(src);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, src, "term_ops.submitPaste(self, command"),
+    );
+    try std.testing.expect(std.mem.count(u8, src, "injectIntoActiveTerminal(self,") >= 2);
 }
 
 test "원격 쓰기 뒤 갱신: 경로가 같아도 호스트가 다르면 다른 저장소다 (RS4a 8회차)" {

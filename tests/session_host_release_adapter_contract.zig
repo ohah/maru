@@ -39,8 +39,11 @@ test "release adapter parses exact pre-publish command independent of option ord
         "maru",
         "--evidence",
         "evidence.json",
+        "--work-dir",
+        "/tmp/pre-publish-work",
     });
     try std.testing.expectEqualStrings("v1.2.3", parsed.pre_publish.tag);
+    try std.testing.expectEqualStrings("/tmp/pre-publish-work", parsed.pre_publish.work_dir);
     try std.testing.expectEqualStrings("out.json", parsed.pre_publish.summary_out);
 }
 
@@ -58,32 +61,32 @@ test "release adapter parses exact predecessor command" {
         "--manifest",
         "Maru-1.2.3-session-host-release.json",
         "--work-dir",
-        "download",
+        "/tmp/download",
         "--summary-out",
         "audit.json",
     });
-    try std.testing.expectEqualStrings("download", parsed.verify_predecessor.work_dir);
+    try std.testing.expectEqualStrings("/tmp/download", parsed.verify_predecessor.work_dir);
 }
 
 test "release adapter requires canonical GitHub CLI authority in both phases" {
     try std.testing.expectError(error.MissingOption, adapter.parseArgs(&.{
-        "verify-predecessor",                   "--repo",     "ohah/maru", "--tag",         "v1.2.3",     "--manifest",
-        "Maru-1.2.3-session-host-release.json", "--work-dir", "download",  "--summary-out", "audit.json",
+        "verify-predecessor",                   "--repo",     "ohah/maru",     "--tag",         "v1.2.3",     "--manifest",
+        "Maru-1.2.3-session-host-release.json", "--work-dir", "/tmp/download", "--summary-out", "audit.json",
     }));
     try std.testing.expectError(error.InvalidGithubCliPath, adapter.parseArgs(&.{
-        "verify-predecessor",  "--repo",                                                           "ohah/maru",  "--tag",                                "v1.2.3",     "--github-cli", "gh",
-        "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest", "Maru-1.2.3-session-host-release.json", "--work-dir", "download",     "--summary-out",
+        "verify-predecessor",  "--repo",                                                           "ohah/maru",  "--tag",                                "v1.2.3",     "--github-cli",  "gh",
+        "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest", "Maru-1.2.3-session-host-release.json", "--work-dir", "/tmp/download", "--summary-out",
         "audit.json",
     }));
     try std.testing.expectError(error.InvalidGithubCliSha256, adapter.parseArgs(&.{
-        "verify-predecessor",  "--repo", "ohah/maru",  "--tag",                                "v1.2.3",     "--github-cli", "/usr/bin/gh",
-        "--github-cli-sha256", "ABC",    "--manifest", "Maru-1.2.3-session-host-release.json", "--work-dir", "download",     "--summary-out",
+        "verify-predecessor",  "--repo", "ohah/maru",  "--tag",                                "v1.2.3",     "--github-cli",  "/usr/bin/gh",
+        "--github-cli-sha256", "ABC",    "--manifest", "Maru-1.2.3-session-host-release.json", "--work-dir", "/tmp/download", "--summary-out",
         "audit.json",
     }));
     try std.testing.expectError(error.PathAlias, adapter.parseArgs(&.{
         "verify-predecessor",                        "--repo",              "ohah/maru",                                                        "--tag",      "v1.2.3",                                    "--github-cli",
         "/tmp/Maru-1.2.3-session-host-release.json", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest", "/tmp/Maru-1.2.3-session-host-release.json", "--work-dir",
-        "download",                                  "--summary-out",       "audit.json",
+        "/tmp/download",                             "--summary-out",       "audit.json",
     }));
 }
 
@@ -129,9 +132,9 @@ test "release adapter rejects empty oversized and aliased path authorities" {
         "audit.json",
     }));
     try std.testing.expectError(error.PathAlias, adapter.parseArgs(&.{
-        "verify-predecessor",                   "--repo",               "ohah/maru",                            "--tag",                                                            "v1.2.3",
-        "--github-cli",                         "/opt/homebrew/bin/gh", "--github-cli-sha256",                  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
-        "Maru-1.2.3-session-host-release.json", "--work-dir",           "Maru-1.2.3-session-host-release.json", "--summary-out",                                                    "audit.json",
+        "verify-predecessor",                        "--repo",               "ohah/maru",                                 "--tag",                                                            "v1.2.3",
+        "--github-cli",                              "/opt/homebrew/bin/gh", "--github-cli-sha256",                       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+        "/tmp/Maru-1.2.3-session-host-release.json", "--work-dir",           "/tmp/Maru-1.2.3-session-host-release.json", "--summary-out",                                                    "audit.json",
     }));
     const too_long = "x" ** (adapter.max_cli_value_bytes + 1);
     try std.testing.expectError(error.ValueTooLong, adapter.parseArgs(&.{
@@ -141,18 +144,48 @@ test "release adapter rejects empty oversized and aliased path authorities" {
     }));
 }
 
-test "release adapter command surfaces remain phase-separated" {
+test "release adapter requires an absolute caller-owned work directory in both phases" {
     try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&.{
         "verify-predecessor", "--repo",                               "ohah/maru",  "--tag",         "v1.2.3",
         "--manifest",         "Maru-1.2.3-session-host-release.json", "--evidence", "evidence.json", "--work-dir",
         "download",           "--summary-out",                        "audit.json",
     }));
-    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&.{
+    try std.testing.expectError(error.InvalidWorkDirPath, adapter.parseArgs(&.{
         "pre-publish",   "--repo",                               "ohah/maru",  "--tag",         "v1.2.3",
         "--manifest",    "Maru-1.2.3-session-host-release.json", "--evidence", "evidence.json", "--dmg",
         "dmg",           "--frozen-executable",                  "maru",       "--work-dir",    "download",
         "--summary-out", "audit.json",
     }));
+    try std.testing.expectError(error.InvalidWorkDirPath, adapter.parseArgs(&.{
+        "verify-predecessor",                   "--repo",      "ohah/maru",           "--tag",                                                            "v1.2.3",
+        "--github-cli",                         "/usr/bin/gh", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+        "Maru-1.2.3-session-host-release.json", "--work-dir",  "download",            "--summary-out",                                                    "audit.json",
+    }));
+    for ([_][]const u8{ "/", "/tmp/../work", "/tmp/./work", "/tmp//work", "/tmp/work/" }) |work_dir| {
+        try std.testing.expectError(error.InvalidWorkDirPath, adapter.parseArgs(&.{
+            "verify-predecessor",                   "--repo",      "ohah/maru",           "--tag",                                                            "v1.2.3",
+            "--github-cli",                         "/usr/bin/gh", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+            "Maru-1.2.3-session-host-release.json", "--work-dir",  work_dir,              "--summary-out",                                                    "audit.json",
+        }));
+    }
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&.{
+        "verify-predecessor",                   "--repo",      "ohah/maru",           "--tag",                                                            "v1.2.3",
+        "--github-cli",                         "/usr/bin/gh", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+        "Maru-1.2.3-session-host-release.json", "--work-dir",  "/tmp/work",           "--summary-out",                                                    "/tmp/work/audit.json",
+    }));
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&.{
+        "pre-publish",                                    "--repo",      "ohah/maru",           "--tag",                                                            "v1.2.3",
+        "--github-cli",                                   "/usr/bin/gh", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+        "/tmp/work/Maru-1.2.3-session-host-release.json", "--evidence",  "/tmp/evidence.json",  "--dmg",                                                            "/tmp/Maru.dmg",
+        "--frozen-executable",                            "/tmp/maru",   "--work-dir",          "/tmp/work",                                                        "--summary-out",
+        "/tmp/audit.json",
+    }));
+    const sibling = try adapter.parseArgs(&.{
+        "verify-predecessor",                   "--repo",      "ohah/maru",           "--tag",                                                            "v1.2.3",
+        "--github-cli",                         "/usr/bin/gh", "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
+        "Maru-1.2.3-session-host-release.json", "--work-dir",  "/tmp/work",           "--summary-out",                                                    "/tmp/worker/audit.json",
+    });
+    try std.testing.expectEqualStrings("/tmp/work", sibling.verify_predecessor.work_dir);
 }
 
 test "release adapter freezes audit schema and protected environment" {

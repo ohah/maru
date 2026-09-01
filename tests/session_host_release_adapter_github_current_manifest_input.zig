@@ -39,6 +39,25 @@ const Authority = struct {
         self.calls += 1;
     }
 };
+const SharedDeadline = struct {
+    calls: usize = 0,
+    fail_at: usize = 0,
+    mutate_at: usize = 0,
+    mutate_path: ?[:0]const u8 = null,
+    pub fn remaining(self: *@This()) !i128 {
+        self.calls += 1;
+        if (self.calls == self.fail_at) return error.TimedOut;
+        if (self.calls == self.mutate_at) {
+            const path = self.mutate_path orelse return error.MutationFailed;
+            if (c.chmod(path.ptr, 0o600) != 0) return error.MutationFailed;
+            const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true }, @as(c.mode_t, 0));
+            if (fd < 0) return error.MutationFailed;
+            defer _ = c.close(fd);
+            if (c.write(fd, "x".ptr, 1) != 1) return error.MutationFailed;
+        }
+        return 1_000 - @as(i128, @intCast(self.calls * 100));
+    }
+};
 const Executor = struct {};
 const Attestor = struct {
     calls: usize = 0,
@@ -46,8 +65,10 @@ const Attestor = struct {
     block_cleanup: bool = false,
     original: ?[:0]const u8 = null,
     seen_private: bool = false,
-    pub fn verify(self: *@This(), _: anytype, allocator: std.mem.Allocator, _: []const u8, _: []const u8, path: []const u8, expected: attestation.Expected, _: []u8, _: i128) !attestation.Observed {
+    last_budget: i128 = 0,
+    pub fn verify(self: *@This(), _: anytype, allocator: std.mem.Allocator, _: []const u8, _: []const u8, path: []const u8, expected: attestation.Expected, _: []u8, budget: i128) !attestation.Observed {
         self.calls += 1;
+        self.last_budget = budget;
         if (self.block_cleanup) {
             const parent = std.fs.path.dirname(path) orelse return error.MutationFailed;
             var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
@@ -282,4 +303,76 @@ test "every successful allocation failure unwinds" {
 }
 test "product wrapper is compiled" {
     _ = composition.authenticatePath;
+    _ = composition.authenticateCandidateUntil;
+}
+
+test "candidate consume forwards one shared deadline and owns child or outer publication expiry cleanup" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var current = currentAuthority();
+    var candidate_owner: candidate_mod.CurrentManifestCandidate = .{};
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    var attestor = Attestor{};
+    var authority = Authority{};
+    var executor = Executor{};
+    var deadline = SharedDeadline{};
+    var output: [8192]u8 = undefined;
+    var result: composition.CurrentManifestInput = .{};
+    try std.testing.expectError(error.InvalidCurrent, composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), deadline.calls);
+    try std.testing.expect(candidate_owner.value() != null);
+
+    current.owner = &current;
+    const pointer = candidate_owner.bytes().?.ptr;
+    try composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result);
+    try std.testing.expectEqual(@as(usize, 5), deadline.calls);
+    try std.testing.expectEqual(@as(i128, 800), attestor.last_budget);
+    try std.testing.expectEqual(pointer, result.bytes().?.ptr);
+    try result.deinit(std.testing.allocator);
+
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    attestor = .{};
+    authority = .{};
+    deadline = .{ .fail_at = 5 };
+    result = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), attestor.calls);
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expect(result.bytes() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "private", .{}));
+
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    attestor = .{};
+    authority = .{};
+    deadline = .{ .fail_at = 2 };
+    result = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expect(result.bytes() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "private", .{}));
+
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    attestor = .{};
+    authority = .{};
+    deadline = .{ .fail_at = 1 };
+    result = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), attestor.calls);
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expect(result.bytes() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "private", .{}));
+
+    try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
+    var private_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const private_path = try std.fmt.bufPrintZ(&private_path_storage, "{s}/{s}", .{ std.mem.sliceTo(&fixture.work_path, 0), file_name });
+    attestor = .{};
+    authority = .{};
+    deadline = .{ .mutate_at = 4, .mutate_path = private_path };
+    result = .{};
+    try std.testing.expectError(error.InvalidManifestInput, composition.authenticateCandidateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, &candidate_owner, std.mem.sliceTo(&fixture.work_path, 0), "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expect(candidate_owner.value() == null);
+    try std.testing.expect(result.bytes() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "private", .{}));
 }

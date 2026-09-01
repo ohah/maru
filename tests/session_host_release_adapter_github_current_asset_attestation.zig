@@ -5,6 +5,7 @@ const manifest = @import("release_manifest");
 const attestation = @import("release_adapter_github_attestation");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const asset_files = @import("release_adapter_github_current_asset_files");
+const deadline_mod = @import("release_adapter_deadline");
 const composition = @import("release_adapter_github_current_asset_attestation");
 
 const source_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -95,6 +96,19 @@ const Clock = struct {
     }
 };
 
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
+    }
+};
+
 const Verifier = struct {
     calls: usize = 0,
     fail_at: ?usize = null,
@@ -162,6 +176,77 @@ test "three roles use held cwd canonical order and one decreasing deadline" {
     private = .{};
     try composition.composeWith(&authority, &verifier, &executor, &clock, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, 100, &result);
     try result.deinit(std.testing.allocator);
+}
+
+test "shared deadline spans every role and expiry before child or final publication unwinds" {
+    var authority = Authority{};
+    var verifier = Verifier{};
+    var deadline = SharedDeadline{ .values = &.{ 100, 90, 90, 70, 60, 50, 40 } };
+    var executor = Executor{};
+    var current = Current{};
+    var private = AssetOwner{};
+    var result: composition.CurrentAssetAttestations = .{};
+    var output: [attestation.max_response_bytes]u8 = undefined;
+    try composition.composeUntilWith(&authority, &verifier, &executor, &deadline, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result);
+    try std.testing.expectEqual(@as(usize, 7), deadline.cursor);
+    try std.testing.expectEqualSlices(i128, &.{ 90, 70, 50 }, &verifier.budgets);
+    try result.deinit(std.testing.allocator);
+
+    authority = .{};
+    verifier = .{};
+    deadline = .{ .values = &.{ 100, 90, 80, 70, 60, 50, 0 } };
+    private = .{};
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &verifier, &executor, &deadline, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 3), verifier.calls);
+    try std.testing.expectEqual(@as(usize, 3), authority.calls);
+    try std.testing.expectEqual(@as(usize, 6), private.revalidations);
+    try std.testing.expect(result.value() == null);
+
+    authority = .{};
+    verifier = .{};
+    deadline = .{ .values = &.{ 100, 90, 80, 0 } };
+    private = .{};
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &verifier, &executor, &deadline, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), verifier.calls);
+    try std.testing.expectEqual(@as(usize, 2), authority.calls);
+    try std.testing.expectEqual(@as(usize, 3), private.revalidations);
+    try std.testing.expect(result.value() == null);
+
+    authority = .{};
+    verifier = .{};
+    deadline = .{ .values = &.{0} };
+    private = .{};
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &verifier, &executor, &deadline, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), private.revalidations);
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), verifier.calls);
+
+    authority = .{};
+    verifier = .{};
+    deadline = .{ .values = &.{ 100, 90, 0 } };
+    private = .{};
+    try std.testing.expectError(error.TimedOut, composition.composeUntilWith(&authority, &verifier, &executor, &deadline, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 2), private.revalidations);
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 1), verifier.calls);
+    try std.testing.expect(result.value() == null);
+
+    var untouched = SharedDeadline{ .values = &.{100} };
+    var drift = Current{ .drift = true };
+    try std.testing.expectError(error.InvalidCurrent, composition.composeUntilWith(&authority, &verifier, &executor, &untouched, std.testing.allocator, &drift, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), untouched.cursor);
+    result.owner = &result;
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &verifier, &executor, &untouched, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), untouched.cursor);
+
+    result = .{};
+    var output_alias = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &verifier, &executor, &output_alias, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", std.mem.asBytes(&output_alias), &result));
+    try std.testing.expectEqual(@as(usize, 0), output_alias.cursor);
+
+    const result_alias: *SharedDeadline = @ptrCast(@alignCast(&result));
+    try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&authority, &verifier, &executor, result_alias, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, &result));
+    try std.testing.expect(result.value() == null);
 }
 
 test "partial verifier failure unwinds and publishes nothing" {
@@ -275,6 +360,10 @@ test "production current and private owner types instantiate the composition bou
     var result: composition.CurrentAssetAttestations = .{};
     var output: [attestation.max_response_bytes]u8 = undefined;
     try std.testing.expectError(error.InvalidCurrent, composition.composeWith(&authority, &verifier, &executor, &clock, std.testing.allocator, &current, &private, "/opt/trusted/gh", "secret", &output, 100, &result));
+    var deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &deadline);
+    defer deadline.deinit() catch unreachable;
+    try std.testing.expectError(error.InvalidCurrent, composition.composeUntil(std.testing.io, std.testing.allocator, &current, &private, .{ .path = "/opt/trusted/gh", .pinned = undefined }, "secret", &output, &deadline, &result));
 }
 
 test "successful three-observation composition unwinds every allocation failure" {

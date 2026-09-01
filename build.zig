@@ -12127,14 +12127,24 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
             .target = target,
             .optimize = evidence_files_optimize,
-            .imports = &.{.{
-                .name = "safe_open",
-                .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
-                    .target = target,
-                    .optimize = evidence_files_optimize,
-                }),
-            }},
+            .imports = &.{
+                .{
+                    .name = "safe_open",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                        .target = target,
+                        .optimize = evidence_files_optimize,
+                    }),
+                },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = evidence_files_optimize,
+                    }),
+                },
+            },
         });
         const release_evidence_files_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_evidence_files.zig"),
@@ -12902,7 +12912,7 @@ pub fn build(b: *std.Build) void {
             const json_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }} });
             const attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
             const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = attestation_optimize });
-            const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }} });
+            const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const cli_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });
             const file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_file.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const composition_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_attestation.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_authority_mod }, .{ .name = "release_adapter_github_manifest_file", .module = file_mod } } });
@@ -13017,7 +13027,7 @@ pub fn build(b: *std.Build) void {
             const resolver_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_git_resolver.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const context_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const artifact_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
-            const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }} });
+            const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const cli_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });
             const manifest_file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_file.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const authenticated_manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_attestation.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod } } });
@@ -13100,14 +13110,21 @@ pub fn build(b: *std.Build) void {
                         .target = target,
                         .optimize = authority_optimize,
                         .link_libc = true,
-                        .imports = &.{.{
+                        .imports = &.{ .{
                             .name = "safe_open",
                             .module = b.createModule(.{
                                 .root_source_file = b.path("src/platform/macos/safe_open.zig"),
                                 .target = target,
                                 .optimize = authority_optimize,
                             }),
-                        }},
+                        }, .{
+                            .name = "release_adapter_identity",
+                            .module = b.createModule(.{
+                                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                                .target = target,
+                                .optimize = authority_optimize,
+                            }),
+                        } },
                     }),
                 }},
             });
@@ -13440,14 +13457,24 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
             .target = target,
             .optimize = files_optimize,
-            .imports = &.{.{
-                .name = "safe_open",
-                .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
-                    .target = target,
-                    .optimize = files_optimize,
-                }),
-            }},
+            .imports = &.{
+                .{
+                    .name = "safe_open",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                        .target = target,
+                        .optimize = files_optimize,
+                    }),
+                },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = files_optimize,
+                    }),
+                },
+            },
         });
         const release_adapter_files_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

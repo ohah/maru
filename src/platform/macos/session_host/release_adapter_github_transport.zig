@@ -26,7 +26,7 @@ pub const DeploymentQuery = struct {
 pub const Request = union(enum) {
     repository,
     workflow_run: u64,
-    draft_release: []const u8,
+    draft_releases,
     published_release: []const u8,
     tag_ref: []const u8,
     annotated_tag: []const u8,
@@ -65,7 +65,8 @@ pub fn plan(storage: *EndpointStorage, request: Request) Error!Plan {
             try validId(run_id);
             break :blk try render(storage, "repos/ohah/maru/actions/runs/{d}", .{run_id});
         },
-        .draft_release, .published_release => |tag| blk: {
+        .draft_releases => try render(storage, "repos/ohah/maru/releases?per_page=100", .{}),
+        .published_release => |tag| blk: {
             try validTag(tag);
             break :blk try render(storage, "repos/ohah/maru/releases/tags/{s}", .{tag});
         },
@@ -106,7 +107,7 @@ pub fn plan(storage: *EndpointStorage, request: Request) Error!Plan {
     };
     const page_shape: PageShape = switch (request) {
         .attempt_jobs => .jobs,
-        .deployments, .deployment_statuses => .array,
+        .draft_releases, .deployments, .deployment_statuses => .array,
         else => .none,
     };
     return .{ .endpoint = rendered, .paginated = page_shape != .none, .page_shape = page_shape };

@@ -1,0 +1,150 @@
+const std = @import("std");
+const validator = @import("release_validator");
+
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor };
+const Phase = enum { pre_publish, verify_predecessor };
+
+const Harness = struct {
+    events: [8]Event = undefined,
+    count: usize = 0,
+    phase: Phase = .pre_publish,
+    bootstrap_error: bool = false,
+    token_error: bool = false,
+    product_error: bool = false,
+
+    fn push(self: *@This(), event: Event) void {
+        self.events[self.count] = event;
+        self.count += 1;
+    }
+
+    fn Bootstrapper(comptime Self: type) type {
+        return struct {
+            harness: *Self,
+            pub fn load(self: *@This(), _: std.mem.Allocator, _: []const []const u8, result: anytype) !void {
+                self.harness.push(.bootstrap);
+                if (self.harness.bootstrap_error) return error.BootstrapInjected;
+                result.command = switch (self.harness.phase) {
+                    .pre_publish => .{ .pre_publish = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+                        .evidence = "/tmp/evidence",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                        .work_dir = "/tmp/work",
+                        .summary_out = "/tmp/summary",
+                    } },
+                    .verify_predecessor => .{ .verify_predecessor = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+                        .work_dir = "/tmp/work",
+                        .summary_out = "/tmp/summary",
+                    } },
+                };
+                result.owner = result;
+            }
+        };
+    }
+
+    fn TokenReader(comptime Self: type) type {
+        return struct {
+            harness: *Self,
+            pub fn read(self: *@This()) ![]const u8 {
+                self.harness.push(.token);
+                if (self.harness.token_error) return error.TokenInjected;
+                return "token";
+            }
+        };
+    }
+
+    fn Drivers(comptime Self: type) type {
+        return struct {
+            harness: *Self,
+            pub fn prePublish(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.pre_publish);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+            pub fn verifyPredecessor(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.verify_predecessor);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.attestation_capture_bytes, storage.attestation.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+        };
+    }
+
+    fn run(self: *@This(), storage: *validator.Storage) !void {
+        var bootstrapper = Bootstrapper(@This()){ .harness = self };
+        var tokens = TokenReader(@This()){ .harness = self };
+        var drivers = Drivers(@This()){ .harness = self };
+        try validator.executeWith(std.testing.io, std.testing.allocator, &.{}, storage, &bootstrapper, &tokens, &drivers);
+    }
+};
+
+test "validator authenticates bootstrap and token before exact pre-publish dispatch" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{};
+    try harness.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .pre_publish }, harness.events[0..harness.count]);
+}
+
+test "verify-predecessor failure propagates without fallback or second phase" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{ .phase = .verify_predecessor, .product_error = true };
+    try std.testing.expectError(error.ProductInjected, harness.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .verify_predecessor }, harness.events[0..harness.count]);
+}
+
+test "bootstrap and token failures start no product and storage caps stay component-owned" {
+    var storage: validator.Storage = undefined;
+    var bootstrap_failure = Harness{ .bootstrap_error = true };
+    try std.testing.expectError(error.BootstrapInjected, bootstrap_failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{.bootstrap}, bootstrap_failure.events[0..bootstrap_failure.count]);
+    var token_failure = Harness{ .token_error = true };
+    try std.testing.expectError(error.TokenInjected, token_failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token }, token_failure.events[0..token_failure.count]);
+    try std.testing.expectEqual(@as(i128, 20 * std.time.ns_per_min), validator.phase_budget_ns);
+    try std.testing.expectEqual(validator.manifest_capture_bytes, storage.manifest_download.len);
+    try std.testing.expectEqual(validator.compatibility_capture_bytes, storage.compatibility.len);
+    const ranges = [_][]const u8{
+        &storage.github_response,
+        &storage.manifest_download,
+        &storage.attestation,
+        &storage.compatibility,
+        std.mem.asBytes(&storage.apple),
+    };
+    for (ranges, 0..) |left, index| for (ranges[index + 1 ..]) |right| {
+        const left_end = @intFromPtr(left.ptr) + left.len;
+        const right_end = @intFromPtr(right.ptr) + right.len;
+        try std.testing.expect(left_end <= @intFromPtr(right.ptr) or right_end <= @intFromPtr(left.ptr));
+    };
+}
+
+test "production failure cleanup retries at most once and retry failure wins" {
+    const FakeExecution = struct {
+        owner: ?*@This() = null,
+        retries: usize = 0,
+        fail_retry: bool = false,
+        pub fn retryCleanup(self: *@This()) !void {
+            self.retries += 1;
+            if (self.fail_retry) return error.RetryInjected;
+            self.owner = null;
+        }
+    };
+    var empty = FakeExecution{};
+    try std.testing.expectEqual(error.ProductInjected, validator.testing_api.settleFailure(&empty, error.ProductInjected));
+    try std.testing.expectEqual(@as(usize, 0), empty.retries);
+    var retained = FakeExecution{};
+    retained.owner = &retained;
+    try std.testing.expectEqual(error.ProductInjected, validator.testing_api.settleFailure(&retained, error.ProductInjected));
+    try std.testing.expectEqual(@as(usize, 1), retained.retries);
+    var failed = FakeExecution{ .fail_retry = true };
+    failed.owner = &failed;
+    try std.testing.expectEqual(error.CleanupFailed, validator.testing_api.settleFailure(&failed, error.ProductInjected));
+    try std.testing.expectEqual(@as(usize, 1), failed.retries);
+}

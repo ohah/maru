@@ -13895,10 +13895,21 @@ fn runAgentEvents(
             //
             // **옆 파일 내용이 그대로면 다시 안 묻는다.** 훅은 매 이벤트마다 그것을 덮어쓰지만 값은
             // pane 이 옮겨 갈 때만 바뀐다 — 매번 물으면 이벤트마다 `tmux` 프로세스가 둘씩 뜬다.
+            // **tmux pane 축은 nonce 와 따로 나른다**(RA7). 역조회가 nonce 를 Term 신원으로 치환하고 나면
+            // 「어느 pane 이었나」가 사라지는데, 한 tmux 세션에 pane 이 여럿이면 그 축이 곧 «각각 다른
+            // 에이전트» 다. 사이드카 버퍼는 아래 `defer` 로 사라지므로 **값을 복사해 둔다.**
+            var pane_buf: [16]u8 = undefined;
+            var emit_pane: []const u8 = "";
             const emit_nonce = blk: {
                 const side = readSidecar(io, allocator, dir, nonce) orelse break :blk nonce;
                 defer allocator.free(side);
                 const obs = ae_route.parseSidecar(side) orelse break :blk nonce; // tmux 밖 → 이름을 믿는다
+                if (obs.pane) |p| {
+                    if (p.len > 0 and p.len <= pane_buf.len) {
+                        @memcpy(pane_buf[0..p.len], p);
+                        emit_pane = pane_buf[0..p.len];
+                    }
+                }
                 const rgop = routes.getOrPut(allocator, nonce) catch break :blk nonce;
                 if (!rgop.found_existing) {
                     rgop.key_ptr.* = allocator.dupe(u8, nonce) catch {
@@ -13931,7 +13942,7 @@ fn runAgentEvents(
                 consumed += line.len + 1;
                 if (line.len == 0) continue;
                 frame.clearRetainingCapacity();
-                try ae.formatEvent(&frame, allocator, emit_nonce, line);
+                try ae.formatEvent(&frame, allocator, emit_nonce, line, emit_pane);
                 try stdout.writeAll(frame.items);
             }
             const next: ae.Cursor = .{ .offset = cur.offset + consumed, .seen_size = size };

@@ -50,9 +50,25 @@ pub const Closed = enum {
     eof,
 };
 
+/// tmux pane 식별자 상한(`%` + 숫자). tmux 는 서버가 켜져 있는 동안 단조 증가하는 번호를 쓰므로
+/// 자릿수가 늘 수 있지만 16 이면 실질적으로 넉넉하다 — 넘치면 그 축만 버린다(프레임은 산다).
+pub const max_pane_bytes: usize = 16;
+
+/// `%<숫자>` 인가. **모양을 검사하는 이유**는 이 값이 뒷날 파일 이름·표시 문자열로 흘러갈 수 있어서다.
+/// 선 위에서 온 값을 그대로 믿지 않는 것은 `nonce` 와 같은 규율이다.
+fn isTmuxPaneToken(p: []const u8) bool {
+    if (p.len < 2 or p[0] != '%') return false;
+    for (p[1..]) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
 pub const Frame = union(enum) {
     /// 이 nonce 의 훅 줄. `line` 은 `<provider>\t<payload>` 로 로컬 로그와 **같은 모양**이다.
-    event: struct { nonce: []const u8, line: []const u8 },
+    ///
+    /// `pane` 은 원격 tmux 의 pane 식별자(`%27`)이고 **없으면 빈 슬라이스**다([계획](../../docs/plans/remote-agent-state.md)
+    /// RA7). 한 tmux 세션에 pane 이 여럿이면 역조회가 셋을 같은 nonce 로 접기 때문에, 그 축을 따로 실어야
+    /// 「각각 다른 에이전트」를 가를 수 있다. tmux 밖이면 원격이 이 키를 아예 안 보낸다.
+    event: struct { nonce: []const u8, line: []const u8, pane: []const u8 = "" },
     /// 하트비트를 봤다(살아 있다).
     heartbeat,
     /// 이 이름의 로그를 여기까지 읽었다([계획](../../docs/plans/remote-agent-state.md) RA5-a).
@@ -81,7 +97,15 @@ pub fn parseFrame(line: []const u8) Frame {
     // 이미 고쳤는데 이쪽만 남아 있었다. 재현 조건이 좁아 눈으로는 못 찾는 자리다.
     if (nonce.len == 0 or nonce.len > command.remote_log_name_max) return .ignored;
     if (!command.instance_token_class.accepts(nonce)) return .ignored;
-    return .{ .event = .{ .nonce = nonce, .line = raw } };
+    // **pane 은 없어도 프레임을 버리지 않는다**(RA7). tmux 밖이면 원격이 이 키를 안 보내고, 구버전
+    // 원격도 마찬가지다 — 그때는 예전과 똑같이 nonce 만으로 귀속한다. 값이 이상하면 **그 축만** 버린다.
+    const pane = blk: {
+        const p = jsonStringField(line, "\"pane\":\"") orelse break :blk "";
+        if (p.len == 0 or p.len > max_pane_bytes) break :blk "";
+        if (!isTmuxPaneToken(p)) break :blk "";
+        break :blk p;
+    };
+    return .{ .event = .{ .nonce = nonce, .line = raw, .pane = pane } };
 }
 
 /// 커서 프레임을 푼다. **이름을 다시 검증한다** — 이 값이 「어느 로그인가」를 정하므로 선 위에서
@@ -218,6 +242,38 @@ pub fn hookEventFrom(unescaped: []const u8) ?hook_event.Event {
 }
 
 const testing = std.testing;
+
+test "RA7 pane 축이 실려 오면 프레임에 담긴다 — nonce 와 따로 나른다" {
+    const f = parseFrame("{\"nonce\":\"host_00000000000000000000000000000001_00000000000000000000000000000002\",\"line\":\"claude\\t{}\",\"pane\":\"%27\"}");
+    try std.testing.expectEqualStrings("%27", f.event.pane);
+    // **파싱은 JSON 이스케이프를 풀지 않는다** — `line` 은 원문 슬라이스라 `\t` 가 두 글자로 남는다.
+    try std.testing.expectEqualStrings("claude\\t{}", f.event.line);
+}
+
+test "RA7 pane 이 없어도 프레임은 산다 — 구버전 원격과 tmux 밖이 같은 모양이다" {
+    // **호환의 핵심이다.** 옛 원격은 이 키를 아예 안 보내고, tmux 밖 세션도 마찬가지다. 그때 프레임을
+    // 버리면 원격 배지가 통째로 죽는다 — 예전과 똑같이 nonce 만으로 귀속해야 한다.
+    const f = parseFrame("{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\"}");
+    try std.testing.expectEqualStrings("4331_7", f.event.nonce);
+    try std.testing.expectEqualStrings("", f.event.pane);
+}
+
+test "RA7 이상한 pane 은 그 축만 버리고 프레임은 살린다" {
+    // 선 위에서 온 값이라 모양을 믿지 않는다(nonce 와 같은 규율). 다만 **프레임까지 버리지는 않는다** —
+    // 그러면 pane 하나가 이상해서 그 Term 의 배지가 통째로 멈춘다.
+    const cases = [_][]const u8{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\",\"pane\":\"27\"}", // % 없음
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\",\"pane\":\"%\"}", // 숫자 없음
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\",\"pane\":\"%2a\"}", // 숫자 아님
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\",\"pane\":\"%12345678901234567\"}", // 상한 초과
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{}\",\"pane\":\"\"}", // 빈 값
+    };
+    for (cases) |c| {
+        const f = parseFrame(c);
+        try std.testing.expectEqualStrings("4331_7", f.event.nonce);
+        try std.testing.expectEqualStrings("", f.event.pane);
+    }
+}
 
 test "hello 를 보기 전에는 잡음을 삼킨다 — 정상 서버도 MOTD 를 앞에 붙인다" {
     var ch = Channel.init(0);

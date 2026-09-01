@@ -2597,6 +2597,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   않는다. `test-session-host-release-adapter-github-current-release-authority`가 Debug·ReleaseFast에서 exact 전체 sequence,
   lightweight/1/8-hop, 9-hop/cycle/mismatch, buffer overwrite, single deadline, owner copy·CLI/child/OOM publication 0을 검증한다.
   current manifest artifact attestation, 최종 command/workflow 조립, Apple product 관측과 frozen U5 E2E는 후속 범위다.
+  Current manifest attestation composition은 current B canonical bytes를 strict context와 move-only current release authority 전체에
+  결속하고, caller pathname 대신 기존 descriptor-owned `ManifestFile`의 canonical name/computed SHA와 before/after
+  identity·type·0400·link-count-1을 검증하면서 pinned CLI artifact attestation을 재사용한다. 성공은 parsed manifest와 current
+  authority identity를 move-only `AuthenticatedCurrentManifest`로만 함께 게시한다.
+  `test-session-host-release-adapter-github-current-manifest-attestation`이 Debug·ReleaseFast에서 role/predecessor/context/current
+  authority/file mismatch, before/after drift, owner copy와 CLI/attestation/OOM publication 0을 검증하고, certificate·subject 세부
+  변조는 재사용하는 artifact-attestation gate가 소유한다. caller pathname
+  read/materialization, local asset·Apple product 관측, summary·executable·workflow 배선과 frozen U5 E2E는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

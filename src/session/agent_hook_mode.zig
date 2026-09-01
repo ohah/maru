@@ -491,11 +491,28 @@ pub fn attentionDebounce(state_now: State, since_ms: u64, now_ms: u64) Debounce 
 pub const CwdLabel = struct {
     pub const max_text = 512;
 
+    /// 이 값이 얼마나 오래 믿을 만한가. **원격에는 「에이전트가 사라졌다」 신호가 없다** —
+    /// `agent_kind` 재판정은 원격에서 아예 돌지 않고(훅 줄이 소스다), 채널이 열려 있는 한 훅 모드도
+    /// 유지된다. 그래서 에이전트를 끝내고 ssh 안에 남아 `cd` 하면 이 값이 **살아 있는 OSC 7 을 덮는다**.
+    ///
+    /// 시각을 함께 들고 오래되면 관측으로 되돌아간다. 턴이 도는 동안에는 매 이벤트가 이 값을 새로
+    /// 하므로 만료되지 않고, 에이전트가 없으면 곧 만료돼 셸의 cwd 가 다시 보인다.
+    pub const stale_after_ms: u64 = 10 * 60 * 1000; // 10 분
+
     len: usize = 0,
+    seen_ms: u64 = 0,
     buf: [max_text]u8 = undefined,
 
     pub fn text(self: *const CwdLabel) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    /// **아직 믿을 만한가.** `now_ms` 는 단조 시계(`awakeMs`)여야 한다 — 벽시계면 슬립·시간 보정에
+    /// 값이 튀어 멀쩡한 값을 버리거나 낡은 값을 붙든다.
+    pub fn fresh(self: *const CwdLabel, now_ms: u64) bool {
+        if (self.len == 0) return false;
+        if (now_ms < self.seen_ms) return true; // 시계가 뒤로 갔다 — 버리지 않는다
+        return now_ms - self.seen_ms <= stale_after_ms;
     }
 
     pub fn isEmpty(self: *const CwdLabel) bool {
@@ -504,14 +521,16 @@ pub const CwdLabel = struct {
 
     /// **절대 경로만, 상한 안에서만 담는다.** 상대 경로는 어느 기준인지 이쪽이 모르고, 잘린 절대
     /// 경로는 남의 디렉터리를 가리킨다 — 둘 다 「모른다」로 두는 편이 안전하다.
-    pub fn set(self: *CwdLabel, path: []const u8) void {
+    pub fn set(self: *CwdLabel, path: []const u8, now_ms: u64) void {
         if (path.len == 0 or path.len > max_text or path[0] != '/') return;
         @memcpy(self.buf[0..path.len], path);
         self.len = path.len;
+        self.seen_ms = now_ms;
     }
 
     pub fn clear(self: *CwdLabel) void {
         self.len = 0;
+        self.seen_ms = 0;
     }
 };
 
@@ -1804,14 +1823,14 @@ test "CwdLabel: 절대 경로만·상한 안에서만 담고, 못 담으면 앞 
     var l: CwdLabel = .{};
     try testing.expect(l.isEmpty());
 
-    l.set("/a/b");
+    l.set("/a/b", 1000);
     try testing.expectEqualStrings("/a/b", l.text());
 
     // **상한을 정확히 채우는 것은 담는다**(경계 한 칸 차이가 잘린 경로를 만든다).
     var exact: [CwdLabel.max_text]u8 = undefined;
     exact[0] = '/';
     @memset(exact[1..], 'a');
-    l.set(&exact);
+    l.set(&exact, 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
 
     // **넘치면 안 담는다.** 잘라 담으면 그 값은 «남의 디렉터리» 를 가리킨다 — 표시에도 판정에도 쓰면
@@ -1819,18 +1838,38 @@ test "CwdLabel: 절대 경로만·상한 안에서만 담고, 못 담으면 앞 
     var over: [CwdLabel.max_text + 1]u8 = undefined;
     over[0] = '/';
     @memset(over[1..], 'b');
-    l.set(&over);
+    l.set(&over, 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
     try testing.expectEqual(@as(u8, 'a'), l.text()[1]); // 앞 값이 그대로다
 
     // 상대 경로도 안 담는다 — 어느 기준인지 이쪽이 모른다.
-    l.set("relative/x");
+    l.set("relative/x", 1000);
     try testing.expectEqual(@as(u8, 'a'), l.text()[1]);
 
     // 빈 값도 안 담는다.
-    l.set("");
+    l.set("", 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
 
     l.clear();
     try testing.expect(l.isEmpty());
+}
+
+test "CwdLabel: 오래되면 안 믿는다 — 원격에는 «에이전트가 사라졌다» 신호가 없다" {
+    // 원격 pane 은 채널이 열려 있는 한 훅 모드가 유지되고 `agent_kind` 재판정도 안 돈다. 그래서
+    // 에이전트를 끝내고 ssh 안에 남아 `cd` 하면, 만료가 없을 때 이 값이 **살아 있는 OSC 7 을 영영
+    // 덮는다**. 턴이 도는 동안에는 매 이벤트가 값을 새로 하므로 만료되지 않는다.
+    var l: CwdLabel = .{};
+    try testing.expect(!l.fresh(0)); // 빈 값은 애초에 안 믿는다
+
+    l.set("/srv/app", 1_000);
+    try testing.expect(l.fresh(1_000));
+    try testing.expect(l.fresh(1_000 + CwdLabel.stale_after_ms)); // 경계는 아직 산다
+    try testing.expect(!l.fresh(1_000 + CwdLabel.stale_after_ms + 1)); // 한 칸 넘으면 죽는다
+
+    // 새 이벤트가 오면 다시 산다(턴이 도는 동안 만료되지 않는 이유).
+    l.set("/srv/app", 1_000 + CwdLabel.stale_after_ms + 1);
+    try testing.expect(l.fresh(1_000 + CwdLabel.stale_after_ms + 1));
+
+    // **시계가 뒤로 가면 버리지 않는다** — 단조 시계를 쓰지만 방어한다.
+    try testing.expect(l.fresh(0));
 }

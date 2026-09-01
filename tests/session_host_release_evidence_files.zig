@@ -84,6 +84,7 @@ test "upgrade leaves publish exact one and near-max roles" {
     try std.testing.expectError(error.LeafMismatch, evidence_files.publishUpgrade(std.testing.allocator, .{
         .common = common(),
         .predecessor = wrong_predecessor,
+        .designated_requirement_sha256 = sha_f,
         .one_path = try absolute(&tmp, "one.json", &a),
         .near_max_path = try absolute(&tmp, "near.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
@@ -92,6 +93,7 @@ test "upgrade leaves publish exact one and near-max roles" {
     try evidence_files.publishUpgrade(std.testing.allocator, .{
         .common = common(),
         .predecessor = predecessor(),
+        .designated_requirement_sha256 = sha_f,
         .one_path = try absolute(&tmp, "one.json", &a),
         .near_max_path = try absolute(&tmp, "near.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),

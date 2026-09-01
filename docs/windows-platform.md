@@ -466,6 +466,9 @@ macOS의 `Cmd`가 maru 바인딩의 주 모디파이어인데 Windows엔 그 키
 반드시 어긋나고, 어긋나도 컴파일은 된다. 테스트가 그 유도를 검증한다("유도된 문자는 정의상 셸 충돌
 문자여야 한다", "비어 있으면 유도가 깨진 것이다").
 
+> **훑는 대상은 plain `Cmd+<c>` 뿐이다.** 수식키가 더 붙은 chord(`⌥⌘C`·`⇧⌘T`)를 함께 세면 그 글자가
+> 밀린 것으로 잡혀 **`Ctrl+Shift+<그 글자>`의 뜻이 통째로 뒤바뀐다**. 실제로 그렇게 됐다 — §2m.106.
+
 핵심 단언은 이것이다 — `Ctrl+<셸 문자>`는 반드시 `control`이어야 한다:
 
 ```zig
@@ -7960,6 +7963,84 @@ agent_keys: judgeable=true search true->false(off 267) focus false->true off 267
 - **놓는 조건 중 터미널만 쟀다** — 사이드바·타이틀바·디바이더를 눌러도 놓지만 판정이 없다.
 - **뷰별 offset 기억**은 여전히 없다(W8.22 의 남은 항목). 뷰를 갈아 끼우면 잔여만 버리고 자리는
   각자 갖고 있으므로 지금도 어긋나지는 않는다.
+
+### 2m.106 **Windows 에서 복사가 안 되고 있었다** — `⌥⌘C` 하나가 규칙을 뒤집었다 (실측 2026-09-01)
+
+다음 슬라이스의 게이트를 돌리는데 `main` 이 이미 빨갰다:
+
+```text
+799/3995 platform.windows.win32_keys.test.isCopyChord: 붙여넣기와 같은 자리에서 판정한다...FAIL
+```
+
+**내 브랜치 탓이 아니었다** — 깨끗한 `origin/main` 워크트리에서 그대로 재현했다.
+
+## 무엇이 깨졌나
+
+`Ctrl+Shift+C` 가 **복사가 아니게 됐다.** §2h 의 표에서 `Ctrl+Shift+<c>` 는 두 뜻 중 하나다 — c 가
+**밀려온 글자**면 plain `Cmd+<c>`(그래서 `shift` 가 **안** 선다), 아니면 `Cmd+Shift+<c>`. 복사 판정
+(`isCopyChord`)은 뒤엣것을 본다(`command and shift`). 그러니 `c` 가 밀린 글자가 되는 순간 복사가 꺼진다.
+
+## 왜 밀렸나
+
+밀린 글자 집합은 바인딩 표를 comptime 에 훑어 유도한다(§2h — 손으로 안 적는다). 그 훑는 함수가
+`shift` 만 걸렀다:
+
+```zig
+if (!chord.modifiers.command) return;
+if (chord.modifiers.shift) return; // plain Cmd 만 본다   ← option·control 은 안 봤다
+```
+
+그러다 편집기 찾기에 **`⌥⌘C`**(대소문자 토글)가 들어왔다. `option` 을 안 보니 그것이 "plain `Cmd+C`"
+로 세어졌고, `c` 가 밀린 글자가 됐다. **바인딩 하나가 다른 플랫폼의 클립보드를 껐다.**
+
+> 주석이 *"plain Cmd 만 본다"* 라고 **말하고 있었다** — 코드가 그 말의 절반만 하고 있었다. 그런
+> 자리는 읽을 때 안 걸린다: 주석이 옳으므로 눈이 그냥 지나간다.
+
+## 고친 것
+
+훑는 조건을 주석이 말하던 그대로 만든다 — `shift`·`option`·`control` 중 하나라도 붙으면 안 센다.
+`⌥⌘` 는 애초에 그 밀어내기의 대상이 아니다(그 자리는 `Ctrl+Alt` 다 — §2h 표).
+
+## 판정
+
+**증상을 잡는 테스트는 이미 있었다**(`isCopyChord`). 없던 것은 **원인을 잡는 자리**다 — 그 테스트만
+보면 "복사가 안 된다" 까지고, 다음 사람은 복사 코드를 뒤진다. 그래서 `addIfColliding` 에 chord 를
+직접 먹여 규칙만 재는 테스트를 함께 세웠다. **오늘의 바인딩 표를 베끼지 않는다** — 그러면 표가 바뀔
+때 같이 바뀌어 아무것도 안 잰다.
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| `option`·`control` 을 다시 흘린다(**옛 동작**) | 원인 테스트 `expected 0, found 1` **와** `isCopyChord` FAIL |
+
+## 왜 아무도 못 봤나 — **Windows 러너가 없다**
+
+이 테스트는 `maru.zig` 가 `builtin.os.tag == .windows` 일 때만 `win32_keys` 를 엮으므로 Linux·macOS
+CI 에서는 **아예 안 돈다**. 즉 이 부류(플랫폼 키 매핑)는 **여기서 게이트를 돌릴 때만** 걸린다.
+러너를 두지 않는 것은 결정 사항이므로(계획서), 그 대신 **슬라이스마다 `zig build test` 를 로컬에서
+돌리는 것이 그 자리를 대신한다** — 이번에 그렇게 걸렸다.
+
+## 함께 발견했고 **고치지 않은** 것 둘
+
+**⚠️ 이 절의 첫 항목을 한 번 정정했다.** 처음에는 *"`sh` 를 부르는 빌드 단계가 Windows 에서 죽는다"*
+라고 적었는데, **그것은 셸 환경 이야기였지 그 단계의 문제가 아니었다** — PowerShell 에는 `sh` 가 없고
+Git Bash 에는 있다. Git Bash 에서 셋을 각각 돌려 보고 나서야 진짜 사실이 나왔다(§2m.104 의 그 규율을
+쓴 자리에서 내가 또 같은 실수를 했다).
+
+- **`tools/check-agent-hook-command.sh` 가 Windows 에서 실패한다 — POSIX 권한 전제 때문이다.**
+  그 검사는 훅 로그 파일이 `0600` 인지 확인하는데, NTFS/Git Bash 에서는 `rw-r--r--` 로 나온다:
+
+  ```text
+  FAIL: 로그 파일 권한이 rw------- 여야 하는데 rw-r--r-- 다(umask 가 빠졌다)
+  ```
+
+  같은 자리의 다른 둘(`test-release-version.sh`·`test-github-release-publication.sh`)은 **통과한다**
+  (실측 `exit=0`) — 즉 "`sh` 스크립트가 다 죽는다" 가 아니라 **이 하나의 전제**다.
+- **`platform/macos/session_host/bounded_process.zig` 가 Windows 타깃으로 컴파일된다** —
+  `type 'void' not a function`. `build.zig` 의 `test_step.dependOn` 이 무조건이라 그렇다. 그 디렉터리는
+  지금 손대지 않기로 한 자리라 **보고만 한다**(가르는 자리는 `build.zig` 이므로 고칠 수는 있다).
+
+**둘 다 `zig build test` 를 상시 빨갛게 만든다** — 그래서 이번 진짜 실패 하나를 그 잡음에서 골라내야
+했다. Windows 러너가 없는 이상 로컬 `zig build test` 가 유일한 그물인데, 그 그물이 늘 빨간 상태다.
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

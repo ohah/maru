@@ -2465,7 +2465,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   manifest exact-one+열거 asset exact-set과 attestation→draft→evidence→manifest→재다운로드→publish→release attestation
   exact 순서를 fail-close한다. `test-session-host-release-manifest`가 이를 Debug·ReleaseFast에서 검증한다. 다만 GitHub
   API·codesign·DMG를 실행해 typed observation을 만드는 executable adapter의 선행 계약은
-  `release_adapter_contract.zig`가 allocation-free `pre-publish`·`verify-predecessor` command, phase별 exact option,
+  `release_adapter_contract.zig`가 allocation-free `pre-publish`·`verify-predecessor` command, 두 phase에서 caller가 absent leaf로
+  지정해야 하는 canonical absolute `--work-dir`의 경로·alias 계약(root·`.`/`..` component·중복/후행 slash 및 모든 pathname의
+  exact·component-boundary ancestor/descendant 관계 거부)과 phase별 exact option,
   canonical manifest asset 이름, repository/tag, `release` protected environment와 summary schema를 닫고 observation JSON 입력을
   금지하며 `test-session-host-release-adapter-contract`가 Debug·ReleaseFast에서 검증한다. macOS 파일 권위 leaf는 모든 absolute
   path component와 final을 `openat(O_NOFOLLOW)`로 열어 regular/bounded bytes·SHA-256·device/inode를 같은 fd에서 만들고 input

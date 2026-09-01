@@ -975,6 +975,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
     --evidence <evidence-summary-path> \
     --dmg <universal-dmg-path> \
     --frozen-executable <extracted-product-executable-path> \
+    --work-dir <new-empty-directory> \
     --summary-out <new-summary-path>
 
   validate_release_manifest verify-predecessor \
@@ -987,7 +988,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
     --summary-out <new-summary-path>
   ```
 
-  `pre-publish`는 current draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 이미 published인 exact
+  두 command의 `work-dir`는 caller가 고른 canonical absolute absent leaf이며 root·`.`/`..` component·중복/후행 slash는 filesystem
+  접근 전에 거부한다. work-dir와 manifest/evidence/DMG/frozen executable/summary/CLI pathname은 exact equality뿐 아니라
+  component-boundary ancestor·descendant 관계도 alias로 거부해 phase cleanup이 입력이나 출력을 포함하지 않게 한다. adapter가
+  no-follow parent 아래 0700으로 만들고 한 phase owner가 성공·실패 cleanup을 끝낸다. ambient
+  `TMPDIR`나 앱의 session-host 저장 경로를 추론·재사용하지 않는다. `pre-publish`는 current
+  draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 이미 published인 exact
   predecessor에서 manifest가 열거한 asset을 새 `work-dir`로 내려받아 `gh release verify`와 각 파일의
   `gh release verify-asset`까지 검사하고 release를 수정하지 않는다. 둘 다 성공 시 stdout이 아니라 `--summary-out`에
   `maru.session-host-release-validation.v1` bounded canonical JSON 하나를 원자적으로 만든다. publish 전 실패는 output 0이며,

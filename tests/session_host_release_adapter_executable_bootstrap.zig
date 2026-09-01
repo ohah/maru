@@ -81,12 +81,13 @@ const Pinner = struct {
     }
 };
 
-fn prePublishArgs(path: []const u8) [19][]const u8 {
+fn prePublishArgs(path: []const u8) [21][]const u8 {
     return .{
-        "pre-publish",                               "--repo",     "ohah/maru",           "--tag",             "v1.2.3",
-        "--github-cli",                              path,         "--github-cli-sha256", cli_sha,             "--manifest",
-        "/tmp/Maru-1.2.3-session-host-release.json", "--evidence", "/tmp/evidence.json",  "--dmg",             "/tmp/Maru.dmg",
-        "--frozen-executable",                       "/tmp/maru",  "--summary-out",       "/tmp/summary.json",
+        "pre-publish",                               "--repo",     "ohah/maru",           "--tag",                 "v1.2.3",
+        "--github-cli",                              path,         "--github-cli-sha256", cli_sha,                 "--manifest",
+        "/tmp/Maru-1.2.3-session-host-release.json", "--evidence", "/tmp/evidence.json",  "--dmg",                 "/tmp/Maru.dmg",
+        "--frozen-executable",                       "/tmp/maru",  "--work-dir",          "/tmp/pre-publish-work", "--summary-out",
+        "/tmp/summary.json",
     };
 }
 
@@ -116,6 +117,10 @@ test "both commands bind context and pin only after identity authority" {
         try std.testing.expectEqualStrings("/usr/local/bin/gh", view.github_cli);
         try std.testing.expectEqualStrings(cli_sha, pinner.seen_sha);
         try std.testing.expectEqualStrings(view.github_cli, pinner.seen_path[0..pinner.seen_path_len]);
+        switch (view.command) {
+            .pre_publish => |command| try std.testing.expectEqualStrings("/tmp/pre-publish-work", command.work_dir),
+            .verify_predecessor => |command| try std.testing.expectEqualStrings("/tmp/work", command.work_dir),
+        }
         try std.testing.expect(!@hasField(bootstrap.PrePublish, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.VerifyPredecessor, "github_cli_sha256"));
         var copied = result;

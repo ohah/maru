@@ -49,9 +49,13 @@ pub const TagAuthority = struct {
 };
 
 pub fn resolveWith(authority: anytype, executor: anytype, allocator: std.mem.Allocator, expected_tag: []const u8, expected_commit: []const u8, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, result: *TagAuthority) !void {
+    var fixed = FixedBudget{ .value = budget_ns };
+    return resolveUntilWith(authority, executor, &fixed, allocator, expected_tag, expected_commit, executable, token, response, result);
+}
+
+pub fn resolveUntilWith(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected_tag: []const u8, expected_commit: []const u8, executable: [:0]const u8, token: []const u8, response: []u8, result: *TagAuthority) !void {
     if (result.owner != null) return error.InvalidOwner;
-    try authority.revalidate(allocator, executable);
-    const ref_bytes = try transport_macos.fetchWith(executor, allocator, executable, token, .{ .tag_ref = expected_tag }, response, budget_ns);
+    const ref_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .tag_ref = expected_tag }, response);
     var parsed_ref = try git.parseRef(allocator, ref_bytes, expected_tag);
     defer parsed_ref.deinit();
     const owned_ref = try ownRef(parsed_ref.observation().*);
@@ -71,8 +75,7 @@ pub fn resolveWith(authority: anytype, executor: anytype, allocator: std.mem.All
             else => return err,
         };
         if (count == max_annotated_tags) return error.DepthExceeded;
-        try authority.revalidate(allocator, executable);
-        const tag_bytes = try transport_macos.fetchWith(executor, allocator, executable, token, .{ .annotated_tag = next.objectSha() }, response, budget_ns);
+        const tag_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .annotated_tag = next.objectSha() }, response);
         var parsed_tag = try git.parseTag(allocator, tag_bytes, .{ .tag = if (count == 0) expected_tag else null, .object_sha = next.objectSha() });
         defer parsed_tag.deinit();
         owned_tags[count] = try ownTag(parsed_tag.observation().*);
@@ -87,6 +90,20 @@ pub fn resolveWith(authority: anytype, executor: anytype, allocator: std.mem.All
     result.count = count;
     for (0..count) |index| result.observations[index] = result.owned_tags[index].observation();
     result.owner = result;
+}
+
+const FixedBudget = struct {
+    value: i128,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.value <= 0) return error.TimedOut;
+        return self.value;
+    }
+};
+
+fn fetchUntil(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, executable: [:0]const u8, token: []const u8, request: transport_macos.Request, response: []u8) ![]const u8 {
+    _ = try deadline.remaining();
+    try authority.revalidate(allocator, executable);
+    return transport_macos.fetchWith(executor, allocator, executable, token, request, response, try deadline.remaining());
 }
 
 fn ownRef(value: git.RefObservation) !OwnedRef {

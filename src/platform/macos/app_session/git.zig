@@ -918,6 +918,19 @@ pub const RepoTarget = union(enum) {
     unknown,
 };
 
+/// 활성 pane 이 **원격 기계에 붙어 있는가.** `scmTargetIsRemote`(목록이 원격인가)와 **다른 질문**이고,
+/// 그 둘이 갈리는 구간이 이 함수가 있는 이유다 — 위 `gitRepoTarget` 주석 참조.
+///
+/// 판정은 재구현하지 않는다: `termCwdIsRemote` 하나가 표시·안전 전부의 단일 출처다.
+fn activePaneIsRemote(self: *AppSession) bool {
+    if (builtin.os.tag != .macos) return false;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return false;
+    term_ops.refreshTermObservation(self, term, false, false);
+    return app_session_mod.termCwdIsRemote(term);
+}
+
 pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (activeTerminalCwd(self, &cwd_buf)) |cwd| {
@@ -928,10 +941,24 @@ pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
         if (repoRootForCached(self, cwd, buf)) |found| return .{ .repo = found };
         return .none;
     }
-    // **원격 목록을 보는 동안에는 로컬 순위로 내려가지 않는다**(RS2). `git_repo` 에 든 것이 원격 경로라
+    // **원격 pane 을 보는 동안에는 로컬 순위로 내려가지 않는다**(RS2). `git_repo` 에 든 것이 원격 경로라
     // 로컬 walk-up 은 뜻이 없고, 우연히 같은 경로가 로컬에 있으면 남의 저장소를 답한다. 「모른다」가
     // 정확한 답이고, 호출자는 그때 직전 판단을 유지한다.
-    if (scmTargetIsRemote(self)) return .unknown;
+    //
+    // ⚠️ **두 가지를 함께 묻는다 — 예전에는 앞의 하나뿐이었다.**
+    //
+    // - `scmTargetIsRemote` = 「**지금 보고 있는 목록**이 원격인가」(`git_repo_dest != null`)
+    // - `activePaneIsRemote` = 「**이 pane** 이 원격인가」(활성 Term 의 관측)
+    //
+    // 앞의 것만 물으면 **원격 pane 인데 목록을 아직 못 읽은 구간**이 로컬로 샌다. `git_repo_dest` 는
+    // 원격 읽기가 **성공한 뒤에야** 서기 때문이다(`submitGitRead`). 그 구간은 실재한다:
+    // ⑴ control socket 이 죽었을 때(`ControlPersist` 만료·네트워크 끊김) ⑵ ssh 진입 직후 첫 읽기 전.
+    //
+    // 그때 3 순위(`file_tree.roots`)가 **로컬 저장소**를 답했고, 화면에는 그 사실이 **아무 데도 없었다** —
+    // 브랜치 줄의 `user@host` 는 목록이 원격일 때만 붙으므로 함께 사라진다. 그 상태에서 누른 스테이지는
+    // 보고 있지도 않은 **로컬 파일**을 바꾼다(§2.2 ⑸ 가 「소켓이 없으면 꺼진 채로 그 사실을 말한다」고
+    // 정한 자리다). 제품 렌더 캡처로 재현했다(2026-09-02).
+    if (scmTargetIsRemote(self) or activePaneIsRemote(self)) return .unknown;
     // **2순위도 캐시를 거친다.** diff를 열어 둔 상태(활성 Term이 파일 Term)는 흔한데, 그때 1순위가 null이라
     // 매 tick 여기로 내려온다 — 캐시 없이 두면 walk-up syscall이 그 상태에서 프레임마다 그대로 돈다.
     if (self.git_repo) |current| {

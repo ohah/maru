@@ -703,6 +703,51 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 /// **매 tick 다시 세운다.** 포인터가 도크 밖에 있으면 다음 pointer 이벤트가 곧바로 호버를 지운다.
 ///
 /// env 미설정이면 무동작.
+/// `MARU_FORCE_REMOTE_SCM=<dest>` — 활성 pane 을 **원격으로 유지한다**(디버그 전용, env-gate).
+///
+/// `maru ssh` 가 접속 성공에 보내는 것과 **같은 시퀀스**를 흘린다:
+///
+///   `OSC 5379 ; ssh ; <dest>` — 목적지 통지(§4.1)
+///   `OSC 7 ; file://<dest>/<cwd>` — 원격 셸의 cwd 보고(authority 가 원격임을 말한다)
+///
+/// **가짜 상태를 손으로 세우지 않는다.** `git_repo_dest` 를 직접 대입하면 그 아래 배선
+/// (`remoteScmTarget` → control socket 확인 → 읽기 라우팅)이 통째로 안 돌아, 화면이 그럴듯한데 제품은
+/// 깨져 있을 수 있다. 관측을 만드는 **바이트**만 준다.
+///
+/// ⚠️ **매 frame 다시 적용한다.** 첫 frame 에 한 번만 흘리면, 그 pane 의 **진짜 로컬 셸**이 다음
+/// 프롬프트에 OSC 7 을 다시 보내 cwd·authority 를 로컬로 되돌린다 — 그러면 「원격 깃발 + 로컬 경로」라는
+/// **실제로는 없는 상태**가 만들어져 확인이 거짓이 된다(실측으로 그렇게 한 번 속았다). 이미 그 값이면
+/// 안 쓴다 — 매 frame 쓰면 코어가 계속 깨어난다.
+pub fn reapplyForcedRemoteScm(self: *AppSession) void {
+    const raw_dest = std.c.getenv("MARU_FORCE_REMOTE_SCM") orelse return;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return;
+    const dest = std.mem.span(raw_dest);
+    const cwd = if (std.c.getenv("MARU_FORCE_REMOTE_SCM_CWD")) |c| std.mem.span(c) else "/";
+    if (dest.len == 0 or cwd.len == 0 or cwd[0] != '/') return;
+
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return;
+    // 이미 그 상태면 안 쓴다.
+    term_ops.refreshTermObservation(self, term, false, false);
+    const obs = &term.rt.observation;
+    if (obs.ssh_remote_dest_present and
+        std.mem.eql(u8, obs.ssh_remote_dest.items, dest) and
+        std.mem.eql(u8, obs.cwd.items, cwd)) return;
+
+    const seq = std.fmt.allocPrint(
+        self.allocator,
+        "\x1b]5379;ssh;{s}\x07\x1b]7;file://{s}{s}\x07",
+        .{ dest, dest, cwd },
+    ) catch return;
+    defer self.allocator.free(seq);
+    const s = term_ops.activeSurface(self);
+    s.lockCore(self.io);
+    s.core.write(seq) catch {};
+    s.unlockCore(self.io);
+    // 뷰는 통지 **뒤**에 연다 — 먼저 열면 아직 로컬인 상태로 한 번 읽고 그 결과가 화면에 남는다.
+    if (self.dock.view != .source_control) dock_ops.setDockView(self, .source_control);
+}
+
 pub fn reapplyForcedScmHover(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SCM_HOVER") orelse return;
     if (self.dock.view != .source_control) return;

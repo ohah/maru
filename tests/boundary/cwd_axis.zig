@@ -96,6 +96,24 @@ const inventory = [_]Entry{
         ,
     },
     .{
+        .path = "src/platform/macos/app_session/debug_fixtures.zig",
+        .fns = &.{},
+        .aliases = 1,
+        .why =
+        \\**디버그 픽스처다**(`MARU_FORCE_REMOTE_SCM`, env-gate). 축을 우회해 읽는 것이 아니라 축의
+        \\**입력을 심는다** — `pinTermsOutsideRepo`(위 항목)와 같은 부류다.
+        \\
+        \\심는 것은 `maru ssh` 가 보내는 것과 **같은 바이트**(OSC 5379 + OSC 7)이고, 관측을 읽는 이유는
+        \\**이미 그 상태면 안 쓰기 위해서**다. 매 frame 다시 적용해야 하는데(진짜 로컬 셸이 다음
+        \\프롬프트에 OSC 7 로 되돌린다), 매번 쓰면 코어가 계속 깨어난다.
+        \\
+        \\`git_repo_dest` 를 손으로 대입하지 **않는** 것이 이 픽스처의 값어치다. 그렇게 하면 그 아래
+        \\배선(`remoteScmTarget` → control socket 확인 → 읽기 라우팅)이 통째로 안 돌아, 화면이 그럴듯한데
+        \\제품은 깨져 있을 수 있다. 실제로 이 픽스처가 **소켓 없는 원격 pane 이 로컬 저장소를 보여 주던
+        \\결함**을 제품 렌더 캡처로 드러냈다(2026-09-02).
+        ,
+    },
+    .{
         .path = "src/platform/macos/app_session/agent.zig",
         .fns = &.{},
         .aliases = 1,

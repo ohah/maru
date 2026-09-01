@@ -13334,6 +13334,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-attestation",
         "Run pre-draft candidate artifact attestation tests",
     );
+    const session_host_release_adapter_github_draft_creation_step = b.step(
+        "test-session-host-release-adapter-github-draft-creation",
+        "Run closed GitHub draft creation authority tests",
+    );
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |composition_optimize| {
             const manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = composition_optimize });
@@ -13370,6 +13374,15 @@ pub fn build(b: *std.Build) void {
             const contract_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"), .target = target, .optimize = composition_optimize });
             const repository_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const release_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
+            const draft_creation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_release", .module = release_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
+            const draft_creation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_draft_creation", .module = draft_creation_mod } } }) });
+            const run_draft_creation_tests = b.addRunArtifact(draft_creation_tests);
+            run_draft_creation_tests.addArg("--maru-expect-tests=8");
+            run_draft_creation_tests.setCwd(b.path("."));
+            session_host_release_adapter_github_draft_creation_step.dependOn(&run_draft_creation_tests.step);
+            session_host_step.dependOn(&run_draft_creation_tests.step);
+            test_step.dependOn(&run_draft_creation_tests.step);
+            macos_only_test_step.dependOn(&run_draft_creation_tests.step);
             const run_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_run.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_github_repository", .module = repository_mod } } });
             const environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_environment.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const deployment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_deployment.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_github_environment", .module = environment_mod } } });

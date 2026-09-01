@@ -64,11 +64,26 @@ const StrictOptionalBool = struct {
 const ApiRelease = struct {
     id: StrictU64,
     tag_name: []const u8,
+    target_commitish: ?[]const u8 = null,
+    name: ?[]const u8 = null,
     draft: bool,
     prerelease: bool,
     // GitHub's OpenAPI exposes this property but does not list it as required. Absence is harmless
     // for a draft, while an immutable predecessor must carry explicit positive evidence.
     immutable: StrictOptionalBool = .{},
+};
+
+pub const CreatedExpected = struct {
+    tag: []const u8,
+    source_commit: []const u8,
+    title: []const u8,
+};
+
+pub const CreatedObservation = struct {
+    id: u64,
+    tag: []const u8,
+    source_commit: []const u8,
+    title: []const u8,
 };
 
 pub const Error = error{
@@ -102,6 +117,53 @@ pub const ParsedDraftCollection = struct {
         return &self.bound_observation;
     }
 };
+
+pub const ParsedCreatedDraft = struct {
+    inner: std.json.Parsed(ApiRelease),
+    bound_observation: CreatedObservation,
+
+    pub fn deinit(self: *ParsedCreatedDraft) void {
+        self.inner.deinit();
+    }
+
+    pub fn observation(self: *const ParsedCreatedDraft) *const CreatedObservation {
+        return &self.bound_observation;
+    }
+};
+
+/// Binds the response of the one permitted draft-creation mutation. Unlike lookup parsing, the
+/// release ID is discovered here; every caller-controlled identity still has to match exactly.
+pub fn parseCreatedDraft(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected: CreatedExpected,
+) Error!ParsedCreatedDraft {
+    github_json.validateCompleteResponse(bytes) catch |err| return err;
+    if (!identity.canonicalTag(expected.tag) or !identity.lowerHex(expected.source_commit, 40) or
+        expected.title.len == 0 or expected.title.len > github_json.max_scalar_string_bytes)
+        return error.ReleaseMismatch;
+    var inner = std.json.parseFromSlice(ApiRelease, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .@"error",
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidJson,
+    };
+    errdefer inner.deinit();
+    const value = inner.value;
+    const target = value.target_commitish orelse return error.ReleaseMismatch;
+    const title = value.name orelse return error.ReleaseMismatch;
+    if (value.id.value == 0 or !std.mem.eql(u8, value.tag_name, expected.tag) or
+        !std.mem.eql(u8, target, expected.source_commit) or !std.mem.eql(u8, title, expected.title) or
+        !publicationMatches(value, .draft)) return error.ReleaseMismatch;
+    return .{ .inner = inner, .bound_observation = .{
+        .id = value.id.value,
+        .tag = value.tag_name,
+        .source_commit = target,
+        .title = title,
+    } };
+}
 
 /// Parses one complete bounded response and binds it to the exact release identity and lifecycle
 /// expected by the current adapter phase. Returned slices remain valid until `Parsed.deinit`.

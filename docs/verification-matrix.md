@@ -2579,6 +2579,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   publication·residue 0이다. `test-session-host-release-adapter-github-tag-chain-transport`가 Debug·ReleaseFast에서 0/1/8-hop,
   exact request/revalidation/deadline 감소, buffer reuse, 9-hop/cycle/mismatch/OOM을 검증한다. repository/run/environment/deployment와
   workflow/U5 배선은 후속 범위다.
+  current GitHub authority composition은 strict `Context`와 pinned CLI에서 repository, current workflow run, configured `release`
+  environment, attempt jobs, source/tag/environment deployments와 candidate별 status history를 closed request 순서로 조회한다. 매
+  request 전 CLI를 재검증하고 최초 monotonic absolute deadline 하나를 공유한다. deployment parser의 two-phase
+  `prepare`/`finish`가 jobs·deployments를 한 번만 parse해 최대 100개 candidate ID를 소유하고 exact-one status backing을 요구한 뒤,
+  recognized protection과 exact job URL의 pending→in_progress 이력을 하나의 deployment에 결속한다. 성공은 move-only
+  `CurrentGitHubAuthority`의 repository/run/job/deployment/environment ID, source commit과 `protected_environment=true`로만
+  게시된다. `test-session-host-release-adapter-github-current-authority`가 Debug·ReleaseFast에서 exact request/revalidation,
+  reusable buffer, 0/1/100 candidate, status backing mismatch, owner copy, deadline/CLI/child/OOM failure의 publication 0을 검증한다.
+  predecessor authority와의 최종 command/workflow 조립, Apple product 관측과 frozen U5 E2E는 후속 범위다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

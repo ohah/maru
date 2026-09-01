@@ -17357,6 +17357,9 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
         debug_fixtures.applyForcedTabCount(self); // 캡처 전용: 탭 바를 넘치게 해 ‹› 를 띄운다(한 번만)
         debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
+        // 캡처 전용: 원격 pane 상태를 **유지**한다 — 진짜 로컬 셸이 OSC 7 로 되돌리기 때문이다.
+        // 호버보다 **먼저** 둔다: 호버는 그 프레임의 목록 위에서 자리를 고르므로 대상이 먼저 서야 한다.
+        debug_fixtures.reapplyForcedRemoteScm(self);
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
@@ -66449,6 +66452,60 @@ test "소스 컨트롤: 원격 세션 터미널은 로컬 저장소를 가리키
 // 들어왔으며 ⑶ 호스트만 바뀌는 전환(로컬 `/srv/app` → 원격 `/srv/app`)을 경로 비교가 못 봤다.
 //
 // **경로를 로컬에도 있을 법한 값으로 둔다** — 이 계약이 막으려는 상황이 정확히 그것이다.
+// **원격 pane 인데 목록을 아직 못 읽은 구간**도 로컬로 새면 안 된다.
+//
+// RS2 의 가드는 `scmTargetIsRemote`(= `git_repo_dest != null`) 하나였다. 그런데 그 값은 원격 읽기가
+// **성공한 뒤에야** 선다(`submitGitRead`). 그래서 이런 구간이 열려 있었다:
+//
+//   ⑴ control socket 이 죽었을 때(`ControlPersist` 만료·네트워크 끊김)
+//   ⑵ ssh 진입 직후, 첫 원격 읽기가 돌아오기 전
+//
+// 그때 3 순위(`file_tree.roots`)가 **로컬 저장소**를 답했고, 화면 어디에도 그 사실이 없었다 — 브랜치
+// 줄의 `user@host` 는 목록이 원격일 때만 붙으므로 함께 사라진다. 그 상태에서 누른 스테이지는 보고
+// 있지도 않은 **로컬 파일**을 바꾼다.
+//
+// **RS2 판정자는 이것을 못 잡았다** — `rememberGitRepoDest` 를 먼저 불러 놓고 검사해서, 옛 가드만으로도
+// 통과했기 때문이다. 여기서는 그 값을 **세우지 않는다.**
+//
+// 제품 렌더 캡처로 재현하고 고쳤다(2026-09-02): 소켓만 지운 대조군에서 도크가 로컬 `maru5` 와
+// 그 워크트리 전부를 보여 줬고, 고친 뒤에는 「저장소를 확인할 수 없습니다」가 뜬다.
+test "원격 pane 은 목록을 못 읽어도 로컬 저장소로 안 떨어진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    // 로컬 순위가 **답을 줄 수 있는** 상태를 만든다 — 그래야 「안 내려간다」가 뜻을 갖는다.
+    // (이 저장소 루트를 탐색기 root 로 두면 3 순위가 그것을 찾는다.)
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const here_len = try std.process.currentPath(session.io, &cwd_buf);
+    const here = cwd_buf[0..here_len];
+    try session.file_tree.replaceExplicitRoots(&.{here});
+
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    // 전제: pane 이 로컬이면 로컬 순위가 답한다(이 판정자가 뒤집는 것이 그 답이라는 확인).
+    try std.testing.expect(git_ops.gitRepoTarget(session, &probe) == .repo);
+
+    // 활성 Term 을 원격으로 몬다 — **`git_repo_dest` 는 세우지 않는다**(읽기가 성공한 적이 없다).
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    try std.testing.expect(!git_ops.scmTargetIsRemote(session)); // 옛 가드는 여기서 안 걸린다
+
+    // 그래도 **로컬로 안 떨어진다.**
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &probe)),
+    );
+
+    // ssh 를 빠져나오면 다시 로컬이 답한다 — 무조건 막는 것이 아니다(래치가 아니다).
+    try term.surface.core.write("\x1b]5379;ssh-end\x07");
+    try std.testing.expect(git_ops.gitRepoTarget(session, &probe) == .repo);
+}
+
 test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다 (RS2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

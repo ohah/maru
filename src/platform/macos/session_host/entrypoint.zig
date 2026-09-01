@@ -10,6 +10,7 @@ const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 pub const subcommand = "__session-host";
 pub const upgrade_preflight_flag = "--upgrade-preflight";
 pub const upgrade_restore_flag = "--upgrade-restore";
+pub const release_compatibility_flag = "--release-compatibility";
 pub const target_role = "target";
 pub const rollback_role = "rollback";
 pub const preflight_fd_arg = "3";
@@ -49,6 +50,7 @@ pub const RestoreInvocation = struct {
 pub const Invocation = union(enum) {
     daemon: DaemonInvocation,
     preflight,
+    release_compatibility,
     restore: RestoreInvocation,
 };
 
@@ -91,6 +93,8 @@ pub fn formatRestoreArgs(
 /// `maru __session-host` 뒤 argv를 전량 받은 strict parser. 남는 인자, uppercase/짧은 ID, 상대 경로,
 /// overflow slot은 모두 거부해 main·executor·restore bootstrap이 같은 의미를 소비하게 한다.
 pub fn parse(args: []const []const u8) ParseError!Invocation {
+    if (args.len == 1 and std.mem.eql(u8, args[0], release_compatibility_flag))
+        return .release_compatibility;
     if (args.len == 2 and std.mem.eql(u8, args[0], upgrade_preflight_flag) and
         std.mem.eql(u8, args[1], preflight_fd_arg))
         return .preflight;
@@ -145,6 +149,7 @@ test "session host entrypoint strictly parses daemon preflight and restore roles
     });
     try std.testing.expectEqual(@as(u128, 0xAA), daemon.daemon.host_id);
     try std.testing.expect((try parse(&.{ upgrade_preflight_flag, preflight_fd_arg })) == .preflight);
+    try std.testing.expect((try parse(&.{release_compatibility_flag})) == .release_compatibility);
     const target = try parse(&.{
         upgrade_restore_flag,
         target_role,

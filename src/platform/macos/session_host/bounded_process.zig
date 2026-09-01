@@ -77,6 +77,34 @@ pub fn runCaptureEnvironmentStdoutDirectory(
     return runCaptureOptionalEnvironment(io, executable, argv, environment, directory_fd, output, budget_ns, .stdout_only);
 }
 
+/// Executes one exact `./leaf` below a held directory vnode. The fork child performs only
+/// async-signal-safe descriptor/process operations before execve.
+pub fn runCaptureEnvironmentStdoutHeldExecutable(
+    io: std.Io,
+    relative_executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    directory_fd: c.fd_t,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    if (!validHeldExecutable(relative_executable)) return error.InvalidExecutable;
+    if (!validDirectoryFd(directory_fd)) return error.InvalidDirectoryFd;
+    return runCaptureOptionalEnvironmentHeld(io, relative_executable, argv, environment, directory_fd, output, budget_ns);
+}
+
+fn runCaptureOptionalEnvironmentHeld(
+    io: std.Io,
+    relative_executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    directory_fd: c.fd_t,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    return runCaptureCommon(io, relative_executable, argv, environment, directory_fd, output, budget_ns, .stdout_only);
+}
+
 fn runCaptureOptionalEnvironment(
     io: std.Io,
     executable: [:0]const u8,
@@ -89,6 +117,19 @@ fn runCaptureOptionalEnvironment(
 ) Error![]const u8 {
     if (executable.len < 2 or executable[0] != '/' or
         std.mem.indexOfScalar(u8, executable, 0) != null) return error.InvalidExecutable;
+    return runCaptureCommon(io, executable, argv, environment, directory_fd, output, budget_ns, capture_mode);
+}
+
+fn runCaptureCommon(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: ?[*:null]const ?[*:0]const u8,
+    directory_fd: ?c.fd_t,
+    output: []u8,
+    budget_ns: i128,
+    capture_mode: CaptureMode,
+) Error![]const u8 {
     if (budget_ns <= 0 or output.len == 0) return error.InvalidBudget;
     if (directory_fd) |fd| if (!validDirectoryFd(fd)) return error.InvalidDirectoryFd;
     var pipe_fds: [2]c.fd_t = undefined;
@@ -263,6 +304,13 @@ fn validDirectoryFd(fd: c.fd_t) bool {
     const probe = c.openat(fd, ".", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
     if (probe < 0) return false;
     return c.close(probe) == 0;
+}
+
+fn validHeldExecutable(executable: [:0]const u8) bool {
+    if (!std.mem.startsWith(u8, executable, "./") or executable.len <= 2) return false;
+    const leaf = executable[2..];
+    return !std.mem.eql(u8, leaf, ".") and !std.mem.eql(u8, leaf, "..") and
+        std.mem.indexOfScalar(u8, leaf, '/') == null and std.mem.indexOfScalar(u8, executable, 0) == null;
 }
 
 const ChildPoll = enum { running, reaped, failed };

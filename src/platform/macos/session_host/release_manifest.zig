@@ -562,7 +562,7 @@ fn equalBuild(a: Build, b: Build) bool {
         std.mem.eql(u8, a.workflow_ref, b.workflow_ref);
 }
 
-fn equalCompatibility(a: Compatibility, b: Compatibility) bool {
+pub fn equalCompatibility(a: Compatibility, b: Compatibility) bool {
     return a.mrsh_major == b.mrsh_major and a.screen_codec == b.screen_codec and
         a.handoff_reader_min == b.handoff_reader_min and
         a.handoff_reader_max == b.handoff_reader_max and a.app_host_abi == b.app_host_abi;

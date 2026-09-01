@@ -281,7 +281,7 @@ fn dispatch(
     // hidden: `maru __session-host <socket>` — 영속 세션 host 프로세스 본체(§10, P3-d2c/d). 앱이 detached spawn한
     // 자식이 이 인자로 재실행돼 host 모드로 진입한다(사용자가 직접 칠 명령이 아니라 usage에 안 넣는다). macOS 전용.
     if (std.mem.eql(u8, command, session_host_entrypoint.subcommand)) {
-        try runSessionHostDaemon(io, allocator, &args, stderr);
+        try runSessionHostDaemon(io, allocator, &args, stdout, stderr);
         return;
     }
 
@@ -13044,7 +13044,7 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
 /// `maru __session-host <session-dir> <socket> <host-id>` — 영속 세션 host 프로세스 본체로 진입한다(P3-d2c/d, §10). 앱 launcher가 detached
 /// spawn한 자식이 이 경로를 탄다. macOS 전용(실 socket/fork). non-macOS에서는 daemon 참조를 comptime으로 배제해
 /// 컴파일을 보존한다. dir은 socket 경로의 parent이고, host는 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
-fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
+fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
         var raw_args: [session_host_entrypoint.max_invocation_args][]const u8 = undefined;
@@ -13064,6 +13064,20 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
             return error.UnknownCommand;
         };
         switch (invocation) {
+            .release_compatibility => {
+                try stdout.print(
+                    "{{\"mrsh_major\":{d},\"screen_codec\":{d},\"handoff_reader_min\":{d},\"handoff_reader_max\":{d},\"app_host_abi\":{d}}}\n",
+                    .{
+                        session_host.protocol.version_major,
+                        session_host.screen_stream.codec_version,
+                        session_host.handoff_codec.reader_min,
+                        session_host.handoff_codec.reader_max,
+                        @import("platform/macos/app_session.zig").abi_version,
+                    },
+                );
+                try stdout.flush();
+                return;
+            },
             .preflight => {
                 session_host.upgrade_bootstrap.runPreflight(
                     allocator,

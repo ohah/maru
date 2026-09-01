@@ -50,6 +50,19 @@ pub const CurrentProduct = struct {
         return .{ .frozen = frozen, .apple = current.apple };
     }
 
+    pub fn pathMutationSeal(self: *const @This()) !files.PathMutationSeal {
+        return self.frozen.pathMutationSeal();
+    }
+
+    pub fn executableDirectoryDescriptor(self: *const @This()) !c.fd_t {
+        if (self.value() == null or self.frozen.parent_fd < 3) return error.InvalidOwner;
+        return self.frozen.parent_fd;
+    }
+
+    pub fn validatePathMutationSeal(self: *const @This(), seal: files.PathMutationSeal) !void {
+        return self.frozen.validatePathMutationSeal(seal);
+    }
+
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) Error!void {
         if (self.owner != self or self.frozen.value() == null or self.apple_observed == null)
             return error.InvalidOwner;
@@ -107,7 +120,7 @@ pub fn observeWith(
     budget_ns: i128,
     result: *CurrentProduct,
 ) !void {
-    if (result.owner != null or result.frozen.owner != null or result.frozen.fd >= 0 or
+    if (result.owner != null or result.frozen.owner != null or result.frozen.fd >= 0 or result.frozen.parent_fd >= 0 or
         result.apple_observed != null) return error.InvalidOwner;
     const authenticated = current.value() orelse return error.InvalidCurrent;
     const private_manifest = current.file.revalidate() catch return error.InvalidCurrent;

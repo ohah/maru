@@ -1166,8 +1166,10 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right) },
+            // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
+            // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(term, .left, find_marks), .search_current = diffSearchMarksFor(term, .left, find_current) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(term, .right, find_marks), .search_current = diffSearchMarksFor(term, .right, find_current) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -1784,6 +1786,34 @@ fn isRightColumn(self: *AppSession, body: maru.session.SplitRect, term: *Term, x
 }
 
 /// 비교 오른쪽 열이 그리는 행들.
+/// 비교 뷰에서 **검색할 열**(§5.1 「비교 뷰 검색」). 선택이 있는 열, 없으면 왼쪽이다 —
+/// 가로 스크롤이 *"포인터가 정하고, 없으면 왼쪽으로 친다"* 로 고른 폴백과 같은 규칙이다.
+///
+/// **매번 다시 묻는다 — 베껴 들지 않는다.** `editor_diff_selection` 은 비교 내용이 다시 계산될 때
+/// 버려지므로(옛 행 인덱스로 훑으면 죽는다), 베껴 두면 선택이 사라진 뒤에도 그 열을 계속 검색해
+/// **화면은 왼쪽인데 결과는 오른쪽 것**이 된다.
+pub fn diffSearchSide(term: *const Term) DiffSide {
+    const sel = term.rt.editor_diff_selection orelse return .left;
+    return sel.side;
+}
+
+/// 검색 강조를 **이 열에 그릴 것인가**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
+///
+/// **호출 인자 안에 묻어 두면 잴 수 없다.** 양쪽에 칠하든 반대 열에 칠하든 화면만 다르고
+/// 판정자는 전부 초록이었다(변이 D7·D8·D9). 그래서 결정을 여기 하나로 꺼낸다.
+pub fn diffSearchMarksFor(term: *const Term, side: DiffSide, marks: anytype) @TypeOf(marks) {
+    return if (diffSearchSide(term) == side) marks else null;
+}
+
+/// 검색이 훑을 줄 배열 — 비교면 위 판정이 고른 열, 아니면 문서 줄이다.
+pub fn findLines(term: *Term) []const []const u8 {
+    if (term.rt.editor_diff) |st| {
+        if (st.view != .compare) return &.{};
+        return if (diffSearchSide(term) == .right) st.right_texts else st.left_texts;
+    }
+    return term.rt.editor_lines;
+}
+
 fn rightTexts(term: *Term) []const []const u8 {
     const st = term.rt.editor_diff orelse return &.{};
     if (st.view != .compare) return &.{};
@@ -17317,6 +17347,131 @@ pub fn openSiblingPicker(self: *AppSession, sym_idx: usize) void {
         .pending, .ready => {},
     }
     self.metal_dirty = true;
+}
+
+test "DFF1 비교 뷰 검색은 선택이 있는 열을 본다 — 없으면 왼쪽 (§5.1)" {
+    // **열을 베껴 들면 안 된다.** `editor_diff_selection` 은 비교 내용이 다시 계산될 때 버려지는데
+    // (옛 행 인덱스로 훑으면 죽는다), 베껴 두면 선택이 사라진 뒤에도 그 열을 계속 검색해
+    // **화면은 왼쪽인데 결과는 오른쪽 것**이 된다. 그래서 매번 다시 묻는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const left_rows = [_][]const u8{ "aa", "aa" };
+    const right_rows = [_][]const u8{"aa aa aa"};
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    fx.term.rt.editor_diff.?.left_texts = &left_rows;
+    fx.term.rt.editor_diff.?.right_texts = &right_rows;
+
+    // **선택이 없으면 왼쪽이다** — 가로 스크롤의 「포인터가 없으면 왼쪽」과 같은 규칙.
+    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.term));
+    try testing.expectEqual(@as(usize, 2), findLines(fx.term).len);
+
+    // **오른쪽을 고르면 오른쪽을 본다.**
+    fx.term.rt.editor_diff_selection = .{
+        .side = .right,
+        .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
+    };
+    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.term));
+    try testing.expectEqual(@as(usize, 1), findLines(fx.term).len);
+
+    // **선택이 사라지면 왼쪽으로 돌아온다** — 베껴 들었다면 여기서 오른쪽에 머문다.
+    fx.term.rt.editor_diff_selection = null;
+    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.term));
+    try testing.expectEqual(@as(usize, 2), findLines(fx.term).len);
+}
+
+test "DFF4 검색 강조는 검색 중인 열에만 간다 — 양쪽도 반대도 아니다 (§5.1)" {
+    // **양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남는다** — Enter 가 어디로 갈지 화면이
+    // 거짓말한다. 반대 열에 칠하면 더 나쁘다: 세는 열과 보이는 열이 통째로 어긋난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const rows = [_][]const u8{"aa"};
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    fx.term.rt.editor_diff.?.left_texts = &rows;
+    fx.term.rt.editor_diff.?.right_texts = &rows;
+
+    const marks: ?[]const []const chrome_editor.frame.Mark = &.{};
+
+    // 선택이 없으면 왼쪽이 검색 중이다 — 왼쪽만 받는다.
+    try testing.expect(diffSearchMarksFor(fx.term, .left, marks) != null);
+    try testing.expect(diffSearchMarksFor(fx.term, .right, marks) == null);
+
+    // 오른쪽을 고르면 뒤바뀐다.
+    fx.term.rt.editor_diff_selection = .{
+        .side = .right,
+        .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
+    };
+    try testing.expect(diffSearchMarksFor(fx.term, .left, marks) == null);
+    try testing.expect(diffSearchMarksFor(fx.term, .right, marks) != null);
+
+    // **현재 매치 표시도 같은 규칙이다** — 강조만 맞고 현재 표시가 양쪽이면 두 자리가 진해진다.
+    const cur: ?chrome_editor.frame.CurrentMatch = .{ .line = 0, .start = 0 };
+    try testing.expect(diffSearchMarksFor(fx.term, .left, cur) == null);
+    try testing.expect(diffSearchMarksFor(fx.term, .right, cur) != null);
+}
+
+test "DFF3 비교 뷰에서는 「선택 영역 내에서만」이 안 켜진다 (§5.1)" {
+    // 그 토글은 **문서 offset 축**을 전제하는데(`matchRange`), 비교 뷰의 매치는 정렬된 행 배열
+    // 축이라 그 변환이 성립하지 않는다 — 켜 두면 거르기가 **엉뚱한 수**를 낸다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "aa aa aa\n");
+    fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+
+    // 단일 편집기에서는 켜진다.
+    fx.session.chrome_host.find.show();
+    fx.session.chrome_host.find.target = .editor;
+    fx.session.find_selection_at_open = .{ .start = 0, .end = 5 };
+    find_ops.toggleFindInSelection(fx.session);
+    try testing.expect(fx.session.chrome_host.find.in_selection != null);
+
+    // **비교 뷰가 되면 안 켜진다.**
+    find_ops.toggleFindInSelection(fx.session); // 먼저 끈다
+    try testing.expect(fx.session.chrome_host.find.in_selection == null);
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    const rows = [_][]const u8{"aa aa aa"};
+    fx.term.rt.editor_diff.?.left_texts = &rows;
+    fx.term.rt.editor_diff.?.right_texts = &rows;
+    fx.session.find_selection_at_open = .{ .start = 0, .end = 5 };
+    find_ops.toggleFindInSelection(fx.session);
+    try testing.expect(fx.session.chrome_host.find.in_selection == null);
+}
+
+test "DFF2 비교가 아닌 문서는 문서 줄을 본다 — 축이 안 섞인다 (§5.1)" {
+    // `findLines` 가 두 축을 하나로 답하므로, 비교가 아닐 때 엉뚱한 배열을 주면 검색이 통째로 어긋난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "one\ntwo\nthree\n");
+    try testing.expectEqual(fx.term.rt.editor_lines.len, findLines(fx.term).len);
+    try testing.expect(fx.term.rt.editor_diff == null);
+
+    // **비교인데 compare 뷰가 아니면 검색할 것이 없다**(읽는 중·거절 등) — 문서 줄로 새면 안 된다.
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    try testing.expectEqual(@as(usize, 0), findLines(fx.term).len);
+
+    // **빈 열은 검색 대상이 아니다.** 그대로 두면 `findMatches` 가 빈 배열을 훑어 매치 0 을 내는데,
+    // 그것은 「없다」가 아니라 「아직 안 열렸다」다 — 두 상태를 같은 화면으로 답하면 안 된다.
+    try testing.expect(!find_ops.activeTermIsEditor(fx.session));
 }
 
 test "SP17 체인 마디의 열 범위를 렌더가 굳힌다 — 클릭이 그것을 읽는다 (§7.5)" {

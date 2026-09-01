@@ -2571,6 +2571,10 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .screen_visible_blocker = term.agent_screen_visible_blocker,
         .screen_visible_idle = term.agent_screen_visible_idle,
         .screen_origin = term.agent_screen_origin,
+        // **우리에게는 이 축이 `agent_kind` 다**(§1.1 C3 주석). 에이전트가 끝나면 `pollAgentKinds` 가
+        // kind 를 `.none` 으로 내리고, 그 전이가 세 상태 자리와 중재기를 통째로 리셋한다 — 「프로세스가
+        // 죽으면 즉시 idle」 이 하려던 일을 그쪽이 이미 한다. 여기에 kind 를 다시 실으면 같은 판단이 두
+        // 곳에 생기고, 한쪽만 고쳐지는 날이 온다. 그래서 **의도적으로 false 다.**
         .process_exited = false,
         .hook_turn_seq = term.agent_hook_turn_seq,
         .screen_seq = term.agent_screen_seq,

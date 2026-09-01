@@ -961,7 +961,9 @@ U5 Release evidence의 OS 중립 canonical aggregate core는 **구현**됐다. `
 Debug·ReleaseFast에서 `maru.session-host-release-evidence.v1`의 `baseline_a`의
 default-false/signed-app-quit 두 gate와 `upgrade_b`의 signed 1-runtime/near-max 두 gate를 exact profile로 분리한다.
 repository/release/source/build run-attempt, candidate DMG·executable, B predecessor release/manifest/asset과 canonical UUID를
-typed nested observation에 결속하고 ephemeral leaf SHA나 raw base64를 durable 권위로 쓰지 않는다. 별도 G3 default-on matrix는
+typed nested observation에 결속한다. `UpgradeExpected.designated_requirement_sha256`는 one/near-max 두 leaf가 같은 값이라는
+내부 일치뿐 아니라 caller가 manifest/Apple product에서 유도한 expected signer requirement와도 exact 일치하게 하므로, 같은 foreign
+signer를 두 leaf에 반복한 replay도 거부한다. ephemeral leaf SHA나 raw base64를 durable 권위로 쓰지 않는다. 별도 G3 default-on matrix는
 이 schema의 optional gate가 아니다. leaf의 no-follow file 입력·exclusive aggregate publication, signed 제품 leaf 실행,
 artifact attestation과 release workflow 배선은 여전히 미구현이므로 이 component green만으로 U5 release나 G3 준비·출하를
 주장하지 않는다.

@@ -5773,6 +5773,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dkey_focus_blurred = true;
     var dkey_focus_taken = false;
     var dkey_scrolls_before: usize = 0;
+    // ── 폴백 목록을 몇 번 짓는가 (W8.23) ──────────────────────────────────────────────────
+    //
+    // **시간이 아니라 횟수를 잰다.** 시간은 기계마다 흔들리지만 "다시 그릴 때마다 또 짓는가" 는
+    // 안 흔들린다. 그리고 이 수가 곧 그 비용이다 — 한 번이 ~270µs 이고 한 프레임에 50 번 넘게 불렸다.
+    var fb_judgeable = false;
+    var fb_shapes_first: usize = 0;
+    var fb_builds_first: usize = 0;
+    var fb_builds_after: usize = 0;
+    var fb_shapes_after: usize = 0;
+    var fb_redraws: usize = 0;
+    // **캐시가 내주는 것이 방금 지었을 것과 같은가.** 위 판정은 «몇 번 짓는가» 까지다 — 키가 틀려
+    // 엉뚱한 목록을 내줘도 그 자리는 초록이다. 그래서 **처음 보는 face 이름**으로 두 번 셰이핑해
+    // (첫 번은 짓고, 둘째 번은 캐시) 글리프가 한 글자도 안 다른지 본다.
+    var fbsame_judgeable = false;
+    var fbsame_first_built = false;
+    var fbsame_second_built = true;
+    var fbsame_glyphs: usize = 0;
+    var fbsame_equal = false;
+    var fbsame_fallback = false;
     // **키가 도크 블록을 지나갔는가**를 함께 잰다. offset 만 보면 "굴리고 **또** 아래로 흘린다" 는
     // 뮤턴트가 초록이다. 이 대목에서 마침 파일 뷰가 떠 있어(실측) 도크를 못 지나간 키는 그 다음
     // 가드가 센다(`keys_while_file`) — 즉 그 수가 **안 늘면** 도크가 삼킨 것이고, **늘면** 흘린 것이다.
@@ -7360,6 +7379,66 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             scm_status_real = &.{};
             scm_opts.status_text = scm_status;
             scm_state.invalidateTree();
+        }
+        // ── 다시 그려도 폴백 목록을 또 짓지 않는다 (W8.23) ────────────────────────────
+        //
+        // 도크를 **세 번 더** 짓는다. 셰이핑은 그만큼 더 돌아야 하고(`shape_calls`),
+        // `CreateFontFallback` 은 **한 번도 더 돌면 안 된다**(`fallback_builds`).
+        if (smoke and spins == 1160 and dock_view == .source_control) {
+            fb_judgeable = true;
+            fb_shapes_first = maru.dwrite_shape.shape_calls;
+            fb_builds_first = maru.dwrite_shape.fallback_builds;
+            var r: usize = 0;
+            while (r < 3) : (r += 1) {
+                scm_state.invalidateTree();
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                fb_redraws += 1;
+            }
+            fb_shapes_after = maru.dwrite_shape.shape_calls;
+            fb_builds_after = maru.dwrite_shape.fallback_builds;
+        }
+        // ── 캐시가 내주는 목록이 방금 지었을 것과 같은가 (W8.23) ─────────────────────
+        //
+        // **처음 보는 face 이름**을 쓴다 — 제품 face 는 이미 캐시에 있어 첫 번째도 적중이라 아무것도
+        // 안 재게 된다. `Consolas` 는 한글이 없으므로 폴백이 **실제로 갈리는** 글자를 고른다: 폴백
+        // 목록이 틀리면 face 이름이나 글리프 id 가 달라진다.
+        if (smoke and spins == 1162) {
+            const probe_family = "Consolas";
+            // **표시 문자열이 아니라 폰트 fixture 다** — `Consolas` 에 없는 코드포인트여야 폴백이
+            // 갈린다. 글자를 그대로 적으면 i18n 원장이 «번역 대상» 으로 세므로(§7 — `src/main.zig`
+            // 는 영어 고정 표면이다) 코드포인트로 적는다. U+AC00·U+B098·U+B2E4 = 가·나·다.
+            const probe_text = "\u{AC00}\u{B098}\u{B2E4}";
+            var g1: [32]maru.text_shaper.GlyphRecord = undefined;
+            var g2: [32]maru.text_shaper.GlyphRecord = undefined;
+            const req: maru.text_shaper.Request = .{
+                .text = probe_text,
+                .family = probe_family,
+                .fallback_csv = "",
+                .size_px = 14,
+            };
+            const b0 = maru.dwrite_shape.fallback_builds;
+            const n1 = maru.text_shaper.shape(allocator, req, &g1) catch 0;
+            const b1 = maru.dwrite_shape.fallback_builds;
+            const n2 = maru.text_shaper.shape(allocator, req, &g2) catch 0;
+            const b2 = maru.dwrite_shape.fallback_builds;
+            if (true) {
+                for (g1[0..n1]) |gg| std.debug.print("DBGF name={s} fb={} gid={d}\n", .{ std.mem.sliceTo(&gg.font_name, 0), gg.fallback, gg.glyph_id });
+            }
+            if (n1 > 0 and n1 == n2) {
+                fbsame_judgeable = true;
+                fbsame_glyphs = n1;
+                fbsame_first_built = b1 > b0;
+                fbsame_second_built = b2 > b1;
+                fbsame_equal = true;
+                for (g1[0..n1], g2[0..n2]) |a2, b_| {
+                    if (a2.glyph_id != b_.glyph_id or a2.fallback != b_.fallback or
+                        !std.mem.eql(u8, &a2.font_name, &b_.font_name)) fbsame_equal = false;
+                    // **폴백 목록을 실제로 지나갔는가**: 나온 face 가 부탁한 face 가 아니다.
+                    // (`GlyphRecord.fallback` 플래그로는 못 잰다 — 실측으로 `false` 였다: 그 값은
+                    // 주 face 를 열어 견주는 자리에서 나오는데 여기서는 그 face 가 안 열린다.)
+                    if (!std.mem.eql(u8, std.mem.sliceTo(&a2.font_name, 0), probe_family)) fbsame_fallback = true;
+                }
+            }
         }
         if (smoke and spins == 1140 and sscroll_judgeable) {
             if (scm_built) |*b| {
@@ -12232,6 +12311,45 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 sbar_thumb_bottom,
                 sbar_track_bottom,
                 sbar_ok,
+            });
+        }
+        {
+            // **다시 그려도 폴백 목록을 또 짓는가.** `CreateFontFallback` 은 시스템 폰트 목록을 훑어
+            // 한 번에 ~270µs 든다 — 런마다 지으면 도크 한 번 다시 그리는 데 그것만으로 15ms 다.
+            //
+            // **무장 조건이 공허하지 않아야 한다**: 셰이핑이 실제로 더 돌았는지(`shapes`)를 함께 본다.
+            // 그것 없이 `builds == 0` 만 보면 **아무것도 안 그린 프레임**도 초록이다.
+            const fb_shaped = fb_shapes_after > fb_shapes_first;
+            const fb_ok = fb_judgeable and fb_redraws == 3 and fb_shaped and
+                fb_builds_after == fb_builds_first and fb_builds_first > 0;
+            try stdout.print("shaper_fallback: judgeable={} redraws={d} shapes {d}->{d} builds {d}->{d} shaper_fallback_ok={}\n", .{
+                fb_judgeable,
+                fb_redraws,
+                fb_shapes_first,
+                fb_shapes_after,
+                fb_builds_first,
+                fb_builds_after,
+                fb_ok,
+            });
+        }
+        {
+            // **캐시가 내주는 목록이 방금 지었을 것과 같은가.** 위 판정은 «몇 번 짓는가» 까지라,
+            // 키가 틀려 엉뚱한 목록을 내줘도 초록이다. 여기서는 처음 보는 face 로 두 번 셰이핑해
+            // ⑴ 첫 번은 **짓고** ⑵ 둘째 번은 **안 짓고** ⑶ 글리프가 한 글자도 안 다른지 본다.
+            //
+            // **폴백이 실제로 갈리는 글자여야 한다** — `Consolas` 에 한글이 없어 다른 face 에서
+            // 나온다(실측: `MalgunGothic`). 그 자리가 안 서면 이 판정은 폴백 목록을 아예 안 지나간
+            // 셈이라 공허하다.
+            const fbsame_ok = fbsame_judgeable and fbsame_glyphs > 0 and
+                fbsame_first_built and !fbsame_second_built and fbsame_equal and fbsame_fallback;
+            try stdout.print("shaper_cache_same: judgeable={} glyphs={d} built {}/{} equal={} via_fallback={} shaper_cache_same_ok={}\n", .{
+                fbsame_judgeable,
+                fbsame_glyphs,
+                fbsame_first_built,
+                fbsame_second_built,
+                fbsame_equal,
+                fbsame_fallback,
+                fbsame_ok,
             });
         }
         {

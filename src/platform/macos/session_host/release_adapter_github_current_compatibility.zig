@@ -5,6 +5,7 @@ const manifest = @import("release_manifest");
 const bounded = @import("bounded_process");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const current_product = @import("release_adapter_github_current_product");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const max_probe_bytes: usize = 512;
 
@@ -97,6 +98,19 @@ pub fn compose(
     return composeWith(&probe, io, current, product, frozen_path, output, budget_ns, result);
 }
 
+pub fn composeUntil(
+    io: std.Io,
+    current: *const current_input.CurrentManifestInput,
+    product: *current_product.CurrentProduct,
+    frozen_path: [:0]const u8,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *CurrentCompatibility,
+) !void {
+    var probe = RealProbe{};
+    return composeUntilWith(&probe, deadline, io, current, product, frozen_path, output, result);
+}
+
 pub fn composeWith(
     probe: anytype,
     io: std.Io,
@@ -107,13 +121,36 @@ pub fn composeWith(
     budget_ns: i128,
     result: *CurrentCompatibility,
 ) !void {
+    var fixed = FixedBudget{ .value = budget_ns };
+    return composeUntilWith(probe, &fixed, io, current, product, frozen_path, output, result);
+}
+
+pub fn composeUntilWith(
+    probe: anytype,
+    deadline: anytype,
+    io: std.Io,
+    current: anytype,
+    product: anytype,
+    frozen_path: [:0]const u8,
+    output: []u8,
+    result: *CurrentCompatibility,
+) !void {
+    const deadline_bytes = std.mem.asBytes(deadline);
+    if (rangesOverlap(deadline_bytes, std.mem.asBytes(result)) or
+        rangesOverlap(deadline_bytes, std.mem.asBytes(current)) or
+        rangesOverlap(deadline_bytes, std.mem.asBytes(product)) or
+        rangesOverlap(deadline_bytes, frozen_path) or
+        rangesOverlap(deadline_bytes, output))
+        return error.InvalidOwner;
     if (!pristine(result) or rangesOverlap(std.mem.asBytes(result), output) or
         rangesOverlap(std.mem.asBytes(current), output) or
         rangesOverlap(std.mem.asBytes(product), output) or
         rangesOverlap(frozen_path, output))
         return error.InvalidOwner;
-    if (budget_ns <= 0 or output.len == 0 or output.len > max_probe_bytes) return error.InvalidBudget;
+    if (output.len == 0 or output.len > max_probe_bytes) return error.InvalidBudget;
     const authenticated = current.value() orelse return error.InvalidCurrent;
+    current.revalidate() catch return error.InvalidCurrent;
+    _ = try deadline.remaining();
     const before = product.revalidate(frozen_path) catch return error.FrozenChanged;
     const directory_fd = product.executableDirectoryDescriptor() catch return error.FrozenChanged;
     var relative_storage: [std.fs.max_name_bytes + 3:0]u8 = undefined;
@@ -121,7 +158,9 @@ pub fn composeWith(
     if (basename.len == 0 or basename.len > std.fs.max_name_bytes) return error.FrozenChanged;
     const relative_executable = std.fmt.bufPrintZ(&relative_storage, "./{s}", .{basename}) catch return error.FrozenChanged;
     const path_seal = product.pathMutationSeal() catch return error.FrozenChanged;
+    const budget_ns = try deadline.remaining();
     const probe_bytes = try probe.run(io, frozen_path, directory_fd, relative_executable, output, budget_ns);
+    if (probe_bytes.ptr != output.ptr or probe_bytes.len > output.len) return error.InvalidProbe;
     const observed = try parse(probe_bytes);
     product.validatePathMutationSeal(path_seal) catch return error.FrozenChanged;
     const after = product.revalidate(frozen_path) catch return error.FrozenChanged;
@@ -130,12 +169,22 @@ pub fn composeWith(
         before.frozen.size != after.frozen.size or before.frozen.mode != after.frozen.mode or
         !std.mem.eql(u8, &before.frozen.sha256, &after.frozen.sha256))
         return error.FrozenChanged;
+    current.revalidate() catch return error.InvalidCurrent;
     if (!manifest.equalCompatibility(authenticated.manifest.compatibility, observed))
         return error.CompatibilityMismatch;
+    _ = try deadline.remaining();
     result.executable_sha256 = before.frozen.sha256;
     result.compatibility = observed;
     result.owner = result;
 }
+
+const FixedBudget = struct {
+    value: i128,
+    pub fn remaining(self: *@This()) Error!i128 {
+        if (self.value <= 0) return error.InvalidBudget;
+        return self.value;
+    }
+};
 
 fn pristine(result: *const CurrentCompatibility) bool {
     return result.owner == null and std.mem.allEqual(u8, &result.executable_sha256, 0) and

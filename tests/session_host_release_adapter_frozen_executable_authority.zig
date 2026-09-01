@@ -108,6 +108,20 @@ test "pathname replacement cannot redirect a held executable authority" {
     try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "maru-macos-app", .data = fixture.bytes });
     if (c.chmod(fixture.path[0..].ptr, 0o755) != 0) return error.MutationFailed;
     try std.testing.expectError(error.FileChanged, files.revalidateExecutable(&pinned, std.mem.sliceTo(&fixture.path, 0)));
+
+    var restored: Fixture = undefined;
+    try restored.init();
+    defer restored.deinit();
+    var restored_pin: files.PinnedExecutableFile = .{};
+    try files.pinExecutable(&restored_pin, std.mem.sliceTo(&restored.path, 0), restored.expected, payload_len);
+    defer restored_pin.deinit() catch {};
+    const mutation_seal = try restored_pin.pathMutationSeal();
+    try restored.tmp.dir.rename("maru-macos-app", restored.tmp.dir, "held", std.testing.io);
+    try restored.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "maru-macos-app", .data = "#!/bin/sh\nexit 0\n" });
+    try restored.tmp.dir.deleteFile(std.testing.io, "maru-macos-app");
+    try restored.tmp.dir.rename("held", restored.tmp.dir, "maru-macos-app", std.testing.io);
+    try std.testing.expectError(error.FileChanged, restored_pin.validatePathMutationSeal(mutation_seal));
+    try std.testing.expectError(error.FileChanged, files.revalidateExecutable(&restored_pin, std.mem.sliceTo(&restored.path, 0)));
 }
 
 test "content mode and link-count mutation invalidate revalidation" {

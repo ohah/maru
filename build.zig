@@ -1467,7 +1467,7 @@ pub fn build(b: *std.Build) void {
             "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다",
             "turning the agent hooks gate off removes what we installed and nothing else",
             "hook mode fills state and conversation from the event log, and only then",
-            "hook mode runs exactly one source and takes over notifications",
+            "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알림은 훅만 낸다",
             "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리킨다 — 제품 spawn 으로 건넌다",
             "host 가 만드는 칸과 GUI 가 읽는 칸이 같은 경로다 — 두 모듈이 같은 이름을 짓는다",
             "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 GUI 가 띄웠다",

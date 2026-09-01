@@ -1435,6 +1435,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   출력하지 않는다. 이 component는 두 phase 전체 owner ordering, workflow permission, checkout 전 CLI capture, GitHub Release
   publication 또는 frozen U5 제품 E2E를 대신하지 않는다.
 
+  release executable의 cross-component 시간 권위 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_deadline.zig`의 final-address `Deadline`이다. 전체 phase orchestration은
+  token 검증 직후 positive budget과 `CLOCK_MONOTONIC` 관측 하나로 absolute expiry를 exact once 만들고, 모든 GitHub API·artifact
+  attestation·Apple product·compatibility child 직전에 같은 owner의 `remaining`만 받는다. 하위 composition이 전달받은 remaining
+  budget으로 새 만료 시각을 만들지 않도록 후속 `...Until` entrypoint는 이 owner pointer를 직접 소비한다. clock rollback,
+  signed overflow, 만료, copied/pre-owned owner는 외부 command 전에 fail-close하며 deadline을 갱신·연장하는 API는 제공하지 않는다.
+
+  focused gate `test-session-host-release-adapter-deadline`은 positive start, monotonic non-increasing remaining, exact expiry,
+  rollback·overflow·zero/negative budget, copied/pre-owned owner와 real monotonic leaf compile을 Debug·ReleaseFast에서 검증한다.
+  이 leaf만으로 하위 composition의 `...Until` 이관, 두 phase 전체 orchestration, workflow 배선 또는 frozen U5 제품 E2E를
+  완료했다고 주장하지 않는다.
+
   release evidence의 canonical bytes는 OS 중립
   `src/platform/macos/session_host/release_evidence.zig` 한 곳이 소유한다. schema는 exact
   `maru.session-host-release-evidence.v1`이고 profile은 `baseline_a | upgrade_b`의 닫힌 union이다. G3의

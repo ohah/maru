@@ -2635,6 +2635,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-github-current-evidence`가 Debug·ReleaseFast actual filesystem에서 owner/copy/path/inode alias,
   summary/A/B/candidate/predecessor/signer/UUID drift, malformed bytes와 allocation unwind publication 0을 검증한다. summary artifact
   attestation, compatibility·세 current asset attestation, final observation과 workflow/U5 배선은 후속이다.
+  Release adapter absolute deadline은 `release_adapter_deadline.zig`의 final-address owner가 positive budget과 단일 monotonic 관측을
+  absolute expiry로 exact once 봉인한다. `test-session-host-release-adapter-deadline`이 Debug·ReleaseFast에서 non-increasing remaining,
+  exact expiry, rollback·overflow·zero/negative budget, copy/pre-owned 거부와 real product leaf compile을 검증한다. 이 component 증거만으로
+  하위 composition의 같은 pointer 소비나 전체 phase/workflow 완료를 주장하지 않는다.
   Current asset private-file composition은 authenticated current B manifest와 move-only current product/evidence에서 exact three-role
   name·size·SHA와 source identity를 유도한다. held frozen fd 재검증, DMG no-follow streaming read, owned evidence bytes를 source로 삼아
   absent 0700 directory의 exact-name 0400·link-count-1 leaves에 complete copy·sync하고, large asset을 heap에 올리지 않은 채 source와

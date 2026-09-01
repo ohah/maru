@@ -13312,6 +13312,14 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-verify-predecessor-product",
         "Run production predecessor verification execution ownership tests",
     );
+    const session_host_release_validator_executable_step = b.step(
+        "test-session-host-release-validator-executable",
+        "Run closed release validator executable dispatch tests",
+    );
+    const session_host_release_validator_binary_step = b.step(
+        "session-host-release-validator",
+        "Build the ReleaseFast session-host release validator executable",
+    );
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |composition_optimize| {
             const manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = composition_optimize });
@@ -13384,6 +13392,24 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_verify_predecessor_product_tests.step);
             test_step.dependOn(&run_verify_predecessor_product_tests.step);
             macos_only_test_step.dependOn(&run_verify_predecessor_product_tests.step);
+            const token_environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_token_environment.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_github_transport", .module = transport_mod }} });
+            const release_validator_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/validate_release_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_token_environment", .module = token_environment_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_pre_publish_product", .module = pre_publish_product_mod }, .{ .name = "release_adapter_verify_predecessor_product", .module = verify_predecessor_product_mod } } });
+            const release_validator_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_validator_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_validator", .module = release_validator_mod }} }) });
+            const run_release_validator_tests = b.addRunArtifact(release_validator_tests);
+            run_release_validator_tests.addArg("--maru-expect-tests=4");
+            run_release_validator_tests.setCwd(b.path("."));
+            session_host_release_validator_executable_step.dependOn(&run_release_validator_tests.step);
+            session_host_step.dependOn(&run_release_validator_tests.step);
+            test_step.dependOn(&run_release_validator_tests.step);
+            macos_only_test_step.dependOn(&run_release_validator_tests.step);
+            if (composition_optimize == .ReleaseFast) {
+                const release_validator_exe = b.addExecutable(.{
+                    .name = "maru-session-host-release-validator",
+                    .root_module = release_validator_mod,
+                });
+                const install_release_validator = b.addInstallArtifact(release_validator_exe, .{});
+                session_host_release_validator_binary_step.dependOn(&install_release_validator.step);
+            }
             const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
             const deadline_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_deadline.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_deadline", .module = deadline_mod }} }) });
             const run_deadline_tests = b.addRunArtifact(deadline_tests);

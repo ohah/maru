@@ -111,6 +111,37 @@ pub fn pageStepPx(viewport_h_px: u32, item_h_px: u32) u32 {
     return viewport_h_px -| item_h_px;
 }
 
+/// 목록을 굴리는 키 넷. **키 타입이 아니라 뜻**을 받는다 — 호스트마다 물리 키가 다른 자리에서 오고
+/// (Win32 는 VK, AppKit 은 `NSEvent`), 그 둘을 여기까지 끌고 오면 중립이 입력 스택을 알게 된다.
+/// 호출자가 자기 키 타입에서 이 넷으로 옮긴다.
+pub const KeyStep = enum { page_up, page_down, home, end };
+
+/// 키 하나를 offset 변화로 옮긴다(docs/scroll-area.md §4.5 — *"키보드 스크롤도 같은 offset 을 움직이는
+/// 동작이므로 ScrollArea 가 제공한다"*).
+///
+/// **반환값은 「픽셀이 움직였는가」이지 「키를 먹었는가」가 아니다.** 둘을 뭉치면 목록 맨 위에서 친
+/// PageUp 이 뒤의 터미널로 새어 스크롤백이 감긴다 — 보이는 목록을 겨눈 키다. *소비했는가*는 소유권
+/// 질문이라 host 가 답한다(누가 키를 들고 있는지는 ScrollArea 밖이다 — 같은 문서 §4.6).
+///
+/// 잔여(`wheel_residue_px`)는 여기서 버린다. 다른 입구가 위치를 확정했으므로 가던 조각은 뜻이 없다.
+pub fn applyKeyStep(
+    state: *State,
+    step: KeyStep,
+    viewport_h_px: u32,
+    item_h_px: u32,
+    max_offset_px: u32,
+) bool {
+    const page = pageStepPx(viewport_h_px, item_h_px);
+    const changed = switch (step) {
+        .page_up => state.scrollByPx(-@as(i64, page), max_offset_px),
+        .page_down => state.scrollByPx(@as(i64, page), max_offset_px),
+        .home => state.setOffsetPx(0, max_offset_px),
+        .end => state.setOffsetPx(max_offset_px, max_offset_px),
+    };
+    state.dropWheelResidue();
+    return changed;
+}
+
 /// 소비처가 항목의 content-space top과 그 안에서의 비음수 변위를 계산해 넘기면, 스냅샷이 통째로
 /// 교체되는 순간에도 같은 자리를 유지한다. 포화·clamp 산술을 여기 두어 재정렬된 anchor가 유계
 /// 좌표를 넘지 못하게 한다.
@@ -756,6 +787,56 @@ test "page and anchor helpers preserve bounded pixel semantics" {
     try std.testing.expectEqual(@as(u32, 145), anchorOffsetPx(120, 25, 400));
     try std.testing.expectEqual(@as(u32, 400), anchorOffsetPx(399, 9, 400));
     try std.testing.expectEqual(@as(u32, 400), anchorOffsetPx(std.math.maxInt(u32), std.math.maxInt(u32), 400));
+}
+
+test "applyKeyStep: 한 항목을 남기고 넘기며 · 끝과 처음에 정확히 닿는다" {
+    const viewport: u32 = 200;
+    const item: u32 = 72;
+    const max_offset: u32 = 500;
+    var state: State = .{};
+
+    // PageDown 은 **한 항목을 남긴다** — 한 화면을 통째로 넘기면 읽던 자리가 끊긴다(`pageStepPx` 계약).
+    try std.testing.expect(applyKeyStep(&state, .page_down, viewport, item, max_offset));
+    try std.testing.expectEqual(viewport - item, state.offset_y_px);
+    try std.testing.expect(applyKeyStep(&state, .page_up, viewport, item, max_offset));
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+
+    // End 는 정확히 상한, Home 은 0 이다 — 한 걸음 모자라면 마지막 항목에 영영 못 닿는다.
+    try std.testing.expect(applyKeyStep(&state, .end, viewport, item, max_offset));
+    try std.testing.expectEqual(max_offset, state.offset_y_px);
+    try std.testing.expect(applyKeyStep(&state, .home, viewport, item, max_offset));
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+}
+
+test "applyKeyStep: 경계에서는 false 를 내지만 그것은 「안 먹었다」가 아니다" {
+    var state: State = .{};
+    // 맨 위에서의 PageUp·Home 은 픽셀을 못 움직인다. 반환값은 **움직였는가**이고, 소비 여부는 host 가
+    // 따로 판정한다 — 그 둘을 뭉치면 목록을 겨눈 키가 뒤의 터미널로 샌다.
+    try std.testing.expect(!applyKeyStep(&state, .page_up, 200, 72, 500));
+    try std.testing.expect(!applyKeyStep(&state, .home, 200, 72, 500));
+
+    // 굴릴 것이 없는 목록(상한 0)에서는 넷 다 0 에 머문다.
+    try std.testing.expect(!applyKeyStep(&state, .page_down, 200, 72, 0));
+    try std.testing.expect(!applyKeyStep(&state, .end, 200, 72, 0));
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+
+    // 뷰포트가 항목보다 작으면 page step 이 0 이다 — 고정 chrome 치수에서 움직임을 만들지 않는다.
+    _ = applyKeyStep(&state, .end, 200, 72, 500);
+    try std.testing.expect(!applyKeyStep(&state, .page_up, 40, 72, 500));
+    try std.testing.expectEqual(@as(u32, 500), state.offset_y_px);
+}
+
+test "applyKeyStep: 가던 휠 조각을 버린다" {
+    var state: State = .{ .offset_y_px = 100, .wheel_residue_px = 0.7 };
+    // 키가 위치를 확정했으므로 아직 1픽셀을 못 채운 휠 잔여는 뜻이 없다. 안 버리면 다음 눈금이 그만큼
+    // 더 움직여, 키로 맞춘 자리가 휠 한 번에 어긋난다(§2m.84 가 표면 사이에서 겪은 그 실패다).
+    _ = applyKeyStep(&state, .page_down, 200, 72, 500);
+    try std.testing.expectEqual(@as(f64, 0), state.wheel_residue_px);
+
+    // **움직이지 않은 걸음도 버린다** — 상한에 붙어 있어도 잔여는 남기지 않는다.
+    state = .{ .offset_y_px = 500, .wheel_residue_px = 0.9 };
+    try std.testing.expect(!applyKeyStep(&state, .end, 200, 72, 500));
+    try std.testing.expectEqual(@as(f64, 0), state.wheel_residue_px);
 }
 
 test "scrollbar geometry only exists when the list actually overflows" {

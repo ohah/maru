@@ -5043,6 +5043,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_size_pt: u32 = 0;
     // 도크가 지금 무엇을 보이는가. 뷰 바의 칸을 누르면 바뀐다(W8.7c2).
     var dock_view: maru.session.dock_panel.View = .explorer;
+    // ── 도크가 키보드를 들고 있는가 (W8.22) ────────────────────────────────────────────
+    //
+    // **도크가 보이는 것만으로는 부족하다.** 도크는 늘 떠 있으므로 그것이 소유권이면 터미널에서 친
+    // PageDown 이 목록을 굴린다. macOS 가 정한 규칙이 그대로다(`agentSessionDockOwnsKeys` doc:
+    // *"사용자가 도크 안을 눌러 키보드를 넘겨준 상태여야 한다"*) — 도크 안 primary down 이 들고,
+    // 터미널·사이드바를 누르면 놓는다. 카드뿐 아니라 헤더·빈 여백도 든다: **누른 곳이 도크였다는
+    // 사실**이 소유권이지 그 frame 에 어떤 action rect 가 있었는지가 아니다.
+    var dock_key_focus = false;
+    var dock_key_focus_takes: usize = 0;
+    var dock_key_focus_releases: usize = 0;
+    var dock_key_scrolls: usize = 0;
+    var dock_keys_consumed: usize = 0;
     // **사이드바 폭은 config 가 정한다**(`sidebar.width`, pt). 배율이 1 이라 pt 가 곧 px 다 —
     // 포트 전체에 DPI 인지가 없다(§2m.35 의 한계와 같은 축).
     const sidebar_w: u32 = cfg.sidebar.width_pt;
@@ -5746,6 +5758,51 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sshrink_off_after: u32 = 0;
     var sshrink_max_after: u32 = 0;
     var sshrink_bar_after = true;
+    // ── Page/Home/End 판정 (W8.22) ─────────────────────────────────────────────────────
+    //
+    // **잰 것을 그때 챙긴다** — 인쇄는 훨씬 뒤에 하고 그 사이 목록이 바뀐다(§2m.103 이 겪은 실패).
+    var dkey_judgeable = false;
+    var dkey_max: u32 = 0;
+    var dkey_view_h: u32 = 0;
+    var dkey_row_h: u32 = 0;
+    var dkey_off_start: u32 = 0;
+    var dkey_off_blurred: u32 = 0;
+    var dkey_off_home: u32 = 0;
+    var dkey_off_page: u32 = 0;
+    var dkey_off_end: u32 = 0;
+    var dkey_focus_blurred = true;
+    var dkey_focus_taken = false;
+    var dkey_scrolls_before: usize = 0;
+    // **키가 도크 블록을 지나갔는가**를 함께 잰다. offset 만 보면 "굴리고 **또** 아래로 흘린다" 는
+    // 뮤턴트가 초록이다. 이 대목에서 마침 파일 뷰가 떠 있어(실측) 도크를 못 지나간 키는 그 다음
+    // 가드가 센다(`keys_while_file`) — 즉 그 수가 **안 늘면** 도크가 삼킨 것이고, **늘면** 흘린 것이다.
+    // 그래서 이 둘이 순서까지 말한다: 도크 블록이 파일 가드보다 앞이라는 사실이다.
+    var dkey_past_blur_before: usize = 0;
+    var dkey_past_blur_after: usize = 0;
+    var dkey_past_end: usize = 0;
+    // **경계에서도 먹어야 한다.** 맨 위에서의 Home 은 픽셀을 못 움직이지만 키는 도크 것이다 — 안 그러면
+    // 보이는 목록을 겨눈 키가 뒤로 새어 스크롤백이 감긴다(macOS `handleScmDockScrollKey` 의 그 계약).
+    var dkey_past_at_top: usize = 0;
+    var dkey_past_after_top: usize = 0;
+    var dkey_off_top_again: u32 = 1;
+    // 에이전트 뷰도 같은 넷을 얻는다. **두 갈래를 따로 잰다** — 한쪽만 재면 갈래를 잘못 탄 뮤턴트가
+    // (SCM 을 굴리라고 하면서 에이전트 상태를 움직이는 것) 그대로 초록이다.
+    var akey_judgeable = false;
+    var akey_max: u32 = 0;
+    var akey_view_h: u32 = 0;
+    var akey_card_h: u32 = 0;
+    var akey_off_start: u32 = 0;
+    var akey_off_blurred: u32 = 0;
+    var akey_off_home: u32 = 0;
+    var akey_off_page: u32 = 0;
+    var akey_off_end: u32 = 0;
+    var akey_focus_blurred = true;
+    var akey_focus_taken = false;
+    var akey_scm_before: u32 = 0;
+    var akey_scm_after: u32 = 0;
+    var akey_search_before = false;
+    var akey_search_after = true;
+    var akey_off_search: u32 = 0;
     var sscroll_after_seen = false;
     var sscroll_last_bottom: f32 = -1;
     var sscroll_view_bottom: f32 = -1;
@@ -7024,6 +7081,66 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 1120 and alate_judgeable) {
             if (agent_detail_be) |*b| b.setTestGate(false); // 이제 답이 온다
         }
+        // ── 에이전트 목록도 Page/Home/End 로 굴린다 (W8.22) ───────────────────────────
+        //
+        // **키를 넘기는 길을 SCM 과 다르게 잡는다** — 여기서는 **뷰 바**를 누른다. 그것도 도크 안이라
+        // 소유권이 넘어가야 하고(*"누른 곳이 도크였다는 사실이 소유권"*), 지금 뷰의 칸이라 뷰는 안
+        // 바뀐다. 카드를 누르면 펼침이 토글돼 뒤 판정과 얽힌다.
+        if (smoke and spins == 1119 and dock_view == .agent_sessions and agent_scroll_max > 0) {
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -60); // 끝까지
+        }
+        // **검색이 먼저다.** 도크 검색이 키를 들고 있으면 목록은 그 넷을 못 가져간다 — 순서표의 1번이
+        // 3·4번보다 앞이라는 그 사실이다(docs/key-input-and-shortcuts.md). 그것부터 잰다: 검색이
+        // 잡은 채로 친 Home 은 목록을 **안 움직여야** 한다.
+        if (smoke and spins == 1121 and dock_view == .agent_sessions and agent_scroll_max > 0) {
+            akey_judgeable = true;
+            akey_max = agent_scroll_max;
+            akey_view_h = agent_scroll_view_h;
+            akey_card_h = maru.chrome.components.session_dock.types.DockMetrics.resolve(1000).card_h;
+            akey_off_start = agent_scroll.offset_y_px;
+            akey_scm_before = scm_scroll.offset_y_px;
+            akey_search_before = agent_search_focused;
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        if (smoke and spins == 1122 and akey_judgeable) {
+            akey_off_search = agent_scroll.offset_y_px;
+            window.postSyntheticVirtualKey(win32_keys.vk_escape); // 검색을 놓는다
+        }
+        // 이제 터미널을 눌러 도크가 키를 **안 든** 상태를 만든다 — 그 자리가 없으면 "늘 굴러간다" 는
+        // 뮤턴트가 초록이고, 제품에서는 터미널에 치던 PageUp 이 목록을 흔든다.
+        if (smoke and spins == 1123 and akey_judgeable) {
+            akey_search_after = agent_search_focused;
+            const tx: i32 = @intCast(geom.terminal.x + 8);
+            const ty: i32 = @intCast(geom.terminal.y + 8);
+            window.postSyntheticMouse(.left_down, tx, ty);
+            window.postSyntheticMouse(.left_up, tx, ty);
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        if (smoke and spins == 1124 and akey_judgeable) {
+            akey_off_blurred = agent_scroll.offset_y_px;
+            akey_focus_blurred = dock_key_focus;
+            const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, cell_w, 2)) |ra| {
+                window.postSyntheticMouse(.left_down, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
+                window.postSyntheticMouse(.left_up, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
+            }
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        if (smoke and spins == 1125 and akey_judgeable) {
+            akey_off_home = agent_scroll.offset_y_px;
+            akey_focus_taken = dock_key_focus;
+            window.postSyntheticVirtualKey(win32_keys.vk_next); // PageDown
+        }
+        if (smoke and spins == 1127 and akey_judgeable) {
+            akey_off_page = agent_scroll.offset_y_px;
+            window.postSyntheticVirtualKey(win32_keys.vk_end);
+        }
+        if (smoke and spins == 1128 and akey_judgeable) {
+            akey_off_end = agent_scroll.offset_y_px;
+            akey_scm_after = scm_scroll.offset_y_px;
+        }
         if (smoke and spins == 1126 and alate_judgeable) {
             alate_turns = agent_detail.turns.len;
             alate_expanded = agent_state.expanded_identity;
@@ -7104,12 +7221,65 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
             window.postSyntheticMouseWheel(.wheel, wx, wy, -60); // 끝까지
         }
+        // ── Page/Home/End 로 목록을 굴린다 (W8.22) ────────────────────────────────────
+        //
+        // **먼저 「안 되는 것」을 잰다.** 도크가 키를 안 들고 있으면 같은 키가 목록을 안 움직여야
+        // 한다 — 그 자리가 없으면 "늘 굴러간다" 는 뮤턴트가 그대로 초록이고, 제품에서는 터미널에
+        // 치던 PageUp 이 목록을 흔든다. 그래서 터미널을 눌러 놓게 하고 Home 을 친다.
+        if (smoke and spins == 1141 and dock_view == .source_control and scm_scroll_max > 0) {
+            dkey_judgeable = true;
+            dkey_max = scm_scroll_max;
+            dkey_view_h = scm_scroll_view_h;
+            dkey_row_h = maru.chrome.components.scm_dock.types.DockMetrics.resolve(1000).row_h;
+            dkey_off_start = scm_scroll.offset_y_px;
+            dkey_scrolls_before = dock_key_scrolls;
+            dkey_past_blur_before = keys_while_file;
+            const tx: i32 = @intCast(geom.terminal.x + 8);
+            const ty: i32 = @intCast(geom.terminal.y + 8);
+            window.postSyntheticMouse(.left_down, tx, ty);
+            window.postSyntheticMouse(.left_up, tx, ty);
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        // 이제 도크를 눌러 키를 넘긴다. **어디를 눌러도** 넘어가야 한다(macOS 의 그 규율: 누른 곳이
+        // 도크였다는 사실이 소유권이다) — 그래서 행이 아니라 목록 **아래 빈 자리**를 누른다.
+        if (smoke and spins == 1142 and dkey_judgeable) {
+            dkey_off_blurred = scm_scroll.offset_y_px;
+            dkey_focus_blurred = dock_key_focus;
+            dkey_past_blur_after = keys_while_file;
+            std.debug.print("DBGK file={} shell={d} whilefile={d} ignored={d} apps={d} view={any}\n", .{ active_view == .file, keys_to_shell, keys_while_file, keys_ignored, app_actions, dock_view });
+            const dx: i32 = @intCast(geom.tree_content.x + 4);
+            const dy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h -| 2);
+            window.postSyntheticMouse(.left_down, dx, dy);
+            window.postSyntheticMouse(.left_up, dx, dy);
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        if (smoke and spins == 1143 and dkey_judgeable) {
+            dkey_off_home = scm_scroll.offset_y_px;
+            dkey_focus_taken = dock_key_focus;
+            dkey_past_at_top = keys_while_file;
+            // 맨 위에서 Home 을 **한 번 더** 친다 — 아무 픽셀도 안 움직이는 걸음이다. 그래도 도크가
+            // 먹어야 한다: 여기서 흘리면 목록을 겨눈 키가 뒤로 샌다.
+            window.postSyntheticVirtualKey(win32_keys.vk_home);
+        }
+        if (smoke and spins == 1144 and dkey_judgeable) {
+            dkey_past_after_top = keys_while_file;
+            dkey_off_top_again = scm_scroll.offset_y_px;
+            window.postSyntheticVirtualKey(win32_keys.vk_next); // PageDown
+        }
+        if (smoke and spins == 1145 and dkey_judgeable) {
+            dkey_off_page = scm_scroll.offset_y_px;
+            window.postSyntheticVirtualKey(win32_keys.vk_end);
+        }
+        if (smoke and spins == 1146 and dkey_judgeable) {
+            dkey_off_end = scm_scroll.offset_y_px;
+            dkey_past_end = keys_while_file;
+        }
         // ── 막대를 잡아 끈다 (W8.22 — 에이전트에 이미 있던 배선을 SCM 에도) ────────────
         //
         // **§2m.96 에서 배운 자리를 그대로 지킨다**: 잡는 것은 `down`(그때 `grab_dy` 를 정한다), 끄는
         // 동안은 영역 판정 **앞**에서 답한다. 판정도 그때 세운 모양이다 — 끝만 보면 clamp 때문에
         // `grab_dy` 가 틀려도 초록이라, **가운데를 잡고 딱 40px** 내려 thumb 도 그만큼 갔는지 본다.
-        if (smoke and spins == 1146 and dock_view == .source_control and scm_scroll_max > 0) {
+        if (smoke and spins == 1147 and dock_view == .source_control and scm_scroll_max > 0) {
             const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
             const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
             window.postSyntheticMouseWheel(.wheel, wx, wy, 60); // 맨 위로
@@ -9117,6 +9287,57 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     continue;
                 }
+                // ── 목록 스크롤 키: Page/Home/End (W8.22) ───────────────────────────
+                //
+                // **순서가 곧 정책이다**(docs/key-input-and-shortcuts.md §목록 스크롤 키의 주인).
+                // 그 표가 정한 자리는 검색 필드·오버레이 **뒤**, 터미널 **앞**이다 — 그래서 위
+                // 두 블록 다음이고 파일 삼킴보다 앞이다. 파일 삼킴은 *"안 보이는 셸로 키가
+                // 새면 안 된다"* 는 가드인데, 여기서 소비하면 셸에 닿지 않으므로 그 이유가
+                // 서지 않는다. 그리고 도크는 파일을 보는 동안에도 보인다.
+                //
+                // **규칙은 중립이 소유한다**(`scroll_area.applyKeyStep`) — 한 항목을 남기는 page
+                // step 도, 상한에 정확히 닿는 End 도 macOS 와 같은 함수를 지난다.
+                //
+                // **경계에서도 소비한다.** 맨 위에서 친 PageUp 은 픽셀을 못 움직이지만 키는
+                // 먹는다 — 안 그러면 보이는 목록을 겨눈 키가 뒤의 터미널로 새어 스크롤백이
+                // 감긴다(macOS `handleScmDockScrollKey` 의 그 계약).
+                dock_keys: {
+                    if (!dock_key_focus or !dock_visible) break :dock_keys;
+                    // **키 → 뜻**은 순수 함수가 갖는다(`win32_keys.listScrollStep`) — 수식키 가드도
+                    // 그 안이다. 여기 인라인으로 적으면 그 규칙을 잴 자리가 **이 루프뿐**이 되는데,
+                    // 합성 키는 수식키를 못 세운다(OS 키보드 상태를 읽는다) — 즉 `⌘Home` 을 목록이
+                    // 삼켜도 판정이 없다. 함수로 빼면 단위 테스트가 그 자리를 직접 잡는다.
+                    const step = win32_keys.listScrollStep(key_ev) orelse break :dock_keys;
+                    const moved = switch (dock_view) {
+                        .source_control => maru.chrome.ui.scroll_area.applyKeyStep(
+                            &scm_scroll,
+                            step,
+                            scm_scroll_view_h,
+                            maru.chrome.components.scm_dock.types.DockMetrics.resolve(1000).row_h,
+                            scm_scroll_max,
+                        ),
+                        .agent_sessions => maru.chrome.ui.scroll_area.applyKeyStep(
+                            &agent_scroll,
+                            step,
+                            agent_scroll_view_h,
+                            maru.chrome.components.session_dock.types.DockMetrics.resolve(1000).card_h,
+                            agent_scroll_max,
+                        ),
+                        // 다른 뷰는 이 넷을 굴리는 목록이 아니다 — **탐색기는 특히 아니다**:
+                        // 그 넷은 거기서 선택 이동의 주인이라(docs/scroll-area.md §4.5 의 정정)
+                        // 스크롤을 얹으면 그 축을 뺏는다. 지금 Windows 에는 그 선택 이동이
+                        // 아직 없으므로 **아무것도 안 하고 흘려보낸다**(삼키지도 않는다).
+                        else => break :dock_keys,
+                    };
+                    dock_keys_consumed += 1;
+                    if (moved) {
+                        dock_key_scrolls += 1;
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                            dock_rebuild_failures += 1;
+                        };
+                    }
+                    continue;
+                }
                 if (active_view == .file) {
                     keys_while_file += 1;
                     continue;
@@ -9423,6 +9644,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     maru.session.dock_layout.Region.terminal
                 else
                     maru.session.dock_layout.regionAt(geom, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                // ── 누른 곳이 키보드의 주인을 정한다 (W8.22) ──────────────────────────
+                //
+                // **여기가 유일한 자리다.** 아래 분기들이 각자 `continue` 로 빠져나가므로 그 안에
+                // 흩어 놓으면 어떤 경로에서는 안 잡히고 어떤 경로에서는 안 놓인다 — "카드는
+                // 잡는데 빈 여백은 안 잡는다" 가 그 증상이고, 사용자에게는 **가끔 되는 키**로
+                // 보인다. 뷰 바는 도크의 일부라 함께 잡는다(뷰를 바꿔도 도크를 보고 있다).
+                if (m.kind == .left_down) {
+                    const want = region == .dock_content or region == .view_bar;
+                    if (want != dock_key_focus) {
+                        dock_key_focus = want;
+                        if (want) dock_key_focus_takes += 1 else dock_key_focus_releases += 1;
+                    }
+                }
                 if (region == .divider and m.kind == .left_down) {
                     divider_drag = maru.session.dock_layout.grabOffsetPx(geom, .right, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
                     divider_grabs += 1;
@@ -11998,6 +12232,83 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 sbar_thumb_bottom,
                 sbar_track_bottom,
                 sbar_ok,
+            });
+        }
+        {
+            // **키보드로 목록이 굴러가는가 — 그리고 도크가 키를 안 들었을 때 안 굴러가는가.**
+            //
+            // 넷을 함께 건다. ⑴ 터미널을 누른 뒤의 Home 은 **아무것도 안 움직여야** 한다(그 자리가
+            // 없으면 "늘 굴러간다" 는 뮤턴트가 초록이다), ⑵ 도크를 누른 뒤의 Home 은 0, ⑶ PageDown 은
+            // **한 행을 남긴** 만큼, ⑷ End 는 정확히 상한이다.
+            //
+            // **기대값을 `pageStepPx` 로 다시 계산하지 않는다** — 같은 함수로 자기를 채점하는 꼴이다
+            // (§2m.95 의 규율). 뷰포트 높이와 행 높이에서 **여기서** 뺀다.
+            const dkey_want_page: u32 = @min(dkey_view_h -| dkey_row_h, dkey_max);
+            // **놓았을 때는 키가 도크를 지나가야 하고**(안 그러면 게이트가 아니라 그냥 죽은 코드다),
+            // **들었을 때는 안 지나가야 한다**(굴리고 또 흘리면 같은 키가 두 번 일한다).
+            const dkey_blur_ok = !dkey_focus_blurred and dkey_off_blurred == dkey_off_start and
+                dkey_past_blur_after > dkey_past_blur_before;
+            const dkey_no_leak = dkey_past_end == dkey_past_blur_after;
+            // 경계 걸음: 픽셀은 그대로여야 하고, 그래도 흘리지 않아야 한다.
+            const dkey_edge_ok = dkey_off_top_again == 0 and dkey_past_after_top == dkey_past_at_top;
+            const dkey_ok = dkey_judgeable and dkey_max > 0 and dkey_off_start > 0 and
+                dkey_blur_ok and dkey_focus_taken and
+                dkey_off_home == 0 and dkey_want_page > 0 and dkey_off_page == dkey_want_page and
+                dkey_off_end == dkey_max and dock_key_scrolls > dkey_scrolls_before and dkey_no_leak and dkey_edge_ok;
+            try stdout.print("dock_keys: judgeable={} focus {}->{} off {d}(blurred {d}) home={d}(again {d}) page={d}(want {d}) end={d}/{d} past {d}->{d}->{d} scrolls={d} consumed={d} takes={d} releases={d} dock_keys_ok={}\n", .{
+                dkey_judgeable,
+                dkey_focus_blurred,
+                dkey_focus_taken,
+                dkey_off_start,
+                dkey_off_blurred,
+                dkey_off_home,
+                dkey_off_top_again,
+                dkey_off_page,
+                dkey_want_page,
+                dkey_off_end,
+                dkey_max,
+                dkey_past_blur_before,
+                dkey_past_blur_after,
+                dkey_past_end,
+                dock_key_scrolls,
+                dock_keys_consumed,
+                dock_key_focus_takes,
+                dock_key_focus_releases,
+                dkey_ok,
+            });
+        }
+        {
+            // **에이전트 목록도 같은 넷으로 굴러가는가.** 갈래를 따로 잰다 — SCM 만 재면 "둘 다 SCM 을
+            // 움직인다" 는 뮤턴트가 초록이다. 그래서 **SCM offset 이 안 움직였는지도** 함께 본다.
+            //
+            // **그리고 검색이 먼저라는 것도 잰다** — 도크 검색이 키를 든 동안 친 Home 은 목록을 안
+            // 움직여야 한다(순서표 1번이 3·4번보다 앞이다). 그 자리가 없으면 "언제나 목록이 먹는다"
+            // 는 뮤턴트가 초록이고, 제품에서는 검색어를 지우려던 Home 이 목록을 맨 위로 보낸다.
+            const akey_want_page: u32 = @min(akey_view_h -| akey_card_h, akey_max);
+            const akey_search_ok = akey_search_before and !akey_search_after and
+                akey_off_search == akey_off_start;
+            const akey_ok = akey_judgeable and akey_max > 0 and akey_off_start > 0 and
+                akey_search_ok and
+                !akey_focus_blurred and akey_off_blurred == akey_off_start and akey_focus_taken and
+                akey_off_home == 0 and akey_want_page > 0 and akey_off_page == akey_want_page and
+                akey_off_end == akey_max and akey_scm_after == akey_scm_before;
+            try stdout.print("agent_keys: judgeable={} search {}->{}(off {d}) focus {}->{} off {d}(blurred {d}) home={d} page={d}(want {d}) end={d}/{d} scm {d}->{d} agent_keys_ok={}\n", .{
+                akey_judgeable,
+                akey_search_before,
+                akey_search_after,
+                akey_off_search,
+                akey_focus_blurred,
+                akey_focus_taken,
+                akey_off_start,
+                akey_off_blurred,
+                akey_off_home,
+                akey_off_page,
+                akey_want_page,
+                akey_off_end,
+                akey_max,
+                akey_scm_before,
+                akey_scm_after,
+                akey_ok,
             });
         }
         {

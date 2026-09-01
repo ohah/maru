@@ -920,6 +920,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied/pre-owned owner와 전 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 composition은 local DMG/frozen
   executable·Apple product 관측, summary publication, executable/workflow 배선과 frozen U5 제품 E2E를 대신하지 않는다.
 
+  executable용 `CurrentManifestInput.authenticateCandidateUntil`은 candidate preflight·one-shot input 이전·private file
+  materialization까지 local ownership으로 끝낸 뒤, 앞 current release부터 이어진 같은 `Deadline` pointer를 current manifest
+  attestation `...Until`에 그대로 전달한다. input composition은 remaining scalar를 읽거나 새 expiry를 만들지 않으며, consume 전
+  실패는 candidate를 보존하고 consume 후 deadline/CLI/child 실패는 기존 역순 cleanup으로 input·private residue를 회수한다.
+  nested manifest attestation이 게시된 뒤에도 outer `CurrentManifestInput` owner를 게시하기 전에 같은 deadline을
+  확인하고 owned bytes·held private file·attestation 결속을 재검증한 뒤, owner 대입 직전에 deadline을 최종 확인한다.
+  이 때 만료하거나 private leaf가
+  바뀌면 nested owner, private file, input bytes를 모두 cleanup하고 candidate는 이미
+  consume된 상태로 publication/residue 0을 유지한다. focused input gate는 exact allocation pointer 이전, deadline object identity 전달,
+  consume 전 접근 0, consume 후 중간·outer publication 만료, outer publication 직전 실제 private inode mutation cleanup과 product wrapper compile을 Debug·ReleaseFast actual filesystem에서
+  검증한다. asset attestation, Apple product·compatibility
+  `...Until` 이관과 전체 owner는 후속 범위다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

@@ -713,6 +713,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   검증한다. 이 gate만으로 세 predecessor asset download·release `verify-asset`, git resolver 또는 final workflow 배선을 완료했다고
   주장하지 않는다.
 
+  executable predecessor composition의 `authenticateUntil`은 상위 phase의 final-address `Deadline` pointer를 그대로 받는다.
+  canonical parse·B↔A context/predecessor/file preflight 뒤 같은 deadline을 확인하고, pinned CLI 재검증 뒤 fresh remaining만
+  attestation child budget으로 전달한다. 새 expiry나 앞 remaining 재사용은 금지한다. preflight 실패는 deadline·CLI·child 접근 0이고,
+  CLI 재검증 중 만료는 child 0, parsed/attestation publication 0으로 닫힌다. child 뒤 manifest file을 다시 검증한
+  후에도 결과 owner를 게시하기 직전 같은 deadline을 확인하며, 만료하면 parsed/attestation을 cleanup하고
+  publication 0을 유지한다. 기존 budget entrypoint는 독립 leaf gate 호환용으로 남는다. focused gate는 exact deadline
+  identity, stale budget 비전달, preflight·중간·최종 만료 cleanup과 product wrapper compile을 Debug·ReleaseFast에서 검증한다.
+  deadline/result storage는 manifest file/input bytes, context/predecessor scalar, executable/token/output 및 production pinned CLI
+  owner와 겹칠 수 없으며 이 alias는 parse·deadline·CLI·child 접근 전에 거부한다.
+  predecessor download/release/assets 전체 deadline 배선은 후속 범위다.
+
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를
   typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. compatibility와 signing 관측은

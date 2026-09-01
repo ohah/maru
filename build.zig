@@ -13262,9 +13262,9 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_current_manifest_input_tests.step);
             if (posix_host_tests) test_step.dependOn(&run_current_manifest_input_tests.step);
             macos_only_test_step.dependOn(&run_current_manifest_input_tests.step);
-            const current_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod } } }) });
+            const current_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod } } }) });
             const run_current_product_tests = b.addRunArtifact(current_product_tests);
-            run_current_product_tests.addArg("--maru-expect-tests=6");
+            run_current_product_tests.addArg("--maru-expect-tests=7");
             run_current_product_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_product_step.dependOn(&run_current_product_tests.step);
             session_host_step.dependOn(&run_current_product_tests.step);

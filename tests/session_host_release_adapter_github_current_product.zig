@@ -7,6 +7,7 @@ const files = @import("release_adapter_files");
 const apple = @import("release_adapter_apple_product");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const manifest_file = @import("release_adapter_github_manifest_file");
+const deadline_mod = @import("release_adapter_deadline");
 const product = @import("release_adapter_github_current_product");
 
 const frozen_name = "maru-macos-app";
@@ -117,13 +118,16 @@ const Fixture = struct {
 
 const Observer = struct {
     calls: usize = 0,
+    budget_ns: i128 = 0,
     executable_sha256: [64]u8,
     team_id: []const u8 = "TEAMID1234",
     fail: bool = false,
     mutate: ?[:0]const u8 = null,
+    mutate_current: ?*current_input.CurrentManifestInput = null,
 
-    pub fn observe(self: *Observer, allocator: std.mem.Allocator, _: std.Io, paths: product.Paths, expected: product.DmgExpected, version: []const u8, _: i128) !apple.Observed {
+    pub fn observe(self: *Observer, allocator: std.mem.Allocator, _: std.Io, paths: product.Paths, expected: product.DmgExpected, version: []const u8, budget_ns: i128) !apple.Observed {
         self.calls += 1;
+        self.budget_ns = budget_ns;
         try std.testing.expectEqualStrings(dmg_name, std.fs.path.basename(paths.dmg));
         try std.testing.expectEqual(@as(u64, 4096), expected.size);
         try std.testing.expectEqualStrings(dmg_sha, &expected.sha256);
@@ -135,6 +139,7 @@ const Observer = struct {
             const changed = [_]u8{'X'};
             if (c.pwrite(fd, &changed, changed.len, 0) != changed.len) return error.FixtureFailed;
         }
+        if (self.mutate_current) |current| current.input.?.bytes[0] ^= 1;
         if (self.fail) return error.ObserverFailed;
         var result: apple.Observed = undefined;
         result.executable_sha256 = self.executable_sha256;
@@ -154,6 +159,19 @@ const Observer = struct {
     }
 };
 
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
+    }
+};
+
 test "authenticated current manifest publishes one revalidated local product" {
     var fixture: Fixture = undefined;
     try fixture.init(std.testing.allocator);
@@ -166,6 +184,76 @@ test "authenticated current manifest publishes one revalidated local product" {
     try std.testing.expectEqual(@as(usize, 1), observer.calls);
     try std.testing.expectEqualStrings(&digest(frozen_bytes), &view.frozen.sha256);
     try std.testing.expectEqualStrings(&digest(frozen_bytes), view.apple.executableSha256());
+}
+
+test "shared deadline brackets frozen pin observer and final publication" {
+    var fixture: Fixture = undefined;
+    try fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var observer = Observer{ .executable_sha256 = digest(frozen_bytes) };
+    var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
+    var result: product.CurrentProduct = .{};
+    try product.observeUntilWith(&observer, &deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result);
+    try std.testing.expectEqual(@as(usize, 3), deadline.cursor);
+    try std.testing.expectEqual(@as(i128, 70), observer.budget_ns);
+    try result.deinit(std.testing.allocator);
+
+    observer = .{ .executable_sha256 = digest(frozen_bytes) };
+    deadline = .{ .values = &.{ 100, 70, 0 } };
+    try std.testing.expectError(error.TimedOut, product.observeUntilWith(&observer, &deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(@as(c.fd_t, -1), result.frozen.fd);
+    try std.testing.expect(result.apple_observed == null);
+
+    observer = .{ .executable_sha256 = digest(frozen_bytes) };
+    deadline = .{ .values = &.{ 100, 0 } };
+    try std.testing.expectError(error.TimedOut, product.observeUntilWith(&observer, &deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+    try std.testing.expectEqual(@as(usize, 0), observer.calls);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(@as(c.fd_t, -1), result.frozen.fd);
+
+    observer = .{ .executable_sha256 = digest(frozen_bytes) };
+    deadline = .{ .values = &.{0} };
+    try std.testing.expectError(error.TimedOut, product.observeUntilWith(&observer, &deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+    try std.testing.expectEqual(@as(usize, 0), observer.calls);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(@as(c.fd_t, -1), result.frozen.fd);
+
+    observer = .{ .executable_sha256 = digest(frozen_bytes), .mutate_current = &fixture.current };
+    deadline = .{ .values = &.{ 100, 70, 40 } };
+    try std.testing.expectError(error.InvalidCurrent, product.observeUntilWith(&observer, &deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+    try std.testing.expectEqual(@as(usize, 2), deadline.cursor);
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(@as(c.fd_t, -1), result.frozen.fd);
+    fixture.current.input.?.bytes[0] ^= 1;
+
+    var copied = fixture.current;
+    var untouched = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidCurrent, product.observeUntilWith(&observer, &untouched, std.testing.allocator, std.testing.io, &copied, fixture.paths(), &result));
+    try std.testing.expectEqual(@as(usize, 0), untouched.cursor);
+
+    const result_deadline: *SharedDeadline = @ptrCast(&result);
+    try std.testing.expectError(error.InvalidOwner, product.observeUntilWith(&observer, result_deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+
+    const current_deadline: *SharedDeadline = @ptrCast(@alignCast(&fixture.current));
+    try std.testing.expectError(error.InvalidOwner, product.observeUntilWith(&observer, current_deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
+
+    var path_deadline_storage: [@sizeOf(SharedDeadline) + 1]u8 align(@alignOf(SharedDeadline)) =
+        .{0} ** (@sizeOf(SharedDeadline) + 1);
+    const path_deadline: *SharedDeadline = @ptrCast(&path_deadline_storage);
+    path_deadline.* = .{ .values = &.{100} };
+    var aliased_paths = fixture.paths();
+    aliased_paths.dmg = path_deadline_storage[0..@sizeOf(SharedDeadline) :0];
+    try std.testing.expectError(error.InvalidOwner, product.observeUntilWith(&observer, path_deadline, std.testing.allocator, std.testing.io, &fixture.current, aliased_paths, &result));
+    try std.testing.expectEqual(@as(usize, 0), path_deadline.cursor);
+
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    var empty: current_input.CurrentManifestInput = .{};
+    try std.testing.expectError(error.InvalidCurrent, product.observeUntil(std.testing.allocator, std.testing.io, &empty, fixture.paths(), undefined, &real_deadline, &result));
 }
 
 test "unauthenticated copied and preowned owners reach no observer" {

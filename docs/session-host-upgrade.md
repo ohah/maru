@@ -1149,6 +1149,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   mutation·timeout·child failure의 publication 0을 Debug·ReleaseFast에서 검증한다. 이 gate만으로 final
   `release_manifest.Observation`, release `verify`/`verify-asset`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  전체 pre-publish phase용 `composeUntil`은 앞 단계의 final-address `Deadline` pointer를 그대로 받는다. result/current/output
+  preflight 뒤 같은 deadline을 확인하고, product held executable·parent directory·path mutation seal 재검증이 끝난 뒤 fresh
+  remaining을 다시 구해 compatibility probe child에만 전달한다. 새 expiry나 앞 remaining 재사용은 금지한다. preflight 실패는
+  deadline·product·probe 접근 0이고, product 재검증 중 만료는 probe 0과 publication 0으로 닫힌다. probe 성공
+  뒤 path mutation seal, frozen executable과 current manifest 결속을 다시 검증한 후에도 결과 owner 게시 직전 같은 deadline을 확인하며,
+  만료하면 publication 0을 유지한다. 기존 budget entrypoint는 독립 leaf gate 호환용으로 남는다. focused gate는 exact
+  deadline identity, stale budget 비전달, preflight·중간·최종 만료와 product wrapper compile을 Debug·ReleaseFast에서
+  검증한다. deadline storage는 result/current/product/output/frozen pathname storage와 겹칠 수 없고 이 alias는
+  deadline·product·probe 접근 전에 거부한다. probe가 반환한 bytes는 caller output의 시작에서 빌린 bounded slice여야 하며
+  foreign capture는 parse 전에 publication 0으로 거부한다. probe 중 current manifest drift의 publication 0도 같은 focused gate가 소유한다.
+  전체 pre-publish owner 배선은 후속 범위다.
+
   current final manifest observation의 단일 소유자는
   `src/platform/macos/session_host/release_adapter_github_current_observation.zig`다. 입력은 authenticated
   `CurrentManifestInput` B, authenticated role-A predecessor manifest와 그 release/assets 검증을 보존한

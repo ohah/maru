@@ -122,17 +122,30 @@ pub fn appendJsonEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Al
     };
 }
 
-/// 이벤트 한 줄을 wire 프레임으로 만든다: `{"nonce":"…","line":"…"}`.
+/// 이벤트 한 줄을 wire 프레임으로 만든다: `{"nonce":"…","line":"…"[,"pane":"%27"]}`.
+///
+/// **`pane` 은 tmux pane 축이다**([계획](../../docs/plans/remote-agent-state.md) RA7). 역조회가 nonce 를
+/// 진짜 Term 신원으로 치환하고 나면 「어느 tmux pane 이었나」가 사라지는데, 한 tmux 세션에 pane 이 여럿이면
+/// 그 축이 곧 «각각 다른 에이전트» 다. nonce 에 합성하지 않고 **필드를 따로 두는 이유**는 nonce 가 Term
+/// 귀속의 유일한 잣대(`remoteNonceMatches`)라, 거기에 하위 축을 섞으면 접두 비교가 생겨 오배달 축이 하나
+/// 늘기 때문이다(RA7.3 결정 3).
+///
+/// **비면 안 싣는다.** tmux 밖이면 이 축이 없고, 구버전 로컬은 모르는 키를 무시하므로 있어도 안전하다.
 pub fn formatEvent(
     out: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
     nonce: []const u8,
     line: []const u8,
+    pane: []const u8,
 ) !void {
     try out.appendSlice(allocator, "{\"nonce\":\"");
     try appendJsonEscaped(out, allocator, nonce);
     try out.appendSlice(allocator, "\",\"line\":\"");
     try appendJsonEscaped(out, allocator, line);
+    if (pane.len > 0) {
+        try out.appendSlice(allocator, "\",\"pane\":\"");
+        try appendJsonEscaped(out, allocator, pane);
+    }
     try out.appendSlice(allocator, "\"}\n");
 }
 
@@ -279,6 +292,19 @@ pub fn advance(cur: Cursor, size: u64) Cursor {
 
 const testing = std.testing;
 
+test "RA7 pane 을 주면 프레임에 실리고, 비면 키 자체가 없다" {
+    // **비었을 때 키를 안 싣는 것이 호환의 절반이다.** `"pane":""` 를 보내면 구버전 로컬이 그것을 모르는
+    // 키로 무시하긴 하지만, 선이 길어지고 「없다」와 「빈 값」이 wire 에서 같은 모양이 된다.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try formatEvent(&out, testing.allocator, "4331_7", "claude\tx", "%27");
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"pane\":\"%27\"") != null);
+
+    out.clearRetainingCapacity();
+    try formatEvent(&out, testing.allocator, "4331_7", "claude\tx", "");
+    try testing.expect(std.mem.indexOf(u8, out.items, "pane") == null);
+}
+
 test "parseArgs: --stdio 와 절대 경로가 있어야 돈다" {
     try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev" }) == .stdio);
     try testing.expectEqualStrings("/tmp/ev", parseArgs(&.{ "--stdio", "--dir=/tmp/ev" }).stdio.dir);
@@ -309,7 +335,7 @@ test "nonceFromFileName: 훅이 거부했을 이름은 여기서도 거부한다
 test "formatEvent: payload 를 파싱하지 않고 문자열로 감싼다" {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try formatEvent(&out, testing.allocator, "4331_7", "claude\t{\"a\":\"b\\c\"}");
+    try formatEvent(&out, testing.allocator, "4331_7", "claude\t{\"a\":\"b\\c\"}", "");
     try testing.expectEqualStrings(
         "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"a\\\":\\\"b\\\\c\\\"}\"}\n",
         out.items,

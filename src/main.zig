@@ -4547,6 +4547,24 @@ const SidebarCard = struct {
     const Source = union(enum) { session: usize, file: usize };
 };
 
+/// 판정용 **합성 `git status` 원문**. 저장소를 안 건드리고 원하는 목록을 만든다 — 파일을 만들면
+/// 사용자의 작업 트리가 바뀐다(이 저장소의 규율).
+///
+/// **왜 필요한가.** 판정이 개발자의 작업 트리에 기대면 **커밋 직후에는 조용히 안 선다** — 실측으로
+/// `scm_dock_click` 이 `no_file_row` 로 오래 접혀 있었다(§2m.103). 여기서 만든 목록은 언제 돌려도 같다.
+fn smokeScmStatus(allocator: std.mem.Allocator, files: usize) []u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    out.appendSlice(allocator, "# branch.oid aaaa\n# branch.head smoke\n") catch return &[_]u8{};
+    var i: usize = 0;
+    while (i < files) : (i += 1) {
+        var buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "1 .M N... 100644 100644 100644 aaa bbb src/smoke_{d}.zig\n", .{i}) catch break;
+        out.appendSlice(allocator, line) catch break;
+    }
+    return allocator.dupe(u8, out.items) catch &[_]u8{};
+}
+
 /// 소스 컨트롤 뷰가 그리는 데 필요한 것들.
 const ScmDockInputs = struct {
     state: *scm_surface.State,
@@ -5651,6 +5669,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scm_dock_intents: usize = 0;
     var scm_dock_redraws: usize = 0;
     var scm_click_judgeable = false;
+    var scm_click_selected: ?usize = null;
+    var scm_click_target: usize = 0;
+    // 누른 행의 이름. **fixture 가 만든 목록인지**를 판정이 스스로 말하게 한다.
+    var scm_click_name_buf: [64]u8 = undefined;
+    var scm_click_name_len: usize = 0;
     var view_judgeable = false;
     var agent_judgeable = false;
     var agent_view_reached = false;
@@ -6378,6 +6401,32 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 };
             }
         }
+        // **판정이 저장소 상태에 기대면 안 된다.** 커밋 직후처럼 변경 파일이 하나도 없으면 아래 클릭
+        // 판정이 `no_file_row` 로 조용히 접힌다 — 실측으로 오래 그 상태였다(§2m.103). 파일을 만들지
+        // 않고 `git status` 원문만 갈아 끼워 **언제 돌려도 같은 목록**을 만든다.
+        if (smoke and spins == 198 and dock_view == .source_control and scm_status_real.len == 0) {
+            const owned = smokeScmStatus(allocator, 6);
+            if (owned.len > 0) {
+                scm_status_real = scm_status;
+                scm_status = owned;
+                scm_opts.status_text = scm_status;
+                scm_state.invalidateTree();
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+        }
+        // **누른 직후에 답을 챙긴다.** 인쇄는 훨씬 뒤인데 그 사이 목록이 바뀌면 `invalidateTree` 가
+        // 포인터 상태를 버려 `selected` 가 `null` 이 된다 — 그러면 눌렸는데도 "안 눌렸다" 로 보고한다
+        // (실측: `scm_selected=null`).
+        if (smoke and spins == 202 and scm_click_judgeable) scm_click_selected = scm_state.selected;
+        // fixture 를 되돌린다 — 그 뒤 판정들은 **진짜 저장소**를 봐야 한다(§2m.101 1회차의 그 덫).
+        if (smoke and spins == 206 and scm_status_real.len != 0) {
+            allocator.free(scm_status);
+            scm_status = scm_status_real;
+            scm_status_real = &.{};
+            scm_opts.status_text = scm_status;
+            scm_state.invalidateTree();
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+        }
         // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
         if (smoke and spins == 200 and dock_view == .source_control) {
             if (scm_built) |*b| {
@@ -6387,6 +6436,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         const slot = b.frame.tree.find(component.build.NodeIds.item(i)) orelse break;
                         const rect = b.frame.tree.entries[slot].rect;
                         scm_click_judgeable = true;
+                        scm_click_target = i;
+                        if (item == .file) {
+                            const nm = item.file.name;
+                            scm_click_name_len = @min(nm.len, scm_click_name_buf.len);
+                            @memcpy(scm_click_name_buf[0..scm_click_name_len], nm[0..scm_click_name_len]);
+                        }
                         const sx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(rect.x + rect.width / 2)));
                         const sy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(rect.y + rect.height / 2)));
                         window.postSyntheticMouse(.left_down, sx, sy);
@@ -6986,17 +7041,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         if (smoke and spins == 1132 and dock_view == .source_control) {
-            var synth: std.ArrayList(u8) = .empty;
-            defer synth.deinit(allocator);
-            synth.appendSlice(allocator, "# branch.oid aaaa\n# branch.head smoke\n") catch {};
-            var f: usize = 0;
-            while (f < 40) : (f += 1) {
-                var line_buf: [96]u8 = undefined;
-                const line = std.fmt.bufPrint(&line_buf, "1 .M N... 100644 100644 100644 aaa bbb src/smoke_{d}.zig\n", .{f}) catch break;
-                synth.appendSlice(allocator, line) catch break;
-            }
-            if (synth.items.len > 0) {
-                const owned: []u8 = allocator.dupe(u8, synth.items) catch &[_]u8{};
+            {
+                const owned: []u8 = smokeScmStatus(allocator, 40);
                 if (owned.len > 0) {
                     // **진짜 것은 안 버리고 옆에 둔다** — 판정이 끝나면 되돌린다.
                     scm_status_real = scm_status;
@@ -12268,7 +12314,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (view_judgeable) {
         const after = d3d11_cells.cellsDigest(dock_cells.items);
         if (scm_click_judgeable) {
-            try stdout.print("scm_dock_intents={d} scm_dock_redraws={d} scm_selected={?d}\n", .{ scm_dock_intents, scm_dock_redraws, scm_state.selected });
+            // **누른 행이 골라졌나.** 값은 누른 직후에 챙긴 것이다. 그리고 **누른 그 행**이어야 한다 —
+            // 아무 행이나 골라도 초록이면 그 판정은 "눌리기는 한다" 만 말한다.
+            // **fixture 가 만든 행이어야 한다.** 그래야 이 판정이 개발자의 작업 트리와 무관하게 같은
+            // 답을 낸다 — 그것이 이 슬라이스가 갚는 것이다(우연히 변경 파일이 있으면 옛 판정도 초록이라
+            // "결정적이다" 를 증명하지 못한다).
+            const scm_click_name = scm_click_name_buf[0..scm_click_name_len];
+            const scm_click_from_fixture = std.mem.startsWith(u8, scm_click_name, "smoke_");
+            const scm_click_ok = scm_click_selected != null and scm_click_selected.? == scm_click_target and
+                scm_click_from_fixture;
+            try stdout.print("scm_dock_intents={d} scm_dock_redraws={d} scm_selected={?d}(want {d}) row={s} scm_dock_click_ok={}\n", .{ scm_dock_intents, scm_dock_redraws, scm_click_selected, scm_click_target, scm_click_name, scm_click_ok });
         } else {
             try stdout.print("scm_dock_click=unjudgeable reason=no_file_row\n", .{});
         }

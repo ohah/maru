@@ -2018,6 +2018,15 @@ fn injectIntoActiveTerminal(self: *AppSession, command: []const u8) bool {
         setScmWriteNotice(self, maru.i18n.t(.scm_inject_host_mismatch));
         return false;
     }
+    // ⚠️ **돌고 있는 것을 알면 넣지 않는다**(RS4c 3회차 후속). vim·less·도는 빌드에 붙여넣으면 그
+    // 프로그램이 받는다 — `git fetch --prune` 이 편집 중인 파일에 글자로 박힌다.
+    //
+    // **모르면 넣는다.** OSC 133 을 내는 원격 셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로
+    // 막고 사용자는 왜 안 되는지도 모른다 — 닫기 확인(`termHasRunningJob`)과 **기본값이 반대**인 이유다.
+    if (term_ops.activeTermKnownBusy(self, self.io)) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_terminal_busy));
+        return false;
+    }
     term_ops.submitPaste(self, command, false, term_ops.activeSurface(self).id);
     return true;
 }
@@ -3120,6 +3129,8 @@ fn writeErrorText(self: *AppSession, result: git_backend_mod.WriteResult) ?[]u8 
     // 전송 층의 것이다(`Host key verification failed.` 같은) — 저장소 이야기로 보여 주면 사용자가 자기
     // 저장소를 의심한다. §6.7 의 「실패는 git 이 한 말 그대로」는 **git 이 돌았을 때**의 계약이다.
     if (result.transportFailed()) return self.allocator.dupe(u8, maru.i18n.t(.scm_remote_transport_failed)) catch null;
+    // **읽기와 같은 말을 한다**(적대적 검증 3회차) — 목록과 쓰기가 다른 문제를 말하면 안 된다.
+    if (result.remoteGitMissing()) return self.allocator.dupe(u8, maru.i18n.t(.scm_remote_git_missing)) catch null;
     const raw = std.mem.trimEnd(u8, result.stderr, "\n");
     if (raw.len == 0) return self.allocator.dupe(u8, maru.i18n.t(.scm_git_command_failed)) catch null;
     // **마지막 줄만** 낸다. 목록 안 한 줄짜리 자리라 여러 줄을 담을 수 없고, hook 거부 사유는 보통 끝에 온다.

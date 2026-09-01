@@ -13,6 +13,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const git_command = maru.session.git_command;
 const git_write_command = maru.session.git_write_command;
+const remote_shell = maru.session.remote_shell;
 const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
@@ -93,6 +94,20 @@ pub const max_inflight: usize = 1;
 /// 원래 이보다 훨씬 작다.
 pub const max_output_bytes: usize = 16 << 20;
 
+/// 읽기가 왜 실패했는가. **「읽지 못함」 하나로 뭉개면 사용자는 무엇을 고쳐야 할지 모른다** —
+/// 원격에 git 이 없는 것과 연결이 끊긴 것은 **고치는 방법이 다르다**(RS4 계약 §2.2 ⑺).
+///
+/// 실측(2026-09-01): 없는 명령은 **127**, ssh 전송 실패는 **255** 로 갈린다. `git` 자신은 그 둘을
+/// 안 쓴다(fatal 은 128, 거절은 1) — 그래서 원격에서만 그 두 값이 우리 이야기다.
+pub const ReadFailure = enum {
+    /// git 이 돌았고 우리가 그 실패를 딱히 분류하지 못한다(로컬의 기본값이기도 하다).
+    generic,
+    /// 원격 PATH 에 `git` 이 없다(exit 127). 처방을 깔아도 못 찾은 것이므로 **사용자가 깔아야 한다.**
+    remote_git_missing,
+    /// ssh 가 자기 실패로 끝났다(exit 255). git 까지 **닿지도 못했다** — 저장소 이야기가 아니다.
+    remote_transport,
+};
+
 pub const Result = struct {
     /// **원격 저장소 루트**(`rev-parse --show-toplevel`, RS3). 로컬 읽기에서는 비어 있다 — 로컬은
     /// walk-up 으로 이미 안다. 원격은 물어봐야 하고, 그 답이 있어야 상대경로를 절대경로로 만들어
@@ -128,6 +143,8 @@ pub const Result = struct {
     /// 마지막 턴 스냅샷 이후 바뀐 것(§6.1). 스냅샷이 없으면 빈 문자열이고 그 섹션은 안 나온다.
     /// 셋 다 정상 종료했는가. 하나라도 실패하면 부분 결과를 쓰지 않는다(섹션이 서로 다른 시점을 섞지 않게).
     ok: bool = false,
+    /// `ok == false` 일 때 **왜**. 화면이 이유를 말할 수 있게 실어 나른다.
+    failure: ReadFailure = .generic,
     /// 출력이 상한에 걸려 잘렸는가. 목록 끝에 그 사실을 표시한다.
     truncated: bool = false,
     /// 이 결과가 어느 요청의 것인지. 늦게 온 결과가 최신 화면을 덮어쓰지 않게 호출자가 대조한다.
@@ -1510,7 +1527,10 @@ fn worktreeSideOn(allocator: std.mem.Allocator, job: *Job, rel_path: []const u8)
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
     const argv = git_command.buildRemoteFileRead(abs, remote, &argv_buf, &cmd_buf) orelse return error.GitFailed;
-    const out = try runArgvWithEnv(allocator, argv, null);
+    // **이 읽기도 원격이다**(적대적 검증 1회차). `runOn` 만 배선하고 여기를 빼면, 소켓이 죽어 diff 가
+    // 안 열려도 화면은 「읽지 못함」만 말한다 — 목록은 「연결이 끊겼다」라고 말하는데 diff 는 딴소리를
+    // 하는 셈이라, 사용자는 둘 중 무엇을 믿을지 알 수 없다.
+    const out = runArgvWithEnv(allocator, argv, null, true) catch |err| return mapRemoteExitError(err);
     // ⚠️ **잘림을 원격 상한으로 다시 판정한다**(RS3a 적대적 검증 3회차). `runArgvWithEnv` 는 로컬 상한
     // (`max_output_bytes`, 16 MiB)으로만 보는데 원격은 그 전에 `head -c` 로 **4 MiB 에서 잘린다** —
     // 그대로 두면 잘린 파일이 `truncated = false` 로 와서 **온전한 파일처럼** 화면에 뜬다(뷰어는 잘린
@@ -1569,16 +1589,26 @@ fn worker(job: *Job) void {
             if (trimmed.len > 0) result.repo_root = state.allocator.dupe(u8, trimmed) catch &.{};
         } else |_| {}
     }
+    var failure: ReadFailure = .generic;
     inline for (required_reads) |pair| {
         if (ok) {
-            const out = runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, null) catch null;
-            if (out) |o| {
+            if (runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, null)) |o| {
                 @field(result, pair[1]) = o.bytes;
                 if (o.truncated) truncated = true;
-            } else ok = false;
+            } else |err| {
+                ok = false;
+                // **왜 실패했는지 싣는다.** 「읽지 못함」 하나로 뭉개면 사용자는 원격에 git 을 깔아야
+                // 하는지, 연결을 다시 붙여야 하는지 알 수 없다.
+                failure = switch (err) {
+                    error.RemoteGitMissing => .remote_git_missing,
+                    error.RemoteTransportFailed => .remote_transport,
+                    else => .generic,
+                };
+            }
         }
     }
     result.ok = ok;
+    result.failure = failure;
     result.truncated = truncated;
     if (job.base.len > 0) state.allocator.free(job.base);
     job.freeRemote(state.allocator);
@@ -1623,6 +1653,19 @@ fn runWithArg(
 /// 조립이 거절되면(`null`) `error.GitFailed` 다. 거절은 곧 「그 값으로는 원격에 아무것도 보내지 않는다」
 /// 이므로(제어문자·수상한 dest·버퍼 초과), 로컬로 **폴백하지 않는다** — 폴백은 원격을 보는 사용자에게
 /// 로컬 저장소를 보여 주는 바로 그 사고다.
+/// 원격 종료 코드를 **이야기**로 바꾼다. `runOn` 안에 인라인으로 두면 「git 없는 원격」을 만들지 않고는
+/// 이 규칙을 셀 수 없다 — 그런 원격은 우리 기계에 만들 수 없다(`/usr/bin/git` 이 늘 있다). 그래서 뗐다.
+///
+/// **원격에서만 부른다.** 로컬 git 은 127·255 를 안 쓰고(fatal 은 128, 거절은 1), 쓴다면 그것은 git 이
+/// 한 말이라 우리가 다시 해석하면 안 된다.
+fn mapRemoteExitError(err: anyerror) anyerror {
+    return switch (err) {
+        error.ExitCommandNotFound => error.RemoteGitMissing, //   원격 PATH 에 git 이 없다
+        error.ExitTransportFailed => error.RemoteTransportFailed, // 거기까지 못 갔다
+        else => err,
+    };
+}
+
 fn runOn(
     allocator: std.mem.Allocator,
     remote: ?git_command.Remote,
@@ -1633,11 +1676,13 @@ fn runOn(
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const local = git_command.build(kind, git_exe, repo, arg, &argv_buf);
-    const target = remote orelse return runArgvWithEnv(allocator, local, null);
+    const target = remote orelse return runArgvWithEnv(allocator, local, null, false);
     var remote_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
     const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return error.GitFailed;
-    return runArgvWithEnv(allocator, argv, null);
+    // **원격에서만 종료 코드를 이야기로 바꾼다.** 로컬 git 이 127·255 를 내는 일은 없고, 낸다면 그것은
+    // git 이 한 말이라 우리가 다시 해석하면 안 된다.
+    return runArgvWithEnv(allocator, argv, null, true) catch |err| return mapRemoteExitError(err);
 }
 
 /// `index_file`이 있으면 `GIT_INDEX_FILE`로 걸어 **그 index에만** 쓰게 한다(턴 스냅샷). 진짜 index를 안 건드리는
@@ -1652,20 +1697,27 @@ fn runWithEnv(
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv_slices = git_command.build(kind, git_exe, repo, arg, &argv_buf);
-    return runArgvWithEnv(allocator, argv_slices, index_file);
+    return runArgvWithEnv(allocator, argv_slices, index_file, false);
 }
 
 /// **argv 를 직접 받는 진입점.** `check-ignore` 는 경로가 argv 뒤에 붙어 kind 하나로 만들 수 없어
 /// (`git_command.buildCheckIgnore`) 이 자리를 쓴다. 아래 본문은 원래 `runWithEnv` 의 것 그대로다 —
 /// 실행 방식(fork+exec+pipe·환경 덮어쓰기·exit code 해석)을 두 벌로 만들지 않기 위해 갈랐다.
 fn runArgv(allocator: std.mem.Allocator, argv_slices: []const []const u8) !Output {
-    return runArgvWithEnv(allocator, argv_slices, null);
+    return runArgvWithEnv(allocator, argv_slices, null, false);
 }
 
 fn runArgvWithEnv(
     allocator: std.mem.Allocator,
     argv_slices: []const []const u8,
     index_file: ?[]const u8,
+    /// **원격 명령일 때만 참.** 127·255 를 이름 있는 오류로 올릴지 정한다(RS4 §2.2 ⑺).
+    ///
+    /// ⚠️ **로컬에서 켜면 거짓말이 된다.** 우리 자식은 `execve` 가 실패하면 스스로 **127** 로 끝난다
+    /// (셸 관례를 따른 것이다 — 아래 `_exit(127)`). 그 상태는 「원격에 git 이 없다」가 아니라
+    /// 「로컬 git 을 못 띄웠다」이고, 화면에 「원격에 git 을 깔라」고 적으면 사용자는 엉뚱한 기계를
+    /// 손본다. 그래서 로컬은 예전처럼 `GitFailed` 하나로 둔다(적대적 검증 1회차).
+    remote_exit_codes: bool,
 ) !Output {
     // **Windows 는 `CreateProcessW` + 익명 파이프로 간다.** 아래 POSIX 갈래는 `fork`/`execve` 를 쓰는데
     // Windows 에는 없다(`std.c.fork` 가 그 타깃에서 `void` 라 분석되는 순간 컴파일이 깨진다). `comptime`
@@ -1674,7 +1726,7 @@ fn runArgvWithEnv(
     // **POSIX 갈래는 한 줄도 안 건드린다.** 돌아가는 검증된 경로를 옮기지 않는 것이 이 배선의 전제다 —
     // 옮기면 검증할 수 없는 코드로 검증된 코드를 바꾸는 일이 된다(Windows 호스트에서는 POSIX 테스트를
     // 못 돌린다).
-    if (comptime builtin.os.tag == .windows) return runArgvWithEnvWindows(allocator, argv_slices, index_file);
+    if (comptime builtin.os.tag == .windows) return runArgvWithEnvWindows(allocator, argv_slices, index_file, remote_exit_codes);
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —
@@ -1733,6 +1785,13 @@ fn runArgvWithEnv(
     const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, null);
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
+    // **127·255 는 이름을 붙여 올린다**(RS4 §2.2 ⑺). 그 둘은 「git 이 거부했다」가 아니라 각각
+    // 「명령을 못 찾았다」·「거기까지 못 갔다」다. 로컬 호출자는 이 오류를 안 보는데(로컬 git 은 그
+    // 값을 안 쓴다) `runOn` 이 원격일 때만 이야기로 바꾼다.
+    if (remote_exit_codes) {
+        if (spawned.exit_code == 127) return error.ExitCommandNotFound;
+        if (spawned.exit_code == 255) return error.ExitTransportFailed;
+    }
     if (spawned.exit_code != 0) return error.GitFailed;
     // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
     return .{ .bytes = spawned.stdout_bytes, .truncated = spawned.stdout_bytes.len >= max_output_bytes };
@@ -1749,6 +1808,8 @@ fn runArgvWithEnvWindows(
     allocator: std.mem.Allocator,
     argv_slices: []const []const u8,
     index_file: ?[]const u8,
+    /// POSIX 갈래와 같은 뜻 — 원격 명령일 때만 127·255 를 이름 있는 오류로 올린다.
+    remote_exit_codes: bool,
 ) !Output {
     // 캡처 러너는 **배럴을 통해** 온다. 상대 경로(`../windows/…`)로 가져오면 모듈 루트가
     // `platform/macos` 안인 아티팩트(`macos-chrome-lab-smoke` 등)에서 **모듈 밖**이 되어 macOS 빌드가
@@ -1787,6 +1848,10 @@ fn runArgvWithEnvWindows(
     // 넘긴다. git 이 0 이 아닌 코드로 끝나는 것은 **흔한 일**이고(저장소가 아닌 폴더에서 열면 늘
     // 그렇다), 그때마다 프로세스가 죽었다 — 실측 2026-08-27: `Segmentation fault at address
     // 0xffffffffffffffff`, `repoStatusWorker` 스레드.
+    if (remote_exit_codes) { // POSIX 갈래와 같은 판정
+        if (result.exit_code == 127) return error.ExitCommandNotFound;
+        if (result.exit_code == 255) return error.ExitTransportFailed;
+    }
     if (result.exit_code != 0) return error.GitFailed;
     return .{ .bytes = result.bytes, .truncated = result.truncated };
 }
@@ -2058,6 +2123,16 @@ pub const WriteResult = struct {
     /// 있다 해도 그것은 git 이 한 말이다.
     pub fn transportFailed(self: WriteResult) bool {
         return self.remote and self.spawned and self.exit_code == 255;
+    }
+
+    /// 원격 PATH 에 `git` 이 없다(127). **읽기와 같은 말을 해야 한다**(적대적 검증 3회차) — 목록은
+    /// 「원격에 git 이 없습니다」라고 하는데 스테이지는 셸이 뱉은 `sh: git: command not found` 를 그대로
+    /// 보여 주면, 사용자는 두 화면이 **다른 문제**를 말한다고 읽는다.
+    ///
+    /// 로컬은 이 판정을 안 받는다 — 우리 자식은 `execve` 실패에도 127 을 내므로(그쪽은 「로컬 git 을
+    /// 못 띄웠다」이지 원격 이야기가 아니다).
+    pub fn remoteGitMissing(self: WriteResult) bool {
+        return self.remote and self.spawned and self.exit_code == 127;
     }
 
     pub fn ok(self: WriteResult) bool {
@@ -3305,7 +3380,19 @@ test "원격 쓰기 실패: ssh 가 한 말과 git 이 한 말을 가른다 (RS4
         var refused = died;
         refused.exit_code = code;
         try std.testing.expect(!refused.transportFailed());
+        try std.testing.expect(!refused.remoteGitMissing());
     }
+
+    // **원격에 git 이 없는 것도 이름으로 말한다**(적대적 검증 3회차) — 목록과 쓰기가 같은 말을 해야
+    // 사용자가 두 화면을 한 문제로 읽는다.
+    var no_git = died;
+    no_git.exit_code = 127;
+    try std.testing.expect(no_git.remoteGitMissing());
+    try std.testing.expect(!no_git.transportFailed());
+    // **로컬의 127 은 우리 자식의 `execve` 실패다** — 원격 이야기로 바꾸면 엉뚱한 기계를 손보게 한다.
+    var local_127 = no_git;
+    local_127.remote = false;
+    try std.testing.expect(!local_127.remoteGitMissing());
     // 띄우지도 못했으면 그것은 **로컬** 실패다(그 자리는 `spawned=false` 가 이미 가른다).
     var unspawned = died;
     unspawned.spawned = false;
@@ -3417,8 +3504,72 @@ test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr �
     try std.testing.expect(out.stderr_bytes.len > 64 * 1024); // hook 이 실제로 쏟았다(겹침이 일어났다)
 
     // **바이트가 그대로 도착했나.** 원격이 loopback 이라 그 저장소를 직접 읽어 대조할 수 있다.
-    const head = try runArgvWithEnv(allocator, &.{ "/usr/bin/git", "-C", hx.repo, "log", "-1", "--format=%B" }, null);
+    const head = try runArgvWithEnv(allocator, &.{ "/usr/bin/git", "-C", hx.repo, "log", "-1", "--format=%B" }, null, false);
     defer allocator.free(head.bytes);
     try std.testing.expect(std.mem.startsWith(u8, head.bytes, "RS4b-STDIN"));
     try std.testing.expect(head.bytes.len >= big.len - 2); // 잘리지 않았다
+}
+
+test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른다 (RS4 §2.2 ⑺)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const hx = remoteScmHarness() orelse return error.SkipZigTest;
+    const remote: git_command.Remote = .{ .dest = hx.dest, .control_path = hx.ctl };
+
+    // ⑴ **연결이 끊기면 «전송 실패»다.** 그 stderr 는 ssh 가 한 말이라 저장소 이야기가 아니다.
+    try std.testing.expectError(
+        error.RemoteTransportFailed,
+        runOn(allocator, .{ .dest = hx.dest, .control_path = "/nonexistent/sock" }, .status, git_command.remote_git_exe, hx.repo, null),
+    );
+
+    // ⑵ **원격에서 «명령 없음»(127)이 실제로 그 오류로 올라온다.**
+    //
+    //    ⚠️ 「git 없는 원격」을 만들 수는 없다 — 이 기계에는 `/usr/bin/git` 이 늘 있고, `buildRemote` 는
+    //    `argv[0]` 을 버리므로 가짜 경로를 넘겨도 원격은 여전히 `git` 을 찾는다(RS4a 의 설계다).
+    //    그래서 **실물 전송 위에서 진짜 127** 을 내고, 그것이 어떤 오류로 오는지 본다.
+    var argv_buf: [remote_shell.ssh_argv_len][]const u8 = undefined;
+    const missing = remote_shell.sshArgv(
+        .{ .dest = hx.dest, .control_path = hx.ctl },
+        &argv_buf,
+        "'sh' '-c' 'exit 127'",
+    ).?;
+    try std.testing.expectError(error.ExitCommandNotFound, runArgvWithEnv(allocator, missing, null, true));
+    // 그리고 `runOn` 이 그것을 **이야기로 바꾼다** — 두 조각을 따로 세야 「원격을 못 만든다」는 사정이
+    // 규칙 자체를 안 보는 핑계가 되지 않는다.
+    try std.testing.expectEqual(@as(anyerror, error.RemoteGitMissing), mapRemoteExitError(error.ExitCommandNotFound));
+    try std.testing.expectEqual(@as(anyerror, error.RemoteTransportFailed), mapRemoteExitError(error.ExitTransportFailed));
+    // **git 이 한 말은 안 건드린다.**
+    try std.testing.expectEqual(@as(anyerror, error.GitFailed), mapRemoteExitError(error.GitFailed));
+
+    // ⚠️ **로컬에서는 127 을 그렇게 읽지 않는다**(적대적 검증 1회차). 우리 자식은 `execve` 가 실패하면
+    //    스스로 127 로 끝난다 — 그것은 「원격에 git 이 없다」가 아니라 「로컬 git 을 못 띄웠다」이고,
+    //    화면에 「원격에 git 을 깔라」고 적으면 사용자는 **엉뚱한 기계**를 손본다.
+    try std.testing.expectError(
+        error.GitFailed,
+        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, false),
+    );
+    // 같은 명령을 **원격 해석으로** 부르면 그때는 이름이 붙는다 — 갈리는 것은 그 스위치 하나다.
+    try std.testing.expectError(
+        error.ExitCommandNotFound,
+        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, true),
+    );
+
+    // ⑶ **원격 파일 읽기(diff 오른쪽)도 같은 이름을 받는다**(적대적 검증 1회차). `runOn` 만 배선하면
+    //    목록은 「연결이 끊겼다」인데 diff 는 「읽지 못함」이라, 사용자는 둘 중 무엇을 믿을지 모른다.
+    {
+        var fr_buf: [git_command.max_argv][]const u8 = undefined;
+        var fr_cmd: [git_command.max_remote_command_bytes]u8 = undefined;
+        const dead: git_command.Remote = .{ .dest = hx.dest, .control_path = "/nonexistent/sock" };
+        const fr = git_command.buildRemoteFileRead("/etc/hosts", dead, &fr_buf, &fr_cmd).?;
+        try std.testing.expectError(
+            error.ExitTransportFailed,
+            runArgvWithEnv(allocator, fr, null, true),
+        );
+    }
+
+    // ⑷ **git 이 실제로 거부한 것은 그대로 둔다** — 저장소가 아닌 폴더는 128 이고, 그것은 git 이 한 말이다.
+    try std.testing.expectError(
+        error.GitFailed,
+        runOn(allocator, remote, .status, git_command.remote_git_exe, "/", null),
+    );
 }

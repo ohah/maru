@@ -174,11 +174,17 @@ fn submitGitRead(self: *AppSession, repo: []const u8, remote: ?git_command.Remot
     // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface-tooling.md §6).
     // 후보 열거에만 PATH를 쓰고 exec는 확정된 절대경로로 한다(셸·execvp 경유 없음 = PATH hijack 차단 유지).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse {
+    // ⚠️ **원격 읽기는 로컬 git 을 안 쓴다**(적대적 검증 5회차). `buildRemote` 가 `argv[0]` 을 버리고
+    // `remote_git_exe` 로 바꾸므로(RS4a), 로컬 경로는 어차피 안 실린다. 그런데 여기서 `locate` 를 요구하면
+    // **로컬에 git 이 없는 사용자는 원격 SCM 을 통째로 못 쓰고**, 화면은 「git 이 설치되어 있지 않습니다」로
+    // **엉뚱한 기계**를 가리킨다. 쓰기(`scm_dock.submitWrite`)는 RS4a 에서 이렇게 고쳤는데 읽기를 빠뜨렸다.
+    const git_exe = if (remote != null) git_command.remote_git_exe else git_backend_mod.locate(&exe_buf) orelse {
         self.git_missing = true;
         self.metal_dirty = true;
         return;
     };
+    // 원격 목록을 보는 동안 「로컬에 git 이 없다」는 **이 화면의 이야기가 아니다** — 남겨 두면
+    // `scmEmptyNotice` 가 그것을 먼저 낸다(그 판정이 첫 줄이다).
     self.git_missing = false;
     self.git_request_seq += 1;
     // **비교 기준을 함께 넘긴다**(§3.5). 고른 것이 없으면 빈 값이고 그러면 `origin/HEAD`다 —
@@ -207,6 +213,14 @@ fn forgetGitRepo(self: *AppSession) void {
 
 /// 그 목록이 어느 호스트의 것인지 기억한다(null = 로컬). `rememberGitRepo` 와 **같은 자리에서** 부른다 —
 /// 둘이 갈리면 경로만 맞고 호스트가 낡은 상태가 생기고, 그것이 곧 원격 목록에 로컬 동작을 거는 길이다.
+/// 호스트가 갈리면 **실패와 그 사유도 함께 버린다**(적대적 검증 3회차). 안내 줄만 치우면, 원격에서 낸
+/// 「원격에 git 이 없습니다」가 **로컬 목록 위에** 그대로 남는다 — 경로가 같으면 `rememberGitRepo` 가
+/// 그 전환을 못 보기 때문이다(RS2 2회차와 같은 뿌리: 경로만 보면 두 기계가 같은 값이다).
+fn forgetReadFailure(self: *AppSession) void {
+    self.git_failed = false;
+    self.git_failure = .generic;
+}
+
 pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     const want = dest orelse {
         const had = self.git_repo_dest;
@@ -214,7 +228,10 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
         self.git_repo_dest = null;
         // **양방향이다**(적대적 검증 4회차 — 판정자가 잡았다). 로컬 → 원격만 치우고 반대를 빼먹으면,
         // 원격에서 낸 「원격 세션이라 아직 목록만 읽습니다」가 **로컬 목록 위에** 그대로 남는다.
-        if (had != null) scm_dock_ops.clearScmWriteError(self);
+        if (had != null) {
+            scm_dock_ops.clearScmWriteError(self);
+            forgetReadFailure(self);
+        }
         return;
     };
     if (self.git_repo_dest) |current| {
@@ -225,6 +242,7 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     // 하지만 그쪽은 **경로**로만 판정해서, 로컬 `/srv/app` → 원격 `/srv/app` 처럼 경로가 같고 호스트만
     // 바뀌는 전환을 못 본다 — 그때 「원격 세션이라 아직 목록만 읽습니다」가 로컬 목록 위에 그대로 남는다.
     scm_dock_ops.clearScmWriteError(self);
+    forgetReadFailure(self);
     self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
 }
 
@@ -456,6 +474,7 @@ fn clearScmResult(self: *AppSession) void {
     self.git_result = null;
     scm_dock_ops.invalidateRepoList(self); // 저장소가 갈렸다 — 목록도 다시 걷는다
     self.git_failed = false; // 옛 저장소의 실패를 새 저장소에 물려주지 않는다
+    self.git_failure = .generic; // 사유도 함께 — 남기면 다른 저장소 위에 옛 이유가 뜬다
     self.scm_scroll = .{}; // 다른 목록이므로 스크롤·선택은 의미가 없다(엉뚱한 행이 선택돼 보인다)
     self.scm_selected_row = null;
     // **옛 저장소로 날아간 요청을 포기한다.** 이게 없으면 두 가지가 동시에 깨진다: ⑴ `refreshGitStatus`가
@@ -619,12 +638,14 @@ pub fn drainGitStatus(self: *AppSession) void {
         self.git_inflight = 0;
         if (!result.ok) {
             // 실패한 읽기는 결과로 삼지 않는다(섹션이 옛 시점과 섞이지 않게). in-flight만 풀고 상태를 남긴다.
+            self.git_failure = result.failure; // **사유를 먼저 든다** — deinit 뒤에는 못 읽는다
             result.deinit(git_backend_mod.worker_allocator);
             self.git_failed = true;
             self.metal_dirty = true;
             continue;
         }
         self.git_failed = false;
+        self.git_failure = .generic;
         // **원격 저장소 루트를 목록과 같은 결과에서 받는다**(RS3). 이 값이 있어야 diff 가 상대경로를
         // 절대경로로 만들어 작업트리 파일을 읽는다. 로컬 결과에는 비어 있고, 그때는 기억을 비운다 —
         // 남겨 두면 로컬 목록을 보는 동안 옛 원격 루트가 살아 있어 그 쌍으로 파일을 열 수 있다.
@@ -950,11 +971,20 @@ pub fn noticeNoChanges() []const u8 {
 /// 렌더 안 표현식으로 두지 않고 함수로 뺀 이유도 그것이다 — 세 상태를 테스트에서 각각 짚을 수 있어야 두 결론이
 /// 다시 한 문구로 접히는 회귀를 단위로 잡는다.
 pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
-    if (self.git_missing) return maru.i18n.t(.git_not_installed);
+    // ⚠️ **원격 목록에는 로컬 이야기를 안 한다**(적대적 검증 5회차). 원격 읽기는 로컬 git 을 안 쓰므로
+    // (`buildRemote` 가 `argv[0]` 을 버린다), 그 화면에서 「git 이 설치되어 있지 않습니다」는 **엉뚱한
+    // 기계**를 가리킨다. 제출부가 그 깃발을 지우지만, **첫 제출 전 창**이 남는다 — 여기서 닫는다.
+    if (self.git_missing and !scmTargetIsRemote(self)) return maru.i18n.t(.git_not_installed);
     return switch (gitRepoTarget(self, probe)) {
         .none => noticeNotARepo(),
         .unknown => noticeRepoUnknown(),
-        .repo => if (self.git_failed) maru.i18n.t(.git_read_failed) else maru.i18n.t(.scm_loading),
+        // **읽기 실패는 이유를 말한다**(RS4 §2.2 ⑺). 셋은 사용자가 할 일이 각각 다르다:
+        // 원격에 git 을 깐다 · 연결을 다시 붙인다 · (그 밖) 저장소를 본다.
+        .repo => if (self.git_failed) switch (self.git_failure) {
+            .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
+            .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+            .generic => maru.i18n.t(.git_read_failed),
+        } else maru.i18n.t(.scm_loading),
     };
 }
 

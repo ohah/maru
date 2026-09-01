@@ -434,7 +434,7 @@ fn validateUpgrade(root: UpgradeRoot) Error!void {
     )) return error.LeafMismatch;
 }
 
-fn validateCommon(common: Common) Error!void {
+pub fn validateCommon(common: Common) Error!void {
     try scalar(common.test_uuid);
     if (!canonicalUuidV4(common.test_uuid)) return error.InvalidUuid;
     try scalar(common.repository.owner);

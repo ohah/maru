@@ -8,6 +8,7 @@ const process = @import("bounded_process");
 const transport = @import("release_adapter_github_transport");
 
 pub const Error = transport.Error || process.Error;
+pub const Request = transport.Request;
 
 pub fn fetch(
     io: std.Io,

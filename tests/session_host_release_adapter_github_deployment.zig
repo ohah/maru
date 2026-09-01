@@ -300,3 +300,25 @@ test "successful allocations are covered by fail-index testing" {
         .{ jobs, deployments, &backing, expected, environment },
     );
 }
+
+test "prepared deployment transcript is final-address and terminal after rejected status" {
+    var prepared: github_deployment.Prepared = .{};
+    try prepared.prepareJobs(std.testing.allocator, jobs, expected);
+    defer prepared.deinit() catch {};
+    try prepared.prepareDeployments(std.testing.allocator, deployments, expected);
+    const ids = try prepared.candidateIds();
+    try std.testing.expectEqualSlices(u64, &.{5_659_920_837}, ids);
+    var copied = prepared;
+    try std.testing.expectError(error.InvalidOwner, copied.candidateIds());
+    try std.testing.expectError(error.InvalidJson, prepared.acceptStatuses(
+        std.testing.allocator,
+        ids[0],
+        statuses ++ "null",
+    ));
+    try std.testing.expectError(error.InvalidOwner, prepared.acceptStatuses(
+        std.testing.allocator,
+        ids[0],
+        statuses,
+    ));
+    try std.testing.expectError(error.InvalidOwner, prepared.finish(environment));
+}

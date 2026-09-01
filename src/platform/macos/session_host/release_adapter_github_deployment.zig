@@ -88,6 +88,7 @@ pub const Observation = struct {
 };
 
 pub const Error = error{
+    InvalidOwner,
     ResponseTooLarge,
     InvalidJson,
     UnprotectedEnvironment,
@@ -97,6 +98,89 @@ pub const Error = error{
 const Job = struct {
     id: u64,
     url: []const u8,
+};
+
+pub const Prepared = struct {
+    owner: ?*Prepared = null,
+    jobs: ?std.json.Parsed(ApiJobs) = null,
+    deployments: ?std.json.Parsed([]const ApiDeployment) = null,
+    job: ?Job = null,
+    candidate_ids: [max_collection_entries]u64 = @splat(0),
+    received: [max_collection_entries]bool = @splat(false),
+    matched: [max_collection_entries]bool = @splat(false),
+    candidate_count: usize = 0,
+    failed: bool = false,
+
+    pub fn deinit(self: *Prepared) !void {
+        if (self.owner != self) return error.InvalidOwner;
+        if (self.deployments) |*value| value.deinit();
+        if (self.jobs) |*value| value.deinit();
+        self.* = .{};
+    }
+
+    pub fn prepareJobs(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context) !void {
+        if (self.owner != null or self.jobs != null or self.deployments != null) return error.InvalidOwner;
+        var parsed = try parse(ApiJobs, allocator, bytes);
+        errdefer parsed.deinit();
+        if (parsed.value.jobs.len > max_collection_entries) return error.DeploymentMismatch;
+        const job = try bindJob(parsed.value, expected);
+        self.jobs = parsed;
+        self.job = job;
+        self.owner = self;
+    }
+
+    pub fn prepareDeployments(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context) !void {
+        if (self.owner != self or self.jobs == null or self.deployments != null or self.failed) return error.InvalidOwner;
+        errdefer self.failed = true;
+        var parsed = try parse([]const ApiDeployment, allocator, bytes);
+        errdefer parsed.deinit();
+        if (parsed.value.len > max_collection_entries) return error.DeploymentMismatch;
+        for (parsed.value) |deployment| {
+            if (!baseDeploymentMatches(deployment, expected)) continue;
+            if (!deploymentAuthorityMatches(deployment)) return error.DeploymentMismatch;
+            for (self.candidate_ids[0..self.candidate_count]) |id| if (id == deployment.id.value) return error.DeploymentMismatch;
+            self.candidate_ids[self.candidate_count] = deployment.id.value;
+            self.candidate_count += 1;
+        }
+        self.deployments = parsed;
+    }
+
+    pub fn candidateIds(self: *const Prepared) ![]const u64 {
+        if (self.owner != self or self.deployments == null or self.failed) return error.InvalidOwner;
+        return self.candidate_ids[0..self.candidate_count];
+    }
+
+    pub fn acceptStatuses(self: *Prepared, allocator: std.mem.Allocator, deployment_id: u64, bytes: []const u8) !void {
+        if (self.owner != self or self.deployments == null or self.job == null or self.failed) return error.InvalidOwner;
+        errdefer self.failed = true;
+        var index: ?usize = null;
+        for (self.candidate_ids[0..self.candidate_count], 0..) |id, candidate_index| if (id == deployment_id) {
+            index = candidate_index;
+            break;
+        };
+        const candidate_index = index orelse return error.DeploymentMismatch;
+        if (self.received[candidate_index]) return error.DeploymentMismatch;
+        const deployment = deploymentFor(self.deployments.?.value, deployment_id) orelse return error.DeploymentMismatch;
+        self.matched[candidate_index] = try statusesBind(allocator, bytes, deployment, self.job.?.url);
+        self.received[candidate_index] = true;
+    }
+
+    pub fn finish(self: *Prepared, environment: github_environment.Observation) !Observation {
+        if (self.owner != self or self.deployments == null or self.job == null or self.failed) return error.InvalidOwner;
+        errdefer self.failed = true;
+        if (!recognizedProtection(environment)) return error.UnprotectedEnvironment;
+        var match_count: usize = 0;
+        var deployment_id: u64 = 0;
+        for (0..self.candidate_count) |index| {
+            if (!self.received[index]) return error.DeploymentMismatch;
+            if (self.matched[index]) {
+                match_count += 1;
+                deployment_id = self.candidate_ids[index];
+            }
+        }
+        if (match_count != 1) return error.DeploymentMismatch;
+        return .{ .job_id = self.job.?.id, .deployment_id = deployment_id, .environment_id = environment.id };
+    }
 };
 
 /// Binds exact component observations. Input slices need only remain valid for this call.
@@ -109,53 +193,14 @@ pub fn parseAndBind(
     environment: github_environment.Observation,
 ) Error!Observation {
     if (!recognizedProtection(environment)) return error.UnprotectedEnvironment;
-
-    var jobs = try parse(ApiJobs, allocator, jobs_bytes);
-    defer jobs.deinit();
-    if (jobs.value.jobs.len > max_collection_entries) return error.DeploymentMismatch;
-    const job = try bindJob(jobs.value, expected);
-
-    var deployments = try parse([]const ApiDeployment, allocator, deployments_bytes);
-    defer deployments.deinit();
-    if (deployments.value.len > max_collection_entries or
-        status_backings.len > max_collection_entries) return error.DeploymentMismatch;
+    if (status_backings.len > max_collection_entries) return error.DeploymentMismatch;
     try validateBackingIdentity(status_backings);
-
-    var bound_count: u8 = 0;
-    var bound_deployment_id: u64 = 0;
-    for (deployments.value) |deployment| {
-        if (!baseDeploymentMatches(deployment, expected)) continue;
-        if (!deploymentAuthorityMatches(deployment)) return error.DeploymentMismatch;
-        const backing = backingFor(status_backings, deployment.id.value) orelse
-            return error.DeploymentMismatch;
-        if (try statusesBind(allocator, backing.bytes, deployment, job.url)) {
-            bound_count = std.math.add(u8, bound_count, 1) catch
-                return error.DeploymentMismatch;
-            bound_deployment_id = deployment.id.value;
-        }
-    }
-    if (bound_count != 1) return error.DeploymentMismatch;
-
-    // A backing for a foreign or filtered-out deployment is ambiguous caller input. The transport
-    // layer must give this resolver exactly the status histories it requested for base candidates.
-    for (status_backings) |backing| {
-        var found = false;
-        for (deployments.value) |deployment| {
-            if (deployment.id.value == backing.deployment_id and
-                baseDeploymentMatches(deployment, expected))
-            {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return error.DeploymentMismatch;
-    }
-
-    return .{
-        .job_id = job.id,
-        .deployment_id = bound_deployment_id,
-        .environment_id = environment.id,
-    };
+    var prepared: Prepared = .{};
+    try prepared.prepareJobs(allocator, jobs_bytes, expected);
+    defer prepared.deinit() catch {};
+    try prepared.prepareDeployments(allocator, deployments_bytes, expected);
+    for (status_backings) |backing| try prepared.acceptStatuses(allocator, backing.deployment_id, backing.bytes);
+    return prepared.finish(environment);
 }
 
 fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Error!std.json.Parsed(T) {
@@ -236,8 +281,8 @@ fn validateBackingIdentity(backings: []const StatusBacking) Error!void {
     }
 }
 
-fn backingFor(backings: []const StatusBacking, deployment_id: u64) ?StatusBacking {
-    for (backings) |backing| if (backing.deployment_id == deployment_id) return backing;
+fn deploymentFor(deployments: []const ApiDeployment, deployment_id: u64) ?ApiDeployment {
+    for (deployments) |deployment| if (deployment.id.value == deployment_id) return deployment;
     return null;
 }
 

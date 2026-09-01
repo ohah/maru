@@ -9,6 +9,7 @@ const release = @import("release_adapter_github_release");
 const tag_authority = @import("release_adapter_github_tag_authority");
 const transport_macos = @import("release_adapter_github_transport_macos");
 const cli_authority = @import("release_adapter_github_cli_authority");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const max_total_commands = current_authority.max_total_commands + 2 + tag_authority.max_annotated_tags;
 pub const PinnedExecutable = cli_authority.PinnedExecutable;
@@ -79,6 +80,9 @@ const RealCurrentSource = struct {
     pub fn authenticate(_: *@This(), authority: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, result: *current_authority.CurrentGitHubAuthority) !void {
         try current_authority.authenticateWith(authority, executor, clock, allocator, expected, executable, token, response, budget_ns, result);
     }
+    pub fn authenticateUntil(_: *@This(), authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, result: *current_authority.CurrentGitHubAuthority) !void {
+        try current_authority.authenticateUntilWith(authority, executor, deadline, allocator, expected, executable, token, response, result);
+    }
 };
 
 pub fn authenticate(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, candidate: manifest.Manifest, cli: Cli, token: []const u8, response: []u8, budget_ns: i128, result: *CurrentReleaseAuthority) !void {
@@ -87,6 +91,13 @@ pub fn authenticate(io: std.Io, allocator: std.mem.Allocator, expected: context_
     var executor = transport_macos.BoundedExecutor{ .io = io };
     var clock = RealClock{};
     return authenticateWith(&source, &authority, &executor, &clock, allocator, expected, candidate, cli.path, token, response, budget_ns, result);
+}
+
+pub fn authenticateUntil(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, candidate: manifest.Manifest, cli: Cli, token: []const u8, response: []u8, deadline: *deadline_mod.Deadline, result: *CurrentReleaseAuthority) !void {
+    var source = RealCurrentSource{};
+    var authority = RealAuthority{ .pinned = cli.pinned };
+    var executor = transport_macos.BoundedExecutor{ .io = io };
+    return authenticateUntilWith(&source, &authority, &executor, deadline, allocator, expected, candidate, cli.path, token, response, result);
 }
 
 pub fn authenticateWith(source: anytype, authority: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, candidate: manifest.Manifest, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, result: *CurrentReleaseAuthority) !void {
@@ -128,6 +139,49 @@ pub fn authenticateWith(source: anytype, authority: anytype, executor: anytype, 
     result.tag_len = candidate.release.tag.len;
     @memcpy(result.tag[0..result.tag_len], candidate.release.tag);
     result.owner = result;
+}
+
+pub fn authenticateUntilWith(source: anytype, authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, candidate: manifest.Manifest, executable: [:0]const u8, token: []const u8, response: []u8, result: *CurrentReleaseAuthority) !void {
+    if (result.owner != null) return error.InvalidOwner;
+    try context_mod.bindManifest(expected, candidate);
+
+    var current: current_authority.CurrentGitHubAuthority = .{};
+    try source.authenticateUntil(authority, executor, deadline, allocator, expected, executable, token, response, &current);
+    defer current.deinit() catch {};
+    const current_view = current.value() orelse return error.CurrentAuthorityMismatch;
+    if (current_view.repository_id != candidate.repository.id or current_view.run_id != candidate.build.run_id or
+        current_view.run_attempt != candidate.build.run_attempt or !std.mem.eql(u8, current_view.source_commit, candidate.source.commit) or
+        !current_view.protected_environment) return error.CurrentAuthorityMismatch;
+
+    const release_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .draft_releases, response);
+    var parsed_release = try release.parseDraftCollectionAndBind(allocator, release_bytes, .{ .id = candidate.release.id, .tag = candidate.release.tag, .publication = .draft });
+    defer parsed_release.deinit();
+
+    var resolved: tag_authority.TagAuthority = .{};
+    try tag_authority.resolveUntilWith(authority, executor, deadline, allocator, candidate.release.tag, candidate.source.commit, executable, token, response, &resolved);
+    defer resolved.deinit() catch {};
+    _ = resolved.value() orelse return error.InvalidOwner;
+    _ = try deadline.remaining();
+
+    if (candidate.release.tag.len > result.tag.len) return error.InvalidObservation;
+    result.repository_id = current_view.repository_id;
+    result.run_id = current_view.run_id;
+    result.run_attempt = current_view.run_attempt;
+    @memcpy(&result.source_commit, current_view.source_commit);
+    result.job_id = current_view.job_id;
+    result.deployment_id = current_view.deployment_id;
+    result.environment_id = current_view.environment_id;
+    result.protected_environment = true;
+    result.release_id = parsed_release.observation().id;
+    result.tag_len = candidate.release.tag.len;
+    @memcpy(result.tag[0..result.tag_len], candidate.release.tag);
+    result.owner = result;
+}
+
+fn fetchUntil(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, executable: [:0]const u8, token: []const u8, request: transport_macos.Request, response: []u8) ![]const u8 {
+    _ = try deadline.remaining();
+    try authority.revalidate(allocator, executable);
+    return transport_macos.fetchWith(executor, allocator, executable, token, request, response, try deadline.remaining());
 }
 
 fn DeadlineExecutor(comptime Executor: type, comptime Clock: type) type {

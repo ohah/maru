@@ -1345,6 +1345,26 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   publication과 prepared bytes 해제를 Debug·ReleaseFast에서 검증한다. 이 gate는 leaf 의미 검증, production executable 배선,
   workflow ordering 또는 frozen U5 E2E를 대신하지 않는다.
 
+  production `verify-predecessor` execution owner는
+  `src/platform/macos/session_host/release_adapter_verify_predecessor_product.zig`의 caller-owned final-address `Execution`이다.
+  executable bootstrap의 exact `verify_predecessor` command/context/pinned CLI, validated borrowed token, positive phase budget과 caller-owned
+  bounded GitHub/attestation buffers만 입력으로 받고 앞 절 transaction의 각 step을 기존 production leaf에 직접 연결한다. `Execution`
+  storage는 bootstrap/token/context/command/buffer와 겹칠 수 없으며 alias preflight는 deadline·filesystem·child보다 먼저다. command의
+  manifest는 no-follow single-read candidate로 열고 input을 private workspace의 `current-manifest` child에 exact once materialize한 뒤
+  current protected context의 published-A attestation을 수행한다. 인증된 manifest는 같은 deadline으로 immutable tag chain/release/assets를
+  `predecessor-assets` child에 검증하고, summary bytes를 owner graph에서 준비한다.
+
+  transaction의 private cleanup 뒤 `Execution`이 소유한 live deadline의 remaining budget을 최종 검증하고 deadline을 정리한 뒤에만
+  command의 absent `summary-out`에 prepared bytes를 게시한다. foreign 또는 만료된 deadline은 publication 0으로 거부한다. 성공과 ordinary failure는 execution의
+  private owner, deadline, prepared bytes와 borrowed bootstrap/token/buffer를 모두 비운다. cleanup failure 때만 아직 live인 child owner와
+  cleanup allocator context를 같은 `Execution`에 보존하고 borrow는 즉시 지운다. caller는 `retryCleanup`으로 foreign pathname을 지우지
+  않은 채 남은 owner를 정리해야 하며 그 전에는 execution을 재사용하거나 성공으로 처리할 수 없다. token/bootstrap/buffer 검증은
+  manifest open, work-directory와 child 실행보다 먼저 일어나고, supplied buffers는 execution/bootstrap/token/context/command storage와
+  서로 겹칠 수 없다. focused gate `test-session-host-release-adapter-verify-predecessor-product`는 invalid/copied/pre-owned execution의
+  side effect 0, exact production type wiring, transaction delegation, owned deadline의 최종 만료/foreign 거부, success/ordinary-failure
+  empty state, cleanup-failure retry state와 sensitive borrow scrubbing을 Debug·ReleaseFast에서 검증한다. 실제 GitHub child 성공은
+  release workflow와 frozen U5 E2E가 소유한다.
+
   pre-publish phase transaction의 단일 순서 소유자는
   `src/platform/macos/session_host/release_adapter_pre_publish_phase.zig`다. validated token과 positive budget을 받은 뒤 deadline과
   private workspace를 exact once 만들고, current authority/candidate/input, predecessor input/tag-assets, current product/evidence/

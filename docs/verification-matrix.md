@@ -2489,6 +2489,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   cleanup failure와 final deadline 만료의 publication 0, retry authority, deadline과 prepared bytes exact release는
   `test-session-host-release-adapter-verify-predecessor-phase`가 Debug·ReleaseFast에서 검증한다. leaf 의미, production executable과
   workflow/U5 E2E는 이 gate의 범위 밖이다.
+  production verify-predecessor `Execution`은 bootstrap의 exact command/context/pinned CLI, validated token과 disjoint supplied buffers를
+  transaction의 candidate single-read, private manifest materialization, published-A attestation, immutable assets와 prepared summary
+  publication에 연결하고 private cleanup 뒤 owned live deadline을 최종 검증한다. result/bootstrap/token/context/command/buffer alias를 side effect 전에 거부하고 invalid/copied/pre-owned owner side effect 0, foreign/expired deadline publication 0, 성공/ordinary failure empty state, cleanup failure retry authority와
+  sensitive borrow scrubbing은 `test-session-host-release-adapter-verify-predecessor-product`가 Debug·ReleaseFast에서 검증한다. 실제 GitHub
+  success와 workflow/U5 E2E는 별도 증거다.
   production `Execution`은 bootstrap의 pre-publish command/context/pinned CLI와 validated token만 받아 shared deadline/workspace 및
   기존 production `...Until` leaf를 transaction에 연결하고 private cleanup 뒤 `Execution` 자체가 소유한 live deadline만 최종 검증한다. foreign/expired deadline은 publication 0이며 ordinary failure는 empty state로 돌아가고 cleanup 실패만 caller-owned
   execution에 retry authority를 남기며 result/bootstrap/token/context/command/buffer/Apple storage alias를 side effect 전에 거부하는 계약은 `test-session-host-release-adapter-pre-publish-product`가 Debug·ReleaseFast에서

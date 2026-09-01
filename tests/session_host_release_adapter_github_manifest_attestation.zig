@@ -3,8 +3,10 @@
 const std = @import("std");
 const c = std.c;
 const manifest = @import("release_manifest");
+const context_mod = @import("release_adapter_context");
 const deadline_mod = @import("release_adapter_deadline");
 const manifest_file = @import("release_adapter_github_manifest_file");
+const cli_authority = @import("release_adapter_github_cli_authority");
 const composition = @import("release_adapter_github_manifest_attestation");
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -40,6 +42,16 @@ fn candidate() manifest.Manifest {
         .signing = .{ .bundle_id = "com.maru.app", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "TEAMID1234", .designated_requirement_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
         .assets = assets,
         .evidence = .{ .test_uuid = "123e4567-e89b-12d3-a456-426614174000", .summary_name = "summary.json", .summary_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .result = "passed" },
+    };
+}
+
+fn publishedContext() context_mod.Context {
+    return .{
+        .repository = .{ .id = 12345, .owner = "ohah", .name = "maru" },
+        .tag = "v1.2.3",
+        .source_commit = commit,
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 333, .run_attempt = 2 },
+        .protected_tag = true,
     };
 }
 
@@ -141,6 +153,16 @@ fn authenticateAllocationCase(allocator: std.mem.Allocator, bytes: []const u8, s
         .commit = commit,
         .manifest_sha256 = sha,
     }, bytes, file, "/opt/trusted/gh", "token", &output, std.time.ns_per_s, &result);
+    try result.deinit(allocator);
+}
+
+fn authenticatePublishedAllocationCase(allocator: std.mem.Allocator, bytes: []const u8, file: *manifest_file.ManifestFile) !void {
+    var authority = Authority{};
+    var executor = Attesting{ .sha = file.observation().?.sha256 };
+    var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedManifest = .{};
+    try composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, allocator, publishedContext(), bytes, file, "/opt/trusted/gh", "token", &output, &result);
     try result.deinit(allocator);
 }
 
@@ -433,4 +455,137 @@ test "successful composition unwinds every allocation failure" {
     try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
     defer file.cleanup() catch {};
     try std.testing.checkAllAllocationFailures(std.testing.allocator, authenticateAllocationCase, .{ bytes, &sha, &file });
+}
+
+test "published A binds current protected context without successor authority" {
+    _ = composition.authenticatePublishedUntil;
+    const bytes = try manifest.writeCanonical(std.testing.allocator, candidate());
+    defer std.testing.allocator.free(bytes);
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    const sha = std.fmt.bytesToHex(hash, .lower);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var file: manifest_file.ManifestFile = .{};
+    try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
+    defer file.cleanup() catch {};
+    var authority = Authority{};
+    var executor = Attesting{ .sha = &sha };
+    var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedManifest = .{};
+    try composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, publishedContext(), bytes, &file, "/opt/trusted/gh", "token", &output, &result);
+    try std.testing.expectEqual(@as(usize, 3), deadline.cursor);
+    try std.testing.expectEqual(@as(i128, 70), executor.budget_ns);
+    try std.testing.expectEqual(@as(u64, 77), result.value().?.release.id);
+    try result.deinit(std.testing.allocator);
+
+    authority = .{};
+    executor = .{ .sha = &sha };
+    deadline = .{ .values = &.{ 100, 70, 0 } };
+    try std.testing.expectError(error.TimedOut, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, publishedContext(), bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 1), executor.calls);
+    try std.testing.expect(result.value() == null);
+}
+
+test "published A authentication unwinds every allocation failure" {
+    const bytes = try manifest.writeCanonical(std.testing.allocator, candidate());
+    defer std.testing.allocator.free(bytes);
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    const sha = std.fmt.bytesToHex(hash, .lower);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var file: manifest_file.ManifestFile = .{};
+    try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
+    defer file.cleanup() catch {};
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, authenticatePublishedAllocationCase, .{ bytes, &file });
+}
+
+test "published manifest rejects unprotected context role B and drift before authority" {
+    var values = [_]manifest.Manifest{ candidate(), candidate(), candidate(), candidate() };
+    var contexts = [_]context_mod.Context{ publishedContext(), publishedContext(), publishedContext(), publishedContext() };
+    const file_names = [_][]const u8{
+        "Maru-1.2.3-session-host-release.json",
+        "Maru-1.2.3-session-host-release.json",
+        "Maru-1.2.3-session-host-release.json",
+        "Maru-9.9.9-session-host-release.json",
+    };
+    contexts[0].protected_tag = false;
+    values[1].role = .b;
+    values[1].predecessor = .{ .release_id = 1, .tag = "v1.0.0", .commit = "1111111111111111111111111111111111111111", .manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" };
+    contexts[2].build.run_attempt = 3;
+    for (values, contexts, file_names) |value, trusted, file_name| {
+        const bytes = try manifest.writeCanonical(std.testing.allocator, value);
+        defer std.testing.allocator.free(bytes);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+        const sha = std.fmt.bytesToHex(hash, .lower);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.fs.max_path_bytes:0]u8 = undefined;
+        var file: manifest_file.ManifestFile = .{};
+        try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = file_name, .sha256 = &sha, .bytes = bytes });
+        defer file.cleanup() catch {};
+        var authority = Authority{};
+        var executor = Never{};
+        var deadline = SharedDeadline{ .values = &.{ 100, 70 } };
+        var output: [8192]u8 = undefined;
+        var result: composition.AuthenticatedManifest = .{};
+        try std.testing.expectError(error.InvalidPublishedManifest, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, trusted, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+        try std.testing.expectEqual(@as(usize, 0), authority.calls);
+        try std.testing.expectEqual(@as(usize, 0), executor.calls);
+        try std.testing.expectEqual(@as(usize, 0), deadline.cursor);
+        try std.testing.expect(result.value() == null);
+    }
+}
+
+test "manifest owner aliases are rejected before deadline authority or child access" {
+    const canonical = try manifest.writeCanonical(std.testing.allocator, candidate());
+    defer std.testing.allocator.free(canonical);
+    var file: manifest_file.ManifestFile = .{};
+    var authority = Authority{};
+    var executor = Never{};
+    var deadline = SharedDeadline{ .values = &.{100} };
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedManifest = .{};
+    const trusted = publishedContext();
+
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, trusted, canonical, &file, "/opt/trusted/gh", "token", std.mem.asBytes(&result), &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, trusted, std.mem.asBytes(&result), &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, trusted, canonical, &file, "/opt/trusted/gh", "token", std.mem.asBytes(&file), &result));
+
+    var trusted_storage: [16]u8 = undefined;
+    @memcpy(trusted_storage[0..6], "v1.2.3");
+    var aliased_trusted = trusted;
+    aliased_trusted.tag = trusted_storage[0..6];
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntilWith(&authority, &executor, &deadline, std.testing.allocator, aliased_trusted, canonical, &file, "/opt/trusted/gh", "token", &trusted_storage, &result));
+
+    var deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const aliased_deadline: *SharedDeadline = @ptrCast(&deadline_storage);
+    aliased_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntilWith(&authority, &executor, aliased_deadline, std.testing.allocator, trusted, canonical, &file, "/opt/trusted/gh", "token", &deadline_storage, &result));
+
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expectEqual(@as(usize, 0), deadline.cursor);
+
+    var token_storage = [_]u8{ 't', 'o', 'k', 'e', 'n' };
+    const predecessor: manifest.Predecessor = .{ .release_id = 77, .tag = "v1.2.3", .commit = commit, .manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" };
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, predecessor, canonical, &file, "/opt/trusted/gh", &token_storage, &token_storage, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), deadline.cursor);
+
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    var pinned_storage: [@sizeOf(cli_authority.PinnedExecutable)]u8 align(@alignOf(cli_authority.PinnedExecutable)) = undefined;
+    @memset(&pinned_storage, 'x');
+    const pinned: *cli_authority.PinnedExecutable = @ptrCast(&pinned_storage);
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntil(std.testing.io, std.testing.allocator, trusted, canonical, &file, .{ .path = "/opt/trusted/gh", .pinned = pinned }, "token", &pinned_storage, &real_deadline, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticatePublishedUntil(std.testing.io, std.testing.allocator, trusted, canonical, &file, .{ .path = "/opt/trusted/gh", .pinned = pinned }, pinned_storage[0.."token".len], &output, &real_deadline, &result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, predecessor, canonical, &file, .{ .path = "/opt/trusted/gh", .pinned = pinned }, pinned_storage[0.."token".len], &output, &real_deadline, &result));
 }

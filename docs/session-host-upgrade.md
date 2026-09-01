@@ -1409,6 +1409,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   GitHub API token capture, 두 phase의 전체 owner orchestration, workflow의 checkout 전 CLI capture, GitHub Release publication
   또는 frozen U5 제품 E2E를 대신하지 않는다.
 
+  release executable의 token process leaf 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_token_environment.zig`다. leaf는 process environment를 열거하거나 workflow
+  shell이 바꾼 별칭을 받지 않고 exact `GH_TOKEN` 하나만 조회한다. 값의 empty/control/NUL/4 KiB 상한은 새 parser로 복제하지
+  않고 기존 `release_adapter_github_transport.validateToken`을 그대로 호출해 transport와 같은 정책으로 fail-close한다.
+  성공 값은 process environment에서 빌린 slice이며 heap·argv·header·diagnostic·summary storage로 복사하지 않는다. executable은
+  token view가 살아 있는 동안 `setenv`/`unsetenv`를 호출하지 않고, 후속 phase orchestration만 bootstrap의 pinned CLI와 이
+  validated token을 함께 소비한다. 후속 phase orchestration은 missing/invalid token을 CLI revalidation,
+  GitHub API/attestation child, local asset open, work-directory 또는 summary publication보다 먼저 검사해야 한다.
+
+  focused gate `test-session-host-release-adapter-token-environment`는 exact `GH_TOKEN` lookup 1회, missing/empty/control/NUL/cap+1,
+  기존 validator delegation과 borrowed-byte provenance를 Debug·ReleaseFast에서 검증한다. product leaf는 local shell을 trusted
+  release oracle로 삼지 않고 compile만 고정한다. token 내용을 실패 진단에 넣지 않으며 gate fixture도 실제 credential을 읽거나
+  출력하지 않는다. 이 component는 두 phase 전체 owner ordering, workflow permission, checkout 전 CLI capture, GitHub Release
+  publication 또는 frozen U5 제품 E2E를 대신하지 않는다.
+
   release evidence의 canonical bytes는 OS 중립
   `src/platform/macos/session_host/release_evidence.zig` 한 곳이 소유한다. schema는 exact
   `maru.session-host-release-evidence.v1`이고 profile은 `baseline_a | upgrade_b`의 닫힌 union이다. G3의

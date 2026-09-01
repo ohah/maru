@@ -957,6 +957,28 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   zero-residue는 기존 DMG authority component/E2E gate가 계속 소유한다. 이 gate만으로 compatibility/evidence/세 asset attestation,
   final manifest observation, summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  current evidence provenance composition의 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_github_current_evidence.zig`다. 입력은 move-only
+  `CurrentManifestInput` B, 그 B의 predecessor와 이미 교차결속된 move-only `AuthenticatedManifest` A, 그리고 caller의 evidence
+  summary pathname뿐이다. caller가 repository/release/source/build/candidate/predecessor/signer expectation을 별도 scalar로 제출하는
+  API는 두지 않는다. composition은 B manifest의 exact `evidence_summary` asset basename·size·SHA-256과 `evidence.summary_name`·
+  `summary_sha256`을 먼저 같은 값으로 고정하고, summary를 `readInputAlloc(max_evidence_bytes)`로 한 번만 no-follow bounded read한다.
+  B manifest input과 같은 opened `(device,inode)`인 summary는 role alias로 거부한다.
+
+  canonical evidence를 strict parse한 뒤 B manifest에서 repository/release/source/build, universal DMG와 frozen executable candidate
+  digest, `evidence.test_uuid`, `signing.designated_requirement_sha256`을 유도한다. A manifest에서는 exact release ID/tag/source commit,
+  canonical A manifest digest와 A의 universal DMG/frozen executable digest를 유도한다. B의 predecessor 네 필드와 A의 role-A·
+  predecessor-absent manifest를 다시 교차검증한 뒤 이 typed expectation으로 `release_evidence.bind(.upgrade_b)`를 호출한다. 성공은
+  pathname이 아니라 owned summary bytes, computed file observation과 parsed evidence를 한 final-address move-only
+  `CurrentEvidence`로 게시한다. copied/pre-owned/stale manifest owner, A/B swap, foreign predecessor asset, foreign signer, summary
+  pathname·asset·manifest evidence drift, malformed/noncanonical bytes와 allocation failure에서는 결과를 게시하지 않는다.
+
+  focused gate `test-session-host-release-adapter-github-current-evidence`는 Debug·ReleaseFast actual filesystem에서 success와
+  move-only cleanup, caller pathname read 뒤 mutation 격리, manifest-summary inode alias, basename/size/SHA drift, A/B
+  predecessor·candidate·test UUID·signer mismatch, malformed bytes와 allocation unwind의 publication 0을 검증한다. 이 gate는 summary
+  artifact attestation, frozen executable compatibility observation, 세 current asset attestation, final
+  `release_manifest.Observation`, workflow 배선 또는 frozen U5 E2E를 대신하지 않는다.
+
   `release_evidence.UpgradeExpected`는 manifest signing의 `designated_requirement_sha256`도 포함한다. canonical aggregate의 one/near-max
   두 signed-upgrade leaf는 서로 같은 requirement digest를 갖는 것뿐 아니라 이 exact expected digest와도 같아야 한다. 이전처럼 두
   leaf가 같은 foreign signer를 함께 기록하면 통과하는 상태는 허용하지 않는다. `release_evidence.bind`가 manifest/Apple product에서

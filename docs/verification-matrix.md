@@ -2627,6 +2627,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   owned Apple observation을 move-only로 게시한다. `test-session-host-release-adapter-github-current-product`가 Debug·ReleaseFast에서
   authenticated/move-only/path/asset/cap/signing/digest/mutation/failure/cleanup/allocation 경계를 검증한다. 실제 mount/Apple command와
   residue는 기존 DMG authority gate가 소유하며 compatibility/evidence/asset attestation/final observation과 workflow/U5 배선은 후속이다.
+  Current evidence provenance composition은 move-only authenticated current B와 predecessor A manifest만 identity SSOT로 받아 B의
+  summary asset basename·size·SHA와 evidence fields, B↔A predecessor 및 A asset set을 다시 교차검증한다. caller identity scalar 없이
+  B에서 current common/candidate/test UUID/signer를, A에서 predecessor release/manifest/DMG/executable digest를 유도해 no-follow bounded
+  read한 canonical `upgrade_b` evidence에 bind하고 owned bytes+file observation+parsed value를 final-address `CurrentEvidence`로 게시한다.
+  `test-session-host-release-adapter-github-current-evidence`가 Debug·ReleaseFast actual filesystem에서 owner/copy/path/inode alias,
+  summary/A/B/candidate/predecessor/signer/UUID drift, malformed bytes와 allocation unwind publication 0을 검증한다. summary artifact
+  attestation, compatibility·세 current asset attestation, final observation과 workflow/U5 배선은 후속이다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

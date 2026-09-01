@@ -100,7 +100,11 @@ test "upgrade leaves publish exact one and near-max roles" {
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
     defer parsed.deinit();
-    try evidence.bind(parsed.value(), .{ .upgrade_b = .{ .common = common(), .predecessor = predecessor() } });
+    try evidence.bind(parsed.value(), .{ .upgrade_b = .{
+        .common = common(),
+        .predecessor = predecessor(),
+        .designated_requirement_sha256 = sha_f,
+    } });
 }
 
 test "symlink and hardlink leaf aliases publish nothing" {

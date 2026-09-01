@@ -1307,6 +1307,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   temp write/fsync/rename/rollback fault matrix를 중복해 이 gate의 완료로 주장하지 않는다. 이 composition도 CLI option
   parsing, 전체 phase orchestration, workflow command ordering과 GitHub release publication을 대신하지 않는다.
 
+  pre-publish phase transaction의 단일 순서 소유자는
+  `src/platform/macos/session_host/release_adapter_pre_publish_phase.zig`다. validated token과 positive budget을 받은 뒤 deadline과
+  private workspace를 exact once 만들고, current authority/candidate/input, predecessor input/tag-assets, current product/evidence/
+  asset files/asset attestation/compatibility, final observation을 닫힌 순서로 실행한다. `startDeadline`은 실패 시 owner를 게시하지 않는
+  failure-pristine leaf여야 하며, 그 첫 실패에는 cleanup 대상이 없다. 그 뒤 어느 단계든 실패하면 실패하면서 retry 권위를 남긴
+  attempted owner까지 private owner를 역순으로 정리하며 뒤 단계와 summary publication은 0이다. final observation
+  setup 실패도 observation cleanup을 먼저 수행한다. final observation 성공 뒤에도 summary를 먼저 게시하지 않는다.
+  모든 child와 workspace cleanup이 성공한 뒤 live deadline을 최종 검증하고 deadline owner까지 정리한 뒤에만 observation owner에서
+  summary를 게시하며, 마지막으로 observation을 해제한다.
+  private cleanup 실패에도 observation owner는 terminal cleanup하고, cleanup 실패가 `passed` summary와 공존하지 않으며 cleanup retry
+  authority는 실패한 child owner에 남는다.
+  focused gate `test-session-host-release-adapter-pre-publish-phase`는 exact step order, shared deadline identity, 각 fail-index에서
+  attempted owner를 포함한 reverse cleanup, observation setup 실패 cleanup, cleanup 실패 시 publication 0, private cleanup 뒤 final
+  deadline expiry publication 0, deadline cleanup 뒤 publish와 terminal observation cleanup을 Debug·ReleaseFast에서 검증한다.
+  이 transaction gate는 각 leaf의 의미 검증을 복제하지 않으며 production adapter 타입 배선과 signed frozen U5 E2E는 별도 gate가
+  소유한다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

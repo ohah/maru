@@ -1,0 +1,124 @@
+//! Production predecessor verification ownership is exercised without network children.
+
+const std = @import("std");
+const context_mod = @import("release_adapter_context");
+const bootstrap_mod = @import("release_adapter_executable_bootstrap");
+const workspace = @import("release_adapter_pre_publish_workspace");
+const product = @import("release_adapter_verify_predecessor_product");
+
+const commit = "0123456789abcdef0123456789abcdef01234567";
+
+fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &root);
+    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
+}
+
+fn context() context_mod.Context {
+    return .{
+        .repository = .{ .owner = "ohah", .name = "maru", .id = 1 },
+        .tag = "v1.2.3",
+        .source_commit = commit,
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 2, .run_attempt = 1 },
+        .protected_tag = true,
+    };
+}
+
+test "invalid bootstrap and copied execution reach no phase owner" {
+    var bootstrap: bootstrap_mod.Bootstrap = .{};
+    var execution: product.Execution = .{};
+    try std.testing.expectError(error.InvalidBootstrap, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 100, .{}, &execution));
+    try std.testing.expect(execution.owner == null);
+
+    var original: product.Execution = .{};
+    original.owner = &original;
+    var copied = original;
+    try std.testing.expectError(error.InvalidOwner, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 100, .{}, &copied));
+
+    bootstrap.command = .{ .pre_publish = .{
+        .repo = "ohah/maru",
+        .tag = "v1.2.3",
+        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+        .evidence = "/tmp/evidence.json",
+        .dmg = "/tmp/Maru.dmg",
+        .frozen_executable = "/tmp/maru",
+        .work_dir = "/tmp/work",
+        .summary_out = "/tmp/summary.json",
+    } };
+    bootstrap.context = context();
+    bootstrap.owner = &bootstrap;
+    try std.testing.expectError(error.InvalidCommand, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 100, .{}, &execution));
+}
+
+test "token buffer and local candidate failures leave no workspace or borrowed authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var work_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const work = try absolute(&tmp, "phase", &work_storage);
+    var bootstrap: bootstrap_mod.Bootstrap = .{};
+    bootstrap.command = .{ .verify_predecessor = .{
+        .repo = "ohah/maru",
+        .tag = "v1.2.3",
+        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+        .work_dir = work,
+        .summary_out = "/tmp/summary.json",
+    } };
+    bootstrap.context = context();
+    bootstrap.owner = &bootstrap;
+    var execution: product.Execution = .{};
+    try std.testing.expectError(error.InvalidToken, product.run(std.testing.io, std.testing.allocator, &bootstrap, "bad\ntoken", std.time.ns_per_s, .{}, &execution));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, work, .{}));
+    const execution_bytes = std.mem.asBytes(&execution);
+    try std.testing.expectError(error.InvalidBuffer, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", std.time.ns_per_s, .{ .github_response = execution_bytes[0..16] }, &execution));
+    const bootstrap_bytes = std.mem.asBytes(&bootstrap);
+    try std.testing.expectError(error.InvalidBuffer, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", std.time.ns_per_s, .{ .attestation = bootstrap_bytes[0..16] }, &execution));
+    var shared: [32]u8 = undefined;
+    try std.testing.expectError(error.InvalidBuffer, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", std.time.ns_per_s, .{ .github_response = &shared, .attestation = shared[8..] }, &execution));
+    const aliased_token = execution.workspace.path_storage[0..5];
+    @memcpy(aliased_token, "token");
+    try std.testing.expectError(error.InvalidBuffer, product.run(std.testing.io, std.testing.allocator, &bootstrap, aliased_token, std.time.ns_per_s, .{}, &execution));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, work, .{}));
+    try std.testing.expectError(error.InvalidBudget, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 0, .{}, &execution));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, work, .{}));
+    try std.testing.expectError(error.InvalidManifestInput, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", std.time.ns_per_s, .{}, &execution));
+    try std.testing.expect(execution.owner == null);
+    try std.testing.expect(execution.bootstrap == null);
+    try std.testing.expectEqual(@as(usize, 0), execution.token.len);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, work, .{}));
+}
+
+test "cleanup failure preserves only caller-owned retry authority and scrubs borrows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var work_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    var child_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const work = try absolute(&tmp, "phase", &work_storage);
+    var execution: product.Execution = .{};
+    execution.owner = &execution;
+    execution.token = "must-not-survive";
+    try workspace.prepare(&execution.workspace, work);
+    const child = try execution.workspace.childPath(.current_manifest, &child_storage);
+    try std.Io.Dir.createDirAbsolute(std.testing.io, child, .default_dir);
+    try std.testing.expectError(error.CleanupFailed, execution.retryCleanup());
+    try std.testing.expect(execution.owner == &execution);
+    try std.testing.expectEqual(@as(usize, 0), execution.token.len);
+    try std.testing.expect(execution.bootstrap == null);
+    try std.testing.expectEqual(@as(usize, 0), execution.buffers.github_response.len);
+    try std.Io.Dir.deleteDirAbsolute(std.testing.io, child);
+    try execution.retryCleanup();
+    try std.testing.expect(execution.owner == null);
+}
+
+test "final publication validation rejects an expired owned deadline" {
+    var execution: product.Execution = .{};
+    execution.deadline = .{
+        .started_ns = 1,
+        .expires_ns = 2,
+    };
+    execution.deadline.owner = &execution.deadline;
+    try std.testing.expectError(error.TimedOut, execution.validatePublication(&execution.deadline));
+
+    var foreign = execution.deadline;
+    foreign.owner = &foreign;
+    try std.testing.expectError(error.InvalidOwner, execution.validatePublication(&foreign));
+}

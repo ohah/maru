@@ -4,24 +4,24 @@
 //! process-group kill 규율을 공유한다. 성공은 exact exit 0과 pipe EOF를 모두 관측한 뒤에만 반환한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
-extern "c" fn execve(
-    path: [*:0]const u8,
-    argv: [*:null]const ?[*:0]const u8,
-    envp: [*:null]const ?[*:0]const u8,
-) c_int;
+extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn getdtablesize() c_int;
 
 const poll_quantum_ms: c_int = 50;
 const CaptureMode = enum { merged, stdout_only };
 
 pub const Error = error{
     InvalidExecutable,
+    InvalidDirectoryFd,
     InvalidBudget,
     PipeFailed,
-    ForkFailed,
+    SpawnSetupFailed,
+    SpawnFailed,
     ProcessGroupFailed,
     CaptureFailed,
     OutputTooLarge,
@@ -37,7 +37,7 @@ pub fn runCapture(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, null, output, budget_ns, .merged);
+    return runCaptureOptionalEnvironment(io, executable, argv, null, null, output, budget_ns, .merged);
 }
 
 /// Runs with exactly `environment`; no parent variable survives into the child.
@@ -49,7 +49,7 @@ pub fn runCaptureEnvironment(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, environment, output, budget_ns, .merged);
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, output, budget_ns, .merged);
 }
 
 /// Runs with exactly `environment`, captures bounded stdout, and sends stderr to `/dev/null`.
@@ -61,7 +61,21 @@ pub fn runCaptureEnvironmentStdout(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, environment, output, budget_ns, .stdout_only);
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, output, budget_ns, .stdout_only);
+}
+
+/// Runs with exactly `environment` and binds one held directory fd as the child cwd.
+pub fn runCaptureEnvironmentStdoutDirectory(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    directory_fd: c.fd_t,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    if (!validDirectoryFd(directory_fd)) return error.InvalidDirectoryFd;
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, directory_fd, output, budget_ns, .stdout_only);
 }
 
 fn runCaptureOptionalEnvironment(
@@ -69,6 +83,7 @@ fn runCaptureOptionalEnvironment(
     executable: [:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
+    directory_fd: ?c.fd_t,
     output: []u8,
     budget_ns: i128,
     capture_mode: CaptureMode,
@@ -76,6 +91,7 @@ fn runCaptureOptionalEnvironment(
     if (executable.len < 2 or executable[0] != '/' or
         std.mem.indexOfScalar(u8, executable, 0) != null) return error.InvalidExecutable;
     if (budget_ns <= 0 or output.len == 0) return error.InvalidBudget;
+    if (directory_fd) |fd| if (!validDirectoryFd(fd)) return error.InvalidDirectoryFd;
     var pipe_fds: [2]c.fd_t = undefined;
     if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
     if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
@@ -84,14 +100,20 @@ fn runCaptureOptionalEnvironment(
         return error.PipeFailed;
     }
 
-    const pid = c.fork();
-    if (pid < 0) {
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) {
         _ = c.close(pipe_fds[0]);
         _ = c.close(pipe_fds[1]);
-        return error.ForkFailed;
+        return error.SpawnSetupFailed;
     }
-    if (pid == 0) childExec(executable, argv, environment, pipe_fds, capture_mode);
+    const pid = spawnChild(executable, argv, environment, directory_fd, pipe_fds, dev_null, capture_mode) catch |err| {
+        _ = c.close(dev_null);
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return err;
+    };
 
+    _ = c.close(dev_null);
     _ = c.close(pipe_fds[1]);
     if (!establishProcessGroup(pid)) {
         terminateGroup(pid);
@@ -171,21 +193,39 @@ fn runCaptureOptionalEnvironment(
     return output[0..used];
 }
 
+fn spawnChild(
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: ?[*:null]const ?[*:0]const u8,
+    directory_fd: ?c.fd_t,
+    pipe_fds: [2]c.fd_t,
+    dev_null: c.fd_t,
+    capture_mode: CaptureMode,
+) Error!c.pid_t {
+    const max_fd = getdtablesize();
+    if (max_fd <= 3) return error.SpawnSetupFailed;
+    const pid = c.fork();
+    if (pid < 0) return error.SpawnFailed;
+    if (pid == 0) childExec(executable, argv, environment, directory_fd, pipe_fds, dev_null, capture_mode, max_fd);
+    return pid;
+}
+
 fn childExec(
     executable: [:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
+    directory_fd: ?c.fd_t,
     pipe_fds: [2]c.fd_t,
+    dev_null: c.fd_t,
     capture_mode: CaptureMode,
+    max_fd: c_int,
 ) noreturn {
-    if (c.setpgid(0, 0) != 0) c._exit(126);
-    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
-    if (dev_null < 0 or c.dup2(dev_null, 0) < 0 or
+    if (c.setpgid(0, 0) != 0 or c.dup2(dev_null, 0) < 0 or
         c.dup2(pipe_fds[1], 1) < 0 or
         c.dup2(if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
-    _ = c.close(dev_null);
-    _ = c.close(pipe_fds[0]);
-    _ = c.close(pipe_fds[1]);
+    if (directory_fd) |fd| if (c.fchdir(fd) != 0) c._exit(126);
+    var inherited_fd: c_int = 3;
+    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
     if (environment) |envp| {
         _ = execve(executable.ptr, argv, envp);
     } else {
@@ -214,6 +254,16 @@ fn terminateGroup(pid: c.pid_t) void {
 fn setCloseOnExec(fd: c.fd_t) bool {
     const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
     return flags >= 0 and c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) == 0;
+}
+
+fn validDirectoryFd(fd: c.fd_t) bool {
+    if (comptime builtin.os.tag == .macos) {
+        if (fd < 3 or c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0) return false;
+        var stat: posix.Stat = undefined;
+        return c.fstat(fd, &stat) == 0 and posix.S.ISDIR(stat.mode);
+    } else {
+        return false;
+    }
 }
 
 const ChildPoll = enum { running, reaped, failed };

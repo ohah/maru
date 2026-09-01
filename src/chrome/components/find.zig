@@ -23,7 +23,22 @@ fn counterCols(state: *const State) u32 {
     if (state.target == .page) return pageIndicatorCols(state);
     const total = state.match_count;
     const cur: usize = if (total == 0) 0 else state.current + 1;
-    return numDigits(cur) + 1 + numDigits(total); // "cur" + "/" + "total"
+    // ASCII 라 `len` 이 곧 칸 수다. 이 값이 view 가 그리는 문자열과 어긋나면 입력이 카운터를 침범한다.
+    return @as(u32, @intCast(ruleFlags(state).len)) + numDigits(cur) + 1 + numDigits(total);
+}
+
+/// 켜 둔 검색 규칙을 카운터 앞에 짧게 적는다(§5.1). **안 보이면 켠 줄 모른다** — 그러면
+/// 다음에 찾을 때 결과가 틀린 것처럼 보이고, 사용자는 그것을 검색의 결함으로 읽는다.
+///
+/// **편집기 타깃에만 뜬다.** 스크롤백·웹은 이 값을 안 읽으므로 거기 그리면 **거짓말**이 된다.
+/// **영어 고정**(계약 §2.1 — 이 오버레이의 다른 문구와 같은 규율): `Aa` 는 대소문자 구분,
+/// `W` 는 낱말 단위. VSCode 의 `Aa`·`ab|` 버튼과 같은 뜻이다.
+fn ruleFlags(state: *const State) []const u8 {
+    if (state.target != .editor) return "";
+    if (state.match_case and state.whole_word) return "Aa W ";
+    if (state.match_case) return "Aa ";
+    if (state.whole_word) return "W ";
+    return "";
 }
 
 /// 페이지 검색은 **매치 수를 알 수 없다** — `WKFindResult`가 `matchFound`만 준다(docs/web-panel-features.md §8).
@@ -95,6 +110,11 @@ pub const State = struct {
     current: usize = 0,
     match_count: usize = 0,
     target: Target = .scrollback,
+    /// 대소문자를 가리는가(§5.1). **편집기 타깃에서만 읽힌다** — 스크롤백·웹은 종전 규칙 그대로다.
+    /// 이 상태가 여기 사는 이유는 오버레이가 그 토글을 그려야 해서다(`Target` 과 같은 자리).
+    match_case: bool = false,
+    /// 낱말 단위로만 세는가(§5.1). 판정은 `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다.
+    whole_word: bool = false,
     /// 마지막 네비게이션 방향(Enter/↓=앞, Shift+Enter/↑=뒤). 페이지 검색은 매치 리스트가 없어 `current`가
     /// 안 움직이므로(match_count=0) 방향을 여기서만 알 수 있다 — host가 `.find_navigated`를 받아 어느 쪽으로
     /// 보낼지 정할 때 읽는다. 스크롤백에선 안 쓴다(current가 이미 방향을 담는다).
@@ -295,7 +315,7 @@ pub fn view(
     const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else blk: {
         const total = state.match_count;
         const cur: usize = if (total == 0) 0 else state.current + 1;
-        break :blk try std.fmt.allocPrint(arena, "{d}/{d}", .{ cur, total });
+        break :blk try std.fmt.allocPrint(arena, "{s}{d}/{d}", .{ ruleFlags(state), cur, total });
     };
     if (counter) |counter_text| {
         const counter_cols: u32 = counterCols(state);
@@ -676,6 +696,40 @@ test "find view/caret: 긴 검색어는 tail 창(선두 …)으로 오른쪽 정
 // `view` 는 `panel_cols - counter_cols - 1` 에 카운터를 그리고 `textCols` 는 같은 값을 검색어에서
 // 빼 둔다. 둘이 어긋나면 카운터가 입력 영역을 침범하거나(예약 부족) 빈 칸이 남는다(예약 과다).
 // 예전에는 `4` 가 박혀 있었고 그것은 **한글 두 자를 잰 값**이라, 영어로 옮기는 순간 조용히 어긋났다.
+test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라온다 (§5.1)" {
+    // **안 보이면 켠 줄 모른다.** 토글은 화면에 흔적이 없으면 다음 검색 결과를 「틀린 것」으로
+    // 읽게 만든다 — 이 슬라이스가 고치려던 부류(조용히 규칙이 달라진다)를 그대로 반복한다.
+    var s: State = .{};
+    s.target = .editor;
+    s.match_count = 3;
+    s.current = 0;
+
+    try std.testing.expectEqualStrings("", ruleFlags(&s)); // 기본은 아무것도 안 그린다
+    const plain_cols = counterCols(&s);
+
+    s.match_case = true;
+    try std.testing.expectEqualStrings("Aa ", ruleFlags(&s));
+    s.whole_word = true;
+    try std.testing.expectEqualStrings("Aa W ", ruleFlags(&s));
+    s.match_case = false;
+    try std.testing.expectEqualStrings("W ", ruleFlags(&s));
+
+    // **예약 폭이 실제 글자 폭과 같다** — 어긋나면 긴 검색어의 caret 이 카운터에 가려진다(계약 §6.1).
+    s.match_case = true;
+    s.whole_word = true;
+    try std.testing.expectEqual(
+        overlay_input.displayCols(ruleFlags(&s)) + (plain_cols),
+        counterCols(&s),
+    );
+
+    // **편집기가 아니면 안 그린다.** 스크롤백·웹은 이 값을 안 읽으므로 그리면 거짓말이다.
+    s.target = .scrollback;
+    try std.testing.expectEqualStrings("", ruleFlags(&s));
+    try std.testing.expectEqual(plain_cols, counterCols(&s));
+    s.target = .page;
+    try std.testing.expectEqualStrings("", ruleFlags(&s));
+}
+
 test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)" {
     var s: State = .{};
     s.target = .page;

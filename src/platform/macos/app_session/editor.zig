@@ -15049,7 +15049,7 @@ test "EM1 한 줄에 매치가 여럿이면 마크도 여럿 선다 (§5.1)" {
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 4), fx.session.editor_find_matches.items.len);
 
     const rows = buildFindMarks(fx.session, term, fx.session.editor_find_matches.items) orelse return error.NoMarks;
@@ -15079,7 +15079,7 @@ test "EM2 접혀 있으면 마크가 보이는 줄 축으로 선다 (§4.1f × �
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "target", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "target", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
     try testing.expectEqual(@as(u32, 4), fx.session.editor_find_matches.items[0].line); // 문서 줄 축
 
@@ -15117,7 +15117,7 @@ test "EM3 접혀 숨은 매치로 가면 펴고 나서 간다 (§5.1 네비게�
 
     try testing.expect(foldAll(fx.session));
     try testing.expectEqual(@as(usize, 3), term.rt.editor_visible_lines.len); // head·tail·끝 빈 줄 — needle이 숨었다
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
     try testing.expect(buildFindMarks(fx.session, term, fx.session.editor_find_matches.items).?[0].len == 0); // 숨은 동안에는 그릴 것이 없다
 
@@ -15163,7 +15163,7 @@ test "EM4 이미 보이는 매치로는 화면을 움직이지 않는다" {
     const rows_drawn = term.rt.editor_hit_rows_len;
     try testing.expect(rows_drawn > 2); // 판정이 성립할 만큼은 그렸다
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", .{}, &fx.session.editor_find_matches);
     fx.session.chrome_host.find.current = 0;
     fx.session.chrome_host.find.open = true; // 출처 검사를 지난다
     fx.session.editor_find_source = term.surfaceId();
@@ -15224,7 +15224,7 @@ test "EM7 랩에서도 화면 밖 매치로 굴러간다 — 시각 행과 논�
     // **판정이 성립하려면 두 축이 실제로 갈려야 한다.** 안 갈리면 이 테스트는 EM4의 복제일 뿐이다.
     try testing.expect(docs_drawn < rows_drawn);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
     fx.session.chrome_host.find.current = 0;
     fx.session.chrome_host.find.open = true;
@@ -15261,7 +15261,7 @@ test "EM8 매치로 점프하면 조각 offset을 지운다 (§4.1d)" {
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", .{}, &fx.session.editor_find_matches);
     fx.session.chrome_host.find.current = 0;
     fx.session.chrome_host.find.open = true;
     fx.session.editor_find_source = term.surfaceId();
@@ -15345,7 +15345,7 @@ test "EM6 닫은 채 ⌘G로 오가면 현재 매치만 그린다" {
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 3), fx.session.editor_find_matches.items.len);
     fx.session.editor_find_source = term.surfaceId();
 
@@ -15448,7 +15448,7 @@ test "EM11 한 프레임 안에 두 번 네비게이션해도 두 번째가 굴�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", .{}, &fx.session.editor_find_matches);
     try testing.expectEqual(@as(usize, 2), fx.session.editor_find_matches.items.len);
     fx.session.chrome_host.find.open = true;
     fx.session.editor_find_source = term.surfaceId();
@@ -15713,7 +15713,7 @@ test "[측정] 검색 강조가 프레임마다 문서 전체를 훑는 비용" 
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "e", &fx.session.editor_find_matches);
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "e", .{}, &fx.session.editor_find_matches);
     const matches = fx.session.editor_find_matches.items.len;
     fx.session.chrome_host.find.open = true;
     fx.session.editor_find_source = term.surfaceId();

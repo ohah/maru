@@ -3356,6 +3356,11 @@ pub const AppSession = struct {
         return debug_fixtures.maybeDebugOpenPalette(self);
     }
 
+    /// 찾기 오버레이 캡처 훅(§5.1 규칙 표시). 위와 같은 자리·같은 규율이다.
+    pub fn maybeDebugOpenFind(self: *AppSession) void {
+        return debug_fixtures.maybeDebugOpenFind(self);
+    }
+
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
     }
@@ -5711,6 +5716,8 @@ pub const AppSession = struct {
     debug_symbol_picker_tries: u16 = 0,
     debug_palette_opened: bool = false,
     debug_palette_tries: u16 = 0,
+    debug_find_opened: bool = false,
+    debug_find_tries: u16 = 0,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
     debug_native_editor_opened: bool = false,
     /// 캡처 전용 훅(`MARU_OPEN_SCM_DIFF`)이 비교를 이미 열었는가. **성공했을 때만** 세운다 —
@@ -9150,6 +9157,9 @@ pub const AppSession = struct {
             // 대상 자체는 여기서 정하지 않는다 — tick이 매 프레임 동기화한다(전환 경로마다 세우면 새는 문이 남는다).
             .toggle_find => self.toggleFind(),
             .toggle_find_replace => find_ops.toggleFindReplace(self),
+            // 편집기 문서가 아니면 무동작 — 액션 쪽이 게이트를 갖는다(§5.1).
+            .toggle_find_match_case => find_ops.toggleFindMatchCase(self),
+            .toggle_find_whole_word => find_ops.toggleFindWholeWord(self),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
@@ -11277,6 +11287,13 @@ pub const AppSession = struct {
             // 설정 팔레트 그리드 행(폼 포커스)의 ←→ = 16색 셀 이동. host는 rows를 몰라 이 특수 행을 못 가르므로 platform이
             // pre-intercept한다(그 행에서만). ← 셀0·→ 셀15(끝)에선 intercept 안 해 컴포넌트의 영역 포커스 이동으로 이어진다.
             if (settings_ops.settingsPaletteArrowIntercept(self, event)) {
+                self.resetCursorBlink();
+                self.metal_dirty = true;
+                return input_ops.keyConsumedByApp(self);
+            }
+            // 찾기 규칙 토글(⌥⌘C·⌥⌘W)은 **찾기가 떠 있을 때** 쓰는 것이라 여기서 가로챈다 —
+            // 아래 handleInput 이 모든 키를 삼키므로 그냥 두면 키바인딩 해석에 도달하지 못한다(§5.1).
+            if (find_ops.findRuleChordIntercept(self, event)) {
                 self.resetCursorBlink();
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
@@ -41991,6 +42008,169 @@ test "EF13 검색으로 옮긴 커서는 앞의 타이핑과 한 묶음이 아�
     // **한 번의 되돌리기는 ⑵만 되돌린다.** 묶이면 여기서 ⑴까지 사라진다.
     try std.testing.expect(editor_ops.undoEdit(session, term));
     try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF23 ⌥⌘C·⌥⌘W가 찾기 규칙을 바꾼다 — 키 경로 전체 (§5.1)" {
+    // **함수를 직접 부르는 판정자만 두면 chord 가 안 붙어도 전부 초록이다.** 이 저장소가 반복해
+    // 겪은 실패라(EF14 가 같은 이유로 섰다) 여기서는 **키부터** 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    // `Id`·`id`·`ID` 셋에 `id_x` 안에 박힌 것 하나 — 두 축이 각각 다른 답을 낸다.
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "Id id ID id_x\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    session.dispatchAppAction(.toggle_find);
+    for ("id") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 4), session.editor_find_matches.items.len); // 기본: 넷 다
+
+    // **⌥⌘C — 대소문자를 가린다.** `id` 와 `id_x` 안의 `id` 둘만 남는다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.match_case);
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+
+    // **⌥⌘W — 낱말 단위.** 둘 중 `id_x` 안의 것이 빠져 하나가 된다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.whole_word);
+    try std.testing.expectEqual(@as(usize, 1), session.editor_find_matches.items.len);
+
+    // **카운터가 목록과 같이 움직인다** — 안 맞추면 「1/4」 같은 거짓이 뜬다.
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.match_count);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+
+    // **검색어는 그대로다** — 규칙만 바뀌는 것이지 다시 치게 하는 것이 아니다.
+    try std.testing.expectEqualStrings("id", session.chrome_host.find.input.query.items);
+
+    // **되돌리면 넷으로 돌아온다** — 토글이 한 방향이면 사용자가 원래 규칙으로 못 간다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expectEqual(@as(usize, 4), session.editor_find_matches.items.len);
+}
+
+test "EF24 규칙 토글은 편집기 찾기가 떠 있을 때만 먹는다 — 범위와 첫 매치 (§5.1)" {
+    // **세 가지가 조용히 틀릴 수 있는 자리다.** ⑴ 규칙이 좁아질 때 `current` 를 그대로 두면
+    // `setMatchCount` 가 **끝으로 clamp** 해 사용자가 보던 자리가 아니라 마지막으로 튄다.
+    // ⑵ 찾기가 닫혀 있는데 토글되면 다음에 ⌘F 를 눌렀을 때 **켠 기억이 없는 규칙**으로 검색된다.
+    // ⑶ 스크롤백을 보는 중에 토글되면 그 pane 은 이 값을 안 읽으므로 **아무 일도 안 일어나는데
+    // 상태만 바뀐다** — 편집기로 돌아가면 그때 규칙이 달라져 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "id Id ID id\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // ⑴ **좁아지면 첫 매치로 간다.** 끝으로 clamp 되면 여기서 0 이 아니다.
+    session.dispatchAppAction(.toggle_find);
+    for ("id") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 4), session.editor_find_matches.items.len);
+    session.chrome_host.find.current = 3; // 마지막 매치를 보고 있다
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+
+    // ⑵ **찾기가 닫혀 있으면 무동작이다** — 열지도 않는다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    const before = session.chrome_host.find.match_case;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(!session.chrome_host.find.whole_word);
+    try std.testing.expectEqual(before, session.chrome_host.find.match_case);
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // ⑶ **스크롤백을 보고 있으면 토글이 안 먹는다.** 편집기 타깃일 때만 뜻이 있다.
+    //
+    // **그때 그 chord 는 오버레이로 흘러 찾기를 닫는다** — find 컴포넌트가 `⌘·⌃·⌥+글자` 를
+    // 「알 수 없는 키 = 닫기」로 다루기 때문이다. 그 자체가 계약이므로 함께 고정한다:
+    // 토글이 조용히 켜지는 것보다 **닫히는 편이 낫다**(사용자가 무슨 일이 일어났는지 본다).
+    session.dispatchAppAction(.toggle_find);
+    session.chrome_host.find.target = .scrollback;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(!session.chrome_host.find.whole_word); // 상태는 안 바뀐다
+    try std.testing.expect(!session.chrome_host.find.open); // 대신 닫혔다
+}
+
+test "EF25 규칙 토글의 가로채기가 사용자 rebind 를 따른다 — chord 모양이 아니라 액션이다 (§5.1)" {
+    // **가로채기는 오버레이보다 먼저 도는 자리다**(그래야 모달이 키를 삼키기 전에 잡는다).
+    // 그만큼 위험도 크다: chord **모양**(⌥ 가 붙었나 같은)으로 판정하면 사용자가 다른 키로
+    // 바꿔 둔 순간 그 키는 안 먹고, 빌트인 chord 는 rebind 했는데도 계속 먹는다.
+    // 그래서 `resolve` 가 **낸 액션**으로만 판정한다 — 이 판정자가 그것을 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 사용자가 **Option 없는** chord 로 바꿔 둔다 — 모양으로 판정하면 이것이 안 먹는다.
+    const user_binds = [_]maru.config.keybinding.AppBinding{
+        .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'K' } }, .action = .toggle_find_match_case },
+    };
+    session.loaded_config.keybindings = &user_binds;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "id Id ID id\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    session.dispatchAppAction(.toggle_find);
+    for ("id") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 4), session.editor_find_matches.items.len);
+
+    // **사용자가 정한 키가 먹는다.**
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'k' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expect(session.chrome_host.find.match_case);
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
 }
 
 test "EF14 ⌥⌘F가 바꾸기 줄을 연다 — 키 경로 전체 (§5.1)" {

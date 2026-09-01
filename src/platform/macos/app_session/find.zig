@@ -19,6 +19,7 @@ const term_ops = @import("term.zig");
 const editor_ops = @import("editor.zig");
 const pane_ops = @import("pane.zig");
 const maru = @import("maru");
+const terminal = maru.terminal;
 
 /// ⌘F가 지금 **무엇을** 검색하는가 — 활성 Term이 네이티브 편집기면 그 Term(아니면 `null`).
 ///
@@ -70,6 +71,8 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
         self.allocator,
         term.rt.editor_lines,
         self.chrome_host.find.input.query.items,
+        // 토글은 **편집기 타깃에만** 산다(§5.1) — 스크롤백·웹은 이 값을 안 읽는다.
+        .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word },
         &self.editor_find_matches,
     ) catch self.editor_find_matches.clearRetainingCapacity();
     // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
@@ -127,6 +130,69 @@ pub fn toggleFindReplace(self: *AppSession) void {
     if (!self.chrome_host.find.open) return; // 토글이 닫는 쪽이었다면 그대로 둔다
     self.chrome_host.find.replace_open = true;
     self.chrome_host.find.focus = .replace; // 바꿀 문자열을 치러 온 것이다
+    self.metal_dirty = true;
+}
+
+/// 찾기가 **열려 있는 동안** 규칙 토글 chord 를 가로챈다(§5.1).
+///
+/// **왜 사전 가로채기가 필요한가.** 오버레이가 열리면 `handleKeyEvent` 가 *"모든 키를 소비한다
+/// (모달이라 터미널엔 안 내려간다)"* 로 라우팅해 `chrome_host.handleInput` 에 넘긴다 — 그래서
+/// 키바인딩 해석에 **도달하지 못한다**. 그런데 이 두 토글은 **찾기가 떠 있을 때 쓰는 것**이라
+/// 닫고 눌러야 한다면 있으나 마나다. 설정 팔레트의 ←→ 가 같은 이유로 같은 자리를 쓴다
+/// (`settingsPaletteArrowIntercept`).
+///
+/// 사용자 바인딩을 존중한다 — 빌트인 chord 모양을 직접 보지 않고 `resolve` 가 낸 액션으로 판정한다.
+pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
+    if (!isEditorFindTarget(self)) return false;
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolved = self.loaded_config.keyBindingResolver().resolve(event, &buf, .{}) catch return false;
+    const action = switch (resolved) {
+        .app_action => |a| a,
+        else => return false,
+    };
+    switch (action) {
+        .toggle_find_match_case => toggleFindMatchCase(self),
+        .toggle_find_whole_word => toggleFindWholeWord(self),
+        else => return false,
+    }
+    return true;
+}
+
+/// ⌥⌘C: 대소문자를 가릴지 토글한다(§5.1). **편집기 문서에서만** 뜻이 있다.
+///
+/// **오버레이를 열지 않는다.** 찾기가 안 떠 있으면 토글해도 사용자가 그 사실을 볼 자리가 없고,
+/// 다음에 ⌘F 를 눌렀을 때 **켠 기억이 없는 규칙**으로 검색되어 결과가 틀린 것처럼 보인다.
+pub fn toggleFindMatchCase(self: *AppSession) void {
+    if (!isEditorFindTarget(self)) return;
+    self.chrome_host.find.match_case = !self.chrome_host.find.match_case;
+    refilterAfterRuleChange(self);
+}
+
+/// ⌥⌘W: 낱말 단위로만 셀지 토글한다(§5.1). 낱말 판정의 소유자는 `selection.wordRangeAt` 이다.
+pub fn toggleFindWholeWord(self: *AppSession) void {
+    if (!isEditorFindTarget(self)) return;
+    self.chrome_host.find.whole_word = !self.chrome_host.find.whole_word;
+    refilterAfterRuleChange(self);
+}
+
+/// 토글이 뜻을 갖는 상태인가 — **떠 있는 찾기가 편집기 문서를 보고 있을 때**뿐이다.
+fn isEditorFindTarget(self: *AppSession) bool {
+    return self.chrome_host.find.open and self.chrome_host.find.target == .editor;
+}
+
+/// 규칙이 바뀌었으니 목록을 다시 세운다.
+///
+/// **`current` 를 0 으로 되돌린다.** 규칙이 바뀌면 매치 자체가 달라져 옛 인덱스가 가리키던 자리가
+/// 아예 없을 수 있다 — 그대로 두면 「3/2」 같은 카운터나 엉뚱한 자리로의 이동이 나온다(§5.1).
+fn refilterAfterRuleChange(self: *AppSession) void {
+    const term = activeEditorTerm(self) orelse return;
+    // **첫 매치로 되돌린다.** `setMatchCount` 는 범위를 벗어난 `current` 를 **끝으로 clamp** 할 뿐이라
+    // 규칙을 좁히면 사용자가 보던 자리가 아니라 «마지막»으로 튄다. 증분 검색이 글자마다 0 으로
+    // 되돌리는 것과 같은 규칙을 쓴다 — 규칙 변경도 「목록이 통째로 달라지는」 사건이다.
+    self.chrome_host.find.current = 0;
+    // `recomputeEditorFind` 가 `setMatchCount` 까지 한다 — 여기서 `match_count` 를 또 쓰면
+    // 죽은 코드다(변이 M8 이 그것을 보였다).
+    recomputeEditorFind(self, term);
     self.metal_dirty = true;
 }
 

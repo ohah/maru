@@ -87,6 +87,8 @@ pub const entries = [_]Entry{
     // keyEquivalent 없이(키바인딩 가림 방지) 별도지만, 팝업은 chord를 표시만 한다(가로채지 않음 — 안전).
     .{ .action = .toggle_find, .key = "toggle_find", .title = "Find" },
     .{ .action = .toggle_find_replace, .key = "toggle_find_replace", .title = "Find and Replace" },
+    .{ .action = .toggle_find_match_case, .key = "toggle_find_match_case", .title = "Find: Match Case" },
+    .{ .action = .toggle_find_whole_word, .key = "toggle_find_whole_word", .title = "Find: Whole Word" },
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },

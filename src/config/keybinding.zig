@@ -262,6 +262,11 @@ pub const default_app_bindings = [_]AppBinding{
     // 이미 갖고 있다(`symbolPickerReadiness` 가 `.not_editor` 를 먼저 답한다). `⌘O` 는
     // `open_file_panel` 이 쓰지만 shift 유무로 modifier 를 정확 비교하므로 갈린다.
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'O' } }, .action = .toggle_symbol_picker }, // Cmd+Shift+O
+    // ⌥⌘C·⌥⌘W: 찾기의 대소문자·낱말 토글(VSCode 와 같다). 위 셋과 **같은 부류다** — 둘 다
+    // 기본 표 어디에도 없어 `.ignored` 였고, 컨텍스트 게이트는 액션 쪽이 갖는다(편집기 타깃이
+    // 아니면 무동작). `⌘C` 는 터미널 선택이 쓰지만 `⌥⌘C` 는 비어 있어 뺏는 것이 없다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'C' } }, .action = .toggle_find_match_case }, // Cmd+Opt+C
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'W' } }, .action = .toggle_find_whole_word }, // Cmd+Opt+W
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).

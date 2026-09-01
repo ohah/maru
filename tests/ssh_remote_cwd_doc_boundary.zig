@@ -103,4 +103,20 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     defer allocator.free(term);
     const ft_body = try bodyOf(term, "pub fn focusedTermCwd", "\n}\n", 2048);
     try std.testing.expect(std.mem.indexOf(u8, ft_body, "termCwdIsRemote(term)") != null);
+
+    // ── ⑸ **`cwd` 만이 원격 경로는 아니다**(§9.4.1) ──────────────────────────────────────────
+    //
+    // 위 넷은 전부 `cwd` 축이다. 그런데 위험은 축이 아니라 **「저쪽 기계의 경로를 로컬 자원으로 쓴다」**
+    // 는 사실에 있다. 이미지 갤러리는 `cwd` 가 아니라 훅의 `transcript_path` 를 쓰는 바람에 그 표의
+    // 그물에 안 걸렸고, 실제로 **로컬의 다른 대화 이미지를 원격 세션 이름표 밑에 띄웠다**.
+    //
+    // 판정은 **읽는 쪽 한 곳**(`activeSourcePath`)에 있다 — 채택하는 쪽에도 두면 둘이 갈린다.
+    const gallery = try read(allocator, "src/platform/macos/app_session/image_gallery.zig", 4 * 1024 * 1024);
+    defer allocator.free(gallery);
+    const src_body = try bodyOf(gallery, "fn activeSourcePath", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, src_body, "agent_ops.isRemoteAgentPane(term)") != null);
+    // 「없다」와 「못 읽는다」를 가르는 문구가 살아 있는가 — 합치면 사용자가 훅 설치부터 다시 훑는다.
+    try std.testing.expect(std.mem.indexOf(u8, gallery, "image_gallery_remote_unsupported") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "#### 9.4.1 cwd만이 원격 경로는 아니다") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "agent_ops.isRemoteAgentPane(term)") != null);
 }

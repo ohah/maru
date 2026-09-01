@@ -32,6 +32,20 @@ pub const Origin = enum {
     process_exit,
 };
 
+/// 화면 판정의 규칙 id 를 `Origin` 으로 옮긴다(§1.4).
+///
+/// **규칙 id 를 보는 것이 region 을 보는 것보다 정확하다** — 같은 region 에서도 title 규칙과 화면 규칙이
+/// 함께 나오고, 알고 싶은 것은 «무엇이 이 상태를 만들었나» 이기 때문이다.
+///
+/// 순수 층에 두는 이유는 **판정자를 세우기 위해서다.** 호출부(플랫폼 층)에 두면 매핑이 틀려도 아무도 안
+/// 잡고, 그러면 §1.4 의 「출처를 기록한다」가 조용히 거짓말이 된다.
+pub fn originOfRule(rule_id: []const u8) Origin {
+    if (std.mem.eql(u8, rule_id, "pty_activity")) return .pty;
+    if (std.mem.startsWith(u8, rule_id, "progress_")) return .osc_progress;
+    if (std.mem.endsWith(u8, rule_id, "_title")) return .osc_title;
+    return .screen;
+}
+
 pub const Input = struct {
     /// 훅이 세운 상태. **`null` 이면 훅 소스가 없다**(§1.1 A) — 설치 안 됨·게이트 꺼짐·로그 파일 없음이
     /// 전부 여기로 접힌다. 판정은 §1.2 가 소유하고 이 파일은 결과만 받는다.
@@ -208,7 +222,12 @@ pub const ScanSkip = struct {
         return self.generation_same and self.screen == .idle and !self.output_active and !self.expiry_probe;
     }
 
-    /// C2 가 지금 세고 있는가 — 그 조건은 권위표의 C2 와 **같아야 한다**(§1.1).
+    /// C2 가 셀 **가능성**이 있는가.
+    ///
+    /// ⚠️ **권위표의 C2 와 같을 필요는 없고 «넓어야» 한다.** 이 함수가 좁으면 C2 가 셀 상황을 «다시 볼
+    /// 것 없다» 로 지나쳐 카운터가 얼어붙는다(그 사고를 실제로 냈다). 넓으면 화면을 몇 번 더 읽을 뿐이다.
+    /// 그래서 여기서는 `screen == .idle` 을 보고 C2 는 `screen_visible_idle` 을 본다 — 후자가 전자의
+    /// 부분집합이라 이 쪽이 넉넉하다. 아래 `AR-SKIP 넓이` 판정자가 그 포함 관계를 잠근다.
     pub fn c2Counting(self: ScanSkip) bool {
         const hook = self.hook orelse return false;
         return hook == .running and self.screen == .idle and self.hook_child_count == 0 and
@@ -248,6 +267,43 @@ test "AR-SKIP C2 가 닫히면 다시 건너뛴다 — 그 구간에만 더 본�
     try testing.expect(done.canSkip());
 }
 
+test "AR-SKIP 넓이 — 권위표가 C2 를 세는 입력에서는 반드시 스캔한다(포함 관계)" {
+    // 이 둘이 갈리면 C2 가 조용히 굶는다. 조건을 두 곳에 적어 두었으므로(한쪽은 「다시 읽을까」, 한쪽은
+    // 「셀까」) **포함 관계**를 판정자가 지킨다 — 같을 필요는 없고 스캔 쪽이 넓기만 하면 된다.
+    const states = [_]State{ .unknown, .running, .blocked, .idle };
+    for (states) |hook_state| {
+        for (states) |screen_state| {
+            for ([_]u32{ 0, 1, 3 }) |children| {
+                for ([_]bool{ false, true }) |vis_idle| {
+                    var probe: Arbiter = .{};
+                    const v = probe.arbitrate(.{
+                        .hook = hook_state,
+                        .hook_child_count = children,
+                        .screen = screen_state,
+                        .screen_visible_idle = vis_idle,
+                        .screen_seq = 1,
+                    });
+                    const counted = std.mem.startsWith(u8, v.rule, "C2");
+                    if (!counted) continue;
+                    // 권위표가 C2 를 셌다면(닫았든 pending 이든) 스캔을 건너뛰면 안 된다.
+                    const skip: ScanSkip = .{
+                        .hook = hook_state,
+                        .hook_child_count = children,
+                        .screen = screen_state,
+                        .idle_confirmations = 0,
+                        .generation_same = true,
+                        .output_active = false,
+                    };
+                    testing.expect(!skip.canSkip()) catch |e| {
+                        std.debug.print("\n  갈림: hook={s} screen={s} children={d} vis_idle={} rule={s}\n", .{ @tagName(hook_state), @tagName(screen_state), children, vis_idle, v.rule });
+                        return e;
+                    };
+                }
+            }
+        }
+    }
+}
+
 test "AR-SKIP 훅이 없으면 C2 축이 없다 — 예전 규칙 그대로다" {
     const no_hook: ScanSkip = .{ .hook = null, .screen = .idle, .generation_same = true };
     try testing.expect(!no_hook.c2Counting());
@@ -259,6 +315,22 @@ test "AR-SKIP 화면이 바뀌었거나 출력이 흐르면 건너뛰지 않는�
     try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .output_active = true }).canSkip());
     try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .expiry_probe = true }).canSkip());
     try testing.expect(!(ScanSkip{ .screen = .running, .generation_same = true }).canSkip());
+}
+
+test "AR-ORIGIN 실제 규칙 id 가 제 출처로 간다 — 진단이 거짓말하지 않게" {
+    // `agent_observer` 가 실제로 내는 id 들이다. 매핑이 틀리면 배지 옆 출처가 조용히 거짓이 된다.
+    try testing.expectEqual(Origin.pty, originOfRule("pty_activity"));
+    try testing.expectEqual(Origin.osc_progress, originOfRule("progress_idle"));
+    try testing.expectEqual(Origin.osc_progress, originOfRule("progress_running"));
+    try testing.expectEqual(Origin.osc_title, originOfRule("idle_title"));
+    try testing.expectEqual(Origin.osc_title, originOfRule("working_title"));
+    // 화면 규칙들 — 접두·접미가 안 걸리므로 전부 screen 이다.
+    try testing.expectEqual(Origin.screen, originOfRule("live_prompt"));
+    try testing.expectEqual(Origin.screen, originOfRule("working_footer"));
+    try testing.expectEqual(Origin.screen, originOfRule("confirmation_prompt"));
+    try testing.expectEqual(Origin.screen, originOfRule("permission_prompt"));
+    try testing.expectEqual(Origin.screen, originOfRule("interrupted_prompt"));
+    try testing.expectEqual(Origin.screen, originOfRule(""));
 }
 
 test "AR-A 훅 소스가 없으면 화면이 상태를 세운다 — 출처도 화면 것이 그대로 간다" {

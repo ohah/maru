@@ -2540,7 +2540,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_screen_seq +%= 1; // 새 관측 하나 — C2 가 세는 단위다
     term.agent_screen_visible_blocker = detection.visible_blocker;
     term.agent_screen_visible_idle = detection.visible_idle;
-    term.agent_screen_origin = screenOriginOf(detection.rule_id);
+    term.agent_screen_origin = maru.session.agent_state_arbiter.originOfRule(detection.rule_id);
     // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
     //
     // ⚠️ **훅이 있는 Term 에서는 여기서 찍지 않는다**(§1.3). 예전에는 이 함수가 훅 Term 에서 아예 안
@@ -2563,17 +2563,6 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     // **화면 자리를 채웠으면 배지까지 간다**(§1.6-⑴-a). 이 함수를 직접 부르는 경로가 있어 여기서 안
     // 돌리면 그쪽 배지가 안 움직인다. 소비자가 한 번 더 부르지만 **C2 의 셈은 `screen_seq` 가 지킨다**.
     arbitrateAgentState(self, term, displayed);
-}
-
-/// 화면 판정이 어느 근거로 섰는지를 `Origin` 으로 옮긴다(§1.4).
-///
-/// **규칙 id 를 보는 것이 region 을 보는 것보다 정확하다** — 같은 region 에서도 title 규칙과 화면 규칙이
-/// 함께 나오고, 우리가 알고 싶은 것은 «무엇이 이 상태를 만들었나» 이기 때문이다.
-fn screenOriginOf(rule_id: []const u8) maru.session.agent_state_arbiter.Origin {
-    if (std.mem.eql(u8, rule_id, "pty_activity")) return .pty;
-    if (std.mem.startsWith(u8, rule_id, "progress_")) return .osc_progress;
-    if (std.mem.endsWith(u8, rule_id, "_title")) return .osc_title;
-    return .screen;
 }
 
 /// 훅과 화면 두 자리를 §1.1 권위표에 넣어 배지로 나갈 값을 정한다.

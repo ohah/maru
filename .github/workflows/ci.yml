@@ -298,6 +298,17 @@ jobs:
       # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
       - name: Run the gates that only exist on macOS
         run: zig build test-macos-only
+      # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
+      # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이
+      # 손으로 잰 뒤에야 나왔다(docs/plans/remote-scm.md §7·§8·§9.2).
+      #
+      # 하네스가 키·sshd·저장소를 전부 소유한다(`tools/remote-scm/ssh_harness.sh`) — 러너의 `~/.ssh`
+      # 도 agent 도 안 건드린다. `--maru-expect-passed` 로 **건너뛰기가 초록으로 새는 것**을 막는다.
+      #
+      # p5d 에 얹지 않은 이유: 그쪽은 서명된 앱 번들을 요구하는 릴리스급 게이트라, 그 게이트가 빨간
+      # 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
+      - name: Run the remote SCM judges against a harness-owned sshd
+        run: zig build test-remote-scm
       # Swift 앱 호스트가 링크하는 **바로 그 정적 라이브러리**를 컴파일한다. 위 스텝이 이걸 대신하지
       # 못한다 — `build.zig` 에서 테스트 바이너리(1139행)와 이 라이브러리(1399행)는 각자 `imports` 를
       # 가진 별개 모듈이라, 라이브러리 쪽 배선만 빠지면 테스트 빌드는 초록인 채 앱만 안 빌드된다.

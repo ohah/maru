@@ -1798,65 +1798,18 @@ pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
     if (!pointInCommitBox(self, x_px, y_px)) blurCommit(self);
 }
 
-/// 이 인텐트가 **로컬 저장소에 작용하나**(RS2 — [계획](../../../../docs/plans/remote-scm.md)).
+/// **RS2 의 진입점 가드는 RS4 가 지웠다.** 그때는 「원격 목록을 보는 동안 로컬을 만지는 동작」을 여기서
+/// 통째로 끊었는데, RS4a~c 가 그 동작들을 **원격으로 보내면서** 막을 것이 하나도 안 남았다 — 모든
+/// 인텐트가 통과였다. **아무것도 안 막는 게이트는 다음 사람에게 「여기서 지킨다」고 거짓말한다.**
 ///
-/// 원격 목록을 보는 동안 이런 인텐트가 통과하면, 화면은 원격인데 손은 **로컬 파일**에 간다 —
-/// 스테이지·되돌리기가 보고 있지도 않은 파일을 바꾸고, 행 클릭은 로컬에 우연히 같은 경로가 있으면
-/// 남의 파일을 연다(§9.4 가 링크 감지에서 막은 함정, 그리고 이 계획이 선 이유).
+/// 지금 지키는 자리는 둘이고, 둘 다 **대상을 정하는 자리**다:
+/// - `git_ops.writeTargetFor` — 원격인데 control socket 이 없으면 `.unavailable` 로 **보내지 않는다**
+///   (로컬로 떨어뜨리면 원격 경로를 로컬 git 이 받는다).
+/// - `submitWrite`·커밋 제출 — 그 판정을 **같은 함수**로 지난다(두 벌이면 한쪽만 고쳐진다).
 ///
-/// **exhaustive switch 다.** 인텐트가 하나 늘면 여기서 컴파일이 깨져 분류를 강제한다 — 목록을 손으로
-/// 적어 두면 새 동작이 조용히 원격에서 로컬을 만지는 쪽으로 샌다. 화면만 바꾸는 것(접기·탭·스크롤)과
-/// 원격에서도 뜻이 그대로인 것(새로고침 — 원격이면 원격을 다시 읽는다)은 통과시킨다.
-pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
-    return switch (intent) {
-        // 아직 원격으로 못 보내는 것들.
-        //
-        // `fetch_remote`·`open_remote_menu`: 우리 ssh 명령에는 `SSH_AUTH_SOCK` 도 tty 도 없어 인증이
-        // 필요한 원격에서 **항상** 실패하고 물어볼 곳도 없다(실측). 활성 pane 에 명령을 넣는 길로
-        // 간다 — RS4c.
-        .fetch_remote,
-        .open_remote_menu,
-        => true,
-        // **스테이지 계열은 RS4a 에서 이쪽으로 넘어왔다** — 원격 index 를 실제로 바꿀 수 있게 됐다.
-        // 어느 호스트로 갈지는 `submitWrite` 가 **그 행의 저장소**로 판정한다(활성 목적지를 무조건
-        // 쓰면 로컬 저장소 행의 스테이지가 원격으로 날아간다 — RS3 8회차와 같은 함정).
-        .row_action,
-        .section_action,
-        .stage_all_repo,
-        // **커밋도 RS4b 에서 넘어왔다** — 메시지는 stdin 으로 간다(§6.2).
-        .commit,
-        .commit_focus,
-        => false,
-        // 화면 상태만 바꾸거나, 원격에서도 같은 뜻으로 도는 것.
-        //
-        // **비교 열기 셋은 RS3 에서 이쪽으로 넘어왔다** — 원격 diff 를 실제로 읽을 수 있게 됐기 때문이다
-        // (좌우 모두 원격에서 읽고, 그 Term 은 읽기 전용이다). 막아 두면 원격에서 「목록은 보이는데 아무것도
-        // 못 연다」가 되는데, 그건 RS2 의 한계였지 계약이 아니다.
-        .open_row,
-        .open_turn_file,
-        .open_commit_file,
-        .toggle_section,
-        .expand_section,
-        .toggle_repo,
-        .select_commit,
-        .select_turn,
-        .load_more_commits,
-        .select_tab,
-        .refresh_repo,
-        .scroll_thumb,
-        .scroll_track,
-        => false,
-    };
-}
-
+/// 「새 인텐트가 늘면 분류를 강제한다」는 옛 게이트의 값은 판정자로 옮겼다(`app_session.zig` 의
+/// 「원격 목록을 보는 동안…」 — exhaustive switch 라 인텐트가 늘면 **거기서 컴파일이 깨진다**).
 pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void {
-    // **원격 목록을 보는 동안 로컬을 만지는 동작은 여기서 끊는다**(RS2). 진입점 한 겹에서 막는 이유는
-    // 하위 경로가 열 곳이 넘어 하나라도 빠뜨리면 그 자리가 곧 사고이기 때문이다 — 그리고 「조용히
-    // 무동작」이 아니라 **이유를 말한다**(도크의 다른 거절과 같은 규율).
-    if (git_ops.scmTargetIsRemote(self) and intentTouchesLocalRepo(intent)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
-        return;
-    }
     switch (intent) {
         .toggle_section => |section| {
             const index = sectionIndex(section);
@@ -1990,6 +1943,25 @@ fn submitFetch(self: *AppSession) void {
     // 원격이 없으면 **왜 안 되는지 적는다**(§3.5 — 비활성 컨트롤은 이유를 말한다). tree가 이미 action을
     // 껐지만, 그 판단이 프레임 사이에 뒤집힐 수 있어 실행 직전에 한 번 더 본다.
     if (!scmHasRemote(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_remote));
+
+    // ⚠️ **원격 저장소의 fetch 는 우리가 실행하지 않는다**(RS4c · 계약 §6.3). 실측 2026-09-01:
+    //
+    // ```
+    // ssh -S <ctl> <dest> 'echo $SSH_AUTH_SOCK; echo $GIT_ASKPASS; tty'
+    //   SSH_AUTH_SOCK=[]   GIT_ASKPASS=[]   tty=not a tty
+    // ```
+    //
+    // agent 도 askpass 도 tty 도 없다 — 인증이 필요한 원격에서 **항상** 실패하고, 물어볼 곳조차 없다.
+    // 이건 non-interactive ssh 의 성질이라 우리가 고칠 수 없다.
+    //
+    // **maru 에는 그 답이 이미 있다**: `push`·`pull` 이 쓰는 길 — 활성 pane 의 터미널에 명령을 넣어 주고
+    // 실행은 사용자가 한다. 그 pane 은 이미 그 호스트에 붙어 있고 키·agent 가 살아 있으며, 프롬프트가
+    // 떠도 **사용자가 보고 답할 수 있다.**
+    //
+    // 대가를 적어 둔다: **결과를 우리가 모른다.** 로컬 fetch 는 완료를 받아 목록을 다시 읽지만, 주입은
+    // 사용자가 실행하므로 갱신 시점을 알 수 없다 — 그래서 그 사실을 화면에 말한다.
+    if (git_ops.scmTargetIsRemote(self)) return injectRemoteFetch(self);
+
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
@@ -2002,6 +1974,52 @@ fn submitFetch(self: *AppSession) void {
     self.scm_fetch_repo = self.allocator.dupe(u8, repo) catch null;
     clearScmWriteError(self); // 지난 실패 문구가 새 시도 위에 남지 않게
     self.metal_dirty = true;
+}
+
+/// 원격 저장소의 `fetch` 를 **활성 pane 에 넣는다**(RS4c). `push`·`pull` 과 **같은 함수**를 지난다 —
+/// 두 벌이면 한쪽만 고쳐지고, 그 어긋남은 「push 는 그 pane 에, fetch 는 다른 pane 에」로 나타난다.
+fn injectRemoteFetch(self: *AppSession) void {
+    // ⚠️ **넣지 못했으면 넣었다고 말하지 않는다.** 거절 사유를 덮어쓰면 화면이 거짓말한다 —
+    // 사용자는 터미널에서 명령을 찾다가 없는 것을 보고, 왜 없는지는 영영 모른다(적대적 검증 2회차에서
+    // 이 자리를 실제로 그렇게 써 두었다).
+    if (!injectIntoActiveTerminal(self, "git fetch --prune")) return;
+    // **결과를 우리가 모른다**(§6.3 의 대가). 조용히 두면 사용자는 목록이 곧 갱신될 것으로 읽는다.
+    setScmWriteNotice(self, maru.i18n.t(.scm_remote_fetch_injected));
+}
+
+/// 명령 한 줄을 **활성 pane 의 활성 Term** 에 넣는다. 실행은 사용자가 한다.
+///
+/// ⚠️ **여기서 활성 pane 을 다시 묻는다**(계약 §6.4). 목록도 활성 pane 기준이므로(RS2) 정상 상태에서
+/// 둘은 같은 pane 이지만, `followActiveTerminalRepo` 는 **도크가 보일 때만** 돈다 — 도크를 접은 채
+/// pane 을 옮기면 목록 상태가 낡는다. 지금은 진입점이 도크 버튼과 메뉴뿐이라 닫혀 있지만 **그 방어는
+/// 간접적이다**(누가 키바인딩을 더하면 도크가 접힌 채로도 실행된다). 그래서 묻는 자리를 여기 둔다.
+/// 넣었으면 `true`. **거절이면 이유를 적고 `false`** — 호출자가 「넣었다」고 덮어쓰지 않게 한다.
+fn injectIntoActiveTerminal(self: *AppSession, command: []const u8) bool {
+    if (!term_ops.activeTermIsTerminal(self)) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
+        return false;
+    }
+    // ⚠️ **그 명령이 향하는 기계와 지금 타이핑할 pane 의 기계가 같아야 한다**(RS4c 적대적 검증 2회차).
+    //
+    // 목록은 활성 pane 을 따라가지만 `followActiveTerminalRepo` 는 **도크가 보일 때만** 돈다 — 접은 채
+    // pane 을 옮기면 목록의 호스트가 낡는다. 그 상태에서 주입하면 **엉뚱한 기계의 셸**에 명령이 꽂힌다:
+    // `fetch` 는 다른 저장소를 가져오고, `push` 는 **다른 저장소에 쓴다.**
+    //
+    // 지금 진입점은 도크 버튼·메뉴뿐이라 그 상황이 안 생기지만 **그 방어는 간접적이다**(누가 키바인딩을
+    // 더하면 접힌 채로도 실행된다). 그래서 **주입 자리에서 직접 묻는다** — 계약 §6.4.
+    var dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined;
+    const pane_host = git_ops.activeTermRemoteDest(self, &dest_buf);
+    const list_host = self.git_repo_dest;
+    const same_machine = if (pane_host) |p|
+        (list_host != null and std.mem.eql(u8, p, list_host.?))
+    else
+        list_host == null;
+    if (!same_machine) {
+        setScmWriteNotice(self, maru.i18n.t(.scm_inject_host_mismatch));
+        return false;
+    }
+    term_ops.submitPaste(self, command, false, term_ops.activeSurface(self).id);
+    return true;
 }
 
 /// `∨` 보조 메뉴를 연다(P6b — 쓰기·원격 §4). 여는 자리는 그 `∨`의 **발행된 rect**다: 메뉴는 누른 자리에서
@@ -2238,8 +2256,7 @@ pub fn applyRemoteMenuSelection(self: *AppSession, index: usize) void {
     switch (self.scm_remote_menu_items[index]) {
         .push, .pull => {
             const cmd: []const u8 = if (self.scm_remote_menu_items[index] == .push) "git push" else "git pull";
-            if (!term_ops.activeTermIsTerminal(self)) return setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
-            term_ops.submitPaste(self, cmd, false, term_ops.activeSurface(self).id);
+            _ = injectIntoActiveTerminal(self, cmd); // 원격 fetch 와 **같은 자리**를 지난다(RS4c)
         },
         // 목록 읽기는 비동기다 — 결과가 오면 `drainGitStatus`가 `openBaseMenu`를 부른다(브랜치 메뉴와 같은 길).
         .pick_base => settings_ops.requestBranchMenu(self, .pick_base),
@@ -2922,6 +2939,9 @@ fn rememberWriteRepo(self: *AppSession, repo: []const u8, dest: ?[]const u8) voi
 }
 
 /// 판정자 전용 창구 — 제품과 **같은 함수**를 지난다(두 벌이면 판정이 무의미하다).
+pub fn submitFetchForTest(self: *AppSession) void {
+    submitFetch(self);
+}
 pub fn submitWriteForTest(self: *AppSession, repo: []const u8, kind: git_write_command.Kind) bool {
     return submitWrite(self, repo, kind, &.{"a.txt"});
 }

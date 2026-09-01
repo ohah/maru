@@ -59,6 +59,28 @@ pub fn pumpBaseReread(self: *AppSession) void {
     refreshGitStatus(self);
 }
 
+/// 활성 Term 이 붙어 있는 **기계**(원격이면 그 목적지, 로컬이면 null).
+///
+/// `remoteScmTarget` 과 갈린 이유: 그쪽은 **control socket 이 있어야** 답한다(우리가 명령을 보내야
+/// 하므로). 이쪽은 「지금 타이핑하면 어느 기계에 들어가나」만 묻는다 — 소켓이 없어도 그 pane 은
+/// 여전히 그 호스트에 붙어 있고, **타이핑은 그리로 간다.**
+///
+/// 소켓 유무로 이 판정을 대신하면, 소켓이 사라진 원격 pane 이 **로컬로 보여** 로컬 저장소의 `git push`
+/// 가 그 원격 셸에 꽂힌다.
+pub fn activeTermRemoteDest(self: *AppSession, buf: []u8) ?[]const u8 {
+    if (builtin.os.tag != .macos) return null;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return null;
+    term_ops.refreshTermObservation(self, term, false, false);
+    if (term.rt.observation.availability == .unavailable) return null;
+    if (!term.rt.observation.ssh_remote_dest_present) return null;
+    const dest = term.rt.observation.ssh_remote_dest.items;
+    if (dest.len == 0 or dest.len > buf.len) return null;
+    @memcpy(buf[0..dest.len], dest);
+    return buf[0..dest.len];
+}
+
 /// 활성 Term 이 원격이면 그 **SCM 대상**(목적지 · control socket · 원격 cwd). 로컬이면 null.
 ///
 /// RS2 — [계획](../../../../docs/plans/remote-scm.md). 여기가 「원격을 본다」를 정하는 **유일한 자리**다:

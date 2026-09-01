@@ -513,6 +513,12 @@ const Table = struct {
     scm_remote_read_only: [:0]const u8,
     /// 명령을 넣을 터미널이 없다(활성 surface가 터미널이 아니다).
     scm_no_terminal: [:0]const u8,
+    /// 원격 fetch 를 **활성 pane 에 넣었다**. 우리가 실행하지 않으므로 **결과를 우리가 모른다** —
+    /// 조용히 두면 사용자는 목록이 곧 갱신될 것으로 읽는다.
+    scm_remote_fetch_injected: [:0]const u8,
+    /// 지금 활성 pane 이 **그 저장소의 기계가 아니다.** 거기에 명령을 넣으면 다른 기계에서 돈다 —
+    /// `push` 면 다른 저장소에 **쓴다.**
+    scm_inject_host_mismatch: [:0]const u8,
     scm_changes: [:0]const u8,
     scm_history: [:0]const u8,
     scm_staged: [:0]const u8,
@@ -1264,6 +1270,8 @@ const en: Table = .{
     .scm_base_limit = "Too many repositories remembered, so the base branch was not changed",
     .scm_remote_read_only = "This is a remote session, so the list is read-only for now",
     .scm_no_terminal = "No terminal to type into",
+    .scm_remote_fetch_injected = "Typed `git fetch --prune` into the terminal — run it there, then refresh",
+    .scm_inject_host_mismatch = "The active terminal is on a different machine than this repository",
     .scm_changes = "Changes",
     .scm_history = "History",
     .scm_staged = "Staged changes",
@@ -1853,6 +1861,8 @@ const ko: Table = .{
     .scm_base_limit = "기억하는 저장소가 너무 많아 기준을 바꾸지 못했습니다",
     .scm_remote_read_only = "원격 세션이라 아직 목록만 읽습니다",
     .scm_remote_transport_failed = "원격 연결이 끊겨 git 까지 닿지 못했습니다",
+    .scm_remote_fetch_injected = "터미널에 `git fetch --prune` 을 넣었습니다 — 거기서 실행한 뒤 새로고침하세요",
+    .scm_inject_host_mismatch = "활성 터미널이 이 저장소와 다른 기계에 있습니다",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

@@ -14233,6 +14233,41 @@ pub fn build(b: *std.Build) void {
         run_session_host_3d_product_e2e_tests.setCwd(b.path("."));
         session_host_3d_step.dependOn(&run_session_host_3d_product_e2e_tests.step);
 
+        // ── 원격 SCM 을 **실물 SSH 위에서** 돌린다 (`zig build test-remote-scm`) ─────────────
+        //
+        // RS1~RS4 의 원격 판정자는 control socket 이 없으면 `SkipZigTest` 다 — 즉 그 축은 CI 에서
+        // **한 줄도 안 돌았다.** 실제로 그 자리의 결함 여섯이 사람이 손으로 잰 뒤에야 나왔다
+        // (docs/plans/remote-scm.md §7·§8·§9.2). 이 스텝이 그 공백을 메운다.
+        //
+        // **p5d 에 얹지 않는다.** 그쪽은 서명된 앱 번들을 요구하는 릴리스급 게이트라, 그 게이트가
+        // 빨간 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
+        const remote_scm_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/git_backend.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{"원격"},
+        });
+        const run_remote_scm = b.addSystemCommand(&.{ "sh", "tools/remote-scm/ssh_harness.sh" });
+        run_remote_scm.addArtifactArg(remote_scm_tests);
+        run_remote_scm.setCwd(b.path("."));
+        // 필터가 몇 개를 골랐는가 — 판정자가 조용히 사라지면 여기서 걸린다.
+        run_remote_scm.addArg("--maru-expect-tests=3");
+        // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 하네스 env 가 없으면 `SkipZigTest` 로 나가는데,
+        // 컴파일 수만 세면 **하네스가 조용히 안 서도 초록**이다 — 「없어진 것」과 「원래 없던 것」을
+        // 구분할 수 없는, 이 저장소가 가장 나쁘다고 적어 둔 실패 모드다(`tools/simple_test_runner.zig`).
+        run_remote_scm.addArg("--maru-expect-passed=3");
+        b.step(
+            "test-remote-scm",
+            "Run the remote SCM judges against a harness-owned localhost sshd",
+        ).dependOn(&run_remote_scm.step);
+
         const session_host_p5d_step = b.step(
             "test-session-host-p5d",
             "Run the P5d bundle PATH and localhost OpenSSH product gate",

@@ -7,6 +7,7 @@ const current_mod = @import("release_adapter_github_current_release_authority");
 const attestation = @import("release_adapter_github_attestation");
 const file_mod = @import("release_adapter_github_manifest_file");
 const cli_authority = @import("release_adapter_github_cli_authority");
+const deadline_mod = @import("release_adapter_deadline");
 
 pub const Error = error{ InvalidOwner, InvalidCurrent, InvalidManifest, FileChanged };
 pub const Cli = struct { path: [:0]const u8, pinned: *const cli_authority.PinnedExecutable };
@@ -78,7 +79,19 @@ pub fn authenticate(io: std.Io, allocator: std.mem.Allocator, context: context_m
     return authenticateWith(&attestor, &authority, &executor, allocator, context, current, bytes, file, cli.path, token, output, budget_ns, result);
 }
 
+pub fn authenticateUntil(io: std.Io, allocator: std.mem.Allocator, context: context_mod.Context, current: *const current_mod.CurrentReleaseAuthority, bytes: []const u8, file: *const file_mod.ManifestFile, cli: Cli, token: []const u8, output: []u8, deadline: *deadline_mod.Deadline, result: *AuthenticatedCurrentManifest) !void {
+    var attestor = RealAttestor{};
+    var authority = RealAuthority{ .pinned = cli.pinned };
+    var executor = attestation.BoundedExecutor{ .io = io };
+    return authenticateUntilWith(&attestor, &authority, &executor, deadline, allocator, context, current, bytes, file, cli.path, token, output, result);
+}
+
 pub fn authenticateWith(attestor: anytype, authority: anytype, executor: anytype, allocator: std.mem.Allocator, context: context_mod.Context, current: *const current_mod.CurrentReleaseAuthority, bytes: []const u8, file: *const file_mod.ManifestFile, executable: [:0]const u8, token: []const u8, output: []u8, budget_ns: i128, result: *AuthenticatedCurrentManifest) !void {
+    var fixed = FixedBudget{ .value = budget_ns };
+    return authenticateUntilWith(attestor, authority, executor, &fixed, allocator, context, current, bytes, file, executable, token, output, result);
+}
+
+pub fn authenticateUntilWith(attestor: anytype, authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, context: context_mod.Context, current: *const current_mod.CurrentReleaseAuthority, bytes: []const u8, file: *const file_mod.ManifestFile, executable: [:0]const u8, token: []const u8, output: []u8, result: *AuthenticatedCurrentManifest) !void {
     if (result.owner != null or result.parsed != null or result.observed != null) return error.InvalidOwner;
     var parsed = try manifest.parseCanonical(allocator, bytes);
     errdefer parsed.deinit();
@@ -93,13 +106,24 @@ pub fn authenticateWith(attestor: anytype, authority: anytype, executor: anytype
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const sha = std.fmt.bytesToHex(digest, .lower);
     if (!std.mem.eql(u8, std.fs.path.basename(before.path), name) or before.size != bytes.len or !std.mem.eql(u8, before.sha256, &sha)) return error.InvalidManifest;
+    _ = try deadline.remaining();
     try authority.revalidate(allocator, executable);
+    const budget_ns = try deadline.remaining();
     var observed = try attestor.verify(executor, allocator, executable, token, before.path, .{ .context = context, .subject_name = name, .subject_sha256 = &sha }, output, budget_ns);
     errdefer observed.deinit(allocator);
     const after = file.revalidate() catch return error.FileChanged;
     if (before.device != after.device or before.inode != after.inode or before.size != after.size or !std.mem.eql(u8, before.sha256, after.sha256)) return error.FileChanged;
     if (current_view.tag.len > result.tag.len) return error.InvalidCurrent;
+    _ = try deadline.remaining();
     result.* = .{ .owner = result, .parsed = parsed, .observed = observed, .repository_id = current_view.repository_id, .run_id = current_view.run_id, .run_attempt = current_view.run_attempt, .release_id = current_view.release_id, .tag_len = current_view.tag.len, .protected_environment = true };
     @memcpy(&result.source_commit, current_view.source_commit);
     @memcpy(result.tag[0..result.tag_len], current_view.tag);
 }
+
+const FixedBudget = struct {
+    value: i128,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.value <= 0) return error.TimedOut;
+        return self.value;
+    }
+};

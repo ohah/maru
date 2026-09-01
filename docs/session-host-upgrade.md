@@ -1447,6 +1447,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   이 leaf만으로 하위 composition의 `...Until` 이관, 두 phase 전체 orchestration, workflow 배선 또는 frozen U5 제품 E2E를
   완료했다고 주장하지 않는다.
 
+  첫 `...Until` 소비자는 `release_adapter_github_current_authority.zig`다. executable orchestration은 budget 기반 leaf 대신
+  final-address `Deadline` pointer를 넘기며 repository, workflow run, environment, attempt jobs, deployments와 각 deployment
+  status request의 CLI revalidation 전후에 같은 owner의 remaining을 조회하고 두 번째 값만 child budget으로 전달한다. request마다 시작 시각이나 expiry를 다시 만들지 않고, 만료·copied
+  deadline이면 CLI revalidation과 HTTP child 전에 실패한다. 기존 budget entrypoint는 독립 component 호출과 기존 gate 호환을
+  위해 남지만 전체 phase owner는 호출하지 않는다. focused current-authority gate는 injected shared deadline의 exact request별
+  감소, 중간 만료 시 후속 request 0과 publication 0을 Debug·ReleaseFast에서 추가 검증한다. current release draft/tag-chain,
+  manifest/asset attestation, Apple product와 compatibility의 `...Until` 이관은 후속 범위다.
+
   release evidence의 canonical bytes는 OS 중립
   `src/platform/macos/session_host/release_evidence.zig` 한 곳이 소유한다. schema는 exact
   `maru.session-host-release-evidence.v1`이고 profile은 `baseline_a | upgrade_b`의 닫힌 union이다. G3의

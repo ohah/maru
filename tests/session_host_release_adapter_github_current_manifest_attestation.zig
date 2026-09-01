@@ -35,14 +35,25 @@ const Authority = struct {
         if (self.fail) return error.ExecutableChanged;
     }
 };
+const SharedDeadline = struct {
+    calls: usize = 0,
+    fail_at: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        self.calls += 1;
+        if (self.calls == self.fail_at) return error.TimedOut;
+        return 1_000 - @as(i128, @intCast(self.calls * 100));
+    }
+};
 const Executor = struct {};
 const Attestor = struct {
     calls: usize = 0,
     fail: bool = false,
     mutate: bool = false,
     sha: []const u8,
+    last_budget: i128 = 0,
     pub fn verify(self: *@This(), _: anytype, allocator: std.mem.Allocator, executable: []const u8, token: []const u8, path: []const u8, expected: attestation.Expected, _: []u8, budget: i128) !attestation.Observed {
         self.calls += 1;
+        self.last_budget = budget;
         if (self.fail) return error.ChildFailed;
         try std.testing.expectEqualStrings("/opt/trusted/gh", executable);
         try std.testing.expectEqualStrings("token", token);
@@ -236,4 +247,54 @@ test "every successful allocation failure unwinds" {
 }
 test "product wrapper is compiled" {
     _ = composition.authenticate;
+    _ = composition.authenticateUntil;
+}
+
+test "shared deadline brackets CLI revalidation child budget and final publication" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var current = currentAuthority();
+    current.owner = &current;
+    var attestor = Attestor{ .sha = &fixture.sha };
+    var authority = Authority{};
+    var executor = Executor{};
+    var deadline = SharedDeadline{};
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedCurrentManifest = .{};
+    try composition.authenticateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, fixture.bytes, &fixture.file, "/opt/trusted/gh", "token", &output, &result);
+    try std.testing.expectEqual(@as(usize, 3), deadline.calls);
+    try std.testing.expectEqual(@as(i128, 800), attestor.last_budget);
+    try result.deinit(std.testing.allocator);
+
+    attestor = .{ .sha = &fixture.sha };
+    authority = .{};
+    deadline = .{ .fail_at = 3 };
+    result = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, fixture.bytes, &fixture.file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 1), attestor.calls);
+    try std.testing.expect(result.value() == null);
+
+    attestor = .{ .sha = &fixture.sha };
+    authority = .{};
+    deadline = .{ .fail_at = 2 };
+    result = .{};
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, fixture.bytes, &fixture.file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), attestor.calls);
+    try std.testing.expect(result.value() == null);
+
+    attestor = .{ .sha = &fixture.sha };
+    authority = .{};
+    deadline = .{ .fail_at = 1 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, fixture.bytes, &fixture.file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), attestor.calls);
+    try std.testing.expect(result.value() == null);
+
+    current.owner = null;
+    deadline = .{};
+    try std.testing.expectError(error.InvalidCurrent, composition.authenticateUntilWith(&attestor, &authority, &executor, &deadline, std.testing.allocator, context, &current, fixture.bytes, &fixture.file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), deadline.calls);
 }

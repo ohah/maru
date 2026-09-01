@@ -15887,8 +15887,10 @@ pub const AppSession = struct {
                     //
                     // `termCwd`가 아니라 `termCwdForDisplay`인 이유: 원격 cwd(authority가 원격인 관측값)를
                     // 그대로 싣는 기존 wire 동작을 유지해야 한다. `termCwd`는 저장소 판정용이라 원격에서 null을
-                    // 낸다. host 접두는 붙이지 않는다 — `TerminalMeta`에 host 필드가 없고, 접두는 GUI 폴더줄의
-                    // 표기 규약(docs/ssh-integration.md §9.3)이지 wire 값이 아니다.
+                    // 낸다. **경로 문자열에 host 접두를 섞지 않는다** — 접두는 GUI 폴더줄의 표기 규약
+                    // (docs/ssh-integration.md §9.3)이지 wire 값이 아니다. 대신 «어느 기계의 경로인가» 는
+                    // 아래 `cwd_host` 로 **따로** 싣는다(§9.4 — 바깥 소비자는 가드가 불가능하므로 사실대로
+                    // 알려 주는 것이 유일한 수단이다).
                     //
                     // 여기가 §5의 "fs·직렬화는 락 밖"에 해당한다. 이 함수에서 core_mutex를 잡는 것은
                     // `readObservation`뿐이고 그건 값을 복사해 **반환한 뒤**이므로, 이 지점에서는 락을 쥐고 있지
@@ -15905,6 +15907,12 @@ pub const AppSession = struct {
                         try arena.dupe(u8, c)
                     else
                         null;
+                    // 원격이면 그 경로가 **저쪽 기계**의 것이라고 알린다. 로컬이면 생략한다(§3 «없으면 필드
+                    // 생략») — 빈 문자열은 「host 가 빈 원격」으로 읽힌다. cwd 가 없으면 붙일 곳도 없다.
+                    const cwd_host_copy: ?[]const u8 = if (cwd_copy != null and termCwdIsRemote(term)) blk: {
+                        const h = termDisplayHost(term);
+                        break :blk if (h.len > 0) try arena.dupe(u8, h) else null;
+                    } else null;
                     const at_prompt = atPromptWire(sem, alt); // 3상(§3, unknown 보존)
                     const agent = agentInfoWire(term.agent_kind, term.agent_state); // 내부→wire, none=null
                     // git branch: **`cwd_copy`를 넣지 않는다.** 그건 표시용이라 원격 경로를 담을 수 있는데,
@@ -15944,6 +15952,7 @@ pub const AppSession = struct {
                         .detail = .{
                             .terminal = .{
                                 .cwd = cwd_copy, // 없으면 null(§3 필드 생략)
+                                .cwd_host = cwd_host_copy, // 원격일 때만(§9.4)
                                 .git_branch = branch_copy,
                                 .agent = agent,
                                 .at_prompt = at_prompt, // terminal엔 항상(3상)

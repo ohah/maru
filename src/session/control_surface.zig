@@ -105,14 +105,26 @@ pub const TerminalMeta = struct {
     /// 재개 Term에서는 **화면에 폴더가 보이는데 이 필드만 비는** 상태가 상시였고, 반대로 maru ssh 세션에서
     /// 원격 셸이 OSC 7을 안 보내면 ssh 이전의 **낡은 로컬 경로**가 원격 세션의 cwd인 양 실렸다.
     ///
-    /// 원격은 `cwd_host` authority로 가른다 — 원격 authority가 보고한 경로는 그대로 싣고(host 접두는
-    /// 붙이지 않는다. 이 구조체에 host 필드가 없고 접두는 GUI 표기 규약이다), 커널 조회로 대체하지
-    /// 않는다(커널은 로컬 ssh 클라이언트의 cwd를 답한다).
+    /// 원격은 `cwd_host` authority로 가른다 — 원격 authority가 보고한 경로는 **그대로** 싣고(`<host>:` 접두를
+    /// 문자열에 섞지 않는다. 접두는 GUI 표기 규약이고, wire 는 아래 `cwd_host` 로 **따로** 알린다),
+    /// 커널 조회로 대체하지 않는다(커널은 로컬 ssh 클라이언트의 cwd를 답한다).
     ///
     /// **여전히 없을 수 있다.** 영속 세션 호스트로 연 Term은 PTY가 데몬 프로세스 소유라 커널 조회가 닿지
     /// 않아 OSC 7이 유일한 출처다(editor-surface-dock.md §3.5). 클라이언트는 이 필드의 존재를 가정하면
     /// 안 된다 — 그때는 GUI 폴더줄도 함께 비므로 wire만 모르는 상태는 아니다. 값이 없으면 생략.
     cwd: ?[]const u8 = null,
+    /// `cwd` 가 **어느 기계의 것인가**. 원격(ssh)이면 host, 로컬이면 **생략**한다.
+    ///
+    /// **왜 필요한가**: 이 필드가 없으면 `cwd` 는 `/srv/app/proj` 처럼 로컬 경로와 **구별되지 않는다**.
+    /// 외부 소비자(`maru sessions list` 를 읽는 자동화)는 그것을 로컬에서 풀 수 있고, 우연히 같은 모양의
+    /// 경로가 이쪽에 있으면 **다른 기계의 파일을 연다**. 앱 안쪽 소비처는 원격 판정으로 막을 수 있지만
+    /// (ssh-integration.md §9.4 — 링크 스코프·갤러리), **바깥 소비자는 가드가 불가능하다.** 사실대로
+    /// 알려 주는 것이 유일한 수단이다.
+    ///
+    /// 값은 OSC 7 authority 를 먼저 쓰고, 없으면 `maru ssh` 목적지에서 `user@` 를 뗀 host 다.
+    /// 로컬에서 생략하는 것은 이 구조체의 관례를 따른다(§3 «없으면 필드 생략») — 빈 문자열은 «host 가
+    /// 빈 원격» 으로 읽히므로 싣지 않는다.
+    cwd_host: ?[]const u8 = null,
     /// git 브랜치. 위 `cwd`(표시용)가 아니라 **저장소 판정용 축**(`termGitBranch` → 원격·ssh면 null)에서
     /// 파생한다. 원격 세션에 브랜치가 없는 것은 예나 지금이나 같다 — 로컬 `.git`을 원격 경로로 읽지 않도록
     /// 파생 함수가 이미 끊는다(ssh-integration.md §9.4). 없으면 생략.
@@ -334,6 +346,11 @@ fn writeSurface(s: *std.json.Stringify, dto: SurfaceDto) !void {
             if (t.cwd) |c| {
                 try s.objectField("cwd");
                 try s.write(c);
+            }
+            // `cwd` 옆에 붙어야 뜻이 산다 — 원격이면 그 경로가 **저쪽 기계**의 것이라는 표시다.
+            if (t.cwd_host) |h| {
+                try s.objectField("cwd_host");
+                try s.write(h);
             }
             if (t.git_branch) |b| {
                 try s.objectField("git_branch");
@@ -570,6 +587,41 @@ test "surface DTO round-trip: terminal 공통 메타 + 전용 필드가 보존�
     try testing.expect(o.get("url") == null);
     try testing.expect(o.get("panel_kind") == null);
     try testing.expect(o.get("trust") == null);
+}
+
+test "surface DTO: 원격 cwd 는 `cwd_host` 로 어느 기계인지 말한다 — 로컬은 생략" {
+    // **왜 이 필드가 있나**: `cwd` 만 실으면 `/srv/app/proj` 는 로컬 경로와 구별되지 않는다. 앱 안쪽
+    // 소비처는 원격 판정으로 막을 수 있지만(ssh-integration.md §9.4) **바깥 소비자는 가드가 불가능**하다.
+    // 그래서 사실대로 알려 준다.
+
+    // ── ① 원격: 경로는 **그대로**, host 는 **따로**. 경로 문자열에 `<host>:` 를 섞지 않는다.
+    {
+        const dto = termSurface(10, "remote", .{ .cwd = "/srv/app/proj", .cwd_host = "workbox", .at_prompt = .unknown });
+        const wire = try serializeSurface(testing.allocator, dto);
+        defer testing.allocator.free(wire);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+        defer parsed.deinit();
+        const o = parsed.value.object;
+        try testing.expectEqualStrings("/srv/app/proj", o.get("cwd").?.string);
+        try testing.expectEqualStrings("workbox", o.get("cwd_host").?.string);
+        // 접두를 섞었다면 이 단언이 죽는다 — 그 형태는 GUI 표기 규약이지 wire 값이 아니다.
+        try testing.expect(std.mem.indexOfScalar(u8, o.get("cwd").?.string, ':') == null);
+    }
+
+    // ── ② 로컬: **생략**한다. 빈 문자열이면 소비자가 「host 가 빈 원격」으로 읽는다 —
+    //    이 구조체가 `cwd` 에 대해 이미 가르는 그 구분이다(§3).
+    {
+        const dto = termSurface(11, "local", .{ .cwd = "/home/a", .at_prompt = .unknown });
+        const wire = try serializeSurface(testing.allocator, dto);
+        defer testing.allocator.free(wire);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+        defer parsed.deinit();
+        const o = parsed.value.object;
+        try testing.expectEqualStrings("/home/a", o.get("cwd").?.string);
+        try testing.expect(o.get("cwd_host") == null);
+    }
 }
 
 // ── 2) DTO 직렬화 round-trip(web) ──

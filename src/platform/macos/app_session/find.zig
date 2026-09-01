@@ -27,9 +27,10 @@ const terminal = maru.terminal;
 /// 편집기 Term의 코어는 **1×1 sentinel**이다(`createEditorTerm` — 텍스트는 `rt.editor_lines`에 있다).
 /// 그래서 편집기 pane에서 ⌘F는 "기능이 없다"가 아니라 **매치 0을 조용히 답하고** 있었다.
 ///
-/// **비교 뷰는 아직 아니다.** 좌우 중 어느 쪽을 검색하는지부터 정해야 하고, 그 판정은 가로 스크롤·
-/// 히트테스트가 좌우를 가른 뒤에 함께 연다(§4.1g 결정표와 같은 자리). 그때까지 비교 Term에서 ⌘F는
-/// 지금까지대로 스크롤백 경로로 가 매치 0이다 — **바꾸지 않은 것이 아니라 아직 안 연 것**이다.
+/// **비교 뷰도 검색한다**(2026-09-01, §5.1 「비교 뷰 검색」). 이 주석은 오래 *"아직 아니다 — 좌우
+/// 판정이 선행한다"* 로 막고 있었는데, **그 선행은 이미 서 있었다**: 열 히트테스트(`isRightColumn`)는
+/// 2026-08-17 에 섰고, 그보다 중요하게 **선택이 이미 자기 열을 기억한다**(`editor_diff_selection`).
+/// 어느 열인지는 `editor_ops.diffSearchSide` 가 답한다 — 선택이 있는 열, 없으면 왼쪽.
 fn activeEditorTerm(self: *AppSession) ?*Term {
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();

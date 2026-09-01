@@ -751,6 +751,22 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   owner와 겹칠 수 없으며 이 alias는 parse·deadline·CLI·child 접근 전에 거부한다.
   predecessor download/release/assets 전체 deadline 배선은 후속 범위다.
 
+  post-publish `verify-predecessor` manifest 인증도 같은 module이 소유하되 B→A 소비 entrypoint와 권위 입력을 섞지 않는다.
+  `authenticatePublishedUntil`은 executable bootstrap이 인증한 현재 protected tag `Context`, caller가 no-follow로 읽어 private
+  manifest file에 materialize한 exact bytes, checkout 전에 pin한 CLI, token과 같은 phase `Deadline`만 받는다. candidate는 role A,
+  predecessor 부재여야 하며 repository·release tag·source commit·build identity를 current context와 exact 교차 결속한다. manifest
+  filename과 file/content SHA도 candidate에서 유도한 artifact-attestation subject와 일치해야 한다. 과거 A를 검증하는 B 소비 경로와
+  달리 current context의 `protected_tag=true`를 요구하고 `manifest.Predecessor`를 self-synthesize하지 않는다.
+
+  성공은 기존 move-only `AuthenticatedManifest` owner로만 게시하여 후속 immutable release/tag-chain/asset composition이 같은 strict
+  parsed manifest를 재사용한다. deadline/result/output은 bytes/file/CLI/token/context backing과 겹칠 수 없고 production pinned CLI
+  owner도 deadline/result/output뿐 아니라 bytes/file/CLI/token/context backing 전부와 겹칠 수 없다. parsed manifest backing도 모든
+  live 입력과 분리된 뒤에만 외부 권위로 진행한다. role B,
+  predecessor 존재, context/filename/file drift, copied/pre-owned result, deadline/CLI/attestation 실패는 authenticated publication 0이다.
+  focused manifest-attestation gate는 published-A success, B/self-predecessor 합성 거부, owner alias의 deadline/CLI/child 접근 0,
+  protected/current context drift, shared deadline identity와 전 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 gate만으로
+  verify-predecessor 전체 transaction, executable/workflow 배선 또는 frozen U5 제품 E2E를 완료했다고 주장하지 않는다.
+
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를
   typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. compatibility와 signing 관측은
@@ -1010,7 +1026,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
     --tag v<version> \
     --github-cli <pre-checkout-canonical-absolute-path> \
     --github-cli-sha256 <pre-checkout-lowercase-sha256> \
-    --manifest <downloaded-predecessor-manifest-path> \
+    --manifest <downloaded-published-current-manifest-path> \
     --work-dir <new-empty-directory> \
     --summary-out <new-summary-path>
   ```
@@ -1020,8 +1036,11 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   component-boundary ancestor·descendant 관계도 alias로 거부해 phase cleanup이 입력이나 출력을 포함하지 않게 한다. adapter가
   no-follow parent 아래 0700으로 만들고 한 phase owner가 성공·실패 cleanup을 끝낸다. ambient
   `TMPDIR`나 앱의 session-host 저장 경로를 추론·재사용하지 않는다. `pre-publish`는 current
-  draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 이미 published인 exact
-  predecessor에서 manifest가 열거한 asset을 새 `work-dir`로 내려받아 `gh release verify`와 각 파일의
+  draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 같은 trusted tag run이 방금 publish해
+  향후 release가 predecessor로 소비할 exact role-A release를 검사한다. command의 `--tag`와 protected workflow context는 이
+  published A 자신을 가리키며 아직 존재하지 않는 successor B나 B의 `predecessor` scope를 입력·합성하지 않는다. adapter는
+  downloaded current A manifest가 current context와 exact 일치하고 artifact-attested인지 먼저 인증한 뒤 manifest가 열거한 asset을
+  새 `work-dir`로 내려받아 `gh release verify`와 각 파일의
   `gh release verify-asset`까지 검사하고 release를 수정하지 않는다. 둘 다 성공 시 stdout이 아니라 `--summary-out`에
   `maru.session-host-release-validation.v1` bounded canonical JSON 하나를 원자적으로 만든다. publish 전 실패는 output 0이며,
   exclusive rename 뒤 parent `fsync`가 실패하면 새 output을 제거하고 parent를 다시 동기화하는 best-effort rollback 뒤 terminal

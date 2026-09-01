@@ -5649,6 +5649,9 @@ pub const AppSession = struct {
     repo_root_walked_ns: i128 = 0,
     /// 마지막 읽기가 실패했는가. 재시도로 성공하면 풀린다 — 실패를 '읽는 중'으로 위장하지 않는다.
     git_failed: bool = false,
+    /// **왜** 못 읽었는가(RS4 §2.2 ⑺). 「읽지 못함」 하나로 뭉개면 사용자는 원격에 git 을 깔아야
+    /// 하는지, 연결을 다시 붙여야 하는지 알 수 없다 — 고치는 방법이 다른 두 상태다.
+    git_failure: git_backend_mod.ReadFailure = .generic,
     /// git 실행 파일을 못 찾았는가. 뷰를 다시 고르면 재판정한다(설치 후 껐다 켜지 않아도 되게).
     git_missing: bool = false,
     file_tree_rows_dirty: bool = true,
@@ -66267,6 +66270,112 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expect(session.scm_write_error == null);
 }
 
+test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (RS4c 적대적 검증 2회차)" {
+    const busy = term_ops.observationKnownBusy;
+    const Sem = maru.terminal.SemanticPrompt;
+
+    // ⑴ **`.current` 일 때만 판단한다.**
+    try std.testing.expect(busy(.current, false, Sem.command)); //  돌고 있다 — 넣지 않는다
+    try std.testing.expect(!busy(.current, false, Sem.prompt));
+    try std.testing.expect(!busy(.current, false, Sem.input));
+    // **모르면 넣는다** — OSC 133 을 내는 원격 셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로
+    // 막고 사용자는 왜 안 되는지도 모른다(닫기 확인과 기본값이 **반대**인 이유다).
+    try std.testing.expect(!busy(.current, false, Sem.unknown));
+
+    // ⑵ ⚠️ **낡은 관측은 「모른다」다.** 거기 남은 `.command` 로 막으면 화면이 **거짓말한다** —
+    //    사용자는 프롬프트를 보고 있는데 「명령이 돌고 있습니다」가 뜬다.
+    try std.testing.expect(!busy(.stale, false, Sem.command));
+    try std.testing.expect(!busy(.stale, true, Sem.command));
+    try std.testing.expect(!busy(.unavailable, true, Sem.command));
+
+    // ⑶ **alt 화면은 semantic 과 무관하게 돈다** — 거기 넣으면 편집 중인 파일에 글자로 박힌다.
+    try std.testing.expect(busy(.current, true, Sem.prompt));
+    try std.testing.expect(busy(.current, true, Sem.unknown));
+}
+
+test "원격 목록은 로컬 git 이 없어도 읽는다 (적대적 검증 5회차)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    // ⚠️ **`buildRemote` 는 `argv[0]` 을 버린다**(RS4a). 그러니 원격 읽기에 로컬 git 경로는 안 실린다 —
+    //    그런데 제출부가 `locate()` 를 요구하면, 로컬에 git 이 없는 사용자는 **원격 SCM 을 통째로** 못
+    //    쓰고 화면은 「git 이 설치되어 있지 않습니다」로 **엉뚱한 기계**를 가리킨다.
+    //
+    //    소스에서 그 규율을 못박는다 — 이 세션에 로컬 git 이 있어 런타임으로는 그 상태를 못 만든다.
+    const src = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        "src/platform/macos/app_session/git.zig",
+        allocator,
+        .limited(4 * 1024 * 1024),
+    );
+    defer allocator.free(src);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        src,
+        "if (remote != null) git_command.remote_git_exe else git_backend_mod.locate(&exe_buf)",
+    ) != null);
+
+    // 그리고 **원격 목록을 보는 동안 그 안내가 첫 줄을 차지하지 않는다.** 제출부가 그 깃발을 지우지만
+    // **첫 제출 전 창**이 남으므로, 안내 자체가 원격을 안다.
+    session.git_missing = true;
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        git_ops.scmEmptyNotice(session, &probe),
+        maru.i18n.t(.git_not_installed),
+    ));
+    // 로컬 목록에서는 그 안내가 **그대로 첫 줄이다** — 무조건 지우는 것이 아니다.
+    git_ops.rememberGitRepoDest(session, null);
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.git_not_installed),
+        git_ops.scmEmptyNotice(session, &probe),
+    );
+}
+
+test "원격 읽기 실패 사유는 호스트를 넘지 않는다 (RS4 §2.2 ⑺ 적대적 검증 3회차)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    // 원격 읽기가 「그 기계에 git 이 없다」로 실패했다.
+    session.git_failed = true;
+    session.git_failure = .remote_git_missing;
+
+    // ⚠️ **경로가 같고 호스트만 바뀌는 전환.** `rememberGitRepo` 는 경로로만 판정해 이것을 못 본다 —
+    //    그대로 두면 「원격에 git 이 없습니다」가 **로컬 목록 위에** 남는다(RS2 2회차와 같은 뿌리).
+    git_ops.rememberGitRepoDest(session, null);
+    try std.testing.expect(!session.git_failed);
+    try std.testing.expectEqual(git_backend_mod.ReadFailure.generic, session.git_failure);
+
+    // 반대 방향도 같다 — 로컬 실패를 원격 목록 위에 물려주지 않는다.
+    session.git_failed = true;
+    session.git_failure = .generic;
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    try std.testing.expect(!session.git_failed);
+
+    // 다른 호스트로 갈아탈 때도 마찬가지다.
+    session.git_failed = true;
+    session.git_failure = .remote_transport;
+    git_ops.rememberGitRepoDest(session, "user@other-box");
+    try std.testing.expect(!session.git_failed);
+    try std.testing.expectEqual(git_backend_mod.ReadFailure.generic, session.git_failure);
+}
+
 test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4c)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -66330,7 +66439,45 @@ test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4
         maru.i18n.t(.scm_remote_fetch_injected),
     ));
 
-    // ⑸ **주입 자리는 하나다.** `push`·`pull` 과 `fetch` 가 같은 함수를 지나야 「push 는 그 pane 에,
+    // ⑸ **돌고 있는 것을 알면 안 넣는다 — 그러나 모르면 넣는다.**
+    //
+    //    이 기본값이 닫기 확인(`termHasRunningJob`)과 **반대**인 것이 요점이다: OSC 133 을 내는 원격
+    //    셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로 막고 사용자는 왜 안 되는지도 모른다.
+    git_ops.rememberGitRepoDest(session, "user@build-box"); // 다시 같은 기계로
+    {
+        const t = pane_ops.activePane(session).activeTerm();
+        // ⓐ **모른다**(OSC 133 없음) → 넣는다.
+        t.surface.core.semantic_state = .unknown;
+        t.surface.core.alt_active = false;
+        try std.testing.expect(!term_ops.activeTermKnownBusy(session, session.io));
+        scm_dock_ops.clearScmWriteError(session);
+        scm_dock_ops.submitFetchForTest(session);
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.scm_remote_fetch_injected),
+            session.scm_write_error.?,
+        );
+        // ⓑ **돈다**(OSC 133 C) → 안 넣는다.
+        t.surface.core.semantic_state = .command;
+        try std.testing.expect(term_ops.activeTermKnownBusy(session, session.io));
+        scm_dock_ops.clearScmWriteError(session);
+        scm_dock_ops.submitFetchForTest(session);
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_terminal_busy), session.scm_write_error.?);
+        // ⓒ **alt 화면**(vim·less)은 semantic 과 무관하게 돈다 — 거기 넣으면 편집 중인 파일에 박힌다.
+        t.surface.core.semantic_state = .prompt;
+        t.surface.core.alt_active = true;
+        try std.testing.expect(term_ops.activeTermKnownBusy(session, session.io));
+        // ⓓ **프롬프트로 돌아오면** 다시 넣는다.
+        t.surface.core.alt_active = false;
+        try std.testing.expect(!term_ops.activeTermKnownBusy(session, session.io));
+        scm_dock_ops.clearScmWriteError(session);
+        scm_dock_ops.submitFetchForTest(session);
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.scm_remote_fetch_injected),
+            session.scm_write_error.?,
+        );
+    }
+
+    // ⑹ **주입 자리는 하나다.** `push`·`pull` 과 `fetch` 가 같은 함수를 지나야 「push 는 그 pane 에,
     //    fetch 는 다른 pane 에」가 원리적으로 불가능해진다(§6.4 — 주입 시점에 활성 pane 을 다시 묻는다).
     const src = try std.Io.Dir.cwd().readFileAlloc(
         std.Io.Threaded.global_single_threaded.io(),

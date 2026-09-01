@@ -519,6 +519,11 @@ const Table = struct {
     /// 지금 활성 pane 이 **그 저장소의 기계가 아니다.** 거기에 명령을 넣으면 다른 기계에서 돈다 —
     /// `push` 면 다른 저장소에 **쓴다.**
     scm_inject_host_mismatch: [:0]const u8,
+    /// 원격 PATH 에 `git` 이 없다(exit 127). 우리 PATH 처방으로도 못 찾았으므로 **사용자가 깔아야 한다** —
+    /// 「읽지 못함」으로 뭉개면 저장소를 의심하며 시간을 쓴다.
+    scm_remote_git_missing: [:0]const u8,
+    /// 활성 터미널에서 **명령이 돌고 있다**(셸 통합이 그렇게 말한다). 지금 넣으면 그 프로그램이 받는다.
+    scm_terminal_busy: [:0]const u8,
     scm_changes: [:0]const u8,
     scm_history: [:0]const u8,
     scm_staged: [:0]const u8,
@@ -1272,6 +1277,8 @@ const en: Table = .{
     .scm_no_terminal = "No terminal to type into",
     .scm_remote_fetch_injected = "Typed `git fetch --prune` into the terminal — run it there, then refresh",
     .scm_inject_host_mismatch = "The active terminal is on a different machine than this repository",
+    .scm_remote_git_missing = "No git on the remote — install it there",
+    .scm_terminal_busy = "That terminal is running something — wait for the prompt",
     .scm_changes = "Changes",
     .scm_history = "History",
     .scm_staged = "Staged changes",
@@ -1863,6 +1870,8 @@ const ko: Table = .{
     .scm_remote_transport_failed = "원격 연결이 끊겨 git 까지 닿지 못했습니다",
     .scm_remote_fetch_injected = "터미널에 `git fetch --prune` 을 넣었습니다 — 거기서 실행한 뒤 새로고침하세요",
     .scm_inject_host_mismatch = "활성 터미널이 이 저장소와 다른 기계에 있습니다",
+    .scm_remote_git_missing = "원격에 git 이 없습니다 — 그쪽에 설치하세요",
+    .scm_terminal_busy = "그 터미널에서 명령이 돌고 있습니다 — 프롬프트를 기다리세요",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

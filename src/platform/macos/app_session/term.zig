@@ -800,6 +800,53 @@ pub fn cancelPointerGestureForTermRemoval(self: *AppSession, tab_index: usize, p
     }
 }
 
+/// 활성 Term 이 **지금 명령을 돌리고 있다고 우리가 아는가**(RS4c 후속). `termHasRunningJob` 과 **기본값이
+/// 반대**라 따로 있다:
+///
+/// - 닫기 확인은 「모르면 물어본다」가 맞다 — 잘못 닫으면 돌던 작업이 죽는다.
+/// - **명령 주입은 「모르면 넣는다」가 맞다.** OSC 133 을 내는 원격 셸은 **소수**라, 모름을 막음으로
+///   접으면 흔한 경우를 통째로 막는다(그때 사용자는 왜 안 되는지도 모른다).
+///
+/// 그래서 `unknown` 을 **접지 않는다** — 컨트롤 플레인의 `atPromptWire` 3상과 같은 규율이다.
+pub fn activeTermKnownBusy(self: *AppSession, io: std.Io) bool {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return false;
+    if (!term.rt.live_initialized) return false;
+    if (term.surface.process_state == .exited) return false;
+    if (term.surface.remote == null) {
+        term.surface.lockCore(io);
+        defer term.surface.unlockCore(io);
+        // alt 화면(vim·less)은 semantic 과 무관하게 **돌고 있다**(§3 alt 오버라이드와 같은 판정).
+        if (term.surface.core.alt_active) return true;
+        return term.surface.core.semantic_state == .command;
+    }
+    // ⚠️ **`.current` 일 때만 믿는다**(적대적 검증 2회차). `.stale` 은 낡은 값이라, 거기 남은
+    // `.command` 로 막으면 **화면이 거짓말한다** — 사용자는 프롬프트를 보고 있는데 「명령이 돌고
+    // 있습니다」가 뜬다. 「모르면 넣는다」의 「모른다」에는 **낡음도 든다.**
+    return observationKnownBusy(
+        term.rt.observation.availability,
+        term.rt.observation.alt_active,
+        term.rt.observation.semantic_state,
+    );
+}
+
+/// host-backed 관측 → 「지금 돌고 있다고 **아는가**」. 순수라 헤드리스로 전수로 짚는다 — 스모크 세션의
+/// Term 은 in-process 라 위 함수만으로는 이 갈래를 **한 번도 안 지난다**(적대적 검증에서 그렇게 드러났다).
+///
+/// ⚠️ **`.current` 일 때만 믿는다.** `.stale` 은 낡은 값이라, 거기 남은 `.command` 로 막으면 화면이
+/// **거짓말한다** — 사용자는 프롬프트를 보고 있는데 「명령이 돌고 있습니다」가 뜬다. 「모르면 넣는다」의
+/// 「모른다」에는 **낡음도 든다.**
+pub fn observationKnownBusy(
+    availability: maru.app.term_runtime_backend.ObservationAvailability,
+    alt_active: bool,
+    semantic: maru.terminal.SemanticPrompt,
+) bool {
+    if (availability != .current) return false;
+    if (alt_active) return true; // alt 화면(vim·less)은 semantic 과 무관하게 돈다
+    return semantic == .command;
+}
+
 /// 이 Term에 셸이 아닌 포그라운드 명령이 실행 중인가 — 닫기 확인의 단위 판정. live_pty 미초기화(attach 전)나
 /// 이미 종료(exited)면 false(명령 없음). 실행 여부는 코어의 `cursorIsAtPrompt`(셸 통합 OSC 133 + alt 화면,
 /// OS-중립)로 판정한다 — 프롬프트에 idle하게 있으면 실행 중 아님. pgid syscall을 안 쓰므로 login(1) fork

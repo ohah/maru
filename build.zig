@@ -14271,11 +14271,11 @@ pub fn build(b: *std.Build) void {
         run_remote_scm.addArtifactArg(remote_scm_tests);
         run_remote_scm.setCwd(b.path("."));
         // 필터가 몇 개를 골랐는가 — 판정자가 조용히 사라지면 여기서 걸린다.
-        run_remote_scm.addArg("--maru-expect-tests=3");
+        run_remote_scm.addArg("--maru-expect-tests=4");
         // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 하네스 env 가 없으면 `SkipZigTest` 로 나가는데,
         // 컴파일 수만 세면 **하네스가 조용히 안 서도 초록**이다 — 「없어진 것」과 「원래 없던 것」을
         // 구분할 수 없는, 이 저장소가 가장 나쁘다고 적어 둔 실패 모드다(`tools/simple_test_runner.zig`).
-        run_remote_scm.addArg("--maru-expect-passed=3");
+        run_remote_scm.addArg("--maru-expect-passed=4");
         b.step(
             "test-remote-scm",
             "Run the remote SCM judges against a harness-owned localhost sshd",

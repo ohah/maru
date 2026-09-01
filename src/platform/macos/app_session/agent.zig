@@ -803,9 +803,10 @@ pub fn pollAgentKinds(self: *AppSession) void {
                 // `agent_kind` 가 영영 `.none` 이라, `!= .none` 만으로 막으면 원격 축은 판정 함수까지
                 // 도달하지도 못한다 — 채널이 열려도 배지가 영영 안 서는 자리였다.
                 if (observer_probe and (term.agent_kind != .none or term.agent_remote_channel != null)) {
-                    // **소스는 Term 마다 정확히 하나다**(계약 §1). 훅 모드면 화면·OSC 를 아예 읽지 않고,
-                    // 관측 모드면 훅 로그를 읽지 않는다. 여기서 섞으면 «배지가 가끔 틀림» 이 되는데 그
-                    // 증상은 재현되지 않는다.
+                    // **판정은 Term 마다 하나이고, 그 판정에 두 소스가 들어간다**(계약 §1 — 2026-09-01
+                    // 개정). 예전 주석은 「훅 모드면 화면·OSC 를 아예 읽지 않는다」였는데 그 배타가
+                    // 승인 해제·codex 오류 턴·훅 유실을 구조적으로 못 메웠다. 지금은 §1.1 권위표가
+                    // 둘을 중재하고, 뒤집기는 그 표에 열거된 것만 허용한다.
                     //
                     // 훅 로그 확인은 `observation_current` 를 요구하지 않는다 — 그것은 화면 관측이 최신인지의
                     // 조건이고, 파일을 읽는 데는 상관이 없다.
@@ -1757,6 +1758,11 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
             // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
             term.agent_hook_progress.reset();
+            // **훅 상태도 버린다**(적대적 검증 2026-09-01 — 위 셋과 같은 이유인데 빠져 있었다). 남기면
+            // 훅 소스가 돌아온 순간 **낡은 값이 그대로 배지가 된다**: 설정을 껐다 켜거나 로그가
+            // 사라졌다 돌아오는 사이 에이전트가 턴을 끝냈어도 배지는 옛 `running` 이다. `unknown` 으로
+            // 두면 §1.1 의 B0 가 첫 훅 이벤트가 올 때까지 화면을 쓴다 — 「모른다」와 「idle 이다」는 다르다.
+            term.agent_hook_state = .unknown;
             if (observation_current) {
                 pollAgentState(self, term, displayed);
                 pollAgentTranscript(self, term, displayed);

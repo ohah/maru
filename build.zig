@@ -12248,6 +12248,42 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_adapter_contract_tests.step);
         if (posix_host_tests) test_step.dependOn(&run_release_adapter_contract_tests.step);
     }
+    const session_host_release_adapter_pre_publish_workspace_step = b.step(
+        "test-session-host-release-adapter-pre-publish-workspace",
+        "Validate the private pre-publish workspace owner",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |workspace_optimize| {
+        const workspace_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_pre_publish_workspace.zig"),
+            .target = target,
+            .optimize = workspace_optimize,
+            .link_libc = true,
+            .imports = &.{.{
+                .name = "safe_open",
+                .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .target = target,
+                    .optimize = workspace_optimize,
+                }),
+            }},
+        });
+        const workspace_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_pre_publish_workspace.zig"),
+                .target = target,
+                .optimize = workspace_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = workspace_mod }},
+            }),
+        });
+        const run_workspace_tests = b.addRunArtifact(workspace_tests);
+        run_workspace_tests.addArg("--maru-expect-tests=7");
+        run_workspace_tests.setCwd(b.path("."));
+        session_host_release_adapter_pre_publish_workspace_step.dependOn(&run_workspace_tests.step);
+        session_host_step.dependOn(&run_workspace_tests.step);
+        if (macos_host_tests) test_step.dependOn(&run_workspace_tests.step);
+        macos_only_test_step.dependOn(&run_workspace_tests.step);
+    }
     const session_host_release_adapter_context_step = b.step(
         "test-session-host-release-adapter-context",
         "Validate bounded GitHub Actions identity context for the release adapter",

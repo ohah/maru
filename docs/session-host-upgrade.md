@@ -926,6 +926,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   complete write·`fsync`·`close`한 뒤 macOS `RENAME_EXCL`로 absent final에만 게시하고 parent를 `fsync`한다. predecessor work-dir도
   안전하게 연 parent 아래 absent leaf에만 0700으로 만들며, 기존 file/directory/symlink를 재사용하지 않는다.
 
+  frozen executable처럼 manifest size가 큰 binary는 `readInputAlloc`로 전체 bytes를 heap에 올리지 않는다.
+  `release_adapter_files.PinnedExecutableFile`이 caller가 준 absolute pathname을 no-follow로 열어 executable regular fd를
+  final-address move-only owner에 보존하고, manifest의 nonzero expected size/SHA-256과 caller가 선택한 제품 상한을 먼저 결속한 뒤
+  64 KiB 고정 stack buffer로 streaming hash한다. pin 전후 fd의 device/inode/type/mode/link-count/size/mtime/ctime이 같아야 하며,
+  후속 DMG/Apple 관측 뒤 `revalidateExecutable`은 pathname hash·길이, reopened pathname fd, 보존 fd의 identity와 digest를 다시
+  모두 대조한다. pathname 교체, in-place mutation, execute bit 제거, size/digest drift는 frozen asset 관측을 게시하지 않는다.
+  성공/실패 경로에서 heap allocation은 없고 fd cleanup 권위는 원래 final address만 가진다. focused gate
+  `test-session-host-release-adapter-frozen-executable-authority`는 actual macOS filesystem에서 exact success/revalidation,
+  copied/pre-owned owner, relative/symlink/non-regular/non-executable, zero/cap/size/digest mismatch, pathname 교체와 in-place mutation을
+  Debug·ReleaseFast로 검증한다. 이 gate만으로 DMG 내부 executable과의 동일성, Apple product 관측, current manifest composition,
+  summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
+
   외부 관측 명령은 shell 문자열이나 호출자 PATH로 실행하지 않는다. absolute executable과 고정 argv를 공용
   `bounded_process.zig`에 넘기고 stdin은 `/dev/null`, stdout/stderr는 하나의 exact-cap pipe로 제한한다. 성공은 monotonic
   deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process

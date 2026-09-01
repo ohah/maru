@@ -4,6 +4,8 @@
 //! group의 descendant까지 종료해야 다음 release job에 프로세스나 pipe owner를 남기지 않는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const c = std.c;
 const process = @import("bounded_process");
 
 const shell: [:0]const u8 = "/bin/sh";
@@ -50,6 +52,12 @@ test "bounded process rejects nonzero and signaled terminal status" {
     try std.testing.expectError(
         error.InvalidExecutable,
         process.runCapture(std.testing.io, relative, &relative_argv, &output, std.time.ns_per_s),
+    );
+    const missing: [:0]const u8 = "/definitely/missing/maru-bounded-process";
+    const missing_argv = [_:null]?[*:0]const u8{missing.ptr};
+    try std.testing.expectError(
+        error.ChildFailed,
+        process.runCapture(std.testing.io, missing, &missing_argv, &output, std.time.ns_per_s),
     );
     const empty_output: [0]u8 = .{};
     const valid_argv = [_:null]?[*:0]const u8{shell.ptr};
@@ -101,4 +109,81 @@ test "bounded process can replace inherited environment exactly" {
             std.time.ns_per_s,
         ),
     );
+}
+
+test "bounded process closes ambient descriptors when no inheritance is requested" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ambient", .data = "secret" });
+    var ambient_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const ambient_path = try temporaryPath(&tmp, "ambient", &ambient_path_storage);
+    const ambient_fd = c.open(ambient_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = false }, @as(c.mode_t, 0));
+    try std.testing.expect(ambient_fd >= 3);
+    defer _ = c.close(ambient_fd);
+    var fd_storage: [32]u8 = undefined;
+    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked; else printf closed; fi" };
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "closed",
+        try process.runCaptureEnvironment(std.testing.io, shell, &argv, &environment, &output, std.time.ns_per_s),
+    );
+}
+
+test "bounded process binds one directory as child cwd without mutating parent authority" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "held", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held/leaf", .data = "payload" });
+    var directory_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const directory_path = try temporaryPath(&tmp, "held", &directory_path_storage);
+    const directory_fd = c.open(directory_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
+    try std.testing.expect(directory_fd >= 3);
+    defer _ = c.close(directory_fd);
+    var leaf_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const leaf_path = try temporaryPath(&tmp, "held/leaf", &leaf_path_storage);
+    const ambient_fd = c.open(leaf_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = false }, @as(c.mode_t, 0));
+    try std.testing.expect(ambient_fd >= 3 and ambient_fd != directory_fd);
+    defer _ = c.close(ambient_fd);
+    const flags_before = c.fcntl(directory_fd, c.F.GETFD, @as(c_int, 0));
+    var stat_before: std.posix.Stat = undefined;
+    try std.testing.expect(flags_before >= 0 and c.fstat(directory_fd, &stat_before) == 0);
+    try tmp.dir.rename("held", tmp.dir, "held-moved", std.testing.io);
+    try tmp.dir.createDir(std.testing.io, "held", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held/leaf", .data = "replacement" });
+    var fd_storage: [32]u8 = undefined;
+    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '%s|' \"$(/bin/cat ./leaf)\"; if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked; else printf closed; fi" };
+    var output: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "payload|closed",
+        try process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+    );
+    const flags_after = c.fcntl(directory_fd, c.F.GETFD, @as(c_int, 0));
+    var stat_after: std.posix.Stat = undefined;
+    try std.testing.expect(flags_after == flags_before and c.fstat(directory_fd, &stat_after) == 0);
+    try std.testing.expect(stat_after.dev == stat_before.dev and stat_after.ino == stat_before.ino);
+    try std.testing.expectError(
+        error.InvalidDirectoryFd,
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, 0, &output, std.time.ns_per_s),
+    );
+    const closed_fd = c.dup(directory_fd);
+    try std.testing.expect(closed_fd >= 3 and c.close(closed_fd) == 0);
+    try std.testing.expectError(
+        error.InvalidDirectoryFd,
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, closed_fd, &output, std.time.ns_per_s),
+    );
+    try std.testing.expectError(
+        error.InvalidDirectoryFd,
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, ambient_fd, &output, std.time.ns_per_s),
+    );
+}
+
+fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
 }

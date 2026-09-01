@@ -87,6 +87,13 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     try std.testing.expect(std.mem.indexOf(u8, sb_body, "termDisplayHost(term)") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "`<host>:<path>` 로 적는다") != null);
 
+    // 그 규율을 지나는 자리는 **둘**이다 — 폴더줄과 종료 안내. 표에 행만 늘리고 여기서 안 세면,
+    // 이 판정자가 막으려던 낡음이 **새 행에서 다시 시작**된다.
+    const eg_body = try bodyOf(app, "pub fn writeEndedPlaceholderGuidance", "\n    }\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, eg_body, "termCwdIsRemote(term)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, eg_body, "termDisplayHost(term)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "| 종료 placeholder 안내(`마지막 위치`) |") != null);
+
     // ── ⑷ 쓰기 축의 규율: 원격 cwd 를 **로컬 spawn 에 안 넘긴다** ─────────────────────────────
     //
     // 표의 두 행(새 탭 상속·종료 Term 되살리기)이 주장하는 사실이다.

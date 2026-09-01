@@ -2477,6 +2477,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `current-manifest`·`predecessor-manifest`·`predecessor-assets`·`dmg`·`current-assets` child pathname만 유도하며, unexpected entry나
   replacement를 허용하지 않고 초기화/empty root cleanup 실패 시 durable removal까지 retry
   권위를 보존한다. `test-session-host-release-adapter-pre-publish-workspace`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다.
+  pre-publish phase transaction은 validated token 뒤 failure-pristine deadline, workspace와 모든 current/predecessor leaf를 닫힌 순서로 호출하고,
+  deadline start 이후 fail-index마다 실패하면서 retry 권위를 남긴 attempted private owner까지 역순 정리하며 cleanup이 전부 성공한 뒤에만 summary를
+  게시한다. observation setup 실패와 private cleanup 실패에도 observation을 terminal cleanup하고, cleanup 실패 시 publication 0과
+  retry authority를 보존하며 private cleanup 뒤 live deadline 최종 검증·deadline cleanup·성공 publication·observation 해제 순서는
+  `test-session-host-release-adapter-pre-publish-phase`가 Debug·ReleaseFast에서 검증한다. production adapter 타입 배선과 frozen U5
+  E2E는 이 transaction gate의 범위 밖이다.
   release adapter가 사용할 macOS 외부 명령 leaf는 `bounded_process.zig` 한 곳에서 absolute exec, stdin `/dev/null`,
   merged output exact cap, exit 0+EOF, monotonic timeout과 process-group kill/direct-child reap을 소유하고 기존 upgrade codesign이 먼저
   재사용하며, `test-session-host-bounded-process`가 Debug·ReleaseFast 실제 process로 검증한다. 그러나 release adapter executable

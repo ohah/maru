@@ -13098,6 +13098,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-github-current-observation",
         "Run current final release-manifest observation tests",
     );
+    const session_host_release_adapter_summary_step = b.step(
+        "test-session-host-release-adapter-summary",
+        "Run release validation audit summary encoding tests",
+    );
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |composition_optimize| {
             const manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = composition_optimize });
@@ -13141,6 +13145,7 @@ pub fn build(b: *std.Build) void {
             const current_asset_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_asset_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_asset_files", .module = current_asset_files_mod } } });
             const current_compatibility_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_compatibility.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod } } });
             const current_observation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_observation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod }, .{ .name = "release_adapter_github_current_evidence", .module = current_evidence_mod }, .{ .name = "release_adapter_github_current_asset_files", .module = current_asset_files_mod }, .{ .name = "release_adapter_github_current_asset_attestation", .module = current_asset_attestation_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod } } });
+            const summary_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_summary.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_github_current_observation", .module = current_observation_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_predecessor_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
             const run = b.addRunArtifact(tests);
             run.addArg("--maru-expect-tests=8");
@@ -13237,6 +13242,14 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_current_observation_tests.step);
             test_step.dependOn(&run_current_observation_tests.step);
             macos_only_test_step.dependOn(&run_current_observation_tests.step);
+            const summary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_summary.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_summary", .module = summary_mod }, .{ .name = "release_adapter_github_current_observation", .module = current_observation_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } }) });
+            const run_summary_tests = b.addRunArtifact(summary_tests);
+            run_summary_tests.addArg("--maru-expect-tests=6");
+            run_summary_tests.setCwd(b.path("."));
+            session_host_release_adapter_summary_step.dependOn(&run_summary_tests.step);
+            session_host_step.dependOn(&run_summary_tests.step);
+            test_step.dependOn(&run_summary_tests.step);
+            macos_only_test_step.dependOn(&run_summary_tests.step);
         }
     }
     if (target.result.os.tag == .macos) {

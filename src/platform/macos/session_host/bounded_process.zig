@@ -4,7 +4,6 @@
 //! process-group kill 규율을 공유한다. 성공은 exact exit 0과 pipe EOF를 모두 관측한 뒤에만 반환한다.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 
@@ -257,13 +256,13 @@ fn setCloseOnExec(fd: c.fd_t) bool {
 }
 
 fn validDirectoryFd(fd: c.fd_t) bool {
-    if (comptime builtin.os.tag == .macos) {
-        if (fd < 3 or c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0) return false;
-        var stat: posix.Stat = undefined;
-        return c.fstat(fd, &stat) == 0 and posix.S.ISDIR(stat.mode);
-    } else {
-        return false;
-    }
+    if (fd < 3 or c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0) return false;
+    // Opening `.` relative to the held fd proves directory capability without
+    // mutating process cwd. This also avoids Zig 0.16's target-specific `Stat`
+    // declaration while preserving the same fail-closed check on Darwin/Linux.
+    const probe = c.openat(fd, ".", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
+    if (probe < 0) return false;
+    return c.close(probe) == 0;
 }
 
 const ChildPoll = enum { running, reaped, failed };

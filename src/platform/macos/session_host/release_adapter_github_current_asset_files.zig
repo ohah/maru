@@ -35,10 +35,12 @@ pub const Paths = struct {
 
 pub const AssetObservation = struct {
     role: manifest.AssetRole,
+    name: []const u8,
     path: []const u8,
     identity: files.Identity,
     size: u64,
     mode: u32,
+    link_count: u64,
     sha256: []const u8,
 };
 
@@ -56,10 +58,12 @@ const PrivateFile = struct {
         if (!self.present) return null;
         return .{
             .role = self.role,
+            .name = std.mem.sliceTo(&self.name, 0),
             .path = std.mem.sliceTo(&self.path, 0),
             .identity = self.identity,
             .size = self.size,
             .mode = self.mode,
+            .link_count = 1,
             .sha256 = &self.sha256,
         };
     }
@@ -67,6 +71,7 @@ const PrivateFile = struct {
 
 pub const View = struct {
     owner: *const CurrentAssetFiles,
+    directory_fd: c.fd_t,
 
     pub fn asset(self: View, role: manifest.AssetRole) ?AssetObservation {
         var found: ?AssetObservation = null;
@@ -95,7 +100,27 @@ pub const CurrentAssetFiles = struct {
         if (self.owner != self or !self.complete or !self.dir_present or self.dir_fd < 0)
             return null;
         for (&self.private_files) |*file| if (!file.present) return null;
-        return .{ .owner = self };
+        return .{ .owner = self, .directory_fd = self.dir_fd };
+    }
+
+    pub fn revalidate(self: *@This()) Error!View {
+        const view = self.value() orelse return error.InvalidOwner;
+        const directory = fingerprint(self.dir_fd) catch return error.SourceChanged;
+        if (!posix.S.ISDIR(directory.mode) or directory.identity.device != self.dir_identity.device or
+            directory.identity.inode != self.dir_identity.inode or directory.mode & 0o777 != 0o700)
+            return error.SourceChanged;
+        for (&self.private_files) |*file| {
+            const fd = c.openat(self.dir_fd, file.name[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+            if (fd < 0) return error.SourceChanged;
+            defer _ = c.close(fd);
+            const observed = fingerprint(fd) catch return error.SourceChanged;
+            const digest = hashExact(fd, observed.size) catch return error.SourceChanged;
+            if (!posix.S.ISREG(observed.mode) or observed.identity.device != file.identity.device or
+                observed.identity.inode != file.identity.inode or observed.mode & 0o777 != 0o400 or
+                observed.link_count != 1 or observed.size != file.size or !std.mem.eql(u8, &digest, &file.sha256))
+                return error.SourceChanged;
+        }
+        return view;
     }
 
     pub fn deinit(self: *@This()) Error!void {

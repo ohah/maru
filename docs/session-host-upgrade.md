@@ -1142,6 +1142,20 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied owner와 allocation unwind를 Debug·ReleaseFast에서 검증한다. 이 gate는 evidence leaf 실행·aggregate authoring,
   manifest authoring, asset attach/publish 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  evidence writer에 넘길 current candidate 공통 identity는
+  `release_adapter_candidate_evidence_identity.zig`의 final-address move-only `CandidateEvidenceIdentity`가 단독 소유한다.
+  입력은 trusted `Context`, caller가 한 번 생성한 canonical UUID v4 correlation, final-address `CandidateFiles`와
+  `CandidateProduct`, 동일 candidate pathname/DMG work pathname, `SourceTreeAuthority`뿐이다. caller가 release ID/version,
+  commit/tree, candidate digest, build identity나 designated-requirement digest를 별도 scalar로 제출하지 않는다.
+
+  composition은 candidate product를 원래 files/path authority로 재검증하고 source-tree commit을 context와 결속한 뒤
+  repository/release/source/build/candidate와 product signing requirement를 fixed owner storage로 복사한다. UUID 형식과 공통
+  identity 정책은 `release_evidence.validateCommon` 한 곳을 재사용한다. 후속 writer가 사용하기 직전 `revalidate`는 product와
+  source-tree owner를 다시 대조해야 하며 copied/pre-owned owner, UUID/context/product/tree/path drift에서는 view를 내주지 않는다.
+  focused gate `test-session-host-release-adapter-candidate-evidence-identity`는 exact common derivation, owner 독립 storage,
+  copied/pre-owned owner와 UUID/context/product/tree/path drift를 Debug·ReleaseFast에서 검증한다. profile A/B 선택,
+  predecessor authority, gate leaf 조립·publication과 aggregate attestation은 후속 gate가 소유한다.
+
   current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
   `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
   composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B

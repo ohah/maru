@@ -1108,6 +1108,29 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. 이 gate는 release workflow command ordering, draft redownload/publish, signed frozen U5 제품 E2E를
   대신하지 않는다.
 
+  release validation audit summary의 canonical encoding 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_summary.zig`다. `pre-publish`는 final-address
+  `CurrentObservation` B만, `verify-predecessor`는 authenticated role-A manifest와 그 manifest가 열거한
+  published immutable release/assets의 held download 권위를 보존한 `AuthenticatedPredecessorAssets`만 받는다.
+  caller가 manifest pointer, phase 문자열, 성공 boolean, digest·size·repository·release·source·build scalar를
+  다시 제출하지 못한다. predecessor 경로는 manifest artifact attestation receipt와 downloaded asset set을
+  encoding 직전·직후에 다시 검증하고 source commit과 manifest role를 교차 결속한다.
+
+  output은 `maru.session-host-release-validation.v1` schema의 bounded canonical JSON이며 key 순서는
+  `schema`, `phase`, `result`, `manifest_sha256`, `manifest_size`, `manifest`로 고정한다. `phase`는
+  `pre_publish|verify_predecessor`, `result`는 검증 owner에서만 유도되는 `passed`다. nested `manifest`는
+  strict parsed manifest 전체를 보존하고, `manifest_sha256`/`manifest_size`는 `release_manifest.writeCanonical`이
+  만든 exact bytes에서 계산한다. role B는 `pre_publish`, role A는 `verify_predecessor`로만 encoding하며
+  다른 조합은 거부한다. encoder는 LF 하나를 포함한 exact bytes를 만든 뒤 strict parser로 다시
+  round-trip해 noncanonical key/order/escaping/number/trailing bytes와 digest·size·phase·manifest drift를 거부한다.
+  `max_summary_bytes`는 `release_manifest.max_manifest_bytes`보다 크지 않은 별도 상한이고 allocation
+  fail-index에서 output allocation은 전량 unwind된다. 이 bytes를 absent pathname에 exclusive·atomic publish하는
+  filesystem 책임은 기존 `release_adapter_files.publishSummaryExclusive`에 남겨 encoder가 pathname을 받지 않는다.
+  focused gate `test-session-host-release-adapter-summary`는 A/B exact canonical golden, owner copy/pre-owned/stale,
+  role/phase/source/attestation/download drift, duplicate/unknown/missing/type/cap/trailing/noncanonical 변조와 전 allocation
+  fail-index unwind를 Debug·ReleaseFast로 검증한다. summary는 감사 결과일 뿐 다음 command의 권위 입력이
+  아니며, 이 gate는 executable·filesystem publication·workflow ordering·GitHub publish를 대신하지 않는다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

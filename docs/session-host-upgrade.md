@@ -869,8 +869,26 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   attestation drift, CLI 교체, timeout, child/allocation failure는 publication 0이며 `ManifestFile.cleanup` 권위는 caller에게 남긴다.
   focused gate `test-session-host-release-adapter-github-current-manifest-attestation`은 fail-closed call order, before/after file drift,
   authority의 각 identity/protection mismatch, role/context/name mismatch, attestation failure, copied owner와 전 allocation fail-index를
-  Debug·ReleaseFast에서 검증한다. certificate·subject 세부 변조는 재사용하는 artifact-attestation gate가 소유한다. caller pathname read/materialization, local asset/Apple product 관측, summary publication,
+  Debug·ReleaseFast에서 검증한다. certificate·subject 세부 변조는 재사용하는 artifact-attestation gate가 소유한다. local asset/Apple product 관측, summary publication,
   executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
+
+  Current manifest pathname composition의 단일 소유자는
+  `release_adapter_github_current_manifest_input.zig`다. 입력 manifest pathname은 absolute path와 canonical
+  `Maru-<context version>-session-host-release.json` basename을 먼저 요구하고, `release_adapter_files.readInputAlloc`로 모든
+  component를 no-follow 순회해 하나의 regular fd에서 `max_manifest_bytes` 이하 bytes·size·SHA-256·device/inode를 만든다.
+  그 owned bytes와 computed digest만 `release_adapter_github_manifest_file.materialize`에 넘겨 caller가 지정한 absent
+  work-directory 아래 0700 directory와 0400·link-count-1 canonical leaf를 만든다. 원래 pathname은 이후 attestation child나
+  다른 parser에 다시 넘기지 않으며, 원본이 read 뒤 교체·삭제되어도 private leaf와 owned bytes가 같은 candidate를 가리킨다.
+
+  성공은 original input bytes, cleanup 가능한 `ManifestFile`, 앞 단계의 `AuthenticatedCurrentManifest`를 final-address
+  move-only `CurrentManifestInput` 하나가 함께 소유할 때만 게시한다. pre-owned/copied result, noncanonical basename,
+  symlink·non-regular·empty·oversize, destination collision, materialization/attestation 실패는 authenticated result 0이고,
+  이미 만든 private file/work-directory와 input allocation을 역순으로 회수한다. cleanup 자체가 실패하면 성공으로 위장하지 않고
+  같은 owner가 재시도 권위를 보존한다. focused gate
+  `test-session-host-release-adapter-github-current-manifest-input`은 실제 macOS filesystem에서 canonical 성공, attestor가 보는
+  private path와 read 뒤 original mutation 격리, basename/input/path/materialization 실패, attestation 실패 뒤 residue 0,
+  copied/pre-owned owner와 전 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 composition은 local DMG/frozen
+  executable·Apple product 관측, summary publication, executable/workflow 배선과 frozen U5 제품 E2E를 대신하지 않는다.
 
   ```text
   validate_release_manifest pre-publish \

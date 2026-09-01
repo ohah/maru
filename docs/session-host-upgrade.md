@@ -957,6 +957,11 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   zero-residue는 기존 DMG authority component/E2E gate가 계속 소유한다. 이 gate만으로 compatibility/evidence/세 asset attestation,
   final manifest observation, summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  `release_evidence.UpgradeExpected`는 manifest signing의 `designated_requirement_sha256`도 포함한다. canonical aggregate의 one/near-max
+  두 signed-upgrade leaf는 서로 같은 requirement digest를 갖는 것뿐 아니라 이 exact expected digest와도 같아야 한다. 이전처럼 두
+  leaf가 같은 foreign signer를 함께 기록하면 통과하는 상태는 허용하지 않는다. `release_evidence.bind`가 manifest/Apple product에서
+  유도한 expected requirement를 받기 전에는 upgrade evidence를 최종 release observation으로 승격할 수 없다.
+
   외부 관측 명령은 shell 문자열이나 호출자 PATH로 실행하지 않는다. absolute executable과 고정 argv를 공용
   `bounded_process.zig`에 넘기고 stdin은 `/dev/null`, stdout/stderr는 하나의 exact-cap pipe로 제한한다. 성공은 monotonic
   deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process

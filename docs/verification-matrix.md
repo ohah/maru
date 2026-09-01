@@ -2618,6 +2618,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   digest를 재검증한다. `test-session-host-release-adapter-frozen-executable-authority`가 Debug·ReleaseFast actual filesystem에서
   move-only owner, invalid type/mode/expected values, symlink·pathname replacement·in-place mutation을 검증한다. DMG 내부 executable
   동일성, Apple product/current manifest composition, summary·executable·workflow 배선과 frozen U5 E2E는 후속 범위다.
+  Current local product composition은 authenticated `CurrentManifestInput`만 받아 그 manifest의 exact DMG/frozen asset expectation과
+  version을 사용한다. 공통 release asset cap은 `release_adapter_files.max_release_asset_bytes`가 소유하고 downloader·DMG·frozen
+  경계가 재사용한다. `release_adapter_github_current_product.zig`는 frozen pin/revalidation 전후에 기존 DMG authority를 호출하고,
+  DMG 내부 product SHA와 frozen SHA 및 manifest signing과 Apple observation을 기존 manifest policy helper로 대조한 뒤에만 held fd와
+  owned Apple observation을 move-only로 게시한다. `test-session-host-release-adapter-github-current-product`가 Debug·ReleaseFast에서
+  authenticated/move-only/path/asset/cap/signing/digest/mutation/failure/cleanup/allocation 경계를 검증한다. 실제 mount/Apple command와
+  residue는 기존 DMG authority gate가 소유하며 compatibility/evidence/asset attestation/final observation과 workflow/U5 배선은 후속이다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

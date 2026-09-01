@@ -938,6 +938,25 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast로 검증한다. 이 gate만으로 DMG 내부 executable과의 동일성, Apple product 관측, current manifest composition,
   summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
+  `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
+  composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B
+  manifest의 exact `universal_dmg`·`frozen_product_executable` asset name/size/SHA와 release version을 직접 빌린다. 두 input basename은
+  manifest asset name과 exact 일치하고 private manifest/DMG work를 포함한 다른 pathname과 alias되지 않아야 한다. local release asset의
+  공통 nonzero size ceiling은 `release_adapter_files.max_release_asset_bytes` 한 곳이 소유하며 predecessor downloader, DMG authority,
+  frozen executable pin이 같은 값을 재사용한다.
+
+  순서는 frozen executable no-follow pin과 첫 revalidation, read-only DMG staging/mount와 Apple product 관측, frozen executable 두 번째
+  revalidation, DMG 내부 product executable SHA↔frozen SHA 대조, manifest `signing`↔Apple observation 대조다. signing equality는
+  `release_manifest`의 기존 policy helper를 재사용하고 composition이 team/requirement/architecture 규칙을 다시 구현하지 않는다.
+  어느 mismatch·allocation·mount·Apple command·detach·cleanup 실패에서도 product observation을 게시하지 않고, 성공 결과만 held frozen
+  fd와 owned Apple observation을 하나의 final-address move-only owner로 보존한다. 후속 final observation 조립은 pathname이 아니라 이
+  owner를 다시 revalidate한 view만 소비한다. focused gate `test-session-host-release-adapter-github-current-product`는 actual frozen
+  filesystem과 injected DMG/Apple observer로 success, unauthenticated/copied/pre-owned owner, asset/path/cap/signing/digest mismatch,
+  DMG failure 중 frozen mutation, cleanup과 allocation unwind를 Debug·ReleaseFast에서 검증한다. 실제 `hdiutil`·Apple command와 mount
+  zero-residue는 기존 DMG authority component/E2E gate가 계속 소유한다. 이 gate만으로 compatibility/evidence/세 asset attestation,
+  final manifest observation, summary/executable/workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
+
   외부 관측 명령은 shell 문자열이나 호출자 PATH로 실행하지 않는다. absolute executable과 고정 argv를 공용
   `bounded_process.zig`에 넘기고 stdin은 `/dev/null`, stdout/stderr는 하나의 exact-cap pipe로 제한한다. 성공은 monotonic
   deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process

@@ -31,11 +31,28 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 **섞지 않는 이유**: 두 소스를 합치면 어느 쪽이 틀렸는지 진단할 수 없고, 신호 세기 중재가 규칙이 아니라
 추측이 된다. 배지 옆에 소스를 밝힐 수 있어야 버그 보고가 성립한다.
 
-**다른 구현들은 한 판정 안에서 소스를 중재한다**(orca·herdr 소스 실측 2026-09-01 — 둘 다 비-copyleft라
-열람했다). 그쪽은 화면 판정에 신뢰도 플래그를 실어 훅 상태와 견주는데, 그 플래그 이름이 우리
-`agent_observer`의 것과 같다(`visible_blocker`·`visible_idle`·`visible_working`·`skip_state_update`) —
-같은 문제를 같은 모양으로 풀었다. 그래서 **모드를 가르는 쪽이 우리뿐**이고, 그 선택으로 얻는 것이 위
-문단의 진단 가능성이다.
+**참조 구현 둘은 서로 반대 답을 냈지만, 어느 쪽도 모드를 가르지 않는다**(orca(MIT)·herdr(Apache-2.0)
+소스 실측 2026-09-01 — 둘 다 비-copyleft라 열람했다. cmux는 GPL-3.0이라 열지 않았다).
+
+| | orca | herdr |
+| --- | --- | --- |
+| 상태 소스 | 6개(`hook`·`osc`·`title`·`process`·`launch`·`orchestration`) | 사실상 1개(화면 + OSC title/progress를 한 판정에) |
+| 훅이 나르는 것 | 상태 | **세션 신원만**(`session_id`·`transcript_path`) |
+| 중재 방식 | 출처 도장(`origin`) + `updatedAt` 비교 | 중재 자체가 없다 |
+| 흔들림 대책 | stale guard | 시간 기반 **비대칭** 확인 |
+
+herdr 쪽이 특히 눈여겨볼 만한데, **한때 상태 훅을 쓰다가 걷어냈다**. 지금 코드에 남은 것은 제거
+목록이고(`HOOK_REMOVALS`: `PermissionRequest`→blocked, `Stop`→idle, `PreToolUse`·`UserPromptSubmit`
+→working), 설치하는 훅은 `SessionStart` 하나뿐이며 그 스크립트는 상태가 아니라 세션 신원을 보낸다.
+23개 provider 전부 같은 모양이고 `report_agent_state`에 해당하는 경로는 존재하지 않는다.
+
+그러면서도 herdr의 화면 판정 플래그 이름은 우리 `agent_observer`의 것과 같다
+(`visible_blocker`·`visible_idle`·`visible_working`·`skip_state_update`) — 훅을 버린 쪽조차 화면
+판정은 우리와 같은 모양으로 풀었다는 뜻이다. 그리고 그 대신 시간으로 흔들림을 잡는데, **지연을 한
+방향에만 건다**: `working`→`idle`만 100ms 간격 3회 확인(700ms 상한)으로 미루고, `blocked` 해제나
+`working` 진입은 즉시 반영한다. 프로세스가 죽으면 확인 없이 바로 `idle`이다.
+
+**그래서 모드를 가르는 쪽이 우리뿐**이고, 그 선택으로 얻는 것이 위 문단의 진단 가능성이다.
 
 **그 대가는 훅 모드에서 「입력 대기」가 늦게 풀리는 것이다.** 승인 자체는 훅 이벤트가 아니라
 (provider가 알려주지 않는다) `blocked`는 다음 `pre_tool_use`까지 유지된다. 관측 모드는 화면에서 승인

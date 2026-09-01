@@ -38,6 +38,8 @@ const FakeOps = struct {
     product_fault: ProductFault = .none,
     mount_dir: [std.fs.max_path_bytes:0]u8 = undefined,
     mount_len: usize = 0,
+    attach_budget: i128 = 0,
+    detach_budget: i128 = 0,
 
     pub fn capture(
         self: *@This(),
@@ -54,6 +56,7 @@ const FakeOps = struct {
             try std.testing.expectEqualSlices([]const u8, &.{ "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint" }, args[0..5]);
             try std.testing.expectEqual(@as(usize, 7), args.len);
             self.attach_calls += 1;
+            self.attach_budget = budget_ns;
             self.mount_len = args[5].len;
             @memcpy(self.mount_dir[0..self.mount_len], args[5]);
             self.mount_dir[self.mount_len] = 0;
@@ -67,6 +70,7 @@ const FakeOps = struct {
         try std.testing.expectEqualStrings("/dev/disk42s1", args[1]);
         try std.testing.expectEqual(@as(usize, 2), args.len);
         self.detach_calls += 1;
+        self.detach_budget = budget_ns;
         if (self.fail_detach) return error.ChildFailed;
         if (self.mounted) {
             var app_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -131,6 +135,7 @@ const FakeApple = struct {
     call: usize = 0,
     fail_at: ?usize = null,
     invalid_requirement: bool = false,
+    budgets: [8]i128 = @splat(0),
 
     pub fn capture(
         self: *@This(),
@@ -138,10 +143,11 @@ const FakeApple = struct {
         _: []const []const u8,
         environment: []const []const u8,
         output: []u8,
-        _: i128,
+        budget_ns: i128,
     ) ![]const u8 {
         try std.testing.expectEqual(@as(usize, 0), environment.len);
         if (self.fail_at == self.call) return error.ChildFailed;
+        self.budgets[self.call] = budget_ns;
         const captures = [_][]const u8{
             "{\"CFBundleIdentifier\":\"dev.maru.apphost\",\"CFBundleShortVersionString\":\"1.2.3\",\"CFBundleVersion\":\"1\"}",
             "Identifier=dev.maru.apphost\nTeamIdentifier=ABCDEFGHIJ\n",
@@ -159,6 +165,19 @@ const FakeApple = struct {
         self.call += 1;
         @memcpy(output[0..value.len], value);
         return output[0..value.len];
+    }
+};
+
+const Deadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.TimedOut;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
     }
 };
 
@@ -207,6 +226,37 @@ test "DMG authority stages, observes, detaches, and removes all private residue"
     try std.testing.expectEqual(@as(usize, 1), ops.attach_calls);
     try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
     try std.testing.expectEqual(@as(usize, 8), apple.call);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private-work", .{}));
+}
+
+test "deadline-aware DMG authority refreshes every admission and reserves detach cleanup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    const budgets = [_]i128{ 900, 800, 700, 600, 500, 400, 300, 200, 100 };
+    var deadline = Deadline{ .values = &budgets };
+    var observed = try authority.observeUntilWithForTest(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        &deadline,
+    );
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i128, 900), ops.attach_budget);
+    try std.testing.expectEqualSlices(i128, budgets[1..], &apple.budgets);
+    try std.testing.expectEqual(authority.cleanup_budget_ns, ops.detach_budget);
+    try std.testing.expectEqual(budgets.len, deadline.cursor);
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private-work", .{}));
 }
 

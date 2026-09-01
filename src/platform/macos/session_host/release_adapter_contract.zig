@@ -24,6 +24,7 @@ pub const PrePublish = struct {
     evidence: []const u8,
     dmg: []const u8,
     frozen_executable: []const u8,
+    work_dir: []const u8,
     summary_out: []const u8,
 };
 
@@ -58,6 +59,7 @@ pub const Error = error{
     InvalidManifestAssetName,
     InvalidGithubCliPath,
     InvalidGithubCliSha256,
+    InvalidWorkDirPath,
     PathAlias,
     ManifestAssetNameTooLong,
 };
@@ -119,8 +121,9 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const evidence = values.evidence orelse return error.MissingOption;
             const dmg = values.dmg orelse return error.MissingOption;
             const frozen_executable = values.frozen_executable orelse return error.MissingOption;
+            const work_dir = try workDir(&values);
             const github_cli = try githubCli(&values);
-            try disjointPaths(&.{ manifest, evidence, dmg, frozen_executable, summary_out, github_cli.path });
+            try disjointPaths(&.{ manifest, evidence, dmg, frozen_executable, work_dir, summary_out, github_cli.path });
             break :blk .{ .pre_publish = .{
                 .repo = repo,
                 .tag = tag,
@@ -130,11 +133,12 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .evidence = evidence,
                 .dmg = dmg,
                 .frozen_executable = frozen_executable,
+                .work_dir = work_dir,
                 .summary_out = summary_out,
             } };
         },
         .verify_predecessor => blk: {
-            const work_dir = values.work_dir orelse return error.MissingOption;
+            const work_dir = try workDir(&values);
             const github_cli = try githubCli(&values);
             try disjointPaths(&.{ manifest, work_dir, summary_out, github_cli.path });
             break :blk .{ .verify_predecessor = .{
@@ -168,6 +172,8 @@ fn optionDestination(
             &values.dmg
         else if (std.mem.eql(u8, option, "--frozen-executable"))
             &values.frozen_executable
+        else if (std.mem.eql(u8, option, "--work-dir"))
+            &values.work_dir
         else
             null,
         .verify_predecessor => if (std.mem.eql(u8, option, "--work-dir"))
@@ -175,6 +181,23 @@ fn optionDestination(
         else
             null,
     };
+}
+
+fn workDir(values: *const Values) Error![]const u8 {
+    const path = values.work_dir orelse return error.MissingOption;
+    if (!canonicalAbsoluteLeaf(path)) return error.InvalidWorkDirPath;
+    return path;
+}
+
+fn canonicalAbsoluteLeaf(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path) or path.len < 2 or path[path.len - 1] == '/' or
+        std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var components = std.mem.splitScalar(u8, path[1..], '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, ".."))
+            return false;
+    }
+    return true;
 }
 
 fn githubCli(values: *const Values) Error!struct { path: []const u8, sha256: []const u8 } {
@@ -227,7 +250,14 @@ fn validateVersion(version: []const u8) Error!void {
 fn disjointPaths(paths: []const []const u8) Error!void {
     for (paths, 0..) |path, left| {
         for (paths[left + 1 ..]) |other| {
-            if (std.mem.eql(u8, path, other)) return error.PathAlias;
+            if (pathTreeOverlaps(path, other)) return error.PathAlias;
         }
     }
+}
+
+fn pathTreeOverlaps(left: []const u8, right: []const u8) bool {
+    if (std.mem.eql(u8, left, right)) return true;
+    if (left.len < right.len and std.mem.startsWith(u8, right, left) and right[left.len] == '/')
+        return true;
+    return right.len < left.len and std.mem.startsWith(u8, left, right) and left[right.len] == '/';
 }

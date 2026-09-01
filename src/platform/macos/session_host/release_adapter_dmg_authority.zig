@@ -545,7 +545,9 @@ const SystemOps = struct {
 const AppleRunner = struct {
     io: std.Io,
 
-    fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
+    // apple_transport owns the generic runner protocol in another module, so
+    // the real product wrapper must expose this one protocol method to it.
+    pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
         var ops = SystemOps{ .io = self.io };
         return ops.capture(executable, args, environment, output, budget_ns);
     }

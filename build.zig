@@ -12566,7 +12566,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_github_deployment_tests = b.addRunArtifact(github_deployment_tests);
-        run_github_deployment_tests.addArg("--maru-expect-tests=6");
+        run_github_deployment_tests.addArg("--maru-expect-tests=7");
         run_github_deployment_tests.setCwd(b.path("."));
         session_host_release_adapter_github_deployment_step.dependOn(&run_github_deployment_tests.step);
         session_host_step.dependOn(&run_github_deployment_tests.step);

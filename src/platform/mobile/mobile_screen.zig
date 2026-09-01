@@ -53,6 +53,9 @@ pub const OffReason = enum {
 pub const Screen = struct {
     state: State = .waiting_first,
     off_reason: OffReason = .none,
+    /// 버린 `GenerationGap` delta 수. **화면을 안 끄는 대신 셀 수 있어야 한다** — 조용히 버리면
+    /// 「왜 한 프레임 늦게 갱신되나」를 나중에 아무도 못 짚는다.
+    generation_gaps: u32 = 0,
     /// 조립 결과. 화면을 그리는 쪽이 `rowRuns` 로 읽는다.
     inner: assembler.ScreenAssembler,
     /// 조립 중인 프레임. 헤더를 다 못 받았거나 payload 가 덜 왔으면 여기 쌓인다.
@@ -136,7 +139,19 @@ pub const Screen = struct {
             if (head.len < total) return; // payload 가 덜 왔다
             const kind_byte = head[4];
             const payload = head[header_bytes..total];
-            self.apply(kind_byte, payload) catch return self.fail(.malformed);
+            // **`GenerationGap` 은 망가진 데이터가 아니다.** host 가 크기를 바꾸면 generation 이
+            // 오르고, 그 경계에 걸친 delta 는 base 가 어긋난다 — 다음 snapshot 이 base 를 새로
+            // 세운다(§12 조립기 규율). 여기서 화면을 끄면 **세션이 리사이즈될 때마다 폰이 자기
+            // 화면을 날린다**(S11-6 이 그 리사이즈를 일상으로 만든다).
+            //
+            // 그래서 그 delta **하나만 버리고** 계속 읽는다. 나머지 오류는 그대로 접는다 —
+            // 둘을 한 이름으로 묶으면 진짜 손상도 조용히 넘어간다.
+            self.apply(kind_byte, payload) catch |err| switch (err) {
+                error.GenerationGap => {
+                    self.generation_gaps += 1;
+                },
+                else => return self.fail(.malformed),
+            };
             const rest = head.len - total;
             std.mem.copyForwards(u8, self.pending.items, head[total..]);
             self.pending.items.len = rest;
@@ -245,6 +260,24 @@ test "잡음이 상한을 넘으면 끈다 — 영영 기다리지 않는다" {
     try std.testing.expectEqual(OffReason.too_much_noise, s.off_reason);
 }
 
+/// generation 이 어긋난 delta 프레임(테스트용). host 가 크기를 바꾼 **경계에 걸친** 그 한 장이다.
+fn staleDeltaFrame(a: std.mem.Allocator, base_generation: u64) ![]u8 {
+    var runs = [_]stream.Run{.{ .grapheme = "Z", .width = 1, .count = 1 }};
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(a);
+    const rec = try stream.encodeSetRuns(a, .{ .kind = .set_runs, .generation = base_generation, .sequence = 2 }, .{ .base_generation = base_generation, .row_index = 0, .start_col = 0, .runs = &runs });
+    defer a.free(rec);
+    try stream.appendRecord(&body, a, rec);
+
+    var out = try a.alloc(u8, header_bytes + body.items.len);
+    @memset(out[0..header_bytes], 0);
+    @memcpy(out[0..4], magic);
+    out[4] = @intFromEnum(Kind.delta);
+    std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
+    @memcpy(out[header_bytes..], body.items);
+    return out;
+}
+
 /// 한 글자짜리 화면을 담은 프레임(테스트용). 프로듀서(`--stream`)와 같은 모양이다.
 fn snapshotFrame(a: std.mem.Allocator, grapheme: []const u8, width: u8) ![]u8 {
     var runs = [_]stream.Run{.{ .grapheme = grapheme, .width = width, .count = 1 }};
@@ -270,4 +303,53 @@ fn snapshotFrame(a: std.mem.Allocator, grapheme: []const u8, width: u8) ![]u8 {
     std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
     @memcpy(out[header_bytes..], body.items);
     return out;
+}
+
+test "generation 이 어긋난 delta 는 화면을 끄지 않는다 — 다음 snapshot 이 살린다 (S11-6)" {
+    // **이것은 손상이 아니라 정상 절차다.** host 가 크기를 바꾸면 generation 이 오르고, 그
+    // 경계에 걸친 delta 하나가 낡은 base 를 가리킨다. 예전에는 그것을 `malformed` 로 접고
+    // 화면을 껐다 — S11-6 은 붙을 때·떨어질 때마다 generation 을 올리므로, 그대로 두면
+    // **리사이즈를 켜는 순간 폰이 자기 화면을 끈다.**
+    const a = std.testing.allocator;
+    var s = Screen.init(a);
+    defer s.deinit(a);
+
+    const snap = try snapshotFrame(a, "A", 1);
+    defer a.free(snap);
+    _ = s.feed(a, snap);
+    try std.testing.expectEqual(State.ready, s.state);
+
+    // base 가 어긋난 delta — generation 1 인 화면에 generation 9 를 전제한 것이 온다.
+    const stale = try staleDeltaFrame(a, 9);
+    defer a.free(stale);
+    _ = s.feed(a, stale);
+
+    // **화면이 살아 있어야 한다.**
+    try std.testing.expectEqual(State.ready, s.state);
+    try std.testing.expectEqual(OffReason.none, s.off_reason);
+    // 그리고 **버렸다는 사실이 남는다** — 조용히 버리면 나중에 아무도 못 짚는다.
+    try std.testing.expectEqual(@as(u32, 1), s.generation_gaps);
+    // 옛 화면이 그대로다(어긋난 delta 를 얹지 않았다).
+    try std.testing.expectEqualStrings("A", s.rowRuns(0)[0].grapheme);
+
+    // 다음 snapshot 이 base 를 새로 세운다.
+    const snap2 = try snapshotFrame(a, "B", 1);
+    defer a.free(snap2);
+    _ = s.feed(a, snap2);
+    try std.testing.expectEqual(State.ready, s.state);
+    try std.testing.expectEqualStrings("B", s.rowRuns(0)[0].grapheme);
+}
+
+test "진짜 손상은 여전히 끈다 — 두 갈래를 한 이름으로 묶지 않는다 (S11-6)" {
+    // `GenerationGap` 을 살려 주면서 **나머지도 같이 살리면** 버전 스큐·손상이 조용히 넘어간다.
+    const a = std.testing.allocator;
+    var s = Screen.init(a);
+    defer s.deinit(a);
+    var frame: [header_bytes + 4]u8 = @splat(0);
+    @memcpy(frame[0..4], magic);
+    frame[4] = 9; // 우리 코덱에 없는 종류
+    std.mem.writeInt(u32, frame[8..12][0..4], 4, .little);
+    _ = s.feed(a, &frame);
+    try std.testing.expectEqual(State.off, s.state);
+    try std.testing.expectEqual(OffReason.malformed, s.off_reason);
 }

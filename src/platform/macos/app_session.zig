@@ -66025,9 +66025,10 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     //
     // **RS4a 에서 스테이지 계열이 통과 쪽으로 넘어갔다** — 원격 index 를 실제로 바꿀 수 있게 됐다.
     // 남은 셋은 아직 못 보내는 것들이고, 각자 **다른 이유**로 남아 있다(RS4b·RS4c).
+    // **RS4b 에서 커밋도 통과 쪽으로 넘어갔다** — 메시지가 stdin 으로 간다(§6.2).
+    // 남은 둘은 **우리가 실행할 수 없어서** 남는다: 우리 ssh 에는 agent 도 tty 도 없다(RS4c).
     const touches = [_]Intent{
-        .{ .commit = 0 }, //     메시지 파일이 로컬에 있다 — 원격은 stdin(RS4b)
-        .fetch_remote, //        우리 ssh 에는 agent 도 tty 도 없다 — 주입으로 간다(RS4c)
+        .fetch_remote,
         .open_remote_menu,
     };
     for (touches) |intent| try std.testing.expect(scm_dock_ops.intentTouchesLocalRepo(intent));
@@ -66048,6 +66049,9 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         .{ .row_action = .{ .repo_index = 0, .model_index = 0 } },
         .{ .section_action = .{ .repo_index = 0, .section = .changes } },
         .{ .stage_all_repo = 0 },
+        // RS4b — 커밋도 원격으로 간다.
+        .{ .commit = 0 },
+        .{ .commit_focus = 0 },
     };
     for (passes) |intent| try std.testing.expect(!scm_dock_ops.intentTouchesLocalRepo(intent));
 
@@ -66064,9 +66068,12 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app", &ctl_probe) == .unavailable);
     }
 
+    // **거절은 이제 «소켓이 없다» 하나뿐이다**(RS4a·RS4b 가 나머지를 열었다). 이 세션에는 control
+    // socket 이 없으므로 원격 쓰기는 **보내지 않고 이유를 말한다** — 조용한 무동작이 아니다.
     scm_dock_ops.clearScmWriteError(session);
-    scm_dock_ops.applyScmDockIntent(session, .{ .commit = 0 });
-    // **조용한 무동작이 아니라 이유를 말한다**(도크의 다른 거절과 같은 규율).
+    // 이 세션에는 control socket 이 없다 → `.unavailable` → **보내지 않고 이유를 말한다.**
+    // (인텐트로 못 몬다 — 이 스모크 세션에는 저장소 행이 없어 인텐트가 그 문까지 못 간다.)
+    try std.testing.expect(!scm_dock_ops.submitWriteForTest(session, "/srv/app", .stage));
     try std.testing.expect(session.scm_write_error != null);
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_read_only), session.scm_write_error.?);
 

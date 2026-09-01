@@ -1811,13 +1811,9 @@ pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
     return switch (intent) {
         // 아직 원격으로 못 보내는 것들.
         //
-        // - `commit`·`commit_focus`: 메시지 파일이 **로컬에 있다**. 원격은 stdin(`commit -F -`)이라
-        //   실행 층에 파이프가 필요하다 — RS4b.
-        // - `fetch_remote`·`open_remote_menu`: 우리 ssh 명령에는 `SSH_AUTH_SOCK` 도 tty 도 없어
-        //   인증이 필요한 원격에서 **항상** 실패하고 물어볼 곳도 없다(실측). 활성 pane 에 명령을 넣는
-        //   길로 간다 — RS4c.
-        .commit,
-        .commit_focus,
+        // `fetch_remote`·`open_remote_menu`: 우리 ssh 명령에는 `SSH_AUTH_SOCK` 도 tty 도 없어 인증이
+        // 필요한 원격에서 **항상** 실패하고 물어볼 곳도 없다(실측). 활성 pane 에 명령을 넣는 길로
+        // 간다 — RS4c.
         .fetch_remote,
         .open_remote_menu,
         => true,
@@ -1827,6 +1823,9 @@ pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
         .row_action,
         .section_action,
         .stage_all_repo,
+        // **커밋도 RS4b 에서 넘어왔다** — 메시지는 stdin 으로 간다(§6.2).
+        .commit,
+        .commit_focus,
         => false,
         // 화면 상태만 바꾸거나, 원격에서도 같은 뜻으로 도는 것.
         //
@@ -2923,6 +2922,10 @@ fn rememberWriteRepo(self: *AppSession, repo: []const u8, dest: ?[]const u8) voi
 }
 
 /// 판정자 전용 창구 — 제품과 **같은 함수**를 지난다(두 벌이면 판정이 무의미하다).
+pub fn submitWriteForTest(self: *AppSession, repo: []const u8, kind: git_write_command.Kind) bool {
+    return submitWrite(self, repo, kind, &.{"a.txt"});
+}
+
 pub fn rememberWriteRepoForTest(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
     rememberWriteRepo(self, repo, dest);
 }
@@ -3692,22 +3695,27 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_write_seq += 1;
-    // ⚠️ **커밋은 아직 원격으로 안 간다**(RS4b). 로컬은 `commit -F <메시지 파일>` 인데 **그 파일은
-    // 로컬에 있다** — 원격에서 그 경로는 없거나 **남의 파일**이다. 원격은 `commit -F -` 로 stdin 을 써야
-    // 하고, 그러려면 실행 층에 stdin 파이프가 필요하다(`spawnCapture` 는 지금 `dup2(devnull, 0)` 한다 —
-    // 저장소 훅이 `read` 로 멈추는 것을 막는 **의도적** 설계다). 그 자리를 여는 것이 RS4b 다.
+    // **커밋도 원격으로 간다**(RS4b). 메시지 파일은 여전히 **로컬에** 쓰고, 원격이면 실행 층이 그
+    // 바이트를 읽어 `commit -F -` 의 stdin 으로 흘린다 — 그 경로를 원격에 그대로 넘기면 없는 파일이거나
+    // **남의 파일**이다(계약 §6.2).
     //
-    // 여기서 로컬로 떨어뜨리면 **원격 저장소를 보면서 로컬에 커밋**한다 — 막는 편이 맞다.
-    if (git_ops.scmTargetIsRemote(self)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only)); // 위와 같은 두 번째 겹
-        return;
-    }
-    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq, null)) {
+    // 대상 판정은 스테이지와 **같은 함수**를 지난다 — 두 벌이면 「스테이지는 원격, 커밋은 로컬」이 된다.
+    var commit_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const commit_remote: ?git_write_command.Remote = switch (git_ops.writeTargetFor(self, repo, &commit_ctl_buf)) {
+        .local => null,
+        .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
+        .unavailable => {
+            setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only)); // 위와 같은 두 번째 겹
+            deleteCommitMessageFile(path);
+            return;
+        },
+    };
+    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq, commit_remote)) {
         deleteCommitMessageFile(path);
         return;
     }
     self.scm_write_inflight = self.scm_write_seq;
-    rememberWriteRepo(self, repo, null); // 커밋은 아직 로컬만 간다(RS4b)
+    rememberWriteRepo(self, repo, if (commit_remote) |r| r.dest else null);
     self.scm_commit_inflight = true;
     self.scm_commit_started_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
     clearScmWriteError(self);

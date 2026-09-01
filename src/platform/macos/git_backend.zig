@@ -1730,7 +1730,7 @@ fn runArgvWithEnv(
     // 읽기는 **stdout만** 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로
     // 버린다(docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
     // 쓰기는 정반대라(§5 — 가공해서 보여 준다) `spawnCapture`가 그 축을 인자로 받는다.
-    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only);
+    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, null);
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
     if (spawned.exit_code != 0) return error.GitFailed;
@@ -1823,12 +1823,33 @@ fn spawnCapture(
     argv: [*:null]const ?[*:0]const u8,
     envp: [*]const ?[*:0]const u8,
     capture: Capture,
+    /// **원격 커밋만** 이 자리를 쓴다(RS4b). `null` 이면 stdin 은 `/dev/null` 이고, 그것이 기본이다 —
+    /// 아래 자식 갈래의 주석이 그 이유를 든다(저장소 훅이 `read` 로 멈추는 것을 막는다).
+    ///
+    /// 값이 있어도 그 보호는 유지된다: 다 보내면 **write 끝을 닫아** 자식이 EOF 를 본다. 실측으로
+    /// 확인했다 — `commit -F -` 는 stdin 을 먼저 다 읽고, 이어 도는 `pre-commit` hook 은 **빈 stdin** 을
+    /// 받는다(2026-09-01 harness sshd).
+    stdin_bytes: ?[]const u8,
 ) !Spawned {
     var pipe_fds: [2]c_int = undefined;
     if (std.c.pipe(&pipe_fds) != 0) return error.GitFailed;
     // 동시에 도는 다른 fork(셸 PTY spawn 등)로 write 끝이 새면 EOF가 안 와 read가 영원히 블록한다.
     _ = std.c.fcntl(pipe_fds[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
     _ = std.c.fcntl(pipe_fds[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+
+    var in_fds: [2]c_int = .{ -1, -1 };
+    if (stdin_bytes != null) {
+        if (std.c.pipe(&in_fds) != 0) {
+            _ = std.c.close(pipe_fds[0]);
+            _ = std.c.close(pipe_fds[1]);
+            return error.GitFailed;
+        }
+        _ = std.c.fcntl(in_fds[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+        _ = std.c.fcntl(in_fds[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+        // ⚠️ **자식이 먼저 죽으면 write 가 SIGPIPE 로 앱을 죽인다.** 이 저장소는 그것을 fd 단위로
+        // 막는다(`runtime_manager.OutputWake` 와 같은 규율) — 전역 무시는 곳곳의 처분을 바꾼다.
+        _ = std.c.fcntl(in_fds[1], std.c.F.SETNOSIGPIPE, @as(c_int, 1));
+    }
 
     // 파이프로 받을 fd와 /dev/null로 보낼 fd.
     const piped_fd: c_int = switch (capture) {
@@ -1844,6 +1865,10 @@ fn spawnCapture(
     if (pid < 0) {
         _ = std.c.close(pipe_fds[0]);
         _ = std.c.close(pipe_fds[1]);
+        if (in_fds[0] >= 0) {
+            _ = std.c.close(in_fds[0]);
+            _ = std.c.close(in_fds[1]);
+        }
         return error.GitFailed;
     }
     if (pid == 0) {
@@ -1856,8 +1881,15 @@ fn spawnCapture(
             // `GIT_TERMINAL_PROMPT=0`은 git *자신의* 프롬프트만 막고, 저장소가 심어 둔 hook 스크립트가
             // `read`를 부르는 것은 못 막는다. §1이 "프롬프트가 뜨면 그 명령은 영영 안 끝난다"고 한 그
             // 상황이 그렇게 생긴다. /dev/null이면 즉시 EOF라 hook은 진행하거나 스스로 실패한다.
-            _ = std.c.dup2(devnull, 0);
+            // **입력을 주는 경우에만** 그 파이프가 stdin 이다(RS4b). 그때도 우리가 다 쓰면 닫으므로
+            // 자식은 EOF 를 본다 — hook 이 `read` 로 멈추지 않는다는 보장이 유지된다.
+            if (in_fds[0] < 0) _ = std.c.dup2(devnull, 0);
             _ = std.c.close(devnull);
+        }
+        if (in_fds[0] >= 0) {
+            _ = std.c.dup2(in_fds[0], 0);
+            _ = std.c.close(in_fds[0]);
+            _ = std.c.close(in_fds[1]);
         }
         _ = std.c.close(pipe_fds[0]);
         _ = std.c.close(pipe_fds[1]);
@@ -1866,7 +1898,11 @@ fn spawnCapture(
     }
 
     _ = std.c.close(pipe_fds[1]);
-    const collected = switch (capture) {
+    if (in_fds[0] >= 0) _ = std.c.close(in_fds[0]); // 부모는 read 끝을 안 쓴다
+    const collected = if (stdin_bytes) |payload|
+        // **겹쳐 돌린다** — 순차로 하면 교착한다(`pumpStdinAndDrain` 주석).
+        pumpStdinAndDrain(allocator, pipe_fds[0], in_fds[1], payload, max_output_bytes)
+    else switch (capture) {
         .stdout_only => readAllFd(allocator, pipe_fds[0]),
         // 쓰기는 끝까지 비운다 — 상한에서 멈추면 사용자의 git을 도중에 죽인다.
         .stderr_only => readAllFdDraining(allocator, pipe_fds[0], max_output_bytes),
@@ -1893,6 +1929,72 @@ fn spawnCapture(
 /// 받을 이유가 없다). 쓰기에서 같은 일을 하면 **사용자의 git을 index 쓰는 도중에 죽인다** — 중간에 죽은
 /// git은 `index.lock`을 남기고, 그다음부터 사용자의 터미널 git까지 막힌다. 우리가 시키지도 않은 상태다.
 /// 그래서 쓰기는 메모리만 유계로 두고 파이프는 끝까지 비운다.
+/// stdin 을 흘리면서 **동시에** 출력을 비운다(RS4b).
+///
+/// ⚠️ **순차로 하면 교착한다.** 「stdin 을 다 쓴 뒤 stderr 를 읽는다」로 두면, 자식이 우리 입력을 다
+/// 소비하기 전에 stderr 파이프를 가득 채우는 순간 둘 다 멈춘다 — 우리는 write 에서, 자식은 write 에서.
+/// 원격 커밋에서 그 상황은 흔하다: `pre-commit` hook 이 수천 줄을 쏟는 동안 우리는 아직 메시지를
+/// 보내는 중이다(실측 2026-09-01: 512 KiB 메시지 + 2 만 줄 stderr 가 실제로 겹친다).
+///
+/// 그래서 `poll` 로 두 방향을 함께 본다. 다 쓰면 **write 끝을 닫아** 자식에게 EOF 를 준다 —
+/// 닫지 않으면 `commit -F -` 가 입력이 끝나기를 영원히 기다린다.
+fn pumpStdinAndDrain(
+    allocator: std.mem.Allocator,
+    out_fd: c_int,
+    in_fd: c_int,
+    payload: []const u8,
+    keep_max: usize,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [16 * 1024]u8 = undefined;
+    var sent: usize = 0;
+    var write_fd = in_fd;
+    // 다 보냈으면 바로 닫는다 — 빈 메시지도 EOF 가 필요하다.
+    if (payload.len == 0) {
+        _ = std.c.close(write_fd);
+        write_fd = -1;
+    }
+    while (true) {
+        var fds: [2]std.c.pollfd = .{
+            .{ .fd = out_fd, .events = std.c.POLL.IN, .revents = 0 },
+            .{ .fd = write_fd, .events = std.c.POLL.OUT, .revents = 0 },
+        };
+        const n_fds: std.c.nfds_t = if (write_fd >= 0) 2 else 1;
+        const ready = std.c.poll(&fds, n_fds, -1);
+        if (ready < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (write_fd >= 0) _ = std.c.close(write_fd);
+            return error.ReadFailed;
+        }
+        if (write_fd >= 0 and fds[1].revents != 0) {
+            const rest = payload[sent..];
+            const w = std.c.write(write_fd, rest.ptr, rest.len);
+            if (w > 0) sent += @intCast(w);
+            // **EPIPE 는 실패가 아니다** — 자식이 먼저 끝난 것이고, 그 종료 코드가 사실을 말한다.
+            // (write 끝에 `SETNOSIGPIPE` 를 걸어 두어 신호가 아니라 오류로 온다.)
+            if (w <= 0 or sent == payload.len) {
+                _ = std.c.close(write_fd);
+                write_fd = -1;
+            }
+        }
+        if (fds[0].revents != 0) {
+            const r = std.posix.read(out_fd, &tmp) catch {
+                if (write_fd >= 0) _ = std.c.close(write_fd);
+                return error.ReadFailed;
+            };
+            if (r == 0) break; // EOF — 자식이 끝났다
+            if (buf.items.len < keep_max) {
+                const room = keep_max - buf.items.len;
+                try buf.appendSlice(allocator, tmp[0..@min(r, room)]);
+            }
+            // 상한을 넘어도 **읽기는 계속한다** — 멈추면 자식이 EPIPE 로 죽는다.
+        }
+    }
+    if (write_fd >= 0) _ = std.c.close(write_fd);
+    return buf.toOwnedSlice(allocator);
+}
+
 fn readAllFdDraining(allocator: std.mem.Allocator, fd: c_int, keep_max: usize) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1933,6 +2035,11 @@ fn reapPid(pid: std.c.pid_t) c_int {
 }
 
 /// 비동기 쓰기 하나의 결과(호출자가 `takeWriteResult`로 가져간다).
+/// 원격으로 보낼 커밋 메시지의 상한. 넘으면 **자르지 않고 거절한다** — 잘린 커밋 메시지는
+/// 「덜 적힌 것」이 아니라 **다른 메시지**이고, 그것은 되돌릴 수 없는 자리에 박힌다.
+/// (로컬은 파일을 그대로 넘기므로 이 상한이 없다 — 원격만의 조항이다.)
+pub const max_commit_message_bytes: usize = 1 << 20;
+
 pub const WriteResult = struct {
     request_id: u64,
     /// 프로세스를 띄우지도 못한 경우(조립 거부·spawn 실패)는 `false`이고 `stderr`가 비어 있다.
@@ -2094,7 +2201,23 @@ pub fn runWriteSync(
     // 배치 나누기는 **호출자 몫이다**(§2 — 중간에 실패할 수 있고, 그때 목록을 다시 읽는 판단은 화면 상태를
     // 든 쪽이 한다). 여기서 조용히 자르면 일부만 스테이지되고 호출자는 전부 됐다고 믿는다.
     if (paths.len > git_write_command.max_batch_paths) return error.TooManyPaths;
-    const local_argv = try git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf);
+    // ⚠️ **원격 커밋은 메시지를 stdin 으로 보낸다**(RS4b · 계약 §6.2). 로컬은 `-F <메시지 파일>` 인데
+    // **그 파일은 로컬에 있다** — 원격에서 그 경로는 없거나 **남의 파일**이다. 그래서 원격에서는 파일명
+    // 자리에 `-` 를 넣고(그러면 `commit -F -`) 바이트를 파이프로 흘린다.
+    var message_buf: ?[]u8 = null;
+    defer if (message_buf) |m| allocator.free(m);
+    const remote_commit = remote != null and kind == .commit;
+    if (remote_commit) {
+        const path = message_file orelse return error.GitFailed;
+        message_buf = std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            path,
+            allocator,
+            .limited(max_commit_message_bytes),
+        ) catch return error.CommitMessageUnreadable;
+    }
+    const effective_message_file: ?[]const u8 = if (remote_commit) "-" else message_file;
+    const local_argv = try git_write_command.build(kind, git_exe, repo, paths, effective_message_file, &argv_slices_buf);
 
     // **원격이면 여기서 한 번 감싼다.** 아래 실행 갈래 둘은 그대로 두고 argv 만 바뀐다 — 감싸기를
     // 실행 갈래 안에 두면 Windows/POSIX 두 곳에 같은 코드가 생긴다.
@@ -2121,9 +2244,11 @@ pub fn runWriteSync(
     // 분석돼 `environ` 링크가 깨진다. 그래서 이 갈래는 주석만 있고 **한 번도 링크된 적이 없었다**
     // (W8.4⒞2 가 처음 부르자 `undefined symbol: environ` 으로 드러났다).
     if (comptime builtin.os.tag == .windows) {
+        // 원격 쓰기는 macOS 축이다(control socket · `maru ssh`). Windows 갈래는 로컬만 온다.
+        std.debug.assert(remote == null);
         return runWriteSyncWindows(allocator, argv_slices);
     } else {
-        return runWriteSyncPosix(allocator, kind, argv_slices);
+        return runWriteSyncPosix(allocator, kind, argv_slices, message_buf);
     }
 }
 
@@ -2133,6 +2258,8 @@ fn runWriteSyncPosix(
     allocator: std.mem.Allocator,
     kind: git_write_command.Kind,
     argv_slices: []const []const u8,
+    /// 원격 커밋의 메시지(RS4b). `null` 이면 stdin 은 `/dev/null` 이고 그것이 기본이다.
+    stdin_bytes: ?[]const u8,
 ) !WriteOutput {
     var argv_store: std.ArrayList([:0]u8) = .empty;
     defer {
@@ -2180,7 +2307,7 @@ fn runWriteSyncPosix(
     }
     env_ptrs.append(allocator, null) catch return error.GitFailed;
 
-    const spawned = try spawnCapture(allocator, @ptrCast(argv_ptrs.items.ptr), env_ptrs.items.ptr, .stderr_only);
+    const spawned = try spawnCapture(allocator, @ptrCast(argv_ptrs.items.ptr), env_ptrs.items.ptr, .stderr_only, stdin_bytes);
     // 쓰기의 stdout은 애초에 /dev/null로 갔다(`add`는 조용하고 `rm --cached`의 목록은 화면에 안 낸다).
     allocator.free(spawned.stdout_bytes); // 빈 슬라이스 — 분기 없이 해제한다
     return .{
@@ -2673,7 +2800,7 @@ const WriteFixture = struct {
             try ptrs.append(allocator, c.ptr);
         }
         try ptrs.append(allocator, null);
-        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stderr_only);
+        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stderr_only, null);
         allocator.free(spawned.stdout_bytes);
         allocator.free(spawned.stderr_bytes);
         if (spawned.exit_code != 0) return error.PrepareFailed;
@@ -2730,7 +2857,7 @@ const WriteFixture = struct {
             try ptrs.append(allocator, c.ptr);
         }
         try ptrs.append(allocator, null);
-        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stdout_only);
+        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stdout_only, null);
         allocator.free(spawned.stderr_bytes);
         return spawned.stdout_bytes;
     }
@@ -3215,4 +3342,80 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     defer allocator.free(out.stderr_bytes);
     // 소켓이 없으니 ssh 가 **자기 실패**로 끝난다 — git 이 한 말이 아니다(5회차와 같은 축).
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
+}
+
+/// 하네스(`~/.rs4b`)가 서 있으면 그 경로들을, 없으면 null. **없는 것을 있다고 치고 통과시키지 않는다.**
+fn rs4bHarness(buf: *[2][std.fs.max_path_bytes]u8) ?struct { ctl: []const u8, repo: []const u8 } {
+    const home_z = std.c.getenv("HOME") orelse return null;
+    const home = std.mem.span(home_z);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const ctl = std.fmt.bufPrint(&buf[0], "{s}/.rs4b/c", .{home}) catch return null;
+    _ = std.Io.Dir.cwd().statFile(io, ctl, .{ .follow_symlinks = false }) catch return null;
+    const repo = std.fmt.bufPrint(&buf[1], "{s}/.rs4b/repo", .{home}) catch return null;
+    _ = std.Io.Dir.cwd().statFile(io, repo, .{}) catch return null;
+    return .{ .ctl = ctl, .repo = repo };
+}
+
+test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr 를 쏟아도 안 멈춘다 (RS4b)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var path_bufs: [2][std.fs.max_path_bytes]u8 = undefined;
+    const hx = rs4bHarness(&path_bufs) orelse return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const remote: git_write_command.Remote = .{ .dest = "127.0.0.1", .control_path = hx.ctl };
+
+    // ⚠️ **이 판정자가 «멈추면» 그것이 실패다.** stdin 을 다 쓴 뒤에야 stderr 를 읽는 구현에서는,
+    // hook 이 파이프를 채우는 순간 둘 다 선다 — 우리는 write 에서, 자식은 write 에서.
+    // 아래 셋이 그 상황을 **결정적으로** 만든다: 스테이지된 파일 + 시끄러운 hook + 파이프보다 큰 메시지.
+    var b: [std.fs.max_path_bytes]u8 = undefined;
+
+    // ⑴ 커밋할 것이 있어야 hook 이 돈다(없으면 git 은 hook 을 안 부른다 — 첫 판정자가 그래서 헛돌았다).
+    // **매번 다른 내용**이어야 한다 — 같으면 두 번째 실행에서 커밋할 것이 없어 hook 이 안 돌고,
+    // 그러면 이 판정자가 겹침을 재현하지 못한 채 초록이 된다(그 함정을 한 번 밟았다).
+    const file = try std.fmt.bufPrint(&b, "{s}/rs4b-probe.txt", .{hx.repo});
+    var stamp: [64]u8 = undefined;
+    const content = try std.fmt.bufPrint(&stamp, "probe {d}\n", .{std.Io.Clock.awake.now(io).nanoseconds});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = content });
+    const staged = try runWriteSync(allocator, .stage, git_write_command.remote_git_exe, hx.repo, &.{"rs4b-probe.txt"}, null, remote);
+    allocator.free(staged.stderr_bytes);
+    try std.testing.expectEqual(@as(c_int, 0), staged.exit_code); // RS4a 가 원격 index 를 실제로 바꾼다
+
+    // ⑵ 파이프 버퍼(수십 KiB)를 훌쩍 넘는 stderr 를 내는 hook.
+    const hook_dir = try std.fmt.bufPrint(&b, "{s}/.git/hooks", .{hx.repo});
+    std.Io.Dir.cwd().createDirPath(io, hook_dir) catch {}; // 이미 있으면 그대로 쓴다
+    var hook_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const hook = try std.fmt.bufPrint(&hook_buf, "{s}/pre-commit", .{hook_dir});
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = hook,
+        .data = "#!/bin/sh\nawk 'BEGIN{for(i=0;i<20000;i++)print \"noise line \" i}' >&2\nexit 0\n",
+    });
+    defer std.Io.Dir.cwd().deleteFile(io, hook) catch {};
+    // 실행 비트를 세운다 — git 은 실행 가능한 hook 만 부른다.
+    const hook_z = try allocator.dupeZ(u8, hook);
+    defer allocator.free(hook_z);
+    if (std.c.chmod(hook_z, 0o755) != 0) return error.SkipZigTest;
+
+    // ⑶ 512 KiB 메시지.
+    const big = try allocator.alloc(u8, 512 * 1024);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    @memcpy(big[0.."RS4b-STDIN".len], "RS4b-STDIN");
+    big[10] = '\n';
+    big[11] = '\n';
+    big[big.len - 1] = '\n';
+    var msg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_path = try std.fmt.bufPrint(&msg_buf, "{s}/.git/rs4b-msg.txt", .{hx.repo});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = msg_path, .data = big });
+    defer std.Io.Dir.cwd().deleteFile(io, msg_path) catch {};
+
+    const out = try runWriteSync(allocator, .commit, git_write_command.remote_git_exe, hx.repo, &.{}, msg_path, remote);
+    defer allocator.free(out.stderr_bytes);
+    try std.testing.expectEqual(@as(c_int, 0), out.exit_code);
+    try std.testing.expect(out.stderr_bytes.len > 64 * 1024); // hook 이 실제로 쏟았다(겹침이 일어났다)
+
+    // **바이트가 그대로 도착했나.** 원격이 loopback 이라 그 저장소를 직접 읽어 대조할 수 있다.
+    const head = try runArgvWithEnv(allocator, &.{ "/usr/bin/git", "-C", hx.repo, "log", "-1", "--format=%B" }, null);
+    defer allocator.free(head.bytes);
+    try std.testing.expect(std.mem.startsWith(u8, head.bytes, "RS4b-STDIN"));
+    try std.testing.expect(head.bytes.len >= big.len - 2); // 잘리지 않았다
 }

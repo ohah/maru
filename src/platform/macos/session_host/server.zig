@@ -4730,7 +4730,7 @@ test "server: admin runtime end requires exact membership and preallocates succe
     defer registry.deinit();
     const target = try registry.register(0xAA, 80, 24);
     target.controller = 11;
-    try target.observers.append(testing.allocator, 22);
+    try target.observers.append(testing.allocator, .{ .stream = 22 });
     _ = try registry.register(0xBB, 100, 30);
     var fake: FakeRuntimeOps = .{};
     var admission: AdminAdmission = .{};

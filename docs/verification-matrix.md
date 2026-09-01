@@ -2473,7 +2473,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   path component와 final을 `openat(O_NOFOLLOW)`로 열어 regular/bounded bytes·SHA-256·device/inode를 같은 fd에서 만들고 input
   hardlink alias를 거부한다. summary는 0600 temp complete write·fsync·close 뒤 `RENAME_EXCL`로 absent final에만 게시하며 predecessor
   work-dir도 absent leaf에만 0700으로 만든다. `test-session-host-release-adapter-files`가 이를 Debug·ReleaseFast 실제 filesystem에서
-  검증한다. release adapter가 사용할 macOS 외부 명령 leaf는 `bounded_process.zig` 한 곳에서 absolute exec, stdin `/dev/null`,
+  검증한다. pre-publish workspace owner는 caller-owned absolute absent root를 0700으로 만들고 held parent/root identity에서 exact
+  `current-manifest`·`predecessor-manifest`·`predecessor-assets`·`dmg`·`current-assets` child pathname만 유도하며, unexpected entry나
+  replacement를 허용하지 않고 초기화/empty root cleanup 실패 시 durable removal까지 retry
+  권위를 보존한다. `test-session-host-release-adapter-pre-publish-workspace`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다.
+  release adapter가 사용할 macOS 외부 명령 leaf는 `bounded_process.zig` 한 곳에서 absolute exec, stdin `/dev/null`,
   merged output exact cap, exit 0+EOF, monotonic timeout과 process-group kill/direct-child reap을 소유하고 기존 upgrade codesign이 먼저
   재사용하며, `test-session-host-bounded-process`가 Debug·ReleaseFast 실제 process로 검증한다. 그러나 release adapter executable
   배선 전에 `release_adapter_environment.zig`가 실행 프로세스에서 parser 소유의 exact 11개 이름만 직접 조회하고,

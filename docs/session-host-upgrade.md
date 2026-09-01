@@ -1081,6 +1081,33 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   mutation·timeout·child failure의 publication 0을 Debug·ReleaseFast에서 검증한다. 이 gate만으로 final
   `release_manifest.Observation`, release `verify`/`verify-asset`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  current final manifest observation의 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_github_current_observation.zig`다. 입력은 authenticated
+  `CurrentManifestInput` B, authenticated role-A predecessor manifest와 그 release/assets 검증을 보존한
+  `AuthenticatedPredecessorAssets`, final-address `CurrentProduct`, `CurrentEvidence`, `CurrentAssetFiles`, `CurrentAssetAttestations`,
+  `CurrentCompatibility`뿐이다. caller가 repository/release/source/build, boolean receipt, asset·signing·compatibility·evidence
+  scalar 또는 predecessor publication 사실을 별도로 제출하지 않는다.
+
+  composition은 모든 owner를 다시 조회하고 B의 current authority, A predecessor identity, predecessor download source commit,
+  current asset-attestation context를 B와 exact 교차결속한다. current/predecessor manifest owner의 parsed value만 믿지 않고 내부
+  artifact-attestation receipt가 존재하고 verified이며 exact run/subject에 결속된 상태인지도 다시 확인한다. `CurrentProduct`는 caller pathname 없이 held executable fd의
+  identity/type/mode/link-count/size/SHA와 held parent authority를 다시 검증하고, `CurrentAssetFiles`도 held directory와 세 leaf를
+  다시 검증한다. current manifest·predecessor manifest의 canonical owned bytes와 SHA,
+  manifest/asset attestation, held frozen executable과 Apple product, strict evidence parse, compiled compatibility에서만
+  `release_manifest.Observation`을 만든다. asset observation은 manifest role exact-once 순서를 사용하며 regular/no-follow는 private
+  asset owner의 재검증 성공에서만 true다. Apple observation이 이미 증명한 strict signature·notarization·app/DMG staple·Gatekeeper와
+  DMG no-follow extraction만 true로 materialize하고, predecessor published/immutable/release-attested facts는
+  `AuthenticatedPredecessorAssets`가 다시 revalidate된 경우에만 materialize한다.
+
+  조립된 observation은 `release_manifest.parseAndValidateObservation`에 current canonical bytes와 함께 즉시 넣고, 성공한 strict
+  `Parsed`만 final-address move-only `CurrentObservation`으로 게시한다. output storage가 어느 입력 owner storage와 겹치면 입력을
+  덮어쓸 수 있으므로 owner 조회 전에 거부한다. copied/pre-owned output, 어느 입력 owner의 copy·stale·context
+  drift, A/B swap, manifest/asset/executable/evidence/attestation 불일치와 allocation failure는 publication 0이다. focused gate
+  `test-session-host-release-adapter-github-current-observation`은 canonical success, 모든 input projection과 boolean의 derivation,
+  copied/pre-owned/stale owner, output/input storage alias, role/context/predecessor/executable/evidence drift, strict validator rejection 및 allocation unwind를
+  Debug·ReleaseFast에서 검증한다. 이 gate는 release workflow command ordering, draft redownload/publish, signed frozen U5 제품 E2E를
+  대신하지 않는다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

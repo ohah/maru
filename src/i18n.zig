@@ -675,6 +675,9 @@ const Table = struct {
     scm_nothing_to_stage: [:0]const u8,
     scm_git_spawn_failed: [:0]const u8,
     scm_git_command_failed: [:0]const u8,
+    /// 원격 명령이 **git 에 닿지 못했다**(ssh 가 255 로 끝났다). git 이 한 말이 아니므로 그 stderr 를
+    /// 저장소 이야기로 보여 주면 안 된다 — 사용자가 자기 저장소를 의심한다.
+    scm_remote_transport_failed: [:0]const u8,
     scm_need_commit_message: [:0]const u8,
     scm_nothing_staged: [:0]const u8,
     scm_commit_msg_write_failed: [:0]const u8,
@@ -1154,6 +1157,7 @@ const en: Table = .{
     .scm_nothing_to_stage = "There is nothing to stage",
     .scm_git_spawn_failed = "Could not run git",
     .scm_git_command_failed = "The git command failed",
+    .scm_remote_transport_failed = "Lost the connection to the remote — the command did not reach git",
     .scm_need_commit_message = "Enter a commit message",
     .scm_nothing_staged = "There are no staged changes",
     .scm_commit_msg_write_failed = "Could not write the commit message to a temporary file",
@@ -1848,6 +1852,7 @@ const ko: Table = .{
     .scm_base_default = "기본값(origin/HEAD)",
     .scm_base_limit = "기억하는 저장소가 너무 많아 기준을 바꾸지 못했습니다",
     .scm_remote_read_only = "원격 세션이라 아직 목록만 읽습니다",
+    .scm_remote_transport_failed = "원격 연결이 끊겨 git 까지 닿지 못했습니다",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",
     .scm_history = "히스토리",

@@ -19,6 +19,7 @@
 const std = @import("std");
 const path_shape = @import("../path_shape.zig");
 const scm_view = @import("scm_view.zig");
+const remote_shell = @import("remote_shell.zig");
 
 /// 쓰기 명령의 종류. **unborn(첫 커밋 전) 변종이 따로 있다** — HEAD가 없으면 `restore`가 실패하므로 §2가
 /// `rm --cached`를 대신 쓰라고 정했다. 어느 쪽인지는 호출자가 head 상태로 고르고, 이 모듈은 고르지 않는다
@@ -76,6 +77,74 @@ pub const Kind = enum {
         };
     }
 };
+
+/// 원격 실행 대상 · 명령 상한 · argv 길이는 [remote_shell](remote_shell.zig) 이 소유한다.
+/// 읽기(`git_command.zig`)와 **전송은 공유하고 조립은 안 한다** — 갈린 축은 env·hook·stderr 이지
+/// 「어느 소켓으로 보내나」가 아니다.
+pub const Remote = remote_shell.Remote;
+pub const max_remote_command_bytes = remote_shell.max_command_bytes;
+pub const remote_argv_len = remote_shell.ssh_argv_len;
+
+/// 원격에서 부를 git. 로컬은 절대경로 계약이지만 원격의 설치 위치는 우리가 모른다 — PATH 처방이
+/// `remote_shell` 에 있고 그 껍데기가 이 명령을 감싼다.
+pub const remote_git_exe = "git";
+
+/// 원격 쓰기 명령. `build` 가 만든 로컬 argv 를 **인용해** 한 문자열로 접고, `ssh` argv 로 감싼다.
+///
+/// ⚠️ **커밋 메시지는 stdin 으로 간다.** 로컬은 `commit -F <파일>` 인데 그 파일은 **로컬에 있다** —
+/// 원격에서 그 경로는 없거나 **남의 파일**이다. 호출자가 `message_file = "-"` 로 `build` 를 부르고
+/// (그러면 `commit -F -` 가 나온다) 실행 층이 메시지 바이트를 stdin 으로 흘린다.
+///
+/// 실측(2026-09-01, harness sshd + ControlMaster): 제목·본문·따옴표·`$(…)`·한글이 **바이트 그대로**
+/// 보존되고, `pre-commit` hook 은 git 이 stdin 을 **먼저 다 읽은 뒤** 빈 stdin 으로 받는다 —
+/// hook 이 우리 메시지를 먹지 않는다.
+///
+/// ⚠️ **`argv[0]`(git_exe)은 버린다.** 로컬 절대경로는 원격에서 뜻이 없다 — `remote_git_exe` 로 바꾼다.
+pub fn buildRemote(
+    local_argv: []const []const u8,
+    remote: Remote,
+    buf: [][]const u8,
+    cmd_buf: []u8,
+) ?[]const []const u8 {
+    if (local_argv.len < 2) return null; // 최소 `git -C <repo>` 는 있어야 한다
+    var n: usize = 0;
+    n = remote_shell.appendShPrologue(cmd_buf, n, remote_shell.exec_args_script) orelse return null;
+    n = remote_shell.quoteAppend(cmd_buf, n, "env") orelse return null;
+    // **env 목록은 명령 종류가 고른다**(fetch 만 갈린다). 로컬 실행 층과 **같은 목록**을 원격에도 싣는다 —
+    // 한쪽만 실으면 「로컬에서는 막힌 프롬프트가 원격에서 뜬다」가 된다.
+    for (envOverrides(kindOf(local_argv) orelse return null)) |o| {
+        if (!remote_shell.tokenIsSafe(o.name) or !remote_shell.tokenIsSafe(o.value)) return null;
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = ' ';
+        n += 1;
+        // `K=V` 를 **한 토큰으로** 인용한다 — 셸이 인용을 벗기면 env(1) 가 그대로 한 인자로 받는다.
+        var pair_buf: [256]u8 = undefined;
+        const pair = std.fmt.bufPrint(&pair_buf, "{s}={s}", .{ o.name, o.value }) catch return null;
+        n = remote_shell.quoteAppend(cmd_buf, n, pair) orelse return null;
+    }
+    if (n >= cmd_buf.len) return null;
+    cmd_buf[n] = ' ';
+    n += 1;
+    n = remote_shell.quoteAppend(cmd_buf, n, remote_git_exe) orelse return null;
+    for (local_argv[1..]) |token| {
+        if (!remote_shell.tokenIsSafe(token)) return null;
+        if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = ' ';
+        n += 1;
+        n = remote_shell.quoteAppend(cmd_buf, n, token) orelse return null;
+    }
+    return remote_shell.sshArgv(remote, buf, cmd_buf[0..n]);
+}
+
+/// 조립된 argv 에서 명령 종류를 되읽는다. **env 목록을 고르는 데만 쓴다** — 호출자가 kind 를 따로
+/// 넘기면 「argv 는 fetch 인데 env 는 index」가 조용히 생긴다(그 둘이 갈리는 것이 §4 의 전부다).
+fn kindOf(local_argv: []const []const u8) ?Kind {
+    for (local_argv) |token| {
+        if (std.mem.eql(u8, token, "fetch")) return .fetch;
+        if (std.mem.eql(u8, token, "commit")) return .commit;
+    }
+    return .stage; // 나머지는 env 가 같다(`env_overrides`)
+}
 
 /// 경로가 거부되는 이유. **조립 단계에서 막는다** — 여기서 통과시키면 `--` 뒤라도 저장소 밖을 건드린다.
 pub const PathError = error{
@@ -210,6 +279,37 @@ pub const fixed_argv_max: usize = 3 + shared_config_overrides.len + hooks_off.le
 /// 경로 하나가 4 KiB까지 갈 수 있어 개수만으로는 상한이 안 선다.
 pub const max_batch_paths: usize = 256;
 pub const max_batch_bytes: usize = 64 * 1024;
+
+/// 원격 배치의 **끝 인덱스**. `batchEnd` 와 갈린 이유는 상한이 다르기 때문이다(RS4a 6회차):
+///
+/// - 로컬은 `ARG_MAX`(64 KiB)로 자른다 — argv 를 그대로 `execve` 하므로 인용이 없다.
+/// - 원격은 그 argv 를 **인용해 한 문자열로** 접어 8 KiB 버퍼(`max_remote_command_bytes`)에 담는다.
+///   작은따옴표 하나가 `'\''` 4 바이트가 되므로 최악은 **4 배**다.
+///
+/// 두 상한을 같다고 두면 흔한 경로 길이(60 B)에서도 256 개가 원격 버퍼를 넘겨 `buildRemote` 가 null 을
+/// 내고, 화면에는 「git 실패」만 뜬 채 **일부 파일이 조용히 안 스테이지된다.** 그래서 여기서 미리 자른다.
+///
+/// ⚠️ **오늘 이 함수를 부르는 제품 경로는 없다** — 행 하나가 경로 하나를 보내고(`submitRowWrite`),
+/// `_all` 변종은 경로를 안 보낸다. 즉 이것은 **함정을 미리 막아 둔 것**이지 지금 나는 버그가 아니다.
+/// 그래도 두는 이유: 배치를 처음 쓰는 호출자는 `batchEnd` 를 부를 것이고, 그 순간 원격에서만 조용히
+/// 깨진다 — 그리고 그 깨짐은 **원격을 쓰는 사용자에게만** 보인다.
+///
+/// **경로 하나가 상한보다 커도 그 하나는 넣는다** — 안 넣으면 진행이 멈춰 그 파일을 영영 못 보낸다.
+/// 그때는 `buildRemote` 가 null 로 알려 주고 그것은 §5 의 실패 경로다(조용히 빠지는 것과 다르다).
+pub fn remoteBatchEnd(paths: []const []const u8, start: usize) usize {
+    if (start >= paths.len) return start;
+    // 껍데기(`'sh' '-c' '<스크립트>' 'sh' `) + env + `-c` 덮어쓰기 + 하위명령에 넉넉한 자리를 남긴다.
+    const reserve: usize = 2 * 1024;
+    const budget = if (max_remote_command_bytes > reserve) max_remote_command_bytes - reserve else 0;
+    var bytes: usize = 0;
+    var end = start;
+    while (end < paths.len) : (end += 1) {
+        const next = bytes + paths[end].len * 4 + 3; // 최악 인용(×4) + `''` + 구분 공백
+        if (end > start and (end - start >= max_batch_paths or next > budget)) break;
+        bytes = next;
+    }
+    return end;
+}
 
 /// `paths[start..]`에서 한 배치에 넣을 **끝 인덱스**(exclusive)를 돌려준다.
 ///
@@ -743,4 +843,139 @@ test "이 넷은 경로를 안 받는다 — 조립이 거부한다" {
     // 행 명령은 반대로 **받아야** 한다.
     try testing.expect(kindForRow(.stage, false).?.takesPaths());
     try testing.expect(kindForRow(.unstage, true).?.takesPaths());
+}
+
+// ── RS4a 적대적 검증 ────────────────────────────────────────────────────────────────────────
+//
+// 원격 쓰기는 **남의 기계의 index 를 바꾼다.** 읽기가 틀리면 잘못 보여 주고 끝이지만 이쪽은 되돌릴 것이
+// 남는다. 그래서 「로컬에서 닫아 둔 것이 원격에서도 닫혀 있는가」를 전수로 짚는다.
+
+test "원격 쓰기: 로컬이 닫아 둔 구멍이 원격에서도 닫혀 있다 (RS4a 1회차)" {
+    var argv: [fixed_argv_max + max_batch_paths][]const u8 = undefined;
+    var rbuf: [remote_argv_len][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const local = try build(.stage, "/usr/bin/git", "/srv/app", &.{"a.txt"}, null, &argv);
+    const remote = buildRemote(local, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd).?;
+    const line = remote[remote.len - 1];
+
+    // ⑴ **`-c` 덮어쓰기가 하나도 빠지지 않는다.** 하나라도 빠지면 그 구멍이 원격에서만 열린다
+    //    (예: `core.hooksPath` 가 빠지면 남의 저장소 훅을 우리가 실행한다).
+    for (local[1..]) |token| {
+        var quoted_buf: [512]u8 = undefined;
+        const n = quoteAppendForTest(&quoted_buf, 0, token) orelse return error.Unexpected;
+        try std.testing.expect(std.mem.indexOf(u8, line, quoted_buf[0..n]) != null);
+    }
+    // ⑵ **env 도 같은 목록이다.** 로컬 실행 층이 덮어쓰는 것과 원격이 다르면, 로컬에서 막힌 프롬프트가
+    //    원격에서 뜬다 — 그러면 그 명령은 영영 안 끝난다.
+    for (envOverrides(.stage)) |o| {
+        var pair_buf: [256]u8 = undefined;
+        const pair = try std.fmt.bufPrint(&pair_buf, "'{s}={s}'", .{ o.name, o.value });
+        try std.testing.expect(std.mem.indexOf(u8, line, pair) != null);
+    }
+    // ⑶ **`GIT_OPTIONAL_LOCKS` 는 원격에도 없다** — 쓰기는 index 를 잠가야 한다(§1).
+    try std.testing.expect(std.mem.indexOf(u8, line, "GIT_OPTIONAL_LOCKS") == null);
+    // ⑷ **로컬 git 절대경로는 원격에 안 간다** — 그 경로는 남의 기계에서 뜻이 없다.
+    try std.testing.expect(std.mem.indexOf(u8, line, "/usr/bin/git") == null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "'git'") != null);
+    // ⑸ 로그인 셸에는 인용된 토큰만 간다(csh/tcsh 실측 — `remote_shell` 머리말).
+    try std.testing.expect(std.mem.startsWith(u8, line, "'sh' '-c' '"));
+}
+
+test "원격 쓰기: fetch 는 fetch env 로만 조립된다 (RS4a 2회차)" {
+    var argv: [fixed_argv_max + max_batch_paths][]const u8 = undefined;
+    var rbuf: [remote_argv_len][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const local = try build(.fetch, "/usr/bin/git", "/srv/app", &.{}, null, &argv);
+    const remote = buildRemote(local, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd).?;
+    const line = remote[remote.len - 1];
+    // **argv 는 fetch 인데 env 는 index** 가 되면 안 된다 — 그 둘이 갈리는 것이 §4 의 전부다.
+    // `kindOf` 가 argv 에서 되읽으므로 호출자가 kind 를 잘못 넘길 자리가 없다.
+    try std.testing.expect(std.mem.indexOf(u8, line, "'GIT_CONFIG_NOSYSTEM=0'") != null); // fetch 판
+    try std.testing.expect(std.mem.indexOf(u8, line, "'GIT_CONFIG_NOSYSTEM=1'") == null); // index 판이 아니다
+    try std.testing.expect(std.mem.indexOf(u8, line, "GIT_SSH_COMMAND") != null);
+
+    const local_stage = try build(.stage, "/usr/bin/git", "/srv/app", &.{"a.txt"}, null, &argv);
+    const stage = buildRemote(local_stage, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd).?;
+    const sline = stage[stage.len - 1];
+    try std.testing.expect(std.mem.indexOf(u8, sline, "'GIT_CONFIG_NOSYSTEM=1'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sline, "GIT_SSH_COMMAND") == null);
+}
+
+test "원격 쓰기: 셸 메타문자가 든 경로도 한 인자로 도착한다 (RS4a 3회차)" {
+    var argv: [fixed_argv_max + max_batch_paths][]const u8 = undefined;
+    var rbuf: [remote_argv_len][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const nasty = "it's a; $(touch /tmp/pwned) `id` *.txt";
+    const local = try build(.stage, "/usr/bin/git", "/srv/app", &.{nasty}, null, &argv);
+    const remote = buildRemote(local, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd).?;
+    const line = remote[remote.len - 1];
+
+    // 인용 밖에 위험한 문자가 하나도 없다 — 이 문자열은 **남의 셸**이 파싱한다.
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (!in_quote and c == '\\') {
+            try std.testing.expect(i + 1 < line.len);
+            i += 1;
+            continue;
+        }
+        if (c == '\'') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_quote) continue;
+        try std.testing.expect(c == ' ');
+    }
+    try std.testing.expect(!in_quote);
+    // 제어문자가 든 경로는 **명령 자체를 만들지 않는다**.
+    const ctrl = try build(.stage, "/usr/bin/git", "/srv/app", &.{"a\nb.txt"}, null, &argv);
+    try std.testing.expect(buildRemote(ctrl, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd) == null);
+}
+
+/// 판정자가 인용 결과를 대조하려고 쓴다 — 제품과 **같은 함수**를 지난다(두 벌이면 판정이 무의미하다).
+fn quoteAppendForTest(out: []u8, at: usize, token: []const u8) ?usize {
+    return remote_shell.quoteAppend(out, at, token);
+}
+
+test "원격 쓰기: 로컬 배치가 원격 명령 버퍼를 넘긴다 (RS4a 6회차)" {
+    // **로컬 배치 상한과 원격 명령 상한은 서로 모른다.** 로컬은 `ARG_MAX`(64 KiB)로 자르는데 원격은
+    // 인용이 붙어 최대 4 배로 부푼 문자열을 8 KiB 버퍼에 담는다. 그 차이만큼 **조용히 못 보낸다.**
+    var argv: [fixed_argv_max + max_batch_paths][]const u8 = undefined;
+    var rbuf: [remote_argv_len][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+
+    var paths_buf: [max_batch_paths][]const u8 = undefined;
+    const one = "src/platform/macos/app_session/some_reasonably_long_name.zig"; // 60 B — 흔한 길이다
+    for (&paths_buf) |*p| p.* = one;
+
+    // ⚠️ 오늘 배치를 쓰는 제품 경로는 없다 — 이 판정자는 **첫 호출자가 밟을 함정**을 고정한다.
+    // 로컬 배치는 이 전부를 **한 번에** 보내라고 말한다(60 B × 256 ≈ 15.6 KB < 64 KiB).
+    try std.testing.expectEqual(max_batch_paths, batchEnd(&paths_buf, 0));
+    const local = try build(.stage, "/usr/bin/git", "/srv/app", &paths_buf, null, &argv);
+
+    // 그런데 원격은 **만들지 못한다** — 이것이 이 판정자가 잡는 사실이다.
+    const overflow = buildRemote(local, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd);
+    try std.testing.expect(overflow == null);
+
+    // 그래서 **원격 배치는 따로 센다.** 그 상한으로 자르면 반드시 만들어진다.
+    var start: usize = 0;
+    var rounds: usize = 0;
+    while (start < paths_buf.len) : (rounds += 1) {
+        const end = remoteBatchEnd(&paths_buf, start);
+        try std.testing.expect(end > start); // 진행이 멈추면 그 파일을 영영 못 스테이지한다
+        const chunk = try build(.stage, "/usr/bin/git", "/srv/app", paths_buf[start..end], null, &argv);
+        try std.testing.expect(buildRemote(chunk, .{ .dest = "u@h", .control_path = "/tmp/c" }, &rbuf, &cmd) != null);
+        start = end;
+    }
+    try std.testing.expect(rounds > 1); // 실제로 쪼개졌다(안 쪼개졌으면 이 판정자는 아무것도 안 본다)
+}
+
+test "원격 배치: 한 경로가 상한보다 커도 그 하나는 넣는다 (RS4a 6회차)" {
+    // 안 넣으면 진행이 멈춰 그 파일을 **영영** 스테이지할 수 없다. 실제 초과는 `buildRemote` 가
+    // null 로 알려 주고, 그것은 §5 의 실패 경로다 — 조용히 빠지는 것과 다르다.
+    const huge = "'" ** 4096; // 인용이 4 배로 부푸는 최악
+    const paths = [_][]const u8{ huge, "a.txt" };
+    try std.testing.expectEqual(@as(usize, 1), remoteBatchEnd(&paths, 0));
+    try std.testing.expectEqual(@as(usize, 2), remoteBatchEnd(&paths, 1));
 }

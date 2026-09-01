@@ -445,20 +445,13 @@ pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, paths: []const []
 // 그래서 예외를 **이 절 안으로 좁힌다**: 인용·검증·덮어쓰기 보존을 여기 순수 함수가 전부 지고, L4 는
 // 결과 argv 를 그대로 exec 한다. 안전 조건이 실행 코드에 흩어지지 않아야 헤드리스로 전수 고정된다.
 
-/// 원격 실행 대상. `dest` 는 `user@host`, `control_path` 는 `maru ssh` 가 만들어 둔 ControlMaster 소켓이다
-/// (둘 다 L4 가 runtime observation 에서 얻는다 — `remoteUploadContextFor` 와 같은 출처).
-///
-/// **새 연결을 열지 않는다**: `-S <control_path>` 로만 붙는다. 소켓이 없으면 ssh 가 직접 연결을 시도하며
-/// 비밀번호를 물을 수 있으므로, **호출자가 소켓 존재를 먼저 확인한다**(계약 §2.2 ⑸).
-pub const Remote = struct {
-    dest: []const u8,
-    control_path: []const u8,
-};
+/// 원격 실행 대상. 전송 규율(`ssh -S …`)은 [remote_shell](remote_shell.zig) 이 소유한다.
+pub const Remote = remote_shell.Remote;
 
 /// 원격 명령 문자열 상한. `check-ignore` 처럼 경로가 여럿 붙는 kind 가 가장 길고, 경로마다 인용이
 /// 붙으므로 로컬 argv 보다 커진다. 넘으면 **자르지 않고 명령을 만들지 않는다** — 잘린 셸 명령은
 /// 「덜 실행되는 것」이 아니라 **다른 명령**이다.
-pub const max_remote_command_bytes: usize = 8 * 1024;
+pub const max_remote_command_bytes = remote_shell.max_command_bytes;
 
 /// 원격 argv 는 항상 이 길이·이 모양이다 — 토큰 여덟 개다:
 /// `/usr/bin/env ssh -o BatchMode=yes -S <ctl> <dest> <cmd>`.
@@ -469,7 +462,7 @@ pub const max_remote_command_bytes: usize = 8 * 1024;
 ///
 /// `BatchMode=yes` 는 이 모듈의 「프롬프트 없음」 조항을 전송 층까지 잇는다 — 소켓이 사라진 순간
 /// 비밀번호를 묻는 대신 실패해야 한다.
-pub const remote_argv_len: usize = 8;
+pub const remote_argv_len = remote_shell.ssh_argv_len;
 
 /// 원격 명령의 셸 규율은 [remote_shell](remote_shell.zig) 이 소유한다 — PATH 처방과 `sh` 껍데기가
 /// 왜 그 형태인지(csh·fish 실측 포함) 그쪽 머리말에 있다. 여기서 다시 정의하지 않는다: 같은 처방을
@@ -559,19 +552,7 @@ pub fn buildRemote(
 /// 이미 만들어 둔 **원격 명령 한 줄**을 실어 나를 `ssh` argv. `buildRemote` 와 `buildRemoteFileRead` 가
 /// 이 자리를 공유한다 — 전송 옵션(`BatchMode`·`-S`)이 두 벌이 되면 한쪽만 고쳐져 새 연결이 열린다.
 fn remoteArgv(remote: Remote, buf: *[max_argv][]const u8, command: []const u8) ?[]const []const u8 {
-    if (remote.dest.len == 0 or remote.dest[0] == '-') return null;
-    if (!remoteTokenIsSafe(remote.dest)) return null;
-    if (remote.control_path.len == 0 or remote.control_path[0] != '/') return null;
-    if (!remoteTokenIsSafe(remote.control_path)) return null;
-    buf[0] = "/usr/bin/env"; // execve 가 받는 절대경로 — env(1) 가 PATH 에서 ssh 를 찾는다
-    buf[1] = "ssh";
-    buf[2] = "-o";
-    buf[3] = "BatchMode=yes";
-    buf[4] = "-S";
-    buf[5] = remote.control_path;
-    buf[6] = remote.dest;
-    buf[7] = command;
-    return buf[0..remote_argv_len];
+    return remote_shell.sshArgv(remote, buf, command);
 }
 
 /// 원격 파일 읽기의 상한(바이트). **원격에서 자른다** — 로컬은 받은 뒤 `max_output_bytes` 로 자르지만,

@@ -504,17 +504,24 @@ pub const Backend = struct {
         paths: []const []const u8,
         message_file: ?[]const u8,
         request_id: u64,
+        /// 원격이면 그 대상(RS4a). `null` 이면 로컬. **쌍으로 받는다** — 반쪽만 오면
+        /// `git_write_command.buildRemote` 가 거부한다.
+        remote: ?git_write_command.Remote,
     ) bool {
         // **fetch는 이 문으로 못 들어온다.** 들어오면 네트워크 명령이 index 슬롯을 잡아 §6-1대로 목록
         // 읽기까지 멈춘다 — 슬롯이 갈린 이유가 사라진다.
         if (kind.usesNetwork()) return false;
-        return self.submitWriteJob(.index, git_exe, repo, kind, paths, message_file, request_id);
+        return self.submitWriteJob(.index, git_exe, repo, kind, paths, message_file, request_id, remote);
     }
 
     /// 원격 갱신(`fetch --prune`)을 건다(P6). **쓰기와 다른 슬롯**이라 커밋·스테이지가 막히지 않는다 —
     /// fetch는 index를 만지지 않으므로 §6의 직렬화 대상이 아니고, 네트워크라 오래 걸린다.
+    ///
+    /// ⚠️ **원격 저장소에는 이 문을 쓰지 않는다**(RS4 계약 §6.3). 우리 ssh 명령에는 `SSH_AUTH_SOCK` 도
+    /// PATH 도 tty 도 없어(실측 2026-09-01) 인증이 필요한 원격에서 **항상** 실패하고, 물어볼 곳도 없다.
+    /// 원격 fetch 는 `push`·`pull` 과 같은 길로 간다 — 활성 pane 에 명령을 넣고 실행은 사용자가 한다(RS4c).
     pub fn submitFetch(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
-        return self.submitWriteJob(.network, git_exe, repo, .fetch, &.{}, null, request_id);
+        return self.submitWriteJob(.network, git_exe, repo, .fetch, &.{}, null, request_id, null);
     }
 
     fn submitWriteJob(
@@ -526,6 +533,7 @@ pub const Backend = struct {
         paths: []const []const u8,
         message_file: ?[]const u8,
         request_id: u64,
+        remote: ?git_write_command.Remote,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -555,6 +563,18 @@ pub const Backend = struct {
             .kind = kind,
             .request_id = request_id,
         };
+        // **원격 두 축은 쌍으로 든다** — 하나만 들면 `remoteTarget()` 이 로컬로 읽어 원격 경로를
+        // 로컬 git 에 넘긴다(RS3 적대적 검증 6회차에서 diff 가 그렇게 새어 나갔다).
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch {
+                job.deinit();
+                return self.abandonWrite(slot);
+            };
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch {
+                job.deinit();
+                return self.abandonWrite(slot);
+            };
+        }
         job.git_exe = state.allocator.dupe(u8, git_exe) catch {
             job.deinit();
             return self.abandonWrite(slot);
@@ -1921,6 +1941,17 @@ pub const WriteResult = struct {
     /// git이 낸 stderr **원본**. 화면에 내기 전에 호출자가 redact·절단한다(§5).
     stderr: []u8,
     stderr_truncated: bool,
+    /// 이 쓰기가 **원격으로 갔는가**(RS4a). 실패를 어떻게 말할지가 갈린다 — `ssh` 는 **자기 실패에만**
+    /// 255 를 쓰므로(실측 2026-09-01: 소켓이 죽으면 `Host key verification failed.` + 255), 원격 쓰기의
+    /// 255 는 「git 이 거부했다」가 아니라 **「git 까지 못 갔다」**다. 그 둘을 안 가르면 ssh 가 한 말이
+    /// 저장소 이야기로 화면에 뜨고, 사용자는 자기 저장소를 의심한다.
+    remote: bool = false,
+
+    /// 명령이 git 에 닿지도 못했는가. **원격에서만 참일 수 있다** — 로컬 git 이 255 를 내는 일은 없고,
+    /// 있다 해도 그것은 git 이 한 말이다.
+    pub fn transportFailed(self: WriteResult) bool {
+        return self.remote and self.spawned and self.exit_code == 255;
+    }
 
     pub fn ok(self: WriteResult) bool {
         return self.spawned and self.exit_code == 0;
@@ -1946,6 +1977,17 @@ const WriteJob = struct {
     message_file: ?[]u8,
     kind: git_write_command.Kind,
     request_id: u64,
+    /// 원격(SSH) 실행 대상(owned, RS4a). **둘 다 비어 있으면 로컬이다** — 읽기 `Job` 과 같은 모양이라
+    /// 두 축이 같은 규율을 따른다.
+    remote_dest: []u8 = &.{},
+    remote_ctl: []u8 = &.{},
+
+    /// 이 job 이 원격이면 그 대상. 하나라도 비면 **로컬로 본다** — 반쪽짜리 대상으로 명령을 만드느니
+    /// 로컬이 낫다는 뜻이 아니라, 호출자가 쌍으로 넣으므로 그 상태가 애초에 안 생긴다.
+    fn remoteTarget(self: *const WriteJob) ?git_write_command.Remote {
+        if (self.remote_dest.len == 0 or self.remote_ctl.len == 0) return null;
+        return .{ .dest = self.remote_dest, .control_path = self.remote_ctl };
+    }
 
     fn deinit(self: *WriteJob) void {
         const allocator = self.state.allocator;
@@ -1954,6 +1996,8 @@ const WriteJob = struct {
         for (self.paths) |p| allocator.free(p);
         allocator.free(self.paths);
         if (self.message_file) |m| allocator.free(m);
+        if (self.remote_dest.len != 0) allocator.free(self.remote_dest);
+        if (self.remote_ctl.len != 0) allocator.free(self.remote_ctl);
         allocator.destroy(self);
     }
 };
@@ -1974,13 +2018,14 @@ fn writeWorker(job: *WriteJob) void {
         .stderr = &.{},
         .stderr_truncated = false,
     };
-    if (runWriteSync(allocator, job.kind, job.git_exe, job.repo, view_buf[0..n], job.message_file)) |out| {
+    if (runWriteSync(allocator, job.kind, job.git_exe, job.repo, view_buf[0..n], job.message_file, job.remoteTarget())) |out| {
         result = .{
             .request_id = job.request_id,
             .spawned = true,
             .exit_code = out.exit_code,
             .stderr = out.stderr_bytes,
             .stderr_truncated = out.stderr_truncated,
+            .remote = job.remoteTarget() != null,
         };
     } else |_| {
         // 조립 거부·spawn 실패. **성공으로 추정하지 않는다**(§5) — 호출자가 목록을 다시 읽어 사실과 맞춘다.
@@ -2038,6 +2083,9 @@ pub fn runWriteSync(
     repo: []const u8,
     paths: []const []const u8,
     message_file: ?[]const u8,
+    /// 원격이면 그 대상(RS4a). 로컬 argv 를 만든 뒤 **한 자리에서** 감싼다 — 감싸는 자리가 둘이면
+    /// 한쪽만 고쳐지고, 그 어긋남은 「로컬에서는 막힌 것이 원격에서 열린다」로 나타난다.
+    remote: ?git_write_command.Remote,
 ) !WriteOutput {
     // **조립 오류를 `GitFailed`로 뭉개지 않는다.** 경로 거부(절대경로·`..`)는 *우리가* 손대지 않기로 한
     // 일이고 git이 실패한 것이 아니다 — §5의 "실패는 사실대로"가 그 둘을 구별하라고 한다. 뭉개면 화면에
@@ -2046,7 +2094,25 @@ pub fn runWriteSync(
     // 배치 나누기는 **호출자 몫이다**(§2 — 중간에 실패할 수 있고, 그때 목록을 다시 읽는 판단은 화면 상태를
     // 든 쪽이 한다). 여기서 조용히 자르면 일부만 스테이지되고 호출자는 전부 됐다고 믿는다.
     if (paths.len > git_write_command.max_batch_paths) return error.TooManyPaths;
-    const argv_slices = try git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf);
+    const local_argv = try git_write_command.build(kind, git_exe, repo, paths, message_file, &argv_slices_buf);
+
+    // **원격이면 여기서 한 번 감싼다.** 아래 실행 갈래 둘은 그대로 두고 argv 만 바뀐다 — 감싸기를
+    // 실행 갈래 안에 두면 Windows/POSIX 두 곳에 같은 코드가 생긴다.
+    var remote_argv_buf: [git_write_command.remote_argv_len][]const u8 = undefined;
+    var remote_cmd_buf: [git_write_command.max_remote_command_bytes]u8 = undefined;
+    const argv_slices = if (remote) |target|
+        // **실패가 자기 이름을 말한다.** `GitFailed` 로 뭉개면 화면에 「git 실패」가 뜨고 사용자는
+        // 저장소를 의심한다 — 실제로는 우리가 명령을 **만들지 못한** 것이다(§5: 실패는 사실대로).
+        git_write_command.buildRemote(local_argv, target, &remote_argv_buf, &remote_cmd_buf) orelse
+            return error.RemoteCommandTooLong
+    else blk: {
+        // ⚠️ **로컬 실행은 절대경로만 받는다**(RS4a 7회차). 원격 갈래는 `argv[0]` 을 버리고 이름으로
+        // 부르므로 호출자가 `"git"` 을 넘겨도 되는데, 그 값이 **로컬 갈래로 새면** `execve` 가 상대경로를
+        // cwd 기준으로 풀어 **저장소 안의 `git` 이라는 파일**을 실행할 수 있다. 원격 라우팅이 어느
+        // 이유로든 떨어져도 그 결과가 임의 실행이 되면 안 된다 — 여기서 닫는다.
+        if (!std.fs.path.isAbsolute(git_exe)) return error.GitExeNotAbsolute;
+        break :blk local_argv;
+    };
 
     // **Windows 는 캡처 러너로 간다.** 읽기 갈래(`runArgvWithEnv`)와 같은 이유이고, 여기서 갈리는 것은
     // **어느 스트림을 받느냐**다 — 쓰기는 stderr 를 받는다(git 이 왜 거부했는지 못 보여 주면 쓸 수 없는
@@ -2635,12 +2701,12 @@ const WriteFixture = struct {
     }
 
     fn run(self: *WriteFixture, allocator: std.mem.Allocator, kind: git_write_command.Kind, paths: []const []const u8) !WriteOutput {
-        return runWriteSync(allocator, kind, self.exe, self.root, paths, null);
+        return runWriteSync(allocator, kind, self.exe, self.root, paths, null, null);
     }
 
     /// 커밋 — 메시지 파일을 함께 넘긴다(§2: `-m`이 아니다).
     fn commit(self: *WriteFixture, allocator: std.mem.Allocator, message_file: []const u8) !WriteOutput {
-        return runWriteSync(allocator, .commit, self.exe, self.root, &.{}, message_file);
+        return runWriteSync(allocator, .commit, self.exe, self.root, &.{}, message_file, null);
     }
 
     /// 준비용 git의 **출력**을 받는다(로그 확인용). `plainGit`과 같은 조립을 쓰되 stdout을 돌려준다.
@@ -2910,7 +2976,7 @@ test "쓰기 end-to-end: hook이 파이프 버퍼를 넘겨 쏟아도 교착하�
     try fx.dir.dir.writeFile(fixture_io, .{ .sub_path = "../commit-msg.txt", .data = "subject\n" });
 
     // hook이 허용되는 유일한 명령이 커밋이다(§3) — 그래서 이 경로로만 이 상황이 생긴다.
-    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path);
+    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path, null);
     defer out.deinit(allocator);
 
     try testing.expect(!out.ok()); // hook이 거부했다
@@ -2979,7 +3045,7 @@ test "자식의 stdin은 /dev/null이다(stdin을 읽는 hook이 멈추지 않�
     defer allocator.free(msg_path);
     try fx.dir.dir.writeFile(fixture_io, .{ .sub_path = "../stdin-msg.txt", .data = "subject\n" });
 
-    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path);
+    var out = try runWriteSync(allocator, .commit, fx.exe, fx.root, &.{}, msg_path, null);
     defer out.deinit(allocator);
     try testing.expect(!out.ok());
     // **즉시 EOF**여야 한다. 상속된 stdin이면 여기서 블록하거나 남의 입력을 삼킨다.
@@ -3086,4 +3152,67 @@ test "파일 목록 읽기는 hex가 아닌 rev를 거절한다(커밋·턴 둘 
     try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " --upload-pack=x", 2));
     // 셋 이상도 거절한다 — 인자가 하나 더 붙는 길을 열지 않는다.
     try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " " ++ good ++ " " ++ good, 3));
+}
+
+test "원격 쓰기 실패: ssh 가 한 말과 git 이 한 말을 가른다 (RS4a 5회차)" {
+    // `ssh` 는 **자기 실패에만** 255 를 쓴다(실측 2026-09-01: 소켓이 죽으면
+    // `Host key verification failed.` + 255). 그 stderr 를 저장소 이야기로 보여 주면 사용자가 자기
+    // 저장소를 의심한다 — 그 화면에서는 무엇을 고쳐야 할지 알 수 없다.
+    var died: WriteResult = .{
+        .request_id = 1,
+        .spawned = true,
+        .exit_code = 255,
+        .stderr = &.{},
+        .stderr_truncated = false,
+        .remote = true,
+    };
+    try std.testing.expect(died.transportFailed());
+
+    // **로컬의 255 는 git 이 한 말이다** — 원격이 아닌데 갈라 버리면 진짜 사유를 가린다.
+    var local255 = died;
+    local255.remote = false;
+    try std.testing.expect(!local255.transportFailed());
+
+    // **git 이 실제로 거부한 것은 그대로 낸다**(128 = fatal, 1 = 거절 — 실측으로 둘 다 왔다).
+    for ([_]c_int{ 1, 128 }) |code| {
+        var refused = died;
+        refused.exit_code = code;
+        try std.testing.expect(!refused.transportFailed());
+    }
+    // 띄우지도 못했으면 그것은 **로컬** 실패다(그 자리는 `spawned=false` 가 이미 가른다).
+    var unspawned = died;
+    unspawned.spawned = false;
+    try std.testing.expect(!unspawned.transportFailed());
+    // 성공은 실패가 아니다.
+    var okr = died;
+    okr.exit_code = 0;
+    try std.testing.expect(!okr.transportFailed());
+    try std.testing.expect(okr.ok());
+}
+
+test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실행하지 않는다 (RS4a 7회차)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // 호출자는 **원격일 때만** `"git"`(이름)을 넘긴다 — `buildRemote` 가 `argv[0]` 을 버리기 때문이다.
+    // 그 값이 어떤 이유로든 **로컬 갈래**로 새면 `execve("git", …)` 가 되고, POSIX 는 PATH 를 안 뒤지고
+    // **cwd 기준 상대경로**로 푼다 — 저장소 안에 `git` 이라는 실행 파일이 있으면 그것이 돈다.
+    //
+    // 그 상태가 「명령 실패」로 끝나는 것과 「남의 스크립트 실행」으로 끝나는 것은 하늘과 땅이다.
+    try std.testing.expectError(
+        error.GitExeNotAbsolute,
+        runWriteSync(allocator, .stage, "git", "/srv/app", &.{"a.txt"}, null, null),
+    );
+    // 원격이면 이름이어도 된다 — 그 자리는 `execve` 가 아니라 **원격 셸**이 푼다(PATH 처방이 그 위에 있다).
+    const out = try runWriteSync(
+        allocator,
+        .stage,
+        "git",
+        "/srv/app",
+        &.{"a.txt"},
+        null,
+        .{ .dest = "u@nowhere.invalid", .control_path = "/nonexistent/sock" },
+    );
+    defer allocator.free(out.stderr_bytes);
+    // 소켓이 없으니 ssh 가 **자기 실패**로 끝난다 — git 이 한 말이 아니다(5회차와 같은 축).
+    try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
 }

@@ -1809,15 +1809,25 @@ pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
 /// 원격에서도 뜻이 그대로인 것(새로고침 — 원격이면 원격을 다시 읽는다)은 통과시킨다.
 pub fn intentTouchesLocalRepo(intent: component.ids.Intent) bool {
     return switch (intent) {
-        // 로컬 index·로컬 파일을 **바꾼다**. 원격 라우팅은 RS4 다.
-        .row_action,
-        .section_action,
+        // 아직 원격으로 못 보내는 것들.
+        //
+        // - `commit`·`commit_focus`: 메시지 파일이 **로컬에 있다**. 원격은 stdin(`commit -F -`)이라
+        //   실행 층에 파이프가 필요하다 — RS4b.
+        // - `fetch_remote`·`open_remote_menu`: 우리 ssh 명령에는 `SSH_AUTH_SOCK` 도 tty 도 없어
+        //   인증이 필요한 원격에서 **항상** 실패하고 물어볼 곳도 없다(실측). 활성 pane 에 명령을 넣는
+        //   길로 간다 — RS4c.
         .commit,
         .commit_focus,
-        .stage_all_repo,
         .fetch_remote,
         .open_remote_menu,
         => true,
+        // **스테이지 계열은 RS4a 에서 이쪽으로 넘어왔다** — 원격 index 를 실제로 바꿀 수 있게 됐다.
+        // 어느 호스트로 갈지는 `submitWrite` 가 **그 행의 저장소**로 판정한다(활성 목적지를 무조건
+        // 쓰면 로컬 저장소 행의 스테이지가 원격으로 날아간다 — RS3 8회차와 같은 함정).
+        .row_action,
+        .section_action,
+        .stage_all_repo,
+        => false,
         // 화면 상태만 바꾸거나, 원격에서도 같은 뜻으로 도는 것.
         //
         // **비교 열기 셋은 RS3 에서 이쪽으로 넘어왔다** — 원격 diff 를 실제로 읽을 수 있게 됐기 때문이다
@@ -2903,9 +2913,32 @@ fn selectRow(self: *AppSession, repo: []const u8, index: u32) void {
 
 /// 방금 건 쓰기가 **어느 저장소로 갔는가**. 끝난 뒤 그 저장소를 다시 읽어야 화면이 사실을 따라간다 —
 /// 활성 저장소면 목록 읽기가, 아니면 그 머리 줄 읽기가 그 일을 한다.
-fn rememberWriteRepo(self: *AppSession, repo: []const u8) void {
+fn rememberWriteRepo(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
     if (self.scm_write_repo) |old| self.allocator.free(old);
     self.scm_write_repo = self.allocator.dupe(u8, repo) catch null;
+    // **호스트를 함께 든다**(RS4a 8회차). 경로만 들면 원격 `/srv/app` 과 로컬 `/srv/app` 이 같은 값이라,
+    // 쓰기가 도는 동안 pane 이 바뀌면 **다른 기계의 목록**을 갱신 대상으로 고른다.
+    if (self.scm_write_dest) |old| self.allocator.free(old);
+    self.scm_write_dest = if (dest) |d| (self.allocator.dupe(u8, d) catch null) else null;
+}
+
+/// 판정자 전용 창구 — 제품과 **같은 함수**를 지난다(두 벌이면 판정이 무의미하다).
+pub fn rememberWriteRepoForTest(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
+    rememberWriteRepo(self, repo, dest);
+}
+pub fn activeIsWriteTargetForTest(self: *AppSession, repo: []const u8) bool {
+    return activeIsWriteTarget(self, repo);
+}
+
+/// 지금 활성 목록이 **그 쓰기가 간 저장소**인가. 경로와 호스트를 **함께** 본다.
+fn activeIsWriteTarget(self: *AppSession, repo: []const u8) bool {
+    const current = self.git_repo orelse return false;
+    if (!std.mem.eql(u8, repo, current)) return false;
+    const wrote_to = self.scm_write_dest;
+    const showing = self.git_repo_dest;
+    if (wrote_to == null and showing == null) return true; // 둘 다 로컬
+    if (wrote_to == null or showing == null) return false; // 한쪽만 원격 — 다른 기계다
+    return std.mem.eql(u8, wrote_to.?, showing.?);
 }
 
 /// 낙관적으로 옮길 행을 기억한다. 경로는 **복사한다** — 모델 버퍼는 프레임마다 다시 만들어진다.
@@ -2973,22 +3006,38 @@ fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
 /// 뒤늦게 저장소를 바꾼다).
 fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8) bool {
     // **두 번째 겹**(RS2 적대적 검증 3회차). 인텐트 게이트가 첫 겹이지만 쓰기를 거는 길이 그것만이
-    // 아니다 — 커밋은 키 입력 경로에서도 들어온다(`settleCommitInput`). 로컬 index 를 만지는 자리마다
+    // 아니다 — 커밋은 키 입력 경로에서도 들어온다(`settleCommitInput`). 저장소를 만지는 자리마다
     // 묻는 대신, **그 자리로 들어가는 마지막 문**에서 한 번 더 본다.
-    if (git_ops.scmTargetIsRemote(self)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
-        return false;
-    }
+    //
+    // RS4a 에서 이 겹의 뜻이 바뀌었다: 「원격이면 막는다」가 아니라 **「원격이면 그 원격으로 보낸다」**다.
+    // 막는 것은 이제 **대상을 못 정한 경우** 하나뿐 — 원격 pane 인데 control socket 이 없으면
+    // `remoteScmTarget` 이 `.unknown` 을 내고, 그때 로컬로 떨어뜨리면 **원격 경로를 로컬 git 에 넘긴다**
+    // (RS3 6회차에서 diff 가 그렇게 샜다). 그 자리는 쓰기라 더 나쁘다 — 남의 파일을 **바꾼다.**
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote: ?git_write_command.Remote = switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
+        .local => null,
+        .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
+        // 소켓이 없다 — **보내지 않는다.** 로컬로 떨어뜨리면 원격 경로를 로컬 git 이 받는다.
+        .unavailable => {
+            setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
+            return false;
+        },
+    };
     if (self.scm_write_inflight != 0) return false;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
+    // **원격이면 로컬 git 경로를 안 찾는다** — 원격의 설치 위치는 우리가 모르고, `buildRemote` 가
+    // `argv[0]` 을 버리고 `remote_git_exe` 로 바꾼다. 로컬에 git 이 없다고 원격 쓰기가 막히면 안 된다.
+    const git_exe = if (remote != null)
+        git_write_command.remote_git_exe
+    else
+        git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return false;
     }
     self.scm_write_seq += 1;
-    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq)) return false;
+    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq, remote)) return false;
     self.scm_write_inflight = self.scm_write_seq;
-    rememberWriteRepo(self, repo);
+    rememberWriteRepo(self, repo, if (remote) |r| r.dest else null);
     clearScmWriteError(self);
     self.metal_dirty = true;
     return true;
@@ -3032,8 +3081,7 @@ pub fn drainScmWrite(self: *AppSession) void {
     // **어느 저장소를 읽느냐**가 ②d에서 갈린다: 비활성 저장소에 쓴 것이면 목록 읽기(활성 저장소)는
     // 그 사실을 모르므로 그 저장소의 머리 줄 읽기를 낡았다고 표시한다.
     if (self.scm_write_repo) |repo| {
-        const current = self.git_repo orelse "";
-        if (!std.mem.eql(u8, repo, current)) {
+        if (!activeIsWriteTarget(self, repo)) {
             markRepoStatusStaleFor(self, repo);
             return;
         }
@@ -3045,6 +3093,10 @@ pub fn drainScmWrite(self: *AppSession) void {
 /// 수천 줄이 될 수 있다. trace·로그에는 싣지 않는다(화면은 방금 누른 동작의 결과, 로그는 나중에 공유되는 산출물).
 fn writeErrorText(self: *AppSession, result: git_backend_mod.WriteResult) ?[]u8 {
     if (!result.spawned) return self.allocator.dupe(u8, maru.i18n.t(.scm_git_spawn_failed)) catch null;
+    // ⚠️ **ssh 가 한 말을 git 이 한 말로 내지 않는다**(RS4a 5회차). 원격 쓰기가 255 로 끝나면 그 stderr 는
+    // 전송 층의 것이다(`Host key verification failed.` 같은) — 저장소 이야기로 보여 주면 사용자가 자기
+    // 저장소를 의심한다. §6.7 의 「실패는 git 이 한 말 그대로」는 **git 이 돌았을 때**의 계약이다.
+    if (result.transportFailed()) return self.allocator.dupe(u8, maru.i18n.t(.scm_remote_transport_failed)) catch null;
     const raw = std.mem.trimEnd(u8, result.stderr, "\n");
     if (raw.len == 0) return self.allocator.dupe(u8, maru.i18n.t(.scm_git_command_failed)) catch null;
     // **마지막 줄만** 낸다. 목록 안 한 줄짜리 자리라 여러 줄을 담을 수 없고, hook 거부 사유는 보통 끝에 온다.
@@ -3640,16 +3692,22 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_write_seq += 1;
+    // ⚠️ **커밋은 아직 원격으로 안 간다**(RS4b). 로컬은 `commit -F <메시지 파일>` 인데 **그 파일은
+    // 로컬에 있다** — 원격에서 그 경로는 없거나 **남의 파일**이다. 원격은 `commit -F -` 로 stdin 을 써야
+    // 하고, 그러려면 실행 층에 stdin 파이프가 필요하다(`spawnCapture` 는 지금 `dup2(devnull, 0)` 한다 —
+    // 저장소 훅이 `read` 로 멈추는 것을 막는 **의도적** 설계다). 그 자리를 여는 것이 RS4b 다.
+    //
+    // 여기서 로컬로 떨어뜨리면 **원격 저장소를 보면서 로컬에 커밋**한다 — 막는 편이 맞다.
     if (git_ops.scmTargetIsRemote(self)) {
         setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only)); // 위와 같은 두 번째 겹
         return;
     }
-    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq)) {
+    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq, null)) {
         deleteCommitMessageFile(path);
         return;
     }
     self.scm_write_inflight = self.scm_write_seq;
-    rememberWriteRepo(self, repo);
+    rememberWriteRepo(self, repo, null); // 커밋은 아직 로컬만 간다(RS4b)
     self.scm_commit_inflight = true;
     self.scm_commit_started_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
     clearScmWriteError(self);

@@ -144,6 +144,49 @@ pub fn wrapAlloc(
     return allocator.realloc(buf, n) catch buf[0..n];
 }
 
+/// 원격 실행 대상. 두 축을 **쌍으로** 든다 — 하나만 들면 「목적지는 아는데 어느 소켓으로?」가 생기고,
+/// 그 상태에서 새 연결이 열리면 비밀번호 프롬프트가 뜬다(그것이 최악이다).
+pub const Remote = struct {
+    dest: []const u8,
+    control_path: []const u8,
+};
+
+/// 원격 명령 문자열 상한. 경로마다 인용이 붙으므로 로컬 argv 보다 커진다. 넘으면 **자르지 않고 명령을
+/// 만들지 않는다** — 잘린 셸 명령은 「덜 실행되는 것」이 아니라 **다른 명령**이다.
+pub const max_command_bytes: usize = 8 * 1024;
+
+/// 원격 argv 는 항상 이 길이·이 모양이다 — 토큰 여덟 개다:
+/// `/usr/bin/env ssh -o BatchMode=yes -S <ctl> <dest> <cmd>`.
+///
+/// **`env` 를 앞에 두는 이유**: 실행 층은 `execve(argv[0])` 라 argv[0] 이 **절대경로**여야 하는데
+/// (`git_backend.spawnCapture`), `ssh` 의 설치 위치는 시스템마다 다르다(`/usr/bin` · brew). `env(1)` 가
+/// PATH 에서 찾게 한다 — `ssh_upload.zig` 가 같은 이유로 같은 모양을 쓴다.
+///
+/// `BatchMode=yes` 는 「프롬프트 없음」 조항을 **전송 층까지** 잇는다 — 소켓이 사라진 순간 비밀번호를
+/// 묻는 대신 실패해야 한다.
+pub const ssh_argv_len: usize = 8;
+
+/// `ssh -S <ctl> <dest> <command>` argv 를 적는다. **읽기·쓰기 두 축이 이 함수 하나를 지난다** —
+/// 두 벌이면 한쪽만 고쳐지고, 그 어긋남은 새 연결(=프롬프트)로 나타난다.
+///
+/// `buf` 는 `ssh_argv_len` 이상이어야 한다.
+pub fn sshArgv(remote: Remote, buf: [][]const u8, command: []const u8) ?[]const []const u8 {
+    if (buf.len < ssh_argv_len) return null;
+    if (remote.dest.len == 0 or remote.dest[0] == '-') return null; // `-oProxyCommand=…` 로 읽히면 안 된다
+    if (!tokenIsSafe(remote.dest)) return null;
+    if (remote.control_path.len == 0 or remote.control_path[0] != '/') return null;
+    if (!tokenIsSafe(remote.control_path)) return null;
+    buf[0] = "/usr/bin/env"; // execve 가 받는 절대경로 — env(1) 가 PATH 에서 ssh 를 찾는다
+    buf[1] = "ssh";
+    buf[2] = "-o";
+    buf[3] = "BatchMode=yes";
+    buf[4] = "-S";
+    buf[5] = remote.control_path;
+    buf[6] = remote.dest;
+    buf[7] = command;
+    return buf[0..ssh_argv_len];
+}
+
 const testing = std.testing;
 
 test "껍데기: 로그인 셸이 보는 것은 인용된 토큰뿐이다" {
@@ -196,4 +239,29 @@ test "처방: PATH 를 덮지 않고 앞에 붙인다" {
     try testing.expect(std.mem.indexOf(u8, path_assign, path_prefix) != null);
     // `$PATH`·`$HOME` 은 스크립트 **안**에서 펼쳐져야 하므로 인용하지 않는다.
     try testing.expect(std.mem.indexOf(u8, path_prefix, "$HOME/") != null);
+}
+
+test "전송: dest 가 옵션처럼 생기면 명령을 만들지 않는다" {
+    var buf: [ssh_argv_len][]const u8 = undefined;
+    // `-oProxyCommand=…` 로 읽히면 **임의 명령 실행**이다.
+    try testing.expect(sshArgv(.{ .dest = "-oProxyCommand=x", .control_path = "/tmp/c" }, &buf, "true") == null);
+    try testing.expect(sshArgv(.{ .dest = "", .control_path = "/tmp/c" }, &buf, "true") == null);
+    // control socket 은 **절대경로**여야 한다 — 상대경로는 우리 cwd 에 끌려간다.
+    try testing.expect(sshArgv(.{ .dest = "h", .control_path = "rel" }, &buf, "true") == null);
+    try testing.expect(sshArgv(.{ .dest = "h", .control_path = "" }, &buf, "true") == null);
+    try testing.expect(sshArgv(.{ .dest = "h\n", .control_path = "/tmp/c" }, &buf, "true") == null);
+    // 버퍼가 모자라면 자르지 않고 포기한다.
+    var small: [4][]const u8 = undefined;
+    try testing.expect(sshArgv(.{ .dest = "h", .control_path = "/tmp/c" }, &small, "true") == null);
+}
+
+test "전송: BatchMode 는 프롬프트 없음을 전송 층까지 잇는다" {
+    var buf: [ssh_argv_len][]const u8 = undefined;
+    const argv = sshArgv(.{ .dest = "u@h", .control_path = "/tmp/c" }, &buf, "CMD").?;
+    try testing.expectEqual(@as(usize, ssh_argv_len), argv.len);
+    try testing.expectEqualStrings("/usr/bin/env", argv[0]); // execve 는 절대경로만 받는다
+    try testing.expectEqualStrings("BatchMode=yes", argv[3]);
+    try testing.expectEqualStrings("/tmp/c", argv[5]); // 소켓이 dest 보다 **앞**이다
+    try testing.expectEqualStrings("u@h", argv[6]);
+    try testing.expectEqualStrings("CMD", argv[7]);
 }

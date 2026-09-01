@@ -79,6 +79,14 @@ keybind = F4 = esc:[2J
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
   [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`toggle_find_replace`
+  ·`toggle_find_match_case`(빌트인 `⌥⌘C`)·`toggle_find_whole_word`(빌트인 `⌥⌘W`)
+  ·`toggle_find_in_selection`(빌트인 `⌥⌘L`) — **셋 다 편집기 문서를 검색 중일 때만 뜻이 있다**
+  (스크롤백·웹은 이 값을 안 읽는다. 웹은 WebKit 에 낱말 경계가 없어 셋에 다 걸면 거기서만 조용히
+  무시된다 — [visual-mapping §5.1](native-editor-visual-mapping.md)). 켠 규칙은 카운터 앞에
+  `Aa`·`W`·`Sel` 로 뜬다. **찾기가 떠 있는 동안 눌러야 한다** — 오버레이가 열리면 키를 전부
+  소비하므로 그 chord 들은 사전 가로채기로 처리되고, 닫혀 있으면 무동작이다.
+  「선택 영역 내에서만」의 범위는 **찾기를 여는 순간**의 선택 사본이라 그 뒤 선택이 움직여도
+  안 흔들린다(현재 일치가 선택을 옮기는 계약과 같은 필드를 두 뜻으로 쓰지 않기 위해서다)
   (찾기를 **바꾸기 줄과 함께** 연다 — 빌트인 `⌥⌘F`. 이미 열려 있으면 닫지 않고 바꾸기 줄만 켜므로
   `⌘F`로 친 검색어가 살아 있다. 바꾸기는 **편집기 문서에서만** 동작한다 — 스크롤백·웹 페이지는
   읽기 전용이라 그 대상에서는 줄이 뜨지 않는다)·`find_next`·

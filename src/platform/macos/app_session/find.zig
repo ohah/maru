@@ -78,6 +78,24 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
     // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
     // 문서의 것인가"**다. 0일 때 비워 두면 tick의 대조가 매 프레임 "안 맞는다"고 답해 재검색이
     // 무한히 돈다. 매치가 없으면 `buildFindMarks`가 `null`을 주므로 강조는 어차피 안 그려진다.
+    // **「선택 영역 내에서만」은 여기 한 곳에서 거른다**(§5.1). 카운터·막대 마커·Enter 이동·
+    // 「전부 바꾸기」가 모두 이 목록을 읽으므로, 소비처마다 범위를 다시 보게 하면 **한 곳만
+    // 빠뜨려도 그 자리가 조용히 문서 전체를 건드린다** — 특히 「전부 바꾸기」가 그렇다.
+    if (self.chrome_host.find.in_selection) |sel| blk: {
+        const doc = term.rt.editor_doc orelse break :blk;
+        var kept: usize = 0;
+        for (self.editor_find_matches.items) |m| {
+            // 매치는 `(줄, 줄 안 byte)` 이고 범위는 문서 offset 이라 축이 다르다 — `matchRange` 가
+            // 이미 그 변환을 갖고 있으므로 두 번째 변환을 만들지 않는다.
+            const r = editor_ops.matchRangePublic(doc, m) orelse continue;
+            if (r.start >= sel.start and r.end <= sel.end) {
+                self.editor_find_matches.items[kept] = m;
+                kept += 1;
+            }
+        }
+        self.editor_find_matches.shrinkRetainingCapacity(kept);
+    }
+
     self.editor_find_source = term.surfaceId();
     self.chrome_host.find.setMatchCount(self.editor_find_matches.items.len);
 }
@@ -153,6 +171,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     switch (action) {
         .toggle_find_match_case => toggleFindMatchCase(self),
         .toggle_find_whole_word => toggleFindWholeWord(self),
+        .toggle_find_in_selection => toggleFindInSelection(self),
         else => return false,
     }
     return true;
@@ -173,6 +192,36 @@ pub fn toggleFindWholeWord(self: *AppSession) void {
     if (!isEditorFindTarget(self)) return;
     self.chrome_host.find.whole_word = !self.chrome_host.find.whole_word;
     refilterAfterRuleChange(self);
+}
+
+/// ⌥⌘L: 「선택 영역 내에서만」을 토글한다(§5.1).
+///
+/// **범위는 켤 때 뜬 사본이다.** 살아 있는 선택을 읽으면 첫 Enter 가 선택을 매치로 옮기는 순간
+/// 범위가 그 매치 하나로 쪼그라든다 — §5.1 의 *"현재 일치는 primary selection 을 옮긴다"* 와
+/// 같은 필드를 두 뜻으로 쓰게 되기 때문이다.
+pub fn toggleFindInSelection(self: *AppSession) void {
+    if (!isEditorFindTarget(self)) return;
+    if (self.chrome_host.find.in_selection != null) {
+        self.chrome_host.find.in_selection = null;
+        refilterAfterRuleChange(self);
+        return;
+    }
+    // **찾기를 열 때 떠 둔 선택을 쓴다** — 지금의 선택은 이미 첫 매치로 옮겨져 있다(§5.1).
+    // **빈 범위면 켜지지 않는다.** 「그 안에서만」이 문서 전체와 같은 말이 되는데, 그때 토글이
+    // 켜져 보이면 사용자는 좁혀진 줄 안다.
+    const at_open = self.find_selection_at_open orelse return;
+    if (at_open.start >= at_open.end) return;
+    self.chrome_host.find.in_selection = .{ .start = at_open.start, .end = at_open.end };
+    refilterAfterRuleChange(self);
+}
+
+/// 문서가 바뀌면 굳혀 둔 범위를 버린다(§5.1) — offset 이 다른 글자를 가리키게 되므로, 따라가게
+/// 만들면 마커·매치·범위 셋이 각각 다른 시점을 말한다. 끄면 카운터가 전체로 돌아온 것을 보여 준다.
+pub fn dropFindSelectionRange(self: *AppSession) void {
+    self.chrome_host.find.in_selection = null;
+    // **떠 둔 값도 함께 버린다.** 이것만 남기면 편집 뒤 `⌥⌘L` 이 **편집 전 offset** 으로 켜져,
+    // 사용자가 고른 적 없는 자리에 검색이 갇힌다(변이 G6 이 그것을 보였다).
+    self.find_selection_at_open = null;
 }
 
 /// 토글이 뜻을 갖는 상태인가 — **떠 있는 찾기가 편집기 문서를 보고 있을 때**뿐이다.
@@ -201,8 +250,18 @@ fn refilterAfterRuleChange(self: *AppSession) void {
 pub fn toggleFind(self: *AppSession) void {
     if (self.chrome_host.find.open) {
         self.chrome_host.find.hide();
+        self.chrome_host.find.in_selection = null;
+        self.find_selection_at_open = null;
         clearAllFindMatches(self); // 닫힘 — 목록 둘 + ⌘G 닫힘-네비 세션까지 한 곳에서
     } else {
+        // **여는 순간의 선택을 떠 둔다**(§5.1 「선택 영역 내에서만」). 검색어를 한 글자 치면
+        // `revealCurrentFindMatch` 가 선택을 첫 매치로 옮기므로, `⌥⌘L` 을 누를 때는 **이미 늦다**.
+        self.find_selection_at_open = null;
+        if (activeEditorTerm(self)) |t| {
+            if (t.rt.editor_selection) |sel| {
+                if (sel.start() < sel.end()) self.find_selection_at_open = .{ .start = sel.start(), .end = sel.end() };
+            }
+        }
         // alt screen(vim/less/Claude/Codex)에서도 연다 — alt에선 findMatches가 현재 화면만 검색해 매치를
         // 하이라이트한다(스크롤백 매치 제외, 스크롤 네비는 무의미·무동작). 과거엔 iTerm2 관례로 막았으나,
         // 자체 검색이 없는 TUI(Claude/Codex)를 위해 연다. 베이스: Ghostty(alt에서 active area 검색).

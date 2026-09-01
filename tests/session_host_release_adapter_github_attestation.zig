@@ -4,6 +4,7 @@
 //! environment, bounded capture와 certificate/statement 의미만 닫는다.
 
 const std = @import("std");
+const c = std.c;
 const attestation = @import("release_adapter_github_attestation");
 
 const source_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -63,6 +64,17 @@ test "artifact attestation argv is closed and token-free" {
     for (want, plan.args) |left, right| try std.testing.expectEqualStrings(left, right);
     for (plan.args) |arg| try std.testing.expect(std.mem.indexOf(u8, arg, "secret-token") == null);
     try std.testing.expectError(error.InvalidPath, attestation.plan(&storage, "relative.dmg", expected()));
+}
+
+test "held-directory artifact argv accepts only exact dot slash basename" {
+    var storage: attestation.ArgsStorage = undefined;
+    const request = try attestation.planDirectory(&storage, "./Maru-1.2.3-universal.dmg", expected());
+    try std.testing.expectEqualStrings("./Maru-1.2.3-universal.dmg", request.args[2]);
+    try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "Maru-1.2.3-universal.dmg", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "./nested/asset", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "/tmp/asset", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "./.", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "./..", expected()));
 }
 
 test "artifact attestation binds exact verified certificate and SLSA subject" {
@@ -133,6 +145,37 @@ test "artifact attestation execution uses only clean token environment and suppl
     var observed = try attestation.verifyWith(&fake, std.testing.allocator, "/opt/trusted/gh", "secret-token", "/tmp/Maru.dmg", expected(), &output, std.time.ns_per_s);
     defer observed.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 333), observed.run_id);
+}
+
+test "held-directory artifact verification uses the exact directory vnode in a real child" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = subject_name, .data = "asset" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response.json", .data = valid_json });
+    const script =
+        \\#!/bin/sh
+        \\test "$1" = attestation || exit 31
+        \\test "$2" = verify || exit 32
+        \\test "$3" = ./Maru-1.2.3-universal.dmg || exit 33
+        \\test -f "$3" || exit 34
+        \\cat ./response.json
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gh", .data = script });
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var script_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const script_path = try std.fmt.bufPrintZ(&script_storage, "{s}/gh", .{root[0..root_len]});
+    if (c.chmod(script_path.ptr, 0o755) != 0) return error.FixtureFailed;
+    var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&root_storage, "{s}", .{root[0..root_len]});
+    const directory_fd = c.open(root_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
+    if (directory_fd < 0) return error.FixtureFailed;
+    defer _ = c.close(directory_fd);
+    var executor = attestation.BoundedExecutor{ .io = std.testing.io };
+    var output: [attestation.max_response_bytes]u8 = undefined;
+    var observed = try attestation.verifyDirectoryWith(&executor, std.testing.allocator, script_path, "secret-token", directory_fd, "./" ++ subject_name, expected(), &output, std.time.ns_per_s);
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(subject_name, observed.subject_name);
 }
 
 test "artifact attestation rejects token budget and foreign capture" {

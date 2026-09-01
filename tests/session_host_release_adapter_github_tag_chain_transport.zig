@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const manifest = @import("release_manifest");
+const deadline_mod = @import("release_adapter_deadline");
 const composition = @import("release_adapter_github_tag_chain_transport");
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -86,6 +87,32 @@ const Sink = struct {
         }
         result.* = tags.len + 1;
     }
+    pub fn authenticateUntil(self: *@This(), authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, authenticated: anytype, ref: anytype, tags: anytype, executable: [:0]const u8, token: []const u8, workdir: [:0]const u8, output: []u8, result: *usize) !void {
+        _ = authenticated;
+        _ = token;
+        _ = workdir;
+        self.calls += 1;
+        try std.testing.expectEqual(self.expected_depth, tags.len);
+        try std.testing.expectEqualStrings("v1.2.3", ref.tag);
+        for (0..2) |_| {
+            _ = try deadline.remaining();
+            try authority.revalidate(allocator, executable);
+            _ = try executor.capture(executable, &.{"sink"}, &.{}, output, try deadline.remaining());
+        }
+        result.* = tags.len + 1;
+    }
+};
+
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
+    }
 };
 
 fn run(depth: usize) !void {
@@ -107,6 +134,123 @@ test "lightweight one-hop and eight-hop chains reach downstream exactly once" {
     try run(0);
     try run(1);
     try run(8);
+}
+
+fn runUntil(depth: usize) !void {
+    var auth = Authenticated{ .value_storage = candidate() };
+    var authority = Authority{};
+    var executor = Executor{ .depth = depth };
+    var values: [2 * composition.max_total_commands]i128 = undefined;
+    for (&values, 0..) |*value, index| value.* = 100 - @as(i128, @intCast(index));
+    var deadline = SharedDeadline{ .values = &values };
+    var sink = Sink{ .expected_depth = depth };
+    var response: [65536]u8 = undefined;
+    var result: usize = 0;
+    try composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result);
+    try std.testing.expectEqual(2 * (depth + 3), deadline.cursor);
+    try std.testing.expectEqual(depth + 3, executor.calls);
+    for (executor.budgets[0..executor.calls], 0..) |budget, index| {
+        try std.testing.expectEqual(99 - 2 * @as(i128, @intCast(index)), budget);
+    }
+    try std.testing.expectEqual(depth + 1, result);
+}
+
+test "shared deadline crosses zero one and eight tags into downstream without scalar handoff" {
+    try runUntil(0);
+    try runUntil(1);
+    try runUntil(8);
+
+    var response: [65536]u8 = undefined;
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    var absent: @import("release_adapter_github_manifest_attestation").AuthenticatedManifest = .{};
+    var product_result: composition.Result = .{};
+    var pinned_storage: [256]u8 align(16) = undefined;
+    try std.testing.expectError(error.InvalidManifest, composition.authenticateUntil(std.testing.io, std.testing.allocator, &absent, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(&pinned_storage) }, "token", "/tmp/assets", &response, &real_deadline, &product_result));
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntil(std.testing.io, std.testing.allocator, &absent, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(@alignCast(&real_deadline)) }, "token", "/tmp/assets", &response, &real_deadline, &product_result));
+}
+
+test "shared deadline expiry closes tag and tag-to-asset boundaries" {
+    var auth = Authenticated{ .value_storage = candidate() };
+    var response: [65536]u8 = undefined;
+    var result: usize = 0;
+
+    var authority = Authority{};
+    var executor = Executor{ .depth = 0 };
+    var deadline = SharedDeadline{ .values = &.{0} };
+    var sink = Sink{ .expected_depth = 0 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expectEqual(@as(usize, 0), sink.calls);
+
+    authority = .{};
+    executor = .{ .depth = 0 };
+    deadline = .{ .values = &.{ 100, 0 } };
+    sink = .{ .expected_depth = 0 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expectEqual(@as(usize, 0), sink.calls);
+
+    authority = .{};
+    executor = .{ .depth = 0 };
+    deadline = .{ .values = &.{ 100, 90, 0 } };
+    sink = .{ .expected_depth = 0 };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 1), executor.calls);
+    try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    try std.testing.expectEqual(@as(usize, 0), result);
+
+    authority = .{};
+    executor = .{ .depth = 0 };
+    deadline = .{ .values = &.{100} };
+    sink = .{ .expected_depth = 0 };
+    const result_alias = std.mem.asBytes(&result);
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", result_alias, &result));
+    var token_storage: [5]u8 = "token".*;
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", &token_storage, "/tmp/assets", &token_storage, &result));
+    var work_storage: [11:0]u8 = "/tmp/assets".*;
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", &work_storage, work_storage[0..], &result));
+    try std.testing.expectEqual(@as(usize, 0), deadline.cursor);
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expectEqual(@as(usize, 0), sink.calls);
+
+    const authenticated_deadline: *SharedDeadline = @ptrCast(@alignCast(&auth));
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, authenticated_deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result));
+
+    var token_deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const token_deadline: *SharedDeadline = @ptrCast(&token_deadline_storage);
+    token_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, token_deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", &token_deadline_storage, "/tmp/assets", &response, &result));
+    try std.testing.expectEqual(@as(usize, 0), token_deadline.cursor);
+
+    var response_deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const response_deadline: *SharedDeadline = @ptrCast(&response_deadline_storage);
+    response_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, response_deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", "token", "/tmp/assets", &response_deadline_storage, &result));
+    try std.testing.expectEqual(@as(usize, 0), response_deadline.cursor);
+
+    var manifest_deadline = SharedDeadline{ .values = &.{100} };
+    var manifest_deadline_alias = Authenticated{ .value_storage = candidate() };
+    manifest_deadline_alias.value_storage.release.tag = std.mem.asBytes(&manifest_deadline);
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &manifest_deadline, &sink, std.testing.allocator, &manifest_deadline_alias, "/opt/trusted/gh", "token", "/tmp/assets", &response, &result));
+    try std.testing.expectEqual(@as(usize, 0), manifest_deadline.cursor);
+
+    var token_result: usize = 0;
+    var independent_deadline = SharedDeadline{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &independent_deadline, &sink, std.testing.allocator, &auth, "/opt/trusted/gh", std.mem.asBytes(&token_result), "/tmp/assets", &response, &token_result));
+    try std.testing.expectEqual(@as(usize, 0), independent_deadline.cursor);
+
+    var manifest_result: usize = 0;
+    var manifest_result_alias = Authenticated{ .value_storage = candidate() };
+    manifest_result_alias.value_storage.evidence.result = std.mem.asBytes(&manifest_result);
+    independent_deadline = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidObservation, composition.authenticateUntilWith(&authority, &executor, &independent_deadline, &sink, std.testing.allocator, &manifest_result_alias, "/opt/trusted/gh", "token", "/tmp/assets", &response, &manifest_result));
+    try std.testing.expectEqual(@as(usize, 0), independent_deadline.cursor);
 }
 
 test "ninth annotated object is rejected before its request and downstream" {

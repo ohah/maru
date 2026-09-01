@@ -2370,7 +2370,11 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
         .none => return null,
         // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
         .done, .failed => {},
-        .attention => switch (mode_mod.attentionDebounce(term.agent_hook_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
+        // **여기는 훅 자리가 아니라 «지금 배지» 다**(§1.1.1 — 적대적 검증이 잡았다). 알림을 **만드는** 것은
+        // 훅 전이지만, 만들어 둔 알림을 **띄울지**는 지금도 유효한가의 문제다. 훅에는 승인 해제 이벤트가
+        // 없어 `agent_hook_state` 는 영영 `blocked` 이므로, 그것으로 판단하면 C1 이 화면으로 풀어 준 뒤에도
+        // 디바운스가 끝나며 「승인이 필요합니다」가 나간다 — 사용자가 이미 승인한 뒤에.
+        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
             .wait => return null,
             .drop => {
                 term.agent_hook_notice.clear();
@@ -2510,8 +2514,18 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     const now_ms = self.awakeMs();
     const activity_age_ms = now_ms -| term.agent_last_output_ms;
     const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
-    if (generation == term.agent_screen_generation and term.agent_screen_state == .idle and !output_active and
-        !term.agent_stabilizer.needsExpiryProbe()) return;
+    // **판단은 순수 층이 한다**(`ScanSkip` — 그 doc comment 에 왜 거기 있는지 적었다). 이 if 문 안에
+    // 두었을 때 C2 가 조용히 굶었고, 판정자를 세울 자리가 없어 그대로 커밋됐다.
+    const has_hook = agentHookMode(self, term) == .hook;
+    if ((maru.session.agent_state_arbiter.ScanSkip{
+        .hook = if (has_hook) term.agent_hook_state else null,
+        .hook_child_count = @intCast(term.agent_hook_progress.childCount()),
+        .screen = term.agent_screen_state,
+        .idle_confirmations = term.agent_arbiter.idle_confirmations,
+        .generation_same = generation == term.agent_screen_generation,
+        .output_active = output_active,
+        .expiry_probe = term.agent_stabilizer.needsExpiryProbe(),
+    }).canSkip()) return;
     const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, agent_screen_tail_rows, agent_screen_tail_bytes) catch null;
     defer if (screen) |owned| self.allocator.free(owned);
 

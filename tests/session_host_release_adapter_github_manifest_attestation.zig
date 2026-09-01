@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = std.c;
 const manifest = @import("release_manifest");
+const deadline_mod = @import("release_adapter_deadline");
 const manifest_file = @import("release_adapter_github_manifest_file");
 const composition = @import("release_adapter_github_manifest_attestation");
 
@@ -80,8 +81,10 @@ const Attesting = struct {
     calls: usize = 0,
     fail: bool = false,
     mutate_after: bool = false,
-    pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
+    budget_ns: i128 = 0,
+    pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
         self.calls += 1;
+        self.budget_ns = budget_ns;
         if (self.fail) return error.ChildFailed;
         try std.testing.expectEqualStrings("/opt/trusted/gh", executable);
         try std.testing.expectEqualStrings("attestation", args[0]);
@@ -96,6 +99,18 @@ const Attesting = struct {
             if (c.chmod(path_z.ptr, 0o600) != 0) return error.MutationFailed;
         }
         return output[0..valid_attestation.len];
+    }
+};
+
+const SharedDeadline = struct {
+    values: []const i128,
+    cursor: usize = 0,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.cursor == self.values.len) return error.DeadlineExhausted;
+        const value = self.values[self.cursor];
+        self.cursor += 1;
+        if (value <= 0) return error.TimedOut;
+        return value;
     }
 };
 
@@ -235,6 +250,79 @@ test "exact authority and attestation publish one authenticated manifest" {
     var copied = result;
     try std.testing.expect(copied.value() == null);
     try result.deinit(std.testing.allocator);
+}
+
+test "shared deadline brackets CLI attestation and final publication" {
+    const bytes = try manifest.writeCanonical(std.testing.allocator, candidate());
+    defer std.testing.allocator.free(bytes);
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    const sha = std.fmt.bytesToHex(hash, .lower);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var file: manifest_file.ManifestFile = .{};
+    try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
+    defer file.cleanup() catch {};
+    const predecessor: manifest.Predecessor = .{ .release_id = 77, .tag = "v1.2.3", .commit = commit, .manifest_sha256 = &sha };
+    var authority = Authority{};
+    var executor = Attesting{ .sha = &sha };
+    var deadline = SharedDeadline{ .values = &.{ 100, 70, 40 } };
+    var output: [8192]u8 = undefined;
+    var result: composition.AuthenticatedManifest = .{};
+    try composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result);
+    try std.testing.expectEqual(@as(usize, 3), deadline.cursor);
+    try std.testing.expectEqual(@as(i128, 70), executor.budget_ns);
+    try result.deinit(std.testing.allocator);
+
+    authority = .{};
+    executor = .{ .sha = &sha };
+    deadline = .{ .values = &.{ 100, 70, 0 } };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 1), executor.calls);
+    try std.testing.expect(result.value() == null);
+
+    authority = .{};
+    executor = .{ .sha = &sha };
+    deadline = .{ .values = &.{ 100, 0 } };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 1), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expect(result.value() == null);
+
+    authority = .{};
+    executor = .{ .sha = &sha };
+    deadline = .{ .values = &.{0} };
+    try std.testing.expectError(error.TimedOut, composition.authenticateUntilWith(&authority, &executor, &deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), authority.calls);
+    try std.testing.expectEqual(@as(usize, 0), executor.calls);
+    try std.testing.expect(result.value() == null);
+
+    const result_deadline: *SharedDeadline = @ptrCast(@alignCast(&result));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, result_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+
+    const file_deadline: *SharedDeadline = @ptrCast(@alignCast(&file));
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, file_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+
+    var output_deadline_storage: [@sizeOf(SharedDeadline)]u8 align(@alignOf(SharedDeadline)) = undefined;
+    const output_deadline: *SharedDeadline = @ptrCast(&output_deadline_storage);
+    output_deadline.* = .{ .values = &.{100} };
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, output_deadline, std.testing.allocator, trustedContext(), predecessor, bytes, &file, "/opt/trusted/gh", "token", &output_deadline_storage, &result));
+    try std.testing.expectEqual(@as(usize, 0), output_deadline.cursor);
+
+    var scalar_deadline = SharedDeadline{ .values = &.{100} };
+    var aliased_predecessor = predecessor;
+    aliased_predecessor.tag = std.mem.asBytes(&scalar_deadline);
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntilWith(&authority, &executor, &scalar_deadline, std.testing.allocator, trustedContext(), aliased_predecessor, bytes, &file, "/opt/trusted/gh", "token", &output, &result));
+    try std.testing.expectEqual(@as(usize, 0), scalar_deadline.cursor);
+
+    var real_deadline: deadline_mod.Deadline = .{};
+    try deadline_mod.start(100, &real_deadline);
+    defer real_deadline.deinit() catch unreachable;
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, trustedContext(), predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = @ptrCast(@alignCast(&result)) }, "token", &output, &real_deadline, &result));
+    result.owner = &result;
+    try std.testing.expectError(error.InvalidOwner, composition.authenticateUntil(std.testing.io, std.testing.allocator, trustedContext(), predecessor, bytes, &file, .{ .path = "/opt/trusted/gh", .pinned = undefined }, "token", &output, &real_deadline, &result));
 }
 
 test "post-attestation file drift publishes nothing and preserves cleanup authority" {

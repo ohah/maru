@@ -1131,6 +1131,24 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   fail-index unwind를 Debug·ReleaseFast로 검증한다. summary는 감사 결과일 뿐 다음 command의 권위 입력이
   아니며, 이 gate는 executable·filesystem publication·workflow ordering·GitHub publish를 대신하지 않는다.
 
+  release validation summary의 filesystem publication composition 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_summary_publication.zig`다. `pre-publish`와
+  `verify-predecessor`의 production entrypoint는 각각 앞 절의 exact authenticated owner와 absolute absent
+  `summary-out` pathname만 받는다. caller가 summary bytes, phase, 성공 boolean, digest·size 또는 별도 manifest를
+  제출하는 API는 두지 않는다. composition은 owner에서 canonical summary를 allocation한 뒤 기존
+  `release_adapter_files.publishSummaryExclusive`를 exact once 호출하고, 성공·실패 모두에서 bytes를 회수한다.
+  encoding/owner 재검증이 실패하면 output pathname을 열지 않으며 publication 실패를 validation 성공으로 바꾸지 않는다.
+  기존 destination은 regular file·symlink·directory 어느 것도 덮어쓰지 않고, 하위 file adapter의 0600 temp,
+  complete write, file fsync, `RENAME_EXCL`, parent fsync 및 rollback 계약을 그대로 사용한다. 게시된 summary는
+  strict parser로 읽을 수 있는 감사 출력일 뿐 후속 command의 authority input이 아니다.
+
+  focused gate `test-session-host-release-adapter-summary-publication`은 실제 macOS filesystem에서 production
+  `CurrentObservation` B의 exact bytes·0600 publication과 기존 destination 보존을 검증한다. injected owner/publisher로
+  A/B phase별 encode→publish exact-once ordering, encode 실패 publication 0, publish 실패 전파, output byte lifetime 및
+  allocation unwind를 Debug·ReleaseFast에서 검증한다. 하위 file adapter가 이미 소유하는 symlink component,
+  temp write/fsync/rename/rollback fault matrix를 중복해 이 gate의 완료로 주장하지 않는다. 이 composition도 CLI option
+  parsing, 전체 phase orchestration, workflow command ordering과 GitHub release publication을 대신하지 않는다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

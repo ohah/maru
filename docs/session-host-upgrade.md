@@ -885,6 +885,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Debug·ReleaseFast에서 검증한다. certificate·subject 세부 변조는 재사용하는 artifact-attestation gate가 소유한다. local asset/Apple product 관측, summary publication,
   executable/workflow 배선과 frozen U5 제품 E2E는 여전히 후속 범위다.
 
+  executable용 current manifest attestation `...Until` entrypoint는 current release가 사용한 같은 final-address `Deadline`을
+  이어받는다. canonical parse·context/current/file preflight 뒤 deadline을 확인하고 CLI를 재검증한 다음 다시 remaining을
+  구해 attestation child budget으로만 전달한다. child 뒤 private file을 재검증하고, 결과 owner를 게시하기 직전에도
+  같은 deadline이 아직 유효한지 확인한다. local 작업을 이유로 expiry를 새로 만들거나, 만료된 attestation을
+  성공으로 게시하지 않는다. preflight 실패는 deadline/CLI/child 접근 0이고, CLI 재검증 중 만료는 child 0,
+  child 후 만료는 parsed/attestation owner를 cleanup한 뒤 publication 0으로 닫힌다. 기존 budget entrypoint는 독립 leaf gate
+  호환용으로 남는다. focused gate는 shared deadline pre/post/publication 순서, stale budget 비전달, preflight·중간·최종 만료와
+  owner cleanup을 Debug·ReleaseFast에서 검증한다. `CurrentManifestInput` candidate-consume
+  wiring과 asset attestation, Apple product·compatibility `...Until` 이관은 후속 범위다.
+
   Current manifest pathname composition의 단일 소유자는
   `release_adapter_github_current_manifest_input.zig`다. 입력 manifest pathname은 absolute path와 canonical
   `Maru-<context version>-session-host-release.json` basename을 먼저 요구한다. 독립 leaf 검증용 pathname entrypoint와 별도로,

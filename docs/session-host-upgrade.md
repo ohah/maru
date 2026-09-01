@@ -2107,6 +2107,26 @@ U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완�
 경로에 연결된 것과 “migration이 검증됐다”는 것은 다르다 — 전자는 연결됐고, 후자는 위 gate가 닫혀야 성립한다.
 U1~U4와 현재 U5 component seam은 제품 완료가 아니라 기반 증거다.
 
+### 11.29 evidence summary의 게시 inode 권위
+
+manifest authoring이 evidence summary의 size와 SHA-256을 권위 있게 기록하려면 게시 뒤 pathname을 다시 열어
+관측해서는 안 된다. 그 사이는 다른 inode로 교체될 수 있으므로 publication과 manifest observation 사이에
+TOCTOU가 생긴다. `release_adapter_files.publishSummaryOwnedExclusive`는 caller가 제공한 final-address 빈 owner와
+absolute absent pathname, canonical bytes만 받고 다음 순서를 한 번에 소유한다.
+
+1. no-follow로 연 parent directory 아래 0600 임시 regular file을 `O_RDWR|O_EXCL`로 만든다.
+2. complete write와 file sync 뒤 같은 열린 fd에서 regular/type, link-count 1, size와 SHA-256을 계산한다.
+3. `RENAME_EXCL`로 absent final leaf에 게시하고 parent directory를 sync한다.
+4. final pathname을 no-follow로 다시 열어 held fd와 같은 inode인지 확인한 뒤, held fd와 parent fd를 move-only
+   owner에 넘긴다. caller는 이 owner의 value만 manifest observation으로 쓰며 후속 경계마다 pathname을
+   revalidate한다.
+
+성공한 owner는 게시된 파일을 삭제할 권한을 뜻하지 않는다. `deinit`은 fd만 닫고 durable output은 남긴다.
+rename 또는 parent sync 뒤 실패한 publication은 held fd와 leaf의 device/inode가 여전히 같을 때만 best-effort
+unlink와 parent sync를 수행하며 owner를 비워 둔다. pathname이 교체됐으면 foreign leaf를 지우지 않고 residue를 남긴다.
+기존 `publishSummaryExclusive`는 이 owned publication을 호출한 뒤 owner를 닫는 호환 wrapper로 유지한다.
+이 component는 evidence/manifest 조립, GitHub 업로드, workflow 배선이나 U5 제품 성공을 증명하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

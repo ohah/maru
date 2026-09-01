@@ -2471,8 +2471,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   canonical manifest asset 이름, repository/tag, `release` protected environment와 summary schema를 닫고 observation JSON 입력을
   금지하며 `test-session-host-release-adapter-contract`가 Debug·ReleaseFast에서 검증한다. macOS 파일 권위 leaf는 모든 absolute
   path component와 final을 `openat(O_NOFOLLOW)`로 열어 regular/bounded bytes·SHA-256·device/inode를 같은 fd에서 만들고 input
-  hardlink alias를 거부한다. summary는 0600 temp complete write·fsync·close 뒤 `RENAME_EXCL`로 absent final에만 게시하며 predecessor
-  work-dir도 absent leaf에만 0700으로 만든다. `test-session-host-release-adapter-files`가 이를 Debug·ReleaseFast 실제 filesystem에서
+  hardlink alias를 거부한다. summary owned publication은 0600 `O_RDWR` temp의 complete write·fsync 뒤 같은 fd에서 size/SHA를 만들고
+  `RENAME_EXCL`+parent fsync+final inode 재검증 뒤 held file/parent fd를 move-only owner로 반환한다. 기존 void
+  publication은 owner를 닫아 durable output만 남기는 wrapper다. work-dir도 absent leaf에만 0700으로 만든다.
+  `test-session-host-release-adapter-files`가 이를 Debug·ReleaseFast 실제 filesystem에서
   검증한다. pre-publish workspace owner는 caller-owned absolute absent root를 0700으로 만들고 held parent/root identity에서 exact
   `current-manifest`·`predecessor-manifest`·`predecessor-assets`·`dmg`·`current-assets` child pathname만 유도하며, unexpected entry나
   replacement를 허용하지 않고 초기화/empty root cleanup 실패 시 durable removal까지 retry

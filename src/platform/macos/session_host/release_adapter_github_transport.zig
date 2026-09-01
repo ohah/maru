@@ -28,6 +28,7 @@ pub const Request = union(enum) {
     workflow_run: u64,
     draft_releases,
     published_release: []const u8,
+    commit: []const u8,
     tag_ref: []const u8,
     annotated_tag: []const u8,
     environment,
@@ -69,6 +70,10 @@ pub fn plan(storage: *EndpointStorage, request: Request) Error!Plan {
         .published_release => |tag| blk: {
             try validTag(tag);
             break :blk try render(storage, "repos/ohah/maru/releases/tags/{s}", .{tag});
+        },
+        .commit => |sha| blk: {
+            try validSha(sha);
+            break :blk try render(storage, "repos/ohah/maru/git/commits/{s}", .{sha});
         },
         .tag_ref => |tag| blk: {
             try validTag(tag);

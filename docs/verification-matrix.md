@@ -2594,7 +2594,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   재검증한 뒤에만 move-only `AuthenticatedManifest`를 게시한다. candidate의 `assets[]`는 이
   publication 전에는 filesystem allocation/download 권위가 아니다. `test-session-host-release-adapter-github-manifest-attestation`이
   Debug·ReleaseFast에서 parse/cross-binding, existing verifier composition, file drift, copied owner, mismatch/child/allocation failure의
-  publication 0과 unwind를 검증한다. predecessor asset download/release verify-asset/git resolver/final workflow는 후속 범위다.
+  publication 0과 unwind를 검증한다. 같은 gate의 published-A 행은 post-publish current protected context를 role-A manifest의
+  repository/tag/source/build와 직접 결속하고 같은 file/attestation/deadline 규율로 인증한다. deadline/result/output과
+  bytes/file/context/token/pinned CLI, parsed backing alias는 외부 권위 전에 거부한다. successor B predecessor self-synthesis,
+  role B와 unprotected/current-context drift는 publication 0이다. predecessor asset download/release verify-asset/git resolver/final
+  workflow는 후속 범위다.
   `release_adapter_github_predecessor_assets.zig`는 move-only authenticated A manifest만 asset allocation 권위로 받아 기존
   downloader·release attestation·git resolver를 조립한다. CLI는 각 외부 호출 직전, 다운로드 set은 각 release/asset 검증 전후에
   path/device/inode/type/link-count/mode/size/SHA-256과 work-directory pathname identity를 재검증한다. release purl SHA-1은 첫

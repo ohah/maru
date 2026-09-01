@@ -2647,6 +2647,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-bounded-process`가 Debug·ReleaseFast actual process에서 exact `./leaf` read, sibling ambient fd 비상속,
   regular/stdio/closed fd pre-spawn 거부와 parent owner 불변을 기존 timeout/cap/status/environment 행과 함께 검증한다. 이 substrate는
   current asset attestation semantic composition과 workflow/U5 배선을 대신하지 않는다.
+  `release_adapter_github_current_asset_attestation.zig`는 authenticated current B manifest와 final-address
+  `CurrentAssetFiles`를 조립해 canonical three-role 순서의 `gh attestation verify ./<exact-name>`만 held directory cwd에서 실행한다.
+  하나의 absolute deadline, command별 pinned CLI 재검증, held directory와 세 private leaf의 identity·0400·link-count 1·size/SHA
+  pre/post 재검증, 기존 certificate/context/run/subject semantic binder를 모두 통과한 뒤에만 move-only 세 observation을 게시한다.
+  `test-session-host-release-adapter-github-current-asset-attestation`이 Debug·ReleaseFast actual process와 injected failure에서 exact
+  order/argv/cwd, budget 감소, role/context/subject·CLI·filesystem drift, copied/pre-owned owner, partial success 뒤 command/OOM 실패의
+  publication 0과 observation 역순 cleanup을 검증한다. 이 gate는 release verify/verify-asset, compatibility, final observation,
+  workflow 또는 frozen U5 E2E 완료 증거가 아니다.
   `release_adapter_github_cli_authority.zig`는 공식 GitHub Release CI만 대상으로 checkout 전 캡처한 canonical absolute `gh`
   path와 lowercase SHA-256, exact `GITHUB_WORKFLOW_SHA`/GitHub-hosted macOS ARM64 runner observation을 결속한다. macOS filesystem
   leaf는 no-follow regular executable의 device/inode/size/digest를 기록하고 transport 호출 직전 같은 pathname을 재관측해

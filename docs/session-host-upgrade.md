@@ -1031,6 +1031,32 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   닫히는지, invalid/stdio fd가 fork 전에 거부되는지를 Debug·ReleaseFast 실제 process에서 검증한다. 이 substrate만으로
   `CurrentAssetFiles`와 artifact attestation의 semantic composition 또는 workflow/U5 배선을 완료했다고 주장하지 않는다.
 
+  current 세 asset의 artifact attestation composition 단일 소유자는
+  `src/platform/macos/session_host/release_adapter_github_current_asset_attestation.zig`다. 입력은 authenticated
+  `CurrentManifestInput` B, final-address `CurrentAssetFiles`, checkout 전 pin된 GitHub CLI와 token뿐이다. caller가 context,
+  asset expectation, pathname, directory fd나 command 순서를 별도 제출하지 않는다. composition은 B manifest와 그 authenticated
+  authority가 같은 repository/tag/source/build/run-attempt임을 다시 결속하고, manifest의 세 role을 canonical role 순서로 exact
+  once 유도한다. 최초 positive monotonic absolute deadline 하나를 CLI 재검증과 세 command가 공유하며, command마다 budget을
+  재부여하지 않는다.
+
+  각 command 직전에는 CLI authority와 `CurrentAssetFiles`의 held directory/세 leaf identity·0400 mode·link-count 1·size/SHA를
+  재검증한다. child는 `bounded_process.runCaptureEnvironmentStdoutDirectory`로 held directory vnode를 cwd로 삼고
+  `/absolute/gh attestation verify ./<manifest-exact-name> --repo ohah/maru --signer-workflow
+  ohah/maru/.github/workflows/release.yml --signer-digest <source-commit> --source-digest <source-commit> --source-ref
+  refs/tags/<tag> --deny-self-hosted-runners --predicate-type https://slsa.dev/provenance/v1 --format json`만 실행한다. ordinary
+  absolute private pathname, original caller pathname, `/dev/fd` descendant와 inherited ambient fd는 child authority가 아니다.
+  각 stdout은 기존 `release_adapter_github_attestation.parseAndBind`가 exact certificate/context/run/subject name·SHA에 결속하며,
+  command 뒤 같은 filesystem owner를 다시 검증한 뒤에만 그 role을 게시한다.
+
+  성공은 role별 `Observed` 세 개와 immutable manifest/context projection을 final-address move-only `CurrentAssetAttestations` 하나에
+  exact once 게시한다. copied/pre-owned owner, role 누락·중복, manifest/current authority drift, private leaf 교체·rename·hardlink·
+  mode/size/digest drift, CLI 교체, budget 만료, child/JSON/semantic failure는 결과를 게시하지 않고 이미 얻은 observation을 역순
+  deinit한다. 이 composition은 private asset owner를 소비하거나 cleanup하지 않는다. focused gate
+  `test-session-host-release-adapter-github-current-asset-attestation`은 Debug·ReleaseFast actual held-directory process와 injected
+  attestor로 exact three-role order/argv/cwd, single-deadline 감소, CLI·filesystem pre/post revalidation, role/context/subject drift,
+  copied owner와 allocation/command 실패의 publication 0·observation cleanup을 검증한다. 이 gate만으로 release `verify`/
+  `verify-asset`, compatibility, final `release_manifest.Observation`, workflow 배선 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
+
   Apple 제품 관측의 component 의미는 `release_adapter_apple_product.zig` 한 곳이 소유한다. 이 판정자는 caller가 만든
   `Signing`을 받지 않고, frozen product executable의 SHA-256과 `/usr/bin/codesign -d --verbose=4`,
   `/usr/bin/codesign -d -r- --verbose=0`, `/usr/bin/lipo -archs`, `/usr/bin/plutil -convert json -o -`의 bounded output 및

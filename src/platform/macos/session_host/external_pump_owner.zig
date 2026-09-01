@@ -3233,3 +3233,103 @@ test "d2c product owner terminalizes a non-socket descriptor and replays without
         storage.teardown(&cleanup),
     );
 }
+
+// S11-6 **실 host 에 실제로 붙어** 선언이 통하는지 잰다. 층마다 순수 판정자가 있지만 층 «사이» 가
+// 어긋나도 그것들은 다 통과한다 — 실제로 그랬다: observer 의 `controller_generation` 이 0 이라
+// 요청이 `.invalid` 로 떨어지고 `admitControl` 의 **기본값**인 `invariant_failure` 로 나왔는데,
+// 어느 단위 판정자도 그 조합(진짜 attach + controller 없는 세션)을 만들지 않았다.
+//
+// **바이트 왕복까지는 여기서 안 본다.** 이 파일의 하네스는 `owner.pump` 를 한 턴씩만 돌리는
+// 모양이라 지속 I/O 를 못 돌린다(400턴을 돌려도 `tx_bytes=0`). 이 판정자가 지키는 것은 결함이
+// 있던 그 이음매 — 「controller 없는 세션의 observer 가 선언을 낼 수 있는가」다.
+test "S11-6 controller 없는 세션의 observer 도 선언을 낸다 — 실 host attach" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const daemon = @import("daemon.zig");
+    const discovery = @import("discovery.zig");
+    const host_connect = @import("host_connect.zig");
+    const host_manifest = @import("host_manifest.zig");
+    const short_endpoint = @import("short_endpoint.zig");
+    const allocator = std.testing.allocator;
+    const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0x11d;
+    var base_buf: [192]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-s11d-{d}", .{c.getpid()});
+    std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+    _ = c.mkdir(base.ptr, 0o700);
+    var session_buf: [256]u8 = undefined;
+    const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
+    try short_endpoint.prepareCurrentUserNamespace();
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        daemon.runSessionHostWithIdentity(
+            std.heap.page_allocator,
+            std.testing.io,
+            session_dir,
+            endpoint,
+            host_id,
+        ) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        host_manifest.removeEmptyHostDirectories(session_dir, host_id);
+        std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+    }
+
+    // **이 연결을 끝까지 살려 둔다** — 마지막 admin client 가 끊기면 host 가 내려간다(실측).
+    var admin = connect: {
+        var attempt: usize = 0;
+        while (attempt < 750) : (attempt += 1) {
+            switch (host_connect.connectExistingHost(allocator, base, host_id)) {
+                .connected => |client| break :connect client,
+                .failed => {},
+            }
+            _ = usleep(20_000);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer admin.deinit();
+    const spawn = try admin.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":80,\"rows\":24}");
+    defer allocator.free(spawn);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, spawn, .{});
+    defer parsed.deinit();
+    const runtime_id = try std.fmt.parseInt(
+        u128,
+        parsed.value.object.get("result").?.object.get("runtime_id").?.string,
+        16,
+    );
+
+    // `--stream` 과 같은 의도 — observer 다. 그리고 이 세션에는 **controller 가 없다**(폰만 붙는
+    // headless keep-alive 와 같은 모양).
+    var prepared = switch (external_attach.prepare(
+        allocator,
+        std.testing.io,
+        base,
+        .{ .runtime_id = runtime_id, .intent = .stream },
+    )) {
+        .prepared => |value| value,
+        .failed => |f| {
+            std.debug.print(
+                "S11-6 prepare failed: code={s} stage={s}\n",
+                .{ @tagName(f.code), @tagName(f.stage) },
+            );
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer prepared.deinit();
+    var owner: ExternalPumpOwner = .{};
+    try owner.initInPlace(&prepared);
+    defer _ = owner.teardown();
+
+    // 이것이 결함의 씨앗이었다 — controller 가 없으니 0 이다.
+    try std.testing.expectEqual(@as(u64, 0), owner.attachment.state.controller_generation);
+
+    // **controller 자격 없이 통해야 한다.** 실기에서 이 한 줄이 `invariant_failure` 였고, 그러면
+    // client 가 선언 채널을 영영 닫는다.
+    try std.testing.expect(owner.admitDeclareViewport(50, 37, 20) == .admitted);
+}

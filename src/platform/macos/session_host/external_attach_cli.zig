@@ -478,8 +478,8 @@ fn runStreamRequest(
     // 규칙은 ANSI 루프(`notePumpResult`)와 같다: 권위가 확인된 턴에서만 관심사를 내린다.
     var write_interest = false;
 
-    // **stdin 은 뷰포트 선언이 들어오는 길이다**(S11-6). 이 방향은 예전에 안 쓰였다 — observer 라
-    // 입력을 안 보낸다. 선언만 이 자리를 쓴다.
+    // **stdin 은 뷰포트 선언이 들어오는 길이다**(S11-6). 이 방향은 그 전에는 안 쓰였다 —
+    // observer 라 입력도 resize 도 안 보낸다. 선언만 이 자리를 쓴다.
     var viewport: ViewportInbox = .{};
     while (!sink.broken) {
         var fds = [_]posix.pollfd{
@@ -555,7 +555,11 @@ fn runStreamRequest(
 }
 
 /// pump 가 마감을 재는 데 쓰는 단조 시각. 실패하면 0 을 준다 — 시계가 없다고 스트림을 끊는
-/// 것보다, 마감 계산이 보수적으로 도는 편이 낫다(이 모드는 입력도 resize 도 안 보낸다).
+/// 것보다, 마감 계산이 보수적으로 도는 편이 낫다.
+///
+/// **이 모드도 control 을 하나 보낸다**(뷰포트 선언, S11-6) — 그래서 마감이 실제로 의미를 갖는다.
+/// 그래도 0 이 안전한 이유는 pump 턴의 시각도 **같은 함수**에서 오기 때문이다: 시계가 없으면 둘
+/// 다 0 에 머물러 마감이 아예 안 지난다. 두 자리가 갈라지면 그때는 이 선택을 다시 봐야 한다.
 fn streamNowNs() i128 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return 0;

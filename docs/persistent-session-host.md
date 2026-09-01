@@ -6416,8 +6416,8 @@ tmux 가 같은 대가를 진다. 숨기지 않는다.
 
 #### wire — client → host
 
-지금 `--stream` 의 client→host 방향은 **안 쓰인다**(observer 라 입력을 안 보낸다). 그 방향에 프레임
-하나를 정의한다. stdout 프레이밍(`MRSS`)과 **대칭**으로 magic 을 둔다 — 셸이 끼운 잡음과 가르는 같은
+`--stream` 의 client→host 방향은 **뷰포트 선언 하나만** 쓴다 — 입력도 resize 도 안 보낸다(observer
+다). 그 방향에 프레임 하나를 정의한다. stdout 프레이밍(`MRSS`)과 **대칭**으로 magic 을 둔다 — 셸이 끼운 잡음과 가르는 같은
 이유다.
 
 ```text

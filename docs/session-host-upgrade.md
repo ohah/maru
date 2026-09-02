@@ -1843,17 +1843,22 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `signed_upgrade_near_max` leaf를 각각 `readInputAlloc(max_evidence_bytes)`로 완전히 읽고, 열린 fd에서 얻은
   `(device,inode)`가 전부 서로 다른지 확인한다. symlink·special file·oversize·read 중 identity/size/time drift·hardlink alias,
   잘못된 leaf/profile binding 또는 allocation failure에서는 output 경로를 열지 않는다. 모든 leaf가 canonical aggregate bytes로
-  조립되고 expected release identity에 다시 bind된 뒤에만 `publishSummaryExclusive`를 exact once 호출한다. output은 absolute
-  absent leaf여야 하며 기존 파일·symlink를 덮어쓰지 않는다. publication 실패나 parent fsync 실패는 성공으로 바꾸지 않으며,
-  기존 file adapter의 temp cleanup/rollback 규율을 그대로 따른다. 이 owner는 환경변수·GitHub API·Apple command를 읽지 않고,
-  caller가 준 identity를 provenance로 승격하지도 않는다. trusted context/manifest/attestation과의 결합은 후속 workflow owner다.
+  조립되고 expected release identity에 다시 bind된 뒤에만 owned `publishSummaryOwnedExclusive`를 exact once 호출한다. 성공은 게시된
+  exact inode와 parent capability, size와 digest를 보존한 final-address `PinnedReleaseFile` 하나로만 반환한다. writer가 pathname을
+  다시 열어 결과 metadata를 합성하거나 성공 직후 descriptor를 닫아 후속 manifest authoring이 pathname 권위로 되돌아가게 하지 않는다.
+  output은 absolute absent leaf여야 하며 기존 파일·symlink를 덮어쓰지 않는다. pre-owned/copied result와 result storage가
+  identity·leaf/output pathname storage에 alias되는 입력은 filesystem 접근 전에 거부한다. publication 실패나 parent fsync 실패는
+  성공으로 바꾸지 않으며, 기존 file adapter의 temp cleanup/rollback 규율을 그대로 따른다. 이 owner는 환경변수·GitHub API·Apple
+  command를 읽지 않고, caller가 준 identity를 provenance로 승격하지도 않는다. trusted context/manifest/attestation과의 결합은 후속
+  workflow owner다.
 
   focused gate `test-session-host-release-evidence`는 A/B canonical round-trip, 모든 scope의
   duplicate/unknown/missing/type/cap, UUID 형식, profile-role/predecessor, leaf 누락·중복·교환, stale run/attempt,
   A/B candidate swap, 1/near-max count·set digest와 leaf/aggregate allocation fail-index를 Debug·ReleaseFast로
   검증한다. 이 component green은 실제 signed app gate 실행, artifact attestation 또는 release workflow 배선을 대신하지 않는다.
   focused gate `test-session-host-release-evidence-files`는 두 profile의 실제 file 조립/publication, leaf inode alias와 symlink,
-  malformed·candidate/predecessor mismatch, 기존 output 보존, allocation fail-index에서 publication 0을 Debug·ReleaseFast 및
+  malformed·candidate/predecessor mismatch, 기존 output 보존, owned inode revalidation과 owner/input alias, allocation fail-index에서
+  publication 0을 Debug·ReleaseFast 및
   macOS actual filesystem으로 검증한다. special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`의 독립
   계약이며 조립 gate가 중복해 완료를 주장하지 않는다. 이 gate도 caller identity의 GitHub provenance나 signed leaf 생산을 증명하지 않는다.
   manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이 aggregate를 생성하고 artifact

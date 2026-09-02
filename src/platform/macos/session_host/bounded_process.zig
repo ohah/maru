@@ -17,6 +17,7 @@ const CaptureMode = enum { merged, stdout_only };
 pub const Error = error{
     InvalidExecutable,
     InvalidDirectoryFd,
+    InvalidInputFd,
     InvalidBudget,
     PipeFailed,
     SpawnSetupFailed,
@@ -36,7 +37,7 @@ pub fn runCapture(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, null, null, output, budget_ns, .merged);
+    return runCaptureOptionalEnvironment(io, executable, argv, null, null, null, output, budget_ns, .merged);
 }
 
 /// Runs with exactly `environment`; no parent variable survives into the child.
@@ -48,7 +49,7 @@ pub fn runCaptureEnvironment(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, output, budget_ns, .merged);
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, null, output, budget_ns, .merged);
 }
 
 /// Runs with exactly `environment`, captures bounded stdout, and sends stderr to `/dev/null`.
@@ -60,7 +61,22 @@ pub fn runCaptureEnvironmentStdout(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, output, budget_ns, .stdout_only);
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, null, output, budget_ns, .stdout_only);
+}
+
+/// Runs with exactly `environment`, streams one already-held regular file as stdin, and captures
+/// bounded stdout. The child seeks its inherited stdin to byte zero before exec.
+pub fn runCaptureEnvironmentStdoutInputFd(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    input_fd: c.fd_t,
+    output: []u8,
+    budget_ns: i128,
+) Error![]const u8 {
+    if (!validInputFd(io, input_fd)) return error.InvalidInputFd;
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, null, input_fd, output, budget_ns, .stdout_only);
 }
 
 /// Runs with exactly `environment` and binds one held directory fd as the child cwd.
@@ -74,7 +90,7 @@ pub fn runCaptureEnvironmentStdoutDirectory(
     budget_ns: i128,
 ) Error![]const u8 {
     if (!validDirectoryFd(directory_fd)) return error.InvalidDirectoryFd;
-    return runCaptureOptionalEnvironment(io, executable, argv, environment, directory_fd, output, budget_ns, .stdout_only);
+    return runCaptureOptionalEnvironment(io, executable, argv, environment, directory_fd, null, output, budget_ns, .stdout_only);
 }
 
 /// Executes one exact `./leaf` below a held directory vnode. The fork child performs only
@@ -102,7 +118,7 @@ fn runCaptureOptionalEnvironmentHeld(
     output: []u8,
     budget_ns: i128,
 ) Error![]const u8 {
-    return runCaptureCommon(io, relative_executable, argv, environment, directory_fd, output, budget_ns, .stdout_only);
+    return runCaptureCommon(io, relative_executable, argv, environment, directory_fd, null, output, budget_ns, .stdout_only);
 }
 
 fn runCaptureOptionalEnvironment(
@@ -111,13 +127,14 @@ fn runCaptureOptionalEnvironment(
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
     directory_fd: ?c.fd_t,
+    input_fd: ?c.fd_t,
     output: []u8,
     budget_ns: i128,
     capture_mode: CaptureMode,
 ) Error![]const u8 {
     if (executable.len < 2 or executable[0] != '/' or
         std.mem.indexOfScalar(u8, executable, 0) != null) return error.InvalidExecutable;
-    return runCaptureCommon(io, executable, argv, environment, directory_fd, output, budget_ns, capture_mode);
+    return runCaptureCommon(io, executable, argv, environment, directory_fd, input_fd, output, budget_ns, capture_mode);
 }
 
 fn runCaptureCommon(
@@ -126,12 +143,14 @@ fn runCaptureCommon(
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
     directory_fd: ?c.fd_t,
+    input_fd: ?c.fd_t,
     output: []u8,
     budget_ns: i128,
     capture_mode: CaptureMode,
 ) Error![]const u8 {
     if (budget_ns <= 0 or output.len == 0) return error.InvalidBudget;
     if (directory_fd) |fd| if (!validDirectoryFd(fd)) return error.InvalidDirectoryFd;
+    if (input_fd) |fd| if (!validInputFd(io, fd)) return error.InvalidInputFd;
     var pipe_fds: [2]c.fd_t = undefined;
     if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
     if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
@@ -146,7 +165,7 @@ fn runCaptureCommon(
         _ = c.close(pipe_fds[1]);
         return error.SpawnSetupFailed;
     }
-    const pid = spawnChild(executable, argv, environment, directory_fd, pipe_fds, dev_null, capture_mode) catch |err| {
+    const pid = spawnChild(executable, argv, environment, directory_fd, input_fd, pipe_fds, dev_null, capture_mode) catch |err| {
         _ = c.close(dev_null);
         _ = c.close(pipe_fds[0]);
         _ = c.close(pipe_fds[1]);
@@ -238,6 +257,7 @@ fn spawnChild(
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
     directory_fd: ?c.fd_t,
+    input_fd: ?c.fd_t,
     pipe_fds: [2]c.fd_t,
     dev_null: c.fd_t,
     capture_mode: CaptureMode,
@@ -246,7 +266,7 @@ fn spawnChild(
     if (max_fd <= 3) return error.SpawnSetupFailed;
     const pid = c.fork();
     if (pid < 0) return error.SpawnFailed;
-    if (pid == 0) childExec(executable, argv, environment, directory_fd, pipe_fds, dev_null, capture_mode, max_fd);
+    if (pid == 0) childExec(executable, argv, environment, directory_fd, input_fd, pipe_fds, dev_null, capture_mode, max_fd);
     return pid;
 }
 
@@ -255,14 +275,17 @@ fn childExec(
     argv: [*:null]const ?[*:0]const u8,
     environment: ?[*:null]const ?[*:0]const u8,
     directory_fd: ?c.fd_t,
+    input_fd: ?c.fd_t,
     pipe_fds: [2]c.fd_t,
     dev_null: c.fd_t,
     capture_mode: CaptureMode,
     max_fd: c_int,
 ) noreturn {
-    if (c.setpgid(0, 0) != 0 or c.dup2(dev_null, 0) < 0 or
+    const stdin_fd = input_fd orelse dev_null;
+    if (c.setpgid(0, 0) != 0 or c.dup2(stdin_fd, 0) < 0 or
         c.dup2(pipe_fds[1], 1) < 0 or
         c.dup2(if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
+    if (input_fd != null and c.lseek(0, 0, c.SEEK.SET) < 0) c._exit(126);
     if (directory_fd) |fd| if (c.fchdir(fd) != 0) c._exit(126);
     var inherited_fd: c_int = 3;
     while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
@@ -304,6 +327,13 @@ fn validDirectoryFd(fd: c.fd_t) bool {
     const probe = c.openat(fd, ".", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
     if (probe < 0) return false;
     return c.close(probe) == 0;
+}
+
+fn validInputFd(io: std.Io, fd: c.fd_t) bool {
+    if (fd < 3 or c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0) return false;
+    const file = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const stat = file.stat(io) catch return false;
+    return stat.kind == .file;
 }
 
 fn validHeldExecutable(executable: [:0]const u8) bool {

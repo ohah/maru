@@ -176,6 +176,11 @@ pub const PinnedReleaseFile = struct {
         return self.parent_fd;
     }
 
+    pub fn heldDescriptor(self: *const @This()) Error!c.fd_t {
+        if (self.value() == null or self.fd < 0) return error.InvalidOwner;
+        return self.fd;
+    }
+
     pub fn pathMutationSeal(self: *const @This()) Error!PathMutationSeal {
         if (self.value() == null or !self.executable) return error.InvalidOwner;
         var stat: posix.Stat = undefined;

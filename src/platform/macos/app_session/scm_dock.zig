@@ -4259,9 +4259,17 @@ pub fn pumpRepoStatus(self: *AppSession) void {
             .local => null,
             .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
             // 원격인데 소켓이 없다 — **보내지 않는다.** 로컬로 떨어뜨리면 원격 경로를 로컬 git 이 받는다.
-            // 「읽는 중…」으로 두지도 않는다: 아무도 안 읽으므로 그 문구는 영영 안 바뀐다.
+            //
+            // ⚠️ **조건 없이 적는다**(적대적 검증 2026-09-02 4 회차). 처음엔 「아직 한 번도 안 읽었을
+            // 때만」 적었는데 그게 **거꾸로**였다: 이미 읽어 둔 항목이 `stale` 이 되면
+            // `shouldReadRepoStatus` 가 매 tick 참이고, 여기서 아무것도 안 적으면 그 상태가 **영영**
+            // 유지된다 — 매 프레임 control socket 경로를 할당하고 `stat` 하는 되풀이가 된다.
+            // 적어 두면 `failed` 의 5 초 재시도 규율로 내려간다.
+            //
+            // 그리고 그 기록은 **옛 파일 줄을 함께 버린다**(`recordRepoStatusFailure`). 닿을 수 없는
+            // 저장소의 줄을 계속 그리면 화면이 지금 사실을 말하지 않고, 그 줄은 눌리기까지 한다.
             .unavailable => {
-                if (repoStatusFor(self, entry.path) == null) recordRepoStatusFailure(self, entry.path, now);
+                recordRepoStatusFailure(self, entry.path, now);
                 continue;
             },
         };

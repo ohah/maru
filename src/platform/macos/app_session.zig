@@ -66581,6 +66581,42 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         try std.testing.expect(git_ops.writeTargetFor(session, "/other/local-repo", &ctl_probe) == .local);
         // 활성 저장소와 같은 경로인데 control socket 이 없다 → **보내지 않는다**(로컬로 떨어뜨리지 않는다).
         try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app", &ctl_probe) == .unavailable);
+        // ⚠️ **원격 저장소의 «다른 워크트리» 도 로컬로 안 떨어진다**(적대적 검증 2026-09-02 — 제품에서
+        // 재현했다: 목격자 래퍼에 한 줄도 안 남았는데 파일이 `?? → A` 로 바뀌었다 = 로컬이 썼다).
+        //
+        // 위 두 줄만으로는 **못 잡는다**: 워크트리는 활성 저장소와 **경로가 다르고**(그래서 옛 코드가
+        // `.local` 을 냈다) 로컬 저장소도 경로가 다르다 — 두 경우가 경로만으로는 구별되지 않는다.
+        // 판정을 지는 것은 주 워크트리 경로(`origin`)이므로, 그 값을 실제로 심어서 가른다.
+        {
+            const family = [_]maru.session.scm_repos.Entry{
+                .{ .path = "/srv/app", .origin = "/srv/app", .primary = true },
+                .{ .path = "/srv/app-wt", .origin = "/srv/app", .primary = false }, // 같은 가족(원격)
+                .{ .path = "/other/local-repo", .origin = "/other/local-repo", .primary = true },
+            };
+            scm_dock_ops.seedRepoEntriesForTest(session, &family);
+            defer scm_dock_ops.clearRepoEntriesForTest(session);
+            try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app-wt", &ctl_probe) == .unavailable);
+            // 진짜 로컬 행은 **그대로 로컬**이다 — 안전하게 만든다고 멀쩡한 동작을 막지 않는다.
+            try std.testing.expect(git_ops.writeTargetFor(session, "/other/local-repo", &ctl_probe) == .local);
+        }
+        // **읽기도 같은 판정을 지난다.** 머리 줄 읽기(`submitRepoStatus`)는 로컬 git 을 찾아 그 경로에
+        // 돌린다 — 원격 워크트리에 걸면 우연히 같은 경로가 이쪽에 있을 때 **남의 저장소의 브랜치·개수**가
+        // 원격 그룹 밑에 뜬다(제품에서 실제로 그렇게 떴다). 쓰기만 막고 읽기를 두면 화면은 계속 거짓말한다.
+        {
+            const family_only = [_]maru.session.scm_repos.Entry{
+                .{ .path = "/srv/app", .origin = "/srv/app", .primary = true },
+                .{ .path = "/srv/app-wt", .origin = "/srv/app", .primary = false },
+            };
+            scm_dock_ops.seedRepoEntriesForTest(session, &family_only);
+            defer scm_dock_ops.clearRepoEntriesForTest(session);
+            scm_dock_ops.pumpRepoStatus(session);
+            try std.testing.expectEqual(@as(u64, 0), session.scm_repo_status_inflight); // 로컬 git 을 안 걸었다
+            // **「읽는 중…」으로 두지 않는다** — 아무도 안 읽으므로 그 문구는 영영 안 바뀐다.
+            // 이 단언은 위 줄이 «도크가 안 보여서» 통과하는 경우도 함께 가른다(그때는 여기서 걸린다).
+            const wt_status = scm_dock_ops.repoStatusFor(session, "/srv/app-wt") orelse
+                return error.RemoteWorktreeRowLeftPending;
+            try std.testing.expect(wt_status.failed);
+        }
     }
 
     // **거절은 이제 «소켓이 없다» 하나뿐이다**(RS4a·RS4b 가 나머지를 열었다). 이 세션에는 control

@@ -1283,12 +1283,29 @@ pub fn applyForcedStageAll(self: *AppSession) void {
     if (self.git_result == null) return; // 아직 읽기 전이다 — 목록이 없으면 자리 번호가 없다
     if (self.scm_write_inflight != 0) return; // 이미 쓰고 있다
     if (self.scm_write_error != null) return; // 사유가 이미 적혔다 — 재시도가 그걸 덮지 않게
-    const repo = self.git_repo orelse return;
+    // 값이 `1` 이 아니면 **그 접미로 끝나는 행**을 고른다 — 비활성 저장소 행(워크트리 포함)의 쓰기가
+    // 어디로 가는지 보려면 활성 저장소 말고 다른 줄을 눌러야 하는데, 하니스는 포인터가 없다.
+    const want = std.mem.span(std.c.getenv("MARU_FORCE_SCM_STAGE_ALL").?);
     const repos = scm_dock_ops.repoEntries(self);
     for (repos.entries, 0..) |entry, index| {
-        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        const hit = if (std.mem.eql(u8, want, "1"))
+            std.mem.eql(u8, entry.path, self.git_repo orelse return)
+        else
+            std.mem.endsWith(u8, entry.path, want);
+        if (!hit) continue;
         scm_dock_ops.applyScmDockIntent(self, .{ .stage_all_repo = @intCast(index) });
-        self.debug_stage_all_done = true;
+        // **쓰기가 실제로 시작했을 때만 래치를 건다.** 비활성 저장소 행은 그 저장소의 머리 줄 읽기가
+        // 아직 안 왔을 수 있고(「아직 읽지 못했습니다」), 그때 멈추면 하니스는 **한 tick 차이로**
+        // 「아무 일도 안 일어난다」를 보고 결론을 내린다 — fetch 픽스처가 같은 이유로 재시도한다.
+        if (self.scm_write_inflight != 0) {
+            self.debug_stage_all_done = true;
+        } else if (self.scm_write_error) |why| {
+            if (std.mem.eql(u8, why, maru.i18n.t(.scm_repo_unread))) {
+                self.scm_write_error = null; // 「아직」은 사유가 아니라 순서다
+            } else {
+                self.debug_stage_all_done = true; // 진짜 사유는 덮지 않는다
+            }
+        }
         return;
     }
 }

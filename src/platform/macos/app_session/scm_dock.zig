@@ -3948,6 +3948,40 @@ fn refreshRepoList(self: *AppSession) void {
     dropStaleRepoStatus(self);
 }
 
+/// 판정자용: 저장소 목록을 **직접 심는다**. 「같은 저장소 가족」 판정은 `Entry.origin` 이 지는데, 그
+/// 값을 실제 저장소 없이 만들 방법이 이것뿐이다(워크트리 판정은 `git worktree list` 가 준다).
+///
+/// **소유권을 여기서 진다.** 세션 자료구조에 직접 심고 `deinit` 에 맡기면, 그 정리가 `*_initialized`
+/// 로 건너뛰는 자리에서 샌다(2026-09-02 에 CI 의 DebugAllocator 가 그 실수를 잡았다) — 짝이 되는
+/// `clearRepoEntriesForTest` 를 `defer` 로 부른다.
+pub fn seedRepoEntriesForTest(self: *AppSession, entries: []const maru.session.scm_repos.Entry) void {
+    clearRepoEntriesForTest(self);
+    for (entries) |e| {
+        const path = self.allocator.dupe(u8, e.path) catch return;
+        const origin = self.allocator.dupe(u8, e.origin) catch {
+            self.allocator.free(path);
+            return;
+        };
+        self.scm_repo_list.append(self.allocator, .{ .path = path, .origin = origin, .primary = e.primary }) catch {
+            self.allocator.free(path);
+            self.allocator.free(origin);
+            return;
+        };
+    }
+    // `repoEntries` 는 맨 먼저 `refreshRepoList` 를 부른다 — 방금 심은 것을 그 자리에서 걷어내지
+    // 않도록 「방금 걸었다」로 표시한다(`0` 은 무효화 신호다).
+    self.scm_repo_list_walked_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+}
+
+pub fn clearRepoEntriesForTest(self: *AppSession) void {
+    for (self.scm_repo_list.items) |entry| {
+        self.allocator.free(entry.path);
+        self.allocator.free(entry.origin);
+    }
+    self.scm_repo_list.clearRetainingCapacity();
+    self.scm_repo_list_walked_ns = 0; // 다음 `repoEntries` 가 진짜 목록으로 다시 걷는다
+}
+
 /// 목록에서 사라진 저장소의 머리 줄 요약을 버린다.
 ///
 /// **안 버리면 상한이 막힌다**: 요약 캐시는 목록 상한(8)과 같은 상한을 두는데, 저장소를 여닫으며
@@ -4148,11 +4182,35 @@ pub fn pumpRepoStatus(self: *AppSession) void {
     // 않는다**. §6의 `index.lock` 규율이 걸리는 조건이 그 겹침이므로, 슬롯을 나눠 둘이 동시에 돌아도
     // 그 규율을 깨지 않는다.
 
+    // ⚠️ **원격 목록이면 아무것도 안 읽는다**(적대적 검증 2026-09-02 — 제품에서 재현했다).
+    //
+    // 이 읽기는 `git_backend_mod.locate` 로 **로컬** git 을 찾아 그 경로에 돌린다 — 원격 인지가 한 줄도
+    // 없다. 그런데 활성 pane 이 원격이면 목록에 담기는 비활성 행은 그 원격 저장소의 **워크트리**들이고,
+    // 그 경로는 저쪽 기계의 것이다. 그대로 돌리면 **우연히 같은 경로가 이쪽에 있을 때 남의 저장소의
+    // 브랜치·개수가 원격 그룹 밑에 뜬다**(실측: 목격자 래퍼에 한 줄도 안 남았는데 도크는 워크트리의
+    // 브랜치와 배지를 그렸다 — 로컬 git 이 읽은 값이었다).
+    //
+    // 원격 비활성 행을 **원격으로** 읽는 것은 기능이다(워커가 원격 인자를 모른다). 그때까지 그 행들은
+    // 「아직 안 읽음」으로 남고, 쓰기는 `writeTargetFor` 가 같은 이유로 끊는다(같은 판정, 두 자리).
     const repos = repoEntries(self);
     const current = self.git_repo orelse "";
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
     for (repos.entries) |entry| {
         if (std.mem.eql(u8, entry.path, current)) continue; // 활성은 목록 읽기가 채운다
+        // ⚠️ **원격 저장소의 워크트리 행에 로컬 git 을 돌리지 않는다**(적대적 검증 2026-09-02).
+        //
+        // `submitRepoStatus` 는 `locate` 로 **로컬** git 을 찾아 그 경로에 돌린다 — 원격 인지가 한 줄도
+        // 없다. 활성 pane 이 원격이면 이 목록에는 그 저장소의 워크트리들이 함께 실리고 그 경로는 저쪽
+        // 기계의 것이다. 그대로 돌리면 **우연히 같은 경로가 이쪽에 있을 때 남의 저장소의 브랜치·개수가
+        // 원격 그룹 밑에 뜬다**(실측: 목격자 래퍼에 한 줄도 안 남았는데 도크는 워크트리의 브랜치와
+        // 배지를 그렸다 — 로컬 git 이 읽은 값이었다). 판정은 쓰기와 **같은 함수**를 쓴다.
+        //
+        // **「읽는 중…」으로 두지 않는다.** 아무도 안 읽으므로 그 문구는 영영 안 바뀌고, 그러면 화면이
+        // 「곧 온다」고 거짓말한다 — 남의 기계 값을 지우면서 다른 거짓말을 들이는 셈이다.
+        if (self.git_repo_dest != null and git_ops.sameRepoFamily(self, entry.path, current)) {
+            if (repoStatusFor(self, entry.path) == null) recordRepoStatusFailure(self, entry.path, now);
+            continue;
+        }
         if (!shouldReadRepoStatus(repoStatusFor(self, entry.path), now)) continue;
         submitRepoStatus(self, entry.path);
         return; // **하나만** 건다 — 나머지는 다음 tick에

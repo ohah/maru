@@ -162,6 +162,9 @@ pub const ItemId = enum(u64) {
     /// **표시 전용이다.** 누르면 다시 잇는 동작은 실제 socket reconnect(CR4)가 소유하므로 여기서 만들지
     /// 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
     session_host_disconnected = 12,
+    /// 폰이 붙어 세션이 좁아졌다(S11-6). **표시 전용** — 누르는 동작이 없다. 이 상태는 폰이
+    /// 떠나면 host 가 크기를 되돌리며 저절로 사라진다.
+    viewport_narrowed = 13,
 };
 
 /// **우측 묶음에 실릴 수 있는 항목 전부** — `ItemId`에서 좌측 전용을 뺀 것.

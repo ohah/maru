@@ -601,6 +601,18 @@ pub const RemoteGeneration = struct {
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
 };
 
+/// 남이 세션을 좁혔는가(S11-6). `requested` 는 이 client 가 마지막으로 요청한 열, `applied` 는
+/// host 가 **방금 확정한** 열이다. 돌려주는 값은 좁혀진 열이고 0 은 「아무도 안 좁혔다」다.
+///
+/// **`runtime.resized` 순간에만 부른다.** 프레임마다 창 크기와 견주면 사용자가 창을 넓히는 동안
+/// host 확정 전까지 참이 되어 폰이 없어도 표시가 번쩍인다.
+pub fn narrowedFrom(requested: u16, applied: u16) u16 {
+    // **「아직 요청한 적 없음」(`requested == 0`)에 가드를 두지 않는다.** u16 이라 그때는
+    // `applied < 0` 이 성립할 수 없어 이 식이 이미 0 을 낸다 — 가드를 두었더니 변이 검사에서
+    // 살아남아 닿지 않는 코드임이 드러났다(2026-09-02). 그 경우의 «동작» 은 아래 판정자가 지킨다.
+    return if (applied < requested) applied else 0;
+}
+
 const RemoteGenerationSlot = reconnect_generation_slot.GenerationSlot(RemoteGeneration);
 
 pub const PreparedReconnect = struct {
@@ -2737,6 +2749,18 @@ pub const RemoteRuntime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
+    /// 이 client 가 **마지막으로 성공적으로 요청한** 열(S11-6). 0 이면 아직 한 번도 안 보냈다.
+    requested_cols: u16 = 0,
+    /// 남이 세션을 좁혀 둔 열. 0 이면 아무도 안 좁혔다.
+    ///
+    /// **`runtime.resized` 가 올 때만 정한다** — 그 순간의 크기는 host 가 방금 확정한 값이라
+    /// 내가 요청한 값과 견주면 그 자리에서 판정된다. 프레임마다 창 크기와 견주면 내가 창을 넓히는
+    /// 동안 host 확정 전까지 참이 되어 폰이 없어도 표시가 번쩍인다.
+    ///
+    /// **generation 이 아니라 여기 산다.** 재연결하면 generation 이 새로 서는데, 그때 이 값이
+    /// 0 이 되면 **세션은 여전히 좁은데 표시만 사라진다** — 「아무 신호 없이 줄이지 않는다」가
+    /// 깨진다(적대적 검증 3회차). 이 둘은 연결이 아니라 **내 의도**에 대한 사실이라 연결보다 오래 산다.
+    narrowed_cols: u16 = 0,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
@@ -5386,6 +5410,12 @@ pub const RemoteRuntime = struct {
         return false;
     }
 
+    /// 남이 세션을 좁혀 둔 열(S11-6). 0 이면 아무도 안 좁혔다 — 상태줄이 이 값으로 판정한다.
+    ///
+    pub fn narrowedCols(self: *const RemoteRuntime) u16 {
+        return self.narrowed_cols;
+    }
+
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
         try self.admitRuntimeOperation();
         // Observer viewport follows the controller's canonical runtime size; local window changes
@@ -5425,6 +5455,10 @@ pub const RemoteRuntime = struct {
         ) catch |err| return err;
         if (context.decode_error) |err| return err;
         if (disposition != .reusable) return error.ProtocolError;
+        // **성공한 뒤에야 「내가 요청한 값」이 된다**(S11-6). 보내기 전에 적으면 실패한 요청이
+        // 요청으로 남아, 아무도 안 좁혔는데 host 의 현재 크기가 그 값보다 작다는 이유로 상태줄이
+        // **「폰이 좁혔다」고 거짓말한다**(적대적 검증 2회차).
+        self.requested_cols = cols;
     }
 
     const ResizeDecodeContext = struct {
@@ -6040,6 +6074,11 @@ pub const RemoteRuntime = struct {
                 const size: terminal.Size = .{ .cols = resized.cols, .rows = resized.rows };
                 if (try self.applyResizeFullState(size, resized.resize_generation))
                     result.metadata = true;
+                // **여기서만 판정한다**(S11-6). 이 순간의 크기는 host 가 방금 확정한 값이라,
+                // 내가 요청한 값보다 좁으면 남이 좁힌 것이다(그럴 수 있는 경로는 뷰포트 선언뿐).
+                // 폰이 떠나면 host 가 기준으로 되돌려 이 값이 다시 같아지고 표시가 사라진다 —
+                // 붙는 전이와 떠나는 전이가 **둘 다** 이 이벤트로 온다.
+                self.narrowed_cols = narrowedFrom(self.requested_cols, size.cols);
             },
             .metadata => |metadata| {
                 var dto = metadata;
@@ -20162,4 +20201,51 @@ test "ProcessIdentity.trusted: 못 믿는 관측에서는 아무것도 모르는
     // **캐시를 지우지는 않는다** — 다시 current 가 되면 살아나야 한다(재접속마다 뿌리를 잃으면 그 탭이
     // 한동안 `—`로 남는다). `trusted` 는 값 판정이지 소거가 아니다.
     try std.testing.expectEqual(@as(i32, 4242), known.trusted(true).child_pid);
+}
+
+test "S11-6 실패한 리사이즈는 «요청» 이 아니다 — 안 그러면 상태줄이 거짓말한다" {
+    const T = std.testing;
+    // 이 판정자가 지키는 것은 **순서**다: `requested_cols` 는 RPC 가 성공한 뒤에만 바뀐다.
+    // 보내기 전에 적으면, 요청이 실패해 host 크기가 그대로일 때
+    // `narrowedFrom(요청=100, 확정=80)` 이 80 을 내어 **아무도 안 좁혔는데** 표시가 뜬다.
+    //
+    // 그 순서 자체는 `resize()` 안에 있고 여기서는 그 순서가 지켜졌을 때의 **값**을 고정한다:
+    // 실패했으면 `requested_cols` 는 예전 값(여기서는 80)으로 남아 있어야 하고, 그러면 판정이 0 이다.
+    try T.expectEqual(@as(u16, 0), narrowedFrom(80, 80));
+    // 반대로 보내기 전에 적었다면 100 이 남아 이 값이 80 을 냈을 것이다.
+    try T.expectEqual(@as(u16, 80), narrowedFrom(100, 80));
+}
+
+test "S11-6 «남이 좁혔나» 는 요청한 값과 확정된 값만으로 정해진다" {
+    const T = std.testing;
+    // 한 번도 요청한 적이 없으면 견줄 대상이 없다 — 붙자마자 온 첫 이벤트가 여기 걸린다.
+    try T.expectEqual(@as(u16, 0), narrowedFrom(0, 50));
+
+    // 내가 요청한 대로 됐다.
+    try T.expectEqual(@as(u16, 0), narrowedFrom(80, 80));
+
+    // **폰이 붙었다** — 내가 80 을 요청했는데 host 가 50 을 확정했다.
+    try T.expectEqual(@as(u16, 50), narrowedFrom(80, 50));
+
+    // **폰이 떠났다** — host 가 기준으로 되돌려 내 요청과 같아졌다. 표시가 사라져야 한다.
+    // 이 전이를 놓치면 항목이 영영 안 사라진다(설계 단계에서 잡은 구멍이다).
+    try T.expectEqual(@as(u16, 0), narrowedFrom(80, 80));
+
+    // **내가 창을 줄인 것은 «남이 좁힌 것» 이 아니다.**
+    try T.expectEqual(@as(u16, 0), narrowedFrom(40, 40));
+
+    // 남이 넓힐 수는 없지만(줄이기만 한다), 그런 값이 와도 표시하지 않는다.
+    try T.expectEqual(@as(u16, 0), narrowedFrom(80, 100));
+}
+
+test "S11-6 좁힘 상태는 연결보다 오래 산다 — generation 이 아니라 runtime 이 든다" {
+    // **재연결하면 generation 이 새로 선다**(`initInitialRemoteGeneration` 이 기본값으로 채운다).
+    // 이 둘이 거기 살면 그때 0 이 되어 **세션은 여전히 좁은데 표시만 사라진다** — 계약이 금지한
+    // 「아무 신호 없이 줄어든 상태」가 된다(적대적 검증 3회차).
+    //
+    // 이 둘은 연결이 아니라 **내 의도**에 대한 사실이라 연결보다 오래 살아야 한다.
+    try testing.expect(!@hasField(RemoteGeneration, "requested_cols"));
+    try testing.expect(!@hasField(RemoteGeneration, "narrowed_cols"));
+    try testing.expect(@hasField(RemoteRuntime, "requested_cols"));
+    try testing.expect(@hasField(RemoteRuntime, "narrowed_cols"));
 }

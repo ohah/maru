@@ -3002,6 +3002,27 @@ pub fn appKeepAlivePolicyValue() bool {
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
 pub var host_connect_failed: bool = false;
+
+/// 활성 Term 의 세션을 **남이 좁혀 두었으면** 그 열 수(S11-6). 아니면 `null`.
+///
+/// 판정 자체는 `RemoteRuntime` 이 `runtime.resized` 가 올 때 해 둔다 — 여기서 창 크기와 견주면
+/// 사용자가 창을 넓히는 동안 host 확정 전까지 참이 되어 **폰이 없어도 표시가 번쩍인다**.
+/// 이 함수는 그 결과를 읽기만 한다.
+fn activeTermNarrowedCols(self: *AppSession) ?u16 {
+    if (!is_macos) return null;
+    // **활성 surface 가 없을 수 있다**(창을 비우는 경로). `activeSurface()` 는 그때 패닉한다.
+    const window = &self.app_window;
+    if (window.activeConst() == null) return null;
+    const pane = pane_ops.activePane(self);
+    if (pane.terms.items.len == 0) return null;
+    const term = pane.terms.items[@min(pane.active_term, pane.terms.items.len - 1)];
+    // 로컬 Term 은 표시 grid 를 레이아웃이 소유하므로 남이 좁힐 수 없다.
+    if (term.surface.remote == null) return null;
+    const backend = if (app_remote_backend) |*value| value else return null;
+    const slot = backend.runtimes.get(term.rt.handle) orelse return null;
+    const cols = slot.runtime.narrowedCols();
+    return if (cols == 0) null else cols;
+}
 const HostConnectFailureReason = if (is_macos)
     session_host.host_connect.FailureReason
 else
@@ -19967,6 +19988,33 @@ pub const AppSession = struct {
                 rn += 1;
             }
         }
+
+        // **폰이 세션을 좁혀 두었으면 그 사실을 말한다**(S11-6). 위 두 경고보다 **나중에** 넣는다 —
+        // 삽입 순서가 곧 생존 순위라(먼저 넣을수록 오른쪽에 서고 오래 남는다), 데이터 보존
+        // 경고가 이 «사실 전달» 보다 먼저 밀려나면 안 된다(적대적 검증 4회차). 창은 그대로인데 내용이 갑자기
+        // 좁게 리플로우되면 사용자는 그것을 **버그로 읽는다** — 계약이 「아무 신호 없이 줄이지
+        // 않는다」인 이유다. 이것은 사건이 아니라 **폰이 붙어 있는 동안 지속되는 상태**라 상태줄이
+        // 성격에 맞는다(한 번 뜨고 마는 알림이 아니다).
+        if (activeTermNarrowedCols(self)) |narrowed| {
+            var text_buf: [48]u8 = undefined;
+            const text = maru.i18n.format(&text_buf, maru.i18n.t(.status_viewport_narrowed), &.{.{ .d = @intCast(narrowed) }});
+            // 경고가 아니라 **사실 전달**이라 danger 색을 안 쓴다 — 폰이 붙은 것은 정상 동작이다.
+            const narrowed_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+            if (self.buildStatusBarItem(
+                null,
+                text,
+                bar_cols,
+                narrowed_fg,
+                narrowed_fg,
+                .plain,
+            )) |dl| {
+                right_frames[rn] = dl;
+                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                right_ids[rn] = .viewport_narrowed;
+                rn += 1;
+            }
+        }
+
         // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 시급한 순서로 놓는다:
         // blocked(사람을 기다림) → running(알아서 굴러감) → 알림(누적 카운터).
         //
@@ -20288,6 +20336,9 @@ pub const AppSession = struct {
             .running_agents => self.openAgentMenu(false),
             .blocked_agents => self.openAgentMenu(true),
             .cwd => dock_ops.openDockTo(self, .explorer),
+            // **표시 전용이다.** 폰이 떠나면 host 가 크기를 되돌리며 저절로 사라지므로 여기서
+            // 사용자가 할 일이 없다 — 누를 수 있게 보이면 아무 일도 안 하는 자리가 된다.
+            .viewport_narrowed => {},
             .git_branch => settings_ops.requestBranchMenu(self, .switch_branch), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
@@ -20308,6 +20359,7 @@ pub const AppSession = struct {
             // 브랜치도 이제 누를 수 있다 — 목록이 생겼다(§6에서 내려온 항목).
             .notifications, .running_agents, .blocked_agents, .cwd, .git_branch => true,
             .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
+            .viewport_narrowed => false, // 표시 전용 — 열 대상이 없다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
             .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure, .session_host_disconnected => false,

@@ -11705,7 +11705,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_upgrade_failure_process_tests.addArtifactArg(
             session_host_upgrade_failure_process_tests,
         );
-        run_session_host_upgrade_failure_process_tests.addArg("--maru-expect-tests=14");
+        run_session_host_upgrade_failure_process_tests.addArg("--maru-expect-tests=15");
         run_session_host_upgrade_failure_process_tests.setCwd(b.path("."));
 
         const failure_matrix_step = b.step(
@@ -14514,7 +14514,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"S11"},
         });
         const run_attach_stream_consumer_tests = b.addRunArtifact(attach_stream_consumer_tests);
-        run_attach_stream_consumer_tests.addArg("--maru-expect-tests=13");
+        run_attach_stream_consumer_tests.addArg("--maru-expect-tests=15");
         run_attach_stream_consumer_tests.setCwd(b.path("."));
         test_step.dependOn(&run_attach_stream_consumer_tests.step);
         macos_only_test_step.dependOn(&run_attach_stream_consumer_tests.step);

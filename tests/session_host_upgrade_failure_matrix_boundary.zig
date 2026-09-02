@@ -40,7 +40,15 @@ test "U5 first failure matrix keeps every process and product rollback leaf" {
 
     try std.testing.expect(contains(build, "test-session-host-upgrade-failure-matrix"));
     try std.testing.expect(contains(build, "session_host_upgrade_failure_process_tests"));
-    try std.testing.expect(contains(build, "--maru-expect-tests=14"));
+    // **숫자를 그 아티팩트에 못 박는다.** 예전에는 `build.zig` 전체에서 `--maru-expect-tests=14`
+    // 를 문자열로 찾았는데, 정작 이 게이트의 대상은 **15** 였고 그 14 는 **무관한 아티팩트**의
+    // 것이었다 — 즉 이 단언은 지키겠다는 것을 지키지 않은 채 통과하고 있었다. 그 아티팩트의
+    // 숫자가 바뀌어도 아무도 몰랐을 것이고, 실제로 그 무관한 숫자가 바뀌자 비로소 드러났다
+    // (2026-09-02). 호출자와 인자를 함께 적어 남의 숫자로는 못 맞게 한다.
+    try std.testing.expect(contains(
+        build,
+        "run_session_host_upgrade_failure_process_tests.addArg(\"--maru-expect-tests=15\")",
+    ));
     try std.testing.expect(contains(build, "failure_matrix_step.dependOn(&run_session_host_product_rollback_tests.step)"));
     try std.testing.expect(contains(build, "failure_matrix_step.dependOn(&run_session_host_nonempty_rollback_tests.step)"));
 }

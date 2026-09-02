@@ -248,6 +248,11 @@ const ViewportInbox = struct {
             const room = self.buf.len - self.len;
             if (room == 0) {
                 // 잡음만 오는 채널에서도 앞으로 나아간다 — 프레임 하나보다 짧은 꼬리만 남긴다.
+                //
+                // **이 가지는 죽은 코드가 아니다.** 「소비가 늘 진전하니 버퍼가 꽉 찬 채로
+                // 남을 수 없다」고 읽기 쉬운데, 아래 퍼즈 판정자에 `@panic` 을 넣어 재 보니
+                // **여섯 번 도달**했다(2026-09-02). 지우면 `take` 가 0 이 되어 `ingest` 가
+                // 그 자리에서 **영영 돈다**.
                 const keep = viewport_frame_bytes - 1;
                 std.mem.copyForwards(u8, self.buf[0..keep], self.buf[self.len - keep ..]);
                 self.len = keep;
@@ -327,38 +332,48 @@ const ViewportInbox = struct {
         self: *ViewportInbox,
         owner: *external_pump_owner.ExternalPumpOwner,
         stderr: *std.Io.Writer,
-    ) !void {
+    ) void {
         if (self.closed or self.pending == null) return;
         var owner_sink = OwnerViewportSink{ .owner = owner };
         self.flush(.{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
         if (owner_sink.failed) |reason|
-            try stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)});
+            stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)}) catch {};
+    }
+
+    /// 선언 채널에서 한 번 읽는다. 삼킬 바이트가 없으면 `null`.
+    ///
+    /// **stdin 사정으로 화면을 끊지 않는다.** EOF 는 「더 이상 선언이 없다」이고 — 화면을 나르는
+    /// stdout 은 그대로 살아 있다 — **읽기 «오류» 도 마찬가지다**. stdin 이 디렉터리든, 닫혀
+    /// 있든, EIO 든, 그것은 선언 채널의 사정이지 세션의 사정이 아니다. 이 함수가 오류를 위로
+    /// 올리면 호출자가 `.protocol` 로 스트림을 끝내 **폰 화면이 사라진다**.
+    fn readOnce(self: *ViewportInbox, fd: c.fd_t, buf: []u8) ?[]const u8 {
+        const n = posix.read(fd, buf) catch |err| switch (err) {
+            // 지금은 읽을 것이 없다 — 채널은 살아 있다.
+            error.WouldBlock => return null,
+            else => {
+                self.closed = true;
+                return null;
+            },
+        };
+        if (n == 0) {
+            self.closed = true;
+            return null;
+        }
+        return buf[0..n];
     }
 
     fn drain(
         self: *ViewportInbox,
         owner: *external_pump_owner.ExternalPumpOwner,
         stderr: *std.Io.Writer,
-    ) !void {
+    ) void {
         var scratch: [viewport_frame_bytes * 8]u8 = undefined;
-        const n = posix.read(posix.STDIN_FILENO, &scratch) catch |err| switch (err) {
-            error.WouldBlock => return,
-            error.ConnectionResetByPeer, error.NotOpenForReading => {
-                self.closed = true;
-                return;
-            },
-            else => return err,
-        };
-        // **EOF 는 「더 이상 선언이 없다」이지 「끝내라」가 아니다.** 화면을 나르는 stdout 은
-        // 그대로 살아 있다 — 여기서 끝내면 선언을 한 번도 안 보내는 옛 client 가 붙자마자 죽는다.
-        if (n == 0) {
-            self.closed = true;
-            return;
-        }
+        const bytes = self.readOnce(posix.STDIN_FILENO, &scratch) orelse return;
         var owner_sink = OwnerViewportSink{ .owner = owner };
-        self.ingest(scratch[0..n], .{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
+        self.ingest(bytes, .{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
+        // **알리기에 실패해도 스트림은 산다.** stderr 가 막힌 것이 화면을 끊을 이유는 아니다.
         if (owner_sink.failed) |reason|
-            try stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)});
+            stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)}) catch {};
     }
 };
 
@@ -501,10 +516,7 @@ fn runStreamRequest(
             return .protocol;
         };
         if (ready > 0 and fds[1].revents != 0)
-            viewport.drain(&owner, stderr) catch |err| {
-                try stderr.print("maru attach: viewport read failed ({s})\n", .{@errorName(err)});
-                return .protocol;
-            };
+            viewport.drain(&owner, stderr);
         // **소비자가 끊긴 것을 «쓸 때» 말고도 안다.** `broken` 은 쓰기 실패로만 섰는데, 조용한
         // 세션은 보낼 것이 없어 **한 번도 안 쓴다** — 그래서 폰이 화면을 나가도 이 프로세스가
         // 영영 살아 registry 의 observer 자리를 붙들었다(실기 2026-09-01: 고아 여섯, 부모가
@@ -527,10 +539,7 @@ fn runStreamRequest(
         if (result.terminal != null) return .success; // host 가 끝났다 — 정상 종료다.
         // **밀린 선언을 다음 tick 에 다시 낸다.** pump 가 한 턴 돌아 in-flight control 이 끝났을
         // 수 있다 — 그러니 여기서 낸다. 이것이 없으면 폭풍의 마지막 값이 영영 안 간다.
-        viewport.retryPending(&owner, stderr) catch |err| {
-            try stderr.print("maru attach: viewport retry failed ({s})\n", .{@errorName(err)});
-            return .protocol;
-        };
+        viewport.retryPending(&owner, stderr);
         // 이어받은 화면 배치는 별도 경로로 한 번 더 끌어온다(ANSI 루프와 같은 순서).
         if (result.inherited_work_ready) {
             switch (owner.pumpCommittedScreen(io)) {
@@ -1122,4 +1131,96 @@ test "S11-6 되돌아온 선언이 낡은 밀린 값을 밀어낸다" {
     // 보는데 세션만 50열로 굳는다.
     for (rec.sent[0..rec.count]) |sent|
         try T.expect(!(sent.cols == 50 and sent.rows == 37));
+}
+
+test "S11-6 stdin 이 망가져도 스트림은 산다 — 선언만 끝난다" {
+    const T = std.testing;
+    var buf: [viewport_frame_bytes * 8]u8 = undefined;
+
+    // **읽기 오류.** 예전에는 이것이 위로 올라가 호출자가 `.protocol` 로 스트림을 끝냈다 —
+    // stdin 이 디렉터리이거나 닫혀 있다는 이유로 **폰 화면이 사라졌다**.
+    {
+        var inbox: ViewportInbox = .{};
+        try T.expectEqual(@as(?[]const u8, null), inbox.readOnce(-1, &buf));
+        try T.expect(inbox.closed);
+    }
+
+    // **EOF.** 쓰는 쪽이 닫히면 「더 이상 선언이 없다」다.
+    {
+        var inbox: ViewportInbox = .{};
+        var ends: [2]c.fd_t = undefined;
+        try T.expectEqual(@as(c_int, 0), c.pipe(&ends));
+        defer _ = c.close(ends[0]);
+        _ = c.close(ends[1]);
+        try T.expectEqual(@as(?[]const u8, null), inbox.readOnce(ends[0], &buf));
+        try T.expect(inbox.closed);
+    }
+
+    // 정상: 바이트가 있으면 그대로 낸다. 채널은 열려 있다.
+    {
+        var inbox: ViewportInbox = .{};
+        var ends: [2]c.fd_t = undefined;
+        try T.expectEqual(@as(c_int, 0), c.pipe(&ends));
+        defer _ = c.close(ends[0]);
+        defer _ = c.close(ends[1]);
+        var frame: [viewport_frame_bytes]u8 = undefined;
+        const wire = viewportBytes(&frame, 50, 37);
+        try T.expectEqual(@as(isize, @intCast(wire.len)), c.write(ends[1], wire.ptr, wire.len));
+        const got = inbox.readOnce(ends[0], &buf) orelse return error.TestUnexpectedResult;
+        try T.expectEqualSlices(u8, wire, got);
+        try T.expect(!inbox.closed);
+    }
+}
+
+test "S11-6 어떤 잡음·조각 크기로 먹여도 버퍼가 불변을 지키고 프레임을 잃지 않는다" {
+    const T = std.testing;
+    // **결정적 의사난수**로 훑는다 — 실패하면 같은 씨앗으로 그대로 재현된다.
+    var seed: u64 = 0x5eed_1106;
+    const next = struct {
+        fn v(state: *u64) u64 {
+            state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+            return state.* >> 33;
+        }
+    }.v;
+
+    var round: usize = 0;
+    while (round < 300) : (round += 1) {
+        var inbox: ViewportInbox = .{};
+        var rec: RecordingViewportSink = .{};
+
+        // 잡음 사이에 진짜 프레임 하나를 숨긴다.
+        var stream: [96]u8 = undefined;
+        for (&stream) |*b| b.* = @intCast(next(&seed) & 0xff);
+        const at: usize = @intCast(next(&seed) % (stream.len - viewport_frame_bytes));
+        const cols: u16 = @intCast(1 + next(&seed) % 300);
+        const rows: u16 = @intCast(1 + next(&seed) % 300);
+        var frame: [viewport_frame_bytes]u8 = undefined;
+        @memcpy(stream[at..][0..viewport_frame_bytes], viewportBytes(&frame, cols, rows));
+
+        // 조각 크기를 매번 바꿔 먹인다.
+        var fed: usize = 0;
+        while (fed < stream.len) {
+            const take = @min(stream.len - fed, 1 + @as(usize, @intCast(next(&seed) % 11)));
+            inbox.ingest(stream[fed..][0..take], rec.sink());
+            fed += take;
+            // 불변: 버퍼는 절대 넘치지 않는다.
+            try T.expect(inbox.len <= inbox.buf.len);
+        }
+
+        // **숨긴 프레임은 반드시 나온다** — 잡음이 그것을 삼키면 폰이 선언해도 안 간다.
+        var found = false;
+        for (rec.sent[0..rec.count]) |sent|
+            if (sent.cols == cols and sent.rows == rows) {
+                found = true;
+            };
+        if (!found) {
+            std.debug.print(
+                "S11-6 퍼즈 실패 round={d} at={d} cols={d} rows={d} sent={d}\n",
+                .{ round, at, cols, rows, rec.count },
+            );
+            return error.TestUnexpectedResult;
+        }
+        // 잡음이 프레임을 지어내지 않는다 — 보낸 것은 상한 안이다.
+        try T.expect(rec.count <= rec.sent.len);
+    }
 }

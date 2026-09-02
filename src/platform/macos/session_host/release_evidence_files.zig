@@ -9,6 +9,7 @@ const evidence = @import("release_evidence");
 const files = @import("release_adapter_files");
 
 pub const Error = evidence.Error || files.Error;
+pub const PublishedEvidence = files.PinnedReleaseFile;
 
 pub const BaselineRequest = struct {
     common: evidence.Common,
@@ -27,6 +28,13 @@ pub const UpgradeRequest = struct {
 };
 
 pub fn publishBaseline(allocator: std.mem.Allocator, request: BaselineRequest) Error!void {
+    var published: PublishedEvidence = .{};
+    try publishBaselineOwned(allocator, request, &published);
+    try published.deinit();
+}
+
+pub fn publishBaselineOwned(allocator: std.mem.Allocator, request: BaselineRequest, result: *PublishedEvidence) Error!void {
+    try validateResult(result, request.common, &.{ request.default_false_path, request.signed_app_quit_path, request.output_path });
     var default_false = try files.readInputAlloc(allocator, request.default_false_path, evidence.max_evidence_bytes);
     defer default_false.deinit(allocator);
     var signed_app_quit = try files.readInputAlloc(allocator, request.signed_app_quit_path, evidence.max_evidence_bytes);
@@ -43,10 +51,27 @@ pub fn publishBaseline(allocator: std.mem.Allocator, request: BaselineRequest) E
     var parsed = try evidence.parseCanonical(allocator, aggregate);
     defer parsed.deinit();
     try evidence.bind(parsed.value(), .{ .baseline_a = request.common });
-    try files.publishSummaryExclusive(request.output_path, aggregate);
+    try files.publishSummaryOwnedExclusive(result, request.output_path, aggregate);
 }
 
 pub fn publishUpgrade(allocator: std.mem.Allocator, request: UpgradeRequest) Error!void {
+    var published: PublishedEvidence = .{};
+    try publishUpgradeOwned(allocator, request, &published);
+    try published.deinit();
+}
+
+pub fn publishUpgradeOwned(allocator: std.mem.Allocator, request: UpgradeRequest, result: *PublishedEvidence) Error!void {
+    try validateResult(result, request.common, &.{
+        request.predecessor.tag,
+        request.predecessor.commit,
+        request.predecessor.manifest_sha256,
+        request.predecessor.dmg_sha256,
+        request.predecessor.executable_sha256,
+        request.designated_requirement_sha256,
+        request.one_path,
+        request.near_max_path,
+        request.output_path,
+    });
     var one = try files.readInputAlloc(allocator, request.one_path, evidence.max_evidence_bytes);
     defer one.deinit(allocator);
     var near_max = try files.readInputAlloc(allocator, request.near_max_path, evidence.max_evidence_bytes);
@@ -68,5 +93,31 @@ pub fn publishUpgrade(allocator: std.mem.Allocator, request: UpgradeRequest) Err
         .predecessor = request.predecessor,
         .designated_requirement_sha256 = request.designated_requirement_sha256,
     } });
-    try files.publishSummaryExclusive(request.output_path, aggregate);
+    try files.publishSummaryOwnedExclusive(result, request.output_path, aggregate);
+}
+
+fn validateResult(result: *const PublishedEvidence, common: evidence.Common, extra: []const []const u8) Error!void {
+    if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
+    const result_bytes = std.mem.asBytes(result);
+    const common_values = [_][]const u8{
+        common.test_uuid,
+        common.repository.owner,
+        common.repository.name,
+        common.release.tag,
+        common.release.version,
+        common.source.commit,
+        common.source.tree,
+        common.build.workflow_ref,
+        common.candidate.dmg_sha256,
+        common.candidate.executable_sha256,
+    };
+    for (common_values) |value| if (overlaps(result_bytes, value)) return error.InvalidOwner;
+    for (extra) |value| if (overlaps(result_bytes, value)) return error.InvalidOwner;
+}
+
+fn overlaps(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_end = std.math.add(usize, @intFromPtr(left.ptr), left.len) catch return true;
+    const right_end = std.math.add(usize, @intFromPtr(right.ptr), right.len) catch return true;
+    return @intFromPtr(left.ptr) < right_end and @intFromPtr(right.ptr) < left_end;
 }

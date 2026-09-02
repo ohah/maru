@@ -8288,7 +8288,21 @@ fn monotonicNs() u64 {
 }
 ```
 
-`awake` 를 고른 것은 옛 코드의 `CLOCK_MONOTONIC` 과 같은 뜻이기 때문이다(잠든 시간을 안 센다).
+**`awake` 는 옛 시계와 「같은」 것이 아니다 — 적대적 검증 1 회차가 잡았다.** `clockToPosix` 를 읽어
+보니 macOS 에서만 갈린다:
+
+| | 옛 `std.c.clock_gettime(.MONOTONIC)` | `.awake` |
+|---|---|---|
+| Linux · Windows | 자연스러운 단조 시계 | 같다 |
+| **macOS** | `CLOCK_MONOTONIC` — **잠든 시간을 센다** | **`CLOCK_UPTIME_RAW` — 안 센다** |
+
+Darwin 의 MONOTONIC 계열이 잠든 동안 흐른다는 것은 **std 자신의 분류**가 말한다 — 같은 함수가
+`.boot`(*"ticks while suspended"*) 쪽에 Darwin `MONOTONIC_RAW` 를 넣는다.
+
+**이 자리에는 `awake` 가 맞다** — 재려는 것이 「이 파싱이 CPU 를 얼마나 썼나」이기 때문이다(옛 시계면
+파싱 도중 기계가 잠들었다 깨는 순간 예산이 날아가 트리를 버린다). 그래도 **바뀐 것은 바뀐 것이라**
+적어 둔다. 처음에는 *"옛 코드와 같은 뜻"* 이라고 썼는데 **재 보지 않고 쓴 문장이었고 틀렸다** —
+§2m.104 를 인용하는 절에서 같은 실수를 했다.
 
 > **「규칙을 따른다」와 「규칙의 이유를 따른다」는 다르다.** io 를 넘기는 이유는 I/O 의 주인을 호출자에
 > 두기 위해서다. 주인이 될 것이 없는 호출에까지 그 형태만 흉내 내면, 지키는 것 없이 서명만 번진다.
@@ -8340,8 +8354,25 @@ fn monotonicNs() u64 {
 
 ## 결과
 
-**`mise run check` 가 Windows 에서 처음으로 `EXIT=0`** 이다. 그 길에 이 호스트에서 **한 번도 안 돌던
-판정들이 돌기 시작했다**:
+**`mise run check` 가 Windows 에서 처음으로 `EXIT=0`** 이다 — **단, `sh` 가 PATH 에 있는 셸에서**
+(Git Bash). 그 전제를 처음에는 안 적었다(적대적 검증 4 회차가 잡았다): 전부 Git Bash 에서 돌려 놓고
+*"Windows 에서 EXIT=0"* 이라고 적었는데, **PowerShell 에서는 아직 아니다.**
+
+```text
+PS> mise run check-mobile-contract
+[check-mobile-contract] $ sh tools/mobile-harness/doc_claims.sh
+'sh' is not recognized as an internal or external command
+```
+
+`sh` 를 요구하는 자리는 **열**이다(실측): mise 태스크 둘(`check-mobile-contract`·`check-wasm-sync`)과
+`build.zig` 의 `addSystemCommand(&.{ "sh", … })` **여덟**. Git for Windows 는 `sh.exe` 를 깔지만 시스템
+PATH 에 안 올린다(다른 도구를 가리지 않으려고) — 그래서 **Git Bash 안에서 돌리는 것이 전제**다.
+
+> **고치지 않는다 — 보고한다.** 저장소가 스스로 `sh` 를 찾게 만들 수는 있지만(예: Git 설치 경로 탐색),
+> 그것은 *"이 저장소가 Windows 에서 어떤 개발 환경을 지원하는가"* 를 정하는 일이라 여기서 임의로
+> 하지 않는다. 지금 필요한 것은 **전제를 적는 것**이고, 그것을 안 적은 것이 이번의 결함이었다.
+
+그 길에 이 호스트에서 **한 번도 안 돌던 판정들이 돌기 시작했다**:
 
 | 무엇 | 이 호스트에서 |
 |---|---|

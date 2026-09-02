@@ -425,7 +425,19 @@ pub const Provider = struct {
     /// 즉 어느 인스턴스로 읽어도 같은 값이고 공유 상태를 안 건드린다. 그 한 줄을 위해 `open` 의
     /// 서명을 바꾸면 호출자 수십 자리가 따라 바뀐다(`app_session/editor.zig` 실측).
     ///
-    /// `awake` 를 고른다 — 옛 코드의 `CLOCK_MONOTONIC` 과 같은 뜻(잠든 시간을 안 센다)이다.
+    /// **`awake` 는 옛 시계와 「같은」 것이 아니다** — macOS 에서만 갈린다(`Io/Threaded.clockToPosix`):
+    ///
+    /// | | 옛 `std.c.clock_gettime(.MONOTONIC)` | `.awake` |
+    /// |---|---|---|
+    /// | Linux | `CLOCK_MONOTONIC` | `CLOCK_MONOTONIC` (같다) |
+    /// | macOS | `CLOCK_MONOTONIC` — **잠든 시간을 센다** | `CLOCK_UPTIME_RAW` — **안 센다** |
+    ///
+    /// (Darwin 의 MONOTONIC 계열이 잠든 동안 흐른다는 것은 std 자신의 분류가 말한다 — 그 함수가
+    /// `.boot`「잠든 동안도 흐른다」쪽에 Darwin `MONOTONIC_RAW` 를 넣는다.)
+    ///
+    /// **이 자리에는 `awake` 가 맞다.** 재려는 것이 「이 파싱이 CPU 를 얼마나 썼나」라서다 — 옛 시계면
+    /// 파싱 도중에 기계가 잠들었다 깨는 순간 예산이 통째로 날아가 트리를 버린다. 다만 **바뀐 것은
+    /// 바뀐 것이라** 여기 적어 둔다(4ms 예산에서 실제로 걸릴 일은 아니다).
     fn monotonicNs() u64 {
         const io = std.Io.Threaded.global_single_threaded.io();
         return @intCast(std.Io.Clock.awake.now(io).nanoseconds);

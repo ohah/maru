@@ -977,6 +977,11 @@ aggregate core에 전달한다. canonical bytes를 expected identity에 다시 b
 identity의 GitHub provenance, signed leaf 생산, artifact attestation이나 release workflow 배선을 완료로 바꾸지 않는다.
 special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`가 소유하며 이 조립 gate의 직접 증거가 아니다.
 
+U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
+bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
+pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual
+filesystem의 exact read와 replacement 보존 및 allocation failure를 검증한다. manifest semantic authoring은 별도 gate다.
+
 U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
 candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
 fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact

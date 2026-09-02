@@ -2198,6 +2198,14 @@ unlink와 parent sync를 수행하며 owner를 비워 둔다. pathname이 교체
 기존 `publishSummaryExclusive`는 이 owned publication을 호출한 뒤 owner를 닫는 호환 wrapper로 유지한다.
 이 component는 evidence/manifest 조립, GitHub 업로드, workflow 배선이나 U5 제품 성공을 증명하지 않는다.
 
+manifest authoring이 aggregate evidence의 profile과 identity를 다시 bind할 때도 pathname을 새 입력 권위로 열지 않는다.
+`PinnedReleaseFile.readHeldAlloc`은 final pathname이 여전히 held inode를 가리키는지 전후로 revalidate하되, 실제 bytes는 기존 held
+fd에서 exact size만 `pread`한다. read 전후 file/parent fingerprint, EOF, SHA-256과 최초 publication observation이 모두 같아야
+`Input`을 반환한다. cap 초과, copied owner, pathname 교체, short/extra read, inode·metadata·digest drift와 allocation failure에서는
+bytes publication 0이며 foreign replacement를 삭제하거나 수정하지 않는다. focused `test-session-host-release-adapter-files`의 held
+evidence 행은 actual filesystem에서 exact bytes/identity와 pathname replacement·allocation failure를 검증한다. manifest semantic
+authoring과 GitHub upload는 후속 gate다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -14152,7 +14152,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_files_tests = b.addRunArtifact(release_adapter_files_tests);
-        run_release_adapter_files_tests.addArg("--maru-expect-tests=6");
+        run_release_adapter_files_tests.addArg("--maru-expect-tests=8");
         run_release_adapter_files_tests.setCwd(b.path("."));
         session_host_release_adapter_files_step.dependOn(&run_release_adapter_files_tests.step);
         session_host_step.dependOn(&run_release_adapter_files_tests.step);

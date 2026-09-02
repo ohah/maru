@@ -1063,6 +1063,12 @@ pub fn wantControl(next: ControlWant) void {
         else => {},
     }
     if (control_want.eql(next)) return;
+    // **모드가 바뀌면 실어 둔 요청을 버린다.** 그 바이트는 **그 채널** 을 위한 것이라 다른 채널에
+    // 실리면 상대가 못 읽는다. 특히 뷰포트 선언(`MRSV` 8바이트)이 ndjson 컨트롤 축에 들어가면
+    // 그 축이 통째로 깨진다 — 「세션 화면 → 뒤로」라는 평범한 조작이 그 창을 만든다(적대적
+    // 검증 2회차). 반대 방향(ndjson 이 화면 채널로)은 프레임 디코더가 잡음으로 버려 안전하지만,
+    // 그 비대칭에 기대지 않는다.
+    control_req_len = 0;
     // 보던 화면이 아니게 됐다 — 그 조립 상태는 여기서 끝난다(죽은 화면을 남기지 않는다).
     if (control_want == .screen) dropRemoteScreen();
     control_want = next;

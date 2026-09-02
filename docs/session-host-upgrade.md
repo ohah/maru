@@ -2324,6 +2324,27 @@ failure는 publication 0이다. redownload는 remote mutation이 아니므로 �
 검증하며 최초·각 child 전후·최종 authority snapshot의 모든 allocation fail index에서 publication 0을 고정한다. 이 component는 draft
 publish, post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.35 exact draft publication 권위
+
+draft 공개 전환은 tag나 latest lookup이 아니라 ready `DraftAuthority.id` 하나에 대한 단일 PATCH mutation으로만 수행한다.
+`release_adapter_github_draft_publication.zig`의 final-address move-only `PublishedRelease`가 attachment 권위 graph와 ready
+`DraftAssets`, ready `RedownloadValidation`, checkout 전에 고정한 GitHub CLI, validated token 및 같은 release phase `Deadline`을
+함께 소비한다. caller는 release ID/tag/source, asset 집합, draft/prerelease/immutable 판정 또는 성공 bool을 별도 scalar로 제출하지 않는다.
+
+mutation 직전에는 attachment graph를 다시 만들고 redownload receipt의 release/asset ID가 같은 fixed snapshot을 가리키는지 확인한다.
+closed request는 `github.com/repos/ohah/maru/releases/<exact-id>`에 `draft=false`, `prerelease=false`만 보내며 clobber, asset mutation,
+release note/title/tag/source 수정 필드는 허용하지 않는다. child가 시작된 뒤에는 timeout, child failure, malformed response와 local
+allocation failure 어느 것도 `.empty`로 되돌아가 자동 PATCH 재시도를 허용하지 않는다. 성공 여부를 모르면
+remote-state-unknown, exact published response까지 알았지만 마지막 local publication이 실패하면 cleanup-required audit state다.
+
+response는 exact ID/tag/source, `draft=false`, `prerelease=false`, explicit immutable release와 네 asset의 exact ID/name/size,
+uploaded state, SHA-256 digest 및 octet-stream content type을 strict JSON으로 결속한다. 누락·추가·duplicate/foreign asset이나
+redownload 이후 asset 교환은 published authority가 아니다. 마지막 fresh deadline과 attachment/redownload/CLI fence 뒤에만
+`PublishedRelease`를 게시한다. copied/pre-owned result, duplicate asset authority, authority drift, mutation 전 두 authority snapshot과
+응답 후 authority snapshot의 allocation failure, 전 child/parser allocation fail-index를 Debug·ReleaseFast에서 검증한다. 앞의 두
+snapshot failure는 mutation 0과 `.empty`, 응답 뒤 snapshot failure는 exact release ID를 보존한 `.cleanup_required`여야 한다. 이
+component는 post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

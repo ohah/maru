@@ -18,6 +18,7 @@ pub const Error = error{
     InvalidExecutable,
     InvalidDirectoryFd,
     InvalidInputFd,
+    InvalidExpectedSize,
     InvalidBudget,
     PipeFailed,
     SpawnSetupFailed,
@@ -29,6 +30,8 @@ pub const Error = error{
     WaitFailed,
     ChildFailed,
 };
+
+pub const Digest = struct { size: u64, sha256: [64]u8 };
 
 pub fn runCapture(
     io: std.Io,
@@ -77,6 +80,118 @@ pub fn runCaptureEnvironmentStdoutInputFd(
 ) Error![]const u8 {
     if (!validInputFd(io, input_fd)) return error.InvalidInputFd;
     return runCaptureOptionalEnvironment(io, executable, argv, environment, null, input_fd, output, budget_ns, .stdout_only);
+}
+
+/// Runs with exactly `environment` and hashes bounded stdout without retaining its body.
+/// `expected_size` is also the hard byte cap, so an oversized remote body stops immediately.
+pub fn runDigestEnvironmentStdout(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    expected_size: u64,
+    budget_ns: i128,
+) Error!Digest {
+    if (executable.len < 2 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null)
+        return error.InvalidExecutable;
+    if (expected_size == 0 or expected_size > std.math.maxInt(usize)) return error.InvalidExpectedSize;
+    if (budget_ns <= 0) return error.InvalidBudget;
+
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+    if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return error.PipeFailed;
+    }
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return error.SpawnSetupFailed;
+    }
+    const pid = spawnChild(executable, argv, environment, null, null, pipe_fds, dev_null, .stdout_only) catch |err| {
+        _ = c.close(dev_null);
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return err;
+    };
+    _ = c.close(dev_null);
+    _ = c.close(pipe_fds[1]);
+    if (!establishProcessGroup(pid)) {
+        terminateGroup(pid);
+        _ = reapChild(pid, null);
+        _ = c.close(pipe_fds[0]);
+        return error.ProcessGroupFailed;
+    }
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var used: u64 = 0;
+    var eof = false;
+    var child_reaped = false;
+    var status: c_int = 0;
+    const start = std.Io.Clock.awake.now(io).nanoseconds;
+    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
+    var failure: ?Error = null;
+    while (!(eof and child_reaped)) {
+        if (!child_reaped) switch (pollChild(pid, &status)) {
+            .running => {},
+            .reaped => child_reaped = true,
+            .failed => {
+                failure = error.WaitFailed;
+                break;
+            },
+        };
+        if (eof and child_reaped) break;
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (now >= deadline) {
+            failure = error.TimedOut;
+            break;
+        }
+        const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        const wait_ms: c_int = @intCast(@min(remaining_ms, poll_quantum_ms));
+        var fds = [_]c.pollfd{.{ .fd = if (eof) -1 else pipe_fds[0], .events = c.POLL.IN, .revents = 0 }};
+        const rc = c.poll(&fds, if (eof) 0 else 1, wait_ms);
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (rc == 0 or eof) continue;
+        if (fds[0].revents & (c.POLL.ERR | c.POLL.NVAL) != 0) {
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (fds[0].revents & (c.POLL.IN | c.POLL.HUP) == 0) continue;
+        var bytes: [64 * 1024]u8 = undefined;
+        const remaining = expected_size - used;
+        const capacity: usize = if (remaining >= bytes.len) bytes.len else @intCast(remaining + 1);
+        const count = c.read(pipe_fds[0], &bytes, capacity);
+        if (count < 0) {
+            if (posix.errno(count) == .INTR) continue;
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (count == 0) {
+            eof = true;
+        } else if (@as(u64, @intCast(count)) > remaining) {
+            failure = error.OutputTooLarge;
+            break;
+        } else {
+            const count_usize: usize = @intCast(count);
+            hasher.update(bytes[0..count_usize]);
+            used += @intCast(count);
+        }
+    }
+    _ = c.close(pipe_fds[0]);
+    if (failure != null or !child_reaped) terminateGroup(pid);
+    if (!child_reaped and !reapChild(pid, &status)) return error.WaitFailed;
+    if (failure) |err| return err;
+    const unsigned_status: u32 = @bitCast(status);
+    if (!eof or !c.W.IFEXITED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0) return error.ChildFailed;
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return .{ .size = used, .sha256 = std.fmt.bytesToHex(digest, .lower) };
 }
 
 /// Runs with exactly `environment` and binds one held directory fd as the child cwd.

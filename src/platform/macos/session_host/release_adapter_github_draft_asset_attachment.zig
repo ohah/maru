@@ -126,7 +126,7 @@ pub const Paths = struct {
 };
 pub const Cli = struct { path: [:0]const u8, pinned: *const cli_authority_mod.PinnedExecutable };
 
-const ProductionAuthority = struct {
+pub const AuthorityInput = struct {
     allocator: std.mem.Allocator,
     context: context_mod.Context,
     draft: *const draft_mod.DraftAuthority,
@@ -136,48 +136,58 @@ const ProductionAuthority = struct {
     manifest: *const files_mod.PinnedReleaseFile,
     paths: Paths,
     cli: Cli,
+};
+
+const ProductionAuthority = struct {
+    input: AuthorityInput,
 
     pub fn snapshot(self: *@This()) !Snapshot {
-        try validatePaths(self.paths, self.cli.path);
-        const draft = self.draft.value() orelse return error.InvalidDraft;
-        if (draft.id == 0 or !std.mem.eql(u8, draft.tag, self.context.tag) or
-            !std.mem.eql(u8, draft.source_commit, self.context.source_commit)) return error.AuthorityMismatch;
-        const candidate = self.candidate.revalidate(.{ .dmg = self.paths.dmg, .frozen_executable = self.paths.frozen_executable }) catch return error.CandidateChanged;
-        const authored = self.authored.revalidate(self.context, draft.id, self.evidence, self.manifest, .{ .evidence = self.paths.evidence, .manifest = self.paths.manifest }) catch return error.AuthoredChanged;
-        try cli_authority_mod.revalidate(self.allocator, self.cli.path, self.cli.pinned);
-        const evidence = self.evidence.revalidate(self.paths.evidence) catch return error.FileChanged;
-        const manifest_observation = self.manifest.revalidate(self.paths.manifest) catch return error.FileChanged;
-        if (!sameObservation(authored.evidence, evidence) or !sameObservation(authored.manifest, manifest_observation))
-            return error.AuthoredChanged;
-        try files_mod.requireDistinct(&.{ candidate.dmg.identity, candidate.frozen.identity, evidence.identity, manifest_observation.identity });
-
-        var input = try self.manifest.readHeldAlloc(self.allocator, self.paths.manifest, manifest_mod.max_manifest_bytes);
-        defer input.deinit(self.allocator);
-        var parsed = try manifest_mod.parseCanonical(self.allocator, input.bytes);
-        defer parsed.deinit();
-        const value = parsed.value();
-        try context_mod.bindManifest(self.context, value.*);
-        if (value.release.id != draft.id or value.assets.len != 3) return error.ManifestMismatch;
-        const observations = [_]files_mod.ExecutableObservation{ candidate.dmg, candidate.frozen, evidence };
-        const paths = [_][]const u8{ self.paths.dmg, self.paths.frozen_executable, self.paths.evidence };
-        const roles = [_]manifest_mod.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
-        for (value.assets, 0..) |asset, index| {
-            if (asset.role != roles[index] or !std.mem.eql(u8, asset.name, std.fs.path.basename(paths[index])) or
-                asset.size != observations[index].size or !std.mem.eql(u8, asset.sha256, &observations[index].sha256))
-                return error.ManifestMismatch;
-        }
-        return .{
-            .release_id = draft.id,
-            .cli_sha256 = self.cli.pinned.sha256,
-            .assets = .{
-                expectedAsset(self.paths.dmg, candidate.dmg, try self.candidate.dmg.heldDescriptor()),
-                expectedAsset(self.paths.frozen_executable, candidate.frozen, try self.candidate.frozen.heldDescriptor()),
-                expectedAsset(self.paths.evidence, evidence, try self.evidence.heldDescriptor()),
-                expectedAsset(self.paths.manifest, manifest_observation, try self.manifest.heldDescriptor()),
-            },
-        };
+        return snapshotAuthority(self.input);
     }
 };
+
+/// Rebuilds the exact attachment graph for downstream release phases. Keeping this derivation here
+/// prevents redownload and publish adapters from inventing parallel manifest/attestation binding.
+pub fn snapshotAuthority(input: AuthorityInput) !Snapshot {
+    try validatePaths(input.paths, input.cli.path);
+    const draft = input.draft.value() orelse return error.InvalidDraft;
+    if (draft.id == 0 or !std.mem.eql(u8, draft.tag, input.context.tag) or
+        !std.mem.eql(u8, draft.source_commit, input.context.source_commit)) return error.AuthorityMismatch;
+    const candidate = input.candidate.revalidate(.{ .dmg = input.paths.dmg, .frozen_executable = input.paths.frozen_executable }) catch return error.CandidateChanged;
+    const authored = input.authored.revalidate(input.context, draft.id, input.evidence, input.manifest, .{ .evidence = input.paths.evidence, .manifest = input.paths.manifest }) catch return error.AuthoredChanged;
+    try cli_authority_mod.revalidate(input.allocator, input.cli.path, input.cli.pinned);
+    const evidence = input.evidence.revalidate(input.paths.evidence) catch return error.FileChanged;
+    const manifest_observation = input.manifest.revalidate(input.paths.manifest) catch return error.FileChanged;
+    if (!sameObservation(authored.evidence, evidence) or !sameObservation(authored.manifest, manifest_observation))
+        return error.AuthoredChanged;
+    try files_mod.requireDistinct(&.{ candidate.dmg.identity, candidate.frozen.identity, evidence.identity, manifest_observation.identity });
+
+    var manifest_input = try input.manifest.readHeldAlloc(input.allocator, input.paths.manifest, manifest_mod.max_manifest_bytes);
+    defer manifest_input.deinit(input.allocator);
+    var parsed = try manifest_mod.parseCanonical(input.allocator, manifest_input.bytes);
+    defer parsed.deinit();
+    const value = parsed.value();
+    try context_mod.bindManifest(input.context, value.*);
+    if (value.release.id != draft.id or value.assets.len != 3) return error.ManifestMismatch;
+    const observations = [_]files_mod.ExecutableObservation{ candidate.dmg, candidate.frozen, evidence };
+    const paths = [_][]const u8{ input.paths.dmg, input.paths.frozen_executable, input.paths.evidence };
+    const roles = [_]manifest_mod.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
+    for (value.assets, 0..) |asset, index| {
+        if (asset.role != roles[index] or !std.mem.eql(u8, asset.name, std.fs.path.basename(paths[index])) or
+            asset.size != observations[index].size or !std.mem.eql(u8, asset.sha256, &observations[index].sha256))
+            return error.ManifestMismatch;
+    }
+    return .{
+        .release_id = draft.id,
+        .cli_sha256 = input.cli.pinned.sha256,
+        .assets = .{
+            expectedAsset(input.paths.dmg, candidate.dmg, try input.candidate.dmg.heldDescriptor()),
+            expectedAsset(input.paths.frozen_executable, candidate.frozen, try input.candidate.frozen.heldDescriptor()),
+            expectedAsset(input.paths.evidence, evidence, try input.evidence.heldDescriptor()),
+            expectedAsset(input.paths.manifest, manifest_observation, try input.manifest.heldDescriptor()),
+        },
+    };
+}
 
 const ProductionUploader = struct {
     io: std.Io,
@@ -247,7 +257,7 @@ pub fn attachUntil(
         if (overlaps(result_bytes, value)) return error.InvalidOwner;
     inline for (.{ std.mem.asBytes(draft), std.mem.asBytes(candidate), std.mem.asBytes(authored), std.mem.asBytes(evidence), std.mem.asBytes(manifest), std.mem.asBytes(cli.pinned), std.mem.asBytes(deadline), paths.dmg, paths.frozen_executable, paths.evidence, paths.manifest, cli.path, token }) |value|
         if (overlaps(output, value)) return error.InvalidOwner;
-    var authority = ProductionAuthority{ .allocator = allocator, .context = context, .draft = draft, .candidate = candidate, .authored = authored, .evidence = evidence, .manifest = manifest, .paths = paths, .cli = cli };
+    var authority = ProductionAuthority{ .input = .{ .allocator = allocator, .context = context, .draft = draft, .candidate = candidate, .authored = authored, .evidence = evidence, .manifest = manifest, .paths = paths, .cli = cli } };
     var uploader = ProductionUploader{ .io = io, .allocator = allocator, .executable = cli.path, .token = token, .output = output };
     var publisher = ProductionPublisher{};
     try attachCore(&authority, &uploader, &publisher, deadline, result);

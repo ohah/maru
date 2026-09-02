@@ -58,12 +58,16 @@ test "baseline leaves publish one rebound canonical aggregate" {
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
-    try evidence_files.publishBaseline(std.testing.allocator, .{
+    var published: evidence_files.PublishedEvidence = .{};
+    try evidence_files.publishBaselineOwned(std.testing.allocator, .{
         .common = common(),
         .default_false_path = try absolute(&tmp, "default.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
-    });
+    }, &published);
+    const observation = try published.revalidate(try absolute(&tmp, "evidence.json", &out));
+    try std.testing.expectEqual(@as(u64, @intCast((try tmp.dir.statFile(std.testing.io, "evidence.json", .{})).size)), observation.size);
+    try published.deinit();
     const bytes = try tmp.dir.readFileAlloc(std.testing.io, "evidence.json", std.testing.allocator, .limited(evidence.max_evidence_bytes));
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
@@ -90,14 +94,17 @@ test "upgrade leaves publish exact one and near-max roles" {
         .output_path = try absolute(&tmp, "evidence.json", &out),
     }));
     try expectAbsent(&tmp, "evidence.json");
-    try evidence_files.publishUpgrade(std.testing.allocator, .{
+    var published: evidence_files.PublishedEvidence = .{};
+    try evidence_files.publishUpgradeOwned(std.testing.allocator, .{
         .common = common(),
         .predecessor = predecessor(),
         .designated_requirement_sha256 = sha_f,
         .one_path = try absolute(&tmp, "one.json", &a),
         .near_max_path = try absolute(&tmp, "near.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
-    });
+    }, &published);
+    _ = try published.revalidate(try absolute(&tmp, "evidence.json", &out));
+    try published.deinit();
     const bytes = try tmp.dir.readFileAlloc(std.testing.io, "evidence.json", std.testing.allocator, .limited(evidence.max_evidence_bytes));
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
@@ -204,4 +211,30 @@ fn publishAllocation(allocator: std.mem.Allocator) !void {
 
 test "allocation failure never leaves a partial publication" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, publishAllocation, .{});
+}
+
+test "owned publication rejects preowned and identity-aliased result before filesystem access" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    var a: [std.fs.max_path_bytes:0]u8 = undefined;
+    var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var out: [std.fs.max_path_bytes:0]u8 = undefined;
+    const request = evidence_files.BaselineRequest{
+        .common = common(),
+        .default_false_path = try absolute(&tmp, "default.json", &a),
+        .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
+        .output_path = try absolute(&tmp, "evidence.json", &out),
+    };
+    var published: evidence_files.PublishedEvidence = .{};
+    published.owner = &published;
+    try std.testing.expectError(error.InvalidOwner, evidence_files.publishBaselineOwned(std.testing.allocator, request, &published));
+    try expectAbsent(&tmp, "evidence.json");
+
+    published = .{};
+    var aliased = request;
+    aliased.common.test_uuid = std.mem.asBytes(&published)[0..36];
+    try std.testing.expectError(error.InvalidOwner, evidence_files.publishBaselineOwned(std.testing.allocator, aliased, &published));
+    try expectAbsent(&tmp, "evidence.json");
 }

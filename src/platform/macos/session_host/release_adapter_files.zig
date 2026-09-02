@@ -206,7 +206,7 @@ pub const PinnedReleaseFile = struct {
         const held = releaseFingerprint(held_stat, self.executable) catch return error.FileChanged;
         const reopened = releaseFingerprint(path_stat, self.executable) catch return error.FileChanged;
         if (!sameFingerprint(self.fingerprint, held) or !sameFingerprint(self.fingerprint, reopened) or
-            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_stat) catch return error.FileChanged))
+            !sameDirectoryAuthority(self.parent_fingerprint, directoryFingerprint(parent_stat) catch return error.FileChanged))
             return error.FileChanged;
         const digest = hashExact(self.fd, expected.size) catch return error.FileChanged;
         var after: posix.Stat = undefined;
@@ -218,7 +218,7 @@ pub const PinnedReleaseFile = struct {
         var parent_final: posix.Stat = undefined;
         if (c.fstat(final_fd, &final_stat) != 0 or c.fstat(self.parent_fd, &parent_final) != 0 or
             !sameFingerprint(self.fingerprint, releaseFingerprint(final_stat, self.executable) catch return error.FileChanged) or
-            !sameDirectoryFingerprint(self.parent_fingerprint, directoryFingerprint(parent_final) catch return error.FileChanged))
+            !sameDirectoryAuthority(self.parent_fingerprint, directoryFingerprint(parent_final) catch return error.FileChanged))
             return error.FileChanged;
         return expected;
     }

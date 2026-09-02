@@ -66595,7 +66595,11 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
             };
             scm_dock_ops.seedRepoEntriesForTest(session, &family);
             defer scm_dock_ops.clearRepoEntriesForTest(session);
-            try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app-wt", &ctl_probe) == .unavailable);
+            // ⚠️ **`.local` 이 아닌 것**이 여기서 세는 사실이다. RS5 부터 같은 가족은 그 기계로 **보내고**,
+            // 이 스모크 세션에는 control socket 이 없으니 그 자리는 `.unavailable` 로 나온다 — 즉 이
+            // 단언은 「원격 축을 탔다」를 소켓 없는 환경에서 보는 형태다. `.unavailable` 만 콕 집으면
+            // 소켓이 생긴 환경에서 **판정이 멈춘다**(그때는 `.remote` 다).
+            try std.testing.expect(git_ops.writeTargetFor(session, "/srv/app-wt", &ctl_probe) != .local);
             // 진짜 로컬 행은 **그대로 로컬**이다 — 안전하게 만든다고 멀쩡한 동작을 막지 않는다.
             try std.testing.expect(git_ops.writeTargetFor(session, "/other/local-repo", &ctl_probe) == .local);
         }

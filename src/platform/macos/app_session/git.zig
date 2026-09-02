@@ -325,10 +325,10 @@ pub fn writeTargetFor(self: *AppSession, repo: []const u8, ctl_buf: []u8) WriteT
     // 달라도 「같은 저장소 가족」임이 그 한 값으로 드러난다. 진짜 로컬 저장소 행은 `origin` 이 다르니
     // 그대로 `.local` 이다 — RS4a 4 회차가 못 박은 그 동작을 안 건드린다.
     //
-    // 원격 워크트리를 **원격으로** 쓰는 것은 기능이다(쓰기 워커가 그 행의 목적지를 모른다). 여기서는
-    // 「보내지 않고 이유를 말한다」로 끊는다 — 소켓이 없을 때와 같은 처리다.
-    if (!std.mem.eql(u8, current, repo))
-        return if (sameRepoFamily(self, repo, current)) .unavailable else .local;
+    // **같은 가족이면 그 기계로 보낸다**(RS5). 워크트리는 저장소와 같은 호스트·같은 control socket 을
+    // 쓴다 — 목적지가 하나이므로 활성 저장소의 것을 그대로 태운다. 그 전 단계에서는 여기서 끊었는데
+    // (「보내지 않고 이유를 말한다」), 읽기·쓰기 워커가 원격 인자를 받게 되면서 끊을 이유가 없어졌다.
+    if (!std.mem.eql(u8, current, repo) and !sameRepoFamily(self, repo, current)) return .local;
     const ctl = remoteControlSocketFor(self, dest, ctl_buf) orelse return .unavailable;
     return .{ .remote = .{ .dest = dest, .control_path = ctl } };
 }

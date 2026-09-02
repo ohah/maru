@@ -416,10 +416,19 @@ pub const Provider = struct {
         return monotonicNs() >= ctx.deadline_ns;
     }
 
+    /// 단조 시계. **`std.c.clock_gettime` 을 쓰면 안 된다** — POSIX 전용이라 Windows 에서는 이 중립
+    /// 파일이 **컴파일조차 안 되고**, 그러면 그 호스트에서 syntax 회귀를 볼 방법이 사라진다(§2m.108).
+    ///
+    /// **io 를 호출자에게 받지 않는다.** 이 저장소의 규칙은 「I/O 는 호출자가 준 `io` 로 한다」인데
+    /// 시계 읽기는 I/O 가 아니다 — std 구현이 그것을 그대로 말한다(`Io/Threaded.zig`의 `now`가
+    /// `userdata` 를 받자마자 `_ = t;` 로 버리고 `nowWindows`/`nowPosix` 로 간다, 0.16 실측).
+    /// 즉 어느 인스턴스로 읽어도 같은 값이고 공유 상태를 안 건드린다. 그 한 줄을 위해 `open` 의
+    /// 서명을 바꾸면 호출자 수십 자리가 따라 바뀐다(`app_session/editor.zig` 실측).
+    ///
+    /// `awake` 를 고른다 — 옛 코드의 `CLOCK_MONOTONIC` 과 같은 뜻(잠든 시간을 안 센다)이다.
     fn monotonicNs() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        const io = std.Io.Threaded.global_single_threaded.io();
+        return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
     }
 
     /// 문서 내용이 **통째로** 바뀌었다(디스크에서 다시 읽기 등) — 전체를 다시 판다.

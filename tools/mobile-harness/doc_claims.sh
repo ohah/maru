@@ -52,11 +52,18 @@ ck "host 에 남은 하드코딩 22" 0 "$(grep -cE '\(jfloat\)22\.0f|CFSTR\("Men
 echo "§3 상한은 코어가 답한다"
 ck "host 에 남은 quad 상한 하드코딩" 0 "$(grep -cE 'quad_cap = [0-9]|_quadCap = [0-9]' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 
+# **인터프리터 이름을 박지 않는다.** Windows 에는 `python3` 가 없다 — mise 가 깔아 주는 것도
+# `python` 이다(실측). 박아 두면 이 판정 셋이 `127`(command not found)로 죽는데, 그 값이 «판정이
+# 틀렸다» 와 **똑같은 모양**이라 게이트가 상시 빨간 채로 아무도 못 알아본다(§2m.109).
+PY=python3
+command -v "$PY" >/dev/null 2>&1 || PY=python
+command -v "$PY" >/dev/null 2>&1 || { echo "FAIL: python3/python 둘 다 없다"; exit 1; }
+
 echo "ABI 헤더 ↔ Zig export 타입"
 # 이름 집합만 대조하면 **타입이 어긋나도 C 는 컴파일되고 값만 조용히 깨진다**
 # (u32 자리에 u64, 포인터 자리에 정수 같은 것).
 # 숫자가 아니라 **종료 코드**를 본다(아래 키 판정과 같은 이유 — 판정 축이 늘면 숫자 하나로는 샌다).
-python3 "$(dirname "$0")/abi_types.py" > /tmp/maru_abi.$$ 2>&1
+"$PY" "$(dirname "$0")/abi_types.py" > /tmp/maru_abi.$$ 2>&1
 ck "ABI 타입" 0 "$?"
 grep -E "^  (없음|다름|모름)" /tmp/maru_abi.$$ || true
 rm -f /tmp/maru_abi.$$
@@ -259,7 +266,7 @@ echo "데스크톱 키 ↔ 모바일 판정"
 # 적대적 검증에서 14개가 어디에도 없는 채로 통과하고 있었다. 데스크톱에 키가 늘 때도 문다.
 # **숫자를 파싱하지 말고 종료 코드를 본다.** 숫자 하나만 읽으면 스크립트가 판정 축을 늘렸을 때
 # (누락 → 누락+겹침) 새 축이 조용히 샌다 — 실제로 `bell.*` 겹침이 그렇게 통과하고 있었다.
-python3 "$(dirname "$0")/config_key_coverage.py" > /tmp/maru_key_cov.$$ 2>&1
+"$PY" "$(dirname "$0")/config_key_coverage.py" > /tmp/maru_key_cov.$$ 2>&1
 ck "모바일 문서의 키 판정" 0 "$?"
 grep -E "^  (없음|겹침)" /tmp/maru_key_cov.$$ || true
 rm -f /tmp/maru_key_cov.$$
@@ -268,7 +275,7 @@ echo "계획 ↔ 계약 슬라이스 참조"
 # **이름을 여기 손으로 적지 않는다.** 예전 판은 `for m in M4a2 ... M10` 이라, 계획을 쪼개면
 # 판정자가 없는 슬라이스를 계속 찾고(M10 을 M10a~d 로 가르자 바로 그렇게 됐다) 새 인용은
 # 아예 안 봤다. 인용을 훑어 대조한다(접두어 인정 — `M3` 는 M3a~c 가족을 부르는 이름).
-python3 "$(dirname "$0")/plan_citations.py" > /tmp/maru_cite.$$ 2>&1
+"$PY" "$(dirname "$0")/plan_citations.py" > /tmp/maru_cite.$$ 2>&1
 ck "계획 인용" 0 "$?"
 grep -E "^  없음" /tmp/maru_cite.$$ || true
 rm -f /tmp/maru_cite.$$

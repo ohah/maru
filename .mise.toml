@@ -109,6 +109,12 @@ run = "zig build macos-app-host-abi-lib"
 # 없다. 그 둘은 `build.zig` 에서 **각자 imports 를 가진 별개 모듈**이라(1139행 대 1399행), 라이브러리
 # 쪽 배선만 깨지면 테스트 빌드는 초록이다.
 description = "Compile the macOS app host on macOS; explain the skip elsewhere"
+# **Windows 는 셸이 다르다.** mise 는 그 호스트에서 태스크를 `cmd` 로 돌리므로 아래 POSIX `if` 를
+# 못 읽고 **스킵을 설명하려던 태스크가 스킵조차 못 하고 죽는다**(실측 2026-09-01 — 그런데 `error:`
+# 도 `FAIL` 도 안 찍고 종료 코드로만 죽어, 메시지로 세던 집계가 이것을 놓쳤다).
+# **줄은 ASCII 로 적는다** — `cmd` 는 레거시 코드페이지라 한글이 깨져 나온다(실측). 읽을 수 없는
+# 줄은 없느니만 못하다: 이 태스크의 요점이 «건너뛴 이유가 로그에 남는 것» 이기 때문이다.
+run_windows = "echo skip: macos-app-host-abi-lib builds only on macOS (session_host is a struct{} stub elsewhere) -- host is Windows"
 run = """
 if [ "$(uname -s)" = Darwin ]; then
   zig build macos-app-host-abi-lib

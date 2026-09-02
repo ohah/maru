@@ -28,6 +28,18 @@ pub const CandidateFiles = struct {
         const attested = try (self.attestation orelse return error.InvalidOwner).revalidate(paths);
         return .{ .release_id = current.release_id, .tag = attested.tag, .source_commit = attested.source_commit, .build = .{ .workflow_ref = attested.build.workflow_ref, .run_id = attested.build.run_id, .run_attempt = attested.build.run_attempt }, .dmg = attested.dmg, .frozen = attested.frozen };
     }
+    pub fn frozenExecutableDirectoryDescriptor(self: *const @This()) !std.c.fd_t {
+        if (self.owner != self) return error.InvalidOwner;
+        return (self.attestation orelse return error.InvalidOwner).frozen.executableDirectoryDescriptor();
+    }
+    pub fn frozenPathMutationSeal(self: *const @This()) !files.PathMutationSeal {
+        if (self.owner != self) return error.InvalidOwner;
+        return (self.attestation orelse return error.InvalidOwner).frozen.pathMutationSeal();
+    }
+    pub fn validateFrozenPathMutationSeal(self: *const @This(), seal: files.PathMutationSeal) !void {
+        if (self.owner != self) return error.InvalidOwner;
+        try (self.attestation orelse return error.InvalidOwner).frozen.validatePathMutationSeal(seal);
+    }
     pub fn deinit(self: *@This()) !void {
         if (self.owner != self or self.attestation == null) return error.InvalidOwner;
         self.* = .{};

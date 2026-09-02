@@ -6,8 +6,9 @@ const bounded = @import("bounded_process");
 const current_input = @import("release_adapter_github_current_manifest_input");
 const current_product = @import("release_adapter_github_current_product");
 const deadline_mod = @import("release_adapter_deadline");
+const compatibility_probe = @import("release_adapter_compatibility_probe");
 
-pub const max_probe_bytes: usize = 512;
+pub const max_probe_bytes = compatibility_probe.max_probe_bytes;
 
 pub const Error = error{
     InvalidOwner,
@@ -39,42 +40,8 @@ pub const CurrentCompatibility = struct {
     }
 };
 
-const ProbeWire = struct {
-    mrsh_major: u64,
-    screen_codec: u64,
-    handoff_reader_min: u64,
-    handoff_reader_max: u64,
-    app_host_abi: u64,
-};
-
 pub fn parse(bytes_with_newline: []const u8) Error!manifest.Compatibility {
-    const bytes = if (std.mem.endsWith(u8, bytes_with_newline, "\n")) bytes_with_newline[0 .. bytes_with_newline.len - 1] else bytes_with_newline;
-    if (bytes.len == 0 or bytes.len > max_probe_bytes or std.mem.indexOfScalar(u8, bytes, '\r') != null) return error.InvalidProbe;
-    var arena_storage: [2048]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&arena_storage);
-    var parsed = std.json.parseFromSlice(ProbeWire, fba.allocator(), bytes, .{
-        .duplicate_field_behavior = .@"error",
-        .ignore_unknown_fields = false,
-    }) catch return error.InvalidProbe;
-    defer parsed.deinit();
-    const value = parsed.value;
-    if (value.mrsh_major == 0 or value.screen_codec == 0 or value.handoff_reader_min == 0 or
-        value.handoff_reader_min > value.handoff_reader_max or value.app_host_abi == 0)
-        return error.InvalidProbe;
-    var canonical_storage: [max_probe_bytes]u8 = undefined;
-    const canonical = std.fmt.bufPrint(
-        &canonical_storage,
-        "{{\"mrsh_major\":{d},\"screen_codec\":{d},\"handoff_reader_min\":{d},\"handoff_reader_max\":{d},\"app_host_abi\":{d}}}",
-        .{ value.mrsh_major, value.screen_codec, value.handoff_reader_min, value.handoff_reader_max, value.app_host_abi },
-    ) catch return error.InvalidProbe;
-    if (!std.mem.eql(u8, bytes, canonical)) return error.InvalidProbe;
-    return .{
-        .mrsh_major = value.mrsh_major,
-        .screen_codec = value.screen_codec,
-        .handoff_reader_min = value.handoff_reader_min,
-        .handoff_reader_max = value.handoff_reader_max,
-        .app_host_abi = value.app_host_abi,
-    };
+    return compatibility_probe.parse(bytes_with_newline) catch return error.InvalidProbe;
 }
 
 const RealProbe = struct {

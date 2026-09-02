@@ -231,6 +231,10 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
         if (had != null) {
             scm_dock_ops.clearScmWriteError(self);
             forgetReadFailure(self);
+            // **머리 줄 요약도 버린다**(적대적 검증 2026-09-02 3 회차). 그 값들은 **옛 기계**의 것이고,
+            // 낡음 표시로는 부족하다 — `repoStatusTextFor` 가 `stale` 을 안 봐서 **파일 줄이 살아 있고**,
+            // 그 줄을 누르면 저쪽에서 읽은 경로가 지금 기계로 날아간다(RS5 부터 실제로 원격까지 간다).
+            scm_dock_ops.forgetRepoStatus(self);
         }
         return;
     };
@@ -243,6 +247,7 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     // 바뀌는 전환을 못 본다 — 그때 「원격 세션이라 아직 목록만 읽습니다」가 로컬 목록 위에 그대로 남는다.
     scm_dock_ops.clearScmWriteError(self);
     forgetReadFailure(self);
+    scm_dock_ops.forgetRepoStatus(self); // 같은 이유 — 위 분기의 주석을 본다
     self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
 }
 

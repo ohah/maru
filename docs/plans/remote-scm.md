@@ -699,5 +699,70 @@ RS4a 4 회차의 「비활성 **로컬** 저장소 행은 로컬로 간다」가
 
 ### 14.4 남은 것
 
-`scm_repo_status` 캐시는 여전히 **경로로만** 맞춘다(§13.3). 로컬 `/srv/app` → 원격 `/srv/app` 전환에서
-다시 읽히기 전 한 번은 저쪽 기계의 값이 그려질 수 있다 — 근본은 캐시에 host 축이 없는 것이다.
+`scm_repo_status` 캐시는 여전히 **경로로만** 맞춘다(§13.3). **§15 가 그것을 닫았다.**
+
+## 15. 호스트가 바뀌면 머리 줄 요약을 **버린다** (2026-09-02)
+
+§13.3 이 남겨 둔 위험을 닫는다. **닫는 과정에서 처음 세운 처방이 틀렸다는 것이 이번 검증의 수확이다.**
+
+### 15.1 무엇이 새고 있었나
+
+`scm_repo_status` 는 `path` 로만 맞는다. 호스트만 바뀌는 전환(같은 배치의 서버 둘: `B:/srv/app` →
+`C:/srv/app`)에서 그 항목은
+
+- `rememberGitRepo` 가 **경로로만** 판정해 못 보고 — 이 한계는 `rememberGitRepoDest` 주석이 이미
+  적어 두었다. 그런데 그때 함께 치우는 목록에 **이 캐시만 빠져 있었다.**
+- 목록에 계속 있으니 `dropStaleRepoStatus` 도 안 버리고,
+- 성공한 항목은 `stale` 이 서야만 다시 읽히는데(`shouldReadRepoStatus`) 그 전환은 `stale` 을 안 세운다.
+
+→ **영영 안 읽힌다.** 창이 좁은 것이 아니라 없다.
+
+### 15.2 표시만의 문제가 아니다 — 쓰기까지 간다
+
+```
+B 의 status_text  →  modelForRepo(비활성) 이 그것으로 파일 줄을 세운다(②d)
+                  →  submitRowWrite 가 row.path 를 집어
+                  →  submitWrite(repo = C 의 경로, …)  →  RS5 가 C 로 보낸다
+```
+
+**B 에서 읽은 파일 경로로 C 에 스테이지한다.**
+
+### 15.3 처방을 한 번 틀렸다 — 낡음 표시로는 부족하다
+
+처음에는 `markRepoStatusStale` 한 줄이면 된다고 판단했다. **아니다:**
+
+```zig
+fn repoStatusTextFor(self, repo) ?[]const u8 {
+    ...
+    return if (entry.status_text.len > 0) entry.status_text else null;   // `stale` 을 보지 않는다
+}
+```
+
+낡음 표시는 **표시**만 낡게 하고 파일 줄은 그대로 살린다. 다시 읽힐 때까지(항목당 한 tick + ssh 왕복)
+위 쓰기 경로가 열려 있다. 그래서 **버린다**(`forgetRepoStatus`) — 돌고 있는 답도 함께 버린다(그 답은
+옛 기계의 것이다).
+
+「읽는 중…」으로 되돌아가는 깜빡임은 여기서 **맞다.** `refreshGitStatus` 가 그 깜빡임을 피하려고 낡음
+표시만 하는 것은 **같은 기계를 다시 읽을 때**의 이야기이고, 기계가 바뀌었으면 그 줄은 지금 사실이
+아니다 — 「아직 모른다」가 참이다.
+
+### 15.4 host 축은 **안 더한다**
+
+캐시에 host 축을 더하는 안도 있었다. 안 한다: **이 캐시는 어느 순간에도 한 기계의 것만 담는다.**
+`collectRepoRoots` 는 활성 터미널의 루트 하나만 내고 원격이면 `termCwd` 가 막아 0 을 낸다. 나머지는
+`ensureListed(git_repo)` 와 그 워크트리들 — 전부 같은 호스트다. 틱 순서도 그 불변을 지킨다
+(`drainGitStatus`→`followActiveTerminalRepo` 가 `pumpRepoStatus` 보다 **앞**이고, 도크가 숨으면 둘 다
+안 돈다). 그러니 필요한 것은 **축이 아니라 전환 시 무효화**다.
+
+축을 더했다면 맞추는 자리 일곱 곳(`repoStatusFor`·`drainRepoStatus`·`recordRepoStatusFailure`·
+`markRepoStatusStaleFor`·`dropStaleRepoStatus`·투영·`pumpRepoStatus`)을 전부 고쳐야 하고, 하나만
+빠뜨리면 조용히 경로 매칭으로 되돌아간다.
+
+### 15.5 판정자에서 조심한 것
+
+⚠️ **자리 번호로 찾지 않는다.** 처음 쓴 단언은 `items[0]` 을 봤는데, 같은 테스트의 앞 블록이 **같은
+경로**를 실패로 적어 둔 항목이 0 번이었다 — 심은 것이 아니라 그것을 보고 깨졌다. `repoStatusFor` 로
+찾고, 앞 상태를 먼저 치운다.
+
+⚠️ **「심은 것이 파일 줄까지 살아 있다」를 먼저 센다.** 그 줄이 없으면 뒤의 「비었다」가
+**「애초에 없었다」로 통과**한다.

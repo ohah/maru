@@ -3948,6 +3948,58 @@ fn refreshRepoList(self: *AppSession) void {
     dropStaleRepoStatus(self);
 }
 
+/// 머리 줄 요약을 **통째로 버린다** — 호스트가 바뀌었을 때 쓴다(적대적 검증 2026-09-02 3 회차).
+///
+/// **낡음 표시로는 부족하다.** `repoStatusTextFor` 는 `stale` 을 보지 않으므로, 표시만 낡은 것이 아니라
+/// **그 저장소의 파일 줄이 그대로 살아 있다** — 비활성 저장소의 줄은 이 `status_text` 로 세운다(②d).
+/// 그 줄을 누르면 `submitRowWrite` 가 **저쪽 기계에서 읽은 경로**를 지금 기계로 보낸다(RS5 부터 그
+/// 쓰기는 실제로 원격까지 간다). 같은 배치의 서버 둘을 오가면 경로가 겹치므로 닿는 길이다.
+///
+/// 「읽는 중…」으로 되돌아가는 깜빡임은 여기서 **맞다**. `refreshGitStatus` 가 그 깜빡임을 피하려고
+/// 낡음 표시만 하는 것은 **같은 기계를 다시 읽을 때**의 이야기이고, 기계가 바뀌었으면 그 줄은 지금
+/// 사실이 아니다 — 「아직 모른다」가 참이다.
+pub fn forgetRepoStatus(self: *AppSession) void {
+    for (self.scm_repo_status.items) |entry| {
+        self.allocator.free(entry.path);
+        self.allocator.free(entry.branch);
+        if (entry.status_text.len > 0) self.allocator.free(entry.status_text);
+    }
+    self.scm_repo_status.clearRetainingCapacity();
+    // 돌고 있는 답도 버린다 — 그 답은 **옛 기계**의 것이라 새 목록에 실리면 안 된다.
+    self.scm_repo_status_inflight = 0;
+    self.metal_dirty = true;
+}
+
+/// 판정자용: 머리 줄 요약을 직접 심는다(성공 항목). 진짜 저장소 없이 「캐시에 남의 기계 값이 있다」를
+/// 세울 방법이 이것뿐이다. 소유는 세션이 진다 — `deinit` 가 세 문자열을 모두 푼다.
+pub fn seedRepoStatusForTest(self: *AppSession, path: []const u8, branch: []const u8, status_text: []const u8) void {
+    const path_copy = self.allocator.dupe(u8, path) catch return;
+    const branch_copy = self.allocator.dupe(u8, branch) catch {
+        self.allocator.free(path_copy);
+        return;
+    };
+    const text_copy = self.allocator.dupe(u8, status_text) catch {
+        self.allocator.free(path_copy);
+        self.allocator.free(branch_copy);
+        return;
+    };
+    self.scm_repo_status.append(self.allocator, .{
+        .path = path_copy,
+        .branch = branch_copy,
+        .status_text = text_copy,
+        .detached = false,
+        .count = 1,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .read_ns = 1,
+    }) catch {
+        self.allocator.free(path_copy);
+        self.allocator.free(branch_copy);
+        self.allocator.free(text_copy);
+    };
+}
+
 /// 판정자용: 저장소 목록을 **직접 심는다**. 「같은 저장소 가족」 판정은 `Entry.origin` 이 지는데, 그
 /// 값을 실제 저장소 없이 만들 방법이 이것뿐이다(워크트리 판정은 `git worktree list` 가 준다).
 ///

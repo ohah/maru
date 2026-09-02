@@ -139,6 +139,7 @@ test "제외 목록은 **중첩된** 생성물 디렉터리도 거른다" {
     try std.testing.expect(skipped("web/dist/app.js"));
     try std.testing.expect(skipped("crates/target/debug/build.rs"));
     try std.testing.expect(skipped("assets/fonts/a.md")); // 두 세그먼트 항목은 접두어로 걸린다
+    try std.testing.expect(skipped("references/github-rest-api-description/api.yaml"));
 
     // **우리 소스는 계속 훑는다** — 이름이 비슷하다고 거르면 그쪽 마커를 못 잡는다.
     try std.testing.expect(!skipped("src/session/git_command.zig"));

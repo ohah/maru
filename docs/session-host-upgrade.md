@@ -1156,6 +1156,24 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied/pre-owned owner와 UUID/context/product/tree/path drift를 Debug·ReleaseFast에서 검증한다. profile A/B 선택,
   predecessor authority, gate leaf 조립·publication과 aggregate attestation은 후속 gate가 소유한다.
 
+  upgrade-B evidence가 소비할 predecessor 공통 identity는
+  `release_adapter_predecessor_evidence_identity.zig`의 final-address move-only `PredecessorEvidenceIdentity`가 단독
+  소유한다. 입력은 role-A `AuthenticatedManifest`, 그 인증 때 사용한 held `ManifestFile`, 해당 manifest로 만든
+  `AuthenticatedPredecessorAssets`뿐이다. caller가 predecessor release ID/tag/commit, manifest/DMG/executable digest 또는
+  다운로드 성공 bool을 별도 scalar로 제출하지 않는다. authenticated manifest는 parsed manifest와 attestation의 exact subject
+  name/SHA, run identity를 함께 내는 read-only evidence view를 제공하되 raw parsed/observed field를 새 authority로 간주하지 않는다.
+
+  composition은 manifest file과 downloaded set을 재검증하고, manifest가 canonical role A·predecessor 없음인지 확인한 뒤
+  attestation subject digest↔held manifest digest, asset role별 manifest name/size/SHA↔downloaded inode observation,
+  resolved source commit↔manifest source를 전부 교차결속한다. 그 뒤에만 `evidence.Predecessor`의 release ID/tag/commit,
+  manifest SHA, DMG SHA와 frozen executable SHA를 fixed owner storage로 복사한다. 후속 upgrade writer 직전 `revalidate`는 동일
+  세 owner와 held file/download inode를 다시 대조한다. copied/pre-owned/alias owner, authenticated observation drift,
+  role/source/asset 교환·누락·digest/path identity 변화에서는 view publication 0이다. focused gate
+  `test-session-host-release-adapter-predecessor-evidence-identity`는 exact derivation/revalidation, caller scalar 입력 0,
+  manifest attestation/file mismatch, asset role 교환·mutation, copied/pre-owned/alias owner를 Debug·ReleaseFast actual filesystem에서
+  검증한다. 이 gate는 upgrade 1/near-max leaf 실행·aggregate 조립, current manifest authoring, draft publication 또는 frozen U5
+  제품 E2E를 완료하지 않는다.
+
   current local product composition의 단일 소유자는 `release_adapter_github_current_product.zig`다. 입력은 성공한
   `CurrentManifestInput` final-address owner와 caller의 absolute DMG/frozen executable pathname, private DMG work pathname뿐이다.
   composition은 unauthenticated manifest pointer나 caller가 별도로 조립한 asset expectation을 받지 않고, authenticated role-B

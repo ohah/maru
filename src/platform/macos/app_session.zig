@@ -66714,6 +66714,30 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         }
     }
 
+    // ⑵-c **호스트가 바뀌면 머리 줄 요약을 버린다**(적대적 검증 2026-09-02 3 회차).
+    //
+    // 경로가 같고 **호스트만** 바뀌는 전환이 있다(같은 배치의 서버 둘). `rememberGitRepo` 는 경로로만
+    // 판정해 그것을 못 보고, 그 캐시는 목록에 계속 있으니 `dropStaleRepoStatus` 도 안 버린다. 성공한
+    // 항목은 `stale` 이 서야만 다시 읽히는데 그 전환은 `stale` 을 세우지 않는다 — **영영 안 읽힌다.**
+    //
+    // ⚠️ **낡음 표시로는 부족하다**(처음에 그렇게 고치려 했다). `repoStatusTextFor` 는 `stale` 을 보지
+    // 않아서 **파일 줄이 그대로 살아 있고**, 그 줄을 누르면 `submitRowWrite` 가 저쪽 기계에서 읽은
+    // 경로를 지금 기계로 보낸다(RS5 부터 그 쓰기는 실제로 원격까지 간다). 그래서 **버린다.**
+    {
+        // ⚠️ 앞 블록(⑵-b)이 같은 경로를 **실패**로 적어 뒀다 — 그걸 안 치우면 아래 「심은 것이 살아
+        // 있다」가 그 실패 항목(파일 줄 없음)을 보고 걸린다. 자리 번호에 기대지 않는다.
+        scm_dock_ops.forgetRepoStatus(session);
+        scm_dock_ops.seedRepoStatusForTest(session, "/srv/app-wt", "wt-b", "1 .M N... 100644 100644 100644 aaa bbb b-only.txt\n");
+        // 심은 것이 실제로 **파일 줄까지** 살아 있는지 먼저 본다 — 안 그러면 아래 「비었다」가
+        // 「애초에 없었다」로 통과한다.
+        const seeded = scm_dock_ops.repoStatusFor(session, "/srv/app-wt") orelse return error.SeedMissing;
+        try std.testing.expect(seeded.status_text.len > 0);
+        git_ops.rememberGitRepoDest(session, "user@other-box"); // 호스트만 바뀐다
+        try std.testing.expectEqual(@as(usize, 0), session.scm_repo_status.items.len);
+        try std.testing.expect(scm_dock_ops.repoStatusFor(session, "/srv/app-wt") == null);
+        git_ops.rememberGitRepoDest(session, "user@build-box"); // 원래대로 되돌린다
+    }
+
     // **거절은 이제 «소켓이 없다» 하나뿐이다**(RS4a·RS4b 가 나머지를 열었다). 이 세션에는 control
     // socket 이 없으므로 원격 쓰기는 **보내지 않고 이유를 말한다** — 조용한 무동작이 아니다.
     scm_dock_ops.clearScmWriteError(session);

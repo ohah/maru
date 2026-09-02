@@ -89,6 +89,17 @@ const ProductionAuthority = struct {
     }
 };
 
+/// Rebuilds the attachment graph and binds it to this exact final-address redownload receipt.
+/// Later mutation phases use this instead of duplicating attachment or manifest semantics.
+pub fn snapshotValidated(input: attachment.AuthorityInput, attached: *const attachment.DraftAssets, validation: *const RedownloadValidation) !Snapshot {
+    var authority = ProductionAuthority{ .input = input, .attached = attached };
+    const snapshot = try authority.snapshot();
+    const receipt = validation.value() orelse return error.InvalidValidation;
+    if (receipt.release_id != snapshot.release_id) return error.AuthorityMismatch;
+    for (snapshot.assets, 0..) |asset, index| if (receipt.asset_ids[index] != asset.id) return error.AuthorityMismatch;
+    return snapshot;
+}
+
 const ProductionDownloader = struct {
     io: std.Io,
     executable: [:0]const u8,

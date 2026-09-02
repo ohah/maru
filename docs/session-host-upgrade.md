@@ -2277,6 +2277,32 @@ pre/post mismatch, child failure 또는 빈/control-character output에서는 �
 다시 확인해야 다음 단계로 갈 수 있다. 이 component만으로 live release workflow 순서, draft attach·redownload·publish 또는 U5 E2E가
 완료됐다고 주장하지 않는다.
 
+### 11.33 exact draft asset attachment 권위
+
+draft에는 caller가 고른 glob이나 tag 기반 convenience upload가 아니라, 앞서 생성한 exact `DraftAuthority.id`에 candidate DMG,
+frozen executable, aggregate evidence와 candidate manifest 네 asset을 정확히 한 번씩 attach한다.
+`release_adapter_github_draft_asset_attachment.zig`의 final-address move-only `DraftAssets`가 trusted `Context`, `DraftAuthority`,
+`CandidateAttestation`, `AuthoredAttestation`, 네 held file owner와 canonical held manifest, checkout 전에 고정한 GitHub CLI,
+validated token 및 같은 release phase `Deadline`을 함께 소비한다. caller는 release ID, asset name/size/SHA, endpoint, upload 순서,
+`--clobber` 또는 성공 bool을 별도 scalar로 제출하지 않는다.
+
+composition은 held manifest를 canonical parse하고 그 manifest 자체를 제외한 세 asset row가 exact role 순서로 DMG, frozen executable,
+evidence를 지목하는지 확인한다. 네 pathname의 basename, held inode의 size/SHA와 candidate/authored attestation receipt가 모두 같은
+repository/tag/source/workflow run 및 draft ID에 결속돼야 한다. 네 inode는 서로 달라야 하며 pathname은 upload 전후에 각 held owner로
+재검증한다. held input fd의 regular-file 판정은 target별 libc syscall을 직접 부르지 않고 `std.Io.File.stat(io)`의 portable kind를 사용하며
+directory·pipe·device를 upload body로 인정하지 않는다. upload body는 pathname을 child가 다시 열게 하지 않고 held fd에서 bounded pipe로 전달한다. closed GitHub request는
+`uploads.github.com/repos/ohah/maru/releases/<exact-id>/assets?name=<derived-name>`와 octet-stream body만 허용하며 각 response의
+nonzero asset ID, exact name/size/SHA-256 digest, octet-stream content type와 uploaded state를 strict JSON으로 다시 결속한다.
+
+순서는 DMG→frozen executable→evidence→manifest로 고정한다. 모든 호출은 shared deadline의 fresh remaining, pinned CLI와 전체 typed
+graph 재검증으로 둘러싸며 네 response가 모두 맞은 뒤에만 `DraftAssets`를 게시한다. 첫 remote mutation 뒤의 timeout, child failure,
+malformed/foreign response, local allocation 또는 publication 실패는 `.empty`로 되돌아가거나 자동 retry·기존 asset 재사용·삭제를 하지
+않는다. 결속된 asset ID 목록이 있으면 terminal cleanup-required audit state에 보존하고, 성공 여부를 확정할 수 없는 호출이 하나라도
+있으면 terminal remote-state-unknown으로 보존해 사람이 exact draft를 감사해야 한다. copied/pre-owned owner, inode/path/manifest/receipt
+drift, duplicate name/ID, partial attach와 기존 remote asset은 publication 0이다. focused gate는 exact request/body order, held-fd streaming,
+전 fail-index terminal state, token staging zeroization과 bounded response ownership을 Debug·ReleaseFast에서 검증한다. 이 component는 draft redownload validation,
+publish, post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

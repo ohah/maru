@@ -998,6 +998,13 @@ U5 artifact attestation 발급 action은 한 invocation이 canonical absolute re
 executable과 authored evidence/manifest는 최종 release workflow가 이 action을 네 번 따로 호출한다. 이 component는 workflow
 permissions, protected environment, 실제 attestation 발급이나 draft attach/publish를 완료했다는 증거가 아니다.
 
+U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
+authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
+uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph
+revalidation을 Debug·ReleaseFast에서 검증한다. 첫 remote mutation 뒤 partial failure는 자동 retry·reuse·delete하지 않고 known ID를
+cleanup-required 또는 불확정 호출을 remote-state-unknown terminal audit state로 보존해야 한다. 이 gate는 draft redownload validation,
+publish, post-publish release attestation이나 frozen signed U5 제품 E2E 증거가 아니다.
+
 U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
 candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
 fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact

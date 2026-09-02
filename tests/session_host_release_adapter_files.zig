@@ -121,3 +121,46 @@ test "owned summary publication returns the exact published inode authority" {
     defer std.testing.allocator.free(durable);
     try std.testing.expectEqualStrings(bytes, durable);
 }
+
+test "held published evidence reads exact bytes and rejects pathname replacement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var moved_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "evidence.json", &path_buf);
+    const moved = try absolute(&tmp, "original.json", &moved_buf);
+    const bytes = "{\"profile\":\"baseline_a\"}\n";
+    var published: files.PinnedReleaseFile = .{};
+    try files.publishSummaryOwnedExclusive(&published, path, bytes);
+    defer published.deinit() catch {};
+    var input = try published.readHeldAlloc(std.testing.allocator, path, 128);
+    defer input.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(bytes, input.bytes);
+    try std.testing.expectEqual((published.value() orelse unreachable).identity, input.identity);
+
+    var copied = published;
+    try std.testing.expectError(error.InvalidOwner, copied.readHeldAlloc(std.testing.allocator, path, 128));
+    try std.testing.expectError(error.TooLarge, published.readHeldAlloc(std.testing.allocator, path, bytes.len - 1));
+    if (std.c.rename(path.ptr, moved.ptr) != 0) return error.FixtureFailed;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence.json", .data = "foreign" });
+    try std.testing.expectError(error.FileChanged, published.readHeldAlloc(std.testing.allocator, path, 128));
+    const replacement = try tmp.dir.readFileAlloc(std.testing.io, "evidence.json", std.testing.allocator, .limited(16));
+    defer std.testing.allocator.free(replacement);
+    try std.testing.expectEqualStrings("foreign", replacement);
+}
+
+fn readHeldAllocationCase(allocator: std.mem.Allocator) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "evidence.json", &path_buf);
+    var published: files.PinnedReleaseFile = .{};
+    try files.publishSummaryOwnedExclusive(&published, path, "canonical evidence\n");
+    defer published.deinit() catch {};
+    var input = try published.readHeldAlloc(allocator, path, 128);
+    input.deinit(allocator);
+}
+
+test "held evidence allocation failure publishes no bytes" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, readHeldAllocationCase, .{});
+}

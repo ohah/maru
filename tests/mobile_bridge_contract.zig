@@ -5905,3 +5905,21 @@ test "S11-6 못 보낸 선언은 다음에 다시 간다 — 그리고 화면을
     bridge.declareViewportForTest(60, 40);
     try T.expectEqual(@as(?[8]u8, null), bridge.stagedViewportDeclaration());
 }
+
+test "S11-6 채널이 바뀌면 실어 둔 선언을 버린다 — 남의 축에 실리면 안 된다" {
+    const T = std.testing;
+    bridge.setControlWantForTest(.none);
+    bridge.resetViewportDeclarationForTest();
+    bridge.setControlWantForTest(.{ .screen = "000000000000000000000000000000aa".* });
+    defer bridge.setControlWantForTest(.none);
+
+    bridge.declareViewportForTest(50, 37);
+    try T.expect(bridge.stagedViewportDeclaration() != null);
+
+    // **사용자가 뒤로 간다.** host 가 아직 안 가져갔는데 채널이 ndjson 축으로 바뀐다 —
+    // 그대로 두면 `MRSV` 8바이트가 그 축에 실려 컨트롤 플레인이 통째로 깨진다.
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(?[8]u8, null), bridge.stagedViewportDeclaration());
+    var out: [64]u8 = undefined;
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
+}

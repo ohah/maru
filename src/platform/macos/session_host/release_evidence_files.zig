@@ -34,6 +34,14 @@ pub fn publishBaseline(allocator: std.mem.Allocator, request: BaselineRequest) E
 }
 
 pub fn publishBaselineOwned(allocator: std.mem.Allocator, request: BaselineRequest, result: *PublishedEvidence) Error!void {
+    var validator = NoopPublicationValidator{};
+    try publishBaselineOwnedValidated(allocator, request, &validator, result);
+}
+
+/// The validator runs after canonical assembly and binding, immediately before the output path is
+/// opened. Publication itself does not allocate, so an orchestration owner can close allocator
+/// reentrancy without moving filesystem ownership out of this module.
+pub fn publishBaselineOwnedValidated(allocator: std.mem.Allocator, request: BaselineRequest, validator: anytype, result: *PublishedEvidence) !void {
     try validateResult(result, request.common, &.{ request.default_false_path, request.signed_app_quit_path, request.output_path });
     var default_false = try files.readInputAlloc(allocator, request.default_false_path, evidence.max_evidence_bytes);
     defer default_false.deinit(allocator);
@@ -51,6 +59,7 @@ pub fn publishBaselineOwned(allocator: std.mem.Allocator, request: BaselineReque
     var parsed = try evidence.parseCanonical(allocator, aggregate);
     defer parsed.deinit();
     try evidence.bind(parsed.value(), .{ .baseline_a = request.common });
+    try validator.validate();
     try files.publishSummaryOwnedExclusive(result, request.output_path, aggregate);
 }
 
@@ -114,6 +123,10 @@ fn validateResult(result: *const PublishedEvidence, common: evidence.Common, ext
     for (common_values) |value| if (overlaps(result_bytes, value)) return error.InvalidOwner;
     for (extra) |value| if (overlaps(result_bytes, value)) return error.InvalidOwner;
 }
+
+const NoopPublicationValidator = struct {
+    fn validate(_: *@This()) Error!void {}
+};
 
 fn overlaps(left: []const u8, right: []const u8) bool {
     if (left.len == 0 or right.len == 0) return false;

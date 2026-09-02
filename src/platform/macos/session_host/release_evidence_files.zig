@@ -70,6 +70,11 @@ pub fn publishUpgrade(allocator: std.mem.Allocator, request: UpgradeRequest) Err
 }
 
 pub fn publishUpgradeOwned(allocator: std.mem.Allocator, request: UpgradeRequest, result: *PublishedEvidence) Error!void {
+    var validator = NoopPublicationValidator{};
+    try publishUpgradeOwnedValidated(allocator, request, &validator, result);
+}
+
+pub fn publishUpgradeOwnedValidated(allocator: std.mem.Allocator, request: UpgradeRequest, validator: anytype, result: *PublishedEvidence) !void {
     try validateResult(result, request.common, &.{
         request.predecessor.tag,
         request.predecessor.commit,
@@ -102,6 +107,7 @@ pub fn publishUpgradeOwned(allocator: std.mem.Allocator, request: UpgradeRequest
         .predecessor = request.predecessor,
         .designated_requirement_sha256 = request.designated_requirement_sha256,
     } });
+    try validator.validate();
     try files.publishSummaryOwnedExclusive(result, request.output_path, aggregate);
 }
 

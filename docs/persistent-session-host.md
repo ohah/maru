@@ -7013,8 +7013,19 @@ Unix socket은 macOS `sockaddr_un.sun_path`의
 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
 `/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로
 symlink가 아니며 현재 UID 소유인지 검증한다. socket도 현재처럼 peer UID와 mode `0600`을 검증한다. 임의
-`XDG_CACHE_HOME`을 socket prefix로 사용하지 않는다. host/runtime은 재부팅 보존 비목표라 `/tmp` 정리는 수명 계약과
-충돌하지 않는다.
+`XDG_CACHE_HOME`을 socket prefix로 사용하지 않는다.
+
+`/tmp` 정리는 **재부팅과 함께 오지 않을 수 있다.** 청소 도구나 시스템의 공간 회수가 언제든 이 뿌리를 지울 수
+있고, 그때 host 프로세스는 살아 있는 채로 listen socket의 **경로만** 잃는다 — 열려 있는 fd는 그대로지만 새
+연결은 경로로 오므로 아무도 붙지 못한다. host는 시작할 때 한 번 bind하고 socket 파일의 존재를 다시 확인하지
+않으므로 그 host가 쥔 runtime은 회수되지 않는다. 재부팅 보존이 비목표인 것과는 **별개의 손실**이며, 2026-09-02에
+실제로 셸 21개를 그렇게 잃었다.
+
+그래서 최소한 **다음 실행이 자력으로 회복**해야 한다. lock 자리를 만드는 경로(`host_connect.ensureDir`)는 뿌리가
+통째로 사라진 상태를 전제하고 부모부터 만든다. 한 단계만 만들면 `mkdir`이 ENOENT로 실패하고 뒤이은 lock 열기도
+같은 이유로 실패해 `endpoint_denied`로 끝나는데, 정작 뿌리를 만들 수 있는 코드
+(`short_endpoint.prepareCurrentUserNamespace`)는 그보다 뒤에 있어 **도달하지 못한다.** 그 상태에서는 앱을 몇 번
+다시 띄워도 같은 자리에서 멎고, 영속 세션을 통째로 포기한 채 in-process로 폴백한다.
 
 각 host는 자기 런타임 directory의 `owner.lock`을 lifetime 동안 exclusive `flock`하고, 짧은 socket bind가 끝난 뒤
 manifest를 temp-write→`fsync`→rename으로 publish한다. discovery는 lock이 live이고 manifest의 endpoint가 위 trusted

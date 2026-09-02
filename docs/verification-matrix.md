@@ -2589,12 +2589,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   transport의 최종 조립, release attestation·predecessor download·workflow 배선은 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.
-  verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest asset
-  name/SHA-256 exact set을 결속하고 certificate SAN과 verified timestamp를 요구한다. `ownerId`는 canonical nonzero만
+  verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest가 열거한
+  세 asset 및 canonical manifest 파일 자체를 합친 attached artifact 네 개의 name/SHA-256 exact set을 결속하고
+  certificate SAN과 verified timestamp를 요구한다. `ownerId`는 canonical nonzero만
   검사하며 별도 owner 권위로 쓰지 않는다. tag-ref SHA를 annotated tag의 peeled source commit으로 오인하지 않고 후속
   composition이 기존 git resolver의 manifest commit 수렴 증거와 함께만 `ReleaseAttestation.source_commit`을 만든다.
   `test-session-host-release-adapter-github-release-attestation`이 Debug·ReleaseFast에서 release/asset command, statement와
-  asset set, local selection, malformed/duplicate/cap/timeout/child failure를 검증한다. CLI pin/revalidation, predecessor
+  manifest 포함 attached artifact set, local selection, malformed/duplicate/cap/timeout/child failure를 검증한다. CLI pin/revalidation, predecessor
   download, git resolver 조립과 workflow 배선은 여전히 후속 범위다.
   `release_adapter_github_download.zig`는 canonical manifest의 세 asset role exact set을 role 순서로 다운로드한다. exact asset
   name은 Go filepath glob metacharacter를 escape한 뒤 `gh release download <tag> --repo ohah/maru --pattern <literal>

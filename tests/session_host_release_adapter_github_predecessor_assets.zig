@@ -13,6 +13,7 @@ const tag_object = "89abcdef0123456789abcdef0123456789abcdef";
 const a_sha = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
 const b_sha = "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d";
 const c_sha = "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6";
+const manifest_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const assets = [_]manifest.Asset{
     .{ .role = .universal_dmg, .name = "Maru-1.2.3.dmg", .sha256 = a_sha, .size = 1 },
     .{ .role = .frozen_product_executable, .name = "maru-session-host", .sha256 = b_sha, .size = 1 },
@@ -28,7 +29,8 @@ const valid_json =
     \\"statement":{"_type":"https://in-toto.io/Statement/v1","subject":[{"uri":"pkg:github/ohah/maru@v1.2.3","digest":{"sha1":"0123456789abcdef0123456789abcdef01234567"}},
     \\{"name":"Maru-1.2.3.dmg","digest":{"sha256":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}},
     \\{"name":"maru-session-host","digest":{"sha256":"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"}},
-    \\{"name":"summary.json","digest":{"sha256":"2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}}],
+    \\{"name":"summary.json","digest":{"sha256":"2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}},
+    \\{"name":"Maru-1.2.3-session-host-release.json","digest":{"sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}],
     \\"predicateType":"https://in-toto.io/attestation/release/v0.1","predicate":{"ownerId":"2468","purl":"pkg:github/ohah/maru@v1.2.3","releaseId":"67890","repository":"ohah/maru","repositoryId":"12345","tag":"v1.2.3"}},
     \\"verifiedTimestamps":[{"type":"TimestampAuthority","uri":"timestamp.githubapp.com","timestamp":"2026-09-01T00:00:00Z"}]}}
 ;
@@ -81,6 +83,9 @@ const FakeAuthenticated = struct {
     value_storage: manifest.Manifest,
     pub fn value(self: *const @This()) ?*const manifest.Manifest {
         return &self.value_storage;
+    }
+    pub fn evidenceView(self: *const @This()) ?authenticated_manifest.AuthenticatedManifest.EvidenceView {
+        return .{ .value = &self.value_storage, .subject_name = "Maru-1.2.3-session-host-release.json", .subject_sha256 = manifest_sha, .run_id = self.value_storage.build.run_id, .run_attempt = self.value_storage.build.run_attempt };
     }
 };
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {

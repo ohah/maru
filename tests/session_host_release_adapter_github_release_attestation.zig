@@ -8,10 +8,11 @@ const tag_ref_sha = "0123456789abcdef0123456789abcdef01234567";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const manifest_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const executable_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const release_manifest_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const assets = [_]release_manifest.Asset{
     .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 123 },
     .{ .role = .frozen_product_executable, .name = "maru-session-host-1.2.3", .sha256 = executable_sha, .size = 321 },
-    .{ .role = .evidence_summary, .name = "Maru-1.2.3-session-host-release.json", .sha256 = manifest_sha, .size = 456 },
+    .{ .role = .evidence_summary, .name = "evidence.json", .sha256 = manifest_sha, .size = 456 },
 };
 
 fn expected() attestation.Expected {
@@ -21,6 +22,7 @@ fn expected() attestation.Expected {
         .tag = "v1.2.3",
         .tag_ref_sha = tag_ref_sha,
         .assets = &assets,
+        .manifest = .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = release_manifest_sha },
     };
 }
 
@@ -31,7 +33,8 @@ const valid_json =
     \\{"uri":"pkg:github/ohah/maru@v1.2.3","digest":{"sha1":"0123456789abcdef0123456789abcdef01234567"}},
     \\{"name":"Maru-1.2.3-universal.dmg","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
     \\{"name":"maru-session-host-1.2.3","digest":{"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}},
-    \\{"name":"Maru-1.2.3-session-host-release.json","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}],
+    \\{"name":"evidence.json","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+    \\{"name":"Maru-1.2.3-session-host-release.json","digest":{"sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}],
     \\"predicateType":"https://in-toto.io/attestation/release/v0.1","predicate":{
     \\"ownerId":"2468","purl":"pkg:github/ohah/maru@v1.2.3","releaseId":"67890",
     \\"repository":"ohah/maru","repositoryId":"12345","tag":"v1.2.3"}},
@@ -47,6 +50,10 @@ test "release attestation command plans are exact and closed" {
     const asset = try attestation.plan(&storage, .{ .asset = .{ .path = "/tmp/Maru-1.2.3-universal.dmg", .expected = assets[0] } }, expected());
     const asset_want = [_][]const u8{ "release", "verify-asset", "v1.2.3", "/tmp/Maru-1.2.3-universal.dmg", "--repo", "ohah/maru", "--format", "json" };
     try expectArgs(&asset_want, asset.args);
+    const manifest_asset = try attestation.plan(&storage, .{ .manifest_asset = .{ .path = "/tmp/Maru-1.2.3-session-host-release.json" } }, expected());
+    const manifest_want = [_][]const u8{ "release", "verify-asset", "v1.2.3", "/tmp/Maru-1.2.3-session-host-release.json", "--repo", "ohah/maru", "--format", "json" };
+    try expectArgs(&manifest_want, manifest_asset.args);
+    try std.testing.expectError(error.InvalidPath, attestation.plan(&storage, .{ .manifest_asset = .{ .path = "relative.json" } }, expected()));
     try std.testing.expectError(error.InvalidPath, attestation.plan(&storage, .{ .asset = .{ .path = "relative.dmg", .expected = assets[0] } }, expected()));
     var wrong = assets[0];
     wrong.name = "other.dmg";
@@ -60,7 +67,7 @@ test "release attestation binds release identity tag ref and exact assets" {
     try std.testing.expectEqual(@as(u64, 67890), observed.release_id);
     try std.testing.expectEqualStrings("v1.2.3", observed.tag);
     try std.testing.expectEqualStrings(tag_ref_sha, observed.tag_ref_sha);
-    try std.testing.expectEqual(@as(usize, 3), observed.asset_count);
+    try std.testing.expectEqual(@as(usize, 4), observed.asset_count);
 }
 
 fn expectMutation(old: []const u8, replacement: []const u8) !void {
@@ -81,6 +88,19 @@ test "release attestation rejects release and certificate authority drift" {
 test "release attestation rejects asset substitution addition and duplication" {
     try expectMutation(dmg_sha, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
     try expectMutation("Maru-1.2.3-universal.dmg", "Maru-9.9.9-universal.dmg");
+    try expectMutation(release_manifest_sha, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    const missing_manifest = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        valid_json,
+        ",\n{\"name\":\"Maru-1.2.3-session-host-release.json\",\"digest\":{\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}",
+        "",
+    );
+    defer std.testing.allocator.free(missing_manifest);
+    try std.testing.expectError(error.AttestationMismatch, attestation.parseAndBind(std.testing.allocator, missing_manifest, expected()));
+    var aliased = expected();
+    aliased.manifest.name = assets[2].name;
+    try std.testing.expectError(error.InvalidExpected, attestation.parseAndBind(std.testing.allocator, valid_json, aliased));
     const extra = try std.mem.replaceOwned(u8, std.testing.allocator, valid_json, "}],\n\"predicateType", "},{\"name\":\"extra\",\"digest\":{\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}],\n\"predicateType");
     defer std.testing.allocator.free(extra);
     try std.testing.expectError(error.AttestationMismatch, attestation.parseAndBind(std.testing.allocator, extra, expected()));

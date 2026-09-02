@@ -34,7 +34,8 @@ const posixWalk = @import("posix_walk.zig").posixWalk;
 /// 미리 안다고 가정하는데, 이 사고의 성질이 바로 **예상 못 한 곳에 남는 것**이다.
 const scan_root = ".";
 
-/// 훑지 않을 디렉터리. 생성물·의존성·바이너리 자산이라 마커가 들어갈 수 없고, 훑으면 느리기만 하다.
+/// 훑지 않을 디렉터리. 생성물·의존성·바이너리 자산과 `.gitignore` 된 외부 reference checkout은
+/// 이 저장소가 소유한 충돌 마커 판정 대상이 아니며, 훑으면 느리거나 외부 대형 파일에서 실패한다.
 /// `.claude` 는 **다른 체크아웃**이 들어오는 자리다(에이전트 워크트리). 거기를 훑으면 남의 브랜치 상태를
 /// 이 트리의 위반으로 보고한다 — 실제로 범위를 넓히자마자 그것이 났고, 그 오탐이 게이트가 진짜로
 /// 돈다는 증거이기도 했다.
@@ -109,6 +110,10 @@ fn countMarkers(path: []const u8, source: []const u8, report: *bool) usize {
 /// 세그먼트 비교라 `web/dist`·`crates/target` 같은 중첩 생성물도 함께 걸러진다 — 그 셋 다 "우리가 쓴
 /// 소스가 아닌 곳"이라는 같은 이유로 목록에 있다.
 fn skipped(path: []const u8) bool {
+    // `references/`는 저장소 최상위의 ignore된 외부 checkout만 뜻한다. 일반 세그먼트 목록에 넣으면
+    // 향후 `src/references/`처럼 저장소가 소유하는 동명 디렉터리까지 조용히 숨기게 된다.
+    if (std.mem.eql(u8, path, "references") or std.mem.startsWith(u8, path, "references/")) return true;
+
     // **여러 세그먼트로 된 항목**(`assets/fonts`)은 접두어로 본다 — 세그먼트 비교로는 안 걸린다.
     for (skip_dirs) |dir| {
         if (std.mem.indexOfScalar(u8, dir, '/') == null) continue;
@@ -145,6 +150,7 @@ test "제외 목록은 **중첩된** 생성물 디렉터리도 거른다" {
     try std.testing.expect(!skipped("src/session/git_command.zig"));
     try std.testing.expect(!skipped("web/src/main.ts"));
     try std.testing.expect(!skipped("docs/node_modules_notes.md")); // 세그먼트가 아니라 이름의 일부다
+    try std.testing.expect(!skipped("src/references/owned.zig")); // 최상위 외부 checkout만 제외한다
     try std.testing.expect(!skipped("assets/icons/plus.svg"));
 }
 

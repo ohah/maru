@@ -351,6 +351,15 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 - 세션 재현: 저장소 안에 선 Term에 authority만 어긋난 OSC 7을 보내면 폴더줄이 `<host>:<절대경로>`가 되고 저장소 판정이 `.unknown`으로 무너지는지, 그리고 **빈 authority(로컬 보고자 형식)에서는 같은 경로가 `.repo`로 돌아오는지**를 한 테스트에서 대조한다(수정의 효과가 곧 그 대조다).
 - 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).
 - 전달 경로: in-process Term과 **host-backed Term 둘 다 배선됐다**(2026-09-01 코드 대조로 정정 — 이 자리에는 「host-backed 의 wire 는 아직 `cwd_host` 를 싣지 않는다」가 남아 있었다). `cwd_host` 는 `handoff_codec.zig` 의 `tag = 90`(optional) 로 실리고, `runtime_metadata_wire.zig`·`runtime_event_wire.zig`·`server.zig` 가 나른다. 이 문서가 「후속에서 포함해야 한다」고 적었던 canonical 검증도 들어가 있다(`rangeIsCanonical(dto.cwd_host_range, …)` + 해시). 소비처도 이어져 `sidebarCwdPath` 가 `termCwdIsRemote` 일 때 `observation.cwd_host` 로 `<host>:<path>` 를 만든다. 이 문단이 예고했던 링크 갭(「wire 가 붙는 순간 §9.4 의 파일 경로 차단이 그 모드에서만 빠진 채로 남는다」)은 **닫혔다**(2026-09-01 코드 대조로 정정 — 이 자리에는 「`remoteLinkSpanAt` 은 여전히 `linkScopesFromConfig` 를 직접 부른다」는 ⚠️ 가 남아 있었다). 지목됐던 두 호출부가 모두 승인된 래퍼를 쓴다: `remoteLinkSpanAt` 은 `linkScopesForSurfaceId(self, surface.id)` 를, `linkAtFor` 는 `packLinkScopes(linkScopesForTerm(self, hit.term))` 를 부른다. `linkScopesFromConfig` 를 직접 부르는 자리는 이제 그 래퍼 **둘의 내부뿐**이고, 그 사실 자체를 경계 test 가 소스 텍스트에서 세어 못 박는다(호출부가 그 함수를 **쓰는지**는 동작 test 로 볼 수 없어서다).
+- **표의 컨트롤 플레인 행도 이제 판정자가 문다(2026-09-02).** 그 전에는 `ssh_remote_cwd_doc_boundary.zig`
+  가 GUI 축 일곱 줄만 되짚고 **wire 축 한 줄을 빼먹고 있었다** — 표가 낡는 것을 막으려고 쓴 판정자가 한
+  행을 안 보고 있었다. 이 행은 다른 행과 방향이 반대(「안 쓴다」가 아니라 「싣되 host 를 따로 알린다」)라
+  **두 가지가 함께** 참이어야 한다: 값이 실린다 ∧ 경로 문자열이 `<host>:<path>` 로 오염되지 않는다.
+  스키마(L2)·생산자(원격일 때만·`termDisplayHost` 공유·로컬은 생략)·전달 경로(handoff tag 90 ·
+  `rangeIsCanonical` + 해시)를 함께 센다.
+  ⚠️ **여기서 컴파일러는 도와주지 않는다**: `.cwd_host` 는 기본값이 `null` 이라 DTO 리터럴에서 그 줄만
+  지워도 **컴파일이 통과하고 값만 조용히 안 실린다.** 세 갈래 반증(재구현·접두 오염·필드 누락)이 모두
+  판정자를 빨갛게 만드는 것까지 확인했다.
 - **순수 함수 단언만으로는 부족하다.** 폴더줄은 사이드바 **draw list 셀을 직접 읽어** 확인한다 — 조립부가 판정 함수를 안 쓰거나 줄이 빈 문자열로 접히면 단위 테스트는 통과하면서 화면엔 아무것도 안 뜬다. 로컬→원격 전이의 **대조군**을 함께 둔다: 경로가 같고 host만 바뀌는 전이는 `title_generation` bump가 없으면 observation refresh 자체가 스킵돼 옛 host가 계속 그려진다(실제로 그렇게 발견했다).
 - 수동 E2E: 원격 rc에 스니펫을 넣은 뒤 맨 `ssh`와 `maru ssh` 양쪽에서 `cd`가 폴더줄에 반영되는지, 원격 tmux에서 `allow-passthrough` on/off로 값이 오고 끊기는지, ssh를 빠져나오면 로컬 cwd 표시로 복귀하는지.
 

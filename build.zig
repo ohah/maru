@@ -4531,8 +4531,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_ssh_remote_cwd_doc_tests = b.addRunArtifact(ssh_remote_cwd_doc_tests);
-    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-tests=1");
-    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-passed=1");
+    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-tests=2");
+    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-passed=2");
     run_ssh_remote_cwd_doc_tests.setCwd(b.path("."));
     ssh_remote_cwd_doc_step.dependOn(&run_ssh_remote_cwd_doc_tests.step);
     boundary_step.dependOn(&run_ssh_remote_cwd_doc_tests.step);

@@ -1768,8 +1768,30 @@ fn connectMajorWithBackoffDetailed(
 
 /// session-host 디렉터리를 0700으로 만든다(best-effort — EEXIST 무해). lock 파일 생성에 필요하다. 소유/perm의 진짜
 /// 검증은 host `SocketServer.bind`가 fstatat(SYMLINK_NOFOLLOW)로 한다(§11) — 여기선 lock을 놓을 자리만 확보한다.
+///
+/// **부모까지 만든다.** `dir` 은 `<root>/session-host` 이고 그 `root`(`/tmp/maru-<uid>`)는 우리가 소유하지
+/// 않은 자리에 있다 — 시스템 정리든 청소 도구든 통째로 지울 수 있다. 그런데 뿌리를 만드는
+/// `short_endpoint.prepareCurrentUserNamespace` 는 이 함수보다 **뒤**(spawn 직전)에 불린다. 한 단계만
+/// 만들면 부모가 없는 `mkdir` 이 ENOENT 로 실패하고, 뒤이은 `openLock` 도 같은 이유로 실패해
+/// `endpoint_denied` 로 끝난다 — 뿌리를 되살릴 코드에 **도달하지 못한 채**.
+///
+/// 2026-09-02 실측: `/tmp/maru-501` 이 지워진 뒤 앱을 세 번 다시 띄웠지만 매번 같은 자리에서 멎었고,
+/// host 는 살아 있는데 아무도 붙지 못했다. 디렉터리를 손으로 만들어 주자 그 즉시 새 host 가 떴다.
+/// 사용자가 할 일이 아니다.
 fn ensureDir(dir: [:0]const u8) void {
+    ensureParentDir(dir);
     _ = c.mkdir(dir.ptr, 0o700);
+}
+
+/// `dir` 의 부모 한 단계를 0700 으로 만든다. `/tmp` 같은 상위는 이미 있으므로 한 단계면 뿌리 소실을
+/// 덮는다. 실패는 무시한다 — 여기서 못 만들면 뒤의 `openLock` 이 판정한다.
+fn ensureParentDir(dir: [:0]const u8) void {
+    const parent = std.fs.path.dirname(dir) orelse return;
+    if (parent.len == 0 or parent.len >= 512) return;
+    var buf: [512]u8 = undefined;
+    @memcpy(buf[0..parent.len], parent);
+    buf[parent.len] = 0;
+    _ = c.mkdir(@ptrCast(&buf), 0o700);
 }
 
 fn openLock(dir: [:0]const u8) ?c.fd_t {
@@ -2347,4 +2369,37 @@ test "upgrade notice detail is bounded and preserves typed result" {
             .failure = .{ .local = .status_query_failed },
         } }).detail(&tiny),
     );
+}
+
+test "뿌리가 통째로 사라져도 lock 자리를 자력으로 되살린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // `/tmp/maru-<uid>` 가 청소 도구에 지워진 상태를 그대로 만든다 — 뿌리도, 그 아래도 없다.
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/maru-ensuredir-{d}", .{c.getpid()});
+    var dir_buf: [160]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "{s}/session-host", .{root});
+    var lock_buf: [256]u8 = undefined;
+    const lock = try discovery.lockPathIn(&lock_buf, dir);
+    _ = c.unlink(lock.ptr);
+    _ = c.rmdir(dir.ptr);
+    _ = c.rmdir(root.ptr);
+    defer {
+        _ = c.unlink(lock.ptr);
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(root.ptr);
+    }
+
+    // 고치기 전에는 부모가 없어 `mkdir` 이 ENOENT 로 실패했고, 뒤이은 `openLock` 도 같은 이유로 실패해
+    // 호출자가 `endpoint_denied` 를 냈다. 뿌리를 만드는 코드는 그보다 뒤에 있어 도달하지 못했다.
+    ensureDir(dir);
+    const fd = openLock(dir) orelse return error.TestUnexpectedResult;
+    _ = c.close(fd);
+
+    // 만들어진 두 단계가 모두 우리 소유의 0700 이어야 host `SocketServer.bind` 의 검증을 통과한다.
+    for ([_][:0]const u8{ root, dir }) |path| {
+        var st: std.posix.Stat = undefined;
+        try testing.expect(c.fstatat(std.posix.AT.FDCWD, path.ptr, &st, std.posix.AT.SYMLINK_NOFOLLOW) == 0);
+        try testing.expect(std.posix.S.ISDIR(st.mode));
+        try testing.expectEqual(@as(u32, 0o700), st.mode & 0o777);
+    }
 }

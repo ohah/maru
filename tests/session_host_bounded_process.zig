@@ -216,6 +216,32 @@ test "bounded process executes a leaf from the held directory after pathname anc
     );
 }
 
+test "bounded process streams one held regular fd as exact child stdin" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "body", .data = "held-body" });
+    var body_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const body_path = try temporaryPath(&tmp, "body", &body_path_storage);
+    const body_fd = c.open(body_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
+    try std.testing.expect(body_fd >= 3);
+    defer _ = c.close(body_fd);
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "/bin/cat; printf '|done'" };
+    const environment = [_:null]?[*:0]const u8{};
+    var output: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "held-body|done",
+        try process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, body_fd, &output, std.time.ns_per_s),
+    );
+    try std.testing.expectError(
+        error.InvalidInputFd,
+        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, 0, &output, std.time.ns_per_s),
+    );
+    try std.testing.expectError(
+        error.InvalidInputFd,
+        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, tmp.dir.fd, &output, std.time.ns_per_s),
+    );
+}
+
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);

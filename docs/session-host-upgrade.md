@@ -1898,6 +1898,21 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   fail-index를 Debug·ReleaseFast actual filesystem에서 검증한다. 이 gate는 signed baseline leaf 실행, aggregate artifact
   attestation, manifest authoring·draft attach/publish 또는 frozen U5 제품 E2E를 완료하지 않는다.
 
+  upgrade-B evidence의 trusted workflow 조립 owner는
+  `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
+  final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address
+  `PredecessorEvidenceIdentity` 및 backing authenticated manifest/held manifest file/downloaded asset authority, 두 upgrade leaf
+  pathname과 absent output pathname뿐이다. caller는 `evidence.Common`, `evidence.Predecessor`, designated-requirement digest,
+  profile 또는 gate 성공 bool을 별도 scalar로 제출하지 않는다.
+
+  owner는 candidate와 predecessor의 첫 revalidation view를 한 fixed snapshot으로 복사하고, 두 signed leaf를 canonical
+  upgrade aggregate로 조립·bind한 뒤 output open 직전에 양쪽 authority graph를 모두 다시 revalidate한다. 최초 snapshot과
+  release/source/build/candidate/predecessor/signing requirement가 bytewise exact 일치해야만 allocation 없는 exclusive publication
+  suffix를 연다. result와 authority/path storage alias, copied/pre-owned owner, allocator callback 중 candidate·predecessor·held inode
+  drift, leaf 교환·malformed·기존 output에서는 publication 0이다. 성공은 held output inode authority 하나로 반환한다. focused gate
+  `test-session-host-release-adapter-candidate-upgrade-evidence`는 이 계약을 Debug·ReleaseFast actual filesystem에서 검증한다. 이
+  gate는 signed upgrade leaf 자체 실행, aggregate attestation, manifest/draft attach/publish 또는 frozen U5 제품 E2E를 완료하지 않는다.
+
   manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이 aggregate를 생성하고 artifact
   attestation을 발급한다. attestation 검증은 repository·workflow·source commit·run identity와 subject digest를 모두 policy
   input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.

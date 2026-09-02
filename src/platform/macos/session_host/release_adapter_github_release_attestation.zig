@@ -12,22 +12,30 @@ pub const max_args: usize = 8;
 const max_arg_bytes = github_json.max_scalar_string_bytes + 1;
 const max_assets = @typeInfo(release_manifest.AssetRole).@"enum".fields.len;
 
+pub const Artifact = struct {
+    name: []const u8,
+    sha256: []const u8,
+};
+
 pub const Expected = struct {
     repository: release_manifest.Repository,
     release_id: u64,
     tag: []const u8,
     tag_ref_sha: []const u8,
     assets: []const release_manifest.Asset,
+    manifest: Artifact,
 };
 
 pub const AssetCommand = struct {
     path: []const u8,
     expected: release_manifest.Asset,
 };
+pub const ManifestCommand = struct { path: []const u8 };
 
 pub const Command = union(enum) {
     release,
     asset: AssetCommand,
+    manifest_asset: ManifestCommand,
 };
 
 pub const ArgsStorage = [max_args][]const u8;
@@ -75,6 +83,14 @@ pub fn plan(storage: *ArgsStorage, command: Command, expected: Expected) Error!P
             storage[1] = "verify-asset";
             storage[2] = expected.tag;
             storage[3] = asset.path;
+            used = 4;
+        },
+        .manifest_asset => |artifact| {
+            if (!std.fs.path.isAbsolute(artifact.path) or !validScalar(artifact.path)) return error.InvalidPath;
+            if (!std.mem.eql(u8, std.fs.path.basename(artifact.path), expected.manifest.name)) return error.AssetMismatch;
+            storage[1] = "verify-asset";
+            storage[2] = expected.tag;
+            storage[3] = artifact.path;
             used = 4;
         },
     }
@@ -126,9 +142,9 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: E
     if (!std.mem.eql(u8, observed_tag, expected.tag)) return error.AttestationMismatch;
 
     const subjects = try arrayField(statement, "subject");
-    if (subjects.items.len != expected.assets.len + 1) return error.AttestationMismatch;
+    if (subjects.items.len != expected.assets.len + 2) return error.AttestationMismatch;
     var purl_seen = false;
-    var seen_assets: [max_assets]bool = @splat(false);
+    var seen_assets: [max_assets + 1]bool = @splat(false);
     for (subjects.items) |subject_value| {
         const subject = try object(subject_value);
         if (subject.get("uri")) |uri_value| {
@@ -145,12 +161,12 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: E
         const digest = try objectField(subject, "digest");
         if (digest.count() != 1) return error.AttestationMismatch;
         const sha256 = try stringField(digest, "sha256");
-        const index = assetIndex(expected.assets, name, sha256) orelse return error.AttestationMismatch;
+        const index = artifactIndex(expected, name, sha256) orelse return error.AttestationMismatch;
         if (seen_assets[index]) return error.AttestationMismatch;
         seen_assets[index] = true;
     }
     if (!purl_seen) return error.AttestationMismatch;
-    for (seen_assets[0..expected.assets.len]) |seen| if (!seen) return error.AttestationMismatch;
+    for (seen_assets[0 .. expected.assets.len + 1]) |seen| if (!seen) return error.AttestationMismatch;
 
     const timestamps = try arrayField(result, "verifiedTimestamps");
     if (timestamps.items.len == 0) return error.AttestationMismatch;
@@ -166,7 +182,7 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: E
         .release_id = observed_release_id,
         .tag = observed_tag,
         .tag_ref_sha = try purlDigest(statement),
-        .asset_count = expected.assets.len,
+        .asset_count = expected.assets.len + 1,
     };
 }
 
@@ -206,11 +222,12 @@ const BoundedExecutor = struct {
 };
 
 fn validateExpected(expected: Expected) Error!void {
-    if (expected.repository.id == 0 or !std.mem.eql(u8, expected.repository.owner, "ohah") or !std.mem.eql(u8, expected.repository.name, "maru") or expected.release_id == 0 or !identity.canonicalTag(expected.tag) or !identity.lowerHex(expected.tag_ref_sha, 40) or expected.assets.len != max_assets) return error.InvalidExpected;
+    if (expected.repository.id == 0 or !std.mem.eql(u8, expected.repository.owner, "ohah") or !std.mem.eql(u8, expected.repository.name, "maru") or expected.release_id == 0 or !identity.canonicalTag(expected.tag) or !identity.lowerHex(expected.tag_ref_sha, 40) or expected.assets.len != max_assets or !validArtifact(expected.manifest)) return error.InvalidExpected;
     var role_counts: [max_assets]u8 = @splat(0);
     for (expected.assets, 0..) |asset, index| {
         if (!basename(asset.name) or !identity.lowerHex(asset.sha256, 64) or asset.size == 0) return error.InvalidExpected;
         role_counts[@intFromEnum(asset.role)] += 1;
+        if (std.mem.eql(u8, asset.name, expected.manifest.name)) return error.InvalidExpected;
         for (expected.assets[index + 1 ..]) |other| if (std.mem.eql(u8, asset.name, other.name)) return error.InvalidExpected;
     }
     for (role_counts) |count| if (count != 1) return error.InvalidExpected;
@@ -225,9 +242,14 @@ fn purlDigest(statement: std.json.ObjectMap) Error![]const u8 {
     return error.AttestationMismatch;
 }
 
-fn assetIndex(assets_value: []const release_manifest.Asset, name: []const u8, sha256: []const u8) ?usize {
-    for (assets_value, 0..) |asset, index| if (std.mem.eql(u8, asset.name, name) and std.mem.eql(u8, asset.sha256, sha256)) return index;
+fn artifactIndex(expected: Expected, name: []const u8, sha256: []const u8) ?usize {
+    for (expected.assets, 0..) |asset, index| if (std.mem.eql(u8, asset.name, name) and std.mem.eql(u8, asset.sha256, sha256)) return index;
+    if (std.mem.eql(u8, expected.manifest.name, name) and std.mem.eql(u8, expected.manifest.sha256, sha256)) return expected.assets.len;
     return null;
+}
+
+fn validArtifact(value: Artifact) bool {
+    return basename(value.name) and identity.lowerHex(value.sha256, 64);
 }
 
 fn containsAsset(assets_value: []const release_manifest.Asset, candidate: release_manifest.Asset) bool {

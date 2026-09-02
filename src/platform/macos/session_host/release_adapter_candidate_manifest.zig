@@ -40,11 +40,8 @@ pub const PredecessorGraph = struct {
 
 pub fn author(allocator: std.mem.Allocator, context: context_mod.Context, identity: *const candidate_identity.CandidateEvidenceIdentity, candidate: *const candidate_files.CandidateFiles, product: *const candidate_product.CandidateProduct, candidate_paths: candidate_product.Paths, source: *const source_tree.SourceTreeAuthority, compatibility: *const compatibility_mod.CandidateCompatibility, held_evidence: *const files.PinnedReleaseFile, paths: Paths, predecessor: ?PredecessorGraph, result: *files.PinnedReleaseFile) !void {
     const result_bytes = std.mem.asBytes(result);
-    inline for (.{ context.repository.owner, context.repository.name, context.tag, context.source_commit, context.build.workflow_ref, std.mem.asBytes(identity), std.mem.asBytes(candidate), std.mem.asBytes(product), std.mem.asBytes(source), std.mem.asBytes(compatibility), std.mem.asBytes(held_evidence), candidate_paths.dmg, candidate_paths.frozen_executable, candidate_paths.dmg_work }) |value|
-        if (overlaps(result_bytes, value)) return error.InvalidOwner;
-    if (predecessor) |p| inline for (.{ std.mem.asBytes(p.identity), std.mem.asBytes(p.authenticated), std.mem.asBytes(p.held_manifest), std.mem.asBytes(p.assets) }) |value|
-        if (overlaps(result_bytes, value)) return error.InvalidOwner;
-    var authority = RealAuthority{ .context = context, .identity = identity, .candidate = candidate, .product = product, .candidate_paths = candidate_paths, .source = source, .compatibility = compatibility, .predecessor = predecessor };
+    var authority = initAuthority(context, identity, candidate, product, candidate_paths, source, compatibility, predecessor);
+    if (authority.aliases(result_bytes) or overlaps(result_bytes, std.mem.asBytes(held_evidence))) return error.InvalidOwner;
     try authorFromAuthority(allocator, &authority, held_evidence, paths, result);
 }
 
@@ -116,7 +113,7 @@ fn authorFromAuthority(allocator: std.mem.Allocator, authority: anytype, held_ev
     try files.publishSummaryOwnedExclusive(result, paths.output, snapshot);
 }
 
-const RealAuthority = struct {
+pub const Authority = struct {
     context: context_mod.Context,
     identity: *const candidate_identity.CandidateEvidenceIdentity,
     candidate: *const candidate_files.CandidateFiles,
@@ -127,6 +124,14 @@ const RealAuthority = struct {
     predecessor: ?PredecessorGraph,
     assets_storage: [3]manifest.Asset = undefined,
     summary_sha: [64]u8 = undefined,
+
+    pub fn aliases(self: *const @This(), bytes: []const u8) bool {
+        inline for (.{ self.context.repository.owner, self.context.repository.name, self.context.tag, self.context.source_commit, self.context.build.workflow_ref, std.mem.asBytes(self.identity), std.mem.asBytes(self.candidate), std.mem.asBytes(self.product), std.mem.asBytes(self.source), std.mem.asBytes(self.compatibility), self.candidate_paths.dmg, self.candidate_paths.frozen_executable, self.candidate_paths.dmg_work }) |value|
+            if (overlaps(bytes, value)) return true;
+        if (self.predecessor) |p| inline for (.{ std.mem.asBytes(p.identity), std.mem.asBytes(p.authenticated), std.mem.asBytes(p.held_manifest), std.mem.asBytes(p.assets) }) |value|
+            if (overlaps(bytes, value)) return true;
+        return false;
+    }
 
     pub fn revalidate(self: *@This(), profile: evidence.Profile, summary: files.ExecutableObservation, paths: Paths) !Bundle {
         const identity_view = try self.identity.revalidate(self.context, self.candidate, self.product, self.candidate_paths, self.source);
@@ -172,6 +177,24 @@ const RealAuthority = struct {
         } };
     }
 };
+
+pub fn initAuthority(context: context_mod.Context, identity: *const candidate_identity.CandidateEvidenceIdentity, candidate: *const candidate_files.CandidateFiles, product: *const candidate_product.CandidateProduct, candidate_paths: candidate_product.Paths, source: *const source_tree.SourceTreeAuthority, compatibility: *const compatibility_mod.CandidateCompatibility, predecessor: ?PredecessorGraph) Authority {
+    return .{ .context = context, .identity = identity, .candidate = candidate, .product = product, .candidate_paths = candidate_paths, .source = source, .compatibility = compatibility, .predecessor = predecessor };
+}
+
+/// Rebinds already-canonical authored bytes to the same typed graph used by `author`. This is
+/// allocation-free so an attestation caller can repeat it immediately around child execution.
+pub fn validateAuthoredSnapshot(authority: *Authority, context: context_mod.Context, parsed_evidence: *const evidence.Parsed, parsed_manifest: *const manifest.Parsed, evidence_observation: files.ExecutableObservation, paths: Paths) !void {
+    try context_mod.bindManifest(context, parsed_manifest.value().*);
+    const bundle = try authority.revalidate(parsed_evidence.profile(), evidence_observation, paths);
+    try evidence.bind(parsed_evidence.value(), bundle.expected);
+    try validateAuthorityBinding(bundle);
+    try validateBinding(bundle.value, parsed_evidence.profile(), evidence_observation, paths);
+    if (!sameManifest(parsed_manifest.value().*, bundle.value)) return error.BindingMismatch;
+    var expected_name: [manifest.max_asset_name_bytes + 32]u8 = undefined;
+    const exact = std.fmt.bufPrint(&expected_name, "Maru-{s}-session-host-release.json", .{parsed_manifest.value().release.version}) catch return error.InvalidPath;
+    if (!std.mem.eql(u8, std.fs.path.basename(paths.output), exact)) return error.InvalidPath;
+}
 
 fn validateAuthorityBinding(bundle: Bundle) !void {
     const common: evidence.Common = switch (bundle.expected) {
@@ -240,7 +263,7 @@ fn observation(input: files.Input) files.ExecutableObservation {
     return .{ .identity = input.identity, .size = input.size, .mode = input.mode, .sha256 = input.sha256 };
 }
 
-fn validateBinding(value: manifest.Manifest, profile: evidence.Profile, input: files.Input, paths: Paths) !void {
+fn validateBinding(value: manifest.Manifest, profile: evidence.Profile, input: anytype, paths: Paths) !void {
     const role: manifest.Role = switch (profile) {
         .baseline_a => .a,
         .upgrade_b => .b,

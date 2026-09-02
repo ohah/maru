@@ -132,6 +132,8 @@ ICONS = [
     # 쪽이 네트워크를 타는지 화면으로 알 수 없다. `arrow_down`도 안 쓴다: 브랜치 줄에 이미 `↓ N`(behind
     # 개수)이 있어 화살표가 두 뜻이 된다. 구름 + 아래 화살표가 "원격에서 내려받는다"를 그린다.
     ("cloud_download", FIT_STANDARD, 0xF002C, "assets/icons/cloud-download.svg"),
+    # 폰이 세션을 좁혀 둔 상태를 상태줄이 말할 때 쓴다(S11-6). 직접 그린 자산이다.
+    ("phone", FIT_STANDARD, 0xF002D, "assets/icons/phone.svg"),
 ]
 
 

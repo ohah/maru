@@ -345,17 +345,6 @@ pub fn view(
             // **순서를 뒤집는 이유**: `↑↓` 는 오른쪽 정렬이라 폭을 재 봐야 왼쪽 끝을 안다. 이름을 먼저
             // 그리면 그 자리를 알 수가 없다. 그리는 순서는 겹치지 않는 한 화면에 영향이 없다.
             var branch_end: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
-            // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
-            // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
-            if (props.unpushed) {
-                const name_w = writer.measureRun(props.branch, .control); // 위 `line` 이 쓰는 role
-                const dot_x = branch_x + name_w + @as(f32, @floatFromInt(m.gap));
-                const dot_w = writer.measureRun(unpushed_dot, .supporting);
-                // 오른쪽 묶음(↑↓·칩)을 침범하지 않을 때만 그린다 — 겹치면 둘 다 못 읽는다.
-                if (dot_x + dot_w < branch_end) {
-                    try writer.line(rect, dot_x, unpushed_dot, .accent_bar, .supporting, false);
-                }
-            }
             // ── 원격 갱신 칩(P6). **글자는 tree가 준 rect 안에 놓는다** — 여기서 자기 산수로 자리를
             // 잡으면 "그린 자리와 눌리는 자리"의 주인이 둘이 된다(탭 칸에서 이미 겪은 갈림).
             var fetch_right: u32 = m.inset_x;
@@ -447,6 +436,27 @@ pub fn view(
                 }
             }
             try writer.lineWithin(rect, name_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
+            // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
+            // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
+            //
+            // ⚠️ **이름 뒤에 둔다 — 앞에 두면 두 가지가 함께 틀렸다**(제품 캡처 2026-09-02, RS4 검증).
+            // ⑴ 시작점을 `branch_x + name_w` 로 잡았는데 이름의 실제 시작은 `name_x` 다. 로컬은 둘이
+            //    같아서 안 드러났고, **원격이면 host 접두 폭만큼 왼쪽으로 밀려 `127.0.●0.1` 처럼 호스트
+            //    글자 위에 얹혔다.** 「경로만 보면 두 기계가 같은 값」과 같은 뿌리다 — 로컬에서만 참인
+            //    식을 원격에 그대로 썼다.
+            // ⑵ 침범 검사에 쓰던 `branch_end` 가 그 자리에서는 **아직 `↑↓`·칩만큼 안 좁혀진** 값이었다.
+            //    주석은 「오른쪽 묶음을 침범하지 않을 때만」이라 적어 두고 실제로는 안 지켰다.
+            // 두 값 모두 여기서는 **확정된 뒤**다. 그리는 순서는 겹치지 않는 한 화면에 영향이 없다.
+            if (props.unpushed) {
+                const name_w = writer.measureRun(props.branch, .control); // 위 `lineWithin` 이 쓰는 role
+                const dot_x = name_x + name_w + @as(f32, @floatFromInt(m.gap));
+                const dot_w = writer.measureRun(unpushed_dot, .supporting);
+                // 오른쪽 묶음(↑↓·칩)을 침범하지 않을 때만 그린다 — 겹치면 둘 다 못 읽는다. 이름이
+                // `branch_end` 에서 잘렸으면 이 검사가 곧 「점을 놓을 자리가 없다」와 같은 뜻이 된다.
+                if (dot_x + dot_w < branch_end) {
+                    try writer.line(rect, dot_x, unpushed_dot, .accent_bar, .supporting, false);
+                }
+            }
         }
     }
 
@@ -2345,6 +2355,89 @@ test "아직 안 보낸 것이 있으면 브랜치 이름 뒤에 점이 선다 (
     });
     const clean_draws = try viewBudgeted(&storage_clean, clean, clean_frame, .{});
     try testing.expect(findExactText(clean_draws, "●") == null);
+}
+
+test "원격이면 점이 host 접두 **뒤**에 선다 (§3.5 · RS4 제품 검증)" {
+    // ⚠️ **위 판정자는 이 결함을 통과시켰다.** 거기엔 `remote_host` 가 없어 이름이 `branch_x` 에서
+    // 시작하고, 그러면 틀린 식(`branch_x + name_w`)과 맞는 식(`name_x + name_w`)이 **같은 값**이다.
+    // 원격에서만 갈리는데 원격을 안 세웠다 — 「경로만 보면 두 기계가 같은 값」과 같은 뿌리다.
+    //
+    // 제품 캡처(2026-09-02)에서 실제로 `127.0.●0.1 main` 처럼 **호스트 글자 위에** 얹혔다.
+    var storage: TestStorage = .{};
+    // host 를 이름보다 **넓게** 잡는다 — 좁으면 틀린 식도 우연히 이름 뒤에 떨어져 판정이 안 선다.
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 420, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .remote_host = "deploy@10.0.0.7",
+        .has_ab = true,
+        .ahead = 3,
+        .unpushed = true,
+        .fetch = .{ .enabled = true },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    const host = findExactText(draws, "deploy@10.0.0.7") orelse return error.MissingHost;
+    const name = findExactText(draws, "main") orelse return error.MissingBranch;
+    const dot = findExactText(draws, "●") orelse return error.MissingDot;
+    // 순서가 곧 뜻이다: `<host> <branch> ●`.
+    try testing.expect(name.origin.x > host.origin.x);
+    try testing.expect(dot.origin.x > name.origin.x);
+    const ahead = findExactText(draws, "↑ 3") orelse return error.MissingAhead;
+    try testing.expect(dot.origin.x < ahead.origin.x);
+}
+
+test "자리가 없으면 점을 **지운다** — 어떤 이름 길이에서도 `↑↓` 위에 안 얹힌다 (§3.5)" {
+    // 점의 침범 검사는 `↑↓`·칩만큼 **좁혀진** `branch_end` 를 봐야 한다. 예전에는 그 검사가 좁히기
+    // **전**에 있어서, 주석은 「오른쪽 묶음을 침범하지 않을 때만」이라 적어 두고 실제로는 rect 오른쪽
+    // 끝까지를 자리로 쳤다.
+    //
+    // ⚠️ **길이 하나로는 못 잡는다.** 처음엔 긴 이름 하나로 「점이 없다」를 봤는데, 그 자리는 고친 쪽도
+    // 안 고친 쪽도 점이 없어서 **판정이 안 섰다**(실측). 겹치는 구간은 좁고 폰트에 딸린 값이라, 상수를
+    // 맞히는 대신 **성질**을 센다: 어떤 길이에서도 점은 `↑` 왼쪽이다.
+    var name_buf: [64]u8 = undefined;
+    @memcpy(name_buf[0..5], "feat/");
+    var seen_dot: usize = 0;
+    var len: usize = 5;
+    while (len < name_buf.len) : (len += 1) {
+        name_buf[len] = 'x';
+        const branch = name_buf[0 .. len + 1];
+        var storage: TestStorage = .{};
+        const props: types.Props = .{
+            .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+            .items = &.{},
+            .branch = branch,
+            // 오른쪽 묶음을 **넓게** 만든다 — 좁으면 겹칠 수 있는 구간 자체가 거의 없어 훑어도 안 걸린다.
+            .has_ab = true,
+            .ahead = 88888,
+            .behind = 88888,
+            .unpushed = true,
+            .fetch = .{ .enabled = true },
+        };
+        const frame = try build.build(props, .{
+            .nodes = &storage.nodes,
+            .entries = &storage.entries,
+            .layout_items = &storage.layout_items,
+            .flex_scratch = &storage.flex_scratch,
+            .child_rects = &storage.child_rects,
+            .actions = &storage.actions,
+        });
+        const draws = try viewBudgeted(&storage, props, frame, .{});
+        const ahead = findExactText(draws, "↑ 88888") orelse return error.MissingAhead;
+        if (findExactText(draws, "●")) |dot| {
+            seen_dot += 1;
+            try testing.expect(dot.origin.x < ahead.origin.x);
+        }
+    }
+    // **점이 한 번도 안 나왔으면 아무것도 안 센 것이다** — 「없어서 통과」와 「비켜서 통과」를 가른다.
+    try testing.expect(seen_dot > 0);
 }
 
 test "원격 갱신 칩과 ahead/behind는 같은 줄에서 겹치지 않는다 (P6)" {

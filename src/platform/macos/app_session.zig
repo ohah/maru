@@ -5654,6 +5654,9 @@ pub const AppSession = struct {
     /// 캡처 게이트가 상자를 이미 굴렸나(`MARU_FORCE_SCM_COMMIT_WHEEL`). 매 tick 굴리면 끝까지 가 버려
     /// 중간 상태가 캡처에 안 남는다 — 강제 호버·커밋 메시지가 쓰는 것과 같은 1회성 래치다.
     debug_commit_wheel_done: bool = false,
+    /// 캡처 게이트가 **전체 스테이지를 이미 걸었나**(`MARU_FORCE_SCM_STAGE_ALL`). 매 tick 걸면 원격으로
+    /// 초당 수십 개의 `git add` 가 나가 목격자 로그를 못 읽는다 — 휠과 같은 1회성 래치다.
+    debug_stage_all_done: bool = false,
     /// 표시 텍스트 합성 버퍼 — 본문에 IME 조합 글자를 caret 자리에 **끼워** 만든 결과다. component는
     /// 할당을 안 하므로(props는 빌린 슬라이스) 이 합성은 host가 소유한다. 조합이 없으면 안 쓴다.
     scm_commit_display: std.ArrayList(u8) = .empty,
@@ -17363,6 +17366,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
+        debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
         debug_fixtures.applyForcedBaseMenu(self); // 캡처 전용: 기준 목록은 그 메뉴를 한 번 더 눌러야 뜬다(§3.5)

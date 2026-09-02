@@ -1266,6 +1266,33 @@ pub fn applyForcedFetch(self: *AppSession) void {
     scm_dock_ops.applyScmDockIntent(self, .fetch_remote);
 }
 
+/// **전체 스테이지를 실제로 건다**(`MARU_FORCE_SCM_STAGE_ALL=1`, RS4a). 사용자가 「변경 사항」 그룹
+/// 머리의 `+` 를 누른 것과 **같은 진입점**(`applyScmDockIntent(.stage_all_repo)`)을 태우므로, 대상
+/// 판정(`writeTargetFor`)·원격 인자 조립·실패 문구는 전부 제품이 한다.
+///
+/// **활성 저장소를 목록에서 다시 찾는다.** intent 가 싣는 것은 자리 번호라 `git_repo` 를 그대로 넘길 수
+/// 없고, 0 번으로 고정하면 저장소가 여럿일 때 **남의 저장소를 스테이지한다**.
+///
+/// **성사될 때까지 다시 건다.** 첫 tick 에는 목록 읽기가 없어(`git_result == null`) 저장소 목록이 서지
+/// 않는다 — fetch·커밋 픽스처가 같은 이유로 재시도한다. 한 번 걸었으면 래치로 멈춘다(매 tick 걸면 원격에
+/// `git add` 가 초당 수십 개 나간다).
+pub fn applyForcedStageAll(self: *AppSession) void {
+    if (self.debug_stage_all_done) return;
+    if (std.c.getenv("MARU_FORCE_SCM_STAGE_ALL") == null) return;
+    if (self.dock.view != .source_control) return;
+    if (self.git_result == null) return; // 아직 읽기 전이다 — 목록이 없으면 자리 번호가 없다
+    if (self.scm_write_inflight != 0) return; // 이미 쓰고 있다
+    if (self.scm_write_error != null) return; // 사유가 이미 적혔다 — 재시도가 그걸 덮지 않게
+    const repo = self.git_repo orelse return;
+    const repos = scm_dock_ops.repoEntries(self);
+    for (repos.entries, 0..) |entry, index| {
+        if (!std.mem.eql(u8, entry.path, repo)) continue;
+        scm_dock_ops.applyScmDockIntent(self, .{ .stage_all_repo = @intCast(index) });
+        self.debug_stage_all_done = true;
+        return;
+    }
+}
+
 /// 커밋 **실행**까지 헤드리스로 확인한다(`MARU_FORCE_SCM_COMMIT_RUN=1`). 사용자 클릭과 **같은
 /// 진입점**(`submitCommit`)을 태우므로 판정·메시지 파일·hook은 전부 제품이 한다.
 ///

@@ -43,7 +43,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
 - [원격 에이전트 상태(배지·대화 줄) 구현 계획](plans/remote-agent-state.md)
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
-- [네이티브 편집기 구현 계획](plans/native-editor.md)
+- [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
 - [원격 SCM 단계 계획(RS1~RS4 — 원격 저장소 읽기·쓰기)](plans/remote-scm.md)

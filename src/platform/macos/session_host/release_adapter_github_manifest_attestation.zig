@@ -20,6 +20,22 @@ pub const AuthenticatedManifest = struct {
         return if (self.parsed) |*parsed| parsed.value() else null;
     }
 
+    pub const EvidenceView = struct {
+        value: *const manifest.Manifest,
+        subject_name: []const u8,
+        subject_sha256: []const u8,
+        run_id: u64,
+        run_attempt: u64,
+    };
+
+    pub fn evidenceView(self: *const AuthenticatedManifest) ?EvidenceView {
+        const value_ptr = self.value() orelse return null;
+        const observed = self.observed orelse return null;
+        if (!observed.verified or observed.run_id != value_ptr.build.run_id or observed.run_attempt != value_ptr.build.run_attempt)
+            return null;
+        return .{ .value = value_ptr, .subject_name = observed.subject_name, .subject_sha256 = observed.subject_sha256, .run_id = observed.run_id, .run_attempt = observed.run_attempt };
+    }
+
     pub fn deinit(self: *AuthenticatedManifest, allocator: std.mem.Allocator) Error!void {
         if (self.owner != self) return error.InvalidOwner;
         if (self.observed) |*observed| observed.deinit(allocator);

@@ -31,6 +31,21 @@ pub const AuthenticatedPredecessorAssets = struct {
         return .{ .source_commit = &self.source_commit, .downloads = &self.downloads };
     }
 
+    pub const EvidenceView = struct {
+        source_commit: []const u8,
+        assets: [3]download.DownloadedAsset,
+    };
+
+    pub fn revalidateEvidence(self: *const AuthenticatedPredecessorAssets) !EvidenceView {
+        const current = self.value() orelse return error.InvalidOwner;
+        try current.downloads.revalidate();
+        return .{ .source_commit = current.source_commit, .assets = .{
+            current.downloads.asset(.universal_dmg) orelse return error.FileChanged,
+            current.downloads.asset(.frozen_product_executable) orelse return error.FileChanged,
+            current.downloads.asset(.evidence_summary) orelse return error.FileChanged,
+        } };
+    }
+
     pub fn cleanup(self: *AuthenticatedPredecessorAssets) !void {
         if (self.owner != self) return error.InvalidOwner;
         self.downloads.cleanup() catch return error.CleanupFailed;

@@ -1218,6 +1218,62 @@ fn feedRemoteScreen(bytes: []const u8) usize {
 fn dropRemoteScreen() void {
     if (remote_screen) |*s| s.deinit(term_allocator);
     remote_screen = null;
+    // **다음에 열면 다시 선언한다.** 채널이 바뀌면 host 쪽 슬롯도 새것이라, 안 지우면 새 슬롯이
+    // 선언 없이 남아 세션이 안 줄어든다.
+    remote_declared_cols = 0;
+    remote_declared_rows = 0;
+}
+
+/// host 로 **보내는 데 성공한** 마지막 선언(S11-6). 0 은 「아직 안 보냈다」다.
+var remote_declared_cols: u16 = 0;
+var remote_declared_rows: u16 = 0;
+
+/// 판정용 — 지금 채널에 실린 선언(없으면 `null`). 「무엇을 알렸나」를 바이트로 본다.
+pub fn stagedViewportDeclaration() ?[8]u8 {
+    if (control_req_len != 8) return null;
+    if (!std.mem.eql(u8, control_req[0..4], "MRSV")) return null;
+    var out: [8]u8 = undefined;
+    @memcpy(&out, control_req[0..8]);
+    return out;
+}
+
+/// 판정용 — 채널 모드를 바꾼다(실 SSH 없이 선언 규율만 잰다).
+pub fn setControlWantForTest(next: ControlWant) void {
+    control_want = next;
+}
+
+/// 판정용 — 선언 상태를 초기로 되돌린다.
+pub fn resetViewportDeclarationForTest() void {
+    remote_declared_cols = 0;
+    remote_declared_rows = 0;
+    control_req_len = 0;
+}
+
+/// 판정용 — 그리기 없이 선언만 시킨다.
+pub fn declareViewportForTest(cols: u16, rows: u16) void {
+    declareViewport(cols, rows);
+}
+
+/// 폰이 그릴 수 있는 격자를 알린다 — `"MRSV" | cols:u16 LE | rows:u16 LE`.
+///
+/// **창이 아니라 「그리는 격자」를 보낸다**(S11-6). 창 폭으로 선언하면 세션이 폰이 **못 그리는
+/// 열까지** 갖게 되어 리사이즈를 하고도 오른쪽이 잘린다.
+///
+/// **보낸 뒤에야 「마지막」이 된다.** 앞서 적어 두면 못 보낸 값이 보낸 것으로 남아, 같은 값이
+/// 다시 와도 걸러져 **영영 안 간다**(CLI 쪽에서 같은 결함을 잡았다).
+fn declareViewport(cols: u16, rows: u16) void {
+    // 화면을 보고 있을 때만 뜻이 있다 — 목록 채널은 ndjson 을 나른다.
+    if (control_want != .screen) return;
+    if (cols == 0 or rows == 0) return;
+    if (cols == remote_declared_cols and rows == remote_declared_rows) return;
+    // 아직 host 가 안 가져간 요청이 있으면 덮지 않는다. 다음 프레임에 다시 본다.
+    if (control_req_len != 0) return;
+    @memcpy(control_req[0..4], "MRSV");
+    std.mem.writeInt(u16, control_req[4..6], cols, .little);
+    std.mem.writeInt(u16, control_req[6..8], rows, .little);
+    control_req_len = 8;
+    remote_declared_cols = cols;
+    remote_declared_rows = rows;
 }
 
 /// 조립된 원격 화면의 상태(0=첫 프레임 대기, 1=선다, 2=껐다). 없으면 0.
@@ -4669,6 +4725,10 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     const ox = @as(i32, @intFromFloat(win.x));
     const oy = @as(i32, @intFromFloat(win.y + set_head_h + 1));
     const rows_fit: u16 = @intCast(@max(0, @divTrunc(@as(i32, @intFromFloat(win.h - set_head_h - 1)), line_h)));
+    const cols_fit: u16 = @intCast(@max(0, @divTrunc(@as(i32, @intFromFloat(win.w)), cell_w)));
+    // **여기서 알린다.** 이 값이 곧 우리가 그릴 수 있는 격자이고, 회전·폰트 변경이 이 자리를
+    // 다시 지나간다 — 별도 갈고리를 달면 그중 하나를 빠뜨린다.
+    declareViewport(cols_fit, rows_fit);
 
     // **아래를 기준으로 그린다**(S11-6). 원격 화면이 창보다 높으면 위부터 그리는 것은 **프롬프트가
     // 있는 아래쪽을 버리는** 것이다 — 사용자가 방금 친 명령의 결과를 못 본다. 터미널은 최신 출력이

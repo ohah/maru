@@ -78,18 +78,19 @@ test "filter: 'find'로 Find 명령군이 팝업에 노출된다(toggle_find/rep
     defer out.deinit(allocator);
 
     // "find" → Find / Find and Replace / Find: Match Case / Find: Whole Word /
-    // Find: In Selection / Find Next / Find Previous 7개. 카탈로그 순서대로.
+    // Find: In Selection / Find: Other Diff Column / Find Next / Find Previous 8개. 카탈로그 순서대로.
     //
     // **바꾸기와 규칙 토글이 팔레트에 있어야 하는 이유**: 빌트인 `⌥⌘F`·`⌥⌘C`·`⌥⌘W`는 사용자가
     // `unbind`하거나 다른 액션으로 덮어쓸 수 있다(configuration-input.md §keybind). 그때 팔레트가
     // 유일한 도달 경로다.
     try filter(allocator, "find", &out);
-    try std.testing.expectEqual(@as(usize, 7), out.items.len);
+    try std.testing.expectEqual(@as(usize, 8), out.items.len);
     try std.testing.expect(actionAt(out.items, 0).? == .toggle_find);
     try std.testing.expect(actionAt(out.items, 1).? == .toggle_find_replace);
     try std.testing.expect(actionAt(out.items, 2).? == .toggle_find_match_case);
     try std.testing.expect(actionAt(out.items, 3).? == .toggle_find_whole_word);
     try std.testing.expect(actionAt(out.items, 4).? == .toggle_find_in_selection);
-    try std.testing.expect(actionAt(out.items, 5).? == .find_next);
-    try std.testing.expect(actionAt(out.items, 6).? == .find_previous);
+    try std.testing.expect(actionAt(out.items, 5).? == .toggle_find_diff_side);
+    try std.testing.expect(actionAt(out.items, 6).? == .find_next);
+    try std.testing.expect(actionAt(out.items, 7).? == .find_previous);
 }

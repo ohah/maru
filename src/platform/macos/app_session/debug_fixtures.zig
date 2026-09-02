@@ -1430,6 +1430,9 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
         self.chrome_host.find.match_case = std.mem.indexOf(u8, rules, "case") != null;
         self.chrome_host.find.whole_word = std.mem.indexOf(u8, rules, "word") != null;
         if (std.mem.indexOf(u8, rules, "sel") != null) find_ops.toggleFindInSelection(self);
+        // **비교 뷰의 열도 캡처로 갈라 본다**(§5.1). `L`·`R` 표시는 화면에서만 드러나고, 단위
+        // 판정자는 문자열만 재지 카운터 옆에 실제로 서는지는 못 본다.
+        if (std.mem.indexOf(u8, rules, "right") != null) find_ops.toggleFindDiffSide(self);
     }
     find_ops.recomputeFind(self);
     self.debug_find_opened = true;

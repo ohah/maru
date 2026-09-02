@@ -90,6 +90,7 @@ pub const entries = [_]Entry{
     .{ .action = .toggle_find_match_case, .key = "toggle_find_match_case", .title = "Find: Match Case" },
     .{ .action = .toggle_find_whole_word, .key = "toggle_find_whole_word", .title = "Find: Whole Word" },
     .{ .action = .toggle_find_in_selection, .key = "toggle_find_in_selection", .title = "Find: In Selection" },
+    .{ .action = .toggle_find_diff_side, .key = "toggle_find_diff_side", .title = "Find: Other Diff Column" },
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
@@ -389,6 +390,12 @@ test "KB_SYM3 팔레트가 편집기 액션의 chord 를 표시한다 — 배선
     try std.testing.expectEqualStrings("⇧⌘O", formatChord(chordForAction(resolver, .toggle_symbol_picker).?, &buf));
     try std.testing.expectEqualStrings("⌘Z", formatChord(chordForAction(resolver, .editor_undo).?, &buf));
     try std.testing.expectEqualStrings("⌘S", formatChord(chordForAction(resolver, .editor_save).?, &buf));
+    // **찾기 규칙 토글 넷이 같은 가족이다** — 수식자가 갈리면 사용자가 셋을 외운 손버릇이
+    // 넷째에서 안 먹는다(§5.1 「어느 열을 보는지 …」가 `⌥⌘D` 를 그 가족으로 정했다).
+    try std.testing.expectEqualStrings("⌥⌘C", formatChord(chordForAction(resolver, .toggle_find_match_case).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘W", formatChord(chordForAction(resolver, .toggle_find_whole_word).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘L", formatChord(chordForAction(resolver, .toggle_find_in_selection).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘D", formatChord(chordForAction(resolver, .toggle_find_diff_side).?, &buf));
 
     // **chord 가 없는 편집기 액션은 null 이어야 한다** — 없는 것을 있다고 그리면 사용자가
     // 안 되는 키를 누른다. 이 여섯이 왜 비어 있는지는 docs/configuration-input.md 가 소유한다.
@@ -402,6 +409,13 @@ test "KB_SYM3 팔레트가 편집기 액션의 chord 를 표시한다 — 배선
         if (std.meta.eql(entry.action, Action.toggle_symbol_picker)) found = true;
     }
     try std.testing.expect(found);
+
+    // 열 넘기기도 같다 — 빌트인 chord 를 사용자가 unbind 하면 팔레트가 **유일한 도달 경로**다.
+    var found_side = false;
+    for (entries) |entry| {
+        if (std.meta.eql(entry.action, Action.toggle_find_diff_side)) found_side = true;
+    }
+    try std.testing.expect(found_side);
 }
 
 test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {

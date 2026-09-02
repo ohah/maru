@@ -11,6 +11,10 @@ const props = @import("../props.zig");
 const input = @import("../input.zig");
 const overlay_input = @import("overlay_input.zig"); // 검색어·조합 입력 모델 + 표시 폭(EAW) + 패널 레이아웃(palette와 공유)
 
+/// 비교 뷰의 어느 열인가. **여기 사는 이유는 `Target` 과 같다** — 오버레이가 그 값을 그려야 한다.
+/// 제품(`editor_ops.DiffSide`)이 이 타입을 **그대로** 쓴다 — 같은 모양을 두 군데 두면 값이 갈린다.
+pub const DiffSide = enum { left, right };
+
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
 
@@ -24,7 +28,25 @@ fn counterCols(state: *const State) u32 {
     const total = state.match_count;
     const cur: usize = if (total == 0) 0 else state.current + 1;
     // ASCII 라 `len` 이 곧 칸 수다. 이 값이 view 가 그리는 문자열과 어긋나면 입력이 카운터를 침범한다.
-    return @as(u32, @intCast(ruleFlags(state).len)) + numDigits(cur) + 1 + numDigits(total);
+    return @as(u32, @intCast(sideFlag(state).len + ruleFlags(state).len)) + numDigits(cur) + 1 + numDigits(total);
+}
+
+/// 지금 검색 중인 **열**을 카운터 맨 앞에 적는다(§5.1).
+///
+/// **왼쪽은 언제나 옛 판이다**(「변경 사항」은 `index ↔ 작업트리`, 「스테이지된 변경」은
+/// `HEAD ↔ index`). 그래서 이 표시가 없으면 방금 **추가한** 이름을 찾다 만난 0 을 설명할 길이
+/// 없다 — 그 이름은 오른쪽 열에 뻔히 보이는데도. 「못 찾는다」가 아니라 **「왜 0인지 모른다」**가
+/// 이 표시가 막는 결함이다.
+///
+/// **비교 뷰가 아니면 안 적는다** — 단일 편집기에는 열이 없다. `ruleFlags` 와 같은 이유로
+/// **영어 고정**(계약 §2.1)이고, 규칙 깃발보다 **앞에** 선다: 어느 문서를 보는가가 그 문서를
+/// 어떻게 훑는가보다 먼저다.
+fn sideFlag(state: *const State) []const u8 {
+    if (state.target != .editor) return "";
+    return switch (state.diff_side_shown orelse return "") {
+        .left => "L ",
+        .right => "R ",
+    };
 }
 
 /// 켜 둔 검색 규칙을 카운터 앞에 짧게 적는다(§5.1). **안 보이면 켠 줄 모른다** — 그러면
@@ -126,6 +148,17 @@ pub const State = struct {
     /// 정했으므로, 살아 있는 선택을 읽으면 첫 Enter 가 범위를 그 매치 하나로 쪼그라뜨린다.
     /// `null` 이면 꺼진 것이고, 문서가 바뀌면 제품이 버린다.
     in_selection: ?struct { start: usize, end: usize } = null,
+    /// 비교 뷰에서 **사용자가 명시로 고른 열**(§5.1 — `⌥⌘D`). `null` 은 「안 골랐다」이고, 그때는
+    /// 제품의 폴백(「선택이 있는 열, 없으면 왼쪽」)이 답한다.
+    ///
+    /// **폴백 값을 여기 베껴 두면 안 된다.** 그 폴백이 읽는 선택은 비교가 다시 계산될 때 죽는데
+    /// 베낀 값은 살아남아, **화면은 왼쪽인데 결과는 오른쪽 것**이 된다(§5.1 이 이름으로 막아 둔 증상).
+    /// 사용자가 고른 값은 그 위험이 없다 — 행 인덱스가 아니라 **열 이름**이라 재계산으로 안 죽는다.
+    diff_side: ?DiffSide = null,
+    /// 지금 **실제로 검색 중인 열** — 화면에 적을 값이다(명시값이면 그것, 아니면 폴백의 답).
+    /// 제품이 재검색마다 실어 준다(`match_count` 와 **같은 미러 규율**). `null` 이면 비교 뷰가
+    /// 아니라 아무것도 안 적는다.
+    diff_side_shown: ?DiffSide = null,
     /// 마지막 네비게이션 방향(Enter/↓=앞, Shift+Enter/↑=뒤). 페이지 검색은 매치 리스트가 없어 `current`가
     /// 안 움직이므로(match_count=0) 방향을 여기서만 알 수 있다 — host가 `.find_navigated`를 받아 어느 쪽으로
     /// 보낼지 정할 때 읽는다. 스크롤백에선 안 쓴다(current가 이미 방향을 담는다).
@@ -163,6 +196,11 @@ pub const State = struct {
         self.current = 0;
         self.match_count = 0;
         self.page_found = null; // 지난 검색의 찾음/없음이 새로 연 창에 남지 않게(target은 session이 tick에 세운다)
+        // **고른 열도 여기서 버린다**(§5.1 — *"찾기를 닫으면 사라진다"*). 닫는 자리가 아니라 **여는
+        // 자리**에서 버리는 이유는 두 가지다: 닫는 경로가 여럿이라 한 곳만 빠뜨려도 지난 선택이
+        // 남고(이 파일의 `clearAllFindMatches` 주석이 그 부류를 이름으로 든다), 오버레이가 닫힌 뒤에도
+        // **⌘G 네비는 살아 있어** 그 동안에는 고른 열이 유지되는 것이 맞기 때문이다.
+        self.diff_side = null;
         self.open = true;
     }
 
@@ -326,7 +364,7 @@ pub fn view(
     const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else blk: {
         const total = state.match_count;
         const cur: usize = if (total == 0) 0 else state.current + 1;
-        break :blk try std.fmt.allocPrint(arena, "{s}{d}/{d}", .{ ruleFlags(state), cur, total });
+        break :blk try std.fmt.allocPrint(arena, "{s}{s}{d}/{d}", .{ sideFlag(state), ruleFlags(state), cur, total });
     };
     if (counter) |counter_text| {
         const counter_cols: u32 = counterCols(state);
@@ -756,6 +794,52 @@ test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라�
     try std.testing.expectEqual(plain_cols, counterCols(&s));
     s.target = .page;
     try std.testing.expectEqualStrings("", ruleFlags(&s));
+}
+
+test "FND24 검색 중인 열이 카운터 앞에 뜬다 — 규칙 깃발보다 앞이고 예약 폭도 따라온다 (§5.1)" {
+    // **왼쪽은 언제나 옛 판이다.** 이 표시가 없으면 방금 추가한 이름을 찾다 만난 0 을 설명할 길이
+    // 없다 — 그 이름은 오른쪽 열에 뻔히 보이는데도. 「못 찾는다」가 아니라 「왜 0인지 모른다」가
+    // 이 표시가 막는 결함이다.
+    var s: State = .{};
+    s.target = .editor;
+    s.match_count = 0;
+    s.current = 0;
+
+    // **비교 뷰가 아니면 안 적는다** — 단일 편집기에는 열이 없다.
+    try std.testing.expectEqualStrings("", sideFlag(&s));
+    const plain_cols = counterCols(&s);
+
+    s.diff_side_shown = .left;
+    try std.testing.expectEqualStrings("L ", sideFlag(&s));
+    s.diff_side_shown = .right;
+    try std.testing.expectEqualStrings("R ", sideFlag(&s));
+
+    // **예약 폭이 실제 글자 폭과 같다** — 어긋나면 긴 검색어의 caret 이 카운터에 가려진다(계약 §6.1).
+    try std.testing.expectEqual(overlay_input.displayCols(sideFlag(&s)) + plain_cols, counterCols(&s));
+
+    // **열이 규칙보다 앞에 선다** — 어느 문서를 보는가가 그 문서를 어떻게 훑는가보다 먼저다.
+    s.match_case = true;
+    try std.testing.expectEqualStrings("R ", sideFlag(&s));
+    try std.testing.expectEqualStrings("Aa ", ruleFlags(&s));
+    try std.testing.expectEqual(
+        overlay_input.displayCols("R ") + overlay_input.displayCols("Aa ") + plain_cols,
+        counterCols(&s),
+    );
+
+    // **편집기가 아니면 안 그린다** — 스크롤백·웹에는 열이 없으므로 그리면 거짓말이다.
+    s.target = .scrollback;
+    try std.testing.expectEqualStrings("", sideFlag(&s));
+    s.target = .page;
+    try std.testing.expectEqualStrings("", sideFlag(&s));
+}
+
+test "FND25 찾기를 새로 열면 고른 열이 기본으로 돌아온다 (§5.1)" {
+    // **닫는 자리가 아니라 여는 자리에서 버린다.** 닫는 경로가 여럿이라 한 곳만 빠뜨려도 지난
+    // 선택이 남고, 오버레이가 닫힌 뒤에도 ⌘G 네비는 살아 있어 그 동안에는 유지되는 것이 맞다.
+    var s: State = .{};
+    s.diff_side = .right;
+    s.show();
+    try std.testing.expect(s.diff_side == null);
 }
 
 test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)" {

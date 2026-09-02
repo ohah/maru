@@ -171,6 +171,26 @@ pub const PinnedReleaseFile = struct {
         return .{ .identity = self.fingerprint.identity, .size = self.fingerprint.size, .mode = self.fingerprint.mode, .sha256 = self.sha256 };
     }
 
+    pub fn executableDirectoryDescriptor(self: *const @This()) Error!c.fd_t {
+        if (self.value() == null or !self.executable or self.parent_fd < 0) return error.InvalidOwner;
+        return self.parent_fd;
+    }
+
+    pub fn pathMutationSeal(self: *const @This()) Error!PathMutationSeal {
+        if (self.value() == null or !self.executable) return error.InvalidOwner;
+        var stat: posix.Stat = undefined;
+        if (c.fstat(self.parent_fd, &stat) != 0) return error.FileChanged;
+        return mutationSeal(try directoryFingerprint(stat));
+    }
+
+    pub fn validatePathMutationSeal(self: *const @This(), seal: PathMutationSeal) Error!void {
+        if (self.value() == null or !self.executable) return error.InvalidOwner;
+        var stat: posix.Stat = undefined;
+        if (c.fstat(self.parent_fd, &stat) != 0 or
+            !sameMutationSeal(seal, mutationSeal(try directoryFingerprint(stat))))
+            return error.FileChanged;
+    }
+
     pub fn revalidate(self: *const @This(), path: [:0]const u8) Error!ExecutableObservation {
         const expected = self.value() orelse return error.InvalidOwner;
         var path_digest: [32]u8 = undefined;

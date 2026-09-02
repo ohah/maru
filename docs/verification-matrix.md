@@ -985,6 +985,14 @@ malformed·교환 leaf, 기존 output과 allocation failure에서는 publication
 `test-session-host-release-adapter-candidate-baseline-evidence`가 이를 actual macOS filesystem의 Debug·ReleaseFast gate로 검증한다.
 signed leaf 실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
 
+U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
+predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
+fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/
+download inode를 모두 다시 검증한다. caller identity scalar, copied/pre-owned/alias owner, allocator callback drift, malformed·교환
+leaf와 기존 output에서는 publication 0이며 성공은 held output inode authority 하나다.
+`test-session-host-release-adapter-candidate-upgrade-evidence`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다. signed leaf
+실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
+
 U5 Release DMG pathname/mount authority는 **구현**됐다. 종료 gate
 `test-session-host-release-adapter-dmg-authority`는 `max_dmg_bytes` 이하 expected size/SHA, exclusive 0700 work-directory,
 no-follow source→0600 private DMG bounded streaming copy와 source/copy identity·SHA 결속, read-only fixed mount, exact `Maru.app/Contents/Info.plist` 및

@@ -2303,6 +2303,27 @@ drift, duplicate name/ID, partial attach와 기존 remote asset은 publication 0
 전 fail-index terminal state, token staging zeroization과 bounded response ownership을 Debug·ReleaseFast에서 검증한다. 이 component는 draft redownload validation,
 publish, post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.34 exact draft asset redownload 권위
+
+upload response는 GitHub가 실제로 보존한 bytes의 증거가 아니므로 draft publish 전에 네 asset을 exact asset ID로 다시 내려받아
+held 원본과 대조한다. `release_adapter_github_draft_asset_redownload.zig`의 final-address move-only
+`RedownloadValidation`만 ready `DraftAuthority`와 `DraftAssets`, candidate/authored attestation, canonical held manifest와 네 held file,
+checkout 전에 고정한 GitHub CLI, validated token 및 같은 release phase `Deadline`을 함께 소비한다. caller는 release/tag/name/SHA,
+asset 순서, 성공 bool 또는 download URL을 별도 scalar로 제출하지 않는다.
+
+각 요청은 `github.com/repos/ohah/maru/releases/assets/<exact-asset-id>`에 octet-stream accept header를 사용하며
+DMG→frozen executable→evidence→manifest 순서로만 실행한다. response body는 pathname이나 unbounded heap/file로 materialize하지 않고
+bounded pipe에서 chunk별로 SHA-256과 byte count를 계산한다. expected size를 넘는 첫 byte, 조기 EOF, child failure·timeout 또는 digest
+불일치는 즉시 실패한다. stderr는 protocol bytes와 섞지 않고 token은 argv나 inherited environment에 두지 않는다. 각 child 전후에는
+DraftAuthority, DraftAssets, pinned CLI, 네 held file과 typed attestation graph를 모두 재검증하고 최초 fixed snapshot과 비교한다.
+
+네 exact ID/name/size/SHA가 모두 원본과 일치하고 마지막 fresh deadline·authority fence를 통과한 뒤에만 validation owner를 게시한다.
+copied/pre-owned/aliased result, duplicate/zero asset ID, held inode/path/manifest/receipt drift, foreign capture, partial redownload와 allocator
+failure는 publication 0이다. redownload는 remote mutation이 아니므로 실패가 draft cleanup state를 바꾸거나 attach를 재시도·삭제하지
+않는다. focused gate는 exact argv/environment/order, streaming count/digest cap, 전 child-index와 authority drift를 Debug·ReleaseFast에서
+검증하며 최초·각 child 전후·최종 authority snapshot의 모든 allocation fail index에서 publication 0을 고정한다. 이 component는 draft
+publish, post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

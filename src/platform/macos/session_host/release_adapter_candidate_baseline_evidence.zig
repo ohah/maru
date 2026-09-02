@@ -49,7 +49,7 @@ pub fn publishWith(allocator: std.mem.Allocator, authority: anytype, paths: Path
 fn publishFromAuthority(allocator: std.mem.Allocator, authority: anytype, paths: Paths, result: *PublishedEvidence) !void {
     try validateInputs(authority, paths, result);
     const initial = try authority.revalidate();
-    var snapshot: Snapshot = .{};
+    var snapshot: IdentitySnapshot = .{};
     try snapshot.capture(initial);
     var validator = PublicationValidator(@TypeOf(authority)){
         .authority = authority,
@@ -85,7 +85,7 @@ const Authority = struct {
 fn PublicationValidator(comptime AuthorityType: type) type {
     return struct {
         authority: AuthorityType,
-        expected: *const Snapshot,
+        expected: *const IdentitySnapshot,
 
         pub fn validate(self: *@This()) !void {
             const current = try self.authority.revalidate();
@@ -94,7 +94,7 @@ fn PublicationValidator(comptime AuthorityType: type) type {
     };
 }
 
-const Snapshot = struct {
+pub const IdentitySnapshot = struct {
     test_uuid: [36]u8 = @splat(0),
     repository_id: u64 = 0,
     release_id: u64 = 0,
@@ -110,7 +110,7 @@ const Snapshot = struct {
     executable_sha256: [64]u8 = @splat(0),
     designated_requirement_sha256: [64]u8 = @splat(0),
 
-    fn capture(self: *@This(), view: IdentityView) !void {
+    pub fn capture(self: *@This(), view: IdentityView) !void {
         try evidence.validateCommon(view.common);
         if (view.common.test_uuid.len != self.test_uuid.len or
             view.common.repository.owner.len != "ohah".len or
@@ -140,7 +140,7 @@ const Snapshot = struct {
         try evidence.validateCommon(self.common());
     }
 
-    fn common(self: *const @This()) evidence.Common {
+    pub fn common(self: *const @This()) evidence.Common {
         return .{
             .test_uuid = &self.test_uuid,
             .repository = .{ .id = self.repository_id, .owner = "ohah", .name = "maru" },
@@ -151,7 +151,7 @@ const Snapshot = struct {
         };
     }
 
-    fn matches(self: *const @This(), view: IdentityView) bool {
+    pub fn matches(self: *const @This(), view: IdentityView) bool {
         const expected = self.common();
         const current = view.common;
         return current.repository.id == expected.repository.id and

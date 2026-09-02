@@ -1326,6 +1326,8 @@ pub const RemoteTermBackend = struct {
     app_quit_target_count: u32 = 0,
     next_shutdown_connection_identity: u64 = 0,
 
+    /// **제품 경로는 `init*` 이 부팅 후 경과 밀리초로 덮어쓴다.** 이 기본값 1 은 구조체 리터럴을 직접
+    /// 만드는 테스트만을 위한 것이다 — 이유는 `initialNotificationConfigGeneration` 주석에 적었다.
     notification_config_generation: u64 = 1,
     notifications_osc: bool = false,
 
@@ -1417,8 +1419,39 @@ pub const RemoteTermBackend = struct {
         return 1;
     }
 
+    /// `config_generation` 의 시작값. **앱 프로세스보다 host 가 오래 산다**는 사실 하나가 이 함수의 전부다.
+    ///
+    /// host 는 exec 업그레이드를 넘어 살아남으며 runtime 마다 `record.config_generation` 을 보존한다
+    /// (`notification_delivery.MetadataStore`). 그런데 이 카운터를 앱이 뜰 때마다 1 로 되돌리면, 재접속한
+    /// 앱이 보내는 값은 그 보존된 값보다 **작거나 같다**. host 는 그것을 `stale_config` 로 거절하는데,
+    /// wire 에서는 `stale_controller` 와 함께 `invalid_generation` 한 코드로 접혀 온다. 앱은 구분할 수단이
+    /// 없어 controller_generation 경합으로 읽고 재시도하지만, 그 값은 controller 승격에서만 바뀌므로
+    /// **재시도로는 절대 수렴하지 않는다.** 바깥 루프가 실패한 entry 를 0 으로 되돌려 매 frame 다시 태우니
+    /// 앱이 사는 내내 같은 RPC 가 돈다.
+    ///
+    /// 2026-09-02 실측: 앱 세션 3 개가 각각 같은 runtime 에 1119·1140·2893 회 반복했고, 유휴여야 할 앱이
+    /// 수천 번 왕복하다 sleep/DarkWake 구간에 걸린 한 건이 `read_timeout` 으로 연결을 끊었다.
+    ///
+    /// **부팅 후 경과 밀리초**(`Clock.awake`)에서 시작한다. 이 시계를 고른 이유는 그 수명이 host record 의
+    /// 수명과 정확히 같기 때문이다 — record 는 host 프로세스의 메모리에 살고, host 는 재부팅을 넘기지
+    /// 못한다(문서상 non-goal). `awake` 도 재부팅에서 0 으로 돌아가므로 둘은 언제나 같은 부팅 세션을 센다.
+    /// 그 안에서는 단조 증가하니 앱이 몇 번을 다시 뜨든 이전 프로세스가 남긴 값보다 항상 크다.
+    ///
+    /// `Clock.real`(벽시계)은 쓰지 않는다. NTP 가 시계를 뒤로 돌리면 그 폭만큼 다시 갇히기 때문이다.
+    /// generation 은 순서만 뜻하므로 값의 크기 자체에는 의미가 없다.
+    fn initialNotificationConfigGeneration(io: std.Io) u64 {
+        const ms = @divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms);
+        return if (ms > 0) @intCast(ms) else 1;
+    }
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
-        return .{ .allocator = allocator, .io = io, .client = client, .surface_runtime = surface_runtime };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .client = client,
+            .surface_runtime = surface_runtime,
+            .notification_config_generation = initialNotificationConfigGeneration(io),
+        };
     }
 
     pub fn initWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *AdapterPool, surface_runtime: *SurfaceRuntime) !RemoteTermBackend {
@@ -1438,6 +1471,7 @@ pub const RemoteTermBackend = struct {
             .host_pool = pool,
             .mode = .attach_only,
             .surface_runtime = surface_runtime,
+            .notification_config_generation = initialNotificationConfigGeneration(io),
         };
     }
 
@@ -8396,4 +8430,62 @@ test "C3-3b4 pump round-robin은 지속 유입에서도 기존 owner를 굶기�
         fixture.consumeFrame(17);
     }
     for (B4PumpProbe.seen) |value| try testing.expect(value >= 16);
+}
+
+test "재시작한 앱의 config generation 시작값은 host 가 보존한 record 를 넘는다" {
+    // host 는 앱보다 오래 산다 — exec 업그레이드를 넘어 살아남으며 runtime 마다 record 를 보존한다.
+    // 그래서 이 테스트의 store 는 «앱 재시작을 겪은 host» 를 흉내낸다.
+    var store = notification_delivery.MetadataStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const runtime_id: notification_delivery.RuntimeId = 0x5eed;
+    const controller_generation: u64 = 7;
+    try store.install(runtime_id, .{
+        .config_generation = 1,
+        .notifications_osc = false,
+        .display_label = "",
+    });
+
+    // 이전 프로세스가 설정을 올려 둔 상태. 첫 update 는 record 의 controller_generation(0) 이 달라 통과한다.
+    try std.testing.expectEqual(
+        notification_delivery.UpdateResult.applied,
+        try store.update(runtime_id, controller_generation, .{
+            .expected_controller_generation = controller_generation,
+            .config_generation = 4096,
+            .notifications_osc = true,
+            .display_label = "before restart",
+        }),
+    );
+
+    // 앱이 다시 뜨면서 카운터를 1 로 되돌리면 host 는 이 값을 영원히 거절한다. 거절은 wire 에서
+    // `invalid_generation` 으로 접혀 오므로 앱은 controller 경합으로 오해하고 매 frame 재시도한다.
+    try std.testing.expectEqual(
+        notification_delivery.UpdateResult.stale_config,
+        try store.update(runtime_id, controller_generation, .{
+            .expected_controller_generation = controller_generation,
+            .config_generation = 1,
+            .notifications_osc = false,
+            .display_label = "after restart",
+        }),
+    );
+
+    // 벽시계에서 시작하면 보존된 값을 넘어 **한 번에** 적용된다 — 재시도 자체가 필요 없다.
+    try std.testing.expectEqual(
+        notification_delivery.UpdateResult.applied,
+        try store.update(runtime_id, controller_generation, .{
+            .expected_controller_generation = controller_generation,
+            .config_generation = RemoteTermBackend.initialNotificationConfigGeneration(std.testing.io),
+            .notifications_osc = false,
+            .display_label = "after restart",
+        }),
+    );
+}
+
+test "config generation 시작값은 프로세스마다 뒤로 가지 않는다" {
+    const first = RemoteTermBackend.initialNotificationConfigGeneration(std.testing.io);
+    const second = RemoteTermBackend.initialNotificationConfigGeneration(std.testing.io);
+    try std.testing.expect(second >= first);
+    // 구조체 리터럴 기본값 1 은 테스트 전용이다. 제품 init 이 그 값을 그대로 두면 host 의 보존 record 를
+    // 넘지 못해 이 PR 이 고친 무한 재시도로 되돌아간다.
+    try std.testing.expect(first > 1);
 }

@@ -1741,6 +1741,7 @@ pub const RemoteTermBackend = struct {
             return result;
         }
         job_owned = false;
+        logReconnectJobConnected(host_id, "connect");
         return .connected;
     }
 
@@ -1809,6 +1810,7 @@ pub const RemoteTermBackend = struct {
             return result;
         }
         job_owned = false;
+        logReconnectJobConnected(snapshot.host_id, "candidate");
         return .connected;
     }
 
@@ -1836,6 +1838,45 @@ pub const RemoteTermBackend = struct {
         try job.abort(self);
         self.host_reconnect_job = null;
         self.allocator.destroy(job);
+    }
+
+    /// 재접속 job 이 **연결까지는 갔다**는 사실을 남긴다. `via` 는 새로 connect 했는지, 이미 잡아 둔
+    /// candidate 를 채택했는지를 가른다.
+    ///
+    /// 이 줄이 없으면 incident 가 `disposition=reconnect` 로 남아도 admission→job 사슬 중 어디가 끊겼는지
+    /// 가릴 수 없다. 2026-09-03 실측: 정지한 앱의 스택에서 `reconnect_product_tick` 이 19 샘플로 얕게만
+    /// 돌았고(정상 재접속 중이면 그 아래 전이 프레임이 쌓인다) 활성 job 이 없었는데, job 이 **시작조차 안 된
+    /// 것인지** 시작했다가 실패로 끝난 것인지 구분할 근거가 없었다.
+    fn logReconnectJobConnected(host_id: u128, via: []const u8) void {
+        if (builtin.is_test) return;
+        std.log.info("reconnect job connected: host={x:0>32} via={s}", .{ host_id, via });
+    }
+
+    /// 재접속이 **어느 전이에서** 깨졌는지 남긴다. 실패 분기에서만 찍으므로 정상 경로에는 한 줄도 늘지 않는다.
+    ///
+    /// `state` 하나로 처방이 갈린다. `candidate_rejected`·`candidate_failed` 는 원장에서 `retry_old_valid`
+    /// 로 접혀 다시 시도할 여지가 있지만, `takeover_sent_unknown`·`pre_takeover_failed` 는
+    /// `takeover_sent_unknown` 으로 정착해 **의도적으로 재시도하지 않는다**(중복 takeover 방지). 앞의 것이면
+    /// admission 재발급만으로 풀리고, 뒤의 것이면 `controller.status` 로 실제 소유를 먼저 확인하는 프로토콜
+    /// 설계가 필요하다. `next_index` 는 몇 번째 runtime 에서 무너졌는지를, `runtime_handle` 은 그 대상을 짚는다.
+    fn logReconnectRuntimeFailure(state: HostReconnectJobState, next_index: u32, runtime_handle: u64) void {
+        if (builtin.is_test) return;
+        std.log.err("reconnect runtime failed: state={s} next_index={d} runtime_handle={x}", .{
+            @tagName(state), next_index, runtime_handle,
+        });
+    }
+
+    /// 실패가 원장에서 **어떤 처분으로 접혔는지** 남긴다. `retry_reserved` 가 0 이 아니면 재시도 여지가 남은
+    /// 것이고, 0 인 채 `frozen_unavailable` 만 늘었다면 그 runtime 들은 이 job 안에서 끝났다는 뜻이다.
+    fn logReconnectTerminalSummary(summary: host_reconnect_runtime_ledger.TerminalSummary) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "reconnect terminal: host={x:0>32} total={d} published_old={d} published_new={d} frozen={d} ended={d} retry_reserved={d}",
+            .{
+                summary.host_id,            summary.total, summary.published_old,  summary.published_new,
+                summary.frozen_unavailable, summary.ended, summary.retry_reserved,
+            },
+        );
     }
 
     /// Advances exactly one existing CR5 closed-state transition. It never connects, waits, joins,
@@ -1873,9 +1914,11 @@ pub const RemoteTermBackend = struct {
                 return err;
             },
             .candidate_rejected, .authority_conflict, .takeover_sent_unknown, .pre_takeover_failed => {
+                logReconnectRuntimeFailure(state, job.runtime_cursor.next_index, job.runtime_handle);
                 _ = try self.failHostReconnectRuntimeTransactions();
             },
             .candidate_failed => {
+                logReconnectRuntimeFailure(state, job.runtime_cursor.next_index, job.runtime_handle);
                 if (job.runtime_cursor.next_index == 0) {
                     _ = try self.failHostReconnectRuntimeTransactions();
                 } else {
@@ -2181,6 +2224,7 @@ pub const RemoteTermBackend = struct {
             job.runtime_cursor.next_index,
         );
         job.terminal_summary = summary;
+        logReconnectTerminalSummary(summary);
         job.state_raw = @intFromEnum(HostReconnectJobState.runtime_transactions_complete);
         job.seal = process_seal.hostReconnectJobSeal(
             job.pid,

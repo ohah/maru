@@ -290,10 +290,45 @@ pub const WriteTarget = union(enum) {
     unavailable,
 };
 
+/// 두 행이 **같은 저장소 가족**(저장소 + 그 워크트리들)인가. 판정은 `git worktree list` 가 준 **주
+/// 워크트리 경로**(`Entry.origin`)다 — 우리가 선 자리로 판정하면 워크트리에 선 터미널에서 신원이
+/// 뒤집힌다(`scm_repos.Entry.origin` 이 그 이유로 존재한다).
+///
+/// 목록에 없는 경로는 **가족이 아니다**(false) — 모르는 것을 「같다」로 답하면 그쪽이 위험한 쪽이다.
+pub fn sameRepoFamily(self: *AppSession, a: []const u8, b: []const u8) bool {
+    const repos = scm_dock_ops.repoEntries(self);
+    var origin_a: ?[]const u8 = null;
+    var origin_b: ?[]const u8 = null;
+    for (repos.entries) |entry| {
+        if (std.mem.eql(u8, entry.path, a)) origin_a = entry.origin;
+        if (std.mem.eql(u8, entry.path, b)) origin_b = entry.origin;
+    }
+    const oa = origin_a orelse return false;
+    const ob = origin_b orelse return false;
+    return std.mem.eql(u8, oa, ob);
+}
+
 pub fn writeTargetFor(self: *AppSession, repo: []const u8, ctl_buf: []u8) WriteTarget {
     const dest = self.git_repo_dest orelse return .local;
     const current = self.git_repo orelse return .local;
-    if (!std.mem.eql(u8, current, repo)) return .local; // 비활성(로컬) 저장소 행
+    // ⚠️ **원격 저장소의 «다른 워크트리» 행을 로컬로 떨어뜨리지 않는다**(적대적 검증 2026-09-02 —
+    // 제품에서 재현했다).
+    //
+    // 예전에는 「활성이 아니면 로컬 행」이라 보고 곧장 `.local` 을 냈다. **그 전제는 워크트리에서
+    // 거짓이다**: 활성 pane 이 원격이면 목록에는 그 원격 저장소의 워크트리들이 함께 실리고(원격
+    // `git worktree list` 가 준 **저쪽 기계의 경로**다), 그 행은 활성 저장소와 경로가 다르다.
+    //
+    // 실측: 원격 저장소에 워크트리를 만들고 그 행에서 전체 스테이지를 걸었더니 파일이 `?? → A` 로
+    // 바뀌었는데, 원격 PATH 에 세운 목격자 래퍼에는 **한 줄도 안 남았다** — 로컬 git 이 썼다.
+    //
+    // 판정은 **주 워크트리 경로(`origin`)** 가 진다. 워크트리는 그 값을 저장소와 공유하므로, 경로가
+    // 달라도 「같은 저장소 가족」임이 그 한 값으로 드러난다. 진짜 로컬 저장소 행은 `origin` 이 다르니
+    // 그대로 `.local` 이다 — RS4a 4 회차가 못 박은 그 동작을 안 건드린다.
+    //
+    // 원격 워크트리를 **원격으로** 쓰는 것은 기능이다(쓰기 워커가 그 행의 목적지를 모른다). 여기서는
+    // 「보내지 않고 이유를 말한다」로 끊는다 — 소켓이 없을 때와 같은 처리다.
+    if (!std.mem.eql(u8, current, repo))
+        return if (sameRepoFamily(self, repo, current)) .unavailable else .local;
     const ctl = remoteControlSocketFor(self, dest, ctl_buf) orelse return .unavailable;
     return .{ .remote = .{ .dest = dest, .control_path = ctl } };
 }

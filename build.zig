@@ -4515,6 +4515,55 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
+    // ── 원격 감시자(RW1 — docs/plans/remote-watch.md) ──────────────────────────────────────────
+    //
+    // **원격에서 도는 프로그램이라 «컴파일되는 타깃 전부»가 계약이다.** 한 타깃만 깨지면 그 원격만
+    // 조용히 감시가 안 되고, 증상은 「원격만 갱신이 안 된다」로 보인다 — 이 트랙이 고치려던 바로 그
+    // 모양이다. 그래서 게이트가 **전 타깃을 컴파일한다.**
+    //
+    // ⚠️ 컴파일만으로는 부족하다는 것을 실측으로 배웠다: `nftw` 의 `FTW_D` 상수가 libc 마다 달라
+    // (glibc 1 · musl 2) 컴파일도 되고 `nftw` 도 성공하는데 **watch 를 하나도 안 거는** 판을 한 번
+    // 만들었다. 그래서 디렉터리 판정은 `std.Io.Dir` 이 지고, 경계 test 가 그 사실을 소스에서 센다.
+    const remote_watch_step = b.step("remote-watch", "Build the remote filesystem watcher for every remote target");
+    const remote_watch_targets = [_]std.Target.Query{
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos },
+    };
+    for (remote_watch_targets) |query| {
+        const watch_exe = b.addExecutable(.{
+            .name = "maru-remote-watch",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/remote-watch/main.zig"),
+                .target = b.resolveTargetQuery(query),
+                .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
+                .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
+            }),
+        });
+        remote_watch_step.dependOn(&watch_exe.step);
+    }
+
+    const remote_watch_contract_step = b.step(
+        "test-remote-watch-contract",
+        "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",
+    );
+    const remote_watch_contract_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_watch_contract_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_watch_contract = b.addRunArtifact(remote_watch_contract_tests);
+    run_remote_watch_contract.addArg("--maru-expect-tests=1");
+    run_remote_watch_contract.addArg("--maru-expect-passed=1");
+    run_remote_watch_contract.setCwd(b.path("."));
+    remote_watch_contract_step.dependOn(&run_remote_watch_contract.step);
+    boundary_step.dependOn(&run_remote_watch_contract.step);
+    // 전 타깃 컴파일도 경계에 건다 — 한 타깃만 깨지면 그 원격만 조용히 감시가 안 된다.
+    boundary_step.dependOn(remote_watch_step);
+
     // `ssh-integration.md` §9.4 의 「원격 cwd 소비처」 표가 코드와 같은 상태를 말하는지 센다.
     // **그 표는 두 번 낡았다** — 「창 제목이 `currentCwd` 를 쓴다」는 옛 배선인데 코드만 정정됐고,
     // 그 행을 읽은 사람이 「host 접두 후속이 남았다」고 판단했다(소비자가 0 인 자리였다).

@@ -4792,7 +4792,9 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
             }
             var k: u32 = 0;
             while (k < r.count) : (k += 1) {
-                // 화면 밖으로 나가면 그만 그린다 — 둘러보기(팬)는 후속이다(§8 한계).
+                // 화면 밖으로 나가면 그만 그린다. **팬은 후속이 아니라 «없어진 일» 이다** —
+                // 뷰포트 선언(S11-6)이 세션을 이 격자에 맞추므로 넘칠 것이 없다. 이 줄은 그
+                // 선언이 아직 안 닿았거나 host 가 못 줄인 동안의 **방어**로 남는다.
                 if (ox + col * cell_w > @as(i32, @intFromFloat(win.x + win.w))) break;
                 if (r.grapheme.len > 0 and r.grapheme[0] != ' ') {
                     pushText(r.grapheme, ox + col * cell_w, oy + @as(i32, row) * line_h, line_h, fg);

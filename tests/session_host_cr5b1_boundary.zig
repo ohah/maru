@@ -55,7 +55,9 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     // CR5d-2 reuses the sealed terminal summary/rows through the backend-private Window projection;
     // no AppSession caller receives the ledger values directly.
     // CR5d-2 adds the terminal-row shrink projection, digest and summary to the same host job owner.
-    try std.testing.expectEqual(@as(usize, 35), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // 36 번째는 terminal summary 진단이 쓰는 타입 참조 하나다 — 원장을 **소유하지 않고** 이미 만들어진
+    // 요약을 읽어 로그로 흘릴 뿐이라 이 경계가 지키려는 owner 집합은 그대로다.
+    try std.testing.expectEqual(@as(usize, 36), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     const backend_product = backend[0 .. std.mem.indexOf(u8, backend, "const testing = std.testing;") orelse
         return error.TestUnexpectedResult];
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend_product, "reconnectRuntimeSetIdentity"));

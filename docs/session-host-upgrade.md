@@ -2232,6 +2232,31 @@ manifest가 evidence와 같은 parent에 게시되어도 exact evidence leaf의 
 일반 release-file revalidation은 held parent의 directory identity와 mode를 검증하되 sibling 생성에 따라 변하는 mtime/ctime을 input
 무효화 권위로 쓰지 않는다. executable 실행 직전의 별도 `PathMutationSeal`만 directory mutation을 봉인한다.
 
+### 11.31 authored evidence와 manifest artifact attestation 권위
+
+같은 trusted release run이 생성한 aggregate evidence와 candidate manifest도 pathname이나 caller가 제출한 SHA를 곧바로
+artifact-attestation subject로 승격하지 않는다. `release_adapter_candidate_authored_attestation.zig`의 단일 composition이
+final-address `PublishedEvidence`와 held candidate manifest, manifest authoring에 사용한 typed authority graph, checkout 전에 고정한
+GitHub CLI, validated token과 같은 release phase `Deadline`을 함께 소비한다. role B predecessor graph의 유무는 caller가 고르는
+flag가 아니라 held evidence의 canonical profile과 manifest role에서만 결정한다.
+
+composition은 두 held fd에서 bytes를 읽고 `release_evidence.parseCanonical`과 `release_manifest.parseCanonical`로 다시 해석한다.
+manifest author의 공용 revalidation entrypoint가 candidate identity/files/product/source/compatibility, evidence와 role B predecessor를
+다시 결속하며, manifest의 evidence name/SHA와 asset row가 exact held evidence observation을 지목하는지 확인한다. 이 entrypoint가
+manifest authoring 의미를 단일 소스로 소유하며 attestation composition은 repository/release/source/build/signing/asset 비교를
+복제하지 않는다. canonical bytes, typed graph 또는 held file identity가 맞지 않으면 child를 실행하지 않는다.
+
+artifact attestation은 aggregate evidence 다음 manifest 순서로만 실행한다. 각 child 직전에 같은 deadline의 fresh remaining을 얻고,
+pinned CLI와 두 held file, typed graph를 다시 검증한다. subject는 각 held pathname의 exact basename과 held fd에서 계산된 SHA-256이며
+기존 `release_adapter_github_attestation.verifyWith`가 exact repository, workflow, source commit, run ID/attempt와 subject를 판정한다.
+각 child 뒤에도 두 file과 CLI를 재검증하고, 두 receipt가 모두 verified이며 기대 run/subject와 일치한 뒤 마지막 allocation 없는
+revalidation과 deadline 확인을 통과해야 final-address move-only `AuthoredAttestation`을 게시한다.
+
+copied/pre-owned result, result/output buffer/authority/path alias, evidence-manifest inode alias, pathname 교체, canonical 또는 cross-binding
+불일치, role/predecessor 교환, CLI drift, timeout, 첫째 또는 둘째 child 실패와 allocation failure에서는 receipt publication 0이다.
+첫 attestation이 원격에 존재해도 둘째 실패를 성공으로 합성하거나 기존 receipt를 재사용하지 않는다. 이 gate는 attestation 발급
+workflow 명령, draft asset attach, pre-publish redownload/validator, publish 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

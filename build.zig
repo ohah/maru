@@ -5851,6 +5851,16 @@ pub fn build(b: *std.Build) void {
     session_host_release_workflow_step.dependOn(&session_host_release_workflow_contract.step);
     test_step.dependOn(&session_host_release_workflow_contract.step);
 
+    const session_host_release_attestation_action_contract = b.addSystemCommand(&.{ "bash", "tools/test-session-host-release-attestation-action.sh" });
+    session_host_release_attestation_action_contract.setCwd(b.path("."));
+    session_host_release_attestation_action_contract.stdio = .inherit;
+    const session_host_release_attestation_action_step = b.step(
+        "test-session-host-release-attestation-action",
+        "Check the single-subject release attestation action",
+    );
+    session_host_release_attestation_action_step.dependOn(&session_host_release_attestation_action_contract.step);
+    test_step.dependOn(&session_host_release_attestation_action_contract.step);
+
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 

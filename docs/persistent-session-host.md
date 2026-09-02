@@ -146,6 +146,22 @@ prefix key, status line, copy mode, 설정 언어, command language, tmux wire �
 
 ### 비목표
 
+- **원격 기계에서 `maru-sessiond` 를 돌리는 것(원격 relay) — 보류**(2026-09-02 사용자 결정).
+  host 는 **로컬 전용**이고, 원격 지속성은 지금 `ssh` + 사용자의 tmux 가 덮는다.
+  - **왜 보류인가**: relay 는 **원격 배포 축**을 새로 연다 — 원격 `maru` 를 계속 최신으로 유지해야
+    하고, 그 버전 스큐는 이미 물린 적이 있다(`agent-events --resume` 은 옛 원격이 모르는 플래그다,
+    `ssh_upload.zig` 의 그 주석). 지금 원격에 두는 것은 훅과 스트리머뿐이라 얕지만 데몬까지 가면
+    깊어진다. 게다가 이 계약의 전송·인증은 **peer-cred(`getpeereid`) 기반이라 기계를 넘지 못한다** —
+    relay 는 전송·인증을 새로 소유해야 하는데 그것은 [모바일 플랫폼](mobile-platform.md)의 미결과
+    **같은 결정**이고, 거기서는 **모바일이 그것 없이는 아예 존재할 수 없다**(원격은 동작은 한다).
+    급한 쪽이 먼저다.
+  - **다시 볼 신호**: tmux 를 **제대로 지원하는 비용**이 tmux 를 **불필요하게 만드는 비용**에 가까워질
+    때. 그 비용은 0 이 아니다 — RA6(`remote_tmux_route.zig`)이 통째로 `LC_MARU_PANE` 오염 때문에
+    있고, 「tmux pane 이 여럿인데 하나만 감지된다」는 역조회가 성공해도 남는 **구조적 한계**다
+    (클라이언트가 하나라 nonce 도 하나 → 전부 같은 Term 에 귀속). 그 한계를 풀려고 모델에 tmux pane
+    축을 새로 내야 한다면, 그 비용과 relay 비용을 나란히 놓고 비교한다.
+  - ⚠️ **「tmux 를 걷어낸다」가 아니다.** 사용자가 직접 띄우는 것이고 maru 밖에서도 쓴다. maru 가
+    할 수 있는 것은 **자기 원격 지속성에 tmux 가 필요 없게 만드는 것**뿐이다.
 - 재부팅·전원 종료를 건너 실제 OS 프로세스를 보존하는 것.
 - `maru-sessiond` crash·강제 종료 또는 terminal child 종료 뒤 동일 실행 세션을 복구하는 것. host/runtime이 끝나면
   그 Maru runtime도 끝난 것이며 자동 대체 spawn을 하지 않는다.

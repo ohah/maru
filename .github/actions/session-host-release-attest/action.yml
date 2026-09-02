@@ -1,0 +1,62 @@
+name: Session host release single-subject attestation
+description: Pin one release artifact around one immutable GitHub provenance action
+
+inputs:
+  subject-path:
+    description: Canonical absolute pathname of exactly one release artifact
+    required: true
+  subject-name:
+    description: Exact basename expected for the release artifact
+    required: true
+
+outputs:
+  attestation-id:
+    value: ${{ steps.final.outputs.attestation-id }}
+  attestation-url:
+    value: ${{ steps.final.outputs.attestation-url }}
+  bundle-path:
+    value: ${{ steps.final.outputs.bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Pin exact subject
+    id: pin
+    shell: bash
+    env:
+      MARU_SUBJECT_PATH: ${{ inputs.subject-path }}
+      MARU_SUBJECT_NAME: ${{ inputs.subject-name }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-subject.sh" pin "$MARU_SUBJECT_PATH" "$MARU_SUBJECT_NAME" >> "$GITHUB_OUTPUT"
+
+  - name: Attest exact subject
+    id: attest
+    uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+    with:
+      subject-name: ${{ inputs.subject-name }}
+      subject-digest: sha256:${{ steps.pin.outputs.sha256 }}
+
+  - name: Revalidate exact subject
+    id: final
+    shell: bash
+    env:
+      MARU_SUBJECT_PATH: ${{ inputs.subject-path }}
+      MARU_SUBJECT_NAME: ${{ inputs.subject-name }}
+      MARU_DEVICE: ${{ steps.pin.outputs.device }}
+      MARU_INODE: ${{ steps.pin.outputs.inode }}
+      MARU_SIZE: ${{ steps.pin.outputs.size }}
+      MARU_LINKS: ${{ steps.pin.outputs.links }}
+      MARU_SHA256: ${{ steps.pin.outputs.sha256 }}
+      MARU_ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+      MARU_ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+      MARU_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-subject.sh" verify "$MARU_SUBJECT_PATH" "$MARU_SUBJECT_NAME" "$MARU_DEVICE" "$MARU_INODE" "$MARU_SIZE" "$MARU_LINKS" "$MARU_SHA256"
+      [[ -n "$MARU_ATTESTATION_ID" && "$MARU_ATTESTATION_ID" != *$'\n'* && "$MARU_ATTESTATION_ID" != *$'\r'* ]]
+      [[ -n "$MARU_ATTESTATION_URL" && "$MARU_ATTESTATION_URL" != *$'\n'* && "$MARU_ATTESTATION_URL" != *$'\r'* ]]
+      [[ -n "$MARU_BUNDLE_PATH" && "$MARU_BUNDLE_PATH" != *$'\n'* && "$MARU_BUNDLE_PATH" != *$'\r'* ]]
+      printf 'attestation-id=%s\n' "$MARU_ATTESTATION_ID" >> "$GITHUB_OUTPUT"
+      printf 'attestation-url=%s\n' "$MARU_ATTESTATION_URL" >> "$GITHUB_OUTPUT"
+      printf 'bundle-path=%s\n' "$MARU_BUNDLE_PATH" >> "$GITHUB_OUTPUT"

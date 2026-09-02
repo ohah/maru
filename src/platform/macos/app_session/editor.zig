@@ -700,7 +700,9 @@ pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
 /// **`side`를 강제할 수 있다.** 드래그가 반대 열로 넘어가도 잡은 열에 머물러야 하므로(계약: 좌우를
 /// 걸치는 선택은 만들지 않는다), 호출자가 잡은 열을 넘기면 그 열로만 답한다.
 pub const DiffHit = struct { side: DiffSide, row: usize, byte: usize };
-pub const DiffSide = enum { left, right };
+/// 비교 뷰의 어느 열인가. **찾기 오버레이가 그리는 타입을 그대로 쓴다**(`chrome` 컴포넌트가
+/// 소유) — 같은 모양을 두 군데 두면 한쪽만 늘었을 때 조용히 갈린다.
+pub const DiffSide = chrome.components.find.DiffSide;
 
 pub fn hitTestDiffBody(term: *Term, x_px: f64, y_px: f64, force: ?DiffSide) ?DiffHit {
     if (term.kind != .editor) return null;
@@ -1159,8 +1161,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildDiffPaneOps(
             // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
             // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(term, .left, find_marks), .search_current = diffSearchMarksFor(term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(term, .left, marker_current) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(term, .right, find_marks), .search_current = diffSearchMarksFor(term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(term, .right, marker_current) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             wrap,
@@ -1783,7 +1785,12 @@ fn isRightColumn(self: *AppSession, body: maru.session.SplitRect, term: *Term, x
 /// **매번 다시 묻는다 — 베껴 들지 않는다.** `editor_diff_selection` 은 비교 내용이 다시 계산될 때
 /// 버려지므로(옛 행 인덱스로 훑으면 죽는다), 베껴 두면 선택이 사라진 뒤에도 그 열을 계속 검색해
 /// **화면은 왼쪽인데 결과는 오른쪽 것**이 된다.
-pub fn diffSearchSide(term: *const Term) DiffSide {
+pub fn diffSearchSide(self: *const AppSession, term: *const Term) DiffSide {
+    // **명시값은 여기서 이긴다 — 호출자에서 갈아 끼우지 않는다.** 이 함수 하나를 **셋이** 읽는다:
+    // 검색할 줄 배열(`findLines`)·강조(`diffSearchMarksFor`)·막대 마커(`diffMarkerLinesFor`).
+    // 한 곳에서만 반영하면 나머지 둘이 옛 답을 따라가 **화면은 왼쪽인데 결과는 오른쪽 것**이 된다 —
+    // 아래 「베껴 들지 않는다」가 막는 증상이 **다른 원인으로** 재발하는 자리다(§5.1).
+    if (self.chrome_host.find.diff_side) |side| return side;
     const sel = term.rt.editor_diff_selection orelse return .left;
     return sel.side;
 }
@@ -1792,8 +1799,8 @@ pub fn diffSearchSide(term: *const Term) DiffSide {
 ///
 /// **호출 인자 안에 묻어 두면 잴 수 없다.** 양쪽에 칠하든 반대 열에 칠하든 화면만 다르고
 /// 판정자는 전부 초록이었다(변이 D7·D8·D9). 그래서 결정을 여기 하나로 꺼낸다.
-pub fn diffSearchMarksFor(term: *const Term, side: DiffSide, marks: anytype) @TypeOf(marks) {
-    return if (diffSearchSide(term) == side) marks else null;
+pub fn diffSearchMarksFor(self: *const AppSession, term: *const Term, side: DiffSide, marks: anytype) @TypeOf(marks) {
+    return if (diffSearchSide(self, term) == side) marks else null;
 }
 
 /// 매치 목록을 **막대 마커의 행 목록**으로 옮긴다(§4.1a). 채운 개수를 돌려주고 현재 매치의
@@ -1828,15 +1835,15 @@ pub fn markerRows(
 
 /// 막대 마커를 **이 열에 찍을 것인가**(§4.1a 「비교 뷰에서는 검색 중인 열의 막대에만」).
 /// 강조와 같은 판정을 쓰되, 조각은 `null` 이 없으므로 **빈 조각이 「안 찍는다」**다.
-pub fn diffMarkerLinesFor(term: *const Term, side: DiffSide, lines: []const u32) []const u32 {
-    return if (diffSearchSide(term) == side) lines else &.{};
+pub fn diffMarkerLinesFor(self: *const AppSession, term: *const Term, side: DiffSide, lines: []const u32) []const u32 {
+    return if (diffSearchSide(self, term) == side) lines else &.{};
 }
 
 /// 검색이 훑을 줄 배열 — 비교면 위 판정이 고른 열, 아니면 문서 줄이다.
-pub fn findLines(term: *Term) []const []const u8 {
+pub fn findLines(self: *const AppSession, term: *Term) []const []const u8 {
     if (term.rt.editor_diff) |st| {
         if (st.view != .compare) return &.{};
-        return if (diffSearchSide(term) == .right) st.right_texts else st.left_texts;
+        return if (diffSearchSide(self, term) == .right) st.right_texts else st.left_texts;
     }
     return term.rt.editor_lines;
 }
@@ -17394,21 +17401,72 @@ test "DFF1 비교 뷰 검색은 선택이 있는 열을 본다 — 없으면 왼
     fx.term.rt.editor_diff.?.right_texts = &right_rows;
 
     // **선택이 없으면 왼쪽이다** — 가로 스크롤의 「포인터가 없으면 왼쪽」과 같은 규칙.
-    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.term));
-    try testing.expectEqual(@as(usize, 2), findLines(fx.term).len);
+    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 2), findLines(fx.session, fx.term).len);
 
     // **오른쪽을 고르면 오른쪽을 본다.**
     fx.term.rt.editor_diff_selection = .{
         .side = .right,
         .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
     };
-    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.term));
-    try testing.expectEqual(@as(usize, 1), findLines(fx.term).len);
+    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 1), findLines(fx.session, fx.term).len);
 
     // **선택이 사라지면 왼쪽으로 돌아온다** — 베껴 들었다면 여기서 오른쪽에 머문다.
     fx.term.rt.editor_diff_selection = null;
-    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.term));
-    try testing.expectEqual(@as(usize, 2), findLines(fx.term).len);
+    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 2), findLines(fx.session, fx.term).len);
+}
+
+test "DFF8 명시로 고른 열은 셋이 함께 따라온다 — 줄 배열·강조·막대 마커 (§5.1)" {
+    // **이 판정자가 겨냥하는 변이는 「호출자에서만 반영」이다.** 명시값을 `find.zig` 쪽에서 갈아
+    // 끼우면 검색은 오른쪽을 세는데 강조와 막대 마커는 왼쪽에 그려진다 — 이 절이 「베껴 들기」에서
+    // 막아 둔 **화면과 결과가 갈리는** 증상이 다른 원인으로 되돌아온다. 그래서 셋을 **한 자리에서**
+    // 함께 묻는다(변이 D7·D8·D9 가 살아남았던 것도 같은 종류였다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const left_rows = [_][]const u8{ "aa", "aa" };
+    const right_rows = [_][]const u8{"aa aa aa"};
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    fx.term.rt.editor_diff.?.left_texts = &left_rows;
+    fx.term.rt.editor_diff.?.right_texts = &right_rows;
+
+    // **폴백은 왼쪽을 가리킨다** — 선택이 없다. 명시값이 그것을 이겨야 한다.
+    const marks: ?[]const []const chrome_editor.frame.Mark = &.{};
+    const lines = [_]u32{ 1, 2, 3 };
+    fx.session.chrome_host.find.diff_side = .right;
+
+    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 1), findLines(fx.session, fx.term).len); // 오른쪽 행 배열
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .right, marks) != null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .left, marks) == null);
+    try testing.expectEqual(@as(usize, 3), diffMarkerLinesFor(fx.session, fx.term, .right, &lines).len);
+    try testing.expectEqual(@as(usize, 0), diffMarkerLinesFor(fx.session, fx.term, .left, &lines).len);
+
+    // **선택이 반대쪽에 있어도 명시값이 이긴다.** 「선택이 있는 열」이 이기면 사용자가 고른 열이
+    // 포인터 한 번에 뒤집혀, 넘긴 것이 없던 일이 된다.
+    fx.term.rt.editor_diff_selection = .{
+        .side = .left,
+        .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
+    };
+    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.session, fx.term));
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .right, marks) != null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .left, marks) == null);
+
+    // **명시값은 재계산으로 안 죽는다.** 선택은 죽지만(행 인덱스가 낡는다) 열 이름은 안 낡는다 —
+    // 그래서 이 값을 드는 것은 이 절이 금지한 「베껴 들기」가 아니다.
+    fx.term.rt.editor_diff_selection = null;
+    try testing.expectEqual(DiffSide.right, diffSearchSide(fx.session, fx.term));
+
+    // **놓으면 폴백으로 돌아온다** — 명시값이 없어졌는데도 남으면 그것이 곧 베껴 든 것이다.
+    fx.session.chrome_host.find.diff_side = null;
+    try testing.expectEqual(DiffSide.left, diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 2), findLines(fx.session, fx.term).len);
 }
 
 test "DFF7 마커 행은 축을 가려 옮긴다 — 비교면 그대로, 단일이면 보이는 줄로 (§4.1a)" {
@@ -17479,21 +17537,21 @@ test "DFF5 막대 마커도 검색 중인 열에만 찍힌다 — 강조와 같�
     const lines = [_]u32{ 0, 3, 7 };
 
     // 선택이 없으면 왼쪽이 검색 중이다.
-    try testing.expectEqual(@as(usize, 3), diffMarkerLinesFor(fx.term, .left, &lines).len);
-    try testing.expectEqual(@as(usize, 0), diffMarkerLinesFor(fx.term, .right, &lines).len);
+    try testing.expectEqual(@as(usize, 3), diffMarkerLinesFor(fx.session, fx.term, .left, &lines).len);
+    try testing.expectEqual(@as(usize, 0), diffMarkerLinesFor(fx.session, fx.term, .right, &lines).len);
 
     // 오른쪽을 고르면 뒤바뀐다.
     fx.term.rt.editor_diff_selection = .{
         .side = .right,
         .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
     };
-    try testing.expectEqual(@as(usize, 0), diffMarkerLinesFor(fx.term, .left, &lines).len);
-    try testing.expectEqual(@as(usize, 3), diffMarkerLinesFor(fx.term, .right, &lines).len);
+    try testing.expectEqual(@as(usize, 0), diffMarkerLinesFor(fx.session, fx.term, .left, &lines).len);
+    try testing.expectEqual(@as(usize, 3), diffMarkerLinesFor(fx.session, fx.term, .right, &lines).len);
 
     // **강조와 같은 열을 고른다** — 두 판정이 갈리면 색과 막대 표시가 다른 문서를 가리킨다.
     const marks: ?[]const []const chrome_editor.frame.Mark = &.{};
-    const marked_right = diffSearchMarksFor(fx.term, .right, marks) != null;
-    const markers_right = diffMarkerLinesFor(fx.term, .right, &lines).len > 0;
+    const marked_right = diffSearchMarksFor(fx.session, fx.term, .right, marks) != null;
+    const markers_right = diffMarkerLinesFor(fx.session, fx.term, .right, &lines).len > 0;
     try testing.expectEqual(marked_right, markers_right);
 }
 
@@ -17519,17 +17577,17 @@ test "DFF6 비교 뷰 마커는 행을 옮기지 않는다 — 없는 축을 만
     fx.term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
     fx.term.rt.editor_diff.?.left_texts = &rows;
     fx.term.rt.editor_diff.?.right_texts = &rows;
-    try testing.expectEqual(@as(usize, 4), findLines(fx.term).len);
+    try testing.expectEqual(@as(usize, 4), findLines(fx.session, fx.term).len);
 
     // **두 축이 다르다.** 검색은 4행 배열을 훑는데 문서 축은 그것과 길이가 다르다 —
     // `visibleRowOfDocLine` 은 **문서** 축의 함수라 이 배열의 행을 설명하지 못한다.
-    try testing.expect(fx.term.rt.editor_lines.len != findLines(fx.term).len);
+    try testing.expect(fx.term.rt.editor_lines.len != findLines(fx.session, fx.term).len);
 
     // **비교 뷰 마커는 매치의 `line` 을 그대로 쓴다** — 옮기면 없는 축이 하나 더 생긴다.
     // 문서 축에 없는 행(예: 배열 끝)이 와도 마커 목록에 그대로 들어야 한다.
     const lines = [_]u32{3};
-    try testing.expectEqual(@as(usize, 1), diffMarkerLinesFor(fx.term, .left, &lines).len);
-    try testing.expectEqual(@as(u32, 3), diffMarkerLinesFor(fx.term, .left, &lines)[0]);
+    try testing.expectEqual(@as(usize, 1), diffMarkerLinesFor(fx.session, fx.term, .left, &lines).len);
+    try testing.expectEqual(@as(u32, 3), diffMarkerLinesFor(fx.session, fx.term, .left, &lines)[0]);
 }
 
 test "DFF4 검색 강조는 검색 중인 열에만 간다 — 양쪽도 반대도 아니다 (§5.1)" {
@@ -17550,21 +17608,21 @@ test "DFF4 검색 강조는 검색 중인 열에만 간다 — 양쪽도 반대�
     const marks: ?[]const []const chrome_editor.frame.Mark = &.{};
 
     // 선택이 없으면 왼쪽이 검색 중이다 — 왼쪽만 받는다.
-    try testing.expect(diffSearchMarksFor(fx.term, .left, marks) != null);
-    try testing.expect(diffSearchMarksFor(fx.term, .right, marks) == null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .left, marks) != null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .right, marks) == null);
 
     // 오른쪽을 고르면 뒤바뀐다.
     fx.term.rt.editor_diff_selection = .{
         .side = .right,
         .sel = editor_selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
     };
-    try testing.expect(diffSearchMarksFor(fx.term, .left, marks) == null);
-    try testing.expect(diffSearchMarksFor(fx.term, .right, marks) != null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .left, marks) == null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .right, marks) != null);
 
     // **현재 매치 표시도 같은 규칙이다** — 강조만 맞고 현재 표시가 양쪽이면 두 자리가 진해진다.
     const cur: ?chrome_editor.frame.CurrentMatch = .{ .line = 0, .start = 0 };
-    try testing.expect(diffSearchMarksFor(fx.term, .left, cur) == null);
-    try testing.expect(diffSearchMarksFor(fx.term, .right, cur) != null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .left, cur) == null);
+    try testing.expect(diffSearchMarksFor(fx.session, fx.term, .right, cur) != null);
 }
 
 test "DFF3 비교 뷰에서는 「선택 영역 내에서만」이 안 켜진다 (§5.1)" {
@@ -17609,13 +17667,13 @@ test "DFF2 비교가 아닌 문서는 문서 줄을 본다 — 축이 안 섞인
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "one\ntwo\nthree\n");
-    try testing.expectEqual(fx.term.rt.editor_lines.len, findLines(fx.term).len);
+    try testing.expectEqual(fx.term.rt.editor_lines.len, findLines(fx.session, fx.term).len);
     try testing.expect(fx.term.rt.editor_diff == null);
 
     // **비교인데 compare 뷰가 아니면 검색할 것이 없다**(읽는 중·거절 등) — 문서 줄로 새면 안 된다.
     fx.term.rt.editor_diff = .{ .requested_ms = 0 };
     defer fx.term.rt.editor_diff = null;
-    try testing.expectEqual(@as(usize, 0), findLines(fx.term).len);
+    try testing.expectEqual(@as(usize, 0), findLines(fx.session, fx.term).len);
 
     // **빈 열은 검색 대상이 아니다.** 그대로 두면 `findMatches` 가 빈 배열을 훑어 매치 0 을 내는데,
     // 그것은 「없다」가 아니라 「아직 안 열렸다」다 — 두 상태를 같은 화면으로 답하면 안 된다.

@@ -9210,6 +9210,7 @@ pub const AppSession = struct {
             .toggle_find_match_case => find_ops.toggleFindMatchCase(self),
             .toggle_find_whole_word => find_ops.toggleFindWholeWord(self),
             .toggle_find_in_selection => find_ops.toggleFindInSelection(self),
+            .toggle_find_diff_side => find_ops.toggleFindDiffSide(self),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
@@ -17299,6 +17300,10 @@ pub const AppSession = struct {
                 .editor
             else
                 .scrollback;
+            // **적을 열도 매 tick 대조한다**(§5.1 — 위 `target` 과 같은 규율). 재검색만으로는
+            // 못 지운다: 비교가 아니게 되는 사건에 재검색이 늘 따라오지 않아, 지난 값이 남으면
+            // 단일 편집기 카운터에 `L` 이 붙는다 — 화면이 있지도 않은 열을 말한다(EF30 이 잡았다).
+            self.chrome_host.find.diff_side_shown = find_ops.activeFindDiffSideShown(self);
             if (self.chrome_host.find.target != want) {
                 self.chrome_host.find.target = want;
                 self.chrome_host.find.page_found = null; // 대상이 바뀌면 지난 답은 이 화면 것이 아니다
@@ -42380,6 +42385,92 @@ test "EF29 선택 범위 토글도 편집기 찾기일 때만 먹는다 — 팔�
 
     session.dispatchAppAction(.toggle_find_in_selection); // 팔레트 경로
     try std.testing.expect(session.chrome_host.find.in_selection == null);
+}
+
+test "EF30 열 넘기기는 지금 보는 열에서 뒤집는다 — 첫 누름이 반드시 화면을 바꾼다 (§5.1)" {
+    // **명시값에서 뒤집으면 첫 누름이 죽는다.** 아직 안 골랐으면 명시값은 `null` 이라 그것을
+    // 기준 삼으면 늘 같은 쪽으로 가고, 폴백이 이미 그 쪽이면 화면이 한 번 안 바뀐다 — 사용자는
+    // 눌렀는데 아무 일도 안 일어난 것으로 본다. 그래서 **폴백이 답한 열**에서 뒤집는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    const left_rows = [_][]const u8{ "aa", "aa" };
+    const right_rows = [_][]const u8{"aa aa aa"};
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer term.rt.editor_diff = null;
+    term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    term.rt.editor_diff.?.left_texts = &left_rows;
+    term.rt.editor_diff.?.right_texts = &right_rows;
+
+    session.dispatchAppAction(.toggle_find);
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    // **폴백은 왼쪽이고, 화면도 왼쪽이라 적는다.**
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.diff_side == null);
+    try std.testing.expect(session.chrome_host.find.diff_side_shown.? == .left);
+    const left_count = session.chrome_host.find.match_count;
+
+    // ⌥⌘D — 오른쪽으로 넘어가고, **센 수도 그 열의 것**이어야 한다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.diff_side.? == .right);
+    try std.testing.expect(session.chrome_host.find.match_count != left_count);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.diff_side_shown.? == .right);
+
+    // 다시 누르면 되돌아온다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.diff_side.? == .left);
+    try std.testing.expectEqual(left_count, session.chrome_host.find.match_count);
+
+    // **여기서 두 개념을 가른다 — 폴백을 오른쪽으로 세운다.** 위 구간만으로는 「폴백에서 뒤집는다」와
+    // 「명시값에서 뒤집는다」가 **같은 답을 낸다**(둘 다 왼쪽에서 시작하니 첫 누름이 오른쪽이다).
+    // 겹친 채로 두면 명시값에서 뒤집는 변이가 살아남고(M6 이 실제로 살았다), 그 코드는 사용자가
+    // 오른쪽 열을 클릭해 둔 상태에서 ⌥⌘D 를 눌렀을 때 **화면이 안 바뀐다**.
+    session.chrome_host.find.diff_side = null;
+    term.rt.editor_diff_selection = .{
+        .side = .right,
+        .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
+    };
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.diff_side.? == .left);
+    term.rt.editor_diff_selection = null;
+    session.chrome_host.find.diff_side = null;
+
+    // **비교가 아니면 무동작이다** — 단일 편집기에는 열이 없다. 팔레트 경로도 같은 게이트를 지난다.
+    term.rt.editor_diff = null;
+    session.chrome_host.find.diff_side = null;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.diff_side == null);
+    session.dispatchAppAction(.toggle_find_diff_side);
+    try std.testing.expect(session.chrome_host.find.diff_side == null);
+    // 비교가 아니면 **적을 열도 없다** — 남겨 두면 단일 편집기 카운터에 `L` 이 붙는다.
+    // **재검색이 아니라 tick 이 지운다**: 비교가 아니게 되는 사건에 재검색이 늘 따라오지 않는다.
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.diff_side_shown == null);
 }
 
 test "EF27 빈 선택이면 안 켜지고, 편집이 들어오면 범위를 버린다 (§5.1)" {

@@ -37,7 +37,7 @@ fn activeEditorTerm(self: *AppSession) ?*Term {
     if (term.kind != .editor) return null;
     // **비교 뷰도 검색한다**(§5.1 「비교 뷰 검색」 — 2026-09-01). 어느 열인지는
     // `editor_diff.diffSearchSide` 가 답한다(선택이 있는 열, 없으면 왼쪽).
-    if (editor_ops.findLines(term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
+    if (editor_ops.findLines(self, term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
     return term;
 }
 
@@ -71,7 +71,7 @@ pub fn wantedEditorFindSource(self: *AppSession) u64 {
 fn recomputeEditorFind(self: *AppSession, term: *Term) void {
     maru.session.editor.find.findMatches(
         self.allocator,
-        editor_ops.findLines(term),
+        editor_ops.findLines(self, term),
         self.chrome_host.find.input.query.items,
         // 토글은 **편집기 타깃에만** 산다(§5.1) — 스크롤백·웹은 이 값을 안 읽는다.
         .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word },
@@ -100,6 +100,18 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
 
     self.editor_find_source = term.surfaceId();
     self.chrome_host.find.setMatchCount(self.editor_find_matches.items.len);
+}
+
+/// 찾기 줄에 **적을 열** — 활성 편집기가 없거나 비교 뷰가 아니면 `null`(§5.1).
+///
+/// **이 값을 쓰는 자리는 tick 대조 하나다.** 재검색에도 같은 줄을 두었다가 적대적 검증에서
+/// 지워도 아무 판정자가 안 빨개졌다(변이 M10) — tick 이 이미 매 프레임 덮고, 화면은 그 tick 안에서
+/// 그려지기 때문이다. 두 자리에서 쓰면 **두 번째 출처**가 되고, 갈리는 날 「그린 열과 센 열이
+/// 다르다」가 된다. 그래서 죽은 쪽을 지우고 답하는 자리를 하나로 뒀다.
+pub fn activeFindDiffSideShown(self: *AppSession) ?editor_ops.DiffSide {
+    const term = activeEditorTerm(self) orelse return null;
+    if (term.rt.editor_diff == null) return null;
+    return editor_ops.diffSearchSide(self, term);
 }
 
 /// 편집기 매치를 버린다 — 검색을 닫거나 대상이 편집기가 아니게 됐을 때.
@@ -174,6 +186,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
         .toggle_find_match_case => toggleFindMatchCase(self),
         .toggle_find_whole_word => toggleFindWholeWord(self),
         .toggle_find_in_selection => toggleFindInSelection(self),
+        .toggle_find_diff_side => toggleFindDiffSide(self),
         else => return false,
     }
     return true;
@@ -193,6 +206,25 @@ pub fn toggleFindMatchCase(self: *AppSession) void {
 pub fn toggleFindWholeWord(self: *AppSession) void {
     if (!isEditorFindTarget(self)) return;
     self.chrome_host.find.whole_word = !self.chrome_host.find.whole_word;
+    refilterAfterRuleChange(self);
+}
+
+/// ⌥⌘D: 비교 뷰에서 **검색할 열**을 왼쪽↔오른쪽으로 넘긴다(§5.1).
+///
+/// **비교 Term 이 아니면 무동작이다** — 단일 편집기에는 열이 없다(`Aa`·`W` 가 스크롤백·웹에서
+/// 조용히 무시되는 것과 같은 규칙).
+///
+/// **지금 보고 있는 열에서 뒤집는다 — 명시값에서 뒤집지 않는다.** 아직 안 골랐으면 명시값이
+/// `null` 이라 그것을 기준으로 삼으면 첫 누름이 늘 같은 쪽으로 가고, 폴백이 이미 그 쪽이면
+/// **화면이 한 번 안 바뀐다** — 사용자는 눌렀는데 아무 일도 안 일어난 것으로 본다.
+pub fn toggleFindDiffSide(self: *AppSession) void {
+    if (!isEditorFindTarget(self)) return;
+    const term = activeEditorTerm(self) orelse return;
+    if (term.rt.editor_diff == null) return;
+    self.chrome_host.find.diff_side = switch (editor_ops.diffSearchSide(self, term)) {
+        .left => .right,
+        .right => .left,
+    };
     refilterAfterRuleChange(self);
 }
 

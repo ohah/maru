@@ -268,6 +268,7 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'C' } }, .action = .toggle_find_match_case }, // Cmd+Opt+C
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'W' } }, .action = .toggle_find_whole_word }, // Cmd+Opt+W
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'L' } }, .action = .toggle_find_in_selection }, // Cmd+Opt+L
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'D' } }, .action = .toggle_find_diff_side }, // Cmd+Opt+D: 비교 뷰에서 검색할 열 넘기기
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).
@@ -872,6 +873,31 @@ test "KB_SYM4 ⇧⌘O 는 웹 편집 필드에 양보하지 않는다 — 양보
     try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(z, true));
     try std.testing.expect(resolver.resolveWeb(z, false) != .web_editor);
     try std.testing.expect(resolver.resolveWeb(o, false) != .web_editor);
+}
+
+test "KB_SYM5 ⌥⌘D 가 비교 열 넘기기를 부르고, 찾기 토글 넷이 같은 수식자다 (§5.1)" {
+    // **가족이 갈리면 손버릇이 안 먹는다.** 셋을 ⌥⌘ 로 외운 사용자가 넷째만 다른 수식자면
+    // 그 키는 없는 것과 같다. 그리고 `⌥⌘[`·`⌥⌘]` 는 이미 term 이동이라 쓸 수 없었다 —
+    // 그 사실을 여기서 함께 못박는다(다시 그리로 옮기면 이 판정자가 잡는다).
+    const resolver: KeyBindingResolver = .{};
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+
+    const got = try resolver.resolve(
+        .{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } },
+        &buf,
+        .{},
+    );
+    try std.testing.expect(got == .app_action and got.app_action == .toggle_find_diff_side);
+
+    // 대괄호는 여전히 term 이동이다 — 열 넘기기가 그것을 뺏지 않았다.
+    inline for (.{ .{ '[', action_mod.Action.previous_term }, .{ ']', action_mod.Action.next_term } }) |pair| {
+        const r = try resolver.resolve(
+            .{ .key = .{ .char = pair[0] }, .modifiers = .{ .command = true, .option = true } },
+            &buf,
+            .{},
+        );
+        try std.testing.expect(r == .app_action and r.app_action == pair[1]);
+    }
 }
 
 test "KB_SYM2 기본 표에 Option 단독 chord 가 없다 — 터미널 Meta 입력을 안 뺏는다" {

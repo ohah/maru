@@ -94,6 +94,26 @@ test "§9.4 표는 원격 cwd 소비처의 지금 배선을 말한다" {
     try std.testing.expect(std.mem.indexOf(u8, eg_body, "termDisplayHost(term)") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "| 종료 placeholder 안내(`마지막 위치`) |") != null);
 
+    // ── ⑶-b **host 를 적는 세 번째 자리는 이 규율을 «일부러» 안 따른다** ────────────────────────
+    //
+    // SCM 브랜치 줄은 `user@host` 를 적고(계획 §2.3 — 사용자 결정), 값도 `termDisplayHost` 가 아니라
+    // 목록을 읽을 때 박아 둔 `git_repo_dest` 에서 온다. 활성 Term 을 다시 물으면 **화면의 목록과 다른
+    // 호스트**를 적을 수 있어서 갈라 두었다.
+    //
+    // **여기서 세는 이유**: 위 규율 문단이 「그 규율을 지나는 자리는 둘」이라 적는데 host 를 적는 자리는
+    // 셋이다. 그 어긋남을 문서가 설명하지 않으면 다음 사람이 「빠졌다」고 보고 고치러 온다 — 이 표는
+    // **이미 두 번 그렇게 없는 일을 시켰다**(위 ⚠️). 그래서 ⑴ 문서가 그 예외를 적고 있고 ⑵ 코드가
+    // 실제로 그 출처를 쓰는지, 둘을 함께 센다.
+    const scm_dock = try read(allocator, "src/platform/macos/app_session/scm_dock.zig", 8 * 1024 * 1024);
+    defer allocator.free(scm_dock);
+    // 출처가 `git_repo_dest` 다. `termDisplayHost` 로 「고치면」 이 줄이 사라져 여기서 걸린다.
+    try std.testing.expect(std.mem.indexOf(u8, scm_dock, ".remote_host = self.git_repo_dest orelse \"\",") != null);
+    // 문서 양쪽이 서로를 가리킨다 — 한쪽만 고치면 다음 사람이 다시 같은 판단을 한다.
+    try std.testing.expect(std.mem.indexOf(u8, doc, "브랜치 줄이 `termDisplayHost` 를 안 쓰는 것은 빠뜨린 것이 아니다") != null);
+    const plan = try read(allocator, "docs/plans/remote-scm.md", 512 * 1024);
+    defer allocator.free(plan);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "폴더줄과 철자가 다르다. 일부러다.") != null);
+
     // ── ⑷ 쓰기 축의 규율: 원격 cwd 를 **로컬 spawn 에 안 넘긴다** ─────────────────────────────
     //
     // 표의 두 행(새 탭 상속·종료 Term 되살리기)이 주장하는 사실이다.

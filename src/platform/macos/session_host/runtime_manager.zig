@@ -1074,7 +1074,14 @@ pub const RuntimeManager = struct {
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
             const entry = entry_ptr.*;
-            if (entry.controller != null or entry.observers.items.len != 0) return error.Attached;
+            // **조정이 밀려 있으면 아직 업그레이드하지 않는다**(S11-6). observer 가 0 이어야 하는
+            // 것과 같은 이유다: 폰이 방금 떨어졌지만 tick 이 아직 안 돌았으면 세션이 **줄어든
+            // 크기**이고 기준은 이 host 의 메모리에만 있다. 그대로 exec 하면 새 host 는 기준을
+            // 모른 채(선언도 없으니) **줄어든 채로 영영 굳는다**. 다음 tick 이면 풀리는 조건이라
+            // 잠깐 미루는 값이 싸다.
+            if (entry.controller != null or entry.observers.items.len != 0 or
+                entry.viewport_dirty or entry.viewport_baseline_cols != null)
+                return error.Attached;
             const slot = entry.runtime orelse return error.RuntimeMissing;
             const handle: RuntimeHandle = @intFromPtr(slot);
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse return error.RuntimeMissing;
@@ -1115,7 +1122,14 @@ pub const RuntimeManager = struct {
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
             const entry = entry_ptr.*;
-            if (entry.controller != null or entry.observers.items.len != 0) return error.Attached;
+            // **조정이 밀려 있으면 아직 업그레이드하지 않는다**(S11-6). observer 가 0 이어야 하는
+            // 것과 같은 이유다: 폰이 방금 떨어졌지만 tick 이 아직 안 돌았으면 세션이 **줄어든
+            // 크기**이고 기준은 이 host 의 메모리에만 있다. 그대로 exec 하면 새 host 는 기준을
+            // 모른 채(선언도 없으니) **줄어든 채로 영영 굳는다**. 다음 tick 이면 풀리는 조건이라
+            // 잠깐 미루는 값이 싸다.
+            if (entry.controller != null or entry.observers.items.len != 0 or
+                entry.viewport_dirty or entry.viewport_baseline_cols != null)
+                return error.Attached;
             const slot = entry.runtime orelse return error.RuntimeMissing;
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
             lives[live_count] = &terminal_slot.live_pty;

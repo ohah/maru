@@ -88,6 +88,15 @@ pub const ControllerTransitionOutcome = struct {
 /// resize 요청 판정(§9). `.stale`은 controller별 last sequence 이하라 무시(다른 output/client에 관측되지 않음).
 /// `.applied`는 server가 실제 `TerminalCore`+PTY에 적용해야 하며, `changed`가 true일 때만 크기가 실제로 바뀌어
 /// `resize_generation`이 올라가고 `runtime.resized`를 broadcast한다.
+/// 조정이 실제로 적용된 결과(S11-6). `changed` 가 true 일 때만 `resize_generation` 이 올라가고
+/// `runtime.resized` 를 알린다 — controller resize 와 같은 규율이다.
+pub const ViewportApplied = struct {
+    cols: u16,
+    rows: u16,
+    resize_generation: u64,
+    changed: bool,
+};
+
 pub const ResizeOutcome = union(enum) {
     stale,
     applied: struct {
@@ -183,6 +192,31 @@ pub fn gridSizeAllowed(cols: u16, rows: u16) bool {
     return @as(usize, clampCols(cols)) * @as(usize, clampRows(rows)) <= max_grid_cells;
 }
 
+/// 선언이 세션을 이 아래로는 못 줄인다(S11-6). 1열로 접어 세션을 못 쓰게 만드는 것을 막는다.
+/// **정상 client 는 안 막는다** — 실측으로 가장 작은 정상 선언이 21열(좁은 폰 320pt·`font.size`
+/// 상한 40)이라 그 아래로 잡았다.
+pub const viewport_floor_cols: u16 = 10;
+
+/// 판정자가 상한을 만들 수 있게 낸다.
+pub const resize_wire_max_counter: u64 = resize_wire.max_counter;
+
+/// 선언들이 요구하는 세션 열. **선언이 하나도 없으면 `null`** — 그때는 이 기능이 없던 때와
+/// 완전히 같다(기준도 안 잡는다).
+///
+/// **괄호 순서가 계약이다**: `min(기준, max(바닥, 가장 작은 선언))`. 바깥이 `min(기준, …)` 이라
+/// 결과가 기준을 절대 넘지 않는다 — 「줄이기만 한다」가 그렇게 지켜진다. 뒤집어 적으면
+/// (`max(바닥, min(기준, 선언))`) **기준이 바닥보다 작을 때 세션을 늘린다**: `min_cols` 가 2 라
+/// 2열 세션은 실재하고, 거기에 폰이 붙으면 없던 8열이 생긴다.
+pub fn reconciledViewportCols(slots: []const ObserverSlot, baseline: u16) ?u16 {
+    var smallest: ?u16 = null;
+    for (slots) |slot| {
+        const view = slot.declared orelse continue;
+        smallest = if (smallest) |current| @min(current, view.cols) else view.cols;
+    }
+    const want = smallest orelse return null;
+    return @min(baseline, @max(viewport_floor_cols, want));
+}
+
 /// client 가 «자기가 그릴 수 있는 격자» 로 알린 크기(S11-6). 창 크기가 아니라 **그리는 격자**다 —
 /// 창 폭으로 선언하면 세션이 client 가 못 그리는 열까지 갖게 되어 리사이즈를 하고도 오른쪽이 잘린다.
 pub const Viewport = struct {
@@ -203,6 +237,14 @@ pub const ObserverSlot = struct {
     declared: ?Viewport = null,
 };
 
+/// 선언 상태가 바뀐 뒤 세션이 어떤 열이어야 하는가.
+pub const ViewportPlan = union(enum) {
+    /// 바꿀 것이 없다 — 선언이 없거나, 이미 그 크기다.
+    unchanged,
+    /// 이 열로 바꾼다. **행은 안 건드린다.**
+    resize_cols: u16,
+};
+
 /// `declareViewport` 의 결과. **버림과 무변화를 가른다** — 「한쪽만 0 이라 버렸다」를 「같은 값이라
 /// 아무것도 안 했다」로 접으면 client 는 자기 선언이 통했는지 모른다.
 pub const DeclareViewportOutcome = enum {
@@ -215,6 +257,30 @@ pub const DeclareViewportOutcome = enum {
     /// 한쪽만 0 이라 버렸다. 슬롯은 그대로다.
     invalid,
 };
+
+fn hasAnyDeclaration(slots: []const ObserverSlot) bool {
+    for (slots) |slot| if (slot.declared != null) return true;
+    return false;
+}
+
+fn planViewportForEntry(entry: *RuntimeEntry) ViewportPlan {
+    const declared = hasAnyDeclaration(entry.observers.items);
+    if (entry.viewport_baseline_cols) |baseline| {
+        // **마지막 선언이 사라졌다** — 기준으로 돌리고 기준을 놓는다.
+        if (!declared) {
+            entry.viewport_baseline_cols = null;
+            return if (baseline == entry.cols) .unchanged else .{ .resize_cols = baseline };
+        }
+        const want = reconciledViewportCols(entry.observers.items, baseline).?;
+        return if (want == entry.cols) .unchanged else .{ .resize_cols = want };
+    }
+    // 선언이 하나도 없었고 지금도 없다 — 이 기능이 없던 때와 같다(기준도 안 잡는다).
+    if (!declared) return .unchanged;
+    // **첫 선언이다** — 지금 크기가 「폰이 없었으면 이랬을 크기」다.
+    entry.viewport_baseline_cols = entry.cols;
+    const want = reconciledViewportCols(entry.observers.items, entry.cols).?;
+    return if (want == entry.cols) .unchanged else .{ .resize_cols = want };
+}
 
 fn sameObserverStreams(a: []const ObserverSlot, b: []const ObserverSlot) bool {
     if (a.len != b.len) return false;
@@ -241,6 +307,17 @@ pub const RuntimeEntry = struct {
     /// stale로 막는다. controller가 바뀌면(controller/takeover 획득) `controller_sequence`와 함께 false로 리셋한다.
     resize_seq_seen: bool = false,
     observers: std.ArrayListUnmanaged(ObserverSlot) = .empty,
+    /// 「폰이 없었으면 이랬을 열」(S11-6). **선언이 하나라도 있는 동안에만** 값이 있다.
+    ///
+    /// controller 로 잡지 않는 이유: 맥 앱이 먼저 꺼지고 keep-alive 로 세션만 살아 있으면
+    /// controller 가 **없다**. 그 상태에서 폰이 붙었다 떨어지면 되돌릴 대상이 없어 **세션이 폰
+    /// 크기로 영영 굳는다**. 그래서 첫 선언이 들어온 순간의 크기를 여기 적고, 마지막 선언이
+    /// 사라질 때 그 값으로 돌린다. controller 가 스스로 크기를 바꾸면 이 값을 **갱신**한다 —
+    /// 기준은 그 순간의 값을 강제하는 것이 아니라 「폰이 없었으면」을 뜻하기 때문이다.
+    viewport_baseline_cols: ?u16 = null,
+    /// 선언 상태가 바뀌어 **다음 serve tick 에 조정해야 한다**. 여기에 모아 두는 이유가 곧
+    /// 「폭풍을 합친다」다 — 한 tick 안에 선언이 여럿 와도 리사이즈는 한 번이다.
+    viewport_dirty: bool = false,
     /// server가 실 runtime handle을 실어 두는 opaque 슬롯. state machine은 미해석.
     runtime: ?*anyopaque = null,
 
@@ -273,6 +350,8 @@ pub const TerminalRuntimeRegistry = struct {
     /// `entries`에 publish된 canonical grid만 센다. pending backend allocation은 owner가 `canRegister`로 먼저 검증하며,
     /// register 실패는 이 값을 바꾸지 않는다.
     live_grid_cells: usize = 0,
+    /// `viewport_dirty` 인 entry 수. tick 이 **0 이면 표를 훑지도 않는다**.
+    viewport_dirty_count: usize = 0,
     limits: Limits = .{},
     /// 0은 wire의 "첫 page에서 generation 미지정" sentinel이라 실제 complete snapshot은 1부터 시작한다.
     membership_generation: u64 = 1,
@@ -462,6 +541,15 @@ pub const TerminalRuntimeRegistry = struct {
 
     /// subscription을 뗀다(detach/EOF/crash). controller가 끊겨도 자동 승격하지 않는다(§9). runtime은 유지된다.
     fn detach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) RegistryError!DetachOutcome {
+        // **선언을 들고 있던 슬롯이 사라지면 다시 계산해야 한다** — 마지막 하나였다면 기준으로
+        // 돌아가는 자리가 바로 여기다. 선언이 없던 슬롯이면 조정 결과가 그대로라 세우지 않는다.
+        if (self.entries.get(id)) |entry| {
+            for (entry.observers.items) |slot|
+                if (slot.stream == stream and slot.declared != null) {
+                    self.markViewportDirty(entry);
+                    break;
+                };
+        }
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
         if (entry.controller == stream) {
             entry.controller = null; // release. 자동 승격 없음.
@@ -571,6 +659,17 @@ pub const TerminalRuntimeRegistry = struct {
             entry.cols = ready.cols;
             entry.rows = ready.rows;
             entry.resize_generation += 1;
+            // **controller 의 리사이즈는 기준을 갱신한다**(S11-6). 기준은 「폰이 없었으면 이랬을
+            // 크기」이지 「폰이 붙기 전 그 순간의 값」을 강제하는 것이 아니다 — 사용자가 맥 창을
+            // 조절했으면 그쪽이 이긴다. 선언이 없으면 기준 자체가 없으므로 아무 일도 안 한다.
+            //
+            // 여기서 **깎지 않는다**: `PreparedResize` 는 기대값이 봉인돼 있어 커밋 때 값을 바꾸면
+            // 그 계약이 깨진다. 대신 caller 가 이어서 `planViewport` 를 물어 한 번 더 줄인다.
+            if (entry.viewport_baseline_cols != null) {
+                entry.viewport_baseline_cols = ready.cols;
+                // 기준이 바뀌었으니 다음 tick 에 다시 줄인다.
+                self.markViewportDirty(entry);
+            }
             self.live_grid_cells =
                 self.live_grid_cells - ready.old_cells + ready.new_cells;
         }
@@ -883,7 +982,102 @@ pub const TerminalRuntimeRegistry = struct {
         if (before) |b| if (next) |n| {
             if (b.cols == n.cols and b.rows == n.rows) return .unchanged;
         };
+        // 값이 실제로 달라졌을 때만 다음 tick 에 조정한다 — 같은 값이면 위에서 이미 돌아갔다.
+        self.markViewportDirty(entry);
         return if (next == null) .withdrawn else .declared;
+    }
+
+    fn markViewportDirty(self: *TerminalRuntimeRegistry, entry: *RuntimeEntry) void {
+        if (entry.viewport_dirty) return;
+        entry.viewport_dirty = true;
+        self.viewport_dirty_count += 1;
+    }
+
+    /// 조정할 것이 있는가. tick 이 매번 표를 훑지 않게 한다.
+    pub fn viewportDirty(self: *const TerminalRuntimeRegistry) bool {
+        return self.viewport_dirty_count != 0;
+    }
+
+    /// 조정할 runtime 하나를 꺼낸다(플래그를 내린다). 없으면 `null`.
+    pub fn takeDirtyViewport(self: *TerminalRuntimeRegistry) ?RuntimeId {
+        if (self.viewport_dirty_count == 0) return null;
+        var it = self.entries.iterator();
+        while (it.next()) |e| {
+            const entry = e.value_ptr.*;
+            if (!entry.viewport_dirty) continue;
+            entry.viewport_dirty = false;
+            self.viewport_dirty_count -= 1;
+            return entry.id;
+        }
+        // 세는 값과 표가 어긋났다 — 세는 값을 표에 맞춘다.
+        self.viewport_dirty_count = 0;
+        return null;
+    }
+
+    /// 조정 결과를 실제로 적용한다. **caller 가 PTY 를 먼저 바꾸고 나서 부른다.**
+    ///
+    /// controller 의 resize 경로(`commitPreparedResize`)와 **일부러 갈랐다**: 이것은 client 의
+    /// 요청이 아니라 host 의 결정이라 `controller_sequence`·`resize_seq_seen` 을 건드리면 안 된다.
+    /// 그 둘을 건드리면 다음 진짜 controller resize 가 stale 로 막힌다. 기준 크기도 안 건드린다 —
+    /// 기준은 「폰이 없었으면」이고 이 변경은 폰 때문이다.
+    /// 조정을 적용할 수 있는지 **PTY 를 건드리기 전에** 본다.
+    ///
+    /// caller 가 `ops.resize` 를 먼저 부르고 나서 커밋이 실패하면 **PTY 와 registry 가 갈린다** —
+    /// 「PTY 먼저」 규율이 지키려던 것을 정확히 뒤집는다. 실제로 생길 수 있는 경우가 하나 있다:
+    /// `resize_generation` 이 상한에 닿은 세션(줄이는 방향이라 격자 상한은 못 넘는다). 그래서
+    /// 같은 조건을 같은 순서로 보는 함수를 하나 두고, 적용도 이것을 먼저 부른다.
+    pub fn viewportColsApplicable(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        cols: u16,
+    ) RegistryError!void {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        const new_cols = clampCols(cols);
+        if (!gridSizeAllowed(new_cols, entry.rows)) return error.InvalidGridSize;
+        if (new_cols == entry.cols) return;
+        const old_cells = gridCells(entry.cols, entry.rows);
+        const new_cells = gridCells(new_cols, entry.rows);
+        const cells_without_entry = self.live_grid_cells - old_cells;
+        if (cells_without_entry > self.limits.max_aggregate_grid_cells or
+            new_cells > self.limits.max_aggregate_grid_cells - cells_without_entry)
+            return error.AggregateGridLimitReached;
+        if (entry.resize_generation == resize_wire.max_counter)
+            return error.ResizeGenerationExhausted;
+    }
+
+    pub fn applyViewportCols(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        cols: u16,
+    ) RegistryError!ViewportApplied {
+        try self.viewportColsApplicable(id, cols);
+        const entry = self.entries.get(id).?;
+        const new_cols = clampCols(cols);
+        if (new_cols == entry.cols) return .{
+            .cols = entry.cols,
+            .rows = entry.rows,
+            .resize_generation = entry.resize_generation,
+            .changed = false,
+        };
+        const old_cells = gridCells(entry.cols, entry.rows);
+        const new_cells = gridCells(new_cols, entry.rows);
+        entry.cols = new_cols;
+        entry.resize_generation += 1;
+        self.live_grid_cells = self.live_grid_cells - old_cells + new_cells;
+        return .{
+            .cols = entry.cols,
+            .rows = entry.rows,
+            .resize_generation = entry.resize_generation,
+            .changed = true,
+        };
+    }
+
+    /// 선언 상태가 바뀐 뒤(선언·거둠·detach·controller 리사이즈) 세션이 어떤 열이어야 하는지
+    /// 정하고 **기준 크기의 수명을 소유한다**. 크기를 실제로 바꾸는 것은 caller 다 — PTY 와
+    /// registry 가 따로 놀면 안 되므로 여기서 `entry.cols` 를 건드리지 않는다.
+    pub fn planViewport(self: *TerminalRuntimeRegistry, id: RuntimeId) RegistryError!ViewportPlan {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        return planViewportForEntry(entry);
     }
 
     /// 지금 붙어 있는 observer 들의 슬롯. `runtime get` 이 「누가 무엇을 선언했나」를 싣는다.
@@ -1628,4 +1822,157 @@ test "S11-6 준비와 커밋 사이에 온 선언은 인수인계를 무효로 �
     _ = try reg.commitControllerTransition(&prepared);
     try testing.expectEqual(@as(?StreamId, null), reg.get(1).?.controller);
     try testing.expectEqual(@as(usize, 2), (try reg.observerSlots(1)).len);
+}
+
+test "S11-6 조정: 선언이 없으면 아무것도 안 바꾼다" {
+    // **기준도 안 잡는다** — 이 기능이 없던 때와 완전히 같아야 한다.
+    try testing.expectEqual(@as(?u16, null), reconciledViewportCols(&.{}, 80));
+    const silent = [_]ObserverSlot{ .{ .stream = 1 }, .{ .stream = 2 } };
+    try testing.expectEqual(@as(?u16, null), reconciledViewportCols(&silent, 80));
+}
+
+test "S11-6 조정: 가장 작은 선언을 따르되 기준을 넘지 않는다" {
+    const one = [_]ObserverSlot{.{ .stream = 1, .declared = .{ .cols = 50, .rows = 37 } }};
+    try testing.expectEqual(@as(?u16, 50), reconciledViewportCols(&one, 80));
+
+    // 여럿이면 가장 작은 것.
+    const many = [_]ObserverSlot{
+        .{ .stream = 1, .declared = .{ .cols = 50, .rows = 37 } },
+        .{ .stream = 2 },
+        .{ .stream = 3, .declared = .{ .cols = 44, .rows = 30 } },
+    };
+    try testing.expectEqual(@as(?u16, 44), reconciledViewportCols(&many, 80));
+
+    // **줄이기만 한다** — 폰이 자기보다 큰 값을 불러 맥 창을 늘리지 못한다.
+    const wide = [_]ObserverSlot{.{ .stream = 1, .declared = .{ .cols = 200, .rows = 60 } }};
+    try testing.expectEqual(@as(?u16, 80), reconciledViewportCols(&wide, 80));
+}
+
+test "S11-6 조정: 바닥이 있고, 그 바닥이 세션을 «늘리지» 않는다" {
+    // 바닥 아래로는 안 줄인다 — 1열로 접어 세션을 못 쓰게 만드는 것을 막는다.
+    const tiny = [_]ObserverSlot{.{ .stream = 1, .declared = .{ .cols = 1, .rows = 1 } }};
+    try testing.expectEqual(@as(?u16, viewport_floor_cols), reconciledViewportCols(&tiny, 80));
+
+    // **여기가 괄호 순서가 걸리는 자리다.** `min_cols` 가 2 라 2열 세션은 실재한다. 뒤집어 적으면
+    // (`max(바닥, min(기준, 선언))`) 폰이 붙는 것만으로 **없던 8열이 생긴다**.
+    try testing.expectEqual(@as(?u16, 2), reconciledViewportCols(&tiny, 2));
+    const phone = [_]ObserverSlot{.{ .stream = 1, .declared = .{ .cols = 50, .rows = 37 } }};
+    try testing.expectEqual(@as(?u16, 2), reconciledViewportCols(&phone, 2));
+    // 기준이 바닥과 같으면 그대로.
+    try testing.expectEqual(@as(?u16, 10), reconciledViewportCols(&phone, 10));
+}
+
+test "S11-6 기준: 첫 선언에 기억하고, 마지막 선언이 사라지면 그리로 돌아온다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 7, .observer);
+
+    // 선언 전에는 기준을 안 잡는다 — 이 기능이 없던 때와 같다.
+    try testing.expectEqual(ViewportPlan.unchanged, try reg.planViewport(1));
+    try testing.expectEqual(@as(?u16, null), entry.viewport_baseline_cols);
+
+    // **첫 선언**: 지금 크기가 기준이 되고, 세션은 선언한 열로 줄어야 한다.
+    _ = try reg.declareViewport(1, 7, 50, 37);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 50 }, try reg.planViewport(1));
+    try testing.expectEqual(@as(?u16, 80), entry.viewport_baseline_cols);
+
+    // caller 가 적용했다고 하자.
+    entry.cols = 50;
+    try testing.expectEqual(ViewportPlan.unchanged, try reg.planViewport(1));
+
+    // **마지막 선언이 사라지면 기준으로 돌아온다.** 여기가 「폰 크기로 영영 굳는다」를 막는 자리다.
+    _ = try reg.detach(1, 7);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 80 }, try reg.planViewport(1));
+    // 돌아왔으면 기준도 놓는다 — 다음 폰이 붙을 때 그때 크기를 새로 기억해야 한다.
+    try testing.expectEqual(@as(?u16, null), entry.viewport_baseline_cols);
+}
+
+test "S11-6 기준: controller 가 없어도 되돌아온다 — headless keep-alive" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    // **controller 가 없다** — 맥 앱이 꺼지고 세션만 살아 있는 모양.
+    try testing.expectEqual(@as(?StreamId, null), entry.controller);
+    _ = try reg.attach(1, 7, .observer);
+    _ = try reg.declareViewport(1, 7, 50, 37);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 50 }, try reg.planViewport(1));
+    entry.cols = 50;
+
+    _ = try reg.detach(1, 7);
+    // controller 로 기준을 잡았다면 여기서 돌아갈 데가 없어 50 열로 굳었을 것이다.
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 80 }, try reg.planViewport(1));
+}
+
+test "S11-6 기준: 거둠도 마지막 선언이 사라진 것과 같다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 7, .observer);
+    _ = try reg.declareViewport(1, 7, 50, 37);
+    _ = try reg.planViewport(1);
+    entry.cols = 50;
+
+    // 붙어 있되 선언만 거둔다(둘 다 0).
+    try testing.expectEqual(DeclareViewportOutcome.withdrawn, try reg.declareViewport(1, 7, 0, 0));
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 80 }, try reg.planViewport(1));
+    try testing.expectEqual(@as(?u16, null), entry.viewport_baseline_cols);
+}
+
+test "S11-6 기준: 둘이 붙었다 하나만 떨어지면 남은 쪽을 따른다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 7, .observer);
+    _ = try reg.attach(1, 8, .observer);
+    _ = try reg.declareViewport(1, 7, 50, 37);
+    _ = try reg.declareViewport(1, 8, 44, 30);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 44 }, try reg.planViewport(1));
+    entry.cols = 44;
+
+    // 작은 쪽이 떠나면 큰 쪽으로 **넓어진다** — 기준까지는 되돌릴 수 있다.
+    _ = try reg.detach(1, 8);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 50 }, try reg.planViewport(1));
+    // 아직 선언이 남아 있으니 기준은 유지된다.
+    try testing.expectEqual(@as(?u16, 80), entry.viewport_baseline_cols);
+}
+
+test "S11-6 기준: controller 가 창을 조절하면 그쪽이 이긴다 — 기준이 갱신된다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 11, .controller);
+    _ = try reg.attach(1, 7, .observer);
+    _ = try reg.declareViewport(1, 7, 50, 37);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 50 }, try reg.planViewport(1));
+    entry.cols = 50; // caller 가 적용했다.
+    try testing.expectEqual(@as(?u16, 80), entry.viewport_baseline_cols);
+
+    // 사용자가 맥 창을 넓힌다(controller 리사이즈).
+    const sub = subscription_identity.SubscriptionId{ .value = 11 };
+    var prepared = try reg.prepareResizeSubscription(1, sub, 100, 24, 1);
+    _ = try reg.commitResizeSubscription(&prepared);
+    // **기준이 갱신된다** — 「폰이 없었으면 100 열이었을 것」이다.
+    try testing.expectEqual(@as(?u16, 100), entry.viewport_baseline_cols);
+
+    // 그래도 폰이 붙어 있는 동안은 폰을 따른다 — caller 가 한 번 더 줄인다.
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 50 }, try reg.planViewport(1));
+    entry.cols = 50;
+
+    // 폰이 떠나면 **갱신된** 기준으로 돌아온다(80 이 아니라 100).
+    _ = try reg.detach(1, 7);
+    try testing.expectEqual(ViewportPlan{ .resize_cols = 100 }, try reg.planViewport(1));
+}
+
+test "S11-6 기준: 선언이 없으면 controller 리사이즈가 기준을 만들지 않는다" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 11, .controller);
+    const sub = subscription_identity.SubscriptionId{ .value = 11 };
+    var prepared = try reg.prepareResizeSubscription(1, sub, 100, 24, 1);
+    _ = try reg.commitResizeSubscription(&prepared);
+    // 이 기능이 없던 때와 같아야 한다.
+    try testing.expectEqual(@as(?u16, null), entry.viewport_baseline_cols);
+    try testing.expectEqual(ViewportPlan.unchanged, try reg.planViewport(1));
 }

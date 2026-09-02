@@ -1678,9 +1678,10 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `--format json`의 exact object는 GitHub release attestation verifier가 검증한 certificate SAN
   `https://dotcom.releases.github.com`, non-empty verified timestamp와 in-toto v1 statement를 가져야 한다. statement는
   `predicateType=https://in-toto.io/attestation/release/v0.1`, exact repository/repository ID/release ID/tag와
-  `pkg:github/ohah/maru@<tag>` purl을 결속한다. subject는 purl subject exact 1개와 manifest가 열거한 asset name/SHA-256
-  exact set이어야 하며 missing/duplicate/additional asset을 거부한다. 각 `verify-asset` 결과도 같은 release statement와
-  자기 local basename/SHA subject를 모두 포함해야 한다. release predicate의 `ownerId`는 canonical nonzero인지 검사하되,
+  `pkg:github/ohah/maru@<tag>` purl을 결속한다. subject는 purl subject exact 1개, manifest가 열거한 세 asset과
+  그 canonical manifest 파일 자체까지 공개 시점의 attached artifact 네 개 name/SHA-256 exact set이어야 하며
+  missing/duplicate/additional asset을 거부한다. 각 `verify-asset` 결과도 같은 release statement와 자기 local
+  basename/SHA subject를 모두 포함해야 한다. release predicate의 `ownerId`는 canonical nonzero인지 검사하되,
   repository string과 immutable numeric repository ID가 이미 결속되므로 별도 owner 권위로 승격하지 않는다.
 
   release purl subject의 SHA-1은 **tag ref digest**이지 annotated tag를 peel한 최종 source commit이라고 가정하지 않는다.
@@ -1688,7 +1689,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `release_adapter_git_resolver.zig`의 exact tag chain이 manifest source commit으로 수렴한 결과와 함께
   `ReleaseAttestation.source_commit`을 만든다. lightweight tag에서는 두 값이 같을 수 있지만 그 우연을 계약으로 쓰지 않는다.
   focused gate `test-session-host-release-adapter-github-release-attestation`은 release/asset exact argv, clean environment,
-  release identity와 purl/tag-ref/asset set, local asset 선택, malformed/duplicate/cap/timeout/child failure를
+  release identity와 purl/tag-ref/manifest 포함 attached artifact set, local asset 선택, malformed/duplicate/cap/timeout/child failure를
   Debug·ReleaseFast에서 검증한다. 이 gate만으로 CLI pin/revalidation, predecessor download, git resolver composition 또는
   final workflow 배선을 완료했다고 주장하지 않는다.
 

@@ -3756,21 +3756,28 @@ frameless_covers_window=true nchittest_strip=2 nchittest_button=1 nchittest_belo
 
 고친 규칙: **요약 줄을 전부 모아 `failed` 를 합산**하고, 실제 실패는 줄 첫머리 `FAIL (` 로만 센다.
 
-## 보고 — Windows 에서 `zig build test` 는 항상 exit 1 이다
+## ~~보고 — Windows 에서 `zig build test` 는 항상 exit 1 이다~~ → **더는 아니다**(2026-09-01 정정)
 
-`tools/check-agent-hook-command.sh` 가 로그 파일 모드를 `rw-------` 로 요구하는데 NTFS 에는 POSIX
-모드 비트가 없어 `umask 022` 가 `rw-r--r--` 를 낸다.
+원인은 `tools/check-agent-hook-command.sh` 였다. 로그 파일 모드를 `rw-------` 로 요구하는데 NTFS 에는
+POSIX 모드 비트가 없어 `umask 022` 가 `rw-r--r--` 를 낸다.
 
 ```text
 FAIL: 로그 파일 권한이 rw------- 여야 하는데 rw-r--r-- 다(umask 가 빠졌다)
 ```
 
-- **이 브랜치가 만든 것이 아니다** — `tools/` 는 안 건드렸고, 변경을 stash 해도 그대로 실패한다.
-- **고치지 않는다.** 그 게이트는 control-plane 보안 계약(로그 0600)이고, Windows 에서 통과시키려면
-  게이트를 약하게 만들어야 한다. `check-targets` 가 macOS 아티팩트를 안 짓는 것과 **같은 종류의
-  플랫폼 공백**이라 함께 보고한다.
-- **유닛 스위트는 초록이다**(3445 / 25 / 6, `failed` 합 0). 앞으로 이 저장소에서 Windows 게이트를
-  적을 때는 **exit code 가 아니라 요약 줄**을 근거로 적는다.
+- **이 브랜치가 만든 것이 아니었다** — `tools/` 는 안 건드렸고, 변경을 stash 해도 그대로 실패했다.
+- ~~**고치지 않는다.** … Windows 에서 통과시키려면 게이트를 약하게 만들어야 한다.~~
+  → **그 전제가 틀렸다.** 약하게 만들지 않고도 갈 수 있었다: **그 한 줄만** 건너뛰고 `ok` 가 아니라
+  **`SKIP`** 으로 적으면, POSIX 호스트의 검사는 한 톨도 안 줄고 Windows 에서는 *"안 됐다"* 가 아니라
+  *"못 쟀다"* 가 남는다(§2m.108). 나머지 아홉은 그대로 돈다.
+- **그래서 `zig build test` 는 이제 Windows 에서 exit 0 이다**(실측 2026-09-01: `...OK` 5464 줄,
+  `failed` 합 0). *"exit code 가 아니라 요약 줄을 근거로 적는다"* 는 규칙 자체는 **그대로 좋다**
+  (테스트 바이너리가 여럿이라 한 줄만 보면 엉뚱한 것을 읽는다) — 다만 **그 근거였던 「항상 1」은
+  이제 사실이 아니다.**
+
+> **한 번 «고치지 않는다» 로 적은 것이 영원히 그런 것은 아니다.** 그때 적힌 이유("통과시키려면 게이트를
+> 약하게 만들어야 한다")는 **선택지를 둘로만 본 것**이었다 — 통과냐 약화냐. 셋째 칸(*"이 호스트에서는
+> 못 잰다고 적는다"*)이 있었고, 그것은 아무것도 약하게 만들지 않는다.
 
 ### 2m.45 Windows 로컬 초록이 중간 커밋 둘을 깨 놓고 있었다 (2026-08-25)
 
@@ -8224,6 +8231,127 @@ JSON 파싱·매니페스트 검증 같은 **순수 로직**이고, Linux CI 의
 끌 수는 있다(`posix_host_tests` 를 그 타깃에도 걸면 된다). 하지만 그것은 **중립 레이어**의 테스트라,
 끄는 순간 Windows 에서 중립 회귀를 못 보게 된다 — 이 절이 고치려던 바로 그 문제를 한 칸 옮기는 것뿐이다.
 그래서 **빨간 채로 남기고 이름을 붙였다.**
+
+### 2m.109 중립 파일이 POSIX 시계를 부르고 있었다 — 그리고 시계 읽기는 I/O 가 아니다 (실측 2026-09-01)
+
+§2m.108 이 13 개를 1 개로 줄이고 **이름을 붙여 남긴** 그 하나다:
+
+```text
+src\syntax\tree_sitter.zig:370:76: referenced by parseBudgeted
+  → std\c.zig:11468: error: parameter of type 'void' not allowed in calling convention 'x86_64_win'
+```
+
+`monotonicNs` 가 `std.c.clock_gettime(.MONOTONIC, …)` 를 직접 불렀다. **중립 파일(L?)이 POSIX 를
+직접 부르는 자리**이고, 그래서 Windows 에서는 이 모듈이 **컴파일조차 안 됐다** — 즉 그 호스트에서
+syntax 회귀를 볼 방법이 처음부터 없었다.
+
+## 처음 세운 선택지가 틀렸다
+
+보고할 때 *"예산 대신 deadline 을 받으면 중립 모듈이 시계를 아예 안 갖는다"* 를 제일 깨끗한 길로
+적었다. **읽어 보니 성립하지 않는다** — 시계는 시작할 때 한 번이 아니라 **파싱 도중에** 필요하다:
+
+```zig
+fn onProgress(state: [*c]c.TSParseState) callconv(.c) bool {
+    ...
+    return monotonicNs() >= ctx.deadline_ns;   // tree-sitter 가 파싱 중에 되부른다
+}
+```
+
+deadline 을 받아도 그 비교를 하려면 「지금」이 있어야 한다. 그래서 남은 길은 **io 를 받는다** 뿐인
+것처럼 보였는데, 그러면 `Provider.init` → `editor_syntax.open` → `app_session/editor.zig` 의 **수십
+자리**가 함께 바뀐다(실측).
+
+## std 를 읽고 셋째 칸을 찾았다
+
+이 저장소의 규칙은 *"I/O 는 호출자가 준 `io` 로 한다"* 이다. 그런데 **시계 읽기는 I/O 가 아니다** —
+std 구현이 그것을 그대로 말한다(`lib/std/Io/Threaded.zig`, 0.16):
+
+```zig
+fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+    const t: *Threaded = @ptrCast(@alignCast(userdata));
+    _ = t;                                    // ← 인스턴스를 받자마자 버린다
+    return switch (native_os) {
+        .windows => nowWindows(clock),
+        .wasi => nowWasi(clock),
+        else => nowPosix(clock),
+    };
+}
+```
+
+**어느 인스턴스로 읽어도 같은 값이고 공유 상태를 안 건드린다.** 그래서 그 한 줄을 위해 서명을 수십
+자리 바꾸지 않는다:
+
+```zig
+fn monotonicNs() u64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+}
+```
+
+`awake` 를 고른 것은 옛 코드의 `CLOCK_MONOTONIC` 과 같은 뜻이기 때문이다(잠든 시간을 안 센다).
+
+> **「규칙을 따른다」와 「규칙의 이유를 따른다」는 다르다.** io 를 넘기는 이유는 I/O 의 주인을 호출자에
+> 두기 위해서다. 주인이 될 것이 없는 호출에까지 그 형태만 흉내 내면, 지키는 것 없이 서명만 번진다.
+
+## 그런데 둘이 더 있었다 — **메시지로 세면 안 보이는 실패**
+
+§2m.108 이 적은 「13 개」는 **`error:`·`FAIL` 을 grep 해 센 값**이다. 그 방식이 둘을 통째로 놓쳤다:
+
+`tree_sitter` 를 고치고 `mise run check` 를 통째로 돌렸더니 실패 줄은 **0 인데 `EXIT=1`** 이었다.
+범인은 `check-macos-app-host` 였다:
+
+```text
+[check-macos-app-host] $ if [ "$(uname -s)" = Darwin ]; then
+"$(uname -s)"이(가) 예상되지 않았습니다.        ← cmd.exe 의 한국어 오류
+[check-macos-app-host] ERROR task failed
+```
+
+**mise 는 Windows 에서 태스크를 `cmd` 로 돌린다.** 그 태스크는 *"macOS 가 아니면 왜 건너뛰는지 찍고
+통과한다"* 로 설계돼 있는데(그 자리 주석: *"조용한 skip 이 아니다 — 로그에 한 줄이 남아야 «돌았다» 와
+«못 돈다» 를 구분할 수 있다"*), **그 스킵 자체가 Windows 에서 죽고 있었다.**
+
+`run_windows` 로 갈랐다(POSIX 쪽은 한 글자도 안 바뀐다). 그리고 그 줄은 **ASCII 로 적는다** — `cmd` 는
+레거시 코드페이지라 한글이 깨져 나온다(실측). 읽을 수 없는 줄은 없느니만 못하다.
+
+### 그리고 `check-mobile-contract` — 「틀림」은 `FAIL` 이 아니다
+
+같은 실행에서 이것도 내내 실패하고 있었다. 세 판정이 **`127`(command not found)** 을 냈다:
+
+```text
+  틀림 ABI 타입                    기대=0 실제=127
+  틀림 모바일 문서의 키 판정        기대=0 실제=127
+  틀림 계획 인용                    기대=0 실제=127
+```
+
+`python3` 를 박아 놨는데 **Windows 에는 그 이름이 없다** — mise 가 깔아 주는 것조차 `python` 이다(실측).
+`/bin/sh` 하드코딩과 같은 부류다. 인터프리터를 찾아 쓰게 고쳤다(`command -v`, POSIX 쪽은 그대로
+`python3` 을 고른다). 그래서 **ABI 타입 대조·모바일 키 판정·계획 인용 셋이 이 호스트에서 처음 돈다** —
+초록이 된 것이 아니라 **없던 판정이 생긴 것**이다.
+
+> **그 셋이 §2m.108 의 집계에 안 잡힌 이유는 낱말이다.** 이 스크립트는 실패를 `틀림` 으로 찍는다 —
+> `FAIL` 도 `error:` 도 아니다.
+
+> ### 세는 방법이 틀렸다
+>
+> 「13 개」는 **메시지를 grep 해 센 값**이고, 그래서 ⑴ 아무 메시지도 안 찍는 실패와 ⑵ 다른 낱말로 찍는
+> 실패를 못 봤다. **게이트는 종료 코드가 판정이고 메시지는 진단이다.** 앞으로 이 저장소에서 게이트
+> 결과를 적을 때는 `EXIT=$?` 를 먼저 적고, 메시지는 *"그래서 어디가"* 를 말할 때만 쓴다.
+> (`mise` 의 `ERROR task failed` 줄도 못 믿는다 — 실측으로 실패한 태스크 전부에 안 찍혔다.)
+
+## 결과
+
+**`mise run check` 가 Windows 에서 처음으로 `EXIT=0`** 이다. 그 길에 이 호스트에서 **한 번도 안 돌던
+판정들이 돌기 시작했다**:
+
+| 무엇 | 이 호스트에서 |
+|---|---|
+| `tree_sitter` 단위 테스트 27 개 | 처음 돈다 |
+| ABI 헤더 ↔ Zig export 타입 대조 | 처음 돈다 |
+| 모바일 문서의 config 키 판정 | 처음 돈다 |
+| 계획 ↔ 계약 인용 대조 | 처음 돈다 |
+
+**§2m.44 의 「Windows 에서 `zig build test` 는 항상 exit 1」도 함께 낡았다** — 그 절에서 정정했다.
+그 원인(훅 스크립트의 POSIX 권한 검사)을 §2m.108 이 이미 갈랐기 때문이다.
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

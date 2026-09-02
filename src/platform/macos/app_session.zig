@@ -3003,12 +3003,19 @@ pub fn appKeepAlivePolicyValue() bool {
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
 pub var host_connect_failed: bool = false;
 
+// test에서 「폰이 세션을 좁혀 두었다」를 주입한다 — 원격 backend 없이 **상태줄이 그 항목을 실제로
+// 조립하는지** 재려면 그 상태가 필요하다. `test_config_text` 와 같은 관례다: **비공개**이고,
+// 소비처가 `builtin.is_test` 로 가드해 제품 경로는 이 값을 아예 안 읽는다. 세운 test는 defer로
+// 되돌린다 — process-global이다.
+var test_narrowed_cols_override: ?u16 = null;
+
 /// 활성 Term 의 세션을 **남이 좁혀 두었으면** 그 열 수(S11-6). 아니면 `null`.
 ///
 /// 판정 자체는 `RemoteRuntime` 이 `runtime.resized` 가 올 때 해 둔다 — 여기서 창 크기와 견주면
 /// 사용자가 창을 넓히는 동안 host 확정 전까지 참이 되어 **폰이 없어도 표시가 번쩍인다**.
 /// 이 함수는 그 결과를 읽기만 한다.
 fn activeTermNarrowedCols(self: *AppSession) ?u16 {
+    if (builtin.is_test) if (test_narrowed_cols_override) |value| return value;
     if (!is_macos) return null;
     // **활성 surface 가 없을 수 있다**(창을 비우는 경로). `activeSurface()` 는 그때 패닉한다.
     const window = &self.app_window;
@@ -20001,7 +20008,9 @@ pub const AppSession = struct {
             // 경고가 아니라 **사실 전달**이라 danger 색을 안 쓴다 — 폰이 붙은 것은 정상 동작이다.
             const narrowed_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
             if (self.buildStatusBarItem(
-                null,
+                // **새 자산이다** — `host` 를 빌려 쓰면 그 모양이 「host 강등」과 「폰이 좁혔다」
+                // 둘을 뜻하게 되어 §4 의 「한 모양 한 뜻」이 무너진다.
+                icons.codepoint(.phone),
                 text,
                 bar_cols,
                 narrowed_fg,
@@ -78068,4 +78077,44 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
         defer a.free(shown);
         try std.testing.expect(std.mem.indexOf(u8, shown, "build-box") == null);
     }
+}
+
+test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조립된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    const sb = chrome.components.status_bar;
+
+    const hasItem = struct {
+        fn f(s: *AppSession) bool {
+            for (s.statusBarTree().entries) |e| {
+                const id: sb.ItemId = @enumFromInt(e.id);
+                if (id == .viewport_narrowed) return true;
+            }
+            return false;
+        }
+    }.f;
+
+    // **안 좁혀졌으면 항목이 없다** — 이 기능을 안 쓰는 창의 상태줄은 예전과 같아야 한다.
+    test_narrowed_cols_override = null;
+    session.collectStatusBarItems(&collected, builder, colors);
+    try std.testing.expect(!hasItem(session));
+
+    // **좁혀졌으면 실제로 조립된다.** 지금까지 이 축은 규칙만 재고 «그려지는가» 는 안 쟀다.
+    test_narrowed_cols_override = 50;
+    defer test_narrowed_cols_override = null;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    try std.testing.expect(hasItem(session));
 }

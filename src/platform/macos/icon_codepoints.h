@@ -54,6 +54,7 @@
 #define MARU_ICON_ARROW_RIGHT 0xF002Au
 #define MARU_ICON_COLLAPSE_ALL 0xF002Bu
 #define MARU_ICON_CLOUD_DOWNLOAD 0xF002Cu
+#define MARU_ICON_PHONE 0xF002Du
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -100,6 +101,7 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF002Au:
         case 0xF002Bu:
         case 0xF002Cu:
+        case 0xF002Du:
             return true;
         default:
             return false;

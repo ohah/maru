@@ -5851,3 +5851,57 @@ test "컨트롤 명령은 설정 경로를 쓰고 셸이 쪼개지 못하게 인
     var tiny: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&tiny, tiny.len));
 }
+
+test "S11-6 폰은 «그리는 격자» 를 알리고, 같은 값을 다시 안 보낸다" {
+    const T = std.testing;
+    bridge.setControlWantForTest(.{ .screen = "000000000000000000000000000000aa".* });
+    defer bridge.setControlWantForTest(.none);
+    bridge.resetViewportDeclarationForTest();
+
+    bridge.declareViewportForTest(50, 37);
+    const first = bridge.stagedViewportDeclaration() orelse return error.TestUnexpectedResult;
+    try T.expectEqualSlices(u8, "MRSV", first[0..4]);
+    try T.expectEqual(@as(u16, 50), std.mem.readInt(u16, first[4..6], .little));
+    try T.expectEqual(@as(u16, 37), std.mem.readInt(u16, first[6..8], .little));
+
+    // host 가 가져갔다.
+    var out: [64]u8 = undefined;
+    try T.expectEqual(@as(usize, 8), bridge.maru_mobile_take_control_request(&out, out.len));
+    try T.expectEqual(@as(?[8]u8, null), bridge.stagedViewportDeclaration());
+
+    // **같은 값은 다시 안 간다** — 회전 애니메이션이 매 프레임 같은 값을 준다.
+    bridge.declareViewportForTest(50, 37);
+    try T.expectEqual(@as(?[8]u8, null), bridge.stagedViewportDeclaration());
+
+    // 값이 달라지면 간다.
+    bridge.declareViewportForTest(44, 30);
+    const next = bridge.stagedViewportDeclaration() orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u16, 44), std.mem.readInt(u16, next[4..6], .little));
+}
+
+test "S11-6 못 보낸 선언은 다음에 다시 간다 — 그리고 화면을 안 볼 때는 안 보낸다" {
+    const T = std.testing;
+    bridge.setControlWantForTest(.{ .screen = "000000000000000000000000000000aa".* });
+    defer bridge.setControlWantForTest(.none);
+    bridge.resetViewportDeclarationForTest();
+
+    // 아직 안 가져간 요청이 자리를 차지하고 있다.
+    bridge.declareViewportForTest(50, 37);
+    // 그 사이 값이 바뀌었지만 자리가 없어 못 실었다.
+    bridge.declareViewportForTest(44, 30);
+    const staged = bridge.stagedViewportDeclaration() orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u16, 50), std.mem.readInt(u16, staged[4..6], .little));
+
+    // 자리가 나면 **못 보낸 값이 간다** — 보낸 뒤에야 「마지막」이 되기 때문이다.
+    var out: [64]u8 = undefined;
+    _ = bridge.maru_mobile_take_control_request(&out, out.len);
+    bridge.declareViewportForTest(44, 30);
+    const again = bridge.stagedViewportDeclaration() orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u16, 44), std.mem.readInt(u16, again[4..6], .little));
+
+    // **화면을 안 보면 안 보낸다** — 목록 채널은 ndjson 을 나른다.
+    _ = bridge.maru_mobile_take_control_request(&out, out.len);
+    bridge.setControlWantForTest(.none);
+    bridge.declareViewportForTest(60, 40);
+    try T.expectEqual(@as(?[8]u8, null), bridge.stagedViewportDeclaration());
+}

@@ -223,6 +223,45 @@ pub const PinnedReleaseFile = struct {
         return expected;
     }
 
+    /// Reads bytes from the already-held publication inode. The pathname participates only in
+    /// proving that the durable leaf still names that inode before and after the read.
+    pub fn readHeldAlloc(self: *const @This(), allocator: std.mem.Allocator, path: [:0]const u8, cap: usize) Error!Input {
+        const before = try self.revalidate(path);
+        if (before.size > cap) return error.TooLarge;
+        const size: usize = @intCast(before.size);
+        const bytes = try allocator.alloc(u8, size);
+        errdefer allocator.free(bytes);
+        var offset: usize = 0;
+        while (offset < size) {
+            const count = c.pread(self.fd, bytes[offset..].ptr, size - offset, @intCast(offset));
+            if (count < 0) {
+                if (posix.errno(-1) == .INTR) continue;
+                return error.ReadFailed;
+            }
+            if (count == 0) return error.ChangedDuringRead;
+            offset += @intCast(count);
+        }
+        var extra: [1]u8 = undefined;
+        while (true) {
+            const count = c.pread(self.fd, &extra, 1, @intCast(size));
+            if (count < 0) {
+                if (posix.errno(-1) == .INTR) continue;
+                return error.ReadFailed;
+            }
+            if (count != 0) return error.ChangedDuringRead;
+            break;
+        }
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        const after = try self.revalidate(path);
+        if (before.identity.device != after.identity.device or before.identity.inode != after.identity.inode or
+            before.size != after.size or before.mode != after.mode or
+            !std.mem.eql(u8, &before.sha256, &after.sha256) or
+            !std.mem.eql(u8, &digest_hex, &self.sha256)) return error.ChangedDuringRead;
+        return .{ .bytes = bytes, .size = before.size, .mode = before.mode, .sha256 = digest_hex, .identity = before.identity };
+    }
+
     pub fn deinit(self: *@This()) Error!void {
         if (self.owner != self or self.fd < 0 or self.parent_fd < 0) return error.InvalidOwner;
         _ = c.close(self.fd);

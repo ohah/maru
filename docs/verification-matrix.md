@@ -993,6 +993,12 @@ leaf와 기존 output에서는 publication 0이며 성공은 held output inode a
 `test-session-host-release-adapter-candidate-upgrade-evidence`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다. signed leaf
 실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
 
+U5 candidate compatibility는 `release_adapter_candidate_compatibility.zig`가 final-address candidate files/product와 held frozen
+executable parent authority에서만 canonical compatibility probe를 실행해 frozen SHA·release/source/build identity와 함께 fixed owner에
+복사한다. current-manifest 검증과 동일 parser를 공유하고 실행 전후 inode·parent seal·candidate product를 재검증한다. focused gate는
+Debug·ReleaseFast에서 copied/pre-owned/alias owner, foreign capture, timeout, malformed/noncanonical output과 executable/parent/candidate
+drift의 publication 0을 검증한다. manifest authoring과 signed frozen 제품 실행은 별도 gate다.
+
 U5 Release DMG pathname/mount authority는 **구현**됐다. 종료 gate
 `test-session-host-release-adapter-dmg-authority`는 `max_dmg_bytes` 이하 expected size/SHA, exclusive 0700 work-directory,
 no-follow source→0600 private DMG bounded streaming copy와 source/copy identity·SHA 결속, read-only fixed mount, exact `Maru.app/Contents/Info.plist` 및

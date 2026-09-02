@@ -300,11 +300,23 @@ pub const WriteTarget = union(enum) {
 /// 뒤집힌다(`scm_repos.Entry.origin` 이 그 이유로 존재한다).
 ///
 /// 목록에 없는 경로는 **가족이 아니다**(false) — 모르는 것을 「같다」로 답하면 그쪽이 위험한 쪽이다.
+///
+/// ⚠️ **`repoEntries` 를 부르지 않는다 — 소유 목록(`scm_repo_list`)을 직접 읽는다**(적대적 검증
+/// 2026-09-02 2 회차). 이 함수의 호출자는 대부분 **이미 그 목록을 빌린 상태**다: `pumpRepoStatus` 는
+/// `repoEntries` 가 준 슬라이스를 **순회하는 중**이고, `submitWrite` 는 `repoPathAt` 이 빌려 준 경로를
+/// 들고 있다. 여기서 다시 부르면 `repoEntries` 가 **공유 스크래치(`scm_repo_entry_view`)를 덮어쓰고**,
+/// 그 안의 `refreshRepoList` 가 재보행하는 순간 바깥이 들고 있던 `path` 가 **해제된 메모리**가 된다.
+///
+/// 지금 안 터지는 것은 500 ms 폴 간격 덕에 안쪽 보행이 조기 반환하기 때문이다 — **타이머에 기대는
+/// 안전**이라 폴 간격이 바뀌거나 반복문 안에서 목록이 무효화되는 날 깨진다. 소유 목록을 직접 읽으면
+/// 그 의존이 통째로 사라진다(값도 같다: 뷰는 이 목록의 사본이다).
+///
+/// **대신 목록이 아직 안 걷혔으면 답이 없다**(false → 호출자는 `.local`). 그 상태에서는 누를 행 자체가
+/// 없으므로 이 경로에 닿지 않는다 — 호출자가 언제나 `repoEntries` 를 먼저 지난다.
 pub fn sameRepoFamily(self: *AppSession, a: []const u8, b: []const u8) bool {
-    const repos = scm_dock_ops.repoEntries(self);
     var origin_a: ?[]const u8 = null;
     var origin_b: ?[]const u8 = null;
-    for (repos.entries) |entry| {
+    for (self.scm_repo_list.items) |entry| {
         if (std.mem.eql(u8, entry.path, a)) origin_a = entry.origin;
         if (std.mem.eql(u8, entry.path, b)) origin_b = entry.origin;
     }

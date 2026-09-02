@@ -66790,6 +66790,31 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         git_ops.rememberGitRepoDest(session, "user@build-box"); // 원래대로 되돌린다
     }
 
+    // ⑵-d **닿을 수 없는 원격 행은 「못 읽었다」로 적는다 — 매 tick 되풀이하지 않는다**
+    //     (적대적 검증 2026-09-02 4 회차).
+    //
+    // 이미 읽어 둔 항목이 `stale` 이 되면 `shouldReadRepoStatus` 가 **매 tick** 참이다. 소켓이 없어
+    // 못 보낼 때 아무것도 안 적으면 그 상태가 영영 유지되고, 매 프레임 control socket 경로를 할당하고
+    // `stat` 하는 되풀이가 된다. 그리고 닿을 수 없는 저장소의 **파일 줄이 그대로 눌린다.**
+    {
+        const family2 = [_]maru.session.scm_repos.Entry{
+            .{ .path = "/srv/app", .origin = "/srv/app", .primary = true },
+            .{ .path = "/srv/app-wt", .origin = "/srv/app", .primary = false },
+        };
+        scm_dock_ops.forgetRepoStatus(session);
+        scm_dock_ops.seedRepoEntriesForTest(session, &family2);
+        defer scm_dock_ops.clearRepoEntriesForTest(session);
+        scm_dock_ops.seedRepoStatusForTest(session, "/srv/app-wt", "wt-b", "1 .M N... 100644 100644 100644 aaa bbb b-only.txt\n");
+        scm_dock_ops.markRepoStatusStale(session); // 「다시 읽을 때가 됐다」 — 이 세션엔 소켓이 없다
+        scm_dock_ops.pumpRepoStatus(session);
+        const after = scm_dock_ops.repoStatusFor(session, "/srv/app-wt") orelse return error.EntryVanished;
+        try std.testing.expect(after.failed); // 되풀이가 아니라 **사실을 적었다**
+        try std.testing.expect(!after.stale); // 5 초 재시도 규율로 내려갔다
+        // 닿을 수 없는 저장소의 파일 줄은 지운다 — 남기면 그 줄이 눌린다.
+        try std.testing.expectEqual(@as(usize, 0), after.status_text.len);
+        scm_dock_ops.forgetRepoStatus(session);
+    }
+
     // **거절은 이제 «소켓이 없다» 하나뿐이다**(RS4a·RS4b 가 나머지를 열었다). 이 세션에는 control
     // socket 이 없으므로 원격 쓰기는 **보내지 않고 이유를 말한다** — 조용한 무동작이 아니다.
     scm_dock_ops.clearScmWriteError(session);

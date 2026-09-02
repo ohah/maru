@@ -6455,6 +6455,14 @@ controller 는 observer 슬롯을 갖지 않으므로 이 규칙은 저절로 �
 아래 재스냅샷 비용이 그만큼 곱해진다. 그래서 선언은 **다음 serve tick 에 마지막 값만** 적용하고,
 **직전과 같은 값이면 아무것도 안 한다**.
 
+**알림은 wire 어휘를 늘리지 않는다.** 조정으로 크기가 바뀌면 구독자에게 `runtime.resized` 를
+보내는데, 그 이벤트의 client decoder 는 `data` 필드가 **정확히 다섯**이고 `reason` 이 **문자 그대로
+`"controller"`** 여야 통과한다(`runtime_event_wire`). 그래서 `"viewport"` 같은 새 사유를 쓰면
+**모든 조정이 client 에 malformed 로 도착해** 알리려던 것이 오히려 스트림을 깬다(적대적 검증
+3회차에 실제로 그렇게 썼다가 잡았다). 사유를 늘리려면 같은 major 의 옛 client 가 먼저 사라져야
+하는데 attach 는 그들을 정상 경로로 받는다 — `reason` 은 판정에만 쓰이고 동작을 안 바꾸므로 그대로
+쓴다.
+
 **있는 기구를 쓴다.** host 에는 이미 owner resize 경로가 있고 그 상태에
 `{ runtime_id, generation, cols, rows, **pending** }` 이 들어 있다(`client_external_pump` 의
 `OwnerResizeSeal`). 위 「다음 tick 에 마지막 값만」은 그 `pending` 과 같은 모양이므로 **병렬 기구를
@@ -6463,7 +6471,14 @@ controller 는 observer 슬롯을 갖지 않으므로 이 규칙은 저절로 �
 
 #### 조정 규칙
 
-세션 **열** = `max(바닥, min(기준 열, 선언한 observer 들의 열))`. **행은 안 건드린다.**
+세션 **열** = `min(기준 열, max(바닥, 선언한 observer 들의 열 중 가장 작은 것))`.
+**행은 안 건드린다.**
+
+**괄호 순서가 계약이다.** 처음에는 `max(바닥, min(기준, 선언))` 으로 적었는데 그 형태는
+**기준이 바닥보다 작을 때 세션을 «늘린다»** — 「줄이기만 한다」 가드와 정면으로 어긋난다.
+`min_cols` 가 **2** 라 2열 세션은 실재하고, 거기에 폰(50열)이 붙으면 옛 형태는 `max(10, 2) = 10`
+으로 **없던 8열을 만들어 낸다**. 바깥을 `min(기준, …)` 으로 두면 결과가 기준을 절대 넘지 않아
+두 가드가 함께 지켜진다(적대적 검증, 2026-09-02).
 
 **기준 크기는 controller 가 아니라 «선언 이전의 크기» 다.** controller 로 잡으면 되돌릴 데가
 없어지는 경우가 있다 — 맥 앱이 먼저 꺼지고 keep-alive 로 세션만 살아 있으면(headless runtime)
@@ -6498,6 +6513,10 @@ delta 가 먼저 도착하면 base 가 어긋나 `GenerationGap` 이 난다.
 그래서 이 계약은 둘을 함께 요구한다:
 
 1. **host**: 크기가 바뀌면 그 스트림에 **snapshot 을 먼저** 보낸다. delta 를 먼저 보내지 않는다.
+   — **이미 기존 기구가 보장한다**(2026-09-02 코드 확인): `screen_snapshot.computeDeltaBounded` 가
+   `snap.size.cols != prev_meta.cols …` 이면 `error.SnapshotRequired` 를 내고, `runtime_manager`
+   의 delta op 이 그것을 받아 `projectSnapshotBounded` 로 **fresh snapshot** 을 보낸다. 즉 base
+   격자가 다르면 delta 는 원리상 만들어지지 않는다 — 조정 경로가 따로 할 일이 없다.
 2. **client**: `GenerationGap` 은 **망가진 데이터가 아니다**. 그 delta 하나만 버리고 다음 snapshot 을
    기다린다 — 화면을 끄지 않는다. 끄면 폰이 붙는 것만으로 자기 화면을 날린다.
 

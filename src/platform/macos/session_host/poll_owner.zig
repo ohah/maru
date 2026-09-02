@@ -242,6 +242,7 @@ pub const Owner = struct {
         if (poll_fds[1].revents & c.POLL.IN != 0) {
             if (!self.server.drainOwnerWake()) return .listener_broken;
             self.server.tickOwner();
+            reconcileViewports(self);
             self.scheduleProducerNow(now_ns);
             progressed = true;
         } else if (poll_fds[1].revents != 0) {
@@ -4565,4 +4566,97 @@ test "client 종료 이유: 정상 경로만 조용하고 backpressure 희생은
     // 아래 둘은 사용자 세션이 갑자기 끊기는 경로다 — 반드시 흔적을 남겨야 한다.
     try testing.expect(!ClientCloseReason.screen_pressure.isExpected());
     try testing.expect(!ClientCloseReason.observer_offender.isExpected());
+}
+
+/// 선언이 바뀐 runtime 들을 이 tick 에 한 번씩 조정하고, **구독자에게 알린다**(S11-6).
+///
+/// 알리는 것이 이 자리에 있는 이유: client 는 `runtime.resized` 로 크기를 배운다
+/// (`client_external_pump` 의 owner resize 경로). 안 알리고 줄이면 화면은 다음 delta 가
+/// grid 변화를 보고 **fresh snapshot** 으로 스스로 낫지만, 맥 앱의 «크기 모델» 은 낡은 채 남아
+/// 창이 잘못된 열 수로 그린다.
+///
+/// **최선 노력이다.** 어느 client 의 큐가 차서 못 넣어도 조정 자체를 물리지 않는다 — 크기는 이미
+/// 바뀌었고, 그 client 는 다음 resize 나 재연결에서 따라잡는다. 여기서 client 를 끊는 것은
+/// 사용자가 부탁하지도 않은 대가다(controller 가 «요청한» resize 와 다른 점이다).
+fn reconcileViewports(self: *Owner) void {
+    if (!self.server.registry.viewportDirty()) return;
+    const ops = self.server.runtime_ops orelse return;
+    while (socket_server.reconcileOneViewport(self.server.registry, ops)) |done|
+        announceViewportResize(self, done);
+}
+
+/// `runtime.resized` 본문을 만든다. **wire 어휘를 늘리지 않는다.**
+///
+/// client 의 strict decoder 는 `data` 필드가 **정확히 다섯**이고 `reason` 이 **문자 그대로
+/// `"controller"`** 여야 통과한다(`runtime_event_wire`: `data.count != 5`,
+/// `reason_controller != true`). 그래서 `"viewport"` 같은 새 사유를 쓰면 **모든 조정이 client 에
+/// malformed 로 도착한다** — 알리려던 것이 오히려 스트림을 깬다(적대적 검증 3회차에 실제로 그렇게
+/// 썼다가 잡았다). 사유를 늘리려면 옛 client 가 먼저 사라져야 하는데, attach 는 같은 major 의 옛
+/// client 를 정상 경로로 받아들인다. `reason` 은 판정에만 쓰이고 동작을 바꾸지 않으므로 그대로 쓴다.
+fn viewportResizedBody(
+    allocator: std.mem.Allocator,
+    done: socket_server.ViewportReconciled,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"event\":\"runtime.resized\",\"data\":{{\"runtime_id\":\"{x:0>32}\"," ++
+            "\"cols\":{d},\"rows\":{d},\"resize_generation\":{d},\"reason\":\"controller\"}}}}",
+        .{ done.runtime_id, done.cols, done.rows, done.resize_generation },
+    );
+}
+
+fn announceViewportResize(self: *Owner, done: socket_server.ViewportReconciled) void {
+    const records = self.server.subscriptions.collectRuntimeRecords(
+        self.allocator,
+        done.runtime_id,
+    ) catch return;
+    defer self.allocator.free(records);
+    for (records) |record| {
+        const client = self.clientForKey(record.connection) orelse continue;
+        const body = viewportResizedBody(self.allocator, done) catch continue;
+        defer self.allocator.free(body);
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .event, .stream_id = record.stream_id },
+            body,
+        ) catch continue;
+        var owned = true;
+        defer if (owned) self.allocator.free(frame);
+        self.reactor.enqueueOwnedControlBatch(&.{.{
+            .admission = client.admission,
+            .bytes = frame,
+        }}) catch continue;
+        owned = false;
+    }
+}
+
+test "S11-6 조정 알림은 client 의 strict decoder 를 통과한다" {
+    const runtime_event_wire = @import("runtime_event_wire.zig");
+    const body = try viewportResizedBody(std.testing.allocator, .{
+        .runtime_id = 0xaa,
+        .cols = 50,
+        .rows = 24,
+        .resize_generation = 3,
+    });
+    defer std.testing.allocator.free(body);
+
+    // **여기가 이 판정자의 전부다.** client 는 `data` 필드가 정확히 다섯이고 `reason` 이 문자
+    // 그대로 `"controller"` 여야 받는다. 사유를 `"viewport"` 로 적었더니 이 한 줄이 `.malformed`
+    // 로 떨어졌다 — 알리려던 것이 스트림을 깨는 셈이었다(적대적 검증 3회차).
+    const verdict = runtime_event_wire.preflightEventObserved(body, .{ .runtime_id = 0xaa }, null);
+    const preflight = switch (verdict) {
+        .accepted => |value| value,
+        else => {
+            std.debug.print("S11-6 알림 verdict={s}\n", .{@tagName(std.meta.activeTag(verdict))});
+            return error.TestUnexpectedResult;
+        },
+    };
+    switch (preflight.event) {
+        .resized => |event| {
+            try std.testing.expectEqual(@as(u16, 50), event.cols);
+            try std.testing.expectEqual(@as(u16, 24), event.rows);
+            try std.testing.expectEqual(@as(u64, 3), event.resize_generation);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }

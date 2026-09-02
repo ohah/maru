@@ -298,6 +298,14 @@ pub const SocketServer = struct {
         if (self.owner_tick) |tick| tick(self.owner_tick_ctx.?);
     }
 
+    /// 선언이 바뀐 runtime 들을 **이 tick 에 한 번씩** 조정한다(S11-6).
+    ///
+    /// tick 에 두는 것이 「폭풍을 합친다」다 — 회전 애니메이션처럼 선언이 연달아 와도 리사이즈는
+    /// tick 당 한 번이고, 값이 그대로면 `applyViewportCols` 가 `changed=false` 로 접는다.
+    ///
+    /// **PTY 를 먼저 바꾸고 나서 registry 에 적는다.** 반대로 하면 PTY 가 실패했을 때 registry 만
+    /// 줄어 둘이 갈린다. 실패하면 아무것도 안 적고 넘어간다 — dirty 는 이미 내려갔으므로 다음
+    /// 선언이나 detach 가 다시 세운다.
     pub fn sampleMetadataSources(self: *SocketServer, now_ns: u64) void {
         const ops = self.runtime_ops orelse return;
         if (ops.sample_metadata_sources) |sample| sample(ops.ctx, now_ns);
@@ -523,4 +531,182 @@ test "socket server: injected other UID is rejected before fd admission" {
     );
     var byte: [1]u8 = undefined;
     try testing.expectEqual(@as(isize, 0), c.read(client_fd, &byte, byte.len));
+}
+
+/// 조정 한 건의 결과. caller 가 이것을 받아 구독자에게 `runtime.resized` 를 알린다.
+pub const ViewportReconciled = struct {
+    runtime_id: u128,
+    cols: u16,
+    rows: u16,
+    resize_generation: u64,
+};
+
+/// 선언이 바뀐 runtime 을 **하나** 조정한다(S11-6). 더 없으면 `null`.
+///
+/// `SocketServer` 를 안 걸쳐 판정자가 registry 와 ops 만으로 잰다. **알리는 일은 여기서 안 한다** —
+/// 구독자에게 프레임을 넣으려면 client 표가 필요하고 그것은 poll owner 가 든다.
+pub fn reconcileOneViewport(
+    registry: *reg.TerminalRuntimeRegistry,
+    ops: server_mod.RuntimeOps,
+) ?ViewportReconciled {
+    while (registry.takeDirtyViewport()) |id| {
+        const plan = registry.planViewport(id) catch continue;
+        const cols = switch (plan) {
+            .unchanged => continue,
+            .resize_cols => |value| value,
+        };
+        const entry = registry.get(id) orelse continue;
+        // **적용할 수 있는지 먼저 본다.** PTY 를 바꾼 뒤에 커밋이 실패하면 둘이 갈린다 — 「PTY
+        // 먼저」 규율이 지키려던 것을 정확히 뒤집는다(적대적 검증 4회차).
+        registry.viewportColsApplicable(id, cols) catch continue;
+        // **PTY 를 먼저 바꾸고 나서 registry 에 적는다.** 반대로 하면 PTY 가 실패했을 때 registry 만
+        // 줄어 둘이 갈린다.
+        ops.resize(ops.ctx, id, cols, entry.rows) catch continue;
+        const applied = registry.applyViewportCols(id, cols) catch continue;
+        if (!applied.changed) continue;
+        return .{
+            .runtime_id = id,
+            .cols = applied.cols,
+            .rows = applied.rows,
+            .resize_generation = applied.resize_generation,
+        };
+    }
+    return null;
+}
+
+/// 판정자용 편의 — 알림 없이 끝까지 조정한다.
+pub fn reconcileViewportsWith(
+    registry: *reg.TerminalRuntimeRegistry,
+    ops: server_mod.RuntimeOps,
+) void {
+    while (reconcileOneViewport(registry, ops) != null) {}
+}
+
+test "S11-6 tick 이 선언을 실제 크기로 옮기고, 폰이 떠나면 되돌린다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(1, 80, 24);
+    var fake: server_mod.FakeRuntimeOps = .{};
+    const ops = fake.ops();
+
+    // 선언이 없으면 tick 은 아무 일도 안 한다 — 이 기능이 없던 때와 같다.
+    reconcileViewportsWith(&registry, ops);
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 80), entry.cols);
+
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+    reconcileViewportsWith(&registry, ops);
+    // **PTY 가 줄었고 registry 도 같은 값이다.**
+    try testing.expectEqual(@as(u16, 50), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 24), fake.resized_rows); // 행은 안 건드린다.
+    try testing.expectEqual(@as(u16, 50), entry.cols);
+
+    // 같은 tick 을 또 돌려도 다시 안 부른다.
+    fake.resized_cols = 0;
+    reconcileViewportsWith(&registry, ops);
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols);
+
+    // 폰이 떠나면 기준으로 돌아온다.
+    _ = try registry.detachSubscription(1, .{ .value = 7 });
+    reconcileViewportsWith(&registry, ops);
+    try testing.expectEqual(@as(u16, 80), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 80), entry.cols);
+}
+
+test "S11-6 tick: 폭풍이 와도 리사이즈는 한 번, 마지막 값으로" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(1, 80, 24);
+    var fake: server_mod.FakeRuntimeOps = .{};
+    const ops = fake.ops();
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+
+    // 회전 애니메이션처럼 한 tick 안에 선언이 연달아 온다.
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 60, 40);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 44, 30);
+    reconcileViewportsWith(&registry, ops);
+    // **마지막 값 하나로 한 번만** — 중간 값들이 PTY 에 닿지 않는다.
+    try testing.expectEqual(@as(u16, 44), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 44), entry.cols);
+    try testing.expectEqual(@as(u64, 1), entry.resize_generation);
+}
+
+test "S11-6 tick: PTY 가 실패하면 registry 를 안 바꾼다 — 둘이 갈리면 안 된다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(1, 80, 24);
+    var fake: server_mod.FakeRuntimeOps = .{};
+    fake.resize_fail_count = 1;
+    const ops = fake.ops();
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+
+    reconcileViewportsWith(&registry, ops);
+    // PTY 가 실패했으니 registry 도 그대로여야 한다.
+    try testing.expectEqual(@as(u16, 80), entry.cols);
+    try testing.expectEqual(@as(u64, 0), entry.resize_generation);
+
+    // 다음 선언이 다시 세우면 그때 적용된다.
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 44, 30);
+    reconcileViewportsWith(&registry, ops);
+    try testing.expectEqual(@as(u16, 44), entry.cols);
+}
+
+test "S11-6 tick: 한 세션의 선언이 다른 세션 크기를 안 건드린다" {
+    var registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const a = try registry.register(1, 80, 24);
+    const b = try registry.register(2, 120, 40);
+    var fake: server_mod.FakeRuntimeOps = .{};
+    const ops = fake.ops();
+
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+    reconcileViewportsWith(&registry, ops);
+
+    try std.testing.expectEqual(@as(u16, 50), a.cols);
+    // **다른 세션은 그대로다** — 그리고 기준도 안 잡힌다(선언이 없으니).
+    try std.testing.expectEqual(@as(u16, 120), b.cols);
+    try std.testing.expectEqual(@as(?u16, null), b.viewport_baseline_cols);
+    try std.testing.expectEqual(@as(u128, 1), fake.resized_runtime);
+}
+
+test "S11-6 tick: 조정을 기다리던 runtime 이 사라져도 회계가 낫는다" {
+    var registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(1, 80, 24);
+    const b = try registry.register(2, 120, 40);
+    var fake: server_mod.FakeRuntimeOps = .{};
+    const ops = fake.ops();
+
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+    try std.testing.expect(registry.viewportDirty());
+
+    // tick 이 돌기 전에 그 runtime 이 끝난다.
+    registry.unregister(1);
+    // **세는 값이 남아도 tick 이 스스로 낫는다** — 안 그러면 매 tick 표를 헛되이 훑는다.
+    reconcileViewportsWith(&registry, ops);
+    try std.testing.expect(!registry.viewportDirty());
+    try std.testing.expectEqual(@as(u16, 0), fake.resized_cols);
+    try std.testing.expectEqual(@as(u16, 120), b.cols);
+}
+
+test "S11-6 tick: 커밋이 불가능하면 PTY 도 안 건드린다" {
+    var registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const entry = try registry.register(1, 80, 24);
+    // 이 세션은 resize generation 이 상한이다 — 더 못 올린다.
+    entry.resize_generation = reg.resize_wire_max_counter;
+    var fake: server_mod.FakeRuntimeOps = .{};
+    const ops = fake.ops();
+    _ = try registry.attachSubscription(1, .{ .value = 7 }, .observer);
+    _ = try registry.declareViewportSubscription(1, .{ .value = 7 }, 50, 37);
+
+    reconcileViewportsWith(&registry, ops);
+    // **PTY 를 안 건드렸다** — 건드렸다면 registry(80)와 PTY(50)가 갈린 채 남는다.
+    try std.testing.expectEqual(@as(u16, 0), fake.resized_cols);
+    try std.testing.expectEqual(@as(u16, 80), entry.cols);
 }

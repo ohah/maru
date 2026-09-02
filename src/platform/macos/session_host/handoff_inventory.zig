@@ -501,8 +501,8 @@ pub const runtime_entry_groups = [_]Group{
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{ "controller", "observers" },
-        .why = "v1 upgrade is eligible only with zero controller and observer attachments",
+        .fields = &.{ "controller", "observers", "viewport_baseline_cols", "viewport_dirty" },
+        .why = "v1 upgrade is eligible only with zero controller and observer attachments; a viewport declaration needs an observer, so a pending reconcile or a live baseline means the session is still shrunk and only this host knows what to restore it to (S11-6)",
     },
 };
 
@@ -519,8 +519,8 @@ pub const terminal_runtime_registry_groups = [_]Group{
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{"membership_generation_exhausted"},
-        .why = "an exhausted inventory authority cannot safely enter a live upgrade",
+        .fields = &.{ "membership_generation_exhausted", "viewport_dirty_count" },
+        .why = "an exhausted inventory authority cannot safely enter a live upgrade, and a pending viewport reconcile means some session is still shrunk with its baseline only in this host's memory (S11-6)",
     },
 };
 

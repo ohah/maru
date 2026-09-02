@@ -1656,7 +1656,7 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // ── 제품 진입점 ──────────────────────────────────────────────────────────────────────────
     var backend = try git_backend_mod.Backend.init(io);
     defer backend.deinit();
-    if (!backend.submitRepoStatus("git", repo, 1)) {
+    if (!backend.submitRepoStatus("git", repo, 1, null)) {
         try stderr.writeAll("maru win32-git-smoke: could not submit the repo status request\n");
         try stderr.flush();
         return error.UnknownCommand;
@@ -1719,7 +1719,7 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
     defer allocator.free(write_out.stderr_bytes);
 
-    if (!backend.submitRepoStatus("git", repo, 2)) {
+    if (!backend.submitRepoStatus("git", repo, 2, null)) {
         try stderr.writeAll("maru win32-git-smoke: could not submit the second repo status request\n");
         try stderr.flush();
         return error.UnknownCommand;
@@ -15711,7 +15711,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
 
     var backend = try git_backend_mod.Backend.init(io);
     defer backend.deinit();
-    if (!backend.submitRepoStatus("git", repo, 1)) {
+    if (!backend.submitRepoStatus("git", repo, 1, null)) {
         try stderr.writeAll("maru win32-scm-draw-smoke: could not submit the repo status request\n");
         try stderr.flush();
         return error.UnknownCommand;
@@ -16349,7 +16349,7 @@ fn countRowsIn(model: maru.session.scm_view.Model, section: maru.session.scm_vie
 fn readRepoStatus(io: std.Io, allocator: std.mem.Allocator, repo: []const u8) ![]u8 {
     var backend = try git_backend_mod.Backend.init(io);
     defer backend.deinit();
-    if (!backend.submitRepoStatus("git", repo, 1)) return error.UnknownCommand;
+    if (!backend.submitRepoStatus("git", repo, 1, null)) return error.UnknownCommand;
     var rounds: usize = 0;
     while (rounds < 6000) : (rounds += 1) {
         if (backend.takeRepoStatusResult()) |taken| {

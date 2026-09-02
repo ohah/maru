@@ -4197,34 +4197,41 @@ pub fn pumpRepoStatus(self: *AppSession) void {
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
     for (repos.entries) |entry| {
         if (std.mem.eql(u8, entry.path, current)) continue; // 활성은 목록 읽기가 채운다
-        // ⚠️ **원격 저장소의 워크트리 행에 로컬 git 을 돌리지 않는다**(적대적 검증 2026-09-02).
-        //
-        // `submitRepoStatus` 는 `locate` 로 **로컬** git 을 찾아 그 경로에 돌린다 — 원격 인지가 한 줄도
-        // 없다. 활성 pane 이 원격이면 이 목록에는 그 저장소의 워크트리들이 함께 실리고 그 경로는 저쪽
-        // 기계의 것이다. 그대로 돌리면 **우연히 같은 경로가 이쪽에 있을 때 남의 저장소의 브랜치·개수가
-        // 원격 그룹 밑에 뜬다**(실측: 목격자 래퍼에 한 줄도 안 남았는데 도크는 워크트리의 브랜치와
-        // 배지를 그렸다 — 로컬 git 이 읽은 값이었다). 판정은 쓰기와 **같은 함수**를 쓴다.
-        //
-        // **「읽는 중…」으로 두지 않는다.** 아무도 안 읽으므로 그 문구는 영영 안 바뀌고, 그러면 화면이
-        // 「곧 온다」고 거짓말한다 — 남의 기계 값을 지우면서 다른 거짓말을 들이는 셈이다.
-        if (self.git_repo_dest != null and git_ops.sameRepoFamily(self, entry.path, current)) {
-            if (repoStatusFor(self, entry.path) == null) recordRepoStatusFailure(self, entry.path, now);
-            continue;
-        }
         if (!shouldReadRepoStatus(repoStatusFor(self, entry.path), now)) continue;
-        submitRepoStatus(self, entry.path);
+        // ⚠️ **그 행이 어느 기계의 것인지 묻고 간다**(RS5). 예전에는 안 묻고 로컬 git 을 돌려서, 원격
+        // 저장소의 워크트리 행이 **저쪽 기계의 경로를 이쪽 git 으로** 읽혔다(적대적 검증 2026-09-02:
+        // 목격자 래퍼에 한 줄도 안 남았는데 도크는 그 워크트리의 브랜치와 배지를 그렸다).
+        // 판정은 쓰기와 **같은 함수**(`writeTargetFor`)를 쓴다 — 두 벌이면 한쪽만 고쳐진다.
+        var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const remote: ?maru.session.git_command.Remote = switch (git_ops.writeTargetFor(self, entry.path, &ctl_buf)) {
+            .local => null,
+            .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
+            // 원격인데 소켓이 없다 — **보내지 않는다.** 로컬로 떨어뜨리면 원격 경로를 로컬 git 이 받는다.
+            // 「읽는 중…」으로 두지도 않는다: 아무도 안 읽으므로 그 문구는 영영 안 바뀐다.
+            .unavailable => {
+                if (repoStatusFor(self, entry.path) == null) recordRepoStatusFailure(self, entry.path, now);
+                continue;
+            },
+        };
+        submitRepoStatus(self, entry.path, remote);
         return; // **하나만** 건다 — 나머지는 다음 tick에
     }
 }
 
-fn submitRepoStatus(self: *AppSession, repo: []const u8) void {
+fn submitRepoStatus(self: *AppSession, repo: []const u8, remote: ?maru.session.git_command.Remote) void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    // **원격이면 로컬 git 을 안 찾는다**(목록 읽기·쓰기와 같은 규율). `buildRemote` 가 `argv[0]` 을
+    // 버리므로 로컬 경로는 어차피 안 실리고, 여기서 `locate` 를 요구하면 로컬에 git 이 없는 사용자가
+    // 원격 머리 줄을 통째로 못 읽는다.
+    const git_exe = if (remote != null)
+        maru.session.git_command.remote_git_exe
+    else
+        git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_repo_status_seq += 1;
-    if (!self.git_backend.?.submitRepoStatus(git_exe, repo, self.scm_repo_status_seq)) return;
+    if (!self.git_backend.?.submitRepoStatus(git_exe, repo, self.scm_repo_status_seq, remote)) return;
     self.scm_repo_status_inflight = self.scm_repo_status_seq;
 }
 

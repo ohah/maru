@@ -857,7 +857,13 @@ pub const Backend = struct {
 
     /// 머리 줄 하나를 채우는 읽기를 건다. 이미 하나가 돌고 있거나 결과가 안 걷혔으면 **거절한다** —
     /// 목록이 여덟이어도 프로세스는 언제나 하나다.
-    pub fn submitRepoStatus(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+    pub fn submitRepoStatus(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        request_id: u64,
+        remote: ?git_command.Remote,
+    ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.repo_status_inflight > 0 or state.repo_status_result != null) {
@@ -872,6 +878,12 @@ pub const Backend = struct {
         job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseRepoStatusJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseRepoStatusJob(job);
+        // **원격 두 축은 쌍으로 든다** — 하나만 들면 `remoteTarget()` 이 로컬로 읽어 원격 경로를
+        // 이쪽 git 에 준다(목록 읽기 job 이 같은 규율을 진다).
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseRepoStatusJob(job);
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseRepoStatusJob(job);
+        }
         const thread = std.Thread.spawn(.{}, repoStatusWorker, .{job}) catch return self.releaseRepoStatusJob(job);
         thread.detach();
         return true;
@@ -999,6 +1011,10 @@ pub const Backend = struct {
         const state = job.state;
         state.allocator.free(job.git_exe);
         state.allocator.free(job.repo);
+        // **원격 축도 푼다**(RS5). 쌍 중 뒤엣것 dupe 가 실패하면 앞엣것이 이미 잡혀 있다 — 안 풀면
+        // 그 자리가 샌다(CI 의 DebugAllocator 가 같은 모양을 이미 한 번 잡았다).
+        if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
+        if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
         state.allocator.destroy(job);
         return self.abandonRepoStatus();
     }
@@ -1153,12 +1169,16 @@ fn repoStatusWorker(job: *Job) void {
     const state = job.state;
     var result: RepoStatusResult = .{ .request_id = job.request_id };
     result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
-    if (run(state.allocator, .status, job.git_exe, job.repo)) |out| {
+    // **원격 인지 러너를 쓴다**(RS5). 예전에는 `run` 이라 로컬 git 이 그 경로에 돌았고, 원격 저장소의
+    // 워크트리 행에서 **저쪽 기계의 경로를 이쪽 git 이 읽었다**(적대적 검증 2026-09-02).
+    if (runOn(state.allocator, job.remoteTarget(), .status, job.git_exe, job.repo, null)) |out| {
         result.text = out.bytes;
         result.ok = true;
     } else |_| {}
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
+    if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
+    if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
     state.allocator.destroy(job);
 
     state.mutex.lockUncancelable(state.io);

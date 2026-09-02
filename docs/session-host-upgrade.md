@@ -2207,6 +2207,31 @@ bytes publication 0이며 foreign replacement를 삭제하거나 수정하지 �
 evidence 행은 actual filesystem에서 exact bytes/identity와 pathname replacement·allocation failure를 검증한다. manifest semantic
 authoring과 GitHub upload는 후속 gate다.
 
+### 11.30 candidate release manifest authoring 권위
+
+candidate release manifest는 workflow shell이 repository/release/source/build, compatibility, signing, asset metadata 또는
+evidence 결과를 scalar로 조립하지 않는다. `release_adapter_candidate_manifest.zig`의 단일 owner가 trusted `Context`,
+final-address `CandidateEvidenceIdentity`, `CandidateFiles`, `CandidateProduct`, `SourceTreeAuthority`,
+`CandidateCompatibility`, 게시된 `PublishedEvidence`와 그 final pathname을 함께 소비한다. role B만 final-address
+`PredecessorEvidenceIdentity`와 그 backing authenticated manifest/file/assets authority를 추가로 요구한다. role/profile은
+held evidence bytes의 canonical parser 결과에서만 정하고 caller가 별도로 고르지 않는다.
+
+owner는 evidence를 `PinnedReleaseFile.readHeldAlloc(max_evidence_bytes)`로 읽어 canonical parse한 뒤 candidate identity와
+role A common 또는 role B common+predecessor+designated requirement를 exact bind한다. manifest repository/release/source/build,
+candidate DMG·frozen executable SHA, Apple signing과 compatibility는 각 typed authority에서만 유도한다. 세 asset의 name은
+각 held pathname의 basename, size/SHA는 held file observation에서 유도하고 evidence의 `test_uuid`, exact `passed`,
+summary name/SHA도 parsed evidence와 held observation에 함께 결속한다. manifest filename은 exact
+`Maru-<version>-session-host-release.json`이며 absolute absent pathname만 허용한다.
+
+최초 authority graph를 fixed snapshot으로 봉인하고 canonical manifest encode와 self-parse 뒤 output open 직전에 candidate,
+product, source, compatibility, evidence held inode와 role B predecessor graph를 모두 다시 검증한다. 최초 snapshot과 하나라도
+다르면 publication 0이다. result/authority/path alias, copied·pre-owned result, malformed·교환 evidence, role/predecessor 불일치,
+기존 output과 allocation failure도 publication 0이며 성공은 held manifest inode authority 하나만 반환한다. 이 gate는 aggregate
+artifact attestation, draft asset attach, pre-publish validation/publish 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+manifest가 evidence와 같은 parent에 게시되어도 exact evidence leaf의 held/reopened inode·mode·size·digest 결속은 계속 유효해야 한다.
+일반 release-file revalidation은 held parent의 directory identity와 mode를 검증하되 sibling 생성에 따라 변하는 mtime/ctime을 input
+무효화 권위로 쓰지 않는다. executable 실행 직전의 별도 `PathMutationSeal`만 directory mutation을 봉인한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

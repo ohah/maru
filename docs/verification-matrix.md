@@ -982,6 +982,16 @@ bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF�
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual
 filesystem의 exact read와 replacement 보존 및 allocation failure를 검증한다. manifest semantic authoring은 별도 gate다.
 
+U5 candidate manifest authoring은 trusted candidate/product/source/compatibility/evidence authority와 role B predecessor authority
+graph만으로 canonical manifest를 유도한다. held evidence bytes가 정한 role/profile을 candidate identity에 exact bind하고 세 asset의
+basename·size·SHA, Apple signing, compatibility, test UUID와 result를 caller scalar 없이 채운다. encode+self-parse 뒤 output open
+직전에 전체 graph와 held evidence inode를 최초 fixed snapshot과 다시 비교하며 copied/pre-owned/alias owner, malformed·교환
+evidence, authority drift, 기존 output과 allocation fail-index에서는 publication 0이다. focused
+`test-session-host-release-adapter-candidate-manifest`가 role A/B actual filesystem publication과 실패 경계를 Debug·ReleaseFast에서
+검증한다. 같은 parent의 manifest sibling 게시 뒤에도 evidence의 exact held/reopened leaf authority가 유지되며, sibling
+mtime/ctime은 일반 file identity가 아니다. 실행 pathname mutation 봉인은 executable 전용 seal이 계속 소유한다. aggregate
+attestation과 draft attach/publish 및 frozen signed 제품 실행은 별도 gate다.
+
 U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
 candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
 fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact

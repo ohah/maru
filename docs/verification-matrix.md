@@ -977,6 +977,14 @@ aggregate core에 전달한다. canonical bytes를 expected identity에 다시 b
 identity의 GitHub provenance, signed leaf 생산, artifact attestation이나 release workflow 배선을 완료로 바꾸지 않는다.
 special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`가 소유하며 이 조립 gate의 직접 증거가 아니다.
 
+U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
+candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
+fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact
+snapshot과 비교한다. encode/parse allocator callback, copied/pre-owned/alias owner, identity/product/source/path drift,
+malformed·교환 leaf, 기존 output과 allocation failure에서는 publication 0이며 성공은 held output inode authority 하나다.
+`test-session-host-release-adapter-candidate-baseline-evidence`가 이를 actual macOS filesystem의 Debug·ReleaseFast gate로 검증한다.
+signed leaf 실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
+
 U5 Release DMG pathname/mount authority는 **구현**됐다. 종료 gate
 `test-session-host-release-adapter-dmg-authority`는 `max_dmg_bytes` 이하 expected size/SHA, exclusive 0700 work-directory,
 no-follow source→0600 private DMG bounded streaming copy와 source/copy identity·SHA 결속, read-only fixed mount, exact `Maru.app/Contents/Info.plist` 및

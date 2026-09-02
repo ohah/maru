@@ -1861,6 +1861,25 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   publication 0을 Debug·ReleaseFast 및
   macOS actual filesystem으로 검증한다. special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`의 독립
   계약이며 조립 gate가 중복해 완료를 주장하지 않는다. 이 gate도 caller identity의 GitHub provenance나 signed leaf 생산을 증명하지 않는다.
+
+  baseline-A evidence의 trusted workflow 조립 owner는
+  `src/platform/macos/session_host/release_adapter_candidate_baseline_evidence.zig`의 단일 진입점이다. 입력은 trusted
+  `Context`, final-address `CandidateEvidenceIdentity`와 그 identity가 의존하는 exact `CandidateFiles`·`CandidateProduct`·
+  `SourceTreeAuthority`, 동일 candidate pathname, 두 baseline gate leaf pathname과 absent output pathname뿐이다. caller는
+  profile, `evidence.Common`, release/source/build/candidate digest, signing requirement 또는 gate 성공 bool을 별도 scalar로
+  제출하지 않는다. owner는 첫 revalidation view를 bounded fixed storage에 복사해 aggregate 입력을 봉인하고 그 storage와 모든
+  authority/path/result alias를 filesystem 접근 전에 거부한다.
+
+  `release_evidence_files`는 두 leaf를 읽고 canonical aggregate를 다시 bind한 뒤 output parent나 leaf를 열기 직전에 owner의
+  publication validator를 exact once 호출한다. validator는 원래 candidate/product/source authority를 다시 revalidate하고 최초
+  fixed snapshot과 bytewise exact 일치해야만 no-allocation publication suffix를 연다. 따라서 aggregate encode/parse 중 allocator
+  callback이 identity나 backing authority를 바꾸면 output publication은 0이다. 성공은 pathname 재관측이 아니라 held output fd와
+  parent capability, size/SHA를 가진 `PublishedEvidence`로 반환한다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-evidence`는 exact derivation/publication, caller common/profile 입력 0,
+  publication 직전 identity·product·source drift, copied/pre-owned/alias owner, malformed·교환 leaf, 기존 output과 allocation
+  fail-index를 Debug·ReleaseFast actual filesystem에서 검증한다. 이 gate는 signed baseline leaf 실행, aggregate artifact
+  attestation, manifest authoring·draft attach/publish 또는 frozen U5 제품 E2E를 완료하지 않는다.
+
   manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이 aggregate를 생성하고 artifact
   attestation을 발급한다. attestation 검증은 repository·workflow·source commit·run identity와 subject digest를 모두 policy
   input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.

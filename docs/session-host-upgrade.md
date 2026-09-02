@@ -2257,6 +2257,26 @@ copied/pre-owned result, result/output buffer/authority/path alias, evidence-man
 첫 attestation이 원격에 존재해도 둘째 실패를 성공으로 합성하거나 기존 receipt를 재사용하지 않는다. 이 gate는 attestation 발급
 workflow 명령, draft asset attach, pre-publish redownload/validator, publish 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.32 단일 subject artifact attestation 발급 action
+
+release workflow는 여러 artifact를 한 `actions/attest` 호출에 넘기지 않는다. 공식 action의 multi-subject 모드는 한 statement에
+여러 subject를 넣지만 Maru verifier는 statement 하나당 subject 정확히 하나를 요구한다. 따라서 candidate DMG, frozen executable,
+aggregate evidence와 manifest는 `.github/actions/session-host-release-attest/action.yml`을 각각 한 번씩 호출한다. local composite action은
+`actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6`을 immutable SHA로 고정하며 caller가 action ref, predicate 또는 subject digest를
+선택하게 하지 않는다. workflow job의 `id-token: write`, `attestations: write`, `artifact-metadata: write` 권한과 protected tag/release
+environment 제한은 최종 live wiring gate가 함께 검증한다.
+
+입력 subject는 glob이나 목록이 아닌 canonical absolute regular-file pathname 하나와 exact basename 하나다. action은 checkout 이후
+PATH 도구 대신 runner platform의 절대경로 시스템 도구를 쓰고 Darwin/BSD와 Linux/GNU의 stat·SHA-256 형식을 명시적으로 분기한다. 양쪽은
+symlink·hardlink·glob/CSV/control character·basename 불일치를 거부하고, action 호출 전에
+device/inode/link-count/size와 SHA-256을 step output으로 봉인한다. 공식 action에는 caller pathname을 다시 열게 하지 않고 내부에서
+봉인한 `sha256:<digest>`와 exact subject name 하나만 provenance 기본 모드로 넘긴다. 호출 뒤 같은 pathname의
+device/inode/link-count/size/SHA가 모두 같아야 composite output을 게시한다.
+pre/post mismatch, child failure 또는 빈/control-character output에서는 성공 output을 만들지 않는다.
+발급 output 자체는 release 권위가 아니며 candidate 또는 authored attestation typed verifier가 exact workflow/run/source/subject를
+다시 확인해야 다음 단계로 갈 수 있다. 이 component만으로 live release workflow 순서, draft attach·redownload·publish 또는 U5 E2E가
+완료됐다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

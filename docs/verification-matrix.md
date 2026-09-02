@@ -992,6 +992,12 @@ evidence, authority drift, 기존 output과 allocation fail-index에서는 publi
 mtime/ctime은 일반 file identity가 아니다. 실행 pathname mutation 봉인은 executable 전용 seal이 계속 소유한다. aggregate
 attestation과 draft attach/publish 및 frozen signed 제품 실행은 별도 gate다.
 
+U5 artifact attestation 발급 action은 한 invocation이 canonical absolute regular-file subject 정확히 하나만 소유한다.
+`test-session-host-release-attestation-action`은 local composite action의 pre-pin→immutable `actions/attest` exact once→post-pin 순서,
+고정 provenance mode, device/inode/link-count/size/SHA 불변과 glob·CSV 목록·symlink·hardlink·빈/control-character output 거부를 정적으로 고정한다. candidate DMG/frozen
+executable과 authored evidence/manifest는 최종 release workflow가 이 action을 네 번 따로 호출한다. 이 component는 workflow
+permissions, protected environment, 실제 attestation 발급이나 draft attach/publish를 완료했다는 증거가 아니다.
+
 U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
 candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
 fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact

@@ -1142,6 +1142,20 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   copied owner와 allocation unwind를 Debug·ReleaseFast에서 검증한다. 이 gate는 evidence leaf 실행·aggregate authoring,
   manifest authoring, asset attach/publish 또는 frozen U5 E2E를 완료했다고 주장하지 않는다.
 
+  manifest에 기록할 candidate compatibility는 caller 상수나 아직 존재하지 않는 manifest에서 읽지 않는다.
+  `release_adapter_candidate_compatibility.zig`의 final-address move-only `CandidateCompatibility`가 exact frozen candidate를
+  `__session-host --release-compatibility`로 한 번 실행해 유도한다. 입력은 `CandidateFiles`, `CandidateProduct`, 동일 candidate
+  pathname과 release phase의 shared `Deadline`, caller-owned bounded stdout storage뿐이며 caller가 compatibility scalar나 성공 bool을
+  제출하지 않는다. probe는 frozen executable의 held parent descriptor와 relative basename을 사용하고, 실행 전후 candidate product,
+  held executable inode와 parent mutation seal을 재검증한다.
+
+  canonical compatibility parser는 current-manifest 검증과 candidate authoring이 공유하는 단일 모듈이 소유한다. exact field set·순서,
+  양의 schema/ABI 값과 reader min≤max만 허용한다. 성공 owner는 frozen SHA, release/source/build identity와 compatibility를 fixed storage에
+  복사하며 후속 manifest writer 직전 같은 candidate graph를 다시 검증한다. copied/pre-owned/alias owner, foreign capture, timeout,
+  malformed/noncanonical output, executable·parent·candidate drift에서는 publication 0이다. focused gate
+  `test-session-host-release-adapter-candidate-compatibility`가 Debug·ReleaseFast에서 이를 검증한다. 이 gate는 manifest authoring,
+  draft asset attach/publish 또는 signed frozen U5 제품 E2E를 완료하지 않는다.
+
   evidence writer에 넘길 current candidate 공통 identity는
   `release_adapter_candidate_evidence_identity.zig`의 final-address move-only `CandidateEvidenceIdentity`가 단독 소유한다.
   입력은 trusted `Context`, caller가 한 번 생성한 canonical UUID v4 correlation, final-address `CandidateFiles`와

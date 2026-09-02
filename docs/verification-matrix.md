@@ -1012,6 +1012,15 @@ deadline과 child 전후 전체 graph revalidation을 Debug·ReleaseFast에서 �
 timeout, copied/pre-owned/alias owner와 authority drift는 validation publication 0이고 기존 draft/attachment state를 변경하지 않아야 한다.
 이 gate는 draft publish, post-publish release attestation, live workflow 또는 frozen signed U5 제품 E2E 증거가 아니다.
 
+U5 exact draft publication은 ready attachment/redownload receipt와 전체 typed graph가 같은 exact release/asset set을 가리킨 뒤에만
+`DraftAuthority.id`에 `draft=false`, `prerelease=false` 단일 PATCH를 허용한다. `test-session-host-release-adapter-draft-publish`는
+closed argv/clean environment/shared deadline, published immutable response의 exact ID/tag/source/lifecycle과 네 asset
+ID/name/size/digest/content-type 집합, copied/pre-owned result, duplicate asset authority와 authority drift를 Debug·ReleaseFast에서 검증한다.
+mutation 전 두 authority snapshot allocation failure는 mutation 0과 empty를, response 뒤 snapshot allocation failure는 exact release ID가
+있는 cleanup-required를 보존해야 한다. remote mutation 시작 뒤 timeout·child/parse/allocation 실패는 자동 retry 가능한 empty로 돌아가지
+않고 remote-state-unknown 또는 cleanup-required audit state를 보존해야 한다. 이 gate는 post-publish release attestation, live workflow
+또는 frozen signed U5 제품 E2E 증거가 아니다.
+
 U5 baseline-A candidate evidence 조립은 `release_adapter_candidate_baseline_evidence.zig`가 trusted context와 final-address
 candidate evidence identity의 backing file/product/source authority에서만 canonical common identity를 유도한다. 최초 view를
 fixed snapshot으로 봉인하고 두 leaf의 canonical aggregate가 완성된 뒤 output open 직전에 같은 authority를 다시 검증해 exact

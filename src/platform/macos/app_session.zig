@@ -3008,6 +3008,31 @@ pub fn appKeepAlivePolicyValue() bool {
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
 pub var host_connect_failed: bool = false;
 
+/// **다시 시도해도 되는 시각**(`awakeMs` 기준). `host_connect_failed` 는 「지금 원격을 고르지 않는다」이지
+/// 「영영 포기한다」가 아니어야 한다 — 그 둘을 가르는 것이 이 값이다.
+///
+/// 예전에는 가르지 않았다. 실패가 한 번 나면 `ensureRemoteBackend` 가 맨 앞에서 반환해 **그 앱 세션이
+/// 재시작 전까지 원격으로 못 돌아왔다**. host 가 멀쩡히 떠 있어도 그랬다. opt-in 이던 동안에는 그것을
+/// 감수한 사람만 만났지만 기본값이 켜지면 **모든 사용자가 앱을 켤 때마다** 이 경로를 탄다 — 기동이 한
+/// 박자 늦은 것만으로 세션이 통째로 강등된다.
+///
+/// ⚠️ **무조건 재시도는 안 된다.** 조기 반환이 애초에 있던 이유가 「창마다 3 초 백오프」를 피하는 것이라
+/// (§6 L291), 매번 다시 붙으려 들면 host 가 망가진 사용자는 **창을 열 때마다 몇 초씩 멈춘다**. 그래서
+/// 시각으로 가둔다 — 그 사이의 창은 예전처럼 즉시 in-process 로 열린다.
+/// `retry_never` 로 시작한다 — **재시도는 「연결 실패」에만 붙는다.** `host_connect_failed` 를 세우는 자리가
+/// 둘인데 뜻이 다르다: 하나는 실제 연결 실패(`recordHostConnectFailure`)이고, 다른 하나는 attach-only 복원
+/// pool 이 「나는 새 셸을 spawn 할 주인이 아니다」를 표시하는 **역할 표식**이다. 후자에 재시도를 붙이면
+/// 복원 전용 세션이 창을 열 때마다 승격을 시도해 **몇 초씩 멈춘다** — 고치려던 것과 같은 증상이다.
+/// (적대적 검증에서 잡았다: 0 으로 시작하면 그 표식이 「지금 당장 재시도」로 읽힌다.)
+var host_connect_retry_at_ms: u64 = retry_never;
+
+/// 「다시 시도하지 않는다」. 시각 비교 하나로 «실패라서 기다린다» 와 «애초에 재시도 대상이 아니다» 를 가른다.
+const retry_never: u64 = std.math.maxInt(u64);
+
+/// 실패 뒤 다시 붙어 보기까지 기다리는 시간. 사용자가 「앱을 껐다 켜야 하나」를 고민하기 **전에** 한 번은
+/// 다시 붙어 보되, 창을 연달아 여는 동안에는 안 걸리는 값이다.
+const host_connect_retry_after_ms: u64 = 30_000;
+
 // test에서 「폰이 세션을 좁혀 두었다」를 주입한다 — 원격 backend 없이 **상태줄이 그 항목을 실제로
 // 조립하는지** 재려면 그 상태가 필요하다. `test_config_text` 와 같은 관례다: **비공개**이고,
 // 소비처가 `builtin.is_test` 로 가드해 제품 경로는 이 값을 아예 안 읽는다. 세운 test는 defer로
@@ -7178,10 +7203,17 @@ pub const AppSession = struct {
             // 같은 pool에 current adapter를 게시하고 기존 backend를 승격해야 N-1 runtime과 신규 Term을 함께 보존한다.
             if (app_remote_backend != null and
                 (app_remote_host_pool == null or app_remote_host_pool.?.spawnHostId() != null)) return;
-            // §6 L291: 이미 실패로 판명됐으면 재시도(각 3s backoff) 없이 바로 notice + in-process 폴백.
+            // §6 L291: 이미 실패로 판명됐으면 바로 notice + in-process 폴백. **다만 영영은 아니다** —
+            // `host_connect_retry_at_ms` 가 지나면 한 번 더 붙어 본다(위 그 변수의 이유). 그 전에는
+            // 예전과 똑같이 즉시 반환해 창 여는 길을 안 막는다.
             if (host_connect_failed) {
-                self.host_connect_notice_pending = true;
-                return;
+                if (self.awakeMs() < host_connect_retry_at_ms) {
+                    self.host_connect_notice_pending = true;
+                    return;
+                }
+                // 다시 붙어 본다. **여기서 래치를 미리 풀지 않는다** — 이 시도도 실패하면
+                // `markHostConnectFailed*` 가 다시 세우고 다음 시각을 민다. 미리 풀면 실패한 순간과
+                // 다시 세우는 순간 사이에 `backendForNew` 가 원격을 골라 **없는 backend 를 쓴다**.
             }
             const alloc = std.heap.smp_allocator; // 앱 전역 자원(routing/live_registry와 같은 allocator).
             var arena = std.heap.ArenaAllocator.init(alloc);
@@ -7281,7 +7313,35 @@ pub const AppSession = struct {
             // 첫 spawn의 PTY reader publication 전에 같은 값이 들어가야 한다.
             app_remote_backend.?.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
             self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
+            // **붙었으면 래치를 푼다.** 안 풀면 `backendForNew` 가 계속 in-process 를 고르고, 그 앱 세션은
+            // **재시작 전까지 원격으로 못 돌아온다** — host 가 멀쩡히 떠 있어도 그렇다.
+            //
+            // opt-in 이던 동안에는 그것을 감수한 사람만 만났지만, 기본값이 켜지면 **모든 사용자가 앱을 켤
+            // 때마다** 이 경로를 탄다. 기동이 한 박자 늦거나 일시 오류가 한 번만 나도 그 세션이 통째로
+            // 강등된다. 실제로 test 하나가 그것을 재현했다 — host 를 살려 두고도 `createTerm` 이
+            // host-backed 가 아니었다(R3 #3).
+            //
+            // ⚠️ **notice 는 안 지운다.** 「조용히 폴백하지 않는다」(§6 L291)가 이 축의 계약이고, 그 사이에
+            // 열린 Term 은 실제로 in-process 다 — 사용자가 그 사실을 알아야 한다. 푸는 것은 **상태**이지
+            // **사실**이 아니다.
+            clearHostConnectFailure();
         }
+    }
+
+    /// host 에 다시 붙었다. **`host_connect_failed` 하나만** 되돌린다.
+    ///
+    /// ⚠️ **사유(`stage`·`reason`·`error`)는 안 지운다.** 계류 중인 notice 는 렌더 **시점에**
+    /// `hostConnectFailureDetail(…, host_connect_failure_stage, …_reason, …_error)` 로 문구를 만든다 —
+    /// 여기서 null 로 비우면 그 notice 가 **사유 없이** 뜬다. 「무엇이 막혔는지」가 사라지는 것이고,
+    /// 그것이 이 notice 의 존재 이유다(§6 L291 — 조용히 폴백하지 않는다).
+    ///
+    /// 다음 실패가 세 필드를 통째로 덮으므로 남겨 두어도 낡지 않는다. **푸는 것은 상태이지 사실이 아니다.**
+    /// (적대적 검증 2회차에서 잡았다 — 처음에는 사유까지 지웠고, 주석은 「사실은 안 지운다」라고
+    /// 적어 놓고 코드가 그 반대였다.)
+    ///
+    /// 되돌릴 곳이 여기 하나여야 「어디서 풀리는가」가 갈리지 않는다.
+    fn clearHostConnectFailure() void {
+        host_connect_failed = false;
     }
 
     /// host attach 실패를 "영구 없음"과 "일시 실패"로 가른다. 영구로 올리는 것은 **그 handle이 다시는 붙을 수 없다는
@@ -7834,6 +7894,9 @@ pub const AppSession = struct {
         error_name: ?[]const u8,
     ) void {
         host_connect_failed = true;
+        // **다음에 다시 붙어 볼 시각을 민다.** 이것이 없으면 창을 열 때마다 시각이 이미 지나 있어
+        // 매번 몇 초씩 멈춘다 — 조기 반환이 피하려던 그 비용이 그대로 돌아온다.
+        host_connect_retry_at_ms = self.awakeMs() +| host_connect_retry_after_ms;
         host_connect_failure_stage = stage;
         host_connect_failure_reason = reason;
         host_connect_failure_error = error_name;

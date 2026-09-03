@@ -12,6 +12,21 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
 }
 
+/// 줄 주석(`//`)을 벗긴다. **부정 단언은 반드시 이것을 지나야 한다** — 그러지 않으면 「그 함정을
+/// 설명하는 주석」이 걸린다. 이 판정자가 실제로 그렇게 한 번 빨갛게 났다(`submitGitRead` 언급).
+/// 세야 하는 것은 「언급하는가」가 아니라 **「쓰는가」**다.
+fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const keep = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
+        try out.appendSlice(allocator, keep);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 함수 본문을 자른다. **`max` 를 넘으면 실패한다** — 경계가 안 맞으면 슬라이스가 파일 끝까지 달아나고
 /// 그러면 needle 이 아무 데서나 걸려 판정자가 통째로 초록이 된다.
 fn bodyOf(src: []const u8, head: []const u8, close: []const u8, max: usize) ![]const u8 {
@@ -87,7 +102,20 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     try std.testing.expect(std.mem.indexOf(u8, pump, "remoteControlSocketFor(self, dest") != null);
     // ⚠️ **트리거만 건다.** 여기서 읽기를 직접 조립하면 파싱 계약이 두 벌이 된다(계약 §2).
     try std.testing.expect(std.mem.indexOf(u8, pump, "refreshGitStatus(self)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pump, "submitGitRead") == null);
+    // 부정 단언은 **주석을 벗기고** 센다 — 안 그러면 그 함정을 설명하는 주석이 걸린다(실제로 걸렸다).
+    const pump_code = try stripComments(allocator, pump);
+    defer allocator.free(pump_code);
+    try std.testing.expect(std.mem.indexOf(u8, pump_code, "submitGitRead") == null);
     // 즉시 재시도하지 않는다 — 소켓이 죽었으면 초당 수십 개의 ssh 자식이 된다.
     try std.testing.expect(std.mem.indexOf(u8, pump, "retry_at_ns") != null);
+    // ⚠️ **영구 실패는 포기한다**(RW5). 「한도를 넘었다」에 계속 재시도하면 도크를 열어 둔 내내
+    // 5 초마다 ssh 자식이 뜬다 — 실측 30 초에 7 번. 종료 코드를 **보고** 정해야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "stopReporting()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "isPermanent(why)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, ".gave_up") != null);
+    // ⚠️ **감시 루트는 저장소 «루트» 다.** `git_repo` 는 원격에서 **cwd** 라(그것으로 충분한 것은
+    // `git -C` 가 상위를 찾기 때문), 그걸 감시하면 하위 디렉터리에 서 있을 때 바깥 변경을 놓친다 —
+    // 실측에서 저장소 루트의 변경이 **0 개**의 읽기를 불렀다(적대적 검증 1 회차).
+    try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse return") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump_code, "self.git_repo orelse return") == null);
 }

@@ -366,15 +366,22 @@ pub fn spawnRemoteWatch(
     return .{ .pid = pid, .out_fd = out_pipe[0], .in_fd = in_pipe[1] };
 }
 
-/// 감시자를 끝낸다. **stdin 을 먼저 닫는다** — 그것이 감시자가 기다리는 정상 종료 신호다(EOF).
-/// `SIGTERM` 은 그래도 안 끝날 때의 보루다: 조용한 자식이라 EPIPE 로는 안 죽는다.
-pub fn stopRemoteWatch(stream: WatchStream) void {
+/// 감시자를 끝내고 **왜 끝났는지 돌려준다**(RW5). stdin 을 먼저 닫는다 — 그것이 감시자가 기다리는
+/// 정상 종료 신호다(EOF). `SIGTERM` 은 그래도 안 끝날 때의 보루다: 조용한 자식이라 EPIPE 로는 안 죽는다.
+///
+/// ⚠️ **종료 코드를 버리지 않는다.** 감시자는 「한도를 넘었다」(`exit_watch_limit`)와 「못 돈다」
+/// (`exit_unsupported`)를 코드로 말하는데, 그것을 안 보면 호출자는 **영원히 다시 띄운다** — 실측:
+/// 즉시 실패하는 감시자에 30 초 동안 **7 번** 기동했다(백오프 주기 5 초 × 무한).
+///
+/// 반환은 `reapPid` 규약을 따른다: 정상 종료면 그 코드, 신호로 죽었으면 `-1`. 우리가 `SIGTERM` 을
+/// 보낸 뒤라 **정상 정리에서는 보통 `-1`** 이다 — 호출자는 그 값을 「이유 없음」으로 읽어야 한다.
+pub fn stopRemoteWatch(stream: WatchStream) c_int {
     if (stream.in_fd >= 0) _ = std.c.close(stream.in_fd); // ① EOF — 스스로 끝내게 한다
     if (stream.out_fd >= 0) _ = std.c.close(stream.out_fd);
     // ⚠️ `kill(0, …)` 은 프로세스 그룹 전체다 — pid 를 반드시 검사한다(에이전트 스트림과 같은 이유).
-    if (stream.pid <= 0) return;
+    if (stream.pid <= 0) return -1;
     _ = std.c.kill(stream.pid, std.c.SIG.TERM); // ② 보루
-    _ = reapPid(stream.pid);
+    return reapPid(stream.pid);
 }
 
 /// 스트리머를 끝낸다. **fd 를 먼저 닫는다** — 자식은 stdout 이 끊기면 다음 write 에서 EPIPE 로 죽는다.

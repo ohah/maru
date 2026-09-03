@@ -32,6 +32,20 @@ pub const retry_ns: i128 = 5 * std.time.ns_per_s;
 /// 심은 것이 아닐 수도 있다**(같은 경로에 다른 파일이 있는 경우) — 그때 무한히 모으지 않는다.
 pub const max_pending: usize = 4 * 1024;
 
+/// 감시자가 「이 원격에서는 못 한다」고 말하는 종료 코드. `tools/remote-watch/main.zig` 의 상수와
+/// 같아야 한다 — 경계 test 가 센다.
+pub const exit_watch_limit: c_int = 2;
+pub const exit_unsupported: c_int = 3;
+
+/// 그 종료 코드가 **다시 시도해도 소용없는** 것인가(RW5).
+///
+/// 한도 초과·미지원은 저장소나 원격이 바뀌기 전에는 결과가 같다. 그런데도 다시 띄우면 사용자가 도크를
+/// 열어 둔 내내 **5 초마다 ssh 자식**이 뜬다 — 실측으로 30 초에 7 번이었다. 그건 남의 서버에서 도는
+/// 비용이라 「조용히 계속」이 가장 나쁜 선택이다.
+pub fn isPermanent(exit_code: c_int) bool {
+    return exit_code == exit_watch_limit or exit_code == exit_unsupported;
+}
+
 pub const Phase = enum {
     /// 아직 아무것도 안 했다. 원격 SCM 이 서면 여기서 시작한다.
     idle,
@@ -39,6 +53,9 @@ pub const Phase = enum {
     watching,
     /// 못 띄웠다. `retry_at_ns` 뒤에 다시 본다.
     backoff,
+    /// **다시 안 띄운다**(RW5). 감시자가 「이 원격에서는 못 한다」고 말했다 — 대상이 바뀌기 전에는
+    /// 결과가 같으므로 재시도가 순수한 낭비다. 화면은 RW3 이전 동작(포커스·새로고침)으로 돌아간다.
+    gave_up,
 };
 
 /// 채널 하나. **`dest` 는 소유하지 않는다** — 세션의 `git_repo_dest` 가 그 값의 주인이고, 여기서
@@ -60,8 +77,17 @@ pub const Channel = struct {
     }
 
     /// 채널을 끝낸다. **멱등이다** — 호스트 전환과 세션 종료가 같은 자리를 지난다.
+    /// 채널을 끝내고 **감시자가 남긴 이유**를 돌려준다(정상 정리면 `-1`).
+    pub fn stopReporting(self: *Channel) c_int {
+        const code: c_int = if (self.started) ssh_upload.stopRemoteWatch(self.stream) else -1;
+        self.started = false;
+        self.stream = .{ .pid = 0, .out_fd = -1, .in_fd = -1 };
+        self.pending.clearRetainingCapacity();
+        return code;
+    }
+
     pub fn stop(self: *Channel) void {
-        if (self.started) ssh_upload.stopRemoteWatch(self.stream);
+        if (self.started) _ = ssh_upload.stopRemoteWatch(self.stream);
         self.started = false;
         self.stream = .{ .pid = 0, .out_fd = -1, .in_fd = -1 };
         self.phase = .idle;
@@ -125,6 +151,17 @@ test "상한을 넘는 부분 줄은 버린다 — 무한히 모으지 않는다
     try buf.appendNTimes(a, 'x', max_pending + 1);
     try testing.expectEqual(@as(u32, 0), takeChanges(&buf, a));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "«다시 시도해도 소용없는» 종료만 포기로 읽는다" {
+    // 한도·미지원은 대상이 바뀌기 전엔 결과가 같다 — 다시 띄우면 5 초마다 ssh 자식이 영원히 뜬다.
+    try testing.expect(isPermanent(exit_watch_limit));
+    try testing.expect(isPermanent(exit_unsupported));
+    // 그 밖은 **일시적**으로 본다. 정상 정리(`-1`)·소켓 끊김·원격 재부팅은 다시 해 볼 값이 있다.
+    try testing.expect(!isPermanent(-1));
+    try testing.expect(!isPermanent(0));
+    try testing.expect(!isPermanent(127)); // 명령 없음 — 설치가 다시 될 수 있다
+    try testing.expect(!isPermanent(255)); // ssh 전송 실패
 }
 
 test "설치 계약과 같은 판·같은 자리를 가리킨다" {

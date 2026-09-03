@@ -1445,6 +1445,59 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
 /// **팔레트는 편집기 액션 여섯이 닿는 유일한 길이다**(나머지는 chord 가 없다 —
 /// docs/configuration-input.md "편집기 전용 action"). 그 행에 chord 가 제대로 뜨는지는
 /// `default_app_bindings` 역스캔 결과라, 표를 고치면 화면이 따라 바뀐다.
+/// `MARU_EDIT_OP=<연산>` — 편집 연산을 한 번 걸어 **화면에 남는 결과**를 캡처한다(§3.9a·§3.9b).
+///
+/// **판정자는 문서 byte 를 재지 화면을 안 잰다.** 들여쓴 줄이 실제로 밀려 보이는지, 대문자로 바뀐
+/// 글자가 제대로 그려지는지는 렌더를 지나야 안다 — 좌표계·글리프 문제는 캡처로만 드러난다.
+///
+/// 연산: `indent`·`outdent`·`delete_line`·`dup`·`move_down`·`move_up`·`upper`·`lower`.
+/// `MARU_EDIT_SELECT=<lo>-<hi>` 로 문서 offset 범위를 고른다(없으면 caret 만 세운다).
+pub fn maybeDebugEditOp(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_EDIT_OP") orelse return;
+    if (self.debug_edit_op_done) return;
+    self.debug_edit_tries +%= 1;
+    if (self.debug_edit_tries > 240) {
+        self.debug_edit_op_done = true;
+        return;
+    }
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return; // 아직 파일이 안 열렸다 — 다음 tick 에 다시 본다
+    if (term.rt.editor_doc == null) return;
+
+    if (std.c.getenv("MARU_EDIT_SELECT")) |sv| {
+        const spec = std.mem.span(sv);
+        if (std.mem.indexOfScalar(u8, spec, '-')) |dash| {
+            const lo = std.fmt.parseInt(usize, spec[0..dash], 10) catch 0;
+            const hi = std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch 0;
+            term.rt.editor_selection = if (lo < hi)
+                maru.session.editor.selection.Selection.fromPoints(lo, hi)
+            else
+                maru.session.editor.selection.Selection.at(lo);
+        }
+    }
+    const op = std.mem.span(raw);
+    _ = if (std.mem.eql(u8, op, "indent"))
+        editor_ops.indentLines(self, term, false)
+    else if (std.mem.eql(u8, op, "outdent"))
+        editor_ops.indentLines(self, term, true)
+    else if (std.mem.eql(u8, op, "delete_line"))
+        editor_ops.deleteLines(self, term)
+    else if (std.mem.eql(u8, op, "dup"))
+        editor_ops.duplicateLines(self, term)
+    else if (std.mem.eql(u8, op, "move_down"))
+        editor_ops.moveLines(self, term, true)
+    else if (std.mem.eql(u8, op, "move_up"))
+        editor_ops.moveLines(self, term, false)
+    else if (std.mem.eql(u8, op, "upper"))
+        editor_ops.transformCase(self, term, true)
+    else if (std.mem.eql(u8, op, "lower"))
+        editor_ops.transformCase(self, term, false)
+    else
+        false;
+    self.debug_edit_op_done = true;
+    self.metal_dirty = true;
+}
+
 pub fn maybeDebugOpenPalette(self: *AppSession) void {
     if (std.c.getenv("MARU_OPEN_COMMAND_PALETTE") == null) return;
     // 심볼 피커 훅과 같은 이유로 **한 번만 열지 않는다** — 나중에 뜨는 알림이 배타적으로 닫는다.

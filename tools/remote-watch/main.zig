@@ -20,6 +20,10 @@ const builtin = @import("builtin");
 
 /// 한도 초과로 **일부만 감시하게 된** 경우의 종료 코드. 호출자는 이 값을 보고 폴링으로 내려간다
 /// (계획 §RW5) — 반쪽만 감시하면서 최신인 척하는 것이 최악이라 **조용히 계속하지 않는다.**
+/// `--version` 이 내는 줄. 설치 쪽이 **이 문자열로** 「우리 것이고 이 판이다」를 확인한다 —
+/// 판이 바뀌면 여기를 올리고, 그러면 옛 판이 깔린 원격은 다음 설치에서 갈린다.
+pub const version_line = "maru-remote-watch 1\n";
+
 pub const exit_watch_limit: u8 = 2;
 /// 감시 API 자체를 못 열었다(플랫폼 미지원 등). 호출자는 설치를 실패로 보고 현행 동작을 유지한다.
 pub const exit_unsupported: u8 = 3;
@@ -34,6 +38,14 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     const root = args.next() orelse return exitWith(exit_unsupported);
+
+    // **멱등 확인용 진입점.** 설치 쪽은 「이미 있고 **돌아가는가**」를 물어야 한다 — 파일 존재만 보면
+    // 아키텍처가 틀린 바이너리나 잘린 파일을 「설치됨」으로 읽는다(그러면 감시가 조용히 안 된다).
+    // 실제로 실행해 보는 것이 그 둘을 함께 가른다.
+    if (std.mem.eql(u8, root, "--version")) {
+        _ = std.posix.system.write(1, version_line.ptr, version_line.len);
+        return;
+    }
 
     var dirs: std.ArrayList([]u8) = .empty;
     defer {

@@ -4132,12 +4132,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"] != nil
     }
+    private var isSessionHostSignedAppQuitEvidenceMode: Bool {
+        isSessionHostRecoverySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT"] != nil
+    }
     private var isSessionHostAutoReconnectSmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT"] != nil
     }
     private var sessionHostRecoveryBaselineIteration: UInt32? {
-        guard isSessionHostRecoveryBaselineMode,
+        guard isSessionHostRecoveryBaselineMode || isSessionHostSignedAppQuitEvidenceMode,
               let raw = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION"]
         else { return nil }
         return UInt32(raw)
@@ -9624,6 +9628,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             "session-host-cr6e-c3c-home"
         } else if isSessionHostInputContinuitySmokeMode {
             "session-host-cr6d-home"
+        } else if isSessionHostSignedAppQuitEvidenceMode {
+            "session-host-signed-app-quit-home"
         } else if isSessionHostRecoveryBaselineMode {
             "session-host-cr6e-home"
         } else {
@@ -9659,7 +9665,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard isSessionHostRecoverySmokeMode,
               let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
         let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
-        let allowedRoots = Set(["session-host-cr6c-home", "session-host-cr6d-home", "session-host-cr6e-home"])
+        let allowedRoots = Set([
+            "session-host-cr6c-home", "session-host-cr6d-home", "session-host-cr6e-home",
+            "session-host-signed-app-quit-home"
+        ])
         guard allowedRoots.contains(root.lastPathComponent),
               root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
         let marker = root.appendingPathComponent("e3c-wake-ready", isDirectory: false).standardizedFileURL

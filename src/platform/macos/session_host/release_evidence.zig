@@ -10,7 +10,7 @@ const upgrade_limits = @import("upgrade_limits.zig");
 
 pub const schema = "maru.session-host-release-evidence.v1";
 pub const default_false_leaf_schema = "maru.session-host-default-false-baseline.v1";
-pub const signed_app_quit_leaf_schema = "maru.session-host-signed-app-quit-reattach.v1";
+pub const signed_app_quit_leaf_schema = upgrade_limits.signed_app_quit_leaf_schema;
 pub const signed_upgrade_leaf_schema = upgrade_limits.signed_upgrade_leaf_schema;
 pub const max_evidence_bytes = manifest.max_evidence_bytes;
 pub const max_scalar_string_bytes = manifest.max_scalar_string_bytes;

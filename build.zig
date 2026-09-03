@@ -2609,6 +2609,69 @@ pub fn build(b: *std.Build) void {
         session_host_cr6c_assert.step.dependOn(&run_session_host_cr6c_appkit.step);
         session_host_cr6c_appkit_step.dependOn(&session_host_cr6c_assert.step);
 
+        const signed_app_quit_candidate_dmg = b.option(
+            []const u8,
+            "session-host-signed-candidate-dmg",
+            "Absolute path to the caller-attested signed candidate DMG",
+        ) orelse "";
+        const signed_app_quit_frozen_exe = b.option(
+            []const u8,
+            "session-host-signed-candidate-exe",
+            "Absolute path to the caller-attested frozen candidate executable",
+        ) orelse "";
+        const signed_app_quit_test_uuid = b.option(
+            []const u8,
+            "session-host-signed-app-quit-test-uuid",
+            "Canonical release UUID also passed to the other baseline-A gate",
+        ) orelse "";
+        const signed_app_quit_step = b.step(
+            "macos-session-host-signed-app-quit-evidence",
+            "Run signed candidate AppKit Quit and exact reattach release evidence E2E",
+        );
+        const signed_app_quit_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-signed-app-quit-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\" zig-out/session-host-signed-app-quit; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt zig-out/session-host-signed-app-quit/leaf.json",
+        });
+        signed_app_quit_fixture.setCwd(b.path("."));
+        const run_signed_app_quit = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_signed_app_quit.setCwd(b.path("."));
+        run_signed_app_quit.has_side_effects = true;
+        run_signed_app_quit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_signed_app_quit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+        run_signed_app_quit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home"),
+        );
+        run_signed_app_quit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+        run_signed_app_quit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+        isolateMacosProductTest(b, run_signed_app_quit, b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home"), "signed-app-quit");
+        run_signed_app_quit.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home/.config/maru/config"),
+        );
+        run_signed_app_quit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID", signed_app_quit_test_uuid);
+        run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG", signed_app_quit_candidate_dmg);
+        run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE", signed_app_quit_frozen_exe);
+        run_signed_app_quit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT",
+            b.pathFromRoot("zig-out/session-host-signed-app-quit/leaf.json"),
+        );
+        run_signed_app_quit.step.dependOn(&macos_app_bundle.step);
+        run_signed_app_quit.step.dependOn(&file_panel_web_build.step);
+        run_signed_app_quit.step.dependOn(&signed_app_quit_fixture.step);
+        signed_app_quit_step.dependOn(&run_signed_app_quit.step);
+
         const session_host_cr6d_appkit_step = b.step(
             "macos-session-host-input-continuity-smoke",
             "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
@@ -12056,6 +12119,31 @@ pub fn build(b: *std.Build) void {
             "Validate the signed AppKit Quit release evidence boundary",
         );
         signed_app_quit_evidence_harness_step.dependOn(&run_signed_app_quit_evidence_tests.step);
+        const signed_app_quit_evidence_harness = b.addExecutable(.{
+            .name = "maru-session-host-signed-app-quit-evidence",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6c_appkit_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        signed_app_quit_evidence_harness_step.dependOn(&signed_app_quit_evidence_harness.step);
+        const signed_app_quit_evidence_unit_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6c_appkit_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_signed_app_quit_evidence_unit_tests = b.addRunArtifact(signed_app_quit_evidence_unit_tests);
+        run_signed_app_quit_evidence_unit_tests.addArg("--maru-expect-tests=3");
+        run_signed_app_quit_evidence_unit_tests.setCwd(b.path("."));
+        signed_app_quit_evidence_harness_step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);
+        run_session_host_tests.step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);
 
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));

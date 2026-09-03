@@ -13,6 +13,8 @@ const short_endpoint = @import("short_endpoint.zig");
 const daemon = @import("daemon.zig");
 const poll_owner = @import("poll_owner.zig");
 const runtime_manager = @import("runtime_manager.zig");
+const code_signature = @import("code_signature.zig");
+const upgrade_limits = @import("upgrade_limits.zig");
 
 extern "c" fn usleep(useconds: c_uint) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -20,6 +22,41 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 
 const recovery_baseline_iterations: usize = 5;
+const signed_app_quit_iteration_count: usize = 2;
+const max_candidate_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
+
+const SignedAppQuitConfig = struct {
+    test_uuid: []u8,
+    candidate_dmg: [:0]u8,
+    frozen_executable: [:0]u8,
+    output: [:0]u8,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.test_uuid);
+        allocator.free(self.candidate_dmg);
+        allocator.free(self.frozen_executable);
+        allocator.free(self.output);
+        self.* = undefined;
+    }
+};
+
+const CandidateIdentity = struct {
+    dev: i64,
+    ino: u64,
+    size: u64,
+    mode: u32,
+    modified_sec: i64,
+    modified_nsec: i64,
+    changed_sec: i64,
+    changed_nsec: i64,
+    sha256: [32]u8,
+};
+
+const SignedCandidateSet = struct {
+    dmg: CandidateIdentity,
+    frozen: CandidateIdentity,
+    app: CandidateIdentity,
+};
 
 const AutoReconnectArtifact = struct {
     schema: []const u8 = "maru.session-host-cr6e-c3c-appkit.v1",
@@ -186,6 +223,9 @@ const RecoveryBaselineArtifact = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
+    var signed_app_quit = try readSignedAppQuitConfig(allocator);
+    defer if (signed_app_quit) |*config| config.deinit(allocator);
+    if (signed_app_quit) |config| try invalidateArtifact(config.output);
     const fd_before = try countOpenFds(io);
     const app_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_APP_EXE") orelse
         return error.MissingAppExecutable;
@@ -199,6 +239,17 @@ pub fn main(init: std.process.Init) !void {
     if (product_path.len == 0 or product_path[0] != '/') return error.InvalidProductExecutable;
     const product_path_z = try allocator.dupeZ(u8, product_path);
     defer allocator.free(product_path_z);
+    const signed_candidate_before = if (signed_app_quit) |config| blk: {
+        if (!upgrade_limits.canonicalReleaseTestUuid(config.test_uuid))
+            return error.InvalidTestUuid;
+        const dmg = try inspectCandidate(config.candidate_dmg, false);
+        const frozen = try inspectCandidate(config.frozen_executable, true);
+        const app = try inspectCandidate(app_path_z, true);
+        if (!std.mem.eql(u8, &app.sha256, &frozen.sha256) or
+            !code_signature.sameReleaseSigner(io, app_path_z, config.frozen_executable))
+            return error.InvalidSignedCandidate;
+        break :blk SignedCandidateSet{ .dmg = dmg, .frozen = frozen, .app = app };
+    } else null;
     const input_continuity = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE") != null;
     const recovery_baseline_raw = std.c.getenv("MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT");
     const recovery_baseline_path = if (recovery_baseline_raw) |raw| std.mem.span(raw) else null;
@@ -248,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
     // Use a short PID-owned root so socket paths stay below `sun_path` and parallel gates cannot
     // see one another. Children inherit the same root through `execve`.
     var isolated_root_buf: [64]u8 = undefined;
-    const isolated_root = if (auto_reconnect) try std.fmt.bufPrintZ(
+    const isolated_root = if (auto_reconnect or signed_app_quit != null) try std.fmt.bufPrintZ(
         &isolated_root_buf,
         "/tmp/maru-c3c-{d}",
         .{std.c.getpid()},
@@ -273,7 +324,10 @@ pub fn main(init: std.process.Init) !void {
     };
     const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xC6C0_A77C_17A0_0001;
     var socket_buf: [160]u8 = undefined;
-    const socket = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    const socket = if (isolated_root) |root|
+        try short_endpoint.socketPathUnder(&socket_buf, root, host_id)
+    else
+        try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
     const dir_z = try allocator.dupeZ(u8, session_dir);
     defer allocator.free(dir_z);
     const socket_z = try allocator.dupeZ(u8, socket);
@@ -378,7 +432,7 @@ pub fn main(init: std.process.Init) !void {
         try std.fmt.bufPrint(&sibling_params_buf, "{{\"runtime_id\":\"{s}\"}}", .{&sibling_runtime_id})
     else
         "";
-    const process_identity_before = if (auto_reconnect)
+    const process_identity_before = if (auto_reconnect or signed_app_quit != null)
         try queryRuntimeProcessIdentity(allocator, socket, &runtime_id)
     else
         RuntimeProcessIdentity{ .host_pid = 0, .child_pid = 0 };
@@ -418,10 +472,18 @@ pub fn main(init: std.process.Init) !void {
 
     var baseline_rows: [recovery_baseline_iterations]RecoveryBaselineIteration = undefined;
     var auto_process_identity_after: RuntimeProcessIdentity = .{ .host_pid = 0, .child_pid = 0 };
-    const iteration_count: usize = if (recovery_baseline_path != null) recovery_baseline_iterations else 1;
+    var signed_rows: [signed_app_quit_iteration_count]RecoveryBaselineIteration = undefined;
+    const iteration_count: usize = if (recovery_baseline_path != null)
+        recovery_baseline_iterations
+    else if (signed_app_quit != null)
+        signed_app_quit_iteration_count
+    else
+        1;
     for (0..iteration_count) |iteration| {
+        if (signed_app_quit) |config|
+            try validateSignedCandidate(io, config, app_path_z, signed_candidate_before.?);
         _ = std.c.unlink("zig-out/maru-macos-app/app.summary.txt");
-        if (recovery_baseline_path != null) {
+        if (recovery_baseline_path != null or signed_app_quit != null) {
             var iteration_buf: [16]u8 = undefined;
             const iteration_z = try std.fmt.bufPrintZ(&iteration_buf, "{d}", .{iteration});
             if (setenv("MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION", iteration_z.ptr, 1) != 0)
@@ -471,13 +533,14 @@ pub fn main(init: std.process.Init) !void {
             allocator.free(sibling_live);
         }
         verification_client.deinit();
-        const process_identity_after = if (auto_reconnect)
+        const process_identity_after = if (auto_reconnect or signed_app_quit != null)
             try queryRuntimeProcessIdentity(allocator, socket, &runtime_id)
         else
             RuntimeProcessIdentity{ .host_pid = 0, .child_pid = 0 };
         if (auto_reconnect) auto_process_identity_after = process_identity_after;
-        if (auto_reconnect and (process_identity_before.host_pid != process_identity_after.host_pid or
-            process_identity_before.child_pid != process_identity_after.child_pid))
+        if ((auto_reconnect or signed_app_quit != null) and
+            (process_identity_before.host_pid != process_identity_after.host_pid or
+                process_identity_before.child_pid != process_identity_after.child_pid))
             return error.RuntimeProcessIdentityDrift;
         if (!runtime_survived) return error.RuntimeDidNotSurviveAppExit;
         if (!controller_zero) return error.ControllerAuthoritySurvivedAppExit;
@@ -498,9 +561,26 @@ pub fn main(init: std.process.Init) !void {
                 observer_zero,
             );
         }
+        if (signed_app_quit != null) {
+            signed_rows[iteration] = try readRecoveryBaselineIteration(
+                allocator,
+                io,
+                @intCast(iteration),
+                harness_launch_ns,
+                harness_exit_ns,
+                runtime_survived,
+                controller_zero,
+                observer_zero,
+            );
+            const row = signed_rows[iteration];
+            if (row.stage != 2 or !row.marker_present or !row.async_wake_marker_present or
+                !row.before_capture or !row.after_capture)
+                return error.SignedAppQuitObservationIncomplete;
+        }
         if (iteration + 1 < iteration_count) _ = usleep(250 * 1000);
     }
-    if (recovery_baseline_path != null and unsetenv("MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION") != 0)
+    if ((recovery_baseline_path != null or signed_app_quit != null) and
+        unsetenv("MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION") != 0)
         return error.EnvironmentFailed;
 
     terminateAndReap(daemon_pid);
@@ -508,6 +588,15 @@ pub fn main(init: std.process.Init) !void {
     const host_artifacts_removed = cleanupExactHostArtifacts(io, session_dir, socket, host_id);
     if (!host_artifacts_removed) return error.ArtifactCleanupFailed;
     artifacts_owned = false;
+    if (signed_app_quit) |config| {
+        const before = signed_candidate_before.?;
+        try validateSignedCandidate(io, config, app_path_z, before);
+        if (!host_artifacts_removed or access(socket_z.ptr, 0) == 0)
+            return error.ArtifactCleanupFailed;
+        if (try remainingChildProcesses() != 0 or try countOpenFds(io) != fd_before)
+            return error.ProcessCleanupIncomplete;
+        try writeSignedAppQuitArtifact(io, config, before.dmg.sha256, before.frozen.sha256);
+    }
     if (recovery_baseline_path) |path| {
         const fd_after = try countOpenFds(io);
         const child_processes_remaining = try remainingChildProcesses();
@@ -810,6 +899,164 @@ fn writeStrictArtifact(
     if (std.c.rename(temp_z.ptr, path_z.ptr) != 0) return error.ArtifactRenameFailed;
 }
 
+fn readSignedAppQuitConfig(allocator: std.mem.Allocator) !?SignedAppQuitConfig {
+    const uuid_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID");
+    const dmg_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG");
+    const frozen_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE");
+    const output_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT");
+    if (uuid_raw == null and dmg_raw == null and frozen_raw == null and output_raw == null) return null;
+    if (uuid_raw == null or dmg_raw == null or frozen_raw == null or output_raw == null)
+        return error.IncompleteSignedAppQuitConfig;
+    const uuid = std.mem.span(uuid_raw.?);
+    const dmg = std.mem.span(dmg_raw.?);
+    const frozen = std.mem.span(frozen_raw.?);
+    const output = std.mem.span(output_raw.?);
+    if (!std.fs.path.isAbsolute(dmg) or !std.fs.path.isAbsolute(frozen) or
+        !std.fs.path.isAbsolute(output) or dmg.len == 0 or frozen.len == 0 or output.len == 0)
+        return error.InvalidSignedAppQuitPath;
+    if (std.mem.eql(u8, dmg, frozen) or std.mem.eql(u8, dmg, output) or
+        std.mem.eql(u8, frozen, output))
+        return error.InvalidSignedAppQuitPath;
+    const owned_uuid = try allocator.dupe(u8, uuid);
+    errdefer allocator.free(owned_uuid);
+    const owned_dmg = try allocator.dupeZ(u8, dmg);
+    errdefer allocator.free(owned_dmg);
+    const owned_frozen = try allocator.dupeZ(u8, frozen);
+    errdefer allocator.free(owned_frozen);
+    const owned_output = try allocator.dupeZ(u8, output);
+    return .{
+        .test_uuid = owned_uuid,
+        .candidate_dmg = owned_dmg,
+        .frozen_executable = owned_frozen,
+        .output = owned_output,
+    };
+}
+
+fn invalidateArtifact(path: [:0]const u8) !void {
+    const rc = std.c.unlink(path.ptr);
+    if (rc != 0 and std.posix.errno(rc) != .NOENT)
+        return error.ArtifactInvalidationFailed;
+}
+
+fn inspectCandidate(path: [:0]const u8, executable: bool) !CandidateIdentity {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.CandidateOpenFailed;
+    defer _ = std.c.close(fd);
+    var before: std.posix.Stat = undefined;
+    if (std.c.fstat(fd, &before) != 0 or !std.posix.S.ISREG(before.mode) or
+        before.uid != std.c.getuid() or before.nlink != 1 or before.mode & 0o022 != 0 or
+        (executable and before.mode & 0o111 == 0) or before.size <= 0 or
+        @as(u64, @intCast(before.size)) > max_candidate_bytes)
+        return error.InvalidCandidateFile;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var total: u64 = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+    while (true) {
+        const count = std.c.pread(fd, &buffer, buffer.len, @intCast(total));
+        if (count < 0) {
+            if (std.posix.errno(count) == .INTR) continue;
+            return error.CandidateReadFailed;
+        }
+        if (count == 0) break;
+        const chunk = buffer[0..@intCast(count)];
+        hasher.update(chunk);
+        total = std.math.add(u64, total, chunk.len) catch return error.InvalidCandidateFile;
+        if (total > max_candidate_bytes) return error.InvalidCandidateFile;
+    }
+    var after: std.posix.Stat = undefined;
+    if (std.c.fstat(fd, &after) != 0 or !sameStat(before, after) or
+        total != @as(u64, @intCast(before.size)))
+        return error.CandidateChanged;
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return .{
+        .dev = before.dev,
+        .ino = @intCast(before.ino),
+        .size = total,
+        .mode = @intCast(before.mode),
+        .modified_sec = before.mtimespec.sec,
+        .modified_nsec = before.mtimespec.nsec,
+        .changed_sec = before.ctimespec.sec,
+        .changed_nsec = before.ctimespec.nsec,
+        .sha256 = digest,
+    };
+}
+
+fn sameStat(left: std.posix.Stat, right: std.posix.Stat) bool {
+    return left.dev == right.dev and left.ino == right.ino and left.mode == right.mode and
+        left.nlink == right.nlink and left.uid == right.uid and left.size == right.size and
+        left.mtimespec.sec == right.mtimespec.sec and left.mtimespec.nsec == right.mtimespec.nsec and
+        left.ctimespec.sec == right.ctimespec.sec and left.ctimespec.nsec == right.ctimespec.nsec;
+}
+
+fn sameCandidateIdentity(left: CandidateIdentity, right: CandidateIdentity) bool {
+    return left.dev == right.dev and left.ino == right.ino and left.size == right.size and
+        left.mode == right.mode and left.modified_sec == right.modified_sec and
+        left.modified_nsec == right.modified_nsec and left.changed_sec == right.changed_sec and
+        left.changed_nsec == right.changed_nsec and std.mem.eql(u8, &left.sha256, &right.sha256);
+}
+
+fn validateSignedCandidate(
+    io: std.Io,
+    config: SignedAppQuitConfig,
+    app_path: [:0]const u8,
+    before: SignedCandidateSet,
+) !void {
+    if (!sameCandidateIdentity(before.dmg, try inspectCandidate(config.candidate_dmg, false)) or
+        !sameCandidateIdentity(before.frozen, try inspectCandidate(config.frozen_executable, true)) or
+        !sameCandidateIdentity(before.app, try inspectCandidate(app_path, true)) or
+        !code_signature.sameReleaseSigner(io, app_path, config.frozen_executable))
+        return error.SignedCandidateChanged;
+}
+
+fn writeSignedAppQuitArtifact(
+    io: std.Io,
+    config: SignedAppQuitConfig,
+    dmg_sha256: [32]u8,
+    executable_sha256: [32]u8,
+) !void {
+    var storage: [2048]u8 = undefined;
+    const bytes = try encodeSignedAppQuitArtifact(&storage, config.test_uuid, dmg_sha256, executable_sha256);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = config.output,
+        .data = bytes,
+        .flags = .{
+            .truncate = false,
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        },
+    });
+}
+
+fn encodeSignedAppQuitArtifact(
+    storage: *[2048]u8,
+    test_uuid: []const u8,
+    dmg_sha256: [32]u8,
+    executable_sha256: [32]u8,
+) ![]const u8 {
+    if (!upgrade_limits.canonicalReleaseTestUuid(test_uuid)) return error.InvalidTestUuid;
+    var writer: std.Io.Writer = .fixed(storage);
+    var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
+    const dmg_hex = std.fmt.bytesToHex(dmg_sha256, .lower);
+    const executable_hex = std.fmt.bytesToHex(executable_sha256, .lower);
+    try json.write(.{
+        .schema = upgrade_limits.signed_app_quit_leaf_schema,
+        .test_uuid = test_uuid,
+        .result = "passed",
+        .candidate_dmg_sha256 = &dmg_hex,
+        .candidate_executable_sha256 = &executable_hex,
+        .runtime_count = 1,
+        .same_host_pid = true,
+        .all_runtime_pids_preserved = true,
+        .gui_exact_reattach = true,
+        .runtime_screen_before_preserved = true,
+        .runtime_screen_after_writable = true,
+        .cleanup_complete = true,
+    });
+    try writer.writeByte('\n');
+    return writer.buffered();
+}
+
 fn waitForExactExit(pid: c_int, timeout_ms: usize) !void {
     var status: c_int = 0;
     var elapsed: usize = 0;
@@ -896,4 +1143,41 @@ fn cleanupExactHostArtifacts(
     return access(socket.ptr, 0) != 0 and
         access(host_dir.ptr, 0) != 0 and
         access(log_path.ptr, 0) != 0;
+}
+
+test "signed app Quit evidence is canonical and contains only durable observations" {
+    var storage: [2048]u8 = undefined;
+    const bytes = try encodeSignedAppQuitArtifact(
+        &storage,
+        "123e4567-e89b-42d3-a456-426614174000",
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"123e4567-e89b-42d3-a456-426614174000\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"candidate_executable_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n",
+        bytes,
+    );
+}
+
+test "signed app Quit evidence rejects noncanonical trusted UUID" {
+    var storage: [2048]u8 = undefined;
+    try std.testing.expectError(error.InvalidTestUuid, encodeSignedAppQuitArtifact(
+        &storage,
+        "123E4567-E89B-42D3-A456-426614174000",
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+    ));
+}
+
+test "signed app Quit evidence never accepts caller result booleans" {
+    var storage: [2048]u8 = undefined;
+    const bytes = try encodeSignedAppQuitArtifact(
+        &storage,
+        "123e4567-e89b-42d3-a456-426614174000",
+        [_]u8{0x11} ** 32,
+        [_]u8{0x22} ** 32,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"result\":\"passed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "duration") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "runtime_id") == null);
 }

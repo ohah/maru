@@ -13722,10 +13722,39 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-evidence",
         "Run trusted candidate baseline evidence publication tests",
     );
+    const session_host_release_adapter_candidate_baseline_phase_step = b.step(
+        "test-session-host-release-adapter-candidate-baseline-phase",
+        "Validate baseline signed leaf transaction ordering and cleanup",
+    );
     const session_host_release_adapter_candidate_upgrade_evidence_step = b.step(
         "test-session-host-release-adapter-candidate-upgrade-evidence",
         "Run trusted candidate upgrade evidence publication tests",
     );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |baseline_phase_optimize| {
+        const baseline_phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_baseline_phase.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const baseline_phase_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_candidate_baseline_phase.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{
+                    .name = "release_adapter_candidate_baseline_phase",
+                    .module = baseline_phase_mod,
+                }},
+            }),
+        });
+        const run_baseline_phase_tests = b.addRunArtifact(baseline_phase_tests);
+        run_baseline_phase_tests.addArg("--maru-expect-tests=4");
+        run_baseline_phase_tests.setCwd(b.path("."));
+        session_host_release_adapter_candidate_baseline_phase_step.dependOn(&run_baseline_phase_tests.step);
+        session_host_step.dependOn(&run_baseline_phase_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_baseline_phase_tests.step);
+        macos_only_test_step.dependOn(&run_baseline_phase_tests.step);
+    }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",
         "Run candidate compatibility authority tests",

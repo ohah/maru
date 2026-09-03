@@ -186,6 +186,11 @@ pub const Owner = struct {
         // all of them and must not consume a parent connection before its PID mismatch is noticed.
         if (!self.validateProcessIdentity()) return .authority_lost;
         if (self.armed_upgrade != null) return .upgrade_ready;
+        // **폴 회차마다 본다 — 출력이 있을 때가 아니라.** 선언은 client 갈래로 오는데 조정을
+        // 출력 wake 갈래에 두었더니, 출력이 없는 세션은 폰이 알려도 영영 안 좁아졌다. 폰은
+        // 읽기 전용이라 스스로 출력을 만들 수도 없다(적대적 검증 4회차, 실측으로 잡았다).
+        // 조정할 것이 없으면 정수 하나만 보고 나온다(`viewportDirty`).
+        reconcileViewports(self);
         const before_poll_ns = monotonicNow(self.io);
         self.scheduleCadence(before_poll_ns);
 
@@ -242,7 +247,6 @@ pub const Owner = struct {
         if (poll_fds[1].revents & c.POLL.IN != 0) {
             if (!self.server.drainOwnerWake()) return .listener_broken;
             self.server.tickOwner();
-            reconcileViewports(self);
             self.scheduleProducerNow(now_ns);
             progressed = true;
         } else if (poll_fds[1].revents != 0) {
@@ -4628,6 +4632,66 @@ fn announceViewportResize(self: *Owner, done: socket_server.ViewportReconciled) 
         }}) catch continue;
         owned = false;
     }
+}
+
+test "S11-6 선언은 «출력이 없어도» 조정된다 — serve 루프가 그 자리를 지난다" {
+    // **이 판정자가 없으면 이 축은 조용히 죽는다.** 조정 자체는 `socket_server` 판정자가 순수
+    // 헬퍼로 재고, 알림 본문은 아래 판정자가 잰다. 그런데 「그 조정을 **serve 루프가 실제로
+    // 부르는가**」는 아무도 안 봤다 — 처음에 그 호출이 **PTY 출력 wake 갈래 안**에 있어서,
+    // 출력이 없는 세션에서는 폰이 선언해도 영영 안 좁아졌다. 폰은 읽기 전용이라 스스로 출력을
+    // 만들 수도 없다(적대적 검증 4회차).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/idle.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    const runtime = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB9,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    const observer = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer _ = c.close(observer.fd);
+
+    // 폰이 「나는 50열을 그린다」고 알린다. **그 뒤로 PTY 출력은 한 바이트도 없다.**
+    try sendTestRequest(
+        observer.fd,
+        .request,
+        7,
+        "{\"method\":\"runtime.declare_viewport\",\"params\":{\"stream_id\":1,\"cols\":50,\"rows\":20}}",
+    );
+    try pumpUntilResponse(&owner, observer.fd, "\"declared\"");
+
+    // 출력 wake 없이 루프를 돌린다 — 여기서 세션이 좁아져야 한다.
+    var spins: usize = 0;
+    while (spins < 64 and runtime.cols != 50) : (spins += 1) _ = try owner.pollOnce(5);
+
+    try testing.expectEqual(@as(u16, 50), runtime.cols);
+    try testing.expectEqual(@as(u16, 50), fake_runtime.resized_cols);
+    // 행은 안 바꾼다(계약) — 폰이 20 을 알려도 그대로다.
+    try testing.expectEqual(@as(u16, 24), runtime.rows);
 }
 
 test "S11-6 조정 알림은 client 의 strict decoder 를 통과한다" {

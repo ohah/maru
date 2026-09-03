@@ -78098,6 +78098,82 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
     }
 }
 
+test "SB1-S11-6: 제품 getter 가 진짜 remote runtime 의 좁힘 값을 집는다 — 주입 없이" {
+    // 앞 판정자는 `test_narrowed_cols_override` 로 값을 넣는데, 그 주입은 함수 **첫 줄**에서
+    // 돌려주므로 아래 몸통(활성 창·pane·Term·`surface.remote`·앱 전역 backend·handle 조회)이
+    // 한 줄도 안 돈다. 즉 조회가 통째로 틀려도 그 판정자는 초록이다. 여기서는 주입을 쓰지 않고
+    // 진짜 runtime 을 앱 전역 backend 에 심어 **그 몸통을** 태운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    const handle: app.TermRuntimeHandle = 0x5116;
+    const original_handle = term.rt.handle;
+    term.rt.handle = handle;
+    defer term.rt.handle = original_handle;
+
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try session_host.remote_runtime.testing_api.initializeDetachedGeneration(&runtime, allocator);
+    runtime.narrowed_cols = 50;
+    try installCr2d3EventRuntime(&runtime, handle);
+    defer removeCr2d3EventRuntime(handle);
+
+    // **로컬 Term 은 남이 못 좁힌다.** runtime 이 좁혀졌다고 말해도 `surface.remote` 가 비어
+    // 있으면 표시가 없어야 한다 — 그 가드가 실제로 있는지 여기서만 드러난다.
+    try std.testing.expect(term.surface.remote == null);
+    try std.testing.expect(activeTermNarrowedCols(session) == null);
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    term.surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer term.surface.remote = null;
+
+    // 원격 Term 이면 그 handle 로 backend 를 뒤져 값을 집는다.
+    try std.testing.expectEqual(@as(?u16, 50), activeTermNarrowedCols(session));
+
+    // **0 은 「안 좁혀졌다」다** — 그대로 흘리면 상태줄에 `폰 0열` 이 뜬다.
+    runtime.narrowed_cols = 0;
+    try std.testing.expect(activeTermNarrowedCols(session) == null);
+
+    // **handle 이 어긋나면 없다.** 조회가 handle 을 안 보고 아무 행이나 집으면 여기서 걸린다.
+    runtime.narrowed_cols = 50;
+    term.rt.handle = handle +% 1;
+    try std.testing.expect(activeTermNarrowedCols(session) == null);
+    term.rt.handle = handle;
+    try std.testing.expectEqual(@as(?u16, 50), activeTermNarrowedCols(session));
+
+    // **그 값이 실제로 그려질 글자가 되는가.** 항목이 tree 에 섰다는 것만으로는 「무엇이라고
+    // 적혔는지」를 모른다 — 아이콘이 빠지거나 숫자가 딴 값이어도 id 는 그대로다. 그래서 조립된
+    // 셀의 codepoint 를 이어 붙여 읽는다.
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var saw_phone_icon = false;
+    for (collected.items) |c| {
+        for (c.pane.owned_list.cells) |cell| {
+            if (cell.codepoint == 0) continue;
+            if (cell.codepoint == icons.codepoint(.phone)) saw_phone_icon = true;
+            var b: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(@intCast(cell.codepoint), &b) catch continue;
+            try text.appendSlice(allocator, b[0..len]);
+        }
+    }
+    // 아이콘 codepoint 가 셀에 실렸다 — 등록 집합에 없으면 여기서 blank 가 되어 안 잡힌다.
+    try std.testing.expect(saw_phone_icon);
+    // 숫자가 **그 값**이다. `narrowedCols()` 대신 아무 값이나 실으면 여기서 갈린다.
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "50") != null);
+}
+
 test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조립된다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

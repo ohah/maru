@@ -2743,6 +2743,11 @@ fn rangesOverlap(a: anytype, a_len: usize, b: anytype, b_len: usize) bool {
 
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
+///
+/// **그래서 아래 필드 기본값(`= 0` 등)은 «안 먹는다».** `undefined` 에서 필드를 하나씩 채우므로,
+/// 새 필드를 더하면 `spawnWithConnection` 과 `attachExistingWithConnection` **두 자리에 모두**
+/// 초기값을 써야 한다. 안 쓰면 그 필드는 쓰레기로 시작하고, 읽는 쪽은 그것을 정상값으로 믿는다 —
+/// S11-6 의 `narrowed_cols` 가 그렇게 「폰 43690열」(0xAAAA)을 상태줄에 띄웠다.
 pub const RemoteRuntime = struct {
     generation_owner: ReconnectGenerationOwner,
     reconnect_executor: ReconnectProductExecutor,
@@ -3877,6 +3882,11 @@ pub const RemoteRuntime = struct {
         self.runtime_lifetime = .{};
         self.selection_all = false;
         self.selection_host_authoritative = false;
+        // **여기서 안 쓰면 쓰레기가 남는다**(S11-6). 이 구조체는 `var rr: RemoteRuntime = undefined`
+        // 에서 in-place 로 서므로 **필드 기본값(`= 0`)이 안 먹는다** — 안 쓰면 `narrowedCols()` 가
+        // 아무 값이나 내고, 폰이 붙은 적 없는 세션의 상태줄에 「폰 43690열」 이 뜬다(실측값이다).
+        self.requested_cols = 0;
+        self.narrowed_cols = 0;
         try self.initializePendingEventOwner();
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
@@ -3975,6 +3985,11 @@ pub const RemoteRuntime = struct {
         self.runtime_lifetime = .{};
         self.selection_all = false;
         self.selection_host_authoritative = false;
+        // **여기서 안 쓰면 쓰레기가 남는다**(S11-6). 이 구조체는 `var rr: RemoteRuntime = undefined`
+        // 에서 in-place 로 서므로 **필드 기본값(`= 0`)이 안 먹는다** — 안 쓰면 `narrowedCols()` 가
+        // 아무 값이나 내고, 폰이 붙은 적 없는 세션의 상태줄에 「폰 43690열」 이 뜬다(실측값이다).
+        self.requested_cols = 0;
+        self.narrowed_cols = 0;
         try self.initializePendingEventOwner();
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
@@ -5416,6 +5431,19 @@ pub const RemoteRuntime = struct {
         return self.narrowed_cols;
     }
 
+    /// host 가 **방금 확정한** 열을 받아 「남이 좁혔나」를 다시 판정한다(S11-6). 그 순간의 크기는
+    /// host 가 정한 값이라, 내가 요청한 값보다 좁으면 남이 좁힌 것이다(그럴 수 있는 경로는 뷰포트
+    /// 선언뿐). 폰이 떠나면 host 가 기준으로 되돌려 값이 다시 같아지고 표시가 사라진다 — 붙는
+    /// 전이와 떠나는 전이가 **둘 다** 이 판정으로 온다.
+    ///
+    /// **경로가 둘이라 여기 모은다.** 크기 게시는 attachment 가 `.legacy` 냐 `.generation` 이냐로
+    /// 갈린다(`drainLegacyObservationEvents` vs prepared semantic commit). 처음에 legacy 쪽에만
+    /// 적었더니 **제품이 쓰는 generation 경로에서 표시가 통째로 안 떴다** — 관측 크기는 갱신되는데
+    /// 이 값만 0 이라 화면만 보고는 못 잡는다. 새 게시 경로가 생기면 여기를 부른다.
+    fn noteHostAppliedCols(self: *RemoteRuntime, cols: u16) void {
+        self.narrowed_cols = narrowedFrom(self.requested_cols, cols);
+    }
+
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
         try self.admitRuntimeOperation();
         // Observer viewport follows the controller's canonical runtime size; local window changes
@@ -5866,6 +5894,7 @@ pub const RemoteRuntime = struct {
                 self.currentGeneration().observation.size = .{ .cols = decision.cols, .rows = decision.rows };
                 self.currentGeneration().resize_generation = decision.resize_generation;
                 self.currentGeneration().resize_baseline_present = true;
+                self.noteHostAppliedCols(decision.cols);
                 result.metadata = true;
             },
             .revoked => {
@@ -6074,11 +6103,7 @@ pub const RemoteRuntime = struct {
                 const size: terminal.Size = .{ .cols = resized.cols, .rows = resized.rows };
                 if (try self.applyResizeFullState(size, resized.resize_generation))
                     result.metadata = true;
-                // **여기서만 판정한다**(S11-6). 이 순간의 크기는 host 가 방금 확정한 값이라,
-                // 내가 요청한 값보다 좁으면 남이 좁힌 것이다(그럴 수 있는 경로는 뷰포트 선언뿐).
-                // 폰이 떠나면 host 가 기준으로 되돌려 이 값이 다시 같아지고 표시가 사라진다 —
-                // 붙는 전이와 떠나는 전이가 **둘 다** 이 이벤트로 온다.
-                self.narrowed_cols = narrowedFrom(self.requested_cols, size.cols);
+                self.noteHostAppliedCols(size.cols);
             },
             .metadata => |metadata| {
                 var dto = metadata;
@@ -18198,6 +18223,9 @@ test "K3 actual daemon kernel cwd survives detach and preserves authority isolat
         .shell_integration = null,
     }, .{ .cols = 80, .rows = 24 }, null);
     runtime_a_live = true;
+    // **막 spawn 한 runtime 도 아무도 안 좁혔다**(S11-6, attach 쪽과 같은 이유 — in-place `undefined`).
+    try testing.expectEqual(@as(u16, 0), runtime_a.requested_cols);
+    try testing.expectEqual(@as(u16, 0), runtime_a.narrowedCols());
     var runtime_b: RemoteRuntime = undefined;
     try runtime_b.spawnWithAdapter(&adapter, allocator, io, 2, .{
         .command = "/bin/sh",
@@ -18352,6 +18380,11 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     // **재접속**: attachExisting으로 그 runtime에 붙어 원격-backed Surface를 세운다(spawn 없이 — 저장된 runtime_id로).
     var rr: RemoteRuntime = undefined;
     try rr.attachExisting(&client, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 });
+    // **막 붙은 runtime 은 아무도 안 좁혔다**(S11-6). 이 구조체는 `undefined` 에서 in-place 로
+    // 서므로 필드 기본값이 안 먹는다 — 초기화를 빠뜨리면 여기가 쓰레기를 집고, 폰이 붙은 적
+    // 없는 세션의 상태줄에 「폰 <쓰레기>열」 이 뜬다. 실제로 그렇게 비어 있었다.
+    try testing.expectEqual(@as(u16, 0), rr.requested_cols);
+    try testing.expectEqual(@as(u16, 0), rr.narrowedCols());
     defer rr.deinit();
     try testing.expectEqual(rid, rr.runtimeIdHex()); // 재접속한 runtime_id가 저장한 값과 같다.
 
@@ -20236,6 +20269,38 @@ test "S11-6 «남이 좁혔나» 는 요청한 값과 확정된 값만으로 정
 
     // 남이 넓힐 수는 없지만(줄이기만 한다), 그런 값이 와도 표시하지 않는다.
     try T.expectEqual(@as(u16, 0), narrowedFrom(80, 100));
+}
+
+test "S11-6 실제 `runtime.resized` 이벤트가 좁힘 상태를 세우고 되돌린다" {
+    // `narrowedFrom` 은 순수 함수라 판정자가 이미 여럿인데, **그 값을 대입하는 자리**를 지나는
+    // 판정자는 없었다. 그 대입은 이벤트 적용 함수 안에 있고, 거기서 빠져도 순수 판정자는 전부
+    // 통과한다 — 「값은 맞는데 닿는 자리가 틀림」의 자리다. 그래서 실제 wire 이벤트를 태운다.
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+
+    // 이 fixture 는 `RemoteRuntime = undefined` 에서 필요한 것만 세우는 legacy 형이라
+    // (같은 파일의 다른 fixture 들과 같다) 이 둘도 손으로 세운다. 제품 spawn/attach 가
+    // 그것을 해 주는지는 아래 「fresh runtime」 판정자가 따로 지킨다.
+    fixture.runtime.narrowed_cols = 0;
+    // 내가 80 열을 요청해 둔 상태다(`resize()` 가 성공한 뒤에만 적히는 값).
+    fixture.runtime.requested_cols = 80;
+
+    // **폰이 붙었다** — host 가 50 을 확정해 보낸다.
+    _ = try fixture.publish(
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":50,\"rows\":40,\"resize_generation\":11,\"reason\":\"controller\"}}",
+    );
+    try std.testing.expectEqual(@as(u16, 50), fixture.runtime.narrowedCols());
+
+    // **폰이 떠났다** — host 가 기준으로 되돌린다. 표시가 사라져야 한다.
+    _ = try fixture.publish(
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":80,\"rows\":40,\"resize_generation\":12,\"reason\":\"controller\"}}",
+    );
+    try std.testing.expectEqual(@as(u16, 0), fixture.runtime.narrowedCols());
 }
 
 test "S11-6 좁힘 상태는 연결보다 오래 산다 — generation 이 아니라 runtime 이 든다" {

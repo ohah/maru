@@ -3825,8 +3825,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
     private static let statusSessionEnded = Int32(MaruAppHostStatusSessionEnded.rawValue)
 
-    private let artifactDirectory = "zig-out/maru-macos-app"
-    private let summaryPath = "zig-out/maru-macos-app/app.summary.txt"
+    private var summaryPath: String {
+        ProcessInfo.processInfo.environment["MARU_APP_SUMMARY_PATH"] ?? "zig-out/maru-macos-app/app.summary.txt"
+    }
+    private var artifactDirectory: String {
+        URL(fileURLWithPath: summaryPath).deletingLastPathComponent().path
+    }
     private var capabilities = MaruAppHostCapabilities()
     // 이 controller는 pre-AppKit lease 획득 성공 뒤에만 생성된다. startup loser는 이 상태에 도달하지 않는다.
     private let appInstanceLeaseStatus = UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED)

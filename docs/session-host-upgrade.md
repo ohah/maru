@@ -1903,6 +1903,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   게시 직전과 final pathname에서 다시 확인한다. 이 보존 단계는 candidate bytes가 같은 trusted build에서 왔음을 유지할 뿐 signer,
   notarization, GitHub provenance 또는 release publication을 새로 승인하지 않는다.
 
+  두 baseline 제품 gate는 이 보존 디렉터리의 `Maru.app` absolute pathname을 공통
+  `-Dsession-host-signed-candidate-app` 입력으로 받는다. build 조립은 main executable과 bundled CLI pathname을 그 bundle 아래에서만
+  유도하며 release gate를 위해 별도 `macos-app-bundle`을 다시 만들거나 checkout의 `web/dist`를 제품 환경에 주입하지 않는다.
+  candidate app 입력이 없거나 상대경로이면 skip/fallback하지 않고 하네스의 absolute-path 검증에서 실패한다. 두 gate의 app executable,
+  candidate DMG와 frozen executable은 기존 no-follow digest·strict signer 검증으로 같은 candidate에 결속되며, signed-app-quit의 bundled
+  CLI도 같은 bundle에서만 온다. 이 경로 조립은 app bundle 자체의 provenance를 승인하지 않으며 앞선 candidate product authority와
+  release workflow의 결속 책임을 유지한다.
+
   `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
   digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical
   aggregate bytes만 반환하고 filesystem을 열거나 publication 성공을 주장하지 않는다. 후속 executable adapter가 기존

@@ -1000,6 +1000,11 @@ U5 signed candidate staging은 universal build가 공증·staple 검증한 app�
 기존 final·symlink 거부, copy/비교 실패 시 final publication 0을 검증한다. 이 gate는 Apple 서명·공증 자체나 GitHub workflow의
 baseline leaf 실행·attestation·release publication을 대신하지 않는다.
 
+U5 signed baseline product gate의 실행 경로는 공통 `session-host-signed-candidate-app` 옵션 하나가 소유한다. 두 gate는 그 bundle의
+`Contents/MacOS/maru-macos-app`을 실행하고 signed-app-quit만 같은 bundle의 `Contents/MacOS/maru`를 사용한다. release gate에
+`macos-app-bundle`, `zig-out/Maru.app` 또는 checkout `web/dist` fallback/dependency가 남으면 실패하는 focused boundary를 둔다.
+실제 Developer ID candidate 실행은 trusted release workflow가 이 옵션에 앞선 staging app absolute pathname을 전달할 때 완료된다.
+
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
 bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual

@@ -953,8 +953,12 @@ test "실측: 콜드런치가 얼마나 막는가 (문서의 110 ms 재확인)" 
         _ = c.mkdir(base.ptr, 0o700);
         defer std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
 
-        // `std.time.Timer` 는 Zig 0.16 에서 이 자리에 없다. 저장소가 쓰는 단조 시계를 그대로 쓴다
-        // (`app_process_incident_owner.zig` 의 `monotonicMs` 와 같은 모양).
+        // `std.time.Timer` 는 Zig 0.16 에서 이 자리에 없다. 이 저장소가 쓰는 단조 시계 모양
+        // (`clock_gettime(.MONOTONIC)`)을 그대로 쓴다 — 같은 모양이 session host 안에 이미 있다.
+        //
+        // ⚠️ **여기에 그 파일 이름을 적지 말 것.** `session_host_cr0b_boundary` 가 incident owner 파일을
+        // **언급하는 제품 소스의 개수**를 세는데(단일 writer owner 불변식), 주석도 소스 텍스트라 함께
+        // 세어져 판정자가 깨진다. 실제로 그렇게 깨뜨렸다(expected 2, found 3).
         const started = monotonicMsForMeasure() orelse return error.SkipZigTest;
         const result = connectOrLaunchDetailed(allocator, exe, base, .{});
         const ended = monotonicMsForMeasure() orelse return error.SkipZigTest;

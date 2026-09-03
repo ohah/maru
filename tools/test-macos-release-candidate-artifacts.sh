@@ -77,5 +77,8 @@ test "$preserve" -lt "$final_move"
 test "$(grep -F -c 'codesign --verify --strict --deep "$candidate_staged/Maru.app"' "$build_script")" = 1
 test "$(grep -F -c 'xcrun stapler validate "$candidate_staged/Maru.app"' "$build_script")" = 1
 test "$(grep -F -c 'xcrun stapler validate "$candidate_staged/Maru-$version-universal.dmg"' "$build_script")" = 1
+# 떼어낸 main executable 에는 codesign 검증을 걸 수 없다 — 번들 밖에서는 `invalid resource directory` 로
+# 반드시 실패하므로 릴리스가 통째로 막힌다. 사본의 무결성은 번들 서명 검증과 아래 `cmp` 가 이미 보장한다.
+test "$(grep -F -c 'codesign --verify --strict "$candidate_staged/maru-session-host-' "$build_script")" = 0
 
 echo 'macOS release candidate artifact contract: OK'

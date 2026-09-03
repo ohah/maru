@@ -130,7 +130,14 @@ spctl -a -t open --context context:primary-signature -v "$out"
 echo "==> preserve signed session-host candidate artifacts"
 candidate_staged=$(sh tools/publish-macos-release-candidate.sh "$app" "$dmg" "$version" "$work/candidate-publish")
 codesign --verify --strict --deep "$candidate_staged/Maru.app"
-codesign --verify --strict "$candidate_staged/maru-session-host-$version"
+# 떼어낸 `maru-session-host-<version>` 에는 codesign 을 걸지 않는다. 그 원본은 `Maru.app` 의 **main
+# executable** 이라 서명이 번들의 `_CodeSignature/CodeResources` 에 묶여 있고, 파일만 밖으로 복사하면
+# `invalid resource directory (directory or signature have been modified)` 로 **반드시** 실패한다.
+# 파일이 상한 것이 아니라 성립할 수 없는 검증이다(같은 번들의 `maru` 는 부수 파일이라 떼어내도 통과한다).
+# 2026-09-04 실측: 이 한 줄이 dmg 공증·staple 을 모두 통과한 뒤의 릴리스를 매번 막았다.
+#
+# 사본의 무결성은 두 검사가 이미 등가로 보장한다 — 위 `--strict --deep` 이 번들 서명을 검증하고,
+# 아래 `cmp` 가 사본이 번들 안 원본과 **바이트 동일**함을 확인한다.
 xcrun stapler validate "$candidate_staged/Maru.app"
 xcrun stapler validate "$candidate_staged/Maru-$version-universal.dmg"
 spctl -a -t open --context context:primary-signature -v "$candidate_staged/Maru-$version-universal.dmg"

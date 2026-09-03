@@ -13757,6 +13757,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-workspace",
         "Validate isolated baseline runner workspace",
     );
+    const session_host_release_adapter_candidate_baseline_child_step = b.step(
+        "test-session-host-release-adapter-candidate-baseline-child",
+        "Validate bounded baseline leaf process execution",
+    );
     const session_host_baseline_child_paths_step = b.step(
         "test-session-host-baseline-child-paths",
         "Validate exclusive baseline child path preparation",
@@ -13959,6 +13963,15 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_candidate_evidence_identity_tests.step);
             test_step.dependOn(&run_candidate_evidence_identity_tests.step);
             macos_only_test_step.dependOn(&run_candidate_evidence_identity_tests.step);
+            const candidate_baseline_child_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod }, .{ .name = "release_adapter_candidate_evidence_identity", .module = candidate_evidence_identity_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod }, .{ .name = "release_adapter_candidate_baseline_app", .module = candidate_baseline_app_mod }, .{ .name = "release_adapter_candidate_baseline_workspace", .module = candidate_baseline_workspace_mod } } });
+            const candidate_baseline_child_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_baseline_child.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_baseline_child", .module = candidate_baseline_child_mod }} }) });
+            const run_candidate_baseline_child_tests = b.addRunArtifact(candidate_baseline_child_tests);
+            run_candidate_baseline_child_tests.addArg("--maru-expect-tests=7");
+            run_candidate_baseline_child_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_baseline_child_step.dependOn(&run_candidate_baseline_child_tests.step);
+            session_host_step.dependOn(&run_candidate_baseline_child_tests.step);
+            test_step.dependOn(&run_candidate_baseline_child_tests.step);
+            macos_only_test_step.dependOn(&run_candidate_baseline_child_tests.step);
             const predecessor_evidence_identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_predecessor_evidence_identity.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const predecessor_evidence_identity_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_predecessor_evidence_identity.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_predecessor_evidence_identity", .module = predecessor_evidence_identity_mod } } }) });
             const run_predecessor_evidence_identity_tests = b.addRunArtifact(predecessor_evidence_identity_tests);

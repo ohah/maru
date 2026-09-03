@@ -240,10 +240,23 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
         self.remote_watch.stop(); // 로컬 목록이다 — 채널이 있을 이유가 없다
         return;
     };
-    const repo = self.git_repo orelse return;
+    // ⚠️ **저장소 «루트» 를 본다 — `git_repo` 가 아니다**(적대적 검증 2026-09-03 1 회차).
+    //
+    // 원격 목록의 대상(`git_repo`)은 **cwd** 다(`git -C <cwd>` 가 상위 저장소를 스스로 찾으므로 루트가
+    // 필요 없다 — 위 `submitGitRead(self, r.cwd, …)`). 그런데 화면이 보여 주는 것은 **저장소 전체**다.
+    // 그 cwd 를 감시 루트로 쓰면 하위 디렉터리에 서 있을 때 **바깥 변경을 통째로 놓친다** — 실측:
+    // 하위 변경은 읽기 10 개를 부르는데 저장소 루트의 변경은 **0** 이었다. `.git/index` 도 그 바깥이라,
+    // 다른 터미널에서 스테이지한 것이 영영 안 보인다.
+    //
+    // 루트는 읽기 결과의 `repo_root`(`rev-parse --show-toplevel`)가 이미 들고 있다. **아직 없으면
+    // 안 띄운다** — 첫 읽기가 끝나면 다음 tick 이 띄운다(추측한 루트를 감시하느니 한 tick 늦는 편이 낫다).
+    const repo = self.git_repo_remote_root orelse return;
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
 
     switch (self.remote_watch.phase) {
+        // **다시 안 띄운다**(RW5). 감시자가 「이 원격에서는 못 한다」고 말했다 — 대상이 바뀌면
+        // `rememberGitRepoDest` 가 채널을 통째로 놓으므로 이 상태도 그때 풀린다.
+        .gave_up => return,
         .backoff => {
             if (now < self.remote_watch.retry_at_ns) return;
             self.remote_watch.phase = .idle; // 때가 됐다 — 아래에서 다시 띄운다
@@ -291,11 +304,25 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     }
 
     // **EOF 는 채널이 죽었다는 뜻이다.** 감시자는 스스로 안 끝난다(무한 루프) — 끝났다면 원격에서
-    // 죽었거나 소켓이 끊긴 것이다. 정리하고 백오프 뒤 다시 띄운다.
+    // 죽었거나 소켓이 끊긴 것이다.
+    //
+    // ⚠️ **왜 죽었는지 보고 정한다**(RW5). 「한도를 넘었다」·「못 돈다」는 다시 띄워도 결과가 같다 —
+    // 그런데도 재시도하면 사용자가 도크를 열어 둔 내내 **5 초마다 ssh 자식**이 뜬다(실측: 30 초에 7 번).
+    // 그때는 포기하고 RW3 이전 동작(포커스·새로고침)으로 돌아간다.
     if (eof) {
-        self.remote_watch.stop();
-        self.remote_watch.phase = .backoff;
-        self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+        const why = self.remote_watch.stopReporting();
+        if (remote_watch_mod.isPermanent(why)) {
+            self.remote_watch.phase = .gave_up;
+            // 문구는 **영어다** — 이 파일의 i18n 원장은 0 이고(번역 대상 레이어), 이것은 UI 가 아니라
+            // 진단 로그다. 원장을 올려 예외를 만드느니 로그를 영어로 두는 편이 그 게이트를 안 흐린다.
+            std.log.scoped(.scm).warn(
+                "remote watcher cannot run on this host (exit={d}) — auto refresh off, falling back to manual refresh dest={s}",
+                .{ why, dest },
+            );
+        } else {
+            self.remote_watch.phase = .backoff;
+            self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+        }
     }
 }
 

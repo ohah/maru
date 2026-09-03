@@ -7,7 +7,8 @@
 const std = @import("std");
 // cli/ssh.zig를 직접 import하면 root와 maru 두 모듈에 중복되므로(빌드 에러) maru 모듈을 통해 쓴다.
 const ssh = @import("maru").cli.ssh;
-const remote_shell = @import("maru").session.remote_shell; // 원격 셸 규율(PATH 처방 · `sh` 껍데기)
+const remote_shell = @import("maru").session.remote_shell;
+const watch_install = @import("maru").session.remote_watch_install; // 원격 감시자 설치 계약(RW2a) — 경로 상수의 단일 출처 // 원격 셸 규율(PATH 처방 · `sh` 껍데기)
 
 /// 스트리머가 원격에서 도는 **스크립트**(상수). `$1`=원격 maru 경로, `$2`=상대 디렉터리.
 ///
@@ -126,6 +127,24 @@ pub fn uploadBytes(
 ///
 /// **host 당 하나만 띄운다**(계약 §11.6 — `MaxSessions` 기본 10 에 다중화도 포함된다). pane 마다 띄우면
 /// 같은 호스트 pane 다섯이 상한이 된다.
+/// 감시자 스트림. `Stream` 과 달리 **stdin 쓰기 끝을 부모가 든다** — 그 fd 를 닫는 것이 조용한
+/// 자식에게 보내는 유일한 정상 종료 신호다.
+pub const WatchStream = struct {
+    pid: std.c.pid_t,
+    /// 자식 stdout(논블로킹). 호출자가 읽고 **닫는다**.
+    out_fd: c_int,
+    /// 자식 stdin 의 **쓰기 끝**. 아무것도 쓰지 않는다 — 이 fd 의 존재 자체가 「부모가 살아 있다」다.
+    in_fd: c_int,
+};
+
+/// `exec <감시자> <루트>`.
+///
+/// ⚠️ **감시자 경로를 인자로 넘기지 않는다.** 그 경로에는 `$HOME` 이 들어 있는데, `wrapAlloc` 이
+/// 인용한 인자 안에서는 **확장되지 않는다** — 원격이 리터럴 `$HOME/...` 을 열려다 실패하고 증상은
+/// 「감시가 그냥 안 된다」뿐이다(에이전트 스트리머가 같은 함정에 한 번 빠졌다). 그래서 스크립트가
+/// 직접 적고, 그 문자열은 **설치 계약의 상수**를 그대로 이어 붙여 단일 출처를 지킨다.
+const watch_script = "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" \"$1\"";
+
 pub const Stream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout. 호출자가 읽고 **닫는다**.
@@ -282,6 +301,80 @@ pub fn spawnAgentEvents(
     }
     _ = std.c.close(out_pipe[1]);
     return .{ .pid = pid, .out_fd = out_pipe[0] };
+}
+
+/// **조용한 감시자를 위한 스트림**(RW3 — [계획](../../../docs/plans/remote-watch.md)).
+///
+/// `spawnAgentEvents` 와 fork·pipe·execve 모양이 같지만 **stdin 이 다르다.** 그쪽은 `/dev/null` 로
+/// 막는데, 근거는 「스트리머는 입력을 안 읽고, 열어 두면 부모가 죽었을 때 자식이 영영 안 끝난다」다.
+/// 감시자에는 그 논리가 **거꾸로** 적용된다:
+///
+/// - 감시자는 **설계상 조용하다**(바뀔 때만 출력). 그래서 부모가 죽어도 **EPIPE 를 못 받는다** —
+///   실측에서 조용한 원격 프로세스는 ssh 가 SIGKILL 돼도 살아남았다(계획 §5).
+/// - 그래서 stdin 을 **파이프**로 준다. 부모가 죽거나 닫으면 자식은 **EOF** 를 받고 스스로 끝낸다.
+///
+/// 즉 `/dev/null` 은 「쓰는 자식」의 고아 방지책이고, **파이프는 「조용한 자식」의 고아 방지책**이다.
+pub fn spawnRemoteWatch(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    /// 감시할 저장소 루트(원격 절대 경로).
+    root: []const u8,
+) !WatchStream {
+    const cmd = try remote_shell.wrapAlloc(allocator, watch_script, &.{root});
+    defer allocator.free(cmd);
+
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    var in_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&in_pipe) != 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.PipeFailed;
+    }
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        _ = std.c.dup2(in_pipe[0], 0); // **파이프다** — 부모가 닫으면 감시자가 EOF 로 끝난다
+        _ = std.c.dup2(out_pipe[1], 1);
+        for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+    _ = std.c.close(in_pipe[0]);
+    // **읽기가 UI 를 안 멈춘다** — 틱이 드레인하므로 논블로킹이어야 한다(에이전트 채널과 같은 규율).
+    const fl = std.c.fcntl(out_pipe[0], std.c.F.GETFL, @as(c_int, 0));
+    if (fl >= 0) _ = std.c.fcntl(out_pipe[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    return .{ .pid = pid, .out_fd = out_pipe[0], .in_fd = in_pipe[1] };
+}
+
+/// 감시자를 끝낸다. **stdin 을 먼저 닫는다** — 그것이 감시자가 기다리는 정상 종료 신호다(EOF).
+/// `SIGTERM` 은 그래도 안 끝날 때의 보루다: 조용한 자식이라 EPIPE 로는 안 죽는다.
+pub fn stopRemoteWatch(stream: WatchStream) void {
+    if (stream.in_fd >= 0) _ = std.c.close(stream.in_fd); // ① EOF — 스스로 끝내게 한다
+    if (stream.out_fd >= 0) _ = std.c.close(stream.out_fd);
+    // ⚠️ `kill(0, …)` 은 프로세스 그룹 전체다 — pid 를 반드시 검사한다(에이전트 스트림과 같은 이유).
+    if (stream.pid <= 0) return;
+    _ = std.c.kill(stream.pid, std.c.SIG.TERM); // ② 보루
+    _ = reapPid(stream.pid);
 }
 
 /// 스트리머를 끝낸다. **fd 를 먼저 닫는다** — 자식은 stdout 이 끊기면 다음 write 에서 EPIPE 로 죽는다.

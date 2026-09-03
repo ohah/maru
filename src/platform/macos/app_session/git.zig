@@ -26,6 +26,8 @@ const git_status = maru.session.git_status; // check-ignore 출력 파서(순수
 const layout_math = app_session_mod.layout_math;
 const scm_dock_ops = @import("scm_dock.zig");
 const dock_ops = @import("dock.zig");
+const ssh_upload = @import("../ssh_upload.zig"); // 원격 감시자 spawn(RW3)
+const remote_watch_mod = @import("../remote_watch.zig"); // 감시 채널 상태·줄 파싱(RW3)
 const pane_ops = @import("pane.zig");
 const editor_diff_ops = @import("editor_diff.zig");
 const settings_ops = @import("settings.zig");
@@ -221,6 +223,82 @@ fn forgetReadFailure(self: *AppSession) void {
     self.git_failure = .generic;
 }
 
+/// **원격 감시 채널을 돌린다**(RW3). 틱마다 한 번 — 띄울 때가 됐으면 띄우고, 온 것이 있으면 읽고,
+/// 「바뀌었다」가 왔으면 **지금 있는 읽기 경로를 다시 건다.**
+///
+/// 읽기 파이프라인은 안 건드린다(계약 §2 「트리거만 바꾼다」). 여기서 하는 일은 `refreshGitStatus` 를
+/// 부르는 것뿐이고, 그 함수가 이미 「목록 + 비활성 머리 줄」을 함께 낡음 표시한다.
+pub fn pumpRemoteWatch(self: *AppSession) void {
+    if (builtin.os.tag != .macos) return;
+    // **도크가 안 보이면 안 돈다.** 감시는 화면을 위한 것이고, 안 보이는 동안 원격에 프로세스를
+    // 띄워 둘 이유가 없다(`pumpRepoStatus` 와 같은 게이트).
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) {
+        self.remote_watch.stop();
+        return;
+    }
+    const dest = self.git_repo_dest orelse {
+        self.remote_watch.stop(); // 로컬 목록이다 — 채널이 있을 이유가 없다
+        return;
+    };
+    const repo = self.git_repo orelse return;
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+
+    switch (self.remote_watch.phase) {
+        .backoff => {
+            if (now < self.remote_watch.retry_at_ns) return;
+            self.remote_watch.phase = .idle; // 때가 됐다 — 아래에서 다시 띄운다
+        },
+        .idle, .watching => {},
+    }
+
+    if (!self.remote_watch.started) {
+        // control socket 이 없으면 띄울 수 없다 — 있는 판정을 다시 만들지 않고 그 함수를 쓴다.
+        var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const ctl = remoteControlSocketFor(self, dest, &ctl_buf) orelse {
+            self.remote_watch.phase = .backoff;
+            self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+            return;
+        };
+        const stream = ssh_upload.spawnRemoteWatch(self.allocator, ctl, dest, repo) catch {
+            self.remote_watch.phase = .backoff;
+            self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+            return;
+        };
+        self.remote_watch.stream = stream;
+        self.remote_watch.started = true;
+        self.remote_watch.phase = .watching;
+        return; // 이번 tick 은 여기까지 — 방금 띄운 것에서 읽을 것은 없다
+    }
+
+    // 드레인. **논블로킹이라 UI 를 안 멈춘다**(에이전트 채널과 같은 규율).
+    var buf: [512]u8 = undefined;
+    var eof = false;
+    while (true) {
+        const n = std.c.read(self.remote_watch.stream.out_fd, &buf, buf.len);
+        if (n > 0) {
+            self.remote_watch.pending.appendSlice(self.allocator, buf[0..@intCast(n)]) catch break;
+            continue;
+        }
+        if (n == 0) eof = true;
+        break;
+    }
+
+    const changes = remote_watch_mod.takeChanges(&self.remote_watch.pending, self.allocator);
+    if (changes > 0) {
+        self.remote_watch.changes +|= changes;
+        // **여기가 이 트랙의 전부다** — 트리거만 걸고 나머지는 기존 경로가 한다.
+        refreshGitStatus(self);
+    }
+
+    // **EOF 는 채널이 죽었다는 뜻이다.** 감시자는 스스로 안 끝난다(무한 루프) — 끝났다면 원격에서
+    // 죽었거나 소켓이 끊긴 것이다. 정리하고 백오프 뒤 다시 띄운다.
+    if (eof) {
+        self.remote_watch.stop();
+        self.remote_watch.phase = .backoff;
+        self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+    }
+}
+
 pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     const want = dest orelse {
         const had = self.git_repo_dest;
@@ -235,6 +313,9 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
             // 낡음 표시로는 부족하다 — `repoStatusTextFor` 가 `stale` 을 안 봐서 **파일 줄이 살아 있고**,
             // 그 줄을 누르면 저쪽에서 읽은 경로가 지금 기계로 날아간다(RS5 부터 실제로 원격까지 간다).
             scm_dock_ops.forgetRepoStatus(self);
+            // **감시 채널도 끊는다**(RW3). 그 채널은 «저 기계의 그 저장소» 를 보고 있었다 — 남겨 두면
+            // 로컬로 돌아온 화면에 저쪽 변화가 트리거로 들어온다.
+            self.remote_watch.stop();
         }
         return;
     };
@@ -248,6 +329,7 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     scm_dock_ops.clearScmWriteError(self);
     forgetReadFailure(self);
     scm_dock_ops.forgetRepoStatus(self); // 같은 이유 — 위 분기의 주석을 본다
+    self.remote_watch.stop(); // 감시 채널도(RW3) — 다음 tick 이 새 호스트로 다시 띄운다
     self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
 }
 

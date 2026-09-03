@@ -4588,6 +4588,24 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
+    const remote_watch_channel_step = b.step(
+        "test-remote-watch-channel",
+        "Remote watch channel wiring (pipe stdin, stop order, lifetime hook, trigger only)",
+    );
+    const remote_watch_channel_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_watch_channel_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_watch_channel = b.addRunArtifact(remote_watch_channel_tests);
+    run_remote_watch_channel.addArg("--maru-expect-tests=4");
+    run_remote_watch_channel.addArg("--maru-expect-passed=4");
+    run_remote_watch_channel.setCwd(b.path("."));
+    remote_watch_channel_step.dependOn(&run_remote_watch_channel.step);
+    boundary_step.dependOn(&run_remote_watch_channel.step);
+
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",

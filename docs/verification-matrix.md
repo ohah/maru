@@ -985,6 +985,15 @@ cleanup을 관측한 뒤 canonical leaf를 exclusive `0600` output으로 게시�
 검증한다. 이 증거는 GitHub candidate
 attestation, default-false leaf 생산, 두 baseline leaf의 trusted workflow 실행이나 aggregate publication을 대신하지 않는다.
 
+U5 baseline-A의 default-false leaf 생산은 실제 signed app bootstrap 관측을 종료 gate로 삼는다. opt-in
+`macos-session-host-default-false-evidence`는 trusted UUID와 candidate DMG·frozen executable을 no-follow digest 및 strict signer로
+고정하고, 사용자 config·session-host registry와 분리된 비어 있는 root에서 actual app executable을 시작한다. 제품 bootstrap 직후
+Zig owner snapshot의 exact `false/absent/missing`을 닫힌 ABI 결과로 관측하고 candidate 재검증과 정상 child 종료 뒤에만 canonical
+`maru.session-host-default-false-baseline.v1` leaf를 exclusive `0600`으로 게시해야 한다. focused
+`test-session-host-default-false-evidence`는 schema SSOT, ABI enum의 닫힘, stale output invalidation, caller 결과 bool 0, candidate
+재검증과 exclusive publication 경계를 검증한다. 이 gate는 G3 default-on 승인, GitHub provenance, DMG notarization 또는 두 A leaf의
+trusted workflow 실행·aggregate publication을 대신하지 않는다.
+
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
 bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual

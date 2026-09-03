@@ -1883,6 +1883,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   duration과 AppKit 진단용 summary는 release leaf에 넣지 않는다. 이 leaf는 candidate file의 GitHub attestation이나 draft release
   provenance를 독자적으로 승인하지 않으며, baseline aggregate owner가 같은 candidate authority에 다시 결속한다.
 
+  default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
+  명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와
+  같은 no-follow identity·SHA-256·strict Apple designated-requirement 경계로 고정한다. 테스트 전용의 비어 있는 격리 config root에서
+  실제 app executable을 시작하고, Swift가 writer lease를 얻어 `maru_macos_session_config_bootstrap`을 성공시킨 직후 Zig bootstrap
+  owner가 가진 typed snapshot을 ABI의 닫힌 관측값으로 읽는다. 성공 관측은 exact `value=false`,
+  `SessionKeepAliveProvenance.absent`, `FileProvenance.missing`이어야 하며 환경변수나 caller가 준 bool을 결과로 승격하지 않는다.
+  관측 전후 candidate identity와 signer가 그대로이고 direct child가 정상 종료한 뒤에만 exact
+  `maru.session-host-default-false-baseline.v1` leaf를 absent output에 mode `0600`으로 배타 게시한다. leaf의 `resolved_default=false`,
+  `explicit_override_present=false`, `signed_product=true`는 각각 이 제품 관측과 하네스의 실제 서명 검증에서만 유도한다. 격리 root는
+  사용자 config 및 session-host registry와 달라야 하고 성공·실패 모두 자기 artifact만 정리한다. 이 leaf는 default-on 전환을
+  승인하지 않으며, candidate의 GitHub attestation·DMG deep signature/notarization·draft release provenance도 독자적으로 승인하지 않는다.
+
   `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
   digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical
   aggregate bytes만 반환하고 filesystem을 열거나 publication 성공을 주장하지 않는다. 후속 executable adapter가 기존

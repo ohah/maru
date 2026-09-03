@@ -14,6 +14,8 @@ test "product-child fixtures require an isolated root and the default suite neve
     defer allocator.free(launcher);
     const runner = try readSource(allocator, "tools/simple_test_runner.zig");
     defer allocator.free(runner);
+    const signed_upgrade = try readSource(allocator, "tests/session_host_signed_upgrade_e2e.zig");
+    defer allocator.free(signed_upgrade);
 
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -67,6 +69,12 @@ test "product-child fixtures require an isolated root and the default suite neve
         runner,
         "if (setenv(\"CFFIXED_USER_HOME\", root.ptr, 1) != 0)",
     ) != null);
+    // signed product E2E 자체는 `builtin.is_test == false`로 컴파일된다. 따라서 parent가
+    // current-user helper를 부르면 실제 앱 root로 빠지며, exact isolated root helper만 허용한다.
+    try std.testing.expect(std.mem.indexOf(u8, signed_upgrade, "socketDirPathUnder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, signed_upgrade, "socketPathUnder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, signed_upgrade, "prepareCurrentUserNamespace") == null);
+    try std.testing.expect(std.mem.indexOf(u8, signed_upgrade, "currentSocketPathIn") == null);
 }
 
 test "common runner binds session registry and app workspace to the same pid root" {

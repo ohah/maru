@@ -1058,14 +1058,15 @@ Debug·ReleaseFast component 9개로 고정한다. actual-DMG macOS E2E는 성�
 `/dev/disk*` identity를 detach하고 private mount/work-directory residue가 0임을 증명한다. 이 gate가 green이어도 GitHub 관측·manifest·attestation·evidence
 aggregate의 최종 조립과 release workflow 배선은 별도이며 U5 완료 판정을 바꾸지 않는다.
 
-U5의 non-empty 성공 경로는 `test-session-host-signed-upgrade`로 자동 실행할 수 있다. 이 opt-in gate는 strict
+U5의 non-empty 성공 경로는 trusted run UUID를 `-Dsession-host-release-test-uuid`로 주는
+`test-session-host-signed-upgrade`로 자동 실행할 수 있다. 이 opt-in gate는 strict
 same-designated-requirement signer인 caller-attested frozen N-1/current executable을 받아 echo를 끈 실제 PTY shell의
 pre/post child output, 동일 host/child PID·host/runtime ID, epoch/build 전진과 `committed/none`, capability 유지,
-종료 marker 뒤 host-owned reap과 typed inventory 연속 2회 부재를 단언한다. pathname 대신 두 SHA/build ID와 signer
-requirement digest 및 reap 증거를 담은 JSON artifact를 남긴다. 입력의 release
+종료 marker 뒤 host-owned reap과 typed inventory 연속 2회 부재를 단언한다. pathname 대신 trusted run UUID, 두 executable
+SHA와 signer requirement digest 및 reap 증거를 담은 canonical v2 leaf를 남긴다. 입력의 release
 인접성/방향은 executable 내부에서 증명하지 않으므로 release job은
 [`maru.session-host-release.v1`](session-host-upgrade.md#u5--제품-활성화)의 exact predecessor·compatibility·서명·asset·attestation
-계약을 summary와 교차검증해야 한다. 실제 배포 artifact A를 보존해 B job에서 A daemon→B adapter→same-PID exec→B GUI
+계약을 leaf와 교차검증해야 한다. 실제 배포 artifact A를 보존해 B job에서 A daemon→B adapter→same-PID exec→B GUI
 attach를 실행하는 named release gate와 artifact owner가 없으면 provenance 미검증이다.
 하네스의 1-runtime 복원 소비자는 GUI 제품 경계인 `RemoteRuntime.attachExisting`이어야 하며, raw MRSH attach만으로는
 GUI exact reattach를 주장하지 않는다. 하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당

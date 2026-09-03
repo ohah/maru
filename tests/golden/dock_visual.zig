@@ -59,6 +59,54 @@ const channel_tolerance: u8 = 2;
 // 캡처가 **0 픽셀** 차이로 맞았다. 근거가 사라진 관용은 게이트만 약하게 하므로 넣지 않는다. 다시 차이가
 // 나면 그때는 원인을 찾을 일이지 예산을 늘릴 일이 아니다.
 
+/// 캡처를 만드는 소스. **이 목록이 좁으면 낡음을 놓치고, 넓으면 무관한 변경에 시끄러워진다.**
+/// 지금은 캡처를 실제로 그리는 둘만 둔다 — 프레임을 세우는 쪽(`lab.zig`)과 시나리오를 고르는 쪽
+/// (`chrome_lab_smoke.zig`). 이 둘 밖의 변경(예: 라벨을 만드는 `agent_selection.zig`)으로 캡처가 낡는
+/// 경우는 못 잡는다. 그때는 아래 「캡처 나이」 초 수가 사람에게 단서가 된다 — **판정이 아니라 사실을
+/// 보이는 것이 이 줄의 몫이다.**
+const capture_producers = [_][]const u8{
+    "src/platform/macos/chrome_lab_smoke.zig",
+    "src/platform/macos/chrome/lab.zig",
+};
+
+const CaptureAge = struct {
+    age_ns: i128,
+    /// 캡처가 생산자 소스보다 **오래됐는가**. 참이면 그 그림은 지금 코드의 것이 아닐 수 있다.
+    older_than_producer: bool,
+};
+
+/// 캡처가 생산자보다 낡았는가 — **순수 판정**(시각만 받는다).
+///
+/// IO 를 섞지 않는 이유는 판정자를 세우기 위해서다. 이 저장소는 이런 판단이 호출부 `if` 안에 숨었다가
+/// 조용히 깨진 전례가 있다(`ScanSkip`·`screenOriginOf`).
+fn captureIsStale(capture_ns: i128, newest_producer_ns: i128) bool {
+    return capture_ns < newest_producer_ns;
+}
+
+/// 캡처 파일의 나이와 「생산자보다 낡았는가」. 캡처가 없거나 stat 이 실패하면 `null` — **그때는 아무 말도
+/// 하지 않는다**(없는 파일은 위 `FileNotFound` 가 이미 다룬다).
+fn captureAge(io: std.Io, capture_path: []const u8) ?CaptureAge {
+    const cap = std.Io.Dir.cwd().statFile(io, capture_path, .{}) catch return null;
+    var newest: i128 = 0;
+    for (capture_producers) |src| {
+        const st = std.Io.Dir.cwd().statFile(io, src, .{}) catch continue;
+        if (st.mtime.nanoseconds > newest) newest = st.mtime.nanoseconds;
+    }
+    const now: i128 = std.Io.Clock.real.now(io).nanoseconds;
+    return .{
+        .age_ns = now - cap.mtime.nanoseconds,
+        .older_than_producer = newest != 0 and captureIsStale(cap.mtime.nanoseconds, newest),
+    };
+}
+
+test "골든 캡처가 생산자보다 낡았는지 판정한다 — 그 사실을 말해야 사흘 묵은 그림을 회귀로 안 읽는다" {
+    // 2026-09-03: 두 세션이 각자 사흘 묵은 캡처를 「시각 회귀」로 판정했다. 픽셀 수까지 정확히 세어
+    // 나오는 메시지라 아무도 그림의 나이를 안 물었다.
+    try std.testing.expect(captureIsStale(100, 200)); // 캡처가 먼저 만들어졌다 = 낡았다
+    try std.testing.expect(!captureIsStale(200, 100)); // 캡처가 나중 = 신선하다
+    try std.testing.expect(!captureIsStale(100, 100)); // 같은 시각이면 낡은 것이 아니다
+}
+
 const Case = struct {
     name: []const u8,
     capture: []const u8,
@@ -885,6 +933,23 @@ test "session dock visual golden" {
             return err;
         };
         if (diff.differing_pixels != 0) {
+            // **먼저 「이 그림이 언제 것인가」를 말한다.** 캡처는 `zig-out` 의 빌드 산출물이라 생산자
+            // (`macos-chrome-lab-smoke`)를 다시 안 돌리면 **옛 이미지가 그대로 남는다.** 그러면 이 게이트는
+            // 지금 코드와 무관한 그림을 골든과 비교해 「시각 회귀」라는 **가장 그럴듯한 거짓말**을 낸다 —
+            // 픽셀 수까지 정확히 세어서. 실제로 두 세션이 그 거짓말을 각자 믿고 사흘 묵은 캡처를 「회귀」로
+            // 판정했다(2026-09-03). 그때까지 이 줄이 없어서 아무도 그림의 나이를 안 물었다.
+            //
+            // 이 프로젝트는 같은 부류를 이미 여러 번 막았다(`--maru-expect-tests` 는 「이름이 안 맞아 0개가
+            // 돌아도 초록」을, `evicted` 는 「말없이 밀림」을). 골든만 그 규율이 빠져 있었다.
+            if (captureAge(io, capture_path)) |age| {
+                std.debug.print("  캡처 나이: {d}초 전에 만들어졌다", .{@divTrunc(age.age_ns, std.time.ns_per_s)});
+                if (age.older_than_producer) std.debug.print(
+                    " — ⚠️ **생산자 소스보다 낡았다.** `zig build macos-chrome-lab-smoke` 를 먼저 돌리고 다시 보라" ++
+                        "(그 스텝은 `test-macos-chrome-lab-smoke` 와 다르다 — 뒤엣것은 계약 테스트라 캡처를 안 만든다)",
+                    .{},
+                );
+                std.debug.print("\n", .{});
+            }
             std.debug.print(
                 "시각 회귀: {s}\n  계약: {s}\n  다른 픽셀 {d}개, 최대 채널 차이 {d}, 처음 어긋난 곳 ({d},{d})\n  갱신이 의도라면 MARU_UPDATE_GOLDEN=1로 다시 만들고 **눈으로 확인**하라\n",
                 .{ case.name, case.contract, diff.differing_pixels, diff.max_channel_delta, diff.first_x, diff.first_y },

@@ -84,6 +84,16 @@ codesign --force --options runtime --timestamp \
     --sign "$SIGN_ID" "$app/$helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
+# RW2b 감시자(Resources/remote-watch/<variant>/maru-remote-watch). **번들 서명은 이들을 봉인만 하고
+# 서명하지 않는다** — `codesign "$app"` 은 Resources 안의 Mach-O 를 seal 에 넣을 뿐이라 각 실행파일은
+# 서명도, hardened runtime 도, secure timestamp 도 없는 채로 남는다. `--verify --strict --deep` 은
+# 중첩 **번들**을 따라가므로 이것을 잡지 못하고 통과하지만, 공증은 모든 Mach-O 를 검사해 거부한다.
+# 2026-09-03 실측: 공증이 `Invalid` 로 돌아왔고 사유 6 건이 전부 이 두 파일이었다.
+# linux 변종은 ELF 라 서명 대상이 아니므로 `macos-*` 만 고른다.
+for watcher in "$app"/Contents/Resources/remote-watch/macos-*/maru-remote-watch; do
+    [ -f "$watcher" ] || continue
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$watcher"
+done
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
 codesign --verify --strict --deep "$app"
 

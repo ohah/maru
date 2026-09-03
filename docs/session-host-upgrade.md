@@ -2345,6 +2345,29 @@ redownload 이후 asset 교환은 published authority가 아니다. 마지막 fr
 snapshot failure는 mutation 0과 `.empty`, 응답 뒤 snapshot failure는 exact release ID를 보존한 `.cleanup_required`여야 한다. 이
 component는 post-publish release attestation, live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.36 published release attestation 권위
+
+공개 직후 검증은 published tag를 다시 검색하거나 caller가 release/asset scalar를 재제출하는 경로가 아니다.
+`release_adapter_github_post_publish_attestation.zig`의 final-address move-only `VerifiedRelease`가 ready
+`PublishedRelease`, 그 publication이 소비한 ready `DraftAssets`·`RedownloadValidation`과 attachment 권위 graph, checkout 전에 고정한 GitHub CLI, validated token과 같은
+release phase `Deadline`을 함께 소비한다. authority snapshot은 canonical manifest의 repository/release/source와 manifest가
+열거한 세 asset, held manifest 자체의 name/size/SHA-256, published release ID/tag/source 및 네 asset ID를 한 번에 다시 유도한다.
+
+owner는 GitHub tag ref와 최대 8개의 annotated tag chain을 기존 bounded resolver로 읽어 manifest source commit까지 수렴시키고,
+그 첫 ref target을 release attestation의 `tag_ref_sha`와 별도로 결속한다. 이어 exact `release verify` 한 번과 DMG, frozen executable,
+evidence, manifest 순서의 exact `release verify-asset` 네 번을 수행한다. 각 child 직전과 직후에는 CLI, held inode와 전체 publication
+graph를 다시 검증하며 모든 호출은 같은 absolute monotonic deadline을 소비한다. release/asset statement는 모두 exact release
+ID/tag/tag-ref와 공개 시점 네 asset name/SHA-256 집합을 가져야 한다. lightweight tag의 ref SHA와 source commit이 우연히 같다는
+가정은 하지 않는다.
+
+모든 tag-chain/release/asset 검증과 마지막 fresh authority fence가 끝난 뒤에만 exact 네 asset ID/SHA-256을 소유한 `VerifiedRelease`를 게시한다. copied/pre-owned/aliased
+result, pathname·inode·mode·link-count·digest drift, publish authority 교환, foreign capture, child/timeout/allocation failure는 결과
+publication 0이다. 공개 자체는 이미 끝났으므로 실패를 draft cleanup이나 publish 재시도로 바꾸지 않고 audit 실패로 남긴다.
+focused gate `test-session-host-release-adapter-post-publish-attestation`은 exact 순서, shared deadline, tag-ref/source 분리, 매 child
+전후 authority fence, owner/alias/drift와 전 child/authority allocation fail-index를 Debug·ReleaseFast typed composition에서 검증한다.
+held inode의 actual filesystem 재검증은 이 owner가 매 snapshot마다 호출하는 `test-session-host-release-adapter-draft-assets`가 별도로 소유한다.
+이 component는 live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -1005,6 +1005,13 @@ revalidation을 Debug·ReleaseFast에서 검증한다. 첫 remote mutation 뒤 p
 cleanup-required 또는 불확정 호출을 remote-state-unknown terminal audit state로 보존해야 한다. 이 gate는 draft redownload validation,
 publish, post-publish release attestation이나 frozen signed U5 제품 E2E 증거가 아니다.
 
+- `test-session-host-release-adapter-post-publish-attestation`은 ready published authority와 원본 ready attachment/redownload 영수증 및 attachment graph를 다시 결속하고,
+  GitHub tag ref/annotated chain을 manifest source commit까지 bounded 수렴시킨 뒤 release verify exact 1회와 held 네 asset의
+  verify-asset exact 4회를 수행한다. tag-ref SHA와 source commit을 구분하고 각 child 전후 CLI·held inode·publication graph,
+  shared deadline, move-only result와 실패 publication 0을 Debug·ReleaseFast typed composition에서 검증한다. actual held filesystem
+  재검증은 매 snapshot이 호출하는 draft-assets gate가 별도로 소유한다. live release workflow나
+  frozen signed U5 제품 E2E의 증거는 아니다.
+
 U5 exact draft asset redownload는 ready `DraftAuthority`·`DraftAssets`와 candidate/authored attestation, canonical held manifest 및 네 held
 file authority에서만 exact GitHub asset ID와 expected name/size/SHA를 유도한다. `test-session-host-release-adapter-draft-redownload`는
 DMG→frozen executable→evidence→manifest exact request 순서, clean token environment, body 비저장 bounded streaming count/SHA, shared

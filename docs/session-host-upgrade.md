@@ -1969,17 +1969,15 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   게시하며, aggregate publication 뒤에도 같은 deadline과 candidate를 마지막으로 검증해야 성공을 반환한다. 각 child는 caller가
   고른 UUID·digest·성공 bool을 받지 않고 같은 candidate identity view에서 입력을 유도해야 한다.
 
-  어느 단계든 실패하면 aggregate→signed-app-quit→default-false 순서로 이미 시도한 child를 best-effort 정리한다. cleanup failure는
-  원래 오류보다 우선하고 뒤 cleanup도 계속한다. 실패한 cleanup owner의 exact retry authority와 이미 게시된 residue는 제품
-  owner가 보존해야 하며 성공 결과로 축소하지 않는다. 성공 경로는 세 child owner를 다음 manifest/attestation 단계가 소비하도록
-  보존한다. candidate authority와 입력 app/DMG/frozen executable은 이 transaction의 cleanup 대상이 아니며 실제 앱 사용자
-  session-host registry를 work root로 사용하지 않는다. focused gate
-  `test-session-host-release-adapter-candidate-baseline-phase`는 exact 실행·재검증 순서, shared deadline identity, 모든 setup
-  fail-index의 역순 cleanup, final candidate/deadline drift와 cleanup failure의 성공 결과 0을 Debug·ReleaseFast에서
-  검증한다. 제품 runner·workflow caller는 후속 gate이며, 이 phase만으로 signed leaf 실행이나 release publication을 완료했다고
-  주장하지 않는다.
+  실패는 attempted child를 역순 정리하고 cleanup failure와 retry owner를 보존한다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-phase`는 순서·deadline·fail-index·cleanup을 Debug·ReleaseFast에서 검증한다.
 
-  `release_adapter_candidate_baseline_product.zig` owns execution state.
+  `release_adapter_candidate_baseline_product.zig`는 final-address execution과 fixed candidate/work 경로를 소유한다. 후속
+  `release_adapter_candidate_baseline_app.zig`는 `CandidateProduct` 재검증 view에서 frozen executable SHA와 designated-requirement
+  digest를 유도하고, 보존된 `Maru.app`의 main executable과 bundled CLI를 no-follow regular executable로 pin한다. main bytes는 frozen
+  SHA와 같고 두 파일은 distinct inode·link count 1이어야 한다. observer가 얻은 두 strict designated-requirement digest도 product와
+  같아야 한다. pin 전후 product/path identity가 고정돼야 authority를 반환하며 copied/pre-owned/alias, symlink·hardlink, digest/signer
+  불일치와 교체는 child 실행 전에 실패한다. 앱 실행·leaf/evidence 게시·사용자 config/session-host registry 접근은 후속이다.
 
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한

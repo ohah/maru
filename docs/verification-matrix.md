@@ -1079,6 +1079,13 @@ cleanup-failure exact retry set을 `test-session-host-release-adapter-candidate-
 concrete typed candidate graph와 app/frozen bytes·SHA·strict signer를 결속하는 `bindCandidate`, actual filesystem leaf runner 및
 aggregate publisher, workflow caller·artifact attestation·manifest/draft publication과 frozen U5 전체 E2E는 후속 증거다.
 
+U5 baseline-A preserved candidate app authority는 `release_adapter_candidate_baseline_app.zig`가 candidate product의 frozen SHA와
+designated-requirement digest에 `Maru.app` main·bundled CLI의 held no-follow executable identity를 결속한다. main/frozen digest 불일치,
+두 executable의 signer 불일치, symlink·hardlink·같은 inode·관측 중 pathname/candidate drift와 copied/pre-owned/alias result는 child 실행
+전에 실패한다. `test-session-host-release-adapter-candidate-baseline-app`은 actual macOS filesystem에서 이 결속과 final-address owner의
+재검증·해제를 Debug·ReleaseFast로 검증한다. 실제 AppKit/CLI 실행, 격리 HOME/config/session registry, leaf/evidence publication과 release
+workflow 배선은 후속 runner 증거다.
+
 U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
 predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
 fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/

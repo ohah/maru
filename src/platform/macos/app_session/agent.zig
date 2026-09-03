@@ -747,11 +747,23 @@ pub fn pollAgentKinds(self: *AppSession) void {
             for (pane.terms.items) |term| {
                 if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                 const be = self.backendFor(term);
-                be.readObservation(term.rt.handle, self.allocator, &term.rt.observation, periodic_kind_probe) catch {
+                be.readObservation(term.rt.handle, self.allocator, &term.rt.observation, periodic_kind_probe) catch |err| {
                     // 마지막 coherent snapshot은 유지하되 current로 가장하지 않는다. remote reconnect 동안 kind/state를
                     // none/idle로 덮지 않는 것이 알림 누락보다 안전하다.
-                    if (term.rt.observation.availability == .current)
+                    // ⚠️ **사유를 남긴다.** 예전에는 `catch {` 로 오류를 통째로 버려서, 관측이 `stale` 에 머물러도
+                    // **왜인지 알 방법이 없었다** — 기록도 notice 도 로그도 없었다. 실사용에서 그 상태가 30 분 넘게
+                    // 지속됐는데(2026-09-03) 사유가 안 남아 원격을 하나씩 무죄로 만들어 가며 추측할 수밖에 없었다.
+                    //
+                    // **`if (… == .current)` 안에 둔다 = 전이 순간만 찍힌다.** 이 자리는 모든 tab/pane/term 을 도는
+                    // 주기 루프라 매 회차 찍으면 로그 폭탄인데, 이미 `stale` 이면 이 조건이 막는다. 진동하면 여러 번
+                    // 찍히지만 그 진동 자체가 정보다.
+                    if (term.rt.observation.availability == .current) {
+                        std.log.scoped(.agent).warn(
+                            "observation read failed, marking stale (periodic probe) err={s}",
+                            .{@errorName(err)},
+                        );
                         term.rt.observation.availability = .stale;
+                    }
                 };
                 const observation_current = term.rt.observation.availability == .current;
                 const foreground_available = observation_current and term.rt.observation.foreground_available;

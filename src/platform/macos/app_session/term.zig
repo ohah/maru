@@ -390,9 +390,24 @@ pub fn refreshTermObservation(self: *AppSession, term: *Term, include_foreground
         if (term.rt.observation.availability == .current and
             term.rt.observation.title_generation == generation) return;
     }
-    self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, include_foreground) catch {
-        if (term.rt.observation.availability == .current)
+    self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, include_foreground) catch |err| {
+        // ⚠️ **사유를 남긴다.** 예전에는 `catch {` 로 오류를 통째로 버려서, 관측이 `stale` 에 머물러도
+        // **왜인지 알 방법이 없었다** — 기록도 notice 도 로그도 없었다. 실사용에서 그 상태가 30 분 넘게
+        // 지속됐는데(2026-09-03) 사유가 안 남아 원격을 하나씩 무죄로 만들어 가며 추측할 수밖에 없었다.
+        //
+        // **`if (… == .current)` 안에 둔다 = 전이 순간만 찍힌다.** 이 자리는 모든 tab/pane/term 을 도는
+        // 주기 루프라 매 회차 찍으면 로그 폭탄인데, 이미 `stale` 이면 이 조건이 막는다. 진동하면 여러 번
+        // 찍히지만 그 진동 자체가 정보다.
+        //
+        // **두 자리를 함께 고친다.** 같은 모양이 `app_session/agent.zig` 의 주기 probe 에도 있어, 한 곳만
+        // 남기면 다른 경로로 들어온 실패는 여전히 조용하다.
+        if (term.rt.observation.availability == .current) {
+            std.log.scoped(.agent).warn(
+                "observation read failed, marking stale (refresh) err={s}",
+                .{@errorName(err)},
+            );
             term.rt.observation.availability = .stale;
+        }
     };
 }
 

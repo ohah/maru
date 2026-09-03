@@ -107,7 +107,10 @@ test "릴리스 워크플로: 붙든 `gh` 를 실제로 검증하고 그 결과�
 
     // 경로에 개행·CR 이 든 경우를 거른다. 원본은 이것을 `\$canonical.*\\n.*\$canonical.*\\r` 로
     // 재는데, 한 줄 안에서 **그 순서로** 넷이 나오는지를 본 것이다.
-    try std.testing.expect(hasOrderedOnOneLine(block, &.{ "$canonical", "\\n", "$canonical", "\\r" }));
+    //
+    // **개수까지 본다(`= 1`).** 처음에는 「있기만 하면」으로 옮겼는데, 원본은 `grep -c … = 1` 이라
+    // 그 가드가 **둘로 늘어도** 빨개진다. 적대적 검증 1 회차가 그 차이를 잡았다.
+    try std.testing.expectEqual(@as(usize, 1), countOrderedOnOneLine(block, &.{ "$canonical", "\\n", "$canonical", "\\r" }));
 
     // **`GITHUB_ENV` 가 아니라 `GITHUB_OUTPUT` 이다.** env 로 내보내면 그 값이 뒤따르는 모든 단계의
     // 환경에 남는다 — 이 워크플로가 굳이 output 두 줄로 가르는 이유다.
@@ -117,8 +120,9 @@ test "릴리스 워크플로: 붙든 `gh` 를 실제로 검증하고 그 결과�
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(block, "GITHUB_ENV"));
 }
 
-/// 한 줄 안에 `parts` 가 **그 순서대로** 모두 나오는 줄이 있는가.
-fn hasOrderedOnOneLine(text: []const u8, parts: []const []const u8) bool {
+/// 한 줄 안에 `parts` 가 **그 순서대로** 모두 나오는 줄의 **수**. 원본의 `grep -c <순서 정규식>` 이다.
+fn countOrderedOnOneLine(text: []const u8, parts: []const []const u8) usize {
+    var n: usize = 0;
     var it = std.mem.splitScalar(u8, text, '\n');
     line: while (it.next()) |line| {
         var at: usize = 0;
@@ -126,9 +130,9 @@ fn hasOrderedOnOneLine(text: []const u8, parts: []const []const u8) bool {
             const found = std.mem.indexOfPos(u8, line, at, p) orelse continue :line;
             at = found + p.len;
         }
-        return true;
+        n += 1;
     }
-    return false;
+    return n;
 }
 
 test "릴리스 워크플로: 모든 Action 이 40 자리 SHA 로 못박혀 있다" {
@@ -152,11 +156,18 @@ test "릴리스 워크플로: 모든 Action 이 40 자리 SHA 로 못박혀 있�
         if (rest.len == 0) continue;
         seen += 1;
 
-        const at = std.mem.lastIndexOfScalar(u8, rest, '@') orelse {
+        // **`@` 는 정확히 하나여야 한다.** 원본 정규식이 `^[^@[:space:]]+@…$` 라 이름 쪽에 `@` 를 못
+        // 넣는다. 처음에는 `lastIndexOf` 로 잘랐는데 그러면 `evil@thing@<40자리>` 가 **통과한다** —
+        // 핀 검사에서 그것이 새면 검사가 있으나 마나다(적대적 검증 1 회차).
+        const at = std.mem.indexOfScalar(u8, rest, '@') orelse {
             std.debug.print("unpinned Action (no @): {s}\n", .{rest});
             return error.UnpinnedAction;
         };
         const sha = rest[at + 1 ..];
+        if (std.mem.indexOfScalar(u8, sha, '@') != null) {
+            std.debug.print("unpinned Action (more than one @): {s}\n", .{rest});
+            return error.UnpinnedAction;
+        }
         if (sha.len != 40) {
             std.debug.print("unpinned Action (not a 40-hex SHA): {s}\n", .{rest});
             return error.UnpinnedAction;
@@ -177,10 +188,19 @@ test "릴리스 워크플로: 태그 push 로만 켜진다" {
 
     // **트리거를 통째로 고정한다.** 「`workflow_dispatch` 를 하나 더했다」가 이 파이프라인에서는
     // 「아무 브랜치에서나 릴리스를 쏠 수 있다」와 같은 말이다.
-    const block = blockUntil(text, "on:\n", "permissions:") orelse return error.TriggerBlockMissing;
+    // **줄바꿈을 찾는 바늘에 넣지 않는다.** `"on:\n"` 으로 찾으면 CRLF 작업 트리에서 아예 못 찾는다
+    // (실측: `TriggerBlockMissing`). 줄 머리를 먼저 찾고 거기서부터 자른다.
+    const on_at = std.mem.indexOf(u8, text, "\non:") orelse return error.TriggerBlockMissing;
+    const block = blockUntil(text[on_at + 1 ..], "on:", "permissions:") orelse return error.TriggerBlockMissing;
     // **끝 공백을 턴다.** 원본은 `$(...)` 로 받았고 그것이 끝 개행을 지운다 — 그래서 `permissions:`
     // 앞의 빈 줄이 비교에 안 들어갔다. 안 털면 그 빈 줄 하나 때문에 옮긴 판정이 원본과 달라진다.
-    const got = std.mem.trimEnd(u8, block, "\r\n");
+    //
+    // **CR 도 턴다.** `core.autocrlf=true` 로 받은 작업 트리에서는 이 파일이 CRLF 다 — 그러면 통짜
+    // 비교가 계약과 아무 상관 없는 이유로 깨진다(원본 스크립트도 같은 약점이었다). 이 판정이 재는
+    // 것은 **트리거의 내용**이지 그 파일의 줄바꿈이 아니다.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    for (std.mem.trimEnd(u8, block, "\r\n")) |c| if (c != '\r') try buf.append(std.testing.allocator, c);
     const want = "on:\n  push:\n    tags: [\"v*\"]";
-    try std.testing.expectEqualStrings(want, got);
+    try std.testing.expectEqualStrings(want, buf.items);
 }

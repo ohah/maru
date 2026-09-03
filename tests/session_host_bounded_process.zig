@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const process = @import("bounded_process");
+const posix = std.posix;
 
 const shell: [:0]const u8 = "/bin/sh";
 
@@ -248,4 +249,41 @@ fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+}
+
+test "bounded process treats a child that exits before setpgid as grouped" {
+    // ACCES: the child reached exec first. SRCH: the child already exited.
+    // Both mean the group the child established for itself is in place. Only the
+    // classifier is judged here: reaching SRCH from a live spawn needs a low
+    // `RLIMIT_NOFILE` (7 of 300 at 256, none at this harness's 1048576), and the
+    // runner's limit is not this test's to set.
+    try std.testing.expectEqual(process.GroupOutcome.established, process.classifyGroupErrno(.ACCES));
+    try std.testing.expectEqual(process.GroupOutcome.established, process.classifyGroupErrno(.SRCH));
+    try std.testing.expectEqual(process.GroupOutcome.retry, process.classifyGroupErrno(.INTR));
+    try std.testing.expectEqual(process.GroupOutcome.failed, process.classifyGroupErrno(.PERM));
+    try std.testing.expectEqual(process.GroupOutcome.failed, process.classifyGroupErrno(.INVAL));
+}
+
+test "bounded process keeps the child status when a low descriptor limit opens the setpgid race" {
+    // `childExec` closes every descriptor up to `getdtablesize()` before exec, so
+    // how long the child lives before it can die — and therefore whether the
+    // parent's `setpgid` finds a zombie — is set by RLIMIT_NOFILE. The harness
+    // shell runs at 1048576 and never opens the race; `launchctl limit maxfiles`
+    // is 256, so the GUI app runs where it does open. This test spawns at 256.
+    var saved: posix.rlimit = undefined;
+    saved = posix.getrlimit(.NOFILE) catch return;
+    if (saved.cur <= 256) return;
+    posix.setrlimit(.NOFILE, .{ .cur = 256, .max = saved.max }) catch return;
+    defer posix.setrlimit(.NOFILE, saved) catch {};
+
+    var output: [16]u8 = undefined;
+    const missing: [:0]const u8 = "/definitely/missing/maru-bounded-process";
+    const argv = [_:null]?[*:0]const u8{missing.ptr};
+    var attempt: usize = 0;
+    while (attempt < 300) : (attempt += 1) {
+        try std.testing.expectError(
+            error.ChildFailed,
+            process.runCapture(std.testing.io, missing, &argv, &output, std.time.ns_per_s),
+        );
+    }
 }

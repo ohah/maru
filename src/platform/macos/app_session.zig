@@ -7133,6 +7133,14 @@ pub const AppSession = struct {
         // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
         // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
         // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
+        // **새 Term 을 만드는 것이 재시도 계기다.** `ensureRemoteBackend` 의 제품 호출자는 `init` 하나뿐이라,
+        // 시각 게이트만으로는 **창을 새로 열어야만** 복구된다. 그런데 사용자가 원하는 것은 보통 「터미널
+        // 하나 더 여는 것」이다 — 실측 사례가 그 모양이었다(2026-09-03: 원격 바이너리를 13 분 비웠다
+        // 되돌렸는데 **20 분이 지나도 재접속 안 함**, 스풀만 638KB 로 자람).
+        //
+        // 이미 붙어 있으면(`host_connect_failed` 가 안 섰으면) 이 호출은 `ensureRemoteBackend` 맨 앞의
+        // 「backend 있음」 조기 반환으로 즉시 끝난다 — 정상 경로에 비용을 안 얹는다.
+        if (is_macos and host_connect_failed) self.ensureRemoteBackend();
         if (is_macos and !host_connect_failed) {
             if (app_remote_backend) |*rb| {
                 rb.configureNotifications(self.loaded_config.config.notifications.osc) catch {};

@@ -12145,6 +12145,23 @@ pub fn build(b: *std.Build) void {
         signed_app_quit_evidence_harness_step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);
         run_session_host_tests.step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);
 
+        const default_false_evidence_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_default_false_evidence_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_default_false_evidence_tests = b.addRunArtifact(default_false_evidence_tests);
+        run_default_false_evidence_tests.addArg("--maru-expect-tests=3");
+        run_default_false_evidence_tests.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_default_false_evidence_tests.step);
+        const default_false_evidence_step = b.step(
+            "test-session-host-default-false-evidence",
+            "Validate the signed app default-false release evidence boundary",
+        );
+        default_false_evidence_step.dependOn(&run_default_false_evidence_tests.step);
+
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));
         run_signed_upgrade_e2e.has_side_effects = true;

@@ -46,6 +46,22 @@ pub fn originOfRule(rule_id: []const u8) Origin {
     return .screen;
 }
 
+/// 이 규칙이 **훅을 뒤집은** 것인가(§1.4 — 화면이 배지를 만들었다).
+///
+/// 화면이 이긴 자리는 C1·C2·C3 셋뿐이고, 그때만 사용자에게 표식을 보인다. **평소(B)는 조용해야 한다** —
+/// 훅이 정한 대로인 것이 예상이고, 늘 표식이 뜨면 그 신호가 아무 뜻도 없어진다.
+///
+/// ⚠️ **`C2-pending` 은 뒤집힌 것이 아니다.** 세는 중일 뿐 상태는 훅의 것이라(`origin` 도 `hook` 이다)
+/// 접두 비교(`r[0] == 'C'`)로 잡으면 「곧 뒤집힐지도 모른다」를 「뒤집혔다」로 보여 준다.
+///
+/// `A` 경로도 `origin` 이 `screen` 일 수 있지만 그것은 훅이 없는 것이지 뒤집은 것이 아니다 — 그래서
+/// `origin` 이 아니라 **규칙 이름**으로 판단한다.
+pub fn ruleIsFlip(rule: []const u8) bool {
+    return std.mem.eql(u8, rule, "C1") or
+        std.mem.eql(u8, rule, "C2") or
+        std.mem.eql(u8, rule, "C3");
+}
+
 pub const Input = struct {
     /// 훅이 세운 상태. **`null` 이면 훅 소스가 없다**(§1.1 A) — 설치 안 됨·게이트 꺼짐·로그 파일 없음이
     /// 전부 여기로 접힌다. 판정은 §1.2 가 소유하고 이 파일은 결과만 받는다.
@@ -315,6 +331,31 @@ test "AR-SKIP 화면이 바뀌었거나 출력이 흐르면 건너뛰지 않는�
     try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .output_active = true }).canSkip());
     try testing.expect(!(ScanSkip{ .screen = .idle, .generation_same = true, .expiry_probe = true }).canSkip());
     try testing.expect(!(ScanSkip{ .screen = .running, .generation_same = true }).canSkip());
+}
+
+test "AR-FLIP 뒤집은 규칙만 표식을 받는다 — C2-pending 과 A 는 아니다" {
+    // 화면이 이긴 자리만 사용자에게 보인다. 평소(B)에도 표식이 뜨면 그 신호가 아무 뜻도 없어진다.
+    try testing.expect(ruleIsFlip("C1"));
+    try testing.expect(ruleIsFlip("C2"));
+    try testing.expect(ruleIsFlip("C3"));
+
+    // **C2-pending 은 세는 중일 뿐 상태는 훅의 것이다**(origin 도 hook) — 접두 비교로 잡으면 「곧
+    // 뒤집힐지도 모른다」가 「뒤집혔다」로 보인다.
+    try testing.expect(!ruleIsFlip("C2-pending"));
+    // A 는 훅이 없는 것이지 뒤집은 것이 아니다. B·B0·D1·D2 도 훅을 따른 것이다.
+    for ([_][]const u8{ "A", "B", "B0", "D1", "D2", "" }) |r| try testing.expect(!ruleIsFlip(r));
+}
+
+test "AR-FLIP 권위표가 내는 rule 과 실제로 맞물린다 — 이름을 손으로 적지 않는다" {
+    // 위 판정자는 문자열을 손으로 적는다. 그 이름이 arbitrate 가 내는 것과 갈리면 표식이 조용히 사라지므로
+    // **실제 판정 결과**로 한 번 더 확인한다.
+    var a: Arbiter = .{};
+    try testing.expect(ruleIsFlip(a.arbitrate(.{ .hook = .blocked, .screen_seq = 1 }).rule)); // C1
+    a.reset();
+    try testing.expect(ruleIsFlip(a.arbitrate(.{ .hook = .running, .process_exited = true }).rule)); // C3
+    a.reset();
+    try testing.expect(!ruleIsFlip(a.arbitrate(.{ .hook = .running }).rule)); // B
+    try testing.expect(!ruleIsFlip(a.arbitrate(.{ .hook = null, .screen = .idle }).rule)); // A
 }
 
 test "AR-ORIGIN 실제 규칙 id 가 제 출처로 간다 — 진단이 거짓말하지 않게" {

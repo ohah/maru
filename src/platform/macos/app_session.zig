@@ -71053,6 +71053,54 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
 // [E1 §6.1] **트리거까지** 제품 경로로 몬다: 실제 claude 화면(실행 중 footer → 프롬프트 상자)을 term 코어에 흘려
 // `pollAgentState`가 running → idle을 판정하고, 그 순간 스냅샷이 찍히는지 본다. 위 테스트가 "찍힌 뒤"를 보고
 // 이 테스트가 "언제 찍는가"를 봐서, 에이전트 없이 §6.1 전 구간이 닫힌다.
+test "AW4 화면이 뒤집은 배지에만 각주 표식이 붙는다 (§1.4 · 사이드바)" {
+    // §1 은 「배지 옆에 소스를 밝힐 수 있어야 버그 보고가 성립한다」를 요구했는데 그 값이 로그까지만 가
+    // 있었다 — 개발자는 재현할 수 있고 **사용자는 못 말하는** 상태였다. 이 표식이 그 간극을 메운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .claude;
+    term.agent_state = .running;
+
+    // ① 훅이 정한 배지(B) — **조용해야 한다.** 늘 뜨면 그 신호가 아무 뜻도 없어진다.
+    term.agent_state_rule = "B";
+    const plain = try sidebar_ops.agentStatusLine(session, term);
+    defer a.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "*") == null);
+
+    // ② 화면이 뒤집은 배지(C1) — 같은 상태인데 표식이 붙는다.
+    term.agent_state_rule = "C1";
+    const flipped = try sidebar_ops.agentStatusLine(session, term);
+    defer a.free(flipped);
+    try std.testing.expect(std.mem.endsWith(u8, flipped, "*"));
+    // 문구 자체는 그대로다 — 표식만 더한다(상태 문구의 단일 출처를 흐리지 않는다).
+    try std.testing.expect(std.mem.startsWith(u8, flipped, plain));
+
+    // ③ **C2-pending 은 뒤집힌 것이 아니다.** 세는 중일 뿐 상태는 훅의 것이다.
+    term.agent_state_rule = "C2-pending";
+    const pending = try sidebar_ops.agentStatusLine(session, term);
+    defer a.free(pending);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "*") == null);
+
+    // ④ 에이전트가 아니면 상태줄 자체가 비고, 표식도 없다.
+    term.agent_kind = .none;
+    term.agent_state_rule = "C1";
+    const empty = try sidebar_ops.agentStatusLine(session, term);
+    defer a.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+}
+
 test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 풀린다 (§1.1 C1 · 제품 경로)" {
     // **순수 판정자로는 못 잡는 사슬을 본다**: 화면 판정 → `screen_visible_blocker` → 중재 → 배지.
     // 사용자가 보고한 「엔터를 눌러도 진행중으로 안 바뀐다」가 바로 이 사슬이다.

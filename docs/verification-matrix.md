@@ -1003,6 +1003,12 @@ baseline leaf 실행·attestation·release publication을 대신하지 않는다
 U5 signed baseline product gate의 실행 경로는 공통 `session-host-signed-candidate-app` 옵션 하나가 소유한다. 두 gate는 그 bundle의
 `Contents/MacOS/maru-macos-app`을 실행하고 signed-app-quit만 같은 bundle의 `Contents/MacOS/maru`를 사용한다. release gate에
 `macos-app-bundle`, `zig-out/Maru.app` 또는 checkout `web/dist` fallback/dependency가 남으면 실패하는 focused boundary를 둔다.
+
+U5 baseline child 경로 gate는 workspace owner가 봉인한 두 HOME과 두 leaf absolute pathname을 네 필수 build option으로 전달한다.
+각 HOME은 absent child를 mode `0700`으로 배타 생성하고 leaf는 absent여야 하며, build/AppKit 하네스는 고정 `zig-out` 경로,
+`/tmp/maru-product-test-*` registry 또는 stale pathname 삭제를 사용하지 않는다. focused source boundary는 option 누락·상대경로,
+HOME/leaf alias, 기존 HOME/leaf와 release harness의 unlink를 거부하고 두 제품 entrypoint가 exact injected HOME/config/registry/leaf를
+소비하는지 검증한다. 이 gate는 production runner의 candidate 재검증·역순 cleanup·aggregate publication을 대신하지 않는다.
 실제 Developer ID candidate 실행은 trusted release workflow가 이 옵션에 앞선 staging app absolute pathname을 전달할 때 완료된다.
 
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만

@@ -56,7 +56,7 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         256 * 1024,
     );
     defer allocator.free(barrel);
-    const contract = try read(allocator, "docs/session-host-upgrade.md", 256 * 1024);
+    const contract = try read(allocator, "docs/session-host-upgrade.md", 512 * 1024);
     defer allocator.free(contract);
 
     const process_start = std.mem.indexOf(u8, coordinator, "fn processArmedWithDeadline") orelse

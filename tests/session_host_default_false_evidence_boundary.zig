@@ -34,9 +34,9 @@ test "default false leaf pins the signed candidate and publishes exclusively" {
     const app_path = std.mem.indexOf(u8, source, "const app_path_z =") orelse return error.MissingAppPath;
     const reject_alias = std.mem.indexOfPos(u8, source, app_path, "std.mem.eql(u8, config.output, app_path_z)") orelse
         return error.MissingOutputAliasRejection;
-    const invalidate = std.mem.indexOfPos(u8, source, reject_alias, "try invalidateArtifact(config.output)") orelse
-        return error.MissingStaleInvalidation;
-    try std.testing.expect(app_path < reject_alias and reject_alias < invalidate);
+    const workspace_validation = std.mem.indexOfPos(u8, source, reject_alias, "try validateReleaseWorkspace(config.output") orelse
+        return error.MissingWorkspaceValidation;
+    try std.testing.expect(app_path < reject_alias and reject_alias < workspace_validation);
 }
 
 test "default false product run owns an empty isolated config root" {
@@ -49,6 +49,23 @@ test "default false product run owns an empty isolated config root" {
     try expectContains(build, "session-host-default-false-home");
     try expectContains(swift, "isSessionHostDefaultFalseEvidenceMode");
     try std.testing.expect(std.mem.indexOf(u8, build, "MARU_SESSION_HOST_DEFAULT_FALSE_RESULT") == null);
+}
+
+test "default false child consumes the sealed workspace paths without deleting stale state" {
+    const build = try read("build.zig", 2 * 1024 * 1024);
+    defer std.testing.allocator.free(build);
+    const harness = try read("src/platform/macos/session_host/cr6c_appkit_smoke.zig", 1024 * 1024);
+    defer std.testing.allocator.free(harness);
+
+    try expectContains(build, "session-host-default-false-home");
+    try expectContains(build, "session-host-default-false-output");
+    try expectContains(build, "MARU_SESSION_HOST_DEFAULT_FALSE_OUTPUT");
+    try expectContains(build, "MARU_APP_SUMMARY_PATH");
+    try expectContains(harness, "validateReleaseWorkspace");
+    try expectContains(harness, "appSummaryPath");
+    try std.testing.expect(std.mem.indexOf(u8, build, "zig-out/maru-macos-app/session-host-default-false-home") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "zig-out/session-host-default-false/leaf.json") == null);
+    try std.testing.expect(std.mem.indexOf(u8, harness, "invalidateArtifact") == null);
 }
 
 fn read(path: []const u8, limit: usize) ![]u8 {

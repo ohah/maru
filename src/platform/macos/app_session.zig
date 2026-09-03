@@ -9239,6 +9239,20 @@ pub const AppSession = struct {
             .toggle_find_whole_word => find_ops.toggleFindWholeWord(self),
             .toggle_find_in_selection => find_ops.toggleFindInSelection(self),
             .toggle_find_diff_side => find_ops.toggleFindDiffSide(self),
+            // 줄 조작은 **활성 편집기 Term** 에만 간다(§3.9a). 게이트는 각 함수가 든다 — 팔레트도
+            // 같은 자리를 지나므로 여기서 또 판정하면 출처가 둘이 된다.
+            .delete_lines, .duplicate_lines, .move_lines_up, .move_lines_down, .indent_lines, .outdent_lines => {
+                const t = pane_ops.activePane(self).activeTerm();
+                _ = switch (action) {
+                    .delete_lines => editor_ops.deleteLines(self, t),
+                    .duplicate_lines => editor_ops.duplicateLines(self, t),
+                    .move_lines_up => editor_ops.moveLines(self, t, false),
+                    .move_lines_down => editor_ops.moveLines(self, t, true),
+                    .indent_lines => editor_ops.indentLines(self, t, false),
+                    .outdent_lines => editor_ops.indentLines(self, t, true),
+                    else => unreachable,
+                };
+            },
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
@@ -11633,8 +11647,13 @@ pub const AppSession = struct {
                             .line_edge
                         else
                             .char),
-                        .enter => editor_ops.insertText(self, active, "\n"),
-                        .tab => editor_ops.insertText(self, active, "\t"),
+                        .enter => editor_ops.insertNewlineKeepingIndent(self, active),
+                        // **선택이 여러 줄이면 들여쓰기/내어쓰기다**(§3.9a). 아니면 종전대로 탭 문자 —
+                        // 한 줄 안에서 Tab 이 줄을 들여쓰면 글자를 못 넣는다.
+                        .tab => if (editor_ops.selectionSpansLines(active))
+                            editor_ops.indentLines(self, active, m.shift)
+                        else
+                            editor_ops.insertText(self, active, "\t"),
                         else => false,
                     };
                     if (handled) {

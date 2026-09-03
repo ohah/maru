@@ -127,6 +127,17 @@ pub const Action = union(enum) {
     toggle_find_in_selection,
     /// ⌥⌘D — 비교 뷰에서 검색할 열을 왼쪽↔오른쪽으로 넘긴다(§5.1).
     toggle_find_diff_side,
+    /// 걸친 줄들을 지운다(§3.9a — 빌트인 `⇧⌘K`).
+    delete_lines,
+    /// 걸친 줄들을 아래에 복사한다(§3.9a). **기본 chord 없음** — VSCode 의 `⇧⌥↓` 는 `⌘` 없는 `⌥` 라
+    /// 터미널 Meta 입력을 뺏는다(configuration-input.md 가 그 부류를 소유한다).
+    duplicate_lines,
+    /// 걸친 블록을 위/아래 줄과 맞바꾼다(§3.9a). **기본 chord 없음** — 위와 같은 근거.
+    move_lines_up,
+    move_lines_down,
+    /// 걸친 줄들을 한 단계 들여쓴다/내어쓴다(§3.9a). 선택이 여러 줄이면 `Tab`·`⇧Tab` 으로도 닿는다.
+    indent_lines,
+    outdent_lines,
     // 활성 편집기 뷰의 랩(긴 줄 자동 줄바꿈)을 뒤집는다(visual-mapping §4 "가로 스크롤이 기본이고 랩은 토글").
     // **기본 chord가 없다** — VSCode의 `⌥Z`를 그대로 두면 터미널의 Meta-z를 전역으로 가져간다. 키 계약의
     // context-aware resolver에는 파일 트리·웹 편집기 컨텍스트만 있고 **편집기 Term 컨텍스트가 아직 없어서**,
@@ -253,6 +264,12 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_find_whole_word")) return .toggle_find_whole_word;
     if (std.mem.eql(u8, value, "toggle_find_in_selection")) return .toggle_find_in_selection;
     if (std.mem.eql(u8, value, "toggle_find_diff_side")) return .toggle_find_diff_side;
+    if (std.mem.eql(u8, value, "outdent_lines")) return .outdent_lines;
+    if (std.mem.eql(u8, value, "indent_lines")) return .indent_lines;
+    if (std.mem.eql(u8, value, "move_lines_down")) return .move_lines_down;
+    if (std.mem.eql(u8, value, "move_lines_up")) return .move_lines_up;
+    if (std.mem.eql(u8, value, "duplicate_lines")) return .duplicate_lines;
+    if (std.mem.eql(u8, value, "delete_lines")) return .delete_lines;
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;

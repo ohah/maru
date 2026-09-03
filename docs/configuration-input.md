@@ -98,7 +98,11 @@ keybind = F4 = esc:[2J
   `session.keep-alive-after-quit`은 위 소유권 예외대로 현재 값을 보존·materialize하고, 나머지 config 파일의
   schema·특수 키·주석은 내장 기본 상태로 돌린다).
 - **편집기 전용 action**: `toggle_editor_wrap`(그 뷰의 줄 바꿈 토글)·`fold_all`·`unfold_all`·
-  `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`. 레벨은 중첩 **겹수**다(1이 문서
+  `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`·`delete_lines`(빌트인 `⇧⌘K`)·
+  `duplicate_lines`·`move_lines_up`·`move_lines_down`·`indent_lines`·`outdent_lines` — **줄 조작
+  넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
+  대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
+  `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서
   맨 바깥이고, 레벨끼리는 합치지 않고 갈아 끼운다 —
   [visual-mapping §4.1f](native-editor-visual-mapping.md)).
   `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⇧⌘O`. 찾기가 모든 글자에서
@@ -110,6 +114,7 @@ keybind = F4 = esc:[2J
   |---|---|---|
   | **뺏을 것이 없다** | `toggle_symbol_picker` | `⇧⌘O`가 기본 표 어디에도 없다. 배선 전에는 `resolve`의 fallthrough에서 `.ignored`라 **누르면 아무 일도 안 일어나는** 상태였다 |
   | **Option 단독은 터미널 입력이다** | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
+  | **`⌘` 없는 `⌥` 는 터미널 입력이다** | `duplicate_lines`·`move_lines_up`·`move_lines_down` | VSCode 는 `⇧⌥↓`·`⌥↑↓` 인데 기본 표에는 **`⌘` 를 안 낀 `⌥` chord 가 하나도 없다**(실측 0개 — 위 `toggle_editor_wrap` 과 같은 근거). 들여쓰기·내어쓰기는 `Tab`·`⇧Tab` 으로 닿으므로 이 부류가 아니고, `delete_lines` 는 `⇧⌘K` 가 비어 있어 빌트인이 있다 |
   | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
 
   **컨텍스트가 필요한 부류와 섞지 않는다.** 「편집기 Term 컨텍스트가 서야 한다」는 조건은

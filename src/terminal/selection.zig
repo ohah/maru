@@ -358,7 +358,66 @@ pub fn foldCase(cp: u21) u21 {
     };
 }
 
-/// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
+/// 소문자를 대문자로 올린다 — **`foldCase`의 짝**(편집기 대소문자 변환, native-editor-document-model
+/// §3.9b). **덮는 블록이 `foldCase`와 정확히 같아야 한다**: 다르면 *"소문자로 바꾼 뒤 다시
+/// 대문자로"* 가 원문과 달라진다. 넓힐 때는 **둘을 같은 슬라이스에서** 넓힌다.
+///
+/// **덮지 않는 글자는 자기 자신이다.** 문서를 바꾸는 연산이 쓰므로 *"모르면 안 건드린다"* 가 안전한
+/// 저하다 — 한글·CJK·숫자·문장부호도 이 규칙으로 그대로 남는다(별도 판정을 두지 않는다).
+pub fn upperCase(cp: u21) u21 {
+    return switch (cp) {
+        'a'...'z' => cp - 32,
+        0x00E0...0x00F6, 0x00F8...0x00FE => cp - 32, // Latin-1 à-ö, ø-þ
+        0x03B1...0x03C1, 0x03C3...0x03C9 => cp - 32, // Greek α-ρ, σ-ω
+        0x0430...0x044F => cp - 32, // Cyrillic а-я
+        0x0450...0x045F => cp - 80, // Cyrillic ѐ-џ
+        else => cp,
+    };
+}
+
+test "CASE1 대문자 올리기는 foldCase 의 짝이다 — 덮는 블록이 같다 (§3.9b)" {
+    // **비대칭이면 왕복이 원문을 바꾼다.** `foldCase` 가 접는 모든 코드포인트는 `upperCase` 가
+    // 되돌릴 수 있어야 하고, 그 반대도 같다.
+    var cp: u21 = 0;
+    while (cp < 0x0500) : (cp += 1) {
+        const lo = foldCase(cp);
+        if (lo != cp) {
+            // 접힌 것 — 올리면 원래 대문자로 돌아온다.
+            try std.testing.expectEqual(cp, upperCase(lo));
+        }
+        const up = upperCase(cp);
+        if (up != cp) {
+            // 올라간 것 — 접으면 원래 소문자로 돌아온다.
+            try std.testing.expectEqual(cp, foldCase(up));
+        }
+    }
+}
+
+test "CASE2 덮지 않는 글자는 그대로다 — 한글·CJK·숫자·문장부호 (§3.9b)" {
+    // **모르면 안 건드린다.** 문서를 바꾸는 연산이 쓰므로 저하가 「그대로」여야 한다.
+    for ([_]u21{ '가', '힣', 0x4E00, '0', '9', '-', '_', ' ', 0x0100, 0x00DF }) |cp| {
+        try std.testing.expectEqual(cp, upperCase(cp));
+        try std.testing.expectEqual(cp, foldCase(cp));
+    }
+}
+
+test "CASE3 변환이 UTF-8 길이를 안 바꾼다 — 선택이 안 흔들린다 (§3.9b)" {
+    // **길이가 변하면 선택 범위와 다른 커서가 밀린다.** 지금 덮는 네 블록은 같은 길이 안에서만
+    // 움직이므로 그 성질이 성립하고, `ß`→`ss` 같은 1:N 을 들이는 날 깨진다(§3.9b 가 그때 보정
+    // 규칙을 함께 정하라고 적어 뒀다).
+    var cp: u21 = 0;
+    while (cp < 0x0500) : (cp += 1) {
+        var a: [4]u8 = undefined;
+        var b: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &a) catch continue;
+        const nu = std.unicode.utf8Encode(upperCase(cp), &b) catch continue;
+        try std.testing.expectEqual(n, nu);
+        const nf = std.unicode.utf8Encode(foldCase(cp), &b) catch continue;
+        try std.testing.expectEqual(n, nf);
+    }
+}
+
+/// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지/// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
 fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
     for (needle, 0..) |n, k| {
         if (foldCase(haystack[k]) != foldCase(n)) return false;

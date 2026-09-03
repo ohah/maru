@@ -9241,7 +9241,7 @@ pub const AppSession = struct {
             .toggle_find_diff_side => find_ops.toggleFindDiffSide(self),
             // 줄 조작은 **활성 편집기 Term** 에만 간다(§3.9a). 게이트는 각 함수가 든다 — 팔레트도
             // 같은 자리를 지나므로 여기서 또 판정하면 출처가 둘이 된다.
-            .delete_lines, .duplicate_lines, .move_lines_up, .move_lines_down, .indent_lines, .outdent_lines => {
+            .delete_lines, .duplicate_lines, .move_lines_up, .move_lines_down, .indent_lines, .outdent_lines, .transform_to_uppercase, .transform_to_lowercase => {
                 const t = pane_ops.activePane(self).activeTerm();
                 _ = switch (action) {
                     .delete_lines => editor_ops.deleteLines(self, t),
@@ -9250,6 +9250,8 @@ pub const AppSession = struct {
                     .move_lines_down => editor_ops.moveLines(self, t, true),
                     .indent_lines => editor_ops.indentLines(self, t, false),
                     .outdent_lines => editor_ops.indentLines(self, t, true),
+                    .transform_to_uppercase => editor_ops.transformCase(self, t, true),
+                    .transform_to_lowercase => editor_ops.transformCase(self, t, false),
                     else => unreachable,
                 };
             },
@@ -42465,6 +42467,42 @@ test "EF29 선택 범위 토글도 편집기 찾기일 때만 먹는다 — 팔�
 
     session.dispatchAppAction(.toggle_find_in_selection); // 팔레트 경로
     try std.testing.expect(session.chrome_host.find.in_selection == null);
+}
+
+test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치 종단 (§3.9b)" {
+    // **디스패치가 둘을 같은 인자로 부르면 소문자 명령이 대문자로 바꾼다**(변이 C12). 함수를 직접
+    // 부르는 판정자만 두면 그 배선이 안 잡힌다 — `CMT10`·`LN7` 이 같은 이유로 선 선례다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "Ab\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "c.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(0, 2);
+    session.dispatchAppAction(.transform_to_uppercase);
+    try std.testing.expectEqualStrings("AB\n", term.rt.editor_doc.?.file.content);
+
+    session.dispatchAppAction(.transform_to_lowercase);
+    try std.testing.expectEqualStrings("ab\n", term.rt.editor_doc.?.file.content);
 }
 
 test "EF30 열 넘기기는 지금 보는 열에서 뒤집는다 — 첫 누름이 반드시 화면을 바꾼다 (§5.1)" {

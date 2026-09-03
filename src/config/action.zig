@@ -138,6 +138,10 @@ pub const Action = union(enum) {
     /// 걸친 줄들을 한 단계 들여쓴다/내어쓴다(§3.9a). 선택이 여러 줄이면 `Tab`·`⇧Tab` 으로도 닿는다.
     indent_lines,
     outdent_lines,
+    /// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b). **기본 chord 없음** — 선례도
+    /// 팔레트 전용이고, 남는 자리는 `⌘` 없는 `⌥` 뿐인데 그것은 터미널 Meta 입력을 뺏는다.
+    transform_to_uppercase,
+    transform_to_lowercase,
     // 활성 편집기 뷰의 랩(긴 줄 자동 줄바꿈)을 뒤집는다(visual-mapping §4 "가로 스크롤이 기본이고 랩은 토글").
     // **기본 chord가 없다** — VSCode의 `⌥Z`를 그대로 두면 터미널의 Meta-z를 전역으로 가져간다. 키 계약의
     // context-aware resolver에는 파일 트리·웹 편집기 컨텍스트만 있고 **편집기 Term 컨텍스트가 아직 없어서**,
@@ -265,6 +269,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_find_in_selection")) return .toggle_find_in_selection;
     if (std.mem.eql(u8, value, "toggle_find_diff_side")) return .toggle_find_diff_side;
     if (std.mem.eql(u8, value, "outdent_lines")) return .outdent_lines;
+    if (std.mem.eql(u8, value, "transform_to_uppercase")) return .transform_to_uppercase;
+    if (std.mem.eql(u8, value, "transform_to_lowercase")) return .transform_to_lowercase;
     if (std.mem.eql(u8, value, "indent_lines")) return .indent_lines;
     if (std.mem.eql(u8, value, "move_lines_down")) return .move_lines_down;
     if (std.mem.eql(u8, value, "move_lines_up")) return .move_lines_up;

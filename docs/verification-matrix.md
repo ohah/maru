@@ -1086,6 +1086,13 @@ designated-requirement digest에 `Maru.app` main·bundled CLI의 held no-follow 
 재검증·해제를 Debug·ReleaseFast로 검증한다. 실제 AppKit/CLI 실행, 격리 HOME/config/session registry, leaf/evidence publication과 release
 workflow 배선은 후속 runner 증거다.
 
+U5 baseline-A runner workspace는 `release_adapter_candidate_baseline_workspace.zig`가 기존
+`release_adapter_pre_publish_workspace.zig`의 descriptor-owned 0700 root를 소비해 `default-false`·`signed-app-quit` HOME, 두 leaf와
+aggregate output의 exact absent path를 한 final-address owner에 봉인한다. ambient HOME/config와 실제 `/tmp/maru-<uid>`는 입력도
+cleanup 대상도 아니다. copied/pre-owned owner, owner/path storage alias, root 교체·unexpected child·sync failure는 foreign deletion 0과
+retry authority를 보존한다. `test-session-host-release-adapter-candidate-baseline-workspace`가 actual filesystem의 Debug·ReleaseFast에서
+exact path set, root identity와 성공/실패 cleanup을 검증한다. 실제 AppKit/CLI child, leaf/aggregate publication은 후속이다.
+
 U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
 predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
 fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/
@@ -2599,8 +2606,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `RENAME_EXCL`+parent fsync+final inode 재검증 뒤 held file/parent fd를 move-only owner로 반환한다. 기존 void
   publication은 owner를 닫아 durable output만 남기는 wrapper다. work-dir도 absent leaf에만 0700으로 만든다.
   `test-session-host-release-adapter-files`가 이를 Debug·ReleaseFast 실제 filesystem에서
-  검증한다. pre-publish workspace owner는 caller-owned absolute absent root를 0700으로 만들고 held parent/root identity에서 exact
-  `current-manifest`·`predecessor-manifest`·`predecessor-assets`·`dmg`·`current-assets` child pathname만 유도하며, unexpected entry나
+  검증한다. pre-publish workspace owner는 caller-owned absolute absent root를 0700으로 만들고 held parent/root identity에서 closed typed
+  child pathname만 유도한다. pre-publish namespace는 exact `current-manifest`·`predecessor-manifest`·`predecessor-assets`·`dmg`·`current-assets`,
+  baseline runner namespace는 exact `default-false`·`signed-app-quit`·두 JSON leaf·aggregate이며, unexpected entry나
   replacement를 허용하지 않고 초기화/empty root cleanup 실패 시 durable removal까지 retry
   권위를 보존한다. `test-session-host-release-adapter-pre-publish-workspace`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다.
   pre-publish phase transaction은 validated token 뒤 failure-pristine deadline, workspace와 모든 current/predecessor leaf를 닫힌 순서로 호출하고,

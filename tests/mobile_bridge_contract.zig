@@ -5785,6 +5785,33 @@ test "원하는 것이 바뀌면 닫고 나서 연다 — 같은 채널이니까
     try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
 }
 
+test "아직 때가 아니면 뜻이 살아남는다 — 다음 tick 이 다시 연다" {
+    // **실기에서 이렇게 죽었다**(2026-09-03, 시뮬레이터): 세션 화면을 다시 열 때 이전 컨트롤
+    // 채널이 아직 닫히는 중이라 코어가 `MARU_SSH_ERR_NOT_READY`(`control_closing`)를 냈는데,
+    // host 가 그것을 딱딱한 실패로 접었다. 「열자」는 뜻은 `take_control_open` 이 이미 가져간
+    // 뒤라 사라졌고, 그 화면은 **영영 「받는 중」** 이었다. 목록은 멀쩡해서 더 안 보였다.
+    //
+    // 이 갈래가 없으면 위/아래 판정자 둘 다 통과한다 — 그것들은 「졌다」와 「같은 것을 다시
+    // 원한다」만 보고, **「아직 때가 아니다」를 안 본다**.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    const id: [32]u8 = @splat('a');
+    bridge.wantControl(.{ .screen = id });
+    // host 가 뜻을 집어 갔다.
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    // 그런데 아직 못 연다 — 이전 채널이 닫히는 중이다.
+    bridge.maru_mobile_control_open_retry();
+    // **뜻이 살아 있어야 한다.** 다음 tick 이 다시 집어 간다.
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // 원하는 것이 없어졌으면 되살리지 않는다 — 없는 뜻을 만들면 안 연 채널을 연다.
+    bridge.wantControl(.none);
+    _ = bridge.maru_mobile_take_control_open();
+    bridge.maru_mobile_control_open_retry();
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+}
+
 test "열기 요청은 가져간다고 사라지지 않는다 — 열렸을 때만 내린다" {
     // host 는 채널이 닫힌 뒤에만 연다. 그때까지 이 뜻이 사라지면 축이 **영영 안 선다**.
     bridge.maru_mobile_control_reset();

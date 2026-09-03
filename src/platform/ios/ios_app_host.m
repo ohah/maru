@@ -24,6 +24,9 @@ static void driveControlChannel(void);
 /// 컨트롤 채널을 연 시각(ms, 0 이면 안 열었다). **시한을 재는 것은 host 의 일이다** —
 /// 코어에는 시계가 없다(계약 §4a: 5초).
 static double gControlOpenMs = 0;
+/// 「아직 때가 아니다」로 되돌린 첫 시각(ms, 0 이면 되돌린 적 없다). **재시도에도 마감이 있다** —
+/// 닫힘이 영영 안 끝나면 화면이 조용히 「받는 중」에 머문다(계약 §4a: 실패하면 그 화면이 말한다).
+static double gControlRetryMs = 0;
 static void pumpSshOnMainThread(void);
 
 static NSString *const kShader =
@@ -1355,13 +1358,32 @@ static void driveControlChannel(void) {
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
-        if (cmd_len == 0 || maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len) != 0) {
+        // **「아직 때가 아니다」와 「졌다」를 가른다.** 이전 채널이 닫히는 중이면 코어가
+        // `MARU_SSH_ERR_NOT_READY` 를 내는데(그 자리 주석이 "조금 뒤에 다시 부르면 된다"),
+        // 그것을 딱딱한 실패로 접으면 「열자」는 뜻이 사라져 그 화면이 **영영 「받는 중」** 이
+        // 된다(실측 2026-09-03: 세션 화면 재진입).
+        const int open_rc = cmd_len == 0
+                                ? -1
+                                : maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len);
+        if (open_rc == MARU_SSH_ERR_NOT_READY) {
+            const double now_ms = CACurrentMediaTime() * 1000.0;
+            if (gControlRetryMs == 0) gControlRetryMs = now_ms;
+            if (now_ms - gControlRetryMs > 5000) {
+                NSLog(@"MARU_CONTROL open gave up: %s", maru_ssh_pump_control_error());
+                gControlRetryMs = 0;
+                maru_mobile_control_open_failed();
+            } else {
+                maru_mobile_control_open_retry();
+            }
+        } else if (open_rc != 0) {
+            gControlRetryMs = 0;
             // **컨트롤 축의 이름을 찍는다**(Android 와 같은 자리) — 터미널 슬롯을 찍으면 한 번
             // 박힌 이름이 그 뒤 모든 실패를 덮는다.
             NSLog(@"MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
             // **실패는 그 화면이 말한다**(계약 §4a).
             maru_mobile_control_open_failed();
         } else {
+            gControlRetryMs = 0;
             gControlOpenMs = CACurrentMediaTime() * 1000.0;
         }
     }

@@ -134,6 +134,9 @@ static unsigned long long nowMs(void) {
 
 /// 컨트롤 채널을 연 시각(0 이면 안 열었다). 시한 판정에 쓴다.
 static unsigned long long g_control_open_ms = 0;
+/// 「아직 때가 아니다」로 되돌린 첫 시각(ms, 0 이면 되돌린 적 없다). **재시도에도 마감이 있다** —
+/// 닫힘이 영영 안 끝나면 화면이 조용히 「받는 중」에 머문다(계약 §4a: 실패하면 그 화면이 말한다).
+static unsigned long long g_control_retry_ms = 0;
 static void drainHostKeyDecision(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
@@ -1763,13 +1766,32 @@ static void driveControlChannel(void) {
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
-        if (cmd_len == 0 || maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len) != 0) {
+        // **「아직 때가 아니다」와 「졌다」를 가른다.** 이전 채널이 닫히는 중이면 코어가
+        // `MARU_SSH_ERR_NOT_READY` 를 내는데(그 자리 주석이 "조금 뒤에 다시 부르면 된다"),
+        // 그것을 딱딱한 실패로 접으면 「열자」는 뜻이 사라져 그 화면이 **영영 「받는 중」** 이
+        // 된다(실측 2026-09-03: 세션 화면 재진입).
+        const int open_rc = cmd_len == 0
+                                ? -1
+                                : maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len);
+        if (open_rc == MARU_SSH_ERR_NOT_READY) {
+            const unsigned long long now_ms = nowMs();
+            if (g_control_retry_ms == 0) g_control_retry_ms = now_ms;
+            if (now_ms - g_control_retry_ms > 5000) {
+                LOGI("MARU_CONTROL open gave up: %s", maru_ssh_pump_control_error());
+                g_control_retry_ms = 0;
+                maru_mobile_control_open_failed();
+            } else {
+                maru_mobile_control_open_retry();
+            }
+        } else if (open_rc != 0) {
+            g_control_retry_ms = 0;
             // **컨트롤 축의 이름을 찍는다.** 예전에는 터미널 슬롯을 찍어, 한 번 박힌 이름이
             // 그 뒤 모든 실패를 덮어 **진짜 원인이 자기 로그에 가렸다**.
             LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
             // **실패는 그 화면이 말한다**(계약 §4a). 안 알리면 목록은 이유도 모른 채 기다린다.
             maru_mobile_control_open_failed();
         } else {
+            g_control_retry_ms = 0;
             g_control_open_ms = nowMs();
         }
     }

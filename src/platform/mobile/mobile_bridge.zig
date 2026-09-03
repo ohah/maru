@@ -1357,6 +1357,19 @@ pub export fn maru_mobile_control_open_failed() void {
     control_client.openFailed();
 }
 
+/// host 가 **조금 뒤에 다시 부르면 되는** 이유로 못 열었다고 알린다(`err_not_ready`).
+///
+/// **화면에 실패를 말하지 않는다** — 실패가 아니라 아직 때가 아닌 것이다. 대신 「열자」는 뜻을
+/// 되돌려 다음 tick 이 다시 집게 한다. 이것이 없으면 뜻은 `take_control_open` 이 이미 가져가서
+/// 사라지고, 그 화면은 **영영 「받는 중」** 으로 남는다.
+///
+/// 실측으로 겪은 자리(2026-09-03, 시뮬레이터): 세션 화면을 열 때 이전 컨트롤 채널이 아직 닫히는
+/// 중이라 `control_closing` 이 났고, host 가 그것을 딱딱한 실패로 접어 축이 다시는 안 섰다.
+pub export fn maru_mobile_control_open_retry() void {
+    control_open = .none;
+    control_open_req = control_want != .none;
+}
+
 /// host 가 **원격 명령이 그냥 끝났다**고 알린다(계약 §4a). `code` 는 그 종료 코드다.
 ///
 /// 시한을 기다리는 것과 다르다 — 답할 것이 이미 죽었으므로 화면이 **고칠 자리**를 말할 수 있다.

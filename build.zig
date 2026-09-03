@@ -13522,6 +13522,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-draft-publish",
         "Run exact GitHub draft publication authority tests",
     );
+    const session_host_release_adapter_post_publish_attestation_step = b.step(
+        "test-session-host-release-adapter-post-publish-attestation",
+        "Run post-publish GitHub release attestation authority tests",
+    );
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |composition_optimize| {
             const manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = composition_optimize });
@@ -13699,6 +13703,15 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_draft_publish_tests.step);
             test_step.dependOn(&run_draft_publish_tests.step);
             macos_only_test_step.dependOn(&run_draft_publish_tests.step);
+            const post_publish_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_post_publish_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_draft_asset_attachment", .module = draft_assets_mod }, .{ .name = "release_adapter_github_draft_asset_redownload", .module = draft_redownload_mod }, .{ .name = "release_adapter_github_draft_publication", .module = draft_publish_mod }, .{ .name = "release_adapter_github_release_attestation", .module = release_attestation_mod }, .{ .name = "release_adapter_github_tag_authority", .module = tag_authority_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
+            const post_publish_attestation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_post_publish_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod }} }) });
+            const run_post_publish_attestation_tests = b.addRunArtifact(post_publish_attestation_tests);
+            run_post_publish_attestation_tests.addArg("--maru-expect-tests=8");
+            run_post_publish_attestation_tests.setCwd(b.path("."));
+            session_host_release_adapter_post_publish_attestation_step.dependOn(&run_post_publish_attestation_tests.step);
+            session_host_step.dependOn(&run_post_publish_attestation_tests.step);
+            test_step.dependOn(&run_post_publish_attestation_tests.step);
+            macos_only_test_step.dependOn(&run_post_publish_attestation_tests.step);
             const current_evidence_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_evidence.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod } } });
             const current_asset_files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_asset_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_product", .module = current_product_mod }, .{ .name = "release_adapter_github_current_evidence", .module = current_evidence_mod } } });
             const current_asset_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_current_asset_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_current_manifest_input", .module = current_manifest_input_mod }, .{ .name = "release_adapter_github_current_asset_files", .module = current_asset_files_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });

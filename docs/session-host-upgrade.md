@@ -1979,6 +1979,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   검증한다. 제품 runner·workflow caller는 후속 gate이며, 이 phase만으로 signed leaf 실행이나 release publication을 완료했다고
   주장하지 않는다.
 
+  `release_adapter_candidate_baseline_product.zig` owns execution state.
+
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
   final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address

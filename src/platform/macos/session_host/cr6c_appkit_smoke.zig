@@ -25,7 +25,7 @@ const recovery_baseline_iterations: usize = 5;
 const signed_app_quit_iteration_count: usize = 2;
 const max_candidate_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
 
-const SignedAppQuitConfig = struct {
+const ReleaseEvidenceConfig = struct {
     test_uuid: []u8,
     candidate_dmg: [:0]u8,
     frozen_executable: [:0]u8,
@@ -38,6 +38,15 @@ const SignedAppQuitConfig = struct {
         allocator.free(self.output);
         self.* = undefined;
     }
+};
+const SignedAppQuitConfig = ReleaseEvidenceConfig;
+const DefaultFalseConfig = ReleaseEvidenceConfig;
+
+const ReleaseEvidenceEnv = struct {
+    uuid: [*:0]const u8,
+    dmg: [*:0]const u8,
+    frozen: [*:0]const u8,
+    output: [*:0]const u8,
 };
 
 const CandidateIdentity = struct {
@@ -225,7 +234,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var signed_app_quit = try readSignedAppQuitConfig(allocator);
     defer if (signed_app_quit) |*config| config.deinit(allocator);
-    if (signed_app_quit) |config| try invalidateArtifact(config.output);
+    var default_false = try readDefaultFalseConfig(allocator);
+    defer if (default_false) |*config| config.deinit(allocator);
+    if (signed_app_quit != null and default_false != null) return error.ConflictingReleaseEvidenceModes;
     const fd_before = try countOpenFds(io);
     const app_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_APP_EXE") orelse
         return error.MissingAppExecutable;
@@ -233,6 +244,34 @@ pub fn main(init: std.process.Init) !void {
     if (app_path.len == 0 or app_path[0] != '/') return error.InvalidAppExecutable;
     const app_path_z = try allocator.dupeZ(u8, app_path);
     defer allocator.free(app_path_z);
+    if (signed_app_quit) |config| {
+        if (std.mem.eql(u8, config.output, app_path_z)) return error.InvalidSignedAppQuitPath;
+        try invalidateArtifact(config.output);
+    }
+    if (default_false) |config| {
+        if (std.mem.eql(u8, config.output, app_path_z)) return error.InvalidDefaultFalsePath;
+        try invalidateArtifact(config.output);
+    }
+    if (default_false) |config| {
+        if (!upgrade_limits.canonicalReleaseTestUuid(config.test_uuid)) return error.InvalidTestUuid;
+        const before = try inspectDefaultFalseCandidate(io, config, app_path_z);
+        if (setenv("MARU_SESSION_DEFAULT_FALSE_EVIDENCE_SMOKE", "1", 1) != 0)
+            return error.EnvironmentFailed;
+        defer _ = unsetenv("MARU_SESSION_DEFAULT_FALSE_EVIDENCE_SMOKE");
+        const app_pid = std.c.fork();
+        if (app_pid < 0) return error.ForkFailed;
+        if (app_pid == 0) {
+            const argv = [_:null]?[*:0]const u8{app_path_z.ptr};
+            _ = std.c.execve(app_path_z.ptr, &argv, @ptrCast(std.c.environ));
+            std.c._exit(127);
+        }
+        try waitForExactExit(app_pid, 30_000);
+        try validateDefaultFalseCandidate(io, config, app_path_z, before);
+        if (try remainingChildProcesses() != 0 or try countOpenFds(io) != fd_before)
+            return error.ProcessCleanupIncomplete;
+        try writeDefaultFalseArtifact(io, config, before.dmg.sha256, before.frozen.sha256);
+        return;
+    }
     const product_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_PRODUCT_EXE") orelse
         return error.MissingProductExecutable;
     const product_path = std.mem.span(product_raw);
@@ -242,13 +281,12 @@ pub fn main(init: std.process.Init) !void {
     const signed_candidate_before = if (signed_app_quit) |config| blk: {
         if (!upgrade_limits.canonicalReleaseTestUuid(config.test_uuid))
             return error.InvalidTestUuid;
-        const dmg = try inspectCandidate(config.candidate_dmg, false);
-        const frozen = try inspectCandidate(config.frozen_executable, true);
-        const app = try inspectCandidate(app_path_z, true);
-        if (!std.mem.eql(u8, &app.sha256, &frozen.sha256) or
-            !code_signature.sameReleaseSigner(io, app_path_z, config.frozen_executable))
-            return error.InvalidSignedCandidate;
-        break :blk SignedCandidateSet{ .dmg = dmg, .frozen = frozen, .app = app };
+        break :blk try inspectSignedCandidate(
+            io,
+            config.candidate_dmg,
+            config.frozen_executable,
+            app_path_z,
+        );
     } else null;
     const input_continuity = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE") != null;
     const recovery_baseline_raw = std.c.getenv("MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT");
@@ -900,23 +938,39 @@ fn writeStrictArtifact(
 }
 
 fn readSignedAppQuitConfig(allocator: std.mem.Allocator) !?SignedAppQuitConfig {
-    const uuid_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID");
-    const dmg_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG");
-    const frozen_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE");
-    const output_raw = std.c.getenv("MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT");
+    return readReleaseEvidenceConfig(allocator, .{
+        .uuid = "MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID",
+        .dmg = "MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG",
+        .frozen = "MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE",
+        .output = "MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT",
+    });
+}
+
+fn readDefaultFalseConfig(allocator: std.mem.Allocator) !?DefaultFalseConfig {
+    return readReleaseEvidenceConfig(allocator, .{
+        .uuid = "MARU_SESSION_HOST_DEFAULT_FALSE_TEST_UUID",
+        .dmg = "MARU_SESSION_HOST_DEFAULT_FALSE_CANDIDATE_DMG",
+        .frozen = "MARU_SESSION_HOST_DEFAULT_FALSE_FROZEN_EXE",
+        .output = "MARU_SESSION_HOST_DEFAULT_FALSE_OUTPUT",
+    });
+}
+
+fn readReleaseEvidenceConfig(allocator: std.mem.Allocator, env: ReleaseEvidenceEnv) !?ReleaseEvidenceConfig {
+    const uuid_raw = std.c.getenv(env.uuid);
+    const dmg_raw = std.c.getenv(env.dmg);
+    const frozen_raw = std.c.getenv(env.frozen);
+    const output_raw = std.c.getenv(env.output);
     if (uuid_raw == null and dmg_raw == null and frozen_raw == null and output_raw == null) return null;
     if (uuid_raw == null or dmg_raw == null or frozen_raw == null or output_raw == null)
-        return error.IncompleteSignedAppQuitConfig;
+        return error.IncompleteReleaseEvidenceConfig;
     const uuid = std.mem.span(uuid_raw.?);
     const dmg = std.mem.span(dmg_raw.?);
     const frozen = std.mem.span(frozen_raw.?);
     const output = std.mem.span(output_raw.?);
     if (!std.fs.path.isAbsolute(dmg) or !std.fs.path.isAbsolute(frozen) or
-        !std.fs.path.isAbsolute(output) or dmg.len == 0 or frozen.len == 0 or output.len == 0)
-        return error.InvalidSignedAppQuitPath;
-    if (std.mem.eql(u8, dmg, frozen) or std.mem.eql(u8, dmg, output) or
-        std.mem.eql(u8, frozen, output))
-        return error.InvalidSignedAppQuitPath;
+        !std.fs.path.isAbsolute(output) or dmg.len == 0 or frozen.len == 0 or output.len == 0 or
+        std.mem.eql(u8, dmg, frozen) or std.mem.eql(u8, dmg, output) or std.mem.eql(u8, frozen, output))
+        return error.InvalidReleaseEvidencePath;
     const owned_uuid = try allocator.dupe(u8, uuid);
     errdefer allocator.free(owned_uuid);
     const owned_dmg = try allocator.dupeZ(u8, dmg);
@@ -1002,11 +1056,93 @@ fn validateSignedCandidate(
     app_path: [:0]const u8,
     before: SignedCandidateSet,
 ) !void {
-    if (!sameCandidateIdentity(before.dmg, try inspectCandidate(config.candidate_dmg, false)) or
-        !sameCandidateIdentity(before.frozen, try inspectCandidate(config.frozen_executable, true)) or
-        !sameCandidateIdentity(before.app, try inspectCandidate(app_path, true)) or
-        !code_signature.sameReleaseSigner(io, app_path, config.frozen_executable))
+    const after = try inspectSignedCandidate(io, config.candidate_dmg, config.frozen_executable, app_path);
+    if (!sameCandidateIdentity(before.dmg, after.dmg) or
+        !sameCandidateIdentity(before.frozen, after.frozen) or
+        !sameCandidateIdentity(before.app, after.app))
         return error.SignedCandidateChanged;
+}
+
+fn inspectSignedCandidate(
+    io: std.Io,
+    candidate_dmg: [:0]const u8,
+    frozen_executable: [:0]const u8,
+    app_path: [:0]const u8,
+) !SignedCandidateSet {
+    const result: SignedCandidateSet = .{
+        .dmg = try inspectCandidate(candidate_dmg, false),
+        .frozen = try inspectCandidate(frozen_executable, true),
+        .app = try inspectCandidate(app_path, true),
+    };
+    if (!std.mem.eql(u8, &result.app.sha256, &result.frozen.sha256) or
+        !code_signature.sameReleaseSigner(io, app_path, frozen_executable))
+        return error.InvalidSignedCandidate;
+    return result;
+}
+
+fn inspectDefaultFalseCandidate(
+    io: std.Io,
+    config: DefaultFalseConfig,
+    app_path: [:0]const u8,
+) !SignedCandidateSet {
+    return inspectSignedCandidate(io, config.candidate_dmg, config.frozen_executable, app_path);
+}
+
+fn validateDefaultFalseCandidate(
+    io: std.Io,
+    config: DefaultFalseConfig,
+    app_path: [:0]const u8,
+    before: SignedCandidateSet,
+) !void {
+    const after = try inspectDefaultFalseCandidate(io, config, app_path);
+    if (!sameCandidateIdentity(before.dmg, after.dmg) or
+        !sameCandidateIdentity(before.frozen, after.frozen) or
+        !sameCandidateIdentity(before.app, after.app))
+        return error.SignedCandidateChanged;
+}
+
+fn writeDefaultFalseArtifact(
+    io: std.Io,
+    config: DefaultFalseConfig,
+    dmg_sha256: [32]u8,
+    executable_sha256: [32]u8,
+) !void {
+    var storage: [1024]u8 = undefined;
+    const bytes = try encodeDefaultFalseArtifact(&storage, config.test_uuid, dmg_sha256, executable_sha256);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = config.output,
+        .data = bytes,
+        .flags = .{
+            .truncate = false,
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        },
+    });
+}
+
+fn encodeDefaultFalseArtifact(
+    storage: *[1024]u8,
+    test_uuid: []const u8,
+    dmg_sha256: [32]u8,
+    executable_sha256: [32]u8,
+) ![]const u8 {
+    if (!upgrade_limits.canonicalReleaseTestUuid(test_uuid)) return error.InvalidTestUuid;
+    var writer: std.Io.Writer = .fixed(storage);
+    var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
+    const dmg_hex = std.fmt.bytesToHex(dmg_sha256, .lower);
+    const executable_hex = std.fmt.bytesToHex(executable_sha256, .lower);
+    try json.write(.{
+        .schema = upgrade_limits.default_false_leaf_schema,
+        .test_uuid = test_uuid,
+        .result = "passed",
+        .candidate_dmg_sha256 = &dmg_hex,
+        .candidate_executable_sha256 = &executable_hex,
+        .resolved_default = false,
+        .explicit_override_present = false,
+        .signed_product = true,
+    });
+    try writer.writeByte('\n');
+    return writer.buffered();
 }
 
 fn writeSignedAppQuitArtifact(
@@ -1180,4 +1316,41 @@ test "signed app Quit evidence never accepts caller result booleans" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"result\":\"passed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "duration") == null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "runtime_id") == null);
+}
+
+test "default false evidence is canonical and contains only derived observations" {
+    var storage: [1024]u8 = undefined;
+    const bytes = try encodeDefaultFalseArtifact(
+        &storage,
+        "123e4567-e89b-42d3-a456-426614174000",
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"123e4567-e89b-42d3-a456-426614174000\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"candidate_executable_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n",
+        bytes,
+    );
+}
+
+test "default false evidence rejects noncanonical trusted UUID" {
+    var storage: [1024]u8 = undefined;
+    try std.testing.expectError(error.InvalidTestUuid, encodeDefaultFalseArtifact(
+        &storage,
+        "123E4567-E89B-42D3-A456-426614174000",
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+    ));
+}
+
+test "default false evidence has no caller-controlled result surface" {
+    var storage: [1024]u8 = undefined;
+    const bytes = try encodeDefaultFalseArtifact(
+        &storage,
+        "123e4567-e89b-42d3-a456-426614174000",
+        [_]u8{0x11} ** 32,
+        [_]u8{0x22} ** 32,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"result\":\"passed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "config_path") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "signer_path") == null);
 }

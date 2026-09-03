@@ -4368,6 +4368,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var hotKeyActions: [UInt32: UInt32] = [:]
     private var hotKeyEventHandler: EventHandlerRef?
 
+    private static var isSessionHostDefaultFalseEvidenceMode: Bool {
+        ProcessInfo.processInfo.environment["MARU_SESSION_DEFAULT_FALSE_EVIDENCE_SMOKE"] == "1"
+    }
+
     static func main() {
         let leaseStatus = acquireAppInstanceWriterLeaseBeforeAppKit()
         guard leaseStatus == UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED) else {
@@ -4379,6 +4383,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard configBootstrapStatus == UInt32(MARU_SESSION_CONFIG_BOOTSTRAP_READY) else {
             fputs("maru: session config bootstrap failed (status=\(configBootstrapStatus))\n", stderr)
             Darwin.exit(1)
+        }
+        if isSessionHostDefaultFalseEvidenceMode {
+            let observation = maru_macos_session_default_false_observation()
+            guard observation == UInt32(MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED) else {
+                fputs("maru: default-false bootstrap observation failed (status=\(observation))\n", stderr)
+                Darwin.exit(1)
+            }
+            fputs("maru: default-false bootstrap observation matched\n", stderr)
+            Darwin.exit(0)
         }
         if ProcessInfo.processInfo.environment["MARU_SESSION_CONFIG_BOOTSTRAP_DUPLICATE_SMOKE"] == "1" {
             let duplicateStatus = maru_macos_session_config_bootstrap()

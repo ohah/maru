@@ -69,6 +69,14 @@ pub const SessionConfigBootstrapResult = enum(u32) {
     load_failure = c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE,
 };
 
+pub const SessionDefaultFalseObservation = enum(u32) {
+    not_bootstrapped = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_NOT_BOOTSTRAPPED,
+    matched = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED,
+    resolved_true = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_RESOLVED_TRUE,
+    explicit_override = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_EXPLICIT_OVERRIDE,
+    config_present = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_CONFIG_PRESENT,
+};
+
 const LeaseSlot = if (builtin.os.tag == .macos)
     struct {
         held: ?app_instance_lease_mod.AppInstanceLease = null,
@@ -130,8 +138,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v180 session config bootstrap and notification cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 180), abi_version);
+test "ABI v181 session config bootstrap observation and notification cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 181), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -141,6 +149,7 @@ test "ABI v180 session config bootstrap and notification cold route values match
     try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE), @intFromEnum(SessionConfigBootstrapResult.no_lease));
     try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED), @intFromEnum(SessionConfigBootstrapResult.already_initialized));
     try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE), @intFromEnum(SessionConfigBootstrapResult.load_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED), @intFromEnum(SessionDefaultFalseObservation.matched));
 }
 
 test "app instance LeaseSlot acquires exactly once and preserves typed failure" {
@@ -648,6 +657,53 @@ pub export fn maru_macos_session_config_bootstrap() u32 {
         else => SessionConfigBootstrapResult.load_failure,
     });
     return @intFromEnum(SessionConfigBootstrapResult.ready);
+}
+
+pub export fn maru_macos_session_default_false_observation() u32 {
+    if (!app_instance_lease_slot.isHeld())
+        return @intFromEnum(SessionDefaultFalseObservation.not_bootstrapped);
+    return @intFromEnum(classifyDefaultFalseSnapshot(session_mod.appKeepAliveSnapshotIfBootstrapped()));
+}
+
+fn classifyDefaultFalseSnapshot(snapshot_optional: ?session_mod.config_mod.SessionKeepAliveSnapshot) SessionDefaultFalseObservation {
+    const snapshot = snapshot_optional orelse return .not_bootstrapped;
+    if (snapshot.value) return .resolved_true;
+    switch (snapshot.provenance) {
+        .absent => {},
+        .explicit_valid, .explicit_invalid => return .explicit_override,
+    }
+    if (snapshot.file_provenance != .missing) return .config_present;
+    return .matched;
+}
+
+test "default false observation classifies every bootstrap state without caller booleans" {
+    const Snapshot = session_mod.config_mod.SessionKeepAliveSnapshot;
+    try std.testing.expectEqual(SessionDefaultFalseObservation.not_bootstrapped, classifyDefaultFalseSnapshot(null));
+    try std.testing.expectEqual(SessionDefaultFalseObservation.matched, classifyDefaultFalseSnapshot(Snapshot{
+        .value = false,
+        .provenance = .absent,
+        .file_provenance = .missing,
+    }));
+    try std.testing.expectEqual(SessionDefaultFalseObservation.resolved_true, classifyDefaultFalseSnapshot(Snapshot{
+        .value = true,
+        .provenance = .absent,
+        .file_provenance = .missing,
+    }));
+    try std.testing.expectEqual(SessionDefaultFalseObservation.explicit_override, classifyDefaultFalseSnapshot(Snapshot{
+        .value = false,
+        .provenance = .{ .explicit_valid = false },
+        .file_provenance = .readable,
+    }));
+    try std.testing.expectEqual(SessionDefaultFalseObservation.explicit_override, classifyDefaultFalseSnapshot(Snapshot{
+        .value = false,
+        .provenance = .explicit_invalid,
+        .file_provenance = .readable,
+    }));
+    try std.testing.expectEqual(SessionDefaultFalseObservation.config_present, classifyDefaultFalseSnapshot(Snapshot{
+        .value = false,
+        .provenance = .absent,
+        .file_provenance = .unreadable,
+    }));
 }
 
 pub export fn maru_macos_incident_owner_shutdown() u32 {

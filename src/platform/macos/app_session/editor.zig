@@ -5218,6 +5218,49 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
 /// 사용자가 **그 언어에 없는 문자**를 문서에 박는다.
 ///
 /// **한 번의 토글은 undo 하나다** — 커서가 N개여도 `delta.apply` 한 번이다(§3.3).
+/// 커서들이 **걸친 줄 번호**(중복 없이 오름차순). 줄 조작 넷과 주석 토글이 **같은 답**을 써야 한다
+/// — 갈리면 `⌘/` 로 주석 처리한 범위와 `⇧⌘K` 로 지우는 범위가 달라진다(§3.9a).
+///
+/// **선택이 다음 줄 머리에서 끝나면 그 줄은 뺀다.** 줄 전체를 끌어 고르면 끝이 다음 줄 offset 0이
+/// 되는데, 그대로 넣으면 **고르지 않은 줄이 딸려 온다**(2026-08-27 실측 — `[0,2)`로 첫 줄만 골랐는데
+/// 둘째 줄까지 갔다). VSCode·Xcode 가 같은 자리에서 뺀다.
+///
+/// **중복은 정렬 뒤 인접 비교로 지운다.** 넣을 때마다 앞을 훑으면 O(n²)이고 커서는 `⌘⌃D` 로 수천
+/// 개가 된다(4,000개에서 비교 800만 번을 실측했다). 한 줄에 커서가 여럿이어도 **한 번만** 세야 —
+/// 두 번 세면 주석은 `////` 가 되고 줄 이동은 **두 칸** 움직인다.
+fn selectedLineNumbers(self: *AppSession, term: *Term, out: *std.ArrayList(usize)) bool {
+    const doc = term.rt.editor_doc orelse return false;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+    while (iter.next()) |sel| {
+        const s_off = @min(sel.start(), content.len);
+        var e_off = @min(sel.end(), content.len);
+        if (e_off > s_off) {
+            const e_line = lines.lineAt(e_off);
+            if (lines.line(e_line)) |l| {
+                if (l.start == e_off) e_off -= 1;
+            }
+        }
+        const lo = lines.lineAt(s_off);
+        const hi = lines.lineAt(e_off);
+        var n = lo;
+        while (n <= hi) : (n += 1) out.append(self.allocator, n) catch return false;
+    }
+    if (out.items.len == 0) return false;
+    std.mem.sort(usize, out.items, {}, std.sort.asc(usize));
+    var w: usize = 0;
+    for (out.items, 0..) |n, i| {
+        if (i == 0 or n != out.items[w - 1]) {
+            out.items[w] = n;
+            w += 1;
+        }
+    }
+    out.shrinkRetainingCapacity(w);
+    return true;
+}
+
 pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
@@ -5233,42 +5276,10 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
 
     // 커서들이 걸친 **줄 번호**를 모은다. 같은 줄에 커서가 여럿이면 한 번만 — 두 번 주석 처리하면
     // `////`가 된다.
+    // **줄 번호는 `selectedLineNumbers` 하나가 답한다**(§3.9a) — 줄 조작 넷과 같은 답이어야 한다.
     var line_nums: std.ArrayList(usize) = .empty;
     defer line_nums.deinit(self.allocator);
-    var iter = selections(term);
-    if (iter.count() == 0) return false;
-    while (iter.next()) |sel| {
-        const s_off = @min(sel.start(), content.len);
-        var e_off = @min(sel.end(), content.len);
-        // **선택이 다음 줄 **머리**에서 끝나면 그 줄은 안 넣는다.** 줄 전체를 끌어 고르면 끝이
-        // 다음 줄 offset 0이 되는데, 그대로 `lineAt`에 넣으면 **고르지 않은 줄이 주석 처리된다**
-        // (적대적 검증 2026-08-27이 실측으로 잡았다 — `[0,2)`로 첫 줄만 골랐는데 둘째 줄까지 갔다).
-        // VSCode·Xcode가 같은 자리에서 그 줄을 뺀다.
-        if (e_off > s_off) {
-            const e_line = lines.lineAt(e_off);
-            if (lines.line(e_line)) |l| {
-                if (l.start == e_off) e_off -= 1;
-            }
-        }
-        const lo = lines.lineAt(s_off);
-        const hi = lines.lineAt(e_off);
-        var n = lo;
-        while (n <= hi) : (n += 1) line_nums.append(self.allocator, n) catch return false;
-    }
-    if (line_nums.items.len == 0) return false;
-
-    // **중복은 정렬한 뒤 인접한 것끼리 지운다.** 넣을 때마다 앞을 전부 훑으면 O(n²)이고, 커서는
-    // `⌘⌃D`로 수천 개가 된다 — 4,000개에서 비교가 800만 번임을 실측했다(2026-08-27). 커서가
-    // primary 먼저 나오는 순서라 정렬돼 있지 않으므로, 넣는 중에는 인접 비교로 지울 수 없다.
-    std.mem.sort(usize, line_nums.items, {}, std.sort.asc(usize));
-    var w: usize = 0;
-    for (line_nums.items, 0..) |n, i| {
-        if (i == 0 or n != line_nums.items[w - 1]) {
-            line_nums.items[w] = n;
-            w += 1;
-        }
-    }
-    line_nums.shrinkRetainingCapacity(w);
+    if (!selectedLineNumbers(self, term, &line_nums)) return false;
 
     // **하나라도 주석이 아니면 전부 주석.** 빈 줄은 판단에서 뺀다 — 빈 줄 하나 때문에 전체가
     // "주석 아님"으로 뒤집히면 이미 다 주석인 블록을 해제할 수 없다.
@@ -5339,6 +5350,323 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
+}
+
+/// 줄 조작 넷이 공유하는 **편집 적용 꼬리**(§3.9a) — undo 하나, 스크롤 앵커, 구문 통지, reveal.
+///
+/// **꼬리를 복사해 두면 넷 중 하나가 반드시 어긋난다.** 실제로 `toggleLineComment`·`pasteText`가
+/// 같은 아홉 줄을 각자 들고 있고, 그 중 하나만 `breakUndoGroup`을 빠뜨려도 **타이핑과 한 undo로
+/// 뭉친다**(§3.3 "연산 종류 변경"). 그래서 넷은 이 자리 하나를 탄다.
+fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.editor.delta.Change) bool {
+    if (ranges.len == 0) return false;
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+    const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term);
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+    breakUndoGroup(term);
+    pushUndo(self, term, inverse, before, before_primary, .insert);
+    writeBackSelections(self, term, sels);
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges });
+    revealPrimaryCaretRows(self, term, rows_before);
+    breakUndoGroup(term);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 줄 조작이 설 수 있는 문서인가 — 편집기이고, 비교가 아니고, 읽기 전용이 아니어야 한다.
+fn lineOpDoc(term: *Term) ?Opened {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return null;
+    // **읽기 전용은 심층 방어다**(§6). `edit_doc.apply` 가 같은 판정을 하므로 이 줄을 지워도 문서는
+    // 안 바뀌고 `applyLineEdit` 이 거짓을 낸다 — 그래서 **판정자로 잡히지 않는다**(변이 L21 이
+    // 살아남는 것이 정상이다). 그럼에도 두는 이유는 여기서 막으면 `selectedLineNumbers` 부터의
+    // 헛일과 할당이 아예 안 일어나서다. `toggleLineComment`·`pasteText` 도 같은 자리에 같은 줄을 둔다.
+    if (doc.file.read_only) return null;
+    return doc;
+}
+
+/// `⇧⌘K` — 걸친 줄들을 지운다(§3.9a).
+///
+/// **마지막 줄이면 앞 개행을 지운다.** 뒤에 개행이 없는데 줄 내용만 지우면 **빈 줄이 남아** 사용자
+/// 눈에는 "지웠는데 자리가 남는다"로 보인다.
+pub fn deleteLines(self: *AppSession, term: *Term) bool {
+    const doc = lineOpDoc(term) orelse return false;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    var nums: std.ArrayList(usize) = .empty;
+    defer nums.deinit(self.allocator);
+    if (!selectedLineNumbers(self, term, &nums)) return false;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    for (nums.items) |n| {
+        const line = lines.line(n) orelse continue;
+        var start = line.start;
+        var end = line.end_with_ending; // 개행 포함
+        if (end >= content.len and start > 0) {
+            // 문서 마지막 줄 — 앞 개행까지 먹는다.
+            start -= 1;
+            end = content.len;
+        }
+        ranges.append(self.allocator, .{ .start = start, .end = end, .text = "" }) catch return false;
+    }
+    return applyLineEdit(self, term, ranges.items);
+}
+
+/// 걸친 줄들을 **아래에** 복사한다(§3.9a).
+///
+/// **선택은 복사본으로 옮긴다**(VSCode 관례). 원본에 두면 다시 눌렀을 때 **같은 줄이 또 복제되어**
+/// 사용자가 만든 복사본이 아니라 원본만 늘어난다 — `delta.apply`가 삽입 지점 뒤의 selection을 미므로,
+/// 복사본을 **선택 앞이 아니라 뒤**에 넣는 것이 그 동작을 만든다.
+pub fn duplicateLines(self: *AppSession, term: *Term) bool {
+    const doc = lineOpDoc(term) orelse return false;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    var nums: std.ArrayList(usize) = .empty;
+    defer nums.deinit(self.allocator);
+    if (!selectedLineNumbers(self, term, &nums)) return false;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |t| self.allocator.free(t);
+        owned.deinit(self.allocator);
+    }
+    var shift: usize = 0;
+    // **연속한 줄은 한 덩어리로 복사한다.** 줄마다 따로 넣으면 A B 가 A A B B 가 되어 블록이 깨진다.
+    var i: usize = 0;
+    while (i < nums.items.len) {
+        var j = i;
+        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
+        const first = lines.line(nums.items[i]) orelse {
+            i = j + 1;
+            continue;
+        };
+        const last = lines.line(nums.items[j]) orelse {
+            i = j + 1;
+            continue;
+        };
+        const block = content[first.start..@min(last.end_with_ending, content.len)];
+        const t = if (block.len > 0 and block[block.len - 1] == '\n')
+            self.allocator.dupe(u8, block) catch return false
+        else
+            std.fmt.allocPrint(self.allocator, "\n{s}", .{block}) catch return false;
+        owned.append(self.allocator, t) catch {
+            self.allocator.free(t);
+            return false;
+        };
+        const at = @min(last.end_with_ending, content.len);
+        ranges.append(self.allocator, .{ .start = at, .end = at, .text = t }) catch return false;
+        shift += t.len;
+        i = j + 1;
+    }
+    if (!applyLineEdit(self, term, ranges.items)) return false;
+
+    // **선택을 사본으로 옮긴다**(§3.9a). `delta.apply` 는 삽입 지점 **뒤**만 밀므로, 블록 뒤에 넣은
+    // 사본은 선택을 안 건드린다 — 그대로 두면 커서가 **위 원본**에 남아, 다시 눌렀을 때 사용자가
+    // 방금 만든 사본이 아니라 원본이 또 복제된다.
+    //
+    // **앞에 넣어 미는 방법은 안 된다** — 선택이 삽입 지점에서 시작하면 anchor 는 제자리고 focus 만
+    // 밀려 **두 사본을 통째로 덮는다**(실측: 두 번째 복제가 네 벌을 만들었다).
+    if (shift > 0) {
+        if (term.rt.editor_selection) |sel| term.rt.editor_selection = .{
+            .anchor_start = sel.anchor_start + shift,
+            .anchor_end = sel.anchor_end + shift,
+            .focus = sel.focus + shift,
+            .kind = sel.kind,
+        };
+        for (term.rt.editor_extra_selections) |*e| e.* = .{
+            .anchor_start = e.anchor_start + shift,
+            .anchor_end = e.anchor_end + shift,
+            .focus = e.focus + shift,
+            .kind = e.kind,
+        };
+    }
+    return true;
+}
+
+/// 걸친 블록을 위/아래 줄과 **통째로 맞바꾼다**(§3.9a).
+///
+/// **문서 처음/끝에서는 무동작이다.** clamp 해서 절반만 움직이면 사용자는 무슨 일이 났는지 못 읽는다.
+/// **연속하지 않은 줄 무리는 각자 옮긴다** — 한 덩어리로 치면 사이의 안 고른 줄까지 끌려간다.
+pub fn moveLines(self: *AppSession, term: *Term, down: bool) bool {
+    const doc = lineOpDoc(term) orelse return false;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    var nums: std.ArrayList(usize) = .empty;
+    defer nums.deinit(self.allocator);
+    if (!selectedLineNumbers(self, term, &nums)) return false;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |t| self.allocator.free(t);
+        owned.deinit(self.allocator);
+    }
+    var i: usize = 0;
+    while (i < nums.items.len) {
+        var j = i;
+        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
+        const lo = nums.items[i];
+        const hi = nums.items[j];
+        i = j + 1;
+        // **경계에서는 그 무리만 건너뛴다** — 다른 무리는 여전히 움직여야 한다.
+        if (!down and lo == 0) continue;
+        if (down and hi + 1 >= lines.lineCount()) continue;
+        // **문서 끝 개행이 만드는 빈 줄은 이동 대상이 아니다.** 그것과 맞바꾸면 내용이 `"c\n"` →
+        // `"\nc"` 가 되어 **빈 줄이 생기고 끝 개행이 사라진다**(적대적 검증 LN4 가 실측했다).
+        // 화면에는 아무 줄도 없는 자리라, 사용자는 "아래로 옮겼는데 줄이 하나 늘었다"만 본다.
+        if (down and (lines.line(hi + 1) orelse continue).start >= content.len) continue;
+        const swap_n = if (down) hi + 1 else lo - 1;
+        const blk_first = lines.line(lo) orelse continue;
+        const blk_last = lines.line(hi) orelse continue;
+        const other = lines.line(swap_n) orelse continue;
+
+        const blk = content[blk_first.start..@min(blk_last.end_with_ending, content.len)];
+        const oth = content[other.start..@min(other.end_with_ending, content.len)];
+        // **개행이 없는 마지막 줄이 섞이면 개행을 손으로 맞춘다** — 그대로 이으면 두 줄이 붙는다.
+        const blk_nl = blk.len > 0 and blk[blk.len - 1] == '\n';
+        const oth_nl = oth.len > 0 and oth[oth.len - 1] == '\n';
+        const blk_body = if (blk_nl) blk[0 .. blk.len - 1] else blk;
+        const oth_body = if (oth_nl) oth[0 .. oth.len - 1] else oth;
+        const region_start = if (down) blk_first.start else other.start;
+        const region_end = if (down) @min(other.end_with_ending, content.len) else @min(blk_last.end_with_ending, content.len);
+        const trailing_nl = if (down) blk_nl and oth_nl else oth_nl and blk_nl;
+        const t = if (down)
+            (if (trailing_nl)
+                std.fmt.allocPrint(self.allocator, "{s}\n{s}\n", .{ oth_body, blk_body }) catch return false
+            else
+                std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ oth_body, blk_body }) catch return false)
+        else
+            (if (trailing_nl)
+                std.fmt.allocPrint(self.allocator, "{s}\n{s}\n", .{ blk_body, oth_body }) catch return false
+            else
+                std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ blk_body, oth_body }) catch return false);
+        owned.append(self.allocator, t) catch {
+            self.allocator.free(t);
+            return false;
+        };
+        ranges.append(self.allocator, .{ .start = region_start, .end = region_end, .text = t }) catch return false;
+    }
+    return applyLineEdit(self, term, ranges.items);
+}
+
+/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a).
+///
+/// **들여쓰기는 탭 문자 하나다** — `Tab` 키가 넣는 것과 **같아야** 한다. 갈라 두면 같은 키가 선택
+/// 여부에 따라 다른 문자를 넣는다. **빈 줄은 건드리지 않는다**(§3.7이 주석에서 같은 결정을 했다 —
+/// 공백만 있는 줄이 늘어난다). **내어쓰기는 있는 만큼만** 뺀다: 탭 하나, 없으면 공백을 최대
+/// `editor.tab-width`개. 없는 줄이 섞여도 연산 전체가 실패하지 않는다.
+pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
+    const doc = lineOpDoc(term) orelse return false;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    var nums: std.ArrayList(usize) = .empty;
+    defer nums.deinit(self.allocator);
+    if (!selectedLineNumbers(self, term, &nums)) return false;
+
+    const width: usize = @max(1, term.rt.editor_tab_width);
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    for (nums.items) |n| {
+        const line = lines.line(n) orelse continue;
+        const text = content[line.start..line.contentEnd()];
+        if (outdent) {
+            if (text.len == 0) continue;
+            var take: usize = 0;
+            if (text[0] == '\t') {
+                take = 1;
+            } else {
+                while (take < text.len and take < width and text[take] == ' ') take += 1;
+            }
+            if (take == 0) continue; // 뺄 것이 없다 — 이 줄만 건너뛴다
+            ranges.append(self.allocator, .{ .start = line.start, .end = line.start + take, .text = "" }) catch return false;
+        } else {
+            if (std.mem.trimStart(u8, text, " \t").len == 0) continue; // 빈 줄
+            ranges.append(self.allocator, .{ .start = line.start, .end = line.start, .text = "\t" }) catch return false;
+        }
+    }
+    return applyLineEdit(self, term, ranges.items);
+}
+
+/// 선택이 **여러 줄에 걸치는가** — `Tab` 이 글자를 넣을지 줄을 들여쓸지 가른다(§3.9a).
+///
+/// **줄 번호로 잰다.** offset 차이로 재면 긴 한 줄이 여러 줄로 오인된다. 커서가 여럿이면 하나라도
+/// 여러 줄에 걸치면 참이다 — 섞였을 때 일부만 들여쓰면 나머지 커서는 탭 문자를 받아 한 연산이
+/// 두 뜻이 된다.
+pub fn selectionSpansLines(term: *Term) bool {
+    const doc = term.rt.editor_doc orelse return false;
+    const lines = doc.file.lines;
+    const content = doc.file.content;
+    var iter = selections(term);
+    while (iter.next()) |sel| {
+        const s_off = @min(sel.start(), content.len);
+        const e_off = @min(sel.end(), content.len);
+        if (e_off <= s_off) continue;
+        if (lines.lineAt(s_off) != lines.lineAt(e_off)) return true;
+    }
+    return false;
+}
+
+/// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a).
+///
+/// **앞 공백을 글자 그대로 잇는다** — 탭이면 탭, 공백이면 공백(§3.5 *"원문을 바꾸지 않는다"*와 같은
+/// 결이다. 변환하면 그 파일의 나머지와 어긋난다).
+///
+/// **caret 앞까지만 본다.** 줄 가운데서 Enter 를 치면 뒤 절반이 다음 줄로 가는데, 그 줄의 들여쓰기는
+/// **원래 줄의 것**이지 잘린 조각의 것이 아니다.
+///
+/// **커서마다 다른 들여쓰기를 잇는다** — 커서가 여럿이면 각자 자기 줄을 본다. 하나로 정하면 다른
+/// 커서 자리에 **그 줄에 없던 공백**이 들어간다.
+///
+/// **읽기 전용·비교에서는 종전 경로로 떨어진다**(그쪽이 거절한다 — 여기서 또 판정하면 출처가 둘이다).
+pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
+    const doc = lineOpDoc(term) orelse return insertText(self, term, "\n");
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |t| self.allocator.free(t);
+        owned.deinit(self.allocator);
+    }
+    var iter = selections(term);
+    if (iter.count() == 0) return insertText(self, term, "\n");
+    while (iter.next()) |sel| {
+        const s_off = @min(sel.start(), content.len);
+        const e_off = @min(sel.end(), content.len);
+        const line = lines.line(lines.lineAt(s_off)) orelse return insertText(self, term, "\n");
+        // **caret 앞까지만** 본다.
+        const head = content[line.start..s_off];
+        const indent_len = head.len - std.mem.trimStart(u8, head, " \t").len;
+        const indent = head[0..indent_len];
+        const t = std.fmt.allocPrint(self.allocator, "\n{s}", .{indent}) catch return false;
+        owned.append(self.allocator, t) catch {
+            self.allocator.free(t);
+            return false;
+        };
+        ranges.append(self.allocator, .{ .start = s_off, .end = e_off, .text = t }) catch return false;
+    }
+    // **들여쓸 것이 없으면 종전 경로다** — 같은 결과를 두 자리에서 만들지 않는다.
+    var any_indent = false;
+    for (ranges.items) |r| {
+        if (r.text.len > 1) any_indent = true;
+    }
+    if (!any_indent) return insertText(self, term, "\n");
+    return applyLineEdit(self, term, ranges.items);
 }
 
 /// **클립보드를 커서마다 넣는다**(§3.4).
@@ -13814,6 +14142,242 @@ test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — �
     try testing.expect(insertText(fx.session, t2, ")"));
     // 첫·셋째는 지나가고 둘째만 넣었다 — 길이가 정확히 1 늘었다.
     try testing.expectEqual(before_len + 1, t2.rt.editor_doc.?.file.content.len);
+}
+
+test "LN1 줄 삭제 — 마지막 줄은 앞 개행을 먹어 빈 줄을 안 남긴다 (§3.9a)" {
+    // **뒤에 개행이 없는데 내용만 지우면 빈 줄이 남는다** — 사용자 눈에는 "지웠는데 자리가 남는다".
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln1.zig", "a\nb\nc");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("b\nc", term.rt.editor_doc.?.file.content);
+
+    // **마지막 줄** — 앞 개행까지 먹는다.
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.content.len);
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("b", term.rt.editor_doc.?.file.content);
+}
+
+test "LN2 줄 조작은 선택이 걸친 줄만 건드린다 — 다음 줄 머리는 뺀다 (§3.9a)" {
+    // 줄 전체를 끌어 고르면 끝 offset 이 **다음 줄 0** 이 된다. 그대로 세면 고르지 않은 줄이 지워진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln2.zig", "aa\nbb\ncc\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3); // "aa\n" — 둘째 줄 머리
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("bb\ncc\n", term.rt.editor_doc.?.file.content);
+}
+
+test "LN3 줄 복제 — 연속한 줄은 한 덩어리다 (§3.9a)" {
+    // **줄마다 따로 넣으면 A B 가 A A B B 가 되어 블록이 깨진다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln3.zig", "a\nb\nc\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3); // a, b
+    try testing.expect(duplicateLines(fx.session, term));
+    try testing.expectEqualStrings("a\nb\na\nb\nc\n", term.rt.editor_doc.?.file.content);
+
+    // **선택이 복사본으로 옮겨져야 한다.** 원본에 남으면 다시 눌렀을 때 **같은 줄이 또 복제되어**
+    // 사용자가 만든 복사본이 아니라 원본만 늘어난다(변이 L16).
+    // **자리를 정확히 못박는다.** 「4 이상」 같은 부등식이면 **절반만 민** 구현도 통과한다 —
+    // 내용은 우연히 같아지기 때문이다(변이 L19 가 그렇게 살아남았다). 블록이 `"a\nb\n"`(4 byte)이므로
+    // 선택 `[0,3)` 은 정확히 `[4,7)` 이 되어야 한다.
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.start());
+    try testing.expectEqual(@as(usize, 7), term.rt.editor_selection.?.end());
+
+    try testing.expect(duplicateLines(fx.session, term));
+    try testing.expectEqualStrings("a\nb\na\nb\na\nb\nc\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.start());
+}
+
+test "LN4 줄 이동 — 맞바꾸고, 문서 끝에서는 무동작이다 (§3.9a)" {
+    // **clamp 해서 절반만 움직이면 사용자가 무슨 일이 났는지 못 읽는다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln4.zig", "a\nb\nc\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0); // 첫 줄
+    try testing.expect(!moveLines(fx.session, term, false)); // 위로 — 무동작
+    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editor_doc.?.file.content);
+
+    try testing.expect(moveLines(fx.session, term, true)); // 아래로
+    try testing.expectEqualStrings("b\na\nc\n", term.rt.editor_doc.?.file.content);
+
+    // **위로도 된다** — 아래만 되는 구현은 위 단언만으로 안 잡힌다(변이 L17).
+    const term2 = try undoFixture(&fx, allocator, "ln4b.zig", "a\nb\nc\n");
+    term2.rt.editor_selection = editor_selection.Selection.at(2); // 둘째 줄
+    try testing.expect(moveLines(fx.session, term2, false));
+    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editor_doc.?.file.content);
+
+    // **문서 끝에서 아래로도 무동작이다.**
+    term2.rt.editor_selection = editor_selection.Selection.at(4); // 마지막 줄
+    try testing.expect(!moveLines(fx.session, term2, true));
+    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editor_doc.?.file.content);
+}
+
+test "LN5 들여쓰기는 탭 문자 — 빈 줄은 안 건드리고, 내어쓰기는 있는 만큼만 (§3.9a)" {
+    // 들여쓰기 문자가 `Tab` 키와 갈리면 **같은 키가 선택 여부에 따라 다른 문자를 넣는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln5.zig", "a\n\nb\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // 세 줄 전부
+
+    try testing.expect(indentLines(fx.session, term, false));
+    try testing.expectEqualStrings("\ta\n\n\tb\n", term.rt.editor_doc.?.file.content); // 빈 줄은 그대로
+
+    // **내어쓰기는 있는 만큼만** — 뺄 것 없는 줄이 섞여도 연산이 통째로 실패하지 않는다.
+    try testing.expect(indentLines(fx.session, term, true));
+    try testing.expectEqualStrings("a\n\nb\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(!indentLines(fx.session, term, true)); // 더 뺄 것이 없다
+
+    // **공백 들여쓰기는 `editor.tab-width` 만큼 뺀다** — 한 칸만 빼면 네 번 눌러야 한 단계가 풀려
+    // 사용자가 「내어쓰기가 안 먹는다」로 읽는다(변이 L23).
+    const term4 = try undoFixture(&fx, allocator, "ln5c.zig", "    a\n");
+    term4.rt.editor_tab_width = 4;
+    term4.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(indentLines(fx.session, term4, true));
+    try testing.expectEqualStrings("a\n", term4.rt.editor_doc.?.file.content);
+
+    // **섞이면 있는 쪽만 뺀다** — 뺄 것 없는 줄 하나 때문에 연산이 통째로 실패하면, 블록을 고를
+    // 때마다 내어쓰기가 죽는다(변이 L7).
+    const term2 = try undoFixture(&fx, allocator, "ln5b.zig", "\tx\ny\n");
+    term2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+    try testing.expect(indentLines(fx.session, term2, true));
+    try testing.expectEqualStrings("x\ny\n", term2.rt.editor_doc.?.file.content);
+}
+
+test "LN6 Enter 가 이전 줄 들여쓰기를 잇는다 — caret 앞까지만 본다 (§3.9a)" {
+    // **줄 가운데서 치면 뒤 절반이 다음 줄로 가는데, 들여쓰기는 원래 줄의 것이다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln6.zig", "\t\tab\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(3); // "\t\ta" 뒤 (b 앞)
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term));
+    try testing.expectEqualStrings("\t\ta\n\t\tb\n", term.rt.editor_doc.?.file.content);
+
+    // **선택이 있으면 지운 뒤 그 자리의 줄을 본다**(§3.9a). 안 지우면 Enter 가 고른 글자를 남긴 채
+    // 줄만 늘려, 사용자가 「바꿔 쓰려고 골랐는데 그대로 있다」를 본다(변이 L24).
+    const term4 = try undoFixture(&fx, allocator, "ln6d.zig", "\tab\n");
+    term4.rt.editor_selection = editor_selection.Selection.fromPoints(1, 3); // "ab"
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term4));
+    try testing.expectEqualStrings("\t\n\t\n", term4.rt.editor_doc.?.file.content);
+
+    // **caret 이 들여쓰기 안에 있으면 그 앞까지만 잇는다** — 줄 전체를 보면 뒤쪽 들여쓰기까지
+    // 세어 사용자가 자르지 않은 공백이 새 줄에 들어간다(변이 L9).
+    const term3 = try undoFixture(&fx, allocator, "ln6c.zig", "\t\tab\n");
+    term3.rt.editor_selection = editor_selection.Selection.at(1); // 탭 하나 뒤
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term3));
+    try testing.expectEqualStrings("\t\n\t\tab\n", term3.rt.editor_doc.?.file.content);
+
+    // **들여쓰기가 없으면 종전 경로** — 개행만 들어간다.
+    const term2 = try undoFixture(&fx, allocator, "ln6b.zig", "x\n");
+    term2.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term2));
+    try testing.expectEqualStrings("x\n\n", term2.rt.editor_doc.?.file.content);
+}
+
+test "LN9 줄 조작은 앞뒤 타이핑과 한 undo 로 뭉치지 않는다 (§3.3 연산 종류 변경)" {
+    // **꼬리가 `breakUndoGroup` 을 빠뜨리면 타이핑과 한 묶음이 된다** — 되돌리기 한 번에 사용자가
+    // 친 글자까지 사라진다(변이 L22). CMT9 가 주석 토글에 대해 세운 것과 같은 판정이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln9.zig", "a\nb\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(insertText(fx.session, term, "X"));
+    try testing.expectEqualStrings("aX\nb\n", term.rt.editor_doc.?.file.content);
+
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("b\n", term.rt.editor_doc.?.file.content);
+
+    // **되돌리기 한 번은 줄 삭제만 푼다** — 친 글자는 남아 있어야 한다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("aX\nb\n", term.rt.editor_doc.?.file.content);
+}
+
+test "LN8 줄 조작은 비교 뷰와 읽기 전용을 거절한다 (§3.9a)" {
+    // **게이트를 재는 판정자가 없으면 지워도 전부 초록이다**(변이 L20·L21 이 그렇게 살아남았다).
+    // 비교 뷰는 축이 둘이라(§4.1g) 문서 offset 이 성립하지 않고, 읽기 전용은 고칠 수 없는 파일이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln8.zig", "a\nb\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // **비교 뷰** — 넷 다 거절하고 문서는 그대로다.
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    try testing.expect(!deleteLines(fx.session, term));
+    try testing.expect(!duplicateLines(fx.session, term));
+    try testing.expect(!moveLines(fx.session, term, true));
+    try testing.expect(!indentLines(fx.session, term, false));
+    try testing.expect(!insertNewlineKeepingIndent(fx.session, term));
+    try testing.expectEqualStrings("a\nb\n", term.rt.editor_doc.?.file.content);
+    term.rt.editor_diff = null;
+
+    // **읽기 전용** — 같은 자리에서 같은 답이다.
+    term.rt.editor_doc.?.file.read_only = true;
+    try testing.expect(!deleteLines(fx.session, term));
+    try testing.expect(!duplicateLines(fx.session, term));
+    try testing.expect(!moveLines(fx.session, term, true));
+    try testing.expect(!indentLines(fx.session, term, false));
+    try testing.expectEqualStrings("a\nb\n", term.rt.editor_doc.?.file.content);
+    term.rt.editor_doc.?.file.read_only = false;
+
+    // **정상 상태에서는 된다** — 위 단언이 「늘 거짓」으로 통과하지 않게 대조를 둔다.
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("b\n", term.rt.editor_doc.?.file.content);
+}
+
+test "LN7 ⇧⌘K 와 Tab/⇧Tab 이 실제로 닿는다 — 키 경로 전체 (§3.9a)" {
+    // **함수를 직접 부르는 판정자만 있으면 배선이 빠져도 전부 초록이다**(CMT10 이 같은 이유로 섰다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "ln7.zig", "a\nb\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .{ .char = 'k' }, .{ .command = true, .shift = true });
+    try testing.expectEqualStrings("b\n", term.rt.editor_doc.?.file.content);
+
+    // **선택이 한 줄 안이면 Tab 은 탭 문자다** — 아니면 글자를 못 넣는다.
+    // **caret 이 줄 머리가 아니어야 갈린다** — 머리에서 재면 「그 자리에 넣기」와 「줄 들여쓰기」가
+    // 같은 답을 내 변이가 살아남는다(L11).
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("b\t\n", term.rt.editor_doc.?.file.content);
+
+    // **한 줄 안에서 여러 글자를 골라도 Tab 은 글자다** — offset 차이로 재면 긴 한 줄이 여러 줄로
+    // 오인되어, 단어를 고르고 Tab 을 치면 **줄이 들여쓰기된다**(변이 L12).
+    const term3 = try undoFixture(&fx, allocator, "ln7c.zig", "abcd\n");
+    term3.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("\td\n", term3.rt.editor_doc.?.file.content);
+
+    // **여러 줄이면 들여쓰기다.**
+    const term2 = try undoFixture(&fx, allocator, "ln7b.zig", "a\nb\n");
+    term2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("\ta\n\tb\n", term2.rt.editor_doc.?.file.content);
+    try pressKey(&fx, .tab, .{ .shift = true });
+    try testing.expectEqualStrings("a\nb\n", term2.rt.editor_doc.?.file.content);
 }
 
 test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {

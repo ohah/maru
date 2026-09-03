@@ -269,6 +269,7 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'W' } }, .action = .toggle_find_whole_word }, // Cmd+Opt+W
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'L' } }, .action = .toggle_find_in_selection }, // Cmd+Opt+L
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'D' } }, .action = .toggle_find_diff_side }, // Cmd+Opt+D: 비교 뷰에서 검색할 열 넘기기
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'K' } }, .action = .delete_lines }, // Cmd+Shift+K: 줄 삭제(§3.9a — VSCode 와 같다)
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).

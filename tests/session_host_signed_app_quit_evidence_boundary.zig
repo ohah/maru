@@ -44,6 +44,26 @@ test "signed app Quit release mode isolates the product child namespace" {
     try std.testing.expect(std.mem.indexOf(u8, swift, "session-host-signed-app-quit-home") != null);
 }
 
+test "signed app Quit child consumes the sealed workspace paths without an ambient registry" {
+    const build = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "build.zig",
+        std.testing.allocator,
+        .limited(2 * 1024 * 1024),
+    );
+    defer std.testing.allocator.free(build);
+    const source = try readHarness();
+    defer std.testing.allocator.free(source);
+
+    try std.testing.expect(std.mem.indexOf(u8, build, "session-host-signed-app-quit-home") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "session-host-signed-app-quit-output") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "MARU_APP_SUMMARY_PATH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "zig-out/maru-macos-app/session-host-signed-app-quit-home") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "zig-out/session-host-signed-app-quit/leaf.json") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "/tmp/maru-c3c-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "validateReleaseWorkspace") != null);
+}
+
 fn readHarness() ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,

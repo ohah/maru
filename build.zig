@@ -12171,7 +12171,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_signed_app_quit_evidence_tests = b.addRunArtifact(signed_app_quit_evidence_tests);
-        run_signed_app_quit_evidence_tests.addArg("--maru-expect-tests=3");
+        run_signed_app_quit_evidence_tests.addArg("--maru-expect-tests=4");
         run_signed_app_quit_evidence_tests.setCwd(b.path("."));
         run_session_host_tests.step.dependOn(&run_signed_app_quit_evidence_tests.step);
         const signed_app_quit_evidence_harness_step = b.step(
@@ -12213,7 +12213,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_default_false_evidence_tests = b.addRunArtifact(default_false_evidence_tests);
-        run_default_false_evidence_tests.addArg("--maru-expect-tests=3");
+        run_default_false_evidence_tests.addArg("--maru-expect-tests=4");
         run_default_false_evidence_tests.setCwd(b.path("."));
         run_session_host_tests.step.dependOn(&run_default_false_evidence_tests.step);
         const default_false_evidence_step = b.step(
@@ -13738,6 +13738,16 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-workspace",
         "Validate isolated baseline runner workspace",
     );
+    const session_host_baseline_child_paths_step = b.step(
+        "test-session-host-baseline-child-paths",
+        "Validate exclusive baseline child path preparation",
+    );
+    const run_session_host_baseline_child_paths = b.addSystemCommand(&.{ "sh", "tests/session-host-baseline-child-paths.sh" });
+    run_session_host_baseline_child_paths.setCwd(b.path("."));
+    session_host_baseline_child_paths_step.dependOn(&run_session_host_baseline_child_paths.step);
+    session_host_step.dependOn(&run_session_host_baseline_child_paths.step);
+    test_step.dependOn(&run_session_host_baseline_child_paths.step);
+    macos_only_test_step.dependOn(&run_session_host_baseline_child_paths.step);
     const session_host_release_adapter_candidate_upgrade_evidence_step = b.step(
         "test-session-host-release-adapter-candidate-upgrade-evidence",
         "Run trusted candidate upgrade evidence publication tests",

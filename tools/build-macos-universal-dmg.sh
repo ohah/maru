@@ -14,7 +14,8 @@
 #          --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
 #          --password "$APPLE_APP_SPECIFIC_PASSWORD"
 #
-# 산출물: dist/Maru-<버전>-universal.dmg (dist/는 git에 커밋하지 않는다)
+# 산출물: dist/Maru-<버전>-universal.dmg 및 같은 bytes를 보존한
+# dist/session-host-candidate-<버전>/ (dist/는 git에 커밋하지 않는다)
 set -eu
 
 # 서명 주체(조직명·Team ID)는 저장소에 두지 않는다. 키체인에 인증서가 하나면 이 접두사만으로 찾히고,
@@ -125,4 +126,22 @@ out="dist/Maru-${version}-universal.dmg"
 cp "$dmg" "$out"
 echo "==> verify"
 spctl -a -t open --context context:primary-signature -v "$out"
-echo "==> done: $out ($(lipo -archs "$app/Contents/MacOS/maru-macos-app"))"
+
+echo "==> preserve signed session-host candidate artifacts"
+candidate_staged=$(sh tools/publish-macos-release-candidate.sh "$app" "$dmg" "$version" "$work/candidate-publish")
+codesign --verify --strict --deep "$candidate_staged/Maru.app"
+codesign --verify --strict "$candidate_staged/maru-session-host-$version"
+xcrun stapler validate "$candidate_staged/Maru.app"
+xcrun stapler validate "$candidate_staged/Maru-$version-universal.dmg"
+spctl -a -t open --context context:primary-signature -v "$candidate_staged/Maru-$version-universal.dmg"
+candidate="dist/session-host-candidate-$version"
+test ! -e "$candidate"
+test ! -L "$candidate"
+mv "$candidate_staged" "$candidate"
+if ! cmp "$candidate/Maru.app/Contents/MacOS/maru-macos-app" "$candidate/maru-session-host-$version" ||
+    ! cmp "$out" "$candidate/Maru-$version-universal.dmg"
+then
+    rm -rf -- "$candidate"
+    exit 1
+fi
+echo "==> done: $out; $candidate ($(lipo -archs "$app/Contents/MacOS/maru-macos-app"))"

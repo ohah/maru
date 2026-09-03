@@ -159,10 +159,17 @@ stdin 을 쓸 수 없다**는 뜻이기도 하다: 설치는 한 exec, 감시는
 
 ## 7. 단계
 
+> **진행**(계획 문서가 진행의 단일 출처다 — [PR 체크리스트](../pr-checklist.md) 「문서 상태 표기 규율」):
+> RW1 **완료** · RW2a **완료** · RW2b **미착수** · RW3 **미착수** · RW4 **미착수** · RW5 **미착수**.
+
 - **RW1 — 감시자 바이너리**: inotify(리눅스) + kqueue(macOS·BSD). stdin `poll` 로 수명 결속. 인자는
   감시할 루트 하나. 출력은 「바뀌었다」한 줄(디바운스는 로컬이 진다).
-- **RW2 — 설치·판별**: `uname -sm` → embed 된 변종 선택 → stdin 파이프로 `$HOME/.cache/maru/` 에 설치.
-  멱등 확인(`--version`), 실패 시 `exit 1`.
+- **RW2a — 설치 계약**: `uname -sm` → 변종 판별, 멱등 확인(`--version` 을 **실행**해 본다), stdin 으로
+  받은 바이트를 `$HOME/.cache/maru/` 에 임시 이름→`mv` 로 심기, 못 쓰면 `exit 1`.
+  **순수 계층**(`src/session/remote_watch_install.zig`)이라 명령을 만들 뿐 실행하지 않는다.
+- **RW2b — 페이로드 배달**: 빌드가 만든 변종을 앱이 손에 쥐는 길(번들 리소스 또는 embed).
+  ⚠️ `maru_terminfo` 가 **세 모듈**에 등록된 함정과, `maru_mod` 에 넣으면 **wasm·모바일까지** 리눅스
+  바이너리를 지고 가는 문제를 함께 풀어야 한다 — 그래서 RW2a 와 갈랐다.
 - **RW3 — 채널**: ControlMaster 위에 긴 exec 하나. stdin 파이프 유지, 재시작·백오프, 소켓 부재 감지
   (이미 있는 `remoteControlSocketFor` 를 쓴다).
 - **RW4 — 트리거 접속**: 「바뀌었다」→ 지금의 읽기 경로. **디바운스**를 로컬에 둔다(연타로 읽기가 쌓이지

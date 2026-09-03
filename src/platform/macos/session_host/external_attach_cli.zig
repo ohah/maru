@@ -332,12 +332,13 @@ const ViewportInbox = struct {
         self: *ViewportInbox,
         owner: *external_pump_owner.ExternalPumpOwner,
         stderr: *std.Io.Writer,
-    ) void {
-        if (self.closed or self.pending == null) return;
+    ) bool {
+        if (self.closed or self.pending == null) return false;
         var owner_sink = OwnerViewportSink{ .owner = owner };
         self.flush(.{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
         if (owner_sink.failed) |reason|
             stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)}) catch {};
+        return owner_sink.admitted_any;
     }
 
     /// 선언 채널에서 한 번 읽는다. 삼킬 바이트가 없으면 `null`.
@@ -366,25 +367,32 @@ const ViewportInbox = struct {
         self: *ViewportInbox,
         owner: *external_pump_owner.ExternalPumpOwner,
         stderr: *std.Io.Writer,
-    ) void {
+    ) bool {
         var scratch: [viewport_frame_bytes * 8]u8 = undefined;
-        const bytes = self.readOnce(posix.STDIN_FILENO, &scratch) orelse return;
+        const bytes = self.readOnce(posix.STDIN_FILENO, &scratch) orelse return false;
         var owner_sink = OwnerViewportSink{ .owner = owner };
         self.ingest(bytes, .{ .ctx = &owner_sink, .send = OwnerViewportSink.send });
         // **알리기에 실패해도 스트림은 산다.** stderr 가 막힌 것이 화면을 끊을 이유는 아니다.
         if (owner_sink.failed) |reason|
             stderr.print("maru attach: viewport declaration rejected ({s})\n", .{@tagName(reason)}) catch {};
+        return owner_sink.admitted_any;
     }
 };
 
 const OwnerViewportSink = struct {
     owner: *external_pump_owner.ExternalPumpOwner,
     failed: ?client_pump.TerminalReason = null,
+    /// 이번에 **실제로 실은 것이 있는가.** 쓰기 관심은 그때만 세운다 — 아무것도 안 실었는데
+    /// 세우면 POLLOUT 이 매 턴 깨워 루프가 헛돈다(적대적 검증 2회차).
+    admitted_any: bool = false,
 
     fn send(ctx: *anyopaque, cols: u16, rows: u16) ViewportAdmit {
         const self: *OwnerViewportSink = @ptrCast(@alignCast(ctx));
         return switch (self.owner.admitDeclareViewport(cols, rows, streamNowNs())) {
-            .admitted => .admitted,
+            .admitted => {
+                self.admitted_any = true;
+                return .admitted;
+            },
             .backpressure, .busy => .retry,
             .terminal => |reason| {
                 self.failed = reason;
@@ -515,8 +523,15 @@ fn runStreamRequest(
             try stderr.print("maru attach: stream poll failed ({s})\n", .{@errorName(err)});
             return .protocol;
         };
+        // **실었으면 쓰기 관심을 «우리가» 세운다.** pump 의 `write_interest` 만 믿으면 안 된다 —
+        // 그것은 「RX 가 말랐다」는 증거가 선 뒤에만 서고, 그 증거는 실제로 한 번 읽어야 생긴다.
+        // 조용한 세션에 붙은 관측자는 받을 것이 없어 그 턴이 영영 안 오고, 큐에 든 선언이
+        // **admitted 인 채로 안 나간다**(실기 2026-09-03: host 의 `dispatchDeclareViewport` 가
+        // 한 번도 안 불렸다). ANSI 루프(`external_loop_owner`)는 `admitDetach` 뒤에 같은 일을 한다.
         if (ready > 0 and fds[1].revents != 0)
-            viewport.drain(&owner, stderr);
+            if (viewport.drain(&owner, stderr)) {
+                write_interest = true;
+            };
         // **소비자가 끊긴 것을 «쓸 때» 말고도 안다.** `broken` 은 쓰기 실패로만 섰는데, 조용한
         // 세션은 보낼 것이 없어 **한 번도 안 쓴다** — 그래서 폰이 화면을 나가도 이 프로세스가
         // 영영 살아 registry 의 observer 자리를 붙들었다(실기 2026-09-01: 고아 여섯, 부모가
@@ -525,9 +540,14 @@ fn runStreamRequest(
             sink.broken = true;
             break;
         }
+        const socket_writable = ready > 0 and fds[0].revents & posix.POLL.OUT != 0;
         const turn: attach_pump.TurnInput = .{
-            .readable = ready > 0 and fds[0].revents & posix.POLL.IN != 0,
-            .writable = ready > 0 and fds[0].revents & posix.POLL.OUT != 0,
+            // **쓰기 턴은 «의무적 zero-readiness RX 프리픽스» 를 함께 돈다.** ANSI 루프가 같은
+            // 자리에 그 주석을 달고 `.readable = true` 를 준다 — 그래야 pump 가 한 번 읽어
+            // `would_block` 을 받고, 그 증거가 곧 TX 권한이 된다. 이 경로의 읽기는
+            // `MSG_DONTWAIT`(`external_pump_owner.readPosix`)라 **막히지 않는다**.
+            .readable = (ready > 0 and fds[0].revents & posix.POLL.IN != 0) or socket_writable,
+            .writable = socket_writable,
             .now_ns = streamNowNs(),
         };
         const result = owner.pumpApplying(
@@ -539,7 +559,7 @@ fn runStreamRequest(
         if (result.terminal != null) return .success; // host 가 끝났다 — 정상 종료다.
         // **밀린 선언을 다음 tick 에 다시 낸다.** pump 가 한 턴 돌아 in-flight control 이 끝났을
         // 수 있다 — 그러니 여기서 낸다. 이것이 없으면 폭풍의 마지막 값이 영영 안 간다.
-        viewport.retryPending(&owner, stderr);
+        if (viewport.retryPending(&owner, stderr)) write_interest = true;
         // 이어받은 화면 배치는 별도 경로로 한 번 더 끌어온다(ANSI 루프와 같은 순서).
         if (result.inherited_work_ready) {
             switch (owner.pumpCommittedScreen(io)) {

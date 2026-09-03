@@ -85,12 +85,7 @@ pub fn prepareAdmission(
         .terminal => return .invalid,
     }
     if (!target.isCanonicalFor(kind) or request_id == 0 or wire_len == 0 or
-        !expectation.isCanonical() or switch (expectation) {
-        .resize => kind != .resize,
-        .resync => kind != .resync,
-        .detach => kind != .detach,
-        .declare_viewport => kind != .declare_viewport,
-    })
+        !expectation.isCanonical() or !expectationMatchesKind(expectation, kind))
         return .invalid;
     const deadline_ns = std.math.add(i128, now_ns, timeout_ns) catch
         return .deadline_overflow;
@@ -102,6 +97,17 @@ pub fn prepareAdmission(
         .wire_len = wire_len,
         .deadline_ns = deadline_ns,
     } };
+}
+
+/// 기대와 종류가 같은 control 을 가리키는가. **한 자리에 둔다** — admission 과 TX 자격 판정이
+/// 각자 이 대조를 적으면 새 control 이 생길 때 한쪽만 고쳐진다(S11-6 이 실제로 그렇게 났다).
+pub fn expectationMatchesKind(expectation: ControlExpectation, kind: ControlKind) bool {
+    return switch (expectation) {
+        .resize => kind == .resize,
+        .resync => kind == .resync,
+        .detach => kind == .detach,
+        .declare_viewport => kind == .declare_viewport,
+    };
 }
 
 pub const ProgressResult = union(enum) {

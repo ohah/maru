@@ -63,7 +63,7 @@ pub const Seed = struct {
     semantic_active: bool,
     reentry_clear: bool,
     attachment_role: AttachmentRole,
-    terminal_detach_only: bool,
+    observer_control_only: bool,
     authority_flow: OwnerAuthorityFlow,
     owner_authority_seal_digest: external_owner_seal.Digest,
     authority_generation: AuthorityGeneration,
@@ -104,7 +104,7 @@ comptime {
         "semantic_active",
         "reentry_clear",
         "attachment_role",
-        "terminal_detach_only",
+        "observer_control_only",
         "authority_flow",
         "owner_authority_seal_digest",
         "authority_generation",
@@ -356,8 +356,13 @@ fn validSeedShape(
 }
 
 fn eligible(seed: Seed) bool {
+    // **관측자도 control 을 낸다.** 예전에는 이 자리가 `detach` 하나만 인정했고(필드 이름도
+    // `terminal_detach_only` 였다), 그래서 S11-6 이 더한 `declare_viewport` 는 큐에 실린 채
+    // 영영 안 나갔다 — 실기에서 `prepareAuthority=pristine` → `invariant_failure` 로 잡았다.
+    // 「관측자가 낼 수 있는가」의 단일 출처는 `ControlKind.requiresController()` 이고, 이 필드는
+    // 그 술어를 통과한 control 하나가 홀로 실려 있음을 뜻한다.
     const role_eligible = seed.attachment_role == .controller or
-        (seed.attachment_role == .observer and seed.terminal_detach_only);
+        (seed.attachment_role == .observer and seed.observer_control_only);
     if (!role_eligible or
         seed.authority_flow != .clear or
         seed.final_parser_readiness != .empty or
@@ -492,7 +497,7 @@ fn zeroSeed() Seed {
         .semantic_active = false,
         .reentry_clear = false,
         .attachment_role = .observer,
-        .terminal_detach_only = false,
+        .observer_control_only = false,
         .authority_flow = .initial_fence,
         .owner_authority_seal_digest = zero_digest,
         .authority_generation = .untracked,
@@ -535,7 +540,7 @@ fn testSeed(
         .semantic_active = true,
         .reentry_clear = true,
         .attachment_role = .controller,
-        .terminal_detach_only = false,
+        .observer_control_only = false,
         .authority_flow = .clear,
         .owner_authority_seal_digest = filledDigest(0xa8),
         .authority_generation = .{ .tracked = 8 },
@@ -577,7 +582,7 @@ const SeedDrift = enum {
     semantic_active,
     reentry_clear,
     attachment_role,
-    terminal_detach_only,
+    observer_control_only,
     authority_flow,
     owner_authority_seal_digest,
     authority_generation,
@@ -638,7 +643,7 @@ fn driftSeed(seed: *Seed, field: SeedDrift) void {
         .semantic_active => seed.semantic_active = !seed.semantic_active,
         .reentry_clear => seed.reentry_clear = !seed.reentry_clear,
         .attachment_role => seed.attachment_role = .observer,
-        .terminal_detach_only => seed.terminal_detach_only = !seed.terminal_detach_only,
+        .observer_control_only => seed.observer_control_only = !seed.observer_control_only,
         .authority_flow => seed.authority_flow = .initial_fence,
         .owner_authority_seal_digest => seed.owner_authority_seal_digest =
             filledDigest(0xc8),
@@ -688,7 +693,7 @@ test "observer authority is eligible only for one sealed terminal detach" {
         PrepareResult.ineligible,
         prepare(&permit, &cleanup, seed),
     );
-    seed.terminal_detach_only = true;
+    seed.observer_control_only = true;
     try std.testing.expectEqual(
         PrepareResult.prepared,
         prepare(&permit, &cleanup, seed),

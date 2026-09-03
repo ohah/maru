@@ -5997,6 +5997,13 @@ pub fn build(b: *std.Build) void {
     release_version_contract.stdio = .inherit;
     const release_version_step = b.step("check-release-version", "Check release tag and macOS plist against the version SSOT");
     release_version_step.dependOn(&release_version_contract.step);
+
+    const release_candidate_artifacts = b.addSystemCommand(&.{ "sh", "tools/test-macos-release-candidate-artifacts.sh" });
+    const release_candidate_artifacts_step = b.step(
+        "test-macos-release-candidate-artifacts",
+        "Test exclusive signed macOS candidate artifact staging",
+    );
+    release_candidate_artifacts_step.dependOn(&release_candidate_artifacts.step);
     test_step.dependOn(&release_version_contract.step);
     if (release_tag) |tag| {
         const release_tag_check = b.addSystemCommand(&.{

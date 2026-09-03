@@ -4130,9 +4130,23 @@ pub const RemoteRuntime = struct {
     }
 
     fn admitRuntimeOperation(self: *const RemoteRuntime) client_mod.ClientError!void {
-        _ = self.runtime_lifetime.preflightPreparation() catch |err| return switch (err) {
-            error.Busy => error.AdminBusy,
-            error.InvalidOwner => error.ProtocolError,
+        _ = self.runtime_lifetime.preflightPreparation() catch |err| {
+            // **거절 사유와 함께 «누가 쥐고 있는가» 를 찍는다.** 호출부(예: `readObservation` → 주기 probe)
+            // 는 error 이름만 받으므로 `AdminBusy` 까지만 알고 **어느 전이에 갇혔는지는 모른다** — 그러면
+            // 로그를 얻고도 한 라운드를 더 돌아야 한다.
+            //
+            // Busy 조건은 `state_raw != idle` 하나이고 상태를 뺏는 곳이 둘, 되돌리는 곳이 둘이다
+            // (`runtime_lifetime_owner.zig`). 짝은 맞지만 **예외 경로에서 한 번 안 놓으면 영구 Busy** 이고,
+            // 그때 이 관문을 지나는 것은 관측·생애주기 계열뿐이라 **입출력은 멀쩡한 채 관측만 죽는다**.
+            // 실사용에서 그 모양이 관측됐다(2026-09-03: `cd` 는 먹는데 폴더줄이 30 분 넘게 안 바뀜).
+            std.log.scoped(.session_host).warn(
+                "runtime operation refused err={s} lifetime_state_raw={d}",
+                .{ @errorName(err), self.runtime_lifetime.state_raw },
+            );
+            return switch (err) {
+                error.Busy => error.AdminBusy,
+                error.InvalidOwner => error.ProtocolError,
+            };
         };
     }
 

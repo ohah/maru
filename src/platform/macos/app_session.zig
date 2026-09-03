@@ -6409,8 +6409,18 @@ pub const AppSession = struct {
         self.term_backend = app.InProcessTermBackend.init(self.allocator, self.io, self.live_registry, self.runtime);
 
         // P3-e3: `session.keep-alive-after-quit`이 켜졌으면 영속 세션 host에 connect-or-launch해 원격 backend를 세운다.
-        // 실패(연결 거부·spawn 실패)면 notice를 예약하고 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
-        // host를 새로 띄우면 backoff로 최대 수 초 블로킹될 수 있다(opt-in 실험적; async/lazy 연결은 후속). 기본값(false)이면
+        // 실패(연결 거부·spawn 실패)면 notice를 예약하고 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다.
+        //
+        // **콜드런치 비용은 실측했다**(2026-09-03, ReleaseFast): 중앙값 **202 ms**(200~604). 이 자리에는
+        // 「최대 수 초 블로킹될 수 있다(async/lazy 연결은 후속)」가 적혀 있었는데, 그 「수 초」는
+        // `connect_attempts 150 × connect_delay_ms 20` = **3 s 상한**이고 **비용이 아니다** — 소켓이 뜨는
+        // 즉시 붙는다. 그 상한은 **host 가 아예 안 뜨는 실패 경로**에서만 나오고, 그 경로는
+        // `host_connect_failed` + 시각 게이트 재시도가 따로 다룬다. **그래서 async/lazy 연결은 안 한다** —
+        // 없는 문제를 고치는 일이 된다(그 주석 한 줄을 근거로 그 작업을 시작하려다 실측에서 멈췄다).
+        //
+        // ⚠️ **다시 재려면 ReleaseFast 로 지어야 한다**: Debug host 는 **1241 ms** 로 6 배 느려 조건이
+        // 다르다. 그 측정은 `session_host/host_connect.zig` 의 `MARU_MEASURE_COLD_LAUNCH` test 가 들고
+        // 있다(CI 에서는 건너뛴다 — Debug 를 재면 「느리다」고 거짓 신고하므로). 기본값(false)이면
         // 이 블록을 건너뛰어 현행 경로와 byte-identical이다.
         if (appKeepAlivePolicyValue() and !self.is_quick) self.ensureRemoteBackend();
 

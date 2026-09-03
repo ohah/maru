@@ -12015,6 +12015,12 @@ pub fn build(b: *std.Build) void {
             .root_module = signed_upgrade_e2e_mod,
         });
         run_session_host_tests.step.dependOn(&signed_upgrade_e2e.step);
+        const signed_upgrade_e2e_harness_step = b.step(
+            "test-session-host-signed-upgrade-harness",
+            "Compile and unit-test the canonical signed-upgrade release evidence harness",
+        );
+        signed_upgrade_e2e_harness_step.dependOn(&run_signed_upgrade_e2e_tests.step);
+        signed_upgrade_e2e_harness_step.dependOn(&signed_upgrade_e2e.step);
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));
         run_signed_upgrade_e2e.has_side_effects = true;
@@ -12028,11 +12034,17 @@ pub fn build(b: *std.Build) void {
             "session-host-signed-current-exe",
             "Absolute path to a signed current maru executable",
         ) orelse "";
+        const signed_release_test_uuid_option = b.option(
+            []const u8,
+            "session-host-release-test-uuid",
+            "Canonical lowercase RFC 4122 UUID v4 owned by the trusted release run",
+        ) orelse "";
         run_signed_upgrade_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
             "zig-out/session-host-signed-upgrade/summary.json",
             "1",
+            signed_release_test_uuid_option,
         });
         const signed_upgrade_e2e_step = b.step(
             "test-session-host-signed-upgrade",
@@ -12048,6 +12060,7 @@ pub fn build(b: *std.Build) void {
             signed_current_exe_option,
             "zig-out/session-host-signed-upgrade-near-max/summary.json",
             "near-max",
+            signed_release_test_uuid_option,
         });
         const signed_upgrade_near_max_e2e_step = b.step(
             "test-session-host-signed-upgrade-near-max",

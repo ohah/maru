@@ -1072,6 +1072,13 @@ child owner를 후속 manifest/attestation 단계에 전달한다.
 `test-session-host-release-adapter-candidate-baseline-phase`는 순서·deadline pointer·모든 fail-index·final drift·cleanup failure를
 Debug·ReleaseFast production-type transaction으로 검증한다. 제품 runner와 trusted workflow caller는 아직 후속이다.
 
+U5 baseline-A product execution의 final-address ownership core는 `release_adapter_candidate_baseline_product.zig`가 preserved
+candidate/work root에서 app main·bundled CLI와 서로 다른 child root를 유도하고, copied/pre-owned execution을 callback 전에
+거부한 뒤 기존 baseline phase의 attempt를 caller-owned `Execution`에 기록한다. success owner retention과 reverse cleanup,
+cleanup-failure exact retry set을 `test-session-host-release-adapter-candidate-baseline-product`가 Debug·ReleaseFast에서 검증한다.
+concrete typed candidate graph와 app/frozen bytes·SHA·strict signer를 결속하는 `bindCandidate`, actual filesystem leaf runner 및
+aggregate publisher, workflow caller·artifact attestation·manifest/draft publication과 frozen U5 전체 E2E는 후속 증거다.
+
 U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
 predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
 fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/

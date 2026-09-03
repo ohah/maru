@@ -246,11 +246,11 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(app_path_z);
     if (signed_app_quit) |config| {
         if (std.mem.eql(u8, config.output, app_path_z)) return error.InvalidSignedAppQuitPath;
-        try invalidateArtifact(config.output);
+        try validateReleaseWorkspace(config.output, .signed_app_quit);
     }
     if (default_false) |config| {
         if (std.mem.eql(u8, config.output, app_path_z)) return error.InvalidDefaultFalsePath;
-        try invalidateArtifact(config.output);
+        try validateReleaseWorkspace(config.output, .default_false);
     }
     if (default_false) |config| {
         if (!upgrade_limits.canonicalReleaseTestUuid(config.test_uuid)) return error.InvalidTestUuid;
@@ -332,20 +332,11 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    // The harness executable is a product-mode binary (`builtin.is_test == false`), so without an
-    // explicit override it would inspect and mutate the user's real `/tmp/maru-UID` registry.
-    // Use a short PID-owned root so socket paths stay below `sun_path` and parallel gates cannot
-    // see one another. Children inherit the same root through `execve`.
-    var isolated_root_buf: [64]u8 = undefined;
-    const isolated_root = if (auto_reconnect or signed_app_quit != null) try std.fmt.bufPrintZ(
-        &isolated_root_buf,
-        "/tmp/maru-c3c-{d}",
-        .{std.c.getpid()},
-    ) else null;
-    if (isolated_root) |root| {
-        if (setenv(short_endpoint.root_override_env, root.ptr, 1) != 0)
-            return error.EnvironmentFailed;
-    }
+    // Release evidence paths are already sealed by validateReleaseWorkspace. Other product smokes
+    // still receive their isolated root from build.zig; never replace either with an ambient path.
+    const isolated_root_raw = std.c.getenv(short_endpoint.root_override_env) orelse
+        return error.MissingSessionHostRoot;
+    const isolated_root: ?[:0]const u8 = std.mem.span(isolated_root_raw);
     try short_endpoint.prepareCurrentUserNamespace();
     // 바로 위 `prepareCurrentUserNamespace` 가 준비한 **그 뿌리**를 쓴다. uid 로 다시 계산하면 준비한 자리와
     // 갈려, 격리를 켠 실행에서 사용자의 공용 registry 를 건드리게 된다.
@@ -520,7 +511,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..iteration_count) |iteration| {
         if (signed_app_quit) |config|
             try validateSignedCandidate(io, config, app_path_z, signed_candidate_before.?);
-        _ = std.c.unlink("zig-out/maru-macos-app/app.summary.txt");
+        _ = std.c.unlink(appSummaryPath().ptr);
         if (recovery_baseline_path != null or signed_app_quit != null) {
             var iteration_buf: [16]u8 = undefined;
             const iteration_z = try std.fmt.bufPrintZ(&iteration_buf, "{d}", .{iteration});
@@ -655,7 +646,7 @@ pub fn main(init: std.process.Init) !void {
     if (auto_reconnect_path) |path| {
         const summary = try std.Io.Dir.cwd().readFileAlloc(
             io,
-            "zig-out/maru-macos-app/app.summary.txt",
+            appSummaryPath(),
             allocator,
             .limited(4 * 1024 * 1024),
         );
@@ -802,7 +793,7 @@ fn readRecoveryBaselineIteration(
 ) !RecoveryBaselineIteration {
     const summary = try std.Io.Dir.cwd().readFileAlloc(
         io,
-        "zig-out/maru-macos-app/app.summary.txt",
+        appSummaryPath(),
         allocator,
         .limited(4 * 1024 * 1024),
     );
@@ -986,10 +977,81 @@ fn readReleaseEvidenceConfig(allocator: std.mem.Allocator, env: ReleaseEvidenceE
     };
 }
 
-fn invalidateArtifact(path: [:0]const u8) !void {
-    const rc = std.c.unlink(path.ptr);
-    if (rc != 0 and std.posix.errno(rc) != .NOENT)
-        return error.ArtifactInvalidationFailed;
+const ReleaseWorkspaceKind = enum { default_false, signed_app_quit };
+
+fn validateReleaseWorkspace(output: [:0]const u8, kind: ReleaseWorkspaceKind) !void {
+    const home = std.mem.span(std.c.getenv("HOME") orelse return error.MissingReleaseWorkspace);
+    const fixed_home = std.mem.span(std.c.getenv("CFFIXED_USER_HOME") orelse return error.MissingReleaseWorkspace);
+    const config = std.mem.span(std.c.getenv("MARU_CONFIG") orelse return error.MissingReleaseWorkspace);
+    const artifact_root = std.mem.span(std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse
+        return error.MissingReleaseWorkspace);
+    const session_root = std.mem.span(std.c.getenv(short_endpoint.root_override_env) orelse
+        return error.MissingReleaseWorkspace);
+    const summary = appSummaryPath();
+    if (!validAbsolutePath(home) or !validAbsolutePath(output) or !std.mem.eql(u8, home, fixed_home) or
+        !std.mem.eql(u8, home, artifact_root))
+        return error.InvalidReleaseWorkspace;
+    const parent = std.fs.path.dirname(home) orelse return error.InvalidReleaseWorkspace;
+    if (!std.mem.eql(u8, parent, std.fs.path.dirname(output) orelse return error.InvalidReleaseWorkspace))
+        return error.InvalidReleaseWorkspace;
+    const expected_home = switch (kind) {
+        .default_false => "default-false",
+        .signed_app_quit => "signed-app-quit",
+    };
+    const expected_output = switch (kind) {
+        .default_false => "default-false.json",
+        .signed_app_quit => "signed-app-quit.json",
+    };
+    if (!std.mem.eql(u8, std.fs.path.basename(home), expected_home) or
+        !std.mem.eql(u8, std.fs.path.basename(output), expected_output))
+        return error.InvalidReleaseWorkspace;
+    var expected_config_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expected_config = std.fmt.bufPrint(&expected_config_buf, "{s}/.config/maru/config", .{home}) catch
+        return error.InvalidReleaseWorkspace;
+    var expected_session_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expected_session = std.fmt.bufPrint(&expected_session_buf, "{s}/session-host", .{home}) catch
+        return error.InvalidReleaseWorkspace;
+    var expected_summary_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expected_summary = std.fmt.bufPrint(&expected_summary_buf, "{s}/app.summary.txt", .{home}) catch
+        return error.InvalidReleaseWorkspace;
+    if (!std.mem.eql(u8, config, expected_config) or !std.mem.eql(u8, session_root, expected_session) or
+        !std.mem.eql(u8, summary, expected_summary))
+        return error.InvalidReleaseWorkspace;
+    try validatePrivateDirectory(parent);
+    try validatePrivateDirectory(home);
+    var stat: std.posix.Stat = undefined;
+    const output_stat_rc = std.c.fstatat(std.posix.AT.FDCWD, output.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW);
+    if (output_stat_rc == 0 or std.posix.errno(output_stat_rc) != .NOENT)
+        return error.ReleaseOutputExists;
+}
+
+fn appSummaryPath() [:0]const u8 {
+    return if (std.c.getenv("MARU_APP_SUMMARY_PATH")) |raw|
+        std.mem.span(raw)
+    else
+        "zig-out/maru-macos-app/app.summary.txt";
+}
+
+fn validAbsolutePath(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path) or path.len <= 1 or path.len >= std.fs.max_path_bytes or
+        std.mem.endsWith(u8, path, "/") or std.mem.indexOfScalar(u8, path, 0) != null)
+        return false;
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    var components = std.mem.splitScalar(u8, path[1..], '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, ".."))
+            return false;
+    }
+    return true;
+}
+
+fn validatePrivateDirectory(path: []const u8) !void {
+    var storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&storage, "{s}", .{path}) catch return error.InvalidReleaseWorkspace;
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0 or !std.posix.S.ISDIR(stat.mode) or
+        stat.uid != std.c.getuid() or stat.mode & 0o777 != 0o700)
+        return error.InvalidReleaseWorkspace;
 }
 
 fn inspectCandidate(path: [:0]const u8, executable: bool) !CandidateIdentity {

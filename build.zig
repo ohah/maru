@@ -20,6 +20,14 @@ fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step
 /// 실제 제품 바이너리를 실행하는 테스트는 workspace와 session-host namespace를 한 root에 묶는다.
 /// 제품 바이너리는 `builtin.is_test == false`라 이 주입이 없으면 실제 `/tmp/maru-<uid>`를 사용한다.
 fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []const u8, tag: []const u8) void {
+    isolateMacosProductTestAtRoot(
+        run,
+        home,
+        b.fmt("/tmp/maru-product-test-{d}-{s}", .{ std.Thread.getCurrentId(), tag }),
+    );
+}
+
+fn isolateMacosProductTestAtRoot(run: *std.Build.Step.Run, home: []const u8, session_host_root: []const u8) void {
     run.setEnvironmentVariable("HOME", home);
     run.setEnvironmentVariable("CFFIXED_USER_HOME", home);
     // **pid 를 `std.posix` 로 물으면 Windows 에서 빌드가 통째로 안 된다.** `std.c.getpid` 를 참조하는
@@ -29,7 +37,7 @@ fn isolateMacosProductTest(b: *std.Build, run: *std.Build.Step.Run, home: []cons
     // `zig build` 부터 죽었다).
     //
     // 필요한 것은 "이 빌드 프로세스만의 자리" 하나뿐이므로 이식성 있는 식별자를 쓴다.
-    run.setEnvironmentVariable("MARU_SESSION_HOST_ROOT", b.fmt("/tmp/maru-product-test-{d}-{s}", .{ std.Thread.getCurrentId(), tag }));
+    run.setEnvironmentVariable("MARU_SESSION_HOST_ROOT", session_host_root);
 }
 
 fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Compile) void {
@@ -2637,17 +2645,23 @@ pub fn build(b: *std.Build) void {
             "session-host-signed-app-quit-test-uuid",
             "Canonical release UUID also passed to the other baseline-A gate",
         ) orelse "";
+        const signed_app_quit_home = b.option(
+            []const u8,
+            "session-host-signed-app-quit-home",
+            "Absolute absent signed-app-quit HOME sealed by the baseline workspace owner",
+        ) orelse "";
+        const signed_app_quit_output = b.option(
+            []const u8,
+            "session-host-signed-app-quit-output",
+            "Absolute absent signed-app-quit leaf sealed by the baseline workspace owner",
+        ) orelse "";
         const signed_app_quit_step = b.step(
             "macos-session-host-signed-app-quit-evidence",
             "Run signed candidate AppKit Quit and exact reattach release evidence E2E",
         );
-        const signed_app_quit_fixture = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
-            "root=zig-out/maru-macos-app/session-host-signed-app-quit-home; " ++
-                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\" zig-out/session-host-signed-app-quit; " ++
-                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
-                "rm -f zig-out/maru-macos-app/app.summary.txt zig-out/session-host-signed-app-quit/leaf.json",
-        });
+        const signed_app_quit_fixture = b.addSystemCommand(&.{"sh"});
+        signed_app_quit_fixture.addFileArg(b.path("tools/session-host/prepare-baseline-child.sh"));
+        signed_app_quit_fixture.addArgs(&.{ "signed-app-quit", signed_app_quit_home, signed_app_quit_output });
         signed_app_quit_fixture.setCwd(b.path("."));
         const run_signed_app_quit = b.addRunArtifact(session_host_cr6c_appkit_harness);
         run_signed_app_quit.setCwd(b.path("."));
@@ -2663,21 +2677,22 @@ pub fn build(b: *std.Build) void {
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_signed_app_quit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home"),
+            signed_app_quit_home,
         );
         run_signed_app_quit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_signed_app_quit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        isolateMacosProductTest(b, run_signed_app_quit, b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home"), "signed-app-quit");
+        run_signed_app_quit.setEnvironmentVariable("MARU_APP_SUMMARY_PATH", b.fmt("{s}/app.summary.txt", .{signed_app_quit_home}));
+        isolateMacosProductTestAtRoot(run_signed_app_quit, signed_app_quit_home, b.fmt("{s}/session-host", .{signed_app_quit_home}));
         run_signed_app_quit.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home/.config/maru/config"),
+            b.fmt("{s}/.config/maru/config", .{signed_app_quit_home}),
         );
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID", signed_app_quit_test_uuid);
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG", signed_app_quit_candidate_dmg);
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE", signed_app_quit_frozen_exe);
         run_signed_app_quit.setEnvironmentVariable(
             "MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT",
-            b.pathFromRoot("zig-out/session-host-signed-app-quit/leaf.json"),
+            signed_app_quit_output,
         );
         run_signed_app_quit.step.dependOn(&signed_app_quit_fixture.step);
         signed_app_quit_step.dependOn(&run_signed_app_quit.step);
@@ -2687,16 +2702,23 @@ pub fn build(b: *std.Build) void {
             "session-host-default-false-test-uuid",
             "Canonical release UUID also passed to the signed AppKit Quit baseline-A gate",
         ) orelse "";
+        const default_false_home = b.option(
+            []const u8,
+            "session-host-default-false-home",
+            "Absolute absent default-false HOME sealed by the baseline workspace owner",
+        ) orelse "";
+        const default_false_output = b.option(
+            []const u8,
+            "session-host-default-false-output",
+            "Absolute absent default-false leaf sealed by the baseline workspace owner",
+        ) orelse "";
         const default_false_step = b.step(
             "macos-session-host-default-false-evidence",
             "Run signed candidate app bootstrap default-false release evidence E2E",
         );
-        const default_false_fixture = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
-            "root=zig-out/maru-macos-app/session-host-default-false-home; " ++
-                "rm -rf \"$root\"; mkdir -p \"$root/.config/maru\" zig-out/session-host-default-false; " ++
-                "rm -f zig-out/session-host-default-false/leaf.json",
-        });
+        const default_false_fixture = b.addSystemCommand(&.{"sh"});
+        default_false_fixture.addFileArg(b.path("tools/session-host/prepare-baseline-child.sh"));
+        default_false_fixture.addArgs(&.{ "default-false", default_false_home, default_false_output });
         default_false_fixture.setCwd(b.path("."));
         const run_default_false = b.addRunArtifact(session_host_cr6c_appkit_harness);
         run_default_false.setCwd(b.path("."));
@@ -2705,22 +2727,19 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_CR6C_APP_EXE",
             signed_candidate_app_exe,
         );
-        isolateMacosProductTest(
-            b,
-            run_default_false,
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-default-false-home"),
-            "default-false",
-        );
+        isolateMacosProductTestAtRoot(run_default_false, default_false_home, b.fmt("{s}/session-host", .{default_false_home}));
+        run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT", default_false_home);
+        run_default_false.setEnvironmentVariable("MARU_APP_SUMMARY_PATH", b.fmt("{s}/app.summary.txt", .{default_false_home}));
         run_default_false.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-default-false-home/.config/maru/config"),
+            b.fmt("{s}/.config/maru/config", .{default_false_home}),
         );
         run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_TEST_UUID", default_false_test_uuid);
         run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_CANDIDATE_DMG", signed_app_quit_candidate_dmg);
         run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_FROZEN_EXE", signed_app_quit_frozen_exe);
         run_default_false.setEnvironmentVariable(
             "MARU_SESSION_HOST_DEFAULT_FALSE_OUTPUT",
-            b.pathFromRoot("zig-out/session-host-default-false/leaf.json"),
+            default_false_output,
         );
         run_default_false.step.dependOn(&default_false_fixture.step);
         default_false_step.dependOn(&run_default_false.step);

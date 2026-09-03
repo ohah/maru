@@ -4556,8 +4556,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_watch_contract = b.addRunArtifact(remote_watch_contract_tests);
-    run_remote_watch_contract.addArg("--maru-expect-tests=1");
-    run_remote_watch_contract.addArg("--maru-expect-passed=1");
+    run_remote_watch_contract.addArg("--maru-expect-tests=2");
+    run_remote_watch_contract.addArg("--maru-expect-passed=2");
     run_remote_watch_contract.setCwd(b.path("."));
     remote_watch_contract_step.dependOn(&run_remote_watch_contract.step);
     boundary_step.dependOn(&run_remote_watch_contract.step);

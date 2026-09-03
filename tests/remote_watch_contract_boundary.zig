@@ -53,6 +53,23 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, src, "\"change\\n\"") != null);
 }
 
+test "감시자와 설치 계약이 같은 «판»을 말한다" {
+    // 판 문자열이 **두 파일**에 있다: 감시자가 내고(`--version`), 설치 쪽이 그것으로 「이미 있고
+    // 우리 것인가」를 판정한다. 갈리면 설치가 **매번 다시 심거나**(영영 안 맞아서) 반대로 **옛 판을
+    // 그대로 쓴다**(우연히 맞아서) — 둘 다 조용하다.
+    const allocator = std.testing.allocator;
+    const watcher = try read(allocator, "tools/remote-watch/main.zig", 256 * 1024);
+    defer allocator.free(watcher);
+    const install = try read(allocator, "src/session/remote_watch_install.zig", 256 * 1024);
+    defer allocator.free(install);
+
+    // 감시자 쪽은 개행이 붙은 리터럴, 설치 쪽은 붙지 않은 리터럴이다 — 같은 값을 말하는지 센다.
+    try std.testing.expect(std.mem.indexOf(u8, watcher, "\"maru-remote-watch 1\\n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "\"maru-remote-watch 1\"") != null);
+    // 파일 이름에도 같은 판이 박혀 있어야 한다 — 판을 올리면서 이름을 안 올리면 옛 바이너리를 덮는다.
+    try std.testing.expect(std.mem.indexOf(u8, install, "maru-remote-watch-1\"") != null);
+}
+
 /// 줄 주석(`//`)을 벗긴다. 문자열 안의 `//` 는 이 소스에 없다 — 생기면 이 헬퍼부터 고쳐야 한다.
 fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;

@@ -618,11 +618,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   ```sh
   zig build test-session-host-signed-upgrade \
     -Dsession-host-signed-n1-exe=/absolute/path/to/n-1/maru \
-    -Dsession-host-signed-current-exe=/absolute/path/to/current/maru
+    -Dsession-host-signed-current-exe=/absolute/path/to/current/maru \
+    -Dsession-host-release-test-uuid=<trusted-run-lowercase-rfc4122-v4-uuid>
   ```
 
-  결과는 `zig-out/session-host-signed-upgrade/summary.json`에 binary pathname 없이 두 SHA/build ID와 signer
-  requirement digest를 기록하며 실행 시작 때 과거 summary를 제거한다. 두 옵션 누락, 동일 SHA,
+  결과는 `zig-out/session-host-signed-upgrade/summary.json`에 canonical v2 leaf로 binary pathname 없이 trusted run UUID,
+  두 executable SHA와 signer requirement digest 및 제품 관측을 기록하며 실행 시작 때 과거 summary를 제거한다. 세 옵션 누락, 동일 SHA,
   same-UID/no-follow executable 조건 위반, signer 불일치는 **skip이 아니라 실패**다. 하네스 본체는
   기본 `test-session-host`에서 항상 compile되고 순수 helper test도 실행한다. 저장소와 일반 CI에는 release
   signing identity/frozen artifact가 없으므로 signed process 본체는 opt-in이며, 실행하지 않은 상태를 green으로
@@ -1860,8 +1861,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   leaf schema를 직접 strict parse하고 필요한 typed 관측값을 `gates` nested object에 canonical하게 보존한다. leaf SHA만 남겨
   사라진 bytes를 나중에 검증할 수 없게 만들거나, raw leaf를 base64 scalar로 넣어 scalar cap을 우회하지 않는다. A의 두 gate는
   signed app bundle/DMG와 frozen executable 모두를 candidate에 결속한다. B의 두 gate는 현재
-  `maru.session-host-signed-upgrade-e2e.v1`의 후속 v2가 내는 PID/runtime/epoch/screen/input/reap 관측을 보존하고
+  `tests/session_host_signed_upgrade_e2e.zig`가 직접 내는 exact
+  `maru.session-host-signed-upgrade-e2e.v2`의 PID/runtime/epoch/screen/input/reap 관측을 보존하고
   1-runtime과 near-max artifact를 바꿔 끼우지 못하게 runtime count와 runtime-set digest를 profile policy에서 검증한다.
+
+  signed-upgrade 제품 E2E는 trusted release run이 만든 canonical lowercase RFC 4122 UUID v4를 명시 입력받는다. 하네스가
+  UUID를 자체 생성하거나 pathname·환경변수에서 추론하지 않으며, 1-runtime과 near-max 실행은 같은 UUID를 각 canonical v2
+  leaf의 `test_uuid`로 기록한다. leaf는 predecessor/candidate executable SHA-256, exact signer requirement digest와 제품 관측만
+  포함하고 executable pathname·host/runtime 내부 식별자·duration을 release evidence로 승격하지 않는다. 실행 시작 시 stale
+  output을 먼저 제거하고 UUID·서명·제품 검증 중 하나라도 실패하면 새 leaf를 게시하지 않는다. 이 leaf 생산은 두 executable의
+  release 인접성, immutable predecessor provenance 또는 aggregate attestation을 독자적으로 승인하지 않는다.
 
   `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
   digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical

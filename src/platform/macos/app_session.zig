@@ -3417,6 +3417,11 @@ pub const AppSession = struct {
         return debug_fixtures.maybeDebugOpenFind(self);
     }
 
+    /// 편집 연산 캡처 훅(§3.9a·§3.9b). 위와 같은 자리·같은 규율이다.
+    pub fn maybeDebugEditOp(self: *AppSession) void {
+        return debug_fixtures.maybeDebugEditOp(self);
+    }
+
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
     }
@@ -5784,6 +5789,10 @@ pub const AppSession = struct {
     debug_symbol_picker_tries: u16 = 0,
     debug_palette_opened: bool = false,
     debug_palette_tries: u16 = 0,
+    /// 편집 연산 캡처 훅(`MARU_EDIT_OP`)이 이미 걸었는가 — **한 번만** 건다(매 tick 걸면 문서가
+    /// 계속 바뀐다). 시도 수는 파일이 열릴 때까지 기다리는 데 쓴다(찾기 훅과 같은 규율).
+    debug_edit_op_done: bool = false,
+    debug_edit_tries: u16 = 0,
     debug_find_opened: bool = false,
     debug_find_tries: u16 = 0,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).

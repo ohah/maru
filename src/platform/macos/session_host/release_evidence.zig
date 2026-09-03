@@ -11,7 +11,7 @@ const upgrade_limits = @import("upgrade_limits.zig");
 pub const schema = "maru.session-host-release-evidence.v1";
 pub const default_false_leaf_schema = "maru.session-host-default-false-baseline.v1";
 pub const signed_app_quit_leaf_schema = "maru.session-host-signed-app-quit-reattach.v1";
-pub const signed_upgrade_leaf_schema = "maru.session-host-signed-upgrade-e2e.v2";
+pub const signed_upgrade_leaf_schema = upgrade_limits.signed_upgrade_leaf_schema;
 pub const max_evidence_bytes = manifest.max_evidence_bytes;
 pub const max_scalar_string_bytes = manifest.max_scalar_string_bytes;
 pub const near_max_runtime_count: u64 = upgrade_limits.max_runtime_count - 1;
@@ -567,12 +567,5 @@ fn lowerHex(value: []const u8, exact_len: usize) bool {
 }
 
 fn canonicalUuidV4(value: []const u8) bool {
-    if (value.len != 36 or value[8] != '-' or value[13] != '-' or value[18] != '-' or value[23] != '-' or
-        value[14] != '4' or (value[19] != '8' and value[19] != '9' and value[19] != 'a' and value[19] != 'b'))
-        return false;
-    for (value, 0..) |byte, index| {
-        if (index == 8 or index == 13 or index == 18 or index == 23) continue;
-        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
-    }
-    return true;
+    return upgrade_limits.canonicalReleaseTestUuid(value);
 }

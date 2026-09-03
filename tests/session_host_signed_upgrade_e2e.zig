@@ -28,11 +28,13 @@ const Config = struct {
     current_executable: [:0]u8,
     artifact_path: []u8,
     runtime_count: usize,
+    test_uuid: []u8,
 
     fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.n1_executable);
         allocator.free(self.current_executable);
         allocator.free(self.artifact_path);
+        allocator.free(self.test_uuid);
         self.* = undefined;
     }
 };
@@ -44,6 +46,7 @@ const RuntimeRecord = struct {
 };
 
 const Evidence = struct {
+    test_uuid: []const u8,
     host_id: u128,
     runtime_id: [32]u8,
     attempt_id: u128,
@@ -98,13 +101,16 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     const n1_raw = args.next() orelse return usage(stderr);
     const current_raw = args.next() orelse return usage(stderr);
     const artifact_raw = args.next() orelse return usage(stderr);
-    const runtime_count_raw = args.next() orelse return usage(stderr);
-    if (args.next() != null or artifact_raw.len == 0)
-        return usage(stderr);
-    const runtime_count = try parseRuntimeCount(runtime_count_raw);
+    if (artifact_raw.len == 0) return usage(stderr);
     const artifact_path = try allocator.dupe(u8, artifact_raw);
     errdefer allocator.free(artifact_path);
     try invalidateArtifact(allocator, artifact_path);
+    const runtime_count_raw = args.next() orelse return usage(stderr);
+    const test_uuid_raw = args.next() orelse return usage(stderr);
+    if (args.next() != null) return usage(stderr);
+    const runtime_count = try parseRuntimeCount(runtime_count_raw);
+    if (!session_host.upgrade_limits.canonicalReleaseTestUuid(test_uuid_raw))
+        return error.InvalidTestUuid;
     if (n1_raw.len == 0 or current_raw.len == 0) return usage(stderr);
 
     const n1_real = try std.Io.Dir.cwd().realPathFileAlloc(init.io, n1_raw, allocator);
@@ -116,12 +122,15 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     const n1_executable = try allocator.dupeZ(u8, n1_real);
     errdefer allocator.free(n1_executable);
     const current_executable = try allocator.dupeZ(u8, current_real);
+    errdefer allocator.free(current_executable);
+    const test_uuid = try allocator.dupe(u8, test_uuid_raw);
 
     return .{
         .n1_executable = n1_executable,
         .current_executable = current_executable,
         .artifact_path = artifact_path,
         .runtime_count = runtime_count,
+        .test_uuid = test_uuid,
     };
 }
 
@@ -135,7 +144,7 @@ fn parseRuntimeCount(raw: []const u8) !usize {
 fn usage(stderr: *std.Io.Writer) anyerror {
     try stderr.writeAll(
         "usage: maru-session-host-signed-upgrade-e2e " ++
-            "<signed-n1-maru> <signed-current-maru> <artifact.json> <runtime-count>\n",
+            "<signed-n1-maru> <signed-current-maru> <artifact.json> <runtime-count> <test-uuid>\n",
     );
     return error.MissingSignedArtifact;
 }
@@ -197,9 +206,11 @@ fn run(
 
     var host_id = randomNonZeroU128();
     if (host_id == 0) host_id = 1;
-    try session_host.short_endpoint.prepareCurrentUserNamespace();
-    var socket_buf: [128]u8 = undefined;
-    const socket_path = try session_host.short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    var socket_dir_buf: [192]u8 = undefined;
+    const socket_dir = try session_host.short_endpoint.socketDirPathUnder(&socket_dir_buf, base);
+    if (c.mkdir(socket_dir.ptr, 0o700) != 0) return error.TempDirectoryFailed;
+    var socket_buf: [240]u8 = undefined;
+    const socket_path = try session_host.short_endpoint.socketPathUnder(&socket_buf, base, host_id);
     _ = c.unlink(socket_path.ptr);
 
     const supervised_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
@@ -342,6 +353,7 @@ fn run(
     try verifyExactRuntimeSet(allocator, &after, &[_]RuntimeRecord{});
 
     return .{
+        .test_uuid = config.test_uuid,
         .host_id = host_id,
         .runtime_id = records[0].runtime_id,
         .attempt_id = attempt_id,
@@ -706,6 +718,8 @@ fn writeArtifact(
     path: []const u8,
     evidence: Evidence,
 ) !void {
+    if (!session_host.upgrade_limits.canonicalReleaseTestUuid(evidence.test_uuid))
+        return error.InvalidTestUuid;
     if (std.fs.path.dirname(path)) |parent| {
         // Build step의 artifact는 workspace-relative라 parent를 만든다. 직접 실행에서
         // absolute output을 주면 caller가 고른 기존 parent 아래 exact leaf만 쓴다.
@@ -716,34 +730,22 @@ fn writeArtifact(
     defer out.deinit();
     var json: std.json.Stringify = .{
         .writer = &out.writer,
-        .options = .{ .whitespace = .indent_2 },
+        .options = .{},
     };
-    var host_buf: [32]u8 = undefined;
-    const host = try std.fmt.bufPrint(&host_buf, "{x:0>32}", .{evidence.host_id});
-    var attempt_buf: [32]u8 = undefined;
-    const attempt = try std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{evidence.attempt_id});
     const old_sha = std.fmt.bytesToHex(evidence.old_sha256, .lower);
     const current_sha = std.fmt.bytesToHex(evidence.current_sha256, .lower);
     const signer_sha = std.fmt.bytesToHex(evidence.signer_requirement_sha256, .lower);
     const runtime_set_sha = std.fmt.bytesToHex(evidence.runtime_set_sha256, .lower);
-    const old_build_id = try std.fmt.allocPrint(allocator, "sha256:{s}", .{&old_sha});
-    defer allocator.free(old_build_id);
-    const current_build_id = try std.fmt.allocPrint(allocator, "sha256:{s}", .{&current_sha});
-    defer allocator.free(current_build_id);
     try json.write(.{
-        .schema = "maru.session-host-signed-upgrade-e2e.v1",
-        .host_id = host,
-        .runtime_id = &evidence.runtime_id,
+        .schema = session_host.upgrade_limits.signed_upgrade_leaf_schema,
+        .test_uuid = evidence.test_uuid,
+        .result = "passed",
+        .predecessor_executable_sha256 = &old_sha,
+        .candidate_executable_sha256 = &current_sha,
+        .signer_requirement_sha256 = &signer_sha,
         .runtime_count = evidence.runtime_count,
         .runtime_set_sha256 = &runtime_set_sha,
-        .attempt_id = attempt,
-        .old_sha256 = &old_sha,
-        .current_sha256 = &current_sha,
-        .old_build_id = old_build_id,
-        .current_build_id = current_build_id,
-        .signer_requirement_sha256 = &signer_sha,
         .same_host_pid = evidence.host_pid_before == evidence.host_pid_after,
-        .same_runtime_pid = evidence.runtime_pid_before == evidence.runtime_pid_after,
         .all_runtime_pids_preserved = evidence.all_runtime_pids_preserved,
         .runtime_screen_before_preserved = true,
         .runtime_screen_after_writable = true,
@@ -755,13 +757,16 @@ fn writeArtifact(
         .upgrade_capability_preserved = true,
         .epoch_before = evidence.epoch_before,
         .epoch_after = evidence.epoch_after,
-        .duration_ms = evidence.duration_ms,
     });
     try out.writer.writeByte('\n');
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = path,
         .data = out.written(),
-        .flags = .{ .truncate = true },
+        .flags = .{
+            .truncate = false,
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        },
     });
 }
 
@@ -837,6 +842,7 @@ test "signed upgrade artifact invalidates stale success and emits canonical rele
     try std.testing.expect(c.access(path.ptr, c.F_OK) != 0);
 
     try writeArtifact(allocator, std.testing.io, path, .{
+        .test_uuid = "11111111-2222-4333-8444-555555555555",
         .host_id = 1,
         .runtime_id = [_]u8{'a'} ** 32,
         .attempt_id = 2,

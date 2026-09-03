@@ -76,6 +76,37 @@ test "S11-6 narrowed boundary: host 가 확정한 크기를 게시하는 두 자
         "reconcileViewports",
     ));
 
+    // **`--stream` 루프는 control 을 실으면 스스로 쓰기 관심을 세우고, 쓰기 턴에 RX 프리픽스를
+    // 함께 돈다**(ANSI 루프 `external_loop_owner` 와 같은 계약). 둘 중 하나라도 빠지면 조용한
+    // 세션에서 선언이 큐에 실린 채 영영 안 나간다 — 실기에서 그 상태로 잡혔다(2026-09-03).
+    const stream_cli = try readSource(allocator, "src/platform/macos/session_host/external_attach_cli.zig");
+    defer allocator.free(stream_cli);
+    try std.testing.expectEqual(@as(usize, 1), count(
+        stream_cli,
+        "if (viewport.drain(&owner, stderr)) {\n                write_interest = true;",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        stream_cli,
+        ".readable = (ready > 0 and fds[0].revents & posix.POLL.IN != 0) or socket_writable,",
+    ));
+
+    // **TX 자격은 「관측자가 낼 수 있는 control 인가」로 판정한다** — `detach` 를 이름으로 박지
+    // 않는다. 그 술어의 단일 출처는 `ControlKind.requiresController()` 다.
+    const pump = try readSource(allocator, "src/platform/macos/session_host/client_external_pump.zig");
+    defer allocator.free(pump);
+    try std.testing.expectEqual(@as(usize, 1), count(pump, "fn observerControlTxIsSoleFrame("));
+    try std.testing.expectEqual(@as(usize, 0), count(pump, "observerDetachTxIsSoleFrame"));
+    try std.testing.expectEqual(@as(usize, 1), count(pump, "control.kind.requiresController() or"));
+    // 기대↔종류 대조는 admission 과 자격 판정이 **같은 함수**를 쓴다.
+    const correlation = try readSource(allocator, "src/platform/macos/session_host/client_control_correlation.zig");
+    defer allocator.free(correlation);
+    try std.testing.expectEqual(@as(usize, 1), count(correlation, "pub fn expectationMatchesKind("));
+    try std.testing.expectEqual(@as(usize, 1), count(correlation, "!expectationMatchesKind(expectation, kind)"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(pump, "client_control_correlation.expectationMatchesKind("),
+    );
+
     // 이 상태를 읽는 제품 소비처는 상태줄 하나뿐이다 — 늘어나면 그 자리도 위 계약을 알아야 한다.
     try std.testing.expectEqual(@as(usize, 1), count(app, ".narrowedCols()"));
     try std.testing.expectEqual(@as(usize, 1), count(app, "fn activeTermNarrowedCols("));

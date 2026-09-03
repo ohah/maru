@@ -19906,8 +19906,8 @@ pub const ExternalPumpStorage = struct {
             .current => |current| current,
             .empty => return null,
         };
-        const terminal_detach_only = authority.role == .observer and
-            self.observerDetachTxIsSoleFrame(state);
+        const observer_control_only = authority.role == .observer and
+            self.observerControlTxIsSoleFrame(state);
         const semantic_active = switch (self.semantic_state) {
             .active => true,
             else => false,
@@ -19948,7 +19948,7 @@ pub const ExternalPumpStorage = struct {
             .semantic_active = semantic_active,
             .reentry_clear = !self.operation_reentry_latched,
             .attachment_role = authority.role,
-            .terminal_detach_only = terminal_detach_only,
+            .observer_control_only = observer_control_only,
             .authority_flow = authority.flow,
             .owner_authority_seal_digest = self.owner_authority_seal.digest,
             .authority_generation = authority.generation,
@@ -19958,7 +19958,15 @@ pub const ExternalPumpStorage = struct {
     /// Observer authority remains read-only except for its own terminal detach. The exception is
     /// minted only when the sealed correlation and the entire TX queue agree that exactly one
     /// canonical detach request is queued or partially written.
-    fn observerDetachTxIsSoleFrame(
+    /// 관측자가 «홀로» 실어 둔 control 프레임 하나가 그 자격을 갖췄는가.
+    ///
+    /// **`detach` 전용이 아니다.** 관측자가 낼 수 있는 control 은 S11-6 이후 둘이고
+    /// (`detach`·`declare_viewport`), 그 판정의 단일 출처는 `ControlKind.requiresController()` 다.
+    /// 예전에는 여기서 `detach` 를 이름으로 못 박아, 새로 더한 선언이 큐에 실린 채 TX 권한을
+    /// 못 받고 영영 안 나갔다(실기 2026-09-03: `prepareAuthority=pristine` → `invariant_failure`).
+    /// 같은 사실이 흩어져 있던 다른 두 자리(`isCanonicalFor`·`controlGenerationMatches`)는 이미
+    /// 그 술어로 통일했다 — 여기가 남은 셋째였다.
+    fn observerControlTxIsSoleFrame(
         self: *const ExternalPumpStorage,
         state: *const client_external_mode.State,
     ) bool {
@@ -19968,7 +19976,8 @@ pub const ExternalPumpStorage = struct {
             .in_flight => |value| value,
             .idle, .completed, .terminal => return false,
         };
-        if (control.kind != .detach or control.expectation != .detach)
+        if (control.kind.requiresController() or
+            !client_control_correlation.expectationMatchesKind(control.expectation, control.kind))
             return false;
         return switch (client_external_tx.requestFrameProgress(
             state,
@@ -28246,6 +28255,105 @@ fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
     try std.testing.expect(
         storage.live_screen.lifecycle == .cleaned_tombstone,
     );
+}
+
+test "S11-6 조용한 소켓에서 관측자의 선언이 실제로 나간다 — detach 전용이 아니다" {
+    // **이 자리가 없어서 폰의 뷰포트 선언이 제품에서 통째로 안 나갔다**(실기 2026-09-03).
+    // 관측자가 낼 수 있는 control 은 둘인데(`detach`·`declare_viewport`) TX 자격 술어가 `detach`
+    // 하나만 인정했고, 그래서 선언은 큐에 실린 채 `prepareAuthority=pristine` →
+    // `invariant_failure` 로 죽었다. 값은 맞고 **자격이 틀린** 경우라, 순수 판정자로는 안 보인다.
+    //
+    // 읽기는 언제나 `would_block` 이다 — **조용한 세션**이 이 축의 정상 상태다(폰은 읽기 전용이라
+    // 스스로 트래픽을 만들지 못한다). 그 턴에서도 프레임이 **실제 소켓으로** 나가야 한다.
+    const Quiet = struct {
+        fn read(
+            _: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            return .would_block;
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    const observer_evidence: AttachmentEvidence = .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .initial_role = .observer,
+        .initial_controller_generation = 3,
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, observer_evidence) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(testing.clearInitialFence(&storage));
+
+    const admitted = storage.admitControl(.{
+        .request = .{ .declare_viewport = .{
+            .stream_id = observer_evidence.stream_id,
+            .cols = 50,
+            .rows = 20,
+        } },
+        .expected_controller_generation = observer_evidence.initial_controller_generation,
+    }, 101);
+    switch (admitted) {
+        .admitted => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var read_probe: u8 = 0;
+    var apply_probe: u8 = 0;
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_probe,
+            .context_len = @sizeOf(bool),
+            .apply_live_screen = Quiet.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(u8),
+            .read = Quiet.read,
+        },
+    };
+    // 루프가 쓰기 턴에 주는 것과 같은 입력이다 — 「의무적 zero-readiness RX 프리픽스」.
+    const turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        turn.terminal,
+    );
+    // **한 프레임이 나갔다.** 예전에는 자격이 없어 0 이었고, 루프가 그 턴을 만들지도 못했다.
+    try std.testing.expectEqual(@as(usize, 1), turn.tx_frames);
+
+    // 그리고 그것이 «소켓 반대편에» 도착한다 — 큐에 남은 것이 아니다.
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    const request_bytes = c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0);
+    try std.testing.expect(request_bytes > 0);
+    const received = request_wire[0..@intCast(request_bytes)];
+    try std.testing.expect(
+        std.mem.indexOf(u8, received, "runtime.declare_viewport") != null,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, received, "\"cols\":50") != null);
+
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
 test "f3c0 f3c1 completed control defers pending TX to a fresh authority turn" {

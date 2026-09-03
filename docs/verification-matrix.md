@@ -1064,6 +1064,14 @@ malformed·교환 leaf, 기존 output과 allocation failure에서는 publication
 `test-session-host-release-adapter-candidate-baseline-evidence`가 이를 actual macOS filesystem의 Debug·ReleaseFast gate로 검증한다.
 signed leaf 실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
 
+U5 baseline-A signed leaf transaction은 `release_adapter_candidate_baseline_phase.zig`가 하나의 absolute deadline과 trusted
+candidate identity 아래 initial candidate 재검증→default-false→candidate 재검증→signed-app-quit→candidate 재검증→aggregate publication→final
+candidate/deadline 재검증 순서를 고정한다. 실패는 attempted aggregate→signed-app-quit→default-false child를 역순 best-effort
+정리하고 cleanup failure를 terminal로 승격한다. 실패한 cleanup의 retry authority와 residue는 제품 owner가 보존하며, 성공만 세
+child owner를 후속 manifest/attestation 단계에 전달한다.
+`test-session-host-release-adapter-candidate-baseline-phase`는 순서·deadline pointer·모든 fail-index·final drift·cleanup failure를
+Debug·ReleaseFast production-type transaction으로 검증한다. 제품 runner와 trusted workflow caller는 아직 후속이다.
+
 U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
 predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
 fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/

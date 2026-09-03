@@ -1961,6 +1961,24 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   fail-index를 Debug·ReleaseFast actual filesystem에서 검증한다. 이 gate는 signed baseline leaf 실행, aggregate artifact
   attestation, manifest authoring·draft attach/publish 또는 frozen U5 제품 E2E를 완료하지 않는다.
 
+  baseline-A signed leaf transaction의 단일 순서 소유자는
+  `src/platform/macos/session_host/release_adapter_candidate_baseline_phase.zig`다. trusted candidate identity를 빌린
+  final-address 제품 owner가 시작한 하나의 absolute deadline 아래 candidate authority를 먼저 재검증하고 default-false leaf를 실행한 뒤 다시
+  candidate authority를
+  재검증한 뒤 signed-app-quit leaf를 실행한다. 두 번째 candidate 재검증 뒤에만 기존 baseline evidence owner로 aggregate를
+  게시하며, aggregate publication 뒤에도 같은 deadline과 candidate를 마지막으로 검증해야 성공을 반환한다. 각 child는 caller가
+  고른 UUID·digest·성공 bool을 받지 않고 같은 candidate identity view에서 입력을 유도해야 한다.
+
+  어느 단계든 실패하면 aggregate→signed-app-quit→default-false 순서로 이미 시도한 child를 best-effort 정리한다. cleanup failure는
+  원래 오류보다 우선하고 뒤 cleanup도 계속한다. 실패한 cleanup owner의 exact retry authority와 이미 게시된 residue는 제품
+  owner가 보존해야 하며 성공 결과로 축소하지 않는다. 성공 경로는 세 child owner를 다음 manifest/attestation 단계가 소비하도록
+  보존한다. candidate authority와 입력 app/DMG/frozen executable은 이 transaction의 cleanup 대상이 아니며 실제 앱 사용자
+  session-host registry를 work root로 사용하지 않는다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-phase`는 exact 실행·재검증 순서, shared deadline identity, 모든 setup
+  fail-index의 역순 cleanup, final candidate/deadline drift와 cleanup failure의 성공 결과 0을 Debug·ReleaseFast에서
+  검증한다. 제품 runner·workflow caller는 후속 gate이며, 이 phase만으로 signed leaf 실행이나 release publication을 완료했다고
+  주장하지 않는다.
+
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
   final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address

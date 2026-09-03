@@ -977,6 +977,14 @@ aggregate core에 전달한다. canonical bytes를 expected identity에 다시 b
 identity의 GitHub provenance, signed leaf 생산, artifact attestation이나 release workflow 배선을 완료로 바꾸지 않는다.
 special/oversize/read-drift는 하위 `test-session-host-release-adapter-files`가 소유하며 이 조립 gate의 직접 증거가 아니다.
 
+U5 baseline-A의 signed app Quit leaf 생산은 **부분 구현**이다. opt-in
+`macos-session-host-signed-app-quit-evidence`가 trusted UUID와 actual candidate DMG·frozen executable을 no-follow digest로 고정하고,
+strict signed app에서 actual AppKit Quit→재실행을 수행해 host/runtime/child PID, 기존 화면, 재접속 뒤 입력·화면, exact GUI reattach와
+cleanup을 관측한 뒤 canonical leaf를 exclusive `0600` output으로 게시한다. focused
+`test-session-host-signed-app-quit-evidence`는 canonical writer·UUID 거부와 source-level stale invalidation·exclusive output 경계를
+검증한다. 이 증거는 GitHub candidate
+attestation, default-false leaf 생산, 두 baseline leaf의 trusted workflow 실행이나 aggregate publication을 대신하지 않는다.
+
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
 bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual

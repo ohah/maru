@@ -97,6 +97,8 @@ pub const entries = [_]Entry{
     .{ .action = .move_lines_down, .key = "move_lines_down", .title = "Editor: Move Line Down" },
     .{ .action = .indent_lines, .key = "indent_lines", .title = "Editor: Indent Lines" },
     .{ .action = .outdent_lines, .key = "outdent_lines", .title = "Editor: Outdent Lines" },
+    .{ .action = .transform_to_uppercase, .key = "transform_to_uppercase", .title = "Editor: Transform to Uppercase" },
+    .{ .action = .transform_to_lowercase, .key = "transform_to_lowercase", .title = "Editor: Transform to Lowercase" },
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },

@@ -5669,7 +5669,93 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
     return applyLineEdit(self, term, ranges.items);
 }
 
-/// **클립보드를 커서마다 넣는다**(§3.4).
+/// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b).
+///
+/// **낱말 규칙은 `selection.wordRangeAt` 이 소유한다** — 더블클릭이 잡는 그 범위이고
+/// `add_next_occurrence` 가 씨앗을 고를 때 쓰는 것과 **같은 함수**다. 셋이 다른 낱말을 잡으면
+/// 사용자는 그 차이를 설명할 수 없다.
+///
+/// **대소문자 축은 `maru.terminal.selection` 이 소유한다** — `foldCase` 와 그 짝 `upperCase`. 여기서
+/// 따로 표를 만들면 찾기의 대소문자 무시 비교와 어긋난다.
+///
+/// **줄 조작(§3.9a)과 달리 범위를 합치지 않는다.** 겹치는 것은 줄이 아니라 범위이고, 대소문자는
+/// 멱등이라 겹친 자리를 두 번 바꿔도 결과가 같다.
+pub fn transformCase(self: *AppSession, term: *Term, upper: bool) bool {
+    const doc = lineOpDoc(term) orelse return false;
+    const content = doc.file.content;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |t| self.allocator.free(t);
+        owned.deinit(self.allocator);
+    }
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+    while (iter.next()) |sel| {
+        var lo = @min(sel.start(), content.len);
+        var hi = @min(sel.end(), content.len);
+        if (hi == lo) {
+            // **선택이 없으면 caret 의 낱말**(§3.9b).
+            const w = editor_selection.wordRangeAt(content, lo);
+            lo = w.lo;
+            hi = w.hi;
+        }
+        // **빈 범위를 따로 안 막는다**(낱말이 없는 자리 — 문서 끝·공백). 아래 「바뀐 것이 없으면
+        // 건너뛴다」가 그 경우를 그대로 덮으므로, 앞에 또 두면 **판정자로 구별할 수 없는 가지**가
+        // 하나 늘 뿐이다(변이 C7 이 그것을 보였다).
+        // **`hi >= lo` 는 두 출처 모두가 보장한다** — `sel.end() >= sel.start()` 이고 `wordRangeAt` 은
+        // `lo <= hi` 를 낸다. 그래서 여기 `@max` 같은 방어를 두면 **닿을 수 없는 가지**가 되어 판정자로
+        // 구별할 수 없다(변이 C16 이 그것을 보였다). 불변식이 깨지면 이 슬라이스가 곧바로 죽는 편이
+        // 낫다 — 조용히 빈 범위로 넘어가면 「아무 일도 안 일어난다」로만 보인다.
+        const src = content[lo..hi];
+        const buf = self.allocator.alloc(u8, src.len) catch return false;
+        owned.append(self.allocator, buf) catch {
+            self.allocator.free(buf);
+            return false;
+        };
+        // **길이가 안 변한다**(§3.9b) — 덮는 네 블록의 오프셋이 같은 UTF-8 길이 안에서만 움직인다.
+        // 그래서 자리마다 제자리 인코딩이 성립하고, 선택 범위와 다른 커서가 안 밀린다.
+        //
+        // **그 불변식을 런타임에서 다시 안 막는다.** `CASE3` 이 `upperCase`·`foldCase` 를 코드포인트
+        // 전 구간에 대해 **byte 길이가 같다**로 고정하므로, 여기 방어를 두면 **닿을 수 없는 가지**가
+        // 된다(변이 C5 가 그것을 보였다). 1:N 매핑을 들이는 날 `CASE3` 이 먼저 빨개지고, §3.9b 가
+        // 그때 선택 보정 규칙을 함께 정하라고 적어 뒀다.
+        var w_i: usize = 0;
+        // **문서는 열릴 때 UTF-8 이 검증된다**(`session/editor/document.zig` — 아니면 `error.NotUtf8`
+        // 로 아예 안 열리고 CM6 로 떨어진다). 그래서 여기서 디코드가 실패할 수 없다 — 방어를 두면
+        // **닿을 수 없는 가지**가 되고 판정자로 구별할 수 없다(변이 C5 가 그것을 보였다).
+        // `unreachable` 대신 원문을 두는 이유는 §3.8 이다: 문서를 바꾸는 연산이 ReleaseFast 에서
+        // 죽는 것보다, 그 자리를 안 건드리는 편이 안전한 저하다.
+        var view = std.unicode.Utf8View.init(src) catch {
+            continue;
+        };
+        var cps = view.iterator();
+        while (cps.nextCodepoint()) |cp| {
+            const out = if (upper) maru.terminal.selection.upperCase(cp) else maru.terminal.selection.foldCase(cp);
+            w_i += std.unicode.utf8Encode(out, buf[w_i..]) catch continue;
+        }
+        if (std.mem.eql(u8, buf, src)) continue; // 바뀐 것이 없다 — 빈 delta 를 만들지 않는다
+        ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = buf }) catch return false;
+    }
+    // **문서 순서로 정렬한다.** `delta` 는 *"변경들이 문서 순서로 정렬돼 있고 겹치지 않는다"* 를
+    // **불변식으로 요구**하는데, `selections()` 는 **primary 를 먼저** 낸다 — 커서가 여럿이면
+    // 뒤쪽 커서가 앞에 와 `apply` 가 통째로 거절한다(적대적 검증 CS7 이 실측했다: `⌘⌃D` 로 커서를
+    // 늘린 뒤 변환하면 **아무 일도 안 일어났다**). 줄 조작은 `selectedLineNumbers` 가 정렬해 주므로
+    // 이 자리가 없었고, 그래서 같은 함정을 두 번째로 밟았다.
+    //
+    // **겹침은 만들지 않는다** — 각 selection 은 서로 겹치지 않고(§3.2 불변식), 낱말로 넓힌 범위도
+    // 같은 낱말이면 같은 범위라 정렬 뒤 인접 비교로 볼 필요가 없다.
+    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
+        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
+            return a.start < b.start;
+        }
+    }.lessThan);
+    return applyLineEdit(self, term, ranges.items);
+}
+
+/// **클립보드를 커서마다 넣는다**(§3.4)./// **클립보드를 커서마다 넣는다**(§3.4).
 ///
 /// 분배 규칙은 `clipboard.distribute`가 소유한다 — 조각 수가 커서 수와 **같으면** 하나씩,
 /// **다르면** 전부에 통짜다. 외부 앱이 복사한 문자열이면 기억한 경계를 버리고 통짜로 간다.
@@ -14309,6 +14395,141 @@ test "LN9 줄 조작은 앞뒤 타이핑과 한 undo 로 뭉치지 않는다 (§
     // **되돌리기 한 번은 줄 삭제만 푼다** — 친 글자는 남아 있어야 한다.
     try testing.expect(undoEdit(fx.session, term));
     try testing.expectEqualStrings("aX\nb\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CS1 대소문자 변환 — 선택이 있으면 그 범위, 없으면 caret 의 낱말 (§3.9b)" {
+    // **낱말 규칙은 `wordRangeAt` 하나가 소유한다** — 더블클릭·`add_next_occurrence` 와 같은 함수다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cs1.zig", "foo bar\n");
+
+    // 선택 없음 — caret 이 `foo` 안이면 `foo` 만 바뀐다.
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("FOO bar\n", term.rt.editor_doc.?.file.content);
+
+    // 선택 있음 — 그 범위만.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 7); // "bar"
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("FOO BAR\n", term.rt.editor_doc.?.file.content);
+
+    // 소문자로 되돌린다 — 왕복이 원문이다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 7);
+    try testing.expect(transformCase(fx.session, term, false));
+    try testing.expectEqualStrings("foo bar\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CS2 덮지 않는 글자는 그대로고, 바뀔 것이 없으면 무동작이다 (§3.9b)" {
+    // **모르면 안 건드린다.** 그리고 바뀐 것이 없는데 delta 를 만들면 **undo 에 빈 항목**이 쌓여
+    // 되돌리기를 눌러도 화면이 안 변한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cs2.zig", "가나다 ABC\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 9); // "가나다"
+    try testing.expect(!transformCase(fx.session, term, true)); // 한글 — 바뀔 것이 없다
+    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editor_doc.?.file.content);
+
+    // 이미 대문자인 범위도 무동작이다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(10, 13);
+    try testing.expect(!transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CS3 길이가 안 변해 다른 커서가 안 밀린다 — 키릴·그리스도 (§3.9b)" {
+    // **1:N 매핑을 들이는 날 이 성질이 깨진다**(§3.9b 가 그때 보정 규칙을 함께 정하라고 적어 뒀다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cs3.zig", "абв αβγ\n");
+    const before_len = term.rt.editor_doc.?.file.content.len;
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 6); // "абв"
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("АБВ αβγ\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(before_len, term.rt.editor_doc.?.file.content.len);
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(7, 13); // "αβγ"
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("АБВ ΑΒΓ\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(before_len, term.rt.editor_doc.?.file.content.len);
+}
+
+test "CS7 멀티 커서면 전부 바뀌고 undo 하나다 (§3.9b)" {
+    // **커서 하나만 바꾸면 나머지 자리는 그대로 남는다** — 「여기도 같이 고치겠다」로 커서를 늘린
+    // 사용자에게 정확히 반대되는 결과다(변이 C13). §3.9a 와 달리 범위를 **합치지 않는다**:
+    // 겹치는 것은 줄이 아니라 범위이고 대소문자는 멱등이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cs7.zig", "foo bar foo\n");
+
+    // `⌘⌃D` 와 같은 길로 커서를 둘로 늘린다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 3, 3, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("FOO bar FOO\n", term.rt.editor_doc.?.file.content);
+
+    // **전체가 undo 하나다**(§3.3) — 한 번에 둘 다 돌아온다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo bar foo\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CS5 깨진 UTF-8 과 낱말 없는 자리는 문서를 안 바꾼다 (§3.8·§3.9b)" {
+    // **문서 내용은 신뢰 입력이 아니다**(§3.8). 디코드가 실패하면 원문을 그대로 두어야지, 그 자리에
+    // 무엇이든 써 넣으면 **화면과 파일이 갈린다**(변이 C5). 낱말이 없는 자리도 무동작이다(C7).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **깨진 UTF-8 은 여기까지 못 온다** — 문서가 열릴 때 검증되고 아니면 `error.NotUtf8` 이다.
+    // 그 사실을 여기서 함께 못박는다: 이 전제가 무너지면 변환의 디코드 가지가 되살아난다.
+    try testing.expectError(error.NotUtf8, maru.session.editor.document.open("a\xC3 b", false));
+
+    // **낱말이 없는 자리** — 빈 문서에서 caret 이 어디에 있어도 무동작이다.
+    const empty = try undoFixture(&fx, allocator, "cs5b.zig", "");
+    empty.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!transformCase(fx.session, empty, true));
+    try testing.expectEqualStrings("", empty.rt.editor_doc.?.file.content);
+
+    // 공백만 있는 자리도 같다.
+    const ws = try undoFixture(&fx, allocator, "cs5c.zig", "   \n");
+    ws.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(!transformCase(fx.session, ws, true));
+    try testing.expectEqualStrings("   \n", ws.rt.editor_doc.?.file.content);
+}
+
+test "CS4 변환도 비교 뷰·읽기 전용을 거절하고 undo 하나다 (§3.9b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cs4.zig", "ab cd\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    try testing.expect(!transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("ab cd\n", term.rt.editor_doc.?.file.content);
+    term.rt.editor_diff = null;
+
+    // **타이핑과 한 undo 로 뭉치지 않는다**(§3.3 연산 종류 변경).
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(fx.session, term, "X"));
+    try testing.expectEqualStrings("abX cd\n", term.rt.editor_doc.?.file.content);
+    term.rt.editor_selection = editor_selection.Selection.at(5); // "cd" 안
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("abX CD\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("abX cd\n", term.rt.editor_doc.?.file.content);
 }
 
 test "LN8 줄 조작은 비교 뷰와 읽기 전용을 거절한다 (§3.9a)" {

@@ -6622,6 +6622,26 @@ runtime 에 두었는데(위), 그래서 **끊겨 있는 동안 폰이 떠나 ho
 규칙(채널이 닫히면 선언도 사라진다)이 깨진다.
 
 그래서 기존 control 어휘(`resize`·`resync`·`detach`)에 **`declare_viewport` 하나를 더한다**.
+
+**관측자가 낼 수 있는 control 을 더하면 관문이 «셋» 이다**(실기 2026-09-03, PR#3149). 「관측자도
+낼 수 있다」는 사실이 세 자리에 흩어져 있고, 하나만 남아도 **조용히 아무 일도 안 일어난다** —
+로그도 오류도 없다.
+
+1. **admission** — `client_control_correlation.isCanonicalFor`.
+2. **generation 대조** — `client_external_pump.controlGenerationMatches`.
+3. **TX 자격** — `observerControlTxIsSoleFrame` → `client_external_turn_authority.eligible` 의
+   `observer_control_only`. 여기서 막히면 프레임이 큐에 실린 채 `invariant_failure` 로 스트림이
+   조용히 끝난다.
+
+셋의 답은 하나다 — **`ControlKind.requiresController()`**. 새 control 을 더할 때 그 술어를 쓰는
+자리를 전수로 본다.
+
+**그리고 「보내려면 먼저 읽어야 한다」.** TX 권한은 「소켓 RX 가 말랐다」는 **증거**에서만 나오고,
+그 증거는 실제로 한 번 읽어 `would_block` 을 받아야 선다. 조용한 세션에 붙은 관측자는 받을 것이
+없어 그 턴이 영영 안 오고, 폰은 읽기 전용이라 스스로 트래픽을 만들 수도 없다. 그래서 control 을
+싣는 루프는 ⑴ **실었을 때** 스스로 쓰기 관심을 세우고 ⑵ 쓰기 턴에 **RX 프리픽스**(`readable`)를
+함께 돌려야 한다. 그 읽기는 `MSG_DONTWAIT` 라 막히지 않는다. ANSI 루프가 이미 그 계약을 지키고
+있었고 `--stream` 루프만 안 지켜, **폰의 선언이 제품에서 통째로 안 나갔다**.
 `detach` 와 같은 급이다 — **controller 자격을 안 본다**. observer 가 보낼 수 있는 control 이 이제
 둘이므로, 흩어진 `!= .detach` 조건 대신 `ControlKind.requiresController()` 하나가 답한다.
 

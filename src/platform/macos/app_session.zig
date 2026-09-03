@@ -20231,9 +20231,17 @@ pub const AppSession = struct {
                         rn += 1;
                     }
                 }
-                // ② 읽기 전용: **N1 편집기는 전부 읽기 전용이다**. 편집이 막혀 있음을 알리는 유일한
-                // 상시 자리라(§2.2), 값이 늘 같아도 그 사실을 말한다 — 사용자는 "왜 안 써지지"를 묻는다.
-                if (rn < max_status_bar_right_items) {
+                // ② 읽기 전용: **그 문서가 실제로 읽기 전용일 때만** 뜬다(§2.2 — 2026-09-03 정정).
+                //
+                // **오래 조건 없이 그렸다.** 그 문장("N1 편집기는 전부 읽기 전용이다")은 N1 시절의
+                // 것이고, **N2 가 편집을 세우면서(2026-08-25) 거짓이 됐다** — 글자가 들어가는 편집기
+                // 옆에서 사용자가 「읽기 전용」을 읽었다. 이 항목의 존재 이유가 *"사용자는 「왜 안
+                // 써지지」를 묻는다"* 인데 정확히 반대로 오해를 만들고 있었다.
+                //
+                // **판정자가 아니라 캡처가 잡았다** — 상태바 판정자는 항목이 **있는지**만 재고 그것이
+                // **참인지**는 안 쟀다(#3126·#3143 의 화면을 찍고서야 dirty 점과 나란히 뜬 것이 보였다).
+                const doc_read_only = if (active_term.rt.editor_doc) |*d| d.file.read_only else false;
+                if (doc_read_only and rn < max_status_bar_right_items) {
                     if (self.buildStatusBarItem(null, maru.i18n.t(.editor_readonly), bar_cols, fg, icon_fg, .plain)) |dl| {
                         right_frames[rn] = dl;
                         right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
@@ -58751,13 +58759,33 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
             else => {},
         }
     }
-    // **읽기 전용은 상시 자리다**(편집이 막혀 있음을 알리는 유일한 표시).
+    // **쓸 수 있는 문서에는 「읽기 전용」이 안 뜬다**(§2.2 — 2026-09-03 정정). 이 판정자는 오래
+    // `readonly_at != null` 로 **낡은 동작을 고정**하고 있었다: 항목이 **있는지**만 재고 그것이
+    // **참인지**는 안 쟀다. 그래서 N2 가 편집을 세운 뒤에도 초록이었고, 결함은 **캡처가 잡았다**
+    // (#3126·#3143 — 탭에 dirty 점이 뜬 채 「읽기 전용」이 나란히 떠 있었다).
+    try std.testing.expect(readonly_at == null);
+
+    // **읽기 전용 문서에서는 뜬다.** 위 단언이 「늘 거짓」으로 통과하지 않게 대조를 둔다.
+    editor_term.rt.editor_doc.?.file.read_only = true;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    readonly_at = null;
+    eol_at = null;
+    for (session.statusBarTree().entries, 0..) |e, i| {
+        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+            .editor_readonly => readonly_at = i,
+            .editor_eol => eol_at = i,
+            else => {},
+        }
+    }
     try std.testing.expect(readonly_at != null);
     // 줄바꿈은 그 **왼쪽**이다 = 먼저 버려진다. 트리 순서가 곧 화면 좌우이므로 x로 본다.
     if (eol_at) |eol_i| {
         const entries = session.statusBarTree().entries;
         try std.testing.expect(entries[eol_i].rect.x < entries[readonly_at.?].rect.x);
     }
+    editor_term.rt.editor_doc.?.file.read_only = false;
 
     // ③ **커서 위치는 편집기 묶음에서 가장 오른쪽 = 가장 오래 산다**(§2.2 표의 첫 항목).
     //    이것이 커밋 전체의 논거인데 재는 자리가 없어, 코드에서 자리를 정반대(묶음 맨 뒤)로 옮겨도

@@ -13730,6 +13730,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-product",
         "Validate baseline signed product ownership and cleanup",
     );
+    const session_host_release_adapter_candidate_baseline_app_step = b.step(
+        "test-session-host-release-adapter-candidate-baseline-app",
+        "Validate preserved baseline candidate app authority",
+    );
     const session_host_release_adapter_candidate_upgrade_evidence_step = b.step(
         "test-session-host-release-adapter-candidate-upgrade-evidence",
         "Run trusted candidate upgrade evidence publication tests",
@@ -13883,6 +13887,15 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_candidate_product_tests.step);
             test_step.dependOn(&run_candidate_product_tests.step);
             macos_only_test_step.dependOn(&run_candidate_product_tests.step);
+            const candidate_baseline_app_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_baseline_app.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod } } });
+            const candidate_baseline_app_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_baseline_app.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_baseline_app", .module = candidate_baseline_app_mod } } }) });
+            const run_candidate_baseline_app_tests = b.addRunArtifact(candidate_baseline_app_tests);
+            run_candidate_baseline_app_tests.addArg("--maru-expect-tests=5");
+            run_candidate_baseline_app_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_baseline_app_step.dependOn(&run_candidate_baseline_app_tests.step);
+            session_host_step.dependOn(&run_candidate_baseline_app_tests.step);
+            test_step.dependOn(&run_candidate_baseline_app_tests.step);
+            macos_only_test_step.dependOn(&run_candidate_baseline_app_tests.step);
             const source_tree_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const source_tree_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod } } }) });
             const run_source_tree_tests = b.addRunArtifact(source_tree_tests);

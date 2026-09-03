@@ -685,7 +685,8 @@ unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 /// **take-once 가 아니다**(§4a "한 채널, 여러 명령"). host 는 채널이 열릴 수 있는 상태
 /// (`MARU_SSH_CONTROL_NONE`·`_CLOSED`)에서만 이걸 불러야 한다 — 아직 안 닫혔는데 가져가면 그
 /// 뜻이 사라져 축이 영영 안 선다. 가져간 순간 그것이 "돌고 있는 명령" 이 되고, 열기가 지면
-/// `maru_mobile_control_open_failed` 가 되돌린다.
+/// `maru_mobile_control_open_failed`(딱딱한 실패) 또는 `maru_mobile_control_open_retry`
+/// (아직 때가 아님)가 되돌린다.
 int maru_mobile_take_control_open(void);
 /// 컨트롤 채널이 돌릴 **명령 한 줄**을 만든다(그 서버 설정의 `maru-path` 를 쓴다). 자리가
 /// 모자라면 0 — **자르지 않는다**(잘린 명령은 다른 명령이다).
@@ -731,6 +732,14 @@ unsigned int maru_mobile_control_off_reason(void);
 /// **열기가 졌다고 host 가 알린다.** 여는 것은 host 가 하므로(소켓이 그쪽에 있다) 실패도 그쪽만
 /// 안다 — 안 알리면 화면은 이유를 모른 채 기다린다(계약 §4a: 실패하면 그 화면에서 말한다).
 void maru_mobile_control_open_failed(void);
+/// **아직 때가 아니라서 못 열었다고 host 가 알린다**(`maru_ssh_pump_open_control` 이
+/// `MARU_SSH_ERR_NOT_READY`(-7)를 냈을 때 — 예: 이전 채널이 아직 닫히는 중).
+///
+/// `maru_mobile_control_open_failed` 와 **다르다**: 화면에 실패를 말하지 않고 「열자」는 뜻만
+/// 되돌려 다음 tick 이 다시 집게 한다. 이걸 안 부르고 실패로 접으면 그 뜻은 이미
+/// `maru_mobile_take_control_open` 이 가져가서 사라졌으므로 **그 화면이 영영 「받는 중」** 이
+/// 된다(실측 2026-09-03: 세션 화면 재진입이 그렇게 죽었다).
+void maru_mobile_control_open_retry(void);
 /// 조립된 **원격 화면**의 상태(0=첫 프레임 대기, 1=선다, 2=껐다). 없으면 0.
 ///
 /// 컨트롤 축과 **다른 소비자**다(§4a "소비자도 원하는 것이 정한다") — 화면을 원할 때 오는

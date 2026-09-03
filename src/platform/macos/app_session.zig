@@ -21486,15 +21486,56 @@ pub fn reconnectProductSmokeProbe() ReconnectProductSmokeProbe {
 
 /// AppHost's single global timer owner calls this once before iterating Window/quick sessions.
 /// The worker owns blocking connect/hello; this leaf advances only bounded main-owner states.
+/// 재접속 coordinator 가 **왜 한 바퀴도 못 도는지**를 남긴다. 이 tick 은 매 frame 불리므로 사유가
+/// **바뀔 때만** 찍는다 — 같은 상태가 이어지는 동안은 조용하고, 상태 전이 순간에만 한 줄이 남는다.
+///
+/// 2026-09-03 네 번째 정지 실측에서 필요해졌다. incident 는 `disposition=reconnect`·`sequence=1` 로
+/// admission 조건을 만족했고 소켓도 살아 있었는데, job 시작 진단(`reconnect job connected`)이 한 줄도
+/// 남지 않았다. 그때 job 이 «시작을 실패한 것»인지 «coordinator 가 아예 돌지 않은 것»인지 가릴 수단이
+/// 없었다. ReleaseFast 에서는 `turnOne` 이 인라인돼 스택으로도 구분되지 않는다.
+const ReconnectTickState = enum(u8) {
+    active,
+    not_owner_thread,
+    no_backend,
+    coordinator_not_ready,
+    no_publisher,
+};
+
+fn noteReconnectTickState(state: ReconnectTickState) void {
+    if (builtin.is_test) return;
+    const Last = struct {
+        var value: ?ReconnectTickState = null;
+    };
+    if (Last.value) |previous| if (previous == state) return;
+    Last.value = state;
+    if (state == .active) {
+        std.log.info("reconnect tick active", .{});
+    } else {
+        std.log.warn("reconnect tick inactive: {s}", .{@tagName(state)});
+    }
+}
+
 pub fn tickReconnectProductCoordinator() ReconnectProductTurnOutcome {
     if (comptime !is_macos) return .inactive;
     const owner_thread = app_process_incident_owner_thread.load(.acquire);
-    if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())))
+    if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId()))) {
+        noteReconnectTickState(.not_owner_thread);
         return .inactive;
-    const backend = if (app_remote_backend) |*value| value else return .inactive;
+    }
+    const backend = if (app_remote_backend) |*value| value else {
+        noteReconnectTickState(.no_backend);
+        return .inactive;
+    };
     defer backend.maintenanceEventTick();
-    if (!app_reconnect_product_coordinator.ready or app_process_incident_owner.publisher() == null)
+    if (!app_reconnect_product_coordinator.ready) {
+        noteReconnectTickState(.coordinator_not_ready);
         return .inactive;
+    }
+    if (app_process_incident_owner.publisher() == null) {
+        noteReconnectTickState(.no_publisher);
+        return .inactive;
+    }
+    noteReconnectTickState(.active);
     const phase = session_host.attach_phase_deadline.PhaseDeadline.start(
         backend.io,
         .connect_hello,

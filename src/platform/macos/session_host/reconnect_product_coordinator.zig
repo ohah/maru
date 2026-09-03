@@ -5,6 +5,7 @@
 //! c1 receipts until a product caller settles the bound admission and CR5 publication.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const issuer = @import("reconnect_worker_issuer.zig");
 const owner_mod = @import("reconnect_worker_owner.zig");
 const worker_mod = @import("reconnect_worker_runtime.zig");
@@ -125,7 +126,28 @@ pub const Coordinator = struct {
         if (try self.admitOne(backend, admissions, budget, absolute_deadline_ns) != .idle)
             progressed = true;
         if (try self.dispatchOne()) progressed = true;
+        if (!progressed) noteIdleTurn(admissions.count, try self.jobs.activeCount());
         return if (progressed) .progressed else .idle;
+    }
+
+    /// 한 바퀴가 **아무것도 진행하지 못했을 때** 그 자리의 재고를 남긴다. `turnOne` 은 매 frame 불리므로
+    /// 값이 **바뀔 때만** 찍는다 — 정지 상태가 이어지는 동안은 조용하고, 전이 순간에만 한 줄이 남는다.
+    ///
+    /// **`admissions` 가 0 이 아닌데 `jobs` 가 0 이면 그 사이가 끊긴 것이다.** 2026-09-03 네 번째 정지
+    /// 실측에서 incident 는 `disposition=reconnect`·`sequence=1` 로 admission 조건을 만족했고 소켓도 살아
+    /// 있었는데 job 시작 진단이 한 줄도 남지 않았다. admission 이 애초에 안 만들어진 것인지, 만들어졌지만
+    /// dispatch 가 집어가지 못한 것인지 가릴 수단이 없어 원인을 좁히지 못했다.
+    fn noteIdleTurn(admission_count: u32, active_jobs: usize) void {
+        if (builtin.is_test) return;
+        const Last = struct {
+            var admissions: u32 = std.math.maxInt(u32);
+            var jobs: usize = std.math.maxInt(usize);
+        };
+        if (Last.admissions == admission_count and Last.jobs == active_jobs) return;
+        Last.admissions = admission_count;
+        Last.jobs = active_jobs;
+        if (admission_count == 0 and active_jobs == 0) return; // 할 일이 없는 평시는 남기지 않는다.
+        std.log.warn("reconnect turn idle: admissions={d} jobs={d}", .{ admission_count, active_jobs });
     }
 
     pub fn admit(self: *Coordinator, snapshot: owner_mod.Snapshot) !owner_mod.AdmitResult {

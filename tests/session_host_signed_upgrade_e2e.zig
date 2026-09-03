@@ -803,9 +803,21 @@ test "signed upgrade runtime count derives near-max from the product cap" {
     );
     try std.testing.expectError(error.InvalidRuntimeCount, parseRuntimeCount(over_cap));
     try std.testing.expectError(error.InvalidRuntimeCount, parseRuntimeCount("invalid"));
+    try std.testing.expect(session_host.upgrade_limits.canonicalReleaseTestUuid(
+        "11111111-2222-4333-8444-555555555555",
+    ));
+    try std.testing.expect(!session_host.upgrade_limits.canonicalReleaseTestUuid(
+        "11111111-2222-3333-8444-555555555555",
+    ));
+    try std.testing.expect(!session_host.upgrade_limits.canonicalReleaseTestUuid(
+        "11111111-2222-4333-7444-555555555555",
+    ));
+    try std.testing.expect(!session_host.upgrade_limits.canonicalReleaseTestUuid(
+        "11111111-2222-4333-8444-55555555555A",
+    ));
 }
 
-test "signed upgrade artifact invalidates stale success and pins auditable identities" {
+test "signed upgrade artifact invalidates stale success and emits canonical release evidence" {
     const allocator = std.testing.allocator;
     var path_buf: [160]u8 = undefined;
     const path = try std.fmt.bufPrintZ(
@@ -854,12 +866,20 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
     defer parsed.deinit();
     const object = parsed.value.object;
     try std.testing.expectEqualStrings(
-        "maru.session-host-signed-upgrade-e2e.v1",
+        "maru.session-host-signed-upgrade-e2e.v2",
         object.get("schema").?.string,
     );
     try std.testing.expectEqualStrings(
-        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        object.get("old_build_id").?.string,
+        "11111111-2222-4333-8444-555555555555",
+        object.get("test_uuid").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        object.get("predecessor_executable_sha256").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        object.get("candidate_executable_sha256").?.string,
     );
     try std.testing.expectEqualStrings(
         "3333333333333333333333333333333333333333333333333333333333333333",
@@ -878,5 +898,12 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
         @as(i64, 2),
         object.get("runtime_inventory_absent_observations").?.integer,
     );
-    try std.testing.expectEqual(@as(i64, 5), object.get("duration_ms").?.integer);
+    try std.testing.expectEqualStrings("passed", object.get("result").?.string);
+    try std.testing.expectEqualStrings("none", object.get("status_reason").?.string);
+    try std.testing.expect(object.get("host_id") == null);
+    try std.testing.expect(object.get("runtime_id") == null);
+    try std.testing.expect(object.get("attempt_id") == null);
+    try std.testing.expect(object.get("old_build_id") == null);
+    try std.testing.expect(object.get("current_build_id") == null);
+    try std.testing.expect(object.get("duration_ms") == null);
 }

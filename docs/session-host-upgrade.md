@@ -1872,6 +1872,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   output을 먼저 제거하고 UUID·서명·제품 검증 중 하나라도 실패하면 새 leaf를 게시하지 않는다. 이 leaf 생산은 두 executable의
   release 인접성, immutable predecessor provenance 또는 aggregate attestation을 독자적으로 승인하지 않는다.
 
+  signed-app-quit 제품 E2E도 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable의 pathname을
+  명시 입력받는다. 하네스는 시작 시 stale output을 제거하고, 두 candidate file을 no-follow로 열어 실행 전 SHA-256을 고정하며,
+  DMG와 별도 frozen executable을 no-follow로 고정하고, 실행할 app executable이 frozen executable과 exact SHA-256 및 strict Apple
+  designated requirement가 같은지 검증한 뒤 실제 AppKit Quit→재실행을 수행한다. app bundle의 deep signature·notarization과 DMG 안
+  제품 결속은 앞선 candidate product authority가 소유하며 이 leaf가 중복 승인하지 않는다.
+  재실행 전후 exact host/runtime/child PID, 기존 화면 marker, 재접속 뒤에만 발생시킨 PTY output marker와 GUI가 선택한 exact runtime을
+  함께 관측한다. daemon reap과 자기 전용 host artifact 정리가 끝난 뒤에만 exact
+  `maru.session-host-signed-app-quit-reattach.v1` leaf를 absent output에 mode `0600`으로 배타 게시한다. pathname·host/runtime 내부 ID,
+  duration과 AppKit 진단용 summary는 release leaf에 넣지 않는다. 이 leaf는 candidate file의 GitHub attestation이나 draft release
+  provenance를 독자적으로 승인하지 않으며, baseline aggregate owner가 같은 candidate authority에 다시 결속한다.
+
   `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
   digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical
   aggregate bytes만 반환하고 filesystem을 열거나 publication 성공을 주장하지 않는다. 후속 executable adapter가 기존

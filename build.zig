@@ -583,6 +583,57 @@ pub fn build(b: *std.Build) void {
         win32_clipboard_smoke_step.dependOn(&win32_clipboard_smoke_cmd.step);
     }
 
+    // ── 원격 감시자(RW1·RW2b — docs/plans/remote-watch.md) ────────────────────────────────────
+    //
+    // **원격에서 도는 프로그램이라 «컴파일되는 타깃 전부»가 계약이다.** 한 타깃만 깨지면 그 원격만
+    // 조용히 감시가 안 되고, 증상은 「원격만 갱신이 안 된다」로 보인다 — 이 트랙이 고치려던 바로 그
+    // 모양이다. 그래서 게이트가 **전 타깃을 컴파일한다.**
+    //
+    // ⚠️ 컴파일만으로는 부족하다는 것을 실측으로 배웠다: `nftw` 의 `FTW_D` 상수가 libc 마다 달라
+    // (glibc 1 · musl 2) 컴파일도 되고 `nftw` 도 성공하는데 **watch 를 하나도 안 거는** 판을 한 번
+    // 만들었다. 그래서 디렉터리 판정은 `std.Io.Dir` 이 지고, 경계 test 가 그 사실을 소스에서 센다.
+    const remote_watch_step = b.step("remote-watch", "Build the remote filesystem watcher for every remote target");
+    const remote_watch_targets = [_]std.Target.Query{
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos },
+    };
+    for (remote_watch_targets) |query| {
+        const watch_exe = b.addExecutable(.{
+            .name = "maru-remote-watch",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/remote-watch/main.zig"),
+                .target = b.resolveTargetQuery(query),
+                .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
+                .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
+            }),
+        });
+        // **이름을 손으로 적는 자리다**(RW2b) — `Variant.assetName` 과 어긋나면 앱이 빌드가 만들지
+        // 않은 자리를 뒤진다. 경계 test 가 두 목록을 **개수까지** 대조한다(한쪽에만 더해도 걸린다).
+        //
+        // ⚠️ `unreachable` 을 쓰지 않는다 — 타깃을 더하면서 여기를 빠뜨리면 「reached unreachable
+        // code」만 뜨고 **무엇을 해야 하는지 안 알려 준다.**
+        const unsupported = "remote-watch: 지원하지 않는 타깃 — Variant.assetName 과 이 switch 를 함께 더한다";
+        const asset = switch (query.os_tag.?) {
+            .linux => switch (query.cpu_arch.?) {
+                .x86_64 => "linux-x86_64",
+                .aarch64 => "linux-aarch64",
+                else => @panic(unsupported),
+            },
+            .macos => switch (query.cpu_arch.?) {
+                .x86_64 => "macos-x86_64",
+                .aarch64 => "macos-aarch64",
+                else => @panic(unsupported),
+            },
+            else => @panic(unsupported),
+        };
+        const install_watch = b.addInstallArtifact(watch_exe, .{
+            .dest_dir = .{ .override = .{ .custom = b.fmt("remote-watch/{s}", .{asset}) } },
+        });
+        remote_watch_step.dependOn(&install_watch.step);
+    }
+
     var macos_app_bundle_command: ?*std.Build.Step = null;
     if (target.result.os.tag == .macos) {
         const macos_swift_target = swiftMacOSTarget(b, target.result);
@@ -1976,6 +2027,14 @@ pub fn build(b: *std.Build) void {
                     "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Helpers zig-out/Maru.app/Contents/Resources/Fonts; " ++
                     "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
                     "cp -R zig-out/MaruMermaidRenderer.app zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                    // 원격 감시자(RW2b) — 네 변종을 Resources 에 싣는다. **없으면 빌드를 세운다**:
+                    // 조용히 빠지면 그 아키텍처 원격만 감시가 안 되고, 증상은 「원격만 갱신이 안 된다」라
+                    // 이 트랙이 고치려던 모양 그대로다(폰트 라이선스 검사와 같은 규율).
+                    "mkdir -p zig-out/Maru.app/Contents/Resources/remote-watch; " ++
+                    "cp -R zig-out/remote-watch/. zig-out/Maru.app/Contents/Resources/remote-watch/; " ++
+                    "for v in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do " ++
+                    "[ -s \"zig-out/Maru.app/Contents/Resources/remote-watch/$v/maru-remote-watch\" ] || " ++
+                    "{ echo \"error: remote watcher variant missing or empty: $v — 그 원격만 조용히 감시가 안 된다\" >&2; exit 1; }; done; " ++
                     // 형제 `maru` CLI도 번들에 넣는다 — 커맨드 팝업 "Install CLI"가 GUI 바이너리 옆 형제 maru를
                     // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
                     "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
@@ -2046,6 +2105,7 @@ pub fn build(b: *std.Build) void {
         for (grammar_licenses.items) |lic| macos_app_bundle.addFileArg(lic.path);
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
+        macos_app_bundle.step.dependOn(remote_watch_step); // 번들이 싣는 것을 먼저 만든다(RW2b)
         macos_app_bundle.step.dependOn(&macos_mermaid_helper_bundle.step);
         // web/dist·폰트 같은 입력은 zig build가 추적하는 인자가 아니라, side effect를 선언하지 않으면
         // "인자가 그대로다"라는 이유로 이 스텝이 통째로 스킵된다. 그러면 web을 고치고 앱을 빌드해도 번들 안
@@ -4527,35 +4587,6 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
 
-    // ── 원격 감시자(RW1 — docs/plans/remote-watch.md) ──────────────────────────────────────────
-    //
-    // **원격에서 도는 프로그램이라 «컴파일되는 타깃 전부»가 계약이다.** 한 타깃만 깨지면 그 원격만
-    // 조용히 감시가 안 되고, 증상은 「원격만 갱신이 안 된다」로 보인다 — 이 트랙이 고치려던 바로 그
-    // 모양이다. 그래서 게이트가 **전 타깃을 컴파일한다.**
-    //
-    // ⚠️ 컴파일만으로는 부족하다는 것을 실측으로 배웠다: `nftw` 의 `FTW_D` 상수가 libc 마다 달라
-    // (glibc 1 · musl 2) 컴파일도 되고 `nftw` 도 성공하는데 **watch 를 하나도 안 거는** 판을 한 번
-    // 만들었다. 그래서 디렉터리 판정은 `std.Io.Dir` 이 지고, 경계 test 가 그 사실을 소스에서 센다.
-    const remote_watch_step = b.step("remote-watch", "Build the remote filesystem watcher for every remote target");
-    const remote_watch_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-    };
-    for (remote_watch_targets) |query| {
-        const watch_exe = b.addExecutable(.{
-            .name = "maru-remote-watch",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tools/remote-watch/main.zig"),
-                .target = b.resolveTargetQuery(query),
-                .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
-                .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
-            }),
-        });
-        remote_watch_step.dependOn(&watch_exe.step);
-    }
-
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",
@@ -4568,11 +4599,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_watch_contract = b.addRunArtifact(remote_watch_contract_tests);
-    run_remote_watch_contract.addArg("--maru-expect-tests=2");
-    run_remote_watch_contract.addArg("--maru-expect-passed=2");
+    run_remote_watch_contract.addArg("--maru-expect-tests=3");
+    run_remote_watch_contract.addArg("--maru-expect-passed=3");
     run_remote_watch_contract.setCwd(b.path("."));
     remote_watch_contract_step.dependOn(&run_remote_watch_contract.step);
     boundary_step.dependOn(&run_remote_watch_contract.step);
+    // 전 타깃 컴파일도 경계에 건다 — 한 타깃만 깨지면 그 원격만 조용히 감시가 안 된다.
+    boundary_step.dependOn(remote_watch_step);
     // 전 타깃 컴파일도 경계에 건다 — 한 타깃만 깨지면 그 원격만 조용히 감시가 안 된다.
     boundary_step.dependOn(remote_watch_step);
 

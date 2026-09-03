@@ -58,6 +58,21 @@ pub const Variant = enum {
     }
 };
 
+/// 앱이 페이로드를 찾을 때 쓰는 **상대 경로**. 빌드가 `zig-out/remote-watch/<변종>/` 에 놓고,
+/// 번들은 그 트리를 `Contents/Resources/remote-watch/` 로 옮긴다 — 두 자리의 **마지막 두 마디가 같다.**
+///
+/// ⚠️ **이름을 여기서만 만든다.** `build.zig` 가 같은 이름을 손으로 적고 있어 어긋날 수 있는데,
+/// 어긋나면 앱이 **빌드가 만들지 않은 자리**를 뒤지고 증상은 「그 원격만 감시가 안 된다」다.
+/// 경계 test 가 두 목록을 대조한다.
+pub const asset_root = "remote-watch";
+pub const asset_exe = "maru-remote-watch";
+
+/// `remote-watch/<변종>/maru-remote-watch`. 버퍼가 모자라면 **자르지 않고 `null`** — 잘린 경로는
+/// 엉뚱한 파일을 가리킨다.
+pub fn assetRelPath(v: Variant, buf: []u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, asset_root ++ "/{s}/" ++ asset_exe, .{v.assetName()}) catch null;
+}
+
 /// `uname -sm` 출력을 변종으로 옮긴다. 모르면 `null` — 호출자는 **설치를 안 하고** 현행 동작을 둔다.
 ///
 /// ⚠️ **FreeBSD 는 `null` 이다.** kqueue 는 거기서도 돌지만 우리가 만드는 것은 Mach-O(macOS) 라
@@ -89,6 +104,14 @@ pub fn versionMatches(stdout: []const u8) bool {
 }
 
 const testing = std.testing;
+
+test "자산 상대 경로는 변종 이름을 그대로 쓴다" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("remote-watch/linux-x86_64/maru-remote-watch", assetRelPath(.linux_x86_64, &buf).?);
+    try testing.expectEqualStrings("remote-watch/macos-aarch64/maru-remote-watch", assetRelPath(.macos_aarch64, &buf).?);
+    var tiny: [8]u8 = undefined;
+    try testing.expect(assetRelPath(.linux_x86_64, &tiny) == null);
+}
 
 test "uname -sm 을 변종으로 옮긴다 — 모르면 null 이다" {
     try testing.expectEqual(Variant.linux_x86_64, variantFromUname("Linux x86_64").?);

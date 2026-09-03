@@ -13950,9 +13950,23 @@ fn runAgentEvents(
             // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
             // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이
             // 흘러 선이 시끄러워진다.
+            //
+            // ⚠️ **커서는 `emit_nonce` 가 아니라 `nonce`(파일 이름)로 보낸다.** 이벤트는 역조회로 치환된
+            // 이름을 쓰지만(귀속을 위해 — RA6), 커서는 **이 스트리머가 다음 회차에 그 파일을 다시 찾는
+            // 열쇠**다. 치환된 이름으로 보내면 로컬이 그것을 되돌려 줘도 위 `cursors.getOrPut(…, nonce)`
+            // 가 못 찾아 **오프셋이 0 에 머문다** — 재접속마다 파일을 처음부터 다시 읽고(중복),
+            // `shouldTruncate` 의 `cur.offset == size` 가 영영 거짓이라 **파일도 안 비워진다**.
+            // 실측으로 그 비대칭이 잡혔다(2026-09-03): 역조회가 도는 `t*` 는 400~950KB 로 자라 있는데
+            // 치환이 없는 `host_*` 는 1.5KB 였다.
+            //
+            // 로컬은 이 이름을 **귀속에 쓰지 않는다** — `host.cursors` 는 재개 문자열을 만들 때 그대로
+            // 되돌려 보내는 **왕복 토큰**일 뿐이다(`app_session.zig` 의 `recordRemoteCursors`). 그래서
+            // 파일 이름을 그대로 실어도 사이드바 판정은 달라지지 않는다. 그리고 파일 이름은 역조회
+            // 결과와 달리 **안 바뀐다** — 사용자가 다른 pane 에서 attach 해 주인이 바뀌어도 커서는
+            // 그 파일을 계속 가리킨다.
             if (consumed > 0) {
                 frame.clearRetainingCapacity();
-                try ae.formatCursor(&frame, allocator, emit_nonce, next.offset);
+                try ae.formatCursor(&frame, allocator, nonce, next.offset);
                 try stdout.writeAll(frame.items);
             }
 
@@ -13969,7 +13983,7 @@ fn runAgentEvents(
                     // **비웠다는 것도 알린다.** 로컬이 옛 offset 을 든 채 재접속하면 새 파일의 앞을
                     // 건너뛴다 — `advance` 의 회전 감지가 결국 되돌리지만, 그 한 회차를 안 만든다.
                     frame.clearRetainingCapacity();
-                    ae.formatCursor(&frame, allocator, emit_nonce, 0) catch continue;
+                    ae.formatCursor(&frame, allocator, nonce, 0) catch continue; // 위와 같은 이유로 파일 이름
                     stdout.writeAll(frame.items) catch continue;
                 } else |_| {}
             }

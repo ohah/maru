@@ -412,14 +412,40 @@ fn childExec(
     c._exit(126);
 }
 
+/// What the parent should do after `setpgid` on the freshly forked child failed.
+pub const GroupOutcome = enum { established, retry, failed };
+
+/// The child sets its own group before exec, so two errno values still mean the
+/// group is in place and only the parent's redundant call lost a race:
+///   ACCES  the child reached exec first;
+///   SRCH   the child already exited, so nothing is left to place in a group.
+/// Treating SRCH as failure replaces the child's real exit status with
+/// ProcessGroupFailed. How often that happens is decided by `RLIMIT_NOFILE`:
+/// `childExec` below closes every descriptor up to `getdtablesize()` before exec,
+/// so a high limit buys the parent enough time to always win, and a low one does
+/// not. Measured on macOS with an exec that fails into `_exit(126)`, 300 spawns
+/// each:
+///   ulimit -n 1048576 / 65536 / 4096   0 ProcessGroupFailed
+///   ulimit -n 256                      7 ProcessGroupFailed
+///   ulimit -n 64                       8 ProcessGroupFailed
+/// 256 is not a corner: it is what `launchctl limit maxfiles` reports, so it is
+/// the soft limit the GUI app inherits. Tests run from a shell whose limit is
+/// 1048576, which is why the harness never saw this.
+pub fn classifyGroupErrno(err: posix.E) GroupOutcome {
+    return switch (err) {
+        .INTR => .retry,
+        .ACCES, .SRCH => .established,
+        else => .failed,
+    };
+}
+
 fn establishProcessGroup(pid: c.pid_t) bool {
     while (true) {
         if (c.setpgid(pid, pid) == 0) return true;
-        switch (posix.errno(-1)) {
-            .INTR => continue,
-            // The child can win the race by setting its group and entering exec first.
-            .ACCES => return true,
-            else => return false,
+        switch (classifyGroupErrno(posix.errno(-1))) {
+            .retry => continue,
+            .established => return true,
+            .failed => return false,
         }
     }
 }

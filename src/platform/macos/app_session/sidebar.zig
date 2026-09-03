@@ -1807,8 +1807,25 @@ pub fn agentRowBranchOwned(self: *AppSession, term: *Term, indent: []const u8) !
     return std.fmt.allocPrint(self.allocator, "{s}  " ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, branch });
 }
 
+/// 배지가 **화면이 뒤집어 만든 것**임을 알리는 각주 표식([agent-hooks.md](../../../../docs/agent-hooks.md) §1.4).
+///
+/// §1 은 「배지 옆에 소스를 밝힐 수 있어야 버그 보고가 성립한다」를 요구했는데, 그 값(`agent_state_origin`·
+/// `agent_state_rule`)이 `MARU_DEBUG` 로그까지만 가 있었다 — **개발자는 재현할 수 있고 사용자는 못 말하는**
+/// 상태였다. 이 한 글자가 그 간극을 메운다.
+///
+/// **뒤집힌 때만 붙인다.** 평소(훅이 정한 B)는 조용해야 한다 — 늘 뜨면 그 신호가 아무 뜻도 없어진다.
+/// 마커(`?`·`✓`·`·`)와 같이 **번역 대상이 아니다**(기호이지 문장이 아니다 — 아래 주석의 같은 규율).
+const flipped_marker = " *";
+
 pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
     if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
+    const base = try agentStatusLineBase(self, term);
+    if (!maru.session.agent_state_arbiter.ruleIsFlip(term.agent_state_rule)) return base;
+    defer self.allocator.free(base);
+    return std.fmt.allocPrint(self.allocator, "{s}" ++ flipped_marker, .{base});
+}
+
+fn agentStatusLineBase(self: *AppSession, term: *Term) ![]const u8 {
     return switch (term.agent_state) {
         // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처). 훅 모드면 **무엇을 하는 중인지**까지 붙는다.
         .running => runningStatusLine(self, term.agent_hook_tool.text()),

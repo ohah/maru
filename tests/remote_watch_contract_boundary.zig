@@ -70,6 +70,41 @@ test "감시자와 설치 계약이 같은 «판»을 말한다" {
     try std.testing.expect(std.mem.indexOf(u8, install, "maru-remote-watch-1\"") != null);
 }
 
+test "빌드가 만드는 변종과 앱이 찾는 변종이 같다" {
+    // 이름이 **두 곳**에 있다: `build.zig` 가 손으로 적은 `asset` switch 와 `Variant.assetName`.
+    // 어긋나면 앱이 **빌드가 만들지 않은 자리**를 뒤지고, 증상은 「그 아키텍처 원격만 감시가 안 된다」 —
+    // 컴파일러가 못 잇는 관계라 여기서 센다.
+    const allocator = std.testing.allocator;
+    const build_zig = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    defer allocator.free(build_zig);
+    const install = try read(allocator, "src/session/remote_watch_install.zig", 256 * 1024);
+    defer allocator.free(install);
+
+    for ([_][]const u8{ "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64" }) |name| {
+        var needle: [64]u8 = undefined;
+        const quoted = try std.fmt.bufPrint(&needle, "\"{s}\"", .{name});
+        // ⑴ 빌드가 그 이름으로 설치한다 ⑵ 앱이 그 이름으로 찾는다 ⑶ 번들 검사가 그 이름을 센다
+        try std.testing.expect(std.mem.indexOf(u8, build_zig, quoted) != null);
+        try std.testing.expect(std.mem.indexOf(u8, install, quoted) != null);
+    }
+    // ⚠️ **양쪽 «개수»도 센다.** 이름 넷이 양쪽에 있다는 것만 보면 **한쪽에만 다섯 번째를 더해도
+    //    통과한다**(적대적 검증 2 회차에서 실제로 그랬다). 그러면 빌드는 만들고 번들은 싣는데 앱은
+    //    영영 고를 수 없는 변종이 생기고, 더한 사람은 되는 줄 안다.
+    const build_switch = try bodyOf(build_zig, "const asset = switch (query.os_tag.?)", "\n        };", 2048);
+    const name_switch = try bodyOf(install, "pub fn assetName(self: Variant)", "\n    }", 1024);
+    const bundle_line = try bodyOf(build_zig, "\"for v in ", "; do \" ++", 256);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, build_switch, "=> \""));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, name_switch, "=> \""));
+    // 번들 검사 줄도 넷이다 — 여기만 빠지면 그 변종은 **없어도 빌드가 안 선다.**
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, bundle_line, "-"));
+
+    // 번들 단계가 **네 변종을 전부** 검사하고, 없으면 빌드를 세운다.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig, "for v in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig, "remote watcher variant missing or empty") != null);
+    // 경로 조립은 **한 곳**이다 — 앱이 문자열을 다시 짜면 그 자리가 또 어긋난다.
+    try std.testing.expect(std.mem.indexOf(u8, install, "pub fn assetRelPath") != null);
+}
+
 /// 줄 주석(`//`)을 벗긴다. 문자열 안의 `//` 는 이 소스에 없다 — 생기면 이 헬퍼부터 고쳐야 한다.
 fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;

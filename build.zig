@@ -2609,6 +2609,19 @@ pub fn build(b: *std.Build) void {
         session_host_cr6c_assert.step.dependOn(&run_session_host_cr6c_appkit.step);
         session_host_cr6c_appkit_step.dependOn(&session_host_cr6c_assert.step);
 
+        const signed_candidate_app = b.option(
+            []const u8,
+            "session-host-signed-candidate-app",
+            "Absolute path to the preserved signed candidate Maru.app",
+        ) orelse "";
+        const signed_candidate_app_exe = b.fmt(
+            "{s}/Contents/MacOS/maru-macos-app",
+            .{signed_candidate_app},
+        );
+        const signed_candidate_product_exe = b.fmt(
+            "{s}/Contents/MacOS/maru",
+            .{signed_candidate_app},
+        );
         const signed_app_quit_candidate_dmg = b.option(
             []const u8,
             "session-host-signed-candidate-dmg",
@@ -2641,11 +2654,11 @@ pub fn build(b: *std.Build) void {
         run_signed_app_quit.has_side_effects = true;
         run_signed_app_quit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            signed_candidate_app_exe,
         );
         run_signed_app_quit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            signed_candidate_product_exe,
         );
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_signed_app_quit.setEnvironmentVariable(
@@ -2659,7 +2672,6 @@ pub fn build(b: *std.Build) void {
             "MARU_CONFIG",
             b.pathFromRoot("zig-out/maru-macos-app/session-host-signed-app-quit-home/.config/maru/config"),
         );
-        run_signed_app_quit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_TEST_UUID", signed_app_quit_test_uuid);
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_CANDIDATE_DMG", signed_app_quit_candidate_dmg);
         run_signed_app_quit.setEnvironmentVariable("MARU_SESSION_HOST_SIGNED_APP_QUIT_FROZEN_EXE", signed_app_quit_frozen_exe);
@@ -2667,8 +2679,6 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_SIGNED_APP_QUIT_OUTPUT",
             b.pathFromRoot("zig-out/session-host-signed-app-quit/leaf.json"),
         );
-        run_signed_app_quit.step.dependOn(&macos_app_bundle.step);
-        run_signed_app_quit.step.dependOn(&file_panel_web_build.step);
         run_signed_app_quit.step.dependOn(&signed_app_quit_fixture.step);
         signed_app_quit_step.dependOn(&run_signed_app_quit.step);
 
@@ -2693,7 +2703,7 @@ pub fn build(b: *std.Build) void {
         run_default_false.has_side_effects = true;
         run_default_false.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            signed_candidate_app_exe,
         );
         isolateMacosProductTest(
             b,
@@ -2712,7 +2722,6 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_DEFAULT_FALSE_OUTPUT",
             b.pathFromRoot("zig-out/session-host-default-false/leaf.json"),
         );
-        run_default_false.step.dependOn(&macos_app_bundle.step);
         run_default_false.step.dependOn(&default_false_fixture.step);
         default_false_step.dependOn(&run_default_false.step);
 

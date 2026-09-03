@@ -110,6 +110,7 @@ const pane_ops = @import("app_session/pane.zig");
 const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
+const remote_watch_mod = @import("remote_watch.zig"); // 원격 감시 채널(RW3 — 긴 수명 ssh exec 하나)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
 
@@ -5471,6 +5472,9 @@ pub const AppSession = struct {
     /// 값이라, 원격 목록을 보는 동안 로컬 파일을 열거나 스테이지하는 사고가 **경로 비교만으로는 막히지
     /// 않는다**(§9.4 가 링크 감지에서 겪은 것과 같은 함정).
     git_repo_dest: ?[]u8 = null,
+    /// 원격 감시 채널(RW3). **하나다** — 원격 SCM 의 대상이 `git_repo_dest` 하나뿐이라, 그 값이
+    /// 바뀌는 유일한 길목(`rememberGitRepoDest`)에서 갈아 끼운다.
+    remote_watch: remote_watch_mod.Channel = .{},
     /// 원격 저장소의 **루트**(RS3). `git_repo_dest` 가 있을 때만 뜻이 있다. 목록 읽기와 **같은 왕복**에서
     /// 받아 온다(`rev-parse --show-toplevel`) — 따로 물으면 왕복이 늘고, 그 사이 pane 이 바뀌면 루트와
     /// 목록이 다른 저장소의 것이 된다.
@@ -17424,6 +17428,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedBaseMenu(self); // 캡처 전용: 기준 목록은 그 메뉴를 한 번 더 눌러야 뜬다(§3.5)
         debug_fixtures.applyForcedCommitWheel(self); // 캡처 전용: 휠은 포인터 장치 입력이라 하니스가 못 낸다
         scm_dock_ops.settleCommitInput(self); // 상자가 입력을 놓았는데 조합이 남아 있으면 확정한다(경로 열거 대신 상태 판정)
+        git_ops.pumpRemoteWatch(self); // 원격 감시 채널(RW3): 띄우고·드레인하고·바뀌었으면 읽기를 다시 건다
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
         scm_dock_ops.pumpRepoStatus(self); // 아직 안 읽은 저장소 **하나**에 읽기를 건다
         scm_dock_ops.drainRepoStatus(self); // 도착한 머리 줄 요약을 싣는다(P3d-③)
@@ -21151,6 +21156,7 @@ pub const AppSession = struct {
             self.allocator.free(entry.base);
         }
         self.scm_base_len = 0;
+        self.remote_watch.deinit(self.allocator); // 원격 감시 채널(RW3) — 고아를 남기지 않는다
         for (self.scm_repo_status.items) |entry| { // 비활성 저장소 요약
             self.allocator.free(entry.path);
             self.allocator.free(entry.branch);

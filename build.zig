@@ -5792,15 +5792,25 @@ pub fn build(b: *std.Build) void {
     github_release_publication_step.dependOn(&github_release_publication_contract.step);
     test_step.dependOn(&github_release_publication_contract.step);
 
-    const session_host_release_workflow_contract = b.addSystemCommand(&.{ "sh", "tools/test-session-host-release-workflow.sh" });
-    session_host_release_workflow_contract.setCwd(b.path("."));
-    session_host_release_workflow_contract.stdio = .inherit;
+    // **셸에서 Zig 로 옮겼다**(§2m.110). 재는 것은 그대로다 — 옮긴 이유는 이 판정이 `test` 에 매달려
+    // 있어서 **게이트 자신이 POSIX 셸을 요구했기** 때문이다(Windows 에서 `sh` 가 PATH 에 없으면
+    // 계약과 무관한 이유로 게이트가 통째로 빨개진다 — §2m.109). 파일을 읽어 대조하는 판정이라
+    // 셸이 하던 일이 없다.
+    const release_workflow_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/release_workflow/authority_capture.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_release_workflow_tests = b.addRunArtifact(release_workflow_tests);
+    run_release_workflow_tests.setCwd(b.path("."));
     const session_host_release_workflow_step = b.step(
         "check-session-host-release-workflow",
         "Check checkout-before-trust release workflow regressions",
     );
-    session_host_release_workflow_step.dependOn(&session_host_release_workflow_contract.step);
-    test_step.dependOn(&session_host_release_workflow_contract.step);
+    session_host_release_workflow_step.dependOn(&run_release_workflow_tests.step);
+    test_step.dependOn(&run_release_workflow_tests.step);
 
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);

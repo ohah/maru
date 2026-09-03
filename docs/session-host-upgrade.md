@@ -1736,7 +1736,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   wiring gate가 별도로 소유한다.
 
   release workflow의 checkout 전 CLI capture 계약은 `.github/workflows/release.yml`과
-  `tools/test-session-host-release-workflow.sh`가 함께 소유한다. release job의 첫 repository-content 접근보다 앞선
+  `tests/release_workflow/authority_capture.zig`가 함께 소유한다(§2m.110에서 셸 스크립트를 Zig로 옮겼다 — 재는 것은 그대로다). release job의 첫 repository-content 접근보다 앞선
   `Capture trusted GitHub CLI before checkout` step은 초기 runner PATH에서 `gh`를 exact once 찾고, symlink를 해소한 canonical
   absolute path가 regular executable인지 확인한 뒤 lowercase SHA-256을 계산한다. 두 값은 같은 step의 immutable output으로만
   게시하며 `GITHUB_ENV`, repository pathname 또는 checkout 뒤 PATH 재탐색으로 넘기지 않는다. job은 exact

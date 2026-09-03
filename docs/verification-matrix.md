@@ -994,6 +994,12 @@ Zig owner snapshot의 exact `false/absent/missing`을 닫힌 ABI 결과로 관�
 재검증과 exclusive publication 경계를 검증한다. 이 gate는 G3 default-on 승인, GitHub provenance, DMG notarization 또는 두 A leaf의
 trusted workflow 실행·aggregate publication을 대신하지 않는다.
 
+U5 signed candidate staging은 universal build가 공증·staple 검증한 app과 DMG를
+`dist/session-host-candidate-<version>/`에 배타 게시하고 app main executable과 별도 frozen executable의 exact bytes를 두 번
+대조한다. `tools/test-macos-release-candidate-artifacts.sh`는 실제 임시 filesystem에서 exact 세 산출물, executable mode,
+기존 final·symlink 거부, copy/비교 실패 시 final publication 0을 검증한다. 이 gate는 Apple 서명·공증 자체나 GitHub workflow의
+baseline leaf 실행·attestation·release publication을 대신하지 않는다.
+
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
 bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual

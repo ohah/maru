@@ -1895,6 +1895,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   사용자 config 및 session-host registry와 달라야 하고 성공·실패 모두 자기 artifact만 정리한다. 이 leaf는 default-on 전환을
   승인하지 않으며, candidate의 GitHub attestation·DMG deep signature/notarization·draft release provenance도 독자적으로 승인하지 않는다.
 
+  signed universal 빌드가 위 두 baseline gate에 넘기는 candidate pathname은 공증 전이나 architecture별 `zig-out/Maru.app`에서
+  재구성하지 않는다. `tools/build-macos-universal-dmg.sh`가 app·DMG 공증과 staple 검증을 끝낸 바로 그 universal app을
+  `dist/session-host-candidate-<version>/Maru.app`으로 복제하고, 그 app의 main executable bytes를 별도
+  `maru-session-host-<version>` regular executable로 동결한다. 같은 디렉터리의 DMG 사본까지 임시 sibling에서 완성한 뒤 final
+  directory를 배타 rename하며 기존 final·symlink는 실패한다. app 내부 main executable과 frozen executable의 exact byte equality를
+  게시 직전과 final pathname에서 다시 확인한다. 이 보존 단계는 candidate bytes가 같은 trusted build에서 왔음을 유지할 뿐 signer,
+  notarization, GitHub provenance 또는 release publication을 새로 승인하지 않는다.
+
   `test_uuid`는 replay 방지 권위가 아니다. replay 방지는 repository/release/source/build run-attempt, A/B DMG·executable
   digest와 aggregate artifact attestation을 함께 교차검증해 닫는다. OS 중립 core는 leaf bytes를 strict parse해 canonical
   aggregate bytes만 반환하고 filesystem을 열거나 publication 성공을 주장하지 않는다. 후속 executable adapter가 기존

@@ -365,8 +365,10 @@ test "CR2d3 경계는 stable shell event cursor와 Window cursor 제거를 고�
         "test \"host-backed OSC 52 read:",
         "test \"host-backed 재접속:",
     }) |named_test| try std.testing.expectEqual(@as(usize, 1), count(app_session, named_test));
-    try std.testing.expectEqual(@as(usize, 3), count(app_session, "try installCr2d3EventRuntime(&runtime, handle);"));
-    try std.testing.expectEqual(@as(usize, 3), count(app_session, "defer removeCr2d3EventRuntime(handle);"));
+    // 위 세 CR2d3 판정자 **말고** S11-6 좁힘 조회 판정자가 같은 fixture 를 하나 더 쓴다(넷째).
+    // 이 수가 지키는 것은 「설치와 제거가 짝을 이룬다」이지 「CR2d3 만 쓴다」가 아니다.
+    try std.testing.expectEqual(@as(usize, 4), count(app_session, "try installCr2d3EventRuntime(&runtime, handle);"));
+    try std.testing.expectEqual(@as(usize, 4), count(app_session, "defer removeCr2d3EventRuntime(handle);"));
     inline for (.{ "last_bell_count", "last_clipboard_write_seq", "last_clipboard_read_seq" }) |old|
         try std.testing.expectEqual(@as(usize, 0), count(app_session, old));
     try std.testing.expectEqual(@as(usize, 1), count(term, "rb.clipboardWriteFor(term.rt.handle)"));

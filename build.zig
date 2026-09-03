@@ -12039,6 +12039,24 @@ pub fn build(b: *std.Build) void {
         );
         signed_upgrade_e2e_harness_step.dependOn(&run_signed_upgrade_e2e_tests.step);
         signed_upgrade_e2e_harness_step.dependOn(&signed_upgrade_e2e.step);
+
+        const signed_app_quit_evidence_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_signed_app_quit_evidence_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_signed_app_quit_evidence_tests = b.addRunArtifact(signed_app_quit_evidence_tests);
+        run_signed_app_quit_evidence_tests.addArg("--maru-expect-tests=3");
+        run_signed_app_quit_evidence_tests.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_signed_app_quit_evidence_tests.step);
+        const signed_app_quit_evidence_harness_step = b.step(
+            "test-session-host-signed-app-quit-evidence",
+            "Validate the signed AppKit Quit release evidence boundary",
+        );
+        signed_app_quit_evidence_harness_step.dependOn(&run_signed_app_quit_evidence_tests.step);
+
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));
         run_signed_upgrade_e2e.has_side_effects = true;

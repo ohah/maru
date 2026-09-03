@@ -8,7 +8,21 @@ const c = std.c;
 const posix = std.posix;
 const safe_open = @import("safe_open");
 
-pub const Child = enum { current_manifest, predecessor_manifest, predecessor_assets, dmg, current_assets };
+pub const Child = enum {
+    current_manifest,
+    predecessor_manifest,
+    predecessor_assets,
+    dmg,
+    current_assets,
+};
+
+pub const BaselineChild = enum {
+    baseline_default_false_home,
+    baseline_signed_app_quit_home,
+    baseline_default_false_leaf,
+    baseline_signed_app_quit_leaf,
+    baseline_evidence,
+};
 
 pub const Error = error{
     InvalidOwner,
@@ -34,9 +48,16 @@ pub const Workspace = struct {
     sync_fn: *const fn (c.fd_t) bool = systemSync,
 
     pub fn childPath(self: *@This(), child: Child, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
+        return self.childPathFor(childName(child), output);
+    }
+
+    pub fn baselineChildPath(self: *@This(), child: BaselineChild, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
+        return self.childPathFor(baselineChildName(child), output);
+    }
+
+    fn childPathFor(self: *@This(), name: [:0]const u8, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
         if (rangesOverlap(std.mem.asBytes(self), std.mem.asBytes(output))) return error.InvalidOwner;
         try self.revalidate(true);
-        const name = childName(child);
         var observed: posix.Stat = undefined;
         if (c.fstatat(self.root_fd, name.ptr, &observed, posix.AT.SYMLINK_NOFOLLOW) == 0)
             return error.ChildOccupied;
@@ -59,6 +80,10 @@ pub const Workspace = struct {
         if (!self.sync_fn(self.parent_fd)) return error.CleanupFailed;
         _ = c.close(self.parent_fd);
         self.* = .{};
+    }
+
+    pub fn validate(self: *@This()) Error!void {
+        try self.revalidate(true);
     }
 
     fn revalidate(self: *@This(), require_private_mode: bool) Error!void {
@@ -213,6 +238,16 @@ fn childName(child: Child) [:0]const u8 {
         .predecessor_assets => "predecessor-assets",
         .dmg => "dmg",
         .current_assets => "current-assets",
+    };
+}
+
+fn baselineChildName(child: BaselineChild) [:0]const u8 {
+    return switch (child) {
+        .baseline_default_false_home => "default-false",
+        .baseline_signed_app_quit_home => "signed-app-quit",
+        .baseline_default_false_leaf => "default-false.json",
+        .baseline_signed_app_quit_leaf => "signed-app-quit.json",
+        .baseline_evidence => "baseline-evidence.json",
     };
 }
 

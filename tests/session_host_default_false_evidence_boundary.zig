@@ -16,7 +16,7 @@ test "default false leaf observes the closed post-bootstrap ABI state" {
     try expectContains(swift, "MARU_SESSION_DEFAULT_FALSE_EVIDENCE_SMOKE");
     try expectContains(swift, "maru_macos_session_default_false_observation()");
     try expectContains(harness, "MARU_SESSION_HOST_DEFAULT_FALSE_TEST_UUID");
-    try expectContains(harness, "release_evidence.default_false_leaf_schema");
+    try expectContains(harness, "upgrade_limits.default_false_leaf_schema");
 }
 
 test "default false leaf pins the signed candidate and publishes exclusively" {
@@ -31,6 +31,12 @@ test "default false leaf pins the signed candidate and publishes exclusively" {
     try expectContains(source, "resolved_default = false");
     try expectContains(source, "explicit_override_present = false");
     try expectContains(source, "signed_product = true");
+    const app_path = std.mem.indexOf(u8, source, "const app_path_z =") orelse return error.MissingAppPath;
+    const reject_alias = std.mem.indexOfPos(u8, source, app_path, "std.mem.eql(u8, config.output, app_path_z)") orelse
+        return error.MissingOutputAliasRejection;
+    const invalidate = std.mem.indexOfPos(u8, source, reject_alias, "try invalidateArtifact(config.output)") orelse
+        return error.MissingStaleInvalidation;
+    try std.testing.expect(app_path < reject_alias and reject_alias < invalidate);
 }
 
 test "default false product run owns an empty isolated config root" {

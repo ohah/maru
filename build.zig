@@ -2672,6 +2672,50 @@ pub fn build(b: *std.Build) void {
         run_signed_app_quit.step.dependOn(&signed_app_quit_fixture.step);
         signed_app_quit_step.dependOn(&run_signed_app_quit.step);
 
+        const default_false_test_uuid = b.option(
+            []const u8,
+            "session-host-default-false-test-uuid",
+            "Canonical release UUID also passed to the signed AppKit Quit baseline-A gate",
+        ) orelse "";
+        const default_false_step = b.step(
+            "macos-session-host-default-false-evidence",
+            "Run signed candidate app bootstrap default-false release evidence E2E",
+        );
+        const default_false_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-default-false-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/.config/maru\" zig-out/session-host-default-false; " ++
+                "rm -f zig-out/session-host-default-false/leaf.json",
+        });
+        default_false_fixture.setCwd(b.path("."));
+        const run_default_false = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_default_false.setCwd(b.path("."));
+        run_default_false.has_side_effects = true;
+        run_default_false.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        isolateMacosProductTest(
+            b,
+            run_default_false,
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-default-false-home"),
+            "default-false",
+        );
+        run_default_false.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-default-false-home/.config/maru/config"),
+        );
+        run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_TEST_UUID", default_false_test_uuid);
+        run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_CANDIDATE_DMG", signed_app_quit_candidate_dmg);
+        run_default_false.setEnvironmentVariable("MARU_SESSION_HOST_DEFAULT_FALSE_FROZEN_EXE", signed_app_quit_frozen_exe);
+        run_default_false.setEnvironmentVariable(
+            "MARU_SESSION_HOST_DEFAULT_FALSE_OUTPUT",
+            b.pathFromRoot("zig-out/session-host-default-false/leaf.json"),
+        );
+        run_default_false.step.dependOn(&macos_app_bundle.step);
+        run_default_false.step.dependOn(&default_false_fixture.step);
+        default_false_step.dependOn(&run_default_false.step);
+
         const session_host_cr6d_appkit_step = b.step(
             "macos-session-host-input-continuity-smoke",
             "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
@@ -12140,7 +12184,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_signed_app_quit_evidence_unit_tests = b.addRunArtifact(signed_app_quit_evidence_unit_tests);
-        run_signed_app_quit_evidence_unit_tests.addArg("--maru-expect-tests=3");
+        run_signed_app_quit_evidence_unit_tests.addArg("--maru-expect-tests=6");
         run_signed_app_quit_evidence_unit_tests.setCwd(b.path("."));
         signed_app_quit_evidence_harness_step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);
         run_session_host_tests.step.dependOn(&run_signed_app_quit_evidence_unit_tests.step);

@@ -253,7 +253,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 177: drop_image가 Swift가 먼저 atomic 저장한 로컬 임시 PNG 경로를 PNG 바이트와 함께 받는다. host-backed
 // 비동기 freshness barrier가 로컬로 판정된 뒤에도 원래 이미지를 재생성하지 않고 정확한 target surface에 경로를
 // 붙일 수 있게 하는 수명 계약이다. export 시그니처를 바꾸므로 낡은 Swift/new Zig 조합은 ABI 가드에서 실패해야 한다.
-pub const abi_version: u32 = 180;
+pub const abi_version: u32 = 181;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2989,6 +2989,10 @@ pub fn commitAppKeepAliveReset() void {
 
 pub fn appKeepAliveSnapshot() config_mod.SessionKeepAliveSnapshot {
     return keepAliveSnapshotForNewSession();
+}
+
+pub fn appKeepAliveSnapshotIfBootstrapped() ?config_mod.SessionKeepAliveSnapshot {
+    return app_keep_alive_bootstrap_owner.borrow();
 }
 
 pub fn appKeepAlivePolicyValue() bool {

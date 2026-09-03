@@ -38,11 +38,11 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     try std.testing.expect(std.mem.indexOf(u8, verification, "Session default G1 config provenance") != null);
     try expectOne(commands, "`zig build test-session-host-config-provenance`");
 
-    // G2 deliberately opens these projections only in app_session and its settings submodule.
-    // Exact counts include their same-file tests; an additional product reader must update the
-    // G2 SSOT boundary rather than silently becoming another policy owner.
+    // G2 deliberately opens these projections in app_session/settings, plus the read-only v181
+    // release baseline classifier. Exact counts include same-file tests; another product reader
+    // must update this SSOT boundary rather than silently becoming another policy owner.
     try std.testing.expectEqual(@as(usize, 7), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
-    try std.testing.expectEqual(@as(usize, 14), try countOutsideConfig(allocator, "file_provenance"));
+    try std.testing.expectEqual(@as(usize, 20), try countOutsideConfig(allocator, "file_provenance"));
 }
 
 fn countOutsideConfig(allocator: std.mem.Allocator, needle: []const u8) !usize {

@@ -1066,14 +1066,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   pre-publish workspace filesystem owner는 `release_adapter_pre_publish_workspace.zig` 한 곳이다. caller의 absolute absent root를
   no-follow parent 아래 0700으로 만들고 parent/root의 device·inode와 held fd를 final-address move-only owner에 보존한다. 하위 단계는
-  caller 문자열이나 ambient temp 경로를 다시 조합하지 않고 이 owner가 revalidation 뒤 내주는 exact `current-manifest`,
-  `predecessor-manifest`, `predecessor-assets`, `dmg`, `current-assets`
-  absent-child pathname만 받는다. child pathname은 권위 자체가 아니라 각 child owner가 descriptor-relative exclusive 생성할 입력이며,
+  하위 단계는 이 owner가 재검증해 내주는 closed typed child만 받는다. pre-publish namespace는 `current-manifest`,
+  `predecessor-manifest`, `predecessor-assets`, `dmg`, `current-assets`이고 baseline namespace는 `default-false`, `signed-app-quit`,
+  `default-false.json`, `signed-app-quit.json`, `baseline-evidence.json`이다. child pathname은 각 child owner가 exclusive 생성할 입력이며,
   workspace owner는 생성 직후 root descriptor에서 identity를 먼저 봉인하고 pathname을 재검증한다. pathname stat 실패도 봉인된
   descriptor와 이름의 exact identity가 다시 일치할 때만 생성 root를 제거한다. child가 모두 정리된 뒤 exact empty root만 제거하고
   parent를 sync한다. copied/pre-owned owner, relative/root·leaf
   alias, parent/root replacement, unexpected entry와 cleanup 실패는 fail-close하며 cleanup 실패 시 같은 owner가 retry 권위를 보존한다.
-  focused gate `test-session-host-release-adapter-pre-publish-workspace`는 실제 macOS filesystem에서 root mode/identity, 다섯 canonical child,
+  focused gate `test-session-host-release-adapter-pre-publish-workspace`는 실제 macOS filesystem에서 root mode/identity, pre-publish 다섯 canonical child,
   copy·replacement·occupied-child 거부, 성공 cleanup과 retry를 Debug·ReleaseFast로 검증한다. 이 substrate만으로 전체 phase orchestration이나
   child owner cleanup, workflow wiring과 frozen U5 E2E가 완료됐다고 주장하지 않는다.
 
@@ -1972,12 +1972,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   실패는 attempted child를 역순 정리하고 cleanup failure와 retry owner를 보존한다. focused gate
   `test-session-host-release-adapter-candidate-baseline-phase`는 순서·deadline·fail-index·cleanup을 Debug·ReleaseFast에서 검증한다.
 
-  `release_adapter_candidate_baseline_product.zig`는 final-address execution과 fixed candidate/work 경로를 소유한다. 후속
-  `release_adapter_candidate_baseline_app.zig`는 `CandidateProduct` 재검증 view에서 frozen executable SHA와 designated-requirement
-  digest를 유도하고, 보존된 `Maru.app`의 main executable과 bundled CLI를 no-follow regular executable로 pin한다. main bytes는 frozen
-  SHA와 같고 두 파일은 distinct inode·link count 1이어야 한다. observer가 얻은 두 strict designated-requirement digest도 product와
-  같아야 한다. pin 전후 product/path identity가 고정돼야 authority를 반환하며 copied/pre-owned/alias, symlink·hardlink, digest/signer
-  불일치와 교체는 child 실행 전에 실패한다. 앱 실행·leaf/evidence 게시·사용자 config/session-host registry 접근은 후속이다.
+  `release_adapter_candidate_baseline_product.zig`는 execution/경로를, `release_adapter_candidate_baseline_app.zig`는 product의 frozen
+  SHA·signer에 보존 app main/CLI의 distinct no-follow inode를 결속한다. drift·alias·digest/signer 불일치는 child 전에 실패한다.
+  `release_adapter_candidate_baseline_workspace.zig`는 기존 descriptor-owned workspace SSOT로 caller의 absolute absent root를 0700으로
+  만들고 `default-false`·`signed-app-quit` HOME, 두 leaf와 aggregate의 고정 경로를 봉인한다. ambient HOME/config 또는
+  `/tmp/maru-<uid>`를 유도하지 않으며 held root identity가 같고 다섯 child가 모두 사라진 뒤에만 empty root를 제거한다. copied owner,
+  root 교체·잔여물·sync 실패는 외부 삭제 없이 retry authority를 보존한다. 실제 child 실행·evidence 게시는 후속이다.
 
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한

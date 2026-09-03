@@ -1977,7 +1977,15 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `release_adapter_candidate_baseline_workspace.zig`는 기존 descriptor-owned workspace SSOT로 caller의 absolute absent root를 0700으로
   만들고 `default-false`·`signed-app-quit` HOME, 두 leaf와 aggregate의 고정 경로를 봉인한다. ambient HOME/config 또는
   `/tmp/maru-<uid>`를 유도하지 않으며 held root identity가 같고 다섯 child가 모두 사라진 뒤에만 empty root를 제거한다. copied owner,
-  root 교체·잔여물·sync 실패는 외부 삭제 없이 retry authority를 보존한다. 실제 child 실행·evidence 게시는 후속이다.
+  root 교체·잔여물·sync 실패는 외부 삭제 없이 retry authority를 보존한다.
+
+  baseline 제품 child build entrypoint는 이 owner가 봉인한 두 HOME과 두 leaf absolute pathname을 각각 필수 option으로 받는다.
+  `build.zig`가 `zig-out` HOME·leaf 또는 `/tmp/maru-product-test-*` registry를 다시 유도하지 않고, 두 HOME은 absent directory를
+  `0700`으로 배타 생성하며 leaf는 시작 시 absent여야 한다. 하위 AppKit 하네스도 caller pathname의 stale file을 unlink하지 않는다.
+  따라서 direct 개발 실행도 명시한 격리 workspace 밖을 삭제하지 않으며, production runner는 child 종료 뒤 leaf를 보존하고 HOME의
+  config·registry·진단 residue만 자기 child cleanup으로 회수한 다음 workspace owner가 root를 제거한다. 이 entrypoint 경계는
+  workspace owner와 child 실행을 연결할 준비일 뿐 candidate revalidation 순서·aggregate publication·전체 production runner를
+  완료했다고 주장하지 않는다.
 
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한

@@ -916,6 +916,77 @@ fn manifestLoadFailure(io: DiscoveredConnectIo, err: anyerror) FailureReason {
     };
 }
 
+/// 단조 밀리초. 측정 전용 — 벽시계(`REALTIME`)를 쓰면 시계가 조정될 때 음수 구간이 나온다.
+fn monotonicMsForMeasure() ?u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return null;
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+test "실측: 콜드런치가 얼마나 막는가 (문서의 110 ms 재확인)" {
+    // **문서에 실측이 있어도 다시 잰다**(사용자 지시, 2026-09-03). 같은 문서 안에서 두 서술이 갈렸다 —
+    // §상태는 「콜드런치 중앙값 110 ms · 성능은 전환의 블로커가 아니다」이고, `app_session.zig` 의 주석은
+    // 「최초 cold launch 에서 **최대 수 초 블로킹**」이다. 기본값 전환이 이 값에 달려 있어 직접 잰다.
+    //
+    // 재는 것: 제품이 부르는 그 함수(`connectOrLaunch`)가 **host 를 새로 띄워** 붙기까지의 벽시계 시간.
+    // 150 회 × 20 ms = 3 초는 **상한**이지 비용이 아니다 — 소켓이 뜨는 즉시 붙는다는 것이 가설이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // **명시적으로 요청할 때만 돈다.** 재는 대상이 `zig-out/bin/maru` 인데 그 빌드 모드를 test 가 못
+    // 고른다 — CI 의 `zig build test` 는 Debug 를 만들고, Debug host 는 **1241 ms**(실측)라 제품
+    // 조건(ReleaseFast **202 ms**)과 6 배 다르다. 가두지 않으면 이 test 가 CI 에서 「느리다」고
+    // 거짓 신고한다.
+    //
+    //     zig build -Doptimize=ReleaseFast && MARU_MEASURE_COLD_LAUNCH=1 zig build test-session-host
+    if (std.c.getenv("MARU_MEASURE_COLD_LAUNCH") == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // 제품 바이너리 경로. 없으면 잴 대상이 없다.
+    const exe = "zig-out/bin/maru";
+    std.Io.Dir.cwd().access(std.testing.io, exe, .{}) catch return error.SkipZigTest;
+
+    const samples = 5;
+    var ms: [samples]u64 = undefined;
+    for (&ms, 0..) |*slot, i| {
+        // 이 파일의 다른 test 들과 같은 관례로 만든다(`c.mkdir` — 1620·1650 행).
+        var base_buf: [96]u8 = undefined;
+        const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-coldm-{d}-{d}", .{ std.c.getpid(), i });
+        _ = c.mkdir(base.ptr, 0o700);
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+
+        // `std.time.Timer` 는 Zig 0.16 에서 이 자리에 없다. 저장소가 쓰는 단조 시계를 그대로 쓴다
+        // (`app_process_incident_owner.zig` 의 `monotonicMs` 와 같은 모양).
+        const started = monotonicMsForMeasure() orelse return error.SkipZigTest;
+        const result = connectOrLaunchDetailed(allocator, exe, base, .{});
+        const ended = monotonicMsForMeasure() orelse return error.SkipZigTest;
+        slot.* = ended -| started;
+        switch (result.outcome) {
+            .connected => |connected_client| {
+                var client = connected_client; // `c` 는 이 파일의 모듈 별칭이라 가린다
+                client.deinit();
+            },
+            // 못 붙었으면 그 표본은 **버리지 않고 실패로 남긴다** — 「안 붙는다」를 「빠르다」로 읽으면
+            // 이 측정이 거짓말을 한다.
+            .failed => return error.SkipZigTest,
+        }
+    }
+
+    std.mem.sort(u64, &ms, {}, std.sort.asc(u64));
+    std.debug.print(
+        "\n[콜드런치 실측] 표본 {d} · 중앙값 {d} ms · 최소 {d} · 최대 {d} ms\n",
+        .{ samples, ms[samples / 2], ms[0], ms[samples - 1] },
+    );
+
+    // **상한만 못 박는다.** 정확한 수는 기계·부하마다 다르므로 단언하지 않고, 「수 초」가 아니라는 것만
+    // 본다 — 그것이 기본값 전환에서 답해야 할 질문의 전부다.
+    //
+    // 실측(2026-09-03, ReleaseFast): 중앙값 **202 ms**(200~604). 문서 §상태의 104~110 ms 보다 2 배
+    // 높은데, 그쪽은 「페이지 캐시가 더운 상태」 조건이었고 이 기계는 종일 빌드를 돌린 뒤였다. 자릿수가
+    // 같으므로 「블로커가 아니다」라는 판정은 그대로다. ⚠️ `app_session.zig` 의 「최대 수 초 블로킹」은
+    // 과장이다 — 최악이 604 ms 였다. 그 상한(150 × 20 ms = 3 s)은 **host 가 아예 안 뜨는 실패 경로**에서만
+    // 나오고, 그 경로는 `host_connect_failed` 재시도가 따로 다룬다.
+    try std.testing.expect(ms[samples / 2] < 1000);
+}
+
 test "host_connect manifest load failure after phase boundary is deadline first" {
     const Clock = struct {
         now_ns: i128 = 0,

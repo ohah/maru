@@ -12213,6 +12213,20 @@ pub fn build(b: *std.Build) void {
         );
         default_false_evidence_step.dependOn(&run_default_false_evidence_tests.step);
 
+        const signed_candidate_app_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_signed_candidate_app_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_signed_candidate_app_boundary_tests = b.addRunArtifact(signed_candidate_app_boundary_tests);
+        run_signed_candidate_app_boundary_tests.addArg("--maru-expect-tests=1");
+        run_signed_candidate_app_boundary_tests.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_signed_candidate_app_boundary_tests.step);
+        signed_app_quit_evidence_harness_step.dependOn(&run_signed_candidate_app_boundary_tests.step);
+        default_false_evidence_step.dependOn(&run_signed_candidate_app_boundary_tests.step);
+
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));
         run_signed_upgrade_e2e.has_side_effects = true;

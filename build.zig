@@ -9723,6 +9723,22 @@ pub fn build(b: *std.Build) void {
         session_host_2c3d_c3_3b4_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
 
+        // S11-6: 「남이 좁혔나」의 판정 자리를 센다. 값은 판정자가, **자리**는 여기가 지킨다 —
+        // 게시 경로 한쪽에만 적어 제품에서 표시가 통째로 안 뜬 적이 있다.
+        const s11_6_narrowed_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_s11_6_narrowed_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"S11-6 narrowed boundary"},
+        });
+        const run_s11_6_narrowed_boundary_tests = b.addRunArtifact(s11_6_narrowed_boundary_tests);
+        run_s11_6_narrowed_boundary_tests.addArg("--maru-expect-tests=" ++ "1");
+        run_s11_6_narrowed_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b4_step.dependOn(&run_s11_6_narrowed_boundary_tests.step);
+        boundary_step.dependOn(&run_s11_6_narrowed_boundary_tests.step);
+
         const event_c3_3b6_screen_stream_module = b.createModule(.{
             .root_source_file = b.path("src/session/screen_stream.zig"),
             .target = target,

@@ -238,7 +238,9 @@ test "bounded process streams one held regular fd as exact child stdin" {
     );
     try std.testing.expectError(
         error.InvalidInputFd,
-        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, tmp.dir.fd, &output, std.time.ns_per_s),
+        // ⚠️ **디렉터리 fd 다** — 일반 파일이 아니라는 것이 이 단언의 요지다.
+        // `std.Io.Dir` 의 필드는 `.fd` 가 아니라 `.handle` 이다(`Handle = std.posix.fd_t`).
+        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, tmp.dir.handle, &output, std.time.ns_per_s),
     );
 }
 

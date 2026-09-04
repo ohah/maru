@@ -387,6 +387,30 @@ pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
 pub const max_argv = 34; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 18 + kind별 최대 10 + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
+///
+/// ## 무엇을 막고 무엇을 막지 않는가 — 선 긋기 (실측 2026-09-04)
+///
+/// **막는 것: 없어도 «답이 같은» 것.** 훅·pager·외부 diff·자격증명 helper·`ext::` 원격·`fsmonitor` 는
+/// 전부 편의이거나 최적화다. 꺼도 git 은 같은 답을 낸다(느려질 뿐이다). 그러니 실행 벡터를 여는
+/// 대가가 순손해다.
+///
+/// **막지 않는 것: 없으면 «답이 틀리는» 것.** `filter.<이름>.clean`·`.smudge`·`.process` 가 그렇다.
+/// 이것도 저장소 config 가 시킨 프로그램을 실행하지만 — 그리고 크기가 같은 변경이면 `status` 마다
+/// 돈다 — **끄면 안 된다.** 실측:
+///
+/// | | 필터 그대로 | 필터를 끄면 |
+/// |---|---|---|
+/// | `status`(stat 캐시 무효) | 변경 없음(옳다) | **`1 .M … f.dat` — 가짜 수정** |
+/// | `add` 뒤 index 내용 | `POINTER`(옳다) | **원본 그대로 — 저장소 오염** |
+///
+/// Git LFS 가 정확히 이 구조다. 끄면 추적 파일 전부가 수정된 것처럼 보이고, 그 상태로 스테이지하면
+/// 포인터 대신 **원본이 히스토리에 들어간다.** 읽기는 거짓말하고 쓰기는 오염시킨다.
+///
+/// `--attr-source=<빈 트리>` 도 같은 결과다(속성이 없으면 필터도 안 걸린다) — **더 싼 우회가 아니라
+/// 같은 오답이다.**
+///
+/// 그래서 필터는 **git 의 설계상 실행이 곧 정답의 조건**이고, 다른 git 클라이언트도 전부 그렇게 한다.
+/// 이 자리에서 닫을 수 있는 문이 아니다.
 const config_overrides = [_][]const u8{
     // ⚠️ **읽기가 index 를 다시 쓰지 않게 한다**(적대적 검증 2026-09-03 2 회차 — 실측).
     //
@@ -930,6 +954,17 @@ test "모든 명령이 외부 프로세스 실행 경로를 닫는다" {
         // 물어볼 프로그램」이라 **`git status` 마다** 돈다 — 도크가 열려 있는 내내 지나는 문인데 이
         // 목록에만 빠져 있었다.
         try testing.expect(has(argv, "core.fsmonitor="));
+        // ⚠️ **`filter.*` 는 여기 오면 «안» 된다**(실측 2026-09-04 — 막는 기계를 짓기 직전에 잡았다).
+        // 이것도 저장소 config 가 시킨 프로그램을 실행하지만, 끄면 git 이 **틀린 답**을 낸다:
+        // stat 캐시가 무효인 상태에서 `status` 가 가짜 「수정됨」을 내고, 그 상태로 `add` 하면 index 에
+        // 포인터 대신 **원본**이 들어간다(Git LFS 가 정확히 그 구조다 — 저장소 오염이다).
+        // `--attr-source=<빈 트리>` 도 같은 오답이다. 자세한 근거는 `config_overrides` 의 주석에 있다.
+        for (argv) |a| {
+            if (std.mem.startsWith(u8, a, "filter.")) {
+                std.debug.print("필터를 끄면 답이 틀린다 — 이 덮어쓰기를 넣으면 안 된다: {s}\n", .{a});
+                return error.TestUnexpectedResult;
+            }
+        }
         try testing.expect(has(argv, "diff.external="));
         try testing.expect(has(argv, "credential.helper="));
         try testing.expect(has(argv, "protocol.ext.allow=never"));

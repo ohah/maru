@@ -89,12 +89,23 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, poll_body, ".channel_closed) return"));
 
     // ── ⑶ 한도 초과를 **말한다** — 조용히 일부만 감시하지 않는다(§RW5) ──────────────────────
-    try std.testing.expect(std.mem.indexOf(u8, src, "exit_watch_limit") != null);
-    // ⚠️ **비교까지 본다**(적대적 검증 2026-09-04 12 회차). 이름만 세면 «죽은» 보고를 못 본다 —
-    // `collect` 가 `max_dirs` 에서 멈추므로 `> max_dirs` 는 영원히 거짓이고, 그때 상한을 넘는 저장소가
-    // 조용히 반쪽만 감시된다. 실제로 그 상태로 머지됐고 이 판정자는 초록이었다.
-    try std.testing.expect(std.mem.indexOf(u8, src, "dirs.items.len >= max_dirs) return exitWith(exit_watch_limit)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "dirs.items.len > max_dirs)") == null);
+    // ⚠️ **한도는 이제 「포기」가 아니라 「격하」다**(RW7d). 폴링이 생겼으니 잃는 것은 지연뿐이라
+    // 포기할 이유가 없다 — 그래서 **판 2 부터 `exitWith(exit_watch_limit)` 은 어디에도 없어야 한다.**
+    // (상수 자체는 남는다: 원격에 판 1 바이너리가 돌면 그쪽은 여전히 그 코드로 나간다.)
+    try std.testing.expect(std.mem.indexOf(u8, code, "exitWith(exit_watch_limit)") == null);
+    // 「닿았다」로 묻는 자리는 그대로다 — `collect` 가 `max_dirs` 에서 멈추므로 `>` 는 영원히 거짓이다
+    // (12 회차에 잡은 죽은 코드). 이제 그 자리는 폴링으로 간다.
+    try std.testing.expect(std.mem.indexOf(u8, code, "dirs.items.len >= max_dirs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "dirs.items.len > max_dirs)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "const over_limit = dirs.items.len >= max_dirs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "if (over_limit)") != null);
+    // 무장 중 한도는 **나가지 않고 돌려준다** — 호출자가 폴링으로 내려간다.
+    const linux_body_for_limit = linux_body;
+    const arm_body = try bodyOf(src, "fn armLinux(", "\n}\n", 2048);
+    try std.testing.expect(std.mem.indexOf(u8, arm_body, "return error.WatchLimit") != null);
+    // **세 자리 모두** 내려가야 한다: 최초 무장 실패 · 재무장 중 한도 초과 · 재무장 실패. 하나만
+    // 세면 나머지에서 조용히 나가도 초록이다.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, linux_body_for_limit, "return watchPoll(gpa, root, git_prefix)"));
     // ⚠️ **수집 실패를 삼키지 않는다**(15 회차). `catch {}` 면 OOM 으로 도중에 멈춘 절반을 「전부」로
     // 알고 무장한다 — 조용한 반쪽 감시다.
     try std.testing.expect(std.mem.indexOf(u8, code, "collect(io, init.gpa, root, &dirs) catch {}") == null);
@@ -108,7 +119,6 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, linux_body, "armLinux(gpa, ifd, dirs.items)") != null);
     // 무장은 **처음과 재무장 두 번** 일어난다 — 하나만 있으면 둘 중 한 경로가 빠진 것이다.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, linux_body, "armLinux(gpa, ifd, dirs.items)"));
-    try std.testing.expect(std.mem.indexOf(u8, linux_body, "exit_watch_limit") != null);
 
     // ── ⑷ 이벤트를 **해석하지 않는다**(계약 §2 — 파싱 계약을 두 벌로 만들지 않는다) ──────────
     //
@@ -127,11 +137,24 @@ test "감시자와 설치 계약이 같은 «판»을 말한다" {
     const install = try read(allocator, "src/session/remote_watch_install.zig", 256 * 1024);
     defer allocator.free(install);
 
+    // ⚠️ **판 번호를 여기 박지 않는다**(RW7d 에서 2 로 올리며 배웠다). 박아 두면 판을 올릴 때마다
+    // 판정자를 고쳐야 하고, 그 손질이 곧 「무엇을 확인하는지」를 흐린다. **뽑아서 대조한다.**
+    const marker = "maru-remote-watch ";
+    const at = std.mem.indexOf(u8, watcher, "version_line = \"" ++ marker) orelse return error.TestUnexpectedResult;
+    const digits_at = at + ("version_line = \"" ++ marker).len;
+    var end = digits_at;
+    while (end < watcher.len and watcher[end] >= '0' and watcher[end] <= '9') end += 1;
+    const version = watcher[digits_at..end];
+    try std.testing.expect(version.len > 0);
+
     // 감시자 쪽은 개행이 붙은 리터럴, 설치 쪽은 붙지 않은 리터럴이다 — 같은 값을 말하는지 센다.
-    try std.testing.expect(std.mem.indexOf(u8, watcher, "\"maru-remote-watch 1\\n\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, install, "\"maru-remote-watch 1\"") != null);
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, watcher, try std.fmt.bufPrint(&buf, "\"{s}{s}\\n\"", .{ marker, version })) != null);
+    var buf2: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, install, try std.fmt.bufPrint(&buf2, "\"{s}{s}\"", .{ marker, version })) != null);
     // 파일 이름에도 같은 판이 박혀 있어야 한다 — 판을 올리면서 이름을 안 올리면 옛 바이너리를 덮는다.
-    try std.testing.expect(std.mem.indexOf(u8, install, "maru-remote-watch-1\"") != null);
+    var buf3: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, install, try std.fmt.bufPrint(&buf3, "maru-remote-watch-{s}\"", .{version})) != null);
 }
 
 test "빌드가 만드는 변종과 앱이 찾는 변종이 같다" {

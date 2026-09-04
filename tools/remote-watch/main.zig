@@ -24,14 +24,19 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// (계획 §RW5) — 반쪽만 감시하면서 최신인 척하는 것이 최악이라 **조용히 계속하지 않는다.**
 /// `--version` 이 내는 줄. 설치 쪽이 **이 문자열로** 「우리 것이고 이 판이다」를 확인한다 —
 /// 판이 바뀌면 여기를 올리고, 그러면 옛 판이 깔린 원격은 다음 설치에서 갈린다.
-pub const version_line = "maru-remote-watch 1\n";
+pub const version_line = "maru-remote-watch 2\n";
 
+/// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
+/// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
+/// 「영구 실패」로 읽어야 한다(판이 갈리면 다음 설치에서 바뀐다).
 pub const exit_watch_limit: u8 = 2;
 /// 감시 API 자체를 못 열었다(플랫폼 미지원 등). 호출자는 설치를 실패로 보고 현행 동작을 유지한다.
 pub const exit_unsupported: u8 = 3;
 
-/// 한 번에 등록할 디렉터리 상한. 넘으면 `exit_watch_limit` 으로 나간다 — 넘는 순간 이 프로그램이
-/// 아는 것은 「전부는 못 본다」뿐이고, 그 사실을 **말해야** 호출자가 폴링으로 갈아탄다.
+/// 한 번에 등록할 디렉터리 상한. **넘으면 폴링으로 내려간다**(RW7d) — 넘는 순간 이 프로그램이 아는
+/// 것은 「전부는 못 본다」뿐이고, 반쪽을 최신인 척 보여 주는 것이 최악이기 때문이다(계획 §6).
+/// 예전에는 여기서 `exit_watch_limit` 으로 나갔고 앱이 포기했다(RW5). 이제 폴링이 있으니 **잃는 것은
+/// 지연뿐**이라 포기할 이유가 없다.
 const max_dirs: usize = 65_536;
 
 pub fn main(init: std.process.Init) !void {
@@ -70,10 +75,14 @@ pub fn main(init: std.process.Init) !void {
     // `collect` 는 `>= max_dirs` 에서 «멈추므로» 이 값은 `max_dirs` 를 절대 넘지 않는다. 앞 판은 `>` 로
     // 물어서 이 보고가 **죽은 코드**였고, 그래서 상한을 넘는 저장소가 §6 이 「최악」이라 못 박은 상태 —
     // **조용히 반쪽만 감시** — 로 들어갔다. 판정자는 문자열만 봐서 그것을 못 봤다.
-    if (dirs.items.len >= max_dirs) return exitWith(exit_watch_limit);
+    // **한도를 넘으면 폴링이다**(RW7d) — 나가지 않는다. 폴링도 못 하면 그때 말한다.
+    const over_limit = dirs.items.len >= max_dirs;
 
     switch (builtin.os.tag) {
-        .linux => try watchLinux(io, init.gpa, root, &dirs),
+        .linux => if (over_limit)
+            try watchPoll(init.gpa, root, git_prefix.items)
+        else
+            try watchLinux(io, init.gpa, root, git_prefix.items, &dirs),
         // **폴링이다**(RW7c). kqueue 는 파일 «편집» 을 안 알리고 디렉터리마다 fd 를 써서 한도에도
         // 걸린다(§8.6 ①). 그래서 이 갈래는 저쪽에서 git 을 돌려 다이제스트를 비교한다.
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly => try watchPoll(init.gpa, root, git_prefix.items),
@@ -134,7 +143,7 @@ fn announce() bool {
 ///
 /// `git checkout` 이 디렉터리를 만드는 브랜치로 옮기거나 새 모듈을 만들면 그 뒤 편집이 통째로 안
 /// 보인다 — §6 이 「최악」이라 못 박은 조용한 반쪽 감시다.
-fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dirs: *std.ArrayList([]u8)) !void {
+fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8, dirs: *std.ArrayList([]u8)) !void {
     const linux = std.os.linux;
     const ifd: i32 = @intCast(linux.inotify_init1(0));
     if (ifd < 0) return exitWith(exit_unsupported);
@@ -142,7 +151,15 @@ fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dirs: *std.A
         .{ .fd = ifd, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널이 끊기면 여기서 걸린다
     };
-    try armLinux(gpa, ifd, dirs.items);
+    // ⚠️ **한도에 걸리면 폴링으로 내려간다**(RW7d). `max_user_watches` 소진은 저 호스트의 형편이지
+    // 「못 한다」가 아니다 — 폴링은 같은 것을 보고 느릴 뿐이다(계획 §11.7).
+    armLinux(gpa, ifd, dirs.items) catch |err| switch (err) {
+        error.WatchLimit => {
+            _ = std.c.close(ifd);
+            return watchPoll(gpa, root, git_prefix);
+        },
+        else => return err,
+    };
     var buf: [8192]u8 = undefined;
     while (true) {
         _ = std.posix.poll(&fds, -1) catch return;
@@ -159,17 +176,28 @@ fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dirs: *std.A
             dirs.clearRetainingCapacity();
             collect(io, gpa, root, dirs) catch return exitWith(exit_unsupported);
             if (dirs.items.len == 0) return exitWith(exit_unsupported);
-            if (dirs.items.len >= max_dirs) return exitWith(exit_watch_limit);
+            if (dirs.items.len >= max_dirs) {
+                _ = std.c.close(ifd);
+                return watchPoll(gpa, root, git_prefix); // 재무장 중에 넘었다 — 같은 이유로 폴링이다
+            }
             // 이미 걸린 경로에 다시 걸면 **같은 wd 를 돌려준다** — 그래서 전부 다시 거는 것이 안전하고,
             // 어느 것이 새것인지 알 필요가 없다(그걸 알려면 wd→경로 표를 지어야 한다).
-            try armLinux(gpa, ifd, dirs.items);
+            armLinux(gpa, ifd, dirs.items) catch |err| switch (err) {
+                error.WatchLimit => {
+                    _ = std.c.close(ifd);
+                    return watchPoll(gpa, root, git_prefix);
+                },
+                else => return err,
+            };
         }
         if (!announce()) return;
     }
 }
 
 /// 목록의 디렉터리마다 watch 를 건다. **멱등이다** — 같은 경로면 같은 wd 가 온다.
-fn armLinux(gpa: std.mem.Allocator, ifd: i32, dirs: []const []u8) !void {
+///
+/// 한도(`max_user_watches` 소진)는 **나가지 않고 돌려준다** — 호출자가 폴링으로 내려간다(RW7d).
+fn armLinux(gpa: std.mem.Allocator, ifd: i32, dirs: []const []u8) error{ OutOfMemory, WatchLimit }!void {
     const linux = std.os.linux;
     const mask: u32 = linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE |
         linux.IN.MOVED_TO | linux.IN.MOVED_FROM | linux.IN.ATTRIB;
@@ -177,8 +205,8 @@ fn armLinux(gpa: std.mem.Allocator, ifd: i32, dirs: []const []u8) !void {
         const z = try gpa.dupeZ(u8, d);
         defer gpa.free(z);
         const wd: isize = @bitCast(linux.inotify_add_watch(ifd, z, mask));
-        // ENOSPC = `max_user_watches` 소진. **일부만 보고 계속하지 않는다**(§RW5).
-        if (wd < 0) return exitWith(exit_watch_limit);
+        // ENOSPC = `max_user_watches` 소진. **일부만 보고 계속하지 않는다** — 폴링으로 내려간다.
+        if (wd < 0) return error.WatchLimit;
     }
 }
 

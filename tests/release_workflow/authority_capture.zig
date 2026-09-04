@@ -120,6 +120,33 @@ test "릴리스 워크플로: 붙든 `gh` 를 실제로 검증하고 그 결과�
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(block, "GITHUB_ENV"));
 }
 
+test "릴리스 워크플로: mise 뒤 baseline 앞에서 Zig path size digest version을 고정한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      - name: Capture trusted Zig toolchain after mise"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "        id: trusted-zig"));
+    const mise_line = lineOf(text, "uses: jdx/mise-action@").?;
+    const capture_line = lineOf(text, "      - name: Capture trusted Zig toolchain after mise").?;
+    const build_line = lineOf(text, "      - name: Build signed + notarized universal dmg").?;
+    try std.testing.expect(mise_line < capture_line);
+    try std.testing.expect(capture_line < build_line);
+
+    const block = blockUntil(text, "      - name: Capture trusted Zig toolchain after mise", "      - name: Verify release version SSOT") orelse return error.CaptureBlockMissing;
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "command -v zig"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/realpath"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "version=$(\"$canonical\" version)"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "test \"$version\" = '0.16.0'"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/stat -f '%z'"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/shasum -a 256"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "path=%s\\n"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "size=%s\\n"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "sha256=%s\\n"));
+    try std.testing.expectEqual(@as(usize, 3), countMatchingLines(block, "GITHUB_OUTPUT"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(block, "GITHUB_ENV"));
+}
+
 /// 한 줄 안에 `parts` 가 **그 순서대로** 모두 나오는 줄의 **수**. 원본의 `grep -c <순서 정규식>` 이다.
 fn countOrderedOnOneLine(text: []const u8, parts: []const []const u8) usize {
     var n: usize = 0;

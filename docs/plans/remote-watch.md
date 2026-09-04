@@ -554,19 +554,36 @@ git worktree list --porcelain
 클라이언트는 이미 `git_command.config_overrides` 로 그것을 막고 있는데, **그 목록에 구멍이 있다**
 (실측 2026-09-04, git 2.50.1):
 
-| 설정 | 언제 실행되나 | 지금 막히나 |
+| 설정 | 언제 실행되나 | 상태 |
 |---|---|---|
-| `core.hooksPath` | 훅 | ✅ |
-| `diff.external` · `core.pager` · `credential.helper` · `protocol.ext.allow` | 각자 | ✅ |
-| **`core.fsmonitor`** | **`status` 중에** | ❌ **안 막힌다** |
-| **`filter.<name>.clean` · `.smudge`** | **`diff` · `diff --numstat` 중에** | ❌ **안 막힌다** |
+| `core.hooksPath` · `diff.external` · `core.pager` · `credential.helper` · `protocol.ext.allow` | 각자 | ✅ 이미 막혀 있었다 |
+| `diff.<name>.textconv` | `diff` | ✅ 이미 막혀 있었다 — `build` 의 두 `diff` 가 모두 `--no-textconv` 를 건다 |
+| `core.fsmonitor` | **`status` 마다** | ✅ **이번에 막았다**(`-c core.fsmonitor=`) |
+| **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | ❌ **아직 열려 있다** |
 
-`-c core.fsmonitor=` 를 걸면 실행되지 않는 것까지 확인했다. **RW7 은 `core.fsmonitor` 를 막기 전에는
-시작할 수 없다** — 감시자는 `status` 만 돌리므로 그 하나가 이 트랙의 전제다.
+⚠️ **`filter` 는 `diff` 만의 문제가 아니다**(실측). 크기가 **같은** 변경이면 `git status` 가 내용을
+비교해야 해서 `clean` 필터를 **매번** 돌린다 — 크기가 다르면 안 돈다. 도크는 열려 있는 내내 `status`
+를 돌리므로 이것이 가장 자주 지나는 문이다.
 
-`filter.*` 는 `diff` 쪽이라 RW7 의 전제는 아니지만 **지금 클라이언트에 열려 있는 구멍**이다. 이름을
-미리 알 수 없어(`filter.<임의이름>.clean`) `-c` 하나로는 못 막는다 — `git config --list` 로 실제 키를
-읽어 각각 비우는 모양이 필요하다. **별도 작업으로 뗀다.**
+지금 목록으로 실측한 상태:
+
+| 무엇 | 실행되는 프로그램 |
+|---|---|
+| 지금 목록 + `status`(크기 같은 변경) | **`filter.clean`** |
+| 지금 목록 + `diff --no-ext-diff --no-textconv --numstat` | **`filter.clean`** |
+| 거기에 `-c filter.<이름>.clean= -c ….smudge=` 까지 | 없음 |
+
+**막는 법을 셋 비교했다:**
+
+| 방법 | 되나 | 대가 |
+|---|---|---|
+| `--attr-source=<빈 트리>` | ✅ 한 플래그로 전부 | **git 2.40+** — 우리 하한은 2.15.4(§8.2) |
+| `diff --no-textconv` | ❌ textconv 만, `clean` 은 그대로 | — |
+| **`git config --get-regexp` 로 키를 열거해 각각 `-c <key>=`** | ✅ | git 판을 안 가린다. **읽기 한 번이 더 든다**(저장소마다 캐시) |
+
+**열거가 답이다.** 다만 원격 저장소면 그 열거도 **저쪽에서** 돌아야 하고, 키 수가 `max_argv` 를 넘으면
+어떻게 할지(잘라 내면 조용한 구멍이므로 **거절해야 한다**)를 정해야 한다. `buildRemote` 가 `build` 의
+토큰을 그대로 원격 명령줄로 옮기므로 **주입 지점은 `build` 하나**다. **별도 작업으로 뗀다.**
 
 ### 11.6 ⚠️ PATH — 감시자는 지금 처방을 안 지난다
 

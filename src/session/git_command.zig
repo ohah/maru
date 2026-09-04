@@ -384,7 +384,7 @@ pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 32; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 14 + kind별 최대 10 + 여유
+pub const max_argv = 34; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 18 + kind별 최대 10 + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 const config_overrides = [_][]const u8{
@@ -413,6 +413,11 @@ const config_overrides = [_][]const u8{
     "--no-optional-locks",
     "-c", "core.pager=cat", //            pager 프로세스 실행·페이지네이션 금지
     "-c", "core.hooksPath=/dev/null", //  훅 실행 금지(저장소가 심어 둔 스크립트)
+    // ⚠️ **`status` 가 저장소 config 가 시킨 프로그램을 실행한다**(실측 2026-09-04, git 2.50.1).
+    // `core.fsmonitor` 는 「파일이 바뀌었는지 물어볼 프로그램」이라 **`git status` 마다** 돌아간다 —
+    // 훅과 같은 부류인데 이 목록에만 빠져 있었다. 대조군으로 이 한 줄을 넣으면 실행되지 않는다.
+    // 우리는 도크가 열려 있는 내내 `status` 를 돌리므로 이 자리가 가장 자주 지나는 문이다.
+    "-c", "core.fsmonitor=", //           status 마다 도는 「감시 프로그램」 실행 금지
     "-c", "diff.external=", //            external diff 프로그램 금지
     "-c", "credential.helper=", //        자격증명 helper 프로세스 금지
     "-c", "protocol.ext.allow=never", //  ext:: 원격 = 임의 명령 실행 벡터
@@ -921,6 +926,10 @@ test "모든 명령이 외부 프로세스 실행 경로를 닫는다" {
         const argv = build(kind, "/usr/bin/git", "/repo", null, &buf);
         try testing.expect(has(argv, "core.pager=cat"));
         try testing.expect(has(argv, "core.hooksPath=/dev/null"));
+        // ⚠️ **`core.fsmonitor` 도 훅과 같은 부류다**(실측 2026-09-04 · git 2.50.1). 「파일이 바뀌었는지
+        // 물어볼 프로그램」이라 **`git status` 마다** 돈다 — 도크가 열려 있는 내내 지나는 문인데 이
+        // 목록에만 빠져 있었다.
+        try testing.expect(has(argv, "core.fsmonitor="));
         try testing.expect(has(argv, "diff.external="));
         try testing.expect(has(argv, "credential.helper="));
         try testing.expect(has(argv, "protocol.ext.allow=never"));

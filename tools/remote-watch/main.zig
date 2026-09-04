@@ -207,10 +207,22 @@ const poll_tick_ms: c_int = 250;
 
 /// 다이제스트에 넣을 읽기들. **도크가 읽는 것과 같은 범위여야 한다**(§11.3) — `status` 하나만 보면
 /// 다른 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다. 셋을 합쳐도 0.04 s 다(실측).
+/// ⚠️ **`status` 만으로는 「틀린 화면」이 나온다** — 계획 §3 이 이미 재서 적어 둔 것이고, RW7 의 첫
+/// 판이 그 경고를 그대로 밟았다(적대적 검증 2026-09-04). 실측: 이미 수정된 파일을 **더** 고치면
+/// `status` 바이트는 그대로인데 `diff --numstat` 은 `1 1` → `3 3` 으로 바뀐다 — 그 숫자가 도크 행마다
+/// 보이는 `+N −M` 이다. 그래서 다이제스트는 **화면의 숫자를 만드는 읽기까지** 봐야 한다.
+///
+/// 첫 줄(`status`)은 **필수**다. 나머지는 실패해도 「실패했다」를 해시에 넣고 계속한다 — `origin` 이
+/// 없는 저장소에서 `rev-list` 가 실패한다고 감시 전체가 멀면 안 된다.
 const digest_reads = [_][]const []const u8{
     &.{ "status", "--porcelain=v2", "--branch", "--untracked-files=all" },
     &.{ "for-each-ref", "--format=%(refname) %(objectname)" },
     &.{ "worktree", "list", "--porcelain" },
+    // 행별 `+N −M` — 작업트리와 스테이지 양쪽(§3 이 잰 구멍이 여기다)
+    &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv" },
+    &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv", "--cached" },
+    // 머리 줄 `↑↓` — `branch.ab`(upstream 기준)와 **다른 기준**이라 status 로는 못 본다(§3 실측)
+    &.{ "rev-list", "--count", "--left-right", "origin/HEAD...HEAD" },
 };
 
 /// 한 명령의 결과. **`channel_closed` 가 있는 이유**가 이 파일의 1 급 규율이다 — git 이 멈춰 있는
@@ -311,7 +323,7 @@ fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.ha
 /// 잠깐 실패한 것을 변경으로 읽으면 읽기 폭주가 된다).
 fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8) Digest {
     var hasher = std.hash.Wyhash.init(0);
-    for (digest_reads) |tail| {
+    for (digest_reads, 0..) |tail, index| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         argv.appendSlice(gpa, git_prefix) catch return .{ .state = .failed };
@@ -319,7 +331,13 @@ fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const 
         argv.appendSlice(gpa, tail) catch return .{ .state = .failed };
         switch (hashCommand(gpa, argv.items, &hasher)) {
             .ok => {},
-            .failed => return .{ .state = .failed },
+            // **첫 읽기만 필수다.** git 이 없거나 저장소가 아니면 거기서 드러난다. 나머지는 실패를
+            // 해시에 적고 계속한다 — `origin` 이 없는 저장소에서 `rev-list` 가 실패한다고 감시가
+            // 통째로 멀면 안 된다(그 저장소가 오히려 흔하다).
+            .failed => {
+                if (index == 0) return .{ .state = .failed };
+                hasher.update("!");
+            },
             .channel_closed => return .{ .state = .channel_closed },
         }
         hasher.update("\x00");

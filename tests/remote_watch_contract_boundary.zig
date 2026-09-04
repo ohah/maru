@@ -50,10 +50,21 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "git_prefix.len == 0) return exitWith(exit_unsupported)") != null);
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
     // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
-    const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 1024);
+    const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 2048);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"for-each-ref\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"worktree\"") != null);
+    // ⚠️ **`status` 만 보면 「틀린 화면」이 나온다** — 계획 §3 이 이미 재서 적어 둔 것이고 RW7 의 첫
+    // 판이 그 경고를 그대로 밟았다. 실측: 이미 수정된 파일을 더 고치면 `status` 바이트는 같은데
+    // `numstat` 은 `1 1` → `3 3` 이다(도크 행의 `+N −M`). `↑↓` 는 `branch.ab`(upstream 기준)와 **다른
+    // 기준**(`origin/HEAD...HEAD`)이라 그것도 status 로는 못 본다.
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"--numstat\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"--cached\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"rev-list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "origin/HEAD...HEAD") != null);
+    // 첫 읽기만 필수다 — `origin` 이 없는 저장소에서 `rev-list` 가 실패한다고 감시가 멀면 안 된다.
+    const dg_body = try bodyOf(src, "fn digest(", "\n}\n", 2048);
+    try std.testing.expect(std.mem.indexOf(u8, dg_body, "if (index == 0) return .{ .state = .failed }") != null);
     // ⚠️ 다이제스트는 **이 프로세스 안에서만** 산다 — 밖으로 나가는 것은 `change` 한 줄뿐이다(§10).
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "announce()") != null);
 

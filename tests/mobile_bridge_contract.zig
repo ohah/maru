@@ -5944,6 +5944,38 @@ test "U2a 다른 세션을 봤다 돌아와도 «빈 화면부터» 다시 쌓�
     try T.expectEqual(@as(usize, 0), bridge.heldSessionCount());
 }
 
+test "U2 원격 화면에서 목록으로 돌아갈 수 있다 — 덮개로 바꾸려면 나갈 자리가 있어야 한다" {
+    // **실기에서 잡았다**(2026-09-04, 시뮬레이터): 이 화면은 제목만 그리고 **누를 자리를 안
+    // 만들어서**, 들어오면 앱을 죽이는 것 말고는 나갈 수 없었다. 헤더 여러 지점을 눌러도 아무
+    // 일이 없었다. 전환을 「덮개」로 정한 이상(계획 U0) 나갈 자리가 없으면 **세션을 바꿀 수가
+    // 없다** — 그 결정이 통째로 못 쓰게 된다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"a\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const row = bridge.remoteRowCenter(0) orelse return error.TestUnexpectedResult;
+    tapAt(row.x, row.y);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
+
+    // **뒤로가기가 그려져 있고, 누르면 목록으로 돌아간다.**
+    const back = bridge.remoteBackCenter() orelse return error.TestUnexpectedResult;
+    tapAt(back.x, back.y);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+}
+
 test "U2c 목록이 «이미 본 세션» 을 말한다 — 든 줄에만 표시가 그려진다" {
     // 전환을 「덮개」로 정했으니(계획 U0) 고르는 자리는 이 목록 하나다. 어느 줄이 이미 화면을
     // 갖고 있는지 목록이 말하지 않으면 사용자는 그 왕복이 싼지 비싼지 모른 채 누른다.

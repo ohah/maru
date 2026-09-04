@@ -13786,7 +13786,10 @@ pub fn build(b: *std.Build) void {
     run_session_host_baseline_child_paths.setCwd(b.path("."));
     session_host_baseline_child_paths_step.dependOn(&run_session_host_baseline_child_paths.step);
     session_host_step.dependOn(&run_session_host_baseline_child_paths.step);
-    test_step.dependOn(&run_session_host_baseline_child_paths.step);
+    // **이 호스트에서는 안 돈다.** 그 스크립트가 `mkdir -m` 으로 권한을 잡는데 NTFS 에는 그 개념이
+    // 없다(실측 `mkdir: cannot change permissions … Permission denied`). 계약이 깨진 것이 아니라
+    // 「이 호스트를 모른다」다 — 원장이 `.posix_only` 로 그 사실을 든다(§2m.111).
+    if (posix_host_tests) test_step.dependOn(&run_session_host_baseline_child_paths.step);
     macos_only_test_step.dependOn(&run_session_host_baseline_child_paths.step);
     const session_host_release_adapter_candidate_upgrade_evidence_step = b.step(
         "test-session-host-release-adapter-candidate-upgrade-evidence",

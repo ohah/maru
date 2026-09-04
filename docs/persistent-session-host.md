@@ -48,13 +48,15 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > focus report와 설정·prompt core command는 host reader까지 전달되고, 일반 key의 DECCKM/DECKPAM/kitty keyboard 인코딩은
 > runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll 등 input-mode/command
 > parity 전체가 완료됐다는 뜻은 아니다.
-> `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다.
+> `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다(값은 위 단일 출처를 본다).
 > 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
 > `runtime-handle + runtime-state="ended"`를 owned 상태로 반복 저장하고, 두 번째 이후 재실행에서 host
 > probe·attach·새 셸 spawn 0을 자동 gate로 고정하는 durable tombstone이다.
 >
 > **후속/백로그**(2026-09-01 코드 대조로 정리 — 앞선 2026-08-24 목록의 셋 중 **둘은 이미 닫혀 있었다**):
-> **기본값 `true` 전환**(사용자 결정 + 아래 G3 릴리스 A/B 계약). 이 문서는 그 목표 상태를 함께 기술한다 —
+> ✅ **기본값 `true` 전환은 2026-09-04 에 끝났다**(main). **G3 릴리스 A/B 계약은 타지 않았다** — 그 계약은
+> 「기본값이 바뀌기 **전에** 설치한 사용자」를 옮기기 위한 것인데 **릴리스가 0 개라 그런 사용자가 없다**.
+> 출하 **뒤에** 이 값을 다시 바꾼다면 그때는 G3 가 단일 출처다(아래 §6 백로그 계약). 이 문서는 목표 상태를 함께 기술한다 —
 > **구현 완료 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 >
 > ✅ **닫힌 둘**(옛 목록에 남아 있던 것):
@@ -607,8 +609,10 @@ session.keep-alive-after-quit = true
 | `false` | 현재처럼 GUI process 안에 생성 | 현재 AppSession에 연결된 persistent runtime도 terminate |
 
 - 이 키는 config schema·`configuration.md`에 있고, **설정 GUI(workspace 섹션 토글)에도 노출된다**(과거 실험적이라 숨겼던 것을
-  원격 렌더 패리티 완성 후 해제). CLI help는 후속. **기본값은 `false`인 opt-in으로 유지한다.** 자동 default-on은
-  현재 P1~P5 완료 조건이 아니라 별도 release-backlog G3이며, 사용자가 다시 승인하기 전에는 시작하지 않는다.
+  원격 렌더 패리티 완성 후 해제). CLI help는 후속. 기본값 자체는 여기 다시 적지 않는다 —
+  [`configuration.md`](configuration.md)가 단일 출처다(그 서술이 네 곳으로 갈라져 실제로 오독을 냈다).
+  2026-09-04 에 기본값을 켰고, **G3 는 타지 않았다**(릴리스 0 개=옮길 사용자 없음). 아래 백로그 계약은
+  **출하 뒤** 이 값을 다시 바꿀 때의 단일 출처로 남는다.
 - backend 선택은 **새로 만드는 runtime에만** 적용한다. 살아 있는 runtime을 process 사이에서 migrate하거나 설정 토글
   즉시 terminate하지는 않는다. 토글을 켜면 host를 준비해 이후 일반 Term부터 persistent로 만들고, 끄면 이후 Term부터
   in-process로 만든다. 바뀐 quit 의미는 다음 app-wide `Quit Maru`부터 적용한다.
@@ -628,7 +632,8 @@ session.keep-alive-after-quit = true
   같아도 canonical session bool override를 atomic replace에 포함해 미래 기본값 변경에서도 의미가 유지되게 한다.
   끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 미래에 기본값이 바뀌더라도 같은 규칙이라
   "사용자가 명시적으로 끈 `false`"를 리셋이 도로 켜지 않는다(리터럴이 아니라 기본값과 비교하는 이유).
-- **별도 이니셔티브 — G3 백로그 계약:** 기본 전환을 다시 승인하면 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
+- **별도 이니셔티브 — G3 백로그 계약(출하 뒤 재전환용):** 2026-09-04 의 첫 전환은 옮길 사용자가 없어
+  이 계약을 타지 않았다. **릴리스가 존재하는 뒤에** 기본값을 다시 바꾸면 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
   반복 relaunch, config provenance와 explicit override retention을 먼저 배포한다. release B만 default를 `true`로
   바꾼다. B loader는 key
   `absent`/`explicit_valid`/`explicit_invalid`와 config file `missing`/`unreadable`/`oversize`를 구분한다. readable
@@ -7315,7 +7320,8 @@ redaction과 GUI 없이 replay 가능한 의미를 고정한 뒤 version을 유�
 (멀티윈도우·manifest·background 알림)을 완성하고, P5는 다른 terminal/SSH의 개별 runtime attach를 독립적으로 완성한다.
 P5 CLI와 U5 자동 host migration 전체는 `session.keep-alive-after-quit=true`의 선결이 아니다. 실제 frozen
 N-1 host에 current GUI가 attach하거나 안전하게 side-by-side로 유지하는 release E2E는 업데이트 호환성 gate로 유지하되,
-`false→true` 자동 기본값 전환과 그 release trust/provenance는 P1~P5 완료 조건 밖의 G3 백로그다. P6 전체 workspace
+`false→true` 자동 기본값 전환은 2026-09-04 에 끝났고(릴리스 0 개라 G3 를 안 탔다), 그 **release
+trust/provenance** 는 출하 뒤 재전환을 위한 G3 백로그로 남는다. P6 전체 workspace
 TUI와 tmux import adapter는 선택적 후속이다.
 
 각 구현 slice는 TDD로 진행한다. 먼저 해당 phase의 실패 상태를 표현하는 red unit/contract/process E2E를 추가하고, 최소 구현으로
@@ -8137,7 +8143,7 @@ G3 default flip은 이 실행 순서 밖의 release 백로그이며, 사용자 �
 `missing | readable | unreadable | oversize`를 닫힌 상태로 반환한다. G1은 파일을 쓰거나 notice를 만들거나 default를
 바꾸지 않는다. G2가 이 관측을 app-instance lease 아래에서 소비하기 전에는 어떤 migration도 실행하지 않는다.
 
-**G2 explicit override materialization·retention 계약.** release A의 기본값은 계속 `false`이며 G2는
+**G2 explicit override materialization·retention 계약.** (출하 뒤 재전환 시나리오다 — 첫 전환은 이 계약을 타지 않았다.) release A의 기본값은 계속 `false`이며 G2는
 `absent` profile을 opt-out으로 바꾸거나 G3의 explicit `true` migration을 미리 실행하지 않는다. Swift entry가 L0
 app-instance lease를 얻은 직후, AppKit·첫 Window·첫 `AppSession`보다 먼저 app-global bootstrap ABI를 정확히 한 번
 호출한다. bootstrap owner는 G1 loader 결과에서 resolved bool, keep-alive provenance, file provenance를 owned scalar

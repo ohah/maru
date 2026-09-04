@@ -890,11 +890,15 @@ unsigned long maru_ssh_pump_write_control(const unsigned char *bytes, unsigned l
     return off;
 }
 
-void maru_ssh_pump_close_control(void) {
-    if (!g_running || g_handle == 0) return;
+int maru_ssh_pump_close_control(void) {
+    /* **결과를 돌려준다.** 예전에는 `void` 라 코어가 낸 오류를 아무도 안 읽었고, 그래서 닫기가
+       실패해도 host 는 「닫았다」로 넘어갔다 — 원격 명령이 고아로 남아 세션 전환이 통째로
+       막혔는데 화면에도 로그에도 아무 말이 없었다(실기 2026-09-04). */
+    if (!g_running || g_handle == 0) return -1;
     pthread_mutex_lock(&g_session_lock);
-    maru_mobile_ssh_close_control(g_handle);
+    int rc = maru_mobile_ssh_close_control(g_handle);
     pthread_mutex_unlock(&g_session_lock);
+    return rc;
 }
 
 unsigned int maru_ssh_pump_control_state(void) {

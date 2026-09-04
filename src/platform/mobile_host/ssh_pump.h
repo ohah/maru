@@ -110,7 +110,10 @@ int maru_ssh_pump_open_control(const char *command, unsigned int len);
 /// 컨트롤 채널로 보낸다. 돌려주는 값은 **실제로 보낸 바이트 수**다(터미널 `write` 와 같은 규약).
 unsigned long maru_ssh_pump_write_control(const unsigned char *bytes, unsigned long len);
 /// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
-void maru_ssh_pump_close_control(void);
+/* 컨트롤 채널을 닫는다. **결과를 돌려준다** — 0 이 성공이고, 그 밖은 코어가 낸 상태다.
+   호출자는 이 값을 봐야 한다: 예전에는 `void` 라 닫기 실패가 조용히 지나갔고, 원격 명령이
+   고아로 남아 세션 전환이 통째로 막혔다(실기 2026-09-04). */
+int maru_ssh_pump_close_control(void);
 /// 컨트롤 채널 상태(`MARU_SSH_CONTROL_*`). 안 돌고 있으면 `MARU_SSH_CONTROL_NONE`.
 unsigned int maru_ssh_pump_control_state(void);
 /// 컨트롤 명령의 종료 코드를 `*code` 에 넣는다. 아직 안 끝났으면 0 이 아닌 값을 돌려준다.

@@ -168,6 +168,10 @@ pub const min_wire_out = 4096;
 /// 한 번 부를 때마다 답을 하나씩만 내보내게 되어 255 개를 비우는 데 `feed` 를 255 번 부른다 —
 /// 그 사이 서버는 답을 기다린다.
 const max_reply_packet = cipher.Cipher.sealedLen(1);
+/// 미뤄 둔 채널 메시지(`CHANNEL_CLOSE`·`CHANNEL_FAILURE`) 하나가 봉인돼 차지하는 상한.
+/// **먼저 자리를 보고 쓴다** — `writeClose` 는 부르는 순간 채널 상태를 바꾸므로, 자리가
+/// 모자라 `emit` 이 실패하면 「보냈다」고 굳은 채 선에는 아무것도 안 나간다(적대적 검증 2회차).
+const max_channel_reply_packet = cipher.Cipher.sealedLen(16);
 
 /// `feed` 한 번의 결과.
 ///
@@ -557,6 +561,15 @@ pub const Client = struct {
         self.control_cmd_len = command.len;
         self.control_exit_status = null;
         self.control_stderr_len = 0;
+        // **새 채널은 옛 채널의 뜻을 물려받지 않는다.** `control_deferred_close` 는 «그» 채널을
+        // 닫으려던 뜻이다 — 남겨 두면 `flushDeferred` 가 **방금 연 채널**을 열리는 순간 닫는다.
+        // 남을 수 있는 길이 둘이라 여기서 지운다(적대적 검증 1회차):
+        //  · 열기가 거절되면 `self.control` 이 null 이 되는데, 그 플래그를 보는 자리는
+        //    `if (self.control)` 안이라 **영영 안 접힌다**.
+        //  · 닫힘이 미뤄진 채(`.wait`) 채널이 `.closed` 로 끝나면 그 자리에서 접히지만, 그 전에
+        //    다시 열면 옛 뜻이 새 채널로 넘어간다.
+        self.control_deferred_close = false;
+        self.control_deferred_request_failure = false;
         // **터미널 옵션(`Options.window`)을 따르지 않는다** — 그 값은 화면 흐름을 위한 것이고,
         // 이 채널은 다른 성질(작은 줄이 자주)이다.
         var ctl: channel.Channel = .{
@@ -590,11 +603,38 @@ pub const Client = struct {
     }
 
     /// 컨트롤 채널을 닫는다. **터미널은 그대로 산다.**
+    ///
+    /// **아직 «열리는 중» 인 채널도 닫을 수 있어야 한다.** `CHANNEL_CLOSE` 는 상대 번호를 실어야
+    /// 하는데(§5.3) 그 번호는 `CHANNEL_OPEN_CONFIRMATION` 이 준다 — 그래서 확인 전에는 못 보낸다.
+    /// 예전에는 그 자리에서 `writeClose` 가 `UnexpectedMessage` 로 튀어나갔고, **그 위에서 이미
+    /// `control_state` 를 `.closed` 로 바꿔 둔 뒤**였다. 그러면 이렇게 된다:
+    ///
+    ///  · 우리는 「닫았다」고 믿는데 **원격 채널은 그대로 열린다** — 확인이 오고 exec 가 돌아
+    ///    그 명령이 **고아로 영영 산다**(실기 2026-09-04: `maru attach --stream` 이 `sshd-session`
+    ///    을 부모로 4분째 살아 registry 의 observer 자리를 붙들고 있었다).
+    ///  · 그 뒤 모든 열기는 `self.control` 이 아직 차 있어 `NOT_READY` 가 되고, 5초 마감 뒤
+    ///    포기한다 — 화면이 **영영 「받는 중」** 이다([§4a](../../../docs/control-plane.md)
+    ///    「한 번에 control 하나」). 세션을 바꾸는 길이 통째로 막힌다.
+    ///
+    /// 그래서 **미룬다** — 재키잉과 같은 자리(`flushDeferred`)가 채널이 열리는 순간 낸다.
+    /// 빠르게 여닫는 조작(열고 곧바로 뒤로)이 정확히 이 창을 만든다.
     pub fn closeControl(self: *Client, wire_out: []u8) Error![]const u8 {
         const ctl = if (self.control) |*p| p else return wire_out[0..0];
         self.control_state = .closed;
         if (ctl.state == .closed or ctl.state == .close_sent) return wire_out[0..0];
-        if (!self.t.canSendChannelMessages()) {
+        // **보낼 수 있을 때만 보낸다.** 못 보내는 이유는 둘이고(재키잉·아직 안 열림) 답은 하나다.
+        switch (ctl.closeDisposition()) {
+            .done => return wire_out[0..0],
+            .wait => {
+                self.control_deferred_close = true;
+                return wire_out[0..0];
+            },
+            .send => {},
+        }
+        // **자리가 모자라도 미룬다.** `writeClose` 는 부르는 순간 채널을 `.close_sent` 로 굳히므로,
+        // 그 뒤 `emit` 이 실패하면 선에는 아무것도 안 나간 채 「보냈다」가 된다 — 그 닫힘은 영영
+        // 안 나간다(적대적 검증 2회차).
+        if (!self.t.canSendChannelMessages() or wire_out.len < max_channel_reply_packet) {
             // 재키잉 중이면 못 보낸다 — 미뤄 두면 `flushDeferred` 가 낸다.
             self.control_deferred_close = true;
             return wire_out[0..0];
@@ -1132,7 +1172,10 @@ pub const Client = struct {
             return;
         };
         switch (ev) {
-            .opened => {
+            // **닫기로 정했으면 명령을 시작조차 안 한다.** 그 뜻은 이미 `control_deferred_close` 에
+            // 있고, 여기서 `exec` 을 보내면 그 서버에서 명령이 한 번 돌고(감사 로그에 남는다) 그
+            // 답이 우리가 닫은 뒤에 도착한다. 곧바로 `flushDeferred` 가 닫는다.
+            .opened => if (!self.control_deferred_close) {
                 self.control_state = .requesting_exec;
                 try self.emit(w, try ch.writeExec(&buf, self.control_cmd_buf[0..self.control_cmd_len]));
             },
@@ -1141,8 +1184,17 @@ pub const Client = struct {
             .open_failed => {
                 self.control_state = .closed;
                 self.control = null;
+                // **슬롯을 비우면 그 채널을 향한 뜻도 함께 비운다.** 아래 `flushDeferred` 는
+                // `if (self.control)` 안에서만 이 플래그를 보므로, 남기면 접힐 자리가 없다.
+                self.control_deferred_close = false;
+                self.control_deferred_request_failure = false;
             },
-            .request_success => self.control_state = .ready,
+            // **닫기로 정한 축을 답이 되살리지 않는다.** `closeControl` 이 이미 `.closed` 로
+            // 정했는데 늦게 온 `SUCCESS` 가 `.ready` 로 되돌리면, host 는 살아 있는 채널로 알고
+            // 그 위에 쓴다.
+            .request_success => if (self.control_state != .closed) {
+                self.control_state = .ready;
+            },
             // `exec` 이 거절됐다 — 명령을 시작조차 못 했다. 채널을 닫고 축을 끈다.
             .request_failure => {
                 self.control_state = .closed;
@@ -1209,28 +1261,42 @@ pub const Client = struct {
             try self.emit(w, &[_]u8{msg_request_failure});
             self.pending_request_failures -= 1;
         }
-        if (self.deferred_request_failure) {
-            self.deferred_request_failure = false;
+        // **뜻은 «나간 뒤에» 지운다.** 먼저 지우고 보내면 `emit` 이 `ShortBuffer` 로 튀는 순간
+        // 그 뜻이 통째로 사라진다 — 다음 `feed` 가 다시 낼 근거가 없다. 이 축의 결함이 정확히
+        // 그 모양이었다(적대적 검증 2회차: 내가 방금 고친 것과 같은 모양이 바로 옆에 있었다).
+        if (self.deferred_request_failure and w.remaining() >= max_channel_reply_packet) {
             try self.emit(w, try self.ch.writeChannelFailure(&buf));
+            self.deferred_request_failure = false;
         }
-        if (self.deferred_close) {
-            self.deferred_close = false;
-            if (self.ch.state != .closed) try self.emit(w, try self.ch.writeClose(&buf));
-        }
+        if (self.deferred_close) switch (self.ch.closeDisposition()) {
+            .done => self.deferred_close = false,
+            .wait => {},
+            .send => if (w.remaining() >= max_channel_reply_packet) {
+                try self.emit(w, try self.ch.writeClose(&buf));
+                self.deferred_close = false;
+            },
+        };
         if (self.ch.pendingWindowAdjust() != 0) {
             try self.emit(w, try self.ch.writeWindowAdjust(&buf));
         }
         // **컨트롤 채널도 같은 자리에서 비운다.** 내보내는 자리를 나누면 한쪽이 조용히 안 도는
         // 상태가 생긴다 — 터미널 쪽이 이미 그 이유로 한 자리에 모여 있다.
         if (self.control) |*ctl| {
-            if (self.control_deferred_request_failure) {
-                self.control_deferred_request_failure = false;
+            if (self.control_deferred_request_failure and w.remaining() >= max_channel_reply_packet) {
                 try self.emit(w, try ctl.writeChannelFailure(&buf));
+                self.control_deferred_request_failure = false;
             }
-            if (self.control_deferred_close) {
-                self.control_deferred_close = false;
-                if (ctl.state != .closed) try self.emit(w, try ctl.writeClose(&buf));
-            }
+            // **아직 못 닫으면 플래그를 그대로 둔다.** 예전에는 먼저 지우고 `writeClose` 를 불러,
+            // 채널이 아직 열리는 중이면 그 오류와 함께 **닫으려던 뜻이 사라졌다**(그리고 원격
+            // 명령이 고아로 남았다 — `closeControl` 주석). `.wait` 면 다음 `feed` 에 다시 온다.
+            if (self.control_deferred_close) switch (ctl.closeDisposition()) {
+                .done => self.control_deferred_close = false, // 낼 것이 없다 — 뜻을 접는다
+                .wait => {}, // 아직 번호가 없다 — 그대로 들고 있는다
+                .send => if (w.remaining() >= max_channel_reply_packet) {
+                    try self.emit(w, try ctl.writeClose(&buf));
+                    self.control_deferred_close = false;
+                },
+            };
             if (ctl.pendingWindowAdjust() != 0) {
                 try self.emit(w, try ctl.writeWindowAdjust(&buf));
             }
@@ -3228,4 +3294,171 @@ test "거절 답은 우리 채널 상태를 안 건드린다" {
     try testing.expectEqual(channel.State.open, c.ch.state);
     const r = try c.write("ls\n", &out);
     try testing.expectEqual(@as(usize, 3), r.sent);
+}
+
+test "열리는 중인 컨트롤 채널을 닫으면 «열린 뒤에» 닫힘이 나간다 — 뜻이 사라지지 않는다" {
+    // **실기에서 잡았다**(2026-09-04, 시뮬레이터 + 임시 sshd). 폰에서 세션 화면을 열고 곧바로
+    // 뒤로 나가면(열고 2초, 나가고 1초) 원격 `maru attach --stream` 이 **안 죽고 남았다** —
+    // 부모가 `sshd-session` 인 고아가 registry 의 observer 자리를 4분째 붙들고 있었다.
+    //
+    // 원인은 여기다. `CHANNEL_CLOSE` 는 상대 번호를 싣는데(§5.3) 그 번호는
+    // `CHANNEL_OPEN_CONFIRMATION` 이 준다 — 그래서 확인 전에는 못 보낸다. 예전에는 그 자리에서
+    // `writeClose` 가 `UnexpectedMessage` 로 튀어나갔고, 호출자(`maru_mobile_ssh_close_control`)의
+    // 오류를 host 가 **안 봤다**. 그러면 우리는 「닫았다」고 믿는데 원격 채널은 그대로 열려
+    // exec 이 돌고, 그 뒤 모든 열기는 `self.control` 이 차 있어 `NOT_READY` → 5초 마감 → 포기라
+    // **세션을 바꾸는 길이 통째로 막혔다**(§4a 「한 번에 control 하나」).
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    try testing.expectEqual(ControlState.opening, c.controlState());
+
+    // **확인이 오기 전에 닫는다** — 여기서 오류가 나면 안 되고, 선에 나갈 것도 아직 없다.
+    const closed_now = try c.closeControl(&out);
+    try testing.expectEqual(@as(usize, 0), closed_now.len);
+    try testing.expectEqual(ControlState.closed, c.controlState());
+
+    // 이제 상대가 채널을 열어 준다. **그 순간 닫힘이 나가야 한다.**
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_confirmation);
+    try wr.u32be(control_local_id);
+    try wr.u32be(77); // 상대 번호 — 이것이 있어야 닫을 수 있다
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var wire_out: [8192]u8 = undefined;
+    const step = try feedChannelBuffers(&c, wr.written(), &wire_out, &scr, &ctl);
+
+    // 선에 `CHANNEL_CLOSE`(97) 가 상대 번호 77 로 실려 있어야 한다. 안 나가면 원격 명령이 산다.
+    try testing.expect(containsChannelClose(step.wire, 77));
+}
+
+test "닫은 뒤에 온 요청 답이 세션을 죽이지 않는다 — 채널은 «양쪽» CLOSE 로 끝난다" {
+    // **실기가 먼저 잡았다**(2026-09-04, 시뮬레이터): 위 「열린 뒤에 닫힘이 나간다」를 고치자
+    // 이번에는 `MARU_SSH state=12 error=UnexpectedMessage` 로 **SSH 세션이 통째로 죽었다**.
+    // 요청(`exec`)을 보내 놓고 답이 오기 전에 닫으면, 늦게 온 `CHANNEL_SUCCESS` 가
+    // `.close_sent` 채널에 꽂혀 `expectOurChannel` 이 튀었다. §5.3 은 채널이 **양쪽** `CLOSE`
+    // 로 끝난다고 하므로 그동안 오는 답은 **정상**이다 — `EOF`·`CLOSE` 는 이미 그렇게 받고 있었다.
+    var out: [8192]u8 = undefined;
+    var c = try controlOpenedClient(&out); // exec 까지 끝난 상태
+    try testing.expectEqual(ControlState.ready, c.controlState());
+
+    // 닫는다 — 채널이 `.open` 이라 곧바로 나간다.
+    const closed = try c.closeControl(&out);
+    try testing.expect(closed.len > 0);
+
+    // **그 뒤에 답이 하나 더 온다**(우리가 닫기 전에 서버가 보낸 것). 세션이 살아야 한다.
+    var ok: [16]u8 = undefined;
+    var okw = wire.Writer.init(&ok);
+    try okw.byte(channel.msg_channel_success);
+    try okw.u32be(control_local_id);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var wire_out: [8192]u8 = undefined;
+    _ = try feedChannelBuffers(&c, okw.written(), &wire_out, &scr, &ctl);
+    // 그리고 **닫기로 정한 축을 되살리지 않는다.**
+    try testing.expectEqual(ControlState.closed, c.controlState());
+}
+
+test "열리는 중에 닫으면 그 서버에서 명령이 «돌지 않는다»" {
+    // 닫기로 정했는데 exec 을 보내면 원격에서 명령이 한 번 돌고(감사 로그에 남는다) 그 답이
+    // 우리가 닫은 뒤에 온다. 여는 순간 곧바로 닫는 조작이 그 창이다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    _ = try c.closeControl(&out); // 확인 전 — 미뤄진다
+
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_confirmation);
+    try wr.u32be(control_local_id);
+    try wr.u32be(77);
+    try wr.u32be(1 << 20);
+    try wr.u32be(32768);
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var wire_out: [8192]u8 = undefined;
+    const step = try feedChannelBuffers(&c, wr.written(), &wire_out, &scr, &ctl);
+
+    // 닫힘은 나가고, **`exec` 요청은 안 나간다**.
+    try testing.expect(containsChannelClose(step.wire, 77));
+    try testing.expect(!containsChannelRequest(step.wire, 77));
+}
+
+test "새 컨트롤 채널은 옛 채널의 «닫으려던 뜻» 을 물려받지 않는다" {
+    // 적대적 검증 1회차가 잡았다. `control_deferred_close` 는 **그 채널**을 닫으려던 뜻인데,
+    // 남은 채로 다음 채널을 열면 `flushDeferred` 가 **방금 연 채널**을 열리는 순간 닫는다 —
+    // 사용자에게는 「눌렀는데 바로 꺼진다」로 보인다.
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru control --stdio", &out);
+    _ = try c.closeControl(&out); // 확인 전 — 미뤄진다
+    try testing.expect(c.control_deferred_close);
+
+    // 그 채널을 접고(거절) 새로 연다.
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_failure);
+    try wr.u32be(control_local_id);
+    try wr.u32be(1);
+    try wr.string("no");
+    try wr.string("");
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var wire_out: [8192]u8 = undefined;
+    _ = try feedChannelBuffers(&c, wr.written(), &wire_out, &scr, &ctl);
+    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    try testing.expect(!c.control_deferred_close); // 새 채널은 깨끗하다
+
+    // 열어 준다 — **닫힘이 나가면 안 된다**(그 뜻은 앞 채널 것이었다).
+    var wr2 = wire.Writer.init(&buf);
+    try wr2.byte(channel.msg_channel_open_confirmation);
+    try wr2.u32be(control_local_id);
+    try wr2.u32be(88);
+    try wr2.u32be(1 << 20);
+    try wr2.u32be(32768);
+    const step = try feedChannelBuffers(&c, wr2.written(), &wire_out, &scr, &ctl);
+    try testing.expect(!containsChannelClose(step.wire, 88));
+    try testing.expectEqual(ControlState.requesting_exec, c.controlState());
+}
+
+test "열기가 거절되면 미뤄 둔 닫힘을 접는다 — 영영 안 열릴 채널을 기다리지 않는다" {
+    // 위 미룸이 **영원히 남으면** 안 된다. 열기가 거절된 채널은 번호를 영영 못 받으므로 낼 것이
+    // 없고, 그 뜻은 그 자리에서 접혀야 한다(안 접으면 매 `feed` 마다 헛돈다).
+    var c = readyClient();
+    var out: [8192]u8 = undefined;
+    _ = try c.openControl("maru control --stdio", &out);
+    _ = try c.closeControl(&out); // 확인 전 — 미뤄진다
+    try testing.expect(c.control_deferred_close);
+
+    var buf: [128]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_open_failure);
+    try wr.u32be(control_local_id);
+    try wr.u32be(1); // reason: administratively prohibited
+    try wr.string("no");
+    try wr.string("");
+    var scr: [64 * 1024]u8 = undefined;
+    var ctl: [32 * 1024]u8 = undefined;
+    var wire_out: [8192]u8 = undefined;
+    _ = try feedChannelBuffers(&c, wr.written(), &wire_out, &scr, &ctl);
+    try testing.expect(!c.control_deferred_close);
+}
+
+/// 선에 `CHANNEL_REQUEST`(= `exec`) 가 그 번호로 실려 있나.
+fn containsChannelRequest(wire_bytes: []const u8, recipient: u32) bool {
+    var want: [5]u8 = undefined;
+    want[0] = channel.msg_channel_request;
+    std.mem.writeInt(u32, want[1..5], recipient, .big);
+    return std.mem.indexOf(u8, wire_bytes, &want) != null;
+}
+
+/// 선에 `CHANNEL_CLOSE` 가 그 번호로 실려 있나. **패킷을 뜯지 않고 바이트로 본다** — 이 판정이
+/// 재려는 것은 「나갔나」이지 「어떻게 감쌌나」가 아니다.
+fn containsChannelClose(wire_bytes: []const u8, recipient: u32) bool {
+    var want: [5]u8 = undefined;
+    want[0] = channel.msg_channel_close;
+    std.mem.writeInt(u32, want[1..5], recipient, .big);
+    return std.mem.indexOf(u8, wire_bytes, &want) != null;
 }

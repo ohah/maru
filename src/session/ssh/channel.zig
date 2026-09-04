@@ -375,6 +375,29 @@ pub const Channel = struct {
     }
 
     /// `CHANNEL_CLOSE` 를 쓴다(§5.3). 이것도 윈도를 안 먹는다.
+    /// 지금 `CHANNEL_CLOSE` 를 낼 수 있나 — 세 갈래다.
+    ///
+    /// **번호가 있어야 닫을 수 있다.** `CHANNEL_CLOSE` 는 상대 번호를 싣는데(§5.3) 그 번호는
+    /// `CHANNEL_OPEN_CONFIRMATION` 이 준다. 그래서 «아직 열리는 중» 은 실패가 아니라 **기다림**
+    /// 이다 — 그것을 실패로 접으면 닫으려던 뜻이 사라지고 원격 명령이 고아로 남는다
+    /// (실기 2026-09-04, `Client.closeControl` 주석 참고).
+    pub const CloseDisposition = enum {
+        /// 지금 낸다.
+        send,
+        /// 아직 번호가 없다 — 열리면 그때 낸다.
+        wait,
+        /// 낼 것이 없다(이미 닫았거나, 열기가 거절돼 영영 안 열린다).
+        done,
+    };
+
+    pub fn closeDisposition(self: Channel) CloseDisposition {
+        return switch (self.state) {
+            .open, .eof_sent => .send,
+            .idle, .opening => .wait,
+            .close_sent, .closed, .open_failed => .done,
+        };
+    }
+
     pub fn writeClose(self: *Channel, out: []u8) Error![]const u8 {
         if (self.state != .open and self.state != .eof_sent) return Error.UnexpectedMessage;
         var w = wire.Writer.init(out);
@@ -421,12 +444,17 @@ pub const Channel = struct {
                 break :blk .closed;
             },
             msg_channel_request => try self.recvRequest(&r),
+            // **우리가 `CLOSE` 를 보낸 뒤에도 답은 온다**(§5.3 — 채널은 «양쪽» `CLOSE` 가 오가야
+            // 끝난다). 그래서 `close_sent` 도 받는다. 예전에는 `.open`·`.eof_sent` 만 받아,
+            // 요청을 보내 놓고 답이 오기 전에 닫으면 그 답이 **세션을 통째로 죽였다**
+            // (실기 2026-09-04: `MARU_SSH state=12 error=UnexpectedMessage` — 폰이 세션 화면을
+            // 열자마자 나가는 평범한 조작이 그 창을 만든다). `EOF`·`CLOSE` 는 이미 그렇게 받는다.
             msg_channel_success => blk: {
-                try self.expectOurChannel(&r, &.{ .open, .eof_sent });
+                try self.expectOurChannel(&r, &.{ .open, .eof_sent, .close_sent });
                 break :blk .request_success;
             },
             msg_channel_failure => blk: {
-                try self.expectOurChannel(&r, &.{ .open, .eof_sent });
+                try self.expectOurChannel(&r, &.{ .open, .eof_sent, .close_sent });
                 break :blk .request_failure;
             },
             else => Error.NotChannelMessage,

@@ -15,6 +15,10 @@ const candidate_identity = @import("release_adapter_candidate_evidence_identity"
 const source_tree = @import("release_adapter_github_source_tree");
 const candidate_app = @import("release_adapter_candidate_baseline_app");
 const candidate_workspace = @import("release_adapter_candidate_baseline_workspace");
+const zig_toolchain = @import("release_adapter_zig_toolchain_authority");
+
+pub const ZigToolchainAuthority = zig_toolchain.ZigToolchainAuthority;
+pub const ToolchainView = zig_toolchain.View;
 
 pub const Kind = enum { default_false, signed_app_quit };
 
@@ -51,20 +55,20 @@ pub const Inputs = struct {
     workspace: *candidate_workspace.Workspace,
 };
 
-pub fn run(io: std.Io, inputs: Inputs, kind: Kind, zig_executable: [:0]const u8, source_directory_fd: c.fd_t, deadline: anytype) !void {
+pub fn run(io: std.Io, inputs: Inputs, toolchain: *const ZigToolchainAuthority, kind: Kind, source_directory_fd: c.fd_t, deadline: anytype) !void {
     var authority = ConcreteAuthority{ .inputs = inputs, .kind = kind };
     var executor = BoundedExecutor{ .io = io };
     var capture: [capture_bytes]u8 = undefined;
-    try runInternal(&executor, &authority, kind, zig_executable, source_directory_fd, deadline, &capture);
+    try runInternal(&executor, &authority, toolchain, kind, source_directory_fd, deadline, &capture);
 }
 
-pub fn runWith(executor: anytype, authority: anytype, kind: Kind, zig_executable: []const u8, source_directory_fd: c.fd_t, deadline: anytype, capture: []u8) !void {
+pub fn runWith(executor: anytype, authority: anytype, toolchain: anytype, kind: Kind, source_directory_fd: c.fd_t, deadline: anytype, capture: []u8) !void {
     if (!@import("builtin").is_test) @compileError("runWith is a test-only seam");
-    return runInternal(executor, authority, kind, zig_executable, source_directory_fd, deadline, capture);
+    return runInternal(executor, authority, toolchain, kind, source_directory_fd, deadline, capture);
 }
 
-fn runInternal(executor: anytype, authority: anytype, kind: Kind, zig_executable: []const u8, source_directory_fd: c.fd_t, deadline: anytype, capture: []u8) !void {
-    if (!validAbsolute(zig_executable) or source_directory_fd < 0 or capture.len == 0) return error.InvalidInput;
+fn runInternal(executor: anytype, authority: anytype, toolchain: anytype, kind: Kind, source_directory_fd: c.fd_t, deadline: anytype, capture: []u8) !void {
+    if (source_directory_fd < 0 or capture.len == 0) return error.InvalidInput;
     _ = try deadline.remaining();
     const initial = try authority.revalidate();
     var snapshot: Snapshot = .{};
@@ -82,8 +86,12 @@ fn runInternal(executor: anytype, authority: anytype, kind: Kind, zig_executable
     args[6] = try option(&args_storage[6], homeOption(kind), snapshot.homePath());
     args[7] = try option(&args_storage[7], outputOption(kind), snapshot.outputPath());
 
+    const zig = try toolchain.revalidate();
+    if (!validAbsolute(zig.executable)) return error.InvalidToolchain;
     const budget = try deadline.remaining();
-    const captured = try executor.run(zig_executable, &args, &environment, source_directory_fd, capture, budget);
+    const execution = executor.run(zig.executable, &args, &environment, source_directory_fd, capture, budget);
+    _ = try toolchain.revalidate();
+    const captured = try execution;
     if (captured.len != 0 and !borrowedFrom(captured, capture)) return error.InvalidCapture;
 
     const current = try authority.revalidate();

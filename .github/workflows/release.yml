@@ -67,6 +67,37 @@ jobs:
           # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # The protected tag source selects the mise version. Capture its pathname object now so the
+      # later baseline runner can reject any toolchain drift around child execution.
+      - name: Capture trusted Zig toolchain after mise
+        id: trusted-zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovered=$(command -v zig)
+          canonical=$(/usr/bin/realpath "$discovered")
+          case "$canonical" in
+            /*) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$canonical" != *$'\n'* && "$canonical" != *$'\r'* ]]
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          version=$("$canonical" version)
+          test "$version" = '0.16.0'
+          size=$(/usr/bin/stat -f '%z' "$canonical")
+          case "$size" in
+            ''|0|*[!0-9]*) exit 1 ;;
+          esac
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          case "$sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#sha256}" = 64
+          printf 'path=%s\n' "$canonical" >> "$GITHUB_OUTPUT"
+          printf 'size=%s\n' "$size" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
       - name: Verify release version SSOT
         env:
           RELEASE_REF_TYPE: ${{ github.ref_type }}

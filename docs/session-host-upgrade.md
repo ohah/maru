@@ -2542,6 +2542,41 @@ focused gate `test-session-host-release-adapter-post-publish-attestation`은 exa
 held inode의 actual filesystem 재검증은 이 owner가 매 snapshot마다 호출하는 `test-session-host-release-adapter-draft-assets`가 별도로 소유한다.
 이 component는 live workflow wiring 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.37 candidate publication transaction 권위
+
+candidate evidence가 게시된 뒤의 release mutation 순서는 leaf caller들의 관례가 아니라
+`release_adapter_candidate_publication_phase.zig`의 caller-owned final-address `Publication` lifecycle 하나가 소유한다. 이 owner는 같은
+release phase `Deadline`을 빌려 candidate manifest authoring→evidence/manifest artifact attestation→exact draft asset
+attachment→exact-ID redownload validation→draft publication→post-publish release attestation을 정확히 이 순서로 한 번씩 실행한다.
+caller는 중간 owner, release/asset ID, 단계별 deadline·성공 bool 또는 cleanup 대상을 제출하거나 일부 단계만 꺼내 재호출하지 않는다.
+
+generic preflight는 pristine final-address lifecycle과 borrowed deadline identity를 첫 leaf 전에 검사하고, step implementation이 내놓은
+bounded canonical authority bytes가 publication storage와 겹치지 않는지 확인한다. transaction 자신이 그 bytes에서 길이와 domain을
+구분한 BLAKE3 audit seal을 유도해 32-byte inline storage에 복사하며 이후 borrowed slice나 pointer를 audit state로 보존하지 않는다.
+후속 production owner는 manifest/authored-attestation/attachment/redownload/published/verified concrete storage의 pairwise alias와
+deadline 및 모든 borrowed authority/path storage alias를 이 preflight callback 안에서 닫고, draft,
+candidate/product/source/compatibility, held DMG·frozen executable·evidence, pinned CLI와 manifest output pathname을 canonical authority
+bytes로 제공해야 한다. 각 leaf 앞뒤와 최종 publication 직전에는 production owner가 같은 graph에서 다시 유도한 seal이 bytewise exact인지와
+같은 deadline의 fresh remaining을 다시 확인한다. transaction은 새 시작 시각·expiry를 만들거나 앞서 읽은 remaining을 다음 leaf의
+budget으로 재사용하지 않는다.
+
+manifest부터 redownload까지의 mutation 전 실패는 이미 열린 local owner를 verified→published→redownload→attachment→authored
+attestation→manifest 역순으로 best-effort cleanup한다. attach가 첫 remote mutation을 시작했거나 publish가 시작된 뒤의
+`remote-state-unknown`·`cleanup-required`는 empty로 되돌리거나 자동 retry·asset 삭제·draft 재생성으로 성공을 합성하지 않는다.
+terminal remote state와 exact known ID 및 preflight에서 유도한 fixed audit seal은 `Publication`에 보존하고 workflow를
+audit-required로 끝낸다. publish가 ready가 된 뒤
+post-publish attestation이 실패해도 공개 release를 재게시·변경하지 않으며 published authority와 실패 단계를 보존한다. cleanup 실패는
+원래 오류보다 `CleanupFailed`가 우선하고 아직 live인 exact owner만 남겨 `retryCleanup`이 같은 역순으로 재시도한다. remote terminal
+state는 cleanup retry 대상이 아니며 사람이 감사하기 전 같은 publication owner를 재사용할 수 없다.
+
+성공은 `VerifiedRelease`를 포함한 complete publication owner로만 게시한다. 성공 owner의 명시적 cleanup은 verified receipt부터
+manifest까지 역순으로 local capability를 닫되 remote release나 asset을 삭제하지 않는다. focused gate
+`test-session-host-release-adapter-candidate-publication-phase`는 exact 순서·same-deadline identity, no-side-effect preflight,
+각 leaf fail-index, reverse cleanup과 partial-cleanup retry, attach/publish terminal-state 비재시도, publish 뒤 attestation 실패 보존,
+copied/pre-owned/alias/drift를 Debug·ReleaseFast에서 검증한다. 각 leaf의 GitHub command·filesystem·semantic 의미는 기존 focused gate가
+계속 소유한다. concrete leaf storage·authority-byte derivation과 alias matrix는 후속 production wiring gate가 소유한다. 이 transaction은
+production argument/bootstrap 배선, `.github/workflows/release.yml` 호출 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

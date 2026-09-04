@@ -1990,19 +1990,27 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   baseline 제품 leaf process adapter는 `default_false | signed_app_quit` closed kind 하나와 final-address candidate identity,
   보존 app authority, baseline workspace authority를 받아 위 build entrypoint 하나만 실행한다. UUID와 candidate digest는 caller scalar가
   아니라 candidate identity의 첫 revalidation view에서 유도하며, app·DMG·frozen executable·HOME·leaf pathname은 각 authority가
-  봉인한 경로만 argv에 들어간다. cwd는 caller가 held directory fd로 보존한 source root이다. child environment는
+  봉인한 경로만 argv에 들어간다. cwd는 caller가 held directory fd로 보존한 source root이다. Zig executable은 raw pathname이
+  아니라 trusted tag workflow가 mise 설치 직후 만든 final-address `ZigToolchainAuthority`에서만 온다. workflow는 canonical absolute
+  pathname, regular/executable mode, size, SHA-256과 exact version `0.16.0`을 먼저 고정하고, adapter는 같은 pathname object와 held
+  file identity·size·mode·digest를 child 실행 직전과 직후 다시 검증한다. child environment는
   `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `HOME=/var/empty`,
   `ZIG_GLOBAL_CACHE_DIR=.zig-cache`의 closed 목록이며 cache 상대경로는 held source cwd 안에서만 해석된다. adapter는 하나의 남은
   deadline을 bounded process에 넘기고 실행 전후 candidate·app·
   workspace authority가 최초 snapshot과 일치하는지 확인한다. 시작 전 leaf는 absent여야 하며 exit 0 뒤 exact leaf가 새 regular
   `0600` 파일로 존재할 때만 성공이다. stdout/stderr 내용은 성공 authority가 아니다.
 
-  focused gate `test-session-host-release-adapter-candidate-baseline-child`는 두 kind의 exact argv·closed environment·held cwd·deadline,
+  focused gate `test-session-host-release-adapter-zig-toolchain-authority`는 GitHub-hosted macOS ARM64 tag workflow 결속, canonical
+  absolute pathname과 expected size/SHA-256, executable mode, copied/pre-owned owner, pathname·parent·inode·bytes drift를
+  Debug·ReleaseFast actual filesystem에서 검증한다. `check-session-host-release-workflow`는 mise 뒤 exact version·path·size·digest
+  capture가 baseline 실행보다 먼저 존재하는지 고정한다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-child`는 두 kind의 exact argv·closed environment·held cwd·deadline,
   caller UUID/digest/bool 입력 0, 실행 전후 authority drift, foreign capture, 기존·누락·symlink·공개 권한 leaf, timeout·nonzero exit의
   성공 0을 Debug·ReleaseFast에서 검증한다. 이 leaf adapter는 두 child의 순서, aggregate publication, cleanup retry owner 또는 live
-  release workflow 배선을 완료하지 않는다. 특히 현재 bounded process에는 held executable fd와 별도 held cwd를 동시에 받는 진입점이
-  없으므로 absolute `zig` pathname은 아직 실행 권위가 아니다. 이 adapter의 제품 caller는 0이어야 하며, pinned Zig fd+held source cwd
-  실행 경계가 먼저 닫히기 전에는 production runner에 연결하지 않는다.
+  release workflow의 전체 phase 배선을 완료하지 않는다. macOS 공개 API에는 held executable fd와 별도 held cwd를 함께 받는 fd-exec가
+  없으므로 그것을 제품 계약으로 두지 않는다. 공식 release의 실행 신뢰 경계는 protected tag·`release` environment의 GitHub-hosted
+  격리 runner이며, 같은 UID의 비신뢰 동시 프로세스가 executable pathname을 swap한 뒤 원복하는 공격은 이 경계 밖이다. 로컬 빌드와
+  로컬 업그레이드는 이 공식 release evidence 권위를 요구하지 않는다.
 
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한

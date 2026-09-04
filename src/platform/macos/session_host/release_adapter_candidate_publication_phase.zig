@@ -216,7 +216,7 @@ fn validAuditSeal(seal: [32]u8) bool {
     return !std.mem.allEqual(u8, &seal, 0);
 }
 
-fn deriveAuditSeal(bytes: []const u8) [32]u8 {
+pub fn deriveAuditSeal(bytes: []const u8) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(audit_domain);
     var length: [8]u8 = undefined;

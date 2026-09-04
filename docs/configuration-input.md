@@ -99,7 +99,8 @@ keybind = F4 = esc:[2J
   schema·특수 키·주석은 내장 기본 상태로 돌린다).
 - **편집기 전용 action**: `toggle_editor_wrap`(그 뷰의 줄 바꿈 토글)·`fold_all`·`unfold_all`·
   `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`·`delete_lines`(빌트인 `⇧⌘K`)·
-  `duplicate_lines`·`move_lines_up`·`move_lines_down`·`indent_lines`·`outdent_lines` — **줄 조작
+  `duplicate_lines`·`move_lines_up`·`move_lines_down`·`indent_lines`·`outdent_lines`·
+  `transform_to_uppercase`·`transform_to_lowercase`·`add_next_occurrence` — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
   `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서
@@ -116,6 +117,16 @@ keybind = F4 = esc:[2J
   | ~~**Option 단독은 터미널 입력이다**~~ **→ 편집기 Term 컨텍스트가 푼다**(2026-09-03) | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
   | **`⌘` 없는 `⌥` 는 터미널 입력이다** | `duplicate_lines`·`move_lines_up`·`move_lines_down` | VSCode 는 `⇧⌥↓`·`⌥↑↓` 인데 기본 표에는 **`⌘` 를 안 낀 `⌥` chord 가 하나도 없다**(실측 0개 — 위 `toggle_editor_wrap` 과 같은 근거). 들여쓰기·내어쓰기는 `Tab`·`⇧Tab` 으로 닿으므로 이 부류가 아니고, `delete_lines` 는 `⇧⌘K` 가 비어 있어 빌트인이 있다 |
   | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
+
+  **편집기 컨텍스트 기본키는 그 Term 에서만 선다**([키 입력과 단축키](key-input-and-shortcuts.md)
+  「편집기 Term 컨텍스트」) — `toggle_editor_wrap`(`⌥Z`) · `duplicate_lines`(`⇧⌥↓`) ·
+  `move_lines_up`/`_down`(`⌥↑`/`⌥↓`) · `add_next_occurrence`(**`⌘D`**). **전역 표는 안 바뀐다** —
+  터미널에서 `⌘D` 는 그대로 좌우 분할이고, 편집기 안에서만 컨텍스트 표가 그 앞에 선다. 그 예외의
+  근거는 그 문서의 「전역 chord 를 편집기가 가져가는 경우」가 소유한다.
+
+  **`input.option-as-meta = false` 면 Option 단독 chord 는 안 선다** — Swift 가 그 키를 입력기로 보내
+  resolver 까지 오지 않는다(설정이 이긴다). 그때는 커맨드 팔레트와 **설정 창의 키바인딩 편집**으로
+  다른 chord 를 준다. `⌘D` 는 `⌘` 를 끼므로 그 설정과 무관하다.
 
   **「Option 단독」 부류는 편집기 Term 컨텍스트가 푼다**([키 입력과 단축키](key-input-and-shortcuts.md)
   — 2026-09-03). 그 근거가 *"기본 표가 전역이라 터미널 Term 에서도 소비된다"* 였는데, **편집기 Term 에는

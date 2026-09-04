@@ -1758,6 +1758,19 @@ static void driveControlChannel(void) {
     // 계약(§4a: 재시도는 사용자가 그 화면에 다시 올 때다)과도 맞다.
     // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다(계약 §4a) — 채널이 아직 안
     // 닫혔는데 가져가면 그 뜻이 사라져 축이 영영 안 선다. 닫힘이 확인된 다음 tick 에 연다.
+    /* **닫기가 열기보다 «먼저» 다**(iOS 와 같은 자리). 순서가 뒤집혀 있으면, `wantControl` 이
+       닫기와 열기를 함께 세운 tick 에 채널이 마침 CLOSED 인 경우 **열고 나서 그 자리에서 닫는다** —
+       그 뒤로는 열고 닫기를 무한히 되풀이하며 아무 세션도 안 뜬다(실기 2026-09-04 계측: 채널 상태가
+       opening↔closed 로 진동했다). §4a 가 「한 번에 하나」이므로 닫는 것이 먼저다. */
+    if (maru_mobile_take_control_close()) {
+        /* **닫기 결과를 읽는다**(iOS 와 같은 자리) — 실패가 조용하면 원격 명령이 고아로 남아
+           그 뒤 모든 열기가 막힌다(실기 2026-09-04). */
+        int close_rc = maru_ssh_pump_close_control();
+        if (close_rc != 0)
+            LOGI("MARU_CONTROL close failed rc=%d: %s", close_rc, maru_ssh_pump_control_error());
+        g_control_open_ms = 0;
+    }
+
     const unsigned int control_ch = maru_ssh_pump_control_state();
     if (maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
         (control_ch == MARU_SSH_CONTROL_NONE || control_ch == MARU_SSH_CONTROL_CLOSED) &&
@@ -1794,11 +1807,6 @@ static void driveControlChannel(void) {
             g_control_retry_ms = 0;
             g_control_open_ms = nowMs();
         }
-    }
-
-    if (maru_mobile_take_control_close()) {
-        maru_ssh_pump_close_control();
-        g_control_open_ms = 0;
     }
 
     // **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는

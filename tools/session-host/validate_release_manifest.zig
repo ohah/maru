@@ -13,6 +13,7 @@ const compatibility = @import("release_adapter_github_current_compatibility");
 const apple_transport = @import("release_adapter_apple_transport");
 const pre_publish_product = @import("release_adapter_pre_publish_product");
 const verify_predecessor_product = @import("release_adapter_verify_predecessor_product");
+const candidate_release_driver = @import("release_adapter_candidate_release_driver");
 const builtin = @import("builtin");
 
 pub const phase_budget_ns: i128 = 20 * std.time.ns_per_min;
@@ -27,6 +28,7 @@ pub const Storage = struct {
     attestation: [attestation_capture_bytes]u8 = undefined,
     compatibility: [compatibility_capture_bytes]u8 = undefined,
     apple: apple_transport.Storage = undefined,
+    candidate: candidate_release_driver.Execution = .{},
 };
 
 const CurrentBootstrapper = struct {
@@ -79,6 +81,26 @@ const ProductDrivers = struct {
             return settleProductFailure(&execution, err);
         };
     }
+
+    pub fn publishCandidate(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        token: []const u8,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        return candidate_release_driver.run(
+            io,
+            allocator,
+            bootstrap,
+            token,
+            &storage.github_response[0..candidate_release_driver.max_scratch_bytes],
+            budget_ns,
+            &storage.candidate,
+        );
+    }
 };
 
 fn settleProductFailure(execution: anytype, original: anyerror) anyerror {
@@ -104,21 +126,22 @@ pub fn executeWith(
     var bootstrap: bootstrap_mod.Bootstrap = .{};
     try bootstrapper.load(allocator, args, &bootstrap);
     if (bootstrap.owner != &bootstrap) return error.InvalidBootstrap;
-    if (bootstrap.command == .publish_candidate) return error.UnsupportedCommand;
     const token = try tokens.read();
     switch (bootstrap.command) {
         .pre_publish => try drivers.prePublish(io, allocator, &bootstrap, token, phase_budget_ns, storage),
         .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, token, phase_budget_ns, storage),
-        .publish_candidate => unreachable,
+        .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, token, phase_budget_ns, storage),
     }
 }
 
 pub fn runCurrent(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    var storage: Storage = .{};
+    const storage = try allocator.create(Storage);
+    defer allocator.destroy(storage);
+    storage.* = .{};
     var bootstrapper = CurrentBootstrapper{};
     var tokens = CurrentTokenReader{};
     var drivers = ProductDrivers{};
-    try executeWith(io, allocator, args, &storage, &bootstrapper, &tokens, &drivers);
+    try executeWith(io, allocator, args, storage, &bootstrapper, &tokens, &drivers);
 }
 
 pub fn main(init: std.process.Init) !void {

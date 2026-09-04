@@ -71,6 +71,39 @@ test "borrowed publication rejects an unstarted deadline without publishing borr
     try std.testing.expectEqual(product.Deadline{}, deadline);
 }
 
+test "borrowed publication authority failure preserves a live caller deadline" {
+    var files: product.CandidateFiles = .{};
+    var candidate: product.CandidateProduct = .{};
+    var identity: product.CandidateEvidenceIdentity = .{};
+    var source: product.SourceTreeAuthority = .{};
+    var compatibility: product.CandidateCompatibility = .{};
+    var evidence: product.PinnedReleaseFile = .{};
+    var draft: product.DraftAuthority = .{};
+    var attestation: product.CandidateAttestation = .{};
+    var cli: product.PinnedCli = std.mem.zeroes(product.PinnedCli);
+    var execution: product.Execution = .{};
+    var deadline: product.Deadline = .{ .started_ns = 0, .expires_ns = std.math.maxInt(i128) };
+    deadline.owner = &deadline;
+    var response: [4096]u8 = undefined;
+    const failed = failed: {
+        product.runBorrowingDeadline(
+            std.testing.io,
+            std.testing.allocator,
+            inputs(&files, &candidate, &identity, &source, &compatibility, &evidence, &draft, &attestation, &cli),
+            "token",
+            &response,
+            &deadline,
+            &execution,
+        ) catch break :failed true;
+        break :failed false;
+    };
+    try std.testing.expect(failed);
+    try std.testing.expect(deadline.owner == &deadline);
+    try std.testing.expectEqual(@as(i128, 0), deadline.started_ns);
+    try std.testing.expectEqual(std.math.maxInt(i128), deadline.expires_ns);
+    try std.testing.expect(execution.isPristineForComposition());
+}
+
 test "pre-owned and copied execution are rejected before production work" {
     var files: product.CandidateFiles = .{};
     var candidate: product.CandidateProduct = .{};

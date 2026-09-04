@@ -15,6 +15,10 @@ pub const Deadline = struct {
     started_ns: i128 = 0,
     expires_ns: i128 = 0,
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return self.owner == null and self.started_ns == 0 and self.expires_ns == 0;
+    }
+
     pub fn remaining(self: *@This()) Error!i128 {
         var clock = RealClock{};
         return self.remainingWith(&clock) catch |err| switch (err) {

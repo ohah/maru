@@ -48,6 +48,7 @@ test "zero negative overflow and rollback fail closed" {
 test "copied pre-owned and empty owners expose no deadline" {
     var clock = Clock{ .values = &.{ 5, 6 } };
     var deadline: deadline_mod.Deadline = .{};
+    try std.testing.expect(deadline.isPristineForComposition());
     try deadline_mod.startWith(&clock, 10, &deadline);
     var copied = deadline;
     try std.testing.expectError(error.InvalidOwner, copied.remainingWith(&clock));
@@ -55,6 +56,7 @@ test "copied pre-owned and empty owners expose no deadline" {
     occupied.owner = &occupied;
     try std.testing.expectError(error.InvalidOwner, deadline_mod.startWith(&clock, 10, &occupied));
     try deadline.deinit();
+    try std.testing.expect(deadline.isPristineForComposition());
     try std.testing.expectError(error.InvalidOwner, deadline.remainingWith(&clock));
 }
 

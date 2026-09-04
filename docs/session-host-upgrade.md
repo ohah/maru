@@ -2681,13 +2681,15 @@ deadline 아래 조립하려면 세 production owner가 각자 새 expiry를 만
 시작하고 닫는다. borrowed 진입점은 caller가 이미 시작해 final address에 둔 `Deadline` pointer만 받고, 새 deadline을 시작하거나
 borrowed deadline을 deinit하지 않는다.
 
-각 `Execution`은 호출 중 active deadline pointer와 owned/borrowed 구분을 private transient state로 보존한다. preflight는 active
+각 `Execution`은 호출 중 active deadline pointer를 private transient state로 보존한다. prerequisite/publication의 owned 여부는
+호출 frame이 보존하고, deadline start/cleanup callback을 제공하는 baseline preparation만 그 구분도 transient state로 둔다. preflight는 active
 deadline이 self-owned이고 fresh한지, `Execution` 및 모든 input/output/path/buffer storage와 겹치지 않는지 첫 filesystem·child·remote
 mutation 전에 검사한다. 모든 기존 leaf와 authority fence는 이 exact pointer를 받아야 하며, 내부 `Execution.deadline`이나 caller가
 제출한 duration으로 바꿔치기할 수 없다. baseline preparation transaction의 기존 deadline cleanup callback은 borrowed mode에서
-freshness와 pointer identity만 재검증하고 caller deadline을 닫지 않는다.
+caller deadline을 검사하거나 닫지 않는다. pointer identity, freshness와 self-ownership은 cleanup 진입 전의 모든 leaf·authority fence와
+최종 성공 fence가 소유하며, 만료된 실패 경로도 local cleanup을 끝까지 수행한다.
 
-성공, local failure, cleanup failure와 remote audit-required 반환 모두 active deadline borrow와 owned/borrowed 표시는 제거한다.
+성공, local failure, cleanup failure와 remote audit-required 반환 모두 active deadline borrow와 baseline의 owned/borrowed 표시를 제거한다.
 owned `run`만 자기 deadline을 닫고, borrowed 진입점은 반환 뒤에도 caller deadline의 owner·start·expiry를 bytewise 그대로 남긴다.
 외부 deadline이 copied/foreign/unstarted/expired이거나 `Execution` 및 입력 storage에 alias되면 leaf call 0으로 fail-close한다. 성공 owner나
 cleanup retry owner는 deadline pointer를 보존하지 않으며, 후속 상위 transaction은 같은 deadline을 다음 phase에 직접 전달한다.

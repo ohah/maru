@@ -113,9 +113,15 @@ keybind = F4 = esc:[2J
   | 이유 | 해당 action | 무엇이 막고 있나 |
   |---|---|---|
   | **뺏을 것이 없다** | `toggle_symbol_picker` | `⇧⌘O`가 기본 표 어디에도 없다. 배선 전에는 `resolve`의 fallthrough에서 `.ignored`라 **누르면 아무 일도 안 일어나는** 상태였다 |
-  | **Option 단독은 터미널 입력이다** | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
+  | ~~**Option 단독은 터미널 입력이다**~~ **→ 편집기 Term 컨텍스트가 푼다**(2026-09-03) | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
   | **`⌘` 없는 `⌥` 는 터미널 입력이다** | `duplicate_lines`·`move_lines_up`·`move_lines_down` | VSCode 는 `⇧⌥↓`·`⌥↑↓` 인데 기본 표에는 **`⌘` 를 안 낀 `⌥` chord 가 하나도 없다**(실측 0개 — 위 `toggle_editor_wrap` 과 같은 근거). 들여쓰기·내어쓰기는 `Tab`·`⇧Tab` 으로 닿으므로 이 부류가 아니고, `delete_lines` 는 `⇧⌘K` 가 비어 있어 빌트인이 있다 |
   | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
+
+  **「Option 단독」 부류는 편집기 Term 컨텍스트가 푼다**([키 입력과 단축키](key-input-and-shortcuts.md)
+  — 2026-09-03). 그 근거가 *"기본 표가 전역이라 터미널 Term 에서도 소비된다"* 였는데, **편집기 Term 에는
+  PTY 가 없어** 그 Term 안에서는 뺏을 Meta/ESC 입력이 없다. 그래서 `toggle_editor_wrap`·`duplicate_lines`·
+  `move_lines_up`/`_down` 은 **편집기 컨텍스트 기본키**로 설 수 있다. **접기 다섯은 여전히 못 선다** —
+  막는 것이 *"한 chord 로 못 적는다"* 라 **다른 선행**이다.
 
   **컨텍스트가 필요한 부류와 섞지 않는다.** 「편집기 Term 컨텍스트가 서야 한다」는 조건은
   **이미 남이 쓰는 chord를 양보받을 때**의 것이고(`⌘C` — 터미널 선택이 쓴다, native-editor §9.1),

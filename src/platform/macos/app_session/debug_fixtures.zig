@@ -1492,8 +1492,12 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
         editor_ops.transformCase(self, term, true)
     else if (std.mem.eql(u8, op, "lower"))
         editor_ops.transformCase(self, term, false)
-    else
-        false;
+    else if (std.mem.eql(u8, op, "key_opt_z")) blk: {
+        // **키 경로로 지난다**(§편집기 Term 컨텍스트). 함수를 직접 부르면 컨텍스트 배선이 빠져도
+        // 화면이 같아 보인다 — `⌥Z` 가 실제로 랩을 토글하는지는 이 경로로만 드러난다.
+        _ = self.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } }) catch {};
+        break :blk true;
+    } else false;
     self.debug_edit_op_done = true;
     self.metal_dirty = true;
 }

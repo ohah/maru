@@ -177,8 +177,17 @@ pub fn toggleFindReplace(self: *AppSession) void {
 pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
     if (!isEditorFindTarget(self)) return false;
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-    const resolved = self.loaded_config.keyBindingResolver().resolve(event, &buf, .{}) catch return false;
-    const action = switch (resolved) {
+    // **편집기 문맥이면 편집기 컨텍스트가 판정한다**(key-input-and-shortcuts.md).
+    //
+    // **지금은 전역 `resolve` 와 답이 같다** — 이 가로채기가 찾는 chord 넷(`⌥⌘C`·`⌥⌘W`·`⌥⌘L`·`⌥⌘D`)은
+    // 전부 **전역 표**에 있어 두 resolver 가 같은 값을 낸다. 그래서 「전역으로 되돌리는」 변이는
+    // 판정자로 못 잡는다(변이 E10 이 살아남는 것이 정상이다).
+    //
+    // 그럼에도 여기를 컨텍스트로 두는 이유는 **찾기 규칙에 편집기 전용 chord 가 붙는 날** 때문이다.
+    // 그때 이 자리만 전역이면 같은 키가 **찾기가 떠 있을 때와 아닐 때 다르게** 풀리고, 그 갈림은
+    // 사용자가 설명할 수 없다.
+    _ = &buf;
+    const action = switch (self.loaded_config.keyBindingResolver().resolveEditor(event)) {
         .app_action => |a| a,
         else => return false,
     };

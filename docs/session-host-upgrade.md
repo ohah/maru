@@ -2040,6 +2040,27 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   runner까지 하나의 owner로 묶는 transaction, artifact attestation, manifest/draft publication과 live release workflow 호출은
   후속 wiring이다.
 
+  baseline 준비 transaction의 단일 순서 소유자는
+  `src/platform/macos/session_host/release_adapter_candidate_baseline_preparation.zig`다. caller가 선택한 positive budget으로
+  final-address absolute deadline을 exact once 시작한 뒤, absent baseline root에 workspace를 준비하고 같은 deadline 아래 candidate
+  app을 결속한 다음 기존 baseline runner를 **새 deadline을 시작하지 않는 borrowed-deadline 진입점**으로 exact once 실행한다.
+  workspace·app·runner는 각각 기존 production adapter가 의미와 filesystem 권위를 계속 소유하며, transaction은 caller가 이 셋의
+  순서나 deadline identity를 바꾸거나 일부 성공만 꺼내 갈 수 없게 하는 orchestration owner다. runner 성공 뒤 candidate와 deadline을
+  마지막으로 재검증하고 deadline을 정리한 경우에만 workspace·app·두 leaf·aggregate evidence를 하나의 성공 owner로 게시한다.
+
+  deadline 시작 실패는 side effect 0인 failure-pristine leaf다. 그 뒤 실패는 attempted runner→app→workspace 순서로 best-effort
+  cleanup하고 마지막에 deadline을 정리한다. cleanup이 모두 성공하면 transaction은 empty로 돌아가 원래 오류를 보존한다. 어느
+  cleanup이든 실패하면 원래 오류보다 `CleanupFailed`가 우선하며, 아직 정리되지 않은 exact owner만 같은 final-address transaction에
+  남겨 `retryCleanup`으로 다시 회수한다. 성공 owner의 cleanup도 같은 역순이며 일부 cleanup 성공 뒤 뒤 단계가 실패하면 성공한 owner를
+  다시 만들지 않고 남은 retry set만 보존한다. transaction은 no-side-effect preflight를 deadline 시작보다 먼저 호출해야 하며,
+  copied/pre-owned transaction과 concrete transaction/deadline/workspace/app/runner 또는 root/path storage alias는 이 preflight에서
+  filesystem·child 전에 fail-close해야 한다. workspace·candidate app authority drift도 runner 실행 전에 닫는다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-preparation`은 preflight 선행, exact order와 shared deadline identity, 각
+  fail-index의 attempted reverse cleanup, deadline-start pristine failure, 성공 owner 보존, partial cleanup retry와 terminal empty state를
+  Debug·ReleaseFast로 검증한다. concrete storage alias 행렬과 실제 authority drift는 후속 production wiring gate가 소유한다. 이 gate는
+  leaf 의미를 복제하거나 artifact attestation, manifest/draft publication, live release workflow 호출 또는 frozen U5 제품 E2E를
+  완료했다고 주장하지 않는다.
+
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
   final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address

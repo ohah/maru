@@ -1011,6 +1011,15 @@ HOME/leaf alias, 기존 HOME/leaf와 release harness의 unlink를 거부하고 �
 소비하는지 검증한다. 이 gate는 production runner의 candidate 재검증·역순 cleanup·aggregate publication을 대신하지 않는다.
 실제 Developer ID candidate 실행은 trusted release workflow가 이 옵션에 앞선 staging app absolute pathname을 전달할 때 완료된다.
 
+U5 baseline child의 Zig 실행 권위는 protected tag와 같은 source SHA의 GitHub-hosted macOS ARM64 runner가 mise 설치 직후 고정한
+canonical absolute pathname·size·SHA-256과 exact version `0.16.0`이다. final-address `ZigToolchainAuthority`는 held file과 pathname,
+parent identity를 child 실행 직전·직후 재검증하고 raw caller pathname을 baseline executor에 노출하지 않는다.
+`test-session-host-release-adapter-zig-toolchain-authority`는 Debug·ReleaseFast actual filesystem에서 owner와 drift 경계를 검증하고,
+workflow contract gate는 capture가 mise 뒤·baseline 실행 앞에 있으며 version/path/size/digest를 모두 게시하는지 고정한다. macOS에 없는
+fd-exec를 요구하지 않으며 같은 UID의 비신뢰 동시 pathname swap은 GitHub-hosted 격리 release job의 threat model 밖이다. 로컬 빌드와
+로컬 업그레이드는 공식 release evidence 권위를 요구하지 않는다. 이 행은 두 baseline child의 workflow phase orchestration이나
+Developer ID candidate 실행 완료를 단독으로 증명하지 않는다.
+
 U5 held evidence input은 게시된 `PinnedReleaseFile`의 final pathname identity를 전후로 확인하면서 bytes는 기존 held fd에서만
 bounded exact read한다. 최초 inode/size/SHA와 read 전후 fingerprint·EOF가 모두 같을 때만 `Input`을 반환하며 copied owner,
 pathname replacement, cap·allocation·content drift에서는 publication 0이다. `test-session-host-release-adapter-files`가 actual

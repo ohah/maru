@@ -45,6 +45,16 @@ test "runner validates final deadline after final candidate fence" {
     try std.testing.expect(std.mem.indexOf(u8, steps.log(), "final,deadline,clean-evidence") != null);
 }
 
+test "borrowed runner uses the supplied deadline without starting another" {
+    var steps = Steps{};
+    var deadline = Steps{};
+    var execution: runner.Execution = .{};
+    try runner.executeWithBorrowedDeadline(&steps, &deadline, &execution);
+    try std.testing.expect(execution.product_execution.ownsSuccessfulChildren());
+    try std.testing.expectEqualStrings("bind,initial,default,after-default,signed,after-signed,evidence,final,deadline", steps.log());
+    try std.testing.expectEqual(@as(usize, 0), deadline.length);
+}
+
 test "production retry releases deadline-only cleanup state" {
     var execution: runner.Execution = .{};
     execution.owner = &execution;
@@ -92,6 +102,34 @@ test "successful cleanup remains retryable after a later child fails" {
     steps.cleanup_fail = .none;
     try runner.cleanupWith(&steps, &execution);
     try std.testing.expect(execution.owner == null);
+}
+
+test "production cleanup accepts successful runner after input borrows are scrubbed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
+    var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&path_storage, "{s}/baseline", .{root_buf[0..root_len]});
+    var workspace: runner.Workspace = .{};
+    try runner.prepareWorkspaceForTest(&workspace, root);
+    defer workspace.cleanup() catch {};
+    var execution: runner.Execution = .{};
+    execution.owner = &execution;
+    execution.io = std.testing.io;
+    execution.cleanup_workspace = &workspace;
+    execution.borrowed_deadline = true;
+    execution.evidence.owner = &execution.evidence;
+    execution.product_execution = .{
+        .owner = &execution.product_execution,
+        .candidate_bound = true,
+        .default_false_attempted = true,
+        .signed_app_quit_attempted = true,
+        .evidence_attempted = true,
+        .successful = true,
+    };
+    try std.testing.expect(execution.inputs == null);
+    try std.testing.expectError(error.CleanupFailed, execution.cleanup());
 }
 
 const Point = enum { none, final, deadline };

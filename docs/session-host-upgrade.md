@@ -2766,6 +2766,32 @@ scrub, complete owner set, prerequisite cleanup retry와 draft 이후 audit grap
 조립하며 upgrade-B predecessor 실행/profile 선택, executable argument/bootstrap, `.github/workflows/release.yml` 호출과 frozen signed U5
 제품 E2E를 완료하지 않는다.
 
+### 11.44 baseline-A candidate executable contract와 bootstrap
+
+공식 release adapter executable이 §11.43 owner를 선택하는 유일한 새 command는 `publish-candidate`다. allocation-free
+`release_adapter_contract.parseArgs`는 기존 공통 `--repo`, `--tag`, `--github-cli`, `--github-cli-sha256`와 함께 다음 값을 exact once
+요구한다: `--test-uuid`, `--dmg`, `--frozen-executable`, `--dmg-work`, `--baseline-workspace`, `--app-main-executable`,
+`--app-cli-executable`, `--manifest`, `--source-root`, `--zig`, `--zig-size`, `--zig-sha256`. unknown·duplicate·missing·empty option,
+canonical lowercase RFC 4122 v4가 아닌 UUID, non-canonical/non-absolute pathname, zero·non-decimal·leading-zero·overflow Zig size,
+lowercase 64-hex가 아닌 digest를 filesystem 접근 전에 거부한다. source root는 후속 driver가 existing directory로 여는 입력이라
+descendant product path를 포함할 수 있지만 나머지 product/work/output/CLI/Zig pathname은 pairwise same 또는 ancestor/descendant일 수 없다. manifest basename은 tag에서
+유도한 exact `Maru-<version>-session-host-release.json`이다.
+
+`release_adapter_executable_bootstrap.Bootstrap`은 세 command union을 그대로 닫되 `publish-candidate`도 기존과 같은 protected
+`ohah/maru` tag context와 GitHub-hosted macOS ARM64 runner에 결속한다. checkout 전에 pin한 GitHub CLI pathname과 SHA만 bootstrap이
+자기 fixed storage로 복사하고 pin하며, candidate command에서 caller가 준 repository/tag는 trusted context와 exact 일치해야 한다.
+test UUID, product/work/source pathname과 Zig pathname/size/SHA는 parser가 검증한 command view로만 보존하고 bootstrap이 별도 scalar를
+재조립하지 않는다. copied/pre-owned result, context/runner drift와 CLI pin 실패는 command owner publication 0이다.
+
+focused contract/bootstrap gate는 세 command의 option-order independence, exact field set, candidate UUID/Zig/path/manifest 검증,
+source-root 포함 규칙, command/context 결속, context→runner→CLI pin 순서와 copied/pre-owned 차단을 Debug·ReleaseFast에서 검증한다.
+이 command는 executable dispatch에는 아직 연결하지 않는 dormant vocabulary다. Zig `ZigToolchainAuthority`와 source-directory fd를
+열거나 §11.43 owner를 실행하지 않는다. driver보다 먼저 별도 typed source-directory owner가 trusted runner의 exact
+`GITHUB_WORKSPACE` pathname을 context/source authority에 결속하고 no-follow로 연 held directory fd를 소유해야 하며, workflow pathname을
+그냥 열어 raw fd로 §11.43에 넘기는 경로는 금지한다. 후속 executable driver는 성공 owner는
+cleanup하고 pristine/cleanup-required 실패만 bounded cleanup하되 `needsAudit()` graph에 기존 범용 `settleProductFailure`를 호출해
+`CleanupFailed`로 덮어쓰지 않아야 한다. live release workflow 호출과 frozen signed U5 제품 E2E도 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

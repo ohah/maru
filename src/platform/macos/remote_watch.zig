@@ -86,12 +86,29 @@ pub const Channel = struct {
         return code;
     }
 
-    pub fn stop(self: *Channel) void {
+    /// 자식과 버퍼만 놓는다 — **판단은 안 지운다**(적대적 검증 2026-09-04 1 회차).
+    ///
+    /// ⚠️ `stop` 하나로 두 뜻을 쓰면 RW5 가 풀린다. 「도크가 안 보인다」는 **잠시 멈춤**이고
+    /// 「대상이 바뀌었다」는 **놓아줌**인데, 둘 다 `.idle` 로 되돌리면 도크를 껐다 켤 때마다
+    /// 「이 원격에서는 못 한다」가 잊혀 남의 서버에 ssh 자식이 다시 뜨고, RW6 의 배너도 다시 뜬다.
+    fn release(self: *Channel, next: Phase) void {
         if (self.started) _ = ssh_upload.stopRemoteWatch(self.stream);
         self.started = false;
         self.stream = .{ .pid = 0, .out_fd = -1, .in_fd = -1 };
-        self.phase = .idle;
+        self.phase = next;
         self.pending.clearRetainingCapacity();
+    }
+
+    /// 도크가 안 보이거나 SCM 뷰가 아니다 — 자식은 놓되 **`.gave_up` 은 지키다**. 그 판단은 화면이
+    /// 아니라 **저 호스트**에 대한 것이라 도크를 껐다 켠다고 달라지지 않는다.
+    pub fn pause(self: *Channel) void {
+        self.release(if (self.phase == .gave_up) .gave_up else .idle);
+    }
+
+    /// 대상이 바뀌었다(다른 호스트이거나 로컬로 돌아왔다) — 판단째로 놓는다. 「못 한다」는 **그
+    /// 호스트**의 성질이었으므로 새 대상에는 적용되지 않는다.
+    pub fn stop(self: *Channel) void {
+        self.release(.idle);
     }
 };
 
@@ -151,6 +168,29 @@ test "상한을 넘는 부분 줄은 버린다 — 무한히 모으지 않는다
     try buf.appendNTimes(a, 'x', max_pending + 1);
     try testing.expectEqual(@as(u32, 0), takeChanges(&buf, a));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "잠시 멈춤은 «못 한다» 는 판단을 지키고, 놓아줌은 지운다" {
+    // 적대적 검증 2026-09-04 1 회차. `stop` 하나로 두 뜻을 쓰다가 RW5 가 풀렸다 — 도크를 감추면
+    // `.gave_up` 이 `.idle` 로 돌아가, 다시 켤 때마다 못 하는 원격에 ssh 자식이 뜨고 배너도 되풀이됐다.
+    var c: Channel = .{};
+
+    // 「못 한다」는 **호스트**의 성질이라 화면을 감췄다 켠다고 달라지지 않는다.
+    c.phase = .gave_up;
+    c.pause();
+    try testing.expectEqual(Phase.gave_up, c.phase);
+
+    // 대상이 바뀌면 판단째로 놓는다 — 새 호스트에는 그 성질이 없다.
+    c.phase = .gave_up;
+    c.stop();
+    try testing.expectEqual(Phase.idle, c.phase);
+
+    // 나머지 상태는 잠시 멈춤에서도 처음으로 돌아간다 — 다시 보일 때 곧장 띄우면 된다.
+    for ([_]Phase{ .backoff, .watching, .idle }) |from| {
+        c.phase = from;
+        c.pause();
+        try testing.expectEqual(Phase.idle, c.phase);
+    }
 }
 
 test "«다시 시도해도 소용없는» 종료만 포기로 읽는다" {

@@ -233,7 +233,10 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     // **도크가 안 보이면 안 돈다.** 감시는 화면을 위한 것이고, 안 보이는 동안 원격에 프로세스를
     // 띄워 둘 이유가 없다(`pumpRepoStatus` 와 같은 게이트).
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) {
-        self.remote_watch.stop();
+        // **잠시 멈춤이지 놓아줌이 아니다**(적대적 검증 2026-09-04 1 회차). `stop()` 을 쓰면 `.gave_up`
+        // 이 `.idle` 로 풀려 도크를 껐다 켤 때마다 못 하는 원격에 다시 띄운다 — RW5 가 없앤 바로 그
+        // 폭주이고, RW6 의 배너까지 되풀이된다. 그 판단은 **호스트**의 성질이라 화면과 무관하다.
+        self.remote_watch.pause();
         return;
     }
     const dest = self.git_repo_dest orelse {
@@ -250,7 +253,16 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     //
     // 루트는 읽기 결과의 `repo_root`(`rev-parse --show-toplevel`)가 이미 들고 있다. **아직 없으면
     // 안 띄운다** — 첫 읽기가 끝나면 다음 tick 이 띄운다(추측한 루트를 감시하느니 한 tick 늦는 편이 낫다).
-    const repo = self.git_repo_remote_root orelse return;
+    //
+    // ⚠️ **그냥 나가지 않는다**(적대적 검증 2026-09-04 3 회차). 이 이른 반환은 위 둘과 달리 자식을
+    // 든 채로 나갈 수 있는 자리다 — 루트만 비우고 호스트는 그대로인 전이가 생기면(로컬 결과가 도착한
+    // 뒤 `rememberGitRepoDest` 가 아직 안 돈 tick 이 그렇다) 감시자가 «옛 저장소» 를 계속 보고, 아무도
+    // 드레인하지 않아 파이프가 차면 저쪽에서 write 에 걸려 선다. 지속 재현은 못 만들었지만 그 창을
+    // 열어 둘 이유가 없다 — 놓는 값이 0 이다(안 띄운 상태면 `pause` 는 아무 일도 안 한다).
+    const repo = self.git_repo_remote_root orelse {
+        self.remote_watch.pause();
+        return;
+    };
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
 
     switch (self.remote_watch.phase) {

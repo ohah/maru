@@ -7220,7 +7220,18 @@ pub const AppSession = struct {
             // restore-first attach-only backend는 존재 자체가 current spawn host 준비 완료를 뜻하지 않는다.
             // 같은 pool에 current adapter를 게시하고 기존 backend를 승격해야 N-1 runtime과 신규 Term을 함께 보존한다.
             if (app_remote_backend != null and
-                (app_remote_host_pool == null or app_remote_host_pool.?.spawnHostId() != null)) return;
+                (app_remote_host_pool == null or app_remote_host_pool.?.spawnHostId() != null))
+            {
+                // **쓸 수 있는 backend 가 있으면 래치를 푼다.** 래치의 전제는 「host 에 못 붙는다」인데
+                // 여기 도달했다는 것은 그 전제가 **이미 거짓**이라는 뜻이다 — spawn 가능한 backend 가
+                // 서 있다. 안 풀면 `backendForNew` 가 계속 in-process 를 골라, **붙어 있는데도 새 Term 이
+                // 원격으로 안 열린다.**
+                //
+                // 이 자리가 조기 반환이라 아래 성공 경로의 `clearHostConnectFailure()` 에 **못 닿는다**.
+                // 그래서 여기서도 푼다 — 「푸는 곳은 하나」 규율을 지키려고 같은 함수를 부른다.
+                clearHostConnectFailure();
+                return;
+            }
             // §6 L291: 이미 실패로 판명됐으면 바로 notice + in-process 폴백. **다만 영영은 아니다** —
             // `host_connect_retry_at_ms` 가 지나면 한 번 더 붙어 본다(위 그 변수의 이유). 그 전에는
             // 예전과 똑같이 즉시 반환해 창 여는 길을 안 막는다.

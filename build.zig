@@ -3895,6 +3895,18 @@ pub fn build(b: *std.Build) void {
     const run_i18n_literal_boundary_tests = b.addRunArtifact(i18n_literal_boundary_tests);
     run_i18n_literal_boundary_tests.setCwd(b.path("."));
 
+    // 기본 `test` 그래프에 셸 단계가 **조용히** 늘지 않는가. 늘면 그 스크립트가 안 도는 호스트에서
+    // 게이트가 통째로 빨개지고, 그 잡음에 진짜 실패가 묻힌다(§2m.111 — 실제로 22 커밋 동안 그랬다).
+    const shell_gate_ledger_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/shell_gate_ledger.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_shell_gate_ledger_tests = b.addRunArtifact(shell_gate_ledger_tests);
+    run_shell_gate_ledger_tests.setCwd(b.path("."));
+
     // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
     // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
     const conflict_marker_boundary_tests = addProjectTest(b, .{
@@ -5852,6 +5864,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);
+    boundary_step.dependOn(&run_shell_gate_ledger_tests.step);
     boundary_step.dependOn(&run_i18n_orphan_key_boundary_tests.step);
     boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
 
@@ -6076,7 +6089,11 @@ pub fn build(b: *std.Build) void {
         "Check the single-subject release attestation action",
     );
     session_host_release_attestation_action_step.dependOn(&session_host_release_attestation_action_contract.step);
-    test_step.dependOn(&session_host_release_attestation_action_contract.step);
+    // **이 호스트에서는 안 돈다.** `pin-subject.sh` 가 `case $(uname -s)` 에서 모르는 OS 를
+    // `*) return 1` 로 닫는다(§2m.111 실측: MINGW64 에서 EXIT=1). 계약이 깨진 것이 아니라 «이 호스트를
+    // 모른다» 인데 게이트에는 똑같이 빨강으로 보였고, 그래서 main 이 22 커밋 동안 빨갰다.
+    // 원장(`tests/boundary/shell_gate_ledger.zig`)이 이 사실을 `.posix_only` 로 들고 있다.
+    if (posix_host_tests) test_step.dependOn(&session_host_release_attestation_action_contract.step);
 
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);

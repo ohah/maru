@@ -32,6 +32,7 @@ pub const PinnedReleaseFile = files_mod.PinnedReleaseFile;
 pub const DraftAuthority = draft_creation.DraftAuthority;
 pub const CandidateAttestation = candidate_attestation.CandidateAttestation;
 pub const PinnedCli = cli_authority.PinnedExecutable;
+pub const Deadline = deadline_mod.Deadline;
 
 pub const Paths = struct { dmg: [:0]const u8, frozen_executable: [:0]const u8, evidence: [:0]const u8, manifest: [:0]const u8 };
 pub const Cli = struct { path: [:0]const u8, pinned: *const PinnedCli };
@@ -68,18 +69,19 @@ pub const Execution = struct {
     allocator: std.mem.Allocator = undefined,
     audit_storage: ?[]u8 = null,
     audit_len: usize = 0,
+    active_deadline: ?*Deadline = null,
 
     pub fn isPristineForComposition(self: *const @This()) bool {
         return self.pristine();
     }
     pub fn ownsSuccessfulOutputs(self: *const @This()) bool {
-        return self.owner == self and self.transaction.ownsCompletePublication() and self.deadline.owner == null and
+        return self.owner == self and self.transaction.ownsCompletePublication() and self.deadline.isPristineForComposition() and
             self.manifest.owner == &self.manifest and self.authored.owner == &self.authored and
             self.attached.owner == &self.attached and self.redownloaded.owner == &self.redownloaded and
             self.published.owner == &self.published and self.verified.owner == &self.verified and !self.hasBorrowed();
     }
     pub fn needsAudit(self: *const @This()) bool {
-        return self.owner == self and self.transaction.needsAudit();
+        return self.owner == self and self.transaction.needsAudit() and self.deadline.isPristineForComposition() and !self.hasBorrowed();
     }
     pub fn cleanup(self: *@This()) !void {
         if (!self.ownsSuccessfulOutputs()) return error.InvalidOwner;
@@ -88,46 +90,58 @@ pub const Execution = struct {
         self.* = .{};
     }
     pub fn retryCleanup(self: *@This()) !void {
-        if (self.owner != self or !self.transaction.needsCleanup() or self.hasBorrowed()) return error.InvalidOwner;
+        if (self.owner != self or !self.transaction.needsCleanup() or !self.deadline.isPristineForComposition() or self.hasBorrowed()) return error.InvalidOwner;
         var steps = ConcreteSteps{ .execution = self };
         try phase.retryCleanupWith(&steps, &self.transaction);
         self.* = .{};
     }
     fn pristine(self: *const @This()) bool {
-        return self.owner == null and self.transaction.isPristineForComposition() and self.deadline.owner == null and
-            self.deadline.started_ns == 0 and self.deadline.expires_ns == 0 and pristineManifest(&self.manifest) and
+        return self.owner == null and self.transaction.isPristineForComposition() and self.deadline.isPristineForComposition() and pristineManifest(&self.manifest) and
             pristineAuthored(&self.authored) and pristineAttachment(&self.attached) and pristineRedownload(&self.redownloaded) and
             pristinePublished(&self.published) and pristineVerified(&self.verified) and !self.hasBorrowed() and
             self.audit_storage == null and self.audit_len == 0;
     }
     fn hasBorrowed(self: *const @This()) bool {
-        return self.inputs != null or self.token.len != 0 or self.response.len != 0;
+        return self.inputs != null or self.token.len != 0 or self.response.len != 0 or self.active_deadline != null;
     }
     fn clearBorrowed(self: *@This()) void {
         self.inputs = null;
         self.token = "";
         self.response = &.{};
+        self.active_deadline = null;
     }
 };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, token: []const u8, response: []u8, budget_ns: i128, execution: *Execution) !void {
     if (!execution.pristine()) return error.InvalidOwner;
-    try validateAliases(inputs, token, response, execution);
+    try validateAliases(inputs, token, response, execution, null);
+    try deadline_mod.start(budget_ns, &execution.deadline);
+    return runWithDeadline(io, allocator, inputs, token, response, &execution.deadline, true, execution);
+}
+
+pub fn runBorrowingDeadline(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, token: []const u8, response: []u8, deadline: *Deadline, execution: *Execution) !void {
+    if (!execution.pristine()) return error.InvalidOwner;
+    try validateAliases(inputs, token, response, execution, deadline);
+    _ = try deadline.remaining();
+    return runWithDeadline(io, allocator, inputs, token, response, deadline, false, execution);
+}
+
+fn runWithDeadline(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, token: []const u8, response: []u8, deadline: *Deadline, owns_deadline: bool, execution: *Execution) !void {
     execution.owner = execution;
     execution.inputs = inputs;
     execution.token = token;
     execution.response = response;
     execution.io = io;
     execution.allocator = allocator;
+    execution.active_deadline = deadline;
     errdefer {
         if (execution.owner == execution and execution.transaction.isPristineForComposition()) execution.* = .{};
     }
-    try deadline_mod.start(budget_ns, &execution.deadline);
     var steps = ConcreteSteps{ .execution = execution };
-    const outcome = phase.executeWith(&steps, &execution.deadline, &execution.transaction);
+    const outcome = phase.executeWith(&steps, deadline, &execution.transaction);
     releaseAudit(execution);
     execution.clearBorrowed();
-    if (execution.deadline.owner != null) execution.deadline.deinit() catch return error.CleanupFailed;
+    if (owns_deadline and execution.deadline.owner != null) execution.deadline.deinit() catch return error.CleanupFailed;
     outcome catch |err| {
         if (execution.transaction.isPristineForComposition()) execution.* = .{};
         return err;
@@ -146,7 +160,7 @@ const ConcreteSteps = struct {
         return self.execution.inputs orelse error.InvalidOwner;
     }
     pub fn validatePreflight(self: *@This(), publication: *phase.Publication, deadline: *deadline_mod.Deadline) !void {
-        if (publication != &self.execution.transaction or deadline != &self.execution.deadline or self.execution.owner != self.execution) return error.InvalidOwner;
+        if (publication != &self.execution.transaction or deadline != self.execution.active_deadline or self.execution.owner != self.execution) return error.InvalidOwner;
         _ = try self.input();
     }
     pub fn captureAuditBytes(self: *@This(), deadline: *deadline_mod.Deadline) ![]const u8 {
@@ -258,7 +272,7 @@ fn buildAudit(allocator: std.mem.Allocator, i: Inputs, storage: []u8, held_manif
     return writer.buffered();
 }
 
-fn validateAliases(i: Inputs, token: []const u8, response: []u8, execution: *Execution) !void {
+fn validateAliases(i: Inputs, token: []const u8, response: []u8, execution: *Execution, deadline: ?*Deadline) !void {
     const result = std.mem.asBytes(execution);
     const owners = [_][]const u8{ std.mem.asBytes(i.identity), std.mem.asBytes(i.files), std.mem.asBytes(i.product), std.mem.asBytes(i.source), std.mem.asBytes(i.compatibility), std.mem.asBytes(i.evidence), std.mem.asBytes(i.draft), std.mem.asBytes(i.candidate_attestation), std.mem.asBytes(i.cli.pinned) };
     for (owners, 0..) |value, index| for (owners[0..index]) |prior| if (overlaps(value, prior)) return error.InvalidOwner;
@@ -281,6 +295,15 @@ fn validateAliases(i: Inputs, token: []const u8, response: []u8, execution: *Exe
     }
     if (overlaps(result, token) or overlaps(result, response)) return error.InvalidOwner;
     if (overlaps(token, response)) return error.InvalidOwner;
+    if (deadline) |value| {
+        const bytes = std.mem.asBytes(value);
+        if (overlaps(result, bytes) or overlaps(token, bytes) or overlaps(response, bytes)) return error.InvalidOwner;
+        for (values) |item| if (overlaps(bytes, item)) return error.InvalidOwner;
+        if (i.predecessor) |predecessor| {
+            for ([_][]const u8{ std.mem.asBytes(predecessor.identity), std.mem.asBytes(predecessor.authenticated), std.mem.asBytes(predecessor.held_manifest), std.mem.asBytes(predecessor.assets) }) |owner_bytes|
+                if (overlaps(bytes, owner_bytes)) return error.InvalidOwner;
+        }
+    }
     if (response.len == 0) return error.InvalidBuffer;
 }
 

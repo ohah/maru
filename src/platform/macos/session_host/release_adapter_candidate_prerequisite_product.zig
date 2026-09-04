@@ -29,6 +29,7 @@ pub const CandidateProduct = candidate_product.CandidateProduct;
 pub const SourceTreeAuthority = source_tree.SourceTreeAuthority;
 pub const CandidateEvidenceIdentity = candidate_identity.CandidateEvidenceIdentity;
 pub const CandidateCompatibility = compatibility_mod.CandidateCompatibility;
+pub const Deadline = deadline_mod.Deadline;
 
 pub const Paths = candidate_product.Paths;
 pub const Cli = struct { path: [:0]const u8, pinned: *const PinnedCli };
@@ -59,6 +60,7 @@ pub const Execution = struct {
     scratch: []u8 = &.{},
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
+    active_deadline: ?*Deadline = null,
 
     pub fn isPristineForComposition(self: *const @This()) bool {
         return self.pristine();
@@ -66,7 +68,7 @@ pub const Execution = struct {
 
     pub fn ownsCompletePrerequisites(self: *const @This()) bool {
         return self.owner == self and self.transaction.ownsCompletePrerequisites() and
-            self.deadline.owner == null and self.attestation.owner == &self.attestation and
+            self.deadline.isPristineForComposition() and self.attestation.owner == &self.attestation and
             self.draft.owner == &self.draft and self.files.owner == &self.files and
             self.product.owner == &self.product and self.source.owner == &self.source and
             self.identity.owner == &self.identity and self.compatibility.owner == &self.compatibility and
@@ -74,7 +76,7 @@ pub const Execution = struct {
     }
 
     pub fn needsAudit(self: *const @This()) bool {
-        return self.owner == self and self.transaction.needsAudit() and self.deadline.owner == null and
+        return self.owner == self and self.transaction.needsAudit() and self.deadline.isPristineForComposition() and
             !self.hasBorrowed();
     }
 
@@ -86,7 +88,7 @@ pub const Execution = struct {
     }
 
     pub fn retryCleanup(self: *@This()) !void {
-        if (self.owner != self or !self.transaction.needsCleanup() or self.deadline.owner != null or self.hasBorrowed())
+        if (self.owner != self or !self.transaction.needsCleanup() or !self.deadline.isPristineForComposition() or self.hasBorrowed())
             return error.InvalidOwner;
         var steps = ConcreteSteps{ .execution = self };
         try phase.retryCleanupWith(&steps, &self.transaction);
@@ -95,20 +97,21 @@ pub const Execution = struct {
 
     fn pristine(self: *const @This()) bool {
         return self.owner == null and self.transaction.isPristineForComposition() and
-            self.deadline.owner == null and self.deadline.started_ns == 0 and self.deadline.expires_ns == 0 and
+            self.deadline.isPristineForComposition() and
             pristineAttestation(&self.attestation) and pristineDraft(&self.draft) and
             pristineFiles(&self.files) and pristineProduct(&self.product) and pristineSource(&self.source) and
             pristineIdentity(&self.identity) and pristineCompatibility(&self.compatibility) and !self.hasBorrowed();
     }
 
     fn hasBorrowed(self: *const @This()) bool {
-        return self.inputs != null or self.token.len != 0 or self.scratch.len != 0;
+        return self.inputs != null or self.token.len != 0 or self.scratch.len != 0 or self.active_deadline != null;
     }
 
     fn clearBorrowed(self: *@This()) void {
         self.inputs = null;
         self.token = "";
         self.scratch = &.{};
+        self.active_deadline = null;
     }
 };
 
@@ -123,24 +126,51 @@ pub fn run(
 ) !void {
     if (!execution.pristine()) return error.InvalidOwner;
     if (budget_ns <= 0) return error.InvalidBudget;
-    try validateAliases(inputs_value, token, scratch, execution);
+    try validateAliases(inputs_value, token, scratch, execution, null);
     try validateStatic(inputs_value, token, scratch);
 
+    try deadline_mod.start(budget_ns, &execution.deadline);
+    return runWithDeadline(io, allocator, inputs_value, token, scratch, &execution.deadline, true, execution);
+}
+
+pub fn runBorrowingDeadline(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    inputs_value: Inputs,
+    token: []const u8,
+    scratch: []u8,
+    deadline: *Deadline,
+    execution: *Execution,
+) !void {
+    if (!execution.pristine()) return error.InvalidOwner;
+    try validateAliases(inputs_value, token, scratch, execution, deadline);
+    try validateStatic(inputs_value, token, scratch);
+    _ = try deadline.remaining();
+    return runWithDeadline(io, allocator, inputs_value, token, scratch, deadline, false, execution);
+}
+
+fn runWithDeadline(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    inputs_value: Inputs,
+    token: []const u8,
+    scratch: []u8,
+    deadline: *Deadline,
+    owns_deadline: bool,
+    execution: *Execution,
+) !void {
     execution.owner = execution;
     execution.inputs = inputs_value;
     execution.token = token;
     execution.scratch = scratch;
     execution.io = io;
     execution.allocator = allocator;
-    deadline_mod.start(budget_ns, &execution.deadline) catch |err| {
-        execution.* = .{};
-        return err;
-    };
+    execution.active_deadline = deadline;
 
     var steps = ConcreteSteps{ .execution = execution };
-    const outcome = phase.executeWith(&steps, &execution.deadline, &execution.transaction);
+    const outcome = phase.executeWith(&steps, deadline, &execution.transaction);
     execution.clearBorrowed();
-    execution.deadline.deinit() catch return error.CleanupFailed;
+    if (owns_deadline) execution.deadline.deinit() catch return error.CleanupFailed;
     outcome catch |err| {
         if (execution.transaction.isPristineForComposition()) execution.* = .{};
         return err;
@@ -156,12 +186,12 @@ const ConcreteSteps = struct {
 
     pub fn validatePreflight(self: *@This(), preparation: *phase.Preparation, deadline: *deadline_mod.Deadline) !void {
         if (self.execution.owner != self.execution or preparation != &self.execution.transaction or
-            deadline != &self.execution.deadline or !preparation.isPristineForComposition()) return error.InvalidOwner;
+            deadline != self.execution.active_deadline or !preparation.isPristineForComposition()) return error.InvalidOwner;
         _ = try self.input();
     }
 
     pub fn validateAuthority(self: *@This(), deadline: *deadline_mod.Deadline) !void {
-        if (deadline != &self.execution.deadline or self.execution.owner != self.execution) return error.InvalidOwner;
+        if (deadline != self.execution.active_deadline or self.execution.owner != self.execution) return error.InvalidOwner;
         _ = try deadline.remaining();
         const i = try self.input();
         try validateStatic(i, self.execution.token, self.execution.scratch);
@@ -318,7 +348,7 @@ fn filePaths(paths: Paths) candidate_attestation.Paths {
     return .{ .dmg = paths.dmg, .frozen_executable = paths.frozen_executable };
 }
 
-fn validateAliases(i: Inputs, token: []const u8, scratch: []u8, execution: *Execution) !void {
+fn validateAliases(i: Inputs, token: []const u8, scratch: []u8, execution: *Execution, deadline: ?*Deadline) !void {
     const result = std.mem.asBytes(execution);
     const pinned = std.mem.asBytes(i.cli.pinned);
     const values = [_][]const u8{
@@ -330,6 +360,11 @@ fn validateAliases(i: Inputs, token: []const u8, scratch: []u8, execution: *Exec
     for (values, 0..) |value, index| {
         if (overlaps(result, value) or overlaps(pinned, value)) return error.InvalidOwner;
         for (values[0..index]) |prior| if (overlaps(value, prior)) return error.InvalidOwner;
+    }
+    if (deadline) |value| {
+        const bytes = std.mem.asBytes(value);
+        if (overlaps(result, bytes) or overlaps(pinned, bytes)) return error.InvalidOwner;
+        for (values) |item| if (overlaps(bytes, item)) return error.InvalidOwner;
     }
 }
 

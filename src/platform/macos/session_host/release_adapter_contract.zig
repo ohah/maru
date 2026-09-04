@@ -38,9 +38,29 @@ pub const VerifyPredecessor = struct {
     summary_out: []const u8,
 };
 
+pub const PublishCandidate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    test_uuid: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    dmg_work: []const u8,
+    baseline_workspace: []const u8,
+    app_main_executable: []const u8,
+    app_cli_executable: []const u8,
+    manifest: []const u8,
+    source_root: []const u8,
+    zig: []const u8,
+    zig_size: u64,
+    zig_sha256: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
+    publish_candidate: PublishCandidate,
 };
 
 pub const Error = error{
@@ -59,6 +79,10 @@ pub const Error = error{
     InvalidManifestAssetName,
     InvalidGithubCliPath,
     InvalidGithubCliSha256,
+    InvalidTestUuid,
+    InvalidZigSize,
+    InvalidZigSha256,
+    InvalidCandidatePath,
     InvalidWorkDirPath,
     PathAlias,
     ManifestAssetNameTooLong,
@@ -75,11 +99,21 @@ const Values = struct {
     frozen_executable: ?[]const u8 = null,
     work_dir: ?[]const u8 = null,
     summary_out: ?[]const u8 = null,
+    test_uuid: ?[]const u8 = null,
+    dmg_work: ?[]const u8 = null,
+    baseline_workspace: ?[]const u8 = null,
+    app_main_executable: ?[]const u8 = null,
+    app_cli_executable: ?[]const u8 = null,
+    source_root: ?[]const u8 = null,
+    zig: ?[]const u8 = null,
+    zig_size: ?[]const u8 = null,
+    zig_sha256: ?[]const u8 = null,
 };
 
 const Phase = enum {
     pre_publish,
     verify_predecessor,
+    publish_candidate,
 };
 
 pub fn parseArgs(args: []const []const u8) Error!Command {
@@ -88,6 +122,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         .pre_publish
     else if (std.mem.eql(u8, args[0], "verify-predecessor"))
         .verify_predecessor
+    else if (std.mem.eql(u8, args[0], "publish-candidate"))
+        .publish_candidate
     else
         return error.UnknownCommand;
 
@@ -111,13 +147,13 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
     const repo = values.repo orelse return error.MissingOption;
     const tag = values.tag orelse return error.MissingOption;
     const manifest = values.manifest orelse return error.MissingOption;
-    const summary_out = values.summary_out orelse return error.MissingOption;
     if (!std.mem.eql(u8, repo, repository_name)) return error.InvalidRepository;
     try validateTag(tag);
     try validateManifestAssetPath(manifest, tag[1..]);
 
     return switch (phase) {
         .pre_publish => blk: {
+            const summary_out = values.summary_out orelse return error.MissingOption;
             const evidence = values.evidence orelse return error.MissingOption;
             const dmg = values.dmg orelse return error.MissingOption;
             const frozen_executable = values.frozen_executable orelse return error.MissingOption;
@@ -138,6 +174,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             } };
         },
         .verify_predecessor => blk: {
+            const summary_out = values.summary_out orelse return error.MissingOption;
             const work_dir = try workDir(&values);
             const github_cli = try githubCli(&values);
             try disjointPaths(&.{ manifest, work_dir, summary_out, github_cli.path });
@@ -151,7 +188,55 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .summary_out = summary_out,
             } };
         },
+        .publish_candidate => blk: {
+            const test_uuid = values.test_uuid orelse return error.MissingOption;
+            if (!canonicalReleaseTestUuid(test_uuid)) return error.InvalidTestUuid;
+            const dmg = try candidatePath(values.dmg);
+            const frozen_executable = try candidatePath(values.frozen_executable);
+            const dmg_work = try candidatePath(values.dmg_work);
+            const baseline_workspace = try candidatePath(values.baseline_workspace);
+            const app_main_executable = try candidatePath(values.app_main_executable);
+            const app_cli_executable = try candidatePath(values.app_cli_executable);
+            const candidate_manifest = try candidatePath(values.manifest);
+            const source_root = try candidatePath(values.source_root);
+            const zig = try candidatePath(values.zig);
+            const zig_size = try positiveDecimal(values.zig_size orelse return error.MissingOption);
+            const zig_sha256 = values.zig_sha256 orelse return error.MissingOption;
+            if (!lowerHexSha256(zig_sha256)) return error.InvalidZigSha256;
+            const github_cli = try githubCli(&values);
+            if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig });
+            break :blk .{ .publish_candidate = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .test_uuid = test_uuid,
+                .dmg = dmg,
+                .frozen_executable = frozen_executable,
+                .dmg_work = dmg_work,
+                .baseline_workspace = baseline_workspace,
+                .app_main_executable = app_main_executable,
+                .app_cli_executable = app_cli_executable,
+                .manifest = candidate_manifest,
+                .source_root = source_root,
+                .zig = zig,
+                .zig_size = zig_size,
+                .zig_sha256 = zig_sha256,
+            } };
+        },
     };
+}
+
+fn canonicalReleaseTestUuid(value: []const u8) bool {
+    if (value.len != 36 or value[8] != '-' or value[13] != '-' or value[18] != '-' or
+        value[23] != '-' or value[14] != '4' or
+        (value[19] != '8' and value[19] != '9' and value[19] != 'a' and value[19] != 'b')) return false;
+    for (value, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) continue;
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    }
+    return true;
 }
 
 fn optionDestination(
@@ -164,7 +249,7 @@ fn optionDestination(
     if (std.mem.eql(u8, option, "--github-cli")) return &values.github_cli;
     if (std.mem.eql(u8, option, "--github-cli-sha256")) return &values.github_cli_sha256;
     if (std.mem.eql(u8, option, "--manifest")) return &values.manifest;
-    if (std.mem.eql(u8, option, "--summary-out")) return &values.summary_out;
+    if (std.mem.eql(u8, option, "--summary-out") and phase != .publish_candidate) return &values.summary_out;
     return switch (phase) {
         .pre_publish => if (std.mem.eql(u8, option, "--evidence"))
             &values.evidence
@@ -180,7 +265,54 @@ fn optionDestination(
             &values.work_dir
         else
             null,
+        .publish_candidate => if (std.mem.eql(u8, option, "--test-uuid"))
+            &values.test_uuid
+        else if (std.mem.eql(u8, option, "--dmg"))
+            &values.dmg
+        else if (std.mem.eql(u8, option, "--frozen-executable"))
+            &values.frozen_executable
+        else if (std.mem.eql(u8, option, "--dmg-work"))
+            &values.dmg_work
+        else if (std.mem.eql(u8, option, "--baseline-workspace"))
+            &values.baseline_workspace
+        else if (std.mem.eql(u8, option, "--app-main-executable"))
+            &values.app_main_executable
+        else if (std.mem.eql(u8, option, "--app-cli-executable"))
+            &values.app_cli_executable
+        else if (std.mem.eql(u8, option, "--source-root"))
+            &values.source_root
+        else if (std.mem.eql(u8, option, "--zig"))
+            &values.zig
+        else if (std.mem.eql(u8, option, "--zig-size"))
+            &values.zig_size
+        else if (std.mem.eql(u8, option, "--zig-sha256"))
+            &values.zig_sha256
+        else
+            null,
     };
+}
+
+fn candidatePath(value: ?[]const u8) Error![]const u8 {
+    const path = value orelse return error.MissingOption;
+    if (!canonicalAbsoluteLeaf(path)) return error.InvalidCandidatePath;
+    return path;
+}
+
+fn positiveDecimal(value: []const u8) Error!u64 {
+    if (value.len == 0 or value[0] == '0') return error.InvalidZigSize;
+    var result: u64 = 0;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.InvalidZigSize;
+        result = std.math.mul(u64, result, 10) catch return error.InvalidZigSize;
+        result = std.math.add(u64, result, byte - '0') catch return error.InvalidZigSize;
+    }
+    return result;
+}
+
+fn lowerHexSha256(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
 }
 
 fn workDir(values: *const Values) Error![]const u8 {

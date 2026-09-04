@@ -37,9 +37,27 @@ pub const VerifyPredecessor = struct {
     summary_out: []const u8,
 };
 
+pub const PublishCandidate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    test_uuid: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    dmg_work: []const u8,
+    baseline_workspace: []const u8,
+    app_main_executable: []const u8,
+    app_cli_executable: []const u8,
+    manifest: []const u8,
+    source_root: []const u8,
+    zig: []const u8,
+    zig_size: u64,
+    zig_sha256: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
+    publish_candidate: PublishCandidate,
 };
 
 pub const View = struct {
@@ -168,6 +186,25 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .manifest = value.manifest,
                 .work_dir = value.work_dir,
                 .summary_out = value.summary_out,
+            } },
+            .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
+        },
+        .publish_candidate => |value| .{
+            .command = .{ .publish_candidate = .{
+                .repo = value.repo,
+                .tag = value.tag,
+                .test_uuid = value.test_uuid,
+                .dmg = value.dmg,
+                .frozen_executable = value.frozen_executable,
+                .dmg_work = value.dmg_work,
+                .baseline_workspace = value.baseline_workspace,
+                .app_main_executable = value.app_main_executable,
+                .app_cli_executable = value.app_cli_executable,
+                .manifest = value.manifest,
+                .source_root = value.source_root,
+                .zig = value.zig,
+                .zig_size = value.zig_size,
+                .zig_sha256 = value.zig_sha256,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
         },

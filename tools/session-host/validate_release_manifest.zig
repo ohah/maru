@@ -104,10 +104,12 @@ pub fn executeWith(
     var bootstrap: bootstrap_mod.Bootstrap = .{};
     try bootstrapper.load(allocator, args, &bootstrap);
     if (bootstrap.owner != &bootstrap) return error.InvalidBootstrap;
+    if (bootstrap.command == .publish_candidate) return error.UnsupportedCommand;
     const token = try tokens.read();
     switch (bootstrap.command) {
         .pre_publish => try drivers.prePublish(io, allocator, &bootstrap, token, phase_budget_ns, storage),
         .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, token, phase_budget_ns, storage),
+        .publish_candidate => unreachable,
     }
 }
 

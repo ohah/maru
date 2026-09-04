@@ -2731,6 +2731,41 @@ partial-cleanup retry, copied/pre-owned lifecycle 차단을 Debug·ReleaseFast�
 `runBorrowingDeadline` callsite, executable bootstrap, baseline/upgrade profile 선택, live release workflow와 frozen signed U5 제품 E2E는
 후속 production wiring gate가 소유한다.
 
+### 11.43 candidate release production owner
+
+`release_adapter_candidate_release_product.zig`의 caller-owned final-address `Execution` 하나가 §11.42 `Release`, 하나의 `Deadline`,
+`CandidatePrerequisite.Execution`, `CandidateBaselinePreparation.Execution`, `CandidatePublication.Execution`을 같은 주소에 직접 소유한다.
+production `run` caller는 prerequisite의 protected context·test UUID·candidate/DMG work pathname·pinned GitHub CLI, baseline의 absent
+workspace root·candidate app pathname·pinned Zig toolchain·source-directory fd, publication manifest의 absent absolute pathname, token,
+하나의 bounded reusable scratch buffer와 positive 전체 budget만 제공한다. baseline-A evidence에는 predecessor가 없으므로 이 owner는
+predecessor graph를 입력으로 받거나 합성하지 않는다. caller는 중간 owner,
+draft/release/asset ID, evidence pathname·digest, 단계별 success, cleanup 대상 또는 child별 deadline을 제출하지 않는다.
+
+첫 phase 전 preflight는 `Execution`과 세 nested execution이 pristine/final-address이고 전체 budget이 양수이며, top-level과 nested storage,
+external pinned owner, context/UUID/token/scratch/path storage가 pairwise non-alias인지 검사한다. source-directory fd는 유효해야 하고 candidate,
+baseline workspace, app executable, publication manifest pathname은 서로 같은 경로나 ancestor/descendant가 아니며 각 leaf의 기존 canonical
+계약을 만족해야 한다. 이 검증과 pinned CLI/toolchain 재검증이 deadline 시작, filesystem, child 또는 remote mutation보다 먼저 실패해야 한다.
+
+production owner만 `Deadline`을 exact once 시작하고 §11.42에 그 final-address pointer를 빌려준다. concrete steps는 prerequisite,
+baseline preparation, publication의 `runBorrowingDeadline`을 각각 정확히 한 callsite에서 호출한다. baseline 입력의 files/product/source/
+identity는 prerequisite execution의 self-owned field 주소에서만 유도한다. publication 입력의 compatibility/draft/candidate attestation도 같은
+prerequisite owner에서, evidence owner와 exact evidence pathname은 baseline execution의 held runner output과 workspace authority에서만
+유도한다. candidate DMG/frozen pathname과 context/pinned CLI는 최초 caller input과 bytewise 같은 값만 사용한다.
+
+각 authority fence는 지금까지 성공한 nested execution의 public typed revalidation API와 held filesystem owner를 다시 통과한다.
+publication 성공 뒤에는 canonical manifest input과 held manifest를 다시 교차검증하고, 같은 deadline의 fresh remaining을 전후에 확인한다.
+scalar 사본이나 pathname 재관측으로 권위를 대신하지 않는다. 성공, pristine local failure,
+cleanup failure와 audit-required 반환 모두 caller input/token/scratch borrow를 제거하고 deadline을 닫는다. complete success는 deadline이
+pristine이고 세 concrete execution과 complete `Release`만 남긴다. cleanup/retry는 §11.42 순서에 위임하며 dependent owner를 먼저 닫지
+않는다. audit-required graph는 exact phase와 concrete terminal owner를 보존하고 ordinary cleanup/retry를 제공하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-release-product`는 세 production borrowed callsite exact-one, deadline start exact-one,
+pristine/final-address/copy와 full alias/path preflight, nested authority에서만의 input derivation, same-deadline pointer, 반환 전 borrow/deadline
+scrub, complete owner set, prerequisite cleanup retry와 draft 이후 audit graph, dependency-preserving reverse cleanup을 Debug·ReleaseFast에서
+검증한다. 각 GitHub·Apple·baseline child의 실제 의미는 기존 focused gate가 계속 소유한다. 이 owner는 baseline-A candidate publication만
+조립하며 upgrade-B predecessor 실행/profile 선택, executable argument/bootstrap, `.github/workflows/release.yml` 호출과 frozen signed U5
+제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

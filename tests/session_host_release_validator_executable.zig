@@ -1,7 +1,7 @@
 const std = @import("std");
 const validator = @import("release_validator");
 
-const Event = enum { bootstrap, token, pre_publish, verify_predecessor };
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate };
 const Phase = enum { pre_publish, verify_predecessor, publish_candidate };
 
 const Harness = struct {
@@ -91,6 +91,13 @@ const Harness = struct {
                 try std.testing.expectEqual(validator.attestation_capture_bytes, storage.attestation.len);
                 if (self.harness.product_error) return error.ProductInjected;
             }
+            pub fn publishCandidate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.publish_candidate);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
         };
     }
 
@@ -141,11 +148,25 @@ test "bootstrap and token failures start no product and storage caps stay compon
     };
 }
 
-test "publish-candidate stays dormant before token or product access" {
+test "publish-candidate dispatches exactly once after bootstrap and token" {
     var storage: validator.Storage = undefined;
     var harness = Harness{ .phase = .publish_candidate };
-    try std.testing.expectError(error.UnsupportedCommand, harness.run(&storage));
-    try std.testing.expectEqualSlices(Event, &.{.bootstrap}, harness.events[0..harness.count]);
+    try harness.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .publish_candidate }, harness.events[0..harness.count]);
+    var failure = Harness{ .phase = .publish_candidate, .product_error = true };
+    try std.testing.expectError(error.ProductInjected, failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .publish_candidate }, failure.events[0..failure.count]);
+
+    const source = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "tools/session-host/validate_release_manifest.zig",
+        std.testing.allocator,
+        .limited(128 * 1024),
+    );
+    defer std.testing.allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "candidate_release_driver.run("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "&storage.github_response[0..candidate_release_driver.max_scratch_bytes]"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "settleProductFailure(&storage.candidate"));
 }
 
 test "production failure cleanup retries at most once and retry failure wins" {

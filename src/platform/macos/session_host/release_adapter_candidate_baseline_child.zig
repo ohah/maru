@@ -152,9 +152,11 @@ const ProductSource = struct {
 
     pub fn revalidate(self: *@This()) !candidate_app.ProductView {
         const value = try self.product.revalidate(self.files, self.paths);
+        const signing = value.apple.signing();
         return .{
             .frozen_sha256 = value.frozen_sha256,
-            .designated_requirement_sha256 = value.apple.signing().designated_requirement_sha256,
+            .designated_requirement_sha256 = signing.designated_requirement_sha256,
+            .team_id = signing.team_id,
         };
     }
 };

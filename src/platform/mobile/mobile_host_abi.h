@@ -678,16 +678,32 @@ unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 ///
 /// **터미널 흐름과 섞지 않는다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다.
 
-/// **채널을 열어야 하나.** 화면이 그 자리에 오면 1 이 된다 — 계약 §4a "언제 여는가": 채널을
-/// 여는 것은 **그 서버에서 명령을 하나 실행하는 일**이라 감사 로그에 남고, 터미널만 쓰는
-/// 접속에서는 안 연다.
-///
-/// **take-once 가 아니다**(§4a "한 채널, 여러 명령"). host 는 채널이 열릴 수 있는 상태
-/// (`MARU_SSH_CONTROL_NONE`·`_CLOSED`)에서만 이걸 불러야 한다 — 아직 안 닫혔는데 가져가면 그
-/// 뜻이 사라져 축이 영영 안 선다. 가져간 순간 그것이 "돌고 있는 명령" 이 되고, 열기가 지면
-/// `maru_mobile_control_open_failed`(딱딱한 실패) 또는 `maru_mobile_control_open_retry`
-/// (아직 때가 아님)가 되돌린다.
-int maru_mobile_take_control_open(void);
+/* ── 컨트롤 축: 정책은 코어가 정한다 ────────────────────────────────────────────
+   이번 tick 에 host 가 할 일. **하나뿐이다** — 「열고 나서 닫기」는 표현 자체가 없다.
+   예전에는 순서·가드·분류·마감이 두 host 의 tick 안에 흩어져 있어 ⑴ 플랫폼이 갈릴 수 있었고
+   ⑵ 헤드리스로 못 쟀다. 실제로 iOS 가 열기를 닫기보다 먼저 해, 열자마자 닫기를 무한히
+   되풀이하며 아무 세션도 안 떴다(실기 2026-09-04). */
+#define MARU_MOBILE_CONTROL_ACTION_NONE 0
+#define MARU_MOBILE_CONTROL_ACTION_CLOSE 1
+#define MARU_MOBILE_CONTROL_ACTION_OPEN 2
+
+/// **이번 tick 에 무엇을 할까.** `ssh_ready` 는 SSH 세션이 `MARU_SSH_STATE_READY` 인가(1/0),
+/// `channel_state` 는 `MARU_SSH_CONTROL_*`, `now_ms` 는 단조 시각이다. 돌려받은 행동 **하나**를
+/// 그대로 실행한다 — 닫기면 `maru_ssh_pump_close_control`, 열기면 `maru_mobile_control_command`
+/// 로 만든 명령을 `maru_ssh_pump_open_control` 에 싣고 결과를 `maru_mobile_control_note_open`
+/// 에 알린다. **닫기가 먼저다**(§4a — 한 번에 control 하나).
+int maru_mobile_control_tick(int ssh_ready, unsigned int channel_state, unsigned long long now_ms);
+/// 열기의 결과를 알린다. **「아직 때가 아니다」(`MARU_SSH_ERR_NOT_READY`)와 「졌다」를 코어가
+/// 가른다** — 그 분류가 host 에 있으면 두 플랫폼이 갈리고 마감도 각자 세게 된다.
+/// **왜 졌는지를 갈라 돌려준다**: `0` 아직 간다 / `1` 재시도 마감(§4a — 5초)을 넘겨 포기 /
+/// `2` 딱딱한 실패. host 는 0 이 아닐 때만 찍되 **그 둘을 다른 문구로** 찍는다 — 뭉뚱그리면
+/// 사용자가 고칠 자리(예: 그 기계에 `maru` 가 없다)를 못 가른다.
+int maru_mobile_control_note_open(int rc, unsigned long long now_ms);
+/// 열어 둔 명령이 그냥 끝났다 — 기다리던 답을 접고 `code` 를 화면에 알린다(§4a).
+void maru_mobile_control_note_exit_at(unsigned int code);
+/// 열린 명령의 답을 아직 기다리는가 — host 가 종료 코드를 볼 자격이 있나(1/0).
+int maru_mobile_control_awaiting_reply(void);
+
 /// 컨트롤 채널이 돌릴 **명령 한 줄**을 만든다(그 서버 설정의 `maru-path` 를 쓴다). 자리가
 /// 모자라면 0 — **자르지 않는다**(잘린 명령은 다른 명령이다).
 ///
@@ -698,9 +714,6 @@ int maru_mobile_take_control_open(void);
 /// `attach --stream <32-hex>`. 아무것도 안 원하면 **0 이다** — 그 상태에서 열면 그 서버에서
 /// 뜻 없는 명령이 하나 돈다.
 unsigned long maru_mobile_control_command(unsigned char *out, unsigned long cap);
-/// **채널을 닫아야 하나**(take-once). 목록 자리를 벗어나면 1 이 된다 — 열어 둔 채로 두면
-/// 배터리·트래픽을 안 보는 화면에 쓴다.
-int maru_mobile_take_control_close(void);
 /// 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 축이 꺼진 것이다).
 unsigned long maru_mobile_control_feed(const unsigned char *bytes, unsigned long len);
 /// 우리가 만든 요청을 가져간다. **가져가면 사라진다**(take-once). 자리가 모자라면 0 이고
@@ -737,7 +750,7 @@ void maru_mobile_control_open_failed(void);
 ///
 /// `maru_mobile_control_open_failed` 와 **다르다**: 화면에 실패를 말하지 않고 「열자」는 뜻만
 /// 되돌려 다음 tick 이 다시 집게 한다. 이걸 안 부르고 실패로 접으면 그 뜻은 이미
-/// `maru_mobile_take_control_open` 이 가져가서 사라졌으므로 **그 화면이 영영 「받는 중」** 이
+/// `maru_mobile_control_tick` 이 가져가서 사라졌으므로 **그 화면이 영영 「받는 중」** 이
 /// 된다(실측 2026-09-03: 세션 화면 재진입이 그렇게 죽었다).
 void maru_mobile_control_open_retry(void);
 /// 조립된 **원격 화면**의 상태(0=첫 프레임 대기, 1=선다, 2=껐다). 없으면 0.

@@ -21,12 +21,6 @@ static void drainConfigWrite(void);
 static void startSshIfAsked(void);
 static void driveControlChannel(void);
 
-/// 컨트롤 채널을 연 시각(ms, 0 이면 안 열었다). **시한을 재는 것은 host 의 일이다** —
-/// 코어에는 시계가 없다(계약 §4a: 5초).
-static double gControlOpenMs = 0;
-/// 「아직 때가 아니다」로 되돌린 첫 시각(ms, 0 이면 되돌린 적 없다). **재시도에도 마감이 있다** —
-/// 닫힘이 영영 안 끝나면 화면이 조용히 「받는 중」에 머문다(계약 §4a: 실패하면 그 화면이 말한다).
-static double gControlRetryMs = 0;
 static void pumpSshOnMainThread(void);
 
 static NSString *const kShader =
@@ -1344,62 +1338,35 @@ static void publishPublicKey(void) {
 static void driveControlChannel(void) {
     if (!maru_ssh_pump_is_running()) return;
 
-    // **셸이 뜬 뒤에만 연다.** 예전 가드는 `is_running` 뿐이었는데 그것은 `pthread_create` 직후
-    // 참이라 READY 와 무관하다 — 목록 화면이 nav 스택의 뿌리라 접속 중에 거기 있으면 요청이 곧바로
-    // 서고, 그때 열기가 `not_running`/`NotReady` 로 지고 **요청은 take-once 라 사라졌다**. 그러면
-    // 셸이 떠도 목록은 영영 "받는 중" 이었다(Android 기기에서 실측 — 같은 코드라 여기도 같다).
-    // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다(계약 §4a) — 채널이 아직 안
-    // 닫혔는데 가져가면 그 뜻이 사라져 축이 영영 안 선다. 닫힘이 확인된 다음 tick 에 연다.
-    const unsigned int control_ch = maru_ssh_pump_control_state();
-    // **닫기가 열기보다 «먼저» 다.** 순서가 뒤집혀 있으면, `wantControl` 이 닫기와 열기를 함께
-    // 세운 tick 에 채널이 마침 CLOSED 인 경우 **열고 나서 그 자리에서 닫는다** — 그 뒤로는 열고
-    // 닫기를 무한히 되풀이하며 아무 세션도 안 뜬다(실기 2026-09-04 계측: `ch` 가 opening↔closed
-    // 로 진동했다). 빠르게 여닫는 조작이 정확히 그 창을 만든다. §4a 가 「한 번에 하나」이므로
-    // 닫는 것이 먼저다.
-    if (maru_mobile_take_control_close()) {
-        // **닫기 결과를 읽는다.** 실패를 안 보면 원격 명령이 고아로 남아 그 뒤 모든 열기가
+    // **정책은 코어가 정한다.** 닫기/열기의 «순서»·「열 수 있는가」 가드·`NOT_READY` 분류·
+    // 두 마감이 전부 정책이라 Zig 로 올렸다(`maru_mobile_control_tick`). 예전에는 그 넷이 이
+    // 함수 안에 있어 ⑴ 두 플랫폼이 갈릴 수 있었고 ⑵ **헤드리스로 잴 수가 없었다** — 실제로
+    // 이 자리의 순서가 뒤집혀 「열고 그 자리에서 닫기」를 무한히 되풀이했다(실기 2026-09-04).
+    // 여기 남는 것은 **네이티브뿐**이다: 펌프 호출과 로그.
+    const unsigned long long control_now_ms = (unsigned long long)(CACurrentMediaTime() * 1000.0);
+    const int control_action = maru_mobile_control_tick(
+        maru_ssh_pump_state() == MARU_SSH_STATE_READY ? 1 : 0,
+        maru_ssh_pump_control_state(), control_now_ms);
+    if (control_action == MARU_MOBILE_CONTROL_ACTION_CLOSE) {
+        // **닫기 결과를 읽는다.** 실패가 조용하면 원격 명령이 고아로 남아 그 뒤 모든 열기가
         // 막히는데 화면에도 로그에도 아무 말이 없다(실기 2026-09-04 — 그렇게 4분을 헤맸다).
         const int close_rc = maru_ssh_pump_close_control();
         if (close_rc != 0)
             NSLog(@"MARU_CONTROL close failed rc=%d: %s", close_rc, maru_ssh_pump_control_error());
-        gControlOpenMs = 0;
-    }
-
-    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
-        (control_ch == MARU_SSH_CONTROL_NONE || control_ch == MARU_SSH_CONTROL_CLOSED) &&
-        maru_mobile_take_control_open()) {
+    } else if (control_action == MARU_MOBILE_CONTROL_ACTION_OPEN) {
         // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
-        // **「아직 때가 아니다」와 「졌다」를 가른다.** 이전 채널이 닫히는 중이면 코어가
-        // `MARU_SSH_ERR_NOT_READY` 를 내는데(그 자리 주석이 "조금 뒤에 다시 부르면 된다"),
-        // 그것을 딱딱한 실패로 접으면 「열자」는 뜻이 사라져 그 화면이 **영영 「받는 중」** 이
-        // 된다(실측 2026-09-03: 세션 화면 재진입).
         const int open_rc = cmd_len == 0
                                 ? -1
                                 : maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len);
-        if (open_rc == MARU_SSH_ERR_NOT_READY) {
-            const double now_ms = CACurrentMediaTime() * 1000.0;
-            if (gControlRetryMs == 0) gControlRetryMs = now_ms;
-            if (now_ms - gControlRetryMs > 5000) {
-                NSLog(@"MARU_CONTROL open gave up: %s", maru_ssh_pump_control_error());
-                gControlRetryMs = 0;
-                maru_mobile_control_open_failed();
-            } else {
-                maru_mobile_control_open_retry();
-            }
-        } else if (open_rc != 0) {
-            gControlRetryMs = 0;
-            // **컨트롤 축의 이름을 찍는다**(Android 와 같은 자리) — 터미널 슬롯을 찍으면 한 번
-            // 박힌 이름이 그 뒤 모든 실패를 덮는다.
-            NSLog(@"MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
-            // **실패는 그 화면이 말한다**(계약 §4a).
-            maru_mobile_control_open_failed();
-        } else {
-            gControlRetryMs = 0;
-            gControlOpenMs = CACurrentMediaTime() * 1000.0;
-        }
+        // **왜 졌는지를 갈라 찍는다** — 마감을 넘긴 것과 딱딱한 실패는 사용자가 볼 자리가 다르다.
+        const int open_verdict = maru_mobile_control_note_open(open_rc, control_now_ms);
+        if (open_verdict == 1)
+            NSLog(@"MARU_CONTROL open gave up (not ready for 5s): %s", maru_ssh_pump_control_error());
+        else if (open_verdict != 0)
+            NSLog(@"MARU_CONTROL open failed rc=%d: %s", open_rc, maru_ssh_pump_control_error());
     }
 
     // **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는
@@ -1409,16 +1376,9 @@ static void driveControlChannel(void) {
     // 실패한 것이 아니라 **명령이 서 있던 바닥이 사라진 것**이다. 안 가르면 끊을 때마다 그
     // 잔해가 "그 기계에 maru 가 없다" 로 화면에 떴다(Android 실측 — 서버에는 있었다).
     unsigned int control_exit = 0;
-    if (gControlOpenMs != 0 && maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
+    if (maru_mobile_control_awaiting_reply() && maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
         maru_ssh_pump_control_exit_status(&control_exit) == 0) {
-        maru_mobile_control_note_exit(control_exit);
-        gControlOpenMs = 0;
-    }
-
-    if (gControlOpenMs != 0 && maru_mobile_control_state() == MARU_MOBILE_CONTROL_WAITING &&
-        CACurrentMediaTime() * 1000.0 - gControlOpenMs > 5000) {
-        maru_mobile_control_timeout();
-        gControlOpenMs = 0;
+        maru_mobile_control_note_exit_at(control_exit);
     }
 
     unsigned char req[512];
@@ -1509,7 +1469,6 @@ static void startSshIfAsked(void) {
     // 세션 목록이 그대로 남아** 살아 있는 것처럼 보인다 — 코어에는 그 판정에 쓸 연결 개념이
     // 없으므로(시계도 소켓도 없다) 이 자리에서 알려야 한다.
     maru_mobile_control_reset();
-    gControlOpenMs = 0;
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     memset(secret, 0, sizeof secret);
     NSLog(@"MARU_SSH start host=%s port=%u user=%s rc=%d", host, cfg.port, user, rc);

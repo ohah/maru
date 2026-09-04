@@ -5237,28 +5237,28 @@ test "목록 자리에 오면 열어 달라고 하고, 나가면 닫아 달라�
     // 계약 §4a "언제 여는가": 채널을 여는 것은 **그 서버에서 명령을 하나 실행하는 일**이라
     // 감사 로그에 남는다 — 터미널만 쓰는 접속에서는 안 연다.
     bridge.maru_mobile_control_reset();
-    _ = bridge.maru_mobile_take_control_open();
-    _ = bridge.maru_mobile_take_control_close();
+    _ = bridge.takeControlOpen();
+    _ = bridge.takeControlClose();
 
     // 다른 화면에 있는 동안에는 안 연다.
     gotoTerminalScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 
     // 목록 자리에 오면 **한 번** 열어 달라고 한다.
     gotoSessionsScreen();
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     advanceFrame(402, 874, 16);
     // **다시 안 조른다** — 가져갔으면 사라진다.
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 
     // 축이 서고 목록이 온 뒤 화면을 나가면 닫아 달라고 한다.
     _ = feedControl(hello_wire);
     _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}\n");
     advanceFrame(402, 874, 16);
     gotoTerminalScreen();
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlClose());
 
     bridge.maru_mobile_control_reset();
     gotoSessionsScreen();
@@ -5268,16 +5268,16 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
     // 다시 열면 채널 번호가 겹치고, 무엇보다 **그 서버에서 명령이 한 번 더 돈다**.
     bridge.maru_mobile_control_reset();
     gotoSessionsScreen();
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     _ = feedControl(hello_wire);
     advanceFrame(402, 874, 16);
 
     // 화면을 나갔다 다시 와도, 이미 목록을 받았으면 안 조른다.
     _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}\n");
     gotoTerminalScreen();
-    _ = bridge.maru_mobile_take_control_close();
+    _ = bridge.takeControlClose();
     gotoSessionsScreen();
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 
     bridge.maru_mobile_control_reset();
 }
@@ -5291,7 +5291,7 @@ test "화면을 보는 중 연결이 끊기면 끊겼다고 말한다 — 영영
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5318,7 +5318,7 @@ test "누른 뒤 목록이 갱신되면 그 자리를 안 연다" {
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5343,7 +5343,7 @@ test "누른 뒤 목록이 갱신되면 그 자리를 안 연다" {
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
     // 목록을 그렸다는 것은 세션 화면으로 안 밀렸다는 뜻이다 — 밀렸으면 그쪽을 그린다.
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 }
 
 test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌아간다" {
@@ -5359,7 +5359,7 @@ test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌�
     advanceFrame(402, 874, 16);
 
     // host 가 실제로 채널을 열었다고 알린다 — 그래야 "돌리고 있는 명령" 이 선다(§4a).
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // host-backed 한 줄 + 못 붙는 한 줄.
     _ = feedControl(hello_wire);
@@ -5384,8 +5384,8 @@ test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌�
     // 아직 레코드가 안 왔다 — **빈 화면이 아니라 "받는 중"** 이라고 말해야 한다.
     try std.testing.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
     // **다른 명령을 원하므로 먼저 닫는다**(§4a — 같은 채널이니까).
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // 화면 레코드가 오면 셀을 그린다.
     const frame = try makeScreenFrame(std.testing.allocator);
@@ -5417,7 +5417,7 @@ test "원격 화면은 run 이 든 색으로 그린다 — 색 있는 화면이 
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5427,8 +5427,8 @@ test "원격 화면은 run 이 든 색으로 그린다 — 색 있는 화면이 
     const first = bridge.remoteRowCenter(0).?;
     tapAt(first.x, first.y);
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // 새빨간 글자를 실어 보낸다 — rgb intent 라 테마 해석에 안 흔들린다.
     const tag = maru.session.screen_stream.ColorTag;
@@ -5456,7 +5456,7 @@ test "원격 화면이 창보다 높으면 아래를 보여 준다 — 프롬프
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5466,8 +5466,8 @@ test "원격 화면이 창보다 높으면 아래를 보여 준다 — 프롬프
     const first = bridge.remoteRowCenter(0).?;
     tapAt(first.x, first.y);
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // 창에 들어가는 것보다 **훨씬 높은** 화면을 보낸다.
     const tall: u16 = 200;
@@ -5505,7 +5505,7 @@ test "원격 화면은 배경색과 반전을 그린다 — 선택·강조가 �
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5515,8 +5515,8 @@ test "원격 화면은 배경색과 반전을 그린다 — 선택·강조가 �
     const first = bridge.remoteRowCenter(0).?;
     tapAt(first.x, first.y);
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     const tag = maru.session.screen_stream.ColorTag;
     const red: u32 = (tag.rgb << tag.shift) | 0xFF0000;
@@ -5556,7 +5556,7 @@ test "원격 화면은 창을 통째로 덮는다 — 아래 터미널도 보조
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     _ = feedControl(hello_wire);
     _ = feedControl(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
@@ -5724,13 +5724,13 @@ test "runtime id 는 32 소문자 hex 만 — 셸 메타문자를 안 싣는다"
     @memcpy(evil[0..8], "; id > /");
     bridge.wantControl(.{ .screen = evil });
     // want 로 서지 않는다 — 그래서 열기 요청도 안 난다.
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&buf, buf.len));
 
     // 대문자도 안 받는다(원격 CLI 가 소문자만 받는다).
     const upper: [32]u8 = @splat('A');
     bridge.wantControl(.{ .screen = upper });
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 
     // 제대로 된 값은 그대로 실린다.
     const good: [32]u8 = @splat('f');
@@ -5749,15 +5749,15 @@ test "새 연결이면 남은 요청도 사라진다 — 뜻 없는 열기를 �
     bridge.wantControl(.{ .screen = id });
     // 아직 안 집힌 열기 요청이 남은 채로 연결이 새로 선다.
     bridge.maru_mobile_control_reset();
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlClose());
 
     // 닫기 요청도 마찬가지다.
     bridge.wantControl(.sessions);
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     bridge.wantControl(.{ .screen = id });
     bridge.maru_mobile_control_reset();
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlClose());
 }
 
 test "원하는 것이 바뀌면 닫고 나서 연다 — 같은 채널이니까" {
@@ -5769,20 +5769,20 @@ test "원하는 것이 바뀌면 닫고 나서 연다 — 같은 채널이니까
 
     // 목록을 원한다 → 연다.
     bridge.wantControl(.sessions);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlClose());
 
     // 화면을 원한다 → **먼저 닫으라고 한다**. 이때 열기를 같이 집어 가면 안 된다.
     const id: [32]u8 = @splat('a');
     bridge.wantControl(.{ .screen = id });
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlClose());
     // 닫힘을 host 가 확인한 뒤에야 연다 — 그 순서는 host 가 채널 상태로 지킨다(§4a).
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // 같은 것을 다시 원하면 아무 일도 안 일어난다(그 서버에서 명령이 한 번 더 돌면 안 된다).
     bridge.wantControl(.{ .screen = id });
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlClose());
 }
 
 test "아직 때가 아니면 뜻이 살아남는다 — 다음 tick 이 다시 연다" {
@@ -5799,17 +5799,17 @@ test "아직 때가 아니면 뜻이 살아남는다 — 다음 tick 이 다시 
     const id: [32]u8 = @splat('a');
     bridge.wantControl(.{ .screen = id });
     // host 가 뜻을 집어 갔다.
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
     // 그런데 아직 못 연다 — 이전 채널이 닫히는 중이다.
     bridge.maru_mobile_control_open_retry();
     // **뜻이 살아 있어야 한다.** 다음 tick 이 다시 집어 간다.
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // 원하는 것이 없어졌으면 되살리지 않는다 — 없는 뜻을 만들면 안 연 채널을 연다.
     bridge.wantControl(.none);
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     bridge.maru_mobile_control_open_retry();
-    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.takeControlOpen());
 }
 
 test "열기 요청은 가져간다고 사라지지 않는다 — 열렸을 때만 내린다" {
@@ -5818,11 +5818,11 @@ test "열기 요청은 가져간다고 사라지지 않는다 — 열렸을 때�
     defer bridge.maru_mobile_control_reset();
     bridge.wantControl(.sessions);
     // 열기가 지면 되돌아간다 — 다시 시도할 자리가 열려 있어야 한다.
-    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.takeControlOpen();
     bridge.maru_mobile_control_open_failed();
     bridge.maru_mobile_control_reset();
     bridge.wantControl(.sessions);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 }
 
 test "명령은 원하는 것에 따라 달라진다" {
@@ -5956,7 +5956,7 @@ test "U2 원격 화면에서 목록으로 돌아갈 수 있다 — 덮개로 바
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     _ = feedControl(hello_wire);
     _ = feedControl(
@@ -5996,7 +5996,7 @@ test "U2c 목록이 «이미 본 세션» 을 말한다 — 든 줄에만 표시
     advanceFrame(402, 874, 16);
     gotoSessionsScreen();
     advanceFrame(402, 874, 16);
-    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.takeControlOpen());
 
     // runtime 이 있는 줄 둘.
     _ = feedControl(hello_wire);
@@ -6130,3 +6130,91 @@ test "S11-6 채널이 바뀌면 실어 둔 선언을 버린다 — 남의 축에
     var out: [64]u8 = undefined;
     try T.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
 }
+
+// ── 컨트롤 축의 정책이 «코어에» 있다는 것을 재는 자리 ────────────────────────────────
+//
+// 이 셋은 **예전에는 못 재던 것들**이다. 순서·가드·분류·마감이 두 host 의 C/ObjC tick 안에
+// 있어서, 실제로 iOS 가 열기를 닫기보다 먼저 해 「열고 그 자리에서 닫기」를 무한히 되풀이하는
+// 동안 판정자는 내내 초록이었다(실기 2026-09-04).
+
+test "정책: 닫기가 열기보다 «먼저» 다 — 한 tick 은 행동 하나뿐이다" {
+    // **여기가 그 결함의 자리다.** `wantControl` 이 닫기와 열기를 함께 세우는데, 그 tick 에
+    // 채널이 마침 닫혀 있으면 예전 host 는 **열고 나서 닫았다** — 그 뒤로는 열고 닫기를
+    // 되풀이하며 아무 세션도 안 떴다. 행동을 하나만 돌려주면 그 순서는 **표현 자체가 없다**.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    // 목록을 열어 둔 상태를 만든다.
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_none, 1000)); // open
+    // 이제 다른 것을 원한다 — 닫기와 열기가 함께 선다.
+    const id: [32]u8 = @splat('a');
+    bridge.wantControl(.{ .screen = id });
+    // **채널이 마침 닫혀 있어도** 이 tick 이 내는 것은 «닫기» 다.
+    try T.expectEqual(@as(c_int, 1), bridge.maru_mobile_control_tick(1, ssh_control_closed, 1010)); // close
+    // 그다음 tick 에야 연다.
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_closed, 1020)); // open
+}
+
+test "정책: 채널이 안 비었으면 안 연다 — 뜻은 사라지지 않는다" {
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    // 아직 열려 있는 채널(READY=3) 위에서는 아무것도 안 한다.
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_tick(1, 3, 1000));
+    // SSH 가 아직 READY 가 아니어도 마찬가지다.
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_tick(0, ssh_control_none, 1000));
+    // 그리고 **뜻은 살아 있다** — 자리가 나면 연다.
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_none, 1000));
+}
+
+test "정책: 「아직 때가 아니다」에도 마감이 있다 — 시각을 넣어 잰다" {
+    // **이 판정은 이관 전에는 불가능했다.** 마감이 host 의 `CACurrentMediaTime()` 에 박혀 있어
+    // 헤드리스로 시간을 못 넘겼다("답이 기계 속도에 달린 판정" 을 안 만든다는 이 저장소 규율).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_none, 0));
+
+    // 5초 안에는 포기 안 한다 — 뜻이 살아 다음 tick 이 다시 집는다.
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_note_open(ssh_err_not_ready, 0));
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_closed, 100));
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_note_open(ssh_err_not_ready, 4_999));
+
+    // 5초를 넘기면 포기하고(1) 화면이 말한다.
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_closed, 5_000));
+    try T.expectEqual(@as(c_int, 1), bridge.maru_mobile_control_note_open(ssh_err_not_ready, 5_001));
+
+    // **딱딱한 실패는 마감을 안 기다리고, «다른 이유» 로 진다**(2 — host 가 다른 문구로 찍는다).
+    // 뭉뚱그리면 로그가 「졌다」만 말해 사용자가 고칠 자리를 못 가른다.
+    bridge.wantControl(.none);
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_closed, 6_000));
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_note_open(-1, 6_000));
+}
+
+test "정책: 열고 나서 답이 없으면 시한이 화면에 말한다" {
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, ssh_control_none, 0));
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_note_open(0, 0));
+    try T.expectEqual(@as(c_int, 1), bridge.maru_mobile_control_awaiting_reply());
+
+    // 아직 안 넘겼다 — 축은 그대로다.
+    _ = bridge.maru_mobile_control_tick(1, 3, 4_999);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_control_state()); // waiting_hello
+
+    // 넘기면 축이 꺼지고(2), 더는 답을 기다리지 않는다.
+    _ = bridge.maru_mobile_control_tick(1, 3, 5_001);
+    try T.expectEqual(@as(u32, 2), bridge.maru_mobile_control_state()); // off
+    try T.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_awaiting_reply());
+}
+
+const ssh_control_none: u32 = 0;
+const ssh_control_closed: u32 = 4;
+const ssh_err_not_ready: c_int = -7;

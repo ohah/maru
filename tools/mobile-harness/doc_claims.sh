@@ -40,10 +40,13 @@ ck "두 host 가 컨트롤 채널을 연다" 2 "$(grep -l maru_ssh_pump_open_con
 # **원격 명령이 그냥 끝난 것은 시한과 다른 말이다**(계약 §4a). 이 보고가 빠지면 `maru` 경로가
 # 안 잡힌 기계가 "답이 없다" 로만 뜨고, 종료 코드는 pump 가 들고 있는데 아무도 안 읽는다 —
 # 실제로 그 화면을 두 번 오진했다(2026-08-23).
-ck "두 host 가 exec 종료를 코어에 알린다" 2 "$(grep -l "maru_mobile_control_note_exit(" $I $A | wc -l | tr -d ' ')"
-# **열기 요청은 take-once 가 아니다**(계약 §4a). host 가 채널 상태를 안 보고 집어 가면 아직 안
-# 닫힌 자리에서 그 뜻이 사라져 축이 영영 안 선다 — 명령을 갈아 끼우는 전이가 통째로 멈춘다.
-ck "두 host 가 열 수 있을 때만 열기를 집는다" 2 "$(grep -l "MARU_SSH_CONTROL_CLOSED" $I $A | wc -l | tr -d ' ')"
+ck "두 host 가 exec 종료를 코어에 알린다" 2 "$(grep -l "maru_mobile_control_note_exit_at(" $I $A | wc -l | tr -d ' ')"
+# **순서·가드는 이제 코어가 정한다**(계약 §4a). 예전에는 host 가 채널 상태를 보고 «스스로» 열기를
+# 집었는데, 그 순서가 뒤집혀 「열고 그 자리에서 닫기」를 무한히 되풀이했다(실기 2026-09-04).
+# 지금은 행동을 하나만 받는다 — 그 자리가 두 host 에 다 있어야 한다.
+ck "두 host 가 코어에서 행동을 받는다" 2 "$(grep -l "maru_mobile_control_tick(" $I $A | wc -l | tr -d ' ')"
+# 열기 결과의 분류(「아직 때가 아니다」 vs 「졌다」)도 코어 것이다 — host 는 알리기만 한다.
+ck "두 host 가 열기 결과를 코어에 알린다" 2 "$(grep -l "maru_mobile_control_note_open(" $I $A | wc -l | tr -d ' ')"
 
 echo "§4 셀 기하·글자 크기 단일 출처"
 ck "헤더의 TEXT_PX 정의" 1 "$(grep -c 'define MARU_ATLAS_TEXT_PX' $H)"

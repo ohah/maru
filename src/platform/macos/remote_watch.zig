@@ -288,6 +288,13 @@ test "«다시 시도해도 소용없는» 종료만 포기로 읽는다" {
 test "설치 계약과 같은 판·같은 자리를 가리킨다" {
     // 채널이 띄우는 것은 **설치가 심은 그 파일**이다. 두 상수가 갈리면 채널은 없는 파일을 띄우려 하고
     // 증상은 「감시가 그냥 안 된다」뿐이다.
-    try testing.expectEqualStrings("maru-remote-watch-1", install_contract.remote_binary);
+    //
+    // ⚠️ **판 번호를 여기 박지 않는다**(RW7d 에서 2 로 올리며 세 자리째 밟았다). 박아 두면 판을 올릴
+    // 때마다 빨개지고, 그 손질이 곧 「무엇을 확인하는지」를 흐린다. 확인해야 하는 것은 **번호**가
+    // 아니라 «판 문자열과 파일 이름이 같은 판을 가리키는가» 다.
+    try testing.expect(std.mem.startsWith(u8, install_contract.remote_binary, "maru-remote-watch-"));
+    const name_version = install_contract.remote_binary["maru-remote-watch-".len..];
+    const line_version = std.mem.trimEnd(u8, install_contract.version_line["maru-remote-watch ".len..], "\n");
+    try testing.expectEqualStrings(line_version, name_version);
     try testing.expect(std.mem.startsWith(u8, install_contract.remote_dir, "$HOME/"));
 }

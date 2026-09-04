@@ -1648,7 +1648,7 @@ test "sync(2026): 청크가 프레임 한가운데서 끝나도 코어에는 «�
 
         // **매 청크 뒤 코어는 프레임 밖이어야 한다.** 하나라도 안이면 그 순간 메인이 읽으면 그리다 만
         // 화면이다 — 이 저장소가 실기에서 본 바로 그 상태다.
-        mutex.lock(std.testing.io);
+        mutex.lockUncancelable(std.testing.io);
         const mid_frame = core.sync_output;
         const bsu_n = core.sync_bsu_count;
         const esu_n = core.sync_esu_count;
@@ -1658,7 +1658,7 @@ test "sync(2026): 청크가 프레임 한가운데서 끝나도 코어에는 «�
     }
 
     // 그리고 **바이트를 하나도 안 잃는다** — 마지막 프레임까지 다 들어갔다.
-    mutex.lock(std.testing.io);
+    mutex.lockUncancelable(std.testing.io);
     const total_frames = core.sync_esu_count;
     mutex.unlock(std.testing.io);
     try std.testing.expectEqual(@as(u64, 3), total_frames);
@@ -1716,7 +1716,7 @@ test "sync(2026): 끝나지 않는 프레임은 상한에서 접어 스트림을
         reader.applySyncFramed(&core, &mutex, filler, &out_buf, &out_head);
     }
     // 접혔다 — 코어가 BSU 를 봤고(프레임 안), 보류는 상한 아래로 돌아왔다.
-    mutex.lock(std.testing.io);
+    mutex.lockUncancelable(std.testing.io);
     const saw_bsu = core.sync_bsu_count;
     mutex.unlock(std.testing.io);
     try std.testing.expect(saw_bsu >= 1);

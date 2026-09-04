@@ -2577,6 +2577,37 @@ copied/pre-owned/alias/drift를 Debug·ReleaseFast에서 검증한다. 각 leaf�
 계속 소유한다. concrete leaf storage·authority-byte derivation과 alias matrix는 후속 production wiring gate가 소유한다. 이 transaction은
 production argument/bootstrap 배선, `.github/workflows/release.yml` 호출 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.38 candidate publication production owner
+
+`release_adapter_candidate_publication_product.zig`의 caller-owned final-address `Execution`은 §11.37 transaction과
+candidate manifest `PinnedReleaseFile`, `AuthoredAttestation`, `DraftAssets`, `RedownloadValidation`, `PublishedRelease`,
+`VerifiedRelease` concrete owner를 한 주소에 둔다. production `run`만 manifest authoring, authored artifact attestation,
+exact draft attachment, exact-ID redownload, draft publication과 post-publish attestation leaf를 §11.37 순서로 호출한다.
+caller는 중간 owner, release/asset ID, 단계별 success 또는 cleanup 대상을 제출하지 않는다.
+
+preflight는 pristine nested owner와 하나의 final-address `Deadline`, 모든 input/output/buffer/path의 pairwise non-alias,
+positive budget, ready draft와 held candidate/evidence/CLI 권위를 remote mutation 전에 검증한다. 최초 audit snapshot은 candidate
+manifest authority가 재유도한 canonical manifest bytes에 protected context, ready draft ID, pinned CLI identity·mode·size·path/digest, 기존
+DMG·frozen executable·evidence 세 held file의 identity·mode·size·digest, manifest output을 포함한 exact absolute pathname을 길이
+구분해 결속한다. 아직 쓰이지 않은 manifest inode를 최초 snapshot에 있었다고 주장하지 않는다. snapshot backing은 `Execution`이나
+caller storage를 빌리지 않으며 §11.37 transaction이 seal을 복사한 직후 폐기한다. 각 authority fence는 같은 typed graph에서
+expected canonical bytes와 기존 세 held file을 다시 유도하고, manifest 작성 뒤에는 새 held manifest가 그 bytes/output pathname과
+exact하게 결속되는지도 확인한 다음 transaction의 domain-separated seal과 bytewise exact로 대조한다. 모든 fence는 같은 borrowed
+deadline의 fresh remaining을 소비한다.
+
+production owner는 호출 동안만 context, typed authority pointer, pathname, token과 response buffer를 빌리고 성공·실패 반환 전에
+그 borrow를 모두 제거한다. 성공 시 deadline과 audit scratch도 닫고 six concrete owner와 complete `Publication`만 남긴다.
+명시적 cleanup은 verified→published→redownload→attachment→authored→manifest 역순이며 remote release나 asset을 삭제하지 않는다.
+remote mutation 전 leaf 실패와 cleanup 실패는 §11.37의 exact retry set을 보존한다. attachment가
+`remote_state_unknown|cleanup_required`가 됐거나 publication이 시작된 뒤에는 concrete terminal owner와 audit stage를 보존하고
+automatic cleanup/retry를 제공하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-publication-product`는 production leaf callsite가 각각 하나뿐임,
+single deadline과 final-address/copy/alias 차단을 Debug·ReleaseFast에서 검증한다. canonical audit 재유도, borrow 제거,
+성공 concrete owner 집합, 역순 cleanup과 partial cleanup retry, attachment/publish/post-publish terminal 보존은 §11.37 transaction 및
+각 leaf의 기존 gate가 계속 소유하며, 실제 GitHub child 성공도 각 leaf의 product gate가 검증한다. 이 단계는 executable bootstrap/argument parser와
+`.github/workflows/release.yml` 호출 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

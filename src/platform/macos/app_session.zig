@@ -11705,14 +11705,11 @@ pub const AppSession = struct {
         if (self.surface_initialized) {
             const active = pane_ops.activePane(self).activeTerm();
             if (active.kind == .editor and active.rt.editor_diff == null) {
-                var enc_buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-                // 해석이 실패하면(인코딩 버퍼 등) **앱 액션이 아닌 것으로 본다** — 편집기가 처리하고,
-                // 처리 못 하면 아래 정상 경로가 그대로 이어받는다.
-                const is_app_action = if (self.loaded_config.keyBindingResolver().resolve(key_event, &enc_buf, .{})) |r|
-                    r == .app_action
-                else |_|
-                    false;
-                if (!is_app_action) {
+                // **편집기 Term 컨텍스트가 판정한다**(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
+                // 전역 `resolve` 를 쓰면 편집기 전용 기본키(`⌥Z` 등)가 안 보인다 — 그 표는 전역에 못
+                // 넣는 것들이라 이 컨텍스트 안에만 있다.
+                const ed = self.loaded_config.keyBindingResolver().resolveEditor(key_event);
+                if (ed == .editor) {
                     // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,
                     // 맨몸은 문자/줄. **Shift**는 단위를 바꾸지 않고 **선택을 늘린다**.
                     const m = key_event.modifiers;
@@ -11771,6 +11768,23 @@ pub const AppSession = struct {
                         self.metal_dirty = true;
                         return input_ops.keyConsumedByApp(self); // 편집기가 삼켰다
                     }
+                } else if (ed == .app_action) {
+                    // **컨텍스트 기본키는 여기서 디스패치한다.** 아래 전역 경로는 그 chord 를 모른다 —
+                    // `editor_context_bindings` 는 전역 표에 못 넣는 것들이라(터미널 Meta 를 뺏는다)
+                    // 이 컨텍스트 안에만 있다. 안 부르면 `⌥Z` 가 **아무 일도 안 하고** 조용히 사라진다.
+                    self.dispatchAppAction(ed.app_action);
+                    self.metal_dirty = true;
+                    return input_ops.keyConsumedByApp(self);
+                } else if (ed == .consumed) {
+                    // terminal macro·explicit unbind 가 먹었다 — 편집기 Term 에는 보낼 PTY 가 없으므로
+                    // 여기서 끝난다(파일 트리 컨텍스트가 `consumed` 를 다루는 것과 같은 결이다).
+                    //
+                    // **이 조기 반환은 판정자로 못 잡는다**(변이 E15 가 살아남는 것이 정상이다).
+                    // 지우면 아래 전역 경로로 흘러가는데, 그쪽도 같은 `unbind`·매크로를 보고 같은
+                    // 결론(아무것도 안 함)에 이른다 — 편집기 Term 에 PTY 가 없어 **바이트가 갈 곳이
+                    // 없기 때문**이다. 그럼에도 여기서 끊는 이유는 ⑴ 두 번 판정하지 않고 ⑵ PTY 가
+                    // 생기는 갈래가 늘었을 때 **조용히 바이트가 새지 않게** 하기 위해서다.
+                    return input_ops.keyConsumedByApp(self);
                 }
             }
         }
@@ -42627,6 +42641,60 @@ test "EF29 선택 범위 토글도 편집기 찾기일 때만 먹는다 — 팔�
 
     session.dispatchAppAction(.toggle_find_in_selection); // 팔레트 경로
     try std.testing.expect(session.chrome_host.find.in_selection == null);
+}
+
+test "ETX5 ⌥Z 가 키 경로로 랩을 토글한다 — 편집기 컨텍스트 종단" {
+    // **resolver 만 재면 배선이 빠져도 초록이다**(변이 E9: 키 경로가 `app_action` 을 디스패치 안 해도
+    // 내 판정자는 아무도 안 빨개졌다). 전역 표에 없는 chord 라 **아래 정상 경로가 안 받는다** — 여기서
+    // 안 부르면 `⌥Z` 가 조용히 사라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "w.txt", .data = "abc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // **`editor_wrap` 은 `?bool` 이다** — `null` 이면 config 를 따르고, 토글이 그 뷰의 override 를 세운다.
+    // 그래서 두 번 눌러도 `null` 로 **안 돌아온다**(첫 눌림이 override 를 만든다). 재는 것은 「값이
+    // 뒤집히는가」이지 「처음 값으로 돌아오는가」가 아니다.
+    try std.testing.expect(term.rt.editor_wrap == null); // 열 때는 config 를 따른다
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } });
+    const v1 = term.rt.editor_wrap orelse return error.TestUnexpectedResult;
+
+    // 다시 누르면 뒤집힌다 — 같은 chord 가 양방향이다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } });
+    const v2 = term.rt.editor_wrap orelse return error.TestUnexpectedResult;
+    try std.testing.expect(v1 != v2);
+
+    // **줄 이동도 같은 경로로 닿는다** — 컨텍스트 표의 다른 chord 도 디스패치되는지 함께 잰다.
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .option = true } });
+    try std.testing.expectEqualStrings("abc\n", term.rt.editor_doc.?.file.content); // 한 줄뿐 — 무동작
+
+    // **찾기가 떠 있으면 오버레이가 키를 갖는다**(키 계약 우선순위 1번). 그래서 `⌥Z` 는 랩을 토글하지
+    // 않고 검색어로 들어간다 — 그것이 계약이다. 처음엔 반대로 단언했다가 실측으로 뒤집혔다.
+    session.dispatchAppAction(.toggle_find);
+    const w_before = term.rt.editor_wrap;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } });
+    try std.testing.expectEqual(w_before, term.rt.editor_wrap);
 }
 
 test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치 종단 (§3.9b)" {

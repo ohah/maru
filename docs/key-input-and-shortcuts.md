@@ -251,9 +251,74 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·
 2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
 3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다. 단 app action resolver가 확정한 `toggle_file_panel_focus`는 이 tree-local 기본키보다 먼저 실행돼 workspace로 돌아갈 수 있다.
 4. 도크 WKWebView가 first responder이면 ABI v132 `WebKeyRoute(u32)`가 Bool `key_is_app_action`을 대체한다: `0=pass_through`, `1=app_action`, `2=consume_unbound`, `3=web_editor`; unknown은 fail-closed consume, null/변환 실패는 pass-through다. resolver는 사용자 app rebind → explicit unbind → Markdown editable context default → 기존 app default/terminal fallback 순서로 provenance를 보존한다. `live-preview`/`source-edit`의 `web_editor`는 `⌘S/F/A/C/V/X/Z/⇧Z`와 텍스트 탐색·선택·삭제를 WebKit에 양보하고, `consume_unbound`는 WebKit/PTY 어디에도 보내지 않는다. live-preview에서 caret이 task marker 또는 link label 안에 있을 때 `⌘Enter`는 WebKit-local `LivePreviewIntent`로 task toggle 또는 link keyboard activation을 수행한다. 사용자 app rebind·terminal macro·explicit unbind가 계속 먼저이고 이 로컬 chord를 새 전역 action/config default로 중복 등록하지 않는다. 라이브 표의 cell selection이 활성일 때 modifier 없는 `Tab`/`Shift-Tab`/`Enter`는 WebKit 안의 `LivePreviewIntent`가 소유하고 최대 한 번의 CM6 transaction만 만든다. 표가 source-preserving fallback이거나 cell selection이 아니면 같은 키는 CM6 기본 편집 의미를 유지한다. 이 표 로컬 키에는 전역 action이나 config 기본 binding을 새로 만들지 않는다. `app_action`은 같은 이벤트 루프에서 `maru_macos_app_session_dispatch_web_app_action`이 **같은 resolver를 다시 평가해 얻은 `Action`만 직접 dispatch**하며 범용 `handleKeyDown`의 terminal copy/paste·scroll·macro 전처리와 PTY write를 타지 않는다. route와 dispatch 사이 config/mode가 달라져 더는 app action이 아니면 action 0회로 fail-close하고 Swift는 이미 가로챈 이벤트를 consume한다. 두 호출은 AppKit main actor의 한 이벤트 처리 안에 있고 Web surface 제거는 그 사이 끼어들 수 없다. `read`와 HTML은 편집기 소유가 아니며 `⌘S`를 저장으로 오인해 소비하지 않는다. C header 상수·Zig `enum(u32)` compile-time test·Swift exhaustive switch가 raw 값 하나를 공유하고 Swift의 별도 key/mode 목록은 제거한다. 앱 메뉴바의 편집 항목 `Copy(⌘C)`·`Paste(⌘V)`·`Select All(⌘A)`는 `WebKeyRoute`와 별개로 keyEquivalent가 first responder와 무관하게 발화하므로, 도크·브라우저 웹 패널이 first responder이면 표준 `copy:`/`paste:`/`selectAll:`을 responder chain으로 넘겨 WebKit이 처리하고(`read`·`html`은 선택 텍스트 복사·전체 선택만, `live`/`source`는 CM6 편집 복붙), 그 외에는 터미널 선택 복사/PTY 붙여넣기다 — 이 focus 분기가 `web_editor`/`pass_through`의 'WebKit에 양보'를 메뉴바 축에서 성립시킨다(단일 출처: [web-panel.md §4.2](web-panel.md)).
-5. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.
+5. **활성 Term이 네이티브 편집기면 `resolveEditor`가 판정한다**(2026-09-03 — 아래 「편집기 Term 컨텍스트」). 파일 트리·웹과 같은 provenance 순서를 쓰되, **편집기 전용 기본키**를 그 컨텍스트 안에서만 적용한다.
+6. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.
 
-기본 바인딩과 의미:
+### 편집기 Term 컨텍스트 (2026-09-03)
+
+**막혀 있던 것은 기능이 아니라 「그 기능을 어떤 키가 부르는가」였다.** 편집기 액션 여럿이 **chord 없이**
+커맨드 팔레트로만 닿는다 — [입력 설정](configuration-input.md)의 「무엇이 막고 있나」 표가 그 부류를
+소유하고, 그중 하나가 *"`⌥Z`는 Option 단독이라 터미널의 Meta/ESC 입력을 전역으로 뺏는다"* 다.
+
+**그 문장이 맞았던 이유는 기본 표가 전역이라서다.** `default_app_bindings`에 `⌥Z`를 넣으면 **터미널
+Term에서도** 그 chord가 소비된다. 그런데 **편집기 Term에는 PTY가 없다**(`term.zig`가 *"PTY가 없는 갈래가
+셋이다: web·**편집기**·종료 placeholder"*로 못박는다) — 즉 그 Term에서 Meta/ESC 입력은 **보낼 곳이
+없다**. 컨텍스트가 서면 뺏을 것이 없어진다.
+
+- **`resolveEditor`는 파일 트리·웹과 같은 provenance 순서를 쓴다.** 사용자 app rebind → terminal macro
+  (소비) → explicit unbind(소비) → **편집기 컨텍스트 기본키** → 전역 기본 app action → 편집기가 처리.
+  자리는 `resolveFileTree`가 tree default를 두는 **그 자리**이고, 근거도 같다 — 컨텍스트가 자기 기본키를
+  전역보다 먼저 보는 것이 이 저장소의 선례다.
+  - **다만 「전역을 양보받는다」가 이 컨텍스트의 목적은 아니다.** 실측하면 기본 표에 **`⌘` 없는 `⌥`
+    chord가 하나도 없어서**(2026-09-03 — 그것이 애초에 `⌥Z`를 막아 온 이유다) 여기서 넣을 컨텍스트
+    기본키와 **겹칠 전역 chord가 없다**. 순서는 선례를 따를 뿐이고, **전역 chord를 편집기에서 가로채는
+    것은 이 절이 허락하지 않는다** — 그렇게 하려면 그 chord마다 근거를 따로 적는다.
+- **편집기 문맥에서 resolver를 묻는 자리는 전부 이 함수를 탄다.** 실측으로 **둘**이다 — 편집 키
+  경로(`app_session.zig`의 *"이게 앱 액션이냐"* 분기)와 찾기 규칙 chord 가로채기(`find.zig`). 둘이
+  갈리면 **같은 키가 자리에 따라 다르게 풀린다**: 찾기가 떠 있을 때와 아닐 때 `⌥Z`가 다른 일을 한다.
+- **PTY 바이트로 떨어지지 않는다.** 파일 트리 컨텍스트가 *"셸 바이트를 절대 내보내지 않는다"*고 적은
+  것과 같은 근거이고, 여기서는 **보낼 PTY 자체가 없다**.
+- **비교 뷰도 편집기 Term이다.** 다만 읽기 전용이라(편집 거절 27곳) 편집 계열 기본키는 그 안에서
+  무동작이다 — 게이트는 **액션 쪽이 이미 갖고 있고**(각 함수가 `editor_diff != null`을 거절한다)
+  resolver가 그것을 다시 판정하지 않는다. 같은 구분을 `toggle_symbol_picker`가 이미 세웠다
+  ([입력 설정](configuration-input.md) — *"컨텍스트 게이트는 액션 쪽이 이미 갖고 있다"*).
+- **이 컨텍스트로 풀리는 것과 안 풀리는 것을 가른다.**
+
+  | chord 없는 편집기 액션 | 이 컨텍스트가 푸나 |
+  |---|---|
+  | `toggle_editor_wrap`(VSCode `⌥Z`) | **푼다** — Option 단독이 터미널 입력을 뺏는다는 근거가 이 Term에서는 성립하지 않는다 |
+  | `duplicate_lines`·`move_lines_up`/`_down`(VSCode `⇧⌥↓`·`⌥↑↓`) | **푼다** — 같은 근거다 |
+  | `fold_all`·`unfold_all`·`fold_level_1..3` | **안 푼다** — 막는 것이 *"한 chord로 못 적는다"*(VSCode는 `⌘K ⌘0` 두 키 시퀀스이고 `KeyChord`는 수식자+키 하나)라, **다른 선행**이다 |
+  | `⌘⌃D`(멀티커서 「다음 일치 추가」) | **재검토 자리다** — 「임시 chord」로 적혀 있고, 이 컨텍스트가 서는 날 함께 정하기로 [구현 계획](plans/native-editor.md)이 예약했다 |
+
+- **`⌘C`는 이 컨텍스트가 필요 없다.** 계획 문서는 오래 *"⌘C 기본 chord(터미널 선택이 쓰는 키라 편집기
+  Term 컨텍스트가 있어야 양보할 수 있다)"*로 남겨 뒀지만, **기능은 2026-08-26에 Swift 진입점으로
+  섰다**(`copy_editor_selection` 디스패치). 기본 표에 chord가 없는 것은 사실이나 **복사가 안 되는 것은
+  아니다** — 그 두 문장이 한 문서 안에서 서로를 가리고 있었다.
+
+#### `input.option-as-meta` 가 이 컨텍스트보다 위에 있다 (2026-09-03 사용자 결정)
+
+**Option 단독 chord는 이 컨텍스트만으로 성립하지 않는다.** macOS에서 `⌥`+글자는 **특수문자를 만드는
+조합**이기도 하고([설정](configuration.md) `input.option-as-meta`가 그 갈림을 소유한다), **그 판정은
+Swift의 `keyDown`에서 앱 단위로 끝난다** — 그 시점에는 **어느 Term이 활성인지 모른다**.
+
+| `input.option-as-meta` | `⌥Z` 가 가는 곳 | resolver 가 보나 | 편집기에서 누르면 |
+|---|---|---|---|
+| **`true`**(기본) | IME 우회 → 단축키 경로 | **본다** | 컨텍스트 기본키가 **작동한다** |
+| `false` | macOS 입력기(조합) | **못 본다** | 특수문자가 **문서에 들어간다** |
+
+**설정이 이긴다.** `false`로 둔 사용자는 *"특수문자를 치겠다"*는 뜻으로 그렇게 둔 것이고, 편집기가 그
+의도를 뒤집지 않는다. 그 설정에서 Option 단독 편집기 기본키는 **없는 것으로 친다** — 커맨드 팔레트와
+**설정 창의 키바인딩 편집**으로 닿는다(그 목록은 커맨드 카탈로그를 그대로 쓰므로 이 액션들이 이미 든다).
+
+**이 사실을 계약에 적는 이유는 「왜 안 먹지」를 막기 위해서다.** 컨텍스트를 세워도 그 설정에서는 안
+먹는데, 적어 두지 않으면 다음 사람이 컨텍스트의 결함으로 오해하고 같은 자리를 다시 판다.
+
+**어떤 chord를 실제로 넣는가는 이 절이 정하지 않는다.** 컨텍스트가 서면 각 액션의 chord는
+[입력 설정](configuration-input.md)이 소유하는 결정이고, 그 표의 「무엇이 막고 있나」 행들이 그때
+갱신된다. 이 절이 정하는 것은 **판정 순서와 그 근거**다.
+
+기본 바인딩과 의미:기본 바인딩과 의미:
 
 | 키 | action/소유자 | 의미 |
 |---|---|---|

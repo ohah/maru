@@ -241,6 +241,23 @@ pub const default_terminal_bindings = [_]TerminalBinding{
 /// 매칭된다(layout 안전). resolve 순서: 사용자 바인딩 → 빌트인 terminal → '''이 빌트인 app''' →
 /// Cmd-무시 fallthrough. Cmd+Shift+]/[(다음/이전 탭)은 Shift+문자가 layout마다 달라(`]`→`}`) 별도
 /// 처리가 필요해 탭바 UI(클릭 전환)와 함께 후속에서 추가한다.
+/// **편집기 Term 에서만** 서는 기본키(docs/key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
+///
+/// **여기 있는 이유는 전역 표에 못 넣어서다.** `⌘` 없는 `⌥` chord 를 전역에 넣으면 **터미널 Term 에서도**
+/// 소비되어 Meta/ESC 입력을 뺏는다 — 그 근거가 `⌥Z`·줄 복제·이동을 오래 막아 왔다. 편집기 Term 에는
+/// PTY 가 없어 그 Term 안에서는 뺏을 것이 없다.
+///
+/// **`input.option-as-meta = false` 면 이 chord 들은 안 선다** — Swift 가 그 키를 입력기로 보내 여기까지
+/// 오지 않는다. 설정이 이기고, 그때는 커맨드 팔레트와 설정 창의 키바인딩 편집으로 닿는다.
+///
+/// **VSCode 와 같은 키를 쓴다** — 기본값 사용자가 손버릇을 그대로 옮길 수 있어야 한다.
+pub const editor_context_bindings = [_]AppBinding{
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .{ .char = 'Z' } }, .action = .toggle_editor_wrap }, // Opt+Z
+    .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines }, // Shift+Opt+Down
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up }, // Opt+Up
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down }, // Opt+Down
+};
+
 pub const default_app_bindings = [_]AppBinding{
     // Cmd+Ctrl+D: 편집기에서 다음 일치에 커서 추가(VSCode ⌘D). **임시 chord다** — §9.1이 확정한
     // 것은 `⌘D`이지만 편집기 포커스 컨텍스트가 서야 터미널의 pane split과 갈라 쓸 수 있다.
@@ -473,6 +490,49 @@ pub const KeyBindingResolver = struct {
             if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
         }
         return if (is_tree_default) .tree_default else .consumed;
+    }
+
+    pub const EditorResolution = union(enum) {
+        app_action: action_mod.Action,
+        /// 편집기가 직접 처리한다(글자·이동·삭제 키). **PTY 로 안 간다** — 그 Term 에는 PTY 가 없다.
+        editor,
+        /// chord 를 먹되 아무것도 안 한다(terminal macro·explicit unbind).
+        consumed,
+    };
+
+    /// 편집기 Term context (docs/key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
+    ///
+    /// **편집기 Term 에는 PTY 가 없다**(`term.zig` — *"PTY 가 없는 갈래가 셋이다: web·편집기·종료
+    /// placeholder"*). 그래서 `⌥Z` 같은 **Option 단독 chord 가 뺏을 터미널 입력이 없고**, 기본 표에
+    /// 못 넣던 편집기 기본키를 **이 컨텍스트 안에서만** 세울 수 있다.
+    ///
+    /// **순서는 `resolveFileTree` 와 같다** — 사용자 rebind → terminal macro(소비) → explicit
+    /// unbind(소비) → **컨텍스트 기본키** → 전역 기본 → 편집기가 처리. 컨텍스트 기본키가 전역보다
+    /// 먼저인 것은 그 선례를 따르는 것이고, **전역 chord 를 가로채라는 뜻이 아니다**(실측: 겹치는
+    /// 것이 없다 — 기본 표에 `⌘` 없는 `⌥` chord 가 0개다).
+    ///
+    /// **`input.option-as-meta = false` 면 Option 단독 chord 는 여기까지 오지 않는다.** 그 판정은
+    /// Swift `keyDown` 이 앱 단위로 하고, 그때는 어느 Term 이 활성인지 모른다 — 설정이 이긴다.
+    pub fn resolveEditor(self: KeyBindingResolver, event: terminal.KeyEvent) EditorResolution {
+        const chord = KeyChord.fromKeyEvent(event) orelse return .editor;
+        for (self.app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        for (self.terminal_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .consumed;
+        }
+        if (self.isUnbound(chord)) return .consumed;
+        // **이 둘의 순서는 판정자로 못 잡는다** — 겹치는 chord 가 없어서다(`ETX4` 가 그 전제를 지킨다:
+        // 전역 표의 `⌘` 없는 `⌥` 는 0개이고 컨텍스트 표는 **전부** 그 부류다). 그래서 「컨텍스트를
+        // 전역 뒤로 옮기는」 변이가 살아남는 것이 **정상**이다. 그럼에도 이 자리인 이유는 선례다 —
+        // `resolveFileTree` 가 tree default 를 두는 그 자리이고, 겹치는 날 근거를 따로 적게 된다.
+        for (editor_context_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        for (default_app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        return .editor;
     }
 
     /// Web context는 PTY 바이트를 절대 내보내지 않는다. 사용자 app rebind가 최우선이고 terminal macro와 explicit
@@ -874,6 +934,87 @@ test "KB_SYM4 ⇧⌘O 는 웹 편집 필드에 양보하지 않는다 — 양보
     try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(z, true));
     try std.testing.expect(resolver.resolveWeb(z, false) != .web_editor);
     try std.testing.expect(resolver.resolveWeb(o, false) != .web_editor);
+}
+
+test "ETX1 편집기 컨텍스트 기본키는 그 컨텍스트에서만 선다 — 전역은 그대로다" {
+    // **전역 표에 넣으면 터미널 Term 에서도 소비되어 Meta/ESC 입력을 뺏는다** — 그것이 `⌥Z` 를 오래
+    // 막아 온 근거다. 컨텍스트가 그 근거를 편집기 Term 안에서만 없앤다.
+    const resolver: KeyBindingResolver = .{};
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const opt_z: terminal.KeyEvent = .{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } };
+
+    // 편집기 컨텍스트: 랩 토글이다.
+    const ed = resolver.resolveEditor(opt_z);
+    try std.testing.expect(ed == .app_action and ed.app_action == .toggle_editor_wrap);
+
+    // **전역 경로는 이 chord 를 모른다** — 앱 액션이 아니어야 터미널이 Meta 로 인코딩한다.
+    const global = try resolver.resolve(opt_z, &buf, .{});
+    try std.testing.expect(global != .app_action);
+
+    // 줄 복제·이동도 같다.
+    const dup: terminal.KeyEvent = .{ .key = .arrow_down, .modifiers = .{ .option = true, .shift = true } };
+    const rd = resolver.resolveEditor(dup);
+    try std.testing.expect(rd == .app_action and rd.app_action == .duplicate_lines);
+    try std.testing.expect(try resolver.resolve(dup, &buf, .{}) != .app_action);
+
+    const up: terminal.KeyEvent = .{ .key = .arrow_up, .modifiers = .{ .option = true } };
+    const ru = resolver.resolveEditor(up);
+    try std.testing.expect(ru == .app_action and ru.app_action == .move_lines_up);
+    const down: terminal.KeyEvent = .{ .key = .arrow_down, .modifiers = .{ .option = true } };
+    const rdn = resolver.resolveEditor(down);
+    try std.testing.expect(rdn == .app_action and rdn.app_action == .move_lines_down);
+}
+
+test "ETX2 편집기 컨텍스트도 provenance 순서를 지킨다 — 사용자·unbind·매크로가 먼저다" {
+    // **컨텍스트 기본키가 사용자 설정을 이기면 리바인드가 죽는다.** 파일 트리 컨텍스트가 세운 순서를
+    // 그대로 쓴다: 사용자 rebind → terminal macro(소비) → explicit unbind(소비) → 컨텍스트 기본키.
+    const opt_z: terminal.KeyEvent = .{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } };
+    const chord: KeyChord = .{ .modifiers = .{ .option = true }, .key = .{ .char = 'Z' } };
+
+    // ⑴ 사용자가 다른 액션으로 리바인드 — 그것이 이긴다.
+    const rebound: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = chord, .action = .new_tab }} };
+    const r1 = rebound.resolveEditor(opt_z);
+    try std.testing.expect(r1 == .app_action and r1.app_action == .new_tab);
+
+    // ⑵ explicit unbind — 컨텍스트 기본키도 막는다(먹되 아무것도 안 한다).
+    const unbound: KeyBindingResolver = .{ .unbinds = &.{chord} };
+    try std.testing.expect(unbound.resolveEditor(opt_z) == .consumed);
+
+    // ⑶ terminal macro — 같은 자리에서 소비한다.
+    const macro: KeyBindingResolver = .{ .terminal_bindings = &.{.{ .chord = chord, .input = .{ .send_text = "x" } }} };
+    try std.testing.expect(macro.resolveEditor(opt_z) == .consumed);
+}
+
+test "ETX3 전역 기본키는 편집기에서도 그대로 먹고, 모르는 키는 편집기가 받는다" {
+    // **컨텍스트가 전역을 가로채지 않는다**(계약이 그 범위를 명시적으로 제한했다). 그리고 컨텍스트가
+    // 모르는 키는 `.editor` 로 떨어져 편집기가 처리한다 — PTY 로 안 간다(그 Term 에는 PTY 가 없다).
+    const resolver: KeyBindingResolver = .{};
+
+    const save: terminal.KeyEvent = .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } };
+    const rs = resolver.resolveEditor(save);
+    try std.testing.expect(rs == .app_action and rs.app_action == .editor_save);
+
+    // 평범한 글자·편집 키는 편집기 몫이다.
+    try std.testing.expect(resolver.resolveEditor(.{ .key = .{ .char = 'a' }, .modifiers = .{} }) == .editor);
+    try std.testing.expect(resolver.resolveEditor(.{ .key = .arrow_left, .modifiers = .{} }) == .editor);
+    try std.testing.expect(resolver.resolveEditor(.{ .key = .backspace, .modifiers = .{} }) == .editor);
+}
+
+test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다 — ⌘ 없는 ⌥ 는 여전히 0개다" {
+    // **이 판정자가 지키는 것은 근거 자체다.** 전역 표에 `⌘` 없는 `⌥` chord 가 하나라도 들어가면
+    // 터미널 Meta 입력이 전역으로 뺏기고, 그 순간 이 컨텍스트를 세운 이유가 무너진다.
+    var global_option_only: usize = 0;
+    for (default_app_bindings) |b| {
+        if (b.chord.modifiers.option and !b.chord.modifiers.command and !b.chord.modifiers.control) global_option_only += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), global_option_only);
+
+    // 반대로 컨텍스트 표는 **전부** 그 부류다 — 아니면 전역에 있어야 할 것이 여기 잘못 온 것이다.
+    for (editor_context_bindings) |b| {
+        try std.testing.expect(b.chord.modifiers.option);
+        try std.testing.expect(!b.chord.modifiers.command and !b.chord.modifiers.control);
+    }
+    try std.testing.expect(editor_context_bindings.len > 0);
 }
 
 test "KB_SYM5 ⌥⌘D 가 비교 열 넘기기를 부르고, 찾기 토글 넷이 같은 수식자다 (§5.1)" {

@@ -2,7 +2,7 @@ const std = @import("std");
 const validator = @import("release_validator");
 
 const Event = enum { bootstrap, token, pre_publish, verify_predecessor };
-const Phase = enum { pre_publish, verify_predecessor };
+const Phase = enum { pre_publish, verify_predecessor, publish_candidate };
 
 const Harness = struct {
     events: [8]Event = undefined,
@@ -40,6 +40,22 @@ const Harness = struct {
                         .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
                         .work_dir = "/tmp/work",
                         .summary_out = "/tmp/summary",
+                    } },
+                    .publish_candidate => .{ .publish_candidate = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .test_uuid = "123e4567-e89b-42d3-a456-426614174000",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                        .dmg_work = "/tmp/dmg-work",
+                        .baseline_workspace = "/tmp/baseline",
+                        .app_main_executable = "/tmp/app-main",
+                        .app_cli_executable = "/tmp/app-cli",
+                        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+                        .source_root = "/tmp/source",
+                        .zig = "/tmp/zig",
+                        .zig_size = 123,
+                        .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     } },
                 };
                 result.owner = result;
@@ -123,6 +139,13 @@ test "bootstrap and token failures start no product and storage caps stay compon
         const right_end = @intFromPtr(right.ptr) + right.len;
         try std.testing.expect(left_end <= @intFromPtr(right.ptr) or right_end <= @intFromPtr(left.ptr));
     };
+}
+
+test "publish-candidate stays dormant before token or product access" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{ .phase = .publish_candidate };
+    try std.testing.expectError(error.UnsupportedCommand, harness.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{.bootstrap}, harness.events[0..harness.count]);
 }
 
 test "production failure cleanup retries at most once and retry failure wins" {

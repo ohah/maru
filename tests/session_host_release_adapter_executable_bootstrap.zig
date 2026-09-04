@@ -99,19 +99,30 @@ fn predecessorArgs(path: []const u8) [15][]const u8 {
     };
 }
 
-test "both commands bind context and pin only after identity authority" {
-    for ([_]bool{ false, true }) |pre_publish| {
+fn candidateArgs(path: []const u8) [33][]const u8 {
+    return .{
+        "publish-candidate",  "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     path,                                               "--github-cli-sha256", cli_sha,
+        "--test-uuid",        "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",       "--baseline-workspace",
+        "/tmp/baseline-work", "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",       "/tmp/candidate",
+        "--zig",              "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    };
+}
+
+test "all commands bind context and pin only after identity authority" {
+    for ([_]enum { pre_publish, verify_predecessor, publish_candidate }{ .pre_publish, .verify_predecessor, .publish_candidate }) |kind| {
         var trace = Trace{};
         var contexts = ContextReader{ .trace = &trace };
         var runners = RunnerReader{ .trace = &trace };
         var pinner = Pinner{ .trace = &trace };
         const pre = prePublishArgs("/usr/local/bin/gh");
         const predecessor = predecessorArgs("/usr/local/bin/gh");
+        const candidate = candidateArgs("/usr/local/bin/gh");
         var result = bootstrap.Bootstrap{};
-        if (pre_publish)
-            try bootstrap.bootstrapWith(std.testing.allocator, &pre, &contexts, &runners, &pinner, &result)
-        else
-            try bootstrap.bootstrapWith(std.testing.allocator, &predecessor, &contexts, &runners, &pinner, &result);
+        switch (kind) {
+            .pre_publish => try bootstrap.bootstrapWith(std.testing.allocator, &pre, &contexts, &runners, &pinner, &result),
+            .verify_predecessor => try bootstrap.bootstrapWith(std.testing.allocator, &predecessor, &contexts, &runners, &pinner, &result),
+            .publish_candidate => try bootstrap.bootstrapWith(std.testing.allocator, &candidate, &contexts, &runners, &pinner, &result),
+        }
         const view = result.value().?;
         try std.testing.expectEqualSlices(@TypeOf(trace.calls[0]), &.{ .context, .runner, .pin }, trace.calls[0..trace.count]);
         try std.testing.expectEqualStrings("/usr/local/bin/gh", view.github_cli);
@@ -120,9 +131,15 @@ test "both commands bind context and pin only after identity authority" {
         switch (view.command) {
             .pre_publish => |command| try std.testing.expectEqualStrings("/tmp/pre-publish-work", command.work_dir),
             .verify_predecessor => |command| try std.testing.expectEqualStrings("/tmp/work", command.work_dir),
+            .publish_candidate => |command| {
+                try std.testing.expectEqualStrings("123e4567-e89b-42d3-a456-426614174000", command.test_uuid);
+                try std.testing.expectEqualStrings("/usr/local/bin/zig", command.zig);
+                try std.testing.expectEqual(@as(u64, 123456), command.zig_size);
+            },
         }
         try std.testing.expect(!@hasField(bootstrap.PrePublish, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.VerifyPredecessor, "github_cli_sha256"));
+        try std.testing.expect(!@hasField(bootstrap.PublishCandidate, "github_cli"));
         var copied = result;
         try std.testing.expect(copied.value() == null);
         try std.testing.expectError(error.InvalidOwner, bootstrap.bootstrapWith(

@@ -68,6 +68,59 @@ test "release adapter parses exact predecessor command" {
     try std.testing.expectEqualStrings("/tmp/download", parsed.verify_predecessor.work_dir);
 }
 
+fn candidateArgs() [33][]const u8 {
+    return .{
+        "publish-candidate",  "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     "/usr/local/bin/gh",                                "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--test-uuid",        "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",       "--baseline-workspace",
+        "/tmp/baseline-work", "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",       "/tmp/candidate",
+        "--zig",              "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    };
+}
+
+test "release adapter parses exact publish-candidate command and permits source ancestry" {
+    var args = candidateArgs();
+    const first_option = args[1];
+    const first_value = args[2];
+    args[1] = args[31];
+    args[2] = args[32];
+    args[31] = first_option;
+    args[32] = first_value;
+    const parsed = try adapter.parseArgs(&args);
+    try std.testing.expectEqualStrings("123e4567-e89b-42d3-a456-426614174000", parsed.publish_candidate.test_uuid);
+    try std.testing.expectEqualStrings("/tmp/candidate", parsed.publish_candidate.source_root);
+    try std.testing.expectEqual(@as(u64, 123456), parsed.publish_candidate.zig_size);
+    try std.testing.expectEqualStrings("/tmp/output/Maru-1.2.3-session-host-release.json", parsed.publish_candidate.manifest);
+}
+
+test "release adapter rejects malformed candidate UUID Zig authority and local paths" {
+    var args = candidateArgs();
+    args[10] = "123e4567-e89b-12d3-a456-426614174000";
+    try std.testing.expectError(error.InvalidTestUuid, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[30] = "0123";
+    try std.testing.expectError(error.InvalidZigSize, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[30] = "01";
+    try std.testing.expectError(error.InvalidZigSize, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[32] = "ABC";
+    try std.testing.expectError(error.InvalidZigSha256, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[20] = "relative/maru";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[24] = "Maru-1.2.3-session-host-release.json";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
+    args = candidateArgs();
+    args[16] = "/tmp/candidate/Maru.app";
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&args));
+    const missing_zig_digest = candidateArgs();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing_zig_digest[0..31]));
+    var legacy_output = candidateArgs();
+    legacy_output[31] = "--summary-out";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&legacy_output));
+}
+
 test "release adapter requires canonical GitHub CLI authority in both phases" {
     try std.testing.expectError(error.MissingOption, adapter.parseArgs(&.{
         "verify-predecessor",                   "--repo",     "ohah/maru",     "--tag",         "v1.2.3",     "--manifest",

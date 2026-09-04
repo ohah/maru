@@ -8,6 +8,8 @@ const std = @import("std");
 const manifest = @import("release_manifest");
 const upgrade_limits = @import("upgrade_limits.zig");
 
+pub const canonicalReleaseTestUuid = upgrade_limits.canonicalReleaseTestUuid;
+
 pub const schema = "maru.session-host-release-evidence.v1";
 pub const default_false_leaf_schema = upgrade_limits.default_false_leaf_schema;
 pub const signed_app_quit_leaf_schema = upgrade_limits.signed_app_quit_leaf_schema;

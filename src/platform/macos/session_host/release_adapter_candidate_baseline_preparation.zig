@@ -21,6 +21,10 @@ pub const Execution = struct {
             (self.deadline_started or self.workspace_attempted or self.app_attempted or self.runner_attempted);
     }
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return self.pristine();
+    }
+
     fn pristine(self: *const @This()) bool {
         return self.owner == null and !self.deadline_started and !self.workspace_attempted and
             !self.app_attempted and !self.runner_attempted and !self.successful;

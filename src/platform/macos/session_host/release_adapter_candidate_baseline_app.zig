@@ -28,6 +28,10 @@ pub const CandidateApp = struct {
     requirement_sha256: [64]u8 = @splat(0),
     team_id: [10]u8 = @splat(0),
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return pristine(self);
+    }
+
     pub fn value(self: *const @This()) ?View {
         if (self.owner != self) return null;
         return .{ .main = self.main.value() orelse return null, .cli = self.cli.value() orelse return null, .designated_requirement_sha256 = &self.requirement_sha256 };

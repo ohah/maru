@@ -43,21 +43,26 @@ pub const Execution = struct {
     deadline: deadline_mod.Deadline = .{},
     evidence: evidence_mod.PublishedEvidence = .{},
     inputs: ?Inputs = null,
+    cleanup_workspace: ?*Workspace = null,
+    borrowed_deadline: bool = false,
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
     budget_ns: i128 = 0,
 
     pub fn ownsSuccessfulOutputs(self: *const @This()) bool {
-        return self.owner == self and self.inputs != null and self.deadline.owner == &self.deadline and
+        const deadline_valid = self.borrowed_deadline or self.deadline.owner == &self.deadline;
+        return self.owner == self and self.inputs == null and self.cleanup_workspace != null and deadline_valid and
             self.evidence.owner == &self.evidence and self.product_execution.ownsSuccessfulChildren();
     }
     pub fn needsCleanup(self: *const @This()) bool {
         return self.owner == self and !self.product_execution.successful and (self.product_execution.needsCleanup() or
             self.deadline.owner == &self.deadline or self.evidence.owner == &self.evidence);
     }
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return self.pristine();
+    }
     pub fn cleanup(self: *@This()) !void {
-        if (self.owner != self or self.inputs == null or !self.product_execution.ownsSuccessfulChildren())
-            return error.InvalidOwner;
+        if (!self.ownsSuccessfulOutputs()) return error.InvalidOwner;
         var steps = ConcreteSteps{ .execution = self };
         if (!cleanupArtifacts(&steps)) return error.CleanupFailed;
         cleanupDeadline(self) catch return error.CleanupFailed;
@@ -65,7 +70,9 @@ pub const Execution = struct {
     }
     fn pristine(self: *const @This()) bool {
         return self.owner == null and self.product_execution.owner == null and self.deadline.owner == null and
-            self.evidence.owner == null and self.evidence.fd < 0 and self.evidence.parent_fd < 0 and self.inputs == null;
+            self.deadline.started_ns == 0 and self.deadline.expires_ns == 0 and
+            self.evidence.owner == null and self.evidence.fd < 0 and self.evidence.parent_fd < 0 and self.inputs == null and
+            self.cleanup_workspace == null and !self.borrowed_deadline;
     }
 };
 
@@ -74,17 +81,40 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, budget_ns: 
         return error.InvalidOwner;
     execution.owner = execution;
     execution.inputs = inputs;
+    execution.cleanup_workspace = inputs.workspace;
     execution.io = io;
     execution.allocator = allocator;
     execution.budget_ns = budget_ns;
     var steps = ConcreteSteps{ .execution = execution };
     product_execution.executeWith(&steps, &execution.product_execution) catch |err| {
+        execution.inputs = null;
         if (!execution.product_execution.needsCleanup()) {
             cleanupDeadline(execution) catch return error.CleanupFailed;
             execution.* = .{};
         }
         return err;
     };
+    execution.inputs = null;
+}
+
+pub fn runBorrowingDeadline(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, deadline: *deadline_mod.Deadline, execution: *Execution) !void {
+    if (!execution.pristine() or inputs.source_directory_fd < 0 or deadline.owner != deadline or
+        aliasesExecution(execution, inputs) or overlaps(std.mem.asBytes(execution), std.mem.asBytes(deadline))) return error.InvalidOwner;
+    _ = try deadline.remaining();
+    execution.owner = execution;
+    execution.inputs = inputs;
+    execution.cleanup_workspace = inputs.workspace;
+    execution.borrowed_deadline = true;
+    execution.io = io;
+    execution.allocator = allocator;
+    var steps = ConcreteSteps{ .execution = execution, .borrowed = deadline };
+    product_execution.executeWith(&steps, &execution.product_execution) catch |err| {
+        execution.inputs = null;
+        if (!execution.product_execution.needsCleanup()) execution.* = .{};
+        return err;
+    };
+    execution.inputs = null;
+    _ = try deadline.remaining();
 }
 
 pub fn retryCleanup(execution: *Execution) !void {
@@ -102,6 +132,18 @@ pub fn executeWith(steps: anytype, execution: *Execution) !void {
     if (!execution.pristine()) return error.InvalidOwner;
     execution.owner = execution;
     product_execution.executeWith(steps, &execution.product_execution) catch |err| {
+        if (!execution.product_execution.needsCleanup()) execution.* = .{};
+        return err;
+    };
+}
+
+pub fn executeWithBorrowedDeadline(steps: anytype, deadline: anytype, execution: *Execution) !void {
+    if (!builtin.is_test) @compileError("executeWithBorrowedDeadline is a test-only seam");
+    if (!execution.pristine()) return error.InvalidOwner;
+    execution.owner = execution;
+    execution.borrowed_deadline = true;
+    var borrowed = BorrowedSteps(@TypeOf(steps), @TypeOf(deadline)){ .steps = steps, .deadline = deadline };
+    product_execution.executeWith(&borrowed, &execution.product_execution) catch |err| {
         if (!execution.product_execution.needsCleanup()) execution.* = .{};
         return err;
     };
@@ -138,6 +180,7 @@ fn cleanupArtifacts(steps: anytype) bool {
 
 const ConcreteSteps = struct {
     execution: *Execution,
+    borrowed: ?*deadline_mod.Deadline = null,
     fn inputs(self: *@This()) !Inputs {
         if (self.execution.owner != self.execution) return error.InvalidOwner;
         return self.execution.inputs orelse error.InvalidOwner;
@@ -146,6 +189,10 @@ const ConcreteSteps = struct {
         try self.validateAuthorities();
     }
     pub fn startDeadline(self: *@This()) !*deadline_mod.Deadline {
+        if (self.borrowed) |deadline| {
+            _ = try deadline.remaining();
+            return deadline;
+        }
         try deadline_mod.start(self.execution.budget_ns, &self.execution.deadline);
         return &self.execution.deadline;
     }
@@ -217,8 +264,8 @@ const ConcreteSteps = struct {
         _ = try value.toolchain.revalidate();
     }
     fn cleanupOutput(self: *@This(), kind: CleanupKind) !void {
-        const value = try self.inputs();
-        const paths = try value.workspace.value();
+        const workspace = self.execution.cleanup_workspace orelse return error.InvalidOwner;
+        const paths = try workspace.value();
         const leaf = switch (kind) {
             .default_false => paths.default_false_leaf,
             .signed_app_quit => paths.signed_app_quit_leaf,
@@ -228,9 +275,55 @@ const ConcreteSteps = struct {
             _ = try self.execution.evidence.revalidate(leaf);
             try self.execution.evidence.deinit();
         }
-        try cleanupWorkspaceChild(self.execution.io, value.workspace, kind, leaf, paths);
+        try cleanupWorkspaceChild(self.execution.io, workspace, kind, leaf, paths);
     }
 };
+
+fn BorrowedSteps(comptime Steps: type, comptime Deadline: type) type {
+    return struct {
+        steps: Steps,
+        deadline: Deadline,
+        pub fn bindCandidate(self: *@This()) !void {
+            try self.steps.bindCandidate();
+        }
+        pub fn startDeadline(self: *@This()) !Deadline {
+            return self.deadline;
+        }
+        pub fn validateInitialCandidate(self: *@This(), deadline: Deadline) !void {
+            try self.steps.validateInitialCandidate(deadline);
+        }
+        pub fn runDefaultFalse(self: *@This(), deadline: Deadline) !void {
+            try self.steps.runDefaultFalse(deadline);
+        }
+        pub fn validateCandidateAfterDefault(self: *@This(), deadline: Deadline) !void {
+            try self.steps.validateCandidateAfterDefault(deadline);
+        }
+        pub fn runSignedAppQuit(self: *@This(), deadline: Deadline) !void {
+            try self.steps.runSignedAppQuit(deadline);
+        }
+        pub fn validateCandidateAfterQuit(self: *@This(), deadline: Deadline) !void {
+            try self.steps.validateCandidateAfterQuit(deadline);
+        }
+        pub fn publishEvidence(self: *@This(), deadline: Deadline) !void {
+            try self.steps.publishEvidence(deadline);
+        }
+        pub fn validateFinalCandidate(self: *@This(), deadline: Deadline) !void {
+            try self.steps.validateFinalCandidate(deadline);
+        }
+        pub fn validateFinalDeadline(self: *@This(), deadline: Deadline) !void {
+            try self.steps.validateFinalDeadline(deadline);
+        }
+        pub fn cleanupEvidence(self: *@This()) !void {
+            try self.steps.cleanupEvidence();
+        }
+        pub fn cleanupSignedAppQuit(self: *@This()) !void {
+            try self.steps.cleanupSignedAppQuit();
+        }
+        pub fn cleanupDefaultFalse(self: *@This()) !void {
+            try self.steps.cleanupDefaultFalse();
+        }
+    };
+}
 
 pub fn cleanupWorkspaceChildForTest(io: std.Io, workspace: *Workspace, kind: CleanupKind) !void {
     if (!builtin.is_test) @compileError("cleanupWorkspaceChildForTest is a test-only seam");
@@ -273,7 +366,9 @@ const ProductSource = struct {
 };
 
 fn cleanupDeadline(execution: *Execution) !void {
-    if (execution.deadline.owner == &execution.deadline) try execution.deadline.deinit();
+    if (execution.deadline.owner == null) return;
+    if (execution.deadline.owner != &execution.deadline) return error.InvalidOwner;
+    try execution.deadline.deinit();
 }
 
 fn aliasesExecution(execution: *Execution, inputs: Inputs) bool {

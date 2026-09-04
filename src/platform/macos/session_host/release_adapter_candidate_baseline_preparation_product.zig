@@ -20,6 +20,8 @@ pub const CandidateEvidenceIdentity = candidate_identity.CandidateEvidenceIdenti
 pub const SourceTreeAuthority = source_tree.SourceTreeAuthority;
 pub const ZigToolchainAuthority = zig_toolchain.ZigToolchainAuthority;
 pub const Deadline = deadline_mod.Deadline;
+pub const AppPaths = app_mod.Paths;
+pub const AppProductView = app_mod.ProductView;
 
 pub const Inputs = struct {
     context: Context,
@@ -47,6 +49,10 @@ pub const Execution = struct {
     budget_ns: i128 = 0,
     active_deadline: ?*Deadline = null,
     owns_deadline: bool = false,
+
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return self.pristine();
+    }
 
     pub fn ownsSuccessfulOutputs(self: *const @This()) bool {
         return self.owner == self and self.transaction.ownsSuccessfulOutputs() and

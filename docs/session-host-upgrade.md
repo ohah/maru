@@ -2635,6 +2635,41 @@ identity, 각 leaf fail-index, mutation 전 reverse cleanup과 partial-cleanup r
 callsite는 후속 product wiring gate가 소유한다. 이 transaction은 baseline/upgrade evidence 실행, candidate publication,
 executable bootstrap 배선, live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.40 candidate publication prerequisite product owner
+
+`release_adapter_candidate_prerequisite_product.zig`의 caller-owned final-address `Execution` 하나가 §11.39
+`Preparation`, 하나의 `Deadline`, `CandidateAttestation`, `DraftAuthority`, `CandidateFiles`, `CandidateProduct`,
+`SourceTreeAuthority`, `CandidateEvidenceIdentity`, `CandidateCompatibility`와 Apple command capture storage를 직접 소유한다.
+production `run`의 caller는 protected `Context`, test UUID, candidate/DMG work absolute pathname, pinned GitHub CLI, token,
+하나의 bounded scratch buffer와 positive budget만 제공한다. caller는 중간 typed owner, draft ID, digest, signing 관측,
+source tree, compatibility 값, Apple capture storage 또는 child별 budget/deadline을 주입하지 않는다.
+
+첫 leaf 전 preflight는 `Execution`과 모든 nested owner가 pristine이고 final address에 있으며 budget이 양수인지 검증한다.
+서로 다른 nested owner의 storage region은 겹치지 않고, top-level `Execution` 및 그 내부 region은 pinned CLI, context scalar,
+UUID, pathname, token, caller scratch buffer와 빈 slice를 제외하고 겹치지 않아야 한다. 내부 Apple capture storage는 caller에게
+노출하거나 authority로 게시하지 않고 해당 관측에서만 덮어쓴다. candidate pathname은 각 leaf의 basename/absolute-path 계약을 만족하고 DMG work path는 기존 파일과
+부모가 겹치지 않아야 한다. 이 full alias/path matrix와 pinned CLI 재검증은 remote draft 생성 전에 실패해야 하며, 검증 실패는
+GitHub·filesystem·Apple leaf를 한 번도 호출하지 않는다.
+
+concrete steps는 candidate attestation, GitHub draft creation, `CandidateFiles.observe`, `CandidateProduct.observe`,
+`SourceTreeAuthority.observe`, `CandidateEvidenceIdentity.compose`, `CandidateCompatibility.composeUntil` production leaf를 각각
+정확히 한 callsite에서 §11.39 순서로 호출한다. deadline을 소비하지 않는 결속 leaf 전후에도 같은 `Deadline`의 fresh
+`remaining`과 전체 typed graph를 다시 검증한다. authority fence는 protected context, pinned CLI, candidate paths와 지금까지
+게시된 owner를 그 owner의 typed revalidation API로 다시 유도하며 scalar나 boolean 사본을 권위로 사용하지 않는다.
+
+반환 전에는 성공, mutation 전 실패, cleanup 실패, terminal audit 실패 모두 caller의 context/path/UUID/token/scratch borrow를
+제거하고 token을 복사하지 않으며 `Deadline`을 닫는다. 성공은 complete `Preparation`과 self-owned concrete owner 일곱 개만
+게시한다. 명시적 cleanup은 compatibility→identity→source→product→files→draft→attestation 역순으로 local capability를 닫고
+remote draft를 삭제하지 않는다. mutation 전 cleanup 일부가 실패하면 exact remaining owner만 `retryCleanup` 대상으로 남긴다.
+draft가 `remote_state_unknown|cleanup_required|ready`가 된 뒤의 어느 실패도 ordinary cleanup/retry로 축소하지 않고 exact
+`AuditStage`, draft 상태와 당시까지 게시된 concrete owner를 final-address `Execution` 안에 보존한다.
+
+focused gate `test-session-host-release-adapter-candidate-prerequisite-product`는 production leaf callsite 각각 하나, single deadline,
+pristine/final-address/copy 차단, full pairwise alias·path·buffer preflight, leaf별 typed fence, borrow/deadline scrubbing, 성공 owner 집합,
+역순 cleanup과 partial-cleanup retry, draft unknown/known/ready terminal graph 보존을 Debug·ReleaseFast에서 검증한다. 실제 GitHub와
+Apple child 동작은 각 leaf product gate가 계속 소유한다. 이 단계는 baseline/upgrade evidence 실행, candidate publication,
+executable bootstrap 배선, live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

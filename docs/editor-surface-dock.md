@@ -275,7 +275,7 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
      구조체에 필드를 더하는 것 자체는 wire 파손이 아니다 — `bell_count`·`mouse_tracking_mode`처럼 "구 host면
      기본값 = 기존 동작"이라는 호환 패턴이 이미 있다. 비용은 `C3-3b2b0` exact-capacity 게이트 갱신이다.
 
-   **닿지 않는 곳이 하나 있다.** 영속 세션 호스트(`session.keep-alive-after-quit`, 실험적 opt-in·기본 `false`)로
+   **닿지 않는 곳이 하나 있다.** 영속 세션 호스트(`session.keep-alive-after-quit` — 값과 설명은 [설정](configuration.md)이 단일 출처)로
    연 Term은 PTY와 그 자식이 `maru-sessiond` 프로세스에 살아서 GUI 프로세스의 `proc_pidinfo`가 닿지 않는다
    (pid 네임스페이스 문제가 아니라 소유 프로세스가 다른 문제다 — `session_host/remote_term_backend.zig`의
    `processCwd`가 그래서 `null`을 낸다). 그 Term에서는 OSC 7이 **유일한** 출처다. 메우려면 host가 관측

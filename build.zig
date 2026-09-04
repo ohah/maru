@@ -12645,6 +12645,87 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_evidence_files_tests.step);
         if (posix_host_tests) test_step.dependOn(&run_release_evidence_files_tests.step);
     };
+    const session_host_release_adapter_source_directory_authority_step = b.step(
+        "test-session-host-release-adapter-source-directory-authority",
+        "Validate the trusted session-host release source directory owner",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |source_directory_optimize| {
+        const safe_open_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+        });
+        const files_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }},
+        });
+        const context_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = source_directory_optimize }) },
+                .{ .name = "release_adapter_identity", .module = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"), .target = target, .optimize = source_directory_optimize }) },
+            },
+        });
+        const runner_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }},
+        });
+        const contract_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+        });
+        const environment_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_environment.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "release_adapter_context", .module = context_mod }},
+        });
+        const bootstrap_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_executable_bootstrap.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .imports = &.{
+                .{ .name = "release_adapter_contract", .module = contract_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_environment", .module = environment_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = runner_mod },
+            },
+        });
+        const authority_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_source_directory_authority.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod },
+                .{ .name = "safe_open", .module = safe_open_mod },
+            },
+        });
+        const tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_release_adapter_source_directory_authority.zig"),
+            .target = target,
+            .optimize = source_directory_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "release_adapter_source_directory_authority", .module = authority_mod }},
+        }) });
+        const run = b.addRunArtifact(tests);
+        run.addArg("--maru-expect-tests=5");
+        run.setCwd(b.path("."));
+        session_host_release_adapter_source_directory_authority_step.dependOn(&run.step);
+        session_host_step.dependOn(&run.step);
+        if (posix_host_tests) test_step.dependOn(&run.step);
+    }
     const session_host_release_adapter_contract_step = b.step(
         "test-session-host-release-adapter-contract",
         "Validate the closed session-host release adapter CLI contract",

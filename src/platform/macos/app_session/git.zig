@@ -319,6 +319,13 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
                 "remote watcher cannot run on this host (exit={d}) — auto refresh off, falling back to manual refresh dest={s}",
                 .{ why, dest },
             );
+            // **조용히 내리지 않는다**(RW6). 로그는 사용자가 안 본다 — 화면에는 「어느 순간부터 도크가
+            // 안 바뀐다」로만 보이고, 그러면 감시가 꺼진 것이 아니라 저장소가 안 바뀐 것으로 읽는다.
+            // 에이전트 채널이 같은 자리에서 이미 그렇게 한다(`agent_remote_channel_gave_up`).
+            //
+            // ⚠️ **여기 한 번뿐이다.** `.gave_up` 은 위 switch 가 곧장 return 하는 흡수 상태라 이 줄에
+            // 두 번 닿을 수 없고, 대상이 바뀌어 `rememberGitRepoDest` 가 채널을 놓아야 풀린다.
+            self.showNoticeKey(.scm_remote_watch_gave_up);
         } else {
             self.remote_watch.phase = .backoff;
             self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;

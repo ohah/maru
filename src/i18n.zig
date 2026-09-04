@@ -525,6 +525,10 @@ const Table = struct {
     /// 원격 PATH 에 `git` 이 없다(exit 127). 우리 PATH 처방으로도 못 찾았으므로 **사용자가 깔아야 한다** —
     /// 「읽지 못함」으로 뭉개면 저장소를 의심하며 시간을 쓴다.
     scm_remote_git_missing: [:0]const u8,
+    /// 원격 감시자가 「이 호스트에서는 못 한다」고 말해 다시 안 띄운다(RW5·RW6). **조용히 내리지
+    /// 않는다** — 사용자에게는 「어느 순간부터 도크가 안 바뀐다」로만 보이기 때문이다. 화면이 죽은
+    /// 것은 아니므로 무엇을 하면 되는지(직접 새로고침)까지 말한다.
+    scm_remote_watch_gave_up: [:0]const u8,
     /// 활성 터미널에서 **명령이 돌고 있다**(셸 통합이 그렇게 말한다). 지금 넣으면 그 프로그램이 받는다.
     scm_terminal_busy: [:0]const u8,
     scm_changes: [:0]const u8,
@@ -1284,6 +1288,7 @@ const en: Table = .{
     .scm_remote_fetch_injected = "Typed `git fetch --prune` into the terminal — run it there, then refresh",
     .scm_inject_host_mismatch = "The active terminal is on a different machine than this repository",
     .scm_remote_git_missing = "No git on the remote — install it there",
+    .scm_remote_watch_gave_up = "This remote cannot watch for changes. Source control stops refreshing on its own — refresh it yourself.",
     .scm_terminal_busy = "That terminal is running something — wait for the prompt",
     .scm_changes = "Changes",
     .scm_history = "History",
@@ -1879,6 +1884,7 @@ const ko: Table = .{
     .scm_remote_fetch_injected = "터미널에 `git fetch --prune` 을 넣었습니다 — 거기서 실행한 뒤 새로고침하세요",
     .scm_inject_host_mismatch = "활성 터미널이 이 저장소와 다른 기계에 있습니다",
     .scm_remote_git_missing = "원격에 git 이 없습니다 — 그쪽에 설치하세요",
+    .scm_remote_watch_gave_up = "이 원격은 변경을 감시하지 못합니다. 소스 컨트롤이 스스로 갱신되지 않으니 직접 새로고침하세요.",
     .scm_terminal_busy = "그 터미널에서 명령이 돌고 있습니다 — 프롬프트를 기다리세요",
     .scm_no_terminal = "명령을 넣을 터미널이 없습니다",
     .scm_changes = "변경 사항",

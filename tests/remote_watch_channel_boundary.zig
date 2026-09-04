@@ -119,3 +119,33 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse return") != null);
     try std.testing.expect(std.mem.indexOf(u8, pump_code, "self.git_repo orelse return") == null);
 }
+
+test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본다" {
+    const allocator = std.testing.allocator;
+    const git = try read(allocator, "src/platform/macos/app_session/git.zig", 4 * 1024 * 1024);
+    defer allocator.free(git);
+    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 8192);
+
+    // RW5 가 「다시 안 띄운다」를 세웠지만, 그것만으로는 화면이 **조용히** 낡는다 — 사용자에게는
+    // 「어느 순간부터 도크가 안 바뀐다」로만 보이고 저장소가 안 바뀐 것으로 읽힌다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+
+    // ⚠️ **영구 실패에서만 말한다.** 일시적 끊김(슬립·네트워크)에도 띄우면 배너가 잔소리가 되고,
+    // 그러면 사용자가 배너 자체를 무시하게 된다 — 정작 영구 실패일 때 안 읽힌다.
+    const permanent = try bodyOf(pump, "if (remote_watch_mod.isPermanent(why)) {", "\n        } else {", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, permanent, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+    const transient = try bodyOf(pump, "\n        } else {", "\n        }\n", 4096);
+    const transient_code = try stripComments(allocator, transient);
+    defer allocator.free(transient_code);
+    try std.testing.expect(std.mem.indexOf(u8, transient_code, "showNoticeKey") == null);
+
+    // 문구는 **두 로케일 다** 있어야 한다 — 한쪽만 넣으면 다른 쪽에서 컴파일은 되는데 빈 화면이 된다.
+    const i18n = try read(allocator, "src/i18n.zig", 8 * 1024 * 1024);
+    defer allocator.free(i18n);
+    try std.testing.expect(std.mem.indexOf(u8, i18n, "scm_remote_watch_gave_up: [:0]const u8,") != null);
+    var locales: usize = 0;
+    var it = std.mem.splitSequence(u8, i18n, ".scm_remote_watch_gave_up = \"");
+    _ = it.next();
+    while (it.next()) |_| locales += 1;
+    try std.testing.expectEqual(@as(usize, 2), locales);
+}

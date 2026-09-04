@@ -265,6 +265,25 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     };
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
 
+    // ⚠️ **같은 호스트에서 저장소만 바뀌는 전환**(적대적 검증 2026-09-04 6 회차). `git_repo_dest` 가
+    // 그대로라 `rememberGitRepoDest` 는 조기 반환한다 — 그 자리가 못 보는 축이 여기 하나 있다.
+    // 그냥 두면 채널이 **옛 저장소**를 계속 보고, 새 저장소의 변경은 영영 안 오며 옛 저장소의 변경이
+    // 엉뚱한 새로고침을 건다.
+    //
+    // **판단째로 놓는다.** `.gave_up` 은 호스트만의 성질이 아니다 — `exit_watch_limit`(디렉터리가
+    // 너무 많다)은 **저장소마다** 다르다. 큰 저장소에서 포기했다고 옆의 작은 저장소까지 포기할
+    // 이유가 없다. `.backoff` 도 같은 이유로 새 저장소에 물려줄 값이 아니다.
+    //
+    // **switch 보다 «먼저» 본다.** 뒤에 두면 `.gave_up` 이 곧장 return 해 전환을 영영 못 본다.
+    //
+    // ⚠️ **`started` 가 아니라 「기억이 있는가」로 묻는다**(8 회차). `.gave_up`·`.backoff` 채널은 둘 다
+    // `started == false` 라, `started` 로 물으면 **포기한 뒤의 전환을 영영 못 본다** — A 에서 포기하고
+    // B 로 옮기면 B 가 영원히 감시되지 않는다. 「못 띄우는 루트는 아예 안 띄운다」(아래 `canTrack`)가
+    // `started ⇒ 기억 있음` 을 보장하므로, 이 조건이 그것을 포함하면서 더 넓다.
+    if (self.remote_watch.root_len != 0 and !std.mem.eql(u8, self.remote_watch.watchedRoot(), repo)) {
+        self.remote_watch.stop();
+    }
+
     switch (self.remote_watch.phase) {
         // **다시 안 띄운다**(RW5). 감시자가 「이 원격에서는 못 한다」고 말했다 — 대상이 바뀌면
         // `rememberGitRepoDest` 가 채널을 통째로 놓으므로 이 상태도 그때 풀린다.
@@ -277,6 +296,13 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     }
 
     if (!self.remote_watch.started) {
+        // ⚠️ **추적할 수 없는 루트는 아예 안 띄운다**(적대적 검증 2026-09-04 7 회차). 띄워 놓고 무엇을
+        // 보는지 모르면 위 전환 판정이 영영 안 걸려 옛 감시자가 조용히 남는다. 여기서 걸러야 `started`
+        // 가 곧 「기억이 있다」가 된다 — 그래서 그 판정이 `started` 하나만 봐도 된다.
+        if (!remote_watch_mod.canTrack(repo)) {
+            self.remote_watch.pause();
+            return;
+        }
         // control socket 이 없으면 띄울 수 없다 — 있는 판정을 다시 만들지 않고 그 함수를 쓴다.
         var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
         const ctl = remoteControlSocketFor(self, dest, &ctl_buf) orelse {
@@ -292,6 +318,7 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
         self.remote_watch.stream = stream;
         self.remote_watch.started = true;
         self.remote_watch.phase = .watching;
+        self.remote_watch.rememberRoot(repo); // 무엇을 보고 있는지 적어 둔다 — 위 전환 판정의 단일 출처
         return; // 이번 tick 은 여기까지 — 방금 띄운 것에서 읽을 것은 없다
     }
 

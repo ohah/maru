@@ -70,6 +70,25 @@ pub const Channel = struct {
     retry_at_ns: i128 = 0,
     /// 감시자가 「바뀌었다」를 낸 횟수. 화면에 안 쓴다 — **판정자가 「정말 왔나」를 세는 값**이다.
     changes: u32 = 0,
+    /// **지금 감시하고 있는 저장소 루트.** 이것이 없으면 «같은 호스트에서 저장소만 바뀌는» 전환을
+    /// 못 본다(적대적 검증 2026-09-04 6 회차) — `git_repo_dest` 가 그대로라 `rememberGitRepoDest` 는
+    /// 조기 반환하고, 채널은 **옛 저장소**를 계속 본다. 그러면 새 저장소의 변경은 영영 안 오고 옛
+    /// 저장소의 변경이 엉뚱한 새로고침을 건다. 힙을 안 쓴다 — 이 구조체는 `AppSession` 안에 산다.
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    root_len: usize = 0,
+
+    /// 지금 감시 중인 루트(안 띄웠으면 빈 슬라이스).
+    pub fn watchedRoot(self: *const Channel) []const u8 {
+        return self.root_buf[0..self.root_len];
+    }
+
+    /// 띄운 루트를 적어 둔다. **부를 수 있는지는 `canTrack` 이 먼저 답한다** — 이 함수는 들어온 것을
+    /// 그대로 적는다.
+    pub fn rememberRoot(self: *Channel, root: []const u8) void {
+        std.debug.assert(canTrack(root));
+        @memcpy(self.root_buf[0..root.len], root);
+        self.root_len = root.len;
+    }
 
     pub fn deinit(self: *Channel, allocator: std.mem.Allocator) void {
         self.stop();
@@ -86,31 +105,51 @@ pub const Channel = struct {
         return code;
     }
 
-    /// 자식과 버퍼만 놓는다 — **판단은 안 지운다**(적대적 검증 2026-09-04 1 회차).
-    ///
-    /// ⚠️ `stop` 하나로 두 뜻을 쓰면 RW5 가 풀린다. 「도크가 안 보인다」는 **잠시 멈춤**이고
-    /// 「대상이 바뀌었다」는 **놓아줌**인데, 둘 다 `.idle` 로 되돌리면 도크를 껐다 켤 때마다
-    /// 「이 원격에서는 못 한다」가 잊혀 남의 서버에 ssh 자식이 다시 뜨고, RW6 의 배너도 다시 뜬다.
-    fn release(self: *Channel, next: Phase) void {
+    /// **자식과 버퍼만** 놓는다 — 판단(`phase`)도 그 판단의 대상(`root_len`)도 안 건드린다.
+    fn releaseChild(self: *Channel) void {
         if (self.started) _ = ssh_upload.stopRemoteWatch(self.stream);
         self.started = false;
         self.stream = .{ .pid = 0, .out_fd = -1, .in_fd = -1 };
-        self.phase = next;
         self.pending.clearRetainingCapacity();
     }
 
-    /// 도크가 안 보이거나 SCM 뷰가 아니다 — 자식은 놓되 **`.gave_up` 은 지키다**. 그 판단은 화면이
-    /// 아니라 **저 호스트**에 대한 것이라 도크를 껐다 켠다고 달라지지 않는다.
+    /// 도크가 안 보이거나 SCM 뷰가 아니다 — 자식은 놓되 **판단과 그 대상을 지킨다.**
+    ///
+    /// `.gave_up`(못 한다)도 `.backoff`(아직 때가 아니다)도 **저 호스트의 저 저장소**에 대한 판단이라
+    /// 화면을 껐다 켠다고 달라지지 않는다(적대적 검증 4 회차 — `.backoff` 를 빠뜨려 재개가
+    /// `retry_at_ns` 를 건너뛰었다).
+    ///
+    /// ⚠️ **루트 기억도 지키다**(8 회차). 여기서 지우면 「어느 저장소에 대한 판단인가」가 사라져,
+    /// 도크를 껐다 켠 뒤 저장소를 바꾸면 `.gave_up` 이 그대로 남아 **새 저장소를 영영 안 본다.**
     pub fn pause(self: *Channel) void {
-        self.release(if (self.phase == .gave_up) .gave_up else .idle);
+        self.releaseChild();
+        self.phase = switch (self.phase) {
+            .gave_up, .backoff => self.phase,
+            .idle, .watching => .idle,
+        };
     }
 
     /// 대상이 바뀌었다(다른 호스트이거나 로컬로 돌아왔다) — 판단째로 놓는다. 「못 한다」는 **그
     /// 호스트**의 성질이었으므로 새 대상에는 적용되지 않는다.
     pub fn stop(self: *Channel) void {
-        self.release(.idle);
+        self.releaseChild();
+        self.phase = .idle;
+        self.root_len = 0;
     }
 };
+
+/// 감시 루트로 적어 둘 수 있는 최대 길이. `Channel.root_buf` 와 같은 값이다.
+pub const max_root_bytes: usize = std.fs.max_path_bytes;
+
+/// 이 루트를 **추적할 수 있는가**. 못 하면 **아예 안 띄운다**(적대적 검증 2026-09-04 7 회차).
+///
+/// ⚠️ 앞선 판에서는 「넘으면 기억을 0 으로 두고 다음 tick 이 다시 띄운다」고 적었는데 **거짓이었다** —
+/// 전환 판정이 `root_len != 0` 을 요구해 그 경우 아예 안 걸렸고, 무엇을 보는지 모르는 감시자가 조용히
+/// 남았다. 그렇다고 `started` 로 바꾸면 이번엔 매 tick 「달라졌다」가 되어 **재기동 폭주**다(RW5 가
+/// 없앤 바로 그것). 띄우기 «전» 에 답하는 것만이 두 함정을 다 피한다.
+pub fn canTrack(root: []const u8) bool {
+    return root.len <= max_root_bytes;
+}
 
 /// 감시자가 내는 한 줄. `tools/remote-watch/main.zig` 가 쓰는 것과 같아야 한다 — 경계 test 가 센다.
 pub const change_line = "change";
@@ -185,12 +224,51 @@ test "잠시 멈춤은 «못 한다» 는 판단을 지키고, 놓아줌은 지�
     c.stop();
     try testing.expectEqual(Phase.idle, c.phase);
 
-    // 나머지 상태는 잠시 멈춤에서도 처음으로 돌아간다 — 다시 보일 때 곧장 띄우면 된다.
-    for ([_]Phase{ .backoff, .watching, .idle }) |from| {
+    // ⚠️ **`.backoff` 도 판단이다**(적대적 검증 4 회차). 무너뜨리면 재개가 위 switch 의 `.backoff`
+    // 갈래를 안 지나 `retry_at_ns` 를 건너뛴다 — 죽은 원격에 도크 토글마다 ssh 자식이 뜬다.
+    c.phase = .backoff;
+    c.retry_at_ns = 12_345;
+    c.pause();
+    try testing.expectEqual(Phase.backoff, c.phase);
+    try testing.expectEqual(@as(i128, 12_345), c.retry_at_ns);
+    c.stop();
+    try testing.expectEqual(Phase.idle, c.phase);
+
+    // 진행 중이거나 처음인 상태만 처음으로 돌아간다 — 다시 보일 때 곧장 띄우면 된다.
+    for ([_]Phase{ .watching, .idle }) |from| {
         c.phase = from;
         c.pause();
         try testing.expectEqual(Phase.idle, c.phase);
     }
+}
+
+test "무엇을 보고 있는지 기억한다 — 같은 호스트에서 저장소만 바뀌는 전환" {
+    // 적대적 검증 2026-09-04 6 회차. `git_repo_dest` 가 그대로면 `rememberGitRepoDest` 는 조기
+    // 반환하므로, 저장소가 바뀐 것을 아는 유일한 길은 **채널이 무엇을 보고 있는지 아는 것**이다.
+    var c: Channel = .{};
+    try testing.expectEqualStrings("", c.watchedRoot());
+
+    c.rememberRoot("/srv/app");
+    try testing.expectEqualStrings("/srv/app", c.watchedRoot());
+
+    // **놓아줌**은 기억도 지운다 — 새 대상에는 그 판단이 없다.
+    c.stop();
+    try testing.expectEqualStrings("", c.watchedRoot());
+
+    // ⚠️ **잠시 멈춤은 기억을 지킨다**(8 회차). 여기서 지우면 「어느 저장소에 대한 판단인가」가
+    // 사라져, 도크를 껐다 켠 뒤 저장소를 바꾸면 `.gave_up` 이 그대로 남아 새 저장소를 영영 안 본다.
+    for ([_]Phase{ .gave_up, .backoff, .watching, .idle }) |from| {
+        c.rememberRoot("/srv/app");
+        c.phase = from;
+        c.pause();
+        try testing.expectEqualStrings("/srv/app", c.watchedRoot());
+    }
+    c.stop();
+
+    // **추적할 수 있는지는 띄우기 전에 답한다** — 못 하면 안 띄우므로 `rememberRoot` 에 안 온다.
+    try testing.expect(canTrack("/srv/app"));
+    try testing.expect(canTrack("x" ** max_root_bytes));
+    try testing.expect(!canTrack("x" ** (max_root_bytes + 1)));
 }
 
 test "«다시 시도해도 소용없는» 종료만 포기로 읽는다" {

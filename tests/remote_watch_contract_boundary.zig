@@ -37,14 +37,38 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     const linux_body = try bodyOf(src, "fn watchLinux(", "\n}\n", 4096);
     try std.testing.expect(std.mem.indexOf(u8, linux_body, ".fd = 0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, linux_body, "fds[1].revents != 0") != null);
+    // ⚠️ **kqueue 갈래는 지금 「못 한다」고 말한다**(적대적 검증 2026-09-04 13 회차 — 실측). 디렉터리에
+    // 건 `EVFILT_VNODE` 는 **파일 내용 수정을 안 알린다**(만들기·지우기·이름 바꾸기만 온다). 그런데
+    // 화면은 살아 있는 것처럼 보여, 계획 §6 이 「최악」이라 못 박은 조용한 반쪽 감시가 된다.
+    // 되살릴 자리(`watchKqueueDirs`)는 남겨 두되 **stdin 결속은 그때도 지켜야 한다.**
     const kq_body = try bodyOf(src, "fn watchKqueue(", "\n}\n", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, kq_body, ".ident = 0,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, kq_body, "EVFILT.READ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kq_body, "exit_unsupported") != null);
+    const kq_dirs = try bodyOf(src, "fn watchKqueueDirs(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, ".ident = 0,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, "EVFILT.READ") != null);
 
     // ── ⑶ 한도 초과를 **말한다** — 조용히 일부만 감시하지 않는다(§RW5) ──────────────────────
     try std.testing.expect(std.mem.indexOf(u8, src, "exit_watch_limit") != null);
+    // ⚠️ **비교까지 본다**(적대적 검증 2026-09-04 12 회차). 이름만 세면 «죽은» 보고를 못 본다 —
+    // `collect` 가 `max_dirs` 에서 멈추므로 `> max_dirs` 는 영원히 거짓이고, 그때 상한을 넘는 저장소가
+    // 조용히 반쪽만 감시된다. 실제로 그 상태로 머지됐고 이 판정자는 초록이었다.
+    try std.testing.expect(std.mem.indexOf(u8, src, "dirs.items.len >= max_dirs) return exitWith(exit_watch_limit)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "dirs.items.len > max_dirs)") == null);
+    // ⚠️ **수집 실패를 삼키지 않는다**(15 회차). `catch {}` 면 OOM 으로 도중에 멈춘 절반을 「전부」로
+    // 알고 무장한다 — 조용한 반쪽 감시다.
+    try std.testing.expect(std.mem.indexOf(u8, code, "collect(io, init.gpa, root, &dirs) catch {}") == null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "collect(io, gpa, root, dirs) catch {}") == null);
+    // ⚠️ **새 디렉터리는 다시 무장한다**(14 회차 — 실측: 안 하면 그 안의 편집이 통째로 안 보인다).
+    //
+    // ⚠️ **정의가 아니라 «호출»을 센다.** `code` 전체에서 `sawDirEvent(` 를 찾으면 함수 **정의**가
+    // 걸려, 호출을 `if (false)` 로 죽여도 초록이다 — 실제로 그 반증이 통과했다(16 회차). 3 회차에서
+    // 같은 함정을 잡고도 반복했다. 세야 하는 것은 언제나 **쓰는가**다.
+    try std.testing.expect(std.mem.indexOf(u8, linux_body, "if (sawDirEvent(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, linux_body, "armLinux(gpa, ifd, dirs.items)") != null);
+    // 무장은 **처음과 재무장 두 번** 일어난다 — 하나만 있으면 둘 중 한 경로가 빠진 것이다.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, linux_body, "armLinux(gpa, ifd, dirs.items)"));
     try std.testing.expect(std.mem.indexOf(u8, linux_body, "exit_watch_limit") != null);
-    try std.testing.expect(std.mem.indexOf(u8, kq_body, "exit_watch_limit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, "exit_watch_limit") != null);
 
     // ── ⑷ 이벤트를 **해석하지 않는다**(계약 §2 — 파싱 계약을 두 벌로 만들지 않는다) ──────────
     //

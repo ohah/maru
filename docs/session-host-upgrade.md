@@ -2817,6 +2817,34 @@ context/runner/path 결속, 실제 nested directory 성공, final-address/copy/p
 foreign source/runner, pathname 교체 뒤 held inode 불변, `FD_CLOEXEC`, same-UID와 cleanup exact close를 검증한다. 이 owner는 아직
 candidate executable driver나 §11.43 product를 호출하지 않는다.
 
+### 11.46 baseline-A candidate executable driver
+
+`release_adapter_candidate_release_driver.zig`의 caller-owned final-address `Execution` 하나가 executable의
+`publish-candidate` command를 §11.43 production owner에 연결한다. driver 입력은 final-address owned §11.44 `Bootstrap`, token,
+하나의 bounded scratch, positive budget뿐이며 context, runner, pathname, digest, fd 또는 이미 준비된 하위 owner를 별도 scalar로
+받지 않는다. driver는 bootstrap에서 candidate command를 exact once 선택하고 §11.45 `SourceDirectory.prepareCurrent`로 trusted
+checkout을 먼저 고정한 뒤, 같은 bootstrap의 context·runner와 command의 Zig pathname/size/SHA로
+`ZigToolchainAuthority.bind`를 수행한다. 두 authority를 재검증한 borrowed view에서만 source-directory fd와 Zig owner를 꺼내
+candidate prerequisite/baseline/publication input을 유도하고 `release_adapter_candidate_release_product.run`을 exact once 호출한다.
+다른 command, copied/pre-owned bootstrap·result, result/bootstrap/token/scratch와 command/context storage alias, source/Zig drift는
+product와 원격 mutation 전에 실패한다.
+
+성공 시에는 candidate product graph를 먼저 `cleanup`하고 Zig toolchain, source directory 순으로 역순 cleanup한 뒤에만 driver를
+pristine으로 지운다. 실패 시 product가 pristine이면 준비된 Zig/source만 역순 cleanup하고, product가 cleanup-required이면
+`retryCleanup`을 최대 한 번 호출한 뒤 Zig/source를 닫는다. 어느 cleanup이라도 실패하면 남은 retryable owner를 driver에 보존하고
+`CleanupFailed`를 반환해 caller가 `retryCleanup`할 수 있게 한다. 단 §11.45 source close의 ambiguous 실패는 fd 재사용 오종료를
+막기 위해 source owner를 이미 pristine으로 지우며 재시도하지 않는다. 반면 product가 `needsAudit()`이면 draft 이후의 원격 상태와 그
+의존 source/Zig authority를 그대로 보존하고 최초 product 오류를 반환한다. 이 상태에는 ordinary `retryCleanup`을 제공하지 않으며
+기존 범용 `settleProductFailure`를 호출하거나 `CleanupFailed`로 원래 오류를 덮지 않는다.
+
+공식 release validator의 storage가 이 driver `Execution`을 소유하고 dispatch는 bootstrap→token→candidate driver 한 경로만 연다.
+pre-publish와 verify-predecessor의 기존 dispatch·cleanup 의미는 바꾸지 않는다. focused gate
+`test-session-host-release-adapter-candidate-release-driver`는 exact source→Zig→product 순서, bootstrap 내부 입력 유도,
+success/pristine/cleanup-required/audit 네 terminal 분기, reverse cleanup, cleanup retry와 final-address·alias 차단을
+Debug·ReleaseFast에서 검증한다. executable gate는 `publish-candidate`가 더 이상 `UnsupportedCommand`로 끝나지 않고 token 뒤 exact
+candidate driver 하나만 호출하며 audit graph에 범용 settlement를 적용하지 않음을 검증한다. 이 단계는 live release workflow
+호출과 frozen signed U5 제품 E2E를 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

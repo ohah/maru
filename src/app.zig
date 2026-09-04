@@ -12,6 +12,8 @@ pub const live_pty_registry = @import("app/live_pty_registry.zig");
 pub const pty_loop_smoke = @import("app/pty_loop_smoke.zig");
 pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
+/// sync(2026) 프레임 경계 자르기. **배럴에 건다** — 리더가 쓰는 순수 판정이라 모든 타깃에서 돌아야 한다.
+pub const sync_frame_split = @import("app/sync_frame_split.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const input_owner = @import("app/input_owner.zig");

@@ -3,6 +3,7 @@ const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
 const core_command = @import("../session/core_command.zig");
+const sync_frame_split = @import("sync_frame_split.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 /// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답
@@ -573,6 +574,137 @@ pub const PtyReader = struct {
     /// 연산을 하지 않는다. 별도 process gate가 reader 시작 전에만 주입한다.
     output_byte_counter: ?*std.atomic.Value(u64) = null,
 
+    // ── sync(2026) 프레임 경계 보류 ─────────────────────────────────────────────
+    // **아직 안 끝난 프레임의 바이트는 코어에 안 넣고 여기 들고 있는다**(`sync_frame_split`).
+    // 그래야 메인이 30Hz 로 격자를 읽을 때 언제나 **완성 프레임**을 본다 — 이 보류가 없으면
+    // 청크가 프레임 한가운데서 끝나 그리다 만 화면이 그대로 투영된다(실측 18/18 tick).
+    //
+    // **버퍼는 한 번만 잡고 다시는 안 잡는다.** read hot path 에서 실패할 수 있는 할당을 하면
+    // 「바이트를 순서대로 다 넣는다」를 지키기 위한 예외 경로가 늘어난다 — 처음 한 번 실패하면
+    // 그때는 **아무것도 안 들고 있는 상태**라 그냥 이 축을 끄면 된다(오늘 동작).
+    /// 보류 버퍼(첫 프레임을 만날 때 한 번 잡는다). null 이면 아직 안 잡았거나 포기했다.
+    sync_held_buf: ?[]u8 = null,
+    /// 보류 중인 바이트 수.
+    sync_held_len: usize = 0,
+    /// 보류를 시작한 시각(ns, monotonic). 시한을 넘기면 접는다.
+    sync_held_since_ns: i128 = 0,
+    /// 이 축을 껐나(버퍼를 못 잡았다). 켜지지 않으므로 read 경로는 분기 하나만 낸다.
+    sync_bypass: bool = false,
+
+    /// 보류 상한 — 이만큼 쌓이면 프레임이 안 끝나는 것으로 보고 접는다. 전체 화면을 truecolor 로
+    /// 다시 그리는 프레임이 수십 KiB 라 그 몇 배를 준다(값은 여기 하나가 소유한다).
+    const sync_held_max: usize = 256 * 1024;
+    /// 보류 시한(ns). **프레임 «안에서» 질의를 보내고 답을 기다리는 앱**이 있으면 보류가 곧 교착이
+    /// 되므로, 교착 대신 지연으로 접는다. 투영 게이트의 sync timeout(1초)과 같은 눈금이다.
+    const sync_held_timeout_ns: i128 = 1000 * std.time.ns_per_ms;
+
+    /// 청크를 **프레임 경계에서 잘라** 코어에 적용한다. 안 끝난 프레임의 꼬리는 다음 청크를 기다린다.
+    ///
+    /// 순서 계약: **읽은 바이트는 읽은 순서대로 빠짐없이** 코어에 들어간다. 보류가 풀리는 자리
+    /// (상한·시한·프레임 완성)에서도 「들고 있던 것 → 이번 청크」 순서가 뒤집히지 않는다.
+    fn applySyncFramed(
+        self: *PtyReader,
+        core: *terminal.TerminalCore,
+        mutex: *std.Io.Mutex,
+        chunk: []const u8,
+        out_buf: *std.ArrayList(u8),
+        out_head: *usize,
+    ) void {
+        if (self.sync_bypass) return self.applyToCore(core, mutex, chunk, out_buf, out_head);
+
+        // 들고 있는 것이 없으면 **복사 없이** 이 청크만 본다 — 2026 을 안 쓰는 스트림(대부분)은
+        // 여기서 `applicableLen == chunk.len` 이라 예전과 같은 한 번의 write 로 끝난다.
+        if (self.sync_held_len == 0) {
+            const n = sync_frame_split.applicableLen(chunk);
+            self.applyToCore(core, mutex, chunk[0..n], out_buf, out_head);
+            if (n == chunk.len) return;
+            self.holdTail(chunk[n..], core, mutex, out_buf, out_head);
+            return;
+        }
+
+        // 들고 있던 것이 있다 — 이어 붙여 다시 판정한다. 안 들어가면 **순서대로** 흘려보낸다.
+        const buf = self.sync_held_buf.?;
+        if (self.sync_held_len + chunk.len > buf.len or self.heldExpired()) {
+            self.flushHeld(core, mutex, out_buf, out_head);
+            return self.applySyncFramed(core, mutex, chunk, out_buf, out_head);
+        }
+        @memcpy(buf[self.sync_held_len..][0..chunk.len], chunk);
+        self.sync_held_len += chunk.len;
+        const joined = buf[0..self.sync_held_len];
+        const n = sync_frame_split.applicableLen(joined);
+        if (n == 0) return; // 아직도 프레임 안 — 더 기다린다
+        self.applyToCore(core, mutex, joined[0..n], out_buf, out_head);
+        const rest = self.sync_held_len - n;
+        if (rest > 0) std.mem.copyForwards(u8, buf[0..rest], joined[n..]);
+        self.sync_held_len = rest;
+        if (rest == 0) self.sync_held_since_ns = 0;
+    }
+
+    /// 안 끝난 프레임의 꼬리를 들고 있는다. 버퍼를 아직 안 잡았으면 여기서 한 번 잡고, 못 잡으면
+    /// 이 축을 끈다(그 자리에서 꼬리를 그대로 적용하므로 바이트는 안 잃는다).
+    fn holdTail(
+        self: *PtyReader,
+        tail: []const u8,
+        core: *terminal.TerminalCore,
+        mutex: *std.Io.Mutex,
+        out_buf: *std.ArrayList(u8),
+        out_head: *usize,
+    ) void {
+        if (self.sync_held_buf == null) {
+            self.sync_held_buf = self.allocator.alloc(u8, sync_held_max) catch {
+                self.sync_bypass = true;
+                return self.applyToCore(core, mutex, tail, out_buf, out_head);
+            };
+        }
+        const buf = self.sync_held_buf.?;
+        if (tail.len > buf.len) return self.applyToCore(core, mutex, tail, out_buf, out_head);
+        @memcpy(buf[0..tail.len], tail);
+        self.sync_held_len = tail.len;
+        self.sync_held_since_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+    }
+
+    /// 보류가 시한을 넘겼나. 넘기면 교착 대신 **그리다 만 프레임**을 택한다(오늘 동작).
+    fn heldExpired(self: *PtyReader) bool {
+        if (self.sync_held_len == 0) return false;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        return now -| self.sync_held_since_ns >= sync_held_timeout_ns;
+    }
+
+    /// 들고 있던 것을 통째로 코어에 넣는다(상한·시한 초과).
+    fn flushHeld(
+        self: *PtyReader,
+        core: *terminal.TerminalCore,
+        mutex: *std.Io.Mutex,
+        out_buf: *std.ArrayList(u8),
+        out_head: *usize,
+    ) void {
+        if (self.sync_held_len == 0) return;
+        const buf = self.sync_held_buf.?;
+        self.applyToCore(core, mutex, buf[0..self.sync_held_len], out_buf, out_head);
+        self.sync_held_len = 0;
+        self.sync_held_since_ns = 0;
+    }
+
+    /// 코어에 한 조각을 적용하고 그 조각이 만든 응답을 outbound 로 옮긴다(옛 read 단계 본문 그대로).
+    fn applyToCore(
+        self: *PtyReader,
+        core: *terminal.TerminalCore,
+        mutex: *std.Io.Mutex,
+        bytes: []const u8,
+        out_buf: *std.ArrayList(u8),
+        out_head: *usize,
+    ) void {
+        if (bytes.len == 0) return;
+        core.owner_dbg.lock(mutex, self.io);
+        core.write(bytes) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
+        const reply = core.pendingResponse();
+        if (reply.len > 0) {
+            appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
+            core.clearResponse();
+        }
+        core.owner_dbg.unlock(mutex, self.io);
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         pty_id: runtime_mod.PtyId,
@@ -659,6 +791,9 @@ pub const PtyReader = struct {
         std.debug.assert(self.thread == null);
         self.transfer_out.deinit(self.allocator);
         self.transfer_out_head = 0;
+        if (self.sync_held_buf) |buf| self.allocator.free(buf);
+        self.sync_held_buf = null;
+        self.sync_held_len = 0;
     }
 
     pub fn join(self: *PtyReader) void {
@@ -869,6 +1004,13 @@ pub const PtyReader = struct {
             // Pause 요청은 continuous-readable PTY보다 우선한다. 이미 읽은 chunk는 위 read 단계에서 즉시 core에
             // 적용되고, admitted outbound가 모두 실제 PTY에 써진 frontier에서만 ACK한다. 이후 output은 kernel
             // PTY buffer에 남아 target/resumed reader가 다음 byte부터 읽는다.
+            // **보류 중인 sync 프레임을 먼저 흘려보낸다.** 안 그러면 pause/handoff 가 그 바이트를
+            // 통째로 버려 원격이 보낸 프레임이 사라지고, 이어지는 diff 가 없는 셀을 전제해 **모델이
+            // 영구히 어긋난다**. 여기서 접는 대가는 그리다 만 프레임 한 장인데, 어차피 멈추는 자리다
+            // (handoff 인벤토리도 이 두 필드를 `must_be_empty` 로 못 박는다).
+            if (self.pause_state.load(.acquire) == .requested and self.sync_held_len > 0) {
+                self.flushHeld(core, mutex, out_buf, out_head);
+            }
             if (self.pause_state.load(.acquire) == .requested and
                 out_head.* == 0 and out_buf.items.len == 0 and
                 (self.write_queue == null or self.write_queue.?.drainedAtFence()) and
@@ -944,14 +1086,11 @@ pub const PtyReader = struct {
                     .again => {}, // readable/read race — 다음 poll에서 재시도
                     .data => |n| {
                         self.recordOutputBytes(n);
-                        core.owner_dbg.lock(mutex, self.io);
-                        core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
-                        const reply = core.pendingResponse();
-                        if (reply.len > 0) {
-                            appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
-                            core.clearResponse();
-                        }
-                        core.owner_dbg.unlock(mutex, self.io);
+                        // **프레임 경계에서 자른다**(sync 2026 — `sync_frame_split`). 아직 안 끝난 프레임의
+                        // 꼬리는 코어에 안 넣고 들고 있다가 다음 청크와 이어 붙인다. 그래야 메인이 30Hz 로
+                        // 읽는 격자가 **언제나 완성 프레임**이다 — 없으면 청크가 프레임 한가운데서 끝나
+                        // 그리다 만 화면이 그대로 투영된다(실측 18/18 tick).
+                        self.applySyncFramed(core, mutex, readbuf[0..n], out_buf, out_head);
                         // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거. **비블로킹**(tryPush)으로
                         // 보낸다 — 큐가 차면 드롭한다. 근거: (1) 빈 신호라 데이터 손실 없음 — 렌더는 코어 최신 상태를
                         // 읽고, 큐에 이미 신호가 있어 catch-up 렌더가 일어난다(드롭=렌더 coalescing). (2) pushBlocking이면
@@ -1469,4 +1608,117 @@ test "CoreCommandQueue: backpressure — 생산자가 막혀도 소비자 pop이
     }
     thread.join();
     try std.testing.expectEqual(@as(usize, total), got);
+}
+
+test "sync(2026): 청크가 프레임 한가운데서 끝나도 코어에는 «완성 프레임»만 들어간다" {
+    // **실기에서 잡은 결함**(2026-09-04, 임시 sshd + 시뮬레이션 프레임 스트림). 리더가 `read(2)` 청크를
+    // 통째로 적용하는데 SSH 스트림은 거의 언제나 프레임 한가운데서 끊긴다. 그러면 코어 격자에
+    // 「완성 프레임 N + 그리다 만 N+1」 이 남고, 메인이 30Hz 로 그것을 읽어 GPU 에 올린다 —
+    // `.sync` 로그로 18/18 tick 이 `active=1 gproj=1`(= 그리다 만 프레임 투영)이었고, 매 표본이
+    // `bsu == esu + 1` 이었다(= 투영 순간 리더가 다음 프레임 안).
+    //
+    // 그래서 판정은 **매 청크 뒤 코어가 프레임 밖인가**로 한다. 이 판정은 투영 게이트를 안 본다 —
+    // 게이트는 tick 폴링이라 「언제 봐도 완성」을 보장할 수 없고, 그 보장은 여기서 서야 한다.
+    const allocator = std.testing.allocator;
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined; // run()을 시작하지 않으므로 역참조 안 됨
+    var reader = PtyReader.init(allocator, 11, &session, &queue);
+    defer reader.deinit();
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, std.testing.io);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var out_head: usize = 0;
+
+    const B = sync_frame_split.bsu;
+    const E = sync_frame_split.esu;
+    // 프레임 세 장을 **일부러 어긋난 자리에서** 잘라 넣는다(SSH 청크 경계 모사).
+    const stream = B ++ "\x1b[Hone" ++ E ++ B ++ "\x1b[Htwo" ++ E ++ B ++ "\x1b[Hthree" ++ E;
+    var at: usize = 0;
+    var step: usize = 7; // 프레임 길이와 서로소인 보폭 — 경계가 골고루 어긋난다
+    while (at < stream.len) {
+        const end = @min(at + step, stream.len);
+        reader.applySyncFramed(&core, &mutex, stream[at..end], &out_buf, &out_head);
+        at = end;
+        step = if (step == 7) 3 else 7; // BSU 한가운데서 끊기는 경우도 만든다
+
+        // **매 청크 뒤 코어는 프레임 밖이어야 한다.** 하나라도 안이면 그 순간 메인이 읽으면 그리다 만
+        // 화면이다 — 이 저장소가 실기에서 본 바로 그 상태다.
+        mutex.lock(std.testing.io);
+        const mid_frame = core.sync_output;
+        const bsu_n = core.sync_bsu_count;
+        const esu_n = core.sync_esu_count;
+        mutex.unlock(std.testing.io);
+        try std.testing.expect(!mid_frame);
+        try std.testing.expectEqual(bsu_n, esu_n);
+    }
+
+    // 그리고 **바이트를 하나도 안 잃는다** — 마지막 프레임까지 다 들어갔다.
+    mutex.lock(std.testing.io);
+    const total_frames = core.sync_esu_count;
+    mutex.unlock(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 3), total_frames);
+    try std.testing.expectEqual(@as(usize, 0), reader.sync_held_len);
+}
+
+test "sync(2026): 2026 을 안 쓰는 스트림은 보류도 복사도 없이 그대로 흐른다" {
+    // 이 축이 켜졌다고 평범한 셸 출력이 한 tick 늦으면 안 된다. 보류 버퍼는 **첫 프레임을 만날 때만**
+    // 잡히므로, 2026 이 없는 스트림은 할당조차 안 일어난다.
+    const allocator = std.testing.allocator;
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined;
+    var reader = PtyReader.init(allocator, 12, &session, &queue);
+    defer reader.deinit();
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, std.testing.io);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var out_head: usize = 0;
+
+    reader.applySyncFramed(&core, &mutex, "hello ", &out_buf, &out_head);
+    reader.applySyncFramed(&core, &mutex, "world", &out_buf, &out_head);
+    try std.testing.expectEqual(@as(usize, 0), reader.sync_held_len);
+    try std.testing.expectEqual(@as(?[]u8, null), reader.sync_held_buf); // 할당 자체가 없다
+}
+
+test "sync(2026): 끝나지 않는 프레임은 상한에서 접어 스트림을 안 막는다" {
+    // 프레임 «안에서» 질의를 보내고 답을 기다리는 앱이 있으면 보류가 곧 교착이 된다. 그래서
+    // 상한을 넘기면 들고 있던 것을 그대로 코어에 넣는다 — **교착 대신 그리다 만 프레임**(오늘 동작)이다.
+    const allocator = std.testing.allocator;
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined;
+    var reader = PtyReader.init(allocator, 13, &session, &queue);
+    defer reader.deinit();
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, std.testing.io);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var out_head: usize = 0;
+
+    // BSU 만 보내고 ESU 를 안 준다 — 상한을 넘길 때까지 본문만 흘린다.
+    reader.applySyncFramed(&core, &mutex, sync_frame_split.bsu, &out_buf, &out_head);
+    try std.testing.expect(reader.sync_held_len > 0); // 들고 있다
+    const filler = "x" ** 4096;
+    var sent: usize = 0;
+    while (sent <= PtyReader.sync_held_max) : (sent += filler.len) {
+        reader.applySyncFramed(&core, &mutex, filler, &out_buf, &out_head);
+    }
+    // 접혔다 — 코어가 BSU 를 봤고(프레임 안), 보류는 상한 아래로 돌아왔다.
+    mutex.lock(std.testing.io);
+    const saw_bsu = core.sync_bsu_count;
+    mutex.unlock(std.testing.io);
+    try std.testing.expect(saw_bsu >= 1);
+    try std.testing.expect(reader.sync_held_len <= PtyReader.sync_held_max);
 }

@@ -90,11 +90,33 @@
 
 sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 과잉 차단하면 freeze·scroll stale·완성 프레임 MISS — §sync·§11 참고) **실환경에서 게이트가 언제 붙잡고 언제 flush하는지**를 데이터로 봐야 한다. `app_session.zig`의 `sync_diag`(`std.log.scoped(.sync)`) + `logSyncGateDiag`가 이를 담당한다 — `screen_diag`(.screen)·`shell_diag`(.shell)·`coreq.*`(§9.7)와 같은 **MARU_DEBUG 게이트 scoped 로거** 관용구다(관측 가능성 원칙). tick마다 sync 게이트 상태를 한 줄 찍되, 노이즈를 줄이려 **sync 에피소드 중이거나 ESU/active가 바뀐 tick 또는 사이드바 전용 투영(cproj) tick만** emit한다(idle 정적 화면은 침묵). 필드: `active`(활성 surface sync_output)·`hold`(sync_hold_ticks/timeout)·`gproj`(grid 전체 투영 `will_project`)·`cproj`(사이드바 전용 `project_chrome`)·`force`(force_reproject)·`dirty`/`chrome`(metal/chrome_dirty)·`voff`(view_offset)·`esuadv`/`scr`(이 tick 투영을 unblock한 **실제 게이트 이유** — esu_advanced=완성 프레임 flush / view_scrolled=스크롤; 분석기가 active 중 투영을 esu_edge vs scroll로 추론 없이 가르게 `shouldProjectFrame` 입력을 그대로 실음)·`bsu`/`esu`(리더 `parser.feed`가 처리한 BSU=hold 시작/ESU=완성 프레임 누적)·`out`(tick output_events). 이 계측으로 `shouldProjectFrame`의 각 안전판(스크롤·ESU edge·timeout)이 실제로 발동하는 빈도를 잰다("연속 프레임 워크로드에서 sync 막힘의 약 절반이 ESU MISS였다"는 §sync 실측이 이 로거의 산물). **release 비용 ≈ 0**: `diag.maruDebugEnabled()`(env 1회 읽고 캐시)에서 즉시 return하고, `sync_diag_*` 상태 필드는 debug일 때만 쓰인다.
 
-**`bsu`/`esu` vs `active` — SSH sync 어긋남 추적**: `bsu`/`esu`(리더 스레드 `parser.setPrivateModes`가 `+%=`로 세는 `core.sync_bsu_count`/`sync_esu_count`)는 **리더가 실제로 처리한 transition 횟수**이고, `active`는 **메인이 per-tick으로 샘플링한 `sync_output`**이다. 로그에서 `bsu`/`esu` 누적이 메인이 관측한 sync 구간(`active=1` tick 수)보다 **훨씬 빨리 늘면** → per-tick 폴링이 리더의 BSU→ESU 사이클(특히 flush 창 < 1 tick)을 놓치는 것이다. `maru ssh` 원격에서 bubbletea 등 Sync-cap TUI가 SSH 바이트 fragmentation으로 색·셀렉터가 깨지는(로컬·plain ssh는 정상) **미해결 이슈**의 재현·계측 토대다. 진짜 픽스(리더가 보는 바이트 경계 기준으로 sync를 추적하는 "byte replay")를 정하기 전, 이 로거로 desync가 어디서 나는지 데이터로 좁힌다.
+**`bsu`/`esu` vs `active` — SSH sync 어긋남 추적**: `bsu`/`esu`(리더 스레드 `parser.setPrivateModes`가 `+%=`로 세는 `core.sync_bsu_count`/`sync_esu_count`)는 **리더가 실제로 처리한 transition 횟수**이고, `active`는 **메인이 per-tick으로 샘플링한 `sync_output`**이다. 로그에서 `bsu`/`esu` 누적이 메인이 관측한 sync 구간(`active=1` tick 수)보다 **훨씬 빨리 늘면** → per-tick 폴링이 리더의 BSU→ESU 사이클(특히 flush 창 < 1 tick)을 놓치는 것이다. `maru ssh` 원격에서 bubbletea 등 Sync-cap TUI가 SSH 바이트 fragmentation으로 색·셀렉터가 깨지는(로컬·plain ssh는 정상) 이슈의 재현·계측 토대다 — 그 이슈의 **원인은 이 로거가 확정했고**(아래 조사 진행) **픽스는 리더의 바이트 경계 추적**(`sync_frame_split`)으로 들어갔다. 로거는 그대로 남아 회귀를 잰다: 픽스가 살아 있으면 `active=1 tick`과 half-frame이 **0**이다.
 
 **조사 진행(2026-07)** — 아래 test·분석기·주석은 `.sync` 로거와 짝을 이루는 **영구 sync 관측 인프라**다(조사가 끝나도 유지; 로그 형식이 바뀌면 함께 갱신). "유력 가설" 문구만 원인 확정·픽스 시 갱신한다.
 - **파싱 fragmentation 가설 = 기각.** "SSH가 `ESC[?2026h`/`l`를 write 중간에 쪼개 파서가 오파싱한다"는 가설은 헤드리스 회귀 테스트(`core.zig` "조각난 write에도 재조립" — 파서 리팩터가 fragmentation을 깨는 것도 막는 영구 가드)로 반증됐다. 파서(`self.parser` 상태 persist하는 resumable 상태머신)가 **모든 split 경계·바이트 단위**에서 재조립해 `sync_output`·카운터가 정확하다. desync는 파서가 아니라 **리더↔메인 타이밍/투영 게이트** 문제로 좁혀졌다.
-- **유력 가설 = active 중 half-drawn 투영.** `shouldProjectFrame`이 `sync_active=1`(리더 기준 프레임 미완성)인데 grid를 투영하는 두 경로가 half-drawn을 만든다 — bubbletea는 diff 렌더라 그 stale 셀을 이후 안 고쳐(변경분만 보냄) 색·셀렉터가 깨지고 `Ctrl+L`도 무효다. (a) **esu_edge(SSH 빈발, 유력)**: `esu_advanced` flush가 "리더가 이미 **다음** 프레임 BSU를 시작"한 시점에 떨어지면 진행 중 next 프레임을 half-drawn으로 투영한다(로컬은 다음 ESU가 곧 교정하지만 SSH diff는 안 함) — `shouldProjectFrame` 테스트 [B] case 주석 참고. (b) **timeout(드묾)**: 조각 전달이 `sync_timeout_ms`(1초)를 넘겨 hold를 강제 해제. `.sync` 로그의 `active=1 gproj=1`로 잡히고 원인은 아래 분석기가 분해한다.
+- **원인 확정 + 픽스(2026-09-04) = 리더가 «청크 통째로» 적용한 것.** 아래 「유력 가설」이 실측으로
+  맞았고, 그 위층(투영 게이트)이 아니라 **아래층(리더)**에 원인이 있었다. 리더는 `read(2)`가 준
+  4096 B 청크를 그대로 `core.write` 하는데, SSH 스트림은 거의 언제나 프레임 한가운데서 끊긴다 —
+  그래서 코어 격자에 「완성 프레임 N + 그리다 만 N+1」이 남고, **게이트가 무엇을 하든 메인이 읽는
+  것은 그 상태**다. 게이트만으로는 못 고친다: `esu_advanced`를 빼면 연속 애니메이션에서 완성 순간을
+  영영 못 봐 화면이 얼고(실측: 18/18 tick이 `active=1`), 두면 그리다 만 프레임을 올린다.
+  **픽스는 `src/app/sync_frame_split.zig` + `PtyReader.applySyncFramed`** — 아직 안 끝난 프레임의
+  꼬리를 코어에 안 넣고 들고 있다가 다음 청크와 이어 붙인다(= 이 절이 「진짜 픽스」로 적어 둔
+  **바이트 경계 기준 sync 추적**). 그러면 코어 격자는 **언제 읽어도 완성 프레임**이라 게이트는 2선이
+  된다. 보류가 없으면 복사도 없다(2026을 안 쓰는 스트림은 예전과 같은 한 번의 write).
+  · **상한 256 KiB · 시한 1초로 접는다** — 프레임 **안에서** 질의를 보내고 답을 기다리는 앱이 있으면
+    보류가 곧 교착이므로, 교착 대신 지연(=옛 동작)으로 접는다.
+  · **pause/handoff 안전점에서 먼저 흘려보낸다** — 안 그러면 그 바이트가 사라져 이어지는 diff가 없는
+    셀을 전제하고 **모델이 영구히 어긋난다**(handoff 인벤토리가 `sync_held_len`을 `must_be_empty`로 못 박는다).
+  · **자르는 자리가 틀려도 안전하다** — 파서는 재개형이라 어느 바이트 경계에서 잘라도 재조립하고
+    (아래 fragmentation 항의 회귀 테스트), 바이트는 순서대로 전부 들어간다. 최악은 「개선이 안 됨」이다.
+  · **실측(2026-09-04, 임시 sshd + 시뮬레이션 프레임 스트림, `analyze_sync_log.py`)**:
+    | | 픽스 전 | 픽스 후 |
+    |---|---|---|
+    | `active=1` tick | 18 | **0** |
+    | half-drawn 투영(esu_edge) | **18/18** | **0** |
+    | 리더 BSU/ESU | 2935 / 2934 | **2949 / 2949** |
+- **(위 픽스가 지운) 유력 가설 = active 중 half-drawn 투영.** `shouldProjectFrame`이 `sync_active=1`(리더 기준 프레임 미완성)인데 grid를 투영하는 두 경로가 half-drawn을 만든다 — bubbletea는 diff 렌더라 그 stale 셀을 이후 안 고쳐(변경분만 보냄) 색·셀렉터가 깨지고 `Ctrl+L`도 무효다. (a) **esu_edge(SSH 빈발, 유력)**: `esu_advanced` flush가 "리더가 이미 **다음** 프레임 BSU를 시작"한 시점에 떨어지면 진행 중 next 프레임을 half-drawn으로 투영한다(로컬은 다음 ESU가 곧 교정하지만 SSH diff는 안 함) — `shouldProjectFrame` 테스트 [B] case 주석 참고. (b) **timeout(드묾)**: 조각 전달이 `sync_timeout_ms`(1초)를 넘겨 hold를 강제 해제. `.sync` 로그의 `active=1 gproj=1`로 잡히고 원인은 아래 분석기가 분해한다.
 - **분석 도구(영구)**: `tools/sync/analyze_sync_log.py`가 캡처한 `.sync` 로그를 파싱해 half-frame(active 중 투영)을 원인별(esu_edge/timeout/scroll/force)로, 샘플링 누락(리더 BSU/ESU ≫ 메인 active)을 자동으로 짚는다 — `.sync` 로거(영구 관측)의 동반 도구(`tools/perf` 선례). 사용: `MARU_DEBUG=1 ./maru-macos-app 2> log` → `python3 tools/sync/analyze_sync_log.py log`.
 
 ### 11.7 활성 surface 전환 시 게이트 baseline 재설정 (구현)

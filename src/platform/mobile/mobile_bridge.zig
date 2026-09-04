@@ -1343,6 +1343,12 @@ pub fn activeScreenHasFrames() bool {
     return s.snapshots != 0 or s.deltas != 0;
 }
 
+/// 판정용 — 원격 화면의 뒤로가기 한가운데(안 그려졌으면 `null`).
+pub fn remoteBackCenter() ?struct { x: f32, y: f32 } {
+    if (remote_back_rect.w <= 0) return null;
+    return .{ .x = remote_back_rect.x + remote_back_rect.w / 2, .y = remote_back_rect.y + remote_back_rect.h / 2 };
+}
+
 /// 판정용 — 그 세션을 들고 있는가.
 pub fn holdsSession(id: [32]u8) bool {
     for (held_sessions) |slot| {
@@ -2389,6 +2395,10 @@ const session_title = maru.i18n.tIn(.ko, .set_section_terminal);
 var term_bar_rect: SetRect = .{};
 /// 터미널 앱 바의 뒤로가기 자리.
 var term_back_rect: SetRect = .{};
+
+/// 원격 화면에서 목록으로 돌아가는 자리(U2). 그려질 때 서고, 안 그려졌으면 `w == 0` 이라 누름
+/// 판정도 안 선다(터미널 바와 같은 규칙).
+var remote_back_rect: SetRect = .{};
 /// 그 뒤로가기가 지금 눌려 있나.
 var term_back_pressed: bool = false;
 /// 터미널 앱 바의 제스처. 다른 표면과 같은 규칙을 쓴다(§3.1).
@@ -4866,6 +4876,12 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     // 아래 글자가 남는다), 읽기 전용인데 **보조 키바가 그대로 떠** 있었다. 둘 다 원인이 하나다.
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
+    // **나갈 자리를 만든다**(U2). 전환을 「덮개」로 정했으니(계획 U0) 여기서 목록으로 돌아가는
+    // 것이 곧 세션을 바꾸는 길이다. 예전에는 제목만 그리고 **누를 자리를 안 만들어**, 이 화면에
+    // 들어오면 앱을 죽이는 것 말고는 나갈 수 없었다(실기 2026-09-04 — 시뮬레이터에서 헤더 여러
+    // 지점을 눌러도 아무 일이 없었다). 자리와 크기는 터미널 바의 뒤로가기와 같다(§5.1 — 44 이상).
+    remote_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+
     // 상단 바 — 어디서 왔는지와 무엇을 보는지.
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_remote_screen_title), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
@@ -5961,6 +5977,15 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
     // **터미널 화면의 chrome 은 상단 앱 바 하나뿐이다.** 하단 44px 바는 걷어냈고(U3b — 하단은
     // 이동 대상 자리이고 키보드가 늘 떠 있는 터미널에서 44px 를 영구히 썼다), 위쪽 뒤로가기만
     // 남겼다. 그 띠 **밖은 안 먹는다** — 키바·본문이 받는다.
+    // **원격 화면의 뒤로가기.** 이 화면은 읽기 전용이라 본문에 받을 것이 없고, 상단바 왼쪽
+    // 하나만 누른다 — 그것이 「덮개」로 세션을 바꾸는 길이다.
+    if (screenTop() == .remote_screen) {
+        if (phase != 0) return 0;
+        if (remote_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
+        if (!setHit(remote_back_rect, x, y)) return 0;
+        navPop();
+        return 1;
+    }
     if (screenTop() == .terminal) {
         switch (phase) {
             0 => {

@@ -96,6 +96,13 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
 
     // 안 보이는 동안 **남의 서버에 프로세스를 띄워 두지 않는다**(`pumpRepoStatus` 와 같은 게이트).
     try std.testing.expect(std.mem.indexOf(u8, pump, "dock_ops.dockVisible(self)") != null);
+    // ⚠️ **그때는 «잠시 멈춤» 이다**(적대적 검증 2026-09-04 1 회차). `stop()` 을 쓰면 `.gave_up` 이
+    // 풀려 도크를 껐다 켤 때마다 못 하는 원격에 다시 띄운다 — RW5 가 없앤 폭주가 되살아난다.
+    const hidden = try bodyOf(pump, "!dock_ops.dockVisible(self)) {", "\n    }\n", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, hidden, "remote_watch.pause()") != null);
+    const hidden_code = try stripComments(allocator, hidden);
+    defer allocator.free(hidden_code);
+    try std.testing.expect(std.mem.indexOf(u8, hidden_code, "remote_watch.stop()") == null);
     // 로컬 목록이면 채널이 있을 이유가 없다.
     try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_dest orelse") != null);
     // 소켓 판정을 **다시 만들지 않는다** — 있는 함수를 쓴다(두 벌이면 한쪽만 고쳐진다).
@@ -116,7 +123,12 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     // ⚠️ **감시 루트는 저장소 «루트» 다.** `git_repo` 는 원격에서 **cwd** 라(그것으로 충분한 것은
     // `git -C` 가 상위를 찾기 때문), 그걸 감시하면 하위 디렉터리에 서 있을 때 바깥 변경을 놓친다 —
     // 실측에서 저장소 루트의 변경이 **0 개**의 읽기를 불렀다(적대적 검증 1 회차).
-    try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse return") != null);
+    // ⚠️ **이 이른 반환도 자식을 놓고 나간다**(적대적 검증 2026-09-04 3 회차). 루트만 비우고 호스트는
+    // 그대로인 전이에서 감시자가 옛 저장소를 계속 보고, 아무도 드레인하지 않아 파이프가 차면 저쪽이
+    // write 에 걸려 선다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse {") != null);
+    const no_root = try bodyOf(pump, "self.git_repo_remote_root orelse {", "\n    };", 512);
+    try std.testing.expect(std.mem.indexOf(u8, no_root, "remote_watch.pause()") != null);
     try std.testing.expect(std.mem.indexOf(u8, pump_code, "self.git_repo orelse return") == null);
 }
 
@@ -137,6 +149,10 @@ test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본
     const transient = try bodyOf(pump, "\n        } else {", "\n        }\n", 4096);
     const transient_code = try stripComments(allocator, transient);
     defer allocator.free(transient_code);
+    // ⚠️ **부정 단언은 슬라이스가 비면 공허하게 통과한다**(적대적 검증 2026-09-04 1 회차 — 내 판정자를
+    // 내가 공격했다). 그 갈래를 실제로 잡았는지 먼저 못 박는다.
+    try std.testing.expect(std.mem.indexOf(u8, transient_code, ".backoff") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transient_code, "retry_at_ns") != null);
     try std.testing.expect(std.mem.indexOf(u8, transient_code, "showNoticeKey") == null);
 
     // 문구는 **두 로케일 다** 있어야 한다 — 한쪽만 넣으면 다른 쪽에서 컴파일은 되는데 빈 화면이 된다.

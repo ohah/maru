@@ -2670,6 +2670,33 @@ pristine/final-address/copy 차단, full pairwise alias·path·buffer preflight,
 Apple child 동작은 각 leaf product gate가 계속 소유한다. 이 단계는 baseline/upgrade evidence 실행, candidate publication,
 executable bootstrap 배선, live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.41 candidate release production owner의 shared deadline 진입점
+
+candidate prerequisite, baseline-A evidence 준비, candidate publication을 상위 release transaction이 한 absolute monotonic
+deadline 아래 조립하려면 세 production owner가 각자 새 expiry를 만들면 안 된다. 따라서
+`release_adapter_candidate_prerequisite_product.zig`,
+`release_adapter_candidate_baseline_preparation_product.zig`,
+`release_adapter_candidate_publication_product.zig`는 기존 자체 deadline `run`과 별도로
+`runBorrowingDeadline`을 제공한다. 기존 `run`은 호환 경계로서 positive budget으로 자기 `Execution.deadline`을 exact once
+시작하고 닫는다. borrowed 진입점은 caller가 이미 시작해 final address에 둔 `Deadline` pointer만 받고, 새 deadline을 시작하거나
+borrowed deadline을 deinit하지 않는다.
+
+각 `Execution`은 호출 중 active deadline pointer와 owned/borrowed 구분을 private transient state로 보존한다. preflight는 active
+deadline이 self-owned이고 fresh한지, `Execution` 및 모든 input/output/path/buffer storage와 겹치지 않는지 첫 filesystem·child·remote
+mutation 전에 검사한다. 모든 기존 leaf와 authority fence는 이 exact pointer를 받아야 하며, 내부 `Execution.deadline`이나 caller가
+제출한 duration으로 바꿔치기할 수 없다. baseline preparation transaction의 기존 deadline cleanup callback은 borrowed mode에서
+freshness와 pointer identity만 재검증하고 caller deadline을 닫지 않는다.
+
+성공, local failure, cleanup failure와 remote audit-required 반환 모두 active deadline borrow와 owned/borrowed 표시는 제거한다.
+owned `run`만 자기 deadline을 닫고, borrowed 진입점은 반환 뒤에도 caller deadline의 owner·start·expiry를 bytewise 그대로 남긴다.
+외부 deadline이 copied/foreign/unstarted/expired이거나 `Execution` 및 입력 storage에 alias되면 leaf call 0으로 fail-close한다. 성공 owner나
+cleanup retry owner는 deadline pointer를 보존하지 않으며, 후속 상위 transaction은 같은 deadline을 다음 phase에 직접 전달한다.
+
+세 focused product gate는 기존 `run`의 deadline start가 각각 exact one임을 유지하면서 borrowed 진입점의 새 start 0, 동일 pointer의
+모든 fence 전달, caller deadline 비종료, 반환 전 borrow 제거, copied/foreign/unstarted/expired/alias 차단을 Debug·ReleaseFast에서
+검증한다. 이 단계는 세 phase의 순서를 소유하는 상위 candidate release transaction, baseline/upgrade profile 선택, executable bootstrap,
+live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

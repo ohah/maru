@@ -2953,12 +2953,25 @@ pub fn bootstrapSessionKeepAliveConfig(io: std.Io, allocator: std.mem.Allocator)
 }
 
 fn initializeTestSessionKeepAlive(parsed: config_mod.ParsedConfig) void {
+    // **설정 텍스트를 하나도 주지 않은 fixture 는 정책을 끈 세계를 전제한다.** 제품 기본값이 true 가 된 뒤,
+    // 그런 fixture 에까지 그것을 먹이면 host 가 없는 test 프로세스에서 `init` 이 매번 연결에 실패하고
+    // **실패 토스트**(P4 §6 L291 — 조용한 폴백 금지)가 뜬다. 그 토스트는 자기를 닫으려고 **첫 입력을
+    // 소비한다**(`notice.handle`=키, `mouse()`/`scrollWheel`=클릭·휠). 그러면 입력을 보는 test 수십 개가
+    // — 편집기 찾기·커서 blink·split·이미지 갤러리처럼 keep-alive 와 아무 상관 없는 것들이 — 첫 키/클릭을
+    // 잃고 깨진다. 정책이 아니라 **환경**이 깨는 것이다.
+    //
+    // 그래서 «설정을 안 준다»를 «host 없는 세계»로 읽는다. 이는 전환 이전 동작과 정확히 같다(그때는 내장
+    // 기본값이 false 라 같은 fixture 가 같은 값을 받았다). 정책을 보는 test 는 설정 텍스트로 값을
+    // 명시하거나(그러면 아래 파싱 경로를 그대로 탄다) 미러를 직접 세우고, 제품 기본값 자체는
+    // `설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3 선결)`(설정을 주되 그 줄만 뺀다)와
+    // config 계층 test, CI 잡 `keep-alive recovered session macOS` 가 지킨다.
+    const seeded = if (test_config_text.len == 0) false else parsed.config.session.keep_alive_after_quit;
     _ = app_keep_alive_bootstrap_owner.initialize(.{
-        .value = parsed.config.session.keep_alive_after_quit,
+        .value = seeded,
         .provenance = parsed.session_keep_alive_provenance,
         .file_provenance = parsed.file_provenance,
     }) catch session_host.pending_term_close_graph.fatalProofLoss();
-    app_keep_alive_after_quit = parsed.config.session.keep_alive_after_quit;
+    app_keep_alive_after_quit = seeded;
 }
 
 fn keepAliveSnapshotForNewSession() config_mod.SessionKeepAliveSnapshot {
@@ -21485,6 +21498,36 @@ pub const AppSession = struct {
             if (builtin.is_test and live_app_sessions == 0) {
                 app_keep_alive_after_quit = false;
                 app_keep_alive_bootstrap_owner = .{};
+                // **앱 종료 래치도 함께 되돌린다.** 이 셋은 process-global 이고 test 사이에 자동으로 안
+                // 꺼진다. 종료를 흉내 내는 test 가 `app_quit_keep_alive = appKeepAlivePolicyValue()` 로
+                // 값을 잡아 두면 **뒤 test 까지 새어**, 그쪽 `deinit` 이 앱 종료 시퀀스를 타고 자기가 손으로
+                // 심은 backend 에 그것을 돌리다 `fatalProofLoss` 로 죽는다(종료 코드 86).
+                //
+                // 기본값이 `false` 이던 동안에는 잡히는 값이 늘 false 라 **이 누수가 안 보였다**.
+                app_quitting = false;
+                app_quit_keep_alive = false;
+                app_quit_end_all = false;
+                // **incident publication port 도 되돌린다.** 제품 경로(`ensureProcessIncidentOwner`)는 이
+                // process-global port 에 자기 owner 를 설치하고 **회수하지 않는다** — bootstrap fixture 는
+                // `endIncidentBootstrapTest` 로 걷지만 제품 경로에는 그 짝이 없다. 남겨 두면 뒤에 오는
+                // session_host test 가 자기 owner 를 설치하다 `InvalidOwner` 로 거부당한다(설치된 주소가
+                // 남의 것이면 거부하는 것이 port 의 계약이다).
+                //
+                // 기본값이 false 이던 동안에는 app_session test 가 이 경로를 안 탔다. 지금은 **설정을 주되
+                // keep-alive 줄이 없는** fixture(agent hooks 계열)가 제품 기본값 true 를 받아 여기를 지난다.
+                //
+                // ⚠️ **bootstrap fixture 가 도는 동안에는 손대지 않는다.** 그 test 들은 세션이 사라진 뒤에도
+                // owner 가 남아 있기를 요구하고(프로세스 수명 자원) 자기 teardown 으로 직접 걷는다 — 여기서
+                // 같이 걷으면 그 test 가 `publisher() != null` 에서 깨진다(실측으로 확인).
+                if (app_incident_testing.directory_fd < 0 and
+                    app_process_incident_owner.publisher() != null)
+                {
+                    incident_publication_port.revokePublicationPort(&app_process_incident_owner) catch {};
+                    _ = app_process_incident_owner.shutdown() catch {};
+                    app_process_incident_owner = .{};
+                    app_process_incident_nonce = 0;
+                    app_process_incident_owner_thread.store(0, .release);
+                }
             }
         }
         self.* = undefined;
@@ -36748,6 +36791,48 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// **기본값 전환 선결**: 기본값이 true 가 되면 원격 경로가 «유일 경로»가 된다. daemon 이 안 뜨는 사용자에게 남는
+// 것은 이 실패 경로 하나뿐인데, 거기서 「새 터미널이 안 열린다」면 전환은 출하할 수 없다. R3 #3 은 **돌던 host 가
+// 죽는** 경우를 재고, 여기서는 **처음부터 못 붙는** 경우 — 그리고 `createTerm` 직접 호출이 아니라 사용자가 실제로
+// 쓰는 **분할** 경로 — 를 잰다. 두 경로는 backend 선택을 같이 지나지만 실패를 삼키는 자리가 다르다.
+test "keep-alive가 켜져도 host에 못 붙으면 분할이 그대로 열린다 (기본값 전환 선결)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const saved_failed = host_connect_failed;
+    defer host_connect_failed = saved_failed;
+    host_connect_failed = false;
+
+    // 정책을 **설정으로** 켠다 — `init` 이 그 값으로 `ensureRemoteBackend` 를 지나야 이 test 가 재려는
+    // 상태(연결 실패 latch)가 만들어진다. 미러만 세우면 `init` 이 이미 지나간 뒤라 늦다.
+    test_config_text = "session.keep-alive-after-quit = true\n";
+    defer test_config_text = "";
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // **전제를 먼저 못 박는다.** 정책이 꺼져 있거나 연결이 성공해 버리면 아래 단언은 아무것도 안 재고
+    // 조용히 통과한다(위양성). host 없는 test 프로세스라 연결은 실패해 있어야 한다.
+    try std.testing.expect(appKeepAlivePolicyValue());
+    try std.testing.expect(host_connect_failed);
+
+    try pane_ops.splitActivePane(session, .vertical);
+    try std.testing.expectEqual(@as(usize, 2), tab_ops.activeTab(session).panes.items.len);
+
+    // 새 pane 에 Term 이 실제로 떴고, 그것이 in-process 다(원격이 아니라 폴백으로 열렸다).
+    const new_pane = pane_ops.activePane(session);
+    try std.testing.expectEqual(@as(usize, 1), new_pane.terms.items.len);
+    try std.testing.expect(new_pane.activeTerm().surface.remote == null);
 }
 
 // §7 묘비의 **화면 안내와 ⏎ 되살리기**를 못박는다. notice는 아무 키에나 닫히므로 그것만으로는 사용자가 빈 pane을
@@ -52632,6 +52717,33 @@ test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown
 // 실 AppSession(controlled_smoke) 단일 term + 창 사이즈 세팅(split/newTab 선행). initSmokeSessionTwoTerms와 같은
 // 하니스 패턴(§ 위 close-confirm 테스트) — collector는 이 실 트리를 평탄화한다.
 fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
+    // **keep-alive 를 끈 채 만든다.** 기본값이 `true` 라(2026-09-04 전환) 이걸 안 끄면 `init` 이
+    // **진짜 host 연결을 시도**한다. 이 하니스를 쓰는 test 들은 대부분 `app_remote_backend` 를 자기가
+    // 만들어 심는데, `init` 이 먼저 전역 pool·singleton 을 claim 해 두면 그 위에 덮어쓰는 꼴이 되어
+    // 정산이 어긋나고 `fatalProofLoss`(종료 코드 86)로 죽는다 — CI 가 그렇게 잡았다(CR2d4).
+    //
+    // 「기본값이 켜진 상태」 자체는 전용 자리가 본다: 단위는 `설정 줄이 없으면 내장 기본값이 그대로
+    // 정책이 된다 (G3 선결)`, 제품 경로는 CI 잡 `keep-alive recovered session macOS` 다.
+    const saved_config_text = test_config_text;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = saved_config_text;
+    // ⚠️ **설정만으로는 부족하다.** `init` 이 `test_config_text` 를 정책에 반영하는 것은
+    // `live_app_sessions == 0` 일 때뿐이다(다중 Window 통합 검증을 위해 일부러 그렇다). 집계 실행에서
+    // 앞선 test 의 세션이 살아 있으면 그 설정이 **조용히 무시**되고 정책이 켜진 채로 남는다. 그러면
+    // `init` 이 진짜 host 연결을 시도해 전역 `app_remote_backend`/`app_remote_host_pool` 을 건드리고,
+    // 자기 것을 심는 test 들과 부딪혀 claim 정산이 깨진다(`fatalIntegrity`, 종료 코드 86).
+    //
+    // 그래서 게이트를 우회해 **미러도 직접 끈다**. test 모드에서 정책을 읽는 것은 이 미러다
+    // (`appKeepAlivePolicyValue`).
+    // ⚠️ **되돌리지 않는다.** 정책은 `init` 동안만이 아니라 **test 본문 내내** 꺼져 있어야 한다 —
+    // 앱 종료 경로가 `app_quit_keep_alive`(종료 시점의 정책)로 갈리는데, 그 값이 켜져 있으면 `deinit` 이
+    // **테스트가 손으로 심은 attach-only backend** 에 앱 종료 시퀀스를 돌리다 실패해 `fatalProofLoss` 로
+    // 죽는다(종료 코드 86 — CI 가 그렇게 잡았고, 사유는 test 빌드에서 안 찍혀 세 번 헛짚었다).
+    //
+    // 다음 test 는 `live_app_sessions == 0` 에서 `init` 이 다시 세우므로 그대로 두어도 샌 값이 안 남는다.
+    // 켠 상태를 재는 test 들은 지금도 이 값을 **직접** 세운다(그쪽이 이기게 순서가 그렇다).
+    app_keep_alive_after_quit = false;
+
     const session = try allocator.create(AppSession);
     errdefer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{

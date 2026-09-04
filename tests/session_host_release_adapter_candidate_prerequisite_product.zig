@@ -47,6 +47,25 @@ test "production source has exactly one callsite for every prerequisite leaf" {
         "compatibility_mod.composeUntil(",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, needle));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "deadline_mod.start("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn runBorrowingDeadline("));
+}
+
+test "borrowed prerequisite rejects an unstarted deadline without publishing borrows" {
+    var cli: product.PinnedCli = undefined;
+    var execution: product.Execution = .{};
+    var deadline: product.Deadline = .{};
+    var scratch: [4096]u8 = undefined;
+    try std.testing.expectError(error.InvalidOwner, product.runBorrowingDeadline(
+        std.testing.io,
+        std.testing.allocator,
+        inputs(&cli),
+        "token",
+        &scratch,
+        &deadline,
+        &execution,
+    ));
+    try std.testing.expect(execution.isPristineForComposition());
+    try std.testing.expectEqual(product.Deadline{}, deadline);
 }
 
 test "pre-owned and copied execution are rejected before production work" {

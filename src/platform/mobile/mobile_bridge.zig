@@ -1343,6 +1343,13 @@ pub fn activeScreenHasFrames() bool {
     return s.snapshots != 0 or s.deltas != 0;
 }
 
+/// 판정용 — 지금 원하는 control 의 갈래. **화면 스택만 보면 「나갔는가」를 못 잰다** —
+/// 목록으로 돌아왔는데 그 서버에서 `attach` 가 계속 도는 상태가 실기에서 실제로 났다
+/// (2026-09-04 — 나온 뒤에도 host 가 `observers=1 50x27` 이었다).
+pub fn controlWantKind() std.meta.Tag(ControlWant) {
+    return std.meta.activeTag(control_want);
+}
+
 /// 판정용 — 원격 화면의 뒤로가기 한가운데(안 그려졌으면 `null`).
 pub fn remoteBackCenter() ?struct { x: f32, y: f32 } {
     if (remote_back_rect.w <= 0) return null;
@@ -4884,6 +4891,27 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
 
     // 상단 바 — 어디서 왔는지와 무엇을 보는지.
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    // **화살표를 그린다** — 누를 자리만 만들고 안 그리면 「없는 것」과 구별되지 않는다
+    // (실기 2026-09-04 — 히트는 되는데 화면에 아무 표시가 없어 여기가 눌린다는 것을 알 길이
+    // 없었다). 자리·크기·글리프 모두 설정 화면과 같다(§5.1).
+    if (reserveQuad()) {
+        const arrow_rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = remote_back_rect.x + (set_head_h - 22) / 2,
+            .y = remote_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(arrow_rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(arrow_rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(arrow_rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2, // arrow_left
+        };
+        quad_count += 1;
+    }
     pushText(maru.i18n.tIn(.ko, .mob_remote_screen_title), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     // **보는 중이라고 말한다** — 조종하는 화면과 헷갈리면 안 친 글자를 찾게 된다.
     const badge = maru.i18n.tIn(.ko, .mob_remote_screen_readonly);
@@ -5983,8 +6011,11 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         if (phase != 0) return 0;
         if (remote_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
         if (!setHit(remote_back_rect, x, y)) return 0;
-        navPop();
-        return 1;
+        // **하드웨어 뒤로가기와 «같은 길»로 나간다.** 여기서 `navPop()` 만 부르면 화면은
+        // 목록으로 돌아오는데 뜻은 `.screen` 그대로라, 그 서버에서 `attach` 가 계속 돌고
+        // 맥은 폰이 선언한 폭에 계속 눌려 있다(실기 2026-09-04 — 나온 뒤에도 host 가
+        // `observers=1 50x27` 이었다). 나가는 자리가 둘인데 하는 일이 달랐다.
+        return maru_mobile_pop_screen();
     }
     if (screenTop() == .terminal) {
         switch (phase) {

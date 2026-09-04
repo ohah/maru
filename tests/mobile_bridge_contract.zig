@@ -5969,11 +5969,20 @@ test "U2 원격 화면에서 목록으로 돌아갈 수 있다 — 덮개로 바
     advanceFrame(402, 874, 16);
     try T.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
 
+    // **화면 안에서도 그 뜻이 살아 있다** — 보는 중에는 `.screen` 이다.
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).screen, bridge.controlWantKind());
+
     // **뒤로가기가 그려져 있고, 누르면 목록으로 돌아간다.**
     const back = bridge.remoteBackCenter() orelse return error.TestUnexpectedResult;
     tapAt(back.x, back.y);
     advanceFrame(402, 874, 16);
     try T.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    // **그리고 그 서버에서 «그만 본다»** — 화면만 돌아오고 뜻이 `.screen` 으로 남으면 `attach`
+    // 가 계속 돌고 맥은 폰이 선언한 폭에 계속 눌려 있다. 실기에서 정확히 그 상태로 잡혔다
+    // (2026-09-04 — 나온 뒤에도 host 가 `observers=1 50x27`). 화면 스택만 보는 판정은 이것을
+    // 못 가르므로, 하드웨어 뒤로가기와 **같은 결과**임을 여기서 못 박는다.
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).sessions, bridge.controlWantKind());
 }
 
 test "U2c 목록이 «이미 본 세션» 을 말한다 — 든 줄에만 표시가 그려진다" {

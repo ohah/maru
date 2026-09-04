@@ -13810,6 +13810,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-publication-product",
         "Validate concrete candidate publication ownership and wiring",
     );
+    const session_host_release_adapter_candidate_release_phase_step = b.step(
+        "test-session-host-release-adapter-candidate-release-phase",
+        "Validate top-level candidate release ordering and terminal audit state",
+    );
     const session_host_baseline_child_paths_step = b.step(
         "test-session-host-baseline-child-paths",
         "Validate exclusive baseline child path preparation",
@@ -13828,6 +13832,30 @@ pub fn build(b: *std.Build) void {
         "Run trusted candidate upgrade evidence publication tests",
     );
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |baseline_phase_optimize| {
+        const candidate_release_phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_release_phase.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const candidate_release_phase_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_candidate_release_phase.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{
+                    .name = "release_adapter_candidate_release_phase",
+                    .module = candidate_release_phase_mod,
+                }},
+            }),
+        });
+        const run_candidate_release_phase_tests = b.addRunArtifact(candidate_release_phase_tests);
+        run_candidate_release_phase_tests.addArg("--maru-expect-tests=10");
+        run_candidate_release_phase_tests.setCwd(b.path("."));
+        session_host_release_adapter_candidate_release_phase_step.dependOn(&run_candidate_release_phase_tests.step);
+        session_host_step.dependOn(&run_candidate_release_phase_tests.step);
+        if (posix_host_tests) test_step.dependOn(&run_candidate_release_phase_tests.step);
+        macos_only_test_step.dependOn(&run_candidate_release_phase_tests.step);
+
         const baseline_phase_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_baseline_phase.zig"),
             .target = target,

@@ -1249,7 +1249,13 @@ const HeldSession = struct {
     screen: screen.Screen,
     declared_cols: u16,
     declared_rows: u16,
+    /// **마지막으로 본 순번**(U2b). 자리가 모자랄 때 누구를 버릴지 이 값이 정한다 — 시계가 아니라
+    /// 순번이라 기계 속도에 안 흔들린다.
+    seen: u64,
 };
+
+/// 마지막으로 본 순번을 매기는 자리. 넘칠 걱정은 없다(u64 이고 화면 전환마다 하나씩 는다).
+var held_seen_counter: u64 = 0;
 
 /// 폰이 동시에 들 수 있는 세션 수. **자리를 미리 잡지 않는다** — 조립기 하나가 이미 16 MiB
 /// 상한을 들므로(그 구조체의 `max_image_bytes`) 수를 크게 잡으면 그만큼이 상주 가능 메모리다.
@@ -1262,29 +1268,45 @@ var held_sessions: [max_held_sessions]?HeldSession = @splat(null);
 fn stashRemoteScreen(id: [32]u8) void {
     const held = remote_screen orelse return;
     remote_screen = null;
+    held_seen_counter += 1;
+    const entry: HeldSession = .{
+        .id = id,
+        .screen = held,
+        .declared_cols = remote_declared_cols,
+        .declared_rows = remote_declared_rows,
+        .seen = held_seen_counter,
+    };
+    remote_declared_cols = 0;
+    remote_declared_rows = 0;
+
     // 같은 세션이 이미 있으면 그 자리를 덮는다 — 둘을 들면 어느 쪽이 최신인지 알 수 없다.
     for (&held_sessions) |*slot| {
         if (slot.*) |*existing| {
             if (!std.mem.eql(u8, &existing.id, &id)) continue;
             existing.screen.deinit(term_allocator);
-            slot.* = .{ .id = id, .screen = held, .declared_cols = remote_declared_cols, .declared_rows = remote_declared_rows };
-            remote_declared_cols = 0;
-            remote_declared_rows = 0;
+            slot.* = entry;
             return;
         }
     }
     for (&held_sessions) |*slot| {
         if (slot.* != null) continue;
-        slot.* = .{ .id = id, .screen = held, .declared_cols = remote_declared_cols, .declared_rows = remote_declared_rows };
-        remote_declared_cols = 0;
-        remote_declared_rows = 0;
+        slot.* = entry;
         return;
     }
-    // 자리가 없다 — 들고 있을 수 없으면 버린다(그 세션은 다음에 처음부터 쌓는다).
-    var dropped = held;
-    dropped.deinit(term_allocator);
-    remote_declared_cols = 0;
-    remote_declared_rows = 0;
+
+    // **자리가 모자라면 «가장 오래 안 본 것» 을 버린다**(U2b). 예전에는 방금 보던 것을 버렸는데,
+    // 그건 거꾸로다 — 방금 본 세션이야말로 돌아올 가능성이 가장 높다.
+    var oldest: usize = 0;
+    for (held_sessions, 0..) |slot, i| {
+        const candidate = slot orelse continue;
+        const current = held_sessions[oldest] orelse {
+            oldest = i;
+            continue;
+        };
+        if (candidate.seen < current.seen) oldest = i;
+    }
+    if (held_sessions[oldest]) |*victim| victim.screen.deinit(term_allocator);
+    held_sessions[oldest] = entry;
 }
 
 /// 들고 있던 세션이면 그 화면을 되돌린다(U2a). 돌아왔다는 뜻이므로 **선언한 격자도 함께** 살린다
@@ -1319,6 +1341,15 @@ pub const ScreenFrameKind = screen.Kind;
 pub fn activeScreenHasFrames() bool {
     const s = remote_screen orelse return false;
     return s.snapshots != 0 or s.deltas != 0;
+}
+
+/// 판정용 — 그 세션을 들고 있는가.
+pub fn holdsSession(id: [32]u8) bool {
+    for (held_sessions) |slot| {
+        const entry = slot orelse continue;
+        if (std.mem.eql(u8, &entry.id, &id)) return true;
+    }
+    return false;
 }
 
 /// 판정용 — 지금 들고 있는 세션 수.
@@ -4664,6 +4695,13 @@ pub fn remoteSessionsShown() RemoteShown {
     return remote_shown;
 }
 
+/// 판정용 — 이번 프레임에 **「이미 본 세션」 표시**를 몇 줄에 그렸나(U2c).
+var held_markers_drawn: usize = 0;
+
+pub fn heldMarkersDrawn() usize {
+    return held_markers_drawn;
+}
+
 pub fn remoteRowsDrawn() usize {
     return remote_rows_drawn;
 }
@@ -4691,6 +4729,7 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
     const row_h: f32 = 56;
     var y = top;
     remote_rows_drawn = 0;
+    held_markers_drawn = 0;
 
     // **연결이 없으면 컨트롤 축의 이유를 말하지 않는다.** 축은 그 연결 위에 서는 것이라,
     // 연결이 사라지면 남아 있는 사유는 **그 연결이 죽으며 난 잔해**이지 지금의 사실이 아니다.
@@ -4795,6 +4834,21 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     appendPart(&line, &len, row.agent[0..row.agent_len]);
     const sub = line[0..len];
     if (sub.len > 0) pushText(sub, @intFromFloat(win.x + 16), @intFromFloat(y + 30), 13, tk.get(.muted_fg));
+
+    // **이미 본 세션은 그렇다고 말한다**(U2c). 전환을 「덮개」로 정했으니(계획 U0) 고르는 자리는
+    // 이 목록 하나뿐이다 — 어느 줄이 이미 화면을 갖고 있는지 목록이 말하지 않으면, 사용자는 그
+    // 왕복이 싼지 비싼지 모른 채 누른다. **오른쪽 끝의 작은 점** 하나다: 둘째 줄의 값(cwd·git·
+    // agent)과 경쟁하지 않고, 글자가 아니라서 폭이 좁아도 안 잘린다.
+    if (row.has_runtime and holdsSession(row.runtime_id)) {
+        const dot: f32 = 6;
+        push(.{
+            .x = @intFromFloat(win.x + win.w - 16 - dot),
+            .y = @intFromFloat(y + (row_h - dot) / 2),
+            .w = @intFromFloat(dot),
+            .h = @intFromFloat(dot),
+        }, tk.get(.accent_bar), 0xFF, @intFromFloat(dot / 2), 0);
+        held_markers_drawn += 1;
+    }
 
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }

@@ -5944,6 +5944,80 @@ test "U2a 다른 세션을 봤다 돌아와도 «빈 화면부터» 다시 쌓�
     try T.expectEqual(@as(usize, 0), bridge.heldSessionCount());
 }
 
+test "U2c 목록이 «이미 본 세션» 을 말한다 — 든 줄에만 표시가 그려진다" {
+    // 전환을 「덮개」로 정했으니(계획 U0) 고르는 자리는 이 목록 하나다. 어느 줄이 이미 화면을
+    // 갖고 있는지 목록이 말하지 않으면 사용자는 그 왕복이 싼지 비싼지 모른 채 누른다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    // **전이를 만들어야 여는 판정이 돈다**(앞 테스트가 목록 화면 상태로 넘겨줄 수 있다).
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // runtime 이 있는 줄 둘.
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"a\",\"runtime_id\":\"00000000000000000000000000000abc\"}," ++
+            "{\"id\":{\"surface_id\":8},\"title\":\"b\",\"runtime_id\":\"00000000000000000000000000000def\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(usize, 2), bridge.remoteRowsDrawn());
+    // 아직 아무것도 안 봤다 — 표시도 없다.
+    try T.expectEqual(@as(usize, 0), bridge.heldMarkersDrawn());
+
+    // 첫 줄의 세션을 보고 나온다 — 그 화면을 들고 있게 된다.
+    const first: [32]u8 = "00000000000000000000000000000abc".*;
+    bridge.wantControl(.{ .screen = first });
+    _ = bridge.maru_mobile_control_feed(bridge.screen_frame_magic.ptr, bridge.screen_frame_magic.len);
+    bridge.wantControl(.sessions);
+    try T.expect(bridge.holdsSession(first));
+
+    // **든 줄에만** 표시가 그려진다.
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(usize, 2), bridge.remoteRowsDrawn());
+    try T.expectEqual(@as(usize, 1), bridge.heldMarkersDrawn());
+}
+
+test "U2b 자리가 모자라면 «가장 오래 안 본» 세션이 먼저 버려진다" {
+    // 조립기 하나가 16 MiB 이미지 상한을 들어 **수가 곧 상주 메모리**다. 그래서 상한이 있고,
+    // 넘칠 때 누구를 버리는지가 정해져 있어야 한다.
+    //
+    // 예전 구현은 **방금 보던 것**을 버렸다(자리를 못 찾으면 그대로 놓았다) — 거꾸로다. 방금 본
+    // 세션이야말로 돌아올 가능성이 가장 높다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    // 상한(4)을 채운다 — a·b·c·d 를 차례로 보고 나온다.
+    const ids = [_][32]u8{ @splat('a'), @splat('b'), @splat('c'), @splat('d') };
+    for (ids) |id| {
+        bridge.wantControl(.{ .screen = id });
+        // 화면 자리가 실제로 서야 들 것이 생긴다(빈 화면은 들 것이 없다).
+        _ = bridge.maru_mobile_control_feed(bridge.screen_frame_magic.ptr, bridge.screen_frame_magic.len);
+        bridge.wantControl(.sessions);
+    }
+    try T.expectEqual(@as(usize, 4), bridge.heldSessionCount());
+
+    // **a 를 다시 본다** — 이제 가장 오래 안 본 것은 b 다.
+    bridge.wantControl(.{ .screen = ids[0] });
+    bridge.wantControl(.sessions);
+
+    // 다섯째(e)가 들어오면 **b 가** 버려져야 한다. a 는 방금 봤으니 남는다.
+    const e: [32]u8 = @splat('e');
+    bridge.wantControl(.{ .screen = e });
+    _ = bridge.maru_mobile_control_feed(bridge.screen_frame_magic.ptr, bridge.screen_frame_magic.len);
+    bridge.wantControl(.sessions);
+
+    try T.expectEqual(@as(usize, 4), bridge.heldSessionCount());
+    try T.expect(bridge.holdsSession(e));
+    try T.expect(bridge.holdsSession(ids[0])); // a — 방금 봤다
+    try T.expect(!bridge.holdsSession(ids[1])); // b — 가장 오래 안 봤다
+}
+
 test "S11-6 폰은 «그리는 격자» 를 알리고, 같은 값을 다시 안 보낸다" {
     const T = std.testing;
     bridge.setControlWantForTest(.{ .screen = "000000000000000000000000000000aa".* });

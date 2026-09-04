@@ -12857,17 +12857,28 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
     defer allocator.free(path);
     const term = try openPathInActivePane(fx.session, path);
 
-    // ⑴ **chord가 액션으로 해석된다** — 기본 바인딩 표에 실제로 실려 있는가.
+    // ⑴ **chord가 액션으로 해석된다** — **편집기 컨텍스트** 표에 실려 있는가(2026-09-04: `⌘⌃D` 임시
+    //    chord 를 `⌘D` 로 옮겼다 — §9.1 확정. 전역 표가 아니라 컨텍스트 표라 여기서 묻는 함수가 바뀐다).
     {
         const resolver = fx.session.loaded_config.keyBindingResolver();
         var enc: [maru.terminal.input.encoded_key_buffer_len]u8 = undefined;
         const event = maru.terminal.KeyEvent{
             .key = .{ .char = 'D' },
-            .modifiers = .{ .command = true, .control = true },
+            .modifiers = .{ .command = true },
         };
-        const resolved = try resolver.resolve(event, &enc, .{});
-        switch (resolved) {
+        switch (resolver.resolveEditor(event, false)) {
             .app_action => |a| try testing.expectEqual(maru.config.action.Action.add_next_occurrence, a),
+            else => return error.ChordNotWired,
+        }
+        // **터미널에서는 그대로 좌우 분할이다** — 이 대가가 §9.1 의 결정 조건이고, 여기서 깨지면
+        // "편집기를 열었더니 터미널에서 화면이 안 나뉜다" 가 된다.
+        switch (try resolver.resolve(event, &enc, .{})) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.split_horizontal, a),
+            else => return error.ChordNotWired,
+        }
+        // **비교 뷰에서도 분할이다** — 「다음 일치 추가」는 거기서 뜻이 없다.
+        switch (resolver.resolveEditor(event, true)) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.split_horizontal, a),
             else => return error.ChordNotWired,
         }
     }
@@ -12881,7 +12892,35 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
     fx.session.dispatchAppAction(.add_next_occurrence);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
 
-    // ⑶ **팔레트에도 있다** — 키를 뺏긴 사용자가 명령으로 부를 수 있어야 한다.
+    // ⑶ **고른 것이 없으면 아무 일도 안 한다** — 씨앗을 문서 머리로 짐작하면 사용자가 있지도 않은
+    //    커서 자리를 강요당한다(변이 F2). 앞선 판이 실제로 `Selection.at(0)` 을 씨앗으로 썼다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = null;
+    try testing.expect(!addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+
+    // ⑷ **편집기가 아닌 Term 은 받지 않는다** — 이 함수는 `editor_doc`·`editor_selection` 을 전제하고,
+    //    호출자 게이트가 하나 빠지는 날 그 전제가 깨진다(변이 F3).
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 5, 5, .word);
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    try testing.expect(!addNextOccurrence(fx.session, term));
+    term.kind = saved_kind;
+
+    // ⑸ **컨텍스트 키는 화면을 다시 그리게 한다** — 안 그러면 커서가 늘고도 다음 프레임까지 안 보인다.
+    //    다만 디스패치 자리의 `metal_dirty = true` 를 지워도 이 단언은 안 깨진다(변이 F8 이 살아남는
+    //    것이 정상이다) — 이 표의 **액션 넷이 전부 스스로 세우기 때문**이다(`toggleWrap`·
+    //    `addNextOccurrence` 가 각자 끝에서, 복제·이동은 `applyLineEdit` 에서). 그럼에도 그 줄을 두는
+    //    이유는 **다음 액션**이다: 편집기는 PTY 출력이 없어 아무도 프레임을 안 깨우므로, 스스로 안
+    //    세우는 액션이 이 표에 하나 붙는 날 그 키는 **눌러도 화면이 그대로**다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 5, 5, .word);
+    fx.session.metal_dirty = false;
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expect(fx.session.metal_dirty);
+
+    // ⑹ **팔레트에도 있다** — 키를 뺏긴 사용자가 명령으로 부를 수 있어야 한다.
     var found = false;
     for (command_catalog.entries) |e| {
         if (e.action == .add_next_occurrence) found = true;

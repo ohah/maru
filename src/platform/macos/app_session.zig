@@ -11704,12 +11704,21 @@ pub const AppSession = struct {
         // `.app_action`을 내면 이 분기는 비켜서고 아래 정상 경로가 처리한다.
         if (self.surface_initialized) {
             const active = pane_ops.activePane(self).activeTerm();
-            if (active.kind == .editor and active.rt.editor_diff == null) {
+            if (active.kind == .editor) {
                 // **편집기 Term 컨텍스트가 판정한다**(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
                 // 전역 `resolve` 를 쓰면 편집기 전용 기본키(`⌥Z` 등)가 안 보인다 — 그 표는 전역에 못
                 // 넣는 것들이라 이 컨텍스트 안에만 있다.
-                const ed = self.loaded_config.keyBindingResolver().resolveEditor(key_event);
-                if (ed == .editor) {
+                const is_diff = active.rt.editor_diff != null;
+                const ed = self.loaded_config.keyBindingResolver().resolveEditor(key_event, is_diff);
+                // **편집 키 갈래는 비교 뷰에서 안 연다** — 그 축은 문서 offset 을 전제하고 비교에는
+                // 그 축이 없다(§4.1g). 컨텍스트 판정은 그 위에서 먼저 돌아야 `⌥Z` 가 비교에서도 산다.
+                //
+                // **이 `!is_diff` 를 지워도 판정자가 안 잡는다**(그 변이가 살아남는 것이 정상이다) —
+                // 안쪽 함수들이 **전부 비교를 스스로 거절하기 때문**이다(`moveCarets` 첫 줄이
+                // `editor_diff != null` 을 거절하고, 줄 조작은 `lineOpDoc` 이 거절한다). 그럼에도
+                // 여기서 막는 이유는 **심층 방어**다(§6): 안쪽 거절이 하나라도 빠지는 날, 비교 Term 의
+                // selection 을 단일 편집기 좌표로 훑는 경로가 열린다.
+                if (ed == .editor and !is_diff) {
                     // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,
                     // 맨몸은 문자/줄. **Shift**는 단위를 바꾸지 않고 **선택을 늘린다**.
                     const m = key_event.modifiers;
@@ -42695,6 +42704,73 @@ test "ETX5 ⌥Z 가 키 경로로 랩을 토글한다 — 편집기 컨텍스트
     const w_before = term.rt.editor_wrap;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } });
     try std.testing.expectEqual(w_before, term.rt.editor_wrap);
+}
+
+test "ETX6 비교 뷰 종단 — ⌘D 는 분할이고 ⌥Z 는 랩이며 방향키는 편집 갈래로 안 간다" {
+    // **resolver 만 재면 배선이 빠져도 초록이다**(변이 D7·D8·D9·D10 이 그렇게 살아남았다).
+    // 비교 뷰는 갈림이 **액션 단위**라(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」) 세 축을
+    // 한 자리에서 함께 잰다 — 하나만 재면 나머지 둘이 조용히 뒤집힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa\nbb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // 이 Term 을 비교로 만든다 — 줄 배열은 빌린 것이라 이 판정자가 사는 동안만 유효하다.
+    const rows = [_][]const u8{ "aa", "bb" };
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer term.rt.editor_diff = null;
+    term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    term.rt.editor_diff.?.left_texts = &rows;
+    term.rt.editor_diff.?.right_texts = &rows;
+
+    // ⑴ **`⌥Z` 는 랩을 토글한다** — 랩은 뷰 속성이라 비교 뷰에서도 뜻이 있다.
+    const w_before = term.rt.editor_wrap;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } });
+    try std.testing.expect(term.rt.editor_wrap != w_before);
+
+    // ⑵ **방향키가 편집 갈래로 안 간다** — 그 축은 문서 offset 을 전제하고 비교에는 그 축이 없다.
+    //    들어가면 비교 Term 의 selection 을 단일 편집기 좌표로 훑는다.
+    term.rt.editor_selection = null;
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
+    try std.testing.expect(term.rt.editor_selection == null);
+
+    // ⑶ **`⌘D` 는 좌우 분할이다** — 「다음 일치 추가」는 비교 뷰에서 뜻이 없으므로 전역으로 떨어진다.
+    //    여기서 컨텍스트가 먹으면 **비교 뷰에서 화면을 못 나눈다**(액션이 거절해 아무 일도 안 난다).
+    //
+    // **이 단언이 마지막인 이유**: 분할은 **포커스를 새 pane 으로 옮긴다**. 앞에 두면 그 뒤 키가
+    // 비교 Term 이 아니라 새 pane 의 Term 으로 가서 위 둘이 엉뚱한 것을 잰다(실측으로 그랬다).
+    //
+    // **selection 을 다시 세우고 잰다.** ⑵ 가 `null` 로 둔 채로 재면 「비교인가」와 「고른 것이
+    // 없는가」가 픽스처에서 **겹쳐서**, 비교 판정을 `editor_selection == null` 로 잘못 읽는 변이가
+    // 그대로 산다(변이 F6 이 그렇게 살아남았다). 둘을 갈라야 이 단언이 비교를 재는 것이 된다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 2, .focus = 2 };
+    defer term.rt.editor_selection = null;
+    const panes_before = tab_ops.activeTab(session).panes.items.len;
+    session.metal_dirty = false;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(panes_before + 1, tab_ops.activeTab(session).panes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len); // 커서가 안 늘었다
+
 }
 
 test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치 종단 (§3.9b)" {

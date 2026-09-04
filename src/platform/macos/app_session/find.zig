@@ -187,7 +187,12 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     // 그때 이 자리만 전역이면 같은 키가 **찾기가 떠 있을 때와 아닐 때 다르게** 풀리고, 그 갈림은
     // 사용자가 설명할 수 없다.
     _ = &buf;
-    const action = switch (self.loaded_config.keyBindingResolver().resolveEditor(event)) {
+    // **이 값은 오늘 답을 안 바꾼다**(늘 참으로 줘도 판정자가 안 잡는다 — 그 변이가 살아남는 것이
+    // 정상이다). 이 가로채기가 찾는 chord 넷은 **전역 표**에 있어 `needs_editable` 판정을 안 지나기
+    // 때문이다. 그럼에도 제대로 넘기는 이유는 **찾기 규칙에 편집기 전용 chord 가 붙는 날** 때문이고,
+    // 그때 이 인자가 거짓으로 박혀 있으면 비교 뷰에서 조용히 다른 답이 나온다.
+    const is_diff = if (activeEditorTerm(self)) |t| t.rt.editor_diff != null else false;
+    const action = switch (self.loaded_config.keyBindingResolver().resolveEditor(event, is_diff)) {
         .app_action => |a| a,
         else => return false,
     };

@@ -1069,9 +1069,21 @@ pub fn wantControl(next: ControlWant) void {
     // 검증 2회차). 반대 방향(ndjson 이 화면 채널로)은 프레임 디코더가 잡음으로 버려 안전하지만,
     // 그 비대칭에 기대지 않는다.
     control_req_len = 0;
-    // 보던 화면이 아니게 됐다 — 그 조립 상태는 여기서 끝난다(죽은 화면을 남기지 않는다).
-    if (control_want == .screen) dropRemoteScreen();
+    // **보던 화면을 버리지 않고 들고 있는다**(U2a). 예전에는 여기서 놓아서, 다른 세션을 봤다
+    // 돌아오면 그 화면이 **빈 화면부터** 다시 쌓였다 — 「덮개로 고른다」는 전환 방식(계획 U0)에서
+    // 그 왕복은 평범한 조작이다. 죽은 화면을 살아 있는 것처럼 보이지 않게 하는 것은 그대로다:
+    // 되돌린 화면 위로 곧바로 새 프레임이 덮이고, 그 세션이 사라졌으면 attach 가 실패해 화면이
+    // 그렇게 말한다. **새 연결**에서는 여전히 통째로 놓는다(`maru_mobile_control_reset`).
+    switch (control_want) {
+        .screen => |old_id| stashRemoteScreen(old_id),
+        else => {},
+    }
     control_want = next;
+    // 들고 있던 세션이면 그 화면과 선언을 되살린다 — 돌아온 순간 마지막 화면이 보인다.
+    switch (next) {
+        .screen => |new_id| _ = restoreRemoteScreen(new_id),
+        else => {},
+    }
     if (control_open.eql(next)) {
         // 이미 그것을 돌리고 있다 — 열 것도 닫을 것도 없다.
         control_open_req = false;
@@ -1219,8 +1231,8 @@ fn feedRemoteScreen(bytes: []const u8) usize {
     return s.feed(term_allocator, bytes);
 }
 
-/// 원격 화면을 놓는다. 새 연결이거나 그 화면을 그만 볼 때다 — 남겨 두면 **죽은 세션의 화면을
-/// 살아 있는 것처럼** 보여 준다(목록이 같은 이유로 같은 규칙을 쓴다).
+/// 원격 화면을 놓는다. **새 연결일 때다** — 남겨 두면 죽은(또는 다른 기계의) 세션 화면을
+/// 살아 있는 것처럼 보여 준다. 세션을 «바꿀» 때는 이것이 아니라 `stashRemoteScreen` 이다(U2a).
 fn dropRemoteScreen() void {
     if (remote_screen) |*s| s.deinit(term_allocator);
     remote_screen = null;
@@ -1228,6 +1240,94 @@ fn dropRemoteScreen() void {
     // 선언 없이 남아 세션이 안 줄어든다.
     remote_declared_cols = 0;
     remote_declared_rows = 0;
+}
+
+/// 봤던 세션 하나의 상태(U2a). **화면과 그 세션에 대고 선언한 격자**를 함께 든다 — 돌아왔을 때
+/// 격자를 다시 선언하지 않으려면 둘이 같이 살아 있어야 한다.
+const HeldSession = struct {
+    id: [32]u8,
+    screen: screen.Screen,
+    declared_cols: u16,
+    declared_rows: u16,
+};
+
+/// 폰이 동시에 들 수 있는 세션 수. **자리를 미리 잡지 않는다** — 조립기 하나가 이미 16 MiB
+/// 상한을 들므로(그 구조체의 `max_image_bytes`) 수를 크게 잡으면 그만큼이 상주 가능 메모리다.
+/// 넘칠 때의 버림 규칙은 U2b 가 정한다.
+const max_held_sessions: usize = 4;
+var held_sessions: [max_held_sessions]?HeldSession = @splat(null);
+
+/// 지금 보던 화면을 **버리지 않고 들고 있는다**(U2a). 세션을 바꿀 때 부른다 — 그래야 돌아왔을 때
+/// 빈 화면부터 다시 쌓지 않는다. 자리가 없으면 그냥 버린다(U2b 가 버림 규칙을 정한다).
+fn stashRemoteScreen(id: [32]u8) void {
+    const held = remote_screen orelse return;
+    remote_screen = null;
+    // 같은 세션이 이미 있으면 그 자리를 덮는다 — 둘을 들면 어느 쪽이 최신인지 알 수 없다.
+    for (&held_sessions) |*slot| {
+        if (slot.*) |*existing| {
+            if (!std.mem.eql(u8, &existing.id, &id)) continue;
+            existing.screen.deinit(term_allocator);
+            slot.* = .{ .id = id, .screen = held, .declared_cols = remote_declared_cols, .declared_rows = remote_declared_rows };
+            remote_declared_cols = 0;
+            remote_declared_rows = 0;
+            return;
+        }
+    }
+    for (&held_sessions) |*slot| {
+        if (slot.* != null) continue;
+        slot.* = .{ .id = id, .screen = held, .declared_cols = remote_declared_cols, .declared_rows = remote_declared_rows };
+        remote_declared_cols = 0;
+        remote_declared_rows = 0;
+        return;
+    }
+    // 자리가 없다 — 들고 있을 수 없으면 버린다(그 세션은 다음에 처음부터 쌓는다).
+    var dropped = held;
+    dropped.deinit(term_allocator);
+    remote_declared_cols = 0;
+    remote_declared_rows = 0;
+}
+
+/// 들고 있던 세션이면 그 화면을 되돌린다(U2a). 돌아왔다는 뜻이므로 **선언한 격자도 함께** 살린다
+/// — 안 그러면 같은 값을 다시 선언하지 못해(중복 선언은 걸러진다) 세션이 안 좁아진다.
+fn restoreRemoteScreen(id: [32]u8) bool {
+    for (&held_sessions) |*slot| {
+        const entry = if (slot.*) |value| value else continue;
+        if (!std.mem.eql(u8, &entry.id, &id)) continue;
+        slot.* = null;
+        remote_screen = entry.screen;
+        remote_declared_cols = entry.declared_cols;
+        remote_declared_rows = entry.declared_rows;
+        return true;
+    }
+    return false;
+}
+
+/// 들고 있던 것을 전부 놓는다. **새 연결**이 그 자리다 — 다른 기계일 수 있다.
+fn dropHeldSessions() void {
+    for (&held_sessions) |*slot| {
+        if (slot.*) |*entry| entry.screen.deinit(term_allocator);
+        slot.* = null;
+    }
+}
+
+/// 판정용 — 화면 프레임의 wire 모양(`magic | kind | 예약 3 | len LE`). 판정자가 이 값을 손으로
+/// 다시 적으면 코덱이 바뀔 때 갈린다.
+pub const screen_frame_magic = screen.magic;
+pub const ScreenFrameKind = screen.Kind;
+
+/// 판정용 — 지금 보고 있는 화면이 프레임을 받은 적이 있는가(빈 화면인지 아닌지).
+pub fn activeScreenHasFrames() bool {
+    const s = remote_screen orelse return false;
+    return s.snapshots != 0 or s.deltas != 0;
+}
+
+/// 판정용 — 지금 들고 있는 세션 수.
+pub fn heldSessionCount() usize {
+    var n: usize = 0;
+    for (held_sessions) |slot| {
+        if (slot != null) n += 1;
+    }
+    return n;
 }
 
 /// **채널에 실어 host 가 가져간** 마지막 선언(S11-6). 0 은 「아직 안 실었다」다.
@@ -1420,6 +1520,9 @@ pub export fn maru_mobile_control_reset() void {
     control_open_req = false;
     control_close_req = false;
     dropRemoteScreen();
+    // **들고 있던 세션도 전부 놓는다**(U2a). 새 연결은 다른 기계일 수 있고, 그러면 그 화면들은
+    // 남의 것이다 — runtime id 가 같아도 같은 세션이라는 보장이 없다.
+    dropHeldSessions();
     control_client = .{};
     control_row_count = 0;
     control_req_len = 0;

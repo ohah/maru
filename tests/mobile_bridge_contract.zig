@@ -5879,6 +5879,71 @@ test "컨트롤 명령은 설정 경로를 쓰고 셸이 쪼개지 못하게 인
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&tiny, tiny.len));
 }
 
+test "U2a 다른 세션을 봤다 돌아와도 «빈 화면부터» 다시 쌓지 않는다" {
+    // **덮개로 고른다**(계획 U0 — 사용자 확정 2026-09-04). 즉 「목록 → A → 목록 → B → 목록 → A」는
+    // 평범한 조작이다. 예전에는 `wantControl` 이 화면을 바꿀 때마다 조립 상태를 **놓아서**, A 로
+    // 돌아오면 그 세션이 빈 화면부터 다시 쌓였다(스냅샷이 다시 올 때까지 아무것도 없다).
+    //
+    // 컨트롤 채널은 하나라 화면 둘을 «동시에» 흘릴 수는 없다(§4a). U2a 가 없애는 것은 그것이
+    // 아니라 **돌아왔을 때의 빈 화면**이다.
+    const T = std.testing;
+    const stream = maru.session.screen_stream;
+    const a_id: [32]u8 = @splat('a');
+    const b_id: [32]u8 = @splat('b');
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    // A 의 화면을 한 프레임 받는다 — 실제 `MRSS` 스냅샷이다.
+    bridge.wantControl(.{ .screen = a_id });
+    var runs = [_]stream.Run{.{ .grapheme = "A", .width = 1, .count = 1 }};
+    var frame: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame.deinit(T.allocator);
+    const meta = try stream.encodeScreenMeta(T.allocator, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 1,
+        .rows = 1,
+        .active_screen = 0,
+        .cursor = .{ .col = 0, .row = 0, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer T.allocator.free(meta);
+    try stream.appendRecord(&frame, T.allocator, meta);
+    const row = try stream.encodeRow(T.allocator, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
+    defer T.allocator.free(row);
+    try stream.appendRecord(&frame, T.allocator, row);
+
+    // 조립기는 **MRSS 프레임**을 먹는다(`magic | kind | 예약 3 | len LE | payload`) — 레코드를
+    // 그대로 주면 잡음으로 버린다.
+    var wire: std.ArrayListUnmanaged(u8) = .empty;
+    defer wire.deinit(T.allocator);
+    try wire.appendSlice(T.allocator, bridge.screen_frame_magic);
+    try wire.append(T.allocator, @intFromEnum(bridge.ScreenFrameKind.snapshot));
+    try wire.appendSlice(T.allocator, &.{ 0, 0, 0 });
+    var len_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_le, @intCast(frame.items.len), .little);
+    try wire.appendSlice(T.allocator, &len_le);
+    try wire.appendSlice(T.allocator, frame.items);
+
+    _ = bridge.maru_mobile_control_feed(wire.items.ptr, wire.items.len);
+    try T.expect(bridge.activeScreenHasFrames());
+
+    // 목록으로 나갔다 B 를 본다 — A 는 **버려지지 않고 들려 있어야** 한다.
+    bridge.wantControl(.sessions);
+    try T.expectEqual(@as(usize, 1), bridge.heldSessionCount());
+    bridge.wantControl(.{ .screen = b_id });
+    try T.expect(!bridge.activeScreenHasFrames()); // B 는 처음이라 비어 있다
+
+    // **A 로 돌아온다.** 예전에는 여기서 빈 화면이었다.
+    bridge.wantControl(.sessions);
+    bridge.wantControl(.{ .screen = a_id });
+    try T.expect(bridge.activeScreenHasFrames());
+
+    // **새 연결이면 전부 놓는다** — 다른 기계일 수 있다.
+    bridge.wantControl(.sessions);
+    try T.expect(bridge.heldSessionCount() != 0);
+    bridge.maru_mobile_control_reset();
+    try T.expectEqual(@as(usize, 0), bridge.heldSessionCount());
+}
+
 test "S11-6 폰은 «그리는 격자» 를 알리고, 같은 값을 다시 안 보낸다" {
     const T = std.testing;
     bridge.setControlWantForTest(.{ .screen = "000000000000000000000000000000aa".* });

@@ -2012,6 +2012,23 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   격리 runner이며, 같은 UID의 비신뢰 동시 프로세스가 executable pathname을 swap한 뒤 원복하는 공격은 이 경계 밖이다. 로컬 빌드와
   로컬 업그레이드는 이 공식 release evidence 권위를 요구하지 않는다.
 
+  baseline 제품 runner의 production 진입점은
+  `src/platform/macos/session_host/release_adapter_candidate_baseline_runner.zig`다. caller가 이미 final-address로 보존한
+  candidate identity/files/product/source, candidate app, isolated workspace, official release Zig toolchain과 held source cwd만
+  빌리고, caller가 UUID·digest·profile·gate 성공 bool·HOME·leaf/evidence pathname을 별도 제출하지 못하게 한다. runner-owned
+  하나의 absolute deadline 아래 기존 product execution owner를 통해 default-false child→candidate 재검증→signed-app-quit
+  child→candidate 재검증→baseline aggregate publication→final candidate/deadline 재검증을 실제 adapter로 조립한다.
+
+  성공하면 두 leaf와 held aggregate evidence를 후속 manifest/attestation 단계에 넘길 수 있도록 caller-owned `Execution`에
+  보존하며 자동 cleanup하지 않는다. 실패하면 aggregate→signed-app-quit leaf/HOME→default-false leaf/HOME 순으로 exact
+  workspace child만 best-effort cleanup하고, cleanup 실패 시 남은 exact retry set과 deadline/evidence owner를 같은 final-address
+  `Execution`에 보존한다. copied/pre-owned/authority-storage alias execution, 이미 성공한 execution의 재실행, borrowed authority
+  drift와 workspace 밖 삭제는 child 실행 전에 거부한다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-runner`는 production-type concrete composition의 순서, 동일 deadline,
+  성공 owner 보존, 각 fail-index의 역순 cleanup과 retry를 Debug·ReleaseFast에서 검증한다. 실제 filesystem 권위·publication은 이
+  runner가 그대로 호출하는 app/workspace/child/evidence 집중 gate가 각각 검증한다. candidate app/workspace
+  자체 생성, artifact attestation, manifest/draft publication과 live release workflow 호출은 후속 wiring이다.
+
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
   final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address

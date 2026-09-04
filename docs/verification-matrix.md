@@ -1108,6 +1108,15 @@ cleanup 대상도 아니다. copied/pre-owned owner, owner/path storage alias, r
 retry authority를 보존한다. `test-session-host-release-adapter-candidate-baseline-workspace`가 actual filesystem의 Debug·ReleaseFast에서
 exact path set, root identity와 성공/실패 cleanup을 검증한다. 실제 AppKit/CLI child, leaf/aggregate publication은 후속이다.
 
+U5 baseline-A production runner는 `release_adapter_candidate_baseline_runner.zig`가 final-address candidate/app/workspace/toolchain/source
+권위만 빌려 product execution의 닫힌 순서에 실제 두 leaf adapter와 aggregate publisher를 연결한다. caller UUID·digest·profile·성공 bool·
+HOME·leaf/evidence pathname 입력은 0이고, 한 absolute deadline을 모든 child와 최종 fence가 공유한다. 성공은 두 leaf와 held aggregate를
+caller-owned execution에 보존하고, 실패는 aggregate→signed-app-quit→default-false exact workspace child를 역순 정리하며 cleanup failure의
+retry set을 같은 final-address owner에 남긴다. `test-session-host-release-adapter-candidate-baseline-runner`가 copied/pre-owned/alias owner,
+authority drift, 순서·deadline, 각 fail-index와 cleanup retry를 Debug·ReleaseFast에서 검증하고, 실제 filesystem 권위·publication은 runner가
+호출하는 app/workspace/child/evidence 집중 gate가 각각 소유한다. app/workspace 생성,
+artifact attestation, manifest/draft publication과 live workflow 호출은 후속 증거다.
+
 U5 upgrade-B candidate evidence 조립은 `release_adapter_candidate_upgrade_evidence.zig`가 final-address candidate identity와
 predecessor identity의 전체 backing authority graph에서만 common·predecessor·signing requirement를 유도한다. 두 최초 view를
 fixed snapshot으로 봉인하고 canonical aggregate bind 뒤 output open 직전에 candidate와 authenticated predecessor manifest/file/

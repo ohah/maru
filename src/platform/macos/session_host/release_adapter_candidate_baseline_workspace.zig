@@ -23,6 +23,10 @@ pub const Workspace = struct {
     signed_app_quit_leaf: [std.fs.max_path_bytes:0]u8 = @splat(0),
     evidence: [std.fs.max_path_bytes:0]u8 = @splat(0),
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return pristine(self);
+    }
+
     pub fn value(self: *@This()) !Paths {
         if (self.owner != self) return error.InvalidOwner;
         try self.root.validate();
@@ -71,7 +75,8 @@ fn derivePaths(result: *Workspace) !void {
 }
 
 fn pristine(result: *const Workspace) bool {
-    return result.owner == null and result.root.owner == null and
+    return result.owner == null and result.root.owner == null and result.root.parent_fd < 0 and result.root.root_fd < 0 and
+        !result.root.root_present and result.root.root_device == 0 and result.root.root_inode == 0 and result.root.path_len == 0 and
         allZero(&result.default_false_home) and allZero(&result.signed_app_quit_home) and
         allZero(&result.default_false_leaf) and allZero(&result.signed_app_quit_leaf) and allZero(&result.evidence);
 }

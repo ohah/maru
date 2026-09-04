@@ -961,19 +961,20 @@ pub const KeyHintConfig = struct {
 /// 영속 터미널 세션(정상 GUI Quit 후 유지) 설정. 단일 host(`maru-sessiond`)가 PTY/자식/화면을 소유한다
 /// (§10, docs/persistent-session-host.md). loader가 `session.*` 키로 파싱한다(스키마-주도).
 pub const SessionConfig = struct {
-    /// GUI를 종료해도 터미널 runtime(PTY·자식·화면)을 별도 host에서 유지할지. **기본 false**(현행 — 터미널이 GUI 프로세스
-    /// 소유라 종료 시 함께 죽음). true면 새 일반 Window의 Workspace/Term/split을 host(`maru-sessiond`)에 생성해 정상
-    /// GUI Quit 뒤 재접속한다(§10). quick은 **확정 비목표**라 항상 in-process다(session host·manifest·
-    /// `runtime-handle`을 갖지 않으며 `is_quick => remote backend 생성 0` 회귀 gate가 지킨다) — 완성될 것을
-    /// 기다리는 미완성 항목이 아니다. host 연결에 실패하면 notice 뒤 in-process로 폴백한다(host 문제가
-    /// GUI를 막지 않는다).
+    /// GUI를 종료해도 터미널 runtime(PTY·자식·화면)을 별도 host에서 유지할지. **값의 단일 출처는 이
+    /// 필드다** — 문서는 [설정](../../docs/configuration.md)의 `session.keep-alive-after-quit` 행 하나가
+    /// 설명을 소유한다(값을 여러 곳에 다시 적으면 그 서술들이 각자 낡는다. 실제로 그랬다).
     ///
-    /// **기본값 전환은 기술 선결이 아니라 사용자 결정이다**(2026-09-01 코드 대조로 정정 — 이 자리에는
-    /// 「P4 종료 gate 완성 전엔 기본값을 바꾸지 않는다(quick manifest·incremental checkpoint 등이 아직
-    /// 미완성)」이 남아 있었다. 둘 다 사실이 아니게 됐다: quick manifest는 위처럼 **확정 비목표**이고,
-    /// incremental checkpoint는 신호→디바운스 500ms→원자적 발행까지 배선돼 `crashAtPhase` test 가 crash
-    /// 축까지 본다). 전환 절차는 G3 릴리스 A/B 계약이 단일 출처이며 사용자 재승인 전에는 시작하지 않는다.
-    keep_alive_after_quit: bool = false,
+    /// true면 새 일반 Window의 Workspace/Term/split을 host(`maru-sessiond`)에 생성해 정상 GUI Quit 뒤
+    /// 재접속한다(§10). quick은 **확정 비목표**라 항상 in-process다(session host·manifest·`runtime-handle`을
+    /// 갖지 않으며 `is_quick => remote backend 생성 0` 회귀 gate가 지킨다). host 연결에 실패하면 notice 뒤
+    /// in-process로 폴백한다(host 문제가 GUI를 막지 않는다).
+    ///
+    /// **기본 `true`로 전환했다(2026-09-03 사용자 결정).** 첫 릴리스 **전**이라 G3 이관 계약(materialize·
+    /// exact predecessor 고정·롤백 왕복)이 **필요 없다** — 그 계약은 「기본값이 바뀌기 전에 설치한 사용자」를
+    /// 옮기기 위한 것인데 릴리스가 0개라 그런 사용자가 없다. 출하 **뒤에** 이 값을 다시 바꾼다면 그때는
+    /// G3 계약이 단일 출처다.
+    keep_alive_after_quit: bool = true,
 
     pub const schema = .{ // 키: session.keep-alive-after-quit (namespace=Config 필드명 session)
         // 설정 GUI(workspace 섹션)에 토글로 노출한다 — 사용자가 GUI로 켜고 끌 수 있다(기본값 전환 대비 "끄는 수단"이자 opt-in

@@ -4,7 +4,7 @@
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
 
-> **상태: keep-alive opt-in의 P3 core 구현, P4/P5 미완료, 기본값 `false`.** `session.keep-alive-after-quit=true`면
+> **상태: P3 core 구현, P4/P5 미완료.** 기본값은 [설정](configuration.md)의 `session.keep-alive-after-quit` 행이 단일 출처다(여기 다시 적지 않는다 — 그 서술이 낡아 실제로 오독을 냈다). 그 값이 `true`면
 > 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 **정상 GUI Quit 뒤** 살아남고 재실행 시
 > 재접속한다 — 호스트 프로세스, `runtime-handle`(=`host_id:runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
 > (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·기본 드래그 선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더

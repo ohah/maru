@@ -22291,6 +22291,12 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
 /// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
 const agent_hooks_off_config = "sidebar.agent-hooks = false\n";
 
+/// **keep-alive 를 끈 fixture.** 기본값이 `true` 라(2026-09-03 전환) 이것을 안 세우면 모든 test 세션이
+/// host 연결을 시도하고, test 환경에는 host 가 없으므로 설계대로 「유지 안 됨」 notice 가 뜬다(§6 L291 —
+/// 조용히 폴백하지 않는다). 그 notice 가 오버레이 한 줄을 차지해 **keep-alive 와 무관한** test 들의
+/// 화면 단언을 밀어낸다(WP-F1 웹 검색·SB1 상태바). 그 test 들이 재려던 것을 재게 하려면 명시적으로 끈다.
+const keep_alive_off_config = "session.keep-alive-after-quit = false\n";
+
 test "원격 pane 은 로그 파일 없이도 훅 모드로 선다 — 채널이 그 증거다" {
     // 계약 §11.1: ssh 너머는 `agent_kind` 가 영영 `none` 이고 로컬 로그 파일도 없다. 그 둘로 판정하면
     // 원격은 **영원히 관측 모드**다. 채널이 열렸다는 사실이 그 자리를 대신하는지 실제 tick 판정으로 본다.
@@ -38208,6 +38214,8 @@ test "U5 host upgrade 결과는 modal 뒤까지 보존하고 정확히 한 번 �
     defer host_connect_failed = saved_host_connect_failed;
     host_connect_failed = false;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -39876,6 +39884,8 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
 test "headless ticks toggle the blink phase and bump the metal generation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -41563,6 +41573,8 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -41934,6 +41946,8 @@ test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -42829,6 +42843,8 @@ test "EF14 ⌥⌘F가 바꾸기 줄을 연다 — 키 경로 전체 (§5.1)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -43151,6 +43167,8 @@ test "EF21 두 입력의 IME 조합은 서로 독립이다 (§5.1)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -43364,6 +43382,8 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
 test "alt screen에서도 maru Find가 열린다(⌘F 동작·진입해도 tick이 안 닫음 — 현재 화면 검색)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -44349,6 +44369,8 @@ test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal o
 test "empty file dock launcher presents explorer and empty content requests the shared file picker" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -47355,6 +47377,8 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
 test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit-test·workspace 캡처" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59121,6 +59145,8 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
 test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌아오면 다시 열린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59163,6 +59189,8 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
 test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 남지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59203,6 +59231,8 @@ test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 �
 test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 바뀐다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59239,6 +59269,8 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
 test "WP-F1 R9: found/none 표시기가 셀까지 도달한다(긴 검색어와 공존)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59393,6 +59425,8 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
 test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59511,6 +59545,8 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
 test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59553,6 +59589,8 @@ test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
 test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가 나간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59608,6 +59646,8 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
 test "WP-F1: 웹 탭 카운터는 0/0이 아니라 found/none이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -59618,6 +59658,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 found/none이다" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
@@ -59770,6 +59811,8 @@ test "N1: 컨트롤 플레인이 편집기를 editor detail로 낸다" {
 test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면 스크롤백 검색이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -60749,6 +60792,8 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
 test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -61231,6 +61276,8 @@ test "SB1: 상태바로 들어와도 다른 영역의 hover 해제가 먼저 돈
 test "SB1: 확인 모달이 열려 있으면 상태바 클릭이 항목을 실행하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -75686,6 +75733,53 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
     _ = term.agent_image_source.set("/tmp/from-hook.jsonl");
     agent_ops.adoptFallbackImageSource(session, term);
     try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.agent_image_source.path());
+}
+
+test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3 선결)" {
+    // **이 test 가 지키는 것은 「지금 기본값이 무엇인가」다**(아래 ③).
+    //
+    // ⚠️ 처음에는 「줄 없음 → 내장 기본값」 고리를 지키려고 썼는데, **적대적 검증에서 그 근거가
+    // 뒤집혔다**: 좁은 뮤테이션(absent 일 때만 값을 뒤집기)을 넣어도 기존 keep-alive test 스무 개
+    // 넘게가 먼저 잡는다 — 그것들 대부분이 **줄 없는 홈**에서 돌기 때문이다. 그 고리는 이미 촘촘하다.
+    //
+    // 남는 고유 기여는 ③ 하나다. `Config{}` 의 기본값을 **못 박는 test 가 하나도 없어서**, 그 값을
+    // 뒤집어도 test diff 에는 아무것도 안 남는다. 기본값 전환은 사용자 전원의 Quit 의미를 바꾸는
+    // 일인데(detach ↔ terminate) 그것이 **조용히** 일어날 수 있다는 뜻이다. 그 자리를 만든다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    // keep-alive 줄이 **없는** 설정. 다른 키를 하나 두어 「파일이 비어서」가 아니라 「그 줄만 없어서」임을
+    // 분명히 한다 — 빈 파일이면 파서가 다른 갈래를 탈 수 있고, 그러면 이 test 가 다른 것을 보게 된다.
+    test_config_text = "font.size = 14\n";
+    defer test_config_text = "";
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // ── ① **정말 「줄 없음」 경로를 탔는가.** 이것을 안 보면 아래 둘이 우연히 맞을 수 있다 —
+    //    explicit 로 서 있어도 값이 같으면 통과해 버린다.
+    try std.testing.expect(session.loaded_config.session_keep_alive_provenance == .absent);
+
+    // ── ② 줄이 없으면 값은 내장 기본값이다. **이 단언은 중복이다**(위 ⚠️ — 기존 test 들이 이미
+    //    지킨다). 지우지 않는 이유는 이 test 를 읽는 사람에게 ③ 이 **무엇에 대한 값인지** 를 그
+    //    자리에서 보여 주기 때문이다. 검증이 아니라 **문서**로 둔다.
+    try std.testing.expectEqual(
+        (config_mod.Config{}).session.keep_alive_after_quit,
+        app_keep_alive_after_quit,
+    );
+
+    // ── ③ **이 test 의 요점.** 지금 기본값이 무엇인지 못 박는다. 뒤집는 커밋은 이 한 줄을 반드시
+    //    함께 고쳐야 하므로 전환이 **리뷰 diff 에 보인다** — 조용한 뒤집기를 막는 유일한 자리다.
+    try std.testing.expect((config_mod.Config{}).session.keep_alive_after_quit == true);
 }
 
 test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는다 (IG-원격)" {

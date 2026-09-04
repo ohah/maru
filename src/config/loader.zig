@@ -1263,18 +1263,30 @@ test "parse: window.blur — 반경 파싱, 미설정 시 0(끔)" {
     try std.testing.expectEqual(@as(u32, 0), q.config.window_blur);
 }
 
-test "parse: session.keep-alive-after-quit — 영속 세션 opt-in, 미설정 시 false(현행 in-process)" {
-    // P3-e3: 영속 터미널 세션 게이트. true면 새 터미널을 host(maru-sessiond)에 생성한다(§10). 기본 false(현행 동작 유지).
+test "parse: session.keep-alive-after-quit — 명시값이 이기고, 미설정은 내장 기본값이다" {
+    // P3-e3: 영속 터미널 세션 게이트. true면 새 터미널을 host(maru-sessiond)에 생성한다(§10).
     var p = try parse(std.testing.allocator,
         \\session.keep-alive-after-quit = true
     );
     defer p.deinit();
     try std.testing.expect(p.config.session.keep_alive_after_quit);
 
-    // 미설정이면 기본 false(현행 in-process — GUI 종료 시 터미널도 종료).
+    // **명시 false 도 이긴다.** 기본값이 `true` 로 바뀌었으므로(2026-09-03) 이쪽이 「기본값과 다른 값을
+    // 사용자가 고른다」를 재는 자리다 — 예전에는 기본값과 같아 아무것도 안 재고 있었다.
+    var off = try parse(std.testing.allocator,
+        \\session.keep-alive-after-quit = false
+    );
+    defer off.deinit();
+    try std.testing.expect(!off.config.session.keep_alive_after_quit);
+
+    // 미설정이면 **내장 기본값**이다. 그 값이 무엇인지는 여기서 안 박는다 — 기본값을 바꾸는 커밋이
+    // 고쳐야 할 곳을 늘리지 않으려는 것이고, 이 단언이 지키는 것은 **고리**(줄 없음 → `Config{}`)다.
     var q = try parse(std.testing.allocator, "font.size = 14");
     defer q.deinit();
-    try std.testing.expect(!q.config.session.keep_alive_after_quit);
+    try std.testing.expectEqual(
+        (theme.Config{}).session.keep_alive_after_quit,
+        q.config.session.keep_alive_after_quit,
+    );
 }
 
 test "Session default G1 config provenance follows the last applied syntactic occurrence" {

@@ -41,7 +41,13 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     // G2 deliberately opens these projections in app_session/settings, plus the read-only v181
     // release baseline classifier. Exact counts include same-file tests; another product reader
     // must update this SSOT boundary rather than silently becoming another policy owner.
-    try std.testing.expectEqual(@as(usize, 7), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
+    //
+    // 8th occurrence (2026-09-04): the G3 default-flip test asserts the provenance is `.absent`
+    // for a config with no `session.keep-alive-after-quit` line. That is a **test assertion, not a
+    // policy owner** — it reads the projection to prove the "no line -> built-in default" link that
+    // the flip relies on. Kept counted here on purpose: this boundary is what forces the next
+    // reader to come here and say which of the two it is.
+    try std.testing.expectEqual(@as(usize, 8), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
     try std.testing.expectEqual(@as(usize, 20), try countOutsideConfig(allocator, "file_provenance"));
 }
 

@@ -295,12 +295,15 @@ test "source exposes a real bounded executor and no ambient environment lookup" 
     defer std.testing.allocator.free(source);
     const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", std.testing.allocator, .limited(2 * 1024 * 1024));
     defer std.testing.allocator.free(build);
+    const runner_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_baseline_runner.zig", std.testing.allocator, .limited(128 * 1024));
+    defer std.testing.allocator.free(runner_source);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn run(") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "runCaptureEnvironmentStdoutDirectory") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "getenv") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "zig_executable") == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, build, "src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, build, ".name = \"release_adapter_candidate_baseline_child\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, build, ".name = \"release_adapter_candidate_baseline_child\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, runner_source, "@import(\"release_adapter_candidate_baseline_child\")"));
 }
 
 test "toolchain drift after child execution fails closed" {

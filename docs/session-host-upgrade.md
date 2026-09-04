@@ -2026,8 +2026,19 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   drift와 workspace 밖 삭제는 child 실행 전에 거부한다. focused gate
   `test-session-host-release-adapter-candidate-baseline-runner`는 production-type concrete composition의 순서, 동일 deadline,
   성공 owner 보존, 각 fail-index의 역순 cleanup과 retry를 Debug·ReleaseFast에서 검증한다. 실제 filesystem 권위·publication은 이
-  runner가 그대로 호출하는 app/workspace/child/evidence 집중 gate가 각각 검증한다. candidate app/workspace
-  자체 생성, artifact attestation, manifest/draft publication과 live release workflow 호출은 후속 wiring이다.
+  runner가 그대로 호출하는 app/workspace/child/evidence 집중 gate가 각각 검증한다. candidate app의 제품 생성 진입점
+  `bindCandidateUntil`은 두 bundle executable을 no-follow held fd로 먼저 고정하고, `/usr/bin/codesign --verify --strict`와
+  `/usr/bin/codesign -d --verbose=4`를 closed environment의 bounded process로 각각 실행한다. 각 child 전후에는 상위 release phase의
+  같은 final-address `Deadline`에서 fresh remaining을 얻고 candidate product와 두 held inode를 다시 검증한다. main과 CLI의
+  `TeamIdentifier`는 각각 정확히 하나인 유효한 10자리 값이어야 하며 `CandidateProduct`의 Apple observation에서 유도한 exact
+  Team ID와 같을 때만 `CandidateApp`을 게시한다. 내부 실행파일의 identifier가 서로 다르므로 각 designated requirement digest를
+  앱 번들 digest와 같다고 요구하지 않는다. caller는 signer 값이나 성공 bool, command path·argv·timeout을
+  제출하지 않는다. copied/pre-owned result, result/path/deadline alias, symlink·hardlink, executable 또는 candidate drift,
+  timeout·output cap·strict signature/team identity failure는 app authority publication 0이고 열린 fd를 모두 닫는다. focused gate
+  `test-session-host-release-adapter-candidate-baseline-app`은 실제 executable filesystem과 injected signer observer 및 제품이 직접
+  소비하는 command plan으로 exact command/environment/order/deadline, 각 drift와 fail-index를 Debug·ReleaseFast에서 검증한다. workspace와 app을 만들고
+  runner까지 하나의 owner로 묶는 transaction, artifact attestation, manifest/draft publication과 live release workflow 호출은
+  후속 wiring이다.
 
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한

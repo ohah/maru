@@ -48,6 +48,13 @@ pub const TelemetrySnapshot = struct {
 pub const ClientCloseReason = enum {
     /// 클라이언트가 스스로 연결을 닫았다(GUI 종료, CLI 명령 완료). 정상.
     client_closing,
+    /// **소켓이 끊겨** host 가 그것을 감지하고 닫았다. GUI 는 살아 있는데 연결만 사라진 경우다.
+    ///
+    /// 전에는 이것이 `client_closing` 과 한 사유로 뭉쳐 있었고, 그 사유가 `isExpected()` 라 host 는
+    /// 아무것도 남기지 않았다. 그래서 GUI 가 `connection_eof` incident 를 남긴 사건을 host 쪽에서
+    /// 대조할 수단이 없었다 — **양쪽이 서로 «상대가 닫았다»고 기록하는** 모양이 되어 원인을 좁히지
+    /// 못했다(2026-09-04 실측, GUI last_success_request_id=136440 뒤 끊김).
+    peer_broken,
     /// host 자신이 내려간다. 정상.
     host_shutdown,
     /// 메모리 압박으로 이 연결의 화면 큐를 회수하다 닫았다. 사용자에게는 **갑작스러운 세션 단절**로 보인다.
@@ -60,7 +67,7 @@ pub const ClientCloseReason = enum {
     fn isExpected(self: ClientCloseReason) bool {
         return switch (self) {
             .client_closing, .host_shutdown, .testing => true,
-            .screen_pressure, .observer_offender => false,
+            .peer_broken, .screen_pressure, .observer_offender => false,
         };
     }
 };
@@ -315,8 +322,11 @@ pub const Owner = struct {
         const client = self.clients[slot_index] orelse return .listener_broken;
         if (read_ready[slot_index]) client.readReady(now_ns);
         if (!client.isClosing() and write_ready[slot_index]) client.writeReady(now_ns);
-        if (!client.isClosing() and peer_broken[slot_index] and !client.wantsWrite())
+        var closed_by_peer = false;
+        if (!client.isClosing() and peer_broken[slot_index] and !client.wantsWrite()) {
             client.peerBroken();
+            closed_by_peer = true;
+        }
         if (!client.isClosing() and self.producer_remaining[slot_index] != 0) {
             self.producer_remaining[slot_index] -= 1;
             client.tick(now_ns);
@@ -324,7 +334,7 @@ pub const Owner = struct {
         progressed = true;
         if (client.isClosing()) {
             const marker = client.takeArmedUpgrade();
-            self.destroyClient(slot_index, .client_closing);
+            self.destroyClient(slot_index, if (closed_by_peer) .peer_broken else .client_closing);
             if (marker) |armed| {
                 self.destroyAll();
                 if (!self.upgradeTeardownDrained()) {
@@ -419,17 +429,20 @@ pub const Owner = struct {
     /// 보이는데, 그 값만으로는 정상 종료인지 backpressure로 희생된 것인지 구분할 수 없다 — 실제로 "host는 살아
     /// 있는데 그 연결만 끊겼다"를 만났을 때 이유를 알 수단이 없어 추적이 막혔다. host stderr는
     /// `redirectStderrToHostLog`가 `<session_dir>/host-<id>.log`로 돌린다.
-    fn logClientClosed(index: usize, reason: ClientCloseReason) void {
+    /// `pending_out` 은 이 연결로 아직 밀어내지 못한 producer turn 수다. 0 이 아닌 채 끊겼다면 host 가
+    /// **보낼 것을 들고 있는 상태**에서 연결이 사라진 것이라, GUI 가 남긴 `pending_request_count` 와 짝을
+    /// 맞춰 읽을 수 있다. `clients` 는 남은 연결 수로, 한 연결만 끊겼는지 전부 무너졌는지를 가른다.
+    fn logClientClosed(self: *const Owner, index: usize, reason: ClientCloseReason) void {
         if (builtin.is_test or reason.isExpected()) return;
         host_log.line(
-            "session host closed client connection: slot={d} reason={s}",
-            .{ index, @tagName(reason) },
+            "session host closed client connection: slot={d} reason={s} pending_out={d} clients={d}",
+            .{ index, @tagName(reason), self.producer_remaining[index], self.activeCount() },
         );
     }
 
     fn destroyClient(self: *Owner, index: usize, reason: ClientCloseReason) void {
         const client = self.clients[index] orelse return;
-        logClientClosed(index, reason);
+        self.logClientClosed(index, reason);
         self.clients[index] = null;
         self.producer_remaining[index] = 0;
         client.destroy();

@@ -429,13 +429,15 @@ pub const pty_reader_groups = [_]Group{
             "start_aborted",
             "start_gate_reached",
             "output_byte_counter",
+            "sync_held_buf",
+            "sync_bypass",
         },
-        .why = "all pointers, synchronization context, processing latch, and diagnostic byte counter are rebuilt after the quiesced runtime graph exists",
+        .why = "all pointers, synchronization context, processing latch, diagnostic byte counter, and the sync(2026) hold scratch are rebuilt after the quiesced runtime graph exists",
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{ "thread", "transfer_out", "transfer_out_head" },
-        .why = "U2 non-destructive pause joins the old thread and proves its owned response transfer buffer is empty before encode",
+        .fields = &.{ "thread", "transfer_out", "transfer_out_head", "sync_held_len", "sync_held_since_ns" },
+        .why = "U2 non-destructive pause joins the old thread and proves its owned response transfer buffer is empty before encode; the sync(2026) frame hold is flushed at the same safe point so held bytes are never dropped across the handoff",
     },
 };
 

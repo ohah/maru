@@ -2608,6 +2608,33 @@ single deadline과 final-address/copy/alias 차단을 Debug·ReleaseFast에서 �
 각 leaf의 기존 gate가 계속 소유하며, 실제 GitHub child 성공도 각 leaf의 product gate가 검증한다. 이 단계는 executable bootstrap/argument parser와
 `.github/workflows/release.yml` 호출 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.39 candidate publication prerequisite transaction 권위
+
+candidate publication에 필요한 typed graph를 workflow shell이 단계별 성공 boolean이나 scalar로 조립하지 않는다.
+`release_adapter_candidate_prerequisite_phase.zig`의 caller-owned final-address `Preparation` lifecycle 하나가 같은 release phase
+`Deadline` 아래 candidate artifact attestation→draft creation→`CandidateFiles` 결속→Apple product 관측→source tree 관측→
+candidate evidence identity 조립→compatibility probe를 정확히 이 순서로 한 번씩 실행한다. caller는 중간 owner, draft/release ID,
+candidate digest, source tree, signing observation, compatibility 값이나 단계별 deadline을 제출하거나 일부 단계만 재호출하지 않는다.
+
+preflight는 pristine lifecycle과 borrowed deadline identity를 첫 leaf 전에 검증한다. 각 leaf 앞뒤에는 production owner가 candidate
+pathname, pinned CLI, protected context와 지금까지 생긴 typed owner graph를 다시 검증하고 같은 deadline의 fresh remaining을
+확인한다. transaction은 새 expiry를 만들거나 이전 remaining을 다음 child budget으로 재사용하지 않는다. `CandidateFiles`처럼
+allocation 없는 결속 단계도 전후 authority fence에서 제외하지 않는다. 모든 단계가 끝난 뒤 마지막 authority/deadline fence를
+통과한 경우에만 complete prerequisite owner를 게시한다.
+
+draft mutation이 시작되기 전 실패는 열린 local owner를 compatibility→identity→source→product→files→attestation 역순으로
+best-effort cleanup한다. draft child가 시작된 뒤에는 실패가 remote state를 `.empty`로 되돌리거나 draft 생성 자동 retry·삭제를
+허용하지 않는다. exact draft ID를 아는 `cleanup_required`, 결과를 모르는 `remote_state_unknown`, ready draft 뒤 후속 local 실패를
+각각 terminal audit state로 보존한다. 이때 이미 열린 local owner는 audit graph를 재검증하는 데 필요한 동안 보존하며 ordinary
+`retryCleanup` 대상으로 축소하지 않는다. 성공 owner의 명시적 cleanup은 local capability를 역순으로 닫되 remote draft를
+삭제하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-prerequisite-phase`는 preflight 선행, exact step order와 same-deadline
+identity, 각 leaf fail-index, mutation 전 reverse cleanup과 partial-cleanup retry, draft의 unknown/known/ready terminal 보존,
+각 authority fence와 최종 publication을 Debug·ReleaseFast에서 검증한다. concrete leaf storage·alias matrix와 실제 production
+callsite는 후속 product wiring gate가 소유한다. 이 transaction은 baseline/upgrade evidence 실행, candidate publication,
+executable bootstrap 배선, live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

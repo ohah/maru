@@ -2699,6 +2699,38 @@ cleanup retry owner는 deadline pointer를 보존하지 않으며, 후속 상위
 검증한다. 이 단계는 세 phase의 순서를 소유하는 상위 candidate release transaction, baseline/upgrade profile 선택, executable bootstrap,
 live release workflow 또는 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.42 candidate release transaction 권위
+
+candidate release의 최상위 순서는 workflow shell이나 세 production owner 호출 관례가 아니라
+`release_adapter_candidate_release_phase.zig`의 caller-owned final-address `Release` lifecycle 하나가 소유한다. 이 owner는
+candidate prerequisite→baseline-A evidence preparation→candidate publication을 정확히 이 순서로 한 번씩 실행하며, 세 단계에
+caller가 시작한 같은 absolute monotonic `Deadline` pointer를 전달한다. caller는 단계별 duration·새 expiry·성공 boolean이나 중간
+cleanup 대상을 제출하지 않고, transaction은 이전 `remaining` 값을 다음 단계의 budget으로 재사용하지 않는다.
+
+preflight는 pristine lifecycle과 borrowed deadline identity를 첫 단계 전에 검증한다. 각 단계 앞뒤에는 production owner가 protected
+context, candidate pathname, pinned CLI와 지금까지 게시된 concrete authority graph를 다시 검증하고 같은 deadline의 fresh remaining을
+확인해야 한다. prerequisite가 complete를 게시한 뒤에만 baseline을 열고, baseline이 held evidence를 포함한 complete output을 게시한
+뒤에만 publication을 연다. 세 단계와 마지막 authority/deadline fence를 모두 통과한 경우에만 complete release를 게시한다.
+
+prerequisite의 draft mutation 전 실패가 자기 local owner를 전량 정리했다면 `Release`도 pristine으로 돌아간다. 그 정리 일부가 실패한
+경우에만 exact prerequisite owner를 `retryCleanup` 대상으로 보존한다. prerequisite가 `remote_state_unknown|cleanup_required`가 됐거나
+ready draft를 게시한 뒤에는 baseline·publication의 어떤 실패도 자동 cleanup, draft 삭제, 단계 재호출 또는 기존 release 재사용으로
+성공을 합성하지 않는다. 대신 실패 단계와 성공 또는 terminal 상태인 세 concrete owner를 final-address `Release` graph에 보존하고
+`AuditRequired`로 끝낸다. publication 자체의 attachment/publication/post-publish terminal state도 그대로 보존한다.
+
+complete release의 명시적 cleanup은 publication→baseline→prerequisite 역순으로 local capability를 닫되 remote release, asset 또는
+draft를 삭제하지 않는다. cleanup 일부가 실패하면 그 owner에서 멈춰 아직 live인 exact owner와 그 owner가 참조하는 앞 단계 dependency를
+같은 역순의 `retryCleanup` 대상으로 남긴다. prerequisite 실패가 pristine·cleanup-required·audit-required 어느 상태로도 분류되지 않으면
+권위를 버리지 않고 terminal audit 상태로 fail-close한다. audit-required
+graph는 ordinary cleanup/retry 대상이 아니며 사람이 원격 상태를 감사하기 전 같은 release owner를 다시 사용할 수 없다. 성공·실패
+반환 뒤 transaction은 deadline pointer를 보존하거나 닫지 않는다. deadline 소유와 종료는 후속 production owner 하나가 담당한다.
+
+focused gate `test-session-host-release-adapter-candidate-release-phase`는 exact 단계 순서, same-deadline identity, preflight와 각 authority
+fence, prerequisite의 mutation 전 cleanup retry, draft 이후 단계별 audit 보존, complete release publication, 성공 owner의 역순 cleanup과
+partial-cleanup retry, copied/pre-owned lifecycle 차단을 Debug·ReleaseFast에서 검증한다. concrete storage·alias matrix와 세 production
+`runBorrowingDeadline` callsite, executable bootstrap, baseline/upgrade profile 선택, live release workflow와 frozen signed U5 제품 E2E는
+후속 production wiring gate가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

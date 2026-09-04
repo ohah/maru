@@ -175,6 +175,38 @@ test "production source has one borrowed runner call and no owned runner call" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "runner.runBorrowingDeadline("));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "runner.run("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "deadline_mod.start("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn runBorrowingDeadline("));
+}
+
+test "borrowed baseline failure cleans local work and preserves caller deadline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const root = try absolute(&tmp, "borrowed-baseline", &root_storage);
+    var files: product.CandidateFiles = .{};
+    var candidate: product.CandidateProduct = .{};
+    var identity: product.CandidateEvidenceIdentity = .{};
+    var source: product.SourceTreeAuthority = .{};
+    var toolchain: product.ZigToolchainAuthority = .{};
+    var execution: product.Execution = .{};
+    var deadline: product.Deadline = .{ .started_ns = 0, .expires_ns = std.math.maxInt(i128) };
+    deadline.owner = &deadline;
+    const started = deadline.started_ns;
+    const expires = deadline.expires_ns;
+    try std.testing.expectError(error.InvalidOwner, product.runBorrowingDeadline(
+        std.testing.io,
+        std.testing.allocator,
+        inputs(&files, &candidate, &identity, &source, &toolchain),
+        root,
+        &deadline,
+        &execution,
+    ));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, root, .{}));
+    try std.testing.expect(deadline.owner == &deadline);
+    try std.testing.expectEqual(started, deadline.started_ns);
+    try std.testing.expectEqual(expires, deadline.expires_ns);
+    try std.testing.expect(!execution.hasBorrowedInputs());
+    try std.testing.expect(execution.owner == null);
 }
 
 test "workspace cleanup failure retains only production retry state" {

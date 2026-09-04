@@ -12664,7 +12664,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
-        run_release_adapter_contract_tests.addArg("--maru-expect-tests=9");
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=11");
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
         session_host_step.dependOn(&run_release_adapter_contract_tests.step);
@@ -14283,7 +14283,7 @@ pub fn build(b: *std.Build) void {
             const release_validator_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/validate_release_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_token_environment", .module = token_environment_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_pre_publish_product", .module = pre_publish_product_mod }, .{ .name = "release_adapter_verify_predecessor_product", .module = verify_predecessor_product_mod } } });
             const release_validator_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_validator_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_validator", .module = release_validator_mod }} }) });
             const run_release_validator_tests = b.addRunArtifact(release_validator_tests);
-            run_release_validator_tests.addArg("--maru-expect-tests=4");
+            run_release_validator_tests.addArg("--maru-expect-tests=5");
             run_release_validator_tests.setCwd(b.path("."));
             session_host_release_validator_executable_step.dependOn(&run_release_validator_tests.step);
             session_host_step.dependOn(&run_release_validator_tests.step);

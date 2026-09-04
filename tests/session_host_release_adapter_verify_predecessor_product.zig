@@ -48,6 +48,14 @@ test "invalid bootstrap and copied execution reach no phase owner" {
     bootstrap.context = context();
     bootstrap.owner = &bootstrap;
     try std.testing.expectError(error.InvalidCommand, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 100, .{}, &execution));
+
+    bootstrap.command = .{ .publish_candidate = candidateCommand() };
+    try std.testing.expectError(error.InvalidCommand, product.run(std.testing.io, std.testing.allocator, &bootstrap, "token", 100, .{}, &execution));
+    try std.testing.expect(execution.owner == null);
+}
+
+fn candidateCommand() bootstrap_mod.PublishCandidate {
+    return .{ .repo = "ohah/maru", .tag = "v1.2.3", .test_uuid = "123e4567-e89b-42d3-a456-426614174000", .dmg = "/tmp/dmg", .frozen_executable = "/tmp/exe", .dmg_work = "/tmp/dmg-work", .baseline_workspace = "/tmp/baseline", .app_main_executable = "/tmp/app-main", .app_cli_executable = "/tmp/app-cli", .manifest = "/tmp/Maru-1.2.3-session-host-release.json", .source_root = "/tmp/source", .zig = "/tmp/zig", .zig_size = 123, .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
 }
 
 test "token buffer and local candidate failures leave no workspace or borrowed authority" {

@@ -188,3 +188,26 @@ test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본
     while (it.next()) |_| locales += 1;
     try std.testing.expectEqual(@as(usize, 2), locales);
 }
+
+test "감시자는 PATH 처방과 «같은» 굳히기 목록을 받는다" {
+    const allocator = std.testing.allocator;
+    const up = try read(allocator, "src/platform/macos/ssh_upload.zig", 1024 * 1024);
+    defer allocator.free(up);
+
+    // ⚠️ **PATH 처방을 지난다**(RW7a). 감시자 자체는 절대 경로로 부르지만 폴링 갈래가 저쪽에서
+    // `git` 을 찾아야 한다 — 비대화형 ssh 의 PATH 는 `/usr/bin:/bin:…` 뿐이라 Homebrew git 이 안 보인다.
+    const script = try bodyOf(up, "const watch_script = ", ";\n", 512);
+    try std.testing.expect(std.mem.indexOf(u8, script, "remote_shell.path_assign") != null);
+    // 인자가 여럿이다 — 루트 하나만 넘기던 `"$1"` 로는 앞머리를 못 싣는다.
+    try std.testing.expect(std.mem.indexOf(u8, script, "$@") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "$1") == null);
+
+    // ⚠️ **굳히기 목록을 두 벌로 두지 않는다**(RW7b). 감시자가 저쪽에서 git 을 돌리는데 그 목록이
+    // 갈리면 «감시자만» 문이 열린 채 돈다. 앱이 L2 의 단일 출처를 그대로 실어 보내야 한다.
+    const spawn = try bodyOf(up, "pub fn spawnRemoteWatch(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, spawn, "git_command.config_overrides") != null);
+    const spawn_code = try stripComments(allocator, spawn);
+    defer allocator.free(spawn_code);
+    // 목록을 손으로 다시 적지 않는다 — 적었다면 그 문자열이 여기 보인다.
+    try std.testing.expect(std.mem.indexOf(u8, spawn_code, "core.hooksPath") == null);
+}

@@ -13798,6 +13798,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-publication-phase",
         "Validate candidate publication transaction ordering and terminal audit state",
     );
+    const session_host_release_adapter_candidate_prerequisite_phase_step = b.step(
+        "test-session-host-release-adapter-candidate-prerequisite-phase",
+        "Validate candidate prerequisite ordering and terminal draft state",
+    );
     const session_host_release_adapter_candidate_publication_product_step = b.step(
         "test-session-host-release-adapter-candidate-publication-product",
         "Validate concrete candidate publication ownership and wiring",
@@ -14082,6 +14086,14 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_candidate_publication_phase_tests.step);
             test_step.dependOn(&run_candidate_publication_phase_tests.step);
             macos_only_test_step.dependOn(&run_candidate_publication_phase_tests.step);
+            const candidate_prerequisite_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_prerequisite_phase.zig"), .target = target, .optimize = composition_optimize });
+            const candidate_prerequisite_phase_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_prerequisite_phase.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_candidate_prerequisite_phase", .module = candidate_prerequisite_phase_mod }} }) });
+            const run_candidate_prerequisite_phase_tests = b.addRunArtifact(candidate_prerequisite_phase_tests);
+            run_candidate_prerequisite_phase_tests.addArg("--maru-expect-tests=8");
+            session_host_release_adapter_candidate_prerequisite_phase_step.dependOn(&run_candidate_prerequisite_phase_tests.step);
+            session_host_step.dependOn(&run_candidate_prerequisite_phase_tests.step);
+            test_step.dependOn(&run_candidate_prerequisite_phase_tests.step);
+            macos_only_test_step.dependOn(&run_candidate_prerequisite_phase_tests.step);
             const candidate_upgrade_evidence_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_evidence_files", .module = candidate_evidence_files_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod }, .{ .name = "release_adapter_candidate_evidence_identity", .module = candidate_evidence_identity_mod }, .{ .name = "release_adapter_candidate_baseline_evidence", .module = candidate_baseline_evidence_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod }, .{ .name = "release_adapter_predecessor_evidence_identity", .module = predecessor_evidence_identity_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const candidate_upgrade_evidence_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_evidence.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_candidate_upgrade_evidence", .module = candidate_upgrade_evidence_mod } } }) });
             const run_candidate_upgrade_evidence_tests = b.addRunArtifact(candidate_upgrade_evidence_tests);

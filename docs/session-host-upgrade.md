@@ -2061,6 +2061,32 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   leaf 의미를 복제하거나 artifact attestation, manifest/draft publication, live release workflow 호출 또는 frozen U5 제품 E2E를
   완료했다고 주장하지 않는다.
 
+  baseline 준비 transaction의 production owner는
+  `src/platform/macos/session_host/release_adapter_candidate_baseline_preparation_product.zig`의 caller-owned final-address
+  `Execution`이다. trusted context와 candidate identity/files/product/source, product·app 경로, official release Zig toolchain과 held
+  source cwd, caller가 지정한 absent workspace root, positive budget만 입력으로 받는다. caller는 workspace/app/runner owner, deadline,
+  leaf·evidence pathname, UUID·digest·signer 또는 gate 성공 bool을 제출하지 않는다. production preflight는 `Execution`과 그 내부
+  transaction/deadline/workspace/app/runner storage, 모든 borrowed authority, path storage가 겹치지 않고 source fd가 유효한지 deadline
+  시작과 filesystem 접근 전에 검사한다.
+
+  concrete steps는 같은 `Execution` 안에서 deadline을 시작하고 workspace를 준비한 뒤, `bindCandidateUntil`로 app main/CLI를 같은
+  deadline에 결속한다. 이어 기존 baseline runner의 `runBorrowingDeadline`을 호출한다. 이 진입점은 새 deadline을 만들지 않으며,
+  caller deadline의 final-address identity를 실행 내내 보존하고 기존 child 순서·evidence publication·cleanup 계약을 그대로 사용한다.
+  runner 성공 뒤 candidate identity/files/product/source, app, workspace, toolchain과 deadline을 다시 검증하고 deadline을 닫은 다음에만
+  complete owner를 게시한다. 성공 owner의 cleanup과 실패 retry는 generic transaction이 정한 runner→app→workspace→deadline 순서를
+  production owner에 직접 적용하며, 정리된 owner를 재생성하거나 workspace 밖 pathname을 삭제하지 않는다. 실패 즉시 borrowed input을
+  지우고 cleanup failure 때만 아직 live인 exact nested owner와 cleanup에 필요한 io/allocator를 보존한다. runner cleanup이 실패하면
+  그 retry가 workspace capability를 계속 사용하므로 workspace cleanup도 dependency-live로 실패시켜 둘을 함께 보존하고, runner가 먼저
+  정리된 재시도에서만 workspace를 제거한다. owner가 null이어도 nested fd·deadline timestamp·attempt state가 남은 dirty execution은
+  pristine으로 승격하지 않는다.
+
+  focused gate `test-session-host-release-adapter-candidate-baseline-preparation-product`는 invalid/copied/pre-owned execution과 concrete
+  object/path alias의 side effect 0, exact production type wiring, runner의 borrowed-deadline identity와 own-deadline 생성 0, authority
+  drift, 성공 owner 및 cleanup, 각 production step failure의 reverse cleanup, cleanup-failure retry state와 sensitive borrow scrubbing을
+  Debug·ReleaseFast로 검증한다. 실제 codesign/filesystem child 성공은 이 owner가 직접 호출하는 app/workspace/runner 집중 gate가 각각
+  검증한다. artifact attestation, manifest authoring·draft attach/publish, live release workflow 호출과 frozen U5 제품 E2E는 아직 후속
+  wiring이다.
+
   upgrade-B evidence의 trusted workflow 조립 owner는
   `src/platform/macos/session_host/release_adapter_candidate_upgrade_evidence.zig`의 단일 진입점이다. 입력은 baseline과 동일한
   final-address `CandidateEvidenceIdentity` 및 backing candidate/product/source authority, final-address

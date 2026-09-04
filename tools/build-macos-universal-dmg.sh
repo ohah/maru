@@ -142,8 +142,15 @@ xcrun stapler validate "$candidate_staged/Maru.app"
 xcrun stapler validate "$candidate_staged/Maru-$version-universal.dmg"
 spctl -a -t open --context context:primary-signature -v "$candidate_staged/Maru-$version-universal.dmg"
 candidate="dist/session-host-candidate-$version"
-test ! -e "$candidate"
+# 이전 실행이 남긴 산출물은 **걷어내고** 새로 옮긴다. 예전에는 `test ! -e` 로 거부했는데, 그러면 같은
+# 버전을 두 번 빌드하는 순간 공증·staple·`spctl` 을 모두 통과한 뒤 이 한 줄에서 태스크가 죽는다.
+# dmg 는 이미 `dist/` 에 놓인 채라 산출물은 멀쩡한데 태스크만 실패로 끝나, 사람이 매번 손으로 지운 뒤
+# 40 분을 다시 써야 했다(2026-09-04·09-05 연속 실측). 재실행 가능성은 기억에 맡길 일이 아니다.
+#
+# 심링크는 그대로 거부한다 — 경로를 바꿔치기해 저장소 밖을 지우는 것을 막는다. 실패 경로가 이미 같은
+# `rm -rf --` 를 쓰므로 파괴 범위도 그와 동일하다.
 test ! -L "$candidate"
+rm -rf -- "$candidate"
 mv "$candidate_staged" "$candidate"
 if ! cmp "$candidate/Maru.app/Contents/MacOS/maru-macos-app" "$candidate/maru-session-host-$version" ||
     ! cmp "$out" "$candidate/Maru-$version-universal.dmg"

@@ -80,5 +80,9 @@ test "$(grep -F -c 'xcrun stapler validate "$candidate_staged/Maru-$version-univ
 # 떼어낸 main executable 에는 codesign 검증을 걸 수 없다 — 번들 밖에서는 `invalid resource directory` 로
 # 반드시 실패하므로 릴리스가 통째로 막힌다. 사본의 무결성은 번들 서명 검증과 아래 `cmp` 가 이미 보장한다.
 test "$(grep -F -c 'codesign --verify --strict "$candidate_staged/maru-session-host-' "$build_script")" = 0
+# 같은 버전을 두 번 빌드해도 마지막 이동이 막히면 안 된다. 이전 산출물을 만나 거부하던 검사가 있으면
+# 공증까지 끝난 릴리스가 그 한 줄에서 죽고, 사람이 손으로 지운 뒤 처음부터 다시 빌드해야 한다.
+test "$(grep -F -c 'test ! -e "$candidate"' "$build_script")" = 0
+test "$(grep -F -c 'rm -rf -- "$candidate"' "$build_script")" = 2
 
 echo 'macOS release candidate artifact contract: OK'

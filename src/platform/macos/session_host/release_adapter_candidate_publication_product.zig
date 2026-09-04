@@ -80,6 +80,12 @@ pub const Execution = struct {
             self.attached.owner == &self.attached and self.redownloaded.owner == &self.redownloaded and
             self.published.owner == &self.published and self.verified.owner == &self.verified and !self.hasBorrowed();
     }
+    pub fn revalidateSuccessfulOutputs(self: *const @This(), allocator: std.mem.Allocator, inputs_value: Inputs) !void {
+        if (!self.ownsSuccessfulOutputs()) return error.InvalidOwner;
+        const storage = try allocator.alloc(u8, phase.max_audit_bytes);
+        defer allocator.free(storage);
+        _ = try buildAudit(allocator, inputs_value, storage, &self.manifest);
+    }
     pub fn needsAudit(self: *const @This()) bool {
         return self.owner == self and self.transaction.needsAudit() and self.deadline.isPristineForComposition() and !self.hasBorrowed();
     }

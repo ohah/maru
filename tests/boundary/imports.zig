@@ -41,6 +41,8 @@ const ClientReflectionOwnerProof = struct {
     count: usize,
 };
 const client_reflection_owners = [_]ClientReflectionOwnerProof{
+    .{ .path = "src/platform/macos/session_host/release_adapter_candidate_release_driver.zig", .function = "pathsPristine", .expression = "@field(paths,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/release_adapter_candidate_release_driver.zig", .function = "pathsDigest", .expression = "@field(paths,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/pending_event_settlement.zig", .function = "hashPristineRecord", .expression = "@field(T{},field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/pending_event_settlement.zig", .function = "hashSemanticValue", .expression = "@field(value,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[1])", .count = 1 },

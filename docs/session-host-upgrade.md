@@ -2792,6 +2792,31 @@ source-root 포함 규칙, command/context 결속, context→runner→CLI pin �
 cleanup하고 pristine/cleanup-required 실패만 bounded cleanup하되 `needsAudit()` graph에 기존 범용 `settleProductFailure`를 호출해
 `CleanupFailed`로 덮어쓰지 않아야 한다. live release workflow 호출과 frozen signed U5 제품 E2E도 아직 완료하지 않는다.
 
+### 11.45 baseline-A trusted source-directory owner
+
+`release_adapter_source_directory_authority.zig`의 caller-owned final-address `SourceDirectory`는 §11.44의 final-address owned
+`Bootstrap` pointer 하나를 받고 그 안의 candidate command `source_root`, protected `Context`와 `RunnerAuthority`를 내부에서만 꺼내
+current process의 exact `GITHUB_WORKSPACE`에 결속한다. copied/unowned bootstrap과 다른 command는 environment나 filesystem 접근 전에 거부한다.
+두 pathname이 bytewise 같고 canonical absolute directory pathname이며 `context.source_commit`과 runner의 copied
+`workflow_sha`가 같은 lowercase 40-hex일 때만 filesystem을 연다. 이 결속은 trusted workflow가 실행 중인 checkout vnode와 reviewed
+source identity를 한 capability에 묶는 것이며, checkout의 모든 파일 내용이나 clean git worktree를 별도로 증명했다고 주장하지 않는다.
+
+owner는 root `/`부터 각 component를 `openat(O_RDONLY|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)`로 exact once 내려가고 각 중간 fd는 다음
+component를 연 직후 닫는다. 빈 component, `.`, `..`, trailing slash, NUL, symlink, non-directory와 경로 상한 초과는 publication 0으로
+거부하고 열린 임시 fd를 모두 닫는다. 최종 fd의 `fstat`은 directory·현재 effective UID를 요구하며 device/inode, pathname SHA-256,
+source commit과 final fd를 move-only owner에 보존한다. prepare 입력과 result storage가 alias하거나 result가 pre-owned/copied이면
+filesystem 접근 전에 실패한다.
+
+`value()`와 `revalidate()`는 final-address seal, held fd의 `F_GETFD`와 `FD_CLOEXEC`, directory type·UID·device/inode, source/context
+identity를 다시 검증한다. pathname을 다시 열어 권위를 갱신하지 않으므로 prepare 뒤 ancestor 또는 leaf pathname이 교체돼도 기존 held
+vnode만 반환한다. `deinit()`은 소유 fd를 exact once 닫고 storage를 pristine으로 지우며 copied owner는 닫지 못한다. raw fd getter는
+`SourceDirectory.Value`의 borrowed field로만 노출하고 별도 scalar publication은 금지한다.
+
+focused gate `test-session-host-release-adapter-source-directory-authority`는 Debug·ReleaseFast에서 exact environment name, trusted
+context/runner/path 결속, 실제 nested directory 성공, final-address/copy/pre-owned/alias 차단, malformed·relative·symlink·non-directory,
+foreign source/runner, pathname 교체 뒤 held inode 불변, `FD_CLOEXEC`, same-UID와 cleanup exact close를 검증한다. 이 owner는 아직
+candidate executable driver나 §11.43 product를 호출하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

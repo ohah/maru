@@ -8,6 +8,7 @@ const std = @import("std");
 // cli/ssh.zig를 직접 import하면 root와 maru 두 모듈에 중복되므로(빌드 에러) maru 모듈을 통해 쓴다.
 const ssh = @import("maru").cli.ssh;
 const remote_shell = @import("maru").session.remote_shell;
+const git_command = @import("maru").session.git_command; // 굳히기 목록의 단일 출처(RW7)
 const watch_install = @import("maru").session.remote_watch_install; // 원격 감시자 설치 계약(RW2a) — 경로 상수의 단일 출처 // 원격 셸 규율(PATH 처방 · `sh` 껍데기)
 
 /// 스트리머가 원격에서 도는 **스크립트**(상수). `$1`=원격 maru 경로, `$2`=상대 디렉터리.
@@ -143,7 +144,12 @@ pub const WatchStream = struct {
 /// 인용한 인자 안에서는 **확장되지 않는다** — 원격이 리터럴 `$HOME/...` 을 열려다 실패하고 증상은
 /// 「감시가 그냥 안 된다」뿐이다(에이전트 스트리머가 같은 함정에 한 번 빠졌다). 그래서 스크립트가
 /// 직접 적고, 그 문자열은 **설치 계약의 상수**를 그대로 이어 붙여 단일 출처를 지킨다.
-const watch_script = "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" \"$1\"";
+/// ⚠️ **PATH 처방을 지난다**(RW7a). 감시자 자체는 절대 경로로 부르므로 예전에는 PATH 가 필요 없었는데,
+/// 폴링 갈래(RW7b)가 저쪽에서 `git` 을 찾아야 한다 — 비대화형 ssh 의 PATH 는 `/usr/bin:/bin:…` 뿐이라
+/// Homebrew git·`$HOME/.local/bin` 이 안 보인다. 셸 대입은 `exec` 한 자식에게 그대로 전달된다(실측).
+///
+/// 인자가 여럿이라 `"$1"` 이 아니라 `"$@"` 다 — 루트 뒤에 **굳히기까지 끝난 git 앞머리**가 붙는다.
+const watch_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" \"$@\"";
 
 pub const Stream = struct {
     pid: std.c.pid_t,
@@ -321,7 +327,13 @@ pub fn spawnRemoteWatch(
     /// 감시할 저장소 루트(원격 절대 경로).
     root: []const u8,
 ) !WatchStream {
-    const cmd = try remote_shell.wrapAlloc(allocator, watch_script, &.{root});
+    // 루트 뒤에 **git 앞머리**를 실어 보낸다(RW7b). 감시자가 폴링할 때 그대로 쓴다 — 굳히기 목록을
+    // 두 벌로 두면 감시자만 문이 열린 채 돈다(단일 출처는 `git_command.config_overrides`).
+    var args: [git_command.config_overrides.len + 2][]const u8 = undefined;
+    args[0] = root;
+    args[1] = "git";
+    for (git_command.config_overrides, 0..) |token, i| args[i + 2] = token;
+    const cmd = try remote_shell.wrapAlloc(allocator, watch_script, &args);
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

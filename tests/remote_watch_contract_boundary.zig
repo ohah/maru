@@ -37,15 +37,45 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     const linux_body = try bodyOf(src, "fn watchLinux(", "\n}\n", 4096);
     try std.testing.expect(std.mem.indexOf(u8, linux_body, ".fd = 0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, linux_body, "fds[1].revents != 0") != null);
-    // ⚠️ **kqueue 갈래는 지금 「못 한다」고 말한다**(적대적 검증 2026-09-04 13 회차 — 실측). 디렉터리에
-    // 건 `EVFILT_VNODE` 는 **파일 내용 수정을 안 알린다**(만들기·지우기·이름 바꾸기만 온다). 그런데
-    // 화면은 살아 있는 것처럼 보여, 계획 §6 이 「최악」이라 못 박은 조용한 반쪽 감시가 된다.
-    // 되살릴 자리(`watchKqueueDirs`)는 남겨 두되 **stdin 결속은 그때도 지켜야 한다.**
-    const kq_body = try bodyOf(src, "fn watchKqueue(", "\n}\n", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, kq_body, "exit_unsupported") != null);
-    const kq_dirs = try bodyOf(src, "fn watchKqueueDirs(", "\n}\n", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, ".ident = 0,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, "EVFILT.READ") != null);
+    // ⚠️ **macOS·BSD 는 폴링이다**(RW7 — 13 회차 실측이 kqueue 를 버리게 했다). 그 갈래도 stdin 을
+    // 같은 대기에 넣어야 한다. 게다가 **주기를 기다리면 안 된다** — 고아 방지가 1 급 규율이라
+    // 채널이 끊기면 한 주기(5 초)가 아니라 한 tick 안에 끝나야 한다(실측 59 ms).
+    const poll_body = try bodyOf(src, "fn watchPoll(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, ".fd = 0,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "fds[0].revents != 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "poll_tick_ms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "poll_tick_ms: c_int = 250") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "poll_interval_ns: i128 = 5 * std.time.ns_per_s") != null);
+    // git 앞머리가 없으면 폴링을 못 한다 — 조용히 멈춰 있지 말고 말해야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "git_prefix.len == 0) return exitWith(exit_unsupported)") != null);
+    // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
+    // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
+    const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"status\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"for-each-ref\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads, "\"worktree\"") != null);
+    // ⚠️ 다이제스트는 **이 프로세스 안에서만** 산다 — 밖으로 나가는 것은 `change` 한 줄뿐이다(§10).
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "announce()") != null);
+
+    // ⚠️ **git 을 기다리는 동안에도 stdin 을 본다**(적대적 검증 2026-09-04 17 회차 — 실측). 폴링 갈래는
+    // 자식을 띄우므로 §5 의 고아 방지를 «새로» 지켜야 한다. 앞 판은 파이프를 블로킹으로 읽어서, git 이
+    // 멈추면 채널이 끊겨도 안 끝났다(고치기 전 바이너리로 재현 확인 · 고친 뒤 60 ms).
+    const run_body = try bodyOf(src, "fn hashCommand(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, run_body, ".fd = 0,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run_body, "channel_closed") != null);
+    // 병든 원격이 폴링을 영원히 붙잡지 못한다.
+    // ⚠️ **상수가 있는지가 아니라 «그 값으로 끊는지»를 본다.** 이름만 세면 `if (left_ms <= 0) break;`
+    // 를 죽여도 초록이다 — 실제로 그 반증이 통과했다(세 번째로 같은 함정을 밟았다).
+    try std.testing.expect(std.mem.indexOf(u8, run_body, "var left_ms: i64 = command_deadline_ms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run_body, "if (left_ms <= 0) break;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run_body, "left_ms -= poll_tick_ms;") != null);
+    // ⚠️ **자식의 stdin 은 우리 채널이 아니다.** git 이 그것을 읽으면 채널 바이트를 먹거나 프롬프트에
+    // 서고, 그러면 위 함정으로 되돌아간다.
+    try std.testing.expect(std.mem.indexOf(u8, run_body, "std.c.dup2(devnull, 0)") != null);
+    // 그리고 채널이 끊겼으면 **위에서도** 곧장 접어야 한다 — 여기서만 알고 삼키면 소용이 없다.
+    // **두 자리 모두** 접어야 한다 — 첫 다이제스트와 주기 안쪽. 하나만 세면 다른 쪽을 `continue` 로
+    // 바꿔도 초록이다(실제로 그 반증이 통과했다).
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, poll_body, ".channel_closed) return"));
 
     // ── ⑶ 한도 초과를 **말한다** — 조용히 일부만 감시하지 않는다(§RW5) ──────────────────────
     try std.testing.expect(std.mem.indexOf(u8, src, "exit_watch_limit") != null);
@@ -68,7 +98,6 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     // 무장은 **처음과 재무장 두 번** 일어난다 — 하나만 있으면 둘 중 한 경로가 빠진 것이다.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, linux_body, "armLinux(gpa, ifd, dirs.items)"));
     try std.testing.expect(std.mem.indexOf(u8, linux_body, "exit_watch_limit") != null);
-    try std.testing.expect(std.mem.indexOf(u8, kq_dirs, "exit_watch_limit") != null);
 
     // ── ⑷ 이벤트를 **해석하지 않는다**(계약 §2 — 파싱 계약을 두 벌로 만들지 않는다) ──────────
     //

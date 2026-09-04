@@ -18,6 +18,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
 /// 한도 초과로 **일부만 감시하게 된** 경우의 종료 코드. 호출자는 이 값을 보고 폴링으로 내려간다
 /// (계획 §RW5) — 반쪽만 감시하면서 최신인 척하는 것이 최악이라 **조용히 계속하지 않는다.**
 /// `--version` 이 내는 줄. 설치 쪽이 **이 문자열로** 「우리 것이고 이 판이다」를 확인한다 —
@@ -47,6 +49,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // 루트 뒤에 오는 것은 **굳히기까지 끝난 git 앞머리**다(RW7b — `ssh_upload.spawnRemoteWatch` 가
+    // `git_command.config_overrides` 를 그대로 실어 보낸다). 없으면 폴링을 못 한다.
+    var git_prefix: std.ArrayList([]const u8) = .empty;
+    defer git_prefix.deinit(init.gpa);
+    while (args.next()) |a| try git_prefix.append(init.gpa, a);
+
     var dirs: std.ArrayList([]u8) = .empty;
     defer {
         for (dirs.items) |d| init.gpa.free(d);
@@ -66,7 +74,9 @@ pub fn main(init: std.process.Init) !void {
 
     switch (builtin.os.tag) {
         .linux => try watchLinux(io, init.gpa, root, &dirs),
-        .macos, .freebsd, .netbsd, .openbsd, .dragonfly => try watchKqueue(init.gpa, dirs.items),
+        // **폴링이다**(RW7c). kqueue 는 파일 «편집» 을 안 알리고 디렉터리마다 fd 를 써서 한도에도
+        // 걸린다(§8.6 ①). 그래서 이 갈래는 저쪽에서 git 을 돌려 다이제스트를 비교한다.
+        .macos, .freebsd, .netbsd, .openbsd, .dragonfly => try watchPoll(init.gpa, root, git_prefix.items),
         else => return exitWith(exit_unsupported),
     }
 }
@@ -187,75 +197,165 @@ fn sawDirEvent(bytes: []const u8) bool {
     return false;
 }
 
-/// macOS·BSD: **못 한다고 말한다**(적대적 검증 2026-09-04 13 회차 — 실측).
+/// 폴링 주기. 짧을수록 화면이 빨라지고 저쪽 부하가 는다 — 5 초에서 한 번이 저쪽 코어의 1% 미만이다
+/// (실측: 다이제스트 한 번 0.04 s, 5 만 파일 저장소에서 0.11 s).
+const poll_interval_ns: i128 = 5 * std.time.ns_per_s;
+
+/// stdin 을 얼마나 자주 들여다보나. **고아 방지가 1 급 규율**이라(§5) 채널이 끊기면 한 주기가 아니라
+/// 이 시간 안에 끝나야 한다.
+const poll_tick_ms: c_int = 250;
+
+/// 다이제스트에 넣을 읽기들. **도크가 읽는 것과 같은 범위여야 한다**(§11.3) — `status` 하나만 보면
+/// 다른 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다. 셋을 합쳐도 0.04 s 다(실측).
+const digest_reads = [_][]const []const u8{
+    &.{ "status", "--porcelain=v2", "--branch", "--untracked-files=all" },
+    &.{ "for-each-ref", "--format=%(refname) %(objectname)" },
+    &.{ "worktree", "list", "--porcelain" },
+};
+
+/// 한 명령의 결과. **`channel_closed` 가 있는 이유**가 이 파일의 1 급 규율이다 — git 이 멈춰 있는
+/// 동안에도 채널이 끊기면 «즉시» 끝나야 한다(§5).
+const RunResult = enum { ok, failed, channel_closed };
+
+/// git 하나가 멈춰 있을 수 있는 최대 시간. 넘으면 죽이고 「못 읽었다」로 친다 — 큰 저장소의 `status`
+/// 도 0.1 s 대라(실측) 이 값에 걸릴 일은 병든 원격뿐이다.
+const command_deadline_ms: i64 = 30_000;
+
+/// 한 명령을 돌려 stdout 을 해시에 흘려 넣는다. **출력을 모아 두지 않는다** — 다이제스트만 필요하고,
+/// 큰 저장소의 `status` 출력을 통째로 들고 있을 이유가 없다.
 ///
-/// ⚠️ kqueue 의 `EVFILT_VNODE` 를 **디렉터리**에 걸면 「그 디렉터리 자체」의 변화만 온다. 실측(같은
-/// 디렉터리에서 하나씩):
+/// `std.process.Child` 를 안 쓴다 — 이 파일은 이미 raw posix 로 사는데(§5 의 `poll` 결속) 그 API 는
+/// 판마다 흔들려 왔다. fork/exec 는 여기서 예순 줄이고 흔들리지 않는다.
 ///
-/// | 동작 | 알림 |
-/// |---|---|
-/// | 파일 내용 수정(append) | **0** |
-/// | 파일 덮어쓰기 | **0** |
-/// | `touch`(mtime) · `chmod` | **0** |
-/// | 새 파일 · 삭제 · 이름 바꾸기 | 1 |
-///
-/// 즉 **가장 흔한 경우인 「파일을 고쳤다」가 안 온다.** 그런데 만들기·지우기는 오므로 화면은 「살아
-/// 있는」 것처럼 보인다 — 계획 §6 이 「최악」이라 못 박은 **조용히 반쪽만 감시**가 바로 이것이다.
-///
-/// **파일마다 fd 를 여는 길은 닫혀 있다.** maru3 하나가 파일 29,694 개인데(디렉터리는 4,595 개),
-/// 리눅스의 흔한 `ulimit -Sn` 은 1,024 다(§6 실측). 제대로 하려면 macOS 는 FSEvents 가 필요한데
-/// 그것은 CoreServices + run loop 라 이 작은 바이너리의 모양이 아니다 — **후속으로 남긴다.**
-///
-/// 그래서 지금은 `exit_unsupported` 다. RW5 가 다시 안 띄우고 RW6 이 사용자에게 말하며, 화면은
-/// 포커스·새로고침으로 돌아간다. **반쪽을 최신인 척하는 것보다 낫다.**
-fn watchKqueue(gpa: std.mem.Allocator, dirs: []const []u8) !void {
-    _ = gpa;
-    _ = dirs;
-    return exitWith(exit_unsupported);
+/// ⚠️ **git 을 기다리는 동안에도 stdin 을 본다**(적대적 검증 2026-09-04 17 회차 — 실측). 앞 판은
+/// 파이프를 블로킹으로 읽었는데, git 이 멈추면 그 `read` 에서 서서 **채널이 끊겨도 안 끝났다** —
+/// 남의 서버에 고아가 남는다. 이 트랙의 최악 실패다.
+fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.hash.Wyhash) RunResult {
+    var zargs: std.ArrayList(?[*:0]const u8) = .empty;
+    defer {
+        for (zargs.items) |a| if (a) |ptr| gpa.free(std.mem.span(ptr));
+        zargs.deinit(gpa);
+    }
+    for (argv) |a| {
+        const z = gpa.dupeZ(u8, a) catch return .failed;
+        zargs.append(gpa, z.ptr) catch {
+            gpa.free(z);
+            return .failed;
+        };
+    }
+    zargs.append(gpa, null) catch return .failed;
+
+    var fds: [2]c_int = undefined;
+    if (std.c.pipe(&fds) != 0) return .failed;
+    const pid = std.c.fork();
+    if (pid < 0) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        return .failed;
+    }
+    if (pid == 0) {
+        // **자식의 stdin 은 `/dev/null` 이다.** 우리 stdin 은 ssh 채널이라, git 이 그것을 읽으면
+        // 채널 바이트를 먹거나 프롬프트에서 선다(그러면 위 함정으로 되돌아간다).
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.dup2(devnull, 2); // git 의 경고를 다이제스트에 안 섞는다
+        }
+        _ = std.c.dup2(fds[1], 1);
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        _ = execvp(zargs.items[0].?, @ptrCast(zargs.items.ptr));
+        std.c._exit(127);
+    }
+    _ = std.c.close(fds[1]);
+
+    var wait = [_]std.posix.pollfd{
+        .{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널 — 여기가 열리면 곧장 접는다
+    };
+    var buf: [8192]u8 = undefined;
+    var left_ms: i64 = command_deadline_ms;
+    var outcome: RunResult = .failed;
+    while (true) {
+        if (left_ms <= 0) break; // 병든 원격 — 죽이고 「못 읽었다」로 친다
+        const waited = std.posix.poll(&wait, poll_tick_ms) catch break;
+        if (wait[1].revents != 0) {
+            outcome = .channel_closed;
+            break;
+        }
+        if (waited == 0) {
+            left_ms -= poll_tick_ms;
+            continue;
+        }
+        if (wait[0].revents == 0) continue;
+        const rc = std.posix.system.read(fds[0], &buf, buf.len);
+        const n: isize = @bitCast(rc);
+        if (n < 0) break;
+        if (n == 0) {
+            outcome = .ok; // EOF — 자식이 출력을 끝냈다
+            break;
+        }
+        hasher.update(buf[0..@intCast(n)]);
+    }
+    _ = std.c.close(fds[0]);
+    if (outcome != .ok) _ = std.c.kill(pid, std.c.SIG.KILL); // 멈춘 자식을 남기지 않는다
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    if (outcome != .ok) return outcome;
+    const us: u32 = @bitCast(status);
+    if (!(std.c.W.IFEXITED(us) and std.c.W.EXITSTATUS(us) == 0)) return .failed;
+    return .ok;
 }
 
-/// 위가 되살아날 때 쓸 자리 — **지금은 안 부른다.** 지우지 않는 이유는 FSEvents 로 갈아탈 때
-/// stdin 결속(`EVFILT_READ`)과 종료 규율이 그대로 필요하기 때문이다.
-fn watchKqueueDirs(gpa: std.mem.Allocator, dirs: []const []u8) !void {
-    const c = std.c;
-    const kq = c.kqueue();
-    if (kq < 0) return exitWith(exit_unsupported);
-    var change: [1]c.Kevent = undefined;
-    for (dirs) |d| {
-        const z = try gpa.dupeZ(u8, d);
-        defer gpa.free(z);
-        // `O_EVTONLY` — 「이벤트만 받으려고 연다」는 뜻이라 언마운트를 막지 않는다.
-        const fd = std.c.open(z, .{ .ACCMODE = .RDONLY, .EVTONLY = true });
-        if (fd < 0)
-            return exitWith(exit_watch_limit); // EMFILE = fd 소진(§6 — kqueue 의 한도는 `ulimit -n` 이다)
-        change[0] = .{
-            .ident = @intCast(fd),
-            .filter = c.EVFILT.VNODE,
-            .flags = c.EV.ADD | c.EV.CLEAR,
-            .fflags = c.NOTE.WRITE | c.NOTE.DELETE | c.NOTE.RENAME | c.NOTE.EXTEND | c.NOTE.ATTRIB,
-            .data = 0,
-            .udata = 0,
-        };
-        if (c.kevent(kq, &change, 1, undefined, 0, null) < 0) return exitWith(exit_watch_limit);
-    }
-    // stdin 을 **같은 kqueue** 에 — 채널이 끊기면 여기서 온다(고아 방지).
-    change[0] = .{
-        .ident = 0,
-        .filter = c.EVFILT.READ,
-        .flags = c.EV.ADD | c.EV.CLEAR,
-        .fflags = 0,
-        .data = 0,
-        .udata = 0,
-    };
-    _ = c.kevent(kq, &change, 1, undefined, 0, null);
-    var out: [16]c.Kevent = undefined;
-    while (true) {
-        const n = c.kevent(kq, undefined, 0, &out, out.len, null);
-        if (n <= 0) return;
-        for (out[0..@intCast(n)]) |ev| {
-            if (ev.filter == c.EVFILT.READ) return; // stdin → 종료
+/// 지금 상태의 다이제스트. 하나라도 못 읽으면 null — 그때는 **바뀌었다고 말하지 않는다**(git 이
+/// 잠깐 실패한 것을 변경으로 읽으면 읽기 폭주가 된다).
+fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8) Digest {
+    var hasher = std.hash.Wyhash.init(0);
+    for (digest_reads) |tail| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        argv.appendSlice(gpa, git_prefix) catch return .{ .state = .failed };
+        argv.appendSlice(gpa, &.{ "-C", root }) catch return .{ .state = .failed };
+        argv.appendSlice(gpa, tail) catch return .{ .state = .failed };
+        switch (hashCommand(gpa, argv.items, &hasher)) {
+            .ok => {},
+            .failed => return .{ .state = .failed },
+            .channel_closed => return .{ .state = .channel_closed },
         }
-        // **이벤트를 세지 않는다** — 무엇이 바뀌었는지는 호출자가 다시 읽어 알아낸다(계약 §2).
+        hasher.update("\x00");
+    }
+    return .{ .state = .ok, .value = hasher.final() };
+}
+
+const Digest = struct { state: RunResult, value: u64 = 0 };
+
+/// macOS·BSD·한도 초과에서 쓰는 갈래(RW7). **git 을 돌려 다이제스트를 비교한다** — 파일을 훑지
+/// 않는다(전체 stat 걷기는 0.37~0.83 s 로 10 배 넘게 비싸고 `.gitignore` 도 안 따른다).
+///
+/// ⚠️ 다이제스트는 **이 프로세스 안에서만** 산다. 밖으로 나가는 것은 여전히 `change` 한 줄이라
+/// 파싱 계약이 두 벌이 되지 않는다(계약 §2 · §10).
+fn watchPoll(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8) !void {
+    if (git_prefix.len == 0) return exitWith(exit_unsupported); // 앞머리가 없으면 git 을 못 돌린다
+    const first = digest(gpa, root, git_prefix);
+    if (first.state == .channel_closed) return;
+    if (first.state != .ok) return exitWith(exit_unsupported);
+    var last = first.value;
+
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널이 끊기면 여기서 걸린다
+    };
+    var waited_ns: i128 = 0;
+    while (true) {
+        _ = std.posix.poll(&fds, poll_tick_ms) catch return;
+        if (fds[0].revents != 0) return; // stdin EOF/HUP → 종료(고아 방지 — 한 주기를 안 기다린다)
+        waited_ns += @as(i128, poll_tick_ms) * std.time.ns_per_ms;
+        if (waited_ns < poll_interval_ns) continue;
+        waited_ns = 0;
+        const now = digest(gpa, root, git_prefix);
+        if (now.state == .channel_closed) return; // git 을 기다리는 동안 채널이 끊겼다 — 곧장 끝낸다
+        if (now.state != .ok) continue; // 잠깐 실패는 변경이 아니다
+        if (now.value == last) continue;
+        last = now.value;
         if (!announce()) return;
     }
 }

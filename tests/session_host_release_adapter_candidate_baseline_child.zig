@@ -7,6 +7,18 @@ const uuid = "123e4567-e89b-42d3-a456-426614174000";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+const Toolchain = struct {
+    executable: [:0]const u8 = "/opt/zig",
+    calls: usize = 0,
+    drift_after_first: bool = false,
+
+    pub fn revalidate(self: *@This()) !child.ToolchainView {
+        self.calls += 1;
+        if (self.drift_after_first and self.calls > 1) return error.ExecutableChanged;
+        return .{ .executable = self.executable, .size = 1, .sha256 = @splat('a') };
+    }
+};
+
 const Authority = struct {
     view: child.View,
     calls: usize = 0,
@@ -125,13 +137,15 @@ test "both closed kinds receive exact authority-derived argv environment cwd and
         const home = try absolute(&tmp, if (kind == .default_false) "default-false" else "signed-app-quit", &home_storage);
         const output = try absolute(&tmp, if (kind == .default_false) "default-false.json" else "signed-app-quit.json", &output_storage);
         var authority = Authority{ .view = view(kind, home, output) };
+        var toolchain: Toolchain = .{};
         var deadline: Deadline = .{};
         var executor = Executor{ .output_path = output, .expected_kind = kind };
         var capture: [32]u8 = undefined;
-        try child.runWith(&executor, &authority, kind, "/opt/zig", 42, &deadline, &capture);
+        try child.runWith(&executor, &authority, &toolchain, kind, 42, &deadline, &capture);
         try std.testing.expectEqual(@as(usize, 1), executor.calls);
         try std.testing.expectEqual(@as(usize, 2), authority.calls);
         try std.testing.expectEqual(@as(usize, 3), deadline.calls);
+        try std.testing.expectEqual(@as(usize, 2), toolchain.calls);
     }
 }
 
@@ -145,10 +159,11 @@ test "existing output rejects before process execution" {
     var file = try std.Io.Dir.createFileAbsolute(std.testing.io, output, .{});
     file.close(std.testing.io);
     var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain: Toolchain = .{};
     var deadline: Deadline = .{};
     var executor = Executor{ .output_path = output, .expected_kind = .default_false };
     var capture: [32]u8 = undefined;
-    try std.testing.expectError(error.OutputExists, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &deadline, &capture));
+    try std.testing.expectError(error.OutputExists, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
 }
 
@@ -161,11 +176,12 @@ test "missing symlink or public leaf never becomes success" {
         const home = try absolute(&tmp, "default-false", &home_storage);
         const output = try absolute(&tmp, "default-false.json", &output_storage);
         var authority = Authority{ .view = view(.default_false, home, output) };
+        var toolchain: Toolchain = .{};
         var deadline: Deadline = .{};
         var executor = Executor{ .output_path = output, .expected_kind = .default_false, .create_leaf = mode != 0, .mode = mode };
         var capture: [32]u8 = undefined;
         const expected = if (mode == 0) error.MissingOutput else error.UnsafeOutput;
-        try std.testing.expectError(expected, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &deadline, &capture));
+        try std.testing.expectError(expected, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
     }
 
     var tmp = std.testing.tmpDir(.{});
@@ -176,10 +192,11 @@ test "missing symlink or public leaf never becomes success" {
     const home = try absolute(&tmp, "default-false", &home_storage);
     const output = try absolute(&tmp, "default-false.json", &output_storage);
     var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain: Toolchain = .{};
     var deadline: Deadline = .{};
     var executor = Executor{ .output_path = output, .expected_kind = .default_false };
     var capture: [32]u8 = undefined;
-    try std.testing.expectError(error.OutputExists, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &deadline, &capture));
+    try std.testing.expectError(error.OutputExists, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
 }
 
@@ -192,11 +209,12 @@ test "post-exec authority drift and foreign capture fail closed" {
         const home = try absolute(&tmp, "default-false", &home_storage);
         const output = try absolute(&tmp, "default-false.json", &output_storage);
         var authority = Authority{ .view = view(.default_false, home, output), .drift_after_first = !foreign };
+        var toolchain: Toolchain = .{};
         var deadline: Deadline = .{};
         var executor = Executor{ .output_path = output, .expected_kind = .default_false, .foreign_capture = foreign };
         var capture: [32]u8 = undefined;
         const expected = if (foreign) error.InvalidCapture else error.AuthorityChanged;
-        try std.testing.expectError(expected, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &deadline, &capture));
+        try std.testing.expectError(expected, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
     }
 }
 
@@ -208,15 +226,17 @@ test "deadline and child failures publish no success" {
     const home = try absolute(&tmp, "default-false", &home_storage);
     const output = try absolute(&tmp, "default-false.json", &output_storage);
     var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain: Toolchain = .{};
     var expired: ExpiredDeadline = .{};
     var executor = Executor{ .output_path = output, .expected_kind = .default_false };
     var capture: [32]u8 = undefined;
-    try std.testing.expectError(error.Expired, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &expired, &capture));
+    try std.testing.expectError(error.Expired, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &expired, &capture));
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
 
     var deadline: Deadline = .{};
     executor.failure = error.TimedOut;
-    try std.testing.expectError(error.TimedOut, child.runWith(&executor, &authority, .default_false, "/opt/zig", 42, &deadline, &capture));
+    try std.testing.expectError(error.TimedOut, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
+    try std.testing.expectEqual(@as(usize, 2), toolchain.calls);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, output, .{}));
 }
 
@@ -256,10 +276,11 @@ test "real bounded executor uses held cwd closed environment and private leaf" {
     try std.testing.expect(directory_fd >= 0);
     defer _ = std.c.close(directory_fd);
     var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain = Toolchain{ .executable = executable };
     var deadline: Deadline = .{};
     var executor = child.BoundedExecutor{ .io = std.testing.io };
     var capture: [64 * 1024]u8 = undefined;
-    try child.runWith(&executor, &authority, .default_false, executable, directory_fd, &deadline, &capture);
+    try child.runWith(&executor, &authority, &toolchain, .default_false, directory_fd, &deadline, &capture);
     const stat = try std.Io.Dir.cwd().statFile(std.testing.io, output, .{});
     try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(stat.permissions.toMode() & 0o777)));
 }
@@ -267,8 +288,9 @@ test "real bounded executor uses held cwd closed environment and private leaf" {
 test "source exposes a real bounded executor and no ambient environment lookup" {
     std.testing.refAllDecls(child);
     const inputs: child.Inputs = undefined;
+    const zig: child.ZigToolchainAuthority = undefined;
     var deadline: Deadline = .{};
-    try std.testing.expectError(error.InvalidInput, child.run(std.testing.io, inputs, .default_false, "/opt/zig", -1, &deadline));
+    try std.testing.expectError(error.InvalidInput, child.run(std.testing.io, inputs, &zig, .default_false, -1, &deadline));
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig", std.testing.allocator, .limited(96 * 1024));
     defer std.testing.allocator.free(source);
     const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", std.testing.allocator, .limited(2 * 1024 * 1024));
@@ -276,6 +298,40 @@ test "source exposes a real bounded executor and no ambient environment lookup" 
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn run(") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "runCaptureEnvironmentStdoutDirectory") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "getenv") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "zig_executable") == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, build, "src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, build, ".name = \"release_adapter_candidate_baseline_child\""));
+}
+
+test "toolchain drift after child execution fails closed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    var output_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const home = try absolute(&tmp, "default-false", &home_storage);
+    const output = try absolute(&tmp, "default-false.json", &output_storage);
+    var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain = Toolchain{ .drift_after_first = true };
+    var deadline: Deadline = .{};
+    var executor = Executor{ .output_path = output, .expected_kind = .default_false };
+    var capture: [32]u8 = undefined;
+    try std.testing.expectError(error.ExecutableChanged, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
+    try std.testing.expectEqual(@as(usize, 1), executor.calls);
+    try std.testing.expectEqual(@as(usize, 2), toolchain.calls);
+}
+
+test "toolchain drift outranks a simultaneous child failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    var output_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const home = try absolute(&tmp, "default-false", &home_storage);
+    const output = try absolute(&tmp, "default-false.json", &output_storage);
+    var authority = Authority{ .view = view(.default_false, home, output) };
+    var toolchain = Toolchain{ .drift_after_first = true };
+    var deadline: Deadline = .{};
+    var executor = Executor{ .output_path = output, .expected_kind = .default_false, .failure = error.TimedOut };
+    var capture: [32]u8 = undefined;
+    try std.testing.expectError(error.ExecutableChanged, child.runWith(&executor, &authority, &toolchain, .default_false, 42, &deadline, &capture));
+    try std.testing.expectEqual(@as(usize, 2), toolchain.calls);
 }

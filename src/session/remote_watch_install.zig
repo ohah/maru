@@ -15,11 +15,11 @@ pub const remote_dir = "$HOME/.cache/maru";
 
 /// 감시자가 `--version` 으로 내는 줄. **이 문자열이 곧 「우리 것이고 이 판이다」** 다.
 /// `tools/remote-watch/main.zig` 의 `version_line` 과 같아야 한다 — 경계 test 가 그것을 센다.
-pub const version_line = "maru-remote-watch 1";
+pub const version_line = "maru-remote-watch 2";
 
 /// 원격에 놓일 파일 이름. **판을 이름에 박는다** — 안 그러면 옛 판이 깔린 원격에서 새 maru 가
 /// 「이미 있다」로 읽고 조용히 옛 감시자를 쓴다.
-pub const remote_binary = "maru-remote-watch-1";
+pub const remote_binary = "maru-remote-watch-2";
 
 /// ⑴ **이미 있고 «돌아가는가»**. 파일 존재만 보면 아키텍처가 틀린 바이너리나 잘린 파일을 「설치됨」
 /// 으로 읽는다 — 그러면 감시가 조용히 안 된다. **실행해 보는 것**이 그 둘을 함께 가른다.
@@ -128,10 +128,19 @@ test "uname -sm 을 변종으로 옮긴다 — 모르면 null 이다" {
 }
 
 test "판 대조는 정확 일치다 — 부분 일치면 옛 판을 «같다»로 읽는다" {
-    try testing.expect(versionMatches("maru-remote-watch 1\n"));
-    try testing.expect(versionMatches("  maru-remote-watch 1  "));
-    try testing.expect(!versionMatches("maru-remote-watch 12"));
-    try testing.expect(!versionMatches("maru-remote-watch 2"));
+    // ⚠️ **판 번호를 여기 박지 않는다**(RW7d 에서 2 로 올리며 배웠다 — 박아 두면 판을 올릴 때마다
+    // 이 test 가 빨개지고, 그 손질이 곧 「무엇을 확인하는지」를 흐린다). `version_line` 에서 만든다.
+    var buf: [64]u8 = undefined;
+
+    try testing.expect(versionMatches(try std.fmt.bufPrint(&buf, "{s}\n", .{version_line})));
+    try testing.expect(versionMatches(try std.fmt.bufPrint(&buf, "  {s}  ", .{version_line})));
+    // 뒤에 숫자가 더 붙은 «다른» 판을 같다고 읽으면 안 된다(1 과 12).
+    try testing.expect(!versionMatches(try std.fmt.bufPrint(&buf, "{s}2", .{version_line})));
+    // 앞자리가 다른 판도 마찬가지다 — 지금 판의 마지막 글자를 바꿔 만든다.
+    var other: [64]u8 = undefined;
+    @memcpy(other[0..version_line.len], version_line);
+    other[version_line.len - 1] = if (version_line[version_line.len - 1] == '9') '8' else version_line[version_line.len - 1] + 1;
+    try testing.expect(!versionMatches(other[0..version_line.len]));
     try testing.expect(!versionMatches(""));
     try testing.expect(!versionMatches("bash: maru-remote-watch: not found"));
 }

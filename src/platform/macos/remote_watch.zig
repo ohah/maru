@@ -42,6 +42,9 @@ pub const exit_unsupported: c_int = 3;
 /// 한도 초과·미지원은 저장소나 원격이 바뀌기 전에는 결과가 같다. 그런데도 다시 띄우면 사용자가 도크를
 /// 열어 둔 내내 **5 초마다 ssh 자식**이 뜬다 — 실측으로 30 초에 7 번이었다. 그건 남의 서버에서 도는
 /// 비용이라 「조용히 계속」이 가장 나쁜 선택이다.
+/// ⚠️ **판 2 부터 `exit_watch_limit` 은 원격이 안 낸다**(RW7d — 한도에서 폴링으로 내려간다).
+/// 그래도 목록에 남긴다: 원격에 **판 1 바이너리가 도는 동안**은 그쪽이 여전히 그 코드로 나가고,
+/// 그때 재시도하면 5 초마다 ssh 자식이 뜬다(RW5 가 없앤 폭주). 판이 갈리면 다음 설치에서 바뀐다.
 pub fn isPermanent(exit_code: c_int) bool {
     return exit_code == exit_watch_limit or exit_code == exit_unsupported;
 }

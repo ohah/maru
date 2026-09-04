@@ -132,11 +132,6 @@ static unsigned long long nowMs(void) {
     return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)(ts.tv_nsec / 1000000);
 }
 
-/// 컨트롤 채널을 연 시각(0 이면 안 열었다). 시한 판정에 쓴다.
-static unsigned long long g_control_open_ms = 0;
-/// 「아직 때가 아니다」로 되돌린 첫 시각(ms, 0 이면 되돌린 적 없다). **재시도에도 마감이 있다** —
-/// 닫힘이 영영 안 끝나면 화면이 조용히 「받는 중」에 머문다(계약 §4a: 실패하면 그 화면이 말한다).
-static unsigned long long g_control_retry_ms = 0;
 static void drainHostKeyDecision(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
@@ -1215,7 +1210,6 @@ Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring hos
     // **새 연결이면 컨트롤 축도 처음부터**(계약 §4a — iOS 와 같은 자리). 안 그러면 끊겼다 다시
     // 붙었을 때 죽은 세션 목록이 살아 있는 것처럼 남는다.
     maru_mobile_control_reset();
-    g_control_open_ms = 0;
 
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     // 푼 키는 펌프가 복사해 갔다 — 여기 사본은 지운다.
@@ -1758,75 +1752,46 @@ static void driveControlChannel(void) {
     // 계약(§4a: 재시도는 사용자가 그 화면에 다시 올 때다)과도 맞다.
     // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다(계약 §4a) — 채널이 아직 안
     // 닫혔는데 가져가면 그 뜻이 사라져 축이 영영 안 선다. 닫힘이 확인된 다음 tick 에 연다.
-    /* **닫기가 열기보다 «먼저» 다**(iOS 와 같은 자리). 순서가 뒤집혀 있으면, `wantControl` 이
-       닫기와 열기를 함께 세운 tick 에 채널이 마침 CLOSED 인 경우 **열고 나서 그 자리에서 닫는다** —
-       그 뒤로는 열고 닫기를 무한히 되풀이하며 아무 세션도 안 뜬다(실기 2026-09-04 계측: 채널 상태가
-       opening↔closed 로 진동했다). §4a 가 「한 번에 하나」이므로 닫는 것이 먼저다. */
-    if (maru_mobile_take_control_close()) {
+    /* **정책은 코어가 정한다.** 닫기/열기의 «순서»·「열 수 있는가」 가드·`NOT_READY` 분류·
+       두 마감이 전부 정책이라 Zig 로 올렸다(`maru_mobile_control_tick`). 예전에는 그 넷이 이
+       함수 안에 있어 ⑴ 두 플랫폼이 갈릴 수 있었고 ⑵ **헤드리스로 잴 수가 없었다** — 실제로
+       iOS 쪽 순서가 뒤집혀 「열고 그 자리에서 닫기」를 무한히 되풀이했다(실기 2026-09-04).
+       여기 남는 것은 **네이티브뿐**이다: 펌프 호출과 로그. */
+    unsigned long long control_now_ms = (unsigned long long)nowMs();
+    int control_action = maru_mobile_control_tick(
+        maru_ssh_pump_state() == MARU_SSH_STATE_READY ? 1 : 0,
+        maru_ssh_pump_control_state(), control_now_ms);
+    if (control_action == MARU_MOBILE_CONTROL_ACTION_CLOSE) {
         /* **닫기 결과를 읽는다**(iOS 와 같은 자리) — 실패가 조용하면 원격 명령이 고아로 남아
            그 뒤 모든 열기가 막힌다(실기 2026-09-04). */
         int close_rc = maru_ssh_pump_close_control();
         if (close_rc != 0)
             LOGI("MARU_CONTROL close failed rc=%d: %s", close_rc, maru_ssh_pump_control_error());
-        g_control_open_ms = 0;
-    }
-
-    const unsigned int control_ch = maru_ssh_pump_control_state();
-    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
-        (control_ch == MARU_SSH_CONTROL_NONE || control_ch == MARU_SSH_CONTROL_CLOSED) &&
-        maru_mobile_take_control_open()) {
-        // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
-        // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
+    } else if (control_action == MARU_MOBILE_CONTROL_ACTION_OPEN) {
+        /* **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
+           인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다. */
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
-        // **「아직 때가 아니다」와 「졌다」를 가른다.** 이전 채널이 닫히는 중이면 코어가
-        // `MARU_SSH_ERR_NOT_READY` 를 내는데(그 자리 주석이 "조금 뒤에 다시 부르면 된다"),
-        // 그것을 딱딱한 실패로 접으면 「열자」는 뜻이 사라져 그 화면이 **영영 「받는 중」** 이
-        // 된다(실측 2026-09-03: 세션 화면 재진입).
-        const int open_rc = cmd_len == 0
-                                ? -1
-                                : maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len);
-        if (open_rc == MARU_SSH_ERR_NOT_READY) {
-            const unsigned long long now_ms = nowMs();
-            if (g_control_retry_ms == 0) g_control_retry_ms = now_ms;
-            if (now_ms - g_control_retry_ms > 5000) {
-                LOGI("MARU_CONTROL open gave up: %s", maru_ssh_pump_control_error());
-                g_control_retry_ms = 0;
-                maru_mobile_control_open_failed();
-            } else {
-                maru_mobile_control_open_retry();
-            }
-        } else if (open_rc != 0) {
-            g_control_retry_ms = 0;
-            // **컨트롤 축의 이름을 찍는다.** 예전에는 터미널 슬롯을 찍어, 한 번 박힌 이름이
-            // 그 뒤 모든 실패를 덮어 **진짜 원인이 자기 로그에 가렸다**.
-            LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
-            // **실패는 그 화면이 말한다**(계약 §4a). 안 알리면 목록은 이유도 모른 채 기다린다.
-            maru_mobile_control_open_failed();
-        } else {
-            g_control_retry_ms = 0;
-            g_control_open_ms = nowMs();
-        }
+        int open_rc = cmd_len == 0
+                          ? -1
+                          : maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len);
+        /* **왜 졌는지를 갈라 찍는다**(iOS 와 같은 자리) — 마감을 넘긴 것과 딱딱한 실패는
+           사용자가 볼 자리가 다르다. */
+        int open_verdict = maru_mobile_control_note_open(open_rc, control_now_ms);
+        if (open_verdict == 1)
+            LOGI("MARU_CONTROL open gave up (not ready for 5s): %s", maru_ssh_pump_control_error());
+        else if (open_verdict != 0)
+            LOGI("MARU_CONTROL open failed rc=%d: %s", open_rc, maru_ssh_pump_control_error());
     }
 
-    // **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는
-    // 사용자가 고칠 자리를 가른다(계약 §4a: 127 이면 그 기계에 `maru` 가 없다).
-    //
-    // **세션이 살아 있을 때만 그렇게 읽는다.** 연결이 죽으면 채널도 함께 죽는데, 그것은 명령이
-    // 실패한 것이 아니라 **명령이 서 있던 바닥이 사라진 것**이다. 안 가르면 끊을 때마다 그
-    // 잔해가 "그 기계에 maru 가 없다" 로 화면에 떴다(기기 실측 — 서버에는 있었다).
+    /* **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는
+       사용자가 고칠 자리를 가른다(계약 §4a: 127 이면 그 기계에 `maru` 가 없다).
+       **세션이 살아 있을 때만 그렇게 읽는다** — 연결이 죽으면 채널도 함께 죽는데, 그것은 명령이
+       실패한 것이 아니라 명령이 서 있던 바닥이 사라진 것이다. */
     unsigned int control_exit = 0;
-    if (g_control_open_ms != 0 && maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
+    if (maru_mobile_control_awaiting_reply() && maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
         maru_ssh_pump_control_exit_status(&control_exit) == 0) {
-        maru_mobile_control_note_exit(control_exit);
-        g_control_open_ms = 0;
-    }
-
-    // **시한은 host 가 잰다** — 코어에는 시계가 없다(계약 §4a: 5초).
-    if (g_control_open_ms != 0 && maru_mobile_control_state() == MARU_MOBILE_CONTROL_WAITING &&
-        nowMs() - g_control_open_ms > 5000) {
-        maru_mobile_control_timeout();
-        g_control_open_ms = 0;
+        maru_mobile_control_note_exit_at(control_exit);
     }
 
     unsigned char req[512];

@@ -1179,8 +1179,132 @@ fn serverMaruPath() []const u8 {
     return list[idx].maru_path;
 }
 
-/// host 가 가져간다: 지금 채널을 열어야 하나. **가져가면 사라진다.**
-pub export fn maru_mobile_take_control_open() c_int {
+// ── 컨트롤 축의 «정책» 은 여기 산다 ────────────────────────────────────────────────
+//
+// **순서·가드·분류·마감이 전부 정책이다.** 예전에는 그 넷이 두 host 의 C/ObjC tick 안에
+// 흩어져 있었고, 그래서 ⑴ 두 플랫폼이 갈릴 수 있었고 ⑵ **헤드리스로 잴 수가 없었다**.
+// 실제로 iOS tick 이 **열기를 닫기보다 먼저** 해서, `wantControl` 이 둘을 함께 세운 tick 에
+// 채널이 마침 닫혀 있으면 **열고 그 자리에서 닫았다** — 컨트롤 채널이 opening↔closed 로
+// 무한히 진동하고 아무 세션도 안 떴다(실기 2026-09-04). 그 회차 내내 판정자는 초록이었다.
+//
+// 그래서 tick 마다 **행동을 하나만** 돌려준다 — 「열고 나서 닫기」는 **표현 자체가 없다**
+// (가드로 막는 것과 다르다). host 에 남는 것은 **네이티브뿐**이다: 펌프 호출과 로그.
+//
+// 마감도 여기 있다. host 에 있을 때는 `CACurrentMediaTime()` 이 박혀 있어 **못 쟀다** —
+// 시각을 인자로 받으면 판정자가 넣는다(이 저장소의 "답이 기계 속도에 달린 판정" 규율).
+
+/// 이번 tick 에 host 가 할 일. **하나뿐이다.**
+pub const ControlAction = enum(c_int) {
+    /// 아무것도.
+    none = 0,
+    /// 컨트롤 채널을 닫는다(`maru_ssh_pump_close_control`).
+    close = 1,
+    /// 컨트롤 채널을 연다(`maru_mobile_control_command` 가 만든 명령으로).
+    open = 2,
+};
+
+/// 열기 재시도 마감(ms). 「아직 때가 아니다」(`NOT_READY`)가 이만큼 이어지면 포기하고 화면이
+/// 말한다. 근거는 [컨트롤 플레인 §4a](../../../docs/control-plane.md)가 소유한다.
+const control_retry_deadline_ms: u64 = 5000;
+/// 연 뒤 첫 답을 기다리는 마감(ms). 같은 눈금이다.
+const control_reply_deadline_ms: u64 = 5000;
+
+// **`0` 을 「없음」 으로 쓰지 않는다.** 시각 0 은 멀쩡한 값이고, 그것을 표식으로 쓰면 그 순간에
+// 시작한 마감이 매 tick 다시 시작해 **영영 안 끝난다**. host 에 있을 때는 `CACurrentMediaTime()`
+// 이 0 이 될 일이 없어 안 드러났는데, 시각을 넣는 판정자가 곧바로 잡았다 — 마감을 코어로 올린
+// 값이 이것이다.
+/// `NOT_READY` 가 처음 난 시각. `null` 이면 재시도 중이 아니다.
+var control_retry_since_ms: ?u64 = null;
+/// 열기가 성공한 시각. `null` 이면 기다리는 답이 없다.
+var control_opened_at_ms: ?u64 = null;
+
+/// **이번 tick 에 무엇을 할까.** host 는 `ssh_ready`(SSH 세션이 READY 인가)·`channel_state`
+/// (`MARU_SSH_CONTROL_*`)·단조 시각을 주고, 돌려받은 행동 **하나**를 그대로 실행한다.
+///
+/// **닫기가 먼저다**(§4a — 한 번에 control 하나). 열기는 채널이 비었을 때만 나간다.
+pub export fn maru_mobile_control_tick(ssh_ready: c_int, channel_state: u32, now_ms: u64) c_int {
+    // 답을 기다리다 시한을 넘겼나 — 행동과 무관하게 매 tick 본다.
+    if (control_opened_at_ms) |opened| {
+        if (control_client.state == .waiting_hello and
+            now_ms -| opened > control_reply_deadline_ms)
+        {
+            maru_mobile_control_timeout();
+            control_opened_at_ms = null;
+        }
+    }
+    if (takeControlClose() != 0) {
+        control_opened_at_ms = null;
+        return @intFromEnum(ControlAction.close);
+    }
+    // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다 — 채널이 아직 안 닫혔는데
+    // 가져가면 그 뜻이 사라져 축이 영영 안 선다.
+    if (ssh_ready == 0) return @intFromEnum(ControlAction.none);
+    if (channel_state != ssh_control_none and channel_state != ssh_control_closed)
+        return @intFromEnum(ControlAction.none);
+    if (takeControlOpen() == 0) return @intFromEnum(ControlAction.none);
+    return @intFromEnum(ControlAction.open);
+}
+
+/// 열기의 결과를 알린다. **「아직 때가 아니다」와 「졌다」를 여기서 가른다** — 그 분류가 host 에
+/// 있으면 두 플랫폼이 갈리고 마감도 각자 세게 된다.
+///
+/// `rc` 는 `maru_ssh_pump_open_control` 이 돌려준 값이다. `MARU_SSH_ERR_NOT_READY`(-7)는
+/// 이전 채널이 닫히는 중이라는 뜻이라 **조금 뒤에 다시 부르면 된다** — 그것을 딱딱한 실패로
+/// 접으면 「열자」는 뜻이 사라져 그 화면이 영영 「받는 중」이 된다(실측 2026-09-03).
+///
+/// **왜 졌는지를 갈라 돌려준다** — `0` 아직 간다 / `1` 마감을 넘겨 포기 / `2` 딱딱한 실패.
+/// 뭉뚱그리면 로그가 「졌다」만 말하고, 그러면 사용자가 고칠 자리(예: 그 기계에 `maru` 가 없다)를
+/// 못 가른다 — 이 저장소가 그 모양으로 여러 번 시간을 버렸다.
+pub export fn maru_mobile_control_note_open(rc: c_int, now_ms: u64) c_int {
+    if (rc == ssh_err_not_ready) {
+        const since = control_retry_since_ms orelse blk: {
+            control_retry_since_ms = now_ms;
+            break :blk now_ms;
+        };
+        if (now_ms -| since > control_retry_deadline_ms) {
+            control_retry_since_ms = null;
+            maru_mobile_control_open_failed();
+            return 1; // 포기했다
+        }
+        maru_mobile_control_open_retry();
+        return 0;
+    }
+    control_retry_since_ms = null;
+    if (rc != 0) {
+        maru_mobile_control_open_failed();
+        return 2; // 딱딱한 실패 — 마감과 다른 이유다
+    }
+    control_opened_at_ms = now_ms;
+    return 0;
+}
+
+/// 열어 둔 명령이 그냥 끝났다 — 시한을 더 기다리지 않는다(계약 §4a).
+pub export fn maru_mobile_control_note_exit_at(code: u32) void {
+    control_opened_at_ms = null;
+    maru_mobile_control_note_exit(code);
+}
+
+/// 열린 명령의 답을 아직 기다리는가 — host 가 종료 코드를 볼 자격이 있나.
+pub export fn maru_mobile_control_awaiting_reply() c_int {
+    return if (control_opened_at_ms != null) 1 else 0;
+}
+
+/// 판정용 — 마감 상태를 처음으로 되돌린다.
+pub fn resetControlDeadlinesForTest() void {
+    control_retry_since_ms = null;
+    control_opened_at_ms = null;
+}
+
+// **이 셋의 단일 출처는 `mobile_host_abi.h` 다.** 여기 베낀 값이 갈리면 정책이 조용히 틀린
+// 상태를 본다 — `tests/mobile_control_policy_boundary.zig` 가 헤더 원문과 대조한다.
+const ssh_control_none: u32 = 0;
+const ssh_control_closed: u32 = 4;
+const ssh_err_not_ready: c_int = -7;
+
+/// 「열자」는 뜻을 집는다. **`maru_mobile_control_tick` 안에서만 쓴다** — `export` 를 뺀 것은
+/// host 가 이것과 `takeControlClose` 를 **제 순서로** 부르다 「열고 그 자리에서 닫기」를 만든
+/// 적이 있기 때문이다(실기 2026-09-04). 순서는 이제 코어가 정한다.
+pub fn takeControlOpen() c_int {
     if (!control_open_req) return 0;
     // **가져간 순간 그것이 돌고 있는 것이 된다.** host 는 채널이 열릴 수 있을 때만 이걸 부르므로
     // (계약 §4a) 여기서 옮겨 담아야 "이미 그것을 돌리고 있다" 판정이 성립한다. 열기가 지면
@@ -1190,8 +1314,8 @@ pub export fn maru_mobile_take_control_open() c_int {
     return 1;
 }
 
-/// host 가 가져간다: 지금 채널을 닫아야 하나. **가져가면 사라진다.**
-pub export fn maru_mobile_take_control_close() c_int {
+/// 「닫자」는 뜻을 집는다. **`maru_mobile_control_tick` 안에서만 쓴다**(위 주석).
+pub fn takeControlClose() c_int {
     if (!control_close_req) return 0;
     // 닫으라고 했으면 그 채널은 곧 사라진다 — 돌고 있는 것을 비워야 다음 명령을 열 수 있다.
     control_open = .none;
@@ -1563,6 +1687,10 @@ pub export fn maru_mobile_control_reset() void {
     // 집고 `control_command` 가 0 을 답한다(뜻 없는 열기 한 번 + `control_command_without_want`).
     control_open_req = false;
     control_close_req = false;
+    // **마감도 처음부터다.** 남기면 새 연결의 첫 열기가 옛 연결의 재시도 시각을 이어받아
+    // 곧바로 「포기」로 접힌다.
+    control_retry_since_ms = null;
+    control_opened_at_ms = null;
     dropRemoteScreen();
     // **들고 있던 세션도 전부 놓는다**(U2a). 새 연결은 다른 기계일 수 있고, 그러면 그 화면들은
     // 남의 것이다 — runtime id 가 같아도 같은 세션이라는 보장이 없다.

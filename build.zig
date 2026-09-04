@@ -9973,6 +9973,22 @@ pub fn build(b: *std.Build) void {
         session_host_2c3d_c3_3b4_step.dependOn(&run_s11_6_narrowed_boundary_tests.step);
         boundary_step.dependOn(&run_s11_6_narrowed_boundary_tests.step);
 
+        // 컨트롤 축의 **정책이 코어에 있다**는 것을 구조로 지킨다. 그 정책이 두 host 의 tick 에
+        // 있을 때 순서가 뒤집혀 「열고 그 자리에서 닫기」를 무한히 되풀이했는데, 헤드리스로 잴 수
+        // 없어 판정자가 내내 초록이었다(실기 2026-09-04).
+        const mobile_control_policy_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/mobile_control_policy_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"정책 경계"},
+        });
+        const run_mobile_control_policy_boundary_tests = b.addRunArtifact(mobile_control_policy_boundary_tests);
+        run_mobile_control_policy_boundary_tests.addArg("--maru-expect-tests=" ++ "2");
+        run_mobile_control_policy_boundary_tests.setCwd(b.path("."));
+        boundary_step.dependOn(&run_mobile_control_policy_boundary_tests.step);
+
         const event_c3_3b6_screen_stream_module = b.createModule(.{
             .root_source_file = b.path("src/session/screen_stream.zig"),
             .target = target,

@@ -112,7 +112,7 @@ pub const Execution = struct {
         const view = bootstrap.value() orelse return error.InvalidBootstrap;
         return switch (view.command) {
             .pre_publish => |value| value,
-            .verify_predecessor => error.InvalidCommand,
+            .verify_predecessor, .publish_candidate => error.InvalidCommand,
         };
     }
 
@@ -280,7 +280,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, bootstrap: *bootstrap_mod.B
     const view = bootstrap.value() orelse return error.InvalidBootstrap;
     const command_value = switch (view.command) {
         .pre_publish => |value| value,
-        .verify_predecessor => return error.InvalidCommand,
+        .verify_predecessor, .publish_candidate => return error.InvalidCommand,
     };
     try github_transport.validateToken(token);
     try validateBuffers(buffers, apple_storage, result, bootstrap, view, command_value, token);

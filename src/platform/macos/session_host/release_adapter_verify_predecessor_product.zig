@@ -74,7 +74,7 @@ pub const Execution = struct {
         const view = bootstrap.value() orelse return error.InvalidBootstrap;
         return switch (view.command) {
             .verify_predecessor => |value| value,
-            .pre_publish => error.InvalidCommand,
+            .pre_publish, .publish_candidate => error.InvalidCommand,
         };
     }
 
@@ -233,7 +233,7 @@ pub fn run(
     const view = bootstrap.value() orelse return error.InvalidBootstrap;
     const command = switch (view.command) {
         .verify_predecessor => |value| value,
-        .pre_publish => return error.InvalidCommand,
+        .pre_publish, .publish_candidate => return error.InvalidCommand,
     };
     try github_transport.validateToken(token);
     try validateBuffers(buffers, result, bootstrap, view, command, token);

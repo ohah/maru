@@ -52,13 +52,20 @@ pub fn main(init: std.process.Init) !void {
         for (dirs.items) |d| init.gpa.free(d);
         dirs.deinit(init.gpa);
     }
-    collect(io, init.gpa, root, &dirs) catch {};
+    // ⚠️ **실패를 삼키지 않는다**(적대적 검증 2026-09-04 15 회차). `collect` 는 못 여는 디렉터리를
+    // 건너뛰는 것과 별개로 OOM 이면 **도중에** 멈춘다 — 그때 `catch {}` 로 넘어가면 남은 절반을 「전부」
+    // 로 알고 무장해, §6 이 「최악」이라 못 박은 조용한 반쪽 감시가 된다. 못 하면 못 한다고 말한다.
+    collect(io, init.gpa, root, &dirs) catch return exitWith(exit_unsupported);
     // **0 개는 「볼 것이 없다」가 아니라 「못 봤다」다** — 루트를 못 열었다는 뜻이라 폴백해야 한다.
     if (dirs.items.len == 0) return exitWith(exit_unsupported);
-    if (dirs.items.len > max_dirs) return exitWith(exit_watch_limit);
+    // ⚠️ **「닿았다」로 묻는다 — 「넘었다」로 물으면 영원히 거짓이다**(적대적 검증 2026-09-04 12 회차).
+    // `collect` 는 `>= max_dirs` 에서 «멈추므로» 이 값은 `max_dirs` 를 절대 넘지 않는다. 앞 판은 `>` 로
+    // 물어서 이 보고가 **죽은 코드**였고, 그래서 상한을 넘는 저장소가 §6 이 「최악」이라 못 박은 상태 —
+    // **조용히 반쪽만 감시** — 로 들어갔다. 판정자는 문자열만 봐서 그것을 못 봤다.
+    if (dirs.items.len >= max_dirs) return exitWith(exit_watch_limit);
 
     switch (builtin.os.tag) {
-        .linux => try watchLinux(init.gpa, dirs.items),
+        .linux => try watchLinux(io, init.gpa, root, &dirs),
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly => try watchKqueue(init.gpa, dirs.items),
         else => return exitWith(exit_unsupported),
     }
@@ -105,10 +112,55 @@ fn announce() bool {
 
 /// 리눅스: inotify 인스턴스 **하나**에 디렉터리마다 watch 를 건다(watch 는 fd 가 아니다 — 한도는
 /// `max_user_watches` 이지 `ulimit -n` 이 아니다, 계획 §6). 그 fd 와 **stdin 을 함께 `poll`** 한다.
-fn watchLinux(gpa: std.mem.Allocator, dirs: []const []u8) !void {
+///
+/// ⚠️ **디렉터리가 새로 생기면 다시 무장한다**(적대적 검증 2026-09-04 14 회차 — 실측). inotify 는
+/// 새 디렉터리를 자동으로 안 본다. 시작할 때 걸어 둔 것만 보므로, 그냥 두면:
+///
+/// | 동작 | 알림 |
+/// |---|---|
+/// | 새 디렉터리 생성 | 1 (부모에서 온다) |
+/// | **그 안에 파일 생성** | **0** |
+/// | **그 안의 파일 수정** | **0** |
+///
+/// `git checkout` 이 디렉터리를 만드는 브랜치로 옮기거나 새 모듈을 만들면 그 뒤 편집이 통째로 안
+/// 보인다 — §6 이 「최악」이라 못 박은 조용한 반쪽 감시다.
+fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dirs: *std.ArrayList([]u8)) !void {
     const linux = std.os.linux;
     const ifd: i32 = @intCast(linux.inotify_init1(0));
     if (ifd < 0) return exitWith(exit_unsupported);
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = ifd, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널이 끊기면 여기서 걸린다
+    };
+    try armLinux(gpa, ifd, dirs.items);
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        _ = std.posix.poll(&fds, -1) catch return;
+        if (fds[1].revents != 0) return; // stdin EOF/HUP → 종료(고아 방지)
+        if (fds[0].revents == 0) continue;
+        const rc = std.posix.system.read(ifd, &buf, buf.len);
+        const n: isize = @bitCast(rc);
+        if (n <= 0) return;
+        // **이벤트를 세지도, 경로를 읽지도 않는다.** 무엇이 몇 개 바뀌었는지는 호출자가 다시 읽어
+        // 알아낸다(계약 §2). 여기서 보는 것은 **비트 하나** — 「디렉터리가 관련됐는가」뿐이고, 그것은
+        // 파싱 계약이 아니라 **다시 무장해야 하는가**라는 이 프로세스 안의 질문이다.
+        if (sawDirEvent(buf[0..@intCast(n)])) {
+            for (dirs.items) |d| gpa.free(d);
+            dirs.clearRetainingCapacity();
+            collect(io, gpa, root, dirs) catch return exitWith(exit_unsupported);
+            if (dirs.items.len == 0) return exitWith(exit_unsupported);
+            if (dirs.items.len >= max_dirs) return exitWith(exit_watch_limit);
+            // 이미 걸린 경로에 다시 걸면 **같은 wd 를 돌려준다** — 그래서 전부 다시 거는 것이 안전하고,
+            // 어느 것이 새것인지 알 필요가 없다(그걸 알려면 wd→경로 표를 지어야 한다).
+            try armLinux(gpa, ifd, dirs.items);
+        }
+        if (!announce()) return;
+    }
+}
+
+/// 목록의 디렉터리마다 watch 를 건다. **멱등이다** — 같은 경로면 같은 wd 가 온다.
+fn armLinux(gpa: std.mem.Allocator, ifd: i32, dirs: []const []u8) !void {
+    const linux = std.os.linux;
     const mask: u32 = linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE |
         linux.IN.MOVED_TO | linux.IN.MOVED_FROM | linux.IN.ATTRIB;
     for (dirs) |d| {
@@ -118,27 +170,53 @@ fn watchLinux(gpa: std.mem.Allocator, dirs: []const []u8) !void {
         // ENOSPC = `max_user_watches` 소진. **일부만 보고 계속하지 않는다**(§RW5).
         if (wd < 0) return exitWith(exit_watch_limit);
     }
-    var fds = [_]std.posix.pollfd{
-        .{ .fd = ifd, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널이 끊기면 여기서 걸린다
-    };
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        _ = std.posix.poll(&fds, -1) catch return;
-        if (fds[1].revents != 0) return; // stdin EOF/HUP → 종료(고아 방지)
-        if (fds[0].revents == 0) continue;
-        const rc = std.posix.system.read(ifd, &buf, buf.len);
-        const n: isize = @bitCast(rc);
-        if (n <= 0) return;
-        // **이벤트를 세지 않는다.** 무엇이 몇 개 바뀌었는지는 호출자가 다시 읽어 알아낸다 —
-        // 여기서 해석하면 파싱 계약이 두 벌이 된다(계약 §2).
-        if (!announce()) return;
-    }
 }
 
-/// macOS·BSD: kqueue 는 **디렉터리마다 fd 를 연다**(그래서 한도가 `ulimit -n` 이다, 계획 §6).
-/// stdin 은 `EVFILT_READ` 로 같은 kqueue 에 넣어 EOF 를 함께 받는다.
+/// 이 배치에 **디렉터리가 얽힌 이벤트**가 있었나. `struct inotify_event` 는 `{ i32 wd; u32 mask;
+/// u32 cookie; u32 len; }` 뒤에 `len` 바이트 이름이 붙는 가변 길이라, 그 머리만 훑는다.
+fn sawDirEvent(bytes: []const u8) bool {
+    const header = 16;
+    const in_isdir: u32 = 0x4000_0000;
+    var off: usize = 0;
+    while (off + header <= bytes.len) {
+        const mask = std.mem.bytesToValue(u32, bytes[off + 4 ..][0..4]);
+        const len = std.mem.bytesToValue(u32, bytes[off + 12 ..][0..4]);
+        if (mask & in_isdir != 0) return true;
+        off += header + len;
+    }
+    return false;
+}
+
+/// macOS·BSD: **못 한다고 말한다**(적대적 검증 2026-09-04 13 회차 — 실측).
+///
+/// ⚠️ kqueue 의 `EVFILT_VNODE` 를 **디렉터리**에 걸면 「그 디렉터리 자체」의 변화만 온다. 실측(같은
+/// 디렉터리에서 하나씩):
+///
+/// | 동작 | 알림 |
+/// |---|---|
+/// | 파일 내용 수정(append) | **0** |
+/// | 파일 덮어쓰기 | **0** |
+/// | `touch`(mtime) · `chmod` | **0** |
+/// | 새 파일 · 삭제 · 이름 바꾸기 | 1 |
+///
+/// 즉 **가장 흔한 경우인 「파일을 고쳤다」가 안 온다.** 그런데 만들기·지우기는 오므로 화면은 「살아
+/// 있는」 것처럼 보인다 — 계획 §6 이 「최악」이라 못 박은 **조용히 반쪽만 감시**가 바로 이것이다.
+///
+/// **파일마다 fd 를 여는 길은 닫혀 있다.** maru3 하나가 파일 29,694 개인데(디렉터리는 4,595 개),
+/// 리눅스의 흔한 `ulimit -Sn` 은 1,024 다(§6 실측). 제대로 하려면 macOS 는 FSEvents 가 필요한데
+/// 그것은 CoreServices + run loop 라 이 작은 바이너리의 모양이 아니다 — **후속으로 남긴다.**
+///
+/// 그래서 지금은 `exit_unsupported` 다. RW5 가 다시 안 띄우고 RW6 이 사용자에게 말하며, 화면은
+/// 포커스·새로고침으로 돌아간다. **반쪽을 최신인 척하는 것보다 낫다.**
 fn watchKqueue(gpa: std.mem.Allocator, dirs: []const []u8) !void {
+    _ = gpa;
+    _ = dirs;
+    return exitWith(exit_unsupported);
+}
+
+/// 위가 되살아날 때 쓸 자리 — **지금은 안 부른다.** 지우지 않는 이유는 FSEvents 로 갈아탈 때
+/// stdin 결속(`EVFILT_READ`)과 종료 규율이 그대로 필요하기 때문이다.
+fn watchKqueueDirs(gpa: std.mem.Allocator, dirs: []const []u8) !void {
     const c = std.c;
     const kq = c.kqueue();
     if (kq < 0) return exitWith(exit_unsupported);

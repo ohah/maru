@@ -92,7 +92,7 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     const allocator = std.testing.allocator;
     const git = try read(allocator, "src/platform/macos/app_session/git.zig", 4 * 1024 * 1024);
     defer allocator.free(git);
-    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 8192);
+    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 16384);
 
     // 안 보이는 동안 **남의 서버에 프로세스를 띄워 두지 않는다**(`pumpRepoStatus` 와 같은 게이트).
     try std.testing.expect(std.mem.indexOf(u8, pump, "dock_ops.dockVisible(self)") != null);
@@ -129,6 +129,29 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse {") != null);
     const no_root = try bodyOf(pump, "self.git_repo_remote_root orelse {", "\n    };", 512);
     try std.testing.expect(std.mem.indexOf(u8, no_root, "remote_watch.pause()") != null);
+
+    // ⚠️ **같은 호스트에서 저장소만 바뀌는 전환**(적대적 검증 2026-09-04 6 회차). `git_repo_dest` 가
+    // 그대로라 `rememberGitRepoDest` 는 조기 반환한다 — 채널이 무엇을 보고 있는지 스스로 알아야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "self.remote_watch.watchedRoot(), repo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "self.remote_watch.rememberRoot(repo)") != null);
+    // ⚠️ **추적할 수 없는 루트는 아예 안 띄운다**(7 회차). 띄워 놓고 무엇을 보는지 모르면 전환 판정이
+    // 영영 안 걸리고(옛 감시자가 조용히 남는다), 그렇다고 매 tick 「달라졌다」로 읽으면 재기동 폭주다.
+    // 이 게이트가 있어야 `started` 가 곧 「기억이 있다」가 된다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "remote_watch_mod.canTrack(repo)") != null);
+    const can_at = std.mem.indexOf(u8, pump, "remote_watch_mod.canTrack(repo)").?;
+    const spawn_at = std.mem.indexOf(u8, pump, "ssh_upload.spawnRemoteWatch(").?;
+    try std.testing.expect(can_at < spawn_at);
+    // ⚠️ **전환 판정은 「기억이 있는가」로 묻는다**(8 회차). `started` 로 물으면 `.gave_up`·`.backoff`
+    // 채널(둘 다 `started == false`)이 전환을 영영 못 본다 — A 에서 포기하고 B 로 옮기면 B 가 영원히
+    // 감시되지 않는다.
+    const pump_code2 = try stripComments(allocator, pump);
+    defer allocator.free(pump_code2);
+    try std.testing.expect(std.mem.indexOf(u8, pump_code2, "remote_watch.root_len != 0 and") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump_code2, "remote_watch.started and !std.mem.eql") == null);
+    // **switch 보다 «먼저» 본다** — 뒤에 두면 `.gave_up` 이 곧장 return 해 전환을 영영 못 본다.
+    const switch_at = std.mem.indexOf(u8, pump, "switch (self.remote_watch.phase)").?;
+    const swap_at = std.mem.indexOf(u8, pump, "self.remote_watch.watchedRoot(), repo").?;
+    try std.testing.expect(swap_at < switch_at);
     try std.testing.expect(std.mem.indexOf(u8, pump_code, "self.git_repo orelse return") == null);
 }
 
@@ -136,7 +159,7 @@ test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본
     const allocator = std.testing.allocator;
     const git = try read(allocator, "src/platform/macos/app_session/git.zig", 4 * 1024 * 1024);
     defer allocator.free(git);
-    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 8192);
+    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 16384);
 
     // RW5 가 「다시 안 띄운다」를 세웠지만, 그것만으로는 화면이 **조용히** 낡는다 — 사용자에게는
     // 「어느 순간부터 도크가 안 바뀐다」로만 보이고 저장소가 안 바뀐 것으로 읽힌다.

@@ -794,6 +794,7 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         term.agent_screen_state = .unknown;
                         term.agent_screen_visible_blocker = false;
                         term.agent_screen_visible_idle = false;
+                        term.agent_screen_rule = "";
                         term.agent_screen_origin = .screen;
                         // **관측 카운터도 0 으로 되돌린다.** C1 의 미관측 가드가 `screen_seq != 0` 으로
                         // 「화면을 봤다」를 판단하므로, 지난 프로세스의 값이 남으면 새 프로세스에서 화면을
@@ -2568,6 +2569,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_screen_visible_blocker = detection.visible_blocker;
     term.agent_screen_visible_idle = detection.visible_idle;
     term.agent_screen_origin = maru.session.agent_state_arbiter.originOfRule(detection.rule_id);
+    term.agent_screen_rule = detection.rule_id; // 진단 전용(§1.7) — 어느 화면 규칙이 상태를 냈는지
     // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
     //
     // ⚠️ **훅이 있는 Term 에서는 여기서 찍지 않는다**(§1.3). 예전에는 이 함수가 훅 Term 에서 아예 안
@@ -2639,11 +2641,12 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     if (verdict.state != before) {
         if (displayed) self.metal_dirty = true;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
-            "arbitrate {s} -> {s} origin={s} rule={s} hook={s} screen={s} children={d}",
+            "arbitrate {s} -> {s} origin={s} rule={s} hook={s} screen={s} screen_rule={s} idle={} children={d}",
             .{
                 @tagName(before),                      @tagName(verdict.state),
                 @tagName(verdict.origin),              verdict.rule,
                 @tagName(term.agent_hook_state),       @tagName(term.agent_screen_state),
+                term.agent_screen_rule,                term.agent_screen_visible_idle,
                 term.agent_hook_progress.childCount(),
             },
         );

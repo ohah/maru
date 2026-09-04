@@ -113,6 +113,12 @@ pub fn Model(comptime Rt: type) type {
             /// 중재가 여러 번 불릴 수 있어(원격 채널 드레인 + 폴링 소비자) 호출을 세면 C2 임계가 몇 배
             /// 빨리 온다.
             agent_screen_seq: u64 = 0,
+
+            /// 화면 판정이 **어느 규칙으로** 그 상태를 냈는지(`agent_observer` 의 `rule_id`).
+            /// 진단 전용이다 — 판정에는 안 쓴다. 전이가 없으면 화면 로그가 안 찍혀서
+            /// 「화면이 왜 idle 인가」를 물을 수단이 없었다(2026-09-04 실측에서 막혔다).
+            /// comptime 규칙 리터럴이라 수명이 프로그램 전체다.
+            agent_screen_rule: []const u8 = "",
             /// 이 Term 의 중재기. C2 의 연속 셈을 들고 있어 **Term 마다 하나**여야 한다.
             agent_arbiter: agent_state_arbiter.Arbiter = .{},
             /// 마지막 판정의 출처·규칙(§1.4 — 진단용). 배지 옆에 소스를 밝힐 수 있어야 버그 보고가 성립한다.

@@ -97,7 +97,7 @@ fn derive(authenticated: anytype, file: anytype, assets_owner: anytype, forbidde
     for (candidate.assets) |expected| {
         var found: ?AssetObservation = null;
         for (held.assets) |observed| if (observed.role == expected.role) {
-            found = observed;
+            found = .{ .role = observed.role, .path = observed.path, .device = observed.device, .inode = observed.inode, .size = observed.size, .sha256 = observed.sha256 };
             break;
         };
         const observed = found orelse return error.BindingMismatch;

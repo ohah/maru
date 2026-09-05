@@ -45,7 +45,10 @@ test "p5c3c-3b boundary keeps one integrated owner and exactly one product CLI c
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    // 8 MiB — `src/main.zig` 를 읽는 다른 판정자 다섯과 같은 상한이다. 여기만 1 MiB 로 남아 있다가
+    // main.zig 가 1,051,816 바이트가 되자(2026-09-05, c7c3f438f) `StreamTooLong` 으로 main 이 빨개졌다.
+    // 이 값은 예산이 아니라 안전장치다 — 파일 크기 예산은 이 판정자의 관심사가 아니다.
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(8 * 1024 * 1024));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

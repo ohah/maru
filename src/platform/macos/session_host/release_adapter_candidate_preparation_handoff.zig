@@ -210,9 +210,13 @@ const Fault = struct {
     }
 };
 
-const Semantic = struct {
+pub const Semantic = struct {
     manifest_name: [std.fs.max_name_bytes:0]u8,
     manifest_name_len: usize,
+
+    pub fn manifestName(self: *const @This()) []const u8 {
+        return self.manifest_name[0..self.manifest_name_len];
+    }
 };
 
 const Working = struct {
@@ -268,7 +272,7 @@ fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]
         return error.TooLarge;
     const total = std.math.add(u64, observations[0].size, observations[1].size) catch return error.PreparationTooLarge;
     if (total > max_preparation_bytes) return error.PreparationTooLarge;
-    const semantic = try validateSemantic(allocator, sources, observations);
+    const semantic = try validateHeldSemantic(allocator, sources, observations);
 
     var parent_leaf: [std.fs.max_name_bytes:0]u8 = undefined;
     const parent = try openParent(destination, &parent_leaf);
@@ -428,7 +432,7 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
     try files.requireDistinct(&identities);
 }
 
-fn validateSemantic(allocator: std.mem.Allocator, sources: Sources, observations: [role_count]files.ExecutableObservation) Error!Semantic {
+pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, observations: [role_count]files.ExecutableObservation) Error!Semantic {
     var evidence_input = try sources.evidence.file.readHeldAlloc(allocator, sources.evidence.path, evidence_mod.max_evidence_bytes);
     defer evidence_input.deinit(allocator);
     var manifest_input = try sources.manifest.file.readHeldAlloc(allocator, sources.manifest.path, manifest_mod.max_manifest_bytes);

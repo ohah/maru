@@ -172,7 +172,10 @@ const inventory = [_]Entry{
     // 44: 연결이 없으면 목록이 축의 사유 대신 연결을 말한다 — 그 자리의 폴백 문구다.
     .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 50 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
-    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8 },
+    // 9: `sectionOf` 가 namespace 마다 화면 헤더를 답하는데, 그 목록도 같은 comptime 테이블에서
+    // 쓰인다 — `system_theme`(M13 시스템 다크/라이트)이 늘면서 한 줄이 늘었다. **줄이 아니라
+    // 표면 전체가 걸린 문제다**: 모바일이 OS 로케일을 받는 슬라이스가 이 원장을 통째로 0 으로 만든다.
+    .{ .path = "src/platform/mobile/mobile_config.zig", .count = 9 },
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —
     // 사용자 화면이 아니므로 `ui.language` 를 따를 이유가 없다.
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .process = .{ .set_lang = 1 } },

@@ -23,7 +23,7 @@
         <activity android:name="dev.maru.MaruActivity"
                   android:label="MaruChrome"
                   android:screenOrientation="unspecified"
-                  android:configChanges="orientation|keyboardHidden|screenSize"
+                  android:configChanges="orientation|keyboardHidden|screenSize|uiMode"
                   android:windowSoftInputMode="adjustResize"
                   android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="maruchrome" />

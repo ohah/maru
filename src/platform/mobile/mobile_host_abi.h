@@ -218,6 +218,11 @@ void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 /// 자리는 iOS `Library/Application Support/maru/config`, Android `filesDir/config`. 파일이 없으면
 /// 안 부르면 된다(기본값으로 돈다). 다시 부르면 통째로 갈아 끼운다.
 void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
+
+/* 시스템 외관(다크/라이트)을 코어에 알린다 — `is_dark != 0` 이면 다크. **생성 직후 한 번, 그리고
+   바뀔 때마다** 부른다(데스크톱 F2-9 의 `maru_app_set_system_appearance` 와 같은 계약).
+   `theme.follow-system` 이 꺼져 있으면 코어가 무시한다 — host 는 그 설정을 안 본다. */
+void maru_mobile_set_system_appearance(unsigned int is_dark);
 /// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
 /// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.
 ///

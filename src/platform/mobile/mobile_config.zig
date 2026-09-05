@@ -52,6 +52,28 @@ pub const FontConfig = struct {
     };
 };
 
+/// 시스템 외관(다크/라이트)을 따라가는 설정 셋. **데스크톱 F2-9 를 그대로 빌린다** — 키 이름도
+/// 뜻도 같다(`theme.follow-system`·`theme.preset-light`·`theme.preset-dark`).
+///
+/// **그릇만 여기서 만든다.** 데스크톱은 이 셋이 최상위 스칼라(`config/theme.zig` 의 `Config`
+/// 직속)라 통째로 빌릴 sub-struct 가 없다. `Meta.key` 로 전체 키를 명시하는 방식까지 데스크톱과
+/// 같게 두어, 파일에 적히는 글자가 두 곳에서 같다.
+pub const SystemThemeConfig = struct {
+    follow_system: bool = false,
+    preset_light: theme.ThemePreset = .solarized_light,
+    /// **데스크톱은 `.maru` 인데 여기는 `catppuccin_mocha` 다.** 모바일 기본 배경(`#1e1e2e`)이
+    /// 그 프리셋의 배경과 **같아서**, 켜는 순간 화면이 안 튄다 — `.maru`(`#101010`)로 두면 켜자마자
+    /// 어두워진다. 「기기가 다르면 기본값도 다르다」(계약 §4.5)가 색에도 걸리는 그 자리이고,
+    /// 위 `Config.theme` 이 데스크톱 기본을 안 빌린 것과 같은 이유다.
+    preset_dark: theme.ThemePreset = .catppuccin_mocha,
+
+    pub const schema = .{
+        .follow_system = theme.Meta{ .key = "theme.follow-system", .doc = .cfg_theme_follow_system, .widget = .toggle },
+        .preset_light = theme.Meta{ .key = "theme.preset-light", .doc = .cfg_theme_preset_light, .widget = .dropdown },
+        .preset_dark = theme.Meta{ .key = "theme.preset-dark", .doc = .cfg_theme_preset_dark, .widget = .dropdown },
+    };
+};
+
 pub const Config = struct {
     /// 빌린다 — 색 세트는 데스크톱과 뜻이 같고, `theme.preset` 이 이 타입을 통째로 돌려준다.
     ///
@@ -69,6 +91,7 @@ pub const Config = struct {
     cursor: theme.CursorConfig = .{},
     font: FontConfig = .{},
     scrollback: ScrollbackConfig = .{},
+    system_theme: SystemThemeConfig = .{},
 };
 
 /// 등록한 서버 하나. **자격증명은 없다** — 개인키는 Keystore·앱 전용 파일에 있고 여기엔 그것을
@@ -345,6 +368,7 @@ fn sectionOf(comptime ns: []const u8) []const u8 {
     if (std.mem.eql(u8, ns, "cursor")) return maru.i18n.tIn(.ko, .set_section_cursor);
     if (std.mem.eql(u8, ns, "font")) return maru.i18n.tIn(.ko, .mob_appearance);
     if (std.mem.eql(u8, ns, "scrollback")) return maru.i18n.tIn(.ko, .set_section_terminal);
+    if (std.mem.eql(u8, ns, "system_theme")) return maru.i18n.tIn(.ko, .mob_appearance);
     return maru.i18n.tIn(.ko, .set_section_other);
 }
 
@@ -352,6 +376,9 @@ fn sectionOf(comptime ns: []const u8) []const u8 {
 /// 내면 눌러도 아무 일이 안 나는 줄이 된다(그게 PoC 의 문제였다). 그 줄은 편집 수단이
 /// 생기는 슬라이스에서 함께 낸다.
 pub const rows: []const Row = blk: {
+    // 스키마 줄이 늘면 comptime 분기 예산이 먼저 바닥난다(`dashed` 의 글자 순회가 줄마다 돈다).
+    // **값이 아니라 한도라 넉넉히 준다** — 모자라면 컴파일이 서고, 남아도 산출물은 같다.
+    @setEvalBranchQuota(20000);
     // **스키마 밖의 키 하나를 손으로 낸다.** `theme.preset` 은 색 하나가 아니라 세트를 통째로
     // 까는 명시 가지라(계약 §3) 스키마 반영으로는 안 나온다. 그런데 사용자가 가장 먼저 찾는
     // 설정이고 파서가 이미 받으므로, 여기 한 줄만 예외로 둔다 — 예외가 늘면 그때 스키마 쪽에

@@ -17400,8 +17400,10 @@ test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 �
 
     // 예산(4ms)을 한 번에 못 끝낼 만큼 조밀한 문서를 만든다.
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    var i: usize = 0;
-    while (i < 6000) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+    // 6,000 줄을 **한 번에** 넣는다. 한 줄씩 6,000 번 넣던 때는 증분 경로가 매번 돌아 이 test 하나가
+    // 45 초(CI)였다 — 「예산을 한 번에 못 끝낼 만큼 조밀하다」는 조건에 몇 번에 넣었는지는 없다.
+    const dense_line = "pub fn f() void { const s = \"abc\"; _ = s; }\n";
+    _ = insertText(fx.session, fx.term, dense_line ** 6000);
 
     // 여는 경로를 다시 태운다 — 위 삽입은 증분 경로라 열기와 다르다.
     const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
@@ -17442,8 +17444,10 @@ test "ES22 파싱이 남아 있으면 다음 프레임을 부른다 — idle ski
     defer fx.deinit(allocator);
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    var i: usize = 0;
-    while (i < 6000) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+    // 6,000 줄을 **한 번에** 넣는다. 한 줄씩 6,000 번 넣던 때는 증분 경로가 매번 돌아 이 test 하나가
+    // 45 초(CI)였다 — 「예산을 한 번에 못 끝낼 만큼 조밀하다」는 조건에 몇 번에 넣었는지는 없다.
+    const dense_line = "pub fn f() void { const s = \"abc\"; _ = s; }\n";
+    _ = insertText(fx.session, fx.term, dense_line ** 6000);
     const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);

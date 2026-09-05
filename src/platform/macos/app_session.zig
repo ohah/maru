@@ -77393,16 +77393,20 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
         .transcript_path = path,
     });
     {
+        // 폴러가 파일이 자란 것을 알아채면 바로 넘어간다. 무조건 50,000 tick 을 돌리던 때는 이 test 하나가
+        // 31 초(CI)였다 — 기다리는 건 tick 수가 아니라 「갤러리가 따라왔는가」다. 못 따라오면 끝까지 돌고
+        // 아래 물음이 그대로 실패한다.
         var spins: usize = 0;
-        while (spins < 50_000) : (spins += 1) _ = session.tick() catch {};
+        while (spins < 50_000 and session.image_gallery.count() < 2) : (spins += 1) _ = session.tick() catch {};
     }
 
     // ── ② 갤러리를 떠났다가 다시 들어온다.
     dock_ops.setDockView(session, .agent_sessions);
     dock_ops.setDockView(session, .image_gallery);
     {
+        // 다시 들어온 뒤 재구축이 «끝나기»까지 기다린다 — 도는 중에 읽으면 낡은 값과 구분이 안 된다.
         var spins: usize = 0;
-        while (spins < 50_000) : (spins += 1) _ = session.tick() catch {};
+        while (spins < 50_000 and (!session.image_gallery.built or session.image_gallery.count() < 2)) : (spins += 1) _ = session.tick() catch {};
     }
 
     // **여기가 이 test 의 물음이다.** 2 장이면 갤러리가 따라온 것이고, 1 장이면 낡은 것이다.
@@ -77781,7 +77785,12 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
     try tmp.dir.deleteFile(io, "s.jsonl");
     {
         var spins: usize = 0;
-        while (spins < 100_000) : (spins += 1) _ = session.tick() catch {};
+        // 이 test 는 «다시 훑지 않는다»를 묻는 부정 판정이라 조건으로 멈출 수 없다 — 대신 폴러가 다시
+        // 훑을 기회(신선도 간격 500 ms)를 세 번 넘게 «시간으로» 준다. 무조건 100,000 tick 은 21 초(CI)였다.
+        const started_ns = std.Io.Clock.real.now(session.io).nanoseconds;
+        while (spins < 100_000 and
+            std.Io.Clock.real.now(session.io).nanoseconds - started_ns < 1_500 * std.time.ns_per_ms) : (spins += 1)
+            _ = session.tick() catch {};
     }
     try std.testing.expect(!session.image_gallery.scanning());
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());

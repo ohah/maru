@@ -2751,6 +2751,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `maru.session-host-release-aggregate-process-perf.v1` canonical diagnostic JSON으로 남기고 strict parser가 key 순서·count·trailing
   bytes를 독립 판정한다. 이 값은
   release evidence나 latency budget이 아니며 live GitHub bundle/workflow와 frozen signed U5 E2E는 후속 범위다.
+  `test-session-host-release-adapter-live-workflow-phase`는 candidate pin→candidate bundle→draft+authoring→authored bundle→aggregate
+  prepare→별도 process finalize→publish+release attestation→aggregate cleanup의 여덟 단계를 pointer-free reducer의 closed event
+  table로 고정한다. 모든 정상 prefix와 단계별 실패, skip·중복·역순을 전수 검사하고 draft mutation 전 local failure,
+  draft 전 cleanup failure의 cleanup-required, draft mutation 뒤 audit-required, post-publish cleanup failure의 cleanup-required를
+  구분한다. 모든 index/outcome/draft/aggregate/publication bit 조합을 전수해 noncanonical state는 event 적용 전 mutation 0으로 거부한다.
+  aggregate는 prepare 뒤 failure에서
+  보존되고 publish 및 release attestation 성공 전에는 cleanup event를 받을 수 없다. 이 gate는 ordering·terminal classification의
+  SSOT만 닫으며 concrete executable owner, action bundle pathname handoff, release workflow와 frozen signed U5 E2E는 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.
   verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest가 열거한

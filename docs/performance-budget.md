@@ -61,7 +61,8 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 | required 컨텍스트 | 생성 워크플로 · job | 실행 조건 |
 | --- | --- | --- |
-| `check` | ci.yml `check` | 매 PR(ubuntu). **항상 실행**하되 범위를 좁힌다 — `code`면 fmt-check·unit·e2e·oracle·stress·boundary·build, 문서 전용이면 `check-config-docs`만, web 전용이면 검사 없음. |
+| `check` | ci.yml `check` | 매 PR(ubuntu). **항상 실행**하되 범위를 좁힌다 — `code`면 fmt-check·unit·e2e·oracle·stress·build(경계는 아래 잡), 문서 전용이면 `check-config-docs`만, web 전용이면 검사 없음. |
+| `check-boundaries` | ci.yml `check-boundaries` | 매 PR(ubuntu). `check` 에서 갈라낸 경계 게이트 — `code`면 `mise run check-boundaries`, 아니면 검사 없음. 자기 러너를 쓰는 이유는 .mise.toml `check-without-boundaries` 주석. |
 | `require label and assignee=ohah` | pr-metadata.yml `require-label-and-assignee` | 매 PR. 라벨 1개 이상 + assignee=ohah. |
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |

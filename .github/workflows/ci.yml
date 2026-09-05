@@ -132,7 +132,8 @@ jobs:
         run: |
           set -eu
           if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
-            mise run check
+            # `check-boundaries` 는 아래 별도 잡이 자기 러너에서 돈다(.mise.toml 의 그 태스크 주석).
+            mise run check-without-boundaries
           elif [ "$DOCS" = "true" ]; then
             echo "문서 전용 변경 — Zig 게이트 대신 문서 드리프트와 문서 간 링크만 검사한다"
             mise run check-config-docs
@@ -188,6 +189,62 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+  # `check` 에서 갈라낸 경계 게이트. 왜 가르는지는 .mise.toml `check-without-boundaries` 주석이 단일
+  # 출처다 — 요지는 «CPU 덩어리 하나가 다른 13 개 태스크와 4 코어를 나눠 쓰느라 825 s 걸린다»(실측).
+  # 게이트 조건·러너·캐시 형태는 `check` 와 같다. 캐시 키만 자기 것을 쓰고, 첫 실행은 `check` 의 캐시로
+  # 폴백한다(내용이 같은 `.zig-cache` 라 유효하다).
+  #
+  # **필수 체크다.** `check` 에서 빠졌으므로 이 잡이 required 가 아니면 경계 실패가 머지를 막지 못한다 —
+  # docs/performance-budget.md 「필수 CI 체크」 표와 branch protection 을 함께 움직인다.
+  check-boundaries:
+    name: check-boundaries
+    needs: changes
+    if: ${{ github.event.pull_request.draft != true && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-check-boundaries-
+            zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-check-
+      - name: Run the boundary gates
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: |
+          set -eu
+          if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
+            mise run check-boundaries
+          else
+            echo "코드가 안 바뀐 변경 — 경계 게이트를 돌릴 것이 없다"
+          fi
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes

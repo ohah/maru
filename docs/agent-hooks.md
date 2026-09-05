@@ -480,6 +480,8 @@ A 경로(훅이 없어 화면이 세운 것)까지 「뒤집혔다」가 되는�
 | 종류 전환 호출 | `pollAgentKinds` 가 그 리셋을 **실제로 부른다**(제품 경로) | ✅ `AK2` |
 | 화면 liveness | 훅 running + 진행 근거 없음 + **출력 있음** 이 100 회면 한 번 알린다 | ✅ `AR-blind` |
 | liveness 비침습 | 그 기록이 상태·출처·규칙을 **바꾸지 않는다** | ✅ `AR-blind 기록은…` |
+| 실제 화면 전수 | 캡처한 chrome 구조 다섯이 기대 상태로 읽힌다 | ✅ `실제 화면 fixture 전수…` |
+| fixture 커버리지 | provider × 상태 조합에 빈칸이 없다 | ✅ `실제 화면 fixture: provider…` |
 
 **`agent_kind` 전환 리셋은 이제 잠겨 있다**(2026-09-05, `AK1`). 그 분기는 `pollAgentKinds`가 실제
 foreground 프로세스를 열거해야 닿아 제품 테스트로 몰기 어려웠는데, 리셋을

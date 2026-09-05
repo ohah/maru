@@ -126,7 +126,12 @@ composer를 계속 열어 둔다(실측). 그래서 codex는 실행 footer 문�
 문구를 바꿀 때 “프롬프트도 아니고 실행도 아닌” 화면이 생겨 판정이 폴백으로 떨어진다.
 
 그 공유 discriminator는 문자열 조합이 아니라 **한 줄의 모양**으로 적는다(실측 `• Working (3s • esc to interrupt)` →
-“불릿으로 시작하고 `working`과 `esc to interrupt`를 함께 담은 줄”). 근거는 두 실패를 동시에 막아야 한다는 것이다.
+“불릿으로 시작하고 `esc to interrupt`를 담은 줄”). 근거는 두 실패를 동시에 막아야 한다는 것이다.
+
+> **2026-09-05 정정**: 예전에는 `working` 까지 **함께** 요구했는데, 그러면
+> `• Waiting for background terminal (23m 27s • esc to interrupt)` 를 **진행 중인데 놓친다**(실측으로 잡았다).
+> `•` 는 codex 의 **범용 마커**라 완료(`• Ran …`·`• Waited …`·`• Explored`)와 대화 답변까지 같은 기호를 쓰고,
+> 그중 **`esc to interrupt` 를 가진 것만** 진행이다 — 60 초 관측에서 그 조합은 `Working`·`Waiting` 둘뿐이었다.
 
 - 화면 전체에서 여러 문구를 `all`로 요구하면 **서로 다른 줄의 조각을 조합**한다. 에이전트가 그 표현을 여러 줄에 걸쳐
   설명하기만 해도 실행 chrome으로 오인된다.
@@ -134,8 +139,14 @@ composer를 계속 열어 둔다(실측). 그래서 codex는 실행 footer 문�
   밀리는 순간 running 근거가 사라지고 아래 composer가 **근거 있는 idle**을 세운다. 작업 중인 세션이 turn 내내 “대기중”으로
   보이는 쪽이 거짓 running보다 나쁘다.
 
-한 줄 모양으로 지정하면 두 실패가 함께 사라진다. claude에는 이 좁히기가 필요 없다 — claude는 실행 chrome이 프롬프트
-박스 **아래**에 오므로 규칙을 `footer` region으로 자르는 편이 더 강하다. 반대로 `screen`으로 두면 사용자가 composer
+한 줄 모양으로 지정하면 두 실패가 함께 사라진다.
+
+> **2026-09-05 정정 — claude 의 배치가 반대다.** 예전에는 「claude 는 실행 chrome 이 프롬프트 박스 **아래**에
+> 오므로 `footer` region 으로 자르는 편이 더 강하다」고 적었는데, 실측하니 진행 상태줄(`✽ Mulling… `)이
+> 입력창 `❯` **위**에 있었다(스피너 10 행 · 프롬프트 13 행). 게다가 그 자리의 `esc to interrupt` 자체가
+> 사라져 `footer` 규칙이 통째로 안 걸렸다. 그래서 claude 는 **`screen` region + 스피너 줄 게이트**로 잡고,
+> 「아래가 최신」 위치 규칙에 지지 않도록 그 규칙에만 `beats_position` 을 준다(계약 §1.1).
+> 즉 **provider 배치는 버전에 따라 바뀐다** — region 선택을 고정된 사실로 적지 않는다. 반대로 `screen`으로 두면 사용자가 composer
 본문에 그 문구를 타이핑하는 것만으로 위치 tiebreak가 실행 chrome 손을 들어 준다(idle 규칙의 위치는 프롬프트 **라인 시작**
 offset이라 본문 안 문구가 늘 더 아래다). 즉 **provider 배치에 맞는 좁히기 수단이 다르다**: claude는 구조 region, codex는
 한 줄 모양.

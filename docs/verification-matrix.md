@@ -2740,6 +2740,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   검증한다. directory/leaf/artifact/CLI 전후 drift, role 교환, duplicate inode, copied/pre-owned/alias, deadline·child·allocation 전
   fail-index는 publication 0이고 durable bytes와 descriptor count를 보존한다. 이 gate는 process-independent reopen/semantic handoff 계약까지
   닫지만 live workflow의 process 실행/IPC, 실제 GitHub bundle과 frozen signed U5 제품 E2E는 후속 범위다.
+  `test-session-host-release-adapter-candidate-aggregate-process`는 실제 release validator executable을 서로 다른 prepare/finalize
+  child PID로 실행하고 첫 child의 정상 reap 뒤에만 둘째를 spawn한다. IPC는 canonical aggregate directory pathname 하나뿐이며
+  inherited non-stdio fd와 process-local owner 전달은 0이다. 두 aggregate command는 trusted bootstrap/context/CLI를 공유하되
+  `GH_TOKEN` lookup·전달이 0이고 finalize verifier에는 exact `GH_PROMPT_DISABLED=1`만 보낸다. actual temporary filesystem과
+  test-owned verifier로 fixed five-leaf handoff와 four-call semantic order를 검증한다. actual child 행은 missing/hostile token,
+  기존 destination, inventory 오염, verifier 실패·timeout, CLI 교체와 artifact mutation의 후속 phase/publication 0 및 durable-byte
+  보존을 확인하고 exhaustive mutation checkpoint는 handoff/reopen component gate가 소유한다. ReleaseFast 20회 actual process pair는 prepare/finalize/handoff-gap/total의
+  median·p95·max, 실패 수, distinct PID pair, parent FD delta와 residue를 exact
+  `maru.session-host-release-aggregate-process-perf.v1` canonical diagnostic JSON으로 남기고 strict parser가 key 순서·count·trailing
+  bytes를 독립 판정한다. 이 값은
+  release evidence나 latency budget이 아니며 live GitHub bundle/workflow와 frozen signed U5 E2E는 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.
   verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest가 열거한

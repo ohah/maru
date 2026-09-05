@@ -2986,6 +2986,63 @@ durable bytes 보존, fake verifier seam의 test-only source boundary를 고정�
 건드리지 않는다. 이 단계는 process-independent storage·semantic handoff 계약을 닫지만
 live release workflow의 두 process 실행/IPC와 실제 GitHub-issued bundle, frozen signed U5 제품 E2E는 아직 완료하지 않는다.
 
+### 11.51 release validator의 실제 prepare/finalize process 경계와 실측
+
+§11.49와 §11.50을 제품에서 같은 process의 연속 함수 호출로 조립하지 않는다. 기존
+`maru-session-host-release-validator` executable에 닫힌 `prepare-candidate-aggregate`와
+`finalize-candidate-aggregate` command를 추가하고, 첫 command가 정상 종료한 뒤에만 별도 invocation의 두 번째 process를
+시작한다. 둘 사이의 IPC는 stdout, inherited descriptor, pointer, process-local receipt 또는 환경변수가 아니라
+`prepare-candidate-aggregate`가 배타 게시한 canonical absolute aggregate directory pathname 하나다. finalize process는 그
+pathname을 §11.50의 새 `ReopenedAggregate`에 넣어 독립적으로 다시 열며, prepare process의 PID·fd·owner bytes를 받지 않는다.
+
+두 command는 기존 `release_adapter_contract`와 `release_adapter_executable_bootstrap`의 repository/tag/GitHub-hosted runner/source
+commit/run-attempt/checkout 전 pinned CLI 교차결속을 그대로 통과한다. prepare는 evidence와 fixed four-role local bundle의 canonical
+absolute source pathname, absent aggregate destination만 받고 각 source parent를 직접 유도해 새 `PinnedReleaseFile`로 pin한 뒤
+`DurableAggregate.promote`와 `closeRetaining`을 완료한다. caller-provided role 배열·basename·digest·size·성공 boolean·source root는
+받지 않는다. finalize는 aggregate directory와 candidate DMG·frozen executable·manifest pathname만 받고 evidence/bundle path와
+subject는 §11.50 fixed inventory에서 유도한다. 두 command 모두 local bundle 경로이며 GitHub API를 호출하지 않으므로
+`GH_TOKEN`을 읽거나 전달하지 않는다. finalize verifier child environment도 §11.50과 같이 exact `GH_PROMPT_DISABLED=1`뿐이다.
+기존 API-backed `pre-publish|verify-predecessor|publish-candidate`만 exact `GH_TOKEN` leaf를 선행한다.
+
+두 command의 option vocabulary도 `release_adapter_contract` 한 곳에서 닫는다. 공통 필수 option은 exact
+`--repo`, `--tag`, `--github-cli`, `--github-cli-sha256`이다. prepare 전용 필수 option은 exact
+`--evidence`, `--candidate-dmg-bundle`, `--candidate-frozen-bundle`, `--evidence-bundle`, `--manifest-bundle`, `--aggregate`이고,
+finalize 전용 필수 option은 exact `--aggregate`, `--dmg`, `--frozen-executable`, `--manifest`다. 다른 phase의 option, duplicate,
+누락, relative/control/trailing-slash path, 어느 두 pathname의 alias는 parse 단계에서 거부한다. `--aggregate`는 prepare에서 absent
+final directory이고 finalize에서 existing owner-only directory다. bootstrap은 aggregate command에도 context/runner/CLI를 먼저
+결속하지만 local source/artifact pathname은 command별 product owner가 no-follow로 열기 전까지 관측하지 않는다.
+
+prepare 성공은 다섯 source owner와 aggregate owner의 descriptor를 닫고 durable directory만 남긴 뒤 process exit 0으로 끝난다.
+prepare 실패는 complete final aggregate를 성공으로 남기지 않으며, cleanup이 확정되지 않으면 성공으로 바꾸지 않는다. finalize
+성공은 네 semantic verification과 마지막 full fence 뒤 reopened descriptor를 닫고 process exit 0으로 끝나되 aggregate bytes를
+삭제하지 않는다. finalize 실패도 durable aggregate를 수정·삭제하지 않는다. 따라서 retry는 같은 pathname을 새 process에서 다시
+검증할 수 있고, 성공 aggregate의 최종 삭제 권위는 후속 publication/retention slice가 별도로 소유한다. command dispatch는
+unknown/phase 교환/부분 option에서 filesystem·token·child 실행 0이며, aggregate command에서 token reader 호출이 관측되면 실패다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-process`는 harness-owned `mkdtemp` 아래 실제 validator executable과
+test-owned executable verifier를 사용한다. parent가 prepare child의 정상 종료를 reap한 뒤 finalize child를 시작하고 두 PID가
+nonzero·서로 다르며, prepare exit 전에 finalize spawn이 0이고, inherited non-stdio fd가 0임을 확인한다. 성공 시 다섯 durable
+leaf와 네 verifier invocation의 fixed order/subject/context가 맞고 두 process 종료 뒤 fd·child residue가 0이어야 한다. actual
+child 행은 missing token/hostile ambient token, 기존 destination, finalize inventory 오염, verifier 실패·timeout, prepare 뒤 CLI
+교체와 verifier 중 artifact mutation에서 후속 phase 또는 verifier publication 0·durable-byte 보존을 확인한다. source mutation의
+모든 timing checkpoint와 pathname/CLI/artifact drift의 완전한 fault matrix는 각각 §11.49·§11.50 component gate가 소유하고, 이
+process gate가 그 조합을 더 넓게 주장하지 않는다. fake verifier는 test executable일 뿐 product module의
+injected seam이 아니며 실제 GitHub release·credential·앱 session-host registry·manifest·socket·process를 읽거나 바꾸지 않는다.
+
+같은 gate의 ReleaseFast 실측 행은 성공 workflow를 20회 새 prepare/finalize process pair로 실행한다. parent의
+`CLOCK_MONOTONIC`으로 `prepare spawn→reap`, `finalize spawn→reap`, `prepare reap→finalize spawn`, 전체 구간을 각각 기록하고
+median·p95·max, 실패 수, 서로 다른 PID pair 수, 전후 parent FD delta와 aggregate/staging residue를 canonical diagnostic JSON으로
+출력한다. schema는 exact `maru.session-host-release-aggregate-process-perf.v1`이고 key 순서는
+`schema`, `iterations`, `successful_pairs`, `distinct_pid_pairs`, `prepare_ns`, `handoff_gap_ns`, `finalize_ns`, `total_ns`,
+`failures`, `parent_fd_delta`, `aggregate_residue`, `staging_residue`다. 네 시간 object는 각각 unsigned decimal
+`median|p95|max`만 가지며 runner stdout의 마지막 non-empty line 하나로 canonical compact JSON을 쓴다. parser는 duplicate·unknown·
+missing key, 순서 drift, trailing bytes, iteration 불일치와 음수 count를 거부한다. `aggregate_residue`는 finalize가 보존한 다섯
+leaf를 확인한 뒤 harness가 그 aggregate를 정리하고 다시 관측한 예상 밖 aggregate 수이고 `staging_residue`도 durable parent의
+예상 밖 staging entry 수이므로 두 성공값은 0이다. 측정값·PID·duration은 release evidence나 성공
+권위에 들어가지 않으며 이 첫 값은 harness와 local filesystem/fixture
+verifier를 포함한 process-boundary baseline이지 실제 GitHub/Apple network 또는 제품 upgrade latency budget이 아니다. 실제
+GitHub-issued bundle 생성과 release workflow step 간 pathname 전달, frozen signed U5 E2E는 다음 live-workflow slice가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

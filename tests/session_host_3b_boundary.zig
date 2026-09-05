@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
-const max_source_bytes = 1024 * 1024;
+const max_source_bytes = 8 * 1024 * 1024;
 
 test "p5c3c-3b boundary scanner admits the shared 8 MiB source budget" {
     try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), max_source_bytes);

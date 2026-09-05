@@ -2845,6 +2845,30 @@ Debug·ReleaseFast에서 검증한다. executable gate는 `publish-candidate`가
 candidate driver 하나만 호출하며 audit graph에 범용 settlement를 적용하지 않음을 검증한다. 이 단계는 live release workflow
 호출과 frozen signed U5 제품 E2E를 아직 완료하지 않는다.
 
+### 11.47 same-run artifact attestation의 local bundle 검증 leaf
+
+trusted release workflow가 `actions/attest`로 방금 발급한 candidate·evidence·manifest attestation은 GitHub API 검색 결과의 전파를
+기다리지 않는다. action이 반환한 absolute `bundle-path`를 입력으로 받는
+`release_adapter_github_attestation.verifyBundleWith`가 `/absolute/gh attestation verify <absolute-artifact> --bundle
+<absolute-bundle>`과 기존 §8의 repository·signer workflow·source/tag·predicate·JSON option만 고정한다. API 조회형 `plan`·`verifyWith`는
+predecessor와 published-release 검증을 위해 그대로 유지하며, bundle 검증 호출과 option 집합을 공유하되 서로 암묵적으로 fallback하지
+않는다.
+
+bundle은 인증된 결과 자체가 아니라 GitHub CLI가 cryptographic verification을 수행할 입력이다. leaf는 artifact·bundle pathname이
+서로 다른 canonical absolute scalar이고 executable·stdout과 alias하지 않음을 먼저 검사한다. child 직전과 직후 pathname vnode를
+고정하는 상위 composition은 후속 절의 final-address `PinnedReleaseFile` owner가 담당한다. 성공 stdout은 API 조회형과 같은
+`parseAndBind`를 통과해야 하므로 exact-one subject 이름/SHA-256, verified timestamp, GitHub OIDC certificate의 repository·workflow·
+source commit·tag·GitHub-hosted runner·exact `run_id`/`run_attempt` 결속이 약해지지 않는다. caller가 bundle의 attestation ID·URL,
+predicate field나 성공 boolean을 별도 권위로 제출할 수 없다.
+
+local bundle 검증은 GitHub REST API token을 쓰지 않는다. child environment는 inherited environment 0과 exact
+`GH_PROMPT_DISABLED=1`만 가지며 `GH_TOKEN`·Apple secret·HOME/PATH를 전달하지 않는다. bundle을 생략하거나 API 조회로 fallback하는
+분기, relative/equal/control-containing pathname, caller option, custom trusted root와 복수 verified result는 terminal failure다.
+`test-session-host-release-adapter-github-attestation`은 API형 18-argument와 bundle형 20-argument의 exact argv, 두 환경의 차이,
+supplied-buffer provenance, bundle path 거부, 실제 child의 `--bundle` 전달과 기존 certificate/statement 거부 행렬을
+Debug·ReleaseFast에서 검증한다. 이 leaf만으로 bundle pathname pin/revalidation, durable evidence handoff, split prepare/finalize driver,
+live workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

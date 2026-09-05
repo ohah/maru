@@ -128,6 +128,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     char _lastErr[64];
     // 주기 관측: 표시 클럭 간격을 모아 한 번 기록한다.
     double _paceLast, _paceMs[MARU_FRAME_PACE_SAMPLES];
+    unsigned long long _idleSkips;  // 안 바뀌어서 GPU 를 건너뛴 tick 수(M14)
     int _paceN, _paceWarm;
     BOOL _paceDone;
     CTFontRef _atlasFont;
@@ -956,8 +957,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
     l.drawableSize = px;
-    id<CAMetalDrawable> d = [l nextDrawable];
-    if (!d) return;
+    // **드로어블은 여기서 안 잡는다**(M14). 한 번 잡으면 되돌릴 수 없어서, 먼저 잡아 두고
+    // 나중에 "안 그린다" 를 못 한다 — 빌드가 끝나 «바뀌었나» 를 안 뒤에 잡는다(Vulkan 획득과
+    // 같은 이유·같은 자리).
 
     // **여기가 핵심**: 레이아웃을 Zig chrome 이 한다. 플랫폼은 크기만 주고 op 을 받는다.
     //
@@ -998,6 +1000,20 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         [self becomeFirstResponder];
         NSLog(@"MARU_INPUT keyboard_raised");
     }
+
+    // **안 바뀌었으면 여기서 끝낸다**(M14). 위의 부작용(config 저장·컨트롤 채널·키보드)은 **다 하고**
+    // 왔다 — 건너뛰면 설정이 사라지고 목록이 안 선다. 빌드도 이미 돌아서 관성·길게 누름 같은
+    // 시간 축은 안 멈춘다.
+    // **페이싱을 재는 동안에는 안 쉰다**(Android 와 같은 규율). 그 측정은 시작할 때 표본을 다
+    // 채우면 끝나므로(`_paceDone`), 그 뒤부터 쉰다.
+    if (!maru_mobile_frame_changed() && _paceDone) {
+        _paceLast = 0;  // 쉰 간격을 표본에 넣으면 MARU_PACE 가 거짓으로 붉어진다
+        _idleSkips++;
+        if ((_idleSkips % 300) == 1) NSLog(@"MARU_IDLE skipped=%llu", (unsigned long long)_idleSkips);
+        return;
+    }
+    id<CAMetalDrawable> d = [l nextDrawable];
+    if (!d) return;
     // **내리는 쪽도 같은 자리에 둔다.** first responder 를 놓으면 키보드가 내려간다 — 다시
     // 필요해지면 위 `keyboard_raise` 가 잡는다(Android `hideKeyboard` 와 대칭).
     if (maru_mobile_take_keyboard_hide()) {

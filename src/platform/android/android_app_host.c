@@ -74,6 +74,7 @@ static struct {
     uint32_t glyph_w, glyph_h;
     // 창이 리사이즈되면 스왑체인을 다시 만들어야 한다. 안 그러면 화면이 영구히 언다.
     int needs_recreate;
+    unsigned long long idle_skips;  // 안 바뀌어서 GPU 를 건너뛴 tick 수(M14 — 로그 판정자)
 
     VkDescriptorSet dset;
     VkBuffer quad_buf;        // draw-list 를 통째로 올리는 자리
@@ -697,20 +698,6 @@ static void drawFrame(void) {
         }
     }
 
-    uint32_t idx = 0;
-    VkResult acq = vkAcquireNextImageKHR(g.dev, g.swap, UINT64_MAX, g.acquire_sem, VK_NULL_HANDLE, &idx);
-    if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
-        // 창이 리사이즈됐다. 다시 안 만들면 **화면이 영구히 언다** — `adjustResize` 와 자동
-        // 키보드가 첫 프레임에 이걸 일으키므로 실기기에서는 켜자마자 멈춘다.
-        g.needs_recreate = 1;
-        return;
-    }
-    // **`SUBOPTIMAL` 은 재생성 사유가 아니다**(M5). 회전 때 우리는 일부러 `preTransform` 을
-    // IDENTITY 로 잡아 합성기에 회전을 맡기는데, 서페이스의 `currentTransform` 은 ROTATE_90 이라
-    // 드라이버가 **매 프레임** "최적이 아니다" 라고 말한다. 그것을 재생성으로 받으면 초당 열아홉
-    // 번씩 스왑체인을 다시 만든다(실측 2026-09-05: 5초에 95회). 진짜 리사이즈는 위의 창 크기
-    // 비교가 잡으므로 이 신호가 없어도 안 놓친다.
-    if (acq != VK_SUCCESS) return;
 
     // **레이아웃은 Zig chrome 이 한다.** 플랫폼은 쓸 수 있는 크기만 넘기고 quad 를 받는다.
     //
@@ -785,6 +772,10 @@ static void drawFrame(void) {
             last_rows = rows;
         }
     }
+    // **안 바뀌었으면 GPU 를 안 쓴다**(M14). 빌드는 이미 돌았으므로 관성·길게 누름 같은 시간 축은
+    // 다 살아 있고, 여기서 그만두는 것은 획득·제출·프레젠트뿐이다. 페이싱 기준도 끊는다 —
+    // 쉰 간격을 표본에 넣으면 `MARU_PACE` 가 거짓으로 붉어진다.
+    const int frame_changed = maru_mobile_frame_changed() != 0;
     pthread_mutex_unlock(&g_bridge_lock);
 
     // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
@@ -800,6 +791,38 @@ static void drawFrame(void) {
     drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
     drainHostKeyDecision(); // 지문 승인·거절도 같은 자리에서 나른다
     driveControlChannel(); // 목록 화면이 원하면 컨트롤 채널을 열고 요청을 나른다
+
+    // **안 바뀌었으면 여기서 끝낸다**(M14). 위의 부작용은 **다 하고** 왔다 — 못 그린 글자 굽기와
+    // config 저장을 건너뛰면 글자가 영영 안 나타나고 설정이 사라진다(그 자리에 먼저 놨다가
+    // 되물렀다). 빌드도 이미 돌아서 관성·길게 누름 같은 시간 축은 안 멈춘다.
+    // **페이싱을 재는 동안에는 안 쉰다.** `MARU_PACE` 는 프레젠트 간격을 재는 판정자라 쉰 간격이
+    // 섞이면 거짓으로 붉어진다. 그 측정은 시작할 때 표본을 다 채우면 끝나므로(`pace_done`), 그
+    // 뒤부터 쉰다 — 판정자도 살고 테스트 전용 스위치도 필요 없다.
+    if (!frame_changed && g.pace_done) {
+        g.last_ms = 0;  // 다음에 그린 프레임이 «쉰 만큼» 을 간격으로 세지 않게(MARU_PACE)
+        g.idle_skips++;
+        if ((g.idle_skips % 300) == 1) LOGI("MARU_IDLE skipped=%llu", (unsigned long long)g.idle_skips);
+        return;
+    }
+
+    // **여기서 GPU 가 시작된다**(M14). 획득은 «바뀐 프레임에만» 한다 — 스왑체인 이미지는 한 번
+    // 가져오면 되돌려줄 수 없어서, 먼저 획득해 두고 나중에 "안 그린다" 를 못 한다. 그래서 빌드와
+    // 부작용(글자 굽기·config 저장·키보드·SSH·컨트롤 채널)을 **먼저** 다 하고 여기 온다.
+
+    uint32_t idx = 0;
+    VkResult acq = vkAcquireNextImageKHR(g.dev, g.swap, UINT64_MAX, g.acquire_sem, VK_NULL_HANDLE, &idx);
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
+        // 창이 리사이즈됐다. 다시 안 만들면 **화면이 영구히 언다** — `adjustResize` 와 자동
+        // 키보드가 첫 프레임에 이걸 일으키므로 실기기에서는 켜자마자 멈춘다.
+        g.needs_recreate = 1;
+        return;
+    }
+    // **`SUBOPTIMAL` 은 재생성 사유가 아니다**(M5). 회전 때 우리는 일부러 `preTransform` 을
+    // IDENTITY 로 잡아 합성기에 회전을 맡기는데, 서페이스의 `currentTransform` 은 ROTATE_90 이라
+    // 드라이버가 **매 프레임** "최적이 아니다" 라고 말한다. 그것을 재생성으로 받으면 초당 열아홉
+    // 번씩 스왑체인을 다시 만든다(실측 2026-09-05: 5초에 95회). 진짜 리사이즈는 위의 창 크기
+    // 비교가 잡으므로 이 신호가 없어도 안 놓친다.
+    if (acq != VK_SUCCESS) return;
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];

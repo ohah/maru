@@ -223,6 +223,18 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
    바뀔 때마다** 부른다(데스크톱 F2-9 의 `maru_app_set_system_appearance` 와 같은 계약).
    `theme.follow-system` 이 꺼져 있으면 코어가 무시한다 — host 는 그 설정을 안 본다. */
 void maru_mobile_set_system_appearance(unsigned int is_dark);
+
+/* 이번 `maru_mobile_build` 가 낸 그림이 **지난 프레임과 다른가**(1=그려야 한다). build 뒤에 읽는다.
+   0 이면 host 는 GPU 작업(획득·제출·프레젠트)을 통째로 건너뛴다 — 터미널은 대부분의 시간이
+   정지 화면이라 여기서 얻는 것이 가장 크다(M14).
+
+   **페이싱을 재는 동안에는 안 쉰다.** `MARU_PACE` 는 프레젠트 간격을 재는 판정자인데, 쉰 간격이
+   섞이면 그 판정이 죽는다(정지 화면에서도 표본을 채우고 있었다). 그 측정은 시작할 때 정해진
+   표본 수만 채우고 끝나므로, host 는 **끝난 뒤부터** 쉰다 — 판정자도 살고 테스트 전용 스위치도
+   필요 없다. 건너뛴 tick 은 기준(`last_ms`)도 끊어 다음 프레임이 «쉰 만큼» 을 간격으로 안 세게 한다.
+
+   빌드 자체는 매 tick 그대로 돈다 — 관성 감쇠·길게 누름 승격이 멈추면 안 되기 때문이다. */
+unsigned int maru_mobile_frame_changed(void);
 /// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
 /// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.
 ///

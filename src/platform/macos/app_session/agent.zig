@@ -713,6 +713,37 @@ pub fn anyAgentRunning(self: *AppSession) bool {
     return false;
 }
 
+/// **에이전트 종류가 바뀌면 지난 프로세스의 관측을 통째로 버린다.**
+///
+/// 여기서 비우는 자리는 전부 「지난 프로세스가 남긴 값」이고, 하나라도 남으면 새 프로세스가 그 값을
+/// 근거로 판정된다. 두 자리가 특히 위험하다:
+///
+/// - `agent_screen_seq` — 권위표 C1 의 미관측 가드가 `screen_seq != 0` 으로 「화면을 봤다」를 판단한다.
+///   남으면 새 프로세스에서 화면을 **한 번도 안 읽었는데 승인 대기가 즉시 풀린다**(적대적 검증이 잡았다).
+/// - `agent_arbiter` — C2 의 연속 셈. 남으면 지난 프로세스의 관측으로 새 프로세스를 접는다.
+///
+/// **호출부에서 분리해 둔 이유는 판정자다.** 이 리셋은 로컬 `classifyAgentProcesses` 경로 안쪽에 있어
+/// 제품 테스트로 도달하기 어려웠고(원격 경로는 `remote_owns_kind` 로 갈린다), 그래서 필드 13 개 중
+/// `agent_state` 하나만 잠겨 있었다. 함수로 꺼내면 나머지 열둘도 직접 잠근다.
+///
+/// ⚠️ **여기에 없는 것**: `metal_dirty` 와 사이드바 재투영은 `self` 가 필요해 호출부에 남겼다.
+pub fn resetAgentObservationForKindChange(term: *Term) void {
+    // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
+    term.agent_state = .unknown;
+    term.agent_hook_state = .unknown;
+    term.agent_screen_state = .unknown;
+    term.agent_screen_visible_blocker = false;
+    term.agent_screen_visible_idle = false;
+    term.agent_screen_rule = "";
+    term.agent_screen_origin = .screen;
+    term.agent_screen_seq = 0;
+    term.agent_arbiter.reset();
+    term.agent_stabilizer.reset();
+    term.agent_screen_generation = 0;
+    term.agent_last_output_ms = 0;
+    term.agent_transcript.reset();
+}
+
 pub fn pollAgentKinds(self: *AppSession) void {
     self.agent_poll_ticks += 1;
     self.agent_observer_poll_ticks += 1;
@@ -788,27 +819,10 @@ pub fn pollAgentKinds(self: *AppSession) void {
                     if (term.agent_kind != prev) {
                         if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                        // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
-                        term.agent_state = .unknown;
-                        term.agent_hook_state = .unknown;
-                        term.agent_screen_state = .unknown;
-                        term.agent_screen_visible_blocker = false;
-                        term.agent_screen_visible_idle = false;
-                        term.agent_screen_rule = "";
-                        term.agent_screen_origin = .screen;
-                        // **관측 카운터도 0 으로 되돌린다.** C1 의 미관측 가드가 `screen_seq != 0` 으로
-                        // 「화면을 봤다」를 판단하므로, 지난 프로세스의 값이 남으면 새 프로세스에서 화면을
-                        // 한 번도 안 읽었는데도 **승인 대기가 즉시 풀린다**(적대적 검증이 잡았다).
-                        term.agent_screen_seq = 0;
-                        // 중재기의 연속 셈도 버린다 — 지난 프로세스의 관측으로 새 프로세스를 접지 않는다.
-                        term.agent_arbiter.reset();
-                        term.agent_stabilizer.reset();
-                        term.agent_screen_generation = 0;
-                        term.agent_last_output_ms = 0;
                         // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
                         // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
                         const had_reply_kind = term.agent_transcript.owned.reply().len > 0;
-                        term.agent_transcript.reset();
+                        resetAgentObservationForKindChange(term);
                         if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
                     }
                 }

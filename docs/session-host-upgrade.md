@@ -3076,6 +3076,32 @@ draft mutation 경계, aggregate 보존과 post-publish-only cleanup을 exhausti
 gate만으로 executable의 prepare/resume publication command, GitHub-issued bundle action output의 pathname 결속,
 `.github/workflows/release.yml` 배선이나 frozen signed U5 제품 E2E가 완료됐다고 주장하지 않는다.
 
+### 11.53 same-run candidate bundle을 pre-draft authority로 소비하는 경계
+
+§11.52의 두 번째 단계가 발급한 candidate DMG와 frozen executable의 local bundle은 GitHub API 검색 결과로 되돌아가지 않는다.
+`release_adapter_candidate_attestation.zig`의 기존 final-address `CandidateAttestation` owner가 별도
+`composeBundlesUntil` 진입점에서 candidate 두 pathname과 action output의 bundle 두 pathname을 받는다. 네 pathname은 canonical
+absolute regular file이며 서로 달라야 한다. owner는 candidate 두 파일을 기존과 같이 pin하고, bundle 두 파일도 role별 16 MiB
+상한으로 no-follow pin한다. candidate와 bundle의 네 inode는 pairwise distinct여야 한다.
+
+DMG→frozen executable 순서의 각 검증은 shared positive deadline 아래 pinned GitHub CLI를 재검증하고, held candidate와 해당 held
+bundle의 pathname·inode·size·SHA를 child 전후에 다시 확인한다. child는 §11.47의 `verifyBundleWith`만 호출하며 artifact와 bundle
+pathname, context에서 유도한 subject basename과 held candidate SHA만 받는다. 환경은 exact `GH_PROMPT_DISABLED=1`이고 `GH_TOKEN`,
+Apple secret, HOME 또는 PATH를 상속하지 않는다. API 조회형 `verifyWith`로 fallback하거나 caller가 token, digest, subject, success
+boolean, attestation ID·URL을 제출하는 경로는 없다.
+
+두 verified observation이 repository·workflow·source commit·tag·run ID/attempt와 exact subject에 결속되고 마지막 candidate·bundle·CLI
+fence 및 deadline을 모두 통과한 뒤에만 기존 `CandidateAttestation`을 게시한다. 성공 직전 bundle descriptor는 닫되 bundle pathname을
+삭제하지 않는다. 후속 aggregate prepare가 같은 pathname을 새 owner로 다시 pin하고 finalize process가 cryptographic verification을
+반복하므로, 닫힌 과거 descriptor나 이 owner가 durable handoff 권위가 되지 않는다. candidate 또는 bundle drift, alias, oversized·empty
+bundle, verifier/CLI/deadline/allocation 실패는 candidate authority publication 0이고 열린 descriptor를 모두 닫는다.
+
+focused gate `test-session-host-release-adapter-candidate-attestation`은 기존 API 경로를 보존하면서 local-bundle 경로의 exact
+DMG→frozen 호출, token-free bundle verifier, 네 파일 distinct identity, 각 child 전후 drift, final fence, copied/pre-owned/alias,
+모든 allocation 실패와 cleanup을 Debug·ReleaseFast에서 검증한다. 이 단계는 same-run candidate attestation을 pre-draft owner가 실제로
+소비할 수 있게 하지만 candidate command의 입력 배선, prepare/resume process 분리, authored evidence/manifest action, aggregate
+handoff, release workflow 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

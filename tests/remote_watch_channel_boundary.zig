@@ -211,3 +211,43 @@ test "감시자는 PATH 처방과 «같은» 굳히기 목록을 받는다" {
     // 목록을 손으로 다시 적지 않는다 — 적었다면 그 문자열이 여기 보인다.
     try std.testing.expect(std.mem.indexOf(u8, spawn_code, "core.hooksPath") == null);
 }
+
+test "설치 계약이 «죽은 계약» 이 아니다 — 제품이 실제로 심는다" {
+    const allocator = std.testing.allocator;
+    const app = try read(allocator, "src/platform/macos/app_session.zig", 8 * 1024 * 1024);
+    defer allocator.free(app);
+    const git = try read(allocator, "src/platform/macos/app_session/git.zig", 4 * 1024 * 1024);
+    defer allocator.free(git);
+
+    // ⚠️ **이 판정자가 있는 이유.** RW2a 가 계약을, RW2b 가 페이로드를 만들어 두고도 **아무도 실행하지
+    // 않았다** — 번들에 네 변종을 싣고 설치 스크립트를 짜 두고, 감시자는 「사람이 손으로 넣은 원격」
+    // 에서만 돌았다. 컴파일러는 그것을 못 잡는다(쓰이지 않는 `pub` 는 오류가 아니다).
+    for ([_][]const u8{
+        "variantFromUname", // 원격이 무엇인지 가른다
+        "assetRelPath", //     번들의 어느 파일인지 가른다
+        "check_script", //     이미 있고 «우리 판» 인지 «실행해» 본다
+        "install_script", //   없으면 심는다
+    }) |symbol| {
+        var found = false;
+        for ([_][]const u8{ app, git }) |src| {
+            if (std.mem.indexOf(u8, src, symbol) != null) found = true;
+        }
+        if (!found) {
+            std.debug.print("설치 계약이 제품에서 안 쓰인다: {s}\n", .{symbol});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // 띄우기 **전에** 본다 — 뒤에 두면 없는 파일을 `exec` 하고 그 실패를 「일시적」으로 읽어
+    // 5 초마다 되풀이한다(증상은 「그냥 안 된다」).
+    const pump = try bodyOf(git, "pub fn pumpRemoteWatch(", "\n}\n", 16384);
+    const install_at = std.mem.indexOf(u8, pump, "self.remote_watch.install").?;
+    const spawn_at = std.mem.indexOf(u8, pump, "ssh_upload.spawnRemoteWatch(").?;
+    try std.testing.expect(install_at < spawn_at);
+    // 확인·심기는 **스레드**가 진다 — ssh 왕복을 틱에서 하면 화면이 선다(업로드와 같은 규율).
+    try std.testing.expect(std.mem.indexOf(u8, app, "std.Thread.spawn(.{}, watchInstallWorker") != null);
+    // 도는 중에는 **또 시작하지 않는다.**
+    try std.testing.expect(std.mem.indexOf(u8, pump, ".running => return") != null);
+    // deinit 이 그 스레드를 기다린다 — 안 기다리면 detach 스레드가 해제된 self 를 만진다.
+    try std.testing.expect(std.mem.indexOf(u8, app, "self.watch_install_inflight;") != null);
+}

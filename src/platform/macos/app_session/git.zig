@@ -296,6 +296,32 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     }
 
     if (!self.remote_watch.started) {
+        // ⚠️ **띄우기 전에 «심겨 있는지» 본다**(RW2c). 예전에는 곧장 `exec` 했고, 그래서 감시자는
+        // **사람이 손으로 넣은 원격에서만** 돌았다 — 번들에 네 변종을 싣고(RW2b) 설치 계약을 만들어
+        // 두고도(RW2a) 아무도 실행하지 않았다. 없는 파일을 `exec` 하면 `127` 이 오고 RW5 가 그것을
+        // 「일시적」으로 읽어 5 초마다 다시 시도하므로, 증상은 「그냥 안 된다」였다.
+        self.drainWatchInstall();
+        switch (self.remote_watch.install) {
+            .ready => {}, // 있다 — 아래에서 띄운다
+            .running => return, // 스레드가 확인·심기 중이다. **또 시작하지 않는다.**
+            .unknown => {
+                var ctl_buf0: [std.fs.max_path_bytes]u8 = undefined;
+                const ctl0 = remoteControlSocketFor(self, dest, &ctl_buf0) orelse {
+                    self.remote_watch.phase = .backoff;
+                    self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+                    return;
+                };
+                self.beginWatchInstall(ctl0, dest);
+                return; // 이번 tick 은 여기까지 — 답은 다음 tick 이 가져간다
+            },
+            .failed => {
+                // 못 심었다. **곧장 다시 시도하지 않는다** — 백오프가 그 간격을 진다.
+                self.remote_watch.phase = .backoff;
+                self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
+                self.remote_watch.install = .unknown; // 다음 차례에 다시 물어본다
+                return;
+            },
+        }
         // ⚠️ **추적할 수 없는 루트는 아예 안 띄운다**(적대적 검증 2026-09-04 7 회차). 띄워 놓고 무엇을
         // 보는지 모르면 위 전환 판정이 영영 안 걸려 옛 감시자가 조용히 남는다. 여기서 걸러야 `started`
         // 가 곧 「기억이 있다」가 된다 — 그래서 그 판정이 `started` 하나만 봐도 된다.

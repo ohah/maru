@@ -130,6 +130,72 @@ pub fn uploadBytes(
 /// 같은 호스트 pane 다섯이 상한이 된다.
 /// 감시자 스트림. `Stream` 과 달리 **stdin 쓰기 끝을 부모가 든다** — 그 fd 를 닫는 것이 조용한
 /// 자식에게 보내는 유일한 정상 종료 신호다.
+/// 원격에서 **셸 구절 하나를 돌리고 끝난다**(RW2c). `uploadBytes` 와 같은 fork+pipe 인데 두 가지가
+/// 다르다: 보낼 바이트가 **없을 수도** 있고(확인만 하는 경우), 돌려주는 것이 경로가 아니라
+/// **종료 코드와 stdout** 이다.
+///
+/// ⚠️ **블로킹이다.** `uploadBytes` 와 같이 **백그라운드 스레드에서만** 부른다 — 이 파일이 io 를 안
+/// 만지는 이유가 그것이다(`app_session.uploadWorker` 의 규율).
+pub fn runRemoteScript(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    script: []const u8,
+    args: []const []const u8,
+    /// 자식 stdin 으로 흘릴 바이트. 없으면 곧장 EOF 를 준다.
+    stdin_bytes: ?[]const u8,
+    out: *[]u8,
+) !c_int {
+    const cmd = try remote_shell.wrapAlloc(allocator, script, args);
+    defer allocator.free(cmd);
+
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var in_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&in_pipe) != 0) return UploadError.PipeFailed;
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) {
+        for ([_]c_int{ in_pipe[0], in_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.PipeFailed;
+    }
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        _ = std.c.dup2(in_pipe[0], 0);
+        _ = std.c.dup2(out_pipe[1], 1);
+        for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(in_pipe[0]);
+    _ = std.c.close(out_pipe[1]);
+
+    if (stdin_bytes) |bytes| writeAllFd(in_pipe[1], bytes);
+    _ = std.c.close(in_pipe[1]); // EOF — 없어도 닫는다(원격이 stdin 을 기다리며 서지 않게)
+
+    out.* = readAllFd(allocator, out_pipe[0]) catch blk: {
+        break :blk try allocator.dupe(u8, "");
+    };
+    _ = std.c.close(out_pipe[0]);
+    return reapPid(pid);
+}
+
 pub const WatchStream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout(논블로킹). 호출자가 읽고 **닫는다**.

@@ -452,11 +452,18 @@ static int initVulkan(ANativeWindow *win) {
     VkSurfaceTransformFlagBitsKHR want_transform =
         (rotated_90 && identity_ok) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
 
-    // **크기는 창에게 묻는다.** `currentExtent` 를 회전 시 어느 공간으로 주는지는 드라이버마다
-    // 갈린다(스펙은 90/270 에서 뒤바뀐 값을 말하지만, 이 에뮬레이터는 화면 방향 그대로 줬다 —
-    // 실측 2026-09-05: 그 값을 뒤바꿨더니 가로 화면에 세로 스왑체인이 섰다). 그리고 **아래
-    // 리사이즈 검사가 `ANativeWindow` 크기와 `g.extent` 를 비교**하므로, 둘이 어긋나면 매 프레임
-    // 재생성으로 화면이 통째로 멈춘다 — 같은 자리에서 온 값을 써야 그 고리가 안 생긴다.
+    // **크기는 창에게 묻는다.** IDENTITY 로 그린다는 것은 「그림을 «화면» 방향으로 낸다」는
+    // 뜻이고, 화면 방향의 크기를 아는 것은 `ANativeWindow` 다 — 정의상 그렇다.
+    // `currentExtent` 는 그 자리에 못 쓴다: 스펙은 90/270 에서 **서페이스(회전 전) 공간**의
+    // 뒤바뀐 값을 말하는데 이 에뮬레이터는 화면 방향 그대로 줬다(실측 2026-09-05 — 스펙대로
+    // 뒤바꿨더니 가로 화면에 세로 스왑체인이 섰다). 즉 이 값은 **드라이버마다 공간이 갈린다.**
+    //
+    // 그래서 스펙의 「`currentExtent` 가 정해져 있으면 `imageExtent` 는 그것이어야 한다」에서
+    // **의도적으로 벗어난다** — 어긋나는 드라이버에서는 `SUBOPTIMAL` 이 나올 수 있고, 그것은
+    // 아래에서 무시한다. 재 본 드라이버는 하나뿐이다(에뮬레이터 `llvmpipe`).
+    //
+    // 덤으로 **아래 리사이즈 검사와 같은 곳에서 온 값**이 된다. 둘이 어긋나면 매 프레임
+    // 「크기가 다르다 → 재생성」이 돌아 화면이 통째로 멈춘다.
     g.extent = caps.currentExtent;
     if (win) {
         const uint32_t ww = (uint32_t)ANativeWindow_getWidth(win);

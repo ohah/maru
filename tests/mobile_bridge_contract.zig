@@ -6686,3 +6686,56 @@ test "세션 목록 스크롤바는 «밀 수 있을 때만» 뜬다" {
     advanceFrame(402, 874, 16);
     try T.expect(bridge.sessScrollbarDrawn());
 }
+
+// ── 가로 + 소프트 키보드: 자리가 없으면 키바를 접는다 (M5)
+//
+// **눈으로만 보이던 것을 여기서 잰다.** 회전을 열자 가로에서 키보드를 올린 프레임이 이렇게
+// 됐다: 본문 격자가 제 사각형(높이 ≈ 0)을 넘어 그려지고, 그 위에 키바가 얹혀 「Last login…」이
+// `esc`·`tab` 밑에 깔렸다. 계약 테스트는 전부 초록이었다 — 격자는 `@max(2, …)` 로 바닥을
+// 지켰고 키바도 제 자리를 잡았을 뿐, **둘이 같은 픽셀을 쓴다는 것**을 아무도 안 봤다.
+
+test "M5 가로: 키바가 들어갈 자리가 없으면 접고, 본문 격자는 안 넘친다" {
+    // 가로 + 키보드에 해당하는 모양(폭은 넓고 높이는 헤더 + 키바보다 얕다). 실측 값에서 왔다 —
+    // 2400x1080 화면에 소프트 키보드가 서면 논리 높이가 이 언저리로 떨어진다.
+    _ = bridge.maru_mobile_build(865, 110, now());
+
+    // 키바는 **안 선다** — `keybar_rect` 가 0 이면 "그 자리 없음" 이다(그 규율은 이미 있었다).
+    try std.testing.expectEqual(@as(u64, 0), bridge.maru_mobile_keybar_rect(0));
+    // 그리고 격자가 제 사각형을 안 넘는다. 이게 진짜 재는 것이다 — 키바를 뺐어도 격자가
+    // 넘치면 이번엔 **앱 바 밑으로** 깔린다.
+    try std.testing.expectEqual(@as(f32, 0), bridge.bodyGridOverflowPx());
+}
+
+test "M5 세로: 자리가 있으면 키바는 그대로 선다" {
+    // 접는 규칙이 **평소를 건드리면 안 된다.** 위 테스트만 있으면 「늘 접는다」로 고쳐도 초록이다.
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(bridge.maru_mobile_keybar_rect(0) != 0);
+    try std.testing.expectEqual(@as(f32, 0), bridge.bodyGridOverflowPx());
+    // 세로에서는 줄이 넉넉하다 — 문턱(2줄)을 겨우 넘긴 것이 아니다.
+    try std.testing.expect(bridge.maru_mobile_term_rows() > 10);
+}
+
+test "M5 문턱: 키바가 «딱 들어가는» 높이와 «한 픽셀 모자란» 높이가 갈린다" {
+    // 문턱을 상수로 적으면 나중에 키 줄이 늘어도 테스트가 안 따라온다. 그래서 **경계를 찾아**
+    // 그 양쪽을 본다 — 접는 자리가 실제로 「본문 두 줄」인지가 여기서 갈린다.
+    var fit_at: u32 = 0;
+    var h: u32 = 80;
+    while (h < 400) : (h += 1) {
+        _ = bridge.maru_mobile_build(865, h, now());
+        if (bridge.maru_mobile_keybar_rect(0) != 0) {
+            fit_at = h;
+            break;
+        }
+    }
+    try std.testing.expect(fit_at != 0); // 어느 높이에서도 안 서면 규칙이 통째로 망가진 것이다
+
+    // 한 픽셀 아래에서는 안 선다.
+    _ = bridge.maru_mobile_build(865, fit_at - 1, now());
+    try std.testing.expectEqual(@as(u64, 0), bridge.maru_mobile_keybar_rect(0));
+    try std.testing.expectEqual(@as(f32, 0), bridge.bodyGridOverflowPx());
+
+    // 딱 그 높이에서는 서고, 그때도 격자는 안 넘친다.
+    _ = bridge.maru_mobile_build(865, fit_at, now());
+    try std.testing.expect(bridge.maru_mobile_keybar_rect(0) != 0);
+    try std.testing.expectEqual(@as(f32, 0), bridge.bodyGridOverflowPx());
+}

@@ -33,12 +33,19 @@ pub const check_script = remote_dir ++ "/" ++ remote_binary ++ " --version 2>/de
 /// - **임시 이름에 받고 `mv` 로 바꾼다.** 중간에 채널이 끊기면 반쪽 파일이 남는데, 그것을 최종
 ///   이름으로 두면 다음 실행이 「있다」로 읽고 **깨진 것을 돌린다.**
 /// - `chmod 755` 는 `mv` **전에** 한다 — 최종 이름이 보이는 순간 이미 실행 가능해야 경쟁이 없다.
+/// ⚠️ **임시 이름은 «프로세스마다» 다르다**(`$$` — 적대적 검증 2026-09-05 10 회차). 고정 이름이면
+/// 창 둘이 같은 원격에 동시에 심을 때 두 `cat` 이 **같은 파일에 섞여 쓰고**, 그 찢어진 바이너리가
+/// `chmod 755` 뒤 제자리로 `mv` 된다. `mv` 가 원자적인 것은 「반쪽 파일을 최종 이름에 두지 않는다」를
+/// 지킬 뿐, **임시 파일 자체가 두 글쓴이를 견디게 하지는 않는다.**
+///
+/// `$$` 는 원격 `sh` 가 편다 — `$HOME` 과 같은 자리다(`remote_shell` 이 작은따옴표로 감싸므로 로컬
+/// 셸이 먼저 먹지 않는다).
 pub const install_script =
-    "d=\"" ++ remote_dir ++ "\"; " ++
+    "d=\"" ++ remote_dir ++ "\"; t=\"$d/" ++ remote_binary ++ ".tmp.$$\"; " ++
     "mkdir -p \"$d\" || exit 1; " ++
-    "cat > \"$d/" ++ remote_binary ++ ".tmp\" || exit 1; " ++
-    "chmod 755 \"$d/" ++ remote_binary ++ ".tmp\" || exit 1; " ++
-    "mv -f \"$d/" ++ remote_binary ++ ".tmp\" \"$d/" ++ remote_binary ++ "\" || exit 1";
+    "cat > \"$t\" || exit 1; " ++
+    "chmod 755 \"$t\" || exit 1; " ++
+    "mv -f \"$t\" \"$d/" ++ remote_binary ++ "\" || exit 1";
 
 /// 우리가 실어 보낼 수 있는 원격. **모르면 없다** — 추측해서 엉뚱한 바이너리를 심으면 그 원격은
 /// 「설치는 됐는데 안 도는」 상태가 되고, 그 편이 안 하느니만 못하다.
@@ -147,8 +154,12 @@ test "판 대조는 정확 일치다 — 부분 일치면 옛 판을 «같다»�
 
 test "설치 스크립트는 임시 이름에 받고 옮긴다 — 반쪽 파일을 최종 이름에 두지 않는다" {
     // 채널이 중간에 끊기면 반쪽이 남는데, 그것이 최종 이름이면 다음 실행이 **깨진 것을 돌린다.**
-    try testing.expect(std.mem.indexOf(u8, install_script, ".tmp\"") != null);
+    try testing.expect(std.mem.indexOf(u8, install_script, ".tmp") != null);
     try testing.expect(std.mem.indexOf(u8, install_script, "mv -f") != null);
+    // ⚠️ **임시 이름은 프로세스마다 다르다**(적대적 검증 2026-09-05 10 회차). 고정 이름이면 창 둘이
+    // 같은 원격에 동시에 심을 때 두 `cat` 이 같은 파일에 섞여 쓰고, 그 찢어진 것이 `mv` 된다 —
+    // `mv` 의 원자성은 「반쪽을 최종 이름에 두지 않는다」만 지키지 임시 파일을 지키지 않는다.
+    try testing.expect(std.mem.indexOf(u8, install_script, ".tmp.$$") != null);
     // `chmod` 는 `mv` **앞**이어야 한다 — 최종 이름이 보이는 순간 이미 실행 가능해야 한다.
     const chmod_at = std.mem.indexOf(u8, install_script, "chmod").?;
     const mv_at = std.mem.indexOf(u8, install_script, "mv -f").?;

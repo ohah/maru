@@ -61,8 +61,15 @@ pub const Install = enum {
     running,
     /// 있고 우리 판이다 — 띄워도 된다.
     ready,
-    /// 못 심었다(원격이 거절·전송 실패·번들에 그 변종이 없다). 백오프 뒤 다시 본다.
+    /// 못 심었다 — **다시 해 볼 값이 있는 실패**(ssh 끊김·전송 실패). 백오프 뒤 다시 본다.
+    /// RW5 가 감시자에서 세운 것과 같은 규율이다: 일시적 실패는 계속 재시도한다.
     failed,
+    /// **이 원격에는 영영 못 심는다** — `uname` 을 우리가 모르거나(FreeBSD 등) 번들에 그 변종이
+    /// 없다(개발 중 bare 실행 파일). 다시 물어도 답이 같으므로 **포기한다**(적대적 검증 6 회차).
+    ///
+    /// ⚠️ 이것이 없으면 5 초마다 `uname` 왕복 + 번들 읽기 + 스레드가 **영원히** 되풀이된다 — RW5 가
+    /// 감시자에서 없앤 바로 그 폭주다.
+    unsupported,
 };
 
 pub const Phase = enum {
@@ -97,6 +104,10 @@ pub const Channel = struct {
     root_len: usize = 0,
     /// 설치 상태(RW2c). 대상이 바뀌면 `stop` 이 `.unknown` 으로 되돌린다 — 새 호스트에는 그 답이 없다.
     install: Install = .unknown,
+    /// **어느 대상에 대한 답인가**(적대적 검증 2026-09-05 2 회차). `stop` 이 이 값을 올리므로, 그 전에
+    /// 뜬 스레드가 늦게 돌려주는 답은 **버려진다** — 안 그러면 옛 호스트의 「심겨 있다」가 새 호스트에
+    /// 적용돼 없는 파일을 띄우려 한다.
+    install_gen: u32 = 0,
 
     /// 지금 감시 중인 루트(안 띄웠으면 빈 슬라이스).
     pub fn watchedRoot(self: *const Channel) []const u8 {
@@ -152,6 +163,19 @@ pub const Channel = struct {
 
     /// 대상이 바뀌었다(다른 호스트이거나 로컬로 돌아왔다) — 판단째로 놓는다. 「못 한다」는 **그
     /// 호스트**의 성질이었으므로 새 대상에는 적용되지 않는다.
+    /// **같은 호스트에서 저장소만 바뀌었다** — 자식·감시 루트·진행 판단은 놓되 **설치 답은 지킨다**
+    /// (적대적 검증 2026-09-05 13 회차).
+    ///
+    /// 감시자는 **호스트마다** 심긴다(`$HOME/.cache/maru/…`) — 저장소가 바뀐다고 저쪽 파일이 사라지지
+    /// 않는다. 그런데 `stop` 하나로 뭉쳐 두었더니 **저장소를 옮길 때마다** `uname` + `check` 두 왕복을
+    /// 남의 서버에 다시 물었다. 이 트랙에서 **세 번째** 같은 실수다(자식·판단·대상·설치 답은 각각
+    /// 다른 수명을 산다).
+    pub fn switchRoot(self: *Channel) void {
+        self.releaseChild();
+        self.phase = .idle;
+        self.root_len = 0;
+    }
+
     pub fn stop(self: *Channel) void {
         self.releaseChild();
         self.phase = .idle;
@@ -159,6 +183,7 @@ pub const Channel = struct {
         // ⚠️ **설치 답도 놓는다.** 「심겨 있다」는 **그 호스트**에 대한 답이라 새 대상에는 안 통한다.
         // `pause` 는 반대로 지킨다 — 화면을 감췄다고 저쪽에서 파일이 사라지지 않는다.
         self.install = .unknown;
+        self.install_gen +%= 1; // 도는 스레드의 답은 이제 낡았다
     }
 };
 
@@ -293,8 +318,20 @@ test "무엇을 보고 있는지 기억한다 — 같은 호스트에서 저장�
     c.install = .ready;
     c.pause();
     try testing.expectEqual(Install.ready, c.install);
+    // ⚠️ **저장소만 바뀐 것도 설치 답을 지킨다**(13 회차). 감시자는 호스트마다 심기므로 저장소가
+    // 바뀐다고 저쪽 파일이 사라지지 않는다 — 버리면 옮길 때마다 두 왕복을 남의 서버에 다시 문다.
+    c.rememberRoot("/srv/other");
+    c.switchRoot();
+    try testing.expectEqual(Install.ready, c.install);
+    try testing.expectEqualStrings("", c.watchedRoot()); // 루트는 놓는다
+    try testing.expectEqual(Phase.idle, c.phase);
+    const gen_before = c.install_gen;
+    try testing.expectEqual(gen_before, c.install_gen); // 잠시 멈춤은 세대를 안 올린다
     c.stop();
     try testing.expectEqual(Install.unknown, c.install);
+    // ⚠️ **놓아줄 때 세대를 올린다**(적대적 검증 2 회차). 그 전에 뜬 스레드가 늦게 돌려주는 「심겨
+    // 있다」가 **새 호스트**에 적용되면 없는 파일을 띄우려 한다.
+    try testing.expect(c.install_gen != gen_before);
 
     // **추적할 수 있는지는 띄우기 전에 답한다** — 못 하면 안 띄우므로 `rememberRoot` 에 안 온다.
     try testing.expect(canTrack("/srv/app"));

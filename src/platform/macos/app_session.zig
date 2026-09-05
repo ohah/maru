@@ -6161,6 +6161,15 @@ pub const AppSession = struct {
     upload_results: std.ArrayList(UploadResult) = .empty,
     upload_inflight: usize = 0,
     upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-<pid>-N.png) 세션 내 고유화 카운터(메인 스레드 전용)
+    // 원격 감시자 **심기**(RW2c) 백그라운드 스레드 ↔ 메인 tick. 업로드와 **같은 규율**이다 — ssh 왕복이
+    // 블로킹이라 UI 틱에서 하면 화면이 선다. 다른 점은 결과가 경로가 아니라 «심겼는가» 하나라는 것뿐이라
+    // 큐 대신 슬롯 하나를 쓴다. `watch_install_inflight` 는 deinit 이 0 까지 기다리는 같은 가드다.
+    //
+    // ⚠️ **이것이 없으면 RW2a·RW2b 가 죽은 계약이다.** 실제로 그랬다 — 번들에 네 변종을 싣고 설치
+    // 스크립트를 만들어 두고도 아무도 실행하지 않아, 감시자는 **사람이 손으로 넣은 원격**에서만 돌았다.
+    watch_install_mutex: std.Io.Mutex = .init,
+    watch_install_result: ?remote_watch_mod.Install = null,
+    watch_install_inflight: usize = 0,
     // 원격 에이전트 이벤트 채널 — **목적지(host) 당 하나**([계획](../../../docs/plans/remote-agent-state.md) RA5).
     //
     // **업로드와 달리 스레드가 없다.** 업로드는 «한 번 쓰고 EOF» 라 블로킹이 UI 를 멈추므로 스레드로 뺐지만,
@@ -14977,6 +14986,137 @@ pub const AppSession = struct {
     /// 백그라운드 스레드 엔트리: bytes를 ssh로 업로드하고 결과(원격 경로)를 mutex 하에 큐에 넣는다. job과
     /// owned 입력을 전부 해제한다(소유권을 넘겨받았다). io를 안 만지므로(ssh_upload는 posix fork+pipe만 씀 —
     /// std.process.Child가 0.16에서 io 기반이라 회피) 스레드 안전하다.
+    /// 감시자 심기 작업(RW2c). 스레드가 소유하고 스스로 해제한다 — `UploadJob` 과 같은 모양이다.
+    const WatchInstallJob = struct {
+        session: *AppSession,
+        ctl: []u8,
+        dest: []u8,
+        /// 번들에서 읽어 온 그 변종의 바이트. **비어 있으면 「번들에 없다」** 로 실패한다.
+        payload: []u8,
+    };
+
+    /// 백그라운드 스레드 엔트리: 원격에 감시자가 **있고 우리 판인지** 묻고, 아니면 심는다.
+    ///
+    /// ⚠️ **묻는 것이 먼저다.** 매번 심으면 도크를 열 때마다 수백 KB 를 남의 서버로 보낸다 —
+    /// `check_script` 는 `--version` 을 **실행해** 보므로 「파일은 있는데 아키텍처가 틀린」 것도 함께
+    /// 가른다(RW2a 가 그렇게 설계한 이유다).
+    /// 심기를 **시작한다**(RW2c). 이미 도는 중이거나 답이 있으면 아무것도 안 한다.
+    ///
+    /// `uname -sm` 은 여기서 **블로킹으로** 묻는다 — 한 줄짜리 왕복이라 짧고(이미 열린 control socket
+    /// 위다), 이 값이 있어야 어느 변종을 실을지 정할 수 있다. 무거운 쪽(수백 KB 전송)은 스레드다.
+    pub fn beginWatchInstall(self: *AppSession, ctl: []const u8, dest: []const u8) void {
+        var out: []u8 = &.{};
+        const rc = ssh_upload.runRemoteScript(self.allocator, ctl, dest, "exec uname -sm", &.{}, null, &out) catch -1;
+        defer self.allocator.free(out);
+        if (rc != 0) {
+            self.remote_watch.install = .failed;
+            return;
+        }
+        const payload = self.readWatchAsset(out);
+        if (payload.len == 0) {
+            self.allocator.free(payload);
+            self.remote_watch.install = .failed; // 모르는 원격이거나 번들에 그 변종이 없다
+            return;
+        }
+        const job = self.allocator.create(WatchInstallJob) catch {
+            self.allocator.free(payload);
+            self.remote_watch.install = .failed;
+            return;
+        };
+        job.* = .{
+            .session = self,
+            .ctl = self.allocator.dupe(u8, ctl) catch {
+                self.allocator.free(payload);
+                self.allocator.destroy(job);
+                self.remote_watch.install = .failed;
+                return;
+            },
+            .dest = self.allocator.dupe(u8, dest) catch {
+                self.allocator.free(payload);
+                self.allocator.free(job.ctl);
+                self.allocator.destroy(job);
+                self.remote_watch.install = .failed;
+                return;
+            },
+            .payload = payload,
+        };
+        self.watch_install_mutex.lockUncancelable(self.io);
+        self.watch_install_inflight += 1;
+        self.watch_install_result = null;
+        self.watch_install_mutex.unlock(self.io);
+        const thread = std.Thread.spawn(.{}, watchInstallWorker, .{job}) catch {
+            self.watch_install_mutex.lockUncancelable(self.io);
+            self.watch_install_inflight -= 1;
+            self.watch_install_mutex.unlock(self.io);
+            self.allocator.free(job.ctl);
+            self.allocator.free(job.dest);
+            self.allocator.free(job.payload);
+            self.allocator.destroy(job);
+            self.remote_watch.install = .failed;
+            return;
+        };
+        thread.detach();
+        self.remote_watch.install = .running;
+    }
+
+    /// 스레드가 남긴 답을 tick 이 가져간다. **core 는 메인 전용**이라 스레드가 직접 못 쓴다.
+    pub fn drainWatchInstall(self: *AppSession) void {
+        self.watch_install_mutex.lockUncancelable(self.io);
+        const got = self.watch_install_result;
+        self.watch_install_result = null;
+        self.watch_install_mutex.unlock(self.io);
+        if (got) |state| self.remote_watch.install = state;
+    }
+
+    fn watchInstallWorker(job: *WatchInstallJob) void {
+        const self = job.session;
+        const contract = maru.session.remote_watch_install;
+
+        var outcome: remote_watch_mod.Install = .failed;
+        if (job.payload.len > 0) {
+            var out: []u8 = &.{};
+            const check_rc = ssh_upload.runRemoteScript(self.allocator, job.ctl, job.dest, contract.check_script, &.{}, null, &out) catch -1;
+            const already = check_rc == 0 and contract.versionMatches(out);
+            self.allocator.free(out);
+            if (already) {
+                outcome = .ready;
+            } else {
+                var sink: []u8 = &.{};
+                const rc = ssh_upload.runRemoteScript(self.allocator, job.ctl, job.dest, contract.install_script, &.{}, job.payload, &sink) catch -1;
+                self.allocator.free(sink);
+                if (rc == 0) outcome = .ready;
+            }
+        }
+
+        self.allocator.free(job.ctl);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.payload);
+        self.allocator.destroy(job);
+        self.watch_install_mutex.lockUncancelable(self.io);
+        self.watch_install_result = outcome;
+        self.watch_install_inflight -= 1;
+        self.watch_install_mutex.unlock(self.io);
+    }
+
+    /// 번들에서 이 원격에 맞는 변종 바이트를 읽는다(RW2b 가 실어 둔 것). 못 찾으면 빈 슬라이스 —
+    /// 호출자는 그것을 「이 원격은 못 심는다」로 읽는다.
+    fn readWatchAsset(self: *AppSession, uname_sm: []const u8) []u8 {
+        const contract = maru.session.remote_watch_install;
+        const variant = contract.variantFromUname(uname_sm) orelse return &.{};
+        var rel_buf: [128]u8 = undefined;
+        const rel = contract.assetRelPath(variant, &rel_buf) orelse return &.{};
+
+        const exe = std.process.executablePathAlloc(self.io, self.allocator) catch return &.{};
+        defer self.allocator.free(exe);
+        // `…/Contents/MacOS/<exe>` → `…/Contents/Resources/<rel>`. 번들이 아니면 못 찾고, 그때는
+        // 「못 심는다」가 맞다 — 개발 중 bare 실행 파일에는 실을 자리가 없다.
+        const macos_dir = std.fs.path.dirname(exe) orelse return &.{};
+        const contents = std.fs.path.dirname(macos_dir) orelse return &.{};
+        const path = std.fs.path.join(self.allocator, &.{ contents, "Resources", rel }) catch return &.{};
+        defer self.allocator.free(path);
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(8 * 1024 * 1024)) catch &.{};
+    }
+
     fn uploadWorker(job: *UploadJob) void {
         const self = job.session;
         const uploaded: ?[]u8 = ssh_upload.uploadBytes(self.allocator, job.ctl, job.dest, job.name, job.bytes) catch null;
@@ -21170,6 +21310,14 @@ pub const AppSession = struct {
         for (&self.user_actions) |*slot| {
             if (slot.*) |*action| action.deinit(self.allocator);
             slot.* = null;
+        }
+        // 감시자 심기 스레드도 같은 가드다(RW2c) — detach 스레드가 self 를 건드리므로 해제 전 0 까지.
+        while (true) {
+            self.watch_install_mutex.lockUncancelable(self.io);
+            const n = self.watch_install_inflight;
+            self.watch_install_mutex.unlock(self.io);
+            if (n == 0) break;
+            std.atomic.spinLoopHint();
         }
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {

@@ -49,6 +49,22 @@ pub fn isPermanent(exit_code: c_int) bool {
     return exit_code == exit_watch_limit or exit_code == exit_unsupported;
 }
 
+/// 원격에 감시자가 **심겨 있는가**(RW2c). RW2a 가 계약을, RW2b 가 페이로드를 만들어 두고도 «아무도
+/// 실행하지 않아» 감시자는 사람이 손으로 넣은 원격에서만 돌았다 — 그 자리를 잇는 상태다.
+///
+/// tick 은 **읽기만** 하고, 실제 확인·심기는 백그라운드 스레드가 한다(`uploadWorker` 와 같은 규율 —
+/// ssh 왕복은 블로킹이라 UI 틱에서 하면 화면이 선다).
+pub const Install = enum {
+    /// 아직 안 물어봤다.
+    unknown,
+    /// 스레드가 확인·심기 중이다. **또 띄우지 않는다.**
+    running,
+    /// 있고 우리 판이다 — 띄워도 된다.
+    ready,
+    /// 못 심었다(원격이 거절·전송 실패·번들에 그 변종이 없다). 백오프 뒤 다시 본다.
+    failed,
+};
+
 pub const Phase = enum {
     /// 아직 아무것도 안 했다. 원격 SCM 이 서면 여기서 시작한다.
     idle,
@@ -79,6 +95,8 @@ pub const Channel = struct {
     /// 저장소의 변경이 엉뚱한 새로고침을 건다. 힙을 안 쓴다 — 이 구조체는 `AppSession` 안에 산다.
     root_buf: [std.fs.max_path_bytes]u8 = undefined,
     root_len: usize = 0,
+    /// 설치 상태(RW2c). 대상이 바뀌면 `stop` 이 `.unknown` 으로 되돌린다 — 새 호스트에는 그 답이 없다.
+    install: Install = .unknown,
 
     /// 지금 감시 중인 루트(안 띄웠으면 빈 슬라이스).
     pub fn watchedRoot(self: *const Channel) []const u8 {
@@ -138,6 +156,9 @@ pub const Channel = struct {
         self.releaseChild();
         self.phase = .idle;
         self.root_len = 0;
+        // ⚠️ **설치 답도 놓는다.** 「심겨 있다」는 **그 호스트**에 대한 답이라 새 대상에는 안 통한다.
+        // `pause` 는 반대로 지킨다 — 화면을 감췄다고 저쪽에서 파일이 사라지지 않는다.
+        self.install = .unknown;
     }
 };
 
@@ -266,7 +287,14 @@ test "무엇을 보고 있는지 기억한다 — 같은 호스트에서 저장�
         c.pause();
         try testing.expectEqualStrings("/srv/app", c.watchedRoot());
     }
+
+    // ⚠️ **설치 답의 수명은 「대상」이다**(RW2c). 화면을 감췄다고 저쪽 파일이 사라지지 않으므로
+    // `pause` 는 지키고, 새 호스트에는 그 답이 안 통하므로 `stop` 은 지운다.
+    c.install = .ready;
+    c.pause();
+    try testing.expectEqual(Install.ready, c.install);
     c.stop();
+    try testing.expectEqual(Install.unknown, c.install);
 
     // **추적할 수 있는지는 띄우기 전에 답한다** — 못 하면 안 띄우므로 `rememberRoot` 에 안 온다.
     try testing.expect(canTrack("/srv/app"));

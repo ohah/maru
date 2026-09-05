@@ -5231,6 +5231,111 @@ test "win32-terminal-smoke 선택지" {
     try std.testing.expectEqualStrings("--nope", terminalSmokeOpts(&.{ "--hold-editor-ms", "5", "--nope" }).unknown);
 }
 
+/// **구문 색으로 칠해진 셀이 몇이고 역할이 몇 갈래인가.** 스모크 판정 둘이 같은 셈법을 써야 한다
+/// (첫 화면·스크롤한 뒤) — 베껴 두면 한쪽만 고쳐지고, 그 둘이 갈리는 순간 어느 쪽이 옳은지 아무도
+/// 모른다.
+///
+/// **「기본 글자색이 아니다」로 세면 안 된다.** 줄 번호 회색까지 걸려 색칠이 하나도 없어도 초록이
+/// 된다 — 처음에 그렇게 적었고 실제로 `591/594` 가 나왔다(§2m.112). 그래서 **테마의 `syntax_*`
+/// 색과 맞는 것**만 세고, **셀마다 한 번만** 센다(역할별로 더하면 «색칠된 셀 > 전체 셀» 이 나온다.
+/// 그것도 겪었다 — `629/525`).
+///
+/// **역할은 손으로 적는다.** `@field` 로 훑으면 `src/main.zig` 에 외부 반사가 생겨 경계 원장 등록이
+/// 필요해지고, 그 갱신 도구가 이 호스트에서 안 돈다(§2m.109). 판정 쪽에서는 손으로 적는 편이
+/// 오히려 낫다 — **무엇을 기대하는지가 보인다.**
+const SyntaxPaint = struct {
+    colored: usize = 0,
+    distinct: usize = 0,
+    /// 색칠된 셀이 **몇 개의 행**에 흩어져 있는가. 개수만 보면 「한 줄에 몰려 있다」와
+    /// 「화면 전체에 퍼져 있다」가 구별되지 않는다 — 축이 틀어지는 결함의 모양이 그것이다.
+    rows: usize = 0,
+    /// 그려진 행 수(색과 무관). 위 값의 분모다.
+    total_rows: usize = 0,
+};
+
+/// 한 화면에 들어갈 수 있는 행 수의 넉넉한 상한. 넘으면 **더 안 센다** — 판정이 그만큼 둔해질 뿐
+/// 거짓 초록이 되지는 않는다(분자·분모가 함께 막힌다).
+const max_rows = 512;
+
+fn addRow(rows: *[max_rows]f32, n: *usize, y: f32) void {
+    for (rows[0..n.*]) |r| if (@abs(r - y) < 0.5) return;
+    if (n.* == rows.len) return;
+    rows[n.*] = y;
+    n.* += 1;
+}
+
+fn countSyntaxPaint(cells: []const d3d11_cells.Cell, tk: *const maru.chrome.Tokens) SyntaxPaint {
+    const roles = [_]maru.chrome.tokens.ColorRole{
+        .syntax_keyword,   .syntax_string,      .syntax_number,
+        .syntax_comment,   .syntax_property,    .syntax_type_name,
+        .syntax_function,  .syntax_punctuation, .syntax_tag,
+        .syntax_attribute, .syntax_invalid,
+    };
+    var want: [roles.len][3]f32 = undefined;
+    for (roles, 0..) |r, i| {
+        const rgb = tk.get(r);
+        want[i] = .{
+            @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            @as(f32, @floatFromInt(rgb.b)) / 255.0,
+        };
+    }
+    var out: SyntaxPaint = .{};
+    var hit: [roles.len]bool = @splat(false);
+    // 행은 **y 좌표**로 센다. 편집기 셀은 행마다 같은 y 를 쓰므로 그 값의 갈래 수가 곧 행 수다.
+    var rows_col: [max_rows]f32 = undefined;
+    var n_rows_col: usize = 0;
+    var rows_all: [max_rows]f32 = undefined;
+    var n_rows_all: usize = 0;
+    for (cells) |c| {
+        addRow(&rows_all, &n_rows_all, c.rect[1]);
+        if (c.fg[3] < 0.5) continue;
+        for (want, 0..) |v, wi| {
+            if (@abs(c.fg[0] - v[0]) + @abs(c.fg[1] - v[1]) + @abs(c.fg[2] - v[2]) < 0.01) {
+                out.colored += 1;
+                hit[wi] = true;
+                addRow(&rows_col, &n_rows_col, c.rect[1]);
+                break;
+            }
+        }
+    }
+    out.rows = n_rows_col;
+    out.total_rows = n_rows_all;
+    for (hit) |h| if (h) {
+        out.distinct += 1;
+    };
+    return out;
+}
+
+test "구문 색 세기는 셀마다 한 번, 그리고 구문 색만" {
+    const tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
+    const kw = tk.get(.syntax_keyword);
+    const f = struct {
+        fn rgb(c: anytype) [4]f32 {
+            return .{
+                @as(f32, @floatFromInt(c.r)) / 255.0,
+                @as(f32, @floatFromInt(c.g)) / 255.0,
+                @as(f32, @floatFromInt(c.b)) / 255.0,
+                1,
+            };
+        }
+    };
+    var cell = std.mem.zeroes(d3d11_cells.Cell);
+    cell.fg = f.rgb(kw);
+    // **구문 색이 아닌 것은 안 센다** — 여기가 «591/594» 를 만든 자리다.
+    var other = std.mem.zeroes(d3d11_cells.Cell);
+    other.fg = .{ 0.5, 0.5, 0.5, 1 };
+    // **투명한 것도 안 센다.**
+    var ghost = std.mem.zeroes(d3d11_cells.Cell);
+    ghost.fg = f.rgb(kw);
+    ghost.fg[3] = 0;
+
+    const got = countSyntaxPaint(&.{ cell, cell, other, ghost }, &tk);
+    try std.testing.expectEqual(@as(usize, 2), got.colored);
+    // 두 셀이 **같은 역할**이므로 갈래는 하나다 — 역할별로 더하면 여기가 2 가 된다.
+    try std.testing.expectEqual(@as(usize, 1), got.distinct);
+}
+
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, hold_editor_ms: u32) !void {
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
@@ -6051,7 +6156,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var esyn_distinct: usize = 0;
     var esyn_total: usize = 0;
     var esyn_first_line: usize = 0;
-    var editor_hold_done = false;
+    var esyn_rows: usize = 0;
+    var esyn_total_rows: usize = 0;
+    // **스크롤한 편집기의 색**(W8.28). `esyn_scroll_floor` 는 기존 스크롤 판정(790·792)과 그 뒤의
+    // 가로 스크롤 판정이 끝난 자리다 — 그보다 앞에서 굴리면 그 판정들이 내가 옮긴 화면을 본다.
+    const esyn_scroll_floor: usize = 810;
+    var esyn2_sent = false;
+    var esyn2_judgeable = false;
+    var esyn2_before: usize = 0;
+    var esyn2_first_line: usize = 0;
+    var esyn2_cells: usize = 0;
+    var esyn2_total: usize = 0;
+    var esyn2_distinct: usize = 0;
+    var esyn2_rows: usize = 0;
+    var esyn2_total_rows: usize = 0;
+    var editor_hold_first = false;
+    var editor_hold_scrolled = false;
     // ── 폴백 목록을 몇 번 짓는가 (W8.23) ──────────────────────────────────────────────────
     //
     // **시간이 아니라 횟수를 잰다.** 시간은 기계마다 흔들리지만 "다시 그릴 때마다 또 짓는가" 는
@@ -11281,53 +11401,54 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 0 이고, 그러면 그 축이 틀려도 색이 맞아 보인다 — 실제로 이 판정이 처음에 그
                 // 자리에서 무장했다(적대적 검증 7 회차).
                 if (smoke and !esyn_judgeable and of.syntax != null and be.cells.items.len > 0) {
-                    // **테마의 구문 색과 맞는 셀을 센다.** 「기본색이 아니다」로 세면 줄 번호 회색까지
-                    // 걸려 **색칠이 하나도 없어도 초록**이다 — 처음에 그렇게 적었고 실제로 그랬다.
-                    //
-                    // **셀 기준으로 한 번만 센다.** 역할마다 따로 세면 같은 색을 쓰는 역할에서 중복
-                    // 계수되어 «색칠된 셀 > 전체 셀» 이 나온다(그것도 겪었다). 그래서 색을 모으고
-                    // 셀은 한 번만 판정한다.
-                    // **역할을 손으로 적는다.** `@field` 로 훑으면 `src/main.zig` 에 외부 반사가
-                    // 생겨 경계 원장 등록이 필요해진다(§2m.109 — 그 갱신 도구가 이 호스트에서 안 돈다).
-                    // 판정 쪽에서는 손으로 적는 편이 오히려 낫다: **무엇을 기대하는지가 보인다.**
-                    const roles = [_]maru.chrome.tokens.ColorRole{
-                        .syntax_keyword,   .syntax_string,      .syntax_number,
-                        .syntax_comment,   .syntax_property,    .syntax_type_name,
-                        .syntax_function,  .syntax_punctuation, .syntax_tag,
-                        .syntax_attribute, .syntax_invalid,
-                    };
-                    var want: [16][3]f32 = undefined;
-                    var n_want: usize = 0;
-                    for (roles) |r| {
-                        const rgb = chrome_tokens.get(r);
-                        want[n_want] = .{
-                            @as(f32, @floatFromInt(rgb.r)) / 255.0,
-                            @as(f32, @floatFromInt(rgb.g)) / 255.0,
-                            @as(f32, @floatFromInt(rgb.b)) / 255.0,
-                        };
-                        n_want += 1;
-                    }
-                    var n_col: usize = 0;
-                    var hit: [16]bool = @splat(false);
-                    for (be.cells.items) |c| {
-                        if (c.fg[3] < 0.5) continue;
-                        for (want[0..n_want], 0..) |v, wi| {
-                            if (@abs(c.fg[0] - v[0]) + @abs(c.fg[1] - v[1]) + @abs(c.fg[2] - v[2]) < 0.01) {
-                                n_col += 1;
-                                hit[wi] = true;
-                                break;
-                            }
-                        }
-                    }
-                    var distinct: usize = 0;
-                    for (hit[0..n_want]) |h| if (h) {
-                        distinct += 1;
-                    };
+                    const paint = countSyntaxPaint(be.cells.items, &chrome_tokens);
                     esyn_judgeable = true;
                     esyn_total = be.cells.items.len;
                     esyn_first_line = of.first_line;
-                    esyn_cells = n_col;
-                    esyn_distinct = distinct;
+                    esyn_cells = paint.colored;
+                    esyn_distinct = paint.distinct;
+                    esyn_rows = paint.rows;
+                    esyn_total_rows = paint.total_rows;
+                }
+                // ── 스크롤한 뒤에도 색이 나는가 (W8.28) ──────────────────────────────────
+                //
+                // **첫 화면은 이 축을 못 잰다.** `first_line == 0` 이면 「창 앞의 빈 줄」이 0 이라
+                // 그 값이 틀려도 색이 맞아 보인다 — 실제로 그 인자를 0 으로 바꾼 뮤턴트가 스모크
+                // 판정 72 개를 **전부 초록**으로 통과했다(§2m.112 의 적대적 검증 7 회차).
+                //
+                // **스모크가 굴리는 파일에는 색이 없었다.** 휠은 `cache-cleanup.yml` 로 갔고 YAML 은
+                // 번들 grammar 에 없다 — 그래서 «굴린 프레임»과 «색 있는 프레임»이 한 번도 안 겹쳤다.
+                // 여기서 색 있는 파일을 직접 굴린다.
+                //
+                // **굴린 뒤에는 되돌린다.** 이 뒤로도 300 스핀 넘게 판정이 이어지는데, 편집기를
+                // 굴려 둔 채 넘기면 그것들이 보는 화면이 달라진다 — 판정을 세우면서 판정을 흔드는 꼴이다.
+                if (smoke and of.syntax != null and spins >= esyn_scroll_floor) {
+                    if (!esyn2_sent) {
+                        esyn2_sent = true;
+                        esyn2_before = of.first_line;
+                        window.postSyntheticMouseWheel(
+                            .wheel,
+                            @intCast(geom.terminal.x + geom.terminal.w / 2),
+                            @intCast(geom.terminal.y + geom.terminal.h / 2),
+                            -3,
+                        );
+                    } else if (!esyn2_judgeable and of.first_line > esyn2_before and be.cells.items.len > 0) {
+                        const paint = countSyntaxPaint(be.cells.items, &chrome_tokens);
+                        esyn2_judgeable = true;
+                        esyn2_first_line = of.first_line;
+                        esyn2_total = be.cells.items.len;
+                        esyn2_cells = paint.colored;
+                        esyn2_distinct = paint.distinct;
+                        esyn2_rows = paint.rows;
+                        esyn2_total_rows = paint.total_rows;
+                        // 되돌린다 — 위 문단.
+                        window.postSyntheticMouseWheel(
+                            .wheel,
+                            @intCast(geom.terminal.x + geom.terminal.w / 2),
+                            @intCast(geom.terminal.y + geom.terminal.h / 2),
+                            3,
+                        );
+                    }
                 }
                 editor_cells_drawn = be.cells.items.len;
                 editor_last_cells = be.cells.items.len;
@@ -11449,19 +11570,34 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 그리지만 프레임마다 16 ms 라 창을 찍는 하네스가 그 위에 못 앉는다 — 구문 색 슬라이스가
         // 화면 증거 없이 머지된 이유가 이것이다.
         //
-        // **`editor_syntax` 가 초록이라고 말하는 그 문턱을 그대로 쓴다**(색칠된 칸이 있고 역할이 둘
-        // 이상). `esyn_judgeable` 만 보면 안 된다 — 그 값은 **색칠 수와 무관하게** 서므로 색이 하나도
-        // 없는 프레임에서 멈춰 **거짓 증거**를 만든다(적대적 검증 2 회차: 처음에 그렇게 적었다).
-        if (hold_editor_ms != 0 and !editor_hold_done and showing_file and
-            esyn_judgeable and esyn_cells > 0 and esyn_distinct >= 2)
-        {
-            editor_hold_done = true;
-            stdout.print("editor_hold: ms={d} colored={d}/{d} roles={d}\n", .{ hold_editor_ms, esyn_cells, esyn_total, esyn_distinct }) catch {};
-            stdout.flush() catch {};
-            const hold_t0 = std.Io.Clock.awake.now(io).nanoseconds;
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(hold_editor_ms), .awake) catch {};
-            stdout.print("editor_hold_measured_ms={d}\n", .{@divTrunc(std.Io.Clock.awake.now(io).nanoseconds - hold_t0, std.time.ns_per_ms)}) catch {};
-            stdout.flush() catch {};
+        // **두 번 잡는다 — 첫 화면과 굴린 뒤.** 둘은 서로 다른 것을 보여 준다: 앞의 것은 «색이
+        // 나는가», 뒤의 것은 «굴려도 색이 제자리인가» 다. 뒤엣것이 없으면 §2m.112 가 남긴 그 축은
+        // 화면으로 영영 못 본다. 하네스는 `kind=` 로 어느 쪽을 기다릴지 고른다.
+        //
+        // **`esyn*_judgeable` 만 보고 멈추면 안 된다.** 그 값은 **색칠 수와 무관하게** 서므로 색이
+        // 하나도 없는 프레임에서 멈춰 **거짓 증거**를 만든다(§2m.113 의 적대적 검증 2 회차). 그래서
+        // 각 판정이 초록이라고 말하는 그 문턱을 그대로 쓴다.
+        if (hold_editor_ms != 0 and showing_file) {
+            const first_ready = esyn_judgeable and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
+            const scrolled_ready = esyn2_judgeable and esyn2_first_line > 0 and
+                esyn2_rows * 2 >= esyn2_total_rows and esyn2_distinct >= 2;
+            const kind: ?[]const u8 = if (!editor_hold_first and first_ready)
+                "first"
+            else if (!editor_hold_scrolled and scrolled_ready)
+                "scrolled"
+            else
+                null;
+            if (kind) |k| {
+                if (std.mem.eql(u8, k, "first")) editor_hold_first = true else editor_hold_scrolled = true;
+                const rows: usize = if (std.mem.eql(u8, k, "first")) esyn_rows else esyn2_rows;
+                const of_rows: usize = if (std.mem.eql(u8, k, "first")) esyn_total_rows else esyn2_total_rows;
+                stdout.print("editor_hold: kind={s} ms={d} rows={d}/{d}\n", .{ k, hold_editor_ms, rows, of_rows }) catch {};
+                stdout.flush() catch {};
+                const hold_t0 = std.Io.Clock.awake.now(io).nanoseconds;
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(hold_editor_ms), .awake) catch {};
+                stdout.print("editor_hold_measured: kind={s} ms={d}\n", .{ k, @divTrunc(std.Io.Clock.awake.now(io).nanoseconds - hold_t0, std.time.ns_per_ms) }) catch {};
+                stdout.flush() catch {};
+            }
         }
         frames += 1;
         _ = usleep(16_000);
@@ -12708,14 +12844,40 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **색이 둘 이상이어야 한다.** 하나뿐이면 우연히 한 역할만 걸렸거나 전체가 한 색으로
             // 물든 것이고, 둘 다 「구문 색이 돈다」와 다른 사실이다(zig 소스면 키워드·문자열·주석이
             // 함께 온다).
-            const esyn_ok = esyn_judgeable and esyn_cells > 0 and esyn_distinct >= 2;
-            try stdout.print("editor_syntax: judgeable={} first_line={d} colored={d}/{d} roles={d} editor_syntax_ok={}\n", .{
+            // 첫 화면도 **같은 문턱**을 쓴다(실측 26/30). 둘이 다른 잣대를 쓰면 어느 쪽이 옳은지
+            // 아무도 모른다 — 다만 이 판정만으로는 축 결함을 못 잡는다(`first_line == 0` 이라
+            // 그 인자가 아무 일도 안 한다). 그것을 잡는 것은 아래 `editor_syntax_scrolled` 다.
+            const esyn_ok = esyn_judgeable and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
+            // **스크롤한 뒤에도 색이 나는가.** 첫 화면 판정과 문턱이 같고, 더해서 **창이 실제로
+            // 내려갔는지**(`first_line > 0`)를 요구한다 — 그것이 이 판정이 첫 화면 판정과 다른
+            // 유일한 이유다. 굴렸는데 안 내려갔으면 잰 것이 없다.
+            // **문턱은 «색칠된 셀이 있다» 가 아니라 «색이 화면 전체에 퍼져 있다» 다.** 축이 틀어지면
+            // 색이 사라지는 것이 아니라 **한 줄에 몰린다** — 실측으로 그 차이가 전부다:
+            // 성한 것은 행 **28/31**, `leading_empty` 를 0 으로 둔 뮤턴트는 **1/31**(칸 수로는
+            // 370→21 인데, 그것만 보는 판정은 «0 보다 크다» 로 **초록이었다**).
+            // 절반은 그 두 실측 사이에서 고른 값이고 양쪽에 큰 여유가 있다.
+            const esyn2_ok = esyn2_judgeable and esyn2_first_line > 0 and
+                esyn2_rows * 2 >= esyn2_total_rows and esyn2_distinct >= 2;
+            try stdout.print("editor_syntax: judgeable={} first_line={d} colored={d}/{d} rows={d}/{d} roles={d} editor_syntax_ok={}\n", .{
                 esyn_judgeable,
                 esyn_first_line,
                 esyn_cells,
                 esyn_total,
+                esyn_rows,
+                esyn_total_rows,
                 esyn_distinct,
                 esyn_ok,
+            });
+            try stdout.print("editor_syntax_scrolled: judgeable={} first_line={d}->{d} colored={d}/{d} rows={d}/{d} roles={d} editor_syntax_scrolled_ok={}\n", .{
+                esyn2_judgeable,
+                esyn2_before,
+                esyn2_first_line,
+                esyn2_cells,
+                esyn2_total,
+                esyn2_rows,
+                esyn2_total_rows,
+                esyn2_distinct,
+                esyn2_ok,
             });
         }
         {

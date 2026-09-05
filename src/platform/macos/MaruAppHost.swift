@@ -5704,7 +5704,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             window.makeKeyAndOrderFront(nil)
             focusTerminalView(window)
             setupMetalRenderer()
-            guard createSessionForActiveSurface(smokeMode: false, deferInitialSurface: ws != nil) else { return }
+            guard createSessionForActiveSurface(smokeMode: false, deferInitialSurface: ws != nil) else {
+                fputs("maru: window create failed at session bootstrap\n", stderr)
+                return
+            }
             if workspaceCheckpointFailureNotice != UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE),
                let session = surface.appSession {
                 maru_macos_app_session_set_workspace_checkpoint_failure(session, workspaceCheckpointFailureNotice)
@@ -5712,7 +5715,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if let ws {
                 // 복원 적용 실패인데 default 셸 창을 성공으로 등록하면 persistent runtime 단절을 숨기고 다음 Quit에서
                 // 원래 checkpoint까지 덮는다. 실패 창은 즉시 teardown하고 caller가 incomplete로 기록한다.
-                guard applyWorkspaceWindow(ws.text, ws.index) else { return }
+                guard applyWorkspaceWindow(ws.text, ws.index) else {
+                    fputs("maru: window create failed at applyWorkspaceWindow block=\(ws.index)\n", stderr)
+                    return
+                }
                 // M3f: 저장된 창 위치·크기·모니터로 복원(없으면 위 cascade 유지). resize 전에 setFrame해 아래 resize가
                 // 복원된 크기를 세션에 전달하게 한다.
                 applyRestoredWindowFrame(window, text: ws.text, index: ws.index)
@@ -5886,6 +5892,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if let created = createTerminalWindow(applyingWorkspace: (text, i)) {
                 windowByBlock[i] = created
             } else {
+                // **어느 창이 사라졌는지 남긴다.** 이 자리는 지금까지 침묵했고, 사용자에게는 "창 하나가
+                // 안 돌아왔다"만 보였다. 2026-09-05 실측: 창 2 개 중 하나가 복원되지 않았는데
+                // workspace.v1 에는 두 창이 온전히 저장돼 있었고(runtime-handle 10 개 전부 유효, host 에도
+                // 그 runtime 이 살아 있었다) 로그에는 실패 흔적이 한 줄도 없었다. 블록 번호 하나만 있어도
+                // 저장 파일의 어느 window 블록이 문제인지 곧장 짚을 수 있다.
+                fputs("maru: workspace restore failed to create window block=\(i) of \(count)\n", stderr)
                 workspaceRestoreIncomplete = true
             }
         }

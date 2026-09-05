@@ -2902,6 +2902,46 @@ exact cleanup과 allocation failure를 검증한다. 이 leaf는 아직
 candidate/evidence/manifest attestation bundle 전체의 aggregate handoff, prepare/finalize driver, live release workflow 배선 또는
 frozen signed U5 제품 E2E를 완료하지 않는다.
 
+### 11.49 evidence와 local attestation bundle의 atomic durable aggregate handoff
+
+서로 다른 validator process 사이에 넘기는 최소 durable 집합은 baseline evidence 하나와 §11.32가 각각 발급한
+candidate DMG·frozen executable·evidence·manifest의 local attestation bundle 네 개다. caller가 임의 배열이나 role 문자열을
+제출하지 않고 `release_adapter_candidate_aggregate_handoff.zig`의 닫힌 `Sources`가 이 다섯 role을 exact once 소유한다. 각
+source는 final-address `PinnedReleaseFile`, canonical absolute pathname과 그 pathname의 exact parent root로 결속되며 root의 exact
+direct child여야 한다. 다섯 source inode는 pairwise distinct이고 evidence는 `max_evidence_bytes`, 각 bundle은 별도
+`max_attestation_bundle_bytes`, 합계는 `max_aggregate_bytes`를 넘지 않는다. bundle bytes가 cryptographic success를 뜻하지는 않으며
+다음 process가 §11.47 verifier에 넣을 immutable 입력일 뿐이다. handoff는 opaque bundle 두 개의 semantic role swap을 판정하지
+않으며, 다음 process가 fixed destination role과 exact artifact subject를 함께 §11.47에 넣어 그 교환을 fail-close한다.
+
+aggregate는 다섯 leaf를 final pathname에 차례로 게시하지 않는다. absent durable destination directory와 같은 parent 아래에
+owner-only staging directory를 배타 생성하고, source held fd/path/size/SHA를 각 read 전후 다시 검증하면서 evidence의 exact basename과
+네 fixed role basename으로 복사한다. 각 destination leaf는 create-exclusive·`0600`·no-follow regular-file·single-link이며 file sync를
+마친다. 다섯 leaf가 전부 source와 다른 inode이고 role별 size/SHA가 일치하며 pairwise distinct임을 held descriptor로 확인한 뒤 staging
+directory를 sync하고, absent final directory 이름으로 no-replace rename하고, parent directory를 sync한 뒤에만 aggregate를 게시한다.
+allocation/read/write/sync/rename 또는 post-publication fence 실패에서 완전한 final aggregate를 성공으로 반환하지 않는다. final rename
+전 실패는 staging exact inode만 회수한다. rename 뒤 결과를 확정할 수 없는 실패는 caller pathname을 따라 추측 삭제하지 않고
+`CleanupFailed`와 held final-directory/leaf authority를 보존한다.
+
+caller-owned final-address `DurableAggregate`는 wrapper·final directory·다섯 nested file owner의 주소와 canonical role order, final
+directory pathname/parent identity, 각 leaf name/path/inode/size/SHA를 함께 봉인한다. `value`와 `revalidate`는 final directory와 다섯
+held/path inode를 전부 재검증하며 일부 leaf만 반환하지 않는다. `cleanup`은 final directory와 다섯 leaf가 모두 아직 held inode를
+가리킬 때만 final directory를 같은 parent의 private cleanup tomb로 no-replace rename한 뒤 leaf를 역순 unlink하고 directory를 제거해
+parent를 sync한다. syscall 중간 실패는 canonical final에 partial aggregate를 남기지 않고 `cleanup_required` owner가 남은 exact leaf와
+tomb directory를 재시도한다. 어느 pathname이라도 symlink·hardlink·다른 inode로 교체되면 foreign entry를 삭제하지 않고 retry/audit
+authority를 보존한다. `closeRetaining()`은 마지막 full revalidation 뒤 모든 child와
+directory/parent descriptor를 tombstone-before-close로 닫고 final directory는 남긴다. 그 뒤 `retained_closed` aggregate는 조회·삭제·
+재승격 권한을 되찾지 못한다. 따라서 다음 process는 과거 process-local pointer나 fd를 직렬화하지 않고 final directory의 canonical
+pathname들만 새로 no-follow pin하고 §11.47 cryptographic verification을 다시 수행한다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-handoff`는 Debug·ReleaseFast에서 실제 filesystem으로 0/1/4개 bundle,
+fixed role order/name·duplicate inode·source/root/destination alias·source drift·size cap, 모든 publication fail-index, partial final visibility 0,
+pre-existing final, copy/move/final-address, final directory/leaf 교체 때 foreign entry 보존, exact cleanup, retained close 뒤 다섯 bytes 생존과
+옛 owner 권한 소멸을 검증한다. 별도 APFS 측정 행은 40회 prepare promotion→source workspace 제거→full revalidation→retained close를
+실행해 단계별 median·p95·max, 실패 수, 전후 FD delta와 잔여 staging 수를 출력한다. 기능·측정 행은 모두 harness-owned `mkdtemp`
+루트만 사용하며 실제 앱의 session-host registry·manifest·socket·process를 찾거나 종료하거나 수정하지 않는다. 이 값은 현재 release-I/O baseline이지 근거 없이
+제품 latency budget으로 승격하지 않는다. 이 aggregate leaf만으로 split prepare/finalize driver, 다음 process의 reopen/semantic binding,
+live release workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -1532,9 +1532,14 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
     original.deinit();
 
     const Entry = enum { host_id, wire_major, inventory, shutdown_manifest, logical_client, call, deinit };
-    for (std.enums.values(Entry)) |entry| {
+    // 자식 7 개를 먼저 다 띄우고 그 뒤에 하나씩 기다린다. 하나 띄우고 기다리던 때는 이 테스트가 25 초(CI)였다 —
+    // 자식은 fail-stop 으로 abort 하면서 스택 추적을 심볼화하는데 그게 자식당 수 초라, 순서대로 기다리면 7 배다.
+    // 자식들은 서로 독립이라(각자 copied 의 복사본) 동시에 띄워도 판정은 같다.
+    var children: [std.enums.values(Entry).len]std.c.pid_t = undefined;
+    for (std.enums.values(Entry), 0..) |entry, child_index| {
         const child = std.c.fork();
         try std.testing.expect(child >= 0);
+        children[child_index] = child;
         if (child == 0) {
             const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
             if (devnull >= 0) {
@@ -1553,6 +1558,8 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
             }
             std.c._exit(0);
         }
+    }
+    for (children) |child| {
         var status: c_int = 0;
         try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
         // Darwin encodes the terminating signal in the low seven bits.  `@panic` terminates with

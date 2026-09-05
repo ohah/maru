@@ -6168,7 +6168,8 @@ pub const AppSession = struct {
     // ⚠️ **이것이 없으면 RW2a·RW2b 가 죽은 계약이다.** 실제로 그랬다 — 번들에 네 변종을 싣고 설치
     // 스크립트를 만들어 두고도 아무도 실행하지 않아, 감시자는 **사람이 손으로 넣은 원격**에서만 돌았다.
     watch_install_mutex: std.Io.Mutex = .init,
-    watch_install_result: ?remote_watch_mod.Install = null,
+    /// 스레드가 남긴 답과 **그것이 어느 대상에 대한 것인지**. 세대가 안 맞으면 버린다(2 회차).
+    watch_install_result: ?struct { gen: u32, state: remote_watch_mod.Install } = null,
     watch_install_inflight: usize = 0,
     // 원격 에이전트 이벤트 채널 — **목적지(host) 당 하나**([계획](../../../docs/plans/remote-agent-state.md) RA5).
     //
@@ -14954,7 +14955,6 @@ pub const AppSession = struct {
         errdefer self.allocator.free(name);
         errdefer self.allocator.free(bytes);
         const ctl_owned = try self.allocator.dupe(u8, ctl);
-        errdefer self.allocator.free(ctl_owned);
         const dest_owned = try self.allocator.dupe(u8, dest);
         errdefer self.allocator.free(dest_owned);
 
@@ -14991,8 +14991,11 @@ pub const AppSession = struct {
         session: *AppSession,
         ctl: []u8,
         dest: []u8,
-        /// 번들에서 읽어 온 그 변종의 바이트. **비어 있으면 「번들에 없다」** 로 실패한다.
-        payload: []u8,
+        /// 번들의 `Contents` 디렉터리. 스레드가 `uname` 으로 변종을 가른 «뒤» 여기서 집는다 —
+        /// 어느 변종인지 알기 전에 읽을 수 없기 때문이다(8 회차).
+        contents: []u8,
+        /// 시작할 때의 세대. 돌려줄 때 이 값이 아직 유효한지 `drainWatchInstall` 이 본다.
+        gen: u32,
     };
 
     /// 백그라운드 스레드 엔트리: 원격에 감시자가 **있고 우리 판인지** 묻고, 아니면 심는다.
@@ -15005,40 +15008,37 @@ pub const AppSession = struct {
     /// `uname -sm` 은 여기서 **블로킹으로** 묻는다 — 한 줄짜리 왕복이라 짧고(이미 열린 control socket
     /// 위다), 이 값이 있어야 어느 변종을 실을지 정할 수 있다. 무거운 쪽(수백 KB 전송)은 스레드다.
     pub fn beginWatchInstall(self: *AppSession, ctl: []const u8, dest: []const u8) void {
-        var out: []u8 = &.{};
-        const rc = ssh_upload.runRemoteScript(self.allocator, ctl, dest, "exec uname -sm", &.{}, null, &out) catch -1;
-        defer self.allocator.free(out);
-        if (rc != 0) {
+        // ⚠️ **여기서는 ssh 를 안 부른다**(8 회차). 예전 판은 `uname` 을 틱에서 블로킹으로 물었는데,
+        // `runRemoteScript` 에 마감이 없어 **원격이 멈추면 UI 가 통째로 섰다.** 이제 이 함수가 하는
+        // 일은 문자열 몇 개를 복사하고 스레드를 띄우는 것뿐이다.
+        const contents = self.bundleContentsDir() orelse {
+            self.remote_watch.install = .unsupported; // 번들이 아니다 — 다시 물어도 답이 같다
+            return;
+        };
+        const ctl_owned = self.allocator.dupe(u8, ctl) catch {
+            self.allocator.free(contents);
             self.remote_watch.install = .failed;
             return;
-        }
-        const payload = self.readWatchAsset(out);
-        if (payload.len == 0) {
-            self.allocator.free(payload);
-            self.remote_watch.install = .failed; // 모르는 원격이거나 번들에 그 변종이 없다
+        };
+        const dest_owned = self.allocator.dupe(u8, dest) catch {
+            self.allocator.free(ctl_owned);
+            self.allocator.free(contents);
+            self.remote_watch.install = .failed;
             return;
-        }
+        };
         const job = self.allocator.create(WatchInstallJob) catch {
-            self.allocator.free(payload);
+            self.allocator.free(dest_owned);
+            self.allocator.free(ctl_owned);
+            self.allocator.free(contents);
             self.remote_watch.install = .failed;
             return;
         };
         job.* = .{
             .session = self,
-            .ctl = self.allocator.dupe(u8, ctl) catch {
-                self.allocator.free(payload);
-                self.allocator.destroy(job);
-                self.remote_watch.install = .failed;
-                return;
-            },
-            .dest = self.allocator.dupe(u8, dest) catch {
-                self.allocator.free(payload);
-                self.allocator.free(job.ctl);
-                self.allocator.destroy(job);
-                self.remote_watch.install = .failed;
-                return;
-            },
-            .payload = payload,
+            .ctl = ctl_owned,
+            .dest = dest_owned,
+            .contents = contents,
+            .gen = self.remote_watch.install_gen,
         };
         self.watch_install_mutex.lockUncancelable(self.io);
         self.watch_install_inflight += 1;
@@ -15050,7 +15050,7 @@ pub const AppSession = struct {
             self.watch_install_mutex.unlock(self.io);
             self.allocator.free(job.ctl);
             self.allocator.free(job.dest);
-            self.allocator.free(job.payload);
+            self.allocator.free(job.contents);
             self.allocator.destroy(job);
             self.remote_watch.install = .failed;
             return;
@@ -15065,56 +15065,92 @@ pub const AppSession = struct {
         const got = self.watch_install_result;
         self.watch_install_result = null;
         self.watch_install_mutex.unlock(self.io);
-        if (got) |state| self.remote_watch.install = state;
+        // ⚠️ **세대가 안 맞으면 버린다**(2 회차). `stop` 뒤에 늦게 온 답은 «옛 호스트» 의 것이다 —
+        // 그것을 적용하면 새 호스트에 없는 파일을 「있다」고 믿고 띄우려 한다.
+        //
+        // ⚠️ **버릴 때 `.unknown` 으로 되돌린다**(4 회차 — 안 그러면 살아나지 못한다). 옛 스레드가
+        // 새 스레드보다 **늦게** 끝나면 슬롯에 낡은 답이 남는데, 그것을 버리기만 하면 `install` 은
+        // `beginWatchInstall` 이 세운 `.running` 인 채로 굳는다 — 둘 다 끝났으니 다시 쓸 사람이 없고,
+        // 펌프의 `.running => return` 이 그 호스트를 **세션 내내** 막는다. 다시 물어보는 편이 낫다.
+        if (got) |r| {
+            if (r.gen == self.remote_watch.install_gen)
+                self.remote_watch.install = r.state
+            else
+                self.remote_watch.install = .unknown;
+        }
     }
 
     fn watchInstallWorker(job: *WatchInstallJob) void {
         const self = job.session;
         const contract = maru.session.remote_watch_install;
+        const gpa = self.allocator;
 
         var outcome: remote_watch_mod.Install = .failed;
-        if (job.payload.len > 0) {
+        install: {
+            // ⚠️ **`uname` 도 여기서 묻는다**(8 회차). 예전에는 틱에서 블로킹으로 물었는데, 그것은
+            // 원격이 멈추면 **UI 가 통째로 서는** 길이었다(`runRemoteScript` 에 마감이 없다).
             var out: []u8 = &.{};
-            const check_rc = ssh_upload.runRemoteScript(self.allocator, job.ctl, job.dest, contract.check_script, &.{}, null, &out) catch -1;
-            const already = check_rc == 0 and contract.versionMatches(out);
-            self.allocator.free(out);
+            const rc = ssh_upload.runRemoteScript(gpa, job.ctl, job.dest, "exec uname -sm", &.{}, null, &out) catch -1;
+            defer gpa.free(out);
+            if (rc != 0) break :install; // ssh 가 안 됐다 — 다시 해 볼 값이 있다(.failed)
+
+            const variant = contract.variantFromUname(out) orelse {
+                outcome = .unsupported; // 우리가 모르는 원격이다 — 다시 물어도 답이 같다
+                break :install;
+            };
+            var rel_buf: [128]u8 = undefined;
+            const rel = contract.assetRelPath(variant, &rel_buf) orelse {
+                outcome = .unsupported;
+                break :install;
+            };
+            const path = std.fs.path.join(gpa, &.{ job.contents, "Resources", rel }) catch break :install;
+            defer gpa.free(path);
+            const payload = ssh_upload.readFileNoIo(gpa, path, 16 * 1024 * 1024) catch {
+                outcome = .unsupported; // 번들에 그 변종이 없다(개발 중 bare 실행 파일 포함)
+                break :install;
+            };
+            defer gpa.free(payload);
+
+            // **묻는 것이 먼저다.** 매번 심으면 도크를 열 때마다 수백 KB 를 남의 서버로 보낸다 —
+            // `check_script` 는 `--version` 을 **실행해** 보므로 「파일은 있는데 아키텍처가 틀린」
+            // 것도 함께 가른다(RW2a 가 그렇게 설계한 이유다).
+            var checked: []u8 = &.{};
+            const check_rc = ssh_upload.runRemoteScript(gpa, job.ctl, job.dest, contract.check_script, &.{}, null, &checked) catch -1;
+            const already = check_rc == 0 and contract.versionMatches(checked);
+            gpa.free(checked);
             if (already) {
                 outcome = .ready;
-            } else {
-                var sink: []u8 = &.{};
-                const rc = ssh_upload.runRemoteScript(self.allocator, job.ctl, job.dest, contract.install_script, &.{}, job.payload, &sink) catch -1;
-                self.allocator.free(sink);
-                if (rc == 0) outcome = .ready;
+                break :install;
             }
+            var sink: []u8 = &.{};
+            const plant_rc = ssh_upload.runRemoteScript(gpa, job.ctl, job.dest, contract.install_script, &.{}, payload, &sink) catch -1;
+            gpa.free(sink);
+            if (plant_rc == 0) outcome = .ready;
         }
 
-        self.allocator.free(job.ctl);
-        self.allocator.free(job.dest);
-        self.allocator.free(job.payload);
-        self.allocator.destroy(job);
+        const gen = job.gen;
+        gpa.free(job.ctl);
+        gpa.free(job.dest);
+        gpa.free(job.contents);
+        gpa.destroy(job);
         self.watch_install_mutex.lockUncancelable(self.io);
-        self.watch_install_result = outcome;
+        self.watch_install_result = .{ .gen = gen, .state = outcome };
         self.watch_install_inflight -= 1;
         self.watch_install_mutex.unlock(self.io);
     }
 
-    /// 번들에서 이 원격에 맞는 변종 바이트를 읽는다(RW2b 가 실어 둔 것). 못 찾으면 빈 슬라이스 —
-    /// 호출자는 그것을 「이 원격은 못 심는다」로 읽는다.
-    fn readWatchAsset(self: *AppSession, uname_sm: []const u8) []u8 {
-        const contract = maru.session.remote_watch_install;
-        const variant = contract.variantFromUname(uname_sm) orelse return &.{};
-        var rel_buf: [128]u8 = undefined;
-        const rel = contract.assetRelPath(variant, &rel_buf) orelse return &.{};
-
-        const exe = std.process.executablePathAlloc(self.io, self.allocator) catch return &.{};
+    /// 번들의 `Contents` 디렉터리. 스레드가 그 아래 `Resources/<변종>/…` 를 집는다.
+    ///
+    /// 여기만 `io` 를 쓴다(실행 파일 경로) — 그리고 그것은 **문자열 계산**이라 빠르다. 실제 파일
+    /// 읽기와 ssh 왕복은 전부 스레드다(8 회차: 틱에서 블로킹으로 물으면 원격이 멈출 때 UI 가 선다).
+    fn bundleContentsDir(self: *AppSession) ?[]u8 {
+        const exe = std.process.executablePathAlloc(self.io, self.allocator) catch return null;
         defer self.allocator.free(exe);
-        // `…/Contents/MacOS/<exe>` → `…/Contents/Resources/<rel>`. 번들이 아니면 못 찾고, 그때는
-        // 「못 심는다」가 맞다 — 개발 중 bare 실행 파일에는 실을 자리가 없다.
-        const macos_dir = std.fs.path.dirname(exe) orelse return &.{};
-        const contents = std.fs.path.dirname(macos_dir) orelse return &.{};
-        const path = std.fs.path.join(self.allocator, &.{ contents, "Resources", rel }) catch return &.{};
-        defer self.allocator.free(path);
-        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(8 * 1024 * 1024)) catch &.{};
+        // `…/Contents/MacOS/<exe>` → `…/Contents`. 번들이 아니면 없는 자리를 가리키고, 그때는
+        // 스레드가 파일을 못 열어 `.unsupported` 가 된다 — 개발 중 bare 실행 파일이 그렇다.
+        const macos_dir = std.fs.path.dirname(exe) orelse return null;
+        const contents = std.fs.path.dirname(macos_dir) orelse return null;
+        return self.allocator.dupe(u8, contents) catch null;
     }
 
     fn uploadWorker(job: *UploadJob) void {

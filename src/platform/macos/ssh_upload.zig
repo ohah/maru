@@ -196,6 +196,29 @@ pub fn runRemoteScript(
     return reapPid(pid);
 }
 
+/// 파일을 **io 없이** 읽는다(적대적 검증 2026-09-05 8 회차). 이 파일은 백그라운드 스레드에서
+/// 불리므로 `std.Io` 를 안 만지는 것이 규율이다(`uploadWorker` 의 전제) — 번들에서 감시자 바이트를
+/// 집는 것도 그 스레드에서 해야 UI 틱에 ssh 왕복이 안 남는다.
+pub fn readFileNoIo(allocator: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
+    const z = try allocator.dupeZ(u8, path);
+    defer allocator.free(z);
+    const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &tmp, tmp.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+        if (buf.items.len > max) return error.TooLarge;
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 pub const WatchStream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout(논블로킹). 호출자가 읽고 **닫는다**.
@@ -476,7 +499,24 @@ pub fn stopAgentEvents(stream: Stream) void {
 
 /// fd에 data를 전부 쓴다(부분 write 루프). child가 죽어 write가 실패하면(EPIPE 등) 중단한다 — 실패는
 /// exit code로 판정하므로 여기선 조용히 멈춘다.
+/// 이 fd 에 쓰다 상대가 먼저 닫아도 **프로세스가 안 죽게** 한다(적대적 검증 2026-09-05 5 회차).
+///
+/// ⚠️ 실측: 읽는 쪽이 닫힌 파이프에 크게 쓰면 기본 처분에서 **종료 코드 141**(SIGPIPE)로 죽는다 —
+/// `write` 가 `EPIPE` 를 «돌려주지도 못한다». RW2c 는 설치 때마다 수백 KB 를 원격 셸에 흘리므로,
+/// 그 스크립트가 일찍 끝나면(디스크 부족·`mkdir` 실패) **GUI 가 통째로 죽는다.**
+///
+/// 이 저장소는 소켓에 `SO_NOSIGPIPE` 를 쓰지만 그것은 **소켓 전용**이라 파이프를 안 덮는다.
+/// macOS 의 `F_SETNOSIGPIPE` 는 **fd 단위**라 전역 처분을 안 건드린다(`app_host_abi` 가 `PIPE` 를
+/// 일부러 안 잡는 결정을 뒤집지 않는다 — 실측: `fcntl` rc=0, `write` 가 `EPIPE` 를 돌려주고 산다).
+fn silenceSigpipe(fd: c_int) void {
+    _ = std.c.fcntl(fd, F_SETNOSIGPIPE, @as(c_int, 1));
+}
+
+const F_SETNOSIGPIPE: c_int = 73; // <sys/fcntl.h> — Zig std 가 아직 안 싣는다
+const F_GETNOSIGPIPE: c_int = 74; // 되읽어 «정말 걸렸는지» 판정자가 본다
+
 fn writeAllFd(fd: c_int, data: []const u8) void {
+    silenceSigpipe(fd);
     var off: usize = 0;
     while (off < data.len) {
         const n = std.c.write(fd, data.ptr + off, data.len - off);
@@ -507,4 +547,32 @@ fn reapPid(pid: std.c.pid_t) c_int {
     const us: u32 = @bitCast(status); // W 매크로는 u32를 받는다(waitpid status는 c_int)
     if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
     return -1;
+}
+
+test "파이프에 쓰다 상대가 먼저 닫아도 «죽지 않는다»" {
+    // ⚠️ **문자열이 아니라 동작으로 증명한다**(적대적 검증 2026-09-05 7 회차). `F_SETNOSIGPIPE` 는
+    // 손으로 박은 숫자이고 `fcntl` 의 반환값을 버리므로, 틀리면 **막힌 줄 알면서 안 막힌다.**
+    //
+    // 실측 근거(5 회차): 읽는 쪽이 닫힌 파이프에 크게 쓰면 기본 처분에서 **종료 141** 로 죽는다 —
+    // `write` 가 `EPIPE` 를 돌려주지도 못한다. RW2c 는 설치마다 수백 KB 를 흘리므로 그 스크립트가
+    // 일찍 끝나면 GUI 가 통째로 죽는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+
+    silenceSigpipe(fds[1]);
+    // ⑴ 플래그가 «정말» 걸렸나 — 상수가 틀렸으면 여기서 0 이 온다.
+    try std.testing.expectEqual(@as(c_int, 1), std.c.fcntl(fds[1], F_GETNOSIGPIPE, @as(c_int, 0)));
+
+    // ⑵ 그리고 실제로 살아남나. SIGPIPE 가 떴다면 이 test 프로세스가 여기서 죽는다.
+    _ = std.c.close(fds[0]);
+    var big: [64 * 1024]u8 = undefined;
+    @memset(&big, 0);
+    writeAllFd(fds[1], &big);
+
+    // ⑶ 그 write 는 `EPIPE` 를 «돌려준다» — 그래야 `writeAllFd` 의 `n <= 0` 이 의미를 가진다.
+    const n = std.c.write(fds[1], &big, big.len);
+    try std.testing.expect(n < 0);
 }

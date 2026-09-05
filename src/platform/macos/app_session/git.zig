@@ -281,7 +281,9 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     // B 로 옮기면 B 가 영원히 감시되지 않는다. 「못 띄우는 루트는 아예 안 띄운다」(아래 `canTrack`)가
     // `started ⇒ 기억 있음` 을 보장하므로, 이 조건이 그것을 포함하면서 더 넓다.
     if (self.remote_watch.root_len != 0 and !std.mem.eql(u8, self.remote_watch.watchedRoot(), repo)) {
-        self.remote_watch.stop();
+        // ⚠️ **`stop` 이 아니라 `switchRoot` 다**(13 회차). 호스트는 그대로이므로 **설치 답은 지킨다** —
+        // `stop` 을 쓰면 저장소를 옮길 때마다 `uname` + `check` 두 왕복을 남의 서버에 다시 문다.
+        self.remote_watch.switchRoot();
     }
 
     switch (self.remote_watch.phase) {
@@ -316,9 +318,22 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
             },
             .failed => {
                 // 못 심었다. **곧장 다시 시도하지 않는다** — 백오프가 그 간격을 진다.
+                // 일시적 실패는 계속 재시도한다(RW5 가 감시자에서 세운 것과 같은 규율).
                 self.remote_watch.phase = .backoff;
                 self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;
                 self.remote_watch.install = .unknown; // 다음 차례에 다시 물어본다
+                return;
+            },
+            // ⚠️ **영영 못 심는 원격은 포기한다**(적대적 검증 2026-09-05 6 회차). 모르는 `uname` 이나
+            // 번들에 없는 변종은 다시 물어도 답이 같은데, 그때마다 `uname` 왕복 + 번들 읽기 + 스레드가
+            // 든다 — RW5 가 감시자에서 없앤 폭주를 설치 쪽에서 되풀이하는 것이다.
+            .unsupported => {
+                self.remote_watch.phase = .gave_up;
+                std.log.scoped(.scm).warn(
+                    "cannot install the remote watcher for this host — auto refresh off dest={s}",
+                    .{dest},
+                );
+                self.showNoticeKey(.scm_remote_watch_gave_up); // RW6 — 조용히 내리지 않는다
                 return;
             },
         }

@@ -148,6 +148,14 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     defer allocator.free(pump_code2);
     try std.testing.expect(std.mem.indexOf(u8, pump_code2, "remote_watch.root_len != 0 and") != null);
     try std.testing.expect(std.mem.indexOf(u8, pump_code2, "remote_watch.started and !std.mem.eql") == null);
+    // ⚠️ **저장소 전환은 `stop` 이 아니라 `switchRoot` 다**(13 회차). 감시자는 **호스트마다** 심기므로
+    // 저장소가 바뀐다고 저쪽 파일이 사라지지 않는다 — `stop` 을 쓰면 옮길 때마다 `uname` + `check`
+    // 두 왕복을 남의 서버에 다시 묻는다.
+    const swap = try bodyOf(pump, "self.remote_watch.watchedRoot(), repo)) {", "\n    }", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, swap, "remote_watch.switchRoot()") != null);
+    const swap_code = try stripComments(allocator, swap);
+    defer allocator.free(swap_code);
+    try std.testing.expect(std.mem.indexOf(u8, swap_code, "remote_watch.stop()") == null);
     // **switch 보다 «먼저» 본다** — 뒤에 두면 `.gave_up` 이 곧장 return 해 전환을 영영 못 본다.
     const switch_at = std.mem.indexOf(u8, pump, "switch (self.remote_watch.phase)").?;
     const swap_at = std.mem.indexOf(u8, pump, "self.remote_watch.watchedRoot(), repo").?;
@@ -250,4 +258,56 @@ test "설치 계약이 «죽은 계약» 이 아니다 — 제품이 실제로 �
     try std.testing.expect(std.mem.indexOf(u8, pump, ".running => return") != null);
     // deinit 이 그 스레드를 기다린다 — 안 기다리면 detach 스레드가 해제된 self 를 만진다.
     try std.testing.expect(std.mem.indexOf(u8, app, "self.watch_install_inflight;") != null);
+
+    const begin = try bodyOf(app, "pub fn beginWatchInstall(", "\n    }\n", 4096);
+    // ⚠️ **소유본을 «먼저» 만든다**(적대적 검증 2026-09-05 1 회차). 구조체 리터럴 «안»에서 실패
+    // 경로가 `job.ctl` 을 free 하던 판이 있었는데, 그때 `job.*` 은 대입 전이라 `create` 가 준
+    // **미초기화 메모리**를 free 했다.
+    try std.testing.expect(std.mem.indexOf(u8, begin, ".ctl = ctl_owned") != null);
+    try std.testing.expect(std.mem.indexOf(u8, begin, ".dest = dest_owned") != null);
+    const begin_code = try stripComments(allocator, begin);
+    defer allocator.free(begin_code);
+    // ⚠️ 처음엔 `free(job.ctl)` 을 **아예** 금지했는데 **너무 넓었다** — `job.*` 대입 «뒤» 의 정리
+    // 경로가 그것을 free 하는 것은 옳다. 지켜야 하는 것은 「대입 «전» 에 만지지 않는다」이고, 위
+    // 두 단언(`.ctl = ctl_owned`)이 그것을 보장한다.
+    //
+    // `void` 함수의 `errdefer` 는 **절대 안 돈다** — 보호하는 척만 하므로 두지 않는다(2 회차).
+    try std.testing.expect(std.mem.indexOf(u8, begin_code, "errdefer") == null);
+    // ⚠️ **늦게 온 답은 버린다**(2 회차). `stop` 이 세대를 올리고, 수확이 그것을 대조한다.
+    try std.testing.expect(std.mem.indexOf(u8, begin, ".gen = self.remote_watch.install_gen") != null);
+    const drain = try bodyOf(app, "pub fn drainWatchInstall(", "\n    }\n", 2048);
+    try std.testing.expect(std.mem.indexOf(u8, drain, "r.gen == self.remote_watch.install_gen") != null);
+    // ⚠️ **버릴 때 «되물어본다»**(4 회차). 옛 스레드가 새 스레드보다 늦게 끝나면 낡은 답이 슬롯에
+    // 남는데, 버리기만 하면 `install` 이 `.running` 인 채로 굳어 그 호스트가 세션 내내 막힌다.
+    try std.testing.expect(std.mem.indexOf(u8, drain, "self.remote_watch.install = .unknown") != null);
+
+    // ⚠️ **영영 못 심는 원격은 포기한다**(6 회차). 모르는 `uname` 이나 번들에 없는 변종은 다시 물어도
+    // 답이 같은데, 그때마다 왕복 + 번들 읽기 + 스레드가 든다 — RW5 가 감시자에서 없앤 폭주다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, ".unsupported => {") != null);
+    const unsup = try bodyOf(pump, ".unsupported => {", "\n            },", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, unsup, "phase = .gave_up") != null);
+    // 포기했으면 **화면이 말한다**(RW6 과 같은 규율).
+    try std.testing.expect(std.mem.indexOf(u8, unsup, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+    // ⚠️ **틱에서는 ssh 를 «안» 부른다**(8 회차). `runRemoteScript` 에 마감이 없어, 틱에서 부르면
+    // 원격이 멈출 때 **UI 가 통째로 선다**(실측: 정상 왕복도 로컬호스트에서 10 ms).
+    const begin2 = try bodyOf(app, "pub fn beginWatchInstall(", "\n    }\n", 4096);
+    const begin2_code = try stripComments(allocator, begin2);
+    defer allocator.free(begin2_code);
+    try std.testing.expect(std.mem.indexOf(u8, begin2_code, "runRemoteScript") == null);
+    try std.testing.expect(std.mem.indexOf(u8, begin2_code, "uname") == null);
+    // 그 왕복은 **스레드**가 진다.
+    const worker = try bodyOf(app, "fn watchInstallWorker(", "\n    }\n", 8192);
+    try std.testing.expect(std.mem.indexOf(u8, worker, "uname -sm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, worker, "variantFromUname") != null);
+    // 그리고 «번들 읽기» 도 스레드다 — 그래야 io 를 안 만진다(`uploadWorker` 의 전제).
+    try std.testing.expect(std.mem.indexOf(u8, worker, "readFileNoIo") != null);
+    // 영구/일시 실패의 갈림도 스레드가 진다.
+    try std.testing.expect(std.mem.indexOf(u8, worker, "outcome = .unsupported") != null);
+
+    // ⚠️ **파이프에 쓰다 상대가 먼저 닫아도 죽지 않는다**(5 회차 — 실측: 기본 처분이면 종료 141).
+    const upload = try read(allocator, "src/platform/macos/ssh_upload.zig", 1024 * 1024);
+    defer allocator.free(upload);
+    const wall = try bodyOf(upload, "fn writeAllFd(", "\n}\n", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, wall, "silenceSigpipe(fd)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upload, "F_SETNOSIGPIPE") != null);
 }

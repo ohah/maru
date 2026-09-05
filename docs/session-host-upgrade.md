@@ -2887,11 +2887,18 @@ post-publication fence 실패는 partial bytes를 성공으로 게시하지 않�
 regular-file·single-link·size·SHA를 다시 확인한다. `cleanup`은 destination name이 아직 held inode를 가리킬 때만 unlink하고 parent를
 sync한 뒤 nested descriptor를 닫는다. pathname이 다른 inode나 symlink로 교체되면 그 replacement를 삭제하지 않고
 `CleanupFailed`와 exact retry owner를 보존한다. 성공 handoff의 ordinary descriptor close와 durable leaf 삭제는 하나의 API로
-합치지 않는다.
+합치지 않는다. `closeRetaining()`은 wrapper·nested owner·pathname identity와 single-link held inode를 마지막으로 재검증한 뒤
+held file/parent descriptor만 닫고 durable leaf는 그대로 남긴다. close 성공 뒤 owner는 pristine으로 되돌아가지 않는
+`retained_closed` tombstone이며 `value`·`revalidate`·`cleanup`·두 번째 close와 새 `promote`를 모두 거부한다. 따라서 descriptor를
+닫은 과거 process-local capability를 복사하거나 재사용해 다음 process의 durable output을 삭제할 수 없다. 삭제형 `cleanup()`은
+아직 열린 original owner만 호출할 수 있고 exact held inode unlink와 parent sync를 계속 소유한다. close syscall의 성공 여부를
+관측할 수 없는 Darwin 경계에서는 재사용 가능한 fd owner를 남기지 않고 descriptor fields를 즉시 `-1`로 tombstone하며
+`DescriptorCloseFailed`를 반환한다. 이 오류도 durable leaf 삭제 권한을 복구하지 않는다.
 
 focused gate `test-session-host-release-adapter-candidate-evidence-handoff`는 Debug·ReleaseFast에서 실제 filesystem 승격,
 ephemeral workspace 삭제 뒤 durable bytes 생존, source/destination path·alias·owner 거부, source drift, pre-existing destination,
-copy/final-address 차단, destination 교체 시 replacement 보존, exact cleanup과 allocation failure를 검증한다. 이 leaf는 아직
+copy/final-address 차단, destination 교체 시 replacement 보존, retained close 뒤 bytes 생존과 owner 재사용·삭제 권한 소멸,
+exact cleanup과 allocation failure를 검증한다. 이 leaf는 아직
 candidate/evidence/manifest attestation bundle 전체의 aggregate handoff, prepare/finalize driver, live release workflow 배선 또는
 frozen signed U5 제품 E2E를 완료하지 않는다.
 

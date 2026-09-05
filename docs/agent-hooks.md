@@ -75,6 +75,30 @@ antigravity 여덟은 세션 신원(`pane.report_agent_session`)만 보낸다. �
 방향에만 건다**: `working`→`idle`만 100ms 간격 3회 확인(700ms 상한)으로 미루고, `blocked` 해제나
 `working` 진입은 즉시 반영한다. 프로세스가 죽으면 확인 없이 바로 `idle`이다.
 
+**규칙을 코드가 아니라 데이터로 둔다**(herdr 소스 실측 2026-09-05). provider 마다 TOML 한 장이고
+(`agent-detection/claude.toml` 등 12 종), 파일이 **자기 버전을 갖는다**:
+
+```toml
+id = "claude"
+version = "2026.08.29.1"
+min_engine_version = 2
+updated_at = "2026-08-29T00:00:00Z"
+```
+
+그래서 provider 가 UI 문구를 바꾸면 **데이터만 갱신**한다. 우리는 같은 일에 코드를 고치고 재빌드한다
+— 2026-09-05 에 claude 가 진행 표시를 바꿨을 때 PR 둘이 필요했던 자리다. 「규칙이 provider UI 에 묶여
+있다」는 우리 위험을 herdr 는 **배포 주기를 분리해** 완화한다(없애지는 못한다 — 규칙 자체는 여전히
+문구에 묶인다).
+
+**region 어휘도 다르다.** 우리 `footer` 는 「마지막 프롬프트 아래의 마지막 구분선 다음부터」인데,
+herdr 는 `bottom_non_empty_lines(N)` 을 쓴다(N = 3·5·6·8·20, 22 곳). **빈 줄을 세지 않는 하단 N 줄**
+이라, 우리가 겪은 「구분선이 화면 맨 끝이라 footer region 이 비었다」가 그쪽에서는 안 생긴다. 우리는
+같은 문제를 `beats_position`(위치 비교 예외)으로 풀었다 — 어휘를 늘리는 대신 예외를 좁게 준 셈이다.
+
+**orca 는 반대로 스피너를 「장식」으로 분류해 아예 안 쓴다**(`agent-decorative-title-signature.ts`:
+*"spinner glyph is live decoration, not meaningful …"*). 소스가 6 개라 다른 데서 상태를 얻을 수 있기
+때문이고, 그래서 문구 변경에 덜 흔들린다. 우리는 소스가 둘(훅·화면)이라 그 길을 못 간다.
+
 **대신 herdr가 포기한 것이 있다 — 서브에이전트다.** claude 훅 스크립트는 자식 이벤트를 명시적으로
 버리고(`is_subagent = bool(hook_input.get("agent_id"))` → 즉시 종료), `SubagentStop`은 제거 목록에
 있다. 화면 쪽에도 개수를 세는 장치가 없고 provider manifest에 문자열 규칙이 있을 뿐이다(grok의

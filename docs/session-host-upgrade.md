@@ -3102,6 +3102,30 @@ DMG→frozen 호출, token-free bundle verifier, 네 파일 distinct identity, �
 소비할 수 있게 하지만 candidate command의 입력 배선, prepare/resume process 분리, authored evidence/manifest action, aggregate
 handoff, release workflow 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
 
+### 11.54 candidate command의 local bundle 입력 배선
+
+기존 `publish-candidate` command는 candidate attestation을 GitHub API에서 다시 찾지 않고 §11.53의 same-run bundle 진입점으로
+조립한다. command의 닫힌 option 목록에 `--candidate-dmg-bundle`과 `--candidate-frozen-bundle`을 필수로 추가하고, executable
+bootstrap과 candidate driver는 두 값을 final-address pathname storage와 seal에 포함한다. 두 option은 caller가 제출할 수 있는
+attestation 성공 boolean, ID, URL, subject 또는 digest가 아니며 §11.52 단계 2의 action output pathname만 운반한다.
+
+driver는 protected context, checkout 전 pinned GitHub CLI, source와 Zig toolchain을 기존 순서로 결속한 뒤 두 bundle pathname을
+candidate prerequisite에 전달한다. prerequisite의 attestation leaf는 `composeBundlesUntil`만 호출하고 `GH_TOKEN`을 인자로 받지
+않는다. 같은 command의 후속 draft 생성·source 관측·publication leaf는 아직 GitHub API를 사용하므로 process 수준에서는 기존처럼
+exact `GH_TOKEN`을 한 번 읽어 보존하지만, candidate bundle verifier child에는 token·HOME·PATH·Apple secret을 전달하지 않는다.
+
+candidate DMG, frozen executable, 두 bundle, DMG work, baseline workspace, app main/CLI, manifest, source root, Zig와 pinned GitHub CLI의
+pathname은 command parser와 driver seal에서 역할별로 고정한다. bundle option 누락·중복·다른 phase option, relative 또는
+non-canonical pathname, 어느 artifact/CLI pathname과 같은 값, bootstrap/driver storage alias는 filesystem·token reader·child·remote
+mutation 전에 거부한다. candidate bundle 검증 실패는 draft 생성 0이며 기존 prerequisite의 local unwind를 따른다.
+
+focused gate `test-session-host-release-adapter-contract`, `test-session-host-release-adapter-executable-bootstrap`,
+`test-session-host-release-adapter-candidate-release-driver`, `test-session-host-release-adapter-candidate-prerequisite-product`와
+`test-session-host-release-validator-executable`은 option 폐쇄성, bootstrap/driver seal, exact bundle 전달, candidate 단계의
+`composeBundlesUntil` sole call과 API-backed `composeUntil` call 0, token-free child 경계를 Debug·ReleaseFast에서 검증한다. 이 단계는
+live command가 단계 2 output을 소비하게 하지만 단계 3 뒤 process 종료, evidence/manifest action, aggregate prepare/finalize 삽입,
+release workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

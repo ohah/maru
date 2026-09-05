@@ -1048,6 +1048,12 @@ fence와 terminal publication을 Debug·ReleaseFast에서 검증한다. API 조�
 fallback은 0이다. 이 gate는 candidate command 입력 배선, prepare/resume process 분리, aggregate handoff, live workflow 또는 frozen
 signed U5 제품 E2E의 증거가 아니다.
 
+U5 candidate command bundle 배선은 `publish-candidate`의 필수 option 두 개를 executable bootstrap과 sealed driver를 거쳐
+candidate prerequisite의 `composeBundlesUntil`로만 전달한다. contract/bootstrap/driver/prerequisite/validator executable focused
+gate는 누락·중복·phase 교환·non-canonical/aliased pathname을 첫 side effect 전에 거부하고, candidate attestation에서 token/API
+lookup call이 0임을 Debug·ReleaseFast에서 고정한다. 후속 draft/API leaf 때문에 command process의 exact token owner는 아직 유지한다.
+이 gate는 prepare/resume process 분리, evidence/manifest attestation, aggregate 삽입, workflow 또는 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

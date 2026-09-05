@@ -83,6 +83,51 @@ pub fn activeTermRemoteDest(self: *AppSession, buf: []u8) ?[]const u8 {
     return buf[0..dest.len];
 }
 
+/// 이 Term 이 지금 붙어 있는 **기계**(`maru ssh` 가 OSC 5379 로 알린 목적지, 로컬이면 빈 슬라이스).
+///
+/// `activeTermRemoteDest` 와 갈린 이유: 그쪽은 «활성 pane 은 어디인가» 를 묻고 호출자 버퍼에 복사한다.
+/// 이쪽은 **아무 Term 이나** 값 그대로 묻는다 — 관측 캐시를 가리키므로 다음 `refreshTermObservation`
+/// 까지만 유효하다(들고 다니지 말 것).
+pub fn termRemoteDest(term: *const Term) []const u8 {
+    if (term.rt.observation.availability == .unavailable) return "";
+    if (!term.rt.observation.ssh_remote_dest_present) return "";
+    return term.rt.observation.ssh_remote_dest.items;
+}
+
+/// 이 Term 의 경로가 **어느 기계의 것인가** — 훅 cwd 를 담고(`CwdLabel.set`) 되읽을 때(`remoteCwd`) 쓰는 키다.
+///
+/// **목적지만으로는 부족하다**(적대적 검증 2026-09-05 12 회차). `maru ssh` 가 아닌 맨 `ssh` 는 OSC 5379 를
+/// 안 보내므로 목적지가 빈다 — 그런데 **로컬**도 빈다. 그 둘을 같은 키로 두면 로컬 에이전트가 남긴 cwd 가
+/// 그 pane 이 맨 `ssh` 로 들어간 뒤에도 매치되어, 폴더줄이 **원격 접두 + 로컬 경로**라는 없는 자리를 그린다
+/// (§9.4 가 「경로는 두 기계 사이에서 키가 아니다」로 막아 둔 그 함정이다).
+///
+/// 그래서 목적지가 없으면 **OSC 7 authority**(`cwd_host`)로 떨어진다 — 그것이 곧 「이 경로를 보고한 기계」다.
+/// 둘 다 비면 로컬이고, 그때만 키가 빈다.
+pub fn termMachineKey(term: *const Term) []const u8 {
+    const dest = termRemoteDest(term);
+    if (dest.len > 0) return dest;
+    if (term.rt.observation.availability == .unavailable) return "";
+    return term.rt.observation.cwd_host.items;
+}
+
+/// 원격 pane 의 **작업 디렉터리**를 고르는 단일 규칙. 표시(사이드바·폴더줄·창 제목)와 원격 SCM 이
+/// 여기를 함께 지난다 — 두 뷰가 다른 답을 내면 「목록은 원격인데 클릭은 로컬」과 같은 종류의 함정이
+/// 된다(docs/editor-surface-dock.md §3.5).
+///
+/// 1. **훅 cwd** — 신선하고(§`CwdLabel.stale_after_ms`), 그 값을 적을 때의 **기계가 지금과 같을 때만**.
+///    OSC 7 은 `precmd` 라 전면 TUI(claude·codex)가 붙어 있는 동안 발화하지 못해 접속 직전 값에서
+///    멈춘다(ssh-integration.md §9.5). 훅 payload 의 cwd 는 그 구간에도 **매 턴** 온다.
+/// 2. **관측 cwd**(OSC 7).
+///
+/// **호출 전에 관측이 새로여야 한다**(`refreshTermObservation`) — 이 함수는 관측을 갱신하지 않는다.
+/// 반환 슬라이스는 Term 소유라 다음 갱신까지만 유효하다.
+pub fn remoteCwd(self: *AppSession, term: *Term) []const u8 {
+    if (term.agent_hook_cwd.fresh(self.awakeMs()) and
+        term.agent_hook_cwd.hostMatches(termMachineKey(term)))
+        return term.agent_hook_cwd.text();
+    return term.rt.observation.cwd.items;
+}
+
 /// 활성 Term 이 원격이면 그 **SCM 대상**(목적지 · control socket · 원격 cwd). 로컬이면 null.
 ///
 /// RS2 — [계획](../../../../docs/plans/remote-scm.md). 여기가 「원격을 본다」를 정하는 **유일한 자리**다:
@@ -110,9 +155,14 @@ pub fn remoteScmTarget(
 
     const dest = term.rt.observation.ssh_remote_dest.items;
     if (dest.len == 0 or dest.len > dest_buf.len) return null;
-    // **원격 경로는 관측(OSC 7)만이 안다.** 커널 조회는 로컬 ssh 클라이언트의 cwd 라 여기서 쓰면 안 된다
+    // **원격 경로는 저쪽이 보고한 것만 쓴다.** 커널 조회는 로컬 ssh 클라이언트의 cwd 라 여기서 쓰면 안 된다
     // (§9.4 가 링크 감지에서 막은 그 함정).
-    const cwd = term.rt.observation.cwd.items;
+    //
+    // **표시 축과 같은 규칙을 쓴다**(`remoteCwd`). 관측만 보면 원격에서 `claude` 를 띄운 pane 이 —
+    // 그 구간에는 `precmd` 가 안 돌아 OSC 7 이 접속 직전 값(대개 홈)에 멈추므로 — 「원격인데 저장소가
+    // 아니다」로 떨어진다. 폴더줄은 훅 cwd 로 진짜 경로를 그리고 있는데 도크만 빈 안내를 내던 자리가
+    // 이것이고, 그 어긋남 자체가 §3.5 가 한 축으로 모아 둔 것을 다시 가르는 일이다.
+    const cwd = remoteCwd(self, term);
     if (cwd.len == 0 or cwd.len > cwd_buf.len) return null;
     if (!std.fs.path.isAbsolute(cwd)) return null;
 
@@ -203,6 +253,20 @@ fn submitGitRead(self: *AppSession, repo: []const u8, remote: ?git_command.Remot
 
 /// 원격 목적지(`user@host`)의 상한. `ssh` 가 받는 값이고 관측에서 오므로 넉넉히 잡되 유계로 둔다.
 pub const max_remote_dest_bytes: usize = 256;
+
+// **같은 상한이 두 곳에 적혀 있다 — 갈리면 조용히 깨진다**(적대적 검증 2026-09-05 1 회차).
+//
+// 훅 cwd 는 `(host, path)` 쌍이고(`CwdLabel`), 그 host 는 **여기 오는 그 목적지**다. 두 상한이 갈리면
+// 이쪽이 받아들인 긴 목적지가 저쪽에서 거절돼 `hostMatches` 가 영영 거짓이 되고, 그러면 `remoteCwd` 가
+// 훅 값을 **말없이 버린다** — 증상은 「원격에서 도크가 다시 홈을 본다」이고 원인은 상한 하나다.
+// 순수 층은 platform 을 import 할 수 없으므로(계층 방향) 그쪽 값을 SSOT 로 두고 여기서 못 박는다.
+//
+// 메시지는 **영어로 적는다** — 이것은 화면이 아니라 컴파일 진단이라 번역 대상이 아니고, 한국어로 적으면
+// `i18n_literals` 원장을 올려야 하는데 그 파일은 리베이스 충돌이 잦은 자리다(`docs/project-rules.md`).
+comptime {
+    if (max_remote_dest_bytes != maru.session.agent_hook_mode.CwdLabel.max_host)
+        @compileError("max_remote_dest_bytes drifted from CwdLabel.max_host - the hook cwd host axis breaks silently");
+}
 
 /// 지금 보는 저장소를 **통째로 놓는다**(경로 + 호스트). 원격↔로컬 전환에서 한쪽만 놓으면 짝이 어긋난
 /// 상태가 남는다.
@@ -1032,16 +1096,10 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
     term_ops.refreshTermObservation(self, term, false, false);
     if (app_session_mod.termCwdIsRemote(term)) {
         if (term.rt.observation.availability == .unavailable) return null;
-        // **훅이 더 최근을 안다.** OSC 7 은 `precmd` 라 전면 TUI(claude·codex) 가 붙어 있는 동안
-        // 발화하지 못해 접속 직전 값에서 멈춘다 — 에이전트 세션이 전부 홈으로 뜨던 것이 그것이다
-        // (ssh-integration.md §9.5). 훅 값은 매 턴 오므로 있으면 그쪽을 쓴다.
-        //
-        // **이 한 지점에서 정한다.** 사이드바·SCM·파일 탐색기가 모두 이 함수를 지나므로 두 뷰가
-        // 다른 답을 내지 않는다(예전에 그 자리만 관측을 직접 읽어 갈렸던 회귀가 이 함수의 존재 이유다).
-        // **신선할 때만 믿는다**(적대적 검증 4 회차). 원격에는 「에이전트가 사라졌다」 신호가 없어,
-        // 안 만료시키면 끝난 뒤에도 이 값이 살아 있는 OSC 7 을 영영 덮는다.
-        const hook_fresh = term.agent_hook_cwd.fresh(self.awakeMs());
-        const cwd = if (hook_fresh) term.agent_hook_cwd.text() else term.rt.observation.cwd.items;
+        // **규칙은 `remoteCwd` 가 소유한다**(훅 우선 · 신선함 · 같은 기계). 예전에는 그 세 줄이 이
+        // 함수 안에 있었고, 그래서 이 함수를 **안 지나는** 소비처(원격 SCM·창 제목)가 관측만 보며
+        // 다른 답을 냈다 — 같은 화면에서 폴더줄은 진짜 경로, 도크는 홈이던 자리가 그것이다.
+        const cwd = remoteCwd(self, term);
         if (cwd.len == 0 or cwd.len > buf.len) return null;
         @memcpy(buf[0..cwd.len], cwd);
         return buf[0..cwd.len];

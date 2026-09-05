@@ -2442,8 +2442,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `shell_integration = null`인 `/bin/sh` runtime 두 개를 쓰는 Debug·ReleaseFast 제품 gate가 current client의 paired
   kernel cwd/hostname, A detach 중 cwd 변경 뒤 pump 없는 initial reattach, B sibling observation 불변, 실제 PTY
   echo로 들어온 local/remote OSC 7 우선과 known SSH destination 억제를 한 흐름에서 검증한다. K2
-  lifecycle/handle-reuse와 K1 frozen N-1 absence, `cwd_axis`의 `termCwd`/`termCwdForDisplay` 단일 소비자 축도 같은
-  K3 completion step의 선행 증거이며, 어느 것도 실제 daemon gate를 대신하지 않는다.
+  lifecycle/handle-reuse와 K1 frozen N-1 absence, `cwd_axis`의 `termCwd`(로컬 = OSC 7 → 커널 2단)/`remoteCwd`
+  (원격 = 훅 우선 → 관측) 단일 소비자 축도 같은 K3 completion step의 선행 증거이며, 어느 것도 실제 daemon gate를
+  대신하지 않는다. ⚠️ **재고 이름이 2026-09-05(RS6)에 바뀌었다** — `termCwdForDisplay` 의 원격 분기가 하던
+  관측 직독이 `remoteCwd` 로 합쳐져 그 이름이 직독 재고에서 빠졌다. 커널 축은 그대로다(그 함수는 로컬에서
+  여전히 `termCwd` 로 떨어진다).
 - **P4 input parity micro-gate: 구현.** `test-session-host-input-parity`가 Debug·ReleaseFast에서 host-backed
   AppSession의 DECSET 1003 exact-mode/중복·modifier·chrome 억제, 실제 forkpty host reader의 xterm SGR no-button motion
   byte, `selection_scroll_and_extend` 두 번 뒤 authoritative copy와 source boundary를 exact-count한다. AppSession 행은

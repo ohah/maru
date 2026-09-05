@@ -71,10 +71,15 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     try std.testing.expect(std.mem.indexOf(u8, body, "cwd_host.items") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "ssh_remote_dest_present") != null);
 
-    // **커널 축 둘이 그 파일의 재고에 그대로 있는가.** 접두를 붙여 세지 않는 이유가 있다: 같은 파일의
-    // 재고에는 커널 cwd 와 **무관한 이름**이 늘 수 있다. 실제로 `remoteScmTarget`(RS2 — 원격 SCM)이
-    // 늘었는데, 그 함수는 관측(OSC 7)만 읽고 **커널 조회를 하지 않아** K3 의 축과 다른 축이다.
-    // 여기서 재고 줄 전체를 대조하면 그런 무관한 증가마다 이 게이트가 빨개지고, 그 빨강은 K3 가
-    // 지키려는 사실(커널 축이 둘로 유지된다)에 대해 아무것도 말하지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, "\"termCwd\", \"termCwdForDisplay\" }"));
+    // **커널 축이 그 파일의 재고에 그대로 있는가.** 접두를 붙여 세지 않는 이유가 있다: 같은 파일의
+    // 재고에는 커널 cwd 와 **무관한 이름**이 늘고 준다. 실제로 `remoteScmTarget`(RS2 — 원격 SCM)이
+    // 늘었다가 `remoteCwd`(RS6)로 합쳐지며 빠졌는데, 그 둘은 관측(OSC 7)만 읽고 **커널 조회를 하지
+    // 않아** K3 의 축과 다른 축이다. 여기서 재고 줄 전체를 대조하면 그런 무관한 변동마다 이 게이트가
+    // 빨개지고, 그 빨강은 K3 가 지키려는 사실(커널 축이 유지된다)에 대해 아무것도 말하지 않는다.
+    //
+    // **2026-09-05(RS6)에 이 문자열이 한 번 바뀌었다.** `termCwdForDisplay` 의 **원격 분기**가 하던
+    // 관측 직독이 `remoteCwd` 로 옮겨 가면서 그 이름이 직독 재고에서 빠졌다. 커널 축은 그대로다 —
+    // 그 함수는 로컬에서 여전히 `termCwd`(OSC 7 → 커널 2단)로 떨어지고, 옮겨 간 것은 원격 분기뿐이다.
+    // 그래서 여기서 세는 것도 «커널 조회를 하는 이름» 하나(`termCwd`)가 재고에 남아 있는가이다.
+    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, "\"remoteCwd\", \"termCwd\" }"));
 }

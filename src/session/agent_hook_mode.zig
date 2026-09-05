@@ -491,6 +491,16 @@ pub fn attentionDebounce(state_now: State, since_ms: u64, now_ms: u64) Debounce 
 pub const CwdLabel = struct {
     pub const max_text = 512;
 
+    /// 이 경로가 **어느 기계의 것인가**(ssh 목적지 `user@host`, 로컬이면 빈 문자열). 상한은 목적지
+    /// 문자열의 것이라 경로만큼 길 이유가 없다.
+    ///
+    /// **왜 함께 담나**: 경로만으로는 뜻이 없다 — 같은 철자가 두 기계에서 다른 디렉터리다
+    /// (`docs/plans/remote-scm.md` §2.1 「저장소 신원은 (host, path) 쌍이다」). 훅 모드는 로그 파일이
+    /// 한 번 생기면 세션 내내 유지되므로(`agent.zig` `agentHookMode`), 로컬 에이전트가 남긴 값이 그
+    /// pane 이 `maru ssh` 로 들어간 뒤에도 신선한 채로 남는다. 그 값을 그대로 쓰면 **로컬 경로가 원격
+    /// git 명령의 `-C`** 가 된다.
+    pub const max_host = 256;
+
     /// 이 값이 얼마나 오래 믿을 만한가. **원격에는 「에이전트가 사라졌다」 신호가 없다** —
     /// `agent_kind` 재판정은 원격에서 아예 돌지 않고(훅 줄이 소스다), 채널이 열려 있는 한 훅 모드도
     /// 유지된다. 그래서 에이전트를 끝내고 ssh 안에 남아 `cd` 하면 이 값이 **살아 있는 OSC 7 을 덮는다**.
@@ -500,11 +510,24 @@ pub const CwdLabel = struct {
     pub const stale_after_ms: u64 = 10 * 60 * 1000; // 10 분
 
     len: usize = 0,
+    host_len: usize = 0,
     seen_ms: u64 = 0,
     buf: [max_text]u8 = undefined,
+    host_buf: [max_host]u8 = undefined,
 
     pub fn text(self: *const CwdLabel) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    /// 이 경로를 적을 때의 목적지. 로컬이면 빈 슬라이스다.
+    pub fn host(self: *const CwdLabel) []const u8 {
+        return self.host_buf[0..self.host_len];
+    }
+
+    /// **지금도 같은 기계인가.** 소비자는 이것과 `fresh` 를 함께 물어야 한다 — 시간만 보면 「10 분
+    /// 안에 다른 기계에서 적힌 경로」가 통과한다.
+    pub fn hostMatches(self: *const CwdLabel, dest: []const u8) bool {
+        return std.mem.eql(u8, self.host(), dest);
     }
 
     /// **아직 믿을 만한가.** `now_ms` 는 단조 시계(`awakeMs`)여야 한다 — 벽시계면 슬립·시간 보정에
@@ -521,15 +544,22 @@ pub const CwdLabel = struct {
 
     /// **절대 경로만, 상한 안에서만 담는다.** 상대 경로는 어느 기준인지 이쪽이 모르고, 잘린 절대
     /// 경로는 남의 디렉터리를 가리킨다 — 둘 다 「모른다」로 두는 편이 안전하다.
-    pub fn set(self: *CwdLabel, path: []const u8, now_ms: u64) void {
+    ///
+    /// `dest` 는 이 경로가 온 기계(ssh 목적지, 로컬이면 `""`)다. **목적지가 상한을 넘으면 경로도 안
+    /// 담는다** — 잘린 목적지는 `hostMatches` 를 거짓말시키고, 그러면 남의 기계의 경로가 통과한다.
+    pub fn set(self: *CwdLabel, path: []const u8, dest: []const u8, now_ms: u64) void {
         if (path.len == 0 or path.len > max_text or path[0] != '/') return;
+        if (dest.len > max_host) return;
         @memcpy(self.buf[0..path.len], path);
         self.len = path.len;
+        @memcpy(self.host_buf[0..dest.len], dest);
+        self.host_len = dest.len;
         self.seen_ms = now_ms;
     }
 
     pub fn clear(self: *CwdLabel) void {
         self.len = 0;
+        self.host_len = 0;
         self.seen_ms = 0;
     }
 };
@@ -1823,14 +1853,14 @@ test "CwdLabel: 절대 경로만·상한 안에서만 담고, 못 담으면 앞 
     var l: CwdLabel = .{};
     try testing.expect(l.isEmpty());
 
-    l.set("/a/b", 1000);
+    l.set("/a/b", "", 1000);
     try testing.expectEqualStrings("/a/b", l.text());
 
     // **상한을 정확히 채우는 것은 담는다**(경계 한 칸 차이가 잘린 경로를 만든다).
     var exact: [CwdLabel.max_text]u8 = undefined;
     exact[0] = '/';
     @memset(exact[1..], 'a');
-    l.set(&exact, 1000);
+    l.set(&exact, "", 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
 
     // **넘치면 안 담는다.** 잘라 담으면 그 값은 «남의 디렉터리» 를 가리킨다 — 표시에도 판정에도 쓰면
@@ -1838,16 +1868,16 @@ test "CwdLabel: 절대 경로만·상한 안에서만 담고, 못 담으면 앞 
     var over: [CwdLabel.max_text + 1]u8 = undefined;
     over[0] = '/';
     @memset(over[1..], 'b');
-    l.set(&over, 1000);
+    l.set(&over, "", 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
     try testing.expectEqual(@as(u8, 'a'), l.text()[1]); // 앞 값이 그대로다
 
     // 상대 경로도 안 담는다 — 어느 기준인지 이쪽이 모른다.
-    l.set("relative/x", 1000);
+    l.set("relative/x", "", 1000);
     try testing.expectEqual(@as(u8, 'a'), l.text()[1]);
 
     // 빈 값도 안 담는다.
-    l.set("", 1000);
+    l.set("", "", 1000);
     try testing.expectEqual(@as(usize, CwdLabel.max_text), l.text().len);
 
     l.clear();
@@ -1861,15 +1891,56 @@ test "CwdLabel: 오래되면 안 믿는다 — 원격에는 «에이전트가 �
     var l: CwdLabel = .{};
     try testing.expect(!l.fresh(0)); // 빈 값은 애초에 안 믿는다
 
-    l.set("/srv/app", 1_000);
+    l.set("/srv/app", "", 1_000);
     try testing.expect(l.fresh(1_000));
     try testing.expect(l.fresh(1_000 + CwdLabel.stale_after_ms)); // 경계는 아직 산다
     try testing.expect(!l.fresh(1_000 + CwdLabel.stale_after_ms + 1)); // 한 칸 넘으면 죽는다
 
     // 새 이벤트가 오면 다시 산다(턴이 도는 동안 만료되지 않는 이유).
-    l.set("/srv/app", 1_000 + CwdLabel.stale_after_ms + 1);
+    l.set("/srv/app", "", 1_000 + CwdLabel.stale_after_ms + 1);
     try testing.expect(l.fresh(1_000 + CwdLabel.stale_after_ms + 1));
 
     // **시계가 뒤로 가면 버리지 않는다** — 단조 시계를 쓰지만 방어한다.
     try testing.expect(l.fresh(0));
+}
+
+test "CwdLabel: 경로는 (host, path) 쌍이다 — 기계가 바뀌면 그 값은 남의 경로다" {
+    // 훅 모드는 로그 파일이 한 번 생기면 세션 내내 유지된다(`agent.zig` `agentHookMode` 의 주석
+    // «한 번 생긴 파일은 세션 중에 사라지지 않는다»). 그래서 로컬 에이전트가 남긴 cwd 가 그 pane 이
+    // `maru ssh` 로 들어간 뒤에도 **신선한 채로** 남고, 시간만 보는 소비자는 그것을 통과시킨다.
+    // 그 값이 원격 git 명령의 `-C` 가 되면 저쪽 기계에서 **철자만 같은 남의 디렉터리**를 연다
+    // (`docs/plans/remote-scm.md` §2.1 「저장소 신원은 (host, path) 쌍이다」).
+    var l: CwdLabel = .{};
+
+    // ① 로컬에서 적혔다 — 목적지는 비어 있다.
+    l.set("/Users/me/proj", "", 1_000);
+    try testing.expect(l.fresh(1_000));
+    try testing.expect(l.hostMatches("")); // 로컬 소비자에게는 그대로 답한다
+    try testing.expect(!l.hostMatches("me@build-box")); // 그 pane 이 ssh 로 들어가면 더는 이 값이 아니다
+
+    // ② 원격 훅이 값을 새로 하면 목적지도 함께 바뀐다.
+    l.set("/srv/app/proj", "me@build-box", 2_000);
+    try testing.expect(l.hostMatches("me@build-box"));
+    try testing.expect(!l.hostMatches(""));
+    try testing.expect(!l.hostMatches("me@other-box")); // 다른 기계도 남이다
+
+    // ③ **잘린 목적지는 아예 안 담는다.** 담으면 `hostMatches` 가 거짓말을 하고, 그 거짓말은
+    //    「남의 기계의 경로를 내 기계의 것으로 읽는다」로 끝난다 — 경로 상한과 같은 이유다.
+    var over_host: [CwdLabel.max_host + 1]u8 = undefined;
+    @memset(&over_host, 'h');
+    l.set("/srv/app/other", &over_host, 3_000);
+    try testing.expectEqualStrings("/srv/app/proj", l.text()); // 앞 값이 그대로다
+    try testing.expect(l.hostMatches("me@build-box"));
+
+    // ④ 상한을 정확히 채우는 목적지는 담는다(경계 한 칸 차이).
+    var exact_host: [CwdLabel.max_host]u8 = undefined;
+    @memset(&exact_host, 'h');
+    l.set("/srv/app/exact", &exact_host, 4_000);
+    try testing.expectEqualStrings("/srv/app/exact", l.text());
+    try testing.expect(l.hostMatches(&exact_host));
+
+    // ⑤ 비우면 목적지도 함께 사라진다 — 안 지우면 다음 값이 옛 기계를 물려받는다.
+    l.clear();
+    try testing.expect(l.isEmpty());
+    try testing.expectEqualStrings("", l.host());
 }

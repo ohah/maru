@@ -289,7 +289,8 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
    정당한 직독이 일어나는 **함수 이름을 파일별로 고정**하고(별칭은 개수로) — "0건"은 세울 수 없는 규칙이다
    (Q1 직독이 실재한다). 개수만 고정하던 첫 판은 같은 파일에서 정당한 직독 하나를 빼고 부정한 직독 하나를
    더하면 총합이 보존돼 통과했다(실제로 뚫렸다). 새
-   소비자는 `git_ops.termCwd`(저장소 판정) 또는 `git_ops.termCwdForDisplay`(표시)를 쓰고, 직독이 맞다면
+   소비자는 `git_ops.termCwd`(저장소 판정) 또는 `git_ops.termCwdForDisplay`(표시)를 쓰고 — **원격 pane 의
+   cwd 는 `git_ops.remoteCwd` 가 소유한다**(RS6) — 직독이 맞다면
    그 재고에 **이유와 함께** 올려야 한다.
    - 베이스: 공개 libproc API다(clean-room — 공개 API 호출만 하고 레퍼런스 코드 표현은 옮기지 않는다,
      [project-rules.md](project-rules.md)).

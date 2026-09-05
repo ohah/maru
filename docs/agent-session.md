@@ -195,6 +195,29 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 렌더 화면(`capture-pane`)·OSC 타이틀(`display-message -p '#{pane_title}'`)·PTY 원시 바이트(`script`)를 각각 기록해
 대조하는 것이다. 아래는 그 관측이며 **특정 버전·설정의 결과**다(«한계» 참조).
 
+**claude (2.1.251~2.1.260 관측 — 2026-09-05, 화면 running 문구가 사라졌다)**
+
+- 화면: 진행 중 줄이 `✽ Mulling… ` 이다(스피너 + 동사 + `…`). **`esc to interrupt` 는 화면에 없다** —
+  `working_footer` 가 찾던 문구가 통째로 사라졌다.
+- 끝나면 같은 자리가 `✻ Worked for 26s · done 오후 3:41 · 1 shell still running` 으로 바뀐다.
+  **`…`(U+2026) 유무가 진행/완료를 가른다** — 7 pane × 30 회 관측에서 진행 줄은 **전부** `…` 로 끝났고
+  완료 줄에는 **하나도** 없었다.
+- 스피너 프레임은 회전한다 — `✻`(U+273B)·`✽`(U+273D) 실측. **prefix 로 고정할 수 없다.**
+- 증상: **2026-08-12 와 같은 모양이 다른 원인으로 재발했다.** 그때는 타이틀 스피너 계열이 바뀌어
+  `working_title` 이 죽었고, 이번에는 화면 문구가 바뀌어 `working_footer` 가 죽었다. 게다가 tmux 안에서는
+  OSC 제목이 흡수되어 **바깥으로 나가지 않으므로**(`set-titles off` 에서 유출 0 — `on` 대조군은 2개,
+  pty 캡처로 실증) `working_title` 도 못 뜬다. running 근거가 **하나도** 남지 않고 `live_prompt`(idle) 가
+  단독으로 서서, 권위표 C2 가 훅의 running 을 뒤집었다. 앱 로그가 그대로 말한다 —
+  `arbitrate running -> idle origin=screen rule=C2 hook=running screen=idle`.
+- **레이아웃이 규칙 엔진의 가정을 깬다.** `ruleBetter` 는 「같은 화면의 idle/running 충돌은 더 아래에
+  보이는 증거가 이긴다」로 정하는데, claude 는 진행 상태줄을 **입력창 위**에 그린다(스피너 10 행 ·
+  프롬프트 13 행). 그래서 running 규칙을 더해도 위치에서 진다.
+- 대응: 진행 상태줄을 지목하는 `working_spinner` 규칙을 더하고, 그 규칙에만 **`beats_position`**(위치 비교
+  건너뛰기)을 준다. 스피너 prefix + `…` 로 **chrome 자체를 지목**하므로, 대화 출력에 남은 옛 `Working…`
+  텍스트는 이 예외를 못 받는다 — 「낡은 footer 아래 새 프롬프트는 idle」 계약이 그대로 산다.
+- **읽는 법**: 이 부류가 또 나면 `MARU_DEBUG=1` 로 `arbitrate … screen_rule=…` 을 먼저 본다. 화면이 어느
+  규칙으로 그 상태를 냈는지가 거기 있다(계약 §1.7).
+
 **claude (2.1.228 관측 — 2026-08-12, running 타이틀 스피너 계열이 바뀌었다)**
 
 - 타이틀: running **반원 스피너**(관측 프레임 `◐` U+25D0 · `◑` U+25D1 교대) + `<요약>`. 2.1.218의 브라유

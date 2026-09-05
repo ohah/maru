@@ -6655,3 +6655,34 @@ test "세션을 보고 돌아오면 «보던 자리» 다 — 목록 스크롤�
     // **같은 자리다.**
     try T.expectEqual(parked.y, (bridge.remoteRowCenter(10) orelse return error.TestUnexpectedResult).y);
 }
+
+test "세션 목록 스크롤바는 «밀 수 있을 때만» 뜬다" {
+    // 목록이 흐르게 된 순간 「얼마나 남았는지」가 화면에서 사라졌다 — 서른 넘는 세션에서 지금
+    // 어디쯤인지 알 길이 없다. 설정 화면과 같은 규칙(3px·최소 28px)을 쓰되, **안 밀리는 목록에
+    // 띠를 그리면 없는 것을 있다고 말하는 셈**이라 그 조건을 못 박는다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+
+    // 짧은 목록 — 안 밀린다.
+    const few = try sessionListWire(T.allocator, 3);
+    defer T.allocator.free(few);
+    _ = feedControl(few);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16); // 상한은 직전 프레임 값으로 잡으므로 한 장 더 돈다
+    try T.expect(!bridge.sessScrollbarDrawn());
+
+    // 긴 목록 — 밀린다.
+    const many = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(many);
+    _ = feedControl(many);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessScrollbarDrawn());
+}

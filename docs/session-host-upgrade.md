@@ -3043,6 +3043,39 @@ leaf를 확인한 뒤 harness가 그 aggregate를 정리하고 다시 관측한 
 verifier를 포함한 process-boundary baseline이지 실제 GitHub/Apple network 또는 제품 upgrade latency budget이 아니다. 실제
 GitHub-issued bundle 생성과 release workflow step 간 pathname 전달, frozen signed U5 E2E는 다음 live-workflow slice가 소유한다.
 
+### 11.52 live release workflow의 닫힌 단계와 실패 권위
+
+실제 tag workflow는 §11.51의 두 command를 임의 shell 순서로 나열하지 않는다.
+`release_adapter_live_workflow_phase.zig`의 pointer-free reducer가 다음 여덟 단계를 exact once 순서로 소유한다.
+
+1. 서명·공증된 candidate DMG와 frozen executable을 고정한다.
+2. GitHub `actions/attest`가 두 candidate asset의 local bundle을 발급한다.
+3. protected release context에서 새 draft를 만들고 baseline evidence와 candidate manifest를 작성한다.
+4. GitHub `actions/attest`가 evidence와 manifest의 local bundle을 발급한다.
+5. 별도 validator process가 evidence와 네 bundle을 durable aggregate로 prepare한다.
+6. prepare process의 exit 0을 회수한 뒤 별도 validator process가 aggregate를 reopen해 네 bundle을 exact subject에 결속한다.
+7. manifest와 열거된 세 asset을 draft에 첨부·재다운로드 검증하고 publish한 뒤 release attestation을 검증한다.
+8. post-publish 검증이 끝난 뒤에만 durable aggregate를 identity-safe하게 제거하고 terminal success를 기록한다.
+
+reducer event는 위 단계의 typed `succeeded|failed|cleanup_failed`만 받으며 pathname, digest, release ID, process exit code, action output과
+credential을 보존하지 않는다. concrete owner가 해당 단계의 권위를 검증하고 side effect를 끝낸 뒤에만 success event를 적용한다.
+단계 건너뛰기·중복·역순·success 뒤 event·failure 뒤 재사용은 mutation 0으로 거부한다. 1~2단계 실패는 remote mutation이 없으므로
+정리를 확정한 `local_failure`이고, 정리를 확정하지 못한 `cleanup_failed`는 exact local owner를 남기는 `cleanup_required`다.
+3단계에서 draft mutation을 시도한 순간부터 7단계까지의 실패는 remote 상태를 추측해 삭제하거나 같은
+tag로 자동 재시도하지 않는 `audit_required` terminal이다. 5단계 뒤 실패는 durable aggregate를 보존한다. 7단계가 성공한 뒤 8단계
+cleanup 실패도 release 성공을 취소하거나 asset을 바꾸지 않고 exact local cleanup 권위만 남기는 `cleanup_required` terminal이다.
+각 event 전에는 next stage, terminal outcome, draft mutation, aggregate 보존과 publication bit의 canonical 조합을 다시 검증한다.
+서로 모순된 bit를 가진 state는 어떤 event도 적용하지 않고 `InvalidState`로 거부한다. 이 pointer-free 값은 ordering 판정이지
+capability가 아니므로 canonical 중간 state의 출처를 인증하지 않는다. 후속 concrete owner가 final-address lifecycle과 실제 단계
+권위를 소유하고, 검증된 side effect 뒤에만 reducer event를 만들 책임을 진다.
+
+첫 focused gate `test-session-host-release-adapter-live-workflow-phase`는 모든 정상 prefix, 각 단계 실패, 순서 교환·중복·skip,
+모든 index/outcome/authority-bit 조합의 canonical state 판정,
+draft mutation 경계, aggregate 보존과 post-publish-only cleanup을 exhaustive table로 검증한다. 이 reducer는 workflow가 따라야 할
+순서와 terminal classification의 SSOT이며 GitHub API, filesystem, child process 또는 credential을 직접 다루지 않는다. 따라서 이
+gate만으로 executable의 prepare/resume publication command, GitHub-issued bundle action output의 pathname 결속,
+`.github/workflows/release.yml` 배선이나 frozen signed U5 제품 E2E가 완료됐다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

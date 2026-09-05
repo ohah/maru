@@ -4864,6 +4864,13 @@ fn sessScroll() f32 {
 }
 
 /// 판정용 — 지금 그려진 「서버」 줄의 한가운데 y. 안 보이면 `null`.
+/// 이번 프레임에 스크롤바를 그렸나. **판정용** — 「밀 수 있을 때만」이 규칙이라 그 조건을 잰다.
+var sess_scrollbar_drawn: bool = false;
+
+pub fn sessScrollbarDrawn() bool {
+    return sess_scrollbar_drawn;
+}
+
 /// 판정용 — 지금 그려진 「터미널」 줄의 한가운데 y. 안 보이면 `null`.
 pub fn sessTerminalRowCenterY() ?f32 {
     if (sess_row_rect.h <= 0) return null;
@@ -4917,6 +4924,23 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     // 넘겨 그려질 수 있다(다음 프레임에 제자리). 늘어날 때는 어긋나지 않는다.
     const content = row_h + 1 + row_h + 1 + remote_h;
     sess_max_scroll = @max(0, content - sess_list.h);
+
+    // **스크롤바.** 목록이 흐르게 된 순간 「얼마나 남았는지」가 화면에서 사라졌다 — 세션이 서른
+    // 넘게 있으면 지금 어디쯤인지 알 길이 없다. 설정 화면과 **같은 규칙·같은 모양**을 쓴다
+    // (3px, 최소 28px thumb) — 같은 손짓이 화면마다 다르게 굴면 사용자는 매번 시험해 봐야 한다.
+    // 밀 수 있을 때만 그린다.
+    sess_scrollbar_drawn = sess_max_scroll > 0;
+    if (sess_scrollbar_drawn) {
+        const thumb_h = @max(28.0, sess_list.h * (sess_list.h / content));
+        const t = sessScroll() / sess_max_scroll;
+        const bar_w: f32 = 3;
+        push(.{
+            .x = @intFromFloat(sess_list.x + sess_list.w - bar_w - 2),
+            .y = @intFromFloat(sess_list.y + t * (sess_list.h - thumb_h)),
+            .w = @intFromFloat(bar_w),
+            .h = @intFromFloat(thumb_h),
+        }, tk.get(.muted_fg), 0xB0, 1, 0);
+    }
 
     // ── 헤더: 제목 + 오른쪽 톱니. **본문 «뒤» 에 그린다** — 목록이 흐르면 걸친 줄이 자기 y 에
     // 그려져 헤더 자리로 올라온다(사용자가 화면으로 잡았다: 첫 줄 글자가 「세션」 아래 물렸다).

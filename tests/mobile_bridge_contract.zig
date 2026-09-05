@@ -6813,3 +6813,71 @@ test "M5 키바: 문턱은 «방향» 이 아니라 폭이다 — 좁아지는 �
     try std.testing.expectEqual(@as(usize, 2), bridge.keybarRowsDrawn());
     try std.testing.expect(narrowestKeyW() >= 44);
 }
+
+// ── 시스템 다크/라이트 (M13 — 데스크톱 F2-9 를 모바일에 잇는다)
+//
+// **정책은 데스크톱 것이다**: `theme.follow-system` 이 켜지면 시스템 외관의 프리셋이 색을 정하고,
+// 꺼져 있으면 파일 색이 그대로다. 모바일이 다른 것은 **어디서 정하느냐**뿐이다 — 데스크톱은
+// config 를 덮고 「파일에는 안 쓴다」를 규율로 지키는데, 여기는 **그릴 때** 골라서 config 를
+// 아예 안 건드린다. 그래서 아래 마지막 판정자가 「파일 값이 안 변한다」를 잰다.
+
+fn loadCfg(text: []const u8) void {
+    bridge.maru_mobile_load_config(text.ptr, text.len);
+}
+
+test "M13 follow-system: 꺼져 있으면 시스템이 뭐라 해도 파일 색이다" {
+    loadCfg("theme.background = #123456\n");
+    bridge.maru_mobile_set_system_appearance(1); // 다크라고 알려도
+    _ = bridge.maru_mobile_build(411, 841, now());
+    const bg = bridge.terminalBackgroundColor();
+    try std.testing.expectEqual(@as(u8, 0x12), bg.r);
+    try std.testing.expectEqual(@as(u8, 0x34), bg.g);
+    try std.testing.expectEqual(@as(u8, 0x56), bg.b);
+    try std.testing.expect(!bridge.followingSystemTheme());
+}
+
+test "M13 follow-system: 켜지면 시스템 외관이 색을 정하고, 바뀌면 따라온다" {
+    loadCfg(
+        \\theme.follow-system = true
+        \\theme.background = #123456
+        \\theme.preset-dark = tokyo-night
+        \\theme.preset-light = solarized-light
+    );
+    const dark_preset = maru.config.theme.presetColors(.tokyo_night);
+    const light_preset = maru.config.theme.presetColors(.solarized_light);
+
+    bridge.maru_mobile_set_system_appearance(1);
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(bridge.followingSystemTheme());
+    try std.testing.expectEqual(hexOf(dark_preset.background), bridge.terminalBackgroundColor());
+
+    // **바뀌면 따라온다** — 한 번 정하고 마는 것이 아니다.
+    bridge.maru_mobile_set_system_appearance(0);
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expectEqual(hexOf(light_preset.background), bridge.terminalBackgroundColor());
+}
+
+test "M13 follow-system: host 가 아직 안 알려 줬으면 «따라가지 않는다»" {
+    // 모르는 값으로 화면을 바꾸지 않는다. `null` 을 다크로 치면 라이트 기기가 켜자마자 어두워진다.
+    bridge.resetSystemAppearanceForTest();
+    loadCfg("theme.follow-system = true\ntheme.background = #123456\n");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(!bridge.followingSystemTheme());
+    try std.testing.expectEqual(@as(u8, 0x12), bridge.terminalBackgroundColor().r);
+}
+
+test "M13 follow-system: 시스템 색이 «파일에 실리지 않는다»" {
+    // 데스크톱은 규율로 지키는 것을 여기서는 구조로 지킨다 — config 를 안 고치므로 저장 경로가
+    // 시스템 색을 실을 길이 없다. 그 성질을 config 값으로 직접 잰다.
+    loadCfg("theme.follow-system = true\ntheme.background = #123456\n");
+    bridge.maru_mobile_set_system_appearance(1);
+    _ = bridge.maru_mobile_build(411, 841, now());
+    // 화면은 시스템 색인데
+    try std.testing.expect(bridge.terminalBackgroundColor().r != 0x12);
+    // **config 는 파일 그대로다** — 설정 화면도 저장도 이것을 본다.
+    try std.testing.expectEqualStrings("#123456", bridge.configThemeBackgroundForTest());
+}
+
+fn hexOf(text: []const u8) maru.color.Rgb {
+    return maru.color.parseHex(text).?;
+}

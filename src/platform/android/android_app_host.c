@@ -1299,6 +1299,13 @@ Java_dev_maru_MaruActivity_nativeLongPressMs(JNIEnv *env, jclass cls, jint ms) {
     LOGI("MARU_INPUT long_press_ms=%u (sent %d)", got, ms);
 }
 
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeSystemAppearance(JNIEnv *env, jclass cls, jint is_dark) {
+    (void)env;
+    (void)cls;
+    maru_mobile_set_system_appearance(is_dark != 0 ? 1u : 0u);
+}
+
 /// 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
 ///
 /// **`adjustResize` 로는 안 된다** — targetSdk 35(Android 15)부터 edge-to-edge 가 강제되어

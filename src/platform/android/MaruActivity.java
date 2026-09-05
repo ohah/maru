@@ -53,6 +53,9 @@ public class MaruActivity extends android.app.NativeActivity {
      *  선택이 안 잡힌다. */
     private static native void nativeLongPressMs(int ms);
 
+    /** 시스템 외관이 다크인지(`theme.follow-system` 이 켜졌을 때만 코어가 쓴다). */
+    private static native void nativeSystemAppearance(int isDark);
+
     /** 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
      *
      *  manifest 의 `windowSoftInputMode=adjustResize` 로는 부족하다 — targetSdk 35(Android 15)
@@ -385,10 +388,26 @@ public class MaruActivity extends android.app.NativeActivity {
         nativeLongPressMs(android.view.ViewConfiguration.get(this).getLongPressTimeout());
     }
 
+    /** 시스템 다크/라이트를 코어에 알린다. **재개할 때마다**도 다시 읽는다 — 사용자가 설정 앱에서
+     *  바꾸고 돌아오면 `onConfigurationChanged` 가 아니라 재개로 오는 경우가 있다. */
+    private void applySystemAppearance() {
+        int mode = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        nativeSystemAppearance(mode == android.content.res.Configuration.UI_MODE_NIGHT_YES ? 1 : 0);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration cfg) {
+        super.onConfigurationChanged(cfg);
+        // 액티비티가 `configChanges` 로 회전·야간 모드를 직접 받는다(재생성 없음) — 그래서 여기서
+        // 다시 알려야 한다. 안 그러면 앱이 떠 있는 채로 다크를 켰을 때 그대로다.
+        applySystemAppearance();
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         applyLongPressTimeout();
+        applySystemAppearance();
         // **재접속은 여기서 안 정한다.** 돌아오면 창이 다시 서면서 config 를 다시 읽고
         // (docs/mobile-config.md §7), 브리지가 "원격 세션이 없으면" 붙어 달라고 요청한다 —
         // 그 판단이 여기 또 있으면 두 자리가 갈린다(SSH 에는 재개가 없어 되살리기는 없다).

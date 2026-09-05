@@ -108,6 +108,49 @@ fn cfg() mobile_config.Config {
     return if (cfg_parsed) |p| p.config else .{};
 }
 
+/// host 가 마지막으로 알려 준 **시스템 외관**(다크면 true). `null` 이면 아직 못 들었다 —
+/// 그때는 `theme.follow-system` 이 켜져 있어도 파일 색을 쓴다(모르는 값으로 화면을 바꾸지 않는다).
+var system_is_dark: ?bool = null;
+
+/// 시스템 외관이 다크인지 host 가 알려 준다. **생성 직후 한 번, 그리고 바뀔 때마다**다
+/// (데스크톱 F2-9 의 `setSystemAppearance` 와 같은 계약).
+pub export fn maru_mobile_set_system_appearance(is_dark: u32) void {
+    system_is_dark = is_dark != 0;
+}
+
+/// 지금 화면에 쓸 테마 색. **여기가 follow-system 이 사는 유일한 자리다.**
+///
+/// **config 를 안 고친다** — 데스크톱은 색을 config 에 덮고 「파일에는 안 쓴다」를 규율로 지키며
+/// 되돌리려고 원본을 스냅숏하는데, 모바일은 색을 **그릴 때** 읽으므로 그럴 필요가 없다:
+/// 파일 값은 손대지 않은 채 남고, 저장 경로가 시스템 색을 실을 **길 자체가 없으며**(config 에
+/// 없으니까), follow 를 끄면 다음 프레임에 파일 색으로 돌아온다. 규율 대신 구조로 지킨다.
+///
+/// 설정 화면의 `theme.preset` 줄도 **파일이 말하는 것**을 그대로 보인다 — 시스템이 고른 색을
+/// 거기 비추면 사용자가 안 고른 것을 고른 것처럼 읽는다.
+fn activeTheme() maru.config.theme.ThemeConfig {
+    const c = cfg();
+    if (!c.system_theme.follow_system) return c.theme;
+    const dark = system_is_dark orelse return c.theme;
+    return maru.config.theme.presetColors(if (dark) c.system_theme.preset_dark else c.system_theme.preset_light);
+}
+
+/// 지금 따라가는 중인가(판정자용). 켜져 있어도 host 가 아직 안 알려 줬으면 **안 따라간다**.
+pub fn followingSystemTheme() bool {
+    return cfg().system_theme.follow_system and system_is_dark != null;
+}
+
+/// 「아직 못 들었다」로 되돌린다(판정자용). 앱에는 그 전이가 없다 — host 가 만들 때 한 번 알린 뒤
+/// 다시 모르는 상태가 되지 않는다.
+pub fn resetSystemAppearanceForTest() void {
+    system_is_dark = null;
+}
+
+/// **config 가 들고 있는** 배경색 글자(판정자용). 화면 색(`terminalBackgroundColor`)과 갈라
+/// 보려고 둔다 — follow-system 이 파일을 안 건드리는지가 그 둘의 차이로 드러난다.
+pub fn configThemeBackgroundForTest() []const u8 {
+    return cfg().theme.background;
+}
+
 /// `#RRGGBB` 를 토큰 색으로. 값이 틀리면 fallback — 파싱이 이미 forgiving 이라 여기 오는 값은
 /// 대개 맞지만, 색은 **화면이 통째로 검게 될 수 있는 자리**라 마지막까지 기본값을 지킨다.
 fn hex(text: []const u8, fallback: color.Rgb) color.Rgb {
@@ -3155,12 +3198,12 @@ pub fn paletteColor(i: u8) color.Rgb {
 
 /// 지금 테마의 본문 배경색(테스트·진단용 — 숨김 셀의 글자가 이 색이다).
 pub fn terminalBackgroundColor() color.Rgb {
-    return hex(cfg().theme.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E });
+    return hex(activeTheme().background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E });
 }
 
 /// 지금 테마의 전경색(테스트·진단용 — 반전 셀의 배경이 이 색이다).
 pub fn foregroundColor() color.Rgb {
-    return hex(cfg().theme.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA });
+    return hex(activeTheme().foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA });
 }
 
 /// 셀 하나가 실제로 낼 색과 장식. **코어가 셀에 담은 속성을 여기서 푼다** — 예전에는
@@ -3594,7 +3637,7 @@ fn mix(a: anytype, b: @TypeOf(a), t: u16) @TypeOf(a) {
 }
 
 fn themeColors() tokens.ThemeColors {
-    const t = cfg().theme;
+    const t = activeTheme();
     const bg = hex(t.background, .{ .r = 0x1E, .g = 0x1E, .b = 0x2E });
     const fg = hex(t.foreground, .{ .r = 0xE6, .g = 0xE6, .b = 0xEA });
     return .{

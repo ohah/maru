@@ -809,6 +809,23 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
 + (Class)layerClass { return [CAMetalLayer class]; }
 
+/// 시스템 외관이 바뀌면 코어에 알린다(다크 모드 토글·자동 전환). **`traitCollection` 은 뷰가 창에
+/// 붙은 뒤에야 옳으므로** 만들 때 한 번(`didMoveToWindow`)도 같이 알린다 — 그 한 번이 없으면
+/// 앱을 다크로 켜도 첫 화면이 라이트다.
+- (void)reportSystemAppearance {
+    maru_mobile_set_system_appearance(self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ? 1 : 0);
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self reportSystemAppearance];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (previous.userInterfaceStyle != self.traitCollection.userInterfaceStyle) [self reportSystemAppearance];
+}
+
 - (instancetype)initWithFrame:(CGRect)f {
     self = [super initWithFrame:f];
     if (!self) return nil;

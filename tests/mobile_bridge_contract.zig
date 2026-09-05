@@ -6881,3 +6881,91 @@ test "M13 follow-system: 시스템 색이 «파일에 실리지 않는다»" {
 fn hexOf(text: []const u8) maru.color.Rgb {
     return maru.color.parseHex(text).?;
 }
+
+// ── 안 바뀐 프레임은 GPU 를 안 쓴다 (M14)
+//
+// **깃발이 아니라 결과를 견준다.** 상태를 바꾸는 export 가 아흔 개라 「바꾸는 자리마다 dirty」는
+// 하나만 빠뜨려도 화면이 언다 — 이 저장소가 그 모양으로 두 번 물렸다. 그래서 낸 quad 를 지난
+// 프레임과 견주고, 여기서는 **깨어나야 할 때 깨는가**를 갈래마다 잰다.
+
+fn buildFrame() void {
+    _ = bridge.maru_mobile_build(411, 841, now());
+}
+
+test "M14 idle: 아무것도 안 하면 두 번째 프레임부터 «안 바뀜»" {
+    bridge.resetFrameCompareForTest();
+    buildFrame();
+    // 첫 프레임은 그린 적이 없으므로 반드시 그린다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+}
+
+test "M14 idle: 원격 출력이 오면 깬다" {
+    bridge.resetFrameCompareForTest();
+    buildFrame();
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+    _ = bridge.maru_mobile_term_write("hello", 5);
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+}
+
+test "M14 idle: 화면을 옮기면 깬다" {
+    // **화면이 실제로 바뀐 것부터 단언한다.** 이 파일은 순서 의존이라 앞 테스트가 남긴 화면에서
+    // 시작한다 — 그대로 `pop_screen` 을 부르면 이미 목록일 때 **무동작**이고, 그러면 「안 깼다」가
+    // 아니라 **아무 일도 안 일어난 것**을 재게 된다(처음 그렇게 적었다가 판정자가 붉어져 잡았다).
+    bridge.pushScreenForTest("settings");
+    buildFrame();
+    const opened = bridge.currentScreenName();
+    try std.testing.expectEqualStrings("settings", opened);
+
+    bridge.resetFrameCompareForTest();
+    buildFrame();
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+
+    _ = bridge.maru_mobile_pop_screen();
+    buildFrame();
+    // 화면이 실제로 바뀌었고
+    try std.testing.expect(!std.mem.eql(u8, "settings", bridge.currentScreenName()));
+    // 그래서 그림도 바뀐다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+}
+
+test "M14 idle: 창 크기가 바뀌면 깬다" {
+    bridge.resetFrameCompareForTest();
+    buildFrame();
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+    _ = bridge.maru_mobile_build(865, 363, now()); // 회전
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+}
+
+test "M14 idle: 색«만» 바뀌어도 깬다 — quad 개수는 그대로다" {
+    // **적대적 검증이 연 구멍이다**(2026-09-06). 비교를 「바이트」에서 「개수」로 바꾸는 변이를
+    // 넣었더니 판정자 넷 중 셋이 그대로 통과했다 — 위의 셋은 전부 quad 개수가 같이 바뀌는
+    // 갱신(글자·화면·창 크기)이라, **개수만 봐도 초록**이었다.
+    //
+    // 시스템 테마 전환이 딱 그 자리다: 그리는 것은 그대로고 **색만** 바뀐다.
+    loadCfg(
+        \\theme.follow-system = true
+        \\theme.preset-dark = tokyo-night
+        \\theme.preset-light = solarized-light
+    );
+    bridge.maru_mobile_set_system_appearance(1);
+    bridge.resetFrameCompareForTest();
+    buildFrame();
+    buildFrame();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+
+    const before_n = bridge.maru_mobile_build(411, 841, now());
+    bridge.maru_mobile_set_system_appearance(0); // 라이트로
+    const after_n = bridge.maru_mobile_build(411, 841, now());
+    // 개수는 같은데
+    try std.testing.expectEqual(before_n, after_n);
+    // 그림은 다르다 — 그래서 깨야 한다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+}

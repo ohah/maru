@@ -7183,7 +7183,64 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
+    noteFrameChanged();
     return @intCast(quad_count);
+}
+
+// ── 안 바뀐 프레임은 GPU 를 안 쓴다 (M14) ────────────────────────────────────
+//
+// **깃발을 세우지 않고 결과를 비교한다.** 「바꾸는 자리마다 dirty 를 세운다」는 export 가
+// 아흔 개라 하나만 빠뜨려도 화면이 언다 — 이 저장소가 그 모양으로 두 번 물렸다(전역 output
+// 게이트가 커서 위상을 굶겼고, sync 게이트가 스크롤 리페인트를 막았다). 낸 quad 를 지난
+// 프레임과 견주면 **빠뜨릴 목록이 없다**: 화면에 보이는 변화는 반드시 quad 를 바꾼다.
+//
+// **빌드는 그대로 매 tick 돈다.** 건너뛰는 것은 GPU(획득·제출·프레젠트)뿐이라, 빌드 안에서
+// 도는 시간 축(관성 감쇠·길게 누름 승격·아틀라스 축출 순번)은 하나도 안 멈춘다. 그것들이
+// 화면을 바꾸면 그 프레임은 자동으로 "바뀜" 이 된다.
+var prev_quads: []MaruQuad = &.{};
+var prev_quad_count: usize = 0;
+/// 이번 프레임이 지난 프레임과 다른가. 첫 프레임은 **그린 적이 없으므로** 다르다.
+var frame_changed: bool = true;
+/// 이번 build 가 낸 그림이 지난 프레임과 다른가(1=그려야 한다). **build 뒤에 읽는다.**
+pub export fn maru_mobile_frame_changed() u32 {
+    return if (frame_changed) 1 else 0;
+}
+
+fn noteFrameChanged() void {
+    const now = quad_buf[0..quad_count];
+    const before = prev_quads[0..@min(prev_quad_count, prev_quads.len)];
+    // **바이트로 견준다.** `MaruQuad` 는 `extern struct` 라 패딩 없는 평평한 값이고, 그래서
+    // 「같은 그림인가」가 「같은 바이트인가」와 정확히 같은 물음이 된다(`std.mem.eql` 은 구조체에
+    // `!=` 를 못 쓴다).
+    frame_changed = now.len != before.len or
+        !std.mem.eql(u8, std.mem.sliceAsBytes(now), std.mem.sliceAsBytes(before));
+    if (!frame_changed) return;
+    // 바뀐 프레임만 기억한다 — 안 바뀌었으면 지난 것이 이미 그 값이다.
+    if (prev_quads.len < now.len) {
+        const grown = term_allocator.realloc(prev_quads, now.len) catch {
+            // **못 기억하면 다음 프레임도 "바뀜" 이다.** 안전한 쪽으로 넘어진다 — 화면이 어는
+            // 것보다 한 프레임 더 그리는 것이 낫다.
+            prev_quad_count = 0;
+            return;
+        };
+        prev_quads = grown;
+    }
+    @memcpy(prev_quads[0..now.len], now);
+    prev_quad_count = now.len;
+}
+
+/// 판정자용 — 다음 프레임을 "처음 그리는 것" 으로 되돌린다.
+pub fn resetFrameCompareForTest() void {
+    prev_quad_count = 0;
+    frame_changed = true;
+}
+
+/// 판정자용 — 화면 하나를 쌓는다. 제품 경로는 손짓으로만 옮기는데(탭·뒤로가기), 「화면을 옮기면
+/// 깨는가」를 재려면 **옮긴 것이 확실해야** 한다(무동작인 뒤로가기로는 그 물음이 안 선다).
+pub fn pushScreenForTest(name: []const u8) void {
+    inline for (@typeInfo(Screen).@"enum".fields) |f| {
+        if (std.mem.eql(u8, f.name, name)) navPush(@enumFromInt(f.value));
+    }
 }
 
 pub export fn maru_mobile_last_error() [*:0]const u8 {

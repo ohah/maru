@@ -6269,3 +6269,94 @@ test "가용 크기: 다 빼서 0 이 돼도 «1» 은 남긴다 — 0 칸 격�
     bridge.maru_mobile_available_logical(1080, 2400, 0, 0, 0, 0, 0, 0, &w, &h);
     try T.expectEqual(@as(u32, 1080), w);
 }
+
+test "세션 목록은 흐른다 — 창에 안 들어가는 세션도 «닿을 수 있다»" {
+    // **예전에는 안 흘렀다.** 줄을 평범한 루프로 그리고 창을 넘으면 `return` 했다 — 오프셋이라는
+    // 개념이 없었다. 그래서 맥에 탭이 열둘쯤 넘으면 그 뒤 세션은 폰에서 **닿을 수가 없었다**.
+    // 전환을 「덮개」로 정한 이상(계획 U0) 이 목록이 세션을 바꾸는 **유일한 통로**라, 통로에
+    // 못 가는 세션이 생긴다는 뜻이다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(c_int, 2), bridge.maru_mobile_control_tick(1, 0, 1000));
+
+    // 창에 안 들어갈 만큼 많은 줄(열하나쯤 들어간다).
+    _ = feedControl(hello_wire);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(T.allocator);
+    try buf.appendSlice(T.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[");
+    for (0..20) |i| {
+        if (i > 0) try buf.append(T.allocator, ',');
+        var row_buf: [160]u8 = undefined;
+        const row_txt = try std.fmt.bufPrint(
+            &row_buf,
+            "{{\"id\":{{\"surface_id\":{d}}},\"title\":\"s{d}\",\"runtime_id\":\"{d:0>32}\"}}",
+            .{ i + 1, i, i + 1 },
+        );
+        try buf.appendSlice(T.allocator, row_txt);
+    }
+    try buf.appendSlice(T.allocator, "]}\n");
+    _ = feedControl(buf.items);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(usize, 20), bridge.remoteRowsDrawn());
+
+    // **마지막 줄은 아직 창 밖이다** — 그래서 지금은 못 누른다.
+    const last_before = bridge.remoteRowCenter(19) orelse return error.TestUnexpectedResult;
+    try T.expect(last_before.y > 874);
+
+    // 밀어 올린다(손가락으로 위로 = 목록이 아래로 흐른다).
+    bridge.maru_mobile_pointer(0, 1, 200, 700, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+    advanceFrame(402, 874, 16);
+
+    // **줄이 올라왔다** — 같은 인덱스의 자리가 위로 이동했다.
+    const last_after = bridge.remoteRowCenter(19) orelse return error.TestUnexpectedResult;
+    try T.expect(last_after.y < last_before.y);
+}
+
+test "세션 목록: 밀어서 세우는 손짓은 줄을 안 연다" {
+    // 흐르는 목록을 세우려 짚었는데 그 자리 세션이 열리면, 목록을 멈추려다 엉뚱한 화면으로 간다
+    // (서버 목록·설정이 이미 같은 규율을 든다).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    // **여는 뜻은 여기서 안 잰다** — 이 판정자가 재는 것은 손짓이다(앞 판정자가 그 축을 든다).
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(T.allocator);
+    try buf.appendSlice(T.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[");
+    for (0..20) |i| {
+        if (i > 0) try buf.append(T.allocator, ',');
+        var row_buf: [160]u8 = undefined;
+        const row_txt = try std.fmt.bufPrint(
+            &row_buf,
+            "{{\"id\":{{\"surface_id\":{d}}},\"title\":\"s{d}\",\"runtime_id\":\"{d:0>32}\"}}",
+            .{ i + 1, i, i + 1 },
+        );
+        try buf.appendSlice(T.allocator, row_txt);
+    }
+    try buf.appendSlice(T.allocator, "]}\n");
+    _ = feedControl(buf.items);
+    advanceFrame(402, 874, 16);
+
+    // 관성을 세운다.
+    bridge.maru_mobile_pointer(0, 1, 200, 700, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+    advanceFrame(402, 874, 16);
+    // 흐르는 중에 줄을 짚는다 — **세우기만 하고 안 연다**.
+    const row = bridge.remoteRowCenter(1) orelse return error.TestUnexpectedResult;
+    tapAt(row.x, row.y);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown()); // 목록 그대로
+}

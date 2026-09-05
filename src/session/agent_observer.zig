@@ -84,6 +84,16 @@ const Rule = struct {
     /// 현재 근거가 아니므로 하단 거리로 유효 범위를 제한한다. 반대로 입력 프롬프트·실행 footer 같은 **상시 chrome**에는
     /// 걸지 않는다 — 사용자 입력이 길어지면 chrome이 스스로 밀려나 근거가 사라지기 때문이다(실측).
     max_lines_from_bottom: ?u8 = null,
+
+    /// **위치 비교를 건너뛰고 priority 로 겨룬다.** `ruleBetter` 는 「같은 화면의 idle/running 충돌은 더
+    /// 아래에 보이는 증거가 이긴다」로 정하는데, 그 가정은 **상태줄이 입력창 아래**라는 레이아웃에 묶여
+    /// 있다. claude 2.1.25x 는 진행 상태줄(`✽ Mulling… `)을 **입력창 `❯` 위**에 그려서(실측 2026-09-05:
+    /// 스피너 10 행 · 프롬프트 13 행) 그 가정이 깨진다 — running 이 위치에서 지고 화면이 idle 로 판정된다.
+    ///
+    /// ⚠️ **「현재 chrome 으로 식별된 신호」에만 준다.** 대화 출력에 남은 옛 `Working…` 텍스트까지 이 예외를
+    /// 받으면 「낡은 footer 아래 새 프롬프트는 idle」 계약이 깨진다(그 판정자가 이 저장소에 있다). 그래서
+    /// 이 예외를 쓰는 규칙은 **스피너 prefix + `…`** 처럼 chrome 자체를 지목하는 게이트를 함께 든다.
+    beats_position: bool = false,
     /// 매치돼도 상태를 바꾸지 않고 직전 상태를 유지한다(전이·로딩 중간 화면 오탐 억제). state는 unknown이어야 한다.
     skip_state_update: bool = false,
     visible_idle: bool = false,
@@ -161,6 +171,11 @@ const claude_rules = [_]Rule{
     // 본문에 있는 문구는 그보다 아래(큰 offset)라서 항상 이긴다(코드 리뷰에서 재현). 구조로 자르면 입력 본문은
     // box_body이고 실행 chrome만 footer라 그 조합이 성립하지 않는다.
     .{ .id = "working_footer", .state = .running, .priority = 890, .region = .footer, .any = &.{ "esc to interrupt", "esc to stop" }, .visible_running = true },
+    // **진행 상태줄이 입력창 위에 있다** — 그래서 위치 비교로는 `live_prompt` 에 진다(`beats_position`).
+    // `working_footer` 가 찾는 `esc to interrupt` 는 2.1.25x 화면에 더 이상 없고(실측 2026-09-05),
+    // tmux 안에서는 OSC 제목도 흡수되어 `working_title` 까지 죽으므로, 이 규칙이 없으면 running 근거가
+    // **하나도** 남지 않아 권위표 C2 가 훅의 running 을 뒤집는다.
+    .{ .id = "working_spinner", .state = .running, .priority = 905, .region = .screen, .visible_running = true, .beats_position = true, .gate = .{ .any = &claude_working_gates } },
 };
 
 /// codex turn 진행의 단일 discriminator: 실행 footer **한 줄**의 모양이다(실측 `• Working (3s • esc to interrupt)`).
@@ -169,6 +184,27 @@ const claude_rules = [_]Rule{
 /// 다른 항목이 붙거나 wrap으로 `)`가 다음 줄로 밀릴 때 매치가 사라지고, 그 순간 아래 live_prompt가 **근거 있는 idle**을
 /// 세워 작업 중인 세션이 "대기중"으로 보인다(코드 리뷰에서 재현). 불릿 prefix까지 요구해 산문 인용도 대부분 걸러 낸다 —
 /// codex 출력 불릿도 `•`를 쓰므로 완벽한 분리는 아니고, 그 잔여는 docs «한계»에 적었다.
+/// claude 진행 상태줄. **`esc to interrupt` 는 더 이상 화면에 안 나온다**(2.1.251~2.1.260 실측 2026-09-05):
+/// 진행 중에는 `✽ Mulling… `, 끝나면 같은 자리가 `✻ Worked for 26s · done 오후 3:41` 이다 —
+/// **`…`(U+2026) 유무가 그 둘을 가른다**(7 pane × 30 회 관측: 진행 줄은 전부 `…`, 완료 줄은 하나도 없음).
+///
+/// **스피너 프레임은 회전한다.** `✻`(U+273B)·`✽`(U+273D) 를 실측했고, 나머지는 같은 Dingbats 계열이다.
+/// `LineMatch` 는 문자열 prefix 만 받으므로(codepoint 대역은 **같은 줄 보장이 없다**) 프레임을 나열한다.
+/// 목록에 없는 프레임이 오면 이 규칙이 조용히 안 걸리므로, 새 프레임을 보면 여기에 더한다 —
+/// 그 사실은 `MARU_DEBUG` 의 `screen_rule=` 이 알려 준다(계약 §1.7).
+const claude_spinner_frames = [_][]const u8{ "✻", "✽", "✢", "✳", "✶", "✷", "✸", "✹", "✺", "✴" };
+
+/// 프레임마다 «그 기호로 시작하고 `…` 를 포함하는 **한 줄**» 을 요구한다. `Gate.line` 만이 같은 줄을
+/// 보장한다 — 평면 `contains` 로 쓰면 대화 출력의 `…` 가 진행 신호로 둔갑한다.
+const claude_working_gates = blk: {
+    var g: [claude_spinner_frames.len]Gate = undefined;
+    for (claude_spinner_frames, 0..) |frame, i| {
+        g[i] = .{ .line = .{ .prefix = frame, .contains = &.{"…"} } };
+    }
+    break :blk g;
+};
+
+
 const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } };
 
 const codex_rules = [_]Rule{
@@ -278,6 +314,9 @@ fn ruleBetter(candidate: Rule, candidate_position: usize, current: Rule, current
     // 고정 priority가 아니라 더 아래(더 최신 chrome)에 보이는 증거가 이긴다. 위치는 full-screen offset 기준이라
     // 구조 region(footer/box_body 등) 규칙과 whole tail 규칙을 함께 비교할 수 있다.
     if (candidate.visible_blocker != current.visible_blocker) return candidate.visible_blocker;
+    // **현재 chrome 으로 식별된 신호는 위치를 건너뛴다**(`beats_position`) — 아래 위치 규칙은 상태줄이
+    // 입력창 아래라는 레이아웃 가정이라, 위에 그리는 provider 에서 running 이 부당하게 진다.
+    if (candidate.beats_position != current.beats_position) return candidate.beats_position;
     if (isScreenRegion(candidate.region) and isScreenRegion(current.region) and candidate_position != current_position) {
         return candidate_position > current_position;
     }
@@ -1501,4 +1540,53 @@ test "게이트 규칙에도 거리 게이트가 평면 규칙과 같은 의미�
     };
     try std.testing.expectEqual(State.unknown, detectWithRules(&spread, .{ .screen = "far above\na\nb\nc\nd\nnear bottom\n" }).state);
     try std.testing.expectEqual(State.blocked, detectWithRules(&spread, .{ .screen = "x\nfar above\nnear bottom\n" }).state);
+}
+
+// ── claude 진행 상태줄 (2.1.25x) — `esc to interrupt` 가 사라진 뒤의 유일한 화면 근거
+
+test "claude: 입력창 위의 진행 상태줄이 위치를 이겨 running 을 세운다" {
+    // 실측 화면(2.1.252, tmux 안). 진행 줄이 **입력창 위**라 위치 비교로는 프롬프트가 이긴다 —
+    // `beats_position` 이 그 가정을 건너뛴다. 이게 없으면 C2 가 훅의 running 을 뒤집는다.
+    const screen =
+        "✽ Mulling… \n" ++
+        "                     ✔\n" ++
+        "────────────────────────\n" ++
+        "❯ \n" ++
+        "────────────────────────\n" ++
+        "  maru5 │ main\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+    try std.testing.expect(!d.visible_idle); // ← C2 가 세는 값
+}
+
+test "claude: 완료 줄(done)이면 입력창이 idle 을 세운다 — 진행 규칙이 idle 을 통째로 막지 않는다" {
+    const screen =
+        "✻ Worked for 26s · done 오후 3:41 · 1 shell still running\n" ++
+        "────────────────────────\n" ++
+        "❯ \n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude: 대화에 남은 옛 Working 텍스트는 진행 신호가 아니다 — 위치 예외를 못 받는다" {
+    // 스피너 prefix 가 없으므로 `working_spinner` 에 안 걸리고, 「낡은 footer 아래 새 프롬프트는 idle」
+    // 계약이 그대로 산다. 이 구분이 없으면 대화 출력이 배지를 영영 running 으로 묶는다.
+    const d = detect(.claude, .{ .screen = "Working… esc to interrupt\nanswer\n❯ " });
+    try std.testing.expectEqual(State.idle, d.state);
+}
+
+test "claude: 스피너 프레임이 회전해도 같은 진행 신호로 읽는다" {
+    for (claude_spinner_frames) |frame| {
+        const screen = try std.fmt.allocPrint(std.testing.allocator, "{s} Brewing… \n❯ \n", .{frame});
+        defer std.testing.allocator.free(screen);
+        const d = detect(.claude, .{ .screen = screen });
+        try std.testing.expectEqual(State.running, d.state);
+    }
+}
+
+test "claude: `…` 없는 스피너 줄은 진행이 아니다 — 완료 줄이 같은 기호를 쓴다" {
+    const d = detect(.claude, .{ .screen = "✻ Worked for 3s · done\n❯ " });
+    try std.testing.expectEqual(State.idle, d.state);
 }

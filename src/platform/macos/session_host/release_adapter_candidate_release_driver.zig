@@ -35,6 +35,8 @@ const StoredPath = struct {
 const Paths = struct {
     dmg: StoredPath = .{},
     frozen: StoredPath = .{},
+    candidate_dmg_bundle: StoredPath = .{},
+    candidate_frozen_bundle: StoredPath = .{},
     dmg_work: StoredPath = .{},
     baseline: StoredPath = .{},
     app_main: StoredPath = .{},
@@ -126,6 +128,8 @@ pub fn run(
     var paths: Paths = .{};
     try paths.dmg.set(command.dmg);
     try paths.frozen.set(command.frozen_executable);
+    try paths.candidate_dmg_bundle.set(command.candidate_dmg_bundle);
+    try paths.candidate_frozen_bundle.set(command.candidate_frozen_bundle);
     try paths.dmg_work.set(command.dmg_work);
     try paths.baseline.set(command.baseline_workspace);
     try paths.app_main.set(command.app_main_executable);
@@ -213,6 +217,10 @@ const ConcreteSteps = struct {
                     .dmg = execution.paths.dmg.value(),
                     .frozen_executable = execution.paths.frozen.value(),
                     .dmg_work = execution.paths.dmg_work.value(),
+                },
+                .bundles = .{
+                    .dmg_bundle = execution.paths.candidate_dmg_bundle.value(),
+                    .frozen_bundle = execution.paths.candidate_frozen_bundle.value(),
                 },
                 .cli = .{ .path = view.github_cli, .pinned = &bootstrap.cli },
             },
@@ -337,9 +345,10 @@ fn validateAliases(
         view.context.repository.owner, view.context.repository.name,    view.context.tag,
         view.context.source_commit,    view.context.build.workflow_ref, command.repo,
         command.tag,                   command.test_uuid,               command.dmg,
-        command.frozen_executable,     command.dmg_work,                command.baseline_workspace,
-        command.app_main_executable,   command.app_cli_executable,      command.manifest,
-        command.source_root,           command.zig,                     command.zig_sha256,
+        command.frozen_executable,     command.candidate_dmg_bundle,    command.candidate_frozen_bundle,
+        command.dmg_work,              command.baseline_workspace,      command.app_main_executable,
+        command.app_cli_executable,    command.manifest,                command.source_root,
+        command.zig,                   command.zig_sha256,
     };
     for (values, 0..) |value, index| {
         if (overlaps(result, value) or overlaps(token, value) or overlaps(scratch, value)) return error.InvalidOwner;
@@ -416,6 +425,8 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
             hashSlice(&hash, command.test_uuid);
             hashSlice(&hash, command.dmg);
             hashSlice(&hash, command.frozen_executable);
+            hashSlice(&hash, command.candidate_dmg_bundle);
+            hashSlice(&hash, command.candidate_frozen_bundle);
             hashSlice(&hash, command.dmg_work);
             hashSlice(&hash, command.baseline_workspace);
             hashSlice(&hash, command.app_main_executable);

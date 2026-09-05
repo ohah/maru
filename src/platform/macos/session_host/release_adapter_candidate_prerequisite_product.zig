@@ -37,6 +37,7 @@ pub const Inputs = struct {
     context: Context,
     test_uuid: []const u8,
     paths: Paths,
+    bundles: candidate_attestation.BundlePaths,
     cli: Cli,
 };
 
@@ -209,7 +210,7 @@ const ConcreteSteps = struct {
 
     pub fn attestCandidate(self: *@This(), deadline: *deadline_mod.Deadline) !void {
         const i = try self.input();
-        try candidate_attestation.composeUntil(self.execution.io, self.execution.allocator, i.context, filePaths(i.paths), .{ .path = i.cli.path, .pinned = i.cli.pinned }, self.execution.token, self.execution.scratch, deadline, &self.execution.attestation);
+        try candidate_attestation.composeBundlesUntil(self.execution.io, self.execution.allocator, i.context, filePaths(i.paths), i.bundles, .{ .path = i.cli.path, .pinned = i.cli.pinned }, self.execution.scratch, deadline, &self.execution.attestation);
     }
 
     pub fn createDraft(self: *@This(), deadline: *deadline_mod.Deadline) !void {
@@ -280,13 +281,13 @@ fn validateStatic(i: Inputs, token: []const u8, scratch: []u8) !void {
     if (!std.mem.eql(u8, i.context.build.workflow_ref, expected_workflow) or
         !validScalar(token, max_token_bytes) or scratch.len == 0 or scratch.len > max_scratch_bytes)
         return error.InvalidInput;
-    try validatePaths(i.context.tag, i.paths);
+    try validatePaths(i.context.tag, i.paths, i.bundles);
 }
 
-fn validatePaths(tag: []const u8, paths: Paths) !void {
+fn validatePaths(tag: []const u8, paths: Paths, bundles: candidate_attestation.BundlePaths) !void {
     if (tag.len < 2) return error.InvalidPath;
-    const values = [_][]const u8{ paths.dmg, paths.frozen_executable, paths.dmg_work };
-    for (values) |path| if (!std.fs.path.isAbsolute(path)) return error.InvalidPath;
+    const values = [_][]const u8{ paths.dmg, paths.frozen_executable, paths.dmg_work, bundles.dmg_bundle, bundles.frozen_bundle };
+    for (values) |path| if (!canonicalAbsolute(path)) return error.InvalidPath;
     for (values, 0..) |left, index| for (values[index + 1 ..]) |right| if (std.mem.eql(u8, left, right)) return error.InvalidPath;
     var dmg_storage: [context_mod.max_value_bytes]u8 = undefined;
     var frozen_storage: [context_mod.max_value_bytes]u8 = undefined;
@@ -302,6 +303,17 @@ fn validatePaths(tag: []const u8, paths: Paths) !void {
     var existing: std.posix.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, paths.dmg_work.ptr, &existing, std.posix.AT.SYMLINK_NOFOLLOW) == 0 or
         std.posix.errno(-1) != .NOENT) return error.InvalidPath;
+}
+
+fn canonicalAbsolute(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path) or path.len < 2 or path.len >= std.fs.max_path_bytes or
+        path[path.len - 1] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    var components = std.mem.splitScalar(u8, path[1..], '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
+    }
+    return true;
 }
 
 fn validateAttestation(i: Inputs, attestation: *const CandidateAttestation) !void {
@@ -352,9 +364,10 @@ fn validateAliases(i: Inputs, token: []const u8, scratch: []u8, execution: *Exec
     const result = std.mem.asBytes(execution);
     const pinned = std.mem.asBytes(i.cli.pinned);
     const values = [_][]const u8{
-        i.context.repository.owner,   i.context.repository.name, i.context.tag, i.context.source_commit,
-        i.context.build.workflow_ref, i.test_uuid,               i.paths.dmg,   i.paths.frozen_executable,
-        i.paths.dmg_work,             i.cli.path,                token,         scratch,
+        i.context.repository.owner,   i.context.repository.name, i.context.tag,           i.context.source_commit,
+        i.context.build.workflow_ref, i.test_uuid,               i.paths.dmg,             i.paths.frozen_executable,
+        i.paths.dmg_work,             i.bundles.dmg_bundle,      i.bundles.frozen_bundle, i.cli.path,
+        token,                        scratch,
     };
     if (overlaps(result, pinned)) return error.InvalidOwner;
     for (values, 0..) |value, index| {

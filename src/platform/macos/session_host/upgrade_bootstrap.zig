@@ -244,19 +244,58 @@ pub fn readValidated(
     return decodeValidated(allocator, bytes);
 }
 
+/// 이 파일은 **host 프로세스**에서 돈다. `std.log` 는 detached spawn 의 빈 `environ` 때문에
+/// `scanEnviron` 에서 SIGSEGV 를 내므로(→ `host_log.zig`) 쓰지 않고, stderr 에 직접 쓴다.
+/// `redirectStderrToHostLog` 가 fd 2 를 `<session_dir>/host-<id>.log` 로 돌려 두었다.
+fn hostLogLine(comptime fmt: []const u8, args: anytype) void {
+    if (@import("builtin").is_test) return;
+    var buf: [320]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
+    _ = c.write(2, text.ptr, text.len);
+}
+
 fn decodeValidated(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) Error!Validated {
-    var host = handoff_codec.decodeHost(allocator, bytes) catch |err| return mapDecodeError(err);
+    var host = handoff_codec.decodeHost(allocator, bytes) catch |err| {
+        // **여기가 롤백이 없는 구간이다.** `restore_activation.runImpl` 은 이 함수를 롤백 준비보다 먼저
+        // 부르므로(`rollback_path` 자체가 이 디코드 결과 안에 있다) 실패하면 구 binary 로 돌아가지 못하고
+        // host 가 그대로 죽는다 — PTY 소유자가 사라져 셸 전체가 SIGHUP 을 받는다.
+        //
+        // 2026-09-05 실측: 3 일 넘게 살아 있던 host 가 다섯 번째 업그레이드에서 `InvalidValue` 로 죽고 세션
+        // 22 개를 잃었는데, 남은 것은 `restore activation failed: InvalidValue` 한 줄뿐이었다. 어느 필드에서
+        // 깨졌는지도, 얼마나 읽다 멈췄는지도 알 수 없었다.
+        hostLogLine("handoff decode failed: err={s} bytes={d}", .{ @errorName(err), bytes.len });
+        return mapDecodeError(err);
+    };
     errdefer host.deinit();
-    const record_bytes = host.attempt_record orelse return error.InvalidState;
-    var attempt = upgrade_attempt_record.decode(allocator, record_bytes) catch |err| return mapDecodeError(err);
+    const record_bytes = host.attempt_record orelse {
+        hostLogLine("handoff decode failed: attempt_record absent bytes={d}", .{bytes.len});
+        return error.InvalidState;
+    };
+    var attempt = upgrade_attempt_record.decode(allocator, record_bytes) catch |err| {
+        hostLogLine("handoff attempt record decode failed: err={s} record_bytes={d}", .{ @errorName(err), record_bytes.len });
+        return mapDecodeError(err);
+    };
     errdefer attempt.deinit();
     if (attempt.host_id != host.host_id or
         attempt.epoch_before != host.upgrade_epoch or
         attempt.runtime_ids.len != host.runtimes.len)
+    {
+        // **옛 host 의 self-validation 은 `decodeHost` 만 통과시킨다**(`handoff_store.zig:686`). 이 대조는
+        // 새 이미지에만 있으므로, 쓰는 쪽이 「온전하다」고 판정한 handoff 가 읽는 쪽에서 거부될 수 있다.
+        // runtime 집합이 인코드와 attempt record 사이에서 어긋나는 경우가 그 자리다.
+        hostLogLine(
+            "handoff authority mismatch: host_id={} epoch={} runtimes={d} vs attempt host_id={} epoch={} runtimes={d}",
+            .{
+                attempt.host_id == host.host_id, attempt.epoch_before == host.upgrade_epoch,
+                host.runtimes.len,               attempt.host_id == host.host_id,
+                attempt.epoch_before,            attempt.runtime_ids.len,
+            },
+        );
         return error.InvalidState;
+    }
 
     // Handoff runtime order is stable handle order이고 attempt record는 runtime_id 오름차순이다. 별도 allocation 없이
     // bounded stack copy를 정렬해 두 표현이 정확히 같은 live graph인지 확인한다.
@@ -264,8 +303,10 @@ fn decodeValidated(
     if (host.runtimes.len > ids.len) return error.InvalidState;
     for (host.runtimes, 0..) |runtime, index| ids[index] = runtime.runtime_id;
     std.mem.sort(u128, ids[0..host.runtimes.len], {}, std.sort.asc(u128));
-    if (!std.mem.eql(u128, ids[0..host.runtimes.len], attempt.runtime_ids))
+    if (!std.mem.eql(u128, ids[0..host.runtimes.len], attempt.runtime_ids)) {
+        hostLogLine("handoff runtime set mismatch: count={d}", .{host.runtimes.len});
         return error.InvalidState;
+    }
     return .{ .host = host, .attempt = attempt };
 }
 

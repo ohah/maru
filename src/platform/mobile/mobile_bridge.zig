@@ -3268,6 +3268,13 @@ const Run = struct {
 };
 
 /// 본문 사각형을 터미널 격자로 채운다.
+/// 본문 한 줄의 높이. **레이아웃도 이 값을 봐야 한다** — 키바를 넣을지 말지가 「몇 줄이
+/// 남는가」로 갈리는데, 그 식이 여기와 레이아웃에 따로 있으면 둘이 갈린다. 원격 화면(U2)도
+/// 같은 값을 쓴다("여기서 따로 세면 본문과 갈린다" — 그 주석이 가리키던 자리가 여기다).
+fn lineHeight() i32 {
+    return @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
+}
+
 fn pushTerminal(rect: anytype, tk: anytype) void {
     // **본문 영역을 터미널 배경으로 깐다.** 창 전체는 chrome 표면색으로 칠해져 있는데(위
     // `push` 한 장), 본문은 그 위에 자기 배경을 가져야 한다 — 안 그러면 `theme.background`
@@ -3286,7 +3293,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 모바일에서는 이 값이 곧 `font.size` 다(아틀라스 셀 기하가 고정이라 브리지가 직접 정한다).
     // **줄 높이는 글자 크기와 다른 손잡이다.** 백분율 100 이면 예전과 같다(= `font.size`).
     // 낮추면 글자는 그대로 두고 줄만 늘어난다 — 폰에서 그 한 줄이 비싸다.
-    const line_h: i32 = @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
+    const line_h: i32 = lineHeight();
     const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
     const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
     // **여기에 chrome 라벨 크기가 있었다.** 본문 격자를 그리는 함수가 그것을 든 이유는 조합 중
@@ -3296,7 +3303,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), cell_w);
     const rows_f = @divTrunc(@as(i32, @intFromFloat(rect.height)), line_h);
     const cols: u16 = @intCast(@max(8, @min(max_cols, cols_f)));
-    const rows: u16 = @intCast(@max(2, @min(max_rows, rows_f)));
+    const rows: u16 = @intCast(@max(@as(i32, min_body_rows), @min(max_rows, rows_f)));
 
     // **크기가 바뀌면 코어를 다시 세우지 않고 `resize` 한다.** 새로 만들면 스크롤백과 화면
     // 상태가 통째로 날아간다 — 키보드를 올렸다 내리기만 해도 그렇게 된다(창이 리사이즈된다).
@@ -4419,7 +4426,24 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = set_head_h } },
     }, &.{});
 
-    const root = tree.container(.{ .id = 1, .direction = .column }, &.{ app_bar, body, bar });
+    // **자리가 없으면 키바를 안 그린다.** 본문 격자는 최소 `min_body_rows` 줄을 그리는데
+    // (`pushTerminal` 의 바닥), 레이아웃이 그만큼도 안 남기면 **격자가 제 사각형 밖으로 넘쳐
+    // 키바 밑에 깔린다** — 가로에서 소프트 키보드를 올리면 그 모양이 됐다(실측 2026-09-05:
+    // 「Last login…」이 `esc`·`tab` 키 밑에 깔렸고 키바 아랫줄은 키보드에 잘렸다).
+    //
+    // **키바를 접는 쪽을 택한다.** 키바의 존재 이유는 「소프트 키보드에 없는 키」인데 그것을
+    // 남기려다 터미널이 사라지면 앞뒤가 바뀐다. 그리고 남겨 봐야 잘려서 못 누른다 — 안 그리면
+    // `key_bar_ready` 도 안 서서 **없는 키가 눌리는 일도 없다**(그 규율은 이미 있었다).
+    //
+    // 이건 **가로 레이아웃을 정한 것이 아니다** — 넘침을 막는 바닥이다. 가로에서 키바를 어떻게
+    // 할지(한 줄로 접기 등)는 M5 의 다음 슬라이스가 정한다.
+    const bar_h = @as(f32, @floatFromInt(key_bar_rows)) * (key_h + key_gap) + 10.0;
+    const min_body_h = @as(f32, @floatFromInt(@as(i32, min_body_rows) * lineHeight()));
+    const bar_fits = @as(f32, @floatFromInt(height)) - set_head_h - bar_h >= min_body_h;
+    const root = if (bar_fits)
+        tree.container(.{ .id = 1, .direction = .column }, &.{ app_bar, body, bar })
+    else
+        tree.container(.{ .id = 1, .direction = .column }, &.{ app_bar, body });
 
     const built = try tree.build(root, .{
         .root_size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
@@ -5225,7 +5249,7 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     }
 
     // 셀 기하는 본문과 같은 규칙이다(§글리프 기하) — 여기서 따로 세면 본문과 갈린다.
-    const line_h: i32 = @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
+    const line_h: i32 = lineHeight();
     const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
     const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
     const ox = @as(i32, @intFromFloat(win.x));
@@ -6936,6 +6960,9 @@ const key_bar = [_]KeyBarItem{
 /// 갈린다.
 const key_bar_cols: usize = 6;
 const key_bar_rows: usize = (key_bar.len + key_bar_cols - 1) / key_bar_cols;
+/// 본문 격자가 **반드시 그리는** 줄 수. `pushTerminal` 의 바닥이자 레이아웃이 키바를 넣을지
+/// 가르는 문턱이다 — 두 곳이 같은 수를 봐야 격자가 제 사각형 안에 남는다.
+const min_body_rows: u16 = 2;
 
 /// `copy` 가 지금 쓸 수 있나(선택이 있나). 표시와 판정이 같은 값을 본다.
 fn copyEnabled() bool {
@@ -6990,6 +7017,15 @@ pub fn scrollModeBits() u32 {
 }
 
 /// 지금 화면에서 눌린 것처럼 보이는 수정자(테스트·진단용).
+/// 본문 격자가 **제 사각형 밖으로 넘친 px**(0 이면 안 넘쳤다). 격자는 `min_body_rows` 를
+/// 바닥으로 쓰므로 사각형이 그보다 얇으면 그 아래가 다른 것 위에 깔린다 — 가로에서 소프트
+/// 키보드를 올렸을 때 실제로 그렇게 됐다. **눈이 아니면 안 보이던 것**이라 여기서 잰다.
+pub fn bodyGridOverflowPx() f32 {
+    if (body_rect.h <= 0) return 0;
+    const drawn = @as(f32, @floatFromInt(@as(i32, term_rows) * body_line_h));
+    return @max(0, drawn - body_rect.h);
+}
+
 pub fn keybarArmedDrawn() u32 {
     return keybar_armed_drawn;
 }

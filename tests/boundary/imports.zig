@@ -1011,8 +1011,7 @@ test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then re
         "src/platform/macos/session_host/client.zig",
     );
     defer allocator.free(source);
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     const method = findContainerMethod(
@@ -1077,8 +1076,7 @@ test "CR3a-2c2b3b finalizer gates PID and raw states before inherited graph acce
         "src/platform/macos/session_host/client.zig",
     );
     defer allocator.free(source);
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     const method = findContainerMethod(
@@ -1217,8 +1215,7 @@ test "B3b-S reflection digest excludes top-level tests with a lexical token mask
         \\test { const anonymousExcluded = true; _ = anonymousExcluded; }
         \\const After = struct { fn retainedAfter() void {} };
     ;
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const excluded = try source_digest.topLevelTestTokenMask(allocator, &tree);
     defer allocator.free(excluded);
 
@@ -3934,7 +3931,7 @@ test "session host owner projection capability stays in its reviewed mechanics f
         defer allocator.free(path);
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
-        var tokenizer = std.zig.Tokenizer.init(source);
+        var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
         var protected_counts = [_]usize{0} ** protected.len;
         while (true) {
             const token = tokenizer.next();
@@ -4729,8 +4726,11 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     // Allocator restoration is now a checked one-shot token consume, so it intentionally no
     // longer contributes an `*Unchecked` declaration to this global authority inventory.
     try std.testing.expectEqual(@as(usize, 49), unchecked_declarations);
-    for (symbols) |symbol| {
-        var pump_references: usize = 0;
+    // 트리를 **한 번** 걷고 파일마다 심볼 전부를 센다. 처음엔 심볼마다 트리를 다시 걸어
+    // (49 × 720 = 35,577 번 읽기) 이 테스트 하나가 16 초였다(실측 2026-09-05). 판정은 같다 —
+    // (심볼, 파일) 쌍마다 같은 수를 같은 규칙으로 보고, 펌프 파일의 합계는 심볼별로 모아 끝에 확인한다.
+    var pump_references = [_]usize{0} ** symbols.len;
+    {
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
         defer dir.close(std.testing.io);
         var walker = try posixWalk(dir, allocator);
@@ -4742,28 +4742,32 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             defer allocator.free(path);
             const source = try readZigFileZ(allocator, path);
             defer allocator.free(source);
-            const references = countOccurrences(source, symbol.name);
-            if (std.mem.eql(
+            const is_pump = std.mem.eql(
                 u8,
                 entry.path,
                 "platform/macos/session_host/client_external_pump.zig",
-            )) {
-                pump_references += references;
-                continue;
-            }
-            var owner = false;
-            for (symbol.owner_suffixes) |suffix|
-                owner = owner or std.mem.eql(u8, entry.path, suffix);
-            if (!owner and references != 0) {
-                std.debug.print(
-                    "unchecked session-host authority escaped into {s}: {s}\n",
-                    .{ path, symbol.name },
-                );
-                return error.TestUnexpectedResult;
+            );
+            for (symbols, 0..) |symbol, symbol_index| {
+                const references = countOccurrences(source, symbol.name);
+                if (is_pump) {
+                    pump_references[symbol_index] += references;
+                    continue;
+                }
+                var owner = false;
+                for (symbol.owner_suffixes) |suffix|
+                    owner = owner or std.mem.eql(u8, entry.path, suffix);
+                if (!owner and references != 0) {
+                    std.debug.print(
+                        "unchecked session-host authority escaped into {s}: {s}\n",
+                        .{ path, symbol.name },
+                    );
+                    return error.TestUnexpectedResult;
+                }
             }
         }
-        try std.testing.expectEqual(symbol.pump_references, pump_references);
     }
+    for (symbols, 0..) |symbol, symbol_index|
+        try std.testing.expectEqual(symbol.pump_references, pump_references[symbol_index]);
 }
 
 test "generation batch Client ownership mutations have one node-bound production caller" {
@@ -5160,6 +5164,94 @@ test "session host live commit permit keeps checked consume ledger-private" {
     try std.testing.expectEqual(@as(usize, 2), unchecked_pump_calls);
 }
 
+/// 같은 소스를 되풀이해서 파싱·토큰화하지 않게 하는 **한 칸** 캐시.
+///
+/// 왜 필요한가(실측 2026-09-05, 헬퍼 124개에 타이머를 심어 잰 것): 이 파일의 느린 테스트 넷이 74 초를
+/// 썼는데, `inventoryCount` 가 **같은 1.1 MB 파일을 898 번 파싱**해서 34.8 초, `containsRestrictedName` 가
+/// 12,925 번 토큰화해서 10.8 초였다. 판정 논리는 그대로 두고 **읽은 것을 기억만** 하면 사라지는 비용이다.
+///
+/// 한 칸인 이유: 호출이 「같은 소스로 수백 번」 뭉쳐 온다(테스트가 파일 하나를 읽어 선언 목록을 돈다).
+/// 소스가 바뀌면 이전 것을 버린다 — 720 파일 전부를 들고 있으면 AST 가 수백 MB 다.
+///
+/// **내용으로 비교한다**(포인터·길이가 아니라). 같은 주소에 같은 길이의 다른 파일이 올 수 있어서다 —
+/// 그러면 낡은 AST 로 조용히 틀린 판정을 낸다. 1.1 MB `memcmp` 는 0.1 ms 라 898 번 해도 0.1 초다.
+///
+/// `page_allocator` 를 쓰는 이유: `std.testing.allocator` 는 테스트가 끝날 때 누수를 검사한다. 테스트
+/// 경계를 넘어 살아 있는 캐시는 그 검사에 걸리므로 추적되지 않는 할당기로 산다. AST 가 가리키는 것은
+/// 호출자의 버퍼가 아니라 **우리 복사본**이라, 호출자가 자기 버퍼를 먼저 해제해도 안전하다.
+const SourceCache = struct {
+    copy: ?[:0]u8 = null,
+    tree: ?std.zig.Ast = null,
+    tokens: ?[]const std.zig.Token = null,
+
+    const gpa = std.heap.page_allocator;
+
+    fn load(self: *SourceCache, source: [:0]const u8) !void {
+        if (self.copy) |c| if (c.len == source.len and std.mem.eql(u8, c, source)) return;
+        self.reset();
+        self.copy = try gpa.dupeZ(u8, source);
+    }
+
+    fn reset(self: *SourceCache) void {
+        if (self.tree) |*t| t.deinit(gpa);
+        self.tree = null;
+        if (self.tokens) |t| gpa.free(t);
+        self.tokens = null;
+        if (self.copy) |c| gpa.free(c);
+        self.copy = null;
+    }
+
+    fn ast(self: *SourceCache, source: [:0]const u8) !*const std.zig.Ast {
+        try self.load(source);
+        if (self.tree == null) self.tree = try std.zig.Ast.parse(gpa, self.copy.?, .zig);
+        return &self.tree.?;
+    }
+
+    /// `.eof` 토큰까지 포함한다 — 토크나이저 루프가 `.eof` 로 끝나는 모양을 그대로 쓸 수 있게.
+    fn tokenList(self: *SourceCache, source: [:0]const u8) ![]const std.zig.Token {
+        try self.load(source);
+        if (self.tokens == null) {
+            var list: std.ArrayList(std.zig.Token) = .empty;
+            errdefer list.deinit(gpa);
+            var tokenizer = std.zig.Tokenizer.init(self.copy.?);
+            while (true) {
+                const token = tokenizer.next();
+                try list.append(gpa, token);
+                if (token.tag == .eof) break;
+            }
+            self.tokens = try list.toOwnedSlice(gpa);
+        }
+        return self.tokens.?;
+    }
+};
+
+threadlocal var source_cache: SourceCache = .{};
+
+/// 토크나이저와 같은 `next()` 모양으로 캐시된 토큰을 낸다. 캐시를 못 만들면(OOM) 진짜 토크나이저로
+/// 떨어진다 — 그래서 `bool` 을 돌려주던 헬퍼들의 시그니처가 안 바뀐다. 끝에 닿으면 `.eof` 를 계속 낸다.
+const TokenSource = union(enum) {
+    cached: struct { toks: []const std.zig.Token, i: usize = 0 },
+    live: std.zig.Tokenizer,
+
+    fn init(source: [:0]const u8) TokenSource {
+        const toks = source_cache.tokenList(source) catch return .{ .live = std.zig.Tokenizer.init(source) };
+        return .{ .cached = .{ .toks = toks } };
+    }
+
+    fn next(self: *TokenSource) std.zig.Token {
+        switch (self.*) {
+            .cached => |*c| {
+                if (c.i < c.toks.len) {
+                    defer c.i += 1;
+                    return c.toks[c.i];
+                }
+                return c.toks[c.toks.len - 1]; // .eof
+            },
+            .live => |*t| return t.next(),
+        }
+    }
+};
+
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     var count: usize = 0;
     var offset: usize = 0;
@@ -5326,7 +5418,7 @@ test "session host client pump policy imports only dependency-neutral leaves" {
 
     var imports: usize = 0;
     var import_builtins: usize = 0;
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var saw_import = false;
     var saw_paren = false;
     while (true) {
@@ -5853,7 +5945,7 @@ test "d2c pre-entry partial transition has one product decision source" {
             start
         else
             source.len;
-        var tokenizer = std.zig.Tokenizer.init(source);
+        var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
         while (true) {
             const token = tokenizer.next();
             if (token.tag == .eof) break;
@@ -6178,7 +6270,7 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
 
         // Exact identifier allowlists catch multiline declarations, arrays, by-value returns,
         // and explicit stack construction rather than relying on one-line `var` spelling.
-        var tokenizer = std.zig.Tokenizer.init(source);
+        var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
         while (true) {
             const token = tokenizer.next();
             if (token.tag == .eof) break;
@@ -7372,7 +7464,7 @@ test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 만 쓴�
 /// 그래서 `std.zig.Tokenizer` 로 훑고 주석 토큰(`doc_comment`·`container_doc_comment`)은 건너뛴다.
 /// 일반 주석(`//`)은 애초에 토큰이 아니다. 남는 것은 식별자·문자열·키워드 — 코드가 실제로 만지는 것뿐이다.
 fn platformAccessibilityVocabularyInCode(source: [:0]const u8, needles: []const []const u8) ?[]const u8 {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     while (true) {
         const token = tokenizer.next();
         switch (token.tag) {
@@ -8389,7 +8481,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
 }
 
 fn countIdentifierOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8) usize {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var brace_depth: usize = 0;
     var waiting_for_test_body = false;
     var test_body_depth: ?usize = null;
@@ -8424,7 +8516,7 @@ fn countIdentifierOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8)
 }
 
 fn countStringLiteralOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8) usize {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var brace_depth: usize = 0;
     var waiting_for_test_body = false;
     var test_body_depth: ?usize = null;
@@ -8459,7 +8551,7 @@ fn countStringLiteralOutsideTopLevelTests(source: [:0]const u8, wanted: []const 
 }
 
 fn countFieldAssignments(source: [:0]const u8, field_name: []const u8) usize {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var state: enum { start, period, field } = .start;
     var count: usize = 0;
     while (true) {
@@ -8485,7 +8577,7 @@ fn countFieldAssignments(source: [:0]const u8, field_name: []const u8) usize {
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     while (true) {
         const token = tokenizer.next();
         switch (token.tag) {
@@ -8797,7 +8889,7 @@ test "session host prepared metadata mechanics stay inside their final-address o
 }
 
 fn containsExactIdentifier(source: [:0]const u8, expected: []const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     while (true) {
         const token = tokenizer.next();
         switch (token.tag) {
@@ -8818,7 +8910,7 @@ fn containsRestrictedName(source: [:0]const u8, expected: []const u8) bool {
 }
 
 fn joinedStringLiteralsEqual(source: [:0]const u8, expected: []const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var joined: [128]u8 = undefined;
     var joined_len: usize = 0;
     var have_literal = false;
@@ -8866,7 +8958,7 @@ fn joinedStringLiteralsEqual(source: [:0]const u8, expected: []const u8) bool {
 fn containsForbiddenStdChild(source: [:0]const u8) bool {
     if (!hasExactCanonicalStdImport(source)) return true;
     const allowed = [_][]const u8{ "math", "meta", "testing" };
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     const AfterStd = enum { none, declaration, selector };
     var after_std: AfterStd = .none;
     var expect_child = false;
@@ -8925,7 +9017,7 @@ fn containsForbiddenStdChild(source: [:0]const u8) bool {
 }
 
 fn hasExactCanonicalStdImport(source: [:0]const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var state: u4 = 0;
     var matches: usize = 0;
     while (true) {
@@ -8965,7 +9057,7 @@ fn containsForbiddenPumpToken(source: [:0]const u8) bool {
         "FrameParser",
         "ExternalInboxLedger",
     };
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     while (true) {
         const token = tokenizer.next();
         switch (token.tag) {
@@ -8982,7 +9074,7 @@ fn containsForbiddenPumpToken(source: [:0]const u8) bool {
 }
 
 fn containsFacadeAccess(source: [:0]const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var saw_client_external = false;
     var saw_pump_file = false;
     var saw_external_pump = false;
@@ -9018,7 +9110,7 @@ fn containsFacadeAccess(source: [:0]const u8) bool {
 }
 
 fn joinedStringLiteralsContain(source: [:0]const u8, needle: []const u8) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var matched: usize = 0;
     while (true) {
         const token = tokenizer.next();
@@ -9044,7 +9136,7 @@ fn joinedStringLiteralsContainOutsideTopLevelTests(
     source: [:0]const u8,
     needle: []const u8,
 ) bool {
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
     var brace_depth: usize = 0;
     var waiting_for_test_body = false;
     var test_body_depth: ?usize = null;
@@ -9108,8 +9200,8 @@ fn declarationInventory(
     optional_containers: []const []const u8,
     allowed: []const DeclarationTuple,
 ) !DeclarationInventory {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var result: DeclarationInventory = .{
@@ -9261,8 +9353,8 @@ fn inventoryCount(
     source: [:0]const u8,
     wanted: DeclarationTuple,
 ) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     var count: usize = 0;
     const nodes = if (std.mem.eql(u8, wanted.parent, "root"))
         tree.rootDecls()
@@ -9284,8 +9376,8 @@ fn expectAbsentOrExactImport(
     identifier: []const u8,
     exact_initializer: []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     var matches: usize = 0;
     for (tree.rootDecls()) |node| {
         if (tree.nodeTag(node) == .test_decl) continue;
@@ -9316,8 +9408,8 @@ fn expectPublicRootDeclarationsExact(
     source: [:0]const u8,
     expected: []const DeclarationTuple,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     var found: usize = 0;
     for (tree.rootDecls()) |node| {
         if (tree.nodeTag(node) == .test_decl) continue;
@@ -9338,8 +9430,8 @@ fn expectRootContainerFieldsWithOptional(
     baseline: []const []const u8,
     optional_last: []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, container_name) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(members.len == baseline.len or members.len == baseline.len + 1);
@@ -9359,8 +9451,8 @@ fn expectPreparedEndedPurgeCommitSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "PreparedEndedPurgeCommit") orelse
         return error.TestUnexpectedResult;
     const fields = [_]struct { name: []const u8, type_name: []const u8 }{
@@ -9409,8 +9501,8 @@ fn expectPreparedStreamOperationPermitConsumeSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const client_slot_members = findRootContainerMembers(&tree, "ClientSlot") orelse
         return error.TestUnexpectedResult;
     var receipt_decl: ?std.zig.Ast.Node.Index = null;
@@ -9467,8 +9559,8 @@ fn expectClientOperationFenceSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 40), members.len);
@@ -9555,8 +9647,8 @@ fn expectClientOperationFenceBindingSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     var fence_field: ?std.zig.Ast.Node.Index = null;
@@ -9588,8 +9680,8 @@ fn expectClientNodeOperationFenceSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "ClientNode") orelse
         return error.TestUnexpectedResult;
     var operation_fence: ?std.zig.Ast.Node.Index = null;
@@ -9613,8 +9705,8 @@ fn expectClientSlotOperationReservationSchemas(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "ClientSlot") orelse
         return error.TestUnexpectedResult;
     const Field = struct { name: []const u8, type_name: []const u8 };
@@ -9664,8 +9756,8 @@ fn expectEndedPurgeInventorySubtotalMigration(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "PreparedEndedPurgeInventory") orelse
         return error.TestUnexpectedResult;
     var old_count: usize = 0;
@@ -9685,8 +9777,8 @@ fn expectRootEnumExact(
     name: []const u8,
     fields: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const init = findRootVariableInitializer(&tree, name) orelse
         return error.TestUnexpectedResult;
     var buffer: [2]std.zig.Ast.Node.Index = undefined;
@@ -9702,8 +9794,8 @@ fn expectNestedEnumAbsentOrExact(
     name: []const u8,
     fields: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const parent = findRootContainerMembers(&tree, parent_name) orelse
         return error.TestUnexpectedResult;
     for (parent) |member| {
@@ -9722,8 +9814,8 @@ fn expectRootErrorSetExact(
     name: []const u8,
     fields: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const init = findRootVariableInitializer(&tree, name) orelse
         return error.TestUnexpectedResult;
     try expectErrorSetNodeFields(&tree, init, fields);
@@ -9736,8 +9828,8 @@ fn expectNestedErrorSetAbsentOrExact(
     name: []const u8,
     fields: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const parent = findRootContainerMembers(&tree, parent_name) orelse
         return error.TestUnexpectedResult;
     for (parent) |member| {
@@ -9770,8 +9862,7 @@ fn expectEndedPurgeScratchDelta(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "EndedPurgeScratch") orelse
         return error.TestUnexpectedResult;
     const names = [_][]const u8{
@@ -9853,8 +9944,8 @@ fn expectEndedPurgeQuarantineSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const error_node = findRootVariableInitializer(&tree, "Error") orelse
         return error.TestUnexpectedResult;
     try expectErrorSetNodeFields(
@@ -10004,8 +10095,8 @@ fn expectClientReceiverManifest(
     source: [:0]const u8,
     manifest: []const ClientReceiverSpec,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     var found_count: usize = 0;
@@ -10351,9 +10442,7 @@ fn syntheticConstructionPolicyValidAtPath(
     enclosing_fn: []const u8,
     count: usize,
 ) !bool {
-    const allocator = std.testing.allocator;
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const proofs = [_]ClientConstructionProof{.{
         .receiver = "sample",
         .kind = .external_adoption,
@@ -10372,9 +10461,7 @@ fn syntheticConstructionPolicyValidInContainer(
     enclosing_fn: []const u8,
     count: usize,
 ) !bool {
-    const allocator = std.testing.allocator;
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const proofs = [_]ClientConstructionProof{.{
         .receiver = "sample",
         .kind = .external_adoption,
@@ -10448,8 +10535,8 @@ fn expectEnterExternalModeBoundReject(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     var method: ?std.zig.Ast.Node.Index = null;
@@ -10478,8 +10565,8 @@ fn expectClientMethodBodyPrefix(
     method_name: []const u8,
     expected: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     var method: ?std.zig.Ast.Node.Index = null;
@@ -10686,8 +10773,7 @@ fn expectGuardedClientReceiverPolicies(
     manifest: []const ClientReceiverSpec,
     proofs: []const ClientGuardProof,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
 
@@ -11027,9 +11113,7 @@ fn syntheticSharedGuardValid(source: [:0]const u8) bool {
 }
 
 fn checkSyntheticSharedGuard(source: [:0]const u8) !void {
-    const allocator = std.testing.allocator;
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     var method: ?std.zig.Ast.Node.Index = null;
@@ -11054,8 +11138,8 @@ fn checkSyntheticSharedGuard(source: [:0]const u8) !void {
 }
 
 fn expectTrustedClientGuardChain(allocator: std.mem.Allocator, source: [:0]const u8) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, "Client") orelse
         return error.TestUnexpectedResult;
     const require_blocking = findContainerMethod(&tree, members, "Client", "requireBlockingMode") orelse
@@ -11484,8 +11568,7 @@ fn expectContainerMethodMarkersInOrder(
     method_name: []const u8,
     markers: []const []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, container_name) orelse
         return error.TestUnexpectedResult;
     var method_node: ?std.zig.Ast.Node.Index = null;
@@ -11537,8 +11620,8 @@ fn expectOnlyDirectIdentifierReference(
     method_name: []const u8,
     identifier: []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const method = try findUniqueContainerMethod(&tree, container_name, method_name);
     var references: usize = 0;
     var token = tree.firstToken(method);
@@ -11559,8 +11642,7 @@ fn expectExactMethodTokenRegion(
     region: []const u8,
     report_mismatch: bool,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const method = try findUniqueContainerMethod(&tree, container_name, method_name);
     const region_tokens = try tokenizeMarker(allocator, region);
     defer allocator.free(region_tokens);
@@ -11619,8 +11701,7 @@ fn containerMethodMarkerCount(
     method_name: []const u8,
     marker: []const u8,
 ) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, container_name) orelse
         return error.TestUnexpectedResult;
     var method_node: ?std.zig.Ast.Node.Index = null;
@@ -11693,8 +11774,7 @@ fn expectNoUnlistedCallsBetweenMarkers(
     end_marker: []const u8,
     allowed: []const CallAllowance,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     const members = findRootContainerMembers(&tree, container_name) orelse
         return error.TestUnexpectedResult;
     var method_node: ?std.zig.Ast.Node.Index = null;
@@ -11751,8 +11831,8 @@ fn expectRootConstTypeAndInitializer(
     type_name: []const u8,
     initializer: []const u8,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
-    defer tree.deinit(allocator);
+    _ = allocator; // 파싱을 캐시가 소유하게 되어 여기서는 안 쓴다
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다 — 같은 소스면 다시 안 한다
     for (tree.rootDecls()) |node| {
         const variable = tree.fullVarDecl(node) orelse continue;
         if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), name)) continue;

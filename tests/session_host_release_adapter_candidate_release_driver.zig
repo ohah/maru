@@ -152,5 +152,9 @@ test "production driver has one concrete leaf callsite and no generic settlement
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "source_authority.prepareCurrent("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "zig_authority.bind("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "candidate_product.run("));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, source, "candidate_dmg_bundle"));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, source, "candidate_frozen_bundle"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, ".dmg_bundle = execution.paths.candidate_dmg_bundle.value()"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, ".frozen_bundle = execution.paths.candidate_frozen_bundle.value()"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "settleProductFailure"));
 }

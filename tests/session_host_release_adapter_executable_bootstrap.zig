@@ -99,12 +99,13 @@ fn predecessorArgs(path: []const u8) [15][]const u8 {
     };
 }
 
-fn candidateArgs(path: []const u8) [33][]const u8 {
+fn candidateArgs(path: []const u8) [37][]const u8 {
     return .{
-        "publish-candidate",  "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     path,                                               "--github-cli-sha256", cli_sha,
-        "--test-uuid",        "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",       "--baseline-workspace",
-        "/tmp/baseline-work", "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",       "/tmp/candidate",
-        "--zig",              "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        "publish-candidate",                        "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     path,                                               "--github-cli-sha256",                   cli_sha,
+        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",                         "--baseline-workspace",
+        "/tmp/baseline-work",                       "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                         "/tmp/candidate",
+        "--zig",                                    "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--candidate-dmg-bundle",                           "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
+        "/tmp/attest/candidate-frozen.bundle.json",
     };
 }
 
@@ -158,6 +159,8 @@ test "all commands bind context and pin only after identity authority" {
                 try std.testing.expectEqualStrings("123e4567-e89b-42d3-a456-426614174000", command.test_uuid);
                 try std.testing.expectEqualStrings("/usr/local/bin/zig", command.zig);
                 try std.testing.expectEqual(@as(u64, 123456), command.zig_size);
+                try std.testing.expectEqualStrings("/tmp/attest/candidate-dmg.bundle.json", command.candidate_dmg_bundle);
+                try std.testing.expectEqualStrings("/tmp/attest/candidate-frozen.bundle.json", command.candidate_frozen_bundle);
             },
             .prepare_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", command.aggregate),
             .finalize_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", command.dmg),

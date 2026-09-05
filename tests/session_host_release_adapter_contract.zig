@@ -68,12 +68,13 @@ test "release adapter parses exact predecessor command" {
     try std.testing.expectEqualStrings("/tmp/download", parsed.verify_predecessor.work_dir);
 }
 
-fn candidateArgs() [33][]const u8 {
+fn candidateArgs() [37][]const u8 {
     return .{
-        "publish-candidate",  "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     "/usr/local/bin/gh",                                "--github-cli-sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "--test-uuid",        "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",       "--baseline-workspace",
-        "/tmp/baseline-work", "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",       "/tmp/candidate",
-        "--zig",              "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        "publish-candidate",                        "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     "/usr/local/bin/gh",                                "--github-cli-sha256",                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",                         "--baseline-workspace",
+        "/tmp/baseline-work",                       "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                         "/tmp/candidate",
+        "--zig",                                    "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--candidate-dmg-bundle",                           "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
+        "/tmp/attest/candidate-frozen.bundle.json",
     };
 }
 
@@ -154,6 +155,8 @@ test "release adapter parses exact publish-candidate command and permits source 
     try std.testing.expectEqualStrings("/tmp/candidate", parsed.publish_candidate.source_root);
     try std.testing.expectEqual(@as(u64, 123456), parsed.publish_candidate.zig_size);
     try std.testing.expectEqualStrings("/tmp/output/Maru-1.2.3-session-host-release.json", parsed.publish_candidate.manifest);
+    try std.testing.expectEqualStrings("/tmp/attest/candidate-dmg.bundle.json", parsed.publish_candidate.candidate_dmg_bundle);
+    try std.testing.expectEqualStrings("/tmp/attest/candidate-frozen.bundle.json", parsed.publish_candidate.candidate_frozen_bundle);
 }
 
 test "release adapter rejects malformed candidate UUID Zig authority and local paths" {
@@ -183,6 +186,11 @@ test "release adapter rejects malformed candidate UUID Zig authority and local p
     var legacy_output = candidateArgs();
     legacy_output[31] = "--summary-out";
     try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&legacy_output));
+    const missing_bundle = candidateArgs();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing_bundle[0..35]));
+    var noncanonical_bundle = candidateArgs();
+    noncanonical_bundle[34] = "/tmp/attest/../candidate-dmg.bundle.json";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&noncanonical_bundle));
 }
 
 test "release adapter requires canonical GitHub CLI authority in both phases" {

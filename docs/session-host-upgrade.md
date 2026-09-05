@@ -3201,6 +3201,35 @@ reopen→full fence→close의 median·p95·max, 실패 수, FD delta와 durable
 신뢰 가능한 held input으로 회수하는 경계만 닫으며 실제 prepare/resume executable split, authored attestation action, aggregate 삽입,
 live workflow와 frozen signed U5 E2E는 아직 완료하지 않는다.
 
+### 11.57 재인증한 current draft의 publication authority 채택
+
+stage-3 process가 만든 `DraftAuthority`의 pointer·owner bytes·descriptor를 resume process로 직렬화하지 않는다. resume process는
+§11.56에서 다시 연 canonical role-A manifest를 사용해 기존
+`release_adapter_github_current_release_authority.CurrentReleaseAuthority`로 protected workflow, exact mutable draft release와 tag
+source를 다시 인증한다. `release_adapter_github_draft_adoption.zig`의 단일 변환 경계만 그 current authority를 기존 attachment와
+publication leaf가 요구하는 ready `release_adapter_github_draft_creation.DraftAuthority`로 채택한다. 따라서 resume은 draft ID를
+option·환경변수·action output으로 받거나 tag/latest convenience lookup을 새로 구현하지 않는다.
+
+채택은 remote mutation과 child process를 실행하지 않는다. intrinsically valid role-A·no-predecessor manifest와 trusted protected
+`ohah/maru` context를 먼저 결속하고, current authority의 repository/run/run-attempt/source/release ID/tag와 protected environment를
+manifest·context에 exact 비교한다. current authority의 final-address owner가 아니거나 nonzero job/deployment/environment identity가
+없으면 publication은 0이다. result storage는 pristine final-address `DraftAuthority`여야 하며 current owner, manifest의 모든 backing
+slice 또는 context slice와 겹치면 쓰기 전에 거부한다. 성공은 current authority에서 유도한 nonzero release ID, tag와 source commit만
+새 ready draft owner의 독립 storage에 복사한다. caller가 성공 boolean, draft ID, tag, source 또는 provenance scalar를 따로 제출하지
+않는다.
+
+채택 뒤 current authority와 ready draft는 별도 owner다. 어느 하나의 deinit이 다른 하나를 소비하거나 되살리지 않으며 copied,
+pre-owned 또는 채택 전 current field drift는 새 publication 0으로 fail-close한다. 성공한 ready draft의 이후 불변식은 기존
+`DraftAuthority`와 그 소비 leaf가 소유한다. 기존 draft attachment·redownload·publication leaf는
+동일 `DraftAuthority.value()`만 소비하므로 creation과 reauthentication에 따라 두 번째 attachment 구현이나 분기된 security policy를
+만들지 않는다. focused gate `test-session-host-release-adapter-github-draft-adoption`은 exact 성공 유도, role/context/current mismatch,
+copy/final-address/pre-owned/alias와 결과 독립 생존, credential·process·remote mutation 0을 Debug·ReleaseFast에서 검증한다. 같은 gate의
+진단 행은 `adopt`→authority close를 10,000회씩 40표본 실행해 호출당 median·p95·max와 전후 FD delta를 기록한다. 이 값은
+네트워크가 없는 in-process leaf의 참고 실측이며 latency budget이나 GitHub 원격 E2E 완료 판정은 아니다. 실제
+current GitHub API 인증은 기존 `test-session-host-release-adapter-github-current-release-authority`가 계속 소유한다. 이 slice는
+resume publication에 필요한 authority bridge만 닫으며 prepare/resume executable command, authored bundle action, aggregate 삽입,
+live workflow와 frozen signed U5 E2E를 완료했다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

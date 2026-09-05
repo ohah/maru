@@ -1072,6 +1072,13 @@ reopen/fence/close latency 분포, 실패 수와 FD delta를 기록하지만 제
 앱 session-host 상태나 release를 건드리지 않는다. prepare/resume process command, authored attestation action, aggregate 삽입,
 live workflow와 frozen signed U5 E2E는 후속 범위다.
 
+U5 current-draft adoption은 새 process가 재인증한 `CurrentReleaseAuthority`와 canonical role-A manifest·trusted context만으로 기존
+ready `DraftAuthority`를 유도한다. `test-session-host-release-adapter-github-draft-adoption`은 repository/run/source/release/tag와
+protected environment의 exact 결속, role-A/no-predecessor intrinsic policy, current/result final-address·copy/pre-owned·모든 backing
+storage alias 거부와 독립 owner 수명을 Debug·ReleaseFast에서 검증한다. credential, child process와 remote mutation은 0이며 실제
+GitHub current-release 인증은 기존 component gate가 소유한다. 이 gate는 prepare/resume command, authored bundle action, aggregate
+삽입, live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

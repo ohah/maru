@@ -2727,8 +2727,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   닫고 durable leaf를 남긴 뒤 non-reusable tombstone으로 수렴해 과거 process-local owner의 삭제 권한을 소멸시킨다.
   `test-session-host-release-adapter-candidate-evidence-handoff`가 Debug·ReleaseFast에서 실제 승격과 source workspace 제거 뒤 생존,
   path/alias/final-address/source-drift/existing-destination 거부, retained close 뒤 bytes 생존·owner 재사용 차단, allocation failure와
-  identity-safe cleanup을 검증한다. aggregate
-  handoff와 split prepare/finalize wiring은 후속 범위다.
+  identity-safe cleanup을 검증한다. 그 위의
+  `test-session-host-release-adapter-candidate-aggregate-handoff`는 evidence와 candidate DMG·frozen executable·evidence·manifest
+  local bundle 네 개를 닫힌 role 집합으로 받아 staging directory 전체를 sync한 뒤 absent final directory에 no-replace rename하는
+  atomic publication을 검증한다. Debug·ReleaseFast 실제 filesystem 행은 publish와 cleanup 양쪽의 partial final visibility 0,
+  source·destination inode/SHA, replacement 보존, cleanup tomb retry, retained close 뒤 생존과 옛 owner 권한 소멸을 고정하며 harness-owned 임시 루트의 APFS 40회 실측에서 단계별
+  median·p95·max, 실패 수, FD delta와 staging residue를 남긴다. opaque bundle의 artifact-role 교환 판정은 handoff가 아니라 다음
+  process의 §11.47 exact-subject 검증이 소유한다. split prepare/finalize reopen·semantic binding과 live workflow wiring은 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.
   verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest가 열거한

@@ -60,8 +60,17 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     // 기준**(`origin/HEAD...HEAD`)이라 그것도 status 로는 못 본다.
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"--numstat\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"--cached\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, reads, "\"rev-list\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, reads, "origin/HEAD...HEAD") != null);
+    // ⚠️ **`rev-list` 는 여기 있으면 «안» 된다**(적대적 검증 2026-09-05 — 실측). `↑↓` 는 ref 가
+    // 움직여야만 바뀌고, 그러면 `for-each-ref` 의 oid 가 바뀐다(분리 HEAD 는 `status --branch` 의
+    // `branch.oid` 가 덮는다) — 같은 사실을 두 번 묻는 것이라 5 초마다 도는 명령 하나가 낭비다.
+    // 한때 넣었던 근거(§3)는 **`status` 단독** 기준의 측정이었고, `for-each-ref` 가 그것을 대신한다.
+    const reads_code = try stripComments(allocator, reads);
+    defer allocator.free(reads_code);
+    try std.testing.expect(std.mem.indexOf(u8, reads_code, "rev-list") == null);
+    try std.testing.expect(std.mem.indexOf(u8, reads_code, "origin/HEAD...HEAD") == null);
+    // 대신 이 둘이 그 자리를 진다 — 빠지면 `↑↓` 가 조용히 낡는다.
+    try std.testing.expect(std.mem.indexOf(u8, reads_code, "for-each-ref") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reads_code, "--branch") != null);
     // 첫 읽기만 필수다 — `origin` 이 없는 저장소에서 `rev-list` 가 실패한다고 감시가 멀면 안 된다.
     const dg_body = try bodyOf(src, "fn digest(", "\n}\n", 2048);
     try std.testing.expect(std.mem.indexOf(u8, dg_body, "if (index == 0) return .{ .state = .failed }") != null);

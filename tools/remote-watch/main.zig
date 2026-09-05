@@ -249,8 +249,19 @@ const digest_reads = [_][]const []const u8{
     // 행별 `+N −M` — 작업트리와 스테이지 양쪽(§3 이 잰 구멍이 여기다)
     &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv" },
     &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv", "--cached" },
-    // 머리 줄 `↑↓` — `branch.ab`(upstream 기준)와 **다른 기준**이라 status 로는 못 본다(§3 실측)
-    &.{ "rev-list", "--count", "--left-right", "origin/HEAD...HEAD" },
+
+    // ⚠️ **머리 줄 `↑↓` 는 여기 «없다» — 위 둘이 이미 덮는다**(적대적 검증 2026-09-05 — 실측).
+    //
+    // 한때 `rev-list --count --left-right origin/HEAD...HEAD` 를 넣었다. §3 이 「fetch 로 `↑↓` 만
+    // 바뀌면 status 로는 못 본다」를 재 두었기 때문인데, **그 측정은 `status` 단독 기준이었다.**
+    // `for-each-ref` 가 들어온 뒤로는 겹친다: `↑↓` 는 **어느 한쪽 ref 가 움직여야만** 바뀌고, ref 가
+    // 움직이면 `for-each-ref` 의 oid 가 바뀐다. 분리 HEAD 처럼 `refs/` 밖인 경우는 `status --branch`
+    // 의 `branch.oid` 가 덮는다. 둘 다 실측했다:
+    //   비기본 기준(`origin/feat`)만 움직임 → `rev-list` 없이도 다이제스트가 바뀐다
+    //   분리 HEAD 를 옮김                   → 마찬가지
+    //
+    // 그래서 **같은 사실을 두 번 묻던 것**이고, 5 초마다 원격에서 도는 명령 하나를 줄였다.
+    // (도크가 숫자를 «그릴» 때는 여전히 클라이언트가 `rev-list` 를 돌린다 — 그쪽은 값이 필요하다.)
 };
 
 /// 한 명령의 결과. **`channel_closed` 가 있는 이유**가 이 파일의 1 급 규율이다 — git 이 멈춰 있는

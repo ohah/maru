@@ -76,6 +76,61 @@ pub const Hit = struct {
     file_index: u8 = 0,
 };
 
+/// 같은 메시지(= 같은 줄)에 붙은 여러 장 중 **몇 번째**인가(§2.2).
+///
+/// **왜 필요한가**: 라벨은 그 줄의 사용자 텍스트에서 나오므로, 한 메시지에 붙인 N 장이 **글자 그대로
+/// 같은 라벨**을 받는다. 실측(2026-09-05, 이 맥의 Claude 트랜스크립트 131 파일)이 그것을 못 박았다 —
+/// 사용자 첨부 199 장 중 27 장(13 줄)이 다중 첨부였고, 그 **13 줄 전부** 텍스트 블록이 하나뿐이며
+/// 위치도 첫 이미지보다 앞(136~188 B)이라 **예외 없이 N 장이 같은 문장을 받는다**. 순번이 없으면
+/// 격자에 같은 줄이 N 개 뜨고 어느 것이 몇 번째인지 알 길이 없다.
+///
+/// 시각으로도 못 가른다 — 같은 레코드라 타임스탬프까지 같다.
+pub const Seq = struct {
+    /// 1-based. **0 이면 그리지 않는다** — 한 장뿐이거나(=「1/1」은 알려 주는 것이 없다) 묶음이
+    /// 상한을 넘었다는 뜻이다.
+    index: u16 = 0,
+    total: u16 = 0,
+};
+
+/// 한 묶음을 넓힐 상한. 실측 최대는 3 장이다(2026-09-05). 이것은 성능 방어다 — 넘으면 `Seq{}` 를
+/// 돌려준다. 「2/500」은 알려 주는 것이 없고, 그것을 세느라 O(n²) 를 치를 이유는 더 없다.
+pub const max_seq_group: usize = 64;
+
+/// `hits[i]` 의 순번. **`hits` 는 스캐너가 담은 그대로여야 한다**(같은 줄의 이미지가 연속이라는 것이
+/// 이 함수의 유일한 가정이다). 걸러 낸 목록에 쓰면 묶음이 쪼개져 「1/1」이 되므로, 부르는 자리는
+/// 전체 목록 하나뿐이다.
+///
+/// **배열 방향에 기대지 않는다.** 갤러리는 최신을 먼저 보이려고 전체를 뒤집는데(`std.mem.reverse`),
+/// 순번은 **적힌 순서**여야 한다. 그래서 이웃과의 위치가 아니라 `data_offset` 의 크기로 센다.
+pub fn sequenceAt(hits: []const Hit, i: usize) Seq {
+    if (i >= hits.len) return .{};
+    const me = hits[i];
+
+    var start = i;
+    while (start > 0 and sameRecord(hits[start - 1], me)) {
+        start -= 1;
+        if (i - start >= max_seq_group) return .{};
+    }
+    var end = i + 1; // exclusive
+    while (end < hits.len and sameRecord(hits[end], me)) {
+        end += 1;
+        if (end - start > max_seq_group) return .{};
+    }
+
+    const total = end - start;
+    if (total < 2) return .{}; // 한 장뿐이면 순번은 소음이다
+    var rank: u16 = 1;
+    for (hits[start..end]) |h| {
+        if (h.data_offset < me.data_offset) rank += 1;
+    }
+    return .{ .index = rank, .total = @intCast(total) };
+}
+
+/// 같은 레코드(= 같은 파일의 같은 줄)인가. 줄이 곧 메시지 하나다.
+fn sameRecord(a: Hit, b: Hit) bool {
+    return a.file_index == b.file_index and a.line_offset == b.line_offset;
+}
+
 /// 활성 pane 이 읽을 트랜스크립트 **묶음**. 재개 세션이면 부모까지다(§3.3).
 ///
 /// **상한이 3인 근거는 실측이다**(2026-08-30): 체인 깊이가 중앙 1, 최대 2 였다. 하나를 더 두어
@@ -1031,4 +1086,138 @@ test "쓰는 도중에 읽어도 스트리밍이 같은 답을 낸다 — 청크
             try testing.expectEqual(a.data_len, b.data_len);
         }
     }
+}
+
+test "순번: 같은 줄에 붙은 세 장은 적힌 순서로 1/3·2/3·3/3" {
+    const hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 100, .data_offset = 300, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 100, .data_offset = 400, .data_len = 4, .kind = .claude_image, .mime = .png },
+    };
+    for (0..3) |i| {
+        const s = sequenceAt(&hits, i);
+        try std.testing.expectEqual(@as(u16, @intCast(i + 1)), s.index);
+        try std.testing.expectEqual(@as(u16, 3), s.total);
+    }
+}
+
+test "순번: 목록을 뒤집어도 적힌 순서를 말한다" {
+    // 갤러리는 최신을 먼저 보이려고 전체를 뒤집는다. 그때 순번까지 뒤집히면 「3/3」이 첫 장에 붙는다.
+    var hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 100, .data_offset = 300, .data_len = 4, .kind = .claude_image, .mime = .png },
+    };
+    std.mem.reverse(Hit, &hits);
+    try std.testing.expectEqual(@as(u16, 2), sequenceAt(&hits, 0).index); // 뒤집혀 앞에 온 것이 둘째 장
+    try std.testing.expectEqual(@as(u16, 1), sequenceAt(&hits, 1).index);
+}
+
+test "순번: 한 장뿐이면 0 — 「1/1」은 알려 주는 것이 없다" {
+    const hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 900, .data_offset = 950, .data_len = 4, .kind = .claude_image, .mime = .png },
+    };
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 0));
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 1));
+}
+
+test "순번: 다른 줄과 섞이지 않는다" {
+    const hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 100, .data_offset = 300, .data_len = 4, .kind = .claude_image, .mime = .png },
+        .{ .line_offset = 800, .data_offset = 900, .data_len = 4, .kind = .claude_image, .mime = .png },
+    };
+    try std.testing.expectEqual(@as(u16, 2), sequenceAt(&hits, 1).total);
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 2));
+}
+
+test "순번: 파일이 다르면 오프셋이 같아도 남남이다" {
+    // 재개 세션은 부모 파일까지 이어 담는다(§3.3). 그때 오프셋만 보면 다른 파일의 이미지가 한 묶음이 된다.
+    const hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png, .file_index = 0 },
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png, .file_index = 1 },
+    };
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 0));
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 1));
+}
+
+test "순번: 묶음이 상한을 넘으면 세지 않는다" {
+    var hits: [max_seq_group + 1]Hit = undefined;
+    for (&hits, 0..) |*h, i| h.* = .{
+        .line_offset = 100,
+        .data_offset = 200 + @as(u64, i) * 10,
+        .data_len = 4,
+        .kind = .claude_image,
+        .mime = .png,
+    };
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 0));
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, hits.len - 1));
+}
+
+test "순번: 범위 밖 인덱스는 빈 값 — 부르는 쪽이 길이를 어긋내도 죽지 않는다" {
+    const hits = [_]Hit{
+        .{ .line_offset = 100, .data_offset = 200, .data_len = 4, .kind = .claude_image, .mime = .png },
+    };
+    try std.testing.expectEqual(Seq{}, sequenceAt(&hits, 1));
+    try std.testing.expectEqual(Seq{}, sequenceAt(&.{}, 0));
+}
+
+test "실제 모양의 다중 첨부: 두 장이 같은 라벨을 받고 순번으로만 갈린다" {
+    // **이 테스트가 이 기능의 이유다.** 실측(2026-09-05, Claude 트랜스크립트 131 파일)에서 사용자
+    // 다중 첨부 13 줄이 **전부** 텍스트 블록 하나뿐이고 그 텍스트가 첫 이미지보다 앞이었다. 그래서
+    // 두 장은 글자 그대로 같은 설명을 받고, 시각까지 같다(한 레코드다) — 순번 말고는 가를 것이 없다.
+    const context = @import("agent_image_context.zig");
+    const allocator = std.testing.allocator;
+
+    const line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"이 두 화면 비교해 주세요\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AAAA\"}}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"BBBB\"}}" ++
+        "]}}\n";
+
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    _ = try scanBuffer(allocator, line, 0, &hits);
+    try std.testing.expectEqual(@as(usize, 2), hits.items.len);
+
+    for (hits.items, 0..) |h, i| {
+        // 라벨은 payload **앞** 조각만 본다 — 스캔 백엔드가 파일에서 떼어 주는 것과 같은 구간이다.
+        const prefix = line[@intCast(h.line_offset)..@intCast(h.data_offset)];
+        const label = context.label(prefix, "");
+        try std.testing.expectEqualStrings("이 두 화면 비교해 주세요", label.text());
+        try std.testing.expectEqual(context.Source.message_text, label.source);
+
+        const seq = sequenceAt(hits.items, i);
+        try std.testing.expectEqual(@as(u16, @intCast(i + 1)), seq.index);
+        try std.testing.expectEqual(@as(u16, 2), seq.total);
+    }
+
+    // 접두까지 태워 「무엇이 화면에 뜨는가」를 못 박는다 — 두 줄이 순번으로만 갈린다.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("첨부 1/2", context.originPrefix(&buf, "첨부", sequenceAt(hits.items, 0).index, 2));
+    try std.testing.expectEqualStrings("첨부 2/2", context.originPrefix(&buf, "첨부", sequenceAt(hits.items, 1).index, 2));
+}
+
+test "실제 모양의 도구 읽기: 2중 저장을 접고도 출처가 「에이전트가 읽음」이다" {
+    // 에이전트가 읽은 이미지는 한 줄에 마커가 둘이지만(§4.3 의 2 중 저장) 실제로는 **한 장**이다.
+    // 여기서 순번이 붙으면 「1/2」라는 거짓말이 화면에 뜬다 — 접기와 순번이 같은 줄에서 만나는 자리다.
+    const context = @import("agent_image_context.zig");
+    const allocator = std.testing.allocator;
+
+    const prev = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/dock-layout.png\"}}]}}";
+    const line = "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_01\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AAAA\"}}]}}," ++
+        "\"toolUseResult\":{\"file\":{\"base64\":\"AAAA\",\"type\":\"image\"}}}\n";
+
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    _ = try scanBuffer(allocator, line, 0, &hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.items.len); // 사본은 접혔다
+    try std.testing.expectEqual(Seq{}, sequenceAt(hits.items, 0)); // 한 장이니 순번 없음
+
+    const prefix = line[@intCast(hits.items[0].line_offset)..@intCast(hits.items[0].data_offset)];
+    const label = context.label(prefix, prev);
+    try std.testing.expectEqualStrings("dock-layout.png", label.text());
+    try std.testing.expectEqual(context.Source.tool_file_path, label.source);
 }

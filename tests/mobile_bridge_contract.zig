@@ -6739,3 +6739,77 @@ test "M5 문턱: 키바가 «딱 들어가는» 높이와 «한 픽셀 모자란
     try std.testing.expect(bridge.maru_mobile_keybar_rect(0) != 0);
     try std.testing.expectEqual(@as(f32, 0), bridge.bodyGridOverflowPx());
 }
+
+// ── 키바 줄 수는 «폭이» 정한다 (M5 가로 레이아웃)
+//
+// 두 줄이 된 이유가 폭이었다(UX §5.4: 세로 390 에 44×11 + 3×10 = 514 라 한 줄에 못 넣는다).
+// **그러면 푸는 기준도 폭이어야 한다** — 화면 방향으로 가르면 「세로인데 넓은」 태블릿을 틀리게
+// 답한다. 여기서 재는 것은 「가로면 한 줄인가」가 아니라 **「손가락 크기를 지키면서 한 줄에
+// 들어가면 한 줄인가」**다.
+
+/// 그려진 키 열둘의 폭 가운데 가장 좁은 것. **가장 좁은 것이 규칙을 지켜야** 전부 누를 수 있다.
+fn narrowestKeyW() f32 {
+    var min_w: f32 = 1e9;
+    for (0..bridge.maru_mobile_keybar_count()) |i| {
+        const packed_rect = bridge.maru_mobile_keybar_rect(@intCast(i));
+        if (packed_rect == 0) return 0; // 하나라도 안 섰으면 규칙 위반이다
+        const w: f32 = @floatFromInt((packed_rect >> 16) & 0xFFFF);
+        min_w = @min(min_w, w);
+    }
+    return min_w;
+}
+
+test "M5 키바: 세로는 두 줄 — 한 줄에 넣으면 손가락 크기를 못 지킨다" {
+    _ = bridge.maru_mobile_build(411, 841, now()); // 실측 논리 크기(1080x2400 폰)
+    try std.testing.expectEqual(@as(usize, 2), bridge.keybarRowsDrawn());
+    // 두 줄이면 여섯 칸이라 키가 넓어진다 — 44 를 넘겨야 누를 수 있다.
+    try std.testing.expect(narrowestKeyW() >= 44);
+}
+
+test "M5 키바: 가로는 한 줄 — 열둘이 다 들어가고 키가 «오히려 넓다»" {
+    _ = bridge.maru_mobile_build(865, 363, now()); // 실측 논리 크기(2400x1080 가로)
+    try std.testing.expectEqual(@as(usize, 1), bridge.keybarRowsDrawn());
+    // **숨는 키가 없다.** `narrowestKeyW` 는 하나라도 안 서면 0 을 답한다.
+    const w = narrowestKeyW();
+    try std.testing.expect(w >= 44);
+    // 그리고 세로 두 줄일 때보다 넓다 — 한 줄로 접는 것이 손해가 아니라는 것이 요점이다.
+    _ = bridge.maru_mobile_build(411, 841, now());
+    const portrait_w = narrowestKeyW();
+    _ = bridge.maru_mobile_build(865, 363, now());
+    try std.testing.expect(narrowestKeyW() > portrait_w);
+}
+
+test "M5 키바: 한 줄로 접으면 본문이 그만큼 늘어난다" {
+    // 접는 이유가 「본문에 돌려주려고」이므로, 실제로 돌려주는지를 잰다.
+    _ = bridge.maru_mobile_build(865, 363, now());
+    const rows_one_line = bridge.maru_mobile_term_rows();
+    // 같은 창인데 키바가 두 줄이었다면 몇 줄이었을까 — 줄 하나(44+4)만큼 본문이 좁았을 것이다.
+    _ = bridge.maru_mobile_build(411, 841, now());
+    _ = bridge.maru_mobile_build(865, 363, now());
+    try std.testing.expectEqual(rows_one_line, bridge.maru_mobile_term_rows());
+    // 실측(2026-09-05): 두 줄이던 때 9, 한 줄이 되어 11.
+    try std.testing.expect(rows_one_line >= 11);
+}
+
+test "M5 키바: 문턱은 «방향» 이 아니라 폭이다 — 좁아지는 순간 두 줄이 된다" {
+    // 폭만 줄여 간다(높이는 가로 그대로). 방향으로 갈랐다면 이 순회에서 줄 수가 안 바뀐다.
+    var flip_at: u32 = 0;
+    var w: u32 = 865;
+    while (w > 200) : (w -= 1) {
+        _ = bridge.maru_mobile_build(w, 363, now());
+        if (bridge.keybarRowsDrawn() == 2) {
+            flip_at = w;
+            break;
+        }
+    }
+    try std.testing.expect(flip_at != 0); // 안 바뀌면 폭을 안 보는 것이다
+
+    // 문턱 바로 위는 한 줄이고, 그때도 가장 좁은 키가 44 를 지킨다.
+    _ = bridge.maru_mobile_build(flip_at + 1, 363, now());
+    try std.testing.expectEqual(@as(usize, 1), bridge.keybarRowsDrawn());
+    try std.testing.expect(narrowestKeyW() >= 44);
+    // 문턱에서는 두 줄로 바뀌고, 그 덕에 키가 다시 넓어진다.
+    _ = bridge.maru_mobile_build(flip_at, 363, now());
+    try std.testing.expectEqual(@as(usize, 2), bridge.keybarRowsDrawn());
+    try std.testing.expect(narrowestKeyW() >= 44);
+}

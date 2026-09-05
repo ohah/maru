@@ -109,6 +109,9 @@ pub fn Model(comptime Rt: type) type {
             agent_screen_visible_idle: bool = false,
 
             /// 그 idle 근거가 상시 chrome 인가 — C2 의 질 조건(§1.1).
+            /// 화면이 **진행 근거**를 냈는가. 판정에는 안 쓰고 화면 소스 liveness 를 재는 데 쓴다(§1.2).
+            agent_screen_visible_running: bool = false,
+
             agent_screen_idle_is_chrome: bool = false,
 
             /// 그 관측 회차에 **PTY 출력이 최근에 있었는가**. `pollAgentState` 가 계산한 값을

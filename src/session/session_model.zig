@@ -110,6 +110,10 @@ pub fn Model(comptime Rt: type) type {
 
             /// 그 idle 근거가 상시 chrome 인가 — C2 의 질 조건(§1.1).
             agent_screen_idle_is_chrome: bool = false,
+
+            /// 그 관측 회차에 **PTY 출력이 최근에 있었는가**. `pollAgentState` 가 계산한 값을
+            /// 중재기까지 나른다 — `arbitrateAgentState` 에는 시각이 없다.
+            agent_screen_output_active: bool = false,
             /// 화면 상태를 세운 근거(§1.4). A 경로에서 그대로 결과의 출처가 된다.
             agent_screen_origin: agent_state_arbiter.Origin = .screen,
             /// 화면을 새로 판정한 횟수. 중재기가 «같은 관측을 두 번 세지 않게» 하는 입력이다 — 한 tick 에

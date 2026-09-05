@@ -37,6 +37,30 @@ test "정책 경계: 두 host 는 행동을 «받아서 실행만» 한다 — �
     }
 }
 
+test "정책 경계: 가용 논리 크기는 코어가 «한 번만» 계산한다" {
+    // 「키보드가 하단 inset 을 덮으니 두 번 빼지 않는다」가 예전에는 **세 자리**에 있었다 —
+    // iOS 의 ObjC, Android 의 Java `ImeInsets`, 그리고 각자의 뺄셈. 같은 사실이 흩어지면
+    // 한쪽만 고쳐지고, 이 축의 증상(키보드 위 빈 띠)은 눈으로 잘 안 갈린다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+
+    for ([_][]const u8{ ios, android }) |host| {
+        // 계산은 코어에 묻는다 — 두 host 에 각각 한 번.
+        try std.testing.expectEqual(@as(usize, 1), count(host, "maru_mobile_available_logical("));
+    }
+    // **host 가 직접 빼던 자리가 없어야 한다.**
+    try std.testing.expectEqual(@as(usize, 0), count(ios, "safe.bottom ?"));
+    try std.testing.expectEqual(@as(usize, 0), count(android, "avail_px"));
+    // Java 도 미리 접지 않는다 — `ime` 를 그대로 넘긴다.
+    try std.testing.expectEqual(@as(usize, 0), count(java, "ime > nav"));
+    try std.testing.expectEqual(@as(usize, 1), count(java, "Type.ime()).bottom)"));
+}
+
 test "정책 경계: 코어가 베낀 ABI 상수는 헤더와 같은 값이다" {
     // 브리지는 `MARU_SSH_CONTROL_*` 와 `MARU_SSH_ERR_NOT_READY` 를 **값으로** 안다(Zig 는 그
     // 헤더를 안 읽는다). 갈리면 정책이 조용히 틀린 상태를 보고, 증상은 「세션이 안 열린다」다 —

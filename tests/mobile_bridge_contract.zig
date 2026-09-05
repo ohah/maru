@@ -6218,3 +6218,54 @@ test "정책: 열고 나서 답이 없으면 시한이 화면에 말한다" {
 const ssh_control_none: u32 = 0;
 const ssh_control_closed: u32 = 4;
 const ssh_err_not_ready: c_int = -7;
+
+test "가용 크기: 키보드가 하단 inset 을 덮는 만큼만 더 뺀다 — 두 번 빼지 않는다" {
+    // **이 보정이 예전에는 두 host 에 각자 있었다**(iOS 는 ObjC, Android 는 Java `ImeInsets`).
+    // 같은 사실이 두 자리에 있으면 한쪽만 고쳐진다 — 그리고 그 증상은 「키보드 위에 빈 띠」라
+    // 눈으로 봐도 잘 안 갈린다(실기에서 픽셀로 재서야 갈렸다: 2026-09-05, 안드로이드
+    // 에뮬레이터 `extent=2400 top=128 bottom=63 kb=820` → 콘텐츠 하단 1517 = 키보드 상단).
+    const T = std.testing;
+    var w: u32 = 0;
+    var h: u32 = 0;
+
+    // 안드로이드 실측 그대로(px, scale 2.625). 키보드는 화면 하단부터 883 을 덮는다.
+    bridge.maru_mobile_available_logical(1080, 2400, 128, 63, 0, 0, 883, 2625, &w, &h);
+    // 겹치는 63 을 두 번 빼지 않는다 → 2400 - 128 - 63 - (883-63) = 1389 → 529.
+    try T.expectEqual(@as(u32, 529), h);
+
+    // **두 번 빼면** 2400-128-63-883 = 1326 → 505 다. 그 값이 나오면 안 된다.
+    try T.expect(h != 505);
+
+    // 키보드가 없으면 하단 inset 만 뺀다.
+    bridge.maru_mobile_available_logical(1080, 2400, 128, 63, 0, 0, 0, 2625, &w, &h);
+    try T.expectEqual(@as(u32, 841), h); // (2400-128-63)/2.625
+
+    // **키보드가 하단 inset 보다 작으면 더 뺄 것이 없다** — 그 띠 안에 든다.
+    bridge.maru_mobile_available_logical(1080, 2400, 128, 63, 0, 0, 40, 2625, &w, &h);
+    try T.expectEqual(@as(u32, 841), h);
+}
+
+test "가용 크기: iOS 는 pt 라 배율이 1 이고, 좌우 inset 도 뺀다" {
+    const T = std.testing;
+    var w: u32 = 0;
+    var h: u32 = 0;
+    // iOS 는 UIKit 이 이미 pt 를 주므로 `scale_milli = 1000` 이다.
+    bridge.maru_mobile_available_logical(402, 874, 59, 34, 0, 0, 336, 1000, &w, &h);
+    try T.expectEqual(@as(u32, 402), w);
+    try T.expectEqual(@as(u32, 479), h); // 874 - 59 - 34 - (336-34)
+    // 가로 inset(가로 모드의 노치)도 뺀다.
+    bridge.maru_mobile_available_logical(874, 402, 0, 21, 59, 59, 0, 1000, &w, &h);
+    try T.expectEqual(@as(u32, 756), w);
+}
+
+test "가용 크기: 다 빼서 0 이 돼도 «1» 은 남긴다 — 0 칸 격자는 그리는 쪽을 죽인다" {
+    const T = std.testing;
+    var w: u32 = 0;
+    var h: u32 = 0;
+    bridge.maru_mobile_available_logical(100, 100, 60, 60, 60, 60, 500, 1000, &w, &h);
+    try T.expectEqual(@as(u32, 1), w);
+    try T.expectEqual(@as(u32, 1), h);
+    // 배율이 0 으로 와도 나눗셈이 죽지 않는다(host 가 아직 못 잰 프레임).
+    bridge.maru_mobile_available_logical(1080, 2400, 0, 0, 0, 0, 0, 0, &w, &h);
+    try T.expectEqual(@as(u32, 1080), w);
+}

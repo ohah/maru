@@ -1179,6 +1179,39 @@ fn serverMaruPath() []const u8 {
     return list[idx].maru_path;
 }
 
+/// **그릴 수 있는 논리 크기.** 창 크기에서 시스템이 가리는 만큼과 소프트 키보드를 빼고 배율로
+/// 나눈다. host 는 **잰 값을 그대로** 준다 — 보정은 여기서 한 번만 한다.
+///
+/// **`keyboard_from_bottom` 은 «화면 하단부터» 잰 높이다.** 그래서 하단 inset(제스처 바·3버튼
+/// 바·홈 인디케이터)과 **겹친다** — 두 값을 그냥 빼면 그 띠를 두 번 빼서 화면이 그만큼 짧아진다.
+/// 그 보정이 예전에는 **두 host 에 각자**(iOS 는 ObjC 에, Android 는 Java 의 `ImeInsets` 에)
+/// 적혀 있었다. 같은 사실이 두 자리에 있으면 한쪽만 고쳐진다 — 그래서 여기로 모은다.
+///
+/// **배율은 host 가 준다**(`scale_milli`): iOS 는 UIKit 이 이미 pt 로 주므로 `1000`,
+/// Android 는 px 라 `density/160 × 1000`(실측 2625). 그 차이가 이 함수의 유일한 플랫폼 갈래다.
+///
+/// 하한은 **1** 이다 — 0 을 내보내면 격자가 0 칸이 되어 그리는 쪽이 통째로 죽는다.
+pub export fn maru_mobile_available_logical(
+    extent_w: u32,
+    extent_h: u32,
+    inset_top: u32,
+    inset_bottom: u32,
+    inset_left: u32,
+    inset_right: u32,
+    keyboard_from_bottom: u32,
+    scale_milli: u32,
+    out_w: *u32,
+    out_h: *u32,
+) void {
+    // **키보드가 하단 inset 을 덮는 만큼만 더 뺀다.** 키보드가 그 띠보다 작거나 없으면 0 이다.
+    const keyboard_over_inset = keyboard_from_bottom -| inset_bottom;
+    const w_px = extent_w -| inset_left -| inset_right;
+    const h_px = extent_h -| inset_top -| inset_bottom -| keyboard_over_inset;
+    const scale = if (scale_milli == 0) 1000 else scale_milli;
+    out_w.* = @max(1, w_px * 1000 / scale);
+    out_h.* = @max(1, h_px * 1000 / scale);
+}
+
 // ── 컨트롤 축의 «정책» 은 여기 산다 ────────────────────────────────────────────────
 //
 // **순서·가드·분류·마감이 전부 정책이다.** 예전에는 그 넷이 두 host 의 C/ObjC tick 안에

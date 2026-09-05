@@ -436,10 +436,10 @@ public class MaruActivity extends android.app.NativeActivity {
     private static final class ImeInsets implements View.OnApplyWindowInsetsListener {
         @Override
         public android.view.WindowInsets onApplyWindowInsets(View v, android.view.WindowInsets insets) {
-            int ime = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom;
-            int nav = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom;
-            // 키보드는 navigation bar 를 덮는다 — 두 번 빼지 않는다(iOS 의 safe area 처리와 같다).
-            nativeKeyboardHeight(ime > nav ? ime - nav : 0);
+            // **잰 값을 그대로 넘긴다.** 키보드가 navigation bar 를 덮는 겹침은 코어가 접는다
+            // (`maru_mobile_available_logical`) — 여기서 미리 빼면 그 규칙이 iOS 의 ObjC 와
+            // **두 자리**에 살게 되고, 그러면 한쪽만 고쳐진다.
+            nativeKeyboardHeight(insets.getInsets(android.view.WindowInsets.Type.ime()).bottom);
             // **레이아웃이 쓰는 하단 inset 도 여기서 갱신한다.** native 쪽 `queryInsets` 는
             // 창이 생기거나 크기가 바뀔 때만 도는데, 하필 키보드가 떠 있는 프레임에 걸리면
             // 시스템이 0 을 돌려줘 그 값이 굳는다 — 키보드를 내려도 하단 키바가 3버튼 위에

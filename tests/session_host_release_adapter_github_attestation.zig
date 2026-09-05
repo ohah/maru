@@ -80,6 +80,145 @@ test "held-directory artifact argv accepts only exact dot slash basename" {
     try std.testing.expectError(error.InvalidPath, attestation.planDirectory(&storage, "./..", expected()));
 }
 
+test "same-run bundle argv is closed and distinct from API lookup" {
+    var storage: attestation.ArgsStorage = undefined;
+    const request = try attestation.planBundle(
+        &storage,
+        "/tmp/Maru.dmg",
+        "/tmp/Maru.dmg.attestation.json",
+        expected(),
+    );
+    const want = [_][]const u8{
+        "attestation",                             "verify",                         "/tmp/Maru.dmg",    "--bundle",
+        "/tmp/Maru.dmg.attestation.json",          "--repo",                         "ohah/maru",        "--signer-workflow",
+        "ohah/maru/.github/workflows/release.yml", "--signer-digest",                source_sha,         "--source-digest",
+        source_sha,                                "--source-ref",                   "refs/tags/v1.2.3", "--deny-self-hosted-runners",
+        "--predicate-type",                        "https://slsa.dev/provenance/v1", "--format",         "json",
+    };
+    try std.testing.expectEqual(want.len, request.args.len);
+    for (want, request.args) |left, right| try std.testing.expectEqualStrings(left, right);
+    for (request.args) |arg| try std.testing.expect(std.mem.indexOf(u8, arg, "GH_TOKEN") == null);
+}
+
+test "same-run bundle rejects ambiguous pathname authority" {
+    var storage: attestation.ArgsStorage = undefined;
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "relative.json", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "/tmp/Maru.dmg", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "/tmp/../bundle.json", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "/tmp//bundle.json", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "/tmp/bundle.json/", expected()));
+    try std.testing.expectError(error.InvalidPath, attestation.planBundle(&storage, "/tmp/Maru.dmg", "/tmp/bad\nbundle.json", expected()));
+
+    const Never = struct {
+        pub fn capture(_: *@This(), _: []const u8, _: []const []const u8, _: []const []const u8, _: []u8, _: i128) ![]const u8 {
+            return error.UnexpectedChild;
+        }
+    };
+    var never = Never{};
+    var shared: [attestation.max_response_bytes]u8 = undefined;
+    const artifact_path = "/tmp/Maru.dmg";
+    @memcpy(shared[0..artifact_path.len], artifact_path);
+    try std.testing.expectError(error.InvalidPath, attestation.verifyBundleWith(
+        &never,
+        std.testing.allocator,
+        "/opt/trusted/gh",
+        shared[0..artifact_path.len],
+        "/tmp/bundle.json",
+        expected(),
+        &shared,
+        std.time.ns_per_s,
+    ));
+
+    var aliased_expected = expected();
+    @memcpy(shared[0..aliased_expected.context.tag.len], aliased_expected.context.tag);
+    aliased_expected.context.tag = shared[0..aliased_expected.context.tag.len];
+    try std.testing.expectError(error.InvalidPath, attestation.verifyBundleWith(
+        &never,
+        std.testing.allocator,
+        "/opt/trusted/gh",
+        "/tmp/Maru.dmg",
+        "/tmp/bundle.json",
+        aliased_expected,
+        &shared,
+        std.time.ns_per_s,
+    ));
+}
+
+test "same-run bundle execution is token-free and uses supplied capture" {
+    const Fake = struct {
+        pub fn capture(_: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
+            try std.testing.expectEqualStrings("/opt/trusted/gh", executable);
+            try std.testing.expectEqual(@as(usize, 20), args.len);
+            try std.testing.expectEqualStrings("--bundle", args[3]);
+            try std.testing.expectEqualStrings("/tmp/Maru.dmg.attestation.json", args[4]);
+            try std.testing.expectEqual(@as(usize, 1), environment.len);
+            try std.testing.expectEqualStrings("GH_PROMPT_DISABLED=1", environment[0]);
+            try std.testing.expect(budget_ns > 0);
+            @memcpy(output[0..valid_json.len], valid_json);
+            return output[0..valid_json.len];
+        }
+    };
+    var fake = Fake{};
+    var output: [attestation.max_response_bytes]u8 = undefined;
+    var observed = try attestation.verifyBundleWith(
+        &fake,
+        std.testing.allocator,
+        "/opt/trusted/gh",
+        "/tmp/Maru.dmg",
+        "/tmp/Maru.dmg.attestation.json",
+        expected(),
+        &output,
+        std.time.ns_per_s,
+    );
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 333), observed.run_id);
+}
+
+test "same-run bundle uses exact absolute paths in a real token-free child" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifact.dmg", .data = "asset" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bundle.json", .data = "signed bundle fixture" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response.json", .data = valid_json });
+    const script =
+        \\#!/bin/sh
+        \\test "$1" = attestation || exit 31
+        \\test "$2" = verify || exit 32
+        \\test -f "$3" || exit 33
+        \\test "$4" = --bundle || exit 34
+        \\test -f "$5" || exit 35
+        \\test "$6" = --repo || exit 36
+        \\test "$7" = ohah/maru || exit 37
+        \\test "$GH_PROMPT_DISABLED" = 1 || exit 38
+        \\test -z "${GH_TOKEN+x}" || exit 39
+        \\root=$(/usr/bin/dirname "$0")
+        \\/bin/cat "$root/response.json"
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gh", .data = script });
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var script_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const script_path = try std.fmt.bufPrintZ(&script_storage, "{s}/gh", .{root[0..root_len]});
+    if (c.chmod(script_path.ptr, 0o755) != 0) return error.FixtureFailed;
+    var artifact_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const artifact_path = try std.fmt.bufPrint(&artifact_storage, "{s}/artifact.dmg", .{root[0..root_len]});
+    var bundle_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_storage, "{s}/bundle.json", .{root[0..root_len]});
+    var output: [attestation.max_response_bytes]u8 = undefined;
+    var observed = try attestation.verifyBundle(
+        std.testing.io,
+        std.testing.allocator,
+        script_path,
+        artifact_path,
+        bundle_path,
+        expected(),
+        &output,
+        std.time.ns_per_s,
+    );
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(subject_name, observed.subject_name);
+}
+
 test "artifact attestation binds exact verified certificate and SLSA subject" {
     var observed = try attestation.parseAndBind(std.testing.allocator, valid_json, expected());
     defer observed.deinit(std.testing.allocator);

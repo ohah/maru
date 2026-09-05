@@ -5,13 +5,14 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const evidence_mod = @import("release_evidence");
+const bundle_contract = @import("release_adapter_attestation_bundle_contract");
 const files = @import("release_adapter_files");
 const safe_open = @import("safe_open");
 
 extern "c" fn renameatx_np(from_dir_fd: c_int, from: [*:0]const u8, to_dir_fd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
 const rename_excl: c_uint = 0x00000004;
 
-pub const max_attestation_bundle_bytes: u64 = 16 * 1024 * 1024;
+pub const max_attestation_bundle_bytes: u64 = bundle_contract.max_bytes;
 pub const max_aggregate_bytes: u64 = evidence_mod.max_evidence_bytes + 4 * max_attestation_bundle_bytes;
 pub const role_count: usize = 5;
 

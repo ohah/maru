@@ -1062,6 +1062,16 @@ ReleaseFast 40회 diagnostic은 latency 분포, FD delta, expected retained-fina
 않는다. harness-owned root만 사용하므로 실제 앱 session-host 상태와 release를 건드리지 않는다. 이 gate는 다음 process semantic
 reopen, prepare/resume command, authored attestation action, aggregate insertion, live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
 
+U5 retained stage-3 preparation reopen은 이전 owner의 pointer/fd/seal을 받지 않고 canonical directory pathname과 trusted protected-tag
+context에서 새 final-address owner를 만든다. `test-session-host-release-adapter-candidate-preparation-reopen`은 actual filesystem에서
+exact owner-only two-entry inventory, derived manifest name, 두 direct-child file의 single-link identity와 role/aggregate cap,
+canonical baseline evidence/role-A manifest의 전체 cross-binding 및 trusted context binding, full semantic fence와
+tombstone-before-close를 Debug·ReleaseFast에서 검증한다. allocation fail-index와 pathname/directory/file replacement, extra/missing leaf,
+mode·context·metadata seal drift는 view 0으로 fail-close하고 retained directory는 close 뒤에도 생존한다. ReleaseFast 40회 diagnostic은
+reopen/fence/close latency 분포, 실패 수와 FD delta를 기록하지만 제품 latency budget은 아니다. harness-owned root만 사용하므로 실제
+앱 session-host 상태나 release를 건드리지 않는다. prepare/resume process command, authored attestation action, aggregate 삽입,
+live workflow와 frozen signed U5 E2E는 후속 범위다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

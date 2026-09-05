@@ -81,16 +81,21 @@ const inventory = [_]Entry{
     },
     .{
         .path = "src/platform/macos/app_session/git.zig",
-        .fns = &.{ "remoteScmTarget", "termCwd", "termCwdForDisplay" },
+        .fns = &.{ "remoteCwd", "termCwd" },
         .aliases = 0,
         .why =
-        \\축 자체 — `termCwd`와 `termCwdForDisplay`의 1단(OSC 7)을 읽는 바로 그 두 줄이다.
+        \\축 자체 — 로컬은 `termCwd`의 1단(OSC 7), 원격은 `remoteCwd`다.
         \\
-        \\`remoteScmTarget`(RS2 — docs/plans/remote-scm.md)은 **축의 반대편**이라 여기 있다. 축은 원격에서
-        \\의도적으로 null 을 낸다(그 경로를 로컬에 대고 해석하면 남의 저장소를 만진다 — §9.4). 그래서
-        \\「원격 저장소를 본다」는 질문에는 축이 답할 수 없고, 원격 cwd 를 아는 유일한 자리가 관측이다.
+        \\`remoteCwd`(RS6 — docs/plans/remote-scm.md §17)는 **축의 반대편**이라 여기 있다. 로컬 축은
+        \\원격에서 의도적으로 null 을 낸다(그 경로를 로컬에 대고 해석하면 남의 저장소를 만진다 — §9.4).
+        \\그래서 「원격 pane 은 어디에 서 있나」에는 그 축이 답할 수 없고, 관측(그리고 전면 TUI 구간을
+        \\메우는 훅 cwd)이 유일한 소스다.
         \\
-        \\**직독이 여기 하나로 묶여 있는 것이 이 함수의 값어치다**: 원격 판정이 한 곳이라 목록·diff·쓰기가
+        \\**재고가 셋에서 둘로 줄었다.** 예전에는 `termCwdForDisplay`(표시)와 `remoteScmTarget`(원격 SCM)이
+        \\각자 관측을 직독했고, 그래서 같은 pane 에서 폴더줄과 도크가 **다른 답**을 냈다(원격에서 `claude` 를
+        \\띄우면 OSC 7 이 멈춰 도크만 홈을 봤다 — 사용자 보고 2026-09-05). 둘 다 이제 `remoteCwd` 를 부른다.
+        \\
+        \\**직독이 여기 하나로 묶여 있는 것이 이 함수의 값어치다**: 원격 cwd 가 한 곳이라 표시·목록·diff·쓰기가
         \\같은 쌍을 보고, 「목록은 원격인데 클릭은 로컬」이 원리적으로 불가능해진다. 다른 곳에서 원격 cwd 를
         \\또 직독하면 그 보장이 깨지므로, 그때는 이 함수를 부르지 재고를 늘리지 않는다.
         ,

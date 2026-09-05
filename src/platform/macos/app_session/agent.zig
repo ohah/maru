@@ -2121,7 +2121,11 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // **훅이 알려 준 작업 디렉터리를 담는다.** 원격 pane 에서 OSC 7 은 `precmd` 라 전면 TUI 가 붙어
     // 있는 동안 발화하지 못해 값이 접속 직전에서 멈춘다(ssh-integration.md §9.5) — 훅은 그 구간에도
     // **매 턴** 오므로 이 값이 그 자리를 메운다. 로컬은 커널 조회가 이미 정확해서 소비하지 않는다.
-    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd, self.awakeMs());
+    //
+    // **어느 기계의 경로인지 함께 담는다.** 이 값을 읽는 쪽에는 원격 SCM 이 있고, 거기서는 이 경로가
+    // 곧 `git -C` 의 인자다 — 목적지를 안 적으면 로컬 에이전트가 남긴 경로가 그 pane 이 `maru ssh` 로
+    // 들어간 뒤 **저쪽 기계의 같은 철자**를 연다(`CwdLabel.max_host` 주석).
+    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd, git_ops.termMachineKey(term), self.awakeMs());
     captureBeforeForEvent(self, term, ev);
     // **훅 자리만 읽고 훅 자리만 쓴다**(§1.6-⑴). 이 값은 `advance` 의 입력이자 출력이라 화면이 끼어들면
     // 상태 기계가 오염된다 — 배지에 나가는 값은 권위표를 통과한 `agent_state` 다.

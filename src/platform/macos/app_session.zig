@@ -16144,8 +16144,7 @@ pub const AppSession = struct {
         //
         // 여기서 훅 값을 써도 안전한 이유는 §9.4 가 이 소비처를 「표시 전용이고 파일시스템에 닿지
         // 않는다」로 분류해 두었기 때문이다(host 접두가 없는 것도 그 표의 알려진 후속이다).
-        if (termCwdIsRemote(term) and term.agent_hook_cwd.fresh(self.awakeMs()))
-            return term.agent_hook_cwd.text();
+        if (termCwdIsRemote(term)) return git_ops.remoteCwd(self, term);
         return term.rt.observation.cwd.items;
     }
 
@@ -78870,7 +78869,7 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
     }
 
     // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → 폴더줄이 그것으로 바뀐다.
-    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
+    term.agent_hook_cwd.set("/srv/app/proj", "build-box", session.awakeMs()); // 그 기계가 보고한 값이다
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -78881,14 +78880,14 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
 
     // ── ③ **잘린 경로·상대 경로는 안 담는다.** 담으면 남의 디렉터리를 가리킨다.
     term.agent_hook_cwd.clear();
-    term.agent_hook_cwd.set("relative/path", session.awakeMs());
+    term.agent_hook_cwd.set("relative/path", "", session.awakeMs());
     try std.testing.expect(term.agent_hook_cwd.isEmpty());
 
     // ── ④ 대조군: 로컬 pane 은 이 값을 안 본다(커널 조회가 이미 정확하다).
     try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp\x07");
     term_ops.refreshTermObservation(session, term, false, false);
     try std.testing.expect(!termCwdIsRemote(term));
-    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
+    term.agent_hook_cwd.set("/srv/app/proj", "", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -78917,7 +78916,7 @@ test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박�
     _ = try session.resize(800, 600, 1000);
 
     const term = pane_ops.activePane(session).activeTerm();
-    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
+    term.agent_hook_cwd.set("/srv/app/proj", "", session.awakeMs());
     try std.testing.expect(!term.agent_hook_cwd.isEmpty());
 
     // 훅 모드가 아니다(로그도 없고 에이전트도 없고 원격 채널도 없다) → 관측 모드로 내려간다.
@@ -78977,7 +78976,7 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
     }
 
     // ── ③ 훅이 작업 디렉터리를 알려 주면 그때 그린다 — host 는 **목적지에서** 뽑는다.
-    term.agent_hook_cwd.set("/srv/app/proj", session.awakeMs());
+    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -78994,6 +78993,78 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
         defer a.free(shown);
         try std.testing.expect(std.mem.indexOf(u8, shown, "build-box") == null);
     }
+}
+
+test "원격 SCM 은 폴더줄과 같은 cwd 를 본다 — 그리고 다른 기계의 경로는 안 쓴다" {
+    // 원격 pane 에서 `claude` 를 띄우면 OSC 7 은 `precmd` 라 그 구간에 발화하지 못해 접속 직전
+    // 값(대개 홈)에서 멈춘다(ssh-integration.md §9.5). 폴더줄은 훅 cwd 로 진짜 경로를 그리는데
+    // **원격 SCM 만 관측을 직접 읽어** 홈을 대상으로 삼았고, 그러면 도크가 「저장소를 확인할 수
+    // 없습니다」로 떨어진다 — 같은 화면의 두 뷰가 다른 답을 내는, §3.5 가 한 축으로 모아 둔 그 함정이다.
+    //
+    // 규칙의 소유자는 `git_ops.remoteCwd` 하나이고, `remoteScmTarget` 은 그것을 소비한다.
+    // (`remoteScmTarget` 자체는 **살아 있는 control socket** 을 요구해 단위로 못 태운다 — 그 앞단인
+    //  이 규칙을 겨눈다. 소켓 축은 §2.2 ⑸ 가 소유한다.)
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // ── ① `maru ssh` 가 목적지를 알리고, 보고자는 홈에서 멈춰 있다(전면 TUI 가 붙기 직전 값).
+    try term_ops.activeSurface(session).core.write("\x1b]5379;ssh;me@build-box\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/home/me\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    try std.testing.expectEqualStrings("me@build-box", git_ops.termRemoteDest(term));
+    try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
+
+    // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → **SCM 축도** 그것을 본다(예전에는 여기서 갈렸다).
+    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
+    try std.testing.expectEqualStrings("/srv/app/proj", git_ops.remoteCwd(session, term));
+    {
+        // 폴더줄과 **같은 답**이다 — 이것이 이 슬라이스가 지키는 불변식이다.
+        const shown = try sidebarCwdPath(session, term);
+        defer a.free(shown);
+        try std.testing.expectEqualStrings("build-box:/srv/app/proj", shown);
+    }
+
+    // ── ③ **다른 기계에서 적힌 값은 안 쓴다.** 훅 모드는 로그 파일이 한 번 생기면 세션 내내
+    //     유지되므로(`agentHookMode`), 로컬에서 돌던 에이전트가 남긴 cwd 가 그 pane 이 `maru ssh` 로
+    //     들어간 뒤에도 신선한 채로 남는다. 그 값을 쓰면 로컬 경로가 **원격 `git -C`** 가 된다.
+    term.agent_hook_cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
+    try std.testing.expect(term.agent_hook_cwd.fresh(session.awakeMs())); // 시간만 보면 통과한다
+    try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term)); // 그래도 관측으로 돌아간다
+
+    // ── ④ 훅 모드를 벗어나 값을 버리면 관측으로 돌아간다 — 에이전트를 끝내고 그 pane 에서 계속
+    //     일하는 흐름이다(만료 축은 `CwdLabel` 의 순수 판정자가 소유한다).
+    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
+    try std.testing.expectEqualStrings("/srv/app/proj", git_ops.remoteCwd(session, term));
+    term.agent_hook_cwd.clear();
+    try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
+
+    // ── ⑤ **목적지가 없는 원격도 기계를 안다**(적대적 검증 12 회차). 맨 `ssh` 는 OSC 5379 를 안 보내
+    //     목적지가 비는데, **로컬도 빈다** — 둘을 같은 키로 두면 로컬 잔상이 매치되어 폴더줄이
+    //     「원격 접두 + 로컬 경로」라는 없는 자리를 그린다. 그래서 키는 OSC 7 authority 로 떨어진다.
+    try term_ops.activeSurface(session).core.write("\x1b]5379;ssh-end\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/home/me\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term)); // authority 가 원격이다
+    try std.testing.expectEqualStrings("", git_ops.termRemoteDest(term)); // 목적지는 없다
+    try std.testing.expectEqualStrings("build-box", git_ops.termMachineKey(term)); // 그래도 기계는 안다
+    term.agent_hook_cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
+    try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
 }
 
 test "SB1-S11-6: 제품 getter 가 진짜 remote runtime 의 좁힘 값을 집는다 — 주입 없이" {

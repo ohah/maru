@@ -1092,6 +1092,23 @@ JSON으로 남긴다. prerequisite·baseline·manifest의 시간은 실제 signe
 consumer일 뿐 caller로 세지 않는다. executable command,
 stage-4 action, resume composition, live workflow와 frozen signed U5 E2E는 후속 범위다.
 
+U5 stage-3 preparation command는 기존 `publish-candidate`의 의미를 바꾸지 않고 exact `prepare-candidate` command와 sealed driver로
+stage-3 product를 정확히 한 번 호출한다. contract/bootstrap/driver/validator focused gate는 새 durable pathname을 포함한 모든
+입력의 closed option·canonical/disjoint path, protected context와 pinned CLI, exact-one token read, shared budget과 product call을
+Debug·ReleaseFast에서 검증한다. success는 retained durable 두 leaf와 process-local owner/FD 0 뒤에만 게시한다. draft 전 실패는
+ordinary cleanup, draft 뒤 audit failure는 `retryAuditCleanup`으로 local owner만 정리하고 remote draft와 retained bytes를 보존하며,
+cleanup 실패는 원래 오류를 성공이나 retryable 상태로 바꾸지 않는다. process-entry 행은 실제 최장 command argv가 parser와 dispatch에
+도달하고 contract에서 유도한 bound+1만 `TooManyArguments`인지 검증해 기존 32-slot 절단을 막는다. harness-owned fixture만 사용하므로
+실제 앱 session-host 상태와 GitHub release를 건드리지 않는다. stage-4 action, resume composition, aggregate 삽입, workflow와 frozen
+signed U5 E2E는 후속 범위다.
+외부 process outcome은 exact `0=success`, `20=local_failure`, `21=audit_required`, `22=cleanup_failed`이고 stderr는 해당 고정 이름만
+허용한다. 원래 error·credential·pathname은 process 출력에 싣지 않으며 unknown/mapping failure는 22다. focused gate는 bootstrap/token
+failure, draft 전 product failure, draft 뒤 audit cleanup 성공·실패와 invalid internal state가 각각 올바른 code를 내고 다른 code나
+민감 문자열을 출력하지 않는지 검증한다.
+기존 workflow reducer에는 exact `draft_authoring`의 mutation 전 code 20에만 대응하는 `failed_before_remote_mutation` result를 추가한다.
+그 event만 `local_failure`가 되며 다른 stage·이미 시작된 mutation·추측 입력은 거부한다. code 21/22는 각각 기존 보수적 `failed`와
+`cleanup_failed`로 가고, 기존 stage-3 일반 failure의 audit-required 동작은 약화하지 않는다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

@@ -3280,6 +3280,62 @@ cleanup과 해당 경계 전체의 median·p95·max, 실패 수, parent FD delta
 않는다. 이 slice는 stage-3 product transaction만 닫으며 executable command, stage-4 authored action, resume composition,
 live workflow와 frozen signed U5 E2E를 완료하지 않는다.
 
+### 11.59 stage 3 preparation의 executable command와 audit 정산
+
+기존 `publish-candidate` command의 의미를 바꾸거나 그 안에 §11.58을 덧붙이지 않는다. 그 command는 이미 publication까지 수행하는
+호환 경계이므로, live workflow의 단계 3은 새 exact `prepare-candidate` command만 사용한다. 이 command는
+`release_adapter_candidate_stage3_preparation_product.Execution`을 호출하는 전용 sealed driver 하나를 가지며, workflow shell이나
+validator dispatch가 prerequisite, baseline, manifest author와 durable handoff를 다시 조립하지 않는다. 이번 slice는 command를 실제
+validator executable에 연결하지만 `.github/workflows/release.yml`에서 선택하는 권위는 후속 live-workflow wiring이 소유한다.
+
+필수 option은 기존 candidate 입력인 exact `--repo`, `--tag`, `--github-cli`, `--github-cli-sha256`, `--test-uuid`, `--dmg`,
+`--frozen-executable`, `--candidate-dmg-bundle`, `--candidate-frozen-bundle`, `--dmg-work`, `--baseline-workspace`,
+`--app-main-executable`, `--app-cli-executable`, `--manifest`, `--source-root`, `--zig`, `--zig-size`, `--zig-sha256`와 새
+`--durable-preparation`이다. 다른 phase option, 누락·중복, relative/control/NUL/`..`/중복 slash/trailing-slash pathname과 어느
+두 pathname의 tree alias는 parser에서 side effect 전에 거부한다. `--durable-preparation`은 absent final directory pathname일 뿐
+성공 boolean, draft ID, digest나 cleanup 권위가 아니다. 성공 결과는 그 pathname 아래 retained evidence/manifest 두 leaf로만
+게시되며 stdout, 환경변수, inherited descriptor 또는 pointer로 중간 owner를 내보내지 않는다.
+
+bootstrap은 protected current context, GitHub-hosted runner와 checkout 전에 고정한 GitHub CLI를 기존 단일 출처로 결속한다.
+전용 driver는 source directory와 Zig toolchain authority를 먼저 소유하고, 그 둘과 bootstrap에서 유도한 모든 candidate 입력을
+§11.58 `run`에 정확히 한 번 전달한다. 하나의 20분 positive budget을 product가 단일 absolute deadline으로 바꾸며 driver나 child가
+새 expiry를 만들지 않는다. candidate bundle 검증은 token-free local bundle 경로지만 draft creation과 current GitHub API leaf가
+있으므로 command process는 기존 exact `GH_TOKEN`을 한 번 읽는다. 로컬 빌드와 로컬 앱 인증서 upgrade는 이 command나 token에
+의존하지 않는다.
+
+성공은 retained close와 최종 authority fence, product의 local owner 정리, driver의 toolchain/source 역순 close가 모두 끝난 뒤에만
+exit 0이다. draft mutation 전 실패는 product `retryCleanup()`과 driver 역순 cleanup이 끝난 뒤 원래 typed error를 반환한다.
+draft mutation 뒤 `audit_required`는 ordinary `retryCleanup()`으로 보내지 않는다. 전용 settlement가
+`retryAuditCleanup()`으로 남은 process-local owner만 정리하고 remote draft나 retained durable bytes는 수정·삭제하지 않은 뒤 원래
+error를 보존한다. local cleanup이 끝나지 않으면 `CleanupFailed`가 우선하며 성공이나 재시도 가능으로 바꾸지 않는다. 다음 process는
+tag의 current draft를 §11.57로 재인증하고 retained pathname을 §11.56으로 reopen하므로 process-local audit pointer를 직렬화하지 않는다.
+
+workflow는 일반적인 nonzero 하나로 이 결과를 추측하지 않는다. command 경계는 credential·pathname·원래 error 문자열을 싣지 않는
+닫힌 process outcome을 `0=success`, `20=local_failure`, `21=audit_required`, `22=cleanup_failed`로 내보낸다. bootstrap·token·driver
+preflight처럼 remote mutation 전 실패는 20이고, product가 `needsAudit()`인 채 반환한 실패는 local audit cleanup 성공 여부에 따라
+21 또는 22다. 알 수 없는 내부 상태, exit-code mapping 자체의 불가능과 모든 cleanup 미확정은 22로 fail-close한다. stderr는 고정된
+outcome 이름만 허용하고 원래 오류·환경·token·경로를 쓰지 않는다. 후속 live workflow owner는 이 closed code를 typed reducer event로
+변환하며 shell이 tag 조회, durable directory 존재 또는 GitHub API 결과로 분류를 보정하지 않는다.
+
+§11.52 reducer의 기존 stage-3 `failed`는 원격 mutation 여부가 불명인 보수적 audit 판정으로 그대로 유지한다. 대신 exact
+`prepare-candidate` code 20처럼 concrete product가 pristine을 증명한 경우만 표현하는
+`failed_before_remote_mutation` result를 추가한다. 이 result는 expected stage가 exact `draft_authoring`이고
+`draft_mutation_started=false`일 때만 `local_failure`로 terminal 전환하며 다른 stage, 이미 시작된 mutation, code 21/22 또는 caller가
+추측해 만든 event는 `InvalidState`다. code 21은 기존 `failed`, code 22는 기존 `cleanup_failed`로 변환한다. reducer는 exit code를
+직접 파싱하지 않고 후속 concrete workflow owner가 closed mapping을 수행한다.
+
+validator의 argv storage 상한은 contract의 실제 최장 command에서 기계적으로 유도한 exact bound 이상이어야 한다. 현재 하드코딩된
+32개는 기존 `publish-candidate`의 필수 option도 담지 못하므로 새 command 배선과 함께 제거한다. focused executable gate는 실제
+최장 argv가 `main` 수집→contract parse→bootstrap→driver dispatch에 도달하고 exact bound+1만 `TooManyArguments`로 거부되는지
+검증한다. 0-test filter나 `executeWith`만 호출하는 단위 테스트는 이 process-entry 증거를 대신하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-stage3-preparation-command`는 contract/bootstrap/driver/validator의 closed
+command와 exact-one product call, token-before-remote ordering, shared budget, success 역순 cleanup, local failure와 audit failure의
+서로 다른 settlement 및 closed exit-code/redacted-stderr mapping, copied/pre-owned/alias/path/argv-cap 거부를 Debug·ReleaseFast에서 고정한다. actual child 행은 test-owned
+fixture authority와 harness-owned `mkdtemp`만 사용하고 실제 앱 session-host registry·manifest·socket·process 또는 GitHub release를
+읽거나 바꾸지 않는다. 이 slice는 stage-3 executable command까지만 닫으며 stage-4 authored action, resume composition, aggregate
+삽입, live workflow 배선과 frozen signed U5 E2E는 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

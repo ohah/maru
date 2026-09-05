@@ -1079,6 +1079,19 @@ storage alias 거부와 독립 owner 수명을 Debug·ReleaseFast에서 검증�
 GitHub current-release 인증은 기존 component gate가 소유한다. 이 gate는 prepare/resume command, authored bundle action, aggregate
 삽입, live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
 
+U5 stage-3 preparation product는 기존 production prerequisite→baseline→manifest author→durable preparation의 exact transaction과
+하나의 deadline을 소유한다. `test-session-host-release-adapter-candidate-stage3-preparation-product`는 reducer 전 fail point와 concrete
+production callsite/type 조립을 나눠 retained durable commit 전 성공 0, draft mutation 전 local failure와 이후 audit-required terminal,
+retained close 실패와 close 직후 final authority drift, dependency 역순 local cleanup/retry, final-address·copy·pre-owned·storage alias를 Debug·ReleaseFast에서
+검증한다. harness-owned canonical held evidence/manifest를 production handoff에 넣는 actual-filesystem 행은 durable bytes와 staging
+residue 0을 확인한다. 성공 뒤 process-local fd는 0이고 durable evidence/manifest만 남아야 한다. ReleaseFast 20회는 local durable
+promote/fence/retained-close/source-cleanup과 그 경계 전체의 median·p95·max, 실패 수, parent FD delta 및 residue를 canonical diagnostic
+JSON으로 남긴다. prerequisite·baseline·manifest의 시간은 실제 signed candidate/GitHub draft 없이 측정했다고 주장하지 않는다.
+실제 앱 session-host 상태·GitHub release·credential을 건드리지 않으며 이 값은 네트워크 latency budget이나 GitHub 원격 E2E 증거가
+아니다. 기존 durable handoff source scan은 production promote caller를 이 stage-3 product 정확히 하나로 제한하고, retained reopen은
+consumer일 뿐 caller로 세지 않는다. executable command,
+stage-4 action, resume composition, live workflow와 frozen signed U5 E2E는 후속 범위다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

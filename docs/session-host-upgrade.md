@@ -3230,6 +3230,56 @@ current GitHub API 인증은 기존 `test-session-host-release-adapter-github-cu
 resume publication에 필요한 authority bridge만 닫으며 prepare/resume executable command, authored bundle action, aggregate 삽입,
 live workflow와 frozen signed U5 E2E를 완료했다고 주장하지 않는다.
 
+### 11.58 stage 3 preparation의 단일 product owner와 durable commit point
+
+`release_adapter_candidate_stage3_preparation_product.zig`의 caller-owned final-address `Execution`은 §11.52 단계 3의
+prerequisite, baseline evidence 실행, candidate manifest authoring과 §11.55 durable preparation 승격을 한 typed transaction으로
+소유한다. workflow shell이나 executable driver는 중간 owner, draft ID, evidence/manifest digest, 성공 boolean 또는 cleanup 결정을
+조립하지 않는다. 입력은 기존 candidate prerequisite와 baseline의 trusted 입력, manifest의 canonical absolute output pathname,
+absent durable preparation directory pathname뿐이다. evidence pathname은 성공한 baseline workspace에서 유도하고 source root는
+evidence·manifest pathname의 canonical parent에서 유도한다.
+
+§11.55 production durable handoff의 허용 caller는 이 product owner 정확히 하나다. §11.56 reopen은 retained directory의
+별도 consumer이며 promote caller가 아니다. source scan gate는 이 product 밖의 production caller를 0으로 유지해 workflow나
+driver가 durable commit 순서를 다시 조립하지 못하게 한다.
+
+owner는 하나의 positive deadline을 시작해 candidate prerequisite와 baseline product에 같은 pointer를 빌려준다. 순서는 exact
+prerequisite→baseline→manifest author→durable promote→durable full fence→retained close다. manifest는 기존
+`release_adapter_candidate_manifest.author`만 호출해 prerequisite authority와 baseline의 held evidence에서 만들며 authored
+attestation, asset attachment, redownload 또는 publication leaf를 호출하지 않는다. durable promote는 성공한 held evidence와 held
+manifest만 받고, retained close가 끝나기 전에는 stage-3 성공을 게시하지 않는다. 성공 뒤 baseline과 prerequisite의 local owner 및
+held manifest descriptor를 dependency 역순으로 닫는다. retained close 직후에도 deadline과 prerequisite·baseline·manifest 권위를
+마지막으로 다시 검증하며, retained 상태 자체가 아니거나 이 fence가 실패하면 durable bytes를 지우지 않고 audit-required로 남긴다.
+`DraftAuthority.deinit()`은 process-local capability만 비우며 이미 생성된
+remote draft를 삭제·수정하지 않는다. durable directory는 남고 다음 process는 pathname만으로 §11.56을 수행한다.
+
+draft mutation 전에 난 실패는 local owner를 역순 정리하고 pristine으로 돌아간 `local_failure`다. draft mutation을 시도한 뒤의
+prerequisite 실패와, prerequisite 성공 뒤 baseline·manifest·promote·fence·retained-close에서 난 실패는 remote release 존재 여부를
+추측하거나 같은 tag를 자동 재시도하지 않는 `audit_required`다. 이 경우 owner는 기존 prerequisite audit graph 또는 성공한
+prerequisite와 현재 local cleanup capability를 final address에 보존한다. final rename 뒤 durable completion을 확정하지 못한 오류와
+retained close 뒤 local cleanup 실패도 성공으로 바꾸지 않는다. 이미 retained close가 완료된 directory는 과거 pointer로 삭제하지
+않고 manual audit 및 후속 새-owner 판정에 남긴다. cleanup retry는 remote mutation을 실행하지 않고 정확히 남은 local owner만
+dependency 역순으로 정리하며, audit-required state를 자동으로 pristine이나 retryable success로 바꾸지 않는다.
+
+모든 phase 전후 fence는 execution final address, 동일 deadline, prerequisite/baseline/manifest/durable owner 상태, context와 candidate
+path, pinned CLI·toolchain·source authority 및 pathname storage alias를 다시 검증한다. execution·deadline·각 nested owner, token,
+scratch, context backing slice와 모든 pathname storage의 overlap은 첫 filesystem·credential·child·remote mutation 전에 거부한다.
+성공 반환은 execution이 pristine이고 durable directory만 남은 상태여야 하며 pointer, fd, token 또는 scratch borrow가 남으면
+실패다.
+
+focused gate `test-session-host-release-adapter-candidate-stage3-preparation-product`는 generic reducer의 전 fail point를 fake step으로
+전수하고, concrete product가 기존 production prerequisite, baseline, manifest author와 durable handoff type만 exact once 조립하는지
+별도로 컴파일·경계 검사한다. Debug·ReleaseFast에서 shared deadline, draft 전 local failure, draft 이후 audit terminal, final
+rename/retained close 경계, 역순 cleanup과 retry, copied/pre-owned/final-address/alias 및 owner-storage pathname 유도를 검증한다.
+harness-owned 임시 root의 canonical held evidence/manifest를 production durable handoff에 넣는 actual-filesystem 행은 실제 retained
+directory와 staging residue 0을 확인한다. ReleaseFast 성공 20회는 이 local durable promote, full fence, retained close, source-owner
+cleanup과 해당 경계 전체의 median·p95·max, 실패 수, parent FD delta와 temporary residue를 exact
+`maru.session-host-release-stage3-preparation-product-perf.v1` canonical diagnostic JSON으로 남긴다. prerequisite·baseline·manifest의
+실제 시간은 signed candidate와 GitHub draft를 요구하므로 이 JSON에 fake 수치로 넣지 않는다. 이 값은 local durable 경계의 회귀
+비교용 실측이지 latency budget이나 GitHub 원격 E2E 증거가 아니다. 실제 앱 session-host 상태·GitHub release·credential은 건드리지
+않는다. 이 slice는 stage-3 product transaction만 닫으며 executable command, stage-4 authored action, resume composition,
+live workflow와 frozen signed U5 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

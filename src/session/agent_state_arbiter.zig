@@ -75,10 +75,22 @@ pub const Input = struct {
     /// 화면에 idle chrome 이 **지금** 보이는가. C2 가 이것의 연속 관측으로 선다.
     screen_visible_idle: bool = false,
 
-    /// **그 idle 근거가 「상시 chrome」인가**(입력창처럼 작업 중에도 늘 보이는 것). 참이면 C2 가
-    /// 훅의 `running` 을 못 덮는다 — §1.1 의 「idle 은 활동 증거의 **부재**라 훅을 못 덮는다」를
-    /// 시간이 아니라 **근거의 질**로 지킨다. 연속 3 회는 0.3 초면 차므로 이 부류를 막지 못했다.
+    /// **그 idle 근거가 「상시 chrome」인가**(입력창처럼 작업 중에도 늘 보이는 것). 이것 하나로 막지는
+    /// 않는다 — `output_active` 와 **함께** 읽는다(아래).
     screen_idle_is_chrome: bool = false,
+
+    /// **최근에 PTY 출력이 있었는가**(§1.1 의 activity 창). `screen_idle_is_chrome` 과 짝을 이뤄
+    /// **정반대를 요구하는 두 사고**를 가른다:
+    ///
+    /// - **codex 오류 턴**(§9-10): 훅이 `running` 에 멈췄고 화면은 입력창(chrome)뿐이며 **출력이 끊겼다.**
+    ///   턴은 실제로 끝났으므로 C2 가 **닫아 줘야** 한다. 안 닫으면 배지가 영영 진행중이다.
+    /// - **provider UI 변경**(2026-09-05): 에이전트가 **돌고 있는데** 화면이 진행 근거를 못 읽어 입력창만
+    ///   남았다. 스피너가 회전하므로 **출력은 계속 있다.** C2 가 여기서 닫으면 정상 running 을 접는다.
+    ///
+    /// 둘 다 「훅 running + chrome idle」 이라 근거의 질만으로는 안 갈린다. **출력 유무가 가른다** —
+    /// 실측에서 앞은 `last_output_ms == 0`, 뒤는 활동 창 안이었다. 그래서 chrome 근거는 **출력이 없을
+    /// 때만** 훅을 덮는다. 명시적 근거(제목 `✳`·중단 문구·OSC progress)는 이 제약을 안 받는다.
+    output_active: bool = false,
     /// 화면 상태를 세운 근거. A 경로에서 그대로 `Verdict.origin` 이 된다.
     screen_origin: Origin = .screen,
     process_exited: bool = false,
@@ -180,7 +192,9 @@ pub const Arbiter = struct {
 
         // C2 — 훅은 running 인데 자식이 없고 화면이 idle 을 **연속으로** 보인다. codex 오류 턴이 여기서
         // 닫힌다(§9-10 — codex 에는 `StopFailure` 가 없어 `Stop` 이 오지 않는다).
-        if (hook == .running and in.hook_child_count == 0 and in.screen_visible_idle and !in.screen_idle_is_chrome) {
+        if (hook == .running and in.hook_child_count == 0 and in.screen_visible_idle and
+            (!in.screen_idle_is_chrome or !in.output_active))
+        {
             // **같은 화면 관측을 두 번 세지 않는다**(`Input.screen_seq` 주석). 중재가 다시 불렸을 뿐이면
             // 셈은 그대로 두고 지금까지의 판단을 잇는다.
             if (in.screen_seq != self.last_counted_screen_seq) {
@@ -614,10 +628,9 @@ test "AR 상태 이름이 아니라 전이를 잠근다 — blocked 해제는 �
 
 // ── C2 의 질 조건: 상시 chrome 은 훅을 못 덮는다 (§1.1, 2026-09-05)
 
-test "AR-C2q: idle 근거가 상시 chrome 이면 몇 번을 봐도 훅의 running 을 못 덮는다" {
-    // **시간으로는 이 부류를 못 막는다.** 화면이 계속 idle 로 보이면 연속 3 회는 0.3 초면 찬다.
-    // 2026-09-05 사고가 그것이었다 — claude 가 진행 표시를 바꾸자 남은 근거가 입력창뿐이었는데
-    // C2 가 정상 running 을 접었다.
+test "AR-C2q: 작업 중(출력 있음)에는 chrome idle 이 몇 번을 봐도 훅의 running 을 못 덮는다" {
+    // 2026-09-05 사고. provider 가 진행 표시를 바꿔 화면이 running 근거를 못 읽자 남은 것이 입력창뿐이었다.
+    // **스피너가 회전하므로 출력은 계속 있다** — 그것이 「실제로 멈춤」과 이 상황을 가른다.
     var a: Arbiter = .{};
     var seq: u64 = 0;
     var i: usize = 0;
@@ -627,7 +640,8 @@ test "AR-C2q: idle 근거가 상시 chrome 이면 몇 번을 봐도 훅의 runni
             .hook = .running,
             .hook_child_count = 0,
             .screen_visible_idle = true,
-            .screen_idle_is_chrome = true, // ← 입력창 같은 상시 chrome
+            .screen_idle_is_chrome = true, // 입력창
+            .output_active = true, // 돌고 있다
             .screen_seq = seq,
         });
         try std.testing.expectEqual(State.running, v.state);
@@ -635,32 +649,36 @@ test "AR-C2q: idle 근거가 상시 chrome 이면 몇 번을 봐도 훅의 runni
     }
 }
 
-test "AR-C2q: 명시적 idle 근거는 여전히 3 회에 훅을 덮는다 — 구제 경로가 살아 있다" {
-    // 질 조건이 C2 를 통째로 막으면 「훅이 running 에 갇혔을 때 화면이 구해 준다」가 사라진다.
-    // 제목의 `✳`·`conversation interrupted` 같은 **명시적** 신호는 그대로 덮어야 한다.
+test "AR-C2q: 출력이 끊긴 chrome idle 은 여전히 3 회에 훅을 덮는다 — codex 오류 턴 구제" {
+    // §9-10 사고. 턴은 실제로 끝났는데 훅이 `running` 에 멈췄고 화면은 입력창뿐이며 **출력이 끊겼다.**
+    // 여기서 안 닫으면 배지가 영영 진행중이다(제품 판정자 AW2 가 같은 계약을 제품 경로에서 잠근다).
     var a: Arbiter = .{};
-    const in: Input = .{
-        .hook = .running,
-        .hook_child_count = 0,
-        .screen_visible_idle = true,
-        .screen_idle_is_chrome = false, // ← 명시적 근거
-    };
-    var v = a.arbitrate(.{ .hook = in.hook, .screen_visible_idle = true, .screen_seq = 1 });
+    var v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = false, .screen_seq = 1 });
     try std.testing.expectEqualStrings("C2-pending", v.rule);
-    v = a.arbitrate(.{ .hook = in.hook, .screen_visible_idle = true, .screen_seq = 2 });
+    v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = false, .screen_seq = 2 });
     try std.testing.expectEqualStrings("C2-pending", v.rule);
-    v = a.arbitrate(.{ .hook = in.hook, .screen_visible_idle = true, .screen_seq = 3 });
+    v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = false, .screen_seq = 3 });
     try std.testing.expectEqualStrings("C2", v.rule);
     try std.testing.expectEqual(State.idle, v.state);
 }
 
-test "AR-C2q: chrome 이 섞여도 셈이 오염되지 않는다 — 명시적 근거만 센다" {
-    // chrome 관측이 사이에 끼어도 C2 의 연속 셈이 그것으로 차면 안 된다.
+test "AR-C2q: 명시적 idle 근거는 출력이 있어도 3 회에 덮는다 — chrome 제약을 안 받는다" {
+    // 제목의 `✳`·중단 문구는 에이전트가 「끝났다」고 **보낸** 값이라 활동 유무와 무관하게 믿는다.
     var a: Arbiter = .{};
-    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 1 }); // 명시 1
-    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .screen_seq = 2 });
-    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .screen_seq = 3 });
-    // chrome 둘은 C2 자리에 안 들어갔으므로 셈은 1 에서 멈춰 있어야 한다.
-    const v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 4 });
+    var v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .output_active = true, .screen_seq = 1 });
+    try std.testing.expectEqualStrings("C2-pending", v.rule);
+    v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .output_active = true, .screen_seq = 2 });
+    try std.testing.expectEqualStrings("C2-pending", v.rule);
+    v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .output_active = true, .screen_seq = 3 });
+    try std.testing.expectEqualStrings("C2", v.rule);
+}
+
+test "AR-C2q: 차단된 회차는 셈을 올리지 않는다 — 작업 중 관측이 오염시키지 않는다" {
+    var a: Arbiter = .{};
+    // 작업 중(chrome + 출력) 둘 — C2 자리 밖이므로 셈이 안 오른다.
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = true, .screen_seq = 1 });
+    _ = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = true, .screen_seq = 2 });
+    // 이제 출력이 끊겼다 — 여기서부터 세기 시작해야 한다.
+    const v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = false, .screen_seq = 3 });
     try std.testing.expectEqualStrings("C2-pending", v.rule);
 }

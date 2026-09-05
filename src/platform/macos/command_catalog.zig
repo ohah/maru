@@ -102,6 +102,7 @@ pub const entries = [_]Entry{
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
+    .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },
     .{ .action = .editor_undo, .key = "editor_undo", .title = "Editor: Undo" },
     .{ .action = .editor_redo, .key = "editor_redo", .title = "Editor: Redo" },
     .{ .action = .editor_save, .key = "editor_save", .title = "Editor: Save" },

@@ -1499,6 +1499,14 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
         break :blk true;
+    } else if (std.mem.eql(u8, op, "key_bracket")) blk: {
+        // **`⇧⌘\\` 가 caret 을 짝으로 옮기는지 화면으로 본다**(§3.9c). 키 경로로 지나야 chord 두 벌·
+        // 액션 해석·`moveCarets` 갈래가 다 걸린다 — 함수를 직접 부르면 배선이 빠져도 같아 보인다.
+        _ = self.handleKeyEvent(.{
+            .key = .{ .char = '\\' },
+            .modifiers = .{ .command = true, .shift = true },
+        }) catch {};
+        break :blk true;
     } else if (std.mem.eql(u8, op, "key_opt_z")) blk: {
         // **키 경로로 지난다**(§편집기 Term 컨텍스트). 함수를 직접 부르면 컨텍스트 배선이 빠져도
         // 화면이 같아 보인다 — `⌥Z` 가 실제로 랩을 토글하는지는 이 경로로만 드러난다.

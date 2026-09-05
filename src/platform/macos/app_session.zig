@@ -9385,6 +9385,15 @@ pub const AppSession = struct {
                 self,
                 pane_ops.activePane(self).activeTerm(),
             ),
+            // 괄호 짝으로 점프(§3.9c). **이동이므로 `moveCarets` 를 그대로 탄다** — 접힘 펴기·스크롤
+            // 따라가기·멀티 커서 동시 적용·비교 뷰 거절이 전부 거기 이미 있다. `extend = false`:
+            // shift 는 chord 의 일부라 여기까지 안 온다(아래 편집 키 갈래가 그것을 가른다).
+            .jump_to_bracket => _ = editor_ops.moveCarets(
+                self,
+                pane_ops.activePane(self).activeTerm(),
+                .bracket_match,
+                false,
+            ),
             .editor_undo => _ = editor_ops.undoEdit(self, pane_ops.activePane(self).activeTerm()),
             .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
             .editor_save => _ = editor_ops.saveDocument(self, pane_ops.activePane(self).activeTerm()),

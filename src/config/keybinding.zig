@@ -325,6 +325,11 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '}' } }, .action = .next_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '[' } }, .action = .previous_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '{' } }, .action = .previous_tab },
+    // Cmd+Shift+\ : 괄호 짝으로 점프(§3.9c). 위 ]/} 와 **같은 이유로 두 벌**이다 — Shift 가 적용된
+    // '|' 로 올 수도, '\' 가 그대로 올 수도 있다. 액션이 `term.kind != .editor` 를 거절하므로
+    // 터미널에서 눌러도 전과 같고, Cmd 를 끼므로 터미널 Meta 입력을 안 뺏는다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '\\' } }, .action = .jump_to_bracket },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '|' } }, .action = .jump_to_bracket },
     // Cmd+1~9: N번째 워크스페이스(사이드바 탭)로 바로 전환(select_tab은 0-based라 N-1). 범위 밖이면 switchTab이
     // no-op. 브라우저/터미널 공통 관습(베이스: Safari/Terminal.app/iTerm2의 Cmd+숫자 탭 전환). 숫자 키는
     // normalizeEventChar가 안 fold하고 Swift가 char로 그대로 줘 그대로 매칭된다. 모디파이어 정확 비교.
@@ -713,7 +718,10 @@ fn normalizeEventChar(codepoint: u21) u21 {
 
 fn isAllowedPunctuation(byte: u8) bool {
     return switch (byte) {
-        ',', '.', '/', ';', '\'', '[', ']', '-', '=', '`' => true,
+        // '\\' 는 `jump_to_bracket`(⇧⌘\) 을 설정으로 다시 걸 수 있게 넣는다. 짝인 '|' 는 안 넣는다 —
+        // **Shift 로 만들어지는 글자는 이미 설정 밖**이고('+' · '_' · '{' · '}' 가 빌트인에 있으면서
+        // 여기엔 없다), 사용자는 `cmd+shift+\\` 로 적으면 같은 chord 에 닿는다.
+        ',', '.', '/', ';', '\'', '[', ']', '-', '=', '`', '\\' => true,
         else => false,
     };
 }
@@ -728,6 +736,32 @@ test "parses key chords with canonical modifiers and keys" {
 
     try std.testing.expect((try KeyChord.parse("Shift+Alt+F13")).key.eql(.{ .function = 13 }));
     try std.testing.expect((try KeyChord.parse("Cmd+B")).key.eql(.{ .char = 'B' }));
+}
+
+test "BR7 ⇧⌘\\ 는 설정으로도 적을 수 있다 — chord 표기와 action 이름 양쪽 (§3.9c)" {
+    // **빌트인 표는 리터럴이라 파서를 안 지난다.** 그래서 `isAllowedPunctuation` 에서 '\\' 를 도로
+    // 빼도, `parseAction` 에서 이름을 빼도 **기본 동작은 멀쩡하다** — 변이 B21·B22 가 그렇게
+    // 살아남았다. 잃는 것은 *"사용자가 이 키를 다시 걸거나 풀 수 있다"* 이고, 그것을 여기서 잰다.
+    const chord = try KeyChord.parse("cmd+shift+\\");
+    try std.testing.expect(chord.modifiers.command);
+    try std.testing.expect(chord.modifiers.shift);
+    try std.testing.expect(chord.key.eql(.{ .char = '\\' }));
+
+    // 빌트인이 실제로 그 chord 를 쓰고 있다 — 표기와 표가 갈리면 재바인딩이 **다른 키를 푼다**
+    var found = false;
+    for (default_app_bindings) |b| {
+        if (b.chord.eql(chord)) {
+            try std.testing.expectEqual(action_mod.Action.jump_to_bracket, b.action);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+
+    // action 이름도 읽힌다 — 못 읽으면 `keybind = … = jump_to_bracket` 이 조용히 무시된다
+    try std.testing.expectEqual(action_mod.Action.jump_to_bracket, action_mod.parseAction("jump_to_bracket").?);
+
+    // **'|' 는 표기에서 뺀다**(§3.9c) — Shift 로 만들어지는 글자는 설정 밖이고, 사용자는 위 표기로 닿는다
+    try std.testing.expectError(error.UnknownChordPart, KeyChord.parse("cmd+shift+|"));
 }
 
 test "rejects ambiguous key chord strings" {

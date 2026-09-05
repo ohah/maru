@@ -2591,14 +2591,10 @@ var term_press: gesture.Press = .{};
 const term_bar_id: u64 = 400;
 
 var key_bar_band: struct { top: f32 = 0, bot: f32 = 0 } = .{};
-var key_bar_max_scroll: f32 = 0;
-/// 가로 스크롤 오프셋(양수 = 왼쪽으로 밀림).
-/// 키바 가로 스크롤도 **컴포넌트가 든다**(설정 목록과 같은 규칙 — 축만 다르다). 예전에는 여기
-/// 감쇠·임계가 손으로 있었고 설정 목록에도 같은 숫자가 또 있었다.
-var kb_sa: scroll_area.State = .{};
-/// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 키를 안 보낸다.
-var kb_touch: scroll_area.Touch = .{};
-/// 손을 뗀 뒤 남은 가로 관성(프레임당 논리 px).
+// **키바는 안 흐른다.** 한 줄에 안 들어가면 두 줄로 접지 밀지 않는다(`keyBarRows`) — 그래서
+// 스크롤 상태(`kb_sa`·`kb_touch`·`key_bar_max_scroll`)와 그 읽개(`kbScroll`)를 없앴다.
+// 계약 §3.1·UX §5.4 는 이미 「밀 곳이 없다」고 적고 있었는데 **코드에만 잔해가 남아 있었다**
+// (어느 것도 대입되거나 불리지 않았다 — 2026-09-05 적대적 검증).
 /// 손가락이 지금 누르고 있는 키. **hover 가 없는 자리를 메우는 것이 눌림 표시**다(§2.4) —
 /// 없으면 눌렀는지 화면이 답하지 않는다. 밀기로 판정되면 즉시 푼다(누른 것이 아니었으므로).
 var kb_pressed: ?usize = null;
@@ -2627,7 +2623,7 @@ fn routeStale() bool {
 /// 목적지를 잡는다. 주인이 있으면 실패하되, **그 주인이 손가락을 다 뗐으면 빼앗는다**(위).
 ///
 /// **손가락 id 는 안 받는다.** 처음엔 `route_owner` 로 들었는데 **읽는 자리가 한 곳도 없었다**
-/// — 소유 판정은 이미 표면마다 자기 손가락으로 한다(`kb_touch.owner`·`body_owner`·
+/// — 소유 판정은 이미 표면마다 자기 손가락으로 한다(`kb_owner`·`body_owner`·
 /// `set_touch.owner`) 그리고 `routeStale` 이 그것을 본다. 같은 사실을 두 곳에 두면 정리도 두
 /// 곳이 되고, 그것이 R 이 host 에서 없앤 바로 그 병이다.
 fn routeClaim(r: Route) bool {
@@ -2889,11 +2885,6 @@ fn stepBodyFling() void {
     // (아무 테스트도 안 깨졌다). 헛방어를 남기면 다음 사람이 그것을 계약으로 읽는다.
     body_fling *= std.math.pow(f32, scroll_area.Touch.decay_per_ms, dt);
     if (@abs(body_fling) < scroll_area.Touch.stop_below) body_fling = 0;
-}
-
-/// 지금 키바 가로 위치(px).
-fn kbScroll() f32 {
-    return @floatFromInt(kb_sa.offset_y_px);
 }
 
 /// 보조 키바 포인터. **탭과 가로 스크롤을 여기서 가른다** — 키가 화면을 넘치므로 손가락으로
@@ -4402,19 +4393,26 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // ── 보조 키바: 소프트 키보드에 없는 키들(Ctrl·Esc·Tab·화살표) + 셸 문장부호
     //
     // **레이아웃은 자리만 잡고 키는 브리지가 직접 그린다.** 키가 손가락 크기(44)라 화면을 넘쳐
-    // 가로 스크롤이 필요한데, `tree` 는 스크롤 개념이 없고 음수 margin 으로 밀면 레이아웃이
-    // `error.NegativeValue` 로 거부한다(실측 — 화면이 통째로 검게 나갔다). `chrome/ui/scroll_area`
-    // 는 세로 전용이라 여기 못 쓴다. 키바는 "고정 크기 버튼의 가로 나열" 이라 엔진 없이도
-    // 그릴 수 있고, 스크롤·클리핑을 직접 쥐는 편이 낫다 — **U1 이 닫을 공백이 여기 남는다**
-    // (컴포넌트 계층에 가로 스크롤이 생기면 이 직접 그리기를 그쪽으로 옮긴다).
+    // **가로 스크롤은 안 쓴다.** 예전 머리말은 「키가 화면을 넘쳐 가로 스크롤이 필요한데
+    // `scroll_area` 가 세로 전용이라 못 쓴다」였는데 **전제가 둘 다 무너졌다**: 넘치면 밀지 않고
+    // **줄을 늘리고**(`keyBarRows`), 그 컴포넌트도 이제 축에 안 묶여 있다(`Touch.pos` 가 스칼라다).
+    // 남은 이유는 하나다 — `tree` 는 스크롤 개념이 없고 음수 margin 은 `error.NegativeValue` 로
+    // 거부되며(실측 — 화면이 통째로 검게 나갔다), 키바는 "고정 크기 버튼의 격자" 라 엔진 없이
+    // 그리는 편이 싸다.
     // **줄에서 빠지는 키는 없다.** 조건부로 나타나는 키를 두면 나머지가 밀려 손가락이 겨눈
-    // 자리가 바뀐다 — `copy` 도 늘 있고 못 쓸 때만 흐리다.
+    // 자리가 바뀐다 — `copy` 도 늘 있고 못 쓸 때만 흐리다. 폭이 좁아 한 줄에 못 넣을 때도
+    // **접는 것은 줄이지 키가 아니다**.
     const bar_n: usize = key_bar.len;
+    // 줄 수·칸 수·높이를 **한 번 정해** 자리 잡기와 그리기가 같은 값을 본다(갈리면 아래 줄이
+    // 잘리거나 격자가 넘친다).
+    const bar_rows = keyBarRows(@floatFromInt(width));
+    const bar_cols = keyBarCols(bar_rows);
+    const bar_h = keyBarHeight(@floatFromInt(width));
     // 자식 없는 카드 하나가 **밴드 자리**만 잡는다. 키는 아래에서 직접 그린다.
     const bar = tree.card(.{
         .id = key_bar_id_base - 1,
         // **줄 수만큼 높다.** 숫자를 손으로 적으면 키를 더했을 때 아래 줄이 잘린다.
-        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = @as(f32, @floatFromInt(key_bar_rows)) * (key_h + key_gap) + 10.0 } },
+        .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = bar_h } },
     }, &.{});
 
     // ── 상단 앱 바: **돌아갈 길이 보여야 한다.** U3b 가 하단 바를 걷어내며 터미널 화면의
@@ -4435,9 +4433,8 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // 남기려다 터미널이 사라지면 앞뒤가 바뀐다. 그리고 남겨 봐야 잘려서 못 누른다 — 안 그리면
     // `key_bar_ready` 도 안 서서 **없는 키가 눌리는 일도 없다**(그 규율은 이미 있었다).
     //
-    // 이건 **가로 레이아웃을 정한 것이 아니다** — 넘침을 막는 바닥이다. 가로에서 키바를 어떻게
-    // 할지(한 줄로 접기 등)는 M5 의 다음 슬라이스가 정한다.
-    const bar_h = @as(f32, @floatFromInt(key_bar_rows)) * (key_h + key_gap) + 10.0;
+    // 이건 **가로 레이아웃을 정한 것이 아니다** — 넘침을 막는 바닥이다. 가로에서 몇 줄로 그릴지는
+    // 위 `keyBarRows` 가 폭을 보고 정한다.
     const min_body_h = @as(f32, @floatFromInt(@as(i32, min_body_rows) * lineHeight()));
     const bar_fits = @as(f32, @floatFromInt(height)) - set_head_h - bar_h >= min_body_h;
     const root = if (bar_fits)
@@ -4507,6 +4504,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     drawTerminalBar(tk);
 
     key_bar_ready = false;
+    key_bar_rows_drawn = 0;
     for (built.entries) |entry| {
         if (entry.id != key_bar_id_base - 1) continue;
         const band = entry.rect;
@@ -4520,12 +4518,12 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // **칸을 화면 폭으로 나눈다.** 예전에는 44px 고정에 가로 스크롤이었는데, 밀어야 닿는
         // 키는 급할 때 못 찾는다(Ctrl·화살표가 그렇다 — 사용자 요청으로 두 줄 격자가 됐다).
         // 나눈 칸은 44 보다 넓어 손가락에도 낫다.
-        const cell_w = band_w / @as(f32, @floatFromInt(key_bar_cols));
+        const cell_w = band_w / @as(f32, @floatFromInt(bar_cols));
         const kw = @floor(cell_w) - key_gap;
         keybar_armed_drawn = 0;
         for (0..key_bar.len) |i| {
-            const col = i % key_bar_cols;
-            const row = i / key_bar_cols;
+            const col = i % bar_cols;
+            const row = i / bar_cols;
             const kx = @floor(band_x + @as(f32, @floatFromInt(col)) * cell_w + key_gap / 2);
             const ky = @floor(band.y + 5.0 + @as(f32, @floatFromInt(row)) * (key_h + key_gap));
             key_bar_rects[i] = .{ .x = kx, .y = ky, .w = kw, .h = key_h };
@@ -4534,6 +4532,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // **스크롤 표시(`<`/`>`)는 없앴다** — 두 줄 격자라 전부 한눈에 들어와서 "더 있다" 를
         // 알릴 것이 없다. 남겨 두면 아무 데도 안 미는 화살표가 가장자리 칸을 먹는다.
         key_bar_ready = bar_n > 0;
+        if (key_bar_ready) key_bar_rows_drawn = bar_rows;
     }
 
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
@@ -6956,10 +6955,38 @@ const key_bar = [_]KeyBarItem{
     .{ .label = "pgdn", .key_id = 14 },
 };
 
-/// 한 줄에 몇 칸인가. **줄 수는 여기서 파생된다** — 키를 더하면 줄이 늘고, 두 값을 따로 적으면
-/// 갈린다.
-const key_bar_cols: usize = 6;
-const key_bar_rows: usize = (key_bar.len + key_bar_cols - 1) / key_bar_cols;
+/// 한 줄에 못 넣을 때의 줄 수. **사용자가 정한 값이다**([UX §5.4](../../../docs/mobile-ux.md) —
+/// 「두 줄 격자」). 파생이 아니라 결정이라 여기 상수로 둔다.
+const key_bar_rows_narrow: usize = 2;
+
+/// 키 하나의 **최소 손가락 폭**. 높이(`key_h`)와 같은 수인 것은 우연이 아니다 — 손가락 표적은
+/// 정사각(44×44)이다.
+const key_min_w: f32 = key_h;
+
+/// 이 폭에서 키바를 **몇 줄로 그리나.** 한 줄에 전부 넣어도 키가 손가락 크기를 지키면 한 줄이다.
+///
+/// **두 줄이 된 이유가 폭이었으니 푸는 기준도 폭이다** — 세로(논리 411)에서 열둘을 한 줄에 넣으면
+/// 키가 29px 이 되어 못 누른다(UX §5.4 가 적은 그 계산이다). 가로(논리 865)에서는 같은 열둘이
+/// 67px 씩 되어 **한 줄이 낫다**: 세로 한 줄(53px)을 본문에 돌려주고도 키가 오히려 넓어지고,
+/// **숨는 키도 없다**(실측 2026-09-05).
+///
+/// **화면 방향을 안 묻는다** — 폭만 본다. 방향으로 가르면 태블릿 세로처럼 「세로인데 넓은」 자리를
+/// 틀리게 답한다.
+fn keyBarRows(width: f32) usize {
+    const band_w = width - 2 * key_bar_pad_x;
+    const one_row_w = @floor(band_w / @as(f32, @floatFromInt(key_bar.len))) - key_gap;
+    return if (one_row_w >= key_min_w) 1 else key_bar_rows_narrow;
+}
+
+/// 그 줄 수일 때 **한 줄에 몇 칸인가.** 키를 더하면 따라온다 — 두 값을 따로 적으면 갈린다.
+fn keyBarCols(rows: usize) usize {
+    return (key_bar.len + rows - 1) / rows;
+}
+
+/// 키바가 먹는 높이. 레이아웃(자리 잡기)과 「들어가나」 판정이 **같은 식**을 봐야 한다.
+fn keyBarHeight(width: f32) f32 {
+    return @as(f32, @floatFromInt(keyBarRows(width))) * (key_h + key_gap) + 10.0;
+}
 /// 본문 격자가 **반드시 그리는** 줄 수. `pushTerminal` 의 바닥이자 레이아웃이 키바를 넣을지
 /// 가르는 문턱이다 — 두 곳이 같은 수를 봐야 격자가 제 사각형 안에 남는다.
 const min_body_rows: u16 = 2;
@@ -6995,6 +7022,8 @@ const key_bar_id_base: u64 = 500;
 /// 플랫폼은 점만 넘긴다.
 var key_bar_rects: [key_bar.len]struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 } = undefined;
 var key_bar_ready = false;
+/// 마지막 프레임이 실제로 그린 키바 줄 수. `key_bar_ready` 와 같은 자리에서만 움직인다.
+var key_bar_rows_drawn: usize = 0;
 
 /// 눌러 둔 수정자(sticky). **다음 한 글자**에만 실린다 — 계속 걸려 있으면 그 다음 타이핑이
 /// 전부 제어문자가 된다.
@@ -7024,6 +7053,12 @@ pub fn bodyGridOverflowPx() f32 {
     if (body_rect.h <= 0) return 0;
     const drawn = @as(f32, @floatFromInt(@as(i32, term_rows) * body_line_h));
     return @max(0, drawn - body_rect.h);
+}
+
+/// 지금 **그려진** 키바의 줄 수(0 이면 안 그려졌다). 폭에서 다시 계산하지 않고 그리는 자리가
+/// 적어 둔 값을 답한다 — 다시 계산하면 「그렇게 그렸나」가 아니라 「그렇게 계산되나」를 재게 된다.
+pub fn keybarRowsDrawn() usize {
+    return key_bar_rows_drawn;
 }
 
 pub fn keybarArmedDrawn() u32 {

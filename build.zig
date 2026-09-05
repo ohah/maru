@@ -13390,7 +13390,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_attestation_tests = b.addRunArtifact(attestation_tests);
-        run_attestation_tests.addArg("--maru-expect-tests=11");
+        run_attestation_tests.addArg("--maru-expect-tests=15");
         run_attestation_tests.setCwd(b.path("."));
         session_host_release_adapter_github_attestation_step.dependOn(&run_attestation_tests.step);
         session_host_step.dependOn(&run_attestation_tests.step);

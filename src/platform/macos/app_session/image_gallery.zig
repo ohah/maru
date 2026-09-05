@@ -518,6 +518,10 @@ pub const Open = struct {
     /// 원본으로 다시 풀기를 **이미 해 봤나**. 텍스처 상한 때문에 원본을 달라고 해도 `subsample > 1`
     /// 로 돌아올 수 있어(계약 §5.3), `decoded_subsample` 만 보면 매 tick 다시 건다.
     full_tried: bool = false,
+    /// 열었을 때의 라벨(출처·순번·설명). **여기 담아 두는 것이 요점이다** — `hit_index` 로 매 프레임
+    /// 목록을 다시 뒤지면, 그 사이 검색어가 바뀌어 목록이 재구성됐을 때 **남의 이미지의 출처**가 붙는다.
+    /// 문맥(`context`)이 열 때 한 번 읽고 마는 것과 같은 규율이다.
+    label: context.Label = .{},
     /// 「그때 무슨 얘기였나」. 열 때 **한 번만** 읽는다 — 매 프레임 파일을 열면 초당 60 번 IO 다.
     /// 빈 값은 「읽어 봤고 없었다」로 확정된 상태다(실측 6% 가 그렇다).
     context: [context_mod.max_context_bytes]u8 = undefined,
@@ -786,6 +790,16 @@ pub fn poll(self: *AppSession) void {
     if (self.image_gallery.all_labels.items.len != self.image_gallery.all_hits.items.len) {
         self.image_gallery.all_labels.clearRetainingCapacity();
     }
+    // **순번은 여기서만 채운다**(계약 §2.2). 스캐너는 한 장씩 라벨을 만들어 이웃을 못 보고,
+    // 걸러 낸 목록(`hits`)은 묶음이 쪼개져 「1/1」이 된다. 전체가 다 모인 지금이 유일하게 옳은 자리다.
+    if (self.image_gallery.all_labels.items.len == self.image_gallery.all_hits.items.len) {
+        const scanned = self.image_gallery.all_hits.items;
+        for (self.image_gallery.all_labels.items, 0..) |*l, i| {
+            const seq = index.sequenceAt(scanned, i);
+            l.seq = seq.index;
+            l.seq_total = seq.total;
+        }
+    }
     // **최신이 먼저다.** 스캐너는 파일 순서(= 오래된 것부터)로 담는데, 이 기능의 물음은
     // 「**아까** 그 스크린샷 어디 갔지」다. 실제 세션으로 재 보니 151 장 중 4 장만 보이는데
     // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
@@ -1045,11 +1059,27 @@ pub fn viewportRect(self: *const AppSession) image_view.Rect {
     };
 }
 
-/// 문맥에 내줄 줄 수. 없으면 0 — 빈 띠를 남기지 않는다.
+/// 크게 보기 아래에 내줄 줄 수(출처 한 줄 + 문맥 몇 줄). 없으면 0 — 빈 띠를 남기지 않는다.
+///
+/// **`viewportRect` 가 이 값으로 그림 자리를 줄인다.** 그래서 여기서 세는 줄과 `collectOpenContext`
+/// 가 실제로 그리는 줄이 어긋나면 글자가 그림 위에 얹히거나 아래가 잘린다 — 두 곳이 같은 함수를
+/// 부르게 해 그 어긋남을 원리적으로 막는다.
 fn contextRows(self: *const AppSession) u32 {
     const op = if (self.image_gallery.open) |*o| o else return 0;
-    if (op.contextText().len == 0) return 0;
-    return max_context_rows;
+    var rows: u32 = 0;
+    var buf: [context_mod.max_label_bytes]u8 = undefined;
+    if (openPrefix(self, &buf).len > 0) rows += 1;
+    if (op.contextText().len > 0) rows += max_context_rows;
+    return rows;
+}
+
+/// 크게 보고 있는 한 장의 **출처 + 순번**. 격자 라벨과 같은 조립을 쓴다(계약 §2.2.1).
+///
+/// **격자에만 붙이면 절반만 답한 것이다.** 눌러서 크게 본 화면에는 격자가 없으므로, 거기서 「이건
+/// 내가 올린 것인가」를 물으면 답할 길이 사라진다 — 정작 그 물음이 나오는 자리가 여기다.
+fn openPrefix(self: *const AppSession, buf: []u8) []const u8 {
+    const op = if (self.image_gallery.open) |*o| o else return buf[0..0];
+    return context_mod.originPrefix(buf, originText(op.label.source), op.label.seq, op.label.seq_total);
 }
 
 /// 문맥에 내줄 최대 줄 수. 실측 길이 p90 이 311 B 라 도크 폭에서 서너 줄이면 담긴다 —
@@ -1061,7 +1091,7 @@ pub const max_context_rows: u32 = 3;
 pub fn openAt(self: *AppSession, n: usize) void {
     if (n >= self.image_gallery.count()) return;
     self.image_gallery.dropOpen(self.allocator);
-    self.image_gallery.open = .{ .hit_index = n };
+    self.image_gallery.open = .{ .hit_index = n, .label = labelFor(self, n) };
     loadOpenContext(self, n);
     // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
     // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
@@ -1547,7 +1577,9 @@ pub fn collectOpenContext(
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     const op = if (self.image_gallery.open) |*o| o else return;
     const text = op.contextText();
-    if (text.len == 0) return;
+    var prefix_buf: [context_mod.max_label_bytes]u8 = undefined;
+    const prefix = openPrefix(self, &prefix_buf);
+    if (text.len == 0 and prefix.len == 0) return;
 
     const area = gridArea(self);
     const pad = gridMetrics(self).pad;
@@ -1558,6 +1590,7 @@ pub fn collectOpenContext(
     ));
     if (cols == 0) return;
 
+    const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
     // 문맥은 라벨보다 **흐리게**. 그림이 주인공이고 이것은 곁말이다.
     const dim: maru.terminal.Color = .{ .rgb = towardBg(
         self.appearance.theme.sidebar_foreground,
@@ -1568,10 +1601,25 @@ pub fn collectOpenContext(
     // 뷰포트가 비워 둔 아래쪽 띠에 그린다 — `viewportRect` 와 **같은 값**(`contextRows`)을 쓴다.
     const rows = contextRows(self);
     var y = area.y +| area.h -| pad -| (rows *| row_h);
+
+    // **출처는 문맥보다 또렷하게, 그리고 위에.** 문맥은 「그때 무슨 얘기였나」라는 곁말이지만 출처는
+    // 사용자가 이 화면에 대고 묻는 물음의 답이다. 흐리게 두면 곁말에 묻힌다.
+    var context_rows = rows;
+    if (prefix.len > 0) {
+        const pdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, prefix, fg) catch return;
+        self.collectShaped(collected, pdl, builder, .{ .pane = .{
+            .origin_x = area.x +| pad,
+            .origin_y = y,
+            .colors = colors,
+        } });
+        y +|= row_h;
+        context_rows -|= 1;
+    }
+    if (text.len == 0) return;
     // **결정은 순수 함수가 한다.** 「어느 글자를 어느 줄에」와 「그것을 어떻게 그릴까」를 한 함수에
     // 두었더니, 결정 쪽 결함(줄바꿈에 글자가 사라짐 · 남의 메모리 해제)을 **어떤 test 도 못 봤다** —
     // `collectShaped` 가 CoreText 함수 포인터를 요구해 이 함수를 단위 test 로 부를 수 없기 때문이다.
-    const plan = layoutContext(text, cols, rows);
+    const plan = layoutContext(text, cols, context_rows);
     for (plan.lines[0..plan.count], 0..) |span, i| {
         const raw = text[span.start..][0..span.len];
         // «…» 는 **마지막 줄에 남는 것이 있을 때만**이다 — 줄바꿈은 자르기가 아니다.
@@ -1686,45 +1734,62 @@ pub fn collectLabels(
 
     for (self.image_gallery.tiles.items) |*tile| {
         const text = tile.label.text();
-        if (text.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
+        // **출처와 순번은 라벨보다 앞서 붙는다**(계약 §2.2) — 이 줄에 사용자가 던지는 첫 물음이
+        // 「내가 올린 것인가」이기 때문이다.
+        var prefix_buf: [context_mod.max_label_bytes]u8 = undefined;
+        const prefix = context_mod.originPrefix(
+            &prefix_buf,
+            originText(tile.label.source),
+            tile.label.seq,
+            tile.label.seq_total,
+        );
+        if (text.len == 0 and prefix.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
         const rect = image_grid.labelRectAt(area, m, l, tile.hit_index) orelse continue;
         const all_cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), rect.w / self.cell_width_px));
         if (all_cols == 0) continue;
 
-        // **시각 자리를 먼저 뗀다**(있고, 줄이 넉넉할 때만).
         var time_buf: [16]u8 = undefined;
         var time_text: []const u8 = &.{};
         if (tile.label.time_s != 0) {
             const off = utcOffsetAt(tile.label.time_s);
             time_text = formatImageTime(&time_buf, tile.label.time_s, off, now_s, now_off);
         }
-        var label_cols = all_cols;
-        var time_cols: u16 = 0;
-        if (time_text.len > 0) {
-            time_cols = @intCast(@min(
-                @as(usize, std.math.maxInt(u16)),
-                chrome.components.overlay_input.displayCols(time_text),
-            ));
-            const want = time_cols +| time_gap_cols;
-            // **모자라면 시각을 버린다** — 파일명을 잘라 시계를 넣지 않는다.
-            if (all_cols >= want +| min_label_cols) {
-                label_cols = all_cols - want;
-            } else {
-                time_text = &.{};
-                time_cols = 0;
-            }
+
+        // **자리 나누기는 순수 모듈이 정한다** — 좁아지면 시각부터, 그래도 모자라면 접두까지 버린다.
+        // 설명이 없는 줄에서는 최소 폭을 요구하지 않는다(지킬 라벨이 애초에 없다).
+        const split = context_mod.splitLabelRow(
+            all_cols,
+            displayColsOf(prefix),
+            displayColsOf(time_text),
+            time_gap_cols,
+            if (text.len == 0) 0 else min_label_cols,
+        );
+
+        var at_col: u32 = 0;
+        if (split.prefix_cols > 0) {
+            // 접두는 라벨보다 **흐리게**. 곁말이 파일명보다 먼저 읽히면 안 된다(시각과 같은 규율).
+            const pdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.prefix_cols, prefix, dim) catch continue;
+            self.collectShaped(collected, pdl, builder, .{ .pane = .{
+                .origin_x = rect.x,
+                .origin_y = rect.y,
+                .colors = colors,
+            } });
+            at_col = @as(u32, split.prefix_cols) +| time_gap_cols;
         }
 
-        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, label_cols, text, fg) catch continue;
-        self.collectShaped(collected, dl, builder, .{ .pane = .{
-            .origin_x = rect.x,
-            .origin_y = rect.y,
-            .colors = colors,
-        } });
-        if (time_text.len == 0) continue;
-        const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, time_cols, time_text, dim) catch continue;
+        if (text.len > 0 and split.label_cols > 0) {
+            const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.label_cols, text, fg) catch continue;
+            self.collectShaped(collected, dl, builder, .{ .pane = .{
+                .origin_x = rect.x +| at_col *| self.cell_width_px,
+                .origin_y = rect.y,
+                .colors = colors,
+            } });
+        }
+        if (split.time_cols == 0) continue;
+        const time_col = at_col +| @as(u32, split.label_cols) +| time_gap_cols;
+        const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.time_cols, time_text, dim) catch continue;
         self.collectShaped(collected, tdl, builder, .{ .pane = .{
-            .origin_x = rect.x +| (@as(u32, label_cols) +| time_gap_cols) *| self.cell_width_px,
+            .origin_x = rect.x +| time_col *| self.cell_width_px,
             .origin_y = rect.y,
             .colors = colors,
         } });
@@ -1734,6 +1799,30 @@ pub fn collectLabels(
 /// 시각과 라벨 사이 최소 간격, 그리고 시각을 넣기 위해 남겨야 할 라벨 최소 폭(칸).
 const time_gap_cols: u16 = 1;
 const min_label_cols: u16 = 6;
+
+/// 이 라벨이 **어떻게 대화에 들어왔는가**를 한 낱말로. 모르면 빈 값이다 — 지어내지 않는다.
+///
+/// `Source` 는 그동안 진단·테스트 전용이었다. 그래서 사용자는 「내가 올린 것인지 에이전트가 읽은
+/// 것인지」를 라벨 **모양**(파일명이냐 문장이냐)으로 짐작해야 했는데, 그것은 규약이 아니라 우연한
+/// 상관이라 사용자가 경로를 적어 보낸 순간 틀린다.
+fn originText(source: context_mod.Source) []const u8 {
+    return switch (source) {
+        // codex 래퍼의 경로도 **사용자가 보낸 것**이다 — 래퍼는 provider 가 붙인 껍데기일 뿐이다.
+        .message_text, .codex_wrapper_path => maru.i18n.t(.image_gallery_origin_sent),
+        .tool_file_path => maru.i18n.t(.image_gallery_origin_read),
+        .none => "",
+    };
+}
+
+/// 이 글자가 차지할 칸 수(u16 로 포화). 폭 계산의 단일 출처는 `displayCols` 다 — 바이트 길이로 세면
+/// 한글이 두 칸인 것을 놓쳐 라벨이 밀린다.
+fn displayColsOf(text: []const u8) u16 {
+    if (text.len == 0) return 0;
+    return @intCast(@min(
+        @as(usize, std.math.maxInt(u16)),
+        chrome.components.overlay_input.displayCols(text),
+    ));
+}
 /// 전경색을 배경 쪽으로 `percent` 만큼 당긴다. 어두운 테마·밝은 테마 어느 쪽에서도 «흐리게» 가 된다 —
 /// 고정 회색을 쓰면 한쪽 테마에서 배경과 붙거나 오히려 더 튄다.
 fn towardBg(fg: maru.color.Rgb, bg: maru.color.Rgb, percent: u8) maru.color.Rgb {

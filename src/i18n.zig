@@ -377,6 +377,18 @@ const Table = struct {
     image_gallery_search_prompt: [:0]const u8,
     /// 검색어에 걸린 것이 없을 때. 「이 세션에 이미지가 없다」와 **다른 사실**이라 나눈다.
     image_gallery_no_match: [:0]const u8,
+    /// 라벨 앞에 붙는 **출처** — 이 이미지가 어떻게 대화에 들어왔는가(계약 §2.2).
+    ///
+    /// **왜 두 값을 가르나**: 라벨 텍스트만으로는 「내가 올린 것」과 「에이전트가 읽은 것」이 구분되지
+    /// 않는다. 사용자가 붙여넣었으면 라벨은 그가 쓴 문장이고, 에이전트가 읽었으면 파일명인데 — 그것은
+    /// 규약이 아니라 우연한 상관이라, 사용자가 경로를 적어 보낸 순간 틀린다.
+    ///
+    /// 도크 폭이 좁아 **짧아야 한다**(자리를 못 얻으면 통째로 빠진다). 아이콘이 아니라 글자인 이유는
+    /// 폭 계산이 정직하기 때문이다 — PUA 합성 아이콘은 렌더가 2 칸을 쓰는데 폭 계산은 1 칸으로 봐서
+    /// 라벨이 밀린다.
+    image_gallery_origin_sent: [:0]const u8,
+    /// 에이전트가 도구로 **읽은** 이미지(Claude `Read` · Codex `view_image`).
+    image_gallery_origin_read: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
     agent_hook_notice_failed: [:0]const u8,
     agent_hook_notice_attention: [:0]const u8,
@@ -1341,6 +1353,8 @@ const en: Table = .{
     .image_gallery_open_failed = "Could not open this image",
     .image_gallery_search_prompt = "Filter: ",
     .image_gallery_no_match = "No image matches",
+    .image_gallery_origin_sent = "Sent",
+    .image_gallery_origin_read = "Read",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
     .agent_hook_notice_attention = "Waiting for your approval",
@@ -1938,6 +1952,8 @@ const ko: Table = .{
     .image_gallery_open_failed = "이 이미지를 열 수 없습니다",
     .image_gallery_search_prompt = "거르기: ",
     .image_gallery_no_match = "걸린 이미지가 없습니다",
+    .image_gallery_origin_sent = "첨부",
+    .image_gallery_origin_read = "읽음",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",
     .agent_hook_notice_attention = "승인을 기다리는 중",

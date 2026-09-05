@@ -124,6 +124,7 @@ pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책
 pub const file_tree_layout = @import("session/file_tree_layout.zig"); // 파일 트리 픽셀 스크롤 ↔ 행 인덱스 순수 산술 — 그리기와 히트테스트의 단일 출처
+pub const remote_file_listing = @import("session/remote_file_listing.zig"); // 원격 디렉터리 목록 wire·(host,path) root 키(RF1 — 헬퍼와 GUI 의 단일 출처)
 pub const workspace = @import("session/workspace.zig");
 pub const workspace_checkpoint = @import("session/workspace_checkpoint.zig"); // P4 C1: dirty 세대·debounce/retry·final Quit 순수 coordinator
 pub const runtime_reconcile = @import("session/runtime_reconcile.zig"); // P4 R2b: manifest↔host inventory 순수 분류

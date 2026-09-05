@@ -712,7 +712,7 @@ pub const PtySession = struct {
         if (self.owns_child_lifecycle.load(.acquire) and
             !self.exited.load(.acquire) and !self.reaping.swap(true, .acq_rel))
         {
-            shutdownChild(self.child_pid);
+            shutdownChild(self.child_pid, self.master_fd.load(.acquire));
             self.exited.store(true, .release);
         }
     }
@@ -1759,11 +1759,24 @@ fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
 const shutdown_grace_attempts = 6;
 const shutdown_grace_interval_ms = 10;
 
-fn shutdownChild(pid: std.c.pid_t) void {
+// PTY master 에 쌓인 채 안 읽힌 출력을 버린다. 자식을 종료시키는 시점에는 reader 가 이미 멈춰 있어 아무도
+// master 를 읽지 않는다. 그 상태에서 출력이 남아 있으면 자식은 — SIGKILL 을 받아도 — exit 의 tty close 에서
+// 출력이 빠지길 기다리며 멈추고(ttywait), waitpid 는 계속 0(살아 있음)을 돌려준다. 아래 SIGKILL 뒤 300 회
+// 폴링을 다 소진하고 포기하던 원인이 이것이다. 실측(2026-09-06, runtime_manager U2 pause 판정자):
+// `sh -c 'while :; do printf x; done'` 의 close 가 4,077ms(포기) → 15ms(SIGHUP 에서 거둠).
+// tcflush 는 std.c 에 없어 직접 선언한다. best-effort — 이미 닫힌 fd 면 실패해도 reap 폴링은 그대로 간다.
+extern "c" fn tcflush(fd: c_int, queue_selector: c_int) c_int;
+const TCIOFLUSH: c_int = 3;
+fn discardUnreadMasterOutput(master_fd: std.posix.fd_t) void {
+    if (master_fd < 0) return;
+    _ = tcflush(master_fd, TCIOFLUSH);
+}
+
+fn shutdownChild(pid: std.c.pid_t, master_fd: std.posix.fd_t) void {
     if (pid <= 0) return;
 
-    if (signalAndReap(pid, .HUP)) return;
-    if (signalAndReap(pid, .TERM)) return;
+    if (signalAndReap(pid, .HUP, master_fd)) return;
+    if (signalAndReap(pid, .TERM, master_fd)) return;
 
     // Last resort: SIGKILL is uncatchable. 그래도 reap을 무한 blocking wait4로 기다리지 않는다 —
     // 멀티스레드 + reader thread의 reap 경합, PTY 버퍼 상태 등으로 wait4(pid, 0)이 영영 안
@@ -1773,15 +1786,16 @@ fn shutdownChild(pid: std.c.pid_t) void {
     // zombie 누수는 프로세스 수명 한정이라 무한 hang보다 안전하다.
     _ = std.c.kill(-pid, .KILL);
     _ = std.c.kill(pid, .KILL);
-    reapBoundedAfterKill(pid);
+    reapBoundedAfterKill(pid, master_fd);
 }
 
 // SIGKILL 이후 유계 reap: WNOHANG poll을 짧게 반복하며 최대 shutdown_kill_reap_attempts번
 // 기다린다. 무한 blocking wait4 대신 — close/deinit이 어떤 OS 이상에서도 막히지 않게.
 const shutdown_kill_reap_attempts = 300; // 300 × 10ms = 최대 3s(보통 1~2회에 거둠)
-fn reapBoundedAfterKill(pid: std.c.pid_t) void {
+fn reapBoundedAfterKill(pid: std.c.pid_t, master_fd: std.posix.fd_t) void {
     var attempt: usize = 0;
     while (attempt < shutdown_kill_reap_attempts) : (attempt += 1) {
+        discardUnreadMasterOutput(master_fd);
         if (tryReap(pid) != .alive) return; // reaped 또는 이미 gone
         sleepMillis(shutdown_grace_interval_ms);
     }
@@ -1792,16 +1806,38 @@ fn reapBoundedAfterKill(pid: std.c.pid_t) void {
 // child directly, then polls a bounded grace window. Returns true once the child
 // has been reaped or is already gone, false if it is still alive after the
 // window so the caller can escalate.
-fn signalAndReap(pid: std.c.pid_t, sig: std.c.SIG) bool {
+fn signalAndReap(pid: std.c.pid_t, sig: std.c.SIG, master_fd: std.posix.fd_t) bool {
     _ = std.c.kill(-pid, sig);
     _ = std.c.kill(pid, sig);
 
     var attempt: usize = 0;
     while (attempt < shutdown_grace_attempts) : (attempt += 1) {
+        discardUnreadMasterOutput(master_fd);
         if (tryReap(pid) != .alive) return true;
         sleepMillis(shutdown_grace_interval_ms);
     }
+    discardUnreadMasterOutput(master_fd);
     return tryReap(pid) != .alive;
+}
+
+test "close: 바쁜 writer 자식도 1초 안에 거둔다 — 안 읽힌 PTY 출력이 exit 를 막지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "while :; do printf x; done" },
+        .size = .{ .cols = 20, .rows = 4 },
+    });
+    defer session.deinit();
+    const pid = session.child_pid;
+    sleepMillis(100); // 아무도 master 를 읽지 않으니 자식은 곧 PTY 출력 버퍼를 채우고 write 에 막힌다
+    const started_ns = std.Io.Clock.real.now(std.testing.io).nanoseconds;
+    session.close();
+    const elapsed_ms = @divFloor(std.Io.Clock.real.now(std.testing.io).nanoseconds - started_ns, std.time.ns_per_ms);
+    // 고치기 전: SIGHUP·SIGTERM 유예창을 지나 SIGKILL 뒤 300 회 폴링까지 다 소진(4 초)하고도 못 거뒀다.
+    try std.testing.expect(elapsed_ms < 1000);
+    // close 가 실제로 거뒀다: 이미 reap 된 pid 는 waitpid 가 -1(ECHILD)을 돌려준다. 못 거뒀으면 0(아직 살아 있음).
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, &status, std.c.W.NOHANG));
 }
 
 const ReapResult = enum { reaped, alive, gone };

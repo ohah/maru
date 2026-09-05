@@ -24,7 +24,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// (계획 §RW5) — 반쪽만 감시하면서 최신인 척하는 것이 최악이라 **조용히 계속하지 않는다.**
 /// `--version` 이 내는 줄. 설치 쪽이 **이 문자열로** 「우리 것이고 이 판이다」를 확인한다 —
 /// 판이 바뀌면 여기를 올리고, 그러면 옛 판이 깔린 원격은 다음 설치에서 갈린다.
-pub const version_line = "maru-remote-watch 2\n";
+///
+/// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
+/// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
+pub const version_line = "maru-remote-watch 3\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -52,6 +55,17 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, root, "--version")) {
         _ = std.posix.system.write(1, version_line.ptr, version_line.len);
         return;
+    }
+
+    // **목록 모드**(RF2 — [계획](../../docs/plans/remote-file-tree.md) §2.2·§10). 디렉터리 하나를
+    // 나열해 `maru-rfls 1` wire 로 stdout 에 내고 끝난다 — 감시와 달리 **한 번 답하고 죽는** 모드라
+    // stdin 고아 방지 규율이 필요 없다. wire 의 단일 출처는 `src/session/remote_file_listing.zig` 이고,
+    // 여기는 그 인코더를 **모듈로 못 물어**(이 바이너리는 std 만 임포트한다 — 크기·자기완결) 손으로
+    // 낸다. 드리프트는 빌드가 이 바이너리를 실제로 돌려 그 파서로 되읽는 게이트가 막는다
+    // (`test-remote-file-listing` — RW 의 version_line 문자열 대조보다 강한, 바이트 수준 왕복이다).
+    if (std.mem.eql(u8, root, "list")) {
+        const dir_path = args.next() orelse return exitWith(exit_unsupported);
+        return runList(io, dir_path);
     }
 
     // 루트 뒤에 오는 것은 **굳히기까지 끝난 git 앞머리**다(RW7b — `ssh_upload.spawnRemoteWatch` 가
@@ -92,6 +106,150 @@ pub fn main(init: std.process.Init) !void {
 
 fn exitWith(code: u8) noreturn {
     std.process.exit(code);
+}
+
+// ── 목록 모드(RF2) ──────────────────────────────────────────────────────────────────────────────
+
+/// wire 상수 — `src/session/remote_file_listing.zig` 와 **바이트까지 같아야 한다.** 이 바이너리는
+/// std 만 임포트하므로(크기·자기완결) 여기 사본이 있고, 드리프트는 실행형 왕복 게이트가 막는다.
+const rfls_header = "maru-rfls 1\n";
+const rfls_max_name_bytes: usize = 1024;
+
+/// stdout 에 전부 쓴다. 실패하면 false — 채널이 끊긴 것이고, 부분 레코드를 남기느니 그냥 끝낸다
+/// (파서 쪽이 꼬리 부재를 「잘림」으로 읽는다).
+fn putAll(bytes: []const u8) bool {
+    const sys = std.posix.system;
+    var left = bytes.len;
+    while (left > 0) {
+        const rc = sys.write(1, bytes[bytes.len - left ..].ptr, left);
+        const n: isize = @bitCast(rc);
+        if (n <= 0) return false;
+        left -= @intCast(n);
+    }
+    return true;
+}
+
+/// 신원 stat 의 타깃별 진입점. Zig 0.16 은 이 자리에 **한 이름이 없다** — musl 의 `std.c` 에는
+/// `fstat` 계열이 없고([zig-016-syscall-std-gaps]), darwin 은 `std.c` 가 그 자리다. 리눅스는 raw
+/// syscall 로 간다(libc 불요·musl 정적과도 무관).
+const RawStat = struct { dev: u64, ino: u64, mode: u32 };
+
+fn rawFstat(fd: std.posix.fd_t) ?RawStat {
+    return switch (builtin.os.tag) {
+        // 자기 자신은 `AT.EMPTY_PATH` 로 묻는다 — fd 하나가 곧 대상이다.
+        .linux => linuxStatx(fd, "", std.posix.AT.EMPTY_PATH),
+        else => blk: {
+            var st: std.c.Stat = undefined;
+            if (std.c.fstat(fd, &st) != 0) break :blk null;
+            break :blk .{ .dev = @as(u64, @bitCast(@as(i64, st.dev))), .ino = @intCast(st.ino), .mode = @intCast(st.mode) };
+        },
+    };
+}
+
+fn rawFstatAt(dir_fd: std.posix.fd_t, name_z: [*:0]const u8, flags: u32) ?RawStat {
+    return switch (builtin.os.tag) {
+        .linux => linuxStatx(dir_fd, name_z, flags),
+        else => blk: {
+            var st: std.c.Stat = undefined;
+            if (std.c.fstatat(dir_fd, name_z, &st, @intCast(flags)) != 0) break :blk null;
+            break :blk .{ .dev = @as(u64, @bitCast(@as(i64, st.dev))), .ino = @intCast(st.ino), .mode = @intCast(st.mode) };
+        },
+    };
+}
+
+/// 리눅스는 `statx` 하나만 남았다(0.16 — `Stat`/`fstatat` 래퍼가 없다). dev 는 major/minor 로 오므로
+/// 한 u64 로 접는다 — wire 계약은 「같은 기계 안에서 같으면 같다」뿐이라 접는 방식은 자유다(§2.3 ⑴).
+fn linuxStatx(dir_fd: std.posix.fd_t, path_z: [*:0]const u8, flags: u32) ?RawStat {
+    var stx: std.os.linux.Statx = undefined;
+    const want: std.os.linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true };
+    const rc = std.os.linux.statx(dir_fd, path_z, flags, want, &stx);
+    if (std.os.linux.errno(rc) != .SUCCESS) return null;
+    if (!stx.mask.TYPE or !stx.mask.INO) return null; // 커널·FS 가 못 채우면 「모른다」다
+    const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+    return .{ .dev = dev, .ino = stx.ino, .mode = @as(u32, stx.mode) };
+}
+
+fn putRemoteError(msg: []const u8) void {
+    var head: [64]u8 = undefined;
+    const h = std.fmt.bufPrint(&head, "! {d} ", .{msg.len}) catch return;
+    if (!putAll(h)) return;
+    if (!putAll(msg)) return;
+    _ = putAll("\n");
+}
+
+/// 디렉터리 하나를 wire v1 로 나열한다. **한 왕복에 목록 + 신원**이 계약이다(계획 §2.3 ⑵) —
+/// 목록과 `stat` 을 나눠 물으면 그 사이가 창이 된다. 신원 숫자는 이 기계의 `(dev, ino)` 지만 wire
+/// 계약은 「같은 기계 안에서 같으면 같다」뿐이다(§2.3 ⑴).
+///
+/// 실패는 **wire 로 말하고 0 으로 끝난다**(`!` 레코드) — 종료 코드는 전송(ssh) 수준의 실패와
+/// 가르는 자리로 남긴다. 조용한 실패는 없다(§2.5).
+fn runList(io: std.Io, dir_path: []const u8) void {
+    if (!putAll(rfls_header)) return;
+    // 절대경로만 — 상대는 로그인 셸의 cwd(홈)에 걸려 **다른 폴더**를 나열한다
+    // (`git_command.buildRemoteFileRead` 가 같은 이유로 절대만 받는다).
+    if (dir_path.len == 0 or dir_path[0] != '/') {
+        putRemoteError("path is not absolute");
+        return;
+    }
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "opendir failed: {s}", .{@errorName(err)}) catch "opendir failed";
+        putRemoteError(msg);
+        return;
+    };
+    defer dir.close(io);
+
+    // 나열한 디렉터리 **자신**의 신원 — 열린 핸들을 `fstat` 한다(경로 재해석 없음).
+    const dir_stat = rawFstat(dir.handle) orelse {
+        putRemoteError("fstat failed");
+        return;
+    };
+    {
+        var head: [64]u8 = undefined;
+        const h = std.fmt.bufPrint(&head, "D {d} {d}\n", .{ dir_stat.dev, dir_stat.ino }) catch return;
+        if (!putAll(h)) return;
+    }
+
+    var count: u64 = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch {
+        // 순회가 중간에 죽으면 **꼬리를 내지 않는다** — 파서가 「잘림」으로 읽어 반쪽 목록이
+        // 완결인 척하지 못하게 한다.
+        return;
+    }) |entry| {
+        // 상한 넘는 이름은 **안 싣고 안 센다**(인코더 계약과 같다 — 잘라 실으면 없는 항목이 된다).
+        if (entry.name.len == 0 or entry.name.len > rfls_max_name_bytes) continue;
+
+        var name_z: [rfls_max_name_bytes + 1]u8 = undefined;
+        @memcpy(name_z[0..entry.name.len], entry.name);
+        name_z[entry.name.len] = 0;
+        const name_ptr: [*:0]const u8 = name_z[0..entry.name.len :0];
+
+        // 항목 신원은 `lstat` 축이다(링크 자신) — 종류 판정과 같은 한 번의 stat 에서 나온다.
+        const st = rawFstatAt(dir.handle, name_ptr, std.posix.AT.SYMLINK_NOFOLLOW) orelse continue;
+
+        const letter: u8 = if (std.posix.S.ISDIR(st.mode))
+            'd'
+        else if (std.posix.S.ISLNK(st.mode)) blk: {
+            // 링크가 디렉터리를 가리키면 `S`(트리가 펼칠 수 있다), 아니면·끊겼으면 `s`.
+            const followed = rawFstatAt(dir.handle, name_ptr, 0) orelse break :blk @as(u8, 's');
+            break :blk if (std.posix.S.ISDIR(followed.mode)) @as(u8, 'S') else 's';
+        } else if (std.posix.S.ISREG(st.mode))
+            'f'
+        else
+            'o';
+
+        var head: [96]u8 = undefined;
+        const h = std.fmt.bufPrint(&head, "E {d} {d} {c} {d} ", .{ st.dev, st.ino, letter, entry.name.len }) catch continue;
+        if (!putAll(h)) return;
+        if (!putAll(entry.name)) return;
+        if (!putAll("\n")) return;
+        count += 1;
+    }
+
+    var tail: [32]u8 = undefined;
+    const t = std.fmt.bufPrint(&tail, "X {d}\n", .{count}) catch return;
+    _ = putAll(t);
 }
 
 /// 루트 아래 디렉터리를 모은다. **`st_mode` 로 판정한다** — `nftw` 의 `FTW_D` 는 libc 마다 값이 달라

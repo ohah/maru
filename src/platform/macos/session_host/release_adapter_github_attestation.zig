@@ -8,7 +8,8 @@ const process = @import("bounded_process");
 
 pub const max_response_bytes = github_json.max_response_bytes;
 pub const max_token_bytes = github_json.max_scalar_string_bytes;
-pub const max_args: usize = 18;
+pub const max_api_args: usize = 18;
+pub const max_args: usize = 20;
 const arg_bytes: usize = context_mod.max_value_bytes + 32;
 
 pub const TagProtection = enum {
@@ -62,6 +63,27 @@ pub fn plan(storage: *ArgsStorage, artifact_path: []const u8, expected: Expected
     return planValidated(storage, artifact_path, expected);
 }
 
+/// Verifies an attestation emitted earlier in the same workflow attempt without waiting for the
+/// repository attestation index to expose it. The signed bundle is only verifier input; all
+/// authority still comes from the verified certificate and statement parsed below.
+pub fn planBundle(storage: *ArgsStorage, artifact_path: []const u8, bundle_path: []const u8, expected: Expected) Error!Plan {
+    try validateExpected(expected);
+    if (!canonicalAbsolutePath(artifact_path) or !canonicalAbsolutePath(bundle_path) or
+        std.mem.eql(u8, artifact_path, bundle_path)) return error.InvalidPath;
+    const source_ref = std.fmt.bufPrint(&storage.source_ref, "refs/tags/{s}", .{expected.context.tag}) catch
+        return error.InvalidExpected;
+    const values = [_][]const u8{
+        "attestation",                             "verify",                         artifact_path,                  "--bundle",
+        bundle_path,                               "--repo",                         "ohah/maru",                    "--signer-workflow",
+        "ohah/maru/.github/workflows/release.yml", "--signer-digest",                expected.context.source_commit, "--source-digest",
+        expected.context.source_commit,            "--source-ref",                   source_ref,                     "--deny-self-hosted-runners",
+        "--predicate-type",                        "https://slsa.dev/provenance/v1", "--format",                     "json",
+    };
+    comptime std.debug.assert(values.len == max_args);
+    for (values, 0..) |value, index| storage.args[index] = value;
+    return .{ .args = &storage.args };
+}
+
 /// Builds the same closed verifier command for a child whose cwd is a held directory vnode.
 pub fn planDirectory(storage: *ArgsStorage, artifact_path: []const u8, expected: Expected) Error!Plan {
     try validateExpected(expected);
@@ -81,9 +103,9 @@ fn planValidated(storage: *ArgsStorage, artifact_path: []const u8, expected: Exp
         expected.context.source_commit,   "--source-ref",                            source_ref,        "--deny-self-hosted-runners",   "--predicate-type",
         "https://slsa.dev/provenance/v1", "--format",                                "json",
     };
-    comptime std.debug.assert(values.len == max_args);
+    comptime std.debug.assert(values.len == max_api_args);
     for (values, 0..) |value, index| storage.args[index] = value;
-    return .{ .args = &storage.args };
+    return .{ .args = storage.args[0..max_api_args] };
 }
 
 pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: Expected) Error!Observed {
@@ -201,6 +223,22 @@ pub fn verifyWith(executor: anytype, allocator: std.mem.Allocator, executable: [
     return parseAndBind(allocator, captured, expected);
 }
 
+pub fn verifyBundleWith(executor: anytype, allocator: std.mem.Allocator, executable: []const u8, artifact_path: []const u8, bundle_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
+    if (!canonicalAbsolutePath(executable)) return error.InvalidPath;
+    if (budget_ns <= 0) return error.InvalidBudget;
+    if (output.len == 0 or output.len > max_response_bytes) return error.ResponseTooLarge;
+    if (overlaps(output, executable) or overlaps(output, artifact_path) or overlaps(output, bundle_path) or
+        overlaps(executable, artifact_path) or overlaps(executable, bundle_path) or overlaps(artifact_path, bundle_path) or
+        expectedOverlaps(output, expected))
+        return error.InvalidPath;
+    var storage: ArgsStorage = undefined;
+    const request = try planBundle(&storage, artifact_path, bundle_path, expected);
+    const environment = [_][]const u8{"GH_PROMPT_DISABLED=1"};
+    const captured = try executor.capture(executable, request.args, &environment, output, budget_ns);
+    if (!borrowedFrom(captured, output)) return error.InvalidCapture;
+    return parseAndBind(allocator, captured, expected);
+}
+
 pub fn verifyDirectoryWith(executor: anytype, allocator: std.mem.Allocator, executable: []const u8, token: []const u8, directory_fd: std.c.fd_t, artifact_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
     if (!validScalar(token)) return error.InvalidToken;
     if (budget_ns <= 0) return error.InvalidBudget;
@@ -218,6 +256,11 @@ pub fn verifyDirectoryWith(executor: anytype, allocator: std.mem.Allocator, exec
 pub fn verify(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, token: []const u8, artifact_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
     var executor = BoundedExecutor{ .io = io };
     return verifyWith(&executor, allocator, executable, token, artifact_path, expected, output, budget_ns);
+}
+
+pub fn verifyBundle(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, artifact_path: []const u8, bundle_path: []const u8, expected: Expected, output: []u8, budget_ns: i128) !Observed {
+    var executor = BoundedExecutor{ .io = io };
+    return verifyBundleWith(&executor, allocator, executable, artifact_path, bundle_path, expected, output, budget_ns);
 }
 
 pub const BoundedExecutor = struct {
@@ -267,6 +310,37 @@ fn validScalar(value: []const u8) bool {
     if (value.len == 0 or value.len > max_token_bytes) return false;
     for (value) |byte| if (byte < 0x20 or byte == 0x7f) return false;
     return true;
+}
+
+fn canonicalAbsolutePath(value: []const u8) bool {
+    if (value.len < 2 or value[0] != '/' or value[value.len - 1] == '/' or !validScalar(value)) return false;
+    var parts = std.mem.splitScalar(u8, value[1..], '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
+fn overlaps(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_end = std.math.add(usize, @intFromPtr(left.ptr), left.len) catch return true;
+    const right_end = std.math.add(usize, @intFromPtr(right.ptr), right.len) catch return true;
+    return @intFromPtr(left.ptr) < right_end and @intFromPtr(right.ptr) < left_end;
+}
+
+fn expectedOverlaps(bytes: []const u8, expected: Expected) bool {
+    for ([_][]const u8{
+        expected.context.repository.owner,
+        expected.context.repository.name,
+        expected.context.tag,
+        expected.context.source_commit,
+        expected.context.build.workflow_ref,
+        expected.subject_name,
+        expected.subject_sha256,
+    }) |value| {
+        if (overlaps(bytes, value)) return true;
+    }
+    return false;
 }
 
 fn object(value: std.json.Value) Error!std.json.ObjectMap {

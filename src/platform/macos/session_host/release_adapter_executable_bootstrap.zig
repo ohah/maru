@@ -54,10 +54,32 @@ pub const PublishCandidate = struct {
     zig_sha256: []const u8,
 };
 
+pub const PrepareCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    evidence: []const u8,
+    candidate_dmg_bundle: []const u8,
+    candidate_frozen_bundle: []const u8,
+    evidence_bundle: []const u8,
+    manifest_bundle: []const u8,
+    aggregate: []const u8,
+};
+
+pub const FinalizeCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    aggregate: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    manifest: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
     publish_candidate: PublishCandidate,
+    prepare_candidate_aggregate: PrepareCandidateAggregate,
+    finalize_candidate_aggregate: FinalizeCandidateAggregate,
 };
 
 pub const View = struct {
@@ -205,6 +227,30 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .zig = value.zig,
                 .zig_size = value.zig_size,
                 .zig_sha256 = value.zig_sha256,
+            } },
+            .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
+        },
+        .prepare_candidate_aggregate => |value| .{
+            .command = .{ .prepare_candidate_aggregate = .{
+                .repo = value.repo,
+                .tag = value.tag,
+                .evidence = value.evidence,
+                .candidate_dmg_bundle = value.candidate_dmg_bundle,
+                .candidate_frozen_bundle = value.candidate_frozen_bundle,
+                .evidence_bundle = value.evidence_bundle,
+                .manifest_bundle = value.manifest_bundle,
+                .aggregate = value.aggregate,
+            } },
+            .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
+        },
+        .finalize_candidate_aggregate => |value| .{
+            .command = .{ .finalize_candidate_aggregate = .{
+                .repo = value.repo,
+                .tag = value.tag,
+                .aggregate = value.aggregate,
+                .dmg = value.dmg,
+                .frozen_executable = value.frozen_executable,
+                .manifest = value.manifest,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
         },

@@ -1054,6 +1054,14 @@ gate는 누락·중복·phase 교환·non-canonical/aliased pathname을 첫 side
 lookup call이 0임을 Debug·ReleaseFast에서 고정한다. 후속 draft/API leaf 때문에 command process의 exact token owner는 아직 유지한다.
 이 gate는 prepare/resume process 분리, evidence/manifest attestation, aggregate 삽입, workflow 또는 frozen signed U5 E2E의 증거가 아니다.
 
+U5 stage-3 durable preparation handoff는 held baseline evidence와 authored manifest를 absent owner-only directory의 fixed two-role
+inventory로 atomic 승격한다. `test-session-host-release-adapter-candidate-preparation-handoff`는 actual filesystem의 no-follow
+source/final identity, canonical baseline profile과 evidence/manifest release binding, role별/합계 cap, source와 destination의 inode 분리, staging sync→no-replace rename→parent sync publication,
+partial final 0, 모든 fail-index, replacement 보존, exact cleanup과 retained-close tombstone을 Debug·ReleaseFast에서 검증한다.
+ReleaseFast 40회 diagnostic은 latency 분포, FD delta, expected retained-final count와 unexpected staging residue를 기록하지만 성공 권위나 latency budget에는 들어가지
+않는다. harness-owned root만 사용하므로 실제 앱 session-host 상태와 release를 건드리지 않는다. 이 gate는 다음 process semantic
+reopen, prepare/resume command, authored attestation action, aggregate insertion, live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

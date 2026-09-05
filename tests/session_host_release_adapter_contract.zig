@@ -77,6 +77,70 @@ fn candidateArgs() [33][]const u8 {
     };
 }
 
+fn prepareAggregateArgs() [21][]const u8 {
+    return .{
+        "prepare-candidate-aggregate",      "--repo",                           "ohah/maru",                      "--tag",                                                            "v1.2.3",
+        "--github-cli",                     "/usr/local/bin/gh",                "--github-cli-sha256",            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--evidence",
+        "/tmp/source/evidence.json",        "--candidate-dmg-bundle",           "/tmp/source/candidate-dmg.json", "--candidate-frozen-bundle",                                        "/tmp/source/candidate-frozen.json",
+        "--evidence-bundle",                "/tmp/source/evidence-bundle.json", "--manifest-bundle",              "/tmp/source/manifest-bundle.json",                                 "--aggregate",
+        "/tmp/handoff/candidate-aggregate",
+    };
+}
+
+fn finalizeAggregateArgs() [17][]const u8 {
+    return .{
+        "finalize-candidate-aggregate",     "--repo",                                              "ohah/maru",               "--tag",                                                            "v1.2.3",
+        "--github-cli",                     "/usr/local/bin/gh",                                   "--github-cli-sha256",     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--aggregate",
+        "/tmp/handoff/candidate-aggregate", "--dmg",                                               "/tmp/artifacts/Maru.dmg", "--frozen-executable",                                              "/tmp/artifacts/maru-session-host",
+        "--manifest",                       "/tmp/artifacts/Maru-1.2.3-session-host-release.json",
+    };
+}
+
+test "release adapter parses exact aggregate prepare and finalize commands" {
+    const prepare = try adapter.parseArgs(&prepareAggregateArgs());
+    try std.testing.expectEqualStrings("/tmp/source/evidence.json", prepare.prepare_candidate_aggregate.evidence);
+    try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", prepare.prepare_candidate_aggregate.aggregate);
+    const finalize = try adapter.parseArgs(&finalizeAggregateArgs());
+    try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", finalize.finalize_candidate_aggregate.aggregate);
+    try std.testing.expectEqualStrings("/tmp/artifacts/maru-session-host", finalize.finalize_candidate_aggregate.frozen_executable);
+}
+
+test "release adapter closes aggregate command option and path authority" {
+    var prepare = prepareAggregateArgs();
+    prepare[19] = "--dmg";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&prepare));
+    prepare = prepareAggregateArgs();
+    prepare[20] = "/tmp/source/evidence.json";
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&prepare));
+    prepare = prepareAggregateArgs();
+    prepare[12] = "relative/candidate-dmg.json";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&prepare));
+    prepare = prepareAggregateArgs();
+    prepare[20] = "/tmp/handoff/candidate-aggregate/";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&prepare));
+    prepare = prepareAggregateArgs();
+    prepare[20] = "/tmp/handoff/bad\naggregate";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&prepare));
+    prepare = prepareAggregateArgs();
+    prepare[19] = "--evidence";
+    try std.testing.expectError(error.DuplicateOption, adapter.parseArgs(&prepare));
+
+    var finalize = finalizeAggregateArgs();
+    finalize[11] = "--evidence";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&finalize));
+    finalize = finalizeAggregateArgs();
+    finalize[11] = "--candidate-dmg-bundle";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&finalize));
+    finalize = finalizeAggregateArgs();
+    finalize[10] = "/tmp/artifacts/Maru-1.2.3-session-host-release.json";
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&finalize));
+    finalize = finalizeAggregateArgs();
+    finalize[16] = "/tmp/artifacts/with=equals.json";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&finalize));
+    const missing = finalizeAggregateArgs();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing[0 .. missing.len - 2]));
+}
+
 test "release adapter parses exact publish-candidate command and permits source ancestry" {
     var args = candidateArgs();
     const first_option = args[1];

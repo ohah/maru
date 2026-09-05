@@ -1,8 +1,8 @@
 const std = @import("std");
 const validator = @import("release_validator");
 
-const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate };
-const Phase = enum { pre_publish, verify_predecessor, publish_candidate };
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate };
+const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate };
 
 const Harness = struct {
     events: [8]Event = undefined,
@@ -57,6 +57,24 @@ const Harness = struct {
                         .zig_size = 123,
                         .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     } },
+                    .prepare_aggregate => .{ .prepare_candidate_aggregate = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .evidence = "/tmp/evidence",
+                        .candidate_dmg_bundle = "/tmp/candidate-dmg",
+                        .candidate_frozen_bundle = "/tmp/candidate-frozen",
+                        .evidence_bundle = "/tmp/evidence-bundle",
+                        .manifest_bundle = "/tmp/manifest-bundle",
+                        .aggregate = "/tmp/aggregate",
+                    } },
+                    .finalize_aggregate => .{ .finalize_candidate_aggregate = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .aggregate = "/tmp/aggregate",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                        .manifest = "/tmp/manifest",
+                    } },
                 };
                 result.owner = result;
             }
@@ -96,6 +114,16 @@ const Harness = struct {
                 try std.testing.expectEqualStrings("token", token);
                 try std.testing.expectEqual(validator.phase_budget_ns, budget);
                 try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+            pub fn prepareCandidateAggregate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, budget: i128, _: *validator.Storage) !void {
+                self.harness.push(.prepare_aggregate);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+            pub fn finalizeCandidateAggregate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, budget: i128, _: *validator.Storage) !void {
+                self.harness.push(.finalize_aggregate);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
                 if (self.harness.product_error) return error.ProductInjected;
             }
         };
@@ -165,8 +193,23 @@ test "publish-candidate dispatches exactly once after bootstrap and token" {
     );
     defer std.testing.allocator.free(source);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "candidate_release_driver.run("));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "&storage.github_response[0..candidate_release_driver.max_scratch_bytes]"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "storage.github_response[0..candidate_release_driver.max_scratch_bytes]"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "settleProductFailure(&storage.candidate"));
+}
+
+test "aggregate commands dispatch exactly once without reading GitHub token" {
+    var storage: validator.Storage = undefined;
+    var prepare = Harness{ .phase = .prepare_aggregate, .token_error = true };
+    try prepare.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .prepare_aggregate }, prepare.events[0..prepare.count]);
+
+    var finalize = Harness{ .phase = .finalize_aggregate, .token_error = true };
+    try finalize.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .finalize_aggregate }, finalize.events[0..finalize.count]);
+
+    var failure = Harness{ .phase = .finalize_aggregate, .token_error = true, .product_error = true };
+    try std.testing.expectError(error.ProductInjected, failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .finalize_aggregate }, failure.events[0..failure.count]);
 }
 
 test "production failure cleanup retries at most once and retry failure wins" {

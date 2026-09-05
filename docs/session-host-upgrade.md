@@ -3170,6 +3170,37 @@ session-host registry·manifest·socket·process와 GitHub release를 찾거나 
 닫으며 다음 process의 semantic reopen, stage-3 prepare command, stage-4 이후 resume command, live workflow와 frozen signed U5 E2E는
 아직 완료하지 않는다.
 
+### 11.56 retained stage 3 preparation의 process-independent semantic reopen
+
+`release_adapter_candidate_preparation_reopen.zig`의 caller-owned final-address `ReopenedPreparation`은 §11.55의
+`closeRetaining()` 뒤 남은 canonical absolute directory pathname과 별도로 획득한 trusted `release_adapter_context.Context`만
+받아 새 소유권을 만든다. 이전 process의 pointer, descriptor, seal, parsed view, draft owner, token 또는 environment는 입력으로
+받지 않는다. trusted context는 protected `ohah/maru` tag, source commit과 release workflow run을 먼저 검증하고, manifest의
+repository/tag/source/build를 `bindManifest`로 결속한다. evidence와 manifest는 다시 held fd에서 canonical parse하며 baseline A,
+role A, passed result, repository/release/source/build/test UUID, candidate DMG·frozen executable digest, evidence name/size/SHA를
+상호 결속한다. manifest filename은 caller 문자열이 아니라 parsed version에서 `Maru-<version>-session-host-release.json`으로
+유도하며 evidence filename은 exact `baseline-evidence.json`이다.
+
+reopen은 absolute parent와 target directory를 no-follow로 열고 UID가 현재 process owner인지, mode가 exact `0700`인지, link와
+directory identity가 pathname과 같은지 확인한다. directory inventory는 derived manifest leaf와 fixed evidence leaf 두 regular
+single-link `0600` 파일만 허용한다. 두 파일을 direct child로 pin하고 서로 다른 inode, role별/합계 size cap, read 전후
+pathname/fd identity와 digest를 검증한다. wrapper·directory·두 file owner의 final address, trusted context 사본, canonical path,
+derived names, dev/inode/size/SHA를 하나의 metadata seal로 묶고, 이 모든 검사가 끝난 뒤에만 `value()`를 공개한다.
+`fence()`는 directory를 pathname으로 다시 열어 parent/name/held identity와 exact inventory를 재확인하고 두 held file을 다시 읽어
+canonical parse·상호 binding·trusted-context binding까지 반복한다. 따라서 byte replacement, hardlink, extra/missing/renamed leaf,
+mode·owner 변경, directory pathname 교체 또는 in-memory owner/context/seal 변조는 부분 view 없이 fail-close한다.
+
+`close()`는 성공한 full fence 뒤 phase와 seal을 먼저 closed tombstone으로 바꾼 다음 file→directory→parent descriptor를 정확히
+한 번 닫는다. reopen owner는 retained durable directory를 삭제하거나 이름을 바꾸지 않는다. 삭제 권위는 후속 publication/retention
+owner가 별도로 획득해야 하며 close 실패에도 old verified authority는 되살아나지 않는다. focused gate
+`test-session-host-release-adapter-candidate-preparation-reopen`은 harness-owned actual filesystem에서 이전 owner의 retained close와
+source 제거 뒤 새 owner reopen, copy/move/final-address, context 및 모든 semantic field mismatch, inventory·identity·mode mutation,
+allocation fail-index, retained bytes와 descriptor 정산을 Debug·ReleaseFast로 검증한다. ReleaseFast 40회 diagnostic은
+reopen→full fence→close의 median·p95·max, 실패 수, FD delta와 durable final 생존을 기록하지만 성공 권위나 latency budget은 아니다.
+테스트는 앱 session-host 상태와 GitHub/Apple 자격증명·release를 찾거나 수정하지 않는다. 이 slice는 새 process가 stage 3 output을
+신뢰 가능한 held input으로 회수하는 경계만 닫으며 실제 prepare/resume executable split, authored attestation action, aggregate 삽입,
+live workflow와 frozen signed U5 E2E는 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

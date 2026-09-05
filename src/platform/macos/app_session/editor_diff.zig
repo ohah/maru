@@ -1251,9 +1251,16 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
 
     var failed_steps: usize = 0;
     var ok_steps: usize = 0;
+    // 실패 지점을 0부터 훑되, 한 스텝이 «실패를 못 주입한 채» 끝나면(할당 수를 넘어섰다) 그 뒤는 전부 같은
+    // 성공이라 멈춘다. 120 스텝을 다 돌던 때는 이 테스트 하나가 14.5 초(CI)였다. 검증 범위는 그대로다.
+    var diff_clean_pass = false;
     var step: usize = 0;
     while (step < 120) : (step += 1) {
+        if (diff_clean_pass) break;
         var fa = std.testing.FailingAllocator.init(backing, .{});
+        defer if (!fa.has_induced_failure) {
+            diff_clean_pass = true;
+        };
         const allocator = fa.allocator();
         var fx = try Fixture.init(allocator);
         defer fx.deinit(allocator);

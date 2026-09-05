@@ -47264,7 +47264,12 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     session.ended_placeholder_dropped_pending = 11;
     var saw_rollback = false;
     var saw_commit = false;
+    // 실패 지점을 0부터 훑되, 한 번 «실패를 못 주입한 채» 성공하면 그 뒤는 전부 같은 성공이라 멈춘다.
+    // 512 회를 다 돌던 때는 이 테스트 하나가 18.5 초(CI)였고, 실제 할당 수를 넘는 뒤쪽은 아무것도 새로 검증하지
+    // 않았다. 검증 범위(모든 실패 지점 + 깨끗한 성공 1 회)는 그대로다.
+    var restore_clean_pass = false;
     for (0..512) |fail_index| {
+        if (restore_clean_pass) break;
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         session.allocator = failing.allocator();
         var apply_error: ?anyerror = null;
@@ -47290,6 +47295,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             saw_rollback = true;
             session.allocator = allocator; // rejected candidate retained no object backed by `failing`.
         } else {
+            if (!failing.has_induced_failure) restore_clean_pass = true;
             // Post-commit best-effort projection work may intentionally catch OOM. In that case apply has
             // already completed the no-fail swap, so it must be wholly new rather than a mixed half-state.
             try std.testing.expectEqualStrings(new_root, session.file_tree.rootAt(0).?);

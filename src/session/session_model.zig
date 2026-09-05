@@ -107,6 +107,9 @@ pub fn Model(comptime Rt: type) type {
             /// 화면 판정이 함께 낸 신뢰도 플래그. 권위표의 C1·C2 가 이 둘로 선다.
             agent_screen_visible_blocker: bool = false,
             agent_screen_visible_idle: bool = false,
+
+            /// 그 idle 근거가 상시 chrome 인가 — C2 의 질 조건(§1.1).
+            agent_screen_idle_is_chrome: bool = false,
             /// 화면 상태를 세운 근거(§1.4). A 경로에서 그대로 결과의 출처가 된다.
             agent_screen_origin: agent_state_arbiter.Origin = .screen,
             /// 화면을 새로 판정한 횟수. 중재기가 «같은 관측을 두 번 세지 않게» 하는 입력이다 — 한 tick 에

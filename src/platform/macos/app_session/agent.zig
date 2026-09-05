@@ -734,6 +734,8 @@ pub fn resetAgentObservationForKindChange(term: *Term) void {
     term.agent_screen_state = .unknown;
     term.agent_screen_visible_blocker = false;
     term.agent_screen_visible_idle = false;
+    term.agent_screen_idle_is_chrome = false;
+    term.agent_screen_output_active = false;
     term.agent_screen_rule = "";
     term.agent_screen_origin = .screen;
     term.agent_screen_seq = 0;
@@ -2582,6 +2584,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_screen_seq +%= 1; // 새 관측 하나 — C2 가 세는 단위다
     term.agent_screen_visible_blocker = detection.visible_blocker;
     term.agent_screen_visible_idle = detection.visible_idle;
+    term.agent_screen_idle_is_chrome = detection.idle_is_chrome;
     term.agent_screen_origin = maru.session.agent_state_arbiter.originOfRule(detection.rule_id);
     term.agent_screen_rule = detection.rule_id; // 진단 전용(§1.7) — 어느 화면 규칙이 상태를 냈는지
     // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
@@ -2621,6 +2624,7 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .screen = term.agent_screen_state,
         .screen_visible_blocker = term.agent_screen_visible_blocker,
         .screen_visible_idle = term.agent_screen_visible_idle,
+        .screen_idle_is_chrome = term.agent_screen_idle_is_chrome,
         .screen_origin = term.agent_screen_origin,
         // **우리에게는 이 축이 `agent_kind` 다**(§1.1 C3 주석). 에이전트가 끝나면 `pollAgentKinds` 가
         // kind 를 `.none` 으로 내리고, 그 전이가 세 상태 자리와 중재기를 통째로 리셋한다 — 「프로세스가

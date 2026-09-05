@@ -20,6 +20,8 @@ pub const Detection = struct {
     visible_idle: bool = false,
     visible_blocker: bool = false,
     visible_running: bool = false,
+    /// idle 근거가 상시 chrome 인가(§1.1 C2 의 질 조건). `Rule.idle_is_chrome` 을 그대로 나른다.
+    idle_is_chrome: bool = false,
     /// 매치했으나 상태를 바꾸지 말라는 규칙(skip_state_update)이 이긴 경우. Stabilizer가 직전 상태를 유지한다.
     skip: bool = false,
 
@@ -84,6 +86,17 @@ const Rule = struct {
     /// 현재 근거가 아니므로 하단 거리로 유효 범위를 제한한다. 반대로 입력 프롬프트·실행 footer 같은 **상시 chrome**에는
     /// 걸지 않는다 — 사용자 입력이 길어지면 chrome이 스스로 밀려나 근거가 사라지기 때문이다(실측).
     max_lines_from_bottom: ?u8 = null,
+
+    /// **이 idle 근거가 「상시 chrome」인가.** 입력창처럼 **작업 중에도 화면에 늘 있는** 것이면 참이다.
+    ///
+    /// 계약 §1.1 은 「idle 은 활동 증거의 **부재**라 훅을 못 덮는다」는 비대칭을 세우고 C2 에 무거운
+    /// 조건을 걸었는데, 그 조건이 「연속 3 회」 하나뿐이었다. **시간은 이 부류를 못 막는다** — 화면이
+    /// 계속 idle 로 보이면 3 회는 0.3 초면 찬다. 근거의 **질**을 봐야 한다.
+    ///
+    /// 2026-09-05 사고가 그 자리였다: claude 가 진행 표시를 바꿔 running 근거를 못 읽자 남은 것이
+    /// 입력창뿐이었고, C2 가 정상 running 을 0.3 초 만에 접었다(`origin=screen rule=C2 hook=running`).
+    /// 문서 기록상 2026-08-12 에도 같은 부류가 있었으니 두 번째다.
+    idle_is_chrome: bool = false,
 
     /// **위치 비교를 건너뛰고 priority 로 겨룬다.** `ruleBetter` 는 「같은 화면의 idle/running 충돌은 더
     /// 아래에 보이는 증거가 이긴다」로 정하는데, 그 가정은 **상태줄이 입력창 아래**라는 레이아웃에 묶여
@@ -155,7 +168,7 @@ const claude_rules = [_]Rule{
     .{ .id = "confirm_prompt", .state = .blocked, .priority = 985, .region = .screen, .all = &.{ "enter to confirm", "esc to cancel" }, .max_lines_from_bottom = 10, .visible_blocker = true },
     // 입력 줄은 하단 거리가 아니라 구조로 집는다. 사용자 statusLine 커스텀이 상태줄을 여러 줄로 만들면 거리
     // 가드가 현재 프롬프트를 잔상으로 오인하므로(실측), prompt_anchor가 프롬프트 라인 자체를 앵커로 쓴다.
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .prompt_anchor, .line_prefixes = &.{"❯"}, .visible_idle = true },
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .prompt_anchor, .line_prefixes = &.{"❯"}, .visible_idle = true, .idle_is_chrome = true },
     .{ .id = "idle_title", .state = .idle, .priority = 880, .region = .title, .any = &.{"✳"}, .visible_idle = true },
     // OSC 9;4(ConEmu progress)는 실측에서 두 provider 모두 emit하지 않았다 — 현재 발화하지 않는 규칙이다.
     // 표준 기반 데이터라 존치하되 근거 있는 값으로 오해하지 않도록 남긴다(docs/agent-session.md «실측 신호 기록»).
@@ -281,7 +294,7 @@ const codex_rules = [_]Rule{
     // `allow command?`는 `not`에서 뺐다. 승인 화면은 confirmation_prompt(blocker)가 절대 우선으로 이미 이기므로 중복인데,
     // tail이 넓어지면 **이미 승인이 끝난 오래된 문구**가 유일한 idle 근거를 지워 폴백이 타이핑을 running으로 만든다
     // (코드 리뷰에서 재현). blocker 쪽은 거리 게이트로 현재성을 보고, idle 쪽은 그 문구를 아예 보지 않는다.
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .visible_idle = true, .gate = .{
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .visible_idle = true, .idle_is_chrome = true, .gate = .{
         .any = &.{ .{ .line_prefix = &.{"›"} }, .{ .line_prefix = &.{"❯"} } },
         .not = &.{.{ .line = codex_working_line }},
     } },
@@ -328,6 +341,7 @@ fn detectWithRules(rules: []const Rule, input: Input) Detection {
         .visible_idle = rule.visible_idle,
         .visible_blocker = rule.visible_blocker,
         .visible_running = rule.visible_running,
+        .idle_is_chrome = rule.idle_is_chrome,
         .skip = rule.skip_state_update,
     };
     if (input.output_active) return .{ .state = .running, .rule_id = "pty_activity" };
@@ -1639,4 +1653,40 @@ test "codex: 완료·대화 줄은 같은 `•` 마커를 써도 진행이 아�
         const d = detect(.codex, .{ .screen = screen });
         try std.testing.expectEqual(State.idle, d.state);
     }
+}
+
+// ── idle 근거의 질: 상시 chrome 과 명시적 신호를 가른다 (§1.1 C2, 2026-09-05)
+
+test "idle 근거의 질: 입력창은 chrome, 제목·중단 문구는 명시적이다" {
+    // 권위표 C2 가 이 플래그로 「덮을 자격」을 가른다. 여기서 안 세우면 그쪽 조건이 통째로 무력해진다.
+    { // claude 입력창 — 작업 중에도 늘 있는 chrome
+        const d = detect(.claude, .{ .screen = "❯ " });
+        try std.testing.expect(d.visible_idle);
+        try std.testing.expect(d.idle_is_chrome);
+    }
+    { // claude 제목의 `✳` — 에이전트가 「끝났다」고 **보낸** 값이다
+        const d = detect(.claude, .{ .osc_title = "✳ 무언가" });
+        try std.testing.expect(d.visible_idle);
+        try std.testing.expect(!d.idle_is_chrome);
+    }
+    { // codex 입력창 — chrome
+        const d = detect(.codex, .{ .screen = "› " });
+        try std.testing.expect(d.visible_idle);
+        try std.testing.expect(d.idle_is_chrome);
+    }
+    { // ⚠️ **codex 중단 화면은 지금 chrome 으로 읽힌다** — `interrupted_prompt`(885) 가 아래 입력창의
+        // `live_prompt`(900) 에 **위치 비교로** 진다(「아래가 최신」). 명시적 종료 신호가 chrome 에 가려지는
+        // 셈이라 C2 가 그 화면으로는 훅을 못 덮는다. 이 변경의 범위(질 조건)와 **별개인 우선순위 결함**이므로
+        // 현재 동작을 그대로 잠가 두고, 고칠 때 이 판정자가 바뀌게 한다.
+        const d = detect(.codex, .{ .screen = "■ Conversation interrupted\n› " });
+        try std.testing.expect(d.visible_idle);
+        try std.testing.expect(d.idle_is_chrome); // ← 위 결함이 고쳐지면 여기가 `!` 로 바뀐다
+    }
+}
+
+test "idle 근거의 질: running·blocked 판정에는 chrome 표시가 따라붙지 않는다" {
+    // 플래그는 **idle 근거에만** 뜻이 있다. running 을 세운 규칙이 이것을 들면 C2 조건이 엉뚱하게 읽힌다.
+    const running = detect(.claude, .{ .screen = "✽ Mulling… \n❯ \n" });
+    try std.testing.expectEqual(State.running, running.state);
+    try std.testing.expect(!running.idle_is_chrome);
 }

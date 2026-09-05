@@ -84,6 +84,13 @@ pub fn findAvailableLayout(start: c.fd_t) ?Layout {
             return Layout.init(first) catch return null;
         first += @intCast(offset);
     }
+    // 구간을 못 찾으면 업그레이드는 시작조차 못 하고 되돌려진다. 그런데 그 경로(`finishPreclosed
+    // WithoutLayout`)는 단계 이름조차 남기지 않아, 로그만 보면 「업그레이드를 시도한 적이 없는 것」과
+    // 구분되지 않는다. 요구 폭과 한계를 남겨 둘을 가른다.
+    if (!builtin.is_test) host_log.line(
+        "session host upgrade layout unavailable: start={d} slots={d} max_fd={d}",
+        .{ start, exec_fd_set.max_slots, max_fd },
+    );
     return null;
 }
 
@@ -405,7 +412,26 @@ fn processBudgetReserved(
         });
     };
     var reservation: exec_fd_set.SlotReservation = .{};
-    reservation.reserve(&requested) catch {
+    reservation.reserve(&requested) catch |err| {
+        // `fd_slot_reserve` 라는 이름만으로는 왜 실패했는지 갈리지 않는다. `reserve` 는 다섯 가지
+        // 이유로 실패하는데(요청 슬롯이 이미 열림 / sentinel dup 실패 / 슬롯 초과 / 잘못된 슬롯 /
+        // 중복 슬롯) 그중 어느 것이냐에 따라 고칠 곳이 완전히 다르다. 2026-09-05 실측: 셸 14 개를
+        // 쥔 host 가 이 단계에서 업그레이드를 포기했는데(`.status = .resumed` 라 세션은 살았다),
+        // 남은 것이 단계 이름 한 줄이라 원인을 특정하지 못했다.
+        //
+        // `first_slot` 과 `max_fd` 를 함께 남기는 이유: `findAvailableLayout` 은 `first + max_slots
+        // <= max_fd` 로 구간을 고르는데 sentinel 은 `first + max_slots` **번 fd 자체**를 쓴다. 경계에서
+        // 둘이 어긋나는지는 이 두 값이 있어야 판별된다.
+        if (!builtin.is_test) host_log.line(
+            "session host upgrade fd reserve failed: err={s} first_slot={d} slots={d} max_fd={d} errno={d}",
+            .{
+                @errorName(err),
+                ctx.layout.first_runtime_slot,
+                exec_fd_set.max_slots,
+                getdtablesize(),
+                std.c._errno().*,
+            },
+        );
         noteUpgradeStage("fd_slot_reserve");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,

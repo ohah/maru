@@ -1,0 +1,8 @@
+• Explored
+  └ 파일 두 개를 읽었습니다
+
+• Working (18m 24s • esc to interrupt)
+
+› Ask Codex to do anything
+
+  Context 19% used · weekly 41% left · gpt-5.6-sol low

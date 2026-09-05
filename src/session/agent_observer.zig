@@ -1690,3 +1690,105 @@ test "idle 근거의 질: running·blocked 판정에는 chrome 표시가 따라�
     try std.testing.expectEqual(State.running, running.state);
     try std.testing.expect(!running.idle_is_chrome);
 }
+
+// ── 실제 화면 fixture 전수 — 손으로 쓴 문자열이 아니라 **캡처한 chrome 구조**로 잠근다
+
+/// 판정자마다 문자열을 손으로 적으면 두 가지가 샌다. ⑴ 오탈자와 「기억으로 쓴 문구」가 실제와
+/// 어긋나도 통과한다 — 2026-09-05 에 실제로 그랬다(내가 답변에 쓴 `esc to interrupt` 를 화면에서
+/// 세어 40/40 이라고 읽었다). ⑵ provider × 상태 조합의 **어디가 비었는지** 안 보인다.
+///
+/// 그래서 실제 캡처에서 **chrome 구조만** 뽑아 fixture 로 둔다(대화 내용은 넣지 않는다 — 사용자
+/// 데이터이고, 판정에도 안 쓰인다). 새 provider 나 새 상태를 지원할 때 여기 한 줄을 더하는 것이
+/// 곧 커버리지다.
+const screen_fixtures = [_]struct {
+    name: []const u8,
+    agent: Agent,
+    want: State,
+    /// 그 상태를 **왜** 그렇게 읽어야 하는지 — 규칙이 바뀌어 깨졌을 때 읽을 사람을 위해.
+    why: []const u8,
+    text: []const u8,
+}{
+    .{
+        .name = "claude-running",
+        .agent = .claude,
+        .want = .running,
+        .why = "스피너 줄(`✽ Working… `)이 입력창 **위**에 있어도 진행으로 읽어야 한다(§1.1 `beats_position`)",
+        .text = @embedFile("agent_screens/claude-running.txt"),
+    },
+    .{
+        .name = "claude-idle",
+        .agent = .claude,
+        .want = .idle,
+        .why = "같은 자리가 `done` 으로 바뀌면 `…` 이 없다 — 진행 규칙이 idle 을 통째로 막지 않는다",
+        .text = @embedFile("agent_screens/claude-idle.txt"),
+    },
+    .{
+        .name = "codex-running",
+        .agent = .codex,
+        .want = .running,
+        .why = "`• Working (… esc to interrupt)` — `•` 는 범용 마커라 `esc to interrupt` 가 가른다",
+        .text = @embedFile("agent_screens/codex-running.txt"),
+    },
+    .{
+        .name = "codex-waiting",
+        .agent = .codex,
+        .want = .running,
+        .why = "`Waiting` 도 진행이다. 예전 규칙은 `working` 문구까지 요구해 이 화면을 놓쳤다",
+        .text = @embedFile("agent_screens/codex-waiting.txt"),
+    },
+    .{
+        .name = "codex-idle",
+        .agent = .codex,
+        .want = .idle,
+        .why = "완료 줄(`Ran`·`Waited`·`Explored`)은 같은 `•` 마커여도 `esc to interrupt` 가 없다",
+        .text = @embedFile("agent_screens/codex-idle.txt"),
+    },
+};
+
+test "실제 화면 fixture 전수가 기대한 상태로 읽힌다" {
+    for (screen_fixtures) |f| {
+        const d = detect(f.agent, .{ .screen = f.text });
+        std.testing.expectEqual(f.want, d.state) catch |err| {
+            std.debug.print(
+                "\n  fixture '{s}' 가 {s} 이어야 하는데 {s} 로 읽혔다 (rule={s})\n  근거: {s}\n",
+                .{ f.name, @tagName(f.want), @tagName(d.state), d.rule_id, f.why },
+            );
+            return err;
+        };
+    }
+}
+
+test "실제 화면 fixture: running 은 idle 근거를 세우지 않는다 — C2 가 그것으로 훅을 덮는다" {
+    for (screen_fixtures) |f| {
+        if (f.want != .running) continue;
+        const d = detect(f.agent, .{ .screen = f.text });
+        std.testing.expect(!d.visible_idle) catch |err| {
+            std.debug.print("\n  fixture '{s}' 가 running 인데 visible_idle 을 세웠다 (rule={s})\n", .{ f.name, d.rule_id });
+            return err;
+        };
+    }
+}
+
+test "실제 화면 fixture: provider × 상태 조합에 빈칸이 없다" {
+    // 커버리지를 **판정자로** 잠근다 — 새 provider 를 지원하면서 fixture 를 안 넣으면 여기서 걸린다.
+    var claude_running = false;
+    var claude_idle = false;
+    var codex_running = false;
+    var codex_idle = false;
+    for (screen_fixtures) |f| {
+        switch (f.agent) {
+            .claude => if (f.want == .running) {
+                claude_running = true;
+            } else if (f.want == .idle) {
+                claude_idle = true;
+            },
+            .codex => if (f.want == .running) {
+                codex_running = true;
+            } else if (f.want == .idle) {
+                codex_idle = true;
+            },
+        }
+    }
+    try std.testing.expect(claude_running and claude_idle);
+    try std.testing.expect(codex_running and codex_idle);
+}

@@ -253,7 +253,13 @@ test "shared deadline brackets frozen pin observer and final publication" {
     try deadline_mod.start(100, &real_deadline);
     defer real_deadline.deinit() catch unreachable;
     var empty: current_input.CurrentManifestInput = .{};
-    try std.testing.expectError(error.InvalidCurrent, product.observeUntil(std.testing.allocator, std.testing.io, &empty, fixture.paths(), undefined, &real_deadline, &result));
+    // storage 는 **실제 객체**를 넘긴다. `undefined` 를 넘기면 `observeUntil` 첫 줄의 겹침 검사가 정의되지 않은
+    // 포인터의 주소 범위를 deadline·current·result 와 비교한다 — 그 쓰레기 값이 어디를 가리키는지는 컴파일
+    // 단위마다 달라, 다른 테스트 파일과 한 바이너리에 묶이자 Debug 에서만 `InvalidOwner` 가 먼저 났다(실측).
+    // 이 테스트의 물음은 「빈 current 는 InvalidCurrent」이고, 그 답은 storage 의 주소와 무관해야 한다.
+    const StorageType = std.meta.Child(@typeInfo(@TypeOf(product.observeUntil)).@"fn".params[4].type.?);
+    var storage: StorageType = undefined;
+    try std.testing.expectError(error.InvalidCurrent, product.observeUntil(std.testing.allocator, std.testing.io, &empty, fixture.paths(), &storage, &real_deadline, &result));
 }
 
 test "unauthenticated copied and preowned owners reach no observer" {

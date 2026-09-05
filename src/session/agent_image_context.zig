@@ -71,6 +71,13 @@ pub const Label = struct {
     buf: [max_label_bytes]u8 = undefined,
     len: usize = 0,
     source: Source = .none,
+    /// 같은 메시지에 붙은 여러 장 중 몇 번째인가(`agent_image_index.sequenceAt`). **0 이면 안 그린다.**
+    ///
+    /// 라벨을 만드는 쪽(스캐너)은 이 값을 못 채운다 — 이웃 hit 을 봐야 알 수 있는데 스캐너는 한 장씩
+    /// 만든다. 그래서 목록이 다 모인 뒤 갤러리가 채운다. 그 전까지는 0 이고, 0 은 「모른다」가 아니라
+    /// 「그리지 않는다」이므로 미완성 상태가 화면에 거짓말을 하지 않는다.
+    seq: u16 = 0,
+    seq_total: u16 = 0,
     /// 이 이미지가 트랜스크립트에 적힌 **시각**(Unix 초, UTC). **0 이면 모른다** — 그때는 안 그린다.
     ///
     /// 라벨과 한 몸으로 다닌다. 따로 배열을 들면 `hits` 를 건드리는 자리마다 «셋» 을 맞춰야 하고,
@@ -107,6 +114,67 @@ pub fn matches(label_text: []const u8, query: []const u8) bool {
         } else return true;
     }
     return false;
+}
+
+/// 라벨 줄 **왼쪽 접두**(출처 + 순번)를 만든다. 예: `첨부 2/3` · `읽음` · `2/3` · 빈 값.
+///
+/// **출처를 왜 화면에 내는가**: `Source` 는 오래 진단·테스트 전용이었고, 그동안 사용자는 「이 텍스트가
+/// 내가 올린 것인지 에이전트가 읽은 것인지」를 라벨 **모양**(파일명이냐 문장이냐)으로 짐작해야 했다.
+/// 그것은 규약이 아니라 우연한 상관이라, 사용자가 경로를 적어 보낸 순간 틀린다.
+///
+/// **문자열을 여기서 고르지 않는다.** `origin` 은 호출자가 i18n 테이블에서 뽑아 넘긴다 — 이 모듈은
+/// 화면도 언어도 모르는 순수 계산이어야 Linux 에서 그대로 시험된다.
+///
+/// 순번은 **두 장 이상일 때만** 붙는다(`1/1` 은 알려 주는 것이 없다). `buf` 가 모자라면 붙이지 못한
+/// 조각을 조용히 버린다 — 반쪽 숫자(`2/`)를 남기는 것보다 낫다.
+pub fn originPrefix(buf: []u8, origin: []const u8, seq: u16, seq_total: u16) []const u8 {
+    const has_seq = seq > 0 and seq_total > 1;
+    if (origin.len == 0 and !has_seq) return buf[0..0];
+    if (origin.len == 0) return std.fmt.bufPrint(buf, "{d}/{d}", .{ seq, seq_total }) catch buf[0..0];
+    if (!has_seq) {
+        if (origin.len > buf.len) return buf[0..0];
+        @memcpy(buf[0..origin.len], origin);
+        return buf[0..origin.len];
+    }
+    return std.fmt.bufPrint(buf, "{s} {d}/{d}", .{ origin, seq, seq_total }) catch blk: {
+        if (origin.len > buf.len) break :blk buf[0..0];
+        @memcpy(buf[0..origin.len], origin);
+        break :blk buf[0..origin.len];
+    };
+}
+
+/// 라벨 줄의 자리 나누기 — **순수 결정**이라 화면 없이 시험한다. 칸(cols) 단위다.
+///
+/// 줄은 `[접두] gap [라벨] gap [시각]` 이고, 좁아지면 **시각부터 버린다**. 원래 규율("파일명을 잘라
+/// 시계를 넣지 않는다")을 접두까지 넓힌 것이다: 접두가 시각보다 먼저 자리를 얻는 이유는, 이 줄에
+/// 사용자가 던지는 첫 물음이 「내가 올린 것인가」이기 때문이다. 그래도 라벨이 `min_label` 아래로
+/// 내려가야 한다면 접두 쪽을 포기한다 — 설명이 사라진 줄은 아무 물음에도 답하지 못한다.
+pub const RowSplit = struct {
+    /// 0 이면 그 조각을 그리지 않는다.
+    prefix_cols: u16 = 0,
+    label_cols: u16 = 0,
+    time_cols: u16 = 0,
+};
+
+pub fn splitLabelRow(all_cols: u16, prefix_cols: u16, time_cols: u16, gap: u16, min_label: u16) RowSplit {
+    if (all_cols == 0) return .{};
+    var out: RowSplit = .{ .label_cols = all_cols };
+    if (prefix_cols > 0) {
+        // u32 로 올려 더한다 — 셋을 u16 으로 더하면 넘칠 수 있고, 넘치면 「자리가 남는다」로 뒤집힌다.
+        const want: u32 = @as(u32, prefix_cols) + gap;
+        if (@as(u32, out.label_cols) >= want + min_label) {
+            out.prefix_cols = prefix_cols;
+            out.label_cols = @intCast(@as(u32, out.label_cols) - want);
+        }
+    }
+    if (time_cols > 0) {
+        const want: u32 = @as(u32, time_cols) + gap;
+        if (@as(u32, out.label_cols) >= want + min_label) {
+            out.time_cols = time_cols;
+            out.label_cols = @intCast(@as(u32, out.label_cols) - want);
+        }
+    }
+    return out;
 }
 
 fn foldAscii(c: u8) u8 {
@@ -753,4 +821,67 @@ test "문맥: 상한을 넘으면 자르되 UTF-8 을 깨지 않는다" {
     const got = contextText(line.items, &buf);
     try std.testing.expect(got.len > 0 and got.len <= max_context_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(got)); // 잘린 자리가 글자 한가운데가 아니다
+}
+
+test "접두: 출처와 순번을 한 조각으로 붙인다" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("첨부 2/3", originPrefix(&buf, "첨부", 2, 3));
+    try std.testing.expectEqualStrings("읽음", originPrefix(&buf, "읽음", 0, 0));
+    try std.testing.expectEqualStrings("2/3", originPrefix(&buf, "", 2, 3));
+    try std.testing.expectEqualStrings("", originPrefix(&buf, "", 0, 0));
+}
+
+test "접두: 한 장뿐이면 순번을 붙이지 않는다 — 「1/1」은 소음이다" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("첨부", originPrefix(&buf, "첨부", 1, 1));
+    // 순번을 못 정한 경우(묶음이 상한을 넘었다)도 같다 — 출처만 말한다.
+    try std.testing.expectEqualStrings("첨부", originPrefix(&buf, "첨부", 0, 3));
+}
+
+test "접두: 자리가 모자라면 반쪽 숫자를 남기지 않는다" {
+    // `2/` 처럼 잘린 순번은 틀린 정보다. 못 붙이면 출처만, 그것도 못 담으면 빈 값이다.
+    var small: [7]u8 = undefined; // "첨부 2/3" = 10 B 라 안 들어간다("첨부" = 6 B 는 들어간다)
+    try std.testing.expectEqualStrings("첨부", originPrefix(&small, "첨부", 2, 3));
+    var tiny: [2]u8 = undefined;
+    try std.testing.expectEqualStrings("", originPrefix(&tiny, "첨부", 2, 3));
+    var none: [0]u8 = undefined;
+    try std.testing.expectEqualStrings("", originPrefix(&none, "", 2, 3));
+}
+
+test "자리 나누기: 넉넉하면 셋을 다 싣는다" {
+    const s = splitLabelRow(30, 6, 5, 1, 6);
+    try std.testing.expectEqual(@as(u16, 6), s.prefix_cols);
+    try std.testing.expectEqual(@as(u16, 5), s.time_cols);
+    try std.testing.expectEqual(@as(u16, 17), s.label_cols); // 30 - (6+1) - (5+1)
+}
+
+test "자리 나누기: 좁아지면 시각부터 버린다" {
+    // 라벨이 최소(6)를 못 지키게 되는 순간 시각이 빠진다 — 접두는 남는다.
+    const s = splitLabelRow(14, 6, 5, 1, 6);
+    try std.testing.expectEqual(@as(u16, 6), s.prefix_cols);
+    try std.testing.expectEqual(@as(u16, 0), s.time_cols);
+    try std.testing.expectEqual(@as(u16, 7), s.label_cols);
+}
+
+test "자리 나누기: 그래도 모자라면 접두까지 버린다 — 설명이 먼저다" {
+    const s = splitLabelRow(10, 6, 5, 1, 6);
+    try std.testing.expectEqual(@as(u16, 0), s.prefix_cols);
+    try std.testing.expectEqual(@as(u16, 0), s.time_cols);
+    try std.testing.expectEqual(@as(u16, 10), s.label_cols);
+}
+
+test "자리 나누기: 빈 줄과 없는 조각" {
+    try std.testing.expectEqual(RowSplit{}, splitLabelRow(0, 6, 5, 1, 6));
+    const s = splitLabelRow(20, 0, 0, 1, 6);
+    try std.testing.expectEqual(@as(u16, 0), s.prefix_cols);
+    try std.testing.expectEqual(@as(u16, 0), s.time_cols);
+    try std.testing.expectEqual(@as(u16, 20), s.label_cols);
+}
+
+test "자리 나누기: 큰 값이 넘쳐 「자리가 남는다」로 뒤집히지 않는다" {
+    // u16 으로 더하면 65535 + gap 이 감겨 조건이 참이 되고, 라벨 폭이 음수로 돌아간다.
+    const s = splitLabelRow(100, 65535, 65535, 1, 6);
+    try std.testing.expectEqual(@as(u16, 0), s.prefix_cols);
+    try std.testing.expectEqual(@as(u16, 0), s.time_cols);
+    try std.testing.expectEqual(@as(u16, 100), s.label_cols);
 }

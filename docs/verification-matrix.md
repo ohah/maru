@@ -1041,6 +1041,13 @@ U5 artifact attestation 발급 action은 한 invocation이 canonical absolute re
 executable과 authored evidence/manifest는 최종 release workflow가 이 action을 네 번 따로 호출한다. 이 component는 workflow
 permissions, protected environment, 실제 attestation 발급이나 draft attach/publish를 완료했다는 증거가 아니다.
 
+U5 same-run candidate bundle 소비는 기존 final-address `CandidateAttestation` owner가 맡는다.
+`test-session-host-release-adapter-candidate-attestation`은 candidate DMG/frozen과 두 local bundle의 no-follow pin·pairwise distinct
+identity·role별 크기 상한, DMG→frozen `verifyBundleWith` exact order, token-free child, shared deadline, 각 child 전후 candidate/bundle/CLI
+fence와 terminal publication을 Debug·ReleaseFast에서 검증한다. API 조회형 경로는 기존 호환 계약으로 남지만 bundle 진입점에서의
+fallback은 0이다. 이 gate는 candidate command 입력 배선, prepare/resume process 분리, aggregate handoff, live workflow 또는 frozen
+signed U5 제품 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

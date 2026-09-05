@@ -11,6 +11,7 @@ const c = std.c;
 const entrypoint = @import("entrypoint.zig");
 const code_signature = @import("code_signature.zig");
 const host_authority = @import("host_authority.zig");
+const host_log = @import("host_log.zig");
 const host_manifest = @import("host_manifest.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
 const owner_lease = @import("owner_lease.zig");
@@ -60,22 +61,35 @@ fn runImpl(
     invocation: entrypoint.RestoreInvocation,
     notification_adapter: ?notification_os_delivery.Adapter,
 ) !void {
-    _ = try bootstrapProcessSeal();
+    // 복원은 다섯 단계인데 실패하면 호출자에는 에러 이름 하나만 올라간다. 2026-09-05 에 3 일 넘게
+    // 살아 있던 host 가 `InvalidValue` 로 죽고 세션 22 개를 잃었을 때, 남은 단서는 그 이름뿐이라 어느
+    // 단계였는지 끝내 특정하지 못했다 — 이름만으로는 후보가 여러 단계에 걸쳐 있다. 그래서 단계마다
+    // 이름을 붙여 남긴다. 진단은 제품 경로를 바꾸지 않는다(실패는 그대로 전파된다).
+    _ = bootstrapProcessSeal() catch |err| {
+        host_log.line("restore stage failed: stage=process_seal err={s}", .{@errorName(err)});
+        return err;
+    };
 
-    var armed = try upgrade_bootstrap.armRestoreInvocation(
+    var armed = upgrade_bootstrap.armRestoreInvocation(
         allocator,
         invocation,
-    );
+    ) catch |err| {
+        host_log.line("restore stage failed: stage=arm err={s}", .{@errorName(err)});
+        return err;
+    };
     var armed_active = true;
     defer if (armed_active) armed.deinit();
 
     var rollback_exec: ?upgrade_bootstrap.PreparedRollbackExec =
         if (invocation.role == .target)
-            try upgrade_bootstrap.PreparedRollbackExec.prepare(
+            upgrade_bootstrap.PreparedRollbackExec.prepare(
                 allocator,
                 &armed,
                 invocation,
-            )
+            ) catch |err| {
+                host_log.line("restore stage failed: stage=rollback_prepare err={s}", .{@errorName(err)});
+                return err;
+            }
         else
             null;
     defer if (rollback_exec) |*prepared| prepared.deinit();
@@ -85,6 +99,10 @@ fn runImpl(
         io,
         invocation,
     ) catch |err| {
+        host_log.line("restore stage failed: stage=validate_image err={s} rollback={s}", .{
+            @errorName(err),
+            if (rollback_exec != null) "armed" else "none",
+        });
         if (rollback_exec) |*prepared|
             prepared.execute() catch return error.RollbackExecFailed;
         return err;
@@ -101,6 +119,15 @@ fn runImpl(
         &rollback_allowed,
         notification_adapter,
     ) catch |err| {
+        // `rollback_allowed` 가 여기서 결정적이다. `activateValidated` 는 authority 를 잡고 소유권을
+        // 커밋하는 순간 이 플래그를 내리는데(롤백 금지선), 그 뒤의 실패는 **설계상** 롤백하지 않는다.
+        // 로그에 이 값이 없으면 「롤백이 왜 안 걸렸나」를 사후에 판별할 수 없다 — 결함과 정상 동작이
+        // 같은 한 줄로 보인다.
+        host_log.line("restore stage failed: stage=activate err={s} rollback_allowed={s} rollback={s}", .{
+            @errorName(err),
+            if (rollback_allowed) "yes" else "no",
+            if (rollback_exec != null) "armed" else "none",
+        });
         if (rollback_allowed and err != error.AuthorityPoisoned) {
             if (rollback_exec) |*prepared|
                 prepared.execute() catch return error.RollbackExecFailed;

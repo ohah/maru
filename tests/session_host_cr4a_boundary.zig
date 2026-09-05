@@ -665,7 +665,10 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     const restore_run_end = std.mem.indexOfPos(u8, restore_activation, restore_run_start, "fn bootstrapProcessSeal()") orelse
         return error.TestUnexpectedResult;
     const restore_run = restore_activation[restore_run_start..restore_run_end];
-    const bootstrap_pos = std.mem.indexOf(u8, restore_run, "_ = try bootstrapProcessSeal();") orelse
+    // 호출 **위치**만 본다. 이 경계가 고정하는 것은 seal → arm → activate 라는 순서이지 오류 전파
+    // 표현이 아니다. 예전 needle 은 `_ = try bootstrapProcessSeal();` 전체였는데, 실패 단계를 로그로
+    // 남기려고 `try` 를 `catch |err| { … }` 로 바꾸자 순서가 그대로인데도 경계가 깨졌다.
+    const bootstrap_pos = std.mem.indexOf(u8, restore_run, "bootstrapProcessSeal()") orelse
         return error.TestUnexpectedResult;
     const arm_pos = std.mem.indexOf(u8, restore_run, "upgrade_bootstrap.armRestoreInvocation(") orelse
         return error.TestUnexpectedResult;

@@ -145,6 +145,10 @@ test "retained close preserves the complete aggregate and revokes old authority"
 }
 
 test "source owners roots identities and destination are fail closed" {
+    const product_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_aggregate_handoff.zig", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(product_source);
+    try std.testing.expect(std.mem.indexOf(u8, product_source, "stat.uid == c.geteuid()") != null);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, product_source, "validOwnedDirectory("));
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();

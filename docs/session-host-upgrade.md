@@ -2914,7 +2914,7 @@ direct child여야 한다. 다섯 source inode는 pairwise distinct이고 eviden
 않으며, 다음 process가 fixed destination role과 exact artifact subject를 함께 §11.47에 넣어 그 교환을 fail-close한다.
 
 aggregate는 다섯 leaf를 final pathname에 차례로 게시하지 않는다. absent durable destination directory와 같은 parent 아래에
-owner-only staging directory를 배타 생성하고, source held fd/path/size/SHA를 각 read 전후 다시 검증하면서 evidence의 exact basename과
+current effective UID 소유의 owner-only staging directory를 배타 생성하고, source held fd/path/size/SHA를 각 read 전후 다시 검증하면서 evidence의 exact basename과
 네 fixed role basename으로 복사한다. 각 destination leaf는 create-exclusive·`0600`·no-follow regular-file·single-link이며 file sync를
 마친다. 다섯 leaf가 전부 source와 다른 inode이고 role별 size/SHA가 일치하며 pairwise distinct임을 held descriptor로 확인한 뒤 staging
 directory를 sync하고, absent final directory 이름으로 no-replace rename하고, parent directory를 sync한 뒤에만 aggregate를 게시한다.
@@ -2929,7 +2929,8 @@ held/path inode를 전부 재검증하며 일부 leaf만 반환하지 않는다.
 parent를 sync한다. syscall 중간 실패는 canonical final에 partial aggregate를 남기지 않고 `cleanup_required` owner가 남은 exact leaf와
 tomb directory를 재시도한다. 어느 pathname이라도 symlink·hardlink·다른 inode로 교체되면 foreign entry를 삭제하지 않고 retry/audit
 authority를 보존한다. `closeRetaining()`은 마지막 full revalidation 뒤 모든 child와
-directory/parent descriptor를 tombstone-before-close로 닫고 final directory는 남긴다. 그 뒤 `retained_closed` aggregate는 조회·삭제·
+directory/parent descriptor를 tombstone-before-close로 닫고 final directory는 남긴다. 생성 직후와 모든 후속 fence는 staging/final
+directory의 current effective UID와 exact `0700` mode를 함께 재검증한다. 그 뒤 `retained_closed` aggregate는 조회·삭제·
 재승격 권한을 되찾지 못한다. 따라서 다음 process는 과거 process-local pointer나 fd를 직렬화하지 않고 final directory의 canonical
 pathname들만 새로 no-follow pin하고 §11.47 cryptographic verification을 다시 수행한다.
 
@@ -3125,6 +3126,49 @@ focused gate `test-session-host-release-adapter-contract`, `test-session-host-re
 `composeBundlesUntil` sole call과 API-backed `composeUntil` call 0, token-free child 경계를 Debug·ReleaseFast에서 검증한다. 이 단계는
 live command가 단계 2 output을 소비하게 하지만 단계 3 뒤 process 종료, evidence/manifest action, aggregate prepare/finalize 삽입,
 release workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
+
+### 11.55 stage 3 output의 atomic durable preparation handoff
+
+§11.52 단계 3을 마친 process의 `PinnedReleaseFile`, draft owner, candidate graph 또는 baseline workspace descriptor를 다음
+process로 넘기지 않는다. `release_adapter_candidate_preparation_handoff.zig`의 caller-owned final-address
+`DurablePreparation`이 이미 authoring을 마친 held canonical baseline evidence와 candidate manifest 두 source를 하나의 absent durable
+destination directory로 승격한다. source는 role별 canonical absolute pathname과 exact parent root의 direct child이고, 두 inode는
+서로 달라야 한다. evidence는 `release_evidence.max_evidence_bytes`, manifest는 `release_manifest.max_manifest_bytes`, 합계는 두
+상한의 합을 넘지 않는다. owner는 held bytes를 canonical parse하고 evidence profile/role이 baseline A, 양쪽 result가 passed인지
+확인한다. repository id/owner/name, release id/tag/version, source commit/tree, workflow ref/run ID/attempt와 test UUID를 양쪽에서 exact
+비교하고, manifest의 evidence name/size/SHA와 evidence held observation을 결속한다. destination evidence leaf는 exact
+`baseline-evidence.json`, manifest leaf는 parsed manifest version에서 유도한 exact
+`Maru-<version>-session-host-release.json`이다. caller가 role 배열, destination leaf, digest, size, release/draft ID, version 또는 성공
+boolean을 제출하지 않는다. 이 leaf는 remote draft를 만들거나 조회하지 않고 `GH_TOKEN`, GitHub CLI, Apple secret, HOME 또는 PATH를
+받지 않는다.
+
+handoff는 final directory에 두 파일을 차례로 보이게 하지 않는다. absent destination과 같은 parent 아래 current effective UID 소유의 owner-only staging
+directory를 배타 생성하고, 각 held source의 pathname/inode/size/SHA를 read 전후 재검증하면서 fixed evidence→manifest 순서로
+create-exclusive `0600` leaf에 복사한다. 두 destination leaf는 source와 다른 inode이고 size/SHA가 같으며 서로 다른 inode여야 한다.
+각 file sync, staging directory sync, absent final name으로 no-replace rename, parent directory sync와 마지막 full source/final fence를
+모두 통과한 뒤에만 result를 게시한다. allocation/read/write/sync/rename 실패와 source drift에서 incomplete final directory를 성공으로
+반환하지 않는다. final rename 전 실패는 exact staging inode만 회수하고, rename 뒤 완료 여부를 확정하지 못한 실패는 pathname을 따라
+추측 삭제하지 않으며 `CleanupFailed`와 held exact authority를 보존한다.
+
+`DurablePreparation`은 wrapper·final directory·두 nested file owner의 final address, canonical destination pathname과 parent/final
+directory identity, fixed leaf order와 각 inode/size/SHA를 한 seal로 결속한다. `value`와 `revalidate`는 exact two-entry directory와
+source-independent destination identity, current effective UID와 exact `0700` mode를 전부 다시 확인하고 일부 leaf view를 공개하지 않는다. `cleanup`은 final directory와 두
+leaf가 여전히 held inode를 가리킬 때만 private cleanup tomb로 no-replace rename한 뒤 manifest→evidence 역순으로 제거하고 directory와
+parent를 sync한다. symlink·hardlink·pathname replacement는 foreign entry를 삭제하지 않고 retry owner를 보존한다.
+`closeRetaining()`은 마지막 full revalidation 뒤 file/directory/parent descriptor를 tombstone-before-close로 닫고 durable directory는
+남긴다. 성공 뒤 old owner는 `retained_closed`라 조회·삭제·재승격 권위를 되찾지 못하며, 다음 process는 canonical final directory
+pathname만 받아 별도 reopen owner로 새로 검증해야 한다.
+
+focused gate `test-session-host-release-adapter-candidate-preparation-handoff`는 Debug·ReleaseFast actual filesystem에서 fixed two-role
+promotion, canonical/profile/release binding, source/root/destination·owner alias와 duplicate inode, source drift, role별/합계 size cap, pre-existing final, 모든 publication
+fail-index, partial final visibility 0, copy/move/final-address, final directory/leaf replacement 때 foreign entry 보존, exact cleanup,
+retained close 뒤 두 bytes 생존과 old-owner 권한 소멸을 검증한다. 별도 ReleaseFast 측정 행은 harness-owned `mkdtemp`에서 40회
+promotion→source 제거→full revalidation→retained close를 실행해 단계별 median·p95·max, 실패 수, parent FD delta와 staging/final
+inventory를 canonical diagnostic으로 기록한다. expected retained final은 40개를 직접 재관측하고 unexpected staging residue는 0이어야
+한다. 측정값은 성공 권위나 제품 latency budget이 아니다. 테스트는 실제 앱
+session-host registry·manifest·socket·process와 GitHub release를 찾거나 수정하지 않는다. 이 slice는 atomic stage-3 storage만
+닫으며 다음 process의 semantic reopen, stage-3 prepare command, stage-4 이후 resume command, live workflow와 frozen signed U5 E2E는
+아직 완료하지 않는다.
 
 ## 12. 필수 적대적 검증
 

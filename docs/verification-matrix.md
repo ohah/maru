@@ -2733,7 +2733,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   atomic publication을 검증한다. Debug·ReleaseFast 실제 filesystem 행은 publish와 cleanup 양쪽의 partial final visibility 0,
   source·destination inode/SHA, replacement 보존, cleanup tomb retry, retained close 뒤 생존과 옛 owner 권한 소멸을 고정하며 harness-owned 임시 루트의 APFS 40회 실측에서 단계별
   median·p95·max, 실패 수, FD delta와 staging residue를 남긴다. opaque bundle의 artifact-role 교환 판정은 handoff가 아니라 다음
-  process의 §11.47 exact-subject 검증이 소유한다. split prepare/finalize reopen·semantic binding과 live workflow wiring은 후속 범위다.
+  process의 §11.47 exact-subject 검증이 소유한다. atomic handoff leaf 단독으로는 reopen·semantic binding을 완료하지 않으며 live workflow wiring도 후속 범위다.
+  `test-session-host-release-adapter-candidate-aggregate-reopen`은 retained close 뒤 canonical final directory에서 다섯 leaf와 외부
+  DMG·frozen·manifest를 새 final-address owner로 pin하고, fixed DMG→frozen→evidence→manifest 순서의 local bundle verification이
+  exact subject name/SHA와 같은 context/run에 결속된 뒤에만 verified aggregate를 게시함을 Debug·ReleaseFast actual filesystem에서
+  검증한다. directory/leaf/artifact/CLI 전후 drift, role 교환, duplicate inode, copied/pre-owned/alias, deadline·child·allocation 전
+  fail-index는 publication 0이고 durable bytes와 descriptor count를 보존한다. 이 gate는 process-independent reopen/semantic handoff 계약까지
+  닫지만 live workflow의 process 실행/IPC, 실제 GitHub bundle과 frozen signed U5 제품 E2E는 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.
   verified release statement의 exact repository ID/release ID/tag/purl, purl subject의 tag-ref SHA-1과 manifest가 열거한

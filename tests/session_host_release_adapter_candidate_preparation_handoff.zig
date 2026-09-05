@@ -353,7 +353,7 @@ test "APFS preparation handoff records forty isolated samples without FD or stag
     std.debug.print("preparation_handoff_apfs mode={s} samples=40 failures=0 fd_delta=0 promote_median_ns={d} promote_p95_ns={d} promote_max_ns={d} revalidate_median_ns={d} revalidate_p95_ns={d} revalidate_max_ns={d} close_median_ns={d} close_p95_ns={d} close_max_ns={d} retained_finals=40 staging_residue=0\n", .{ @tagName(builtin.mode), promote_ns[20], promote_ns[37], promote_ns[39], revalidate_ns[20], revalidate_ns[37], revalidate_ns[39], close_ns[20], close_ns[37], close_ns[39] });
 }
 
-test "preparation handoff is credential-free and product-dormant" {
+test "preparation handoff is credential-free with one stage3 product caller" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_preparation_handoff.zig", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(source);
     try std.testing.expect(std.mem.indexOf(u8, source, "stat.uid == c.geteuid()") != null);
@@ -364,7 +364,8 @@ test "preparation handoff is credential-free and product-dormant" {
     defer src.close(std.testing.io);
     var walker = try posixWalk(src, std.testing.allocator);
     defer walker.deinit();
-    var product_callers: usize = 0;
+    var unexpected_callers: usize = 0;
+    var stage3_product_seen = false;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind == .sym_link) return error.TestUnexpectedResult;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
@@ -373,9 +374,14 @@ test "preparation handoff is credential-free and product-dormant" {
         if (std.mem.eql(u8, entry.path, "platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig")) continue;
         const product = try src.readFileAlloc(std.testing.io, entry.path, std.testing.allocator, .limited(16 * 1024 * 1024));
         defer std.testing.allocator.free(product);
-        product_callers += std.mem.count(u8, product, "release_adapter_candidate_preparation_handoff");
+        const callers = std.mem.count(u8, product, "release_adapter_candidate_preparation_handoff");
+        if (std.mem.eql(u8, entry.path, "platform/macos/session_host/release_adapter_candidate_stage3_preparation_product.zig")) {
+            try std.testing.expectEqual(@as(usize, 1), callers);
+            stage3_product_seen = true;
+        } else unexpected_callers += callers;
     }
-    try std.testing.expectEqual(@as(usize, 0), product_callers);
+    try std.testing.expect(stage3_product_seen);
+    try std.testing.expectEqual(@as(usize, 0), unexpected_callers);
 }
 
 fn replaceHeld(owner: *files.PinnedReleaseFile, path: [:0]const u8, bytes: []const u8, cap: usize) !void {

@@ -10,6 +10,13 @@ pub const Error = files.Error || error{
     InvalidPath,
     SourceChanged,
     CleanupFailed,
+    DescriptorCloseFailed,
+};
+
+pub const Phase = enum {
+    pristine,
+    open,
+    retained_closed,
 };
 
 pub const Value = struct {
@@ -19,6 +26,7 @@ pub const Value = struct {
 
 pub const DurableEvidence = struct {
     owner: ?*DurableEvidence = null,
+    phase: Phase = .pristine,
     file: files.PinnedReleaseFile = .{},
     destination: [std.fs.max_path_bytes:0]u8 = @splat(0),
     destination_len: usize = 0,
@@ -27,7 +35,7 @@ pub const DurableEvidence = struct {
     leaf_present: bool = false,
 
     pub fn value(self: *const @This()) ?Value {
-        if (self.owner != self or !self.leaf_present or !validStorage(self) or
+        if (self.owner != self or self.phase != .open or !self.leaf_present or !validStorage(self) or
             self.file.owner != &self.file)
             return null;
         const observation = self.file.value() orelse return null;
@@ -45,7 +53,7 @@ pub const DurableEvidence = struct {
     /// Deletes only the exact inode published by this owner. A pathname replacement remains
     /// untouched and leaves this owner available for explicit recovery/audit.
     pub fn cleanup(self: *@This()) Error!void {
-        if (self.owner != self or self.file.owner != &self.file or !validStorage(self))
+        if (self.owner != self or self.phase != .open or self.file.owner != &self.file or !validStorage(self))
             return error.InvalidOwner;
         if (self.leaf_present) {
             const path: [:0]const u8 = self.destination[0..self.destination_len :0];
@@ -65,6 +73,23 @@ pub const DurableEvidence = struct {
         if (c.fsync(self.file.parent_fd) != 0) return error.CleanupFailed;
         self.file.deinit() catch return error.CleanupFailed;
         self.* = .{};
+    }
+
+    /// Drops only process-local descriptors. The durable leaf remains for a later process, while
+    /// the final-address tombstone prevents this old capability from regaining deletion authority.
+    pub fn closeRetaining(self: *@This()) Error!void {
+        if (self.owner != self or self.phase != .open or self.file.owner != &self.file or !validStorage(self))
+            return error.InvalidOwner;
+        _ = try self.revalidate();
+
+        const file_fd = self.file.fd;
+        const parent_fd = self.file.parent_fd;
+        self.file = .{};
+        self.phase = .retained_closed;
+
+        const file_close_failed = c.close(file_fd) != 0;
+        const parent_close_failed = c.close(parent_fd) != 0;
+        if (file_close_failed or parent_close_failed) return error.DescriptorCloseFailed;
     }
 };
 
@@ -115,6 +140,7 @@ pub fn promote(
     result.leaf_len = destination_leaf.len;
     result.leaf_present = true;
     result.owner = result;
+    result.phase = .open;
 
     const published = result.revalidate() catch {
         result.cleanup() catch return error.CleanupFailed;
@@ -130,7 +156,7 @@ pub fn promote(
 }
 
 fn pristine(value: *const DurableEvidence) bool {
-    return value.owner == null and value.file.owner == null and value.file.fd < 0 and value.file.parent_fd < 0 and
+    return value.owner == null and value.phase == .pristine and value.file.owner == null and value.file.fd < 0 and value.file.parent_fd < 0 and
         value.destination_len == 0 and value.leaf_len == 0 and !value.leaf_present;
 }
 

@@ -104,7 +104,12 @@ echo "§5 안전 영역은 네 변 다"
 # **선언이 아니라 읽는 자리를 센다** — `got_left = 0` 같은 초기화까지 세면 실제 조회를 지워도
 # 수가 그대로다(변이로 확인했다).
 ck "Android 가 네 변을 다 읽는다" 4 "$(grep -c 'GetFieldID(env, boxCls, "' $A)"
-ck "Android 가 좌우를 폭에서 뺀다" 1 "$(grep -c 'g.inset_left - g.inset_right' $A)"
+# **빼는 것은 이제 코어다**(`maru_mobile_available_logical`). 예전에는 두 host 가 각자 뺐고
+# 「키보드가 하단 inset 을 덮으니 두 번 빼지 않는다」가 iOS 의 ObjC 와 Android 의 Java 에
+# **각자** 적혀 있었다 — 같은 사실이 두 자리면 한쪽만 고쳐진다. 그래서 세는 것도 옮긴다:
+# 두 host 가 그 함수에 **네 변을 다 넘기는가**.
+ck "두 host 가 가용 크기를 코어에 묻는다" 2 "$(grep -l 'maru_mobile_available_logical(' $I $A | wc -l | tr -d ' ')"
+ck "Android 가 좌우 inset 을 코어로 넘긴다" 1 "$(grep -c 'g.inset_left, (unsigned int)g.inset_right' $A)"
 ck "Android 가 좌측만큼 그림을 민다" 1 "$(grep -c 'float ox = (float)g.inset_left;' $A)"
 # **그리는 자리와 누르는 자리가 같아야 한다** — 폭만 줄이고 터치를 안 옮기면 오른쪽 끝이 안 눌린다.
 ck "Android 터치 x 가 좌측 inset 을 뺀다" 0 "$(grep -cE 'AMotionEvent_getX\(ev, [0-9a-z]+\) / g.scale' $A)"

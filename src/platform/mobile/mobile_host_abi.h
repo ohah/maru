@@ -678,6 +678,23 @@ unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 ///
 /// **터미널 흐름과 섞지 않는다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다.
 
+/// **그릴 수 있는 논리 크기.** 창 크기에서 시스템이 가리는 만큼과 소프트 키보드를 빼고 배율로
+/// 나눈다. host 는 **잰 값을 그대로** 준다 — 보정은 코어가 한 번만 한다.
+///
+/// `keyboard_from_bottom` 은 **화면 하단부터** 잰 높이다(0 이면 키보드가 없다). 그래서 하단
+/// inset(제스처 바·3버튼 바·홈 인디케이터)과 **겹치는데, 그 겹침을 코어가 접는다** — host 가
+/// 미리 빼서 주면 안 된다. 그 보정이 예전에는 두 host 에 각자 있었다.
+///
+/// `scale_milli` 는 논리 단위당 픽셀 × 1000: iOS 는 UIKit 이 이미 pt 를 주므로 `1000`,
+/// Android 는 px 라 `density/160*1000`. 0 이면 1000 으로 본다.
+///
+/// 결과는 **최소 1** 이다 — 0 칸 격자는 그리는 쪽을 죽인다.
+void maru_mobile_available_logical(unsigned int extent_w, unsigned int extent_h,
+                                   unsigned int inset_top, unsigned int inset_bottom,
+                                   unsigned int inset_left, unsigned int inset_right,
+                                   unsigned int keyboard_from_bottom, unsigned int scale_milli,
+                                   unsigned int *out_w, unsigned int *out_h);
+
 /* ── 컨트롤 축: 정책은 코어가 정한다 ────────────────────────────────────────────
    이번 tick 에 host 가 할 일. **하나뿐이다** — 「열고 나서 닫기」는 표현 자체가 없다.
    예전에는 순서·가드·분류·마감이 두 host 의 tick 안에 흩어져 있어 ⑴ 플랫폼이 갈릴 수 있었고

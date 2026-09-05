@@ -681,15 +681,15 @@ static void drawFrame(void) {
     // **좌우도 뺀다.** 안 빼면 곡면 화면에서 **본문 양끝 글자가 모서리에 말리고**, 가로
     // 모드에서는 노치 밑에 깔린다. 홀펀치·평면 기기에서는 이 값이 0 이라 아무 차이가 없어
     // **안 드러난 채 오래 잠복하는** 자리다.
-    int avail_w_px = (int)g.extent.width - g.inset_left - g.inset_right;
-    if (avail_w_px < 1) avail_w_px = 1;
-    unsigned int lw = (unsigned int)(avail_w_px / scale);
-    // **소프트 키보드도 inset 이다.** 안 빼면 키보드가 화면 절반을 덮는데 레이아웃은 그대로라
-    // 하단(보조 키바·상태바)이 통째로 가려진다 — 그 키바의 존재 이유가 "소프트 키보드에
-    // Ctrl·Esc·Tab·화살표가 없다" 인데 정작 키보드가 뜨면 못 쓰게 된다.
-    int avail_px = (int)g.extent.height - (int)g.inset_top - (int)g.inset_bottom - g.keyboard_px;
-    if (avail_px < 1) avail_px = 1;
-    unsigned int lh = (unsigned int)(avail_px / scale);
+    // **잰 값을 그대로 준다.** 하단 inset·키보드 겹침 보정과 하한은 코어가 한다
+    // (`maru_mobile_available_logical`) — 예전에는 그 규칙이 여기와 iOS 의 ObjC 에 **각자**
+    // 적혀 있었고, Java 의 `ImeInsets` 가 한 번 더 접고 있었다. 셋을 하나로 모았다.
+    unsigned int lw = 0, lh = 0;
+    maru_mobile_available_logical((unsigned int)g.extent.width, (unsigned int)g.extent.height,
+                                  (unsigned int)g.inset_top, (unsigned int)g.inset_bottom,
+                                  (unsigned int)g.inset_left, (unsigned int)g.inset_right,
+                                  (unsigned int)g.keyboard_px,
+                                  (unsigned int)(scale * 1000.0f + 0.5f), &lw, &lh);
     // **입력 스레드와 겹치는 구간만 막는다.** IME 가 `maru_mobile_input` 으로 코어에 쓰는
     // 것과 여기서 격자를 읽는 것이 겹치면 셀을 반쯤 쓴 상태로 읽는다. 오류 문자열도 두
     // 스레드가 만지므로 같이 넣는다.

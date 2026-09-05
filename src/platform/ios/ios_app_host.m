@@ -958,10 +958,16 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // 자동으로 키보드 **위**로 올라온다.
     //
     // safe area 하단과 겹치는 만큼은 두 번 빼지 않는다 — 키보드는 홈 인디케이터 영역을 덮는다.
-    CGFloat kb = _keyboardH > safe.bottom ? _keyboardH - safe.bottom : 0;
-    CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
-                                self.bounds.size.height - safe.top - safe.bottom - kb);
-    unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height,
+    // **잰 값을 그대로 준다.** 키보드가 하단 safe area 와 겹치는 만큼을 접는 것은 코어가 한다 —
+    // 예전에는 그 보정이 여기와 Android 의 `ImeInsets` 에 **각자** 적혀 있었다.
+    // UIKit 은 이미 pt 를 주므로 배율은 1000 이다.
+    unsigned int lw = 0, lh = 0;
+    maru_mobile_available_logical((unsigned int)self.bounds.size.width,
+                                  (unsigned int)self.bounds.size.height,
+                                  (unsigned int)safe.top, (unsigned int)safe.bottom,
+                                  (unsigned int)safe.left, (unsigned int)safe.right,
+                                  (unsigned int)_keyboardH, 1000, &lw, &lh);
+    unsigned int n = maru_mobile_build(lw, lh,
                                        (unsigned long long)(CACurrentMediaTime() * 1000.0));
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.

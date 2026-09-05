@@ -1705,6 +1705,10 @@ const screen_fixtures = [_]struct {
     agent: Agent,
     want: State,
     /// 그 상태를 **왜** 그렇게 읽어야 하는지 — 규칙이 바뀌어 깨졌을 때 읽을 사람을 위해.
+    ///
+    /// ⚠️ **값은 영어다.** 이 배열은 `test` 블록 **밖**이라 i18n 원장 스캐너가 제품 경로로 센다
+    /// (계약 §7.2 — 주석과 `test` 블록만 제외한다). 표시 문자열이 아니라 판정자 진단이므로
+    /// 원장을 올리는 대신 영어로 적는다.
     why: []const u8,
     text: []const u8,
 }{
@@ -1712,35 +1716,35 @@ const screen_fixtures = [_]struct {
         .name = "claude-running",
         .agent = .claude,
         .want = .running,
-        .why = "스피너 줄(`✽ Working… `)이 입력창 **위**에 있어도 진행으로 읽어야 한다(§1.1 `beats_position`)",
+        .why = "spinner line sits ABOVE the composer; must still read as running (see beats_position)",
         .text = @embedFile("agent_screens/claude-running.txt"),
     },
     .{
         .name = "claude-idle",
         .agent = .claude,
         .want = .idle,
-        .why = "같은 자리가 `done` 으로 바뀌면 `…` 이 없다 — 진행 규칙이 idle 을 통째로 막지 않는다",
+        .why = "same slot turns into `done` with no ellipsis; the running rule must not block idle",
         .text = @embedFile("agent_screens/claude-idle.txt"),
     },
     .{
         .name = "codex-running",
         .agent = .codex,
         .want = .running,
-        .why = "`• Working (… esc to interrupt)` — `•` 는 범용 마커라 `esc to interrupt` 가 가른다",
+        .why = "bullet is a generic marker; only `esc to interrupt` separates running from done",
         .text = @embedFile("agent_screens/codex-running.txt"),
     },
     .{
         .name = "codex-waiting",
         .agent = .codex,
         .want = .running,
-        .why = "`Waiting` 도 진행이다. 예전 규칙은 `working` 문구까지 요구해 이 화면을 놓쳤다",
+        .why = "`Waiting` is running too; the old rule also demanded `working` and missed this screen",
         .text = @embedFile("agent_screens/codex-waiting.txt"),
     },
     .{
         .name = "codex-idle",
         .agent = .codex,
         .want = .idle,
-        .why = "완료 줄(`Ran`·`Waited`·`Explored`)은 같은 `•` 마커여도 `esc to interrupt` 가 없다",
+        .why = "done lines (Ran/Waited/Explored) share the bullet but carry no `esc to interrupt`",
         .text = @embedFile("agent_screens/codex-idle.txt"),
     },
 };

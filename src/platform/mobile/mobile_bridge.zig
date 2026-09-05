@@ -4685,6 +4685,8 @@ fn stepSetFling() void {
     // **서버 목록도 같은 걸음으로 흐른다.** 한쪽만 밟으면 손을 뗀 뒤 그 화면만 즉시 멈춘다 —
     // 같은 손짓이 화면마다 다르게 굴면 사용자는 매번 시험해 봐야 한다.
     _ = srv_touch.step(&srv_sa, @intFromFloat(@max(0, srv_max_scroll)), frame_dt_ms);
+    // 세션 목록도 같은 걸음이다 — 한쪽만 밟으면 손을 뗀 뒤 그 화면만 즉시 멈춘다.
+    _ = sess_touch.step(&sess_sa, @intFromFloat(@max(0, sess_max_scroll)), frame_dt_ms);
 }
 
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
@@ -4812,6 +4814,31 @@ var sess_servers_rect: SetRect = .{};
 /// 하나를 고치면 다른 하나가 조용히 바뀐다.
 var sess_press: gesture.Press = .{};
 
+// ── 세션 목록은 «흐른다» ──────────────────────────────────────────────────────────
+//
+// **예전에는 안 흘렀다.** 줄을 평범한 루프로 그리고 창을 넘으면 `return` 했다 — 오프셋이라는
+// 개념 자체가 없었다. 그래서 맥에 탭이 열둘쯤 넘으면 **그 뒤 세션은 폰에서 닿을 수가 없었다**.
+// 전환을 「덮개」로 정한 이상(계획 U0) 이 목록이 **세션을 바꾸는 유일한 통로**라, 통로에 못 가는
+// 세션이 생긴다는 뜻이다. 들어가는 줄 수는 창에 달렸고(대략 열하나) 그 위는 조용히 사라졌다.
+//
+// 규칙은 서버 목록·설정과 같은 것을 쓴다(`chrome.ui.scroll_area`) — 같은 손짓이 화면마다 다르게
+// 굴면 사용자는 매번 시험해 봐야 한다.
+var sess_list: SetRect = .{};
+var sess_sa: scroll_area.State = .{};
+var sess_touch: scroll_area.Touch = .{};
+var sess_max_scroll: f32 = 0;
+
+/// 지금 스크롤 위치(px).
+fn sessScroll() f32 {
+    return @floatFromInt(sess_sa.offset_y_px);
+}
+
+/// 그 사각이 목록 창 **안에 보이나**. 안 보이면 rect 를 안 남긴다 — 남기면 화면 밖인데 눌린다
+/// (설정 목록에서 겪은 결함이다).
+fn sessVisible(y: f32, h: f32) bool {
+    return y + h >= sess_list.y and y <= sess_list.y + sess_list.h;
+}
+
 /// 세션 목록. **이 앱의 뿌리 화면이다**(UX §2.2). 지금 실을 수 있는 것은 **진짜 세션 하나**뿐이라
 /// 한 줄이다 — 목록을 채워 보이려고 없는 세션을 그리지 않는다(계약 §2.4 가 경고한 자리이고,
 /// 실제로 그렇게 그린 탭 셋을 U3a 에서 걷어냈다). 서버 목록·연결 진단은 **서버가 0개**이므로
@@ -4850,12 +4877,28 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     // ── 줄 하나: 지금 있는 세션. **48 이 아니라 56 이다** — 나중에 `cwd`·상태가 두 번째 줄로
     // 붙을 자리이고(M3), 그때 높이가 바뀌면 손가락이 겨눈 자리가 움직인다.
     const row_h: f32 = 56;
-    sess_row_rect = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = row_h };
-    if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
-    pushText(session_title, @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
-    push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y + row_h), .w = @intFromFloat(sess_row_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
-    drawServersEntry(win, tk, row_h);
-    drawRemoteSessions(win, tk, sess_servers_rect.y + row_h + 1);
+    // **헤더는 고정, 그 아래가 흐른다**(서버 목록·설정과 같은 자리). 헤더까지 흘리면 톱니가
+    // 화면 밖으로 나가 설정에 못 들어간다.
+    sess_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
+    sess_sa.clamp(@intFromFloat(@max(0, sess_max_scroll)));
+    const top = sess_list.y - sessScroll();
+
+    sess_row_rect = if (sessVisible(top, row_h)) .{ .x = win.x, .y = top, .w = win.w, .h = row_h } else .{};
+    if (sess_row_rect.w > 0) {
+        if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        pushText(session_title, @intFromFloat(win.x + 16), @intFromFloat(top + (row_h - 17) / 2), 17, tk.get(.surface_fg));
+        push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(top + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    }
+    const servers_top = top + row_h + 1;
+    drawServersEntry(win, tk, row_h, servers_top);
+    const remote_h = drawRemoteSessions(win, tk, servers_top + row_h + 1);
+
+    // **내용 높이는 그리면서 잰다.** 원격 줄 수는 매 프레임 달라지고(목록이 갱신된다) 메시지
+    // 갈래는 줄 높이가 아니라 글줄이 정한다 — 미리 계산하면 그 지식이 두 자리에 산다.
+    // 이번 프레임의 clamp 는 위에서 **직전 값**으로 했으므로, 목록이 줄어든 그 프레임 한 장만
+    // 넘겨 그려질 수 있다(다음 프레임에 제자리). 늘어날 때는 어긋나지 않는다.
+    const content = row_h + 1 + row_h + 1 + remote_h;
+    sess_max_scroll = @max(0, content - sess_list.h);
 }
 
 /// **그 PC 의 세션들**(S10d-2). 서버 목록 아래에 붙는다 — 뜻이 다르다(하나는 붙을 수 있는 것,
@@ -4900,7 +4943,8 @@ pub fn remoteOffMessage() []const u8 {
     return remote_off_msg[0..remote_off_msg_len];
 }
 
-fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
+/// 그린 **내용 높이**를 돌려준다 — 부르는 쪽이 그것으로 스크롤 상한을 잡는다.
+fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
     // **여는 판정은 그리는 자리에서 한다.** 화면 전환은 여러 경로로 일어나므로 그 전부에
     // 갈고리를 달면 하나를 빠뜨린다 — 여기는 목록을 실제로 그리는 유일한 자리다.
     noteControlScreen(true);
@@ -4924,7 +4968,7 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);
         @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
         remote_shown = .off;
-        return;
+        return row_h;
     }
 
     if (control_client.state == .off) {
@@ -4955,31 +4999,35 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);
         @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
         remote_shown = .off;
-        return;
+        return row_h;
     }
 
     if (!control_listed) {
         // 아직 안 받았다. **비어 있다고 말하지 않는다.**
         pushText(maru.i18n.tIn(.ko, .mob_sessions_loading), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
         remote_shown = .loading;
-        return;
+        return row_h;
     }
 
     if (control_row_count == 0) {
         pushText(maru.i18n.tIn(.ko, .mob_sessions_none), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
         remote_shown = .none;
-        return;
+        return row_h;
     }
 
     remote_shown = .rows;
     remote_row0 = .{ .x = win.x, .y = top, .w = win.w, .h = row_h };
     for (control_rows[0..control_row_count]) |*row| {
-        // 화면 밖으로 나가면 그만 그린다 — 스크롤은 U1 이 준다(여기서 흉내 내지 않는다).
-        if (y > win.y + win.h) return;
-        drawSessionRow(win, tk, row, y, row_h);
+        // **안 보이는 줄은 안 그린다 — 그래도 «센다».** 예전에는 창을 넘는 순간 `return` 해서
+        // 그 아래 세션이 통째로 사라졌다(맥에 탭이 열둘쯤 넘으면 닿을 수가 없었다). 지금은
+        // 목록이 흐르므로 위로 지나간 줄도 아래로 남은 줄도 높이에 들어가야 상한이 맞는다.
+        if (sessVisible(y, row_h)) drawSessionRow(win, tk, row, y, row_h);
+        // **센 것은 «있는 줄» 이지 그린 줄이 아니다.** 이 수는 히트 판정(`remoteRowAt`)과
+        // 판정자가 쓰는데, 화면 밖 줄을 빼면 스크롤한 뒤 인덱스가 어긋난다.
         remote_rows_drawn += 1;
         y += row_h + 1;
     }
+    return y - top;
 }
 
 /// 둘째 줄에 조각을 잇는다. **자리가 모자라면 그 조각을 통째로 생략한다** — 반쯤 그린 값은
@@ -5270,10 +5318,16 @@ pub fn remoteScreenShown() RemoteScreenShown {
 
 /// 세션 화면 아래에 붙는 **서버 목록 입구**. 화면을 나눠 그리는 이유는 하나다 — 세션 줄과
 /// 이 줄은 뜻이 다르다(하나는 지금 보고 있는 것, 하나는 붙을 수 있는 것).
-fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32) void {
+/// `y` 는 **흐르는 자리**다 — 세션 목록이 스크롤되므로 그리는 쪽이 정해서 준다(예전에는 위
+/// 줄의 rect 에서 유도했는데, 그 줄이 화면 밖으로 나가면 rect 가 비어 여기가 0 을 기준으로 잡았다).
+fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32, y: f32) void {
     // ── 서버 목록 입구. **개수를 함께 적는다** — 0 이면 들어가서야 비었음을 알게 되고, 그
     // 화면이 무엇을 담는지도 안 보인다.
-    sess_servers_rect = .{ .x = win.x, .y = sess_row_rect.y + row_h + 1, .w = win.w, .h = row_h };
+    if (!sessVisible(y, row_h)) {
+        sess_servers_rect = .{}; // 안 보이면 rect 를 안 남긴다 — 남기면 화면 밖인데 눌린다
+        return;
+    }
+    sess_servers_rect = .{ .x = win.x, .y = y, .w = win.w, .h = row_h };
     if (sess_pressed == .servers) push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y), .w = @intFromFloat(sess_servers_rect.w), .h = @intFromFloat(sess_servers_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     var cnt: [8]u8 = undefined;
@@ -6276,7 +6330,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 // **둘째 손가락은 누름 판정을 안 건드린다**(계약 §3.1 — 표면마다 한 제스처).
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
-                sess_press.begin(x, y, time_ms, false); // 이 화면에는 흐르는 것이 없다
+                // **흐르는 목록을 세우려 짚었으면 줄을 안 누른다**(서버 목록·설정과 같은 규율).
+                const stopped = sess_touch.begin(pointer_id, y);
+                sess_press.begin(x, y, time_ms, stopped);
+                if (stopped) {
+                    sess_pressed = .none;
+                    remote_pressed_row = null;
+                    return 1;
+                }
                 sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else blk: {
                     // **원격 줄은 눌러서 그 화면을 연다**(§4a). 붙을 수 없는 줄(runtime id 가
                     // 없는 것 — in-process Term)은 누름 표시도 안 준다: 눌리는 것처럼 보이고
@@ -6289,13 +6350,18 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             1 => {
                 if (!routeIs(.chrome)) return 0;
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
-                if (sess_press.move(x, y)) sess_pressed = .none;
+                if (sess_press.move(x, y)) {
+                    sess_pressed = .none;
+                    remote_pressed_row = null;
+                }
+                sess_touch.move(&sess_sa, pointer_id, y, @intFromFloat(@max(0, sess_max_scroll)));
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
                 const was = sess_pressed;
                 sess_pressed = .none;
+                sess_touch.end(pointer_id, frame_dt_ms);
                 routeClear(); // 세션 목록은 한 손가락 화면이다 — 뗀 순간 끝이다
                 if (phase == 3) {
                     sess_press.cancel();

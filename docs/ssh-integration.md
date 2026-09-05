@@ -544,7 +544,7 @@ lifecycle 테스트는 **부모가 기본 처리일 때만 돌아서 이 결함�
 
 ## 11. Windows 원격 (설계 초안 — **미구현**)
 
-> **상태**: 초안이다. 코드는 0 줄이고, 아래 «열린 질문» 다섯이 닫히기 전에는 구현하지 않는다.
+> **상태**: 초안이다. 코드는 0 줄이고, 아래 «열린 질문» 여섯이 닫히기 전에는 구현하지 않는다.
 >
 > **이 절은 §4 의 드롭/paste 업로드만 다룬다.** `maru ssh` 의 다른 축(terminfo 전파·자기식별·원격 cwd 인식 §9)이 Windows 원격에서 어떻게 되는지는 **아직 아무도 확인하지 않았다** — 그것들도 POSIX 도구를 전제할 가능성이 높으므로, 「Windows 원격 지원」을 주장하려면 별도 조사가 필요하다. 여기서 업로드만 고쳐도 **`maru ssh` 가 Windows 를 온전히 지원한다는 뜻은 아니다.**
 
@@ -557,6 +557,15 @@ ssh -S <ctl> <dest> <uploadShellCommand>   →  sh -c 안에서 cat / printf / "
 ```
 
 **Windows OpenSSH 의 기본 셸은 `cmd.exe`** 이고([Microsoft Learn](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)), 레지스트리 `HKLM\SOFTWARE\OpenSSH` 의 `DefaultShell` 로 PowerShell 로 바꿀 수도 있다. 어느 쪽이든 `sh -c` 도 `cat` 도 없고 `$HOME` 도 확장되지 않아 **명령이 통째로 실패한다.** 실패가 조용해서 사용자에게는 「붙여넣기가 안 된다」로만 보인다.
+
+⚠️ **원인은 추정이다 — 실 Windows 원격의 로그를 본 적이 없다.** 위는 「기본 셸이 `cmd.exe` 이므로 실패한다」는 **연역**이고, 그 기계에서 실제로 무엇이 실패했는지는 확인하지 않았다. 반례가 있다: `DefaultShell` 을 **`bash.exe`(Git for Windows)** 로 둔 서버라면 `sh -c` 도 `cat` 도 있어 **현재 구현이 그대로 동작할 수 있다.** 따라서 «Windows = 실패» 는 과잉 일반화이고, 설계 전에 **그 서버에서 무엇이 실패하는지 먼저 봐야 한다**:
+
+```
+ssh <dest> "sh -c 'echo ok'"     # sh 가 있는가
+ssh <dest> "cat </dev/null"      # cat 이 있는가
+```
+
+둘 다 실패하면 이 절의 전제가 맞고, 하나라도 되면 원인은 다른 데 있다(예: OSC 5379 미도달로 §4 분기 자체에 안 들어감 — 그때는 sftp 로 바꿔도 안 낫는다).
 
 **업계 기준으로도 이 기능 자체가 드물다** — iTerm2 는 shell integration 을 원격에 깔아야 하고, WezTerm 은 드래그-업로드가 아직 미구현이다(동작 비교 목적의 관찰이며 코드 표현은 참고하지 않는다 — §8 clean-room 근거).
 
@@ -578,6 +587,8 @@ ssh -S <ctl> <dest> <uploadShellCommand>   →  sh -c 안에서 cat / printf / "
 ```
 sftp -o ControlPath=<ctl> -b - <dest>
   @pwd                                        # 원격 홈 절대경로 (에코 억제)
+  @-mkdir .cache                              # ⚠️ sftp mkdir 는 **재귀가 아니다**
+  @-mkdir .cache/maru                         #    한 줄로 쓰면 첫 업로드가 반드시 실패한다
   @-mkdir .cache/maru/dropped                 # '-' 로 「이미 있음」 무시
   @put <temp_path> .cache/maru/dropped/<name>
 ```
@@ -605,7 +616,11 @@ sftp -o ControlPath=<ctl> -b - <dest>
 
 **② 7 일 보존 정리를 무엇으로 대체하나.** 현재는 업로드마다 `find "$d" -type f -mtime +7 -delete` 를 돌린다(§5·§6 — **사용자 결정 2026-06-21**). **sftp 프로토콜에는 mtime 필터가 없다.** 후보: ⑴ `ls -l` 을 받아 로컬에서 판정 후 `rm` 배치(출력 형식이 서버·로케일에 흔들린다) ⑵ 정리 주기를 업로드마다에서 떼어낸다 ⑶ Unix 는 지금대로 두고 Windows 만 다르게 한다(경로가 둘이 되어 §11.2 의 채택 근거를 갉는다). **셋 다 사용자 결정이 필요하다.**
 
+**⑥ 동시 업로드와 세션 예산.** 이미지를 여러 장 빠르게 넣으면 sftp 프로세스가 여럿이 되고, 각각 ControlMaster 의 **세션 하나**를 먹는다. `sshd_config` 의 `MaxSessions` 기본값은 **10** 이고 pane 당 터미널 1 + 이벤트 채널 1 이 이미 상시 점유한다(agent-hooks §11.6). 넘치면 `Session open refused by peer` 인데 **그 종료 코드가 정상 종료·다중화 경합과 겹쳐** 조용한 실패가 된다(2026-09-05 에 실제로 이 상한에 물렸다). 현재 방식도 같은 예산을 쓰므로 **신규 위험은 아니지만**, 업로드를 직렬화할지 정해야 한다.
+
 **④ 폴백의 방향과 순서.** sftp 가 안 되는 서버(서브시스템 비활성)가 있으므로 두 경로가 공존한다. 무엇을 먼저 시도하고, 실패를 **무엇으로 판정**하며(종료 코드는 원인마다 겹친다 — agent-hooks §11.6 이 같은 함정을 적었다), 판정 결과를 캐시할지가 미정이다.
+
+  ⚠️ **폴백이 있으면 §11.2 의 «OS 판정 필요» 비판이 약해진다.** PowerShell 안도 `ssh <dest> "powershell -c …"` 를 **먼저 시도하고 실패하면 `sh` 로** 떨어지면 OS 를 안 물어도 된다 — 즉 그 열의 ❌ 는 «판정이 필요하다» 가 아니라 «시도가 한 번 더 든다» 로 줄어든다. 그래도 **경로가 둘**이라는 문제(⑤)는 남는다.
 
 **⑤ Unix 도 sftp 로 옮길 것인가.** §11.2 표의 «코드 경로 1 개» 는 **이것을 옮길 때만** 성립한다. Windows 만 sftp 로 두면 경로는 **2 개**이고, 그러면 PowerShell 안과의 차이가 「분기가 둘」에서 「분기가 둘 + 프로토콜도 둘」로 줄어든다. 반대로 Unix 를 옮기면 **지금 잘 동작하는 경로를 건드리는 회귀 위험**을 진다(§8 이 «구현 ✅» 로 적은 그 경로다). **이 질문이 ②(정리 정책)와 묶여 있다** — Unix 를 안 옮기면 `find -mtime` 이 살아남아 ② 가 Windows 만의 문제로 작아진다.
 

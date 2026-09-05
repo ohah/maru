@@ -100,7 +100,7 @@ keybind = F4 = esc:[2J
 - **편집기 전용 action**: `toggle_editor_wrap`(그 뷰의 줄 바꿈 토글)·`fold_all`·`unfold_all`·
   `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`·`delete_lines`(빌트인 `⇧⌘K`)·
   `duplicate_lines`·`move_lines_up`·`move_lines_down`·`indent_lines`·`outdent_lines`·
-  `transform_to_uppercase`·`transform_to_lowercase`·`add_next_occurrence`·`jump_to_bracket` — **줄 조작
+  `transform_to_uppercase`·`transform_to_lowercase`·`add_next_occurrence`·`jump_to_bracket`·`add_cursor_above`·`add_cursor_below` — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
   `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서

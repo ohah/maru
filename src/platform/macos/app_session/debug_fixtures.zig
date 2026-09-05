@@ -1499,6 +1499,19 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
         break :blk true;
+    } else if (std.mem.eql(u8, op, "key_add_cursor")) blk: {
+        // **`⌥⌘↓` 가 커서를 늘리는지 화면으로 본다**(§3.2b). 키 경로로 지나야 chord 가 **전역
+        // `focus_pane_down` 이 아니라 편집기 컨텍스트**에 잡히는 것까지 걸린다 — 함수를 직접 부르면
+        // 그 갈림이 빠져도 화면이 같아 보인다. 두 번 눌러 커서 셋을 만든다.
+        _ = self.handleKeyEvent(.{
+            .key = .arrow_down,
+            .modifiers = .{ .command = true, .option = true },
+        }) catch {};
+        _ = self.handleKeyEvent(.{
+            .key = .arrow_down,
+            .modifiers = .{ .command = true, .option = true },
+        }) catch {};
+        break :blk true;
     } else if (std.mem.eql(u8, op, "key_bracket")) blk: {
         // **`⇧⌘\\` 가 caret 을 짝으로 옮기는지 화면으로 본다**(§3.9c). 키 경로로 지나야 chord 두 벌·
         // 액션 해석·`moveCarets` 갈래가 다 걸린다 — 함수를 직접 부르면 배선이 빠져도 같아 보인다.

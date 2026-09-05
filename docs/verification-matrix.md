@@ -2713,8 +2713,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   environment/bounded stdout을 소유하고, exact-one JSON result의 verified certificate summary를 trusted repository/source/tag/
   workflow/run-attempt/GitHub-hosted runner에 결속한다. SLSA v1 statement는 subject 이름/SHA exact-one과 certificate/context
   교차검증에만 쓰고 workflow-controlled predicate를 독립 권위로 승격하지 않는다.
+  같은 trusted run에서 `actions/attest`가 반환한 absolute bundle은 별도 `verifyBundleWith` 경로가 exact `--bundle` option으로만
+  소비한다. 이 경로는 inherited environment와 `GH_TOKEN` 없이 `GH_PROMPT_DISABLED=1`만 전달하고 API 조회로 fallback하지 않으며,
+  검증 stdout은 API형과 동일한 strict `parseAndBind`를 통과한다. 이 leaf는 bundle pathname의 filesystem 권위를 만들지 않으며
+  후속 composition이 artifact와 bundle을 각각 no-follow pin하고 child 전후에 재검증해야 한다.
   `test-session-host-release-adapter-github-attestation`이 Debug·ReleaseFast에서 command와 semantic authority의 성공 및
-  identity/run/subject mismatch, duplicate/malformed/cap/timeout/child failure를 검증한다. CLI pathname pin/revalidation과 이
+  API형과 bundle형의 exact argv·서로 다른 clean environment·pathname 거부·supplied capture, identity/run/subject mismatch,
+  duplicate/malformed/cap/timeout/child failure를 검증한다. CLI와 bundle pathname pin/revalidation과 이
   transport의 최종 조립, release attestation·predecessor download·workflow 배선은 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.

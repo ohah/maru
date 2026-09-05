@@ -684,6 +684,9 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
     }
 }
 
+/// `reapplyForcedRemoteScm` 재전송 사이의 최소 간격 기준점 — 매 frame 보내면 셸에 명령이 쌓인다.
+var last_forced_send_ms: i64 = 0;
+
 /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
 /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.
 /// 강제된 에이전트 상태를 **여러 Term에** 다시 세운다(캡처 전용).
@@ -714,16 +717,32 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 /// (`remoteScmTarget` → control socket 확인 → 읽기 라우팅)이 통째로 안 돌아, 화면이 그럴듯한데 제품은
 /// 깨져 있을 수 있다. 관측을 만드는 **바이트**만 준다.
 ///
-/// ⚠️ **매 frame 다시 적용한다.** 첫 frame 에 한 번만 흘리면, 그 pane 의 **진짜 로컬 셸**이 다음
-/// 프롬프트에 OSC 7 을 다시 보내 cwd·authority 를 로컬로 되돌린다 — 그러면 「원격 깃발 + 로컬 경로」라는
-/// **실제로는 없는 상태**가 만들어져 확인이 거짓이 된다(실측으로 그렇게 한 번 속았다). 이미 그 값이면
-/// 안 쓴다 — 매 frame 쓰면 코어가 계속 깨어난다.
+/// ⚠️ **관측이 원격이 될 때까지 다시 보낸다.** 첫 frame 에 한 번만 보내면, 셸이 아직 프롬프트에 닿기
+/// 전이라 통째로 사라지거나, 그 pane 의 **진짜 로컬 셸**이 다음 프롬프트에 OSC 7 을 다시 보내
+/// cwd·authority 를 로컬로 되돌린다 — 그러면 「원격 깃발 + 로컬 경로」라는 **실제로는 없는 상태**가
+/// 만들어져 확인이 거짓이 된다(실측으로 그렇게 한 번 속았다). 이미 그 값이면 안 보낸다.
+/// `MARU_FORCE_REMOTE_SCM*` 값이 **작은따옴표 셸 문자열을 깨지 않는가**.
+///
+/// 작은따옴표 안에서 특별한 뜻을 갖는 문자는 `'` **하나뿐**이라 그것만 막으면 충분하다. 제어문자도
+/// 함께 막는다 — 깨지지는 않지만 OSC 페이로드를 망가뜨려 관측이 이상해진다. 화이트리스트로 좁히면
+/// 공백 든 경로처럼 **정당한 값**이 말없이 무동작이 되어, 픽스처가 안 도는 걸 결함으로 오진한다.
+fn forcedRemoteValueIsSafe(v: []const u8) bool {
+    for (v) |c| {
+        if (c == '\'' or c < 0x20 or c == 0x7f) return false;
+    }
+    return true;
+}
+
 pub fn reapplyForcedRemoteScm(self: *AppSession) void {
     const raw_dest = std.c.getenv("MARU_FORCE_REMOTE_SCM") orelse return;
     if (!self.surface_initialized or self.tabs.items.len == 0) return;
     const dest = std.mem.span(raw_dest);
     const cwd = if (std.c.getenv("MARU_FORCE_REMOTE_SCM_CWD")) |c| std.mem.span(c) else "/";
     if (dest.len == 0 or cwd.len == 0 or cwd[0] != '/') return;
+    // 아래에서 **작은따옴표 셸 문자열**에 그대로 끼워 넣으므로, 따옴표를 깰 수 있는 값은 여기서 막는다.
+    // 안 막으면 `MARU_FORCE_REMOTE_SCM="x'; touch /tmp/PWNED; echo '"` 가 그 명령을 실제로 실행한다
+    // (실측으로 파일이 생겼다). 자기 env 라 권한 경계는 아니지만, 조용히 엉뚱한 게 돌아 확인이 거짓이 된다.
+    if (!forcedRemoteValueIsSafe(dest) or !forcedRemoteValueIsSafe(cwd)) return;
 
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .terminal) return;
@@ -732,18 +751,41 @@ pub fn reapplyForcedRemoteScm(self: *AppSession) void {
     const obs = &term.rt.observation;
     if (obs.ssh_remote_dest_present and
         std.mem.eql(u8, obs.ssh_remote_dest.items, dest) and
-        std.mem.eql(u8, obs.cwd.items, cwd)) return;
+        std.mem.eql(u8, obs.cwd.items, cwd))
+    {
+        // 이미 원격이면 보내지 않지만 **도크는 다시 고정한다** — `sleep` 이 관측을 수백 초 붙들고 있는
+        // 동안 여기서 반환하므로, 아래 고정 줄에 영영 닿지 못한다. 그 사이 다른 곳이 뷰를 바꾸면
+        // 캡처가 엉뚱한 도크를 찍는다. 통지가 이미 끝난 뒤라 「먼저 열면 로컬을 한 번 읽는다」는
+        // 아래 계약과도 어긋나지 않는다.
+        if (self.dock.view != .source_control) dock_ops.setDockView(self, .source_control);
+        return;
+    }
 
-    const seq = std.fmt.allocPrint(
+    // **호스트 PTY 로 보낸다.** 이 pane 은 host-backed 영속 세션이라 앱 쪽 `term.surface.core` 는
+    // placeholder 다 — 거기 OSC 를 써도 진짜 코어(host 프로세스)는 모르고, 다음 관측 동기화가 덮는다
+    // (실측: 703 프레임 내내 `term_backend.surfaceFor(handle)` 가 null, 앱 core 는 dest 를 기억하는데
+    // 관측은 끝까지 로컬). 그래서 **셸이 그 바이트를 직접 출력하게** 한다 — `maru ssh` 와 같은 길이다.
+    //
+    // 뒤에 `sleep` 을 붙이는 이유: 명령이 끝나면 셸이 **다음 프롬프트에서 자기 OSC 7(로컬 cwd)** 을 찍어
+    // 방금 준 원격 authority 를 덮는다(실측: dest 는 붙는데 cwd 가 919 프레임 내내 로컬로 돌아왔다).
+    // 프롬프트로 돌아가지 않게 두면 원격 관측이 유지된다.
+    //
+    // **유한한 sleep 이어야 한다.** 이 pane 은 영속 세션이라 셸이 앱보다 오래 산다 — `sleep 86400` 으로
+    // 두니 앱을 전부 끈 뒤에도 `sleep` 2개가 남아 있었다(실측). 끝나도 손해가 없다: 셸이 프롬프트로
+    // 돌아가 로컬 OSC 7 을 찍으면 관측이 어긋나고, 위 재전송이 2초 안에 다시 세운다.
+    const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_ms));
+    // 벽시계라 역행할 수 있다(NTP step). 음수 델타를 「아직 이르다」로 읽으면 그 시간만큼 픽스처가
+    // 통째로 멈추므로, 역행이면 즉시 다시 보낸다.
+    const elapsed_ms = now_ms - last_forced_send_ms;
+    if (elapsed_ms >= 0 and elapsed_ms < 2000) return;
+    last_forced_send_ms = now_ms;
+    const cmd = std.fmt.allocPrint(
         self.allocator,
-        "\x1b]5379;ssh;{s}\x07\x1b]7;file://{s}{s}\x07",
+        "printf '\\033]5379;ssh;{s}\\007\\033]7;file://{s}{s}\\007'; sleep 300\n",
         .{ dest, dest, cwd },
     ) catch return;
-    defer self.allocator.free(seq);
-    const s = term_ops.activeSurface(self);
-    s.lockCore(self.io);
-    s.core.write(seq) catch {};
-    s.unlockCore(self.io);
+    defer self.allocator.free(cmd);
+    term_ops.submitPaste(self, cmd, true, term.surface.id);
     // 뷰는 통지 **뒤**에 연다 — 먼저 열면 아직 로컬인 상태로 한 번 읽고 그 결과가 화면에 남는다.
     if (self.dock.view != .source_control) dock_ops.setDockView(self, .source_control);
 }

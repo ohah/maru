@@ -14154,7 +14154,7 @@ pub fn build(b: *std.Build) void {
             const candidate_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const candidate_attestation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_candidate_attestation", .module = candidate_attestation_mod } } }) });
             const run_candidate_attestation_tests = b.addRunArtifact(candidate_attestation_tests);
-            run_candidate_attestation_tests.addArg("--maru-expect-tests=4");
+            run_candidate_attestation_tests.addArg("--maru-expect-tests=8");
             run_candidate_attestation_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_attestation_step.dependOn(&run_candidate_attestation_tests.step);
             session_host_step.dependOn(&run_candidate_attestation_tests.step);

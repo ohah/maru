@@ -422,14 +422,31 @@ fn processBudgetReserved(
         // `first_slot` 과 `max_fd` 를 함께 남기는 이유: `findAvailableLayout` 은 `first + max_slots
         // <= max_fd` 로 구간을 고르는데 sentinel 은 `first + max_slots` **번 fd 자체**를 쓴다. 경계에서
         // 둘이 어긋나는지는 이 두 값이 있어야 판별된다.
+        // `SlotOccupied` 는 「요청 구간의 어떤 fd 가 이미 열려 있다」까지만 말한다. 그런데 그 구간은
+        // 직전에 `findAvailableLayout` 이 **전부 비었다고 판정한** 바로 그 구간이다(259 개 전수 검사).
+        // 2026-09-05 실측: host 의 최대 fd 가 48 일 때 탐색이 49 를 골랐고, 예약은 그 49 를 점유로 봤다.
+        // 즉 두 호출 **사이에** fd 가 열린다 — fd 는 언제나 가장 낮은 빈 번호를 가져가므로 새로 열린
+        // 것이 정확히 `first_slot` 을 차지한다. 무엇이 여는지 모르면 고칠 지점이 안 정해지고, 번호만
+        // 알아도 `lsof` 로 정체가 바로 나온다. 그래서 **어느 슬롯이, 무슨 종류로** 점유됐는지 남긴다.
+        var occupied_slot: i32 = -1;
+        var occupied_mode: u32 = 0;
+        for (requested) |slot| {
+            if (!exec_fd_set.isOpen(slot)) continue;
+            occupied_slot = slot;
+            var st: std.c.Stat = undefined;
+            if (std.c.fstat(slot, &st) == 0) occupied_mode = @intCast(st.mode & std.c.S.IFMT);
+            break;
+        }
         if (!builtin.is_test) host_log.line(
-            "session host upgrade fd reserve failed: err={s} first_slot={d} slots={d} max_fd={d} errno={d}",
+            "session host upgrade fd reserve failed: err={s} first_slot={d} slots={d} max_fd={d} errno={d} occupied_slot={d} occupied_mode=0o{o}",
             .{
                 @errorName(err),
                 ctx.layout.first_runtime_slot,
                 exec_fd_set.max_slots,
                 getdtablesize(),
                 std.c._errno().*,
+                occupied_slot,
+                occupied_mode,
             },
         );
         noteUpgradeStage("fd_slot_reserve");

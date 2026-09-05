@@ -734,6 +734,7 @@ pub fn resetAgentObservationForKindChange(term: *Term) void {
     term.agent_screen_state = .unknown;
     term.agent_screen_visible_blocker = false;
     term.agent_screen_visible_idle = false;
+    term.agent_screen_visible_running = false;
     term.agent_screen_idle_is_chrome = false;
     term.agent_screen_output_active = false;
     term.agent_screen_rule = "";
@@ -2588,6 +2589,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_screen_seq +%= 1; // 새 관측 하나 — C2 가 세는 단위다
     term.agent_screen_visible_blocker = detection.visible_blocker;
     term.agent_screen_visible_idle = detection.visible_idle;
+    term.agent_screen_visible_running = detection.visible_running;
     term.agent_screen_idle_is_chrome = detection.idle_is_chrome;
     term.agent_screen_output_active = output_active;
     term.agent_screen_origin = maru.session.agent_state_arbiter.originOfRule(detection.rule_id);
@@ -2629,6 +2631,7 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .screen = term.agent_screen_state,
         .screen_visible_blocker = term.agent_screen_visible_blocker,
         .screen_visible_idle = term.agent_screen_visible_idle,
+        .screen_visible_running = term.agent_screen_visible_running,
         .screen_idle_is_chrome = term.agent_screen_idle_is_chrome,
         .output_active = term.agent_screen_output_active,
         .screen_origin = term.agent_screen_origin,
@@ -2661,6 +2664,22 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         // **턴 키를 싣지 않는다.** 이 턴이 어떻게 끝났는지는 훅만 아는데 그 훅이 안 왔기 때문에 C2 가
         // 필요했다 — 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
         captureTurnSnapshot(self, term.surfaceId(), .{}, 0);
+    }
+    // **화면 소스가 죽은 것을 스스로 말한다**(계약 §1.2 의 화면 쪽 대칭). `MARU_DEBUG` 뒤에 두지
+    // 않는다 — 이건 개발자 진단이 아니라 **「우리가 이 provider 를 못 읽고 있다」는 사실**이고,
+    // 그것을 모르는 채로 배지만 이상한 구간이 두 번(2026-08-12·2026-09-05) 있었다. 턴당 한 번이라
+    // 시끄럽지 않다.
+    if (verdict.screen_blind_tripped) {
+        std.log.scoped(.agent).warn(
+            "screen source blind: hook says running but no running evidence for {d} observations " ++
+                "(kind={s} screen_rule={s} screen={s}) — provider chrome may have changed",
+            .{
+                maru.session.agent_state_arbiter.Arbiter.blind_confirmations_required,
+                @tagName(term.agent_kind),
+                term.agent_screen_rule,
+                @tagName(term.agent_screen_state),
+            },
+        );
     }
     if (verdict.state != before) {
         if (displayed) self.metal_dirty = true;

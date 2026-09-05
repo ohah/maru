@@ -72,6 +72,10 @@ pub const Input = struct {
     screen: State = .unknown,
     /// 화면에 승인 chrome 이 **지금** 보이는가. C1 이 이것의 부재로 선다.
     screen_visible_blocker: bool = false,
+
+    /// 화면이 **진행 근거**를 냈는가(`working_*` 규칙이 걸렸는가). 판정에는 안 쓴다 —
+    /// 화면 소스가 살아 있는지 재는 데만 쓴다(아래 `screen_blind_tripped`).
+    screen_visible_running: bool = false,
     /// 화면에 idle chrome 이 **지금** 보이는가. C2 가 이것의 연속 관측으로 선다.
     screen_visible_idle: bool = false,
 
@@ -117,6 +121,15 @@ pub const Verdict = struct {
     /// 진단용이다. `origin` 이 «누가» 라면 이것은 «어느 규칙으로» 이고, 둘이 같이 있어야 «화면이 이겼다»
     /// 를 넘어 «화면이 C2 로 이겼다» 까지 말할 수 있다. 문자열은 전부 컴파일 타임 상수라 수명이 없다.
     rule: []const u8,
+
+    /// **화면이 이 provider 의 진행 chrome 을 못 읽는 상태가 방금 확정됐다**(턴당 한 번만 참).
+    ///
+    /// 계약 §1.2 는 **훅** 소스가 끊기면 그 자리를 버리고 알린다. 화면 소스에는 그 대칭이 없었다 —
+    /// provider 가 UI 문구를 바꾸면 규칙이 조용히 안 걸리고, 배지만 이상해진 채 아무도 이유를 모른다.
+    /// 2026-08-12 와 2026-09-05 두 번 다 그렇게 났고, 두 번째는 원인을 찾는 데 반나절이 들었다.
+    ///
+    /// 판정을 바꾸지 않는다 — **기록만** 한다. 고치지는 못해도 「우리가 못 읽고 있다」를 먼저 말한다.
+    screen_blind_tripped: bool = false,
 };
 
 pub const Arbiter = struct {
@@ -126,6 +139,12 @@ pub const Arbiter = struct {
     last_turn_seq: u64 = 0,
     /// 마지막으로 **센** 화면 관측의 `screen_seq`. 같은 관측을 두 번 세지 않게 한다.
     last_counted_screen_seq: u64 = 0,
+
+    /// 화면이 진행 근거를 못 낸 **연속 관측 수**(같은 턴 안에서). 아래 `blind_reported` 와 짝이다.
+    blind_confirmations: u16 = 0,
+    blind_counted_screen_seq: u64 = 0,
+    /// 이 턴에서 이미 알렸는가 — 같은 턴에 로그가 쏟아지지 않게 한다.
+    blind_reported: bool = false,
 
     /// 화면 idle 이 훅 running 을 덮으려면 필요한 연속 관측 수(§1.1 C2).
     ///
@@ -138,16 +157,61 @@ pub const Arbiter = struct {
     /// 이유를 되돌린다. 우리 쪽 탈출구는 시간이 아니라 `StopFailure`(claude)와 프로세스 종료(C3)다.
     pub const idle_confirmations_required: u8 = 3;
 
+    /// **화면 소스가 죽었다고 보기까지의 연속 관측 수.** 관측 주기가 100ms 이므로 약 10 초다.
+    ///
+    /// C2 의 3 회(0.3 초)보다 훨씬 무겁다. 이것은 상태를 바꾸는 판정이 아니라 **사람에게 말하는**
+    /// 것이라, 일시적인 화면 흔들림(스크롤·재그림·짧은 전환)에 울리면 안 된다. 반대로 너무 길면
+    /// 「이상한데 이유를 모른다」 구간이 그만큼 늘어난다 — 10 초는 사용자가 배지를 의심하기 시작하는
+    /// 시점보다 앞선다.
+    pub const blind_confirmations_required: u16 = 100;
+
     pub fn reset(self: *Arbiter) void {
         self.* = .{};
     }
 
     /// §1.1 권위표. **순서가 곧 계약이다** — 아래 주석의 행 이름이 문서의 행과 1:1 로 대응한다.
     pub fn arbitrate(self: *Arbiter, in: Input) Verdict {
+        // **판정과 기록을 섞지 않는다.** 아래 `decide` 가 §1.1 권위표 그대로이고, 여기서는 그 결과에
+        // 화면 소스 liveness 만 얹는다. 반환 지점이 아홉이라 각 자리에 끼우면 반드시 하나를 빠뜨린다.
+        var v = self.decide(in);
+        v.screen_blind_tripped = self.trackScreenBlind(in);
+        return v;
+    }
+
+    /// **화면이 이 provider 의 진행 chrome 을 못 읽고 있는가**(계약 §1.2 의 화면 쪽 대칭).
+    ///
+    /// 세는 조건은 셋이다. 훅이 「돌고 있다」 하고, 화면은 **진행 근거를 하나도 못 내고**, 그런데
+    /// **출력은 계속 있다.** 셋째가 핵심이다 — 출력이 끊긴 채 화면이 조용한 것은 「턴이 실제로
+    /// 끝났는데 훅이 갇힌」 §9-10 상황이고 그쪽은 C2 가 닫는다. 출력이 도는데도 화면이 아무 진행
+    /// 근거를 못 내면 그것은 **우리가 못 읽는 것**이다.
+    ///
+    /// 턴이 바뀌면 셈과 보고 여부가 함께 리셋된다(`decide` 의 턴 경계에서).
+    fn trackScreenBlind(self: *Arbiter, in: Input) bool {
+        const blind = in.hook != null and in.hook.? == .running and
+            !in.screen_visible_running and in.output_active;
+        if (!blind) {
+            self.blind_confirmations = 0;
+            return false;
+        }
+        // 같은 화면 관측을 두 번 세지 않는다(C2 와 같은 규율 — §1.6-⑴-a).
+        if (in.screen_seq != self.blind_counted_screen_seq) {
+            self.blind_counted_screen_seq = in.screen_seq;
+            self.blind_confirmations +|= 1;
+        }
+        if (self.blind_confirmations < blind_confirmations_required) return false;
+        if (self.blind_reported) return false; // 턴당 한 번만 말한다
+        self.blind_reported = true;
+        return true;
+    }
+
+    fn decide(self: *Arbiter, in: Input) Verdict {
         // 턴이 바뀌었으면 C2 의 연속 셈을 버린다. **모든 규칙보다 먼저다** — 아래 어느 분기가 이기든
         // 그 셈은 지난 턴의 것이고, 지난 턴의 관측으로 이번 턴을 접으면 안 된다.
         if (in.hook_turn_seq != self.last_turn_seq) {
             self.idle_confirmations = 0;
+            // 화면 liveness 도 턴 단위다 — 새 턴은 처음부터 세고, 다시 말할 수 있다.
+            self.blind_confirmations = 0;
+            self.blind_reported = false;
             self.last_turn_seq = in.hook_turn_seq;
         }
 
@@ -681,4 +745,114 @@ test "AR-C2q: 차단된 회차는 셈을 올리지 않는다 — 작업 중 관�
     // 이제 출력이 끊겼다 — 여기서부터 세기 시작해야 한다.
     const v = a.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_idle_is_chrome = true, .output_active = false, .screen_seq = 3 });
     try std.testing.expectEqualStrings("C2-pending", v.rule);
+}
+
+// ── 화면 소스 liveness: 「우리가 이 provider 를 못 읽는다」를 스스로 말한다 (§1.2 의 화면 쪽 대칭)
+
+test "AR-blind: 훅이 running 인데 화면이 진행 근거를 못 내고 출력은 계속 있으면 임계에서 한 번 알린다" {
+    // 2026-09-05 사고의 모양 그대로다 — provider 가 UI 를 바꿔 화면이 진행 chrome 을 못 읽는데
+    // 에이전트는 돌고 있다(스피너가 회전하니 출력이 있다).
+    var a: Arbiter = .{};
+    var seq: u64 = 0;
+    var tripped: usize = 0;
+    var i: usize = 0;
+    while (i < Arbiter.blind_confirmations_required + 20) : (i += 1) {
+        seq += 1;
+        const v = a.arbitrate(.{
+            .hook = .running,
+            .screen_visible_running = false, // 진행 근거를 못 읽는다
+            .output_active = true, // 그런데 돌고 있다
+            .screen_seq = seq,
+        });
+        if (v.screen_blind_tripped) tripped += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), tripped); // 턴당 **한 번만**
+}
+
+test "AR-blind: 화면이 진행 근거를 내면 세지 않는다" {
+    var a: Arbiter = .{};
+    var seq: u64 = 0;
+    var i: usize = 0;
+    while (i < Arbiter.blind_confirmations_required + 20) : (i += 1) {
+        seq += 1;
+        const v = a.arbitrate(.{
+            .hook = .running,
+            .screen_visible_running = true, // 잘 읽고 있다
+            .output_active = true,
+            .screen_seq = seq,
+        });
+        try std.testing.expect(!v.screen_blind_tripped);
+    }
+}
+
+test "AR-blind: 출력이 끊겼으면 세지 않는다 — 그건 §9-10 이고 C2 가 닫는다" {
+    // 「턴이 실제로 끝났는데 훅이 갇힌」 상태를 화면 소스 고장으로 오해하면 안 된다.
+    var a: Arbiter = .{};
+    var seq: u64 = 0;
+    var i: usize = 0;
+    while (i < Arbiter.blind_confirmations_required + 20) : (i += 1) {
+        seq += 1;
+        const v = a.arbitrate(.{
+            .hook = .running,
+            .screen_visible_running = false,
+            .output_active = false, // 출력이 끊겼다
+            .screen_seq = seq,
+        });
+        try std.testing.expect(!v.screen_blind_tripped);
+    }
+}
+
+test "AR-blind: 새 턴은 처음부터 세고 다시 말할 수 있다" {
+    var a: Arbiter = .{};
+    var seq: u64 = 0;
+    var turn: u64 = 1;
+    var tripped: usize = 0;
+    var t: usize = 0;
+    while (t < 2) : (t += 1) {
+        var i: usize = 0;
+        while (i < Arbiter.blind_confirmations_required + 5) : (i += 1) {
+            seq += 1;
+            const v = a.arbitrate(.{
+                .hook = .running,
+                .screen_visible_running = false,
+                .output_active = true,
+                .screen_seq = seq,
+                .hook_turn_seq = turn,
+            });
+            if (v.screen_blind_tripped) tripped += 1;
+        }
+        turn += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), tripped); // 턴마다 한 번씩
+}
+
+test "AR-blind: 같은 화면 관측을 두 번 세지 않는다 (§1.6-⑴-a)" {
+    var a: Arbiter = .{};
+    var i: usize = 0;
+    // `screen_seq` 를 고정한 채 임계보다 많이 부른다 — 화면을 한 번만 본 셈이다.
+    while (i < Arbiter.blind_confirmations_required + 20) : (i += 1) {
+        const v = a.arbitrate(.{
+            .hook = .running,
+            .screen_visible_running = false,
+            .output_active = true,
+            .screen_seq = 7,
+        });
+        try std.testing.expect(!v.screen_blind_tripped);
+    }
+}
+
+test "AR-blind: 기록은 판정을 바꾸지 않는다" {
+    // liveness 는 **관측**이지 규칙이 아니다. 같은 입력에서 상태·출처·규칙이 그대로여야 한다.
+    var a: Arbiter = .{};
+    var b: Arbiter = .{};
+    var seq: u64 = 0;
+    var i: usize = 0;
+    while (i < Arbiter.blind_confirmations_required + 5) : (i += 1) {
+        seq += 1;
+        const with = a.arbitrate(.{ .hook = .running, .screen_visible_running = false, .output_active = true, .screen_seq = seq });
+        const without = b.arbitrate(.{ .hook = .running, .screen_visible_running = true, .output_active = true, .screen_seq = seq });
+        try std.testing.expectEqual(without.state, with.state);
+        try std.testing.expectEqual(without.origin, with.origin);
+        try std.testing.expectEqualStrings(without.rule, with.rule);
+    }
 }

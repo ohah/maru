@@ -78000,8 +78000,22 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     const vp_after = image_gallery_ops.viewportRect(session);
     try std.testing.expect(vp_after.h < vp_before.h);
 
-    // ── 문맥이 없으면 빈 띠를 남기지 않는다.
+    // ── **출처는 열 때 스냅샷으로 굳는다**(§2.2.1). `hit_index` 로 매 프레임 목록을 다시 뒤지면,
+    //    그 사이 검색어가 바뀌어 목록이 재구성됐을 때 남의 이미지의 출처가 붙는다.
+    try std.testing.expectEqual(
+        maru.session.agent_image_context.Source.tool_file_path,
+        op.label.source,
+    );
+
+    // ── 문맥이 없어도 **출처 한 줄**은 남는다 — 그것은 빈 띠가 아니라 실제로 그리는 줄이다.
+    //    (이 fixture 는 에이전트가 Read 한 이미지라 「읽음」이 붙는다.)
     op.context_len = 0;
+    const vp_origin_only = image_gallery_ops.viewportRect(session);
+    try std.testing.expect(vp_origin_only.h > vp_after.h); // 문맥 줄이 빠진 만큼 그림 자리가 늘었다
+    try std.testing.expect(vp_origin_only.h < vp_before.h); // 그래도 출처 한 줄은 예약한다
+
+    // ── 출처도 문맥도 없으면 빈 띠를 남기지 않는다.
+    op.label.source = .none;
     const vp_none = image_gallery_ops.viewportRect(session);
     try std.testing.expectEqual(vp_before.h, vp_none.h);
 }

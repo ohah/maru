@@ -218,7 +218,6 @@ const claude_working_gates = blk: {
     break :blk g;
 };
 
-
 const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } };
 
 const codex_rules = [_]Rule{

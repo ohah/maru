@@ -15232,10 +15232,18 @@ pub const Client = struct {
     fn logPoisonCallSite(reason: client_poison.ConnectionReason, ra: usize) void {
         if (builtin.is_test) return;
         const decision = client_poison.decisionFor(client_poison.outcomeForConnection(reason));
+        // `return_address` 만으로는 **그 프로세스가 살아 있는 동안에만** 심볼을 풀 수 있다. 앱이 이미 다시
+        // 뜬 뒤에는 ASLR 슬라이드가 달라져 `atos -p` 도 `atos -l` 도 쓸 수 없고, 주소는 아무 뜻도 없는
+        // 숫자가 된다. 2026-09-05 실측: `local_invariant_violation` 이 `return_address=0x1025d4618` 과 함께
+        // 남았지만 그 줄을 읽었을 때는 앱이 다른 PID 였고, 주소를 손에 쥔 채 끝내 못 읽었다.
+        //
+        // dyld 이미지 0 은 main executable 이고 `client.zig` 는 거기 링크된다. 슬라이드를 함께 남기면
+        // 사후에도 `atos -o <바이너리> -l <slide> <return_address>` 로 복원된다.
+        const slide: usize = @intCast(std.c._dyld_get_image_vmaddr_slide(0));
         if (decision.expected) {
-            std.log.info("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+            std.log.info("client poison: reason={s} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), ra, slide });
         } else {
-            std.log.err("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+            std.log.err("client poison: reason={s} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), ra, slide });
         }
     }
 

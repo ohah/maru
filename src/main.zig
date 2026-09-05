@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+/// tree-sitter. **root 모듈이 이미 갖고 있다**(build.zig 의 `-Msyntax`) — 편집기 색칠이 쓴다.
+const ts = @import("syntax");
 /// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류). 본문에 네이티브
 /// 참조가 0 이고 `home` 경로만 받는다.
 ///
@@ -4178,12 +4180,28 @@ const OpenFile = struct {
     /// 막대가 없으면(넘치지 않으면) 0 이고, 그때는 굴릴 곳도 없다.
     hmax_col: u16 = 0,
 
+    /// 이 문서의 구문 파서. **없으면 무색이다** — grammar 가 번들에 없거나 파서를 못 세운 경우이고,
+    /// 그것은 결함이 아니라 계약이다(`native-editor-visual-mapping.md` §5).
+    syntax: ?ts.Provider = null,
+    /// 질의 결과(문서 byte 축)와 그것을 chrome 낱말로 옮긴 재료. 프레임마다 다시 채우되
+    /// **저장소는 재사용한다**.
+    syntax_spans: std.ArrayList(ts.Span) = .empty,
+    color_spans: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.ByteSpan) = .empty,
+    color_lines: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.LineBounds) = .empty,
+    /// 색 계산의 저장소 — **규칙과 함께 중립이 갖는다**(§2m.112).
+    colors: maru.chrome.components.editor_view.syntax_colors.Scratch = .{},
+
     /// 사이드바 카드에 뜨는 이름. **경로 안을 가리킨다**(따로 복사하지 않는다).
     fn name(self: *const OpenFile) []const u8 {
         return std.fs.path.basename(self.path);
     }
 
     fn deinit(self: *OpenFile, allocator: std.mem.Allocator) void {
+        if (self.syntax) |*p| p.deinit();
+        self.syntax_spans.deinit(allocator);
+        self.color_spans.deinit(allocator);
+        self.color_lines.deinit(allocator);
+        self.colors.deinit(allocator);
         self.lines.deinit(allocator);
         allocator.free(self.line_starts);
         allocator.free(self.text);
@@ -4255,7 +4273,69 @@ fn openFileFor(
         widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(l)));
         if (widest >= limit) break;
     }
-    return .{ .opened = .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts, .max_cols = widest } };
+    // **구문 파서를 여기서 한 번 세운다.** 문서가 안 바뀌므로(읽기 전용) 다시 팔 일이 없다 —
+    // macOS 의 예산·재개 장치(§2.1a)가 필요한 것은 편집이 있을 때다. 문법이 번들에 없으면 `null`
+    // 이고 그때는 무색이다(계약 §5 — 결함이 아니다).
+    //
+    // **문법 표를 여기서 다시 적지 않는다** — `grammarForPath` 가 단일 출처다.
+    const grammar = maru.session.editor.language.grammarForPath(path);
+    const provider = ts.Provider.init(text, syntaxLanguageFor(grammar), 0);
+
+    return .{ .opened = .{
+        .path = owned_path,
+        .text = text,
+        .lines = lines,
+        .line_starts = starts,
+        .max_cols = widest,
+        .syntax = provider,
+    } };
+}
+
+/// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다. **두 열거가 같은 축이고**(그 파일 doc:
+/// *"값을 늘릴 때 두 곳이 갈리지 않게 호출자가 옮긴다"*), 이름이 1:1 이라 comptime 에 유도한다 —
+/// 손으로 쓴 switch 는 한쪽에 문법이 늘 때 조용히 `.other` 로 떨어진다.
+fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
+    // **두 열거는 같은 축이고 이름이 1:1 이다**(`tree_sitter.zig` 의 doc: *"이 모듈은 maru 를 못
+    // 들여오므로 필요한 것만 다시 적는다 — 값을 늘릴 때 두 곳이 갈리지 않게 **호출자가 옮긴다**"*).
+    // macOS 도 같은 자리를 갖는다(`app_session/editor_syntax.zig` 의 `syntaxLanguage`) — 두 모듈을
+    // 다 보는 공용 자리가 없어서다(§2m.112 의 «배선» 절).
+    //
+    // **드리프트를 컴파일 오류로 만든다.** 손으로 쓴 갈래는 문법이 늘 때 조용히 `.other` 로
+    // 떨어지고 그 증상은 「그 언어만 무색」이라 눈에 잘 안 띈다. 아래 검사가 이름을 대조한다 —
+    // 반사(`@field`)를 안 쓰는 이유는 그것이 이 파일에 생기면 경계 원장 등록이 필요해지고, 그
+    // 갱신 도구가 이 호스트에서 안 돌기 때문이다(§2m.109).
+    comptime {
+        @setEvalBranchQuota(20_000);
+        for (@typeInfo(maru.session.editor.language.Grammar).@"enum".fields) |gf| {
+            if (std.mem.eql(u8, gf.name, "none")) continue;
+            var found = false;
+            for (@typeInfo(ts.Language).@"enum".fields) |lf| {
+                if (std.mem.eql(u8, gf.name, lf.name)) found = true;
+            }
+            if (!found) @compileError("Grammar and syntax.Language names drifted: " ++ gf.name);
+        }
+    }
+    return switch (g) {
+        .zig => .zig,
+        .json => .json,
+        .markdown => .markdown,
+        .javascript => .javascript,
+        .typescript => .typescript,
+        .tsx => .tsx,
+        .c => .c,
+        .cpp => .cpp,
+        .python => .python,
+        .go => .go,
+        .rust => .rust,
+        .java => .java,
+        .ruby => .ruby,
+        .php => .php,
+        .kotlin => .kotlin,
+        .bash => .bash,
+        .css => .css,
+        .html => .html,
+        .none => .other,
+    };
 }
 
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
@@ -4265,7 +4345,8 @@ fn openFileFor(
 fn buildComposedEditor(
     allocator: std.mem.Allocator,
     host: EditorHost,
-    file: *const OpenFile,
+    /// **가변이다** — 구문 색 계산이 이 문서의 스크래치를 재사용한다(프레임마다 새로 할당하지 않는다).
+    file: *OpenFile,
     rect: maru.session.split_tree.Rect,
     ops: []maru.chrome.draw.Op,
     tokens: *const maru.chrome.Tokens,
@@ -4319,6 +4400,9 @@ fn buildComposedEditor(
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
     };
+    // **구문 색을 여기서 만든다.** 보이는 창만 계산한다 — 문서가 커도 프레임마다 드는 값이 창에 묶인다.
+    const line_colors = editorLineColors(allocator, file, file.first_line, @as(usize, grid.rows) + 1);
+
     return buildEditorFrame(
         allocator,
         host,
@@ -4352,7 +4436,117 @@ fn buildComposedEditor(
         if (file.max_cols == 0) null else file.max_cols,
         null,
         .{ .line_starts = file.line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans },
+        line_colors,
     );
+}
+
+/// 줄 슬라이스가 **문서 어디에 앉아 있는가**. 그 슬라이스는 `text` 안을 가리키므로 포인터 차이가
+/// 곧 진짜 오프셋이다.
+///
+/// **`OpenFile.line_starts` 를 쓰면 안 된다.** 그것은 CR 을 벗긴 뒤 `off += len + 1` 로 만든 **가상**
+/// 축이라(선택 영역이 그 축을 쓴다) CRLF 문서에서 줄마다 1 씩 어긋난다 — tree-sitter 의 스팬은
+/// `text` 의 바이트 축이므로 그대로 쓰면 **색이 밀린다.** LF 문서에서는 두 축이 같아 증상이 안
+/// 보이므로, 이 자리를 «단순화» 하면 조용히 깨진다(그래서 아래 판정이 CRLF 로 잰다).
+fn lineBoundsIn(text: []const u8, line: []const u8) maru.chrome.components.editor_view.syntax_colors.LineBounds {
+    const st: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
+    return .{ .start = st, .end = st + @as(u32, @intCast(line.len)) };
+}
+
+test "줄 경계는 CRLF 에서도 진짜 문서 오프셋이다" {
+    // `ab\r\ncd\r\nef` — 둘째 줄 내용은 [4, 6), 셋째 줄은 [8, 10) 이다.
+    const text = "ab\r\ncd\r\nef";
+    var it = std.mem.splitScalar(u8, text, 0x0A);
+    var got: [3]maru.chrome.components.editor_view.syntax_colors.LineBounds = undefined;
+    var n: usize = 0;
+    while (it.next()) |raw| : (n += 1) {
+        if (n >= got.len) break;
+        got[n] = lineBoundsIn(text, std.mem.trimEnd(u8, raw, "\r"));
+    }
+    try std.testing.expectEqual(@as(u32, 0), got[0].start);
+    try std.testing.expectEqual(@as(u32, 2), got[0].end);
+    // **가상 축이면 여기가 3 이다** — 그 차이가 이 판정의 전부다.
+    try std.testing.expectEqual(@as(u32, 4), got[1].start);
+    try std.testing.expectEqual(@as(u32, 6), got[1].end);
+    try std.testing.expectEqual(@as(u32, 8), got[2].start);
+    try std.testing.expectEqual(@as(u32, 10), got[2].end);
+}
+
+/// 보이는 창의 줄별 구문 색. **규칙은 중립이 갖는다**(`editor_view.syntax_colors`) — 여기서 하는
+/// 일은 재료를 그 층의 낱말로 옮기는 것뿐이다.
+///
+/// **줄 경계는 진짜 문서 오프셋이어야 한다.** `OpenFile.line_starts` 는 CR 을 벗긴 뒤 만든 **가상**
+/// 오프셋이라(선택 영역이 그 축을 쓴다) CRLF 파일에서 tree-sitter 의 바이트 축과 어긋난다 — 그대로
+/// 쓰면 색이 줄마다 밀린다(적대적 검증이 만들기 전에 잡았다). 줄 슬라이스가 `text` 안을 가리키므로
+/// **포인터 차이**로 진짜 오프셋을 얻는다.
+fn editorLineColors(
+    allocator: std.mem.Allocator,
+    file: *OpenFile,
+    first_line: usize,
+    count: usize,
+) []const []const editor_view.content.ColorSpan {
+    const p = &(file.syntax orelse return &.{});
+    const ls = file.lines.items;
+    if (first_line >= ls.len or count == 0) return &.{};
+    const last = @min(first_line + count, ls.len);
+
+    const lo: u32 = @intCast(@intFromPtr(ls[first_line].ptr) - @intFromPtr(file.text.ptr));
+    const hi_line = ls[last - 1];
+    const hi: u32 = @intCast(@intFromPtr(hi_line.ptr) - @intFromPtr(file.text.ptr) + hi_line.len);
+
+    p.spansForRange(allocator, file.text, .{ .start = lo, .end = hi }, &file.syntax_spans);
+    if (file.syntax_spans.items.len == 0) return &.{};
+
+    file.color_spans.clearRetainingCapacity();
+    file.color_spans.ensureTotalCapacity(allocator, file.syntax_spans.items.len) catch return &.{};
+    for (file.syntax_spans.items) |sp| {
+        const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
+        file.color_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
+    }
+
+    file.color_lines.clearRetainingCapacity();
+    file.color_lines.ensureTotalCapacity(allocator, last - first_line) catch return &.{};
+    for (ls[first_line..last]) |l| file.color_lines.appendAssumeCapacity(lineBoundsIn(file.text, l));
+
+    return maru.chrome.components.editor_view.syntax_colors.lineColors(
+        &file.colors,
+        allocator,
+        file.text,
+        file.color_lines.items,
+        file.color_spans.items,
+        4,
+        first_line,
+    );
+}
+
+test "스크롤한 창의 색은 문서 줄 자리에 붙는다" {
+    // **스모크가 못 재는 축이다.** 편집기가 스크롤된 채로 그려지는 프레임이 스모크에 없어서
+    // `leading_empty` 를 0 으로 바꿔도 판정이 전부 초록이었다(적대적 검증 7 회차). 여기서 문다.
+    const a = std.testing.allocator;
+    const text = try a.dupe(u8, "\n\n\nconst x = 1;\n");
+    const path = try a.dupe(u8, "t.zig");
+    var of: OpenFile = .{
+        .path = path,
+        .text = text,
+        .lines = .empty,
+        .line_starts = try a.alloc(usize, 0),
+        .syntax = ts.Provider.init(text, .zig, 0),
+    };
+    defer of.deinit(a);
+    if (of.syntax == null) return error.SkipZigTest; // grammar 가 번들에 없으면 잴 것이 없다.
+
+    var it = std.mem.splitScalar(u8, text, 0x0A);
+    while (it.next()) |l| try of.lines.append(a, l);
+
+    // 넷째 줄(색인 3)만 보이는 창.
+    const got = editorLineColors(a, &of, 3, 1);
+
+    // **길이가 4 여야 한다** — 앞 세 줄은 창 밖이지만 자리는 있어야 색인이 문서 줄과 맞는다.
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    try std.testing.expectEqual(@as(usize, 0), got[0].len);
+    try std.testing.expectEqual(@as(usize, 0), got[2].len);
+    // 그리고 색은 **그 자리**에 있다. `leading_empty` 를 0 으로 주면 여기가 색인 밖이 된다.
+    try std.testing.expect(got[3].len > 0);
+    try std.testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_keyword, got[3][0].role);
 }
 
 const WinSession = struct {
@@ -5773,6 +5967,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dkey_focus_blurred = true;
     var dkey_focus_taken = false;
     var dkey_scrolls_before: usize = 0;
+    // ── 편집기 구문 색 (W8.26) ──────────────────────────────────────────────────────────
+    //
+    // **색이 「났다」를 세는 것이 아니라 「기본색이 아닌 것이 났다」를 센다.** 셀 수만 보면 글자가
+    // 그려졌다는 것까지고, 색칠은 그 위의 사실이다.
+    var esyn_judgeable = false;
+    var esyn_cells: usize = 0;
+    var esyn_distinct: usize = 0;
+    var esyn_total: usize = 0;
+    var esyn_first_line: usize = 0;
     // ── 폴백 목록을 몇 번 짓는가 (W8.23) ──────────────────────────────────────────────────
     //
     // **시간이 아니라 횟수를 잰다.** 시간은 기계마다 흔들리지만 "다시 그릴 때마다 또 짓는가" 는
@@ -10998,6 +11201,58 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 defer be.deinit(allocator);
                 cells.ensureUnusedCapacity(allocator, be.cells.items.len) catch {};
                 for (be.cells.items) |c| cells.appendAssumeCapacity(c);
+                // **스크롤한 뒤에 잰다.** 첫 화면은 `first_line == 0` 이라 「창 앞의 빈 줄」 축이
+                // 0 이고, 그러면 그 축이 틀려도 색이 맞아 보인다 — 실제로 이 판정이 처음에 그
+                // 자리에서 무장했다(적대적 검증 7 회차).
+                if (smoke and !esyn_judgeable and of.syntax != null and be.cells.items.len > 0) {
+                    // **테마의 구문 색과 맞는 셀을 센다.** 「기본색이 아니다」로 세면 줄 번호 회색까지
+                    // 걸려 **색칠이 하나도 없어도 초록**이다 — 처음에 그렇게 적었고 실제로 그랬다.
+                    //
+                    // **셀 기준으로 한 번만 센다.** 역할마다 따로 세면 같은 색을 쓰는 역할에서 중복
+                    // 계수되어 «색칠된 셀 > 전체 셀» 이 나온다(그것도 겪었다). 그래서 색을 모으고
+                    // 셀은 한 번만 판정한다.
+                    // **역할을 손으로 적는다.** `@field` 로 훑으면 `src/main.zig` 에 외부 반사가
+                    // 생겨 경계 원장 등록이 필요해진다(§2m.109 — 그 갱신 도구가 이 호스트에서 안 돈다).
+                    // 판정 쪽에서는 손으로 적는 편이 오히려 낫다: **무엇을 기대하는지가 보인다.**
+                    const roles = [_]maru.chrome.tokens.ColorRole{
+                        .syntax_keyword,   .syntax_string,      .syntax_number,
+                        .syntax_comment,   .syntax_property,    .syntax_type_name,
+                        .syntax_function,  .syntax_punctuation, .syntax_tag,
+                        .syntax_attribute, .syntax_invalid,
+                    };
+                    var want: [16][3]f32 = undefined;
+                    var n_want: usize = 0;
+                    for (roles) |r| {
+                        const rgb = chrome_tokens.get(r);
+                        want[n_want] = .{
+                            @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                            @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                            @as(f32, @floatFromInt(rgb.b)) / 255.0,
+                        };
+                        n_want += 1;
+                    }
+                    var n_col: usize = 0;
+                    var hit: [16]bool = @splat(false);
+                    for (be.cells.items) |c| {
+                        if (c.fg[3] < 0.5) continue;
+                        for (want[0..n_want], 0..) |v, wi| {
+                            if (@abs(c.fg[0] - v[0]) + @abs(c.fg[1] - v[1]) + @abs(c.fg[2] - v[2]) < 0.01) {
+                                n_col += 1;
+                                hit[wi] = true;
+                                break;
+                            }
+                        }
+                    }
+                    var distinct: usize = 0;
+                    for (hit[0..n_want]) |h| if (h) {
+                        distinct += 1;
+                    };
+                    esyn_judgeable = true;
+                    esyn_total = be.cells.items.len;
+                    esyn_first_line = of.first_line;
+                    esyn_cells = n_col;
+                    esyn_distinct = distinct;
+                }
                 editor_cells_drawn = be.cells.items.len;
                 editor_last_cells = be.cells.items.len;
                 editor_last_rows = be.written.visual_rows;
@@ -12350,6 +12605,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 fbsame_equal,
                 fbsame_fallback,
                 fbsame_ok,
+            });
+        }
+        {
+            // **편집기가 구문 색을 칠하는가.** 셀 수만 보면 「글자가 그려졌다」까지다 — 색칠은 그
+            // 위의 사실이라 **기본 전경색이 아닌 셀**을 센다.
+            //
+            // **색이 둘 이상이어야 한다.** 하나뿐이면 우연히 한 역할만 걸렸거나 전체가 한 색으로
+            // 물든 것이고, 둘 다 「구문 색이 돈다」와 다른 사실이다(zig 소스면 키워드·문자열·주석이
+            // 함께 온다).
+            const esyn_ok = esyn_judgeable and esyn_cells > 0 and esyn_distinct >= 2;
+            try stdout.print("editor_syntax: judgeable={} first_line={d} colored={d}/{d} roles={d} editor_syntax_ok={}\n", .{
+                esyn_judgeable,
+                esyn_first_line,
+                esyn_cells,
+                esyn_total,
+                esyn_distinct,
+                esyn_ok,
             });
         }
         {
@@ -15078,6 +15350,8 @@ fn buildEditorFrame(
     content_max_cols: ?u32,
     sel: ?EditorSelRange,
     ss: anytype,
+    /// 줄별 구문 색. **렌더 축과 같은 축**이고 짧아도 된다 — 없는 줄은 무색이다(그 자리 계약).
+    line_colors: []const []const editor_view.content.ColorSpan,
 ) !EditorBuilt {
     // **선택을 행 축으로 자른다.** 산술은 중립이 소유한다(`selection_marks`) — macOS 와
     // Windows 가 각자 적으면 경계 셋(줄 시작·줄 끝·선택 양끝) 중 하나가 조용히 갈린다.
@@ -15100,6 +15374,7 @@ fn buildEditorFrame(
             .lines = ls,
             .total_lines = ls.len,
             .selection_marks = sel_marks,
+            .line_colors = line_colors,
             // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
             .first_col = first_col,
             // 가장 긴 줄의 표시 폭 — 막대 길이와 "막대를 세울지" 를 중립이 이것으로 정한다.
@@ -15436,7 +15711,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
     var max_top: usize = 0;
     {
-        var probe = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
+        var probe = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch, &.{});
         defer probe.deinit(allocator);
         max_top = probe.written.max_top_line;
     }
@@ -15448,7 +15723,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else
                 before -| @as(usize, @intCast(-delta));
 
-            var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
+            var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch, &.{});
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
@@ -15498,7 +15773,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         // 3 번 줄 5 바이트에서 6 번 줄 2 바이트까지.
         const lo = line_starts[3] + 5;
         const hi = line_starts[6] + 2;
-        var built_sel = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, .{ .lo = lo, .hi = hi }, sel_scratch);
+        var built_sel = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, .{ .lo = lo, .hi = hi }, sel_scratch, &.{});
         defer built_sel.deinit(allocator);
 
         // **기대값을 여기서 따로 센다** — 중립 함수를 안 부르고, 줄 범위가 겹치는지만 본다.
@@ -15542,7 +15817,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var drag_anchor: ?usize = null;
     var sel_range: ?EditorSelRange = null;
     var caret_at: ?editor_view.hit.Point = null;
-    var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch);
+    var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch, &.{});
     defer built.deinit(allocator);
     var frames: usize = 0;
     var wheel_events: usize = 0;
@@ -15606,7 +15881,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else => {},
         };
         if (dirty) {
-            var next_built = buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch) catch built;
+            var next_built = buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch, &.{}) catch built;
             if (next_built.cells.items.ptr != built.cells.items.ptr) {
                 built.deinit(allocator);
                 built = next_built;
@@ -15620,7 +15895,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
-                const next_built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
+                const next_built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch, &.{});
                 built.deinit(allocator);
                 built = next_built;
             }

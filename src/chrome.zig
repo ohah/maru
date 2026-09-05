@@ -68,6 +68,9 @@ pub const components = struct {
         pub const geometry = @import("chrome/components/editor_view/geometry.zig");
         pub const gutter = @import("chrome/components/editor_view/gutter.zig");
         pub const content = @import("chrome/components/editor_view/content.zig");
+        /// 구문 스팬 → 줄별 색 구간. **역할이 이미 정해진 채로** 들어온다(캡처 이름 → 역할은
+        /// `maru.syntax_colors` 가 잇는다 — chrome 은 session 을 안 본다).
+        pub const syntax_colors = @import("chrome/components/editor_view/syntax_colors.zig");
         pub const viewport = @import("chrome/components/editor_view/viewport.zig");
         pub const hit = @import("chrome/components/editor_view/hit.zig"); // 화면 좌표 → (행·논리 줄·줄 안 byte). 플랫폼이 굳힌 기하만 대 준다
         pub const selection_marks = @import("chrome/components/editor_view/selection_marks.zig"); // 문서 offset 선택 → 행마다의 Mark. 축(행→문서 줄)은 호출자가 푼다

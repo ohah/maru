@@ -218,7 +218,16 @@ const claude_working_gates = blk: {
     break :blk g;
 };
 
-const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } };
+/// codex turn 진행의 화면 discriminator. **`•` 는 codex 의 범용 마커**라 그것만으로는 못 가른다 —
+/// 60 초 관측(2026-09-05)에서 `• Ran …`(316) · `• Waited …`(72) · `• Explored`(35) 같은 **완료** 줄과
+/// `• 가능합니다. 다만 …` 같은 **대화 답변**까지 같은 마커를 쓴다. 그중 **`esc to interrupt` 를 가진
+/// 것만 진행 중**이고, 그것이 claude 의 `…` 와 같은 자리다.
+///
+/// ⚠️ **`working` 을 함께 요구하지 않는다.** 예전에는 요구했는데, 그러면
+/// `• Waiting for background terminal (23m 27s • esc to interrupt)` 가 **진행 중인데 idle 로 판정된다**
+/// (실측으로 잡았다 — 그 pane 은 배지가 대기중으로 접혔다). `LineMatch` 가 **같은 한 줄**을 보장하므로
+/// 문구를 하나 더 걸지 않아도 「서로 다른 줄에서 주워 조합」 은 일어나지 않는다.
+const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{"esc to interrupt"} };
 
 const codex_rules = [_]Rule{
     .{ .id = "action_required_title", .state = .blocked, .priority = 1000, .region = .title, .all = &.{"action required"}, .visible_blocker = true },
@@ -1602,4 +1611,29 @@ test "claude: 실측된 스피너 프레임 전수가 같은 진행 신호로 �
 test "claude: `…` 없는 스피너 줄은 진행이 아니다 — 완료 줄이 같은 기호를 쓴다" {
     const d = detect(.claude, .{ .screen = "✻ Worked for 3s · done\n❯ " });
     try std.testing.expectEqual(State.idle, d.state);
+}
+
+// ── codex 진행 줄: `•` 는 범용 마커라 `esc to interrupt` 만이 진행을 가른다 (실측 2026-09-05)
+
+test "codex: Waiting 도 진행 줄이다 — `working` 문구를 요구하면 놓친다" {
+    // 실측 화면. 예전 규칙은 `working` 을 함께 요구해서 이 줄을 못 잡았고, 배지가 대기중으로 접혔다.
+    const screen =
+        "• Waiting for background terminal (23m 27s • esc to interrupt) · 1 background terminal running\n" ++
+        "› \n";
+    const d = detect(.codex, .{ .screen = screen });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(!d.visible_idle);
+}
+
+test "codex: 완료·대화 줄은 같은 `•` 마커를 써도 진행이 아니다" {
+    // 60 초 관측에서 나온 실제 모양들 — `esc to interrupt` 가 없으므로 걸리지 않아야 한다.
+    for ([_][]const u8{
+        "• Ran zig fmt --check build.zig src && zig build test\n› \n",
+        "• Waited for background terminal · gh run watch 33955506893 --interval 15\n› \n",
+        "• Explored\n› \n",
+        "• 가능합니다. 다만 현재 실측 가능한 범위가 나뉩니다.\n› \n",
+    }) |screen| {
+        const d = detect(.codex, .{ .screen = screen });
+        try std.testing.expectEqual(State.idle, d.state);
+    }
 }

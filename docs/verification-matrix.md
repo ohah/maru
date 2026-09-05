@@ -2723,9 +2723,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   transport의 최종 조립, release attestation·predecessor download·workflow 배선은 후속 범위다.
   baseline evidence를 process 사이에 넘길 때는 `DurableEvidence`가 ephemeral workspace의 exact direct child인 held source를
   read 전후 재검증하고 workspace 밖 absolute destination에 exclusive publish한다. destination owner는 held/path inode와 SHA를
-  재검증하며 cleanup 때 exact inode만 unlink하므로 pathname replacement를 삭제하지 않는다.
+  재검증하며 cleanup 때 exact inode만 unlink하므로 pathname replacement를 삭제하지 않는다. `closeRetaining()`은 descriptor만
+  닫고 durable leaf를 남긴 뒤 non-reusable tombstone으로 수렴해 과거 process-local owner의 삭제 권한을 소멸시킨다.
   `test-session-host-release-adapter-candidate-evidence-handoff`가 Debug·ReleaseFast에서 실제 승격과 source workspace 제거 뒤 생존,
-  path/alias/final-address/source-drift/existing-destination 거부, allocation failure와 identity-safe cleanup을 검증한다. aggregate
+  path/alias/final-address/source-drift/existing-destination 거부, retained close 뒤 bytes 생존·owner 재사용 차단, allocation failure와
+  identity-safe cleanup을 검증한다. aggregate
   handoff와 split prepare/finalize wiring은 후속 범위다.
   `release_adapter_github_release_attestation.zig`는 post-publish release와 local asset에 대해 exact
   `gh release verify <tag>`/`verify-asset <tag> <absolute-file>` argv, clean token environment와 bounded stdout을 소유한다.

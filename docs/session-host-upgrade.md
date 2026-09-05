@@ -2942,6 +2942,50 @@ pre-existing final, copy/move/final-address, final directory/leaf 교체 때 for
 제품 latency budget으로 승격하지 않는다. 이 aggregate leaf만으로 split prepare/finalize driver, 다음 process의 reopen/semantic binding,
 live release workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
 
+### 11.50 다음 process의 aggregate reopen과 local bundle semantic binding
+
+finalize validator는 §11.49의 `DurableAggregate` 메모리나 descriptor를 역직렬화하지 않는다.
+`release_adapter_candidate_aggregate_reopen.zig`의 caller-owned final-address `ReopenedAggregate` 하나가 canonical absolute final
+directory pathname, trusted `Context`, checkout 전에 고정한 GitHub CLI와 candidate DMG·frozen executable·candidate manifest의
+canonical absolute pathname만 받는다. evidence pathname과 네 bundle pathname은 caller가 제출하지 않고 final directory의 held
+identity와 §11.49 fixed role basename에서만 유도한다. DMG·frozen·manifest basename도 context tag에서 유도한 exact release name이어야
+하며 caller가 subject name, SHA-256, role 문자열, 성공 boolean, token 또는 bundle URL을 별도 권위로 제출할 수 없다.
+
+owner는 final directory의 parent를 component별 no-follow로 열고 final directory를 `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`로 고정한다.
+owner-only `0700` directory와 parent/name의 exact device/inode 결속을 확인한 뒤 directory entry를 bounded하게 한 번 열거한다. `.`·`..`를
+제외한 entry는 정확히 다섯 개여야 하며 네 fixed bundle basename 외 유일한 valid component 하나만 evidence basename으로 유도한다.
+그 다음 evidence와 네 bundle을 fixed role 순서로 새 `PinnedReleaseFile`에 연다. 각 leaf는 held directory의 exact direct child,
+regular·single-link·`0600`, role별 size cap 이하여야 하고
+다섯 inode는 pairwise distinct여야 한다. 외부 DMG·frozen·manifest도 별도 final-address owner로 새로 pin하며 세 inode와 aggregate의
+다섯 inode는 모두 달라야 한다. evidence basename은 네 fixed 이름과 다른 유일한 canonical component이고, DMG·frozen·manifest basename은 같은 tag의
+exact 이름이어야 한다. 최초 directory/leaf/artifact observation과 pathname, context와 CLI identity를 final-address metadata seal로
+한 번에 봉인하고, 일부 leaf나 unverified view는 공개하지 않는다.
+
+semantic binding은 shared positive deadline 아래 DMG→frozen executable→evidence→manifest 순서로만 §11.47
+`verifyBundleWith`를 네 번 호출한다. 각 호출의 artifact pathname과 bundle pathname, subject basename과 held-fd SHA-256은 fixed role에서
+유도하며 verifier child의 environment는 exact `GH_PROMPT_DISABLED=1` 하나라 `GH_TOKEN`·Apple secret·HOME/PATH를 받지 않는다.
+외부 artifact와 CLI pathname은 final directory와 같거나 그 descendant일 수 없다. 각 child 직전과 직후에는 held directory를 independent
+descriptor offset으로 다시 열거해 exact same five-name set임을 확인하고, CLI, final directory, 다섯 aggregate leaf와 세 외부 artifact를
+전부 재검증해 최초 snapshot과 비교한다.
+verified certificate/statement의 repository·workflow·source commit·tag·run ID/attempt와 exact-one subject name/SHA가 모두 같고 마지막
+fresh deadline과 full fence를 통과한 뒤에만 `ReopenedAggregate`를 `.verified`로 게시한다. bundle bytes 자체, pathname 또는 child exit
+status만으로 verified를 만들지 않는다.
+
+copied/pre-owned/aliased result, relative/control/trailing-slash path, directory replacement, missing/extra/fixed-name 교환 leaf,
+mode/link/size/digest drift, duplicate inode, artifact basename/role 교환, CLI/context drift, timeout, verifier capture alias, 첫째부터 넷째
+child 실패와 allocation failure는 verified publication 0이다. prepare process가 남긴 complete final directory는 finalize 실패 때도
+삭제하거나 부분 수정하지 않는다. 실패 cleanup과 성공 `close()`는 새로 연 descriptor만 tombstone-before-close로 닫고 caller pathname을
+따라 unlink하지 않는다. close 뒤 owner는 non-reusable `closed` tombstone이며 과거 pointer나 descriptor로 durable aggregate를 읽거나
+삭제할 권위를 되찾지 못한다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-reopen`은 Debug·ReleaseFast actual filesystem에서 prepare owner의
+`closeRetaining()` 뒤 새 process-equivalent owner가 다섯 leaf와 세 artifact를 reopen하고 fixed four-call semantic binding을 완료함을
+검증한다. exact argv/token-free environment/order, role별 subject name/SHA, directory/leaf/artifact/CLI 전후 drift, copied/final-address,
+all allocation/child fail-index, failure 뒤 durable bytes 생존과 descriptor leak 0, close syscall failure의 observable `CleanupFailed`와
+durable bytes 보존, fake verifier seam의 test-only source boundary를 고정한다. harness-owned `mkdtemp` root와 fake verifier만 사용하며 실제 앱 session-host 상태나 GitHub release를
+건드리지 않는다. 이 단계는 process-independent storage·semantic handoff 계약을 닫지만
+live release workflow의 두 process 실행/IPC와 실제 GitHub-issued bundle, frozen signed U5 제품 E2E는 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

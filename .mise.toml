@@ -390,7 +390,24 @@ description = "Check format, tests, boundaries, config docs, doc links, and buil
 # `struct {}` 로 스텁하므로, 앱 호스트는 Linux 에서 빌드가 **불가능**하다. CI 의 check job 은 ubuntu 라
 # `macos-app-host-abi-lib` 를 직접 걸면 항상 빨갛다(2026-08-28 PR #2803 에서 실측했다 — 로컬 macOS 는
 # 초록이었고 CI 만 8개 컴파일 오류로 죽었다). 그래서 OS 로 갈라지는 `check-macos-app-host` 를 건다.
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "build"]
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-task-split", "build"]
+
+# CI 의 `check` 잡이 도는 것 — `check` 에서 `check-boundaries` 만 뺀 집합이다.
+#
+# **왜 가르나.** `check-boundaries` 는 경계 게이트 150여 개를 컴파일·실행하는 CPU 덩어리다.
+# 실측(2026-09-05): 로컬 16 코어 320 s, CI 4 코어 **825 s** — 같은 러너에서 `jobs = 8` 로 다른 13 개
+# 태스크와 코어를 나눠 쓰느라 굶주린다. 자기 러너를 주려고 CI 에서만 별도 잡(`check-boundaries`)으로
+# 뺀다. **로컬 `mise run check` 는 그대로 전부 돈다** — 개발자가 한 번에 보는 게이트 집합은 바꾸지 않는다.
+#
+# `check` 의 depends 를 고치면 **여기도 같이** 고친다. 두 목록이 갈리면 CI 가 어떤 게이트를 조용히
+# 빠뜨린다 — 그래서 아래 `check-task-split` 판정자가 「check = 이것 + check-boundaries」를 잠근다.
+[tasks.check-task-split]
+description = "Lock `check` == `check-without-boundaries` + `check-boundaries` (self-test first)"
+run = ["sh tools/ci/check-task-split.test.sh", "sh tools/ci/check-task-split.sh"]
+
+[tasks.check-without-boundaries]
+description = "CI: everything in `check` except check-boundaries (which runs in its own job)"
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-task-split", "build"]
 
 [tasks."packages:check"]
 # npm 라이브러리 게이트. Zig `check`와 분리된 opt-in 경로다(web:check와 같은 구조) —

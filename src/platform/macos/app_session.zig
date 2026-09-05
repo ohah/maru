@@ -20400,7 +20400,16 @@ pub const AppSession = struct {
             const kind = agents.running_kind;
             var agent_buf: [16]u8 = undefined;
             const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(agents.running, 99)}) catch "";
-            const icon = if (kind == .none) icons.codepoint(.sparkle) else agentIconCodepoint(kind);
+            // **종류를 모르면 아이콘을 안 그린다.** 예전에는 `.none` 에 sparkle 을 썼는데 그것은 claude
+            // 아이콘이라, 「모른다」를 「claude 다」로 단정하는 거짓말이 된다. 실제로 그 한 줄이 진단을
+            // 망쳤다(2026-09-05): 원격 pane 의 `agent_kind` 가 안 세워진 상태였는데 화면은 claude 로
+            // 보여, 사용자가 「codex 인데 claude 로 나온다」로 읽고 **엉뚱한 축을 한참 팠다**.
+            //
+            // **provider 중립 아이콘은 두지 않는다** — 그것을 만들려면 새 SVG 자산과 빌드 생성기가
+            // 필요하고, 그 비용은 이 자리가 정당화하지 못한다. 아이콘이 없어도 blocked(모래시계)와는
+            // **모양으로 갈리므로** 위 주석의 규율("running 과 같은 아이콘을 쓰면 개수가 무엇의 개수인지
+            // 모호해진다")은 그대로 지켜진다.
+            const icon: ?u21 = if (kind == .none) null else agentIconCodepoint(kind);
             if (text.len > 0 and rn < max_status_bar_right_items) {
                 if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
                     right_frames[rn] = dl;

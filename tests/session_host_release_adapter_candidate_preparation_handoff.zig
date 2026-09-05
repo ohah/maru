@@ -368,6 +368,9 @@ test "preparation handoff is credential-free and product-dormant" {
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind == .sym_link) return error.TestUnexpectedResult;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        // The next-process adapter is the sole internal consumer and has its own whole-src
+        // product-dormancy sentinel. It is not a product caller of the handoff operation.
+        if (std.mem.eql(u8, entry.path, "platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig")) continue;
         const product = try src.readFileAlloc(std.testing.io, entry.path, std.testing.allocator, .limited(16 * 1024 * 1024));
         defer std.testing.allocator.free(product);
         product_callers += std.mem.count(u8, product, "release_adapter_candidate_preparation_handoff");

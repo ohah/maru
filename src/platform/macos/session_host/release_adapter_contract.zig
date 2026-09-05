@@ -57,10 +57,36 @@ pub const PublishCandidate = struct {
     zig_sha256: []const u8,
 };
 
+pub const PrepareCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    evidence: []const u8,
+    candidate_dmg_bundle: []const u8,
+    candidate_frozen_bundle: []const u8,
+    evidence_bundle: []const u8,
+    manifest_bundle: []const u8,
+    aggregate: []const u8,
+};
+
+pub const FinalizeCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    aggregate: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    manifest: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
     publish_candidate: PublishCandidate,
+    prepare_candidate_aggregate: PrepareCandidateAggregate,
+    finalize_candidate_aggregate: FinalizeCandidateAggregate,
 };
 
 pub const Error = error{
@@ -108,12 +134,19 @@ const Values = struct {
     zig: ?[]const u8 = null,
     zig_size: ?[]const u8 = null,
     zig_sha256: ?[]const u8 = null,
+    candidate_dmg_bundle: ?[]const u8 = null,
+    candidate_frozen_bundle: ?[]const u8 = null,
+    evidence_bundle: ?[]const u8 = null,
+    manifest_bundle: ?[]const u8 = null,
+    aggregate: ?[]const u8 = null,
 };
 
 const Phase = enum {
     pre_publish,
     verify_predecessor,
     publish_candidate,
+    prepare_candidate_aggregate,
+    finalize_candidate_aggregate,
 };
 
 pub fn parseArgs(args: []const []const u8) Error!Command {
@@ -124,6 +157,10 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         .verify_predecessor
     else if (std.mem.eql(u8, args[0], "publish-candidate"))
         .publish_candidate
+    else if (std.mem.eql(u8, args[0], "prepare-candidate-aggregate"))
+        .prepare_candidate_aggregate
+    else if (std.mem.eql(u8, args[0], "finalize-candidate-aggregate"))
+        .finalize_candidate_aggregate
     else
         return error.UnknownCommand;
 
@@ -146,13 +183,13 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
 
     const repo = values.repo orelse return error.MissingOption;
     const tag = values.tag orelse return error.MissingOption;
-    const manifest = values.manifest orelse return error.MissingOption;
     if (!std.mem.eql(u8, repo, repository_name)) return error.InvalidRepository;
     try validateTag(tag);
-    try validateManifestAssetPath(manifest, tag[1..]);
 
     return switch (phase) {
         .pre_publish => blk: {
+            const manifest = values.manifest orelse return error.MissingOption;
+            try validateManifestAssetPath(manifest, tag[1..]);
             const summary_out = values.summary_out orelse return error.MissingOption;
             const evidence = values.evidence orelse return error.MissingOption;
             const dmg = values.dmg orelse return error.MissingOption;
@@ -174,6 +211,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             } };
         },
         .verify_predecessor => blk: {
+            const manifest = values.manifest orelse return error.MissingOption;
+            try validateManifestAssetPath(manifest, tag[1..]);
             const summary_out = values.summary_out orelse return error.MissingOption;
             const work_dir = try workDir(&values);
             const github_cli = try githubCli(&values);
@@ -198,6 +237,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const app_main_executable = try candidatePath(values.app_main_executable);
             const app_cli_executable = try candidatePath(values.app_cli_executable);
             const candidate_manifest = try candidatePath(values.manifest);
+            try validateManifestAssetPath(candidate_manifest, tag[1..]);
             const source_root = try candidatePath(values.source_root);
             const zig = try candidatePath(values.zig);
             const zig_size = try positiveDecimal(values.zig_size orelse return error.MissingOption);
@@ -225,6 +265,49 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .zig_sha256 = zig_sha256,
             } };
         },
+        .prepare_candidate_aggregate => blk: {
+            const evidence = try aggregatePath(values.evidence);
+            const candidate_dmg_bundle = try aggregatePath(values.candidate_dmg_bundle);
+            const candidate_frozen_bundle = try aggregatePath(values.candidate_frozen_bundle);
+            const evidence_bundle = try aggregatePath(values.evidence_bundle);
+            const manifest_bundle = try aggregatePath(values.manifest_bundle);
+            const aggregate = try aggregatePath(values.aggregate);
+            const github_cli = try githubCli(&values);
+            if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ evidence, candidate_dmg_bundle, candidate_frozen_bundle, evidence_bundle, manifest_bundle, aggregate, github_cli.path });
+            break :blk .{ .prepare_candidate_aggregate = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .evidence = evidence,
+                .candidate_dmg_bundle = candidate_dmg_bundle,
+                .candidate_frozen_bundle = candidate_frozen_bundle,
+                .evidence_bundle = evidence_bundle,
+                .manifest_bundle = manifest_bundle,
+                .aggregate = aggregate,
+            } };
+        },
+        .finalize_candidate_aggregate => blk: {
+            const aggregate = try aggregatePath(values.aggregate);
+            const dmg = try aggregatePath(values.dmg);
+            const frozen_executable = try aggregatePath(values.frozen_executable);
+            const manifest = try aggregatePath(values.manifest);
+            try validateManifestAssetPath(manifest, tag[1..]);
+            const github_cli = try githubCli(&values);
+            if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ aggregate, dmg, frozen_executable, manifest, github_cli.path });
+            break :blk .{ .finalize_candidate_aggregate = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .aggregate = aggregate,
+                .dmg = dmg,
+                .frozen_executable = frozen_executable,
+                .manifest = manifest,
+            } };
+        },
     };
 }
 
@@ -248,8 +331,8 @@ fn optionDestination(
     if (std.mem.eql(u8, option, "--tag")) return &values.tag;
     if (std.mem.eql(u8, option, "--github-cli")) return &values.github_cli;
     if (std.mem.eql(u8, option, "--github-cli-sha256")) return &values.github_cli_sha256;
-    if (std.mem.eql(u8, option, "--manifest")) return &values.manifest;
-    if (std.mem.eql(u8, option, "--summary-out") and phase != .publish_candidate) return &values.summary_out;
+    if (std.mem.eql(u8, option, "--manifest") and phase != .prepare_candidate_aggregate) return &values.manifest;
+    if (std.mem.eql(u8, option, "--summary-out") and (phase == .pre_publish or phase == .verify_predecessor)) return &values.summary_out;
     return switch (phase) {
         .pre_publish => if (std.mem.eql(u8, option, "--evidence"))
             &values.evidence
@@ -289,6 +372,28 @@ fn optionDestination(
             &values.zig_sha256
         else
             null,
+        .prepare_candidate_aggregate => if (std.mem.eql(u8, option, "--evidence"))
+            &values.evidence
+        else if (std.mem.eql(u8, option, "--candidate-dmg-bundle"))
+            &values.candidate_dmg_bundle
+        else if (std.mem.eql(u8, option, "--candidate-frozen-bundle"))
+            &values.candidate_frozen_bundle
+        else if (std.mem.eql(u8, option, "--evidence-bundle"))
+            &values.evidence_bundle
+        else if (std.mem.eql(u8, option, "--manifest-bundle"))
+            &values.manifest_bundle
+        else if (std.mem.eql(u8, option, "--aggregate"))
+            &values.aggregate
+        else
+            null,
+        .finalize_candidate_aggregate => if (std.mem.eql(u8, option, "--aggregate"))
+            &values.aggregate
+        else if (std.mem.eql(u8, option, "--dmg"))
+            &values.dmg
+        else if (std.mem.eql(u8, option, "--frozen-executable"))
+            &values.frozen_executable
+        else
+            null,
     };
 }
 
@@ -296,6 +401,18 @@ fn candidatePath(value: ?[]const u8) Error![]const u8 {
     const path = value orelse return error.MissingOption;
     if (!canonicalAbsoluteLeaf(path)) return error.InvalidCandidatePath;
     return path;
+}
+
+fn aggregatePath(value: ?[]const u8) Error![]const u8 {
+    const path = value orelse return error.MissingOption;
+    if (!canonicalAggregatePath(path)) return error.InvalidCandidatePath;
+    return path;
+}
+
+fn canonicalAggregatePath(path: []const u8) bool {
+    if (!canonicalAbsoluteLeaf(path) or std.mem.indexOfScalar(u8, path, '=') != null) return false;
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
 }
 
 fn positiveDecimal(value: []const u8) Error!u64 {

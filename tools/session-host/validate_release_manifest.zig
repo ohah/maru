@@ -14,6 +14,7 @@ const apple_transport = @import("release_adapter_apple_transport");
 const pre_publish_product = @import("release_adapter_pre_publish_product");
 const verify_predecessor_product = @import("release_adapter_verify_predecessor_product");
 const candidate_release_driver = @import("release_adapter_candidate_release_driver");
+const candidate_aggregate_process = @import("release_adapter_candidate_aggregate_process");
 const builtin = @import("builtin");
 
 pub const phase_budget_ns: i128 = 20 * std.time.ns_per_min;
@@ -29,6 +30,7 @@ pub const Storage = struct {
     compatibility: [compatibility_capture_bytes]u8 = undefined,
     apple: apple_transport.Storage = undefined,
     candidate: candidate_release_driver.Execution = .{},
+    aggregate_process: candidate_aggregate_process.Storage = .{},
 };
 
 const CurrentBootstrapper = struct {
@@ -96,10 +98,33 @@ const ProductDrivers = struct {
             allocator,
             bootstrap,
             token,
-            &storage.github_response[0..candidate_release_driver.max_scratch_bytes],
+            storage.github_response[0..candidate_release_driver.max_scratch_bytes],
             budget_ns,
             &storage.candidate,
         );
+    }
+
+    pub fn prepareCandidateAggregate(
+        _: *@This(),
+        _: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        if (budget_ns != phase_budget_ns) return error.InvalidBudget;
+        try candidate_aggregate_process.prepare(allocator, bootstrap, &storage.aggregate_process);
+    }
+
+    pub fn finalizeCandidateAggregate(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        try candidate_aggregate_process.finalize(io, allocator, bootstrap, budget_ns, &storage.aggregate_process);
     }
 };
 
@@ -126,11 +151,12 @@ pub fn executeWith(
     var bootstrap: bootstrap_mod.Bootstrap = .{};
     try bootstrapper.load(allocator, args, &bootstrap);
     if (bootstrap.owner != &bootstrap) return error.InvalidBootstrap;
-    const token = try tokens.read();
     switch (bootstrap.command) {
-        .pre_publish => try drivers.prePublish(io, allocator, &bootstrap, token, phase_budget_ns, storage),
-        .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, token, phase_budget_ns, storage),
-        .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, token, phase_budget_ns, storage),
+        .pre_publish => try drivers.prePublish(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
+        .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
     }
 }
 

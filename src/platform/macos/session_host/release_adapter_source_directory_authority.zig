@@ -46,7 +46,7 @@ pub const SourceDirectory = struct {
         const view = try bootstrapView(bootstrap);
         const command = switch (view.command) {
             .publish_candidate => |candidate| candidate,
-            .pre_publish, .verify_predecessor => return error.InvalidCommand,
+            else => return error.InvalidCommand,
         };
         try self.requireValid(view.context.source_commit, &view.runner.workflow_sha, command.source_root);
     }
@@ -114,7 +114,7 @@ pub fn prepare(
     const view = try bootstrapView(bootstrap);
     const command = switch (view.command) {
         .publish_candidate => |candidate| candidate,
-        .pre_publish, .verify_predecessor => return error.InvalidCommand,
+        else => return error.InvalidCommand,
     };
     const requested_path = command.source_root;
     if (viewOverlaps(std.mem.asBytes(result), view) or

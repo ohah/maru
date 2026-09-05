@@ -119,7 +119,7 @@ pub fn run(
     const view = try bootstrapView(bootstrap);
     const command = switch (view.command) {
         .publish_candidate => |candidate| candidate,
-        .pre_publish, .verify_predecessor => return error.InvalidCommand,
+        else => return error.InvalidCommand,
     };
     try validateAliases(execution, bootstrap, view, command, token, scratch);
 
@@ -166,7 +166,7 @@ const ConcreteSteps = struct {
         const view = try bootstrapView(execution.bootstrap.?);
         const command = switch (view.command) {
             .publish_candidate => |candidate| candidate,
-            .pre_publish, .verify_predecessor => return error.InvalidCommand,
+            else => return error.InvalidCommand,
         };
         try validateAliases(execution, execution.bootstrap.?, view, command, execution.token, execution.scratch);
         try execution.requireActive(view);
@@ -428,6 +428,8 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
         },
         .pre_publish => hash.update("pre-publish"),
         .verify_predecessor => hash.update("verify-predecessor"),
+        .prepare_candidate_aggregate => hash.update("prepare-candidate-aggregate"),
+        .finalize_candidate_aggregate => hash.update("finalize-candidate-aggregate"),
     }
     var digest: [32]u8 = undefined;
     hash.final(&digest);

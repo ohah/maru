@@ -22897,6 +22897,62 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     session.closeRemoteAgentHost(dest);
 }
 
+test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통째로 버려진다" {
+    // **필드 13 개 중 `agent_state` 하나만 잠겨 있던 자리.** 이 리셋은 로컬 classify 경로 안쪽이라
+    // 제품 테스트로 도달하기 어려웠고, 그래서 나머지 열둘은 빼먹어도 아무도 몰랐다.
+    //
+    // 특히 두 자리가 남으면 사용자가 보는 결과가 틀어진다:
+    // - `agent_screen_seq` 가 남으면 C1 의 미관측 가드가 뚫려 **승인 대기가 즉시 풀린다**
+    // - `agent_arbiter` 의 연속 셈이 남으면 지난 프로세스의 관측으로 새 프로세스를 **접는다**
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+
+    // 지난 프로세스가 남긴 값으로 전부 채운다 — 하나도 초기값이 아니게.
+    term.agent_state = .running;
+    term.agent_hook_state = .blocked;
+    term.agent_screen_state = .running;
+    term.agent_screen_visible_blocker = true;
+    term.agent_screen_visible_idle = true;
+    term.agent_screen_rule = "live_prompt";
+    term.agent_screen_origin = .hook;
+    term.agent_screen_seq = 42;
+    term.agent_screen_generation = 7;
+    term.agent_last_output_ms = 12345;
+    // C2 의 연속 셈을 실제로 올려 둔다(리셋이 안 되면 다음 관측 하나로 뒤집힌다).
+    _ = term.agent_arbiter.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 1 });
+    _ = term.agent_arbiter.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 2 });
+
+    agent_ops.resetAgentObservationForKindChange(term);
+
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_hook_state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_screen_state);
+    try std.testing.expect(!term.agent_screen_visible_blocker);
+    try std.testing.expect(!term.agent_screen_visible_idle);
+    try std.testing.expectEqualStrings("", term.agent_screen_rule);
+    try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.screen, term.agent_screen_origin);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_screen_seq);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_screen_generation);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_last_output_ms);
+    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
+
+    // **중재기가 실제로 비워졌는가** — 필드가 아니라 «행동» 으로 잰다. 셈이 남아 있었다면 아래 한 번의
+    // 관측으로 C2 가 성립해 idle 로 접힌다(리셋 전에 둘을 쌓아 뒀다).
+    const v = term.agent_arbiter.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 3 });
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, v.state);
+    try std.testing.expectEqualStrings("C2-pending", v.rule);
+}
+
 test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상태만 채우면 화면이 그것을 안 그린다" {
     // ⚠️ **실사용에서 정확히 이 모양이었다**(2026-08-31): 훅이 돌고 이벤트가 흐르고 알림도 오는데
     // **왼쪽 목록만 안 바뀐다.** 사이드바·탭·도크가 「이 Term 에 에이전트가 있나」를 `agent_kind` 로

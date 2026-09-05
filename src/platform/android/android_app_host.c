@@ -434,7 +434,35 @@ static int initVulkan(ANativeWindow *win) {
 
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.pd, g.surface, &caps);
+    // **회전은 컴포지터에게 맡긴다**(M5 첫 슬라이스). `preTransform` 은 「내가 이 회전을 «이미»
+    // 적용해 그린다」는 선언이라, 화면이 90° 돌았는데 `caps.currentTransform` 을 그대로 주면
+    // **우리가 안 돌린 그림이 돌아간 것으로 취급돼 옆으로 눕는다**(실측 2026-09-05: 가로로
+    // 돌리면 세로 크기 그대로 좌상단에 90° 누운 채 그려지고 나머지는 검었다).
+    //
+    // 그리고 `ROTATE_90/270` 일 때 `currentExtent` 는 **회전 «전»(서페이스) 공간**으로 온다 —
+    // 그 값을 그대로 쓰면 폭·높이가 서로 바뀐 채 그린다. 그래서 IDENTITY 를 쓸 수 있으면
+    // 그것을 요청하고, 크기도 화면 방향대로 잡는다.
+    //
+    // **대신 합성 비용이 붙는다.** Android 가 권하는 것은 정점 변환에 회전을 넣는
+    // pre-rotation 이지만, 그것은 좌표계를 통째로 건드리는 일이라 별도 슬라이스다 —
+    // 먼저 「돌리면 제대로 그려진다」를 세우고, 비용이 문제가 되면 그때 옮긴다.
+    const int rotated_90 = (caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+                                                     VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) != 0;
+    const int identity_ok = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) != 0;
+    VkSurfaceTransformFlagBitsKHR want_transform =
+        (rotated_90 && identity_ok) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+
+    // **크기는 창에게 묻는다.** `currentExtent` 를 회전 시 어느 공간으로 주는지는 드라이버마다
+    // 갈린다(스펙은 90/270 에서 뒤바뀐 값을 말하지만, 이 에뮬레이터는 화면 방향 그대로 줬다 —
+    // 실측 2026-09-05: 그 값을 뒤바꿨더니 가로 화면에 세로 스왑체인이 섰다). 그리고 **아래
+    // 리사이즈 검사가 `ANativeWindow` 크기와 `g.extent` 를 비교**하므로, 둘이 어긋나면 매 프레임
+    // 재생성으로 화면이 통째로 멈춘다 — 같은 자리에서 온 값을 써야 그 고리가 안 생긴다.
     g.extent = caps.currentExtent;
+    if (win) {
+        const uint32_t ww = (uint32_t)ANativeWindow_getWidth(win);
+        const uint32_t wh = (uint32_t)ANativeWindow_getHeight(win);
+        if (ww && wh) g.extent = (VkExtent2D){.width = ww, .height = wh};
+    }
     uint32_t fn = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g.pd, g.surface, &fn, NULL);
     VkSurfaceFormatKHR *fmts = calloc(fn, sizeof(*fmts));
@@ -451,14 +479,15 @@ static int initVulkan(ANativeWindow *win) {
                                      .imageExtent = g.extent, .imageArrayLayers = 1,
                                      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                                     .preTransform = caps.currentTransform,
+                                     .preTransform = want_transform,
                                      .compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
                                      .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
     if (vkCreateSwapchainKHR(g.dev, &scci, NULL, &g.swap) != VK_SUCCESS) {
         scci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         if (vkCreateSwapchainKHR(g.dev, &scci, NULL, &g.swap) != VK_SUCCESS) { LOGI("swapchain_fail"); return 0; }
     }
-    LOGI("swapchain %ux%u fifo", g.extent.width, g.extent.height);
+    LOGI("swapchain %ux%u fifo transform=0x%x(cur=0x%x)", g.extent.width, g.extent.height,
+         (unsigned)want_transform, (unsigned)caps.currentTransform);
 
     vkGetSwapchainImagesKHR(g.dev, g.swap, &g.image_count, NULL);
     VkImage *imgs = calloc(g.image_count, sizeof(*imgs));
@@ -663,12 +692,17 @@ static void drawFrame(void) {
 
     uint32_t idx = 0;
     VkResult acq = vkAcquireNextImageKHR(g.dev, g.swap, UINT64_MAX, g.acquire_sem, VK_NULL_HANDLE, &idx);
-    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR) {
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
         // 창이 리사이즈됐다. 다시 안 만들면 **화면이 영구히 언다** — `adjustResize` 와 자동
         // 키보드가 첫 프레임에 이걸 일으키므로 실기기에서는 켜자마자 멈춘다.
         g.needs_recreate = 1;
         return;
     }
+    // **`SUBOPTIMAL` 은 재생성 사유가 아니다**(M5). 회전 때 우리는 일부러 `preTransform` 을
+    // IDENTITY 로 잡아 합성기에 회전을 맡기는데, 서페이스의 `currentTransform` 은 ROTATE_90 이라
+    // 드라이버가 **매 프레임** "최적이 아니다" 라고 말한다. 그것을 재생성으로 받으면 초당 열아홉
+    // 번씩 스왑체인을 다시 만든다(실측 2026-09-05: 5초에 95회). 진짜 리사이즈는 위의 창 크기
+    // 비교가 잡으므로 이 신호가 없어도 안 놓친다.
     if (acq != VK_SUCCESS) return;
 
     // **레이아웃은 Zig chrome 이 한다.** 플랫폼은 쓸 수 있는 크기만 넘기고 quad 를 받는다.
@@ -830,7 +864,7 @@ static void drawFrame(void) {
                            .pWaitSemaphores = &g.submit_sem, .swapchainCount = 1,
                            .pSwapchains = &g.swap, .pImageIndices = &idx};
     VkResult pres = vkQueuePresentKHR(g.queue, &pi);
-    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) g.needs_recreate = 1;
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR) g.needs_recreate = 1; // SUBOPTIMAL 은 위 주석대로 무시
     vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(g.dev, 1, &g.fence);
 

@@ -22,7 +22,7 @@
     <application android:label="MaruChrome" android:debuggable="true">
         <activity android:name="dev.maru.MaruActivity"
                   android:label="MaruChrome"
-                  android:screenOrientation="portrait"
+                  android:screenOrientation="unspecified"
                   android:configChanges="orientation|keyboardHidden|screenSize"
                   android:windowSoftInputMode="adjustResize"
                   android:exported="true">

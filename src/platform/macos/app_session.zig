@@ -22916,6 +22916,53 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     session.closeRemoteAgentHost(dest);
 }
 
+test "AK2: `pollAgentKinds` 가 종류 전환에서 리셋을 **실제로 부른다** (제품 경로)" {
+    // **AK1 의 짝이자, AK1 이 남긴 공백을 메운다.** AK1 은 리셋 함수를 직접 부르므로
+    // `pollAgentKinds` 안의 **호출**은 안 잠긴다 — 그 줄을 지우면 AK1 은 통과하고 제품만 깨진다.
+    //
+    // 전환을 만드는 방법: `agent_kind` 를 손으로 `.claude` 로 두면 실제 foreground(통제된 스모크
+    // 자식)와 어긋나므로, 주기 probe 가 돌 때 `classifyAgentProcesses` 가 `.none` 을 내고
+    // **종류가 바뀐다.** 리셋은 「바뀌었다」에만 걸리므로 어느 방향이든 상관없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    // 원격이 종류를 소유하면 이 가지를 안 탄다(`remote_owns_kind`).
+    try std.testing.expect(term.agent_remote_channel == null);
+    term.rt.observation.availability = .current;
+    term.rt.observation.foreground_available = true;
+
+    // 지난 프로세스가 남긴 값 — 리셋이 안 오면 그대로 살아남는다.
+    term.agent_kind = .claude;
+    term.agent_state = .running;
+    term.agent_screen_seq = 42;
+    term.agent_screen_visible_idle = true;
+    term.agent_screen_rule = "live_prompt";
+
+    // 주기 probe 를 세운다 — 그래야 로컬 classify 가지에 들어간다.
+    session.agent_poll_ticks = agent_ops.agentPollIntervalTicks(session) + 1;
+    agent_ops.pollAgentKinds(session);
+
+    // 종류가 실제로 바뀌었는가 — 안 바뀌었으면 이 판정자가 아무것도 안 잠근다.
+    try std.testing.expect(term.agent_kind != .claude);
+
+    // **그리고 리셋이 따라왔는가.** `pollAgentKinds` 의 호출을 지우면 여기가 죽는다.
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_state);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_screen_seq);
+    try std.testing.expect(!term.agent_screen_visible_idle);
+    try std.testing.expectEqualStrings("", term.agent_screen_rule);
+}
+
 test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통째로 버려진다" {
     // **필드 13 개 중 `agent_state` 하나만 잠겨 있던 자리.** 이 리셋은 로컬 classify 경로 안쪽이라
     // 제품 테스트로 도달하기 어려웠고, 그래서 나머지 열둘은 빼먹어도 아무도 몰랐다.

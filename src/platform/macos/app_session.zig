@@ -71978,6 +71978,52 @@ test "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 �
     try std.testing.expectEqualStrings("B0", term.agent_state_rule);
 }
 
+test "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 running 을 못 덮는다 (§1.1 C2 · 제품 경로)" {
+    // **AW2 의 짝이다.** 둘은 화면이 똑같이 「입력창만」 인데 정반대를 요구한다 —
+    // AW2 는 출력이 **끊긴** 상태(codex 오류 턴)라 닫아야 하고, 여기는 출력이 **계속 있는** 상태
+    // (provider 가 진행 표시를 바꿔 화면이 running 근거를 못 읽는 2026-09-05 사고)라 닫으면 안 된다.
+    //
+    // ⚠️ **이 판정자가 제품 배선을 잠근다.** 순수 중재기는 이미 잠겨 있었지만
+    // `Term` → `Arbiter.Input` 으로 `screen_idle_is_chrome`·`output_active` 를 **나르는 두 줄**은
+    // 지워도 아무도 안 죽었다(mutation 으로 확인). 그 두 줄이 끊기면 C2 강화가 통째로 무력해진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .codex;
+    term.rt.observation.availability = .current;
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    term.agent_hook_log_present = true;
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+
+    // 훅은 running 이라 하고, 화면에는 입력창(chrome)만 보인다 — 여기까지는 AW2 와 같다.
+    term.agent_hook_state = .running;
+    try surface.core.write("\x1b[2J\x1b[H  응답을 쓰는 중\r\n\r\n› \r\n  Context 2% used\r\n");
+
+    // **다른 것은 이것뿐이다: 매 회차 출력이 있다.** 실제로도 스피너가 회전하므로 PTY 출력이 끊기지 않는다.
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        term.rt.observation.observer_generation +%= 1;
+        term.agent_last_output_ms = session.awakeMs();
+        agent_ops.pollAgentState(session, term, false);
+        try std.testing.expect(term.agent_screen_visible_idle);
+        try std.testing.expect(term.agent_screen_idle_is_chrome); // 입력창은 chrome 이다
+        // 여섯 번을 봐도 C2 자리에 안 들어간다 — `C2-pending` 조차 아니다.
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+        try std.testing.expectEqualStrings("B", term.agent_state_rule);
+    }
+}
+
 test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)" {
     // **generation 을 올리지 않는 것이 이 판정자의 요점이다.** codex 오류 턴은 훅이 running 에 멈춘 채
     // 화면만 idle 이고 **출력이 끊긴** 상태다. 예전 fast-path 는 정확히 그 상태를 「다시 볼 것 없다」로

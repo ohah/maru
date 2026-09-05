@@ -1559,6 +1559,9 @@ pub fn build(b: *std.Build) void {
             "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)",
             "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 낡은 값이 배지가 되지 않게 (§1.1)",
             "AW4 화면이 뒤집은 배지에만 각주 표식이 붙는다 (§1.4 · 사이드바)",
+            // AW2 의 짝. 화면은 똑같이 「입력창만」 인데 **출력이 계속 있는** 상태라 C2 가 닫으면 안 된다.
+            // 이 둘이 나란히 있어야 「정반대를 요구하는 두 사고」가 계약으로 고정된다(§1.1 C2).
+            "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 running 을 못 덮는다 (§1.1 C2 · 제품 경로)",
             "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리킨다 — 제품 spawn 으로 건넌다",
             "host 가 만드는 칸과 GUI 가 읽는 칸이 같은 경로다 — 두 모듈이 같은 이름을 짓는다",
             "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 GUI 가 띄웠다",
@@ -1589,11 +1592,11 @@ pub fn build(b: *std.Build) void {
     // **+10 은 원격(ssh) 축이다**(docs/plans/remote-agent-state.md RA5). 그 열을 여기 적기 전까지는
     // 그 판정자들이 **어느 게이트에도 안 매달려 있었다** — 파일에 있으니 도는 줄 알았는데 이름 필터는
     // 0개 매치도 초록이라, 정확히 이 주석이 경고하는 사고가 원격 축에서 한 번 더 날 뻔했다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=37");
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=38");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=37");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=38");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

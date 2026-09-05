@@ -11,6 +11,8 @@ fn bootstrap(source_root: []const u8) authority.Bootstrap {
         .test_uuid = "123e4567-e89b-42d3-a456-426614174000",
         .dmg = "/tmp/dmg",
         .frozen_executable = "/tmp/exe",
+        .candidate_dmg_bundle = "/tmp/dmg.bundle.json",
+        .candidate_frozen_bundle = "/tmp/frozen.bundle.json",
         .dmg_work = "/tmp/dmg-work",
         .baseline_workspace = "/tmp/baseline",
         .app_main_executable = "/tmp/app-main",

@@ -45,7 +45,7 @@ test "invalid bootstrap and copied execution reach no phase owner" {
 }
 
 fn candidateCommand() bootstrap_mod.PublishCandidate {
-    return .{ .repo = "ohah/maru", .tag = "v1.2.3", .test_uuid = "123e4567-e89b-42d3-a456-426614174000", .dmg = "/tmp/dmg", .frozen_executable = "/tmp/exe", .dmg_work = "/tmp/dmg-work", .baseline_workspace = "/tmp/baseline", .app_main_executable = "/tmp/app-main", .app_cli_executable = "/tmp/app-cli", .manifest = "/tmp/Maru-1.2.3-session-host-release.json", .source_root = "/tmp/source", .zig = "/tmp/zig", .zig_size = 123, .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
+    return .{ .repo = "ohah/maru", .tag = "v1.2.3", .test_uuid = "123e4567-e89b-42d3-a456-426614174000", .dmg = "/tmp/dmg", .frozen_executable = "/tmp/exe", .candidate_dmg_bundle = "/tmp/dmg.bundle.json", .candidate_frozen_bundle = "/tmp/frozen.bundle.json", .dmg_work = "/tmp/dmg-work", .baseline_workspace = "/tmp/baseline", .app_main_executable = "/tmp/app-main", .app_cli_executable = "/tmp/app-cli", .manifest = "/tmp/Maru-1.2.3-session-host-release.json", .source_root = "/tmp/source", .zig = "/tmp/zig", .zig_size = 123, .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
 }
 
 test "local candidate failure removes deadline and workspace before return" {

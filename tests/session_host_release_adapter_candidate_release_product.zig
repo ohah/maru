@@ -23,6 +23,10 @@ fn inputs(cli: *const product.PinnedCli, toolchain: *const product.ZigToolchainA
                 .frozen_executable = "/tmp/candidate/maru-session-host-1.2.3",
                 .dmg_work = "/private/tmp/maru-dmg-work-1.2.3",
             },
+            .bundles = .{
+                .dmg_bundle = "/tmp/attest/candidate-dmg.bundle.json",
+                .frozen_bundle = "/tmp/attest/candidate-frozen.bundle.json",
+            },
             .cli = .{ .path = "/usr/bin/gh", .pinned = cli },
         },
         .baseline = .{

@@ -20,6 +20,10 @@ fn inputs(cli: *const product.PinnedCli) product.Inputs {
             .frozen_executable = "/tmp/maru-session-host-1.2.3",
             .dmg_work = "/private/tmp/maru-dmg-work-1.2.3",
         },
+        .bundles = .{
+            .dmg_bundle = "/tmp/attest/candidate-dmg.bundle.json",
+            .frozen_bundle = "/tmp/attest/candidate-frozen.bundle.json",
+        },
         .cli = .{ .path = "/usr/bin/gh", .pinned = cli },
     };
 }
@@ -38,7 +42,7 @@ test "production source has exactly one callsite for every prerequisite leaf" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_prerequisite_product.zig", std.testing.allocator, .limited(256 * 1024));
     defer std.testing.allocator.free(source);
     inline for (.{
-        "candidate_attestation.composeUntil(",
+        "candidate_attestation.composeBundlesUntil(",
         "draft_creation.create(",
         "candidate_files.observe(",
         "candidate_product.observe(",
@@ -46,6 +50,8 @@ test "production source has exactly one callsite for every prerequisite leaf" {
         "candidate_identity.compose(",
         "compatibility_mod.composeUntil(",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, needle));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "candidate_attestation.composeUntil("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "filePaths(i.paths), i.bundles,"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "deadline_mod.start("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn runBorrowingDeadline("));
 }
@@ -150,5 +156,21 @@ test "noncanonical tag and UUID fail before CLI or release access" {
     value = inputs(&cli);
     value.test_uuid = "01234567-89ab-0def-0123-456789abcdef";
     try std.testing.expectError(error.AuthorityMismatch, product.run(std.testing.io, std.testing.allocator, value, "token", &scratch, std.time.ns_per_s, &execution));
+    try std.testing.expect(execution.isPristineForComposition());
+}
+
+test "bundle paths are canonical distinct inputs before deadline or authority access" {
+    var cli: product.PinnedCli = undefined;
+    var scratch: [4096]u8 = undefined;
+    var execution: product.Execution = .{};
+    var value = inputs(&cli);
+    value.bundles.dmg_bundle = "/tmp/attest/../candidate-dmg.bundle.json";
+    try std.testing.expectError(error.InvalidPath, product.run(std.testing.io, std.testing.allocator, value, "token", &scratch, std.time.ns_per_s, &execution));
+    try std.testing.expect(execution.isPristineForComposition());
+
+    value = inputs(&cli);
+    var duplicate_storage: [128:0]u8 = @splat(0);
+    value.bundles.dmg_bundle = try std.fmt.bufPrintZ(&duplicate_storage, "{s}", .{value.paths.dmg});
+    try std.testing.expectError(error.InvalidPath, product.run(std.testing.io, std.testing.allocator, value, "token", &scratch, std.time.ns_per_s, &execution));
     try std.testing.expect(execution.isPristineForComposition());
 }

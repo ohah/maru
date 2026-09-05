@@ -143,9 +143,14 @@ pub const Selection = struct {
     /// anchor 쪽 목표 열.
     ///
     /// **선택을 유지한 채 focus만 움직일 때는 쓰이지 않는다**(anchor가 제자리이므로). 필요한 것은
-    /// **selection 전체를 세로로 평행이동**할 때다 — VSCode `translateUp`/`translateDown`(⌃⌘↑/↓)이
-    /// anchor와 focus를 함께 옮기며 `selectionStartLeftoverVisibleColumns`를 쓴다. 하나만 두면
-    /// 평행이동에서 anchor 쪽이 열을 잃는다.
+    /// **selection 전체를 세로로 평행이동**할 때다 — VSCode `translateUp`/`translateDown`이 anchor와
+    /// focus를 함께 옮기며 `selectionStartLeftoverVisibleColumns`를 쓴다. 하나만 두면 평행이동에서
+    /// anchor 쪽이 열을 잃는다.
+    ///
+    /// **chord 를 `⌃⌘↑/↓` 라 적었던 것은 틀렸다(2026-09-05 정정).** VSCode 기본 keybinding 에 그 조합은
+    /// 없다 — `translateUp`/`translateDown` 은 사용자 커맨드가 아니라 `addCursorUp`/`addCursorDown` 의
+    /// **부품**이고, 사용자가 닿는 자리는 `insertCursorAbove`/`Below`(`⌥⌘↑`/`⌥⌘↓`)다. 이 필드를 읽는
+    /// 첫 소비자가 그 연산이다(§3.2b).
     anchor_goal: Goal = .none,
 
     /// caret 하나(선택 없음)를 만든다.

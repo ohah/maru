@@ -2564,6 +2564,95 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     return true;
 }
 
+/// 위/아래로 커서 추가 — 각 커서마다 한 줄 위(아래)에 **사본**을 더한다
+/// ([문서 모델](../../../../docs/native-editor-document-model.md) §3.2b).
+///
+/// **선택 모양이 유지된다.** anchor 와 focus 를 **각자의 목표 열로** 옮기므로 caret 하나면 caret 이,
+/// 범위를 고른 상태면 같은 모양의 범위가 생긴다. `Selection.anchor_goal` 이 그것을 위해 서 있었고
+/// (§3.2 *"goal column이 양끝에 각각 있다"*), **이 함수가 그 필드를 읽는 첫 소비자**다.
+///
+/// **못 가면 안 더한다.** 문서 끝(처음)에서 clamp 하면 원본과 같은 자리가 되고 병합이 곧바로 지운다 —
+/// VSCode 는 만들었다가 지우지만 우리는 만들지 않는다(§3.2b: 결과가 같다면 상한을 안 축내는 쪽).
+///
+/// **읽기 전용에서도 선다** — 문서를 바꾸지 않고, 멀티 커서 복사는 읽기 전용에서 뜻이 있다(§3.4).
+pub fn addCursorVertically(self: *AppSession, term: *Term, down: bool) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+    const primary = term.rt.editor_selection orelse return false; // 씨앗이 없다(§3.2b)
+
+    var buf: std.ArrayList(editor_selection.Selection) = .empty;
+    defer buf.deinit(self.allocator);
+    buf.append(self.allocator, primary) catch return false;
+    buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return false;
+
+    // **사본은 원본 뒤에 모아 넣는다.** 원본을 먼저 다 훑고 나서 더해야 방금 만든 사본을 다시
+    // 훑어 한 번에 여러 줄이 늘어나지 않는다(VSCode `addCursorUp` 도 원본 배열만 훑는다).
+    const original_len = buf.items.len;
+    var added: usize = 0;
+    var i: usize = 0;
+    while (i < original_len) : (i += 1) {
+        if (original_len + added >= editor_selection.max_cursors) break; // 상한(§3.2)
+        const sel = buf.items[i];
+        const how: Motion = if (down) .line_down else .line_up;
+        // **anchor 와 focus 를 각자의 목표 열로 옮긴다** — 하나만 옮기면 선택이 찌그러진다.
+        // `movedOffset` 을 그대로 쓴다: 랩이 켜졌으면 시각 행, 아니면 논리 줄로 떨어지고 문서 끝은
+        // clamp 한다 — 세로 이동이 이미 정한 그 규칙을 두 번째로 적으면 둘이 갈린다.
+        var focus_goal = sel.goal;
+        const new_focus = movedOffset(self, term, doc, sel, how, &focus_goal);
+        const anchor_lo = sel.anchorLo();
+        var anchor_goal = sel.anchor_goal;
+        const new_anchor = if (anchor_lo == sel.focus)
+            new_focus // caret 하나 — 두 번 재지 않는다
+        else blk: {
+            // anchor 를 focus 자리에 놓은 사본으로 물어본다 — 그 함수는 `focus` 만 옮긴다.
+            var probe = editor_selection.Selection.at(anchor_lo);
+            probe.goal = sel.anchor_goal;
+            const moved = movedOffset(self, term, doc, probe, how, &anchor_goal);
+            break :blk moved;
+        };
+        // **제자리면 안 더한다** — 문서 끝에서 clamp 된 것이고, 더해도 병합이 지운다.
+        if (new_focus == sel.focus and new_anchor == anchor_lo) continue;
+        // `kind` 는 승계하지 않는다(§3.2b) — 한 줄 위에 같은 낱말이 있을 이유가 없다.
+        var copy = editor_selection.Selection.fromPoints(new_anchor, new_focus);
+        copy.goal = focus_goal; // 옮기며 세운 목표 열을 사본이 이어받는다(§3.2)
+        copy.anchor_goal = anchor_goal;
+        buf.append(self.allocator, copy) catch break;
+        added += 1;
+    }
+    if (added == 0) return false;
+
+    // **primary 는 새로 생긴 쪽으로 간다**(§3.2) — 위로 더하면 맨 위, 아래로 더하면 맨 아래.
+    // 그래야 `revealPrimaryCaret` 이 방금 늘어난 곳을 따라간다.
+    var primary_idx: usize = original_len;
+    var k: usize = original_len + 1;
+    while (k < buf.items.len) : (k += 1) {
+        const better = if (down)
+            buf.items[k].focus > buf.items[primary_idx].focus
+        else
+            buf.items[k].focus < buf.items[primary_idx].focus;
+        if (better) primary_idx = k;
+    }
+
+    const merged = editor_selection.mergeOverlapping(buf.items, primary_idx);
+    const items = buf.items[0..merged.len];
+    const extras = self.allocator.alloc(editor_selection.Selection, items.len - 1) catch return false;
+    var w: usize = 0;
+    for (items, 0..) |sel, idx| {
+        if (idx == merged.primary) continue;
+        extras[w] = sel;
+        w += 1;
+    }
+    if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = items[merged.primary];
+
+    breakUndoGroup(term); // 커서가 늘었다 — 다음 타이핑은 새 묶음이다(§3.3)
+    revealPrimaryCaret(self, term);
+    self.metal_dirty = true;
+    return true;
+}
+
 pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g) — 이 슬라이스 밖
@@ -12845,6 +12934,224 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!moveCarets(fx.session, term, .char_right, false));
     try testing.expect(!moveCarets(fx.session, term, .line_down, false));
     try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
+}
+
+test "AC1 위/아래로 커서가 늘고 원본이 남는다 — 선택 모양도 유지된다 (§3.2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 줄 길이를 **일부러 다르게** 둔다 — 같으면 「목표 열을 썼나」와 「그냥 offset 을 더했나」가 겹친다.
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "ac.txt", .data = "aaaaaaaa\nbb\ncccccccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ac.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // ① **caret 하나에서 아래로 — 원본이 남고 하나가 는다.**
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(addCursorVertically(fx.session, term, true));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    // primary 는 **새로 생긴 쪽**이다(§3.2) — 그래야 화면이 따라간다.
+    try testing.expect(term.rt.editor_selection.?.focus > 0);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections[0].focus); // 원본은 남는다
+
+    // ①' **위로도 잰다.** 아래로만 재면 방향 인자를 무시하는 변이(A10)와 primary 를 반대쪽에서
+    //     고르는 변이(A6)가 그대로 산다 — 커서가 둘뿐이면 「위」와 「아래」가 픽스처에서 겹친다.
+    //     셋째 줄에서 **위로** 더하면 사본이 원본보다 **앞**에 서야 하고 primary 가 그 사본이다.
+    clearExtraSelections(fx.session, term);
+    const third_line = 12; // "aaaaaaaa\nbb\n" 다음이 'cccccccc'
+    term.rt.editor_selection = editor_selection.Selection.at(third_line);
+    try testing.expect(addCursorVertically(fx.session, term, false));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expect(term.rt.editor_selection.?.focus < third_line); // primary 는 **위**쪽 사본
+    try testing.expectEqual(@as(usize, third_line), term.rt.editor_extra_selections[0].focus);
+
+    // ①'' **커서가 둘일 때 primary 방향을 잰다.** 사본이 하나뿐이면 primary 를 고르는 루프가
+    //      **0회 돌아** 방향을 뒤집는 변이(A6)가 그대로 산다 — `k = original_len + 1` 부터다.
+    //      1·2번 줄에 커서를 두고 **위로** 더하면 primary 는 **가장 위** 사본이어야 한다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(9); // 2번 줄
+    {
+        const extras = try allocator.alloc(editor_selection.Selection, 1);
+        extras[0] = editor_selection.Selection.at(12); // 3번 줄
+        if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = extras;
+    }
+    try testing.expect(addCursorVertically(fx.session, term, false));
+    // 사본 둘(1번 줄·2번 줄) 중 **위쪽**이 primary 다. 2번 줄 사본을 고르면 9 가 나온다.
+    try testing.expect(term.rt.editor_selection.?.focus < 9);
+
+    // ② **범위를 고른 상태면 같은 모양이 생긴다** — anchor 와 focus 를 각자 옮긴다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 4); // 'aaa' 세 글자
+    try testing.expect(addCursorVertically(fx.session, term, true));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    const added = term.rt.editor_selection.?;
+    try testing.expect(added.anchorLo() != added.focus); // caret 으로 찌그러지지 않았다
+
+    // ②' **겹치면 합친다**(§3.2). 이웃한 두 줄에 커서를 두고 아래로 더하면 위 커서의 사본이
+    //     아래 커서와 **같은 자리**에 온다 — 넷이 아니라 셋이 되어야 한다. 병합을 빼도 안 잡히던
+    //     구멍이다(변이 A7).
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(0); // 1번 줄
+    {
+        const extras = try allocator.alloc(editor_selection.Selection, 1);
+        extras[0] = editor_selection.Selection.at(9); // 2번 줄 'bb'
+        if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = extras;
+    }
+    try testing.expect(addCursorVertically(fx.session, term, true));
+    // 원본 둘 + 사본 둘 = 넷인데 하나가 겹쳐 **셋**이다(primary 1 + extras 2).
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // ②'' **사본이 목표 열을 이어받는다**(§3.2). 안 넘기면 다음 세로 이동이 **현재 열에서** 시작해
+    //      짧은 줄을 지나 돌아올 때 열을 잃는다(변이 A11). 1번 줄 8열에서 아래로 더하면 사본은
+    //      짧은 2번 줄('bb')에 서는데, 그 사본이 목표 열 8 을 들고 있어야 3번 줄에서 8열로 돌아온다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(8); // 1번 줄 끝(8열)
+    try testing.expect(addCursorVertically(fx.session, term, true));
+    const short_copy = term.rt.editor_selection.?;
+    try testing.expect(short_copy.goal != .none); // 목표 열을 들고 있다
+    // 그 사본을 한 줄 더 내리면 긴 3번 줄에서 **8열로 돌아온다**.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = short_copy;
+    _ = moveCarets(fx.session, term, .line_down, false);
+    try testing.expectEqual(@as(usize, 12 + 8), term.rt.editor_selection.?.focus);
+
+    // ③ **문서 끝에서는 안 는다** — clamp 하면 원본과 겹쳐 병합이 지운다(§3.2b).
+    clearExtraSelections(fx.session, term);
+    const content_len = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = editor_selection.Selection.at(content_len);
+    try testing.expect(!addCursorVertically(fx.session, term, true));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+test "AC4 커서 수 상한을 넘겨 더하지 않는다 (§3.2·§3.2b)" {
+    // **상한 분기를 지워도 안 잡혔다**(변이 A4) — 픽스처가 `max_cursors` 근처를 안 갔다.
+    // 상한이 없으면 큰 파일에서 키를 누르고 있을 때 커서가 파일 크기만큼 자라 입력이 멈춘다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 줄이 많아야 위로 더할 곳이 있다 — 상한보다 넉넉히.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var n: usize = 0;
+    while (n < editor_selection.max_cursors * 3) : (n += 1) try buf.appendSlice(allocator, "x\n");
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "big.txt", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "big.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // 상한 **바로 아래**까지 커서를 채운다 — 마지막 줄들에 하나씩.
+    // **한 줄씩 띄운다.** 붙여 두면 각 사본이 다음 커서와 정확히 겹쳐 **전부 병합돼** 상한에
+    //     닿지 않는다 — 그러면 상한 분기를 지워도 결과가 같아 변이가 산다(A4 가 그랬다).
+    const fill = editor_selection.max_cursors - 1;
+    const extras = try allocator.alloc(editor_selection.Selection, fill - 1);
+    for (extras, 0..) |*e, i| e.* = editor_selection.Selection.at((i + 1) * 4);
+    if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    _ = addCursorVertically(fx.session, term, true);
+    // **넘지 않는다.** primary 1 + extras 가 상한 이하여야 한다.
+    try testing.expect(term.rt.editor_extra_selections.len + 1 <= editor_selection.max_cursors);
+}
+
+test "AC2 게이트 넷 — 편집기 아님·비교 뷰·문서 없음·커서 없음 (§3.2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "g.txt", .data = "aa\nbb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "g.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // ① 편집기가 아닌 Term
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    try testing.expect(!addCursorVertically(fx.session, term, true));
+    term.kind = saved_kind;
+
+    // ② **비교 뷰** — 축이 둘이라 문서 offset 이 없다(§4.1g)
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    try testing.expect(!addCursorVertically(fx.session, term, true));
+    term.rt.editor_diff = null;
+
+    // ③ **커서가 없다** — 늘릴 씨앗이 없으므로 짐작하지 않는다
+    term.rt.editor_selection = null;
+    try testing.expect(!addCursorVertically(fx.session, term, true));
+
+    // ④ **읽기 전용에서는 선다** — 문서를 안 바꾸고 멀티 커서 복사는 뜻이 있다(§3.4)
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_doc.?.file.read_only = true;
+    defer term.rt.editor_doc.?.file.read_only = false;
+    try testing.expect(addCursorVertically(fx.session, term, true));
+}
+
+test "AC3 ⌥⌘↑↓ 를 실제로 눌렀을 때 커서가 는다 — 배선 종단 (§3.2b)" {
+    // 함수만 재면 chord 등록·액션 해석·디스패치 중 하나가 빠져도 AC1·AC2 는 초록이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "w.txt", .data = "aaaa\nbbbb\ncccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // ① **전역이 아니라 편집기 컨텍스트가 잡는다.** 전역으로 풀리면 pane 포커스가 옮겨진다.
+    {
+        const resolver = fx.session.loaded_config.keyBindingResolver();
+        const down: maru.terminal.KeyEvent = .{ .key = .arrow_down, .modifiers = .{ .command = true, .option = true } };
+        switch (resolver.resolveEditor(down, false)) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.add_cursor_below, a),
+            else => return error.ChordNotWired,
+        }
+        // **비교 뷰에서는 전역으로 돌려준다** — 커서 추가에 뜻이 없으므로 pane 이동이 산다.
+        switch (resolver.resolveEditor(down, true)) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.focus_pane_down, a),
+            else => return error.ChordNotWired,
+        }
+    }
+
+    // ② **키를 누르면 커서가 는다.**
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.session.metal_dirty = false;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .command = true, .option = true } });
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expect(fx.session.metal_dirty);
+
+    // ③ **팔레트에도 있다.**
+    var above = false;
+    var below = false;
+    for (command_catalog.entries) |e| {
+        if (e.action == .add_cursor_above) above = true;
+        if (e.action == .add_cursor_below) below = true;
+    }
+    try testing.expect(above and below);
 }
 
 test "BR6 ⇧⌘\\ 를 실제로 눌렀을 때 caret 이 짝으로 간다 — 배선 종단 (§3.9c)" {

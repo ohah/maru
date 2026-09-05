@@ -103,6 +103,8 @@ pub const entries = [_]Entry{
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },
+    .{ .action = .add_cursor_above, .key = "add_cursor_above", .title = "Editor: Add Cursor Above" },
+    .{ .action = .add_cursor_below, .key = "add_cursor_below", .title = "Editor: Add Cursor Below" },
     .{ .action = .editor_undo, .key = "editor_undo", .title = "Editor: Undo" },
     .{ .action = .editor_redo, .key = "editor_redo", .title = "Editor: Redo" },
     .{ .action = .editor_save, .key = "editor_save", .title = "Editor: Save" },

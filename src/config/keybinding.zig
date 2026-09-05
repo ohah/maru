@@ -269,6 +269,11 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     // **`⌘D` 는 전역 `split_horizontal` 을 편집기 안에서만 가져간다**(§9.1 확정 · 그 문서가 근거를 든다).
     // 비교 뷰에서는 「다음 일치 추가」에 뜻이 없으므로 **전역으로 돌려주어 좌우 분할이 그대로다**.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'D' } }, .action = .add_next_occurrence, .needs_editable = true }, // Cmd+D
+    // Opt+Cmd+Up/Down: 위/아래로 커서 추가(§3.2b). **전역이 이미 쓰는 chord 를 가져온다** —
+    // `focus_pane_up`/`down` 이 그 자리인데, §9.1 의 경계 기준("문서에 작용하는가, 창에 작용하는가")
+    // 으로 편집기 포커스에서는 편집기가 이긴다. 갚는 수단은 팔레트와 앱 메뉴 둘 다 남는다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_up }, .action = .add_cursor_above, .needs_editable = true },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_down }, .action = .add_cursor_below, .needs_editable = true },
 };
 
 pub const default_app_bindings = [_]AppBinding{
@@ -1086,24 +1091,33 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
 
     // **컨텍스트 표의 항목은 둘 중 하나여야 한다**(§편집기 Term 컨텍스트):
     //   ⑴ `⌘` 없는 `⌥` — 전역에 못 넣는 부류라 여기 있는 것이 유일한 자리다.
-    //   ⑵ **전역과 겹치되 근거가 적힌 예외** — 지금은 `⌘D` 하나이고, 그 근거는 그 절의
-    //      「전역 chord 를 편집기가 가져가는 경우」가 소유한다(다른 문서의 확정 · 대가의 대체 경로 ·
-    //      전역 불변 세 줄).
+    //   ⑵ **전역과 겹치되 근거가 적힌 예외** — 그 근거는 그 절의 「전역 chord 를 편집기가 가져가는
+    //      경우」가 소유한다(다른 문서의 확정·판정 기준 · 대가의 대체 경로 · 레퍼런스 세 줄).
     // **아무 근거 없이 `⌘`·`⌃` 조합을 여기 넣으면 이 판정자가 막는다** — 그렇게 늘면 편집기가
-    // 전역 chord 를 조용히 가로채기 시작한다.
+    // 전역 chord 를 조용히 가로채기 시작한다. **목록을 여기 적는 것이 그 관문**이다: 예외를 늘리려면
+    // 이 판정자를 고쳐야 하고, 고치는 사람은 그 절에 근거를 적게 된다.
+    const Exception = struct { key: KeyName, action: action_mod.Action };
+    const allowed = [_]Exception{
+        .{ .key = .{ .char = 'D' }, .action = .add_next_occurrence }, // ⌘D — native-editor-ui.md §9.1 확정
+        .{ .key = .arrow_up, .action = .add_cursor_above }, // ⌥⌘↑ — §3.2b, focus_pane_up 에서 가져옴
+        .{ .key = .arrow_down, .action = .add_cursor_below }, // ⌥⌘↓ — §3.2b
+    };
     var exceptions: usize = 0;
     for (editor_context_bindings) |b| {
         const option_only = b.chord.modifiers.option and !b.chord.modifiers.command and !b.chord.modifiers.control;
         if (option_only) continue;
         exceptions += 1;
-        // 예외는 `⌘D`(다음 일치 추가) 하나다.
-        try std.testing.expect(b.chord.modifiers.command and !b.chord.modifiers.control and !b.chord.modifiers.option);
-        try std.testing.expectEqual(@as(u21, 'D'), b.chord.key.char);
-        try std.testing.expectEqual(action_mod.Action.add_next_occurrence, b.action);
+        // **`⌘` 는 반드시 끼고 `⌃` 는 안 낀다** — `⌘` 가 없으면 터미널 Meta 를, `⌃` 는 제어문자를 뺏는다.
+        try std.testing.expect(b.chord.modifiers.command and !b.chord.modifiers.control);
+        var matched = false;
+        for (allowed) |a| {
+            if (b.chord.key.eql(a.key) and std.meta.eql(b.action, a.action)) matched = true;
+        }
+        try std.testing.expect(matched);
         // **예외는 반드시 편집 가능한 문서를 요구한다** — 아니면 비교 뷰에서도 전역을 가로챈다.
         try std.testing.expect(b.needs_editable);
     }
-    try std.testing.expectEqual(@as(usize, 1), exceptions);
+    try std.testing.expectEqual(allowed.len, exceptions);
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.

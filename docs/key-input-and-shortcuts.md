@@ -617,3 +617,24 @@ macOS 전역 핫키는 window server와 권한 상태에 영향을 받을 수 �
 - 조합 중(preedit) 글자는 `Surface`가 소유하는 `PreeditOverlay`가 base `RenderSnapshot`의 커서 위치부터 반전 스타일로 합성 표시한다. 로컬 `TerminalCore` snapshot과 host-backed `RemoteScreen` snapshot 모두 같은 합성기를 사용한다. **삽입형 미리보기**라, 줄 가운데에서 조합하면 커서 뒤 글자를 조합 폭만큼 오른쪽으로 밀어 확정 후 셸이 그릴 모습을 조합 중에도 보여준다(`가나다`의 `나` 앞 조합 → `가[라]나다`). 합성용 scratch cell에만 그리므로 실제 로컬 core grid와 원격 host grid·delta base는 불변이고, host delta가 도착할 때마다 최신 base에 다시 합성한다. 조합 폭의 단일 출처는 base `RenderSnapshot.ambiguous_wide`이며 현재 host에서는 mode bit로 원격까지 복원한다. 해당 bit가 없던 구 host의 legacy degraded mode는 한글/CJK 고정 wide 폭은 표시하지만 ambiguous-width 설정 parity는 보장하지 않는다. overlay나 GUI config 사본이 별도 폭 정책을 소유하면 안 된다. `size`·grapheme·prompt mark·command exit·placement·image·base 폭 정책 같은 snapshot 필드는 그대로 보존한다.
 - marked text는 해당 GUI attachment에만 존재한다. MRSH wire, `CoreCommand`, workspace manifest, runtime metadata에 저장하거나 전송하지 않는다. 따라서 같은 runtime을 보는 다른 창/클라이언트와 detach 뒤 재접속한 클라이언트에는 조합 중 문자열이 나타나지 않는다. pane/Term/workspace 전환과 포커스 상실은 입력 owner를 바꾸기 전에 조합을 원 surface id의 ordered input queue에 확정한다. workspace를 다른 창으로 옮길 때 아직 전송되지 않은 surface별 queue도 surface와 함께 destination session으로 넘겨 detach 정리에서 버리지 않으며, target이 실제로 사라졌을 때만 새 활성 터미널로 fallback하지 않고 폐기한다. cross-window workspace 이동은 source 이동 대상뿐 아니라 destination의 현재 input owner도 소유권/focus 변경 전에 각 원 surface queue로 확정한다. 두 terminal admission과 moved queue transfer buffer/map은 all-or-none으로 선예약하며 어느 admission/transfer preflight OOM에서도 detach/model surgery 전 전체를 취소해 양쪽 overlay·pin·queue·layout을 그대로 보존한다. same-window는 active owner가 바뀔 때만 확정하고, merge는 destination active owner를 보존하므로 source만 확정한다. 예약 성공한 확정 UTF-8은 application queue에 중복 없이 한 번 admission하지만, 위 OOM fail-closed 경계에서는 0회가 허용되고 transport-level delivery ACK는 제공하지 않는다.
 - 커서에서 시작하는 후행 콘텐츠 run이 전부 faint(SGR 2 → `Cell.style.dim`)면 앱이 그린 인라인 자동완성 고스트로 보고 밀지 않고 오버레이로 덮는다. 그 외에는 삽입형으로 합성한다. 색만으로 고스트를 판정하면 실제 회색 텍스트를 오인할 수 있어 사용하지 않는다. 조합 중 블록 커서는 숨기고 깜빡임은 보이는 위상에 고정한다. preedit 밑줄 스타일은 아직 없으며 현재는 반전 스타일이다.
+
+
+#### 두 번째 자리 — `⌥⌘↑`/`⌥⌘↓`(위/아래로 커서 추가, 2026-09-05)
+
+같은 절차를 밟는다. 근거 셋:
+
+- **다른 문서가 판정 기준을 든다.** [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1의 경계 기준은
+  *"그 키가 **문서에** 작용하는가, **창에** 작용하는가"* 이고, 커서 추가는 문서에 작용한다. 같은 절이
+  *"같은 키가 포커스에 따라 다른 일을 하는 대가를 수용한다 — 대안(어느 한쪽 사용자가 손에 익은 키를
+  영구히 잃는 것)보다 낫다"* 고 **이미 정해 두었다**.
+- **수단을 잃지 않는다.** §9.1이 `⌘D`에 건 그 조건이다. `focus_pane_up`/`focus_pane_down`은 커맨드
+  팔레트와 **앱 메뉴 둘 다**에 남는다(`MaruAppHost.swift`가 `split_horizontal` 바로 아래에 단다).
+- **레퍼런스가 그 chord 를 준다.** VSCode macOS 기본이 `insertCursorAbove`/`insertCursorBelow` =
+  `⌥⌘↑`/`⌥⌘↓` 다(기본 keybinding 실측).
+
+**남는 빚은 발견성 하나다.** 갚는 수단은 `⌘D` 때와 사실상 같지만(팔레트 + 앱 메뉴), §9.1이 든 완화책인
+**모디파이어 홀드 오버레이가 아직 없다** — 편집기 pane에서 `⌥⌘↑`를 누른 사용자가 pane이 안 옮겨진
+이유를 화면에서 알 길이 지금은 없다.
+
+**`⌥⌘←`/`⌥⌘→` 는 안 가져간다** — VSCode에서 그 자리는 「편집기 탭 이동」인데 Maru는 pane 모델이 달라
+`focus_pane_left`/`right`가 더 잘 맞는다. 전수 대조에서 나온 다섯 중 이 둘은 **의도적으로 남긴다**.

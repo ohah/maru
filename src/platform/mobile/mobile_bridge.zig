@@ -1514,6 +1514,15 @@ pub fn remoteBackCenter() ?struct { x: f32, y: f32 } {
 }
 
 /// 판정용 — 그 세션을 들고 있는가.
+/// 판정용 — 지금 «그 세션» 의 화면을 원하는가. `controlWantKind()` 는 갈래만 말하므로,
+/// 「누른 줄과 열린 세션이 같은가」는 이 값으로만 잰다.
+pub fn wantsScreen(id: [32]u8) bool {
+    return switch (control_want) {
+        .screen => |cur| std.mem.eql(u8, &cur, &id),
+        else => false,
+    };
+}
+
 pub fn holdsSession(id: [32]u8) bool {
     for (held_sessions) |slot| {
         const entry = slot orelse continue;
@@ -1625,6 +1634,10 @@ fn absorbFrame(frame: []const u8) void {
     const n = control.parseSessions(frame, &parsed);
     // **응답이 아닌 프레임(알림 등)은 목록을 안 지운다.** 지우면 알림 하나에 화면이 빈다.
     if (n == 0 and control.jsonValueField(frame, "result") == null) return;
+    // **목록이 짧아지면 스크롤을 접는다**(적대적 검증 1회차). `sess_max_scroll` 은 그리면서
+    // 재므로 이 프레임에는 아직 옛 값이고, 그 사이에 밀어 둔 자리가 내용보다 아래면 **빈 곳을
+    // 보고 있게 된다** — 사용자에게는 「목록이 사라졌다」로 보인다. 늘어날 때는 문제가 없다.
+    if (n < control_row_count) sess_sa.reset();
     for (parsed[0..n], 0..) |s, i| control_rows[i].set(s);
     control_row_count = n;
     control_listed = true;
@@ -1730,6 +1743,9 @@ pub export fn maru_mobile_control_reset() void {
     dropHeldSessions();
     control_client = .{};
     control_row_count = 0;
+    // 목록이 통째로 사라졌다 — 밀어 둔 자리를 남기면 다음 목록이 엉뚱한 데서 시작한다.
+    sess_sa.reset();
+    sess_touch.cancel();
     control_req_len = 0;
     control_listed = false;
 }
@@ -4544,22 +4560,35 @@ var nav: [4]Screen = .{ .sessions, .terminal, .terminal, .terminal };
 /// 가면 나온다. 매번 목록을 거치게 하면 이 앱의 주 용도에 탭이 하나 더 붙는다.
 var nav_len: usize = 2;
 
-/// 누른 원격 줄을 연다. **누를 때 잡아 둔 index 를 쓴다** — 뗄 때 좌표로 다시 찾으면 그 사이
-/// 목록이 갱신됐을 때 다른 세션을 열 수 있다.
+/// 누른 원격 줄을 연다. **누를 때 잡아 두는 것은 «그 세션의 id» 다** — 자리(좌표)도 순번(index)도
+/// 아니다.
+///
+/// 좌표가 안 되는 것은 분명하다(그 사이 목록이 흐르거나 갱신되면 다른 줄이 그 자리에 온다).
+/// **순번도 안 된다** — `absorbFrame` 이 줄을 갈아 끼우면 5번이 다른 세션이 된다(적대적 검증
+/// 3회차). 누름과 뗌 사이는 짧지만, 목록은 그 서버가 바뀔 때마다 갱신되므로 **그 창이 실제로
+/// 열린다.** id 로 잡으면 갱신돼도 사용자가 누른 그것을 열고, 사라졌으면 아무것도 안 연다.
 fn openRemoteRow() void {
-    const idx = remote_pressed_row orelse return;
-    remote_pressed_row = null;
-    if (idx >= control_row_count) return; // 목록이 줄었다 — 없는 줄을 열지 않는다
-    const row = &control_rows[idx];
-    if (!row.has_runtime) return; // 붙을 수 없는 줄이다(§3 — 필드의 유무가 그 판정이다)
-    wantControl(.{ .screen = row.runtime_id });
-    navPush(.remote_screen);
+    const id = remote_pressed_id orelse return;
+    remote_pressed_id = null;
+    // 그 id 가 아직 목록에 있나 — 없으면 그 세션은 사라졌다.
+    for (control_rows[0..control_row_count]) |*row| {
+        if (!row.has_runtime) continue;
+        if (!std.mem.eql(u8, &row.runtime_id, &id)) continue;
+        wantControl(.{ .screen = id });
+        navPush(.remote_screen);
+        return;
+    }
 }
 
 /// 그 좌표에 있는 **누를 수 있는** 원격 줄. 붙을 수 없는 줄은 null 이다 — 눌리는 것처럼 보이고
 /// 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
 fn remoteRowAt(x: f32, y: f32) ?usize {
     if (remote_rows_drawn == 0 or remote_row0.h <= 0) return null;
+    // **목록 창 밖은 어느 줄도 아니다**(적대적 검증 2회차). 목록이 흐르면서 `remote_row0.y` 가
+    // 음수가 될 수 있는데, 그러면 아래 「첫 줄보다 위인가」 가드가 무력해져 **고정 헤더의 빈
+    // 자리를 눌러도 그 밑으로 지나간 줄이 열린다** — UX 계약이 「붙임 헤더 밑을 눌러 안 보이는
+    // 값이 바뀌는 것」을 막으라고 적어 둔 바로 그 모양이다.
+    if (y < sess_list.y or y > sess_list.y + sess_list.h) return null;
     if (x < remote_row0.x or x > remote_row0.x + remote_row0.w) return null;
     if (y < remote_row0.y) return null;
     const rel = y - remote_row0.y;
@@ -4804,7 +4833,8 @@ var sess_row_rect: SetRect = .{};
 var sess_pressed: enum { none, gear, row, servers, remote_row } = .none;
 /// 누른 원격 줄의 index(누름 판정과 뗌 판정이 **같은 줄**을 봐야 한다 — 그 사이 목록이 갱신되면
 /// 좌표로 다시 찾은 줄은 다른 세션일 수 있다).
-var remote_pressed_row: ?usize = null;
+/// 누른 원격 줄의 **id**(순번이 아니다 — 위 `openRemoteRow` 주석).
+var remote_pressed_id: ?[32]u8 = null;
 /// 서버 목록으로 들어가는 줄. **여기서 들어간다** — UX 계약(§2.1)은 서버 목록을 세션 목록
 /// *위*에 두지만, 뿌리를 바꾸면 앱이 뜨는 자리와 뒤로가기 스택이 함께 움직인다(그 재배치는
 /// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다.
@@ -4833,6 +4863,18 @@ fn sessScroll() f32 {
     return @floatFromInt(sess_sa.offset_y_px);
 }
 
+/// 판정용 — 지금 그려진 「서버」 줄의 한가운데 y. 안 보이면 `null`.
+/// 판정용 — 지금 그려진 「터미널」 줄의 한가운데 y. 안 보이면 `null`.
+pub fn sessTerminalRowCenterY() ?f32 {
+    if (sess_row_rect.h <= 0) return null;
+    return sess_row_rect.y + sess_row_rect.h / 2;
+}
+
+pub fn sessServersRowCenterY() ?f32 {
+    if (sess_servers_rect.h <= 0) return null;
+    return sess_servers_rect.y + sess_servers_rect.h / 2;
+}
+
 /// 그 사각이 목록 창 **안에 보이나**. 안 보이면 rect 를 안 남긴다 — 남기면 화면 밖인데 눌린다
 /// (설정 목록에서 겪은 결함이다).
 fn sessVisible(y: f32, h: f32) bool {
@@ -4849,30 +4891,6 @@ fn sessVisible(y: f32, h: f32) bool {
 /// 오른쪽**에 둔다.
 fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
-
-    // ── 헤더: 제목 + 오른쪽 톱니
-    pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
-    sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
-    if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
-    if (reserveQuad()) {
-        const rgb = tk.get(.surface_fg);
-        quad_buf[quad_count] = .{
-            .x = sess_gear_rect.x + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
-            .y = sess_gear_rect.y + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
-            .w = @floatFromInt(status_icon_px),
-            .h = @floatFromInt(status_icon_px),
-            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
-            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
-            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
-            .a = 1.0,
-            .radius = 0,
-            .kind = 2,
-            .cell_x = 0,
-            .cell_y = @intCast(gear_slot), // 아이콘 아틀라스의 줄 = `status_cps` 안의 자리
-        };
-        quad_count += 1;
-    }
-    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 
     // ── 줄 하나: 지금 있는 세션. **48 이 아니라 56 이다** — 나중에 `cwd`·상태가 두 번째 줄로
     // 붙을 자리이고(M3), 그때 높이가 바뀌면 손가락이 겨눈 자리가 움직인다.
@@ -4899,6 +4917,34 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     // 넘겨 그려질 수 있다(다음 프레임에 제자리). 늘어날 때는 어긋나지 않는다.
     const content = row_h + 1 + row_h + 1 + remote_h;
     sess_max_scroll = @max(0, content - sess_list.h);
+
+    // ── 헤더: 제목 + 오른쪽 톱니. **본문 «뒤» 에 그린다** — 목록이 흐르면 걸친 줄이 자기 y 에
+    // 그려져 헤더 자리로 올라온다(사용자가 화면으로 잡았다: 첫 줄 글자가 「세션」 아래 물렸다).
+    // 완전히 들어온 줄만 그리면 창 위에 **한 행짜리 빈 구멍**이 생기므로(UX §키바가 겪은 그것),
+    // **걸친 것도 그리고 헤더가 그 위를 덮는다.** 그래서 헤더는 자기 배경을 갖는다.
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
+    if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = sess_gear_rect.x + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
+            .y = sess_gear_rect.y + (set_head_h - @as(f32, @floatFromInt(status_icon_px))) / 2,
+            .w = @floatFromInt(status_icon_px),
+            .h = @floatFromInt(status_icon_px),
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = @intCast(gear_slot), // 아이콘 아틀라스의 줄 = `status_cps` 안의 자리
+        };
+        quad_count += 1;
+    }
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
 
 /// **그 PC 의 세션들**(S10d-2). 서버 목록 아래에 붙는다 — 뜻이 다르다(하나는 붙을 수 있는 것,
@@ -6335,15 +6381,15 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 sess_press.begin(x, y, time_ms, stopped);
                 if (stopped) {
                     sess_pressed = .none;
-                    remote_pressed_row = null;
+                    remote_pressed_id = null;
                     return 1;
                 }
                 sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else blk: {
                     // **원격 줄은 눌러서 그 화면을 연다**(§4a). 붙을 수 없는 줄(runtime id 가
                     // 없는 것 — in-process Term)은 누름 표시도 안 준다: 눌리는 것처럼 보이고
                     // 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
-                    remote_pressed_row = remoteRowAt(x, y);
-                    break :blk if (remote_pressed_row != null) .remote_row else .none;
+                    remote_pressed_id = if (remoteRowAt(x, y)) |i| control_rows[i].runtime_id else null;
+                    break :blk if (remote_pressed_id != null) .remote_row else .none;
                 };
                 return 1;
             },
@@ -6352,7 +6398,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
                 if (sess_press.move(x, y)) {
                     sess_pressed = .none;
-                    remote_pressed_row = null;
+                    remote_pressed_id = null;
                 }
                 sess_touch.move(&sess_sa, pointer_id, y, @intFromFloat(@max(0, sess_max_scroll)));
                 return 1;

@@ -6360,3 +6360,298 @@ test "세션 목록: 밀어서 세우는 손짓은 줄을 안 연다" {
     advanceFrame(402, 874, 16);
     try T.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown()); // 목록 그대로
 }
+
+test "세션 목록이 짧아지면 스크롤을 접는다 — 빈 곳을 보고 있지 않는다" {
+    // **적대적 검증 1회차가 잡았다.** 목록을 아래로 밀어 둔 채 맥에서 탭이 닫히면 줄이 줄어드는데,
+    // 스크롤 상한(`sess_max_scroll`)은 그리면서 재므로 그 프레임에는 아직 옛 값이다 — 밀어 둔
+    // 자리가 내용보다 아래면 **빈 곳을 보고 있게 되고**, 사용자에게는 「목록이 사라졌다」로 보인다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire20 = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire20);
+    _ = feedControl(wire20);
+    advanceFrame(402, 874, 16);
+
+    // 아래로 민다.
+    bridge.maru_mobile_pointer(0, 1, 200, 700, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+    advanceFrame(402, 874, 16);
+    const scrolled = bridge.remoteRowCenter(0) orelse return error.TestUnexpectedResult;
+    try T.expect(scrolled.y < 300); // 첫 줄이 위로 지나갔다
+
+    // **목록이 짧아진다** — 맥에서 탭을 닫은 것과 같다.
+    const wire3 = try sessionListWire(T.allocator, 3);
+    defer T.allocator.free(wire3);
+    _ = feedControl(wire3);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(usize, 3), bridge.remoteRowsDrawn());
+    // 첫 줄이 **다시 제자리에** 있어야 한다 — 밀어 둔 자리가 남으면 화면이 비어 보인다.
+    const after = bridge.remoteRowCenter(0) orelse return error.TestUnexpectedResult;
+    try T.expect(after.y > scrolled.y);
+}
+
+/// 세션 `n` 개짜리 `sessions.list` 응답. **판정자 셋이 같은 것을 만든다** — 손으로 세 번 적으면
+/// 하나만 고쳐진다.
+fn sessionListWire(allocator: std.mem.Allocator, n: usize) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[");
+    for (0..n) |i| {
+        if (i > 0) try buf.append(allocator, ',');
+        var row: [160]u8 = undefined;
+        const txt = try std.fmt.bufPrint(
+            &row,
+            "{{\"id\":{{\"surface_id\":{d}}},\"title\":\"s{d}\",\"runtime_id\":\"{d:0>32}\"}}",
+            .{ i + 1, i, i + 1 },
+        );
+        try buf.appendSlice(allocator, txt);
+    }
+    try buf.appendSlice(allocator, "]}\n");
+    return buf.toOwnedSlice(allocator);
+}
+
+test "스크롤한 목록: 고정 헤더 밑을 눌러도 «안 보이는 줄» 이 안 열린다" {
+    // **적대적 검증 2회차가 잡았다.** 목록이 흐르면 `remote_row0.y` 가 음수가 되는데, 그러면
+    // 「첫 줄보다 위인가」 가드가 무력해져 헤더의 빈 자리(제목 옆)를 눌러도 그 밑으로 지나간
+    // 줄이 열렸다 — UX 계약이 「붙임 헤더 밑을 눌러 안 보이는 값이 바뀌는 것」을 막으라고 적어
+    // 둔 그 모양이다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+
+    // 아래로 민다 — 위쪽 줄들이 헤더 밑으로 지나간다.
+    bridge.maru_mobile_pointer(0, 1, 200, 700, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+    // **관성이 멎을 때까지 기다린다.** 안 그러면 이 탭이 「흐르는 목록을 세우는」 경로로 가서
+    // 헤더 가드를 재지 못한다(1회차에 그 실수를 했다 — 변이가 안 잡혀서 알았다).
+    for (0..60) |_| advanceFrame(402, 874, 16);
+    try T.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    // **뜻으로 잰다.** `remoteSessionsShown()` 은 목록을 «안 그리면» 옛 값이 그대로 남아,
+    // 세션이 열려 화면이 바뀐 것을 못 본다(그 판정으로는 변이가 안 잡혔다).
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).sessions, bridge.controlWantKind());
+
+    // **헤더 안(제목 옆 빈 자리)을 누른다** — 톱니도 아니고 줄도 아니다.
+    tapAt(200, 20);
+    advanceFrame(402, 874, 16);
+    // 세션이 열렸으면 뜻이 `.screen` 이 된다 — 그러면 안 보이는 줄이 열린 것이다.
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).sessions, bridge.controlWantKind());
+}
+
+test "누른 줄과 열리는 세션이 같다 — 사이에 목록이 갱신돼도" {
+    // **적대적 검증 3회차가 잡았다.** 그 자리 주석은 「누를 때 잡아 둔 index 를 쓴다 — 좌표로
+    // 다시 찾으면 목록이 갱신됐을 때 다른 세션을 연다」였는데, **순번도 같은 문제를 갖는다** —
+    // `absorbFrame` 이 줄을 갈아 끼우면 5번이 다른 세션이 된다. 잡아야 하는 것은 **그 세션의 id** 다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    // 세션 다섯 — id 는 1..5.
+    const first = try sessionListWire(T.allocator, 5);
+    defer T.allocator.free(first);
+    _ = feedControl(first);
+    advanceFrame(402, 874, 16);
+
+    // 세 번째 줄(id = `...003`)을 **누른 채로** 둔다.
+    const row = bridge.remoteRowCenter(2) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, row.x, row.y, now());
+
+    // **그 사이 목록이 갱신된다** — 앞의 둘이 사라져 순번이 밀린다(맥에서 탭 둘을 닫은 것).
+    const shifted = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+        "{\"id\":{\"surface_id\":3},\"title\":\"s2\",\"runtime_id\":\"00000000000000000000000000000003\"}," ++
+        "{\"id\":{\"surface_id\":4},\"title\":\"s3\",\"runtime_id\":\"00000000000000000000000000000004\"}," ++
+        "{\"id\":{\"surface_id\":5},\"title\":\"s4\",\"runtime_id\":\"00000000000000000000000000000005\"}]}\n";
+    _ = feedControl(shifted);
+    advanceFrame(402, 874, 16);
+
+    // 손을 뗀다 — **누른 그 세션(`...003`)이 열려야 한다.** 순번으로 잡았으면 이제 2번은
+    // `...005` 라 엉뚱한 세션이 열린다.
+    bridge.maru_mobile_pointer(2, 1, row.x, row.y, now());
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).screen, bridge.controlWantKind());
+    try T.expect(bridge.wantsScreen("00000000000000000000000000000003".*));
+}
+
+test "끝까지 밀면 «마지막 세션» 을 실제로 열 수 있다" {
+    // **적대적 검증 4회차.** 앞 판정자는 「줄이 위로 갔다」만 쟀는데, 이 변경의 존재 이유는
+    // 「닿을 수 있다」다 — 그 둘은 다르다(상한이 모자라면 움직이긴 해도 끝까지 못 간다).
+    // 그래서 **끝까지 밀고 마지막 줄을 눌러 그 세션이 열리는지** 잰다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(@as(usize, 20), bridge.remoteRowsDrawn());
+
+    // **끝까지 민다** — 한 번으로는 모자라니 여러 번, 그리고 관성이 멎을 때까지 돌린다.
+    for (0..6) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 100, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 100, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+
+    // 마지막 줄이 **창 안에** 있어야 한다.
+    const last = bridge.remoteRowCenter(19) orelse return error.TestUnexpectedResult;
+    try T.expect(last.y > 0 and last.y < 874);
+
+    // 그리고 **눌리면 그 세션이 열린다**(id `...020`).
+    tapAt(last.x, last.y);
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.wantsScreen("00000000000000000000000000000020".*));
+}
+
+test "스크롤해도 «원격이 아닌 줄» 이 제자리에서 눌린다" {
+    // **적대적 검증 5회차.** 판정자가 원격 줄만 재고 있었다 — 그런데 같은 목록에 「터미널」과
+    // 「서버」 줄이 함께 흐른다. 그 둘의 rect 를 오프셋으로 안 옮기거나 가시 판정을 잘못하면
+    // **보이는데 안 눌리거나 안 보이는데 눌린다**(이 저장소가 여러 번 겪은 모양).
+    //
+    // 내려갔다 **돌아오는 것**으로 잰다 — 오프셋이 양방향으로 맞는지와 상한 clamp 를 함께 본다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+
+    const before = bridge.sessServersRowCenterY() orelse return error.TestUnexpectedResult;
+
+    // 끝까지 내려간다 — 「서버」 줄은 위로 사라진다.
+    for (0..6) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 100, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 100, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+    try T.expect(bridge.sessServersRowCenterY() == null); // 안 보이면 rect 도 없다
+
+    // 다시 끝까지 올라온다 — **원래 자리로 돌아와야 한다**(상한 0 에서 멈춘다).
+    for (0..8) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 100, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 800, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+    const after = bridge.sessServersRowCenterY() orelse return error.TestUnexpectedResult;
+    try T.expectEqual(before, after);
+
+    // 그리고 **그 자리에서 눌리면 서버 화면으로 간다** — 목록 축이 꺼진다(계약 §4a).
+    tapAt(200, after);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).none, bridge.controlWantKind());
+}
+
+test "스크롤해도 「터미널」 줄이 제자리에서 눌린다" {
+    // 5회차 판정자는 「서버」 줄만 쟀다 — 「터미널」 줄은 같은 오프셋을 타지만 **rect 를 따로
+    // 세우므로** 별개다(그 줄만 오프셋을 빼먹어도 그 판정자는 통과한다).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+
+    const before = bridge.sessTerminalRowCenterY() orelse return error.TestUnexpectedResult;
+    // 내려갔다 올라온다 — 오프셋이 양방향으로 맞아야 제자리로 돌아온다.
+    for (0..6) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 100, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 100, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+    try T.expect(bridge.sessTerminalRowCenterY() == null); // 위로 사라졌다
+    for (0..8) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 100, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 800, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+    try T.expectEqual(before, bridge.sessTerminalRowCenterY() orelse return error.TestUnexpectedResult);
+}
+
+test "세션을 보고 돌아오면 «보던 자리» 다 — 목록 스크롤은 유지된다" {
+    // **이것은 결정이지 우연이 아니다.** 설정·서버 목록은 «들어갈 때» 스크롤을 되돌리는데
+    // (`set_sa.reset()`·`srv_sa.reset()`), 세션 목록은 그러지 않는다 — 전환을 「덮개」로 정한 이상
+    // (계획 U0) 목록 왕복이 평범한 조작이고, 그때마다 맨 위로 튀면 아래쪽 세션을 오갈 수가 없다.
+    // U2a 가 「돌아온 세션은 마지막 화면을 곧바로」인 것과 같은 결이다.
+    //
+    // 판정자가 없으면 다음 사람이 「다른 화면과 맞춘다」며 무심코 reset 을 넣는다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+
+    // 아래로 민 뒤 그 자리를 적어 둔다.
+    for (0..3) |_| {
+        bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+        bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+        bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+        for (0..30) |_| advanceFrame(402, 874, 16);
+    }
+    const parked = bridge.remoteRowCenter(10) orelse return error.TestUnexpectedResult;
+
+    // 보이는 줄 하나를 열었다 돌아온다.
+    tapAt(parked.x, parked.y);
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).screen, bridge.controlWantKind());
+    _ = bridge.maru_mobile_pop_screen();
+    advanceFrame(402, 874, 16);
+
+    // **같은 자리다.**
+    try T.expectEqual(parked.y, (bridge.remoteRowCenter(10) orelse return error.TestUnexpectedResult).y);
+}

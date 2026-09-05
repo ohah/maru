@@ -15872,7 +15872,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"p5c3c-3b boundary"},
         });
         const run_session_host_3b_boundary_tests = b.addRunArtifact(session_host_3b_boundary_tests);
-        run_session_host_3b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3b_boundary_tests.addArg("--maru-expect-tests=2");
         run_session_host_3b_boundary_tests.setCwd(b.path("."));
         session_host_3b_step.dependOn(&run_session_host_3b_boundary_tests.step);
         boundary_step.dependOn(&run_session_host_3b_boundary_tests.step);

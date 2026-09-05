@@ -2,6 +2,11 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const max_source_bytes = 1024 * 1024;
+
+test "p5c3c-3b boundary scanner admits the shared 8 MiB source budget" {
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), max_source_bytes);
+}
 
 test "p5c3c-3b boundary keeps one integrated owner and exactly one product CLI caller" {
     const allocator = std.testing.allocator;
@@ -45,7 +50,7 @@ test "p5c3c-3b boundary keeps one integrated owner and exactly one product CLI c
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(max_source_bytes));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

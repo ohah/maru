@@ -81,6 +81,36 @@ test "durable handoff survives source workspace deletion with equal bytes and di
     try std.testing.expectError(error.InvalidOwner, durable.cleanup());
 }
 
+test "retained close preserves bytes and irrevocably drops process-local authority" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var durable: handoff.DurableEvidence = .{};
+    try handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), fixture.sourcePath(), fixture.destinationPath(), &durable);
+    const held_fd = durable.file.fd;
+    const held_parent_fd = durable.file.parent_fd;
+
+    try durable.closeRetaining();
+    try std.testing.expectEqual(handoff.Phase.retained_closed, durable.phase);
+    try std.testing.expect(durable.value() == null);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), durable.file.fd);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), durable.file.parent_fd);
+    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(held_fd, std.c.F.GETFD, @as(c_int, 0)));
+    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(held_parent_fd, std.c.F.GETFD, @as(c_int, 0)));
+    try std.testing.expectError(error.InvalidOwner, durable.revalidate());
+    try std.testing.expectError(error.InvalidOwner, durable.cleanup());
+    try std.testing.expectError(error.InvalidOwner, durable.closeRetaining());
+    try std.testing.expectError(error.InvalidOwner, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), fixture.sourcePath(), fixture.destinationPath(), &durable));
+
+    const retained = try fixture.tmp.dir.readFileAlloc(std.testing.io, "durable/evidence.json", std.testing.allocator, .limited(evidence.max_evidence_bytes));
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings(bytes, retained);
+
+    var copied_tombstone = durable;
+    try std.testing.expectError(error.InvalidOwner, copied_tombstone.closeRetaining());
+    try std.testing.expectError(error.InvalidOwner, copied_tombstone.cleanup());
+}
+
 test "source direct-child and destination outside-workspace rules reject paths" {
     var fixture: Fixture = undefined;
     try fixture.init();

@@ -2869,6 +2869,32 @@ supplied-buffer provenance, bundle path 거부, 실제 child의 `--bundle` 전�
 Debug·ReleaseFast에서 검증한다. 이 leaf만으로 bundle pathname pin/revalidation, durable evidence handoff, split prepare/finalize driver,
 live workflow 배선 또는 frozen signed U5 제품 E2E를 완료했다고 주장하지 않는다.
 
+### 11.48 baseline evidence의 durable handoff 승격 leaf
+
+prepare와 finalize를 서로 다른 validator process로 나눌 때 baseline runner의 private workspace pathname을 다음 process에 넘기지 않는다.
+`release_adapter_candidate_evidence_handoff.zig`의 caller-owned final-address `DurableEvidence`가 이미 검증된
+`PinnedReleaseFile`과 그 exact ephemeral evidence pathname을 다시 검증하고, held descriptor에서 읽은 canonical bytes를 별도의
+absolute durable destination에 exclusive publish한다. source는 baseline workspace root의 exact direct child여야 하고 destination은
+그 root와 같거나 그 descendant일 수 없다. 따라서 baseline workspace cleanup 뒤에도 finalize가 읽을 inode가 함께 제거되지 않는다.
+
+승격은 source의 held fd/path/size/SHA를 read 전후에 재검증하고, destination parent를 component별 no-follow로 연 뒤 same-name
+destination이 없을 때만 temp write→file sync→exclusive rename→directory sync로 게시한다. published destination은 source와 다른
+device/inode이면서 size/SHA가 같아야 하며 final-address owner가 held file/parent fd, canonical destination pathname과 leaf name을
+함께 보존한다. pathname이나 caller가 제출한 digest·성공 boolean은 권위가 아니다. allocation, read, write, sync, rename 또는
+post-publication fence 실패는 partial bytes를 성공으로 게시하지 않는다.
+
+`value`/`revalidate`는 wrapper와 nested `PinnedReleaseFile`의 final address, exact destination pathname, held/path inode,
+regular-file·single-link·size·SHA를 다시 확인한다. `cleanup`은 destination name이 아직 held inode를 가리킬 때만 unlink하고 parent를
+sync한 뒤 nested descriptor를 닫는다. pathname이 다른 inode나 symlink로 교체되면 그 replacement를 삭제하지 않고
+`CleanupFailed`와 exact retry owner를 보존한다. 성공 handoff의 ordinary descriptor close와 durable leaf 삭제는 하나의 API로
+합치지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-evidence-handoff`는 Debug·ReleaseFast에서 실제 filesystem 승격,
+ephemeral workspace 삭제 뒤 durable bytes 생존, source/destination path·alias·owner 거부, source drift, pre-existing destination,
+copy/final-address 차단, destination 교체 시 replacement 보존, exact cleanup과 allocation failure를 검증한다. 이 leaf는 아직
+candidate/evidence/manifest attestation bundle 전체의 aggregate handoff, prepare/finalize driver, live release workflow 배선 또는
+frozen signed U5 제품 E2E를 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

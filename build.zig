@@ -1230,6 +1230,15 @@ pub fn build(b: *std.Build) void {
             }
         }
         check_targets_step.dependOn(&cross_exe.step);
+
+        // **테스트 블록도 태운다.** 위 실행 파일은 `main()` 아래만 분석한다 — `test` 블록은 안 실린다.
+        // 그 틈으로 **Windows 전용 타입을 쓰는 판정**이 들어갔고 로컬 Windows 는 초록인 채 CI 의
+        // Linux 컴파일이 죽었다(실측: `d3d11_cells.Cell` 이 다른 호스트에는 없다. §2m.114).
+        // `SkipZigTest` 로는 못 막는다 — 런타임 건너뛰기는 **컴파일을 안 막는다.**
+        //
+        // **Run 은 안 만든다**(이 게이트의 규칙 그대로). 컴파일만 하면 이 계열은 전부 잡힌다.
+        const cross_exe_tests = addProjectTest(b, .{ .root_module = cross_exe_mod });
+        check_targets_step.dependOn(&cross_exe_tests.step);
     }
 
     const exe_tests = addProjectTest(b, .{

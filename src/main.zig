@@ -5264,7 +5264,13 @@ fn addRow(rows: *[max_rows]f32, n: *usize, y: f32) void {
     n.* += 1;
 }
 
-fn countSyntaxPaint(cells: []const d3d11_cells.Cell, tk: *const maru.chrome.Tokens) SyntaxPaint {
+/// **셀 타입을 `anytype` 으로 받는다.** `d3d11_cells.Cell` 은 **Windows 밖에서 없는 타입**이라
+/// (다른 호스트에서는 스텁이다) 서명에 박으면 이 함수를 부르는 판정이 Linux·macOS 에서 컴파일을
+/// 죽인다 — 실측: CI `check` 가 `struct 'maru.d3d11_cells__struct_…' has no member named 'Cell'` 로
+/// 빨개졌고 **로컬 Windows 는 초록이었다**. `SkipZigTest` 로는 못 막는다(런타임 건너뛰기는 컴파일을
+/// 안 막는다 — 이 파일이 이미 다른 자리에 그 함정을 적어 뒀다). `anytype` 이면 판정이 **모든 호스트
+/// 에서 돈다** — 건너뛰는 것보다 낫다. 필요한 것은 `fg: [4]f32` 와 `rect: [4]f32` 둘뿐이다.
+fn countSyntaxPaint(cells: anytype, tk: *const maru.chrome.Tokens) SyntaxPaint {
     const roles = [_]maru.chrome.tokens.ColorRole{
         .syntax_keyword,   .syntax_string,      .syntax_number,
         .syntax_comment,   .syntax_property,    .syntax_type_name,
@@ -5307,9 +5313,11 @@ fn countSyntaxPaint(cells: []const d3d11_cells.Cell, tk: *const maru.chrome.Toke
     return out;
 }
 
-test "구문 색 세기는 셀마다 한 번, 그리고 구문 색만" {
-    const tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
-    const kw = tk.get(.syntax_keyword);
+test "구문 색 세기는 셀마다 한 번, 행마다 한 번, 그리고 구문 색만" {
+    // **진짜 테마여야 한다.** 영행렬 테마는 열한 역할의 색이 **전부 같아서** 「같은 역할 두 칸은
+    // 갈래 하나」가 동어반복이 된다 — 역할별로 세는 코드도 그대로 통과한다(적대적 검증 1 회차에
+    // 실제로 그렇게 적혀 있었다). 스모크가 쓰는 그 토큰을 그대로 쓴다.
+    const tk = chromeTokensFor(maru.config.theme.Config{});
     const f = struct {
         fn rgb(c: anytype) [4]f32 {
             return .{
@@ -5319,21 +5327,53 @@ test "구문 색 세기는 셀마다 한 번, 그리고 구문 색만" {
                 1,
             };
         }
+        const Cell = struct { rect: [4]f32 = @splat(0), fg: [4]f32 = @splat(0) };
+        fn at(y: f32, fg: [4]f32) Cell {
+            return .{ .rect = .{ 0, y, 0, 0 }, .fg = fg };
+        }
     };
-    var cell = std.mem.zeroes(d3d11_cells.Cell);
-    cell.fg = f.rgb(kw);
-    // **구문 색이 아닌 것은 안 센다** — 여기가 «591/594» 를 만든 자리다.
-    var other = std.mem.zeroes(d3d11_cells.Cell);
-    other.fg = .{ 0.5, 0.5, 0.5, 1 };
-    // **투명한 것도 안 센다.**
-    var ghost = std.mem.zeroes(d3d11_cells.Cell);
-    ghost.fg = f.rgb(kw);
-    ghost.fg[3] = 0;
+    const kw = f.rgb(tk.get(.syntax_keyword));
+    const str = f.rgb(tk.get(.syntax_string));
+    // **구문 색과 안 겹치는 색을 골라 온다.** 손으로 고른 0.5 회색이 실제로 `syntax_comment`
+    // (128,128,128)와 겹쳐 기대값이 조용히 틀어졌다(적대적 검증 1 회차).
+    var not_syntax: [4]f32 = .{ 0, 0, 0, 1 };
+    {
+        var v: f32 = 0;
+        while (v <= 1.0) : (v += 1.0 / 64.0) {
+            const c: [4]f32 = .{ v, 1 - v, v * 0.5, 1 };
+            // 슬라이스를 **변수로** 만든다 — `&.{…}` 는 comptime 값을 요구한다(`v` 는 런타임이다).
+            const one = [_]f.Cell{f.at(0, c)};
+            if (countSyntaxPaint(&one, &tk).colored == 0) {
+                not_syntax = c;
+                break;
+            }
+        }
+    }
+    const guard = [_]f.Cell{f.at(0, not_syntax)};
+    try std.testing.expectEqual(@as(usize, 0), countSyntaxPaint(&guard, &tk).colored);
+    // 그리고 **줄 번호 색은 구문 색이 아니다** — 그것이 걸리면 «591/594» 가 돌아온다(§2m.112).
+    const gutter = [_]f.Cell{f.at(0, f.rgb(tk.get(.muted_fg)))};
+    try std.testing.expectEqual(@as(usize, 0), countSyntaxPaint(&gutter, &tk).colored);
+    var ghost = kw;
+    ghost[3] = 0;
 
-    const got = countSyntaxPaint(&.{ cell, cell, other, ghost }, &tk);
-    try std.testing.expectEqual(@as(usize, 2), got.colored);
-    // 두 셀이 **같은 역할**이므로 갈래는 하나다 — 역할별로 더하면 여기가 2 가 된다.
-    try std.testing.expectEqual(@as(usize, 1), got.distinct);
+    const cells = [_]f.Cell{
+        f.at(0, kw), // 같은 행에 둘 — 행은 하나로 센다
+        f.at(0, kw),
+        f.at(10, str), // 다른 행, 다른 역할
+        f.at(20, not_syntax), // 구문 색이 아니지만 **행은 있다**
+        f.at(30, ghost), // 투명: 안 센다
+    };
+    const got = countSyntaxPaint(&cells, &tk);
+
+    try std.testing.expectEqual(@as(usize, 3), got.colored);
+    // 역할 둘(keyword·string) — 같은 역할 두 칸이 갈래를 둘로 만들면 «629/525» 가 다시 난다.
+    try std.testing.expectEqual(@as(usize, 2), got.distinct);
+    // **색이 실린 행은 둘이다.** 같은 행의 두 칸을 두 번 세면 이 값이 3 이 되고, 그러면 문턱이
+    // «칸 수»로 되돌아가 축 결함을 다시 놓친다(§2m.114).
+    try std.testing.expectEqual(@as(usize, 2), got.rows);
+    // **분모는 색과 무관하게 그려진 행 전부다.** 색칠된 행만 세면 비율이 늘 1 이 되어 동어반복이다.
+    try std.testing.expectEqual(@as(usize, 4), got.total_rows);
 }
 
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, hold_editor_ms: u32) !void {
@@ -6159,11 +6199,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var esyn_rows: usize = 0;
     var esyn_total_rows: usize = 0;
     // **스크롤한 편집기의 색**(W8.28). `esyn_scroll_floor` 는 기존 스크롤 판정(790·792)과 그 뒤의
-    // 가로 스크롤 판정이 끝난 자리다 — 그보다 앞에서 굴리면 그 판정들이 내가 옮긴 화면을 본다.
+    // 가로 스크롤 판정이 **끝난 뒤**다. 실측으로는 0 으로 내려도 아무 판정이 안 바뀌지만, 그것은
+    // 790 이 보는 파일이 마침 `.yml` 이라서다 — 근거가 우연이면 값은 남긴다(적대적 검증 7 회차).
     const esyn_scroll_floor: usize = 810;
     var esyn2_sent = false;
     var esyn2_judgeable = false;
     var esyn2_before: usize = 0;
+    var esyn2_path: []const u8 = "";
     var esyn2_first_line: usize = 0;
     var esyn2_cells: usize = 0;
     var esyn2_total: usize = 0;
@@ -11420,19 +11462,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 번들 grammar 에 없다 — 그래서 «굴린 프레임»과 «색 있는 프레임»이 한 번도 안 겹쳤다.
                 // 여기서 색 있는 파일을 직접 굴린다.
                 //
-                // **굴린 뒤에는 되돌린다.** 이 뒤로도 300 스핀 넘게 판정이 이어지는데, 편집기를
-                // 굴려 둔 채 넘기면 그것들이 보는 화면이 달라진다 — 판정을 세우면서 판정을 흔드는 꼴이다.
+                // **굴린 뒤에는 되돌리고, 굴리는 자리는 기존 편집기 판정들 뒤로 잡는다**(`floor`).
+                //
+                // **둘 다 지금은 아무것도 안 지킨다** — 되돌리기를 지우고, 바닥을 0 으로 내려도
+                // 판정 75 개가 **전부 그대로다**(적대적 검증 6·7 회차. 처음에 이 주석은 «안 되돌리면
+                // 뒤 판정이 달라진다» 고 **단언**하고 있었다. 아니었다).
+                //
+                // 그런데도 남기는 이유는 **지금의 배치가 우연이기 때문**이다: 기존 스크롤 판정(790)이
+                // 보는 파일이 마침 `.yml` 이라 내가 `.zig` 를 굴려도 안 겹친다. 파일 순서가 바뀌면
+                // 그 우연이 사라지고, 그때 이 둘이 없으면 **판정을 세우면서 판정을 흔들게** 된다.
+                // 「지금 안 걸린다」와 「걸릴 수 없다」는 다르다.
                 if (smoke and of.syntax != null and spins >= esyn_scroll_floor) {
                     if (!esyn2_sent) {
                         esyn2_sent = true;
                         esyn2_before = of.first_line;
+                        // **어느 파일에 던졌는지 기억한다.** 이 뒤로 활성 파일이 바뀔 수 있고, 그때
+                        // 그 파일의 `first_line` 이 크다는 이유만으로 무장하면 **던지지도 않은
+                        // 스크롤**을 잰 것이 된다(지금 스모크에 `.zig` 가 하나뿐이라 안 겪었을 뿐이다).
+                        esyn2_path = of.path;
                         window.postSyntheticMouseWheel(
                             .wheel,
                             @intCast(geom.terminal.x + geom.terminal.w / 2),
                             @intCast(geom.terminal.y + geom.terminal.h / 2),
                             -3,
                         );
-                    } else if (!esyn2_judgeable and of.first_line > esyn2_before and be.cells.items.len > 0) {
+                    } else if (!esyn2_judgeable and std.mem.eql(u8, of.path, esyn2_path) and
+                        of.first_line > esyn2_before and be.cells.items.len > 0)
+                    {
                         const paint = countSyntaxPaint(be.cells.items, &chrome_tokens);
                         esyn2_judgeable = true;
                         esyn2_first_line = of.first_line;

@@ -14192,7 +14192,7 @@ pub fn build(b: *std.Build) void {
             const candidate_evidence_handoff_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_evidence_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod } } });
             const candidate_evidence_handoff_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_evidence_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_evidence_handoff", .module = candidate_evidence_handoff_mod } } }) });
             const run_candidate_evidence_handoff_tests = b.addRunArtifact(candidate_evidence_handoff_tests);
-            run_candidate_evidence_handoff_tests.addArg("--maru-expect-tests=7");
+            run_candidate_evidence_handoff_tests.addArg("--maru-expect-tests=8");
             run_candidate_evidence_handoff_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_evidence_handoff_step.dependOn(&run_candidate_evidence_handoff_tests.step);
             session_host_step.dependOn(&run_candidate_evidence_handoff_tests.step);

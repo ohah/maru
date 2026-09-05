@@ -1,4 +1,4 @@
-⏺ 요청한 변경을 적용했습니다.
+⏺ Applied the requested change.
 
 ✽ Working… (1m 24s · ↓ 4.9k tokens)
                                                                                               ✔

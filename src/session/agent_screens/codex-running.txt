@@ -1,5 +1,5 @@
 • Explored
-  └ 파일 두 개를 읽었습니다
+  └ read two files
 
 • Working (18m 24s • esc to interrupt)
 

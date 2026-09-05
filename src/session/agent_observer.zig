@@ -188,11 +188,19 @@ const claude_rules = [_]Rule{
 /// 진행 중에는 `✽ Mulling… `, 끝나면 같은 자리가 `✻ Worked for 26s · done 오후 3:41` 이다 —
 /// **`…`(U+2026) 유무가 그 둘을 가른다**(7 pane × 30 회 관측: 진행 줄은 전부 `…`, 완료 줄은 하나도 없음).
 ///
-/// **스피너 프레임은 회전한다.** `✻`(U+273B)·`✽`(U+273D) 를 실측했고, 나머지는 같은 Dingbats 계열이다.
-/// `LineMatch` 는 문자열 prefix 만 받으므로(codepoint 대역은 **같은 줄 보장이 없다**) 프레임을 나열한다.
-/// 목록에 없는 프레임이 오면 이 규칙이 조용히 안 걸리므로, 새 프레임을 보면 여기에 더한다 —
-/// 그 사실은 `MARU_DEBUG` 의 `screen_rule=` 이 알려 준다(계약 §1.7).
-const claude_spinner_frames = [_][]const u8{ "✻", "✽", "✢", "✳", "✶", "✷", "✸", "✹", "✺", "✴" };
+/// **스피너 프레임은 회전한다.** 아래 다섯은 전부 실측이다(10 pane × 150 회, 2026-09-05):
+/// `✽`(U+273D) 101 · `✢`(U+2722) 86 · `✻`(U+273B) 77 · `✶`(U+2736) 72 · `✳`(U+2733) 62 회.
+/// `LineMatch` 는 문자열 prefix 만 받으므로(codepoint 대역은 **같은 줄 보장이 없다**) 나열한다.
+///
+/// ⚠️ **추정으로 늘리지 않는다.** 같은 Dingbats 계열이라는 이유로 `✷✸✹✺✴` 를 넣었다가 뺐다 —
+/// 같은 관측에서 **한 번도 안 나왔고**, 근거 없는 prefix 는 오탐만 늘린다. claude 답변 블록 마커
+/// `⏺`(U+23FA, 같은 관측에서 155 회로 최다)가 그 위험을 그대로 보여 준다: **완료된 답변 줄이 화면에
+/// 계속 남으므로**, 그 줄에 `…` 가 있으면(실측: %27 은 3 줄 중 1 줄, %16 은 13 줄 중 1 줄) 배지가
+/// 영영 running 에 묶인다. 그래서 `⏺` 는 **일부러 뺐다.**
+///
+/// 목록에 없는 프레임이 오면 이 규칙이 조용히 안 걸린다. 그때는 `MARU_DEBUG` 의 `screen_rule=` 이
+/// 무엇이 걸렸는지 알려 주므로(계약 §1.7) 거기서 새 프레임을 확인해 **실측으로** 더한다.
+const claude_spinner_frames = [_][]const u8{ "✻", "✽", "✢", "✳", "✶" };
 
 /// 프레임마다 «그 기호로 시작하고 `…` 를 포함하는 **한 줄**» 을 요구한다. `Gate.line` 만이 같은 줄을
 /// 보장한다 — 평면 `contains` 로 쓰면 대화 출력의 `…` 가 진행 신호로 둔갑한다.
@@ -1577,7 +1585,7 @@ test "claude: 대화에 남은 옛 Working 텍스트는 진행 신호가 아니�
     try std.testing.expectEqual(State.idle, d.state);
 }
 
-test "claude: 스피너 프레임이 회전해도 같은 진행 신호로 읽는다" {
+test "claude: 실측된 스피너 프레임 전수가 같은 진행 신호로 읽힌다" {
     for (claude_spinner_frames) |frame| {
         const screen = try std.fmt.allocPrint(std.testing.allocator, "{s} Brewing… \n❯ \n", .{frame});
         defer std.testing.allocator.free(screen);

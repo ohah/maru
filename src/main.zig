@@ -165,15 +165,47 @@ fn dispatch(
     }
     if (std.mem.eql(u8, command, "win32-terminal-smoke")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
+        // **편집기 판을 잡아 둘 수 있다** — `--hold-editor-ms <n>`. 스모크는 편집기를 수백 프레임
+        // present 하지만 **한 프레임도 오래 머물지 않아서** 창을 찍는 하네스가 그 위에 앉지 못한다
+        // (실측: 여섯 번 찍어 여섯 번 다 터미널 판이었다. 그래서 구문 색 슬라이스는 **화면 증거 없이**
+        // 머지됐다). 기본은 0 이라 게이트의 시간은 안 변한다 — 증거를 만들 때만 켠다.
+        var opt_buf: [8][]const u8 = undefined;
+        var n_opt: usize = 0;
+        while (args.next()) |a| : (n_opt += 1) {
+            if (n_opt == opt_buf.len) {
+                try stderr.writeAll("maru win32-terminal-smoke: too many options\n");
+                try stderr.flush();
+                return error.InvalidArgs;
+            }
+            opt_buf[n_opt] = a;
+        }
+        const hold_editor_ms = switch (terminalSmokeOpts(opt_buf[0..n_opt])) {
+            .ok => |o| o.hold_editor_ms,
+            .needs_value => |name| {
+                try stderr.print("maru win32-terminal-smoke: {s} needs a value\n", .{name});
+                try stderr.flush();
+                return error.InvalidArgs;
+            },
+            .bad_value => |v| {
+                try stderr.print("maru win32-terminal-smoke: --hold-editor-ms wants a number, got {s}\n", .{v});
+                try stderr.flush();
+                return error.InvalidArgs;
+            },
+            .unknown => |a| {
+                try stderr.print("maru win32-terminal-smoke: unknown option {s}\n", .{a});
+                try stderr.flush();
+                return error.InvalidArgs;
+            },
+        };
         // 스모크는 **상한이 있어야 한다** — 사람이 안 닫아도 끝나야 CI·자동 캡처가 성립한다.
-        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap);
+        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap, hold_editor_ms);
         return;
     }
     if (std.mem.eql(u8, command, "win32-terminal")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         // **같은 코드 경로다.** 다른 것은 상한 하나뿐이라 "스모크에서는 되는데 앱에서는 안 되는" 자리가
         // 안 생긴다. 창을 닫을 때까지 돈다.
-        try runWin32Terminal(io, allocator, stdout, stderr, null);
+        try runWin32Terminal(io, allocator, stdout, stderr, null, 0);
         return;
     }
 
@@ -5156,7 +5188,50 @@ fn dockGeometryFor(
     });
 }
 
-fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize) !void {
+/// `win32-terminal-smoke` 의 선택지. **디스패치에서 떼어 낸다** — 저 안에서는 인자 반복자와 stderr 가
+/// 얽혀 있어 판정을 걸 수 없고, 실제로 이 계약은 한동안 **손으로 세 번 돌려 본 것**이 전부였다
+/// (적대적 검증 7 회차). 오류를 던지지 않고 **무엇이 잘못됐는지 값으로** 돌려주는 이유는 안내문에
+/// 그 토큰이 들어가야 하기 때문이다.
+const TerminalSmokeOpts = struct { hold_editor_ms: u32 = 0 };
+const TerminalSmokeOptsResult = union(enum) {
+    ok: TerminalSmokeOpts,
+    /// 값을 받아야 하는 이름인데 뒤가 비었다.
+    needs_value: []const u8,
+    /// 숫자 자리에 숫자가 아닌 것이(또는 `u32` 를 넘는 값이) 왔다.
+    bad_value: []const u8,
+    unknown: []const u8,
+};
+
+fn terminalSmokeOpts(args: []const []const u8) TerminalSmokeOptsResult {
+    var out: TerminalSmokeOpts = .{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--hold-editor-ms")) {
+            if (i + 1 >= args.len) return .{ .needs_value = args[i] };
+            i += 1;
+            out.hold_editor_ms = std.fmt.parseInt(u32, args[i], 10) catch return .{ .bad_value = args[i] };
+        } else return .{ .unknown = args[i] };
+    }
+    return .{ .ok = out };
+}
+
+test "win32-terminal-smoke 선택지" {
+    // 기본은 **0 이다** — 게이트가 이 플래그를 안 주므로 그때 시간이 안 변해야 한다.
+    try std.testing.expectEqual(@as(u32, 0), terminalSmokeOpts(&.{}).ok.hold_editor_ms);
+    try std.testing.expectEqual(@as(u32, 250), terminalSmokeOpts(&.{ "--hold-editor-ms", "250" }).ok.hold_editor_ms);
+
+    // **잘못된 인자는 조용히 무시되면 안 된다.** 무시하면 증거를 만들려던 사람이 «찍었는데 편집기가
+    // 아니다» 로 헤맨다 — 실제로 그 자리에서 한 번 헤맸다.
+    try std.testing.expectEqualStrings("--hold-editor-ms", terminalSmokeOpts(&.{"--hold-editor-ms"}).needs_value);
+    try std.testing.expectEqualStrings("abc", terminalSmokeOpts(&.{ "--hold-editor-ms", "abc" }).bad_value);
+    // `u32` 를 넘는 값도 **같은 자리**로 간다(넘침을 조용히 자르면 hold 가 엉뚱해진다).
+    try std.testing.expectEqualStrings("5000000000", terminalSmokeOpts(&.{ "--hold-editor-ms", "5000000000" }).bad_value);
+    try std.testing.expectEqualStrings("--nope", terminalSmokeOpts(&.{"--nope"}).unknown);
+    // 값 자리에 온 것은 **이름으로 다시 읽지 않는다**.
+    try std.testing.expectEqualStrings("--nope", terminalSmokeOpts(&.{ "--hold-editor-ms", "5", "--nope" }).unknown);
+}
+
+fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, hold_editor_ms: u32) !void {
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
         try stderr.flush();
@@ -5976,6 +6051,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var esyn_distinct: usize = 0;
     var esyn_total: usize = 0;
     var esyn_first_line: usize = 0;
+    var editor_hold_done = false;
     // ── 폴백 목록을 몇 번 짓는가 (W8.23) ──────────────────────────────────────────────────
     //
     // **시간이 아니라 횟수를 잰다.** 시간은 기계마다 흔들리지만 "다시 그릴 때마다 또 짓는가" 는
@@ -11369,6 +11445,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try present.beginFrame(clear);
         try pipeline.draw(cells.items, present.width_px, present.height_px);
         try present.present(false);
+        // **증거를 만들 때만 한 프레임에 머문다**(`--hold-editor-ms`). 스모크는 편집기를 수백 프레임
+        // 그리지만 프레임마다 16 ms 라 창을 찍는 하네스가 그 위에 못 앉는다 — 구문 색 슬라이스가
+        // 화면 증거 없이 머지된 이유가 이것이다.
+        //
+        // **`editor_syntax` 가 초록이라고 말하는 그 문턱을 그대로 쓴다**(색칠된 칸이 있고 역할이 둘
+        // 이상). `esyn_judgeable` 만 보면 안 된다 — 그 값은 **색칠 수와 무관하게** 서므로 색이 하나도
+        // 없는 프레임에서 멈춰 **거짓 증거**를 만든다(적대적 검증 2 회차: 처음에 그렇게 적었다).
+        if (hold_editor_ms != 0 and !editor_hold_done and showing_file and
+            esyn_judgeable and esyn_cells > 0 and esyn_distinct >= 2)
+        {
+            editor_hold_done = true;
+            stdout.print("editor_hold: ms={d} colored={d}/{d} roles={d}\n", .{ hold_editor_ms, esyn_cells, esyn_total, esyn_distinct }) catch {};
+            stdout.flush() catch {};
+            const hold_t0 = std.Io.Clock.awake.now(io).nanoseconds;
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(hold_editor_ms), .awake) catch {};
+            stdout.print("editor_hold_measured_ms={d}\n", .{@divTrunc(std.Io.Clock.awake.now(io).nanoseconds - hold_t0, std.time.ns_per_ms)}) catch {};
+            stdout.flush() catch {};
+        }
         frames += 1;
         _ = usleep(16_000);
     }

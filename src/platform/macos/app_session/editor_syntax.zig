@@ -18,13 +18,13 @@ const maru = @import("maru");
 const chrome_editor = maru.chrome.components.editor_view;
 const content = chrome_editor.content;
 const tokens = maru.chrome.tokens;
+const syntax_colors = maru.chrome.components.editor_view.syntax_colors;
 const syntax_capture = maru.session.syntax_capture;
 const editor_language = maru.session.editor.language;
 
-/// 한 줄에서 색을 계산할 **열 상한**. 화면 넓이 × 화면 높이만큼이다 — 랩이 켜지면 논리 줄 하나가
-/// 화면을 통째로 덮을 수 있으므로 폭만으로는 모자라고, 그렇다고 줄 길이에 비례시키면 60,000열짜리
-/// 한 줄에서 프레임당 그만큼을 훑는다(이 저장소가 `frame.max_first_col`로 이미 막은 부류다).
-pub const max_color_cols: usize = 16 * 1024;
+/// 한 줄에서 색을 계산하는 열 상한. **중립이 소유한다** — 이 이름은 그것을 다시 내보낼 뿐이다
+/// (두 벌을 두면 한쪽만 늘어도 아무도 모른다).
+pub const max_color_cols = syntax_colors.max_color_cols;
 
 /// 한 문서의 구문 색 상태. **`Term.rt`가 소유한다** — 문서와 수명이 같다.
 pub const State = struct {
@@ -37,19 +37,11 @@ pub const State = struct {
 
     /// 질의 결과(문서 byte 축). 프레임마다 다시 채우되 **저장소는 재사용한다**.
     spans: std.ArrayList(syntax.Span) = .empty,
-    /// 줄별 색 구간이 실리는 평평한 저장소.
-    flat: std.ArrayList(content.ColorSpan) = .empty,
-    /// `lines`와 같은 축으로 색인되는 슬라이스 배열 — `frame.Props.line_colors`가 그대로 받는다.
-    per_line: std.ArrayList([]const content.ColorSpan) = .empty,
-    /// 열별 역할 임시 버퍼(마지막이 이긴다). 재사용한다.
-    col_roles: std.ArrayList(?tokens.ColorRole) = .empty,
-    /// 정렬·중복 제거한 **줄 안 byte offset**(오름차순 — `columnsAtOffsets`의 계약).
-    offs: std.ArrayList(u32) = .empty,
-    /// 위 offset 들의 **열**. 둘을 따로 두는 이유는 `columnsAtOffsets`가 제자리로 덮어써서
-    /// 한 배열로는 byte 를 잃기 때문이다(그러면 span 마다 다시 찾을 수 없다).
-    cols: std.ArrayList(u32) = .empty,
-    /// 줄별 `flat` 구간 (시작, 끝). 슬라이스를 **나중에** 굳히려고 둔다.
-    bounds: std.ArrayList([2]usize) = .empty,
+    /// 색 계산의 저장소. **규칙과 함께 중립이 갖는다**(§2m.112).
+    colors: syntax_colors.Scratch = .{},
+    /// 위 층의 낱말로 옮긴 재료 — 역할이 정해진 스팬과 줄 경계.
+    byte_spans: std.ArrayList(syntax_colors.ByteSpan) = .empty,
+    line_bounds: std.ArrayList(syntax_colors.LineBounds) = .empty,
 
     /// 심볼 목록(§7.5). 프레임마다 다시 채우되 **저장소는 재사용한다** — 색 버퍼들과 같은 규율이다.
     symbols: std.ArrayList(syntax.Provider.Symbol) = .empty,
@@ -77,12 +69,9 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.provider) |*p| p.deinit();
         self.spans.deinit(allocator);
-        self.flat.deinit(allocator);
-        self.per_line.deinit(allocator);
-        self.col_roles.deinit(allocator);
-        self.offs.deinit(allocator);
-        self.cols.deinit(allocator);
-        self.bounds.deinit(allocator);
+        self.colors.deinit(allocator);
+        self.byte_spans.deinit(allocator);
+        self.line_bounds.deinit(allocator);
         self.symbols.deinit(allocator);
         self.crumb.deinit(allocator);
         self.crumb_bounds.deinit(allocator);
@@ -337,155 +326,38 @@ pub fn lineColors(
     p.spansForRange(allocator, doc_content, range, &self.spans);
     if (self.spans.items.len == 0) return &.{};
 
-    self.flat.clearRetainingCapacity();
-    self.bounds.clearRetainingCapacity();
-    self.per_line.clearRetainingCapacity();
+    // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
+    // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
+    // 다시 적어야 했다. 여기서 하는 일은 **재료를 그 층의 낱말로 옮기는 것**뿐이다.
+    //
+    // **역할이 `null` 인 스팬은 버린다** — 옛 코드가 `roleOf(...) orelse continue` 로 **건너뛰던**
+    // 것과 같은 뜻이다(덮어쓰지 않는다). 그래서 경계에서 버려도 결과가 바뀌지 않는다.
+    self.byte_spans.clearRetainingCapacity();
+    self.byte_spans.ensureTotalCapacity(allocator, self.spans.items.len) catch return &.{};
+    for (self.spans.items) |sp| {
+        const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
+        self.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
+    }
 
-    // **슬라이스를 나중에 굳힌다.** `flat`이 자라면 재할당되므로, 도는 중에 뜬 슬라이스는
-    // 매달린다 — 처음에 그렇게 썼다가 `ES1`이 그것을 잡았다. 먼저 (시작, 끝)만 모으고
-    // 배열이 다 자란 뒤에 한 번에 슬라이스로 바꾼다.
-    self.bounds.ensureTotalCapacity(allocator, last_line) catch return &.{};
-    for (0..first_line) |_| self.bounds.appendAssumeCapacity(.{ 0, 0 });
-
-    var si: usize = 0; // spans 를 앞으로만 훑는다
-    // **축은 보이는 줄, 재료는 원본 줄이다.** 보이는 줄은 문서 순서를 지키므로(접힘은 건너뛸 뿐
-    // 뒤섞지 않는다) 아래 `si` 의 "앞으로만 훑는다" 가 접힘에서도 성립한다.
+    // 줄 경계는 **CRLF 를 아는 쪽**이 준다(`LineIndex.Line.contentEnd()`).
+    self.line_bounds.clearRetainingCapacity();
+    self.line_bounds.ensureTotalCapacity(allocator, last_line - first_line) catch return &.{};
     var li: usize = first_line;
     while (li < last_line) : (li += 1) {
         const src = sourceLineFor(visible_numbers, li) orelse break;
         const line = line_idx.line(src) orelse break;
-        const lo = line.start;
-        const hi = line.contentEnd();
-
-        // 이 줄에 걸리는 span 구간을 찾는다(문서 순서라 커서가 뒤로 가지 않는다).
-        while (si < self.spans.items.len and self.spans.items[si].end <= lo) si += 1;
-        var sj = si;
-        while (sj < self.spans.items.len and self.spans.items[sj].start < hi) sj += 1;
-
-        const start_flat = self.flat.items.len;
-        if (sj > si) {
-            appendLine(self, allocator, doc_content[lo..hi], self.spans.items[si..sj], lo, tab_width);
-        }
-        self.bounds.appendAssumeCapacity(.{ start_flat, self.flat.items.len });
+        self.line_bounds.appendAssumeCapacity(.{ .start = @intCast(line.start), .end = @intCast(line.contentEnd()) });
     }
 
-    self.per_line.ensureTotalCapacity(allocator, self.bounds.items.len) catch return &.{};
-    for (self.bounds.items) |b| self.per_line.appendAssumeCapacity(self.flat.items[b[0]..b[1]]);
-    return self.per_line.items;
-}
-
-/// 한 줄의 색 구간을 `flat`에 붙인다. **마지막 캡처가 이긴다.**
-///
-/// tree-sitter는 한 범위에 캡처를 여럿 낸다(`x` 하나에 `variable`·`type`·`constant`·
-/// `variable.builtin` 넷이 붙는 것을 실측했다 — predicate를 평가하지 않는 탓이다). 어느 것이
-/// 이길지 규칙이 필요하고, **뒤엣것**을 고른다 — Neovim·Helix가 같은 관례이고, `.scm`이 더 좁은
-/// 패턴을 뒤에 적는 편이라 그쪽이 더 구체적이다.
-fn appendLine(
-    self: *State,
-    allocator: std.mem.Allocator,
-    line_bytes: []const u8,
-    spans: []const syntax.Span,
-    line_start: usize,
-    tab_width: u16,
-) void {
-    const width = content.lineColumnsUpTo(line_bytes, tab_width, @intCast(max_color_cols));
-    if (width == 0) return;
-    const w: usize = @min(width, max_color_cols);
-
-    self.col_roles.resize(allocator, w) catch return;
-    @memset(self.col_roles.items, null);
-
-    // **`columnsAtOffsets`는 오름차순 입력을 요구한다.** span 을 그냥 `[start, end]` 짝으로
-    // 늘어놓으면 그 계약이 깨진다 — tree-sitter 가 **같은 범위에 캡처를 여럿** 내므로
-    // `[6,7, 6,7, 6,7]` 같은 배열이 나온다. 처음에 그렇게 쓰고 주석에는 *"비내림차순이라 계약을
-    // 만족한다"*고 적었는데, `ES1`이 그 함수의 debug 단언에서 죽는 것으로 반증했다.
-    //
-    // 그래서 **정렬·중복 제거한 유일 offset**을 만들어 한 번 훑고, span 마다 그 표에서 찾는다.
-    // 줄 하나의 offset 수는 수십이라 정렬 비용이 문제되지 않는다.
-    self.offs.clearRetainingCapacity();
-    self.offs.ensureTotalCapacity(allocator, spans.len * 2) catch return;
-    for (spans) |sp| {
-        self.offs.appendAssumeCapacity(relStart(sp, line_start, line_bytes.len));
-        self.offs.appendAssumeCapacity(relEnd(sp, line_start, line_bytes.len));
-    }
-    std.mem.sort(u32, self.offs.items, {}, std.sort.asc(u32));
-    var uniq: usize = 0;
-    for (self.offs.items) |v| {
-        if (uniq == 0 or self.offs.items[uniq - 1] != v) {
-            self.offs.items[uniq] = v;
-            uniq += 1;
-        }
-    }
-    self.offs.shrinkRetainingCapacity(uniq);
-    self.cols.resize(allocator, uniq) catch return;
-    content.columnsAtOffsets(line_bytes, tab_width, self.offs.items, self.cols.items, @intCast(w));
-
-    for (spans) |sp| {
-        const sb = relStart(sp, line_start, line_bytes.len);
-        const eb = relEnd(sp, line_start, line_bytes.len);
-        if (eb <= sb) continue;
-        const role = roleOf(sp.capture) orelse continue;
-        const c0: usize = self.cols.items[lowerBound(self.offs.items, sb)];
-        const c1: usize = self.cols.items[lowerBound(self.offs.items, eb)];
-        var col: usize = c0;
-        while (col < @min(c1, w)) : (col += 1) self.col_roles.items[col] = role;
-    }
-
-    // 같은 역할이 이어지는 구간을 하나로 묶는다 — run 이 적을수록 렌더가 싸다.
-    var col: usize = 0;
-    while (col < w) {
-        const role = self.col_roles.items[col] orelse {
-            col += 1;
-            continue;
-        };
-        var end = col + 1;
-        while (end < w and self.col_roles.items[end] == role) end += 1;
-        self.flat.append(allocator, .{
-            .start_col = @intCast(col),
-            .end_col = @intCast(end),
-            .role = role,
-        }) catch return;
-        col = end;
-    }
-}
-
-/// span 의 **줄 안** 시작·끝 byte. 줄을 벗어난 부분은 줄 경계로 자른다(여러 줄 토큰이 그렇다).
-fn relStart(sp: syntax.Span, line_start: usize, line_len: usize) u32 {
-    const s = @max(@as(usize, sp.start), line_start) - line_start;
-    return @intCast(@min(s, line_len));
-}
-fn relEnd(sp: syntax.Span, line_start: usize, line_len: usize) u32 {
-    return @intCast(@min(@as(usize, sp.end) -| line_start, line_len));
-}
-
-/// `v` 이상인 첫 자리. `offs` 는 오름차순이고 `v` 는 반드시 그 안에 있다(같은 식으로 만들었다).
-fn lowerBound(offs: []const u32, v: u32) usize {
-    var lo: usize = 0;
-    var hi: usize = offs.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (offs[mid] < v) lo = mid + 1 else hi = mid;
-    }
-    return @min(lo, offs.len - 1);
-}
-
-/// 캡처 이름 → chrome 색 역할. **두 어휘를 잇는 자리가 하나다**(§5.3 — 표는 `syntax_capture`가
-/// 소유하고, chrome 역할로 옮기는 것만 여기서 한다).
-fn roleOf(capture: []const u8) ?tokens.ColorRole {
-    const r = syntax_capture.roleFor(capture) orelse return null;
-    return switch (r) {
-        .keyword => .syntax_keyword,
-        .string => .syntax_string,
-        .number => .syntax_number,
-        .comment => .syntax_comment,
-        .property => .syntax_property,
-        .type_name => .syntax_type_name,
-        .function => .syntax_function,
-        .punctuation => .syntax_punctuation,
-        .tag => .syntax_tag,
-        .attribute => .syntax_attribute,
-        .invalid => .syntax_invalid,
-    };
+    return syntax_colors.lineColors(
+        &self.colors,
+        allocator,
+        doc_content,
+        self.line_bounds.items,
+        self.byte_spans.items,
+        tab_width,
+        first_line,
+    );
 }
 
 // ── 판정자 ──────────────────────────────────────────────────────────────────────

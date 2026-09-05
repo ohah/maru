@@ -1183,12 +1183,37 @@ pub fn build(b: *std.Build) void {
         // 거기가 W2의 호스트 게이트(`hostGateReason`·terminfo·`install-cli`·`maru ssh`)와 W8.5의 경로
         // 정책이 사는 자리라 타깃별로 가장 잘 깨진다. 실측으로 확인했다 — `main.zig`에 macOS 전용 타입
         // 오류를 심으면 `maru.zig`만 도는 게이트는 **통과해 버린다**(적대적 검증에서 잡았다).
+        // **`main.zig` 는 `syntax` 를 직접 부른다**(편집기 구문 색). 위 `syntax_mod` 는 호스트 타깃으로
+        // 세워져서 여기 못 준다 — 안 주면 이 게이트가 `no module named 'syntax'` 로 빨개진다(실측:
+        // 구문 색 슬라이스에서 그랬다. 본 빌드만 초록이라 한동안 안 보였다).
+        //
+        // **C 원본은 싣지 않는다.** 이 게이트는 `-fno-emit-bin` 이라 링크까지 가지 않고, grammar
+        // 열여덟 벌을 타깃마다 컴파일하면 얻는 것 없이 게이트만 길어진다. `@cImport` 가 볼 헤더와
+        // 쿼리 임베드만 있으면 **Zig 쪽 표면**은 그대로 검사된다 — 이 게이트가 지키는 것이 그것이다.
+        const cross_syntax_mod = b.createModule(.{
+            .root_source_file = b.path("src/syntax/tree_sitter.zig"),
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        if (b.lazyDependency("tree_sitter", .{})) |ts_dep| {
+            cross_syntax_mod.addIncludePath(ts_dep.path("include"));
+            cross_syntax_mod.addIncludePath(ts_dep.path("src"));
+        }
+        for (grammars) |g| {
+            if (b.lazyDependency(g.dep, .{})) |dep| {
+                cross_syntax_mod.addIncludePath(dep.path(g.src));
+                cross_syntax_mod.addAnonymousImport(g.import, .{ .root_source_file = dep.path(g.queries) });
+            }
+        }
+
         const cross_exe_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cross_target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "maru", .module = cross_mod },
+                .{ .name = "syntax", .module = cross_syntax_mod },
                 .{ .name = "session_host_build_options", .module = session_host_product_options.createModule() },
             },
         });

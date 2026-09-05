@@ -3186,6 +3186,12 @@ pub fn build(b: *std.Build) void {
     // 두 번 하면 macOS 러너 시간만 먹는다.
     //
     // 등록을 빠뜨리면 그 게이트는 다시 CI 밖이 된다. `tests/boundary/imports.zig` 가 짝을 센다.
+    // **이 집계 step 은 두 모드 루프 안의 판정자를 Debug 로만 돈다** (check-boundaries 와 같은 규칙, 2026-09-06).
+    // 루프 안에서 등록되는 부착은 `if (<loop>_optimize == .Debug) macos_only_test_step.dependOn(…)` 로 걸러
+    // 붙는다. 이유: CI 의 macOS 잡에서 이 step 이 ~15 분이었고 그 대부분이 같은 판정자를 ReleaseFast 로 한 번 더
+    // 컴파일·실행하는 값이었다. ReleaseFast 는 (1) 가족의 전용 스텝(`test-session-host-*`)이 두 모드를 그대로
+    // 돌리고, (2) posix 집계는 리눅스 `check` 잡의 `zig build test` 가 두 모드로 돈다. 판정자 내용은 같다.
+    // 루프 밖(단일 모드) 부착은 그대로 둔다.
     const macos_only_test_step = b.step(
         "test-macos-only",
         "Run the gates that only exist on macOS (the ubuntu check job cannot build them)",
@@ -5647,7 +5653,7 @@ pub fn build(b: *std.Build) void {
             run_retention_app_tests.setCwd(b.path("."));
             session_host_config_override_retention_step.dependOn(&run_retention_app_tests.step);
             test_step.dependOn(&run_retention_app_tests.step);
-            macos_only_test_step.dependOn(&run_retention_app_tests.step);
+            if (retention_optimize == .Debug) macos_only_test_step.dependOn(&run_retention_app_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
         }
     }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
@@ -13642,7 +13648,7 @@ pub fn build(b: *std.Build) void {
             run_ra_mac.setCwd(b.path("."));
             ra_mac_step.dependOn(&run_ra_mac.step);
             test_step.dependOn(&run_ra_mac.step);
-            macos_only_test_step.dependOn(&run_ra_mac.step);
+            if (ra_mac_optimize == .Debug) macos_only_test_step.dependOn(&run_ra_mac.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
         }
 
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |manifest_file_optimize| {
@@ -14292,7 +14298,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_candidate_preparation_handoff_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             session_host_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             test_step.dependOn(&run_candidate_preparation_handoff_tests.step);
-            macos_only_test_step.dependOn(&run_candidate_preparation_handoff_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_candidate_preparation_handoff_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const candidate_preparation_reopen_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const candidate_preparation_reopen_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_preparation_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod }, .{ .name = "release_adapter_candidate_preparation_reopen", .module = candidate_preparation_reopen_mod } } }) });
             const run_candidate_preparation_reopen_tests = b.addRunArtifact(candidate_preparation_reopen_tests);
@@ -14301,7 +14307,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_candidate_preparation_reopen_step.dependOn(&run_candidate_preparation_reopen_tests.step);
             session_host_step.dependOn(&run_candidate_preparation_reopen_tests.step);
             test_step.dependOn(&run_candidate_preparation_reopen_tests.step);
-            macos_only_test_step.dependOn(&run_candidate_preparation_reopen_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_candidate_preparation_reopen_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const candidate_aggregate_handoff_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const candidate_aggregate_handoff_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod } } }) });
             const run_candidate_aggregate_handoff_tests = b.addRunArtifact(candidate_aggregate_handoff_tests);
@@ -14477,7 +14483,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_validator_executable_step.dependOn(&run_release_validator_tests.step);
             session_host_step.dependOn(&run_release_validator_tests.step);
             test_step.dependOn(&run_release_validator_tests.step);
-            macos_only_test_step.dependOn(&run_release_validator_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_release_validator_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const release_validator_exe = b.addExecutable(.{
                 .name = "maru-session-host-release-validator",
                 .root_module = release_validator_mod,
@@ -14535,7 +14541,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_candidate_aggregate_process_step.dependOn(&run_aggregate_process.step);
             session_host_step.dependOn(&run_aggregate_process.step);
             test_step.dependOn(&run_aggregate_process.step);
-            macos_only_test_step.dependOn(&run_aggregate_process.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_aggregate_process.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             if (composition_optimize == .ReleaseFast) {
                 const install_release_validator = b.addInstallArtifact(release_validator_exe, .{});
                 session_host_release_validator_binary_step.dependOn(&install_release_validator.step);
@@ -14577,7 +14583,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_github_draft_adoption_step.dependOn(&run_draft_adoption_tests.step);
             session_host_step.dependOn(&run_draft_adoption_tests.step);
             test_step.dependOn(&run_draft_adoption_tests.step);
-            macos_only_test_step.dependOn(&run_draft_adoption_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_draft_adoption_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const current_manifest_candidate_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_manifest_candidate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_manifest_candidate", .module = current_manifest_candidate_mod } } }) });
             const run_current_manifest_candidate_tests = b.addRunArtifact(current_manifest_candidate_tests);
             run_current_manifest_candidate_tests.addArg("--maru-expect-tests=4");
@@ -14891,7 +14897,7 @@ pub fn build(b: *std.Build) void {
         run_ra_all.setCwd(b.path("."));
         ra_all_step.dependOn(&run_ra_all.step);
         if (posix_host_tests) test_step.dependOn(&run_ra_all.step);
-        macos_only_test_step.dependOn(&run_ra_all.step);
+        if (ra_all_optimize == .Debug) macos_only_test_step.dependOn(&run_ra_all.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
     }
 
     const session_host_release_adapter_dmg_authority_step = b.step(
@@ -15004,7 +15010,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_e2e.step);
             session_host_step.dependOn(&run_dmg_authority_e2e.step);
             if (posix_host_tests) test_step.dependOn(&run_dmg_authority_e2e.step);
-            macos_only_test_step.dependOn(&run_dmg_authority_e2e.step);
+            if (dmg_authority_optimize == .Debug) macos_only_test_step.dependOn(&run_dmg_authority_e2e.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
         }
     };
     const session_host_release_adapter_github_git_step = b.step(
@@ -15314,7 +15320,7 @@ pub fn build(b: *std.Build) void {
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);
-            macos_only_test_step.dependOn(&run_checkpoint_file_tests.step);
+            if (checkpoint_file_optimize == .Debug) macos_only_test_step.dependOn(&run_checkpoint_file_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
 
             const checkpoint_file_boundary_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{

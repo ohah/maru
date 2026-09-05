@@ -100,7 +100,7 @@ keybind = F4 = esc:[2J
 - **편집기 전용 action**: `toggle_editor_wrap`(그 뷰의 줄 바꿈 토글)·`fold_all`·`unfold_all`·
   `fold_level_1`·`fold_level_2`·`fold_level_3`·`toggle_symbol_picker`·`delete_lines`(빌트인 `⇧⌘K`)·
   `duplicate_lines`·`move_lines_up`·`move_lines_down`·`indent_lines`·`outdent_lines`·
-  `transform_to_uppercase`·`transform_to_lowercase`·`add_next_occurrence` — **줄 조작
+  `transform_to_uppercase`·`transform_to_lowercase`·`add_next_occurrence`·`jump_to_bracket` — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
   `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서
@@ -108,8 +108,13 @@ keybind = F4 = esc:[2J
   [visual-mapping §4.1f](native-editor-visual-mapping.md)).
   `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⇧⌘O`. 찾기가 모든 글자에서
   문자열을 보는 것과 달리 **심볼 이름만** 본다 — [native-editor-ui.md §7.5](native-editor-ui.md)).
-  **`toggle_symbol_picker`만 빌트인 chord가 있다 — `⇧⌘O`**(2026-08-31). 나머지 여섯은 아직 없고,
-  **이유는 하나가 아니다**:
+  `jump_to_bracket`은 **caret 옆 괄호의 짝으로 간다** — 대상은 괄호 셋뿐이고(따옴표는 여는 것과 닫는
+  것이 같아 깊이를 못 센다), 괄호가 아닌 곳에서는 아무 일도 안 한다([문서 모델](native-editor-document-model.md) §3.9c).
+
+  **chord 가 붙은 것이 일곱이다**(2026-09-05 실측): `toggle_symbol_picker`(`⇧⌘O`) ·
+  `toggle_editor_wrap`(`⌥Z`) · `delete_lines`(`⇧⌘K`) · `duplicate_lines`(`⇧⌥↓`) ·
+  `move_lines_up`/`_down`(`⌥↑`/`⌥↓`) · `add_next_occurrence`(`⌘D`), 그리고 이 절이 적는
+  `jump_to_bracket`(`⇧⌘\`)까지 여덟이 된다. **없는 것은 아홉이고, 이유는 하나가 아니다**:
 
   | 이유 | 해당 action | 무엇이 막고 있나 |
   |---|---|---|
@@ -117,6 +122,8 @@ keybind = F4 = esc:[2J
   | ~~**Option 단독은 터미널 입력이다**~~ **→ 편집기 Term 컨텍스트가 푼다**(2026-09-03) | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
   | **`⌘` 없는 `⌥` 는 터미널 입력이다** | `duplicate_lines`·`move_lines_up`·`move_lines_down` | VSCode 는 `⇧⌥↓`·`⌥↑↓` 인데 기본 표에는 **`⌘` 를 안 낀 `⌥` chord 가 하나도 없다**(실측 0개 — 위 `toggle_editor_wrap` 과 같은 근거). 들여쓰기·내어쓰기는 `Tab`·`⇧Tab` 으로 닿으므로 이 부류가 아니고, `delete_lines` 는 `⇧⌘K` 가 비어 있어 빌트인이 있다 |
   | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
+  | **다른 키가 이미 닿는다** | `indent_lines`·`outdent_lines` | 선택이 여러 줄일 때의 `Tab`·`⇧Tab` 이 부른다([문서 모델](native-editor-document-model.md) §3.9a). 별도 chord 를 더하면 **같은 일에 두 입구**가 된다 |
+  | **레퍼런스도 안 준다** | `transform_to_uppercase`·`transform_to_lowercase` | VSCode 도 기본 chord 없이 팔레트 전용이다. 뺏을 것이 없는 것이 아니라 **줄 것이 마땅치 않다** — 흔히 쓰는 조합은 이미 임자가 있고, 이 둘은 팔레트에서 부르는 빈도의 연산이다 |
 
   **편집기 컨텍스트 기본키는 그 Term 에서만 선다**([키 입력과 단축키](key-input-and-shortcuts.md)
   「편집기 Term 컨텍스트」) — `toggle_editor_wrap`(`⌥Z`) · `duplicate_lines`(`⇧⌥↓`) ·

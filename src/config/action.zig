@@ -167,6 +167,7 @@ pub const Action = union(enum) {
     // **터미널에서 pane split이 사라진다.** 그래서 아무도 안 쓰는 chord로 먼저 열어 두고, 포커스
     // 컨텍스트가 서는 슬라이스에서 `⌘D`로 옮긴다.
     add_next_occurrence,
+    jump_to_bracket,
     // 편집기의 **되돌리기·다시 하기**(§3.3 — 선형 스택, 연속 타이핑은 한 묶음).
     //
     // **기본 chord가 없다** — `⌘Z`는 터미널·웹 편집기 컨텍스트가 이미 쓰고, 편집기 Term 컨텍스트가
@@ -279,6 +280,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;
+    if (std.mem.eql(u8, value, "jump_to_bracket")) return .jump_to_bracket;
     if (std.mem.eql(u8, value, "editor_undo")) return .editor_undo;
     if (std.mem.eql(u8, value, "editor_redo")) return .editor_redo;
     if (std.mem.eql(u8, value, "editor_save")) return .editor_save;

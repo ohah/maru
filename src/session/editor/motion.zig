@@ -123,7 +123,152 @@ pub fn goalAt(bytes: []const u8, line: line_index.Line, offset: usize, map: Colu
 
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 
+/// 괄호 짝으로 점프 — caret 이 **붙어 있는** 괄호의 짝 **시작 offset**
+/// ([문서 모델](../../../docs/native-editor-document-model.md) §3.9c).
+///
+/// **대상은 괄호 셋뿐이다.** `pairs.zig` 의 `default_pairs` 에는 따옴표도 있지만 여는 것과 닫는 것이
+/// 같아 **깊이를 못 세고**, 문자열의 시작과 끝을 grammar 없이 못 가른다. 자동 닫기는 틀려도 친 자리에서
+/// 바로 보이지만 점프는 **화면 밖으로 데려간다**.
+///
+/// **caret 앞 byte 를 먼저 보고, 그 다음 뒤 byte 를 본다.** 둘 다 괄호면 앞이 이기고, **앞의 짝이 없으면
+/// 거기서 끝난다** — 뒤를 다시 보지 않는다. VSCode `matchBracket` 이 caret 을 품는 괄호를 앞에서부터
+/// 훑어 첫 번째를 쓰는 것과 같은 답이다.
+///
+/// **왕복은 보장하지 않는다**(§3.9c) — `((a))` 의 바깥에서 눌러 안으로 들어가면 되돌아올 때 안쪽 짝을
+/// 만난다. VSCode 도 같다.
+///
+/// **byte 로 세도 UTF-8 이 안 깨진다** — 괄호는 ASCII 이고 연속 byte 는 `0x80`–`0xBF` 라 겹치지 않는다.
+pub fn matchingBracket(bytes: []const u8, offset: usize) ?usize {
+    const at = @min(offset, bytes.len);
+    if (at > 0) {
+        if (bracketJump(bytes, at - 1)) |found| return found;
+        // **앞이 괄호였는데 짝이 없으면 뒤를 안 본다.** 그 판단은 `bracketJump` 가 아니라 여기 있다 —
+        // 그쪽은 "이 자리에서 갈 곳"만 답하고 우선순위는 이 함수가 갖는다.
+        if (isBracket(bytes[at - 1])) return null;
+    }
+    if (at < bytes.len) return bracketJump(bytes, at);
+    return null;
+}
+
+const open_brackets = "([{";
+const close_brackets = ")]}";
+
+fn isBracket(c: u8) bool {
+    return std.mem.indexOfScalar(u8, open_brackets, c) != null or
+        std.mem.indexOfScalar(u8, close_brackets, c) != null;
+}
+
+/// `bytes[pos]` 가 괄호면 그 짝의 시작 offset. 아니거나 짝이 없으면 `null`.
+///
+/// **같은 종류만 센다.** `([)` 같은 어긋난 중첩을 grammar 없이 고쳐 읽을 길이 없고, 다른 종류를 세면
+/// `(` 의 짝을 **못 찾는다**. 문자열 안 괄호도 그래서 못 가르는데, 그 대가는 "안 움직임"으로 떨어진다
+/// (`print("(")` 의 첫 `(` 는 깊이가 0 으로 안 돌아온다) — 엉뚱한 곳으로 데려가는 것보다 낫다.
+fn bracketJump(bytes: []const u8, pos: usize) ?usize {
+    const c = bytes[pos];
+    if (std.mem.indexOfScalar(u8, open_brackets, c)) |k| {
+        const close = close_brackets[k];
+        // **자기 자리부터 센다.** `depth = 1` 로 시작해 `pos + 1` 부터 훑어도 답이 같다(그 변이가
+        // 살아남는 것이 정상이다 — 첫 회에 `bytes[pos] == c` 라 곧바로 1 이 된다). 이 모양인 이유는
+        // 아래 닫는 갈래와 **대칭**이기 때문이다: 둘 다 "자기 자리를 포함해 훑는다" 한 문장으로 읽힌다.
+        var depth: usize = 0;
+        var i = pos;
+        while (i < bytes.len) : (i += 1) {
+            if (bytes[i] == c) {
+                depth += 1;
+            } else if (bytes[i] == close) {
+                depth -= 1;
+                if (depth == 0) return i;
+            }
+        }
+        return null;
+    }
+    if (std.mem.indexOfScalar(u8, close_brackets, c)) |k| {
+        const open = open_brackets[k];
+        var depth: usize = 0;
+        var i = pos + 1;
+        while (i > 0) {
+            i -= 1;
+            if (bytes[i] == c) {
+                depth += 1;
+            } else if (bytes[i] == open) {
+                depth -= 1;
+                if (depth == 0) return i;
+            }
+        }
+        return null;
+    }
+    return null;
+}
+
 const testing = std.testing;
+
+test "BR1 caret 이 붙은 괄호의 짝 시작으로 간다 — 양옆·중첩·종류 무시 (§3.9c)" {
+    const M = matchingBracket;
+    // caret 뒤 byte 가 괄호
+    try testing.expectEqual(@as(?usize, 2), M("(a)", 0));
+    // caret 앞 byte 가 괄호
+    try testing.expectEqual(@as(?usize, 0), M("(a)", 3));
+    // 앞이 이긴다 — `(a|)` 는 앞의 'a' 가 괄호가 아니므로 뒤의 ')' 를 쓴다
+    try testing.expectEqual(@as(?usize, 0), M("(a)", 2));
+    // **중첩은 깊이를 센다** — 안쪽 짝에서 멈추면 1 이 나온다
+    try testing.expectEqual(@as(?usize, 4), M("((a))", 0));
+    // **닫는 쪽도 센다.** 여는 쪽만 재면 뒤로 훑는 갈래의 깊이 세기가 통째로 빠져도 초록이다
+    // (변이 B5 가 그렇게 살아남았다) — 그 갈래는 첫 '(' 에서 멈춰 1 을 준다.
+    try testing.expectEqual(@as(?usize, 0), M("((a))", 5));
+    // **다른 종류는 안 센다** — 세면 '[' 의 짝을 못 찾는다
+    try testing.expectEqual(@as(?usize, 6), M("[a{b}c]", 0));
+    try testing.expectEqual(@as(?usize, 4), M("[a{b}c]", 3));
+}
+
+test "BR2 짝이 없으면 null 이고, 앞을 골랐으면 뒤를 다시 안 본다 (§3.9c)" {
+    const M = matchingBracket;
+    try testing.expectEqual(@as(?usize, null), M("(a", 0)); // 안 닫혔다
+    try testing.expectEqual(@as(?usize, null), M("a)", 2)); // 안 열렸다
+    // **`)|(` 는 앞의 ')' 를 골라 거기서 끝난다.** 뒤의 '(' 를 다시 보면 여기서 1 이 나오는데,
+    // 그러면 「caret 이 붙어 있는 괄호」가 아니라 「짝이 있는 아무 괄호」가 대상이 된다.
+    try testing.expectEqual(@as(?usize, null), M(")(", 1));
+    // **`)(` 로는 못 가른다** — 뒤의 '(' 도 짝이 없어 어느 쪽을 봐도 null 이다(변이 B3 가 그렇게
+    // 살아남았다). 뒤에 짝을 줘야 「앞에서 끝냈나」가 관측된다.
+    try testing.expectEqual(@as(?usize, null), M(")(a)", 1));
+    // 괄호가 아닌 자리에서는 아무 일도 안 한다 — 감싸는 괄호를 찾지 않는다(§3.9c)
+    try testing.expectEqual(@as(?usize, null), M("(abc)", 2));
+}
+
+test "BR3 문자열 안 괄호는 못 가르고 그 대가는 안 움직임이다 (§3.9c)" {
+    // `print("(")` 의 첫 '(' 는 깊이가 2 까지 올라가 0 으로 안 돌아온다. **null 이 맞다** —
+    // 여기서 마지막 ')' 를 주면 문자열 속 '(' 를 짝으로 세는 것이라 더 나쁘다.
+    try testing.expectEqual(@as(?usize, null), matchingBracket("print(\"(\")", 5));
+    // 따옴표 자신은 대상이 아니다 — 여는 것과 닫는 것이 같아 깊이를 못 센다
+    try testing.expectEqual(@as(?usize, null), matchingBracket("\"ab\"", 0));
+    // **`"ab"` 로는 못 가른다** — 따옴표를 대상에 넣어도 깊이가 0 으로 안 돌아와 결과가 같은 null 이다
+    // (변이 B6 가 그렇게 살아남았다). **따옴표 바로 뒤에 괄호를 둬야** 갈린다: 대상에 넣으면 앞의
+    // '"' 를 골라 거기서 끝나 버려 뒤의 '(' 를 못 본다.
+    try testing.expectEqual(@as(?usize, 3), matchingBracket("\"(a)\"", 1));
+}
+
+test "BR4 왕복은 보장하지 않는다 — 중첩에서 안쪽 짝을 만난다 (§3.9c)" {
+    // **이 판정자는 「고쳐야 할 결함」이 아니라 계약을 못박는다.** VSCode 도 같은 답을 내고,
+    // 왕복을 지키려면 「어느 쪽 괄호로 왔는지」를 상태로 들어야 한다.
+    const first = matchingBracket("((a))", 0).?;
+    try testing.expectEqual(@as(usize, 4), first);
+    try testing.expectEqual(@as(?usize, 1), matchingBracket("((a))", first)); // 0 이 아니다
+    // 빈 쌍 안에서는 제자리다
+    try testing.expectEqual(@as(?usize, 1), matchingBracket("{}", 1));
+}
+
+test "BR5 offset 이 문서 끝을 넘어도 안전하고, UTF-8 을 안 깬다 (§3.9c)" {
+    try testing.expectEqual(@as(?usize, 0), matchingBracket("(a)", 99)); // clamp 해서 끝에서 본다
+    try testing.expectEqual(@as(?usize, null), matchingBracket("", 0));
+    try testing.expectEqual(@as(?usize, null), matchingBracket("", 5));
+    // **멀티바이트 글자를 괄호로 오독하지 않는다** — 연속 byte 는 0x80–0xBF 라 ASCII 와 안 겹친다.
+    // '한글(가)' 는 한(0-2)·글(3-5)·'('(6)·가(7-9)·')'(10) 으로 11 byte 다.
+    const s = "한글(가)";
+    try testing.expectEqual(@as(usize, 11), s.len);
+    try testing.expectEqual(@as(?usize, 10), matchingBracket(s, 6));
+    try testing.expectEqual(@as(?usize, 6), matchingBracket(s, 11));
+    // caret 이 '가' 뒤(byte 10)면 앞 byte 는 '가' 의 연속 byte 라 괄호가 아니고, 뒤가 ')' 다
+    try testing.expectEqual(@as(?usize, 6), matchingBracket(s, 10));
+}
 
 /// 탭 폭만 아는 열 변환 — 순수 판정자용. 제품은 `columnsAtOffsets`를 감싼다.
 const SimpleMap = struct {

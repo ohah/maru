@@ -2170,6 +2170,8 @@ pub const Motion = enum {
     doc_end,
     page_up,
     page_down,
+    /// 괄호 짝으로 점프(§3.9c). 가로 이동 부류다 — goal 열을 버린다.
+    bracket_match,
 };
 
 /// 열↔offset 변환을 **화면과 같은 출처**로 만든다(§5.4 MUST).
@@ -2397,6 +2399,12 @@ fn movedOffset(
         .line_start => blk: {
             goal.* = .none;
             break :blk editor_motion.lineStartSmart(content, line, focus);
+        },
+        // **짝이 없으면 제자리다**(§3.9c) — 「없다」와 「여기다」는 다른 답이고, 없는데 옮기면
+        // 사용자가 자기 자리를 잃는다.
+        .bracket_match => blk: {
+            goal.* = .none;
+            break :blk editor_motion.matchingBracket(content, focus) orelse focus;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -12837,6 +12845,74 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!moveCarets(fx.session, term, .char_right, false));
     try testing.expect(!moveCarets(fx.session, term, .line_down, false));
     try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
+}
+
+test "BR6 ⇧⌘\\ 를 실제로 눌렀을 때 caret 이 짝으로 간다 — 배선 종단 (§3.9c)" {
+    // **`matchingBracket` 만 재면 배선이 빠져도 초록이다** — chord 등록·액션 해석·디스패치·
+    // `moveCarets` 갈래 중 하나만 빠져도 기능이 없는 것과 같은데 BR1~BR5 는 전부 통과한다.
+    // `MC8` 이 `⌘D` 에 대해 선 것과 같은 이유다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "br.txt", .data = "f((a))\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "br.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // ⑴ **chord 두 벌이 다 그 액션이다** — '\\' 로 올 수도 '|' 로 올 수도 있다(OS/레이아웃 차이).
+    {
+        const resolver = fx.session.loaded_config.keyBindingResolver();
+        var enc: [32]u8 = undefined;
+        for ([_]u21{ '\\', '|' }) |ch| {
+            const event: maru.terminal.KeyEvent = .{
+                .key = .{ .char = ch },
+                .modifiers = .{ .command = true, .shift = true },
+            };
+            switch (try resolver.resolve(event, &enc, .{})) {
+                .app_action => |a| try testing.expectEqual(maru.config.action.Action.jump_to_bracket, a),
+                else => return error.ChordNotWired,
+            }
+        }
+    }
+
+    // ⑵ **키를 누르면 caret 이 짝 앞으로 간다.** 'f((a))' 에서 offset 1 은 바깥 '(' 앞이다.
+    //
+    // **목표 열을 미리 세워 둔다.** `Selection.at` 의 goal 이 이미 `.none` 이라 그냥 두면 「버렸나」와
+    // 「원래 없었나」가 픽스처에서 겹쳐, goal 을 안 버리는 변이(B9)가 그대로 산다 — 아래 단언이
+    // 그것을 재려면 들어갈 때 `.none` 이 아니어야 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    term.rt.editor_selection.?.goal = .{ .col = 7 };
+    fx.session.metal_dirty = false;
+    _ = try fx.session.handleKeyEvent(.{
+        .key = .{ .char = '\\' },
+        .modifiers = .{ .command = true, .shift = true },
+    });
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus); // 바깥 ')' 앞
+    try testing.expect(fx.session.metal_dirty);
+    // **가로 이동이므로 목표 열을 버린다**(§3.2). 남기면 다음 위/아래 이동이 사용자가 방금 떠난
+    // 열로 튄다 — 그 줄을 지운 변이(B9)가 살아남아 이 단언이 없었음을 보였다.
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
+
+    // ⑶ **짝이 없으면 안 움직인다** — 'f' 자리는 괄호가 아니다(감싸는 괄호를 찾지 않는다).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = try fx.session.handleKeyEvent(.{
+        .key = .{ .char = '\\' },
+        .modifiers = .{ .command = true, .shift = true },
+    });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // ⑷ **팔레트에도 있다** — 키를 뺏긴 사용자가 명령으로 부를 수 있어야 한다.
+    var found = false;
+    for (command_catalog.entries) |e| {
+        if (e.action == .jump_to_bracket) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체를 통과한다 (§9.1)" {

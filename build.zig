@@ -13909,6 +13909,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-preparation-handoff",
         "Validate atomic durable candidate preparation handoff",
     );
+    const session_host_release_adapter_candidate_preparation_reopen_step = b.step(
+        "test-session-host-release-adapter-candidate-preparation-reopen",
+        "Validate next-process candidate preparation semantic reopen",
+    );
     const session_host_release_adapter_candidate_aggregate_handoff_step = b.step(
         "test-session-host-release-adapter-candidate-aggregate-handoff",
         "Validate atomic durable candidate aggregate handoff",
@@ -14298,6 +14302,15 @@ pub fn build(b: *std.Build) void {
             session_host_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             test_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             macos_only_test_step.dependOn(&run_candidate_preparation_handoff_tests.step);
+            const candidate_preparation_reopen_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
+            const candidate_preparation_reopen_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_preparation_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod }, .{ .name = "release_adapter_candidate_preparation_reopen", .module = candidate_preparation_reopen_mod } } }) });
+            const run_candidate_preparation_reopen_tests = b.addRunArtifact(candidate_preparation_reopen_tests);
+            run_candidate_preparation_reopen_tests.addArg("--maru-expect-tests=7");
+            run_candidate_preparation_reopen_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_preparation_reopen_step.dependOn(&run_candidate_preparation_reopen_tests.step);
+            session_host_step.dependOn(&run_candidate_preparation_reopen_tests.step);
+            test_step.dependOn(&run_candidate_preparation_reopen_tests.step);
+            macos_only_test_step.dependOn(&run_candidate_preparation_reopen_tests.step);
             const candidate_aggregate_handoff_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const candidate_aggregate_handoff_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod } } }) });
             const run_candidate_aggregate_handoff_tests = b.addRunArtifact(candidate_aggregate_handoff_tests);

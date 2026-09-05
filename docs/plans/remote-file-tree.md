@@ -371,7 +371,8 @@ RW 의 감시자는 **저장소 하나**를 보고 `change` 한 줄만 낸다(`r
 | 단계 | 범위 | 선행 |
 |---|---|---|
 | **RF1** | 순수 층: 목록 wire 코덱 · `(host, path)` root 키 · 원격 root 판정자 | ✅ 2026-09-06 — §10. **§5 게이트는 RF2 로 옮겼다**(아래) |
-| **RF2** | 읽기 배선: 원격 root 의 `.directory` job(한 왕복에 목록+`stat`) · 「못 읽는다」 표시(§2.5) | RF1 |
+| **RF2a** | 헬퍼 `list` 서브커맨드(판 3) · **실물 왕복 게이트**(`test-remote-file-listing`) | ✅ 2026-09-06 — §10.2 |
+| **RF2b** | 읽기 배선: 원격 root 의 `.directory` job(전송 argv·백엔드 원격 워커) · 「못 읽는다」 표시(§2.5) · **§5 게이트** | RF2a |
 | **RF3** | root 세우기: `remoteCwd` 를 받아 원격 root 로 · 영속을 쌍으로 · 검증 파이프라인의 원격 분기 | ② 결정 |
 | **RF4** | 파일 열기(읽기 전용): `buildRemoteFileRead` 재사용 · 잘림 표시 | ⑤ 결정 |
 | **RF5** | 감시 | ③ 결정 |
@@ -464,3 +465,28 @@ TrailingData · 이름 상한 양끝 · 쓰레기 입력 7 종 · RootKey/판정
 | 4 | (주석) 오류 메시지 자름이 바이트 경계다 | errno 문자열(ASCII) 전제 — UTF-8 메시지를 싣게 되면 글자 경계로 물려야 한다는 것을 그 줄에 적었다 |
 
 판정자 12 개가 됐고, 1 번은 뮤테이션(`.`/`..` 거부 무력화)으로 실제로 잡는 것을 확인했다.
+
+
+### 10.2 RF2a — 헬퍼 `list` 와 실물 왕복 게이트 (2026-09-06)
+
+**들어간 것**:
+
+- `tools/remote-watch/main.zig` — `list <절대경로>` 서브커맨드. 한 왕복에 목록 + 신원(`lstat` 축) +
+  디렉터리 자신의 신원(열린 핸들 `fstat` 축). 심링크는 가리키는 곳까지 갈라 `s`/`S`. 실패는 wire 의
+  `!` 레코드로 말하고 0 으로 끝난다(종료 코드는 전송 수준 실패의 자리로 남긴다 — §2.5). 순회가
+  중간에 죽으면 **꼬리를 내지 않는다**(파서가 잘림으로 읽게).
+- **판 2 → 3**(`version_line`·`remote_binary`) — GUI 가 `list` 를 보내려면 원격 바이너리에 그것이
+  있어야 하고, 판이 그 사실을 보증한다(RW 설치 계약 그대로 — 옛 판이 깔린 원격은 다음 설치에서 갈린다).
+- `tests/remote_file_listing_roundtrip.zig` + `zig build test-remote-file-listing` — **빌드가 만든 실물
+  바이너리를 실제로 돌려** 세션 코덱 파서로 되읽는 게이트. 함정 이름(공백·개행)·심링크 3 종 구분·
+  신원(이쪽 no-follow stat 과 대조)·오류 2 종 완결. `--maru-expect-passed=3` 으로 env 부재의 조용한
+  skip 까지 막는다. 헬퍼가 인코더 **사본**을 드는 대가(§10 — std 만 임포트)를 이 게이트가 낸다:
+  뮤테이션으로 헤더 한 바이트를 갈랐더니 세 판정자가 전부 `UnsupportedVersion` 으로 죽었다.
+
+**구현에서 배운 것(Zig 0.16 syscall 갭)**: musl 타깃의 `std.c` 에는 `fstat`/`fstatat` 이 없고,
+`std.posix.fstat`/`fstatat`/`getenv` 도 없다. 리눅스는 **`std.os.linux.statx` 하나**가 남은 길이다
+(`Stat` 타입도 없다 — 오류 판정은 `std.os.linux.errno`). darwin 은 종전대로 `std.c.fstat` 계열.
+dev 는 statx 의 major/minor 를 u64 하나로 접는다 — wire 계약이 「같은 기계 안에서 같으면 같다」뿐이라
+접는 방식은 자유다(§2.3 ⑴).
+
+**비범위(RF2b 로)**: 전송 argv(ControlMaster 위에서 `list` 를 부르는 쪽)·백엔드 원격 워커·표시·§5 게이트.

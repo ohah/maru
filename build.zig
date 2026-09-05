@@ -3217,6 +3217,51 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(file_tree_backend_tests).step);
 
+    // **헬퍼 `list` ↔ 코덱 파서 왕복 게이트**(RF2a — docs/plans/remote-file-tree.md §10). 헬퍼는
+    // wire 인코더의 **사본**을 들므로(std 만 임포트), 빌드가 만든 실물 바이너리를 실제로 돌려 세션
+    // 코덱 파서로 되읽는다 — RW 의 version_line 문자열 대조보다 강한, 바이트 수준 드리프트 방어다.
+    // POSIX 전용(픽스처가 sh·심링크·개행 이름을 쓴다) — Windows 호스트는 시끄럽게 건너뛴다.
+    if (builtin.os.tag != .windows) {
+        const native_remote_watch = b.addExecutable(.{
+            .name = "maru-remote-watch-native",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/remote-watch/main.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        const install_native_watch = b.addInstallArtifact(native_remote_watch, .{
+            .dest_dir = .{ .override = .{ .custom = "test-helpers" } },
+        });
+        const listing_roundtrip_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/remote_file_listing_roundtrip.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_listing_roundtrip = b.addRunArtifact(listing_roundtrip_tests);
+        run_listing_roundtrip.addArg("--maru-expect-tests=3");
+        // ⚠️ env 가 빠지면 셋 다 `SkipZigTest` 로 **조용히 초록**이 된다 — 실행 수까지 센다
+        // (`test-remote-scm` 이 하네스 침묵에 대해 세운 그 규율).
+        run_listing_roundtrip.addArg("--maru-expect-passed=3");
+        run_listing_roundtrip.setCwd(b.path("."));
+        run_listing_roundtrip.step.dependOn(&install_native_watch.step);
+        run_listing_roundtrip.setEnvironmentVariable(
+            "MARU_REMOTE_WATCH_BIN",
+            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
+        );
+        test_step.dependOn(&run_listing_roundtrip.step);
+        b.step(
+            "test-remote-file-listing",
+            "Run the built remote-watch helper's list mode and re-read it with the session codec",
+        ).dependOn(&run_listing_roundtrip.step);
+    } else {
+        test_step.dependOn(noteSkippedStep(b, "remote_file_listing 왕복", "POSIX 호스트 전용 — sh 픽스처(심링크·개행 이름) + 실물 헬퍼 실행 (docs/plans/remote-file-tree.md §10)"));
+    }
+
     // Windows 캡처 러너. **Windows 호스트에서만 건다** — `kernel32` 를 직접 부르므로 다른 호스트에서는
     // 링크할 심볼이 없다. 테스트가 전부 `builtin.os.tag != .windows` 에서 skip 이라 다른 호스트에
     // 걸어 봐야 아무것도 안 재고 링크만 깨진다. 그 대신 **시끄럽게 건너뛴다**.

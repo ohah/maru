@@ -46,6 +46,8 @@ pub const PublishCandidate = struct {
     test_uuid: []const u8,
     dmg: []const u8,
     frozen_executable: []const u8,
+    candidate_dmg_bundle: []const u8,
+    candidate_frozen_bundle: []const u8,
     dmg_work: []const u8,
     baseline_workspace: []const u8,
     app_main_executable: []const u8,
@@ -232,6 +234,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             if (!canonicalReleaseTestUuid(test_uuid)) return error.InvalidTestUuid;
             const dmg = try candidatePath(values.dmg);
             const frozen_executable = try candidatePath(values.frozen_executable);
+            const candidate_dmg_bundle = try candidatePath(values.candidate_dmg_bundle);
+            const candidate_frozen_bundle = try candidatePath(values.candidate_frozen_bundle);
             const dmg_work = try candidatePath(values.dmg_work);
             const baseline_workspace = try candidatePath(values.baseline_workspace);
             const app_main_executable = try candidatePath(values.app_main_executable);
@@ -245,7 +249,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             if (!lowerHexSha256(zig_sha256)) return error.InvalidZigSha256;
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig });
             break :blk .{ .publish_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -254,6 +258,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .test_uuid = test_uuid,
                 .dmg = dmg,
                 .frozen_executable = frozen_executable,
+                .candidate_dmg_bundle = candidate_dmg_bundle,
+                .candidate_frozen_bundle = candidate_frozen_bundle,
                 .dmg_work = dmg_work,
                 .baseline_workspace = baseline_workspace,
                 .app_main_executable = app_main_executable,
@@ -354,6 +360,10 @@ fn optionDestination(
             &values.dmg
         else if (std.mem.eql(u8, option, "--frozen-executable"))
             &values.frozen_executable
+        else if (std.mem.eql(u8, option, "--candidate-dmg-bundle"))
+            &values.candidate_dmg_bundle
+        else if (std.mem.eql(u8, option, "--candidate-frozen-bundle"))
+            &values.candidate_frozen_bundle
         else if (std.mem.eql(u8, option, "--dmg-work"))
             &values.dmg_work
         else if (std.mem.eql(u8, option, "--baseline-workspace"))

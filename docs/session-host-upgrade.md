@@ -4082,10 +4082,10 @@ Actions action은 Zig process 안에서 호출할 수 없고 각 workflow step�
 
 1. `candidate_pinning` → step `session-host-candidate-pinning`, product `signed-candidate-inputs`.
 2. `candidate_attestation` → step `session-host-candidate-attestation`, local action
-   `./.github/actions/session-host-release-attest`.
+   `./.github/actions/session-host-release-live-candidate-attestation`.
 3. `draft_authoring` → step `session-host-draft-authoring`, validator command `prepare-candidate`.
 4. `authored_attestation` → step `session-host-authored-attestation`, local action
-   `./.github/actions/session-host-release-attest-authored`.
+   `./.github/actions/session-host-release-live-authored-attestation`.
 5. `aggregate_prepare` → step `session-host-aggregate-prepare`, validator command `prepare-candidate-aggregate`.
 6. `aggregate_finalize` → step `session-host-aggregate-finalize`, validator command `finalize-candidate-aggregate`.
 7. `publication` → step `session-host-publication`, validator command `resume-candidate-publication`.
@@ -4102,6 +4102,47 @@ action의 repository-local 표기, command contract exact match와 전체 invent
 또한 binding이 §11.76 identity를 복제하지 않고 직접 유도하며 binding source 안에 별도 invocation inventory가 생기지 않는지
 검사한다. 이 slice는 Actions가 표현할 수 있는 닫힌 실행 명세까지만 세우며, `.github/workflows/release.yml`의 실제 argv·output·
 checkpoint 배선, GitHub-issued live timing 표본과 frozen signed U5 E2E는 다음 slice가 소유한다.
+
+### 11.78 candidate pair를 하나의 live Actions step으로 닫는 경계
+
+§11.52의 `candidate_attestation`은 DMG와 frozen executable 두 subject를 순서대로 attest하지만 live reducer에서는 하나의
+stage이고 §11.77에서는 하나의 GitHub step이다. GitHub Actions step 하나는 `uses:`를 하나만 가질 수 있으므로 single-subject
+action을 workflow에서 두 번 직접 나열하지 않는다. payload leaf인 `.github/actions/session-host-release-attest-candidate/action.yml`이 exact
+DMG→frozen 순서의 pair composite action을 소유하고, 내부에서 기존
+`./.github/actions/session-host-release-attest`를 subject별 exact once 호출한다. 따라서 immutable `actions/attest` pin과 검증은
+single-subject action에 남고 pair action은 두 호출의 전체 구간 identity와 두 bundle의 함께 게시만 소유한다.
+
+§11.77의 stage binding은 이 payload leaf를 직접 가리키지 않고
+`.github/actions/session-host-release-live-candidate-attestation/action.yml`을 가리킨다. live wrapper는 현재 leaf의 네 입력과 두
+출력을 그대로 exact once 전달하며 `actions/attest`를 직접 선택하지 않는다. 다음 workflow bridge slice는 이 wrapper 안에서
+checkpoint admission 뒤 payload를 호출하고 GitHub-owned outcome을 checkpoint commit한 뒤에만 출력을 게시한다. 이렇게 해야 leaf의
+credential/checkpoint-free 계약을 보존하면서도 top-level `uses:` 하나가 reducer stage 하나와 계속 1:1이다. 같은 이유로
+`authored_attestation` binding도 payload leaf가 아니라 `session-host-release-live-authored-attestation` wrapper를 가리킨다.
+
+pair action의 입력은 candidate DMG/frozen executable의 canonical absolute pathname과 exact basename 네 값뿐이다. digest,
+attestation ID/URL, action ref, predicate, 성공 boolean 또는 bundle pathname은 입력으로 받지 않는다. 시작 시 두 subject를
+canonical pathname의 no-follow regular single-link file로 관측해 device/inode/size/SHA-256을 고정하고 서로 다른 vnode인지 검사한다. 두
+single-subject action이 끝난 뒤 두 subject를 다시 exact snapshot과 대조하고, 두 action output의 bundle을 canonical absolute
+regular single-link nonempty file이자 role별 16 MiB 이하로 고정한다. subject 둘과 bundle 둘은 네 distinct vnode여야 한다.
+처음과 마지막 사이의 transient mutation이 exact 같은 inode·size·bytes로 복원된 사실 자체는 shell snapshot으로 관측할 수 없다.
+그러나 두 bundle은 그 최종 SHA-256과 결속되고 다음 stage의 candidate owner가 subject와 bundle을 다시 cryptographic verify하므로,
+그 관측 불가능한 이력은 다른 bytes에 성공 권위를 주지 않는다. 마지막 identity·size·digest가 다르거나 pathname/inode가 교체된
+경우는 pair output 전에 거부한다. 모든 검사가 끝난 뒤에만 `dmg-bundle-path`와 `frozen-bundle-path`를 함께 출력한다.
+
+helper는 credential, `GH_TOKEN`, Apple secret, ambient `HOME`/`PATH`, GitHub context 또는 checkpoint를 읽지 않는다. pair action은
+`actions/attest`를 직접 선택하지 않고 single-subject action만 재사용한다. 실패 시 부분 bundle locator를 pair 성공으로 출력하지
+않으며 remote release mutation은 없다. workflow의 stage 결과/checkpoint 기록은 후속 live workflow caller가 이 action step의
+GitHub-owned outcome과 두 output을 결속해 소유한다.
+
+focused gate `test-session-host-release-candidate-attestation-action`은 payload leaf의 exact 입력/출력 폐쇄성, single-subject action 두 호출과
+DMG→frozen 순서, direct `actions/attest` 0, pre/post pair fence, 네 vnode distinct, bundle nonempty/상한, subject·bundle
+symlink/hardlink/alias, subject mutation과 부분 output 0을 Linux·macOS actual filesystem에서 검증한다. 같은 gate는 candidate live
+wrapper가 payload leaf를 exact once 호출하고 네 입력·두 출력을 role 교환 없이 전달하며 direct `actions/attest`와 checkpoint 구현을
+복제하지 않는지도 고정한다. authored action gate는 authored live wrapper에 같은 분리를 고정한다. binding gate는 두 action stage가
+각 live wrapper를 가리키고 payload leaf를 직접 가리키지 않는지 exact하게 검사한다.
+fixture는 harness-owned 임시 root만 사용하며 실제 앱 session-host 상태·GitHub release·credential을 읽거나 수정하지 않는다. 이
+slice는 stage 2를 하나의 표현 가능한 Actions step으로 닫지만 `release.yml`의 checkpoint/argv/output wiring, 실제 GitHub attestation
+발급과 frozen signed U5 E2E를 완료하지 않는다.
 
 ## 12. 필수 적대적 검증
 

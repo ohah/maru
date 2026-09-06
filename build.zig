@@ -13907,14 +13907,14 @@ pub fn build(b: *std.Build) void {
         "Validate predecessor manifest attestation composition",
     );
     if (target.result.os.tag == .macos) {
-        // ── release adapter 판정자 71 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
+        // ── release adapter 판정자 73 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
         // 왜 갈랐는지는 그 파일 머리가 단일 출처다. 가족의 전용 스텝들과 `test-session-host` 는 각자 바이너리를
         // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
         // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_macos_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
         //
-        // 580 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+        // 603 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
         // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-        const ra_mac_expected_tests: usize = 595;
+        const ra_mac_expected_tests: usize = 603;
         const ra_mac_step = b.step(
             "test-session-host-release-adapter-macos-all",
             "Run the macos session-host release adapter judges from one binary per optimize mode",
@@ -14370,6 +14370,14 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-workflow-state-handoff",
         "Validate append-only durable release workflow state handoff",
     );
+    const session_host_release_adapter_live_workflow_checkpoint_step = b.step(
+        "test-session-host-release-adapter-live-workflow-checkpoint",
+        "Validate fixed descriptor-bound live workflow checkpoints",
+    );
+    const session_host_release_adapter_live_workflow_checkpoint_process_step = b.step(
+        "test-session-host-release-adapter-live-workflow-checkpoint-process",
+        "Measure fixed workflow checkpoints across actual processes",
+    );
     const session_host_release_adapter_candidate_release_product_step = b.step(
         "test-session-host-release-adapter-candidate-release-product",
         "Validate concrete top-level candidate release ownership and wiring",
@@ -14679,6 +14687,88 @@ pub fn build(b: *std.Build) void {
             run_workflow_state_handoff_tests.setCwd(b.path("."));
             session_host_release_adapter_live_workflow_state_handoff_step.dependOn(&run_workflow_state_handoff_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_state_handoff_tests.step);
+            const workflow_checkpoint_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_checkpoint.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    .{ .name = "release_adapter_live_workflow_state_handoff", .module = workflow_state_handoff_mod },
+                    .{ .name = "safe_open", .module = safe_open_mod },
+                },
+            });
+            const workflow_checkpoint_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_live_workflow_checkpoint.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                },
+            }) });
+            const run_workflow_checkpoint_tests = b.addRunArtifact(workflow_checkpoint_tests);
+            run_workflow_checkpoint_tests.addArg("--maru-expect-tests=8");
+            run_workflow_checkpoint_tests.setCwd(b.path("."));
+            session_host_release_adapter_live_workflow_checkpoint_step.dependOn(&run_workflow_checkpoint_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_checkpoint_tests.step);
+
+            const workflow_checkpoint_child = b.addExecutable(.{
+                .name = b.fmt("session-host-release-workflow-checkpoint-child-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/fixtures/session_host_release_workflow_checkpoint_child.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_context", .module = context_mod },
+                        .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                        .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    },
+                }),
+            });
+            const checkpoint_report_mod = b.createModule(.{
+                .root_source_file = b.path("tools/session-host/release_workflow_checkpoint_process_report.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+            });
+            const checkpoint_report_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_workflow_checkpoint_process_report.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .imports = &.{.{ .name = "release_workflow_checkpoint_process_report", .module = checkpoint_report_mod }},
+            }) });
+            const run_checkpoint_report_tests = b.addRunArtifact(checkpoint_report_tests);
+            run_checkpoint_report_tests.addArg("--maru-expect-tests=4");
+            run_checkpoint_report_tests.setCwd(b.path("."));
+            session_host_release_adapter_live_workflow_checkpoint_process_step.dependOn(&run_checkpoint_report_tests.step);
+            const workflow_checkpoint_process = b.addExecutable(.{
+                .name = b.fmt("session-host-release-workflow-checkpoint-process-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_release_workflow_checkpoint_process.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_context", .module = context_mod },
+                        .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                        .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                        .{ .name = "release_workflow_checkpoint_process_report", .module = checkpoint_report_mod },
+                    },
+                }),
+            });
+            const run_workflow_checkpoint_process = b.addRunArtifact(workflow_checkpoint_process);
+            run_workflow_checkpoint_process.addArtifactArg(workflow_checkpoint_child);
+            run_workflow_checkpoint_process.addArg(if (composition_optimize == .ReleaseFast) "20" else "1");
+            run_workflow_checkpoint_process.setCwd(b.path("."));
+            session_host_release_adapter_live_workflow_checkpoint_process_step.dependOn(&run_workflow_checkpoint_process.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_checkpoint_process.step);
+            test_step.dependOn(&run_workflow_checkpoint_process.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_workflow_checkpoint_process.step);
             const repository_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const release_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const draft_creation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_release", .module = release_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });

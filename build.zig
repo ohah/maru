@@ -1355,48 +1355,51 @@ pub fn build(b: *std.Build) void {
     // **AppSession 스위트는 같은 바이너리를 인덱스 mod N 샤드로 N 개 프로세스에 나눠 병렬로 돈다.** 4,557개를 한
     // 프로세스에서 직렬로 돌면 CI(macos-15, 3 vCPU)에서 355초였고 file explorer 잡의 임계 경로였다(실측 2026-09-06,
     // 판정자별 CI 시간으로 4샤드를 시뮬레이션하면 94초, 3코어 CPU 상한은 118초). 컴파일은 한 번이고, 러너의 pid 루트
-    // 격리가 샤드마다 다른 session-host 네임스페이스를 준다. fresh 프로세스 판정자들은 **모든 샤드 뒤에** 돈다(아래).
+    // 격리가 샤드마다 다른 session-host 네임스페이스를 준다.
+    //
+    // **왜 run 스텝 넷이 아니라 래퍼 하나인가**: Zig 0.16 빌드 러너는 stdio 를 물려받는 run 스텝을 돌리는 동안 stderr
+    // 잠금을 자식이 끝날 때까지 쥔다(`std/Build/Step/Run.zig` `spawnChildAndCollect` 의 `lockStderr`). run 스텝을 넷
+    // 만들면 **전역 직렬**이다 — PR #3302 의 CI 에서 샤드 넷이 80초 간격으로 차례로 끝났다. 병렬은 스텝 하나 안에서
+    // `tools/run-test-shards.sh` 가 한다. fresh 프로세스 판정자들은 그 스텝 뒤에 돈다(아래).
     const macos_app_host_abi_shards: usize = 4;
-    var macos_app_host_abi_shard_runs: [macos_app_host_abi_shards]*std.Build.Step.Run = undefined;
-    for (&macos_app_host_abi_shard_runs, 0..) |*shard_run, shard| {
-        const run = b.addRunArtifact(macos_app_host_abi_tests);
-        run.setEnvironmentVariable("MARU_TEST_SHARD", b.fmt("{d}/{d}", .{ shard, macos_app_host_abi_shards }));
-        // session_host.* 판정자는 `test-session-host` 잡이 모듈 그래프째 돈다(병렬). 이 ABI 바이너리는 app_session
-        // 이 그것들을 import 해 딸려오지만, 여기서 다시 돌 이유가 없다 — 실행만 건너뛰어 file-explorer 잡 시간을
-        // 던다(컴파일 수는 그대로라 «골라졌는가» 계약은 불변). shutdown_admin_connector 만 예외: `test-session-host`
-        run.setEnvironmentVariable("MARU_TEST_SKIP_PREFIX", "session_host.");
-        run.setEnvironmentVariable("MARU_TEST_KEEP_PREFIX", "session_host.shutdown_admin_connector");
-        // 에 없고 여기서만 도는 유일한 session_host 모듈이라 남긴다(실측 2026-09-06).
-        run.setEnvironmentVariable(
-            "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
-            "skip-in-aggregate-v1",
-        );
-        run.setEnvironmentVariable(
-            "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST",
-            "skip-in-aggregate-v1",
-        );
-        run.setEnvironmentVariable(
-            "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
-            "skip-in-aggregate-v1",
-        );
-        run.setEnvironmentVariable(
-            "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP",
-            "skip-in-aggregate-v1",
-        );
-        // CR6a-2 real-host fixture는 별도 exact filtered artifact에서 fresh process-global owner graph로 실행한다.
-        // app-host aggregate에서 중복 실행하면 뒤 CR0b owner fixture의 canonical publication port를 바꾸므로 제외한다.
-        run.setEnvironmentVariable(
-            "MARU_SESSION_HOST_CR6A2_REAL_HOST_AGGREGATE_SKIP",
-            "skip-in-app-host-aggregate-v1",
-        );
-        // 아래 행들은 process-global signal/seal/daemon namespace 또는 CoreText process-global cache를 소유한다.
-        // 단일 프로세스 aggregate(샤드마다 같은 규칙)에서는 건너뛰고, 바로 아래 fresh exact artifact에서 각각 실행한다.
-        run.setEnvironmentVariable(
-            "MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP",
-            "skip-in-app-host-aggregate-v1",
-        );
-        shard_run.* = run;
-    }
+    const run_macos_app_host_abi_shards = b.addSystemCommand(&.{"/bin/sh"});
+    run_macos_app_host_abi_shards.addFileArg(b.path("tools/run-test-shards.sh"));
+    run_macos_app_host_abi_shards.addArg(b.fmt("{d}", .{macos_app_host_abi_shards}));
+    run_macos_app_host_abi_shards.addArtifactArg(macos_app_host_abi_tests);
+    // session_host.* 판정자는 `test-session-host` 잡이 모듈 그래프째 돈다(병렬). 이 ABI 바이너리는 app_session
+    // 이 그것들을 import 해 딸려오지만, 여기서 다시 돌 이유가 없다 — 실행만 건너뛰어 file-explorer 잡 시간을
+    // 던다(컴파일 수는 그대로라 «골라졌는가» 계약은 불변). shutdown_admin_connector 만 예외: `test-session-host`
+    run_macos_app_host_abi_shards.setEnvironmentVariable("MARU_TEST_SKIP_PREFIX", "session_host.");
+    run_macos_app_host_abi_shards.setEnvironmentVariable("MARU_TEST_KEEP_PREFIX", "session_host.shutdown_admin_connector");
+    // 에 없고 여기서만 도는 유일한 session_host 모듈이라 남긴다(실측 2026-09-06).
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
+        "skip-in-aggregate-v1",
+    );
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST",
+        "skip-in-aggregate-v1",
+    );
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
+        "skip-in-aggregate-v1",
+    );
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP",
+        "skip-in-aggregate-v1",
+    );
+    // CR6a-2 real-host fixture는 별도 exact filtered artifact에서 fresh process-global owner graph로 실행한다.
+    // app-host aggregate에서 중복 실행하면 뒤 CR0b owner fixture의 canonical publication port를 바꾸므로 제외한다.
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_SESSION_HOST_CR6A2_REAL_HOST_AGGREGATE_SKIP",
+        "skip-in-app-host-aggregate-v1",
+    );
+    // 아래 행들은 process-global signal/seal/daemon namespace 또는 CoreText process-global cache를 소유한다.
+    // 단일 프로세스 aggregate(샤드마다 같은 규칙)에서는 건너뛰고, 바로 아래 fresh exact artifact에서 각각 실행한다.
+    run_macos_app_host_abi_shards.setEnvironmentVariable(
+        "MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP",
+        "skip-in-app-host-aggregate-v1",
+    );
 
     const macos_chrome_face_cache_fresh_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -1685,7 +1688,7 @@ pub fn build(b: *std.Build) void {
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     // fresh-process 행도 서로 병렬 실행하면 daemon fixture와 wall-clock 성능 오라클이 다시 경쟁한다.
     // aggregate 뒤 실제 TTY, 제품 socket 두 행, teardown, CoreText cache 행 순으로 직렬화한다.
-    for (macos_app_host_abi_shard_runs) |shard_run| run_macos_external_tty_fresh_tests.step.dependOn(&shard_run.step);
+    run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_shards.step);
     run_macos_external_attach_fresh_tests.step.dependOn(&run_macos_external_tty_fresh_tests.step);
     run_macos_attach_resolver_fresh_tests.step.dependOn(&run_macos_external_attach_fresh_tests.step);
     run_macos_upgrade_multifd_fresh_tests.step.dependOn(&run_macos_attach_resolver_fresh_tests.step);
@@ -3865,7 +3868,7 @@ pub fn build(b: *std.Build) void {
     // ABI layout 자체는 플랫폼 독립이지만 이 모듈은 `app_session`을 끌어와 POSIX fd·AT.FDCWD까지 함께
     // 컴파일된다(실측: Windows에서 209개 에러) — 즉 실제로는 macOS 전용 artifact다. 위 coretext_* 는
     // 진짜 플랫폼 독립이라(Windows에서 통과 확인) 게이트하지 않고 그대로 기본 test에 남긴다.
-    if (macos_host_tests) for (macos_app_host_abi_shard_runs) |shard_run| test_step.dependOn(&shard_run.step);
+    if (macos_host_tests) test_step.dependOn(&run_macos_app_host_abi_shards.step);
 
     const e2e_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

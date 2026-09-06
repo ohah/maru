@@ -1440,7 +1440,6 @@ test "실제 모양의 도구 읽기: 2중 저장을 접고도 출처가 「에�
     try std.testing.expectEqual(context.Source.tool_file_path, label.source);
 }
 
-
 // ── 활동(도구 호출) 스캔 — 계약 `docs/agent-activity-view.md` §3.1 ─────────────────────────────
 //
 // **구조는 실측, 값은 합성**이다(계약 §5: 트랜스크립트 내용을 fixture 에 쓰지 않는다). 아래 레코드

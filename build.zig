@@ -10210,6 +10210,21 @@ pub fn build(b: *std.Build) void {
         run_mobile_rotation_boundary_tests.setCwd(b.path("."));
         boundary_step.dependOn(&run_mobile_rotation_boundary_tests.step);
 
+        // 접근성 어댑터(M9 둘째 슬라이스)의 결정들. 증상이 `UIAccessibility` 안에서만 나므로
+        // CI 에서는 결정이 코드에 남아 있는지만 센다 — 실제 트리는 시뮬레이터에서 읽어 대조했다.
+        const mobile_a11y_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/mobile_a11y_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"a11y 경계"},
+        });
+        const run_mobile_a11y_boundary_tests = b.addRunArtifact(mobile_a11y_boundary_tests);
+        run_mobile_a11y_boundary_tests.addArg("--maru-expect-tests=" ++ "3");
+        run_mobile_a11y_boundary_tests.setCwd(b.path("."));
+        boundary_step.dependOn(&run_mobile_a11y_boundary_tests.step);
+
         const event_c3_3b6_screen_stream_module = b.createModule(.{
             .root_source_file = b.path("src/session/screen_stream.zig"),
             .target = target,

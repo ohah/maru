@@ -559,9 +559,18 @@ AOSP `ScrollView` 는 기준을 **하나**(`mLastMotionY`) 두므로 `onSecondar
 필요한 길이만 답한다(먼저 물어보고 자리를 잡는 법). **UTF-8 한가운데서는 안 끊는다** — 반쪽
 글자를 받은 iOS `NSString` 은 nil 이라 짧게 읽히는 대신 **이름이 통째로 사라진다**.
 
-**아직 host 어댑터가 없다** — 이것을 네이티브 요소로 투영하는 iOS `UIAccessibilityElement`·
-Android `AccessibilityNodeInfo` 는 [계획 M9](plans/mobile-platform.md)가 소유한다. 그 전까지
-VoiceOver·TalkBack 에게 모바일은 여전히 빈 화면이다.
+**역할 번호의 단일 출처는 ABI 헤더다**(`MARU_MOBILE_A11Y_ROLE_*`). 브리지는 계약 enum 의 순번을
+그대로 내보내지 않는다 — 그 enum 에 줄을 하나 끼워 넣는 순간 host 가 **조용히 다른 역할**을 읽는다.
+
+**iOS 는 이것을 `UIAccessibilityElement` 로 투영한다.** 뷰가 컨테이너가 되고(자기 자신은 요소가
+아니다), 요소는 **들고 있는다** — iOS 는 index 별로 따로 묻는데 질의마다 새 배열을 주면 앞서 준
+요소가 그 배열과 함께 사라진다(실측: 열다섯 중 마지막 하나만 이름과 자리가 남았다). 그래서
+서술자 묶음의 **지문이 바뀔 때만** 다시 만들고, 그때 `UIAccessibilityLayoutChangedNotification`
+을 보낸다 — 안 보내면 화면을 옮겨도 스크린 리더 커서가 옛 버튼에 남는다. 좌표는 **누르는 쪽과
+같은 식으로** 되돌린다(브리지 좌표 + safe area).
+
+**Android 어댑터는 아직 없다** — `AccessibilityNodeInfo` 가상 뷰 계층은
+[계획 M9](plans/mobile-platform.md)가 소유한다. 그 전까지 TalkBack 에게 모바일은 빈 화면이다.
 
 **안 바뀐 프레임은 GPU 를 안 쓴다.** 빌드는 매 tick 그대로 돌고, 낸 quad 가 지난 프레임과 같으면
 host 가 획득·제출·프레젠트를 통째로 건너뛴다(`maru_mobile_frame_changed`). **깃발이 아니라 결과를

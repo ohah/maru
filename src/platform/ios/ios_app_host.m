@@ -143,6 +143,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UITextInputStringTokenizer *_tokenizer;
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
+    /// 지난 프레임 서술자 묶음의 지문(M9) — 바뀐 프레임에만 다시 만들고 알린다.
+    unsigned long long _a11yDigest;
+    /// **들고 있는** 접근성 요소들. 질의마다 새로 만들면 안 된다 — 아래 주석.
+    NSArray *_a11yElements;
 }
 
 /// 키보드 프레임 변화를 받아 `_keyboardH` 를 갱신한다.
@@ -311,6 +315,124 @@ static unsigned int maruPointerId(UITouch *t) {
 
 /// **손가락 전부를 보낸다.** 비소유자의 기준이 낡으면 그 손가락이 이어받는 순간 옛 자리에서
 /// 델타가 나와 화면이 점프한다(T1 이 없앤 병) — 소유권 판정은 코어가 한다.
+#pragma mark - 접근성 어댑터 (CIM §3)
+
+/// 뜻 → iOS 어휘. **번역은 여기 한 곳에서만 한다** — 브리지(Zig)에는 `UIAccessibility` 어휘가
+/// 한 글자도 없다(계약 §3: 의미는 코어가, 어휘는 host 가). 번호의 단일 출처는
+/// `mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*` 다.
+static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int state) {
+    UIAccessibilityTraits t = UIAccessibilityTraitNone;
+    switch (role) {
+        case MARU_MOBILE_A11Y_ROLE_BUTTON:
+            t |= UIAccessibilityTraitButton;
+            break;
+        // **iOS 에는 탭 trait 이 없다.** 탭 바는 컨테이너가 「탭 바」라고 말하고 그 안의 것은
+        // 버튼으로 읽힌다 — 없는 것을 지어내지 않고 버튼으로 둔다.
+        case MARU_MOBILE_A11Y_ROLE_TAB:
+            t |= UIAccessibilityTraitButton;
+            break;
+        case MARU_MOBILE_A11Y_ROLE_TEXT:
+            t |= UIAccessibilityTraitStaticText;
+            break;
+        // 목록 줄·트리 줄·스크롤 면·묶음에는 붙일 trait 이 없다(iOS 는 그것을 계층으로 읽는다).
+        // 모바일 브리지는 아직 그 넷을 안 내므로 여기 오면 이름만 읽힌다.
+        default:
+            break;
+    }
+    // **꺼진 것은 「흐림」으로 읽힌다** — 빼 버리면 사용자가 「없는 버튼」으로 안다(계약 P1).
+    if ((state & MARU_MOBILE_A11Y_STATE_ENABLED) == 0) t |= UIAccessibilityTraitNotEnabled;
+    if ((state & MARU_MOBILE_A11Y_STATE_SELECTED) != 0) t |= UIAccessibilityTraitSelected;
+    return t;
+}
+
+/// 이 뷰는 그림 하나가 아니라 **버튼들의 묶음**이다. `NO` 를 답해야 아래 자식들이 읽힌다.
+- (BOOL)isAccessibilityElement { return NO; }
+
+/// **요소를 들고 있는다 — 질의마다 새로 만들지 않는다.**
+///
+/// 처음에는 데스크톱 어댑터처럼 부를 때마다 새로 만들었다. iOS 는 컨테이너에게 개수와 **index 별로**
+/// 요소를 따로 묻는데, 그때마다 새 배열을 주면 앞서 준 요소들이 이 배열과 함께 사라진다 — 실측
+/// (`idb ui describe-all`): 열다섯 중 **마지막 하나만** 이름과 자리가 있고 나머지 열넷은 이름
+/// `null` 에 크기 0 인 빈 그룹이었다. 그래서 **바뀔 때만** 다시 만들고 그 사이에는 같은 것을 준다.
+- (NSArray *)accessibilityElements {
+    if (_a11yElements == nil) {
+        _a11yDigest = [self accessibilityDigest];
+        _a11yElements = [self buildAccessibilityElements];
+    }
+    return _a11yElements;
+}
+
+/// 서술자 묶음이 바뀌었나를 **한 숫자로** 잰다. 개수만 보면 「같은 수의 다른 화면」을 못 잡는다.
+/// safe area 도 넣는다 — 돌리면 같은 서술자라도 **뷰 좌표가 달라진다**.
+- (unsigned long long)accessibilityDigest {
+    unsigned long long d = 1469598103934665603ULL; // FNV-1a offset basis
+    UIEdgeInsets safe = self.safeAreaInsets;
+    unsigned long long edges[2] = { (unsigned long long)safe.left, (unsigned long long)safe.top };
+    for (unsigned int e = 0; e < 2; e++) { d ^= edges[e]; d *= 1099511628211ULL; }
+    unsigned int n = maru_mobile_a11y_count();
+    for (unsigned int i = 0; i < n; i++) {
+        unsigned long long parts[3] = {
+            maru_mobile_a11y_rect(i),
+            (unsigned long long)maru_mobile_a11y_role(i),
+            (unsigned long long)maru_mobile_a11y_state(i),
+        };
+        unsigned char name[256];
+        unsigned long len = maru_mobile_a11y_label(i, name, sizeof name);
+        for (unsigned int p = 0; p < 3; p++) { d ^= parts[p]; d *= 1099511628211ULL; }
+        for (unsigned long b = 0; b < len; b++) { d ^= name[b]; d *= 1099511628211ULL; }
+    }
+    return d;
+}
+
+/// 좌표는 브리지가 쓰는 논리 좌표(safe area 를 뺀 자리)라, 뷰 좌표로 돌리려면 safe area 를
+/// 도로 더한다 — `sendPointer` 가 빼는 그 값이다. **누르는 자리와 읽는 자리를 같은 식으로 옮긴다.**
+- (NSArray *)buildAccessibilityElements {
+    unsigned int n = maru_mobile_a11y_count();
+    if (n == 0) return @[];
+    UIEdgeInsets safe = self.safeAreaInsets;
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:n];
+    for (unsigned int i = 0; i < n; i++) {
+        unsigned long long r = maru_mobile_a11y_rect(i);
+        CGFloat x = (CGFloat)((r >> 48) & 0xFFFF);
+        CGFloat y = (CGFloat)((r >> 32) & 0xFFFF);
+        CGFloat w = (CGFloat)((r >> 16) & 0xFFFF);
+        CGFloat h = (CGFloat)(r & 0xFFFF);
+        if (w <= 0 || h <= 0) continue;
+
+        // 길이를 먼저 묻고(`cap == 0`) 담는다. 브리지는 글자 한가운데서 안 끊으므로 받은 것은
+        // 언제나 온전한 UTF-8 이다 — 그래도 비면 **이름 없는 요소를 만들지 않는다**(이름 없는
+        // 버튼은 「버튼」이라고만 읽혀 무엇인지 알 길이 없다).
+        unsigned char buf[256];
+        unsigned long need = maru_mobile_a11y_label(i, buf, 0);
+        unsigned long cap = need < sizeof buf ? need : sizeof buf;
+        unsigned long got = maru_mobile_a11y_label(i, buf, cap);
+        NSString *label = [[NSString alloc] initWithBytes:buf length:got encoding:NSUTF8StringEncoding];
+        if (label.length == 0) continue;
+
+        UIAccessibilityElement *e =
+            [[UIAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        e.accessibilityLabel = label;
+        e.accessibilityFrameInContainerSpace = CGRectMake(x + safe.left, y + safe.top, w, h);
+        e.accessibilityTraits = maruA11yTraits(maru_mobile_a11y_role(i), maru_mobile_a11y_state(i));
+        [out addObject:e];
+    }
+    return out;
+}
+
+/// 서술자 묶음이 바뀌면 **다시 만들고 스크린 리더에게 알린다.**
+///
+/// 안 알리면 화면을 옮겨도 커서가 **옛 버튼에 남는다** — 설정을 열었는데 커서는 여전히 「자판」에
+/// 있고, 짚어도 아무 일이 없다. 요소를 다시 묻게 하는 신호가 이것 하나다. 매 프레임 알리면
+/// 읽던 문장을 계속 끊으므로(커서 깜빡임만으로도 프레임은 바뀐다) **지문이 바뀔 때만** 알린다.
+- (void)noteAccessibilityChange {
+    unsigned long long d = [self accessibilityDigest];
+    if (d == _a11yDigest && _a11yElements != nil) return;
+    _a11yDigest = d;
+    _a11yElements = [self buildAccessibilityElements];
+    UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
+    NSLog(@"MARU_A11Y elements=%lu", (unsigned long)_a11yElements.count);
+}
+
 - (void)sendPointer:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
     UIEdgeInsets safe = self.safeAreaInsets;
     for (UITouch *touch in touches) {
@@ -988,6 +1110,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                                   (unsigned int)_keyboardH, 1000, &lw, &lh);
     unsigned int n = maru_mobile_build(lw, lh,
                                        (unsigned long long)(CACurrentMediaTime() * 1000.0));
+    // **서술자는 idle 로 빠지기 전에 견준다**(M9). 아래 M14 조기 return 뒤에 두면 화면이 멈춘
+    // 프레임에서 알림이 안 나가고, 스크린 리더 커서가 옛 버튼에 남는다.
+    [self noteAccessibilityChange];
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.
     drainConfigWrite();

@@ -11,6 +11,7 @@ const cli_mod = @import("release_adapter_github_cli_authority");
 const transport = @import("release_adapter_github_transport");
 const transport_macos = @import("release_adapter_github_transport_macos");
 const deadline_mod = @import("release_adapter_deadline");
+const c = std.c;
 
 pub const asset_count = post.artifact_count;
 pub const ExpectedAsset = struct { path: []const u8, name: []const u8, size: u64, sha256: [64]u8 };
@@ -22,6 +23,41 @@ pub const Expected = struct {
 };
 pub const ObservedPublished = struct { release_id: u64, asset_ids: [asset_count]u64 };
 pub const Cli = struct { path: [:0]const u8, pinned: *const cli_mod.PinnedExecutable };
+pub const Timing = struct {
+    first_lookup_ns: ?u64 = null,
+    attestation_ns: ?u64 = null,
+    final_lookup_ns: ?u64 = null,
+};
+
+const Segment = enum { first_lookup, attestation, final_lookup };
+
+const NullObserver = struct {
+    pub fn begin(_: *@This(), _: Segment) !void {}
+    pub fn end(_: *@This(), _: Segment) !void {}
+};
+
+const ProductionObserver = struct {
+    timing: *Timing,
+    started_ns: u64 = 0,
+
+    pub fn begin(self: *@This(), _: Segment) !void {
+        if (self.started_ns != 0) return error.InvalidOwner;
+        self.started_ns = try monotonicNow();
+    }
+
+    pub fn end(self: *@This(), segment: Segment) !void {
+        if (self.started_ns == 0) return error.InvalidOwner;
+        const finished = try monotonicNow();
+        if (finished < self.started_ns) return error.ClockFailed;
+        const elapsed = finished - self.started_ns;
+        self.started_ns = 0;
+        switch (segment) {
+            .first_lookup => self.timing.first_lookup_ns = elapsed,
+            .attestation => self.timing.attestation_ns = elapsed,
+            .final_lookup => self.timing.final_lookup_ns = elapsed,
+        }
+    }
+};
 
 const StoredContext = struct {
     repository_id: u64 = 0,
@@ -139,7 +175,7 @@ fn BoundAuthority(comptime Source: type) type {
     };
 }
 
-fn authenticateCore(source: anytype, remote: anytype, verifier: anytype, deadline: anytype, result: *post.VerifiedRelease) !void {
+fn authenticateCoreObserved(source: anytype, remote: anytype, verifier: anytype, deadline: anytype, observer: anytype, result: *post.VerifiedRelease) !void {
     if (!pristine(result)) return error.InvalidOwner;
     var published = false;
     defer if (!published and result.value() != null) result.deinit() catch unreachable;
@@ -151,7 +187,9 @@ fn authenticateCore(source: anytype, remote: anytype, verifier: anytype, deadlin
     try freeze(&frozen, initial);
     const before_first = try source.snapshot();
     if (!sameExpected(&frozen, before_first)) return error.AuthorityChanged;
+    try observer.begin(.first_lookup);
     const first = try remote.fetch(frozen.expected(), try deadline.remaining());
+    try observer.end(.first_lookup);
     try validateObserved(&frozen, first);
 
     var authority = BoundAuthority(@TypeOf(source)){
@@ -162,17 +200,26 @@ fn authenticateCore(source: anytype, remote: anytype, verifier: anytype, deadlin
     };
     authority.owner = &authority;
     authority.seal = authority.metadataSeal();
+    try observer.begin(.attestation);
     try verifier.verify(&authority, deadline, result);
+    try observer.end(.attestation);
     const receipt = result.value() orelse return error.InvalidVerified;
     if (!matchesReceipt(&frozen, first, receipt)) return error.InvalidVerified;
 
     _ = try authority.snapshot();
+    try observer.begin(.final_lookup);
     const final = try remote.fetch(frozen.expected(), try deadline.remaining());
+    try observer.end(.final_lookup);
     try validateObserved(&frozen, final);
     if (!std.meta.eql(first, final)) return error.PublishedChanged;
     _ = try authority.snapshot();
     _ = try deadline.remaining();
     published = true;
+}
+
+fn authenticateCore(source: anytype, remote: anytype, verifier: anytype, deadline: anytype, result: *post.VerifiedRelease) !void {
+    var observer = NullObserver{};
+    return authenticateCoreObserved(source, remote, verifier, deadline, &observer, result);
 }
 
 const AggregateSource = struct {
@@ -268,8 +315,44 @@ pub fn authenticateUntil(
     try authenticateCore(&source, &remote, &verifier, deadline, result);
 }
 
+pub fn authenticateUntilObserved(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    aggregate: *reopen.ReopenedAggregate,
+    cli: Cli,
+    token: []const u8,
+    response: []u8,
+    deadline: *deadline_mod.Deadline,
+    timing: *Timing,
+    result: *post.VerifiedRelease,
+) !void {
+    if (timing.first_lookup_ns != null or timing.attestation_ns != null or timing.final_lookup_ns != null or
+        overlaps(std.mem.asBytes(timing), std.mem.asBytes(result))) return error.InvalidOwner;
+    try transport.validateToken(token);
+    if (response.len == 0 or response.len > transport.max_response_bytes or !pristine(result)) return error.InvalidOwner;
+    const result_bytes = std.mem.asBytes(result);
+    const timing_bytes = std.mem.asBytes(timing);
+    const regions = [_][]const u8{ std.mem.asBytes(aggregate), std.mem.asBytes(cli.pinned), std.mem.asBytes(deadline), cli.path, token, response };
+    for (regions, 0..) |region, index| {
+        if (overlaps(result_bytes, region) or overlaps(timing_bytes, region)) return error.InvalidOwner;
+        for (regions[0..index]) |prior| if (overlaps(region, prior)) return error.InvalidOwner;
+    }
+    var source = AggregateSource{ .allocator = allocator, .aggregate = aggregate, .cli = cli };
+    var remote = ProductionRemote{ .io = io, .allocator = allocator, .source = &source, .token = token, .response = response };
+    var verifier = ProductionVerifier{ .io = io, .allocator = allocator, .token = token, .response = response };
+    var observer = ProductionObserver{ .timing = timing };
+    try authenticateCoreObserved(&source, &remote, &verifier, deadline, &observer, result);
+}
+
 pub fn assertProductionBoundary() void {
     _ = &authenticateUntil;
+    _ = &authenticateUntilObserved;
+}
+
+fn monotonicNow() !u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return error.ClockFailed;
+    return std.math.add(u64, try std.math.mul(u64, @intCast(ts.sec), std.time.ns_per_s), @intCast(ts.nsec));
 }
 
 fn bindManifest(candidate: *const manifest_mod.Manifest, aggregate: reopen.View) !void {

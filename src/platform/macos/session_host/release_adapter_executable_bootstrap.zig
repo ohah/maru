@@ -105,6 +105,15 @@ pub const ResumeCandidatePublication = struct {
     frozen_executable: []const u8,
 };
 
+pub const CleanupCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    aggregate: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    manifest: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
@@ -113,6 +122,7 @@ pub const Command = union(enum) {
     prepare_candidate_aggregate: PrepareCandidateAggregate,
     finalize_candidate_aggregate: FinalizeCandidateAggregate,
     resume_candidate_publication: ResumeCandidatePublication,
+    cleanup_candidate_aggregate: CleanupCandidateAggregate,
 };
 
 pub const View = struct {
@@ -319,6 +329,17 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .aggregate = value.aggregate,
                 .dmg = value.dmg,
                 .frozen_executable = value.frozen_executable,
+            } },
+            .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
+        },
+        .cleanup_candidate_aggregate => |value| .{
+            .command = .{ .cleanup_candidate_aggregate = .{
+                .repo = value.repo,
+                .tag = value.tag,
+                .aggregate = value.aggregate,
+                .dmg = value.dmg,
+                .frozen_executable = value.frozen_executable,
+                .manifest = value.manifest,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
         },

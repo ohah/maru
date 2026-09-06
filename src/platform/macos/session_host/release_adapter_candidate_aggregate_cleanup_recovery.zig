@@ -24,6 +24,39 @@ pub const Location = reducer.Location;
 pub const CompletionState = reducer.CompletionState;
 pub const Inventory = reducer.Inventory;
 pub const Recovery = reducer.Recovery;
+pub const Plan = enum { initial, recoverable, audit_required };
+
+/// Mutation-free routing probe. This is not deletion authority: begin/recover repeat every
+/// identity and record check before any mutation.
+pub fn classify(
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    original: [:0]const u8,
+) !Plan {
+    var driver = try ConcreteDriver.initRecover(allocator, context, original);
+    errdefer driver.close() catch {};
+
+    const plan: Plan = blk: {
+        const completion = driver.inspectCompletion() catch break :blk .audit_required;
+        if (completion != .absent) break :blk .recoverable;
+
+        const intent = existsAt(driver.parent_fd, driver.names.intentValue()) catch break :blk .audit_required;
+        const tomb = statOptionalAt(driver.parent_fd, driver.names.tombValue()) catch break :blk .audit_required;
+        const original_stat = statOptionalAt(driver.parent_fd, driver.originalLeaf()) catch break :blk .audit_required;
+        if (intent) {
+            driver.loadIntent() catch break :blk .audit_required;
+            const location = driver.locate() catch break :blk .audit_required;
+            break :blk switch (location) {
+                .original, .tomb, .removed => .recoverable,
+                .ambiguous => .audit_required,
+            };
+        }
+        if (tomb != null or original_stat == null or !validOwnedDirectory(original_stat.?)) break :blk .audit_required;
+        break :blk .initial;
+    };
+    try driver.close();
+    return plan;
+}
 
 /// Product entry point. The concrete filesystem driver is added below the pure restart reducer;
 /// callers cannot submit a tomb name, record pathname, progress suffix, or success flag.
@@ -54,6 +87,7 @@ pub fn recover(
 }
 
 pub fn assertProductionBoundary() void {
+    _ = &classify;
     _ = &begin;
     _ = &recover;
 }

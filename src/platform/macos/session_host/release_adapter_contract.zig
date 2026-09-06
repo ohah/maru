@@ -118,6 +118,17 @@ pub const ResumeCandidatePublication = struct {
     frozen_executable: []const u8,
 };
 
+pub const CleanupCandidateAggregate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    aggregate: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    manifest: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
@@ -126,6 +137,7 @@ pub const Command = union(enum) {
     prepare_candidate_aggregate: PrepareCandidateAggregate,
     finalize_candidate_aggregate: FinalizeCandidateAggregate,
     resume_candidate_publication: ResumeCandidatePublication,
+    cleanup_candidate_aggregate: CleanupCandidateAggregate,
 };
 
 pub const Error = error{
@@ -190,6 +202,7 @@ const Phase = enum {
     prepare_candidate_aggregate,
     finalize_candidate_aggregate,
     resume_candidate_publication,
+    cleanup_candidate_aggregate,
 };
 
 pub fn parseArgs(args: []const []const u8) Error!Command {
@@ -208,6 +221,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         .finalize_candidate_aggregate
     else if (std.mem.eql(u8, args[0], "resume-candidate-publication"))
         .resume_candidate_publication
+    else if (std.mem.eql(u8, args[0], "cleanup-candidate-aggregate"))
+        .cleanup_candidate_aggregate
     else
         return error.UnknownCommand;
 
@@ -422,6 +437,26 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .frozen_executable = frozen_executable,
             } };
         },
+        .cleanup_candidate_aggregate => blk: {
+            const aggregate = try aggregatePath(values.aggregate);
+            const dmg = try aggregatePath(values.dmg);
+            const frozen_executable = try aggregatePath(values.frozen_executable);
+            const manifest = try aggregatePath(values.manifest);
+            try validateManifestAssetPath(manifest, tag[1..]);
+            const github_cli = try githubCli(&values);
+            if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ aggregate, dmg, frozen_executable, manifest, github_cli.path });
+            break :blk .{ .cleanup_candidate_aggregate = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .aggregate = aggregate,
+                .dmg = dmg,
+                .frozen_executable = frozen_executable,
+                .manifest = manifest,
+            } };
+        },
     };
 }
 
@@ -523,6 +558,16 @@ fn optionDestination(
             &values.dmg
         else if (std.mem.eql(u8, option, "--frozen-executable"))
             &values.frozen_executable
+        else
+            null,
+        .cleanup_candidate_aggregate => if (std.mem.eql(u8, option, "--aggregate"))
+            &values.aggregate
+        else if (std.mem.eql(u8, option, "--dmg"))
+            &values.dmg
+        else if (std.mem.eql(u8, option, "--frozen-executable"))
+            &values.frozen_executable
+        else if (std.mem.eql(u8, option, "--manifest"))
+            &values.manifest
         else
             null,
     };

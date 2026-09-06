@@ -428,14 +428,48 @@ fn processBudgetReserved(
         // 즉 두 호출 **사이에** fd 가 열린다 — fd 는 언제나 가장 낮은 빈 번호를 가져가므로 새로 열린
         // 것이 정확히 `first_slot` 을 차지한다. 무엇이 여는지 모르면 고칠 지점이 안 정해지고, 번호만
         // 알아도 `lsof` 로 정체가 바로 나온다. 그래서 **어느 슬롯이, 무슨 종류로** 점유됐는지 남긴다.
+        // 첫 점유자 하나로는 부족했다. **몇 개가** 열렸는지가 「누가 열었나」를 가른다 — 하나면 단일
+        // 할당(예: 소켓 accept 한 번), 둘씩 붙어 있으면 `pipe(2)`(항상 2 개를 연속으로 가져간다),
+        // 여럿이 흩어져 있으면 runtime 단위 준비다. 그래서 앞의 여덟 개까지 번호와 종류를 함께 남긴다.
+        //
+        // 종류는 `fstat` 의 `S_IFMT` 다: 0o10000=FIFO(pipe) · 0o140000=socket · 0o20000=chr(PTY) ·
+        // 0o100000=regular. 번호와 종류가 같이 있으면 `lsof` 없이도 어느 준비 단계인지 좁혀진다.
         var occupied_slot: i32 = -1;
         var occupied_mode: u32 = 0;
+        var occupied_count: u32 = 0;
+        var occupied_list: [8]i32 = .{-1} ** 8;
+        var occupied_modes: [8]u32 = .{0} ** 8;
         for (requested) |slot| {
             if (!exec_fd_set.isOpen(slot)) continue;
-            occupied_slot = slot;
+            var mode: u32 = 0;
             var st: std.c.Stat = undefined;
-            if (std.c.fstat(slot, &st) == 0) occupied_mode = @intCast(st.mode & std.c.S.IFMT);
-            break;
+            if (std.c.fstat(slot, &st) == 0) mode = @intCast(st.mode & std.c.S.IFMT);
+            if (occupied_slot < 0) {
+                occupied_slot = slot;
+                occupied_mode = mode;
+            }
+            if (occupied_count < occupied_list.len) {
+                occupied_list[occupied_count] = slot;
+                occupied_modes[occupied_count] = mode;
+            }
+            occupied_count += 1;
+        }
+        if (!builtin.is_test) {
+            var detail_buf: [224]u8 = undefined;
+            var written: usize = 0;
+            const shown = @min(occupied_count, @as(u32, occupied_list.len));
+            for (0..shown) |index| {
+                const chunk = std.fmt.bufPrint(
+                    detail_buf[written..],
+                    "{s}{d}:0o{o}",
+                    .{ if (index == 0) "" else ",", occupied_list[index], occupied_modes[index] },
+                ) catch break;
+                written += chunk.len;
+            }
+            host_log.line(
+                "session host upgrade fd reserve occupants: count={d} shown={d} list={s}",
+                .{ occupied_count, shown, detail_buf[0..written] },
+            );
         }
         if (!builtin.is_test) host_log.line(
             "session host upgrade fd reserve failed: err={s} first_slot={d} slots={d} max_fd={d} errno={d} occupied_slot={d} occupied_mode=0o{o}",

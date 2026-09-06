@@ -8,6 +8,9 @@ const context_mod = @import("release_adapter_context");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const handoff = @import("release_adapter_candidate_aggregate_handoff");
 const reopen = @import("release_adapter_candidate_aggregate_reopen");
+const manifest_mod = @import("release_manifest");
+const post = @import("release_adapter_github_post_publish_attestation");
+const retention = @import("release_adapter_candidate_aggregate_retention");
 
 const source_names = [_][]const u8{
     "release-evidence.json",
@@ -28,7 +31,36 @@ const artifact_names = [_][]const u8{
     "maru-session-host-1.2.3",
     "Maru-1.2.3-session-host-release.json",
 };
-const artifact_bytes = [_][]const u8{ "candidate dmg bytes\n", "frozen executable bytes\n", "manifest bytes\n" };
+const artifact_bytes = [_][]const u8{ "candidate dmg bytes\n", "frozen executable bytes\n", "manifest placeholder\n" };
+
+fn sha256Hex(bytes: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn canonicalManifest(dmg_name: []const u8) ![]u8 {
+    const dmg_sha = sha256Hex(artifact_bytes[0]);
+    const frozen_sha = sha256Hex(artifact_bytes[1]);
+    const evidence_sha = sha256Hex(source_bytes[0]);
+    const assets = [_]manifest_mod.Asset{
+        .{ .role = .universal_dmg, .name = dmg_name, .sha256 = &dmg_sha, .size = artifact_bytes[0].len },
+        .{ .role = .frozen_product_executable, .name = artifact_names[1], .sha256 = &frozen_sha, .size = artifact_bytes[1].len },
+        .{ .role = .evidence_summary, .name = source_names[0], .sha256 = &evidence_sha, .size = source_bytes[0].len },
+    };
+    return manifest_mod.writeCanonical(std.testing.allocator, .{
+        .schema = manifest_mod.schema,
+        .role = .a,
+        .repository = .{ .id = 55, .owner = "ohah", .name = "maru" },
+        .release = .{ .id = 88, .tag = "v1.2.3", .version = "1.2.3" },
+        .source = .{ .commit = "0123456789abcdef0123456789abcdef01234567", .tree = "1111111111111111111111111111111111111111" },
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 7, .run_attempt = 1 },
+        .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
+        .signing = .{ .bundle_id = "com.maru.app", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "TEAMID1234", .designated_requirement_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
+        .assets = &assets,
+        .evidence = .{ .test_uuid = "123e4567-e89b-12d3-a456-426614174000", .summary_name = source_names[0], .summary_sha256 = &evidence_sha, .result = "passed" },
+    });
+}
 
 fn context() context_mod.Context {
     return .{
@@ -167,6 +199,9 @@ const Fixture = struct {
             const path = try std.fmt.bufPrint(&relative, "artifacts/{s}", .{name});
             try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = bytes });
         }
+        const manifest_bytes = try canonicalManifest(artifact_names[0]);
+        defer std.testing.allocator.free(manifest_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/Maru-1.2.3-session-host-release.json", .data = manifest_bytes });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tools/gh", .data = "#!/bin/sh\nexit 1\n" });
         _ = try absolute(&self.tmp, "workspace", &self.source_roots[0]);
         _ = try absolute(&self.tmp, "bundles", &self.source_roots[1]);
@@ -204,6 +239,12 @@ const Fixture = struct {
         try self.tmp.dir.deleteTree(std.testing.io, "workspace");
         try self.tmp.dir.deleteTree(std.testing.io, "bundles");
         self.prepared = true;
+    }
+
+    fn replaceManifest(self: *@This(), dmg_name: []const u8) !void {
+        const manifest_bytes = try canonicalManifest(dmg_name);
+        defer std.testing.allocator.free(manifest_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/Maru-1.2.3-session-host-release.json", .data = manifest_bytes });
     }
 
     fn sources(self: *@This()) handoff.Sources {
@@ -252,6 +293,220 @@ fn verify(fixture: *Fixture, allocator: std.mem.Allocator, verifier: *Verifier, 
     var executor = Executor{};
     var output: [8192]u8 = undefined;
     try reopen.openAndVerifyWith(cli, verifier, &executor, deadline, allocator, context(), fixture.paths(), fixture.cliInput(), &output, result);
+}
+
+const PostAuthority = struct {
+    value: post.Snapshot,
+    pub fn snapshot(self: *@This()) !post.Snapshot {
+        return self.value;
+    }
+};
+
+const PostDriver = struct {
+    pub fn resolve(_: *@This(), expected: post.Snapshot, _: i128) !post.ResolvedTag {
+        var result: post.ResolvedTag = undefined;
+        @memcpy(&result.tag_ref_sha, "fedcba9876543210fedcba9876543210fedcba98");
+        @memcpy(&result.source_commit, expected.source_commit);
+        return result;
+    }
+    pub fn verify(_: *@This(), expected: post.Snapshot, tag: post.ResolvedTag, index: ?usize, _: i128) !post.Observation {
+        return post.testing_api.observe(expected, tag, index);
+    }
+};
+
+const PostDeadline = struct {
+    pub fn remaining(_: *@This()) !i128 {
+        return std.time.ns_per_s;
+    }
+};
+
+fn publicationSnapshot(fixture: *Fixture, aggregate: reopen.View) !post.Snapshot {
+    const snapshot_paths = [_][]const u8{
+        std.mem.sliceTo(&fixture.artifact_paths[0], 0),
+        std.mem.sliceTo(&fixture.artifact_paths[1], 0),
+        std.mem.sliceTo(&fixture.source_paths[0], 0),
+        std.mem.sliceTo(&fixture.artifact_paths[2], 0),
+    };
+    const snapshot_names = [_][]const u8{ artifact_names[0], artifact_names[1], source_names[0], artifact_names[2] };
+    const observations = [_]files.ExecutableObservation{
+        aggregate.artifacts[0],
+        aggregate.artifacts[1],
+        aggregate.entries[0],
+        aggregate.artifacts[2],
+    };
+    var artifacts: [post.artifact_count]post.Artifact = undefined;
+    for (&artifacts, 0..) |*artifact, index| artifact.* = .{
+        .id = 1000 + index,
+        .path = snapshot_paths[index],
+        .name = snapshot_names[index],
+        .size = observations[index].size,
+        .sha256 = observations[index].sha256,
+    };
+    return .{
+        .release_id = 88,
+        .tag = "v1.2.3",
+        .source_commit = "0123456789abcdef0123456789abcdef01234567",
+        .cli_sha256 = [_]u8{'f'} ** 64,
+        .artifacts = artifacts,
+    };
+}
+
+fn verifyPublicationReceipt(snapshot: post.Snapshot, verified: *post.VerifiedRelease) !void {
+    var authority = PostAuthority{ .value = snapshot };
+    var post_driver = PostDriver{};
+    var post_deadline = PostDeadline{};
+    try post.testing_api.verify(&authority, &post_driver, &post_deadline, verified);
+}
+
+fn deleteConcreteOnce() !u64 {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    errdefer aggregate.deinit() catch {};
+
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+
+    var deletion: retention.Deletion = .{};
+    const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try std.testing.expectEqual(retention.Outcome.success, try retention.deleteVerifiedAggregate(
+        std.testing.allocator,
+        &aggregate,
+        &verified,
+        &deletion,
+    ));
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - started;
+    try std.testing.expect(deletion.isPristine());
+    try std.testing.expect(aggregate.value() == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.openDir(std.testing.io, "durable/handoff", .{}));
+    try fixture.tmp.dir.access(std.testing.io, "artifacts/Maru-1.2.3-universal.dmg", .{});
+    return @intCast(elapsed);
+}
+
+test "production deletion removes the exact retained aggregate on a real filesystem" {
+    _ = try deleteConcreteOnce();
+}
+
+test "production deletion reports local macOS deletion primitive timing samples" {
+    var samples: [12]u64 = undefined;
+    for (&samples) |*sample| sample.* = try deleteConcreteOnce();
+    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+    std.debug.print("\naggregate-retention delete ns median={d} p95={d} samples={d}\n", .{ samples[samples.len / 2], samples[samples.len - 1], samples.len });
+}
+
+test "production deletion preserves the aggregate when canonical manifest asset name is foreign" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.replaceManifest("foreign.dmg");
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    defer aggregate.deinit() catch {};
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+    var deletion: retention.Deletion = .{};
+    try std.testing.expectEqual(retention.Outcome.audit_required, try retention.deleteVerifiedAggregate(
+        std.testing.allocator,
+        &aggregate,
+        &verified,
+        &deletion,
+    ));
+    try std.testing.expect(deletion.isPristine());
+    try fixture.tmp.dir.access(std.testing.io, "durable/handoff", .{});
+}
+
+test "production deletion preserves a newly hardlinked entry before rename" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    defer aggregate.deinit() catch {};
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+    try fixture.tmp.dir.hardLink("durable/handoff/release-evidence.json", fixture.tmp.dir, "durable/foreign-alias.json", std.testing.io, .{});
+    var deletion: retention.Deletion = .{};
+    try std.testing.expectEqual(retention.Outcome.audit_required, try retention.deleteVerifiedAggregate(
+        std.testing.allocator,
+        &aggregate,
+        &verified,
+        &deletion,
+    ));
+    try std.testing.expect(deletion.isPristine());
+    try fixture.tmp.dir.access(std.testing.io, "durable/handoff/release-evidence.json", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/foreign-alias.json", .{});
+}
+
+test "production deletion leaves a foreign directory replacement untouched" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    defer aggregate.deinit() catch {};
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+    try fixture.tmp.dir.rename("durable/handoff", fixture.tmp.dir, "durable/held-original", std.testing.io);
+    try fixture.tmp.dir.createDir(std.testing.io, "durable/handoff", .default_dir);
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "durable/handoff/foreign", .data = "do not delete\n" });
+    var deletion: retention.Deletion = .{};
+    try std.testing.expectEqual(retention.Outcome.audit_required, try retention.deleteVerifiedAggregate(
+        std.testing.allocator,
+        &aggregate,
+        &verified,
+        &deletion,
+    ));
+    try std.testing.expect(deletion.isPristine());
+    try fixture.tmp.dir.access(std.testing.io, "durable/handoff/foreign", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/release-evidence.json", .{});
+}
+
+test "production tomb fence rejects a foreign replacement before first unlink" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    defer aggregate.deinit() catch {};
+
+    const tomb = ".maru-aggregate-cleanup-test";
+    try fixture.tmp.dir.rename("durable/handoff", fixture.tmp.dir, "durable/" ++ tomb, std.testing.io);
+    try fixture.tmp.dir.rename("durable/" ++ tomb, fixture.tmp.dir, "durable/held-original", std.testing.io);
+    try fixture.tmp.dir.createDir(std.testing.io, "durable/" ++ tomb, .default_dir);
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "durable/" ++ tomb ++ "/foreign", .data = "do not delete\n" });
+
+    var deletion: retention.Deletion = .{};
+    deletion.tomb_len = tomb.len;
+    @memcpy(deletion.tomb[0..tomb.len], tomb);
+    try std.testing.expectError(error.AuthorityChanged, retention.testing_api.fenceConcreteTomb(&aggregate, &deletion));
+    try fixture.tmp.dir.access(std.testing.io, "durable/" ++ tomb ++ "/foreign", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/release-evidence.json", .{});
 }
 
 test "retained aggregate reopens and binds four fixed artifact roles" {

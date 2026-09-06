@@ -109,6 +109,16 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (BOOL)isEmpty { return self.from == self.to; }
 @end
 
+/// **어느 서술자에서 왔는지를 들고 다니는 요소.** 상태만 바뀌었을 때 그 자리에서 trait 만 갈아
+/// 끼우려면(아래 `refreshAccessibilityTraits`) 요소마다 제 출처를 알아야 한다 — 배열은 보는
+/// 순서로 정렬하므로 「몇 번째 요소」와 「몇 번째 서술자」가 다르다.
+@interface MaruA11yElement : UIAccessibilityElement
+@property (nonatomic) unsigned int bridgeIndex;
+@end
+
+@implementation MaruA11yElement
+@end
+
 @interface ChromeView : UIView <UITextInput>
 /// 배경으로 나갈 때 AppDelegate 가 부른다 — 키바가 잡고 있던 터치를 푼다.
 /// 같은 자리에서 밀린 화면(설정)이 잡고 있던 터치를 푼다.
@@ -143,8 +153,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UITextInputStringTokenizer *_tokenizer;
     /// 소프트 키보드가 덮는 높이(논리 px, 뷰 좌표). 레이아웃 가용 높이에서 뺀다.
     CGFloat _keyboardH;
-    /// 지난 프레임 서술자 묶음의 지문(M9) — 바뀐 프레임에만 다시 만들고 알린다.
-    unsigned long long _a11yDigest;
+    /// 지난 프레임 서술자 묶음의 지문(M9). **둘로 가른다** — 아래 `noteAccessibilityChange` 참고.
+    unsigned long long _a11yShape, _a11yState;
     /// **들고 있는** 접근성 요소들. 질의마다 새로 만들면 안 된다 — 아래 주석.
     NSArray *_a11yElements;
 }
@@ -356,32 +366,40 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
 /// `null` 에 크기 0 인 빈 그룹이었다. 그래서 **바뀔 때만** 다시 만들고 그 사이에는 같은 것을 준다.
 - (NSArray *)accessibilityElements {
     if (_a11yElements == nil) {
-        _a11yDigest = [self accessibilityDigest];
+        [self accessibilityDigestShape:&_a11yShape state:&_a11yState];
         _a11yElements = [self buildAccessibilityElements];
     }
     return _a11yElements;
 }
 
-/// 서술자 묶음이 바뀌었나를 **한 숫자로** 잰다. 개수만 보면 「같은 수의 다른 화면」을 못 잡는다.
-/// safe area 도 넣는다 — 돌리면 같은 서술자라도 **뷰 좌표가 달라진다**.
-- (unsigned long long)accessibilityDigest {
-    unsigned long long d = 1469598103934665603ULL; // FNV-1a offset basis
+/// 서술자 묶음이 바뀌었나를 **두 숫자로** 잰다.
+///
+/// **생김새**(`shape`)는 몇 개가 어디에 어떤 이름으로 있느냐다 — 이것이 바뀌면 화면이 바뀐 것이고,
+/// 스크린 리더에게 알려야 한다. **상태**(`state`)는 그 버튼들의 역할·비트다(눌러 둔 수정자 같은
+/// 것) — 이것만 바뀌면 요소는 다시 만들되 **알리지는 않는다**. 아래 `noteAccessibilityChange` 가
+/// 그 이유를 적는다.
+///
+/// safe area 는 생김새에 넣는다 — 돌리면 같은 서술자라도 **뷰 좌표가 달라진다**.
+- (void)accessibilityDigestShape:(unsigned long long *)outShape state:(unsigned long long *)outState {
+    unsigned long long shape = 1469598103934665603ULL; // FNV-1a offset basis
+    unsigned long long state = 1469598103934665603ULL;
     UIEdgeInsets safe = self.safeAreaInsets;
     unsigned long long edges[2] = { (unsigned long long)safe.left, (unsigned long long)safe.top };
-    for (unsigned int e = 0; e < 2; e++) { d ^= edges[e]; d *= 1099511628211ULL; }
+    for (unsigned int e = 0; e < 2; e++) { shape ^= edges[e]; shape *= 1099511628211ULL; }
     unsigned int n = maru_mobile_a11y_count();
     for (unsigned int i = 0; i < n; i++) {
-        unsigned long long parts[3] = {
-            maru_mobile_a11y_rect(i),
-            (unsigned long long)maru_mobile_a11y_role(i),
-            (unsigned long long)maru_mobile_a11y_state(i),
-        };
+        shape ^= maru_mobile_a11y_rect(i);
+        shape *= 1099511628211ULL;
         unsigned char name[256];
         unsigned long len = maru_mobile_a11y_label(i, name, sizeof name);
-        for (unsigned int p = 0; p < 3; p++) { d ^= parts[p]; d *= 1099511628211ULL; }
-        for (unsigned long b = 0; b < len; b++) { d ^= name[b]; d *= 1099511628211ULL; }
+        for (unsigned long b = 0; b < len; b++) { shape ^= name[b]; shape *= 1099511628211ULL; }
+        state ^= (unsigned long long)maru_mobile_a11y_role(i);
+        state *= 1099511628211ULL;
+        state ^= (unsigned long long)maru_mobile_a11y_state(i);
+        state *= 1099511628211ULL;
     }
-    return d;
+    *outShape = shape;
+    *outState = state;
 }
 
 /// 좌표는 브리지가 쓰는 논리 좌표(safe area 를 뺀 자리)라, 뷰 좌표로 돌리려면 safe area 를
@@ -409,28 +427,68 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
         NSString *label = [[NSString alloc] initWithBytes:buf length:got encoding:NSUTF8StringEncoding];
         if (label.length == 0) continue;
 
-        UIAccessibilityElement *e =
-            [[UIAccessibilityElement alloc] initWithAccessibilityContainer:self];
+        MaruA11yElement *e =
+            [[MaruA11yElement alloc] initWithAccessibilityContainer:self];
+        e.bridgeIndex = i;
         e.accessibilityLabel = label;
         e.accessibilityFrameInContainerSpace = CGRectMake(x + safe.left, y + safe.top, w, h);
         e.accessibilityTraits = maruA11yTraits(maru_mobile_a11y_role(i), maru_mobile_a11y_state(i));
         [out addObject:e];
     }
+    // **읽는 순서는 보는 순서다.** 브리지가 내는 순서는 **그리는 순서**라(앱 바를 자판·끊기 차례로
+    // 그린다) 그대로 주면 VoiceOver 로 훑을 때 오른쪽으로 갔다가 왼쪽으로 되돌아온다 — 실측:
+    // `뒤로 가기(x=0) → 자판(x=298) → 끊기(x=246)`. 화면에는 아무 표시가 없고 훑는 사람만 겪는다.
+    //
+    // **여기서 정렬하는 이유**: 순서는 뜻이 아니라 **읽는 방식**이고, 그것은 host 의 몫이다
+    // (RTL 언어에서는 좌우가 뒤집힌다 — 그때 고칠 자리도 여기 하나다).
+    [out sortUsingComparator:^NSComparisonResult(MaruA11yElement *a, MaruA11yElement *b) {
+        CGRect ra = a.accessibilityFrameInContainerSpace;
+        CGRect rb = b.accessibilityFrameInContainerSpace;
+        // 같은 줄인가는 **높이로** 잰다 — 픽셀 하나 어긋난 것을 다른 줄로 세면 순서가 널뛴다.
+        CGFloat tol = MIN(CGRectGetHeight(ra), CGRectGetHeight(rb)) / 2;
+        if (fabs(CGRectGetMinY(ra) - CGRectGetMinY(rb)) > tol) {
+            return CGRectGetMinY(ra) < CGRectGetMinY(rb) ? NSOrderedAscending : NSOrderedDescending;
+        }
+        if (CGRectGetMinX(ra) == CGRectGetMinX(rb)) return NSOrderedSame;
+        return CGRectGetMinX(ra) < CGRectGetMinX(rb) ? NSOrderedAscending : NSOrderedDescending;
+    }];
     return out;
 }
 
-/// 서술자 묶음이 바뀌면 **다시 만들고 스크린 리더에게 알린다.**
+/// 서술자 묶음이 바뀌면 다시 만들고, **생김새가 바뀌었을 때만** 스크린 리더에게 알린다.
 ///
 /// 안 알리면 화면을 옮겨도 커서가 **옛 버튼에 남는다** — 설정을 열었는데 커서는 여전히 「자판」에
-/// 있고, 짚어도 아무 일이 없다. 요소를 다시 묻게 하는 신호가 이것 하나다. 매 프레임 알리면
-/// 읽던 문장을 계속 끊으므로(커서 깜빡임만으로도 프레임은 바뀐다) **지문이 바뀔 때만** 알린다.
+/// 있고, 짚어도 아무 일이 없다. 요소를 다시 묻게 하는 신호가 이것 하나다.
+///
+/// **그런데 아무 때나 알리면 더 나쁘다.** 이 알림은 읽던 것을 끊고 커서를 되돌린다 — 상태만
+/// 바뀔 때(키바에서 ctrl 을 눌러 `selected` 가 켜지는 것)도 알리면, 사용자는 켜자마자 커서를 처음
+/// 으로 잃고 **다음 키까지 아홉 번을 다시 훑는다**. 그래서 요소는 다시 만들되(trait 이 최신이라야
+/// 「선택됨」이 제대로 읽힌다) 알림은 **생김새가 바뀔 때만** 보낸다.
 - (void)noteAccessibilityChange {
-    unsigned long long d = [self accessibilityDigest];
-    if (d == _a11yDigest && _a11yElements != nil) return;
-    _a11yDigest = d;
+    unsigned long long shape = 0, state = 0;
+    [self accessibilityDigestShape:&shape state:&state];
+    if (shape == _a11yShape && state == _a11yState && _a11yElements != nil) return;
+    BOOL layoutChanged = (shape != _a11yShape) || _a11yElements == nil;
+    _a11yShape = shape;
+    _a11yState = state;
+    if (!layoutChanged) {
+        // **자리에 둔 채 갈아 끼운다.** 알림을 안 보내도 요소 «객체»를 새로 만들면 커서가 붙잡고
+        // 있던 것이 사라진다 — 2회차에서 알림만 막은 것으로는 반쪽이었다(UIKit 의 뷰가 그대로
+        // 살아 있듯, 우리 요소도 살아 있어야 커서가 그 자리를 지킨다).
+        [self refreshAccessibilityTraits];
+        return;
+    }
     _a11yElements = [self buildAccessibilityElements];
     UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
     NSLog(@"MARU_A11Y elements=%lu", (unsigned long)_a11yElements.count);
+}
+
+/// 생김새는 그대로고 상태만 바뀌었을 때 — **같은 객체의** trait 만 새로 적는다.
+- (void)refreshAccessibilityTraits {
+    for (MaruA11yElement *e in _a11yElements) {
+        e.accessibilityTraits =
+            maruA11yTraits(maru_mobile_a11y_role(e.bridgeIndex), maru_mobile_a11y_state(e.bridgeIndex));
+    }
 }
 
 - (void)sendPointer:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {

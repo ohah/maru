@@ -10221,7 +10221,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"a11y 경계"},
         });
         const run_mobile_a11y_boundary_tests = b.addRunArtifact(mobile_a11y_boundary_tests);
-        run_mobile_a11y_boundary_tests.addArg("--maru-expect-tests=" ++ "3");
+        run_mobile_a11y_boundary_tests.addArg("--maru-expect-tests=" ++ "5");
         run_mobile_a11y_boundary_tests.setCwd(b.path("."));
         boundary_step.dependOn(&run_mobile_a11y_boundary_tests.step);
 

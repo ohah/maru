@@ -114,10 +114,62 @@ test "a11y 경계: 어휘는 host 에만, 좌표는 누르는 쪽과 같은 식�
 
     // 번역은 **한 함수 안에서만** 한다 — 두 곳에서 하면 역할이 조용히 갈린다.
     try std.testing.expectEqual(@as(usize, 1), count(host, "static UIAccessibilityTraits maruA11yTraits"));
-    try std.testing.expectEqual(@as(usize, 1), count(host, "e.accessibilityTraits = maruA11yTraits("));
+    // 어휘가 **그 함수 밖에 새지 않는다** — 부르는 자리는 둘이어도(만들 때·갈아 끼울 때) trait
+    // 상수를 적는 자리는 하나여야 한다. 두 곳에서 적으면 「꺼짐」이 한쪽에서만 붙는다.
+    try std.testing.expectEqual(@as(usize, 1), count(host, "UIAccessibilityTraitNotEnabled"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "UIAccessibilityTraitSelected"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "UIAccessibilityTraitStaticText"));
 
     // 브리지 좌표는 safe area 를 뺀 자리다. 읽는 자리도 **누르는 자리와 같은 식으로** 되돌린다 —
     // 한쪽만 고치면 스크린 리더가 짚는 곳이 손가락이 닿는 곳에서 노치만큼 어긋난다.
     try std.testing.expectEqual(@as(usize, 1), count(host, "CGRectMake(x + safe.left, y + safe.top, w, h)"));
     try std.testing.expect(count(host, "p.x - safe.left") >= 1);
+}
+
+test "a11y 경계: 읽는 순서는 보는 순서다" {
+    // **적대적 검증 1회차가 잡은 결함이다.** 브리지가 내는 순서는 그리는 순서라, 그대로 주면
+    // VoiceOver 로 훑을 때 `뒤로 가기(x=0) → 자판(x=298) → 끊기(x=246)` 로 오른쪽에 갔다가
+    // 왼쪽으로 되돌아온다(실측). 화면에는 아무 표시가 없고 **훑는 사람만** 겪는다.
+    const allocator = std.testing.allocator;
+    const host = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(host);
+
+    try std.testing.expectEqual(@as(usize, 1), count(host, "[out sortUsingComparator:"));
+    // 위에서 아래로, 그다음 왼쪽에서 오른쪽으로 — 둘 다 봐야 한다(하나만 보면 줄이 섞인다).
+    try std.testing.expect(count(host, "CGRectGetMinY(ra)") >= 1);
+    try std.testing.expect(count(host, "CGRectGetMinX(ra)") >= 1);
+    // 같은 줄 판정은 **높이로** 잰다 — 고정 픽셀로 재면 글자 크기를 키웠을 때 줄이 갈린다.
+    try std.testing.expectEqual(@as(usize, 1), count(host, "MIN(CGRectGetHeight(ra), CGRectGetHeight(rb)) / 2"));
+}
+
+test "a11y 경계: 상태만 바뀌면 알리지도 «갈아 끼우지도» 않는다" {
+    // **적대적 검증 2·3회차가 잡은 결함이다.** 레이아웃 변경 알림은 읽던 것을 끊고 커서를
+    // 되돌린다 — 키바에서 ctrl 을 켜자마자 커서를 잃으면 다음 키까지 아홉 번을 다시 훑는다.
+    // 그리고 알림을 막아도 **요소 객체를 새로 만들면** 커서가 붙잡고 있던 것이 사라진다.
+    const allocator = std.testing.allocator;
+    const host = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(host);
+
+    // 지문이 **둘**이다: 생김새(개수·자리·이름)와 상태(역할·비트).
+    try std.testing.expectEqual(@as(usize, 1), count(host, "- (void)accessibilityDigestShape:(unsigned long long *)outShape state:(unsigned long long *)outState"));
+    // 상태는 **생김새에 안 섞인다** — 섞으면 ctrl 하나에 화면이 바뀐 것으로 읽힌다.
+    try std.testing.expectEqual(@as(usize, 0), count(host, "shape ^= (unsigned long long)maru_mobile_a11y_state"));
+    try std.testing.expectEqual(@as(usize, 0), count(host, "shape ^= (unsigned long long)maru_mobile_a11y_role"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "state ^= (unsigned long long)maru_mobile_a11y_state(i)"));
+
+    // 알림은 **생김새가 바뀐 길에서만** 나간다.
+    const note = std.mem.indexOf(u8, host, "- (void)noteAccessibilityChange {") orelse return error.MissingNote;
+    const body_end = std.mem.indexOf(u8, host[note..], "\n}") orelse return error.MissingNoteEnd;
+    const body = host[note .. note + body_end];
+    const early = std.mem.indexOf(u8, body, "[self refreshAccessibilityTraits];") orelse return error.MissingRefresh;
+    const post = std.mem.indexOf(u8, body, "UIAccessibilityPostNotification") orelse return error.MissingPost;
+    try std.testing.expect(early < post); // 상태만 바뀐 길은 알림 앞에서 되돌아간다
+    try std.testing.expectEqual(@as(usize, 1), count(body, "return;\n    }"));
+
+    // 그리고 그 길은 **만들지 않는다** — 같은 객체의 trait 만 새로 적는다.
+    const refresh = std.mem.indexOf(u8, host, "- (void)refreshAccessibilityTraits {") orelse return error.MissingRefreshFn;
+    const r_end = std.mem.indexOf(u8, host[refresh..], "\n}") orelse return error.MissingRefreshEnd;
+    const r_body = host[refresh .. refresh + r_end];
+    try std.testing.expectEqual(@as(usize, 0), count(r_body, "alloc]"));
+    try std.testing.expectEqual(@as(usize, 1), count(r_body, "maruA11yTraits("));
 }

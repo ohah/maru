@@ -5251,17 +5251,25 @@ const SyntaxPaint = struct {
     rows: usize = 0,
     /// 그려진 행 수(색과 무관). 위 값의 분모다.
     total_rows: usize = 0,
+    /// **행 상한에 닿았다 — 잰 값을 믿으면 안 된다.** 두 배열이 따로 차므로, 색 없는 행이 상한을
+    /// 먼저 채우면 그 뒤의 **색칠된 행은 분자에만 들어가고 분모에는 안 들어간다**. 그러면 비율이
+    /// 부풀어 **거짓 초록**이 된다(실측 가능한 모양: 무색 512 행 + 색 300 행 → 300/512 로 통과,
+    /// 참값은 300/812). 상한에 닿은 것과 다 센 것이 **똑같이 초록으로 보이면 안 된다** — §2m.2 가
+    /// 깊이 상한에서 배운 그것이다. 그래서 이 값이 서면 판정은 «못 쟀다» 로 접는다.
+    capped: bool = false,
 };
 
 /// 한 화면에 들어갈 수 있는 행 수의 넉넉한 상한. 넘으면 **더 안 센다** — 판정이 그만큼 둔해질 뿐
 /// 거짓 초록이 되지는 않는다(분자·분모가 함께 막힌다).
 const max_rows = 512;
 
-fn addRow(rows: *[max_rows]f32, n: *usize, y: f32) void {
-    for (rows[0..n.*]) |r| if (@abs(r - y) < 0.5) return;
-    if (n.* == rows.len) return;
+/// 새 행이면 담는다. **자리가 없으면 `false`** — 조용히 버리면 안 된다(아래).
+fn addRow(rows: *[max_rows]f32, n: *usize, y: f32) bool {
+    for (rows[0..n.*]) |r| if (@abs(r - y) < 0.5) return true;
+    if (n.* == rows.len) return false;
     rows[n.*] = y;
     n.* += 1;
+    return true;
 }
 
 /// **셀 타입을 `anytype` 으로 받는다.** `d3d11_cells.Cell` 은 **Windows 밖에서 없는 타입**이라
@@ -5294,23 +5302,63 @@ fn countSyntaxPaint(cells: anytype, tk: *const maru.chrome.Tokens) SyntaxPaint {
     var rows_all: [max_rows]f32 = undefined;
     var n_rows_all: usize = 0;
     for (cells) |c| {
-        addRow(&rows_all, &n_rows_all, c.rect[1]);
+        if (!addRow(&rows_all, &n_rows_all, c.rect[1])) out.capped = true;
         if (c.fg[3] < 0.5) continue;
         for (want, 0..) |v, wi| {
             if (@abs(c.fg[0] - v[0]) + @abs(c.fg[1] - v[1]) + @abs(c.fg[2] - v[2]) < 0.01) {
                 out.colored += 1;
                 hit[wi] = true;
-                addRow(&rows_col, &n_rows_col, c.rect[1]);
+                // **여기서는 상한을 안 본다.** 색칠된 행은 전체 행의 **부분집합**이고 위에서
+                // `rows_all` 을 먼저 채우므로, 이쪽이 먼저 차는 일은 없다 — 그 검사를 두면
+                // 도달할 수 없는 안전장치가 되어 «막아 준다» 는 착각만 남는다(적대적 검증
+                // 11 회차: 그 자리를 지운 뮤턴트가 **초록이었다**). 대신 아래에서 그 관계를 못 박는다.
+                _ = addRow(&rows_col, &n_rows_col, c.rect[1]);
                 break;
             }
         }
     }
     out.rows = n_rows_col;
     out.total_rows = n_rows_all;
+    // 위 문단의 그 관계다 — 깨지면 상한 보고가 조용해진다.
+    std.debug.assert(n_rows_col <= n_rows_all);
     for (hit) |h| if (h) {
         out.distinct += 1;
     };
     return out;
+}
+
+test "행 상한에 닿으면 «못 쟀다» 로 접는다 — 상한이 조용하면 거짓 초록이 된다" {
+    // **두 배열이 따로 찬다.** 색 없는 행이 상한을 먼저 채우면 그 뒤의 색칠된 행은 **분자에만**
+    // 들어가고 분모에는 안 들어간다 — 비율이 부풀어 통과한다. 지금 편집기 프레임은 서른 행 남짓
+    // 이라 안 닿지만, **상한에 닿은 것과 다 센 것이 똑같이 초록으로 보이면 안 된다**(§2m.2).
+    const tk = chromeTokensFor(maru.config.theme.Config{});
+    const Cell = struct { rect: [4]f32 = @splat(0), fg: [4]f32 = @splat(0) };
+    const kw = tk.get(.syntax_keyword);
+    const kw_fg: [4]f32 = .{
+        @as(f32, @floatFromInt(kw.r)) / 255.0,
+        @as(f32, @floatFromInt(kw.g)) / 255.0,
+        @as(f32, @floatFromInt(kw.b)) / 255.0,
+        1,
+    };
+
+    var cells: std.ArrayList(Cell) = .empty;
+    defer cells.deinit(std.testing.allocator);
+    // 무색 행으로 상한을 꽉 채운다.
+    for (0..max_rows) |i| try cells.append(std.testing.allocator, .{
+        .rect = .{ 0, @floatFromInt(i * 2), 0, 0 },
+        .fg = .{ 0, 0, 0, 0 }, // 투명 — 색으로 안 세되 행으로는 센다
+    });
+    // 그 뒤에 색칠된 행 300 개. 분모는 이미 꽉 찼다.
+    for (0..300) |i| try cells.append(std.testing.allocator, .{
+        .rect = .{ 0, @floatFromInt((max_rows + i) * 2), 0, 0 },
+        .fg = kw_fg,
+    });
+
+    const got = countSyntaxPaint(cells.items, &tk);
+    // **비율만 보면 통과한다** — 그것이 이 판정이 있는 이유다.
+    try std.testing.expect(got.rows * 2 >= got.total_rows);
+    // 그래서 상한을 **값으로** 들고 나온다.
+    try std.testing.expect(got.capped);
 }
 
 test "구문 색 세기는 셀마다 한 번, 행마다 한 번, 그리고 구문 색만" {
@@ -6198,6 +6246,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var esyn_first_line: usize = 0;
     var esyn_rows: usize = 0;
     var esyn_total_rows: usize = 0;
+    var esyn_capped = false;
     // **스크롤한 편집기의 색**(W8.28). `esyn_scroll_floor` 는 기존 스크롤 판정(790·792)과 그 뒤의
     // 가로 스크롤 판정이 **끝난 뒤**다. 실측으로는 0 으로 내려도 아무 판정이 안 바뀌지만, 그것은
     // 790 이 보는 파일이 마침 `.yml` 이라서다 — 근거가 우연이면 값은 남긴다(적대적 검증 7 회차).
@@ -6212,6 +6261,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var esyn2_distinct: usize = 0;
     var esyn2_rows: usize = 0;
     var esyn2_total_rows: usize = 0;
+    var esyn2_capped = false;
     var editor_hold_first = false;
     var editor_hold_scrolled = false;
     // ── 폴백 목록을 몇 번 짓는가 (W8.23) ──────────────────────────────────────────────────
@@ -11442,7 +11492,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **스크롤한 뒤에 잰다.** 첫 화면은 `first_line == 0` 이라 「창 앞의 빈 줄」 축이
                 // 0 이고, 그러면 그 축이 틀려도 색이 맞아 보인다 — 실제로 이 판정이 처음에 그
                 // 자리에서 무장했다(적대적 검증 7 회차).
-                if (smoke and !esyn_judgeable and of.syntax != null and be.cells.items.len > 0) {
+                // **가로로 굴러간 프레임은 안 잰다.** 본문이 화면 오른쪽 밖으로 나가면 줄 번호만
+                // 남아 색이 0 이 되는데, 그것은 결함이 아니라 그 화면의 성질이다 — 실측: 가로 막대를
+                // 끄는 스핀 980 에서 편집기가 **462 → 52 셀**로 떨어지고 색칠된 행이 0/30 이다.
+                // 이 판정이 무장하는 자리(977)와 그 스핀은 **셋 차이**였다(적대적 검증 13 회차).
+                if (smoke and !esyn_judgeable and of.syntax != null and of.first_col == 0 and be.cells.items.len > 0) {
                     const paint = countSyntaxPaint(be.cells.items, &chrome_tokens);
                     esyn_judgeable = true;
                     esyn_total = be.cells.items.len;
@@ -11451,6 +11505,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     esyn_distinct = paint.distinct;
                     esyn_rows = paint.rows;
                     esyn_total_rows = paint.total_rows;
+                    esyn_capped = paint.capped;
                 }
                 // ── 스크롤한 뒤에도 색이 나는가 (W8.28) ──────────────────────────────────
                 //
@@ -11472,7 +11527,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 보는 파일이 마침 `.yml` 이라 내가 `.zig` 를 굴려도 안 겹친다. 파일 순서가 바뀌면
                 // 그 우연이 사라지고, 그때 이 둘이 없으면 **판정을 세우면서 판정을 흔들게** 된다.
                 // 「지금 안 걸린다」와 「걸릴 수 없다」는 다르다.
-                if (smoke and of.syntax != null and spins >= esyn_scroll_floor) {
+                if (smoke and of.syntax != null and of.first_col == 0 and spins >= esyn_scroll_floor) {
                     if (!esyn2_sent) {
                         esyn2_sent = true;
                         esyn2_before = of.first_line;
@@ -11486,7 +11541,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             @intCast(geom.terminal.y + geom.terminal.h / 2),
                             -3,
                         );
-                    } else if (!esyn2_judgeable and std.mem.eql(u8, of.path, esyn2_path) and
+                    } else if (!esyn2_judgeable and std.mem.eql(u8, of.path, esyn2_path) and of.first_col == 0 and
                         of.first_line > esyn2_before and be.cells.items.len > 0)
                     {
                         const paint = countSyntaxPaint(be.cells.items, &chrome_tokens);
@@ -11497,6 +11552,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         esyn2_distinct = paint.distinct;
                         esyn2_rows = paint.rows;
                         esyn2_total_rows = paint.total_rows;
+                        esyn2_capped = paint.capped;
                         // 되돌린다 — 위 문단.
                         window.postSyntheticMouseWheel(
                             .wheel,
@@ -12903,7 +12959,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 첫 화면도 **같은 문턱**을 쓴다(실측 26/30). 둘이 다른 잣대를 쓰면 어느 쪽이 옳은지
             // 아무도 모른다 — 다만 이 판정만으로는 축 결함을 못 잡는다(`first_line == 0` 이라
             // 그 인자가 아무 일도 안 한다). 그것을 잡는 것은 아래 `editor_syntax_scrolled` 다.
-            const esyn_ok = esyn_judgeable and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
+            const esyn_ok = esyn_judgeable and !esyn_capped and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
             // **스크롤한 뒤에도 색이 나는가.** 첫 화면 판정과 문턱이 같고, 더해서 **창이 실제로
             // 내려갔는지**(`first_line > 0`)를 요구한다 — 그것이 이 판정이 첫 화면 판정과 다른
             // 유일한 이유다. 굴렸는데 안 내려갔으면 잰 것이 없다.
@@ -12912,19 +12968,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 성한 것은 행 **28/31**, `leading_empty` 를 0 으로 둔 뮤턴트는 **1/31**(칸 수로는
             // 370→21 인데, 그것만 보는 판정은 «0 보다 크다» 로 **초록이었다**).
             // 절반은 그 두 실측 사이에서 고른 값이고 양쪽에 큰 여유가 있다.
-            const esyn2_ok = esyn2_judgeable and esyn2_first_line > 0 and
+            const esyn2_ok = esyn2_judgeable and !esyn2_capped and esyn2_first_line > 0 and
                 esyn2_rows * 2 >= esyn2_total_rows and esyn2_distinct >= 2;
-            try stdout.print("editor_syntax: judgeable={} first_line={d} colored={d}/{d} rows={d}/{d} roles={d} editor_syntax_ok={}\n", .{
+            try stdout.print("editor_syntax: judgeable={} first_line={d} colored={d}/{d} rows={d}/{d} capped={} roles={d} editor_syntax_ok={}\n", .{
                 esyn_judgeable,
                 esyn_first_line,
                 esyn_cells,
                 esyn_total,
                 esyn_rows,
                 esyn_total_rows,
+                esyn_capped,
                 esyn_distinct,
                 esyn_ok,
             });
-            try stdout.print("editor_syntax_scrolled: judgeable={} first_line={d}->{d} colored={d}/{d} rows={d}/{d} roles={d} editor_syntax_scrolled_ok={}\n", .{
+            try stdout.print("editor_syntax_scrolled: judgeable={} first_line={d}->{d} colored={d}/{d} rows={d}/{d} capped={} roles={d} editor_syntax_scrolled_ok={}\n", .{
                 esyn2_judgeable,
                 esyn2_before,
                 esyn2_first_line,
@@ -12932,6 +12989,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 esyn2_total,
                 esyn2_rows,
                 esyn2_total_rows,
+                esyn2_capped,
                 esyn2_distinct,
                 esyn2_ok,
             });

@@ -7875,8 +7875,13 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
     // 실패 지점을 하나씩 뒤로 밀며 연다. 열기 한 번이 쓰는 할당 수보다 넉넉히 돈다.
     var failed_steps: usize = 0;
     var ok_steps: usize = 0;
+    // 실패를 못 주입한 스텝이 나오면 그 뒤는 전부 같은 성공이라 멈춘다(`editor_diff.zig`와 같은 방법).
+    // **측정값이다**(2026-09-06): 24 스텝 중 7 스텝이 실패를 못 주입하고 있었다. 아래 개수 단언은
+    // 그대로 성립한다 — 멈추는 그 스텝이 성공 스텝 하나를 보장한다.
+    var clean_pass = false;
     var step: usize = 0;
     while (step < 24) : (step += 1) {
+        if (clean_pass) break;
         var failing = std.testing.FailingAllocator.init(backing, .{});
         const alloc = failing.allocator();
 
@@ -7892,6 +7897,9 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         defer session.deinit(); // 누수·이중 해제는 backing(=testing.allocator)이 잡는다
 
         // **여기서부터** 실패시킨다 — init이 쓴 할당은 건드리지 않는다.
+        defer if (!failing.has_induced_failure) {
+            clean_pass = true;
+        };
         failing.fail_index = failing.allocations + step;
         const term = openPathInActivePane(session, path) catch {
             failed_steps += 1;
@@ -12712,8 +12720,13 @@ test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 �
     const backing = testing.allocator;
 
     var reached: usize = 0; // 실제로 편집이 성사된 지점 수
+    // 한 스텝이 **실패를 못 주입한 채** 끝나면(할당 수를 넘어섰다) 그 뒤는 전부 같은 성공이라 멈춘다
+    // (`editor_diff.zig`의 비교 계산 훑기와 같은 방법). **측정값이다**(2026-09-06, Debug, macOS arm64):
+    // 40 스텝 중 19 스텝이 실패를 못 주입하고 있었다. 검증 범위는 그대로다.
+    var clean_pass = false;
     var step: usize = 0;
     while (step < 40) : (step += 1) {
+        if (clean_pass) break;
         var failing = std.testing.FailingAllocator.init(backing, .{});
         const alloc = failing.allocator();
 
@@ -12738,6 +12751,9 @@ test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 �
         term.rt.editor_hit_geom.tab_width = 4;
 
         // **여기서부터** 실패시킨다. 편집 자체가 막히는 지점도, 갱신 중간에 막히는 지점도 지난다.
+        defer if (!failing.has_induced_failure) {
+            clean_pass = true;
+        };
         failing.fail_index = failing.allocations + step;
         term.rt.editor_selection = editor_selection.Selection.at(0);
         _ = insertText(fx.session, term, "z");
@@ -14243,8 +14259,12 @@ test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
     //    실패하는 경우는 **할당 실패**뿐이므로, `EDIT6`처럼 실패 지점을 하나씩 밀며 잰다.
     {
         var reached: usize = 0;
+        // 실패를 못 주입한 스텝이 나오면 그 뒤는 전부 같은 성공이라 멈춘다(`EDIT6`과 같은 방법).
+        // **측정값이다**(2026-09-06): 40 스텝 중 16 스텝이 실패를 못 주입하고 있었다.
+        var clean_pass = false;
         var step: usize = 0;
         while (step < 40) : (step += 1) {
+            if (clean_pass) break;
             var failing = std.testing.FailingAllocator.init(allocator, .{});
             const alloc = failing.allocator();
             var fx2 = try PaneFixture.init(alloc);
@@ -14254,6 +14274,9 @@ test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
             const before2 = allocator.dupe(u8, t2.rt.editor_doc.?.file.content) catch continue;
             defer allocator.free(before2);
 
+            defer if (!failing.has_induced_failure) {
+                clean_pass = true;
+            };
             failing.fail_index = failing.allocations + step;
             const ok = cutSelection(fx2.session, t2);
             if (!ok) {

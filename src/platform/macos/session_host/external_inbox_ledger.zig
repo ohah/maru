@@ -7153,7 +7153,16 @@ test "ledger enforces exact item cap with canonical empty leases" {
         error.ItemCapExceeded,
         ledger.reserveLease(leaseSemantic(7, false), &rejected),
     );
-    for (tokens) |token| try ledger.releaseLease(token);
+    // 뒷정리는 **일부만 개별 해제하고 나머지는 drainAll 로 한 번에** 비운다. `release` 한 번은
+    // 변조 감지(다이제스트·별칭·시뮬레이션 재계산)를 위해 슬롯 전체를 여러 번 도는 방어 설계라,
+    // 4096 개를 하나씩 풀면 O(n²)다 — **측정값이다**(2026-09-06, Debug, macOS arm64): 예약 0.7 초,
+    // 개별 해제 4096 회 15.6 초(begin 2.4 · prepare 4.4 · finish 7.4 · commit 1.4). 이 판정자가
+    // 지키는 것은 **정확한 상한**이고 그 부분은 그대로다. 개별 해제 경로는 여기 64 회와 다른
+    // 판정자들이 계속 덮고, drainAll 이 돌려준 개수와 `finish` 가 회계가 0 으로 돌아왔음을 본다.
+    const individually_released: usize = 64;
+    for (tokens[0..individually_released]) |token| try ledger.releaseLease(token);
+    const report = try ledger.drainAll();
+    try std.testing.expectEqual(max_items - individually_released, report.drained_active_count);
     try ledger.finish();
 }
 

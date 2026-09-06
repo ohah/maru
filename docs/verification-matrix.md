@@ -1153,6 +1153,17 @@ filesystem full fence·GitHub network·앱 E2E 지연과는 별도 지표로 표
 이 gate는 네 remote leaf 호출, 공통 publication suffix composition, executable command, workflow stage 5~8, aggregate cleanup 또는
 frozen signed U5 E2E의 증거가 아니다.
 
+U5 resume publication composition은 final-address `Execution` 안의 §11.63 asset graph, 공통 suffix transaction과 네 typed
+leaf result를 하나의 deadline으로 조합한다. 각 leaf production entrypoint는 한 번 받은 plain snapshot이 아니라 exact graph를
+snapshot source로 빌려 remote child 전후에 다시 fence하고, 기존 leaf의 production transport/parser/state core를 재사용한다.
+`test-session-host-release-adapter-candidate-resume-publication-product`는 exact stage order와 graph fence inventory, 모든 boundary
+drift, attachment mutation 전/후의 local failure 대 audit 전이, publication/post-publish audit, 성공 reverse cleanup 및 cleanup
+retry suffix, execution/source/CLI/deadline/token/response final-address·alias·borrow 0을 Debug·ReleaseFast에서 고정한다. source
+sentinel은 generic test seam의 제품 caller 0, snapshot-source entrypoint별 production transport 재사용과 resume composition caller
+exact 1을 검증한다. synthetic response와 harness-owned owner만 사용하므로 실제 GitHub release·credential·앱 session-host 상태를
+건드리지 않는다. executable command, workflow stage 5~8, aggregate 삭제, source execution 최종 정산과 frozen signed U5 E2E는
+후속 증거다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

@@ -146,6 +146,11 @@ pub fn main(init: std.process.Init.Minimal) void {
     // 실행만 건너뛰어 러너 시간을 던다.
     const skip_prefixes = envPrefix("MARU_TEST_SKIP_PREFIX");
     const keep_prefixes = envPrefix("MARU_TEST_KEEP_PREFIX");
+    // `MARU_TEST_KEEP_ONLY_PREFIX`: 이것으로 시작하는 이름 **만** 돌린다(나머지는 FILTERED). 같은 모듈 그래프를
+    // 루트만 달리해 컴파일한 바이너리가 다른 바이너리의 테스트를 통째로 다시 도는 «번짐»을, 자기 몫만 남기고 끊는
+    // 용도다(예: client_external_rx_read_test_support — 1,589개 중 1,555개가 client_external_pump 바이너리와 동일).
+    const keep_only_prefixes = envPrefix("MARU_TEST_KEEP_ONLY_PREFIX");
+    var kept: usize = 0;
     var filtered: usize = 0;
 
     var passed: usize = 0;
@@ -154,6 +159,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     var leaked: usize = 0;
 
     for (test_functions, 0..) |test_fn, index| {
+        if (keep_only_prefixes != null and !matchesPrefix(test_fn.name, keep_only_prefixes)) {
+            filtered += 1;
+            if (!have_tty) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
+            continue;
+        }
+        if (keep_only_prefixes != null) kept += 1;
         if (matchesPrefix(test_fn.name, skip_prefixes) and !matchesPrefix(test_fn.name, keep_prefixes)) {
             filtered += 1;
             if (!have_tty) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
@@ -219,6 +230,11 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (logged_errors != 0) std.debug.print("{d} errors were logged.\n", .{logged_errors});
     if (filtered != 0) std.debug.print("{d} tests filtered by prefix.\n", .{filtered});
     // skip prefix 를 줬는데 하나도 안 걸렸다 = prefix 오타/이름 규칙 변화. 조용히 시간만 그대로 쓰지 말고 빨개진다.
+    // keep-only 를 줬는데 하나도 안 남았다 = prefix 오타. 조용히 «0개 돌리고 초록»이 되지 않게 빨개진다.
+    if (keep_only_prefixes != null and kept == 0) {
+        std.debug.print("keep-only prefix kept no tests — check MARU_TEST_KEEP_ONLY_PREFIX\n", .{});
+        std.process.exit(1);
+    }
     if (skip_prefixes != null and filtered == 0) {
         std.debug.print("skip prefix matched no tests — check --maru-skip-prefix\n", .{});
         std.process.exit(1);

@@ -16597,6 +16597,11 @@ pub fn build(b: *std.Build) void {
         if (posix_host_tests) test_step.dependOn(&run_external_rx_read_tests.step);
         macos_only_test_step.dependOn(&run_external_rx_read_tests.step);
         session_host_step.dependOn(&run_external_rx_read_tests.step);
+        // 이 바이너리의 1,589개 중 1,555개는 client_external_pump 바이너리와 **동일한 번짐**이다(같은 session_host 그래프를
+        // 루트만 달리해 컴파일). test-macos-only 에서 109초를 두 번 내던 것 — 자기 몫(rx_read_test_support.*) 33개만 남긴다.
+        // 컴파일되는 테스트 집합(1,590개)은 그대로고 실행만 건너뛴다(러너가 FILTERED 로 찍는다). 공통분은 client_external_pump
+        // 바이너리가 같은 단계에서 계속 돈다. 실측(2026-09-06 프로브): 34 passed / 1,556 filtered / 0 failed.
+        run_external_rx_read_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "client_external_rx_read_test_support.");
     }
 
     // Opt-in external oracle: validates committed goldens against system libvterm.

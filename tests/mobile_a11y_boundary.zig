@@ -174,3 +174,33 @@ test "a11y 경계: 상태만 바뀌면 알리지도 «갈아 끼우지도» 않�
     try std.testing.expectEqual(@as(usize, 0), count(r_body, "alloc]"));
     try std.testing.expectEqual(@as(usize, 1), count(r_body, "maruA11yTraits("));
 }
+
+test "a11y 경계: Android 는 «누르는 경로 그대로» 누르고, 좌표를 두 번 세지 않는다" {
+    // TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
+    // 합성해 주지 않는다. 그 길이 없으면 「읽히는데 안 눌리는」 버튼만 남는다.
+    const allocator = std.testing.allocator;
+    const host = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(host);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+
+    // 누름은 **네이티브의 포인터 경로 그대로**다(down/up 한 쌍). 새 경로를 만들면 제스처·라우팅이
+    // 아는 것을 못 쓰고, 그 순간 「스크린 리더로 누른 것」만 다르게 군다.
+    try std.testing.expectEqual(@as(usize, 2), count(host, "maru_mobile_pointer(0, 0, lx, ly, t)") + count(host, "maru_mobile_pointer(2, 0, lx, ly, t)"));
+    try std.testing.expectEqual(@as(usize, 1), count(java, "return nativeA11yClick(virtualViewId);"));
+    // 동작을 안 붙이면 `setClickable` 만으로는 두 번 두드리기가 안 온다.
+    try std.testing.expectEqual(@as(usize, 1), count(java, "node.addAction(AccessibilityNodeInfo.ACTION_CLICK)"));
+
+    // **좌표를 되돌리는 자리는 네이티브 하나다.** Java 가 scale·inset 을 알면 두 번째 진실이 생겨
+    // 스크린 리더가 짚는 곳과 손가락이 닿는 곳이 어긋난다.
+    try std.testing.expectEqual(@as(usize, 0), countCode(java, "g.scale"));
+    try std.testing.expectEqual(@as(usize, 0), countCode(java, "getResources().getDisplayMetrics"));
+    try std.testing.expect(count(host, "float scale = g.scale;") >= 1);
+
+    // 알림은 **생김새가 바뀔 때만** — 상태(역할·비트)는 지문에 안 넣는다(iOS 와 같은 규율).
+    try std.testing.expectEqual(@as(usize, 0), count(host, "shape ^= (unsigned long long)maru_mobile_a11y_state"));
+    try std.testing.expectEqual(@as(usize, 1), count(java, "public static void a11yChanged()"));
+
+    // 그리고 **d8 이 죽지 않게** provider 는 static 이다(아래 판정자가 그 이유를 적는다).
+    try std.testing.expectEqual(@as(usize, 1), count(java, "private static final class Provider extends AccessibilityNodeProvider"));
+}

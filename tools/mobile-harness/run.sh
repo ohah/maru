@@ -336,7 +336,11 @@ chrome-android-app)
     javac -source 8 -target 8 -nowarn -bootclasspath "$SDK/platforms/android-35/android.jar" \
         -d "$OUT/java" "$ANDROID/MaruActivity.java" "$ANDROID/MaruSshService.java" \
         "$ANDROID/MaruKeyStore.java"
-    "$BT/d8" --min-api 29 --output "$OUT" $(find "$OUT/java" -name '*.class')
+    # **`--lib` 를 준다.** 라이브러리 추상 클래스를 상속하고 `super` 를 부르는 클래스가 생기면
+    # (접근성 `AccessibilityNodeProvider`) d8 이 상위 사슬을 못 찾아 **내부 오류로 죽는다**
+    # (실측: "Cannot invoke String.length()" NPE). 그 전까지는 그런 클래스가 없어 안 드러났다.
+    "$BT/d8" --min-api 29 --lib "$SDK/platforms/android-35/android.jar" \
+        --output "$OUT" $(find "$OUT/java" -name '*.class')
     python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.write(sys.argv[3],"classes.dex");z.close()' \
         "$OUT/base.apk" "$OUT/libmaruchrome.so" "$OUT/classes.dex"
     [ -f "$OUT/debug.keystore" ] || keytool -genkeypair -keystore "$OUT/debug.keystore" \

@@ -134,6 +134,7 @@ static unsigned long long nowMs(void) {
 }
 
 static void drainHostKeyDecision(void);
+static void noteA11yChange(void); // 서술자 묶음이 바뀌면 TalkBack 에 알린다(M9)
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -141,6 +142,7 @@ static uint8_t *g_glyph_px = NULL;
 // 다시 굽지 않으므로, 원본이 없으면 재개 뒤 **이모지가 영영 안 보인다**(실측: 홈으로 나갔다
 // 돌아오니 이모지만 사라지고 한글·ASCII 는 멀쩡했다).
 static uint8_t *g_color_px = NULL;
+static unsigned long long g_a11y_shape = 0; // 지난 프레임 서술자 «생김새» 지문(M9)
 static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
 
@@ -798,6 +800,7 @@ static void drawFrame(void) {
     // **페이싱을 재는 동안에는 안 쉰다.** `MARU_PACE` 는 프레젠트 간격을 재는 판정자라 쉰 간격이
     // 섞이면 거짓으로 붉어진다. 그 측정은 시작할 때 표본을 다 채우면 끝나므로(`pace_done`), 그
     // 뒤부터 쉰다 — 판정자도 살고 테스트 전용 스위치도 필요 없다.
+    noteA11yChange();
     if (!frame_changed && g.pace_done) {
         g.last_ms = 0;  // 다음에 그린 프레임이 «쉰 만큼» 을 간격으로 세지 않게(MARU_PACE)
         g.idle_skips++;
@@ -1384,6 +1387,131 @@ Java_dev_maru_MaruActivity_nativeInputKind(JNIEnv *env, jclass cls) {
     unsigned int k = maru_mobile_input_kind();
     pthread_mutex_unlock(&g_bridge_lock);
     return (jint)k;
+}
+
+/// 서술자 묶음의 **생김새**(개수·자리·이름)가 바뀌면 Java 를 통해 TalkBack 에 알린다.
+///
+/// **상태(역할·비트)는 안 센다.** 그것까지 세면 키바에서 수정자를 켤 때마다 알림이 나가고,
+/// 그 알림은 읽던 것을 끊고 커서를 되돌린다 — 다음 키까지 처음부터 다시 훑게 된다(iOS 어댑터가
+/// 같은 이유로 지문을 둘로 가른다). 상태는 노드를 **물을 때마다** 새로 읽으므로 안 알려도 최신이다.
+static void noteA11yChange(void) {
+    // **재는 동안만 잠근다.** IME 스레드가 코어에 쓰는 것과 겹치면 서술자를 반쯤 읽는다.
+    // 그리고 **Java 를 부를 때는 놓는다** — 락을 쥔 채 JNI 로 올라가면 그쪽이 다시 내려올 때
+    // 맞물린다(가상 노드 질의가 곧 이 락을 잡는다).
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long long shape = 1469598103934665603ull; // FNV-1a
+    unsigned int n = maru_mobile_a11y_count();
+    for (unsigned int i = 0; i < n; i++) {
+        shape ^= maru_mobile_a11y_rect(i);
+        shape *= 1099511628211ull;
+        unsigned char name[256];
+        unsigned long len = maru_mobile_a11y_label(i, name, sizeof name);
+        for (unsigned long b = 0; b < len; b++) { shape ^= name[b]; shape *= 1099511628211ull; }
+    }
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (shape == g_a11y_shape) return;
+    g_a11y_shape = shape;
+    if (!g_activity_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    if ((*g_app->activity->vm)->AttachCurrentThread(g_app->activity->vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "a11yChanged", "()V");
+    if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
+    LOGI("MARU_A11Y elements=%u", n);
+}
+
+// ── 접근성 어댑터 (M9) ─────────────────────────────────────────────────────
+//
+// TalkBack 은 **가상 뷰 계층**으로 읽는다(`AccessibilityNodeProvider`). Java 가 그 계층을 세우고,
+// 여기서는 브리지의 서술자를 **Java 가 바로 쓸 수 있는 값**으로 넘긴다.
+//
+// **좌표를 여기서 바꾸는 이유**: 브리지 좌표는 safe area 를 뺀 논리 좌표이고, 뷰 좌표로 되돌리는
+// 식(`* scale + inset`)은 **누르는 경로가 이미 아는 것**이다(위 `AMotionEvent` 처리). Java 가
+// scale·inset 을 따로 알면 그 순간 두 번째 진실이 생겨, 스크린 리더가 짚는 곳과 손가락이 닿는
+// 곳이 조용히 어긋난다.
+
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yCount(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int n = maru_mobile_a11y_count();
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)n;
+}
+
+/// 자리 — **뷰 픽셀**로 (x<<48)|(y<<32)|(w<<16)|h. 없는 index 는 0.
+JNIEXPORT jlong JNICALL
+Java_dev_maru_MaruActivity_nativeA11yRect(JNIEnv *env, jclass cls, jint index) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long long packed = maru_mobile_a11y_rect((unsigned int)index);
+    float scale = g.scale;
+    float ox = (float)g.inset_left, oy = (float)g.inset_top;
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (packed == 0) return 0;
+    unsigned long long lx = (packed >> 48) & 0xFFFF, ly = (packed >> 32) & 0xFFFF;
+    unsigned long long lw = (packed >> 16) & 0xFFFF, lh = packed & 0xFFFF;
+    unsigned long long x = (unsigned long long)((float)lx * scale + ox);
+    unsigned long long y = (unsigned long long)((float)ly * scale + oy);
+    unsigned long long w = (unsigned long long)((float)lw * scale);
+    unsigned long long h = (unsigned long long)((float)lh * scale);
+    return (jlong)((x << 48) | (y << 32) | (w << 16) | h);
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yRole(JNIEnv *env, jclass cls, jint index) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int r = maru_mobile_a11y_role((unsigned int)index);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)r;
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yState(JNIEnv *env, jclass cls, jint index) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int st = maru_mobile_a11y_state((unsigned int)index);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)st;
+}
+
+/// 이름. **길이를 먼저 묻고 담는다** — 브리지는 글자 한가운데서 안 끊으므로 받은 것은 언제나
+/// 온전한 UTF-8 이다(`NewStringUTF` 는 잘린 바이트를 받으면 무엇을 만들지 모른다).
+JNIEXPORT jstring JNICALL
+Java_dev_maru_MaruActivity_nativeA11yLabel(JNIEnv *env, jclass cls, jint index) {
+    (void)cls;
+    unsigned char buf[257];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long need = maru_mobile_a11y_label((unsigned int)index, buf, 0);
+    unsigned long cap = need < sizeof buf - 1 ? need : sizeof buf - 1;
+    unsigned long got = maru_mobile_a11y_label((unsigned int)index, buf, cap);
+    pthread_mutex_unlock(&g_bridge_lock);
+    buf[got] = 0;
+    return (*env)->NewStringUTF(env, (const char *)buf);
+}
+
+/// TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
+/// 합성해 주지 않는다. 그래서 여기서 **누르는 경로 그대로** 눌러 준다(down/up 한 쌍). 이 함수가
+/// 없으면 TalkBack 사용자에게는 「읽히는데 안 눌리는」 버튼만 남는다.
+JNIEXPORT jboolean JNICALL
+Java_dev_maru_MaruActivity_nativeA11yClick(JNIEnv *env, jclass cls, jint index) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long long packed = maru_mobile_a11y_rect((unsigned int)index);
+    if (packed == 0) {
+        pthread_mutex_unlock(&g_bridge_lock);
+        return JNI_FALSE;
+    }
+    float lx = (float)((packed >> 48) & 0xFFFF) + (float)((packed >> 16) & 0xFFFF) / 2.0f;
+    float ly = (float)((packed >> 32) & 0xFFFF) + (float)(packed & 0xFFFF) / 2.0f;
+    unsigned long long t = nowMs();
+    maru_mobile_pointer(0, 0, lx, ly, t);
+    maru_mobile_pointer(2, 0, lx, ly, t);
+    pthread_mutex_unlock(&g_bridge_lock);
+    // **이 줄이 있어야 「스크린 리더가 누른 것」과 「손가락이 누른 것」을 가른다.** 없으면 둘이
+    // 같은 자국을 남겨, 두 번 두드리기가 정말 이 길로 왔는지 확인할 방법이 없다(실측하며 겪었다).
+    LOGI("MARU_A11Y click=%d", (int)index);
+    return JNI_TRUE;
 }
 
 /// **눌러 둔 보조 키바 수정자.** IME shim 이 조합을 건너뛸지 판정하는 데 쓴다 — `Ctrl+B` 는

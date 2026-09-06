@@ -580,8 +580,16 @@ AOSP `ScrollView` 는 기준을 **하나**(`mLastMotionY`) 두므로 `onSecondar
 을 보낸다 — 안 보내면 화면을 옮겨도 스크린 리더 커서가 옛 버튼에 남는다. 좌표는 **누르는 쪽과
 같은 식으로** 되돌린다(브리지 좌표 + safe area).
 
-**Android 어댑터는 아직 없다** — `AccessibilityNodeInfo` 가상 뷰 계층은
-[계획 M9](plans/mobile-platform.md)가 소유한다. 그 전까지 TalkBack 에게 모바일은 빈 화면이다.
+**Android 는 `AccessibilityNodeProvider` 의 가상 뷰 계층으로 낸다.** IME 를 받는 전면 뷰가 그
+계층을 들고, 노드는 **질의마다 새로 만든다**(iOS 와 반대다 — 거기서는 들고 있어야 커서를 안 잃는다.
+`AccessibilityNodeInfo` 는 프레임워크가 회수하는 값이다).
+
+**두 번 두드리기는 `ACTION_CLICK` 으로 온다** — iOS 처럼 터치를 합성해 주지 않는다. 그래서 그
+동작을 받아 **누르는 경로 그대로** 눌러 준다(포인터 down/up 한 쌍). 이 길이 없으면 읽히기만 하고
+안 눌린다. 좌표를 뷰 픽셀로 되돌리는 것도 네이티브에서 한다 — 그 식(`* scale + inset`)은 누르는
+경로가 이미 아는 것이고, Java 가 따로 알면 두 번째 진실이 된다.
+
+알림은 iOS 와 같은 규율이다: **생김새가 바뀔 때만** `TYPE_WINDOW_CONTENT_CHANGED` 를 보낸다.
 
 **안 바뀐 프레임은 GPU 를 안 쓴다.** 빌드는 매 tick 그대로 돌고, 낸 quad 가 지난 프레임과 같으면
 host 가 획득·제출·프레젠트를 통째로 건너뛴다(`maru_mobile_frame_changed`). **깃발이 아니라 결과를

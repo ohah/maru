@@ -1866,7 +1866,14 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                 // **우리 pane 의 것만 먹는다.** 채널은 host 당 하나라(RA4) 여러 pane 이 섞여 온다.
                 // 형태 검증(경로 문자·대문자 등)은 채널이 이미 했다(`parseFrame`). 여기서는 **우리
                 // 것인가**만 본다 — 발급할 때 쓴 값과 바이트가 같아야 한다.
-                if (nonce.len == 0 or !std.mem.eql(u8, e.nonce, nonce)) continue;
+                if (nonce.len == 0 or !std.mem.eql(u8, e.nonce, nonce)) {
+                    // **주인을 못 찾은 이벤트를 기록한다**(진단 전용 — 판정에는 안 쓴다).
+                    // 스풀·스트리머·분배까지 다 정상인데 여기서 조용히 버려지면, 배지는 안 뜨고
+                    // 이유는 어디에도 없다. 2026-09-07 에 그 벽에 세 번 부딪혔다.
+                    self.noteUnmatchedRemoteNonce(e.nonce, nonce);
+                    continue;
+                }
+                self.remote_nonce_matched +|= 1;
                 var un: std.ArrayListUnmanaged(u8) = .empty;
                 defer un.deinit(self.allocator);
                 ras.unescapeInto(&un, self.allocator, e.line) catch continue;

@@ -6234,6 +6234,17 @@ pub const AppSession = struct {
     remote_agent_hosts: std.StringHashMapUnmanaged(RemoteAgentHost) = .empty,
     /// 직전 분배 모양(`reportRemoteFeedShape` 가 같은 말을 반복하지 않게 한다).
     last_remote_feed_shape: u64 = std.math.maxInt(u64),
+
+    /// 이번 분배에서 **주인을 찾은** 이벤트 수(`consumeRemoteAgentLines` 가 올린다).
+    remote_nonce_matched: usize = 0,
+    /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
+    /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
+    unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
+    unmatched_event_nonce_len: u8 = 0,
+    unmatched_term_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
+    unmatched_term_nonce_len: u8 = 0,
+    /// 같은 짝을 반복해서 말하지 않게 한다.
+    unmatched_reported: bool = false,
     // 인앱 새 버전 안내(distribution.md "인앱 새 버전 안내") 백그라운드 체크 ↔ 메인 tick 통신. upload 패턴과
     // 동일하다 — 첫 tick에서 별도 스레드가 GitHub releases/latest를 curl로 받아(UI 안 멈춤) 현재 버전과
     // 비교하고, 새 버전이면 mutex 하에 태그를 update_tag_buf에 담는다. 메인 tick(drainUpdateCheck)이 빼서
@@ -14933,6 +14944,44 @@ pub const AppSession = struct {
         }
     }
 
+    /// **이벤트는 왔는데 아무 Term 도 안 가져갔다**를 알린다.
+    ///
+    /// 여기까지 오면 스풀·스트리머·분배는 전부 정상이다 — 마지막 한 칸, nonce 대조에서 갈린 것이다.
+    /// 그 상태는 사용자에게 「배지가 안 뜬다」로만 보이고 로그에는 아무것도 없었다. 2026-09-07 에
+    /// 원격에서 해시를 손으로 대조해서야 알았고, 그 사이 가설 셋이 실측에 반증됐다.
+    ///
+    /// **둘을 나란히 찍는다** — 온 nonce 와 Term 이 들고 있던 nonce. 하나만으로는 어디서 갈렸는지
+    /// 모른다(앱 인스턴스 부분이 다른지, pane 부분이 다른지, 아예 비었는지).
+    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize) void {
+        if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
+        if (self.remote_nonce_matched > 0) {
+            self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
+            return;
+        }
+        if (self.unmatched_event_nonce_len == 0) return;
+        if (self.unmatched_reported) return;
+        self.unmatched_reported = true;
+        std.log.scoped(.agent).warn(
+            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, none matched)",
+            .{
+                dest,
+                self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
+                if (self.unmatched_term_nonce_len == 0) "(empty)" else self.unmatched_term_nonce[0..self.unmatched_term_nonce_len],
+                fed,
+            },
+        );
+    }
+
+    /// 주인을 못 찾은 이벤트 nonce 와 그때 Term 의 nonce 를 담아 둔다(마지막 것만).
+    pub fn noteUnmatchedRemoteNonce(self: *AppSession, event_nonce: []const u8, term_nonce: []const u8) void {
+        const en = @min(event_nonce.len, self.unmatched_event_nonce.len);
+        @memcpy(self.unmatched_event_nonce[0..en], event_nonce[0..en]);
+        self.unmatched_event_nonce_len = @intCast(en);
+        const tn = @min(term_nonce.len, self.unmatched_term_nonce.len);
+        @memcpy(self.unmatched_term_nonce[0..tn], term_nonce[0..tn]);
+        self.unmatched_term_nonce_len = @intCast(tn);
+    }
+
     /// **분배가 어떤 모양이었는지 알린다** — 같은 모양이 이어지면 말하지 않는다.
     ///
     /// 「아무도 못 받았다」(`fed == 0`)는 **기본 레벨**로 낸다. 그 상태에서는 이벤트가 정확히
@@ -14975,11 +15024,13 @@ pub const AppSession = struct {
     /// 그때 「어느 조건에서 걸리는지」를 아무도 말하지 않아 로컬 앱 상태를 못 보는 쪽에서는 추측만
     /// 반복됐다. 그래서 조건별로 세고, **아무도 못 받으면** 기본 레벨로 알린다(계약 §1.2 의 결).
     fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
+        self.remote_nonce_matched = 0;
         var fed: usize = 0;
         var no_channel: usize = 0;
         var no_dest: usize = 0;
         var other_dest: usize = 0;
         defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
+        defer self.reportOrphanNonce(dest, lines.len, fed);
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -23202,6 +23253,80 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
 // `no_channel += 1` 을 지우는 변형은 Zig 의 「local variable is never mutated」로 **컴파일이 깨지고**,
 // 그 빌드 실패를 「판정자가 안 죽었다」로 읽었다. 카운터는 그대로 두고 **전달만 0 으로 바꾸는** 변형이
 // 옳다(그러면 컴파일되고 동작만 달라진다). 확인: `no_channel`·`no_dest` 전달을 0 으로 → 각각 죽는다.
+
+test "RF2: 이벤트가 왔는데 아무 Term 도 안 가져가면 두 nonce 를 나란히 남긴다" {
+    // **스풀·스트리머·분배가 다 정상인데 마지막 한 칸에서 갈리는 자리.** 2026-09-07 에 그 상태를
+    // 만났고, 로그가 없어 원격에서 해시를 손으로 대조해야 했다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+
+    // Term 은 이 nonce 를 안다.
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // 그런데 **다른 nonce** 로 이벤트가 온다 — 주인이 없다.
+    session.unmatched_reported = false;
+    session.unmatched_event_nonce_len = 0;
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    // 둘을 **나란히** 담았는가 — 하나만으로는 어디서 갈렸는지 모른다.
+    try std.testing.expectEqualStrings("host_bbbb_other", session.unmatched_event_nonce[0..session.unmatched_event_nonce_len]);
+    try std.testing.expectEqualStrings(mine, session.unmatched_term_nonce[0..session.unmatched_term_nonce_len]);
+    try std.testing.expect(session.unmatched_reported); // 한 번 말했다
+    try std.testing.expectEqual(@as(usize, 0), session.remote_nonce_matched);
+}
+
+test "RF2: 주인을 찾으면 셈이 서고, 다시 끊기면 또 말할 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // 주인이 있는 이벤트 — 셈이 선다.
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+    try std.testing.expect(session.remote_nonce_matched > 0);
+    try std.testing.expect(!session.unmatched_reported); // 붙었으니 보고 상태가 풀린다
+}
 
 test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 정확해도 안 붙는 자리" {
     // **2026-09-06 의 자리.** 스트리머가 pane 열을 정확히 구분해 보내는데도 사이드바에서 둘만

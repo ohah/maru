@@ -6190,6 +6190,8 @@ pub const AppSession = struct {
     // **pane 당이 아니라 host 당인 이유**는 `MaxSessions`(기본 10, 다중화 포함)다 — pane 마다 띄우면 같은
     // 호스트 pane 다섯이 상한이 된다(2026-08-29 실측).
     remote_agent_hosts: std.StringHashMapUnmanaged(RemoteAgentHost) = .empty,
+    /// 직전 분배 모양(`reportRemoteFeedShape` 가 같은 말을 반복하지 않게 한다).
+    last_remote_feed_shape: u64 = std.math.maxInt(u64),
     // 인앱 새 버전 안내(distribution.md "인앱 새 버전 안내") 백그라운드 체크 ↔ 메인 tick 통신. upload 패턴과
     // 동일하다 — 첫 tick에서 별도 스레드가 GitHub releases/latest를 curl로 받아(UI 안 멈춤) 현재 버전과
     // 비교하고, 새 버전이면 mutex 하에 태그를 update_tag_buf에 담는다. 메인 tick(drainUpdateCheck)이 빼서
@@ -14877,14 +14879,69 @@ pub const AppSession = struct {
         }
     }
 
+    /// **분배가 어떤 모양이었는지 알린다** — 같은 모양이 이어지면 말하지 않는다.
+    ///
+    /// 「아무도 못 받았다」(`fed == 0`)는 **기본 레벨**로 낸다. 그 상태에서는 이벤트가 정확히
+    /// 와도 배지가 조용히 안 뜨고, 사용자에게는 「감지가 안 된다」로만 보인다. 나머지 모양은
+    /// `MARU_DEBUG` 뒤에 둔다 — 정상 동작에서도 로컬 Term 은 늘 걸러지므로 사실 자체가 이상이
+    /// 아니다. 어느 조건에서 걸렸는지가 함께 나오므로 원인 축이 바로 갈린다.
+    fn reportRemoteFeedShape(
+        self: *AppSession,
+        dest: []const u8,
+        lines_len: usize,
+        fed: usize,
+        no_channel: usize,
+        no_dest: usize,
+        other_dest: usize,
+    ) void {
+        if (lines_len == 0) return; // EOF 를 알리는 호출은 분배가 아니다
+        const shape = (@as(u64, @intCast(@min(fed, 0xFFFF))) << 48) |
+            (@as(u64, @intCast(@min(no_channel, 0xFFFF))) << 32) |
+            (@as(u64, @intCast(@min(no_dest, 0xFFFF))) << 16) |
+            @as(u64, @intCast(@min(other_dest, 0xFFFF)));
+        if (shape == self.last_remote_feed_shape) return;
+        self.last_remote_feed_shape = shape;
+        if (fed == 0) {
+            std.log.scoped(.agent).warn(
+                "remote events reached no term: dest={s} skipped(no_channel={d} no_dest={d} other_dest={d})",
+                .{ dest, no_channel, no_dest, other_dest },
+            );
+            return;
+        }
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
+            "remote feed: dest={s} fed={d} skipped(no_channel={d} no_dest={d} other_dest={d})",
+            .{ dest, fed, no_channel, no_dest, other_dest },
+        );
+    }
+
     /// 한 목적지의 Term 들에 줄을 먹인다. `lines` 가 비면 **EOF 를 알리는 호출**이다.
+    ///
+    /// **왜 세는가.** 이벤트가 정확히 와도 Term 에 안 붙으면 배지는 조용히 안 뜬다 — 스트리머가
+    /// pane 열을 정확히 구분해 보내는데도 사이드바에서 둘만 잡히는 일이 실제로 있었다(2026-09-06).
+    /// 그때 「어느 조건에서 걸리는지」를 아무도 말하지 않아 로컬 앱 상태를 못 보는 쪽에서는 추측만
+    /// 반복됐다. 그래서 조건별로 세고, **아무도 못 받으면** 기본 레벨로 알린다(계약 §1.2 의 결).
     fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
+        var fed: usize = 0;
+        var no_channel: usize = 0;
+        var no_dest: usize = 0;
+        var other_dest: usize = 0;
+        defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (term.agent_remote_channel == null) continue;
-                    if (!term.rt.observation.ssh_remote_dest_present) continue;
-                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
+                    if (term.agent_remote_channel == null) {
+                        no_channel += 1;
+                        continue;
+                    }
+                    if (!term.rt.observation.ssh_remote_dest_present) {
+                        no_dest += 1;
+                        continue;
+                    }
+                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) {
+                        other_dest += 1;
+                        continue;
+                    }
+                    fed += 1;
                     if (lines.len > 0)
                         agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
                     else

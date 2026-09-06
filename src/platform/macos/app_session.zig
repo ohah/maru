@@ -11769,7 +11769,16 @@ pub const AppSession = struct {
         // \e[6~ -> 0x07 '~'). alt 화면(vim/less)에선 앱이 자체 페이징하므로 그대로 \e[5~/\e[6~를
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
-        if (self.surface_initialized) {
+        // **터미널일 때만 판정한다**([키 입력과 단축키](../../../docs/key-input-and-shortcuts.md)
+        // 「선-가로채기는 터미널 것일 때만 먹는다」). 이 블록은 **편집기 분기보다 앞**이라, 게이트가
+        // 없으면 편집기에서 `PageUp`/`PageDown` 이 **통째로 사라진다** — `scrollPage` 가 편집기를
+        // 거절해도 아래 `keyConsumedByApp` 가 이미 끝을 내기 때문이다(스크롤도 안 되고 편집기에도
+        // 안 온다). 편집기 Term 은 자기 sentinel surface 를 가져 `alt_active` 가 늘 거짓이므로
+        // **무조건** 그랬다.
+        //
+        // **게이트를 `lockCore` 앞에 둔다** — 편집기에서 매 PageUp 마다 sentinel core 를 잠글 이유가
+        // 없다.
+        if (self.surface_initialized and term_ops.activeTermIsTerminal(self)) {
             const active_term = pane_ops.activePane(self).activeTerm();
             const page_alt_active = if (active_term.surface.remote != null)
                 (if (active_term.rt.observation.availability == .unavailable)
@@ -16748,6 +16757,14 @@ pub const AppSession = struct {
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
     pub fn jumpToPrompt(self: *AppSession, dir: i8) void {
         if (!self.surface_initialized) return;
+        // **터미널 기능이다** — OSC 133 블록은 편집기·웹 Term 에 없다. `scrollPage` 가 이미 같은
+        // 가드를 갖고 있는데 여기만 없어 편집기 Term 의 sentinel surface 에 큐를 넣고 있었다.
+        //
+        // **이 줄은 오늘 도달하지 않는다**(호출자가 ABI 하나뿐이고 Swift 가 먼저 게이트한다 — 그
+        // 변이가 살아남는 것이 정상이다). 그럼에도 두는 이유는 **Swift 를 안 거치는 호출자가 생기는
+        // 날**이다(팔레트·메뉴가 이 액션을 갖게 되는 경우) — `toggleCursorAt` 의 「마지막 커서는 안
+        // 지운다」 가드와 같은 규율이다. 대칭 자체가 근거는 아니다.
+        if (!term_ops.activeTermIsTerminal(self)) return;
         // view_offset mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
         // 큐를 타 순서 보존(메인 직접 mutate면 reader scroll과 view_offset race). "스크롤됨" 최적화는 reader 렌더 트리거로 대체.
         self.enqueueCoreCommandForSurface(term_ops.activeSurface(self).id, .{ .jump_to_prompt = dir }) catch {};

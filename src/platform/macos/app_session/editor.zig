@@ -17284,6 +17284,103 @@ test "EMK4 팔레트가 편집기 컨텍스트 chord 를 보여 준다 (발견�
     try testing.expect(split.modifiers.command);
 }
 
+test "TIG1 PageUp 은 편집기에서 caret 을 옮기고 터미널에서는 스크롤한다 (선-가로채기 게이트)" {
+    // **양쪽을 다 잰다.** 편집기만 재면 게이트를 늘 참으로 둔 변이가 살고, 터미널만 재면 늘 거짓으로
+    // 둔 변이가 산다 — 그 갈림이 이 조각의 전부다.
+    //
+    // **이 층은 판정자가 하나도 없었다**(2026-09-07 실측) — 터미널에서 `PageUp` 이 스크롤인 것도
+    // 아무도 안 쟀다. 그래서 편집기 분기 **앞**에서 키를 통째로 삼키는 것을 못 봤다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.page_keys_scroll = true; // 기본값(`input.page_keys = .scroll`)
+    const term = fx.term;
+
+    // ⑴ **편집기에서는 caret 이 움직인다.** 게이트가 없으면 `keyConsumedByApp` 가 먼저 끝내
+    //    **아무 일도 안 난다**(스크롤도 안 되고 편집기에도 안 온다).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{} });
+    const after_down = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expect(after_down.focus > 0);
+
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_up, .modifiers = .{} });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus); // 위로 되돌아온다
+
+    // ⑵ **`⇧` 를 끼면 선택이 는다** — 단위는 그대로다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{ .shift = true } });
+    const ext = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expect(!ext.isEmpty()); // caret 이 아니라 범위다
+
+    // ⑶ **터미널에서는 편집기로 안 온다**(대조군). 같은 Term 을 터미널로 바꿔 잰다 — 이 단언이
+    //    없으면 게이트를 늘 거짓으로 둔 변이가 산다.
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{} });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus); // 안 움직였다
+    term.kind = saved_kind;
+
+    // ⑷ **`page_keys = .passthrough` 면 편집기가 원래도 받는다**(설정 대조군 — §계약 19회차).
+    fx.session.page_keys_scroll = false;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{} });
+    try testing.expect(term.rt.editor_selection.?.focus > 0);
+}
+
+test "TIG2 활성 Term 종류 질의는 좁고 fail-open 이다 (선-가로채기 게이트)" {
+    // 이 질의를 재는 판정자가 **하나도 없었다** — `scrollPage` 의 거절조차 안 쟀다(2026-09-07 실측).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    // ⑴ **편집기면 거짓** — 그래야 선-가로채기가 비켜선다.
+    fx.session.surface_initialized = true;
+    try testing.expect(!term_ops.activeTermIsTerminal(fx.session));
+
+    // ⑵ **터미널이면 참**(대조군).
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    try testing.expect(term_ops.activeTermIsTerminal(fx.session));
+    term.kind = saved_kind;
+
+    // ⑶ **fail-open** — surface 가 아직 없으면 **참**이다. 시작 중에 선-가로채기가 죽으면
+    //    터미널에서 `⌘↑`·`⇧PageUp` 이 조용히 사라진다.
+    fx.session.surface_initialized = false;
+    try testing.expect(term_ops.activeTermIsTerminal(fx.session));
+}
+
+test "TIG3 프롬프트 점프는 편집기 Term 에 큐를 안 넣는다 (심층 방어)" {
+    // **오늘 이 가드는 도달하지 않는다**(Swift 가 먼저 게이트한다 — 그 변이가 살아남는 것이 정상이다).
+    // 그럼에도 재는 이유는 `scrollPage` 와 **같은 답**임을 고정하기 위해서다 — 지금까지 그 둘이
+    // 갈려 있었고(하나는 거절, 하나는 무가드) 그 갈림이 이 결함의 씨앗이었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    const term = fx.term;
+
+    // 편집기에서는 아무 일도 안 난다 — `metal_dirty` 도 안 선다.
+    fx.session.metal_dirty = false;
+    fx.session.jumpToPrompt(-1);
+    try testing.expect(!fx.session.metal_dirty);
+
+    // 터미널이면 돈다(대조군).
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    fx.session.jumpToPrompt(-1);
+    try testing.expect(fx.session.metal_dirty);
+    term.kind = saved_kind;
+}
+
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {
     // **`AnchorKind`가 있는 이유를 재는 테스트다.** anchor가 점이면 단어를 잡고 뒤로 끌 때 그
     // 단어가 잘린다 — `selection.zig` 머리말이 anchor를 **범위**로 둔 근거가 그것이다.

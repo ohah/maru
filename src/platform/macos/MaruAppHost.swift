@@ -5323,6 +5323,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 호출부가 consume한다.
     // 이 chord 를 편집기 컨텍스트가 소유하는가 — 참이면 메뉴바 keyEquivalent 를 양보한다.
     // 판정은 전부 Zig 다(활성 Term 종류·resolver 순서가 거기 있어서, 여기 두면 출처가 둘이 된다).
+    // 활성 Term 이 터미널인가 — 터미널 전용 선-가로채기(프롬프트 점프·페이지 스크롤)의 게이트다.
+    // fail-open: 세션이 없으면 참(시작 중에는 종전대로 돈다).
+    var activeTermIsTerminal: Bool {
+        guard let session = appSession else { return true }
+        return maru_macos_app_session_active_term_is_terminal(session) != 0
+    }
+
     func editorOwnsChord(_ event: NSEvent) -> Bool {
         guard let session = appSession, var keyEvent = normalizedKeyEvent(from: event) else { return false }
         return maru_macos_app_session_editor_owns_chord(session, &keyEvent) != 0
@@ -6961,8 +6968,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 pastePasteboardText()
                 return
             }
+            // **아래 둘은 터미널 전용이다 — 활성 Term 이 터미널일 때만 돈다**(docs/key-input-and-shortcuts.md
+            // 「선-가로채기는 터미널 것일 때만 먹는다」). 스크롤백도 OSC 133 블록도 편집기·웹 Term 에는
+            // 없는데, 게이트가 없으면 그 키를 **먹고 return** 해서 편집기에 오지도 못한다(⌘↑ 가 문서
+            // 처음으로 안 가고 프롬프트로 튀던 것이 이것이다). 판정은 Zig 가 한다.
+            //
+            // **위의 ⌘C·⌘V 는 여기 안 넣는다** — 클립보드는 Term 종류와 무관한 의도이고 Zig 쪽
+            // copyText·pasteText 가 이미 갈래를 갖고 있다. 함께 막으면 편집기 복사·붙여넣기가 죽는다.
+            let terminalOwnsPreCore = activeTermIsTerminal
             // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다(방향만 넘김, page 크기는 Zig).
-            if event.modifierFlags.contains(.shift), let session = appSession {
+            // **정확히 Shift만**이다 — `.contains(.shift)`는 ⇧⌘PageUp 같은 조합까지 삼킨다(브라우저 nav 가
+            // `.contains(.command)`로 ⌘⇧R을 삼키던 것과 같은 부류, 리뷰 [8]).
+            if terminalOwnsPreCore, chordMods == .shift, let session = appSession {
                 if event.keyCode == 116 { // PageUp -> 과거(위)
                     _ = maru_macos_app_session_scroll_page(session, 1)
                     markMetalNeedsRedraw()
@@ -6975,7 +6992,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             }
             // Cmd+↑/↓: OSC 133 프롬프트 블록으로 점프(분류·이동은 Zig core, 여기선 방향만).
-            if chordMods == .command, let session = appSession {
+            if terminalOwnsPreCore, chordMods == .command, let session = appSession {
                 if event.keyCode == 126 { // Up -> 이전(과거) 프롬프트
                     _ = maru_macos_app_session_jump_prompt(session, -1)
                     markMetalNeedsRedraw()

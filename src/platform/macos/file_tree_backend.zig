@@ -9,11 +9,20 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const path_shape = maru.path_shape;
 const file_tree = maru.session.file_tree;
+const listing = maru.session.remote_file_listing; // 원격 목록 wire(RF1) — 파서·상한의 단일 출처
+// **조건부 임포트**(RF2b) — 이 파일은 Windows 에서도 컴파일되는데 ssh_upload 는 macOS 전용이다.
+// barrel 조건부 import + comptime gate 가 이 저장소의 처방이다(macos-only-code-linux-crosscompile-check).
+const ssh_upload = if (builtin.os.tag == .macos) @import("ssh_upload.zig") else struct {};
 const c = std.c;
 
 var test_tmp_counter: std.atomic.Value(u64) = .init(0);
 
 pub const max_inflight: usize = 4;
+/// 그중 **원격 job 이 물 수 있는 슬롯 상한**(RF2b — 계획 §2.2.1). 로컬 스캔은 ms 축인데 원격 왕복은
+/// 두세 자릿수 느리다(실측: localhost ControlMaster 바닥값 ~8 ms + 실서버 RTT) — 상한 없이 공유하면
+/// 멀티루트에서 원격이 슬롯 넷을 다 물어 **로컬 트리가 멎는다.** 2 는 「로컬에 항상 둘을 남긴다」는
+/// 뜻의 초기값이고, RF3 이 제품 트래픽으로 재측정한다.
+pub const max_remote_inflight: usize = 2;
 pub const max_results: usize = 16;
 
 pub const OwnedEntry = struct {
@@ -37,9 +46,14 @@ pub const Result = struct {
     root_operation: u32 = 0,
     root_validation_round: u8 = 0,
     validated_dir: ?std.Io.Dir = null,
+    /// 원격이 wire 로 보고한 실패(RF2b — `!` 레코드) 또는 전송 수준 실패의 기계 판정 문자열.
+    /// **표시는 아직 아니다** — 소비처(RF3)가 i18n 으로 풀어 「원격이라 못 읽는다」를 그린다(§2.5).
+    /// null 이면서 `ok == false` 인 원격 결과는 잘림·오독이다(파서가 완결을 못 봤다).
+    remote_error: ?[]u8 = null,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator, io: std.Io) void {
         if (self.validated_dir) |dir| dir.close(io);
+        if (self.remote_error) |msg| allocator.free(msg);
         allocator.free(self.path);
         for (self.entries.items) |entry| allocator.free(entry.name);
         self.entries.deinit(allocator);
@@ -47,10 +61,23 @@ pub const Result = struct {
     }
 };
 
+/// 원격 job 의 목적지(RF2b). 문자열은 **job 소유**다 — 관측 캐시를 가리키면 다음 갱신이 밑을 바꾼다
+/// (`remoteScmTarget` 이 버퍼 복사로 푸는 그 문제).
+const RemoteTarget = struct {
+    dest: []u8,
+    ctl: []u8,
+
+    fn deinit(self: RemoteTarget, allocator: std.mem.Allocator) void {
+        allocator.free(self.dest);
+        allocator.free(self.ctl);
+    }
+};
+
 const Job = struct {
     state: *State,
     path: []u8,
     kind: ResultKind,
+    remote: ?RemoteTarget = null,
     request_id: u64 = 0,
     expected_root_generation: u64 = 0,
     root_operation: u32 = 0,
@@ -78,6 +105,7 @@ const State = struct {
     mutex: std.Io.Mutex = .init,
     refs: std.atomic.Value(usize) = .init(1), // Backend owner + detached workers
     inflight: usize = 0,
+    remote_inflight: usize = 0,
     results: [max_results]Result = undefined,
     results_len: usize = 0,
     shutting_down: bool = false,
@@ -102,13 +130,41 @@ pub const Backend = struct {
 
     /// true일 때만 path 소유권이 backend로 이동한다. false면 호출자가 tree에 재예약한 뒤 free한다.
     pub fn submit(self: *Backend, path: []u8, expected_root_generation: u64) bool {
-        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null);
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, null);
+    }
+
+    /// **원격 root 의 디렉터리 스캔**(RF2b). 목적지·control socket 은 복사해 job 이 소유한다.
+    /// macOS 전용 — 다른 호스트에선 항상 false 다(전송이 ssh_upload 라 그 밖에 없다).
+    ///
+    /// true 면 path 소유권이 backend 로 이동한다(로컬 submit 과 같은 계약). false 면 호출자가
+    /// 재예약 뒤 free 한다 — **원격 슬롯 상한(`max_remote_inflight`)에 걸려도 false** 다: 로컬을
+    /// 굶기지 않는 것이 그 상한의 존재 이유다(§2.2.1).
+    pub fn submitRemoteDirectory(
+        self: *Backend,
+        path: []u8,
+        dest: []const u8,
+        ctl: []const u8,
+        expected_root_generation: u64,
+    ) bool {
+        if (comptime builtin.os.tag != .macos) return false;
+        const state = self.state orelse return false;
+        const dest_owned = state.allocator.dupe(u8, dest) catch return false;
+        const ctl_owned = state.allocator.dupe(u8, ctl) catch {
+            state.allocator.free(dest_owned);
+            return false;
+        };
+        const remote: RemoteTarget = .{ .dest = dest_owned, .ctl = ctl_owned };
+        if (!self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, remote)) {
+            remote.deinit(state.allocator);
+            return false;
+        }
+        return true;
     }
 
     /// Successful root publish transfers its still-open no-follow directory capability to the first
     /// scan. On false the caller retains both path and dir ownership.
     pub fn submitValidatedRootScan(self: *Backend, path: []u8, expected_root_generation: u64, dir: std.Io.Dir) bool {
-        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, dir);
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, dir, null);
     }
 
     pub fn submitFileHash(self: *Backend, path: []u8) bool {
@@ -123,11 +179,11 @@ pub const Backend = struct {
         root_operation: u32,
         root_validation_round: u8,
     ) bool {
-        return self.submitJobMeta(path, .root_validation, request_id, expected_root_generation, root_operation, root_validation_round, null);
+        return self.submitJobMeta(path, .root_validation, request_id, expected_root_generation, root_operation, root_validation_round, null, null);
     }
 
     fn submitJob(self: *Backend, path: []u8, kind: ResultKind) bool {
-        return self.submitJobMeta(path, kind, 0, 0, 0, 0, null);
+        return self.submitJobMeta(path, kind, 0, 0, 0, 0, null, null);
     }
 
     fn submitJobMeta(
@@ -139,18 +195,23 @@ pub const Backend = struct {
         root_operation: u32,
         root_validation_round: u8,
         validated_dir: ?std.Io.Dir,
+        remote: ?RemoteTarget,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
-        if (state.shutting_down or state.inflight >= max_inflight) {
+        if (state.shutting_down or state.inflight >= max_inflight or
+            (remote != null and state.remote_inflight >= max_remote_inflight))
+        {
             state.mutex.unlock(state.io);
             return false;
         }
         state.inflight += 1;
+        if (remote != null) state.remote_inflight += 1;
         _ = state.refs.fetchAdd(1, .monotonic);
         state.mutex.unlock(state.io);
 
         const job = state.allocator.create(Job) catch {
+            if (remote != null) decrementRemote(state);
             finishWithoutResult(state);
             return false;
         };
@@ -163,9 +224,11 @@ pub const Backend = struct {
             .root_operation = root_operation,
             .root_validation_round = root_validation_round,
             .validated_dir = validated_dir,
+            .remote = remote,
         };
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
+            if (remote != null) decrementRemote(state);
             finishWithoutResult(state);
             return false;
         };
@@ -182,14 +245,18 @@ pub const Backend = struct {
 
     fn worker(job: *Job) void {
         const state = job.state;
+        const was_remote = job.remote != null;
         var result = switch (job.kind) {
-            .directory => if (job.validated_dir) |dir|
+            .directory => if (job.remote) |remote|
+                remoteScanDirectory(state.allocator, job.path, remote)
+            else if (job.validated_dir) |dir|
                 scanOpenedDirectory(state.allocator, state.io, job.path, dir)
             else
                 scanDirectory(state.allocator, state.io, job.path),
             .file_hash => hashFile(state.allocator, state.io, job.path),
             .root_validation => validateRoot(state.allocator, state.io, job.path),
         };
+        if (job.remote) |remote| remote.deinit(state.allocator);
         result.request_id = job.request_id;
         result.expected_root_generation = job.expected_root_generation;
         result.root_operation = job.root_operation;
@@ -207,8 +274,15 @@ pub const Backend = struct {
             result.deinit(state.allocator, state.io);
         }
         state.inflight -= 1;
+        if (was_remote) state.remote_inflight -= 1;
         state.mutex.unlock(state.io);
         state.release();
+    }
+
+    fn decrementRemote(state: *State) void {
+        state.mutex.lockUncancelable(state.io);
+        state.remote_inflight -= 1;
+        state.mutex.unlock(state.io);
     }
 
     /// 완료 result 하나의 소유권을 호출자에게 넘긴다. frame tick에서 호출해도 syscall은 없다.
@@ -476,6 +550,103 @@ fn identityOfFile(io: std.Io, file: std.Io.File) !file_tree.Identity {
     }
     const stat = try file.stat(io);
     return .{ .device = 0, .inode = @intCast(stat.inode), .kind = kindTag(stat.kind) };
+}
+
+/// 원격 디렉터리 스캔(RF2b) — **전송과 매핑을 가른다.** 전송(`runRemoteCapped`)은 이 얇은 껍데기가
+/// 하고, wire→`Result` 매핑은 순수 함수(`remoteResultFromWire`)라 ssh 없이 단위로 겨눈다.
+///
+/// **여기는 백그라운드 스레드다** — `std.Io` 를 안 만진다(`ssh_upload` 의 규율). 로컬 파일시스템도
+/// 안 만진다: 이 함수 안에 open/stat 이 생기면 그것이 §2.4 위반이고, 경계 게이트가 그 토큰을 센다.
+fn remoteScanDirectory(allocator: std.mem.Allocator, owned_path: []u8, remote: RemoteTarget) Result {
+    if (comptime builtin.os.tag != .macos) unreachable; // submitRemoteDirectory 가 이미 막는다
+    var out: []u8 = &.{};
+    const code = ssh_upload.runRemoteCapped(
+        allocator,
+        remote.ctl,
+        remote.dest,
+        ssh_upload.list_script,
+        &.{owned_path},
+        listing.max_wire_bytes,
+        &out,
+    ) catch {
+        // 전송 자체를 못 세웠다(fork/pipe). wire 가 없으니 매핑도 없다 — ok=false 인 빈 결과다.
+        return .{ .path = owned_path };
+    };
+    defer allocator.free(out);
+    return remoteResultFromWire(allocator, owned_path, out, code);
+}
+
+/// wire 바이트 → `Result` 의 **순수 매핑**(RF2b). OS 중립이라 어느 호스트에서든 단위로 돈다.
+///
+/// `ok` 는 「완결된 정상 목록」일 때만 참이다: 파서가 꼬리까지 봤고, 원격 오류(`!`)가 없고, 종료
+/// 코드가 0 일 때. 원격 오류·비정상 종료(127=헬퍼 없음 포함)·잘림·오독은 전부 ok=false 이고,
+/// 그중 **말할 수 있는 것**은 `remote_error` 에 담는다 — 침묵과 실패를 가르는 것이 §2.5 다.
+fn remoteResultFromWire(allocator: std.mem.Allocator, owned_path: []u8, bytes: []const u8, exit_code: c_int) Result {
+    var result = Result{ .path = owned_path };
+    var parser = listing.Parser.init(bytes);
+    var malformed = false;
+    while (parser.next() catch blk: {
+        malformed = true;
+        break :blk null;
+    }) |event| switch (event) {
+        .dir => |identity| {
+            // 항목과 같은 불투명 신원 축이다 — device/inode 에 뜻을 부여하지 않는다(§2.3 ⑴).
+            result.identity = .{ .value = .{
+                .device = identity.dev,
+                .inode = identity.ino,
+                .kind = @intFromEnum(file_tree.IdentityKind.directory),
+            } };
+        },
+        .entry => |entry| {
+            const name = allocator.dupe(u8, entry.name) catch {
+                malformed = true;
+                break;
+            };
+            result.entries.append(allocator, .{
+                .name = name,
+                .kind = entry.kind,
+                .identity = .{
+                    .device = entry.dev,
+                    .inode = entry.ino,
+                    .kind = @intFromEnum(identityKindFor(entry.kind)),
+                },
+            }) catch {
+                allocator.free(name);
+                malformed = true;
+                break;
+            };
+        },
+        .remote_error => |msg| {
+            result.remote_error = allocator.dupe(u8, msg) catch null;
+        },
+    };
+
+    const clean_exit = exit_code == 0;
+    result.ok = !malformed and parser.complete() and result.remote_error == null and clean_exit;
+    // 말할 수 있는 실패는 말한다 — 헬퍼 부재(127)·전송 강등이 「그냥 빈 트리」로 뭉개지면 §2.5 위반이다.
+    if (!result.ok and result.remote_error == null) {
+        // 오독이 잘림보다 먼저다 — 오독은 항상 미완결을 함의하므로 순서를 뒤집으면 「malformed」가
+        // 죽은 가지가 된다(판정자가 실제로 잡았다).
+        result.remote_error = if (!clean_exit)
+            std.fmt.allocPrint(allocator, "transport exit {d}", .{exit_code}) catch null
+        else if (malformed)
+            allocator.dupe(u8, "listing malformed") catch null
+        else
+            allocator.dupe(u8, "listing truncated") catch null;
+    }
+    return result;
+}
+
+/// wire 의 종류 → 신원 종류. 로컬 축(`kindTag` — `std.Io.File.Kind`)과 **다른 입력 타입**이라 따로
+/// 산다. 값은 같은 `IdentityKind` 로 접힌다 — 신원 비교가 종류까지 보므로 이 매핑이 갈리면 같은
+/// 항목이 「다른 파일」로 읽힌다.
+fn identityKindFor(kind: file_tree.Kind) file_tree.IdentityKind {
+    return switch (kind) {
+        .file => .regular,
+        .directory => .directory,
+        .symlink_file, .symlink_directory => .symlink,
+        .other => .other,
+    };
 }
 
 fn scanDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Result {
@@ -1357,4 +1528,77 @@ test "file tree backend retirement releases owner without waiting for worker gen
     try std.testing.expect(state.shutting_down);
     state.inflight = 0;
     state.release();
+}
+
+// ── 원격 wire → Result 매핑 판정자(RF2b) — ssh 없이, 어느 호스트에서든 돈다 ─────────────────────
+
+test "원격 매핑: 완결된 목록이 entries·신원·ok 로 풀린다" {
+    const a = std.testing.allocator;
+    var wire: [2048]u8 = undefined;
+    var n = listing.appendHeader(&wire, 0).?;
+    n = listing.appendDirIdentity(&wire, n, .{ .dev = 9, .ino = 77 }).?;
+    n = listing.appendEntry(&wire, n, .{ .dev = 9, .ino = 100, .kind = .file, .name = "nl\nname.txt" }).?;
+    n = listing.appendEntry(&wire, n, .{ .dev = 9, .ino = 101, .kind = .symlink_directory, .name = "dirlink" }).?;
+    n = listing.appendFooter(&wire, n, 2).?;
+
+    const path = try a.dupe(u8, "/srv/app");
+    var result = remoteResultFromWire(a, path, wire[0..n], 0);
+    defer result.deinit(a, std.testing.io);
+
+    try std.testing.expect(result.ok);
+    try std.testing.expect(result.remote_error == null);
+    try std.testing.expectEqual(@as(u64, 77), result.identity.?.value.inode);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), result.identity.?.value.kind);
+    try std.testing.expectEqual(@as(usize, 2), result.entries.items.len);
+    try std.testing.expectEqualStrings("nl\nname.txt", result.entries.items[0].name);
+    try std.testing.expectEqual(file_tree.Kind.symlink_directory, result.entries.items[1].kind);
+    // 신원 종류가 wire 종류에서 맞게 접혔다 — 갈리면 같은 항목이 「다른 파일」로 읽힌다.
+    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.symlink)), result.entries.items[1].identity.kind);
+}
+
+test "원격 매핑: 잘림·오독·비정상 종료는 ok=false 이고 «말할 수 있는 실패» 를 담는다 (§2.5)" {
+    const a = std.testing.allocator;
+    var wire: [1024]u8 = undefined;
+    var n = listing.appendHeader(&wire, 0).?;
+    n = listing.appendDirIdentity(&wire, n, .{ .dev = 1, .ino = 2 }).?;
+    n = listing.appendEntry(&wire, n, .{ .dev = 1, .ino = 3, .kind = .file, .name = "a" }).?;
+    // 꼬리 없음 = 잘림.
+    {
+        var result = remoteResultFromWire(a, try a.dupe(u8, "/p"), wire[0..n], 0);
+        defer result.deinit(a, std.testing.io);
+        try std.testing.expect(!result.ok);
+        try std.testing.expectEqualStrings("listing truncated", result.remote_error.?);
+        // 잘린 목록의 항목을 그리면 없는 항목이 «지워진 것처럼» 보인다 — 버리는 판단은 소비처 몫이라
+        // 매핑은 읽은 만큼 담아 두고 ok 가 그 경계를 진다.
+        try std.testing.expectEqual(@as(usize, 1), result.entries.items.len);
+    }
+    // 완결인데 종료 코드가 127 — 헬퍼 부재.
+    {
+        var full = n;
+        full = listing.appendFooter(&wire, full, 1).?;
+        var result = remoteResultFromWire(a, try a.dupe(u8, "/p"), wire[0..full], 127);
+        defer result.deinit(a, std.testing.io);
+        try std.testing.expect(!result.ok);
+        try std.testing.expectEqualStrings("transport exit 127", result.remote_error.?);
+    }
+    // 오독(경로 탈출 이름) — 파서가 거부하고, 매핑은 malformed 로 접는다.
+    {
+        var result = remoteResultFromWire(a, try a.dupe(u8, "/p"), "maru-rfls 1\nD 1 2\nE 1 3 f 2 ..\n", 0);
+        defer result.deinit(a, std.testing.io);
+        try std.testing.expect(!result.ok);
+        try std.testing.expectEqualStrings("listing malformed", result.remote_error.?);
+        try std.testing.expectEqual(@as(usize, 0), result.entries.items.len);
+    }
+}
+
+test "원격 매핑: 원격 오류(`!`)는 완결된 답이다 — 메시지가 그대로 실린다" {
+    const a = std.testing.allocator;
+    var wire: [512]u8 = undefined;
+    var n = listing.appendHeader(&wire, 0).?;
+    n = listing.appendRemoteError(&wire, n, "opendir failed: AccessDenied").?;
+    var result = remoteResultFromWire(a, try a.dupe(u8, "/p"), wire[0..n], 0);
+    defer result.deinit(a, std.testing.io);
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("opendir failed: AccessDenied", result.remote_error.?);
+    try std.testing.expectEqual(@as(usize, 0), result.entries.items.len);
 }

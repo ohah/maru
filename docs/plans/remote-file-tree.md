@@ -372,7 +372,7 @@ RW 의 감시자는 **저장소 하나**를 보고 `change` 한 줄만 낸다(`r
 |---|---|---|
 | **RF1** | 순수 층: 목록 wire 코덱 · `(host, path)` root 키 · 원격 root 판정자 | ✅ 2026-09-06 — §10. **§5 게이트는 RF2 로 옮겼다**(아래) |
 | **RF2a** | 헬퍼 `list` 서브커맨드(판 3) · **실물 왕복 게이트**(`test-remote-file-listing`) | ✅ 2026-09-06 — §10.2 |
-| **RF2b** | 읽기 배선: 원격 root 의 `.directory` job(전송 argv·백엔드 원격 워커) · 「못 읽는다」 표시(§2.5) · **§5 게이트** | RF2a |
+| **RF2b** | 백엔드 원격 워커(`submitRemoteDirectory` — 전송+순수 매핑) · **§5 게이트** · **실물 sshd 왕복 게이트** · 원격 슬롯 상한(§2.2.1) | ✅ 2026-09-06 — §10.3. 「못 읽는다」 **표시**는 RF3 로(트리에 원격 root 가 서야 그릴 자리가 있다) |
 | **RF3** | root 세우기: `remoteCwd` 를 받아 원격 root 로 · 영속을 쌍으로 · 검증 파이프라인의 원격 분기 | ② 결정 |
 | **RF4** | 파일 열기(읽기 전용): `buildRemoteFileRead` 재사용 · 잘림 표시 | ⑤ 결정 |
 | **RF5** | 감시 | ③ 결정 |
@@ -490,3 +490,37 @@ dev 는 statx 의 major/minor 를 u64 하나로 접는다 — wire 계약이 「
 접는 방식은 자유다(§2.3 ⑴).
 
 **비범위(RF2b 로)**: 전송 argv(ControlMaster 위에서 `list` 를 부르는 쪽)·백엔드 원격 워커·표시·§5 게이트.
+
+
+### 10.3 RF2b — 백엔드 원격 워커와 두 게이트 (2026-09-06)
+
+**들어간 것**:
+
+- `ssh_upload.zig` — `list_script`(설치 계약 경로의 판 3 을 exec — 설치는 RW 펌프가 단일 소유자이고,
+  없으면 127 로 **판정 가능하게** 죽는다) · `runRemoteCapped`(상한 있는 캡처 전송). ⚠️ 기존
+  `readAllFd` 는 64 KiB 에서 읽기를 **멈추는** 구조라 자식이 그보다 많이 쓰면 파이프가 차 `waitpid`
+  가 교착한다 — 목록은 MB 축이라 못 쓰고, 새 러너는 넘치면 **fd 를 닫아** 자식을 EPIPE 로 끝낸다
+  (헬퍼 `putAll` 이 그 계약이다). 넘침은 `-2` 로 갈라 「깨끗한 0」과 안 섞인다.
+- `remote_file_listing.max_wire_bytes = 8 MiB` — 전송이 읽기를 자르는 상한(실측 §3.2 ⒞ 근거).
+- `file_tree_backend.zig` — `submitRemoteDirectory`(macOS 전용, dest·ctl 을 job 이 소유) · worker 의
+  원격 갈래 = **전송(runRemoteCapped) + 순수 매핑(remoteResultFromWire)** 둘로 갈라 매핑을 ssh 없이
+  단위로 겨눈다. `Result.remote_error`(§2.5 — 말할 수 있는 실패: 원격 `!` 메시지 / `transport exit N`
+  / `listing malformed` / `listing truncated`. **오독이 잘림보다 먼저다** — 오독은 항상 미완결을
+  함의해 순서를 뒤집으면 malformed 가 죽은 가지가 된다. 판정자가 실제로 잡았다).
+- **원격 슬롯 상한**(§2.2.1): `max_remote_inflight = 2` — 「로컬에 항상 둘을 남긴다」. RF3 이 제품
+  트래픽으로 재측정한다.
+- **§5 게이트**(`tests/remote_file_tree_axis_boundary.zig`, check-boundaries 소속): ⑴ 원격 갈래
+  둘의 본문에 로컬 FS 호출 토큰 0 + `validated_dir` 0(capability 는 국경을 못 넘는다) ⑵
+  `submitRemoteDirectory` 소비처 재고 — **RF3 전에는 0**(늘면 이유와 함께 재고를 올린다) ⑶ 로컬
+  root 커밋의 capability 하드 게이트(`.fp_root_capability_gone`) 존치 — 갈래는 정확히 둘이어야 한다.
+- **실물 sshd 왕복 게이트**(`zig build test-remote-file-tree`): `tools/remote-scm/ssh_harness.sh` 위에서
+  제품 전송이 실물 헬퍼의 wire 를 왕복 — 신원이 이쪽 stat 과 일치·`seed.txt`/`.git` 종류·없는
+  디렉터리의 `!` 완결. `--maru-expect-passed=2` 로 하네스 침묵 차단. 스크립트는 일반형(`exec "$1"
+  list "$2"`)이다 — 제품 리터럴은 설치 계약 경로를 exec 하는데 하네스 sshd 의 HOME 은 실사용자
+  홈이라, 거기 심는 것은 테스트가 사용자 캐시를 오염시키는 일이다(리터럴의 형태는 순수 판정자 몫).
+
+**뮤테이션**: 매핑의 오독/잘림 우선순위(위) + §5 소비처 재고(가짜 `submitRemoteDirectory` 토큰을
+소비처에 넣자 `expected 0, found 1` 로 즉사).
+
+**비범위(RF3 로)**: root 세우기·「못 읽는다」 **표시**·`remoteCwd` 따라가기·영속 쌍 마이그레이션 —
+전부 「트리에 원격 root 가 선다」에 매여 있다.

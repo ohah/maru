@@ -46,6 +46,13 @@ pub const max_error_bytes: usize = 512;
 /// 원격이 악의적으로 수를 불려도 파서가 여기서 멈춘다.
 pub const max_entries: usize = 100_000;
 
+/// 한 왕복 wire 전체의 상한(바이트). **전송이 이 값으로 읽기를 자른다**(RF2b `runRemoteCapped`) —
+/// 로컬은 받은 뒤 자르면 되지만 원격은 그 전에 바이트가 링크를 다 건너오고, 상한 없는 읽기는 원격이
+/// 멈추면 이쪽 스레드가 영영 선다(`git_command.max_remote_file_bytes` 와 같은 이유). 실측 근거:
+/// 2,000 항목 `ls -lai` 가 133 KB 였다(계획 §3.2 ⒞) — 이 wire 는 그보다 촘촘하고, 8 MiB 는 십만
+/// 항목대의 흉악한 디렉터리까지 덮는다. 넘친 목록은 꼬리를 잃어 파서가 **잘림**으로 읽는다.
+pub const max_wire_bytes: usize = 8 << 20;
+
 /// 원격 기계 이름(ssh 목적지)의 상한 — [`CwdLabel.max_host`](agent_hook_mode.zig) 가 SSOT 다.
 /// 같은 값을 손으로 적으면 RS6 이 잡은 그 드리프트(상한 두 벌)가 여기서 재발한다.
 pub const max_host_bytes: usize = agent_hook_mode.CwdLabel.max_host;

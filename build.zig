@@ -3224,7 +3224,11 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(file_tree_backend_tests).step);
+    const run_file_tree_backend_tests = b.addRunArtifact(file_tree_backend_tests);
+    test_step.dependOn(&run_file_tree_backend_tests.step);
+    // 원격 매핑(RF2b)처럼 이 파일만 도는 반복 작업이 생겨 이름을 붙였다 — `zig build test` 전체(12 분)를
+    // 돌리지 않고 이 축만 잰다.
+    b.step("test-file-tree-backend", "Run the file tree backend unit tests only").dependOn(&run_file_tree_backend_tests.step);
 
     // **헬퍼 `list` ↔ 코덱 파서 왕복 게이트**(RF2a — docs/plans/remote-file-tree.md §10). 헬퍼는
     // wire 인코더의 **사본**을 들므로(std 만 임포트), 빌드가 만든 실물 바이너리를 실제로 돌려 세션
@@ -5105,6 +5109,20 @@ pub fn build(b: *std.Build) void {
     run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=2");
     run_session_host_ssh_upload_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
+    // 원격 파일 트리 §2.4 게이트(RF2b) — 원격 갈래가 로컬 FS 에 닿지 않는지, 원격 submit 소비처
+    // 재고(RF3 전 0), 로컬 capability 하드 게이트 존치를 소스 구조로 센다.
+    const remote_file_tree_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_file_tree_axis_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_file_tree_axis_boundary_tests = b.addRunArtifact(remote_file_tree_axis_boundary_tests);
+    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=3");
+    run_remote_file_tree_axis_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_remote_file_tree_axis_boundary_tests.step);
+
     const session_host_ssh_reconnect_isolation_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_ssh_reconnect_isolation_boundary.zig"),
@@ -16119,6 +16137,48 @@ pub fn build(b: *std.Build) void {
             "test-remote-scm",
             "Run the remote SCM judges against a harness-owned localhost sshd",
         ).dependOn(&run_remote_scm.step);
+
+        // **원격 파일 트리 하네스 게이트**(RF2b — docs/plans/remote-file-tree.md §10.3). 같은 하네스
+        // sshd 위에서 제품 전송(`runRemoteCapped`)이 실물 헬퍼의 목록 wire 를 왕복하는지 잰다.
+        {
+            const rft_native_watch = b.addExecutable(.{
+                .name = "maru-remote-watch-native",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/remote-watch/main.zig"),
+                    .target = b.graph.host,
+                    .optimize = optimize,
+                    .link_libc = true,
+                }),
+            });
+            const rft_install_native = b.addInstallArtifact(rft_native_watch, .{
+                .dest_dir = .{ .override = .{ .custom = "test-helpers" } },
+            });
+            const remote_file_tree_harness_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/ssh_upload.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"RF2b 하네스"},
+            });
+            const run_rft_harness = b.addSystemCommand(&.{ "sh", "tools/remote-scm/ssh_harness.sh" });
+            run_rft_harness.addArtifactArg(remote_file_tree_harness_tests);
+            run_rft_harness.setCwd(b.path("."));
+            run_rft_harness.addArg("--maru-expect-tests=2");
+            // 하네스가 조용히 안 서면 skip 으로 초록이 된다 — 실행 수까지 센다(test-remote-scm 의 규율).
+            run_rft_harness.addArg("--maru-expect-passed=2");
+            run_rft_harness.step.dependOn(&rft_install_native.step);
+            run_rft_harness.setEnvironmentVariable(
+                "MARU_RFLS_HELPER",
+                b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
+            );
+            b.step(
+                "test-remote-file-tree",
+                "Run the remote file tree transport judges against a harness-owned localhost sshd",
+            ).dependOn(&run_rft_harness.step);
+        }
 
         const session_host_p5d_step = b.step(
             "test-session-host-p5d",

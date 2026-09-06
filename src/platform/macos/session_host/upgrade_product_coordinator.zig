@@ -296,109 +296,20 @@ fn processArmedWithDeadlineHooks(
         if (gate_preclosed and report.status == .resumed) ctx.gate.cancelClose();
         return .{ .terminal = report };
     };
-    if (!ctx.rollback_image.revalidate()) {
-        noteUpgradeStage("rollback_image_revalidate_pre_freeze");
-        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-            .status = .resumed,
-            .reason = .handoff_failed,
-        });
-    }
-    if (deadline.expired())
-        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-            .status = .resumed,
-            .reason = .deadline_exceeded,
-        });
 
-    const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
-    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
-        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-            .status = .resumed,
-            .reason = .runtime_changed,
-        });
-
-    const preview = ctx.manager.previewUpgradeHandoff(
-        ctx.allocator,
-        ready_authority.host_id,
-        ready_authority.upgrade_epoch,
-        ready_authority.authority_generation,
-        @intCast(ctx.layout.first_runtime_slot),
-    ) catch |err| return finishBeforeFreeze(
-        ctx,
-        attempt_id,
-        gate_preclosed,
-        reportForCaptureError(err),
-    );
-    const record = ctx.owner.encodeRunningRecordWithDeadline(
-        ctx.allocator,
-        execution,
-        ready_authority.host_id,
-        ready_authority.upgrade_epoch,
-        ctx.rollback_image.record(),
-        preview.sortedRuntimeIds(),
-        deadline.expiresAtNs(),
-    ) catch {
-        noteUpgradeStage("attempt_record_build");
-        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-            .status = .resumed,
-            .reason = .handoff_failed,
-        });
-    };
-    defer ctx.allocator.free(record);
-    const preview_bytes = preview.totalBytesWithAttempt(record.len) catch
-        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-            .status = .resumed,
-            .reason = .state_too_large,
-        });
-    var disk_full_fixture_active = false;
-    defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id);
-    if (before_budget_prepare) |hook| {
-        hook(ctx.owner_dir, attempt_id) catch return .invariant_violation;
-        disk_full_fixture_active = true;
-    }
-    var budget_reservation = budget_admission.prepare(
-        ctx.allocator,
-        ctx.owner_dir,
-        attempt_id,
-        .{
-            .bytes = preview_bytes,
-            .membership_generation = preview.membership_generation,
-            .runtime_ids = preview.sortedRuntimeIds(),
-        },
-        deadline,
-    ) catch |err| return finishBeforeFreeze(
-        ctx,
-        attempt_id,
-        gate_preclosed,
-        reportForBudgetError(err),
-    );
-    if (after_budget_prepare) |hook| hook(&budget_reservation) catch {
-        budget_reservation.cancel() catch {};
-        return .invariant_violation;
-    };
-    const outcome = processBudgetReserved(
-        ctx,
-        attempt_id,
-        execution,
-        ready_authority,
-        record,
-        deadline,
-        gate_preclosed,
-        &budget_reservation,
-    );
-    budget_reservation.cancel() catch return .invariant_violation;
-    return outcome;
-}
-
-fn processBudgetReserved(
-    ctx: Context,
-    attempt_id: u128,
-    execution: upgrade_owner.Execution,
-    ready_authority: AuthoritySnapshot,
-    record: []const u8,
-    deadline: upgrade_deadline.Deadline,
-    gate_preclosed: bool,
-    budget_reservation: *budget_admission.Reservation,
-) Outcome {
+    // **예약을 여기서 한다 — 준비 작업보다 먼저다.** `findAvailableLayout` 은 「지금 비어 있는」
+    // 259 칸을 고르는데, fd 는 언제나 **가장 낮은 빈 번호**를 가져간다. 그래서 고른 뒤 예약하기
+    // 전에 이 함수가 fd 를 하나라도 열면 그것이 정확히 `first_runtime_slot` 을 차지한다.
+    //
+    // 2026-09-06 실측(셸 15 개를 쥔 host): `first_slot=59 occupied_slot=59 occupied_mode=0o40000`
+    // — 0o40000 은 `S_IFDIR`, 즉 **디렉토리** fd 였다. 아래 `rollback_image.revalidate()` 가 이미지
+    // 검증을 하며 번들 디렉토리를 여는데, 그것이 59 를 가져가 예약이 `SlotOccupied` 로 죽었다.
+    // 업그레이드가 `handoff_failed` 로 끝나 host 는 구 이미지에 남았다.
+    //
+    // 창을 좁히는 것으로는 못 고친다 — 사이에 fd 를 여는 코드가 하나라도 있으면 같은 일이 난다.
+    // **선택과 예약 사이에 아무것도 끼지 않게** 예약을 앞으로 옮긴다. 예약된 슬롯은 CLOEXEC 이라
+    // 뒤따르는 open 들은 이 구간 위로 밀려난다. 실패 경로의 `rollback()` 은 `self.* = .{}` 라
+    // 멱등이므로 아래 defer 와 안쪽 rollback 이 겹쳐도 안전하다.
     const requested = ctx.layout.requested() orelse
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
@@ -490,6 +401,113 @@ fn processBudgetReserved(
         });
     };
 
+    // exec 이 성공하면 이 프로세스는 교체돼 여기로 돌아오지 않는다 — 즉 반환은 곧 실패다.
+    defer reservation.rollback();
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_pre_freeze");
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
+    }
+    if (deadline.expired())
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .deadline_exceeded,
+        });
+
+    const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
+    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .runtime_changed,
+        });
+
+    const preview = ctx.manager.previewUpgradeHandoff(
+        ctx.allocator,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
+        ready_authority.authority_generation,
+        @intCast(ctx.layout.first_runtime_slot),
+    ) catch |err| return finishBeforeFreeze(
+        ctx,
+        attempt_id,
+        gate_preclosed,
+        reportForCaptureError(err),
+    );
+    const record = ctx.owner.encodeRunningRecordWithDeadline(
+        ctx.allocator,
+        execution,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
+        ctx.rollback_image.record(),
+        preview.sortedRuntimeIds(),
+        deadline.expiresAtNs(),
+    ) catch {
+        noteUpgradeStage("attempt_record_build");
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
+    };
+    defer ctx.allocator.free(record);
+    const preview_bytes = preview.totalBytesWithAttempt(record.len) catch
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .state_too_large,
+        });
+    var disk_full_fixture_active = false;
+    defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id);
+    if (before_budget_prepare) |hook| {
+        hook(ctx.owner_dir, attempt_id) catch return .invariant_violation;
+        disk_full_fixture_active = true;
+    }
+    var budget_reservation = budget_admission.prepare(
+        ctx.allocator,
+        ctx.owner_dir,
+        attempt_id,
+        .{
+            .bytes = preview_bytes,
+            .membership_generation = preview.membership_generation,
+            .runtime_ids = preview.sortedRuntimeIds(),
+        },
+        deadline,
+    ) catch |err| return finishBeforeFreeze(
+        ctx,
+        attempt_id,
+        gate_preclosed,
+        reportForBudgetError(err),
+    );
+    if (after_budget_prepare) |hook| hook(&budget_reservation) catch {
+        budget_reservation.cancel() catch {};
+        return .invariant_violation;
+    };
+    const outcome = processBudgetReserved(
+        ctx,
+        attempt_id,
+        execution,
+        ready_authority,
+        record,
+        deadline,
+        gate_preclosed,
+        &budget_reservation,
+        &reservation,
+    );
+    budget_reservation.cancel() catch return .invariant_violation;
+    return outcome;
+}
+
+fn processBudgetReserved(
+    ctx: Context,
+    attempt_id: u128,
+    execution: upgrade_owner.Execution,
+    ready_authority: AuthoritySnapshot,
+    record: []const u8,
+    deadline: upgrade_deadline.Deadline,
+    gate_preclosed: bool,
+    budget_reservation: *budget_admission.Reservation,
+    reservation: *exec_fd_set.SlotReservation,
+) Outcome {
     var frozen = (if (gate_preclosed)
         upgrade_attempt.freezePreclosed(ctx.manager, ctx.gate, deadline)
     else
@@ -627,7 +645,7 @@ fn processBudgetReserved(
             .reason = .authority_poisoned,
         });
     }
-    if (!replaceAll(&reservation, capture.resources, pair, ctx.lifetime_owner, ctx.layout))
+    if (!replaceAll(reservation, capture.resources, pair, ctx.lifetime_owner, ctx.layout))
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
     reservation.assertExactNonCloexec(&.{}) catch
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);

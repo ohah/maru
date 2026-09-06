@@ -1198,8 +1198,9 @@ pub fn cycleFilter(self: *AppSession) bool {
     // 그림이 떠 있다」가 된다.
     closeOpen(self);
     self.image_gallery.filter = self.image_gallery.filter.next();
-    // 목록이 통째로 바뀌므로 보던 자리는 뜻을 잃는다 — 맨 위로 되돌린다.
+    // 목록이 통째로 바뀌므로 보던 자리도, 얹혀 있던 칸도 뜻을 잃는다.
     self.image_gallery.scroll.offset_y_px = 0;
+    self.image_gallery.hovered = null;
     rebuildFilter(self);
     self.metal_dirty = true;
     return true;
@@ -1451,6 +1452,8 @@ pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!builtin.target.os.tag.isDarwin()) return false;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return clearHover(self);
     if (self.image_gallery.open != null) return clearHover(self);
+    // 줄 목록에는 「얹힌 칸」이 없다 — 격자 좌표로 판정하면 남의 자리를 밝힌다(클릭과 같은 이유).
+    if (!self.image_gallery.filter.isGrid()) return clearHover(self);
 
     const area = gridArea(self);
     if (x_px < @as(f64, @floatFromInt(area.x)) or y_px < @as(f64, @floatFromInt(area.y))) return clearHover(self);
@@ -1502,6 +1505,12 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         } else closeOpen(self);
         return true;
     }
+
+    // **줄 목록에서는 격자 히트테스트를 돌리지 않는다.** 좌표계가 다르므로 엉뚱한 항목이 잡히고,
+    // 그것이 활동 `Hit` 이면 `ensureOpen` 이 명령 문자열을 **이미지로 디코드**하려 들어 「열지
+    // 못했습니다」가 뜬다. 줄을 눌렀을 때의 동작(펼침)은 AV3 가 정의한다 — 그때까지는 도크를
+    // 눌렀다는 사실(키 포커스)만 받고 아무것도 열지 않는다.
+    if (!self.image_gallery.filter.isGrid()) return true;
 
     const m = gridMetrics(self);
     const l = gridLayout(self);
@@ -1995,6 +2004,29 @@ pub fn gridLayout(self: *const AppSession) image_grid.Layout {
 
 /// 휠로 격자를 굴린다. 크게 보기 중에는 `wheelZoom` 이 가져가므로 여기 오지 않는다.
 pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) bool {
+    // **줄 목록은 자기 자를 쓴다.** 격자의 `max_scroll` 은 타일 크기와 열 수에서 나오므로 줄 목록의
+    // 실제 높이(항목 수 × 줄 높이)와 다르다. 그대로 쓰면 **끝까지 내려가지 않는다** — 4,084개짜리
+    // 세션에서 앞부분만 닿는다. 눈금도 한 줄이어야 「한 칸씩」이 뜻을 갖는다.
+    if (!self.image_gallery.filter.isGrid()) {
+        const area = gridArea(self);
+        const row_h = listRowHeightPx(self);
+        if (row_h == 0) return false;
+        const content_h: u32 = @intCast(@min(
+            @as(u64, self.image_gallery.count()) * @as(u64, row_h),
+            @as(u64, std.math.maxInt(u32)),
+        ));
+        const max_scroll = content_h -| area.h;
+        if (max_scroll == 0) return false; // 다 보인다 — 이벤트를 삼키지 않는다
+        const unit: f64 = if (precise)
+            @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
+        else
+            @floatFromInt(row_h);
+        if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, max_scroll)) {
+            self.metal_dirty = true;
+        }
+        return true; // 경계에서도 소비한다 — 안 그러면 제스처가 뒤 터미널로 샌다
+    }
+
     const l = gridLayout(self);
     if (l.max_scroll == 0) return false; // 굴릴 것이 없다 — 이벤트를 삼키지 않는다
     // 트랙패드(precise)는 논리 픽셀, 눈금은 한 번에 한 행. 도크 목록과 같은 규약이다.
@@ -2028,6 +2060,8 @@ pub fn appendHoverQuad(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     if (self.image_gallery.open != null) return;
+    // **필터가 바뀌어도 `hovered` 는 남는다.** 격자 좌표로 그리면 목록 화면에 뜬금없는 강조가 뜬다.
+    if (!self.image_gallery.filter.isGrid()) return;
     const n = self.image_gallery.hovered orelse return;
 
     const area = gridArea(self);
@@ -2214,7 +2248,7 @@ pub fn appendGpuImages(
 }
 
 /// 줄 목록 한 줄의 높이(px). 셀 높이의 배수로 두어 글자가 줄 사이에 끼지 않는다.
-fn listRowHeightPx(self: *const AppSession) u32 {
+pub fn listRowHeightPx(self: *const AppSession) u32 {
     return self.cell_height_px + list_row_padding_px;
 }
 

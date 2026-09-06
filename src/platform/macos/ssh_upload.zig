@@ -395,6 +395,10 @@ const watch_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remo
 /// 읽는다」가 된다(§2.5 — 조용한 실패가 아니라 판정 가능한 실패다).
 pub const list_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" list \"$1\"";
 
+/// **이름 변경 스크립트**(RF6a). 인자 다섯을 그대로 헬퍼에 넘긴다 — 인용은 `sshArgv` 아래에서
+/// `git_command.buildRemoteRename` 이 소유하고, 여기는 자리만 만든다(두 벌 금지).
+pub const rename_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" mv \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"";
+
 pub const Stream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout. 호출자가 읽고 **닫는다**.

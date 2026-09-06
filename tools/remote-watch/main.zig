@@ -27,7 +27,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 3\n";
+pub const version_line = "maru-remote-watch 4\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -66,6 +66,23 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, root, "list")) {
         const dir_path = args.next() orelse return exitWith(exit_unsupported);
         return runList(io, dir_path);
+    }
+
+    // **이름 변경 모드**(RF6a — [계획](../../docs/plans/remote-file-tree.md) §2.3 ⑶). 인자는
+    // `mv <부모 절대경로> <이전 이름> <새 이름> <dev> <ino>` 다. 계약의 핵심은 **저쪽 한 프로세스
+    // 안에서 stat → 비교 → 실행**이라는 것이다 — 셸로 쪼개면(`[ "$(stat …)" = N ] && mv`) 그 사이가
+    // 그대로 TOCTOU 창이고, 우리가 보던 파일이 아닌 것을 옮기게 된다.
+    //
+    // 신원은 **부모를 열어 그 핸들 아래에서** 다시 잰다(경로 재해석 없음 — 로컬의 `openPinnedParent`
+    // 가 하는 것과 같은 축). 그리고 rename 은 **비대체**여야 한다 — 대체면 남의 파일이 조용히
+    // 사라진다. 못 하는 원격에서는 대체로 내려가지 않고 `unsupported` 로 말한다(fail-closed).
+    if (std.mem.eql(u8, root, "mv")) {
+        const parent = args.next() orelse return exitWith(exit_unsupported);
+        const old_name = args.next() orelse return exitWith(exit_unsupported);
+        const new_name = args.next() orelse return exitWith(exit_unsupported);
+        const dev_text = args.next() orelse return exitWith(exit_unsupported);
+        const ino_text = args.next() orelse return exitWith(exit_unsupported);
+        return runRename(io, init.gpa, parent, old_name, new_name, dev_text, ino_text);
     }
 
     // 루트 뒤에 오는 것은 **굳히기까지 끝난 git 앞머리**다(RW7b — `ssh_upload.spawnRemoteWatch` 가
@@ -113,6 +130,20 @@ fn exitWith(code: u8) noreturn {
 /// wire 상수 — `src/session/remote_file_listing.zig` 와 **바이트까지 같아야 한다.** 이 바이너리는
 /// std 만 임포트하므로(크기·자기완결) 여기 사본이 있고, 드리프트는 실행형 왕복 게이트가 막는다.
 const rfls_header = "maru-rfls 1\n";
+const rfmv_header = "maru-rfmv 1\n";
+
+/// 변경 결말 — `src/session/remote_file_mutation.zig` 의 `Outcome` 과 **같은 수**여야 한다.
+/// 이 바이너리는 세션 모듈을 못 물어(std 만 임포트) 사본을 든다 — 드리프트는 왕복 게이트가 잡는다.
+const MvOutcome = enum(u8) {
+    ok = 0,
+    stale = 1,
+    collision = 2,
+    not_found = 3,
+    denied = 4,
+    invalid = 5,
+    io = 6,
+    unsupported = 7,
+};
 const rfls_max_name_bytes: usize = 1024;
 
 /// stdout 에 전부 쓴다. 실패하면 false — 채널이 끊긴 것이고, 부분 레코드를 남기느니 그냥 끝낸다
@@ -175,6 +206,129 @@ fn putRemoteError(msg: []const u8) void {
     if (!putAll(h)) return;
     if (!putAll(msg)) return;
     _ = putAll("\n");
+}
+
+/// 변경 결말 한 벌을 낸다(`maru-rfmv 1`). 진단은 선택이고 `S` **앞에** 온다 — 파서가 `S` 를 꼬리로
+/// 읽으므로 순서가 계약이다.
+fn putMvResult(outcome: MvOutcome, message: ?[]const u8) void {
+    if (!putAll(rfmv_header)) return;
+    if (message) |m| {
+        const clipped = if (m.len > 512) m[0..512] else m;
+        var head: [64]u8 = undefined;
+        const h = std.fmt.bufPrint(&head, "! {d} ", .{clipped.len}) catch return;
+        if (!putAll(h)) return;
+        if (!putAll(clipped)) return;
+        if (!putAll("\n")) return;
+    }
+    var tail: [16]u8 = undefined;
+    const t = std.fmt.bufPrint(&tail, "S {d}\n", .{@intFromEnum(outcome)}) catch return;
+    _ = putAll(t);
+}
+
+/// 이름이 **이름일 수 있는가**. wire 가 같은 규율을 목록 쪽에서 쓴다(UnsafeName) — 여기서도 막아야
+/// `..` 하나가 부모 밖을 가리키는 일이 없다.
+fn mvNameIsSafe(name: []const u8) bool {
+    if (name.len == 0 or name.len > 1024) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    for (name) |c| if (c == '/' or c == 0) return false;
+    return true;
+}
+
+/// 부모 아래에서 `old` 를 `new` 로 바꾼다 — **신원을 다시 재고, 비대체로**(§2.3 ⑶).
+fn runRename(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    parent: []const u8,
+    old_name: []const u8,
+    new_name: []const u8,
+    dev_text: []const u8,
+    ino_text: []const u8,
+) void {
+    if (parent.len == 0 or parent[0] != '/') return putMvResult(.invalid, "parent is not absolute");
+    if (!mvNameIsSafe(old_name) or !mvNameIsSafe(new_name)) return putMvResult(.invalid, "unsafe name");
+    if (std.mem.eql(u8, old_name, new_name)) return putMvResult(.invalid, "name unchanged");
+    const want_dev = std.fmt.parseInt(u64, dev_text, 10) catch return putMvResult(.invalid, "bad identity");
+    const want_ino = std.fmt.parseInt(u64, ino_text, 10) catch return putMvResult(.invalid, "bad identity");
+
+    // 부모를 **열어서** 그 핸들 아래에서만 판단한다 — 경로를 다시 해석하지 않는다.
+    var dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |err| {
+        return putMvResult(mvOutcomeForOpen(err), "opendir failed");
+    };
+    defer dir.close(io);
+
+    const old_z = gpa.dupeZ(u8, old_name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(old_z);
+    const new_z = gpa.dupeZ(u8, new_name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(new_z);
+
+    // 신원 재확인. 링크는 **링크 자신**을 본다(로컬의 `identityAt` 과 같은 축 — `SYMLINK_NOFOLLOW`).
+    const st = rawFstatAt(dir.handle, old_z.ptr, std.posix.AT.SYMLINK_NOFOLLOW) orelse
+        return putMvResult(.not_found, "source is gone");
+    if (st.dev != want_dev or st.ino != want_ino) return putMvResult(.stale, "identity changed");
+
+    switch (renameNoReplace(dir.handle, old_z.ptr, new_z.ptr)) {
+        .ok => putMvResult(.ok, null),
+        .exists => putMvResult(.collision, "target exists"),
+        .denied => putMvResult(.denied, "permission denied"),
+        .not_found => putMvResult(.not_found, "source is gone"),
+        .unsupported => putMvResult(.unsupported, "this remote cannot rename without replacing"),
+        .io => putMvResult(.io, "rename failed"),
+    }
+}
+
+const RenameResult = enum { ok, exists, denied, not_found, unsupported, io };
+
+/// **비대체 rename**. 대체(덮어쓰기)로 조용히 내려가지 않는다 — 그러면 사용자가 모르는 사이 남의
+/// 파일이 사라진다. 리눅스는 `renameat2(RENAME_NOREPLACE)`, macOS·BSD 는 `renameatx_np(RENAME_EXCL)`
+/// 이고, 커널·파일시스템이 그 플래그를 모르면 `unsupported` 로 **말한다**(§2.5 — 조용한 폴백 금지).
+fn renameNoReplace(dir_fd: std.posix.fd_t, old_z: [*:0]const u8, new_z: [*:0]const u8) RenameResult {
+    switch (builtin.os.tag) {
+        .linux => {
+            const linux = std.os.linux;
+            const rc = linux.syscall5(
+                .renameat2,
+                @as(usize, @bitCast(@as(isize, dir_fd))),
+                @intFromPtr(old_z),
+                @as(usize, @bitCast(@as(isize, dir_fd))),
+                @intFromPtr(new_z),
+                rename_noreplace,
+            );
+            return switch (linux.errno(rc)) {
+                .SUCCESS => .ok,
+                .EXIST, .NOTEMPTY => .exists,
+                .ACCES, .PERM, .ROFS => .denied,
+                .NOENT => .not_found,
+                // 옛 커널(4.0 미만)·플래그를 모르는 파일시스템. **대체로 안 내려간다.**
+                .NOSYS, .INVAL, .OPNOTSUPP => .unsupported,
+                else => .io,
+            };
+        },
+        else => {
+            const rc = renameatx_np(dir_fd, old_z, dir_fd, new_z, rename_excl);
+            if (rc == 0) return .ok;
+            return switch (std.posix.errno(rc)) {
+                .EXIST, .NOTEMPTY => .exists,
+                .ACCES, .PERM, .ROFS => .denied,
+                .NOENT => .not_found,
+                .OPNOTSUPP, .INVAL => .unsupported, // darwin 은 NOTSUP 이 OPNOTSUPP 과 같은 수다
+                else => .io,
+            };
+        },
+    }
+}
+
+const rename_noreplace: usize = 1; // linux RENAME_NOREPLACE
+const rename_excl: c_uint = 0x0000_0004; // macOS RENAME_EXCL
+
+extern "c" fn renameatx_np(fromfd: c_int, from: [*:0]const u8, tofd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
+
+fn mvOutcomeForOpen(err: anyerror) MvOutcome {
+    return switch (err) {
+        error.FileNotFound => .not_found,
+        error.AccessDenied, error.PermissionDenied => .denied,
+        error.NotDir => .invalid,
+        else => .io,
+    };
 }
 
 /// 디렉터리 하나를 wire v1 로 나열한다. **한 왕복에 목록 + 신원**이 계약이다(계획 §2.3 ⑵) —

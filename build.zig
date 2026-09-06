@@ -3259,6 +3259,22 @@ pub fn build(b: *std.Build) void {
     run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
+    // 원격 변경 결과 wire(RF6a) 순수 판정자만. 같은 이유로 maru 그래프에 필터를 건다.
+    const remote_mutation_wire_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{"RF6a wire"},
+    });
+    remote_mutation_wire_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_remote_mutation_wire_tests = b.addRunArtifact(remote_mutation_wire_tests);
+    run_remote_mutation_wire_tests.addArg("--maru-expect-tests=25"); // 이름 있는 넷 + 이름 없는 블록들
+    b.step("test-remote-file-mutation-wire", "Run the pure remote mutation wire codec judges only").dependOn(&run_remote_mutation_wire_tests.step);
+
     // 원격 탐색기 수직 판정자(RF3a~) — app_session 전체를 12 분 돌리지 않고 이 축만 잰다.
     if (builtin.os.tag == .macos) {
         const remote_explorer_tests = addProjectTest(b, .{
@@ -3332,6 +3348,32 @@ pub fn build(b: *std.Build) void {
             "test-remote-file-listing",
             "Run the built remote-watch helper's list mode and re-read it with the session codec",
         ).dependOn(&run_listing_roundtrip.step);
+
+        // **헬퍼 `mv` ↔ 변경 코덱 왕복 게이트**(RF6a). 같은 실물 바이너리를 돌려 결말 wire 를 되읽고,
+        // 계약(신원 재확인·비대체 rename)이 **실제로 지켜지는지**까지 잰다 — 셸 조합으로는 못 만드는
+        // 보장이 그것이라, 문자열 대조로는 이 슬라이스의 값어치를 못 지킨다.
+        const mutation_roundtrip_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/remote_file_mutation_roundtrip.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_mutation_roundtrip = b.addRunArtifact(mutation_roundtrip_tests);
+        run_mutation_roundtrip.addArg("--maru-expect-tests=2");
+        run_mutation_roundtrip.addArg("--maru-expect-passed=2"); // env 가 빠지면 조용히 초록이 된다
+        run_mutation_roundtrip.setCwd(b.path("."));
+        run_mutation_roundtrip.step.dependOn(&install_native_watch.step);
+        run_mutation_roundtrip.setEnvironmentVariable(
+            "MARU_REMOTE_WATCH_BIN",
+            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
+        );
+        test_step.dependOn(&run_mutation_roundtrip.step);
+        b.step(
+            "test-remote-file-mutation",
+            "Run the built remote-watch helper's mv mode and re-read it with the session codec",
+        ).dependOn(&run_mutation_roundtrip.step);
     } else {
         test_step.dependOn(noteSkippedStep(b, "remote_file_listing 왕복", "POSIX 호스트 전용 — sh 픽스처(심링크·개행 이름) + 실물 헬퍼 실행 (docs/plans/remote-file-tree.md §10)"));
     }

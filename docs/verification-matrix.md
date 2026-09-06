@@ -1132,6 +1132,15 @@ Darwin descriptor-close 실패는 이미 tombstone된 owner를 재시도하지 �
 harness-owned `mkdtemp`만 사용하며 실제 앱 session-host 상태·GitHub release·credential을 읽거나 바꾸지 않는다. 이 gate는 executable resume command, workflow stage 5/6, publication composition, post-publish aggregate cleanup,
 live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
 
+U5 publication suffix phase는 최초 candidate 경로와 후속 resume 경로가 공유할
+attach→redownload→publish→post-publish verify의 exact order, 동일 audit seal/deadline, 첫 remote mutation 전후 실패 분류와 역순 local
+cleanup을 단일 owner로 둔다. `test-session-host-release-adapter-candidate-publication-suffix-phase`는 모든 leaf·authority fence 실패,
+attachment의 empty/terminal 분기, attachment/publication/post-publish audit stage, copied/pre-owned/foreign deadline/seal·state drift 및
+cleanup 실패의 exact retry set을 Debug·ReleaseFast에서 검증한다. 기존 candidate publication phase/product gate는 local
+manifest/attestation prefix가 suffix를 exact once 조합하고 전체 callback 순서와 terminal 결과가 보존됨을 검증한다. injected fixture만
+사용하므로 실제 GitHub release·credential·filesystem과 앱 session-host 상태를 건드리지 않는다. 이 gate는 resume asset graph,
+executable publication command, live workflow stage 5~8, aggregate cleanup 또는 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

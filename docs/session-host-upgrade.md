@@ -3449,6 +3449,38 @@ load-bearing evidence로 유지하며 product gate가 그 fault matrix를 중복
 `mkdtemp` 아래만 사용하고 실제 앱 session-host 상태·GitHub release·credential을 찾거나 수정하지 않는다. 이 slice는 resume authority product까지만 닫으며 executable resume command, stage 5/6 workflow 삽입, publication
 composition, post-publish aggregate cleanup, live workflow와 frozen signed U5 E2E는 후속 범위다.
 
+### 11.62 재개와 최초 실행이 공유하는 publication suffix 권위
+
+draft asset 첨부 이후의 정책을 최초 실행용 candidate transaction과 재개용 publication composition이 각각 구현하지 않는다.
+`release_adapter_candidate_publication_suffix_phase.zig`의 final-address `Publication` 하나가
+attach→redownload→publish→post-publish verify의 exact-once 순서, 같은 audit seal과 deadline identity, 원격 mutation 경계 및
+역순 local capability 정리를 소유한다. 이 값은 pathname·release/asset ID·digest·credential·child 결과를 저장하지 않으며 concrete
+leaf가 검증된 side effect를 끝낸 뒤 남긴 typed owner의 존재 여부만 단계 bit로 나타낸다.
+
+suffix 진입 전 caller는 자기 preflight와 canonical audit bytes를 끝내고 nonzero domain-separated seal을 넘긴다. suffix는 pristine
+final address에 seal을 복사한 뒤 첫 attachment를 시도한다. attachment가 remote mutation 전에 실패해 leaf state가 `empty`이면
+attachment local owner를 정리하고 원래 오류를 돌려준다. attachment state가 `remote_state_unknown|cleanup_required|ready`이거나
+attachment 성공 뒤 authority fence·redownload·publish·post-publish verify 중 하나가 실패하면 자동 retry·remote delete·다른 draft
+채택 없이 exact `attachment|publication|post_publish` audit stage를 terminal로 보존한다. 특히 redownload 실패는 이미 네 upload가
+끝났으므로 attachment audit이고, publish 응답 불확정과 publish 뒤 fence 실패는 publication audit이며, verify와 마지막 fence 실패는
+post-publish audit이다.
+
+성공은 네 attempted bit, nonzero seal, no-audit와 successful bit가 모두 canonical일 때만 공개한다. 성공 cleanup은
+verified→published→redownloaded→attached 역순으로 local owner를 닫고 remote release나 asset을 삭제하지 않는다. cleanup 하나가
+실패해도 나머지 suffix owner 정리를 계속하고 실패한 exact owner bit만 retry set으로 남긴다. audit-required 값은 generic cleanup으로
+재시도할 수 없다. copied/pre-owned owner, foreign deadline, seal mismatch, 단계 bit와 terminal state의 비정상 조합은 다음 leaf 전에
+거부한다.
+
+기존 `release_adapter_candidate_publication_phase.zig`는 manifest author→authored attestation의 local prefix와 그 역순 cleanup만
+소유하고, 위 네 단계의 실행·audit 분류·cleanup은 suffix phase에 위임한다. 후속 resume publication composition도 같은 suffix phase를
+직접 조합하므로 원격 불확정 상태 정책의 두 번째 구현을 만들지 않는다. focused gate
+`test-session-host-release-adapter-candidate-publication-suffix-phase`는 정상 순서, 모든 leaf/fence 실패, attachment mutation 전후 분기,
+각 audit stage, copied/pre-owned/foreign deadline/seal 변조와 cleanup retry suffix를 Debug·ReleaseFast exhaustive table로 검증한다.
+기존 candidate publication phase/product gate는 prefix→suffix exact-one 조립과 기존 전체 순서·실패·cleanup 관찰이 바뀌지 않음을
+검증한다. fixture는 injected pointer-free step뿐이고 실제 GitHub release·credential·filesystem 또는 앱 session-host 상태를 읽거나
+수정하지 않는다. 이 경계는 resume asset graph adapter, executable resume/publication command, workflow stage 5~8 배선, aggregate
+삭제나 frozen signed U5 E2E를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -443,6 +443,7 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
         .prepare_candidate_aggregate => hash.update("prepare-candidate-aggregate"),
         .finalize_candidate_aggregate => hash.update("finalize-candidate-aggregate"),
         .resume_candidate_publication => hash.update("resume-candidate-publication"),
+        .cleanup_candidate_aggregate => hash.update("cleanup-candidate-aggregate"),
     }
     var digest: [32]u8 = undefined;
     hash.final(&digest);

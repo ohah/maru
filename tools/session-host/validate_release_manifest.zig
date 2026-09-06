@@ -1,7 +1,8 @@
 //! Official GitHub Release validator executable.
 //!
 //! Success is observable only through the command's exclusive summary pathname. This process does
-//! not emit credentials or validation JSON on stdout and never falls back between phase drivers.
+//! not emit credentials on stdout and never falls back between phase drivers. The stage-8 cleanup
+//! command alone emits its non-authoritative timing record there.
 
 const std = @import("std");
 const manifest = @import("release_manifest");
@@ -17,6 +18,7 @@ const verify_predecessor_product = @import("release_adapter_verify_predecessor_p
 const candidate_release_driver = @import("release_adapter_candidate_release_driver");
 const candidate_stage3_command = @import("release_adapter_candidate_stage3_preparation_command");
 const candidate_resume_publication_command = @import("release_adapter_candidate_resume_publication_command");
+const candidate_published_cleanup_command = @import("release_adapter_candidate_published_cleanup_command");
 const candidate_aggregate_process = @import("release_adapter_candidate_aggregate_process");
 const builtin = @import("builtin");
 
@@ -36,6 +38,7 @@ pub const Storage = struct {
     candidate: candidate_release_driver.Execution = .{},
     stage3: candidate_stage3_command.Execution = .{},
     resume_publication: candidate_resume_publication_command.Execution = .{},
+    published_cleanup: candidate_published_cleanup_command.Execution = .{},
     aggregate_process: candidate_aggregate_process.Storage = .{},
 };
 
@@ -161,6 +164,40 @@ const ProductDrivers = struct {
         };
     }
 
+    pub fn cleanupCandidateAggregate(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        tokens: anytype,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        const outcome = candidate_published_cleanup_command.runOutcome(
+            io,
+            allocator,
+            bootstrap,
+            tokens,
+            storage.github_response[0..candidate_published_cleanup_command.max_response_bytes],
+            budget_ns,
+            &storage.published_cleanup,
+        );
+        if (outcome == .success) {
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+            const stdout = &stdout_file_writer.interface;
+            try stdout.writeAll(storage.published_cleanup.timingLine());
+            try stdout.flush();
+            return;
+        }
+        return switch (outcome) {
+            .success => unreachable,
+            .audit_required => error.PublishedCleanupAuditRequired,
+            .cleanup_required => error.PublishedCleanupRequired,
+            .descriptor_close_failed => error.PublishedCleanupDescriptorCloseFailed,
+        };
+    }
+
     pub fn prepareCandidateAggregate(
         _: *@This(),
         _: std.Io,
@@ -220,6 +257,7 @@ pub fn executeWith(
         .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .resume_candidate_publication => try drivers.resumeCandidatePublication(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        .cleanup_candidate_aggregate => try drivers.cleanupCandidateAggregate(io, allocator, &bootstrap, tokens, phase_budget_ns, storage),
     }
 }
 
@@ -245,6 +283,8 @@ pub fn main(init: std.process.Init) !void {
                 finishStage3(.local_failure);
             if (count != 0 and std.mem.eql(u8, values[0], "resume-candidate-publication"))
                 finishResumePublication(.audit_required);
+            if (count != 0 and std.mem.eql(u8, values[0], "cleanup-candidate-aggregate"))
+                finishPublishedCleanup(.audit_required);
             return err;
         };
     }
@@ -263,12 +303,22 @@ pub fn main(init: std.process.Init) !void {
             };
             finishResumePublication(resume_outcome);
         }
+        if (count != 0 and std.mem.eql(u8, values[0], "cleanup-candidate-aggregate")) {
+            const cleanup_outcome: candidate_published_cleanup_command.Outcome = switch (err) {
+                error.PublishedCleanupRequired => .cleanup_required,
+                error.PublishedCleanupDescriptorCloseFailed => .descriptor_close_failed,
+                else => .audit_required,
+            };
+            finishPublishedCleanup(cleanup_outcome);
+        }
         return err;
     };
     if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
         finishStage3(.success);
     if (count != 0 and std.mem.eql(u8, values[0], "resume-candidate-publication"))
         finishResumePublication(.success);
+    if (count != 0 and std.mem.eql(u8, values[0], "cleanup-candidate-aggregate"))
+        finishPublishedCleanup(.success);
 }
 
 fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, value: []const u8) !void {
@@ -285,4 +335,9 @@ fn finishStage3(outcome: candidate_stage3_command.Outcome) noreturn {
 fn finishResumePublication(outcome: candidate_resume_publication_command.Outcome) noreturn {
     std.debug.print("{s}", .{candidate_resume_publication_command.stderrLine(outcome)});
     std.process.exit(candidate_resume_publication_command.exitCode(outcome));
+}
+
+fn finishPublishedCleanup(outcome: candidate_published_cleanup_command.Outcome) noreturn {
+    std.debug.print("{s}", .{candidate_published_cleanup_command.stderrLine(outcome)});
+    std.process.exit(candidate_published_cleanup_command.exitCode(outcome));
 }

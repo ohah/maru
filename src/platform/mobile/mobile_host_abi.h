@@ -251,13 +251,31 @@ unsigned int maru_mobile_a11y_count(void);
 /* 자리. `maru_mobile_keybar_rect` 와 **같은 꾸림**이다: (x<<48)|(y<<32)|(w<<16)|h. */
 unsigned long long maru_mobile_a11y_rect(unsigned int index);
 
-/* 역할 — `chrome/ui/semantics.zig` 의 `Role` 순번(0=button, 1=tree_item, 2=list_item,
-   3=tab, 4=scroll_view, 5=text, 6=group). */
+/* 역할. **번호는 여기가 단일 출처다** — 브리지는 계약 enum(`chrome/ui/semantics.zig` 의 `Role`)의
+   순번을 그대로 내보내지 않는다. 그러면 그 enum 에 줄을 하나 끼워 넣는 순간 host 가 조용히 다른
+   역할을 읽는다(데스크톱 ABI 도 같은 이유로 제 번호를 따로 든다). */
+enum {
+    MARU_MOBILE_A11Y_ROLE_BUTTON = 0,
+    MARU_MOBILE_A11Y_ROLE_TREE_ITEM = 1,
+    MARU_MOBILE_A11Y_ROLE_LIST_ITEM = 2,
+    MARU_MOBILE_A11Y_ROLE_TAB = 3,
+    MARU_MOBILE_A11Y_ROLE_SCROLL_VIEW = 4,
+    MARU_MOBILE_A11Y_ROLE_TEXT = 5,
+    MARU_MOBILE_A11Y_ROLE_GROUP = 6,
+};
 unsigned int maru_mobile_a11y_role(unsigned int index);
 
 /* 상태 비트. **한 번에 읽어 간다** — 항목마다 호출을 넷 하면 그 사이에 프레임이 바뀌어 서로 다른
-   프레임의 값을 섞는다. bit0 enabled · bit1 selected · bit2 focusable ·
-   bit3 「펼침이라는 개념이 있는가」 · bit4 그 값. */
+   프레임의 값을 섞는다. */
+enum {
+    MARU_MOBILE_A11Y_STATE_ENABLED = 1u << 0,
+    MARU_MOBILE_A11Y_STATE_SELECTED = 1u << 1,
+    MARU_MOBILE_A11Y_STATE_FOCUSABLE = 1u << 2,
+    /* 이 줄에 「펼침」이라는 개념이 있나. 없으면 아래 EXPANDED 는 뜻이 없다 — 스크린 리더가
+       「접힘」으로 읽지 않게 둘을 가른다. */
+    MARU_MOBILE_A11Y_STATE_EXPANDABLE = 1u << 3,
+    MARU_MOBILE_A11Y_STATE_EXPANDED = 1u << 4,
+};
 unsigned int maru_mobile_a11y_state(unsigned int index);
 
 /* 이름을 `out` 에 **복사**하고 **쓴 바이트 수**를 답한다. 가리키는 것은 다음 프레임에 사라질 수

@@ -7269,10 +7269,36 @@ pub export fn maru_mobile_a11y_rect(index: u32) u64 {
     return (x << 48) | (y << 32) | (w << 16) | h;
 }
 
-/// 역할(`chrome/ui/semantics.zig` 의 `Role` 순번). 없는 index 는 0xFFFF_FFFF.
+/// **wire 로 나가는 역할 번호.** 계약 enum(`chrome/ui/semantics.zig` 의 `Role`)의 순번을 그대로
+/// 내보내지 않는 이유: 그 enum 에 줄을 하나 끼워 넣는 순간 host 가 **조용히 다른 역할**을 읽는다
+/// (데스크톱 ABI 도 같은 이유로 제 번호를 따로 든다). 번호의 단일 출처는 `mobile_host_abi.h` 이고,
+/// 아래 switch 가 **빠짐없이** 적혀 있어서 계약에 역할이 늘면 여기서 컴파일이 멈춘다.
+const WireRole = enum(u32) {
+    button = 0,
+    tree_item = 1,
+    list_item = 2,
+    tab = 3,
+    scroll_view = 4,
+    text = 5,
+    group = 6,
+
+    fn from(role: tree.SemanticRole) WireRole {
+        return switch (role) {
+            .button => .button,
+            .tree_item => .tree_item,
+            .list_item => .list_item,
+            .tab => .tab,
+            .scroll_view => .scroll_view,
+            .text => .text,
+            .group => .group,
+        };
+    }
+};
+
+/// 역할(`mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*`). 없는 index 는 0xFFFF_FFFF.
 pub export fn maru_mobile_a11y_role(index: u32) u32 {
     if (index >= a11y_count) return 0xFFFF_FFFF;
-    return @intFromEnum(a11y_nodes[index].sem.role);
+    return @intFromEnum(WireRole.from(a11y_nodes[index].sem.role));
 }
 
 /// 상태 비트. **한 번에 읽어 간다** — 항목마다 호출을 넷 하면 host 코드가 그만큼 길어지고,

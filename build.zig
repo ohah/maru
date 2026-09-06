@@ -5054,6 +5054,24 @@ pub fn build(b: *std.Build) void {
     remote_watch_channel_step.dependOn(&run_remote_watch_channel.step);
     boundary_step.dependOn(&run_remote_watch_channel.step);
 
+    const ssh_keepalive_step = b.step(
+        "test-ssh-spawn-keepalive",
+        "Every ssh spawned by ssh_upload carries ServerAlive keepalive (half-open TCP detection)",
+    );
+    const ssh_keepalive_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/ssh_spawn_keepalive_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ssh_keepalive = b.addRunArtifact(ssh_keepalive_tests);
+    run_ssh_keepalive.addArg("--maru-expect-tests=1");
+    run_ssh_keepalive.addArg("--maru-expect-passed=1");
+    run_ssh_keepalive.setCwd(b.path("."));
+    ssh_keepalive_step.dependOn(&run_ssh_keepalive.step);
+    boundary_step.dependOn(&run_ssh_keepalive.step);
+
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",

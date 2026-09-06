@@ -74,7 +74,13 @@ pub fn uploadBytes(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, cmd);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     // stdin/stdout 파이프(부모↔자식). [0]=read, [1]=write.
     var in_pipe: [2]c_int = undefined;
@@ -162,7 +168,13 @@ pub fn runRemoteScript(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, cmd);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     var in_pipe: [2]c_int = undefined;
     if (std.c.pipe(&in_pipe) != 0) return UploadError.PipeFailed;
@@ -296,7 +308,13 @@ pub fn runRemoteCapped(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, cmd);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
@@ -417,6 +435,25 @@ pub const Stream = struct {
 /// 결과**다. 그런데도 `uploadBytes` 처럼 동기로 기다리지 않는다: 이 함수는 tick 스레드에서 불리고,
 /// ssh 왕복은 수백 ms 에서 몇 초다. 그동안 UI 가 멈추면 그것이 곧 «maru 가 원격에 붙을 때 뻗는다» 다.
 /// 그래서 fd 를 돌려주고 **호출자가 논블로킹으로 훑는다**(스트리머와 같은 규율).
+/// **반개방(half-open) TCP 를 감지하는 유일한 수단이다.**
+///
+/// 여기서 띄우는 `ssh` 는 `-S` 로 ControlMaster 소켓을 **쓰려고 하지만**, 그 소켓이 없거나 못 쓰면
+/// 조용히 **자기 TCP 연결**로 떨어진다. 그 연결의 상대(원격 `sshd` 세션)가 FIN·RST 없이 사라지면
+/// 로컬 소켓은 `ESTABLISHED` 로 남고, `ssh` 는 `pselect` 에서 **영원히** 깨지 않는다.
+///
+/// 2026-09-07 실측: agent-events 브리지가 그 상태로 **5 시간 36 분** 매달려 있었다.
+/// `sample` 878 프레임이 전부 `pselect` 였고, 원격에는 그 연결의 `sshd` 세션이 없었다(가장 오래된 것이
+/// 55 분). 소비자는 `read` 에서 EOF 대신 `EAGAIN` 만 받아 EOF 갈래에 못 들어갔고, 그래서 이미 구현된
+/// 재접속(RA5-b)이 **한 번도 안 불렸다** — 사이드바가 그 시간 내내 굳어 있었다.
+///
+/// `ssh -G openClaw` 는 `tcpkeepalive yes` 이지만 그것으로는 못 잡는다 — macOS 의 TCP keepalive 는
+/// 기본 **2 시간** 유휴 뒤에야 시작한다. `serveraliveinterval` 은 **0**(꺼짐)이 기본이라 명시해야 한다.
+/// 15 초 × 3 회 = 45 초면 죽은 상대에서 `ssh` 가 끝나고, 그 종료가 곧 소비자의 EOF 다.
+///
+/// **일회성 명령에도 붙인다.** 매달린 업로드·설치도 같은 방식으로 영원히 안 끝난다.
+const keepalive_interval_opt = "ServerAliveInterval=15";
+const keepalive_count_opt = "ServerAliveCountMax=3";
+
 pub fn spawnRemoteCommand(
     allocator: std.mem.Allocator,
     ctl: []const u8,
@@ -435,7 +472,13 @@ pub fn spawnRemoteCommand(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, shell_command);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
@@ -535,7 +578,13 @@ pub fn spawnAgentEvents(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, cmd);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
@@ -602,7 +651,13 @@ pub fn spawnRemoteWatch(
     defer allocator.free(c_dest);
     const c_cmd = try allocator.dupeZ(u8, cmd);
     defer allocator.free(c_cmd);
-    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        c_env0.ptr, c_ssh.ptr,
+        "-o",       keepalive_interval_opt,
+        "-o",       keepalive_count_opt,
+        c_flag.ptr, c_ctl.ptr,
+        c_dest.ptr, c_cmd.ptr,
+    };
 
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;

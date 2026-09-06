@@ -6431,6 +6431,16 @@ pub fn build(b: *std.Build) void {
     // 원장(`tests/boundary/shell_gate_ledger.zig`)이 이 사실을 `.posix_only` 로 들고 있다.
     if (posix_host_tests) test_step.dependOn(&session_host_release_attestation_action_contract.step);
 
+    const session_host_release_candidate_attestation_action_contract = b.addSystemCommand(&.{ "bash", "tools/test-session-host-release-candidate-attestation-action.sh" });
+    session_host_release_candidate_attestation_action_contract.setCwd(b.path("."));
+    session_host_release_candidate_attestation_action_contract.stdio = .inherit;
+    const session_host_release_candidate_attestation_action_step = b.step(
+        "test-session-host-release-candidate-attestation-action",
+        "Check the candidate DMG and frozen executable pair attestation action",
+    );
+    session_host_release_candidate_attestation_action_step.dependOn(&session_host_release_candidate_attestation_action_contract.step);
+    if (posix_host_tests) test_step.dependOn(&session_host_release_candidate_attestation_action_contract.step);
+
     const session_host_release_authored_attestation_action_contract = b.addSystemCommand(&.{ "bash", "tools/test-session-host-release-authored-attestation-action.sh" });
     session_host_release_authored_attestation_action_contract.setCwd(b.path("."));
     session_host_release_authored_attestation_action_contract.stdio = .inherit;

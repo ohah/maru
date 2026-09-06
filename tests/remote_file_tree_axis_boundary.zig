@@ -126,3 +126,30 @@ test "감시 채널은 창 당 하나다 — 뷰가 나눠 쓰지, 트리 전용
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "spawnRemoteWatch"));
     }
 }
+
+test "원격 변경은 로컬 변경 백엔드를 안 탄다 — 문이 하나이고 그 앞에서 갈린다 (RF6b §2.4)" {
+    // RF6b 가 이름 변경을 열면서 가장 위험해진 한 줄은 「원격 경로가 로컬 mutation 백엔드로 가는 것」
+    // 이다. 그쪽은 휴지통 staging·롤백·에디터 잠금이 **로컬 파일시스템 의미**에 묶여 있어, 같은
+    // 철자의 로컬 파일이 대상이 된다. 그래서 ⑴ 갈림은 `enqueueFileTreeEdit` 맨 앞 한 자리이고
+    // ⑵ 원격 커밋은 로컬 백엔드 심볼을 **하나도** 안 쓴다.
+    const allocator = std.testing.allocator;
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+
+    // 갈림이 그 문의 **첫 문장**이어야 한다 — 뒤에 두면 그 앞 배관(예약·잠금)을 이미 지난다.
+    const gate = std.mem.indexOf(u8, panel, "if (target.remote) return enqueueRemoteFileTreeRename(self, target, name);") orelse
+        return error.TestUnexpectedResult;
+    const door = std.mem.indexOf(u8, panel, "pub fn enqueueFileTreeEdit(").?;
+    const reserve = std.mem.indexOf(u8, panel, "file_tree_mutation_backend.tryReserve()").?;
+    try std.testing.expect(door < gate and gate < reserve);
+
+    // 원격 커밋 본문은 로컬 백엔드를 안 만진다(같은 함수 안에서 섞이면 그 규율이 호출자에게 샌다).
+    const body = fnBody(panel, "enqueueRemoteFileTreeRename") orelse return error.TestUnexpectedResult;
+    for ([_][]const u8{ "file_tree_mutation_backend", "tryReserve", "submitReserved", "file_tree_trash" }) |symbol| {
+        try std.testing.expect(std.mem.indexOf(u8, body, symbol) == null);
+    }
+    // 이름 규칙은 **로컬과 같은 순수 함수**가 소유한다 — 두 벌이면 한쪽만 고쳐진다.
+    try std.testing.expect(std.mem.indexOf(u8, body, "file_tree_mutation.validateName(name)") != null);
+    // 로컬 타깃의 원격 펜스는 **그대로 서 있다**(RF6b 는 그것을 안 열었다 — 원격은 다른 문이다).
+    try std.testing.expect(std.mem.indexOf(u8, panel, "if (self.file_tree_rows_remote) return null;") != null);
+}

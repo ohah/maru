@@ -2403,6 +2403,9 @@ pub const FileTreeEditTarget = struct {
     row_kind: file_tree.RowKind,
     symlink: bool = false,
     edit_kind: FileTreeEditKind,
+    /// **원격 트리의 행인가**(RF6b). 참이면 로컬 변경 백엔드로 안 간다 — 그쪽은 휴지통·롤백이
+    /// 로컬 파일시스템 의미에 묶여 있어 원격 경로가 들어가면 같은 철자의 로컬 파일이 대상이 된다(§2.4).
+    remote: bool = false,
     identity: ?file_tree.Identity = null,
     parent_identity: ?file_tree.Identity = null,
     root_identity: ?file_tree.Identity = null,
@@ -5274,6 +5277,10 @@ pub const AppSession = struct {
     remote_file_open_inflight: bool = false,
     remote_file_mutex: std.Io.Mutex = .init,
     remote_file_outcome: ?file_panel_ops.RemoteFileOutcome = null,
+    /// 원격 이름 변경(RF6b) — 단발 워커. 로컬 변경 백엔드를 안 탄다(§2.4).
+    remote_rename_inflight: bool = false,
+    remote_rename_mutex: std.Io.Mutex = .init,
+    remote_rename_outcome: ?file_panel_ops.RemoteRenameOutcome = null,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
@@ -21485,6 +21492,15 @@ pub const AppSession = struct {
             self.allocator.free(outcome.bytes);
             self.remote_file_outcome = null;
         }
+        // 원격 이름 변경 워커도 같은 가드다(RF6b) — detach 스레드가 self.remote_rename_* 을 건드린다.
+        while (true) {
+            self.remote_rename_mutex.lockUncancelable(self.io);
+            const still_running = self.remote_rename_inflight and self.remote_rename_outcome == null;
+            self.remote_rename_mutex.unlock(self.io);
+            if (!still_running) break;
+            std.atomic.spinLoopHint();
+        }
+        self.remote_rename_outcome = null; // 소유한 바이트가 없다(결말은 열거 하나다)
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {
             self.upload_mutex.lockUncancelable(self.io);
@@ -79826,4 +79842,88 @@ test "원격 탐색기 감시: 트리거가 펼친 디렉터리를 다시 읽게
     // ── ④ 비활성 탐색기에는 트리거가 아무 일도 안 한다(조용한 재예약 폭주 방지).
     file_panel_ops.invalidateRemoteExplorerExpanded(session);
     try std.testing.expect(re.tree.takeScanRequest() == null);
+}
+
+test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 결말이 안내·재읽기로 갈린다 (RF6b)" {
+    // 전송 없이 태우는 수직이다 — 결말(finishRemoteRename)은 제품 드레인 그 자체라 직접 부른다.
+    // 전송 실물(헬퍼 mv 계약)은 RF6a 의 실물 왕복 게이트가 소유한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const re = &session.remote_explorer;
+    re.active = true;
+    try re.dest.appendSlice(a, "me@build-box");
+    try re.ctl.appendSlice(a, "/tmp/maru-ctl-fixture");
+    try re.root.appendSlice(a, "/srv/app");
+    try re.tree.replaceExplicitRoots(&.{"/srv/app"});
+    while (re.tree.takeScanRequest()) |owned| a.free(owned);
+    try re.tree.applySnapshot("/srv/app", &.{.{ .name = "old.txt", .kind = .file, .identity = .{ .device = 7, .inode = 42, .kind = 1 } }});
+    session.file_tree_rows_remote = true;
+
+    // ── ① 이름 규칙은 **로컬과 같은 순수 함수**가 소유한다 — 원격이라고 느슨해지지 않는다.
+    var target = FileTreeEditTarget{ .row_kind = .file, .edit_kind = .rename, .remote = true, .identity = .{ .device = 7, .inode = 42, .kind = 1 } };
+    const path = "/srv/app/old.txt";
+    @memcpy(target.path_buf[0..path.len], path);
+    target.path_len = path.len;
+    // ⚠️ **제품 문으로 태운다**(`enqueueFileTreeEdit`) — 원격 분기가 사라지면 이 호출이 **로컬 변경
+    //    백엔드**로 가고, 그때 나오는 안내는 「root 밖」이다(§2.4 위반이 화면 문구로 드러난다).
+    //    직접 `enqueueRemoteFileTreeRename` 을 부르면 그 분기를 안 지나 뮤테이션이 통과한다(실측).
+    @memset(&session.notice_message_buf, 0);
+    try std.testing.expect(!file_panel_ops.enqueueFileTreeEdit(session, target, "a/b"));
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_name_invalid)));
+    @memset(&session.notice_message_buf, 0);
+    try std.testing.expect(!file_panel_ops.enqueueFileTreeEdit(session, target, "old.txt"));
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_name_unchanged)));
+
+    // ── ② 결말이 갈린다. 충돌은 **다시 읽지 않고** 안내만(트리는 안 낡았다).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .collision });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_mutation_collision)));
+    try std.testing.expect(re.tree.takeScanRequest() == null);
+
+    // ── ③ stale 은 **다시 읽고** 그 사실을 말한다(트리가 낡았다는 뜻이다).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .stale });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_rename_stale)));
+    var stale_scans: usize = 0;
+    while (re.tree.takeScanRequest()) |owned| {
+        a.free(owned);
+        stale_scans += 1;
+    }
+    try std.testing.expect(stale_scans > 0);
+
+    // ── ④ 비대체를 못 하는 원격은 **안 바꿨다고** 말한다(조용한 덮어쓰기가 아니다).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .unsupported });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_rename_unsupported)));
+
+    // ── ⑤ 성공은 **낙관적으로 안 그리고** 다시 읽는다(재스캔이 권위다).
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .ok });
+    var ok_scans: usize = 0;
+    while (re.tree.takeScanRequest()) |owned| {
+        a.free(owned);
+        ok_scans += 1;
+    }
+    try std.testing.expect(ok_scans > 0);
+
+    // ── ⑥ 답이 없으면(전송 실패) **못 했다**로 말한다 — 침묵도, 성공도 아니다.
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = null });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_rename_failed)));
+
+    // ── ⑦ 원격 행이 발행 중이면 **로컬 변경 타깃은 여전히 null 이다**(§2.4 펜스는 그대로다).
+    try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
 }

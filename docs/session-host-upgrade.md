@@ -3520,6 +3520,45 @@ fixture는 injected source와 harness-owned 기존 owner만 사용하며 실제 
 읽거나 수정하지 않는다. 이 경계는 네 remote leaf 호출, 공통 suffix composition, executable publication command, workflow stage
 5~8, post-publish aggregate 삭제나 frozen signed U5 E2E를 대신하지 않는다.
 
+### 11.64 resume asset graph와 공통 publication suffix의 제품 조합
+
+stage-4 뒤 새 process의 publication 조합은 `release_adapter_candidate_resume_publication_product.zig`의 final-address
+`Execution` 하나가 소유한다. 입력은 §11.61의 ready resume execution, §11.63의 trusted context·checkout 전 pinned CLI,
+token·response storage와 단일 positive monotonic deadline뿐이다. 이 owner는 내부에 resume asset-graph `Authority`, 공통
+publication suffix transaction과 attachment→redownload→publication→post-publish 네 typed result를 둔다. 과거 process의
+`CandidateAttestation`·`AuthoredAttestation`을 복제하거나 기존 fresh publication product를 우회 입력으로 만들지 않는다.
+
+네 leaf에는 caller가 한 번 만든 plain snapshot을 주지 않는다. 각 leaf의 production snapshot-source entrypoint가 exact
+final-address asset-graph authority를 빌려 원격 child 전후와 마지막 publication 전에 `snapshotAttachment()`,
+`snapshotRedownload()`, `snapshotPublication()`, `snapshotPostPublish()`을 다시 호출한다. leaf의 기존 transport, response parser,
+deadline, remote-state-unknown 전이와 typed result publication core는 그대로 단일 출처다. snapshot-source entrypoint는 임의
+side effect callback을 받지 않고 leaf가 소유한 production uploader/downloader/mutator/verifier만 조합하며, 제품 caller는 이
+resume composition 하나로 제한한다. 따라서 test-only generic seam을 production 경로로 여는 방식은 금지한다.
+
+composition은 asset graph의 domain-separated audit projection을 공통 suffix의 audit seal로 사용한다. suffix preflight와 각
+`validateAuthority`는 execution·deadline·graph final address, source execution·CLI pointer와 context, token/response storage 및
+seal을 다시 대조한다. attachment 전의 local failure만 graph를 닫고 pristine으로 돌아간다. 첫 remote upload 가능 지점 이후의
+attachment/redownload/publication/post-publish 실패는 기존 suffix의 exact audit stage를 보존하며 graph와 해당 typed result를
+임의 정리하거나 remote delete/retry하지 않는다. 성공 cleanup은 verified→published→redownloaded→attached→graph 역순이며,
+cleanup failure는 실패한 exact local owner와 아직 필요한 graph만 retryable하게 남긴다. graph `deinit()`은 source execution을
+소비하지 않으며 상위 resume command가 publication 성공/감사 결과와 함께 source의 ready/audit cleanup suffix를 별도로 정산한다.
+
+`run()`과 `runBorrowingDeadline()`은 copied/moved/pre-owned execution, source/CLI/deadline 교체, context/path/token/response 및
+owner storage alias, empty/oversized credential·response와 expired deadline을 첫 credential/child/remote mutation 전에 거부한다.
+반환 시 token·response·deadline borrow는 남지 않는다. 성공은 suffix complete, 네 result와 graph의 exact final address,
+deadline 정산 및 borrow 0이 모두 맞을 때만 공개한다. audit와 cleanup-required는 서로 다른 terminal shape이며 성공이나 pristine으로
+낮추지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-resume-publication-product`는 injected production-shaped leaf driver로
+exact 네 단계와 매-call graph fence, 모든 단계 전후 drift, attachment mutation 전/후 분기, suffix audit stage, reverse cleanup과
+retry suffix, final-address/copy/alias/deadline/token/response hostile matrix를 Debug·ReleaseFast에서 검증한다. 별도 source sentinel은
+네 leaf production entrypoint가 기존 leaf core와 transport owner를 사용하고 generic test seam을 제품에서 호출하지 않으며 제품
+caller가 resume composition 하나뿐임을 고정한다. 같은 gate는 한 run의 graph bind, 11회 authority projection, 공통 suffix와 reverse
+cleanup을 묶은 local orchestration latency와 FD 증감을 관측값으로 출력하되 원격 GitHub 지연이나 제품 E2E라고 부르지 않는다.
+fixture는 harness-owned owner와 synthetic remote response만 사용하고 실제
+GitHub release·credential·앱 session-host 상태를 읽거나 수정하지 않는다. 이 경계는 executable resume/publication command,
+workflow stage 5~8, post-publish aggregate 삭제, source resume execution 최종 정산 또는 frozen signed U5 E2E를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

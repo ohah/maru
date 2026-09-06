@@ -435,23 +435,9 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
         e.accessibilityTraits = maruA11yTraits(maru_mobile_a11y_role(i), maru_mobile_a11y_state(i));
         [out addObject:e];
     }
-    // **읽는 순서는 보는 순서다.** 브리지가 내는 순서는 **그리는 순서**라(앱 바를 자판·끊기 차례로
-    // 그린다) 그대로 주면 VoiceOver 로 훑을 때 오른쪽으로 갔다가 왼쪽으로 되돌아온다 — 실측:
-    // `뒤로 가기(x=0) → 자판(x=298) → 끊기(x=246)`. 화면에는 아무 표시가 없고 훑는 사람만 겪는다.
-    //
-    // **여기서 정렬하는 이유**: 순서는 뜻이 아니라 **읽는 방식**이고, 그것은 host 의 몫이다
-    // (RTL 언어에서는 좌우가 뒤집힌다 — 그때 고칠 자리도 여기 하나다).
-    [out sortUsingComparator:^NSComparisonResult(MaruA11yElement *a, MaruA11yElement *b) {
-        CGRect ra = a.accessibilityFrameInContainerSpace;
-        CGRect rb = b.accessibilityFrameInContainerSpace;
-        // 같은 줄인가는 **높이로** 잰다 — 픽셀 하나 어긋난 것을 다른 줄로 세면 순서가 널뛴다.
-        CGFloat tol = MIN(CGRectGetHeight(ra), CGRectGetHeight(rb)) / 2;
-        if (fabs(CGRectGetMinY(ra) - CGRectGetMinY(rb)) > tol) {
-            return CGRectGetMinY(ra) < CGRectGetMinY(rb) ? NSOrderedAscending : NSOrderedDescending;
-        }
-        if (CGRectGetMinX(ra) == CGRectGetMinX(rb)) return NSOrderedSame;
-        return CGRectGetMinX(ra) < CGRectGetMinX(rb) ? NSOrderedAscending : NSOrderedDescending;
-    }];
+    // **순서는 브리지가 정한다.** 서술자는 이미 보는 순서(위에서 아래로, 그다음 왼쪽에서
+    // 오른쪽으로)로 나온다 — 여기서 다시 세우면 Android 어댑터와 조용히 갈리고, 그 갈림은
+    // 스크린 리더에게만 보인다. 좌우가 뒤집히는 언어를 아는 자리도 문구가 있는 그 층이다.
     return out;
 }
 

@@ -17842,6 +17842,9 @@ pub const AppSession = struct {
         // 캡처 전용: 원격 pane 상태를 **유지**한다 — 진짜 로컬 셸이 OSC 7 로 되돌리기 때문이다.
         // 호버보다 **먼저** 둔다: 호버는 그 프레임의 목록 위에서 자리를 고르므로 대상이 먼저 서야 한다.
         debug_fixtures.reapplyForcedRemoteScm(self);
+        debug_fixtures.refocusShellTermForForcedRemote(self);
+        debug_fixtures.reapplyForcedExplorerView(self);
+        debug_fixtures.maybeActivateForcedExplorerFile(self);
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다

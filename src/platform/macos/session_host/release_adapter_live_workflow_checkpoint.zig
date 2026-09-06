@@ -35,6 +35,7 @@ const stages = [_]phase.Stage{
 pub const Error = handoff.Error || error{
     InvalidCheckpoint,
     InvalidOwner,
+    InvocationBusy,
     RootChanged,
     UnsafeRoot,
 };
@@ -78,16 +79,18 @@ pub const Root = struct {
     inode: u64 = 0,
     uid: u32 = 0,
     mode: u32 = 0,
+    invocation_active: bool = false,
     path_len: usize = 0,
     path: [std.fs.max_path_bytes:0]u8 = @splat(0),
 
     pub fn value(self: *const @This()) Error!RootIdentity {
-        if (self.owner != self or self.fd < 0) return error.InvalidOwner;
+        if (self.owner != self or self.fd < 0 or self.invocation_active) return error.InvalidOwner;
         return .{ .device = self.device, .inode = self.inode, .uid = self.uid, .mode = self.mode };
     }
 
     pub fn deinit(self: *@This()) Error!void {
         if (self.owner != self or self.fd < 0) return error.InvalidOwner;
+        if (self.invocation_active) return error.InvocationBusy;
         _ = c.close(self.fd);
         self.* = .{};
     }
@@ -102,12 +105,33 @@ pub const Root = struct {
         if (c.fstat(reopened, &named) != 0 or !self.matches(named)) return error.RootChanged;
     }
 
+    fn beginInvocation(self: *@This()) Error!void {
+        if (self.owner != self or self.fd < 0) return error.InvalidOwner;
+        if (self.invocation_active) return error.InvocationBusy;
+        try self.revalidate();
+        self.invocation_active = true;
+    }
+
+    fn endInvocation(self: *@This()) void {
+        if (self.owner == self) self.invocation_active = false;
+    }
+
     fn matches(self: *const @This(), stat: posix.Stat) bool {
         return posix.S.ISDIR(stat.mode) and stat.mode & 0o777 == 0o700 and
             stat.dev == self.device and stat.ino == self.inode and stat.uid == self.uid and
             stat.uid == c.geteuid() and @as(u32, @intCast(stat.mode)) == self.mode;
     }
 };
+
+pub fn invoke(
+    root: *Root,
+    payload: *anyopaque,
+    call: *const fn (*anyopaque) phase.Result,
+) Error!phase.Result {
+    try root.beginInvocation();
+    defer root.endInvocation();
+    return call(payload);
+}
 
 pub fn openRoot(result: *Root, path: [:0]const u8) Error!void {
     return openRootInternal(result, path, null);
@@ -178,6 +202,25 @@ pub fn advance(
     result: phase.Result,
     workflow: context.Context,
 ) Error!phase.State {
+    var state = try admit(allocator, root, stage, workflow);
+    try phase.apply(&state, .{ .stage = stage, .result = result });
+    var storage: [handoff.max_document_bytes]u8 = undefined;
+    const bytes = try handoff.encode(&storage, state, workflow);
+    try files.publishSummaryExclusiveAt(root.fd, leaf_names[@intFromEnum(stage) + 1], bytes);
+    try root.revalidate();
+    return state;
+}
+
+/// Proves that one stage is current and its append-only destination is absent before the caller
+/// performs the stage side effect. `advance` repeats this admission after the side effect so a
+/// concurrent or replayed writer can never turn an already-owned destination into success.
+pub fn admit(
+    allocator: std.mem.Allocator,
+    root: *Root,
+    stage: phase.Stage,
+    workflow: context.Context,
+) Error!phase.State {
+    if (root.invocation_active) return error.InvocationBusy;
     const index: usize = @intFromEnum(stage);
     if (index >= stages.len or stages[index] != stage) return error.UnexpectedStage;
     try root.revalidate();
@@ -192,17 +235,12 @@ pub fn advance(
     }
     var state = try reopen(allocator, root, index, workflow);
     if (state.expectedStage() != stage) return if (state.outcome == .active) error.UnexpectedStage else error.TerminalState;
-    try phase.apply(&state, .{ .stage = stage, .result = result });
-    var storage: [handoff.max_document_bytes]u8 = undefined;
-    const bytes = try handoff.encode(&storage, state, workflow);
-    try files.publishSummaryExclusiveAt(root.fd, leaf_names[index + 1], bytes);
-    try root.revalidate();
     return state;
 }
 
 fn pristine(root: *const Root) bool {
     return root.owner == null and root.fd < 0 and root.device == 0 and root.inode == 0 and
-        root.uid == 0 and root.mode == 0 and root.path_len == 0 and allZero(&root.path);
+        root.uid == 0 and root.mode == 0 and !root.invocation_active and root.path_len == 0 and allZero(&root.path);
 }
 
 fn overlaps(left: []const u8, right: []const u8) bool {

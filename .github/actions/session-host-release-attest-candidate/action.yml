@@ -1,0 +1,82 @@
+name: Session host candidate release pair attestation
+description: Attest one candidate DMG and frozen executable as one ordered live workflow stage
+
+inputs:
+  dmg-path:
+    description: Canonical absolute pathname of the signed and notarized candidate DMG
+    required: true
+  dmg-name:
+    description: Exact candidate DMG basename
+    required: true
+  frozen-path:
+    description: Canonical absolute pathname of the frozen session-host executable
+    required: true
+  frozen-name:
+    description: Exact frozen executable basename
+    required: true
+
+outputs:
+  dmg-bundle-path:
+    value: ${{ steps.final.outputs.dmg-bundle-path }}
+  frozen-bundle-path:
+    value: ${{ steps.final.outputs.frozen-bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Pin candidate pair
+    id: pin
+    shell: bash
+    env:
+      MARU_DMG_PATH: ${{ inputs.dmg-path }}
+      MARU_DMG_NAME: ${{ inputs.dmg-name }}
+      MARU_FROZEN_PATH: ${{ inputs.frozen-path }}
+      MARU_FROZEN_NAME: ${{ inputs.frozen-name }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-candidate-pair.sh" pin \
+        "$MARU_DMG_PATH" "$MARU_DMG_NAME" \
+        "$MARU_FROZEN_PATH" "$MARU_FROZEN_NAME" >> "$GITHUB_OUTPUT"
+
+  - name: Attest candidate dmg
+    id: dmg
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.dmg-path }}
+      subject-name: ${{ inputs.dmg-name }}
+
+  - name: Attest frozen executable
+    id: frozen
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.frozen-path }}
+      subject-name: ${{ inputs.frozen-name }}
+
+  - name: Fence candidate pair and bundles
+    id: final
+    shell: bash
+    env:
+      MARU_DMG_PATH: ${{ inputs.dmg-path }}
+      MARU_DMG_NAME: ${{ inputs.dmg-name }}
+      MARU_FROZEN_PATH: ${{ inputs.frozen-path }}
+      MARU_FROZEN_NAME: ${{ inputs.frozen-name }}
+      MARU_DMG_DEVICE: ${{ steps.pin.outputs.dmg_device }}
+      MARU_DMG_INODE: ${{ steps.pin.outputs.dmg_inode }}
+      MARU_DMG_SIZE: ${{ steps.pin.outputs.dmg_size }}
+      MARU_DMG_LINKS: ${{ steps.pin.outputs.dmg_links }}
+      MARU_DMG_SHA256: ${{ steps.pin.outputs.dmg_sha256 }}
+      MARU_FROZEN_DEVICE: ${{ steps.pin.outputs.frozen_device }}
+      MARU_FROZEN_INODE: ${{ steps.pin.outputs.frozen_inode }}
+      MARU_FROZEN_SIZE: ${{ steps.pin.outputs.frozen_size }}
+      MARU_FROZEN_LINKS: ${{ steps.pin.outputs.frozen_links }}
+      MARU_FROZEN_SHA256: ${{ steps.pin.outputs.frozen_sha256 }}
+      MARU_DMG_BUNDLE: ${{ steps.dmg.outputs.bundle-path }}
+      MARU_FROZEN_BUNDLE: ${{ steps.frozen.outputs.bundle-path }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-candidate-pair.sh" verify \
+        "$MARU_DMG_PATH" "$MARU_DMG_NAME" \
+        "$MARU_FROZEN_PATH" "$MARU_FROZEN_NAME" \
+        "$MARU_DMG_DEVICE" "$MARU_DMG_INODE" "$MARU_DMG_SIZE" "$MARU_DMG_LINKS" "$MARU_DMG_SHA256" \
+        "$MARU_FROZEN_DEVICE" "$MARU_FROZEN_INODE" "$MARU_FROZEN_SIZE" "$MARU_FROZEN_LINKS" "$MARU_FROZEN_SHA256" \
+        "$MARU_DMG_BUNDLE" "$MARU_FROZEN_BUNDLE" >> "$GITHUB_OUTPUT"

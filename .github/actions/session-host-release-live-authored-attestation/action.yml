@@ -1,0 +1,38 @@
+name: Session host live authored attestation stage
+description: Reserve one live stage boundary around the closed authored pair attestation payload
+
+inputs:
+  preparation-path:
+    description: Canonical absolute pathname of the retained stage-3 preparation directory
+    required: true
+  evidence-path:
+    description: Canonical absolute pathname of the baseline evidence direct child
+    required: true
+  evidence-name:
+    description: Exact baseline evidence basename
+    required: true
+  manifest-path:
+    description: Canonical absolute pathname of the candidate manifest direct child
+    required: true
+  manifest-name:
+    description: Exact candidate manifest basename
+    required: true
+
+outputs:
+  evidence-bundle-path:
+    value: ${{ steps.payload.outputs.evidence-bundle-path }}
+  manifest-bundle-path:
+    value: ${{ steps.payload.outputs.manifest-bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Attest authored pair payload
+    id: payload
+    uses: ./.github/actions/session-host-release-attest-authored
+    with:
+      preparation-path: ${{ inputs.preparation-path }}
+      evidence-path: ${{ inputs.evidence-path }}
+      evidence-name: ${{ inputs.evidence-name }}
+      manifest-path: ${{ inputs.manifest-path }}
+      manifest-name: ${{ inputs.manifest-name }}

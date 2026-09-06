@@ -1279,6 +1279,12 @@ skip/reverse executor 0, same/alternate-executor reentry와 root teardown 거부
 checkpoint invocation primitive의 제품 import/callsite exact-one owner를 검증한다. 이 gate는 injected executor와 harness-owned private root만
 사용하므로 실제 GitHub/Apple side effect, `release.yml` step wiring과 frozen signed U5 E2E를 완료로 세지 않는다.
 
+U5 GitHub Actions step binding은 §11.76의 닫힌 `Invocation`에서만 여덟 exact step ID, 직전 predecessor와
+product/repository-local-action/validator-command identity를 유도한다. `test-session-host-release-adapter-live-workflow-binding`은
+stage·kind·identity 결속, action의 `./.github/actions/...` 표기, validator contract command exact match, step/identity uniqueness와
+binding source 안의 별도 invocation inventory 0을 Debug·ReleaseFast에서 검증한다. 이 명세는 side effect나 결과를 실행·수용하지 않으므로
+실제 `release.yml` argv/output/checkpoint 배선, GitHub-issued live timing 표본과 frozen signed U5 E2E는 후속 증거다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

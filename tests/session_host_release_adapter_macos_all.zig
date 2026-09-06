@@ -76,6 +76,7 @@ test {
     _ = @import("session_host_release_adapter_github_tag_chain_transport.zig");
     _ = @import("session_host_release_adapter_post_publish_attestation.zig");
     _ = @import("session_host_release_adapter_candidate_published_cleanup_authority.zig");
+    _ = @import("session_host_release_adapter_candidate_published_cleanup_command.zig");
     _ = @import("session_host_release_adapter_pre_publish_product.zig");
     _ = @import("session_host_release_adapter_pre_publish_workspace.zig");
     _ = @import("session_host_release_adapter_predecessor_evidence_identity.zig");

@@ -137,8 +137,17 @@ fn resumePublicationArgs(path: []const u8) [17][]const u8 {
     };
 }
 
+fn cleanupAggregateArgs(path: []const u8) [17][]const u8 {
+    return .{
+        "cleanup-candidate-aggregate", "--repo",                                              "ohah/maru",               "--tag",               "v1.2.3",
+        "--github-cli",                path,                                                  "--github-cli-sha256",     cli_sha,               "--aggregate",
+        "/tmp/handoff/aggregate",      "--dmg",                                               "/tmp/artifacts/Maru.dmg", "--frozen-executable", "/tmp/artifacts/session-host",
+        "--manifest",                  "/tmp/artifacts/Maru-1.2.3-session-host-release.json",
+    };
+}
+
 test "all commands bind context and pin only after identity authority" {
-    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate, resume_publication }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_aggregate, .finalize_aggregate, .resume_publication }) |kind| {
+    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_aggregate, .finalize_aggregate, .resume_publication, .published_cleanup }) |kind| {
         var trace = Trace{};
         var contexts = ContextReader{ .trace = &trace };
         var runners = RunnerReader{ .trace = &trace };
@@ -149,6 +158,7 @@ test "all commands bind context and pin only after identity authority" {
         const prepare = prepareAggregateArgs("/usr/local/bin/gh");
         const finalize = finalizeAggregateArgs("/usr/local/bin/gh");
         const resume_args = resumePublicationArgs("/usr/local/bin/gh");
+        const cleanup_args = cleanupAggregateArgs("/usr/local/bin/gh");
         var result = bootstrap.Bootstrap{};
         switch (kind) {
             .pre_publish => try bootstrap.bootstrapWith(std.testing.allocator, &pre, &contexts, &runners, &pinner, &result),
@@ -157,6 +167,7 @@ test "all commands bind context and pin only after identity authority" {
             .prepare_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &prepare, &contexts, &runners, &pinner, &result),
             .finalize_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &finalize, &contexts, &runners, &pinner, &result),
             .resume_publication => try bootstrap.bootstrapWith(std.testing.allocator, &resume_args, &contexts, &runners, &pinner, &result),
+            .published_cleanup => try bootstrap.bootstrapWith(std.testing.allocator, &cleanup_args, &contexts, &runners, &pinner, &result),
         }
         const view = result.value().?;
         try std.testing.expectEqualSlices(@TypeOf(trace.calls[0]), &.{ .context, .runner, .pin }, trace.calls[0..trace.count]);
@@ -177,6 +188,7 @@ test "all commands bind context and pin only after identity authority" {
             .prepare_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", command.aggregate),
             .finalize_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", command.dmg),
             .resume_candidate_publication => |command| try std.testing.expectEqualStrings("/tmp/handoff/preparation", command.preparation),
+            .cleanup_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/aggregate", command.aggregate),
         }
         try std.testing.expect(!@hasField(bootstrap.PrePublish, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.VerifyPredecessor, "github_cli_sha256"));

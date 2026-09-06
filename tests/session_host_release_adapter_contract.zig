@@ -106,6 +106,31 @@ fn resumePublicationArgs() [17][]const u8 {
     };
 }
 
+fn cleanupAggregateArgs() [17][]const u8 {
+    return .{
+        "cleanup-candidate-aggregate", "--repo",                                              "ohah/maru",               "--tag",                                                            "v1.2.3",
+        "--github-cli",                "/usr/local/bin/gh",                                   "--github-cli-sha256",     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--aggregate",
+        "/tmp/handoff/aggregate",      "--dmg",                                               "/tmp/artifacts/Maru.dmg", "--frozen-executable",                                              "/tmp/artifacts/session-host",
+        "--manifest",                  "/tmp/artifacts/Maru-1.2.3-session-host-release.json",
+    };
+}
+
+test "release adapter parses exact published aggregate cleanup command" {
+    const parsed = try adapter.parseArgs(&cleanupAggregateArgs());
+    try std.testing.expectEqualStrings("ohah/maru", parsed.cleanup_candidate_aggregate.repo);
+    try std.testing.expectEqualStrings("v1.2.3", parsed.cleanup_candidate_aggregate.tag);
+    try std.testing.expectEqualStrings("/tmp/handoff/aggregate", parsed.cleanup_candidate_aggregate.aggregate);
+
+    var foreign = cleanupAggregateArgs();
+    foreign[15] = "--release-id";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&foreign));
+    var relative = cleanupAggregateArgs();
+    relative[10] = "relative/aggregate";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&relative));
+    const missing = cleanupAggregateArgs();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing[0 .. missing.len - 2]));
+}
+
 test "release adapter parses exact resumed publication command" {
     const parsed = try adapter.parseArgs(&resumePublicationArgs());
     try std.testing.expectEqualStrings("/tmp/handoff/preparation", parsed.resume_candidate_publication.preparation);

@@ -3756,6 +3756,60 @@ close 불확실성을 검증한다. 같은 gate의 actual macOS filesystem fixtu
 실제 앱 session-host 저장소·GitHub release·credential을 읽거나 수정하지 않는다. 이 slice는 process-crash recovery substrate를
 닫으며 current published asset-ID 재인증, executable cleanup command, workflow stage 8과 frozen signed U5 E2E는 후속 경계다.
 
+### 11.68 fresh-process published asset-ID 재인증 권위
+
+stage-8의 최초/`prepared` 경로는 stage-7 process가 남긴 `PublishedRelease`나 `VerifiedRelease`를 복원하지 않는다. 두 값은
+final-address process-local capability이며 직렬화한 release/asset ID, workflow output 또는 성공 boolean은 삭제 허가가 아니다.
+`release_adapter_candidate_published_cleanup_authority.zig`가 같은 process에서 막 reopen한 §11.50
+`ReopenedAggregate`, checkout 전에 pin한 GitHub CLI, protected release `Context`, token과 하나의 positive monotonic
+`Deadline`만 받아 current published release의 exact 네 asset ID를 다시 발견하고 기존 §11.36
+`VerifiedRelease`까지 조합한다.
+
+owner는 aggregate를 full-fence하고 held canonical role-A manifest를 다시 읽어 repository/tag/source/build/release와 DMG,
+frozen executable, evidence, manifest의 exact pathname/name/size/SHA-256을 유도한다. caller는 release ID, asset ID, asset
+pathname·digest, published state나 endpoint를 별도로 제출하지 않는다. pinned CLI를 재검증한 뒤 exact tag의
+`published_release` endpoint를 조회하며 response는 `id`, `tag_name`, `target_commitish`, `draft=false`,
+`prerelease=false`, explicit `immutable=true`와 exact 네 asset만 허용한다. asset은 canonical role 순서와 무관하게
+nonzero·pairwise-distinct ID, exact name/size, `uploaded`, `application/octet-stream`, `sha256:<lowercase hex>`가 local graph와
+각각 정확히 하나 대응해야 한다. missing·duplicate·foreign asset, unknown/absent immutable, extra asset과 caller가 고른 latest
+release는 모두 publication 0이다.
+
+```mermaid
+flowchart TD
+    A[Reopen and full-fence retained aggregate] --> B[Read canonical held role-A manifest]
+    B --> C[Revalidate pinned GitHub CLI]
+    C --> D[Fetch exact published release by canonical tag]
+    D --> E[Bind four current asset IDs to held names sizes and digests]
+    E --> F[Resolve current tag chain]
+    F --> G[Verify release attestation]
+    G --> H[Verify four held asset attestations]
+    H --> I[Full-fence aggregate and CLI again]
+    I --> J[Refetch exact published release]
+    J --> K{Same immutable release and four IDs}
+    K -->|yes| L[Publish sealed VerifiedRelease]
+    K -->|no| M[Publish nothing and delete nothing]
+```
+
+두 published-release 조회와 tag-chain/release/asset attestation은 같은 absolute deadline을 소비한다. 첫 조회로 얻은 ID는
+final-address source owner의 fixed storage에만 보존되고, §11.36의 `verifySnapshotUntil()`이 각 child 전후에 source를
+호출할 때마다 aggregate·manifest·CLI graph를 다시 fence한다. attestation이 끝난 뒤 owner는 pinned CLI와 aggregate를 다시
+fence하고 exact published-release endpoint를 한 번 더 조회한다. 최초·최종 response의 release lifecycle과 네 ID/name/size/digest
+집합이 bytewise 같은 경우에만 `VerifiedRelease`를 caller에게 남긴다. 최종 조회 실패·timeout·drift는 이미 만들어진 local
+receipt를 즉시 검증된 방식으로 deinit하고 pristine output으로 끝내며 §11.67 intent publication, rename과 unlink는 0이다.
+remote release나 asset을 수정·삭제하거나 자동 재게시하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-published-cleanup-authority`는 두 exact 조회, tag resolve→release
+verify→DMG→frozen executable→evidence→manifest verify 순서, same-deadline identity, 매 child 전후 aggregate/manifest/CLI fence,
+최초·최종 ID 교환과 lifecycle/extra/missing/duplicate asset, local graph drift, copied/pre-owned/aliased output, child/timeout 및 전
+allocation fail-index의 publication 0·local receipt cleanup을 Debug·ReleaseFast에서 검증한다. ReleaseFast 20회 diagnostic은
+injected remote와 aggregate source에서 재인증 reducer 전체의 median·p95·max, external-call count, failure count와 FD delta를
+출력한다. 이는 실제 GitHub network latency가 아니다. live stage-8 command가 생기면 같은 도메인 timing record로 두 조회,
+attestation suffix와 local cleanup을 각각 측정하며, opt-in frozen signed U5만 실제 GitHub 성공 표본을 낸다. live 표본이 없는
+상태를 0 ms 성공으로 기록하지 않는다. actual filesystem reopen/fence 비용은 §11.50 gate의 별도 실측이 소유한다. fixture는
+실제 GitHub release·credential과 앱 session-host 상태를 읽거나 수정하지
+않는다. 이 slice는 current published asset-ID 재인증까지만 닫으며 executable cleanup command, workflow stage 8과 frozen signed
+U5 E2E를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

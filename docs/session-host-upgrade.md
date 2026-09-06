@@ -3977,6 +3977,30 @@ ambient secret 차단, fork 전 실패의 marker 0과 반복 실행 뒤 FD delta
 수정하지 않는다. 이 owner는 in-process live state 적용까지 닫지만 Actions job/step 사이 durable state 전달,
 `.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
 
+### 11.74 Actions step 간 append-only workflow state handoff
+
+live workflow의 reducer state는 shell 변수, step 성공 여부, `GITHUB_OUTPUT`의 caller-authored boolean 또는 같은 pathname의
+덮어쓰기로 전달하지 않는다. `release_adapter_live_workflow_state_handoff.zig`는 pointer-free §11.52 `State`와 현재 protected
+workflow context를 입력으로 받아 exact `maru.session-host-release-workflow-state.v1` document를 만든다. handoff는 context가
+canonical protected `ohah/maru` tag workflow identity인지 다시 검증한다. document는 context 원문이나
+credential을 보존하지 않고 repository ID, tag, source commit, workflow ref, run ID/attempt와 protected bit의 length-delimited
+BLAKE3 digest, reducer `next_index`, closed outcome 이름과 세 boolean bit만 canonical order로 담는다. decode는 expected current context의
+digest와 exact byte-for-byte 재인코딩을 모두 대조하고 `State.isCanonical()`이 거짓이면 게시하지 않는다.
+
+각 Actions stage는 이전 leaf를 component별 no-follow로 열어 bounded bytes, regular single-link inode, mode `0600`, open 전후
+identity와 digest를 검증한 뒤에만 state를 얻는다. 다음 state는 기존 release file publisher의 fsync된 temporary leaf와
+exclusive rename을 재사용해 **새 absent pathname**에만 게시한다. 같은 leaf를 갱신·삭제하거나 symlink/hardlink/loose mode leaf를
+수용하지 않는다. 따라서 crash는 이전 complete leaf 또는 다음 complete leaf만 남기고, retry는 목적지 존재를 성공으로 추측하지
+않는다. stage별 pathname 선택은 후속 live workflow owner가 fixed inventory로 소유하며 이 codec의 caller 입력이나 success authority가
+아니다.
+
+focused gate `test-session-host-release-adapter-live-workflow-state-handoff`는 모든 canonical prefix와 terminal state round-trip,
+context 전 축 교환, malformed/duplicate/reordered/trailing/noncanonical bytes, actual filesystem의 `0600` exclusive publication,
+content/mode/symlink/hardlink drift, destination 보존과 allocation cleanup을 Debug·ReleaseFast로 검증한다. fixture는 test-owned temporary
+directory만 사용하며 실제 앱 session-host registry·manifest·socket·process, GitHub release 또는 credential을 읽거나 수정하지 않는다.
+이 slice는 durable state artifact까지만 닫고 stage pathname inventory와 command 전체를 조립하는 live workflow owner,
+`.github/workflows/release.yml` 호출 및 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

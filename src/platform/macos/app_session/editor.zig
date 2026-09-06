@@ -3915,6 +3915,11 @@ fn widenedFocus(file: *const editor.edit_doc.EditableFile, sel: editor_selection
             break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
         },
         .line => blk: {
+            // **`@min` 은 지금 도달하지 않는다**(2026-09-06 변이 검사가 등가임을 보였다):
+            // `lineAt` 이 `offset <= byteLen()` 을 **단언**하고, `off` 는 `hitTestBody` 가 낸 것이라
+            // 늘 그 안이다(`byteAtPoint` 의 모든 반환 경로가 `<= text.len`). 그럼에도 두는 이유는
+            // 이 줄이 **옮겨 온 기존 방어**이기 때문이다 — 이 조각은 자리만 바꿨지 그 판단을
+            // 뒤집지 않는다. 빼려면 `hitTestBody` 의 상한을 계약으로 못 박는 별도 조각이 필요하다.
             const li = file.lines.lineAt(@min(off, file.lines.byteLen()));
             const line = file.lines.line(li) orelse break :blk off;
             break :blk if (off >= sel.anchorHi()) line.contentEnd() else line.start;
@@ -16800,10 +16805,15 @@ const OptWordFixture = struct {
         const io_ = std.testing.io;
         var fx = try PaneFixture.init(allocator);
         errdefer fx.deinit(allocator);
-        try fx.dir.dir.writeFile(io_, .{
-            .sub_path = "ow.txt",
-            .data = "alpha beta gamma\ndelta epsilon\n\nzeta\n",
-        });
+        // **채움 줄을 뒤에 붙여 스크롤 막대가 서게 한다.** 네 줄짜리 판에서는 막대가 아예 없어
+        // `term.rt.editor_scrollbar` 가 `null` 이고, 그러면 막대 단언이 **조용히 건너뛴다** —
+        // 5회차에서 `R25`(⌥ 에서 막대 가드를 건너뛰는 변이)가 그래서 살아남았다. 뒤에 붙이므로
+        // 위 표의 offset 은 그대로다.
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendSlice(allocator, "alpha beta gamma\ndelta epsilon\n\nzeta\n");
+        for (0..200) |_| try buf.appendSlice(allocator, "filler line\n");
+        try fx.dir.dir.writeFile(io_, .{ .sub_path = "ow.txt", .data = buf.items });
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
         const path = try std.fs.path.join(allocator, &.{ root, "ow.txt" });
@@ -16869,6 +16879,31 @@ test "OW1 ⌥더블클릭은 커서를 더하지 않고 primary 를 낱말로 �
     try testing.expectEqual(@as(usize, 6), sel.start());
     try testing.expectEqual(@as(usize, 10), sel.end());
     try testing.expectEqual(editor_selection.AnchorKind.word, sel.kind);
+
+    // ⑷ **undo 묶음을 끊는다**(§3.3 — 커서가 편집 아닌 이유로 움직였다). `⌥` 갈래에서만 안 끊는
+    //    변이가 4회차에 살아남았다: 그러면 `⌥더블클릭` 앞뒤 타이핑이 한 묶음이 되어 undo 한 번이
+    //    **둘 다** 되돌린다.
+    term.rt.editor_last_edit_kind = .insert; // 앞선 타이핑이 남긴 상태
+    try testing.expect(fxo.optClick(false, 8, 0));
+    try testing.expectEqual(EditKind.none, term.rt.editor_last_edit_kind);
+
+    // ⑸ **`metal_dirty` 는 여기서 안 잰다 — 잴 수가 없다.** 마지막 줄의 `self.metal_dirty = true`
+    //    를 지워도 화면 표시는 그대로 선다: 바로 앞 줄의 `beginPointerGesture` 가
+    //    `cancelPointerGesture` → `clearPointerGesture` 를 타고 **거기서 이미 세운다**
+    //    (`app_session.zig` — 5회차가 그것을 보였다). 단언을 두면 변이가 있든 없든 통과하는
+    //    **항진명제**가 되어, 커버리지처럼 보이면서 아무것도 안 지킨다.
+
+    // ⑹ **막대 위는 `⌥` 를 껴도 거절한다**(§4.1g — 상위가 먼저 가져간다). `⌥` 갈래에서만 그 가드를
+    //    건너뛰는 변이가 살아남았다: 그러면 막대 드래그 중 `⌥더블클릭`이 본문 선택을 연다.
+    {
+        // **`orelse` 로 실패시킨다** — `if (…) |bar|` 로 감싸면 막대가 없을 때 단언이 조용히
+        // 사라진다(그것이 `R25` 가 산 이유다). 판이 200 줄이라 막대는 반드시 있다.
+        const bar = term.rt.editor_scrollbar orelse return error.NoScrollbar;
+        const bar_x: f64 = @as(f64, bar.track_x) + 1;
+        // **`⌥` 없이도 거절한다**(대조군 — 위 단언이 항진명제가 아니다).
+        try testing.expect(!selectWordOrLineAt(fxo.fx.session, fxo.pane, false, bar_x, fxo.y(0), 0));
+        try testing.expect(!selectWordOrLineAt(fxo.fx.session, fxo.pane, false, bar_x, fxo.y(0), 8));
+    }
 }
 
 test "OW2 ⌥ 없는 더블클릭은 여전히 나머지 커서를 지운다 (§9.1 대조군)" {
@@ -16937,7 +16972,29 @@ test "OW3 primary 가 이미 낱말이면 ⌥더블클릭이 늘린다 — 새�
     // **단위는 안 바뀐다** — 이어지는 드래그가 낱말 단위로 늘어야 한다(§3.2).
     try testing.expectEqual(editor_selection.AnchorKind.word, sel.kind);
 
+    // **방향(`focus`)을 잰다 — `start()`/`end()` 만 보면 안 갈린다.** 4회차에서 변이 둘이 여기서
+    // 살아남았다: ⑴ `widenedFocus` 가 방향을 `anchorHi()` 대신 `anchorLo()` 로 재는 것, ⑵ 새로 잡을
+    // 때 `focus` 를 `range.hi` 대신 `range.lo` 로 두는 것. 둘 다 **범위는 그대로 두고 방향만**
+    // 뒤집으므로, 이어지는 드래그·⇧방향키가 반대편에서 늘어난다.
+    //
+    // ⑴ **이미 잡은 낱말 <안>을 다시 찍는다.** 바깥(13·2)에서는 두 기준이 같은 답을 낸다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(6, 10, 10, .word);
+    try testing.expect(fxo.optClick(false, 8, 0)); // "beta" 안
+    {
+        const inside = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 6), inside.focus); // anchorLo 로 재면 10 이다
+        try testing.expectEqual(@as(usize, 6), inside.start()); // 범위는 양쪽 다 6..10 이라
+        try testing.expectEqual(@as(usize, 10), inside.end()); // **focus 를 봐야만** 갈린다
+    }
+
+    // ⑵ **새로 잡을 때 focus 는 범위의 끝이다** — caret 이 뒤쪽에 서야 이어지는 드래그가 앞으로 는다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(fxo.optClick(false, 13, 0)); // "gamma" 11..16 을 새로 잡는다
+    try testing.expectEqual(@as(usize, 16), term.rt.editor_selection.?.focus); // lo 면 11 이다
+
     // **뒤로도 늘린다** — 앞 낱말을 ⌥더블클릭하면 그 시작까지 삼킨다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(6, 10, 10, .word);
+    try testing.expect(fxo.optClick(false, 13, 0)); // 다시 6..16 으로 만들어 둔다
     //
     // **앞서 늘린 쪽(16)은 안 남는다.** anchor 는 **처음 잡은 낱말** "beta"(6..10)에 고정이고
     // `focus` 만 움직이므로, 반대쪽으로 늘리면 0..10 이 된다 — 드래그를 뒤로 끌 때와 같은 답이다
@@ -17106,6 +17163,61 @@ test "OW8 .match 에서 이어 끌면 글자 단위로 는다 — 늘릴 단위�
     try testing.expect(beginBodySelection(fxo.fx.session, fxo.pane, fxo.x(6), fxo.y(0), 0));
     try testing.expect(dragBodySelection(fxo.fx.session, 2, fxo.x(13), fxo.y(0)));
     try testing.expectEqual(@as(usize, 13), term.rt.editor_selection.?.focus);
+}
+
+test "OW9 제품 마우스 경로가 ⌥ 와 클릭 수를 편집기까지 넘긴다 (§3.2d 배선)" {
+    // **파생만 재면 배선이 빠져도 초록이다.** `OW1`~`OW8` 은 `selectWordOrLineAt` 을 **직접** 부르므로
+    // `app_session.mouse` 가 `mods` 대신 `0` 을 넘겨도 여덟이 전부 통과한다 — 그러면 제품에서
+    // `⌥더블클릭`이 **그냥 더블클릭**으로 동작하는데 판정자는 아무 말도 안 한다(4회차 `R37`).
+    // `COL6` 이 열 선택에서 선 그 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // **창 크기를 준다** — 픽스처는 렌더 상태만 세우므로 `termRect()` 가 0×0 이고, 그러면 pane 사각이
+    // 비어 포인터가 어느 pane 에도 안 맞는다.
+    fxo.fx.session.surface_initialized = true;
+    fxo.fx.session.backing_width_px = 1200;
+    fxo.fx.session.backing_height_px = 800;
+
+    // **라우팅이 쓰는 것과 같은 사각으로 다시 그린다.** 픽스처의 하드코딩 사각(`fx.leaf_rect`)으로
+    // 그린 채 두면 `editor_hit_geom` 과 `paneAtPoint` 가 **다른 좌표계**를 봐서 클릭이 어디에도 안
+    // 맞고, 판정자가 "라우팅이 안 걸린다"를 "동작이 틀렸다"로 잘못 읽는다.
+    var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer rects.deinit(allocator);
+    try tab_ops.activeTabLeafRects(fxo.fx.session, allocator, fxo.fx.session.termRect(), &rects);
+    const active = pane_ops.activePane(fxo.fx.session);
+    const leaf = blk: {
+        for (rects.items) |r| if (r.leaf == active) break :blk r;
+        return error.NoLeafRect;
+    };
+    var d = appendPaneFrame(fxo.fx.session, leaf.rect, term) orelse return error.EditorPaneDidNotDraw;
+    d.dl.deinit(allocator);
+
+    const g = term.rt.editor_hit_geom;
+    if (g.cell_w_px == 0 or g.cell_h_px == 0) return error.SkipZigTest;
+    // 첫 줄 8열 — "alphabet"(0..8) 밖, "bravo"(9..14) 안쪽 자리를 피해 낱말 안을 집는다.
+    const x: f64 = @as(f64, @floatFromInt(g.body_x)) +
+        @as(f64, @floatFromInt(g.content_left_px)) +
+        @as(f64, @floatFromInt(2 * @as(u32, g.cell_w_px)));
+    const y: f64 = @as(f64, @floatFromInt(g.body_y)) + @as(f64, @floatFromInt(g.cell_h_px));
+
+    // **여벌 커서를 둔 채 ⌥더블클릭을 마우스 ABI 로 민다**(kind 4 = 더블, mods 8 = ⌥).
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(0),
+        editor_selection.Selection.at(1),
+    }, 0);
+    fxo.fx.session.mouse(4, x, y, 0, 8);
+    // ⑴ `mods` 가 0 으로 새면 나머지 커서가 지워진다.
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    // ⑵ `kind == 5` 를 `kind == 4` 로 바꾸면 더블클릭이 **줄**을 잡는다.
+    try testing.expectEqual(editor_selection.AnchorKind.word, term.rt.editor_selection.?.kind);
+
+    // **⌥트리플클릭은 줄이다** — 같은 배선의 반대편이다.
+    fxo.fx.session.mouse(5, x, y, 0, 8);
+    try testing.expectEqual(editor_selection.AnchorKind.line, term.rt.editor_selection.?.kind);
 }
 
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {

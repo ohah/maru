@@ -2008,6 +2008,15 @@ test "DSEL4: 비교 뷰도 더블클릭 뒤 뒤로 끌면 잡은 단어가 안 �
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("alpha beta gamma", fx.session.chrome_clipboard_write);
     try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, col_x(g, cw, 2), y0));
+
+    // ⑸ **`⌥` 를 껴도 비교 뷰 갈래로 간다**(§3.2d). 비교 뷰에는 멀티 커서가 없으므로
+    //    (`editor_diff_selection` 이 **단수**다) `⌥` 가 답을 바꿀 것이 없다 — 그런데 위 넷이 전부
+    //    `mods = 0` 으로 부르는 탓에, `⌥` 에서만 이 갈래를 건너뛰어 **단일 편집기 경로로 떨어지는**
+    //    변이가 살아남았다(§3.2d 슬라이스 4회차 `R24`). 그러면 비교 뷰 클릭이 뒤에 있는 문서에
+    //    선택을 세운다.
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, col_x(g, cw, 7), y0, 8));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("beta", fx.session.chrome_clipboard_write);
 }
 
 test "DSEL2 비교 뷰 선택: 한 열에 머물고, 빈 행은 복사에서 빠진다 (§4.1g 비교 뷰)" {

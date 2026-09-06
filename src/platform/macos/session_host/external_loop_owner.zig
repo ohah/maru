@@ -1551,7 +1551,7 @@ test "p5c3c-3b actual openpty stdout backpressure preserves one immutable partia
         .{},
     );
     try std.testing.expectEqualSlices(u8, &report.prefix_digest, &digest);
-    try expectChildExitZero(child);
+    try expectChildExitZeroDrainingMaster(child, master);
     const after = try posix.tcgetattr(slave);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
 }
@@ -1695,7 +1695,7 @@ test "p5c3c-3b actual openpty stdin reaches one MRSH input frame without byte lo
         external_ansi.leave_bytes,
         output[external_ansi.enter_bytes.len..],
     );
-    try expectChildExitZero(child);
+    try expectChildExitZeroDrainingMaster(child, master);
     const after = try posix.tcgetattr(slave);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
 }
@@ -1781,7 +1781,7 @@ test "p5c3c-3b actual poll loop suppresses observer input and detaches with rest
         if (count < 0 and posix.errno(count) == .INTR) continue;
         return error.TestUnexpectedResult;
     }
-    try expectChildExitZero(child);
+    try expectChildExitZeroDrainingMaster(child, master);
     const after = try posix.tcgetattr(slave);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
 }
@@ -1923,6 +1923,49 @@ const child_wait_timeout_ms: i64 = 5_000;
 ///
 /// 마감이 있으면 같은 상황이 **몇 초짜리 읽을 수 있는 실패**가 된다 — `waitChildTestDeadline` 이
 /// 자식을 죽이고 `TestTimedOut` 을 낸다. 이 파일의 다른 판정자는 이미 그쪽을 쓰고 있었다.
+/// `expectChildExitZero` 와 같지만, 기다리는 동안 **pty master 를 계속 비운다**.
+///
+/// **왜 필요한가** — 이 파일의 openpty 판정자들은 master 에서 «정확히 N 바이트»를 읽고 판정한 뒤
+/// 자식 종료를 기다린다. 그런데 자식의 클린 teardown 은 `bestEffortLeave()`(leave 시퀀스를 slave 에
+/// 비차단 write) → `raw.restore()` = `tcsetattr(TCSAFLUSH)` 순서인데, TCSAFLUSH 는 **출력 큐가 다 빠질
+/// 때까지 기다린다**. 부모가 N 바이트만 읽고 waitpid 로 들어가면 leave 바이트는 아무도 안 읽어 큐에
+/// 남고, 자식은 drain 을 영원히 기다린다 — 데드락. 부모는 `after` termios 를 검사하려 slave 도 열어 둔
+/// 채라, 주석에 적힌 «같은 slave 의 다른 writer 가 열려 있으면 tcsetattr 가 계속 기다린다» 조건도 만족한다.
+///
+/// **왜 매번이 아니라 가끔인가** — 자식이 leave 를 쓰는 순간 큐가 아직 가득(backpressure)이면 비차단
+/// write 가 EAGAIN 으로 건너뛰어져 잔여물이 없다. 부하로 자식이 밀려 **부모가 먼저 큐를 비운 뒤**에야
+/// 자식이 leave 를 쓰면 성공해 남는다. 그래서 러너가 바쁠 때만 터졌다(2026-08-31 32분 매달림, 2026-09-06
+/// main 에서 세 번 TestTimedOut). 부모가 기다리는 동안 master 를 비우면 leave 가 소비되고 TCSAFLUSH 가
+/// 돌아온다. 판정은 그대로다 — 이 판정자들은 대기 뒤 master 를 다시 읽지 않는다(`tcgetattr(slave)` 만).
+fn expectChildExitZeroDrainingMaster(child: c.pid_t, master: c.fd_t) !void {
+    const wait_status = try waitChildTestDeadlineDraining(child, master, child_wait_timeout_ms);
+    try std.testing.expect(c.W.IFEXITED(wait_status));
+    try std.testing.expectEqual(@as(c_int, 0), c.W.EXITSTATUS(wait_status));
+}
+
+fn waitChildTestDeadlineDraining(child: c.pid_t, master: c.fd_t, timeout_ms: i64) !u32 {
+    var status: c_int = 0;
+    var sink: [4096]u8 = undefined;
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
+    while (started.untilNow(std.testing.io, .awake).toMilliseconds() < timeout_ms) {
+        const waited = c.waitpid(child, &status, c.W.NOHANG);
+        if (waited == child) return @bitCast(status);
+        if (waited < 0 and posix.errno(waited) == .INTR) continue;
+        if (waited < 0) return error.TestUnexpectedResult;
+        // 10ms 자거나, 그 사이 master 에 뭔가 오면 읽어서 버린다(자식의 leave 시퀀스 등). 이게 자식의
+        // TCSAFLUSH drain 을 풀어준다.
+        var fds = [_]posix.pollfd{.{ .fd = master, .events = posix.POLL.IN, .revents = 0 }};
+        const ready = posix.poll(&fds, 10) catch 0;
+        if (ready > 0 and (fds[0].revents & posix.POLL.IN) != 0) {
+            const count = c.read(master, &sink, sink.len);
+            _ = count; // 0/음수(EOF·EAGAIN)여도 다음 루프가 waitpid 로 판단한다
+        }
+    }
+    _ = c.kill(child, posix.SIG.KILL);
+    _ = c.waitpid(child, &status, 0);
+    return error.TestTimedOut;
+}
+
 fn expectChildExitZero(child: c.pid_t) !void {
     const wait_status = try waitChildTestDeadline(child, child_wait_timeout_ms);
     try std.testing.expect(c.W.IFEXITED(wait_status));

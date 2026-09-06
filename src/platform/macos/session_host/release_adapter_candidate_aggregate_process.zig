@@ -19,6 +19,97 @@ pub const Storage = struct {
     output: [attestation.max_response_bytes]u8 = undefined,
 };
 
+pub const Outcome = enum { success, audit_required, cleanup_failed };
+
+pub fn exitCode(outcome: Outcome) u8 {
+    return switch (outcome) {
+        .success => 0,
+        .audit_required => 21,
+        .cleanup_failed => 22,
+    };
+}
+
+pub fn stderrLine(outcome: Outcome) []const u8 {
+    return switch (outcome) {
+        .success => "success\n",
+        .audit_required => "audit_required\n",
+        .cleanup_failed => "cleanup_failed\n",
+    };
+}
+
+pub fn storagePristine(storage: *const Storage) bool {
+    for (&storage.sources) |*source| if (!pinnedPristine(source)) return false;
+    for (&storage.aggregate.files) |*file| if (!pinnedPristine(file)) return false;
+    for (&storage.reopened.entries) |*file| if (!pinnedPristine(file)) return false;
+    for (&storage.reopened.artifacts) |*file| if (!pinnedPristine(file)) return false;
+    return storage.aggregate.owner == null and storage.aggregate.phase == .pristine and
+        storage.aggregate.parent_fd == -1 and storage.aggregate.directory_fd == -1 and
+        storage.aggregate.directory_device == 0 and storage.aggregate.directory_inode == 0 and
+        storage.aggregate.destination_len == 0 and storage.aggregate.directory_leaf_len == 0 and
+        allZero(&storage.aggregate.path_lens) and allZero(&storage.aggregate.name_lens) and
+        allFalse(&storage.aggregate.present) and allZero(&storage.aggregate.seal) and
+        storage.reopened.owner == null and storage.reopened.phase == .pristine and
+        storage.reopened.parent_fd == -1 and storage.reopened.directory_fd == -1 and
+        storage.reopened.directory_device == 0 and storage.reopened.directory_inode == 0 and
+        storage.reopened.directory_len == 0 and storage.reopened.directory_leaf_len == 0 and
+        allZero(&storage.reopened.name_lens) and allZero(&storage.reopened.path_lens) and
+        allZero(&storage.reopened.artifact_path_lens) and storage.reopened.cli_path_len == 0 and
+        storage.reopened.context.repository_id == 0 and storage.reopened.context.tag_len == 0 and
+        allZero(&storage.reopened.context.source_commit) and storage.reopened.context.workflow_ref_len == 0 and
+        storage.reopened.context.run_id == 0 and storage.reopened.context.run_attempt == 0 and
+        allZero(&storage.reopened.seal);
+}
+
+fn pinnedPristine(source: *const files.PinnedReleaseFile) bool {
+    return source.owner == null and source.fd == -1 and source.parent_fd == -1 and source.path_len == 0 and
+        allZero(&source.path_sha256) and allZero(&source.sha256) and !source.executable;
+}
+
+fn allZero(value: anytype) bool {
+    return std.mem.allEqual(u8, std.mem.asBytes(value), 0);
+}
+
+fn allFalse(value: []const bool) bool {
+    for (value) |item| if (item) return false;
+    return true;
+}
+
+/// Aggregate commands run only after stage 3 has attempted remote draft mutation. A locally clean
+/// failure is therefore still audit-required; any owner we cannot settle raises cleanup-failed.
+pub fn settleFailure(storage: *Storage) Outcome {
+    var failed = false;
+    for (&storage.sources) |*source| {
+        if (source.owner == source) {
+            source.deinit() catch {
+                failed = true;
+            };
+        } else if (source.owner != null or source.fd != -1 or source.parent_fd != -1) {
+            failed = true;
+        }
+    }
+    if (storage.aggregate.owner == &storage.aggregate and
+        (storage.aggregate.phase == .open or storage.aggregate.phase == .cleanup_required))
+    {
+        storage.aggregate.cleanup() catch {
+            failed = true;
+        };
+    } else if (storage.aggregate.owner != null or storage.aggregate.phase != .pristine or
+        storage.aggregate.parent_fd != -1 or storage.aggregate.directory_fd != -1)
+    {
+        failed = true;
+    }
+    if (storage.reopened.owner == &storage.reopened and storage.reopened.phase == .verified) {
+        storage.reopened.deinit() catch {
+            failed = true;
+        };
+    } else if (storage.reopened.owner != null or storage.reopened.phase != .pristine or
+        storage.reopened.parent_fd != -1 or storage.reopened.directory_fd != -1)
+    {
+        failed = true;
+    }
+    return if (!failed and storagePristine(storage)) .audit_required else .cleanup_failed;
+}
+
 pub fn prepare(
     allocator: std.mem.Allocator,
     bootstrap: *bootstrap_mod.Bootstrap,

@@ -265,6 +265,10 @@ pub fn runCurrent(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
     const storage = try allocator.create(Storage);
     defer allocator.destroy(storage);
     storage.* = .{};
+    try runCurrentWithStorage(io, allocator, args, storage);
+}
+
+fn runCurrentWithStorage(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, storage: *Storage) !void {
     var bootstrapper = CurrentBootstrapper{};
     var tokens = CurrentTokenReader{};
     var drivers = ProductDrivers{};
@@ -285,10 +289,19 @@ pub fn main(init: std.process.Init) !void {
                 finishResumePublication(.audit_required);
             if (count != 0 and std.mem.eql(u8, values[0], "cleanup-candidate-aggregate"))
                 finishPublishedCleanup(.audit_required);
+            if (count != 0 and isAggregateCommand(values[0]))
+                finishAggregateCommand(.audit_required);
             return err;
         };
     }
-    runCurrent(init.io, init.gpa, values[0..count]) catch |err| {
+    const storage = init.gpa.create(Storage) catch {
+        if (count != 0 and isAggregateCommand(values[0]))
+            finishAggregateCommand(.audit_required);
+        return error.OutOfMemory;
+    };
+    defer init.gpa.destroy(storage);
+    storage.* = .{};
+    runCurrentWithStorage(init.io, init.gpa, values[0..count], storage) catch |err| {
         const outcome: candidate_stage3_command.Outcome = switch (err) {
             error.Stage3AuditRequired => .audit_required,
             error.Stage3CleanupFailed => .cleanup_failed,
@@ -311,6 +324,8 @@ pub fn main(init: std.process.Init) !void {
             };
             finishPublishedCleanup(cleanup_outcome);
         }
+        if (count != 0 and isAggregateCommand(values[0]))
+            finishAggregateCommand(candidate_aggregate_process.settleFailure(&storage.aggregate_process));
         return err;
     };
     if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
@@ -319,6 +334,13 @@ pub fn main(init: std.process.Init) !void {
         finishResumePublication(.success);
     if (count != 0 and std.mem.eql(u8, values[0], "cleanup-candidate-aggregate"))
         finishPublishedCleanup(.success);
+    if (count != 0 and isAggregateCommand(values[0]))
+        finishAggregateCommand(.success);
+}
+
+fn isAggregateCommand(command: []const u8) bool {
+    return std.mem.eql(u8, command, "prepare-candidate-aggregate") or
+        std.mem.eql(u8, command, "finalize-candidate-aggregate");
 }
 
 fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, value: []const u8) !void {
@@ -330,6 +352,11 @@ fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, valu
 fn finishStage3(outcome: candidate_stage3_command.Outcome) noreturn {
     std.debug.print("{s}", .{candidate_stage3_command.stderrLine(outcome)});
     std.process.exit(candidate_stage3_command.exitCode(outcome));
+}
+
+fn finishAggregateCommand(outcome: candidate_aggregate_process.Outcome) noreturn {
+    std.debug.print("{s}", .{candidate_aggregate_process.stderrLine(outcome)});
+    std.process.exit(candidate_aggregate_process.exitCode(outcome));
 }
 
 fn finishResumePublication(outcome: candidate_resume_publication_command.Outcome) noreturn {

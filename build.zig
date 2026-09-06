@@ -14290,6 +14290,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-aggregate-process",
         "Validate and measure actual validator aggregate process handoff",
     );
+    const session_host_release_adapter_candidate_aggregate_command_outcome_step = b.step(
+        "test-session-host-release-adapter-candidate-aggregate-command-outcome",
+        "Validate closed aggregate command process outcomes",
+    );
     const session_host_release_adapter_candidate_baseline_phase_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-phase",
         "Validate baseline signed leaf transaction ordering and cleanup",
@@ -14855,6 +14859,20 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_verify_predecessor_product_step.dependOn(&run_verify_predecessor_product_tests.step);
             const token_environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_token_environment.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_github_transport", .module = transport_mod }} });
             const candidate_aggregate_process_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_process.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod } } });
+            const candidate_aggregate_command_outcome_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_command_outcome.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "release_adapter_candidate_aggregate_process", .module = candidate_aggregate_process_mod }},
+            }) });
+            const run_candidate_aggregate_command_outcome_tests = b.addRunArtifact(candidate_aggregate_command_outcome_tests);
+            run_candidate_aggregate_command_outcome_tests.addArg("--maru-expect-tests=8");
+            run_candidate_aggregate_command_outcome_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_aggregate_command_outcome_step.dependOn(&run_candidate_aggregate_command_outcome_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_candidate_aggregate_command_outcome_tests.step);
+            test_step.dependOn(&run_candidate_aggregate_command_outcome_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_candidate_aggregate_command_outcome_tests.step);
             const release_validator_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/validate_release_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_token_environment", .module = token_environment_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_pre_publish_product", .module = pre_publish_product_mod }, .{ .name = "release_adapter_verify_predecessor_product", .module = verify_predecessor_product_mod }, .{ .name = "release_adapter_candidate_release_driver", .module = candidate_release_driver_mod }, .{ .name = "release_adapter_candidate_stage3_preparation_command", .module = candidate_stage3_preparation_command_mod }, .{ .name = "release_adapter_candidate_resume_publication_command", .module = candidate_resume_publication_command_mod }, .{ .name = "release_adapter_candidate_published_cleanup_command", .module = candidate_published_cleanup_command_mod }, .{ .name = "release_adapter_candidate_aggregate_process", .module = candidate_aggregate_process_mod } } });
             const release_validator_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_validator_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_validator", .module = release_validator_mod }} }) });
             const run_release_validator_tests = b.addRunArtifact(release_validator_tests);
@@ -14868,6 +14886,21 @@ pub fn build(b: *std.Build) void {
                 .name = "maru-session-host-release-validator",
                 .root_module = release_validator_mod,
             });
+            const aggregate_command_outcome_process = b.addExecutable(.{
+                .name = b.fmt("session-host-release-aggregate-command-outcome-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_release_aggregate_command_outcome_process.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                }),
+            });
+            const run_aggregate_command_outcome_process = b.addRunArtifact(aggregate_command_outcome_process);
+            run_aggregate_command_outcome_process.addArtifactArg(release_validator_exe);
+            run_aggregate_command_outcome_process.setCwd(b.path("."));
+            session_host_release_adapter_candidate_aggregate_command_outcome_step.dependOn(&run_aggregate_command_outcome_process.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_aggregate_command_outcome_process.step);
+            test_step.dependOn(&run_aggregate_command_outcome_process.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_aggregate_command_outcome_process.step);
             const aggregate_verifier_exe = b.addExecutable(.{
                 .name = b.fmt("session-host-release-aggregate-verifier-{s}", .{@tagName(composition_optimize)}),
                 .root_module = b.createModule(.{

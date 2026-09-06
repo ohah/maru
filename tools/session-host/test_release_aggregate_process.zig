@@ -39,8 +39,15 @@ pub fn main(init: std.process.Init) !void {
     const root: [:0]const u8 = std.mem.span(root_ptr);
     defer std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
 
-    var warmup = try std.process.spawn(init.io, .{ .argv = &.{"/usr/bin/true"}, .stdin = .close, .stdout = .close, .stderr = .close });
-    try expectSuccess(try warmup.wait(init.io));
+    const warmup = try std.process.run(init.gpa, init.io, .{
+        .argv = &.{"/usr/bin/true"},
+        .stdout_limit = .limited(1),
+        .stderr_limit = .limited(1),
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
+    });
+    defer init.gpa.free(warmup.stdout);
+    defer init.gpa.free(warmup.stderr);
+    try expectSuccess(warmup.term);
     try sealNonStdioForExec();
     const fd_before = try openFdCount(init.io);
     if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_000, .existing_destination) != null)
@@ -196,14 +203,15 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     };
     const total_started = monotonicNs();
     const prepare_started = total_started;
+    if (scenario == .existing_destination) {
+        try runClosedAuditRequired(io, allocator, &prepare_args, &environment, 30 * std.time.ns_per_s);
+        if (try directoryEntryCount(io, aggregate) != 1) return error.ExistingDestinationMutated;
+        return null;
+    }
     var prepare_child = try std.process.spawn(io, .{ .argv = &prepare_args, .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
     const prepare_pid = prepare_child.id orelse return error.MissingPid;
     const prepare_succeeded = try waitResult(&prepare_child, 30 * std.time.ns_per_s);
     const prepare_reaped = monotonicNs();
-    if (scenario == .existing_destination) {
-        if (prepare_succeeded or try directoryEntryCount(io, aggregate) != 1) return error.ExistingDestinationMutated;
-        return null;
-    }
     if (!prepare_succeeded) return error.ChildFailed;
 
     if (scenario == .cli_drift) {
@@ -225,25 +233,19 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
         "--manifest",          manifest,
     };
     const finalize_spawned = monotonicNs();
-    var finalize_child = try std.process.spawn(io, .{ .argv = &finalize_args, .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
-    const finalize_pid = finalize_child.id orelse return error.MissingPid;
-    const finalize_succeeded = waitResult(&finalize_child, if (scenario == .verifier_timeout) std.time.ns_per_s else 30 * std.time.ns_per_s) catch |err| switch (err) {
-        error.ChildTimedOut => if (scenario == .verifier_timeout) false else return err,
-        else => return err,
-    };
-    const finalize_reaped = monotonicNs();
-    if (scenario == .inventory_drift) {
-        if (finalize_succeeded or try directoryEntryCount(io, aggregate) != 6) return error.DurableAggregateMutated;
-        var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-        const order_path = try childPath(&order_path_storage, durable, "verify-order");
-        if (cwd.access(io, order_path, .{})) |_| return error.UnexpectedVerifier else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
+    if (scenario == .inventory_drift or scenario == .verifier_failure or scenario == .cli_drift or scenario == .artifact_drift) {
+        try runClosedAuditRequired(io, allocator, &finalize_args, &environment, 30 * std.time.ns_per_s);
+        if (scenario == .inventory_drift) {
+            if (try directoryEntryCount(io, aggregate) != 6) return error.DurableAggregateMutated;
+            var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
+            const order_path = try childPath(&order_path_storage, durable, "verify-order");
+            if (cwd.access(io, order_path, .{})) |_| return error.UnexpectedVerifier else |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
+            return null;
         }
-        return null;
-    }
-    if (scenario == .verifier_failure or scenario == .verifier_timeout or scenario == .cli_drift or scenario == .artifact_drift) {
-        if (finalize_succeeded or try directoryEntryCount(io, aggregate) != 5) return error.DurableAggregateMutated;
+        if (try directoryEntryCount(io, aggregate) != 5) return error.DurableAggregateMutated;
         var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
         const order_path = try childPath(&order_path_storage, durable, "verify-order");
         if (scenario == .artifact_drift) {
@@ -251,6 +253,25 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
             defer allocator.free(order_bytes);
             if (!std.mem.eql(u8, order_bytes, "Maru-1.2.3-universal.dmg\n")) return error.VerificationOrderDrift;
         } else if (cwd.access(io, order_path, .{})) |_| {
+            return error.UnexpectedVerifierPublication;
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        return null;
+    }
+    var finalize_child = try std.process.spawn(io, .{ .argv = &finalize_args, .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
+    const finalize_pid = finalize_child.id orelse return error.MissingPid;
+    const finalize_succeeded = waitResult(&finalize_child, if (scenario == .verifier_timeout) std.time.ns_per_s else 30 * std.time.ns_per_s) catch |err| switch (err) {
+        error.ChildTimedOut => if (scenario == .verifier_timeout) false else return err,
+        else => return err,
+    };
+    const finalize_reaped = monotonicNs();
+    if (scenario == .verifier_timeout) {
+        if (finalize_succeeded or try directoryEntryCount(io, aggregate) != 5) return error.DurableAggregateMutated;
+        var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
+        const order_path = try childPath(&order_path_storage, durable, "verify-order");
+        if (cwd.access(io, order_path, .{})) |_| {
             return error.UnexpectedVerifierPublication;
         } else |err| switch (err) {
             error.FileNotFound => {},
@@ -287,6 +308,24 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
         .aggregate_residue = if (aggregate_count == 5) 0 else aggregate_count,
         .staging_residue = stage_count,
     };
+}
+
+fn runClosedAuditRequired(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, environment: *const std.process.Environ.Map, timeout_ns: u64) !void {
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .environ_map = environment,
+        .stdout_limit = .limited(64),
+        .stderr_limit = .limited(64),
+        .timeout = .{ .duration = .{ .raw = .fromNanoseconds(timeout_ns), .clock = .awake } },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 21) return error.UnexpectedOutcome,
+        else => return error.UnexpectedOutcome,
+    }
+    if (result.stdout.len != 0 or !std.mem.eql(u8, result.stderr, "audit_required\n"))
+        return error.UnexpectedOutcome;
 }
 
 fn trustedEnvironment(allocator: std.mem.Allocator) !std.process.Environ.Map {

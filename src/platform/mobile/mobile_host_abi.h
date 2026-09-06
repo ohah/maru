@@ -291,6 +291,12 @@ unsigned int maru_mobile_a11y_state(unsigned int index);
    사라진다. 그래서 답은 언제나 그대로 문자열로 만들 수 있다(NUL 은 안 붙으니 길이로 읽는다). */
 unsigned long maru_mobile_a11y_label(unsigned int index, unsigned char *out, unsigned long cap);
 
+/* 집합 안 자리 — 위 16비트가 「몇째」(1 부터, 0 은 집합의 일원이 아니다), 아래 16비트가 「전부 몇」.
+   **한 번에 답한다**(상태 비트와 같은 이유). 목록은 흐르고 터미널은 스크롤백을 들기 때문에, 이 값이
+   없으면 지금 보는 것이 마지막인지 위로 천 줄이 더 있는지 알 길이 없다 — 화면은 그것을 스크롤바로
+   말하는데 색과 길이라 안 읽힌다. Android 는 `AccessibilityNodeInfo.CollectionItemInfo` 로 옮긴다. */
+unsigned int maru_mobile_a11y_set_pos(unsigned int index);
+
 /* 값 — 이름 **옆에** 읽히는 것(개수·상태 문구). 규칙은 이름과 같다(먼저 길이를 묻고, 글자
    한가운데서 안 끊는다). **이름에 이어 붙이지 않는 이유**: 스크린 리더는 이름과 값을 다른 시점에
    읽고, 값만 바뀌었을 때 이름을 다시 읽지 않는다 — 붙여 두면 값이 바뀔 때마다 이름이 바뀐 것이 된다. */

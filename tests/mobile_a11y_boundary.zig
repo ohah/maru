@@ -248,3 +248,21 @@ test "a11y 경계: 읽어 준 것과 누를 것이 같고, 이름은 modified UT
     try std.testing.expectEqual(@as(usize, 0), countCode(node_body, "NewStringUTF")); // 주석의 언급은 뺀다
     try std.testing.expectEqual(@as(usize, 1), count(node_body, "utf8ToUtf16("));
 }
+
+test "a11y 경계: 「몇째 줄」이 host 까지 간다" {
+    // 브리지만 알고 host 가 안 읽으면 사용자는 **한 번도 못 듣는다** — 이 축이 이미 한 번 겪은
+    // 모양이다(값 `value` 가 그랬다). Android 에는 그 뜻을 담는 자리가 있다(`CollectionItemInfo`).
+    const allocator = std.testing.allocator;
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const host = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(host);
+    const header = try readSource(allocator, "src/platform/mobile/mobile_host_abi.h");
+    defer allocator.free(header);
+
+    try std.testing.expectEqual(@as(usize, 1), count(header, "unsigned int maru_mobile_a11y_set_pos(unsigned int index);"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "maru_mobile_a11y_set_pos((unsigned int)index)"));
+    try std.testing.expectEqual(@as(usize, 1), count(java, "node.setCollectionItemInfo("));
+    // **0 은 「집합의 일원이 아니다」** — 그때는 안 싣는다(지어내면 「1 / 1」 같은 거짓이 읽힌다).
+    try std.testing.expectEqual(@as(usize, 1), count(java, "if (posInSet > 0) {"));
+}

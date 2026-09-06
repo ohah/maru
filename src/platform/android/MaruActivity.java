@@ -86,6 +86,8 @@ public class MaruActivity extends android.app.NativeActivity {
      *  **나눠 물으면 안 된다**(ABI 헤더의 규율): 그 사이에 프레임이 바뀌면 이름과 자리가 서로 다른
      *  프레임의 것이 되어, 스크린 리더가 짚는 곳과 손가락이 닿는 곳이 어긋난다. */
     private static native String nativeA11yNode(int index, int[] out);
+    /** 집합 안 자리 — 위 16비트가 「몇째」(1 부터, 0 은 일원이 아니다), 아래 16비트가 「전부 몇」. */
+    private static native int nativeA11ySetPos(int index);
     /** 두 번 두드리기 — **누르는 경로 그대로** 누른다. */
     private static native boolean nativeA11yClick(int index);
 
@@ -175,6 +177,17 @@ public class MaruActivity extends android.app.NativeActivity {
                         ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                         : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
                 node.setAccessibilityFocused(view.a11yFocus == virtualViewId);
+
+                // **「전체 중 몇째」를 옮긴다.** 목록은 흐르고 터미널은 스크롤백을 든다 — 화면은
+                // 그것을 스크롤바로 말하는데 색과 길이라 안 읽힌다. Android 에는 그 뜻을 담는
+                // 자리가 있다(`CollectionItemInfo`) — TalkBack 이 그것을 제 어휘로 읽어 준다.
+                int sp = nativeA11ySetPos(virtualViewId);
+                int posInSet = sp >>> 16;
+                if (posInSet > 0) {
+                    // 한 줄짜리 항목이다(열은 하나) — 번호는 0부터 세므로 하나 뺀다.
+                    node.setCollectionItemInfo(AccessibilityNodeInfo.CollectionItemInfo.obtain(
+                            posInSet - 1, 1, 0, 1, false));
+                }
 
                 Rect bounds = new Rect(x, y, x + w, y + h);
                 node.setBoundsInParent(bounds);

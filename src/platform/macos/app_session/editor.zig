@@ -3898,7 +3898,31 @@ fn pointOnEditorScrollbar(term: *Term, x_px: f64, y_px: f64) bool {
     return false;
 }
 
-pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64) bool {
+/// 잡은 단위로 늘린 뒤의 `focus`. **드래그 확장과 `⌥더블/트리플클릭`이 이것 하나를 쓴다**(§3.2d).
+///
+/// 사용자에겐 둘이 같은 "늘리기"라, 다른 낱말을 잡으면 그 차이를 설명할 수 없다.
+///
+/// **비교 뷰는 안 쓴다 — 좌표계가 다르다**(§3.2d 표): 그쪽(`dragDiffBodySelection`)은 위치가
+/// `(row, byte)`이고 방향을 `RowPos.lessThan`으로, 줄 끝을 `text.len`으로 잰다. 억지로 합치려면
+/// 좌표를 추상화해야 하는데 그 값이 이 조각에 없다. 그래서 **단일 편집기 하나만** 뗀다.
+fn widenedFocus(file: *const editor.edit_doc.EditableFile, sel: editor_selection.Selection, off: usize) usize {
+    return switch (sel.kind) {
+        // `.match`(일치로 잡은 범위)는 잡은 단위가 없으므로 글자 단위로 는다 — `.simple`과 같다.
+        .simple, .match => off,
+        .word => blk: {
+            const w = editor_selection.wordRangeAt(file.content, off);
+            // 앞으로 끌면 그 단어의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
+            break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
+        },
+        .line => blk: {
+            const li = file.lines.lineAt(@min(off, file.lines.byteLen()));
+            const line = file.lines.line(li) orelse break :blk off;
+            break :blk if (off >= sel.anchorHi()) line.contentEnd() else line.start;
+        },
+    };
+}
+
+pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64, mods: i32) bool {
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
     // **비교 뷰도 여기서 소비한다.** `hitTestBody`가 diff를 첫 줄에서 거절하므로 이 자리에서 갈리지
@@ -3929,10 +3953,56 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // (안전 빌드는 panic, ReleaseFast는 확장 단위를 모르는 `.line`이 남는다 — 그 assert가 막으려던
     // 바로 그 상태다). 빈 줄에 caret을 두는 것이 옳다: 고를 것이 없다.
     const kind = if (range.lo == range.hi) editor_selection.AnchorKind.simple else range.kind;
-    clearExtraSelections(self, term);
+
+    // **`⌥`를 끼면 나머지 커서를 안 지운다**(§3.2d) — §3.2c 가 `⌥클릭`에 대해 정한 것과 같은
+    // 근거다: 그것이 **더하는·넓히는** 제스처이기 때문이다.
+    const additive = (mods & 8) != 0;
+    if (!additive) clearExtraSelections(self, term);
     breakUndoGroup(term); // 위와 같은 이유(§3.3)
-    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
+
+    // **`⌥더블클릭`은 primary 가 이미 낱말이면 늘린다**(§3.2d). VSCode `LastCursorWordSelect` 가
+    // `lastAddedState.modelState.hasSelection()` 을 `inSelectionMode` 로 넘겨 같은 답을 낸다 —
+    // 두 번째가 첫 번째를 버리면 **한 번에 한 낱말밖에 못 잡는다**.
+    //
+    // **`.word` 가 아니면 새로 잡는다.** `.match`(⌘D 로 선 것)도 `.simple`(맨 드래그로 잡은 것)도
+    // **늘릴 단위가 없다** — 낱말 아닌 조각을 낱말 단위로 늘리면 사용자가 본 것과 어긋난다.
+    // `widenedFocus` 가 그 둘을 똑같이 글자 단위로 다루는 것과 **같은 판단**이다.
+    //
+    // **`⌥트리플클릭`은 늘 새로 잡는다.** VSCode 도 클릭(`LastCursorLineSelect`, `inSelectionMode:
+    // false`)과 드래그(`LastCursorLineSelectDrag`, `true`)를 갈라 놓는다 — 낱말 쪽과 갈리는
+    // 지점이라(그쪽엔 `…Drag` 변형이 아예 없다) 그대로 따른다.
+    const extend = additive and !whole_line and if (term.rt.editor_selection) |sel|
+        sel.kind == .word and !sel.isEmpty()
+    else
+        false;
+
+    if (extend) {
+        // `anchor_*` 는 그대로 두고 `focus` 만 민다 — 드래그 확장과 **같은 계산**이다. 잡은 단위가
+        // 안 바뀌었으므로 `kind` 도 `.word` 그대로다(§3.2 — 그 단위는 처음 잡을 때 정해진다).
+        const sel = &term.rt.editor_selection.?;
+        sel.focus = widenedFocus(&doc.file, sel.*, off);
+    } else {
+        term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
+    }
+
+    // **넓히면 옆 커서를 삼킬 수 있다**(§3.2d) — 같은 낱말·줄 안에 `⌥클릭`으로 찍어 둔 것들이다.
+    // §3.2 의 *"겹치면 하나로 합친다"* 가 그대로 걸린다. **primary 는 승계된다**(그 함수가 한다) —
+    // 넓힌 것이 primary 이므로 그것이 남고, 합쳐진 범위는 원래 낱말과 대응이 끊기므로 `kind` 가
+    // `simple` 로 돌아간다. 즉 넓히자마자 합쳐졌으면 이어지는 드래그가 글자 단위가 된다.
+    //
+    // **상한은 안 본다** — 커서 수가 안 는다. 이 연산은 **넓히기**지 더하기가 아니다(§3.2d).
+    if (additive) {
+        var buf: std.ArrayList(editor_selection.Selection) = .empty;
+        defer buf.deinit(self.allocator);
+        buf.append(self.allocator, term.rt.editor_selection.?) catch return true;
+        buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return true;
+        const merged = editor_selection.mergeOverlapping(buf.items, 0);
+        writeCursors(self, term, buf.items[0..merged.len], merged.primary);
+    }
+
     // **드래그를 이어서 arm한다** — 더블클릭 후 끌면 단어 단위로 늘어난다. 뗌이 소유권을 놓는다.
+    // `⌥` 를 껴도 같다: `dragBodySelection` 이 primary 하나만 미므로 **방금 넓힌 것**이 이어서
+    // 늘어나고 나머지 커서는 가만히 있다(§3.2d).
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
     return true;
@@ -4167,22 +4237,10 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                 // **잡은 단위로 늘어난다**(`AnchorKind` doc). 더블클릭 뒤 끌면 지나가는 단어가
                 // 통째로, 트리플클릭 뒤 끌면 줄이 통째로 들어온다 — 글자 단위로 늘면 잡은 단어의
                 // 반쪽이 남아 사용자가 본 것과 어긋난다.
-                sel.focus = switch (sel.kind) {
-                    // `.match`(일치로 잡은 범위)는 잡은 단위가 없으므로 글자 단위로 는다 — `.simple`과 같다.
-                    .simple, .match => off,
-                    .word => blk: {
-                        const doc = owner.term.rt.editor_doc orelse break :blk off;
-                        const w = editor_selection.wordRangeAt(doc.file.content, off);
-                        // 앞으로 끌면 그 단어의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
-                        break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
-                    },
-                    .line => blk: {
-                        const doc = owner.term.rt.editor_doc orelse break :blk off;
-                        const li = doc.file.lines.lineAt(@min(off, doc.file.lines.byteLen()));
-                        const line = doc.file.lines.line(li) orelse break :blk off;
-                        break :blk if (off >= sel.anchorHi()) line.contentEnd() else line.start;
-                    },
-                };
+                sel.focus = if (owner.term.rt.editor_doc) |*doc|
+                    widenedFocus(&doc.file, sel.*, off)
+                else
+                    off;
                 self.metal_dirty = true;
             }
             return true;
@@ -16711,6 +16769,301 @@ test "MC2 같은 줄에 커서가 여럿이면 그 줄에 띠도 여럿 선다 (
     try testing.expectEqualStrings("ab\nab\nab", fx.session.chrome_clipboard_write);
 }
 
+/// `⌥더블/트리플클릭` 판정자들이 쓰는 판(§3.2d).
+///
+/// 본문 "alpha beta gamma\ndelta epsilon\n\nzeta" — **낱말 경계가 뚜렷하고 빈 줄이 하나 있다**
+/// (`⌥트리플클릭`의 `.simple` 갈래를 재려면 필요하다).
+///
+/// | 오프셋 | | 오프셋 | |
+/// |---|---|---|---|
+/// | 0..5 | `alpha` | 17..22 | `delta` |
+/// | 6..10 | `beta` | 23..30 | `epsilon` |
+/// | 11..16 | `gamma` | 31 | 빈 줄 |
+const OptWordFixture = struct {
+    fx: PaneFixture,
+    term: *Term,
+    pane: *Pane,
+    text_x0: i32,
+    y0: i32,
+    cell_w: u32,
+    cell_h: u32,
+    path: []u8,
+
+    fn init(allocator: std.mem.Allocator) !OptWordFixture {
+        const io_ = std.testing.io;
+        var fx = try PaneFixture.init(allocator);
+        errdefer fx.deinit(allocator);
+        try fx.dir.dir.writeFile(io_, .{
+            .sub_path = "ow.txt",
+            .data = "alpha beta gamma\ndelta epsilon\n\nzeta\n",
+        });
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+        const path = try std.fs.path.join(allocator, &.{ root, "ow.txt" });
+        errdefer allocator.free(path);
+        const term = try openPathInActivePane(fx.session, path);
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+        const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+        const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+        const geom = term.rt.editor_hit_geom;
+        return .{
+            .fx = fx,
+            .term = term,
+            .pane = pane_ops.activePane(fx.session),
+            .text_x0 = @as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)),
+            .y0 = @as(i32, @intCast(body.y)) + inset,
+            .cell_w = geom.cell_w_px,
+            .cell_h = geom.cell_h_px,
+            .path = path,
+        };
+    }
+
+    fn deinit(self: *OptWordFixture, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.fx.deinit(allocator);
+    }
+
+    fn x(self: OptWordFixture, col: u32) f64 {
+        return @floatFromInt(self.text_x0 + @as(i32, @intCast(col * self.cell_w)));
+    }
+    fn y(self: OptWordFixture, row: u32) f64 {
+        return @floatFromInt(self.y0 + 1 + @as(i32, @intCast(row * self.cell_h)));
+    }
+    /// `⌥`(bit 8)를 끼고 더블(`whole_line=false`)·트리플클릭한다.
+    fn optClick(self: *OptWordFixture, whole_line: bool, col: u32, row: u32) bool {
+        return selectWordOrLineAt(self.fx.session, self.pane, whole_line, self.x(col), self.y(row), 8);
+    }
+};
+
+test "OW1 ⌥더블클릭은 커서를 더하지 않고 primary 를 낱말로 넓히며 나머지를 남긴다 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // **primary 는 둘째 줄에 caret**, 여벌 커서 하나는 셋째 줄 — 둘 다 넓힐 낱말("beta") 밖이다.
+    // 겹치면 병합이 끼어들어 「더했나」와 「합쳤나」가 같은 자리가 된다(픽스처가 개념을 갈라야 한다).
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(18), // primary — "delta" 안
+        editor_selection.Selection.at(33), // 여벌 — "zeta" 안
+    }, 0);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+
+    try testing.expect(fxo.optClick(false, 8, 0)); // 첫 줄 8열 = "beta" 안
+
+    // ⑴ **커서 수가 그대로다** — 넓히기지 더하기가 아니다.
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    // ⑵ **나머지 커서가 살아 있다** — `⌥` 는 `clearExtraSelections` 를 안 부른다.
+    try testing.expectEqual(@as(usize, 33), term.rt.editor_extra_selections[0].focus);
+    // ⑶ **primary 가 그 낱말이 됐다.**
+    const sel = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 6), sel.start());
+    try testing.expectEqual(@as(usize, 10), sel.end());
+    try testing.expectEqual(editor_selection.AnchorKind.word, sel.kind);
+}
+
+test "OW2 ⌥ 없는 더블클릭은 여전히 나머지 커서를 지운다 (§9.1 대조군)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(18),
+        editor_selection.Selection.at(33),
+    }, 0);
+    // **`mods = 0`** — 같은 좌표, 같은 함수, 모디파이어만 다르다.
+    try testing.expect(selectWordOrLineAt(fxo.fx.session, fxo.pane, false, fxo.x(8), fxo.y(0), 0));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    const sel = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 6), sel.start());
+
+    // **`⌥`는 bit 8 이다.** 다른 비트로는 안 열린다 — `⇧`(4)·`⌃`(16)·`⌘`(32)를 각각 재서
+    // `& 8` 을 다른 마스크로 바꾼 변이가 살지 못하게 한다.
+    for ([_]i32{ 4, 16, 32 }) |m| {
+        writeCursors(fxo.fx.session, term, &.{
+            editor_selection.Selection.at(18),
+            editor_selection.Selection.at(33),
+        }, 0);
+        try testing.expect(selectWordOrLineAt(fxo.fx.session, fxo.pane, false, fxo.x(8), fxo.y(0), m));
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    }
+    // **⌥가 섞여 있으면 열린다** — `⌥⌘` 같은 조합에서 마스크가 아니라 동등 비교(`== 8`)로 바뀐
+    // 변이를 잡는다.
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(18),
+        editor_selection.Selection.at(33),
+    }, 0);
+    try testing.expect(selectWordOrLineAt(fxo.fx.session, fxo.pane, false, fxo.x(8), fxo.y(0), 8 | 32));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+}
+
+test "OW3 primary 가 이미 낱말이면 ⌥더블클릭이 늘린다 — 새로 잡지 않는다 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(fxo.optClick(false, 8, 0)); // "beta" 6..10
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.end());
+
+    // **다른 낱말을 또 ⌥더블클릭하면 그 사이가 통째로 잡힌다.** 새로 잡으면 11..16 이 된다.
+    try testing.expect(fxo.optClick(false, 13, 0)); // "gamma" 11..16
+    const sel = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 6), sel.start()); // 잡은 낱말의 시작이 남는다
+    try testing.expectEqual(@as(usize, 16), sel.end());
+    // **단위는 안 바뀐다** — 이어지는 드래그가 낱말 단위로 늘어야 한다(§3.2).
+    try testing.expectEqual(editor_selection.AnchorKind.word, sel.kind);
+
+    // **뒤로도 늘린다** — 앞 낱말을 ⌥더블클릭하면 그 시작까지 삼킨다.
+    //
+    // **앞서 늘린 쪽(16)은 안 남는다.** anchor 는 **처음 잡은 낱말** "beta"(6..10)에 고정이고
+    // `focus` 만 움직이므로, 반대쪽으로 늘리면 0..10 이 된다 — 드래그를 뒤로 끌 때와 같은 답이다
+    // (그것이 `AnchorKind` 가 anchor 를 **범위**로 두는 이유다: 잡은 낱말은 안 잘린다).
+    try testing.expect(fxo.optClick(false, 2, 0)); // "alpha" 0..5
+    const back = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 0), back.start()); // "alpha" 시작까지
+    try testing.expectEqual(@as(usize, 10), back.end()); // **"beta" 끝이 남는다** — anchor 가 범위다
+}
+
+test "OW4 늘릴 단위가 없으면 새로 잡는다 — .match 도 .simple 도 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // ⑴ **`.match`** — `⌘D` 로 선 커서다. 낱말 아닌 조각일 수 있으므로 늘리지 않는다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 5, 5, .match);
+    try testing.expect(fxo.optClick(false, 13, 0)); // "gamma"
+    {
+        const sel = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 11), sel.start()); // 0 이 아니다 — 새로 잡았다
+        try testing.expectEqual(@as(usize, 16), sel.end());
+        try testing.expectEqual(editor_selection.AnchorKind.word, sel.kind); // 단위가 생겼다
+    }
+
+    // ⑵ **`.simple` 범위** — 맨 드래그로 잡은 것이다. 이것도 늘릴 단위가 없다.
+    //    `.match` 하나만 막은 변이(`kind != .match`)는 여기서 죽는다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+    try testing.expectEqual(editor_selection.AnchorKind.simple, term.rt.editor_selection.?.kind);
+    try testing.expect(fxo.optClick(false, 13, 0));
+    {
+        const sel = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 11), sel.start());
+        try testing.expectEqual(@as(usize, 16), sel.end());
+    }
+
+    // ⑶ **빈 `.word`** 도 늘릴 것이 없다 — caret 을 늘리면 그 자리부터 잡힌다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(fxo.optClick(false, 13, 0));
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.start());
+}
+
+test "OW5 ⌥트리플클릭은 늘 새로 잡는다 — 클릭과 드래그가 갈린다 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // **primary 를 낱말 범위로 세워 둔다** — `!whole_line` 게이트를 뺀 변이는 여기서 그 낱말을
+    // 늘려 버린다(0..16 이 아니라 6..2x 가 된다).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(fxo.optClick(false, 8, 0)); // "beta" 6..10, `.word`
+    try testing.expectEqual(editor_selection.AnchorKind.word, term.rt.editor_selection.?.kind);
+
+    // ⌥트리플클릭 → **둘째 줄 전체를 새로** 잡는다. "delta epsilon" 은 17..30.
+    try testing.expect(fxo.optClick(true, 3, 1));
+    {
+        const sel = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 17), sel.start());
+        try testing.expectEqual(@as(usize, 30), sel.end()); // 개행은 안 들어간다
+        try testing.expectEqual(editor_selection.AnchorKind.line, sel.kind);
+    }
+
+    // **줄끼리도 안 늘린다** — 첫 줄을 또 ⌥트리플하면 0..16 이지 0..30 이 아니다.
+    try testing.expect(fxo.optClick(true, 3, 0));
+    {
+        const sel = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 0), sel.start());
+        try testing.expectEqual(@as(usize, 16), sel.end());
+    }
+
+    // **빈 줄은 caret 이다** — `fromAnchorRange` 의 `(kind == .simple) == (lo == hi)` 단언이
+    // 깨지지 않아야 한다(셋째 줄 = 31, 내용 없음).
+    try testing.expect(fxo.optClick(true, 0, 2));
+    {
+        const sel = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 31), sel.start());
+        try testing.expectEqual(@as(usize, 31), sel.end());
+        try testing.expectEqual(editor_selection.AnchorKind.simple, sel.kind);
+    }
+}
+
+test "OW6 넓히다 옆 커서를 삼키면 합치고 primary 를 잇는다 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // primary = "beta"(6..10, `.word`), 여벌 커서는 **"gamma" 안**(13) — 넓히면 삼켜진다.
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.fromAnchorRange(6, 10, 10, .word),
+        editor_selection.Selection.at(13),
+    }, 0);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+
+    try testing.expect(fxo.optClick(false, 13, 0)); // "gamma" 까지 늘린다 → 6..16
+
+    // ⑴ **삼킨 커서가 사라진다.**
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    const sel = term.rt.editor_selection orelse return error.NoSelection;
+    // ⑵ **범위는 넓힌 그대로**, primary 가 승계됐다.
+    try testing.expectEqual(@as(usize, 6), sel.start());
+    try testing.expectEqual(@as(usize, 16), sel.end());
+    // ⑶ **합쳐지면 `kind` 가 `simple` 로 돌아간다** — 그 범위는 더 이상 한 낱말이 아니다.
+    try testing.expectEqual(editor_selection.AnchorKind.simple, sel.kind);
+
+    // **삼키지 않으면 그대로 둘이다**(대조군) — 병합을 늘 부르는 것과 「겹쳐서 합쳤다」를 가른다.
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(18),
+        editor_selection.Selection.at(33),
+    }, 0);
+    try testing.expect(fxo.optClick(false, 8, 0)); // "beta" — 둘 다 안 겹친다
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+}
+
+test "OW7 ⌥더블클릭 뒤 드래그는 방금 넓힌 primary 만 늘린다 (§3.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    writeCursors(fxo.fx.session, term, &.{
+        editor_selection.Selection.at(18), // primary
+        editor_selection.Selection.at(33), // 여벌 — 가만히 있어야 한다
+    }, 0);
+    try testing.expect(fxo.optClick(false, 8, 0)); // "beta" 6..10
+
+    // **제스처가 armed 다** — 이어 끌면 낱말 단위로 는다.
+    try testing.expect(dragBodySelection(fxo.fx.session, 2, fxo.x(13), fxo.y(0)));
+    const sel = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 6), sel.start());
+    try testing.expectEqual(@as(usize, 16), sel.end()); // "gamma" 끝까지 — 글자 단위면 13 이다
+
+    // **나머지 커서는 안 움직였다.**
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 33), term.rt.editor_extra_selections[0].focus);
+}
+
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {
     // **`AnchorKind`가 있는 이유를 재는 테스트다.** anchor가 점이면 단어를 잡고 뒤로 끌 때 그
     // 단어가 잘린다 — `selection.zig` 머리말이 anchor를 **범위**로 둔 근거가 그것이다.
@@ -16742,7 +17095,7 @@ test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어�
     const row0: f64 = @floatFromInt(y0 + 1);
 
     // ⑴ **더블클릭 → 단어.** "beta"는 6..10.
-    try testing.expect(selectWordOrLineAt(fx.session, pane, false, on_beta, row0));
+    try testing.expect(selectWordOrLineAt(fx.session, pane, false, on_beta, row0, 0));
     const w = term.rt.editor_selection orelse return error.NoSelection;
     try testing.expectEqual(editor_selection.AnchorKind.word, w.kind);
     try testing.expectEqual(@as(usize, 6), w.start());
@@ -16764,7 +17117,7 @@ test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어�
     try testing.expect(dragBodySelection(fx.session, 3, on_alpha, row0));
 
     // ⑷ **트리플클릭 → 줄.** 개행은 뺀다.
-    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row0));
+    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row0, 0));
     const l = term.rt.editor_selection orelse return error.NoSelection;
     try testing.expectEqual(editor_selection.AnchorKind.line, l.kind);
     try testing.expectEqual(@as(usize, 0), l.start());
@@ -16784,7 +17137,7 @@ test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어�
     // ⑺ **줄 단위도 뒤로 끌 수 있다.** 둘째 줄을 잡고 첫 줄로 끌면 첫 줄 **머리**까지 삼키면서
     //    잡은 줄의 끝이 남는다 — 그 갈래를 지운 뮤턴트가 살아남았다(적대적 검증).
     try testing.expect(dragBodySelection(fx.session, 3, on_beta, row1));
-    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row1)); // 둘째 줄을 잡는다
+    try testing.expect(selectWordOrLineAt(fx.session, pane, true, on_beta, row1, 0)); // 둘째 줄을 잡는다
     const l3 = term.rt.editor_selection orelse return error.NoSelection;
     try testing.expectEqual(@as(usize, 17), l3.start());
     try testing.expect(dragBodySelection(fx.session, 2, on_beta, row0)); // 첫 줄로 끈다
@@ -16933,7 +17286,7 @@ test "SEL6 막대 띠 위 더블·트리플 클릭은 선택을 열지 않는다
 
     // ⑴ **막대를 잡은 채 더블클릭해도 선택이 안 열린다.**
     try testing.expect(beginScrollbarGesture(fx.session, pane, bar_x, row0));
-    try testing.expect(!selectWordOrLineAt(fx.session, pane, false, bar_x, row0));
+    try testing.expect(!selectWordOrLineAt(fx.session, pane, false, bar_x, row0, 0));
     try testing.expectEqual(@as(?editor_selection.Selection, null), term.rt.editor_selection);
     // 막대 드래그가 살아 있다 — 편집기 막대는 `pointer_gesture_owner`가 아니라 이 필드가 든다.
     try testing.expectEqual(term, fx.session.editor_scrollbar_term);
@@ -16941,12 +17294,12 @@ test "SEL6 막대 띠 위 더블·트리플 클릭은 선택을 열지 않는다
     fx.session.cancelPointerGesture();
 
     // ⑵ 트리플클릭도 같다.
-    try testing.expect(!selectWordOrLineAt(fx.session, pane, true, bar_x, row0));
+    try testing.expect(!selectWordOrLineAt(fx.session, pane, true, bar_x, row0, 0));
     try testing.expectEqual(@as(?editor_selection.Selection, null), term.rt.editor_selection);
 
     // ⑶ **본문은 연다** — 위 둘이 항진명제가 아니라는 대조군.
     const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
-    try testing.expect(selectWordOrLineAt(fx.session, pane, false, text_x, row0));
+    try testing.expect(selectWordOrLineAt(fx.session, pane, false, text_x, row0, 0));
     try testing.expect(term.rt.editor_selection != null);
     fx.session.cancelPointerGesture();
 }

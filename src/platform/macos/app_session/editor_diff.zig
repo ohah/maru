@@ -1985,7 +1985,7 @@ test "DSEL4: 비교 뷰도 더블클릭 뒤 뒤로 끌면 잡은 단어가 안 �
 
     // ⑴ `beta`(byte 6..10)를 더블클릭 — 그 단어만 잡힌다.
     //    **제품 진입점을 탄다**(`selectWordOrLineAt`) — 그래야 "비교 뷰로 갈리는가"까지 함께 잰다.
-    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, col_x(g, cw, 7), y0));
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, col_x(g, cw, 7), y0, 0));
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("beta", fx.session.chrome_clipboard_write);
 
@@ -2003,7 +2003,7 @@ test "DSEL4: 비교 뷰도 더블클릭 뒤 뒤로 끌면 잡은 단어가 안 �
     try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, col_x(g, cw, 13), y0));
 
     // ⑷ **트리플클릭은 줄 단위**다 — 뒤로 끌어도 줄 전체가 남는다.
-    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, true, col_x(g, cw, 7), y0));
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, true, col_x(g, cw, 7), y0, 0));
     try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, col_x(g, cw, 2), y0));
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("alpha beta gamma", fx.session.chrome_clipboard_write);

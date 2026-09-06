@@ -1077,7 +1077,8 @@ canonical baseline evidence/role-A manifest의 전체 cross-binding 및 trusted 
 tombstone-before-close를 Debug·ReleaseFast에서 검증한다. allocation fail-index와 pathname/directory/file replacement, extra/missing leaf,
 mode·context·metadata seal drift는 view 0으로 fail-close하고 retained directory는 close 뒤에도 생존한다. ReleaseFast 40회 diagnostic은
 reopen/fence/close latency 분포, 실패 수와 FD delta를 기록하지만 제품 latency budget은 아니다. harness-owned root만 사용하므로 실제
-앱 session-host 상태나 release를 건드리지 않는다. prepare/resume process command, authored attestation action, aggregate 삽입,
+앱 session-host 상태나 release를 건드리지 않는다. stage-4 이후 resume authority product가 sole product caller exact 1이며,
+prepare/resume process command, authored attestation action, aggregate 삽입,
 live workflow와 frozen signed U5 E2E는 후속 범위다.
 
 U5 current-draft adoption은 새 process가 재인증한 `CurrentReleaseAuthority`와 canonical role-A manifest·trusted context만으로 기존
@@ -1116,6 +1117,18 @@ failure, draft 전 product failure, draft 뒤 audit cleanup 성공·실패와 in
 기존 workflow reducer에는 exact `draft_authoring`의 mutation 전 code 20에만 대응하는 `failed_before_remote_mutation` result를 추가한다.
 그 event만 `local_failure`가 되며 다른 stage·이미 시작된 mutation·추측 입력은 거부한다. code 21/22는 각각 기존 보수적 `failed`와
 `cleanup_failed`로 가고, 기존 stage-3 일반 failure의 audit-required 동작은 약화하지 않는다.
+
+U5 stage-4 이후 resume authority product는 retained preparation semantic reopen, durable aggregate의 fixed four-bundle 재검증,
+current mutable draft 재인증과 ready `DraftAuthority` 채택을 exact once 순서와 하나의 deadline으로 소유한다.
+`test-session-host-release-adapter-candidate-resume-authority-product`는 generic phase의 모든 fail/cleanup checkpoint와 concrete 기존
+component call inventory를 나눠 final-address·copy·pre-owned·storage alias, current API 전 local full fence, bundle verifier token 0,
+manifest/context/current/adopted-draft 결속, preparation manifest와 aggregate manifest artifact의 exact same identity 및 그 pair를 한 번만 센 나머지 10개 vnode의 cross-owner identity distinct,
+current API 뒤 public aggregate fence를 포함한 성공·실패 후 descriptor 정산과 retained preparation/aggregate 생존을 Debug·ReleaseFast에서
+검증한다. required manifest pair의 불일치와 나머지 10개 identity의 각 위치를 앞 위치와 alias한 행동 matrix가 누락된 role을 잡는다. audit cleanup은 변조 뒤에도 재-fence 없이
+descriptor를 포기하고, ready cleanup만 마지막 fence를 요구한다. 두 cleanup의 실패 상태를 분리하고 남은 exact suffix 재시도도 고정한다.
+Darwin descriptor-close 실패는 이미 tombstone된 owner를 재시도하지 않고 남은 정리를 마친 뒤 terminal warning으로 관측되는지 별도 행렬로 고정한다. 실제 filesystem fault matrix는 product가 호출하는 preparation/aggregate/current component gate가 계속 소유한다. 모든 fixture는
+harness-owned `mkdtemp`만 사용하며 실제 앱 session-host 상태·GitHub release·credential을 읽거나 바꾸지 않는다. 이 gate는 executable resume command, workflow stage 5/6, publication composition, post-publish aggregate cleanup,
+live workflow 또는 frozen signed U5 E2E의 증거가 아니다.
 
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는

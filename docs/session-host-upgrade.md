@@ -3380,6 +3380,68 @@ subject/bundle pathname·inode alias와 partial output 0을 Linux·macOS에서 �
 stage-4 pair action과 locator handoff만 닫으며 retained stage-3 semantic reopen, current draft 재인증, bundle cryptographic binding,
 aggregate prepare/finalize 삽입, live workflow 배선과 frozen signed U5 제품 E2E는 아직 완료하지 않는다.
 
+### 11.61 stage 4 이후 resume authority의 단일 product owner
+
+stage 4가 돌려준 두 bundle pathname과 stage 2의 candidate bundle pathname을 성공 boolean이나 과거 process의 capability로
+해석하지 않는다. `release_adapter_candidate_resume_authority_product.zig`의 caller-owned final-address `Execution` 하나가 새
+process에서 §11.56 retained preparation reopen, §11.50 aggregate semantic reopen, 기존 current draft 재인증과 §11.57 ready draft
+채택을 exact once transaction으로 소유한다. 입력은 trusted protected context, retained preparation directory, durable aggregate
+directory, candidate DMG·frozen executable, checkout 전에 pin한 GitHub CLI, exact token·bounded response와 하나의 positive budget뿐이다.
+evidence·manifest와 네 bundle pathname, subject name/SHA, release ID, draft ID, 성공 scalar 또는 이전 owner bytes는 입력으로 받지 않는다.
+
+순서는 local fail-closed 작업을 먼저 하는 exact preparation reopen→첫 preparation fence→manifest held parse→aggregate reopen·DMG→frozen→evidence→manifest
+bundle verification→aggregate와 preparation의 credential 직전 fence→current draft authentication→ready draft adoption→두 durable owner의
+최종 fence이다. preparation view에서 유도한 manifest pathname만 aggregate
+reopen과 current authentication에 공유하고, aggregate의 evidence와 bundle pathname은 held five-entry inventory에서만 유도한다.
+모든 bundle verifier child는 기존 §11.47 token-free environment를 유지한다. `GH_TOKEN`은 bundle 검증과 마지막 full local fence가
+끝난 뒤 current draft authentication에서만 사용하며 adoption은 child·credential·remote mutation 0이다. 현재 release 조회는 tag/latest
+편의 경로를 새로 만들지 않고 기존 `CurrentReleaseAuthority`를 exact once 사용한다.
+
+§11.51의 stage-6 finalize process는 검증 뒤 descriptor를 닫고 exit code만 남기므로 그 성공을 stage-7 capability로 직렬화할 수 없다.
+따라서 resume product의 aggregate reopen은 중복 최적화 대상이 아니라 새 publication process가 자기 final-address authority를 얻는
+필수 독립 검증이다. stage-6 exit 0, workflow step outcome 또는 과거 verifier stdout을 입력 권위로 받는 우회 경로는 없다.
+
+aggregate reopen owner는 기존 private fence와 같은 검사를 수행하는 public read-only `fence()`를 제공하며 verified phase에서만 view를
+돌려준다. `Execution.value()`는 preparation·aggregate·current·ready draft 네 nested owner가 모두 exact final address에 있고 transaction이 ready이며,
+deadline과 context/path/CLI/token borrow가 반환되고 두 durable directory 및 모든 held file/artifact가 마지막 full fence를 통과한 경우에만
+ready draft와 held preparation/aggregate view를 함께 공개한다. manifest는 held descriptor에서 매 fence마다 canonical parse하고 trusted
+context, current release와 adopted draft의 repository/run/source/release/tag를 다시 결속한다. aggregate는 성공 직전에도 네 bundle의
+cryptographic·semantic verification 결과와 directory/leaf/artifact/CLI identity를 다시 검증한다. caller가 bundle child exit나 pathname
+존재만으로 ready 상태를 만들 수 없다.
+
+어느 단계 실패도 이미 stage 3에서 생성된 remote draft나 retained preparation·aggregate bytes를 삭제·변경하거나 같은 tag를 자동
+재시도하지 않는다. 열린 local owner는 ready draft→current→aggregate→preparation의 생성 역순으로 닫고, owner를 소비하지 않은 정리 실패는
+exact 남은 owner와 `cleanup_required`를 보존한다. current authentication은 read-only remote query지만 stage 3 이후이므로 실패 결과는 workflow에서
+`audit_required`이고 local cleanup 완료가 remote 상태를 `local_failure`로 낮추지 않는다. 성공 owner는 후속 publication composition이
+소비하기 전까지 네 nested authority를 보존하며, 성공 cleanup도 durable 두 directory를 unlink하지 않는다. durable aggregate 삭제 권위는
+계속 §11.52 단계 8의 post-publish owner만 가진다. audit 실패 정리의 `audit_cleanup_required`와 성공 owner 정리의
+`ready_cleanup_required`는 서로 다른 상태이며, 어느 쪽도 부분 정리 뒤 ready/pristine으로 보이지 않는다. 각 retry는 아직 소비되지 않은 실패 owner부터
+남은 역순 suffix만 계속한다. Darwin `close()` 실패는 descriptor가 이미 소비됐는지 알 수 없으므로 하위 owner처럼 즉시 tombstone하고
+상위 transaction도 그 owner를 완료 처리한 뒤 나머지 역순 정리를 계속하며, 마지막에 `DescriptorCloseFailed`를 terminal warning으로
+반환한다. 이 경우 같은 숫자의 FD를 다시 닫는 retry authority를 만들지 않는다. ready cleanup은 성공 authority를 닫으므로 마지막 fence 뒤 close하지만, audit cleanup은 이미
+fence 실패가 원인일 수 있어 내용을 다시 신뢰하지 않고 final-address owner와 phase만 확인한 `deinit`으로 descriptor를 포기한다. 그렇지
+않으면 감지한 변조가 동일 cleanup을 영구히 막는다. 두 경로 모두 durable pathname을 unlink하거나 bytes를 고치지 않는다.
+
+모든 preflight와 phase fence는 execution·transaction·deadline·nested owner의 final address, context/CLI/path storage와 token/response의
+alias, canonical absolute pathname과 preparation/aggregate/artifact의 same-or-descendant 및 pairwise identity를 검사한다. preparation과
+aggregate directory는 서로 같거나 조상·자손일 수 없고 candidate artifact/CLI도 어느 durable directory 아래에 있을 수 없다. copied,
+moved, pre-owned execution, path/context/CLI/token storage overlap, deadline 교체, nested owner·seal·phase drift는 다음 child·credential
+호출과 ready publication 전에 거부한다.
+
+여기서 cross-owner identity는 하위 owner별 검사들의 합이 아니다. product fence는 preparation의 두 held leaf, aggregate의 다섯 held leaf와
+세 artifact, checkout 전에 pin한 CLI까지 총 11개 slot을 비교한다. aggregate의 manifest artifact는 preparation owner가 보존한 manifest
+pathname에서 직접 열었으므로 두 manifest slot은 exact 같은 `(device, inode)`여야 한다. 그 required shared-manifest pair를 한 번만 센
+나머지 10개 vnode는 모두 달라야 한다. 따라서 manifest가 다른 inode로 교체되거나, 그 의도된 pair 이외의 preparation leaf를 aggregate
+leaf·artifact·CLI에 hard-link한 교차-owner alias는 current credential 사용 전과 ready 공개 직전에 모두 거부한다.
+
+focused gate `test-session-host-release-adapter-candidate-resume-authority-product`는 generic transaction의 모든 단계·실패·cleanup
+checkpoint, required shared-manifest identity와 나머지 10개 vnode의 각 위치 alias 거부, concrete product의 existing-component exact-one 조립 및 shared-deadline API 선택을 분리해 Debug·ReleaseFast에서 검증한다.
+retained preparation과 aggregate의 directory·leaf·artifact·CLI mutation, fixed four-bundle 순서·token-free child, current mismatch와
+descriptor/owner 정산은 이 product가 직접 호출하는 §11.56·§11.50·current-authority component의 harness-owned actual-filesystem gate를
+load-bearing evidence로 유지하며 product gate가 그 fault matrix를 중복 주장하지 않는다. product gate fixture와 모든 하위 fixture는
+`mkdtemp` 아래만 사용하고 실제 앱 session-host 상태·GitHub release·credential을 찾거나 수정하지 않는다. 이 slice는 resume authority product까지만 닫으며 executable resume command, stage 5/6 workflow 삽입, publication
+composition, post-publish aggregate cleanup, live workflow와 frozen signed U5 E2E는 후속 범위다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

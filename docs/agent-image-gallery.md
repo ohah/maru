@@ -453,7 +453,9 @@ typedef struct MaruAppHostGpuImage {
 } MaruAppHostGpuImage;
 ```
 
-격자 배치·팬·줌이 모두 이 구조체로 표현된다. 텍스처 업로드(`MaruAppHostGpuImageUpload`, `image_id`/`generation` 캐시)와 회수(`live_image_ids`)도 kitty graphics 경로가 이미 한다. `buildGpuImages`는 kitty placement 전용 **변환기**일 뿐이므로 갤러리는 자기 builder로 같은 구조체를 채운다.
+격자 배치·팬·줌이 모두 이 구조체로 표현된다. 텍스처 업로드(`MaruAppHostGpuImageUpload`, `image_id`/`generation` 캐시)와 회수(`live_image_ids`)도 kitty graphics 경로가 이미 한다.
+
+**회수를 빌려 쓰므로 규율도 함께 온다: 안 그리고 나가는 프레임은 예외 없이 「다시 올려야 함」으로 표시한다.** 한 프레임이라도 `live_image_ids` 에서 빠진 텍스처는 거둬지는데, 「이미 올렸다」 표시가 참으로 남아 있으면 다음에 그릴 때 **업로드 없이 id 만** 실려 빈 자리가 된다. 그 길은 셋이다 — 크게 보기가 격자를 대체할 때(격자 타일), 창 밖으로 스크롤된 타일, 그리고 **도크를 접었을 때**(격자 타일과 크게 보기 **둘 다**). 마지막 것이 실제로 빠져 있었다: 뷰를 바꿔 나가면 크게 보기가 아예 닫히지만(§2.2 의 상태는 그 pane 을 떠나며 버린다) **접기는 크게 보기를 든 채 돌아오므로**, 표시가 없으면 다시 폈을 때 그 한 장만 빈다. `buildGpuImages`는 kitty placement 전용 **변환기**일 뿐이므로 갤러리는 자기 builder로 같은 구조체를 채운다.
 
 따라서 **`chrome/draw.zig`의 `Op`에 image를 추가하지 않는다.** 터미널이 "셀 + 이미지"로 그리듯 갤러리도 "chrome이 격자·라벨, `gpu_images`가 픽셀"로 그린다. 서드파티 이미지 라이브러리를 벤더링하지 않는다.
 

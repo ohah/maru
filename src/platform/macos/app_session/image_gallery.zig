@@ -299,6 +299,18 @@ pub const State = struct {
         for (self.tiles.items) |*tile| tile.uploaded = false;
     }
 
+    /// 크게 보기의 텍스처도 **같은 규율을 받는다.** `markAllNeedUpload` 는 격자 타일만 훑으므로
+    /// (`tiles`), 크게 보기 한 장은 그 표시에서 빠져 있었다.
+    ///
+    /// 실제로 그렇게 났다(사용자 보고): 이미지를 눌러 크게 본 채 **도크를 접으면** 그 프레임에
+    /// `gallery_open_image_id` 가 `live_ids` 에 안 실려 텍스처가 evict 되는데 `uploaded` 는 참으로
+    /// 남는다. 도크를 다시 펴면 크게 보기 화면은 돌아오지만 **그림 자리가 빈다** — 업로드 없이 id 만
+    /// 실리기 때문이다. 뷰를 바꿔 나갈 때는 `onLeaveView` 가 아예 닫아서(`dropOpen`) 이 길에 안
+    /// 들어오고, **접기만** 그 길로 간다.
+    pub fn markOpenNeedUpload(self: *State) void {
+        if (self.open) |*op| op.uploaded = false;
+    }
+
     /// 크게 보기의 픽셀도 owned 다 — 소스가 갈리거나 닫을 때 반드시 여기서 푼다.
     pub fn dropOpen(self: *State, allocator: std.mem.Allocator) void {
         if (self.open) |*op| allocator.free(op.pixels);
@@ -1501,14 +1513,22 @@ fn appendOpenImage(
 ) void {
     const vp = viewportRect(self);
     const r = image_view.destRect(op.view, vp, op.width, op.height);
-    if (r.w <= 0 or r.h <= 0) return;
+    // **안 그리고 나가는 길은 예외 없이 표시한다** — 이 프레임에 id 가 안 실리면 텍스처가 거둬지는데
+    // `uploaded` 가 참으로 남으면 다음에 그릴 때 빈 자리가 된다(격자 타일과 같은 규율).
+    if (r.w <= 0 or r.h <= 0) {
+        op.uploaded = false;
+        return;
+    }
 
     // 보이는 부분만 남긴다.
     const x0 = @max(r.x, vp.x);
     const y0 = @max(r.y, vp.y);
     const x1 = @min(r.x + r.w, vp.x + vp.w);
     const y1 = @min(r.y + r.h, vp.y + vp.h);
-    if (x1 <= x0 or y1 <= y0) return; // 통째로 밖이다 — clamp 가 막지만 한 겹 더 둔다
+    if (x1 <= x0 or y1 <= y0) { // 통째로 밖이다 — clamp 가 막지만 한 겹 더 둔다
+        op.uploaded = false;
+        return;
+    }
 
     const id = gallery_open_image_id;
     const img: metal_frame.GpuImage = .{
@@ -1528,7 +1548,10 @@ fn appendOpenImage(
     };
     live_ids.append(self.allocator, id) catch {};
 
-    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + 1) catch return;
+    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + 1) catch {
+        op.uploaded = false;
+        return;
+    };
     @memcpy(merged_images[0..images.len], images.*);
     merged_images[images.len] = img;
     self.allocator.free(images.*);
@@ -1994,8 +2017,11 @@ pub fn appendGpuImages(
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     // 도크가 안 보이거나 다른 뷰면 이 프레임에 타일이 하나도 안 실린다 = 전부 evict 된다.
+    // **크게 보기 한 장도 같이 표시한다** — 접었다 펴면 격자가 아니라 그 한 장이 돌아오는데, 표시가
+    // 빠지면 정확히 그 화면만 빈다(`markOpenNeedUpload`).
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) {
         self.image_gallery.markAllNeedUpload();
+        self.image_gallery.markOpenNeedUpload();
         return;
     }
 

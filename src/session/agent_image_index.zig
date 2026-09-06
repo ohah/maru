@@ -30,12 +30,51 @@ pub const Kind = enum {
     claude_tool_file,
     /// Codex `{"type":"input_image","image_url":"data:<mime>;base64,…"}`.
     codex_input_image,
+    /// Claude `{"type":"tool_use","id":…,"name":…,"input":{…}}` — 에이전트가 도구를 부른 자리.
+    /// MCP 호출도 여기다(이름만 `mcp__서버__도구` 다).
+    claude_tool_use,
+    /// Codex `payload.type == "custom_tool_call"` 또는 `"function_call"`.
+    codex_tool_call,
 
     pub fn provider(self: Kind) Provider {
         return switch (self) {
-            .claude_image, .claude_tool_file => .claude,
-            .codex_input_image => .codex,
+            .claude_image, .claude_tool_file, .claude_tool_use => .claude,
+            .codex_input_image, .codex_tool_call => .codex,
         };
+    }
+
+    /// 그림인가. **디코드·격자·썸네일은 이것만 본다** — 활동 `Hit` 의 `data_offset` 은 base64 가 아니라
+    /// 사람이 읽는 문자열을 가리키므로, 가르지 않으면 디코더가 명령문을 PNG 로 열려고 든다.
+    pub fn isImage(self: Kind) bool {
+        return switch (self) {
+            .claude_image, .claude_tool_file, .codex_input_image => true,
+            .claude_tool_use, .codex_tool_call => false,
+        };
+    }
+};
+
+/// 활동이 어떤 종류인가 — 화면의 「읽기 / 실행」 필터가 이 값을 본다(계약 §2.1).
+///
+/// **도구 이름으로만 가른다.** `grep` 을 「읽기」로 옮기려면 명령 문자열을 해석해야 하는데, 파이프·
+/// 리다이렉트·서브셸이 섞이면 「읽기인가」에 정답이 없고 그 해석은 규칙이 두 벌이 된다(계약 §2.3).
+pub const Activity = enum {
+    /// 이미지 `Hit` 이다 — 활동 축이 없다.
+    none,
+    /// Claude `Read` · Codex `view_image`.
+    read,
+    /// Claude `Bash` · Codex `exec`/`shell`.
+    exec,
+    /// 그 밖 전부(Edit·Write·MCP·provider 가 새로 만든 도구).
+    other,
+
+    /// 도구 이름을 축으로 옮긴다. **모르는 이름은 `other`** — 없는 분류를 지어내지 않는다.
+    pub fn fromToolName(name: []const u8) Activity {
+        if (std.mem.eql(u8, name, "Read")) return .read;
+        if (std.mem.eql(u8, name, "view_image")) return .read;
+        if (std.mem.eql(u8, name, "Bash")) return .exec;
+        if (std.mem.eql(u8, name, "exec")) return .exec;
+        if (std.mem.eql(u8, name, "shell")) return .exec;
+        return .other;
     }
 };
 
@@ -68,6 +107,13 @@ pub const Hit = struct {
     data_len: u32,
     kind: Kind,
     mime: Mime,
+    /// 활동 축(계약 §2.1의 필터). 이미지는 `none` 이다.
+    activity: Activity = .none,
+    /// 도구 이름의 자리 — **줄 시작으로부터의 상대 오프셋**이다(`line_offset` 을 더하면 파일 절대).
+    /// 절대값을 담지 않는 이유는 크기다: 이름은 언제나 같은 줄 안이므로 u32 로 충분하고, `Hit` 이
+    /// 12,200개까지 가므로(계약 §4.2) 8 바이트를 아낀다. 이미지는 둘 다 0 이다.
+    name_rel: u32 = 0,
+    name_len: u16 = 0,
     /// **어느 파일**의 오프셋인가(`Chain` 안 위치). 재개 세션은 부모 rollout 까지 훑으므로(§3.3)
     /// 오프셋만으로는 어느 파일인지 알 수 없다 — 그 값으로 디코드·라벨이 파일을 연다.
     ///
@@ -221,6 +267,21 @@ const claude_image_marker = "\"type\":\"image\",\"source\":{\"type\":\"base64\""
 const claude_tool_file_marker = "\"file\":{\"base64\":\"";
 const codex_marker = "\"type\":\"input_image\"";
 const compacted_marker = "\"type\":\"compacted\"";
+const claude_tool_use_marker = "\"type\":\"tool_use\"";
+const codex_custom_tool_call_marker = "\"type\":\"custom_tool_call\"";
+const codex_function_call_marker = "\"type\":\"function_call\"";
+
+const name_key = "\"name\":\"";
+/// 대상 문자열의 자리를 정하는 키들. **순서가 계약이다**(계약 §2.2) — 앞의 것이 있으면 그것을 쓴다.
+const description_key = "\"description\":\"";
+const file_path_key = "\"file_path\":\"";
+const command_key = "\"command\":\"";
+const input_key = "\"input\":\"";
+const arguments_key = "\"arguments\":\"";
+
+/// 대상 문자열의 끝을 찾을 때 훑는 최대 바이트. 라벨 상한(160 B)의 3.2 배다 — 라벨에 들어갈 몫과
+/// 「이 자리가 어디서 시작하는가」만 알면 되고, 전문은 펼칠 때 파일에서 다시 읽는다.
+const max_target_scan_bytes: usize = 512;
 
 const data_key = "\"data\":\"";
 const image_url_key = "\"image_url\":\"";
@@ -251,6 +312,11 @@ pub fn scanLine(
     try scanClaudeToolFiles(allocator, line, line_offset, out);
     dropToolFileDuplicates(out, before, after_images);
     try scanCodexImages(allocator, line, line_offset, out);
+    // 활동은 이미지와 **같은 줄에 공존하지 않는다**(호출 레코드와 결과 레코드가 다른 줄이다). 그래도
+    // 순서를 뒤에 두는 이유는 위 세 패스가 `dropToolFileDuplicates` 로 **자기들끼리 접기** 때문이다 —
+    // 사이에 끼면 그 접기가 남의 항목을 셈에 넣는다.
+    try scanClaudeToolUses(allocator, line, line_offset, out);
+    try scanCodexToolCalls(allocator, line, line_offset, out);
 }
 
 /// `compacted` 레코드인가. **줄 앞부분만** 본다.
@@ -366,6 +432,121 @@ fn scanCodexImages(
     }
 }
 
+/// Claude 의 도구 호출 한 건을 잡는다.
+///
+/// **한 줄에 하나다**(실측 39,618 / 39,618 — 계약 §3.1). 병렬 호출도 provider 가 레코드를 나눠 쓰므로
+/// 반복 루프가 필요 없고, 그래서 키를 **줄 전체**에서 찾아도 남의 레코드 값을 집을 수 없다. 이미지
+/// 패스가 `key_search_window` 로 창을 좁히는 것과 갈리는 지점이고, 그 차이가 여기서는 필수다 —
+/// `description` 은 23 KB 짜리 `command` 뒤에 올 수 있어 512 바이트 창이면 못 본다.
+fn scanClaudeToolUses(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    line_offset: u64,
+    out: *std.ArrayList(Hit),
+) !void {
+    const m = std.mem.indexOf(u8, line, claude_tool_use_marker) orelse return;
+    const after = m + claude_tool_use_marker.len;
+    const name = findQuotedValue(line, after, name_key) orelse return;
+    const activity = Activity.fromToolName(line[name.start .. name.start + name.len]);
+    // 대상이 없으면 **이름이 대상이다** — 「무엇을 했는지」를 못 적느니 도구 이름이라도 적는다.
+    const target = pickClaudeTarget(line, after) orelse name;
+    try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity);
+}
+
+/// Codex 의 도구 호출 한 건. `custom_tool_call` 과 `function_call` 두 모양을 다 본다.
+///
+/// **결과 레코드와 헷갈리지 않는다**: 마커가 닫는 따옴표까지 포함하므로 `"custom_tool_call_output"`
+/// 에는 걸리지 않는다.
+fn scanCodexToolCalls(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    line_offset: u64,
+    out: *std.ArrayList(Hit),
+) !void {
+    const m = std.mem.indexOf(u8, line, codex_custom_tool_call_marker) orelse
+        std.mem.indexOf(u8, line, codex_function_call_marker) orelse return;
+    const after = m;
+    const name = findQuotedValue(line, after, name_key) orelse return;
+    const activity = Activity.fromToolName(line[name.start .. name.start + name.len]);
+    const target = pickCodexTarget(line, after) orelse name;
+    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity);
+}
+
+/// 화면에 적을 **대상**의 자리를 고른다. 순서가 계약이다(§2.2) — 실측이 정한 순서다:
+/// `description` 은 Bash 의 68.8% 에 있고 중앙 26 B 라 라벨에 언제나 들어가는 반면, 명령 첫 줄은
+/// **52.4% 가 여러 줄**이고 **27.4%** 가 라벨 상한을 넘는다.
+fn pickClaudeTarget(line: []const u8, from: usize) ?Span {
+    if (findEscapedValue(line, from, description_key)) |v| return v;
+    if (findEscapedValue(line, from, file_path_key)) |v| return v;
+    if (findEscapedValue(line, from, command_key)) |v| return v;
+    return null;
+}
+
+/// Codex 호출 레코드에는 **사람이 읽는 설명 필드가 없다**(키 실측: `call_id,id,input,…,name,status,type`).
+/// 그래서 언제나 명령 문자열이 대상이고, provider 사이에서 화면이 달라지는 것을 그대로 둔다(§2.2).
+fn pickCodexTarget(line: []const u8, from: usize) ?Span {
+    if (findEscapedValue(line, from, input_key)) |v| return v;
+    if (findEscapedValue(line, from, arguments_key)) |v| return v;
+    return null;
+}
+
+/// 이스케이프를 인지해 따옴표 값의 끝을 찾는다.
+///
+/// **base64 와 다른 점이 이것이다.** 이미지 payload 에는 이스케이프가 없어 다음 `"` 가 곧 끝이지만,
+/// 사람이 쓴 명령에는 `\"` 와 `\n` 이 흔하다(명령의 52.4% 가 여러 줄이다). 그대로 `indexOfScalar`
+/// 를 쓰면 명령 중간에서 잘려 **엉뚱한 자리**를 대상으로 잡는다.
+fn findEscapedValue(line: []const u8, from: usize, key: []const u8) ?Span {
+    const k = std.mem.indexOfPos(u8, line, from, key) orelse return null;
+    const start = k + key.len;
+    // **끝까지 훑지 않는다.** 이 자리는 라벨(160 B)에 들어갈 만큼만 알면 되고, 펼침은 파일에서 그
+    // 자리부터 **다시** 읽는다(계약 §2.4). 명령은 최대 23 KB 라 끝을 찾자고 전부 훑으면 스캔이
+    // 몇 배가 된다 — 실측으로 그 대가를 확인하고 상한을 뒀다.
+    const limit = @min(line.len, start + max_target_scan_bytes);
+    var i = start;
+    while (i < limit) : (i += 1) {
+        switch (line[i]) {
+            // 이스케이프된 한 글자는 값의 일부다 — 그것이 `"` 여도 끝이 아니다.
+            '\\' => i += 1,
+            '"' => return .{ .start = start, .len = i - start },
+            else => {},
+        }
+    }
+    // 상한 안에서 끝을 못 봤다 = 값이 그보다 길다. **잘린 자리를 준다** — 라벨은 어차피 160 B 이고
+    // 펼침은 파일에서 다시 읽으므로, 여기서 「없다」로 답하면 긴 명령이 통째로 목록에서 사라진다.
+    if (limit > start) {
+        var end = limit;
+        // 이스케이프 한 쌍을 반으로 자르지 않는다.
+        if (line[end - 1] == '\\') end -= 1;
+        if (end > start) return .{ .start = start, .len = end - start };
+    }
+    return null;
+}
+
+fn appendActivity(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(Hit),
+    line_offset: u64,
+    target: Span,
+    name: Span,
+    kind: Kind,
+    activity: Activity,
+) !void {
+    if (target.len == 0) return;
+    if (target.len > std.math.maxInt(u32)) return;
+    // 이름은 줄 시작 상대라 u32/u16 에 담는다. 한 줄 상한(16 MiB) 안이면 도달하지 않는 방어다.
+    if (name.start > std.math.maxInt(u32) or name.len > std.math.maxInt(u16)) return;
+    try out.append(allocator, .{
+        .line_offset = line_offset,
+        .data_offset = line_offset + target.start,
+        .data_len = @intCast(target.len),
+        .kind = kind,
+        .mime = .unknown,
+        .activity = activity,
+        .name_rel = @intCast(name.start),
+        .name_len = @intCast(name.len),
+    });
+}
+
 const Span = struct { start: usize, len: usize };
 
 /// `from`부터 `key_search_window` 안에서 `key`를 찾고, 그 뒤 따옴표 값의 범위를 돌려준다.
@@ -421,6 +602,15 @@ pub fn scanBuffer(
 /// 넘치면 `partial` 로 표시하고 더 담지 않는다 — 조용히 자르지 않는다.
 pub const max_hits_per_file: usize = 4096;
 
+/// 한 파일에서 담는 **활동** 자리의 상한. 이미지와 **따로** 센다.
+///
+/// **한 통으로 세면 갤러리가 조용히 빈다.** 활동은 세션당 최대 12,200개인데(활동 뷰 계약 §4.2) 이미지는
+/// 한 파일 최대 770개다. 같은 4096 을 나눠 쓰면 활동이 상한을 채운 파일에서 **이미지가 밀려나고**,
+/// 사용자에게는 「이미지가 없습니다」로 보인다 — 고장과 구분되지 않는 종류의 실패다.
+///
+/// 값은 실측 최대(12,200)의 1.34 배다. `Hit` 이 32 바이트 미만이므로 16,384개라도 512 KB 다.
+pub const max_activity_hits_per_file: usize = 16384;
+
 /// 청크로 흘러오는 파일을 줄 경계로 이어 붙여 훑는다.
 ///
 /// **이 타입이 있는 이유는 청크 경계다.** 64 KiB 씩 읽으면 마커도 base64 도 경계에 걸린다. 걸친 조각을
@@ -435,6 +625,10 @@ pub const StreamScanner = struct {
     consumed: u64 = 0,
     /// 상한에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
+    /// 지금까지 담은 이미지 수. **상한을 종류별로 세기 위해** 든다(`max_hits_per_file`).
+    image_count: usize = 0,
+    /// 지금까지 담은 활동 수(`max_activity_hits_per_file`).
+    activity_count: usize = 0,
     /// 이월 버퍼를 앞으로 당긴 **횟수**. 진단용이자 회귀 가드다 — 개행을 못 만난 청크에서 이 값이
     /// 오르면 긴 줄 하나가 O(N²) 로 바이트를 옮기고 있다는 뜻이다(실측 52.9 초 → 10.1 초 수정).
     carry_moves: u64 = 0,
@@ -442,6 +636,34 @@ pub const StreamScanner = struct {
     pub fn deinit(self: *StreamScanner, allocator: std.mem.Allocator) void {
         self.carry.deinit(allocator);
         self.* = .{};
+    }
+
+    /// 방금 줄에서 나온 `Hit` 들을 **종류별 상한 안에서만** 받아들인다.
+    ///
+    /// 넘친 것은 버리고 `partial` 로 밝힌다 — 「없다」와 「못 봤다」를 가르는 계약이다. 잘라내기가
+    /// 아니라 **골라 담기**인 이유는 한 줄에서 두 종류가 함께 나올 수 있기 때문이다: 한쪽이 넘쳤다고
+    /// 뒤를 통째로 자르면 아직 자리가 남은 다른 종류까지 잃는다.
+    fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) void {
+        var w = before;
+        for (out.items[before..]) |h| {
+            const is_image = h.kind.isImage();
+            const full = if (is_image)
+                self.image_count >= max_hits_per_file
+            else
+                self.activity_count >= max_activity_hits_per_file;
+            if (full) {
+                self.partial = true;
+                continue;
+            }
+            out.items[w] = h;
+            w += 1;
+            if (is_image) {
+                self.image_count += 1;
+            } else {
+                self.activity_count += 1;
+            }
+        }
+        out.shrinkRetainingCapacity(w);
     }
 
     /// 청크 하나를 먹인다. `chunk` 는 `self.consumed + self.carry.len` 위치부터의 바이트여야 한다.
@@ -465,14 +687,10 @@ pub const StreamScanner = struct {
         var used: usize = 0;
         var search: usize = old_len;
         while (std.mem.indexOfScalarPos(u8, buf, search, '\n')) |nl| {
-            if (out.items.len < max_hits_per_file) {
+            if (self.image_count < max_hits_per_file or self.activity_count < max_activity_hits_per_file) {
                 const before = out.items.len;
                 try scanLine(allocator, buf[used..nl], base + used, out);
-                if (out.items.len > max_hits_per_file) {
-                    out.shrinkRetainingCapacity(max_hits_per_file);
-                    self.partial = true;
-                }
-                _ = before;
+                self.admit(out, before);
             } else {
                 self.partial = true;
             }
@@ -1220,4 +1438,262 @@ test "실제 모양의 도구 읽기: 2중 저장을 접고도 출처가 「에�
     const label = context.label(prefix, prev);
     try std.testing.expectEqualStrings("dock-layout.png", label.text());
     try std.testing.expectEqual(context.Source.tool_file_path, label.source);
+}
+
+
+// ── 활동(도구 호출) 스캔 — 계약 `docs/agent-activity-view.md` §3.1 ─────────────────────────────
+//
+// **구조는 실측, 값은 합성**이다(계약 §5: 트랜스크립트 내용을 fixture 에 쓰지 않는다). 아래 레코드
+// 모양은 이 맥의 실제 파일에서 읽은 것이고, 그 안의 경로·명령·설명만 지어낸 것이다.
+
+fn activityAt(hits: *const std.ArrayList(Hit), i: usize, line: []const u8) []const u8 {
+    const h = hits.items[i];
+    const start: usize = @intCast(h.data_offset);
+    return line[start .. start + h.data_len];
+}
+
+fn toolNameAt(hits: *const std.ArrayList(Hit), i: usize, line: []const u8) []const u8 {
+    const h = hits.items[i];
+    return line[h.name_rel .. h.name_rel + h.name_len];
+}
+
+test "활동: Claude 도구 호출은 description 을 대상으로 잡는다" {
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01AB","name":"Bash","input":{"command":"grep -rn foo src/","description":"foo 쓰는 자리 찾기"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqual(Kind.claude_tool_use, hits.items[0].kind);
+    try testing.expectEqual(Activity.exec, hits.items[0].activity);
+    try testing.expect(!hits.items[0].kind.isImage());
+    // **명령이 아니라 설명이다** — 실측이 정한 순서다(§2.2).
+    try testing.expectEqualStrings("foo 쓰는 자리 찾기", activityAt(&hits, 0, line));
+    try testing.expectEqualStrings("Bash", toolNameAt(&hits, 0, line));
+}
+
+test "활동: Read 는 description 이 없어 file_path 가 대상이다" {
+    // 실측: `Read` 의 description 은 0 / 635 다.
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01CD","name":"Read","input":{"file_path":"/tmp/shots/dock.png"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqual(Activity.read, hits.items[0].activity);
+    try testing.expectEqualStrings("/tmp/shots/dock.png", activityAt(&hits, 0, line));
+}
+
+test "활동: 설명도 경로도 없으면 명령이 대상이다" {
+    // 실측: Bash 의 31.2% 에는 description 이 없다.
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01EF","name":"Bash","input":{"command":"zig build test"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqualStrings("zig build test", activityAt(&hits, 0, line));
+}
+
+test "활동: 셋 다 없으면 도구 이름이 대상이다 — 빈 줄을 남기지 않는다" {
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01GH","name":"ListAgents","input":{}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqual(Activity.other, hits.items[0].activity);
+    try testing.expectEqualStrings("ListAgents", activityAt(&hits, 0, line));
+}
+
+test "활동: 명령 안의 이스케이프된 따옴표에서 잘리지 않는다" {
+    // base64 와 갈리는 지점이다 — 이미지 payload 에는 이스케이프가 없어 다음 `"` 가 곧 끝이지만
+    // 사람이 쓴 명령에는 `\"` 가 흔하다. `indexOfScalar` 로 끊으면 `grep -n ` 에서 잘린다.
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01IJ","name":"Bash","input":{"command":"grep -n \"pub fn main\" src/main.zig && echo done"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqualStrings(
+        \\grep -n \"pub fn main\" src/main.zig && echo done
+    , activityAt(&hits, 0, line));
+}
+
+test "활동: 여러 줄 명령도 통째로 잡는다" {
+    // 실측: 명령의 52.4% 가 여러 줄이다. `\n` 은 JSON 이스케이프라 값 안에 있다.
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01KL","name":"Bash","input":{"command":"cd /tmp\npython3 - <<'PY'\nprint(1)\nPY"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expect(std.mem.indexOf(u8, activityAt(&hits, 0, line), "PY") != null);
+}
+
+test "활동: description 이 긴 명령 뒤에 있어도 찾는다 — 창을 두지 않는 이유" {
+    // 실측: 대상 문자열 최대 23,866 B. 512 바이트 창(`key_search_window`)이면 못 본다.
+    // 한 줄에 호출이 하나뿐이라(실측 39,618/39,618) 줄 전체를 봐도 남의 값을 집지 않는다.
+    const head =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01MN","name":"Bash","input":{"command":"
+    ;
+    const tail =
+        \\","description":"긴 명령 뒤의 설명"}}]}}
+    ;
+    var long: [4096]u8 = undefined;
+    @memset(&long, 'x');
+    const line = try std.mem.concat(testing.allocator, u8, &.{ head, &long, tail });
+    defer testing.allocator.free(line);
+    const text = try std.mem.concat(testing.allocator, u8, &.{ line, "\n" });
+    defer testing.allocator.free(text);
+
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(testing.allocator);
+    _ = try scanBuffer(testing.allocator, text, 0, &hits);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqualStrings("긴 명령 뒤의 설명", activityAt(&hits, 0, line));
+}
+
+test "활동: 축은 도구 이름으로만 가른다 — MCP 와 편집은 other 다" {
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01OP","name":"mcp__drive__search","input":{"query":"설계"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqual(Activity.other, hits.items[0].activity);
+    try testing.expectEqualStrings("mcp__drive__search", toolNameAt(&hits, 0, line));
+    // 대상 키가 없으므로 이름이 대상이다 — MCP 인자 이름을 지어내지 않는다.
+    try testing.expectEqualStrings("mcp__drive__search", activityAt(&hits, 0, line));
+}
+
+test "활동: grep 은 읽기가 아니라 실행이다 — 명령의 의미를 판정하지 않는다" {
+    // 계약 §2.3. 이 판정자는 「그렇게 되면 좋겠다」가 아니라 **그렇게 하기로 한 결정**을 지킨다.
+    const line =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01QR","name":"Bash","input":{"command":"sed -n '1,20p' README.md"}}]}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(Activity.exec, hits.items[0].activity);
+}
+
+test "활동: Codex custom_tool_call 은 input 이 대상이고 결과 레코드에는 안 걸린다" {
+    const call =
+        \\{"timestamp":"2026-09-07T00:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_AB","name":"exec","input":"sed -n '1,20p' src/main.zig","status":"completed"}}
+    ;
+    const output =
+        \\{"timestamp":"2026-09-07T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_AB","output":"[{\"type\":\"input_text\",\"text\":\"done\"}]"}}
+    ;
+    var hits = try collect(call ++ "\n" ++ output ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    // **결과 줄은 활동이 아니다** — 마커가 닫는 따옴표까지라 `custom_tool_call_output` 에 안 걸린다.
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    try testing.expectEqual(Kind.codex_tool_call, hits.items[0].kind);
+    try testing.expectEqual(Activity.exec, hits.items[0].activity);
+    try testing.expectEqualStrings("sed -n '1,20p' src/main.zig", activityAt(&hits, 0, call));
+}
+
+test "활동: 상한은 종류별이다 — 활동이 넘쳐도 이미지가 밀려나지 않는다" {
+    // **한 통으로 세면 갤러리가 조용히 빈다.** 활동은 세션당 최대 12,200개인데 이미지 상한은 4,096
+    // 이라, 상한을 공유하면 활동이 많은 세션에서 이미지가 인덱스에 못 들어간다. 사용자에게는
+    // 「이미지가 없습니다」로 보이고 그것은 고장과 구분되지 않는다.
+    const call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]}}
+    ;
+    const image =
+        \\{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}
+    ;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    // 이미지 상한을 **넘기고도 남게** 활동을 쌓는다.
+    var i: usize = 0;
+    while (i < max_hits_per_file + 64) : (i += 1) {
+        try text.appendSlice(testing.allocator, call);
+        try text.append(testing.allocator, '\n');
+    }
+    // 그 **뒤에** 이미지를 둔다 — 상한을 공유하면 이 줄이 잘린다.
+    try text.appendSlice(testing.allocator, image);
+    try text.append(testing.allocator, '\n');
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(testing.allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(testing.allocator);
+    try scanner.feed(testing.allocator, text.items, &hits);
+
+    var images: usize = 0;
+    var activities: usize = 0;
+    for (hits.items) |h| {
+        if (h.kind.isImage()) images += 1 else activities += 1;
+    }
+    // **뒤에 온 이미지가 살아 있다.**
+    try testing.expectEqual(@as(usize, 1), images);
+    try testing.expectEqual(max_hits_per_file + 64, activities);
+    try testing.expect(!scanner.partial); // 둘 다 자기 상한 안이라 자른 것이 없다
+}
+
+test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {
+    // **위 판정자만으로는 부족했다.** 뮤테이션으로 마커에서 닫는 따옴표를 빼도 그 판정자가 통과했다 —
+    // 실제로 막고 있던 것은 마커가 아니라 「결과 레코드에 `name` 이 없다」는 성질이었기 때문이다
+    // (실측 3,966 / 3,966 이 `call_id,id,…,output,type`). 즉 그 판정자는 **마커를 검증하지 않는다.**
+    //
+    // 방어가 둘이면 각각 시험해야 한다. 여기서는 마커 자신을 본다 — provider 가 나중에 결과
+    // 레코드에 `name` 을 넣으면 그때부터는 이것이 유일한 방어다.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        "\"type\":\"custom_tool_call_output\"",
+        codex_custom_tool_call_marker,
+    ) == null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        "\"type\":\"function_call_output\"",
+        codex_function_call_marker,
+    ) == null);
+    // 반대쪽도 못박는다 — 마커가 진짜 호출 레코드에는 걸려야 한다.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        "\"type\":\"custom_tool_call\",\"call_id\":\"call_AB\"",
+        codex_custom_tool_call_marker,
+    ) != null);
+}
+
+test "활동: Codex compacted 줄은 활동도 건너뛴다" {
+    // 이미지와 같은 이유다 — compacted 는 이전 대화를 통째로 재수록하므로 세면 몇 배가 된다.
+    const line =
+        \\{"type":"compacted","payload":{"type":"custom_tool_call","call_id":"call_CD","name":"exec","input":"echo hi"}}
+    ;
+    var hits = try collect(line ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), hits.items.len);
+}
+
+test "활동: 이미지 줄과 활동 줄은 서로를 오염시키지 않는다" {
+    const call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01ST","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}
+    ;
+    const result =
+        \\{"type":"user","message":{"content":[{"tool_use_id":"toolu_01ST","type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}]}}
+    ;
+    var hits = try collect(call ++ "\n" ++ result ++ "\n");
+    defer hits.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), hits.items.len);
+    try testing.expectEqual(Kind.claude_tool_use, hits.items[0].kind);
+    try testing.expectEqual(Activity.read, hits.items[0].activity);
+    try testing.expectEqual(Kind.claude_image, hits.items[1].kind);
+    // 이미지 쪽은 활동 축을 갖지 않는다 — 두 축이 섞이면 필터가 거짓말을 한다.
+    try testing.expectEqual(Activity.none, hits.items[1].activity);
+    try testing.expect(hits.items[1].kind.isImage());
 }

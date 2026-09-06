@@ -5282,9 +5282,14 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     if (row.has_runtime and holdsSession(row.runtime_id)) {
         appendPart(&read, &read_len, maru.i18n.tIn(.ko, .mob_a11y_held));
     }
+    // **이름이 비면 그 줄은 사라진다.** 제목도 `cwd` 도 없는 세션이 있을 수 있는데(둘 다 원격이
+    // 주는 값이다), 빈 이름을 내면 host 가 요소를 아예 안 만들어 **눌리는 줄이 안 읽힌다**.
+    // 화면에는 빈 줄로 보이지만 누르면 열리므로, 읽는 쪽에도 그만큼은 있어야 한다
+    // (적대적 검증 11회차 — 「이름 없는 줄」은 목록의 정상 상태다).
+    const read_label = if (title.len > 0) title else maru.i18n.tIn(.ko, .mob_a11y_unnamed);
     noteA11yClipped(.{ .x = win.x, .y = y, .w = win.w, .h = row_h }, sess_list, .{
         .role = .list_item,
-        .label = title,
+        .label = read_label,
         .value = read[0..read_len],
         // 초점 있는 세션이 **고른 상태**다 — 왼쪽 띠가 눈에 말하는 그것이다.
         .selected = row.focused,

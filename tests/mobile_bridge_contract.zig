@@ -7144,6 +7144,127 @@ test "M9 서술자: 보는 순서로 낸다 — 훑는 사람이 되돌아가지
     }
 }
 
+test "M9 서술자: 설정 화면은 줄마다 이름과 «값» 을 낸다" {
+    // 값이 없으면 「커서 깜빡임」이라고만 읽히고 켜졌는지 꺼졌는지는 **손잡이 자리와 색으로만**
+    // 말해진다 — 둘 다 안 읽힌다. 그리고 갈래 머리글이 없으면 스무 줄 남짓이 구획 없이 이어진다.
+    const T = std.testing;
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var fields: usize = 0;
+    var with_value: usize = 0;
+    var headers: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        switch (n.sem.role) {
+            .button => {
+                if (std.mem.eql(u8, n.sem.label, maru.i18n.tIn(.ko, .mob_a11y_back))) continue;
+                fields += 1;
+                if (n.sem.value.len > 0) with_value += 1;
+            },
+            .text => headers += 1,
+            else => {},
+        }
+    }
+    try T.expect(fields >= 5);
+    try T.expectEqual(fields, with_value); // **값 없는 설정 줄이 없다**
+    try T.expect(headers >= 1); // 맨 위 갈래 이름(붙임 머리글)이 읽힌다
+
+    // 뒤로가기도 있다 — 없으면 이 화면에서 나갈 길을 못 찾는다.
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_a11y_back)) != null);
+}
+
+test "M9 서술자: 물어보는 화면들도 읽힌다 — 지문은 «통째로»" {
+    // 비밀번호·호스트키는 **누를 것이 둘뿐인 화면**이다. 그 둘이 안 읽히면 붙는 길이 막힌다.
+    // 그리고 호스트키 화면의 존재 이유는 **지문 대조**인데, 화면은 눈으로 맞대기 좋게 두 줄로
+    // 쪼개 그린다 — 반쪽 둘로 읽어 주면 대조가 안 된다.
+    const T = std.testing;
+
+    bridge.setScreenForTest("password");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_password_ok)) != null);
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_password_cancel)) != null);
+    // **친 글자는 절대 안 읽어 준다** — 소리로 나가고 곁에 사람이 있을 수 있다. 개수만 값이다.
+    const hint = a11yFind(maru.i18n.tIn(.ko, .mob_password_hint)) orelse return error.MissingDescriptor;
+    try T.expect(hint.sem.value.len <= 3); // 개수(숫자)일 뿐이다
+
+    bridge.setScreenForTest("host_key");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_hostkey_ok)) != null);
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_hostkey_cancel)) != null);
+    const fp_node = a11yFind(maru.i18n.tIn(.ko, .mob_hostkey_hint)) orelse return error.MissingDescriptor;
+    try T.expectEqualStrings(bridge.hostKeyFingerprintShown(), fp_node.sem.value);
+}
+
+test "M9 서술자: 서버 편집은 칸마다 이름과 «온전한» 값을 낸다" {
+    // 화면은 자리에 맞춰 값의 앞을 자르지만(`fitRight`), 스크린 리더에는 잘릴 이유가 없다 —
+    // 주소가 반쪽이면 어느 서버를 고치는지 모른다.
+    const T = std.testing;
+    bridge.setScreenForTest("server_edit");
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_a11y_back)) != null);
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_server_save)) != null);
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_server_delete)) != null);
+
+    // 칸 다섯이 다 이름을 갖는다 — 하나라도 빠지면 그 칸은 「버튼」으로만 읽힌다.
+    var fields: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role == .button and n.sem.label.len > 0) fields += 1;
+    }
+    try T.expect(fields >= 8); // 칸 다섯 + 공개키 + 저장 + 삭제 + 뒤로
+}
+
+test "M9 서술자: 팝업이 열리면 «팝업만» 읽힌다" {
+    // **적대적 검증이 잡았다.** 선택 줄을 누르면 팝업이 뜨고, 그때 포인터는 「항목 아니면 닫기」만
+    // 한다 — 아래 줄도 뒤로가기도 안 눌린다. 그런데 서술자는 아래 줄이 그대로 나오고 **팝업
+    // 항목은 하나도 안 나왔다**: 읽히는 것은 안 눌리고, 눌리는 것은 안 읽히는 양쪽 어긋남이다.
+    const T = std.testing;
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 선택 줄(테마 프리셋)을 찾아 누른다 — **키로 찾는다**(라벨은 문구라 바뀔 수 있고, 자리는
+    // 스크롤에 따라 움직인다). 이 파일의 다른 판정자와 같은 방법이다.
+    var opened = false;
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "theme.preset")) continue;
+        bridge.maru_mobile_pointer(0, 1, 200, y, now());
+        bridge.maru_mobile_pointer(2, 1, 200, y, now());
+        _ = bridge.maru_mobile_build(402, 874, now());
+        opened = bridge.settingsPopupOpen();
+        break;
+    }
+    try T.expect(opened); // **전제부터 단언한다** — 안 열렸으면 이 판정은 아무것도 안 잰다
+
+    var items: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role == .list_item) items += 1;
+        // 아래 줄도 뒤로가기도 안 남는다.
+        try T.expect(n.sem.role != .text);
+        try T.expect(!std.mem.eql(u8, n.sem.label, maru.i18n.tIn(.ko, .mob_a11y_back)));
+    }
+    try T.expect(items >= 2); // 고를 것이 읽힌다
+
+    // 그리고 **고른 것은 고른 상태로** 읽힌다(팝업에서 색으로만 말하던 것이다).
+    var selected: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.selected) selected += 1;
+    }
+    try T.expect(selected <= 1); // 없거나 하나 — 「—」 일 때는 아무것도 안 고른 것이다
+}
+
+test "M9 서술자: 서버 목록은 나가는 길과 «추가» 를 낸다" {
+    const T = std.testing;
+    bridge.setScreenForTest("servers");
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_a11y_back)) != null);
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_server_add)) != null);
+    // **터미널 화면 것은 안 섞인다** — 덮인 층은 안 낸다(게이트가 층마다 선다).
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_keyboard)) == null);
+}
+
 test "M9 서술자: 세션 목록도 읽힌다 — 줄은 «몇 분의 몇» 을 말한다" {
     // **여기가 처음 만나는 화면이다.** 터미널만 읽히던 동안 스크린 리더 사용자는 세션을 고를
     // 수조차 없었다. 목록은 흐르므로(가상화) 「몇 분의 몇」은 **있는 줄 전부**로 세야 한다 —

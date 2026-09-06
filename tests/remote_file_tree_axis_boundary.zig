@@ -82,7 +82,10 @@ test "원격 상호작용 펜스가 서 있다 — 열기·변경이 원격 모�
     const allocator = std.testing.allocator;
     const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
     defer allocator.free(panel);
-    try std.testing.expect(std.mem.count(u8, panel, "explorerRemoteActive(self)") >= 2);
+    // 키는 «지금 모드» 가 아니라 **발행 출처**다(적대적 검증 2026-09-06 2 회차 — 원격이 내려간 뒤
+    // 재빌드 전의 낡은 원격 행이 로컬 갈래로 들어가는 창. 신원 pin 이 실질 방어이고 이 키는 심층
+    // 방어인데, 둘 다 있어야 «pin 이 없는 새 행 동작» 이 생겨도 안 샌다).
+    try std.testing.expect(std.mem.count(u8, panel, "self.file_tree_rows_remote") >= 3); // 굳힘 + 펜스 둘
     try std.testing.expect(std.mem.indexOf(u8, panel, ".fp_remote_open_unsupported") != null);
 }
 

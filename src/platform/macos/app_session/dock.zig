@@ -332,7 +332,8 @@ fn refreshDockTree(self: *AppSession) void {
 /// 루트만 남기고 접는다. 바뀐 것이 없으면 **행 재투영도 하지 않는다** — 이미 접힌 트리에서 누르면
 /// 아무 일도 일어나지 않아야 하고, 그때 선택·스크롤을 건드릴 이유가 없다.
 fn collapseDockTree(self: *AppSession) void {
-    if (file_panel_ops.explorerRemoteActive(self)) {
+    // 키는 발행 출처다(적대적 검증 2 회차 — file_panel 의 activate 펜스와 같은 이유).
+    if (self.file_tree_rows_remote) {
         if (!self.remote_explorer.tree.collapseAll()) return;
     } else if (!self.file_tree.collapseAll()) return;
     self.file_tree_rows_dirty = true;

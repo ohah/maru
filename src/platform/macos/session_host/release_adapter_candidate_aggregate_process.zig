@@ -11,6 +11,7 @@ const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const attestation = @import("release_adapter_github_attestation");
 const handoff = @import("release_adapter_candidate_aggregate_handoff");
 const reopen = @import("release_adapter_candidate_aggregate_reopen");
+const command_outcome = @import("release_adapter_candidate_aggregate_command_outcome");
 
 pub const Storage = struct {
     sources: [handoff.role_count]files.PinnedReleaseFile = @splat(.{}),
@@ -19,23 +20,9 @@ pub const Storage = struct {
     output: [attestation.max_response_bytes]u8 = undefined,
 };
 
-pub const Outcome = enum { success, audit_required, cleanup_failed };
-
-pub fn exitCode(outcome: Outcome) u8 {
-    return switch (outcome) {
-        .success => 0,
-        .audit_required => 21,
-        .cleanup_failed => 22,
-    };
-}
-
-pub fn stderrLine(outcome: Outcome) []const u8 {
-    return switch (outcome) {
-        .success => "success\n",
-        .audit_required => "audit_required\n",
-        .cleanup_failed => "cleanup_failed\n",
-    };
-}
+pub const Outcome = command_outcome.Outcome;
+pub const exitCode = command_outcome.exitCode;
+pub const stderrLine = command_outcome.stderrLine;
 
 pub fn storagePristine(storage: *const Storage) bool {
     for (&storage.sources) |*source| if (!pinnedPristine(source)) return false;

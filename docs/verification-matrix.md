@@ -1224,6 +1224,15 @@ ReleaseFast 20회 injected aggregate source부터 재인증 reducer 전체는 me
 진단값으로 남기지만 actual filesystem reopen 비용, 실제 GitHub latency나 frozen signed U5 성공의 증거가 아니다. executable cleanup command, live workflow stage 8과 frozen signed U5 E2E는
 후속 경계다.
 
+U5 stage-5/6 aggregate command process outcome은 `prepare-candidate-aggregate`와 `finalize-candidate-aggregate`가 식별된 뒤
+일반 exit 1이나 Zig error 문자열 대신 exact `success|audit_required|cleanup_failed`와 `0|21|22`만 내보내게 한다.
+`test-session-host-release-adapter-candidate-aggregate-command-outcome`은 두 command의 vocabulary, pristine·foreign/impossible owner,
+ownerless metadata residue와 argument-cap·storage-allocation 실패 분기를 Debug·ReleaseFast에서 검증하고, actual process의
+pre-filesystem missing-option 실패에서 stderr byte와 exit code를 고정한다. 기존 aggregate-process gate는 성공 process와 durable
+aggregate 보존 및 destination 충돌·finalize 검증 실패의 exact audit-required outcome을 맡는다. stage 3 뒤이므로 모든 ordinary 실패는 audit-required이고 cleanup 미확정만 cleanup-failed다.
+실제 앱 session-host 상태·GitHub release·credential은 읽거나 수정하지 않으며 reducer mapping, live workflow와 frozen U5 E2E는
+후속 경계다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

@@ -3879,6 +3879,32 @@ record를 만들어 검증하며, 실제 앱 session-host registry·manifest·so
 순서, `live|injected`, nullable 구간과 nonnegative duration을 byte 단위로 검증한다. 실제 GitHub 성공 표본과
 `.github/workflows/release.yml` stage-8 event 배선은 frozen signed U5 gate가 소유한다.
 
+### 11.70 stage 5·6 aggregate command의 닫힌 process outcome
+
+live workflow가 §11.52 reducer에 stage 5·6 event를 넣을 때 일반적인 nonzero exit나 Zig error 이름을 해석하지 않는다.
+`prepare-candidate-aggregate`와 `finalize-candidate-aggregate`는 command가 argv 첫 값으로 식별된 뒤부터 exact
+`success|audit_required|cleanup_failed` 한 줄과 `0|21|22`만 process outcome으로 낸다. pathname, credential, 원래 error,
+child stderr, aggregate inventory나 측정값은 stderr에 싣지 않는다. 두 command가 실행되는 시점에는 stage 3의 draft mutation이
+이미 시작됐으므로 parse/bootstrap/local preflight처럼 아직 aggregate mutation이 없는 실패도 `local_failure`로 낮추지 않고
+`audit_required`다. workflow는 durable pathname 존재, child 실행 횟수, GitHub 조회 또는 step outcome으로 이 mapping을 보정하지
+않는다.
+
+각 command의 product driver는 성공이면 기존 의미 그대로 process exit 0 전에 모든 process-local owner를 정산한다. 실패 시
+canonical execution이 exact cleanup retry authority를 보존한 경우에만 bounded `retryCleanup()`을 수행한다. 그 정리가 끝나면
+원래 실패를 `audit_required`로 보존하고, 정리가 실패하거나 owner 상태가 분류 불가능하면 `cleanup_failed`가 우선한다.
+prepare 실패는 complete aggregate를 성공으로 남기지 않고, finalize 실패는 기존 durable aggregate를 수정·삭제하지 않는
+§11.51 계약을 유지한다. command 식별 전 unknown/empty invocation은 이 닫힌 mapping 대상이 아니며 기존 validator 오류 경계에
+남는다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-command-outcome`은 두 command의 outcome vocabulary,
+pristine·foreign/impossible owner와 ownerless metadata residue, argument-cap·storage-allocation 실패의 닫힌 분기를 고정한다.
+실제 validator process 행은 의도적으로 필수 option을 누락해 filesystem·credential·child 접근 전에 stage 5·6 각각의 exit/stderr를
+byte 단위로 검증한다. 기존 `test-session-host-release-adapter-candidate-aggregate-process`는 성공 process와 actual filesystem
+aggregate 보존에 더해 destination 충돌과 finalize inventory·verifier·CLI·artifact 실패의 exact `audit_required` outcome을
+검증한다. 두 gate 모두 실제 앱 session-host 상태·GitHub
+release·credential을 읽거나 수정하지 않는다. 이 slice는 stage 5·6 process outcome만
+닫으며 reducer event mapping, `.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -13914,7 +13914,7 @@ pub fn build(b: *std.Build) void {
         //
         // 580 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
         // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-        const ra_mac_expected_tests: usize = 588;
+        const ra_mac_expected_tests: usize = 595;
         const ra_mac_step = b.step(
             "test-session-host-release-adapter-macos-all",
             "Run the macos session-host release adapter judges from one binary per optimize mode",
@@ -14366,6 +14366,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-workflow-aggregate-child",
         "Run bounded aggregate children and apply their workflow events",
     );
+    const session_host_release_adapter_live_workflow_state_handoff_step = b.step(
+        "test-session-host-release-adapter-live-workflow-state-handoff",
+        "Validate append-only durable release workflow state handoff",
+    );
     const session_host_release_adapter_candidate_release_product_step = b.step(
         "test-session-host-release-adapter-candidate-release-product",
         "Validate concrete top-level candidate release ownership and wiring",
@@ -14647,6 +14651,34 @@ pub fn build(b: *std.Build) void {
             run_aggregate_child_tests.setCwd(b.path("."));
             session_host_release_adapter_live_workflow_aggregate_child_step.dependOn(&run_aggregate_child_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_aggregate_child_tests.step);
+            const workflow_state_handoff_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_state_handoff.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_identity", .module = identity_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                },
+            });
+            const workflow_state_handoff_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_live_workflow_state_handoff.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    .{ .name = "release_adapter_live_workflow_state_handoff", .module = workflow_state_handoff_mod },
+                },
+            }) });
+            const run_workflow_state_handoff_tests = b.addRunArtifact(workflow_state_handoff_tests);
+            run_workflow_state_handoff_tests.addArg("--maru-expect-tests=7");
+            run_workflow_state_handoff_tests.setCwd(b.path("."));
+            session_host_release_adapter_live_workflow_state_handoff_step.dependOn(&run_workflow_state_handoff_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_state_handoff_tests.step);
             const repository_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const release_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const draft_creation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_release", .module = release_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });

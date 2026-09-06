@@ -42,7 +42,7 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 | M6 | 실기기 성능 예산 + 아틀라스 축출 | **축출 완료**, 성능 예산은 실기기 대기 |
 | ~~M7~~ | ~~CI 통합~~ — **안 한다**(아래) | 취소 |
 | M8 | `features-ios` 를 앱으로 — `simctl spawn` 에서 멈춘다 | 미착수 |
-| M9 | **접근성 어댑터** — 이미 있는 계약을 모바일이 안 따른다 | **첫 슬라이스 완료**(2026-09-06) — 브리지가 서술자를 낸다(터미널 앱 바 셋 + 키바 열둘, `maru_mobile_a11y_*`). **남은 것은 host 어댑터 둘**이고 그때까지 VoiceOver·TalkBack 에게는 여전히 빈 화면이다 |
+| M9 | **접근성 어댑터** — 이미 있는 계약을 모바일이 안 따른다 | **거의 닫혔다**(2026-09-06). 브리지가 서술자를 내고(`maru_mobile_a11y_*`) **두 host 어댑터가 다 섰다**(iOS `UIAccessibilityElement`·Android `AccessibilityNodeProvider`). 덮은 것: 터미널 앱 바·키바·**본문 줄**·세션 목록·서버 목록·설정·서버 편집·비밀번호·호스트키·원격 화면. **남은 것**: 새 출력 알림(live region)·스크롤백 훑기·선택 영역, 그리고 **낭독 실측**(실기기 — 이 환경에서는 못 잰다) |
 | M10a | **모바일 config 계약** — 스키마·파일 위치·읽고 쓰는 경로([모바일 config](../mobile-config.md)) | 완료 |
 | M10b0 | **엔진 열기** — `schema.tryParse` 를 Config 타입에 안 묶는다(데스크톱 테스트 green 으로 끝낸다 — 모바일 구조체는 다음 커밋) | 완료 |
 | M10b | **읽는 경로** — 구조체를 조립하고(빌릴 계열 / 새로 쓸 계열은 [계약 §3](../mobile-config.md)) host 가 파일을 읽어 넘겨 파싱·소비한다. `theme.preset`·`palette.N` 은 스키마 밖이라 따로 다룬다 | **완료**(두 host — 크기 상한·복귀 재읽기 포함) |
@@ -1030,10 +1030,11 @@ PoC 는 "되는가" 에 답했고 지금 계획은 **PoC 가 드러낸 것**만 
 
 [chrome 상호작용 이관](../chrome-interaction-migration.md)이 정한 계약: interactive node 가
 **semantic descriptor** 를 내고 플랫폼 어댑터가 그것을 네이티브 접근성 요소로 투영한다.
-**모바일은 그 어댑터가 없다** — GPU 로 그린 quad 뿐이라 VoiceOver·TalkBack 에게는 빈 화면이다.
+**모바일에는 그 어댑터가 없었다** — GPU 로 그린 quad 뿐이라 VoiceOver·TalkBack 에게 빈 화면이었다.
+GPU 로 UI 를 그리는 선택의 대가라 나중에 붙이기 비쌌다.
 
-GPU 로 UI 를 그리는 선택의 대가라 나중에 붙이기 비싸다. 지금 계약이 이미 있으므로 iOS 는
-`UIAccessibilityElement`, Android 는 `AccessibilityNodeInfo` 로 같은 descriptor 를 투영하면 된다.
+**2026-09-06 에 닫혔다.** 아래 슬라이스들이 브리지의 서술자와 두 host 어댑터를 세웠다 — iOS 는
+`UIAccessibilityElement`, Android 는 `AccessibilityNodeProvider` 의 가상 뷰 계층이다.
 
 #### 첫 슬라이스 — 브리지가 서술자를 낸다 (2026-09-06)
 

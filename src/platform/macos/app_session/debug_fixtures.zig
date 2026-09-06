@@ -1597,6 +1597,7 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
     // 캡처가 조용히 아무 일도 안 한 화면을 찍는다(실측으로 그랬다).
     if (std.mem.eql(u8, op, "drag_column") and term.rt.editor_hit_geom.cell_w_px == 0) return;
     if (std.mem.eql(u8, op, "opt_click") and term.rt.editor_hit_geom.cell_w_px == 0) return;
+    if (std.mem.eql(u8, op, "opt_word") and term.rt.editor_hit_geom.cell_w_px == 0) return;
     _ = if (std.mem.eql(u8, op, "indent"))
         editor_ops.indentLines(self, term, false)
     else if (std.mem.eql(u8, op, "outdent"))
@@ -1638,6 +1639,30 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
             _ = editor_ops.dragBodySelection(self, 3, x, y); // 안 끌고 뗀다 → 커서 추가
         }
         break :blk true;
+    } else if (std.mem.eql(u8, op, "opt_word")) blk: {
+        // **`⌥더블클릭` 이 나머지 커서를 남기고 primary 만 낱말로 넓히는지 화면으로 본다**(§3.2d).
+        // `opt_click` 과 같은 세 자리를 찍어 커서 셋을 만든 뒤, **마지막 자리에서 `⌥더블클릭`** 한다 —
+        // 앞 둘은 caret 으로 남고 primary 자리에만 선택 띠가 서야 한다. 판정자는 문서 offset 을 재지
+        // 화면을 안 재므로, 띠가 실제로 그 자리에만 그려지는지는 이것만 답한다.
+        const g = term.rt.editor_hit_geom;
+        const pane = pane_ops.activePane(self);
+        var last_x: f64 = 0;
+        var last_y: f64 = 0;
+        var row: u32 = 1;
+        while (row <= 3) : (row += 1) {
+            const x: f64 = @as(f64, @floatFromInt(g.body_x)) +
+                @as(f64, @floatFromInt(g.content_left_px)) +
+                @as(f64, @floatFromInt((3 + row * 2) * @as(u32, g.cell_w_px)));
+            const y: f64 = @as(f64, @floatFromInt(g.body_y)) +
+                @as(f64, @floatFromInt(row * @as(u32, g.cell_h_px)));
+            _ = editor_ops.beginBodySelection(self, pane, x, y, 8);
+            _ = editor_ops.dragBodySelection(self, 3, x, y);
+            last_x = x;
+            last_y = y;
+        }
+        // **`⌥`(bit 8)를 낀 더블클릭.** 헤드리스에서 `self.mouse` 는 pane 라우팅이 안 걸리므로
+        // `drag_column`·`opt_click` 과 같은 이유로 편집기 연산을 직접 부른다.
+        break :blk editor_ops.selectWordOrLineAt(self, pane, false, last_x, last_y, 8);
     } else if (std.mem.eql(u8, op, "drag_column")) blk: {
         // **열/블록 선택을 화면으로 본다**(§3.2a). `⌥` 를 끼고 down→drag→up 을 흘려 사각형을 끈다 —
         // 판정자는 문서 byte 를 재지 화면을 안 재므로, 사각형이 실제로 그 자리에 그려지는지는 이것만

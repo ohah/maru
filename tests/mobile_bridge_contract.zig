@@ -6983,6 +6983,67 @@ fn a11yFind(label: []const u8) ?bridge.A11yNodeView {
     return null;
 }
 
+test "덮인 터미널은 스크롤도 안 된다 — 게이트에 판정자가 없었다" {
+    // **적대적 검증 1회차의 곁가지다.** 서술자 게이트를 지우는 변이가 실수로 `maru_mobile_scroll`
+    // 의 같은 게이트를 지웠는데 **259개가 전부 초록이었다** — 그 게이트는 아무도 안 재고 있었다.
+    // 설정 화면이 덮고 있는데 손가락을 밀면 뒤에서 터미널이 스크롤되는 결함이라, 눈으로는 「왜
+    // 갑자기 다른 데를 보고 있지」로만 보인다.
+    endAnyGesture();
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    var i: usize = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6); // 스크롤백을 만든다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+
+    // 설정이 덮고 있으면 밀어도 **뒤가 안 움직인다**.
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll(300);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+
+    // 그리고 돌아오면 **밀린다** — 게이트가 늘 막아 버리면 스크롤 자체가 죽는다.
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll(300);
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    bridge.maru_mobile_scroll_to_bottom();
+}
+
+test "M9 서술자: 복사 버튼도 낸다 — 눌리는데 안 읽히면 복사할 길이 없다" {
+    // **적대적 검증 3회차가 잡은 결함이다.** 복사는 선택이 있을 때만 앱 바 오른쪽 끝에 뜨는데
+    // (키바가 두 줄 격자가 되며 옮겼다) 서술자를 안 냈다 — 손으로는 눌리고 스크린 리더에게는
+    // 없는 버튼이라, VoiceOver 사용자에게는 **복사할 길이 아예 없었다**. 1회차와 거울상이다.
+    endAnyGesture();
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("copyme rest", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 선택이 없으면 **버튼이 없고**, 없는 것은 안 읽힌다.
+    try std.testing.expect(a11yFind(maru.i18n.tIn(.ko, .mob_copy)) == null);
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, q.x, q.y, now());
+    holdPast(600);
+    bridge.maru_mobile_pointer(2, 1, q.x, q.y, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const n = a11yFind(maru.i18n.tIn(.ko, .mob_copy)) orelse return error.MissingDescriptor;
+    // 그리고 **읽는 자리가 누르는 자리다** — 위 판정자와 같은 규율이다.
+    const c = bridge.terminalCopyCenter() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(c.x >= n.rect.x and c.x <= n.rect.x + n.rect.w);
+    try std.testing.expect(c.y >= n.rect.y and c.y <= n.rect.y + n.rect.h);
+}
+
 test "M9 서술자: 터미널 앱 바의 세 자리를 이름과 역할로 낸다" {
     bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
@@ -7059,6 +7120,34 @@ test "M9 서술자: 덮여서 안 눌리는 것은 안 읽힌다" {
     bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
     try std.testing.expect(a11yFind("자판") != null);
+}
+
+test "M9 서술자: 이름은 «글자» 단위로 끊긴다 — 반쪽 UTF-8 을 안 낸다" {
+    // **적대적 검증 2회차가 잡은 결함이다.** 처음에는 `@min(label.len, cap)` 으로 잘라서 「뒤로
+    // 가기」(13바이트)를 cap 12 로 받으면 마지막 글자가 반쪽이 됐다. 그 조각을 받은 iOS
+    // `NSString` 은 **nil** 이라 이름이 통째로 사라진다 — 짧게 읽히는 것과 안 읽히는 것은 다르다.
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+
+    var idx: u32 = 0;
+    const nodes = bridge.a11yNodesForTest();
+    while (idx < nodes.len) : (idx += 1) {
+        if (std.mem.eql(u8, nodes[idx].sem.label, "뒤로 가기")) break;
+    } else return error.MissingDescriptor;
+
+    // 먼저 물어보면 **필요한 길이**를 답한다(담을 자리를 잡는 법).
+    try std.testing.expectEqual(@as(usize, 13), bridge.maru_mobile_a11y_label(idx, undefined, 0));
+
+    // 그리고 **어떤 cap 이든** 받은 것이 그대로 온전한 UTF-8 이다.
+    var buf: [16]u8 = undefined;
+    var cap: usize = 1;
+    while (cap <= buf.len) : (cap += 1) {
+        const n = bridge.maru_mobile_a11y_label(idx, &buf, cap);
+        try std.testing.expect(n <= cap);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(buf[0..n]));
+        // 자리가 넉넉하면 통째로 준다 — 「안전하게」 늘 잘라 버리면 이름이 늘 짧아진다.
+        if (cap >= 13) try std.testing.expectEqual(@as(usize, 13), n);
+    }
 }
 
 test "M9 서술자: 프레임마다 다시 만든다 — 쌓이지 않는다" {

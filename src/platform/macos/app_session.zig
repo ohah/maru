@@ -2329,6 +2329,10 @@ pub fn agentIconCodepoint(kind: AgentKind) u21 {
 /// 않으므로, "무엇을 그리는가"를 여기로 꺼내 둔다. 그러지 않으면 절대경로로 되돌리는 변경이 아무
 /// 테스트도 깨뜨리지 않는다.
 pub fn bandPathFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
+    // **원격 미러는 저쪽 경로를 그린다**(RF6e). 미러의 실제 자리는 `~/.cache/maru/remote-view/<해시>/`
+    // 인데 그것을 그리면 **화면이 거짓말을 한다** — 사용자가 연 것은 저 기계의 파일이다. 호스트는
+    // 밴드 왼쪽(`bandHostFor`)이 따로 그린다.
+    if (entry.remote_origin_label.len > 0) return entry.remote_origin_label;
     return maru.session.repo_path.displayRelative(entry.path, breadcrumbRootFor(self, entry));
 }
 
@@ -21771,12 +21775,11 @@ pub const AppSession = struct {
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
-                    if (term.file_entry) |entry| { // FP16: Term 소유 파일 entry — destroyTerm과 같은 목록(위 주석의 동기 규율)
-                        self.allocator.free(entry.path);
-                        self.freeDiffEntryState(entry);
-                        self.allocator.destroy(entry);
-                        term.file_entry = null;
-                    }
+                    // FP16: Term 소유 파일 entry. **목록을 손으로 두 벌 두지 않는다**(RF6e) — 이 자리와
+                    // `destroyTerm` 이 같은 목록을 각자 들고 있었고, 그래서 새 필드를 더할 때마다 한쪽을
+                    // 빠뜨렸다(위 주석이 「동기 유지」를 부탁하지만 사람 기억은 실제로 놓쳤다 — N1 이 그
+                    // 첫 사례이고, RF6e 의 원격 출처가 두 번째였다). 이제 함수 하나가 그 목록의 단일 출처다.
+                    term_ops.releaseTermFileEntry(self, term);
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     // 편집기 Term이 소유한 문서·줄·경로(N1) — `destroyTerm`과 같은 목록의 항목이다. 이 줄이
@@ -79890,6 +79893,36 @@ test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 
     try re.tree.applySnapshot("/srv/app", &.{.{ .name = "old.txt", .kind = .file, .identity = .{ .device = 7, .inode = 42, .kind = 1 } }});
     session.file_tree_rows_remote = true;
 
+    // ── ⓪ 만들기도 **같은 문**으로 간다(RF6d) — 부모는 로컬 planCreate 와 같은 규칙으로 고른다.
+    {
+        var mk = FileTreeEditTarget{ .row_kind = .file, .edit_kind = .create_file, .remote = true, .identity = .{ .device = 7, .inode = 42, .kind = 1 }, .parent_identity = .{ .device = 7, .inode = 1, .kind = 2 } };
+        const mk_path = "/srv/app/old.txt";
+        @memcpy(mk.path_buf[0..mk_path.len], mk_path);
+        mk.path_len = mk_path.len;
+        // ⚠️ **어느 신원을 보내는가**를 잰다. 파일 행에서 자기 신원을 보내면 저쪽 비교가 항상
+        //    stale 이 되어 만들기가 **조용히 안 된다**(화면에는 「트리가 낡았다」로만 보인다).
+        const container = file_panel_ops.remoteCreateContainer(mk).?;
+        try std.testing.expectEqualStrings("/srv/app", container.parent);
+        try std.testing.expectEqual(@as(u64, 1), container.identity.?.inode); // 파일(42)이 아니라 **부모**(1)
+        var mk_dir = mk;
+        mk_dir.row_kind = .directory;
+        const dir_container = file_panel_ops.remoteCreateContainer(mk_dir).?;
+        try std.testing.expectEqualStrings("/srv/app/old.txt", dir_container.parent); // 디렉터리 행은 그 자신
+        try std.testing.expectEqual(@as(u64, 42), dir_container.identity.?.inode);
+
+        @memset(&session.notice_message_buf, 0);
+        try std.testing.expect(!file_panel_ops.enqueueFileTreeEdit(session, mk, "a/b")); // 이름 규칙은 공용이다
+        try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_name_invalid)));
+        // 배타 생성이 막은 결말은 **덮어쓰지 않았다**는 뜻이다.
+        @memset(&session.notice_message_buf, 0);
+        file_panel_ops.finishRemoteRename(session, .{ .outcome = .collision, .kind = .create_file });
+        try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_mutation_collision)));
+        // 답이 없으면 만들기 쪽 문구다.
+        @memset(&session.notice_message_buf, 0);
+        file_panel_ops.finishRemoteRename(session, .{ .outcome = null, .kind = .create_directory });
+        try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_create_failed)));
+    }
+
     // ── ① 이름 규칙은 **로컬과 같은 순수 함수**가 소유한다 — 원격이라고 느슨해지지 않는다.
     var target = FileTreeEditTarget{ .row_kind = .file, .edit_kind = .rename, .remote = true, .identity = .{ .device = 7, .inode = 42, .kind = 1 } };
     const path = "/srv/app/old.txt";
@@ -79940,6 +79973,22 @@ test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 
     @memset(&session.notice_message_buf, 0);
     file_panel_ops.finishRemoteRename(session, .{ .outcome = null });
     try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_rename_failed)));
+
+    // ── ⑥b **밴드가 거짓말을 안 한다**(RF6e). 원격 미러의 실제 자리는 캐시 경로인데, 그것을 그리면
+    //    사용자가 연 것(저 기계의 파일)과 다른 것을 보여 준다. 라벨은 상태바 cwd 와 같은 모양이다.
+    {
+        const entry = try a.create(maru.session.dock_panel.Entry);
+        defer a.destroy(entry);
+        entry.* = .{ .id = 1, .kind = .markdown, .mode = .read, .path = try a.dupe(u8, "/Users/x/.cache/maru/remote-view/ab12/README.md") };
+        defer a.free(entry.path);
+        // 아직 안 박았으면 지금까지의 동작(그 경로 그대로) — 회귀가 아니다.
+        try std.testing.expectEqualStrings(entry.path, bandPathFor(session, entry));
+        entry.remote_origin_dest = try a.dupe(u8, "me@build-box");
+        defer a.free(entry.remote_origin_dest);
+        entry.remote_origin_label = try a.dupe(u8, "me@build-box:/srv/app/README.md");
+        defer a.free(entry.remote_origin_label);
+        try std.testing.expectEqualStrings("me@build-box:/srv/app/README.md", bandPathFor(session, entry));
+    }
 
     // ── ⑦ 원격 행이 발행 중이면 **로컬 변경 타깃은 여전히 null 이다**(§2.4 펜스는 그대로다).
     try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
@@ -80019,4 +80068,17 @@ test "원격 탐색기 삭제 수직: 확인을 거치고, 굳힌 대상을 지�
     @memset(&session.notice_message_buf, 0);
     file_panel_ops.finishRemoteRename(session, .{ .outcome = null, .kind = .delete });
     try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_delete_failed)));
+}
+
+test "원격 탐색기 미러 정리: 오래된 것만 지우고 우리 하위 트리 밖으로 안 나간다 (RF6f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const day_ns: i128 = 24 * 60 * 60 * @as(i128, std.time.ns_per_s);
+    // ── 순수 판정: 보존 기간은 **업로드의 원격 정리와 같은 값**(사용자 결정 2026-06-21)이다.
+    const now: i128 = 100 * day_ns;
+    try std.testing.expect(!file_panel_ops.mirrorEntryIsStale(now, now)); // 방금 쓴 것
+    try std.testing.expect(!file_panel_ops.mirrorEntryIsStale(now, now - 6 * day_ns));
+    try std.testing.expect(file_panel_ops.mirrorEntryIsStale(now, now - 7 * day_ns)); // 경계는 지운다
+    try std.testing.expect(file_panel_ops.mirrorEntryIsStale(now, now - 30 * day_ns));
+    // 미래 mtime(시계가 뒤로 간 원격·NFS)은 **안 지운다** — 포화 뺄셈이 0 이 된다.
+    try std.testing.expect(!file_panel_ops.mirrorEntryIsStale(now, now + 10 * day_ns));
 }

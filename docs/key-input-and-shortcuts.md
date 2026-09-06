@@ -336,6 +336,22 @@ nav 에서 *"`.contains(.command)` 은 `⌘⇧R` 까지 삼킨다(리뷰 [8])"* 
 
 **resolver 만 물으면 여섯 다 「편집기가 받는다」로 나온다**(실측). 그것이 이 결함들이 오래 산 이유다.
 
+**조건부가 아니라 무조건이다**(16회차 — *"밑의 터미널이 vim 이면 다를까"* 를 의심해 확인했다).
+편집기 Term 은 **자기 sentinel surface** 를 갖고(`term.surface = &slot.editor.surface`) 그 core 의
+`alt_active` 는 늘 거짓이라, `pageScrollDelta` 가 **항상** 0 이 아니다. 밑의 터미널 상태와 무관하다.
+
+**다만 설정 하나가 가른다**(19회차): `input.page_keys` 가 `.passthrough` 면 그 함수가 0 을 내므로
+**그 설정에서는 편집기가 PageUp 을 이미 받는다**. 기본값이 `.scroll` 이라 대부분의 사용자에게 죽어
+있는 것이고, 이 갈림은 **판정자의 대조군**으로 그대로 쓴다.
+
+**이 여섯 중 무엇도 판정자가 없다**(17·18회차). 터미널에서 `PageUp` 이 스크롤인 것도, `⌘↑` 가 프롬프트
+점프인 것도 **앱 수준에서는 아무도 안 잰다**(`jumpToPrompt` 는 `terminal/core.zig` 에서 **코어 함수만**
+재고, 라우팅은 안 잰다). 그래서 이 조각은 **양쪽을 다 세운다** — 편집기가 받는가, 그리고 **터미널이
+여전히 스크롤·점프하는가**. 한쪽만 재면 게이트가 항진명제가 된다.
+
+**판정은 Zig 에서 끝까지 몰 수 있다**(20회차). 판정자가 `fx.session.handleKeyEvent(...)` 를 직접 미는
+선례가 이미 있으므로(실측), ③ʹ 층은 **제품 함수를 그대로 태워** 잰다. ①ʹ(Swift)만 정적 판정자 몫이다.
+
 **chord 가 없는 편집기 액션은 열이다**(실측): `fold_all`·`unfold_all`·`fold_level_1..3` ·
 `copy_editor_selection` · `transform_to_uppercase`/`_lowercase` · `indent_lines`/`outdent_lines`.
 뒤의 다섯은 [입력 설정](configuration-input.md) 의 「무엇이 막고 있나」 표가 이유를 소유한다(다른 키가

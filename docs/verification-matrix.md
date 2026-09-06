@@ -1256,6 +1256,12 @@ signal·timeout·cap, wrong state/command/context와 payload·descriptor·state 
 검증한다. Actions step 간
 durable state handoff, live workflow 배선과 frozen signed U5 E2E는 후속 경계다.
 
+U5 live workflow state handoff는 pointer-free reducer state를 현재 protected repository/tag/source/workflow/run identity의
+length-delimited BLAKE3 digest에 결속한 canonical v1 document로 전달한다. 이전 leaf는 no-follow regular single-link `0600` inode와
+open 전후 bytes/identity를 검증하고 다음 state는 새 absent pathname에만 fsync+exclusive rename으로 게시한다. focused gate가 모든
+canonical/terminal state, context 전 축과 byte/state drift, actual filesystem의 crash-safe publication 및 symlink/hardlink/mode/content
+거부를 Debug·ReleaseFast로 고정한다. stage pathname inventory, live workflow owner와 release.yml 배선은 후속 경계다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

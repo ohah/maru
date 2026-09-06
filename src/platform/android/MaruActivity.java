@@ -17,6 +17,11 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityNodeProvider;
+import android.graphics.Rect;
+import java.util.List;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -73,6 +78,17 @@ public class MaruActivity extends android.app.NativeActivity {
     /** 눌러 둔 보조 키바 수정자(Ctrl·Alt). 0 이면 없다. */
     private static native int nativeArmedMods();
 
+    // ── 접근성 (M9) — 브리지의 서술자를 가상 뷰 계층으로 옮긴다 ──────────────────
+    /** 이번 프레임 서술자 수. **읽는 순서로** 나온다(순서는 브리지가 정한다). */
+    private static native int nativeA11yCount();
+    /** 자리 — **뷰 픽셀**로 (x<<48)|(y<<32)|(w<<16)|h. 네이티브가 이미 scale·inset 을 되돌렸다. */
+    private static native long nativeA11yRect(int index);
+    private static native int nativeA11yRole(int index);
+    private static native int nativeA11yState(int index);
+    private static native String nativeA11yLabel(int index);
+    /** 두 번 두드리기 — **누르는 경로 그대로** 누른다. */
+    private static native boolean nativeA11yClick(int index);
+
     /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
      *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
      *  뺄 화면이 없을 때만 기본 동작(앱 내리기)으로 넘긴다. */
@@ -89,6 +105,129 @@ public class MaruActivity extends android.app.NativeActivity {
             super(ctx);
             setFocusable(true);
             setFocusableInTouchMode(true);
+        }
+
+        /// **가상 뷰 계층**(M9). 이 뷰는 화면 전체를 덮는 투명한 판이라, 그리는 것은 GPU 가
+        /// 하고 **읽히는 것은 여기서** 만든다. TalkBack 은 이 provider 로 자식들을 묻는다.
+        ///
+        /// **노드를 질의마다 새로 만드는 것이 이 플랫폼의 방식이다**(iOS 와 반대다 — 거기서는
+        /// 들고 있어야 한다). `AccessibilityNodeInfo` 는 프레임워크가 회수하는 값이다.
+        private AccessibilityNodeProvider provider;
+        /// 접근성 커서가 지금 어느 가상 노드에 있나. `-1` 은 없다.
+        private int a11yFocus = -1;
+
+        @Override
+        public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+            if (provider == null) provider = new Provider(this);
+            return provider;
+        }
+
+        /// **`static` 이어야 한다.** 이중 중첩된 «비정적» 내부 클래스가 라이브러리 추상 클래스를
+        /// 상속하면 d8 8.2.2 가 내부 오류로 죽는다(실측 — "Cannot invoke String.length()" NPE,
+        /// 최소 재현까지 좁혔다). 바깥 참조가 필요 없기도 하다 — 뷰는 생성자로 받는다.
+        private static final class Provider extends AccessibilityNodeProvider {
+            private final InputView view;
+
+            Provider(InputView v) { this.view = v; }
+
+            @Override
+            public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
+                int n = nativeA11yCount();
+                if (virtualViewId == AccessibilityNodeProvider.HOST_VIEW_ID) {
+                    AccessibilityNodeInfo host = AccessibilityNodeInfo.obtain(view);
+                    view.onInitializeAccessibilityNodeInfo(host);
+                    // **자식을 붙이지 않으면 아무것도 못 찾는다.** 순서는 브리지가 정한
+                    // 읽는 순서 그대로다 — 여기서 다시 세우지 않는다.
+                    for (int i = 0; i < n; i++) host.addChild(view, i);
+                    return host;
+                }
+                if (virtualViewId < 0 || virtualViewId >= n) return null;
+
+                long r = nativeA11yRect(virtualViewId);
+                int x = (int) ((r >> 48) & 0xFFFF);
+                int y = (int) ((r >> 32) & 0xFFFF);
+                int w = (int) ((r >> 16) & 0xFFFF);
+                int h = (int) (r & 0xFFFF);
+                int state = nativeA11yState(virtualViewId);
+
+                AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain(view, virtualViewId);
+                node.setPackageName(view.getContext().getPackageName());
+                node.setClassName(a11yClassName(nativeA11yRole(virtualViewId)));
+                // **이름은 contentDescription 이다** — `setText` 로 넣으면 편집 가능한 글자처럼 읽힌다.
+                node.setContentDescription(nativeA11yLabel(virtualViewId));
+                node.setParent(view);
+                node.setEnabled((state & 1) != 0);
+                node.setSelected((state & 2) != 0);
+                node.setVisibleToUser(true);
+                node.setFocusable(true);
+                // 두 번 두드리기가 여기로 온다. **`setClickable` 만으로는 안 온다** — 동작도 붙인다.
+                node.setClickable(true);
+                node.addAction(AccessibilityNodeInfo.ACTION_CLICK);
+                node.addAction(view.a11yFocus == virtualViewId
+                        ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
+                        : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
+                node.setAccessibilityFocused(view.a11yFocus == virtualViewId);
+
+                Rect bounds = new Rect(x, y, x + w, y + h);
+                node.setBoundsInParent(bounds);
+                int[] origin = new int[2];
+                view.getLocationOnScreen(origin);
+                node.setBoundsInScreen(new Rect(origin[0] + x, origin[1] + y,
+                        origin[0] + x + w, origin[1] + y + h));
+                return node;
+            }
+
+            @Override
+            public boolean performAction(int virtualViewId, int action, Bundle arguments) {
+                if (virtualViewId == AccessibilityNodeProvider.HOST_VIEW_ID) {
+                    return view.performAccessibilityAction(action, arguments);
+                }
+                if (virtualViewId < 0 || virtualViewId >= nativeA11yCount()) return false;
+                switch (action) {
+                    case AccessibilityNodeInfo.ACTION_CLICK:
+                        return nativeA11yClick(virtualViewId);
+                    case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:
+                        view.a11yFocus = virtualViewId;
+                        sendA11yEvent(virtualViewId, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
+                        return true;
+                    case AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS:
+                        if (view.a11yFocus == virtualViewId) view.a11yFocus = -1;
+                        sendA11yEvent(virtualViewId,
+                                AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+
+            @Override
+            public AccessibilityNodeInfo findFocus(int focusType) {
+                if (focusType == AccessibilityNodeInfo.FOCUS_ACCESSIBILITY && view.a11yFocus >= 0) {
+                    return createAccessibilityNodeInfo(view.a11yFocus);
+                }
+                return super.findFocus(focusType);
+            }
+
+            private void sendA11yEvent(int virtualViewId, int type) {
+                AccessibilityEvent ev = AccessibilityEvent.obtain(type);
+                ev.setPackageName(view.getContext().getPackageName());
+                ev.setClassName(a11yClassName(nativeA11yRole(virtualViewId)));
+                ev.setSource(view, virtualViewId);
+                view.getParent().requestSendAccessibilityEvent(view, ev);
+            }
+        }
+
+        /// 뜻 → Android 어휘. **번역은 여기 한 곳에서만 한다** — 번호의 단일 출처는
+        /// `mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*` 다.
+        private static String a11yClassName(int role) {
+            switch (role) {
+                case 0: return "android.widget.Button";        // button
+                case 3: return "android.widget.Button";        // tab — 탭 바는 컨테이너가 말한다
+                case 5: return "android.widget.TextView";      // text
+                case 1: case 2: return "android.widget.TextView";  // 트리·목록 줄
+                case 4: return "android.widget.ScrollView";    // scroll_view
+                default: return "android.view.View";           // group·모르는 것
+            }
         }
 
         @Override
@@ -367,6 +506,23 @@ public class MaruActivity extends android.app.NativeActivity {
                         (android.view.inputmethod.InputMethodManager)
                                 a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
                 if (imm != null && a.input != null) imm.restartInput(a.input);
+            }
+        });
+    }
+
+    /** **서술자 묶음의 «생김새»가 바뀌었다**고 네이티브가 알린다(M9).
+     *
+     *  안 알리면 화면을 옮겨도 TalkBack 이 옛 버튼을 계속 들고 있다 — 짚어도 아무 일이 없다.
+     *  상태만 바뀌었을 때는 안 부른다: 그때 알리면 읽던 것을 끊고 커서를 되돌려, 키바에서
+     *  수정자를 켜자마자 다음 키까지 처음부터 다시 훑게 된다(iOS 어댑터와 같은 규율). */
+    public static void a11yChanged() {
+        final MaruActivity a = current;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (a.input != null) {
+                    a.input.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+                }
             }
         });
     }

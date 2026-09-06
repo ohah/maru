@@ -27,7 +27,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 4\n";
+pub const version_line = "maru-remote-watch 5\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -83,6 +83,22 @@ pub fn main(init: std.process.Init) !void {
         const dev_text = args.next() orelse return exitWith(exit_unsupported);
         const ino_text = args.next() orelse return exitWith(exit_unsupported);
         return runRename(io, init.gpa, parent, old_name, new_name, dev_text, ino_text);
+    }
+
+    // **삭제 모드**(RF6c — 열린 질문 ④ = ㉰, 사용자 결정 2026-09-06). 인자는
+    // `rm <부모 절대경로> <이름> <dev> <ino>` 다. 계약은 `mv` 와 **같은 축**이다 — 저쪽 한 프로세스
+    // 안에서 stat → 신원 비교 → `unlinkat`. 셸 `rm` 은 그 보장이 없다(그 사이에 다른 것이 들어오면
+    // 엉뚱한 것을 지운다).
+    //
+    // ⚠️ **되돌리기가 없다.** 원격에는 휴지통이 없고 우리가 만들지도 않는다(§4 ④ — `EXDEV` 와 정리
+    // 정책 때문). 그래서 이 모드의 안전은 「되돌릴 수 있다」가 아니라 **「엉뚱한 것을 안 지운다」**
+    // 에서 온다. 되돌릴 수 없다는 사실은 **확인 모달이 말한다**(§2.3 ⑷ — 차이를 숨기지 않는다).
+    if (std.mem.eql(u8, root, "rm")) {
+        const parent = args.next() orelse return exitWith(exit_unsupported);
+        const name = args.next() orelse return exitWith(exit_unsupported);
+        const dev_text = args.next() orelse return exitWith(exit_unsupported);
+        const ino_text = args.next() orelse return exitWith(exit_unsupported);
+        return runDelete(io, init.gpa, parent, name, dev_text, ino_text);
     }
 
     // 루트 뒤에 오는 것은 **굳히기까지 끝난 git 앞머리**다(RW7b — `ssh_upload.spawnRemoteWatch` 가
@@ -321,6 +337,62 @@ const rename_noreplace: usize = 1; // linux RENAME_NOREPLACE
 const rename_excl: c_uint = 0x0000_0004; // macOS RENAME_EXCL
 
 extern "c" fn renameatx_np(fromfd: c_int, from: [*:0]const u8, tofd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
+
+/// 부모 아래에서 `name` 을 지운다 — **신원을 다시 재고**(§2.3 ⑶), 디렉터리면 빈 것만.
+///
+/// 디렉터리를 재귀로 안 지운다: 한 프로세스 안에서 신원을 재는 보장이 **트리 전체로는 성립하지
+/// 않고**(내려가는 동안 아래가 바뀔 수 있다), 되돌리기가 없는 곳에서 재귀 삭제는 사고의 크기가
+/// 다르다. 빈 디렉터리만 지우고 나머지는 화면이 말한다.
+fn runDelete(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    parent: []const u8,
+    name: []const u8,
+    dev_text: []const u8,
+    ino_text: []const u8,
+) void {
+    if (parent.len == 0 or parent[0] != '/') return putMvResult(.invalid, "parent is not absolute");
+    if (!mvNameIsSafe(name)) return putMvResult(.invalid, "unsafe name");
+    const want_dev = std.fmt.parseInt(u64, dev_text, 10) catch return putMvResult(.invalid, "bad identity");
+    const want_ino = std.fmt.parseInt(u64, ino_text, 10) catch return putMvResult(.invalid, "bad identity");
+
+    var dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |err| {
+        return putMvResult(mvOutcomeForOpen(err), "opendir failed");
+    };
+    defer dir.close(io);
+
+    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(name_z);
+
+    const st = rawFstatAt(dir.handle, name_z.ptr, std.posix.AT.SYMLINK_NOFOLLOW) orelse
+        return putMvResult(.not_found, "target is gone");
+    if (st.dev != want_dev or st.ino != want_ino) return putMvResult(.stale, "identity changed");
+
+    // 디렉터리인가는 **방금 잰 mode** 가 말한다 — 다시 물으면 그 사이가 창이다.
+    const is_dir = (st.mode & std.posix.S.IFMT) == std.posix.S.IFDIR;
+    switch (unlinkNoFollow(dir.handle, name_z.ptr, is_dir)) {
+        .ok => putMvResult(.ok, null),
+        .exists => putMvResult(.collision, "directory is not empty"),
+        .denied => putMvResult(.denied, "permission denied"),
+        .not_found => putMvResult(.not_found, "target is gone"),
+        .unsupported => putMvResult(.unsupported, "cannot delete this kind of entry"),
+        .io => putMvResult(.io, "delete failed"),
+    }
+}
+
+/// `unlinkat` — 디렉터리면 `AT_REMOVEDIR`(**빈 것만** 지워진다). 링크는 링크 자신을 지운다.
+fn unlinkNoFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8, is_dir: bool) RenameResult {
+    const flags: u32 = if (is_dir) std.posix.AT.REMOVEDIR else 0;
+    const rc = std.c.unlinkat(dir_fd, name_z, @intCast(flags));
+    if (rc == 0) return .ok;
+    return switch (std.posix.errno(rc)) {
+        .NOTEMPTY, .EXIST => .exists,
+        .ACCES, .PERM, .ROFS => .denied,
+        .NOENT => .not_found,
+        .ISDIR, .INVAL => .unsupported,
+        else => .io,
+    };
+}
 
 fn mvOutcomeForOpen(err: anyerror) MvOutcome {
     return switch (err) {

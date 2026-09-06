@@ -150,6 +150,98 @@ test "헬퍼 mv 왕복: 신원이 맞으면 바꾸고, 어긋나면 stale 로 �
     }
 }
 
+fn runRm(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    bin: []const u8,
+    parent: []const u8,
+    name: []const u8,
+    dev: u64,
+    ino: u64,
+) !mutation.Parsed {
+    var dev_buf: [24]u8 = undefined;
+    var ino_buf: [24]u8 = undefined;
+    const dev_text = try std.fmt.bufPrint(&dev_buf, "{d}", .{dev});
+    const ino_text = try std.fmt.bufPrint(&ino_buf, "{d}", .{ino});
+    const out = try std.process.run(gpa, io, .{ .argv = &.{ bin, "rm", parent, name, dev_text, ino_text } });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    switch (out.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    const parsed = try mutation.parse(out.stdout);
+    return .{ .outcome = parsed.outcome, .message = &.{} };
+}
+
+test "헬퍼 rm 왕복: 신원이 맞아야 지우고, 빈 디렉터리만 간다 (RF6c)" {
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/maru-rfrm-rt.{d}", .{std.c.getpid()});
+    try sh(gpa, io,
+        \\set -eu
+        \\rm -rf "$1"
+        \\mkdir -p "$1/empty" "$1/full"
+        \\printf keep > "$1/keep.txt"
+        \\printf gone > "$1/gone.txt"
+        \\printf inside > "$1/full/inside.txt"
+    , dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var keep_buf: [128]u8 = undefined;
+    const keep_path = try std.fmt.bufPrint(&keep_buf, "{s}/keep.txt", .{dir});
+
+    // ── ① 신원이 어긋나면 **안 지운다**(§2.3 ⑶ — 이 모드의 안전은 여기서 온다).
+    {
+        const id = try listDev(gpa, io, bin, dir, "keep.txt");
+        const got = try runRm(gpa, io, bin, dir, "keep.txt", id.dev, id.ino +% 1);
+        try std.testing.expectEqual(mutation.Outcome.stale, got.outcome);
+        const body = try std.Io.Dir.cwd().readFileAlloc(io, keep_path, gpa, .limited(64));
+        defer gpa.free(body);
+        try std.testing.expectEqualStrings("keep", body); // 그대로 있다
+    }
+
+    // ── ② 안 빈 디렉터리는 안 지운다(재귀 삭제를 안 한다 — 되돌리기가 없는 곳에서 사고가 커진다).
+    {
+        const id = try listDev(gpa, io, bin, dir, "full");
+        const got = try runRm(gpa, io, bin, dir, "full", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.collision, got.outcome);
+        var inside_buf: [128]u8 = undefined;
+        const inside = try std.fmt.bufPrint(&inside_buf, "{s}/full/inside.txt", .{dir});
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, inside, .{}) catch null != null);
+    }
+
+    // ── ③ 빈 디렉터리는 지운다.
+    {
+        const id = try listDev(gpa, io, bin, dir, "empty");
+        const got = try runRm(gpa, io, bin, dir, "empty", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var empty_buf: [128]u8 = undefined;
+        const empty = try std.fmt.bufPrint(&empty_buf, "{s}/empty", .{dir});
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, empty, .{}) catch null == null);
+    }
+
+    // ── ④ 신원이 맞으면 실제로 지워진다 — 그리고 **옆 파일은 그대로다**.
+    {
+        const id = try listDev(gpa, io, bin, dir, "gone.txt");
+        const got = try runRm(gpa, io, bin, dir, "gone.txt", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var gone_buf: [128]u8 = undefined;
+        const gone = try std.fmt.bufPrint(&gone_buf, "{s}/gone.txt", .{dir});
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, gone, .{}) catch null == null);
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, keep_path, .{}) catch null != null);
+    }
+
+    // ── ⑤ 이름이 이름일 수 없으면 invalid — `..` 로 부모를 지우는 일이 없다.
+    {
+        const got = try runRm(gpa, io, bin, dir, "..", 1, 2);
+        try std.testing.expectEqual(mutation.Outcome.invalid, got.outcome);
+    }
+}
+
 test "헬퍼 mv: 절대경로가 아니면 wire 오류로 완결된다 — 침묵이 아니다 (RF6a)" {
     const bin = helperBin() orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;

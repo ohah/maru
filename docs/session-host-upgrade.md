@@ -3946,6 +3946,37 @@ nonzero·signal·exec failure observation, 양쪽 cap+1, timeout descendant kill
 FD delta 0을 Debug·ReleaseFast에서 검증한다. 이 substrate만으로 stage 5·6 command/stage identity, mapper 적용, workflow state handoff나
 live GitHub release가 완료됐다고 주장하지 않는다.
 
+### 11.73 stage 5·6 bounded child owner와 reducer 적용
+
+live workflow의 stage 5·6 process owner는 caller가 command tag와 argv를 따로 제출하게 하지 않는다.
+`release_adapter_live_workflow_aggregate_child.zig`가 command를 포함한 bounded argument slice를
+`release_adapter_contract.parseArgs`로 먼저 검증하고 그 union의 active tag를 유일한 command identity로 사용한다. aggregate 외 command,
+최대 argument 수 초과, executable·argument/environment payload와 descriptor backing 또는 workflow state가 caller-owned `Storage`와
+겹치는 입력, noncanonical workflow state는 fork 전에
+거부한다. 따라서 argv는 prepare인데 reducer stage만 finalize로 교환하거나 storage 초기화가 아직 읽지 않은 입력을 덮는 경로가 없다.
+
+owner는 validated argument를 null-terminated fixed storage로 복사하고, `release_adapter_context.required_names` 11개와
+`release_adapter_github_cli_authority.required_runner_names` 4개의 닫힌 합집합을 검증·canonical order로 `NAME=value` fixed storage에
+다시 만든다. unknown·duplicate·missing identity, untrusted runner와 command/context tag 불일치는 fork
+전에 실패하며 `GH_TOKEN`, ambient `HOME` 또는 runner의 다른 environment는 child에게 전달하지 않는다. executable은 absolute
+null-terminated pathname이어야 하고 argv 0은 그 executable, argv 1 이후는 검증한 contract argument가 된다. allocation, shell 조립,
+environment map 또는 caller-provided null sentinel은 사용하지 않는다.
+
+state·command preflight 뒤 owner는 §11.72 `runObserveEnvironment`를 exact once 호출한다. 정상 observation의 termination과 두 complete
+stream view는 §11.71 mapper 형식으로 변환해 `applyObservation`에 직접 넣는다. timeout, cap, spawn, wait, pipe 또는 다른 observation
+실패는 원래 오류나 partial bytes를 state에 넣지 않고 incomplete synthetic observation 하나로 같은 mapper를 통과시켜 보수적인
+`cleanup_failed` event가 되게 한다. 반환하는 non-authoritative `RunResult`는 `observed|observation_failed`만 구분하며 reducer 결과를
+보정하거나 success authority가 되지 않는다. state는 process 실행 중 다른 writer가 없다는 workflow single-owner 전제를 유지한다.
+
+focused gate `test-session-host-release-adapter-live-workflow-aggregate-child`는 Debug·ReleaseFast actual child로 두 command의 canonical
+`0|21|22` tuple, signal, stdout/trailing stderr, timeout과 양쪽 cap 실패를 reducer state까지 검증한다. 또한 command/tag 교환을 만들 수
+없는 API, aggregate 외 command, wrong-stage·terminal state, payload·descriptor·state storage alias, missing·duplicate·unknown environment,
+context/tag drift,
+ambient secret 차단, fork 전 실패의 marker 0과 반복 실행 뒤 FD delta 0을 고정한다. fixture는 test-owned executable과 temporary path만
+사용하며 실제 validator aggregate bytes, GitHub release·credential 또는 앱 session-host registry·manifest·socket·process를 읽거나
+수정하지 않는다. 이 owner는 in-process live state 적용까지 닫지만 Actions job/step 사이 durable state 전달,
+`.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

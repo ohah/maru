@@ -77,6 +77,21 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         const t = pane_ops.activePane(self).activeTerm();
         if (t.agent_image_source.set(path)) {
             dock_ops.openDockTo(self, .image_gallery);
+            // MARU_FORCE_IMAGE_GALLERY_FILTER=<images|reads|execs|all> — 종류 필터를 세운다.
+            // **활동 목록의 픽셀을 헤드리스로 찍는 유일한 길**이다: 제품에서 필터를 바꾸는 수단은
+            // 지금 `Tab`(키 입력)뿐인데 헤드리스에는 키보드가 없다. 필터는 인덱스와 무관한 상태라
+            // 스캔 전에 세워도 되고, 바로 아래 `refresh` 가 그 필터로 목록을 만든다.
+            if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_FILTER")) |raw_f| {
+                const name = std.mem.span(raw_f);
+                self.image_gallery.filter = if (std.mem.eql(u8, name, "reads"))
+                    .reads
+                else if (std.mem.eql(u8, name, "execs"))
+                    .execs
+                else if (std.mem.eql(u8, name, "all"))
+                    .all
+                else
+                    .images;
+            }
             image_gallery_ops.refresh(self, true);
             // MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 그 칸을 크게 연다. 실제 열기는 클릭이라 헤드리스로는
             // 만들 수 없고(마우스가 없다), 스캔이 워커라 지금은 인덱스가 비어 있다 — 그래서 예약만 한다.

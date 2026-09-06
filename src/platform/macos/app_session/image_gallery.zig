@@ -207,6 +207,9 @@ pub const State = struct {
     /// 안 보고 있다」가 아니다 — 여기서 함께 지우면 같은 pane 에 머무는 내내 매 tick 다시 훑는다.
     focus_surface_id: u64 = 0,
     /// 스캔이 찾은 **전부**. 필터의 원본이라 여기서는 아무것도 빼지 않는다.
+    /// 지금 무엇을 보고 있나(활동 뷰 계약 §2.1). **필터가 모양을 정한다** — 이미지는 격자,
+    /// 나머지는 줄 목록이다.
+    filter: Filter = .images,
     all_hits: std.ArrayList(index.Hit) = .empty,
     all_labels: std.ArrayList(context.Label) = .empty,
     /// 검색어(+IME 조합). 비면 필터가 꺼진 것이고 `hits` 는 `all_hits` 와 같다.
@@ -396,10 +399,9 @@ pub const State = struct {
         const q = self.queryText();
         const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
-            // **격자는 그림만 받는다.** 스캐너가 도구 호출까지 담기 시작했으므로(활동 뷰 계약 §4.1)
-            // 여기서 안 거르면 활동 `Hit` 의 `data_offset`(사람이 읽는 문자열)이 디코더로 넘어가
-            // 빈 칸이 뜬다. 활동은 이 목록이 아니라 줄 목록이 소비한다.
-            if (!hit.kind.isImage()) continue;
+            // **종류 필터가 먼저다**(계약 §2.1). 이미지 필터면 그림만 받는다 — 안 거르면 활동
+            // `Hit` 의 `data_offset`(사람이 읽는 문자열)이 디코더로 넘어가 빈 칸이 뜬다.
+            if (!self.filter.admits(hit)) continue;
             const label: context.Label = if (paired) self.all_labels.items[i] else .{};
             if (q.len > 0 and !context.matches(label.text(), q)) continue;
             self.hits.appendAssumeCapacity(hit);
@@ -423,9 +425,9 @@ pub const State = struct {
         };
         const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
-            // 물러날 자리에서도 그림만 받는다 — 여기서 새면 「필터를 못 걸었다」가 「엉뚱한 칸이
+            // 물러날 자리에서도 종류는 지킨다 — 여기서 새면 「검색을 못 걸었다」가 「엉뚱한 것이
             // 떴다」로 번진다.
-            if (!hit.kind.isImage()) continue;
+            if (!self.filter.admits(hit)) continue;
             self.hits.appendAssumeCapacity(hit);
             self.labels.appendAssumeCapacity(if (paired) self.all_labels.items[i] else .{});
         }
@@ -548,6 +550,42 @@ pub const Open = struct {
 
     pub fn contextText(self: *const Open) []const u8 {
         return self.context[0..self.context_len];
+    }
+};
+
+/// 종류 필터(활동 뷰 계약 §2.1). 순서가 곧 순환 순서다.
+///
+/// **기본이 `images` 인 이유**: 이 뷰는 이미지 갤러리로 살아 있었고, 활동은 얹히는 축이다. 기본을
+/// 바꾸면 「내 갤러리가 사라졌다」가 된다.
+pub const Filter = enum {
+    images,
+    reads,
+    execs,
+    all,
+
+    /// 이 필터가 격자인가. `false` 면 줄 목록이다.
+    pub fn isGrid(self: Filter) bool {
+        return self == .images;
+    }
+
+    pub fn next(self: Filter) Filter {
+        return switch (self) {
+            .images => .reads,
+            .reads => .execs,
+            .execs => .all,
+            .all => .images,
+        };
+    }
+
+    /// 이 `Hit` 이 이 필터에 드는가. **판정을 한 곳에 둔다** — 목록을 만드는 자리와 세는 자리가
+    /// 갈리면 「12장 중 8장」이 거짓말을 한다.
+    pub fn admits(self: Filter, hit: index.Hit) bool {
+        return switch (self) {
+            .images => hit.kind.isImage(),
+            .reads => hit.activity == .read,
+            .execs => hit.activity == .exec,
+            .all => true,
+        };
     }
 };
 
@@ -1149,6 +1187,24 @@ pub fn navigateOpen(self: *AppSession, delta: i32) bool {
     return true;
 }
 
+/// 종류 필터를 다음으로 넘긴다. 소비했으면 `true`.
+///
+/// **갤러리가 키를 쥐고 있을 때만** 가져간다 — 도크가 보인다는 이유로 삼키면 터미널의 Tab(자동
+/// 완성)이 사라진다. 검색 중에도 물러난다(그때 Tab 은 검색창 것이다).
+pub fn cycleFilter(self: *AppSession) bool {
+    if (!ownsKeys(self)) return false;
+    if (self.image_gallery.search_active) return false;
+    // 크게 보기는 닫는다 — 그 그림이 다음 필터에는 없을 수 있고, 남겨 두면 「목록을 바꿨는데 남의
+    // 그림이 떠 있다」가 된다.
+    closeOpen(self);
+    self.image_gallery.filter = self.image_gallery.filter.next();
+    // 목록이 통째로 바뀌므로 보던 자리는 뜻을 잃는다 — 맨 위로 되돌린다.
+    self.image_gallery.scroll.offset_y_px = 0;
+    rebuildFilter(self);
+    self.metal_dirty = true;
+    return true;
+}
+
 /// 크게 보기를 닫고 격자로 돌아간다. 원본 픽셀(수 MB)을 여기서 푼다.
 pub fn closeOpen(self: *AppSession) void {
     if (self.image_gallery.open == null) return;
@@ -1744,6 +1800,7 @@ pub fn collectLabels(
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!self.image_gallery.filter.isGrid()) return; // 줄 목록은 자기 라벨을 스스로 그린다
     if (self.image_gallery.open != null) return;
     if (self.image_gallery.tiles.items.len == 0) return;
 
@@ -2026,7 +2083,12 @@ pub fn appendGpuImages(
     // 도크가 안 보이거나 다른 뷰면 이 프레임에 타일이 하나도 안 실린다 = 전부 evict 된다.
     // **크게 보기 한 장도 같이 표시한다** — 접었다 펴면 격자가 아니라 그 한 장이 돌아오는데, 표시가
     // 빠지면 정확히 그 화면만 빈다(`markOpenNeedUpload`).
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) {
+    // 격자가 아닌 필터에서는 그림을 하나도 안 싣는다 — 줄 목록이 그 자리를 쓴다(계약 §2.1).
+    // **여기도 「안 그리고 나가는 길」이라 표시를 남긴다**: 필터를 되돌렸을 때 텍스처가 거둬진
+    // 채 `uploaded` 만 참으로 남으면 격자가 빈다(도크 접기에서 겪은 것과 같은 결함).
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or
+        !self.image_gallery.filter.isGrid())
+    {
         self.image_gallery.markAllNeedUpload();
         self.image_gallery.markOpenNeedUpload();
         return;
@@ -2151,6 +2213,65 @@ pub fn appendGpuImages(
     }
 }
 
+/// 줄 목록 한 줄의 높이(px). 셀 높이의 배수로 두어 글자가 줄 사이에 끼지 않는다.
+fn listRowHeightPx(self: *const AppSession) u32 {
+    return self.cell_height_px + list_row_padding_px;
+}
+
+/// 줄 사이 여백(px). 촘촘하면 훑기 어렵고 넓으면 한 화면에 몇 줄 못 담는다.
+const list_row_padding_px: u32 = 4;
+
+/// 활동을 **줄 목록**으로 그린다(활동 뷰 계약 §2.1·§2.2).
+///
+/// **격자와 같은 자리를 쓴다.** 필터가 모양을 정하므로 둘이 동시에 뜨는 일은 없다. 자리 계산을
+/// 여기서 하는 이유는 격자(`image_grid`)의 배치가 정사각 타일 전제라 줄에 맞지 않기 때문이다.
+///
+/// 지금은 **대상 한 줄**만 그린다. 결과 요약과 시각은 AV2, 펼침은 AV3 다 — 없는 것을 자리만
+/// 잡아 두면 빈 띠가 남고, 그것은 「없다」와 「아직 안 붙였다」를 섞는다.
+pub fn collectActivityList(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (self.image_gallery.filter.isGrid()) return;
+
+    const area = gridArea(self);
+    if (area.w == 0 or area.h == 0) return;
+    const row_h = listRowHeightPx(self);
+    if (row_h == 0) return;
+
+    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+    if (cols == 0) return;
+
+    const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+
+    // 스크롤은 격자와 같은 값을 쓴다 — 필터를 바꿔도 「어디를 보고 있었나」가 이어진다.
+    const first: usize = @intCast(self.image_gallery.scroll.offset_y_px / row_h);
+    const rows_fit: usize = @intCast(area.h / row_h);
+    const total = self.image_gallery.count();
+    const last = @min(first +| rows_fit, total);
+    // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
+    self.image_gallery.overflow = total -| (last -| first);
+
+    var i = first;
+    while (i < last) : (i += 1) {
+        if (i >= self.image_gallery.labels.items.len) break;
+        const text = self.image_gallery.labels.items[i].text();
+        if (text.len == 0) continue; // 없는 설명을 지어내지 않는다
+        const y = area.y + @as(u32, @intCast((i - first) * row_h));
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = area.x,
+            .origin_y = y,
+            .colors = colors,
+        } });
+    }
+}
+
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.
 ///
 /// **다섯을 가른다** — 「에이전트가 없다」·「원격이라 못 읽는다」·「세는 중」·「훑었는데 없다」·
@@ -2188,6 +2309,9 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 거르고 있는데 0 이면 「세션에 이미지가 없다」가 **아니다**. 그렇게 말하면 사용자는 검색어를
         // 지울 생각을 못 하고 갤러리가 고장났다고 읽는다.
         if (self.image_gallery.queryText().len > 0) return maru.i18n.t(.image_gallery_no_match);
+        // **「이미지가 없다」는 이미지 필터에서만 참이다.** 실행 필터에서 그 문구를 내면 거짓말이고,
+        // 사용자는 갤러리가 고장난 줄 안다(계약 §2 — 「없다」와 「안 보인다」를 가르는 규율의 연장).
+        if (!self.image_gallery.filter.isGrid()) return maru.i18n.t(.image_gallery_none_of_kind);
         return maru.i18n.t(.image_gallery_empty);
     }
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.

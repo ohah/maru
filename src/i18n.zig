@@ -363,6 +363,7 @@ const Table = struct {
     /// 그 증거다) 대화 파일만 저쪽 기계에 있다. 「없습니다」로 접으면 사용자가 훅 설치부터 다시 훑는다.
     image_gallery_remote_unsupported: [:0]const u8,
     image_gallery_empty: [:0]const u8,
+    image_gallery_none_of_kind: [:0]const u8,
     image_gallery_partial: [:0]const u8,
     /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
     image_gallery_scanning: [:0]const u8,
@@ -1396,6 +1397,7 @@ const en: Table = .{
     .image_gallery_no_agent = "No agent session in this pane",
     .image_gallery_remote_unsupported = "Remote session — the gallery cannot read it yet",
     .image_gallery_empty = "No images in this session",
+    .image_gallery_none_of_kind = "Nothing of this kind in this session",
     .image_gallery_partial = "Could not read the whole session",
     .image_gallery_scanning = "Scanning…",
     .image_gallery_count_suffix = " images",
@@ -2015,6 +2017,7 @@ const ko: Table = .{
     .image_gallery_no_agent = "이 pane에 에이전트 세션이 없습니다",
     .image_gallery_remote_unsupported = "원격 세션입니다 — 갤러리는 아직 원격을 읽지 못합니다",
     .image_gallery_empty = "이 세션에는 이미지가 없습니다",
+    .image_gallery_none_of_kind = "이 세션에는 이 종류가 없습니다",
     .image_gallery_partial = "세션을 다 읽지 못했습니다",
     .image_gallery_scanning = "세는 중…",
     .image_gallery_count_suffix = "장",

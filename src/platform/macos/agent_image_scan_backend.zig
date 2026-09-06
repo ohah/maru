@@ -190,6 +190,20 @@ fn finish(state: *State, result: ?Result) void {
 
 /// 그 hit 의 라벨을 **두 조각만** 읽어 만든다 — 이미지 줄의 base64 앞부분과 그 앞선 줄들.
 /// base64 는 수 MB 라 절대 안 읽는다. 실패는 **빈 라벨**이다(없는 설명을 지어내지 않는다).
+/// 활동(도구 호출)의 라벨. **이미지보다 단순하다** — 스캐너가 이미 대상의 자리를 정했으므로
+/// (활동 뷰 계약 §2.2) 그 구간만 읽어 다듬는다. 이미지처럼 앞선 줄들을 뒤질 일이 없다.
+///
+/// 시각은 **아직 안 붙인다**(`time_s = 0` = 「모른다」 = 안 그린다). 활동 레코드에서 timestamp 의
+/// 자리는 이미지 줄과 다르고, 그것을 확인하지 않은 채 이미지 경로를 재사용하면 **남의 시각**이
+/// 붙는다. 시각은 결과 요약과 함께 AV2 가 붙인다.
+fn readActivityLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.Allocator) context.Label {
+    if (hit.data_len == 0) return .{};
+    const buf = allocator.alloc(u8, hit.data_len) catch return .{};
+    defer allocator.free(buf);
+    if (!readAllAt(io, file, buf, hit.data_offset)) return .{};
+    return context.activityLabel(buf, hit.activity == .read);
+}
+
 fn readLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.Allocator) context.Label {
     const prefix_len: usize = @intCast(@min(
         hit.data_offset -| hit.line_offset,
@@ -368,7 +382,10 @@ fn worker(job: *Job) void {
                 result.labels.appendAssumeCapacity(.{});
                 continue;
             };
-            result.labels.appendAssumeCapacity(readLabel(io, file, hit, state.allocator));
+            result.labels.appendAssumeCapacity(if (hit.kind.isImage())
+                readLabel(io, file, hit, state.allocator)
+            else
+                readActivityLabel(io, file, hit, state.allocator));
         }
     }
 

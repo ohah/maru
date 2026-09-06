@@ -11709,6 +11709,15 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
+            // Tab 으로 종류 필터를 순환한다(이미지 → 읽기 → 실행 → 전체, 활동 뷰 계약 §2.1).
+            //
+            // **임시 수단이다.** 계약 §8 이 「필터 UI 의 자리」를 남은 결정으로 들고 있고, 그것이
+            // 정해지기 전까지 이 슬라이스의 결과를 만져 볼 길이 필요하다. 갤러리가 **키를 쥐고
+            // 있을 때만** 가져가므로(`cycleFilter` 안의 `ownsKeys`) 터미널의 Tab 이 사라지지 않는다.
+            if (event.key == .tab and image_gallery_ops.cycleFilter(self)) {
+                self.metal_dirty = true;
+                return input_ops.keyConsumedByApp(self);
+            }
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
         // until the later explicit dock-local action has been published as ready.
@@ -19027,6 +19036,8 @@ pub const AppSession = struct {
                             } else |_| {}
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
                             image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
+                            // 활동 필터에서는 격자 대신 **줄 목록**이 그 자리를 쓴다(활동 뷰 계약 §2.1).
+                            image_gallery_ops.collectActivityList(self, &collected, pane_frame_builder, tabbar_colors);
                             // 크게 보기 아래 「그때 무슨 얘기였나」. 터미널이 alt screen 이라 그 이력을
                             // 안 갖고 있고 훅·CLI 어디에도 「그 자리로 가라」가 없으므로, 트랜스크립트를
                             // 읽는 갤러리가 직접 보여준다(실측 94%에서 나오고 전부 라벨과 다른 정보다).
@@ -76466,6 +76477,196 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images2[0].image_id);
     // **업로드가 함께 실린다** — 텍스처가 evict 됐으므로 id 만 실으면 아무것도 안 그려진다.
+    try std.testing.expectEqual(@as(usize, 1), uploads2.len);
+    try std.testing.expect(pixels2.len > 0);
+}
+
+test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐다 (AV1-b)" {
+    // **이 슬라이스가 보이려는 것 하나**: 인덱스가 담은 도구 호출이 화면까지 온다.
+    // 이미지 필터에서는 그림 하나, 실행 필터에서는 그 명령 한 줄이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 구조는 실측, 값은 합성 — 도구 호출 한 건 + 사용자가 붙인 이미지 한 장.
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_A\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"grep -rn foo src/\",\"description\":\"foo 찾기\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    // ── ① 기본은 이미지다. 활동이 인덱스에 있어도 갤러리는 그대로다.
+    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), galleryImageHits(session));
+
+    // ── ② Tab 은 **갤러리가 키를 쥐고 있을 때만** 가져간다. 안 그러면 터미널의 Tab 이 사라진다.
+    try std.testing.expect(!image_gallery_ops.cycleFilter(session));
+    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → reads
+    try std.testing.expectEqual(image_gallery_ops.Filter.reads, session.image_gallery.filter);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count()); // Read 호출은 없다
+
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → execs
+    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // **대상은 명령이 아니라 설명이다**(계약 §2.2) — 실측이 정한 순서를 화면까지 지킨다.
+    try std.testing.expectEqualStrings("foo 찾기", session.image_gallery.labels.items[0].text());
+
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → all
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → images 로 돌아온다
+    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+}
+
+test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리고 되돌리면 다시 올린다 (AV1-b)" {
+    // 격자와 목록은 **같은 자리**를 쓴다. 겹쳐 그리면 무엇을 누르는지 알 수 없다.
+    // 그리고 안 그리고 나가는 프레임이므로 **업로드 표시 규율**이 여기에도 걸린다 — 안 그러면
+    // 필터를 되돌렸을 때 텍스처가 거둬진 채 `uploaded` 만 참으로 남아 격자가 빈다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"zig build test\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/b.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+
+    // ── ① 실행 필터로 간다.
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+
+    var images: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels: []u8 = &.{};
+    var live: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images);
+        allocator.free(uploads);
+        allocator.free(pixels);
+        live.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    try std.testing.expectEqual(@as(usize, 0), images.len); // 그림은 하나도 안 실린다
+    try std.testing.expectEqual(@as(usize, 0), live.items.len);
+    // 안 그리고 나갔으므로 「다시 올려야 함」으로 바뀌어 있다.
+    for (session.image_gallery.tiles.items) |tile| {
+        try std.testing.expect(!tile.uploaded);
+    }
+
+    // ── ② 이미지로 되돌리면 **업로드가 함께** 실린다.
+    //
+    // **타일을 다시 기다린다.** 필터를 바꾸면 `rebuildFilter` 가 타일을 버리므로(인덱스 도메인이
+    // 새로 만들어진다) 되돌린 직후에는 픽셀이 없다 — 워커가 다시 풀어야 한다. 그 왕복을 안
+    // 기다리면 이 판정자는 「그림이 안 실린다」를 결함이 아니라 **타이밍**으로 보게 된다.
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    // 「처음 그리는 프레임」과 같은 상태로 되돌린다(IG3-c2·IG4-b 가 같은 이유로 같은 되돌림을 한다).
+    session.image_gallery.tiles.items[0].uploaded = false;
+    var images2: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels2: []u8 = &.{};
+    var live2: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images2);
+        allocator.free(uploads2);
+        allocator.free(pixels2);
+        live2.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
     try std.testing.expect(pixels2.len > 0);
 }

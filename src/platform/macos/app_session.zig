@@ -76687,6 +76687,166 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 }
 
+test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는다 (적대적 B2)" {
+    // **좌표계가 다르다.** 목록 줄을 눌렀는데 격자 히트테스트가 돌면 엉뚱한 항목이 잡히고, 그것이
+    // 활동이면 `ensureOpen` 이 **명령 문자열을 이미지로 디코드**하려 들어 「열지 못했습니다」가 뜬다.
+    // 호버도 같다 — 격자 자리에 뜬금없는 강조가 그려진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_C\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"목록 보기\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/c.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    // 격자에서 한 칸에 얹어 둔다 — 그 상태를 들고 필터를 넘긴다.
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    const l = maru.session.image_grid.layout(area, m, session.image_gallery.count(), 0);
+    const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
+    const cx: f64 = @floatFromInt(cell.x + cell.w / 2);
+    const cy: f64 = @floatFromInt(cell.y + cell.h / 2);
+    _ = image_gallery_ops.handleHover(session, cx, cy);
+    try std.testing.expectEqual(@as(?usize, 0), session.image_gallery.hovered);
+
+    // ── ① 필터를 넘기면 얹힌 것도 없어진다. 남으면 격자 자리에 강조가 그려진다.
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(session.image_gallery.hovered == null);
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // ── ② 목록 위 호버는 「얹힌 칸」을 만들지 않는다.
+    _ = image_gallery_ops.handleHover(session, cx, cy);
+    try std.testing.expect(session.image_gallery.hovered == null);
+
+    // ── ③ 목록을 눌러도 크게 보기가 열리지 않는다(도크를 눌렀다는 사실만 받는다).
+    session.image_gallery.key_focus = false;
+    try std.testing.expect(image_gallery_ops.handleDown(session, cx, cy));
+    try std.testing.expect(session.image_gallery.key_focus); // 도크는 키를 가져간다
+    try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
+}
+
+test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
+    // 격자의 `max_scroll` 은 타일 크기·열 수에서 나오므로 줄 목록의 실제 높이와 다르다.
+    // 그대로 쓰면 **끝까지 안 내려간다** — 실측 세션(4,084개)에서 앞부분만 닿는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 한 화면에 다 안 들어갈 만큼 활동을 쌓는다.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try body.appendSlice(allocator, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_S\",");
+        try body.appendSlice(allocator, "\"name\":\"Bash\",\"input\":{\"command\":\"echo hi\",\"description\":\"줄 ");
+        var num_buf: [8]u8 = undefined;
+        const num = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable;
+        try body.appendSlice(allocator, num);
+        try body.appendSlice(allocator, "\"}}]}}\n");
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "d.jsonl", .data = body.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/d.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try std.testing.expectEqual(@as(usize, 200), session.image_gallery.count());
+
+    // 한 화면에 다 못 담는다는 것을 먼저 못박는다 — 안 그러면 이 판정자는 아무것도 검증하지 않는다.
+    const area = image_gallery_ops.gridArea(session);
+    const row_h = image_gallery_ops.listRowHeightPx(session);
+    try std.testing.expect(row_h > 0);
+    const rows_fit = area.h / row_h;
+    try std.testing.expect(rows_fit < 200);
+
+    // 아래로 충분히 굴린다. 격자 자를 쓰면 여기서 멈춘다.
+    var spins: usize = 0;
+    while (spins < 2000) : (spins += 1) {
+        _ = image_gallery_ops.wheelScroll(session, -50, false, 0, 0);
+    }
+    const content_h = 200 * row_h;
+    const want_max = content_h -| area.h;
+    // **마지막 줄까지 닿는다.** 끝에서 멈추되 그 끝이 목록의 끝이어야 한다.
+    try std.testing.expectEqual(want_max, session.image_gallery.scroll.offset_y_px);
+}
+
 test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리고 되돌리면 다시 올린다 (AV1-b)" {
     // 격자와 목록은 **같은 자리**를 쓴다. 겹쳐 그리면 무엇을 누르는지 알 수 없다.
     // 그리고 안 그리고 나가는 프레임이므로 **업로드 표시 규율**이 여기에도 걸린다 — 안 그러면

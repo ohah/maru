@@ -34,6 +34,23 @@ pub const View = struct {
     draft: draft_mod.View,
 };
 
+pub const PublicationContext = context_mod.Context;
+pub const PublicationObservation = files.ExecutableObservation;
+pub const publication_asset_count: usize = 4;
+pub const PublicationAsset = struct {
+    path: []const u8,
+    observation: PublicationObservation,
+    fd: std.c.fd_t,
+};
+pub const PublicationView = struct {
+    context: PublicationContext,
+    release_id: u64,
+    tag: []const u8,
+    source_commit: []const u8,
+    cli_sha256: [64]u8,
+    assets: [publication_asset_count]PublicationAsset,
+};
+
 pub const Execution = struct {
     owner: ?*Execution = null,
     transaction: phase.Transaction = .{},
@@ -54,6 +71,39 @@ pub const Execution = struct {
             .preparation = self.preparation.value() orelse return null,
             .aggregate = self.aggregate.value() orelse return null,
             .draft = self.draft.value() orelse return null,
+        };
+    }
+
+    /// Re-fences the retained local graph and projects the exact held descriptors needed by the
+    /// four existing publication leaves. No process-local pre-resume authority is reconstructed.
+    pub fn publicationView(
+        self: *const @This(),
+        allocator: std.mem.Allocator,
+        context: PublicationContext,
+        cli_path: [:0]const u8,
+        cli: *const cli_mod.PinnedExecutable,
+    ) !PublicationView {
+        if (!validReadyScalars(self)) return error.InvalidOwner;
+        const ready = self.value() orelse return error.InvalidOwner;
+        const aggregate_cli_path = try aggregateCliPath(self);
+        if (!std.mem.eql(u8, cli_path, aggregate_cli_path)) return error.AuthorityChanged;
+
+        var fenced = try fenceLocalGraph(self, allocator, context, cli_path, cli);
+        defer fenced.manifest.deinit();
+        try requireReadyAuthority(context, fenced.manifest.value(), self.current.value(), ready.draft);
+
+        return .{
+            .context = context,
+            .release_id = ready.draft.id,
+            .tag = ready.draft.tag,
+            .source_commit = ready.draft.source_commit,
+            .cli_sha256 = cli.sha256,
+            .assets = .{
+                .{ .path = aggregateArtifactPath(self, 0) catch return error.AuthorityChanged, .observation = fenced.aggregate.artifacts[0], .fd = try self.aggregate.artifacts[0].heldDescriptor() },
+                .{ .path = aggregateArtifactPath(self, 1) catch return error.AuthorityChanged, .observation = fenced.aggregate.artifacts[1], .fd = try self.aggregate.artifacts[1].heldDescriptor() },
+                .{ .path = aggregateEntryPath(self, 0) catch return error.AuthorityChanged, .observation = fenced.aggregate.entries[0], .fd = try self.aggregate.entries[0].heldDescriptor() },
+                .{ .path = fenced.preparation.entries[1].path, .observation = fenced.preparation.entries[1].observation, .fd = try self.preparation.entries[1].heldDescriptor() },
+            },
         };
     }
 
@@ -98,6 +148,11 @@ pub const Execution = struct {
         return self.inputs != null or self.token.len != 0 or self.response.len != 0;
     }
 };
+
+fn validReadyScalars(execution: *const Execution) bool {
+    return execution.draft.id != 0 and execution.draft.tag_len != 0 and execution.draft.tag_len <= execution.draft.tag.len and
+        execution.current.release_id != 0 and execution.current.tag_len != 0 and execution.current.tag_len <= execution.current.tag.len;
+}
 
 pub fn run(
     io: std.Io,
@@ -164,24 +219,9 @@ const ConcreteSteps = struct {
     }
 
     pub fn fenceAggregate(self: *@This(), _: bool) !void {
-        const preparation = self.execution.preparation.value() orelse return error.InvalidOwner;
-        const aggregate = try self.execution.aggregate.fence();
         const value = try self.input();
-        try cli_mod.revalidate(self.execution.allocator, value.cli_path, value.cli);
-        try requireCrossIdentityGraph(preparation, aggregate, value.cli);
-        var parsed = try self.readManifest();
-        defer parsed.deinit();
-        try requireSemanticGraphImpl(parsed.value(), .{
-            .preparation_evidence = preparation.entries[0].observation,
-            .preparation_manifest = preparation.entries[1].observation,
-            .aggregate_evidence = aggregate.entries[0],
-            .aggregate_dmg = aggregate.artifacts[0],
-            .aggregate_frozen = aggregate.artifacts[1],
-            .aggregate_manifest = aggregate.artifacts[2],
-            .dmg_name = std.fs.path.basename(value.paths.dmg),
-            .frozen_name = std.fs.path.basename(value.paths.frozen_executable),
-            .evidence_name = aggregate.evidence_name,
-        });
+        var fenced = try fenceLocalGraph(self.execution, self.execution.allocator, value.context, value.cli_path, value.cli);
+        defer fenced.manifest.deinit();
         _ = try self.execution.deadline.remaining();
     }
 
@@ -252,6 +292,89 @@ const ConcreteSteps = struct {
         return manifest_mod.parseCanonical(self.execution.allocator, held.bytes);
     }
 };
+
+const FencedLocalGraph = struct {
+    preparation: preparation_mod.View,
+    aggregate: aggregate_mod.View,
+    manifest: manifest_mod.Parsed,
+};
+
+fn fenceLocalGraph(
+    execution: *const Execution,
+    allocator: std.mem.Allocator,
+    context: PublicationContext,
+    cli_path: [:0]const u8,
+    cli: *const cli_mod.PinnedExecutable,
+) !FencedLocalGraph {
+    const preparation = try execution.preparation.fence(allocator);
+    const aggregate = try execution.aggregate.fence();
+    try cli_mod.revalidate(allocator, cli_path, cli);
+    try requireCrossIdentityGraph(preparation, aggregate, cli);
+    var parsed = try readManifestFor(execution, allocator);
+    errdefer parsed.deinit();
+    try context_mod.bindManifest(context, parsed.value().*);
+    try requireSemanticGraphImpl(parsed.value(), .{
+        .preparation_evidence = preparation.entries[0].observation,
+        .preparation_manifest = preparation.entries[1].observation,
+        .aggregate_evidence = aggregate.entries[0],
+        .aggregate_dmg = aggregate.artifacts[0],
+        .aggregate_frozen = aggregate.artifacts[1],
+        .aggregate_manifest = aggregate.artifacts[2],
+        .dmg_name = std.fs.path.basename(try aggregateArtifactPath(execution, 0)),
+        .frozen_name = std.fs.path.basename(try aggregateArtifactPath(execution, 1)),
+        .evidence_name = aggregate.evidence_name,
+    });
+    return .{ .preparation = preparation, .aggregate = aggregate, .manifest = parsed };
+}
+
+fn requireReadyAuthority(
+    context: PublicationContext,
+    manifest: *const manifest_mod.Manifest,
+    current: ?current_mod.View,
+    draft: draft_mod.View,
+) !void {
+    const authenticated = current orelse return error.InvalidOwner;
+    if (!context.protected_tag or manifest.role != .a or manifest.predecessor != null or
+        authenticated.repository_id != context.repository.id or
+        authenticated.run_id != context.build.run_id or
+        authenticated.run_attempt != context.build.run_attempt or
+        !std.mem.eql(u8, authenticated.source_commit, context.source_commit) or
+        authenticated.job_id == 0 or authenticated.deployment_id == 0 or authenticated.environment_id == 0 or
+        !authenticated.protected_environment or
+        authenticated.release_id != manifest.release.id or
+        !std.mem.eql(u8, authenticated.tag, manifest.release.tag) or
+        draft.id != manifest.release.id or
+        !std.mem.eql(u8, draft.tag, context.tag) or
+        !std.mem.eql(u8, draft.source_commit, context.source_commit)) return error.AuthorityChanged;
+}
+
+fn readManifestFor(execution: *const Execution, allocator: std.mem.Allocator) !manifest_mod.Parsed {
+    _ = execution.preparation.value() orelse return error.InvalidOwner;
+    const path = try manifestPath(execution);
+    var held = try execution.preparation.entries[1].readHeldAlloc(allocator, path, manifest_mod.max_manifest_bytes);
+    defer held.deinit(allocator);
+    return manifest_mod.parseCanonical(allocator, held.bytes);
+}
+
+fn aggregateCliPath(execution: *const Execution) ![:0]const u8 {
+    const len = execution.aggregate.cli_path_len;
+    if (len == 0 or len >= execution.aggregate.cli_path.len) return error.InvalidPath;
+    return execution.aggregate.cli_path[0..len :0];
+}
+
+fn aggregateEntryPath(execution: *const Execution, index: usize) ![:0]const u8 {
+    if (index >= execution.aggregate.paths.len) return error.InvalidPath;
+    const len = execution.aggregate.path_lens[index];
+    if (len == 0 or len >= execution.aggregate.paths[index].len) return error.InvalidPath;
+    return execution.aggregate.paths[index][0..len :0];
+}
+
+fn aggregateArtifactPath(execution: *const Execution, index: usize) ![:0]const u8 {
+    if (index >= execution.aggregate.artifact_paths.len) return error.InvalidPath;
+    const len = execution.aggregate.artifact_path_lens[index];
+    if (len == 0 or len >= execution.aggregate.artifact_paths[index].len) return error.InvalidPath;
+    return execution.aggregate.artifact_paths[index][0..len :0];
+}
 
 fn requireCrossIdentityGraph(preparation: preparation_mod.View, aggregate: aggregate_mod.View, cli: *const cli_mod.PinnedExecutable) !void {
     const identities: [11]files.Identity = .{
@@ -390,6 +513,10 @@ pub const testing_api = if (builtin.is_test) struct {
 
     pub fn requireSemanticGraph(manifest: *const manifest_mod.Manifest, graph: SemanticGraph) !void {
         return requireSemanticGraphImpl(manifest, graph);
+    }
+
+    pub fn readyScalarsValid(execution: *const Execution) bool {
+        return validReadyScalars(execution);
     }
 
     pub fn driveWith(steps: anytype, transaction: *phase.Transaction) !void {

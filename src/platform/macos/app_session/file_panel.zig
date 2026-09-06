@@ -1175,9 +1175,14 @@ pub fn enqueueRemoteFileTreeCreate(self: *AppSession, target: FileTreeEditTarget
         self.showNoticeKey(.fp_identity_not_ready);
         return false;
     };
+    const endpoint = pinRemoteEndpoint(self) orelse {
+        self.showNoticeKey(.fp_remote_create_failed);
+        return false;
+    };
     beginRemoteRename(
         self,
         if (target.edit_kind == .create_directory) .create_directory else .create_file,
+        endpoint,
         parent,
         name,
         &.{},
@@ -1191,6 +1196,37 @@ pub fn enqueueRemoteFileTreeCreate(self: *AppSession, target: FileTreeEditTarget
 /// **로컬 변경 백엔드를 안 탄다**(§2.4 — 그쪽은 휴지통 staging·롤백·에디터 잠금이 로컬 파일시스템
 /// 의미에 묶여 있어, 원격 경로가 들어가면 같은 철자의 로컬 파일이 대상이 된다).
 pub const RemoteMutationKind = enum { rename, delete, create_file, create_directory };
+
+/// 변경 한 건이 쓸 **목적지 한 쌍**. `diff_remote_dest` 와 같은 규율로 **요청할 때 박는다**
+/// (적대적 검증 5 회차 — 예전에는 보낼 때 세션에서 읽었다). 삭제는 그 사이에 **확인 모달**이
+/// 끼어 창이 가장 넓다: 사용자가 생각하는 동안 pane 이 다른 호스트로 바뀌면 그쪽으로 보낸다.
+/// 신원 재확인이 뒷문으로 막아 주지만, 뒷문에 기대는 것은 이 설계가 하지 않기로 한 것이다.
+pub const RemoteEndpoint = struct {
+    dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined,
+    dest_len: usize = 0,
+    ctl_buf: [std.fs.max_path_bytes]u8 = undefined,
+    ctl_len: usize = 0,
+
+    pub fn dest(self: *const RemoteEndpoint) []const u8 {
+        return self.dest_buf[0..self.dest_len];
+    }
+    pub fn ctl(self: *const RemoteEndpoint) []const u8 {
+        return self.ctl_buf[0..self.ctl_len];
+    }
+};
+
+/// 지금 원격 탐색기의 목적지 쌍을 굳힌다. 활성이 아니거나 값이 없으면 `null` — 그때는 보내지 않는다.
+pub fn pinRemoteEndpoint(self: *const AppSession) ?RemoteEndpoint {
+    const re = &self.remote_explorer;
+    if (!re.active or re.dest.items.len == 0 or re.ctl.items.len == 0) return null;
+    var out: RemoteEndpoint = .{};
+    if (re.dest.items.len > out.dest_buf.len or re.ctl.items.len > out.ctl_buf.len) return null;
+    @memcpy(out.dest_buf[0..re.dest.items.len], re.dest.items);
+    out.dest_len = re.dest.items.len;
+    @memcpy(out.ctl_buf[0..re.ctl.items.len], re.ctl.items);
+    out.ctl_len = re.ctl.items.len;
+    return out;
+}
 
 pub const RemoteRenameJob = struct {
     session: *AppSession,
@@ -1239,16 +1275,19 @@ pub fn enqueueRemoteFileTreeRename(self: *AppSession, target: FileTreeEditTarget
         self.showNoticeKey(.fp_identity_not_ready);
         return false;
     };
-    beginRemoteRename(self, .rename, parent, old_name, name, identity.device, identity.inode);
+    const endpoint = pinRemoteEndpoint(self) orelse {
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return false;
+    };
+    beginRemoteRename(self, .rename, endpoint, parent, old_name, name, identity.device, identity.inode);
     return true;
 }
 
 /// 원격 트리 행의 이름을 바꾼다(RF6b). 이름 검증은 **로컬과 같은 순수 함수**를 쓴다
 /// (`file_tree_mutation.validateName`) — 규칙이 두 벌이면 한쪽만 고쳐진다.
-pub fn beginRemoteRename(self: *AppSession, kind: RemoteMutationKind, parent: []const u8, old_name: []const u8, new_name: []const u8, dev: u64, ino: u64) void {
+pub fn beginRemoteRename(self: *AppSession, kind: RemoteMutationKind, endpoint: RemoteEndpoint, parent: []const u8, old_name: []const u8, new_name: []const u8, dev: u64, ino: u64) void {
     if (comptime builtin.os.tag != .macos) return;
-    const re = &self.remote_explorer;
-    if (!re.active or re.ctl.items.len == 0 or re.dest.items.len == 0) {
+    if (endpoint.dest_len == 0 or endpoint.ctl_len == 0) {
         self.showNoticeKey(remoteMutationFailedKey(kind));
         return;
     }
@@ -1282,8 +1321,8 @@ pub fn beginRemoteRename(self: *AppSession, kind: RemoteMutationKind, parent: []
     };
     job.old_name = self.allocator.dupe(u8, old_name) catch return;
     job.new_name = self.allocator.dupe(u8, new_name) catch return;
-    job.dest = self.allocator.dupe(u8, re.dest.items) catch return;
-    job.ctl = self.allocator.dupe(u8, re.ctl.items) catch return;
+    job.dest = self.allocator.dupe(u8, endpoint.dest()) catch return;
+    job.ctl = self.allocator.dupe(u8, endpoint.ctl()) catch return;
 
     self.remote_rename_inflight = true;
     const thread = std.Thread.spawn(.{}, remoteRenameWorker, .{job}) catch {
@@ -1522,18 +1561,21 @@ pub fn finishRemoteFileOpen(self: *AppSession, outcome: RemoteFileOutcome) void 
     openFileTreePath(self, mirror, outcome.supported);
     // **출처를 열 때 박는다**(RF6e — `diff_remote_dest` 와 같은 규율). 나중에 세션 상태를 읽으면 그
     // 사이 활성 pane 이 바뀌어 다른 호스트의 것으로 해석된다.
-    stampRemoteOrigin(self, outcome.path);
+    stampRemoteOrigin(self, mirror, outcome.path);
     // read_only 는 여기서 다시 세우지 않는다 — 근거가 경로 접두(`remoteViewPathIsReadOnly`)라 문서
     // 열기 지점 한 곳이 소유한다(두 벌이면 한쪽만 고쳐진다).
 }
 
 /// 방금 연 문서에 **원격 출처**를 박는다(RF6e). 실패하면 조용히 지나간다 — 그때는 밴드가 미러 경로를
 /// 그리는 지금까지의 동작으로 남고, 그것이 틀린 것보다 낫다(문서를 못 여는 것이 아니다).
-fn stampRemoteOrigin(self: *AppSession, remote_path: []const u8) void {
+fn stampRemoteOrigin(self: *AppSession, mirror_path: []const u8, remote_path: []const u8) void {
     const term = pane_ops.activePane(self).activeTerm();
     const entry = term.file_entry orelse return;
-    // 미러가 아닌 문서에 박지 않는다 — 방금 연 그것이 맞는지 경로 접두로 확인한다.
-    if (!remoteViewPathIsReadOnly(entry.path)) return;
+    // ⚠️ **방금 연 그것에만 박는다**(적대적 검증 2 회차). 「미러인가」로만 물으면, 편집기가 안 열리는
+    // 갈래(비지원 확장자 → 외부 앱)에서 **직전에 연 다른 원격 문서**가 그 가드를 통과한다 — 그러면
+    // 그 문서의 밴드가 방금 누른 파일의 경로를 말한다(RF6e 가 없애려던 바로 그 거짓말이, 더 그럴듯한
+    // 모습으로 되돌아온다). 경로가 같은지 **정확히** 본다.
+    if (!std.mem.eql(u8, entry.path, mirror_path)) return;
     if (entry.remote_origin_dest.len > 0) self.allocator.free(entry.remote_origin_dest);
     if (entry.remote_origin_label.len > 0) self.allocator.free(entry.remote_origin_label);
     entry.remote_origin_dest = self.allocator.dupe(u8, self.remote_explorer.dest.items) catch &.{};
@@ -1609,6 +1651,13 @@ fn writeRemoteMirror(self: *AppSession, remote_path: []const u8, bytes: []const 
 /// 이다 — 같은 성격의 캐시에 다른 수를 쓰면 사용자가 두 규칙을 외워야 한다.
 const remote_view_keep_ns: i128 = 7 * 24 * 60 * 60 * @as(i128, std.time.ns_per_s);
 
+/// 정리를 **다시 도는 최소 간격**(적대적 검증 3 회차 — tick 비용을 유계로).
+const mirror_prune_interval_ns: i128 = 60 * 60 * @as(i128, std.time.ns_per_s);
+
+/// 한 번에 살펴보는 해시 디렉터리 상한. 넘으면 다음 차례에 이어 본다 — 캐시가 아주 크게 자란
+/// 뒤에도 한 tick 을 통째로 먹지 않는다.
+const max_mirror_prune_buckets: usize = 64;
+
 /// 이 항목을 지울 때가 됐나 — **순수 판정**(판정자가 실물 파일 없이 잰다).
 pub fn mirrorEntryIsStale(now_ns: i128, mtime_ns: i128) bool {
     return now_ns -| mtime_ns >= remote_view_keep_ns;
@@ -1626,6 +1675,13 @@ pub fn mirrorEntryIsStale(now_ns: i128, mtime_ns: i128) bool {
 /// 여는」 상태가 된다(그것이 훨씬 나쁘다).
 fn pruneRemoteMirror(self: *AppSession) void {
     if (comptime builtin.os.tag != .macos) return;
+    // ⚠️ **매 열기마다 안 돈다**(적대적 검증 3 회차). 해시 디렉터리는 7 일간 (dest, parent) 쌍마다
+    // 쌓이므로 걷는 비용이 **유계가 아니다** — 그런데 여기는 UI tick 이다(업로드는 이미 ssh 왕복을
+    // 내는 자리라 거기 붙일 수 있었지만 이쪽은 다르다). 한 시간에 한 번이면 캐시는 충분히 줄고
+    // tick 은 안 문다.
+    const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+    if (self.last_mirror_prune_ns != 0 and now_ns -| self.last_mirror_prune_ns < mirror_prune_interval_ns) return;
+    self.last_mirror_prune_ns = now_ns;
     const home = trimmedHome() orelse return;
     const root_path = std.fmt.allocPrint(self.allocator, "{s}/" ++ remote_view_subdir, .{home}) catch return;
     defer self.allocator.free(root_path);
@@ -1633,10 +1689,35 @@ fn pruneRemoteMirror(self: *AppSession) void {
     defer root.close(self.io);
 
     const now = std.Io.Clock.real.now(self.io);
-    var it = root.iterate();
-    while (it.next(self.io) catch null) |bucket| {
-        if (bucket.kind != .directory) continue;
-        var dir = root.openDir(self.io, bucket.name, .{ .iterate = true }) catch continue;
+
+    // ⚠️ **순회하면서 지우지 않는다**(적대적 검증 1 회차). `readdir` 는 순회 중 삭제 뒤의 동작이
+    // 불명확해 **항목을 건너뛸 수 있다** — 그러면 오래된 파일이 남고 캐시가 계속 자란다(조용한
+    // 부분 실패라 아무도 모른다). 이름을 **먼저 모으고** 그 뒤에 지운다.
+    var buckets: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (buckets.items) |b| self.allocator.free(b);
+        buckets.deinit(self.allocator);
+    }
+    {
+        var it = root.iterate();
+        while (it.next(self.io) catch null) |bucket| {
+            if (bucket.kind != .directory) continue;
+            if (buckets.items.len >= max_mirror_prune_buckets) break; // 한 번에 도는 양도 유계다
+            const owned = self.allocator.dupe(u8, bucket.name) catch break;
+            buckets.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                break;
+            };
+        }
+    }
+
+    for (buckets.items) |bucket_name| {
+        var dir = root.openDir(self.io, bucket_name, .{ .iterate = true }) catch continue;
+        var stale: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (stale.items) |n| self.allocator.free(n);
+            stale.deinit(self.allocator);
+        }
         var live: usize = 0;
         {
             defer dir.close(self.io);
@@ -1654,13 +1735,22 @@ fn pruneRemoteMirror(self: *AppSession) void {
                     live += 1;
                     continue;
                 }
-                dir.deleteFile(self.io, item.name) catch {
+                const owned = self.allocator.dupe(u8, item.name) catch {
+                    live += 1;
+                    continue;
+                };
+                stale.append(self.allocator, owned) catch {
+                    self.allocator.free(owned);
                     live += 1;
                 };
             }
+            // 순회가 끝난 **뒤에** 지운다.
+            for (stale.items) |name| dir.deleteFile(self.io, name) catch {
+                live += 1;
+            };
         }
         // 비었으면 해시 디렉터리도 치운다 — 안 그러면 빈 폴더가 파일 수만큼 남는다.
-        if (live == 0) root.deleteDir(self.io, bucket.name) catch {};
+        if (live == 0) root.deleteDir(self.io, bucket_name) catch {};
     }
 }
 
@@ -2129,6 +2219,12 @@ pub fn requestDeleteSelectedRemoteFileTreeEntry(self: *AppSession) void {
         self.showNoticeKey(.fp_path_too_long);
         return;
     }
+    // **목적지도 여기서 박는다**(적대적 검증 5 회차) — 확인을 누르는 사이 pane 이 다른 호스트로
+    // 바뀌면, 보낼 때 읽는 값은 그 호스트다.
+    self.pending_remote_delete.endpoint = pinRemoteEndpoint(self) orelse {
+        self.showNoticeKey(.fp_remote_delete_failed);
+        return;
+    };
     @memcpy(self.pending_remote_delete.parent_buf[0..parent.len], parent);
     self.pending_remote_delete.parent_len = parent.len;
     @memcpy(self.pending_remote_delete.name_buf[0..name.len], name);
@@ -2146,6 +2242,7 @@ pub fn confirmRemoteFileTreeDelete(self: *AppSession) void {
     beginRemoteRename(
         self,
         .delete,
+        pending.endpoint,
         pending.parent_buf[0..pending.parent_len],
         pending.name_buf[0..pending.name_len],
         &.{},

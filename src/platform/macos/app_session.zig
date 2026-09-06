@@ -5288,9 +5288,14 @@ pub const AppSession = struct {
     remote_rename_inflight: bool = false,
     remote_rename_mutex: std.Io.Mutex = .init,
     remote_rename_outcome: ?file_panel_ops.RemoteRenameOutcome = null,
+    /// 미러 정리를 마지막으로 돈 시각(RF6f — 적대적 검증 3 회차). 0 이면 아직 안 돌았다.
+    last_mirror_prune_ns: i128 = 0,
     /// 확인 모달이 뜬 사이 굳혀 두는 원격 삭제 대상(RF6c) — 선택이 움직여도 **처음 물었던 그것**을
     /// 지운다. 신원까지 굳히므로 저쪽이 갈리면 헬퍼가 `stale` 로 막는다.
     pending_remote_delete: struct {
+        /// 물을 때 박은 목적지 쌍(적대적 검증 5 회차) — 확인 사이에 pane 이 바뀌어도 **물었던 그
+        /// 기계**로 간다.
+        endpoint: file_panel_ops.RemoteEndpoint = .{},
         parent_buf: [std.fs.max_path_bytes]u8 = undefined,
         parent_len: usize = 0,
         name_buf: [512]u8 = undefined,
@@ -79757,6 +79762,19 @@ test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_onl
 
     // ── ③b 비지원 결말(적대적 검증 C): 행의 supported=false 를 결말까지 실어 로컬과 같은
     //    외부-열기 갈래를 탄다 — 원격 .png 가 텍스트 편집기로 열리는 표시 거짓 방지.
+    //    ⚠️ **그리고 직전 문서의 밴드를 오염시키지 않는다**(적대적 검증 2 회차): 이 갈래는 편집기
+    //    entry 를 안 만드는데, 「미러인가」로만 물으면 직전에 연 원격 문서가 그 가드를 통과해 그
+    //    문서 밴드에 이 png 경로가 박힌다.
+    const before_label_len = blk: {
+        const t = pane_ops.activePane(session).activeTerm();
+        break :blk if (t.file_entry) |e| e.remote_origin_label.len else 0;
+    };
+    const before_label = blk: {
+        const t = pane_ops.activePane(session).activeTerm();
+        break :blk if (t.file_entry) |e| try a.dupe(u8, e.remote_origin_label) else try a.dupe(u8, "");
+    };
+    defer a.free(before_label);
+    _ = before_label_len;
     file_panel_ops.finishRemoteFileOpen(session, .{
         .path = try a.dupe(u8, "/srv/app/proj/pic.png"),
         .bytes = try a.dupe(u8, "\x89PNG"),
@@ -79766,6 +79784,12 @@ test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_onl
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session)); // 편집기 entry 불변
     try std.testing.expect(session.file_tree_external_open != null);
     try std.testing.expect(std.mem.endsWith(u8, session.file_tree_external_open.?, "/pic.png"));
+    {
+        const t = pane_ops.activePane(session).activeTerm();
+        const now_label = if (t.file_entry) |e| e.remote_origin_label else "";
+        try std.testing.expectEqualStrings(before_label, now_label); // 직전 문서의 밴드가 그대로다
+        try std.testing.expect(std.mem.indexOf(u8, now_label, "pic.png") == null);
+    }
     {
         const png_dir = std.fs.path.dirname(session.file_tree_external_open.?).?;
         std.Io.Dir.cwd().deleteTree(io, png_dir) catch {};
@@ -79988,6 +80012,25 @@ test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 
         entry.remote_origin_label = try a.dupe(u8, "me@build-box:/srv/app/README.md");
         defer a.free(entry.remote_origin_label);
         try std.testing.expectEqualStrings("me@build-box:/srv/app/README.md", bandPathFor(session, entry));
+    }
+
+    // ── ⑥c **목적지를 요청할 때 박는다**(적대적 검증 5 회차). 보낼 때 세션에서 읽으면, 확인 모달
+    //    사이에 pane 이 다른 호스트로 바뀔 때 **그쪽으로 보낸다**(신원 재확인은 뒷문일 뿐이다).
+    {
+        const pinned = file_panel_ops.pinRemoteEndpoint(session).?;
+        try std.testing.expectEqualStrings("me@build-box", pinned.dest());
+        try std.testing.expectEqualStrings("/tmp/maru-ctl-fixture", pinned.ctl());
+        // 그 사이 호스트가 바뀌어도 **박아 둔 것**은 안 변한다.
+        re.dest.clearRetainingCapacity();
+        try re.dest.appendSlice(a, "other@elsewhere");
+        try std.testing.expectEqualStrings("me@build-box", pinned.dest());
+        try std.testing.expectEqualStrings("other@elsewhere", file_panel_ops.pinRemoteEndpoint(session).?.dest());
+        // 탐색기가 내려가면 박을 것이 없다 — 그때는 안 보낸다.
+        re.active = false;
+        try std.testing.expect(file_panel_ops.pinRemoteEndpoint(session) == null);
+        re.active = true;
+        re.dest.clearRetainingCapacity();
+        try re.dest.appendSlice(a, "me@build-box");
     }
 
     // ── ⑦ 원격 행이 발행 중이면 **로컬 변경 타깃은 여전히 null 이다**(§2.4 펜스는 그대로다).

@@ -241,3 +241,35 @@ test "Term 파일 entry 해제 목록은 한 벌이다 (RF6e)" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, app_src, "self.allocator.destroy(entry);"));
     try std.testing.expect(std.mem.indexOf(u8, app_src, "term_ops.releaseTermFileEntry(self, term)") != null);
 }
+
+test "적대적 검증 5 회차의 못 — 정리·스탬프·목적지 (RF6 후속)" {
+    const allocator = std.testing.allocator;
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+
+    // ① 정리는 **순회하면서 지우지 않는다**. readdir 는 순회 중 삭제 뒤 동작이 불명확해 항목을
+    //    건너뛸 수 있고, 그러면 오래된 파일이 남아 캐시가 계속 자란다(조용한 부분 실패).
+    const prune = fnBody(panel, "pruneRemoteMirror") orelse return error.TestUnexpectedResult;
+    const collect_at = std.mem.indexOf(u8, prune, "buckets.append(") orelse return error.TestUnexpectedResult;
+    const del_dir_at = std.mem.indexOf(u8, prune, "root.deleteDir(") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(collect_at < del_dir_at); // 모으고 → 지운다
+    // 파일도 같은 규율: 이름을 모았다가 순회 **뒤에** 지운다.
+    try std.testing.expect(std.mem.indexOf(u8, prune, "stale.append(") != null);
+    // ③ tick 비용이 유계다 — 간격과 개수 상한 둘 다.
+    try std.testing.expect(std.mem.indexOf(u8, prune, "mirror_prune_interval_ns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prune, "max_mirror_prune_buckets") != null);
+
+    // ② 스탬프는 **방금 연 그것**에만 붙는다(「미러인가」로만 물으면 직전 문서를 오염시킨다).
+    const stamp = fnBody(panel, "stampRemoteOrigin") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, stamp, "std.mem.eql(u8, entry.path, mirror_path)") != null);
+
+    // ⑤ 변경은 목적지를 **요청할 때 박는다** — 워커 시작 함수가 세션에서 직접 안 읽는다.
+    const begin = fnBody(panel, "beginRemoteRename") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, begin, "endpoint.dest()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, begin, "endpoint.ctl()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, begin, "remote_explorer.dest") == null);
+    try std.testing.expect(std.mem.indexOf(u8, begin, "re.ctl.items") == null);
+    // 삭제는 **물을 때** 박는다(확인 모달 사이가 가장 넓은 창이다).
+    const ask = fnBody(panel, "requestDeleteSelectedRemoteFileTreeEntry") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, ask, "pinRemoteEndpoint(self)") != null);
+}

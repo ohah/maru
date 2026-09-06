@@ -7231,6 +7231,14 @@ const max_a11y_nodes = 128;
 /// rect 규율과 같은 판정이다(옛 자리를 답하면 없는 버튼이 읽힌다).
 fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
     if (rect.w <= 0 or rect.h <= 0) return;
+    // **덮인 것은 안 낸다.** `buildUi` 는 어느 화면이든 터미널 층을 먼저 세우므로(코어 격자가
+    // 살아 있어야 한다) 밀린 화면이 떠 있어도 앱 바·키바의 rect 는 서 있다. 그런데 그때
+    // `chromePointer` 가 **모든 터치를 먹어서**(그 함수 끝의 `return 1`) 그 버튼들은 안 눌린다 —
+    // 서술자만 내면 스크린 리더가 「자판」을 읽어 주고 짚어도 아무 일이 안 난다. 그것이 바로 이
+    // 슬라이스가 막겠다고 한 「짚은 곳과 닿는 곳이 어긋나는 것」이다(적대적 검증 1회차에서 잡았다).
+    //
+    // **누르는 쪽과 같은 조건을 본다** — 다른 식으로 적으면 또 갈린다.
+    if (screenTop() != .terminal) return;
     if (a11y_count >= a11y_nodes.len) {
         setLastError("a11y_overflow");
         return;
@@ -7345,11 +7353,25 @@ pub fn resetFrameCompareForTest() void {
     frame_changed = true;
 }
 
-/// 판정자용 — 화면 하나를 쌓는다. 제품 경로는 손짓으로만 옮기는데(탭·뒤로가기), 「화면을 옮기면
-/// 깨는가」를 재려면 **옮긴 것이 확실해야** 한다(무동작인 뒤로가기로는 그 물음이 안 선다).
-pub fn pushScreenForTest(name: []const u8) void {
+/// 판정자용 — **화면 스택을 그 화면 하나로 맞춘다.** 제품 경로는 손짓으로만 옮기는데(탭·뒤로가기),
+/// 「화면을 옮기면 달라지는가」를 재려면 **옮긴 것이 확실해야** 한다.
+///
+/// 미는 것이 아니라 **맞추는** 이유: `nav` 는 넉 장뿐이라 앞선 판정자가 채워 두면 미는 것이
+/// 조용히 무동작이 되고(`navPush` 의 이른 return), 그러면 판정자는 「옮겼다」고 믿은 채 **안 옮긴
+/// 것**을 잰다. 뿌리가 `.sessions` 이고 그 위가 다 `.terminal` 이라 터미널을 재는 판정자는 그래도
+/// 초록이어서 **아무도 안 알려 준다** — 실제로 그 함정에 두 번 걸렸다(M14 는 붉게, M9 는 초록으로).
+pub fn setScreenForTest(name: []const u8) void {
     inline for (@typeInfo(Screen).@"enum".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) navPush(@enumFromInt(f.value));
+        if (std.mem.eql(u8, f.name, name)) {
+            const s: Screen = @enumFromInt(f.value);
+            if (s == .sessions) {
+                nav_len = 1; // 뿌리는 목록이다
+            } else {
+                nav[1] = s;
+                nav_len = 2;
+            }
+            syncKeyboardForScreen();
+        }
     }
 }
 

@@ -16,6 +16,7 @@ const pre_publish_product = @import("release_adapter_pre_publish_product");
 const verify_predecessor_product = @import("release_adapter_verify_predecessor_product");
 const candidate_release_driver = @import("release_adapter_candidate_release_driver");
 const candidate_stage3_command = @import("release_adapter_candidate_stage3_preparation_command");
+const candidate_resume_publication_command = @import("release_adapter_candidate_resume_publication_command");
 const candidate_aggregate_process = @import("release_adapter_candidate_aggregate_process");
 const builtin = @import("builtin");
 
@@ -34,6 +35,7 @@ pub const Storage = struct {
     apple: apple_transport.Storage = undefined,
     candidate: candidate_release_driver.Execution = .{},
     stage3: candidate_stage3_command.Execution = .{},
+    resume_publication: candidate_resume_publication_command.Execution = .{},
     aggregate_process: candidate_aggregate_process.Storage = .{},
 };
 
@@ -134,6 +136,31 @@ const ProductDrivers = struct {
         };
     }
 
+    pub fn resumeCandidatePublication(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        token: []const u8,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        const outcome = candidate_resume_publication_command.runOutcome(
+            io,
+            allocator,
+            bootstrap,
+            token,
+            storage.github_response[0..candidate_resume_publication_command.max_response_bytes],
+            budget_ns,
+            &storage.resume_publication,
+        );
+        return switch (outcome) {
+            .success => {},
+            .audit_required => error.ResumePublicationAuditRequired,
+            .cleanup_failed => error.ResumePublicationCleanupFailed,
+        };
+    }
+
     pub fn prepareCandidateAggregate(
         _: *@This(),
         _: std.Io,
@@ -192,6 +219,7 @@ pub fn executeWith(
         .prepare_candidate => try drivers.prepareCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
+        .resume_candidate_publication => try drivers.resumeCandidatePublication(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
     }
 }
 
@@ -215,6 +243,8 @@ pub fn main(init: std.process.Init) !void {
         appendArgumentImpl(&values, &count, value) catch |err| {
             if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
                 finishStage3(.local_failure);
+            if (count != 0 and std.mem.eql(u8, values[0], "resume-candidate-publication"))
+                finishResumePublication(.audit_required);
             return err;
         };
     }
@@ -226,10 +256,19 @@ pub fn main(init: std.process.Init) !void {
         };
         if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
             finishStage3(outcome);
+        if (count != 0 and std.mem.eql(u8, values[0], "resume-candidate-publication")) {
+            const resume_outcome: candidate_resume_publication_command.Outcome = switch (err) {
+                error.ResumePublicationCleanupFailed => .cleanup_failed,
+                else => .audit_required,
+            };
+            finishResumePublication(resume_outcome);
+        }
         return err;
     };
     if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
         finishStage3(.success);
+    if (count != 0 and std.mem.eql(u8, values[0], "resume-candidate-publication"))
+        finishResumePublication(.success);
 }
 
 fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, value: []const u8) !void {
@@ -241,4 +280,9 @@ fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, valu
 fn finishStage3(outcome: candidate_stage3_command.Outcome) noreturn {
     std.debug.print("{s}", .{candidate_stage3_command.stderrLine(outcome)});
     std.process.exit(candidate_stage3_command.exitCode(outcome));
+}
+
+fn finishResumePublication(outcome: candidate_resume_publication_command.Outcome) noreturn {
+    std.debug.print("{s}", .{candidate_resume_publication_command.stderrLine(outcome)});
+    std.process.exit(candidate_resume_publication_command.exitCode(outcome));
 }

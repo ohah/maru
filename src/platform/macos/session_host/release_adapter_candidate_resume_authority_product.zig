@@ -35,6 +35,8 @@ pub const View = struct {
 };
 
 pub const PublicationContext = context_mod.Context;
+pub const Deadline = deadline_mod.Deadline;
+pub const startDeadline = deadline_mod.start;
 pub const PublicationObservation = files.ExecutableObservation;
 pub const publication_asset_count: usize = 4;
 pub const PublicationAsset = struct {
@@ -59,6 +61,7 @@ pub const Execution = struct {
     aggregate: aggregate_mod.ReopenedAggregate = .{},
     current: current_mod.CurrentReleaseAuthority = .{},
     draft: draft_mod.DraftAuthority = .{},
+    active_deadline: ?*deadline_mod.Deadline = null,
     inputs: ?Inputs = null,
     token: []const u8 = "",
     response: []u8 = &.{},
@@ -135,7 +138,7 @@ pub const Execution = struct {
         if (disposition == .descriptor_close_failed) return error.DescriptorCloseFailed;
     }
 
-    fn pristine(self: *const @This()) bool {
+    pub fn isPristineForComposition(self: *const @This()) bool {
         return self.owner == null and self.transaction.isPristineForComposition() and self.deadline.isPristineForComposition() and
             std.meta.eql(self.preparation, preparation_mod.ReopenedPreparation{}) and
             std.meta.eql(self.aggregate, aggregate_mod.ReopenedAggregate{}) and
@@ -145,7 +148,7 @@ pub const Execution = struct {
     }
 
     fn hasBorrowed(self: *const @This()) bool {
-        return self.inputs != null or self.token.len != 0 or self.response.len != 0;
+        return self.active_deadline != null or self.inputs != null or self.token.len != 0 or self.response.len != 0;
     }
 };
 
@@ -163,10 +166,40 @@ pub fn run(
     budget_ns: i128,
     execution: *Execution,
 ) !void {
-    if (!execution.pristine()) return error.InvalidOwner;
+    if (!execution.isPristineForComposition()) return error.InvalidOwner;
     try validateInputs(inputs, token, response, execution);
     try deadline_mod.start(budget_ns, &execution.deadline);
+    return runBound(io, allocator, inputs, token, response, &execution.deadline, true, execution);
+}
+
+pub fn runBorrowingDeadline(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    inputs: Inputs,
+    token: []const u8,
+    response: []u8,
+    deadline: *deadline_mod.Deadline,
+    execution: *Execution,
+) !void {
+    if (!execution.isPristineForComposition()) return error.InvalidOwner;
+    try validateInputs(inputs, token, response, execution);
+    try validateDeadlineAlias(inputs, token, response, execution, deadline);
+    _ = try deadline.remaining();
+    return runBound(io, allocator, inputs, token, response, deadline, false, execution);
+}
+
+fn runBound(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    inputs: Inputs,
+    token: []const u8,
+    response: []u8,
+    deadline: *deadline_mod.Deadline,
+    owns_deadline: bool,
+    execution: *Execution,
+) !void {
     execution.owner = execution;
+    execution.active_deadline = deadline;
     execution.inputs = inputs;
     execution.token = token;
     execution.response = response;
@@ -174,26 +207,31 @@ pub fn run(
     execution.allocator = allocator;
     var steps = ConcreteSteps{ .execution = execution };
     const outcome = phase.executeWith(&steps, &execution.transaction);
+    execution.active_deadline = null;
     execution.inputs = null;
     execution.token = "";
     execution.response = &.{};
-    execution.deadline.deinit() catch return error.CleanupFailed;
+    if (owns_deadline) execution.deadline.deinit() catch return error.CleanupFailed;
     return outcome;
 }
 
 const ConcreteSteps = struct {
     execution: *Execution,
 
+    fn deadline(self: *@This()) !*deadline_mod.Deadline {
+        return self.execution.active_deadline orelse error.InvalidOwner;
+    }
+
     fn input(self: *@This()) !Inputs {
         return self.execution.inputs orelse error.InvalidOwner;
     }
 
     pub fn validatePreflight(self: *@This()) !void {
-        if (self.execution.owner != self.execution or self.execution.transaction.owner != &self.execution.transaction or
-            self.execution.deadline.owner != &self.execution.deadline) return error.InvalidOwner;
+        if (self.execution.owner != self.execution or self.execution.transaction.owner != &self.execution.transaction) return error.InvalidOwner;
         const value = try self.input();
         try validateInputs(value, self.execution.token, self.execution.response, self.execution);
-        _ = try self.execution.deadline.remaining();
+        try validateDeadlineAlias(value, self.execution.token, self.execution.response, self.execution, try self.deadline());
+        _ = try (try self.deadline()).remaining();
     }
 
     pub fn openPreparation(self: *@This()) !void {
@@ -203,7 +241,7 @@ const ConcreteSteps = struct {
 
     pub fn fencePreparation(self: *@This(), _: bool) !void {
         _ = try self.execution.preparation.fence(self.execution.allocator);
-        _ = try self.execution.deadline.remaining();
+        _ = try (try self.deadline()).remaining();
     }
 
     pub fn openAggregate(self: *@This()) !void {
@@ -215,14 +253,14 @@ const ConcreteSteps = struct {
             .dmg = value.paths.dmg,
             .frozen_executable = value.paths.frozen_executable,
             .manifest = manifest_path,
-        }, .{ .path = value.cli_path, .pinned = value.cli }, self.execution.response, &self.execution.deadline, &self.execution.aggregate);
+        }, .{ .path = value.cli_path, .pinned = value.cli }, self.execution.response, try self.deadline(), &self.execution.aggregate);
     }
 
     pub fn fenceAggregate(self: *@This(), _: bool) !void {
         const value = try self.input();
         var fenced = try fenceLocalGraph(self.execution, self.execution.allocator, value.context, value.cli_path, value.cli);
         defer fenced.manifest.deinit();
-        _ = try self.execution.deadline.remaining();
+        _ = try (try self.deadline()).remaining();
     }
 
     pub fn authenticateCurrent(self: *@This()) !void {
@@ -232,7 +270,7 @@ const ConcreteSteps = struct {
         try current_mod.authenticateUntil(self.execution.io, self.execution.allocator, value.context, parsed.value().*, .{
             .path = value.cli_path,
             .pinned = value.cli,
-        }, self.execution.token, self.execution.response, &self.execution.deadline, &self.execution.current);
+        }, self.execution.token, self.execution.response, try self.deadline(), &self.execution.current);
     }
 
     pub fn adoptDraft(self: *@This()) !void {
@@ -478,6 +516,27 @@ fn validateInputs(inputs: Inputs, token: []const u8, response: []u8, execution: 
     for (values) |value| if (overlaps(owner, value)) return error.InvalidOwner;
     for (values, 0..) |left, index| for (values[index + 1 ..]) |right|
         if (overlaps(left, right)) return error.InvalidOwner;
+}
+
+fn validateDeadlineAlias(inputs: Inputs, token: []const u8, response: []u8, execution: *const Execution, deadline: *const deadline_mod.Deadline) !void {
+    const deadline_bytes = std.mem.asBytes(deadline);
+    if (deadline != &execution.deadline and overlaps(deadline_bytes, std.mem.asBytes(execution))) return error.InvalidOwner;
+    const values = [_][]const u8{
+        inputs.paths.preparation,
+        inputs.paths.aggregate,
+        inputs.paths.dmg,
+        inputs.paths.frozen_executable,
+        inputs.cli_path,
+        inputs.context.repository.owner,
+        inputs.context.repository.name,
+        inputs.context.tag,
+        inputs.context.source_commit,
+        inputs.context.build.workflow_ref,
+        std.mem.asBytes(inputs.cli),
+        token,
+        response,
+    };
+    for (values) |value| if (overlaps(deadline_bytes, value)) return error.InvalidOwner;
 }
 
 fn canonicalAbsolute(path: []const u8) bool {

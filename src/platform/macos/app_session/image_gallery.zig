@@ -207,6 +207,12 @@ pub const State = struct {
     /// 안 보고 있다」가 아니다 — 여기서 함께 지우면 같은 pane 에 머무는 내내 매 tick 다시 훑는다.
     focus_surface_id: u64 = 0,
     /// 스캔이 찾은 **전부**. 필터의 원본이라 여기서는 아무것도 빼지 않는다.
+    /// 줄 목록이 **마지막 프레임에 실제로 그린 줄 수**. 진단이자 판정자의 눈이다.
+    ///
+    /// **없으면 렌더가 통째로 죽어도 CI 가 못 잡는다.** 판정자들은 그림 채널(`appendGpuImages`)만
+    /// 보고 있었는데, 목록은 글자가 전부라 안 그려져도 「활동이 없다」로 보인다 — 격자가 빈 것과 달리
+    /// 눈에 띄지도 않는다. `overflow` 와 짝이다(그것은 «못 그린 수», 이것은 «그린 수»).
+    drawn_rows: usize = 0,
     /// 지금 무엇을 보고 있나(활동 뷰 계약 §2.1). **필터가 모양을 정한다** — 이미지는 격자,
     /// 나머지는 줄 목록이다.
     filter: Filter = .images,
@@ -2274,7 +2280,10 @@ pub fn collectActivityList(
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    if (self.image_gallery.filter.isGrid()) return;
+    if (self.image_gallery.filter.isGrid()) {
+        self.image_gallery.drawn_rows = 0; // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다
+        return;
+    }
 
     // **한 줄도 못 그리는 길에서도 그 사실을 남긴다**(계약 §2 — 「없다」와 「안 보인다」는 다르다).
     // 조용히 물러나면 화면은 비었는데 안내는 「4,084개」라고만 말해, 사용자에게는 목록이 **없는 것**과
@@ -2285,6 +2294,7 @@ pub fn collectActivityList(
     const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
     if (area.w == 0 or area.h == 0 or row_h == 0 or cols == 0) {
         self.image_gallery.overflow = total;
+        self.image_gallery.drawn_rows = 0;
         return;
     }
 
@@ -2297,19 +2307,62 @@ pub fn collectActivityList(
     // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
     self.image_gallery.overflow = total -| (last -| first);
 
+    // 접두는 라벨보다 **흐리게** — 곁말이 본문보다 먼저 읽히면 안 된다(격자 라벨과 같은 규율).
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        time_dim_percent,
+    ) };
+
+    var drawn: usize = 0;
     var i = first;
     while (i < last) : (i += 1) {
         if (i >= self.image_gallery.labels.items.len) break;
-        const text = self.image_gallery.labels.items[i].text();
-        if (text.len == 0) continue; // 없는 설명을 지어내지 않는다
+        const label = self.image_gallery.labels.items[i];
+        const text = label.text();
+        // **「전체」에는 이미지도 섞인다.** 그 줄의 「첨부 / 읽음」은 계약 §2.2.1 이 「이 화면에 사용자가
+        // 던지는 첫 물음」이라고 못박은 정보다 — 목록이라고 버리면 격자에서 답하던 것을 못 답한다.
+        // 활동 줄에는 접두가 없다(`Source.none`) — 모르면 말하지 않는다.
+        var prefix_buf: [context_mod.max_label_bytes]u8 = undefined;
+        const prefix = context_mod.originPrefix(
+            &prefix_buf,
+            originText(label.source),
+            label.seq,
+            label.seq_total,
+        );
+        if (text.len == 0 and prefix.len == 0) continue; // 없는 설명을 지어내지 않는다
+        drawn += 1;
+
         const y = area.y + @as(u32, @intCast((i - first) * row_h));
-        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
-        self.collectShaped(collected, dl, builder, .{ .pane = .{
-            .origin_x = area.x,
-            .origin_y = y,
-            .colors = colors,
-        } });
+        // 자리 나누기는 격자와 **같은 순수 함수**가 정한다(시각은 아직 없으므로 0 칸).
+        const split = context_mod.splitLabelRow(
+            cols,
+            displayColsOf(prefix),
+            0,
+            time_gap_cols,
+            if (text.len == 0) 0 else min_label_cols,
+        );
+
+        var at_col: u32 = 0;
+        if (split.prefix_cols > 0) {
+            const pdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.prefix_cols, prefix, dim) catch continue;
+            self.collectShaped(collected, pdl, builder, .{ .pane = .{
+                .origin_x = area.x,
+                .origin_y = y,
+                .colors = colors,
+            } });
+            at_col = @as(u32, split.prefix_cols) +| time_gap_cols;
+        }
+        if (text.len > 0 and split.label_cols > 0) {
+            const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.label_cols, text, fg) catch continue;
+            self.collectShaped(collected, dl, builder, .{ .pane = .{
+                .origin_x = area.x +| (at_col *| self.cell_width_px),
+                .origin_y = y,
+                .colors = colors,
+            } });
+        }
     }
+    self.image_gallery.drawn_rows = drawn;
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.

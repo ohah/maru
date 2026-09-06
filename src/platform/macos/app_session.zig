@@ -76767,6 +76767,73 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
 }
 
+test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인한다 (적대적 D4)" {
+    // **판정자들이 그림 채널만 보고 있었다.** 목록은 글자가 전부라, 렌더가 통째로 죽어도
+    // 「활동이 없다」로 보일 뿐 CI 는 못 잡는다(격자가 비는 것과 달리 눈에도 안 띈다).
+    // 그래서 렌더가 **몇 줄을 그렸는지**를 값으로 남기고 제품 `tick()` 경로로 확인한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_D\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo one\",\"description\":\"첫째 줄\"}}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_E\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo two\",\"description\":\"둘째 줄\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "e.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/e.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    // **제품 경로로 그린다** — `tick()` 이 프레임을 조립하며 목록 렌더를 부른다.
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.drawn_rows);
+    // 자리를 다 얻었으므로 넘친 것이 없다(그 값이 「도크가 좁다」 문구를 가른다).
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.overflow);
+
+    // ── 격자로 돌아가면 줄은 0 이다 — 옛 값이 남으면 이 판정자가 속는다.
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows);
+}
+
 test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     // 목록이 통째로 비는 길이 있다(좁은 도크·줄 높이 0). 그때 개수만 적으면 사용자에게는
     // 「목록이 없다」와 구분되지 않는다 — 계약 §2 가 가르라고 한 바로 그 둘이다. 격자는

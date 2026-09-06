@@ -27,7 +27,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 5\n";
+pub const version_line = "maru-remote-watch 6\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -99,6 +99,19 @@ pub fn main(init: std.process.Init) !void {
         const dev_text = args.next() orelse return exitWith(exit_unsupported);
         const ino_text = args.next() orelse return exitWith(exit_unsupported);
         return runDelete(io, init.gpa, parent, name, dev_text, ino_text);
+    }
+
+    // **만들기 모드**(RF6d). 인자는 `mk <부모 절대경로> <이름> <d|f> <dev> <ino>` 다. `mv`·`rm` 과
+    // **같은 축**이다 — 부모를 열어 그 신원을 다시 재고, **배타 생성**으로 만든다
+    // (`O_CREAT|O_EXCL` / `mkdirat`). 배타가 계약인 이유는 이름 변경과 같다: 덮어쓰면 남의 파일이
+    // 조용히 사라진다. 미리 「있나」를 물으면 그 사이가 창이라, 커널이 판정하게 둔다.
+    if (std.mem.eql(u8, root, "mk")) {
+        const parent = args.next() orelse return exitWith(exit_unsupported);
+        const name = args.next() orelse return exitWith(exit_unsupported);
+        const kind = args.next() orelse return exitWith(exit_unsupported);
+        const dev_text = args.next() orelse return exitWith(exit_unsupported);
+        const ino_text = args.next() orelse return exitWith(exit_unsupported);
+        return runCreate(io, init.gpa, parent, name, kind, dev_text, ino_text);
     }
 
     // 루트 뒤에 오는 것은 **굳히기까지 끝난 git 앞머리**다(RW7b — `ssh_upload.spawnRemoteWatch` 가
@@ -290,6 +303,59 @@ fn runRename(
         .unsupported => putMvResult(.unsupported, "this remote cannot rename without replacing"),
         .io => putMvResult(.io, "rename failed"),
     }
+}
+
+/// 부모 아래에 `name` 을 만든다 — **부모 신원을 다시 재고**(§2.3 ⑶), **배타로**.
+fn runCreate(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    parent: []const u8,
+    name: []const u8,
+    kind: []const u8,
+    dev_text: []const u8,
+    ino_text: []const u8,
+) void {
+    if (parent.len == 0 or parent[0] != '/') return putMvResult(.invalid, "parent is not absolute");
+    if (!mvNameIsSafe(name)) return putMvResult(.invalid, "unsafe name");
+    const want_dir = if (std.mem.eql(u8, kind, "d")) true else if (std.mem.eql(u8, kind, "f")) false else return putMvResult(.invalid, "bad kind");
+    const want_dev = std.fmt.parseInt(u64, dev_text, 10) catch return putMvResult(.invalid, "bad identity");
+    const want_ino = std.fmt.parseInt(u64, ino_text, 10) catch return putMvResult(.invalid, "bad identity");
+
+    var dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |err| {
+        return putMvResult(mvOutcomeForOpen(err), "opendir failed");
+    };
+    defer dir.close(io);
+
+    // **부모의 신원**을 다시 잰다 — 그 사이 부모가 갈렸으면 엉뚱한 곳에 만든다.
+    const parent_stat = rawFstat(dir.handle) orelse return putMvResult(.io, "fstat failed");
+    if (parent_stat.dev != want_dev or parent_stat.ino != want_ino)
+        return putMvResult(.stale, "parent identity changed");
+
+    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(name_z);
+
+    if (want_dir) {
+        const rc = std.c.mkdirat(dir.handle, name_z.ptr, 0o755);
+        if (rc == 0) return putMvResult(.ok, null);
+        return putMvResult(switch (std.posix.errno(rc)) {
+            .EXIST => .collision,
+            .ACCES, .PERM, .ROFS => .denied,
+            .NOENT => .not_found,
+            else => .io,
+        }, "mkdir failed");
+    }
+    // `O_EXCL` 이 곧 「덮어쓰지 않는다」다 — 미리 물어보면 그 사이가 창이다.
+    const fd = std.c.openat(dir.handle, name_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(std.c.mode_t, 0o644));
+    if (fd >= 0) {
+        _ = std.c.close(fd);
+        return putMvResult(.ok, null);
+    }
+    putMvResult(switch (std.posix.errno(fd)) {
+        .EXIST => .collision,
+        .ACCES, .PERM, .ROFS => .denied,
+        .NOENT => .not_found,
+        else => .io,
+    }, "create failed");
 }
 
 const RenameResult = enum { ok, exists, denied, not_found, unsupported, io };

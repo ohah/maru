@@ -242,6 +242,109 @@ test "헬퍼 rm 왕복: 신원이 맞아야 지우고, 빈 디렉터리만 간�
     }
 }
 
+fn runMk(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    bin: []const u8,
+    parent: []const u8,
+    name: []const u8,
+    kind: []const u8,
+    dev: u64,
+    ino: u64,
+) !mutation.Parsed {
+    var dev_buf: [24]u8 = undefined;
+    var ino_buf: [24]u8 = undefined;
+    const dev_text = try std.fmt.bufPrint(&dev_buf, "{d}", .{dev});
+    const ino_text = try std.fmt.bufPrint(&ino_buf, "{d}", .{ino});
+    const out = try std.process.run(gpa, io, .{ .argv = &.{ bin, "mk", parent, name, kind, dev_text, ino_text } });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    switch (out.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    const parsed = try mutation.parse(out.stdout);
+    return .{ .outcome = parsed.outcome, .message = &.{} };
+}
+
+/// 디렉터리 **자신**의 신원(헬퍼가 `D` 레코드로 내는 그 값 — 같은 축이어야 비교가 성립한다).
+fn listSelf(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, dir: []const u8) !struct { dev: u64, ino: u64 } {
+    const out = try std.process.run(gpa, io, .{ .argv = &.{ bin, "list", dir } });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    var parser = maru.session.remote_file_listing.Parser.init(out.stdout);
+    const first = (try parser.next()) orelse return error.TestUnexpectedResult;
+    return .{ .dev = first.dir.dev, .ino = first.dir.ino };
+}
+
+test "헬퍼 mk 왕복: 부모 신원이 맞아야 만들고, 배타라 덮어쓰지 않는다 (RF6d)" {
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/maru-rfmk-rt.{d}", .{std.c.getpid()});
+    try sh(gpa, io,
+        \\set -eu
+        \\rm -rf "$1"
+        \\mkdir -p "$1"
+        \\printf mine > "$1/taken.txt"
+    , dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const id = try listSelf(gpa, io, bin, dir);
+
+    // ── ① 부모 신원이 어긋나면 **안 만든다**(엉뚱한 곳에 만들지 않는다).
+    {
+        const got = try runMk(gpa, io, bin, dir, "nope.txt", "f", id.dev, id.ino +% 1);
+        try std.testing.expectEqual(mutation.Outcome.stale, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/nope.txt", .{dir});
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, path, .{}) catch null == null);
+    }
+
+    // ── ② 배타 생성: 이름이 있으면 **덮어쓰지 않는다**(남의 내용이 그대로다).
+    {
+        const got = try runMk(gpa, io, bin, dir, "taken.txt", "f", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.collision, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/taken.txt", .{dir});
+        const kept = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64));
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("mine", kept);
+    }
+
+    // ── ③ 파일을 만든다 — **빈 파일**이고 개행 이름도 된다(인자로 가므로 셸 인용과 무관하다).
+    {
+        const got = try runMk(gpa, io, bin, dir, "nl\nmade.txt", "f", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/nl\nmade.txt", .{dir});
+        const body = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64));
+        defer gpa.free(body);
+        try std.testing.expectEqual(@as(usize, 0), body.len);
+    }
+
+    // ── ④ 디렉터리를 만든다.
+    {
+        const got = try runMk(gpa, io, bin, dir, "made-dir", "d", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/made-dir", .{dir});
+        const st = try std.Io.Dir.cwd().statFile(io, path, .{});
+        try std.testing.expectEqual(std.Io.File.Kind.directory, st.kind);
+        // 같은 이름을 또 만들면 배타가 막는다.
+        const again = try runMk(gpa, io, bin, dir, "made-dir", "d", id.dev, id.ino);
+        try std.testing.expectEqual(mutation.Outcome.collision, again.outcome);
+    }
+
+    // ── ⑤ 이름·종류가 이름·종류일 수 없으면 invalid.
+    {
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runMk(gpa, io, bin, dir, "..", "f", id.dev, id.ino)).outcome);
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runMk(gpa, io, bin, dir, "a/b", "f", id.dev, id.ino)).outcome);
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runMk(gpa, io, bin, dir, "ok.txt", "x", id.dev, id.ino)).outcome);
+    }
+}
+
 test "헬퍼 mv: 절대경로가 아니면 wire 오류로 완결된다 — 침묵이 아니다 (RF6a)" {
     const bin = helperBin() orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;

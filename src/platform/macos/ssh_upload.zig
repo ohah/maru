@@ -402,6 +402,9 @@ pub const rename_script = remote_shell.path_assign ++ "exec \"" ++ watch_install
 /// **삭제 스크립트**(RF6c). `rename_script` 와 같은 자리·같은 규율 — 인자는 위치 인자로 간다.
 pub const delete_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" rm \"$1\" \"$2\" \"$3\" \"$4\"";
 
+/// **만들기 스크립트**(RF6d). 같은 자리·같은 규율.
+pub const create_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" mk \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"";
+
 pub const Stream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout. 호출자가 읽고 **닫는다**.

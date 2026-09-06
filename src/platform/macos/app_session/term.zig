@@ -732,14 +732,7 @@ fn destroyTermWithAbandonBackend(
         }
         term.rt.live_initialized = false;
     }
-    // 파일 entry(FP16 §1)는 Term 소유다 — 여기서 해제하지 않으면 탭을 닫을 때마다 path와 Entry가 샌다.
-    // 소유권 경계가 여기 하나뿐이라(생성은 파일 열기, 해제는 여기) 중간 상태가 없다.
-    if (term.file_entry) |entry| {
-        self.allocator.free(entry.path);
-        self.freeDiffEntryState(entry);
-        self.allocator.destroy(entry);
-        term.file_entry = null;
-    }
+    releaseTermFileEntry(self, term);
     // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
     if (term.git_branch) |b| self.allocator.free(b);
     if (term.git_branch_cwd) |c| self.allocator.free(c);
@@ -1445,3 +1438,19 @@ pub const screen_diag = std.log.scoped(.screen);
 // 이벤트를 구조화 한 줄씩 찍는다 — 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
 // drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
 pub const shell_diag = std.log.scoped(.shell);
+
+/// Term 이 소유한 파일 entry를 푼다(FP16 §1). **이 목록의 단일 출처다.**
+///
+/// 예전에는 `destroyTerm` 과 `AppSession.deinit` 이 같은 목록을 **각자** 들고 있었고, 주석이 「동기
+/// 유지」를 부탁했다. 사람 기억은 실제로 놓쳤다 — N1(편집기 문서)이 첫 사례였고, RF6e 의 원격 출처가
+/// 두 번째였다(누수는 `...FAIL` 로 안 찍혀 눈에 안 띈다). 그래서 두 벌을 하나로 모은다.
+pub fn releaseTermFileEntry(self: *AppSession, term: *Term) void {
+    const entry = term.file_entry orelse return;
+    self.allocator.free(entry.path);
+    // 원격 미러 출처(RF6e) — 열 때 박고 여기서 푼다.
+    if (entry.remote_origin_dest.len > 0) self.allocator.free(entry.remote_origin_dest);
+    if (entry.remote_origin_label.len > 0) self.allocator.free(entry.remote_origin_label);
+    self.freeDiffEntryState(entry);
+    self.allocator.destroy(entry);
+    term.file_entry = null;
+}

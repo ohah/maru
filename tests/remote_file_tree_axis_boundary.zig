@@ -156,6 +156,32 @@ test "원격 변경은 로컬 변경 백엔드를 안 탄다 — 문이 하나�
     try std.testing.expect(std.mem.indexOf(u8, panel, "if (self.file_tree_rows_remote) return null;") != null);
 }
 
+test "원격 만들기도 같은 문을 지나고 부모 신원을 짝지어 보낸다 (RF6d)" {
+    // 만들기가 로컬 백엔드로 새면 §2.4 가 깨진다 — 갈림은 이름 변경과 **같은 한 자리**여야 한다.
+    // 그리고 부모 신원 짝짓기는 **순수 함수 하나**가 소유해야 한다: 짝이 어긋나면 저쪽 재확인이
+    // 항상 stale 이 되어 만들기가 조용히 안 되고, 화면에는 「트리가 낡았다」로만 보인다.
+    const allocator = std.testing.allocator;
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+
+    // 원격 커밋이 만들기를 **같은 자리에서** 갈라 받는다(문이 둘이 되면 규율이 호출자에게 샌다).
+    const commit = fnBody(panel, "enqueueRemoteFileTreeRename") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, commit, "enqueueRemoteFileTreeCreate(self, target, name)") != null);
+
+    // 만들기 본문도 로컬 백엔드를 안 만진다.
+    const create = fnBody(panel, "enqueueRemoteFileTreeCreate") orelse return error.TestUnexpectedResult;
+    for ([_][]const u8{ "file_tree_mutation_backend", "tryReserve", "file_tree_trash" }) |symbol| {
+        try std.testing.expect(std.mem.indexOf(u8, create, symbol) == null);
+    }
+    // 이름 규칙은 공용 순수 함수, 짝짓기는 순수 함수 하나가 소유한다.
+    try std.testing.expect(std.mem.indexOf(u8, create, "file_tree_mutation.validateName(name)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create, "remoteCreateContainer(target)") != null);
+
+    // 그 순수 함수가 파일 행에서 **부모** 신원을 고른다(자기 신원이 아니다).
+    const container = fnBody(panel, "remoteCreateContainer") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, container, ".identity = target.parent_identity") != null);
+}
+
 test "원격 삭제는 확인을 거치고 로컬 휴지통을 안 탄다 (RF6c ④=㉰)" {
     // ④ 사용자 결정: 원격에는 휴지통이 없어 **되돌릴 수 없다**. 그래서 ⑴ 요청은 확인 모달만 세우고
     // ⑵ 실제 삭제는 확인 뒤에만 일어나며 ⑶ 로컬 휴지통 배관(staging·Trash·복구)을 안 탄다.
@@ -190,4 +216,28 @@ test "원격 삭제는 확인을 거치고 로컬 휴지통을 안 탄다 (RF6c 
         return error.TestUnexpectedResult;
     const busy = std.mem.indexOf(u8, local, "fileTreeNamespaceMutationBusy(self)").?;
     try std.testing.expect(gate < busy);
+}
+
+test "Term 파일 entry 해제 목록은 한 벌이다 (RF6e)" {
+    // 이 게이트가 있는 이유: `destroyTerm` 과 `AppSession.deinit` 이 같은 목록을 **각자** 들고 있었고,
+    // 주석이 「동기 유지」를 부탁했지만 사람 기억은 두 번 놓쳤다(N1 편집기 문서 · RF6e 원격 출처).
+    // 누수는 `...FAIL` 로 안 찍혀 눈에 안 띈다 — 그래서 「목록이 한 벌인가」를 구조로 센다.
+    const allocator = std.testing.allocator;
+    const term_src = try read(allocator, "src/platform/macos/app_session/term.zig", 8 * 1024 * 1024);
+    defer allocator.free(term_src);
+    const app_src = try read(allocator, "src/platform/macos/app_session.zig", 8 * 1024 * 1024);
+    defer allocator.free(app_src);
+
+    // 해제 목록을 아는 자리는 **그 함수 하나**다.
+    const release = fnBody(term_src, "releaseTermFileEntry") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, release, "entry.remote_origin_dest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, release, "entry.remote_origin_label") != null);
+    try std.testing.expect(std.mem.indexOf(u8, release, "freeDiffEntryState(entry)") != null);
+
+    // 그리고 **그 밖에서 entry 를 손으로 파괴하지 않는다** — 두 벌이 되는 순간 한쪽이 낡는다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, term_src, "self.allocator.destroy(entry);"));
+    // ⚠️ **파괴로 좁혀 센다.** 「`term.file_entry` 를 캡처하는 자리」로 세면 읽기용 접근까지 걸려
+    //    게이트가 거짓 경보를 낸다(실측으로 그렇게 걸렸다) — 문제는 **푸는 목록이 두 벌인 것**이다.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, app_src, "self.allocator.destroy(entry);"));
+    try std.testing.expect(std.mem.indexOf(u8, app_src, "term_ops.releaseTermFileEntry(self, term)") != null);
 }

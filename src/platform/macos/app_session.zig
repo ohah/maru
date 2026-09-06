@@ -6142,6 +6142,11 @@ pub const AppSession = struct {
     editor_drag_autoscroll: i8 = 0,
     /// 그 경과 누적(ms). **tick 수가 아니라 ms로 게이트한다** — tick마다 한 줄이면 30→60Hz에서
     /// 두 배 빨라진다(바로 위 터미널 필드가 그 사고를 겪고 고친 자리다).
+    /// `⌥` 를 누른 down 의 문서 offset — **끌지 않고 뗐을 때** 커서를 더할 자리다(§3.2c).
+    ///
+    /// up 에서 좌표를 다시 hit-test 하지 않는 이유: 손을 떼는 순간 포인터가 한두 픽셀 흔들려 있으면
+    /// **누른 자리와 다른 offset** 이 나온다. 사용자가 겨냥한 것은 누른 자리다.
+    editor_drag_down_offset: usize = 0,
     editor_drag_autoscroll_accum_ms: u32 = 0,
     /// 자동 스크롤이 선택을 늘릴 때 쓸 **마지막 x 좌표**(창 좌표). 세로로만 굴러가므로 가로 위치는
     /// 드래그가 마지막으로 알려 준 곳에 머문다.

@@ -3517,11 +3517,19 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
     const off = hitTestBody(term, x_px, y_px) orelse return false;
     logHitSnapshotDiag(self, term, y_px, off);
     // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
-    clearExtraSelections(self, term);
+    //
+    // **`⌥` 를 끼면 정리하지 않는다**(§3.2c) — 그것이 커서를 **더하는** 제스처이기 때문이다. 지우면
+    // 두 번째 `⌥클릭` 이 첫 번째를 날려 여러 개를 찍을 수 없다(`OPT4` 가 그것을 잡았다). 맨 클릭이
+    // 여전히 정리하므로 「없앨 방법이 없다」는 근거는 그대로 산다.
+    const additive = (mods & 8) != 0;
+    if (!additive) clearExtraSelections(self, term);
     // **커서가 편집 아닌 이유로 움직였다 — undo 묶음을 끊는다**(§3.3). 안 끊으면 클릭 뒤 친
     // 글자를 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다.
     breakUndoGroup(term);
-    term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
+    // **`⌥` 면 primary 를 안 덮는다** — 덮으면 기존 primary 가 사라져 「더하기」가 아니라 「옮기기」가
+    // 된다. 그 자리에 무엇을 세울지는 up 에서 토글이 정한다(끌었으면 열 선택이 통째로 다시 판다).
+    if (!additive) term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
+    self.editor_drag_down_offset = off; // 끌지 않고 뗐을 때 커서를 더할 자리(§3.2c)
 
     // **`⌥` 또는 `⇧⌥` 면 열 선택이다**(§3.2a·§9.1). 앞은 터미널 관례(iTerm2·Terminal.app), 뒤는
     // VSCode 관례이고 **둘이 같은 결과**라 설정으로 가를 것이 없다. `⌘`(32)는 링크 열기가 쓰므로
@@ -3987,6 +3995,92 @@ pub fn columnSelectStep(self: *AppSession, term: *Term, step: ColumnStep) bool {
     return true;
 }
 
+/// `⌥클릭` — 그 자리에 커서를 더하거나, 이미 있으면 지운다(§3.2c).
+///
+/// **토글이다.** 더하기만 되면 잘못 찍은 커서를 없앨 방법이 전체 해제뿐이고, 그러면 공들여 찍은
+/// 나머지가 통째로 날아간다(VSCode `CreateCursor` 가 같은 이유로 *"sort of like a toggle"* 이다).
+///
+/// **「그 자리」는 점이 아니라 selection 이 품는 범위다** — 범위를 고른 커서의 안쪽 아무 데나 찍어도
+/// 지워진다. 점으로만 보면 범위 커서를 없애려면 caret 자리를 정확히 겨냥해야 한다.
+fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
+    if (term.kind != .editor) return;
+    if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 둘이다(§4.1g)
+    if (term.rt.editor_doc == null) return;
+
+    var buf: std.ArrayList(editor_selection.Selection) = .empty;
+    defer buf.deinit(self.allocator);
+    const primary = term.rt.editor_selection orelse {
+        // 커서가 아예 없으면 그냥 하나 세운다 — 지울 것이 없다.
+        term.rt.editor_selection = editor_selection.Selection.at(off);
+        breakUndoGroup(term);
+        self.metal_dirty = true;
+        return;
+    };
+    buf.append(self.allocator, primary) catch return;
+    buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return;
+
+    // **품는 커서를 찾는다.** 배열 순서로 먼저 걸린 하나만 본다.
+    // **문서 순서로 세운 뒤 찾는다.** `buf` 는 primary 를 맨 앞에 넣어 모았으므로 배열 순서가 문서
+    // 순서와 다르다 — 그대로 「앞의 것」을 고르면 **화면에서 뒤에 있는 커서**가 primary 가 된다
+    // (`OPT2` 가 그것을 잡았다: 0·5·10 에서 10 을 지웠는데 0 이 아니라 5 가 이어야 한다).
+    std.mem.sort(editor_selection.Selection, buf.items, {}, struct {
+        fn lt(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
+            return a.start() < b.start();
+        }
+    }.lt);
+
+    var hit: ?usize = null;
+    for (buf.items, 0..) |sel, i| {
+        if (off >= sel.start() and off <= sel.end()) {
+            hit = i;
+            break;
+        }
+    }
+
+    if (hit) |i| {
+        // **커서가 하나뿐이면 아무 일도 안 한다**(§3.2c) — 지우면 caret 이 사라지고, 더하면 같은
+        // 자리에 둘이 생겨 한 프레임 동안 중복이 존재한다(상한도 하나를 더 센다).
+        //
+        // **이 줄을 지워도 판정자가 안 잡는다 — 동등 변이다**(적대적 검증 2026-09-06, 두 회차를
+        // 살아남았고 픽스처를 두 번 고쳐도 그대로였다). 지우면 `buf` 가 비고, 그러면
+        // `writeCursors` 가 `items.len == 0` 에서 **그냥 돌아가** 두 필드를 손대지 않는다 — 결과가
+        // 같다. 그 가드는 **다른 이유로** 필요하다(빈 배열에 `alloc(len - 1)` 은 underflow 다).
+        //
+        // 그럼에도 이 줄을 두는 이유는 **의도**다: "마지막 커서는 안 지운다"가 여기서 읽혀야
+        // 하고, `writeCursors` 의 가드가 언젠가 바뀌면 그때 이 자리가 답을 낸다.
+        if (buf.items.len == 1) return;
+        _ = buf.orderedRemove(i);
+        // **primary 를 지웠으면 남은 것 중 앞의 것이 잇는다**(§3.2c) — 제품은 primary 를 단수 필드에
+        // 들므로 그것을 지우면 필드가 빈다. 배열에서 원소를 빼는 것과 다르다.
+        const new_primary: usize = if (i == 0) 0 else i - 1;
+        writeCursors(self, term, buf.items, new_primary);
+    } else {
+        if (buf.items.len >= editor_selection.max_cursors) return; // 상한(§3.2) — 조용히 멈춘다
+        buf.append(self.allocator, editor_selection.Selection.at(off)) catch return;
+        // primary 는 **새로 찍은 커서**다(§3.2).
+        const merged = editor_selection.mergeOverlapping(buf.items, buf.items.len - 1);
+        writeCursors(self, term, buf.items[0..merged.len], merged.primary);
+    }
+    breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
+    revealPrimaryCaret(self, term);
+    self.metal_dirty = true;
+}
+
+/// selection 배열을 제품 두 필드로 내려쓴다 — primary 하나와 나머지.
+fn writeCursors(self: *AppSession, term: *Term, items: []const editor_selection.Selection, primary: usize) void {
+    if (items.len == 0) return;
+    const extras = self.allocator.alloc(editor_selection.Selection, items.len - 1) catch return;
+    var w: usize = 0;
+    for (items, 0..) |sel, idx| {
+        if (idx == primary) continue;
+        extras[w] = sel;
+        w += 1;
+    }
+    if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = items[primary];
+}
+
 /// 사각형을 줄마다 selection 으로 펴서 제품 두 필드에 쓴다(§3.2a).
 ///
 /// **매 프레임 다시 판다** — 결과를 누적하지 않으므로 사각형을 줄이면 커서도 줄고, 상한에 걸렸다
@@ -4096,6 +4190,18 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
         3 => {
             self.editor_drag_autoscroll = 0; // 손을 뗐다 — 안 끄면 tick이 영원히 굴린다
             self.editor_drag_autoscroll_accum_ms = 0;
+            // **끌지 않고 뗀 `⌥` 는 열 선택이 아니라 커서 추가다**(§3.2c). 갈림은 down 이 아니라
+            // **여기서** 정해진다 — down 시점에는 끌지 안 끌지 알 수 없다.
+            //
+            // **「움직였다」는 사각형이 자랐는가로 잰다** — 픽셀 임계값을 두면 그 수를 잰 근거가 없고
+            // (§10 임계값 규율), 셀 안에서 미세하게 흔들린 드래그는 같은 행·열이라 안 자란다:
+            // **셀 격자가 이미 그 임계값 노릇을 한다.**
+            if (owner.term.rt.editor_column_anchor) |a| {
+                if (a.to_row == a.from_row and a.to_col == a.from_col) {
+                    owner.term.rt.editor_column_anchor = null; // 사각형을 버린다
+                    toggleCursorAt(self, owner.term, self.editor_drag_down_offset);
+                }
+            }
             self.finishPointerGesture();
             return true;
         },
@@ -13119,6 +13225,257 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!moveCarets(fx.session, term, .char_right, false));
     try testing.expect(!moveCarets(fx.session, term, .line_down, false));
     try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
+}
+
+test "OPT1 ⌥클릭은 토글이다 — 더하고, 다시 찍으면 지운다 (§3.2c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "ot.txt", .data = "aaaa\nbbbb\ncccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ot.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // ⑴ **빈 자리를 찍으면 더한다** — primary 가 새 커서다(§3.2).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    toggleCursorAt(fx.session, term, 10);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.focus);
+
+    // ⑵ **그 자리를 다시 찍으면 지운다.**
+    toggleCursorAt(fx.session, term, 10);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus); // 남은 하나
+
+    // ⑶ **범위 안쪽을 찍어도 지운다** — 「그 자리」는 점이 아니라 selection 이 품는 범위다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    toggleCursorAt(fx.session, term, 5); // 두 번째 커서
+    {
+        // 그 커서를 범위로 넓힌다(5..9).
+        term.rt.editor_selection = editor_selection.Selection.fromPoints(5, 9);
+    }
+    toggleCursorAt(fx.session, term, 7); // 범위 **안쪽**
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // ⑷ **커서가 하나뿐인데 그 자리를 찍으면 아무 일도 안 한다**(§3.2c) — 지우면 caret 이 사라지고,
+    //    더하면 같은 자리에 둘이 생겨 한 프레임 동안 중복이 존재한다.
+    //
+    //    **`focus` 만 보면 안 잡힌다**(변이 O3 가 두 회차를 살아남았다) — `len == 1` 일 때 지우면
+    //    `writeCursors` 가 `items.len == 0` 에서 **그냥 돌아가** 필드가 옛 값 그대로다. 즉 "안 지운
+    //    것"과 "지웠는데 안 반영된 것"이 겉보기에 같다. **커서를 둘로 만들어 갈른다**: 하나를 지워
+    //    하나만 남긴 뒤 그 하나를 또 찍으면, 분기가 없을 때 `extra` 가 아니라 **primary 가 사라진다.**
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    toggleCursorAt(fx.session, term, 9); // 둘
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    toggleCursorAt(fx.session, term, 9); // 하나로
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    const only = term.rt.editor_selection orelse return error.NoSelection;
+    toggleCursorAt(fx.session, term, only.focus); // 그 하나를 또 찍는다 — 아무 일도 없어야 한다
+    try testing.expect(term.rt.editor_selection != null);
+    try testing.expectEqual(only.focus, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+
+    // ⑸ **겹친 커서가 여럿이면 먼저 걸린 하나만 지운다**(§3.2c). 마지막을 지우는 변이(O15)는
+    //    **겹치는 커서가 둘 이상**이라야 관측된다 — 범위 둘이 한 점을 함께 품게 만든다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(2, 8);
+    {
+        const extras = try allocator.alloc(editor_selection.Selection, 1);
+        extras[0] = editor_selection.Selection.fromPoints(4, 12); // 5 를 함께 품는다
+        if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = extras;
+    }
+    toggleCursorAt(fx.session, term, 5);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len); // 하나만 지웠다
+    // 문서 순서로 **앞의 것**(2..8)이 지워지고 뒤의 것(4..12)이 남는다.
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.anchorLo());
+}
+
+test "OPT2 primary 를 지우면 앞의 것이 잇는다 — 제품은 primary 를 단수 필드에 든다 (§3.2c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "op.txt", .data = "aaaa\nbbbb\ncccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "op.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // 0·5·10 셋을 만든다. primary 는 마지막에 찍은 10.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    toggleCursorAt(fx.session, term, 5);
+    toggleCursorAt(fx.session, term, 10);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.focus);
+
+    // **primary(10)를 지운다** — 필드가 비므로 남은 것 중 앞의 것(5)이 잇는다.
+    toggleCursorAt(fx.session, term, 10);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+
+    // **undo 묶음을 끊는다**(§3.3) — 커서가 편집 아닌 이유로 움직였다. 안 끊으면 클릭 뒤 친 글자를
+    // 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다(변이 O14).
+    term.rt.editor_last_edit_kind = .insert;
+    toggleCursorAt(fx.session, term, 15);
+    try testing.expectEqual(@as(@TypeOf(term.rt.editor_last_edit_kind), .none), term.rt.editor_last_edit_kind);
+}
+
+test "OPT3 게이트 — 비교 뷰·읽기 전용·커서 없음 (§3.2c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "og.txt", .data = "aa\nbb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "og.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // ⑴ **비교 뷰는 거절** — 축이 둘이라 문서 offset 이 없다(§4.1g).
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    toggleCursorAt(fx.session, term, 4);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    term.rt.editor_diff = null;
+
+    // ⑵ **읽기 전용에서는 선다** — 고르는 것은 문서를 안 바꾸고 복사가 주된 쓰임이다(§3.4).
+    term.rt.editor_doc.?.file.read_only = true;
+    toggleCursorAt(fx.session, term, 4);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    term.rt.editor_doc.?.file.read_only = false;
+
+    // ⑶ **커서가 아예 없으면 하나 세운다** — 지울 것이 없다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = null;
+    toggleCursorAt(fx.session, term, 3);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+}
+
+test "OPT5 상한을 넘겨 더하지 않는다 (§3.2·§3.2c)" {
+    // **상한 분기를 지워도 안 잡혔다**(변이 O6) — 픽스처가 `max_cursors` 근처를 안 갔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var n: usize = 0;
+    while (n < editor_selection.max_cursors + 8) : (n += 1) try buf.appendSlice(allocator, "xy\n");
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "olim.txt", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "olim.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // **정확히 상한만큼** 채운다 — primary 하나 + extra `max_cursors - 1` 개. 하나 모자라게 채우면
+    // 한 번 더 들어갈 자리가 남아 「상한을 안 본다」 변이가 그대로 산다(실측으로 그랬다).
+    const fill = editor_selection.max_cursors;
+    const extras = try allocator.alloc(editor_selection.Selection, fill - 1);
+    for (extras, 0..) |*e, i| e.* = editor_selection.Selection.at((i + 1) * 3);
+    if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // 빈 자리를 찍는다 — 상한이라 **안 는다**.
+    const before = term.rt.editor_extra_selections.len;
+    toggleCursorAt(fx.session, term, fill * 3 + 1);
+    try testing.expectEqual(before, term.rt.editor_extra_selections.len);
+    try testing.expect(term.rt.editor_extra_selections.len + 1 <= editor_selection.max_cursors);
+}
+
+test "OPT4 up 종단 — 안 끌면 커서 추가, 끌면 열 선택 (§3.2c)" {
+    // **파생만 재면 갈림이 빠져도 초록이다** — down 에서 사각형을 세우고 up 에서 갈라야 하는데,
+    // 그 갈림이 없으면 `⌥클릭` 이 폭 0 짜리 열 선택으로 끝난다(커서가 안 는다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "ou.txt", .data = "aaaaaaaa\nbbbbbbbb\ncccccccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ou.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const g = term.rt.editor_hit_geom;
+    const text_x0: i32 = @as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(g.content_left_px));
+    const top_y: i32 = @as(i32, @intCast(body.y)) + inset;
+    const pane = pane_ops.activePane(fx.session);
+
+    const x0: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(2 * @as(u32, g.cell_w_px))));
+    const y0: f64 = @floatFromInt(top_y + 1);
+    const y1: f64 = @floatFromInt(top_y + 1 + @as(i32, @intCast(2 * @as(u32, g.cell_h_px))));
+
+    // ⑴ **안 끌고 뗐다 → 커서 추가.** 첫 줄에 이미 caret 이 있으니 둘이 된다.
+    //
+    //    **커서를 둘 세워 둔다** — 하나만 두면 down 이 그것을 지워도 up 이 다시 더해 **결과가 같아진다**
+    //    (변이 O10 이 그렇게 살아남았다). 둘이면 지우는 순간 하나가 사라져 관측된다.
+    term.rt.editor_selection = editor_selection.Selection.at(20); // 3번 줄
+    clearExtraSelections(fx.session, term);
+    {
+        const extras = try allocator.alloc(editor_selection.Selection, 1);
+        extras[0] = editor_selection.Selection.at(10); // 2번 줄
+        term.rt.editor_extra_selections = extras;
+    }
+    try testing.expect(beginBodySelection(fx.session, pane, x0, y0, 8));
+    try testing.expect(term.rt.editor_column_anchor != null); // down 에서 사각형이 선다
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len); // down 이 안 지웠다
+    _ = dragBodySelection(fx.session, 3, x0, y0); // up — 안 끌었다
+    try testing.expectEqual(@as(?editor_selection.ColumnAnchor, null), term.rt.editor_column_anchor);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len); // 셋이 됐다
+
+    //    **더해진 자리가 down 의 offset 이다**(§3.2c) — up 좌표로 다시 hit-test 하면 손을 떼며 흔들린
+    //    자리가 잡힌다(변이 O13).
+    //
+    //    **첫 줄로 재면 안 잡힌다** — `editor_drag_down_offset` 의 초기값이 0 이라 그 필드를 안 세워도
+    //    첫 줄을 가리킨다(두 회차를 그렇게 살아남았다). **셋째 줄**을 눌러 0 과 갈라야 관측된다.
+    try testing.expect(term.rt.editor_selection.?.focus < 9); // 첫 줄 "aaaaaaaa" 안
+    {
+        clearExtraSelections(fx.session, term);
+        term.rt.editor_column_anchor = null;
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        const y2: f64 = @floatFromInt(top_y + 1 + @as(i32, @intCast(2 * @as(u32, g.cell_h_px))));
+        try testing.expect(beginBodySelection(fx.session, pane, x0, y2, 8));
+        _ = dragBodySelection(fx.session, 3, x0, y2);
+        // 셋째 줄 "cccccccc" 는 offset 18.. 이다 — 필드를 안 세우면 0(첫 줄)이 잡힌다.
+        try testing.expect(term.rt.editor_selection.?.focus >= 18);
+    }
+
+    // ⑵ **끌고 뗐다 → 열 선택**(커서 추가가 아니다). 세 줄이므로 extra 가 둘이다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_column_anchor = null;
+    try testing.expect(beginBodySelection(fx.session, pane, x0, y0, 8));
+    _ = dragBodySelection(fx.session, 2, x0, y1);
+    _ = dragBodySelection(fx.session, 3, x0, y1);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
 }
 
 test "COL4 시각 좌표를 든 것은 함께 죽는다 — 탭 폭·랩·접힘 (§3.2a)" {

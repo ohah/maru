@@ -1,0 +1,96 @@
+name: Session host authored release pair attestation
+description: Attest one retained baseline evidence and candidate manifest pair without promoting bundle locators to authority
+
+inputs:
+  preparation-path:
+    description: Canonical absolute pathname of the retained stage-3 preparation directory
+    required: true
+  evidence-path:
+    description: Canonical absolute pathname of the baseline evidence direct child
+    required: true
+  evidence-name:
+    description: Exact baseline evidence basename
+    required: true
+  manifest-path:
+    description: Canonical absolute pathname of the candidate manifest direct child
+    required: true
+  manifest-name:
+    description: Exact candidate manifest basename
+    required: true
+
+outputs:
+  evidence-bundle-path:
+    value: ${{ steps.final.outputs.evidence-bundle-path }}
+  manifest-bundle-path:
+    value: ${{ steps.final.outputs.manifest-bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Pin authored pair
+    id: pin
+    shell: bash
+    env:
+      MARU_PREPARATION_PATH: ${{ inputs.preparation-path }}
+      MARU_EVIDENCE_PATH: ${{ inputs.evidence-path }}
+      MARU_EVIDENCE_NAME: ${{ inputs.evidence-name }}
+      MARU_MANIFEST_PATH: ${{ inputs.manifest-path }}
+      MARU_MANIFEST_NAME: ${{ inputs.manifest-name }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-authored-pair.sh" pin \
+        "$MARU_PREPARATION_PATH" \
+        "$MARU_EVIDENCE_PATH" "$MARU_EVIDENCE_NAME" \
+        "$MARU_MANIFEST_PATH" "$MARU_MANIFEST_NAME" >> "$GITHUB_OUTPUT"
+
+  - name: Attest baseline evidence
+    id: evidence
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.evidence-path }}
+      subject-name: ${{ inputs.evidence-name }}
+
+  - name: Attest candidate manifest
+    id: manifest
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.manifest-path }}
+      subject-name: ${{ inputs.manifest-name }}
+
+  - name: Fence authored pair and bundles
+    id: final
+    shell: bash
+    env:
+      MARU_PREPARATION_PATH: ${{ inputs.preparation-path }}
+      MARU_EVIDENCE_PATH: ${{ inputs.evidence-path }}
+      MARU_EVIDENCE_NAME: ${{ inputs.evidence-name }}
+      MARU_MANIFEST_PATH: ${{ inputs.manifest-path }}
+      MARU_MANIFEST_NAME: ${{ inputs.manifest-name }}
+      MARU_PREPARATION_DEVICE: ${{ steps.pin.outputs.preparation_device }}
+      MARU_PREPARATION_INODE: ${{ steps.pin.outputs.preparation_inode }}
+      MARU_PREPARATION_OWNER: ${{ steps.pin.outputs.preparation_owner }}
+      MARU_PREPARATION_MODE: ${{ steps.pin.outputs.preparation_mode }}
+      MARU_EVIDENCE_DEVICE: ${{ steps.pin.outputs.evidence_device }}
+      MARU_EVIDENCE_INODE: ${{ steps.pin.outputs.evidence_inode }}
+      MARU_EVIDENCE_SIZE: ${{ steps.pin.outputs.evidence_size }}
+      MARU_EVIDENCE_LINKS: ${{ steps.pin.outputs.evidence_links }}
+      MARU_EVIDENCE_MODE: ${{ steps.pin.outputs.evidence_mode }}
+      MARU_EVIDENCE_SHA256: ${{ steps.pin.outputs.evidence_sha256 }}
+      MARU_MANIFEST_DEVICE: ${{ steps.pin.outputs.manifest_device }}
+      MARU_MANIFEST_INODE: ${{ steps.pin.outputs.manifest_inode }}
+      MARU_MANIFEST_SIZE: ${{ steps.pin.outputs.manifest_size }}
+      MARU_MANIFEST_LINKS: ${{ steps.pin.outputs.manifest_links }}
+      MARU_MANIFEST_MODE: ${{ steps.pin.outputs.manifest_mode }}
+      MARU_MANIFEST_SHA256: ${{ steps.pin.outputs.manifest_sha256 }}
+      MARU_EVIDENCE_BUNDLE: ${{ steps.evidence.outputs.bundle-path }}
+      MARU_MANIFEST_BUNDLE: ${{ steps.manifest.outputs.bundle-path }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/pin-authored-pair.sh" verify \
+        "$MARU_PREPARATION_PATH" \
+        "$MARU_EVIDENCE_PATH" "$MARU_EVIDENCE_NAME" \
+        "$MARU_MANIFEST_PATH" "$MARU_MANIFEST_NAME" \
+        "$MARU_PREPARATION_DEVICE" "$MARU_PREPARATION_INODE" "$MARU_PREPARATION_OWNER" "$MARU_PREPARATION_MODE" \
+        "$MARU_EVIDENCE_DEVICE" "$MARU_EVIDENCE_INODE" "$MARU_EVIDENCE_SIZE" "$MARU_EVIDENCE_LINKS" "$MARU_EVIDENCE_MODE" "$MARU_EVIDENCE_SHA256" \
+        "$MARU_MANIFEST_DEVICE" "$MARU_MANIFEST_INODE" "$MARU_MANIFEST_SIZE" "$MARU_MANIFEST_LINKS" "$MARU_MANIFEST_MODE" "$MARU_MANIFEST_SHA256" \
+        "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" >> "$GITHUB_OUTPUT"

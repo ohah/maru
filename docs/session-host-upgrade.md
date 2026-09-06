@@ -3371,10 +3371,11 @@ job이 소유하며 local helper에는 subject/bundle pathname과 고정된 관�
 focused gate `test-session-host-release-authored-attestation-action`은 action source에서 pair pre-pin→기존 single-subject evidence exact
 once→기존 single-subject manifest exact once→pair final fence와 output 순서를 고정하고, nested action이 pinned single-subject
 component 이외의 `actions/attest` 또는 외부 action을 직접 선택하지 못하게 한다. actual filesystem helper 행은 canonical pair 성공,
-두 subject 중 어느 하나의 중간 mutation, directory pathname replacement와 extra/missing entry, wrong owner/mode, swapped role/name,
+두 subject 중 어느 하나의 중간 mutation, directory pathname replacement와 extra/missing entry, mode, swapped role/name,
 relative·control path, symlink·hardlink·directory·empty/oversized bundle, preparation 하위 bundle,
 subject/bundle pathname·inode alias와 partial output 0을 Linux·macOS에서 검증한다. bundle 상한 literal은
-`release_adapter_attestation_bundle_contract.max_bytes`와 gate에서 함께 비교해 shell/Zig SSOT drift를 막는다. 모든 fixture는 harness-owned `mkdtemp` 아래에만
+`release_adapter_attestation_bundle_contract.max_bytes`와 gate에서 함께 비교하고 owner 비교는 current effective UID source contract로
+고정해 shell/Zig SSOT drift와 소유자 검사 누락을 막는다. 모든 fixture는 harness-owned `mkdtemp` 아래에만
 있고 실제 앱 session-host registry·manifest·socket·process와 GitHub release/credential을 찾거나 수정하지 않는다. 이 slice는
 stage-4 pair action과 locator handoff만 닫으며 retained stage-3 semantic reopen, current draft 재인증, bundle cryptographic binding,
 aggregate prepare/finalize 삽입, live workflow 배선과 frozen signed U5 제품 E2E는 아직 완료하지 않는다.

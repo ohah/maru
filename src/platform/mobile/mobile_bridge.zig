@@ -2734,6 +2734,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
 
     // **44 이상 정사각**(§5.1 — 작게 그리고 넓게 받는다). 설정 화면과 같은 자리·같은 크기다.
     term_back_rect = .{ .x = term_bar_rect.x, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(term_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
     if (term_back_pressed) push(.{
         .x = @intFromFloat(term_back_rect.x),
         .y = @intFromFloat(term_back_rect.y),
@@ -2768,6 +2769,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     // **키보드를 다시 올리는 자리.** 앱이 키보드를 안 내리지만 사용자가 한 번 내리면
     // (스와이프·⌘K) 다시 올릴 길이 없었다 — 설정 칸을 누르는 것 말고는(사용자 요청).
     term_kb_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 2, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(term_kb_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_keyboard) });
     if (term_kb_pressed) push(.{
         .x = @intFromFloat(term_kb_rect.x),
         .y = @intFromFloat(term_kb_rect.y),
@@ -2788,6 +2790,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     // **끊는 자리.** 자판 왼쪽 고정이다 — 복사가 나타났다 사라져도 이 자리는 안 움직인다
     // (조건부 버튼이 다른 버튼을 밀면 손가락이 겨눈 자리가 바뀐다).
     term_disc_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 3, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(term_disc_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_disconnect) });
     if (term_disc_pressed) push(.{
         .x = @intFromFloat(term_disc_rect.x),
         .y = @intFromFloat(term_disc_rect.y),
@@ -4570,6 +4573,16 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             const kx = @floor(band_x + @as(f32, @floatFromInt(col)) * cell_w + key_gap / 2);
             const ky = @floor(band.y + 5.0 + @as(f32, @floatFromInt(row)) * (key_h + key_gap));
             key_bar_rects[i] = .{ .x = kx, .y = ky, .w = kw, .h = key_h };
+            // **키바 키도 버튼이다.** 눌러 둔 수정자는 `selected` 로 읽히고, 못 쓰는 키는
+            // 서술자를 **빼지 않고** `enabled = false` 로 낸다 — 계약이 「누를 수 없는 컨트롤도
+            // 자리와 이름은 있다」로 정한 자리다(P1).
+            const kr = key_bar_rects[i];
+            noteA11y(.{ .x = kr.x, .y = kr.y, .w = kr.w, .h = kr.h }, .{
+                .role = .button,
+                .label = key_bar[i].label,
+                .enabled = !(key_bar[i].is_copy and !copyEnabled()),
+                .selected = armed_mods & key_bar[i].sticky_mod != 0,
+            });
             drawKey(i, kx, ky, kw, tk);
         }
         // **스크롤 표시(`<`/`>`)는 없앴다** — 두 줄 격자라 전부 한눈에 들어와서 "더 있다" 를
@@ -7158,6 +7171,9 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     stepBodyFling();
     if (term_core) |*core| checkLongPress(core);
     quad_count = 0;
+    // **서술자도 프레임마다 비운다**(M9). 안 비우면 지난 프레임에 있던 버튼을 계속 읽는다 —
+    // rect 가 0 이면 안 답하는 규율과 같은 이유다.
+    a11y_count = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패
     // (`maru_mobile_input` 의 core write)가 아무도 읽기 전에 지워진다 — 키가 조용히
     // 사라지던 것이 이번 리뷰 최상위 결함이었는데, 그 신호가 딱 그 경로에서만 안 남았다.
@@ -7185,6 +7201,100 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     }
     noteFrameChanged();
     return @intCast(quad_count);
+}
+
+// ── 접근성 서술자 (M9) ──────────────────────────────────────────────────────
+//
+// **계약은 데스크톱 것이다** — `chrome/ui/semantics.zig` 의 `Role`·`Semantics` 를 그대로 빌린다
+// (CIM §3). 데스크톱은 `tree` 노드가 서술자를 싣고 Swift 어댑터가 그것을 네이티브 요소로
+// 투영하는데, **모바일은 UI 를 거의 직접 그린다**(tree 노드 다섯 vs 누를 수 있는 사각형 서른일곱)
+// — 그래서 tree 의 배관이 여기서는 거의 안 쓰이고, 그리는 자리가 스스로 내야 한다.
+//
+// **내는 자리는 rect 를 기록하는 그 자리다.** 「그리는 자리와 누르는 자리가 같아야 한다」는
+// 규율이 이 파일에 이미 있는데(`key_bar_rects`·`term_back_rect`…), 서술자를 **다른 곳에서**
+// 만들면 세 번째 진실이 생겨 조용히 갈린다. 그래서 `noteA11y` 는 rect 를 적는 줄 옆에 선다.
+//
+// **아직 host 어댑터가 없다**(iOS `UIAccessibilityElement`·Android `AccessibilityNodeInfo`).
+// 이 슬라이스는 그 어댑터가 읽을 것을 내는 데까지다 — 그 전까지 VoiceOver·TalkBack 에게는
+// 여전히 빈 화면이고, 그 사실을 계획에 적어 둔다.
+const A11yNode = struct {
+    rect: SetRect,
+    sem: tree.Semantics,
+};
+/// 이번 프레임의 서술자. **프레임마다 다시 만든다** — 안 그리면 안 낸다는 것이 곧 계약이라
+/// (`key_bar_rect` 가 0 을 답하는 규율과 같다), 남겨 두면 없는 것을 읽게 된다.
+var a11y_nodes: [max_a11y_nodes]A11yNode = undefined;
+var a11y_count: usize = 0;
+const max_a11y_nodes = 128;
+
+/// 지금 그린 면 하나를 접근성에 알린다. **폭이 0 이면 안 그려진 것**이라 안 낸다 — 이 파일의
+/// rect 규율과 같은 판정이다(옛 자리를 답하면 없는 버튼이 읽힌다).
+fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
+    if (rect.w <= 0 or rect.h <= 0) return;
+    if (a11y_count >= a11y_nodes.len) {
+        setLastError("a11y_overflow");
+        return;
+    }
+    a11y_nodes[a11y_count] = .{ .rect = rect, .sem = sem };
+    a11y_count += 1;
+}
+
+/// 이번 프레임의 서술자 개수. **build 뒤에 읽는다.**
+pub export fn maru_mobile_a11y_count() u32 {
+    return @intCast(a11y_count);
+}
+
+/// 서술자 하나의 자리. `maru_mobile_keybar_rect` 와 **같은 꾸림**(x<<48|y<<32|w<<16|h)이라
+/// host 가 두 가지 푸는 법을 안 익혀도 된다. 없는 index 는 0.
+pub export fn maru_mobile_a11y_rect(index: u32) u64 {
+    if (index >= a11y_count) return 0;
+    const r = a11y_nodes[index].rect;
+    const x: u64 = @intFromFloat(@max(0, r.x));
+    const y: u64 = @intFromFloat(@max(0, r.y));
+    const w: u64 = @intFromFloat(@max(0, r.w));
+    const h: u64 = @intFromFloat(@max(0, r.h));
+    return (x << 48) | (y << 32) | (w << 16) | h;
+}
+
+/// 역할(`chrome/ui/semantics.zig` 의 `Role` 순번). 없는 index 는 0xFFFF_FFFF.
+pub export fn maru_mobile_a11y_role(index: u32) u32 {
+    if (index >= a11y_count) return 0xFFFF_FFFF;
+    return @intFromEnum(a11y_nodes[index].sem.role);
+}
+
+/// 상태 비트. **한 번에 읽어 간다** — 항목마다 호출을 넷 하면 host 코드가 그만큼 길어지고,
+/// 그 사이에 프레임이 바뀌면 서로 다른 프레임의 값을 섞는다.
+/// bit0 enabled · bit1 selected · bit2 focusable · bit3 expanded 를 아는가 · bit4 expanded 값.
+pub export fn maru_mobile_a11y_state(index: u32) u32 {
+    if (index >= a11y_count) return 0;
+    const s = a11y_nodes[index].sem;
+    var bits: u32 = 0;
+    if (s.enabled) bits |= 1;
+    if (s.selected) bits |= 2;
+    if (s.focusable) bits |= 4;
+    if (s.expanded) |e| {
+        bits |= 8;
+        if (e) bits |= 16;
+    }
+    return bits;
+}
+
+/// 이름을 `out` 에 복사하고 길이를 답한다(잘리면 잘린 길이). **복사한다** — 라벨이 가리키는
+/// 것은 다음 프레임에 사라질 수 있고, host 가 그 뒤에 읽으면 남의 메모리를 읽는다.
+pub export fn maru_mobile_a11y_label(index: u32, out: [*]u8, cap: usize) usize {
+    if (index >= a11y_count or cap == 0) return 0;
+    const label = a11y_nodes[index].sem.label;
+    const n = @min(label.len, cap);
+    @memcpy(out[0..n], label[0..n]);
+    return n;
+}
+
+/// 판정자가 보는 서술자 한 줄. `A11yNode` 를 그대로 내면 그 타입이 밖으로 새므로 뷰만 낸다.
+pub const A11yNodeView = A11yNode;
+
+/// 판정자용 — 이번 프레임의 서술자를 그대로 본다.
+pub fn a11yNodesForTest() []const A11yNodeView {
+    return a11y_nodes[0..a11y_count];
 }
 
 // ── 안 바뀐 프레임은 GPU 를 안 쓴다 (M14) ────────────────────────────────────

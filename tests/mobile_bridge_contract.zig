@@ -6969,3 +6969,92 @@ test "M14 idle: 색«만» 바뀌어도 깬다 — quad 개수는 그대로다" 
     // 그림은 다르다 — 그래서 깨야 한다.
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
 }
+
+// ── 접근성 서술자 (M9 첫 슬라이스)
+//
+// 지금 VoiceOver·TalkBack 에게 모바일은 **빈 화면**이다 — GPU quad 뿐이라 읽을 것이 없다.
+// 계약(`chrome/ui/semantics.zig`)과 데스크톱 구현은 이미 있으므로 여기서는 **브리지가 낼 것을
+// 내는가**를 잰다. host 어댑터는 다음 슬라이스라, 이것만으로는 아직 아무도 못 듣는다.
+
+fn a11yFind(label: []const u8) ?bridge.A11yNodeView {
+    for (bridge.a11yNodesForTest()) |n| {
+        if (std.mem.eql(u8, n.sem.label, label)) return n;
+    }
+    return null;
+}
+
+test "M9 서술자: 터미널 앱 바의 세 자리를 이름과 역할로 낸다" {
+    bridge.pushScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+
+    for ([_][]const u8{ "뒤로 가기", "자판", "끊기" }) |label| {
+        const n = a11yFind(label) orelse {
+            std.debug.print("서술자에 «{s}» 가 없다\n", .{label});
+            return error.MissingDescriptor;
+        };
+        try std.testing.expectEqual(maru.chrome.ui.semantics.Role.button, n.sem.role);
+        // **자리가 있어야 읽힌다** — 0 짜리 사각형은 스크린 리더가 못 짚는다.
+        try std.testing.expect(n.rect.w > 0 and n.rect.h > 0);
+    }
+}
+
+test "M9 서술자: «읽는 자리» 가 «누르는 자리» 와 같다" {
+    // 이 파일의 규율(그리는 자리 = 누르는 자리)에 **읽는 자리**를 묶는다. 서술자를 다른 곳에서
+    // 만들면 세 번째 진실이 생겨 조용히 갈리고, 그러면 스크린 리더가 짚은 곳과 손가락이 닿는
+    // 곳이 어긋난다 — 눈으로는 안 보이는 결함이다.
+    bridge.pushScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+
+    const kb = a11yFind("자판") orelse return error.MissingDescriptor;
+    const center = bridge.terminalKeyboardCenter() orelse return error.NoKeyboardButton;
+    try std.testing.expect(center.x >= kb.rect.x and center.x <= kb.rect.x + kb.rect.w);
+    try std.testing.expect(center.y >= kb.rect.y and center.y <= kb.rect.y + kb.rect.h);
+
+    const disc = a11yFind("끊기") orelse return error.MissingDescriptor;
+    const dc = bridge.terminalDisconnectCenter() orelse return error.NoDisconnectButton;
+    try std.testing.expect(dc.x >= disc.rect.x and dc.x <= disc.rect.x + disc.rect.w);
+    try std.testing.expect(dc.y >= disc.rect.y and dc.y <= disc.rect.y + disc.rect.h);
+}
+
+test "M9 서술자: 키바 키 열둘이 다 나오고, 눌러 둔 수정자는 selected 다" {
+    bridge.pushScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    var keys: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        for ([_][]const u8{ "esc", "tab", "home", "end", "pgup", "ctrl", "alt", "pgdn" }) |k| {
+            if (std.mem.eql(u8, n.sem.label, k)) keys += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 8), keys); // 화살표 넷은 라벨이 기호라 뺀다
+
+    // ctrl 을 눌러 두면 그 서술자가 «고른 상태» 로 읽힌다.
+    const ctrl_before = a11yFind("ctrl") orelse return error.MissingDescriptor;
+    try std.testing.expect(!ctrl_before.sem.selected);
+    tapAt(ctrl_before.rect.x + ctrl_before.rect.w / 2, ctrl_before.rect.y + ctrl_before.rect.h / 2);
+    _ = bridge.maru_mobile_build(411, 841, now());
+    const ctrl_after = a11yFind("ctrl") orelse return error.MissingDescriptor;
+    try std.testing.expect(ctrl_after.sem.selected);
+}
+
+test "M9 서술자: 프레임마다 다시 만든다 — 쌓이지 않는다" {
+    // **처음에는 「밀린 화면으로 옮기면 터미널 것이 사라진다」로 적었다가 붉었다.** 그것이 아니라
+    // `buildUi` 가 **어느 화면이든 터미널 층을 먼저 세운다** — 코어 격자가 살아 있어야 돌아왔을 때
+    // 화면이 그대로이고, `key_bar_ready` 가 거짓말을 안 하기 때문이다(그 자리 주석이 그렇게 적고
+    // 있었다). 그러니 「안 낸다」가 아니라 **「쌓이지 않는다」**가 이 축의 참인 성질이다.
+    bridge.pushScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    const first = bridge.maru_mobile_a11y_count();
+    try std.testing.expect(first > 0);
+
+    // 같은 화면을 여러 번 그려도 개수가 안 는다 — 안 비우면 여기서 배로 는다.
+    _ = bridge.maru_mobile_build(411, 841, now());
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expectEqual(first, bridge.maru_mobile_a11y_count());
+
+    // 그리고 **없는 index 는 정직하게 답한다** — 옛 자리를 돌려주면 없는 버튼이 읽힌다.
+    try std.testing.expectEqual(@as(u64, 0), bridge.maru_mobile_a11y_rect(first));
+    try std.testing.expectEqual(@as(u32, 0xFFFF_FFFF), bridge.maru_mobile_a11y_role(first));
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_state(first));
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_label(first, &buf, buf.len));
+}

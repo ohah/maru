@@ -444,13 +444,24 @@ fn scanClaudeToolUses(
     line_offset: u64,
     out: *std.ArrayList(Hit),
 ) !void {
-    const m = std.mem.indexOf(u8, line, claude_tool_use_marker) orelse return;
-    const after = m + claude_tool_use_marker.len;
-    const name = findQuotedValue(line, after, name_key) orelse return;
-    const activity = Activity.fromToolName(line[name.start .. name.start + name.len]);
-    // 대상이 없으면 **이름이 대상이다** — 「무엇을 했는지」를 못 적느니 도구 이름이라도 적는다.
-    const target = pickClaudeTarget(line, after) orelse name;
-    try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity);
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, line, i, claude_tool_use_marker)) |m| {
+        const after = m + claude_tool_use_marker.len;
+        // **자기 레코드 안에서만 값을 찾는다.** 실측은 「한 줄에 하나」였지만(39,618 / 39,618) 코드가
+        // 그 전제에 **의존하면** provider 가 포맷을 바꾸는 날 조용히 틀린다 — 적대적 검증에서 실제로
+        // 첫 호출의 라벨로 **두 번째 호출의 경로**가 나왔다. 다음 마커 앞까지로 범위를 닫으면 전제가
+        // 깨져도 각자 제 값을 갖는다(전제가 참인 동안 비용은 그대로다).
+        const end = std.mem.indexOfPos(u8, line, after, claude_tool_use_marker) orelse line.len;
+        const scope = line[0..end];
+        i = end;
+
+        const name = findQuotedValue(scope, after, name_key) orelse continue;
+        const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
+        // 대상이 없으면 **이름이 대상이다** — 「무엇을 했는지」를 못 적느니 도구 이름이라도 적는다.
+        const target = pickClaudeTarget(scope, after) orelse name;
+        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity);
+        if (end == line.len) break;
+    }
 }
 
 /// Codex 의 도구 호출 한 건. `custom_tool_call` 과 `function_call` 두 모양을 다 본다.
@@ -466,9 +477,13 @@ fn scanCodexToolCalls(
     const m = std.mem.indexOf(u8, line, codex_custom_tool_call_marker) orelse
         std.mem.indexOf(u8, line, codex_function_call_marker) orelse return;
     const after = m;
-    const name = findQuotedValue(line, after, name_key) orelse return;
-    const activity = Activity.fromToolName(line[name.start .. name.start + name.len]);
-    const target = pickCodexTarget(line, after) orelse name;
+    // Claude 쪽과 같은 이유로 범위를 닫는다 — 뒤에 또 호출이 있으면 그 값은 그쪽 것이다.
+    const next = std.mem.indexOfPos(u8, line, after + 1, codex_custom_tool_call_marker) orelse
+        std.mem.indexOfPos(u8, line, after + 1, codex_function_call_marker) orelse line.len;
+    const scope = line[0..next];
+    const name = findQuotedValue(scope, after, name_key) orelse return;
+    const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
+    const target = pickCodexTarget(scope, after) orelse name;
     try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity);
 }
 

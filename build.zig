@@ -3302,7 +3302,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
-        run_remote_explorer_tests.addArg("--maru-expect-tests=7"); // 이름 있는 4 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+        run_remote_explorer_tests.addArg("--maru-expect-tests=8"); // 이름 있는 5 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
     }
@@ -5244,7 +5244,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_file_tree_axis_boundary_tests = b.addRunArtifact(remote_file_tree_axis_boundary_tests);
-    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=5");
+    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=6");
     run_remote_file_tree_axis_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_remote_file_tree_axis_boundary_tests.step);
 

@@ -519,6 +519,24 @@ pub fn startFileTreeEdit(self: *AppSession, edit_kind: FileTreeEditKind) void {
         self.showNoticeKey(.fp_mutation_in_progress);
         return;
     }
+    // **원격 갈래**(RF6b). 이름 변경만 연다 — 만들기·삭제는 아직이다(삭제는 ④ 결정, RF6c).
+    if (self.file_tree_rows_remote) {
+        if (edit_kind != .rename) {
+            self.showNoticeKey(.fp_remote_change_unsupported);
+            return;
+        }
+        const remote_target = selectedRemoteFileTreeRenameTarget(self) orelse {
+            self.showNoticeKey(.fp_select_first);
+            return;
+        };
+        var copied = copyFileTreeEditTarget(remote_target, edit_kind) orelse {
+            self.showNoticeKey(.fp_path_too_long);
+            return;
+        };
+        copied.remote = true;
+        settings_ops.startRename(self, .{ .file_tree = copied });
+        return;
+    }
     const target = selectedFileTreeMutationTarget(self) orelse {
         self.showNoticeKey(.fp_select_first);
         return;
@@ -786,6 +804,15 @@ pub fn updateFileTree(self: *AppSession) !void {
         // 거절되거나 실패하면 그 화면은 판정 없이 남는다 — 모르면 흐리게 하지 않는다.
         git_ops.requestIgnoredForPaths(self, result.path, result.entries.items);
         changed = true;
+    }
+
+    // 원격 이름 변경 결말(RF6b) — 같은 드레인 규율.
+    {
+        self.remote_rename_mutex.lockUncancelable(self.io);
+        const got = self.remote_rename_outcome;
+        self.remote_rename_outcome = null;
+        self.remote_rename_mutex.unlock(self.io);
+        if (got) |result| finishRemoteRename(self, result);
     }
 
     // 원격 파일 열기 결말(RF4) — 워커가 남긴 결과를 tick 이 가져간다.
@@ -1102,6 +1129,172 @@ pub const RemoteFileOutcome = struct {
     exit_code: c_int,
     supported: bool = true,
 };
+
+/// 원격 이름 변경 작업(RF6b). RF4 의 파일 열기와 같은 모양이다 — 사용자 조작 단발이라 큐가 필요 없고,
+/// **로컬 변경 백엔드를 안 탄다**(§2.4 — 그쪽은 휴지통 staging·롤백·에디터 잠금이 로컬 파일시스템
+/// 의미에 묶여 있어, 원격 경로가 들어가면 같은 철자의 로컬 파일이 대상이 된다).
+pub const RemoteRenameJob = struct {
+    session: *AppSession,
+    parent: []u8,
+    old_name: []u8,
+    new_name: []u8,
+    dest: []u8,
+    ctl: []u8,
+    /// 행이 들고 있던 신원 — 저쪽이 이것과 다르면 **안 옮기고** stale 로 답한다(§2.3 ⑶).
+    dev: u64,
+    ino: u64,
+};
+
+pub const RemoteRenameOutcome = struct {
+    /// 저쪽이 답한 결말. 전송 자체가 실패했으면 null(= 「못 했다」).
+    outcome: ?remote_file_mutation.Outcome,
+};
+
+/// 편집기가 확정한 이름을 원격 이름 변경으로 보낸다(RF6b). **이름 규칙은 로컬과 같은 순수 함수**가
+/// 소유한다 — 두 벌이면 한쪽만 고쳐진다.
+pub fn enqueueRemoteFileTreeRename(self: *AppSession, target: FileTreeEditTarget, name: []const u8) bool {
+    if (comptime builtin.os.tag != .macos) return false;
+    if (target.edit_kind != .rename) return false;
+    if (!self.file_tree_rows_remote or !self.remote_explorer.active) {
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return false;
+    }
+    file_tree_mutation.validateName(name) catch {
+        self.showNoticeKey(.fp_name_invalid);
+        return false;
+    };
+    const path = target.path();
+    const old_name = std.fs.path.basename(path);
+    if (std.mem.eql(u8, old_name, name)) {
+        self.showNoticeKey(.fp_name_unchanged);
+        return false;
+    }
+    const parent = std.fs.path.dirname(path) orelse {
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return false;
+    };
+    const identity = target.identity orelse {
+        self.showNoticeKey(.fp_identity_not_ready);
+        return false;
+    };
+    beginRemoteRename(self, parent, old_name, name, identity.device, identity.inode);
+    return true;
+}
+
+/// 원격 트리 행의 이름을 바꾼다(RF6b). 이름 검증은 **로컬과 같은 순수 함수**를 쓴다
+/// (`file_tree_mutation.validateName`) — 규칙이 두 벌이면 한쪽만 고쳐진다.
+pub fn beginRemoteRename(self: *AppSession, parent: []const u8, old_name: []const u8, new_name: []const u8, dev: u64, ino: u64) void {
+    if (comptime builtin.os.tag != .macos) return;
+    const re = &self.remote_explorer;
+    if (!re.active or re.ctl.items.len == 0 or re.dest.items.len == 0) {
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return;
+    }
+    if (self.remote_rename_inflight) {
+        self.showNoticeKey(.fp_remote_file_busy);
+        return;
+    }
+    const job = self.allocator.create(RemoteRenameJob) catch return;
+    job.* = .{
+        .session = self,
+        .parent = self.allocator.dupe(u8, parent) catch {
+            self.allocator.destroy(job);
+            return;
+        },
+        .old_name = &.{},
+        .new_name = &.{},
+        .dest = &.{},
+        .ctl = &.{},
+        .dev = dev,
+        .ino = ino,
+    };
+    var ok = false;
+    defer if (!ok) {
+        self.allocator.free(job.ctl);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.new_name);
+        self.allocator.free(job.old_name);
+        self.allocator.free(job.parent);
+        self.allocator.destroy(job);
+    };
+    job.old_name = self.allocator.dupe(u8, old_name) catch return;
+    job.new_name = self.allocator.dupe(u8, new_name) catch return;
+    job.dest = self.allocator.dupe(u8, re.dest.items) catch return;
+    job.ctl = self.allocator.dupe(u8, re.ctl.items) catch return;
+
+    self.remote_rename_inflight = true;
+    const thread = std.Thread.spawn(.{}, remoteRenameWorker, .{job}) catch {
+        self.remote_rename_inflight = false;
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return;
+    };
+    thread.detach();
+    ok = true;
+}
+
+/// 백그라운드: 헬퍼 `mv` 를 돌려 결말을 슬롯에 둔다. **std.Io 를 안 만진다**(ssh_upload 규율).
+fn remoteRenameWorker(job: *RemoteRenameJob) void {
+    const self = job.session;
+    const allocator = self.allocator;
+    defer {
+        allocator.free(job.ctl);
+        allocator.free(job.dest);
+        allocator.free(job.new_name);
+        allocator.free(job.old_name);
+        allocator.free(job.parent);
+        allocator.destroy(job);
+    }
+    var out: []u8 = &.{};
+    var outcome: ?remote_file_mutation.Outcome = null;
+    var dev_buf: [24]u8 = undefined;
+    var ino_buf: [24]u8 = undefined;
+    const dev_text = std.fmt.bufPrint(&dev_buf, "{d}", .{job.dev}) catch "";
+    const ino_text = std.fmt.bufPrint(&ino_buf, "{d}", .{job.ino}) catch "";
+    const code = ssh_upload.runRemoteCapped(
+        allocator,
+        job.ctl,
+        job.dest,
+        ssh_upload.rename_script,
+        &.{ job.parent, job.old_name, job.new_name, dev_text, ino_text },
+        remote_file_mutation.max_wire_bytes,
+        &out,
+    ) catch -1;
+    defer allocator.free(out);
+    // 전송이 성공했을 때만 답을 믿는다 — **답이 없거나 잘렸으면 「못 했다」다**(성공으로 접으면
+    // 안 바뀐 파일을 바뀐 것으로 그린다).
+    if (code == 0) {
+        if (remote_file_mutation.parse(out)) |parsed| outcome = parsed.outcome else |_| {}
+    }
+    self.remote_rename_mutex.lockUncancelable(self.io);
+    self.remote_rename_outcome = .{ .outcome = outcome };
+    self.remote_rename_mutex.unlock(self.io);
+}
+
+/// tick 이 결말을 낸다. **판정자가 직접 부르는 제품 함수**다(RF4 의 `finishRemoteFileOpen` 과 같은 결).
+pub fn finishRemoteRename(self: *AppSession, result: RemoteRenameOutcome) void {
+    self.remote_rename_inflight = false;
+    const outcome = result.outcome orelse {
+        self.showNoticeKey(.fp_remote_rename_failed);
+        return;
+    };
+    switch (outcome) {
+        // 바뀌었으니 **다시 읽는다** — 낙관적으로 행을 고쳐 그리지 않는다(로컬도 재스캔이 권위다).
+        .ok => invalidateRemoteExplorerExpanded(self),
+        // 그 사이 다른 것이 들어왔다. 트리가 낡았다는 뜻이라 **다시 읽고** 그 사실을 말한다.
+        .stale => {
+            invalidateRemoteExplorerExpanded(self);
+            self.showNoticeKey(.fp_remote_rename_stale);
+        },
+        .collision => self.showNoticeKey(.fp_mutation_collision),
+        .not_found => {
+            invalidateRemoteExplorerExpanded(self);
+            self.showNoticeKey(.fp_remote_rename_stale);
+        },
+        .invalid => self.showNoticeKey(.fp_name_invalid),
+        .unsupported => self.showNoticeKey(.fp_remote_rename_unsupported),
+        .denied, .io => self.showNoticeKey(.fp_remote_rename_failed),
+    }
+}
 
 /// 원격 트리의 파일 행을 **읽기 전용으로** 연다(RF4 — [계획](../../../docs/plans/remote-file-tree.md) §10.6).
 ///
@@ -1671,6 +1864,21 @@ pub fn selectedFileTreeMutationTarget(self: *const AppSession) ?file_tree_mutati
             else => {},
         };
     }
+    return target;
+}
+
+/// 원격 트리에서 **이름 변경 대상**을 고른다(RF6b). 로컬 타깃(`selectedFileTreeMutationTarget`)과
+/// 따로인 이유는 소비처가 다르기 때문이다 — 저쪽은 로컬 변경 백엔드로 가고 이쪽은 헬퍼 `mv` 로 간다.
+/// 한 함수가 둘을 겸하면 §2.4 의 「원격 경로는 로컬 syscall 에 안 간다」가 호출자 규율이 되어 샌다.
+pub fn selectedRemoteFileTreeRenameTarget(self: *const AppSession) ?file_tree_mutation.Target {
+    if (!self.file_tree_rows_remote) return null;
+    const index = selectedFileTreeRow(self) orelse return null;
+    if (index >= self.file_tree_rows.items.len) return null;
+    const target = fileTreeMutationTarget(self.file_tree_rows.items[index]) orelse return null;
+    // root 는 이름을 못 바꾼다(로컬과 같은 규칙 — root 는 사용자가 고른 자리이지 항목이 아니다).
+    if (target.kind == .root) return null;
+    // **신원이 없으면 안 간다.** 저쪽에서 다시 재는 값이 없으면 §2.3 ⑶ 의 재확인이 성립하지 않는다.
+    if (target.identity == null) return null;
     return target;
 }
 
@@ -2585,6 +2793,9 @@ pub fn queueExternalLink(
 }
 
 pub fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: []const u8) bool {
+    // **원격은 여기서 갈린다**(RF6b) — 아래 배관(예약·에디터 잠금·rename remap·휴지통)은 전부 로컬
+    // 파일시스템 의미에 묶여 있다. 원격 경로가 그리로 가면 §2.4 가 깨진다.
+    if (target.remote) return enqueueRemoteFileTreeRename(self, target, name);
     if (fileTreeNamespaceMutationBusy(self)) {
         self.showNoticeKey(.fp_mutation_in_progress);
         return false;
@@ -4198,6 +4409,7 @@ pub fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
 // 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
 
 pub const file_tree_mutation = maru.session.file_tree_mutation;
+pub const remote_file_mutation = maru.session.remote_file_mutation;
 
 pub const file_tree_icon = chrome.file_tree_icon;
 

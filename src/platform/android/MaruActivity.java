@@ -162,8 +162,15 @@ public class MaruActivity extends android.app.NativeActivity {
                 node.setVisibleToUser(true);
                 node.setFocusable(true);
                 // 두 번 두드리기가 여기로 온다. **`setClickable` 만으로는 안 온다** — 동작도 붙인다.
-                node.setClickable(true);
-                node.addAction(AccessibilityNodeInfo.ACTION_CLICK);
+                //
+                // **누를 수 있는 것에만 붙인다.** 글자(갈래 머리글·호스트키 지문)는 눌러도 아무
+                // 일이 없는데 「두 번 탭하여 활성화」라고 안내하면, 사용자는 눌러 보고서야 안다 —
+                // 이 이니셔티브가 계속 막아 온 「읽는 것 ≠ 눌리는 것」의 반대 방향이다
+                // (적대적 검증 6회차). 뜻은 브리지가 정하고 여기서는 그 뜻을 따른다.
+                final boolean actionable = role != MARU_MOBILE_A11Y_ROLE_TEXT
+                        && role != MARU_MOBILE_A11Y_ROLE_GROUP;
+                node.setClickable(actionable);
+                if (actionable) node.addAction(AccessibilityNodeInfo.ACTION_CLICK);
                 node.addAction(view.a11yFocus == virtualViewId
                         ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                         : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
@@ -234,6 +241,11 @@ public class MaruActivity extends android.app.NativeActivity {
                 view.getParent().requestSendAccessibilityEvent(view, ev);
             }
         }
+
+        /// 번호의 단일 출처는 `mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*` 다 — 여기서는
+        /// **누를 수 있는가**를 가르는 데 쓰는 둘만 이름으로 든다(나머지는 아래 switch 가 센다).
+        private static final int MARU_MOBILE_A11Y_ROLE_TEXT = 5;
+        private static final int MARU_MOBILE_A11Y_ROLE_GROUP = 6;
 
         /// 뜻 → Android 어휘. **번역은 여기 한 곳에서만 한다** — 번호의 단일 출처는
         /// `mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*` 다.

@@ -7186,6 +7186,13 @@ test "M9 서술자: 물어보는 화면들도 읽힌다 — 지문은 «통째�
     // **친 글자는 절대 안 읽어 준다** — 소리로 나가고 곁에 사람이 있을 수 있다. 개수만 값이다.
     const hint = a11yFind(maru.i18n.tIn(.ko, .mob_password_hint)) orelse return error.MissingDescriptor;
     try T.expect(hint.sem.value.len <= 3); // 개수(숫자)일 뿐이다
+    // **읽는 자리가 그리는 자리다.** 처음에는 지역 `y` 가 더 내려간 뒤에 계산해서, 그린 글자를
+    // 통째로 비껴가 구분선과 버튼 사이 빈 자리를 가리켰다(적대적 검증 1회차).
+    const dots = bridge.passwordDotsRectForTest();
+    try T.expect(hint.rect.y >= dots.y - 1 and hint.rect.y <= dots.y + 1);
+    // 그리고 **확인 버튼과 안 겹친다** — 겹치면 짚는 자리가 모호해진다.
+    const ok = bridge.passwordOkCenter();
+    try T.expect(hint.rect.y + hint.rect.h <= ok.y);
 
     bridge.setScreenForTest("host_key");
     _ = bridge.maru_mobile_build(402, 874, now());
@@ -7193,6 +7200,90 @@ test "M9 서술자: 물어보는 화면들도 읽힌다 — 지문은 «통째�
     try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_hostkey_cancel)) != null);
     const fp_node = a11yFind(maru.i18n.tIn(.ko, .mob_hostkey_hint)) orelse return error.MissingDescriptor;
     try T.expectEqualStrings(bridge.hostKeyFingerprintShown(), fp_node.sem.value);
+    // 자리도 **그린 두 줄**을 덮는다(같은 병을 옆 화면에서 잡았다).
+    const fp_rect = bridge.hostKeyFingerprintRectForTest();
+    try T.expect(fp_node.rect.y >= fp_rect.y - 1 and fp_node.rect.y <= fp_rect.y + 1);
+    const ok_c = bridge.hostKeyOkCenter();
+    try T.expect(fp_node.rect.y + fp_node.rect.h <= ok_c.y);
+}
+
+test "M9 서술자: 어느 화면에서도 «나갈 길» 이 읽힌다" {
+    // **적대적 검증 7회차가 잡았다.** 원격 화면은 읽기 전용이라 누를 것이 뒤로가기 하나뿐인데
+    // 그것을 안 냈다 — 들어가면 스크린 리더 사용자는 **아무것도 못 하고 갇힌다**. 나가는 길은
+    // 화면마다 반드시 있어야 하므로 밀린 화면 전부에서 잰다.
+    const T = std.testing;
+    const back = maru.i18n.tIn(.ko, .mob_a11y_back);
+    for ([_][]const u8{ "servers", "settings", "server_edit", "remote_screen" }) |screen| {
+        bridge.setScreenForTest(screen);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        if (a11yFind(back) == null) {
+            std.debug.print("«{s}» 화면에 나갈 길이 없다\n", .{screen});
+            return error.NoWayOut;
+        }
+    }
+    // 물어보는 화면 둘은 뒤로가기 대신 **취소**가 그 자리다.
+    for ([_][]const u8{ "password", "host_key" }) |screen| {
+        bridge.setScreenForTest(screen);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const cancel = if (std.mem.eql(u8, screen, "password"))
+            maru.i18n.tIn(.ko, .mob_password_cancel)
+        else
+            maru.i18n.tIn(.ko, .mob_hostkey_cancel);
+        try T.expect(a11yFind(cancel) != null);
+    }
+}
+
+test "M9 서술자: 「몇 분의 몇」은 «읽히는 것» 과 수가 맞는다" {
+    // **적대적 검증 8회차가 잡았다.** 서버 목록의 집합 크기를 「줄 + 추가」로 셌는데, 「추가」는
+    // 목록 끝에 붙은 **버튼**이라 그 집합의 일원으로 읽히지 않는다 — 「셋 중 둘」이라 들은
+    // 사용자가 셋째를 찾다 못 찾는다. 수는 **실제로 읽히는 것**과 맞아야 한다.
+    const T = std.testing;
+    // **서버가 있어야 잴 것이 있다.** 0 개면 줄이 하나도 없어 이 판정자가 아무것도 안 잰다
+    // (실제로 그렇게 초록이었고, 변이가 안 물려서 드러났다).
+    const src =
+        "ssh.server.1.name = alpha\nssh.server.1.host = a.example\nssh.server.1.user = me\n" ++
+        "ssh.server.2.name = beta\nssh.server.2.host = b.example\nssh.server.2.user = me\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    defer bridge.maru_mobile_load_config("", 0);
+
+    for ([_][]const u8{ "sessions", "servers" }) |screen| {
+        bridge.setScreenForTest(screen);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        var members: u32 = 0;
+        var claimed: u32 = 0;
+        for (bridge.a11yNodesForTest()) |n| {
+            if (n.sem.set_size == 0) continue;
+            members += 1;
+            if (claimed == 0) claimed = n.sem.set_size;
+            try T.expectEqual(claimed, n.sem.set_size); // 한 화면에 집합은 하나다
+            try T.expect(n.sem.position_in_set >= 1 and n.sem.position_in_set <= claimed);
+        }
+        if (members == 0) continue;
+        // **보이는 것만 세지 않는다**(목록은 흐른다) — 그래서 `>=` 다. 다만 화면이 다 담을 만큼
+        // 짧은 목록에서는 **정확히 같아야** 한다: 이 판정자가 도는 자리가 그렇다.
+        try T.expectEqual(claimed, members);
+    }
+}
+
+test "M9 서술자: 겹치는 서술자가 없다 — 짚은 것과 닿는 것이 하나다" {
+    // **적대적 검증 4회차가 잡았다.** 서버 줄은 폭 전체, 편집은 오른쪽 88px 인데 포인터는 편집을
+    // **먼저** 본다 — 서술자를 폭 전체로 내면 그 띠에서 둘이 겹쳐, 스크린 리더가 짚은 것과
+    // 손가락이 닿는 것이 갈린다. 겹침은 이 축의 결함이 늘 드러나는 모양이라 화면 전체에서 잰다.
+    for ([_][]const u8{ "sessions", "servers", "settings", "terminal" }) |screen| {
+        bridge.setScreenForTest(screen);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const nodes = bridge.a11yNodesForTest();
+        for (nodes, 0..) |a, i| {
+            for (nodes[i + 1 ..]) |b| {
+                const overlap_x = a.rect.x < b.rect.x + b.rect.w and b.rect.x < a.rect.x + a.rect.w;
+                const overlap_y = a.rect.y < b.rect.y + b.rect.h and b.rect.y < a.rect.y + a.rect.h;
+                if (overlap_x and overlap_y) {
+                    std.debug.print("겹친다({s}): «{s}» 와 «{s}»\n", .{ screen, a.sem.label, b.sem.label });
+                    return error.OverlappingDescriptors;
+                }
+            }
+        }
+    }
 }
 
 test "M9 서술자: 서버 편집은 칸마다 이름과 «온전한» 값을 낸다" {
@@ -7212,6 +7303,45 @@ test "M9 서술자: 서버 편집은 칸마다 이름과 «온전한» 값을 �
         if (n.sem.role == .button and n.sem.label.len > 0) fields += 1;
     }
     try T.expect(fields >= 8); // 칸 다섯 + 공개키 + 저장 + 삭제 + 뒤로
+}
+
+test "M9 서술자: 편집 중인 줄은 그렇다고 말하고, 캐럿은 값에 안 섞인다" {
+    // **적대적 검증 3회차가 잡았다.** 화면은 「지금 이 줄이 입력을 받는다」를 캐럿(▏)과 색으로
+    // 말하는데 — 색은 안 읽히고, 캐럿은 **글자로 읽힌다**(값 끝에 블록 문자 이름이 붙는다).
+    // 키보드가 어디로 가는지 모르면 칠 수가 없다.
+    const T = std.testing;
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    // 숫자 줄을 눌러 편집을 연다 — 키로 찾는다(자리는 스크롤에 따라 움직인다).
+    var editing_idx: ?usize = null;
+    var y: f32 = 0;
+    while (y < 874) : (y += 4) {
+        const idx = bridge.settingsRowAt(200, y) orelse continue;
+        if (bridge.settingsRows()[idx].kind != .number) continue;
+        bridge.maru_mobile_pointer(0, 1, 200, y, now());
+        bridge.maru_mobile_pointer(2, 1, 200, y, now());
+        _ = bridge.maru_mobile_build(402, 874, now());
+        editing_idx = idx;
+        break;
+    }
+    try T.expect(editing_idx != null);
+    try T.expect(bridge.settingsEditLen() >= 0 and bridge.settingsPopupOpen() == false); // 편집이 열렸다(팝업이 아니다)
+
+    var marked: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        // 캐럿이 값에 섞이지 않는다.
+        try T.expect(std.mem.indexOf(u8, n.sem.value, "\u{258F}") == null);
+        if (n.sem.selected) marked += 1;
+    }
+    try T.expect(marked >= 1); // 편집 중인 줄이 «고른 상태» 로 읽힌다
+
+    // **켜 둔 편집을 끄고 나간다.** 이 파일은 상태를 물려주므로, 남기면 다음 판정자가 「눌렀는데
+    // 팝업이 안 열린다」로 붉어진다(실제로 그렇게 붉었다 — 그 자리는 편집 확정이 먹은 것이었다).
+    // 뒤로가기가 편집을 **거두는** 자리다(§5.6 — 확정이 아니라 취소).
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try T.expectEqual(@as(usize, 0), bridge.settingsEditLen());
 }
 
 test "M9 서술자: 팝업이 열리면 «팝업만» 읽힌다" {
@@ -7245,6 +7375,11 @@ test "M9 서술자: 팝업이 열리면 «팝업만» 읽힌다" {
         try T.expect(!std.mem.eql(u8, n.sem.label, maru.i18n.tIn(.ko, .mob_a11y_back)));
     }
     try T.expect(items >= 2); // 고를 것이 읽힌다
+
+    // **고르지 않고 닫는 길**이 있다 — 없으면 스크린 리더로는 취소가 아예 불가능하다(화면에서는
+    // 바깥 탭이 취소다). 지어낸 것이 아니라 이미 눌리는 자리를 읽히게 한 것이다.
+    const cancel = a11yFind(maru.i18n.tIn(.ko, .mob_a11y_dismiss)) orelse return error.MissingDismiss;
+    try T.expect(cancel.rect.h > 0);
 
     // 그리고 **고른 것은 고른 상태로** 읽힌다(팝업에서 색으로만 말하던 것이다).
     var selected: usize = 0;

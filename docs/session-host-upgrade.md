@@ -3611,6 +3611,76 @@ production-shaped driver와 harness-owned storage만 사용하며 실제 GitHub 
 않는다. 이 slice는 stage-7 executable command까지만 닫으며 workflow stage 5~8 배선, stage-8 aggregate deletion과 frozen signed U5
 E2E를 대신하지 않는다.
 
+### 11.66 post-publish durable aggregate의 identity-safe 삭제 권위
+
+§11.52 단계 8의 삭제는 stage-7 process exit 0, workflow step outcome, pathname 존재, release ID·asset ID 또는 caller가 만든 success
+boolean을 권위로 받지 않는다. 새 process가 `release_adapter_candidate_aggregate_retention.zig`의 caller-owned final-address
+`Deletion` 하나 안에서 retained aggregate와 canonical manifest를 다시 열고, 같은 process에서 막 검증한 sealed
+`VerifiedRelease`와 exact 결속한 뒤에만 삭제 mutation을 시작한다. `VerifiedRelease`는 owner 주소, release/tag/source/tag-ref와 네
+asset ID·digest를 domain-separated Blake3 seal에 포함하며 `value()`와 `deinit()` 모두 seal을 검사한다. 따라서 field를 복사하거나
+owner pointer만 맞춘 값, 검증 뒤 바뀐 receipt, 다른 process에서 직렬화한 bytes는 삭제 permit이 아니다.
+
+`deleteVerifiedAggregate()`의 입력은 §11.50 aggregate reopen owner, 그 owner가 held한 manifest의 canonical bytes와 같은 process의
+`VerifiedRelease`뿐이다. manifest는 role A, predecessor 없음, protected `ohah/maru` context, exact release ID/tag/source commit과
+세 asset role/name/size/digest를 다시 결속한다. verified release의 네 digest는 aggregate가 held한 DMG·frozen executable·evidence와
+manifest observation에 canonical role 순서로 exact 일치해야 하고 asset ID는 nonzero·pairwise distinct여야 한다. aggregate directory,
+다섯 entry와 세 external artifact는 모두 pairwise-distinct vnode여야 하고 aggregate, verified release와 deletion storage가 주소로
+겹치면 첫 mutation 전에 거부한다. 삭제 시작 직전 aggregate exact inventory, 각 held entry의 device/inode/nlink=1,
+directory의 device/inode·owner uid·0700 mode와 parent pathname binding을 한 번 더 fence한다.
+
+```mermaid
+flowchart TD
+    A[Reopen retained aggregate and held manifest] --> B[Verify current published release attestation]
+    B --> C[Bind manifest and four exact asset receipts]
+    C --> D[Final aggregate fence]
+    D --> E[Exclusive rename to sealed cleanup tomb]
+    E --> F[Bind tomb pathname to held directory identity]
+    F --> G[Unlink five held entries in reverse role order]
+    G --> H[Fsync tomb directory]
+    H --> I[Remove exact tomb directory]
+    I --> J[Fsync held parent and close descriptors]
+    J --> K[Stage 8 terminal success]
+```
+
+삭제는 `arc4random_buf` 64-bit nonce로 만든 `.maru-aggregate-cleanup-<lower-hex>` final leaf를 같은 held parent 안에서
+`RENAME_EXCL`한 순간부터만
+`cleanup_required`다. rename 전 오류는 aggregate bytes와 pathname을 그대로 보존하는 `audit_required`이며 unlink 0이다. rename 뒤에는
+original pathname을 다시 따라가지 않고 held directory fd와 sealed tomb basename만 사용한다. 다섯 entry는 manifest bundle→evidence
+bundle→candidate frozen bundle→candidate DMG bundle→evidence 역순으로, 매 entry마다 held descriptor와 current tomb entry의
+directory device/inode·owner uid·0700 mode가 reopen 때 고정한 identity와 같은지 먼저 검사하고, held descriptor와 current entry의
+device/inode 및 `nlink=1`을 확인한 뒤 `unlinkat`한다. rename 직후 tomb identity가 held directory와 다르면 unlink 0인
+`cleanup_required`이며, 재시도도 같은 tomb identity fence부터 시작한다. 일부 unlink·fsync·rmdir·parent fsync·descriptor close 실패는 이미 지운 entry를
+되살리거나 release 성공을 취소하지 않고 역순 suffix의 `remaining_entries`, `directory_synced`, `directory_removed`, `parent_synced`의 monotonic
+ledger와 tomb identity를 `cleanup_required` owner에 보존한다. nonce collision은 foreign tomb을 건드리지 않고
+rename 전 `audit_required`로 끝나며 이름을 추측해 재사용하지 않는다. `retryCleanup()`은 그 owner의 final address와 seal을 검사하고
+ledger상 처음 미완료 단계부터만 계속한다. 따라서 rmdir 뒤 parent fsync가 실패한 재시도는 사라진 tomb을 다시 rmdir하지 않고 held
+parent sync부터 계속한다. descriptor는 parent sync 뒤 각 번호를 owner에서 먼저 tombstone한 다음 exact once 닫는다. `close(2)` 오류는
+그 번호의 생존을 안전하게 판별할 수 없으므로 같은 번호를 재시도해 재사용된 foreign fd를 닫지 않는다. 하나라도 close 결과가
+불확실하면 pathname cleanup이 끝났어도 non-retryable `descriptor_close_failed` terminal이며 stage-8 success가 아니다. 어느
+재시도도 original aggregate pathname, foreign replacement, remote release와 asset을 조회·수정·삭제하지 않는다.
+
+성공은 다섯 entry, tomb directory와 descriptor가 모두 사라지고 parent sync가 확정된 뒤에만 deletion owner를 pristine으로 만들며,
+이때 stage-8 reducer success event를 만들 수 있다. descriptor close 실패는 pathname 삭제가 끝났더라도
+`descriptor_close_failed`로 남고 terminal success가 아니다. copied/moved/pre-owned owner, corrupt length/remaining suffix/seal,
+unexpected inventory, symlink·hardlink,
+directory/entry replacement, deletion 중 새 entry 삽입과 cleanup 재진입은 foreign data를 건드리지 않고 실패한다. aggregate의
+descriptor-only `deinit()`은 rename 전 audit 경로에서만 허용되며 deletion mutation 뒤 `cleanup_required`를 포기하는 API는 없다.
+이 원장은 process memory 안의 same-process 재시도 권위이므로 rename 뒤 abrupt process death가 남긴 cleanup tomb의 재시작 발견·복구는
+이 primitive가 보장하지 않는다. executable cleanup command와 workflow reducer는 그런 tomb을 성공으로 오인하거나 임의 삭제해서는
+안 되며, 재시작 복구 권위와 판정자를 별도 후속 경계로 닫아야 한다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-retention`은 sealed publication receipt의 복사·변조·위조 거부,
+manifest와 네 role 결속, rename 전 mutation 0, directory pathname 교체와 hardlink 보존, rename 직후 tomb pathname 교체의
+unlink 0, 실제 파일시스템의 exact 삭제, exact reverse
+unlink, 각 unlink 및 두 fsync·rmdir 실패 뒤 monotonic retry suffix, descriptor close 불확실성의 non-retry와 exclusive rename 실패,
+final-address/copy/corrupt-ledger 거부를 Debug·ReleaseFast에서 검증한다. 실제 삭제 테스트는 12회 삭제 primitive 구간 timing sample도 출력하지만
+측정은 `deleteVerifiedAggregate()` 호출 직전부터 반환 직후까지라 validate·manifest read/parse·binding·fence와 삭제 syscall을 포함하고,
+fixture 생성·aggregate reopen·publication receipt 검증은 제외한다. 그 값은 제품 latency budget이나 성공 권위가 아니다.
+fixture는 harness-owned temporary directory와 synthetic sealed receipt만 사용하고 실제 GitHub release·credential·앱 session-host
+상태를 읽거나 수정하지 않는다. 이 slice는 stage-8 삭제 권위 primitive만 닫으며 executable cleanup command,
+`.github/workflows/release.yml`의 stage 5~8 reducer 배선, 실제 GitHub-issued receipt의 same-process 조합과 frozen signed U5 E2E를
+대신하지 않고 abrupt process death 뒤 cleanup tomb 재발견도 증명하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

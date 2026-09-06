@@ -1187,6 +1187,18 @@ publish, post-publish release attestation이나 frozen signed U5 제품 E2E 증�
   재검증은 매 snapshot이 호출하는 draft-assets gate가 별도로 소유한다. live release workflow나
   frozen signed U5 제품 E2E의 증거는 아니다.
 
+U5 post-publish aggregate retention은 same-process sealed `VerifiedRelease`의 release/tag/source와 네 artifact digest를 reopened
+aggregate가 held한 canonical role-A manifest, protected repository/build context, DMG·frozen executable·evidence·manifest
+observation에 다시 결속한 뒤에만 stage-8 local deletion을 허용한다.
+`test-session-host-release-adapter-candidate-aggregate-retention`은 Debug·ReleaseFast에서 final-address/copy/corrupt seal 거부,
+rename 전 validation/fence failure의 mutation 0, reverse five-entry cleanup과 모든 unlink·directory fsync·rmdir·parent fsync 실패의
+monotonic retry suffix, ambiguous descriptor close의 terminal non-retry를 고정한다. 같은 gate가 harness-owned actual filesystem에서
+성공 삭제, foreign manifest asset name, 새 hardlink와 rename 전 directory pathname replacement 보존, rename 직후 tomb pathname
+replacement의 unlink 0 및 12회 삭제 primitive 구간 timing sample을
+검증한다. timing 범위는 `deleteVerifiedAggregate()` 전체이며 fixture 생성·aggregate reopen·publication receipt 검증은 제외한다.
+실제 GitHub release·credential·앱 session-host 상태는 읽거나 수정하지 않으며 executable cleanup command, live workflow
+stage 8, abrupt process death 뒤 cleanup tomb 재발견과 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset redownload는 ready `DraftAuthority`·`DraftAssets`와 candidate/authored attestation, canonical held manifest 및 네 held
 file authority에서만 exact GitHub asset ID와 expected name/size/SHA를 유도한다. `test-session-host-release-adapter-draft-redownload`는
 DMG→frozen executable→evidence→manifest exact request 순서, clean token environment, body 비저장 bounded streaming count/SHA, shared

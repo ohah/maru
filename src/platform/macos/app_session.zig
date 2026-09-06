@@ -23096,6 +23096,100 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     try std.testing.expectEqualStrings("C2-pending", v.rule);
 }
 
+// ── 분배 진단(RF1). **mutation 을 잘못 설계하면 멀쩡한 판정자를 뺀다** — 2026-09-06 에 그럴 뻔했다:
+// `no_channel += 1` 을 지우는 변형은 Zig 의 「local variable is never mutated」로 **컴파일이 깨지고**,
+// 그 빌드 실패를 「판정자가 안 죽었다」로 읽었다. 카운터는 그대로 두고 **전달만 0 으로 바꾸는** 변형이
+// 옳다(그러면 컴파일되고 동작만 달라진다). 확인: `no_channel`·`no_dest` 전달을 0 으로 → 각각 죽는다.
+
+test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 정확해도 안 붙는 자리" {
+    // **2026-09-06 의 자리.** 스트리머가 pane 열을 정확히 구분해 보내는데도 사이드바에서 둘만
+    // 잡혔다. 그때 「어느 조건에서 걸리는지」를 아무도 말하지 않아, 로컬 앱 상태를 못 보는 쪽에서는
+    // 세 조건(채널 없음·dest 없음·dest 불일치)을 추측으로 하나씩 지워야 했다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // ① 채널이 없다 — 세 조건 중 첫째에서 걸린다.
+    term.agent_remote_channel = null;
+    session.last_remote_feed_shape = std.math.maxInt(u64);
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
+    try std.testing.expect(session.last_remote_feed_shape != std.math.maxInt(u64));
+    const only_no_channel = session.last_remote_feed_shape;
+    try std.testing.expectEqual(@as(u64, 0), only_no_channel >> 48); // fed == 0
+    try std.testing.expect(((only_no_channel >> 32) & 0xFFFF) > 0); // no_channel > 0
+
+    // ② 채널은 있는데 dest 를 모른다 — 둘째에서 걸린다.
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+    term.rt.observation.ssh_remote_dest_present = false;
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
+    const only_no_dest = session.last_remote_feed_shape;
+    try std.testing.expectEqual(@as(u64, 0), only_no_dest >> 48);
+    try std.testing.expect((only_no_dest & 0xFFFF0000) >> 16 > 0); // no_dest > 0
+
+    // ③ dest 는 아는데 다른 목적지다 — 셋째에서 걸린다.
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "otherHost");
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 3);
+    const only_other = session.last_remote_feed_shape;
+    try std.testing.expectEqual(@as(u64, 0), only_other >> 48);
+    try std.testing.expect((only_other & 0xFFFF) > 0); // other_dest > 0
+
+    // 세 모양이 서로 달라야 한다 — 같으면 진단이 갈리지 않는다.
+    try std.testing.expect(only_no_channel != only_no_dest);
+    try std.testing.expect(only_no_dest != only_other);
+}
+
+test "RF1: 같은 모양이 이어지면 다시 말하지 않는다" {
+    // 분배는 매 회차 돈다. 모양이 안 바뀌었는데 매번 말하면 로그가 쓸모를 잃는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
+    const first = session.last_remote_feed_shape;
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
+    try std.testing.expectEqual(first, session.last_remote_feed_shape); // 그대로다
+}
+
+test "RF1: EOF 를 알리는 호출은 분배로 세지 않는다" {
+    // `lines` 가 비면 채널에 끝을 알리는 것이지 이벤트를 나르는 것이 아니다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.feedRemoteAgentTerms("openClaw", &.{}, 1);
+    try std.testing.expectEqual(std.math.maxInt(u64), session.last_remote_feed_shape); // 안 건드린다
+}
+
 test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상태만 채우면 화면이 그것을 안 그린다" {
     // ⚠️ **실사용에서 정확히 이 모양이었다**(2026-08-31): 훅이 돌고 이벤트가 흐르고 알림도 오는데
     // **왼쪽 목록만 안 바뀐다.** 사이드바·탭·도크가 「이 Term 에 에이전트가 있나」를 `agent_kind` 로

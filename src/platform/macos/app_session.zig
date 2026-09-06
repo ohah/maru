@@ -5270,6 +5270,10 @@ pub const AppSession = struct {
     /// «지금 모드» 로 가르면 원격이 내려간 뒤 재빌드 전의 낡은 원격 행이 로컬 갈래로 들어간다.
     /// 재빌드 스위치만 이 값을 쓴다(행과 원자적으로 굳는다).
     file_tree_rows_remote: bool = false,
+    /// 원격 파일 열기(RF4) — 단발 워커의 in-flight 표식과 결과 슬롯.
+    remote_file_open_inflight: bool = false,
+    remote_file_mutex: std.Io.Mutex = .init,
+    remote_file_outcome: ?file_panel_ops.RemoteFileOutcome = null,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
@@ -21458,6 +21462,20 @@ pub const AppSession = struct {
             self.watch_install_mutex.unlock(self.io);
             if (n == 0) break;
             std.atomic.spinLoopHint();
+        }
+        // 원격 파일 열기 워커도 같은 가드다(RF4) — detach 스레드가 self.remote_file_* 을 건드린다.
+        // 워커의 마지막 행위가 outcome 게시이므로 «inflight 인데 outcome 이 없다» 가 곧 «아직 돈다» 다.
+        while (true) {
+            self.remote_file_mutex.lockUncancelable(self.io);
+            const still_running = self.remote_file_open_inflight and self.remote_file_outcome == null;
+            self.remote_file_mutex.unlock(self.io);
+            if (!still_running) break;
+            std.atomic.spinLoopHint();
+        }
+        if (self.remote_file_outcome) |outcome| {
+            self.allocator.free(outcome.path);
+            self.allocator.free(outcome.bytes);
+            self.remote_file_outcome = null;
         }
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {
@@ -79580,7 +79598,7 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
         // 그리고 **거절이 원격 안내였다** — 신원 pin 이 로컬 열기를 막는 심층 방어와 달리, 출처
         // 펜스는 애초에 원격 갈래로 보낸다. 이 바이트가 그 갈래의 증거다(적대적 검증 3 회차 —
         // entry 수만 보면 «열기 실패» 와 «펜스» 가 구별되지 않아 판정이 공허했다).
-        const expected_notice = maru.i18n.t(.fp_remote_open_unsupported);
+        const expected_notice = maru.i18n.t(.fp_remote_file_read_failed);
         try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, expected_notice));
     }
     // 다시 원격으로(activate 가 updateFileTree 를 불러 행이 로컬로 재빌드됐다).
@@ -79624,4 +79642,113 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
         .root => |v| try std.testing.expect(!std.mem.eql(u8, v.path, root)),
         else => {},
     };
+}
+
+test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_only · 실패·과대·바쁨은 안내 (RF4)" {
+    // 전송 없이 태우는 수직이다 — 워커의 결말(finishRemoteFileOpen)은 제품 드레인 그 자체라
+    // test-only 표식 없이 직접 부른다. 전송 실물(BatchMode·argv)은 RS3/RF2b 축 판정자들이 소유한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 미러 해시가 목적지를 쓴다 — 원격 상태만 세운다(전송은 없다).
+    try session.remote_explorer.dest.appendSlice(a, "me@build-box");
+
+    // ── ① 실패 결말: 안내가 «못 읽는다» 바이트다(§2.5).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteFileOpen(session, .{
+        .path = try a.dupe(u8, "/srv/app/proj/hello.txt"),
+        .bytes = try a.dupe(u8, ""),
+        .exit_code = 127,
+    });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_file_read_failed)));
+    try std.testing.expect(!session.remote_file_open_inflight);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
+
+    // ── ② 과대 결말: 상한 이상이면 열지 않는다(⑤ — 잘린 내용이 온전한 척 뜨는 것이 최악이다).
+    @memset(&session.notice_message_buf, 0);
+    const big = try a.alloc(u8, maru.session.git_command.max_remote_file_bytes);
+    @memset(big, 'x');
+    file_panel_ops.finishRemoteFileOpen(session, .{
+        .path = try a.dupe(u8, "/srv/app/proj/big.bin"),
+        .bytes = big,
+        .exit_code = 0,
+    });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_file_too_large)));
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
+
+    // ── ③ 성공 결말: 미러가 써지고, 파일이 열리고, 문서가 read_only 다.
+    file_panel_ops.finishRemoteFileOpen(session, .{
+        .path = try a.dupe(u8, "/srv/app/proj/hello.txt"),
+        .bytes = try a.dupe(u8, "hello from remote\n"),
+        .exit_code = 0,
+    });
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.file_entry != null);
+    try std.testing.expect(std.mem.endsWith(u8, term.file_entry.?.path, "/hello.txt"));
+    // 미러 실제 바이트 확인 — 화면에 갈 내용이 원격 바이트 그대로다.
+    {
+        const mirrored = try std.Io.Dir.cwd().readFileAlloc(io, term.file_entry.?.path, a, .limited(4096));
+        defer a.free(mirrored);
+        try std.testing.expectEqualStrings("hello from remote\n", mirrored);
+    }
+    try std.testing.expect(term.rt.editor_doc != null);
+    try std.testing.expect(term.rt.editor_doc.?.file.read_only);
+    // 미러 정리(판정자 위생 — /tmp 에 pid 무관 해시 경로라 양쪽 정리 규율).
+    const mirror_dir = std.fs.path.dirname(term.file_entry.?.path).?;
+    defer std.Io.Dir.cwd().deleteTree(io, mirror_dir) catch {};
+
+    // ── ③b 비지원 결말(적대적 검증 C): 행의 supported=false 를 결말까지 실어 로컬과 같은
+    //    외부-열기 갈래를 탄다 — 원격 .png 가 텍스트 편집기로 열리는 표시 거짓 방지.
+    file_panel_ops.finishRemoteFileOpen(session, .{
+        .path = try a.dupe(u8, "/srv/app/proj/pic.png"),
+        .bytes = try a.dupe(u8, "\x89PNG"),
+        .exit_code = 0,
+        .supported = false,
+    });
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session)); // 편집기 entry 불변
+    try std.testing.expect(session.file_tree_external_open != null);
+    try std.testing.expect(std.mem.endsWith(u8, session.file_tree_external_open.?, "/pic.png"));
+    {
+        const png_dir = std.fs.path.dirname(session.file_tree_external_open.?).?;
+        std.Io.Dir.cwd().deleteTree(io, png_dir) catch {};
+    }
+
+    // ── ④ 바쁨: in-flight 중의 새 열기는 안내로 거절(조용한 드롭이 아니다).
+    session.remote_explorer.active = true;
+    try session.remote_explorer.ctl.appendSlice(a, "/maru-dead-ctl");
+    session.remote_file_open_inflight = true;
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.openRemoteFileReadOnly(session, "/srv/app/proj/other.txt", true);
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_file_busy)));
+    session.remote_file_open_inflight = false;
+}
+
+test "원격 탐색기 미러 판정: HOME 꼬리 슬래시·형제 접두에 안 속는다 (RF4 적대적 A)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const judge = file_panel_ops.remoteViewPathIsReadOnlyForHome;
+    // 정상 — trimmedHome 계약(꼬리 슬래시 없는 home)에서 미러 접두가 잡힌다.
+    try std.testing.expect(judge("/Users/x/.cache/maru/remote-view/ab12/f.txt", "/Users/x"));
+    // ⚠️ 꼬리 슬래시 home 을 그대로 주면 판정이 깨진다 — 그래서 공급자는 trimmedHome 하나다.
+    //    (여기서 참을 기대하면 안 된다: 이 판은 «계약 위반 입력은 거짓» 을 못박는 판이다.)
+    try std.testing.expect(!judge("/Users/x/.cache/maru/remote-view/ab12/f.txt", "/Users/x/"));
+    // 형제 접두 함정 — remote-viewX 는 미러가 아니다(경로 접두 판정의 고전 함정).
+    try std.testing.expect(!judge("/Users/x/.cache/maru/remote-viewX/ab12/f.txt", "/Users/x"));
+    // home 형제 함정 — /Users/xy 는 /Users/x 의 하위가 아니다.
+    try std.testing.expect(!judge("/Users/xy/.cache/maru/remote-view/ab12/f.txt", "/Users/x"));
+    // 미러 밖 캐시 파일은 읽기 전용이 아니다.
+    try std.testing.expect(!judge("/Users/x/.cache/maru/other/f.txt", "/Users/x"));
 }

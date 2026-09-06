@@ -197,6 +197,72 @@ pub fn runRemoteScript(
     return reapPid(pid);
 }
 
+/// **argv 를 그대로** 상한 캡처로 실행한다(RF4). `runRemoteCapped` 와 같은 규율(상한 넘치면 fd 를
+/// 닫아 자식을 EPIPE 로 끝내고 -2)이되, 명령 조립을 이쪽이 하지 않는다 — 원격 파일 읽기의 인용·상한
+/// SSOT 는 `git_command.buildRemoteFileRead` 이고(§RS3), 여기서 스크립트를 다시 쓰면 두 벌이 된다.
+/// argv[0] 은 절대경로여야 한다(`remote_shell.sshArgv` 가 그렇게 만든다 — env 가 PATH 를 푼다).
+pub fn runArgvCapped(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    max_bytes: usize,
+    out: *[]u8,
+) !c_int {
+    var argv_z: std.ArrayList(?[*:0]const u8) = .empty;
+    defer {
+        for (argv_z.items) |maybe| if (maybe) |ptr| allocator.free(std.mem.span(ptr));
+        argv_z.deinit(allocator);
+    }
+    for (argv) |arg| try argv_z.append(allocator, (try allocator.dupeZ(u8, arg)).ptr);
+    try argv_z.append(allocator, null);
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        _ = std.c.close(0);
+        _ = std.c.dup2(out_pipe[1], 1);
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        _ = std.c.execve(argv_z.items[0].?, @ptrCast(argv_z.items.ptr), @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [16 * 1024]u8 = undefined;
+    var overflowed = false;
+    var read_failed = false;
+    while (true) {
+        const n = std.c.read(out_pipe[0], &tmp, tmp.len);
+        if (n < 0) {
+            // EINTR 을 EOF 로 접으면 안 된다(적대적 검증 3 회차) — 이 러너의 소비자(RF4 파일
+            // 읽기)는 wire 와 달리 **꼬리가 없어**, 시그널 한 번에 잘린 바이트가 exit 0 과 함께
+            // 온전한 척 열린다(§2.5 최악 케이스). 시그널은 재시도, 그 밖의 읽기 오류는 실패로.
+            if (std.posix.errno(n) == .INTR) continue;
+            read_failed = true;
+            break;
+        }
+        if (n == 0) break;
+        const take = @min(@as(usize, @intCast(n)), max_bytes - buf.items.len);
+        buf.appendSlice(allocator, tmp[0..take]) catch break;
+        if (buf.items.len >= max_bytes) {
+            overflowed = true;
+            break;
+        }
+    }
+    _ = std.c.close(out_pipe[0]);
+    out.* = try buf.toOwnedSlice(allocator);
+    const code = reapPid(pid);
+    if (overflowed) return -2;
+    if (read_failed) return -1;
+    return code;
+}
+
 /// `runRemoteScript` 의 **상한 있는** 짝(RF2b). 목록 wire 는 스크립트 답과 달리 **MB 단위**가 될 수
 /// 있어 `readAllFd` 를 못 쓴다 — 그쪽은 64 KiB 에서 읽기를 **멈추는데**, 자식이 그보다 많이 쓰면
 /// 파이프가 차서 write 에 서고 `waitpid` 가 **교착**한다(닫지 않고 reap 하러 가는 구조라).
@@ -257,7 +323,10 @@ pub fn runRemoteCapped(
     var overflowed = false;
     while (true) {
         const n = std.c.read(out_pipe[0], &tmp, tmp.len);
-        if (n < 0) break; // 읽기 실패 — 지금까지 읽은 것으로 판정한다(꼬리가 없으면 잘림이다)
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue; // 시그널은 잘림이 아니다 — 재시도(적대적 검증 3 회차)
+            break; // 읽기 실패 — 지금까지 읽은 것으로 판정한다(꼬리가 없으면 잘림이다)
+        }
         if (n == 0) break; // EOF
         const take = @min(@as(usize, @intCast(n)), max_bytes - buf.items.len);
         buf.appendSlice(allocator, tmp[0..take]) catch break;

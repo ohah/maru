@@ -79760,3 +79760,70 @@ test "원격 탐색기 미러 판정: HOME 꼬리 슬래시·형제 접두에 �
     // 미러 밖 캐시 파일은 읽기 전용이 아니다.
     try std.testing.expect(!judge("/Users/x/.cache/maru/other/f.txt", "/Users/x"));
 }
+
+test "원격 탐색기 감시: 트리거가 펼친 디렉터리를 다시 읽게 하고, 대상은 뷰가 정한다 (RF5a)" {
+    // 채널 하나를 두 뷰가 나눠 쓴다(③ 확정). 여기서 재는 것은 ⑴ 대상 해석이 뷰를 따라가는가
+    // ⑵ 트리거가 **탐색기 갈래**로 가 펼친 디렉터리를 다시 예약하는가 — 둘 다 제품 함수로 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // ── 원격 탐색기를 세운다(전송 없이 — 모델만).
+    const re = &session.remote_explorer;
+    re.active = true;
+    try re.dest.appendSlice(a, "me@build-box");
+    try re.ctl.appendSlice(a, "/tmp/maru-ctl-fixture");
+    try re.root.appendSlice(a, "/srv/app");
+    try re.tree.replaceExplicitRoots(&.{"/srv/app"});
+    while (re.tree.takeScanRequest()) |owned| a.free(owned);
+    try re.tree.applySnapshot("/srv/app", &.{
+        .{ .name = "src", .kind = .directory },
+        .{ .name = "shut", .kind = .directory },
+    });
+    _ = try re.tree.toggleDirectory("/srv/app/src");
+    while (re.tree.takeScanRequest()) |owned| a.free(owned);
+
+    // ── ① 대상 해석: 탐색기 뷰면 탐색기가 주인이다.
+    dock_ops.openDockTo(session, .explorer);
+    {
+        const target = git_ops.remoteWatchTargetForTest(session).?;
+        try std.testing.expectEqualStrings("me@build-box", target.dest);
+        try std.testing.expectEqualStrings("/srv/app", target.root);
+        try std.testing.expectEqual(git_ops.WatchOwner.explorer, target.owner);
+    }
+
+    // ── ② 트리거: 펼친 것만 다시 예약된다(root + src, 접힌 shut 은 아니다).
+    file_panel_ops.invalidateRemoteExplorerExpanded(session);
+    var seen: usize = 0;
+    var saw_root = false;
+    var saw_src = false;
+    while (re.tree.takeScanRequest()) |owned| {
+        defer a.free(owned);
+        seen += 1;
+        if (std.mem.eql(u8, owned, "/srv/app")) saw_root = true;
+        if (std.mem.eql(u8, owned, "/srv/app/src")) saw_src = true;
+        try std.testing.expect(!std.mem.eql(u8, owned, "/srv/app/shut"));
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+    try std.testing.expect(saw_root and saw_src);
+
+    // ── ③ 탐색기가 내려가면 대상도 없다(죽은 트리에 감시자를 붙이지 않는다).
+    re.active = false;
+    try std.testing.expect(git_ops.remoteWatchTargetForTest(session) == null);
+
+    // ── ④ 비활성 탐색기에는 트리거가 아무 일도 안 한다(조용한 재예약 폭주 방지).
+    file_panel_ops.invalidateRemoteExplorerExpanded(session);
+    try std.testing.expect(re.tree.takeScanRequest() == null);
+}

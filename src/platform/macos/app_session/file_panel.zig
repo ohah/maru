@@ -1035,6 +1035,21 @@ pub fn openProjectedFileTreePath(
 /// v1 은 **비영속**이다: 재시작하면 따라가기가 원격 cwd 에서 다시 세운다(원격 SCM 과 같은 흐름).
 /// `dock-tree-roots` 를 (host, path) 쌍으로 넓히는 마이그레이션은 명시적 원격 root 고정이 생길 때
 /// 함께 간다 — 지금 넓히면 아무도 안 쓰는 포맷 갈래가 생긴다.
+/// 원격 감시자의 트리거를 받아 **펼쳐 둔 디렉터리를 다시 읽는다**(RF5a — [계획](../../../docs/plans/remote-file-tree.md) ③).
+///
+/// 감시자는 `change` 한 줄만 낸다 — 어디가 바뀌었는지 안 싣는다. 그래서 무효화가 거칠고, 그 거칢을
+/// **모델이 유계로 만든다**: 펼친 것만 넣고(`invalidateExpanded`), 큐가 중복을 제거하며, 발사는 원격
+/// 슬롯 상한이 잡는다. 예약만 하고 실제 왕복은 `updateFileTree` 의 원격 펌프가 다음 tick 에 한다 —
+/// 여기서 쏘면 상한을 두 곳이 나눠 갖게 된다.
+pub fn invalidateRemoteExplorerExpanded(self: *AppSession) void {
+    if (comptime builtin.os.tag != .macos) return;
+    if (!self.remote_explorer.active) return;
+    const any = self.remote_explorer.tree.invalidateExpanded() catch return;
+    if (!any) return;
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+}
+
 pub const RemoteExplorer = struct {
     tree: file_tree.Tree,
     active: bool = false,

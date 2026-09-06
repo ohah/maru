@@ -103,12 +103,20 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     const hidden_code = try stripComments(allocator, hidden);
     defer allocator.free(hidden_code);
     try std.testing.expect(std.mem.indexOf(u8, hidden_code, "remote_watch.stop()") == null);
-    // 로컬 목록이면 채널이 있을 이유가 없다.
-    try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_dest orelse") != null);
+    // 원격 대상이 없으면 채널이 있을 이유가 없다. **판정이 `remoteWatchTarget` 으로 옮겼다**(RF5a —
+    // 채널 하나를 두 뷰가 나눠 쓴다). 펌프는 그 하나를 지나고, 목적지 판정은 그 안에 그대로 있다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "remoteWatchTarget(self) orelse") != null);
+    const target_fn = try bodyOf(git, "fn remoteWatchTarget(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, target_fn, "self.git_repo_dest orelse") != null);
+    // 두 주인이 **같은 함수**를 지난다 — 따로 만들면 드리프트가 조용히 생긴다(§③ 확정).
+    try std.testing.expect(std.mem.indexOf(u8, target_fn, ".source_control =>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, target_fn, ".explorer =>") != null);
     // 소켓 판정을 **다시 만들지 않는다** — 있는 함수를 쓴다(두 벌이면 한쪽만 고쳐진다).
     try std.testing.expect(std.mem.indexOf(u8, pump, "remoteControlSocketFor(self, dest") != null);
     // ⚠️ **트리거만 건다.** 여기서 읽기를 직접 조립하면 파싱 계약이 두 벌이 된다(계약 §2).
+    // 주인마다 받는 자리가 다르되(RF5a) **둘 다 기존 경로**다 — 새 읽기를 여기서 만들지 않는다.
     try std.testing.expect(std.mem.indexOf(u8, pump, "refreshGitStatus(self)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "invalidateRemoteExplorerExpanded(self)") != null);
     // 부정 단언은 **주석을 벗기고** 센다 — 안 그러면 그 함정을 설명하는 주석이 걸린다(실제로 걸렸다).
     const pump_code = try stripComments(allocator, pump);
     defer allocator.free(pump_code);
@@ -126,9 +134,13 @@ test "감시는 도크가 보일 때만 돌고, 트리거는 기존 읽기 경�
     // ⚠️ **이 이른 반환도 자식을 놓고 나간다**(적대적 검증 2026-09-04 3 회차). 루트만 비우고 호스트는
     // 그대로인 전이에서 감시자가 옛 저장소를 계속 보고, 아무도 드레인하지 않아 파이프가 차면 저쪽이
     // write 에 걸려 선다.
-    try std.testing.expect(std.mem.indexOf(u8, pump, "self.git_repo_remote_root orelse {") != null);
-    const no_root = try bodyOf(pump, "self.git_repo_remote_root orelse {", "\n    };", 512);
-    try std.testing.expect(std.mem.indexOf(u8, no_root, "remote_watch.pause()") != null);
+    // 루트 판정도 `remoteWatchTarget` 안에 있다(RF5a) — SCM 은 저장소 루트, 탐색기는 원격 트리 루트.
+    try std.testing.expect(std.mem.indexOf(u8, target_fn, "self.git_repo_remote_root orelse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, target_fn, "re.root.items") != null);
+    // 대상이 없으면 **놓아주는 것이 아니라 멈춘다** — `stop` 이 지우는 설치 답·`.gave_up` 은 호스트의
+    // 성질이라 화면이 바뀌었다고 버릴 값이 아니다(호스트 전이는 `rememberGitRepoDest` 가 잡는다).
+    const no_target = try bodyOf(pump, "remoteWatchTarget(self) orelse {", "\n    };", 512);
+    try std.testing.expect(std.mem.indexOf(u8, no_target, "remote_watch.pause()") != null);
 
     // ⚠️ **같은 호스트에서 저장소만 바뀌는 전환**(적대적 검증 2026-09-04 6 회차). `git_repo_dest` 가
     // 그대로라 `rememberGitRepoDest` 는 조기 반환한다 — 채널이 무엇을 보고 있는지 스스로 알아야 한다.
@@ -171,12 +183,17 @@ test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본
 
     // RW5 가 「다시 안 띄운다」를 세웠지만, 그것만으로는 화면이 **조용히** 낡는다 — 사용자에게는
     // 「어느 순간부터 도크가 안 바뀐다」로만 보이고 저장소가 안 바뀐 것으로 읽힌다.
-    try std.testing.expect(std.mem.indexOf(u8, pump, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+    // **주인마다 문구가 다르다**(RF5a) — 사용자가 다음에 할 일이 다르기 때문이다. 선택자 하나가
+    // 그 갈래를 소유하고, 두 키가 다 살아 있어야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, pump, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
+    const notice_fn = try bodyOf(git, "fn watchGaveUpNoticeKey(", "\n}\n", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".scm_remote_watch_gave_up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".fp_remote_watch_gave_up") != null);
 
     // ⚠️ **영구 실패에서만 말한다.** 일시적 끊김(슬립·네트워크)에도 띄우면 배너가 잔소리가 되고,
     // 그러면 사용자가 배너 자체를 무시하게 된다 — 정작 영구 실패일 때 안 읽힌다.
     const permanent = try bodyOf(pump, "if (remote_watch_mod.isPermanent(why)) {", "\n        } else {", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, permanent, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, permanent, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
     const transient = try bodyOf(pump, "\n        } else {", "\n        }\n", 4096);
     const transient_code = try stripComments(allocator, transient);
     defer allocator.free(transient_code);
@@ -287,7 +304,7 @@ test "설치 계약이 «죽은 계약» 이 아니다 — 제품이 실제로 �
     const unsup = try bodyOf(pump, ".unsupported => {", "\n            },", 1024);
     try std.testing.expect(std.mem.indexOf(u8, unsup, "phase = .gave_up") != null);
     // 포기했으면 **화면이 말한다**(RW6 과 같은 규율).
-    try std.testing.expect(std.mem.indexOf(u8, unsup, "showNoticeKey(.scm_remote_watch_gave_up)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unsup, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
     // ⚠️ **틱에서는 ssh 를 «안» 부른다**(8 회차). `runRemoteScript` 에 마감이 없어, 틱에서 부르면
     // 원격이 멈출 때 **UI 가 통째로 선다**(실측: 정상 왕복도 로컬호스트에서 10 ms).
     const begin2 = try bodyOf(app, "pub fn beginWatchInstall(", "\n    }\n", 4096);

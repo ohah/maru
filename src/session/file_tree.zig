@@ -829,6 +829,47 @@ pub const Tree = struct {
         return changed;
     }
 
+    /// **펼쳐 둔 디렉터리를 전부 다시 읽으라고 예약한다**(RF5a — 원격 감시).
+    ///
+    /// 원격 감시자는 `change` 한 줄만 낸다 — **어디가** 바뀌었는지 안 싣는다([계획](../../docs/plans/remote-file-tree.md)
+    /// ③ 확정: 채널 하나를 두 뷰가 나눠 쓰되 프로토콜은 안 늘린다). 그래서 무효화가 거칠다:
+    /// 경로 하나를 지목하는 `invalidatePath` 대신, **지금 화면에 내용이 보이는 디렉터리 전부**를 큐에
+    /// 넣는다. 접힌 것은 넣지 않는다 — 안 보이는 것을 다시 읽으면 왕복만 늘고 화면은 그대로다
+    /// (펼칠 때 `toggleDirectory` 가 어차피 읽는다).
+    ///
+    /// 재예약은 **자기 제한적이다**: `enqueueScan` 이 같은 경로를 중복 제거하고, 큐가 넘치면 root 만
+    /// 남기는 coarse recovery 로 접히며, 실행 쪽 상한(원격 슬롯)이 왕복 수를 잡는다. 그래서 트리거가
+    /// 몰려도 예약이 무한히 자라지 않는다.
+    ///
+    /// 되돌린 것이 하나라도 있으면 true(호출자가 「읽을 것이 없었다」를 no-op 으로 둘 수 있게).
+    pub fn invalidateExpanded(self: *Tree) !bool {
+        var any = false;
+        for (self.roots.items) |*root| {
+            if (!root.expanded) continue;
+            root.loading = true;
+            try self.enqueueScan(root.path);
+            any = true;
+            for (root.children.items) |*child| {
+                if (try self.enqueueExpandedSubtree(child)) any = true;
+            }
+        }
+        return any;
+    }
+
+    fn enqueueExpandedSubtree(self: *Tree, node: *Node) !bool {
+        if (!node.expanded) return false;
+        var any = false;
+        if (node.kind.isDirectory()) {
+            node.loading = true;
+            try self.enqueueScan(node.path);
+            any = true;
+        }
+        for (node.children.items) |*child| {
+            if (try self.enqueueExpandedSubtree(child)) any = true;
+        }
+        return any;
+    }
+
     pub fn invalidatePath(self: *Tree, changed_path: []const u8) !void {
         for (self.roots.items) |*root| {
             if (!pathWithin(changed_path, root.path)) continue;
@@ -1851,5 +1892,71 @@ test "전체 접기는 scan 을 예약하지 않는다 — 감추는 동작이�
     while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
 
     _ = tree.collapseAll();
+    try std.testing.expect(tree.takeScanRequest() == null);
+}
+
+test "펼친 것만 다시 읽는다: 접힌 서브트리는 예약에 안 든다 (RF5a)" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+    try tree.applySnapshot("/w", &.{
+        .{ .name = "open", .kind = .directory },
+        .{ .name = "shut", .kind = .directory },
+        .{ .name = "a.txt", .kind = .file },
+    });
+    _ = try tree.toggleDirectory("/w/open");
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+    try tree.applySnapshot("/w/open", &.{.{ .name = "deep", .kind = .directory }});
+    _ = try tree.toggleDirectory("/w/open/deep");
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+
+    try std.testing.expect(try tree.invalidateExpanded());
+
+    // root + 펼친 둘 = 셋. 접힌 `shut` 과 파일은 안 든다(안 보이는 것을 읽으면 왕복만 는다).
+    var seen: std.ArrayList([]u8) = .empty;
+    defer {
+        for (seen.items) |p| std.testing.allocator.free(p);
+        seen.deinit(std.testing.allocator);
+    }
+    while (tree.takeScanRequest()) |owned| try seen.append(std.testing.allocator, owned);
+    try std.testing.expectEqual(@as(usize, 3), seen.items.len);
+    var has_root = false;
+    var has_open = false;
+    var has_deep = false;
+    for (seen.items) |p| {
+        if (std.mem.eql(u8, p, "/w")) has_root = true;
+        if (std.mem.eql(u8, p, "/w/open")) has_open = true;
+        if (std.mem.eql(u8, p, "/w/open/deep")) has_deep = true;
+        try std.testing.expect(!std.mem.eql(u8, p, "/w/shut"));
+        try std.testing.expect(!std.mem.eql(u8, p, "/w/a.txt"));
+    }
+    try std.testing.expect(has_root and has_open and has_deep);
+}
+
+test "트리거가 몰려도 예약이 안 자란다 — 중복 제거가 진다 (RF5a)" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/w"});
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+    try tree.applySnapshot("/w", &.{.{ .name = "src", .kind = .directory }});
+    _ = try tree.toggleDirectory("/w/src");
+    while (tree.takeScanRequest()) |owned| std.testing.allocator.free(owned);
+
+    // 감시자가 트리거를 연달아 냈다 — 큐는 그래도 「root + src」 둘이다.
+    for (0..50) |_| _ = try tree.invalidateExpanded();
+    var count: usize = 0;
+    while (tree.takeScanRequest()) |owned| {
+        std.testing.allocator.free(owned);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "펼친 것이 없으면 예약도 없다 — 호출자가 no-op 으로 둔다 (RF5a)" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    // root 조차 없는 빈 트리(원격이 아직 안 붙었거나 못 읽어 접힌 상태).
+    try std.testing.expect(!try tree.invalidateExpanded());
     try std.testing.expect(tree.takeScanRequest() == null);
 }

@@ -3236,6 +3236,29 @@ pub fn build(b: *std.Build) void {
     // 돌리지 않고 이 축만 잰다.
     b.step("test-file-tree-backend", "Run the file tree backend unit tests only").dependOn(&run_file_tree_backend_tests.step);
 
+    // **트리 모델(순수)만 도는 산출물**(RF5a). `src/session/file_tree.zig` 는 std 만 쓰는 순수 층인데
+    // 판정자가 `maru` 모듈 그래프에만 실려 있어, 이 축만 반복해 재려면 12 분짜리 전체를 돌려야 했다.
+    // 여기서 따로 세워 `test` 에 매단다 — 순수라 **Linux CI 에서도 돈다**(원격 감시의 거친 무효화가
+    // macOS 전용 경로에 갇히지 않는다는 뜻이기도 하다).
+    // ⚠️ `src/session/file_tree.zig` 를 **모듈 루트로 못 세운다** — 그 파일이 `../path_shape.zig` 를
+    // 임포트해서 모듈 경로 밖으로 나간다(실측: `import of file outside module path`). 그래서 maru
+    // 그래프에 **필터**를 건다. `test` 전체에는 매달지 않는다(그쪽이 이미 같은 판정자를 돌린다) —
+    // 이건 이 축만 반복해 재는 이름이다.
+    const file_tree_model_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{"RF5a"},
+    });
+    file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
+    run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
+
     // 원격 탐색기 수직 판정자(RF3a~) — app_session 전체를 12 분 돌리지 않고 이 축만 잰다.
     if (builtin.os.tag == .macos) {
         const remote_explorer_tests = addProjectTest(b, .{
@@ -3263,7 +3286,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
-        run_remote_explorer_tests.addArg("--maru-expect-tests=6"); // 이름 있는 3 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+        run_remote_explorer_tests.addArg("--maru-expect-tests=7"); // 이름 있는 4 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
     }
@@ -5179,7 +5202,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_file_tree_axis_boundary_tests = b.addRunArtifact(remote_file_tree_axis_boundary_tests);
-    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=4");
+    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=5");
     run_remote_file_tree_axis_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_remote_file_tree_axis_boundary_tests.step);
 

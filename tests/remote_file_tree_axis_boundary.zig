@@ -99,3 +99,30 @@ test "로컬 root 커밋의 capability 요구는 그대로다 — 갈래는 정�
     defer allocator.free(panel);
     try std.testing.expect(std.mem.count(u8, panel, ".fp_root_capability_gone") >= 1);
 }
+
+test "감시 채널은 창 당 하나다 — 뷰가 나눠 쓰지, 트리 전용 채널을 새로 만들지 않는다 (RF5a §③)" {
+    // ③ 확정의 못이다: 세션 예산(`MaxSessions` 기본 10, pane 당 이미 둘)을 지키는 근거가 「도크는 한
+    // 번에 한 뷰라 동시 수요가 없다」이므로, **채널을 새로 띄우는 자리가 늘면 그 근거가 무너진다.**
+    // 그래서 `spawnRemoteWatch` 소비처는 정확히 하나여야 한다(감시 펌프).
+    const allocator = std.testing.allocator;
+    const git = try read(allocator, "src/platform/macos/app_session/git.zig", 8 * 1024 * 1024);
+    defer allocator.free(git);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, git, "spawnRemoteWatch("));
+    // 대상 해석이 **뷰로** 갈린다 — 두 주인이 같은 함수를 지난다(따로 만들면 드리프트가 조용히 생긴다).
+    try std.testing.expect(std.mem.indexOf(u8, git, "remoteWatchTarget(self)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, git, ".explorer =>") != null);
+    // 못 서는 원격은 **화면이 말한다**(§2.5) — 주인마다 다른 안내 키.
+    try std.testing.expect(std.mem.indexOf(u8, git, ".scm_remote_watch_gave_up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, git, ".fp_remote_watch_gave_up") != null);
+
+    // 다른 파일이 감시자를 따로 띄우지 않는다(탐색기는 **설치만** 재사용한다 — RF3a 부터의 규율).
+    const still_zero = [_][]const u8{
+        "src/platform/macos/app_session/file_panel.zig",
+        "src/platform/macos/app_session/scm_dock.zig",
+    };
+    for (still_zero) |path| {
+        const source = try read(allocator, path, 8 * 1024 * 1024);
+        defer allocator.free(source);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "spawnRemoteWatch"));
+    }
+}

@@ -13907,14 +13907,14 @@ pub fn build(b: *std.Build) void {
         "Validate predecessor manifest attestation composition",
     );
     if (target.result.os.tag == .macos) {
-        // ── release adapter 판정자 70 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
+        // ── release adapter 판정자 71 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
         // 왜 갈랐는지는 그 파일 머리가 단일 출처다. 가족의 전용 스텝들과 `test-session-host` 는 각자 바이너리를
         // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
         // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_macos_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
         //
-        // 561 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+        // 570 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
         // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-        const ra_mac_expected_tests: usize = 561;
+        const ra_mac_expected_tests: usize = 570;
         const ra_mac_step = b.step(
             "test-session-host-release-adapter-macos-all",
             "Run the macos session-host release adapter judges from one binary per optimize mode",
@@ -14157,6 +14157,10 @@ pub fn build(b: *std.Build) void {
     const session_host_release_adapter_candidate_resume_publication_command_step = b.step(
         "test-session-host-release-adapter-candidate-resume-publication-command",
         "Run the resumed publication executable command tests",
+    );
+    const session_host_release_adapter_candidate_published_cleanup_authority_step = b.step(
+        "test-session-host-release-adapter-candidate-published-cleanup-authority",
+        "Run fresh-process published cleanup authority tests",
     );
     const session_host_release_adapter_candidate_stage3_preparation_command_step = b.step(
         "test-session-host-release-adapter-candidate-stage3-preparation-command",
@@ -14723,6 +14727,12 @@ pub fn build(b: *std.Build) void {
             run_post_publish_attestation_tests.addArg("--maru-expect-tests=9");
             run_post_publish_attestation_tests.setCwd(b.path("."));
             session_host_release_adapter_post_publish_attestation_step.dependOn(&run_post_publish_attestation_tests.step);
+            const candidate_published_cleanup_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_published_cleanup_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod }, .{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
+            const candidate_published_cleanup_authority_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_published_cleanup_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_candidate_published_cleanup_authority", .module = candidate_published_cleanup_authority_mod }, .{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod } } }) });
+            const run_candidate_published_cleanup_authority_tests = b.addRunArtifact(candidate_published_cleanup_authority_tests);
+            run_candidate_published_cleanup_authority_tests.addArg("--maru-expect-tests=9");
+            run_candidate_published_cleanup_authority_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_published_cleanup_authority_step.dependOn(&run_candidate_published_cleanup_authority_tests.step);
             const candidate_aggregate_retention_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_retention.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod }, .{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod } } });
             const candidate_aggregate_retention_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_retention.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_candidate_aggregate_retention", .module = candidate_aggregate_retention_mod }, .{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod } } }) });
             const run_candidate_aggregate_retention_tests = b.addRunArtifact(candidate_aggregate_retention_tests);

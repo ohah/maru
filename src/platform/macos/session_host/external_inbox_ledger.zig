@@ -1697,7 +1697,7 @@ fn simulateLiveBatchFrom(
         .next_slot_hint = ledger.next_slot_hint,
     };
     if (initial == null)
-        for (ledger.slots, 0..) |slot, slot_index|
+        for (&ledger.slots, 0..) |slot, slot_index|
             if (slot.active or slot.retired)
                 simulation.occupied_slots.set(slot_index);
     for (batch.mutations[start..count], start..) |mutation, index| {
@@ -2256,7 +2256,7 @@ fn liveSimulationDigest(
     simulation: *const LiveSimulation,
     node_count: usize,
 ) owner_seal.Digest {
-    var writer = owner_seal.Writer.init("MARULSM1");
+    var writer = owner_seal.Writer.init("MARULSM2");
     writer.writeUsize(simulation.charged_bytes);
     writer.writeUsize(simulation.charged_items);
     writer.writeU64(simulation.next_generation);
@@ -2268,10 +2268,13 @@ fn liveSimulationDigest(
     writer.writeUsize(node_count);
     for (simulation.nodes[0..node_count]) |node|
         writer.writeBytes(&liveNodeDigest(node));
-    for (0..max_items) |slot| {
-        writer.writeBool(simulation.cleared_slots.isSet(slot));
-        writer.writeBool(simulation.occupied_slots.isSet(slot));
-    }
+    // 비트셋은 **뒷받침 워드째** 넣는다. 비트를 하나씩 `writeBool` 하면 Blake3 update 가 8,192번이고,
+    // 이 다이제스트는 해제 1건 경로에서 8~9번 다시 계산된다(`requirePreparingLiveBatch` 마다).
+    // 같은 정보(모든 비트)를 워드 128개로 넣으면 update 가 64분의 1이다. `max_items` 가 워드
+    // 크기의 배수라 패딩 비트가 없다 — 배수가 아니게 바뀌면 아래 단언이 막는다.
+    comptime std.debug.assert(max_items % @bitSizeOf(usize) == 0);
+    for (simulation.cleared_slots.masks) |mask| writer.writeUsize(mask);
+    for (simulation.occupied_slots.masks) |mask| writer.writeUsize(mask);
     return writer.finish();
 }
 
@@ -3384,6 +3387,18 @@ pub const ExternalInboxLedger = struct {
             if (!std.mem.eql(u8, &current_digest, &sealed_digest))
                 return error.StalePlan;
         }
+        // **병합이 없는 배치(admission·release만)는 아래에서 외부 코드가 전혀 돌지 않는다** — 교체
+        // 할당(콜백)도, 원본 바이트 읽기도, 배치 갱신도 병합 갈래에만 있다. 그래서 할당 뒤와 끝의
+        // 재구성은 첫 재구성과 같은 입력의 같은 계산이다. 재구성이 지키는 것은 「할당 콜백이 ledger
+        // 뒷받침 바이트를 바꾸는 것」이고 그것은 병합에서만 생기므로, 병합이 있을 때만 다시 짓는다.
+        // 슬롯 4096개 fold 두 번을 해제 1건마다 아낀다 — **측정값**은 판정자 주석에 있다.
+        var has_merge = false;
+        for (batch.mutations[0..batch.mutation_count]) |mutation| {
+            if (mutation == .merge) {
+                has_merge = true;
+                break;
+            }
+        }
         const allocation_allocator = batch.sealed_allocator;
         const ReplacementAllocationPlan = struct {
             mutation_index: u8,
@@ -3437,123 +3452,125 @@ pub const ExternalInboxLedger = struct {
         }
         // Allocation callbacks may mutate ledger-backed source bytes. Defer every source
         // read until all callbacks are complete, then validate the complete virtual batch once.
-        try self.requirePreparingLiveBatch(batch);
-        simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
-        var pending_replacement_index: u8 = 0;
-        for (batch.mutations[0..batch.mutation_count], 0..) |*mutation, index| {
-            switch (mutation.*) {
-                .merge => |*merge| {
-                    if (!simulation.nodes[index].live) continue;
-                    switch (merge.replacement) {
-                        .prebuilt => |prebuilt| {
-                            var cursor: usize = 0;
-                            try matchRefBytes(
-                                self,
-                                batch,
-                                merge.destination,
-                                index,
-                                prebuilt.bytes(),
-                                &cursor,
-                            );
-                            switch (merge.source) {
-                                .owned => |source| {
-                                    const end = std.math.add(
-                                        usize,
-                                        cursor,
-                                        source.logical_len,
-                                    ) catch return error.InvalidPayload;
-                                    if (end != prebuilt.logical_len or
-                                        !std.mem.eql(
-                                            u8,
-                                            prebuilt.bytes()[cursor..end],
-                                            source.bytes(),
-                                        ))
-                                        return error.InvalidPayload;
-                                    cursor = end;
-                                },
-                                .existing => |source_ref| try matchRefBytes(
+        if (has_merge) {
+            try self.requirePreparingLiveBatch(batch);
+            simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
+            var pending_replacement_index: u8 = 0;
+            for (batch.mutations[0..batch.mutation_count], 0..) |*mutation, index| {
+                switch (mutation.*) {
+                    .merge => |*merge| {
+                        if (!simulation.nodes[index].live) continue;
+                        switch (merge.replacement) {
+                            .prebuilt => |prebuilt| {
+                                var cursor: usize = 0;
+                                try matchRefBytes(
                                     self,
                                     batch,
-                                    source_ref,
+                                    merge.destination,
                                     index,
                                     prebuilt.bytes(),
                                     &cursor,
-                                ),
-                            }
-                            if (cursor != prebuilt.logical_len)
-                                return error.InvalidPayload;
-                        },
-                        .coalesced => {
-                            if (pending_replacement_index >= pending_replacement_count or
-                                batch.replacement_count >= max_live_mutations)
-                                return error.InvalidPlan;
-                            const pending =
-                                &pending_replacements[pending_replacement_index];
-                            if (allocation_plans[pending_replacement_index].mutation_index !=
-                                index)
-                                return error.StalePlan;
-                            var cursor: usize = 0;
-                            try appendRefBytes(
-                                self,
-                                batch,
-                                merge.destination,
-                                index,
-                                pending.mutableBytes(),
-                                &cursor,
-                            );
-                            switch (merge.source) {
-                                .owned => |source| {
-                                    const end = std.math.add(
-                                        usize,
-                                        cursor,
-                                        source.logical_len,
-                                    ) catch return error.InvalidPayload;
-                                    if (end != pending.logical_len)
-                                        return error.InvalidPayload;
-                                    @memcpy(
-                                        pending.mutableBytes()[cursor..end],
-                                        source.bytes(),
-                                    );
-                                    cursor = end;
-                                },
-                                .existing => |source_ref| try appendRefBytes(
+                                );
+                                switch (merge.source) {
+                                    .owned => |source| {
+                                        const end = std.math.add(
+                                            usize,
+                                            cursor,
+                                            source.logical_len,
+                                        ) catch return error.InvalidPayload;
+                                        if (end != prebuilt.logical_len or
+                                            !std.mem.eql(
+                                                u8,
+                                                prebuilt.bytes()[cursor..end],
+                                                source.bytes(),
+                                            ))
+                                            return error.InvalidPayload;
+                                        cursor = end;
+                                    },
+                                    .existing => |source_ref| try matchRefBytes(
+                                        self,
+                                        batch,
+                                        source_ref,
+                                        index,
+                                        prebuilt.bytes(),
+                                        &cursor,
+                                    ),
+                                }
+                                if (cursor != prebuilt.logical_len)
+                                    return error.InvalidPayload;
+                            },
+                            .coalesced => {
+                                if (pending_replacement_index >= pending_replacement_count or
+                                    batch.replacement_count >= max_live_mutations)
+                                    return error.InvalidPlan;
+                                const pending =
+                                    &pending_replacements[pending_replacement_index];
+                                if (allocation_plans[pending_replacement_index].mutation_index !=
+                                    index)
+                                    return error.StalePlan;
+                                var cursor: usize = 0;
+                                try appendRefBytes(
                                     self,
                                     batch,
-                                    source_ref,
+                                    merge.destination,
                                     index,
                                     pending.mutableBytes(),
                                     &cursor,
-                                ),
-                            }
-                            if (cursor != pending.logical_len)
-                                return error.InvalidPayload;
-                            const replacement_index = batch.replacement_count;
-                            batch.coalesced_replacements[replacement_index] =
-                                pending.*;
-                            pending.* = OwnedPayload.empty(batch.allocator);
-                            batch.coalesced_replacement_fingerprints[replacement_index] =
-                                fingerprint(
-                                    batch.coalesced_replacements[replacement_index],
                                 );
-                            merge.coalesced_replacement_index = replacement_index;
-                            batch.replacement_count += 1;
-                            batch.replacement_bytes = std.math.add(
-                                usize,
-                                batch.replacement_bytes,
-                                batch.coalesced_replacements[replacement_index].logical_len,
-                            ) catch return error.ByteCapExceeded;
-                            pending_replacement_index += 1;
-                        },
-                    }
-                    merge.digest = liveMutationDigest(batch, index);
-                    batch.progress_digest = liveProgressDigest(batch);
-                },
-                else => {},
+                                switch (merge.source) {
+                                    .owned => |source| {
+                                        const end = std.math.add(
+                                            usize,
+                                            cursor,
+                                            source.logical_len,
+                                        ) catch return error.InvalidPayload;
+                                        if (end != pending.logical_len)
+                                            return error.InvalidPayload;
+                                        @memcpy(
+                                            pending.mutableBytes()[cursor..end],
+                                            source.bytes(),
+                                        );
+                                        cursor = end;
+                                    },
+                                    .existing => |source_ref| try appendRefBytes(
+                                        self,
+                                        batch,
+                                        source_ref,
+                                        index,
+                                        pending.mutableBytes(),
+                                        &cursor,
+                                    ),
+                                }
+                                if (cursor != pending.logical_len)
+                                    return error.InvalidPayload;
+                                const replacement_index = batch.replacement_count;
+                                batch.coalesced_replacements[replacement_index] =
+                                    pending.*;
+                                pending.* = OwnedPayload.empty(batch.allocator);
+                                batch.coalesced_replacement_fingerprints[replacement_index] =
+                                    fingerprint(
+                                        batch.coalesced_replacements[replacement_index],
+                                    );
+                                merge.coalesced_replacement_index = replacement_index;
+                                batch.replacement_count += 1;
+                                batch.replacement_bytes = std.math.add(
+                                    usize,
+                                    batch.replacement_bytes,
+                                    batch.coalesced_replacements[replacement_index].logical_len,
+                                ) catch return error.ByteCapExceeded;
+                                pending_replacement_index += 1;
+                            },
+                        }
+                        merge.digest = liveMutationDigest(batch, index);
+                        batch.progress_digest = liveProgressDigest(batch);
+                    },
+                    else => {},
+                }
             }
+            if (pending_replacement_index != pending_replacement_count)
+                return error.InvalidPlan;
+            simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
         }
-        if (pending_replacement_index != pending_replacement_count)
-            return error.InvalidPlan;
-        simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
         batch.accepted_source_bytes = simulation.accepted_source_bytes;
         batch.expected_next_generation = simulation.next_generation;
         batch.expected_generation_exhausted = simulation.generation_exhausted;
@@ -6172,7 +6189,7 @@ fn rangeOverlapsPayloads(range: ByteRange, payloads: []const OwnedPayload) bool 
 }
 
 fn rangeOverlapsActive(range: ByteRange, ledger: *const ExternalInboxLedger) bool {
-    for (ledger.slots) |slot| {
+    for (&ledger.slots) |slot| {
         if (!slot.active and !slot.retired) continue;
         if (rangesOverlap(range, rangeOfPayload(&slot.payload))) return true;
     }
@@ -9395,6 +9412,57 @@ test "live replacement callbacks cannot redirect later allocation or hide batch 
         ledger.abortPreparedLiveBatch(&batch),
     );
     try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "live simulation digest covers every occupancy and cleared word — tampering either bitset at the first or last slot is InvalidPlan" {
+    // `liveSimulationDigest` 가 비트셋을 **워드째** 넣는다(비트 8,192개 → 워드 128개). 같은 정보인지는
+    // 「어느 비트를 바꿔도 다음 준비 호출이 거부하는가」로 잰다 — 첫 워드와 마지막 워드, 점유·비움 두
+    // 비트셋 모두. 워드 일부만 넣거나 한 비트셋을 빠뜨리는 뮤턴트가 여기서 죽는다(적대적 검증 2026-09-06:
+    // 이 계약을 지키는 판정자가 그전엔 없었다).
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var payload = OwnedPayload.empty(allocator);
+    const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
+    inline for (.{ @as(usize, 0), max_items - 1 }) |slot| {
+        var occupied: PreparedLiveBatch = .{};
+        try ledger.beginLiveCleanupBatch(&occupied);
+        occupied.working_simulation.occupied_slots.toggle(slot);
+        try std.testing.expectError(
+            error.InvalidPlan,
+            ledger.prepareLiveRelease(&occupied, .{ .existing = token }, .lease),
+        );
+        var cleared: PreparedLiveBatch = .{};
+        try ledger.beginLiveCleanupBatch(&cleared);
+        cleared.working_simulation.cleared_slots.toggle(slot);
+        try std.testing.expectError(
+            error.InvalidPlan,
+            ledger.prepareLiveRelease(&cleared, .{ .existing = token }, .lease),
+        );
+    }
+    // 변조 안 한 해제는 그대로 통한다 — 위 거부가 다른 이유가 아니었음을 못박는다.
+    try ledger.releaseLease(token);
+    try ledger.finish();
+}
+
+test "release-only live batch still rejects ledger drift between prepare and finish" {
+    // 병합이 없는 배치는 `finishLiveBatch` 가 시뮬레이션을 한 번만 짓는다 — 할당 콜백이 없으니 뒤의
+    // 재구성 둘은 같은 입력의 같은 계산이었다. 남은 한 번이 지키는 것, 「준비 뒤 ledger 가 바뀌면 finish
+    // 가 거부한다」는 그대로여야 한다. 준비와 finish 사이에 **합법적인** 다른 예약으로 회계를 움직인다.
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var payload = OwnedPayload.empty(allocator);
+    const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveCleanupBatch(&batch);
+    try ledger.prepareLiveRelease(&batch, .{ .existing = token }, .lease);
+    var other = OwnedPayload.empty(allocator);
+    const other_token = try ledger.reserveLease(leaseSemantic(8, false), &other);
+    try std.testing.expectError(error.StalePlan, ledger.finishLiveBatch(&batch));
+    _ = ledger.abortPreparedLiveBatch(&batch);
+    // 낡은 배치를 버린 뒤 ledger 는 멀쩡하다.
+    try ledger.releaseLease(other_token);
+    try ledger.releaseLease(token);
     try ledger.finish();
 }
 

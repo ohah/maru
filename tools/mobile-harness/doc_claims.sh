@@ -79,8 +79,10 @@ echo "ABI 헤더 ↔ Zig export"
 # 선언은 열 0 에서 반환형으로 시작하는 줄이다(`void maru_mobile_x(...);`).
 # 반환형은 소문자만이 아니다(`const MaruQuad *maru_mobile_quads(void);`) — 실제로 이 하나를
 # 놓쳐 집합이 어긋났다.
-h=$(grep -E '^[A-Za-z_][A-Za-z0-9_ ]*\*? *maru_mobile_[a-z_]+\(' $H | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
-z=$(grep -hoE '^pub export fn maru_mobile_[a-z_]+' $B $S | grep -oE 'maru_mobile_[a-z_]+' | sort -u)
+# **이름에 숫자가 들 수 있다**(`maru_mobile_a11y_*`). `[a-z_]+` 로 훑으면 `maru_mobile_a` 에서
+# 잘려 두 집합이 어긋나고, 게이트가 **없는 불일치**를 알린다(2026-09-06 실측).
+h=$(grep -E '^[A-Za-z_][A-Za-z0-9_ ]*\*? *maru_mobile_[a-z0-9_]+\(' $H | grep -oE 'maru_mobile_[a-z0-9_]+' | sort -u)
+z=$(grep -hoE '^pub export fn maru_mobile_[a-z0-9_]+' $B $S | grep -oE 'maru_mobile_[a-z0-9_]+' | sort -u)
 ck "선언 집합" "$(printf '%s' "$h" | wc -l | tr -d ' ')" "$(printf '%s' "$z" | wc -l | tr -d ' ')"
 if [ "$h" != "$z" ]; then
   printf "  틀림 %-42s\n" "선언 집합이 다르다 — 한쪽에만 있는 것:"

@@ -794,6 +794,9 @@ const Table = struct {
     mob_password_ok: [:0]const u8,
     mob_password_cancel: [:0]const u8,
     mob_copy: [:0]const u8,
+    /// 접근성이 읽을 뒤로가기 이름. **화면에는 아이콘만 있고 글자가 없다** — 그래서 이 문구는
+    /// 그리지 않고 스크린 리더에게만 간다(M9).
+    mob_a11y_back: [:0]const u8,
     mob_keyboard: [:0]const u8,
     mob_disconnect: [:0]const u8,
     mob_hostkey_title: [:0]const u8,
@@ -1261,6 +1264,7 @@ const en: Table = .{
     .mob_password_ok = "Connect",
     .mob_password_cancel = "Cancel",
     .mob_copy = "copy",
+    .mob_a11y_back = "Back",
     .mob_keyboard = "kbd",
     .mob_disconnect = "disc",
     .mob_hostkey_title = "First time connecting",
@@ -1864,6 +1868,7 @@ const ko: Table = .{
     .mob_password_ok = "접속",
     .mob_password_cancel = "취소",
     .mob_copy = "복사",
+    .mob_a11y_back = "뒤로 가기",
     .mob_keyboard = "자판",
     .mob_disconnect = "끊기",
     .mob_hostkey_title = "처음 연결하는 서버",

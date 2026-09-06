@@ -235,6 +235,34 @@ void maru_mobile_set_system_appearance(unsigned int is_dark);
 
    빌드 자체는 매 tick 그대로 돈다 — 관성 감쇠·길게 누름 승격이 멈추면 안 되기 때문이다. */
 unsigned int maru_mobile_frame_changed(void);
+
+/* ── 접근성 서술자(M9) ─────────────────────────────────────────────────────────
+   누를 수 있는 면을 스크린 리더에게 넘길 형태로 낸다. 계약은 데스크톱 것을 그대로 쓴다
+   (CIM §3 — `chrome/ui/semantics.zig` 의 `Role`·`Semantics`).
+
+   **build 뒤에 읽는다.** 프레임마다 다시 만들어지므로 index 는 그 프레임 안에서만 뜻이 있다.
+   없는 index 는 정직하게 답한다(rect 0 · role 0xFFFFFFFF · state 0 · label 길이 0) — 옛 자리를
+   돌려주면 없는 버튼이 읽힌다.
+
+   host 는 이것을 네이티브 요소로 투영한다: iOS `UIAccessibilityElement`,
+   Android `AccessibilityNodeInfo`. **그 어댑터가 서기 전까지는 아무도 못 듣는다.** */
+unsigned int maru_mobile_a11y_count(void);
+
+/* 자리. `maru_mobile_keybar_rect` 와 **같은 꾸림**이다: (x<<48)|(y<<32)|(w<<16)|h. */
+unsigned long long maru_mobile_a11y_rect(unsigned int index);
+
+/* 역할 — `chrome/ui/semantics.zig` 의 `Role` 순번(0=button, 1=tree_item, 2=list_item,
+   3=tab, 4=scroll_view, 5=text, 6=group). */
+unsigned int maru_mobile_a11y_role(unsigned int index);
+
+/* 상태 비트. **한 번에 읽어 간다** — 항목마다 호출을 넷 하면 그 사이에 프레임이 바뀌어 서로 다른
+   프레임의 값을 섞는다. bit0 enabled · bit1 selected · bit2 focusable ·
+   bit3 「펼침이라는 개념이 있는가」 · bit4 그 값. */
+unsigned int maru_mobile_a11y_state(unsigned int index);
+
+/* 이름을 `out` 에 **복사**하고 길이를 답한다(잘리면 잘린 길이). 가리키는 것은 다음 프레임에
+   사라질 수 있어서 포인터를 안 준다. */
+unsigned long maru_mobile_a11y_label(unsigned int index, unsigned char *out, unsigned long cap);
 /// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
 /// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.
 ///

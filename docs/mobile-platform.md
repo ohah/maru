@@ -542,6 +542,17 @@ AOSP `ScrollView` 는 기준을 **하나**(`mLastMotionY`) 두므로 `onSecondar
 돌리면 격자를 다시 잡는다(실측 2026-09-05: 세로 51×31 ↔ 가로 108×9). 그러니 좌우 inset 은 이제
 곡면 기기 밖에서도 0 이 아닐 수 있다.
 
+**누를 수 있는 면은 접근성 서술자를 낸다.** 계약은 데스크톱 것을 그대로 쓴다
+([CIM §3](chrome-interaction-migration.md) — `chrome/ui/semantics.zig` 의 `Role`·`Semantics`).
+**내는 자리는 rect 를 적는 그 줄 옆**이다 — 「그리는 자리와 누르는 자리가 같아야 한다」는 규율에
+**읽는 자리**를 묶는다. 다른 곳에서 만들면 세 번째 진실이 생겨, 스크린 리더가 짚은 곳과 손가락이
+닿는 곳이 조용히 어긋난다. 프레임마다 다시 만들고(쌓이지 않는다), **없는 index 는 0 으로 답한다**
+— 옛 자리를 돌려주면 없는 버튼이 읽힌다. 못 쓰는 컨트롤은 **빼지 않고** `enabled = false` 로 낸다.
+
+**아직 host 어댑터가 없다** — 이것을 네이티브 요소로 투영하는 iOS `UIAccessibilityElement`·
+Android `AccessibilityNodeInfo` 는 [계획 M9](plans/mobile-platform.md)가 소유한다. 그 전까지
+VoiceOver·TalkBack 에게 모바일은 여전히 빈 화면이다.
+
 **안 바뀐 프레임은 GPU 를 안 쓴다.** 빌드는 매 tick 그대로 돌고, 낸 quad 가 지난 프레임과 같으면
 host 가 획득·제출·프레젠트를 통째로 건너뛴다(`maru_mobile_frame_changed`). **깃발이 아니라 결과를
 견주는 이유**는 상태를 바꾸는 진입점이 아흔 개라, 「바꾸는 자리마다 dirty 를 세운다」는 하나만

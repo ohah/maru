@@ -5266,6 +5266,10 @@ pub const AppSession = struct {
     file_tree: file_tree.Tree = undefined,
     /// 원격 탐색기(RF3a) — 로컬 트리를 대체하지 않고 얹히는 별도 모델(file_panel.RemoteExplorer 주석).
     remote_explorer: file_panel_ops.RemoteExplorer = undefined,
+    /// **발행된 행 목록의 출처**(적대적 검증 2 회차). 펜스(열기·변경·접기·안내 라벨)의 키다 —
+    /// «지금 모드» 로 가르면 원격이 내려간 뒤 재빌드 전의 낡은 원격 행이 로컬 갈래로 들어간다.
+    /// 재빌드 스위치만 이 값을 쓴다(행과 원자적으로 굳는다).
+    file_tree_rows_remote: bool = false,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
@@ -79328,9 +79332,23 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
 
+    // 가짜 원격 root 는 **실존하는 /tmp 경로**다 — 같은 철자의 로컬 미끼 파일을 심어, 펜스가
+    // 뚫리면(원격 행이 로컬 열기로 새면) 그 파일이 «정말로 열려» 판정이 문다(적대적 검증 3 회차 —
+    // 없는 경로로는 열기 실패와 펜스가 구별되지 않아 판정이 공허했다).
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/maru-rf3a-judge.{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    {
+        var clash_buf: [96]u8 = undefined;
+        const clash = try std.fmt.bufPrint(&clash_buf, "{s}/clash.txt", .{root});
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clash, .data = "local" });
+    }
+
     // ── ① 원격 대상 적용(따라가기의 가시성 게이트는 우회 — 판정이 요구하는 control socket 은
     //     단위에서 못 세운다. 그 게이트 자체는 remoteScmTarget 판정자들이 소유한다).
-    file_panel_ops.applyRemoteExplorerTarget(session, "me@build-box", "/maru-dead-ctl", "/srv/app/proj");
+    file_panel_ops.applyRemoteExplorerTarget(session, "me@build-box", "/maru-dead-ctl", root);
     try std.testing.expect(file_panel_ops.explorerRemoteActive(session));
     // 변경 펜스(§2.4): 원격이 활성이면 mutation 진입점이 닫힌다.
     try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
@@ -79339,20 +79357,20 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
     //     (ssh 는 -S 소켓이 없으면 **직접 접속으로 폴백**한다 — 테스트가 네트워크를 만지면 안 된다.)
     const scan_path = session.remote_explorer.tree.takeScanRequest() orelse return error.TestUnexpectedResult;
     defer a.free(scan_path);
-    try std.testing.expectEqualStrings("/srv/app/proj", scan_path);
+    try std.testing.expectEqualStrings(root, scan_path);
 
     // ── ③ 첫 재빌드: 원격 모델이 발행 목록을 채운다 — root 행이 선다.
     try file_panel_ops.updateFileTree(session);
     try std.testing.expect(session.file_tree_rows.items.len >= 1);
     switch (session.file_tree_rows.items[0]) {
-        .root => |v| try std.testing.expectEqualStrings("/srv/app/proj", v.path),
+        .root => |v| try std.testing.expectEqualStrings(root, v.path),
         else => return error.TestUnexpectedResult,
     }
 
     // ── ③b 성공 결과 주입 — 항목이 원격 모델을 지나 발행 행으로 나온다(신원 pin 포함).
     {
         var ok_result: file_tree_backend.Result = .{
-            .path = try a.dupe(u8, "/srv/app/proj"),
+            .path = try a.dupe(u8, root),
             .ok = true,
             .was_remote = true,
             .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @intFromEnum(file_tree.IdentityKind.directory) } },
@@ -79390,9 +79408,42 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
         try std.testing.expect(saw_file);
     }
 
+    // ── ③c **낡은 행 펜스**(적대적 검증 2 회차): 원격이 내려간 직후, 재빌드 전의 발행 행은 아직
+    //     원격의 것이다. 펜스가 «지금 모드» 를 보면 이 창에서 원격 경로가 로컬 열기로 들어간다 —
+    //     키는 발행 출처(file_tree_rows_remote)여야 한다.
+    file_panel_ops.deactivateRemoteExplorer(session);
+    try std.testing.expect(!file_panel_ops.explorerRemoteActive(session)); // 모드는 이미 로컬인데
+    try std.testing.expect(session.file_tree_rows_remote); // 행은 아직 원격이다 — 이 창이 그 구멍이다
+    try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
+    {
+        var file_index: ?usize = null;
+        for (session.file_tree_rows.items, 0..) |row, i| switch (row) {
+            .file => file_index = i,
+            else => {},
+        };
+        const before_entries = file_panel_ops.fileEntryCount(session);
+        @memset(&session.notice_message_buf, 0);
+        file_panel_ops.activateFileTreeRow(session, file_index.?);
+        // 로컬 열기로 새지 않았다 — 파일 entry 가 생기면 같은 철자의 로컬 파일이 열린 것이다.
+        try std.testing.expectEqual(before_entries, file_panel_ops.fileEntryCount(session));
+        // 그리고 **거절이 원격 안내였다** — 신원 pin 이 로컬 열기를 막는 심층 방어와 달리, 출처
+        // 펜스는 애초에 원격 갈래로 보낸다. 이 바이트가 그 갈래의 증거다(적대적 검증 3 회차 —
+        // entry 수만 보면 «열기 실패» 와 «펜스» 가 구별되지 않아 판정이 공허했다).
+        const expected_notice = maru.i18n.t(.fp_remote_open_unsupported);
+        try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, expected_notice));
+    }
+    // 다시 원격으로(activate 가 updateFileTree 를 불러 행이 로컬로 재빌드됐다).
+    try std.testing.expect(!session.file_tree_rows_remote);
+    file_panel_ops.applyRemoteExplorerTarget(session, "me@build-box", "/maru-dead-ctl", root);
+    {
+        const scan2 = session.remote_explorer.tree.takeScanRequest() orelse return error.TestUnexpectedResult;
+        defer a.free(scan2);
+    }
+    try file_panel_ops.updateFileTree(session);
+
     // ── ④ 실패 결과 주입(root 스캔이 «원격이라 못 읽는다» 로 끝난 모양) → 드레인.
     session.file_tree_backend.pushResultForTest(.{
-        .path = try a.dupe(u8, "/srv/app/proj"),
+        .path = try a.dupe(u8, root),
         .ok = false,
         .was_remote = true,
         .remote_error = try a.dupe(u8, "opendir failed: AccessDenied"),
@@ -79419,7 +79470,7 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
     try std.testing.expect(!file_panel_ops.explorerRemoteActive(session));
     try file_panel_ops.updateFileTree(session);
     for (session.file_tree_rows.items) |row| switch (row) {
-        .root => |v| try std.testing.expect(!std.mem.eql(u8, v.path, "/srv/app/proj")),
+        .root => |v| try std.testing.expect(!std.mem.eql(u8, v.path, root)),
         else => {},
     };
 }

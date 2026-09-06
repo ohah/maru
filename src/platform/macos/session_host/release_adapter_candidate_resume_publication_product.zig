@@ -84,6 +84,16 @@ pub const Execution = struct {
         try cleanupBound(&driver, self, false);
     }
 
+    /// Releases only process-local owners after the caller has captured the closed audit stage.
+    /// Remote state is never retried, deleted, or reclassified by this transition.
+    pub fn cleanupAudit(self: *@This()) !void {
+        if (!self.needsAudit()) return error.InvalidOwner;
+        self.transaction.audit_required = false;
+        self.transaction.audit_stage = .none;
+        var driver = ProductionDriver{ .execution = self };
+        try cleanupBound(&driver, self, true);
+    }
+
     pub fn retryCleanup(self: *@This()) !void {
         if (!self.needsCleanup()) return error.InvalidOwner;
         var driver = ProductionDriver{ .execution = self };
@@ -427,6 +437,12 @@ pub const testing_api = if (builtin.is_test) struct {
     pub fn cleanupWith(driver: anytype, execution: *Execution) !void {
         if (!execution.ownsSuccessfulOutputs()) return error.InvalidOwner;
         try cleanupBound(driver, execution, false);
+    }
+    pub fn cleanupAuditWith(driver: anytype, execution: *Execution) !void {
+        if (!execution.needsAudit()) return error.InvalidOwner;
+        execution.transaction.audit_required = false;
+        execution.transaction.audit_stage = .none;
+        try cleanupBound(driver, execution, true);
     }
     pub fn retryCleanupWith(driver: anytype, execution: *Execution) !void {
         if (!execution.needsCleanup()) return error.InvalidOwner;

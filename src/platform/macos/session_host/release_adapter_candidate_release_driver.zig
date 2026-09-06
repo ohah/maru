@@ -442,6 +442,7 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
         .verify_predecessor => hash.update("verify-predecessor"),
         .prepare_candidate_aggregate => hash.update("prepare-candidate-aggregate"),
         .finalize_candidate_aggregate => hash.update("finalize-candidate-aggregate"),
+        .resume_candidate_publication => hash.update("resume-candidate-publication"),
     }
     var digest: [32]u8 = undefined;
     hash.final(&digest);

@@ -107,6 +107,17 @@ pub const FinalizeCandidateAggregate = struct {
     manifest: []const u8,
 };
 
+pub const ResumeCandidatePublication = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    preparation: []const u8,
+    aggregate: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+};
+
 pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
@@ -114,6 +125,7 @@ pub const Command = union(enum) {
     prepare_candidate: PrepareCandidate,
     prepare_candidate_aggregate: PrepareCandidateAggregate,
     finalize_candidate_aggregate: FinalizeCandidateAggregate,
+    resume_candidate_publication: ResumeCandidatePublication,
 };
 
 pub const Error = error{
@@ -167,6 +179,7 @@ const Values = struct {
     manifest_bundle: ?[]const u8 = null,
     aggregate: ?[]const u8 = null,
     durable_preparation: ?[]const u8 = null,
+    preparation: ?[]const u8 = null,
 };
 
 const Phase = enum {
@@ -176,6 +189,7 @@ const Phase = enum {
     prepare_candidate,
     prepare_candidate_aggregate,
     finalize_candidate_aggregate,
+    resume_candidate_publication,
 };
 
 pub fn parseArgs(args: []const []const u8) Error!Command {
@@ -192,6 +206,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         .prepare_candidate_aggregate
     else if (std.mem.eql(u8, args[0], "finalize-candidate-aggregate"))
         .finalize_candidate_aggregate
+    else if (std.mem.eql(u8, args[0], "resume-candidate-publication"))
+        .resume_candidate_publication
     else
         return error.UnknownCommand;
 
@@ -387,6 +403,25 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .manifest = manifest,
             } };
         },
+        .resume_candidate_publication => blk: {
+            const preparation = try aggregatePath(values.preparation);
+            const aggregate = try aggregatePath(values.aggregate);
+            const dmg = try aggregatePath(values.dmg);
+            const frozen_executable = try aggregatePath(values.frozen_executable);
+            const github_cli = try githubCli(&values);
+            if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ preparation, aggregate, dmg, frozen_executable, github_cli.path });
+            break :blk .{ .resume_candidate_publication = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .preparation = preparation,
+                .aggregate = aggregate,
+                .dmg = dmg,
+                .frozen_executable = frozen_executable,
+            } };
+        },
     };
 }
 
@@ -410,7 +445,8 @@ fn optionDestination(
     if (std.mem.eql(u8, option, "--tag")) return &values.tag;
     if (std.mem.eql(u8, option, "--github-cli")) return &values.github_cli;
     if (std.mem.eql(u8, option, "--github-cli-sha256")) return &values.github_cli_sha256;
-    if (std.mem.eql(u8, option, "--manifest") and phase != .prepare_candidate_aggregate) return &values.manifest;
+    if (std.mem.eql(u8, option, "--manifest") and phase != .prepare_candidate_aggregate and
+        phase != .resume_candidate_publication) return &values.manifest;
     if (std.mem.eql(u8, option, "--summary-out") and (phase == .pre_publish or phase == .verify_predecessor)) return &values.summary_out;
     return switch (phase) {
         .pre_publish => if (std.mem.eql(u8, option, "--evidence"))
@@ -472,6 +508,16 @@ fn optionDestination(
         else
             null,
         .finalize_candidate_aggregate => if (std.mem.eql(u8, option, "--aggregate"))
+            &values.aggregate
+        else if (std.mem.eql(u8, option, "--dmg"))
+            &values.dmg
+        else if (std.mem.eql(u8, option, "--frozen-executable"))
+            &values.frozen_executable
+        else
+            null,
+        .resume_candidate_publication => if (std.mem.eql(u8, option, "--preparation"))
+            &values.preparation
+        else if (std.mem.eql(u8, option, "--aggregate"))
             &values.aggregate
         else if (std.mem.eql(u8, option, "--dmg"))
             &values.dmg

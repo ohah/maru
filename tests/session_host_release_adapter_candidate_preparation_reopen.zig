@@ -287,7 +287,7 @@ fn measureSample() !Sample {
     return .{ .open_ns = open_ns, .fence_ns = fence_ns, .close_ns = close_ns };
 }
 
-test "semantic reopen is credential-free and product-dormant" {
+test "semantic reopen is credential-free with one resume product caller" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(source);
     inline for (.{ "GH_TOKEN", "release_adapter_github", "release_adapter_apple", "std.process", "std.posix.getenv" }) |forbidden|
@@ -304,7 +304,7 @@ test "semantic reopen is credential-free and product-dormant" {
         defer std.testing.allocator.free(product);
         product_callers += std.mem.count(u8, product, "release_adapter_candidate_preparation_reopen");
     }
-    try std.testing.expectEqual(@as(usize, 0), product_callers);
+    try std.testing.expectEqual(@as(usize, 1), product_callers);
 }
 
 fn openFdCount() !u32 {

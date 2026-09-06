@@ -3971,8 +3971,15 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // **`⌥트리플클릭`은 늘 새로 잡는다.** VSCode 도 클릭(`LastCursorLineSelect`, `inSelectionMode:
     // false`)과 드래그(`LastCursorLineSelectDrag`, `true`)를 갈라 놓는다 — 낱말 쪽과 갈리는
     // 지점이라(그쪽엔 `…Drag` 변형이 아예 없다) 그대로 따른다.
+    //
+    // **`isEmpty()` 는 안 본다 — `.word` 는 빌 수 없다**(2026-09-06 변이 검사가 그 조건이 죽은 것을
+    // 보였다). `fromAnchorRange` 가 `(kind == .simple) == (lo == hi)` 를 단언하므로 `.word` 의 anchor
+    // 는 **점이 아니고**, 그러면 `fixedEnd()` 의 두 갈래가 다 `focus` 와 같아질 수 없다: `anchorLo`
+    // 를 내는 갈래는 `focus > anchorLo` 일 때뿐이고, `anchorHi` 를 내는 갈래는 `focus <= anchorLo <
+    // anchorHi` 라서다. 즉 `start() < end()` 가 늘 성립한다 — 조건을 두면 판정자가 지킬 수 없는
+    // 죽은 줄이 된다.
     const extend = additive and !whole_line and if (term.rt.editor_selection) |sel|
-        sel.kind == .word and !sel.isEmpty()
+        sel.kind == .word
     else
         false;
 
@@ -16899,6 +16906,16 @@ test "OW2 ⌥ 없는 더블클릭은 여전히 나머지 커서를 지운다 (§
     }, 0);
     try testing.expect(selectWordOrLineAt(fxo.fx.session, fxo.pane, false, fxo.x(8), fxo.y(0), 8 | 32));
     try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+
+    // **`⌥` 없이는 늘리지도 않는다.** primary 가 이미 낱말 범위여도 **새로 잡는다** — 지우는 것만
+    // 재면 `extend` 에서 `additive` 를 뺀 변이가 살아남는다(1회차 `O11` 이 그랬다).
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(6, 10, 10, .word); // "beta"
+    try testing.expect(selectWordOrLineAt(fxo.fx.session, fxo.pane, false, fxo.x(13), fxo.y(0), 0));
+    {
+        const fresh = term.rt.editor_selection orelse return error.NoSelection;
+        try testing.expectEqual(@as(usize, 11), fresh.start()); // 6 이 아니다 — 늘리지 않았다
+        try testing.expectEqual(@as(usize, 16), fresh.end());
+    }
 }
 
 test "OW3 primary 가 이미 낱말이면 ⌥더블클릭이 늘린다 — 새로 잡지 않는다 (§3.2d)" {
@@ -17062,6 +17079,33 @@ test "OW7 ⌥더블클릭 뒤 드래그는 방금 넓힌 primary 만 늘린다 (
     // **나머지 커서는 안 움직였다.**
     try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
     try testing.expectEqual(@as(usize, 33), term.rt.editor_extra_selections[0].focus);
+}
+
+test "OW8 .match 에서 이어 끌면 글자 단위로 는다 — 늘릴 단위가 없다 (§3.2d)" {
+    // **`widenedFocus` 의 `.simple, .match` 갈래를 재는 유일한 판정자다.** `⌥더블클릭`이 `.match` 를
+    // 「늘리지 않고 새로 잡는」 근거가 *"드래그 확장이 그것을 글자 단위로 다룬다"* 인데, 그 인용한
+    // 사실 자체를 아무도 안 재고 있었다(1회차 `O19` 가 살아남아 드러났다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fxo = try OptWordFixture.init(allocator);
+    defer fxo.deinit(allocator);
+    const term = fxo.term;
+
+    // down 으로 제스처를 세운 뒤 primary 를 `.match` 범위로 바꾼다 — `⌘D` 가 남기는 모양이고,
+    // 6..9("bet")는 **낱말 경계가 아니다**.
+    try testing.expect(beginBodySelection(fxo.fx.session, fxo.pane, fxo.x(6), fxo.y(0), 0));
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(6, 9, 9, .match);
+
+    // "gamma"(11..16) 안 13 으로 끈다.
+    try testing.expect(dragBodySelection(fxo.fx.session, 2, fxo.x(13), fxo.y(0)));
+    const dragged = term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expectEqual(@as(usize, 13), dragged.focus); // 낱말 단위면 16 이다
+    try testing.expectEqual(editor_selection.AnchorKind.match, dragged.kind); // 단위는 안 바뀐다
+
+    // **`.simple` 도 같다**(같은 갈래를 두 값이 함께 탄다 — 한쪽만 재면 갈래를 쪼갠 변이가 산다).
+    try testing.expect(beginBodySelection(fxo.fx.session, fxo.pane, fxo.x(6), fxo.y(0), 0));
+    try testing.expect(dragBodySelection(fxo.fx.session, 2, fxo.x(13), fxo.y(0)));
+    try testing.expectEqual(@as(usize, 13), term.rt.editor_selection.?.focus);
 }
 
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {

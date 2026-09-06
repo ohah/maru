@@ -726,6 +726,12 @@ VSCode 가 `lastAddedState.modelState.hasSelection()` 을 `inSelectionMode` 로 
     늘린다」로 다루면 역시 사용자가 본 것과 어긋난다. 인용한 그 한 줄이 두 값을 **한 부류**로
     묶는데 규칙만 `.match` 를 집었던 것이라, 규칙을 **`.word` 일 때만 늘린다** 로 뒤집어 적는다 —
     구현(`sel.kind == .word`)과 계약이 같은 문장이 된다.
+  - **「범위가 비었나」는 안 묻는다 — `.word` 는 빌 수 없다**(2026-09-06 변이 검사가 그 조건이 죽은
+    것을 보였다). `Selection.fromAnchorRange` 가 `(kind == .simple) == (lo == hi)` 를 단언하므로
+    `.word` 의 anchor 는 **점이 아니고**, 그러면 `fixedEnd()` 의 두 갈래가 다 `focus` 와 같아질 수
+    없다: `anchorLo` 를 내는 갈래는 `focus > anchorLo` 일 때뿐이고, `anchorHi` 를 내는 갈래는
+    `focus <= anchorLo < anchorHi` 라서다. **조건을 두면 어떤 판정자도 지킬 수 없는 죽은 줄**이 되므로
+    적지 않는다 — 판정자를 더 세게 만드는 대신 코드에서 뺐다.
   - **양쪽으로 거듭 늘리면 앞서 늘린 쪽은 안 남는다**(실측). anchor 는 **처음 잡은 낱말**에 고정이고
     `focus` 만 움직이기 때문이다 — 드래그를 뒤로 끌 때와 같은 답이고, `AnchorKind` 가 anchor 를
     **범위**로 둔 이유(잡은 낱말이 안 잘린다)가 그대로 나타난 것이다.

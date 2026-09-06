@@ -137,8 +137,29 @@ pub fn validateUntil(
     try validateCore(&authority, &downloader, deadline, result);
 }
 
+pub fn validateSnapshotUntil(
+    io: std.Io,
+    source: anytype,
+    token: []const u8,
+    deadline: *deadline_mod.Deadline,
+    result: *RedownloadValidation,
+) !void {
+    if (!pristine(result)) return error.InvalidOwner;
+    try transport.validateToken(token);
+    const result_bytes = std.mem.asBytes(result);
+    const source_bytes = std.mem.asBytes(source);
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token }) |value|
+        if (overlaps(result_bytes, value)) return error.InvalidOwner;
+    const executable = try source.executablePath();
+    inline for (.{ result_bytes, source_bytes, std.mem.asBytes(deadline), token }) |value|
+        if (overlaps(executable, value)) return error.InvalidOwner;
+    var downloader = ProductionDownloader{ .io = io, .executable = executable, .token = token };
+    try validateCore(source, &downloader, deadline, result);
+}
+
 pub fn assertProductionBoundary() void {
     _ = &validateUntil;
+    _ = &validateSnapshotUntil;
 }
 
 pub const testing_api = if (builtin.is_test) struct {

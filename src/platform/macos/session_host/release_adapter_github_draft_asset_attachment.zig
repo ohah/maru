@@ -263,8 +263,37 @@ pub fn attachUntil(
     try attachCore(&authority, &uploader, &publisher, deadline, result);
 }
 
+/// Executes the production upload transport while deriving every before/after snapshot from one
+/// final-address resumed authority. The source also owns the canonical pinned CLI pathname.
+pub fn attachSnapshotUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    source: anytype,
+    token: []const u8,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *DraftAssets,
+) !void {
+    if (!pristine(result)) return error.InvalidOwner;
+    try transport.validateToken(token);
+    if (output.len == 0 or output.len > transport.max_response_bytes) return error.InvalidOutput;
+    const result_bytes = std.mem.asBytes(result);
+    const source_bytes = std.mem.asBytes(source);
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token, output }) |value|
+        if (overlaps(result_bytes, value)) return error.InvalidOwner;
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token }) |value|
+        if (overlaps(output, value)) return error.InvalidOwner;
+    const executable = try source.executablePath();
+    inline for (.{ result_bytes, source_bytes, std.mem.asBytes(deadline), token, output }) |value|
+        if (overlaps(executable, value)) return error.InvalidOwner;
+    var uploader = ProductionUploader{ .io = io, .allocator = allocator, .executable = executable, .token = token, .output = output };
+    var publisher = ProductionPublisher{};
+    try attachCore(source, &uploader, &publisher, deadline, result);
+}
+
 pub fn assertProductionBoundary() void {
     _ = &attachUntil;
+    _ = &attachSnapshotUntil;
 }
 
 pub const testing_api = if (builtin.is_test) struct {

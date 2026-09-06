@@ -11,6 +11,7 @@ const tag_authority = @import("release_adapter_github_tag_authority");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const transport_macos = @import("release_adapter_github_transport_macos");
 const deadline_mod = @import("release_adapter_deadline");
+const context_mod = @import("release_adapter_context");
 
 pub const artifact_count = attachment.asset_count;
 pub const Artifact = struct { id: u64, path: []const u8, name: []const u8, size: u64, sha256: [64]u8 };
@@ -153,37 +154,7 @@ const ProductionAuthority = struct {
     }
 };
 
-const ProductionDriver = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    input: attachment.AuthorityInput,
-    token: []const u8,
-    response: []u8,
-    deadline: *deadline_mod.Deadline,
-    pub fn resolve(self: *@This(), expected: Snapshot, _: i128) !ResolvedTag {
-        var authority = CliFence{ .pinned = self.input.cli.pinned };
-        var executor = transport_macos.BoundedExecutor{ .io = self.io };
-        var resolved: tag_authority.TagAuthority = .{};
-        defer if (resolved.owner != null) resolved.deinit() catch {};
-        try tag_authority.resolveUntilWith(&authority, &executor, self.deadline, self.allocator, expected.tag, expected.source_commit, self.input.cli.path, self.token, self.response, &resolved);
-        const value = resolved.value() orelse return error.SourceMismatch;
-        var result: ResolvedTag = undefined;
-        @memcpy(&result.tag_ref_sha, value.ref.target.sha);
-        @memcpy(&result.source_commit, expected.source_commit);
-        return result;
-    }
-    pub fn verify(self: *@This(), expected: Snapshot, tag: ResolvedTag, index: ?usize, budget: i128) !Observation {
-        var assets: [3]manifest.Asset = undefined;
-        const roles = [_]manifest.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
-        for (&assets, 0..) |*a, i| a.* = .{ .role = roles[i], .name = expected.artifacts[i].name, .sha256 = &expected.artifacts[i].sha256, .size = expected.artifacts[i].size };
-        const exp: release_attestation.Expected = .{ .repository = self.input.context.repository, .release_id = expected.release_id, .tag = expected.tag, .tag_ref_sha = &tag.tag_ref_sha, .assets = &assets, .manifest = .{ .name = expected.artifacts[3].name, .sha256 = &expected.artifacts[3].sha256 } };
-        const command: release_attestation.Command = if (index) |i| if (i < 3) .{ .asset = .{ .path = expected.artifacts[i].path, .expected = assets[i] } } else .{ .manifest_asset = .{ .path = expected.artifacts[3].path } } else .release;
-        var observed = try release_attestation.verify(self.io, self.allocator, self.input.cli.path, self.token, command, exp, self.response, budget);
-        defer observed.deinit();
-        return .{ .release_id = observed.release_id, .tag_ref_sha = tag.tag_ref_sha, .artifact_index = index };
-    }
-};
-const CliFence = struct {
+const PinnedCliSource = struct {
     pinned: *const cli_authority.PinnedExecutable,
     pub fn revalidate(self: *@This(), allocator: std.mem.Allocator, path: [:0]const u8) !void {
         try cli_authority.revalidate(allocator, path, self.pinned);
@@ -200,8 +171,106 @@ pub fn verifyUntil(io: std.Io, input: attachment.AuthorityInput, attached: *cons
     for (owned) |value| if (rangesOverlap(result_bytes, value) or rangesOverlap(response, value)) return error.InvalidOwner;
     for (borrowed) |value| if (rangesOverlap(result_bytes, value) or rangesOverlap(response, value)) return error.InvalidOwner;
     var authority = ProductionAuthority{ .input = input, .attached = attached, .validated = validated, .published = published };
-    var driver = ProductionDriver{ .io = io, .allocator = input.allocator, .input = input, .token = token, .response = response, .deadline = deadline };
+    var cli_source = PinnedCliSource{ .pinned = input.cli.pinned };
+    var driver = ProductionDriver(*PinnedCliSource){
+        .io = io,
+        .allocator = input.allocator,
+        .cli_source = &cli_source,
+        .context = input.context,
+        .executable = input.cli.path,
+        .token = token,
+        .response = response,
+        .deadline = deadline,
+    };
     try verifyCore(&authority, &driver, deadline, result);
+}
+
+pub fn verifySnapshotUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    source: anytype,
+    token: []const u8,
+    response: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *VerifiedRelease,
+) !void {
+    if (!pristine(result)) return error.InvalidOwner;
+    if (response.len == 0 or response.len > release_attestation.max_response_bytes) return error.InvalidBuffer;
+    const result_bytes = std.mem.asBytes(result);
+    const source_bytes = std.mem.asBytes(source);
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token, response }) |value|
+        if (rangesOverlap(result_bytes, value)) return error.InvalidOwner;
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token }) |value|
+        if (rangesOverlap(response, value)) return error.InvalidOwner;
+    const executable = try source.executablePath();
+    inline for (.{ result_bytes, source_bytes, std.mem.asBytes(deadline), token, response }) |value|
+        if (rangesOverlap(executable, value)) return error.InvalidOwner;
+    const context = try source.releaseContext();
+    inline for (.{
+        context.repository.owner,
+        context.repository.name,
+        context.tag,
+        context.source_commit,
+        context.build.workflow_ref,
+    }) |value| inline for (.{ result_bytes, source_bytes, std.mem.asBytes(deadline), executable, token, response }) |owner|
+        if (rangesOverlap(value, owner)) return error.InvalidOwner;
+    var driver = ProductionDriver(@TypeOf(source)){
+        .io = io,
+        .allocator = allocator,
+        .cli_source = source,
+        .context = context,
+        .executable = executable,
+        .token = token,
+        .response = response,
+        .deadline = deadline,
+    };
+    try verifyCore(source, &driver, deadline, result);
+}
+
+fn ProductionDriver(comptime CliSource: type) type {
+    return struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        cli_source: CliSource,
+        context: context_mod.Context,
+        executable: [:0]const u8,
+        token: []const u8,
+        response: []u8,
+        deadline: *deadline_mod.Deadline,
+
+        pub fn resolve(self: *@This(), expected: Snapshot, _: i128) !ResolvedTag {
+            var executor = transport_macos.BoundedExecutor{ .io = self.io };
+            var resolved: tag_authority.TagAuthority = .{};
+            defer if (resolved.owner != null) resolved.deinit() catch {};
+            var cli_fence = CliFence(CliSource){ .source = self.cli_source };
+            try tag_authority.resolveUntilWith(&cli_fence, &executor, self.deadline, self.allocator, expected.tag, expected.source_commit, self.executable, self.token, self.response, &resolved);
+            const value = resolved.value() orelse return error.SourceMismatch;
+            var result: ResolvedTag = undefined;
+            @memcpy(&result.tag_ref_sha, value.ref.target.sha);
+            @memcpy(&result.source_commit, expected.source_commit);
+            return result;
+        }
+
+        pub fn verify(self: *@This(), expected: Snapshot, tag: ResolvedTag, index: ?usize, budget: i128) !Observation {
+            var assets: [3]manifest.Asset = undefined;
+            const roles = [_]manifest.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
+            for (&assets, 0..) |*a, i| a.* = .{ .role = roles[i], .name = expected.artifacts[i].name, .sha256 = &expected.artifacts[i].sha256, .size = expected.artifacts[i].size };
+            const exp: release_attestation.Expected = .{ .repository = self.context.repository, .release_id = expected.release_id, .tag = expected.tag, .tag_ref_sha = &tag.tag_ref_sha, .assets = &assets, .manifest = .{ .name = expected.artifacts[3].name, .sha256 = &expected.artifacts[3].sha256 } };
+            const command: release_attestation.Command = if (index) |i| if (i < 3) .{ .asset = .{ .path = expected.artifacts[i].path, .expected = assets[i] } } else .{ .manifest_asset = .{ .path = expected.artifacts[3].path } } else .release;
+            var observed = try release_attestation.verify(self.io, self.allocator, self.executable, self.token, command, exp, self.response, budget);
+            defer observed.deinit();
+            return .{ .release_id = observed.release_id, .tag_ref_sha = tag.tag_ref_sha, .artifact_index = index };
+        }
+    };
+}
+
+fn CliFence(comptime CliSource: type) type {
+    return struct {
+        source: CliSource,
+        pub fn revalidate(self: *@This(), allocator: std.mem.Allocator, path: [:0]const u8) !void {
+            try self.source.revalidate(allocator, path);
+        }
+    };
 }
 
 fn rangesOverlap(left: []const u8, right: []const u8) bool {

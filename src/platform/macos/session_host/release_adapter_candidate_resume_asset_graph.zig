@@ -13,6 +13,7 @@ const redownload = @import("release_adapter_github_draft_asset_redownload");
 const publication = @import("release_adapter_github_draft_publication");
 const post_publish = @import("release_adapter_github_post_publish_attestation");
 const cli_mod = @import("release_adapter_github_cli_authority");
+const publication_audit_domain = "maru.session-host.resume-publication.audit.v1";
 
 const SourceFn = *const fn (
     *anyopaque,
@@ -96,6 +97,37 @@ pub const Authority = struct {
     cli_path_len: usize = 0,
     frozen: Frozen = .{},
     seal: [32]u8 = @splat(0),
+
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return self.owner == null and self.source == null and self.source_address == 0 and self.source_fn == null and
+            self.cli == null and self.cli_address == 0 and self.cli_path_len == 0 and
+            std.mem.allEqual(u8, &self.seal, 0);
+    }
+
+    pub fn ownsPublicationAuthority(self: *const @This()) bool {
+        self.validateOwner() catch return false;
+        return true;
+    }
+
+    pub fn publicationAuditSeal(self: *@This()) ![32]u8 {
+        try self.fence();
+        var hasher = std.crypto.hash.Blake3.init(.{});
+        hasher.update(publication_audit_domain);
+        hasher.update(&self.seal);
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    pub fn publicationCliPath(self: *@This()) ![:0]const u8 {
+        try self.fence();
+        return self.cliPath();
+    }
+
+    pub fn publicationContext(self: *@This()) !resume_product.PublicationContext {
+        try self.fence();
+        return self.context.value();
+    }
 
     pub fn snapshotAttachment(self: *@This()) !attachment.Snapshot {
         try self.fence();

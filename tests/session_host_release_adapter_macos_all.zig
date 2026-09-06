@@ -39,6 +39,7 @@ test {
     _ = @import("session_host_release_adapter_candidate_stage3_preparation_product.zig");
     _ = @import("session_host_release_adapter_candidate_resume_authority_product.zig");
     _ = @import("session_host_release_adapter_candidate_resume_asset_graph.zig");
+    _ = @import("session_host_release_adapter_candidate_resume_publication_product.zig");
     _ = @import("session_host_release_adapter_candidate_stage3_preparation_command.zig");
     _ = @import("session_host_release_adapter_candidate_upgrade_evidence.zig");
     _ = @import("session_host_release_adapter_deadline.zig");

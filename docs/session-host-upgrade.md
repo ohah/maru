@@ -3434,8 +3434,15 @@ pathname에서 직접 열었으므로 두 manifest slot은 exact 같은 `(device
 나머지 10개 vnode는 모두 달라야 한다. 따라서 manifest가 다른 inode로 교체되거나, 그 의도된 pair 이외의 preparation leaf를 aggregate
 leaf·artifact·CLI에 hard-link한 교차-owner alias는 current credential 사용 전과 ready 공개 직전에 모두 거부한다.
 
+identity graph만 맞아서는 충분하지 않다. 같은 protected run이 같은 basename으로 둘 이상의 artifact를 attest했을 수 있으므로,
+product fence는 held preparation manifest의 fixed 세 asset을 aggregate의 DMG→frozen executable→evidence 관측과 role·basename·size·SHA-256까지
+exact 비교한다. preparation evidence와 aggregate가 복사해 보존한 evidence는 서로 다른 inode여야 하지만 size·SHA-256은 같아야 하고,
+preparation manifest와 aggregate manifest artifact는 위와 같이 같은 inode·size·SHA-256이어야 한다. 이 semantic cross-binding은 aggregate
+bundle verifier가 각 subject를 개별 검증했다는 사실로 대체할 수 없으며 current credential 사용 전과 ready 공개 직전에 모두 다시 수행한다.
+
 focused gate `test-session-host-release-adapter-candidate-resume-authority-product`는 generic transaction의 모든 단계·실패·cleanup
-checkpoint, required shared-manifest identity와 나머지 10개 vnode의 각 위치 alias 거부, concrete product의 existing-component exact-one 조립 및 shared-deadline API 선택을 분리해 Debug·ReleaseFast에서 검증한다.
+checkpoint, required shared-manifest identity와 나머지 10개 vnode의 각 위치 alias 거부, manifest 세 asset과 aggregate artifact의
+role/name/size/SHA 및 두 evidence copy의 semantic 결속, concrete product의 existing-component exact-one 조립 및 shared-deadline API 선택을 분리해 Debug·ReleaseFast에서 검증한다.
 retained preparation과 aggregate의 directory·leaf·artifact·CLI mutation, fixed four-bundle 순서·token-free child, current mismatch와
 descriptor/owner 정산은 이 product가 직접 호출하는 §11.56·§11.50·current-authority component의 harness-owned actual-filesystem gate를
 load-bearing evidence로 유지하며 product gate가 그 fault matrix를 중복 주장하지 않는다. product gate fixture와 모든 하위 fixture는

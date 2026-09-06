@@ -1124,7 +1124,9 @@ current mutable draft 재인증과 ready `DraftAuthority` 채택을 exact once �
 component call inventory를 나눠 final-address·copy·pre-owned·storage alias, current API 전 local full fence, bundle verifier token 0,
 manifest/context/current/adopted-draft 결속, preparation manifest와 aggregate manifest artifact의 exact same identity 및 그 pair를 한 번만 센 나머지 10개 vnode의 cross-owner identity distinct,
 current API 뒤 public aggregate fence를 포함한 성공·실패 후 descriptor 정산과 retained preparation/aggregate 생존을 Debug·ReleaseFast에서
-검증한다. required manifest pair의 불일치와 나머지 10개 identity의 각 위치를 앞 위치와 alias한 행동 matrix가 누락된 role을 잡는다. audit cleanup은 변조 뒤에도 재-fence 없이
+검증한다. required manifest pair의 불일치와 나머지 10개 identity의 각 위치를 앞 위치와 alias한 행동 matrix가 누락된 role을 잡는다.
+별도 semantic matrix는 held manifest의 fixed DMG→frozen→evidence asset role/name/size/SHA를 aggregate 관측과 비교하고, preparation evidence와
+aggregate evidence copy가 다른 inode이면서 같은 size/SHA인지 검증해 같은 run의 독립적으로 유효한 bundle을 섞는 조합을 current credential 전에 거부한다. audit cleanup은 변조 뒤에도 재-fence 없이
 descriptor를 포기하고, ready cleanup만 마지막 fence를 요구한다. 두 cleanup의 실패 상태를 분리하고 남은 exact suffix 재시도도 고정한다.
 Darwin descriptor-close 실패는 이미 tombstone된 owner를 재시도하지 않고 남은 정리를 마친 뒤 terminal warning으로 관측되는지 별도 행렬로 고정한다. 실제 filesystem fault matrix는 product가 호출하는 preparation/aggregate/current component gate가 계속 소유한다. 모든 fixture는
 harness-owned `mkdtemp`만 사용하며 실제 앱 session-host 상태·GitHub release·credential을 읽거나 바꾸지 않는다. 이 gate는 executable resume command, workflow stage 5/6, publication composition, post-publish aggregate cleanup,

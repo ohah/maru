@@ -4804,6 +4804,14 @@ fn stepSetFling() void {
 /// 값을 이름에 붙이지 않는 이유는 계약이 소유한다 — 스크린 리더는 값만 바뀌었을 때 이름을 다시
 /// 안 읽는다. 토글은 켜짐/꺼짐이 **손잡이 자리와 색으로만** 말해지던 것이라, 그 사실을 값과
 /// `selected` 두 가지로 준다(읽는 쪽이 무엇을 쓰든 사실이 닿게).
+/// 그린 값에서 **캐럿을 뗀다.** 화면은 「지금 이 줄이 입력을 받는다」를 캐럿(▏)과 색으로 말하는데,
+/// 색은 안 읽히고 캐럿은 **글자로 읽힌다**(「왼쪽 팔분의 일 블록」 같은 이름이 값 끝에 붙는다).
+/// 사실은 `selected` 로 주고, 값에서는 뗀다.
+fn stripCaret(text: []const u8) []const u8 {
+    const caret = "\u{258F}";
+    return if (std.mem.endsWith(u8, text, caret)) text[0 .. text.len - caret.len] else text;
+}
+
 fn noteA11ySettingRow(i: usize, label: []const u8, value: []const u8, on: bool, list_top: f32, list_h: f32) void {
     // **팝업이 열려 있으면 아래 줄은 안 눌린다** — 포인터가 「항목 아니면 닫기」만 하기 때문이다.
     // 그때 이 줄들을 계속 내면 스크린 리더가 안 눌리는 것을 읽어 준다(이 이니셔티브가 계속
@@ -4812,7 +4820,14 @@ fn noteA11ySettingRow(i: usize, label: []const u8, value: []const u8, on: bool, 
     noteA11yClipped(
         set_row_rects[i],
         .{ .x = set_list.x, .y = list_top, .w = set_list.w, .h = list_h },
-        .{ .role = .button, .label = label, .value = value, .selected = on },
+        .{
+            .role = .button,
+            .label = label,
+            .value = stripCaret(value),
+            // **편집 중이라는 사실도 여기 실린다.** 토글의 켜짐/꺼짐과 같은 이유다 — 화면이
+            // 색으로만 말하는 것은 안 읽힌다. 지금 키보드가 어디로 가는지 모르면 칠 수가 없다.
+            .selected = on or (set_edit != null and set_edit.? == i),
+        },
     );
 }
 
@@ -5313,6 +5328,9 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     // 들어오면 앱을 죽이는 것 말고는 나갈 수 없었다(실기 2026-09-04 — 시뮬레이터에서 헤더 여러
     // 지점을 눌러도 아무 일이 없었다). 자리와 크기는 터미널 바의 뒤로가기와 같다(§5.1 — 44 이상).
     remote_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    // **나갈 길이 없으면 갇힌다.** 이 화면은 읽기 전용이라 누를 것이 뒤로가기 하나뿐인데, 그것을
+    // 안 내면 스크린 리더 사용자는 들어온 뒤 **아무것도 못 한다**(적대적 검증 7회차).
+    noteA11y(remote_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
 
     // 상단 바 — 어디서 왔는지와 무엇을 보는지.
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
@@ -5359,11 +5377,20 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
         .waiting_first => {
             // **아직 안 왔다고 말한다** — 빈 화면은 "세션이 비었다" 로 읽힌다.
             pushText(maru.i18n.tIn(.ko, .mob_remote_screen_waiting), @intFromFloat(win.x + 16), @intFromFloat(win.y + set_head_h + 20), 15, tk.get(.muted_fg));
+            // **기다리는 중이라는 사실도 읽힌다** — 안 그러면 빈 화면과 구별이 안 된다.
+            noteA11y(
+                .{ .x = win.x + 16, .y = win.y + set_head_h + 20, .w = win.w - 32, .h = 24 },
+                .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_remote_screen_waiting) },
+            );
             remote_screen_shown = .waiting;
             return;
         },
         .off => {
             pushText(maru.i18n.tIn(.ko, .mob_remote_screen_off), @intFromFloat(win.x + 16), @intFromFloat(win.y + set_head_h + 20), 15, tk.get(.muted_fg));
+            noteA11y(
+                .{ .x = win.x + 16, .y = win.y + set_head_h + 20, .w = win.w - 32, .h = 24 },
+                .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_remote_screen_off) },
+            );
             remote_screen_shown = .off;
             return;
         },
@@ -5962,12 +5989,24 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         // **누르는 자리가 둘이라 서술자도 둘이다**: 줄 전체는 접속이고 오른쪽 88px 는 편집이다.
         // 하나만 내면 스크린 리더 사용자는 둘 중 하나를 못 쓴다(길게 누르기는 숨은 기능이라
         // 그 자리를 눈에 보이게 둔 것이 이 화면의 결정이다).
-        noteA11yClipped(srv_row_rects[i], srv_list, .{
+        // **줄의 읽는 자리는 편집 띠 앞에서 끝난다.** 포인터가 편집을 먼저 보므로(그 자리는 줄이
+        // 못 먹는다) 폭 전체를 내면 그 띠에서 두 서술자가 겹쳐, 스크린 리더가 짚은 것과 손가락이
+        // 닿는 것이 갈린다(적대적 검증 4회차). **누르는 규칙과 같은 폭**을 쓴다.
+        const row_read: SetRect = .{
+            .x = srv_row_rects[i].x,
+            .y = srv_row_rects[i].y,
+            .w = @max(0, srv_row_rects[i].w - srv_edit_rects_in_list[i].w),
+            .h = srv_row_rects[i].h,
+        };
+        noteA11yClipped(row_read, srv_list, .{
             .role = .list_item,
             .label = label,
             .value = sub_text,
             .position_in_set = @intCast(i + 1),
-            .set_size = @intCast(list.len + 1), // 추가 줄까지가 이 목록이다
+            // **집합은 서버 줄들이다.** 「추가」는 목록 끝에 붙은 **버튼**이라 이 집합의 일원으로
+            // 읽히지 않는다 — 그것까지 세면 「셋 중 둘」이라 들은 사용자가 셋째를 찾다 못 찾는다
+            // (적대적 검증 8회차: 수는 읽히는 것과 맞아야 한다).
+            .set_size = @intCast(list.len),
         });
         noteA11yClipped(srv_edit_rects_in_list[i], srv_list, .{
             .role = .button,
@@ -5995,16 +6034,16 @@ fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     // 존재 이유가 그 대조다.
     const fp = hostKeyFingerprintShown();
     const half = fp.len / 2;
+    // 두 줄을 덮는 자리를 **첫 줄에서** 붙든다(아래에서 `y` 가 내려간다 — 비밀번호 화면에서 같은
+    // 방식으로 읽는 자리가 그린 글자를 비껴갔다).
+    hk_fp_rect = .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = 44 };
     pushText(fp[0..half], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
     y += 22;
     pushText(fp[half..], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
     // **지문은 «통째로» 읽힌다.** 화면은 눈으로 맞대기 좋게 두 줄로 쪼개 그리지만, 반쪽 둘로
     // 읽어 주면 대조가 안 된다 — 이 화면의 존재 이유가 그 대조다. 두 줄을 덮는 한 자리에
     // 온전한 값을 싣는다(무엇을 묻는 화면인지는 이름이 말한다).
-    noteA11y(
-        .{ .x = win.x + set_pad_x, .y = y - 22, .w = win.w - set_pad_x * 2, .h = 44 },
-        .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_hostkey_hint), .value = fp },
-    );
+    noteA11y(hk_fp_rect, .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_hostkey_hint), .value = fp });
     y += 34;
 
     hk_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
@@ -6018,6 +6057,11 @@ fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
+/// 지문 두 줄을 덮는 자리(판정자용 — 읽는 자리가 그린 자리와 같아야 한다).
+var hk_fp_rect: SetRect = .{};
+pub fn hostKeyFingerprintRectForTest() SetRect {
+    return hk_fp_rect;
+}
 var hk_ok_rect: SetRect = .{};
 var hk_cancel_rect: SetRect = .{};
 var hk_pressed: enum { none, ok, cancel } = .none;
@@ -6085,6 +6129,10 @@ fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     }
     const shown = if (chars == 0) maru.i18n.tIn(.ko, .mob_password_empty) else dots[0..n];
     const role: tokens.ColorRole = if (chars == 0) .muted_fg else .surface_fg;
+    // **자리를 여기서 붙든다.** 아래에서 `y` 가 구분선과 여백만큼 더 내려가므로, 그 뒤에 계산하면
+    // 읽는 자리가 그린 글자를 통째로 비껴간다(적대적 검증 1회차에서 그렇게 잡혔다).
+    const dots_y = y;
+    pw_dots_rect = .{ .x = win.x + set_pad_x, .y = dots_y, .w = win.w - set_pad_x * 2, .h = 24 };
     pushText(shown, @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 20, tk.get(role));
     y += 40;
     push(.{ .x = @intFromFloat(win.x + set_pad_x), .y = @intFromFloat(y), .w = @intFromFloat(win.w - set_pad_x * 2), .h = 1 }, tk.get(.accent_bar), 0xFF, 0, 0);
@@ -6096,7 +6144,7 @@ fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     var cnt_buf: [24]u8 = undefined;
     const cnt_text = std.fmt.bufPrint(&cnt_buf, "{d}", .{chars}) catch "";
     noteA11y(
-        .{ .x = win.x + set_pad_x, .y = y - 40, .w = win.w - set_pad_x * 2, .h = 40 },
+        .{ .x = win.x + set_pad_x, .y = dots_y, .w = win.w - set_pad_x * 2, .h = 24 },
         .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_password_hint), .value = cnt_text },
     );
 
@@ -6110,6 +6158,12 @@ fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     if (pw_pressed == .cancel) push(.{ .x = @intFromFloat(pw_cancel_rect.x), .y = @intFromFloat(pw_cancel_rect.y), .w = @intFromFloat(pw_cancel_rect.w), .h = @intFromFloat(pw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_password_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
+
+/// 판정자용 — 가림표를 **그린** 자리. 읽는 자리가 이것과 같아야 한다.
+pub fn passwordDotsRectForTest() SetRect {
+    return pw_dots_rect;
+}
+var pw_dots_rect: SetRect = .{};
 
 /// 비밀번호 화면의 두 버튼 한가운데(테스트용 — 좌표를 테스트가 다시 계산하지 않는다).
 pub fn passwordOkCenter() struct { x: f32, y: f32 } {
@@ -6196,7 +6250,12 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
         pushText(shown, @intFromFloat(rect.x + rect.w - set_pad_x - @as(f32, @floatFromInt(textWidth(shown, 15)))), @intFromFloat(rect.y + (set_row_h - 15) / 2), 15, tk.get(role));
         // **값은 «줄인 것» 이 아니라 온전한 것을 읽힌다.** 화면은 자리에 맞춰 앞을 자르지만
         // (`fitRight`), 스크린 리더에는 잘릴 이유가 없다 — 주소가 반쪽이면 어느 서버인지 모른다.
-        noteA11y(rect, .{ .role = .button, .label = label, .value = value });
+        noteA11y(rect, .{
+            .role = .button,
+            .label = label,
+            .value = stripCaret(value),
+            .selected = editing,
+        });
         push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y + set_row_h - 1), .w = @intFromFloat(rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
         y += set_row_h;
     }
@@ -6493,6 +6552,19 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 set_pop_sa.clamp(@intFromFloat(@max(0, set_pop_max_scroll)));
                 if (py + ph > set_list.y + set_list.h) py = @max(set_list.y, r.y - ph);
                 if (py < set_list.y) py = set_list.y;
+                // **고르지 않고 닫는 길도 낸다.** 화면에서는 바깥을 눌러 취소하는데, 그 자리에
+                // 서술자가 없으면 스크린 리더로는 **취소가 아예 불가능**하다(고르는 것 말고는
+                // 나갈 길이 없다). 없는 것을 지어내는 것이 아니라 **이미 눌리는 자리**를 읽히게
+                // 하는 것이다 — 포인터가 그 바깥 탭을 취소로 받는다(적대적 검증 5회차).
+                //
+                // 자리는 팝업 **위쪽 띠**다: 목록 창 안이고 팝업과 안 겹친다(겹치면 짚는 자리가
+                // 갈린다). 팝업이 창 맨 위에 붙었으면 띠가 없으니 그때는 안 낸다.
+                if (py - set_list.y >= set_row_h) noteA11y(
+                    .{ .x = set_list.x, .y = set_list.y, .w = set_list.w, .h = py - set_list.y },
+                    // **제 문구를 쓴다.** 다른 화면의 「취소」를 빌리면 그 화면이 바뀔 때 여기가
+                    // 조용히 따라 바뀐다(적대적 검증 9회차).
+                    .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_dismiss) },
+                );
                 push(.{ .x = @intFromFloat(px - 1), .y = @intFromFloat(py - 1), .w = @intFromFloat(pw + 2), .h = @intFromFloat(ph + 2) }, tk.get(.muted_fg), 0xFF, 9, 0);
                 push(.{ .x = @intFromFloat(px), .y = @intFromFloat(py), .w = @intFromFloat(pw), .h = @intFromFloat(ph) }, tk.get(.surface_bg), 0xFF, 8, 0);
                 for (c.items[0..shown], 0..) |it, k| {

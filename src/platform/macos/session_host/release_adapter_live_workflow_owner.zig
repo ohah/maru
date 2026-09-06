@@ -18,6 +18,17 @@ pub const Invocation = union(enum) {
     aggregate_cleanup: void,
 };
 
+pub const inventory = [_]Invocation{
+    .{ .candidate_pinning = {} },
+    .{ .candidate_attestation = {} },
+    .{ .draft_authoring = {} },
+    .{ .authored_attestation = {} },
+    .{ .aggregate_prepare = {} },
+    .{ .aggregate_finalize = {} },
+    .{ .publication = {} },
+    .{ .aggregate_cleanup = {} },
+};
+
 pub const Identity = struct {
     stage: phase.Stage,
     kind: Kind,
@@ -92,9 +103,11 @@ fn execute(raw: *anyopaque) phase.Result {
 
 comptime {
     const fields = @typeInfo(Invocation).@"union".fields;
-    if (fields.len != 8) @compileError("live workflow invocation inventory drift");
+    if (fields.len != inventory.len) @compileError("live workflow invocation inventory drift");
     for (fields, 0..) |field, index| {
-        const invocation: Invocation = @unionInit(Invocation, field.name, {});
+        const invocation = inventory[index];
+        if (!std.mem.eql(u8, field.name, @tagName(invocation)))
+            @compileError("live workflow invocation tag inventory drift");
         if (@intFromEnum(identity(invocation).stage) != index)
             @compileError("live workflow invocation order drift");
     }

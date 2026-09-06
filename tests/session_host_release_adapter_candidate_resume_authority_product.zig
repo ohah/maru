@@ -234,6 +234,21 @@ test "product exposes only final-address ready cleanup and test-only transaction
     try std.testing.expect(@hasDecl(product, "testing_api"));
 }
 
+test "publication view rejects corrupt draft and current lengths before slicing" {
+    var execution = product.Execution{};
+    execution.draft.id = 1;
+    execution.draft.tag_len = 1;
+    execution.current.release_id = 1;
+    execution.current.tag_len = 1;
+    try std.testing.expect(product.testing_api.readyScalarsValid(&execution));
+
+    execution.draft.tag_len = execution.draft.tag.len + 1;
+    try std.testing.expect(!product.testing_api.readyScalarsValid(&execution));
+    execution.draft.tag_len = 1;
+    execution.current.tag_len = execution.current.tag.len + 1;
+    try std.testing.expect(!product.testing_api.readyScalarsValid(&execution));
+}
+
 test "cross-owner identity graph requires the shared manifest and ten distinct vnodes" {
     var identities: [11]files.Identity = undefined;
     for (&identities, 0..) |*identity, index| identity.* = .{ .device = 1, .inode = index + 1 };

@@ -290,6 +290,11 @@ unsigned int maru_mobile_a11y_state(unsigned int index);
    **UTF-8 한가운데서는 안 끊는다** — 반쪽 글자를 받은 iOS `NSString` 은 nil 이라 이름이 통째로
    사라진다. 그래서 답은 언제나 그대로 문자열로 만들 수 있다(NUL 은 안 붙으니 길이로 읽는다). */
 unsigned long maru_mobile_a11y_label(unsigned int index, unsigned char *out, unsigned long cap);
+
+/* 값 — 이름 **옆에** 읽히는 것(개수·상태 문구). 규칙은 이름과 같다(먼저 길이를 묻고, 글자
+   한가운데서 안 끊는다). **이름에 이어 붙이지 않는 이유**: 스크린 리더는 이름과 값을 다른 시점에
+   읽고, 값만 바뀌었을 때 이름을 다시 읽지 않는다 — 붙여 두면 값이 바뀔 때마다 이름이 바뀐 것이 된다. */
+unsigned long maru_mobile_a11y_value(unsigned int index, unsigned char *out, unsigned long cap);
 /// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
 /// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.
 ///

@@ -1455,7 +1455,7 @@ Java_dev_maru_MaruActivity_nativeA11yCount(JNIEnv *env, jclass cls) {
 JNIEXPORT jstring JNICALL
 Java_dev_maru_MaruActivity_nativeA11yNode(JNIEnv *env, jclass cls, jint index, jintArray out) {
     (void)cls;
-    unsigned char buf[257];
+    unsigned char buf[257], val[257];
     jint vals[6] = {0, 0, 0, 0, 0, 0};
     pthread_mutex_lock(&g_bridge_lock);
     unsigned long long packed = maru_mobile_a11y_rect((unsigned int)index);
@@ -1464,10 +1464,27 @@ Java_dev_maru_MaruActivity_nativeA11yNode(JNIEnv *env, jclass cls, jint index, j
     unsigned long need = maru_mobile_a11y_label((unsigned int)index, buf, 0);
     unsigned long cap = need < sizeof buf - 1 ? need : sizeof buf - 1;
     unsigned long got = maru_mobile_a11y_label((unsigned int)index, buf, cap);
+    // **값도 같은 락 안에서 받는다** — 나눠 물으면 이름과 값이 서로 다른 프레임의 것이 된다.
+    unsigned long vneed = maru_mobile_a11y_value((unsigned int)index, val, 0);
+    unsigned long vcap = vneed < sizeof val - 1 ? vneed : sizeof val - 1;
+    unsigned long vgot = maru_mobile_a11y_value((unsigned int)index, val, vcap);
     float scale = g.scale;
     float ox = (float)g.inset_left, oy = (float)g.inset_top;
     pthread_mutex_unlock(&g_bridge_lock);
     buf[got] = 0;
+    val[vgot] = 0;
+
+    // **Android 에는 값 자리가 따로 없다.** `setStateDescription` 은 API 30 이고 여기는 29 부터라,
+    // TalkBack 이 실제로 읽는 자리(`contentDescription`)에 **쉼표로 이어** 준다 — 값을 버리면
+    // 서버 개수도 세션의 cwd·git 도 아예 안 읽힌다. iOS 는 값 자리가 있어 따로 싣는다(그 차이는
+    // 플랫폼의 것이고, 이어 붙이는 자리는 **여기 하나**다).
+    if (vgot > 0 && got + 2 + vgot < sizeof buf) {
+        buf[got] = ',';
+        buf[got + 1] = ' ';
+        memcpy(buf + got + 2, val, vgot);
+        got += 2 + vgot;
+        buf[got] = 0;
+    }
 
     vals[0] = (jint)((float)((packed >> 48) & 0xFFFF) * scale + ox);
     vals[1] = (jint)((float)((packed >> 32) & 0xFFFF) * scale + oy);

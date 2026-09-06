@@ -4404,6 +4404,12 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3b_boundary_tests.setCwd(b.path("."));
     session_host_e3b_step.dependOn(&run_session_host_e3b_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3b_boundary_tests.step);
+    // **`test-session-host` 는 잡의 `-Doptimize` 모드 하나만 컴파일한다** (2026-09-06). 가족 블록들은 자기 전용
+    // 게이트를 위해 Debug·ReleaseFast 두 모드를 루프로 다 만드는데, 이 집계가 그 스텝을 «스텝째» 의존하면 두 모드를
+    // 다 물려받아 Debug 잡이 ReleaseFast 까지 컴파일했다(CI 실측: 바이너리 96개·컴파일 638초 중 두-모드 쌍 27개).
+    // 그래서 하위 스텝을 스텝으로 의존하지 않고 그 안의 run 을 `if (<loop>_optimize == optimize)` 로 걸러 붙인다.
+    // 단일 모드(`.optimize = optimize`) 아티팩트는 그대로 붙인다. 가족의 전용 스텝 자체는 여전히 두 모드를 돈다.
+    const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     const session_host_kernel_cwd_k1_step = b.step(
         "test-session-host-kernel-cwd-k1",
         "Verify K1 paired cwd authority wire ownership without enabling kernel cwd parity",
@@ -4422,6 +4428,7 @@ pub fn build(b: *std.Build) void {
             b.addRunArtifact(session_host_kernel_cwd_k1_wire_tests);
         run_session_host_kernel_cwd_k1_wire_tests.addArg("--maru-expect-tests=1");
         session_host_kernel_cwd_k1_step.dependOn(&run_session_host_kernel_cwd_k1_wire_tests.step);
+        if (k1_optimize == optimize) session_host_step.dependOn(&run_session_host_kernel_cwd_k1_wire_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
     }
     const session_host_kernel_cwd_k1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -4435,6 +4442,7 @@ pub fn build(b: *std.Build) void {
     run_session_host_kernel_cwd_k1_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_kernel_cwd_k1_boundary_tests.setCwd(b.path("."));
     session_host_kernel_cwd_k1_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
+    session_host_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
     const session_host_kernel_cwd_k2_step = b.step(
         "test-session-host-kernel-cwd-k2",
@@ -4455,6 +4463,7 @@ pub fn build(b: *std.Build) void {
             b.addRunArtifact(session_host_kernel_cwd_k2_wire_tests);
         run_session_host_kernel_cwd_k2_wire_tests.addArg("--maru-expect-tests=1");
         session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_wire_tests.step);
+        if (k2_optimize == optimize) session_host_step.dependOn(&run_session_host_kernel_cwd_k2_wire_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         const session_host_kernel_cwd_k2_manager_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
@@ -4470,6 +4479,7 @@ pub fn build(b: *std.Build) void {
         // cwd-generation-only sampler test in one product-root executable.
         run_session_host_kernel_cwd_k2_manager_tests.addArg("--maru-expect-tests=3");
         session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_manager_tests.step);
+        if (k2_optimize == optimize) session_host_step.dependOn(&run_session_host_kernel_cwd_k2_manager_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
     }
     const session_host_kernel_cwd_k2_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -4483,6 +4493,7 @@ pub fn build(b: *std.Build) void {
     run_session_host_kernel_cwd_k2_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_kernel_cwd_k2_boundary_tests.setCwd(b.path("."));
     session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_boundary_tests.step);
+    session_host_step.dependOn(&run_session_host_kernel_cwd_k2_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_kernel_cwd_k2_boundary_tests.step);
     const session_host_kernel_cwd_k3_step = b.step(
         "test-session-host-kernel-cwd-k3",
@@ -4501,6 +4512,7 @@ pub fn build(b: *std.Build) void {
     run_session_host_kernel_cwd_k3_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_kernel_cwd_k3_boundary_tests.setCwd(b.path("."));
     session_host_kernel_cwd_k3_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);
+    session_host_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k3_optimize| {
@@ -4520,6 +4532,7 @@ pub fn build(b: *std.Build) void {
             run_session_host_kernel_cwd_k3_product_tests.addArg("--maru-expect-tests=3");
             run_session_host_kernel_cwd_k3_product_tests.setCwd(b.path("."));
             session_host_kernel_cwd_k3_step.dependOn(&run_session_host_kernel_cwd_k3_product_tests.step);
+            if (k3_optimize == optimize) session_host_step.dependOn(&run_session_host_kernel_cwd_k3_product_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
     }
     const session_host_upgrade_budget_admission_step = b.step(
@@ -4540,6 +4553,7 @@ pub fn build(b: *std.Build) void {
     session_host_upgrade_budget_admission_step.dependOn(
         &run_session_host_upgrade_budget_admission_boundary_tests.step,
     );
+    session_host_step.dependOn(&run_session_host_upgrade_budget_admission_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_upgrade_budget_admission_boundary_tests.step);
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |budget_optimize| {
@@ -4561,6 +4575,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_admission_tests.step,
             );
+            if (budget_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_budget_admission_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
 
             const session_host_upgrade_budget_store_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -4580,6 +4595,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_store_tests.step,
             );
+            if (budget_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_budget_store_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
 
             const session_host_upgrade_budget_manager_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -4599,6 +4615,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_manager_tests.step,
             );
+            if (budget_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_budget_manager_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
 
             const session_host_upgrade_budget_codec_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -4617,6 +4634,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_codec_tests.step,
             );
+            if (budget_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_budget_codec_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
 
             const session_host_upgrade_budget_product_compile = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -4644,6 +4662,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_product.step,
             );
+            if (budget_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_budget_product.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
 
         const upgrade_coordinator_cleanup_failure_tests = addProjectTest(b, .{
@@ -4717,6 +4736,7 @@ pub fn build(b: *std.Build) void {
     session_host_upgrade_stale_sweep_step.dependOn(
         &run_session_host_upgrade_stale_sweep_boundary_tests.step,
     );
+    session_host_step.dependOn(&run_session_host_upgrade_stale_sweep_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_upgrade_stale_sweep_boundary_tests.step);
 
     const session_host_upgrade_notice_boundary_tests = addProjectTest(b, .{
@@ -4829,6 +4849,7 @@ pub fn build(b: *std.Build) void {
         session_host_upgrade_stale_sweep_step.dependOn(
             &run_session_host_upgrade_stale_sweep_product_tests.step,
         );
+        session_host_step.dependOn(&run_session_host_upgrade_stale_sweep_product_tests.step);
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |sweep_optimize| {
             const session_host_upgrade_stale_sweep_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -4847,6 +4868,7 @@ pub fn build(b: *std.Build) void {
             session_host_upgrade_stale_sweep_step.dependOn(
                 &run_session_host_upgrade_stale_sweep_tests.step,
             );
+            if (sweep_optimize == optimize) session_host_step.dependOn(&run_session_host_upgrade_stale_sweep_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
     }
     const session_host_e3c_step = b.step(
@@ -5208,6 +5230,7 @@ pub fn build(b: *std.Build) void {
     session_host_legacy_metadata_consumers_step.dependOn(
         &run_session_host_legacy_metadata_consumers_boundary_tests.step,
     );
+    session_host_step.dependOn(&run_session_host_legacy_metadata_consumers_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_legacy_metadata_consumers_boundary_tests.step);
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |legacy_metadata_optimize| {
@@ -5253,6 +5276,7 @@ pub fn build(b: *std.Build) void {
             session_host_legacy_metadata_consumers_step.dependOn(
                 &run_session_host_legacy_metadata_consumers_product_tests.step,
             );
+            if (legacy_metadata_optimize == optimize) session_host_step.dependOn(&run_session_host_legacy_metadata_consumers_product_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
     }
     // K3's current-daemon fixture cannot prove an older binary omits the additive authority field.
@@ -5260,6 +5284,7 @@ pub fn build(b: *std.Build) void {
     // completion step instead of weakening those requirements to source-level assertions in K3.
     session_host_kernel_cwd_k3_step.dependOn(session_host_legacy_metadata_consumers_step);
     session_host_kernel_cwd_k3_step.dependOn(&run_cwd_axis_boundary_tests.step);
+    session_host_step.dependOn(&run_cwd_axis_boundary_tests.step);
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",
@@ -12694,13 +12719,7 @@ pub fn build(b: *std.Build) void {
     // 전용 `test-session-host` 스텝은 그대로 남아 있어 macOS에서 따로 돌릴 수 있다.
     if (macos_host_tests) test_step.dependOn(&run_session_host_tests.step);
 
-    const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
-    session_host_step.dependOn(session_host_kernel_cwd_k1_step);
-    session_host_step.dependOn(session_host_kernel_cwd_k2_step);
-    session_host_step.dependOn(session_host_kernel_cwd_k3_step);
-    session_host_step.dependOn(session_host_upgrade_budget_admission_step);
-    session_host_step.dependOn(session_host_upgrade_stale_sweep_step);
     const session_host_release_manifest_step = b.step(
         "test-session-host-release-manifest",
         "Validate canonical session-host release manifests in Debug and ReleaseFast",
@@ -12717,7 +12736,7 @@ pub fn build(b: *std.Build) void {
         run_release_manifest_tests.addArg("--maru-expect-tests=11");
         run_release_manifest_tests.setCwd(b.path("."));
         session_host_release_manifest_step.dependOn(&run_release_manifest_tests.step);
-        session_host_step.dependOn(&run_release_manifest_tests.step);
+        if (manifest_optimize == optimize) session_host_step.dependOn(&run_release_manifest_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         if (posix_host_tests) test_step.dependOn(&run_release_manifest_tests.step);
     }
     const session_host_release_evidence_step = b.step(
@@ -12748,7 +12767,7 @@ pub fn build(b: *std.Build) void {
         run_release_evidence_tests.addArg("--maru-expect-tests=9");
         run_release_evidence_tests.setCwd(b.path("."));
         session_host_release_evidence_step.dependOn(&run_release_evidence_tests.step);
-        session_host_step.dependOn(&run_release_evidence_tests.step);
+        if (evidence_optimize == optimize) session_host_step.dependOn(&run_release_evidence_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         if (posix_host_tests) test_step.dependOn(&run_release_evidence_tests.step);
     }
     const session_host_release_evidence_files_step = b.step(
@@ -12815,7 +12834,7 @@ pub fn build(b: *std.Build) void {
         run_release_evidence_files_tests.addArg("--maru-expect-tests=7");
         run_release_evidence_files_tests.setCwd(b.path("."));
         session_host_release_evidence_files_step.dependOn(&run_release_evidence_files_tests.step);
-        session_host_step.dependOn(&run_release_evidence_files_tests.step);
+        if (evidence_files_optimize == optimize) session_host_step.dependOn(&run_release_evidence_files_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         if (posix_host_tests) test_step.dependOn(&run_release_evidence_files_tests.step);
     };
     const session_host_release_adapter_source_directory_authority_step = b.step(
@@ -12896,7 +12915,7 @@ pub fn build(b: *std.Build) void {
         run.addArg("--maru-expect-tests=6");
         run.setCwd(b.path("."));
         session_host_release_adapter_source_directory_authority_step.dependOn(&run.step);
-        session_host_step.dependOn(&run.step);
+        if (source_directory_optimize == optimize) session_host_step.dependOn(&run.step); // test-session-host 는 잡의 -Doptimize 모드만
     }
     const session_host_release_adapter_contract_step = b.step(
         "test-session-host-release-adapter-contract",
@@ -13813,7 +13832,7 @@ pub fn build(b: *std.Build) void {
             run.addArg("--maru-expect-tests=13");
             run.setCwd(b.path("."));
             session_host_release_adapter_github_manifest_attestation_step.dependOn(&run.step);
-            session_host_step.dependOn(&run.step);
+            if (attestation_optimize == optimize) session_host_step.dependOn(&run.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
     }
     const session_host_release_adapter_github_predecessor_manifest_input_step = b.step(
@@ -13843,7 +13862,7 @@ pub fn build(b: *std.Build) void {
             run.addArg("--maru-expect-tests=6");
             run.setCwd(b.path("."));
             session_host_release_adapter_github_predecessor_manifest_input_step.dependOn(&run.step);
-            session_host_step.dependOn(&run.step);
+            if (input_optimize == optimize) session_host_step.dependOn(&run.step); // test-session-host 는 잡의 -Doptimize 모드만
         }
     }
     if (target.result.os.tag == .macos) {
@@ -14394,7 +14413,7 @@ pub fn build(b: *std.Build) void {
             run_candidate_preparation_handoff_tests.addArg("--maru-expect-tests=10");
             run_candidate_preparation_handoff_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_preparation_handoff_step.dependOn(&run_candidate_preparation_handoff_tests.step);
-            session_host_step.dependOn(&run_candidate_preparation_handoff_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_candidate_preparation_handoff_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             test_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_candidate_preparation_handoff_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const candidate_preparation_reopen_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
@@ -14403,7 +14422,7 @@ pub fn build(b: *std.Build) void {
             run_candidate_preparation_reopen_tests.addArg("--maru-expect-tests=7");
             run_candidate_preparation_reopen_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_preparation_reopen_step.dependOn(&run_candidate_preparation_reopen_tests.step);
-            session_host_step.dependOn(&run_candidate_preparation_reopen_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_candidate_preparation_reopen_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             test_step.dependOn(&run_candidate_preparation_reopen_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_candidate_preparation_reopen_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const candidate_aggregate_handoff_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
@@ -14579,7 +14598,7 @@ pub fn build(b: *std.Build) void {
             run_release_validator_tests.addArg("--maru-expect-tests=8");
             run_release_validator_tests.setCwd(b.path("."));
             session_host_release_validator_executable_step.dependOn(&run_release_validator_tests.step);
-            session_host_step.dependOn(&run_release_validator_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_release_validator_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             test_step.dependOn(&run_release_validator_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_release_validator_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const release_validator_exe = b.addExecutable(.{
@@ -14637,7 +14656,7 @@ pub fn build(b: *std.Build) void {
             run_aggregate_process.addArg(if (composition_optimize == .ReleaseFast) "20" else "1");
             run_aggregate_process.setCwd(b.path("."));
             session_host_release_adapter_candidate_aggregate_process_step.dependOn(&run_aggregate_process.step);
-            session_host_step.dependOn(&run_aggregate_process.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_aggregate_process.step); // test-session-host 는 잡의 -Doptimize 모드만
             test_step.dependOn(&run_aggregate_process.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_aggregate_process.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             if (composition_optimize == .ReleaseFast) {
@@ -14654,7 +14673,7 @@ pub fn build(b: *std.Build) void {
             run.addArg("--maru-expect-tests=9");
             run.setCwd(b.path("."));
             session_host_release_adapter_github_predecessor_assets_step.dependOn(&run.step);
-            session_host_step.dependOn(&run.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run.step); // test-session-host 는 잡의 -Doptimize 모드만
             const tag_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_tag_chain_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_tag_chain_transport", .module = tag_chain_mod } } }) });
             const run_tag_tests = b.addRunArtifact(tag_tests);
             run_tag_tests.addArg("--maru-expect-tests=8");
@@ -14675,7 +14694,7 @@ pub fn build(b: *std.Build) void {
             run_draft_adoption_tests.addArg("--maru-expect-tests=6");
             run_draft_adoption_tests.setCwd(b.path("."));
             session_host_release_adapter_github_draft_adoption_step.dependOn(&run_draft_adoption_tests.step);
-            session_host_step.dependOn(&run_draft_adoption_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_draft_adoption_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             test_step.dependOn(&run_draft_adoption_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_draft_adoption_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
             const current_manifest_candidate_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_manifest_candidate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_manifest_candidate", .module = current_manifest_candidate_mod } } }) });
@@ -15087,7 +15106,7 @@ pub fn build(b: *std.Build) void {
             run_dmg_authority_e2e.addArtifactArg(dmg_authority_e2e_tests);
             run_dmg_authority_e2e.setCwd(b.path("."));
             session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_e2e.step);
-            session_host_step.dependOn(&run_dmg_authority_e2e.step);
+            if (dmg_authority_optimize == optimize) session_host_step.dependOn(&run_dmg_authority_e2e.step); // test-session-host 는 잡의 -Doptimize 모드만
             if (posix_host_tests) test_step.dependOn(&run_dmg_authority_e2e.step);
             if (dmg_authority_optimize == .Debug) macos_only_test_step.dependOn(&run_dmg_authority_e2e.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
         }
@@ -15275,7 +15294,7 @@ pub fn build(b: *std.Build) void {
         run_bounded_process_tests.addArg("--maru-expect-tests=12");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
-        session_host_step.dependOn(&run_bounded_process_tests.step);
+        if (process_optimize == optimize) session_host_step.dependOn(&run_bounded_process_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
         if (posix_host_tests) test_step.dependOn(&run_bounded_process_tests.step);
     };
     const workspace_checkpoint_step = b.step(

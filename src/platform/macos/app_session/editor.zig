@@ -7967,9 +7967,6 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         defer session.deinit(); // 누수·이중 해제는 backing(=testing.allocator)이 잡는다
 
         // **여기서부터** 실패시킨다 — init이 쓴 할당은 건드리지 않는다.
-        defer if (!failing.has_induced_failure) {
-            clean_pass = true;
-        };
         failing.fail_index = failing.allocations + step;
         const term = openPathInActivePane(session, path) catch {
             failed_steps += 1;
@@ -7978,6 +7975,11 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         // 성공했으면 세션 해체가 그 Term을 정리한다(그 경로도 함께 확인된다).
         try testing.expect(term.rt.editor_path != null);
         ok_steps += 1;
+        // **조기 종료는 성공한 스텝에서만 정한다.** 실패를 주입하지 않았는데 열렸다면 뒤 스텝은 전부 같은 성공이다.
+        // 처음(#3296)엔 이 판정을 `defer` 로 걸어 위 `catch { continue }` 경로에서도 실행됐는데, 그러면 주입과 무관한
+        // 일시적 열기 실패 한 번이 「깨끗한 통과」로 오판되어 루프가 끝나고 `ok_steps == 0` 으로 죽는다 — main run
+        // 2bb4c39ed(2026-09-06, 샤드 0)에서 그렇게 한 번 실패했다. 예전처럼 그런 스텝은 실패로 세고 계속 돈다.
+        if (!failing.has_induced_failure) clean_pass = true;
     }
     // **공허해질 수 없게 세어서 단언한다.** 실패를 한 번도 안 겪으면 이 테스트는 아무것도 지키지
     // 않는다 — 열기가 쓰는 할당 수가 줄어 창을 벗어나도 여기서 걸린다.

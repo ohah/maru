@@ -761,6 +761,52 @@ pub fn maybeActivateForcedExplorerFile(self: *AppSession) void {
     }
 }
 
+/// `MARU_OPEN_EXPLORER_RENAME=<원격 절대 경로>|<새 이름>` — 그 행을 골라 **제품 경로 그대로**
+/// 이름을 바꾼다(RF6b 실측 캡처용 debug-gate). 편집기를 열어 손으로 치는 대신
+/// `enqueueFileTreeEdit` 를 부르는 이유는, 그 함수가 **원격 갈림이 사는 문**이기 때문이다 —
+/// 손으로 원격 커밋을 부르면 그 문을 안 지나 캡처가 실제 배선을 안 태운다(§10.10 의 그 함정).
+///
+/// `MARU_OPEN_EXPLORER_DELETE=<원격 절대 경로>` — 그 행을 골라 삭제를 **요청**한다. 실제 삭제는
+/// 안 한다 — 확인 모달이 뜨는 것까지가 이 픽스처의 일이고, 그 모달이 「되돌릴 수 없습니다」를
+/// 말하는지가 RF6c 의 계약이다(§2.3 ⑷). 확인을 누르는 것은 사람의 몫이라 캡처가 대신하지 않는다.
+var forced_explorer_mutation_done = false;
+
+pub fn maybeForceExplorerMutation(self: *AppSession) void {
+    if (forced_explorer_mutation_done) return;
+    if (!self.file_tree_rows_remote) return;
+    if (std.c.getenv("MARU_OPEN_EXPLORER_RENAME")) |raw| {
+        const spec = std.mem.span(raw);
+        const bar = std.mem.indexOfScalar(u8, spec, '|') orelse return;
+        const want = spec[0..bar];
+        const new_name = spec[bar + 1 ..];
+        if (new_name.len == 0) return;
+        const index = rowIndexForPath(self, want) orelse return;
+        forced_explorer_mutation_done = true;
+        _ = file_panel_ops.setFileTreeSelection(self, index);
+        file_panel_ops.startFileTreeEdit(self, .rename);
+        const target = self.rename orelse return;
+        if (target != .file_tree) return;
+        _ = file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, new_name);
+        settings_ops.closeRename(self);
+        return;
+    }
+    if (std.c.getenv("MARU_OPEN_EXPLORER_DELETE")) |raw| {
+        const index = rowIndexForPath(self, std.mem.span(raw)) orelse return;
+        forced_explorer_mutation_done = true;
+        _ = file_panel_ops.setFileTreeSelection(self, index);
+        file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
+    }
+}
+
+/// 발행된 행에서 그 경로의 파일 행 인덱스. 없으면 아직 목록이 안 왔다는 뜻이라 다음 tick 에 다시 본다.
+fn rowIndexForPath(self: *AppSession, want: []const u8) ?usize {
+    for (self.file_tree_rows.items, 0..) |row, i| switch (row) {
+        .file => |v| if (std.mem.eql(u8, v.path, want)) return i,
+        else => {},
+    };
+    return null;
+}
+
 /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
 /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.
 /// 강제된 에이전트 상태를 **여러 Term에** 다시 세운다(캡처 전용).

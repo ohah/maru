@@ -3559,6 +3559,58 @@ fixture는 harness-owned owner와 synthetic remote response만 사용하고 실�
 GitHub release·credential·앱 session-host 상태를 읽거나 수정하지 않는다. 이 경계는 executable resume/publication command,
 workflow stage 5~8, post-publish aggregate 삭제, source resume execution 최종 정산 또는 frozen signed U5 E2E를 대신하지 않는다.
 
+### 11.65 stage 7 resume publication의 executable command와 단일 deadline 정산
+
+§11.52 단계 7은 workflow shell이 stage-6 exit 0, draft ID, bundle pathname 또는 과거 process의 owner bytes를 publication
+권위로 조립하지 않는다. 기존 `maru-session-host-release-validator`에 exact `resume-candidate-publication` command를 추가하고,
+`release_adapter_candidate_resume_publication_command.zig`의 caller-owned final-address `Execution` 하나가 §11.61 resume authority
+재구성과 §11.64 publication composition 및 두 product의 local owner 정산을 exact once 소유한다. 기존 `publish-candidate`의
+호환 의미는 바꾸지 않는다.
+
+필수 option은 exact `--repo`, `--tag`, `--github-cli`, `--github-cli-sha256`, `--preparation`, `--aggregate`, `--dmg`,
+`--frozen-executable`뿐이다. preparation manifest, evidence, 네 bundle, draft/release ID, source commit, asset name·size·digest와
+성공 boolean은 option이나 environment로 받지 않고 retained preparation·aggregate와 protected bootstrap context에서 다시 유도한다.
+네 pathname과 CLI는 canonical absolute이고 서로 같거나 조상·자손일 수 없으며, duplicate/missing/foreign phase option과
+relative/control/NUL/`..`/중복 slash/trailing slash는 contract parse에서 credential·filesystem·child·remote mutation 전에 거부한다.
+command는 bootstrap slice를 보존하지 않고 네 pathname을 bounded internal storage에 복사해 nested product가 실행되는 동안 argv
+backing 교체로 권위가 바뀌지 않게 한다.
+
+command `Execution`이 20분 positive budget을 단 한 번 absolute `Deadline`으로 만들고 §11.61과 §11.64에 같은 pointer를
+순서대로 빌려준다. 이를 위해 resume authority product는 기존 `run()`과 같은 concrete transaction을 수행하되 caller deadline을
+닫거나 보존하지 않는 `runBorrowingDeadline()`을 제공한다. publication product의 기존 `runBorrowingDeadline()`과 함께 두 단계가
+각자 새 20분 budget을 시작하는 경로는 command에서 금지한다. 매 경계는 command/execution/deadline/bootstrap/CLI final address와
+context, copied pathname, token/response storage의 pairwise non-overlap 및 deadline remaining을 다시 검증한다. token은 local
+preparation·aggregate와 token-free bundle 검증이 끝난 뒤 current draft 인증과 네 GitHub leaf에서만 사용하고, command 반환에는
+token·response·bootstrap·deadline borrow가 남지 않는다.
+
+resume authority가 ready가 된 뒤 그 exact owner를 publication input으로 빌린다. publication 성공은 verified→published→redownloaded→
+attached→graph 순서의 §11.64 cleanup이 끝나고, 이어 ready draft→current→aggregate→preparation 순서의 §11.61 ready cleanup과
+command deadline close까지 끝난 뒤에만 exit 0이다. 이 cleanup은 descriptor authority만 닫으며 retained preparation과 durable
+aggregate pathname을 unlink하거나 수정하지 않는다. aggregate 삭제 권위는 계속 stage 8의 별도 post-publish owner만 갖는다.
+
+stage 4가 이미 remote draft를 만들었으므로 command 이름이 식별된 뒤의 parse/bootstrap/resume 실패와 publication의 첫 upload 전
+local failure도 `local_failure`로 낮추지 않고 `audit_required`다. publication이 exact audit stage를 보존하면 command가 그 stage를
+먼저 닫힌 값으로 붙든 뒤 새 `cleanupAudit()` 경계로 typed leaf와 graph만 역순 정리한다. `cleanupAudit()`은 remote delete/retry를
+실행하거나 audit를 success로 바꾸지 않으며, 실패 시 ordinary 성공 cleanup과 구별되는 exact retry suffix를 남긴다. 이어 resume
+authority는 audit failure면 `retryAuditCleanup()`, ready owner면 `cleanup()`으로 정리한다. 어느 local cleanup이나 deadline close도
+확정되지 않으면 `cleanup_failed`가 우선한다. copied/pre-owned owner, impossible nested state, audit-stage 소실 또는 성공 뒤 남은
+borrow는 모두 cleanup 미확정으로 fail-close한다.
+
+process outcome은 credential·pathname·원래 error를 출력하지 않는 `0=success`, `21=audit_required`, `22=cleanup_failed` 세 값이다.
+stderr도 exact `success|audit_required|cleanup_failed` 한 줄뿐이다. command token이 argv 첫 값으로 식별된 뒤 argument cap, parse,
+bootstrap 또는 token read가 실패하면 이미 stage 3/4를 지난 invocation이므로 21이다. command를 식별할 수 없는 일반 validator
+오류에는 이 mapping을 적용하지 않는다. live workflow reducer와 `.github/workflows/release.yml` 배선, stage-8 aggregate 삭제는
+후속 concrete owner가 이 닫힌 code를 event로 바꾸며 shell이 filesystem이나 GitHub 상태로 결과를 보정하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-resume-publication-command`는 contract→bootstrap→token→single-deadline→
+resume→publication→publication/source cleanup 순서, 두 product의 exact same deadline address, success와 resume/publication 각 실패,
+publication audit-stage capture, 모든 cleanup retry suffix, copied/pre-owned/final-address와 bootstrap/path/token/response/deadline alias,
+closed exit-code/redacted-stderr 및 실제 validator dispatch exact once를 Debug·ReleaseFast에서 고정한다. source sentinel은 production
+command가 두 product의 borrowing entrypoint만 호출하고 owned-budget `run()`을 호출하지 않음을 검증한다. fixture는 injected
+production-shaped driver와 harness-owned storage만 사용하며 실제 GitHub release·credential·앱 session-host 상태를 읽거나 수정하지
+않는다. 이 slice는 stage-7 executable command까지만 닫으며 workflow stage 5~8 배선, stage-8 aggregate deletion과 frozen signed U5
+E2E를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

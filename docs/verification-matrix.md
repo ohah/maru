@@ -1164,6 +1164,15 @@ exact 1을 검증한다. synthetic response와 harness-owned owner만 사용하�
 건드리지 않는다. executable command, workflow stage 5~8, aggregate 삭제, source execution 최종 정산과 frozen signed U5 E2E는
 후속 증거다.
 
+U5 stage-7 resume publication command는 exact `resume-candidate-publication` contract와 protected bootstrap에서만 네 canonical
+pathname을 받아, final-address command owner가 만든 단일 absolute deadline을 resume authority와 publication composition에
+순서대로 빌려준다. `test-session-host-release-adapter-candidate-resume-publication-command`는 contract→bootstrap→token→resume→
+publication→publication/source cleanup의 exact order와 same deadline address, publication audit-stage 보존 뒤 local-only audit
+cleanup, 모든 cleanup retry suffix, owner/path/token/response/deadline alias, closed `0|21|22` outcome 및 validator dispatch exact once를
+Debug·ReleaseFast에서 검증한다. source sentinel은 두 nested product의 owned-budget `run()` caller가 command에 없고 borrowing
+entrypoint만 exact once임을 고정한다. injected fixture만 사용하므로 실제 GitHub release·credential·앱 session-host 상태를 건드리지
+않는다. live workflow stage 5~8, stage-8 durable aggregate 삭제와 frozen signed U5 E2E는 후속 증거다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

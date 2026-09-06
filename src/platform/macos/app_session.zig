@@ -75845,6 +75845,19 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
 /// (2026-09-06, 「취소한 뒤에도 다시 채워진다」). 조건이 서면 바로 돌아오고, 마감(30초)을 넘기면 그때의 상태로 뒤
 /// 단언이 죽는다. 정상 실행은 수십 ms~수 초라 마감에 닿지 않는다. 시계는 256틱마다 한 번 읽어 틱 루프의 비용을 안
 /// 늘린다. 「이 안에 안 일어난다」를 보는 음성 대기는 이 헬퍼를 쓰지 않는다(그쪽은 짧은 벽시계를 직접 잰다).
+/// 인덱스에 담긴 것 중 **그림만** 센다.
+///
+/// 스캐너가 도구 호출까지 담기 시작했으므로(활동 뷰 계약 §4.1) `all_hits.items.len` 은 더 이상
+/// 「이미지 수」가 아니다. 그 값으로 「두 장이 왔나」를 기다리면 **활동 `Hit` 이 그 수를 미리 채워**
+/// 갱신을 안 기다리고 빠져나간다 — 실제로 그렇게 판정자 하나가 깨졌다.
+fn galleryImageHits(session: *const AppSession) usize {
+    var n: usize = 0;
+    for (session.image_gallery.all_hits.items) |h| {
+        if (h.kind.isImage()) n += 1;
+    }
+    return n;
+}
+
 const GalleryWait = struct {
     io: std.Io,
     deadline_ns: i96,
@@ -78419,12 +78432,14 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
     image_gallery_ops.refresh(session, true);
     {
         var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.all_hits.items.len < 2) {
+        while (wait.pending() and galleryImageHits(session) < 2) {
             _ = session.tick() catch {};
         }
     }
     // 원본은 둘, 보여줄 것은 하나 — **인덱스 도메인이 하나**라는 불변식이 여기서 시험된다.
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.all_hits.items.len);
+    // **그림만 센다**: 이 fixture 는 `tool_use` + `tool_result` 짝이라 인덱스에는 활동 `Hit` 도 들어
+    // 있다(계약 §4.1). 전체 길이로 세면 「두 장이 왔다」를 활동이 대신 만족시켜 버린다.
+    try std.testing.expectEqual(@as(usize, 2), galleryImageHits(session));
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
     try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
     // **라벨과 목록이 같은 세대다.** 어긋나면 남의 설명이 붙는다.

@@ -396,6 +396,10 @@ pub const State = struct {
         const q = self.queryText();
         const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
+            // **격자는 그림만 받는다.** 스캐너가 도구 호출까지 담기 시작했으므로(활동 뷰 계약 §4.1)
+            // 여기서 안 거르면 활동 `Hit` 의 `data_offset`(사람이 읽는 문자열)이 디코더로 넘어가
+            // 빈 칸이 뜬다. 활동은 이 목록이 아니라 줄 목록이 소비한다.
+            if (!hit.kind.isImage()) continue;
             const label: context.Label = if (paired) self.all_labels.items[i] else .{};
             if (q.len > 0 and !context.matches(label.text(), q)) continue;
             self.hits.appendAssumeCapacity(hit);
@@ -419,6 +423,9 @@ pub const State = struct {
         };
         const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
+            // 물러날 자리에서도 그림만 받는다 — 여기서 새면 「필터를 못 걸었다」가 「엉뚱한 칸이
+            // 떴다」로 번진다.
+            if (!hit.kind.isImage()) continue;
             self.hits.appendAssumeCapacity(hit);
             self.labels.appendAssumeCapacity(if (paired) self.all_labels.items[i] else .{});
         }

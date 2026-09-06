@@ -58,8 +58,8 @@ fn buildBindings() [owner.inventory.len]Binding {
 fn actionUses(identity: owner.Identity) ?[]const u8 {
     if (identity.kind != .action) return null;
     return switch (identity.stage) {
-        .candidate_attestation => "./.github/actions/session-host-release-attest",
-        .authored_attestation => "./.github/actions/session-host-release-attest-authored",
+        .candidate_attestation => "./.github/actions/session-host-release-live-candidate-attestation",
+        .authored_attestation => "./.github/actions/session-host-release-live-authored-attestation",
         else => unreachable,
     };
 }

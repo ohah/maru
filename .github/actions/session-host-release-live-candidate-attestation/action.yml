@@ -1,0 +1,34 @@
+name: Session host live candidate attestation stage
+description: Reserve one live stage boundary around the closed candidate pair attestation payload
+
+inputs:
+  dmg-path:
+    description: Canonical absolute pathname of the signed and notarized candidate DMG
+    required: true
+  dmg-name:
+    description: Exact candidate DMG basename
+    required: true
+  frozen-path:
+    description: Canonical absolute pathname of the frozen session-host executable
+    required: true
+  frozen-name:
+    description: Exact frozen executable basename
+    required: true
+
+outputs:
+  dmg-bundle-path:
+    value: ${{ steps.payload.outputs.dmg-bundle-path }}
+  frozen-bundle-path:
+    value: ${{ steps.payload.outputs.frozen-bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Attest candidate pair payload
+    id: payload
+    uses: ./.github/actions/session-host-release-attest-candidate
+    with:
+      dmg-path: ${{ inputs.dmg-path }}
+      dmg-name: ${{ inputs.dmg-name }}
+      frozen-path: ${{ inputs.frozen-path }}
+      frozen-name: ${{ inputs.frozen-name }}

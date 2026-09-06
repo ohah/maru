@@ -55,9 +55,9 @@ pub const Error = checkpoint.Error || error{ InvalidExecutor, ExecutorBusy };
 pub fn identity(invocation: Invocation) Identity {
     return switch (invocation) {
         .candidate_pinning => .{ .stage = .candidate_pinning, .kind = .product, .name = "signed-candidate-inputs" },
-        .candidate_attestation => .{ .stage = .candidate_attestation, .kind = .action, .name = ".github/actions/session-host-release-attest/action.yml" },
+        .candidate_attestation => .{ .stage = .candidate_attestation, .kind = .action, .name = ".github/actions/session-host-release-live-candidate-attestation/action.yml" },
         .draft_authoring => .{ .stage = .draft_authoring, .kind = .command, .name = "prepare-candidate" },
-        .authored_attestation => .{ .stage = .authored_attestation, .kind = .action, .name = ".github/actions/session-host-release-attest-authored/action.yml" },
+        .authored_attestation => .{ .stage = .authored_attestation, .kind = .action, .name = ".github/actions/session-host-release-live-authored-attestation/action.yml" },
         .aggregate_prepare => .{ .stage = .aggregate_prepare, .kind = .command, .name = "prepare-candidate-aggregate" },
         .aggregate_finalize => .{ .stage = .aggregate_finalize, .kind = .command, .name = "finalize-candidate-aggregate" },
         .publication => .{ .stage = .publication, .kind = .command, .name = "resume-candidate-publication" },

@@ -3681,6 +3681,81 @@ fixture는 harness-owned temporary directory와 synthetic sealed receipt만 사�
 `.github/workflows/release.yml`의 stage 5~8 reducer 배선, 실제 GitHub-issued receipt의 same-process 조합과 frozen signed U5 E2E를
 대신하지 않고 abrupt process death 뒤 cleanup tomb 재발견도 증명하지 않는다.
 
+### 11.67 post-publish cleanup의 process-crash recovery 권위
+
+stage-8 executable은 §11.66의 process-local `Deletion`만 들고 rename 이후 오류를 반환해서는 안 된다. 그 상태로 process가
+끝나면 남은 tomb의 이름·원래 directory identity·삭제한 suffix를 다음 process가 인증할 수 없어 durable aggregate를 영구
+고아로 만든다. 무한 in-process retry도 `SIGKILL`·전원 손실·지속적인 filesystem 오류를 닫지 못한다. 따라서
+`release_adapter_candidate_aggregate_cleanup_recovery.zig`의 caller-owned final-address `Recovery`가 첫 unlink 전에
+`maru.session-host.aggregate-cleanup.v1` durable record를 게시하고, 다음 process가 그 record와 exact tomb을 다시 열어 같은
+삭제를 계속할 유일한 권위를 소유한다.
+
+record pathname은 caller option이나 environment에서 받지 않는다. protected repository context와 canonical original
+aggregate absolute pathname을 field별 big-endian 길이-prefix로 분리해 domain-separated BLAKE3에 넣은 64 lowercase-hex key로 같은 held parent 아래
+`.maru-aggregate-cleanup-<key>.json`을 유도한다. record는 schema, repository ID, tag, source commit, release ID, canonical original
+absolute pathname과 tomb basename, aggregate directory device/inode/uid/mode, canonical 다섯 entry의 role/name/device/inode/size/SHA-256을 bounded canonical
+JSON으로 가진다. pathname·fd 번호, credential, token, process-local phase·remaining suffix,
+address, deadline과 성공 boolean은 기록하지 않는다. 마지막 `payload_sha256`은 그 필드를 제외한 앞선 canonical payload bytes의
+SHA-256이다. `0600`, regular file, link-count 1인 per-attempt `arc4random_buf` nonce temp leaf에 write·file fsync한 뒤
+final record로 no-replace rename하고 parent fsync까지 끝나야 recovery intent가 게시된다. record publish가 끝나기 전에는 aggregate
+rename과 entry unlink가 0이다. publish 전 process death가 남긴 partial temp는 다음 시도의 이름과 충돌하지 않으며 삭제 권위로
+해석하지 않는다. 같은 process의 오류 정리는 held descriptor와 named `(device,inode)`가 일치할 때만 그 temp를 unlink한다.
+
+```mermaid
+flowchart TD
+    A[Revalidate full aggregate and VerifiedRelease] --> B[Publish canonical cleanup record]
+    B --> C[Fsync record and held parent]
+    C --> D[Rename original aggregate to recorded tomb]
+    D --> E[Fsync held parent]
+    E --> F[Verify tomb and next recorded entry identity]
+    F --> G[Unlink one exact entry]
+    G --> H[Recheck exact tomb inventory]
+    H --> I{Entries remain}
+    I -->|yes| F
+    I -->|no| J[Fsync and remove exact tomb]
+    J --> K[Publish durable completion receipt]
+    K --> L[Fsync parent then remove intent record]
+    L --> M[Final parent fsync and stage 8 success]
+```
+
+최초 실행은 §11.66의 full aggregate fence와 same-process sealed `VerifiedRelease` 결속 뒤 exact entry identity를 record에
+동결한다. recovery 시작은 canonical original pathname과 derived record를 모두 no-follow로 검사한다. intent record에서
+original exact directory만 존재하면 recorded tomb으로 no-replace rename을 계속하고, tomb exact directory만 존재하면 그 tomb을
+채택한다. 둘 다 존재하거나 어느 identity·context·schema·checksum도 어긋나면 unlink 0인 `audit_required`다. tomb을 채택한
+뒤에는 original pathname을 다시 따라가지 않는다. record는 immutable하며 progress를 덮어쓰지 않는다. 매 재개에서 tomb의 현재
+direct-child inventory를 record의 다섯 identity와 대조하고, exact present entry만 정해진 역순으로 unlink한다. absent expected entry는
+이전 process가 이미 지운 durable progress로 해석하되, 남은 모든 entry와 tomb identity가 record와 일치할 때만 계속한다.
+present-but-foreign entry, unexpected child, symlink·hardlink와 삭제 순서상 뒤 entry가 남았는데 앞 entry만 사라진 non-prefix
+inventory는 foreign data를 건드리지 않는다.
+
+intent record를 한 번 게시한 뒤에는 unlink별 record replace가 없으므로 검증과 rename 사이의 record CAS window도 없다. 각 unlink 뒤
+tomb directory를 fsync하고 다음 inventory를 다시 읽는다. temp residue는 record final publication 전 abrupt death에서만 생길 수
+있고 다음 attempt나 recovery의 권위를 막지 않는다. same-process failure에서는 owner UID, mode, link count와 held inode를 검증한
+뒤에만 회수한다. tomb directory fsync→exact rmdir→parent fsync가
+끝나도 곧바로 intent를 지우지 않는다. 같은 key의 `.maru-aggregate-cleanup-<key>.done.json`에 intent payload SHA-256,
+repository/tag/source/workflow run/release, canonical original absolute pathname/tomb basename, 제거한 directory identity, intent payload SHA-256과 completion 자체의
+canonical payload SHA-256을 담은 completion receipt를 create-exclusive·file fsync·parent
+fsync로 먼저 게시한다. 그 뒤 intent를 unlink하고 parent를 다시 fsync해야 terminal success다. crash 뒤 intent와 completion이 함께
+있으면 둘의 digest/context를 결속하고 original/tomb absent를 확인한 뒤 intent cleanup부터 계속한다. completion만 있으면 exact
+idempotent success를 재생한다. completion 없이 original·tomb·intent가 모두 absent인 첫 호출은 성공으로 추측하지 않는다. tomb basename이
+다른 inode로 재사용됐으면 foreign replacement를 삭제하지 않고 audit로 남긴다. Darwin descriptor close 불확실성은 §11.66과 같이
+non-retryable `descriptor_close_failed`이며 pathname success로 낮추지 않는다.
+
+record는 삭제 허가를 새로 만들지 않는다. full aggregate가 남은 최초/`prepared` 경로는 local attestation bundle과 현재 GitHub
+published release를 다시 인증해야 하며, partial tomb recovery는 최초 검증이 게시한 record의 exact parent·directory·entry identity와
+canonical checksum으로 삭제 대상을 제한한다. 같은 UID의 임의 쓰기 권한을 별도 공격자 격리로 과장하지 않는다. 이 경계가 막는
+것은 stale/copy/pathname replacement, crash 중간 상태와 다른 aggregate 간 권위 혼합이며, same-UID 악성 process에 대한 독립 비밀
+키 인증은 계약 밖이다.
+
+focused gate `test-session-host-release-adapter-candidate-aggregate-cleanup-recovery`는 pure reducer에서 intent publication 전 실패의
+rename/unlink 0, 모든 mutation·sync 지점의 monotonic 재개, completion idempotency, ambiguous/non-prefix/foreign inventory와 descriptor
+close 불확실성을 검증한다. 같은 gate의 actual macOS filesystem fixture는 intent publication부터 final parent sync까지 20개 checkpoint
+각각에서 첫 process를 즉시 종료하고, 그 뒤 fork한 별도 process가 exact original pathname에서 복구해 original/tomb/intent가 없는
+상태와 completion receipt를 남기는지 검증한다. Debug·ReleaseFast 각각 이 20개 fresh-process recovery의 fork→recover→wait 전체
+시간 median·p95·max도 출력하되 제품 latency budget이나 GitHub E2E로 해석하지 않는다. fixture는 harness-owned private root만 사용하고
+실제 앱 session-host 저장소·GitHub release·credential을 읽거나 수정하지 않는다. 이 slice는 process-crash recovery substrate를
+닫으며 current published asset-ID 재인증, executable cleanup command, workflow stage 8과 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

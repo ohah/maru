@@ -23,9 +23,9 @@ test "invocation inventory binds exact stage kind and identity" {
     const expected_kinds = [_]owner.Kind{ .product, .action, .command, .action, .command, .command, .command, .command };
     const expected_names = [_][]const u8{
         "signed-candidate-inputs",
-        ".github/actions/session-host-release-attest/action.yml",
+        ".github/actions/session-host-release-live-candidate-attestation/action.yml",
         "prepare-candidate",
-        ".github/actions/session-host-release-attest-authored/action.yml",
+        ".github/actions/session-host-release-live-authored-attestation/action.yml",
         "prepare-candidate-aggregate",
         "finalize-candidate-aggregate",
         "resume-candidate-publication",

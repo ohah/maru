@@ -4,6 +4,8 @@ set -euo pipefail
 action=.github/actions/session-host-release-attest-authored/action.yml
 helper=.github/actions/session-host-release-attest-authored/pin-authored-pair.sh
 single_action='./.github/actions/session-host-release-attest'
+live_action=.github/actions/session-host-release-live-authored-attestation/action.yml
+payload_action='./.github/actions/session-host-release-attest-authored'
 contract=src/platform/macos/session_host/release_adapter_attestation_bundle_contract.zig
 
 test -f "$action"
@@ -32,6 +34,17 @@ test "$(grep -Fxc 'bundle_max_bytes=16777216' "$helper")" -eq 1
 test "$(grep -Fxc 'pub const max_bytes: u64 = 16 * 1024 * 1024;' "$contract")" -eq 1
 test "$(grep -Fc '"$owner" == "$(/usr/bin/id -u)"' "$helper")" -eq 3
 ! grep -Eq 'GH_TOKEN|APPLE_|(^|[^A-Z_])HOME([^A-Z_]|$)|(^|[^A-Z_])PATH([^A-Z_]|$)' "$helper"
+
+test -f "$live_action"
+for input in preparation-path evidence-path evidence-name manifest-path manifest-name; do
+    test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
+    test "$(grep -Fxc "      $input: \${{ inputs.$input }}" "$live_action")" -eq 1
+done
+test "$(grep -Fxc "    uses: $payload_action" "$live_action")" -eq 1
+test "$(grep -Fc 'uses: actions/attest@' "$live_action")" -eq 0
+test "$(grep -Fc 'checkpoint' "$live_action")" -eq 0
+test "$(grep -Fxc '    value: ${{ steps.payload.outputs.evidence-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.payload.outputs.manifest-bundle-path }}' "$live_action")" -eq 1
 
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/maru-authored-attest-action.XXXXXX")
 fixture_root=$(cd "$fixture_root" && pwd -P)

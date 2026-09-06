@@ -44,8 +44,8 @@ test "U5 live binding keeps step and execution identities unique" {
 
 test "U5 action bindings are canonical repository-local uses paths" {
     const bindings = binding.all();
-    try std.testing.expectEqualStrings("./.github/actions/session-host-release-attest", bindings[1].actionUses().?);
-    try std.testing.expectEqualStrings("./.github/actions/session-host-release-attest-authored", bindings[3].actionUses().?);
+    try std.testing.expectEqualStrings("./.github/actions/session-host-release-live-candidate-attestation", bindings[1].actionUses().?);
+    try std.testing.expectEqualStrings("./.github/actions/session-host-release-live-authored-attestation", bindings[3].actionUses().?);
     for (bindings, 0..) |item, index| {
         if (index == 1 or index == 3) continue;
         try std.testing.expect(item.actionUses() == null);

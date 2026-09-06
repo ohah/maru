@@ -142,6 +142,31 @@ pub fn publishUntil(
     try publishCore(&authority, &mutator, deadline, result);
 }
 
+pub fn publishSnapshotUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    source: anytype,
+    token: []const u8,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *PublishedRelease,
+) !void {
+    if (!pristine(result)) return error.InvalidOwner;
+    try transport.validateToken(token);
+    if (output.len == 0 or output.len > transport.max_response_bytes) return error.InvalidOutput;
+    const result_bytes = std.mem.asBytes(result);
+    const source_bytes = std.mem.asBytes(source);
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token, output }) |value|
+        if (overlaps(result_bytes, value)) return error.InvalidOwner;
+    inline for (.{ source_bytes, std.mem.asBytes(deadline), token }) |value|
+        if (overlaps(output, value)) return error.InvalidOutput;
+    const executable = try source.executablePath();
+    inline for (.{ result_bytes, source_bytes, std.mem.asBytes(deadline), token, output }) |value|
+        if (overlaps(executable, value)) return error.InvalidOwner;
+    var mutator = ProductionMutator{ .io = io, .allocator = allocator, .executable = executable, .token = token, .output = output };
+    try publishCore(source, &mutator, deadline, result);
+}
+
 pub const testing_api = if (builtin.is_test) struct {
     pub fn publish(authority: anytype, mutator: anytype, deadline: anytype, result: *PublishedRelease) !void {
         try publishCore(authority, mutator, deadline, result);
@@ -166,6 +191,7 @@ pub const testing_api = if (builtin.is_test) struct {
 
 pub fn assertProductionBoundary() void {
     _ = &publishUntil;
+    _ = &publishSnapshotUntil;
 }
 
 fn publishCore(authority: anytype, mutator: anytype, deadline: anytype, result: *PublishedRelease) !void {

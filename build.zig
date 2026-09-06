@@ -3664,7 +3664,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -3681,7 +3681,7 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
         // `CT*` 는 밴드 마디의 열 범위(`platform/cell_text.zig` — §7.5). **`maru` 모듈이라 여기서
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW" },
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK" },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));
@@ -12560,6 +12560,26 @@ pub fn build(b: *std.Build) void {
         );
         signed_upgrade_e2e_harness_step.dependOn(&run_signed_upgrade_e2e_tests.step);
         signed_upgrade_e2e_harness_step.dependOn(&signed_upgrade_e2e.step);
+
+        // **편집기 chord 가 메뉴에 먹히지 않는지 잰다**(docs/key-input-and-shortcuts.md 「메뉴
+        // keyEquivalent 층」). Swift 가 질의를 **부르는지**는 Zig 판정자가 못 보므로 소스를 읽어 블록을
+        // 통째로 단언한다 — 심볼만 보면 극성을 뒤집은 변이가 산다.
+        const editor_chord_menu_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/editor_chord_menu_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_editor_chord_menu_tests = b.addRunArtifact(editor_chord_menu_tests);
+        run_editor_chord_menu_tests.addArg("--maru-expect-tests=2");
+        run_editor_chord_menu_tests.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_editor_chord_menu_tests.step);
+        const editor_chord_menu_step = b.step(
+            "test-editor-chord-menu",
+            "Validate that editor-context chords win over menu key equivalents",
+        );
+        editor_chord_menu_step.dependOn(&run_editor_chord_menu_tests.step);
 
         const signed_app_quit_evidence_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

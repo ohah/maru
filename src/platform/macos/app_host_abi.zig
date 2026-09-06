@@ -1815,6 +1815,17 @@ pub export fn maru_macos_app_session_any_overlay_open(session: ?*AppSession) c_i
     return if (app_session.anyOverlayOpen()) 1 else 0;
 }
 
+// **이 chord 를 편집기 컨텍스트가 소유하는가**(v-editor-chord). Swift performKeyEquivalent가 1이면
+// 메뉴바 keyEquivalent(⌘D=Split Right 등)를 양보해 키를 keyDown으로 보낸다 — `any_overlay_open`과 같은
+// 부류의 **부작용 없는** 질의다. 그 층이 없으면 `⌘D`·`⌥⌘↑`·`⌥⌘↓`가 메뉴에 먹혀 편집기에 안 온다
+// (docs/key-input-and-shortcuts.md 「메뉴 keyEquivalent 층」). null/변환 실패는 0(양보 안 함).
+pub export fn maru_macos_app_session_editor_owns_chord(session: ?*AppSession, event: ?*const KeyEvent) c_int {
+    const app_session = session orelse return 0;
+    const raw_event = (event orelse return 0).*;
+    const key_event = keyEventFromAbi(raw_event) catch return 0;
+    return if (app_session.editorOwnsChord(key_event)) 1 else 0;
+}
+
 // WKWebView typed route를 side-effect·PTY write 없이 조회한다. 같은 Zig resolver가 app-action/consume-unbound/
 // web-editor/pass-through provenance를 보존하며, v132가 옛 v100 Bool 조회를 대체한다. null/event 변환 실패는
 // pass-through. 실제 app-action은 아래 전용 export가 resolver를 다시 평가한 뒤 terminal 전처리 없이 dispatch한다.

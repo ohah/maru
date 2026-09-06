@@ -16,6 +16,7 @@ const GlobalBinding = maru.config.GlobalBinding;
 const KeyChord = maru.config.KeyChord;
 const KeyName = maru.config.keybinding.KeyName;
 const KeyBindingResolver = maru.config.KeyBindingResolver;
+const editor_context_bindings = maru.config.keybinding.editor_context_bindings;
 const default_app_bindings = maru.config.keybinding.default_app_bindings;
 
 /// 카탈로그 한 항목(정적). action_key/title은 컴파일타임 문자열 리터럴(널 종단) — ABI에서 그대로 가리킨다.
@@ -188,6 +189,15 @@ fn appendStr(buf: []u8, len: *usize, s: []const u8) void {
 /// 안 묶였으면 null. select_tab 같은 payload 액션은 std.meta.eql로 payload까지 비교한다.
 pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     for (resolver.app_bindings) |binding| {
+        if (std.meta.eql(binding.action, action)) return binding.chord;
+    }
+    // **편집기 컨텍스트 기본키도 표시한다**(§편집기 Term 컨텍스트 「메뉴 keyEquivalent 층」).
+    // 이것이 없으면 `⌘D`·`⌥Z`·`⌥↑↓` 가 배선돼 있는데도 팔레트가 **「단축키 없음」**이라고 말해
+    // 발견조차 안 된다(실측). 전역 표보다 **먼저** 보는 것은 `resolveEditor` 의 순서와 같다.
+    //
+    // **메뉴에 chord 가 새로 달리지는 않는다** — 이 표의 액션들은 팔레트 카탈로그에만 있고
+    // `catalogMenuItem` 이 거는 스무 항목에 하나도 없다(실측). 즉 바뀌는 것은 팔레트 표시뿐이다.
+    for (editor_context_bindings) |binding| {
         if (std.meta.eql(binding.action, action)) return binding.chord;
     }
     for (default_app_bindings) |binding| {

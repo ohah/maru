@@ -523,6 +523,35 @@ pub const KeyBindingResolver = struct {
         return if (is_tree_default) .tree_default else .consumed;
     }
 
+    /// `resolveEditor` 와 **같은 순서**를 구현하되 **어느 표가 이겼는지**를 남긴다(§편집기 Term 컨텍스트
+    /// 「메뉴 keyEquivalent 층」).
+    ///
+    /// **`EditorResolution` 은 그 구분을 못 한다** — 컨텍스트 표가 이겨도, 전역으로 떨어져도 똑같이
+    /// `.app_action` 이다. 그 뭉갬 때문에 *"이 chord 를 편집기가 소유하는가"* 를 물을 수가 없었고,
+    /// 그래서 메뉴 keyEquivalent 가 `⌘D`·`⌥⌘↑`·`⌥⌘↓` 를 가로채는 것을 아무도 못 잡았다.
+    ///
+    /// **웹 컨텍스트가 같은 문제를 이 모양으로 풀었다** — `.web_editor` 가 `.app_action` 에 안 뭉개지고
+    /// 처음부터 별도 variant 다.
+    pub const EditorResolutionDetailed = union(enum) {
+        /// 사용자 rebind 또는 전역 기본 표가 이겼다. **컨텍스트는 진 것이다.**
+        app_action: action_mod.Action,
+        /// **`editor_context_bindings` 가 이겼다** — 이 chord 는 편집기 것이다.
+        editor_context_action: action_mod.Action,
+        editor,
+        consumed,
+
+        /// 뭉개서 옛 타입으로 준다. **손실적이고, 그것이 의도다** — 호출자 대부분은
+        /// *"이 chord 가 앱 액션인가"* 만 물으므로 그 열여덟을 안 건드린다.
+        pub fn coarse(self: EditorResolutionDetailed) EditorResolution {
+            return switch (self) {
+                .app_action => |a| .{ .app_action = a },
+                .editor_context_action => |a| .{ .app_action = a },
+                .editor => .editor,
+                .consumed => .consumed,
+            };
+        }
+    };
+
     pub const EditorResolution = union(enum) {
         app_action: action_mod.Action,
         /// 편집기가 직접 처리한다(글자·이동·삭제 키). **PTY 로 안 간다** — 그 Term 에는 PTY 가 없다.
@@ -545,6 +574,11 @@ pub const KeyBindingResolver = struct {
     /// **`input.option-as-meta = false` 면 Option 단독 chord 는 여기까지 오지 않는다.** 그 판정은
     /// Swift `keyDown` 이 앱 단위로 하고, 그때는 어느 Term 이 활성인지 모른다 — 설정이 이긴다.
     pub fn resolveEditor(self: KeyBindingResolver, event: terminal.KeyEvent, is_diff: bool) EditorResolution {
+        return self.resolveEditorDetailed(event, is_diff).coarse();
+    }
+
+    /// 위 doc 의 순서를 **여기 하나에서** 구현한다 — `resolveEditor` 는 이것을 뭉개 준다.
+    pub fn resolveEditorDetailed(self: KeyBindingResolver, event: terminal.KeyEvent, is_diff: bool) EditorResolutionDetailed {
         // 이 `orelse` 는 **오늘 도달하지 않는다**(`.consumed` 로 바꿔도 판정자가 안 잡는 것이 정상) —
         // `keyNameFromTerminalKey` 가 `terminal.Key` 를 남김없이 덮어 `null` 을 안 낸다. 네 resolver 가
         // 같은 관용구를 쓰고 갈래마다 값이 다른 것도 그래서다. 편집기의 몫은 `.editor` 다 — 못 읽은 키를
@@ -570,7 +604,9 @@ pub const KeyBindingResolver = struct {
             // 맞았는데 조건이 안 맞았으면 **그 표는 할 말을 다 한 것**이고, 뒤에 같은 chord 를 또
             // 두는 날에는 두 항목이 조용히 서로를 가리게 된다.
             if (is_diff and binding.needs_editable) break;
-            return .{ .app_action = binding.action };
+            // **컨텍스트가 이겼다** — 이 자리만 다른 variant 다. 메뉴 keyEquivalent 를 양보시킬지의
+            // 판정이 정확히 이것이다.
+            return .{ .editor_context_action = binding.action };
         }
         for (default_app_bindings) |binding| {
             if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
@@ -1579,4 +1615,58 @@ test "resolve: user terminal binding overrides a built-in default" {
     const r = KeyBindingResolver{ .terminal_bindings = &user };
     // 사용자 바인딩이 빌트인보다 우선.
     try std.testing.expectEqualStrings("X", (try r.resolve(.{ .key = .backspace, .modifiers = .{ .command = true } }, &buf, .{})).terminal_input);
+}
+
+test "EMK1 컨텍스트가 이긴 답과 전역으로 떨어진 답이 구별된다 (메뉴 keyEquivalent 층)" {
+    // **이 구분이 없어서 결함이 오래 살았다.** 판정자 열여덟이 전부 *"이 chord 가 앱 액션인가"* 만
+    // 물었고, **어느 표가 이겼는지**는 아무도 안 물었다 — 그래서 컨텍스트가 한 번도 전역을 이겨 본
+    // 적이 없는데도 전부 초록이었다.
+    const resolver = KeyBindingResolver{};
+    const cmd_d: terminal.KeyEvent = .{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } };
+
+    // ⑴ **단일 편집기 — 컨텍스트가 이긴다.**
+    const d_edit = resolver.resolveEditorDetailed(cmd_d, false);
+    try std.testing.expect(d_edit == .editor_context_action);
+    try std.testing.expectEqual(action_mod.Action.add_next_occurrence, d_edit.editor_context_action);
+
+    // ⑵ **비교 뷰 — 전역으로 떨어진다.** 여기서 양보하면 비교 뷰에서 화면을 못 나눈다.
+    const d_diff = resolver.resolveEditorDetailed(cmd_d, true);
+    try std.testing.expect(d_diff == .app_action);
+    try std.testing.expectEqual(action_mod.Action.split_horizontal, d_diff.app_action);
+
+    // ⑶ **뭉개면 둘이 같아진다** — 옛 타입이 이 질문에 답할 수 없다는 것 자체를 고정한다.
+    try std.testing.expect(d_edit.coarse() == .app_action);
+    try std.testing.expect(d_diff.coarse() == .app_action);
+
+    // ⑷ **`⌥Z` 는 비교 뷰에서도 컨텍스트가 이긴다**(랩은 뷰 속성이라 `needs_editable` 이 아니다).
+    const opt_z: terminal.KeyEvent = .{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } };
+    try std.testing.expect(resolver.resolveEditorDetailed(opt_z, true) == .editor_context_action);
+
+    // ⑸ **전역 전용 chord 는 컨텍스트가 아니다** — 참을 남발하면 편집기에서 메뉴가 통째로 죽는다.
+    const cmd_t: terminal.KeyEvent = .{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } };
+    try std.testing.expect(resolver.resolveEditorDetailed(cmd_t, false) == .app_action);
+
+    // ⑹ **편집기가 직접 처리하는 키도 아니다.**
+    const plain_a: terminal.KeyEvent = .{ .key = .{ .char = 'a' }, .modifiers = .{} };
+    try std.testing.expect(resolver.resolveEditorDetailed(plain_a, false) == .editor);
+}
+
+test "EMK2 사용자 rebind·unbind 가 이기면 컨텍스트는 진다 (양보하면 안 된다)" {
+    // **`resolveEditor` 의 순서를 그대로 물려받는다** — 사용자 app rebind → terminal macro → unbind →
+    // 컨텍스트 → 전역. 앞의 셋이 이기면 컨텍스트는 진 것이라 메뉴를 양보시키면 안 된다.
+    const cmd_d: terminal.KeyEvent = .{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } };
+    // **표와 같은 대문자다** — `fromKeyEvent` 가 글자를 대문자로 정규화하므로 소문자 리터럴은 안 맞는다.
+    const chord = KeyChord{ .modifiers = .{ .command = true }, .key = .{ .char = 'D' } };
+
+    // ⑴ 사용자가 `⌘D` 를 다른 앱 액션에 묶으면 그것이 이긴다.
+    const rebound = [_]AppBinding{.{ .chord = chord, .action = .new_tab }};
+    const r1 = KeyBindingResolver{ .app_bindings = &rebound };
+    const d1 = r1.resolveEditorDetailed(cmd_d, false);
+    try std.testing.expect(d1 == .app_action);
+    try std.testing.expectEqual(action_mod.Action.new_tab, d1.app_action);
+
+    // ⑵ 명시적 unbind 면 소비된다 — 컨텍스트가 아니다.
+    const unbinds = [_]KeyChord{chord};
+    const r2 = KeyBindingResolver{ .unbinds = &unbinds };
+    try std.testing.expect(r2.resolveEditorDetailed(cmd_d, false) == .consumed);
 }

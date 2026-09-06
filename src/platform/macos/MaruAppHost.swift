@@ -240,8 +240,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // handleKeyEvent의 모달 입력 차단·녹음 캡처가 그 키를 처리한다. 안 그러면 ⌘조합이 메뉴바 keyEquivalent에 먼저
     // 먹혀(performKeyEquivalent → runCatalogAction) handleKeyEvent의 모달/녹음 가드를 통째로 우회해, 세팅 중 ⌘T가
     // 새거나 녹음할 chord가 캡처되지 않는다(근본 수정). 오버레이가 아니면 super가 기존 메뉴 단축키를 처리한다.
+    // **편집기 컨텍스트가 소유한 chord 는 메뉴보다 먼저다**(docs/key-input-and-shortcuts.md 「메뉴
+    // keyEquivalent 층」). 이 갈래가 없으면 `⌘D`(Split Right)·`⌥⌘↑↓`(focus pane) 메뉴 항목이 먼저
+    // 발화해 편집기의 「다음 일치 추가」·「위/아래 커서 추가」가 **제품에서 통째로 죽는다** — 배선도
+    // resolver 도 옳은데 `keyDown` 까지 오지를 않는다. 판정은 Zig 가 하고(활성 Term·resolver 순서가
+    // 거기 있다) 여기서는 그 답만 따른다. 오버레이 갈래가 **먼저**여야 모달 중 chord 녹음이 안 샌다.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if controller?.anyOverlayOpen == true {
+            controller?.handleKeyDown(event)
+            return true
+        }
+        if controller?.editorOwnsChord(event) == true {
             controller?.handleKeyDown(event)
             return true
         }
@@ -5312,6 +5321,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // Zig resolver의 typed route를 그대로 전달한다. 정규화 실패·세션 없음은 pass-through(0), 알 수 없는 raw는
     // 호출부가 consume한다.
+    // 이 chord 를 편집기 컨텍스트가 소유하는가 — 참이면 메뉴바 keyEquivalent 를 양보한다.
+    // 판정은 전부 Zig 다(활성 Term 종류·resolver 순서가 거기 있어서, 여기 두면 출처가 둘이 된다).
+    func editorOwnsChord(_ event: NSEvent) -> Bool {
+        guard let session = appSession, var keyEvent = normalizedKeyEvent(from: event) else { return false }
+        return maru_macos_app_session_editor_owns_chord(session, &keyEvent) != 0
+    }
+
     func webPanelKeyRoute(_ wp: MaruWebPanelView, _ event: NSEvent) -> UInt32 {
         guard let session = surfaceOwning(wp)?.appSession ?? appSession,
               var keyEvent = normalizedKeyEvent(from: event) else { return 0 }

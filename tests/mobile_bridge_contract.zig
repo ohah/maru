@@ -7064,6 +7064,60 @@ test "M9 서술자: 복사 버튼도 낸다 — 눌리는데 안 읽히면 복�
     try std.testing.expect(c.y >= n.rect.y and c.y <= n.rect.y + n.rect.h);
 }
 
+test "M9 본문: 줄이 «전체 중 몇째» 인지 말한다 — 스크롤백을 안 숨긴다" {
+    // 화면은 그것을 스크롤바로 말하는데 색과 길이라 안 읽힌다 — 지금 보는 것이 마지막인지,
+    // 위로 천 줄이 더 있는지 알 길이 없었다. 수는 **있는 줄 전부**로 센다(웹 터미널이 행마다
+    // `aria-posinset`/`aria-setsize` 를 다는 그 자리다).
+    const T = std.testing;
+    endAnyGesture();
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+
+    // 스크롤백을 만든다 — 화면보다 많은 줄을 흘린다.
+    var i: usize = 0;
+    while (i < 80) : (i += 1) {
+        var line: [24]u8 = undefined;
+        const t = std.fmt.bufPrint(&line, "line{d}\r\n", .{i}) catch continue;
+        _ = bridge.maru_mobile_input(t.ptr, t.len);
+    }
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var seen: usize = 0;
+    var set_size: u32 = 0;
+    var last_pos: u32 = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .text) continue;
+        seen += 1;
+        if (set_size == 0) set_size = n.sem.set_size;
+        try T.expectEqual(set_size, n.sem.set_size); // 한 화면에 집합은 하나다
+        try T.expect(n.sem.position_in_set > last_pos); // 위에서 아래로 커진다
+        last_pos = n.sem.position_in_set;
+        try T.expect(n.sem.position_in_set <= set_size);
+    }
+    try T.expect(seen > 0);
+    // **스크롤백이 수에 들어간다** — 화면 줄 수보다 크다(안 그러면 「있는 것 전부」가 아니다).
+    try T.expect(set_size > @as(u32, @intCast(seen)));
+
+    // **host 로 나가는 길이 있어야 사용자가 듣는다.** 브리지만 알고 ABI 가 없으면 그 값은
+    // 아무 데도 안 닿는다 — 이 축에서 이미 한 번 겪은 모양이다(값 `value` 가 그랬다).
+    var idx2: u32 = 0;
+    var packed_seen: usize = 0;
+    while (idx2 < bridge.maru_mobile_a11y_count()) : (idx2 += 1) {
+        const packed_v = bridge.maru_mobile_a11y_set_pos(idx2);
+        if (packed_v == 0) continue;
+        packed_seen += 1;
+        try T.expectEqual(set_size, packed_v & 0xFFFF);
+        try T.expect((packed_v >> 16) >= 1 and (packed_v >> 16) <= set_size);
+    }
+    try T.expectEqual(seen, packed_seen);
+    // 없는 index 는 0 이다 — 옛 자리를 돌려주면 없는 줄의 번호가 읽힌다.
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_set_pos(bridge.maru_mobile_a11y_count()));
+}
+
 test "M9 본문: 화면이 가득 차도 글자 자리가 안 넘친다" {
     // **본문이 들어오면서 계산이 달라졌다.** 목록만 낼 때는 한 화면이 2.7 KiB 였는데, 본문은
     // 줄마다 최대 960바이트다 — 넘치면 이름·값이 빈 것이 되고, 빈 이름은 host 가 요소를 아예

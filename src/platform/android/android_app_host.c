@@ -1502,7 +1502,17 @@ Java_dev_maru_MaruActivity_nativeA11yNode(JNIEnv *env, jclass cls, jint index, j
     return (*env)->NewString(env, u16, ulen);
 }
 
-/// TalkBack 의 두 번 두드리기는 /// TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
+/// 집합 안 자리(위 16비트=몇째, 아래 16비트=전부 몇). Java 가 `CollectionItemInfo` 로 옮긴다.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11ySetPos(JNIEnv *env, jclass cls, jint index) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int v = maru_mobile_a11y_set_pos((unsigned int)index);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)v;
+}
+
+/// TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
 /// 합성해 주지 않는다. 그래서 여기서 **누르는 경로 그대로** 눌러 준다(down/up 한 쌍). 이 함수가
 /// 없으면 TalkBack 사용자에게는 「읽히는데 안 눌리는」 버튼만 남는다.
 JNIEXPORT jboolean JNICALL

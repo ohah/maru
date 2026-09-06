@@ -7612,7 +7612,21 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
     // **커서가 있는 줄은 그렇다고 말한다.** 화면은 그것을 깜빡이는 사각형으로만 말하는데 — 색도
     // 모양도 안 읽힌다. 지금 치는 글자가 어디로 가는지 모르면 터미널을 쓸 수가 없다
     // (적대적 검증 3회차. 토글의 켜짐/꺼짐·편집 중인 줄과 같은 규율이다).
-    noteA11y(rect, .{ .role = .text, .label = label, .value = text, .selected = has_cursor });
+    // **「전체 중 몇째 줄」을 말한다.** 화면은 스크롤바로 그것을 말하는데 — 색과 길이라 안 읽힌다.
+    // 스크린 리더 사용자는 지금 보는 것이 마지막인지, 위로 천 줄이 더 있는지 알 길이 없었다.
+    // 수는 **보이는 줄이 아니라 있는 줄 전부**로 센다(목록 화면과 같은 규율 — 계약 `set_size`).
+    //
+    // 절대 줄 번호 = 스크롤백 길이 − 지금 올라간 만큼 + 화면 안 순번.
+    const total = snap.scrollback_len + body_rows;
+    const absolute = snap.scrollback_len - @min(snap.scrollback_len, snap.view_offset) + row + 1;
+    noteA11y(rect, .{
+        .role = .text,
+        .label = label,
+        .value = text,
+        .selected = has_cursor,
+        .position_in_set = @intCast(@min(absolute, total)),
+        .set_size = @intCast(total),
+    });
 }
 
 /// 한 줄에서 읽어 낼 글자의 상한. 240칸 × 4바이트라 어떤 격자에서도 줄이 통째로 들어간다.
@@ -7745,6 +7759,20 @@ pub export fn maru_mobile_a11y_label(index: u32, out: [*]u8, cap: usize) usize {
 pub export fn maru_mobile_a11y_value(index: u32, out: [*]u8, cap: usize) usize {
     if (index >= a11y_count) return 0;
     return copyA11yText(a11y_nodes[index].sem.value, out, cap);
+}
+
+/// **집합 안 자리**: 위 16비트가 「몇째」(1부터, 0 은 집합의 일원이 아니다), 아래 16비트가 「전부
+/// 몇」이다. 한 번에 답하는 이유는 상태 비트와 같다 — 둘로 나눠 물으면 그 사이에 프레임이 바뀌어
+/// **서로 다른 프레임의 수**를 섞는다.
+///
+/// **왜 필요한가**: 목록이 흐르고 터미널은 스크롤백을 든다. 화면은 그것을 스크롤바로 말하는데
+/// 색과 길이라 안 읽힌다 — 이 값이 없으면 지금 보는 것이 마지막인지, 위로 천 줄이 더 있는지
+/// 알 길이 없다. 없는 index 는 0.
+pub export fn maru_mobile_a11y_set_pos(index: u32) u32 {
+    if (index >= a11y_count) return 0;
+    const sem = a11y_nodes[index].sem;
+    return (@as(u32, @intCast(@min(sem.position_in_set, 0xFFFF))) << 16) |
+        @as(u32, @intCast(@min(sem.set_size, 0xFFFF)));
 }
 
 /// 판정자가 보는 서술자 한 줄. `A11yNode` 를 그대로 내면 그 타입이 밖으로 새므로 뷰만 낸다.

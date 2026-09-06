@@ -25,6 +25,7 @@ var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
 /// 이 test 프로세스와 **그 자식들**이 사용자의 session-host registry와 workspace를 절대 건드리지 않게 한다.
 ///
@@ -88,6 +89,32 @@ fn expectedPassedCount(args: std.process.Args) ?usize {
     return optionValue(args, "--maru-expect-passed=");
 }
 
+/// skip/keep prefix 는 **env 로** 받는다(argv 아님). **왜 argv 가 아닌가**: 일부 판정자가
+/// `_NSGetArgc() >= 3` 으로 「fixture 게이트인가」를 판단해 fixture 없으면 SkipZigTest 한다. skip 설정을
+/// argv 로 넘기면 argc 가 늘어 그 판정자들이 fixture 가 있다고 오판하고 돌다 죽는다(실측 2026-09-06,
+/// P3-e4d-2a). env 는 argc 를 안 건드린다. CSV 원시 값을 돌려준다.
+fn envPrefix(name: [*:0]const u8) ?[]const u8 {
+    // **macOS 전용이다** — 이 필터를 쓰는 곳이 macOS 게이트뿐이고, `getenv` 는 libc 심볼이라 libc 를 안
+    // 링크한 리눅스 테스트 바이너리에서 참조만으로 링크가 깨진다. 조건이 comptime-known 이라 평범한 if 로도
+    // 접혀 비-macOS 에서는 getenv 참조가 사라진다(`optionValue`·`isolateSessionHostRoot` 와 같은 규칙).
+    if (builtin.os.tag != .macos) return null;
+    const raw = getenv(name) orelse return null;
+    const value = std.mem.span(raw);
+    return if (value.len == 0) null else value;
+}
+
+/// 이름이 CSV 안 어느 prefix 로든 시작하면 참. **왜 startsWith 인가**: 모듈 경로(`session_host.` 등)로
+/// 거르되, 다른 모듈 테스트의 «설명»에 그 문자열이 우연히 들어 있어도 안 걸리게 — 이름의 «머리»만 본다.
+fn matchesPrefix(name: []const u8, csv: ?[]const u8) bool {
+    const list = csv orelse return false;
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |prefix| {
+        if (prefix.len == 0) continue;
+        if (std.mem.startsWith(u8, name, prefix)) return true;
+    }
+    return false;
+}
+
 pub fn main(init: std.process.Init.Minimal) void {
     @disableInstrumentation();
 
@@ -113,12 +140,25 @@ pub fn main(init: std.process.Init.Minimal) void {
     });
     const have_tty = Io.File.stderr().isTty(runner_io) catch unreachable;
 
+    // **컴파일은 됐지만 여기서는 안 돌린다** — `--maru-skip-prefix` 로 시작하는 이름은 다른 잡이 이미 도는
+    // 것(예: `session_host.` 는 `test-session-host` 가 모듈 그래프째 돈다). `--maru-keep-prefix` 는 그 예외다
+    // (그 잡에 없어 여기서만 도는 모듈). 컴파일 수(`--maru-expect-tests`)는 그대로라 «골라졌는가»는 불변이고,
+    // 실행만 건너뛰어 러너 시간을 던다.
+    const skip_prefixes = envPrefix("MARU_TEST_SKIP_PREFIX");
+    const keep_prefixes = envPrefix("MARU_TEST_KEEP_PREFIX");
+    var filtered: usize = 0;
+
     var passed: usize = 0;
     var skipped: usize = 0;
     var failed: usize = 0;
     var leaked: usize = 0;
 
     for (test_functions, 0..) |test_fn, index| {
+        if (matchesPrefix(test_fn.name, skip_prefixes) and !matchesPrefix(test_fn.name, keep_prefixes)) {
+            filtered += 1;
+            if (!have_tty) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
+            continue;
+        }
         testing.allocator_instance = .{};
         testing.io_instance = .init(testing.allocator, .{
             .argv0 = .init(init.args),
@@ -177,6 +217,12 @@ pub fn main(init: std.process.Init.Minimal) void {
         });
     }
     if (logged_errors != 0) std.debug.print("{d} errors were logged.\n", .{logged_errors});
+    if (filtered != 0) std.debug.print("{d} tests filtered by prefix.\n", .{filtered});
+    // skip prefix 를 줬는데 하나도 안 걸렸다 = prefix 오타/이름 규칙 변화. 조용히 시간만 그대로 쓰지 말고 빨개진다.
+    if (skip_prefixes != null and filtered == 0) {
+        std.debug.print("skip prefix matched no tests — check --maru-skip-prefix\n", .{});
+        std.process.exit(1);
+    }
     if (leaked_count != 0) std.debug.print("{d} tests leaked memory.\n", .{leaked_count});
     if (failed_count != 0 or leaked_count != 0 or logged_errors != 0) std.process.exit(1);
     // **돌았는지도 센다.** 위 실패 판정은 SKIP 을 통과로 흘려보내므로, 그것만으로는 «증거가 만들어졌는가»

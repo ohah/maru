@@ -1353,6 +1353,12 @@ pub fn build(b: *std.Build) void {
         macos_app_host_abi_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
     const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
+    // session_host.* 판정자는 `test-session-host` 잡이 모듈 그래프째 돈다(병렬). 이 ABI 바이너리는 app_session
+    // 이 그것들을 import 해 딸려오지만, 여기서 다시 돌 이유가 없다 — 실행만 건너뛰어 file-explorer 잡 시간을
+    // 던다(컴파일 수는 그대로라 «골라졌는가» 계약은 불변). shutdown_admin_connector 만 예외: `test-session-host`
+    run_macos_app_host_abi_tests.setEnvironmentVariable("MARU_TEST_SKIP_PREFIX", "session_host.");
+    run_macos_app_host_abi_tests.setEnvironmentVariable("MARU_TEST_KEEP_PREFIX", "session_host.shutdown_admin_connector");
+    // 에 없고 여기서만 도는 유일한 session_host 모듈이라 남긴다(실측 2026-09-06).
     run_macos_app_host_abi_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
         "skip-in-aggregate-v1",

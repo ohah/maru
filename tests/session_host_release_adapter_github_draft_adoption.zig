@@ -141,7 +141,7 @@ test "result cannot overlap current manifest or context backing storage" {
     try std.testing.expectError(error.StorageAlias, adoption.adopt(aliased_context, candidate(), &current, &result));
 }
 
-test "adoption is credential free mutation free and product dormant" {
+test "adoption is credential free mutation free with one resume product caller" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_github_draft_adoption.zig", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(source);
     inline for (.{ "GH_TOKEN", "std.process", "bounded_process", "capture(", "create(" }) |forbidden|
@@ -157,7 +157,7 @@ test "adoption is credential free mutation free and product dormant" {
         defer std.testing.allocator.free(product);
         callers += std.mem.count(u8, product, "release_adapter_github_draft_adoption");
     }
-    try std.testing.expectEqual(@as(usize, 0), callers);
+    try std.testing.expectEqual(@as(usize, 1), callers);
 }
 
 test "current draft adoption records batched diagnostic latency without FD growth" {

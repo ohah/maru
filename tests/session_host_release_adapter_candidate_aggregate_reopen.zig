@@ -436,6 +436,26 @@ test "successful and failed reopen close every descriptor without deleting durab
     try std.testing.expectEqualStrings(source_bytes[0], input.bytes);
 }
 
+test "audit deinit closes descriptors after a verified artifact changes" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    const before = try countFds();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var result: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &result);
+    const dmg = fixture.paths().dmg;
+    const fd = c.open(dmg.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return error.FixtureFailed;
+    if (c.pwrite(fd, "X", 1, 0) != 1 or c.close(fd) != 0) return error.FixtureFailed;
+    try std.testing.expectError(error.AuthorityChanged, result.fence());
+    try result.deinit();
+    try std.testing.expectEqual(before, try countFds());
+}
+
 test "descriptor cleanup failure is observable and preserves durable bytes" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -463,9 +483,10 @@ test "production entrypoint cannot select a fake verifier" {
     );
     defer std.testing.allocator.free(source);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn openAndVerify("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn openAndVerifyUntil("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn openAndVerifyWith("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "if (!builtin.is_test) @compileError(\"openAndVerifyWith is a test-only seam\")"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "return openAndVerifyUsing(&cli_impl, &verifier"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "return openAndVerifyUsing(&cli_impl, &verifier"));
 }
 
 fn countFds() !usize {

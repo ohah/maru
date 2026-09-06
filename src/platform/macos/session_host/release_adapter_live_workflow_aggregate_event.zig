@@ -10,6 +10,15 @@ const contract = @import("release_adapter_contract");
 
 pub const Command = std.meta.Tag(contract.Command);
 pub const Error = phase.Error || error{InvalidCommand};
+pub const max_stdout_bytes: usize = 1;
+pub const max_stderr_bytes: usize = blk: {
+    var maximum: usize = 0;
+    for (@typeInfo(command_outcome.Outcome).@"enum".fields) |field| {
+        const outcome: command_outcome.Outcome = @enumFromInt(field.value);
+        maximum = @max(maximum, command_outcome.stderrLine(outcome).len);
+    }
+    break :blk maximum;
+};
 
 pub const Termination = union(enum) {
     exited: u8,
@@ -45,6 +54,14 @@ pub fn eventFor(command: Command, observation: Observation) error{InvalidCommand
 pub fn applyObservation(state: *phase.State, command: Command, observation: Observation) Error!void {
     const stage = try stageFor(command);
     return phase.apply(state, .{ .stage = stage, .result = classify(observation) });
+}
+
+/// Proves command/stage applicability without mutating the live workflow state or launching a
+/// process. The real observation must still pass through `applyObservation` after the child exits.
+pub fn validateApplication(state: *const phase.State, command: Command) Error!void {
+    var probe = state.*;
+    const stage = try stageFor(command);
+    try phase.apply(&probe, .{ .stage = stage, .result = .succeeded });
 }
 
 fn classify(observation: Observation) phase.Result {

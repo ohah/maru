@@ -3336,6 +3336,49 @@ fixture authority와 harness-owned `mkdtemp`만 사용하고 실제 앱 session-
 읽거나 바꾸지 않는다. 이 slice는 stage-3 executable command까지만 닫으며 stage-4 authored action, resume composition, aggregate
 삽입, live workflow 배선과 frozen signed U5 E2E는 아직 완료하지 않는다.
 
+### 11.60 stage 4 authored artifact의 pair attestation action
+
+§11.52 단계 4는 workflow shell이 `actions/attest`를 두 번 임의 호출하거나 두 결과를 scalar 성공값으로 조립하지 않는다.
+local composite action `.github/actions/session-host-release-attest-authored/action.yml` 하나가 §11.59의 retained preparation에 있는
+exact baseline evidence와 candidate manifest를 evidence→manifest 순서로 attest한다. action은 기존
+`session-host-release-attest` single-subject action만 role별 exact once 재사용하며 `actions/attest`를 직접 호출하거나 다른 ref로
+재선택하지 않는다. 따라서 subject별 pre/post inode·link-count·size·SHA 고정과 pinned action ref의 단일 출처는 §11.32 component에
+남고, 이 pair action은 두 subject를 한 workflow 단계로 결속하는 순서·전체 구간 fence·bundle handoff만 소유한다.
+
+입력은 canonical absolute `preparation-path`, 그 직계 자식인 `evidence-path`, `manifest-path`와 exact basename인
+`baseline-evidence.json`, `Maru-<version>-session-host-release.json`뿐이다. pathname과 name은 권위가 아니라 locator다. preparation은
+현재 effective user 소유의 exact `0700` real directory이고 두 subject 외 entry가 없어야 한다. evidence와 manifest는 서로 다른
+regular single-link `0600` inode여야 하며 action 시작 전에 directory와 두 file을 모두 pin한다. evidence attestation이 끝난 뒤
+manifest attestation을 시작하고, 둘이 끝난 뒤 처음 고정한 preparation directory의 canonical pathname/device/inode/owner/mode와
+두-entry inventory, 두 subject의 canonical pathname/device/inode/size/link count/mode/SHA-256을 모두 다시 확인한다. 첫 attestation
+뒤 evidence가 바뀌거나 두 번째 동안 manifest 또는 directory pathname이 바뀌면 bundle output을 게시하지 않는다. caller가 subject digest,
+attestation ID/URL, predicate, repository/run/source identity, 성공 boolean 또는 bundle basename을 제출하는 입력은 없다.
+
+두 single-subject action의 `bundle-path`는 성공 권위가 아니라 다음 process가 다시 검증할 locator다. pair action은 두 값이 newline·
+control character 없는 canonical absolute regular single-link file이고 각각 1 byte 이상
+`release_adapter_attestation_bundle_contract.max_bytes` 이하인지 확인한다. 두 bundle과 두 subject의 pathname 및 inode는 pairwise
+distinct여야 하고 bundle은 preparation directory 아래에 있을 수 없다. final directory/subject fence와 bundle locator 검사가 모두 성공한 뒤에만 exact `evidence-bundle-path`와
+`manifest-bundle-path` 두 output을 함께 게시한다. attestation ID와 URL은 다음 단계 입력이나 action output으로 전달하지 않는다.
+bundle JSON 의미, certificate/source/run/subject binding과 cryptographic verification은 action shell이 흉내 내지 않고 다음
+resume process의 기존 `verifyBundleWith` 경계가 다시 수행한다.
+
+evidence action 실패는 manifest action 0이고 output 0이다. evidence 성공 뒤 manifest 또는 final fence가 실패하면 이미 발급된
+원격 attestation을 삭제·재발급하거나 성공으로 합성하지 않고 output 0으로 실패한다. stage 3에서 draft mutation이 이미 시작됐으므로
+후속 live workflow owner는 이 모든 stage-4 실패를 `audit_required`로 기록한다. 이 action은 `GH_TOKEN`, Apple secret, HOME, PATH를
+명시적으로 받아 child environment를 만드는 실행 경계가 아니다. GitHub OIDC permission과 action runtime environment는 live release
+job이 소유하며 local helper에는 subject/bundle pathname과 고정된 관측값만 환경으로 전달한다.
+
+focused gate `test-session-host-release-authored-attestation-action`은 action source에서 pair pre-pin→기존 single-subject evidence exact
+once→기존 single-subject manifest exact once→pair final fence와 output 순서를 고정하고, nested action이 pinned single-subject
+component 이외의 `actions/attest` 또는 외부 action을 직접 선택하지 못하게 한다. actual filesystem helper 행은 canonical pair 성공,
+두 subject 중 어느 하나의 중간 mutation, directory pathname replacement와 extra/missing entry, wrong owner/mode, swapped role/name,
+relative·control path, symlink·hardlink·directory·empty/oversized bundle, preparation 하위 bundle,
+subject/bundle pathname·inode alias와 partial output 0을 Linux·macOS에서 검증한다. bundle 상한 literal은
+`release_adapter_attestation_bundle_contract.max_bytes`와 gate에서 함께 비교해 shell/Zig SSOT drift를 막는다. 모든 fixture는 harness-owned `mkdtemp` 아래에만
+있고 실제 앱 session-host registry·manifest·socket·process와 GitHub release/credential을 찾거나 수정하지 않는다. 이 slice는
+stage-4 pair action과 locator handoff만 닫으며 retained stage-3 semantic reopen, current draft 재인증, bundle cryptographic binding,
+aggregate prepare/finalize 삽입, live workflow 배선과 frozen signed U5 제품 E2E는 아직 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

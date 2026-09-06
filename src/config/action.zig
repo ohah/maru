@@ -170,6 +170,10 @@ pub const Action = union(enum) {
     jump_to_bracket,
     add_cursor_above,
     add_cursor_below,
+    column_select_up,
+    column_select_down,
+    column_select_left,
+    column_select_right,
     // 편집기의 **되돌리기·다시 하기**(§3.3 — 선형 스택, 연속 타이핑은 한 묶음).
     //
     // **기본 chord가 없다** — `⌘Z`는 터미널·웹 편집기 컨텍스트가 이미 쓰고, 편집기 Term 컨텍스트가
@@ -285,6 +289,10 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "jump_to_bracket")) return .jump_to_bracket;
     if (std.mem.eql(u8, value, "add_cursor_above")) return .add_cursor_above;
     if (std.mem.eql(u8, value, "add_cursor_below")) return .add_cursor_below;
+    if (std.mem.eql(u8, value, "column_select_up")) return .column_select_up;
+    if (std.mem.eql(u8, value, "column_select_down")) return .column_select_down;
+    if (std.mem.eql(u8, value, "column_select_left")) return .column_select_left;
+    if (std.mem.eql(u8, value, "column_select_right")) return .column_select_right;
     if (std.mem.eql(u8, value, "editor_undo")) return .editor_undo;
     if (std.mem.eql(u8, value, "editor_redo")) return .editor_redo;
     if (std.mem.eql(u8, value, "editor_save")) return .editor_save;

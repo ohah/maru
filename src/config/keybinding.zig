@@ -335,6 +335,13 @@ pub const default_app_bindings = [_]AppBinding{
     // 터미널에서 눌러도 전과 같고, Cmd 를 끼므로 터미널 Meta 입력을 안 뺏는다.
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '\\' } }, .action = .jump_to_bracket },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '|' } }, .action = .jump_to_bracket },
+    // Shift+Opt+Cmd+방향키: 열/블록 선택 확장(§3.2a). **전역 표에 둔다** — `⌘` 를 끼므로 터미널 Meta 를
+    // 안 뺏고(그것이 편집기 Term 컨텍스트가 필요한 유일한 조건이다), 액션 자신이 편집기가 아니면
+    // 거절한다. 이 조합은 기본 표에 **0개**였다(실측) — 뺏을 것이 없다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true, .shift = true }, .key = .arrow_up }, .action = .column_select_up },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true, .shift = true }, .key = .arrow_down }, .action = .column_select_down },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true, .shift = true }, .key = .arrow_left }, .action = .column_select_left },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true, .shift = true }, .key = .arrow_right }, .action = .column_select_right },
     // Cmd+1~9: N번째 워크스페이스(사이드바 탭)로 바로 전환(select_tab은 0-based라 N-1). 범위 밖이면 switchTab이
     // no-op. 브라우저/터미널 공통 관습(베이스: Safari/Terminal.app/iTerm2의 Cmd+숫자 탭 전환). 숫자 키는
     // normalizeEventChar가 안 fold하고 Swift가 char로 그대로 줘 그대로 매칭된다. 모디파이어 정확 비교.

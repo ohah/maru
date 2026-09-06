@@ -1893,6 +1893,14 @@ const TermRuntime = struct {
     /// **문서 순서로 정렬돼 있지 않다**(추가된 순서다). 정렬이 필요한 소비처(복사 — §3.4)가
     /// 그 자리에서 정렬한다.
     editor_extra_selections: []maru.session.editor.selection.Selection = &.{},
+    /// 열/블록 선택의 **단수 원본**(§3.2a) — 진행 중인 사각형. 결과는 위 두 필드에 파생으로 들어간다.
+    ///
+    /// **`Selections.column` 과 같은 값을 제품 자리에 둔다.** L2 구조체는 편집할 때 임시로 조립했다가
+    /// `writeBackSelections` 가 두 필드로 내려쓰는 것이라 **드래그 사이에 살아남지 못한다**(실측).
+    /// 생명주기는 selection 과 같으므로 나란히 선다.
+    ///
+    /// **행은 문서 기준 시각 행이다** — 뷰포트 기준이 아니다(자동 스크롤이 붙으므로).
+    editor_column_anchor: ?maru.session.editor.selection.ColumnAnchor = null,
     /// 위 선택을 **줄별 byte 범위**로 자른 것(렌더가 요구하는 축). 화면 밖 줄은 빈 슬라이스다.
     /// 문서 줄 수만큼 한 번 잡고 재사용한다 — `editor_hit_rows`와 같은 관례다.
     editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
@@ -9408,6 +9416,10 @@ pub const AppSession = struct {
                 pane_ops.activePane(self).activeTerm(),
                 true,
             ),
+            .column_select_up => _ = editor_ops.columnSelectStep(self, pane_ops.activePane(self).activeTerm(), .up),
+            .column_select_down => _ = editor_ops.columnSelectStep(self, pane_ops.activePane(self).activeTerm(), .down),
+            .column_select_left => _ = editor_ops.columnSelectStep(self, pane_ops.activePane(self).activeTerm(), .left),
+            .column_select_right => _ = editor_ops.columnSelectStep(self, pane_ops.activePane(self).activeTerm(), .right),
             .jump_to_bracket => _ = editor_ops.moveCarets(
                 self,
                 pane_ops.activePane(self).activeTerm(),
@@ -13135,7 +13147,7 @@ pub const AppSession = struct {
                         self.mouse_drag_selecting = false;
                         return;
                     }
-                    if (editor_ops.beginBodySelection(self, pane, x_px, y_px)) {
+                    if (editor_ops.beginBodySelection(self, pane, x_px, y_px, mods)) {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false; // 터미널 선택이 아니다 — 소유자가 다르다

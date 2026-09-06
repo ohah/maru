@@ -1371,14 +1371,15 @@ pub fn build(b: *std.Build) void {
     }
     // **AppSession 스위트는 같은 바이너리를 인덱스 mod N 샤드로 N 개 프로세스에 나눠 병렬로 돈다.** 4,557개를 한
     // 프로세스에서 직렬로 돌면 CI(macos-15, 3 vCPU)에서 355초였고 file explorer 잡의 임계 경로였다(실측 2026-09-06,
-    // 판정자별 CI 시간으로 4샤드를 시뮬레이션하면 94초, 3코어 CPU 상한은 118초). 컴파일은 한 번이고, 러너의 pid 루트
-    // 격리가 샤드마다 다른 session-host 네임스페이스를 준다.
+    // 3코어 CPU 상한은 118초). 컴파일은 한 번이고, 러너의 pid 루트 격리가 샤드마다 다른 session-host 네임스페이스를 준다.
+    // **왜 3인가**: 4샤드(#3307)에서 스텝 172초였지만 코어보다 프로세스가 많아 경합이 생겼고, 반복 횟수로 워커를 기다리는
+    // 판정자(`spins < 200_000`)가 부하에서 흔들렸다(2026-09-06 IG14 플레이크). 코어당 하나로 맞춘다.
     //
     // **왜 run 스텝 넷이 아니라 래퍼 하나인가**: Zig 0.16 빌드 러너는 stdio 를 물려받는 run 스텝을 돌리는 동안 stderr
     // 잠금을 자식이 끝날 때까지 쥔다(`std/Build/Step/Run.zig` `spawnChildAndCollect` 의 `lockStderr`). run 스텝을 넷
     // 만들면 **전역 직렬**이다 — PR #3302 의 CI 에서 샤드 넷이 80초 간격으로 차례로 끝났다. 병렬은 스텝 하나 안에서
     // `tools/run-test-shards.sh` 가 한다. fresh 프로세스 판정자들은 그 스텝 뒤에 돈다(아래).
-    const macos_app_host_abi_shards: usize = 4;
+    const macos_app_host_abi_shards: usize = 3;
     const run_macos_app_host_abi_shards = b.addSystemCommand(&.{"/bin/sh"});
     run_macos_app_host_abi_shards.addFileArg(b.path("tools/run-test-shards.sh"));
     run_macos_app_host_abi_shards.addArg(b.fmt("{d}", .{macos_app_host_abi_shards}));

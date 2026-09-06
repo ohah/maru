@@ -3810,6 +3810,75 @@ attestation suffix와 local cleanup을 각각 측정하며, opt-in frozen signed
 않는다. 이 slice는 current published asset-ID 재인증까지만 닫으며 executable cleanup command, workflow stage 8과 frozen signed
 U5 E2E를 대신하지 않는다.
 
+### 11.69 stage-8 executable cleanup command와 구간 실측
+
+`maru-session-host-release-validator cleanup-candidate-aggregate`는 §11.52 단계 8을 실행하는 유일한 command다. closed
+option은 공통 `--repo`, `--tag`, `--github-cli`, `--github-cli-sha256`와 canonical absolute `--aggregate`, `--dmg`,
+`--frozen-executable`, `--manifest`뿐이며 release ID,
+asset ID, tomb·intent·completion pathname, 진행 suffix, 성공 boolean 또는 측정값을 받지 않는다. protected bootstrap이
+repository/tag/source/run-attempt, GitHub-hosted runner와 checkout 전에 pin한 CLI를 먼저 결속하고, command-owned final-address
+`Execution`이 이후 분기와 모든 local owner 정산을 소유한다.
+
+command는 token을 읽기 전에 `release_adapter_candidate_aggregate_cleanup_recovery.zig`의 mutation-free `classify()`로 durable
+state를 삼분한다. `recoverable`은 checksum과 protected context에 맞는 intent 또는 completion이 있다는 뜻이며 곧바로
+`recover()`만 실행한다. 이 경로는 제품 `ReopenedAggregate`를 만들거나 `GH_TOKEN`을 읽거나 GitHub/attestation child를 실행하지
+않으며, recovery가 exact intent/tomb/completion을 검증하기 위해 여는 local descriptor만 허용한다.
+`initial`은 original aggregate만 있고 derived intent·completion·tomb이 모두 없다는 뜻이다. 이때만 aggregate와 세 external
+artifact를 no-follow로 reopen하기 전에 단일 positive monotonic `Deadline`을 시작한다. reopen이 성공한 뒤에만 token을 exact once
+읽어 같은 deadline 아래 §11.68 `authenticateUntil()`을 실행한 뒤, 같은
+process의 sealed `VerifiedRelease`를 §11.67 `begin()`에 넘긴다. `audit_required`는 missing-all, ambiguous original/tomb,
+corrupt·foreign record/completion, context/path identity drift 또는 completion과 pathname의 모순이며 token read, GitHub call,
+rename과 unlink가 모두 0이다. 분류는 삭제 permit이 아니므로 `recover()`와 `begin()`이 각각 durable state와 no-replace intent
+publication을 다시 검증한다. 분류 뒤 경합은 성공으로 추측하지 않고 audit 또는 durable cleanup retry로 닫는다.
+
+```mermaid
+flowchart TD
+    A[Bootstrap cleanup-candidate-aggregate] --> B[Classify derived durable cleanup state]
+    B -->|recoverable| C[Recover without token or GitHub]
+    B -->|initial| F[Start one absolute Deadline]
+    F --> D[Reopen and full-fence aggregate]
+    D --> E[Read GH_TOKEN exact once]
+    E --> G[Authenticate current published assets]
+    G --> H[Begin durable cleanup with VerifiedRelease]
+    B -->|audit_required| I[Return audit_required without mutation]
+    C --> J[Settle Recovery and command owners]
+    H --> J
+    I --> J
+    J --> L{Outcome is success}
+    L -->|yes| K[Emit timing record and success]
+    L -->|no| M[Emit closed failure outcome only]
+```
+
+initial 경로는 verified receipt를 command 밖으로 게시하지 않으며 `begin()` 반환 뒤 receipt와 deadline을 정리한다. 재인증 전 실패는
+aggregate를 보존하는 `audit_required`다. intent가 durable해진 뒤의 local 실패는 release 성공을 취소하지 않는
+`cleanup_required`이고 다음 invocation이 credential-free recovery를 계속할 수 있다. descriptor close 불확실성은
+일반 `audit_required`로 뭉개지 않고 `descriptor_close_failed`로 보존한다. command의 closed stderr/outcome은 각각
+`success|audit_required|cleanup_required|descriptor_close_failed` 한 줄과 `0|21|22|23`이며 shell은 pathname 존재나 exit code를
+다른 결과로 보정하지 않는다. validator argument 수집·parse·bootstrap 실패도 command token이 식별된 뒤에는
+`audit_required`로 닫는다.
+
+command는 성공 권위와 분리된 canonical compact JSON
+`maru.session-host-release-cleanup-command-perf.v1` 한 줄을 stdout에 쓴다. key 순서는 `schema`, `sample`, `classification_ns`,
+`first_lookup_ns`, `attestation_ns`, `final_lookup_ns`, `cleanup_ns`, `total_ns`다. 실제 production
+invocation은 `sample=live`이고 각 duration은 protected bootstrap이 끝난 뒤 stage-8 `Execution`이 시작한 시점부터의
+`CLOCK_MONOTONIC` 구간 실측이다. 따라서 `total_ns`는 process startup·argument 수집·bootstrap pinning과 stdout write를 포함하지
+않는다. §11.68 owner가 caller-owned
+timing observer를 first fetch, attestation suffix, final fetch의 실제 호출 둘레에서 채우며 command가 전체 시간에서 추정해
+분배하지 않는다. observer는 권위 입력이나 seal에 들어가지 않고 실패 시 성공 표본으로 게시되지 않는다. recovery 경로는 호출하지 않은
+GitHub 세 구간을 숫자 0으로 성공처럼 기록하지 않고 `null`로 쓴다. 실패 invocation은 성공 표본을 게시하지 않는다. focused
+fixture는 `sample=injected`만 허용하며 live 통계와 합치지 않는다. duration은 삭제 permit, workflow event,
+release evidence 또는 latency budget에 들어가지 않는다. frozen signed U5 gate는 실제 GitHub-issued release에서 나온 `live` 행만
+수집하고, 표본이 없으면 명시적으로 `no_live_sample`로 실패한다.
+
+focused gate `test-session-host-release-adapter-candidate-published-cleanup-command`는 closed contract/bootstrap/dispatch,
+mutation-free 삼분류, recoverable·completion 경로의 token/GitHub/reopen 0, initial 경로의 single deadline→reopen→token→두
+published lookup과 attestation→durable begin 순서, 같은 deadline 주소, 모든 outcome/exit/stderr, owner·path·token·response alias와
+cleanup retry를 Debug·ReleaseFast에서 검증한다. 실제 삭제·fresh-process recovery와 그 구간 실측은 §11.67의
+`test-session-host-release-adapter-candidate-aggregate-cleanup-recovery`가 harness-owned `mkdtemp` 아래만 aggregate와 durable
+record를 만들어 검증하며, 실제 앱 session-host registry·manifest·socket·process를 찾거나 수정하지 않는다. command의 injected timing formatter gate는 key
+순서, `live|injected`, nullable 구간과 nonnegative duration을 byte 단위로 검증한다. 실제 GitHub 성공 표본과
+`.github/workflows/release.yml` stage-8 event 배선은 frozen signed U5 gate가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

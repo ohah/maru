@@ -1224,6 +1224,15 @@ ReleaseFast 20회 injected aggregate source부터 재인증 reducer 전체는 me
 진단값으로 남기지만 actual filesystem reopen 비용, 실제 GitHub latency나 frozen signed U5 성공의 증거가 아니다. executable cleanup command, live workflow stage 8과 frozen signed U5 E2E는
 후속 경계다.
 
+U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
+token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
+호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published
+asset을 재인증한 뒤 durable `begin()`을 호출한다. `test-session-host-release-adapter-candidate-published-cleanup-command`는 이
+ordering과 credential-free recovery, 분류 뒤 경합의 mutation 0, closed `0|21|22|23` 결과, owner/alias/cleanup 수명을
+Debug·ReleaseFast에서 고정한다. canonical perf JSON은 production `live`와 fixture `injected`를 분리하고 호출하지 않은 원격 구간을
+`null`로 보존하고 재인증 owner의 observer가 두 fetch와 attestation의 실제 호출 둘레를 잰다. harness-owned private root만 사용하므로 실제 앱 session-host 상태나 GitHub release/credential을 건드리지
+않는다. 실제 GitHub-issued `live` 표본과 workflow stage-8 reducer event, frozen signed U5 E2E는 live release gate의 증거다.
+
 U5 exact draft asset redownload는 ready `DraftAuthority`·`DraftAssets`와 candidate/authored attestation, canonical held manifest 및 네 held
 file authority에서만 exact GitHub asset ID와 expected name/size/SHA를 유도한다. `test-session-host-release-adapter-draft-redownload`는
 DMG→frozen executable→evidence→manifest exact request 순서, clean token environment, body 비저장 bounded streaming count/SHA, shared

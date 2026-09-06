@@ -1006,6 +1006,12 @@ int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t fo
 /* 세팅 등 chrome 오버레이/keybind 녹음 열림(1) — Swift performKeyEquivalent가 메뉴바 keyEquivalent를 양보할지 판정
    (1이면 ⌘조합을 keyDown 경로로 보내 모달 입력 차단·chord 녹음이 동작). */
 int32_t maru_macos_app_session_any_overlay_open(MaruAppHostSession *session);
+
+/* 이 chord 를 편집기 컨텍스트가 소유하는가 — 1이면 Swift performKeyEquivalent 가 메뉴바
+   keyEquivalent 를 양보하고 키를 keyDown 으로 보낸다(docs/key-input-and-shortcuts.md
+   「메뉴 keyEquivalent 층」). 부작용 없음. */
+int32_t maru_macos_app_session_editor_owns_chord(MaruAppHostSession *session,
+                                                 const MaruAppHostKeyEvent *event);
 /* WKWebView typed key route: 0=pass-through, 1=app-action, 2=consume-unbound, 3=web-editor. side-effect와 PTY
    write 없이 같은 Zig resolver의 provenance를 반환한다. unknown은 Swift가 consume하고 null/event 변환 실패는
    pass-through다. v132가 옛 v100 Bool app-action 조회를 대체한다. */

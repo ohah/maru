@@ -16609,6 +16609,30 @@ pub const AppSession = struct {
     /// action_key(= parseAction 문자열) 한 개를 실행한다 — 메뉴/팝업 선택의 디스패치 경로. 파싱되면
     /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
     /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
+    /// **이 chord 를 편집기 컨텍스트가 소유하는가** — Swift `performKeyEquivalent` 가 메뉴바
+    /// keyEquivalent 를 양보할지 묻는 자리다([키 입력과 단축키](../../../docs/key-input-and-shortcuts.md)
+    /// 「메뉴 keyEquivalent 층」).
+    ///
+    /// **부작용이 없다.** `any_overlay_open` 과 같은 부류의 질의이고, 매 key equivalent 마다 불린다.
+    ///
+    /// **참이 되는 조건은 좁다** — 넓히면 편집기에서 메뉴 단축키가 통째로 죽는다:
+    /// - 활성 Term 이 편집기여야 한다(터미널에서는 늘 거짓이다).
+    /// - **`editor_context_bindings` 가 이겨야** 한다. 사용자 rebind·terminal macro·unbind 가 먼저
+    ///   이기면 컨텍스트는 진 것이라 **양보하면 안 된다**.
+    /// - 비교 뷰에서 `needs_editable` 인 것은 컨텍스트가 지므로 역시 거짓이다 — 그래야 `⌘D` 가
+    ///   비교 뷰에서 **좌우 분할**로 남는다.
+    ///
+    /// 그 셋을 한꺼번에 만족시키는 것이 `resolveEditorDetailed` 의 `.editor_context_action` 이다.
+    pub fn editorOwnsChord(self: *AppSession, event: terminal.KeyEvent) bool {
+        if (!self.surface_initialized) return false;
+        const active = pane_ops.activePane(self).activeTerm();
+        if (active.kind != .editor) return false;
+        // **편집 키 경로와 같은 `is_diff` 산출식이다** — 다른 것을 쓰면 두 층이 갈린다.
+        const is_diff = active.rt.editor_diff != null;
+        return self.loaded_config.keyBindingResolver()
+            .resolveEditorDetailed(event, is_diff) == .editor_context_action;
+    }
+
     pub fn runAction(self: *AppSession, action_key: []const u8) bool {
         // 모달/오버레이(세팅·confirm·notice·palette·find·context_menu)가 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서
         // 잡아 이 경로로 보낸다)를 무시한다 — 모달 중 단축키(⌘T 등)가 뒤의 터미널을 조작하거나, keybind 녹음할 chord를

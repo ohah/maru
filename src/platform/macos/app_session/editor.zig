@@ -17222,6 +17222,68 @@ test "OW9 제품 마우스 경로가 ⌥ 와 클릭 수를 편집기까지 넘�
     try testing.expectEqual(editor_selection.AnchorKind.line, term.rt.editor_selection.?.kind);
 }
 
+test "EMK3 편집기가 소유한 chord 만 메뉴를 양보시킨다 (메뉴 keyEquivalent 층)" {
+    // **제품 질의를 잰다.** `EMK1` 은 resolver 를, 이것은 「활성 Term 이 편집기인가」와 가드까지 묶은
+    // 답을 잰다 — 그 둘이 갈리면 터미널에서 메뉴 단축키가 죽거나 편집기에서 계속 안 산다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term; // 픽스처가 이미 편집기를 연다
+    fx.session.surface_initialized = true;
+
+    const cmd_d: maru.terminal.KeyEvent = .{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } };
+    const cmd_t: maru.terminal.KeyEvent = .{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } };
+    const opt_z: maru.terminal.KeyEvent = .{ .key = .{ .char = 'z' }, .modifiers = .{ .option = true } };
+
+    // ⑴ **편집기에서는 컨텍스트 chord 가 참이다** — 이것이 `⌘D` 를 살리는 답이다.
+    try testing.expect(fx.session.editorOwnsChord(cmd_d));
+    try testing.expect(fx.session.editorOwnsChord(opt_z));
+    // **전역 전용은 거짓** — `⌘T` 는 편집기에서도 새 탭이어야 한다. 참을 남발하면 편집기에서
+    // 메뉴 단축키가 통째로 죽는다.
+    try testing.expect(!fx.session.editorOwnsChord(cmd_t));
+
+    // ⑵ **비교 뷰에서 `⌘D` 는 거짓이다** — 그래야 메뉴가 그대로 먹어 좌우 분할이 남는다(§편집기 Term
+    //    컨텍스트). `⌥Z`(랩)는 비교에서도 뜻이 있어 참으로 남는다 — **둘이 갈리는 것이 요점이다.**
+    term.rt.editor_diff = .{};
+    try testing.expect(!fx.session.editorOwnsChord(cmd_d));
+    try testing.expect(fx.session.editorOwnsChord(opt_z));
+    term.rt.editor_diff = null;
+
+    // ⑶ **편집기가 아니면 거짓이다.** 같은 Term 을 터미널로 바꿔 잰다 — 이 가드가 없으면
+    //    터미널에서 `⌘D` 가 화면을 못 나눈다.
+    const saved_kind = term.kind;
+    term.kind = .terminal;
+    try testing.expect(!fx.session.editorOwnsChord(cmd_d));
+    try testing.expect(!fx.session.editorOwnsChord(opt_z));
+    term.kind = saved_kind;
+
+    // ⑷ **surface 가 아직 안 섰으면 거짓이다.** 그때는 키 경로 자체가 안 도므로 양보할 이유가 없다.
+    fx.session.surface_initialized = false;
+    try testing.expect(!fx.session.editorOwnsChord(cmd_d));
+    fx.session.surface_initialized = true;
+    try testing.expect(fx.session.editorOwnsChord(cmd_d)); // 되돌리면 다시 참(대조군)
+}
+
+test "EMK4 팔레트가 편집기 컨텍스트 chord 를 보여 준다 (발견성)" {
+    // 키가 살아나도 팔레트가 **「단축키 없음」**이라고 말하면 사용자는 그 키를 못 찾는다(실측으로
+    // 그랬다 — `chordForAction` 이 컨텍스트 표를 안 봤다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const resolver = maru.config.KeyBindingResolver{};
+    const d = command_catalog.chordForAction(resolver, .add_next_occurrence) orelse return error.NoChord;
+    try testing.expect(d.modifiers.command and !d.modifiers.option and !d.modifiers.shift);
+    try testing.expectEqual(@as(u21, 'D'), d.key.char);
+
+    const z = command_catalog.chordForAction(resolver, .toggle_editor_wrap) orelse return error.NoChord;
+    try testing.expect(z.modifiers.option and !z.modifiers.command);
+
+    // **전역 액션은 그대로다** — 컨텍스트 표를 먼저 본다고 전역이 가려지면 안 된다.
+    const split = command_catalog.chordForAction(resolver, .split_horizontal) orelse return error.NoChord;
+    try testing.expectEqual(@as(u21, 'D'), split.key.char);
+    try testing.expect(split.modifiers.command);
+}
+
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {
     // **`AnchorKind`가 있는 이유를 재는 테스트다.** anchor가 점이면 단어를 잡고 뒤로 끌 때 그
     // 단어가 잘린다 — `selection.zig` 머리말이 anchor를 **범위**로 둔 근거가 그것이다.

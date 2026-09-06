@@ -113,9 +113,22 @@ pub const ReopenedAggregate = struct {
         };
     }
 
+    pub fn fence(self: *const @This()) Error!View {
+        if (self.phase != .verified) return error.InvalidOwner;
+        try self.fenceInternal();
+        return self.value() orelse error.InvalidOwner;
+    }
+
     pub fn close(self: *@This()) Error!void {
         if (self.value() == null) return error.InvalidOwner;
         try self.fenceInternal();
+        self.phase = .closed;
+        self.seal = metadataSeal(self);
+        try self.closeDescriptors(false);
+    }
+
+    pub fn deinit(self: *@This()) Error!void {
+        if (self.owner != self or self.phase != .verified) return error.InvalidOwner;
         self.phase = .closed;
         self.seal = metadataSeal(self);
         try self.closeDescriptors(false);
@@ -232,6 +245,23 @@ pub fn openAndVerify(
     var cli_impl = RealCli{};
     var verifier = RealVerifier{};
     return openAndVerifyUsing(&cli_impl, &verifier, &executor, &deadline, allocator, context, paths, cli, output, result);
+}
+
+pub fn openAndVerifyUntil(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    context: context_mod.Context,
+    paths: Paths,
+    cli: Cli,
+    output: []u8,
+    deadline: *deadline_mod.Deadline,
+    result: *ReopenedAggregate,
+) Error!void {
+    _ = try deadline.remaining();
+    var executor = attestation.BoundedExecutor{ .io = io };
+    var cli_impl = RealCli{};
+    var verifier = RealVerifier{};
+    return openAndVerifyUsing(&cli_impl, &verifier, &executor, deadline, allocator, context, paths, cli, output, result);
 }
 
 pub fn openAndVerifyWith(

@@ -899,7 +899,10 @@ int32_t maru_macos_app_session_jump_prompt(
     int32_t dir
 );
 /* 마우스 선택(셀렉션) 또는 mouse reporting. kind 1=down 2=drag 3=up 4=더블클릭(단어) 5=트리플클릭(논리 줄).
-   button 0=left 1=middle 2=right(셀렉션은 left만 의미). mods 비트(xterm): 4=shift 8=meta/alt 16=ctrl.
+   button 0=left 1=middle 2=right(셀렉션은 left만 의미). mods 비트(xterm): 4=shift 8=meta/alt 16=ctrl 32=command.
+   command(32)는 xterm 표준 밖이다 — 사이드바 그룹 드래그의 "Cmd=중첩/없으면 형제" 판정에 쓰고, 터미널
+   마우스 리포트로 갈 때는 Zig가 그 비트를 마스킹해 뺀다(SGR motion 비트 32와 충돌해 cb=button+mods+motion이
+   오염된다). Swift 쪽 modsBits가 같은 넷을 세운다.
    mouse tracking(DECSET 1000~1003)이 켜졌고 shift 미포함이면 셀렉션 대신 앱에 SGR/x10 리포트한다 —
    shift+click은 xterm 관례대로 셀렉션 override. 좌표는 backing 픽셀(좌상단 원점), 셀 변환은 Zig가 한다. */
 int32_t maru_macos_app_session_mouse(

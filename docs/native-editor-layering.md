@@ -438,7 +438,7 @@ are not thread safe"*, 여러 스레드가 동시에 쓰려면 `ts_tree_copy`가
 **무엇을 공유하고 무엇이 독립인가**:
 
 - **공유(문서가 하나다)**: 버퍼·undo/redo 스택·revision·**dirty**. 한쪽에서 편집하면 다른 쪽에 즉시 보이고, 어느 Term에서 저장해도 같은 문서가 저장된다. dirty 표시는 두 탭에 함께 뜬다.
-- **독립(뷰 상태다)**: selection·caret·스크롤·랩 토글·접힘 상태.
+- **독립(뷰 상태다)**: selection·caret·**열 선택 원본**·스크롤·랩 토글·접힘 상태.
 - **닫기**: 뷰 하나를 닫아도 다른 뷰가 남아 있으면 문서는 살아 있으므로 **dirty 확인을 하지 않는다.** 마지막 뷰를 닫을 때만 [file-panel.md](file-panel.md)의 dirty 게이트가 걸린다.
 - **소유자**: 경로 → 문서 하나의 매핑은 [editor-surface.md](editor-surface.md) §4의 **app-global `DocumentRegistry`**가 이미 그 자리다("여러 창이 같은 파일을 열 때 identity를 하나로 묶는 건 창 위 계층이어야 한다"). 이 결정은 그 설계와 새로 충돌하지 않는다.
 

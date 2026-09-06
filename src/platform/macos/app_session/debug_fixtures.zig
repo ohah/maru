@@ -1518,6 +1518,10 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
         }
     }
     const op = std.mem.span(raw);
+    // **드래그는 렌더가 기하를 굳힌 뒤라야 좌표를 만들 수 있다**(§4.1g). 첫 tick 에는 아직 0 이므로
+    // `done` 을 안 세우고 그냥 돌아가 다음 tick 에 다시 온다 — 여기서 세우면 기회가 한 번뿐이라
+    // 캡처가 조용히 아무 일도 안 한 화면을 찍는다(실측으로 그랬다).
+    if (std.mem.eql(u8, op, "drag_column") and term.rt.editor_hit_geom.cell_w_px == 0) return;
     _ = if (std.mem.eql(u8, op, "indent"))
         editor_ops.indentLines(self, term, false)
     else if (std.mem.eql(u8, op, "outdent"))
@@ -1540,6 +1544,27 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
         term.rt.editor_selection = maru.session.editor.selection.Selection.fromAnchorRange(0, 5, 5, .word);
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
         _ = self.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }) catch {};
+        break :blk true;
+    } else if (std.mem.eql(u8, op, "drag_column")) blk: {
+        // **열/블록 선택을 화면으로 본다**(§3.2a). `⌥` 를 끼고 down→drag→up 을 흘려 사각형을 끈다 —
+        // 판정자는 문서 byte 를 재지 화면을 안 재므로, 사각형이 실제로 그 자리에 그려지는지는 이것만
+        // 답한다. 좌표는 렌더가 굳힌 기하에서 뽑는다(§4.1g — live 로 다시 구하면 프레임이 갈린다).
+        const g = term.rt.editor_hit_geom;
+        if (g.cell_w_px == 0 or g.cell_h_px == 0) break :blk false;
+        // **`hitTestBody` 가 받는 것과 같은 좌표계**다 — 그 함수가 `geom.body_x`·`body_y` 를 그대로
+        // 쓰므로 여기서도 그 값에 셀 배수를 더한다(pane 사각을 따로 구하면 프레임이 갈린다).
+        const x0: f64 = @as(f64, @floatFromInt(g.body_x)) +
+            @as(f64, @floatFromInt(g.content_left_px)) +
+            @as(f64, @floatFromInt(4 * @as(u32, g.cell_w_px)));
+        const y0: f64 = @as(f64, @floatFromInt(g.body_y)) + @as(f64, @floatFromInt(g.cell_h_px));
+        const x1 = x0 + @as(f64, @floatFromInt(6 * @as(u32, g.cell_w_px)));
+        const y1 = y0 + @as(f64, @floatFromInt(3 * @as(u32, g.cell_h_px)));
+        // **편집기 연산을 직접 부른다.** `self.mouse` 는 헤드리스에서 pane 라우팅이 안 걸려 아무 일도
+        // 안 한다(실측 — 화면이 base 와 똑같았다). 이 훅이 증명할 것은 **사각형이 화면에 그려지는가**
+        // 이고, 마우스 라우팅은 `COL6` 이 down·drag·up 으로 이미 잰다.
+        const pane = pane_ops.activePane(self);
+        if (!editor_ops.beginBodySelection(self, pane, x0, y0, 8)) break :blk false;
+        _ = editor_ops.dragBodySelection(self, 2, x1, y1);
         break :blk true;
     } else if (std.mem.eql(u8, op, "key_add_cursor")) blk: {
         // **`⌥⌘↓` 가 커서를 늘리는지 화면으로 본다**(§3.2b). 키 경로로 지나야 chord 가 **전역

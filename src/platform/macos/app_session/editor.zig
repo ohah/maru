@@ -31,6 +31,7 @@ const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
 const editor_selection = maru.session.editor.selection;
 const editor_motion = maru.session.editor.motion;
+const editor_column = maru.session.editor.column;
 const editor_pairs = maru.session.editor.pairs;
 const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
@@ -3471,7 +3472,43 @@ fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.
 /// **잡은 Term을 든다.** 드래그가 pane을 벗어나거나 포커스가 옮겨져도 그 문서가 선택된다(스크롤바
 /// 드래그가 같은 규율을 쓴다). 좌표가 본문 밖으로 나가면 `hitTestBody`가 clamp한 offset을 주므로
 /// 호출자가 분기를 더 지지 않는다(§10 *"항상 유효한 offset"*).
-pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+/// 화면 좌표 → **문서 기준 시각 행·열**(§3.2a의 `ColumnAnchor` 축).
+///
+/// `hitTestBody` 와 **같은 굳은 스냅숏**을 읽는다 — 다른 프레임의 값을 섞으면 사각형이 caret 과 다른
+/// 자리를 잡는다(§4.1g). 행은 **문서 기준**이라야 자동 스크롤 중에도 안 미끄러진다: `editor_hit_rows`
+/// 의 첨자는 뷰포트 상대이므로 **`editor_first_line` 을 더해** 문서 축으로 올린다.
+fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u32 } {
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null;
+    const geom = term.rt.editor_hit_geom;
+    const p = chrome_editor.hit.bodyPoint(
+        .{
+            .body_x = geom.body_x,
+            .body_y = geom.body_y,
+            .content_left_px = geom.content_left_px,
+            .content_width = geom.content_width,
+            .cell_w_px = geom.cell_w_px,
+            .cell_h_px = geom.cell_h_px,
+            .tab_width = geom.tab_width,
+        },
+        term.rt.editor_hit_rows[0..rows_len],
+        term.rt.editor_hit_lines[0..rows_len],
+        term.rt.editor_lines,
+        x_px,
+        y_px,
+    ) orelse return null;
+
+    // 줄 안 byte → 시각 열. **`columnsAtOffsets` 하나를 쓴다** — 열을 여기서 다시 세면 화면과 갈리는
+    // 두 번째 출처가 생긴다(`ColumnMap.columnOf` 가 같은 함수를 부른다).
+    const line_text = if (p.line < term.rt.editor_lines.len) term.rt.editor_lines[p.line] else "";
+    var offs = [_]u32{@intCast(@min(p.byte_in_line, line_text.len))};
+    var cols = [_]u32{0};
+    chrome_editor.content.columnsAtOffsets(line_text, geom.tab_width, &offs, &cols, std.math.maxInt(u32));
+
+    return .{ .row = @intCast(p.row + term.rt.editor_first_line), .col = cols[0] };
+}
+
+pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, mods: i32) bool {
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
@@ -3482,6 +3519,15 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     // 글자를 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다.
     breakUndoGroup(term);
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
+
+    // **`⌥` 또는 `⇧⌥` 면 열 선택이다**(§3.2a·§9.1). 앞은 터미널 관례(iTerm2·Terminal.app), 뒤는
+    // VSCode 관례이고 **둘이 같은 결과**라 설정으로 가를 것이 없다. `⌘`(32)는 링크 열기가 쓰므로
+    // 여기 안 온다.
+    term.rt.editor_column_anchor = if ((mods & 8) != 0) blk: {
+        const rc = visualRowColAt(term, x_px, y_px) orelse break :blk null;
+        break :blk .{ .from_row = rc.row, .from_col = rc.col, .to_row = rc.row, .to_col = rc.col };
+    } else null;
+
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
     return true;
@@ -3885,6 +3931,110 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
 ///
 /// **`focus`만 움직인다** — `anchor_*`는 down이 세운 자리에 남는다. 그것이 드래그 선택의 정의이고,
 /// 뒤로 끌면 `anchorLo`/`anchorHi`가 `@min`/`@max`로 읽어 범위가 뒤집히지 않는다(`Selection` doc).
+pub const ColumnStep = enum { up, down, left, right };
+
+/// 키보드로 사각형을 넓힌다 — **`from` 은 고정이고 `to` 만 움직인다**(§3.2a).
+///
+/// 시작 모서리가 따라 움직이면 그것은 넓히는 것이 아니라 **옮기는** 것이다(VSCode `columnSelectUp` 등이
+/// 전부 `from` 을 그대로 넘긴다).
+///
+/// **사각형이 없으면 지금 caret 에서 만든다** — 그래야 키만으로 열 선택을 시작할 수 있다.
+pub fn columnSelectStep(self: *AppSession, term: *Term, step: ColumnStep) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+
+    if (term.rt.editor_column_anchor == null) {
+        const sel = term.rt.editor_selection orelse return false;
+        const li = doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len));
+        const line = doc.file.lines.line(li) orelse return false;
+        const pm = productColumnMap(term);
+        const col = pm.map().columnOf(pm.map().ctx, doc.file.content[line.start..line.contentEnd()], sel.focus - line.start);
+        const row: u32 = @intCast(li);
+        term.rt.editor_column_anchor = .{ .from_row = row, .from_col = col, .to_row = row, .to_col = col };
+    }
+    var a = &term.rt.editor_column_anchor.?;
+
+    switch (step) {
+        .up => a.to_row -|= 1,
+        .down => {
+            const last: u32 = @intCast(doc.file.lines.lineCount() -| 1);
+            if (a.to_row < last) a.to_row += 1;
+        },
+        .left => a.to_col -|= 1,
+        // **오른쪽 상한은 「걸친 줄들 중 가장 긴 줄의 끝 열」이다**(VSCode `maxVisualViewColumn`).
+        // 없으면 오른쪽 키가 영원히 먹히고, 되돌리려면 그 횟수만큼 왼쪽을 눌러야 한다.
+        .right => {
+            const lo = @min(a.from_row, a.to_row);
+            const hi = @max(a.from_row, a.to_row);
+            const pm = productColumnMap(term);
+            var max_col: u32 = 0;
+            var i = lo;
+            while (i <= hi) : (i += 1) {
+                const line = doc.file.lines.line(i) orelse continue;
+                const text = doc.file.content[line.start..line.contentEnd()];
+                const c = pm.map().columnOf(pm.map().ctx, text, text.len);
+                if (c > max_col) max_col = c;
+            }
+            if (a.to_col < max_col) a.to_col += 1;
+        },
+    }
+    applyColumnSelection(self, term);
+    revealPrimaryCaret(self, term);
+    return true;
+}
+
+/// 사각형을 줄마다 selection 으로 펴서 제품 두 필드에 쓴다(§3.2a).
+///
+/// **매 프레임 다시 판다** — 결과를 누적하지 않으므로 사각형을 줄이면 커서도 줄고, 상한에 걸렸다
+/// 풀려도 복구된다("누적되지 않고 대체된다").
+fn applyColumnSelection(self: *AppSession, term: *Term) void {
+    const anchor = term.rt.editor_column_anchor orelse return;
+    const doc = term.rt.editor_doc orelse return;
+    // **랩이 꺼졌으면 스냅숏을 안 쓴다.** 그때 시각 행은 논리 줄과 1:1 이라 두 경로가 **같은 답**을
+    // 내는데, 스냅숏에 기대면 **화면 밖 줄에 커서가 안 선다** — 키보드로 넓히거나 자동 스크롤이
+    // 따라오기 전에는 그 행이 스냅숏에 없기 때문이다. `movedVisualRow` 가 같은 이유로 랩이 꺼지면
+    // 논리 줄 경로로 떨어진다.
+    const wrapped = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (wrapped and rows_len == 0) return; // 랩인데 그린 것이 없다 — 조각을 알 길이 없다
+
+    // **`to_row` 에서 시작해 `from_row` 쪽으로** 모은다 — 그 순서가 곧 상한에서 살아남는 쪽이다.
+    var rows: std.ArrayList(editor_column.Row) = .empty;
+    defer rows.deinit(self.allocator);
+    const first = term.rt.editor_first_line;
+    const step: i64 = if (anchor.from_row > anchor.to_row) 1 else -1;
+    var r: i64 = @intCast(anchor.to_row);
+    const end: i64 = @as(i64, @intCast(anchor.from_row)) + step;
+    while (r != end) : (r += step) {
+        if (r < 0) break;
+        const abs: usize = @intCast(r);
+        const line_idx: usize = if (wrapped) blk: {
+            if (abs < first or abs - first >= rows_len) continue; // 랩: 스냅숏 밖은 조각을 모른다
+            break :blk term.rt.editor_hit_lines[abs - first];
+        } else abs;
+        const line = doc.file.lines.line(line_idx) orelse continue;
+        const text = doc.file.content[line.start..line.contentEnd()];
+        rows.append(self.allocator, .{ .start = line.start, .text = text }) catch break;
+    }
+    if (rows.items.len == 0) return;
+
+    const cap = @min(rows.items.len, editor_selection.max_cursors);
+    const buf = self.allocator.alloc(editor_selection.Selection, cap) catch return;
+    defer self.allocator.free(buf);
+    const pm = productColumnMap(term);
+    const n = editor_column.derive(rows.items, anchor, pm.map(), buf);
+    if (n == 0) return;
+
+    // primary 는 **끌고 있는 쪽** — 첫 항목이 `to_row` 다(§3.2a).
+    const extras = self.allocator.alloc(editor_selection.Selection, n - 1) catch return;
+    @memcpy(extras, buf[1..n]);
+    if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = buf[0];
+    self.metal_dirty = true;
+}
+
 pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) bool {
     const owner = switch (self.pointer_gesture_owner) {
         .editor_selection => |g| g,
@@ -3904,6 +4054,16 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                 // SEL5가 잡았다 — 아래로 끌면 위로 굴리려 하고 맨 위라 clamp에 막혔다.
                 self.editor_drag_autoscroll = if (y_px < top) 1 else if (y_px > bottom) -1 else 0;
                 if (self.editor_drag_autoscroll == 0) self.editor_drag_autoscroll_accum_ms = 0;
+            }
+            // **열 선택이면 사각형을 늘리고 파생한다**(§3.2a) — 아래 「잡은 단위로 늘어난다」 갈래는
+            // 단일 selection 의 focus 를 미는 것이라 사각형과 축이 다르다.
+            if (owner.term.rt.editor_column_anchor != null) {
+                if (visualRowColAt(owner.term, x_px, y_px)) |rc| {
+                    owner.term.rt.editor_column_anchor.?.to_row = rc.row;
+                    owner.term.rt.editor_column_anchor.?.to_col = rc.col;
+                    applyColumnSelection(self, owner.term);
+                }
+                return true;
             }
             const off = hitTestBody(owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
             if (owner.term.rt.editor_selection) |*sel| {
@@ -6290,7 +6450,27 @@ fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
     // 쓰므로, 레벨 접기를 갈아 끼웠을 때 접힌 줄 수가 우연히 같으면 주소도 길이도 그대로다 — 내용만
     // 다른 그 상태를 캐시가 "맞다"고 읽는다. 접힘을 바꾸는 곳은 여기 하나이므로 여기서 버린다.
     term.rt.editor_row_cache.filled = false;
+    // **시각 좌표를 든 것들도 여기서 죽는다**(§3.2a) — 뷰 폭·랩·접힘·탭 폭이 바뀌면 옛 시각 열은
+    // 다른 글자를 가리킨다. `goal` 과 열 원본은 **같은 사건에 함께** 죽어야 한다: 하나만 비우면
+    // 다음 세로 이동과 다음 사각형이 서로 다른 좌표계를 본다.
+    //
+    // **`setEditorTabWidth` 가 이것을 안 하고 있었다**(적대적 검증 2026-09-05 — 계약의 무효화 목록에도
+    // 탭 폭이 빠져 있었다). 접힘 층만 버리고 나가면 탭 폭 4→8 뒤의 목표 열이 옛 값 그대로다.
+    invalidateVisualCoords(term);
     self.metal_dirty = true;
+}
+
+/// 시각 열에 기댄 값을 전부 버린다 — 열 원본과 양끝 목표 열(§3.2a·§3.2).
+fn invalidateVisualCoords(term: *Term) void {
+    term.rt.editor_column_anchor = null;
+    if (term.rt.editor_selection) |*s| {
+        s.goal = .none;
+        s.anchor_goal = .none;
+    }
+    for (term.rt.editor_extra_selections) |*s| {
+        s.goal = .none;
+        s.anchor_goal = .none;
+    }
 }
 
 /// 지금 이 Term에서 접힘이 성립하지 않는가. **접기·펼치기가 여기서 거절한다.**
@@ -6402,6 +6582,8 @@ pub fn toggleWrap(self: *AppSession) bool {
     if (term.kind != .editor) return false;
     const now = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
     term.rt.editor_wrap = !now;
+    // 랩이 갈리면 시각 행·열이 통째로 바뀐다(§3.2a) — 접힘 파생과 같은 사건이다.
+    invalidateVisualCoords(term);
     // **접힘이 달라지면 시각 행 수도 달라진다.** 렌더가 센 값은 옛 랩의 것이고 스크롤 상한이 그것을
     // 읽으므로, 다시 그리기 전의 한 번을 위해 버린다(다음 프레임이 곧바로 채운다).
     term.rt.editor_total_visual_rows = 0;
@@ -12051,7 +12233,7 @@ test "SEL1 본문 클릭이 선택을 세우고, 드래그가 범위를 넓히�
     const down_x: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(3 * @as(u32, geom.cell_w_px))));
     const down_y: f64 = @floatFromInt(y0 + 1);
     const pane = pane_ops.activePane(fx.session);
-    try testing.expect(beginBodySelection(fx.session, pane, down_x, down_y));
+    try testing.expect(beginBodySelection(fx.session, pane, down_x, down_y, 0));
 
     const sel0 = term.rt.editor_selection orelse return error.NoSelection;
     try testing.expectEqual(sel0.anchor_start, sel0.focus); // 클릭만으로는 범위가 없다(caret)
@@ -12115,7 +12297,7 @@ test "SEL2 gutter와 막대 띠는 본문 선택이 가져가지 않는다 (§4.
 
     // **gutter를 눌러도 선택이 안 선다** — 줄 번호·접힘 화살표 자리다.
     const gutter_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + 1);
-    try testing.expect(!beginBodySelection(fx.session, pane, gutter_x, y));
+    try testing.expect(!beginBodySelection(fx.session, pane, gutter_x, y, 0));
     try testing.expectEqual(@as(?maru.session.editor.selection.Selection, null), term.rt.editor_selection);
 
     // **막대 띠를 눌러도 선택이 안 선다** — 막대가 먼저 가져간다.
@@ -12128,7 +12310,7 @@ test "SEL2 gutter와 막대 띠는 본문 선택이 가져가지 않는다 (§4.
     // 본문은 가져간다 — 위 둘이 항진명제가 아니라는 대조군이다.
     const geom = term.rt.editor_hit_geom;
     const text_x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 1);
-    try testing.expect(beginBodySelection(fx.session, pane, text_x, y));
+    try testing.expect(beginBodySelection(fx.session, pane, text_x, y, 0));
     try testing.expect(term.rt.editor_selection != null);
 }
 
@@ -12934,6 +13116,162 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!moveCarets(fx.session, term, .char_right, false));
     try testing.expect(!moveCarets(fx.session, term, .line_down, false));
     try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
+}
+
+test "COL4 시각 좌표를 든 것은 함께 죽는다 — 탭 폭·랩·접힘 (§3.2a)" {
+    // **`setEditorTabWidth` 가 이것을 안 하고 있었다**(적대적 검증 2026-09-05). 계약의 무효화 목록에도
+    // 탭 폭이 빠져 있었다 — 계약과 코드가 같은 구멍이었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "iv.txt", .data = "\tabc\n\tdef\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "iv.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // 사각형과 목표 열을 **둘 다** 세워 둔다 — 하나만 재면 나머지가 조용히 남는다.
+    const seed: editor_selection.ColumnAnchor = .{ .from_row = 0, .from_col = 2, .to_row = 1, .to_col = 4 };
+    term.rt.editor_column_anchor = seed;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_selection.?.goal = .{ .col = 7 };
+    term.rt.editor_selection.?.anchor_goal = .{ .col = 3 };
+
+    // ⑴ **탭 폭이 바뀌면 둘 다 죽는다.** 탭 하나가 4열이냐 8열이냐가 시각 열을 통째로 바꾼다.
+    setEditorTabWidth(fx.session, term, 8);
+    try testing.expectEqual(@as(?editor_selection.ColumnAnchor, null), term.rt.editor_column_anchor);
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.anchor_goal);
+
+    // ⑵ **랩 토글도 같은 사건이다** — 시각 행·열이 통째로 바뀐다.
+    term.rt.editor_column_anchor = seed;
+    term.rt.editor_selection.?.goal = .{ .col = 7 };
+    _ = toggleWrap(fx.session);
+    try testing.expectEqual(@as(?editor_selection.ColumnAnchor, null), term.rt.editor_column_anchor);
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
+}
+
+test "COL7 키보드 확장 — from 은 고정이고 오른쪽 상한은 가장 긴 줄이다 (§3.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "ks.txt", .data = "abcd\nef\nghij\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ks.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    _ = try fx.session.tick();
+
+    // ⑴ **사각형이 없으면 caret 에서 만든다** — 키만으로 시작할 수 있어야 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(1); // 1번 줄 1열
+    try testing.expect(columnSelectStep(fx.session, term, .down));
+    const a1 = term.rt.editor_column_anchor orelse return error.NoAnchor;
+    try testing.expectEqual(@as(u32, 0), a1.from_row);
+    try testing.expectEqual(@as(u32, 1), a1.to_row);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len); // 두 줄
+
+    // ⑵ **`from` 은 고정이다** — 또 내려도 시작 모서리가 안 따라온다(따라오면 「옮기는」 것이다).
+    _ = columnSelectStep(fx.session, term, .down);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_column_anchor.?.from_row);
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_column_anchor.?.to_row);
+
+    // ⑶ **오른쪽 상한은 걸친 줄 중 가장 긴 줄의 끝**(여기선 'abcd'·'ghij' 의 4열).
+    //    없으면 오른쪽 키가 영원히 먹혀 되돌리는 데 그만큼 왼쪽을 눌러야 한다.
+    var guard: usize = 0;
+    while (guard < 20) : (guard += 1) _ = columnSelectStep(fx.session, term, .right);
+    try testing.expectEqual(@as(u32, 4), term.rt.editor_column_anchor.?.to_col);
+
+    // ⑷ **`⇧⌥⌘` 방향키를 실제로 눌러야 그것이 도달한다**(C17·C18). resolver 와 디스패치를 안 재면
+    //    chord 를 표에서 빼도, 디스패치가 방향을 바꿔도 위 단언이 전부 초록이다.
+    {
+        const resolver = fx.session.loaded_config.keyBindingResolver();
+        var enc: [32]u8 = undefined;
+        const down: maru.terminal.KeyEvent = .{
+            .key = .arrow_down,
+            .modifiers = .{ .command = true, .option = true, .shift = true },
+        };
+        switch (try resolver.resolve(down, &enc, .{})) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.column_select_down, a),
+            else => return error.ChordNotWired,
+        }
+        // 키를 눌러 **아래로** 늘어나는지 — 디스패치가 `.up` 을 부르면 줄어든다.
+        term.rt.editor_column_anchor = .{ .from_row = 0, .from_col = 0, .to_row = 0, .to_col = 0 };
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        _ = try fx.session.handleKeyEvent(down);
+        try testing.expectEqual(@as(u32, 1), term.rt.editor_column_anchor.?.to_row);
+    }
+
+    // ⑸ **문서 끝에서 멈춘다.** 마지막 개행 뒤 빈 줄도 한 줄이라 `lineCount() - 1` 이 끝이다.
+    guard = 0;
+    while (guard < 20) : (guard += 1) _ = columnSelectStep(fx.session, term, .down);
+    const doc = term.rt.editor_doc orelse return error.NoDoc;
+    try testing.expectEqual(@as(u32, @intCast(doc.file.lines.lineCount() - 1)), term.rt.editor_column_anchor.?.to_row);
+}
+
+test "COL6 드래그 종단 — ⌥ 와 ⇧⌥ 둘 다 사각형을 세우고 커서가 는다 (§3.2a·§9.1)" {
+    // **파생만 재면 배선이 빠져도 초록이다** — `mods` 전달·좌표 변환·드래그 갱신 중 하나만 빠져도
+    // `COL1`~`COL5` 는 전부 통과한다. `MC8`·`BR6`·`AC3` 이 선 그 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "cd.txt", .data = "aaaaaaaa\nbbbbbbbb\ncccccccc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "cd.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **렌더가 스냅숏을 굳혀야 `hitTestBody` 가 답한다**(§4.1g) — `tick` 만으로는 안 선다.
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const g = term.rt.editor_hit_geom;
+    const text_x0: i32 = @as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(g.content_left_px));
+    const top_y: i32 = @as(i32, @intCast(body.y)) + inset;
+    const pane = pane_ops.activePane(fx.session);
+
+    const x0: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(1 * @as(u32, g.cell_w_px))));
+    const y0: f64 = @floatFromInt(top_y + 1);
+    const x2: f64 = @floatFromInt(text_x0 + @as(i32, @intCast(4 * @as(u32, g.cell_w_px))));
+    const y2: f64 = @floatFromInt(top_y + 1 + @as(i32, @intCast(2 * @as(u32, g.cell_h_px))));
+
+    // ⑴ **`⌥`(mods 8) 로 시작하면 사각형이 선다** — 터미널 관례.
+    try testing.expect(beginBodySelection(fx.session, pane, x0, y0, 8));
+    try testing.expect(term.rt.editor_column_anchor != null);
+    _ = dragBodySelection(fx.session, 2, x2, y2);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len); // 세 줄
+    // **열 방향도 늘어난다** — 줄 수만 재면 `to_col` 갱신을 지운 변이가 산다(C13). 세 열을 끌었으므로
+    // 각 selection 이 빈 caret 이 아니라 **범위**여야 한다.
+    try testing.expect(term.rt.editor_selection.?.anchorLo() != term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_column_anchor.?.to_col > term.rt.editor_column_anchor.?.from_col);
+
+    // ⑵ **`⇧⌥`(4|8) 도 같은 결과** — VSCode 관례. 둘이 갈리면 설정이 필요해진다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_column_anchor = null;
+    try testing.expect(beginBodySelection(fx.session, pane, x0, y0, 4 | 8));
+    try testing.expect(term.rt.editor_column_anchor != null);
+    _ = dragBodySelection(fx.session, 2, x2, y2);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // ⑶ **모디파이어가 없으면 사각형이 안 선다** — 일반 선택이다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_column_anchor = null;
+    try testing.expect(beginBodySelection(fx.session, pane, x0, y0, 0));
+    try testing.expectEqual(@as(?editor_selection.ColumnAnchor, null), term.rt.editor_column_anchor);
 }
 
 test "AC1 위/아래로 커서가 늘고 원본이 남는다 — 선택 모양도 유지된다 (§3.2b)" {
@@ -16113,7 +16451,7 @@ test "SEL5 드래그가 pane 밖에 머물면 굴러가고, 손을 떼면 멈춘
     const top_y: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
     const pane = pane_ops.activePane(fx.session);
 
-    try testing.expect(beginBodySelection(fx.session, pane, text_x, top_y));
+    try testing.expect(beginBodySelection(fx.session, pane, text_x, top_y, 0));
     try testing.expectEqual(@as(i8, 0), fx.session.editor_drag_autoscroll); // 안에서는 안 선다
 
     // ⑴ **아래로 벗어난다.**

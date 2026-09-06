@@ -4964,6 +4964,17 @@ pub fn sessServersRowCenterY() ?f32 {
 
 /// 그 사각이 목록 창 **안에 보이나**. 안 보이면 rect 를 안 남긴다 — 남기면 화면 밖인데 눌린다
 /// (설정 목록에서 겪은 결함이다).
+/// 판정자용 — 목록 창의 윗변(헤더 아래).
+pub fn sessListTopForTest() f32 {
+    return sess_list.y;
+}
+
+/// 판정자용 — 목록이 얼마나 밀렸나. **전제를 단언하는 데 쓴다**(안 밀렸는데 초록이면 그 판정은
+/// 아무것도 안 잰 것이다).
+pub fn sessScrollForTest() f32 {
+    return sessScroll();
+}
+
 fn sessVisible(y: f32, h: f32) bool {
     return y + h >= sess_list.y and y <= sess_list.y + sess_list.h;
 }
@@ -4998,7 +5009,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     sess_row_rect = if (sessVisible(top, row_h)) .{ .x = win.x, .y = top, .w = win.w, .h = row_h } else .{};
     // **줄은 목록의 일원으로 읽힌다** — 「3 / 8」을 말할 수 있어야 어디쯤인지 안다. 집합은
     // `sessSetSize()` 가 세고, 번호는 화면에 놓인 차례 그대로다(터미널·서버·원격 세션들).
-    noteA11y(sess_row_rect, .{
+    noteA11yClipped(sess_row_rect, sess_list, .{
         .role = .list_item,
         .label = session_title,
         .position_in_set = 1,
@@ -5238,7 +5249,7 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     if (row.has_runtime and holdsSession(row.runtime_id)) {
         appendPart(&read, &read_len, maru.i18n.tIn(.ko, .mob_a11y_held));
     }
-    noteA11y(.{ .x = win.x, .y = y, .w = win.w, .h = row_h }, .{
+    noteA11yClipped(.{ .x = win.x, .y = y, .w = win.w, .h = row_h }, sess_list, .{
         .role = .list_item,
         .label = title,
         .value = read[0..read_len],
@@ -5521,7 +5532,7 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32, y: f32) 
     const cnt_text = std.fmt.bufPrint(&cnt, "{d}", .{servers().len}) catch "?";
     // **개수는 이름이 아니라 값이다.** 스크린 리더는 이름과 값을 다른 시점에 읽고, 값만 바뀌었을
     // 때 이름을 다시 안 읽는다 — 「서버 3」으로 이어 붙이면 3 이 바뀔 때마다 이름이 바뀐 것이 된다.
-    noteA11y(sess_servers_rect, .{
+    noteA11yClipped(sess_servers_rect, sess_list, .{
         .role = .list_item,
         .label = maru.i18n.tIn(.ko, .mob_servers),
         .value = cnt_text,
@@ -7318,7 +7329,12 @@ fn sortA11yForReading() void {
 /// 어떤 것은 목록 줄(다음 갱신에 바뀐다), 어떤 것은 **그리면서 만든 스택 버퍼**(이 함수가 돌아가는
 /// 순간 사라진다)다. host 는 프레임이 **끝난 뒤에** 읽으므로, 복사하지 않으면 남의 메모리를 읽는다.
 /// 프레임마다 비운다 — 서술자와 같은 수명이다.
-var a11y_text: [4096]u8 = undefined;
+/// **크기의 근거**(적대적 검증 2회차에서 실측했다): 한 화면에 목록 줄이 15개 서고, 그중 가장 긴
+/// 줄이 이름+값 181바이트였다(제목·경로·git·agent 를 코어가 담는 자리 끝까지 채운 목록) — 약
+/// 2.7 KiB 다. 세로가 더 긴 기기면 21줄까지 서므로 3.8 KiB 가 되어 4 KiB 로는 **여유가 5%** 였다.
+/// 배로 둔다 — 넘치면 이름이 빈 것이 되고, 빈 이름은 host 가 요소를 아예 안 만들어 그 줄이
+/// 스크린 리더에서 통째로 사라진다.
+var a11y_text: [8192]u8 = undefined;
 var a11y_text_len: usize = 0;
 
 /// 글자를 담고 담은 자리를 답한다. 자리가 모자라면 **빈 것을 답하고 이름을 남긴다** — 조용히
@@ -7333,6 +7349,18 @@ fn a11yIntern(text: []const u8) []const u8 {
     @memcpy(at, text);
     a11y_text_len += text.len;
     return at;
+}
+
+/// 흐르는 목록의 줄처럼 **창에 갇힌 것**은 그 창으로 잘라서 낸다.
+///
+/// 화면에서는 헤더를 나중에 그려 지나간 줄을 덮지만 **서술자에는 덮개가 없다** — 자리를 그대로
+/// 내면 스크린 리더가 헤더 자리에서 그 줄을 짚고, 톱니와 겹친다. 눈에는 안 보이고 훑는 사람만
+/// 겪는 어긋남이라 판정자로만 잡힌다(적대적 검증 1회차).
+fn noteA11yClipped(rect: SetRect, clip: SetRect, sem: tree.Semantics) void {
+    const top = @max(rect.y, clip.y);
+    const bottom = @min(rect.y + rect.h, clip.y + clip.h);
+    if (bottom <= top) return; // 통째로 지나갔다 — 없는 것이다
+    noteA11y(.{ .x = rect.x, .y = top, .w = rect.w, .h = bottom - top }, sem);
 }
 
 fn noteA11y(rect: SetRect, sem: tree.Semantics) void {

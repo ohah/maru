@@ -809,6 +809,9 @@ const Table = struct {
     /// 접근성이 읽을 「이 세션은 이미 화면을 갖고 있다」(U2c). **화면에는 점 하나로 말한다** —
     /// 색은 안 읽히므로 같은 사실을 문구로 준다(M9).
     mob_a11y_held: [:0]const u8,
+    /// 접근성이 읽을 토글 상태. **화면에는 손잡이 위치와 색으로만 말한다** — 둘 다 안 읽힌다(M9).
+    mob_a11y_on: [:0]const u8,
+    mob_a11y_off: [:0]const u8,
     mob_keyboard: [:0]const u8,
     mob_disconnect: [:0]const u8,
     mob_hostkey_title: [:0]const u8,
@@ -1287,6 +1290,8 @@ const en: Table = .{
     .mob_copy = "copy",
     .mob_a11y_back = "Back",
     .mob_a11y_held = "open",
+    .mob_a11y_on = "on",
+    .mob_a11y_off = "off",
     .mob_keyboard = "kbd",
     .mob_disconnect = "disc",
     .mob_hostkey_title = "First time connecting",
@@ -1901,6 +1906,8 @@ const ko: Table = .{
     .mob_copy = "복사",
     .mob_a11y_back = "뒤로 가기",
     .mob_a11y_held = "열려 있음",
+    .mob_a11y_on = "켜짐",
+    .mob_a11y_off = "꺼짐",
     .mob_keyboard = "자판",
     .mob_disconnect = "끊기",
     .mob_hostkey_title = "처음 연결하는 서버",

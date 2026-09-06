@@ -4798,6 +4798,24 @@ fn stepSetFling() void {
     _ = sess_touch.step(&sess_sa, @intFromFloat(@max(0, sess_max_scroll)), frame_dt_ms);
 }
 
+/// 설정 줄 하나를 서술자로 낸다. **자리는 이미 잡혀 있다**(`set_row_rects[i]` — 그리기와 히트가
+/// 함께 쓰는 그 사각형이라, 읽는 자리도 같은 값이다).
+///
+/// 값을 이름에 붙이지 않는 이유는 계약이 소유한다 — 스크린 리더는 값만 바뀌었을 때 이름을 다시
+/// 안 읽는다. 토글은 켜짐/꺼짐이 **손잡이 자리와 색으로만** 말해지던 것이라, 그 사실을 값과
+/// `selected` 두 가지로 준다(읽는 쪽이 무엇을 쓰든 사실이 닿게).
+fn noteA11ySettingRow(i: usize, label: []const u8, value: []const u8, on: bool, list_top: f32, list_h: f32) void {
+    // **팝업이 열려 있으면 아래 줄은 안 눌린다** — 포인터가 「항목 아니면 닫기」만 하기 때문이다.
+    // 그때 이 줄들을 계속 내면 스크린 리더가 안 눌리는 것을 읽어 준다(이 이니셔티브가 계속
+    // 막아 온 그 모양이다). **누르는 쪽과 같은 조건을 본다.**
+    if (set_open != null) return;
+    noteA11yClipped(
+        set_row_rects[i],
+        .{ .x = set_list.x, .y = list_top, .w = set_list.w, .h = list_h },
+        .{ .role = .button, .label = label, .value = value, .selected = on },
+    );
+}
+
 fn drawSetToggle(on: bool, cx: f32, cy: f32, tk: *const tokens.Tokens) void {
     const w: f32 = 44;
     const h: f32 = 26;
@@ -5848,6 +5866,7 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
 
     // ── 헤더: 뒤로 + 제목(설정 화면과 같은 모양 — 두 화면이 다르게 굴면 매번 시험해 봐야 한다)
     srv_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(srv_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
     if (srv_back_pressed) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
@@ -5891,6 +5910,10 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
             const ry_add = srv_list.y + @as(f32, @floatFromInt(i)) * srv_row_h - srvScroll();
             if (ry_add + srv_row_h >= srv_list.y and ry_add <= srv_list.y + srv_list.h) {
                 srv_add_rect = .{ .x = srv_list.x, .y = ry_add, .w = srv_list.w, .h = srv_row_h };
+                noteA11yClipped(srv_add_rect, srv_list, .{
+                    .role = .button,
+                    .label = maru.i18n.tIn(.ko, .mob_server_add),
+                });
                 if (srv_add_pressed) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry_add), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
                 pushText(maru.i18n.tIn(.ko, .mob_server_add), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry_add + (srv_row_h - 17) / 2), 17, tk.get(.accent_bar));
             } else srv_add_rect = .{};
@@ -5932,6 +5955,26 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
             addr;
         pushText(sub_text, @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry + 12 + 22), 14, tk.get(sub_role));
         push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry + srv_row_h - 1), .w = @intFromFloat(srv_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+        // **읽는 것도 여기서 낸다** — 값은 둘째 줄 그대로다. 그 줄은 주소일 수도 있고 「덜 적혔다」
+        // 「처음 붙는다」 「붙는 중」일 수도 있는데, **그 사실이 색으로만 말해지면 안 읽힌다**.
+        //
+        // **누르는 자리가 둘이라 서술자도 둘이다**: 줄 전체는 접속이고 오른쪽 88px 는 편집이다.
+        // 하나만 내면 스크린 리더 사용자는 둘 중 하나를 못 쓴다(길게 누르기는 숨은 기능이라
+        // 그 자리를 눈에 보이게 둔 것이 이 화면의 결정이다).
+        noteA11yClipped(srv_row_rects[i], srv_list, .{
+            .role = .list_item,
+            .label = label,
+            .value = sub_text,
+            .position_in_set = @intCast(i + 1),
+            .set_size = @intCast(list.len + 1), // 추가 줄까지가 이 목록이다
+        });
+        noteA11yClipped(srv_edit_rects_in_list[i], srv_list, .{
+            .role = .button,
+            .label = maru.i18n.tIn(.ko, .mob_server_edit_short),
+            // **어느 줄의 편집인가**를 값으로 말한다 — 「편집」만 여럿 읽히면 무엇을 고치는지 모른다.
+            .value = label,
+        });
     }
 }
 
@@ -5955,13 +5998,22 @@ fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     pushText(fp[0..half], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
     y += 22;
     pushText(fp[half..], @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 15, tk.get(.surface_fg));
+    // **지문은 «통째로» 읽힌다.** 화면은 눈으로 맞대기 좋게 두 줄로 쪼개 그리지만, 반쪽 둘로
+    // 읽어 주면 대조가 안 된다 — 이 화면의 존재 이유가 그 대조다. 두 줄을 덮는 한 자리에
+    // 온전한 값을 싣는다(무엇을 묻는 화면인지는 이름이 말한다).
+    noteA11y(
+        .{ .x = win.x + set_pad_x, .y = y - 22, .w = win.w - set_pad_x * 2, .h = 44 },
+        .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_hostkey_hint), .value = fp },
+    );
     y += 34;
 
     hk_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(hk_ok_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_hostkey_ok) });
     if (hk_pressed == .ok) push(.{ .x = @intFromFloat(hk_ok_rect.x), .y = @intFromFloat(hk_ok_rect.y), .w = @intFromFloat(hk_ok_rect.w), .h = @intFromFloat(hk_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     y += set_row_h;
     hk_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(hk_cancel_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_hostkey_cancel) });
     if (hk_pressed == .cancel) push(.{ .x = @intFromFloat(hk_cancel_rect.x), .y = @intFromFloat(hk_cancel_rect.y), .w = @intFromFloat(hk_cancel_rect.w), .h = @intFromFloat(hk_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
@@ -6038,11 +6090,23 @@ fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x + set_pad_x), .y = @intFromFloat(y), .w = @intFromFloat(win.w - set_pad_x * 2), .h = 1 }, tk.get(.accent_bar), 0xFF, 0, 0);
     y += 24;
 
+    // **가림표 줄도 읽힌다.** 글자는 절대 안 읽어 준다 — 스크린 리더는 소리로 나가고 곁에 사람이
+    // 있을 수 있다(그래서 화면도 점으로만 그린다). 대신 **몇 글자를 쳤는지**를 값으로 준다:
+    // 아무 표시가 없으면 키보드가 먹고 있는지조차 모른다.
+    var cnt_buf: [24]u8 = undefined;
+    const cnt_text = std.fmt.bufPrint(&cnt_buf, "{d}", .{chars}) catch "";
+    noteA11y(
+        .{ .x = win.x + set_pad_x, .y = y - 40, .w = win.w - set_pad_x * 2, .h = 40 },
+        .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_password_hint), .value = cnt_text },
+    );
+
     pw_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(pw_ok_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_password_ok) });
     if (pw_pressed == .ok) push(.{ .x = @intFromFloat(pw_ok_rect.x), .y = @intFromFloat(pw_ok_rect.y), .w = @intFromFloat(pw_ok_rect.w), .h = @intFromFloat(pw_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_password_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     y += set_row_h;
     pw_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(pw_cancel_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_password_cancel) });
     if (pw_pressed == .cancel) push(.{ .x = @intFromFloat(pw_cancel_rect.x), .y = @intFromFloat(pw_cancel_rect.y), .w = @intFromFloat(pw_cancel_rect.w), .h = @intFromFloat(pw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_password_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
@@ -6075,6 +6139,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
     srv_edit_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(srv_edit_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
     if (srv_edit_back_pressed) push(.{ .x = @intFromFloat(srv_edit_back_rect.x), .y = @intFromFloat(srv_edit_back_rect.y), .w = @intFromFloat(srv_edit_back_rect.w), .h = @intFromFloat(srv_edit_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
@@ -6129,6 +6194,9 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
         const room = @as(i32, @intFromFloat(rect.w - set_pad_x * 2 - 12)) - label_w;
         const shown = fitRight(value, @max(40, room), 15, &fit_buf);
         pushText(shown, @intFromFloat(rect.x + rect.w - set_pad_x - @as(f32, @floatFromInt(textWidth(shown, 15)))), @intFromFloat(rect.y + (set_row_h - 15) / 2), 15, tk.get(role));
+        // **값은 «줄인 것» 이 아니라 온전한 것을 읽힌다.** 화면은 자리에 맞춰 앞을 자르지만
+        // (`fitRight`), 스크린 리더에는 잘릴 이유가 없다 — 주소가 반쪽이면 어느 서버인지 모른다.
+        noteA11y(rect, .{ .role = .button, .label = label, .value = value });
         push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y + set_row_h - 1), .w = @intFromFloat(rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
         y += set_row_h;
     }
@@ -6138,6 +6206,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     y += 12;
     const key_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n] = key_rect;
+    noteA11y(key_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, if (pubkey_copied) .mob_pubkey_copied else .mob_pubkey) });
     if (srv_edit_pressed == server_field_n) push(.{ .x = @intFromFloat(key_rect.x), .y = @intFromFloat(key_rect.y), .w = @intFromFloat(key_rect.w), .h = @intFromFloat(key_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     const key_label = maru.i18n.tIn(.ko, if (pubkey_copied) .mob_pubkey_copied else .mob_pubkey);
     pushText(key_label, @intFromFloat(key_rect.x + set_pad_x), @intFromFloat(key_rect.y + (set_row_h - 16) / 2), 16, tk.get(if (pubkey_copied) .accent_bar else .surface_fg));
@@ -6159,6 +6228,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     y += 12;
     const save_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n + 1] = save_rect;
+    noteA11y(save_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_server_save) });
     if (srv_edit_pressed == server_field_n + 1) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_save), @intFromFloat(save_rect.x + set_pad_x), @intFromFloat(save_rect.y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y + set_row_h - 1), .w = @intFromFloat(save_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
@@ -6166,6 +6236,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
 
     const del_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n + 2] = del_rect;
+    noteA11y(del_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_server_delete) });
     if (srv_edit_pressed == server_field_n + 2) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_delete), @intFromFloat(del_rect.x + set_pad_x), @intFromFloat(del_rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
@@ -6175,6 +6246,8 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
 
     // ── 헤더: 뒤로 + 제목
     set_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h }; // 44 이상 정사각
+    // 팝업이 열려 있으면 **뒤로가기도 안 눌린다**(포인터가 「항목 아니면 닫기」로 먼저 먹는다).
+    if (set_open == null) noteA11y(set_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
     if (set_back_pressed) push(.{ .x = @intFromFloat(set_back_rect.x), .y = @intFromFloat(set_back_rect.y), .w = @intFromFloat(set_back_rect.w), .h = @intFromFloat(set_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
@@ -6271,6 +6344,13 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 set_row_rects[i] = .{}; // 헤더는 **누를 수 없다** — 글자일 뿐이다
                 if (ry + h < list_top or ry + h > list_top + list_h + 0.5) continue;
                 pushText(title, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(ry + (set_header_h - 13) / 2), 13, tk.get(.accent_bar));
+                // **머리글도 읽힌다.** 누를 수는 없지만(글자다) 이것이 없으면 스무 줄 남짓이
+                // 아무 구획 없이 이어져, 지금 어느 갈래를 듣고 있는지 알 수 없다.
+                if (set_open == null) noteA11yClipped(
+                    .{ .x = set_list.x, .y = ry, .w = set_list.w, .h = set_header_h },
+                    .{ .x = set_list.x, .y = list_top, .w = set_list.w, .h = list_h },
+                    .{ .role = .text, .label = title },
+                );
             },
             .field => |*row| {
                 // **위아래 규칙이 다르다 — 덮는 것이 있느냐로 갈린다.**
@@ -6294,7 +6374,11 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 // **값은 config 에서 읽는다** — 화면이 자기 상태를 들면 파일과 갈린다(§1).
                 const val = mobile_config.valueOf(cfg(), row.key);
                 switch (row.kind) {
-                    .toggle => drawSetToggle(val != 0, right, ry + h / 2, tk),
+                    .toggle => {
+                        drawSetToggle(val != 0, right, ry + h / 2, tk);
+                        // **손잡이 자리와 색으로만 말하던 것**을 값으로 준다 — 둘 다 안 읽힌다.
+                        noteA11ySettingRow(i, row.label, maru.i18n.tIn(.ko, if (val != 0) .mob_a11y_on else .mob_a11y_off), val != 0, list_top, list_h);
+                    },
                     .number => {
                         // **편집 중이면 치는 값을 보인다.** 어디로 가는지 안 보이면 "키보드가
                         // 어디에 쓰이는지 모르는" 그 혼란이 그대로 남는다. 캐럿(▏)으로 그 줄이
@@ -6307,6 +6391,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                             (std.fmt.bufPrint(&buf, "{d}", .{val}) catch "?");
                         const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
                         pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(role));
+                        noteA11ySettingRow(i, row.label, t, false, list_top, list_h);
                     },
                     .text => {
                         // 편집 중이면 치는 값을, 아니면 지금 값을 보인다. 캐럿(▏)으로 그 줄이
@@ -6320,6 +6405,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                             mobile_config.textValueOf(cfg(), row.key);
                         const role: tokens.ColorRole = if (editing) .accent_bar else .muted_fg;
                         pushText(t, @intFromFloat(right - @as(f32, @floatFromInt(textWidth(t, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(role));
+                        noteA11ySettingRow(i, row.label, t, false, list_top, list_h);
                     },
                     .choice => {
                         // **고른 것이 없으면 이름을 안 적는다**(§프리셋 되짚기). 아무거나 적으면
@@ -6328,6 +6414,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                         const chev_w: f32 = 14;
                         pushText("\u{25BE}", @intFromFloat(right - chev_w), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
                         pushText(v, @intFromFloat(right - chev_w - 6 - @as(f32, @floatFromInt(textWidth(v, 15)))), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.muted_fg));
+                        noteA11ySettingRow(i, row.label, v, false, list_top, list_h);
                     },
                 }
                 push(.{ .x = @intFromFloat(set_list.x + set_pad_x), .y = @intFromFloat(ry + h - 1), .w = @intFromFloat(set_list.w - 2 * set_pad_x), .h = 1 }, tk.get(.divider), 0x80, 0, 0);
@@ -6358,6 +6445,13 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
         push(.{ .x = @intFromFloat(set_list.x), .y = @intFromFloat(set_list.y), .w = @intFromFloat(set_list.w), .h = @intFromFloat(set_header_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
         pushText(title, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(set_list.y + (set_header_h - 13) / 2), 13, tk.get(.accent_bar));
         push(.{ .x = @intFromFloat(set_list.x), .y = @intFromFloat(set_list.y + set_header_h - 1), .w = @intFromFloat(set_list.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+        // **붙임 머리글도 읽힌다.** 이 줄이 덮은 인라인 머리글은 안 그려지므로(그래서 안 낸다),
+        // 여기서 안 내면 **맨 위 갈래의 이름이 어디에서도 안 읽힌다** — 실기 트리에서 첫 섹션만
+        // 이름 없이 시작하는 것으로 드러났다.
+        if (set_open == null) noteA11y(
+            .{ .x = set_list.x, .y = set_list.y, .w = set_list.w, .h = set_header_h },
+            .{ .role = .text, .label = title },
+        );
     }
 
     // ── 팝업: **행 옆에 얹는다**(하위 화면으로 밀지 않는다). 배경이 보여야 즉시-적용이
@@ -6414,6 +6508,15 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                     if (sel != null and k == sel.?)
                         push(.{ .x = @intFromFloat(px + 2), .y = @intFromFloat(iy + 2), .w = @intFromFloat(pw - 4), .h = @intFromFloat(set_row_h - 4) }, tk.get(.tab_active_bg), 0xFF, 6, 0);
                     pushText(it, @intFromFloat(px + 14), @intFromFloat(iy + (set_row_h - 15) / 2), 15, tk.get(if (sel != null and k == sel.?) .accent_bar else .surface_fg));
+                    // **팝업 항목도 읽힌다.** 지금 이것이 눌리는 유일한 것인데 서술자가 없으면
+                    // 스크린 리더 사용자는 **고를 수가 없다**(적대적 검증에서 잡았다).
+                    noteA11y(set_item_rects[k], .{
+                        .role = .list_item,
+                        .label = it,
+                        .selected = sel != null and k == sel.?,
+                        .position_in_set = @intCast(k + 1),
+                        .set_size = @intCast(shown),
+                    });
                 }
             }
         },

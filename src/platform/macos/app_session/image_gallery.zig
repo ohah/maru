@@ -2323,8 +2323,15 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
             .{ .d = @intCast(n) },
         });
     }
+    // **단위도 종류를 따른다.** 명령을 「장」으로 세면 안 된다 — 헤드리스 캡처가 실제로 「4084장」을
+    // 잡아냈고, 값 판정자로는 안 보이는 종류의 결함이다(계약 §2.2 의 「지어내지 않는다」와 같은 축:
+    // 이미지의 단위를 활동에 빌려 쓰면 화면이 거짓을 말한다).
+    const suffix = if (self.image_gallery.filter.isGrid())
+        maru.i18n.t(.image_gallery_count_suffix)
+    else
+        maru.i18n.t(.image_gallery_activity_count_suffix);
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
-    return std.fmt.bufPrint(buf, "{d}{s}", .{ n, maru.i18n.t(.image_gallery_count_suffix) }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{d}{s}", .{ n, suffix }) catch buf[0..0];
 }
 
 /// `formatImageTime` 의 test 창구. 순수 함수라 화면 없이 표기를 짚을 수 있다.

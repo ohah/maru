@@ -369,6 +369,7 @@ const Table = struct {
     image_gallery_scanning: [:0]const u8,
     /// 개수 뒤에 붙는 단위. 「12장」처럼 숫자와 이어 붙인다.
     image_gallery_count_suffix: [:0]const u8,
+    image_gallery_activity_count_suffix: [:0]const u8,
     /// 격자에 다 못 들어갈 때. **「없다」와 「안 보인다」는 다른 사실이다** — 접으면 사용자가
     /// 이미지를 놓치고도 모른다(계약 §2). `{0}` 보이는 수, `{1}` 전체 수. 두 언어의 **어순이
     /// 반대**라(en "4 of 12" / ko "12장 중 4장") 조각을 이어 붙이면 한쪽이 반드시 틀린다.
@@ -1401,6 +1402,7 @@ const en: Table = .{
     .image_gallery_partial = "Could not read the whole session",
     .image_gallery_scanning = "Scanning…",
     .image_gallery_count_suffix = " images",
+    .image_gallery_activity_count_suffix = " actions",
     .image_gallery_shown_of = "{0} of {1} images",
     .image_gallery_open_failed = "Could not open this image",
     .image_gallery_search_prompt = "Filter: ",
@@ -2021,6 +2023,7 @@ const ko: Table = .{
     .image_gallery_partial = "세션을 다 읽지 못했습니다",
     .image_gallery_scanning = "세는 중…",
     .image_gallery_count_suffix = "장",
+    .image_gallery_activity_count_suffix = "개",
     .image_gallery_shown_of = "{1}장 중 {0}장",
     .image_gallery_open_failed = "이 이미지를 열 수 없습니다",
     .image_gallery_search_prompt = "거르기: ",

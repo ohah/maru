@@ -4976,6 +4976,13 @@ fn sessVisible(y: f32, h: f32) bool {
 /// **설정 입구가 여기다.** 하단 상시 바는 두 플랫폼 관례가 아니고(하단은 이동 대상 자리다),
 /// 키보드가 거의 늘 떠 있는 터미널에서 44px 를 영구히 쓴다. 관례대로 **부모 화면의 앱 바
 /// 오른쪽**에 둔다.
+/// 목록의 **전체 줄 수**. 스크린 리더가 「몇 분의 몇」을 말하려면 화면에 뜬 것이 아니라 **있는
+/// 것 전부**를 세야 한다(계약 `Semantics.set_size` 가 가상화를 이유로 그렇게 적는다) — 목록은
+/// 흐르므로 지금 보이는 줄만 세면 늘 창 크기가 나온다.
+fn sessSetSize() u32 {
+    return 2 + @as(u32, @intCast(control_row_count)); // 터미널 + 서버 + 원격 세션들
+}
+
 fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
@@ -4989,6 +4996,14 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     const top = sess_list.y - sessScroll();
 
     sess_row_rect = if (sessVisible(top, row_h)) .{ .x = win.x, .y = top, .w = win.w, .h = row_h } else .{};
+    // **줄은 목록의 일원으로 읽힌다** — 「3 / 8」을 말할 수 있어야 어디쯤인지 안다. 집합은
+    // `sessSetSize()` 가 세고, 번호는 화면에 놓인 차례 그대로다(터미널·서버·원격 세션들).
+    noteA11y(sess_row_rect, .{
+        .role = .list_item,
+        .label = session_title,
+        .position_in_set = 1,
+        .set_size = sessSetSize(),
+    });
     if (sess_row_rect.w > 0) {
         if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
         pushText(session_title, @intFromFloat(win.x + 16), @intFromFloat(top + (row_h - 17) / 2), 17, tk.get(.surface_fg));
@@ -5029,6 +5044,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(sess_gear_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_settings) });
     if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
@@ -5171,7 +5187,7 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
         // **안 보이는 줄은 안 그린다 — 그래도 «센다».** 예전에는 창을 넘는 순간 `return` 해서
         // 그 아래 세션이 통째로 사라졌다(맥에 탭이 열둘쯤 넘으면 닿을 수가 없었다). 지금은
         // 목록이 흐르므로 위로 지나간 줄도 아래로 남은 줄도 높이에 들어가야 상한이 맞는다.
-        if (sessVisible(y, row_h)) drawSessionRow(win, tk, row, y, row_h);
+        if (sessVisible(y, row_h)) drawSessionRow(win, tk, row, y, row_h, remote_rows_drawn);
         // **센 것은 «있는 줄» 이지 그린 줄이 아니다.** 이 수는 히트 판정(`remoteRowAt`)과
         // 판정자가 쓰는데, 화면 밖 줄을 빼면 스크롤한 뒤 인덱스가 어긋난다.
         remote_rows_drawn += 1;
@@ -5192,7 +5208,7 @@ fn appendPart(buf: []u8, len: *usize, part: []const u8) void {
     len.* += part.len;
 }
 
-fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow, y: f32, row_h: f32) void {
+fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow, y: f32, row_h: f32, index: usize) void {
     // 초점 있는 세션은 왼쪽에 띠 하나. **글자만으로 표시하면 목록에서 안 보인다.**
     if (row.focused) push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y), .w = 3, .h = @intFromFloat(row_h) }, tk.get(.accent_bar), 0xFF, 0, 0);
 
@@ -5210,6 +5226,27 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     appendPart(&line, &len, row.agent[0..row.agent_len]);
     const sub = line[0..len];
     if (sub.len > 0) pushText(sub, @intFromFloat(win.x + 16), @intFromFloat(y + 30), 13, tk.get(.muted_fg));
+
+    // **읽는 것도 여기서 낸다.** 이름은 줄의 제목(사용자 데이터라 번역하지 않는다), 값은 둘째
+    // 줄(cwd·git·agent) 그대로다 — 이름에 이어 붙이면 값만 바뀔 때 이름이 바뀐 것으로 읽힌다.
+    //
+    // **「이미 본 세션」은 눈에 점 하나로 말한다**(U2c). 눈으로 보는 것과 같은 사실을 스크린
+    // 리더도 들어야 하므로 값 끝에 문구로 잇는다 — 점은 색이라 읽히지 않는다.
+    var read: [320]u8 = undefined;
+    var read_len: usize = 0;
+    appendPart(&read, &read_len, sub);
+    if (row.has_runtime and holdsSession(row.runtime_id)) {
+        appendPart(&read, &read_len, maru.i18n.tIn(.ko, .mob_a11y_held));
+    }
+    noteA11y(.{ .x = win.x, .y = y, .w = win.w, .h = row_h }, .{
+        .role = .list_item,
+        .label = title,
+        .value = read[0..read_len],
+        // 초점 있는 세션이 **고른 상태**다 — 왼쪽 띠가 눈에 말하는 그것이다.
+        .selected = row.focused,
+        .position_in_set = @intCast(index + 3), // 터미널·서버 다음이 원격 세션들이다
+        .set_size = sessSetSize(),
+    });
 
     // **이미 본 세션은 그렇다고 말한다**(U2c). 전환을 「덮개」로 정했으니(계획 U0) 고르는 자리는
     // 이 목록 하나뿐이다 — 어느 줄이 이미 화면을 갖고 있는지 목록이 말하지 않으면, 사용자는 그
@@ -5482,6 +5519,15 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32, y: f32) 
     pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     var cnt: [8]u8 = undefined;
     const cnt_text = std.fmt.bufPrint(&cnt, "{d}", .{servers().len}) catch "?";
+    // **개수는 이름이 아니라 값이다.** 스크린 리더는 이름과 값을 다른 시점에 읽고, 값만 바뀌었을
+    // 때 이름을 다시 안 읽는다 — 「서버 3」으로 이어 붙이면 3 이 바뀔 때마다 이름이 바뀐 것이 된다.
+    noteA11y(sess_servers_rect, .{
+        .role = .list_item,
+        .label = maru.i18n.tIn(.ko, .mob_servers),
+        .value = cnt_text,
+        .position_in_set = 2,
+        .set_size = sessSetSize(),
+    });
     pushText(cnt_text, @intFromFloat(sess_servers_rect.x + sess_servers_rect.w - 16 - @as(f32, @floatFromInt(textWidth(cnt_text, 15)))), @intFromFloat(sess_servers_rect.y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
     push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y + row_h), .w = @intFromFloat(sess_servers_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
@@ -7175,11 +7221,15 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // **서술자도 프레임마다 비운다**(M9). 안 비우면 지난 프레임에 있던 버튼을 계속 읽는다 —
     // rect 가 0 이면 안 답하는 규율과 같은 이유다.
     a11y_count = 0;
+    a11y_text_len = 0;
     // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패
     // (`maru_mobile_input` 의 core write)가 아무도 읽기 전에 지워진다 — 키가 조용히
     // 사라지던 것이 이번 리뷰 최상위 결함이었는데, 그 신호가 딱 그 경로에서만 안 남았다.
     // 비우는 것은 **읽은 쪽**이 한다(`maru_mobile_clear_error`).
     const tk = tokens.Tokens.rich(themeColors());
+    // **터미널 층은 맨 위일 때만 읽힌다.** 아래 `switch` 가 밀린 화면을 그리기 직전에 깃발을
+    // 다시 세운다 — 그러면 「그리는 자리」와 「읽는 자리」의 조건이 한 곳에서만 정해진다.
+    a11y_top_layer = screenTop() == .terminal;
     buildUi(width, height, &tk) catch |err| {
         setLastError(@errorName(err));
         return 0;
@@ -7190,6 +7240,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // **목록 자리를 벗어났으면 닫는다.** 여는 판정은 `drawRemoteSessions` 가 하고, 나가는
     // 판정은 여기서 한 번에 한다 — 화면 전환 경로마다 갈고리를 달면 하나를 빠뜨린다.
     if (screenTop() != .sessions) noteControlScreen(false);
+    a11y_top_layer = true; // 여기부터는 «맨 위» 화면이다
     switch (screenTop()) {
         .terminal => {},
         .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
@@ -7223,6 +7274,13 @@ const A11yNode = struct {
     rect: SetRect,
     sem: tree.Semantics,
 };
+/// 지금 **맨 위 화면**을 그리는 중인가. 서술자는 그때만 낸다.
+///
+/// 처음에는 `screenTop() == .terminal` 로 적었다 — 그때는 터미널 층만 서술자를 냈기 때문이다.
+/// 화면이 늘면서 그 조건은 **「터미널이냐」가 아니라 「지금 그리는 것이 맨 위냐」**로 읽혀야 한다.
+/// 빌드가 층마다 이 깃발을 세우므로, 새 화면이 서술자를 내기 시작해도 그 자리를 안 고쳐도 된다.
+var a11y_top_layer = false;
+
 /// 이번 프레임의 서술자. **프레임마다 다시 만든다** — 안 그리면 안 낸다는 것이 곧 계약이라
 /// (`key_bar_rect` 가 0 을 답하는 규율과 같다), 남겨 두면 없는 것을 읽게 된다.
 var a11y_nodes: [max_a11y_nodes]A11yNode = undefined;
@@ -7254,6 +7312,29 @@ fn sortA11yForReading() void {
     std.mem.sort(A11yNode, a11y_nodes[0..a11y_count], {}, Less.f);
 }
 
+/// 서술자의 **이름·값 글자를 여기 복사해 둔다.**
+///
+/// 넘겨받은 슬라이스가 어디를 가리키는지 부르는 쪽마다 다르다 — 어떤 것은 i18n 표(영원하다),
+/// 어떤 것은 목록 줄(다음 갱신에 바뀐다), 어떤 것은 **그리면서 만든 스택 버퍼**(이 함수가 돌아가는
+/// 순간 사라진다)다. host 는 프레임이 **끝난 뒤에** 읽으므로, 복사하지 않으면 남의 메모리를 읽는다.
+/// 프레임마다 비운다 — 서술자와 같은 수명이다.
+var a11y_text: [4096]u8 = undefined;
+var a11y_text_len: usize = 0;
+
+/// 글자를 담고 담은 자리를 답한다. 자리가 모자라면 **빈 것을 답하고 이름을 남긴다** — 조용히
+/// 자르면 사용자가 그 반쪽을 값으로 읽는다(계약 §5).
+fn a11yIntern(text: []const u8) []const u8 {
+    if (text.len == 0) return "";
+    if (a11y_text_len + text.len > a11y_text.len) {
+        setLastError("a11y_text_overflow");
+        return "";
+    }
+    const at = a11y_text[a11y_text_len..][0..text.len];
+    @memcpy(at, text);
+    a11y_text_len += text.len;
+    return at;
+}
+
 fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
     if (rect.w <= 0 or rect.h <= 0) return;
     // **덮인 것은 안 낸다.** `buildUi` 는 어느 화면이든 터미널 층을 먼저 세우므로(코어 격자가
@@ -7267,12 +7348,15 @@ fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
     // 속하지도 않는** 것을 가리킨다.
     //
     // **누르는 쪽과 같은 조건을 본다** — 다른 식으로 적으면 또 갈린다.
-    if (screenTop() != .terminal) return;
+    if (!a11y_top_layer) return;
     if (a11y_count >= a11y_nodes.len) {
         setLastError("a11y_overflow");
         return;
     }
-    a11y_nodes[a11y_count] = .{ .rect = rect, .sem = sem };
+    var owned = sem;
+    owned.label = a11yIntern(sem.label);
+    owned.value = a11yIntern(sem.value);
+    a11y_nodes[a11y_count] = .{ .rect = rect, .sem = owned };
     a11y_count += 1;
 }
 
@@ -7342,7 +7426,7 @@ pub export fn maru_mobile_a11y_state(index: u32) u32 {
     return bits;
 }
 
-/// 이름을 `out` 에 복사하고 **쓴 바이트 수**를 답한다. **복사한다** — 라벨이 가리키는 것은 다음
+/// 이름·값을 `out` 에 복사하고 **쓴 바이트 수**를 답한다. **복사한다** — 가리키는 것은 다음
 /// 프레임에 사라질 수 있고, host 가 그 뒤에 읽으면 남의 메모리를 읽는다.
 ///
 /// `cap == 0` 이면 아무것도 안 쓰고 **필요한 길이**를 답한다(먼저 물어보고 담을 자리를 잡는 법).
@@ -7351,15 +7435,26 @@ pub export fn maru_mobile_a11y_state(index: u32) u32 {
 /// 되는데, 그 조각을 받은 iOS `initWithBytes:encoding:NSUTF8StringEncoding` 은 **nil 을 답한다** —
 /// 이름이 통째로 사라져 VoiceOver 가 「버튼」이라고만 읽는다(Android 는 U+FFFD 를 읽어 준다).
 /// 짧게 읽히는 것과 **안 읽히는 것**은 다르므로 마지막 온전한 글자까지만 준다.
+fn copyA11yText(text: []const u8, out: [*]u8, cap: usize) usize {
+    if (cap == 0) return text.len;
+    var n = @min(text.len, cap);
+    // 이어지는 바이트(0b10xxxxxx)에 멈춰 있으면 그 글자가 시작한 자리까지 물러선다.
+    while (n > 0 and n < text.len and (text[n] & 0xC0) == 0x80) n -= 1;
+    @memcpy(out[0..n], text[0..n]);
+    return n;
+}
+
 pub export fn maru_mobile_a11y_label(index: u32, out: [*]u8, cap: usize) usize {
     if (index >= a11y_count) return 0;
-    const label = a11y_nodes[index].sem.label;
-    if (cap == 0) return label.len;
-    var n = @min(label.len, cap);
-    // 이어지는 바이트(0b10xxxxxx)에 멈춰 있으면 그 글자가 시작한 자리까지 물러선다.
-    while (n > 0 and n < label.len and (label[n] & 0xC0) == 0x80) n -= 1;
-    @memcpy(out[0..n], label[0..n]);
-    return n;
+    return copyA11yText(a11y_nodes[index].sem.label, out, cap);
+}
+
+/// **값은 이름과 따로 읽힌다.** 스크린 리더는 둘을 다른 시점에 읽고, 값만 바뀌었을 때 이름을 다시
+/// 읽지 않는다 — 「서버 3」처럼 이어 붙이면 3 이 바뀔 때마다 **이름이 바뀐 것**이 된다(계약
+/// `Semantics.value` 가 그 이유를 소유한다). 없으면 0 이다.
+pub export fn maru_mobile_a11y_value(index: u32, out: [*]u8, cap: usize) usize {
+    if (index >= a11y_count) return 0;
+    return copyA11yText(a11y_nodes[index].sem.value, out, cap);
 }
 
 /// 판정자가 보는 서술자 한 줄. `A11yNode` 를 그대로 내면 그 타입이 밖으로 새므로 뷰만 낸다.

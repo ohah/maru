@@ -355,6 +355,17 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
     return t;
 }
 
+/// 값 한 줄을 읽어 온다(없으면 `nil` — 빈 문자열을 실으면 VoiceOver 가 「값 없음」을 읽는다).
+static NSString *maruA11yValue(unsigned int index) {
+    unsigned char buf[256];
+    unsigned long need = maru_mobile_a11y_value(index, buf, 0);
+    if (need == 0) return nil;
+    unsigned long cap = need < sizeof buf ? need : sizeof buf;
+    unsigned long got = maru_mobile_a11y_value(index, buf, cap);
+    NSString *s = [[NSString alloc] initWithBytes:buf length:got encoding:NSUTF8StringEncoding];
+    return s.length > 0 ? s : nil;
+}
+
 /// 이 뷰는 그림 하나가 아니라 **버튼들의 묶음**이다. `NO` 를 답해야 아래 자식들이 읽힌다.
 - (BOOL)isAccessibilityElement { return NO; }
 
@@ -397,6 +408,11 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
         state *= 1099511628211ULL;
         state ^= (unsigned long long)maru_mobile_a11y_state(i);
         state *= 1099511628211ULL;
+        // **값은 상태 쪽이다.** 개수가 3 에서 4 가 되는 것은 화면이 바뀐 것이 아니라 그 줄의 값이
+        // 바뀐 것이다 — 알리면 읽던 것을 끊고 커서를 되돌린다.
+        unsigned char val[256];
+        unsigned long vlen = maru_mobile_a11y_value(i, val, sizeof val);
+        for (unsigned long b = 0; b < vlen; b++) { state ^= val[b]; state *= 1099511628211ULL; }
     }
     *outShape = shape;
     *outState = state;
@@ -431,6 +447,9 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
             [[MaruA11yElement alloc] initWithAccessibilityContainer:self];
         e.bridgeIndex = i;
         e.accessibilityLabel = label;
+        // **값은 이름과 따로 싣는다** — VoiceOver 는 둘을 다른 시점에 읽고, 값만 바뀌었을 때
+        // 이름을 다시 읽지 않는다. 이어 붙이면 값이 바뀔 때마다 이름이 바뀐 것이 된다.
+        e.accessibilityValue = maruA11yValue(i);
         e.accessibilityFrameInContainerSpace = CGRectMake(x + safe.left, y + safe.top, w, h);
         e.accessibilityTraits = maruA11yTraits(maru_mobile_a11y_role(i), maru_mobile_a11y_state(i));
         [out addObject:e];
@@ -474,6 +493,7 @@ static UIAccessibilityTraits maruA11yTraits(unsigned int role, unsigned int stat
     for (MaruA11yElement *e in _a11yElements) {
         e.accessibilityTraits =
             maruA11yTraits(maru_mobile_a11y_role(e.bridgeIndex), maru_mobile_a11y_state(e.bridgeIndex));
+        e.accessibilityValue = maruA11yValue(e.bridgeIndex);
     }
 }
 

@@ -7124,6 +7124,78 @@ test "M9 서술자: 보는 순서로 낸다 — 훑는 사람이 되돌아가지
     }
 }
 
+test "M9 서술자: 세션 목록도 읽힌다 — 줄은 «몇 분의 몇» 을 말한다" {
+    // **여기가 처음 만나는 화면이다.** 터미널만 읽히던 동안 스크린 리더 사용자는 세션을 고를
+    // 수조차 없었다. 목록은 흐르므로(가상화) 「몇 분의 몇」은 **있는 줄 전부**로 세야 한다 —
+    // 보이는 것만 세면 늘 창 크기가 나온다(계약 `Semantics.set_size` 가 그 이유를 적는다).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    bridge.setScreenForTest("terminal");
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 3);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+
+    // 붙박이 둘(터미널·서버) + 원격 셋 = 다섯이고, 줄마다 그 수를 말한다.
+    const nodes = bridge.a11yNodesForTest();
+    var rows: usize = 0;
+    for (nodes) |n| {
+        if (n.sem.role != .list_item) continue;
+        rows += 1;
+        try T.expectEqual(@as(u32, 5), n.sem.set_size);
+        try T.expect(n.sem.position_in_set >= 1 and n.sem.position_in_set <= 5);
+    }
+    try T.expectEqual(@as(usize, 5), rows);
+
+    // **톱니도 읽힌다** — 설정으로 가는 길이 이것 하나다.
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_settings)) != null);
+
+    // **개수는 값이지 이름이 아니다.** 이름에 이어 붙이면 값만 바뀔 때 이름이 바뀐 것으로 읽힌다.
+    const servers_row = a11yFind(maru.i18n.tIn(.ko, .mob_servers)) orelse return error.MissingDescriptor;
+    try T.expect(servers_row.sem.value.len > 0);
+
+    // 그리고 **터미널 화면 것은 안 섞인다** — 덮인 층은 안 낸다.
+    try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_keyboard)) == null);
+}
+
+test "M9 서술자: 목록 줄의 이름·값은 «복사» 라 프레임이 지나도 살아 있다" {
+    // 값 중에는 **그리면서 만든 스택 버퍼**(서버 개수·둘째 줄)가 있다. 복사하지 않으면 host 가
+    // 프레임이 끝난 뒤 읽을 때 남의 메모리를 읽는다 — 이 파일의 판정자는 프레임 안에서 보므로
+    // 그 결함을 **못 잡는다**. 그래서 ABI 로 읽어 본다(host 가 하는 그대로).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 2);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+
+    // 프레임이 끝난 **뒤에** 읽는다. 이름 글자는 서술자 안에 살아 있어야 한다.
+    var i: u32 = 0;
+    var named: usize = 0;
+    var buf: [256]u8 = undefined;
+    while (i < bridge.maru_mobile_a11y_count()) : (i += 1) {
+        const n = bridge.maru_mobile_a11y_label(i, &buf, buf.len);
+        if (n > 0) named += 1;
+        try T.expect(std.unicode.utf8ValidateSlice(buf[0..n]));
+    }
+    try T.expect(named >= 4);
+    // **글자 자리가 모자라지 않았다.** 다른 오류(목록 wire 의 것)는 이 축이 아니므로 이름으로 가른다.
+    try T.expect(!std.mem.eql(u8, std.mem.span(bridge.maru_mobile_last_error()), "a11y_text_overflow"));
+}
+
 test "M9 서술자: 덮여서 안 눌리는 것은 안 읽힌다" {
     // **적대적 검증 1회차가 잡은 결함이다.** `buildUi` 가 어느 화면이든 터미널 층을 세우므로
     // 설정 화면이 덮고 있어도 앱 바·키바의 rect 는 서 있다 — 그런데 그때 `chromePointer` 가

@@ -379,6 +379,71 @@ pub fn readInputAlloc(
     };
 }
 
+/// Reads one fixed child of an already-held directory capability. The caller owns validation of
+/// the directory itself; this function never resolves a parent pathname.
+pub fn readInputAtAlloc(
+    allocator: std.mem.Allocator,
+    parent_fd: c.fd_t,
+    leaf: [:0]const u8,
+    cap: usize,
+) Error!Input {
+    if (parent_fd < 0 or !validComponent(leaf)) return error.UnsafePath;
+    const fd = c.openat(parent_fd, leaf.ptr, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+    }, @as(c.mode_t, 0));
+    if (fd < 0) return error.UnsafePath;
+    defer _ = c.close(fd);
+    var before: posix.Stat = undefined;
+    var named: posix.Stat = undefined;
+    if (c.fstat(fd, &before) != 0 or c.fstatat(parent_fd, leaf.ptr, &named, posix.AT.SYMLINK_NOFOLLOW) != 0)
+        return error.ReadFailed;
+    const fingerprint = try releaseFingerprint(before, false);
+    const named_fingerprint = try releaseFingerprint(named, false);
+    if (!sameFingerprint(fingerprint, named_fingerprint)) return error.FileChanged;
+    if (fingerprint.link_count != 1) return error.PathAlias;
+    if (fingerprint.size == 0 or fingerprint.size > cap) return error.TooLarge;
+    const size: usize = @intCast(fingerprint.size);
+    const bytes = try allocator.alloc(u8, size);
+    errdefer allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < size) {
+        const count = c.pread(fd, bytes[offset..].ptr, size - offset, @intCast(offset));
+        if (count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (count == 0) return error.ChangedDuringRead;
+        offset += @intCast(count);
+    }
+    var extra: [1]u8 = undefined;
+    while (true) {
+        const count = c.pread(fd, &extra, 1, @intCast(size));
+        if (count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (count != 0) return error.ChangedDuringRead;
+        break;
+    }
+    var after: posix.Stat = undefined;
+    var final_named: posix.Stat = undefined;
+    if (c.fstat(fd, &after) != 0 or c.fstatat(parent_fd, leaf.ptr, &final_named, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !sameFingerprint(fingerprint, try releaseFingerprint(after, false)) or
+        !sameFingerprint(fingerprint, try releaseFingerprint(final_named, false))) return error.ChangedDuringRead;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return .{
+        .bytes = bytes,
+        .size = fingerprint.size,
+        .mode = fingerprint.mode,
+        .sha256 = std.fmt.bytesToHex(digest, .lower),
+        .identity = fingerprint.identity,
+    };
+}
+
 pub fn pinExecutable(
     result: *PinnedExecutableFile,
     path: [:0]const u8,
@@ -613,20 +678,42 @@ pub fn publishSummaryExclusive(path: [:0]const u8, bytes: []const u8) Error!void
     try published.deinit();
 }
 
+/// Publishes one fixed child relative to an already-held directory capability. The duplicated
+/// descriptor is owned by the temporary publication owner and closed before return.
+pub fn publishSummaryExclusiveAt(parent_fd: c.fd_t, leaf: [:0]const u8, bytes: []const u8) Error!void {
+    if (parent_fd < 0 or !validComponent(leaf)) return error.UnsafePath;
+    const owned_parent = c.fcntl(parent_fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
+    if (owned_parent < 0) return error.UnsafePath;
+    var published: PinnedReleaseFile = .{};
+    try publishSummaryOwnedExclusiveParent(&published, owned_parent, leaf, null, bytes);
+    try published.deinit();
+}
+
 /// Publishes a summary without reopening it to derive manifest metadata. The held temporary-file
 /// descriptor becomes the final leaf descriptor after the exclusive rename, so size and digest
 /// authority cross the publication boundary without a pathname TOCTOU window.
 pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const u8, bytes: []const u8) Error!void {
     if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
-    if (bytes.len == 0 or bytes.len > summary_cap) return error.TooLarge;
     var leaf_buf: [std.fs.max_name_bytes:0]u8 = undefined;
     const parent = try openParent(path, &leaf_buf);
+    return publishSummaryOwnedExclusiveParent(result, parent.fd, parent.leaf, path, bytes);
+}
+
+fn publishSummaryOwnedExclusiveParent(
+    result: *PinnedReleaseFile,
+    parent_fd: c.fd_t,
+    leaf: [:0]const u8,
+    path: ?[:0]const u8,
+    bytes: []const u8,
+) Error!void {
+    if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
+    if (bytes.len == 0 or bytes.len > summary_cap) return error.TooLarge;
     var keep_parent = false;
     defer {
-        if (!keep_parent) _ = c.close(parent.fd);
+        if (!keep_parent) _ = c.close(parent_fd);
     }
     var existing: posix.Stat = undefined;
-    if (c.fstatat(parent.fd, parent.leaf.ptr, &existing, posix.AT.SYMLINK_NOFOLLOW) == 0)
+    if (c.fstatat(parent_fd, leaf.ptr, &existing, posix.AT.SYMLINK_NOFOLLOW) == 0)
         return error.DestinationExists;
     if (posix.errno(-1) != .NOENT) return error.UnsafePath;
 
@@ -638,7 +725,7 @@ pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const 
         c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
         temp = std.fmt.bufPrintZ(&temp_buf, ".maru-release-summary-{x}.tmp", .{nonce}) catch
             return error.CreateFailed;
-        fd = c.openat(parent.fd, temp.ptr, .{
+        fd = c.openat(parent_fd, temp.ptr, .{
             .ACCMODE = .RDWR,
             .CREAT = true,
             .EXCL = true,
@@ -654,9 +741,9 @@ pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const 
     var keep_fd = false;
     defer {
         var removed = false;
-        if (temp_exists) removed = unlinkHeldLeaf(parent.fd, temp, fd);
-        if (final_exists) removed = unlinkHeldLeaf(parent.fd, parent.leaf, fd) or removed;
-        if (removed) _ = c.fsync(parent.fd);
+        if (temp_exists) removed = unlinkHeldLeaf(parent_fd, temp, fd);
+        if (final_exists) removed = unlinkHeldLeaf(parent_fd, leaf, fd) or removed;
+        if (removed) _ = c.fsync(parent_fd);
         if (!keep_fd) _ = c.close(fd);
     }
     var offset: usize = 0;
@@ -676,20 +763,24 @@ pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const 
     if (before.link_count != 1 or before.size != bytes.len or before.mode & 0o777 != 0o600)
         return error.FileChanged;
     const digest = try hashExact(fd, before.size);
-    if (renameatx_np(parent.fd, temp.ptr, parent.fd, parent.leaf.ptr, rename_excl) != 0) {
+    if (renameatx_np(parent_fd, temp.ptr, parent_fd, leaf.ptr, rename_excl) != 0) {
         if (posix.errno(-1) == .EXIST) return error.DestinationExists;
         return error.PublishFailed;
     }
     temp_exists = false;
     final_exists = true;
-    if (c.fsync(parent.fd) != 0) return error.SyncFailed;
+    if (c.fsync(parent_fd) != 0) return error.SyncFailed;
 
-    const final_fd = safe_open.openAbsoluteNoFollow(path, false) catch return error.FileChanged;
+    const final_fd = if (path) |absolute|
+        safe_open.openAbsoluteNoFollow(absolute, false) catch return error.FileChanged
+    else
+        c.openat(parent_fd, leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(c.mode_t, 0));
+    if (final_fd < 0) return error.FileChanged;
     defer _ = c.close(final_fd);
     var held_stat: posix.Stat = undefined;
     var final_stat: posix.Stat = undefined;
     var parent_stat: posix.Stat = undefined;
-    if (c.fstat(fd, &held_stat) != 0 or c.fstat(final_fd, &final_stat) != 0 or c.fstat(parent.fd, &parent_stat) != 0)
+    if (c.fstat(fd, &held_stat) != 0 or c.fstat(final_fd, &final_stat) != 0 or c.fstat(parent_fd, &parent_stat) != 0)
         return error.FileChanged;
     const held = releaseFingerprint(held_stat, false) catch return error.FileChanged;
     const reopened = releaseFingerprint(final_stat, false) catch return error.FileChanged;
@@ -701,13 +792,13 @@ pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const 
         held.mode & 0o777 != 0o600 or !std.mem.eql(u8, &digest, &final_digest))
         return error.FileChanged;
     const parent_fingerprint = directoryFingerprint(parent_stat) catch return error.FileChanged;
-    var path_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+    var path_digest: [32]u8 = @splat(0);
+    if (path) |absolute| std.crypto.hash.sha2.Sha256.hash(absolute, &path_digest, .{});
     result.* = .{
         .owner = result,
         .fd = fd,
-        .parent_fd = parent.fd,
-        .path_len = path.len,
+        .parent_fd = parent_fd,
+        .path_len = if (path) |absolute| absolute.len else 0,
         .path_sha256 = path_digest,
         .fingerprint = held,
         .parent_fingerprint = parent_fingerprint,

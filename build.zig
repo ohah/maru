@@ -8,6 +8,23 @@ const product_identity = @import("src/platform/macos/product_identity.zig");
 /// Zig 0.16 Build의 test-server IPC 대신 project-owned simple runner를 쓴다.
 /// `simple_test_runner`는 standard terminal runner와 같은 test/leak/log failure
 /// semantics를 exit code로 보존한다. docs/development-commands.md를 함께 갱신한다.
+const BoundaryShard = struct { index: usize, count: usize };
+
+/// `-Dboundary-shard=i/n` 을 해석한다. 형식이 틀리면 설정 단계에서 바로 죽는다 — 조용히 전체를 돌거나 빈 샤드를
+/// 초록으로 만들지 않게.
+fn parseBoundaryShard(raw: ?[]const u8) ?BoundaryShard {
+    const text = raw orelse return null;
+    const slash = std.mem.indexOfScalar(u8, text, '/') orelse
+        std.debug.panic("invalid -Dboundary-shard '{s}': expected i/n", .{text});
+    const index = std.fmt.parseInt(usize, text[0..slash], 10) catch
+        std.debug.panic("invalid -Dboundary-shard '{s}': expected i/n", .{text});
+    const count = std.fmt.parseInt(usize, text[slash + 1 ..], 10) catch
+        std.debug.panic("invalid -Dboundary-shard '{s}': expected i/n", .{text});
+    if (count == 0 or index >= count)
+        std.debug.panic("invalid -Dboundary-shard '{s}': need i < n and n >= 1", .{text});
+    return .{ .index = index, .count = count };
+}
+
 fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var configured = options;
     configured.test_runner = .{
@@ -3946,7 +3963,10 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/imports.zig"),
             .target = target,
-            .optimize = optimize,
+            // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
+            // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
+            // 의미를 바꾸지 않는다(빌드 모드로 분기하는 코드 없음, 실측 2026-09-06).
+            .optimize = .ReleaseSafe,
         }),
     });
     const run_boundary_tests = b.addRunArtifact(boundary_tests);
@@ -4183,7 +4203,20 @@ pub fn build(b: *std.Build) void {
     const run_i18n_pinned_language_boundary_tests = b.addRunArtifact(i18n_pinned_language_boundary_tests);
     run_i18n_pinned_language_boundary_tests.setCwd(b.path("."));
 
-    const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
+    // **check-boundaries 는 CI 에서 인덱스 샤드로 나뉘어 돈다**(`-Dboundary-shard=i/n`). 등록 148줄은 전부 이
+    // `boundary_step` 에 그대로 매달린다. 샤드 옵션이 있으면 이 스텝은 `check-boundaries-all` 이 되고, `build()` 끝에서
+    // 의존 목록을 인덱스 mod n 으로 골라 `check-boundaries` 스텝을 다시 만든다. 옵션이 없으면(로컬) 이 스텝이 전체다.
+    // 왜 나누는가: 아티팩트별 실행이 stderr 잠금으로 직렬이라 웜 캐시에서도 로컬 258초·CI 약 500초가 바닥이고, CI 잡
+    // 810초가 PR 임계 경로였다(실측 2026-09-06). 잡을 넷으로 나누면 벽시계가 그 1/4 이다.
+    const boundary_shard = parseBoundaryShard(b.option(
+        []const u8,
+        "boundary-shard",
+        "check-boundaries 를 i/n 인덱스 샤드로 나눠 돈다 (CI 매트릭스용). 없으면 전체를 돈다.",
+    ));
+    const boundary_step = b.step(
+        if (boundary_shard != null) "check-boundaries-all" else "check-boundaries",
+        "Check facade import boundaries",
+    );
     const session_host_p4_r3_screen_inbox_step = b.step(
         "test-session-host-p4-r3-screen-inbox",
         "P4 R3 single-owner screen inbox boundary gates",
@@ -4268,6 +4301,17 @@ pub fn build(b: *std.Build) void {
     run_macos_app_host_abi_shards_boundary_tests.addArg("--maru-expect-tests=1");
     run_macos_app_host_abi_shards_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_macos_app_host_abi_shards_boundary_tests.step);
+    const check_boundaries_shards_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/check_boundaries_shards_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_check_boundaries_shards_boundary_tests = b.addRunArtifact(check_boundaries_shards_boundary_tests);
+    run_check_boundaries_shards_boundary_tests.addArg("--maru-expect-tests=1");
+    run_check_boundaries_shards_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_check_boundaries_shards_boundary_tests.step);
     const session_host_cr6f_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_cr6f_boundary.zig"),
@@ -16845,6 +16889,28 @@ pub fn build(b: *std.Build) void {
 
     const shape_run_probe_step = b.step("shape-run-probe", "Measure shaping run distribution (measure-first)");
     shape_run_probe_step.dependOn(&run_shape_run_probe.step);
+
+    // [check-boundaries 샤드] 위 `boundary_step` 주석 참고. 등록이 모두 끝난 여기서 의존 목록을 자른다 — 그래서
+    // 어떤 판정자도 샤드 밖으로 빠질 수 없다(인덱스 mod n 은 전체를 정확히 n 조각으로 덮는다). 각 샤드는 자기 몫과
+    // 전체 수를 한 줄로 찍고, CI 집계 잡이 네 샤드의 몫 합이 전체와 같은지 다시 센다.
+    if (boundary_shard) |shard| {
+        const total = boundary_step.dependencies.items.len;
+        const sharded = b.step(
+            "check-boundaries",
+            b.fmt("Check facade import boundaries — shard {d}/{d}", .{ shard.index, shard.count }),
+        );
+        var mine: usize = 0;
+        for (boundary_step.dependencies.items, 0..) |dep, index| {
+            if (index % shard.count != shard.index) continue;
+            sharded.dependOn(dep);
+            mine += 1;
+        }
+        if (mine == 0) std.debug.panic(
+            "check-boundaries shard {d}/{d} selects no steps (total {d})",
+            .{ shard.index, shard.count, total },
+        );
+        std.debug.print("check-boundaries shard {d}/{d}: {d} of {d} steps\n", .{ shard.index, shard.count, mine, total });
+    }
 }
 
 fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {

@@ -196,12 +196,18 @@ jobs:
   #
   # **필수 체크다.** `check` 에서 빠졌으므로 이 잡이 required 가 아니면 경계 실패가 머지를 막지 못한다 —
   # docs/performance-budget.md 「필수 CI 체크」 표와 branch protection 을 함께 움직인다.
-  check-boundaries:
-    name: check-boundaries
+  check-boundaries-shard:
+    # check-boundaries 를 인덱스 샤드 넷으로 나눠 병렬로 돈다 — build.zig 의 `-Dboundary-shard` 주석 참고. 필수 체크
+    # 이름 `check-boundaries` 는 아래 집계 잡이 유지한다. 샤드가 어느 하나라도 실패·취소되면 집계가 실패한다.
+    name: check-boundaries (${{ matrix.shard }}/4)
     needs: changes
     if: ${{ github.event.pull_request.draft != true && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -216,26 +222,36 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-check-boundaries-s${{ matrix.shard }}of4-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-check-boundaries-s${{ matrix.shard }}of4-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-check-boundaries-s${{ matrix.shard }}of4-
             zig-v2-${{ runner.os }}-check-boundaries-
             zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-check-
-      - name: Run the boundary gates
+      - name: Run the boundary gates (shard)
         env:
           CODE: ${{ needs.changes.outputs.code }}
           CHANGES_RESULT: ${{ needs.changes.result }}
+          SHARD: ${{ matrix.shard }}
         run: |
-          set -eu
+          set -euo pipefail
           if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
-            mise run check-boundaries
+            zig build check-boundaries -Dboundary-shard="$SHARD/4" 2>&1 | tee boundary-shard.log
+            # build.zig 가 찍는 «내 몫 / 전체» 한 줄 — 없으면 배선이 깨진 것이라 여기서 빨개진다.
+            grep -E "^check-boundaries shard $SHARD/4: [0-9]+ of [0-9]+ steps$" boundary-shard.log > boundary-shard-count.txt
           else
             echo "코드가 안 바뀐 변경 — 경계 게이트를 돌릴 것이 없다"
+            echo skipped > boundary-shard-count.txt
           fi
-      - name: 저장 전에 캐시를 예산 안으로 줄인다
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: boundary-shard-${{ matrix.shard }}
+          path: boundary-shard-count.txt
+          retention-days: 1
+      - name: 저장 전에 캐시를 예산 안으로 줄인다 (샤드는 전체의 1/4 이라 예산도 1/3)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: sh tools/ci/prune-zig-cache.sh 3072
+        run: sh tools/ci/prune-zig-cache.sh 1024
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -243,7 +259,43 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-check-boundaries-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v2-${{ runner.os }}-check-boundaries-s${{ matrix.shard }}of4-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
+  check-boundaries:
+    # 필수 체크의 이름을 지키는 집계 잡. 샤드 잡의 결론이 success 가 아니면 실패하고, 네 샤드가 찍은 «내 몫 / 전체» 의 합이
+    # 전체와 같은지 다시 센다 — 인덱스 mod n 은 구조상 빠짐이 없지만, 배선이 바뀌어도 여기서 한 번 더 걸린다.
+    name: check-boundaries
+    needs: [changes, check-boundaries-shard]
+    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: boundary-shard-*
+          path: shards
+      - name: 샤드 결론과 몫의 합을 확인한다
+        env:
+          SHARDS_RESULT: ${{ needs.check-boundaries-shard.result }}
+        run: |
+          set -euo pipefail
+          echo "shard job result: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = "success" ] || { echo "샤드 잡이 success 가 아니다: $SHARDS_RESULT"; exit 1; }
+          files=$(ls shards/*/boundary-shard-count.txt | wc -l)
+          [ "$files" -eq 4 ] || { echo "샤드 개수 파일이 4개가 아니다: $files"; exit 1; }
+          skipped=$(grep -lx skipped shards/*/boundary-shard-count.txt | wc -l || true)
+          if [ "$skipped" -eq 4 ]; then echo "코드가 안 바뀐 변경 — 네 샤드 모두 건너뛰었다"; exit 0; fi
+          [ "$skipped" -eq 0 ] || { echo "일부 샤드만 건너뛰었다: $skipped"; exit 1; }
+          sum=0; total=""
+          for f in shards/*/boundary-shard-count.txt; do
+            line=$(cat "$f"); echo "$line"
+            k=$(printf '%s' "$line" | sed -E 's/.*: ([0-9]+) of ([0-9]+) steps$/\1/')
+            t=$(printf '%s' "$line" | sed -E 's/.*: ([0-9]+) of ([0-9]+) steps$/\2/')
+            if [ -n "$total" ] && [ "$t" != "$total" ]; then echo "샤드마다 전체 수가 다르다: $t vs $total"; exit 1; fi
+            total=$t; sum=$((sum + k))
+          done
+          [ "$sum" -eq "$total" ] || { echo "샤드 몫의 합 $sum ≠ 전체 $total — 판정자가 빠졌다"; exit 1; }
+          echo "check-boundaries: 샤드 몫의 합 $sum = 전체 $total"
 
   file-explorer-macos:
     name: file explorer macOS product path

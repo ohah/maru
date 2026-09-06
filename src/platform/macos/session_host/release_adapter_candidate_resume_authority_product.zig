@@ -169,6 +169,19 @@ const ConcreteSteps = struct {
         const value = try self.input();
         try cli_mod.revalidate(self.execution.allocator, value.cli_path, value.cli);
         try requireCrossIdentityGraph(preparation, aggregate, value.cli);
+        var parsed = try self.readManifest();
+        defer parsed.deinit();
+        try requireSemanticGraphImpl(parsed.value(), .{
+            .preparation_evidence = preparation.entries[0].observation,
+            .preparation_manifest = preparation.entries[1].observation,
+            .aggregate_evidence = aggregate.entries[0],
+            .aggregate_dmg = aggregate.artifacts[0],
+            .aggregate_frozen = aggregate.artifacts[1],
+            .aggregate_manifest = aggregate.artifacts[2],
+            .dmg_name = std.fs.path.basename(value.paths.dmg),
+            .frozen_name = std.fs.path.basename(value.paths.frozen_executable),
+            .evidence_name = aggregate.evidence_name,
+        });
         _ = try self.execution.deadline.remaining();
     }
 
@@ -273,6 +286,41 @@ fn sameIdentity(left: files.Identity, right: files.Identity) bool {
     return left.device == right.device and left.inode == right.inode;
 }
 
+const SemanticGraphInput = struct {
+    preparation_evidence: files.ExecutableObservation,
+    preparation_manifest: files.ExecutableObservation,
+    aggregate_evidence: files.ExecutableObservation,
+    aggregate_dmg: files.ExecutableObservation,
+    aggregate_frozen: files.ExecutableObservation,
+    aggregate_manifest: files.ExecutableObservation,
+    dmg_name: []const u8,
+    frozen_name: []const u8,
+    evidence_name: []const u8,
+};
+
+fn requireSemanticGraphImpl(manifest: *const manifest_mod.Manifest, graph: SemanticGraphInput) !void {
+    if (!sameContent(graph.preparation_evidence, graph.aggregate_evidence) or
+        sameIdentity(graph.preparation_evidence.identity, graph.aggregate_evidence.identity) or
+        !sameObservation(graph.preparation_manifest, graph.aggregate_manifest) or
+        manifest.assets.len != 3) return error.AuthorityChanged;
+
+    const observations = [_]files.ExecutableObservation{ graph.aggregate_dmg, graph.aggregate_frozen, graph.aggregate_evidence };
+    const roles = [_]manifest_mod.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
+    const names = [_][]const u8{ graph.dmg_name, graph.frozen_name, graph.evidence_name };
+    for (manifest.assets, observations, roles, names) |asset, observation, role, name| {
+        if (asset.role != role or !std.mem.eql(u8, asset.name, name) or asset.size != observation.size or
+            !std.mem.eql(u8, asset.sha256, &observation.sha256)) return error.AuthorityChanged;
+    }
+}
+
+fn sameContent(left: files.ExecutableObservation, right: files.ExecutableObservation) bool {
+    return left.size == right.size and std.mem.eql(u8, &left.sha256, &right.sha256);
+}
+
+fn sameObservation(left: files.ExecutableObservation, right: files.ExecutableObservation) bool {
+    return sameIdentity(left.identity, right.identity) and left.mode == right.mode and sameContent(left, right);
+}
+
 fn classifyCloseErrorImpl(err: anyerror) anyerror!phase.CleanupDisposition {
     return switch (err) {
         error.DescriptorCloseFailed => .descriptor_close_failed,
@@ -330,12 +378,18 @@ fn overlaps(left: []const u8, right: []const u8) bool {
 }
 
 pub const testing_api = if (builtin.is_test) struct {
+    pub const SemanticGraph = SemanticGraphInput;
+
     pub fn classifyCloseError(err: anyerror) anyerror!phase.CleanupDisposition {
         return classifyCloseErrorImpl(err);
     }
 
     pub fn requireIdentityGraph(identities: [11]files.Identity) !void {
         return requireIdentityGraphImpl(identities);
+    }
+
+    pub fn requireSemanticGraph(manifest: *const manifest_mod.Manifest, graph: SemanticGraph) !void {
+        return requireSemanticGraphImpl(manifest, graph);
     }
 
     pub fn driveWith(steps: anytype, transaction: *phase.Transaction) !void {

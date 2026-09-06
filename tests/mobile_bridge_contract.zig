@@ -7064,6 +7064,68 @@ test "M9 서술자: 복사 버튼도 낸다 — 눌리는데 안 읽히면 복�
     try std.testing.expect(c.y >= n.rect.y and c.y <= n.rect.y + n.rect.h);
 }
 
+test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값이다" {
+    // **한 덩어리로 주면 모바일에서 못 읽는다.** macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이
+    // 있어 화면 전체를 값 하나로 줘도 줄 이동이 되지만(Ghostty 가 그 길이다), UIKit·Android 의
+    // 요소에는 그것이 없다 — 서른 줄이 한 번에 읽히고 특정 줄로 못 간다. 그래서 웹 터미널처럼
+    // 줄마다 요소를 둔다(xterm.js `AccessibilityManager`).
+    //
+    // **이름이 번호인 것이 요점이다.** 글자를 이름에 담으면 출력이 흐를 때마다 「생김새가
+    // 바뀌었다」가 되어 host 가 요소를 다시 만들고 알림을 보낸다 — 커서가 계속 처음으로 튕긴다.
+    const T = std.testing;
+    endAnyGesture();
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    // **줄을 커서로 옮긴다** — `\r\n` 은 입력 경로가 Enter 로 가르므로 같은 줄을 덮는다
+    // (그렇게 짰다가 한 줄만 나와서 알았다).
+    _ = bridge.maru_mobile_input("hello", 5);
+    _ = bridge.maru_mobile_input("\x1b[2;1H", 6);
+    _ = bridge.maru_mobile_input("world", 5);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var rows: usize = 0;
+    var first_label: []const u8 = "";
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .text) continue;
+        rows += 1;
+        if (rows == 1) first_label = n.sem.label;
+        // **글자는 값이지 이름이 아니다** — 이름은 번호라 짧다.
+        try T.expect(n.sem.label.len <= 3);
+        try T.expect(n.sem.value.len > 0); // 빈 줄은 아예 안 낸다
+    }
+    try T.expectEqual(@as(usize, 2), rows); // 「hello」와 「world」 두 줄뿐 — 빈 줄은 안 센다
+    try T.expectEqualStrings("1", first_label);
+
+    // **글자가 바뀌어도 «이름과 자리» 는 그대로다** — 그것이 커서를 지키는 성질이다.
+    var before_names: [64]u8 = undefined;
+    var bn: usize = 0;
+    var before_y: [8]f32 = undefined;
+    var bi: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .text or bi == before_y.len) continue;
+        @memcpy(before_names[bn..][0..n.sem.label.len], n.sem.label);
+        bn += n.sem.label.len;
+        before_y[bi] = n.rect.y;
+        bi += 1;
+    }
+    _ = bridge.maru_mobile_input("!!", 2); // 같은 줄의 글자만 바뀐다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var an: usize = 0;
+    var ai: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .text or ai == before_y.len) continue;
+        try T.expectEqualStrings(before_names[an..][0..n.sem.label.len], n.sem.label);
+        an += n.sem.label.len;
+        try T.expectEqual(before_y[ai], n.rect.y);
+        ai += 1;
+    }
+    try T.expectEqual(bi, ai);
+}
+
 test "M9 서술자: 터미널 앱 바의 세 자리를 이름과 역할로 낸다" {
     bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());

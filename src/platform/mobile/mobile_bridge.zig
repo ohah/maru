@@ -3478,6 +3478,23 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         strike_run.flush(grid_cols, ox, y0 + y_strike, cell_w, rule);
         over_run.flush(grid_cols, ox, y0 + y_over, cell_w, rule);
 
+        // ── 1.5) **그 줄을 읽을 수 있게 낸다**(M9).
+        //
+        // **줄마다 하나다.** 화면 전체를 한 요소의 값으로 주면 스크린 리더가 통째로 한 번에 읽고
+        // 줄 이동이 안 된다 — macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이 있어 그렇게 해도 되지만
+        // (Ghostty 가 그 길이다), UIKit·Android 의 요소에는 그것이 없다. 웹 터미널이 행마다 요소를
+        // 두는 것과 같은 이유다(xterm.js `AccessibilityManager`).
+        //
+        // **신원은 「몇 번째 줄」이고 글자는 값이다.** 이름에 글자를 담으면 출력이 흐를 때마다
+        // 「생김새가 바뀌었다」가 되어 host 가 요소를 다시 만들고 알림을 보낸다 — 스크린 리더의
+        // 커서가 계속 처음으로 튕긴다(목록 화면에서 그 규칙을 세울 때 정한 그대로다).
+        noteTerminalRow(row, snap, core, .{
+            .x = rect.x,
+            .y = @floatFromInt(y0),
+            .w = rect.width,
+            .h = @floatFromInt(line_h),
+        });
+
         // ── 2) 글자
         col = 0;
         while (col < grid_cols) : (col += 1) {
@@ -7536,6 +7553,48 @@ fn a11yIntern(text: []const u8) []const u8 {
 /// 화면에서는 헤더를 나중에 그려 지나간 줄을 덮지만 **서술자에는 덮개가 없다** — 자리를 그대로
 /// 내면 스크린 리더가 헤더 자리에서 그 줄을 짚고, 톱니와 겹친다. 눈에는 안 보이고 훑는 사람만
 /// 겪는 어긋남이라 판정자로만 잡힌다(적대적 검증 1회차).
+/// 본문 한 줄의 서술자. **이름은 「몇째 줄」, 값은 그 줄의 글자**다(위 호출 자리의 주석이 근거).
+///
+/// 빈 줄은 안 낸다 — 스무 줄짜리 빈 화면에서 스무 번을 훑게 하지 않는다. 끝의 여백도 턴다:
+/// 터미널은 줄을 공백으로 채우므로 그대로 주면 「명령어 뒤에 공백 일흔 개」가 읽힌다.
+fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, rect: SetRect) void {
+    if (!a11y_top_layer) return; // 덮여 있으면 아래 층은 안 낸다(누르는 쪽과 같은 조건)
+    var buf: [term_row_read_cap]u8 = undefined;
+    var len: usize = 0;
+    var col: u16 = 0;
+    while (col < body_cols) : (col += 1) {
+        const cell = snap.cells[core.index(row, col)];
+        if (cell.continuation) continue;
+        const cp: u21 = if (cell.codepoint == 0) ' ' else cell.codepoint;
+        var enc: [4]u8 = undefined;
+        // **담을 수 없는 값이면 대체 문자로 자리를 지킨다.** 건너뛰면 그 뒤 칸이 앞으로 밀려
+        // 읽는 줄과 보는 줄이 어긋난다 — 이 파일이 계속 막아 온 그 어긋남이다(계약 §5: 조용히
+        // 넘어가지 않는다. 여기서는 「무엇이 있었다」를 지우지 않는 것이 옳은 처리다).
+        const n = if (std.unicode.utf8Encode(cp, &enc)) |k| k else |_| repl: {
+            @memcpy(enc[0..3], "\u{FFFD}");
+            break :repl 3;
+        };
+        if (len + n > buf.len) break;
+        @memcpy(buf[len..][0..n], enc[0..n]);
+        len += n;
+    }
+    const text = std.mem.trimEnd(u8, buf[0..len], " ");
+    if (text.len == 0) return;
+
+    // 이름은 줄 번호다. **모자랄 수 없다** — 격자 행은 `u16` 이라 다섯 자리를 넘지 않는다.
+    // 그래도 오류를 삼키지 않으려고 갈래를 적어 둔다(계약 §5).
+    var name: [24]u8 = undefined;
+    const label = if (std.fmt.bufPrint(&name, "{d}", .{row + 1})) |t| t else |_| short: {
+        setLastError("a11y_row_label");
+        break :short "";
+    };
+    if (label.len == 0) return;
+    noteA11y(rect, .{ .role = .text, .label = label, .value = text });
+}
+
+/// 한 줄에서 읽어 낼 글자의 상한. 240칸 × 4바이트라 어떤 격자에서도 줄이 통째로 들어간다.
+const term_row_read_cap = 960;
+
 fn noteA11yClipped(rect: SetRect, clip: SetRect, sem: tree.Semantics) void {
     const top = @max(rect.y, clip.y);
     const bottom = @min(rect.y + rect.h, clip.y + clip.h);

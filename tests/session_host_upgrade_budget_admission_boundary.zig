@@ -48,7 +48,7 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         128 * 1024,
     );
     defer allocator.free(outer_loop);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
     const barrel = try read(
         allocator,

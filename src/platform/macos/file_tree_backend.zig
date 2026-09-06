@@ -46,6 +46,9 @@ pub const Result = struct {
     root_operation: u32 = 0,
     root_validation_round: u8 = 0,
     validated_dir: ?std.Io.Dir = null,
+    /// 이 결과가 원격 job 의 것인가(RF3a) — 소비처가 로컬/원격 모델로 **라우팅하는 유일한 키**다.
+    /// 경로로 가르면 같은 철자의 두 기계가 섞인다(§2.1).
+    was_remote: bool = false,
     /// 원격이 wire 로 보고한 실패(RF2b — `!` 레코드) 또는 전송 수준 실패의 기계 판정 문자열.
     /// **표시는 아직 아니다** — 소비처(RF3)가 i18n 으로 풀어 「원격이라 못 읽는다」를 그린다(§2.5).
     /// null 이면서 `ok == false` 인 원격 결과는 잘림·오독이다(파서가 완결을 못 봤다).
@@ -295,6 +298,23 @@ pub const Backend = struct {
         for (state.results[1..state.results_len], 0..) |remaining, i| state.results[i] = remaining;
         state.results_len -= 1;
         return result;
+    }
+
+    /// 완료 큐에 결과 하나를 **판정자용으로** 밀어 넣는다. 원격 수직(적용→드레인→표시)을 ssh 없이
+    /// 태우기 위한 것 — 실물 전송은 RF2b 하네스 게이트가 소유한다. `isIdleForTest` 와 같은 규율로
+    /// test 밖 컴파일을 컴파일 에러로 막는다.
+    pub fn pushResultForTest(self: *Backend, result: Result) void {
+        if (!builtin.is_test) @compileError("pushResultForTest is test-only");
+        const state = self.state orelse return;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        if (state.shutting_down or state.results_len >= max_results) {
+            var owned = result;
+            owned.deinit(state.allocator, state.io);
+            return;
+        }
+        state.results[state.results_len] = result;
+        state.results_len += 1;
     }
 
     pub fn isIdleForTest(self: *Backend) bool {
@@ -570,7 +590,7 @@ fn remoteScanDirectory(allocator: std.mem.Allocator, owned_path: []u8, remote: R
         &out,
     ) catch {
         // 전송 자체를 못 세웠다(fork/pipe). wire 가 없으니 매핑도 없다 — ok=false 인 빈 결과다.
-        return .{ .path = owned_path };
+        return .{ .path = owned_path, .was_remote = true };
     };
     defer allocator.free(out);
     return remoteResultFromWire(allocator, owned_path, out, code);
@@ -582,7 +602,7 @@ fn remoteScanDirectory(allocator: std.mem.Allocator, owned_path: []u8, remote: R
 /// 코드가 0 일 때. 원격 오류·비정상 종료(127=헬퍼 없음 포함)·잘림·오독은 전부 ok=false 이고,
 /// 그중 **말할 수 있는 것**은 `remote_error` 에 담는다 — 침묵과 실패를 가르는 것이 §2.5 다.
 fn remoteResultFromWire(allocator: std.mem.Allocator, owned_path: []u8, bytes: []const u8, exit_code: c_int) Result {
-    var result = Result{ .path = owned_path };
+    var result = Result{ .path = owned_path, .was_remote = true };
     var parser = listing.Parser.init(bytes);
     var malformed = false;
     while (parser.next() catch blk: {

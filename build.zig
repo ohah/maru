@@ -3230,6 +3230,38 @@ pub fn build(b: *std.Build) void {
     // 돌리지 않고 이 축만 잰다.
     b.step("test-file-tree-backend", "Run the file tree backend unit tests only").dependOn(&run_file_tree_backend_tests.step);
 
+    // 원격 탐색기 수직 판정자(RF3a~) — app_session 전체를 12 분 돌리지 않고 이 축만 잰다.
+    if (builtin.os.tag == .macos) {
+        const remote_explorer_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{"원격 탐색기"},
+        });
+        remote_explorer_tests.root_module.link_libc = true;
+        remote_explorer_tests.root_module.linkFramework("AppKit", .{});
+        remote_explorer_tests.root_module.linkFramework("Metal", .{});
+        remote_explorer_tests.root_module.linkFramework("MetalKit", .{});
+        remote_explorer_tests.root_module.linkFramework("QuartzCore", .{});
+        remote_explorer_tests.root_module.linkFramework("CoreText", .{});
+        remote_explorer_tests.root_module.linkFramework("CoreGraphics", .{});
+        remote_explorer_tests.root_module.linkFramework("ImageIO", .{});
+        remote_explorer_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
+        run_remote_explorer_tests.addArg("--maru-expect-tests=4"); // 이름 있는 1 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+        run_remote_explorer_tests.setCwd(b.path("."));
+        b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
+    }
+
     // **헬퍼 `list` ↔ 코덱 파서 왕복 게이트**(RF2a — docs/plans/remote-file-tree.md §10). 헬퍼는
     // wire 인코더의 **사본**을 들므로(std 만 임포트), 빌드가 만든 실물 바이너리를 실제로 돌려 세션
     // 코덱 파서로 되읽는다 — RW 의 version_line 문자열 대조보다 강한, 바이트 수준 드리프트 방어다.
@@ -5119,7 +5151,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_file_tree_axis_boundary_tests = b.addRunArtifact(remote_file_tree_axis_boundary_tests);
-    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=3");
+    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=4");
     run_remote_file_tree_axis_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_remote_file_tree_axis_boundary_tests.step);
 

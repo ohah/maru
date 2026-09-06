@@ -28,7 +28,7 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
     defer allocator.free(process_test);
     const harness = try read(allocator, "tools/ci/session-host-disk-full-admission.sh", 16 * 1024);
     defer allocator.free(harness);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(

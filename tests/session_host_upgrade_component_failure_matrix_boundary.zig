@@ -64,7 +64,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         std.testing.io,
         "build.zig",
         std.testing.allocator,
-        .limited(1024 * 1024),
+        .limited(2 * 1024 * 1024),
     );
     defer std.testing.allocator.free(build);
     const coordinator = try std.Io.Dir.cwd().readFileAlloc(

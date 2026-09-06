@@ -20,7 +20,7 @@ test "P3-e4d-2a metadata consumers use actual product boundaries" {
     const allocator = std.testing.allocator;
     const app = try read(allocator, "src/platform/macos/app_session.zig", 8 * 1024 * 1024);
     defer allocator.free(app);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
     const matrix = try read(allocator, "docs/verification-matrix.md", 2 * 1024 * 1024);
     defer allocator.free(matrix);

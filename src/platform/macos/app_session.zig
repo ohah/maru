@@ -5264,6 +5264,8 @@ pub const AppSession = struct {
     // FP7: Zed project panel 규칙을 따르는 L2 snapshot tree + L4 background scanner. tick은 아래 backend의
     // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
     file_tree: file_tree.Tree = undefined,
+    /// 원격 탐색기(RF3a) — 로컬 트리를 대체하지 않고 얹히는 별도 모델(file_panel.RemoteExplorer 주석).
+    remote_explorer: file_panel_ops.RemoteExplorer = undefined,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
@@ -6340,6 +6342,8 @@ pub const AppSession = struct {
         {
             self.file_tree = file_tree.Tree.init(allocator);
             errdefer self.file_tree.deinit();
+            self.remote_explorer = .{ .tree = file_tree.Tree.init(allocator) };
+            errdefer self.remote_explorer.deinit(allocator);
             self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
             errdefer self.file_tree_backend.deinit();
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
@@ -21462,6 +21466,7 @@ pub const AppSession = struct {
             self.file_tree_mutation_backend.deinit();
             self.file_tree_backend.deinit();
             self.file_tree.deinit();
+            self.remote_explorer.deinit(self.allocator);
             self.file_tree_rows.deinit(self.allocator);
             self.git_ignore_query_buf.deinit(self.allocator);
             self.git_ignore_query_paths.deinit(self.allocator);
@@ -79301,4 +79306,120 @@ test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조�
     collected.clearRetainingCapacity();
     session.collectStatusBarItems(&collected, builder, colors);
     try std.testing.expect(hasItem(session));
+}
+
+test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드레인 → «못 읽는다» 로 접힘 (RF3a)" {
+    // ssh 없이 태우는 수직이다 — 전송 실물은 RF2b 하네스 게이트가 소유하고, 여기는 적용·발행·오류
+    // 표시·펜스가 **한 줄로 이어지는지**를 본다(계획 §10.4). 결과는 backend 의 판정자용 주입으로
+    // 넣는다(`pushResultForTest` — `isIdleForTest` 와 같은 test-only 규율).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // ── ① 원격 대상 적용(따라가기의 가시성 게이트는 우회 — 판정이 요구하는 control socket 은
+    //     단위에서 못 세운다. 그 게이트 자체는 remoteScmTarget 판정자들이 소유한다).
+    file_panel_ops.applyRemoteExplorerTarget(session, "me@build-box", "/maru-dead-ctl", "/srv/app/proj");
+    try std.testing.expect(file_panel_ops.explorerRemoteActive(session));
+    // 변경 펜스(§2.4): 원격이 활성이면 mutation 진입점이 닫힌다.
+    try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
+
+    // ── ② 스캔 요청을 판정자가 소비한다 — 펌프가 죽은 소켓으로 실물 ssh 를 띄우지 않게.
+    //     (ssh 는 -S 소켓이 없으면 **직접 접속으로 폴백**한다 — 테스트가 네트워크를 만지면 안 된다.)
+    const scan_path = session.remote_explorer.tree.takeScanRequest() orelse return error.TestUnexpectedResult;
+    defer a.free(scan_path);
+    try std.testing.expectEqualStrings("/srv/app/proj", scan_path);
+
+    // ── ③ 첫 재빌드: 원격 모델이 발행 목록을 채운다 — root 행이 선다.
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_rows.items.len >= 1);
+    switch (session.file_tree_rows.items[0]) {
+        .root => |v| try std.testing.expectEqualStrings("/srv/app/proj", v.path),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // ── ③b 성공 결과 주입 — 항목이 원격 모델을 지나 발행 행으로 나온다(신원 pin 포함).
+    {
+        var ok_result: file_tree_backend.Result = .{
+            .path = try a.dupe(u8, "/srv/app/proj"),
+            .ok = true,
+            .was_remote = true,
+            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @intFromEnum(file_tree.IdentityKind.directory) } },
+            .expected_root_generation = session.remote_explorer.tree.rootGeneration(),
+        };
+        try ok_result.entries.append(a, .{
+            .name = try a.dupe(u8, "sub"),
+            .kind = .directory,
+            .identity = .{ .device = 7, .inode = 43, .kind = @intFromEnum(file_tree.IdentityKind.directory) },
+        });
+        try ok_result.entries.append(a, .{
+            .name = try a.dupe(u8, "nl\nname.txt"),
+            .kind = .file,
+            .identity = .{ .device = 7, .inode = 44, .kind = @intFromEnum(file_tree.IdentityKind.regular) },
+        });
+        session.file_tree_backend.pushResultForTest(ok_result);
+    }
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.remote_explorer.err == null);
+    {
+        var saw_dir = false;
+        var saw_file = false;
+        for (session.file_tree_rows.items) |row| switch (row) {
+            .directory => |v| {
+                try std.testing.expectEqualStrings("sub", v.label);
+                saw_dir = true;
+            },
+            .file => |v| {
+                try std.testing.expectEqualStrings("nl\nname.txt", v.label);
+                saw_file = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(saw_dir);
+        try std.testing.expect(saw_file);
+    }
+
+    // ── ④ 실패 결과 주입(root 스캔이 «원격이라 못 읽는다» 로 끝난 모양) → 드레인.
+    session.file_tree_backend.pushResultForTest(.{
+        .path = try a.dupe(u8, "/srv/app/proj"),
+        .ok = false,
+        .was_remote = true,
+        .remote_error = try a.dupe(u8, "opendir failed: AccessDenied"),
+        .expected_root_generation = session.remote_explorer.tree.rootGeneration(),
+    });
+    try file_panel_ops.updateFileTree(session);
+
+    // ── ⑤ §2.5 — 침묵이 아니다: 사유가 남고, root 실패는 안내 행(.empty) 하나로 접힌다.
+    try std.testing.expect(session.remote_explorer.err != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.remote_explorer.err.?, "AccessDenied") != null);
+    // root 행이 사라지고 안내 행(.empty)이 맨 위에 선다(뒤의 recent_header 는 로컬 빈 상태와 같은
+    // 상수 행이다 — 원격에는 최근 파일이 없어 count 0 으로 뜬다).
+    switch (session.file_tree_rows.items[0]) {
+        .empty => {},
+        else => return error.TestUnexpectedResult,
+    }
+    for (session.file_tree_rows.items) |row| switch (row) {
+        .root, .directory, .file => return error.TestUnexpectedResult,
+        else => {},
+    };
+
+    // ── ⑥ 로컬 복귀 — 원격 모델이 내려가고 발행은 로컬 모델로 돌아간다.
+    file_panel_ops.deactivateRemoteExplorer(session);
+    try std.testing.expect(!file_panel_ops.explorerRemoteActive(session));
+    try file_panel_ops.updateFileTree(session);
+    for (session.file_tree_rows.items) |row| switch (row) {
+        .root => |v| try std.testing.expect(!std.mem.eql(u8, v.path, "/srv/app/proj")),
+        else => {},
+    };
 }

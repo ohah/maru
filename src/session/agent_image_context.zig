@@ -103,6 +103,21 @@ pub const Label = struct {
 ///
 /// 대소문자 접기는 ASCII 만 한다. 한글에는 대소문자가 없고, 그 밖의 문자를 제대로 접으려면 유니코드
 /// 케이스 테이블이 필요한데 이 기능이 그것을 정당화하지 않는다.
+/// 활동(도구 호출) 한 건의 라벨. **인덱스가 가리킨 대상 문자열을 사람이 읽는 한 줄로 만든다.**
+///
+/// 이미지 라벨(`label`)과 달리 **찾을 것이 없다** — 스캐너가 이미 대상의 자리를 정했으므로
+/// (`description` → `file_path` → 명령, 활동 뷰 계약 §2.2) 여기서는 그 바이트를 다듬기만 한다.
+/// 다듬기는 `writeText` 가 이미 한다: JSON 이스케이프를 풀고, 줄바꿈·탭을 공백으로 접고, 상한에서
+/// 자른다. 명령의 52.4% 가 여러 줄이므로 그 접기가 없으면 한 줄 목록이 깨진다.
+///
+/// `is_path` 면 basename 만 남긴다 — `Read` 의 대상은 절대 경로라 라벨 폭을 통째로 먹는다(이미지
+/// 라벨이 같은 이유로 같은 선택을 한다).
+pub fn activityLabel(raw: []const u8, is_path: bool) Label {
+    var out: Label = .{ .source = .none };
+    out.len = writeText(&out.buf, if (is_path) basenameOf(raw) else raw);
+    return out;
+}
+
 pub fn matches(label_text: []const u8, query: []const u8) bool {
     if (query.len == 0) return true;
     if (label_text.len < query.len) return false;
@@ -884,4 +899,33 @@ test "자리 나누기: 큰 값이 넘쳐 「자리가 남는다」로 뒤집히
     try std.testing.expectEqual(@as(u16, 0), s.prefix_cols);
     try std.testing.expectEqual(@as(u16, 0), s.time_cols);
     try std.testing.expectEqual(@as(u16, 100), s.label_cols);
+}
+
+test "활동 라벨: 여러 줄 명령이 한 줄로 접힌다" {
+    // 실측: 명령의 52.4% 가 여러 줄이다. 접지 않으면 목록 한 줄이 깨진다.
+    const l = activityLabel("cd /tmp\\npython3 - <<'PY'\\nprint(1)\\nPY", false);
+    try testing.expectEqualStrings("cd /tmp python3 - <<'PY' print(1) PY", l.text());
+}
+
+test "활동 라벨: JSON 이스케이프를 푼다" {
+    const l = activityLabel("grep -n \\\"pub fn main\\\" src/main.zig", false);
+    try testing.expectEqualStrings("grep -n \"pub fn main\" src/main.zig", l.text());
+}
+
+test "활동 라벨: 경로는 basename 만 남는다" {
+    const l = activityLabel("/Users/me/work/repo/src/session/agent_image_index.zig", true);
+    try testing.expectEqualStrings("agent_image_index.zig", l.text());
+}
+
+test "활동 라벨: 상한을 넘겨도 잘려서 들어간다" {
+    var long: [512]u8 = undefined;
+    @memset(&long, 'x');
+    const l = activityLabel(&long, false);
+    try testing.expect(l.len > 0);
+    try testing.expect(l.len <= max_label_bytes);
+}
+
+test "활동 라벨: 빈 대상은 빈 라벨이다 — 지어내지 않는다" {
+    const l = activityLabel("", false);
+    try testing.expect(l.isEmpty());
 }

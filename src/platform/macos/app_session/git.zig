@@ -292,21 +292,63 @@ fn forgetReadFailure(self: *AppSession) void {
 ///
 /// 읽기 파이프라인은 안 건드린다(계약 §2 「트리거만 바꾼다」). 여기서 하는 일은 `refreshGitStatus` 를
 /// 부르는 것뿐이고, 그 함수가 이미 「목록 + 비활성 머리 줄」을 함께 낡음 표시한다.
+/// 감시 채널을 **지금 누가 쓰는가**([계획](../../../docs/plans/remote-file-tree.md) ③ 확정 — RF5a).
+///
+/// 채널은 창 당 하나다. 그것으로 충분한 이유는 **도크가 한 번에 한 뷰**이기 때문이다 — 소스 컨트롤과
+/// 탐색기가 동시에 보이는 상태가 없으므로 동시 수요가 구조적으로 없다. 새 채널을 안 만드는 것이
+/// `MaxSessions` 예산을 지키는 길이고, `change` 트리거 계약도 그대로 둔다(누가 받느냐만 뷰가 정한다).
+pub const WatchOwner = enum { source_control, explorer };
+
+/// 감시 대상 한 벌. 슬라이스는 **세션이 들고 있는 것을 빌린다** — tick 안에서만 쓴다.
+pub const WatchTarget = struct { dest: []const u8, root: []const u8, owner: WatchOwner };
+
+/// 이번 tick 의 감시 대상. `null` 이면 이 화면에는 감시할 원격이 없다.
+///
+fn remoteWatchTarget(self: *AppSession) ?WatchTarget {
+    return switch (self.dock.view) {
+        .source_control => {
+            const dest = self.git_repo_dest orelse return null;
+            // ⚠️ 저장소 **루트**를 본다 — `git_repo` 가 아니다(아래 주석). 아직 없으면 이번 tick 은 없다.
+            const root = self.git_repo_remote_root orelse return null;
+            return .{ .dest = dest, .root = root, .owner = .source_control };
+        },
+        .explorer => {
+            const re = &self.remote_explorer;
+            // ctl 이 비면 대상이 없다(적대적 검증 1 회차 — 빈 ctl 은 ssh 직결 폴백이다).
+            if (!re.active or re.ctl.items.len == 0) return null;
+            if (re.dest.items.len == 0 or re.root.items.len == 0) return null;
+            return .{ .dest = re.dest.items, .root = re.root.items, .owner = .explorer };
+        },
+        else => null,
+    };
+}
+
+/// 감시가 안 서는 원격을 **화면이 말한다**(RW6·§2.5). 문구가 뷰마다 다른 이유는 사용자가 다음에 할
+/// 일이 다르기 때문이다 — 소스 컨트롤은 「직접 새로고침」, 탐색기는 「폴더를 접었다 펴라」다.
+fn watchGaveUpNoticeKey(owner: WatchOwner) maru.i18n.Key {
+    return switch (owner) {
+        .source_control => .scm_remote_watch_gave_up,
+        .explorer => .fp_remote_watch_gave_up,
+    };
+}
+
+/// 판정자 창구 — `remoteWatchTarget` 은 tick 전용이라 밖에서 못 부른다. 계약을 재려면 같은 함수를
+/// 태워야 한다(따로 만들면 두 벌이 되어 드리프트가 조용히 생긴다).
+pub fn remoteWatchTargetForTest(self: *AppSession) ?WatchTarget {
+    return remoteWatchTarget(self);
+}
+
 pub fn pumpRemoteWatch(self: *AppSession) void {
     if (builtin.os.tag != .macos) return;
     // **도크가 안 보이면 안 돈다.** 감시는 화면을 위한 것이고, 안 보이는 동안 원격에 프로세스를
     // 띄워 둘 이유가 없다(`pumpRepoStatus` 와 같은 게이트).
-    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) {
+    if (!dock_ops.dockVisible(self)) {
         // **잠시 멈춤이지 놓아줌이 아니다**(적대적 검증 2026-09-04 1 회차). `stop()` 을 쓰면 `.gave_up`
         // 이 `.idle` 로 풀려 도크를 껐다 켤 때마다 못 하는 원격에 다시 띄운다 — RW5 가 없앤 바로 그
         // 폭주이고, RW6 의 배너까지 되풀이된다. 그 판단은 **호스트**의 성질이라 화면과 무관하다.
         self.remote_watch.pause();
         return;
     }
-    const dest = self.git_repo_dest orelse {
-        self.remote_watch.stop(); // 로컬 목록이다 — 채널이 있을 이유가 없다
-        return;
-    };
     // ⚠️ **저장소 «루트» 를 본다 — `git_repo` 가 아니다**(적대적 검증 2026-09-03 1 회차).
     //
     // 원격 목록의 대상(`git_repo`)은 **cwd** 다(`git -C <cwd>` 가 상위 저장소를 스스로 찾으므로 루트가
@@ -317,16 +359,24 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     //
     // 루트는 읽기 결과의 `repo_root`(`rev-parse --show-toplevel`)가 이미 들고 있다. **아직 없으면
     // 안 띄운다** — 첫 읽기가 끝나면 다음 tick 이 띄운다(추측한 루트를 감시하느니 한 tick 늦는 편이 낫다).
+    // 탐색기(RF5a)의 루트는 `remote_explorer.root` 이고, 같은 규율으로 비면 안 띄운다.
     //
-    // ⚠️ **그냥 나가지 않는다**(적대적 검증 2026-09-04 3 회차). 이 이른 반환은 위 둘과 달리 자식을
+    // ⚠️ **그냥 나가지 않는다**(적대적 검증 2026-09-04 3 회차). 이 이른 반환은 위와 달리 자식을
     // 든 채로 나갈 수 있는 자리다 — 루트만 비우고 호스트는 그대로인 전이가 생기면(로컬 결과가 도착한
     // 뒤 `rememberGitRepoDest` 가 아직 안 돈 tick 이 그렇다) 감시자가 «옛 저장소» 를 계속 보고, 아무도
     // 드레인하지 않아 파이프가 차면 저쪽에서 write 에 걸려 선다. 지속 재현은 못 만들었지만 그 창을
     // 열어 둘 이유가 없다 — 놓는 값이 0 이다(안 띄운 상태면 `pause` 는 아무 일도 안 한다).
-    const repo = self.git_repo_remote_root orelse {
+    //
+    // ⚠️ **없음의 뜻이 둘이다.** 「이 뷰는 원격을 안 본다」(로컬 목록·탐색기 비활성)는 `stop` 이고,
+    // 「원격인데 루트를 아직 모른다」는 `pause` 다. 지금은 둘을 가르지 않고 **`pause` 로 접는다** —
+    // `stop` 이 지우는 것은 설치 답과 `.gave_up` 인데, 그 둘은 **호스트의 성질**이라 화면이 바뀌었다고
+    // 버릴 값이 아니다(호스트가 바뀌는 전이는 `rememberGitRepoDest` 가 이미 `stop` 으로 잡는다).
+    const target = remoteWatchTarget(self) orelse {
         self.remote_watch.pause();
         return;
     };
+    const dest = target.dest;
+    const repo = target.root;
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
 
     // ⚠️ **같은 호스트에서 저장소만 바뀌는 전환**(적대적 검증 2026-09-04 6 회차). `git_repo_dest` 가
@@ -397,7 +447,7 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
                     "cannot install the remote watcher for this host — auto refresh off dest={s}",
                     .{dest},
                 );
-                self.showNoticeKey(.scm_remote_watch_gave_up); // RW6 — 조용히 내리지 않는다
+                self.showNoticeKey(watchGaveUpNoticeKey(target.owner)); // RW6 — 조용히 내리지 않는다
                 return;
             },
         }
@@ -443,8 +493,14 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
     const changes = remote_watch_mod.takeChanges(&self.remote_watch.pending, self.allocator);
     if (changes > 0) {
         self.remote_watch.changes +|= changes;
-        // **여기가 이 트랙의 전부다** — 트리거만 걸고 나머지는 기존 경로가 한다.
-        refreshGitStatus(self);
+        // **여기가 이 트랙의 전부다** — 트리거만 걸고 나머지는 기존 경로가 한다. 누가 받느냐만
+        // 뷰가 정한다(RF5a — 트리거 계약 자체는 그대로다).
+        switch (target.owner) {
+            .source_control => refreshGitStatus(self),
+            // 경로가 안 실리므로 **거친 무효화**다 — 펼쳐 둔 디렉터리 전부를 다시 읽는다. 재예약은
+            // 자기 제한적이다(큐가 중복 제거 · 원격 슬롯 2 · 접힌 것은 안 넣는다).
+            .explorer => file_panel_ops.invalidateRemoteExplorerExpanded(self),
+        }
     }
 
     // **EOF 는 채널이 죽었다는 뜻이다.** 감시자는 스스로 안 끝난다(무한 루프) — 끝났다면 원격에서
@@ -469,7 +525,7 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
             //
             // ⚠️ **여기 한 번뿐이다.** `.gave_up` 은 위 switch 가 곧장 return 하는 흡수 상태라 이 줄에
             // 두 번 닿을 수 없고, 대상이 바뀌어 `rememberGitRepoDest` 가 채널을 놓아야 풀린다.
-            self.showNoticeKey(.scm_remote_watch_gave_up);
+            self.showNoticeKey(watchGaveUpNoticeKey(target.owner));
         } else {
             self.remote_watch.phase = .backoff;
             self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;

@@ -1045,8 +1045,8 @@ U5 authored pair attestation action은 retained stage-3 preparation의 owner-onl
 action 구간에 걸쳐 함께 고정한다. `test-session-host-release-authored-attestation-action`은 directory와 두 subject의 pre-pin 뒤 기존
 single-subject action을 evidence→manifest로 exact once씩만 호출하고, final directory/inventory/subject fence와 preparation 밖의 두
 canonical bounded bundle locator 검사가 끝난 뒤에만 두 output을 함께 게시하는지 고정한다. actual filesystem helper 행은 directory
-pathname·inventory·owner/mode, subject identity/mode/SHA, role swap, symlink/hardlink와 subject/bundle pairwise alias를 Linux·macOS에서
-검증하며 bundle 상한은 Zig contract와 source-level로 수렴시킨다. action은 bundle JSON의 cryptographic/semantic authority를 주장하지
+pathname·inventory/mode, subject identity/mode/SHA, role swap, symlink/hardlink와 subject/bundle pairwise alias를 Linux·macOS에서
+검증하고 current effective UID 비교와 bundle 상한은 source contract로 고정한다. action은 bundle JSON의 cryptographic/semantic authority를 주장하지
 않으며 retained preparation reopen, current draft 재인증, resume process, workflow와 frozen signed U5 E2E는 후속 범위다.
 
 U5 same-run candidate bundle 소비는 기존 final-address `CandidateAttestation` owner가 맡는다.

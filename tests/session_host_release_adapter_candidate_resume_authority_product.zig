@@ -2,6 +2,7 @@ const std = @import("std");
 const phase = @import("release_adapter_candidate_resume_authority_phase");
 const product = @import("release_adapter_candidate_resume_authority_product");
 const files = @import("release_adapter_files");
+const manifest_mod = @import("release_manifest");
 
 const Event = enum {
     preflight,
@@ -254,6 +255,92 @@ test "cross-owner identity graph requires the shared manifest and ten distinct v
     }
 }
 
+test "semantic graph binds preparation evidence and every manifest asset to aggregate bytes" {
+    const dmg = observed(4, 41, 'a');
+    const frozen = observed(5, 42, 'b');
+    const evidence = observed(6, 43, 'c');
+    const manifest_file = observed(7, 44, 'd');
+    const assets = [_]manifest_mod.Asset{
+        .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = &dmg.sha256, .size = dmg.size },
+        .{ .role = .frozen_product_executable, .name = "maru-session-host-1.2.3", .sha256 = &frozen.sha256, .size = frozen.size },
+        .{ .role = .evidence_summary, .name = "baseline-evidence.json", .sha256 = &evidence.sha256, .size = evidence.size },
+    };
+    var manifest: manifest_mod.Manifest = undefined;
+    manifest.assets = &assets;
+    const canonical = product.testing_api.SemanticGraph{
+        .preparation_evidence = evidence,
+        .preparation_manifest = manifest_file,
+        .aggregate_evidence = observed(8, evidence.size, 'c'),
+        .aggregate_dmg = dmg,
+        .aggregate_frozen = frozen,
+        .aggregate_manifest = manifest_file,
+        .dmg_name = assets[0].name,
+        .frozen_name = assets[1].name,
+        .evidence_name = assets[2].name,
+    };
+    try product.testing_api.requireSemanticGraph(&manifest, canonical);
+
+    var changed = canonical;
+    changed.aggregate_evidence.sha256[0] = 'e';
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_evidence.size += 1;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_evidence.identity = changed.preparation_evidence.identity;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_manifest.identity.inode += 1;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_manifest.size += 1;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_manifest.mode ^= 0o100;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+    changed = canonical;
+    changed.aggregate_manifest.sha256[0] = 'e';
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, changed));
+
+    const wrong_sha: [64]u8 = @splat('f');
+    for (0..assets.len) |index| {
+        var hostile_assets = assets;
+        hostile_assets[index].size += 1;
+        manifest.assets = &hostile_assets;
+        try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+
+        hostile_assets = assets;
+        hostile_assets[index].sha256 = &wrong_sha;
+        manifest.assets = &hostile_assets;
+        try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+
+        hostile_assets = assets;
+        hostile_assets[index].role = if (index == 2) .universal_dmg else .evidence_summary;
+        manifest.assets = &hostile_assets;
+        try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+
+        hostile_assets = assets;
+        hostile_assets[index].name = "other";
+        manifest.assets = &hostile_assets;
+        try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+    }
+
+    manifest.assets = assets[0..2];
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+    const extra_assets = assets ++ [_]manifest_mod.Asset{assets[0]};
+    manifest.assets = &extra_assets;
+    try std.testing.expectError(error.AuthorityChanged, product.testing_api.requireSemanticGraph(&manifest, canonical));
+}
+
+fn observed(inode: u64, size: u64, digest_byte: u8) files.ExecutableObservation {
+    return .{
+        .identity = .{ .device = 1, .inode = inode },
+        .size = size,
+        .mode = 0o600,
+        .sha256 = @splat(digest_byte),
+    };
+}
+
 test "concrete product run rejects before filesystem credential or child work" {
     var execution = product.Execution{};
     var response: [1]u8 = undefined;
@@ -281,6 +368,8 @@ test "product source has one existing-component path and borrows the aggregate d
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "current_mod.authenticateUntil("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "adoption.adopt("));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "requireCrossIdentityGraph("));
+    // One production call, one implementation declaration, and one test-only forwarding seam.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, source, "requireSemanticGraphImpl("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "cli_mod.revalidate("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self.execution.aggregate.deinit()"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self.execution.preparation.deinit()"));

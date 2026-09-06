@@ -13235,7 +13235,7 @@ pub const AppSession = struct {
             defer dbl_rects.deinit(self.allocator);
             if (tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &dbl_rects)) |_| {
                 if (Model.paneAtPoint(dbl_rects.items, x_px, y_px)) |pane| {
-                    if (editor_ops.selectWordOrLineAt(self, pane, kind == 5, x_px, y_px)) {
+                    if (editor_ops.selectWordOrLineAt(self, pane, kind == 5, x_px, y_px, mods)) {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;

@@ -42,9 +42,11 @@ pub const Phase = enum { pristine, preparing, verified, closed };
 
 pub const View = struct {
     verified: bool,
+    context: context_mod.Context,
     directory: []const u8,
     evidence_name: []const u8,
     entries: [handoff.role_count]files.ExecutableObservation,
+    artifact_names: [artifact_count][]const u8,
     artifacts: [artifact_count]files.ExecutableObservation,
 };
 
@@ -101,14 +103,20 @@ pub const ReopenedAggregate = struct {
         if (self.owner != self or self.phase != .verified or !validStorage(self) or
             !std.mem.eql(u8, &self.seal, &metadataSeal(self))) return null;
         var entries: [handoff.role_count]files.ExecutableObservation = undefined;
+        var artifact_names: [artifact_count][]const u8 = undefined;
         var artifacts: [artifact_count]files.ExecutableObservation = undefined;
         for (&self.entries, 0..) |*entry, index| entries[index] = entry.value() orelse return null;
-        for (&self.artifacts, 0..) |*artifact, index| artifacts[index] = artifact.value() orelse return null;
+        for (&self.artifacts, 0..) |*artifact, index| {
+            artifacts[index] = artifact.value() orelse return null;
+            artifact_names[index] = std.fs.path.basename(self.artifact_paths[index][0..self.artifact_path_lens[index]]);
+        }
         return .{
             .verified = true,
+            .context = self.context.value(),
             .directory = self.directory[0..self.directory_len],
             .evidence_name = self.names[0][0..self.name_lens[0]],
             .entries = entries,
+            .artifact_names = artifact_names,
             .artifacts = artifacts,
         };
     }

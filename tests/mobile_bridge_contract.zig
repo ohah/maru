@@ -7207,6 +7207,51 @@ test "M9 서술자: 물어보는 화면들도 읽힌다 — 지문은 «통째�
     try T.expect(fp_node.rect.y + fp_node.rect.h <= ok_c.y);
 }
 
+test "M9 서술자: 이름 없는 서술자는 없다 — 빈 이름은 «사라진 줄» 이다" {
+    // **적대적 검증 11회차가 잡았다.** 빈 이름을 내면 host 가 요소를 아예 안 만든다 — 화면에는
+    // 있고 눌리는데 스크린 리더에서는 **그 줄이 통째로 없다**. 세션 줄의 이름은 제목이거나
+    // 경로인데 **둘 다 없는 세션**이 올 수 있다(둘 다 원격이 주는 값이다).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    // 제목도 경로도 없는 줄(원격이 그렇게 줄 수 있다).
+    const wire = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n";
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+
+    var rows: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        try T.expect(n.sem.label.len > 0); // **이름 없는 서술자가 없다**
+        if (n.sem.role == .list_item) rows += 1;
+    }
+    // 터미널·서버 + 그 이름 없는 세션 = 셋이 다 읽힌다(하나라도 빠지면 못 고른다).
+    try T.expectEqual(@as(usize, 3), rows);
+
+    // **한 곳만 고치고 끝내지 않는다** — 빈 이름은 어느 화면에서든 그 자리를 지운다.
+    // 서버는 이름이 없으면 `user@host` 로 떨어지고, 설정 줄은 스키마가 이름을 준다.
+    const src = "ssh.server.1.host = a.example\nssh.server.1.user = me\n"; // 이름 없는 서버
+    bridge.maru_mobile_load_config(src, src.len);
+    defer bridge.maru_mobile_load_config("", 0);
+    for ([_][]const u8{
+        "sessions",    "servers",  "settings", "terminal",
+        "server_edit", "password", "host_key", "remote_screen",
+    }) |screen| {
+        bridge.setScreenForTest(screen);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        for (bridge.a11yNodesForTest()) |n| {
+            if (n.sem.label.len == 0) {
+                std.debug.print("«{s}» 화면에 이름 없는 서술자가 있다\n", .{screen});
+                return error.NamelessDescriptor;
+            }
+        }
+    }
+}
+
 test "M9 서술자: 어느 화면에서도 «나갈 길» 이 읽힌다" {
     // **적대적 검증 7회차가 잡았다.** 원격 화면은 읽기 전용이라 누를 것이 뒤로가기 하나뿐인데
     // 그것을 안 냈다 — 들어가면 스크린 리더 사용자는 **아무것도 못 하고 갇힌다**. 나가는 길은
@@ -7284,6 +7329,35 @@ test "M9 서술자: 겹치는 서술자가 없다 — 짚은 것과 닿는 것�
             }
         }
     }
+
+    // **팝업이 열린 상태도 잰다** — 닫기 자리와 항목이 붙어 있어 겹치기 쉬운 자리다.
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var opened = false;
+    var yy: f32 = 0;
+    while (yy < 874) : (yy += 4) {
+        const idx = bridge.settingsRowAt(200, yy) orelse continue;
+        if (!std.mem.eql(u8, bridge.settingsRows()[idx].key, "theme.preset")) continue;
+        bridge.maru_mobile_pointer(0, 1, 200, yy, now());
+        bridge.maru_mobile_pointer(2, 1, 200, yy, now());
+        _ = bridge.maru_mobile_build(402, 874, now());
+        opened = bridge.settingsPopupOpen();
+        break;
+    }
+    try std.testing.expect(opened); // 전제 — 안 열렸으면 아무것도 안 잰다
+    const pop = bridge.a11yNodesForTest();
+    for (pop, 0..) |a, i| {
+        for (pop[i + 1 ..]) |b| {
+            const ox = a.rect.x < b.rect.x + b.rect.w and b.rect.x < a.rect.x + a.rect.w;
+            const oy = a.rect.y < b.rect.y + b.rect.h and b.rect.y < a.rect.y + a.rect.h;
+            if (ox and oy) {
+                std.debug.print("팝업에서 겹친다: «{s}» 와 «{s}»\n", .{ a.sem.label, b.sem.label });
+                return error.OverlappingDescriptors;
+            }
+        }
+    }
+    _ = bridge.maru_mobile_pop_screen(); // 닫고 나간다 — 다음 판정자에 안 물려준다
+    _ = bridge.maru_mobile_build(402, 874, now());
 }
 
 test "M9 서술자: 서버 편집은 칸마다 이름과 «온전한» 값을 낸다" {

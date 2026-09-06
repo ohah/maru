@@ -814,6 +814,9 @@ const Table = struct {
     /// 닫히는 규칙을 스크린 리더에게 말로 주는 자리다(M9). 다른 화면의 「취소」를 빌리면 그
     /// 화면 문구가 바뀔 때 여기가 조용히 따라 바뀐다.
     mob_a11y_dismiss: [:0]const u8,
+    /// 접근성이 읽을 「이름 없는 세션」. 제목도 경로도 없는 줄이 있을 수 있는데(둘 다 원격이 주는
+    /// 값이다), 빈 이름을 내면 host 가 요소를 아예 안 만들어 그 줄이 통째로 사라진다(M9).
+    mob_a11y_unnamed: [:0]const u8,
     mob_a11y_on: [:0]const u8,
     mob_a11y_off: [:0]const u8,
     mob_keyboard: [:0]const u8,
@@ -1295,6 +1298,7 @@ const en: Table = .{
     .mob_a11y_back = "Back",
     .mob_a11y_held = "open",
     .mob_a11y_dismiss = "dismiss",
+    .mob_a11y_unnamed = "unnamed session",
     .mob_a11y_on = "on",
     .mob_a11y_off = "off",
     .mob_keyboard = "kbd",
@@ -1912,6 +1916,7 @@ const ko: Table = .{
     .mob_a11y_back = "뒤로 가기",
     .mob_a11y_held = "열려 있음",
     .mob_a11y_dismiss = "닫기",
+    .mob_a11y_unnamed = "이름 없는 세션",
     .mob_a11y_on = "켜짐",
     .mob_a11y_off = "꺼짐",
     .mob_keyboard = "자판",

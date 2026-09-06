@@ -7,6 +7,7 @@ const session_host = @import("session_host.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
+const abi_term_ops = @import("app_session/term.zig"); // 활성 Term 종류 질의(선-가로채기 게이트)
 const app_instance_lease_mod = if (builtin.os.tag == .macos)
     @import("app_instance_lease.zig")
 else
@@ -1813,6 +1814,21 @@ pub export fn maru_macos_app_session_set_focus(session: ?*AppSession, focused: i
 pub export fn maru_macos_app_session_any_overlay_open(session: ?*AppSession) c_int {
     const app_session = session orelse return 0;
     return if (app_session.anyOverlayOpen()) 1 else 0;
+}
+
+// **활성 Term 이 터미널인가**(v-terminal-gate). Swift 의 **터미널 전용 선-가로채기**(프롬프트 점프
+// `⌘↑`/`⌘↓`, 스크롤백 페이지 `⇧PageUp`/`⇧PageDown`)가 이것으로 게이트한다 — 그 넷은 OSC 133 블록과
+// 스크롤백을 움직이는데 편집기·웹 Term 에는 **둘 다 없다**. 게이트가 없으면 그 키들이 편집기에
+// 오지도 못한다(docs/key-input-and-shortcuts.md 「선-가로채기는 터미널 것일 때만 먹는다」).
+//
+// **`⌘C`·`⌘V` 는 이것으로 막으면 안 된다** — 클립보드는 Term 종류와 무관한 의도이고 Zig 쪽
+// `copyText`·`pasteText` 가 이미 갈래를 갖고 있다. 여기서 막으면 편집기 복사·붙여넣기가 죽는다.
+//
+// **fail-open 이다** — surface 가 아직 없거나 탭이 없으면 **1**을 낸다(시작 중에는 선-가로채기가
+// 그대로 돈다). 부작용 없음.
+pub export fn maru_macos_app_session_active_term_is_terminal(session: ?*AppSession) c_int {
+    const app_session = session orelse return 1;
+    return if (abi_term_ops.activeTermIsTerminal(app_session)) 1 else 0;
 }
 
 // **이 chord 를 편집기 컨텍스트가 소유하는가**(v-editor-chord). Swift performKeyEquivalent가 1이면

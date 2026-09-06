@@ -67,3 +67,24 @@ test "EMK6 Swift 헬퍼가 ABI 를 그대로 통과시킨다" {
     defer std.testing.allocator.free(header);
     try std.testing.expect(std.mem.indexOf(u8, header, "maru_macos_app_session_editor_owns_chord") != null);
 }
+
+test "TIG4 터미널 전용 선-가로채기가 Term 종류로 게이트된다" {
+    const swift = try readSwift();
+    defer std.testing.allocator.free(swift);
+
+    // **블록을 통째로 본다** — 심볼만 보면 게이트를 지우거나 극성을 뒤집은 변이가 산다.
+    const gate = "            let terminalOwnsPreCore = activeTermIsTerminal";
+    try std.testing.expect(std.mem.indexOf(u8, swift, gate) != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "if terminalOwnsPreCore, chordMods == .shift, let session = appSession {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "if terminalOwnsPreCore, chordMods == .command, let session = appSession {") != null);
+
+    // **`⌘C`·`⌘V` 는 게이트에 안 걸린다** — 걸면 편집기 복사·붙여넣기가 죽는다.
+    try std.testing.expect(std.mem.indexOf(u8, swift, "if chordMods == .command, event.keyCode == 8 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "if chordMods == .command, event.keyCode == 9 {") != null);
+
+    // **`.contains(.shift)` 로 돌아가면 안 된다** — ⇧⌘PageUp 같은 조합까지 삼킨다.
+    try std.testing.expect(std.mem.indexOf(u8, swift, "if event.modifierFlags.contains(.shift), let session = appSession {") == null);
+
+    // **판정을 Swift 로 복제하지 않았다.**
+    try std.testing.expect(std.mem.indexOf(u8, swift, "kind == .terminal") == null);
+}

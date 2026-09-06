@@ -1441,7 +1441,7 @@ pub fn build(b: *std.Build) void {
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     const run_macos_chrome_face_cache_fresh_tests = b.addRunArtifact(macos_chrome_face_cache_fresh_tests);
     // wrapper의 이름 없는 import sentinel 1 + 실제 성능 판정자 1.
-    run_macos_chrome_face_cache_fresh_tests.addArg("--maru-expect-tests=2");
+    run_macos_chrome_face_cache_fresh_tests.addArg("--maru-expect-tests=3");
     run_macos_chrome_face_cache_fresh_tests.setCwd(b.path("."));
 
     const macos_external_tty_fresh_tests = addProjectTest(b, .{
@@ -3045,7 +3045,7 @@ pub fn build(b: *std.Build) void {
         const run_session_host_cr6e_c3c_validator_tests = b.addRunArtifact(
             session_host_cr6e_c3c_validator_tests,
         );
-        run_session_host_cr6e_c3c_validator_tests.addArg("--maru-expect-tests=2");
+        run_session_host_cr6e_c3c_validator_tests.addArg("--maru-expect-tests=3");
         const run_session_host_cr6e_c3c_validator = b.addRunArtifact(session_host_cr6e_c3c_validator);
         run_session_host_cr6e_c3c_validator.addArg(
             "tests/artifacts/session-host/cr6e-c3c-appkit.json",
@@ -3288,7 +3288,7 @@ pub fn build(b: *std.Build) void {
     });
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
-    run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    run_file_tree_model_tests.addArg("--maru-expect-tests=34"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
     // 원격 변경 결과 wire(RF6a) 순수 판정자만. 같은 이유로 maru 그래프에 필터를 건다.
@@ -3304,7 +3304,7 @@ pub fn build(b: *std.Build) void {
     });
     remote_mutation_wire_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_remote_mutation_wire_tests = b.addRunArtifact(remote_mutation_wire_tests);
-    run_remote_mutation_wire_tests.addArg("--maru-expect-tests=25"); // 이름 있는 넷 + 이름 없는 블록들
+    run_remote_mutation_wire_tests.addArg("--maru-expect-tests=35"); // 이름 있는 넷 + 이름 없는 블록들
     b.step("test-remote-file-mutation-wire", "Run the pure remote mutation wire codec judges only").dependOn(&run_remote_mutation_wire_tests.step);
 
     // 원격 탐색기 수직 판정자(RF3a~) — app_session 전체를 12 분 돌리지 않고 이 축만 잰다.
@@ -3666,7 +3666,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -3683,7 +3683,7 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
         // `CT*` 는 밴드 마디의 열 범위(`platform/cell_text.zig` — §7.5). **`maru` 모듈이라 여기서
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK" },
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG" },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));
@@ -4289,7 +4289,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "CR6e-a1 경계는", "CR6e-a2 경계는" },
     });
     const run_session_host_cr6e_boundary_tests = b.addRunArtifact(session_host_cr6e_boundary_tests);
-    run_session_host_cr6e_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_cr6e_boundary_tests.addArg("--maru-expect-tests=3");
     run_session_host_cr6e_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6e_boundary_tests.step);
     const macos_app_host_abi_shards_boundary_tests = addProjectTest(b, .{
@@ -4447,7 +4447,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P4 E3a unchanged screen"},
         });
         const run_session_host_e3a_server_tests = b.addRunArtifact(session_host_e3a_server_tests);
-        run_session_host_e3a_server_tests.addArg("--maru-expect-tests=2");
+        run_session_host_e3a_server_tests.addArg("--maru-expect-tests=3");
         session_host_e3a_step.dependOn(&run_session_host_e3a_server_tests.step);
 
         const session_host_e3a_manager_tests = addProjectTest(b, .{
@@ -4737,7 +4737,7 @@ pub fn build(b: *std.Build) void {
             });
             const run_session_host_upgrade_budget_store_tests =
                 b.addRunArtifact(session_host_upgrade_budget_store_tests);
-            run_session_host_upgrade_budget_store_tests.addArg("--maru-expect-tests=2");
+            run_session_host_upgrade_budget_store_tests.addArg("--maru-expect-tests=3");
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_store_tests.step,
             );
@@ -5128,7 +5128,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_ssh_remote_cwd_doc_tests = b.addRunArtifact(ssh_remote_cwd_doc_tests);
-    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-tests=2");
+    run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-tests=3");
     run_ssh_remote_cwd_doc_tests.addArg("--maru-expect-passed=2");
     run_ssh_remote_cwd_doc_tests.setCwd(b.path("."));
     ssh_remote_cwd_doc_step.dependOn(&run_ssh_remote_cwd_doc_tests.step);
@@ -5348,7 +5348,7 @@ pub fn build(b: *std.Build) void {
     const run_session_host_ssh_upload_boundary_tests = b.addRunArtifact(
         session_host_ssh_upload_boundary_tests,
     );
-    run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=3");
     run_session_host_ssh_upload_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
     // 원격 파일 트리 §2.4 게이트(RF2b) — 원격 갈래가 로컬 FS 에 닿지 않는지, 원격 submit 소비처
@@ -5516,7 +5516,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         const run_input_parity_host_tests = b.addRunArtifact(input_parity_host_tests);
-        run_input_parity_host_tests.addArg("--maru-expect-tests=2");
+        run_input_parity_host_tests.addArg("--maru-expect-tests=3");
         run_input_parity_host_tests.setCwd(b.path("."));
         session_host_input_parity_step.dependOn(&run_input_parity_host_tests.step);
 
@@ -5838,7 +5838,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P4 N2b1 remote backend binding"},
         });
         const run_delivery_backend_tests = b.addRunArtifact(delivery_backend_tests);
-        run_delivery_backend_tests.addArg("--maru-expect-tests=2");
+        run_delivery_backend_tests.addArg("--maru-expect-tests=3");
         session_host_notification_delivery_step.dependOn(&run_delivery_backend_tests.step);
     }
     const session_host_config_provenance_step = b.step(
@@ -7080,7 +7080,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b core"},
         });
         const run_cr0b_contract_tests = b.addRunArtifact(cr0b_contract_tests);
-        run_cr0b_contract_tests.addArg("--maru-expect-tests=21");
+        run_cr0b_contract_tests.addArg("--maru-expect-tests=31");
         run_cr0b_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_contract_tests.step);
         const cr0b_writer_tests = addProjectTest(b, .{
@@ -7196,7 +7196,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         const run_cr2a_generation_tests = b.addRunArtifact(cr2a_generation_tests);
-        run_cr2a_generation_tests.addArg("--maru-expect-tests=2");
+        run_cr2a_generation_tests.addArg("--maru-expect-tests=3");
         run_cr2a_generation_tests.setCwd(b.path("."));
         session_host_cr2a_step.dependOn(&run_cr2a_generation_tests.step);
         const cr2a_boundary_tests = addProjectTest(b, .{
@@ -7442,7 +7442,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2d2 remote"},
         });
         const run_cr2d2_runtime_tests = b.addRunArtifact(cr2d2_runtime_tests);
-        run_cr2d2_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr2d2_runtime_tests.addArg("--maru-expect-tests=3");
         run_cr2d2_runtime_tests.setCwd(b.path("."));
         session_host_cr2d2_step.dependOn(&run_cr2d2_runtime_tests.step);
 
@@ -7475,7 +7475,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2d3 event cursor"},
         });
         const run_cr2d3_cursor_tests = b.addRunArtifact(cr2d3_cursor_tests);
-        run_cr2d3_cursor_tests.addArg("--maru-expect-tests=2");
+        run_cr2d3_cursor_tests.addArg("--maru-expect-tests=3");
         run_cr2d3_cursor_tests.setCwd(b.path("."));
         session_host_cr2d3_step.dependOn(&run_cr2d3_cursor_tests.step);
 
@@ -7762,7 +7762,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2e-e1"},
         });
         const run_cr2e_e1_tests = b.addRunArtifact(cr2e_e1_tests);
-        run_cr2e_e1_tests.addArg("--maru-expect-tests=2");
+        run_cr2e_e1_tests.addArg("--maru-expect-tests=3");
         run_cr2e_e1_tests.setCwd(b.path("."));
         session_host_cr2e_e1_step.dependOn(&run_cr2e_e1_tests.step);
 
@@ -7797,7 +7797,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2e-e2a"},
         });
         const run_cr2e_e2a_tests = b.addRunArtifact(cr2e_e2a_tests);
-        run_cr2e_e2a_tests.addArg("--maru-expect-tests=2");
+        run_cr2e_e2a_tests.addArg("--maru-expect-tests=3");
         run_cr2e_e2a_tests.setCwd(b.path("."));
         session_host_cr2e_e2a_step.dependOn(&run_cr2e_e2a_tests.step);
 
@@ -7868,7 +7868,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2e-e3a1"},
         });
         const run_cr2e_e3a1_tests = b.addRunArtifact(cr2e_e3a1_tests);
-        run_cr2e_e3a1_tests.addArg("--maru-expect-tests=2");
+        run_cr2e_e3a1_tests.addArg("--maru-expect-tests=3");
         run_cr2e_e3a1_tests.setCwd(b.path("."));
         session_host_cr2e_e3a1_step.dependOn(&run_cr2e_e3a1_tests.step);
 
@@ -7919,7 +7919,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR2e-e3a2 RSS validator는"},
         });
         const run_cr2e_e3a2_validator_tests = b.addRunArtifact(cr2e_e3a2_validator_tests);
-        run_cr2e_e3a2_validator_tests.addArg("--maru-expect-tests=2");
+        run_cr2e_e3a2_validator_tests.addArg("--maru-expect-tests=3");
         run_cr2e_e3a2_validator_tests.setCwd(b.path("."));
         session_host_cr2e_e3a2_step.dependOn(&run_cr2e_e3a2_validator_tests.step);
 
@@ -7985,7 +7985,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_cr2e_e3a2_rss_tests = b.addRunArtifact(cr2e_e3a2_rss_tests);
     run_cr2e_e3a2_rss_tests.addArtifactArg(cr2e_e3a2_rss_child_tests);
-    run_cr2e_e3a2_rss_tests.addArg("--maru-expect-tests=2");
+    run_cr2e_e3a2_rss_tests.addArg("--maru-expect-tests=3");
     run_cr2e_e3a2_rss_tests.setCwd(b.path("."));
     run_cr2e_e3a2_rss_tests.has_side_effects = true;
     session_host_cr2e_e3a2_step.dependOn(&run_cr2e_e3a2_rss_tests.step);
@@ -8215,7 +8215,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3b R2a RemoteGeneration"},
         });
         const run_cr3b_r2a_runtime_tests = b.addRunArtifact(cr3b_r2a_runtime_tests);
-        run_cr3b_r2a_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr3b_r2a_runtime_tests.addArg("--maru-expect-tests=3");
         run_cr3b_r2a_runtime_tests.setCwd(b.path("."));
         session_host_cr3b_r2a_step.dependOn(&run_cr3b_r2a_runtime_tests.step);
 
@@ -8346,7 +8346,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3b R2c replacement은"},
         });
         const run_cr3b_r2c_client_slot_tests = b.addRunArtifact(cr3b_r2c_client_slot_tests);
-        run_cr3b_r2c_client_slot_tests.addArg("--maru-expect-tests=2");
+        run_cr3b_r2c_client_slot_tests.addArg("--maru-expect-tests=3");
         run_cr3b_r2c_client_slot_tests.setCwd(b.path("."));
         session_host_cr3b_r2c_step.dependOn(&run_cr3b_r2c_client_slot_tests.step);
 
@@ -8396,7 +8396,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3b R3 reclaim은"},
         });
         const run_cr3b_r3_client_slot_tests = b.addRunArtifact(cr3b_r3_client_slot_tests);
-        run_cr3b_r3_client_slot_tests.addArg("--maru-expect-tests=2");
+        run_cr3b_r3_client_slot_tests.addArg("--maru-expect-tests=3");
         run_cr3b_r3_client_slot_tests.setCwd(b.path("."));
         session_host_cr3b_r3_step.dependOn(&run_cr3b_r3_client_slot_tests.step);
 
@@ -8446,7 +8446,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3c C1은"},
         });
         const run_cr3c_c1_runtime_tests = b.addRunArtifact(cr3c_c1_runtime_tests);
-        run_cr3c_c1_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr3c_c1_runtime_tests.addArg("--maru-expect-tests=3");
         run_cr3c_c1_runtime_tests.setCwd(b.path("."));
         session_host_cr3c_c1_step.dependOn(&run_cr3c_c1_runtime_tests.step);
 
@@ -8481,7 +8481,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3c C2는"},
         });
         const run_cr3c_c2_runtime_tests = b.addRunArtifact(cr3c_c2_runtime_tests);
-        run_cr3c_c2_runtime_tests.addArg("--maru-expect-tests=2");
+        run_cr3c_c2_runtime_tests.addArg("--maru-expect-tests=3");
         run_cr3c_c2_runtime_tests.setCwd(b.path("."));
         session_host_cr3c_c2_step.dependOn(&run_cr3c_c2_runtime_tests.step);
 
@@ -8566,7 +8566,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4a barrier"},
         });
         const run_cr4a_catchup_contract_tests = b.addRunArtifact(cr4a_catchup_contract_tests);
-        run_cr4a_catchup_contract_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_catchup_contract_tests.addArg("--maru-expect-tests=3");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_contract_tests.step);
 
         const cr4a_catchup_stage_contract_tests = addProjectTest(b, .{
@@ -8579,7 +8579,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4a catchup"},
         });
         const run_cr4a_catchup_stage_contract_tests = b.addRunArtifact(cr4a_catchup_stage_contract_tests);
-        run_cr4a_catchup_stage_contract_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_catchup_stage_contract_tests.addArg("--maru-expect-tests=3");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_stage_contract_tests.step);
 
         const cr4a_catchup_cell_accounting_tests = addProjectTest(b, .{
@@ -8604,7 +8604,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4a catchup apply leaf는"},
         });
         const run_cr4a_catchup_byte_cap_tests = b.addRunArtifact(cr4a_catchup_byte_cap_tests);
-        run_cr4a_catchup_byte_cap_tests.addArg("--maru-expect-tests=2");
+        run_cr4a_catchup_byte_cap_tests.addArg("--maru-expect-tests=3");
         session_host_cr4a_step.dependOn(&run_cr4a_catchup_byte_cap_tests.step);
 
         const cr4a_actual_issuer_connect_tests = addProjectTest(b, .{
@@ -8813,7 +8813,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4b paused paste는"},
         });
         const run_cr4b_paused_paste_tests = b.addRunArtifact(cr4b_paused_paste_tests);
-        run_cr4b_paused_paste_tests.addArg("--maru-expect-tests=2");
+        run_cr4b_paused_paste_tests.addArg("--maru-expect-tests=3");
         session_host_cr4b_step.dependOn(&run_cr4b_paused_paste_tests.step);
 
         const cr4b_runtime_mutation_tests = addProjectTest(b, .{
@@ -8827,7 +8827,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4b stable queue seal은"},
         });
         const run_cr4b_runtime_mutation_tests = b.addRunArtifact(cr4b_runtime_mutation_tests);
-        run_cr4b_runtime_mutation_tests.addArg("--maru-expect-tests=2");
+        run_cr4b_runtime_mutation_tests.addArg("--maru-expect-tests=3");
         run_cr4b_runtime_mutation_tests.setCwd(b.path("."));
         session_host_cr4b_step.dependOn(&run_cr4b_runtime_mutation_tests.step);
 
@@ -8842,7 +8842,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4b actual socket controller takeover는"},
         });
         const run_cr4b_runtime_controller_tests = b.addRunArtifact(cr4b_runtime_controller_tests);
-        run_cr4b_runtime_controller_tests.addArg("--maru-expect-tests=2");
+        run_cr4b_runtime_controller_tests.addArg("--maru-expect-tests=3");
         run_cr4b_runtime_controller_tests.setCwd(b.path("."));
         session_host_cr4b_step.dependOn(&run_cr4b_runtime_controller_tests.step);
 
@@ -8927,7 +8927,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR4c C2 actual host job은"},
         });
         const run_cr4c_c2_backend_tests = b.addRunArtifact(cr4c_c2_backend_tests);
-        run_cr4c_c2_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr4c_c2_backend_tests.addArg("--maru-expect-tests=3");
         run_cr4c_c2_backend_tests.setCwd(b.path("."));
         session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_backend_tests.step);
 
@@ -9043,7 +9043,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR5b-1 host job"},
         });
         const run_cr5b1_backend_tests = b.addRunArtifact(cr5b1_backend_tests);
-        run_cr5b1_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr5b1_backend_tests.addArg("--maru-expect-tests=3");
         run_cr5b1_backend_tests.setCwd(b.path("."));
         session_host_cr5b1_step.dependOn(&run_cr5b1_backend_tests.step);
 
@@ -9193,7 +9193,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR5b-2c actual host job은"},
         });
         const run_cr5b2c_backend_tests = b.addRunArtifact(cr5b2c_backend_tests);
-        run_cr5b2c_backend_tests.addArg("--maru-expect-tests=2");
+        run_cr5b2c_backend_tests.addArg("--maru-expect-tests=3");
         run_cr5b2c_backend_tests.setCwd(b.path("."));
         session_host_cr5b2c_step.dependOn(&run_cr5b2c_backend_tests.step);
 
@@ -11029,7 +11029,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3a-2c3d C1"},
         });
         const run_event_c1_runtime_tests = b.addRunArtifact(event_c1_runtime_tests);
-        run_event_c1_runtime_tests.addArg("--maru-expect-tests=21");
+        run_event_c1_runtime_tests.addArg("--maru-expect-tests=31");
         run_event_c1_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c1_step.dependOn(&run_event_c1_runtime_tests.step);
 
@@ -11059,7 +11059,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3a-2c3d C2"},
         });
         const run_event_c2_runtime_tests = b.addRunArtifact(event_c2_runtime_tests);
-        run_event_c2_runtime_tests.addArg("--maru-expect-tests=2");
+        run_event_c2_runtime_tests.addArg("--maru-expect-tests=3");
         run_event_c2_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c2_step.dependOn(&run_event_c2_runtime_tests.step);
 
@@ -11318,7 +11318,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_event_c3_3a3_actual_socket_tests =
             b.addRunArtifact(event_c3_3a3_actual_socket_tests);
-        run_event_c3_3a3_actual_socket_tests.addArg("--maru-expect-tests=2");
+        run_event_c3_3a3_actual_socket_tests.addArg("--maru-expect-tests=3");
         run_event_c3_3a3_actual_socket_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3a3_step.dependOn(&run_event_c3_3a3_actual_socket_tests.step);
 
@@ -11349,7 +11349,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"C3-3b1"},
         });
         const run_event_c3_3b1_runtime_tests = b.addRunArtifact(event_c3_3b1_runtime_tests);
-        run_event_c3_3b1_runtime_tests.addArg("--maru-expect-tests=2");
+        run_event_c3_3b1_runtime_tests.addArg("--maru-expect-tests=3");
         run_event_c3_3b1_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b1_step.dependOn(&run_event_c3_3b1_runtime_tests.step);
 
@@ -11617,7 +11617,7 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC=run-isolated-v1",
         });
         run_b3_6_runtime_tests.addArtifactArg(b3_6_runtime_tests);
-        run_b3_6_runtime_tests.addArg("--maru-expect-tests=2");
+        run_b3_6_runtime_tests.addArg("--maru-expect-tests=3");
         run_b3_6_runtime_tests.setCwd(b.path("."));
         session_host_b3_6_step.dependOn(&run_b3_6_runtime_tests.step);
 
@@ -11660,7 +11660,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"B3-1 registry"},
         });
         const run_b3_1_registry_tests = b.addRunArtifact(b3_1_registry_tests);
-        run_b3_1_registry_tests.addArg("--maru-expect-tests=2");
+        run_b3_1_registry_tests.addArg("--maru-expect-tests=3");
         run_b3_1_registry_tests.setCwd(b.path("."));
         session_host_b3_1_step.dependOn(&run_b3_1_leaf_tests.step);
         session_host_b3_1_step.dependOn(&run_b3_1_registry_tests.step);
@@ -11694,7 +11694,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         const run_b3_2_product_tests = b.addRunArtifact(b3_2_product_tests);
-        run_b3_2_product_tests.addArg("--maru-expect-tests=2");
+        run_b3_2_product_tests.addArg("--maru-expect-tests=3");
         run_b3_2_product_tests.setCwd(b.path("."));
         session_host_b3_2_step.dependOn(&run_b3_2_product_tests.step);
 
@@ -11726,7 +11726,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"B3-3 registry"},
         });
         const run_b3_3_registry_tests = b.addRunArtifact(b3_3_registry_tests);
-        run_b3_3_registry_tests.addArg("--maru-expect-tests=2");
+        run_b3_3_registry_tests.addArg("--maru-expect-tests=3");
         run_b3_3_registry_tests.setCwd(b.path("."));
         session_host_b3_3_step.dependOn(&run_b3_3_registry_tests.step);
 
@@ -11858,7 +11858,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3a-2c3b generation transport"},
         });
         const run_b3_4_5_transport_slot_tests = b.addRunArtifact(b3_4_5_transport_slot_tests);
-        run_b3_4_5_transport_slot_tests.addArg("--maru-expect-tests=2");
+        run_b3_4_5_transport_slot_tests.addArg("--maru-expect-tests=3");
         run_b3_4_5_transport_slot_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_transport_slot_tests.step);
 
@@ -12015,7 +12015,7 @@ pub fn build(b: *std.Build) void {
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=run-isolated-v1",
             });
             run_b3_strict_cleanup_tests.addArtifactArg(b3_strict_cleanup_tests);
-            run_b3_strict_cleanup_tests.addArg("--maru-expect-tests=2");
+            run_b3_strict_cleanup_tests.addArg("--maru-expect-tests=3");
             run_b3_strict_cleanup_tests.expectExitCode(0);
             run_b3_strict_cleanup_tests.setCwd(b.path("."));
 
@@ -12070,7 +12070,7 @@ pub fn build(b: *std.Build) void {
                     "MARU_SESSION_HOST_RESPONSE_ALIAS_CASE=" ++ strict_case,
                 });
                 run_b3_cleanup_drift.addArtifactArg(b3_strict_cleanup_tests);
-                run_b3_cleanup_drift.addArg("--maru-expect-tests=2");
+                run_b3_cleanup_drift.addArg("--maru-expect-tests=3");
                 run_b3_cleanup_drift.expectExitCode(0);
                 run_b3_cleanup_drift.setCwd(b.path("."));
                 run_b3_0_4_tests.step.dependOn(&run_b3_cleanup_drift.step);
@@ -12631,7 +12631,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_editor_chord_menu_tests = b.addRunArtifact(editor_chord_menu_tests);
-        run_editor_chord_menu_tests.addArg("--maru-expect-tests=2");
+        run_editor_chord_menu_tests.addArg("--maru-expect-tests=3");
         run_editor_chord_menu_tests.setCwd(b.path("."));
         run_session_host_tests.step.dependOn(&run_editor_chord_menu_tests.step);
         const editor_chord_menu_step = b.step(
@@ -15168,7 +15168,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_candidate_aggregate_cleanup_recovery_step.dependOn(&run_candidate_aggregate_cleanup_recovery_tests.step);
             const candidate_aggregate_reopen_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_reopen.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod }, .{ .name = "release_adapter_github_post_publish_attestation", .module = post_publish_attestation_mod }, .{ .name = "release_adapter_candidate_aggregate_retention", .module = candidate_aggregate_retention_mod }, .{ .name = "release_adapter_candidate_aggregate_cleanup_recovery", .module = candidate_aggregate_cleanup_recovery_mod } } }) });
             const run_candidate_aggregate_reopen_tests = b.addRunArtifact(candidate_aggregate_reopen_tests);
-            run_candidate_aggregate_reopen_tests.addArg("--maru-expect-tests=20");
+            run_candidate_aggregate_reopen_tests.addArg("--maru-expect-tests=30");
             run_candidate_aggregate_reopen_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_aggregate_reopen_step.dependOn(&run_candidate_aggregate_reopen_tests.step);
             session_host_release_adapter_candidate_aggregate_retention_step.dependOn(&run_candidate_aggregate_reopen_tests.step);
@@ -16084,7 +16084,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P4 C3"},
         });
         const run_checkpoint_product_boundary_tests = b.addRunArtifact(checkpoint_product_boundary_tests);
-        run_checkpoint_product_boundary_tests.addArg("--maru-expect-tests=2");
+        run_checkpoint_product_boundary_tests.addArg("--maru-expect-tests=3");
         run_checkpoint_product_boundary_tests.setCwd(b.path("."));
         workspace_checkpoint_product_step.dependOn(&run_checkpoint_product_boundary_tests.step);
         if (checkpoint_product_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_product_boundary_tests.step);
@@ -16098,7 +16098,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P4 C3b"},
         });
         const run_checkpoint_mutation_boundary_tests = b.addRunArtifact(checkpoint_mutation_boundary_tests);
-        run_checkpoint_mutation_boundary_tests.addArg("--maru-expect-tests=2");
+        run_checkpoint_mutation_boundary_tests.addArg("--maru-expect-tests=3");
         run_checkpoint_mutation_boundary_tests.setCwd(b.path("."));
         workspace_checkpoint_product_step.dependOn(&run_checkpoint_mutation_boundary_tests.step);
         if (checkpoint_product_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_mutation_boundary_tests.step);
@@ -16703,7 +16703,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"p5c3c-3b boundary"},
         });
         const run_session_host_3b_boundary_tests = b.addRunArtifact(session_host_3b_boundary_tests);
-        run_session_host_3b_boundary_tests.addArg("--maru-expect-tests=2");
+        run_session_host_3b_boundary_tests.addArg("--maru-expect-tests=3");
         run_session_host_3b_boundary_tests.setCwd(b.path("."));
         session_host_3b_step.dependOn(&run_session_host_3b_boundary_tests.step);
         boundary_step.dependOn(&run_session_host_3b_boundary_tests.step);
@@ -16796,7 +16796,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_3d_product_e2e_tests.addArtifactArg(
             session_host_3d_product_e2e_tests,
         );
-        run_session_host_3d_product_e2e_tests.addArg("--maru-expect-tests=2");
+        run_session_host_3d_product_e2e_tests.addArg("--maru-expect-tests=3");
         run_session_host_3d_product_e2e_tests.expectExitCode(0);
         run_session_host_3d_product_e2e_tests.setCwd(b.path("."));
         session_host_3d_step.dependOn(&run_session_host_3d_product_e2e_tests.step);
@@ -16864,7 +16864,7 @@ pub fn build(b: *std.Build) void {
             const run_rft_harness = b.addSystemCommand(&.{ "sh", "tools/remote-scm/ssh_harness.sh" });
             run_rft_harness.addArtifactArg(remote_file_tree_harness_tests);
             run_rft_harness.setCwd(b.path("."));
-            run_rft_harness.addArg("--maru-expect-tests=2");
+            run_rft_harness.addArg("--maru-expect-tests=3");
             // 하네스가 조용히 안 서면 skip 으로 초록이 된다 — 실행 수까지 센다(test-remote-scm 의 규율).
             run_rft_harness.addArg("--maru-expect-passed=2");
             run_rft_harness.step.dependOn(&rft_install_native.step);

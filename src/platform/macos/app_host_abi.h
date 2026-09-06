@@ -1012,6 +1012,10 @@ int32_t maru_macos_app_session_any_overlay_open(MaruAppHostSession *session);
    「메뉴 keyEquivalent 층」). 부작용 없음. */
 int32_t maru_macos_app_session_editor_owns_chord(MaruAppHostSession *session,
                                                  const MaruAppHostKeyEvent *event);
+
+/* 활성 Term 이 터미널인가 — 1이면 Swift 의 터미널 전용 선-가로채기(프롬프트 점프·페이지 스크롤)가
+   돈다. 편집기·웹 Term 에서는 0이라 그 키가 편집기까지 흐른다. fail-open(세션 없으면 1). */
+int32_t maru_macos_app_session_active_term_is_terminal(MaruAppHostSession *session);
 /* WKWebView typed key route: 0=pass-through, 1=app-action, 2=consume-unbound, 3=web-editor. side-effect와 PTY
    write 없이 같은 Zig resolver의 provenance를 반환한다. unknown은 Swift가 consume하고 null/event 변환 실패는
    pass-through다. v132가 옛 v100 Bool app-action 조회를 대체한다. */

@@ -4028,6 +4028,50 @@ session-host registry·manifest·socket·process, GitHub release와 credential�
 process 경계까지만 닫고 여덟 concrete command를 호출하는 live workflow owner, `release.yml` step 배선과 frozen signed U5 E2E는
 후속 경계다.
 
+### 11.76 여덟 live stage invocation의 닫힌 owner
+
+여덟 단계는 모두 같은 종류의 shell command가 아니다. `release_adapter_live_workflow_owner.zig`가 stage와 실행 경계를 따로 받지 않는
+닫힌 `Invocation` union 하나로 다음 inventory를 exact order로 소유한다.
+
+1. `candidate_pinning`은 signed release job이 게시한 candidate DMG와 frozen executable을 기존 candidate identity owner로 고정하는
+   in-process product invocation이다.
+2. `candidate_attestation`은 pinned `.github/actions/session-host-release-attest/action.yml`을 DMG→frozen executable 순서로 호출하고
+   두 local bundle locator를 함께 검증하는 action invocation이다.
+3. `draft_authoring`은 validator의 exact `prepare-candidate` command invocation이다.
+4. `authored_attestation`은 pinned `.github/actions/session-host-release-attest-authored/action.yml` action invocation이다.
+5. `aggregate_prepare`와 6. `aggregate_finalize`는 validator의 exact `prepare-candidate-aggregate`와
+   `finalize-candidate-aggregate` command invocation이다.
+7. `publication`은 validator의 exact `resume-candidate-publication` command invocation이다.
+8. `aggregate_cleanup`은 validator의 exact `cleanup-candidate-aggregate` command invocation이다.
+
+caller는 `Stage`, action path, command text, reducer `Result`를 따로 조합하지 않는다. union tag가 stage와 exact action/command identity를
+동시에 결정한다. owner는 §11.75의 expected checkpoint를 먼저 reopen한 뒤 invocation별 sealed executor를 exact once 호출하고,
+그 executor가 반환한 닫힌 `succeeded|failed|cleanup_failed|failed_before_remote_mutation`만 같은 stage의 event로 바꿔 다음 fixed leaf를
+배타 게시한다. `failed_before_remote_mutation`은 `prepare-candidate`의 closed exit 20에서만 만들 수 있다. 실행을 시작한 concrete executor는
+action failure, observation failure, unknown exit/stream tuple을 remote/local 상태 추측 없이 해당 stage의 보수적인 `failed` 또는
+`cleanup_failed`로 닫는다. stage 5·6은 §11.73 actual-child owner를 그대로 사용하며 exit code를 두 번째로 해석하지 않는다.
+
+여기서 닫힌 것은 **stage 선택과 결과 publication의 조립 면**이다. 이 slice의 `Executor.init` callback은 테스트와 다음 배선 slice가
+구체 실행기를 끼우는 process-local port이며, callback의 진위나 GitHub action 실행 자체를 증명하지 않는다. 제품 caller는 다음
+`release.yml` 배선에서 inventory별 기존 concrete owner만 고정해 이 port를 만들고 임의 callback·임의 `Result`를 받지 않는다.
+초기화되지 않았거나 복사된 executor는 side effect 전에 publication 0으로 거부한다.
+
+owner는 root identity와 protected workflow context를 매 invocation 전후 재검증하고, checkpoint를 먼저 전진시킨 뒤 side effect를
+실행하지 않는다. executor가 반환하기 전에 process-local capability 정산과 최종 authority fence를 끝내야 하며 owner는 pathname,
+digest, action output, release ID, credential이나 raw error를 reducer state에 넣지 않는다. terminal leaf가 게시되면 뒤 invocation은
+executor 0회로 거부한다. copied owner, wrong union tag를 위한 별도 stage, replay, skip, reverse와 같은 executor 또는 다른 executor를 통한
+process-local reentry는 다음 leaf publication 없이 fail-close한다. invocation 중 root teardown 요청은 root mutation 0으로 거부하고,
+executor final-address/callback 결속 또는 root/context drift는 다음 leaf publication 없이 fail-close한다. GitHub job의 서로
+다른 step/process 동시 실행 직렬화는 이 메모리 guard가 아니라 다음 `release.yml`의 dependency graph가 소유한다.
+
+focused gate `test-session-host-release-adapter-live-workflow-owner`는 여덟 union tag의 exact stage/identity/order, 정상 chain, 각 단계의
+모든 닫힌 결과, stage 3 exit-20 전용 mapping, replay·skip·reverse·terminal executor 0, root/context drift, executor exact-once와
+same/alternate-executor reentry·root teardown 차단, post-call executor drift publication 0과 checkpoint invocation primitive의 제품
+import/callsite가 이 owner 하나뿐임을 `src/` 전수 검사로 Debug·ReleaseFast에서 검증한다. actual child/process와 action shell 자체의 의미 검증은 기존 단계별 gate를 재사용하고,
+이 gate는 harness-owned private root와 injected sealed executor만 사용해 실제 앱 session-host 상태·GitHub release·credential을 건드리지
+않는다. 이 slice는 여덟 invocation과 durable checkpoint의 단일 composition owner까지만 닫으며 `.github/workflows/release.yml`의
+실제 step wiring과 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

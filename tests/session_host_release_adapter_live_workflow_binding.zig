@@ -60,15 +60,17 @@ test "U5 command bindings are names recognized by the validator contract" {
     }
 }
 
-test "U5 production binding inventory has one source owner" {
+test "U5 binding source derives instead of copying the invocation inventory" {
     const allocator = std.testing.allocator;
-    const source = try std.fs.cwd().readFileAlloc(
-        allocator,
+    const source = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
         "src/platform/macos/session_host/release_adapter_live_workflow_binding.zig",
-        128 * 1024,
+        allocator,
+        .limited(128 * 1024),
     );
     defer allocator.free(source);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "const step_ids ="));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "owner.inventory"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "for (owner.inventory"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "[_]owner.Invocation"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "phase.Stage"));
 }

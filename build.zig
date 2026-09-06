@@ -14358,6 +14358,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-workflow-phase",
         "Validate live release workflow ordering and terminal authority",
     );
+    const session_host_release_adapter_live_workflow_aggregate_event_step = b.step(
+        "test-session-host-release-adapter-live-workflow-aggregate-event",
+        "Bind aggregate process observations to live workflow events",
+    );
     const session_host_release_adapter_candidate_release_product_step = b.step(
         "test-session-host-release-adapter-candidate-release-product",
         "Validate concrete top-level candidate release ownership and wiring",
@@ -14404,6 +14408,39 @@ pub fn build(b: *std.Build) void {
         run_live_workflow_phase_tests.addArg("--maru-expect-tests=11");
         run_live_workflow_phase_tests.setCwd(b.path("."));
         session_host_release_adapter_live_workflow_phase_step.dependOn(&run_live_workflow_phase_tests.step);
+
+        const live_workflow_aggregate_event_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_aggregate_event.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{.{
+                .name = "release_adapter_live_workflow_phase",
+                .module = live_workflow_phase_mod,
+            }},
+        });
+        const live_workflow_aggregate_event_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_live_workflow_aggregate_event.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{
+                    .{
+                        .name = "release_adapter_live_workflow_phase",
+                        .module = live_workflow_phase_mod,
+                    },
+                    .{
+                        .name = "release_adapter_live_workflow_aggregate_event",
+                        .module = live_workflow_aggregate_event_mod,
+                    },
+                },
+            }),
+        });
+        const run_live_workflow_aggregate_event_tests = b.addRunArtifact(live_workflow_aggregate_event_tests);
+        run_live_workflow_aggregate_event_tests.addArg("--maru-expect-tests=7");
+        run_live_workflow_aggregate_event_tests.setCwd(b.path("."));
+        session_host_release_adapter_live_workflow_aggregate_event_step.dependOn(&run_live_workflow_aggregate_event_tests.step);
+        session_host_step.dependOn(&run_live_workflow_aggregate_event_tests.step);
+        boundary_step.dependOn(&run_live_workflow_aggregate_event_tests.step);
 
         const candidate_release_phase_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_release_phase.zig"),

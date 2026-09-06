@@ -3493,7 +3493,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             .y = @floatFromInt(y0),
             .w = rect.width,
             .h = @floatFromInt(line_h),
-        });
+        }, snap.cursor.visible and snap.cursor.row == row);
 
         // ── 2) 글자
         col = 0;
@@ -7526,12 +7526,18 @@ fn sortA11yForReading() void {
 /// 어떤 것은 목록 줄(다음 갱신에 바뀐다), 어떤 것은 **그리면서 만든 스택 버퍼**(이 함수가 돌아가는
 /// 순간 사라진다)다. host 는 프레임이 **끝난 뒤에** 읽으므로, 복사하지 않으면 남의 메모리를 읽는다.
 /// 프레임마다 비운다 — 서술자와 같은 수명이다.
-/// **크기의 근거**(적대적 검증 2회차에서 실측했다): 한 화면에 목록 줄이 15개 서고, 그중 가장 긴
-/// 줄이 이름+값 181바이트였다(제목·경로·git·agent 를 코어가 담는 자리 끝까지 채운 목록) — 약
-/// 2.7 KiB 다. 세로가 더 긴 기기면 21줄까지 서므로 3.8 KiB 가 되어 4 KiB 로는 **여유가 5%** 였다.
-/// 배로 둔다 — 넘치면 이름이 빈 것이 되고, 빈 이름은 host 가 요소를 아예 안 만들어 그 줄이
-/// 스크린 리더에서 통째로 사라진다.
-var a11y_text: [8192]u8 = undefined;
+/// **크기의 근거.** 넘치면 이름이 빈 것이 되고, 빈 이름은 host 가 요소를 아예 안 만들어 그 줄이
+/// 스크린 리더에서 **통째로 사라진다** — 그래서 최악을 재서 잡는다.
+///
+/// - 목록 화면: 한 화면에 15줄, 가장 긴 줄이 이름+값 181바이트 ≈ 2.7 KiB(세로가 긴 기기면 3.8 KiB).
+/// - **본문 화면이 훨씬 크다**(터미널 줄이 들어오면서 계산이 달라졌다): 줄마다 최대
+///   `term_row_read_cap`(960)이고 화면 줄 수만큼이다. 넓은 화면에서 60줄이면 **57 KiB** 다.
+///   실제로 결합 문자(칸 하나가 코드포인트 넷 = 10바이트)로 채우니 8 KiB 를 넘겼다 — 「글자 수」가
+///   아니라 **바이트**로 재야 하는 자리다(적대적 검증 2회차).
+///
+/// 그래서 `줄 상한 × 줄 수 상한` 으로 잡는다. 정적이라 앱 크기에만 실리고(아틀라스는 메가바이트다),
+/// 이 값을 넘길 격자는 폰·태블릿에 없다.
+var a11y_text: [term_row_read_cap * 68]u8 = undefined;
 var a11y_text_len: usize = 0;
 
 /// 글자를 담고 담은 자리를 답한다. 자리가 모자라면 **빈 것을 답하고 이름을 남긴다** — 조용히
@@ -7557,7 +7563,7 @@ fn a11yIntern(text: []const u8) []const u8 {
 ///
 /// 빈 줄은 안 낸다 — 스무 줄짜리 빈 화면에서 스무 번을 훑게 하지 않는다. 끝의 여백도 턴다:
 /// 터미널은 줄을 공백으로 채우므로 그대로 주면 「명령어 뒤에 공백 일흔 개」가 읽힌다.
-fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, rect: SetRect) void {
+fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, rect: SetRect, has_cursor: bool) void {
     if (!a11y_top_layer) return; // 덮여 있으면 아래 층은 안 낸다(누르는 쪽과 같은 조건)
     var buf: [term_row_read_cap]u8 = undefined;
     var len: usize = 0;
@@ -7565,18 +7571,32 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
     while (col < body_cols) : (col += 1) {
         const cell = snap.cells[core.index(row, col)];
         if (cell.continuation) continue;
-        const cp: u21 = if (cell.codepoint == 0) ' ' else cell.codepoint;
-        var enc: [4]u8 = undefined;
-        // **담을 수 없는 값이면 대체 문자로 자리를 지킨다.** 건너뛰면 그 뒤 칸이 앞으로 밀려
-        // 읽는 줄과 보는 줄이 어긋난다 — 이 파일이 계속 막아 온 그 어긋남이다(계약 §5: 조용히
-        // 넘어가지 않는다. 여기서는 「무엇이 있었다」를 지우지 않는 것이 옳은 처리다).
-        const n = if (std.unicode.utf8Encode(cp, &enc)) |k| k else |_| repl: {
-            @memcpy(enc[0..3], "\u{FFFD}");
-            break :repl 3;
-        };
-        if (len + n > buf.len) break;
-        @memcpy(buf[len..][0..n], enc[0..n]);
-        len += n;
+        // **클러스터를 통째로 읽힌다.** 코어는 base 를 셀에 두고 나머지를 `grapheme_id` 로 따로
+        // 보관한다 — base 만 보면 `❤` 와 `❤️` 가 같아지고, 결합으로 만든 글자는 반쪽이 읽힌다
+        // (그리는 쪽이 이 배관을 쓰는 그 이유다. 적대적 검증 1회차에서 잡았다).
+        var cps: [max_cluster]u21 = undefined;
+        cps[0] = if (cell.codepoint == 0) ' ' else cell.codepoint;
+        var cps_len: usize = 1;
+        if (cell.grapheme_id != 0 and cell.grapheme_id <= snap.graphemes.len) {
+            for (snap.graphemes[cell.grapheme_id - 1]) |extra| {
+                if (cps_len == max_cluster) break;
+                cps[cps_len] = extra;
+                cps_len += 1;
+            }
+        }
+        for (cps[0..cps_len]) |cp| {
+            var enc: [4]u8 = undefined;
+            // **담을 수 없는 값이면 대체 문자로 자리를 지킨다.** 건너뛰면 그 뒤 칸이 앞으로 밀려
+            // 읽는 줄과 보는 줄이 어긋난다 — 이 파일이 계속 막아 온 그 어긋남이다(계약 §5: 조용히
+            // 넘어가지 않는다. 여기서는 「무엇이 있었다」를 지우지 않는 것이 옳은 처리다).
+            const n = if (std.unicode.utf8Encode(cp, &enc)) |k| k else |_| repl: {
+                @memcpy(enc[0..3], "\u{FFFD}");
+                break :repl 3;
+            };
+            if (len + n > buf.len) break;
+            @memcpy(buf[len..][0..n], enc[0..n]);
+            len += n;
+        }
     }
     const text = std.mem.trimEnd(u8, buf[0..len], " ");
     if (text.len == 0) return;
@@ -7589,7 +7609,10 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
         break :short "";
     };
     if (label.len == 0) return;
-    noteA11y(rect, .{ .role = .text, .label = label, .value = text });
+    // **커서가 있는 줄은 그렇다고 말한다.** 화면은 그것을 깜빡이는 사각형으로만 말하는데 — 색도
+    // 모양도 안 읽힌다. 지금 치는 글자가 어디로 가는지 모르면 터미널을 쓸 수가 없다
+    // (적대적 검증 3회차. 토글의 켜짐/꺼짐·편집 중인 줄과 같은 규율이다).
+    noteA11y(rect, .{ .role = .text, .label = label, .value = text, .selected = has_cursor });
 }
 
 /// 한 줄에서 읽어 낼 글자의 상한. 240칸 × 4바이트라 어떤 격자에서도 줄이 통째로 들어간다.

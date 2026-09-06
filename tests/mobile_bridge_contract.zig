@@ -7064,6 +7064,67 @@ test "M9 서술자: 복사 버튼도 낸다 — 눌리는데 안 읽히면 복�
     try std.testing.expect(c.y >= n.rect.y and c.y <= n.rect.y + n.rect.h);
 }
 
+test "M9 본문: 화면이 가득 차도 글자 자리가 안 넘친다" {
+    // **본문이 들어오면서 계산이 달라졌다.** 목록만 낼 때는 한 화면이 2.7 KiB 였는데, 본문은
+    // 줄마다 최대 960바이트다 — 넘치면 이름·값이 빈 것이 되고, 빈 이름은 host 가 요소를 아예
+    // 안 만들어 **그 줄이 사라진다**(적대적 검증 2회차).
+    const T = std.testing;
+    endAnyGesture();
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(1200, 900, now()); // 넓은 화면(태블릿 쪽)
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+
+    // 화면을 가득 채운다 — 줄마다 긴 글자, 줄 수만큼.
+    var row: u16 = 1;
+    while (row <= 60) : (row += 1) {
+        var pos: [16]u8 = undefined;
+        const seq = std.fmt.bufPrint(&pos, "\x1b[{d};1H", .{row}) catch continue;
+        _ = bridge.maru_mobile_input(seq.ptr, seq.len);
+        const line = "0123456789" ** 20; // 200칸
+        _ = bridge.maru_mobile_input(line, line.len);
+    }
+    _ = bridge.maru_mobile_build(1200, 900, now());
+
+    // **넘침이 없다.**
+    try T.expect(!std.mem.eql(u8, std.mem.span(bridge.maru_mobile_last_error()), "a11y_text_overflow"));
+    // 그리고 낸 서술자에 **이름 없는 것도, 값 빈 본문 줄도** 없다.
+    var rows_seen: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        try T.expect(n.sem.label.len > 0);
+        if (n.sem.role != .text) continue;
+        rows_seen += 1;
+        try T.expect(n.sem.value.len > 0);
+    }
+    try T.expect(rows_seen >= 10); // 실제로 여러 줄이 찼다(전제)
+
+    // **더 나쁜 내용으로 민다.** 결합 문자는 칸 하나가 여러 코드포인트라 바이트가 몇 배다 —
+    // 「글자 수」가 아니라 「바이트」로 재야 하는 자리다.
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    row = 1;
+    while (row <= 60) : (row += 1) {
+        var pos2: [16]u8 = undefined;
+        const seq2 = std.fmt.bufPrint(&pos2, "\x1b[{d};1H", .{row}) catch continue;
+        _ = bridge.maru_mobile_input(seq2.ptr, seq2.len);
+        // e + 결합 악센트 셋 = 칸 하나에 10바이트
+        const heavy = "e\u{0301}\u{0302}\u{0303}" ** 40;
+        _ = bridge.maru_mobile_input(heavy, heavy.len);
+    }
+    _ = bridge.maru_mobile_build(1200, 900, now());
+    if (std.mem.eql(u8, std.mem.span(bridge.maru_mobile_last_error()), "a11y_text_overflow")) {
+        std.debug.print("결합 문자로 채우니 글자 자리가 넘친다\n", .{});
+        return error.A11yTextOverflow;
+    }
+    for (bridge.a11yNodesForTest()) |n| {
+        try T.expect(n.sem.label.len > 0);
+        if (n.sem.role == .text) try T.expect(n.sem.value.len > 0);
+    }
+}
+
 test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값이다" {
     // **한 덩어리로 주면 모바일에서 못 읽는다.** macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이
     // 있어 화면 전체를 값 하나로 줘도 줄 이동이 되지만(Ghostty 가 그 길이다), UIKit·Android 의
@@ -7124,6 +7185,26 @@ test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값�
         ai += 1;
     }
     try T.expectEqual(bi, ai);
+
+    // **보는 글자와 읽는 글자가 같다.** 코어는 base 를 셀에 두고 결합 문자를 따로 보관하는데,
+    // base 만 읽으면 `❤` 와 `❤️` 가 같아진다(적대적 검증 1회차).
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("\u{2764}\u{FE0F}", 6); // ❤️ = base + VS16
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var found = false;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .text) continue;
+        if (std.mem.indexOf(u8, n.sem.value, "\u{2764}\u{FE0F}") != null) found = true;
+    }
+    try T.expect(found);
+
+    // **커서가 있는 줄은 그렇다고 말한다.** 화면은 깜빡이는 사각형으로만 말하는데 색도 모양도
+    // 안 읽힌다 — 치는 글자가 어디로 가는지 모르면 터미널을 쓸 수가 없다(적대적 검증 3회차).
+    var marked: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role == .text and n.sem.selected) marked += 1;
+    }
+    try T.expectEqual(@as(usize, 1), marked); // 커서는 한 줄에만 있다
 }
 
 test "M9 서술자: 터미널 앱 바의 세 자리를 이름과 역할로 낸다" {

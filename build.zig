@@ -1548,6 +1548,24 @@ pub fn build(b: *std.Build) void {
     run_macos_event_release_fresh_tests.addArg("--maru-expect-tests=5");
     run_macos_event_release_fresh_tests.setCwd(b.path("."));
 
+    // **선-가로채기 게이트의 ABI 배선**(docs/key-input-and-shortcuts.md 「선-가로채기는 터미널 것일
+    // 때만 먹는다」). 이 판정자는 Swift 가 실제로 부르는 **export** 를 민다 — 파생만 재면 래퍼가
+    // 상수를 내도 초록이다(변이 `T9`·`T10` 이 그 자리였다). 전체 ABI suite 는 샤드로 도는 무거운
+    // 스텝이라, 위 탐색기 gate 와 **같은 이유**로 전용 step 을 둔다(빠른 되먹임).
+    const macos_terminal_gate_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"TIG5"}, // TIG1~3 은 `test-editor` 가, TIG4 는 `test-editor-chord-menu` 가 돈다
+    });
+    const run_macos_terminal_gate_tests = b.addRunArtifact(macos_terminal_gate_tests);
+    // 6 = TIG5 하나 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
+    run_macos_terminal_gate_tests.addArg("--maru-expect-tests=6");
+    run_macos_terminal_gate_tests.setCwd(b.path("."));
+    const macos_terminal_gate_step = b.step(
+        "test-terminal-gate",
+        "Validate that terminal-only pre-core interceptions gate on the active Term kind",
+    );
+    macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
+
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
     // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.

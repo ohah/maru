@@ -85,6 +85,17 @@ test "TIG4 터미널 전용 선-가로채기가 Term 종류로 게이트된다" 
     // **`.contains(.shift)` 로 돌아가면 안 된다** — ⇧⌘PageUp 같은 조합까지 삼킨다.
     try std.testing.expect(std.mem.indexOf(u8, swift, "if event.modifierFlags.contains(.shift), let session = appSession {") == null);
 
+    // **헬퍼가 fail-open 이다** — 세션이 없으면 **참**이어야 한다. `false` 로 뒤집히면 창이 뜨는
+    //  동안 터미널에서 `⌘↑`·`⇧PageUp` 이 조용히 사라진다(1회차 `T16` 이 그 자리다). Zig 쪽
+    //  `activeTermIsTerminal`·ABI 도 같은 방향이고, **셋이 갈리면 시작 순간에만 나는 버그**가 된다.
+    const helper =
+        \\    var activeTermIsTerminal: Bool {
+        \\        guard let session = appSession else { return true }
+        \\        return maru_macos_app_session_active_term_is_terminal(session) != 0
+        \\    }
+    ;
+    try std.testing.expect(std.mem.indexOf(u8, swift, helper) != null);
+
     // **판정을 Swift 로 복제하지 않았다.**
     try std.testing.expect(std.mem.indexOf(u8, swift, "kind == .terminal") == null);
 }

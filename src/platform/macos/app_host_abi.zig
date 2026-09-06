@@ -8337,3 +8337,40 @@ test "app 진단 로그 fd는 base 아래 app.log를 append로 열고 상한을 
     try std.testing.expectEqual(@as(i64, 0), std.c.lseek(after_cap, 0, std.c.SEEK.END));
     _ = std.c.close(after_cap);
 }
+
+test "TIG5 활성 Term 질의 ABI 가 Term 종류를 그대로 전한다 (선-가로채기 게이트 배선)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // **파생만 재면 배선이 빠져도 초록이다.** `TIG2` 는 `term_ops.activeTermIsTerminal` 을 **직접**
+    // 부르는데 Swift 가 부르는 것은 **이 export** 다 — 래퍼가 늘 1 을 내면 게이트가 죽고 편집기는
+    // 그 키들을 계속 못 받는다(1회차 `T9`·`T10` 이 그 자리다).
+
+    // ⑴ **세션이 없으면 fail-open(1)** — 시작 중에는 선-가로채기가 종전대로 돌아야 한다. 0 으로
+    //    뒤집히면 창이 뜨는 동안 터미널에서 `⌘↑`·`⇧PageUp` 이 조용히 사라진다.
+    try std.testing.expectEqual(@as(c_int, 1), maru_macos_app_session_active_term_is_terminal(null));
+
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    const s = session orelse return error.NoSession;
+    s.surface_initialized = true;
+
+    // ⑵ **터미널이면 1** — 새 세션의 활성 Term 은 터미널이다.
+    try std.testing.expectEqual(@as(c_int, 1), maru_macos_app_session_active_term_is_terminal(session));
+
+    // ⑶ **편집기면 0**(요점) — 그래야 Swift 가 비켜서고 키가 편집기에 닿는다. 한쪽만 재면 상수를
+    //    낸 변이가 산다.
+    const tab = s.tabs.items[s.app_window.active_tab];
+    const pane = tab.panes.items[tab.active_pane];
+    const term = pane.terms.items[pane.active_term];
+    const saved = term.kind;
+    term.kind = .editor;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_active_term_is_terminal(session));
+    term.kind = saved;
+}

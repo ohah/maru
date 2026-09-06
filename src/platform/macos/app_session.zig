@@ -2216,6 +2216,9 @@ const PendingConfirm = union(enum) {
     grant: u64,
     file_panel_close,
     file_tree_delete,
+    /// 원격 삭제(RF6c) — **되돌릴 수 없다**. 로컬(휴지통)과 다른 종류로 두는 이유가 그것이다:
+    /// 문구도 버튼도 달라야 하고, 한 종류로 합치면 그 차이가 호출자 규율이 되어 샌다(§2.3 ⑷).
+    remote_file_tree_delete,
 };
 
 const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
@@ -5281,6 +5284,16 @@ pub const AppSession = struct {
     remote_rename_inflight: bool = false,
     remote_rename_mutex: std.Io.Mutex = .init,
     remote_rename_outcome: ?file_panel_ops.RemoteRenameOutcome = null,
+    /// 확인 모달이 뜬 사이 굳혀 두는 원격 삭제 대상(RF6c) — 선택이 움직여도 **처음 물었던 그것**을
+    /// 지운다. 신원까지 굳히므로 저쪽이 갈리면 헬퍼가 `stale` 로 막는다.
+    pending_remote_delete: struct {
+        parent_buf: [std.fs.max_path_bytes]u8 = undefined,
+        parent_len: usize = 0,
+        name_buf: [512]u8 = undefined,
+        name_len: usize = 0,
+        dev: u64 = 0,
+        ino: u64 = 0,
+    } = .{},
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
@@ -8587,6 +8600,8 @@ pub const AppSession = struct {
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
             .file_panel_close => file_panel_ops.cancelFilePanelClose(self),
             .file_tree_delete => self.pending_file_tree_delete = null,
+            // 굳혀 둔 대상을 **비운다** — 안 비우면 다음 확인이 옛 대상을 지울 수 있다.
+            .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
@@ -11080,6 +11095,7 @@ pub const AppSession = struct {
                         .syncing, .saving => {},
                     },
                     .file_tree_delete => file_panel_ops.confirmFileTreeDelete(self),
+                    .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
@@ -79926,4 +79942,80 @@ test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 
 
     // ── ⑦ 원격 행이 발행 중이면 **로컬 변경 타깃은 여전히 null 이다**(§2.4 펜스는 그대로다).
     try std.testing.expect(file_panel_ops.selectedFileTreeMutationTarget(session) == null);
+}
+
+test "원격 탐색기 삭제 수직: 확인을 거치고, 굳힌 대상을 지우며, 결말이 갈린다 (RF6c)" {
+    // ④=㉰(사용자 결정 2026-09-06): 되돌리기가 없으므로 **확인 없이 안 지운다.** 여기서 재는 것은
+    // ⑴ 요청이 확인 모달을 세우고 대상을 굳히는가 ⑵ 취소가 그것을 비우는가 ⑶ 결말이 삭제 뜻으로
+    // 갈리는가(같은 코드가 rename 과 다른 뜻이다) — 전부 제품 함수로.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const re = &session.remote_explorer;
+    re.active = true;
+    try re.dest.appendSlice(a, "me@build-box");
+    try re.ctl.appendSlice(a, "/tmp/maru-ctl-fixture");
+    try re.root.appendSlice(a, "/srv/app");
+    try re.tree.replaceExplicitRoots(&.{"/srv/app"});
+    while (re.tree.takeScanRequest()) |owned| a.free(owned);
+    try re.tree.applySnapshot("/srv/app", &.{.{ .name = "doomed.txt", .kind = .file, .identity = .{ .device = 7, .inode = 42, .kind = 1 } }});
+    session.file_tree_rows_remote = true;
+    session.file_tree_rows_dirty = true;
+    try file_panel_ops.updateFileTree(session);
+
+    // 행을 고른다(발행된 행에서 고르는 것이 제품 경로다).
+    var picked = false;
+    for (session.file_tree_rows.items, 0..) |row, i| switch (row) {
+        .file => {
+            picked = file_panel_ops.setFileTreeSelection(session, i);
+        },
+        else => {},
+    };
+    try std.testing.expect(picked);
+
+    // ── ① 요청은 **지우지 않고 묻는다**. 대상은 굳어 있다.
+    file_panel_ops.requestDeleteSelectedFileTreeEntry(session); // 원격이면 원격 문으로 간다
+    try std.testing.expect(session.pending_confirm == .remote_file_tree_delete);
+    try std.testing.expect(!session.remote_rename_inflight); // 아직 아무것도 안 보냈다
+    try std.testing.expectEqualStrings("doomed.txt", session.pending_remote_delete.name_buf[0..session.pending_remote_delete.name_len]);
+    try std.testing.expectEqualStrings("/srv/app", session.pending_remote_delete.parent_buf[0..session.pending_remote_delete.parent_len]);
+    try std.testing.expectEqual(@as(u64, 42), session.pending_remote_delete.ino);
+
+    // ── ② 취소는 굳힌 대상을 **비운다**(안 비우면 다음 확인이 옛 대상을 지운다).
+    session.cancelPendingClose();
+    try std.testing.expectEqual(@as(usize, 0), session.pending_remote_delete.name_len);
+
+    // ── ③ 결말은 **삭제 뜻**으로 갈린다: 같은 collision 코드가 rename 은 「이름이 있다」, 삭제는
+    //     「폴더가 안 비었다」다(헬퍼가 AT_REMOVEDIR 로만 지우므로).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .collision, .kind = .delete });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_delete_not_empty)));
+
+    // ── ④ 성공은 다시 읽는다(재스캔이 권위다).
+    while (re.tree.takeScanRequest()) |owned| a.free(owned);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = .ok, .kind = .delete });
+    var scans: usize = 0;
+    while (re.tree.takeScanRequest()) |owned| {
+        a.free(owned);
+        scans += 1;
+    }
+    try std.testing.expect(scans > 0);
+
+    // ── ⑤ 답이 없으면 삭제 쪽 문구로 말한다(rename 문구가 아니다).
+    @memset(&session.notice_message_buf, 0);
+    file_panel_ops.finishRemoteRename(session, .{ .outcome = null, .kind = .delete });
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, maru.i18n.t(.fp_remote_delete_failed)));
 }

@@ -20,11 +20,13 @@ fn fnBody(source: []const u8, name: []const u8) ?[]const u8 {
     var needle_buf: [128]u8 = undefined;
     const needle = std.fmt.bufPrint(&needle_buf, "fn {s}(", .{name}) catch return null;
     const start = std.mem.indexOf(u8, source, needle) orelse return null;
-    var end = start + needle.len;
-    while (std.mem.indexOfPos(u8, source, end, "\nfn ")) |next| {
-        end = next;
-        break;
-    } else end = source.len;
+    const after = start + needle.len;
+    // ⚠️ **둘 다 본다**(`\nfn ` 와 `\npub fn `). 예전에는 `\nfn ` 만 봐서, 뒤따르는 것이 전부 `pub fn`
+    // 이면 본문이 **다음 함수들까지 삼켰다** — 그러면 「이 본문에 X 가 없다」 같은 부정 단언이
+    // 남의 코드를 보고 죽는다(RF6c 에서 실제로 그렇게 걸렸다).
+    var end = source.len;
+    if (std.mem.indexOfPos(u8, source, after, "\nfn ")) |next| end = @min(end, next);
+    if (std.mem.indexOfPos(u8, source, after, "\npub fn ")) |next| end = @min(end, next);
     return source[start..end];
 }
 
@@ -152,4 +154,40 @@ test "원격 변경은 로컬 변경 백엔드를 안 탄다 — 문이 하나�
     try std.testing.expect(std.mem.indexOf(u8, body, "file_tree_mutation.validateName(name)") != null);
     // 로컬 타깃의 원격 펜스는 **그대로 서 있다**(RF6b 는 그것을 안 열었다 — 원격은 다른 문이다).
     try std.testing.expect(std.mem.indexOf(u8, panel, "if (self.file_tree_rows_remote) return null;") != null);
+}
+
+test "원격 삭제는 확인을 거치고 로컬 휴지통을 안 탄다 (RF6c ④=㉰)" {
+    // ④ 사용자 결정: 원격에는 휴지통이 없어 **되돌릴 수 없다**. 그래서 ⑴ 요청은 확인 모달만 세우고
+    // ⑵ 실제 삭제는 확인 뒤에만 일어나며 ⑶ 로컬 휴지통 배관(staging·Trash·복구)을 안 탄다.
+    // 이 셋 중 하나라도 무너지면 «묻지 않고 남의 서버에서 지우는» 상태가 된다.
+    const allocator = std.testing.allocator;
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+
+    // 요청 본문: 확인만 세운다 — 워커를 직접 시작하지 않는다.
+    const ask = fnBody(panel, "requestDeleteSelectedRemoteFileTreeEntry") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, ask, "showConfirmKeys(.remote_file_tree_delete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ask, "beginRemoteRename(") == null);
+    // 되돌릴 수 없다는 것을 **문구와 버튼이** 말한다(§2.3 ⑷ — 차이를 숨기지 않는다).
+    try std.testing.expect(std.mem.indexOf(u8, ask, ".fp_remote_delete_confirm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ask, ".btn_delete_forever") != null);
+
+    // 확인 본문: 굳혀 둔 대상으로만 지운다(확인을 누르는 사이 선택이 움직여도 그것을 지운다).
+    const confirm = fnBody(panel, "confirmRemoteFileTreeDelete") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, confirm, "pending_remote_delete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, confirm, "beginRemoteRename(") != null);
+
+    // 로컬 휴지통 배관은 어느 쪽도 안 탄다.
+    for ([_][]const u8{ ask, confirm }) |body| {
+        for ([_][]const u8{ "file_tree_trash", "maru-trash", "pending_file_tree_delete" }) |symbol| {
+            try std.testing.expect(std.mem.indexOf(u8, body, symbol) == null);
+        }
+    }
+
+    // 로컬 삭제 진입점이 **원격을 먼저 가른다** — 안 그러면 원격 행이 휴지통 staging 으로 간다.
+    const local = fnBody(panel, "requestDeleteSelectedFileTreeEntry") orelse return error.TestUnexpectedResult;
+    const gate = std.mem.indexOf(u8, local, "if (self.file_tree_rows_remote) return requestDeleteSelectedRemoteFileTreeEntry(self);") orelse
+        return error.TestUnexpectedResult;
+    const busy = std.mem.indexOf(u8, local, "fileTreeNamespaceMutationBusy(self)").?;
+    try std.testing.expect(gate < busy);
 }

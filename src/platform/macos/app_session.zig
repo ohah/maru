@@ -76457,6 +76457,130 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     try std.testing.expect(pixels2.len > 0);
 }
 
+test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 남는다 (IG4-b)" {
+    // **사용자 보고**: 이미지를 눌러 크게 본 상태에서 도크를 접었다 펴면 그림 자리가 빈다.
+    //
+    // 원인은 격자 타일에서 이미 한 번 고친 것과 **같은 결함**이다 — 렌더러는 `live_ids` 에 없는
+    // 텍스처를 evict 하는데(kitty K4c), 도크가 안 보이는 프레임에는 크게 보기 id 도 안 실리므로
+    // 텍스처가 거둬진다. 그런데 `markAllNeedUpload` 는 `tiles` 만 훑어 크게 보기 한 장은 `uploaded`
+    // 가 참으로 남았고, 다시 펴면 **업로드 없이 id 만** 실렸다.
+    //
+    // 뷰를 바꿔 나가는 길에는 이 증상이 없다 — `onLeaveView` 가 크게 보기를 아예 닫기 때문이다.
+    // **접기만** 상태를 들고 돌아오므로, 이 test 는 그 길을 그대로 탄다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    image_gallery_ops.openAt(session, 0);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expect(session.image_gallery.open.?.pixels.len > 0);
+
+    // ── ① 한 프레임 그려 「이미 올렸다」 상태를 만든다. 여기서부터가 사용자의 화면이다.
+    var images: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels: []u8 = &.{};
+    var live: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images);
+        allocator.free(uploads);
+        allocator.free(pixels);
+        live.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    try std.testing.expectEqual(@as(usize, 1), images.len);
+    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images[0].image_id);
+    try std.testing.expect(session.image_gallery.open.?.uploaded);
+
+    // ── ② **도크를 접는다.** 크게 보기는 그대로 열려 있다(접기는 닫기가 아니다).
+    session.dock.collapsed = true;
+    try std.testing.expect(!dock_ops.dockVisible(session));
+    var images_hidden: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads_hidden: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels_hidden: []u8 = &.{};
+    var live_hidden: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images_hidden);
+        allocator.free(uploads_hidden);
+        allocator.free(pixels_hidden);
+        live_hidden.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images_hidden, &uploads_hidden, &pixels_hidden, &live_hidden);
+    try std.testing.expectEqual(@as(usize, 0), images_hidden.len);
+    try std.testing.expectEqual(@as(usize, 0), live_hidden.items.len); // 안 실렸다 = 텍스처가 거둬진다
+    try std.testing.expect(session.image_gallery.open != null); // 접기는 크게 보기를 닫지 않는다
+    // **여기가 결함의 자리였다** — 안 그린 프레임을 지나면 「다시 올려야 함」이어야 한다.
+    try std.testing.expect(!session.image_gallery.open.?.uploaded);
+
+    // ── ③ 다시 편다. 그림이 돌아오려면 **업로드가 함께 실려야** 한다.
+    session.dock.collapsed = false;
+    var images2: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels2: []u8 = &.{};
+    var live2: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images2);
+        allocator.free(uploads2);
+        allocator.free(pixels2);
+        live2.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    try std.testing.expectEqual(@as(usize, 1), images2.len);
+    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images2[0].image_id);
+    try std.testing.expectEqual(@as(usize, 1), uploads2.len);
+    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, uploads2[0].image_id);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 4), pixels2.len); // 2×2 RGBA 가 실제로 다시 간다
+    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, live2.items[0]);
+}
+
 test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 민다 (IG4-c)" {
     // **계산(IG4-a)이 도는 것과 «입력이 거기 닿는 것» 은 다른 사실이다.** 배선이 빠지면 순수 test 는
     // 전부 통과하는데 화면에서는 휠이 안 먹고 그림이 안 밀린다.

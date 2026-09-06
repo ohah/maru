@@ -1049,6 +1049,17 @@ pathname·inventory/mode, subject identity/mode/SHA, role swap, symlink/hardlink
 검증하고 current effective UID 비교와 bundle 상한은 source contract로 고정한다. action은 bundle JSON의 cryptographic/semantic authority를 주장하지
 않으며 retained preparation reopen, current draft 재인증, resume process, workflow와 frozen signed U5 E2E는 후속 범위다.
 
+U5 candidate pair attestation action은 reducer의 stage 2 하나를 GitHub `uses:` step 하나로 표현한다. focused
+`test-session-host-release-candidate-attestation-action`은 DMG→frozen 순서로 기존 single-subject action을 exact once씩만 재사용하고,
+두 subject의 전체 구간 identity/digest fence와 두 bundle의 canonical regular single-link·16 MiB 상한 및 네 vnode distinct를 통과한
+뒤에만 두 locator를 함께 출력하는지 actual filesystem에서 검증한다. direct `actions/attest`, digest·성공 scalar·bundle caller 입력과
+부분 output은 0이다. candidate/authored live wrapper는 각 payload action을 exact once 위임하고 top-level binding은 leaf가 아니라 이
+wrapper를 가리킨다. 따라서 후속 checkpoint bridge가 payload의 닫힌 입력 계약을 깨지 않고 같은 `uses:` step 안에 들어갈 자리가
+있다. wrapper 안의 실제 checkpoint admission/commit은 아직 후속 증거다. 2026-09-07 Apple Silicon 로컬 actual filesystem에서 64 MiB DMG와 8 MiB frozen executable의
+`pin -> verify` 전체를 warmup 3회 뒤 20회 측정한 값은 median 528.0 ms, p95 582.7 ms, max 636.5 ms였다. 이는
+두 subject를 전후로 SHA-256 하는 로컬 stage 비용이며 `actions/attest`의 GitHub OIDC·service 왕복은 포함하지 않는다. 후자는 실제
+workflow 배선 뒤 GitHub-hosted runner 표본으로 별도 기록한다.
+
 U5 same-run candidate bundle 소비는 기존 final-address `CandidateAttestation` owner가 맡는다.
 `test-session-host-release-adapter-candidate-attestation`은 candidate DMG/frozen과 두 local bundle의 no-follow pin·pairwise distinct
 identity·role별 크기 상한, DMG→frozen `verifyBundleWith` exact order, token-free child, shared deadline, 각 child 전후 candidate/bundle/CLI

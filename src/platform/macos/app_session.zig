@@ -76767,6 +76767,81 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
 }
 
+test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
+    // 목록이 통째로 비는 길이 있다(좁은 도크·줄 높이 0). 그때 개수만 적으면 사용자에게는
+    // 「목록이 없다」와 구분되지 않는다 — 계약 §2 가 가르라고 한 바로 그 둘이다. 격자는
+    // 「12장 중 8장」이 그 몫을 하지만 목록에는 타일이 없어 그 경로를 안 탄다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_N\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo hi\",\"description\":\"인사\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "n.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/n.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
+
+    // ── ① 자리를 얻었으면 개수를 말한다. **단위는 「장」이 아니다** — 명령을 그림으로 세지 않는다.
+    session.image_gallery.overflow = 0;
+    const normal = image_gallery_ops.noticeText(session, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_activity_count_suffix)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_count_suffix)) == null);
+
+    // ── ② 하나도 못 그렸으면 그 사실을 말한다.
+    session.image_gallery.overflow = session.image_gallery.count();
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.image_gallery_too_narrow),
+        image_gallery_ops.noticeText(session, &buf),
+    );
+
+    // ── ③ **격자는 이 문구를 쓰지 않는다** — 거기에는 「12장 중 8장」이 있다.
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    session.image_gallery.overflow = session.image_gallery.count();
+    const grid_notice = image_gallery_ops.noticeText(session, &buf);
+    try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.image_gallery_too_narrow)));
+}
+
 test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     // 격자의 `max_scroll` 은 타일 크기·열 수에서 나오므로 줄 목록의 실제 높이와 다르다.
     // 그대로 쓰면 **끝까지 안 내려간다** — 실측 세션(4,084개)에서 앞부분만 닿는다.

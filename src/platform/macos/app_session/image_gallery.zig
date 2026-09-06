@@ -1201,6 +1201,9 @@ pub fn cycleFilter(self: *AppSession) bool {
     // 목록이 통째로 바뀌므로 보던 자리도, 얹혀 있던 칸도 뜻을 잃는다.
     self.image_gallery.scroll.offset_y_px = 0;
     self.image_gallery.hovered = null;
+    // **넘친 수도 옛 모양의 것이다.** 격자에서 넘쳐 있었다면 그 값이 남아, 목록의 첫 프레임이
+    // 그려지기 전에 「도크가 좁아 못 그립니다」가 한 번 스친다. 렌더가 다시 채운다.
+    self.image_gallery.overflow = 0;
     rebuildFilter(self);
     self.metal_dirty = true;
     return true;
@@ -2273,20 +2276,23 @@ pub fn collectActivityList(
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     if (self.image_gallery.filter.isGrid()) return;
 
+    // **한 줄도 못 그리는 길에서도 그 사실을 남긴다**(계약 §2 — 「없다」와 「안 보인다」는 다르다).
+    // 조용히 물러나면 화면은 비었는데 안내는 「4,084개」라고만 말해, 사용자에게는 목록이 **없는 것**과
+    // 구분되지 않는다. 자리를 하나도 못 얻었으므로 전부가 overflow 다.
+    const total = self.image_gallery.count();
     const area = gridArea(self);
-    if (area.w == 0 or area.h == 0) return;
     const row_h = listRowHeightPx(self);
-    if (row_h == 0) return;
-
     const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-    if (cols == 0) return;
+    if (area.w == 0 or area.h == 0 or row_h == 0 or cols == 0) {
+        self.image_gallery.overflow = total;
+        return;
+    }
 
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
     // 스크롤은 격자와 같은 값을 쓴다 — 필터를 바꿔도 「어디를 보고 있었나」가 이어진다.
     const first: usize = @intCast(self.image_gallery.scroll.offset_y_px / row_h);
     const rows_fit: usize = @intCast(area.h / row_h);
-    const total = self.image_gallery.count();
     const last = @min(first +| rows_fit, total);
     // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
     self.image_gallery.overflow = total -| (last -| first);
@@ -2356,6 +2362,13 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
             .{ .d = @intCast(n - self.image_gallery.overflow) },
             .{ .d = @intCast(n) },
         });
+    }
+    // **하나도 못 그렸으면 그렇게 말한다.** 목록은 자리를 못 얻으면 통째로 비는데(좁은 도크·줄
+    // 높이 0), 그때 개수만 적으면 사용자에게는 「목록이 없다」와 구분되지 않는다 — 계약 §2 가
+    // 가르라고 한 바로 그 둘이다. 격자는 「12장 중 8장」이 그 몫을 하지만 목록에는 타일이 없어
+    // 그 경로를 안 탄다.
+    if (!self.image_gallery.filter.isGrid() and self.image_gallery.overflow >= n) {
+        return maru.i18n.t(.image_gallery_too_narrow);
     }
     // **단위도 종류를 따른다.** 명령을 「장」으로 세면 안 된다 — 헤드리스 캡처가 실제로 「4084장」을
     // 잡아냈고, 값 판정자로는 안 보이는 종류의 결함이다(계약 §2.2 의 「지어내지 않는다」와 같은 축:

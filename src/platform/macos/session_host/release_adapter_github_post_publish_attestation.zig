@@ -29,9 +29,12 @@ pub const VerifiedRelease = struct {
     tag_ref_sha: [40]u8 = @splat(0),
     artifact_ids: [artifact_count]u64 = @splat(0),
     artifact_sha256: [artifact_count][64]u8 = @splat(@splat(0)),
+    seal: [32]u8 = @splat(0),
 
     pub fn value(self: *const @This()) ?View {
-        if (self.owner != self or self.release_id == 0 or self.tag_len == 0 or self.tag_len > self.tag.len or !lowerHex(&self.source_commit, 40) or !lowerHex(&self.tag_ref_sha, 40)) return null;
+        if (self.owner != self or self.release_id == 0 or self.tag_len == 0 or self.tag_len > self.tag.len or
+            !lowerHex(&self.source_commit, 40) or !lowerHex(&self.tag_ref_sha, 40) or
+            !std.crypto.timing_safe.eql([32]u8, self.seal, verifiedSeal(self))) return null;
         for (self.artifact_ids, 0..) |id, index| {
             if (id == 0 or !lowerHex(&self.artifact_sha256[index], 64)) return null;
             for (self.artifact_ids[0..index]) |prior| if (id == prior) return null;
@@ -39,7 +42,7 @@ pub const VerifiedRelease = struct {
         return .{ .release_id = self.release_id, .tag = self.tag[0..self.tag_len], .source_commit = &self.source_commit, .tag_ref_sha = &self.tag_ref_sha, .artifact_ids = self.artifact_ids, .artifact_sha256 = self.artifact_sha256 };
     }
     pub fn deinit(self: *@This()) !void {
-        if (self.owner != self) return error.InvalidOwner;
+        _ = self.value() orelse return error.InvalidOwner;
         self.* = .{};
     }
 };
@@ -91,6 +94,7 @@ fn verifyCore(authority: anytype, driver: anytype, deadline: anytype, result: *V
     result.artifact_ids = fixed.ids;
     result.artifact_sha256 = fixed.sha256;
     result.owner = result;
+    result.seal = verifiedSeal(result);
 }
 
 fn fence(authority: anytype, fixed: *const Frozen) !void {
@@ -127,7 +131,23 @@ fn same(fixed: *const Frozen, value: Snapshot) bool {
     return true;
 }
 fn pristine(value: *const VerifiedRelease) bool {
-    return value.owner == null and value.release_id == 0 and value.tag_len == 0 and std.mem.allEqual(u8, &value.tag, 0) and std.mem.allEqual(u8, &value.source_commit, 0) and std.mem.allEqual(u8, &value.tag_ref_sha, 0) and std.mem.allEqual(u64, &value.artifact_ids, 0) and std.mem.allEqual(u8, std.mem.asBytes(&value.artifact_sha256), 0);
+    return value.owner == null and value.release_id == 0 and value.tag_len == 0 and std.mem.allEqual(u8, &value.tag, 0) and std.mem.allEqual(u8, &value.source_commit, 0) and std.mem.allEqual(u8, &value.tag_ref_sha, 0) and std.mem.allEqual(u64, &value.artifact_ids, 0) and std.mem.allEqual(u8, std.mem.asBytes(&value.artifact_sha256), 0) and std.mem.allEqual(u8, &value.seal, 0);
+}
+
+fn verifiedSeal(value: *const VerifiedRelease) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.session-host.post-publish.verified-release.v1");
+    const address = @intFromPtr(value);
+    hasher.update(std.mem.asBytes(&address));
+    hasher.update(std.mem.asBytes(&value.release_id));
+    if (value.tag_len <= value.tag.len) hasher.update(value.tag[0..value.tag_len]);
+    hasher.update(&value.source_commit);
+    hasher.update(&value.tag_ref_sha);
+    hasher.update(std.mem.asBytes(&value.artifact_ids));
+    hasher.update(std.mem.asBytes(&value.artifact_sha256));
+    var seal: [32]u8 = undefined;
+    hasher.final(&seal);
+    return seal;
 }
 fn lowerHex(value: []const u8, len: usize) bool {
     if (value.len != len) return false;

@@ -3905,6 +3905,27 @@ aggregate 보존에 더해 destination 충돌과 finalize inventory·verifier·C
 release·credential을 읽거나 수정하지 않는다. 이 slice는 stage 5·6 process outcome만
 닫으며 reducer event mapping, `.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
 
+### 11.71 stage 5·6 process observation의 reducer event 결속
+
+live workflow owner는 stage 5·6 child의 종료를 shell 조건식이나 pathname 존재 여부로 재해석하지 않는다.
+`release_adapter_live_workflow_aggregate_event.zig`가 command identity를
+`prepare-candidate-aggregate→aggregate_prepare`, `finalize-candidate-aggregate→aggregate_finalize`로 고정하고, 회수한
+process observation을 §11.52 reducer에 직접 적용한다. observation은 process termination과 bounded stdout/stderr 각각의 bytes 및
+capture-complete bit만 가지며 command와 독립적인 stage 값을 caller에게 받지 않는다. command identity는 별도 복제 enum이 아니라
+release CLI contract의 command tag SSOT를 사용하고 다른 command 여섯 개는 observation 해석 전에 `InvalidCommand`로 거부한다.
+
+정상 종료 `0|21|22`는 stdout empty와 stderr exact `success\n|audit_required\n|cleanup_failed\n`가 서로 일치할 때만 각각
+`succeeded|failed|cleanup_failed` event가 된다. signal·stop·unknown termination, stream cap 초과, stdout byte 하나라도 존재,
+exit/stderr 불일치, missing newline, trailing byte와 unknown code는 child가 남긴 local cleanup 상태를 증명할 수 없으므로 보수적인
+`cleanup_failed` event가 된다. mapper는 pathname, aggregate inventory, environment, credential, child stderr의 비공개 문자열이나
+GitHub 상태를 검사·보존하지 않는다. reducer가 command에서 유도한 stage를 현재 `expectedStage()`와 대조하므로 역순·중복·terminal
+observation은 기존 mutation-zero 오류를 유지한다.
+
+focused gate `test-session-host-release-adapter-live-workflow-aggregate-event`는 두 command의 세 canonical tuple, 모든
+exit/stderr 교차 조합, unknown·signal termination, stdout·newline·trailing·cap drift와 모든 workflow prefix에서의 stage 결속을
+Debug·ReleaseFast로 검증하고 나머지 CLI command tag 전부의 거부를 고정한다. 이 slice는 child observation에서 reducer event까지의 pure ownership만 닫으며 process spawn/reap,
+Actions step 간 state handoff, `.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

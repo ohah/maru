@@ -1233,6 +1233,14 @@ aggregate 보존 및 destination 충돌·finalize 검증 실패의 exact audit-r
 실제 앱 session-host 상태·GitHub release·credential은 읽거나 수정하지 않으며 reducer mapping, live workflow와 frozen U5 E2E는
 후속 경계다.
 
+U5 stage-5/6 aggregate reducer event mapping은 command identity가 reducer stage를 단독으로 결정하고, normal exit
+`0|21|22`·empty stdout·exact `success\n|audit_required\n|cleanup_failed\n`의 일치 tuple만
+`succeeded|failed|cleanup_failed`로 적용한다. `test-session-host-release-adapter-live-workflow-aggregate-event`는 두 command의 canonical
+tuple과 모든 exit/stderr 교차 조합, signal·unknown termination, stdout·newline·trailing·capture-complete drift, 모든 workflow prefix의
+역순·중복·terminal mutation 0을 Debug·ReleaseFast에서 검증한다. mapper는 경로·credential·GitHub 상태를 보지 않으며 process
+spawn/reap, Actions state handoff, live workflow와 frozen U5 E2E는 후속 경계다. command identity는 release CLI contract tag를
+직접 사용하며 aggregate 외 모든 tag는 observation 해석과 state mutation 전에 거부한다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

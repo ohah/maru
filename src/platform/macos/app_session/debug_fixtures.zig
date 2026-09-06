@@ -18,6 +18,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const Pane = app_session_mod.Pane;
 const settings_ops = @import("settings.zig");
 const DropPlan = AppSession.DropPlan;
 const dock_ops = @import("dock.zig"); // 캡처 게이트가 도크 content 원점을 창 좌표로 옮길 때 쓴다
@@ -27,6 +28,7 @@ const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const pane_ops = @import("pane.zig");
+const file_panel_ops = @import("file_panel.zig"); // MARU_OPEN_EXPLORER_FILE 이 원격 행을 클릭과 같은 길로 활성화할 때 쓴다
 const find_ops = @import("find.zig");
 const git_ops = @import("git.zig");
 const image_gallery_ops = @import("image_gallery.zig"); // MARU_FORCE_IMAGE_GALLERY 가 갤러리를 첫 frame 에 세울 때 쓴다
@@ -686,6 +688,78 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 
 /// `reapplyForcedRemoteScm` 재전송 사이의 최소 간격 기준점 — 매 frame 보내면 셸에 명령이 쌓인다.
 var last_forced_send_ms: i64 = 0;
+
+/// `MARU_OPEN_EXPLORER_FILE` 이 이미 열었는가 — 열기는 한 번만(매 tick 다시 열면 «바쁨» 안내가 쌓인다).
+var forced_explorer_file_opened = false;
+
+/// `MARU_OPEN_EXPLORER_FILE=<원격 절대 경로>` — 발행된 원격 트리에서 그 경로의 파일 행을 **클릭과
+/// 같은 길**(`activateFileTreeRow` — 원격 펜스·supported 판정 포함)로 한 번 활성화한다(RF4 실측
+/// 캡처용 debug-gate). 손으로 `openRemoteFileReadOnly` 를 부르지 않는 이유는 REMOTE_SCM 픽스처와
+/// 같다 — 가짜 상태를 세우면 화면이 그럴듯한데 제품 배선이 안 돈다. 행이 아직 없으면(목록 수신 중)
+/// 다음 tick 에 다시 본다. env 미설정이면 무동작.
+/// `MARU_OPEN_EXPLORER=1` — 도크를 탐색기 뷰로 **유지한다**(실측 캡처용 debug-gate). 원격
+/// 탐색기(RF3a)의 follow 게이트가 «도크 가시 + 탐색기 뷰» 라서 헤드리스 캡처는 이 뷰를 열 수단이
+/// 필요하고, 첫 frame 한 번으로는 안 된다 — 원격 SCM follow 가 나중 tick 에 뷰를 소스 컨트롤로
+/// 덮는다(실측에서 확인). 다른 뷰일 때만 다시 연다(idempotent — MARU_FORCE_SCM_HOVER 재단언과 같은 결).
+/// `MARU_FORCE_REMOTE_SCM` 이 켜져 있는데 활성 term 이 **편집기**면 셸 term 으로 초점을 돌린다
+/// (실측 캡처용 debug-gate). 강제 원격은 활성 pane 의 PTY 에 바이트를 흘리는 것이라 편집기가 활성이면
+/// 아무 일도 안 일어나고 — 복원된 workspace 의 활성이 지난 실행에서 연 원격 파일이면 캡처가 통째로
+/// 헛돈다(실측에서 그렇게 한 번 속았다). 파일 열기 픽스처가 편집기를 활성으로 만든 **뒤에는** 돌지
+/// 않는다(그 상태가 캡처 대상이다).
+pub fn refocusShellTermForForcedRemote(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_REMOTE_SCM") == null and std.c.getenv("MARU_OPEN_EXPLORER") == null) return;
+    if (forced_explorer_file_opened) return;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return;
+    const tab = self.tabs.items[self.app_window.active_tab];
+    if (tab.panes.items.len == 0) return;
+    // ⑴ **마지막 셸 pane** 을 활성으로 둔다(복원된 workspace 의 활성이 편집기이거나 옛 로컬 셸이면
+    //    원격 따라가기 게이트가 아예 안 선다 — 실측에서 그렇게 세 번 속았다).
+    // **마지막** 셸 pane 을 고른다 — `MARU_FORCE_SPLIT` 이 만든 새 pane 이 뒤에 붙고, 캡처가 원하는
+    // 것은 그 새 pane(config `shell.command` 로 뜬 세션)이다. 첫 pane 을 고르면 복원된 로컬 셸로 간다.
+    {
+        var target: ?usize = null;
+        for (tab.panes.items, 0..) |p, i| {
+            if (paneHasShell(p) != null) target = i;
+        }
+        if (target) |i| pane_ops.focusPane(self, i);
+    }
+    // ⑵ 그 pane 안에서도 활성 term 이 편집기면 셸 term 으로.
+    const pane = pane_ops.activePane(self);
+    if (pane.terms.items.len == 0) return;
+    if (pane.activeTerm().file_entry == null) return; // 이미 셸이다
+    if (paneHasShell(pane)) |i| term_ops.focusTerm(self, i);
+}
+
+fn paneHasShell(pane: *Pane) ?usize {
+    for (pane.terms.items, 0..) |t, i| {
+        if (t.file_entry == null) return i;
+    }
+    return null;
+}
+
+pub fn reapplyForcedExplorerView(self: *AppSession) void {
+    if (std.c.getenv("MARU_OPEN_EXPLORER") == null) return;
+    if (!self.surface_initialized or !self.dock_initialized) return;
+    if (self.dock.presented and !self.dock.collapsed and self.dock.view == .explorer) return;
+    dock_ops.openDockTo(self, .explorer);
+}
+
+pub fn maybeActivateForcedExplorerFile(self: *AppSession) void {
+    if (forced_explorer_file_opened) return;
+    const raw = std.c.getenv("MARU_OPEN_EXPLORER_FILE") orelse return;
+    if (!self.file_tree_rows_remote) return;
+    const want = std.mem.span(raw);
+    for (self.file_tree_rows.items, 0..) |row, i| {
+        switch (row) {
+            .file => |v| if (std.mem.eql(u8, v.path, want)) {
+                forced_explorer_file_opened = true;
+                file_panel_ops.activateFileTreeRow(self, i);
+                return;
+            },
+            else => {},
+        }
+    }
+}
 
 /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
 /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.

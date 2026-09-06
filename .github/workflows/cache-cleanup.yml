@@ -15,8 +15,12 @@ name: Cache cleanup
 #
 # **무엇을 지우나.** 보수적으로 둘만 지운다:
 #  - 닫히거나 머지된 PR ref의 캐시 (아무도 못 읽는다)
-#  - main의 같은 그룹에서 **최신 2개를 넘는** 옛 항목
-#    (1개만 남기면 직전 커밋을 재실행할 때 미스가 난다. 그래서 2개다.)
+#  - main의 같은 그룹에서 **최신 1개를 넘는** 옛 항목.
+#    처음엔 「1개만 남기면 직전 커밋을 재실행할 때 미스가 난다」고 2개를 남겼는데, 그 우려는 성립하지 않는다 —
+#    ci.yml 의 복원 스텝 8개가 **전부** `restore-keys` 접두 폴백을 갖고 있어(2026-09-06 확인, 판정자
+#    `tests/ci_cache_generations_boundary.zig` 가 8:8 을 센다) 정확한 sha 키가 없어도 그룹의 최신 항목을 적중한다.
+#    2개를 남기면 잡 9종 × 2세대 ≈ 9GB 가 정상 상태라 늘 한도에 붙는다(실측 2026-09-06: 29개 10.8GB 로 한도 초과,
+#    LRU 가 살아 있는 캐시를 밀어냈다). 1개면 약 4.9GB 다.
 # 열린 PR의 캐시는 그 PR 재실행에 쓰일 수 있으므로 **건드리지 않는다**.
 
 # **언제 도는가.** 매일 한 번으로는 늦었다 — 2026-08-17 실측: 하루 안에 항목 32개 9.99GB 로
@@ -108,7 +112,7 @@ jobs:
               if pr_state[num] == "closed":  # GitHub은 머지도 closed로 준다
                   doomed.append((c, f"PR #{num} 닫힘"))
 
-          # ② main의 그룹별 최신 2개 초과분
+          # ② main의 그룹별 최신 1개 초과분 (위 주석 — 복원은 전부 접두 폴백이라 1개면 충분하다)
           groups = defaultdict(list)
           for c in caches:
               if c.get("ref") != "refs/heads/main":
@@ -117,8 +121,8 @@ jobs:
               groups[group].append(c)
           for group, items in groups.items():
               items.sort(key=lambda c: c["created_at"], reverse=True)
-              for c in items[2:]:
-                  doomed.append((c, f"{group} 최신 2개 초과"))
+              for c in items[1:]:
+                  doomed.append((c, f"{group} 최신 1개 초과"))
 
           freed = sum(c["size_in_bytes"] for c, _ in doomed)
           print(f"대상 {len(doomed)}개 / {freed // 1048576}MB 회수 예정 (dry_run={dry})")

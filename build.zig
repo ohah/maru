@@ -4312,6 +4312,17 @@ pub fn build(b: *std.Build) void {
     run_check_boundaries_shards_boundary_tests.addArg("--maru-expect-tests=1");
     run_check_boundaries_shards_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_check_boundaries_shards_boundary_tests.step);
+    const ci_cache_generations_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/ci_cache_generations_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ci_cache_generations_boundary_tests = b.addRunArtifact(ci_cache_generations_boundary_tests);
+    run_ci_cache_generations_boundary_tests.addArg("--maru-expect-tests=1");
+    run_ci_cache_generations_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_ci_cache_generations_boundary_tests.step);
     const session_host_cr6f_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_cr6f_boundary.zig"),

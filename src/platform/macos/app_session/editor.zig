@@ -1345,6 +1345,9 @@ pub const Prepared = struct {
 pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
     var opened = try openPath(self.io, self.allocator, path);
     errdefer opened.deinit(self.allocator);
+    // 원격 미러(RF4)는 어느 길로 열려도 읽기 전용이다 — 근거가 경로 접두라 리로드·재열기·복원이
+    // 전부 이 한 줄을 지난다(적대적 검증 2 회차: entry 플래그였다면 길마다 배선이 필요했다).
+    if (file_panel_ops.remoteViewPathIsReadOnly(path)) opened.file.read_only = true;
 
     // **줄 슬라이스를 미리 만든다.** `frame.build`는 문서 전체를 받아야 스크롤바 길이가 맞는데(§4.1a),
     // 매 프레임 다시 만들면 프레임마다 할당이 생긴다. 줄들은 문서 버퍼를 빌리므로 문서보다 오래 살면 안 된다.

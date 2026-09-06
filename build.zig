@@ -3257,7 +3257,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
-        run_remote_explorer_tests.addArg("--maru-expect-tests=4"); // 이름 있는 1 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+        run_remote_explorer_tests.addArg("--maru-expect-tests=6"); // 이름 있는 3 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
     }

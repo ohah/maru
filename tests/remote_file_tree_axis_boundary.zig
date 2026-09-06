@@ -86,7 +86,9 @@ test "원격 상호작용 펜스가 서 있다 — 열기·변경이 원격 모�
     // 재빌드 전의 낡은 원격 행이 로컬 갈래로 들어가는 창. 신원 pin 이 실질 방어이고 이 키는 심층
     // 방어인데, 둘 다 있어야 «pin 이 없는 새 행 동작» 이 생겨도 안 샌다).
     try std.testing.expect(std.mem.count(u8, panel, "self.file_tree_rows_remote") >= 3); // 굳힘 + 펜스 둘
-    try std.testing.expect(std.mem.indexOf(u8, panel, ".fp_remote_open_unsupported") != null);
+    // RF4: 원격 파일 행은 열기로 간다 — 열기 진입점과 «못 읽는다» 안내가 함께 있어야 한다(§2.5).
+    try std.testing.expect(std.mem.indexOf(u8, panel, "openRemoteFileReadOnly(self, v.path, v.supported)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, panel, ".fp_remote_file_read_failed") != null);
 }
 
 test "로컬 root 커밋의 capability 요구는 그대로다 — 갈래는 정확히 둘이어야 한다 (§2.2)" {

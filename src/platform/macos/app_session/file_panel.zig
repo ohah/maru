@@ -41,7 +41,10 @@ const scroll_ops = @import("scroll.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
 const file_tree_dock_ops = @import("file_tree_dock.zig");
-const git_ops = @import("git.zig"); // 활성 터미널 cwd 해석을 소스 컨트롤 뷰와 공유한다(followActiveTerminalCwd)
+const git_ops = @import("git.zig");
+const remote_shell = maru.session.remote_shell; // 원격 명령 상한(RF4 — buildRemoteFileRead 의 cmd_buf 크기)
+const git_command = maru.session.git_command; // 원격 파일 읽기 argv 의 SSOT(RF4)
+const ssh_upload = if (builtin.os.tag == .macos) @import("../ssh_upload.zig") else struct {}; // 활성 터미널 cwd 해석을 소스 컨트롤 뷰와 공유한다(followActiveTerminalCwd)
 const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
 const FilePanelOpenPathResult = AppSession.FilePanelOpenPathResult;
@@ -785,6 +788,15 @@ pub fn updateFileTree(self: *AppSession) !void {
         changed = true;
     }
 
+    // 원격 파일 열기 결말(RF4) — 워커가 남긴 결과를 tick 이 가져간다.
+    {
+        self.remote_file_mutex.lockUncancelable(self.io);
+        const got = self.remote_file_outcome;
+        self.remote_file_outcome = null;
+        self.remote_file_mutex.unlock(self.io);
+        if (got) |outcome| finishRemoteFileOpen(self, outcome);
+    }
+
     // follow 가 펌프보다 **먼저다**(적대적 검증 3 회차): 적용이 이번 tick 의 ctl·스캔 요청을 세우고
     // 같은 tick 의 펌프가 그것을 쏜다 — 뒤에 두면 첫 활성화가 한 프레임 늦고, ctl 갱신도 한 tick
     // 낡은 것을 쓴다.
@@ -1054,6 +1066,192 @@ fn setRemoteExplorerError(self: *AppSession, reason: ?[]const u8) void {
     const re = &self.remote_explorer;
     if (re.err) |old| self.allocator.free(old);
     re.err = if (reason) |r| self.allocator.dupe(u8, r) catch null else null;
+}
+
+/// 원격 파일 읽기 작업(RF4). 한 번에 하나 — 파일 열기는 사용자 클릭 단발이라 큐가 필요 없고,
+/// 슬롯이 차 있으면 안내로 거절한다(조용한 드롭이 아니라 — §2.5).
+pub const RemoteFileJob = struct {
+    session: *AppSession,
+    /// 원격 절대 경로(작업 소유).
+    path: []u8,
+    dest: []u8,
+    ctl: []u8,
+    /// 행이 판정한 «편집기가 여는 종류인가»(확장자 축) — 결말이 로컬 열기와 같은 분기를 타야
+    /// 원격 .png 가 텍스트로 열리지 않는다(적대적 검증 C).
+    supported: bool,
+};
+
+pub const RemoteFileOutcome = struct {
+    path: []u8,
+    bytes: []u8,
+    exit_code: c_int,
+    supported: bool = true,
+};
+
+/// 원격 트리의 파일 행을 **읽기 전용으로** 연다(RF4 — [계획](../../../docs/plans/remote-file-tree.md) §10.6).
+///
+/// 흐름: 백그라운드 워커가 `buildRemoteFileRead`(인용·상한 SSOT — RS3 의 그 명령) argv 를
+/// `runArgvCapped` 로 실행 → tick 이 `finishRemoteFileOpen` 으로 결말을 낸다. 내용은 **로컬 임시
+/// 미러**(`$HOME/.cache/maru/remote-view/…`)에 내려 기존 열기 파이프라인(신원 pin 포함)을 그대로
+/// 태우고, 문서를 read_only 로 만든다 — 저장 축이 없는 것이 v1 의 계약이다(⑤).
+pub fn openRemoteFileReadOnly(self: *AppSession, remote_path: []const u8, supported: bool) void {
+    if (comptime builtin.os.tag != .macos) return;
+    const re = &self.remote_explorer;
+    if (!re.active or re.ctl.items.len == 0) {
+        // 낡은 원격 행(연결이 막 죽은 창)에서의 클릭이다 — 침묵이 아니라 «못 읽는다» 다(§2.5).
+        self.showNoticeKey(.fp_remote_file_read_failed);
+        return;
+    }
+    if (self.remote_file_open_inflight) {
+        self.showNoticeKey(.fp_remote_file_busy);
+        return;
+    }
+    const job = self.allocator.create(RemoteFileJob) catch return;
+    job.* = .{
+        .session = self,
+        .supported = supported,
+        .path = self.allocator.dupe(u8, remote_path) catch {
+            self.allocator.destroy(job);
+            return;
+        },
+        .dest = self.allocator.dupe(u8, re.dest.items) catch {
+            self.allocator.free(job.path);
+            self.allocator.destroy(job);
+            return;
+        },
+        .ctl = self.allocator.dupe(u8, re.ctl.items) catch {
+            self.allocator.free(job.dest);
+            self.allocator.free(job.path);
+            self.allocator.destroy(job);
+            return;
+        },
+    };
+    self.remote_file_open_inflight = true;
+    const thread = std.Thread.spawn(.{}, remoteFileWorker, .{job}) catch {
+        self.remote_file_open_inflight = false;
+        self.allocator.free(job.ctl);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.path);
+        self.allocator.destroy(job);
+        self.showNoticeKey(.fp_remote_file_read_failed);
+        return;
+    };
+    thread.detach();
+}
+
+/// 백그라운드: 원격 파일 바이트를 받아 결과 슬롯에 둔다. **std.Io 를 안 만진다**(ssh_upload 규율).
+fn remoteFileWorker(job: *RemoteFileJob) void {
+    const self = job.session;
+    const allocator = self.allocator;
+    defer {
+        allocator.free(job.ctl);
+        allocator.free(job.dest);
+        allocator.destroy(job);
+    }
+    var bytes: []u8 = &.{};
+    var code: c_int = -1;
+    build: {
+        var argv_buf: [git_command.max_argv][]const u8 = undefined;
+        var cmd_buf: [remote_shell.max_command_bytes]u8 = undefined;
+        const argv = git_command.buildRemoteFileRead(job.path, .{
+            .dest = job.dest,
+            .control_path = job.ctl,
+        }, &argv_buf, &cmd_buf) orelse break :build;
+        // 상한+1 로 읽어 「정확히 상한」과 「상한에서 잘림」을 가른다 — head 는 상한만큼 주고 끝나므로
+        // len >= max 가 곧 잘림 신호다(RS3a 가 diff 에서 같은 판정을 쓴다).
+        code = ssh_upload.runArgvCapped(allocator, argv, git_command.max_remote_file_bytes + 1, &bytes) catch -1;
+    }
+    self.remote_file_mutex.lockUncancelable(self.io);
+    self.remote_file_outcome = .{ .path = job.path, .bytes = bytes, .exit_code = code, .supported = job.supported };
+    self.remote_file_mutex.unlock(self.io);
+}
+
+/// tick 이 워커의 결말을 낸다(드레인). **판정자가 직접 부르는 제품 함수**이기도 하다 — 전송 없이
+/// 「결말→미러→열기→read_only」 수직을 실물로 태운다(RF3a 의 pushResultForTest 와 같은 결이되,
+/// 이쪽은 제품 경로 그 자체라 test-only 표식도 필요 없다).
+pub fn finishRemoteFileOpen(self: *AppSession, outcome: RemoteFileOutcome) void {
+    defer {
+        self.allocator.free(outcome.path);
+        self.allocator.free(outcome.bytes);
+    }
+    self.remote_file_open_inflight = false;
+    if (outcome.exit_code != 0) {
+        self.showNoticeKey(.fp_remote_file_read_failed);
+        return;
+    }
+    if (outcome.bytes.len >= git_command.max_remote_file_bytes) {
+        // ⑤ 확정: 잘린 파일은 **열지 않는다** — 잘린 내용이 온전한 척 뜨는 것이 최악이고, 장차 저장
+        // 축이 열리면 잘린 저장이 원격 파일을 자른다.
+        self.showNoticeKey(.fp_remote_file_too_large);
+        return;
+    }
+    const mirror = writeRemoteMirror(self, outcome.path, outcome.bytes) orelse {
+        self.showNoticeKey(.fp_remote_file_read_failed);
+        return;
+    };
+    defer self.allocator.free(mirror);
+    openFileTreePath(self, mirror, outcome.supported);
+    // read_only 는 여기서 다시 세우지 않는다 — 근거가 경로 접두(`remoteViewPathIsReadOnly`)라 문서
+    // 열기 지점 한 곳이 소유한다(두 벌이면 한쪽만 고쳐진다).
+}
+
+/// 원격 바이트를 로컬 임시 미러에 내린다. 반환 경로는 호출자 소유.
+///
+/// 자리: `$HOME/.cache/maru/remote-view/<dest·부모 해시>/<basename>` — basename 을 지켜 탭·트리 라벨이
+/// 원격과 같게 보이고, 해시 디렉터리가 「다른 기계·다른 폴더의 같은 이름」 충돌을 막는다. wire 가
+/// `/`·NUL 없는 이름만 통과시키므로(UnsafeName) basename 은 파일명으로 안전하다.
+/// 미러 루트. **`/tmp` 가 아니다**(적대적 검증 1 회차) — `/tmp` 는 모두가 쓰는 곳이라 예측 가능한
+/// 이름은 디렉터리 선점·심볼릭 링크 공격면이 된다(다른 로컬 사용자가 그 이름을 링크로 만들어 두면
+/// 우리 write 가 남이 고른 자리로 간다). `$HOME/.cache/maru` 는 0700 홈 아래의 maru 전용 디렉터리라
+/// 그 면이 없다(업로드·감시자 설치와 같은 자리 규율 — §5·§9.5).
+pub const remote_view_subdir = ".cache/maru/remote-view";
+
+/// 이 경로가 원격 미러인가 — **경로 접두가 곧 read_only 근거다**(적대적 검증 2 회차). 문서 열기가
+/// 이 판정 하나를 지나므로, 리로드·재열기·workspace 복원 어느 길로 열려도 원격 미러는 읽기 전용이다.
+/// entry 플래그로 들면 그 세 길마다 배선이 필요하고 하나만 빠져도 편집이 열린다.
+pub fn remoteViewPathIsReadOnly(path: []const u8) bool {
+    const home = trimmedHome() orelse return false;
+    return remoteViewPathIsReadOnlyForHome(path, home);
+}
+
+/// 순수 판정(판정자용 분리). ⚠️ `home` 은 **꼬리 `/` 를 뗀** 값이어야 한다 — `trimmedHome` 이 그
+/// 계약의 유일한 공급자다(적대적 검증 A: `HOME=/Users/x/` 이면 접두 판정이 자기 미러를 못 알아봐
+/// read_only 가 조용히 풀린다 — `controlSocketPath` 가 같은 함정을 trimEnd 로 막은 선례).
+pub fn remoteViewPathIsReadOnlyForHome(path: []const u8, home: []const u8) bool {
+    if (home.len == 0 or !std.mem.startsWith(u8, path, home)) return false;
+    const rest = path[home.len..];
+    if (rest.len == 0 or rest[0] != '/') return false;
+    return std.mem.startsWith(u8, rest[1..], remote_view_subdir ++ "/");
+}
+
+/// HOME 을 꼬리 `/` 없이 — 판정과 미러 쓰기가 **같은 철자**를 봐야 한다(두 벌이면 쓴 쪽은 되고
+/// 읽기 전용만 빠지는, 눈에 안 보이는 갈림이 된다).
+fn trimmedHome() ?[]const u8 {
+    const home_z = std.c.getenv("HOME") orelse return null;
+    const home = std.mem.trimEnd(u8, std.mem.span(home_z), "/");
+    return if (home.len == 0) null else home;
+}
+
+fn writeRemoteMirror(self: *AppSession, remote_path: []const u8, bytes: []const u8) ?[]u8 {
+    const basename = std.fs.path.basename(remote_path);
+    if (basename.len == 0) return null;
+    const parent = std.fs.path.dirname(remote_path) orelse "/";
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(self.remote_explorer.dest.items);
+    hasher.update(&.{0});
+    hasher.update(parent);
+    const home = trimmedHome() orelse return null;
+    const dir_path = std.fmt.allocPrint(self.allocator, "{s}/" ++ remote_view_subdir ++ "/{x}", .{
+        home, hasher.final(),
+    }) catch return null;
+    defer self.allocator.free(dir_path);
+    std.Io.Dir.cwd().createDirPath(self.io, dir_path) catch return null;
+    const full = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, basename }) catch return null;
+    std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = full, .data = bytes }) catch {
+        self.allocator.free(full);
+        return null;
+    };
+    return full;
 }
 
 /// 활성 pane 이 원격이면 그 기계의 cwd 를 원격 트리 root 로 세운다(열린 질문 ② = ㉮, 로컬과 같은
@@ -1384,7 +1582,9 @@ pub fn activateFileTreeRow(self: *AppSession, index: usize) void {
         switch (row) {
             .root => |v| _ = self.remote_explorer.tree.toggleDirectory(v.path) catch false,
             .directory => |v| _ = self.remote_explorer.tree.toggleDirectory(v.path) catch false,
-            .file, .recent_file => self.showNoticeKey(.fp_remote_open_unsupported),
+            .file => |v| openRemoteFileReadOnly(self, v.path, v.supported),
+            .recent_file => {}, // 원격 모델은 recent 를 만들지 않는다 — 오면 무동작이 정직하다
+
             .recent_header, .empty => {},
         }
         self.file_tree_rows_dirty = true;

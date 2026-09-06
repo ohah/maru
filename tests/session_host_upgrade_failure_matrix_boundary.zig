@@ -16,7 +16,7 @@ test "U5 first failure matrix keeps every process and product rollback leaf" {
         std.testing.io,
         "build.zig",
         std.testing.allocator,
-        .limited(1024 * 1024),
+        .limited(2 * 1024 * 1024),
     );
     defer std.testing.allocator.free(build);
 

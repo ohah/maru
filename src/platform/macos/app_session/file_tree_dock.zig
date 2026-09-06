@@ -168,6 +168,14 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) ?Prepared {
         if (edit_identity) |want| if (file_tree.rowIdentity(row)) |identity| {
             if (identity.eql(want)) out.label = edit_text.?;
         };
+        // 원격 탐색기(RF3a)의 빈 행은 「열어 보라」가 아니라 상태 안내다 — 읽기 실패면 §2.5 의
+        // 「원격이라 못 읽는다」, 아직 결과 전이면 첫 목록 대기 안내다.
+        if (row == .empty and file_panel_ops.explorerRemoteActive(self)) {
+            out.label = if (self.remote_explorer.err != null)
+                i18n.t(.fp_remote_tree_unreadable)
+            else
+                i18n.t(.fp_remote_tree_loading);
+        }
     }
 
     const props = component.types.Props{

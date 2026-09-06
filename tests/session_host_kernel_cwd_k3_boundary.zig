@@ -20,7 +20,7 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     const allocator = std.testing.allocator;
     const runtime = try read(allocator, "src/platform/macos/session_host/remote_runtime.zig", 2 * 1024 * 1024);
     defer allocator.free(runtime);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
     const plan = try read(allocator, "docs/plans/session-host-kernel-cwd.md", 128 * 1024);
     defer allocator.free(plan);

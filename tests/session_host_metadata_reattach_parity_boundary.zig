@@ -20,7 +20,7 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     const allocator = std.testing.allocator;
     const runtime = try read(allocator, "src/platform/macos/session_host/remote_runtime.zig", 2 * 1024 * 1024);
     defer allocator.free(runtime);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
     const ssot = try read(allocator, "docs/persistent-session-host.md", 2 * 1024 * 1024);
     defer allocator.free(ssot);

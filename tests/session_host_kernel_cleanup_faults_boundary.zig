@@ -28,7 +28,7 @@ test "kernel cleanup fault gate observes real errno and keeps injection test-onl
     defer allocator.free(coordinator);
     const process_test = try read(allocator, "tests/session_host_daemon_cleanup_fail_stop_e2e.zig", 64 * 1024);
     defer allocator.free(process_test);
-    const build = try read(allocator, "build.zig", 1024 * 1024);
+    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(

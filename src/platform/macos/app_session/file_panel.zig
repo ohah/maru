@@ -701,6 +701,49 @@ pub fn updateFileTree(self: *AppSession) !void {
             changed = true;
             continue;
         }
+        // ── 원격 결과(RF3a)는 원격 모델로 — 로컬과 섞이면 같은 철자의 경로가 남의 트리에 박힌다.
+        if (result.was_remote) {
+            const re = &self.remote_explorer;
+            if (result.expected_root_generation != re.tree.rootGeneration()) continue;
+            if (!result.ok) {
+                // §2.5 — 침묵이 아니라 「못 읽는다」다. **root 실패는 트리를 비워 안내 행(.empty)이
+                // 서게 한다** — root 행을 남겨 두면 «펼쳐진 빈 폴더» 로 보여 실패가 화면에 없다.
+                // 하위 실패는 그 노드만 접는다(트리 전체를 안내로 바꾸면 멀쩡한 형제가 사라진다).
+                if (std.mem.eql(u8, result.path, re.root.items)) {
+                    re.tree.replaceExplicitRoots(&.{}) catch {};
+                } else {
+                    re.tree.failSnapshot(result.path);
+                }
+                setRemoteExplorerError(self, result.remote_error orelse "remote listing failed");
+                changed = true;
+                continue;
+            }
+            setRemoteExplorerError(self, null);
+            self.file_tree_entry_inputs.clearRetainingCapacity();
+            self.file_tree_entry_inputs.ensureTotalCapacity(self.allocator, result.entries.items.len) catch {
+                re.tree.failSnapshot(result.path);
+                re.tree.requeueScan(result.path) catch {};
+                self.file_tree_rows_dirty = true;
+                continue;
+            };
+            for (result.entries.items) |entry| self.file_tree_entry_inputs.appendAssumeCapacity(.{
+                .name = entry.name,
+                .kind = entry.kind,
+                .identity = entry.identity,
+            });
+            re.tree.applySnapshotWithIdentity(result.path, result.identity, self.file_tree_entry_inputs.items) catch |err| switch (err) {
+                error.NotFound => {}, // root 가 그 사이 이관된 정상 race(따라가기가 cd 를 쫓는다)
+                error.IdentityMismatch => re.tree.failSnapshot(result.path),
+                else => {
+                    re.tree.failSnapshot(result.path);
+                    re.tree.requeueScan(result.path) catch {};
+                },
+            };
+            // 로컬과 달리 여기서 안 하는 둘: git check-ignore(로컬 git 에 원격 경로를 대는 §2.4 위반)와
+            // watcher(로컬 감시자에 원격 경로를 등록하는 같은 위반). 감시 축은 RF5 다.
+            changed = true;
+            continue;
+        }
         // Directory results belong to the exact root snapshot that queued them. Comparing only
         // the path is insufficient for A -> B -> A because the same bytes can name a new root
         // authority after two replacements.
@@ -753,12 +796,39 @@ pub fn updateFileTree(self: *AppSession) !void {
         submitted += 1;
     }
 
+    // 원격 스캔 펌프(RF3a). 상한이 로컬과 **따로**다(§2.2.1 — 원격이 로컬 슬롯을 굶기지 않는다).
+    if (self.remote_explorer.active) {
+        var remote_submitted: usize = 0;
+        while (remote_submitted < file_tree_backend.max_remote_inflight) {
+            const path = self.remote_explorer.tree.takeScanRequest() orelse break;
+            if (!self.file_tree_backend.submitRemoteDirectory(
+                path,
+                self.remote_explorer.dest.items,
+                self.remote_explorer.ctl.items,
+                self.remote_explorer.tree.rootGeneration(),
+            )) {
+                self.remote_explorer.tree.requeueScan(path) catch {};
+                self.allocator.free(path);
+                break;
+            }
+            remote_submitted += 1;
+        }
+    }
+
     followActiveTerminalCwd(self);
+    followRemoteExplorer(self);
 
     if (changed) self.file_tree_rows_dirty = true;
     if (self.file_tree_rows_dirty) {
         try projectFileTreeOpenStates(self);
-        try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
+        // 발행 행 목록은 하나다 — 원격이 활성이면 원격 모델이 그 목록을 채운다(선택·스크롤·호버는
+        // 발행 목록 기준이라 그대로 동작한다). open 상태는 **로컬 파일**의 것이므로 원격 행에 물리면
+        // 같은 철자의 남의 파일이 「열린 것처럼」 빛난다 — 빈 목록을 준다.
+        if (self.remote_explorer.active) {
+            try self.remote_explorer.tree.buildRows(self.allocator, &.{}, &self.file_tree_rows);
+        } else {
+            try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
+        }
         classifyFileTreeRows(self.file_tree_rows.items);
         reconcileFileTreeSelection(self);
         clampFileTreeScroll(self);
@@ -937,6 +1007,109 @@ pub fn openProjectedFileTreePath(
 ///
 /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
 /// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다).
+/// **원격 탐색기 상태**(RF3a — [계획](../../../docs/plans/remote-file-tree.md) §10.4). 로컬 트리를
+/// 대체하지 않고 **얹힌다**: 별도 `Tree` 인스턴스라 로컬의 접힘·스크롤·영속이 안 다치고, 경로가 같은
+/// 두 기계가 한 모델 안에서 충돌할 일도 없다(§2.1 — 경로는 두 기계 사이에서 키가 아니다).
+///
+/// v1 은 **비영속**이다: 재시작하면 따라가기가 원격 cwd 에서 다시 세운다(원격 SCM 과 같은 흐름).
+/// `dock-tree-roots` 를 (host, path) 쌍으로 넓히는 마이그레이션은 명시적 원격 root 고정이 생길 때
+/// 함께 간다 — 지금 넓히면 아무도 안 쓰는 포맷 갈래가 생긴다.
+pub const RemoteExplorer = struct {
+    tree: file_tree.Tree,
+    active: bool = false,
+    dest: std.ArrayListUnmanaged(u8) = .empty,
+    /// 이번 tick 의 control socket — follow 가 매 tick 갱신한다(`maru ssh` 가 끊기면 사라지는 값이라
+    /// 굳혀 두면 죽은 소켓으로 계속 쏜다).
+    ctl: std.ArrayListUnmanaged(u8) = .empty,
+    root: std.ArrayListUnmanaged(u8) = .empty,
+    /// 「원격이라 못 읽는다」(§2.5)의 기계 사유. null 이면 문제 없음. 표시는 i18n 키가 하고 이 값은
+    /// 진단용이다 — 조용한 실패가 §2.5 가 금지한 그것이라 버리지 않는다.
+    err: ?[]u8 = null,
+
+    pub fn deinit(self: *RemoteExplorer, allocator: std.mem.Allocator) void {
+        self.tree.deinit();
+        self.dest.deinit(allocator);
+        self.ctl.deinit(allocator);
+        self.root.deinit(allocator);
+        if (self.err) |e| allocator.free(e);
+    }
+};
+
+/// 탐색기가 지금 **원격 모델을 그리고 있는가.** 상호작용 펜스(열기·변경·접기)가 전부 이 판정
+/// 하나를 본다 — 판정이 흩어지면 §2.4 의 새는 길이 된다.
+pub fn explorerRemoteActive(self: *const AppSession) bool {
+    return self.remote_explorer.active;
+}
+
+fn setRemoteExplorerError(self: *AppSession, reason: ?[]const u8) void {
+    const re = &self.remote_explorer;
+    if (re.err) |old| self.allocator.free(old);
+    re.err = if (reason) |r| self.allocator.dupe(u8, r) catch null else null;
+}
+
+/// 활성 pane 이 원격이면 그 기계의 cwd 를 원격 트리 root 로 세운다(열린 질문 ② = ㉮, 로컬과 같은
+/// 규칙 — 근거는 2026-08-31 「root 는 cwd 폴더 그 자체」와 §3.5 「두 뷰가 같은 곳을 본다」다.
+/// SCM 도크는 RS6 부터 원격 cwd 를 따라가므로 트리만 안 따라가면 그 불변식이 깨진다).
+///
+/// 판정은 `remoteScmTarget` 재사용이다 — 목적지·**살아 있는** control socket·원격 cwd 를 한 번에
+/// 주고, 그 판정이 SCM 과 같아야 「도크의 두 뷰가 다른 기계를 보는」 상태가 원리적으로 안 생긴다.
+fn followRemoteExplorer(self: *AppSession) void {
+    if (comptime builtin.os.tag != .macos) return;
+    // 로컬 따라가기와 같은 가시성 게이트(§1.1) + 탐색기 뷰 한정 — 원격 왕복은 로컬 스캔보다 비싸다.
+    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer) return;
+    var dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined;
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = git_ops.remoteScmTarget(self, &dest_buf, &ctl_buf, &cwd_buf) orelse {
+        deactivateRemoteExplorer(self);
+        return;
+    };
+    // 헬퍼 설치(판 3 이 `list` 를 보증한다) — RW 펌프가 그 축의 단일 소유자라 여기서는 **재사용**만
+    // 한다(멱등: 이미 돌거나 답이 있으면 무동작). drain 도 같이 — SCM 뷰 펌프는 소스컨트롤 뷰에서만
+    // 돌아서, 탐색기만 쓰는 세션은 여기가 유일한 drain 자리다.
+    if (self.remote_watch.install == .unknown) self.beginWatchInstall(target.ctl, target.dest);
+    self.drainWatchInstall();
+    applyRemoteExplorerTarget(self, target.dest, target.ctl, target.cwd);
+}
+
+/// 원격 pane 이 아니게 되면(로컬 복귀·소켓 사망) 원격 모델을 화면에서 내린다. 모델 자체는 남는다 —
+/// 같은 자리로 돌아오면 접힘이 살아 있는 편이 낫고, 다른 root 로 가면 replace 가 어차피 버린다.
+pub fn deactivateRemoteExplorer(self: *AppSession) void {
+    const re = &self.remote_explorer;
+    if (!re.active) return;
+    re.active = false;
+    self.file_tree_rows_dirty = true;
+}
+
+/// follow 가 고른 원격 대상을 모델에 적용한다. follow(가시성 게이트·판정·설치)와 적용을 가른 것은
+/// 판정자 때문이다 — `remoteScmTarget` 은 살아 있는 control socket 을 요구해 단위에서 못 세우고,
+/// 적용·펌프·오류 표시의 수직은 이 함수부터 실물로 태울 수 있다(RS6 의 `remoteCwd` 분리와 같은 결).
+pub fn applyRemoteExplorerTarget(self: *AppSession, dest: []const u8, ctl: []const u8, cwd: []const u8) void {
+    const re = &self.remote_explorer;
+    // control socket 은 매 tick 갱신 — 끊겼다 다시 붙으면 경로가 그대로여도 내용이 새 소켓이다.
+    re.ctl.clearRetainingCapacity();
+    re.ctl.appendSlice(self.allocator, ctl) catch return;
+
+    const same_dest = std.mem.eql(u8, re.dest.items, dest);
+    const same_root = std.mem.eql(u8, re.root.items, cwd);
+    if (re.active and same_dest and same_root) return; // 바뀔 때만(§1 정책 ⑵)
+
+    re.dest.clearRetainingCapacity();
+    re.dest.appendSlice(self.allocator, dest) catch return;
+    re.root.clearRetainingCapacity();
+    re.root.appendSlice(self.allocator, cwd) catch return;
+    // 원격 root 는 로컬 검증 파이프라인(realpath·capability)을 **못 탄다**(§2.2 — 갈래는 둘이다).
+    // 이 갈래의 증거는 첫 목록이 가져오는 D 신원이고, `applySnapshotWithIdentity` 가 그것을 pin 한다.
+    const roots = [_][]const u8{cwd};
+    re.tree.replaceExplicitRoots(&roots) catch {
+        setRemoteExplorerError(self, "root replace failed");
+        return;
+    };
+    setRemoteExplorerError(self, null);
+    re.active = true;
+    self.file_tree_rows_dirty = true;
+}
+
 pub fn followActiveTerminalCwd(self: *AppSession) void {
     if (!dock_ops.dockVisible(self)) return;
     if (self.tabs.items.len == 0) return;
@@ -1182,6 +1355,21 @@ pub fn paneHasProtectedFilePanel(pane: *Pane) bool {
 pub fn activateFileTreeRow(self: *AppSession, index: usize) void {
     if (index >= self.file_tree_rows.items.len) return;
     const row = self.file_tree_rows.items[index];
+    // **원격 펜스**(RF3a — §2.4). 발행 행이 원격 모델의 것일 때 로컬 모델·로컬 열기에 그 경로를
+    // 넘기면, 같은 철자의 로컬 파일이 열리거나 로컬 트리가 원격 경로를 문다. 접기/펼치기는 원격
+    // 모델로 가고, 파일 열기는 RF4 전까지 **안내로 거절**한다 — 조용한 무동작이 아니라(§2.5).
+    if (explorerRemoteActive(self)) {
+        switch (row) {
+            .root => |v| _ = self.remote_explorer.tree.toggleDirectory(v.path) catch false,
+            .directory => |v| _ = self.remote_explorer.tree.toggleDirectory(v.path) catch false,
+            .file, .recent_file => self.showNoticeKey(.fp_remote_open_unsupported),
+            .recent_header, .empty => {},
+        }
+        self.file_tree_rows_dirty = true;
+        updateFileTree(self) catch {};
+        self.metal_dirty = true;
+        return;
+    }
     switch (row) {
         .recent_header => self.file_tree.toggleRecent(),
         .root => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
@@ -1229,6 +1417,9 @@ pub fn retireFilePanelSurface(self: *AppSession, entry: *dock_panel.Entry, retir
 }
 
 pub fn selectedFileTreeMutationTarget(self: *const AppSession) ?file_tree_mutation.Target {
+    // **원격 변경은 RF6 전까지 없다**(§2.4 — 로컬 mutation backend 에 원격 경로가 가면 같은 철자의
+    // 로컬 파일이 지워진다). null 이면 변경 UI 가 자연히 비활성이다.
+    if (explorerRemoteActive(self)) return null;
     const index = selectedFileTreeRow(self) orelse return null;
     if (index >= self.file_tree_rows.items.len) return null;
     var target = fileTreeMutationTarget(self.file_tree_rows.items[index]) orelse return null;

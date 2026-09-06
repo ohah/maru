@@ -10,7 +10,7 @@ test "U5 signed near-max gate owns 255 real PTYs and exact GUI reattach evidence
         std.testing.io,
         "build.zig",
         std.testing.allocator,
-        .limited(1024 * 1024),
+        .limited(2 * 1024 * 1024),
     );
     defer std.testing.allocator.free(build);
     try std.testing.expectEqual(@as(usize, 1), count(source, "const near_max_runtime_count = session_host.upgrade_limits.max_runtime_count - 1;"));

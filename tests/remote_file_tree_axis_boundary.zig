@@ -56,21 +56,34 @@ test "원격 스캔 갈래는 로컬 파일시스템에 닿지 않는다 (§2.4)
     try std.testing.expect(std.mem.indexOf(u8, scan, "runRemoteCapped") != null);
 }
 
-test "원격 submit 의 소비처 재고 — RF3 전에는 아무도 못 연다" {
-    // `submitRemoteDirectory` 를 부르는 제품 파일의 **전수 재고**다. RF2b 시점의 정답은 0 —
-    // root 세우기(RF3)가 열 때 이 재고를 **이유와 함께** 올린다. 재고 없이 늘면, 원격 경로가
-    // 검증(§2.1 쌍·영속 마이그레이션) 없이 트리에 들어온 것이다.
+test "원격 submit 의 소비처 재고 — 여는 자리는 정확히 하나다" {
+    // `submitRemoteDirectory` 를 부르는 제품 파일의 **전수 재고**다. RF3a 가 열었다: 소비처는
+    // `file_panel.zig` 의 원격 펌프 **하나**이고, 그 펌프는 remote_explorer(별도 모델 · §2.1 쌍 ·
+    // remoteScmTarget 판정)를 지나는 경로에만 있다. 다른 파일에서 늘면 원격 경로가 그 검증 없이
+    // 트리에 들어온 것이다 — 재고를 이유와 함께 올려라.
     const allocator = std.testing.allocator;
-    const consumers = [_][]const u8{
-        "src/platform/macos/app_session/file_panel.zig",
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, panel, ".submitRemoteDirectory("));
+    const still_zero = [_][]const u8{
         "src/platform/macos/file_tree_mutation_backend.zig",
         "src/platform/macos/app_session.zig",
     };
-    for (consumers) |path| {
+    for (still_zero) |path| {
         const source = try read(allocator, path, 8 * 1024 * 1024);
         defer allocator.free(source);
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "submitRemoteDirectory"));
     }
+}
+
+test "원격 상호작용 펜스가 서 있다 — 열기·변경이 원격 모델 뒤에서 갈린다 (§2.4)" {
+    // RF3a 의 펜스: 행 활성화·변경 진입점이 원격 판정 하나(explorerRemoteActive)를 지나고, 원격
+    // 파일 열기는 안내 키로 거절된다. 가드가 리팩터로 지워지면 여기서 걸린다.
+    const allocator = std.testing.allocator;
+    const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
+    defer allocator.free(panel);
+    try std.testing.expect(std.mem.count(u8, panel, "explorerRemoteActive(self)") >= 2);
+    try std.testing.expect(std.mem.indexOf(u8, panel, ".fp_remote_open_unsupported") != null);
 }
 
 test "로컬 root 커밋의 capability 요구는 그대로다 — 갈래는 정확히 둘이어야 한다 (§2.2)" {

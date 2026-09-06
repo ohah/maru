@@ -2811,6 +2811,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     term_copy_rect = .{};
     if (copyEnabled()) {
         term_copy_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+        noteA11y(term_copy_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_copy) });
         if (term_copy_pressed) push(.{
             .x = @intFromFloat(term_copy_rect.x),
             .y = @intFromFloat(term_copy_rect.y),
@@ -7237,6 +7238,10 @@ fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
     // 서술자만 내면 스크린 리더가 「자판」을 읽어 주고 짚어도 아무 일이 안 난다. 그것이 바로 이
     // 슬라이스가 막겠다고 한 「짚은 곳과 닿는 곳이 어긋나는 것」이다(적대적 검증 1회차에서 잡았다).
     //
+    // 이것은 P1 의 「누를 수 없는 컨트롤도 자리와 이름은 있다」와 **다른 이야기**다. 그 말은 지금
+    // 보이는 면 안의 꺼진 버튼(`enabled = false`)을 가리키고, 여기는 **다른 화면에 덮여 이 면에
+    // 속하지도 않는** 것을 가리킨다.
+    //
     // **누르는 쪽과 같은 조건을 본다** — 다른 식으로 적으면 또 갈린다.
     if (screenTop() != .terminal) return;
     if (a11y_count >= a11y_nodes.len) {
@@ -7287,12 +7292,22 @@ pub export fn maru_mobile_a11y_state(index: u32) u32 {
     return bits;
 }
 
-/// 이름을 `out` 에 복사하고 길이를 답한다(잘리면 잘린 길이). **복사한다** — 라벨이 가리키는
-/// 것은 다음 프레임에 사라질 수 있고, host 가 그 뒤에 읽으면 남의 메모리를 읽는다.
+/// 이름을 `out` 에 복사하고 **쓴 바이트 수**를 답한다. **복사한다** — 라벨이 가리키는 것은 다음
+/// 프레임에 사라질 수 있고, host 가 그 뒤에 읽으면 남의 메모리를 읽는다.
+///
+/// `cap == 0` 이면 아무것도 안 쓰고 **필요한 길이**를 답한다(먼저 물어보고 담을 자리를 잡는 법).
+///
+/// **UTF-8 한가운데서는 안 끊는다.** 「뒤로 가기」는 13바이트라 cap 이 12 면 마지막 글자가 반쪽이
+/// 되는데, 그 조각을 받은 iOS `initWithBytes:encoding:NSUTF8StringEncoding` 은 **nil 을 답한다** —
+/// 이름이 통째로 사라져 VoiceOver 가 「버튼」이라고만 읽는다(Android 는 U+FFFD 를 읽어 준다).
+/// 짧게 읽히는 것과 **안 읽히는 것**은 다르므로 마지막 온전한 글자까지만 준다.
 pub export fn maru_mobile_a11y_label(index: u32, out: [*]u8, cap: usize) usize {
-    if (index >= a11y_count or cap == 0) return 0;
+    if (index >= a11y_count) return 0;
     const label = a11y_nodes[index].sem.label;
-    const n = @min(label.len, cap);
+    if (cap == 0) return label.len;
+    var n = @min(label.len, cap);
+    // 이어지는 바이트(0b10xxxxxx)에 멈춰 있으면 그 글자가 시작한 자리까지 물러선다.
+    while (n > 0 and n < label.len and (label[n] & 0xC0) == 0x80) n -= 1;
     @memcpy(out[0..n], label[0..n]);
     return n;
 }

@@ -260,8 +260,10 @@ unsigned int maru_mobile_a11y_role(unsigned int index);
    bit3 「펼침이라는 개념이 있는가」 · bit4 그 값. */
 unsigned int maru_mobile_a11y_state(unsigned int index);
 
-/* 이름을 `out` 에 **복사**하고 길이를 답한다(잘리면 잘린 길이). 가리키는 것은 다음 프레임에
-   사라질 수 있어서 포인터를 안 준다. */
+/* 이름을 `out` 에 **복사**하고 **쓴 바이트 수**를 답한다. 가리키는 것은 다음 프레임에 사라질 수
+   있어서 포인터를 안 준다. `cap == 0` 이면 아무것도 안 쓰고 **필요한 길이**를 답한다.
+   **UTF-8 한가운데서는 안 끊는다** — 반쪽 글자를 받은 iOS `NSString` 은 nil 이라 이름이 통째로
+   사라진다. 그래서 답은 언제나 그대로 문자열로 만들 수 있다(NUL 은 안 붙으니 길이로 읽는다). */
 unsigned long maru_mobile_a11y_label(unsigned int index, unsigned char *out, unsigned long cap);
 /// config 파일 크기 상한. **헤더가 단일 출처다** — host 마다 숫자를 적으면 갈린다(실제로 갈렸다:
 /// Android 64KB 잘라 쓰기 · iOS 무제한 · 데스크톱 1MB). 데스크톱과 같은 값으로 둔다.

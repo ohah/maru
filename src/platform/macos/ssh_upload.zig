@@ -9,7 +9,8 @@ const std = @import("std");
 const ssh = @import("maru").cli.ssh;
 const remote_shell = @import("maru").session.remote_shell;
 const git_command = @import("maru").session.git_command; // 굳히기 목록의 단일 출처(RW7)
-const watch_install = @import("maru").session.remote_watch_install; // 원격 감시자 설치 계약(RW2a) — 경로 상수의 단일 출처 // 원격 셸 규율(PATH 처방 · `sh` 껍데기)
+const watch_install = @import("maru").session.remote_watch_install; // 원격 감시자 설치 계약(RW2a) — 경로 상수의 단일 출처
+const listing = @import("maru").session.remote_file_listing; // 목록 wire(RF1) — 하네스 판정자가 되읽는다
 
 /// 스트리머가 원격에서 도는 **스크립트**(상수). `$1`=원격 maru 경로, `$2`=상대 디렉터리.
 ///
@@ -196,6 +197,84 @@ pub fn runRemoteScript(
     return reapPid(pid);
 }
 
+/// `runRemoteScript` 의 **상한 있는** 짝(RF2b). 목록 wire 는 스크립트 답과 달리 **MB 단위**가 될 수
+/// 있어 `readAllFd` 를 못 쓴다 — 그쪽은 64 KiB 에서 읽기를 **멈추는데**, 자식이 그보다 많이 쓰면
+/// 파이프가 차서 write 에 서고 `waitpid` 가 **교착**한다(닫지 않고 reap 하러 가는 구조라).
+///
+/// 여기는 상한까지 읽고, 넘치면 **읽기 fd 를 닫는다** — 자식(ssh·헬퍼)은 다음 write 의 EPIPE 로
+/// 끝나고(헬퍼 `putAll` 이 그 계약이다) reap 이 안 선다. 넘친 출력은 꼬리가 없으므로 파서가
+/// 「잘림」으로 읽는다 — 조용한 절단이 아니다.
+///
+/// stdin 은 즉시 EOF 다(목록은 입력이 없다).
+pub fn runRemoteCapped(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    script: []const u8,
+    args: []const []const u8,
+    max_bytes: usize,
+    out: *[]u8,
+) !c_int {
+    const cmd = try remote_shell.wrapAlloc(allocator, script, args);
+    defer allocator.free(cmd);
+
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        // stdin 은 /dev/null 이 아니라 **닫는다** — 목록은 입력이 없고, 열린 stdin 은 원격이 read 로
+        // 서는 자리다(`spawnCapture` 가 stdin 을 막는 것과 같은 이유).
+        _ = std.c.close(0);
+        _ = std.c.dup2(out_pipe[1], 1);
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [16 * 1024]u8 = undefined;
+    var overflowed = false;
+    while (true) {
+        const n = std.c.read(out_pipe[0], &tmp, tmp.len);
+        if (n < 0) break; // 읽기 실패 — 지금까지 읽은 것으로 판정한다(꼬리가 없으면 잘림이다)
+        if (n == 0) break; // EOF
+        const take = @min(@as(usize, @intCast(n)), max_bytes - buf.items.len);
+        buf.appendSlice(allocator, tmp[0..take]) catch break;
+        if (buf.items.len >= max_bytes) {
+            overflowed = true;
+            break;
+        }
+    }
+    _ = std.c.close(out_pipe[0]); // 넘쳤으면 이 닫기가 자식을 EPIPE 로 끝낸다
+    out.* = try buf.toOwnedSlice(allocator);
+    const code = reapPid(pid);
+    // 넘친 출력은 성공 코드여도 **완결이 아니다** — 꼬리를 잃었으니 파서가 잘림으로 읽지만, 호출자가
+    // 코드만 보고 「깨끗한 0」으로 오독하지 않게 여기서도 가른다.
+    if (overflowed) return -2;
+    return code;
+}
+
 /// 파일을 **io 없이** 읽는다(적대적 검증 2026-09-05 8 회차). 이 파일은 백그라운드 스레드에서
 /// 불리므로 `std.Io` 를 안 만지는 것이 규율이다(`uploadWorker` 의 전제) — 번들에서 감시자 바이트를
 /// 집는 것도 그 스레드에서 해야 UI 틱에 ssh 왕복이 안 남는다.
@@ -239,6 +318,13 @@ pub const WatchStream = struct {
 ///
 /// 인자가 여럿이라 `"$1"` 이 아니라 `"$@"` 다 — 루트 뒤에 **굳히기까지 끝난 git 앞머리**가 붙는다.
 const watch_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" \"$@\"";
+
+/// 원격 디렉터리 **목록**(RF2b — [계획](../../docs/plans/remote-file-tree.md) §10.3). `$1`=원격 절대
+/// 경로. `watch_script` 와 같은 결 — 설치 계약이 소유한 경로의 **판 3** 바이너리를 exec 한다(판 3 이
+/// `list` 를 보증한다 — `remote_watch_install.version_line`). 설치는 여기서 안 한다: RW 설치 펌프
+/// (`beginWatchInstall`)가 그 축의 단일 소유자이고, 바이너리가 없으면 exec 이 127 로 죽어 「못
+/// 읽는다」가 된다(§2.5 — 조용한 실패가 아니라 판정 가능한 실패다).
+pub const list_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" list \"$1\"";
 
 pub const Stream = struct {
     pid: std.c.pid_t,
@@ -575,4 +661,75 @@ test "파이프에 쓰다 상대가 먼저 닫아도 «죽지 않는다»" {
     // ⑶ 그 write 는 `EPIPE` 를 «돌려준다» — 그래야 `writeAllFd` 의 `n <= 0` 이 의미를 가진다.
     const n = std.c.write(fds[1], &big, big.len);
     try std.testing.expect(n < 0);
+}
+
+// ── RF2b 하네스 판정자 — 실물 sshd(ControlMaster) 위에서 제품 전송(runRemoteCapped)을 왕복한다 ──
+//
+// `tools/remote-scm/ssh_harness.sh` 가 env(MARU_REMOTE_SCM_DEST/CTL/REPO)를 세우고, 빌드가
+// MARU_RFLS_HELPER 로 실물 헬퍼 경로를 넣는다(`test-remote-file-tree`). env 가 없으면 skip 인데
+// 빌드 등록이 --maru-expect-passed 로 그 침묵을 막는다(test-remote-scm 과 같은 규율).
+//
+// 스크립트가 제품 `list_script` 리터럴이 아닌 이유: 그쪽은 설치 계약 경로($HOME/.cache/maru/…)를
+// exec 하는데 하네스 sshd 의 HOME 은 실사용자 홈이라, 거기 심는 것은 테스트가 사용자 캐시를
+// 오염시키는 일이다. 전송·상한·wire 축은 이 일반형이 동일하게 태우고, 리터럴의 형태는
+// remote_watch_install 의 판정자들이 문자열로 못 박는다.
+
+fn harnessEnv(name: [*:0]const u8) ?[]const u8 {
+    const raw = std.c.getenv(name) orelse return null;
+    const v = std.mem.span(raw);
+    return if (v.len == 0) null else v;
+}
+
+test "RF2b 하네스: 제품 전송이 실물 sshd 위에서 목록 wire 를 왕복한다" {
+    const dest = harnessEnv("MARU_REMOTE_SCM_DEST") orelse return error.SkipZigTest;
+    const ctl = harnessEnv("MARU_REMOTE_SCM_CTL") orelse return error.SkipZigTest;
+    const repo = harnessEnv("MARU_REMOTE_SCM_REPO") orelse return error.SkipZigTest;
+    const helper = harnessEnv("MARU_RFLS_HELPER") orelse return error.SkipZigTest;
+    const a = std.testing.allocator;
+
+    var out: []u8 = &.{};
+    const code = try runRemoteCapped(a, ctl, dest, "exec \"$1\" list \"$2\"", &.{ helper, repo }, listing.max_wire_bytes, &out);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(c_int, 0), code);
+
+    var parser = listing.Parser.init(out);
+    const first = (try parser.next()).?;
+    // 나열한 디렉터리 자신의 신원 — 같은 기계(loopback)라 이쪽 stat 과 같아야 한다. 이 대조가
+    // 「ssh 를 지나도 신원이 안 바뀐다」를 실물로 못 박는다.
+    const local = try std.Io.Dir.cwd().statFile(std.testing.io, repo, .{});
+    try std.testing.expectEqual(@as(u64, @intCast(local.inode)), first.dir.ino);
+
+    var saw_seed = false;
+    var saw_git = false;
+    while (try parser.next()) |ev| {
+        const entry = ev.entry;
+        if (std.mem.eql(u8, entry.name, "seed.txt")) {
+            try std.testing.expectEqual(@import("maru").session.file_tree.Kind.file, entry.kind);
+            saw_seed = true;
+        }
+        if (std.mem.eql(u8, entry.name, ".git")) {
+            try std.testing.expectEqual(@import("maru").session.file_tree.Kind.directory, entry.kind);
+            saw_git = true;
+        }
+    }
+    try std.testing.expect(parser.complete());
+    try std.testing.expect(saw_seed);
+    try std.testing.expect(saw_git);
+}
+
+test "RF2b 하네스: 없는 원격 디렉터리는 wire 오류로 완결된다 — 침묵이 아니다 (§2.5)" {
+    const dest = harnessEnv("MARU_REMOTE_SCM_DEST") orelse return error.SkipZigTest;
+    const ctl = harnessEnv("MARU_REMOTE_SCM_CTL") orelse return error.SkipZigTest;
+    const helper = harnessEnv("MARU_RFLS_HELPER") orelse return error.SkipZigTest;
+    const a = std.testing.allocator;
+
+    var out: []u8 = &.{};
+    const code = try runRemoteCapped(a, ctl, dest, "exec \"$1\" list \"$2\"", &.{ helper, "/maru-rfls-harness-no-such-dir" }, listing.max_wire_bytes, &out);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(c_int, 0), code); // wire 로 말했으니 전송 코드는 깨끗하다
+
+    var parser = listing.Parser.init(out);
+    const ev = (try parser.next()).?;
+    try std.testing.expect(std.mem.startsWith(u8, ev.remote_error, "opendir failed"));
+    try std.testing.expect(parser.complete());
 }

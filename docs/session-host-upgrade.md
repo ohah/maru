@@ -4072,6 +4072,37 @@ import/callsite가 이 owner 하나뿐임을 `src/` 전수 검사로 Debug·Rele
 않는다. 이 slice는 여덟 invocation과 durable checkpoint의 단일 composition owner까지만 닫으며 `.github/workflows/release.yml`의
 실제 step wiring과 frozen signed U5 E2E는 후속 경계다.
 
+### 11.77 GitHub Actions live step binding의 닫힌 명세
+
+§11.76의 process-local `Executor` callback을 GitHub Actions의 `uses:` 또는 별도 validator process와 같은 것으로 간주하지 않는다.
+Actions action은 Zig process 안에서 호출할 수 없고 각 workflow step은 독립 process이므로, 둘 사이의 고정 결속을 생략한 채
+`release.yml`에 command를 나열하면 invocation owner를 우회한 두 번째 stage inventory가 된다.
+`release_adapter_live_workflow_binding.zig`가 이 간극을 메우는 pointer-free 명세를 소유한다. 이 명세는 §11.76의
+`Invocation`만 받아 다음 여덟 binding을 exact order로 유도한다.
+
+1. `candidate_pinning` → step `session-host-candidate-pinning`, product `signed-candidate-inputs`.
+2. `candidate_attestation` → step `session-host-candidate-attestation`, local action
+   `./.github/actions/session-host-release-attest`.
+3. `draft_authoring` → step `session-host-draft-authoring`, validator command `prepare-candidate`.
+4. `authored_attestation` → step `session-host-authored-attestation`, local action
+   `./.github/actions/session-host-release-attest-authored`.
+5. `aggregate_prepare` → step `session-host-aggregate-prepare`, validator command `prepare-candidate-aggregate`.
+6. `aggregate_finalize` → step `session-host-aggregate-finalize`, validator command `finalize-candidate-aggregate`.
+7. `publication` → step `session-host-publication`, validator command `resume-candidate-publication`.
+8. `aggregate_cleanup` → step `session-host-aggregate-cleanup`, validator command `cleanup-candidate-aggregate`.
+
+각 binding은 바로 앞 binding의 step ID를 유일한 predecessor로 갖고 첫 단계만 predecessor가 없다. action 경로는 repository-local
+canonical `./.github/actions/...` 표기만 허용하고, command는 validator contract가 소유한 exact text와 일치해야 한다. caller는
+step ID, predecessor, kind, action path 또는 command text를 제출하지 않는다. binding은 credential, pathname, action output,
+exit code, reducer result 또는 checkpoint bytes를 담지 않으며 side effect를 실행하지 않는다. 그 값들은 다음 live workflow caller가
+고정 argv와 §11.75 checkpoint를 결속할 때만 소비한다.
+
+focused gate `test-session-host-release-adapter-live-workflow-binding`은 여덟 invocation 전수의 stage·kind·identity·step ID·predecessor,
+action의 repository-local 표기, command contract exact match와 전체 inventory uniqueness를 Debug·ReleaseFast에서 검증한다.
+또한 binding이 §11.76 identity를 복제하지 않고 직접 유도하며 binding source 안에 별도 invocation inventory가 생기지 않는지
+검사한다. 이 slice는 Actions가 표현할 수 있는 닫힌 실행 명세까지만 세우며, `.github/workflows/release.yml`의 실제 argv·output·
+checkpoint 배선, GitHub-issued live timing 표본과 frozen signed U5 E2E는 다음 slice가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

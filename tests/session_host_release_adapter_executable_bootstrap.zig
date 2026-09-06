@@ -128,8 +128,17 @@ fn finalizeAggregateArgs(path: []const u8) [17][]const u8 {
     };
 }
 
+fn resumePublicationArgs(path: []const u8) [17][]const u8 {
+    return .{
+        "resume-candidate-publication", "--repo",                      "ohah/maru",              "--tag", "v1.2.3",
+        "--github-cli",                 path,                          "--github-cli-sha256",    cli_sha, "--preparation",
+        "/tmp/handoff/preparation",     "--aggregate",                 "/tmp/handoff/aggregate", "--dmg", "/tmp/artifacts/Maru.dmg",
+        "--frozen-executable",          "/tmp/artifacts/session-host",
+    };
+}
+
 test "all commands bind context and pin only after identity authority" {
-    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_aggregate, .finalize_aggregate }) |kind| {
+    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate, resume_publication }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_aggregate, .finalize_aggregate, .resume_publication }) |kind| {
         var trace = Trace{};
         var contexts = ContextReader{ .trace = &trace };
         var runners = RunnerReader{ .trace = &trace };
@@ -139,6 +148,7 @@ test "all commands bind context and pin only after identity authority" {
         const candidate = candidateArgs("/usr/local/bin/gh");
         const prepare = prepareAggregateArgs("/usr/local/bin/gh");
         const finalize = finalizeAggregateArgs("/usr/local/bin/gh");
+        const resume_args = resumePublicationArgs("/usr/local/bin/gh");
         var result = bootstrap.Bootstrap{};
         switch (kind) {
             .pre_publish => try bootstrap.bootstrapWith(std.testing.allocator, &pre, &contexts, &runners, &pinner, &result),
@@ -146,6 +156,7 @@ test "all commands bind context and pin only after identity authority" {
             .publish_candidate => try bootstrap.bootstrapWith(std.testing.allocator, &candidate, &contexts, &runners, &pinner, &result),
             .prepare_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &prepare, &contexts, &runners, &pinner, &result),
             .finalize_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &finalize, &contexts, &runners, &pinner, &result),
+            .resume_publication => try bootstrap.bootstrapWith(std.testing.allocator, &resume_args, &contexts, &runners, &pinner, &result),
         }
         const view = result.value().?;
         try std.testing.expectEqualSlices(@TypeOf(trace.calls[0]), &.{ .context, .runner, .pin }, trace.calls[0..trace.count]);
@@ -165,12 +176,14 @@ test "all commands bind context and pin only after identity authority" {
             .prepare_candidate => |command| try std.testing.expectEqualStrings("/tmp/durable-stage3", command.durable_preparation),
             .prepare_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", command.aggregate),
             .finalize_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", command.dmg),
+            .resume_candidate_publication => |command| try std.testing.expectEqualStrings("/tmp/handoff/preparation", command.preparation),
         }
         try std.testing.expect(!@hasField(bootstrap.PrePublish, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.VerifyPredecessor, "github_cli_sha256"));
         try std.testing.expect(!@hasField(bootstrap.PublishCandidate, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.PrepareCandidateAggregate, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.FinalizeCandidateAggregate, "github_cli_sha256"));
+        try std.testing.expect(!@hasField(bootstrap.ResumeCandidatePublication, "github_cli"));
         var copied = result;
         try std.testing.expect(copied.value() == null);
         try std.testing.expectError(error.InvalidOwner, bootstrap.bootstrapWith(

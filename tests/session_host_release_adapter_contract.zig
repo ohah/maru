@@ -97,6 +97,39 @@ fn finalizeAggregateArgs() [17][]const u8 {
     };
 }
 
+fn resumePublicationArgs() [17][]const u8 {
+    return .{
+        "resume-candidate-publication", "--repo",                      "ohah/maru",              "--tag",                                                            "v1.2.3",
+        "--github-cli",                 "/usr/local/bin/gh",           "--github-cli-sha256",    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--preparation",
+        "/tmp/handoff/preparation",     "--aggregate",                 "/tmp/handoff/aggregate", "--dmg",                                                            "/tmp/artifacts/Maru.dmg",
+        "--frozen-executable",          "/tmp/artifacts/session-host",
+    };
+}
+
+test "release adapter parses exact resumed publication command" {
+    const parsed = try adapter.parseArgs(&resumePublicationArgs());
+    try std.testing.expectEqualStrings("/tmp/handoff/preparation", parsed.resume_candidate_publication.preparation);
+    try std.testing.expectEqualStrings("/tmp/handoff/aggregate", parsed.resume_candidate_publication.aggregate);
+    try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", parsed.resume_candidate_publication.dmg);
+}
+
+test "resumed publication vocabulary and path graph are closed" {
+    var args = resumePublicationArgs();
+    args[9] = "--manifest";
+    try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&args));
+    args = resumePublicationArgs();
+    args[12] = "/tmp/handoff/preparation/aggregate";
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&args));
+    args = resumePublicationArgs();
+    args[16] = "relative/session-host";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
+    args = resumePublicationArgs();
+    args[10] = "/tmp/handoff/preparation/";
+    try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
+    const missing = resumePublicationArgs();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing[0 .. missing.len - 2]));
+}
+
 test "release adapter parses exact aggregate prepare and finalize commands" {
     const prepare = try adapter.parseArgs(&prepareAggregateArgs());
     try std.testing.expectEqualStrings("/tmp/source/evidence.json", prepare.prepare_candidate_aggregate.evidence);

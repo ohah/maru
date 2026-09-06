@@ -73,6 +73,25 @@ test "remote attachment and every later failure preserve the exact suffix audit 
     }
 }
 
+test "captured audit stage permits local-only reverse cleanup and exact retry" {
+    var fixture = Fixture.init();
+    var deadline: u8 = 0;
+    var driver = Driver{ .fail_at = .publish };
+    var execution: product.Execution = .{};
+    try std.testing.expectError(error.AuditRequired, product.testing_api.runWithSource(&fixture.source, std.testing.allocator, context, cli_path, &fixture.cli, &deadline, &driver, &execution));
+    try std.testing.expectEqual(product.AuditStage.publication, execution.auditStage());
+    driver.length = 0;
+    driver.cleanup_fail = .redownload;
+    try std.testing.expectError(error.CleanupFailed, product.testing_api.cleanupAuditWith(&driver, &execution));
+    try std.testing.expect(execution.needsCleanup());
+    try std.testing.expectEqualStrings("clean-publish,clean-redownload,clean-attach", driver.log());
+    driver.length = 0;
+    driver.cleanup_fail = .none;
+    try product.testing_api.retryCleanupWith(&driver, &execution);
+    try std.testing.expectEqualStrings("clean-redownload,clean-graph", driver.log());
+    try std.testing.expect(execution.isPristineForComposition());
+}
+
 test "graph drift is local before upload and audit-required after upload" {
     inline for (.{ Point.first_fence, Point.after_attach_fence }) |point| {
         var fixture = Fixture.init();

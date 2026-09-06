@@ -1199,6 +1199,20 @@ replacement의 unlink 0 및 12회 삭제 primitive 구간 timing sample을
 실제 GitHub release·credential·앱 session-host 상태는 읽거나 수정하지 않으며 executable cleanup command, live workflow
 stage 8, abrupt process death 뒤 cleanup tomb 재발견과 frozen signed U5 E2E의 증거가 아니다.
 
+U5 post-publish cleanup recovery는 `maru.session-host.aggregate-cleanup.v1` canonical durable record가 original aggregate와
+derived tomb의 directory identity와 다섯 fixed entry identity/digest를 소유하게 한다. immutable record를
+file-fsync→no-replace publication→parent-fsync하기 전에는 rename/unlink가 0이고, 이후 새 process는 caller가 준 tomb이나 ledger가
+아니라 protected context와 original aggregate pathname에서 유도한 exact record만 다시 연다. completion receipt도 intent digest와
+자기 canonical payload digest를 함께 검증한 뒤에만 intent 없는 idempotent success를 재생한다.
+`test-session-host-release-adapter-candidate-aggregate-cleanup-recovery`는 Debug·ReleaseFast pure reducer에서 pre-intent mutation 0,
+모든 mutation·sync 지점의 monotonic 재개, completion idempotency, ambiguous/non-prefix/foreign inventory와 descriptor close 불확실성을
+검증한다. 같은 gate의 actual filesystem fixture는 intent publication부터 final parent sync까지 20개 checkpoint에서 첫 process를
+즉시 종료하고, 뒤이어 fork한 별도 process가 exact original pathname에서 복구해 original/tomb/intent가 사라지는지 검증한다.
+20개 fresh-process 실측은 fork→recover→wait 전체의 median·p95·max를 진단값으로만 남긴다.
+실제 앱 session-host 저장소와 GitHub credential/release는
+건드리지 않는다. 이 gate는 crash-recoverable local cleanup substrate의 증거이며 current published asset-ID 재인증, executable stage-8
+command, live workflow wiring과 frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset redownload는 ready `DraftAuthority`·`DraftAssets`와 candidate/authored attestation, canonical held manifest 및 네 held
 file authority에서만 exact GitHub asset ID와 expected name/size/SHA를 유도한다. `test-session-host-release-adapter-draft-redownload`는
 DMG→frozen executable→evidence→manifest exact request 순서, clean token environment, body 비저장 bounded streaming count/SHA, shared

@@ -115,6 +115,29 @@ fn matchesPrefix(name: []const u8, csv: ?[]const u8) bool {
     return false;
 }
 
+/// `MARU_TEST_SHARD="i/n"`: 컴파일된 테스트를 **인덱스 mod n** 으로 n 개 프로세스에 나눠, 이 프로세스는 자기 몫
+/// (index % n == i)만 돌린다. 같은 바이너리를 n 번 띄우면 되므로 컴파일은 한 번이고, 러너의 pid 루트 격리
+/// (`isolateSessionHostRoot`)가 샤드마다 다른 네임스페이스를 준다. **왜 인덱스인가**: 이름 접두로 나누면 한 모듈
+/// (app_session 1,127개·237초)이 한 샤드에 몰린다. 인덱스는 모듈 안에서도 고르게 섞인다(실측 2026-09-06, CI
+/// macos-15 3 vCPU: 4,557개 355초 직렬 → 4샤드 시뮬레이션 94초). prefix 필터 **뒤에** 적용하므로 `kept`·`filtered`
+/// 가드는 샤드와 무관하고, 컴파일 수(`--maru-expect-tests`)도 그대로다. `--maru-expect-passed` 와는 함께 쓰지
+/// 않는다 — 그쪽은 프로세스 하나가 다 돌았다는 전제다.
+const Shard = struct { index: usize, count: usize };
+
+fn invalidShard(raw: []const u8) noreturn {
+    std.debug.print("invalid MARU_TEST_SHARD {s} — expected i/n with i < n\n", .{raw});
+    std.process.exit(1);
+}
+
+fn envShard() ?Shard {
+    const raw = envPrefix("MARU_TEST_SHARD") orelse return null;
+    const slash = std.mem.indexOfScalar(u8, raw, '/') orelse invalidShard(raw);
+    const index = std.fmt.parseInt(usize, raw[0..slash], 10) catch invalidShard(raw);
+    const count = std.fmt.parseInt(usize, raw[slash + 1 ..], 10) catch invalidShard(raw);
+    if (count == 0 or index >= count) invalidShard(raw);
+    return .{ .index = index, .count = count };
+}
+
 pub fn main(init: std.process.Init.Minimal) void {
     @disableInstrumentation();
 
@@ -150,8 +173,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     // 루트만 달리해 컴파일한 바이너리가 다른 바이너리의 테스트를 통째로 다시 도는 «번짐»을, 자기 몫만 남기고 끊는
     // 용도다(예: client_external_rx_read_test_support — 1,589개 중 1,555개가 client_external_pump 바이너리와 동일).
     const keep_only_prefixes = envPrefix("MARU_TEST_KEEP_ONLY_PREFIX");
+    const shard = envShard();
     var kept: usize = 0;
     var filtered: usize = 0;
+    var other_shard: usize = 0;
 
     var passed: usize = 0;
     var skipped: usize = 0;
@@ -159,15 +184,22 @@ pub fn main(init: std.process.Init.Minimal) void {
     var leaked: usize = 0;
 
     for (test_functions, 0..) |test_fn, index| {
+        // 다른 샤드의 몫은 FILTERED 줄도 찍지 않는다 — 샤드 n 개가 같은 줄을 n 번 찍으면 로그를 못 읽는다. 다만
+        // `filtered`·`kept` 는 샤드와 무관하게 세어 아래 가드가 어느 샤드에서나 같은 답을 내게 한다.
+        const mine = if (shard) |s| index % s.count == s.index else true;
         if (keep_only_prefixes != null and !matchesPrefix(test_fn.name, keep_only_prefixes)) {
             filtered += 1;
-            if (!have_tty) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
+            if (!have_tty and mine) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
             continue;
         }
         if (keep_only_prefixes != null) kept += 1;
         if (matchesPrefix(test_fn.name, skip_prefixes) and !matchesPrefix(test_fn.name, keep_prefixes)) {
             filtered += 1;
-            if (!have_tty) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
+            if (!have_tty and mine) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });
+            continue;
+        }
+        if (!mine) {
+            other_shard += 1;
             continue;
         }
         testing.allocator_instance = .{};
@@ -238,6 +270,14 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (skip_prefixes != null and filtered == 0) {
         std.debug.print("skip prefix matched no tests — check --maru-skip-prefix\n", .{});
         std.process.exit(1);
+    }
+    if (shard) |s| {
+        std.debug.print("shard {d}/{d}: {d} tests belong to other shards.\n", .{ s.index, s.count, other_shard });
+        // 샤드가 하나도 안 돌렸다 = n 이 테스트 수보다 크거나 필터와 겹쳐 비었다. 조용히 «0개 돌리고 초록»이 되지 않게 빨개진다.
+        if (passed_count + skipped_count + failed_count == 0) {
+            std.debug.print("shard ran no tests — check MARU_TEST_SHARD\n", .{});
+            std.process.exit(1);
+        }
     }
     if (leaked_count != 0) std.debug.print("{d} tests leaked memory.\n", .{leaked_count});
     if (failed_count != 0 or leaked_count != 0 or logged_errors != 0) std.process.exit(1);

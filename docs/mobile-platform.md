@@ -421,7 +421,7 @@ Java UI 스레드에서 오고 그리는 쪽은 NativeActivity 스레드라(실�
 **제스처의 목적지는 소유 손가락에 딸린다.** 둘째 손가락이 다른 표면 위에 닿아도 그 제스처의
 목적지는 안 바뀐다 — 키바를 밀면서 본문이 같이 스크롤되는 상태를 막는다. **다만 그 "소유
 손가락" 을 목적지 옆에 따로 두지는 않는다** — 표면마다 이미 자기 소유자를 들고 있고
-(`kb_touch.owner`·`body_owner`), 목적지가 살아 있는지는 **그것들에게 물어서** 판정한다. 같은
+(`kb_owner`·`body_owner`·`set_touch.owner`), 목적지가 살아 있는지는 **그것들에게 물어서** 판정한다. 같은
 사실을 두 벌 두면 정리도 두 곳이 되고, 그것이 이 계약이 host 에서 없앤 바로 그 병이다.
 
 **끝나는 자리도 하나다**: 마지막 손가락이 떼지거나 `cancel` 이 오면 목적지가 지워진다.
@@ -1299,8 +1299,8 @@ baseline 이 칸의 3/4 지점이라 위쪽에 5 px 여백이 남는다 — 그 
 
 | 계약 | 모바일 상태 |
 |---|---|
-| [chrome 상호작용 이관](chrome-interaction-migration.md) — interactive node 가 semantic descriptor 를 내고 플랫폼이 네이티브 접근성 요소로 투영한다 | **어댑터 없음.** GPU quad 뿐이라 VoiceOver·TalkBack 에게는 빈 화면이다 |
-| [설정](configuration.md) — config 스키마·resolve 계약 | **아직 아무 config 도 안 읽는다.** `themeColors()`·`font_px` 가 값을 고정한다 — 폰트 크기 하나 못 바꾼다. 데스크톱 스키마를 따를 자리는 아니고(§1 — 모바일 config 는 따로다) **모바일 스키마가 아직 없는 것**이 공백이다 |
+| [chrome 상호작용 이관](chrome-interaction-migration.md) — interactive node 가 semantic descriptor 를 내고 플랫폼이 네이티브 접근성 요소로 투영한다 | **따른다**(2026-09-06). 브리지가 서술자를 내고 두 host 가 투영한다(iOS `UIAccessibilityElement`·Android `AccessibilityNodeProvider`) — 앱 바·키바·본문 줄·목록·설정·묻는 화면들. 남은 것은 새 출력 알림·스크롤백 훑기·선택 영역이고 [계획 M9](plans/mobile-platform.md)가 소유한다 |
+| [설정](configuration.md) — config 스키마·resolve 계약 | **따른다**(M10). 모바일 스키마로 파일을 읽고 쓴다 — 화면이 스키마에서 줄을 만들고 값은 config 가 든다. 파일도 스키마도 데스크톱과 **따로**다(§1) |
 | [배포](distribution.md) — 채널·서명·업데이트 | **모바일 스토어를 안 다룬다.** `AndroidManifest.xml` 의 `android:debuggable="true"` 는 개발용이라 배포 전에 반드시 뺀다 |
 
 계획은 [M9~M11](plans/mobile-platform.md)이 소유한다.

@@ -162,6 +162,7 @@ test "all commands bind context and pin only after identity authority" {
                 try std.testing.expectEqualStrings("/tmp/attest/candidate-dmg.bundle.json", command.candidate_dmg_bundle);
                 try std.testing.expectEqualStrings("/tmp/attest/candidate-frozen.bundle.json", command.candidate_frozen_bundle);
             },
+            .prepare_candidate => |command| try std.testing.expectEqualStrings("/tmp/durable-stage3", command.durable_preparation),
             .prepare_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", command.aggregate),
             .finalize_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", command.dmg),
         }

@@ -44,11 +44,7 @@ pub const SourceDirectory = struct {
 
     pub fn revalidate(self: *@This(), bootstrap: *Bootstrap) Error!void {
         const view = try bootstrapView(bootstrap);
-        const command = switch (view.command) {
-            .publish_candidate => |candidate| candidate,
-            else => return error.InvalidCommand,
-        };
-        try self.requireValid(view.context.source_commit, &view.runner.workflow_sha, command.source_root);
+        try self.requireValid(view.context.source_commit, &view.runner.workflow_sha, try sourceRoot(view.command));
     }
 
     pub fn deinit(self: *@This()) Error!void {
@@ -112,11 +108,7 @@ pub fn prepare(
 ) Error!void {
     if (!pristine(result) or overlapsObject(result, bootstrap)) return error.InvalidOwner;
     const view = try bootstrapView(bootstrap);
-    const command = switch (view.command) {
-        .publish_candidate => |candidate| candidate,
-        else => return error.InvalidCommand,
-    };
-    const requested_path = command.source_root;
+    const requested_path = try sourceRoot(view.command);
     if (viewOverlaps(std.mem.asBytes(result), view) or
         overlaps(std.mem.asBytes(result), requested_path)) return error.InvalidOwner;
     const workspace_path = lookup.get(required_name) orelse return error.MissingKey;
@@ -224,16 +216,21 @@ fn overlapsObject(a: anytype, b: anytype) bool {
 }
 
 fn viewOverlaps(result_bytes: []const u8, view: bootstrap_mod.View) bool {
-    const command_path = switch (view.command) {
-        .publish_candidate => |candidate| candidate.source_root,
-        else => "",
-    };
+    const command_path = sourceRoot(view.command) catch "";
     return overlaps(result_bytes, view.context.repository.owner) or
         overlaps(result_bytes, view.context.repository.name) or
         overlaps(result_bytes, view.context.tag) or
         overlaps(result_bytes, view.context.source_commit) or
         overlaps(result_bytes, view.context.build.workflow_ref) or
         overlaps(result_bytes, command_path);
+}
+
+fn sourceRoot(command: bootstrap_mod.Command) Error![]const u8 {
+    return switch (command) {
+        .publish_candidate => |candidate| candidate.source_root,
+        .prepare_candidate => |candidate| candidate.source_root,
+        else => error.InvalidCommand,
+    };
 }
 
 fn overlaps(left: []const u8, right: []const u8) bool {

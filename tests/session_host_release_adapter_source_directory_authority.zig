@@ -35,6 +35,30 @@ fn bootstrap(source_root: []const u8) authority.Bootstrap {
     return result;
 }
 
+fn preparationBootstrap(source_root: []const u8) authority.Bootstrap {
+    var result = bootstrap(source_root);
+    result.command = .{ .prepare_candidate = .{
+        .repo = "ohah/maru",
+        .tag = "v1.2.3",
+        .test_uuid = "123e4567-e89b-42d3-a456-426614174000",
+        .dmg = "/tmp/dmg",
+        .frozen_executable = "/tmp/exe",
+        .candidate_dmg_bundle = "/tmp/dmg.bundle.json",
+        .candidate_frozen_bundle = "/tmp/frozen.bundle.json",
+        .dmg_work = "/tmp/dmg-work",
+        .baseline_workspace = "/tmp/baseline",
+        .app_main_executable = "/tmp/app-main",
+        .app_cli_executable = "/tmp/app-cli",
+        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+        .source_root = source_root,
+        .zig = "/tmp/zig",
+        .zig_size = 123,
+        .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .durable_preparation = "/tmp/durable-stage3",
+    } };
+    return result;
+}
+
 const Lookup = struct {
     value: ?[]const u8,
     calls: usize = 0,
@@ -78,6 +102,22 @@ test "trusted workspace binds one held same-uid directory and closes it exactly 
     try source.deinit();
     try std.testing.expect(std.c.fcntl(held, std.c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectError(error.InvalidOwner, source.deinit());
+}
+
+test "stage3 preparation binds the same held source authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "checkout", .default_dir);
+    var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "checkout", &path_storage);
+    var lookup = Lookup{ .value = path };
+    var source: authority.SourceDirectory = .{};
+    var trusted = preparationBootstrap(path);
+    trusted.owner = &trusted;
+    try authority.prepare(&source, &trusted, &lookup);
+    try source.revalidate(&trusted);
+    try std.testing.expectEqualStrings(commit, &(try source.value()).source_commit);
+    try source.deinit();
 }
 
 test "identity and exact workspace mismatch fail before filesystem publication" {

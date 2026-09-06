@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const manifest = @import("release_manifest");
+const contract = @import("release_adapter_contract");
 const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const token_environment = @import("release_adapter_token_environment");
 const github_transport = @import("release_adapter_github_transport");
@@ -14,10 +15,12 @@ const apple_transport = @import("release_adapter_apple_transport");
 const pre_publish_product = @import("release_adapter_pre_publish_product");
 const verify_predecessor_product = @import("release_adapter_verify_predecessor_product");
 const candidate_release_driver = @import("release_adapter_candidate_release_driver");
+const candidate_stage3_command = @import("release_adapter_candidate_stage3_preparation_command");
 const candidate_aggregate_process = @import("release_adapter_candidate_aggregate_process");
 const builtin = @import("builtin");
 
 pub const phase_budget_ns: i128 = 20 * std.time.ns_per_min;
+pub const max_command_args: usize = contract.max_command_args;
 pub const github_capture_bytes: usize = github_transport.max_capture_bytes;
 pub const manifest_capture_bytes: usize = manifest.max_manifest_bytes;
 pub const attestation_capture_bytes: usize = attestation.max_response_bytes;
@@ -30,6 +33,7 @@ pub const Storage = struct {
     compatibility: [compatibility_capture_bytes]u8 = undefined,
     apple: apple_transport.Storage = undefined,
     candidate: candidate_release_driver.Execution = .{},
+    stage3: candidate_stage3_command.Execution = .{},
     aggregate_process: candidate_aggregate_process.Storage = .{},
 };
 
@@ -104,6 +108,32 @@ const ProductDrivers = struct {
         );
     }
 
+    pub fn prepareCandidate(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        token: []const u8,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        const outcome = candidate_stage3_command.runOutcome(
+            io,
+            allocator,
+            bootstrap,
+            token,
+            storage.github_response[0..candidate_stage3_command.max_scratch_bytes],
+            budget_ns,
+            &storage.stage3,
+        );
+        return switch (outcome) {
+            .success => {},
+            .local_failure => error.Stage3LocalFailure,
+            .audit_required => error.Stage3AuditRequired,
+            .cleanup_failed => error.Stage3CleanupFailed,
+        };
+    }
+
     pub fn prepareCandidateAggregate(
         _: *@This(),
         _: std.Io,
@@ -137,6 +167,10 @@ pub const testing_api = if (builtin.is_test) struct {
     pub fn settleFailure(execution: anytype, original: anyerror) anyerror {
         return settleProductFailure(execution, original);
     }
+
+    pub fn appendArgument(values: *[max_command_args][]const u8, count: *usize, value: []const u8) !void {
+        return appendArgumentImpl(values, count, value);
+    }
 } else struct {};
 
 pub fn executeWith(
@@ -155,6 +189,7 @@ pub fn executeWith(
         .pre_publish => try drivers.prePublish(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        .prepare_candidate => try drivers.prepareCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
     }
@@ -171,16 +206,39 @@ pub fn runCurrent(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
 }
 
 pub fn main(init: std.process.Init) !void {
-    const max_args: usize = 32;
-    var values: [max_args][]const u8 = undefined;
+    var values: [max_command_args][]const u8 = undefined;
     var count: usize = 0;
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
     while (args.next()) |value| {
-        if (count == values.len) return error.TooManyArguments;
-        values[count] = value;
-        count += 1;
+        appendArgumentImpl(&values, &count, value) catch |err| {
+            if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
+                finishStage3(.local_failure);
+            return err;
+        };
     }
-    try runCurrent(init.io, init.gpa, values[0..count]);
+    runCurrent(init.io, init.gpa, values[0..count]) catch |err| {
+        const outcome: candidate_stage3_command.Outcome = switch (err) {
+            error.Stage3AuditRequired => .audit_required,
+            error.Stage3CleanupFailed => .cleanup_failed,
+            else => .local_failure,
+        };
+        if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
+            finishStage3(outcome);
+        return err;
+    };
+    if (count != 0 and std.mem.eql(u8, values[0], "prepare-candidate"))
+        finishStage3(.success);
+}
+
+fn appendArgumentImpl(values: *[max_command_args][]const u8, count: *usize, value: []const u8) !void {
+    if (count.* == values.len) return error.TooManyArguments;
+    values[count.*] = value;
+    count.* += 1;
+}
+
+fn finishStage3(outcome: candidate_stage3_command.Outcome) noreturn {
+    std.debug.print("{s}", .{candidate_stage3_command.stderrLine(outcome)});
+    std.process.exit(candidate_stage3_command.exitCode(outcome));
 }

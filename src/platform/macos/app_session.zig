@@ -75816,6 +75816,27 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
     try std.testing.expectEqual(gens[1], gens[gens.len - 1]);
 }
 
+/// 이미지 갤러리 판정자가 워커(훑기·디코드)를 **벽시계**로 기다린다. 예전엔 `spins < 200_000` 같은 반복 횟수로
+/// 기다렸는데, 반복 상한은 숨은 시간 제한이라 부하에서 짧아진다 — 샤드 병렬 CI(3 vCPU)에서 IG14 가 그렇게 죽었다
+/// (2026-09-06, 「취소한 뒤에도 다시 채워진다」). 조건이 서면 바로 돌아오고, 마감(30초)을 넘기면 그때의 상태로 뒤
+/// 단언이 죽는다. 정상 실행은 수십 ms~수 초라 마감에 닿지 않는다. 시계는 256틱마다 한 번 읽어 틱 루프의 비용을 안
+/// 늘린다. 「이 안에 안 일어난다」를 보는 음성 대기는 이 헬퍼를 쓰지 않는다(그쪽은 짧은 벽시계를 직접 잰다).
+const GalleryWait = struct {
+    io: std.Io,
+    deadline_ns: i96,
+    ticks: usize = 0,
+
+    fn start(io: std.Io) GalleryWait {
+        return .{ .io = io, .deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + 30 * std.time.ns_per_s };
+    }
+
+    fn pending(self: *GalleryWait) bool {
+        self.ticks += 1;
+        if (self.ticks & 0xff != 0) return true;
+        return std.Io.Clock.awake.now(self.io).nanoseconds < self.deadline_ns;
+    }
+};
+
 test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 실제로 이어진다 (IG1-e)" {
     // 이 슬라이스가 보이려는 것은 하나다: `Term.agent_image_source` → 워커 스캔 → tick 수확 → 화면 문구.
     // 훅이 소스를 채우는 부분은 「hook mode runs exactly one source」의 ⑦-b 가 따로 본다.
@@ -75859,8 +75880,8 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     // 하는 것이다(IG1-c 에서 그 부류를 한 번 냈다).
     const Wait = struct {
         fn until(sess: *AppSession) !void {
-            var spins: usize = 0;
-            while (spins < 200_000) : (spins += 1) {
+            var wait = GalleryWait.start(sess.io);
+            while (wait.pending()) {
                 _ = sess.tick() catch {};
                 if (sess.image_gallery.built) return;
             }
@@ -76013,8 +76034,8 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expect(session.image_gallery.built);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
@@ -76087,8 +76108,8 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
@@ -76111,8 +76132,8 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     // `tick()` 이 프레임을 조립하며 `appendGpuImages` → `ensureTiles` 를 부르고, 디코드 워커가 푼 것을
     // 다음 tick 의 `poll` 이 수확한다. 위 spin 을 도는 동안 그 왕복이 끝났다.
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76210,15 +76231,15 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(image_count, session.image_gallery.count());
 
     // 타일이 하나라도 나와야 격자를 그리는 상태다 — 그 전에는 「스캔 중」이 문구를 가진다.
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76306,12 +76327,12 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76333,8 +76354,8 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
 
     // ── ② 원본이 풀릴 때까지 tick. **워커가 푼다** — main actor 는 수확만 한다.
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.open.?.pixels.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76461,12 +76482,12 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76479,8 +76500,8 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
     session.mouse(3, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
     try std.testing.expect(session.image_gallery.open != null);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.open.?.pixels.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -76682,8 +76703,8 @@ test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는�
 
     const Wait = struct {
         fn until(sess: *AppSession) !void {
-            var spins: usize = 0;
-            while (spins < 200_000) : (spins += 1) {
+            var wait = GalleryWait.start(sess.io);
+            while (wait.pending()) {
                 _ = sess.tick() catch {};
                 if (sess.image_gallery.built) return;
             }
@@ -76777,15 +76798,15 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     // **2중 저장이 접혔다** — 접지 않으면 3장이 된다(실측 코퍼스에서 44%가 이 사본이었다).
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len < 2) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len < 2) {
             _ = session.tick() catch {};
         }
     }
@@ -76871,8 +76892,8 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 30), session.image_gallery.count());
 
@@ -76881,8 +76902,8 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     // 「첫 타일」이 아니라 **0 번 칸**을 기다린다 — 여럿이 동시에 풀려 배열에 먼저 담기는 것이
     // 0 번이라는 보장이 없다(그리기는 `hit_index` 로 자리를 잡으므로 순서는 무관하다).
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
@@ -77016,8 +77037,8 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
     try std.testing.expect(term.agent_image_source.set(child_path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
 
     // ── ① 체인이 부모까지 잇는다.
@@ -77031,8 +77052,8 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
 
     // ── ③ 그 오프셋으로 **부모 파일**을 열어 실제로 푼다. 파일을 잘못 고르면 여기서 깨진다.
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -77090,8 +77111,8 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(image_count, session.image_gallery.count());
 
@@ -77222,8 +77243,8 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
 
@@ -77358,8 +77379,8 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
     // 라벨은 **스캔 워커가** 만든다(IG11-a) — 타일이 아직 없어도 전부 있어야 거를 수 있다.
@@ -77481,8 +77502,8 @@ test "이미지 갤러리: 라벨과 함께 「언제」도 붙는다 (IG12)" {
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
     // **워커가 시각까지 만들었다.** 2026-08-30T09:13:22Z = 1788081202.
@@ -77567,8 +77588,8 @@ test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항�
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
     // **그 줄 자신의 시각**이어야 한다. 01:00:00Z = 1788051600.
@@ -77665,8 +77686,8 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
@@ -77688,8 +77709,8 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
         // 폴러가 파일이 자란 것을 알아채면 바로 넘어간다. 무조건 50,000 tick 을 돌리던 때는 이 test 하나가
         // 31 초(CI)였다 — 기다리는 건 tick 수가 아니라 「갤러리가 따라왔는가」다. 못 따라오면 끝까지 돌고
         // 아래 물음이 그대로 실패한다.
-        var spins: usize = 0;
-        while (spins < 50_000 and session.image_gallery.count() < 2) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.count() < 2) _ = session.tick() catch {};
     }
 
     // ── ② 갤러리를 떠났다가 다시 들어온다.
@@ -77697,8 +77718,8 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
     dock_ops.setDockView(session, .image_gallery);
     {
         // 다시 들어온 뒤 재구축이 «끝나기»까지 기다린다 — 도는 중에 읽으면 낡은 값과 구분이 안 된다.
-        var spins: usize = 0;
-        while (spins < 50_000 and (!session.image_gallery.built or session.image_gallery.count() < 2)) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and (!session.image_gallery.built or session.image_gallery.count() < 2)) _ = session.tick() catch {};
     }
 
     // **여기가 이 test 의 물음이다.** 2 장이면 갤러리가 따라온 것이고, 1 장이면 낡은 것이다.
@@ -77999,8 +78020,8 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
@@ -78017,8 +78038,8 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
 
     // 결과가 오면 바뀐다.
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.count() < 2) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.count() < 2) {
             _ = session.tick() catch {};
         }
     }
@@ -78068,8 +78089,8 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
@@ -78143,8 +78164,8 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -78159,8 +78180,8 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
     }
     image_gallery_ops.refresh(session, true);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.count() < 2) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.count() < 2) {
             _ = session.tick() catch {};
         }
     }
@@ -78228,8 +78249,8 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -78249,8 +78270,8 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
     }
     image_gallery_ops.refresh(session, true);
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.all_hits.items.len < 2) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.all_hits.items.len < 2) {
             _ = session.tick() catch {};
         }
     }
@@ -78312,8 +78333,8 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
 
     // 대화가 여덟 턴 이어진다.
@@ -78325,8 +78346,8 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
             _ = try f.writePositional(io, &.{one}, one.len * turn);
         }
         image_gallery_ops.refresh(session, true);
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.count() < turn + 1) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.count() < turn + 1) {
             _ = session.tick() catch {};
         }
         try std.testing.expectEqual(turn + 1, session.image_gallery.count());
@@ -78397,8 +78418,8 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -78484,8 +78505,8 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
@@ -78678,8 +78699,8 @@ test "이미지 갤러리: 한 틱에 여러 장을 동시에 건다 (IG14)" {
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 40), session.image_gallery.count());
 
@@ -78750,8 +78771,8 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
     try std.testing.expect(term.agent_image_source.set(path_a));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
 
     // ── ① 자리를 **가득** 채운 채로 소스를 바꾼다(그래야 죽은 항목이 전부를 막는다).
@@ -78765,14 +78786,14 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
     try std.testing.expect(term.agent_image_source.set(path_b));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
 
     // ── ③ 다시 채워진다. 비우지 않으면 여기서 **한 장도** 안 온다.
     {
-        var spins: usize = 0;
-        while (spins < 1_500_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
@@ -78847,8 +78868,8 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
     try std.testing.expectEqualStrings("sq5", session.image_gallery.labels.items[0].text());
@@ -78867,8 +78888,8 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
 
     // ── ② 0 번 칸이 차기를 기다린다.
     {
-        var spins: usize = 0;
-        while (spins < 1_500_000 and session.image_gallery.tileFor(0) == null) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
@@ -78931,16 +78952,16 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
     {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
     // ── ① 열면 **뷰포트만큼만** 푼다. 원본(8×1600)이 아니라 절반이다.
     image_gallery_ops.openAt(session, 0);
     {
-        var spins: usize = 0;
-        while (spins < 1_500_000) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending()) {
             _ = session.tick() catch {};
             const o = session.image_gallery.open orelse break;
             if (o.pixels.len > 0) break;
@@ -78967,8 +78988,8 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
         try std.testing.expect(o.view.scale > 1.0);
     }
     {
-        var spins: usize = 0;
-        while (spins < 1_500_000) : (spins += 1) {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending()) {
             _ = session.tick() catch {};
             const o = session.image_gallery.open orelse break;
             if (o.decoded_subsample == 1) break;

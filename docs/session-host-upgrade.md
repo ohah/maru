@@ -3481,6 +3481,45 @@ verified→published→redownloaded→attached 역순으로 local owner를 닫�
 수정하지 않는다. 이 경계는 resume asset graph adapter, executable resume/publication command, workflow stage 5~8 배선, aggregate
 삭제나 frozen signed U5 E2E를 대신하지 않는다.
 
+### 11.63 resume authority를 네 publication leaf가 읽는 asset graph
+
+resume process는 §11.61의 성공을 과거 process의 `CandidateAttestation`·`AuthoredAttestation`으로 되만들지 않는다. 두 타입은
+descriptor와 final-address pointer authority를 포함하므로 직렬화하거나 값만 복제하면 검증된 권위가 아니다.
+`release_adapter_candidate_resume_authority_product.Execution.publicationView()`가 ready execution의 retained preparation,
+aggregate, adopted draft와 현재 pinned GitHub CLI를 다시 fence한 뒤, `release_adapter_candidate_resume_asset_graph.zig`의
+final-address `Authority`가 그 view를 attachment→redownload→publication→post-publish용 typed snapshot으로만 투영한다.
+
+`publicationView()`는 호출 때마다 preparation full fence, cryptographic verification을 마친 aggregate owner의 bundle·artifact·semantic full fence, CLI pathname·inode·
+mode·size·digest 재검증, §11.61의 11-slot identity graph와 manifest asset semantic graph, protected context·manifest·adopted draft의
+repository/run/source/release/tag 결속을 다시 수행한다. 그 뒤에만 aggregate가 실제로 잡은 DMG·frozen executable·evidence와
+preparation이 잡은 manifest의 pathname, observation과 held fd를 고정 순서로 돌려준다. manifest는 aggregate verifier가 연
+동일 vnode의 별도 descriptor 대신 preparation의 canonical held descriptor를 upload source로 택한다. 네 upload source는 서로
+다른 vnode·fd이고 basename·size·SHA-256이 manifest의 세 asset 및 manifest 자체와 일치해야 한다. caller가 pathname, fd,
+digest, release ID나 draft ID를 별도 입력으로 덮어쓰는 경로는 없다.
+
+`Authority.bind()`는 pristine final address, exact ready `Execution`, trusted context와 checkout 전에 pin한 CLI만 받으며 source와
+CLI owner를 소비하지 않는다. context와 CLI pathname은 bounded fixed storage로 복사하고 source/CLI final address 및 처음
+fence한 graph의 domain-separated seal을 보존한다. 각 `snapshotAttachment()` 호출은 source를 다시 fence하고 seal과 exact graph를
+대조한다. `snapshotRedownload()`, `snapshotPublication()`, `snapshotPostPublish()`은 앞 단계의 final-address typed receipt를
+추가로 결속하며 release ID, 네 asset ID, name/size/SHA, tag/source를 임의로 재구성하지 않는다. copied/moved/pre-owned authority,
+source·CLI·receipt address 교체, graph/path/fd/identity/content/context drift와 storage alias는 다음 snapshot 전에 거부한다.
+
+adapter는 token, response buffer, credential, child process 또는 remote mutation을 소유하지 않는다. `deinit()`은 자기 borrow와
+fixed snapshot만 지우며 resume execution의 descriptor나 durable directory를 닫거나 삭제하지 않는다. source execution은
+후속 publication composition이 suffix cleanup과 함께 별도로 정산한다. 따라서 이 slice는 기존 leaf의 generic test seam을 production
+우회로 승격하거나 caller가 만든 plain snapshot을 신뢰하지 않는다.
+
+focused gate `test-session-host-release-adapter-candidate-resume-asset-graph`는 attachment→redownload→publication→post-publish의
+고정 projection, source fence exact count, 모든 receipt field 결속, final-address/copy/pre-owned/source·CLI·receipt drift,
+각 asset identity/path/fd/name/size/SHA와 context seal 변조 및 deinit의 source 비소비를 Debug·ReleaseFast에서 검증한다.
+concrete source의 `publicationView()` gate는 기존 §11.61 component를 다시 호출하는 exact inventory와 ready 전 거부를 고정한다.
+ReleaseFast의 40×1,000 batched diagnostic은 injected source 위에서 adapter의 seal 대조와 attachment projection 자체만
+median/p95/max 및 FD delta로 실측한다. filesystem full fence 비용은 기존 preparation/aggregate 실측과 분리하며, 이 수치를
+실제 GitHub network upload나 앱 end-to-end latency로 해석하지 않는다.
+fixture는 injected source와 harness-owned 기존 owner만 사용하며 실제 GitHub release·credential·filesystem이나 앱 session-host 상태를
+읽거나 수정하지 않는다. 이 경계는 네 remote leaf 호출, 공통 suffix composition, executable publication command, workflow stage
+5~8, post-publish aggregate 삭제나 frozen signed U5 E2E를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

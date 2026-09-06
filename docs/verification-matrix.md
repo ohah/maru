@@ -1141,6 +1141,18 @@ manifest/attestation prefix가 suffix를 exact once 조합하고 전체 callback
 사용하므로 실제 GitHub release·credential·filesystem과 앱 session-host 상태를 건드리지 않는다. 이 gate는 resume asset graph,
 executable publication command, live workflow stage 5~8, aggregate cleanup 또는 frozen signed U5 E2E의 증거가 아니다.
 
+U5 resume asset graph는 stage-4 이후 ready `Execution`을 과거 process의 candidate/authored attestation으로 복제하지 않고,
+`Execution.publicationView()`의 매-call preparation·verified aggregate·CLI·identity/semantic graph full fence에서만 네 held upload source를
+투영한다. `test-session-host-release-adapter-candidate-resume-asset-graph`는 final-address `Authority`의 initial seal과 매 snapshot
+재검증, DMG→frozen→evidence→manifest path/identity/fd/name/size/SHA, adopted draft의 release/tag/source 및 attachment·redownload·
+publication receipt의 exact 결속, copy/pre-owned/source·CLI·receipt 교체와 모든 graph field drift 거부, deinit의 source owner 비소비를
+Debug·ReleaseFast에서 고정한다. concrete resume product source gate는 ready 전 view 0과 기존 component full-fence call inventory를
+고정한다. injected fixture만 사용하므로 실제 GitHub release·credential·filesystem과 앱 session-host 상태를 건드리지 않는다.
+같은 gate의 ReleaseFast 40×1,000 batched diagnostic은 adapter projection의 median/p95/max와 FD delta를 기록하되,
+filesystem full fence·GitHub network·앱 E2E 지연과는 별도 지표로 표시한다.
+이 gate는 네 remote leaf 호출, 공통 publication suffix composition, executable command, workflow stage 5~8, aggregate cleanup 또는
+frozen signed U5 E2E의 증거가 아니다.
+
 U5 exact draft asset attachment는 `DraftAuthority.id`와 candidate/authored attestation, canonical held manifest와 네 distinct held file
 authority에서만 DMG→frozen executable→evidence→manifest upload를 유도한다. `test-session-host-release-adapter-draft-assets`는
 uploads endpoint의 exact release ID/name, held-fd body streaming, strict response ID/name/size/digest/content-type/state, shared deadline과 전후 graph

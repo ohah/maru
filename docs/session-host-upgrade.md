@@ -4001,6 +4001,33 @@ directory만 사용하며 실제 앱 session-host registry·manifest·socket·pr
 이 slice는 durable state artifact까지만 닫고 stage pathname inventory와 command 전체를 조립하는 live workflow owner,
 `.github/workflows/release.yml` 호출 및 frozen signed U5 E2E는 후속 경계다.
 
+### 11.75 고정 checkpoint inventory와 실제 process handoff
+
+Actions step 경계는 caller가 이전·다음 state pathname이나 순번을 고르게 하지 않는다.
+`release_adapter_live_workflow_checkpoint.zig`는 initial state와 §11.52의 여덟 stage 결과에 대응하는 아홉 leaf를
+`00-initial.state`, `01-candidate-pinning.state`, …, `08-aggregate-cleanup.state`의 compile-time inventory로 소유한다.
+stage `N`은 leaf `N`만 입력으로 열고 event를 적용한 뒤 leaf `N+1`에만 게시한다. 입력 state의
+`expectedStage()`가 호출 stage와 다르거나 output leaf가 이미 있으면 mutation 0으로 실패한다. 실패 event도 그 stage의 output
+leaf에 terminal state를 남기므로 같은 Actions run/attempt에서 ambiguous retry가 기존 증거를 덮어쓸 수 없다.
+
+checkpoint root는 canonical absolute pathname으로만 받고 component별 no-follow로 연다. 각 process는 root가 현재 euid 소유의
+directory이고 mode `0700`인지 확인해 descriptor를 보유한다. 최초 trusted root owner가 관측한 device/inode/uid/mode는
+exact-width lowercase hex `maru-root-v1` token 하나로 canonicalize해 Actions step output에 봉인하며, 이후 process는 caller가 새 identity를 선택하게 하지 않고 그 값과
+exact-match한 root만 연다. §11.74의 held state fd와 publication fd의 parent identity를
+그 root descriptor와 결속하고 operation 전후 root pathname이 같은 device/inode/mode/uid인지 다시 검사한다. 따라서 caller
+pathname을 한 번 검사한 뒤 다시 여는 TOCTOU나 root 교체·symlink·foreign-owner/loose-mode 경로는 state authority가 되지 않는다.
+state 문서는 계속 protected workflow context digest에 결속되며 root나 leaf pathname 자체는 성공 권위가 아니다.
+
+focused gate `test-session-host-release-adapter-live-workflow-checkpoint`는 아홉 leaf의 exact order, 성공·terminal 전이,
+skip/reverse/duplicate, context·content·mode·root identity drift와 allocation cleanup을 Debug·ReleaseFast에서 검증한다.
+`test-session-host-release-adapter-live-workflow-checkpoint-process`는 harness-owned `mkdtemp` root에서 trusted root identity를 봉인한 뒤
+init process 하나와 stage process 여덟을 실제로 spawn/reap한다. ReleaseFast 20회에서 PID 분리, 9/9 exclusive leaf, 최종 reducer success, parent FD delta 0과
+root/temporary residue 0을 요구하고 init·stage handoff·전체 wall-clock의 median·p95·max를 canonical diagnostic JSON으로 출력한다.
+이 시간은 로컬 APFS와 process spawn을 포함하지만 GitHub queue/network 또는 실제 Actions step latency는 아니다. fixture는 실제 앱
+session-host registry·manifest·socket·process, GitHub release와 credential을 읽거나 수정하지 않는다. 이 slice는 fixed checkpoint와
+process 경계까지만 닫고 여덟 concrete command를 호출하는 live workflow owner, `release.yml` step 배선과 frozen signed U5 E2E는
+후속 경계다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

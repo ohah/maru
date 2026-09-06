@@ -1261,6 +1261,13 @@ length-delimited BLAKE3 digest에 결속한 canonical v1 document로 전달한�
 open 전후 bytes/identity를 검증하고 다음 state는 새 absent pathname에만 fsync+exclusive rename으로 게시한다. focused gate가 모든
 canonical/terminal state, context 전 축과 byte/state drift, actual filesystem의 crash-safe publication 및 symlink/hardlink/mode/content
 거부를 Debug·ReleaseFast로 고정한다. stage pathname inventory, live workflow owner와 release.yml 배선은 후속 경계다.
+U5 fixed workflow checkpoint는 initial+여덟 stage result의 compile-time leaf inventory만 허용하고, 최초 trusted owner가 Actions에
+봉인한 canonical `maru-root-v1` device/inode/uid/mode token과 exact-match한 private `0700` descriptor에서 현재 stage input을 reopen한 뒤 다음 absent leaf에만
+reducer 결과를 게시한다. component gate가 성공·terminal,
+skip/reverse/duplicate와 context/content/root identity·mode drift를 Debug·ReleaseFast에서 검증한다. actual-process gate는 harness-owned
+root에서 init+여덟 stage를 서로 다른 process로 20회 spawn/reap하고 9/9 leaf, final success, PID 분리, FD delta 0, residue 0 및
+init/stage/total median·p95·max를 canonical JSON으로 남긴다. 이는 local APFS/process 비용의 실측이며 GitHub Actions step·network
+latency가 아니다. concrete command live owner, release.yml 배선과 frozen signed U5 E2E는 후속 경계다.
 
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub

@@ -1248,6 +1248,14 @@ non-overlap이어야 하고 child는 exact environment와 `/dev/null` stdin만 �
 `test-session-host-bounded-process`가 actual child, descendant timeout과 반복 FD delta 0을 Debug·ReleaseFast에서 검증한다. stage 5·6
 product owner와 mapper 적용, workflow state handoff 및 live GitHub release는 후속 경계다.
 
+U5 stage-5/6 bounded child owner는 `release_adapter_live_workflow_aggregate_child`가 contract argument를 먼저 parse해 active command tag를
+유도하고, context 11개와 runner-authority 4개 SSOT의 closed environment만 canonical fixed storage로 재구성한 뒤 actual child observation을 reducer mapper에 직접
+적용한다. observation 실패도 partial byte나 raw error를 게시하지 않고 synthetic incomplete observation을 거쳐 conservative
+`cleanup_failed`가 된다. `test-session-host-release-adapter-live-workflow-aggregate-child`가 Debug·ReleaseFast actual process로 tuple,
+signal·timeout·cap, wrong state/command/context와 payload·descriptor·state storage alias의 fork 전 거부, ambient secret 0과 FD delta 0을
+검증한다. Actions step 간
+durable state handoff, live workflow 배선과 frozen signed U5 E2E는 후속 경계다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

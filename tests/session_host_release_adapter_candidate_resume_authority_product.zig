@@ -388,4 +388,28 @@ test "product source has one existing-component path and borrows the aggregate d
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "cli_mod.revalidate("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self.execution.aggregate.deinit()"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self.execution.preparation.deinit()"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "pub fn runBorrowingDeadline("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "return runBound(io, allocator, inputs, token, response, deadline, false, execution);"));
+}
+
+test "borrowed deadline preflight does not consume caller authority" {
+    var execution = product.Execution{};
+    var deadline = product.Deadline{};
+    try product.startDeadline(std.time.ns_per_s, &deadline);
+    defer deadline.deinit() catch {};
+    var response: [1]u8 = undefined;
+    try std.testing.expectError(error.InvalidInput, product.runBorrowingDeadline(undefined, std.testing.allocator, .{
+        .context = .{
+            .repository = .{ .id = 1, .owner = "ohah", .name = "maru" },
+            .tag = "v1.2.3",
+            .source_commit = "0123456789abcdef0123456789abcdef01234567",
+            .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/heads/main", .run_id = 1, .run_attempt = 1 },
+            .protected_tag = true,
+        },
+        .paths = .{ .preparation = "/tmp/preparation", .aggregate = "/tmp/aggregate", .dmg = "/tmp/candidate.dmg", .frozen_executable = "/tmp/frozen" },
+        .cli_path = "/tmp/gh",
+        .cli = undefined,
+    }, "", &response, &deadline, &execution));
+    _ = try deadline.remaining();
+    try std.testing.expect(execution.value() == null);
 }

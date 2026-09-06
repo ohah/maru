@@ -1,8 +1,8 @@
 const std = @import("std");
 const validator = @import("release_validator");
 
-const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate };
-const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate };
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate, resume_publication };
+const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate, resume_publication };
 
 const Harness = struct {
     events: [8]Event = undefined,
@@ -96,6 +96,14 @@ const Harness = struct {
                         .frozen_executable = "/tmp/exe",
                         .manifest = "/tmp/manifest",
                     } },
+                    .resume_publication => .{ .resume_candidate_publication = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .preparation = "/tmp/preparation",
+                        .aggregate = "/tmp/aggregate",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                    } },
                 };
                 result.owner = result;
             }
@@ -152,6 +160,13 @@ const Harness = struct {
             pub fn finalizeCandidateAggregate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, budget: i128, _: *validator.Storage) !void {
                 self.harness.push(.finalize_aggregate);
                 try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+            pub fn resumeCandidatePublication(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.resume_publication);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
                 if (self.harness.product_error) return error.ProductInjected;
             }
         };
@@ -254,6 +269,16 @@ test "aggregate commands dispatch exactly once without reading GitHub token" {
     var failure = Harness{ .phase = .finalize_aggregate, .token_error = true, .product_error = true };
     try std.testing.expectError(error.ProductInjected, failure.run(&storage));
     try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .finalize_aggregate }, failure.events[0..failure.count]);
+}
+
+test "resume publication dispatches exactly once after bootstrap and token" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{ .phase = .resume_publication };
+    try harness.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .resume_publication }, harness.events[0..harness.count]);
+    var failure = Harness{ .phase = .resume_publication, .product_error = true };
+    try std.testing.expectError(error.ProductInjected, failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .resume_publication }, failure.events[0..failure.count]);
 }
 
 test "production failure cleanup retries at most once and retry failure wins" {

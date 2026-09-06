@@ -14409,14 +14409,34 @@ pub fn build(b: *std.Build) void {
         run_live_workflow_phase_tests.setCwd(b.path("."));
         session_host_release_adapter_live_workflow_phase_step.dependOn(&run_live_workflow_phase_tests.step);
 
+        const candidate_aggregate_command_outcome_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_command_outcome.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const live_workflow_contract_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
         const live_workflow_aggregate_event_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_aggregate_event.zig"),
             .target = target,
             .optimize = baseline_phase_optimize,
-            .imports = &.{.{
-                .name = "release_adapter_live_workflow_phase",
-                .module = live_workflow_phase_mod,
-            }},
+            .imports = &.{
+                .{
+                    .name = "release_adapter_live_workflow_phase",
+                    .module = live_workflow_phase_mod,
+                },
+                .{
+                    .name = "release_adapter_candidate_aggregate_command_outcome",
+                    .module = candidate_aggregate_command_outcome_mod,
+                },
+                .{
+                    .name = "release_adapter_contract",
+                    .module = live_workflow_contract_mod,
+                },
+            },
         });
         const live_workflow_aggregate_event_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -14432,11 +14452,15 @@ pub fn build(b: *std.Build) void {
                         .name = "release_adapter_live_workflow_aggregate_event",
                         .module = live_workflow_aggregate_event_mod,
                     },
+                    .{
+                        .name = "release_adapter_contract",
+                        .module = live_workflow_contract_mod,
+                    },
                 },
             }),
         });
         const run_live_workflow_aggregate_event_tests = b.addRunArtifact(live_workflow_aggregate_event_tests);
-        run_live_workflow_aggregate_event_tests.addArg("--maru-expect-tests=7");
+        run_live_workflow_aggregate_event_tests.addArg("--maru-expect-tests=8");
         run_live_workflow_aggregate_event_tests.setCwd(b.path("."));
         session_host_release_adapter_live_workflow_aggregate_event_step.dependOn(&run_live_workflow_aggregate_event_tests.step);
         session_host_step.dependOn(&run_live_workflow_aggregate_event_tests.step);
@@ -14895,7 +14919,8 @@ pub fn build(b: *std.Build) void {
             run_verify_predecessor_product_tests.setCwd(b.path("."));
             session_host_release_adapter_verify_predecessor_product_step.dependOn(&run_verify_predecessor_product_tests.step);
             const token_environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_token_environment.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_github_transport", .module = transport_mod }} });
-            const candidate_aggregate_process_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_process.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod } } });
+            const candidate_aggregate_command_outcome_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_command_outcome.zig"), .target = target, .optimize = composition_optimize });
+            const candidate_aggregate_process_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_aggregate_process.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_candidate_aggregate_handoff", .module = candidate_aggregate_handoff_mod }, .{ .name = "release_adapter_candidate_aggregate_reopen", .module = candidate_aggregate_reopen_mod }, .{ .name = "release_adapter_candidate_aggregate_command_outcome", .module = candidate_aggregate_command_outcome_mod } } });
             const candidate_aggregate_command_outcome_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_release_adapter_candidate_aggregate_command_outcome.zig"),
                 .target = target,

@@ -3926,6 +3926,26 @@ exit/stderr 교차 조합, unknown·signal termination, stdout·newline·trailin
 Debug·ReleaseFast로 검증하고 나머지 CLI command tag 전부의 거부를 고정한다. 이 slice는 child observation에서 reducer event까지의 pure ownership만 닫으며 process spawn/reap,
 Actions step 간 state handoff, `.github/workflows/release.yml` 배선과 frozen signed U5 E2E는 후속 경계다.
 
+### 11.72 bounded dual-stream child observation substrate
+
+stage 5·6 owner가 validator의 nonzero exit를 일반 `ChildFailed`로 뭉개거나 stdout과 stderr를 합치지 않도록
+`bounded_process.zig`는 `runObserveEnvironment`를 제공한다. caller가 소유한 서로 겹치지 않는 non-empty stdout/stderr buffer,
+absolute executable, null-terminated argv, exact child environment와 양의 monotonic budget을 받고, 별도 `CLOEXEC` pipe 두 개로 두 stream을
+동시에 drain한다. 성공 반환은 두 pipe EOF와 exact child reap을 모두 관측한 뒤뿐이며 borrowed result는 termination과 두 buffer의
+사용 구간만 가진다.
+
+normal exit는 code가 0이 아니어도 observation으로 반환하고 signal termination도 별도 tag로 보존한다. exec 실패의 child-side
+`_exit(126)` 역시 observation이다. fork 전 executable·budget·buffer 검증 실패와 parent의
+pipe/fork/process-group/poll/wait 실패 및 deadline 초과는 typed error다. 어느 stream이든
+caller cap을 한 byte 넘는 순간 partial observation을 게시하지 않고 process group 전체를 kill/reap한다. timeout과 capture failure도
+같은 정산을 거치며, fork child는 stdin을 `/dev/null`로 고정하고 요청한 exact environment 외 parent environment와 non-stdio fd를
+상속하지 않는다. 두 output buffer가 겹치면 fork 전에 `AliasedOutput`으로 거부한다.
+
+기존 `runCapture*`의 exit-0 계약과 호출자는 바꾸지 않는다. focused gate `test-session-host-bounded-process`는 actual child로 분리 stream,
+nonzero·signal·exec failure observation, 양쪽 cap+1, timeout descendant kill, exact environment, ambient fd 차단, buffer alias와 반복 실행 뒤
+FD delta 0을 Debug·ReleaseFast에서 검증한다. 이 substrate만으로 stage 5·6 command/stage identity, mapper 적용, workflow state handoff나
+live GitHub release가 완료됐다고 주장하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

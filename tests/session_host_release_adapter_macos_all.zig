@@ -78,6 +78,7 @@ test {
     _ = @import("session_host_release_adapter_live_workflow_state_handoff.zig");
     _ = @import("session_host_release_adapter_live_workflow_checkpoint.zig");
     _ = @import("session_host_release_adapter_live_workflow_owner.zig");
+    _ = @import("session_host_release_adapter_live_workflow_binding.zig");
     _ = @import("session_host_release_adapter_post_publish_attestation.zig");
     _ = @import("session_host_release_adapter_candidate_published_cleanup_authority.zig");
     _ = @import("session_host_release_adapter_candidate_published_cleanup_command.zig");

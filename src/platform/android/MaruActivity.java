@@ -81,11 +81,11 @@ public class MaruActivity extends android.app.NativeActivity {
     // ── 접근성 (M9) — 브리지의 서술자를 가상 뷰 계층으로 옮긴다 ──────────────────
     /** 이번 프레임 서술자 수. **읽는 순서로** 나온다(순서는 브리지가 정한다). */
     private static native int nativeA11yCount();
-    /** 자리 — **뷰 픽셀**로 (x<<48)|(y<<32)|(w<<16)|h. 네이티브가 이미 scale·inset 을 되돌렸다. */
-    private static native long nativeA11yRect(int index);
-    private static native int nativeA11yRole(int index);
-    private static native int nativeA11yState(int index);
-    private static native String nativeA11yLabel(int index);
+    /** 노드 하나를 **한 번에** 받는다 — `out` 에 x·y·w·h(뷰 픽셀)·role·state 를 채우고 이름을 답한다.
+     *
+     *  **나눠 물으면 안 된다**(ABI 헤더의 규율): 그 사이에 프레임이 바뀌면 이름과 자리가 서로 다른
+     *  프레임의 것이 되어, 스크린 리더가 짚는 곳과 손가락이 닿는 곳이 어긋난다. */
+    private static native String nativeA11yNode(int index, int[] out);
     /** 두 번 두드리기 — **누르는 경로 그대로** 누른다. */
     private static native boolean nativeA11yClick(int index);
 
@@ -115,6 +115,8 @@ public class MaruActivity extends android.app.NativeActivity {
         private AccessibilityNodeProvider provider;
         /// 접근성 커서가 지금 어느 가상 노드에 있나. `-1` 은 없다.
         private int a11yFocus = -1;
+        /// 커서를 놓을 때 **읽어 준 이름**. 누를 때 그 이름이 아직 그 자리인지 대조한다 — 아래.
+        private String a11yFocusLabel;
 
         @Override
         public AccessibilityNodeProvider getAccessibilityNodeProvider() {
@@ -143,18 +145,17 @@ public class MaruActivity extends android.app.NativeActivity {
                 }
                 if (virtualViewId < 0 || virtualViewId >= n) return null;
 
-                long r = nativeA11yRect(virtualViewId);
-                int x = (int) ((r >> 48) & 0xFFFF);
-                int y = (int) ((r >> 32) & 0xFFFF);
-                int w = (int) ((r >> 16) & 0xFFFF);
-                int h = (int) (r & 0xFFFF);
-                int state = nativeA11yState(virtualViewId);
+                // **한 번에 받는다** — 나눠 물으면 프레임이 섞인다(위 `nativeA11yNode` 주석).
+                int[] v = new int[6];
+                String label = nativeA11yNode(virtualViewId, v);
+                int x = v[0], y = v[1], w = v[2], h = v[3];
+                int role = v[4], state = v[5];
 
                 AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain(view, virtualViewId);
                 node.setPackageName(view.getContext().getPackageName());
-                node.setClassName(a11yClassName(nativeA11yRole(virtualViewId)));
+                node.setClassName(a11yClassName(role));
                 // **이름은 contentDescription 이다** — `setText` 로 넣으면 편집 가능한 글자처럼 읽힌다.
-                node.setContentDescription(nativeA11yLabel(virtualViewId));
+                node.setContentDescription(label);
                 node.setParent(view);
                 node.setEnabled((state & 1) != 0);
                 node.setSelected((state & 2) != 0);
@@ -185,13 +186,28 @@ public class MaruActivity extends android.app.NativeActivity {
                 if (virtualViewId < 0 || virtualViewId >= nativeA11yCount()) return false;
                 switch (action) {
                     case AccessibilityNodeInfo.ACTION_CLICK:
+                        // **읽어 준 것과 누를 것이 같은지 본다.** 커서는 index 로 붙잡는데 그 사이에
+                        // 화면이 바뀌면 같은 index 가 **다른 버튼**이 된다 — 「esc」라고 듣고 tab 이
+                        // 눌린다. 잘못 누르느니 **아무것도 안 누르는** 편이 낫다(스크린 리더
+                        // 사용자는 무엇이 눌렸는지 볼 수 없다). 적대적 검증 4회차에서 잡았다.
+                        if (view.a11yFocus == virtualViewId && view.a11yFocusLabel != null) {
+                            int[] now = new int[6];
+                            if (!view.a11yFocusLabel.equals(nativeA11yNode(virtualViewId, now))) return false;
+                        }
                         return nativeA11yClick(virtualViewId);
                     case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:
                         view.a11yFocus = virtualViewId;
+                        {
+                            int[] at = new int[6];
+                            view.a11yFocusLabel = nativeA11yNode(virtualViewId, at);
+                        }
                         sendA11yEvent(virtualViewId, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
                         return true;
                     case AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS:
-                        if (view.a11yFocus == virtualViewId) view.a11yFocus = -1;
+                        if (view.a11yFocus == virtualViewId) {
+                            view.a11yFocus = -1;
+                            view.a11yFocusLabel = null;
+                        }
                         sendA11yEvent(virtualViewId,
                                 AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
                         return true;
@@ -211,7 +227,9 @@ public class MaruActivity extends android.app.NativeActivity {
             private void sendA11yEvent(int virtualViewId, int type) {
                 AccessibilityEvent ev = AccessibilityEvent.obtain(type);
                 ev.setPackageName(view.getContext().getPackageName());
-                ev.setClassName(a11yClassName(nativeA11yRole(virtualViewId)));
+                int[] v = new int[6];
+                nativeA11yNode(virtualViewId, v);
+                ev.setClassName(a11yClassName(v[4]));
                 ev.setSource(view, virtualViewId);
                 view.getParent().requestSendAccessibilityEvent(view, ev);
             }

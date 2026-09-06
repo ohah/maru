@@ -287,3 +287,208 @@ test "bounded process keeps the child status when a low descriptor limit opens t
         );
     }
 }
+
+test "bounded observation separates stdout and stderr and preserves nonzero exit" {
+    var stdout: [4]u8 = undefined;
+    var stderr: [4]u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf out; printf err >&2; exit 21" };
+    const environment = [_:null]?[*:0]const u8{};
+    const result = try process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &argv,
+        &environment,
+        &stdout,
+        &stderr,
+        std.time.ns_per_s,
+    );
+    try std.testing.expectEqual(process.Termination{ .exited = 21 }, result.termination);
+    try std.testing.expectEqualStrings("out", result.stdout);
+    try std.testing.expectEqualStrings("err", result.stderr);
+}
+
+test "bounded observation drains both pipes under concurrent backpressure" {
+    const byte_count = 20_000;
+    var stdout: [byte_count]u8 = undefined;
+    var stderr: [byte_count]u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{
+        shell.ptr,
+        "-c",
+        "(i=0; while [ $i -lt 20000 ]; do printf o; i=$((i+1)); done) & (i=0; while [ $i -lt 20000 ]; do printf e; i=$((i+1)); done >&2) & wait",
+    };
+    const environment = [_:null]?[*:0]const u8{};
+    const result = try process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &argv,
+        &environment,
+        &stdout,
+        &stderr,
+        5 * std.time.ns_per_s,
+    );
+    try std.testing.expectEqual(process.Termination{ .exited = 0 }, result.termination);
+    try std.testing.expectEqual(byte_count, result.stdout.len);
+    try std.testing.expectEqual(byte_count, result.stderr.len);
+    try std.testing.expect(std.mem.allEqual(u8, result.stdout, 'o'));
+    try std.testing.expect(std.mem.allEqual(u8, result.stderr, 'e'));
+}
+
+test "bounded observation preserves signal and child-side exec failure" {
+    var stdout: [8]u8 = undefined;
+    var stderr: [8]u8 = undefined;
+    const environment = [_:null]?[*:0]const u8{};
+    const signaled = [_:null]?[*:0]const u8{ shell.ptr, "-c", "kill -TERM $$" };
+    const signal_result = try process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &signaled,
+        &environment,
+        &stdout,
+        &stderr,
+        std.time.ns_per_s,
+    );
+    try std.testing.expectEqual(process.Termination{ .signal = @intFromEnum(c.SIG.TERM) }, signal_result.termination);
+    try std.testing.expectEqual(@as(usize, 0), signal_result.stdout.len);
+    try std.testing.expectEqual(@as(usize, 0), signal_result.stderr.len);
+
+    const missing: [:0]const u8 = "/definitely/missing/maru-bounded-observation";
+    const missing_argv = [_:null]?[*:0]const u8{missing.ptr};
+    const exec_result = try process.runObserveEnvironment(
+        std.testing.io,
+        missing,
+        &missing_argv,
+        &environment,
+        &stdout,
+        &stderr,
+        std.time.ns_per_s,
+    );
+    try std.testing.expectEqual(process.Termination{ .exited = 126 }, exec_result.termination);
+}
+
+test "bounded observation rejects either stream cap plus one" {
+    var stdout: [4]u8 = undefined;
+    var stderr: [4]u8 = undefined;
+    const environment = [_:null]?[*:0]const u8{};
+    const stdout_overflow = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde" };
+    try std.testing.expectError(error.OutputTooLarge, process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &stdout_overflow,
+        &environment,
+        &stdout,
+        &stderr,
+        std.time.ns_per_s,
+    ));
+    const stderr_overflow = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde >&2" };
+    try std.testing.expectError(error.OutputTooLarge, process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &stderr_overflow,
+        &environment,
+        &stdout,
+        &stderr,
+        std.time.ns_per_s,
+    ));
+}
+
+test "bounded observation timeout kills descendants retaining either pipe" {
+    var stdout: [8]u8 = undefined;
+    var stderr: [8]u8 = undefined;
+    const environment = [_:null]?[*:0]const u8{};
+    const argv = [_:null]?[*:0]const u8{
+        shell.ptr,
+        "-c",
+        "(trap '' TERM; sleep 10) & exit 0",
+    };
+    const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try std.testing.expectError(error.TimedOut, process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &argv,
+        &environment,
+        &stdout,
+        &stderr,
+        80 * std.time.ns_per_ms,
+    ));
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
+    try std.testing.expect(elapsed >= 50 * std.time.ns_per_ms);
+    try std.testing.expect(elapsed < std.time.ns_per_s);
+}
+
+test "bounded observation replaces environment and closes ambient descriptors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ambient-observe", .data = "secret" });
+    var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try temporaryPath(&tmp, "ambient-observe", &path_storage);
+    const ambient_fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = false }, @as(c.mode_t, 0));
+    try std.testing.expect(ambient_fd >= 3);
+    defer _ = c.close(ambient_fd);
+    var fd_storage: [32]u8 = undefined;
+    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const environment = [_:null]?[*:0]const u8{ "ONLY_CHILD=present", fd_entry.ptr };
+    const argv = [_:null]?[*:0]const u8{
+        shell.ptr,
+        "-c",
+        "printf '%s|%s' \"$ONLY_CHILD\" \"${HOME-unset}\"; if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked >&2; else printf closed >&2; fi",
+    };
+    var stdout: [32]u8 = undefined;
+    var stderr: [16]u8 = undefined;
+    const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, std.time.ns_per_s);
+    try std.testing.expectEqualStrings("present|unset", result.stdout);
+    try std.testing.expectEqualStrings("closed", result.stderr);
+}
+
+test "bounded observation rejects aliased buffers and repeated runs leak no descriptors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var marker_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const marker_path = try temporaryPath(&tmp, "must-not-exist", &marker_path_storage);
+    var marker_environment_storage: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const marker_environment = try std.fmt.bufPrintZ(&marker_environment_storage, "MARKER={s}", .{marker_path});
+    var aliased: [16]u8 = undefined;
+    const alias_environment = [_:null]?[*:0]const u8{marker_environment.ptr};
+    const alias_argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "/usr/bin/touch \"$MARKER\"" };
+    try std.testing.expectError(error.AliasedOutput, process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &alias_argv,
+        &alias_environment,
+        aliased[0..8],
+        aliased[4..12],
+        std.time.ns_per_s,
+    ));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "must-not-exist", .{}));
+    const empty: [0]u8 = .{};
+    try std.testing.expectError(error.InvalidBudget, process.runObserveEnvironment(
+        std.testing.io,
+        shell,
+        &alias_argv,
+        &alias_environment,
+        &empty,
+        aliased[0..8],
+        std.time.ns_per_s,
+    ));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "must-not-exist", .{}));
+
+    const before = try countOpenFds();
+    var stdout: [8]u8 = undefined;
+    var stderr: [8]u8 = undefined;
+    const environment = [_:null]?[*:0]const u8{};
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ok; printf err >&2" };
+    for (0..20) |_| {
+        const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, std.time.ns_per_s);
+        try std.testing.expectEqualStrings("ok", result.stdout);
+        try std.testing.expectEqualStrings("err", result.stderr);
+    }
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
+fn countOpenFds() !usize {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, "/dev/fd", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |_| count += 1;
+    return count;
+}

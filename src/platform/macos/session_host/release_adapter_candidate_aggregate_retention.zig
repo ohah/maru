@@ -57,6 +57,19 @@ pub fn deleteVerifiedAggregate(
     return executeCore(&driver, verified, deletion);
 }
 
+/// Performs the exact pre-mutation binding used by deletion. Crash-recoverable cleanup records
+/// consume this check before they publish any durable deletion intent.
+pub fn validateVerifiedAggregate(
+    allocator: std.mem.Allocator,
+    aggregate: *reopen.ReopenedAggregate,
+    verified: *const post.VerifiedRelease,
+) !void {
+    const receipt = verified.value() orelse return error.InvalidOwner;
+    var driver = ConcreteDriver{ .aggregate = aggregate, .allocator = allocator };
+    try driver.validate(receipt);
+    try driver.fence();
+}
+
 fn executeCore(driver: anytype, verified: *const post.VerifiedRelease, deletion: *Deletion) !Outcome {
     if (!pristine(deletion)) return error.InvalidOwner;
     const receipt = verified.value() orelse return .audit_required;

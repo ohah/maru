@@ -1213,6 +1213,17 @@ file-fsync→no-replace publication→parent-fsync하기 전에는 rename/unlink
 건드리지 않는다. 이 gate는 crash-recoverable local cleanup substrate의 증거이며 current published asset-ID 재인증, executable stage-8
 command, live workflow wiring과 frozen signed U5 E2E의 증거가 아니다.
 
+U5 fresh-process published cleanup authority는 reopened aggregate와 held canonical role-A manifest에서 release/tag/source/build 및
+DMG·frozen executable·evidence·manifest의 exact name/size/SHA/path를 유도하며 caller-provided release/asset ID를 받지 않는다.
+`test-session-host-release-adapter-candidate-published-cleanup-authority`는 같은 absolute deadline 아래 exact-tag published release를
+최초·최종 두 번 조회하고 그 사이 기존 tag-chain→release→네 held asset attestation을 수행해, 두 response의 explicit immutable
+lifecycle과 nonzero·distinct asset ID/name/size/uploaded/content-type/digest 집합이 같을 때만 final-address `VerifiedRelease`를
+게시하는지 Debug·ReleaseFast에서 검증한다. lifecycle/extra/missing/duplicate/foreign asset, 최초·최종 ID 교환, aggregate·manifest·CLI
+drift, copied/pre-owned/alias, child/timeout/allocation 실패는 local receipt를 정리하고 cleanup intent/rename/unlink 0이어야 한다.
+ReleaseFast 20회 injected aggregate source부터 재인증 reducer 전체는 median·p95·max, external-call count, failure count와 FD delta를
+진단값으로 남기지만 actual filesystem reopen 비용, 실제 GitHub latency나 frozen signed U5 성공의 증거가 아니다. executable cleanup command, live workflow stage 8과 frozen signed U5 E2E는
+후속 경계다.
+
 U5 exact draft asset redownload는 ready `DraftAuthority`·`DraftAssets`와 candidate/authored attestation, canonical held manifest 및 네 held
 file authority에서만 exact GitHub asset ID와 expected name/size/SHA를 유도한다. `test-session-host-release-adapter-draft-redownload`는
 DMG→frozen executable→evidence→manifest exact request 순서, clean token environment, body 비저장 bounded streaming count/SHA, shared

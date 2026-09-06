@@ -6917,7 +6917,7 @@ test "M14 idle: 화면을 옮기면 깬다" {
     // **화면이 실제로 바뀐 것부터 단언한다.** 이 파일은 순서 의존이라 앞 테스트가 남긴 화면에서
     // 시작한다 — 그대로 `pop_screen` 을 부르면 이미 목록일 때 **무동작**이고, 그러면 「안 깼다」가
     // 아니라 **아무 일도 안 일어난 것**을 재게 된다(처음 그렇게 적었다가 판정자가 붉어져 잡았다).
-    bridge.pushScreenForTest("settings");
+    bridge.setScreenForTest("settings");
     buildFrame();
     const opened = bridge.currentScreenName();
     try std.testing.expectEqualStrings("settings", opened);
@@ -6984,7 +6984,7 @@ fn a11yFind(label: []const u8) ?bridge.A11yNodeView {
 }
 
 test "M9 서술자: 터미널 앱 바의 세 자리를 이름과 역할로 낸다" {
-    bridge.pushScreenForTest("terminal");
+    bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
 
     for ([_][]const u8{ "뒤로 가기", "자판", "끊기" }) |label| {
@@ -7002,7 +7002,7 @@ test "M9 서술자: «읽는 자리» 가 «누르는 자리» 와 같다" {
     // 이 파일의 규율(그리는 자리 = 누르는 자리)에 **읽는 자리**를 묶는다. 서술자를 다른 곳에서
     // 만들면 세 번째 진실이 생겨 조용히 갈리고, 그러면 스크린 리더가 짚은 곳과 손가락이 닿는
     // 곳이 어긋난다 — 눈으로는 안 보이는 결함이다.
-    bridge.pushScreenForTest("terminal");
+    bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
 
     const kb = a11yFind("자판") orelse return error.MissingDescriptor;
@@ -7017,7 +7017,7 @@ test "M9 서술자: «읽는 자리» 가 «누르는 자리» 와 같다" {
 }
 
 test "M9 서술자: 키바 키 열둘이 다 나오고, 눌러 둔 수정자는 selected 다" {
-    bridge.pushScreenForTest("terminal");
+    bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
     var keys: usize = 0;
     for (bridge.a11yNodesForTest()) |n| {
@@ -7036,12 +7036,36 @@ test "M9 서술자: 키바 키 열둘이 다 나오고, 눌러 둔 수정자는 
     try std.testing.expect(ctrl_after.sem.selected);
 }
 
+test "M9 서술자: 덮여서 안 눌리는 것은 안 읽힌다" {
+    // **적대적 검증 1회차가 잡은 결함이다.** `buildUi` 가 어느 화면이든 터미널 층을 세우므로
+    // 설정 화면이 덮고 있어도 앱 바·키바의 rect 는 서 있다 — 그런데 그때 `chromePointer` 가
+    // **모든 터치를 먹어서** 그 버튼들은 안 눌린다. 서술자만 내면 스크린 리더가 「자판」을 읽어
+    // 주고 짚어도 아무 일이 안 난다. 그것이 바로 위 판정자가 막겠다고 한 「읽는 자리 ≠ 누르는
+    // 자리」다 — 눈에 안 보이는 자리라 손 테스트로는 절대 안 걸린다.
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(bridge.maru_mobile_a11y_count() > 0);
+    try std.testing.expect(a11yFind("자판") != null);
+
+    // 설정을 덮으면 **터미널 것이 하나도 안 남는다** — 개수만 재면 「덮은 화면이 제 것을 낸다」와
+    // 구별이 안 되므로 이름으로도 못박는다.
+    bridge.setScreenForTest("settings");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(a11yFind("자판") == null);
+    try std.testing.expect(a11yFind("끊기") == null);
+    try std.testing.expect(a11yFind("ctrl") == null);
+
+    // 그리고 **돌아오면 다시 읽힌다** — 한 번 덮였다고 영영 사라지면 그것도 결함이다.
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+    try std.testing.expect(a11yFind("자판") != null);
+}
+
 test "M9 서술자: 프레임마다 다시 만든다 — 쌓이지 않는다" {
-    // **처음에는 「밀린 화면으로 옮기면 터미널 것이 사라진다」로 적었다가 붉었다.** 그것이 아니라
-    // `buildUi` 가 **어느 화면이든 터미널 층을 먼저 세운다** — 코어 격자가 살아 있어야 돌아왔을 때
-    // 화면이 그대로이고, `key_bar_ready` 가 거짓말을 안 하기 때문이다(그 자리 주석이 그렇게 적고
-    // 있었다). 그러니 「안 낸다」가 아니라 **「쌓이지 않는다」**가 이 축의 참인 성질이다.
-    bridge.pushScreenForTest("terminal");
+    // `buildUi` 는 **어느 화면이든 터미널 층을 먼저 세운다** — 코어 격자가 살아 있어야 돌아왔을 때
+    // 화면이 그대로이고, `key_bar_ready` 가 거짓말을 안 하기 때문이다. 그러니 rect 는 늘 서 있고,
+    // 매 프레임 **비우는가**가 이 축이다(덮였을 때 내는가는 아래 판정자가 따로 잰다).
+    bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(411, 841, now());
     const first = bridge.maru_mobile_a11y_count();
     try std.testing.expect(first > 0);

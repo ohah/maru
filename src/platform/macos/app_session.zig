@@ -17868,6 +17868,7 @@ pub const AppSession = struct {
         debug_fixtures.refocusShellTermForForcedRemote(self);
         debug_fixtures.reapplyForcedExplorerView(self);
         debug_fixtures.maybeActivateForcedExplorerFile(self);
+        debug_fixtures.maybeForceExplorerMutation(self);
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다

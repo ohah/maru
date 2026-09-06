@@ -5268,7 +5268,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_file_tree_axis_boundary_tests = b.addRunArtifact(remote_file_tree_axis_boundary_tests);
-    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=9");
+    run_remote_file_tree_axis_boundary_tests.addArg("--maru-expect-tests=10");
     run_remote_file_tree_axis_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_remote_file_tree_axis_boundary_tests.step);
 

@@ -781,20 +781,26 @@ pub fn maybeForceExplorerMutation(self: *AppSession) void {
         const new_name = spec[bar + 1 ..];
         if (new_name.len == 0) return;
         const index = rowIndexForPath(self, want) orelse return;
-        forced_explorer_mutation_done = true;
         _ = file_panel_ops.setFileTreeSelection(self, index);
         file_panel_ops.startFileTreeEdit(self, .rename);
-        const target = self.rename orelse return;
+        // ⚠️ **편집이 실제로 그 대상에 열렸는지 본다**(적대적 검증 4 회차). 예전에는 여기 오기 전에
+        //    래치를 걸고 `self.rename` 을 그냥 믿었다 — 편집이 안 열리면 **직전에 열려 있던 다른
+        //    대상**에 새 이름을 커밋하고, 캡처는 성공한 것처럼 보이면서 아무것도 증명하지 않는다
+        //    (증거를 만드는 도구가 거짓말을 하면 없느니만 못하다).
+        const target = self.rename orelse return; // 안 열렸다 — 래치를 안 걸었으니 다음 tick 에 다시 본다
         if (target != .file_tree) return;
+        if (!std.mem.eql(u8, target.file_tree.path(), want)) return; // 다른 대상이 열려 있었다
+        forced_explorer_mutation_done = true;
         _ = file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, new_name);
         settings_ops.closeRename(self);
         return;
     }
     if (std.c.getenv("MARU_OPEN_EXPLORER_DELETE")) |raw| {
         const index = rowIndexForPath(self, std.mem.span(raw)) orelse return;
-        forced_explorer_mutation_done = true;
         _ = file_panel_ops.setFileTreeSelection(self, index);
         file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
+        // 확인 모달이 실제로 섰을 때만 래치한다 — 안 섰으면 다음 tick 이 다시 본다(위와 같은 이유).
+        if (self.pending_confirm == .remote_file_tree_delete) forced_explorer_mutation_done = true;
     }
 }
 

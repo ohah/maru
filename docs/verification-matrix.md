@@ -1269,6 +1269,16 @@ root에서 init+여덟 stage를 서로 다른 process로 20회 spawn/reap하고 
 init/stage/total median·p95·max를 canonical JSON으로 남긴다. 이는 local APFS/process 비용의 실측이며 GitHub Actions step·network
 latency가 아니다. concrete command live owner, release.yml 배선과 frozen signed U5 E2E는 후속 경계다.
 
+U5 live workflow invocation owner는 candidate pinning product, candidate pair attestation action, `prepare-candidate`, authored pair
+attestation action, `prepare-candidate-aggregate`, `finalize-candidate-aggregate`, `resume-candidate-publication`,
+`cleanup-candidate-aggregate`의 여덟 닫힌 union tag가 stage와 exact 실행 identity를 함께 결정하게 한다. caller가 stage·command·action
+path·reducer result를 `run` 입력으로 따로 조립하지 못하며 expected checkpoint reopen 뒤 sealed executor exact once와 최종 fence가 끝난 결과만 다음
+fixed leaf에 배타 게시한다. stage-3 pristine failure는 `prepare-candidate` closed exit 20만 만들고, action/observation 불가능과 unknown
+tuple은 보수적인 terminal로 닫는다. focused Debug·ReleaseFast gate는 exact inventory/order, 정상 chain, 단계별 결과, terminal/replay/
+skip/reverse executor 0, same/alternate-executor reentry와 root teardown 거부, post-call executor 및 root/context drift publication 0,
+checkpoint invocation primitive의 제품 import/callsite exact-one owner를 검증한다. 이 gate는 injected executor와 harness-owned private root만
+사용하므로 실제 GitHub/Apple side effect, `release.yml` step wiring과 frozen signed U5 E2E를 완료로 세지 않는다.
+
 U5 stage-8 executable cleanup command는 exact `cleanup-candidate-aggregate` contract와 protected bootstrap 뒤 durable state를
 token read 전에 `initial|recoverable|audit_required`로 삼분한다. recoverable intent/completion은 제품 `ReopenedAggregate`·token·GitHub
 호출 없이 `recover()`만 실행하고, pristine original aggregate인 initial만 단일 deadline을 시작해 aggregate와 DMG·frozen executable·manifest를 reopen한 뒤 exact-once token으로 current published

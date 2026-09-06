@@ -49,6 +49,7 @@ const ledger = [_]Entry{
     .{ .script = "tools/test-github-release-publication.sh", .reach = .every_host },
     .{ .script = "tools/ci/session-host-release-dmg-authority.sh", .reach = .posix_only },
     .{ .script = "tools/test-session-host-release-attestation-action.sh", .reach = .posix_only },
+    .{ .script = "tools/test-session-host-release-authored-attestation-action.sh", .reach = .posix_only },
     // POSIX 권한을 쓰는 자리(`mkdir -m`)라 NTFS 에서 죽는다 — 실측 2026-09-04.
     // **이 항목이 이 게이트의 첫 수확이다**: 원장을 넣는 PR 이 열려 있는 동안 main 에 들어왔고,
     // CI 가 머지 결과에서 잡았다(§2m.111).

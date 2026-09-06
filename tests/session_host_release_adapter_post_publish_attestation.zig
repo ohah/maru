@@ -84,6 +84,37 @@ test "tag chain then release and four held assets publish one verified owner" {
     try result.deinit();
 }
 
+test "verified release seal rejects otherwise-valid field forgery and mutation" {
+    var authority = Authority{};
+    var driver = Driver{};
+    var deadline = Deadline{};
+    var result: post.VerifiedRelease = .{};
+    try post.testing_api.verify(&authority, &driver, &deadline, &result);
+
+    result.release_id += 1;
+    try std.testing.expect(result.value() == null);
+    result.release_id -= 1;
+    try std.testing.expect(result.value() != null);
+
+    var forged: post.VerifiedRelease = .{
+        .release_id = 88,
+        .tag_len = "v1.2.3".len,
+        .source_commit = "0123456789abcdef0123456789abcdef01234567".*,
+        .tag_ref_sha = "fedcba9876543210fedcba9876543210fedcba98".*,
+        .artifact_ids = .{ 1000, 1001, 1002, 1003 },
+        .artifact_sha256 = .{
+            [_]u8{'a'} ** 64,
+            [_]u8{'b'} ** 64,
+            [_]u8{'c'} ** 64,
+            [_]u8{'d'} ** 64,
+        },
+    };
+    @memcpy(forged.tag[0..forged.tag_len], "v1.2.3");
+    forged.owner = &forged;
+    try std.testing.expect(forged.value() == null);
+    try result.deinit();
+}
+
 test "every child failure publishes no verified authority" {
     inline for (1..7) |fail_at| {
         var authority = Authority{};

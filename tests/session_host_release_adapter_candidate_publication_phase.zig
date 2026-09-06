@@ -122,10 +122,10 @@ test "cleanup failure preserves only the exact retry set" {
     steps.cleanup_fail = .attachment;
     try std.testing.expectError(error.CleanupFailed, phase.cleanupWith(&steps, &publication));
     try std.testing.expect(publication.needsCleanup());
-    try std.testing.expect(!publication.verification_attempted);
-    try std.testing.expect(!publication.publication_attempted);
-    try std.testing.expect(!publication.redownload_attempted);
-    try std.testing.expect(publication.attachment_attempted);
+    try std.testing.expect(!publication.suffix.verification_attempted);
+    try std.testing.expect(!publication.suffix.publication_attempted);
+    try std.testing.expect(!publication.suffix.redownload_attempted);
+    try std.testing.expect(publication.suffix.attachment_attempted);
     try std.testing.expect(!publication.attestation_attempted);
     try std.testing.expect(!publication.manifest_attempted);
     steps.cleanup_fail = .none;
@@ -192,6 +192,10 @@ const Steps = struct {
         if (self.alias_audit) return std.mem.asBytes(self.publication_target.?);
         if (self.oversized_audit) return &oversized_audit_bytes;
         return if (self.empty_audit) self.audit_bytes[0..0] else &self.audit_bytes;
+    }
+    pub fn validateSuffixPreflight(self: *@This(), publication: *phase.SuffixPublication, deadline: *u8, seal: [32]u8) !void {
+        if (deadline != self.expected_deadline or publication != &self.publication_target.?.suffix or
+            !std.mem.eql(u8, &seal, &self.publication_target.?.audit_seal)) return error.ForeignDeadline;
     }
     pub fn validateAuthority(self: *@This(), deadline: *u8, seal: [32]u8) !void {
         self.add("fence");

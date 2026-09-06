@@ -169,6 +169,10 @@ const ConcreteSteps = struct {
         if (publication != &self.execution.transaction or deadline != self.execution.active_deadline or self.execution.owner != self.execution) return error.InvalidOwner;
         _ = try self.input();
     }
+    pub fn validateSuffixPreflight(self: *@This(), publication: *phase.SuffixPublication, deadline: *deadline_mod.Deadline, seal: [32]u8) !void {
+        if (publication != &self.execution.transaction.suffix or deadline != self.execution.active_deadline or
+            !std.mem.eql(u8, &seal, &self.execution.transaction.audit_seal)) return error.InvalidOwner;
+    }
     pub fn captureAuditBytes(self: *@This(), deadline: *deadline_mod.Deadline) ![]const u8 {
         _ = try deadline.remaining();
         const storage = try self.execution.allocator.alloc(u8, phase.max_audit_bytes);

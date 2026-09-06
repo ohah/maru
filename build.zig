@@ -13707,14 +13707,14 @@ pub fn build(b: *std.Build) void {
         "Validate predecessor manifest attestation composition",
     );
     if (target.result.os.tag == .macos) {
-        // ── release adapter 판정자 64 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
+        // ── release adapter 판정자 65 개를 모드당 «한» 바이너리로 (tests/session_host_release_adapter_macos_all.zig) ──
         // 왜 갈랐는지는 그 파일 머리가 단일 출처다. 가족의 전용 스텝들과 `test-session-host` 는 각자 바이너리를
         // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
         // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_macos_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
         //
-        // 490 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+        // 501 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
         // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-        const ra_mac_expected_tests: usize = 490;
+        const ra_mac_expected_tests: usize = 501;
         const ra_mac_step = b.step(
             "test-session-host-release-adapter-macos-all",
             "Run the macos session-host release adapter judges from one binary per optimize mode",
@@ -14110,6 +14110,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-publication-phase",
         "Validate candidate publication transaction ordering and terminal audit state",
     );
+    const session_host_release_adapter_candidate_publication_suffix_phase_step = b.step(
+        "test-session-host-release-adapter-candidate-publication-suffix-phase",
+        "Validate the shared candidate publication suffix policy",
+    );
     const session_host_release_adapter_candidate_prerequisite_phase_step = b.step(
         "test-session-host-release-adapter-candidate-prerequisite-phase",
         "Validate candidate prerequisite ordering and terminal draft state",
@@ -14439,7 +14443,12 @@ pub fn build(b: *std.Build) void {
             run_candidate_baseline_preparation_product_tests.addArg("--maru-expect-tests=10");
             run_candidate_baseline_preparation_product_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_baseline_preparation_product_step.dependOn(&run_candidate_baseline_preparation_product_tests.step);
-            const candidate_publication_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_publication_phase.zig"), .target = target, .optimize = composition_optimize });
+            const candidate_publication_suffix_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_publication_suffix_phase.zig"), .target = target, .optimize = composition_optimize });
+            const candidate_publication_suffix_phase_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_publication_suffix_phase.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_candidate_publication_suffix_phase", .module = candidate_publication_suffix_phase_mod }} }) });
+            const run_candidate_publication_suffix_phase_tests = b.addRunArtifact(candidate_publication_suffix_phase_tests);
+            run_candidate_publication_suffix_phase_tests.addArg("--maru-expect-tests=11");
+            session_host_release_adapter_candidate_publication_suffix_phase_step.dependOn(&run_candidate_publication_suffix_phase_tests.step);
+            const candidate_publication_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_publication_phase.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_candidate_publication_suffix_phase", .module = candidate_publication_suffix_phase_mod }} });
             const candidate_publication_phase_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_publication_phase.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_candidate_publication_phase", .module = candidate_publication_phase_mod }} }) });
             const run_candidate_publication_phase_tests = b.addRunArtifact(candidate_publication_phase_tests);
             run_candidate_publication_phase_tests.addArg("--maru-expect-tests=10");

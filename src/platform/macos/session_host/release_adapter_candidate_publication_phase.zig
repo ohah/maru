@@ -5,8 +5,10 @@
 //! forbids automatic retry.
 
 const std = @import("std");
+const suffix_phase = @import("release_adapter_candidate_publication_suffix_phase");
 
-pub const AuditStage = enum { none, attachment, publication, post_publish };
+pub const AuditStage = suffix_phase.AuditStage;
+pub const SuffixPublication = suffix_phase.Publication;
 pub const max_audit_bytes: usize = 16 * 1024;
 const audit_domain = "maru.session-host.candidate-publication.audit.v1";
 
@@ -15,31 +17,29 @@ pub const Publication = struct {
     audit_seal: [32]u8 = @splat(0),
     manifest_attempted: bool = false,
     attestation_attempted: bool = false,
-    attachment_attempted: bool = false,
-    redownload_attempted: bool = false,
-    publication_attempted: bool = false,
-    verification_attempted: bool = false,
-    successful: bool = false,
-    audit_required: bool = false,
-    audit_stage: AuditStage = .none,
+    suffix: suffix_phase.Publication = .{},
 
     pub fn ownsCompletePublication(self: *const @This()) bool {
-        return self.owner == self and self.successful and !self.audit_required and
-            self.audit_stage == .none and validAuditSeal(self.audit_seal) and self.allAttempted();
+        return self.owner == self and validAuditSeal(self.audit_seal) and self.manifest_attempted and
+            self.attestation_attempted and self.suffix.ownsCompletePublication() and
+            std.mem.eql(u8, &self.audit_seal, &self.suffix.audit_seal);
     }
 
     pub fn needsAudit(self: *const @This()) bool {
-        return self.owner == self and !self.successful and self.audit_required and
-            self.audit_stage != .none and validAuditSeal(self.audit_seal);
+        return self.owner == self and validAuditSeal(self.audit_seal) and self.manifest_attempted and
+            self.attestation_attempted and self.suffix.needsAudit() and
+            std.mem.eql(u8, &self.audit_seal, &self.suffix.audit_seal);
     }
 
     pub fn auditStage(self: *const @This()) AuditStage {
-        return if (self.needsAudit()) self.audit_stage else .none;
+        return if (self.needsAudit()) self.suffix.auditStage() else .none;
     }
 
     pub fn needsCleanup(self: *const @This()) bool {
-        return self.owner == self and !self.successful and !self.audit_required and
-            self.audit_stage == .none and validAuditSeal(self.audit_seal) and self.anyAttempted();
+        if (self.owner != self or !validAuditSeal(self.audit_seal) or self.suffix.needsAudit()) return false;
+        if (self.suffix.needsCleanup())
+            return std.mem.eql(u8, &self.audit_seal, &self.suffix.audit_seal);
+        return self.suffix.isPristineForComposition() and (self.manifest_attempted or self.attestation_attempted);
     }
 
     pub fn isPristineForComposition(self: *const @This()) bool {
@@ -48,17 +48,7 @@ pub const Publication = struct {
 
     fn pristine(self: *const @This()) bool {
         return self.owner == null and std.mem.allEqual(u8, &self.audit_seal, 0) and
-            !self.anyAttempted() and !self.successful and !self.audit_required and self.audit_stage == .none;
-    }
-
-    fn anyAttempted(self: *const @This()) bool {
-        return self.manifest_attempted or self.attestation_attempted or self.attachment_attempted or
-            self.redownload_attempted or self.publication_attempted or self.verification_attempted;
-    }
-
-    fn allAttempted(self: *const @This()) bool {
-        return self.manifest_attempted and self.attestation_attempted and self.attachment_attempted and
-            self.redownload_attempted and self.publication_attempted and self.verification_attempted;
+            !self.manifest_attempted and !self.attestation_attempted and self.suffix.isPristineForComposition();
     }
 };
 
@@ -93,33 +83,19 @@ pub fn executeWith(steps: anytype, deadline: anytype, publication: *Publication)
 
     publication.attestation_attempted = true;
     steps.attestAuthored(deadline) catch |err| return failLocal(steps, publication, err);
-    steps.validateAuthority(deadline, audit_seal) catch |err| return failLocal(steps, publication, err);
 
-    publication.attachment_attempted = true;
-    steps.attachAssets(deadline) catch |err| {
-        if (steps.attachmentRequiresAudit()) return requireAudit(publication, .attachment);
+    suffix_phase.executeWith(steps, deadline, audit_seal, &publication.suffix) catch |err| {
+        if (publication.suffix.needsAudit()) return error.AuditRequired;
+        if (publication.suffix.needsCleanup()) {
+            _ = unwindPrefix(steps, publication);
+            return error.CleanupFailed;
+        }
         return failLocal(steps, publication, err);
     };
-    steps.validateAuthority(deadline, audit_seal) catch return requireAudit(publication, .attachment);
-
-    publication.redownload_attempted = true;
-    steps.validateRedownload(deadline) catch return requireAudit(publication, .attachment);
-    steps.validateAuthority(deadline, audit_seal) catch return requireAudit(publication, .attachment);
-
-    publication.publication_attempted = true;
-    steps.publishDraft(deadline) catch return requireAudit(publication, .publication);
-    steps.validateAuthority(deadline, audit_seal) catch return requireAudit(publication, .publication);
-
-    publication.verification_attempted = true;
-    steps.verifyPublished(deadline) catch return requireAudit(publication, .post_publish);
-    steps.validateAuthority(deadline, audit_seal) catch return requireAudit(publication, .post_publish);
-
-    publication.successful = true;
 }
 
 pub fn cleanupWith(steps: anytype, publication: *Publication) !void {
     if (!publication.ownsCompletePublication()) return error.InvalidOwner;
-    publication.successful = false;
     if (!unwind(steps, publication)) return error.CleanupFailed;
     publication.* = .{};
 }
@@ -136,25 +112,32 @@ fn failLocal(steps: anytype, publication: *Publication, original: anyerror) anye
     return original;
 }
 
-fn requireAudit(publication: *Publication, stage: AuditStage) anyerror {
-    publication.successful = false;
-    publication.audit_required = true;
-    publication.audit_stage = stage;
-    return error.AuditRequired;
-}
-
 fn unwind(steps: anytype, publication: *Publication) bool {
     var clean = true;
-    if (publication.verification_attempted) cleanOne(steps, publication, .verification, &clean);
-    if (publication.publication_attempted) cleanOne(steps, publication, .publication, &clean);
-    if (publication.redownload_attempted) cleanOne(steps, publication, .redownload, &clean);
-    if (publication.attachment_attempted) cleanOne(steps, publication, .attachment, &clean);
-    if (publication.attestation_attempted) cleanOne(steps, publication, .attestation, &clean);
-    if (publication.manifest_attempted) cleanOne(steps, publication, .manifest, &clean);
-    return clean and !publication.anyAttempted();
+    if (publication.suffix.ownsCompletePublication()) {
+        suffix_phase.cleanupWith(steps, &publication.suffix) catch {
+            clean = false;
+        };
+    } else if (publication.suffix.needsCleanup()) {
+        suffix_phase.retryCleanupWith(steps, &publication.suffix) catch {
+            clean = false;
+        };
+    } else if (!publication.suffix.isPristineForComposition()) {
+        clean = false;
+    }
+    if (!unwindPrefix(steps, publication)) clean = false;
+    return clean and publication.suffix.isPristineForComposition() and
+        !publication.attestation_attempted and !publication.manifest_attempted;
 }
 
-const LocalOwner = enum { manifest, attestation, attachment, redownload, publication, verification };
+fn unwindPrefix(steps: anytype, publication: *Publication) bool {
+    var clean = true;
+    if (publication.attestation_attempted) cleanOne(steps, publication, .attestation, &clean);
+    if (publication.manifest_attempted) cleanOne(steps, publication, .manifest, &clean);
+    return clean and !publication.attestation_attempted and !publication.manifest_attempted;
+}
+
+const LocalOwner = enum { manifest, attestation };
 
 fn cleanOne(steps: anytype, publication: *Publication, comptime owner: LocalOwner, clean: *bool) void {
     const released = switch (owner) {
@@ -172,43 +155,11 @@ fn cleanOne(steps: anytype, publication: *Publication, comptime owner: LocalOwne
             };
             break :blk true;
         },
-        .attachment => blk: {
-            steps.cleanupAttachment() catch {
-                clean.* = false;
-                break :blk false;
-            };
-            break :blk true;
-        },
-        .redownload => blk: {
-            steps.cleanupRedownload() catch {
-                clean.* = false;
-                break :blk false;
-            };
-            break :blk true;
-        },
-        .publication => blk: {
-            steps.cleanupPublication() catch {
-                clean.* = false;
-                break :blk false;
-            };
-            break :blk true;
-        },
-        .verification => blk: {
-            steps.cleanupVerification() catch {
-                clean.* = false;
-                break :blk false;
-            };
-            break :blk true;
-        },
     };
     if (!released) return;
     switch (owner) {
         .manifest => publication.manifest_attempted = false,
         .attestation => publication.attestation_attempted = false,
-        .attachment => publication.attachment_attempted = false,
-        .redownload => publication.redownload_attempted = false,
-        .publication => publication.publication_attempted = false,
-        .verification => publication.verification_attempted = false,
     }
 }
 

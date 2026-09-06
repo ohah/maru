@@ -6400,6 +6400,26 @@ test "세션 목록이 짧아지면 스크롤을 접는다 — 빈 곳을 보고
 
 /// 세션 `n` 개짜리 `sessions.list` 응답. **판정자 셋이 같은 것을 만든다** — 손으로 세 번 적으면
 /// 하나만 고쳐진다.
+/// 최악의 목록 — 이름·경로·git·agent 를 코어가 담는 자리 끝까지 채운다. **정상 상태다**:
+/// 긴 경로에서 일하는 것은 흔하고, 그때 서술자 글자가 제일 많이 든다.
+fn sessionListWireLong(allocator: std.mem.Allocator, n: usize) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[");
+    for (0..n) |i| {
+        if (i > 0) try buf.append(allocator, ',');
+        var row: [640]u8 = undefined;
+        const txt = try std.fmt.bufPrint(
+            &row,
+            "{{\"id\":{{\"surface_id\":{d}}},\"title\":\"{s}\",\"cwd\":\"{s}\",\"git\":\"{s}\",\"agent\":\"{s}\",\"runtime_id\":\"{d:0>32}\"}}",
+            .{ i + 1, "t" ** 60, "/" ++ "d" ** 120, "b" ** 40, "a" ** 40, i + 1 },
+        );
+        try buf.appendSlice(allocator, txt);
+    }
+    try buf.appendSlice(allocator, "]}\n");
+    return buf.toOwnedSlice(allocator);
+}
+
 fn sessionListWire(allocator: std.mem.Allocator, n: usize) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -7163,6 +7183,127 @@ test "M9 서술자: 세션 목록도 읽힌다 — 줄은 «몇 분의 몇» 을
 
     // 그리고 **터미널 화면 것은 안 섞인다** — 덮인 층은 안 낸다.
     try T.expect(a11yFind(maru.i18n.tIn(.ko, .mob_keyboard)) == null);
+}
+
+test "M9 서술자: 밀어도 번호는 «있는 줄» 의 번호다" {
+    // 목록이 흐르면 위쪽 줄은 안 그려진다. 번호를 「몇 번째로 그렸나」로 세면 밀 때마다 같은
+    // 줄이 다른 번호로 읽힌다 — 「3 분의 8」이라고 들은 줄이 조금 밀었더니 「1 분의 8」이 된다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+
+    // 밀기 전 — 어떤 줄의 이름과 번호를 적어 둔다(맨 아래 근처 줄이라야 밀어도 남는다).
+    var name: [64]u8 = undefined;
+    var name_len: usize = 0;
+    var before: u32 = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .list_item or n.sem.position_in_set < 8) continue;
+        @memcpy(name[0..n.sem.label.len], n.sem.label);
+        name_len = n.sem.label.len;
+        before = n.sem.position_in_set;
+        break;
+    }
+    try T.expect(name_len > 0);
+
+    // 민다.
+    bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 500, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 500, now());
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessScrollForTest() > 0);
+
+    // 같은 이름의 줄은 **같은 번호**로 읽힌다.
+    var after: u32 = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .list_item) continue;
+        if (!std.mem.eql(u8, n.sem.label, name[0..name_len])) continue;
+        after = n.sem.position_in_set;
+    }
+    try T.expectEqual(before, after);
+}
+
+test "M9 서술자: 목록이 길어도 이름을 잃지 않는다" {
+    // 서술자 글자는 한 벌에 담긴다. 자리가 모자라면 이름이 **빈 것**이 되고, 빈 이름은 host 가
+    // 요소를 아예 안 만든다 — 그 줄이 스크린 리더에서 **통째로 사라진다**. 세션이 많은 것은
+    // 이 앱의 정상 상태다(맥에 탭이 열둘 넘는 것을 보고 목록을 흐르게 만들었다).
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWireLong(T.allocator, 40);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+    bridge.maru_mobile_clear_error();
+    advanceFrame(402, 874, 16);
+
+    // **전제부터 단언한다** — 긴 값이 실제로 들어갔나. 안 들어갔으면 이 판정은 아무것도 안 잰다.
+    var longest: usize = 0;
+    var rows_seen: usize = 0;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .list_item) continue;
+        rows_seen += 1;
+        longest = @max(longest, n.sem.label.len + n.sem.value.len);
+    }
+    try T.expect(longest > 150); // 실측 181 — 값이 안 들어왔으면 이 판정은 아무것도 안 잰다
+
+    // 낸 서술자는 **하나도 빠짐없이 이름이 있다**.
+    var i: u32 = 0;
+    var buf: [256]u8 = undefined;
+    while (i < bridge.maru_mobile_a11y_count()) : (i += 1) {
+        const n = bridge.maru_mobile_a11y_label(i, &buf, buf.len);
+        if (n == 0) {
+            std.debug.print("이름 없는 서술자 index={d} (자리 모자람?)\n", .{i});
+            return error.NamelessDescriptor;
+        }
+    }
+    try T.expect(!std.mem.eql(u8, std.mem.span(bridge.maru_mobile_last_error()), "a11y_text_overflow"));
+}
+
+test "M9 서술자: 흐르는 목록에서 자리는 «목록 창» 을 안 넘는다" {
+    // 목록은 흐르고 헤더는 고정이다. 화면에서는 헤더를 **나중에** 그려서 지나간 줄을 덮지만,
+    // 서술자에는 덮개가 없다 — 자리를 그대로 내면 스크린 리더가 헤더 자리에서 그 줄을 짚는다
+    // (톱니와 겹친다). 눈에는 안 보이고 훑는 사람만 겪는 어긋남이다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 20);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    advanceFrame(402, 874, 16);
+
+    // 위로 민다 — 위쪽 줄들이 헤더 밑으로 지나간다. **손가락으로 민다**: `maru_mobile_scroll` 은
+    // 터미널 화면에서만 듣는 자리라(덮인 화면 뒤가 흐르면 안 된다), 그것으로 재면 「아무 일도
+    // 안 일어난 것」을 재게 된다.
+    bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 300, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 300, now());
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessScrollForTest() > 0); // **밀린 것이 확실해야** 이 판정이 선다
+
+    const top = bridge.sessListTopForTest();
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role != .list_item) continue;
+        try T.expect(n.rect.y >= top - 0.5); // 헤더 밑으로 뻗지 않는다
+    }
 }
 
 test "M9 서술자: 목록 줄의 이름·값은 «복사» 라 프레임이 지나도 살아 있다" {

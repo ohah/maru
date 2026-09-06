@@ -11,6 +11,7 @@ const reopen = @import("release_adapter_candidate_aggregate_reopen");
 const manifest_mod = @import("release_manifest");
 const post = @import("release_adapter_github_post_publish_attestation");
 const retention = @import("release_adapter_candidate_aggregate_retention");
+const recovery = @import("release_adapter_candidate_aggregate_cleanup_recovery");
 
 const source_names = [_][]const u8{
     "release-evidence.json",
@@ -390,6 +391,22 @@ fn deleteConcreteOnce() !u64 {
     return @intCast(elapsed);
 }
 
+fn completeRecoverableCleanup(fixture: *Fixture) !void {
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    errdefer aggregate.deinit() catch {};
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+    var owner: recovery.Recovery = .{};
+    try std.testing.expectEqual(recovery.Outcome.success, try recovery.begin(std.testing.allocator, &aggregate, &verified, &owner));
+    try std.testing.expect(owner.isPristine());
+}
+
 test "production deletion removes the exact retained aggregate on a real filesystem" {
     _ = try deleteConcreteOnce();
 }
@@ -399,6 +416,120 @@ test "production deletion reports local macOS deletion primitive timing samples"
     for (&samples) |*sample| sample.* = try deleteConcreteOnce();
     std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
     std.debug.print("\naggregate-retention delete ns median={d} p95={d} samples={d}\n", .{ samples[samples.len / 2], samples[samples.len - 1], samples.len });
+}
+
+test "production crash recovery resumes every real filesystem checkpoint in a fresh process" {
+    var samples: [20]u64 = undefined;
+    for (&samples, 1..) |*sample, checkpoint| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.prepare();
+        var verifier = Verifier{};
+        var cli = Cli{};
+        var deadline = Deadline{};
+        var aggregate: reopen.ReopenedAggregate = .{};
+        try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+
+        var verified: post.VerifiedRelease = .{};
+        try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+        defer verified.deinit() catch {};
+        const original = fixture.destinationPath();
+
+        const child = c.fork();
+        if (child < 0) return error.FixtureFailed;
+        if (child == 0) {
+            var owner: recovery.Recovery = .{};
+            const outcome = recovery.testing_api.beginCrashAfter(
+                std.heap.page_allocator,
+                &aggregate,
+                &verified,
+                checkpoint,
+                &owner,
+            ) catch c._exit(92);
+            _ = outcome;
+            c._exit(93);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+        try std.testing.expectEqual(@as(c_int, 0), status & 0x7f);
+        try std.testing.expectEqual(@as(c_int, 91), (status >> 8) & 0xff);
+        try aggregate.deinit();
+
+        const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        const recovery_child = c.fork();
+        if (recovery_child < 0) return error.FixtureFailed;
+        if (recovery_child == 0) {
+            var owner: recovery.Recovery = .{};
+            const outcome = recovery.recover(std.heap.page_allocator, context(), original, &owner) catch c._exit(94);
+            if (outcome != .success or !owner.isPristine()) c._exit(95);
+            c._exit(0);
+        }
+        status = 0;
+        try std.testing.expectEqual(recovery_child, c.waitpid(recovery_child, &status, 0));
+        sample.* = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - started);
+        try std.testing.expectEqual(@as(c_int, 0), status);
+        try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.openDir(std.testing.io, "durable/handoff", .{}));
+        var durable = try fixture.tmp.dir.openDir(std.testing.io, "durable", .{ .iterate = true });
+        defer durable.close(std.testing.io);
+        var iterator = durable.iterate();
+        var completion_count: usize = 0;
+        while (try iterator.next(std.testing.io)) |entry| {
+            try std.testing.expect(std.mem.startsWith(u8, entry.name, ".maru-aggregate-cleanup-"));
+            try std.testing.expect(std.mem.endsWith(u8, entry.name, ".done.json"));
+            completion_count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), completion_count);
+    }
+    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+    std.debug.print("\naggregate-cleanup fresh-process recovery ns median={d} p95={d} max={d} samples={d}\n", .{
+        samples[samples.len / 2], samples[samples.len - 2], samples[samples.len - 1], samples.len,
+    });
+}
+
+test "production completion receipt copied or checksum-corrupted cannot replay success" {
+    var first: Fixture = undefined;
+    try first.init();
+    defer first.deinit();
+    try completeRecoverableCleanup(&first);
+    var second: Fixture = undefined;
+    try second.init();
+    defer second.deinit();
+    try completeRecoverableCleanup(&second);
+
+    var first_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const first_path = try recovery.testing_api.completionPath(context(), first.destinationPath(), &first_path_buf);
+    var second_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const second_path = try recovery.testing_api.completionPath(context(), second.destinationPath(), &second_path_buf);
+    const copied = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, first_path, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(copied);
+    const second_receipt = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, second_path, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(second_receipt);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = second_path, .data = copied });
+
+    var owner: recovery.Recovery = .{};
+    try std.testing.expectEqual(recovery.Outcome.audit_required, try recovery.recover(
+        std.testing.allocator,
+        context(),
+        second.destinationPath(),
+        &owner,
+    ));
+    try std.testing.expect(owner.isPristine());
+
+    var corrupt = try std.testing.allocator.dupe(u8, second_receipt);
+    defer std.testing.allocator.free(corrupt);
+    const inode_marker = "\"directory_inode\":";
+    const inode_offset = (std.mem.indexOf(u8, corrupt, inode_marker) orelse return error.TestUnexpectedResult) + inode_marker.len;
+    if (!std.ascii.isDigit(corrupt[inode_offset])) return error.TestUnexpectedResult;
+    corrupt[inode_offset] = if (corrupt[inode_offset] == '9') '8' else corrupt[inode_offset] + 1;
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = second_path, .data = corrupt });
+    try std.testing.expectEqual(recovery.Outcome.audit_required, try recovery.recover(
+        std.testing.allocator,
+        context(),
+        second.destinationPath(),
+        &owner,
+    ));
+    try std.testing.expect(owner.isPristine());
 }
 
 test "production deletion preserves the aggregate when canonical manifest asset name is foreign" {

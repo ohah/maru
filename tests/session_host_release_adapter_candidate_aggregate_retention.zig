@@ -230,7 +230,7 @@ test "production entrypoint accepts only reopened aggregate and same-process ver
     ));
 }
 
-test "stage 8 deletion primitive is credential free and has no executable caller yet" {
+test "stage 8 deletion primitive is credential free and only the recovery owner may call it" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_aggregate_retention.zig", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(source);
     inline for (.{ "GH_TOKEN", "std.process", "std.posix.getenv" }) |forbidden|
@@ -246,7 +246,12 @@ test "stage 8 deletion primitive is credential free and has no executable caller
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const product = try src.readFileAlloc(std.testing.io, entry.path, std.testing.allocator, .limited(16 * 1024 * 1024));
         defer std.testing.allocator.free(product);
-        callers += std.mem.count(u8, product, "release_adapter_candidate_aggregate_retention");
+        const count = std.mem.count(u8, product, "release_adapter_candidate_aggregate_retention");
+        if (count != 0) try std.testing.expectEqualStrings(
+            "platform/macos/session_host/release_adapter_candidate_aggregate_cleanup_recovery.zig",
+            entry.path,
+        );
+        callers += count;
     }
-    try std.testing.expectEqual(@as(usize, 0), callers);
+    try std.testing.expectEqual(@as(usize, 1), callers);
 }

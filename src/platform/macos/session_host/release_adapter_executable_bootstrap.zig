@@ -56,6 +56,26 @@ pub const PublishCandidate = struct {
     zig_sha256: []const u8,
 };
 
+pub const PrepareCandidate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    test_uuid: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    candidate_dmg_bundle: []const u8,
+    candidate_frozen_bundle: []const u8,
+    dmg_work: []const u8,
+    baseline_workspace: []const u8,
+    app_main_executable: []const u8,
+    app_cli_executable: []const u8,
+    manifest: []const u8,
+    source_root: []const u8,
+    zig: []const u8,
+    zig_size: u64,
+    zig_sha256: []const u8,
+    durable_preparation: []const u8,
+};
+
 pub const PrepareCandidateAggregate = struct {
     repo: []const u8,
     tag: []const u8,
@@ -80,6 +100,7 @@ pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
     publish_candidate: PublishCandidate,
+    prepare_candidate: PrepareCandidate,
     prepare_candidate_aggregate: PrepareCandidateAggregate,
     finalize_candidate_aggregate: FinalizeCandidateAggregate,
 };
@@ -231,6 +252,28 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .zig = value.zig,
                 .zig_size = value.zig_size,
                 .zig_sha256 = value.zig_sha256,
+            } },
+            .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
+        },
+        .prepare_candidate => |value| .{
+            .command = .{ .prepare_candidate = .{
+                .repo = value.repo,
+                .tag = value.tag,
+                .test_uuid = value.test_uuid,
+                .dmg = value.dmg,
+                .frozen_executable = value.frozen_executable,
+                .candidate_dmg_bundle = value.candidate_dmg_bundle,
+                .candidate_frozen_bundle = value.candidate_frozen_bundle,
+                .dmg_work = value.dmg_work,
+                .baseline_workspace = value.baseline_workspace,
+                .app_main_executable = value.app_main_executable,
+                .app_cli_executable = value.app_cli_executable,
+                .manifest = value.manifest,
+                .source_root = value.source_root,
+                .zig = value.zig,
+                .zig_size = value.zig_size,
+                .zig_sha256 = value.zig_sha256,
+                .durable_preparation = value.durable_preparation,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
         },

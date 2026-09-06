@@ -15,7 +15,7 @@ pub const Stage = enum(u8) {
     aggregate_cleanup,
 };
 
-pub const Result = enum(u8) { succeeded, failed, cleanup_failed };
+pub const Result = enum(u8) { succeeded, failed, cleanup_failed, failed_before_remote_mutation };
 
 pub const Event = struct {
     stage: Stage,
@@ -55,7 +55,7 @@ pub const State = struct {
                 self.published == (self.next_index >= 7),
             .succeeded => self.next_index == ordered_stages.len and self.draft_mutation_started and
                 !self.aggregate_present and self.published,
-            .local_failure => self.next_index < 2 and !self.draft_mutation_started and
+            .local_failure => self.next_index <= 2 and !self.draft_mutation_started and
                 !self.aggregate_present and !self.published,
             .audit_required => self.next_index >= 2 and self.next_index < 7 and self.draft_mutation_started and
                 self.aggregate_present == (self.next_index >= 5) and !self.published,
@@ -93,6 +93,15 @@ pub fn apply(state: *State, event: Event) Error!void {
     if (state.outcome != .active) return error.TerminalState;
     const expected = state.expectedStage() orelse return error.TerminalState;
     if (event.stage != expected) return error.UnexpectedStage;
+
+    // Only the stage-3 owner can prove that draft creation was never attempted. Generic failures
+    // remain conservative because the remote mutation result can be ambiguous.
+    if (event.result == .failed_before_remote_mutation) {
+        if (event.stage != .draft_authoring or state.next_index != 2 or state.draft_mutation_started)
+            return error.InvalidState;
+        state.outcome = .local_failure;
+        return;
+    }
 
     // Draft creation is the first remote mutation. Even a failed concrete owner may have created
     // remote state, so every failure from this attempted stage onward requires human audit.

@@ -1,8 +1,8 @@
 const std = @import("std");
 const validator = @import("release_validator");
 
-const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate };
-const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate };
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate };
+const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate };
 
 const Harness = struct {
     events: [8]Event = undefined,
@@ -59,6 +59,25 @@ const Harness = struct {
                         .zig_size = 123,
                         .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     } },
+                    .prepare_candidate => .{ .prepare_candidate = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .test_uuid = "123e4567-e89b-42d3-a456-426614174000",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                        .candidate_dmg_bundle = "/tmp/candidate-dmg-bundle",
+                        .candidate_frozen_bundle = "/tmp/candidate-frozen-bundle",
+                        .dmg_work = "/tmp/dmg-work",
+                        .baseline_workspace = "/tmp/baseline",
+                        .app_main_executable = "/tmp/app-main",
+                        .app_cli_executable = "/tmp/app-cli",
+                        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+                        .source_root = "/tmp/source",
+                        .zig = "/tmp/zig",
+                        .zig_size = 123,
+                        .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        .durable_preparation = "/tmp/durable-stage3",
+                    } },
                     .prepare_aggregate => .{ .prepare_candidate_aggregate = .{
                         .repo = "ohah/maru",
                         .tag = "v1.2.3",
@@ -113,6 +132,13 @@ const Harness = struct {
             }
             pub fn publishCandidate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
                 self.harness.push(.publish_candidate);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
+            pub fn prepareCandidate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.prepare_candidate);
                 try std.testing.expectEqualStrings("token", token);
                 try std.testing.expectEqual(validator.phase_budget_ns, budget);
                 try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
@@ -197,6 +223,22 @@ test "publish-candidate dispatches exactly once after bootstrap and token" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "candidate_release_driver.run("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "storage.github_response[0..candidate_release_driver.max_scratch_bytes]"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "settleProductFailure(&storage.candidate"));
+}
+
+test "prepare-candidate dispatches exactly once after bootstrap and token" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{ .phase = .prepare_candidate };
+    try harness.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .prepare_candidate }, harness.events[0..harness.count]);
+}
+
+test "argv collector accepts the contract bound and rejects only bound plus one" {
+    var values: [validator.max_command_args][]const u8 = undefined;
+    var count: usize = 0;
+    for (0..values.len) |_| try validator.testing_api.appendArgument(&values, &count, "value");
+    try std.testing.expectEqual(values.len, count);
+    try std.testing.expectError(error.TooManyArguments, validator.testing_api.appendArgument(&values, &count, "overflow"));
+    try std.testing.expectEqual(values.len, count);
 }
 
 test "aggregate commands dispatch exactly once without reading GitHub token" {

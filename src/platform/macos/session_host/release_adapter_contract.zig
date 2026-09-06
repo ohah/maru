@@ -14,6 +14,8 @@ pub const accepts_observation_json_input = false;
 pub const repository_name = "ohah/maru";
 pub const max_cli_value_bytes: usize = 4 * 1024;
 pub const max_manifest_asset_name_bytes: usize = 255;
+/// Largest reviewed command, excluding argv[0]: command plus 19 option/value pairs.
+pub const max_command_args: usize = 39;
 
 pub const PrePublish = struct {
     repo: []const u8,
@@ -59,6 +61,28 @@ pub const PublishCandidate = struct {
     zig_sha256: []const u8,
 };
 
+pub const PrepareCandidate = struct {
+    repo: []const u8,
+    tag: []const u8,
+    github_cli: []const u8,
+    github_cli_sha256: []const u8,
+    test_uuid: []const u8,
+    dmg: []const u8,
+    frozen_executable: []const u8,
+    candidate_dmg_bundle: []const u8,
+    candidate_frozen_bundle: []const u8,
+    dmg_work: []const u8,
+    baseline_workspace: []const u8,
+    app_main_executable: []const u8,
+    app_cli_executable: []const u8,
+    manifest: []const u8,
+    source_root: []const u8,
+    zig: []const u8,
+    zig_size: u64,
+    zig_sha256: []const u8,
+    durable_preparation: []const u8,
+};
+
 pub const PrepareCandidateAggregate = struct {
     repo: []const u8,
     tag: []const u8,
@@ -87,6 +111,7 @@ pub const Command = union(enum) {
     pre_publish: PrePublish,
     verify_predecessor: VerifyPredecessor,
     publish_candidate: PublishCandidate,
+    prepare_candidate: PrepareCandidate,
     prepare_candidate_aggregate: PrepareCandidateAggregate,
     finalize_candidate_aggregate: FinalizeCandidateAggregate,
 };
@@ -141,12 +166,14 @@ const Values = struct {
     evidence_bundle: ?[]const u8 = null,
     manifest_bundle: ?[]const u8 = null,
     aggregate: ?[]const u8 = null,
+    durable_preparation: ?[]const u8 = null,
 };
 
 const Phase = enum {
     pre_publish,
     verify_predecessor,
     publish_candidate,
+    prepare_candidate,
     prepare_candidate_aggregate,
     finalize_candidate_aggregate,
 };
@@ -159,6 +186,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
         .verify_predecessor
     else if (std.mem.eql(u8, args[0], "publish-candidate"))
         .publish_candidate
+    else if (std.mem.eql(u8, args[0], "prepare-candidate"))
+        .prepare_candidate
     else if (std.mem.eql(u8, args[0], "prepare-candidate-aggregate"))
         .prepare_candidate_aggregate
     else if (std.mem.eql(u8, args[0], "finalize-candidate-aggregate"))
@@ -271,6 +300,50 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .zig_sha256 = zig_sha256,
             } };
         },
+        .prepare_candidate => blk: {
+            const test_uuid = values.test_uuid orelse return error.MissingOption;
+            if (!canonicalReleaseTestUuid(test_uuid)) return error.InvalidTestUuid;
+            const dmg = try candidatePath(values.dmg);
+            const frozen_executable = try candidatePath(values.frozen_executable);
+            const candidate_dmg_bundle = try candidatePath(values.candidate_dmg_bundle);
+            const candidate_frozen_bundle = try candidatePath(values.candidate_frozen_bundle);
+            const dmg_work = try candidatePath(values.dmg_work);
+            const baseline_workspace = try candidatePath(values.baseline_workspace);
+            const app_main_executable = try candidatePath(values.app_main_executable);
+            const app_cli_executable = try candidatePath(values.app_cli_executable);
+            const candidate_manifest = try candidatePath(values.manifest);
+            try validateManifestAssetPath(candidate_manifest, tag[1..]);
+            const source_root = try candidatePath(values.source_root);
+            const zig = try candidatePath(values.zig);
+            const zig_size = try positiveDecimal(values.zig_size orelse return error.MissingOption);
+            const zig_sha256 = values.zig_sha256 orelse return error.MissingOption;
+            if (!lowerHexSha256(zig_sha256)) return error.InvalidZigSha256;
+            const durable_preparation = try candidatePath(values.durable_preparation);
+            const github_cli = try githubCli(&values);
+            if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, source_root, github_cli.path, zig, durable_preparation });
+            break :blk .{ .prepare_candidate = .{
+                .repo = repo,
+                .tag = tag,
+                .github_cli = github_cli.path,
+                .github_cli_sha256 = github_cli.sha256,
+                .test_uuid = test_uuid,
+                .dmg = dmg,
+                .frozen_executable = frozen_executable,
+                .candidate_dmg_bundle = candidate_dmg_bundle,
+                .candidate_frozen_bundle = candidate_frozen_bundle,
+                .dmg_work = dmg_work,
+                .baseline_workspace = baseline_workspace,
+                .app_main_executable = app_main_executable,
+                .app_cli_executable = app_cli_executable,
+                .manifest = candidate_manifest,
+                .source_root = source_root,
+                .zig = zig,
+                .zig_size = zig_size,
+                .zig_sha256 = zig_sha256,
+                .durable_preparation = durable_preparation,
+            } };
+        },
         .prepare_candidate_aggregate => blk: {
             const evidence = try aggregatePath(values.evidence);
             const candidate_dmg_bundle = try aggregatePath(values.candidate_dmg_bundle);
@@ -354,7 +427,7 @@ fn optionDestination(
             &values.work_dir
         else
             null,
-        .publish_candidate => if (std.mem.eql(u8, option, "--test-uuid"))
+        .publish_candidate, .prepare_candidate => if (std.mem.eql(u8, option, "--test-uuid"))
             &values.test_uuid
         else if (std.mem.eql(u8, option, "--dmg"))
             &values.dmg
@@ -380,6 +453,8 @@ fn optionDestination(
             &values.zig_size
         else if (std.mem.eql(u8, option, "--zig-sha256"))
             &values.zig_sha256
+        else if (phase == .prepare_candidate and std.mem.eql(u8, option, "--durable-preparation"))
+            &values.durable_preparation
         else
             null,
         .prepare_candidate_aggregate => if (std.mem.eql(u8, option, "--evidence"))

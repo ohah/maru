@@ -20,6 +20,7 @@ pub const Error = error{
     InvalidInputFd,
     InvalidExpectedSize,
     InvalidBudget,
+    AliasedOutput,
     PipeFailed,
     SpawnSetupFailed,
     SpawnFailed,
@@ -32,6 +33,123 @@ pub const Error = error{
 };
 
 pub const Digest = struct { size: u64, sha256: [64]u8 };
+
+pub const Termination = union(enum) {
+    exited: u8,
+    signal: u32,
+    unknown: u32,
+};
+
+pub const Observation = struct {
+    termination: Termination,
+    stdout: []const u8,
+    stderr: []const u8,
+};
+
+/// Runs with exactly `environment` and returns separated, bounded stdout/stderr even when the
+/// child exits nonzero. Both borrowed slices are published only after both pipes reach EOF and the
+/// exact child is reaped.
+pub fn runObserveEnvironment(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    stdout_buffer: []u8,
+    stderr_buffer: []u8,
+    budget_ns: i128,
+) Error!Observation {
+    if (executable.len < 2 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null)
+        return error.InvalidExecutable;
+    if (budget_ns <= 0 or stdout_buffer.len == 0 or stderr_buffer.len == 0)
+        return error.InvalidBudget;
+    if (rangesOverlap(stdout_buffer, stderr_buffer)) return error.AliasedOutput;
+
+    var stdout_pipe: [2]c.fd_t = undefined;
+    if (!openPipe(&stdout_pipe)) return error.PipeFailed;
+    errdefer closePipe(&stdout_pipe);
+    var stderr_pipe: [2]c.fd_t = undefined;
+    if (!openPipe(&stderr_pipe)) return error.PipeFailed;
+    errdefer closePipe(&stderr_pipe);
+
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) return error.SpawnSetupFailed;
+    defer _ = c.close(dev_null);
+
+    const pid = spawnChild(executable, argv, environment, null, null, stdout_pipe, stderr_pipe, dev_null, .stdout_only) catch |err|
+        return err;
+    _ = c.close(stdout_pipe[1]);
+    stdout_pipe[1] = -1;
+    _ = c.close(stderr_pipe[1]);
+    stderr_pipe[1] = -1;
+
+    if (!establishProcessGroup(pid)) {
+        terminateGroup(pid);
+        _ = reapChild(pid, null);
+        return error.ProcessGroupFailed;
+    }
+
+    var stdout_used: usize = 0;
+    var stderr_used: usize = 0;
+    var stdout_eof = false;
+    var stderr_eof = false;
+    var child_reaped = false;
+    var status: c_int = 0;
+    const start = std.Io.Clock.awake.now(io).nanoseconds;
+    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
+    var failure: ?Error = null;
+
+    while (!(stdout_eof and stderr_eof and child_reaped)) {
+        if (!child_reaped) switch (pollChild(pid, &status)) {
+            .running => {},
+            .reaped => child_reaped = true,
+            .failed => {
+                failure = error.WaitFailed;
+                break;
+            },
+        };
+        if (stdout_eof and stderr_eof and child_reaped) break;
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (now >= deadline) {
+            failure = error.TimedOut;
+            break;
+        }
+        const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        const wait_ms: c_int = @intCast(@min(remaining_ms, poll_quantum_ms));
+        var fds = [_]c.pollfd{
+            .{ .fd = if (stdout_eof) -1 else stdout_pipe[0], .events = c.POLL.IN, .revents = 0 },
+            .{ .fd = if (stderr_eof) -1 else stderr_pipe[0], .events = c.POLL.IN, .revents = 0 },
+        };
+        const rc = c.poll(&fds, 2, wait_ms);
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (rc == 0) continue;
+        if (drainObservedStream(stdout_pipe[0], fds[0].revents, stdout_buffer, &stdout_used, &stdout_eof)) |err| {
+            failure = err;
+            break;
+        }
+        if (drainObservedStream(stderr_pipe[0], fds[1].revents, stderr_buffer, &stderr_used, &stderr_eof)) |err| {
+            failure = err;
+            break;
+        }
+    }
+
+    _ = c.close(stdout_pipe[0]);
+    stdout_pipe[0] = -1;
+    _ = c.close(stderr_pipe[0]);
+    stderr_pipe[0] = -1;
+    if (failure != null or !child_reaped) terminateGroup(pid);
+    if (!child_reaped and !reapChild(pid, &status)) return error.WaitFailed;
+    if (failure) |err| return err;
+    if (!stdout_eof or !stderr_eof) return error.CaptureFailed;
+    return .{
+        .termination = decodeTermination(status),
+        .stdout = stdout_buffer[0..stdout_used],
+        .stderr = stderr_buffer[0..stderr_used],
+    };
+}
 
 pub fn runCapture(
     io: std.Io,
@@ -110,7 +228,7 @@ pub fn runDigestEnvironmentStdout(
         _ = c.close(pipe_fds[1]);
         return error.SpawnSetupFailed;
     }
-    const pid = spawnChild(executable, argv, environment, null, null, pipe_fds, dev_null, .stdout_only) catch |err| {
+    const pid = spawnChild(executable, argv, environment, null, null, pipe_fds, null, dev_null, .stdout_only) catch |err| {
         _ = c.close(dev_null);
         _ = c.close(pipe_fds[0]);
         _ = c.close(pipe_fds[1]);
@@ -280,7 +398,7 @@ fn runCaptureCommon(
         _ = c.close(pipe_fds[1]);
         return error.SpawnSetupFailed;
     }
-    const pid = spawnChild(executable, argv, environment, directory_fd, input_fd, pipe_fds, dev_null, capture_mode) catch |err| {
+    const pid = spawnChild(executable, argv, environment, directory_fd, input_fd, pipe_fds, null, dev_null, capture_mode) catch |err| {
         _ = c.close(dev_null);
         _ = c.close(pipe_fds[0]);
         _ = c.close(pipe_fds[1]);
@@ -374,6 +492,7 @@ fn spawnChild(
     directory_fd: ?c.fd_t,
     input_fd: ?c.fd_t,
     pipe_fds: [2]c.fd_t,
+    stderr_pipe_fds: ?[2]c.fd_t,
     dev_null: c.fd_t,
     capture_mode: CaptureMode,
 ) Error!c.pid_t {
@@ -381,7 +500,7 @@ fn spawnChild(
     if (max_fd <= 3) return error.SpawnSetupFailed;
     const pid = c.fork();
     if (pid < 0) return error.SpawnFailed;
-    if (pid == 0) childExec(executable, argv, environment, directory_fd, input_fd, pipe_fds, dev_null, capture_mode, max_fd);
+    if (pid == 0) childExec(executable, argv, environment, directory_fd, input_fd, pipe_fds, stderr_pipe_fds, dev_null, capture_mode, max_fd);
     return pid;
 }
 
@@ -392,6 +511,7 @@ fn childExec(
     directory_fd: ?c.fd_t,
     input_fd: ?c.fd_t,
     pipe_fds: [2]c.fd_t,
+    stderr_pipe_fds: ?[2]c.fd_t,
     dev_null: c.fd_t,
     capture_mode: CaptureMode,
     max_fd: c_int,
@@ -399,7 +519,7 @@ fn childExec(
     const stdin_fd = input_fd orelse dev_null;
     if (c.setpgid(0, 0) != 0 or c.dup2(stdin_fd, 0) < 0 or
         c.dup2(pipe_fds[1], 1) < 0 or
-        c.dup2(if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
+        c.dup2(if (stderr_pipe_fds) |fds| fds[1] else if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
     if (input_fd != null and c.lseek(0, 0, c.SEEK.SET) < 0) c._exit(126);
     if (directory_fd) |fd| if (c.fchdir(fd) != 0) c._exit(126);
     var inherited_fd: c_int = 3;
@@ -458,6 +578,62 @@ fn terminateGroup(pid: c.pid_t) void {
 fn setCloseOnExec(fd: c.fd_t) bool {
     const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
     return flags >= 0 and c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) == 0;
+}
+
+fn openPipe(fds: *[2]c.fd_t) bool {
+    if (c.pipe(fds) != 0) return false;
+    if (setCloseOnExec(fds[0]) and setCloseOnExec(fds[1])) return true;
+    closePipe(fds);
+    return false;
+}
+
+fn closePipe(fds: *[2]c.fd_t) void {
+    for (fds) |*fd| {
+        if (fd.* >= 0) _ = c.close(fd.*);
+        fd.* = -1;
+    }
+}
+
+fn rangesOverlap(a: []u8, b: []u8) bool {
+    const a_start = @intFromPtr(a.ptr);
+    const b_start = @intFromPtr(b.ptr);
+    const a_end = std.math.add(usize, a_start, a.len) catch return true;
+    const b_end = std.math.add(usize, b_start, b.len) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
+
+fn drainObservedStream(
+    fd: c.fd_t,
+    revents: i16,
+    buffer: []u8,
+    used: *usize,
+    eof: *bool,
+) ?Error {
+    if (eof.* or revents == 0) return null;
+    if (revents & (c.POLL.ERR | c.POLL.NVAL) != 0) return error.CaptureFailed;
+    if (revents & (c.POLL.IN | c.POLL.HUP) == 0) return null;
+    var overflow: [1]u8 = undefined;
+    const destination = if (used.* == buffer.len) overflow[0..] else buffer[used.*..];
+    const count = c.read(fd, destination.ptr, destination.len);
+    if (count < 0) {
+        if (posix.errno(count) == .INTR) return null;
+        return error.CaptureFailed;
+    }
+    if (count == 0) {
+        eof.* = true;
+    } else if (used.* == buffer.len) {
+        return error.OutputTooLarge;
+    } else {
+        used.* += @intCast(count);
+    }
+    return null;
+}
+
+fn decodeTermination(status: c_int) Termination {
+    const unsigned: u32 = @bitCast(status);
+    if (c.W.IFEXITED(unsigned)) return .{ .exited = @intCast(c.W.EXITSTATUS(unsigned)) };
+    if (c.W.IFSIGNALED(unsigned)) return .{ .signal = @intFromEnum(c.W.TERMSIG(unsigned)) };
+    return .{ .unknown = unsigned };
 }
 
 fn validDirectoryFd(fd: c.fd_t) bool {

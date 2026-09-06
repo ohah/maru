@@ -14413,6 +14413,19 @@ pub const AppSession = struct {
         /// 접속 폭주**다(계획이 «그 목적지를 캐시해 매 접속마다 왕복하지 않는다» 로 못박은 자리다).
         /// 표는 그 목적지의 마지막 원격 pane 이 닫힐 때 비워지므로, 다시 여는 것은 **사용자 행동**이다.
         stopped: bool = false,
+        /// 이 전송으로 **마지막에 무언가 온 시각**. 0 이면 아직 안 띄웠다는 뜻이다.
+        ///
+        /// **왜 host 에 두는가 — `Channel` 의 침묵 시한만으로는 전송이 안 되살아난다.** `Channel` 은 Term
+        /// 마다 있고 시한에 걸리면 자기를 `.silent` 로 닫을 뿐이라, 그 Term 은 관측 모드로 강등되지만
+        /// **ssh 자식은 그대로 남고 새 스트리머도 안 뜬다**. 재생성(`scheduleStreamerRetry`)이 `eof`
+        /// 갈래에만 있었기 때문이다(RA5-b 가 EOF 를 유일한 사망 신호로 잡았다).
+        ///
+        /// 2026-09-07 실측: ControlMaster 가 교체되자 원격 스트리머가 죽었는데 mux 클라이언트인 로컬
+        /// `ssh` 는 EOF 를 내지 않고 `read` 가 계속 `EAGAIN` 만 냈다 — 그래서 `eof` 갈래에 영영 못 들어가
+        /// **5 시간 11 분 동안** 죽은 전송을 붙들고 사이드바가 굳었다. 스트리머는 하트비트를 5 초마다
+        /// 보내므로(`agent_events` 기본값) 살아 있으면 이 값이 그 주기로 갱신된다. 즉 **침묵이 곧 전송의
+        /// 사망**이고, 판정을 host 에 두어야 그 사망이 재생성으로 이어진다.
+        last_rx_ms: u64 = 0,
         /// EOF 뒤 **다시 띄울 시각**(0 = 예약 없음). RA5-b.
         ///
         /// 위 `stopped` 는 「영원히 안 된다」(원격에 maru 가 없다·제한 서버·HOME 이 없다)를 뜻하고,
@@ -14753,6 +14766,9 @@ pub const AppSession = struct {
         setNonBlockingFd(stream.out_fd);
         host.stream = stream;
         host.stream_started = true;
+        // **침묵 시계를 여기서 켠다.** 0 으로 두면 아래 판정이 «태초부터 조용했다» 로 읽어 첫 tick 에
+        // 곧바로 죽은 전송으로 몰아간다.
+        host.last_rx_ms = self.awakeMs();
         host.retry_at_ms = 0;
         host.saw_hello = false; // 새 스트리머의 `hello` 를 다시 본다
         // ⚠️ **죽은 스트림의 꼬리를 버린다**(적대적 검증 5 회차). `pending` 은 개행 없이 끊긴 조각을
@@ -14875,6 +14891,8 @@ pub const AppSession = struct {
             // 목적지가 그 뒤로 영영 안 붙는다 — 재접속을 넣고도 오늘 이전과 같은 상태가 된다.
             // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
             host.retries = 0;
+            // 같은 이유로 **침묵 시계도 되돌린다** — 하트비트 한 줄이면 전송은 살아 있다.
+            host.last_rx_ms = now_ms;
             // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
             self.recordRemoteCursors(host, lines[0..count], now_ms);
             self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
@@ -14891,6 +14909,26 @@ pub const AppSession = struct {
         // 계획이 «사망 감지는 하트비트로만 한다» 로 못박은 자리가 여기다.
         if (!eof) {
             self.tickRemoteAgentTerms(dest, now_ms);
+            // **침묵도 사망이다 — EOF 와 같은 길로 보낸다.** 위 `tick` 은 `Channel` 을 닫아 그 Term 을
+            // 관측 모드로 내리지만, 그것만으로는 **전송이 되살아나지 않는다**. 죽은 ssh 자식이 그대로
+            // 남고 새 스트리머가 안 뜨므로 사용자에게는 「어느 순간부터 배지가 안 뜬다」가 영구히 된다 —
+            // RA5-b 가 고쳤다고 적은 바로 그 증상인데, 그때 잡은 신호가 EOF 하나뿐이라 EOF 가 **안 오는**
+            // 사망을 못 덮었다(2026-09-07 실측: ControlMaster 교체 뒤 `read` 가 5 시간 넘게 `EAGAIN`).
+            //
+            // 시한은 `Channel` 과 **같은 상수**를 쓴다 — 두 벌로 두면 한쪽이 바뀌는 날 조용히 갈린다.
+            // 스트리머가 5 초마다 하트비트를 보내므로 이 시한을 넘긴 침묵은 전송이 죽은 것이다.
+            if (host.last_rx_ms != 0 and
+                now_ms -| host.last_rx_ms >= maru.session.remote_agent_stream.silence_deadline_ms)
+            {
+                ssh_upload.stopAgentEvents(host.stream);
+                host.stream = .{ .pid = 0, .out_fd = -1 };
+                host.stream_started = false;
+                host.last_rx_ms = 0;
+                // 꼬리를 버리는 이유는 EOF 갈래와 같다 — 개행 없이 끊긴 조각이 새 스트림의 `hello` 앞에
+                // 붙으면 관문을 영영 못 지난다.
+                host.pending.clearRetainingCapacity();
+                self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 침묵했다");
+            }
             return;
         }
         // **EOF 는 조용하지 않다.** 채널을 닫으면 다음 `agentHookMode` 가 관측 모드로 강등한다(§1.2) —
@@ -23531,6 +23569,64 @@ test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term
     // 채널까지 떼야 한다 — 남기면 `modeFor` 가 계속 «채널이 열렸다» 로 읽어 훅 모드에 갇힌다.
     try std.testing.expect(term.agent_remote_channel == null);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+}
+
+test "침묵한 전송은 EOF 와 같은 길로 다시 띄워진다 — 채널만 닫고 끝내지 않는다" {
+    // **바로 앞 테스트와 무는 것이 다르다.** 그쪽은 `Channel` 이 스스로 닫히는지를 재고, 이쪽은 그
+    // 닫힘이 **전송 재생성으로 이어지는지**를 잰다. 둘을 가르는 이유는 실제로 갈렸기 때문이다 —
+    // 2026-09-07 실측에서 `Channel` 은 침묵으로 닫혔는데 죽은 `ssh` 자식이 그대로 남고 새 스트리머가
+    // 안 떠서, 그 목적지의 배지가 **5 시간 11 분** 동안 굳어 있었다. RA5-b 가 재접속을 넣으며 잡은
+    // 사망 신호가 EOF 하나뿐이었고, ControlMaster 가 교체되면 mux 클라이언트는 EOF 를 안 내고
+    // `read` 가 `EAGAIN` 만 낸다 — 그래서 `eof` 갈래에 영영 못 들어갔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "box";
+    // 아무것도 안 오는 파이프다 — 쓰는 쪽을 열어 둔 채 두면 `read` 가 `EAGAIN` 을 내므로 EOF 가 아니다.
+    // **그 상태가 정확히 실측의 모양이다**(전송은 죽었는데 fd 는 안 닫힌다).
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]); // 읽는 쪽은 아래에서 제품 코드가 닫는다
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{
+        .stream = .{ .pid = 0, .out_fd = fds[0] }, // pid 0 = 신호하지 않는 가짜 자식
+        .install_done = true,
+        .stream_started = true,
+        .last_rx_ms = 1_000,
+    });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    const deadline = maru.session.remote_agent_stream.silence_deadline_ms;
+
+    // ① 시한 **직전**에는 아무것도 안 한다 — 조용한 몇 초마다 전송을 갈아치우면 그것이 접속 폭주다.
+    session.drainRemoteAgentHost(dest, host, 1_000 + deadline - 1);
+    try std.testing.expect(host.stream_started);
+    try std.testing.expectEqual(@as(u64, 0), host.retry_at_ms);
+
+    // ② 시한을 넘기면 EOF 와 **같은 처리**다: 자식을 거두고, 다시 띄울 예약을 남긴다.
+    session.drainRemoteAgentHost(dest, host, 1_000 + deadline);
+    try std.testing.expect(!host.stream_started);
+    try std.testing.expectEqual(@as(c_int, -1), host.stream.out_fd);
+    try std.testing.expect(host.retry_at_ms != 0); // 예약이 없으면 영영 안 돌아온다
+    try std.testing.expect(!host.stopped); // 침묵 한 번은 「영원히 안 된다」가 아니다
+    try std.testing.expectEqual(@as(u64, 0), host.last_rx_ms); // 시계는 다시 띄울 때 켠다
 }
 
 test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫힌다 — 침묵이 사망 신호다" {

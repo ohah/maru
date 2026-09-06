@@ -1413,9 +1413,13 @@ static void noteA11yChange(void) {
     g_a11y_shape = shape;
     if (!g_activity_cls || !g_app) return;
     JNIEnv *env = NULL;
-    if ((*g_app->activity->vm)->AttachCurrentThread(g_app->activity->vm, &env, NULL) != 0) return;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
     jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "a11yChanged", "()V");
     if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
+    // **붙였으면 놓는다** — 이 파일의 다른 C→Java 호출이 다 그렇게 한다(적대적 검증 2회차:
+    // 처음에는 이 한 줄이 빠져 있었고, 그러면 그리는 스레드가 JVM 에 붙은 채로 남는다).
+    (*vm)->DetachCurrentThread(vm);
     LOGI("MARU_A11Y elements=%u", n);
 }
 
@@ -1438,59 +1442,50 @@ Java_dev_maru_MaruActivity_nativeA11yCount(JNIEnv *env, jclass cls) {
     return (jint)n;
 }
 
-/// 자리 — **뷰 픽셀**로 (x<<48)|(y<<32)|(w<<16)|h. 없는 index 는 0.
-JNIEXPORT jlong JNICALL
-Java_dev_maru_MaruActivity_nativeA11yRect(JNIEnv *env, jclass cls, jint index) {
-    (void)env; (void)cls;
-    pthread_mutex_lock(&g_bridge_lock);
-    unsigned long long packed = maru_mobile_a11y_rect((unsigned int)index);
-    float scale = g.scale;
-    float ox = (float)g.inset_left, oy = (float)g.inset_top;
-    pthread_mutex_unlock(&g_bridge_lock);
-    if (packed == 0) return 0;
-    unsigned long long lx = (packed >> 48) & 0xFFFF, ly = (packed >> 32) & 0xFFFF;
-    unsigned long long lw = (packed >> 16) & 0xFFFF, lh = packed & 0xFFFF;
-    unsigned long long x = (unsigned long long)((float)lx * scale + ox);
-    unsigned long long y = (unsigned long long)((float)ly * scale + oy);
-    unsigned long long w = (unsigned long long)((float)lw * scale);
-    unsigned long long h = (unsigned long long)((float)lh * scale);
-    return (jlong)((x << 48) | (y << 32) | (w << 16) | h);
-}
-
-JNIEXPORT jint JNICALL
-Java_dev_maru_MaruActivity_nativeA11yRole(JNIEnv *env, jclass cls, jint index) {
-    (void)env; (void)cls;
-    pthread_mutex_lock(&g_bridge_lock);
-    unsigned int r = maru_mobile_a11y_role((unsigned int)index);
-    pthread_mutex_unlock(&g_bridge_lock);
-    return (jint)r;
-}
-
-JNIEXPORT jint JNICALL
-Java_dev_maru_MaruActivity_nativeA11yState(JNIEnv *env, jclass cls, jint index) {
-    (void)env; (void)cls;
-    pthread_mutex_lock(&g_bridge_lock);
-    unsigned int st = maru_mobile_a11y_state((unsigned int)index);
-    pthread_mutex_unlock(&g_bridge_lock);
-    return (jint)st;
-}
-
-/// 이름. **길이를 먼저 묻고 담는다** — 브리지는 글자 한가운데서 안 끊으므로 받은 것은 언제나
-/// 온전한 UTF-8 이다(`NewStringUTF` 는 잘린 바이트를 받으면 무엇을 만들지 모른다).
+/// 노드 하나를 **한 번에** 준다 — 자리(뷰 픽셀) 넷과 역할·상태를 `out` 에 채우고 이름을 답한다.
+///
+/// **넷으로 나눠 물으면 안 된다.** ABI 헤더가 그 이유를 적고 있다: 항목마다 호출을 여러 번 하면
+/// 그 사이에 프레임이 바뀌어 **서로 다른 프레임의 값이 섞인다**. 그러면 이름은 `esc` 인데 자리는
+/// 다른 키가 되어, 스크린 리더가 짚는 곳과 손가락이 닿는 곳이 어긋난다 — 이 이니셔티브가 계속
+/// 막아 온 그 결함이다(적대적 검증 3회차에서 잡았다).
+///
+/// **좌표를 여기서 되돌리는 이유**: 브리지 좌표는 safe area 를 뺀 논리 좌표이고, 뷰 좌표로 돌리는
+/// 식(`* scale + inset`)은 **누르는 경로가 이미 아는 것**이다. Java 가 그것을 따로 알면 두 번째
+/// 진실이 생긴다.
 JNIEXPORT jstring JNICALL
-Java_dev_maru_MaruActivity_nativeA11yLabel(JNIEnv *env, jclass cls, jint index) {
+Java_dev_maru_MaruActivity_nativeA11yNode(JNIEnv *env, jclass cls, jint index, jintArray out) {
     (void)cls;
     unsigned char buf[257];
+    jint vals[6] = {0, 0, 0, 0, 0, 0};
     pthread_mutex_lock(&g_bridge_lock);
+    unsigned long long packed = maru_mobile_a11y_rect((unsigned int)index);
+    unsigned int role = maru_mobile_a11y_role((unsigned int)index);
+    unsigned int state = maru_mobile_a11y_state((unsigned int)index);
     unsigned long need = maru_mobile_a11y_label((unsigned int)index, buf, 0);
     unsigned long cap = need < sizeof buf - 1 ? need : sizeof buf - 1;
     unsigned long got = maru_mobile_a11y_label((unsigned int)index, buf, cap);
+    float scale = g.scale;
+    float ox = (float)g.inset_left, oy = (float)g.inset_top;
     pthread_mutex_unlock(&g_bridge_lock);
     buf[got] = 0;
-    return (*env)->NewStringUTF(env, (const char *)buf);
+
+    vals[0] = (jint)((float)((packed >> 48) & 0xFFFF) * scale + ox);
+    vals[1] = (jint)((float)((packed >> 32) & 0xFFFF) * scale + oy);
+    vals[2] = (jint)((float)((packed >> 16) & 0xFFFF) * scale);
+    vals[3] = (jint)((float)(packed & 0xFFFF) * scale);
+    vals[4] = (jint)role;
+    vals[5] = (jint)state;
+    (*env)->SetIntArrayRegion(env, out, 0, 6, vals);
+    // **UTF-16 으로 직접 만든다** — 클립보드 경로와 같은 이유다(그 자리 주석이 근거를 든다):
+    // `NewStringUTF` 는 modified UTF-8 을 기대하므로 이모지(4바이트 UTF-8)를 주면 **정의되지 않은
+    // 동작**이고, CheckJNI 를 켠 빌드에서는 abort 한다. 지금 이름은 다 BMP 지만 **다음 슬라이스가
+    // 세션·서버 이름(사용자 데이터)을 서술자로 낸다** — 그때 이모지가 든 이름 하나면 앱이 죽는다.
+    static jchar u16[512];
+    jsize ulen = utf8ToUtf16((const char *)buf, got, u16, 512);
+    return (*env)->NewString(env, u16, ulen);
 }
 
-/// TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
+/// TalkBack 의 두 번 두드리기는 /// TalkBack 의 두 번 두드리기는 **가상 노드에 `ACTION_CLICK`** 으로 온다 — iOS 처럼 터치를
 /// 합성해 주지 않는다. 그래서 여기서 **누르는 경로 그대로** 눌러 준다(down/up 한 쌍). 이 함수가
 /// 없으면 TalkBack 사용자에게는 「읽히는데 안 눌리는」 버튼만 남는다.
 JNIEXPORT jboolean JNICALL
@@ -1504,9 +1499,15 @@ Java_dev_maru_MaruActivity_nativeA11yClick(JNIEnv *env, jclass cls, jint index) 
     }
     float lx = (float)((packed >> 48) & 0xFFFF) + (float)((packed >> 16) & 0xFFFF) / 2.0f;
     float ly = (float)((packed >> 32) & 0xFFFF) + (float)(packed & 0xFFFF) / 2.0f;
+    // **손가락 번호가 겹치면 안 된다.** 진짜 손가락은 `AMotionEvent_getPointerId`(0 부터)를 쓰는데
+    // 같은 0 으로 넣으면, 손가락이 내려와 있는 동안 스크린 리더가 활성화했을 때 그 손가락의 자리를
+    // 덮어쓴다 — 끌던 것이 튀거나 끊긴다(적대적 검증 1회차에서 잡았다). 값은 헤더가 든다.
+    //
+    // **시각도 벌린다.** down 과 up 이 같은 ms 면 「머문 시간 0」이라, 시간으로 재는 판정들이
+    // 경계값을 밟는다. 한 프레임보다 짧은 1ms 를 준다 — 사람이 두드린 것과 같은 모양이다.
     unsigned long long t = nowMs();
-    maru_mobile_pointer(0, 0, lx, ly, t);
-    maru_mobile_pointer(2, 0, lx, ly, t);
+    maru_mobile_pointer(0, MARU_MOBILE_POINTER_ID_A11Y, lx, ly, t);
+    maru_mobile_pointer(2, MARU_MOBILE_POINTER_ID_A11Y, lx, ly, t + 1);
     pthread_mutex_unlock(&g_bridge_lock);
     // **이 줄이 있어야 「스크린 리더가 누른 것」과 「손가락이 누른 것」을 가른다.** 없으면 둘이
     // 같은 자국을 남겨, 두 번 두드리기가 정말 이 길로 왔는지 확인할 방법이 없다(실측하며 겪었다).

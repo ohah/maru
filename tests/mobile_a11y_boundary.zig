@@ -186,7 +186,27 @@ test "a11y 경계: Android 는 «누르는 경로 그대로» 누르고, 좌표�
 
     // 누름은 **네이티브의 포인터 경로 그대로**다(down/up 한 쌍). 새 경로를 만들면 제스처·라우팅이
     // 아는 것을 못 쓰고, 그 순간 「스크린 리더로 누른 것」만 다르게 군다.
-    try std.testing.expectEqual(@as(usize, 2), count(host, "maru_mobile_pointer(0, 0, lx, ly, t)") + count(host, "maru_mobile_pointer(2, 0, lx, ly, t)"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "maru_mobile_pointer(0, MARU_MOBILE_POINTER_ID_A11Y, lx, ly, t)"));
+    try std.testing.expectEqual(@as(usize, 1), count(host, "maru_mobile_pointer(2, MARU_MOBILE_POINTER_ID_A11Y, lx, ly, t + 1)"));
+
+    // **손가락 번호가 겹치면 안 된다**(적대적 1회차). 진짜 손가락은 0 부터 쓰므로 같은 값을 넣으면
+    // 손가락이 내려와 있는 동안 활성화했을 때 그 손가락의 자리를 덮어쓴다. 값은 헤더가 든다.
+    const header = try readSource(allocator, "src/platform/mobile/mobile_host_abi.h");
+    defer allocator.free(header);
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MOBILE_POINTER_ID_A11Y 0xFFFFFFFFu"));
+
+    // **붙였으면 놓는다**(적대적 2회차) — 이 파일의 다른 C→Java 호출이 다 그렇게 한다.
+    // 파일 전체 개수를 견주면 매직 오프셋이 되므로 **그 함수 안에서** 짝을 센다.
+    const note = std.mem.indexOf(u8, host, "static void noteA11yChange(void) {") orelse return error.MissingNote;
+    const note_end = std.mem.indexOf(u8, host[note..], "\n}") orelse return error.MissingNoteEnd;
+    const note_body = host[note .. note + note_end];
+    try std.testing.expectEqual(@as(usize, 1), count(note_body, "AttachCurrentThread"));
+    try std.testing.expectEqual(@as(usize, 1), count(note_body, "DetachCurrentThread"));
+
+    // **노드는 한 번에 받는다**(적대적 3회차) — 나눠 물으면 이름과 자리가 다른 프레임의 것이 된다.
+    try std.testing.expectEqual(@as(usize, 1), count(java, "private static native String nativeA11yNode(int index, int[] out);"));
+    try std.testing.expectEqual(@as(usize, 0), count(java, "nativeA11yRect"));
+    try std.testing.expectEqual(@as(usize, 0), count(java, "nativeA11yLabel"));
     try std.testing.expectEqual(@as(usize, 1), count(java, "return nativeA11yClick(virtualViewId);"));
     // 동작을 안 붙이면 `setClickable` 만으로는 두 번 두드리기가 안 온다.
     try std.testing.expectEqual(@as(usize, 1), count(java, "node.addAction(AccessibilityNodeInfo.ACTION_CLICK)"));
@@ -203,4 +223,28 @@ test "a11y 경계: Android 는 «누르는 경로 그대로» 누르고, 좌표�
 
     // 그리고 **d8 이 죽지 않게** provider 는 static 이다(아래 판정자가 그 이유를 적는다).
     try std.testing.expectEqual(@as(usize, 1), count(java, "private static final class Provider extends AccessibilityNodeProvider"));
+}
+
+test "a11y 경계: 읽어 준 것과 누를 것이 같고, 이름은 modified UTF-8 함정을 피한다" {
+    const allocator = std.testing.allocator;
+    const host = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(host);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+
+    // **4회차** — 커서는 index 로 붙잡는데 그 사이 화면이 바뀌면 같은 index 가 다른 버튼이 된다.
+    // 「esc」라고 듣고 tab 이 눌리느니 **아무것도 안 누르는** 편이 낫다(무엇이 눌렸는지 볼 수 없다).
+    try std.testing.expectEqual(@as(usize, 1), count(java, "private String a11yFocusLabel;"));
+    try std.testing.expectEqual(@as(usize, 1), count(java, "if (!view.a11yFocusLabel.equals(nativeA11yNode(virtualViewId, now))) return false;"));
+    // 커서를 거두면 그 이름도 버린다 — 남기면 옛 이름으로 대조해 **영영 안 눌린다**.
+    try std.testing.expectEqual(@as(usize, 1), count(java, "view.a11yFocusLabel = null;"));
+
+    // **6회차** — `NewStringUTF` 는 modified UTF-8 을 기대해서 이모지(4바이트)에 정의되지 않은
+    // 동작이고 CheckJNI 빌드에서는 abort 한다. 이 파일의 클립보드 경로가 같은 이유로 이미
+    // UTF-16 변환을 쓴다 — 서술자 이름도 같은 규율을 따른다(다음 슬라이스가 사용자 데이터를 낸다).
+    const node_fn = std.mem.indexOf(u8, host, "Java_dev_maru_MaruActivity_nativeA11yNode") orelse return error.MissingNodeFn;
+    const node_end = std.mem.indexOf(u8, host[node_fn..], "\n}") orelse return error.MissingNodeEnd;
+    const node_body = host[node_fn .. node_fn + node_end];
+    try std.testing.expectEqual(@as(usize, 0), countCode(node_body, "NewStringUTF")); // 주석의 언급은 뺀다
+    try std.testing.expectEqual(@as(usize, 1), count(node_body, "utf8ToUtf16("));
 }

@@ -7200,6 +7200,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
+    sortA11yForReading();
     noteFrameChanged();
     return @intCast(quad_count);
 }
@@ -7230,6 +7231,29 @@ const max_a11y_nodes = 128;
 
 /// 지금 그린 면 하나를 접근성에 알린다. **폭이 0 이면 안 그려진 것**이라 안 낸다 — 이 파일의
 /// rect 규율과 같은 판정이다(옛 자리를 답하면 없는 버튼이 읽힌다).
+/// **읽는 순서로 세운다** — 위에서 아래로, 그다음 왼쪽에서 오른쪽으로.
+///
+/// 서술자가 나오는 순서는 **그리는 순서**다. 그대로 두면 스크린 리더로 훑을 때 앱 바에서
+/// `뒤로 가기(x=0) → 자판(x=298) → 끊기(x=246)` 로 오른쪽에 갔다가 왼쪽으로 되돌아온다(실측).
+/// 화면에는 아무 표시가 없고 **훑는 사람만** 겪는다.
+///
+/// **여기서 정하는 이유**: 순서를 host 가 각자 정하면 두 host 가 조용히 갈리고, 그 갈림은 스크린
+/// 리더에게만 보인다(처음에는 iOS 어댑터에서 정렬했다가 Android 를 붙이며 이리로 옮겼다).
+/// 그리고 좌우가 뒤집히는 언어를 알아야 할 자리도 결국 여기다 — 문구가 이 층에 있다.
+///
+/// 같은 줄인지는 **y 값이 같은가**로 잰다. 한 줄에 놓이는 사각형은 레이아웃이 같은 값을 주므로
+/// (`term_bar_rect.y`·키바의 행 y) 이것이 참이고, 어림으로 재면 오히려 「a~b, b~c 인데 a≁c」가
+/// 생겨 정렬 자체가 흐트러진다.
+fn sortA11yForReading() void {
+    const Less = struct {
+        fn f(_: void, a: A11yNode, b: A11yNode) bool {
+            if (a.rect.y != b.rect.y) return a.rect.y < b.rect.y;
+            return a.rect.x < b.rect.x;
+        }
+    };
+    std.mem.sort(A11yNode, a11y_nodes[0..a11y_count], {}, Less.f);
+}
+
 fn noteA11y(rect: SetRect, sem: tree.Semantics) void {
     if (rect.w <= 0 or rect.h <= 0) return;
     // **덮인 것은 안 낸다.** `buildUi` 는 어느 화면이든 터미널 층을 먼저 세우므로(코어 격자가

@@ -126,20 +126,21 @@ test "a11y 경계: 어휘는 host 에만, 좌표는 누르는 쪽과 같은 식�
     try std.testing.expect(count(host, "p.x - safe.left") >= 1);
 }
 
-test "a11y 경계: 읽는 순서는 보는 순서다" {
-    // **적대적 검증 1회차가 잡은 결함이다.** 브리지가 내는 순서는 그리는 순서라, 그대로 주면
-    // VoiceOver 로 훑을 때 `뒤로 가기(x=0) → 자판(x=298) → 끊기(x=246)` 로 오른쪽에 갔다가
-    // 왼쪽으로 되돌아온다(실측). 화면에는 아무 표시가 없고 **훑는 사람만** 겪는다.
+test "a11y 경계: 순서를 host 가 다시 세우지 않는다" {
+    // 읽는 순서는 **브리지**가 정한다(`sortA11yForReading`) — 그 성질은 Zig 단위 판정자가
+    // 잰다(`mobile_bridge_contract` 의 「보는 순서로 낸다」). 여기서 지키는 것은 **host 가 그것을
+    // 다시 세우지 않는다**는 것이다: 두 host 가 각자 정렬하면 조용히 갈리고, 그 갈림은 스크린
+    // 리더에게만 보인다(처음에 iOS 에서 정렬했다가 Android 를 붙이며 브리지로 옮겼다).
     const allocator = std.testing.allocator;
     const host = try readSource(allocator, "src/platform/ios/ios_app_host.m");
     defer allocator.free(host);
+    const bridge = try readSource(allocator, "src/platform/mobile/mobile_bridge.zig");
+    defer allocator.free(bridge);
 
-    try std.testing.expectEqual(@as(usize, 1), count(host, "[out sortUsingComparator:"));
-    // 위에서 아래로, 그다음 왼쪽에서 오른쪽으로 — 둘 다 봐야 한다(하나만 보면 줄이 섞인다).
-    try std.testing.expect(count(host, "CGRectGetMinY(ra)") >= 1);
-    try std.testing.expect(count(host, "CGRectGetMinX(ra)") >= 1);
-    // 같은 줄 판정은 **높이로** 잰다 — 고정 픽셀로 재면 글자 크기를 키웠을 때 줄이 갈린다.
-    try std.testing.expectEqual(@as(usize, 1), count(host, "MIN(CGRectGetHeight(ra), CGRectGetHeight(rb)) / 2"));
+    try std.testing.expectEqual(@as(usize, 0), count(host, "sortUsingComparator"));
+    try std.testing.expectEqual(@as(usize, 1), count(bridge, "fn sortA11yForReading()"));
+    // 그리고 **부르는 자리가 있어야** 한다 — 함수만 있고 안 부르면 순서는 그리는 순서 그대로다.
+    try std.testing.expectEqual(@as(usize, 1), count(bridge, "    sortA11yForReading();"));
 }
 
 test "a11y 경계: 상태만 바뀌면 알리지도 «갈아 끼우지도» 않는다" {

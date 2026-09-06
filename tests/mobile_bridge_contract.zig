@@ -7097,6 +7097,33 @@ test "M9 서술자: 키바 키 열둘이 다 나오고, 눌러 둔 수정자는 
     try std.testing.expect(ctrl_after.sem.selected);
 }
 
+test "M9 서술자: 보는 순서로 낸다 — 훑는 사람이 되돌아가지 않는다" {
+    // 서술자가 나오는 순서는 **그리는 순서**다. 그대로 두면 앱 바에서 `뒤로 가기(x=0) →
+    // 자판(x=298) → 끊기(x=246)` 가 되어, 스크린 리더로 훑을 때 오른쪽에 갔다가 왼쪽으로
+    // 되돌아온다(iOS 실기에서 그렇게 나왔다). 화면에는 아무 표시가 없다.
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(411, 841, now());
+
+    const nodes = bridge.a11yNodesForTest();
+    try std.testing.expect(nodes.len >= 3);
+    // 앱 바 셋이 **왼쪽에서 오른쪽으로** 나온다.
+    try std.testing.expectEqualStrings("뒤로 가기", nodes[0].sem.label);
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .mob_disconnect), nodes[1].sem.label);
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .mob_keyboard), nodes[2].sem.label);
+
+    // 그리고 **전체가** 위에서 아래로, 같은 줄에서는 왼쪽에서 오른쪽으로다.
+    var i: usize = 1;
+    while (i < nodes.len) : (i += 1) {
+        const prev = nodes[i - 1].rect;
+        const cur = nodes[i].rect;
+        if (prev.y == cur.y) {
+            try std.testing.expect(prev.x < cur.x);
+        } else {
+            try std.testing.expect(prev.y < cur.y);
+        }
+    }
+}
+
 test "M9 서술자: 덮여서 안 눌리는 것은 안 읽힌다" {
     // **적대적 검증 1회차가 잡은 결함이다.** `buildUi` 가 어느 화면이든 터미널 층을 세우므로
     // 설정 화면이 덮고 있어도 앱 바·키바의 rect 는 서 있다 — 그런데 그때 `chromePointer` 가

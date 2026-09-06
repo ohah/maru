@@ -42,7 +42,7 @@ const Source = struct {
 
     pub fn snapshot(self: *@This()) !subject.Expected {
         self.calls += 1;
-        if (self.fail_at == self.calls) return error.LocalFenceFailed;
+        if (self.fail_at == self.calls) return error.OutOfMemory;
         var result = self.value;
         if (self.drift_at) |at| {
             if (self.calls >= at) result.assets[1].size += 1;
@@ -88,8 +88,13 @@ const AttestationDriver = struct {
 
 const Verifier = struct {
     driver: AttestationDriver = .{},
+    check_copy: bool = false,
 
     pub fn verify(self: *@This(), authority: anytype, deadline: anytype, result: *post.VerifiedRelease) !void {
+        if (self.check_copy) {
+            var copied = authority.*;
+            try std.testing.expectError(error.InvalidOwner, copied.snapshot());
+        }
         try post.testing_api.verify(authority, &self.driver, deadline, result);
     }
 };
@@ -112,7 +117,7 @@ fn run(source: *Source, remote: *Remote, verifier: *Verifier, deadline: *Deadlin
 test "two exact published reads bracket one sealed post-publish attestation" {
     var source = Source{};
     var remote = Remote{};
-    var verifier = Verifier{};
+    var verifier = Verifier{ .check_copy = true };
     var deadline = Deadline{};
     var result: post.VerifiedRelease = .{};
     try run(&source, &remote, &verifier, &deadline, &result);
@@ -121,6 +126,8 @@ test "two exact published reads bracket one sealed post-publish attestation" {
     try std.testing.expectEqual([_]u64{ 1000, 1001, 1002, 1003 }, value.artifact_ids);
     try std.testing.expectEqual(@as(usize, 2), remote.calls);
     try std.testing.expectEqual(@as(usize, 6), verifier.driver.calls);
+    var copied = result;
+    try std.testing.expect(copied.value() == null);
     try result.deinit();
 }
 
@@ -136,13 +143,22 @@ test "final published ID exchange removes the temporary local receipt" {
 }
 
 test "local graph drift at every attestation fence publishes nothing" {
-    inline for (2..10) |drift_at| {
+    inline for (2..12) |drift_at| {
         var source = Source{ .drift_at = drift_at };
         var remote = Remote{};
         var verifier = Verifier{};
         var deadline = Deadline{};
         var result: post.VerifiedRelease = .{};
         try std.testing.expectError(error.AuthorityChanged, run(&source, &remote, &verifier, &deadline, &result));
+        try std.testing.expect(result.value() == null);
+    }
+    inline for (1..12) |fail_at| {
+        var source = Source{ .fail_at = fail_at };
+        var remote = Remote{};
+        var verifier = Verifier{};
+        var deadline = Deadline{};
+        var result: post.VerifiedRelease = .{};
+        try std.testing.expectError(error.OutOfMemory, run(&source, &remote, &verifier, &deadline, &result));
         try std.testing.expect(result.value() == null);
     }
 }
@@ -193,7 +209,42 @@ test "preowned result and deadline expiry preserve no new authority" {
     try std.testing.expectError(error.InvalidOwner, run(&source, &remote, &verifier, &deadline, &occupied));
     try std.testing.expectEqual(@as(usize, 0), remote.calls);
 
-    inline for (1..14) |expire_at| {
+    var aggregate: @import("release_adapter_candidate_aggregate_reopen").ReopenedAggregate = .{};
+    var pinned: @import("release_adapter_github_cli_authority").PinnedExecutable = .{
+        .path_sha256 = @splat(0),
+        .path_len = 0,
+        .identity = .{ .device = 0, .inode = 0 },
+        .size = 0,
+        .mode = 0,
+        .sha256 = @splat(0),
+    };
+    var product_deadline: @import("release_adapter_deadline").Deadline = .{};
+    var response: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidOwner, subject.authenticateUntil(
+        std.testing.io,
+        std.testing.allocator,
+        &aggregate,
+        .{ .path = "/usr/bin/false", .pinned = &pinned },
+        "token",
+        &response,
+        &product_deadline,
+        &occupied,
+    ));
+
+    var pristine_product: post.VerifiedRelease = .{};
+    const aliased_response = std.mem.asBytes(&pristine_product);
+    try std.testing.expectError(error.InvalidOwner, subject.authenticateUntil(
+        std.testing.io,
+        std.testing.allocator,
+        &aggregate,
+        .{ .path = "/usr/bin/false", .pinned = &pinned },
+        "token",
+        aliased_response,
+        &product_deadline,
+        &pristine_product,
+    ));
+
+    inline for (1..13) |expire_at| {
         source = .{};
         remote = .{};
         verifier = .{};
@@ -223,12 +274,28 @@ test "published response parser binds lifecycle and exact four assets independen
     const extra = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "]}", ",{\"id\":9999,\"name\":\"foreign\",\"size\":1,\"state\":\"uploaded\",\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"content_type\":\"application/octet-stream\"}]}");
     defer std.testing.allocator.free(extra);
     try std.testing.expectError(error.InvalidResponse, subject.testing_api.parse(std.testing.allocator, extra, exp));
+
+    const missing_start = std.mem.indexOf(u8, bytes, "{\"id\":1001").?;
+    const missing_end = std.mem.indexOfPos(u8, bytes, missing_start, "}").? + 1;
+    const missing = try std.mem.concat(std.testing.allocator, u8, &.{ bytes[0 .. missing_start - 1], bytes[missing_end..] });
+    defer std.testing.allocator.free(missing);
+    try std.testing.expectError(error.InvalidResponse, subject.testing_api.parse(std.testing.allocator, missing, exp));
+
+    const duplicate_id = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"id\":1003", "\"id\":1000");
+    defer std.testing.allocator.free(duplicate_id);
+    try std.testing.expectError(error.InvalidResponse, subject.testing_api.parse(std.testing.allocator, duplicate_id, exp));
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseWithFailingAllocator, .{ bytes, exp });
+}
+
+fn parseWithFailingAllocator(allocator: std.mem.Allocator, bytes: []const u8, exp: subject.Expected) !void {
+    _ = try subject.testing_api.parse(allocator, bytes, exp);
 }
 
 test "ReleaseFast diagnostic measures the whole injected composition" {
     if (builtin.mode != .ReleaseFast) return error.SkipZigTest;
     var samples: [20]u64 = undefined;
-    const fd_before = std.posix.system.getdtablesize();
+    const fd_before = try openFdCount();
     var external_calls: usize = 0;
     for (&samples) |*sample| {
         var source = Source{};
@@ -243,8 +310,17 @@ test "ReleaseFast diagnostic measures the whole injected composition" {
         try result.deinit();
     }
     std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
-    const fd_after = std.posix.system.getdtablesize();
+    const fd_after = try openFdCount();
     std.debug.print("published_cleanup_reauthentication mode=ReleaseFast samples=20 failures=0 fd_delta={d} external_calls={d} median_ns={d} p95_ns={d} max_ns={d}\n", .{
         @as(i64, fd_after) - @as(i64, fd_before), external_calls, samples[10], samples[18], samples[19],
     });
+}
+
+fn openFdCount() !u32 {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, "/dev/fd", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: u32 = 0;
+    while (try iterator.next(std.testing.io)) |_| count += 1;
+    return count;
 }

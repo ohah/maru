@@ -158,7 +158,19 @@ pub fn connectOrLaunchDetailed(
     const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return plain(.{ .failed = .invalid_endpoint });
 
     // Manifest-capable host는 host별 short endpoint를 쓰므로 fixed major socket보다 registry를 먼저 본다.
-    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return plain(outcome);
+    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| {
+        // 이 조기 반환은 **아래 업그레이드 스캔을 통째로 건너뛴다**(docs/session-host-upgrade.md
+        // 머리말 상태 블록 「앱 재실행 orchestration은 연결됐다」: GUI 는 「같은 build 의 host 가
+        // 없으면」에만 exec 교체를 시도한다). 계약대로지만 결과는 무겁다 — 한 번 현재 build 의 host
+        // 가 생기면 구 build 의 살아 있는 host 는 다시 스캔되지 않아 자기 runtime 과 함께 굳는다.
+        //
+        // 2026-09-05 실측: 셸 12 개를 쥔 host 가 이 경로로 영구히 구 이미지에 남았다. 그런데 이 분기가
+        // 무음이라 「왜 업그레이드를 안 했나」가 사후에 재구성되지 않았고, `candidate rejected` 가 한
+        // 줄도 없다는 사실만으로 스캔 자체가 안 돌았음을 역산해야 했다. 한 줄이면 즉시 갈린다.
+        if (!builtin.is_test)
+            std.log.info("session host: current-build host found — upgrade scan skipped", .{});
+        return plain(outcome);
+    }
 
     var sock_buf: [640]u8 = undefined;
     const socket = discovery.socketPathIn(&sock_buf, dir) catch return plain(.{ .failed = .invalid_endpoint });

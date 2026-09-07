@@ -188,6 +188,7 @@ test "checkpoint invocation primitives have one production composition owner" {
     var admits: usize = 0;
     var invokes: usize = 0;
     var advances: usize = 0;
+    var bootstraps: usize = 0;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind == .sym_link) return error.TestUnexpectedResult;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
@@ -202,11 +203,13 @@ test "checkpoint invocation primitives have one production composition owner" {
         admits += std.mem.count(u8, source, "checkpoint.admit(");
         invokes += std.mem.count(u8, source, "checkpoint.invoke(");
         advances += std.mem.count(u8, source, "checkpoint.advance(");
+        bootstraps += std.mem.count(u8, source, "checkpoint.initializeOrRecoverInitial(");
     }
     try std.testing.expectEqual(@as(usize, 1), imports);
     try std.testing.expectEqual(@as(usize, 2), admits);
     try std.testing.expectEqual(@as(usize, 1), invokes);
     try std.testing.expectEqual(@as(usize, 2), advances);
+    try std.testing.expectEqual(@as(usize, 1), bootstraps);
 }
 
 test "fresh-process action bridge rejects non-action invocations and non-action results" {

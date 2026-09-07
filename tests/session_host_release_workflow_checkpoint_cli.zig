@@ -19,6 +19,10 @@ test "argv admits only the two closed commands and canonical stage result names"
     try std.testing.expectError(error.InvalidStage, cli.parse(&.{ "admit", "/private/tmp/root", root_token, "Candidate_Attestation" }));
     try std.testing.expectError(error.InvalidResult, cli.parse(&.{ "commit", "/private/tmp/root", root_token, "candidate_attestation", "cleanup_failed" }));
     try std.testing.expectError(error.InvalidArguments, cli.parse(&.{ "admit", "/private/tmp/root", root_token, "candidate_attestation", "extra" }));
+    try std.testing.expectError(error.InvalidPath, cli.parse(&.{ "admit", "/private/tmp/../root", root_token, "candidate_attestation" }));
+    try std.testing.expectError(error.InvalidPath, cli.parse(&.{ "admit", "/private//root", root_token, "candidate_attestation" }));
+    try std.testing.expectError(error.InvalidPath, cli.parse(&.{ "admit", "/private/tmp/root/", root_token, "candidate_attestation" }));
+    try std.testing.expectError(error.InvalidPath, cli.parse(&.{ "admit", "/private/tmp\x00/root", root_token, "candidate_attestation" }));
 }
 
 test "fresh owner admission is read only and success commit publishes exactly the fixed next leaf" {

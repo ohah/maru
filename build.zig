@@ -14432,6 +14432,14 @@ pub fn build(b: *std.Build) void {
         "session-host-release-workflow-checkpoint",
         "Build the product checkpoint bridge for live release actions",
     );
+    const session_host_release_workflow_bootstrap_cli_step = b.step(
+        "test-session-host-release-workflow-bootstrap-cli",
+        "Validate protected workflow checkpoint bootstrap and recovery",
+    );
+    const session_host_release_workflow_bootstrap_product_step = b.step(
+        "session-host-release-workflow-bootstrap",
+        "Build the protected workflow checkpoint bootstrap executable",
+    );
     const session_host_release_adapter_live_workflow_owner_step = b.step(
         "test-session-host-release-adapter-live-workflow-owner",
         "Bind the eight live workflow invocations to durable checkpoints",
@@ -14953,6 +14961,61 @@ pub fn build(b: *std.Build) void {
             run_workflow_checkpoint_cli_process.addArtifactArg(workflow_checkpoint_cli_exe);
             run_workflow_checkpoint_cli_process.setCwd(b.path("."));
             session_host_release_workflow_checkpoint_cli_step.dependOn(&run_workflow_checkpoint_cli_process.step);
+            const workflow_bootstrap_cli_mod = b.createModule(.{
+                .root_source_file = b.path("tools/session-host/release_workflow_bootstrap_cli.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_environment", .module = workflow_checkpoint_environment_mod },
+                    .{ .name = "release_adapter_live_workflow_owner", .module = live_workflow_owner_mod },
+                },
+            });
+            const workflow_bootstrap_cli_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_workflow_bootstrap_cli.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    .{ .name = "release_workflow_bootstrap_cli", .module = workflow_bootstrap_cli_mod },
+                },
+            }) });
+            const run_workflow_bootstrap_cli_tests = b.addRunArtifact(workflow_bootstrap_cli_tests);
+            run_workflow_bootstrap_cli_tests.addArg("--maru-expect-tests=5");
+            run_workflow_bootstrap_cli_tests.setCwd(b.path("."));
+            session_host_release_workflow_bootstrap_cli_step.dependOn(&run_workflow_bootstrap_cli_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_bootstrap_cli_tests.step);
+            test_step.dependOn(&run_workflow_bootstrap_cli_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_workflow_bootstrap_cli_tests.step);
+            const workflow_bootstrap_cli_exe = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-release-workflow-bootstrap-{s}", .{@tagName(composition_optimize)}),
+                .root_module = workflow_bootstrap_cli_mod,
+            });
+            if (composition_optimize == optimize) {
+                session_host_release_workflow_bootstrap_product_step.dependOn(
+                    &b.addInstallArtifact(workflow_bootstrap_cli_exe, .{
+                        .dest_sub_path = "maru-session-host-release-workflow-bootstrap",
+                    }).step,
+                );
+            }
+            const workflow_bootstrap_cli_process = b.addExecutable(.{
+                .name = b.fmt("session-host-release-workflow-bootstrap-cli-process-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_release_workflow_bootstrap_cli_process.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod }},
+                }),
+            });
+            const run_workflow_bootstrap_cli_process = b.addRunArtifact(workflow_bootstrap_cli_process);
+            run_workflow_bootstrap_cli_process.addArtifactArg(workflow_bootstrap_cli_exe);
+            run_workflow_bootstrap_cli_process.setCwd(b.path("."));
+            session_host_release_workflow_bootstrap_cli_step.dependOn(&run_workflow_bootstrap_cli_process.step);
             const repository_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const release_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const draft_creation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_release", .module = release_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });

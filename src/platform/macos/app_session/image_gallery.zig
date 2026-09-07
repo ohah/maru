@@ -415,7 +415,12 @@ pub const State = struct {
         }
     }
 
-    /// 거를 자리를 못 잡았을 때의 물러날 자리 — **필터를 끄고 전부 보여준다**.
+    /// 거를 자리를 못 잡았을 때의 물러날 자리 — **검색을 끄고 그 종류를 전부 보여준다**.
+    ///
+    /// ⚠️ **끄는 것은 검색이지 종류가 아니다.** 종류 필터(§2.1)는 사용자가 「지금 무엇을 보고
+    /// 있는가」로 고른 것이라, 자리를 못 잡았다고 이미지 필터에 활동을 쏟아 놓으면 그것이야말로
+    /// 「왜 이게 뜨지」가 된다. 예전 주석은 「필터를 끈다」고 적혀 있었는데 종류 필터가 생긴 뒤로
+    /// 거짓이 됐다(적대적 검증 I2).
     ///
     /// 반쯤 걸러 두면 사용자는 왜 어떤 이미지가 사라졌는지 알 수 없다. 여기서도 자리를 못 잡으면
     /// 목록은 비지만, **`hits` 와 `labels` 는 언제나 같은 길이다**(둘 다 비어 있다).
@@ -2282,6 +2287,50 @@ pub fn listRowHeightPx(self: *const AppSession) u32 {
 /// 줄 사이 여백(px). 촘촘하면 훑기 어렵고 넓으면 한 화면에 몇 줄 못 담는다.
 const list_row_padding_px: u32 = 4;
 
+/// 줄 목록이 이번 프레임에 **자리를 못 얻는** 수. 하나도 못 그리면 `count()` 와 같다.
+///
+/// **계산은 `listWindow` 가 소유하고 이 함수는 그것을 읽을 뿐이다.** 예전에는 렌더가 `overflow` 에
+/// 남긴 값을 안내가 읽었는데, 그리는 순서가 「안내 → 목록」이라 안내는 **한 프레임 늦은 값**을 봤다
+/// (적대적 검증 I1). 그때 이 함수가 계산을 따로 갖는 바람에 **렌더와 두 벌**이 됐고, J1 이 그것을
+/// 다시 잡았다 — 지금은 둘 다 `listWindow` 하나를 부른다.
+pub fn listOverflow(self: *const AppSession) usize {
+    const w = listWindow(self);
+    return w.total -| (w.last -| w.first);
+}
+
+/// 줄 목록이 이번 프레임에 그릴 **창**. 렌더와 안내가 **이 하나만** 부른다.
+///
+/// **두 벌이면 갈린다.** 처음에는 `listOverflow` 가 계산을 따로 갖고 렌더가 또 계산했는데, 그것은
+/// 이 저장소가 반복해서 당한 형태다(적대적 검증 J1 이 내 I1 수정에서 그것을 찾았다 — 계산을 한
+/// 곳으로 모은다면서 **절반만** 옮겼다). `cols == 0` 처럼 한 줄도 못 그리는 경우는 `first == last`
+/// 로 답한다 — 그러면 overflow 가 저절로 `total` 이 된다.
+pub const ListWindow = struct { total: usize, first: usize, last: usize, rows_fit: usize, cols: u16, row_h: u32 };
+
+pub fn listWindow(self: *const AppSession) ListWindow {
+    const total = self.image_gallery.count();
+    const empty: ListWindow = .{ .total = total, .first = 0, .last = 0, .rows_fit = 0, .cols = 0, .row_h = 0 };
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return empty;
+    const area = gridArea(self);
+    const row_h = listRowHeightPx(self);
+    if (area.w == 0 or area.h == 0 or row_h == 0) return empty;
+    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+    if (cols == 0) return empty;
+
+    const rows_fit: usize = @intCast(area.h / row_h);
+    // **스크롤을 목록 끝 안으로 잡아 둔다**(H2) — 큰 목록에서 굴린 뒤 짧은 pane 으로 옮기면
+    // `first` 가 끝을 넘어 화면이 비고, 안내가 틀린 원인을 말한다.
+    const max_first = total -| rows_fit;
+    const first: usize = @min(@as(usize, @intCast(self.image_gallery.scroll.offset_y_px / row_h)), max_first);
+    return .{
+        .total = total,
+        .first = first,
+        .last = @min(first +| rows_fit, total),
+        .rows_fit = rows_fit,
+        .cols = cols,
+        .row_h = row_h,
+    };
+}
+
 /// 활동을 **줄 목록**으로 그린다(활동 뷰 계약 §2.1·§2.2).
 ///
 /// **격자와 같은 자리를 쓴다.** 필터가 모양을 정하므로 둘이 동시에 뜨는 일은 없다. 자리 계산을
@@ -2305,19 +2354,19 @@ pub fn collectActivityList(
 
     // **한 줄도 못 그리는 길에서도 그 사실을 남긴다**(계약 §2 — 「없다」와 「안 보인다」는 다르다).
     // 조용히 물러나면 화면은 비었는데 안내는 「4,084개」라고만 말해, 사용자에게는 목록이 **없는 것**과
-    // 구분되지 않는다. 자리를 하나도 못 얻었으므로 전부가 overflow 다.
+    // 구분되지 않는다.
     //
     // ⚠️ **어느 길에서 그 안내가 실제로 보이는지 알고 적는다.** `gridArea().w` 는 `tree_content.w` 와
     // 같은 값이므로, `cols == 0` 이면 안내도 같은 폭 게이트(`tree_content_cols > 0`)에 막혀 **갤러리
     // 블록 자체가 안 돈다** — 그 경우 문구는 원리적으로 화면에 못 나온다. 실제로 보이는 길은
     // **세로가 모자랄 때**(`area.h == 0`)다. 그래서 문구가 「좁다」가 아니라 「자리가 없다」이다
     // (적대적 검증 F1 이 「좁아서」라고 적힌 것을 잡았다 — 틀린 원인을 말하고 있었다).
-    const total = self.image_gallery.count();
+    const win = listWindow(self);
     const area = gridArea(self);
-    const row_h = listRowHeightPx(self);
-    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-    if (area.w == 0 or area.h == 0 or row_h == 0 or cols == 0) {
-        self.image_gallery.overflow = total;
+    const cols = win.cols;
+    const row_h = win.row_h;
+    if (cols == 0 or row_h == 0) {
+        self.image_gallery.overflow = win.total;
         self.image_gallery.drawn_rows = 0;
         return;
     }
@@ -2325,23 +2374,22 @@ pub fn collectActivityList(
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
     // 스크롤은 격자와 같은 값을 쓴다 — 필터를 바꿔도 「어디를 보고 있었나」가 이어진다.
-    const rows_fit: usize = @intCast(area.h / row_h);
-    // **스크롤을 목록 끝 안으로 잡아 둔다.** 오프셋은 픽셀이고 목록 길이는 소스·필터가 정하므로,
-    // 큰 목록에서 굴린 뒤 작은 pane 으로 옮기면 `first` 가 끝을 넘어 **화면이 빈다** — 그때
-    // 안내는 「자리가 없습니다」라고 **틀린 원인**을 말한다(적대적 검증 H2. F1 과 같은 형태다).
-    // 리셋(§`onSourceChanged`)이 의미를 맞추고, 이 clamp 가 **어느 경로로 어긋나도** 화면을 살린다.
-    const max_first = total -| rows_fit;
-    const first: usize = @min(@as(usize, @intCast(self.image_gallery.scroll.offset_y_px / row_h)), max_first);
-    const last = @min(first +| rows_fit, total);
-    // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
-    self.image_gallery.overflow = total -| (last -| first);
+    const first = win.first;
+    const last = win.last;
+    // **자리를 못 얻은 수를 남긴다.** 계약 §2(「없다」와 「안 보인다」를 가른다)를 지키는 것은 이제
+    // 안내가 직접 부르는 `listWindow` 이고, **이 필드를 읽는 제품 코드는 없다** — 판정자가 렌더를
+    // 들여다보는 창일 뿐이다(`drawn_rows` 와 같은 역할, 적대적 검증 K1 이 전수로 확인했다).
+    // 그 사실을 안 적으면 다음 사람이 「안내가 이걸 읽겠지」로 오해해 순서 의존을 되살린다.
+    self.image_gallery.overflow = win.total -| (last -| first);
 
-    // 접두는 라벨보다 **흐리게** — 곁말이 본문보다 먼저 읽히면 안 된다(격자 라벨과 같은 규율).
+    // 접두·시각은 라벨보다 **흐리게** — 곁말이 본문보다 먼저 읽히면 안 된다(격자 라벨과 같은 규율).
     const dim: maru.terminal.Color = .{ .rgb = towardBg(
         self.appearance.theme.sidebar_foreground,
         self.appearance.theme.sidebar_background,
         time_dim_percent,
     ) };
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+    const now_off = utcOffsetAt(now_s);
 
     var drawn: usize = 0;
     var i = first;
@@ -2365,12 +2413,22 @@ pub fn collectActivityList(
         if (text.len == 0 and prefix.len == 0) continue;
         drawn += 1;
 
+        // **시각도 격자에서 갖던 정보다.** 활동 라벨은 아직 `time_s == 0`(AV2)이라 안 그려지지만,
+        // 「전체」에 섞이는 이미지 줄은 격자에서 시각을 보여 주고 있었다 — 목록이라고 버리면
+        // 접두를 버렸던 것과 같은 손실이다(적대적 검증 I3, D3 와 짝).
+        var time_buf: [16]u8 = undefined;
+        var time_text: []const u8 = &.{};
+        if (label.time_s != 0) {
+            const off = utcOffsetAt(label.time_s);
+            time_text = formatImageTime(&time_buf, label.time_s, off, now_s, now_off);
+        }
+
         const y = area.y + @as(u32, @intCast((i - first) * row_h));
-        // 자리 나누기는 격자와 **같은 순수 함수**가 정한다(시각은 아직 없으므로 0 칸).
+        // 자리 나누기는 격자와 **같은 순수 함수**가 정한다 — 좁아지면 시각부터 버린다(§2.2.3).
         const split = context_mod.splitLabelRow(
             cols,
             displayColsOf(prefix),
-            0,
+            displayColsOf(time_text),
             time_gap_cols,
             if (text.len == 0) 0 else min_label_cols,
         );
@@ -2389,6 +2447,16 @@ pub fn collectActivityList(
             const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.label_cols, text, fg) catch continue;
             self.collectShaped(collected, dl, builder, .{ .pane = .{
                 .origin_x = area.x +| (at_col *| self.cell_width_px),
+                .origin_y = y,
+                .colors = colors,
+            } });
+        }
+        if (split.time_cols > 0 and time_text.len > 0) {
+            // 시각은 **오른쪽 끝**에 붙인다(격자 라벨과 같은 자리 규약).
+            const time_col: u32 = @as(u32, cols) -| split.time_cols;
+            const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.time_cols, time_text, dim) catch continue;
+            self.collectShaped(collected, tdl, builder, .{ .pane = .{
+                .origin_x = area.x +| (time_col *| self.cell_width_px),
                 .origin_y = y,
                 .colors = colors,
             } });
@@ -2442,9 +2510,12 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.
     if (self.image_gallery.tiles.items.len > 0) {
-        if (self.image_gallery.overflow == 0) return "";
+        // **렌더가 남긴 값이 아니라 지금 계산을 본다.** 그리는 순서가 「안내 → 격자」라 잔값을 읽으면
+        // 한 프레임 늦는다 — 목록에서 고친 것과 **같은 결함**이고, 그때 격자를 빠뜨렸다(적대적 검증 J5).
+        const grid_overflow = gridLayout(self).overflow;
+        if (grid_overflow == 0) return "";
         return maru.i18n.format(buf, maru.i18n.t(.image_gallery_shown_of), &.{
-            .{ .d = @intCast(n - self.image_gallery.overflow) },
+            .{ .d = @intCast(n -| grid_overflow) },
             .{ .d = @intCast(n) },
         });
     }
@@ -2452,7 +2523,7 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 높이 0), 그때 개수만 적으면 사용자에게는 「목록이 없다」와 구분되지 않는다 — 계약 §2 가
     // 가르라고 한 바로 그 둘이다. 격자는 「12장 중 8장」이 그 몫을 하지만 목록에는 타일이 없어
     // 그 경로를 안 탄다.
-    if (!self.image_gallery.filter.isGrid() and self.image_gallery.overflow >= n) {
+    if (!self.image_gallery.filter.isGrid() and listOverflow(self) >= n) {
         return maru.i18n.t(.image_gallery_too_narrow);
     }
     // **단위도 종류를 따른다.** 명령을 「장」으로 세면 안 된다 — 헤드리스 캡처가 실제로 「4084장」을

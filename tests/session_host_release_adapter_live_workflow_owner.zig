@@ -187,6 +187,7 @@ test "checkpoint invocation primitives have one production composition owner" {
     var imports: usize = 0;
     var admits: usize = 0;
     var invokes: usize = 0;
+    var advances: usize = 0;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind == .sym_link) return error.TestUnexpectedResult;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
@@ -200,10 +201,38 @@ test "checkpoint invocation primitives have one production composition owner" {
         imports += import_count;
         admits += std.mem.count(u8, source, "checkpoint.admit(");
         invokes += std.mem.count(u8, source, "checkpoint.invoke(");
+        advances += std.mem.count(u8, source, "checkpoint.advance(");
     }
     try std.testing.expectEqual(@as(usize, 1), imports);
-    try std.testing.expectEqual(@as(usize, 1), admits);
+    try std.testing.expectEqual(@as(usize, 2), admits);
     try std.testing.expectEqual(@as(usize, 1), invokes);
+    try std.testing.expectEqual(@as(usize, 2), advances);
+}
+
+test "fresh-process action bridge rejects non-action invocations and non-action results" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.open();
+    const identity = try fixture.root.value();
+    var token_storage: [checkpoint.max_root_identity_token_bytes:0]u8 = undefined;
+    const token = try checkpoint.encodeRootIdentity(&token_storage, identity);
+    try fixture.root.deinit();
+    fixture.root = .{};
+    try std.testing.expectError(error.InvalidExternalAction, owner.admitActionProcess(
+        std.testing.allocator,
+        fixture.path(),
+        token,
+        fixture.currentContext(),
+        .{ .candidate_pinning = {} },
+    ));
+    try std.testing.expectError(error.InvalidActionResult, owner.commitActionProcess(
+        std.testing.allocator,
+        fixture.path(),
+        token,
+        fixture.currentContext(),
+        .{ .candidate_attestation = {} },
+        .cleanup_failed,
+    ));
 }
 
 test "root or context drift during execution publishes no next checkpoint" {

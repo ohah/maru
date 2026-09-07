@@ -18,7 +18,7 @@ pub const View = struct {
 };
 
 pub const Observation = struct {
-    path: []const u8,
+    path: [:0]const u8,
     size: u64,
     mode: u32,
     sha256: [64]u8,
@@ -66,7 +66,7 @@ pub const Materialized = struct {
         if (!sameDestination(self, current)) return error.AuthorityChanged;
         try validateBoundAuthorities(self, current);
         const observed = try validateDestination(self);
-        return .{ .path = self.path[0..self.path_len], .size = observed.size, .mode = observed.mode, .sha256 = self.sha256 };
+        return .{ .path = self.path[0..self.path_len :0], .size = observed.size, .mode = observed.mode, .sha256 = self.sha256 };
     }
 };
 

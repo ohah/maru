@@ -39,3 +39,38 @@ test "source composes the phase without ambient paths credentials or result bool
     try std.testing.expect(std.mem.indexOf(u8, source, "GH_TOKEN") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "success_boolean") == null);
 }
+
+test "workspace cleanup is descriptor confined to the selected signed child" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
+    var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&path_storage, "{s}/upgrade", .{root_buf[0..root_len]});
+    var workspace: runner.Workspace = .{};
+    try runner.prepareWorkspaceForTest(&workspace, root);
+    const paths = try workspace.value();
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{});
+    defer dir.close(std.testing.io);
+    try dir.createDir(std.testing.io, "signed-one", .default_dir);
+    try dir.createDir(std.testing.io, "signed-near-max", .default_dir);
+    {
+        var home = try dir.openDir(std.testing.io, "signed-one", .{});
+        defer home.close(std.testing.io);
+        try home.writeFile(std.testing.io, .{ .sub_path = "owned-residue", .data = "owned" });
+    }
+    try dir.writeFile(std.testing.io, .{ .sub_path = "signed-one.json", .data = "owned leaf" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "signed-near-max.json", .data = "neighbor" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "foreign-session-state", .data = "must survive" });
+
+    try runner.cleanupWorkspaceChildForTest(std.testing.io, &workspace, .one);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, paths.signed_one_home, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, paths.signed_one_leaf, .{}));
+    try std.Io.Dir.accessAbsolute(std.testing.io, paths.signed_near_max_home, .{});
+    try std.Io.Dir.accessAbsolute(std.testing.io, paths.signed_near_max_leaf, .{});
+    try dir.access(std.testing.io, "foreign-session-state", .{});
+
+    try runner.cleanupWorkspaceChildForTest(std.testing.io, &workspace, .near_max);
+    try dir.deleteFile(std.testing.io, "foreign-session-state");
+    try workspace.cleanup();
+}

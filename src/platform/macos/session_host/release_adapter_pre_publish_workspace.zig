@@ -99,6 +99,13 @@ pub const Workspace = struct {
         try self.revalidate(true);
     }
 
+    /// Returns the already-held directory authority after revalidating both the held vnode and
+    /// its canonical pathname. The caller borrows this descriptor; `Workspace` retains ownership.
+    pub fn rootDirectoryDescriptor(self: *@This()) Error!c.fd_t {
+        try self.revalidate(true);
+        return self.root_fd;
+    }
+
     fn revalidate(self: *@This(), require_private_mode: bool) Error!void {
         if (self.owner != self or !self.root_present or self.parent_fd < 0)
             return error.InvalidOwner;

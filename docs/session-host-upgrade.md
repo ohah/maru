@@ -4550,6 +4550,38 @@ authority 재검증 뒤 deadline 순서를 고정한다. actual filesystem은 �
 residue 0을 기존 leaf gate와 함께 검증한다. 이 slice는 signed upgrade runner, B manifest/checkpoint,
 live workflow, GitHub mutation·frozen signed U5 실측을 완료했다고 주장하지 않는다.
 
+### 11.91 protected profile→signed upgrade execution과 로컬 실측
+
+`release_adapter_profile_upgrade_execution.zig`의 final-address `ProfileUpgradeExecution`이 protected upgrade-B profile에서
+authenticated predecessor를 만들고 기존 `candidate_upgrade_runner.runBorrowingDeadline`까지 잇는 유일한 제품 composition이다.
+입력은 current candidate identity/files/product/source, profile context/environment/manifest input, pre-publish·upgrade의 서로 다른
+descriptor-owned workspace, pinned GitHub CLI/token/response buffer, pinned Zig toolchain과 held source directory뿐이다. caller는
+predecessor identity/manifest/file/assets, ref/tag observation, N-1 pathname·digest, runtime count나 leaf 성공 boolean을 제출하지 않는다.
+
+composition은 하나의 owned `Deadline`을 시작하고 `profile_predecessor_authority.authenticateUntil` → predecessor graph revalidate →
+`candidate_upgrade_runner.runBorrowingDeadline` → candidate와 predecessor graph 및 retained evidence file 최종 revalidate → final deadline 순서로 실행한다.
+runner 입력의 predecessor 네 pointer는 모두 `ProfileUpgradeExecution.predecessor` 내부 owner에서만 투영한다. 두 workspace가 같거나
+ancestor/descendant인 경우와 mutable response/result/deadline/candidate/profile authority storage alias는 첫 filesystem/network/process
+callback 전에 거부한다. 성공 owner는 authenticated predecessor와 signed execution/evidence를 manifest authoring·attestation까지 함께
+보존한다.
+
+실패·명시 cleanup은 signed execution/evidence → authenticated predecessor → deadline 역순 best-effort다. runner의 성공 owner와
+부분 artifact retry owner를 구분해 각자의 기존 cleanup entrypoint를 호출하며, 한 cleanup 실패가 뒤의 독립 cleanup을 막지 않는다.
+모든 자원이 회수되면 pristine으로 돌아가고 하나라도 불확실하면 credential·response와 다른 borrowed input을 저장하지 않은 채 exact
+owned capability만 같은 주소에 남겨 `retryCleanup`한다.
+
+성공 시 별도 `TimingDiagnostic`은 `predecessor_auth_ns`, 기존 runner의 `signed_one_ns`·`signed_near_max_ns`·`runner_phase_ns`,
+전체 `profile_phase_ns`를 monotonic clock으로 기록한다. 모든 값은 양수이고 runner child 합은 runner phase 이하, predecessor auth와
+runner phase 합은 profile phase 이하여야 한다. 측정 구간은 첫 authority callback 직전부터 final authority/deadline fence 직후까지며
+GitHub queue·runner allocation 시간은 포함하지 않는다. 실패·clock 역행·overflow에서는 diagnostic success를 게시하지 않고, timing은
+release 성공 권위·manifest evidence·checkpoint 입력으로 사용하지 않는다.
+
+focused Debug·ReleaseFast gate는 predecessor raw input 0, exact call/deadline/owner projection, 두 workspace disjoint, candidate/profile/
+predecessor/evidence drift, 모든 composition fail-index, runner success/partial cleanup 분기와 역순 best-effort retry, timing 양수·합계·역행·overflow를
+검증한다. 실제 local child 실측은 signed N-1/current fixture가 존재하는 macOS gate에서 canonical diagnostic을 보존한다. protected B
+시험 tag의 GitHub-issued timing, B manifest/checkpoint·attestation·draft publication과 frozen signed U5 완료 증거는 후속 live workflow가
+소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

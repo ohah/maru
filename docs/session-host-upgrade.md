@@ -4454,6 +4454,28 @@ owner와 환경 재관측 drift를 Debug·ReleaseFast에서 검증한다. 이 ga
 건드리지 않는다. 다음 composition gate가 endorsement→A download/authentication→upgrade runner→B manifest의 exact 순서와 하나의
 deadline/checkpoint를 소유하며, protected B 시험 tag만 actual signed 1/near-max 실측과 frozen U5 완료 증거가 된다.
 
+### 11.88 protected profile과 인증된 predecessor identity의 결속
+
+pre-publish upgrade-B는 profile document를 읽었다는 사실과 A release를 인증했다는 사실을 caller의 boolean 두 개로 합치지 않는다.
+`release_adapter_profile_predecessor_binding.zig`의 final-address `BoundPredecessor`가 둘 사이의 유일한 결속 권위다. 결속 직전 profile
+owner는 exact environment key를 두 번 재관측하고 current protected-tag `Context`를 다시 검증한다. 그 다음 기존
+`PredecessorEvidenceIdentity`가 authenticated A manifest·held manifest file·세 authenticated asset을 다시 검증해 낸 값을 받으며,
+profile의 `release_id`, `tag`, `commit`, `manifest_sha256` 네 필드가 모두 exact 일치할 때만 A의 DMG·frozen executable digest를
+포함한 fixed owner를 게시한다. `baseline_a`, 일부 필드 일치, caller가 재제출한 scalar, profile 원문 또는 unauthenticated manifest
+parse 결과로는 이 권위를 만들 수 없다.
+
+결속 owner는 profile/identity의 backing pointer를 보존하지 않고 authenticated identity의 고정 길이 값만 자기 storage에 복사한다.
+복사·pre-owned·입출력 storage alias를 preflight에서 callback 전에 거부하고, seal은 final address와 여섯 predecessor 필드 및 profile
+document digest를 모두 포함한다. 재검증은 profile environment와 authenticated A owner들을 다시 관측해 selection drift·file drift·asset
+drift를 구분 없이 fail-close한다. 실패는 output pristine이며 credential·network mutation·runner 실행·manifest authoring이 0이다.
+성공한 owner만 후속 upgrade composition이 runner의 predecessor 입력으로 투영할 수 있고, post-publish B→A entrypoint는 이 owner를
+사용하지 않는다.
+
+focused Debug·ReleaseFast gate는 exact 성공, baseline 거부, 네 endorsement 필드 각각의 mismatch, identity 재검증 drift,
+environment 2-read drift, copied/pre-owned/alias owner와 callback-before-preflight 0을 검증한다. 이 gate도 injected authenticated owner만
+사용해 filesystem·GitHub·실제 앱 session-host 상태를 건드리지 않는다. 아직 남은 live composition은 이 권위에서 exact A manifest
+download/authentication을 만들고 같은 deadline으로 asset authentication→upgrade runner→B manifest/checkpoint를 잇는 일이다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

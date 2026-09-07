@@ -1452,6 +1452,13 @@ B manifest를 권위로 유지한다. focused Debug·ReleaseFast gate는 strict 
 unknown/duplicate/missing/noncanonical 입력, context/digest drift와 copied/pre-owned/alias owner를 credential/network/filesystem 없이
 검증한다. endorsement→A 인증→runner→manifest/checkpoint 배선과 protected B tag actual signed 실측은 후속 gate다.
 
+U5 profile-predecessor binding은 profile owner의 exact environment 재관측 뒤 authenticated A manifest·held manifest file·세 asset에서
+재유도한 `PredecessorEvidenceIdentity`와 endorsement의 release ID/tag/commit/manifest SHA를 모두 일치시킨다. 성공 owner는 identity의
+DMG·frozen executable SHA까지 fixed storage에 복사하고 final address·여섯 필드·profile document digest를 봉인한다. baseline,
+부분 일치, caller scalar, copied/pre-owned/alias storage, environment/identity drift는 callback 또는 후속 side effect 전에 fail-close한다.
+focused `test-session-host-release-adapter-profile-predecessor-binding`은 이 결속과 production concrete surface를 Debug·ReleaseFast에서
+filesystem·credential·network·실제 session-host 상태 없이 검증한다. live A 획득과 runner/publication orchestration은 후속이다.
+
 U5 candidate compatibility는 `release_adapter_candidate_compatibility.zig`가 final-address candidate files/product와 held frozen
 executable parent authority에서만 canonical compatibility probe를 실행해 frozen SHA·release/source/build identity와 함께 fixed owner에
 복사한다. current-manifest 검증과 동일 parser를 공유하고 실행 전후 inode·parent seal·candidate product를 재검증한다. focused gate는

@@ -29,12 +29,14 @@ const Config = struct {
     artifact_path: []u8,
     runtime_count: usize,
     test_uuid: []u8,
+    isolated_root: []u8,
 
     fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.n1_executable);
         allocator.free(self.current_executable);
         allocator.free(self.artifact_path);
         allocator.free(self.test_uuid);
+        allocator.free(self.isolated_root);
         self.* = undefined;
     }
 };
@@ -104,14 +106,16 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     if (artifact_raw.len == 0) return usage(stderr);
     const artifact_path = try allocator.dupe(u8, artifact_raw);
     errdefer allocator.free(artifact_path);
-    try invalidateArtifact(allocator, artifact_path);
     const runtime_count_raw = args.next() orelse return usage(stderr);
     const test_uuid_raw = args.next() orelse return usage(stderr);
+    const isolated_root_raw = args.next() orelse return usage(stderr);
     if (args.next() != null) return usage(stderr);
     const runtime_count = try parseRuntimeCount(runtime_count_raw);
     if (!session_host.upgrade_limits.canonicalReleaseTestUuid(test_uuid_raw))
         return error.InvalidTestUuid;
-    if (n1_raw.len == 0 or current_raw.len == 0) return usage(stderr);
+    if (n1_raw.len == 0 or current_raw.len == 0 or !validIsolatedRoot(isolated_root_raw, artifact_path))
+        return usage(stderr);
+    try requireAbsentArtifact(allocator, artifact_path);
 
     const n1_real = try std.Io.Dir.cwd().realPathFileAlloc(init.io, n1_raw, allocator);
     defer allocator.free(n1_real);
@@ -124,6 +128,8 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     const current_executable = try allocator.dupeZ(u8, current_real);
     errdefer allocator.free(current_executable);
     const test_uuid = try allocator.dupe(u8, test_uuid_raw);
+    errdefer allocator.free(test_uuid);
+    const isolated_root = try allocator.dupe(u8, isolated_root_raw);
 
     return .{
         .n1_executable = n1_executable,
@@ -131,6 +137,7 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
         .artifact_path = artifact_path,
         .runtime_count = runtime_count,
         .test_uuid = test_uuid,
+        .isolated_root = isolated_root,
     };
 }
 
@@ -144,7 +151,8 @@ fn parseRuntimeCount(raw: []const u8) !usize {
 fn usage(stderr: *std.Io.Writer) anyerror {
     try stderr.writeAll(
         "usage: maru-session-host-signed-upgrade-e2e " ++
-            "<signed-n1-maru> <signed-current-maru> <artifact.json> <runtime-count> <test-uuid>\n",
+            "<signed-n1-maru> <signed-current-maru> <artifact.json> <runtime-count> <test-uuid> " ++
+            "<isolated-root>\n",
     );
     return error.MissingSignedArtifact;
 }
@@ -184,24 +192,16 @@ fn run(
     );
     defer allocator.free(target_build_id);
 
-    var nonce: u64 = 0;
-    arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(@TypeOf(nonce)));
-    var leaf_buf: [128]u8 = undefined;
-    const leaf = try std.fmt.bufPrint(
-        &leaf_buf,
-        "maru-session-host-signed-upgrade-{d}-{x:0>16}",
-        .{ c.getpid(), nonce },
-    );
-    var base_buf: [160]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/{s}", .{leaf});
-    var session_dir_buf: [192]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(&session_dir_buf, "{s}/session-host", .{base});
-
-    var tmp = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
-    defer tmp.close(io);
-    try tmp.createDirPath(io, leaf);
-    defer tmp.deleteTree(io, leaf) catch {};
+    var base_buf: [std.fs.max_path_bytes:0]u8 = @splat(0);
+    const base = try std.fmt.bufPrintZ(&base_buf, "{s}", .{config.isolated_root});
+    const parent_path = std.fs.path.dirname(base) orelse return error.InvalidIsolatedRoot;
+    const leaf = std.fs.path.basename(base);
+    var parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{});
+    defer parent.close(io);
+    try parent.createDir(io, leaf, .default_dir);
     if (c.chmod(base.ptr, 0o700) != 0) return error.TempDirectoryFailed;
+    var session_dir_buf: [std.fs.max_path_bytes:0]u8 = @splat(0);
+    const session_dir = try std.fmt.bufPrintZ(&session_dir_buf, "{s}/session-host", .{base});
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TempDirectoryFailed;
 
     var host_id = randomNonZeroU128();
@@ -705,11 +705,22 @@ fn randomNonZeroU128() u128 {
     return if (value == 0) 1 else value;
 }
 
-fn invalidateArtifact(allocator: std.mem.Allocator, path: []const u8) !void {
+fn requireAbsentArtifact(allocator: std.mem.Allocator, path: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    const rc = c.unlink(path_z.ptr);
-    if (rc != 0 and posix.errno(rc) != .NOENT) return error.ArtifactInvalidationFailed;
+    var stat: posix.Stat = undefined;
+    const result = c.fstatat(posix.AT.FDCWD, path_z.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW);
+    if (result == 0) return error.OutputExists;
+    if (posix.errno(result) != .NOENT) return error.ArtifactInspectionFailed;
+}
+
+fn validIsolatedRoot(root: []const u8, artifact: []const u8) bool {
+    if (!std.fs.path.isAbsolute(root) or root.len < 2 or root.len >= std.fs.max_path_bytes or
+        std.mem.indexOfScalar(u8, root, 0) != null or std.mem.endsWith(u8, root, "/")) return false;
+    const root_parent = std.fs.path.dirname(root) orelse return false;
+    const artifact_parent = std.fs.path.dirname(artifact) orelse return false;
+    return std.fs.path.isAbsolute(artifact) and std.mem.eql(u8, root_parent, artifact_parent) and
+        !std.mem.eql(u8, std.fs.path.basename(root), ".") and !std.mem.eql(u8, std.fs.path.basename(root), "..");
 }
 
 fn writeArtifact(
@@ -822,7 +833,7 @@ test "signed upgrade runtime count derives near-max from the product cap" {
     ));
 }
 
-test "signed upgrade artifact invalidates stale success and emits canonical release evidence" {
+test "signed upgrade artifact rejects stale success and emits canonical release evidence" {
     const allocator = std.testing.allocator;
     var path_buf: [160]u8 = undefined;
     const path = try std.fmt.bufPrintZ(
@@ -838,7 +849,9 @@ test "signed upgrade artifact invalidates stale success and emits canonical rele
     );
     try std.testing.expect(fd >= 0);
     _ = c.close(fd);
-    try invalidateArtifact(allocator, path);
+    try std.testing.expectError(error.OutputExists, requireAbsentArtifact(allocator, path));
+    try std.testing.expectEqual(@as(c_int, 0), c.unlink(path.ptr));
+    try requireAbsentArtifact(allocator, path);
     try std.testing.expect(c.access(path.ptr, c.F_OK) != 0);
 
     try writeArtifact(allocator, std.testing.io, path, .{

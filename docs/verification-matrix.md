@@ -3319,8 +3319,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   predecessor authority→기존 upgrade runner→양쪽 authority와 retained evidence file 최종 revalidate를 잇는다. caller predecessor/ref/tag/path/digest/runtime scalar는 0이고,
   성공 owner가 authenticated predecessor와 signed evidence를 함께 보존한다. 별도 monotonic diagnostic은 predecessor authentication,
   signed 1/near-max, runner phase와 전체 profile phase를 기록하되 성공 권위로 쓰지 않는다.
-  `test-session-host-release-adapter-profile-upgrade-execution`은 Debug·ReleaseFast에서 exact ordering/deadline, owner-only predecessor projection,
-  workspace/input alias preflight, 모든 fail-index와 runner success/partial cleanup retry, timing 합계·역행·overflow를 검증한다. protected B
+  `test-session-host-release-adapter-profile-upgrade-execution`과 기존 candidate-upgrade runner·workspace gate는 함께 Debug·ReleaseFast에서 exact
+  ordering/deadline, owner-only predecessor projection, workspace/input alias preflight, 모든 fail-index와 runner success/partial cleanup retry,
+  timing 합계·역행·overflow를 검증한다. protected B
   시험 tag의 GitHub-issued timing과 manifest/checkpoint·publication은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,

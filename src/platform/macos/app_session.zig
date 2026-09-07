@@ -77553,6 +77553,89 @@ test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 펼치면 칩 줄이 자리를 돌려준다 — 그 줄을 눌러도 닫힌다 (AV3+AV4)" {
+    // **리베이스가 만든 결함을 못으로 박는다.** AV3(펼침) 혼자서는 칩 줄이 없었고 AV4(칩) 혼자서는
+    // 펼침이 없었다. 합쳐진 뒤에야 「안 그리는데 자리는 뺏는다」가 생겼고, 그러면 ① 펼침이 한 줄을
+    // 빈 채로 잃고 ② 그 줄이 펼침 영역 밖이라 눌러도 안 닫히고 클릭이 뒤 터미널로 샌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_W\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo hi\",\"description\":\"인사\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "d.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/d.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    image_gallery_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 닫혀 있을 때: 칩 줄이 자리를 먹고, 그 줄은 목록 영역 **위**다.
+    const closed_area = image_gallery_ops.gridArea(session);
+    const chip_rect = image_gallery_ops.chipRowRect(session);
+    try std.testing.expect(chip_rect.h > 0);
+    try std.testing.expectEqual(chip_rect.y +| chip_rect.h, closed_area.y);
+
+    // 첫 줄을 눌러 펼친다.
+    const row_y: f64 = @floatFromInt(closed_area.y + 1);
+    const row_x: f64 = @floatFromInt(closed_area.x + 1);
+    try std.testing.expect(image_gallery_ops.handleDown(session, row_x, row_y));
+    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+
+    // ── ⓪ **안 그렸으면 0 이라고 말한다.** 잔값이 남으면 「필터 UI 가 나갔나」를 값으로 보는 창이
+    //    거짓말을 한다.
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_chips);
+
+    // ── ① **자리를 돌려받는다.** 안 그리는 줄이 자리를 쥐고 있으면 「이하 생략」이 한 줄 일찍 온다.
+    const open_area = image_gallery_ops.gridArea(session);
+    try std.testing.expect(open_area.y < closed_area.y);
+    try std.testing.expectEqual(@as(u32, 0), image_gallery_ops.chipRowTakenPx(session));
+    try std.testing.expectEqual(@as(u32, 0), image_gallery_ops.chipRowRect(session).h);
+
+    // ── ② **그 줄을 눌러도 닫힌다.** 계약이 못박은 「펼침은 어디를 눌러도 닫는다」에 예외가 없다.
+    const chip_y: f64 = @floatFromInt(chip_rect.y + chip_rect.h / 2);
+    try std.testing.expect(image_gallery_ops.handleDown(session, row_x, chip_y));
+    try std.testing.expect(session.image_gallery.open == null);
+    // 필터는 그대로다 — 칩이 클릭을 가로채 종류를 바꿔 버리면 안 된다.
+    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 도크가 좁으면 고른 칩만 남는다 (AV4)" {
     // 넷을 우겨넣어 글자를 자르면 무엇을 누르는지 알 수 없다. 「지금 무엇을 보고 있나」는
     // 마지막까지 지킬 정보이므로 **고른 것 하나**를 남긴다(계약 §2.2.3 과 같은 규율).
@@ -80170,7 +80253,6 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
 
     // ── 크게 보기를 열면 문맥이 실린다.
-    const vp_before = image_gallery_ops.viewportRect(session);
     image_gallery_ops.openAt(session, 0);
     const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
     try std.testing.expectEqualStrings(
@@ -80180,9 +80262,23 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     // **라벨과 다른 정보다** — 같으면 굳이 띄울 이유가 없다(실측에서도 겹침 0%였다).
     try std.testing.expect(!std.mem.eql(u8, op.contextText(), "dock.png"));
 
+    // 예약 줄이 **하나도 없을 때**의 그림 자리가 이 판정자의 기준선이다. 그것을 **크게 보기를 연
+    // 상태에서** 잰다 — 닫힌 상태를 기준선으로 쓰면 안 된다. 칩 줄(AV4)이 크게 보기 동안 자리를
+    // 돌려주므로 닫힌 화면과 연 화면은 애초에 세로 자리가 다르다.
+    const vp_none = blk: {
+        const saved_ctx = op.context_len;
+        const saved_src = op.label.source;
+        op.context_len = 0;
+        op.label.source = .none;
+        const v = image_gallery_ops.viewportRect(session);
+        op.context_len = saved_ctx;
+        op.label.source = saved_src;
+        break :blk v;
+    };
+
     // ── 문맥이 있으면 그림 자리가 그만큼 줄어든다. 안 줄이면 글자가 그림 위에 얹힌다.
     const vp_after = image_gallery_ops.viewportRect(session);
-    try std.testing.expect(vp_after.h < vp_before.h);
+    try std.testing.expect(vp_after.h < vp_none.h);
 
     // ── **출처는 열 때 스냅샷으로 굳는다**(§2.2.1). `hit_index` 로 매 프레임 목록을 다시 뒤지면,
     //    그 사이 검색어가 바뀌어 목록이 재구성됐을 때 남의 이미지의 출처가 붙는다.
@@ -80196,12 +80292,11 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     op.context_len = 0;
     const vp_origin_only = image_gallery_ops.viewportRect(session);
     try std.testing.expect(vp_origin_only.h > vp_after.h); // 문맥 줄이 빠진 만큼 그림 자리가 늘었다
-    try std.testing.expect(vp_origin_only.h < vp_before.h); // 그래도 출처 한 줄은 예약한다
+    try std.testing.expect(vp_origin_only.h < vp_none.h); // 그래도 출처 한 줄은 예약한다
 
-    // ── 출처도 문맥도 없으면 빈 띠를 남기지 않는다.
+    // ── 출처도 문맥도 없으면 빈 띠를 남기지 않는다 — 기준선으로 정확히 돌아온다.
     op.label.source = .none;
-    const vp_none = image_gallery_ops.viewportRect(session);
-    try std.testing.expectEqual(vp_before.h, vp_none.h);
+    try std.testing.expectEqual(vp_none.h, image_gallery_ops.viewportRect(session).h);
 }
 
 test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
@@ -80257,7 +80352,16 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
     try std.testing.expectEqualStrings("", op.contextText());
     // 빈 띠를 남기지 않는다 — 그림이 그만큼 커야 한다.
-    try std.testing.expectEqual(vp_before.h, image_gallery_ops.viewportRect(session).h);
+    //
+    // **닫힌 화면과 연 화면의 차이를 정확히 적는다.** 칩 줄(AV4)은 크게 보기 동안 그리지 않으므로
+    // 자리를 돌려준다(`chipRowTakenPx`). 그래서 「같다」가 아니라 「정확히 칩 줄만큼 크다」가 참이다 —
+    // 예약 줄이 새어 들어오면(빈 띠) 이보다 작아지고, 칩 줄이 안 그려지면서 자리만 쥐고 있으면
+    // 이보다 작아진다. 두 결함 다 이 한 줄이 잡는다.
+    const chip_give_back: @TypeOf(vp_before.h) = @floatFromInt(image_gallery_ops.chipRowHeightPx(session));
+    try std.testing.expectEqual(
+        vp_before.h + chip_give_back,
+        image_gallery_ops.viewportRect(session).h,
+    );
 }
 
 test "이미지 갤러리: 문맥 줄바꿈이 글자를 흘리지 않는다 (IG13 적대적)" {

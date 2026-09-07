@@ -9,7 +9,7 @@ fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]cons
     return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
 }
 
-test "private root seals two homes two execution copies two leaves and aggregate" {
+test "private root seals two homes two leaves predecessor executable and aggregate" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
@@ -17,8 +17,8 @@ test "private root seals two homes two execution copies two leaves and aggregate
     var owner: upgrade.Workspace = .{};
     try upgrade.prepare(&owner, root);
     const paths = try owner.value();
-    const expected = [_][]const u8{ "signed-one", "signed-near-max", "predecessor-executable", "current-executable", "signed-one.json", "signed-near-max.json", "upgrade-evidence.json" };
-    inline for (.{ paths.signed_one_home, paths.signed_near_max_home, paths.predecessor_executable, paths.current_executable, paths.signed_one_leaf, paths.signed_near_max_leaf, paths.evidence }, expected) |path, name| {
+    const expected = [_][]const u8{ "signed-one", "signed-near-max", "predecessor-executable", "signed-one.json", "signed-near-max.json", "upgrade-evidence.json" };
+    inline for (.{ paths.signed_one_home, paths.signed_near_max_home, paths.predecessor_executable, paths.signed_one_leaf, paths.signed_near_max_leaf, paths.evidence }, expected) |path, name| {
         try std.testing.expectEqualStrings(name, std.fs.path.basename(path));
         try std.testing.expectEqualStrings(root, std.fs.path.dirname(path).?);
         try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, path, .{}));

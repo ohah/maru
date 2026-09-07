@@ -3331,6 +3331,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   A/B pair, dual/unknown inventory, role/name/SHA swap, source drift, fail-index, retained close·reopen과 cleanup
   retry를 검증하며 harness-owned private root만 사용한다. profile-aware product, timing diagnostic publication,
   live workflow와 protected B tag 실측은 후속 gate다.
+  Upgrade-B stage-3 제품 composition은 성공한 `ProfileUpgradeExecution`을 재실행하지 않고 재검증해
+  `candidate_manifest.PredecessorGraph`와 upgrade evidence를 투영하고 role-B manifest authoring→공용 durable
+  promotion→fence→retained close를 한 새 deadline 아래 수행한다. `test-session-host-release-adapter-profile-stage3-preparation-product`는
+  Debug·ReleaseFast에서 exact call/deadline/owner projection, predecessor/signer 결속, profile/candidate/evidence/manifest/path
+  drift, copied/pre-owned/alias, 모든 fail-index, retained commit 뒤 source owner 생존, 역순 cleanup·retry와 actual
+  private-filesystem residue 0을 검증한다. 기존 profile owner와 그 workspace/assets는 caller-owned라 이 제품의 cleanup
+  대상이 아니다. timing publication, command/live workflow와 protected B tag 실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

@@ -111,10 +111,18 @@ keybind = F4 = esc:[2J
   `jump_to_bracket`은 **caret 옆 괄호의 짝으로 간다** — 대상은 괄호 셋뿐이고(따옴표는 여는 것과 닫는
   것이 같아 깊이를 못 센다), 괄호가 아닌 곳에서는 아무 일도 안 한다([문서 모델](native-editor-document-model.md) §3.9c).
 
-  **chord 가 붙은 것이 일곱이다**(2026-09-05 실측): `toggle_symbol_picker`(`⇧⌘O`) ·
-  `toggle_editor_wrap`(`⌥Z`) · `delete_lines`(`⇧⌘K`) · `duplicate_lines`(`⇧⌥↓`) ·
-  `move_lines_up`/`_down`(`⌥↑`/`⌥↓`) · `add_next_occurrence`(`⌘D`), 그리고 이 절이 적는
-  `jump_to_bracket`(`⇧⌘\`)까지 여덟이 된다. **없는 것은 아홉이고, 이유는 하나가 아니다**:
+  ~~**chord 가 붙은 것이 일곱이다**(2026-09-05 실측)~~ → **열넷이다**(2026-09-07 재실측):
+  `toggle_symbol_picker`(`⇧⌘O`) · `toggle_editor_wrap`(`⌥Z`) · `delete_lines`(`⇧⌘K`) ·
+  `duplicate_lines`(`⇧⌥↓`) · `move_lines_up`/`_down`(`⌥↑`/`⌥↓`) · `add_next_occurrence`(`⌘D`) ·
+  `jump_to_bracket`(`⇧⌘\`) · `add_cursor_above`/`_below`(`⌥⌘↑`/`⌥⌘↓`) ·
+  `column_select_up`/`_down`/`_left`/`_right`(`⌥⇧⌘` 방향키). **없는 것은 열이다**:
+
+  **그 셋(`⌘D`·`⌥⌘↑`·`⌥⌘↓`)은 배선만 돼 있고 제품에서 죽어 있었다**(2026-09-06 사용자 확인) —
+  AppKit 메뉴바 keyEquivalent 가 먼저 먹었다. 그리고 **팔레트가 그 키들을 「없음」으로 보여 주고
+  있었다**(`chordForAction` 이 컨텍스트 표를 안 봤다). 둘 다 닫혔고, 그 층은
+  [키 입력과 단축키](key-input-and-shortcuts.md) 「메뉴 keyEquivalent 층」이 소유한다.
+
+  **없는 열의 이유는 하나가 아니다**:
 
   | 이유 | 해당 action | 무엇이 막고 있나 |
   |---|---|---|

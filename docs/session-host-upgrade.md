@@ -4613,6 +4613,38 @@ profile upgrade runner를 B manifest authoring에 연결하거나 timing diagnos
 workflow/GitHub mutation을 수행하지 않는다. 그 다음 profile-aware stage-3 product가 §11.91의 성공
 owner에서 upgrade evidence와 predecessor graph를 투영하고 이 공용 handoff를 사용한다.
 
+### 11.93 upgrade-B stage-3 product composition
+
+`release_adapter_profile_stage3_preparation_product.zig`의 final-address 제품 owner는 §11.91의 성공한
+`ProfileUpgradeExecution`을 signed 실행의 유일한 입력 authority로 소비해 role-B manifest와 §11.92의 durable
+preparation을 만든다. 이 owner는 signed one/near-max child나 predecessor download를 다시 실행하지 않는다. caller가
+upgrade evidence pathname·profile·manifest role·predecessor scalar·signer requirement·timing 값 또는 성공 boolean을
+별도로 제출하는 진입점은 두지 않는다.
+
+입력은 protected current `Context`, 기존 candidate identity/files/product/source/compatibility, 성공한
+`ProfileUpgradeExecution`, 그 실행에 사용한 profile environment/owner와 `ProfileManifestInput`, upgrade workspace,
+manifest output과 absent durable destination뿐이다. 제품은 하나의 새 owned deadline 아래
+`profile execution initial revalidate → candidate_manifest.author(predecessor graph) → profile execution/evidence와
+authored manifest revalidate → preparation_handoff.promote → full fence → closeRetaining → final profile/deadline
+fence → manifest와 새 로컬 authority cleanup` 순서를 고정한다. `candidate_manifest.PredecessorGraph`의 네 pointer는
+오직 `ProfileUpgradeExecution.predecessor`와 같은 manifest input의 authenticated manifest/file에서 투영한다.
+
+profile execution의 재검증은 final-address owner, timing 내부 일관성, candidate identity, authenticated predecessor,
+upgrade evidence held descriptor와 workspace를 함께 확인한다. timing은 진단 일관성 확인에만 쓰며 manifest,
+evidence binding, durable publication 또는 성공 판정의 입력으로 사용하지 않는다. 모든 mutable/result storage와
+pathname은 기존 owner storage 및 서로 간 alias·동일/ancestor/descendant를 filesystem·network·publication 전에
+거부한다.
+
+성공 commit은 retained-closed durable directory 하나이며 기존 `ProfileUpgradeExecution`과 candidate authority의
+소유권은 caller에게 그대로 남는다. 실패 cleanup은 durable → authored manifest → 새 deadline 역순 best-effort이고,
+기존 profile owner·upgrade workspace·evidence·predecessor assets를 삭제하거나 정산하지 않는다. durable rename 뒤
+실패는 audit-required로 남겨 retained directory를 자동 삭제하지 않으며 exact stage와 로컬 cleanup 상태를 보존한다.
+
+focused Debug·ReleaseFast gate는 exact call/deadline/owner projection, B manifest predecessor와 signer 결속,
+profile/candidate/evidence/manifest/path drift, copied/pre-owned/alias, 모든 composition fail-index, retained commit 뒤
+source owner 생존, 역순 cleanup·retry와 actual private-filesystem residue 0을 검증한다. timing diagnostic publication,
+fresh-process command wiring, checkpoint·attestation, live workflow/GitHub mutation과 protected B tag 실측은 후속 gate다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

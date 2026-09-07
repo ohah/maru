@@ -15388,6 +15388,12 @@ pub fn build(b: *std.Build) void {
             run_candidate_upgrade_workspace_tests.addArg("--maru-expect-tests=5");
             run_candidate_upgrade_workspace_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_workspace_tests.step);
+            const candidate_upgrade_predecessor_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_predecessor.zig"), .target = target, .optimize = composition_optimize, .link_libc = true });
+            const candidate_upgrade_predecessor_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_predecessor.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_upgrade_predecessor", .module = candidate_upgrade_predecessor_mod }} }) });
+            const run_candidate_upgrade_predecessor_tests = b.addRunArtifact(candidate_upgrade_predecessor_tests);
+            run_candidate_upgrade_predecessor_tests.addArg("--maru-expect-tests=5");
+            run_candidate_upgrade_predecessor_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_predecessor_tests.step);
             const source_tree_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const source_tree_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod } } }) });
             const run_source_tree_tests = b.addRunArtifact(source_tree_tests);

@@ -13,7 +13,9 @@ extern "c" fn renameatx_np(from_dir_fd: c_int, from: [*:0]const u8, to_dir_fd: c
 const rename_excl: c_uint = 0x00000004;
 
 pub const role_count: usize = 2;
-pub const evidence_name = "baseline-evidence.json";
+pub const baseline_evidence_name = "baseline-evidence.json";
+pub const upgrade_evidence_name = "upgrade-evidence.json";
+pub const evidence_name = baseline_evidence_name;
 pub const max_preparation_bytes: u64 = evidence_mod.max_evidence_bytes + manifest_mod.max_manifest_bytes;
 
 pub const Error = files.Error || evidence_mod.Error || manifest_mod.ParseError || error{
@@ -211,13 +213,24 @@ const Fault = struct {
 };
 
 pub const Semantic = struct {
+    profile: evidence_mod.Profile,
     manifest_name: [std.fs.max_name_bytes:0]u8,
     manifest_name_len: usize,
 
+    pub fn evidenceName(self: *const @This()) []const u8 {
+        return evidenceNameForProfile(self.profile);
+    }
     pub fn manifestName(self: *const @This()) []const u8 {
         return self.manifest_name[0..self.manifest_name_len];
     }
 };
+
+pub fn evidenceNameForProfile(profile: evidence_mod.Profile) []const u8 {
+    return switch (profile) {
+        .baseline_a => baseline_evidence_name,
+        .upgrade_b => upgrade_evidence_name,
+    };
+}
 
 const Working = struct {
     parent_fd: c.fd_t,
@@ -322,7 +335,7 @@ fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]
 
 fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observations: [role_count]files.ExecutableObservation, semantic: Semantic, destination: [:0]const u8, final_leaf: [:0]const u8, result: *DurablePreparation, injector: anytype, working: *Working) TestError!void {
     try injector.hit(.staging_created);
-    const role_names = [_][]const u8{ evidence_name, semantic.manifest_name[0..semantic.manifest_name_len] };
+    const role_names = [_][]const u8{ semantic.evidenceName(), semantic.manifest_name[0..semantic.manifest_name_len] };
     const caps = [_]usize{ evidence_mod.max_evidence_bytes, manifest_mod.max_manifest_bytes };
     const stage_path_value: [:0]const u8 = working.stage_path[0..working.stage_path_len :0];
     for (0..role_count) |index| {
@@ -443,16 +456,40 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
     defer parsed_evidence.deinit();
     var parsed_manifest = try manifest_mod.parseCanonical(allocator, manifest_input.bytes);
     defer parsed_manifest.deinit();
-    const baseline = switch (parsed_evidence.value()) {
-        .baseline_a => |value| value,
-        .upgrade_b => return error.InvalidBinding,
-    };
     const authored = parsed_manifest.value();
-    if (baseline.role != .a or baseline.result != .passed or authored.role != .a or authored.predecessor != null or
-        !std.mem.eql(u8, authored.evidence.result, "passed") or !sameRepository(baseline.repository, authored.repository) or
-        !sameRelease(baseline.release, authored.release) or !sameSource(baseline.source, authored.source) or
-        !sameBuild(baseline.build, authored.build) or !std.mem.eql(u8, baseline.test_uuid, authored.evidence.test_uuid) or
-        !std.mem.eql(u8, authored.evidence.summary_name, evidence_name) or
+    const profile = parsed_evidence.profile();
+    const expected_name = evidenceNameForProfile(profile);
+    const EvidenceCommon = struct {
+        test_uuid: []const u8,
+        repository: evidence_mod.Repository,
+        release: evidence_mod.Release,
+        source: evidence_mod.Source,
+        build: evidence_mod.Build,
+        candidate: evidence_mod.Candidate,
+    };
+    const common: EvidenceCommon = switch (parsed_evidence.value()) {
+        .baseline_a => |value| blk: {
+            if (value.role != .a or value.result != .passed or authored.role != .a or authored.predecessor != null)
+                return error.InvalidBinding;
+            break :blk .{ .test_uuid = value.test_uuid, .repository = value.repository, .release = value.release, .source = value.source, .build = value.build, .candidate = value.candidate };
+        },
+        .upgrade_b => |value| blk: {
+            const predecessor = authored.predecessor orelse return error.InvalidBinding;
+            if (value.role != .b or value.result != .passed or authored.role != .b or
+                predecessor.release_id != value.predecessor.release_id or
+                !std.mem.eql(u8, predecessor.tag, value.predecessor.tag) or
+                !std.mem.eql(u8, predecessor.commit, value.predecessor.commit) or
+                !std.mem.eql(u8, predecessor.manifest_sha256, value.predecessor.manifest_sha256) or
+                !std.mem.eql(u8, authored.signing.designated_requirement_sha256, value.gates.signed_upgrade_one.signer_requirement_sha256) or
+                !std.mem.eql(u8, authored.signing.designated_requirement_sha256, value.gates.signed_upgrade_near_max.signer_requirement_sha256))
+                return error.InvalidBinding;
+            break :blk .{ .test_uuid = value.test_uuid, .repository = value.repository, .release = value.release, .source = value.source, .build = value.build, .candidate = value.candidate };
+        },
+    };
+    if (!std.mem.eql(u8, authored.evidence.result, "passed") or !sameRepository(common.repository, authored.repository) or
+        !sameRelease(common.release, authored.release) or !sameSource(common.source, authored.source) or
+        !sameBuild(common.build, authored.build) or !std.mem.eql(u8, common.test_uuid, authored.evidence.test_uuid) or
+        !std.mem.eql(u8, authored.evidence.summary_name, expected_name) or
         !std.mem.eql(u8, authored.evidence.summary_sha256, &observations[0].sha256)) return error.InvalidBinding;
     var evidence_asset: ?manifest_mod.Asset = null;
     var dmg_asset: ?manifest_mod.Asset = null;
@@ -472,15 +509,15 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
         },
     };
     const asset = evidence_asset orelse return error.InvalidBinding;
-    if (!std.mem.eql(u8, (dmg_asset orelse return error.InvalidBinding).sha256, baseline.candidate.dmg_sha256) or
-        !std.mem.eql(u8, (frozen_asset orelse return error.InvalidBinding).sha256, baseline.candidate.executable_sha256))
+    if (!std.mem.eql(u8, (dmg_asset orelse return error.InvalidBinding).sha256, common.candidate.dmg_sha256) or
+        !std.mem.eql(u8, (frozen_asset orelse return error.InvalidBinding).sha256, common.candidate.executable_sha256))
         return error.InvalidBinding;
-    if (!std.mem.eql(u8, asset.name, evidence_name) or asset.size != observations[0].size or
+    if (!std.mem.eql(u8, asset.name, expected_name) or asset.size != observations[0].size or
         !std.mem.eql(u8, asset.sha256, &observations[0].sha256)) return error.InvalidBinding;
-    var semantic: Semantic = undefined;
+    var semantic: Semantic = .{ .profile = profile, .manifest_name = undefined, .manifest_name_len = 0 };
     const name = std.fmt.bufPrintZ(&semantic.manifest_name, "Maru-{s}-session-host-release.json", .{authored.release.version}) catch return error.InvalidPath;
     semantic.manifest_name_len = name.len;
-    if (!std.mem.eql(u8, std.fs.path.basename(sources.evidence.path), evidence_name) or
+    if (!std.mem.eql(u8, std.fs.path.basename(sources.evidence.path), expected_name) or
         !std.mem.eql(u8, std.fs.path.basename(sources.manifest.path), name)) return error.InvalidPath;
     return semantic;
 }
@@ -646,7 +683,8 @@ fn validStorage(value: *const DurablePreparation) bool {
             !std.mem.eql(u8, std.fs.path.basename(value.paths[index][0..value.path_lens[index]]), value.names[index][0..value.name_lens[index]]) or
             !std.mem.eql(u8, std.fs.path.dirname(value.paths[index][0..value.path_lens[index]]) orelse return false, value.destination[0..value.destination_len])) return false;
     }
-    if (!std.mem.eql(u8, value.names[0][0..value.name_lens[0]], evidence_name) or
+    if ((!std.mem.eql(u8, value.names[0][0..value.name_lens[0]], baseline_evidence_name) and
+        !std.mem.eql(u8, value.names[0][0..value.name_lens[0]], upgrade_evidence_name)) or
         !std.mem.startsWith(u8, value.names[1][0..value.name_lens[1]], "Maru-") or
         !std.mem.endsWith(u8, value.names[1][0..value.name_lens[1]], "-session-host-release.json")) return false;
     return true;

@@ -1305,6 +1305,15 @@ filesystem/process/SHA-256 stage wall-clock의 median·p95·max, failure count, 
 독립 Actions step 사이의 열린 descriptor 지속성은 주장하지 않으며 바로 다음 candidate attestation이 같은 pathname을 다시 pin한다.
 GitHub queue/network·attestation 발급 시간과 frozen signed U5 E2E는 후속 live workflow 증거다.
 
+U5 validator command bridge는 기존 closed validator argv의 첫 command에서 `draft_authoring`, 두 aggregate stage, `publication`,
+`aggregate_cleanup`을 유도하고, fixed workspace validator를 fresh child로 exact once 실행한 bounded exit/stderr 관측만 reducer event로
+바꿔 durable checkpoint를 게시한다. focused Debug·ReleaseFast gate는 다섯 command/outcome vocabulary, network 세 stage에만 `GH_TOKEN`,
+stage 3에만 `GITHUB_WORKSPACE`, aggregate 두 stage에는 credential 0인 child environment 선택과 malformed argv를 unit으로 검증한다.
+unknown/noisy tuple은 observation unit, exec failure·timeout·exact environment·FD 회수는 bounded-process gate,
+replay·skip·reverse와 root/context drift의 child 0은 owner gate가 소유한다. actual wrapper→synthetic-validator process chain은 다섯 성공
+stage와 stage-3 terminal failure, 상이한 child PID, checkpoint exact-once, median·p95·max/FD/residue를 검증한다. fixture는 harness-owned private root와 synthetic validator만 사용한다. 실제 `release.yml`
+argv/output 조립, GitHub-issued latency와 frozen signed U5 E2E는 후속 증거다.
+
 U5 live workflow invocation owner는 candidate pinning product, candidate pair attestation action, `prepare-candidate`, authored pair
 attestation action, `prepare-candidate-aggregate`, `finalize-candidate-aggregate`, `resume-candidate-publication`,
 `cleanup-candidate-aggregate`의 여덟 닫힌 union tag가 stage와 exact 실행 identity를 함께 결정하게 한다. caller가 stage·command·action

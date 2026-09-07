@@ -207,6 +207,12 @@ pub const State = struct {
     /// 안 보고 있다」가 아니다 — 여기서 함께 지우면 같은 pane 에 머무는 내내 매 tick 다시 훑는다.
     focus_surface_id: u64 = 0,
     /// 스캔이 찾은 **전부**. 필터의 원본이라 여기서는 아무것도 빼지 않는다.
+    /// 줄 목록이 **마지막 프레임에 실제로 그린 줄 수**. 진단이자 판정자의 눈이다.
+    ///
+    /// **없으면 렌더가 통째로 죽어도 CI 가 못 잡는다.** 판정자들은 그림 채널(`appendGpuImages`)만
+    /// 보고 있었는데, 목록은 글자가 전부라 안 그려져도 「활동이 없다」로 보인다 — 격자가 빈 것과 달리
+    /// 눈에 띄지도 않는다. `overflow` 와 짝이다(그것은 «못 그린 수», 이것은 «그린 수»).
+    drawn_rows: usize = 0,
     /// 지금 무엇을 보고 있나(활동 뷰 계약 §2.1). **필터가 모양을 정한다** — 이미지는 격자,
     /// 나머지는 줄 목록이다.
     filter: Filter = .images,
@@ -409,7 +415,12 @@ pub const State = struct {
         }
     }
 
-    /// 거를 자리를 못 잡았을 때의 물러날 자리 — **필터를 끄고 전부 보여준다**.
+    /// 거를 자리를 못 잡았을 때의 물러날 자리 — **검색을 끄고 그 종류를 전부 보여준다**.
+    ///
+    /// ⚠️ **끄는 것은 검색이지 종류가 아니다.** 종류 필터(§2.1)는 사용자가 「지금 무엇을 보고
+    /// 있는가」로 고른 것이라, 자리를 못 잡았다고 이미지 필터에 활동을 쏟아 놓으면 그것이야말로
+    /// 「왜 이게 뜨지」가 된다. 예전 주석은 「필터를 끈다」고 적혀 있었는데 종류 필터가 생긴 뒤로
+    /// 거짓이 됐다(적대적 검증 I2).
     ///
     /// 반쯤 걸러 두면 사용자는 왜 어떤 이미지가 사라졌는지 알 수 없다. 여기서도 자리를 못 잡으면
     /// 목록은 비지만, **`hits` 와 `labels` 는 언제나 같은 길이다**(둘 다 비어 있다).
@@ -568,11 +579,17 @@ pub const Filter = enum {
         return self == .images;
     }
 
+    /// 다음 필터. **순서는 실측이 정한다**(적대적 검증 H5).
+    ///
+    /// 처음에는 표 순서대로 `images → reads → execs → all` 이었는데, 그러면 **첫 Tab 이 거의 항상
+    /// 빈 화면**이다 — 「읽기」로 세어지는 것(`Read`·`view_image`)은 실측 39,645 건 중 **634 건**
+    /// (1.6%)뿐이고 Codex 세션에서는 **0 건**이다. 사용자가 처음 만나는 화면이 비어 있으면 기능이
+    /// 고장난 것으로 읽힌다. 그래서 **가장 많은 것부터** 돈다 — `Bash`/`exec` 가 도구의 92% 다.
     pub fn next(self: Filter) Filter {
         return switch (self) {
-            .images => .reads,
-            .reads => .execs,
-            .execs => .all,
+            .images => .execs,
+            .execs => .reads,
+            .reads => .all,
             .all => .images,
         };
     }
@@ -751,6 +768,9 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 9 초 내내). 못 박는 불변식 자체는 `applyFilter` 가 지킨다 — 훑기 결과는 반드시 거길 지나므로
     // 여기 것은 그 창을 줄이는 몫이다(뮤테이션으로 확인: 이 줄만 지우면 test 는 통과한다).
     self.image_gallery.pendingClear();
+    // **보던 자리도 옛 세션의 것이다.** 오프셋은 픽셀이라 새 목록에서는 아무 뜻이 없고, 남겨 두면
+    // 짧은 목록에서 끝을 넘어 화면이 빈다(적대적 검증 H2). 필터 전환이 같은 이유로 같은 일을 한다.
+    if (!same) self.image_gallery.scroll.offset_y_px = 0;
 
     // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
     // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
@@ -1189,8 +1209,17 @@ pub fn navigateOpen(self: *AppSession, delta: i32) bool {
 
 /// 종류 필터를 다음으로 넘긴다. 소비했으면 `true`.
 ///
-/// **갤러리가 키를 쥐고 있을 때만** 가져간다 — 도크가 보인다는 이유로 삼키면 터미널의 Tab(자동
-/// 완성)이 사라진다. 검색 중에도 물러난다(그때 Tab 은 검색창 것이다).
+/// **갤러리가 키를 쥐고 있을 때만** 가져간다(`ownsKeys`). 검색 중에는 물러난다(그때 Tab 은 검색창 것).
+///
+/// ⚠️ **그 게이트로도 터미널 Tab 을 뺏는다 — 알고 두는 것이다.** `key_focus` 는 도크를 한 번 클릭하면
+/// 켜진 채 남으므로, 그 뒤 터미널에 글자를 쳐도(문자는 터미널로 간다) **Tab 만 여기로 온다**.
+/// 사용자에게는 자동완성이 죽은 것으로 보인다. ←→(`navigateOpen`)는 이 위험 때문에 「크게 보기가
+/// 열렸을 때만」으로 좁혀 두었지만, 필터 전환은 크게 보기와 무관해서 같은 좁힘을 쓸 수 없다.
+///
+/// **사용자가 감수하기로 했다(2026-09-07).** 적대적 검증 D1 이 이 결함을 짚었고, 대안(안내 줄 클릭 ·
+/// `Cmd` 조합 · 아예 빼기)을 제시했으나 「뺏겨도 된다」는 결정이 나왔다. 그러니 이것은 **못 본 결함이
+/// 아니라 고른 트레이드오프**다 — 되돌리기 전에 그 결정부터 확인할 것. 제대로 된 필터 UI 는 AV4 다
+/// (계약 §8 「필터 UI 의 자리」).
 pub fn cycleFilter(self: *AppSession) bool {
     if (!ownsKeys(self)) return false;
     if (self.image_gallery.search_active) return false;
@@ -1198,8 +1227,12 @@ pub fn cycleFilter(self: *AppSession) bool {
     // 그림이 떠 있다」가 된다.
     closeOpen(self);
     self.image_gallery.filter = self.image_gallery.filter.next();
-    // 목록이 통째로 바뀌므로 보던 자리는 뜻을 잃는다 — 맨 위로 되돌린다.
+    // 목록이 통째로 바뀌므로 보던 자리도, 얹혀 있던 칸도 뜻을 잃는다.
     self.image_gallery.scroll.offset_y_px = 0;
+    self.image_gallery.hovered = null;
+    // **넘친 수도 옛 모양의 것이다.** 격자에서 넘쳐 있었다면 그 값이 남아, 목록의 첫 프레임이
+    // 그려지기 전에 「도크가 좁아 못 그립니다」가 한 번 스친다. 렌더가 다시 채운다.
+    self.image_gallery.overflow = 0;
     rebuildFilter(self);
     self.metal_dirty = true;
     return true;
@@ -1451,6 +1484,8 @@ pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!builtin.target.os.tag.isDarwin()) return false;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return clearHover(self);
     if (self.image_gallery.open != null) return clearHover(self);
+    // 줄 목록에는 「얹힌 칸」이 없다 — 격자 좌표로 판정하면 남의 자리를 밝힌다(클릭과 같은 이유).
+    if (!self.image_gallery.filter.isGrid()) return clearHover(self);
 
     const area = gridArea(self);
     if (x_px < @as(f64, @floatFromInt(area.x)) or y_px < @as(f64, @floatFromInt(area.y))) return clearHover(self);
@@ -1502,6 +1537,12 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         } else closeOpen(self);
         return true;
     }
+
+    // **줄 목록에서는 격자 히트테스트를 돌리지 않는다.** 좌표계가 다르므로 엉뚱한 항목이 잡히고,
+    // 그것이 활동 `Hit` 이면 `ensureOpen` 이 명령 문자열을 **이미지로 디코드**하려 들어 「열지
+    // 못했습니다」가 뜬다. 줄을 눌렀을 때의 동작(펼침)은 AV3 가 정의한다 — 그때까지는 도크를
+    // 눌렀다는 사실(키 포커스)만 받고 아무것도 열지 않는다.
+    if (!self.image_gallery.filter.isGrid()) return true;
 
     const m = gridMetrics(self);
     const l = gridLayout(self);
@@ -1995,6 +2036,29 @@ pub fn gridLayout(self: *const AppSession) image_grid.Layout {
 
 /// 휠로 격자를 굴린다. 크게 보기 중에는 `wheelZoom` 이 가져가므로 여기 오지 않는다.
 pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) bool {
+    // **줄 목록은 자기 자를 쓴다.** 격자의 `max_scroll` 은 타일 크기와 열 수에서 나오므로 줄 목록의
+    // 실제 높이(항목 수 × 줄 높이)와 다르다. 그대로 쓰면 **끝까지 내려가지 않는다** — 4,084개짜리
+    // 세션에서 앞부분만 닿는다. 눈금도 한 줄이어야 「한 칸씩」이 뜻을 갖는다.
+    if (!self.image_gallery.filter.isGrid()) {
+        const area = gridArea(self);
+        const row_h = listRowHeightPx(self);
+        if (row_h == 0) return false;
+        const content_h: u32 = @intCast(@min(
+            @as(u64, self.image_gallery.count()) * @as(u64, row_h),
+            @as(u64, std.math.maxInt(u32)),
+        ));
+        const max_scroll = content_h -| area.h;
+        if (max_scroll == 0) return false; // 다 보인다 — 이벤트를 삼키지 않는다
+        const unit: f64 = if (precise)
+            @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
+        else
+            @floatFromInt(row_h);
+        if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, max_scroll)) {
+            self.metal_dirty = true;
+        }
+        return true; // 경계에서도 소비한다 — 안 그러면 제스처가 뒤 터미널로 샌다
+    }
+
     const l = gridLayout(self);
     if (l.max_scroll == 0) return false; // 굴릴 것이 없다 — 이벤트를 삼키지 않는다
     // 트랙패드(precise)는 논리 픽셀, 눈금은 한 번에 한 행. 도크 목록과 같은 규약이다.
@@ -2028,6 +2092,8 @@ pub fn appendHoverQuad(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     if (self.image_gallery.open != null) return;
+    // **필터가 바뀌어도 `hovered` 는 남는다.** 격자 좌표로 그리면 목록 화면에 뜬금없는 강조가 뜬다.
+    if (!self.image_gallery.filter.isGrid()) return;
     const n = self.image_gallery.hovered orelse return;
 
     const area = gridArea(self);
@@ -2214,12 +2280,56 @@ pub fn appendGpuImages(
 }
 
 /// 줄 목록 한 줄의 높이(px). 셀 높이의 배수로 두어 글자가 줄 사이에 끼지 않는다.
-fn listRowHeightPx(self: *const AppSession) u32 {
+pub fn listRowHeightPx(self: *const AppSession) u32 {
     return self.cell_height_px + list_row_padding_px;
 }
 
 /// 줄 사이 여백(px). 촘촘하면 훑기 어렵고 넓으면 한 화면에 몇 줄 못 담는다.
 const list_row_padding_px: u32 = 4;
+
+/// 줄 목록이 이번 프레임에 **자리를 못 얻는** 수. 하나도 못 그리면 `count()` 와 같다.
+///
+/// **계산은 `listWindow` 가 소유하고 이 함수는 그것을 읽을 뿐이다.** 예전에는 렌더가 `overflow` 에
+/// 남긴 값을 안내가 읽었는데, 그리는 순서가 「안내 → 목록」이라 안내는 **한 프레임 늦은 값**을 봤다
+/// (적대적 검증 I1). 그때 이 함수가 계산을 따로 갖는 바람에 **렌더와 두 벌**이 됐고, J1 이 그것을
+/// 다시 잡았다 — 지금은 둘 다 `listWindow` 하나를 부른다.
+pub fn listOverflow(self: *const AppSession) usize {
+    const w = listWindow(self);
+    return w.total -| (w.last -| w.first);
+}
+
+/// 줄 목록이 이번 프레임에 그릴 **창**. 렌더와 안내가 **이 하나만** 부른다.
+///
+/// **두 벌이면 갈린다.** 처음에는 `listOverflow` 가 계산을 따로 갖고 렌더가 또 계산했는데, 그것은
+/// 이 저장소가 반복해서 당한 형태다(적대적 검증 J1 이 내 I1 수정에서 그것을 찾았다 — 계산을 한
+/// 곳으로 모은다면서 **절반만** 옮겼다). `cols == 0` 처럼 한 줄도 못 그리는 경우는 `first == last`
+/// 로 답한다 — 그러면 overflow 가 저절로 `total` 이 된다.
+pub const ListWindow = struct { total: usize, first: usize, last: usize, rows_fit: usize, cols: u16, row_h: u32 };
+
+pub fn listWindow(self: *const AppSession) ListWindow {
+    const total = self.image_gallery.count();
+    const empty: ListWindow = .{ .total = total, .first = 0, .last = 0, .rows_fit = 0, .cols = 0, .row_h = 0 };
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return empty;
+    const area = gridArea(self);
+    const row_h = listRowHeightPx(self);
+    if (area.w == 0 or area.h == 0 or row_h == 0) return empty;
+    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+    if (cols == 0) return empty;
+
+    const rows_fit: usize = @intCast(area.h / row_h);
+    // **스크롤을 목록 끝 안으로 잡아 둔다**(H2) — 큰 목록에서 굴린 뒤 짧은 pane 으로 옮기면
+    // `first` 가 끝을 넘어 화면이 비고, 안내가 틀린 원인을 말한다.
+    const max_first = total -| rows_fit;
+    const first: usize = @min(@as(usize, @intCast(self.image_gallery.scroll.offset_y_px / row_h)), max_first);
+    return .{
+        .total = total,
+        .first = first,
+        .last = @min(first +| rows_fit, total),
+        .rows_fit = rows_fit,
+        .cols = cols,
+        .row_h = row_h,
+    };
+}
 
 /// 활동을 **줄 목록**으로 그린다(활동 뷰 계약 §2.1·§2.2).
 ///
@@ -2237,39 +2347,122 @@ pub fn collectActivityList(
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    if (self.image_gallery.filter.isGrid()) return;
+    if (self.image_gallery.filter.isGrid()) {
+        self.image_gallery.drawn_rows = 0; // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다
+        return;
+    }
 
+    // **한 줄도 못 그리는 길에서도 그 사실을 남긴다**(계약 §2 — 「없다」와 「안 보인다」는 다르다).
+    // 조용히 물러나면 화면은 비었는데 안내는 「4,084개」라고만 말해, 사용자에게는 목록이 **없는 것**과
+    // 구분되지 않는다.
+    //
+    // ⚠️ **어느 길에서 그 안내가 실제로 보이는지 알고 적는다.** `gridArea().w` 는 `tree_content.w` 와
+    // 같은 값이므로, `cols == 0` 이면 안내도 같은 폭 게이트(`tree_content_cols > 0`)에 막혀 **갤러리
+    // 블록 자체가 안 돈다** — 그 경우 문구는 원리적으로 화면에 못 나온다. 실제로 보이는 길은
+    // **세로가 모자랄 때**(`area.h == 0`)다. 그래서 문구가 「좁다」가 아니라 「자리가 없다」이다
+    // (적대적 검증 F1 이 「좁아서」라고 적힌 것을 잡았다 — 틀린 원인을 말하고 있었다).
+    const win = listWindow(self);
     const area = gridArea(self);
-    if (area.w == 0 or area.h == 0) return;
-    const row_h = listRowHeightPx(self);
-    if (row_h == 0) return;
-
-    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-    if (cols == 0) return;
+    const cols = win.cols;
+    const row_h = win.row_h;
+    if (cols == 0 or row_h == 0) {
+        self.image_gallery.overflow = win.total;
+        self.image_gallery.drawn_rows = 0;
+        return;
+    }
 
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
     // 스크롤은 격자와 같은 값을 쓴다 — 필터를 바꿔도 「어디를 보고 있었나」가 이어진다.
-    const first: usize = @intCast(self.image_gallery.scroll.offset_y_px / row_h);
-    const rows_fit: usize = @intCast(area.h / row_h);
-    const total = self.image_gallery.count();
-    const last = @min(first +| rows_fit, total);
-    // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
-    self.image_gallery.overflow = total -| (last -| first);
+    const first = win.first;
+    const last = win.last;
+    // **자리를 못 얻은 수를 남긴다.** 계약 §2(「없다」와 「안 보인다」를 가른다)를 지키는 것은 이제
+    // 안내가 직접 부르는 `listWindow` 이고, **이 필드를 읽는 제품 코드는 없다** — 판정자가 렌더를
+    // 들여다보는 창일 뿐이다(`drawn_rows` 와 같은 역할, 적대적 검증 K1 이 전수로 확인했다).
+    // 그 사실을 안 적으면 다음 사람이 「안내가 이걸 읽겠지」로 오해해 순서 의존을 되살린다.
+    self.image_gallery.overflow = win.total -| (last -| first);
 
+    // 접두·시각은 라벨보다 **흐리게** — 곁말이 본문보다 먼저 읽히면 안 된다(격자 라벨과 같은 규율).
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        time_dim_percent,
+    ) };
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+    const now_off = utcOffsetAt(now_s);
+
+    var drawn: usize = 0;
     var i = first;
     while (i < last) : (i += 1) {
         if (i >= self.image_gallery.labels.items.len) break;
-        const text = self.image_gallery.labels.items[i].text();
-        if (text.len == 0) continue; // 없는 설명을 지어내지 않는다
+        const label = self.image_gallery.labels.items[i];
+        const text = label.text();
+        // **「전체」에는 이미지도 섞인다.** 그 줄의 「첨부 / 읽음」은 계약 §2.2.1 이 「이 화면에 사용자가
+        // 던지는 첫 물음」이라고 못박은 정보다 — 목록이라고 버리면 격자에서 답하던 것을 못 답한다.
+        // 활동 줄에는 접두가 없다(`Source.none`) — 모르면 말하지 않는다.
+        var prefix_buf: [context_mod.max_label_bytes]u8 = undefined;
+        const prefix = context_mod.originPrefix(
+            &prefix_buf,
+            originText(label.source),
+            label.seq,
+            label.seq_total,
+        );
+        // 없는 설명을 지어내지 않는다. **자리는 지킨다** — `y` 를 `i` 로 계산하므로 못 그린 줄은
+        // 빈 자리로 남는다. 그것이 「뭔가 있었는데 못 그렸다」를 정직하게 보이고, 항목 위치가
+        // 인덱스와 1:1 이라 스크롤·클릭(AV3) 계산이 갈리지 않는다(적대적 검증 H3 의 결정).
+        if (text.len == 0 and prefix.len == 0) continue;
+        drawn += 1;
+
+        // **시각도 격자에서 갖던 정보다.** 활동 라벨은 아직 `time_s == 0`(AV2)이라 안 그려지지만,
+        // 「전체」에 섞이는 이미지 줄은 격자에서 시각을 보여 주고 있었다 — 목록이라고 버리면
+        // 접두를 버렸던 것과 같은 손실이다(적대적 검증 I3, D3 와 짝).
+        var time_buf: [16]u8 = undefined;
+        var time_text: []const u8 = &.{};
+        if (label.time_s != 0) {
+            const off = utcOffsetAt(label.time_s);
+            time_text = formatImageTime(&time_buf, label.time_s, off, now_s, now_off);
+        }
+
         const y = area.y + @as(u32, @intCast((i - first) * row_h));
-        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
-        self.collectShaped(collected, dl, builder, .{ .pane = .{
-            .origin_x = area.x,
-            .origin_y = y,
-            .colors = colors,
-        } });
+        // 자리 나누기는 격자와 **같은 순수 함수**가 정한다 — 좁아지면 시각부터 버린다(§2.2.3).
+        const split = context_mod.splitLabelRow(
+            cols,
+            displayColsOf(prefix),
+            displayColsOf(time_text),
+            time_gap_cols,
+            if (text.len == 0) 0 else min_label_cols,
+        );
+
+        var at_col: u32 = 0;
+        if (split.prefix_cols > 0) {
+            const pdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.prefix_cols, prefix, dim) catch continue;
+            self.collectShaped(collected, pdl, builder, .{ .pane = .{
+                .origin_x = area.x,
+                .origin_y = y,
+                .colors = colors,
+            } });
+            at_col = @as(u32, split.prefix_cols) +| time_gap_cols;
+        }
+        if (text.len > 0 and split.label_cols > 0) {
+            const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.label_cols, text, fg) catch continue;
+            self.collectShaped(collected, dl, builder, .{ .pane = .{
+                .origin_x = area.x +| (at_col *| self.cell_width_px),
+                .origin_y = y,
+                .colors = colors,
+            } });
+        }
+        if (split.time_cols > 0 and time_text.len > 0) {
+            // 시각은 **오른쪽 끝**에 붙인다(격자 라벨과 같은 자리 규약).
+            const time_col: u32 = @as(u32, cols) -| split.time_cols;
+            const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.time_cols, time_text, dim) catch continue;
+            self.collectShaped(collected, tdl, builder, .{ .pane = .{
+                .origin_x = area.x +| (time_col *| self.cell_width_px),
+                .origin_y = y,
+                .colors = colors,
+            } });
+        }
     }
+    self.image_gallery.drawn_rows = drawn;
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.
@@ -2317,14 +2510,31 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.
     if (self.image_gallery.tiles.items.len > 0) {
-        if (self.image_gallery.overflow == 0) return "";
+        // **렌더가 남긴 값이 아니라 지금 계산을 본다.** 그리는 순서가 「안내 → 격자」라 잔값을 읽으면
+        // 한 프레임 늦는다 — 목록에서 고친 것과 **같은 결함**이고, 그때 격자를 빠뜨렸다(적대적 검증 J5).
+        const grid_overflow = gridLayout(self).overflow;
+        if (grid_overflow == 0) return "";
         return maru.i18n.format(buf, maru.i18n.t(.image_gallery_shown_of), &.{
-            .{ .d = @intCast(n - self.image_gallery.overflow) },
+            .{ .d = @intCast(n -| grid_overflow) },
             .{ .d = @intCast(n) },
         });
     }
+    // **하나도 못 그렸으면 그렇게 말한다.** 목록은 자리를 못 얻으면 통째로 비는데(좁은 도크·줄
+    // 높이 0), 그때 개수만 적으면 사용자에게는 「목록이 없다」와 구분되지 않는다 — 계약 §2 가
+    // 가르라고 한 바로 그 둘이다. 격자는 「12장 중 8장」이 그 몫을 하지만 목록에는 타일이 없어
+    // 그 경로를 안 탄다.
+    if (!self.image_gallery.filter.isGrid() and listOverflow(self) >= n) {
+        return maru.i18n.t(.image_gallery_too_narrow);
+    }
+    // **단위도 종류를 따른다.** 명령을 「장」으로 세면 안 된다 — 헤드리스 캡처가 실제로 「4084장」을
+    // 잡아냈고, 값 판정자로는 안 보이는 종류의 결함이다(계약 §2.2 의 「지어내지 않는다」와 같은 축:
+    // 이미지의 단위를 활동에 빌려 쓰면 화면이 거짓을 말한다).
+    const suffix = if (self.image_gallery.filter.isGrid())
+        maru.i18n.t(.image_gallery_count_suffix)
+    else
+        maru.i18n.t(.image_gallery_activity_count_suffix);
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
-    return std.fmt.bufPrint(buf, "{d}{s}", .{ n, maru.i18n.t(.image_gallery_count_suffix) }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{d}{s}", .{ n, suffix }) catch buf[0..0];
 }
 
 /// `formatImageTime` 의 test 창구. 순수 함수라 화면 없이 표기를 짚을 수 있다.

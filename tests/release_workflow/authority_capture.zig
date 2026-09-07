@@ -13,6 +13,7 @@
 const std = @import("std");
 
 const workflow_path = ".github/workflows/release.yml";
+const live_action_path = ".github/actions/session-host-release-live/action.yml";
 
 /// 이 워크플로가 못박아야 하는 checkout Action 의 커밋. **버전 태그가 아니라 SHA 다** — 태그는
 /// 옮겨 달 수 있고, 옮겨 달리면 우리가 검증한 적 없는 코드가 릴리스 파이프라인 안에서 돈다.
@@ -20,6 +21,10 @@ const pinned_checkout = "uses: actions/checkout@34e114876b0b11c390a56381ad16ebd1
 
 fn readWorkflow(arena: std.mem.Allocator) ![]const u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, workflow_path, arena, .limited(1024 * 1024));
+}
+
+fn readLiveAction(arena: std.mem.Allocator) ![]const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, live_action_path, arena, .limited(1024 * 1024));
 }
 
 /// `needle` 을 **정확히 그 내용인 줄**로 세는 수. 원본 스크립트의 `grep -c '^…$'` 다 —
@@ -78,7 +83,8 @@ test "릴리스 워크플로: 신뢰 획득 단계가 체크아웃보다 **앞**
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "        id: trusted-gh"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, pinned_checkout));
-    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, "command -v gh"));
+    // release writer와 checkout 없는 read-only timing observer가 각각 runner-provided gh를 찾는다.
+    try std.testing.expectEqual(@as(usize, 2), countMatchingLines(text, "command -v gh"));
 
     // **이 한 줄이 이 파일의 요점이다.** 체크아웃 뒤에 `gh` 를 찾으면 그 PATH 는 방금 받아 온
     // 저장소가 건드릴 수 있는 것이라, 무엇을 붙들었는지 우리가 말할 수 없게 된다.
@@ -181,6 +187,9 @@ test "릴리스 워크플로: 모든 Action 이 40 자리 SHA 로 못박혀 있�
         // 뒤 주석(`# v4`)을 자른다.
         if (std.mem.indexOfAny(u8, rest, " \t#")) |cut| rest = rest[0..cut];
         if (rest.len == 0) continue;
+        // 저장소 안의 reviewed action은 commit ref가 아니라 exact relative pathname으로 고정한다.
+        // live workflow gate가 허용 경로와 exact-one 호출을 별도로 검사한다.
+        if (std.mem.startsWith(u8, rest, "./.github/actions/")) continue;
         seen += 1;
 
         // **`@` 는 정확히 하나여야 한다.** 원본 정규식이 `^[^@[:space:]]+@…$` 라 이름 쪽에 `@` 를 못
@@ -218,8 +227,8 @@ test "릴리스 워크플로: 태그 push 로만 켜진다" {
     // **줄바꿈을 찾는 바늘에 넣지 않는다.** `"on:\n"` 으로 찾으면 CRLF 작업 트리에서 아예 못 찾는다
     // (실측: `TriggerBlockMissing`). 줄 머리를 먼저 찾고 거기서부터 자른다.
     const on_at = std.mem.indexOf(u8, text, "\non:") orelse return error.TriggerBlockMissing;
-    const block = blockUntil(text[on_at + 1 ..], "on:", "permissions:") orelse return error.TriggerBlockMissing;
-    // **끝 공백을 턴다.** 원본은 `$(...)` 로 받았고 그것이 끝 개행을 지운다 — 그래서 `permissions:`
+    const block = blockUntil(text[on_at + 1 ..], "on:", "concurrency:") orelse return error.TriggerBlockMissing;
+    // **끝 공백을 턴다.** 원본은 `$(...)` 로 받았고 그것이 끝 개행을 지운다 — 그래서 `concurrency:`
     // 앞의 빈 줄이 비교에 안 들어갔다. 안 털면 그 빈 줄 하나 때문에 옮긴 판정이 원본과 달라진다.
     //
     // **CR 도 턴다.** `core.autocrlf=true` 로 받은 작업 트리에서는 이 파일이 CRLF 다 — 그러면 통짜
@@ -230,4 +239,196 @@ test "릴리스 워크플로: 태그 push 로만 켜진다" {
     for (std.mem.trimEnd(u8, block, "\r\n")) |c| if (c != '\r') try buf.append(std.testing.allocator, c);
     const want = "on:\n  push:\n    tags: [\"v*\"]";
     try std.testing.expectEqualStrings(want, buf.items);
+}
+
+test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller 하나만 실행한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+
+    try std.testing.expectEqual(@as(usize, 0), countExactLines(text, "permissions:"));
+    try std.testing.expectEqual(@as(usize, 2), countExactLines(text, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      contents: write # GitHub Release 생성/업로드"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      id-token: write # artifact attestation OIDC"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      attestations: write # artifact attestation publication"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      - name: Build session host live release executables"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      - name: Run session host live release workflow"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "        id: session-host-live"));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "        uses: ./.github/actions/session-host-release-live"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "tools/publish-github-release.sh"));
+
+    const zig_capture = lineOf(text, "      - name: Capture trusted Zig toolchain after mise").?;
+    const job = lineOf(text, "  universal-dmg:").?;
+    const permissions = lineOf(text, "    permissions:").?;
+    const steps = lineOf(text, "    steps:").?;
+    const signed_build = lineOf(text, "      - name: Build signed + notarized universal dmg").?;
+    const executable_build = lineOf(text, "      - name: Build session host live release executables").?;
+    const live = lineOf(text, "      - name: Run session host live release workflow").?;
+    try std.testing.expect(job < permissions and permissions < steps);
+    try std.testing.expect(zig_capture < signed_build and signed_build < executable_build and executable_build < live);
+
+    const build_block = blockUntil(text, "      - name: Build session host live release executables", "      - name: Run session host live release workflow") orelse
+        return error.LiveExecutableBuildMissing;
+    inline for (.{
+        "session-host-release-validator",
+        "session-host-release-workflow-bootstrap",
+        "session-host-release-workflow-candidate-inputs",
+        "session-host-release-workflow-checkpoint",
+        "session-host-release-workflow-command",
+    }) |step| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(build_block, step));
+
+    const live_block = blockUntil(text, "      - name: Run session host live release workflow", "      - name: Upload dmg as workflow artifact") orelse
+        return error.LiveCallerBlockMissing;
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "gh-path: ${{ steps.trusted-gh.outputs.path }}"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "gh-sha256: ${{ steps.trusted-gh.outputs.sha256 }}"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-path: ${{ steps.trusted-zig.outputs.path }}"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-size: ${{ steps.trusted-zig.outputs.size }}"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-sha256: ${{ steps.trusted-zig.outputs.sha256 }}"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
+
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "zig build"));
+    try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
+    const signed_block = blockUntil(text, "      - name: Build signed + notarized universal dmg", "      - name: Build session host live release executables") orelse
+        return error.SignedBuildBlockMissing;
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(signed_block, "ZIG: ${{ steps.trusted-zig.outputs.path }}"));
+}
+
+test "live 릴리스 timing job은 GitHub-issued top-level step만 read-only로 기록한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const timing_at = std.mem.indexOf(u8, text, "  session-host-release-live-timing:") orelse return error.LiveTimingJobMissing;
+    const timing = text[timing_at..];
+
+    inline for (.{
+        "    needs: universal-dmg",
+        "      actions: read",
+        "      contents: read",
+        "/actions/runs/$MARU_RUN_ID/attempts/$MARU_RUN_ATTEMPT/jobs?per_page=100",
+        "maru.session-host-release-live-timing.v1",
+        "Run session host live release workflow",
+        "for attempt in $(/usr/bin/seq 1 12)",
+        "test \"$attempt\" -lt 12",
+        "/bin/sleep 5",
+        "test ! -L \"$response\"",
+        "test ! -L \"$record\"",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "if-no-files-found: error",
+    }) |needle| try std.testing.expect(countMatchingLines(timing, needle) >= 1);
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(timing, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "contents: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "id-token: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "attestations: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "actions/checkout"));
+}
+
+test "live 릴리스 action: eight-stage SSOT order와 최소 credential을 지킨다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readLiveAction(arena_state.allocator());
+
+    const ids = [_][]const u8{
+        "session-host-candidate-pinning",
+        "session-host-candidate-attestation",
+        "session-host-draft-authoring",
+        "session-host-authored-attestation",
+        "session-host-aggregate-prepare",
+        "session-host-aggregate-finalize",
+        "session-host-publication",
+        "session-host-aggregate-cleanup",
+    };
+    var previous: usize = 0;
+    for (ids) |id| {
+        const needle = try std.fmt.allocPrint(arena_state.allocator(), "    id: {s}", .{id});
+        try std.testing.expectEqual(@as(usize, 1), countExactLines(text, needle));
+        const at = std.mem.indexOfPos(u8, text, previous, needle) orelse return error.LiveStageMissing;
+        try std.testing.expect(at >= previous);
+        previous = at + needle.len;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, "uses: ./.github/actions/session-host-release-live-candidate-attestation"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, "uses: ./.github/actions/session-host-release-live-authored-attestation"));
+    try std.testing.expectEqual(@as(usize, 5), countMatchingLines(text, "maru-session-host-release-workflow-command"));
+    try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "GH_TOKEN: ${{ github.token }}"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "GITHUB_ENV"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "continue-on-error"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "if: always()"));
+}
+
+test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사용한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readLiveAction(arena_state.allocator());
+
+    inline for (.{
+        "$RUNNER_TEMP/maru-session-host-release-checkpoints",
+        "$RUNNER_TEMP/maru-session-host-release-live",
+        "dist/session-host-candidate-$MARU_VERSION",
+        "baseline-evidence.json",
+        "Maru-$MARU_VERSION-session-host-release.json",
+        "/usr/bin/uuidgen",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, needle));
+
+    inline for (.{
+        "steps.session-host-candidate-attestation.outputs.dmg-bundle-path",
+        "steps.session-host-candidate-attestation.outputs.frozen-bundle-path",
+    }) |needle| try std.testing.expectEqual(@as(usize, 2), countMatchingLines(text, needle));
+    inline for (.{
+        "steps.session-host-authored-attestation.outputs.evidence-bundle-path",
+        "steps.session-host-authored-attestation.outputs.manifest-bundle-path",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, needle));
+}
+
+test "live 릴리스 action: command 단계마다 closed argv와 credential 위치를 사용한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readLiveAction(arena_state.allocator());
+
+    const draft = blockUntil(text, "  - name: Author baseline evidence and draft", "  - name: Attest authored evidence pair") orelse
+        return error.LiveDraftBlockMissing;
+    try expectClosedOptions(draft, 19, &.{
+        "--repo ",                "--tag ",                  "--github-cli ",              "--github-cli-sha256 ", "--test-uuid ",          "--dmg ",
+        "--frozen-executable ",   "--candidate-dmg-bundle ", "--candidate-frozen-bundle ", "--dmg-work ",          "--baseline-workspace ", "--app-main-executable ",
+        "--app-cli-executable ",  "--manifest ",             "--source-root ",             "--zig ",               "--zig-size ",           "--zig-sha256 ",
+        "--durable-preparation ",
+    });
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(draft, "GH_TOKEN: ${{ github.token }}"));
+
+    const prepare = blockUntil(text, "  - name: Prepare attestation aggregate", "  - name: Finalize attestation aggregate") orelse
+        return error.LiveAggregatePrepareBlockMissing;
+    try expectClosedOptions(prepare, 10, &.{
+        "--repo ",                 "--tag ",                     "--github-cli ",      "--github-cli-sha256 ", "--evidence ",
+        "--candidate-dmg-bundle ", "--candidate-frozen-bundle ", "--evidence-bundle ", "--manifest-bundle ",   "--aggregate ",
+    });
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(prepare, "GH_TOKEN"));
+
+    const finalize = blockUntil(text, "  - name: Finalize attestation aggregate", "  - name: Publish candidate release") orelse
+        return error.LiveAggregateFinalizeBlockMissing;
+    try expectClosedOptions(finalize, 8, &.{
+        "--repo ",      "--tag ", "--github-cli ",        "--github-cli-sha256 ",
+        "--aggregate ", "--dmg ", "--frozen-executable ", "--manifest ",
+    });
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(finalize, "GH_TOKEN"));
+
+    const publication = blockUntil(text, "  - name: Publish candidate release", "  - name: Clean verified aggregate") orelse
+        return error.LivePublicationBlockMissing;
+    try expectClosedOptions(publication, 8, &.{
+        "--repo ",        "--tag ",       "--github-cli ", "--github-cli-sha256 ",
+        "--preparation ", "--aggregate ", "--dmg ",        "--frozen-executable ",
+    });
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(publication, "GH_TOKEN: ${{ github.token }}"));
+
+    const cleanup_at = std.mem.indexOf(u8, text, "  - name: Clean verified aggregate") orelse return error.LiveCleanupBlockMissing;
+    const cleanup = text[cleanup_at..];
+    try expectClosedOptions(cleanup, 8, &.{
+        "--repo ",      "--tag ", "--github-cli ",        "--github-cli-sha256 ",
+        "--aggregate ", "--dmg ", "--frozen-executable ", "--manifest ",
+    });
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(cleanup, "GH_TOKEN: ${{ github.token }}"));
+}
+
+fn expectClosedOptions(block: []const u8, expected_count: usize, options: []const []const u8) !void {
+    try std.testing.expectEqual(expected_count, std.mem.count(u8, block, "--"));
+    try std.testing.expectEqual(expected_count, options.len);
+    for (options) |option| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, block, option));
 }

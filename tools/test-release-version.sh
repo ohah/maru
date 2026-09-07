@@ -84,7 +84,8 @@ test "$(grep -F -c 'cmp "$work/arm.app/Contents/Info.plist" "$work/x86.app/Conte
 verify_line=$(grep -n 'name: Verify release version SSOT' .github/workflows/release.yml | cut -d: -f1)
 secret_line=$(grep -n 'name: Import Developer ID certificate' .github/workflows/release.yml | cut -d: -f1)
 test "$verify_line" -lt "$secret_line"
-test "$(grep -F -c 'zig build check-release-version -Drelease-tag="$RELEASE_TAG"' .github/workflows/release.yml)" = 1
+test "$(grep -F -c '"$TRUSTED_ZIG" build check-release-version -Drelease-tag="$RELEASE_TAG"' .github/workflows/release.yml)" = 1
+test "$(grep -F -c 'TRUSTED_ZIG: ${{ steps.trusted-zig.outputs.path }}' .github/workflows/release.yml)" = 2
 ! grep -F -q 'zig build check-release-version -Drelease-tag="${{' .github/workflows/release.yml
 
 echo 'release version SSOT contract: OK'

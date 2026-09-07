@@ -6465,6 +6465,11 @@ pub fn build(b: *std.Build) void {
         "Check checkout-before-trust release workflow regressions",
     );
     session_host_release_workflow_step.dependOn(&run_release_workflow_tests.step);
+    const session_host_release_live_workflow_step = b.step(
+        "check-session-host-release-live-workflow",
+        "Check the repository-local eight-stage live release workflow",
+    );
+    session_host_release_live_workflow_step.dependOn(&run_release_workflow_tests.step);
     test_step.dependOn(&run_release_workflow_tests.step);
 
     const session_host_release_attestation_action_contract = b.addSystemCommand(&.{ "bash", "tools/test-session-host-release-attestation-action.sh" });

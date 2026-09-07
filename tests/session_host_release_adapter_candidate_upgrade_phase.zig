@@ -39,6 +39,7 @@ test "every operation failure cleans only attempted outputs in reverse order" {
     for (0..9) |fail_index| {
         var steps = Steps{ .fail_index = fail_index };
         try std.testing.expectError(error.InjectedFailure, phase.runWith(&steps));
+        try std.testing.expectEqual(fail_index + 1, steps.operation_index);
         const expected = switch (fail_index) {
             0, 1 => &[_]Event{},
             2, 3 => &[_]Event{.cleanup_one},
@@ -51,12 +52,15 @@ test "every operation failure cleans only attempted outputs in reverse order" {
 }
 
 test "cleanup is best effort and cleanup failure outranks execution failure" {
-    var steps = Steps{ .fail_index = 6, .cleanup_fail = .near_max };
-    try std.testing.expectError(error.CleanupFailed, phase.runWith(&steps));
-    try std.testing.expectEqualSlices(Event, &.{ .cleanup_evidence, .cleanup_near_max, .cleanup_one }, steps.cleanupEvents());
+    inline for (.{ CleanupFailure.evidence, .near_max, .one }) |cleanup_failure| {
+        var steps = Steps{ .fail_index = 6, .cleanup_fail = cleanup_failure };
+        try std.testing.expectError(error.CleanupFailed, phase.runWith(&steps));
+        try std.testing.expectEqual(@as(usize, 7), steps.operation_index);
+        try std.testing.expectEqualSlices(Event, &.{ .cleanup_evidence, .cleanup_near_max, .cleanup_one }, steps.cleanupEvents());
+    }
 }
 
-test "deadline identity drift is rejected by the concrete step boundary" {
+test "final deadline failure cleans every attempted output" {
     var steps = Steps{ .fail_index = 8 };
     try std.testing.expectError(error.InjectedFailure, phase.runWith(&steps));
     try std.testing.expectEqual(@as(usize, 8), steps.deadline_uses);

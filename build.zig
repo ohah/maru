@@ -15400,12 +15400,12 @@ pub fn build(b: *std.Build) void {
             run_candidate_upgrade_workspace_tests.addArg("--maru-expect-tests=5");
             run_candidate_upgrade_workspace_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_workspace_tests.step);
-            const candidate_upgrade_predecessor_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_predecessor.zig"), .target = target, .optimize = composition_optimize, .link_libc = true });
-            const candidate_upgrade_predecessor_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_predecessor.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_upgrade_predecessor", .module = candidate_upgrade_predecessor_mod }} }) });
-            const run_candidate_upgrade_predecessor_tests = b.addRunArtifact(candidate_upgrade_predecessor_tests);
-            run_candidate_upgrade_predecessor_tests.addArg("--maru-expect-tests=5");
-            run_candidate_upgrade_predecessor_tests.setCwd(b.path("."));
-            session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_predecessor_tests.step);
+            const candidate_upgrade_executable_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true });
+            const candidate_upgrade_executable_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_upgrade_executable", .module = candidate_upgrade_executable_mod }} }) });
+            const run_candidate_upgrade_executable_tests = b.addRunArtifact(candidate_upgrade_executable_tests);
+            run_candidate_upgrade_executable_tests.addArg("--maru-expect-tests=5");
+            run_candidate_upgrade_executable_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_executable_tests.step);
             const candidate_upgrade_child_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_child.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_zig_toolchain_authority", .module = zig_toolchain_mod } } });
             const candidate_upgrade_child_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_child.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_upgrade_child", .module = candidate_upgrade_child_mod }} }) });
             const run_candidate_upgrade_child_tests = b.addRunArtifact(candidate_upgrade_child_tests);

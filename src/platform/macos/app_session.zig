@@ -60086,6 +60086,77 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
 
 // SB1: **긴 경로는 잎이 남아야 한다.** 순수 함수(`text_layout.elidePathMiddle`)만 통과하고 배선이 빠지면
 // 화면은 그대로 끝이 잘린다 — 그래서 실제 항목 DrawList에 잎(마지막 디렉터리)이 실렸는지로 본다.
+test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용이고, 문법이 없으면 없다" {
+    // **`SB1` 은 접두어가 필터에 없어 `test-editor` 에서 안 돈다**(샤드에서만 돈다). 그래서 항목을
+    // 통째로 지우거나 상한 검사를 빼먹은 변이가 **빠른 스위트에서 살아남았다**(2026-09-07 1회차
+    // `S1`·`S8`·`S9`). 같은 것을 `SBL` 접두어로 여기 세워 변이 루프가 잡게 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+
+    const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch
+        return error.SkipZigTest;
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    const Id = chrome.components.status_bar.ItemId;
+    var lang_at: ?usize = null;
+    var eol_at: ?usize = null;
+    for (session.statusBarTree().entries, 0..) |e, i| switch (@as(Id, @enumFromInt(e.id))) {
+        .editor_language => lang_at = i,
+        .editor_eol => eol_at = i,
+        else => {},
+    };
+
+    // ⑴ **뜬다** — `.zig` 라 문법이 있다. 항목을 지운 변이가 여기서 죽는다.
+    try std.testing.expect(lang_at != null);
+    try std.testing.expectEqual(
+        maru.session.editor.language.Grammar.zig,
+        editor_term.rt.editor_grammar,
+    );
+
+    // ⑵ **자리는 줄바꿈과 읽기 전용 사이다** — 화면 x 로 잰다(계약이 정한 규율: "더하는 순서"는
+    //    구현이고 계약은 좌우다). 읽기 전용은 쓸 수 있는 문서라 안 뜨므로 줄바꿈만 본다.
+    if (eol_at) |eol_i| {
+        const entries = session.statusBarTree().entries;
+        try std.testing.expect(entries[eol_i].rect.x < entries[lang_at.?].rect.x);
+    }
+
+    // ⑶ **표시 전용이다** — 열 대상이 없으므로 호버도 주지 않는다. 같은 파일이라 구조체 안
+    //    private 함수를 이름으로 부를 수 있다.
+    try std.testing.expect(!AppSession.statusBarItemClickable(.editor_language));
+
+    // ⑷ **상한을 지킨다** — 우측 항목 수가 후보 수를 넘지 않는다. 상한 검사를 뺀 변이가 여기서 죽는다.
+    {
+        var right_n: usize = 0;
+        for (session.statusBarTree().entries) |e| {
+            const id = @as(Id, @enumFromInt(e.id));
+            if (id != .git_branch and id != .cwd) right_n += 1;
+        }
+        try std.testing.expect(right_n <= max_status_bar_right_items);
+    }
+
+    // ⑸ **문법이 없으면 항목이 없다**(대조군 — 위 ⑴ 이 항진명제가 아니다).
+    editor_term.rt.editor_grammar = .none;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    var lang_after: ?usize = null;
+    for (session.statusBarTree().entries, 0..) |e, i| {
+        if (@as(Id, @enumFromInt(e.id)) == .editor_language) lang_after = i;
+    }
+    try std.testing.expect(lang_after == null);
+}
+
 test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서가 버려지는 순서다" {
     // §2.2: 상태바는 창 전폭 띠라 늘 떠 있으면 터미널을 쓰는 동안에도 기존 항목을 밀어낸다 —
     // 그래서 편집기 항목은 **조건부**다. 그리고 배열 순서 = 버려지는 순서라, "축소가 일어났다"는

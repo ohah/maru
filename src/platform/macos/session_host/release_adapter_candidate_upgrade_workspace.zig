@@ -7,7 +7,6 @@ pub const Paths = struct {
     signed_one_home: [:0]const u8,
     signed_near_max_home: [:0]const u8,
     predecessor_executable: [:0]const u8,
-    current_executable: [:0]const u8,
     signed_one_leaf: [:0]const u8,
     signed_near_max_leaf: [:0]const u8,
     evidence: [:0]const u8,
@@ -19,7 +18,6 @@ pub const Workspace = struct {
     signed_one_home: [std.fs.max_path_bytes:0]u8 = @splat(0),
     signed_near_max_home: [std.fs.max_path_bytes:0]u8 = @splat(0),
     predecessor_executable: [std.fs.max_path_bytes:0]u8 = @splat(0),
-    current_executable: [std.fs.max_path_bytes:0]u8 = @splat(0),
     signed_one_leaf: [std.fs.max_path_bytes:0]u8 = @splat(0),
     signed_near_max_leaf: [std.fs.max_path_bytes:0]u8 = @splat(0),
     evidence: [std.fs.max_path_bytes:0]u8 = @splat(0),
@@ -41,7 +39,6 @@ pub const Workspace = struct {
             .signed_one_home = std.mem.sliceTo(&self.signed_one_home, 0),
             .signed_near_max_home = std.mem.sliceTo(&self.signed_near_max_home, 0),
             .predecessor_executable = std.mem.sliceTo(&self.predecessor_executable, 0),
-            .current_executable = std.mem.sliceTo(&self.current_executable, 0),
             .signed_one_leaf = std.mem.sliceTo(&self.signed_one_leaf, 0),
             .signed_near_max_leaf = std.mem.sliceTo(&self.signed_near_max_leaf, 0),
             .evidence = std.mem.sliceTo(&self.evidence, 0),
@@ -67,7 +64,6 @@ fn derivePaths(result: *Workspace) !void {
     _ = try result.root.upgradeChildPath(.signed_one_home, &result.signed_one_home);
     _ = try result.root.upgradeChildPath(.signed_near_max_home, &result.signed_near_max_home);
     _ = try result.root.upgradeChildPath(.predecessor_executable, &result.predecessor_executable);
-    _ = try result.root.upgradeChildPath(.current_executable, &result.current_executable);
     _ = try result.root.upgradeChildPath(.signed_one_leaf, &result.signed_one_leaf);
     _ = try result.root.upgradeChildPath(.signed_near_max_leaf, &result.signed_near_max_leaf);
     _ = try result.root.upgradeChildPath(.evidence, &result.evidence);
@@ -77,7 +73,6 @@ fn pristine(result: *const Workspace) bool {
     return result.owner == null and result.root.owner == null and result.root.parent_fd < 0 and result.root.root_fd < 0 and
         !result.root.root_present and result.root.root_device == 0 and result.root.root_inode == 0 and result.root.path_len == 0 and
         allZero(&result.signed_one_home) and allZero(&result.signed_near_max_home) and allZero(&result.predecessor_executable) and
-        allZero(&result.current_executable) and
         allZero(&result.signed_one_leaf) and allZero(&result.signed_near_max_leaf) and allZero(&result.evidence);
 }
 

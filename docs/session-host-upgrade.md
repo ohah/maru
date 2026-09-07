@@ -4348,13 +4348,13 @@ upgrade-B profile owner가 live checkpoint의 draft-authoring 단계에 연결�
 boolean을 받지 않는다. production runner가 final-address candidate identity와 authenticated predecessor identity의 backing owner에서
 같은 trusted run UUID, predecessor frozen executable, current frozen executable과 두 fixed output pathname을 유도해야 한다.
 
-순서는 하나의 absolute deadline 아래 `initial candidate+predecessor 재검증 → predecessor 실행 사본 → current 실행 사본 → signed 1-runtime 실행 → 양쪽 권위 재검증 → signed
+순서는 하나의 absolute deadline 아래 `initial candidate+predecessor 재검증 → predecessor 실행 사본 → signed 1-runtime 실행 → 양쪽 권위 재검증 → signed
 near-max 실행 → 양쪽 권위 재검증 → canonical upgrade evidence 게시 → 양쪽 권위와 deadline 최종 재검증`으로 닫는다. 두 leaf가
 서로 다른 UUID·signer requirement·predecessor/current 방향을 쓰거나, 한 leaf 뒤 candidate·predecessor manifest/asset/download inode가
 바뀌면 aggregate publication은 0이어야 한다. near-max는 한 runtime 반복 fixture가 아니라 `max_runtime_count - 1`개의 실제 PTY와 각
 GUI `RemoteRuntime` 재접속을 증명하는 기존 signed harness를 사용한다.
 
-실패 cleanup은 aggregate → near-max leaf → 1-runtime leaf → current 실행 사본 → predecessor 실행 사본의 역순이며, 한 cleanup 실패가 뒤의 독립 cleanup을 막지 않는다. cleanup
+실패 cleanup은 aggregate → near-max leaf → 1-runtime leaf → predecessor 실행 사본의 역순이며, 한 cleanup 실패가 뒤의 독립 cleanup을 막지 않는다. cleanup
 실패는 원래 실행 오류보다 강한 `CleanupFailed`로 승격하고, 아직 정리되지 않은 exact owner를 후속 retry에 보존한다. 성공에서는 세
 artifact owner를 profile runner가 manifest authoring·attestation까지 보존한다. 이 phase의 focused Debug·ReleaseFast gate는 순서,
 동일 deadline pointer, 모든 실행 fail-index, authority drift, 역순 best-effort cleanup과 cleanup-failure 승격을 검증한다. 이 gate만
@@ -4365,17 +4365,17 @@ protected B tag E2E가 완료됐다는 증거가 아니다.
 
 §11.84의 production runner가 signed harness의 argv와 출력 경로를 직접 조립하지 않는다.
 `release_adapter_candidate_upgrade_workspace.zig`의 final-address owner는 기존 descriptor-owned private workspace를 재사용해
-`signed-one`·`signed-near-max`의 서로 다른 session root, 실행 전용 `predecessor-executable`·`current-executable`, 두 canonical leaf와
+`signed-one`·`signed-near-max`의 서로 다른 session root, 실행 전용 `predecessor-executable`, 두 canonical leaf와
 `upgrade-evidence.json`만 유도한다. 이 경로는
 ambient `HOME`, 실제 앱의 session-host registry·manifest·socket root나 caller가 제출한 leaf 이름에서 유도하지 않는다. 생성 시
 모든 child가 absent여야 하며, root·child pathname 교체 또는 잔여물이 있으면 foreign entry를 삭제하지 않고 실패한다.
 
-predecessor download는 불변 증거를 위해 `0400`, current candidate의 frozen executable은 immutable candidate file로 `0600`에
-봉인되므로 둘 다 직접 실행하지 않는다. 실행 사본 owner는 authenticated predecessor identity/manifest/file/download graph 또는
-final-address candidate identity/product graph를 각자 재검증하고, held source bytes를 workspace의 서로 다른 absent leaf에 bounded
-streaming copy한 뒤 `0500`, 단일 link, size·SHA-256, parent와 source/destination inode 분리를 봉인한다. 복사 전후 해당 source graph를
-다시 검증하며 실패 시 자기 destination만 identity-checked cleanup한다. caller `chmod`, pathname 재사용, 두 source/destination alias
-또는 원본 download/candidate mode 변경은 허용하지 않는다.
+predecessor download는 불변 증거를 위해 `0400`으로 봉인되므로 직접 실행하지 않는다. 실행 사본 owner는 authenticated predecessor
+identity/manifest/file/download graph를 재검증하고, held source bytes를 workspace의 absent leaf에 bounded streaming copy한 뒤 `0500`,
+단일 link, size·SHA-256, parent와 source/destination inode 분리를 봉인한다. 복사 전후 source graph를 다시 검증하며 실패 시 자기
+destination만 identity-checked cleanup한다. caller `chmod`, pathname 재사용, source/destination alias 또는 원본 download mode 변경은
+허용하지 않는다. current candidate frozen executable은 `PinnedReleaseFile(require_executable=true)`의 held executable/path authority를
+그대로 사용하고 실행 전후 candidate identity/product graph로 재검증한다.
 
 `release_adapter_candidate_upgrade_child.zig`는 final-address candidate identity/product와 authenticated predecessor
 identity/manifest/file/download owner를 매 실행 전후 다시 검증하고, predecessor download set의
@@ -4385,38 +4385,13 @@ UUID, HOME 또는 output을 scalar로 다시 제출하지 않는다. kind는 `on
 `near-max`로만 매핑된다. harness는 held source directory와 하나의 남은 deadline 아래, ambient credential·Apple secret·사용자
 config 없이 실행된다. exit 0 뒤에도 양쪽 authority, toolchain과 exact private `0600` regular leaf를 다시 확인해야 성공이다.
 
-focused Debug·ReleaseFast gate는 두 executable copy의 모든 I/O 실패와 source/destination drift, 두 kind의 closed argv/environment,
+focused Debug·ReleaseFast gate는 predecessor executable copy의 모든 I/O 실패와 source/destination drift, 두 kind의 closed argv/environment,
 predecessor/current 방향과 output 분리, copied·pre-owned·alias owner, authority/toolchain drift, 기존·누락·symlink·loose leaf,
 timeout/nonzero/foreign capture와 역순 cleanup 가능성을 검증한다.
 실제 signed 실행 실측은 protected B 시험 tag에서 child별 monotonic wall-clock과 전체 phase wall-clock을 별도 canonical diagnostic으로
 기록한다. 이 diagnostic은 성공 권위나 release evidence leaf의 일부가 아니며 GitHub queue/network 시간을 포함하지 않는다. 실제
 PTY 1개와 255개를 만드는 비용은 synthetic fixture로 대체하지 않고, signed N-1/current가 없는 일반 CI에서는 실행하지 않는다.
 이 slice만으로 profile runner, checkpoint·manifest·attestation·draft publication 또는 frozen signed U5 완료를 주장하지 않는다.
-
-### 11.86 upgrade-B production runner와 로컬 monotonic 실측
-
-`release_adapter_candidate_upgrade_runner.zig`의 final-address `Execution`이 §11.84 phase의 유일한 제품 adapter다. 입력은 candidate
-identity/files/product/source, authenticated predecessor identity/manifest/file/download, descriptor-owned upgrade workspace, pinned Zig
-toolchain, held source directory와 하나의 positive budget뿐이다. runner는 predecessor downloaded-set에서 exact frozen-product asset을
-no-follow로 열어 held inode를 소유하고, candidate pinned frozen file의 held fd와 함께 §11.85 실행 사본 owner 둘에 연결한다. caller가
-source fd·mode·SHA·실행 pathname·UUID·kind·output leaf를 다시 제출하는 API는 두지 않는다.
-
-`Execution`은 phase가 시도한 predecessor/current copy, signed-one/signed-near-max leaf와 aggregate owner를 final address에 보존한다.
-실패 cleanup이 전부 끝나면 pristine으로 돌아가고, 하나라도 실패하면 남은 exact owner와 cleanup cursor를 같은 주소에서 retry할 수
-있어야 한다. 성공 후에도 manifest authoring·attestation consumer가 세 evidence leaf를 소비할 때까지 보존하며, 명시 cleanup은
-aggregate→near-max→one→current copy→predecessor copy 순서로 진행한다. borrowed deadline variant는 caller deadline을 소유하거나
-초기화·해제하지 않으며 모든 leaf와 fence가 같은 pointer를 소비한다.
-
-runner는 release evidence와 별도의 `TimingDiagnostic`에 `signed_one_ns`, `signed_near_max_ns`, `phase_ns`를 actual monotonic clock으로
-기록한다. 각 child 값은 bounded child 호출 직전부터 성공 반환 직후까지이고, phase 값은 protected bootstrap/download가 끝나고
-phase 실행을 시작한 직후부터 final authority/deadline fence 성공까지다. 값은 모두 양수이고 `phase_ns >= signed_one_ns +
-signed_near_max_ns`여야 한다. child/phase 실패, clock 역행·overflow 또는 final fence 실패에서는 diagnostic success를 게시하지 않는다.
-이 값은 로컬 실행비용이며 GitHub queue/network timing, release 성공 권위, signed leaf 또는 canonical aggregate 필드가 아니다.
-
-focused Debug·ReleaseFast gate는 concrete authority의 predecessor/current 방향, held inode와 `0400|0600→0500` mode, 두 child의 fixed
-kind/path, 동일 deadline pointer, 모든 phase fail-index, child 실패와 동시 authority drift, timing 양수·ordering·역행, copied/pre-owned/
-alias `Execution`, 성공 보존과 cleanup retry를 검증한다. 이 runner가 green이어도 live checkpoint/profile 배선, attestation·manifest·draft
-publication 및 protected B tag의 실제 signed 실행은 별도 미완료다.
 
 ## 12. 필수 적대적 검증
 

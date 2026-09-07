@@ -204,8 +204,25 @@ fn readActivityLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: s
     const buf = allocator.alloc(u8, hit.data_len) catch return .{};
     defer allocator.free(buf);
     if (!readAllAt(io, file, buf, hit.data_offset)) return .{};
-    return context.activityLabel(buf, hit.activity == .read);
+    var out = context.activityLabel(buf, hit.activity == .read);
+    out.time_s = readActivityTime(io, file, hit);
+    return out;
 }
+
+/// 이 호출이 적힌 **시각**. 스캐너가 **자리**를 적어 뒀으므로(`Hit.time_rel`) 그 자리에서 창 하나만
+/// 읽는다 — 이미지처럼 payload 앞뒤를 뒤질 필요가 없다(provider 마다 반대편이라 그 방식이 안 통한다).
+///
+/// 못 읽으면 0(모른다)이고, 그때 화면은 시각을 **안 그린다** — 지어내지 않는다.
+fn readActivityTime(io: std.Io, file: std.Io.File, hit: index.Hit) i64 {
+    if (hit.time_rel == 0) return 0;
+    var buf: [activity_time_window]u8 = undefined;
+    const got = readUpTo(io, file, &buf, hit.line_offset + hit.time_rel);
+    if (got == 0) return 0;
+    return context.timestampSeconds(buf[0..got]);
+}
+
+/// 시각 값 하나가 들어갈 창. `"timestamp":"2026-09-07T01:13:13.040Z"` 가 37 B 라 그 1.7 배다.
+const activity_time_window: usize = 64;
 
 fn readLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.Allocator) context.Label {
     const prefix_len: usize = @intCast(@min(

@@ -1431,6 +1431,16 @@ best-effort cleanup, cleanup failure의 terminal 승격과 성공 artifact 보�
 leaf 성공 boolean이나 profile/predecessor scalar를 받지 않지만, 아직 actual signed child·filesystem authority를 연결한 production
 runner나 live checkpoint/profile owner가 아니므로 frozen U5 제품 실행·publication 완료 판정을 바꾸지 않는다.
 
+U5 upgrade-B 격리 workspace와 signed child 경계는 `release_adapter_candidate_upgrade_workspace.zig`가 descriptor-owned private root에서
+두 session HOME·두 leaf·aggregate와 predecessor executable의 exact absent path만 유도한다. 봉인된 `0400` predecessor download는
+`release_adapter_candidate_upgrade_predecessor.zig`가 backing authority를 전후 재검증하며 별도 `0500` single-link executable로
+bounded copy하고 source/destination identity·size·SHA를 결속한다. `release_adapter_candidate_upgrade_child.zig`는 candidate와
+authenticated predecessor의 backing owner에서 이 실행 사본/current executable·trusted UUID·`1 | near-max`를 다시 유도해 held source
+cwd와 shared deadline으로 기존 signed harness를 실행한다. focused gate는 caller scalar/path 재제출 0, copy I/O fail-index,
+closed argv/environment, 양쪽 authority와 toolchain의 pre/post fence, exact private leaf, drift·timeout·nonzero·foreign capture와 foreign-entry deletion 0을 Debug·ReleaseFast에서
+검증한다. protected B tag의 actual signed child/phase monotonic timing은 evidence와 분리된 diagnostic이 소유하며, unsigned synthetic
+실행이나 GitHub queue timing으로 대체하지 않는다. production profile runner와 checkpoint/publication은 후속이다.
+
 U5 candidate compatibility는 `release_adapter_candidate_compatibility.zig`가 final-address candidate files/product와 held frozen
 executable parent authority에서만 canonical compatibility probe를 실행해 frozen SHA·release/source/build identity와 함께 fixed owner에
 복사한다. current-manifest 검증과 동일 parser를 공유하고 실행 전후 inode·parent seal·candidate product를 재검증한다. focused gate는

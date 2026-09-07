@@ -129,9 +129,46 @@ keybind = F4 = esc:[2J
   | **뺏을 것이 없다** | `toggle_symbol_picker` | `⇧⌘O`가 기본 표 어디에도 없다. 배선 전에는 `resolve`의 fallthrough에서 `.ignored`라 **누르면 아무 일도 안 일어나는** 상태였다 |
   | ~~**Option 단독은 터미널 입력이다**~~ **→ 편집기 Term 컨텍스트가 푼다**(2026-09-03) | `toggle_editor_wrap` | VSCode는 `⌥Z`인데, 기본 표에 **Option만 쓰는 chord가 하나도 없다**(모든 `⌥`가 `⌘`과 함께다). 첫 Option 단독 바인딩은 터미널의 Meta/ESC 입력을 뺏는다 |
   | **`⌘` 없는 `⌥` 는 터미널 입력이다** | `duplicate_lines`·`move_lines_up`·`move_lines_down` | VSCode 는 `⇧⌥↓`·`⌥↑↓` 인데 기본 표에는 **`⌘` 를 안 낀 `⌥` chord 가 하나도 없다**(실측 0개 — 위 `toggle_editor_wrap` 과 같은 근거). 들여쓰기·내어쓰기는 `Tab`·`⇧Tab` 으로 닿으므로 이 부류가 아니고, `delete_lines` 는 `⇧⌘K` 가 비어 있어 빌트인이 있다 |
-  | **한 chord로 못 적는다** | `fold_all`·`unfold_all`·`fold_level_1..3` | VSCode가 `⌘K ⌘0`처럼 **두 키 시퀀스**를 쓰는데 `KeyChord`는 수식자+키 **하나**다. 게다가 `⌘K`는 `clear_screen`이 갖고 있다. VSCode의 커서 접기 `⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 쓴다 |
+  | ~~**한 chord로 못 적는다**~~ → **풀렸다**(2026-09-07) | `fold_all`·`unfold_all`·`fold_level_1..3` | 아래 「접기 다섯의 chord」 |
   | **다른 키가 이미 닿는다** | `indent_lines`·`outdent_lines` | 선택이 여러 줄일 때의 `Tab`·`⇧Tab` 이 부른다([문서 모델](native-editor-document-model.md) §3.9a). 별도 chord 를 더하면 **같은 일에 두 입구**가 된다 |
   | **레퍼런스도 안 준다** | `transform_to_uppercase`·`transform_to_lowercase` | VSCode 도 기본 chord 없이 팔레트 전용이다. 뺏을 것이 없는 것이 아니라 **줄 것이 마땅치 않다** — 흔히 쓰는 조합은 이미 임자가 있고, 이 둘은 팔레트에서 부르는 빈도의 연산이다 |
+
+#### 접기 다섯의 chord (2026-09-07)
+
+**막고 있던 것은 「한 chord 로 못 적는다」였다** — VSCode 가 `⌘K ⌘0`·`⌘K ⌘J`·`⌘K ⌘1~3` 처럼 **두 키
+시퀀스**를 쓰는데 `KeyChord` 는 수식자+키 하나이고, `⌘K` 는 `clear_screen` 이 갖고 있다.
+(VSCode 쪽 chord 는 이 표가 2026-09-05 에 적어 둔 실측을 그대로 쓴다 — 이번 조각에서 원문을 다시
+읽지는 않았다.)
+
+**시퀀스를 만들지 않고 `⌘K` 선행만 뗀 모양으로 간다.**
+
+| 액션 | chord | VSCode |
+|---|---|---|
+| `fold_all` | `⌥⌘0` | `⌘K ⌘0` |
+| `unfold_all` | `⌥⌘J` | `⌘K ⌘J` |
+| `fold_level_1`·`_2`·`_3` | `⌥⌘1`·`⌥⌘2`·`⌥⌘3` | `⌘K ⌘1`~`⌘3` |
+
+- **다섯 자리가 전부 비어 있다**(2026-09-07 실측). 숫자 자리는 `⌘1~9`(탭 선택)와 `⌘0`(글꼴 초기화)뿐이라
+  `⌥⌘` 를 낀 것은 임자가 없고, `⌥⌘J` 도 비어 있다. **뺏는 것이 하나도 없다.**
+- **그래서 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 의 경계 표와 안 부딪힌다.** 그 표가
+  *"창·탭·앱 관리는 앱이 계속 먹는다"* 고 정했고 `⌥⌘[`·`⌥⌘]`(VSCode 의 커서 접기 자리)는
+  `previous_term`·`next_term` 이 쓴다 — **그쪽을 뺏으면 예외를 하나 더 적어야 하는데, 빈 자리가
+  다섯이나 있으므로 그럴 이유가 없다.**
+- **터미널이 잃는 것이 0 이다**(2026-09-07 적대적 검증 3·4회차). 전역 표에 넣으면 터미널에서도 그
+  chord 가 소비되는데(액션이 `false` 를 내도 키는 이미 먹었다), **그 다섯은 지금도 터미널에서 아무
+  일도 안 한다** — resolve 가 *"안 묶인 Cmd → ignored"* 로 떨어뜨리기 때문이다(실측). 즉 「소비되지만
+  아무 일도 안 남」에서 「소비되지만 아무 일도 안 남」으로 바뀔 뿐이다.
+- **전역 표에 넣는다 — 컨텍스트 표가 아니다.** 다섯 다 **스스로 거절한다**(실측: `applyFold`·
+  `unfoldAll` 이 `term.kind != .editor` 를 먼저 보고, 비교 뷰는 `foldsUnavailable` 이 거절한다).
+  `jump_to_bracket`(`⇧⌘\`)·`toggle_symbol_picker`(`⇧⌘O`)와 **같은 부류**다 — 컨텍스트 표는 *"전역에
+  못 넣는 것"*(터미널 입력을 뺏는 Option 단독)을 위한 자리이고, 이 다섯은 그게 아니다.
+- **`⌥⌘` 가족에 이미 여럿이 산다**(실측): `⌥⌘C/W/L/D`(찾기 규칙) · `⌥⌘T`(새 웹 탭) ·
+  `⌥⌘↑↓`(위/아래 커서) · `⌥⌘←→`(pane 포커스) · `⌥⌘[]`(Term 이동). 숫자·`J` 를 더하는 것은 그
+  가족에 자연스럽다.
+- **`fold`(개별 접기)는 chord 를 안 준다.** 그 액션은 없고, 개별 접기는 **gutter 화살표 클릭**이
+  소유한다([시각 매핑](native-editor-visual-mapping.md) §4.1f).
+- **메뉴 keyEquivalent 층을 지나야 산다.** 이 다섯은 팔레트 카탈로그에만 있고 메뉴 항목이 아니므로
+  ②가 뺏을 것이 없다 — 그 층의 규칙은 [키 입력과 단축키](key-input-and-shortcuts.md) 가 소유한다.
 
   **편집기 컨텍스트 기본키는 그 Term 에서만 선다**([키 입력과 단축키](key-input-and-shortcuts.md)
   「편집기 Term 컨텍스트」) — `toggle_editor_wrap`(`⌥Z`) · `duplicate_lines`(`⇧⌥↓`) ·

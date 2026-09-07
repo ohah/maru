@@ -6,8 +6,9 @@ test "signed upgrade harness requires an explicit isolated root and exclusive ou
     const source = @embedFile("session_host_signed_upgrade_e2e.zig");
     try std.testing.expect(std.mem.indexOf(u8, source, "isolated_root: []u8") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "const isolated_root_raw = args.next()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "try requireAbsentArtifact(artifact_path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "try requireAbsentArtifact(allocator, artifact_path)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "invalidateArtifact") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "deleteTree") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "\"/tmp/{s}\"") == null);
 }
 

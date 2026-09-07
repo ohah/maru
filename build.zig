@@ -12768,12 +12768,23 @@ pub fn build(b: *std.Build) void {
             "session-host-release-test-uuid",
             "Canonical lowercase RFC 4122 UUID v4 owned by the trusted release run",
         ) orelse "";
+        const signed_upgrade_root_option = b.option(
+            []const u8,
+            "session-host-signed-upgrade-root",
+            "Absolute absent isolated root for one signed upgrade run",
+        ) orelse "";
+        const signed_upgrade_output_option = b.option(
+            []const u8,
+            "session-host-signed-upgrade-output",
+            "Absolute absent canonical leaf for one signed upgrade run",
+        ) orelse "";
         run_signed_upgrade_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
-            "zig-out/session-host-signed-upgrade/summary.json",
+            if (signed_upgrade_output_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade/summary.json") else signed_upgrade_output_option,
             "1",
             signed_release_test_uuid_option,
+            if (signed_upgrade_root_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade/run-root") else signed_upgrade_root_option,
         });
         const signed_upgrade_e2e_step = b.step(
             "test-session-host-signed-upgrade",
@@ -12787,9 +12798,10 @@ pub fn build(b: *std.Build) void {
         run_signed_upgrade_near_max_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
-            "zig-out/session-host-signed-upgrade-near-max/summary.json",
+            if (signed_upgrade_output_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade-near-max/summary.json") else signed_upgrade_output_option,
             "near-max",
             signed_release_test_uuid_option,
+            if (signed_upgrade_root_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade-near-max/run-root") else signed_upgrade_root_option,
         });
         const signed_upgrade_near_max_e2e_step = b.step(
             "test-session-host-signed-upgrade-near-max",

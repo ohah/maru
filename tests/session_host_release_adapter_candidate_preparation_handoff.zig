@@ -13,6 +13,9 @@ const uuid = "123e4567-e89b-42d3-a456-426614174000";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const requirement_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const predecessor_manifest_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const predecessor_dmg_sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const predecessor_exe_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn common() evidence.Common {
     return .{ .test_uuid = uuid, .repository = .{ .id = 123, .owner = "ohah", .name = "maru" }, .release = .{ .id = 456, .tag = "v1.2.3", .version = "1.2.3" }, .source = .{ .commit = "1111111111111111111111111111111111111111", .tree = "2222222222222222222222222222222222222222" }, .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 789, .run_attempt = 2 }, .candidate = .{ .dmg_sha256 = dmg_sha, .executable_sha256 = exe_sha } };
@@ -24,6 +27,10 @@ fn defaultLeaf() []const u8 {
 
 fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+}
+
+fn upgradeLeaf(comptime count: u64) []const u8 {
+    return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, predecessor_exe_sha, exe_sha, requirement_sha, count, if (count == 1) requirement_sha else predecessor_manifest_sha });
 }
 
 const Fixture = struct {
@@ -102,6 +109,46 @@ const Fixture = struct {
     fn closeSources(self: *@This()) !void {
         for (&self.owners) |*owner| try owner.deinit();
     }
+
+    fn replaceWithUpgrade(self: *@This()) !void {
+        for (&self.owners) |*owner| try owner.deinit();
+        try self.tmp.dir.deleteFile(std.testing.io, "evidence-root/baseline-evidence.json");
+        const predecessor: evidence.Predecessor = .{
+            .release_id = 400,
+            .tag = "v1.2.2",
+            .commit = "3333333333333333333333333333333333333333",
+            .manifest_sha256 = predecessor_manifest_sha,
+            .dmg_sha256 = predecessor_dmg_sha,
+            .executable_sha256 = predecessor_exe_sha,
+        };
+        const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
+        defer std.testing.allocator.free(evidence_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence-root/upgrade-evidence.json", .data = evidence_bytes });
+        const evidence_path = try absolute(&self.tmp, "evidence-root/upgrade-evidence.json", &self.evidence_path);
+        try files.pinReleaseFileObserved(&self.owners[0], evidence_path, false, evidence.max_evidence_bytes);
+        const observed = self.owners[0].value().?;
+        const assets = [_]manifest.Asset{
+            .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 100 },
+            .{ .role = .frozen_product_executable, .name = "maru-session-host", .sha256 = exe_sha, .size = 200 },
+            .{ .role = .evidence_summary, .name = "upgrade-evidence.json", .sha256 = &observed.sha256, .size = observed.size },
+        };
+        const bytes = try manifest.writeCanonical(std.testing.allocator, .{
+            .schema = manifest.schema,
+            .role = .b,
+            .repository = .{ .id = 123, .owner = "ohah", .name = "maru" },
+            .release = .{ .id = 456, .tag = "v1.2.3", .version = "1.2.3" },
+            .source = .{ .commit = common().source.commit, .tree = common().source.tree },
+            .build = .{ .workflow_ref = common().build.workflow_ref, .run_id = 789, .run_attempt = 2 },
+            .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
+            .signing = .{ .bundle_id = "com.example.maru", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "ABCDE12345", .designated_requirement_sha256 = requirement_sha, .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
+            .assets = &assets,
+            .evidence = .{ .test_uuid = uuid, .summary_name = "upgrade-evidence.json", .summary_sha256 = &observed.sha256, .result = "passed" },
+            .predecessor = .{ .release_id = 400, .tag = "v1.2.2", .commit = "3333333333333333333333333333333333333333", .manifest_sha256 = predecessor_manifest_sha },
+        });
+        defer std.testing.allocator.free(bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "manifest-root/Maru-1.2.3-session-host-release.json", .data = bytes });
+        try files.pinReleaseFileObserved(&self.owners[1], self.manifestPath(), false, manifest.max_manifest_bytes);
+    }
 };
 
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
@@ -129,6 +176,18 @@ test "preparation promotion is atomic semantically bound and survives source rem
     _ = try durable.revalidate();
     try durable.cleanup();
     try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(std.testing.io, "durable/prepared", .{}));
+}
+
+test "upgrade B evidence and role-B manifest cross the same durable handoff" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.replaceWithUpgrade();
+    var durable: handoff.DurablePreparation = .{};
+    try handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable);
+    const value = try durable.revalidate();
+    try std.testing.expectEqualStrings("upgrade-evidence.json", std.fs.path.basename(value.entries[0].path));
+    try durable.cleanup();
 }
 
 test "retained close preserves both leaves and revokes old authority" {

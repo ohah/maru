@@ -1073,6 +1073,7 @@ pub export fn maru_macos_app_session_tick(
     app_session.maybeDebugOpenPalette(); // 커맨드 팔레트 캡처 훅 — 행에 붙는 chord 표시를 잰다
     app_session.maybeDebugOpenFind(); // 찾기 캡처 훅 — 카운터 앞의 규칙 표시를 잰다
     app_session.maybeDebugEditOp(); // 편집 연산 캡처 훅 — 화면에 남는 결과를 잰다(§3.9a·§3.9b)
+    app_session.maybeDebugDiffCaretKeys(); // 비교 뷰 caret 캡처 훅 — 키가 caret 에 닿는지 화면으로 잰다
     out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
     // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.

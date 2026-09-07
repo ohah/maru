@@ -287,6 +287,20 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
     // `materialize` 앞에서 부르면 빈 것을 세고 0으로 굳는다(캐시는 0을 "안 셌다"로 읽어 다음 프레임에
     // 다시 세지만, 그때는 이미 막대 없이 한 프레임이 나간 뒤다).
     editor_ops.ensureMaxColsForDiff(term);
+
+    // **caret 을 세운다**([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md)
+    // 「비교 뷰에 caret 을 세운다」). `invalidate`가 옛 선택을 버린 뒤라 여기가 되세우는 자리다 —
+    // **`invalidate` 안에서는 안 된다**: 그 함수는 Term 이 죽을 때도 불리므로(`release`) 죽는
+    // Term 에 caret 을 심는다.
+    //
+    // **오른쪽이다.** 왼쪽은 git 이 준 HEAD 판이라 열려 있는 문서가 아니고, JetBrains 도 편집
+    // 가능한 쪽을 오른쪽에 둔다. 행 배열이 비면 세울 자리가 없다.
+    if (st.right_texts.len > 0) {
+        term.rt.editor_diff_selection = .{
+            .side = .right,
+            .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
+        };
+    }
 }
 
 /// 행 배열을 **화면이 받는 모양**으로 한 번 옮겨 담는다.
@@ -2239,4 +2253,229 @@ test "DSEL4 선택을 든 채 문서가 짧아져도 죽지 않는다 (§4.1g �
     d2.dl.deinit(allocator);
     try testing.expect(!editor_ops.copyDiffSelection(fx.session)); // 복사도 안 죽는다
     fx.term.rt.editor_diff_selection = null;
+}
+
+// ── DCARET: 비교 뷰 caret ──────────────────────────────────────────────────────
+//
+// 계약은 [키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을
+// 세운다」가 소유한다. **판정자 하나는 제품 입구(`handleKeyEvent`)로 들어간다** — resolver·ops 를
+// 직접 부르는 판정자만 있으면 그 위 층이 키를 가로채도 전부 초록이다(⌘D·⌥⌘↑↓ 가 그렇게 죽어
+// 있었다).
+
+/// 비교 Term 을 세우고 **활성으로** 만든다 — 제품 경로가 `activeTerm()` 으로 대상을 고른다.
+fn diffCaretFixture(fx: *Fixture, entry: *dock_panel.Entry, leaf: maru.session.SplitRect) !void {
+    fx.term.file_entry = entry;
+    poll(fx.session, fx.term);
+    if (std.meta.activeTag(fx.term.rt.editor_diff.?.view) != .compare) return error.NotCompare;
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, i| {
+        if (t == fx.term) pane.active_term = i;
+    }
+    fx.session.surface_initialized = true;
+    // **렌더가 굳힌 행 수를 세운다** — `diffPageRows` 가 그 값을 읽고, 안 그리면 1 로 떨어져
+    // PageDown 이 한 행만 간다(그 자체는 계약이지만 판정이 그 갈래에 갇힌다).
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn.dl.deinit(testing.allocator);
+}
+
+test "DCARET1: 비교 뷰를 세우면 caret 이 오른쪽 (0,0) 에 선다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("a\nb\nc\n", "a\nB\nc\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const sel = fx.term.rt.editor_diff_selection orelse return error.NoCaret;
+    try testing.expectEqual(editor_ops.DiffSide.right, sel.side);
+    try testing.expectEqual(@as(usize, 0), sel.sel.focus.row);
+    try testing.expectEqual(@as(usize, 0), sel.sel.focus.byte);
+    // **빈 선택이다** — caret 뿐이라 그릴 띠가 없다(`buildDiffSelectionMarks` 가 그 상태를 안다).
+    try testing.expect(sel.sel.isEmpty());
+    try testing.expectEqual(@as(?[]const []const maru.chrome.components.editor_view.frame.Mark, null), editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .right));
+
+    // **검색 기본 열이 오른쪽이 된다** — 계약이 「의도한 변경」으로 적어 둔 부수 결과다.
+    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term));
+}
+
+test "DCARET2: caret 은 활성 열에만 그려진다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = .{
+        .anchor_start = .{ .row = 1, .byte = 2 },
+        .anchor_end = .{ .row = 1, .byte = 2 },
+        .focus = .{ .row = 1, .byte = 2 },
+    } };
+    const right = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
+    try testing.expectEqual(@as(usize, 1), right[1].len);
+    try testing.expectEqual(@as(u32, 2), right[1][0]);
+    try testing.expectEqual(@as(usize, 0), right[0].len);
+    // **반대 열은 `null`** — 그것이 "이 열에는 커서가 없다"는 뜻이다.
+    try testing.expectEqual(@as(?[]const []const u32, null), editor_ops.buildDiffCarets(fx.session, fx.term, .left));
+
+    // **byte 는 그 행 길이로 잘린다** — 행이 짧아진 프레임에서 줄 밖 열을 집으면 안 된다.
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = 9999;
+    const clamped = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
+    try testing.expectEqual(@as(u32, 4), clamped[1][0]); // "BETA".len
+
+    // **행 첨자가 배열 밖이면 아예 안 그린다.**
+    fx.term.rt.editor_diff_selection.?.sel.focus.row = 9999;
+    try testing.expectEqual(@as(?[]const []const u32, null), editor_ops.buildDiffCarets(fx.session, fx.term, .right));
+}
+
+test "DCARET3: 제품 입구에서 화살표가 caret 을 옮긴다 (handleKeyEvent)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    // ⑴ 아래로 한 행.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑵ 오른쪽으로 한 글자.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑶ **행 끝을 넘으면 다음 행 머리로** — 행 경계를 넘는 것이 계약이다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .end });
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑷ **⌘↑ 는 맨 위로** — 전에는 이 키가 프롬프트로 튀거나 아무 일도 안 했다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑸ **⌘↓ 는 맨 아래 행 끝으로.**
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .command = true } });
+    const texts = fx.term.rt.editor_diff.?.right_texts;
+    try testing.expectEqual(texts.len - 1, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(texts[texts.len - 1].len, fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCARET4: ⇧ 는 anchor 를 두고 focus 만 옮긴다 (선택 확장)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
+    const sel = fx.term.rt.editor_diff_selection.?.sel;
+    try testing.expectEqual(@as(usize, 0), sel.anchor_start.row);
+    try testing.expectEqual(@as(usize, 0), sel.anchor_start.byte);
+    try testing.expectEqual(@as(usize, 1), sel.focus.byte);
+    try testing.expect(!sel.isEmpty());
+    // **띠가 실제로 그려진다** — 빈 선택이 아니게 됐으므로 표식이 나온다.
+    try testing.expect(editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .right) != null);
+
+    // **⇧ 없이 움직이면 접힌다** — anchor 가 따라온다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expect(fx.term.rt.editor_diff_selection.?.sel.isEmpty());
+}
+
+test "DCARET5: 세로 이동이 목표 열을 유지한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 가운데 행이 짧다 — 목표 열을 안 들면 내려갔다 올 때 열이 잘린 채로 남는다.
+    // **마지막 줄만 다르다** — 같은 파일이면 비교 뷰가 서지 않고, 다른 줄을 앞에 두면 짝맞춤
+    // 빈 행이 끼어 앞 세 행의 첨자가 흔들린다.
+    var entry = testEntry("aaaaaaaa\nbb\ncccccccc\nsame\n", "aaaaaaaa\nbb\ncccccccc\ndiff\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 6 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // "bb" 끝
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 6), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // 목표 열 복원
+
+    // **가로로 움직이면 목표를 버린다** — 그러지 않으면 다음 ↓ 가 방금 선 자리가 아니라 옛 열로 간다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCARET6: caret 이 화면 밖으로 나가면 뷰가 따라간다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| {
+        w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    }
+    const text = buf[0..w];
+    // **한 줄을 다르게 둔다** — 같은 파일이면 비교 뷰 자체가 서지 않는다. 마지막 줄이라
+    // 앞쪽 행 첨자는 그대로다.
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    const visible = fx.term.rt.editor_diff_hit_len_right;
+    try testing.expect(visible > 1); // 판정이 성립할 만큼은 그렸다
+
+    // 보이는 마지막 행까지는 안 굴린다.
+    for (0..visible - 1) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    // 한 행 더 내려가면 한 행 굴린다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_first_line);
+
+    // **⌘↑ 로 돌아오면 위로 따라온다.**
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}
+
+test "DCARET7: PageDown 은 렌더가 굳힌 행 수만큼 간다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| {
+        w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    }
+    const text = buf[0..w];
+    // **한 줄을 다르게 둔다** — 같은 파일이면 비교 뷰 자체가 서지 않는다. 마지막 줄이라
+    // 앞쪽 행 첨자는 그대로다.
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const rows = fx.term.rt.editor_diff_hit_len_right;
+    try testing.expect(rows > 1);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_down });
+    try testing.expectEqual(rows, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_up });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+}
+
+test "DCARET8: caret 이 생겨도 비교 뷰는 읽기 전용이다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\n", "ALPHA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const before = fx.term.rt.editor_diff.?.right_texts[0];
+    try testing.expect(!editor_ops.insertText(fx.session, fx.term, "x"));
+    try testing.expectEqualStrings(before, fx.term.rt.editor_diff.?.right_texts[0]);
+
+    // **단일 편집기 쪽 이동도 여전히 거절한다** — 심층 방어를 이 조각이 걷어내지 않았다.
+    try testing.expect(!editor_ops.moveCarets(fx.session, fx.term, .line_down, false));
 }

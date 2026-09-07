@@ -432,8 +432,22 @@ pub const Owner = struct {
     /// `pending_out` 은 이 연결로 아직 밀어내지 못한 producer turn 수다. 0 이 아닌 채 끊겼다면 host 가
     /// **보낼 것을 들고 있는 상태**에서 연결이 사라진 것이라, GUI 가 남긴 `pending_request_count` 와 짝을
     /// 맞춰 읽을 수 있다. `clients` 는 남은 연결 수로, 한 연결만 끊겼는지 전부 무너졌는지를 가른다.
+    ///
+    /// ⚠️ **`isExpected()` 만으로 침묵하면 이 진단이 필요한 바로 그 경우에 스스로 입을 다문다.**
+    /// `peer_broken` 은 세 조건이 **동시에** 성립해야 붙는다 — 닫는 중이 아니고, poll 이 peer 깨짐을
+    /// 보고했고, **보낼 것이 남아 있지 않다**(`!client.wantsWrite()`). 즉 host 가 **보낼 것을 든 채**
+    /// 연결이 깨지면 그것은 `client_closing` 으로 분류되고, `isExpected()` 가 참이라 한 줄도 안 남는다.
+    ///
+    /// 그 침묵이 실제로 추적을 두 번 막았다 — 2026-09-04 실측(GUI `last_success_request_id=136440` 뒤
+    /// 끊김)과 2026-09-07 실측(GUI `stage=runtime_death error=ConnectionClosed`, host 로그 0 줄,
+    /// host 는 `ready` 로 살아 있고 listener 도 정상). 두 번 다 **양쪽이 서로 「상대가 닫았다」로 기록**해
+    /// 원인을 좁히지 못했다. 위 주석이 대조 지점으로 지목한 `pending_out` 이 정작 그 경우에 안 찍힌 것이다.
+    ///
+    /// 그래서 **「정상」으로 분류돼도 보낼 것이 남았으면 남긴다.** 진짜 정상 종료(`pending_out == 0`)는
+    /// 그대로 침묵한다 — 연결이 닫힐 때마다 찍으면 그 소음이 다시 이 로그를 못 읽게 만든다.
     fn logClientClosed(self: *const Owner, index: usize, reason: ClientCloseReason) void {
-        if (builtin.is_test or reason.isExpected()) return;
+        if (builtin.is_test) return;
+        if (reason.isExpected() and self.producer_remaining[index] == 0) return;
         host_log.line(
             "session host closed client connection: slot={d} reason={s} pending_out={d} clients={d}",
             .{ index, @tagName(reason), self.producer_remaining[index], self.activeCount() },

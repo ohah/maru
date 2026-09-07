@@ -64,13 +64,18 @@ const Authority = struct {
     }
 };
 
+fn materializeNoFault(authority: anytype, output: *predecessor.Materialized) !void {
+    var faults = predecessor.Faults{ .fail_at = std.math.maxInt(usize) };
+    try predecessor.materializeWith(authority, &faults, output);
+}
+
 test "0400 held source becomes an exact 0500 single-link executable" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     var authority = fixture.authority();
     var output: predecessor.Materialized = .{};
-    try predecessor.materializeWith(&authority, &output);
+    try materializeNoFault(&authority, &output);
     const observed = try output.revalidate(&authority);
     try std.testing.expectEqual(@as(u32, 0o500), observed.mode & 0o777);
     try std.testing.expectEqual(@as(u64, bytes.len), observed.size);
@@ -87,7 +92,7 @@ test "source and destination descriptor alias is rejected before publication" {
     var authority = fixture.authority();
     authority.view.destination_dir_fd = fixture.source_fd;
     var output: predecessor.Materialized = .{};
-    try std.testing.expectError(error.InvalidAuthority, predecessor.materializeWith(&authority, &output));
+    try std.testing.expectError(error.InvalidAuthority, materializeNoFault(&authority, &output));
 }
 
 test "existing destination remains byte-for-byte unchanged" {
@@ -99,7 +104,7 @@ test "existing destination remains byte-for-byte unchanged" {
     try workspace.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
     var authority = fixture.authority();
     var output: predecessor.Materialized = .{};
-    try std.testing.expectError(error.DestinationExists, predecessor.materializeWith(&authority, &output));
+    try std.testing.expectError(error.DestinationExists, materializeNoFault(&authority, &output));
     const found = try workspace.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(found);
     try std.testing.expectEqualStrings("foreign", found);
@@ -112,7 +117,7 @@ test "post-copy authority drift removes only the owned destination" {
     var authority = fixture.authority();
     authority.drift = true;
     var output: predecessor.Materialized = .{};
-    try std.testing.expectError(error.AuthorityChanged, predecessor.materializeWith(&authority, &output));
+    try std.testing.expectError(error.AuthorityChanged, materializeNoFault(&authority, &output));
     try std.testing.expect(output.owner == null);
     try std.testing.expect(c.faccessat(fixture.root_fd, "predecessor-executable", c.F_OK, 0) != 0);
 }
@@ -123,7 +128,7 @@ test "copied owner and replaced pathname cannot delete foreign bytes" {
     defer fixture.deinit();
     var authority = fixture.authority();
     var output: predecessor.Materialized = .{};
-    try predecessor.materializeWith(&authority, &output);
+    try materializeNoFault(&authority, &output);
     var copied = output;
     try std.testing.expectError(error.InvalidOwner, copied.revalidate(&authority));
     var workspace = try fixture.tmp.dir.openDir(std.testing.io, "workspace", .{});
@@ -134,4 +139,35 @@ test "copied owner and replaced pathname cannot delete foreign bytes" {
     const found = try workspace.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(found);
     try std.testing.expectEqualStrings("foreign", found);
+}
+
+test "every materialization I/O point fails closed without residue" {
+    var count_fixture: Fixture = undefined;
+    try count_fixture.init();
+    var count_authority = count_fixture.authority();
+    var count_output: predecessor.Materialized = .{};
+    var count_faults = predecessor.Faults{ .fail_at = std.math.maxInt(usize) };
+    try predecessor.materializeWith(&count_authority, &count_faults, &count_output);
+    const io_count = count_faults.calls;
+    try count_output.cleanup();
+    count_fixture.deinit();
+    try std.testing.expect(io_count > 0);
+
+    var fail_at: usize = 1;
+    while (fail_at <= io_count) : (fail_at += 1) {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        var authority = fixture.authority();
+        var output: predecessor.Materialized = .{};
+        var faults = predecessor.Faults{ .fail_at = fail_at };
+        var failed = false;
+        predecessor.materializeWith(&authority, &faults, &output) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        try std.testing.expectEqual(fail_at, faults.calls);
+        try std.testing.expect(output.owner == null);
+        try std.testing.expect(c.faccessat(fixture.root_fd, "predecessor-executable", c.F_OK, 0) != 0);
+        fixture.deinit();
+    }
 }

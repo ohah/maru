@@ -20799,6 +20799,10 @@ pub const AppSession = struct {
                 //
                 // **`none` 이면 말하지 않는다** — 그때 "Plain Text" 라고 적으면 강조가 없는 이유를
                 // 설명하는 대신 가린다(줄바꿈 `none` 을 안 적는 것과 같은 규율).
+                // **이 상한 검사는 오늘 도달하지 않는다**(2026-09-07 변이 검사 — 지워도 판정자가
+                // 안 잡는 것이 정상이다). 상한이 `right_candidates.len` 이고 각 항목은 **한 번씩만**
+                // 들어가므로 `rn` 이 그 값을 넘을 수 없다. 그럼에도 두는 이유는 **배열 경계 방어**이고,
+                // 나머지 항목들이 전부 같은 모양을 쓴다 — 여기만 빼면 그 관례가 깨진다.
                 if (rn < max_status_bar_right_items) {
                     if (active_term.rt.editor_grammar.displayName()) |text| {
                         if (self.buildStatusBarItem(null, text, bar_cols, fg, icon_fg, .plain)) |dl| {

@@ -68,7 +68,7 @@ const Fixture = struct {
         const assets = [_]manifest.Asset{
             .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 100 },
             .{ .role = .frozen_product_executable, .name = "maru-session-host", .sha256 = exe_sha, .size = 200 },
-            .{ .role = .evidence_summary, .name = handoff.evidence_name, .sha256 = &observed.sha256, .size = observed.size },
+            .{ .role = .evidence_summary, .name = handoff.baseline_evidence_name, .sha256 = &observed.sha256, .size = observed.size },
         };
         const bytes = try manifest.writeCanonical(std.testing.allocator, .{
             .schema = manifest.schema,
@@ -80,7 +80,7 @@ const Fixture = struct {
             .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
             .signing = .{ .bundle_id = "com.example.maru", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "ABCDE12345", .designated_requirement_sha256 = requirement_sha, .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
             .assets = &assets,
-            .evidence = .{ .test_uuid = uuid, .summary_name = handoff.evidence_name, .summary_sha256 = &observed.sha256, .result = "passed" },
+            .evidence = .{ .test_uuid = uuid, .summary_name = handoff.baseline_evidence_name, .summary_sha256 = &observed.sha256, .result = "passed" },
         });
         defer std.testing.allocator.free(bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "manifest/Maru-1.2.3-session-host-release.json", .data = bytes });
@@ -166,7 +166,7 @@ test "retained preparation reopens in a fresh final-address owner" {
     try std.testing.expect(copied.value() == null);
     try std.testing.expectError(error.InvalidOwner, copied.close(std.testing.allocator));
     const view = result.value().?;
-    try std.testing.expectEqualStrings(handoff.evidence_name, std.fs.path.basename(view.entries[0].path));
+    try std.testing.expectEqualStrings(handoff.baseline_evidence_name, std.fs.path.basename(view.entries[0].path));
     try std.testing.expectEqualStrings("Maru-1.2.3-session-host-release.json", std.fs.path.basename(view.entries[1].path));
     result.context.run_attempt += 1;
     try std.testing.expect(result.value() == null);
@@ -229,7 +229,7 @@ test "inventory pathname and owner-only modes fail closed" {
     try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "durable/prepared/foreign", .data = "x" });
     try std.testing.expectError(error.InvalidInventory, reopen.open(std.testing.allocator, trustedContext(), fixture.destinationPath(), &result));
     try fixture.tmp.dir.deleteFile(std.testing.io, "durable/prepared/foreign");
-    const evidence_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.evidence_name }, 0);
+    const evidence_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.baseline_evidence_name }, 0);
     defer std.testing.allocator.free(evidence_path);
     if (c.chmod(evidence_path.ptr, 0o644) != 0) return error.FixtureFailed;
     try std.testing.expectError(error.InvalidMode, reopen.open(std.testing.allocator, trustedContext(), fixture.destinationPath(), &result));
@@ -237,12 +237,26 @@ test "inventory pathname and owner-only modes fail closed" {
     fixture.deinit();
     try fixture.init();
     try fixture.prepare();
-    const held_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.evidence_name }, 0);
+    const held_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.baseline_evidence_name }, 0);
     defer std.testing.allocator.free(held_path);
     var alias_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     const alias = try absolute(&fixture.tmp, "durable/evidence-alias", &alias_storage);
     if (c.link(held_path.ptr, alias.ptr) != 0) return error.FixtureFailed;
     try std.testing.expectError(error.PathAlias, reopen.open(std.testing.allocator, trustedContext(), fixture.destinationPath(), &result));
+}
+
+test "two canonical evidence documents cannot impersonate a preparation pair" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.prepare();
+    const manifest_bytes = try fixture.tmp.dir.readFileAlloc(std.testing.io, "durable/prepared/baseline-evidence.json", std.testing.allocator, .limited(evidence.max_evidence_bytes));
+    defer std.testing.allocator.free(manifest_bytes);
+    try fixture.tmp.dir.deleteFile(std.testing.io, "durable/prepared/Maru-1.2.3-session-host-release.json");
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "durable/prepared/second-evidence.json", .data = manifest_bytes });
+    var result: reopen.ReopenedPreparation = .{};
+    try std.testing.expectError(error.InvalidInventory, reopen.open(std.testing.allocator, trustedContext(), fixture.destinationPath(), &result));
+    try std.testing.expect(result.value() == null);
 }
 
 test "full fence rejects byte and directory pathname replacement" {
@@ -252,7 +266,7 @@ test "full fence rejects byte and directory pathname replacement" {
     try fixture.prepare();
     var result: reopen.ReopenedPreparation = .{};
     try reopen.open(std.testing.allocator, trustedContext(), fixture.destinationPath(), &result);
-    const evidence_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.evidence_name }, 0);
+    const evidence_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ fixture.destinationPath(), handoff.baseline_evidence_name }, 0);
     defer std.testing.allocator.free(evidence_path);
     const fd = c.open(evidence_path.ptr, .{ .ACCMODE = .WRONLY }, @as(c.mode_t, 0));
     if (fd < 0) return error.FixtureFailed;

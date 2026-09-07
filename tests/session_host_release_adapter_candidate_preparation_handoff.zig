@@ -60,7 +60,7 @@ const Fixture = struct {
         const assets = [_]manifest.Asset{
             .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 100 },
             .{ .role = .frozen_product_executable, .name = "maru-session-host", .sha256 = exe_sha, .size = 200 },
-            .{ .role = .evidence_summary, .name = handoff.evidence_name, .sha256 = &observed.sha256, .size = observed.size },
+            .{ .role = .evidence_summary, .name = handoff.baseline_evidence_name, .sha256 = &observed.sha256, .size = observed.size },
         };
         const bytes = try manifest.writeCanonical(std.testing.allocator, .{
             .schema = manifest.schema,
@@ -72,7 +72,7 @@ const Fixture = struct {
             .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
             .signing = .{ .bundle_id = "com.example.maru", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "ABCDE12345", .designated_requirement_sha256 = requirement_sha, .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
             .assets = &assets,
-            .evidence = .{ .test_uuid = uuid, .summary_name = handoff.evidence_name, .summary_sha256 = &observed.sha256, .result = "passed" },
+            .evidence = .{ .test_uuid = uuid, .summary_name = handoff.baseline_evidence_name, .summary_sha256 = &observed.sha256, .result = "passed" },
         });
         defer std.testing.allocator.free(bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "manifest-root/Maru-1.2.3-session-host-release.json", .data = bytes });
@@ -110,7 +110,7 @@ const Fixture = struct {
         for (&self.owners) |*owner| try owner.deinit();
     }
 
-    fn replaceWithUpgrade(self: *@This()) !void {
+    fn replaceWithUpgrade(self: *@This(), manifest_requirement: []const u8) !void {
         for (&self.owners) |*owner| try owner.deinit();
         try self.tmp.dir.deleteFile(std.testing.io, "evidence-root/baseline-evidence.json");
         const predecessor: evidence.Predecessor = .{
@@ -123,14 +123,14 @@ const Fixture = struct {
         };
         const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
         defer std.testing.allocator.free(evidence_bytes);
-        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence-root/upgrade-evidence.json", .data = evidence_bytes });
-        const evidence_path = try absolute(&self.tmp, "evidence-root/upgrade-evidence.json", &self.evidence_path);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence-root/" ++ handoff.upgrade_evidence_name, .data = evidence_bytes });
+        const evidence_path = try absolute(&self.tmp, "evidence-root/" ++ handoff.upgrade_evidence_name, &self.evidence_path);
         try files.pinReleaseFileObserved(&self.owners[0], evidence_path, false, evidence.max_evidence_bytes);
         const observed = self.owners[0].value().?;
         const assets = [_]manifest.Asset{
             .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 100 },
             .{ .role = .frozen_product_executable, .name = "maru-session-host", .sha256 = exe_sha, .size = 200 },
-            .{ .role = .evidence_summary, .name = "upgrade-evidence.json", .sha256 = &observed.sha256, .size = observed.size },
+            .{ .role = .evidence_summary, .name = handoff.upgrade_evidence_name, .sha256 = &observed.sha256, .size = observed.size },
         };
         const bytes = try manifest.writeCanonical(std.testing.allocator, .{
             .schema = manifest.schema,
@@ -140,9 +140,9 @@ const Fixture = struct {
             .source = .{ .commit = common().source.commit, .tree = common().source.tree },
             .build = .{ .workflow_ref = common().build.workflow_ref, .run_id = 789, .run_attempt = 2 },
             .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
-            .signing = .{ .bundle_id = "com.example.maru", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "ABCDE12345", .designated_requirement_sha256 = requirement_sha, .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
+            .signing = .{ .bundle_id = "com.example.maru", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "ABCDE12345", .designated_requirement_sha256 = manifest_requirement, .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
             .assets = &assets,
-            .evidence = .{ .test_uuid = uuid, .summary_name = "upgrade-evidence.json", .summary_sha256 = &observed.sha256, .result = "passed" },
+            .evidence = .{ .test_uuid = uuid, .summary_name = handoff.upgrade_evidence_name, .summary_sha256 = &observed.sha256, .result = "passed" },
             .predecessor = .{ .release_id = 400, .tag = "v1.2.2", .commit = "3333333333333333333333333333333333333333", .manifest_sha256 = predecessor_manifest_sha },
         });
         defer std.testing.allocator.free(bytes);
@@ -168,7 +168,7 @@ test "preparation promotion is atomic semantically bound and survives source rem
     try std.testing.expect(copied.value() == null);
     try std.testing.expectError(error.InvalidOwner, copied.cleanup());
     const value = try durable.revalidate();
-    try std.testing.expectEqualStrings(handoff.evidence_name, std.fs.path.basename(value.entries[0].path));
+    try std.testing.expectEqualStrings(handoff.baseline_evidence_name, std.fs.path.basename(value.entries[0].path));
     try std.testing.expectEqualStrings("Maru-1.2.3-session-host-release.json", std.fs.path.basename(value.entries[1].path));
     try fixture.closeSources();
     try fixture.tmp.dir.deleteTree(std.testing.io, "evidence-root");
@@ -182,12 +182,22 @@ test "upgrade B evidence and role-B manifest cross the same durable handoff" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    try fixture.replaceWithUpgrade();
+    try fixture.replaceWithUpgrade(requirement_sha);
     var durable: handoff.DurablePreparation = .{};
     try handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable);
     const value = try durable.revalidate();
-    try std.testing.expectEqualStrings("upgrade-evidence.json", std.fs.path.basename(value.entries[0].path));
+    try std.testing.expectEqualStrings(handoff.upgrade_evidence_name, std.fs.path.basename(value.entries[0].path));
     try durable.cleanup();
+}
+
+test "upgrade B signer mismatch cannot publish a durable preparation" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.replaceWithUpgrade(predecessor_manifest_sha);
+    var durable: handoff.DurablePreparation = .{};
+    try std.testing.expectError(error.InvalidBinding, handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable));
+    try std.testing.expect(durable.value() == null);
 }
 
 test "retained close preserves both leaves and revokes old authority" {

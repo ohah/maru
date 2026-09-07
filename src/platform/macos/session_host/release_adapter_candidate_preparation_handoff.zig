@@ -1,4 +1,4 @@
-//! Atomically promotes authored baseline evidence and its manifest into durable stage-3 storage.
+//! Atomically promotes authored profile evidence and its manifest into durable stage-3 storage.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,7 +15,6 @@ const rename_excl: c_uint = 0x00000004;
 pub const role_count: usize = 2;
 pub const baseline_evidence_name = "baseline-evidence.json";
 pub const upgrade_evidence_name = "upgrade-evidence.json";
-pub const evidence_name = baseline_evidence_name;
 pub const max_preparation_bytes: u64 = evidence_mod.max_evidence_bytes + manifest_mod.max_manifest_bytes;
 
 pub const Error = files.Error || evidence_mod.Error || manifest_mod.ParseError || error{

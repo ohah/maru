@@ -4,6 +4,7 @@ const std = @import("std");
 const manifest = @import("release_manifest");
 const workspace_mod = @import("release_adapter_pre_publish_workspace");
 const authenticated_mod = @import("release_adapter_github_manifest_attestation");
+const post_publish = @import("release_adapter_github_predecessor_manifest_input");
 const composition = @import("release_adapter_profile_predecessor_manifest_input");
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -286,4 +287,8 @@ test "uncertain cleanup preserves the top-level retry owner" {
 
 test "production entrypoint remains concrete" {
     _ = composition.authenticateUntil;
+    comptime {
+        if (composition.ProfileManifestInput == post_publish.PredecessorManifestInput)
+            @compileError("pre-publish profile provenance must be a nominal capability");
+    }
 }

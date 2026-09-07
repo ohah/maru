@@ -14753,9 +14753,13 @@ pub const AppSession = struct {
             host.stopped = true;
             return;
         };
-        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch {
-            std.log.scoped(.agent).warn("control socket 경로를 못 만들어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
-            host.stopped = true;
+        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch |err| {
+            if (controlPathErrorIsPermanent(err)) {
+                std.log.scoped(.agent).warn("control socket 경로가 규격을 넘는다 — 원격 배지는 안 선다 dest={s}", .{dest});
+                host.stopped = true;
+                return;
+            }
+            self.scheduleStreamerRetry(dest, host, "control socket 경로를 못 만들었다");
             return;
         };
         defer self.allocator.free(ctl);
@@ -14877,9 +14881,13 @@ pub const AppSession = struct {
                 host.stopped = true;
                 return;
             };
-            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch {
-                std.log.scoped(.agent).warn("control socket 경로를 못 만들어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
-                host.stopped = true;
+            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch |err| {
+                if (controlPathErrorIsPermanent(err)) {
+                    std.log.scoped(.agent).warn("control socket 경로가 규격을 넘는다 — 원격 배지는 안 선다 dest={s}", .{dest});
+                    host.stopped = true;
+                    return;
+                }
+                self.scheduleStreamerRetry(dest, host, "control socket 경로를 못 만들었다");
                 return;
             };
             defer self.allocator.free(ctl);
@@ -14958,6 +14966,17 @@ pub const AppSession = struct {
         // 그때 ControlMaster 는 멀쩡한 경우가 많다(실측). 예전에는 여기서 `stopped` 를 세워 앱을 껐다
         // 켜기 전까지 그 목적지가 죽었다 — 사용자에게는 「어느 순간부터 배지가 안 뜬다」로만 보였다.
         self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 끝났다");
+    }
+
+    /// 이 오류가 **영원히 안 되는 것**인가. 계획 §RA5-b 가 「두 실패를 반드시 가른다」고 정했는데,
+    /// 이 자리는 한 `catch` 로 둘을 뭉개고 있었다 — 경로가 규격(103 바이트)을 넘는 것은 dest 가 그대로인
+    /// 한 안 바뀌지만, **할당 실패는 지금만**이다. 뭉개면 메모리가 잠깐 모자랐다는 이유로 그 목적지
+    /// 배지가 앱 수명 내내 죽는다.
+    fn controlPathErrorIsPermanent(err: maru.cli.ssh.ControlPathError) bool {
+        return switch (err) {
+            error.ControlPathTooLong => true,
+            else => false, // OutOfMemory — 다음 기회에 다시 만든다
+        };
     }
 
     /// 다시 띄울 시각을 예약한다 — **EOF 와 기동 실패가 같은 규칙을 쓴다**(적대적 검증 4 회차).
@@ -23535,6 +23554,45 @@ test "RF3: detached 스풀 이름은 orphan 으로 안 알린다 — 버리는 �
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t")); // 숫자가 없다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t2x")); // 숫자가 아니다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("3185_4")); // 로컬 신원
+}
+test "RS1: control socket 경로 실패는 두 갈래다 — 길이는 영원, 할당은 지금만" {
+    // 계획 §RA5-b 는 「두 실패를 반드시 가른다」고 정했다(`hello` 실패는 영구, EOF 는 재시도). 그런데
+    // 이 자리는 한 `catch` 로 둘을 뭉개, **메모리가 잠깐 모자랐다**는 이유로 그 목적지 배지가 앱 수명
+    // 내내 죽었다 — `stopped` 는 설정 열 곳에 해제 한 곳도 없다.
+    try std.testing.expect(AppSession.controlPathErrorIsPermanent(error.ControlPathTooLong));
+    try std.testing.expect(!AppSession.controlPathErrorIsPermanent(error.OutOfMemory));
+}
+test "RS1: 규격을 넘는 경로는 재시도 예산을 쓰지 않는다" {
+    // 영원히 안 되는 것에 여섯 번을 쓰면 그동안 로그만 시끄럽고 결과는 같다. 갈랐으면 **예산도 갈려야**
+    // 한다 — `retries` 가 안 늘어야 「굳혔다」가 참이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var host: AppSession.RemoteAgentHost = .{};
+    defer host.pending.deinit(a);
+    defer host.install_out.deinit(a);
+    defer host.cursors.deinit(a);
+
+    // 「지금만」쪽은 예산을 쓰고 다시 띄울 시각을 잡는다.
+    session.scheduleStreamerRetry("openClaw", &host, "테스트");
+    try std.testing.expectEqual(@as(u8, 1), host.retries);
+    try std.testing.expect(host.retry_at_ms > 0);
+    try std.testing.expect(!host.stopped);
+
+    // 예산을 다 쓰면 그때 굳는다.
+    host.retries = AppSession.RemoteAgentHost.retry_max;
+    session.scheduleStreamerRetry("openClaw", &host, "테스트");
+    try std.testing.expect(host.stopped);
 }
 test "RF3: 신원이 그대로면 nonce 를 갈아끼우지 않는다" {
     // 매 tick 다시 세우기로 했으니, **안 바뀌었을 때 조용한지**가 먼저다. 여기서 시끄러우면 재바인딩

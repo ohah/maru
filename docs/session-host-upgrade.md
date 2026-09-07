@@ -4416,6 +4416,44 @@ fail-index, child 실패와 동시 authority drift, timing 양수·ordering·역
 검증한다. 이 runner가 green이어도 live checkpoint/profile 배선, attestation·manifest·draft publication 및 protected B tag actual signed
 실행은 별도 미완료다.
 
+### 11.87 pre-publish release profile과 predecessor endorsement 권위
+
+upgrade-B의 현재 manifest는 인증된 predecessor graph가 있어야만 작성할 수 있으므로, 아직 작성되지 않은 B manifest를
+predecessor 선택 권위로 요구하지 않는다. 반대로 `latest`, release 목록 순서, SemVer 산술, git tag 탐색 또는 shell이 조립한
+개별 predecessor option으로 A를 추측하지 않는다. pre-publish 선택의 단일 출처는 protected `release` environment에 저장한
+GitHub environment variable `SESSION_HOST_RELEASE_PROFILE_V1`의 canonical document 하나다. top-level release job은 이 값을
+해석하지 않고 live action 호출 step 하나의 `MARU_SESSION_HOST_RELEASE_PROFILE_V1: ${{ vars.SESSION_HOST_RELEASE_PROFILE_V1 }}`
+environment로만 투영한다. composite action은 별도 input/output으로 복사하지 않으며 제품 executable이 current protected-tag
+`Context`와 함께 읽어 검증·봉인한다.
+
+document는 UTF-8 JSON object 하나와 마지막 LF 하나이고 root key 순서는 `schema`, `profile`, 그리고 upgrade-B에서만
+`predecessor`다. `schema`는 exact `maru.session-host-release-profile.v1`, `profile`은 `baseline_a | upgrade_b`의 닫힌 union이다.
+`baseline_a`에는 `predecessor`가 없어야 한다. `upgrade_b`에는 `release_id`, `tag`, `commit`, `manifest_sha256` 네 필드가 모두
+있어야 하며 release manifest의 같은 이름·상한·canonical decimal/lowercase-hex/tag 규칙을 재사용한다. unknown/duplicate/missing
+key, noncanonical JSON/숫자, control byte, trailing value와 1 KiB 초과를 거부한다. 하나의 document로 profile과 네 필드를 함께
+바꾸므로 Actions variable 여러 개의 부분 갱신을 성공 입력으로 보지 않는다. 값 누락·빈 값은 baseline fallback이 아니라 release
+실패다.
+
+이 document는 A가 진짜 published release라는 증거가 아니라 **선택 endorsement**다. upgrade profile owner는 봉인된 endorsement의
+네 필드로 predecessor manifest의 exact provisional 이름과 download expectation을 만들고, 기존 manifest download/file/
+attestation, immutable release와 세 asset attestation을 모두 통과한 뒤에만 `PredecessorEvidenceIdentity`를 게시한다. 그 identity가
+endorsement와 exact 일치해야 upgrade runner와 B manifest authoring에 전달된다. B manifest가 작성·attest·게시된 뒤의 소비와
+post-publish 검증은 계속 authenticated B manifest의 predecessor scope를 권위로 쓰며 environment document를 다시 신뢰하지 않는다.
+따라서 pre-publish bootstrap과 post-publish B→A 검증은 서로 다른 entrypoint이고 순환하지 않는다.
+
+environment administrator는 이미 release 승인과 signing secret 접근을 통제하는 운영 신뢰 경계이므로 이 document 변경 권위도
+그 경계 안에 둔다. document 원문은 credential이 아니며 child environment에는 profile owner process에만 전달하고 GitHub CLI,
+signed-upgrade child, attestation child와 aggregate/publication/cleanup stage에는 전달하지 않는다. bootstrap은 canonical bytes의
+SHA-256과 parsed 값을 final-address move-only owner에 복사한다. owner seal에는 repository ID/name, current tag/source SHA,
+workflow ref/run ID/attempt, protected bit와 document digest가 모두 들어가 checkpoint run/context에 결속된다. shell/action output, pathname,
+caller-selected ref, success boolean 또는 별도 profile scalar는 권위가 아니다. retry는 같은 run/context와 document digest만 허용하며
+중간에 variable이 바뀌면 remote mutation 전에 fail-close한다.
+
+첫 focused gate는 document의 strict canonical parse, profile/predecessor closed union, current context 결속, copied/pre-owned/alias
+owner와 환경 재관측 drift를 Debug·ReleaseFast에서 검증한다. 이 gate는 credential·network·filesystem·실제 앱 session-host 상태를
+건드리지 않는다. 다음 composition gate가 endorsement→A download/authentication→upgrade runner→B manifest의 exact 순서와 하나의
+deadline/checkpoint를 소유하며, protected B 시험 tag만 actual signed 1/near-max 실측과 frozen U5 완료 증거가 된다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

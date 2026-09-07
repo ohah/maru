@@ -4393,6 +4393,29 @@ timeout/nonzero/foreign capture와 역순 cleanup 가능성을 검증한다.
 PTY 1개와 255개를 만드는 비용은 synthetic fixture로 대체하지 않고, signed N-1/current가 없는 일반 CI에서는 실행하지 않는다.
 이 slice만으로 profile runner, checkpoint·manifest·attestation·draft publication 또는 frozen signed U5 완료를 주장하지 않는다.
 
+### 11.86 upgrade-B production runner와 로컬 monotonic 실측
+
+`release_adapter_candidate_upgrade_runner.zig`의 final-address `Execution`이 §11.84 phase의 유일한 제품 adapter다. 입력은 candidate
+identity/files/product/source, authenticated predecessor identity/manifest/file/download, descriptor-owned upgrade workspace, pinned Zig
+toolchain, held source directory와 하나의 positive budget뿐이다. runner는 predecessor downloaded-set의 exact frozen-product asset을
+no-follow로 열어 held inode로 `0400→0500` 실행 사본을 만들고, current는 `PinnedReleaseFile(require_executable=true)`의 held executable과
+pathname authority를 직접 child에 연결한다. caller가 source fd·mode·SHA·실행 pathname·UUID·kind·output leaf를 다시 제출하지 않는다.
+
+`Execution`은 phase가 시도한 predecessor copy, signed-one/signed-near-max leaf와 aggregate owner를 final address에 보존한다. 실패 cleanup이
+전부 끝나면 pristine으로 돌아가고, 하나라도 실패하면 남은 exact owner를 같은 주소에서 retry할 수 있어야 한다. 성공 후에도 세 evidence
+leaf를 consumer가 사용할 때까지 보존하며, 명시 cleanup은 aggregate→near-max→one→predecessor copy 순서다. borrowed deadline variant는
+caller deadline을 초기화·해제하지 않으며 모든 leaf와 fence가 같은 pointer를 소비한다.
+
+runner는 release evidence와 별도의 `TimingDiagnostic`에 `signed_one_ns`, `signed_near_max_ns`, `phase_ns`를 actual monotonic clock으로
+기록한다. child 값은 bounded child 호출 직전부터 성공 반환 직후까지이고 phase 값은 phase 시작부터 final authority/deadline fence
+성공까지다. 값은 양수이고 `phase_ns >= signed_one_ns + signed_near_max_ns`여야 한다. 실패·clock 역행·overflow에서는 diagnostic success를
+게시하지 않는다. 이는 GitHub queue/network timing이나 release 성공 권위가 아니며 signed leaf와 canonical aggregate에도 넣지 않는다.
+
+focused Debug·ReleaseFast gate는 concrete predecessor/current 방향과 inode/mode, 두 fixed child, 동일 deadline pointer, 모든 phase
+fail-index, child 실패와 동시 authority drift, timing 양수·ordering·역행, copied/pre-owned/alias `Execution`, 성공 보존과 cleanup retry를
+검증한다. 이 runner가 green이어도 live checkpoint/profile 배선, attestation·manifest·draft publication 및 protected B tag actual signed
+실행은 별도 미완료다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

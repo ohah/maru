@@ -1989,6 +1989,15 @@ const TermRuntime = struct {
     editor_diff_marks_right: [][]const chrome.components.editor_view.frame.Mark = &.{},
     editor_diff_mark_buf_left: []chrome.components.editor_view.frame.Mark = &.{},
     editor_diff_mark_buf_right: []chrome.components.editor_view.frame.Mark = &.{},
+    /// 비교 뷰 caret 을 **행마다의 배열**로 자른 것(활성 열 하나만 채운다). 선택 표식과 같은
+    /// 관례다 — 렌더가 받는 모양이 `?[]const []const u32` 이므로 그 모양으로 굳혀 든다.
+    ///
+    /// **byte 는 따로 든다.** caret 은 늘 하나라 행 배열의 한 칸만 길이 1 슬라이스를 가리키면
+    /// 되는데, 그 슬라이스가 가리킬 저장소가 프레임 뒤에도 살아 있어야 한다.
+    editor_diff_caret_rows_left: [][]const u32 = &.{},
+    editor_diff_caret_rows_right: [][]const u32 = &.{},
+    editor_diff_caret_byte_left: [1]u32 = .{0},
+    editor_diff_caret_byte_right: [1]u32 = .{0},
     editor_diff_hit_rows_left: []chrome.ui.visual_map.VisualRow = &.{},
     editor_diff_hit_rows_right: []chrome.ui.visual_map.VisualRow = &.{},
     editor_diff_hit_len_left: usize = 0,
@@ -3483,6 +3492,11 @@ pub const AppSession = struct {
     /// 편집 연산 캡처 훅(§3.9a·§3.9b). 위와 같은 자리·같은 규율이다.
     pub fn maybeDebugEditOp(self: *AppSession) void {
         return debug_fixtures.maybeDebugEditOp(self);
+    }
+
+    /// 비교 뷰 caret 캡처 훅. 위와 같은 자리·같은 규율이다.
+    pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
+        return debug_fixtures.maybeDebugDiffCaretKeys(self);
     }
 
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
@@ -6299,6 +6313,8 @@ pub const AppSession = struct {
     // 백그라운드 스로틀링으로 그보다 낮을 수 있다(실측 ~17Hz). 그러면 30틱 반주기가 0.5초가 아니라 1.7초가 돼
     // **깜빡임이 3배 넘게 느려진다**. 실경과로 재면 tick rate와 무관하게 항상 설정한 속도를 지킨다.
     blink_visible: bool = true,
+    /// 비교 뷰 caret 캡처 훅이 이미 키를 태웠는가(`MARU_DIFF_CARET_KEYS`). **태운 뒤에만** 세운다.
+    debug_diff_caret_keys_done: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
     // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
@@ -11852,6 +11868,26 @@ pub const AppSession = struct {
                 // `editor_diff != null` 을 거절하고, 줄 조작은 `lineOpDoc` 이 거절한다). 그럼에도
                 // 여기서 막는 이유는 **심층 방어**다(§6): 안쪽 거절이 하나라도 빠지는 날, 비교 Term 의
                 // selection 을 단일 편집기 좌표로 훑는 경로가 열린다.
+                // **비교 뷰는 자기 갈래를 연다** — 위 `!is_diff` 는 심층 방어라 그대로 두고, 축이
+                // 다른 이동을 옆에 세운다(key-input-and-shortcuts.md 「비교 뷰에 caret 을 세운다」).
+                // 표는 단일 편집기와 같은 모양이고 **편집 키는 없다**: 비교는 읽기 전용이다.
+                if (ed == .editor and is_diff) {
+                    const m = key_event.modifiers;
+                    const motion: ?editor_ops.Motion = switch (key_event.key) {
+                        .arrow_left => if (m.option) .word_left else if (m.command) .line_start else .char_left,
+                        .arrow_right => if (m.option) .word_right else if (m.command) .line_end else .char_right,
+                        .arrow_up => if (m.command) .doc_start else .line_up,
+                        .arrow_down => if (m.command) .doc_end else .line_down,
+                        .home => if (m.command) .doc_start else .line_start,
+                        .end => if (m.command) .doc_end else .line_end,
+                        .page_up => .page_up,
+                        .page_down => .page_down,
+                        else => null,
+                    };
+                    if (motion) |how| {
+                        if (editor_ops.diffMove(self, active, how, m.shift)) return input_ops.keyConsumedByApp(self);
+                    }
+                }
                 if (ed == .editor and !is_diff) {
                     // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,
                     // 맨몸은 문자/줄. **Shift**는 단위를 바꾸지 않고 **선택을 늘린다**.

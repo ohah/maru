@@ -26,6 +26,17 @@ pub const Side = struct {
     /// 좌우가 각자 자기 것을 넘긴다(한 번에 한 열만 고르므로 한쪽은 `null`이다).
     selection_marks: ?[]const []const frame.Mark = null,
 
+    /// 그 열의 행마다 **커서 자리**(행 안 byte offset, 오름차순). `selection_marks`와 **같은
+    /// 축이고 같은 이유로 열마다 든다** — 비교 뷰는 caret 이 한 열에만 서므로 반대 열은 `null`
+    /// 이고, 그 `null`이 곧 "이 열에는 커서가 없다"는 뜻이다.
+    ///
+    /// **`Shared`에서 옮겨 왔다**(2026-09-08). 좌우 공통 묶음에 있던 동안에는 한 열에만 그릴
+    /// 방법이 없어 비교 뷰가 이 자리를 아예 못 썼다 — 그때 이 필드는 *"커서가 어느 쪽 것인지
+    /// 판정이 선행하는데 그 판정이 없다"*고 적혀 있었지만, 판정(`editor_diff_selection.side`)은
+    /// 이미 있었고 **없던 것은 열마다 값을 받을 자리**였다. 모양(`caret_shape`)과 깜빡임
+    /// (`caret_visible`)은 좌우가 같아야 하므로 `Shared`에 남는다.
+    carets: ?[]const []const u32 = null,
+
     /// 그 열의 행마다 **검색 결과**(§5.1)와 그 중 현재 매치. 단일 편집기만 채운다 —
     /// 비교 뷰 검색은 어느 쪽을 검색하는지부터 정해야 하고, 그것은 가로 스크롤·히트테스트가
     /// 좌우를 가른 뒤의 일이다(같은 슬라이스에 든다).
@@ -74,6 +85,11 @@ pub const Props = struct {
     /// 첫 행에서 건너뛸 **조각 수**(§4.1d). 세로를 공유하므로 좌우 공통이다.
     first_piece: u32 = 0,
     wrap: bool = false,
+    /// 지금 커서를 그릴 순간인가(blink)와 그 모양. **`tab_width` 와 같은 이유로 기본값이 없다** —
+    /// 두면 그것이 두 번째 출처가 되고, Chrome Lab 이 안 넘겨도 조용히 지나가 캡처가 제품을
+    /// 예고하지 못한다. 자리(`Side.carets`)와 달리 이 둘은 **좌우 공통**이다.
+    caret_visible: bool,
+    caret_shape: frame.CaretShape,
     /// **기본값이 없다 — 호출자가 반드시 넘긴다.** 기본값을 두면 그것이 두 번째 출처가 되고,
     /// "렌더가 쓰는 값"을 참조하는 쪽(hit-test)이 조용히 갈린다. 두 번 그렇게 갈렸다: 2차 적대적
     /// 검증은 이 자리가 `4`를 하드코딩해 `frame.default_tab_width`를 바꿔도 렌더가 안 따라오는 것을
@@ -198,10 +214,6 @@ pub const Shared = struct {
     /// 같은 시각 행에서 시작해야 같은 줄이 같은 높이에 선다.
     first_piece: u32 = 0,
     wrap: bool = false,
-    /// 커서 자리(줄별 byte offset)와 지금 그릴 순간인가. **비교 뷰는 안 쓴다** — 좌우 두 문서라
-    /// 커서가 어느 쪽 것인지 판정이 선행하고(§4.1g "비교 뷰"), 그 판정은 아직 없다. 단일 편집기가
-    /// 이 구조를 함께 쓰므로 자리만 뚫어 둔다.
-    carets: ?[]const []const u32 = null,
     caret_visible: bool = true,
     /// caret 모양(`editor.cursor-shape`). 비교 뷰의 양쪽이 **같은 모양**을 쓴다 — 좌우가 다르면
     /// 어느 쪽에 커서가 있는지가 아니라 "왜 모양이 다르지"가 먼저 읽힌다.
@@ -262,7 +274,7 @@ pub fn buildSide(
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,
-        .carets = shared.carets,
+        .carets = side.carets,
         .caret_visible = shared.caret_visible,
         .caret_shape = shared.caret_shape,
         .tab_width = shared.tab_width,
@@ -327,6 +339,8 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         .first_line = props.first_line,
         .first_piece = props.first_piece,
         .wrap = props.wrap,
+        .caret_visible = props.caret_visible,
+        .caret_shape = props.caret_shape,
         .tab_width = props.tab_width,
         .cell_w_px = props.cell_w_px,
         .cell_h_px = props.cell_h_px,
@@ -407,6 +421,8 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
     const rect: draw.Rect = .{ .x = 0, .y = 0, .w = 640, .h = 320 }; // 320/16 = 20행
 
     const spilled = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
         .left = .{ .lines = &lines, .content_max_cols = 4 },
         .right = .{ .lines = &lines, .content_max_cols = 400 }, // 오른쪽만 넘친다
@@ -417,6 +433,8 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
     }, s);
 
     const flat = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
         .left = .{ .lines = &lines, .content_max_cols = 4 },
         .right = .{ .lines = &lines, .content_max_cols = 4 }, // 아무도 안 넘친다
@@ -488,6 +506,8 @@ test "저장소가 모자라도 죽지 않고 잘린다 — 두 열이 절반씩
     const left = [_][]const u8{ "aaaa", "bbbb" };
     const right = [_][]const u8{ "cccc", "dddd" };
     const w = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
         .left = .{ .lines = &left },
         .right = .{ .lines = &right },
@@ -522,6 +542,8 @@ test "op 배열이 비어도 죽지 않는다" {
     var caret_cols: [64]u32 = undefined;
     const line = [_][]const u8{"x"};
     const w = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
         .left = .{ .lines = &line },
         .right = .{ .lines = &line },
@@ -574,6 +596,8 @@ test "아주 좁거나 낮은 자리에서도 죽지 않는다 — 분할 pane�
         var h: u32 = 0;
         while (h <= 40) : (h += 8) {
             const out = build(.{
+                .caret_visible = false,
+                .caret_shape = .bar,
                 .tab_width = frame.default_tab_width,
                 .left = .{ .lines = &left, .total_lines = 1 },
                 .right = .{ .lines = &right, .total_lines = 1 },
@@ -605,6 +629,8 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
     var caret_cols: [64]u32 = undefined;
     const line = [_][]const u8{"x"};
     const out = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
         .left = .{ .lines = &line },
         .right = .{ .lines = &line },

@@ -910,9 +910,23 @@ pub const RowSelection = struct {
     anchor_end: RowPos,
     focus: RowPos,
     kind: AnchorKind = .simple,
+    /// 세로 이동이 향하는 **목표 열**. 단일 편집기의 `Selection.goal`과 같은 뜻이고, 같은 이유로
+    /// **selection 안에 든다** — 밖에 두면 선택을 버릴 때 목표 열만 살아남아 다음 `↑`가 엉뚱한
+    /// 열로 간다(비교 뷰는 내용이 다시 계산될 때 선택을 통째로 버린다).
+    ///
+    /// **`anchor_goal`은 없다.** 그것은 열/블록 선택의 원본 사각형을 되짚는 값인데(§3.2a), 비교
+    /// 뷰에는 열 선택이 없다. 쓰지 않을 자리를 뚫으면 그 자리가 "언젠가 쓰겠지"로 남는다.
+    goal: Goal = .none,
 
     pub fn at(pos: RowPos) RowSelection {
         return .{ .anchor_start = pos, .anchor_end = pos, .focus = pos };
+    }
+
+    /// **가로로 움직인 뒤에 부른다**(§3.2). 세로 이동만 목표 열을 유지한다 — 좌우로 움직인 뒤에도
+    /// 옛 목표를 들고 있으면 다음 `↓`가 방금 선 자리가 아니라 그 전 열로 간다. 단일 편집기의
+    /// `clearGoals`와 같은 규율이다.
+    pub fn clearGoal(self: *RowSelection) void {
+        self.goal = .none;
     }
 
     pub fn fromAnchorRange(a_start: RowPos, a_end: RowPos, focus: RowPos, kind: AnchorKind) RowSelection {

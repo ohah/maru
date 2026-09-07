@@ -1628,6 +1628,34 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
 /// **팔레트는 편집기 액션 여섯이 닿는 유일한 길이다**(나머지는 chord 가 없다 —
 /// docs/configuration-input.md "편집기 전용 action"). 그 행에 chord 가 제대로 뜨는지는
 /// `default_app_bindings` 역스캔 결과라, 표를 고치면 화면이 따라 바뀐다.
+/// `MARU_DIFF_CARET_KEYS=<아래>:<⇧오른쪽>` — 비교 뷰 caret 을 **키로** 옮겨 화면에 남는 결과를
+/// 캡처한다([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을
+/// 세운다」).
+///
+/// **자리를 직접 세우지 않고 키를 태운다.** `editor_diff_selection` 을 여기서 채우면 그것은 제품
+/// 경로가 아니라 그 배관의 복제가 되어, 확인하려던 것(키가 실제로 caret 에 닿는가)을 확인하지
+/// 못한다 — `MARU_OPEN_SCM_DIFF` 가 같은 이유로 클릭 경로를 그대로 탄다.
+///
+/// **비교가 설 때까지 기다린다.** 비교 내용은 git 백엔드의 비동기 결과라 첫 프레임에는 없다.
+/// 래치는 실제로 태운 뒤에만 세운다.
+pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
+    if (self.debug_diff_caret_keys_done) return;
+    const raw = std.c.getenv("MARU_DIFF_CARET_KEYS") orelse return;
+    const spec = std.mem.span(raw);
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return;
+    const downs = std.fmt.parseInt(usize, spec[0..colon], 10) catch return;
+    const rights = std.fmt.parseInt(usize, spec[colon + 1 ..], 10) catch return;
+
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return; // 아직 비교가 안 열렸다 — 다음 tick 에 다시 본다
+    const st = term.rt.editor_diff orelse return;
+    if (st.view != .compare) return;
+
+    for (0..downs) |_| _ = self.handleKeyEvent(.{ .key = .arrow_down }) catch {};
+    for (0..rights) |_| _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } }) catch {};
+    self.debug_diff_caret_keys_done = true;
+}
+
 /// `MARU_EDIT_OP=<연산>` — 편집 연산을 한 번 걸어 **화면에 남는 결과**를 캡처한다(§3.9a·§3.9b).
 ///
 /// **판정자는 문서 byte 를 재지 화면을 안 잰다.** 들여쓴 줄이 실제로 밀려 보이는지, 대문자로 바뀐

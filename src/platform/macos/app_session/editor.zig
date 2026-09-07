@@ -474,8 +474,8 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors },
-        .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .carets = carets },
+        .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -918,6 +918,12 @@ pub fn buildDiffPaneOps(
     right: chrome_editor.diff_frame.Side,
     first_line: usize,
     first_piece: u32,
+    /// 지금 커서를 그릴 순간인가(blink). **caret 자리 자체는 `Side.carets`가 든다** — 좌우 중
+    /// 한 열만 받으므로 이쪽은 공통이다.
+    caret_visible: bool,
+    /// caret 모양. **좌우가 같은 모양을 쓴다** — 다르면 "어느 쪽에 커서가 있나"가 아니라
+    /// "왜 모양이 다르지"가 먼저 읽힌다(`diff_frame.Shared`가 소유한 근거다).
+    caret_shape: chrome_editor.frame.CaretShape,
     wrap: bool,
     /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
     /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
@@ -943,6 +949,8 @@ pub fn buildDiffPaneOps(
         .right = right,
         .first_line = first_line,
         .first_piece = first_piece,
+        .caret_visible = caret_visible,
+        .caret_shape = caret_shape,
         .wrap = wrap,
         .tab_width = tab_width,
         .rect = inner,
@@ -1162,10 +1170,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildDiffPaneOps(
             // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
             // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
+            self.blink_visible,
+            caretShape(self),
             wrap,
             term.rt.editor_tab_width,
             pane_rect,
@@ -3752,6 +3762,163 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
 /// 비교 뷰 선택을 **줄별 byte 범위**로 자른다 — 그 열의 렌더가 요구하는 축이다.
 ///
 /// 단일 편집기의 `buildSelectionMarks`와 같은 일인데 훨씬 짧다: 행 배열이 곧 화면이라 축 변환이 없다.
+/// 비교 뷰 caret 을 **그 열의 행 배열**로 굳힌다 — 활성 열만 배열을 받고 **반대 열은 `null`**이다
+/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
+///
+/// **자리는 선택의 focus 하나다.** caret 을 따로 든 필드로 두면 선택과 두 출처가 되고, 그 둘은
+/// 반드시 갈린다 — 드래그 중에 특히 그렇다.
+///
+/// **행 첨자는 자기 열의 배열 길이로 자른다.** 좌우 길이가 같다는 것은 계약이지 타입이 아니라
+/// (`materialize`가 `rows.left.len`·`rows.right.len`으로 따로 잡는다), 반대 열 길이로 자르면 그
+/// 불변식이 깨지는 날 범위 밖을 훑는다.
+/// 비교 뷰의 caret 을 옮긴다 — `(행, 행 안 byte)` 축 위의 §3.9 이동 일습
+/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
+///
+/// **`moveCarets` 를 재사용하지 않는다.** 그 함수는 문서 offset 축을 전제해 첫 줄에서 비교를
+/// 거절한다. 위로 합치려면 좌표를 추상화해야 하고, 그 값이 이 조각에 없다 — 문서 모델이 멀티 커서
+/// 조각에서 같은 판단을 이미 했다. **공유하는 것은 그 아래의 `motion.*` 하나**이고, 그래서
+/// "`⌥←` 가 간 곳"이 두 뷰에서 갈리지 않는다.
+///
+/// **행 하나를 한 줄로 본다.** 비교 행 배열은 줄 끝 문자가 이미 떼어져 있으므로(§3.8 가시화)
+/// 합성하는 `Line` 의 줄바꿈은 `.none` 이다 — `lf` 로 두면 `contentEnd()` 가 한 byte 짧아져
+/// 행 끝에 못 선다.
+pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool {
+    const st = term.rt.editor_diff orelse return false;
+    if (st.view != .compare) return false;
+    const state = term.rt.editor_diff_selection orelse return false;
+    const side = state.side;
+    const texts = if (side == .right) st.right_texts else st.left_texts;
+    if (texts.len == 0) return false;
+
+    const RowPos = maru.session.editor.selection.RowPos;
+    var sel = state.sel;
+    // **자기 열 길이로 자른다** — 좌우가 같은 길이라는 것은 계약이지 타입이 아니다.
+    const cur_row = @min(sel.focus.row, texts.len - 1);
+    const cur_byte = @min(sel.focus.byte, texts[cur_row].len);
+
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const rows = diffPageRows(term, side);
+
+    // **세로 이동만 목표 열을 든다.** `doc_start`·`doc_end` 는 절대 자리라 목표를 버린다 —
+    // 단일 편집기가 같은 규율이다.
+    const keeps_goal = switch (how) {
+        .line_up, .line_down, .page_up, .page_down => true,
+        else => false,
+    };
+    if (keeps_goal and sel.goal == .none) {
+        sel.goal = editor_motion.goalAt(texts[cur_row], rowLine(texts[cur_row]), cur_byte, map);
+    }
+
+    const next: RowPos = switch (how) {
+        .char_left => if (cur_byte > 0)
+            .{ .row = cur_row, .byte = editor_motion.prevCharBoundary(texts[cur_row], cur_byte) }
+        else if (cur_row > 0)
+            .{ .row = cur_row - 1, .byte = texts[cur_row - 1].len }
+        else
+            .{ .row = 0, .byte = 0 },
+        .char_right => if (cur_byte < texts[cur_row].len)
+            .{ .row = cur_row, .byte = editor_motion.nextCharBoundary(texts[cur_row], cur_byte) }
+        else if (cur_row + 1 < texts.len)
+            .{ .row = cur_row + 1, .byte = 0 }
+        else
+            .{ .row = cur_row, .byte = cur_byte },
+        .word_left => if (cur_byte > 0)
+            .{ .row = cur_row, .byte = editor_motion.wordLeft(texts[cur_row], cur_byte) }
+        else if (cur_row > 0)
+            .{ .row = cur_row - 1, .byte = texts[cur_row - 1].len }
+        else
+            .{ .row = 0, .byte = 0 },
+        .word_right => if (cur_byte < texts[cur_row].len)
+            .{ .row = cur_row, .byte = editor_motion.wordRight(texts[cur_row], cur_byte) }
+        else if (cur_row + 1 < texts.len)
+            .{ .row = cur_row + 1, .byte = 0 }
+        else
+            .{ .row = cur_row, .byte = cur_byte },
+        .line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], rowLine(texts[cur_row]), cur_byte) },
+        .line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        .line_up, .line_down, .page_up, .page_down => blk: {
+            const step: usize = if (how == .line_up or how == .line_down) 1 else rows;
+            const up = (how == .line_up or how == .page_up);
+            const row = if (up) cur_row -| step else @min(cur_row + step, texts.len - 1);
+            break :blk .{ .row = row, .byte = editor_motion.offsetForGoal(texts[row], rowLine(texts[row]), sel.goal, map) };
+        },
+        .doc_start => .{ .row = 0, .byte = 0 },
+        .doc_end => .{ .row = texts.len - 1, .byte = texts[texts.len - 1].len },
+        // **괄호 짝은 비교 뷰에 없다**(§3.9c). 문법을 아는 축이 아니고, 표에도 없다.
+        .bracket_match => return false,
+    };
+
+    if (!keeps_goal) sel.clearGoal();
+    if (extend) {
+        // **anchor 를 두고 focus 만 옮긴다** — 마우스로 잡은 낱말 단위(`kind`)도 그대로 산다.
+        sel.focus = next;
+    } else {
+        const goal = sel.goal;
+        sel = maru.session.editor.selection.RowSelection.at(next);
+        sel.goal = goal;
+    }
+    term.rt.editor_diff_selection = .{ .side = side, .sel = sel };
+    scrollDiffCaretIntoView(self, term, next.row, texts.len, rows);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 한 행을 한 줄로 본 `Line`. 줄바꿈은 **`.none`** 이다 — 위 `diffMove` doc 참조.
+fn rowLine(text: []const u8) maru.session.editor.line_index.Line {
+    return .{ .start = 0, .end_with_ending = text.len, .ending = .none };
+}
+
+/// 비교 뷰가 지금 그리는 **행 수**. 단일 편집기의 `pageRows` 와 같은 근거로 **렌더가 굳힌 값**을
+/// 쓴다 — 여기서 다시 세면 화면과 갈려 비교 뷰만 한 행씩 어긋난다. 아직 한 프레임도 안 그렸으면
+/// 1 로 떨어진다(0 으로 두면 PageDown 이 죽은 키가 된다).
+fn diffPageRows(term: *Term, side: DiffSide) usize {
+    return @max(1, if (side == .right) term.rt.editor_diff_hit_len_right else term.rt.editor_diff_hit_len_left);
+}
+
+/// caret 이 화면 밖으로 나가면 뷰가 따라간다. 세로 상한은 `scrollLines` 가 쓰는 `maxFirstLine`
+/// **하나**를 쓴다 — 두 곳에서 세면 마지막 화면이 비는 자리가 갈린다.
+fn scrollDiffCaretIntoView(self: *AppSession, term: *Term, row: usize, total: usize, visible: usize) void {
+    const first = term.rt.editor_first_line;
+    var want = first;
+    if (row < first) {
+        want = row;
+    } else if (row >= first + visible) {
+        want = row + 1 - visible;
+    }
+    const max_first = maxFirstLine(total, visible, term);
+    want = @min(want, max_first);
+    if (want != first) {
+        term.rt.editor_first_line = want;
+        self.metal_dirty = true;
+    }
+}
+
+pub fn buildDiffCarets(self: *AppSession, term: *Term, side: DiffSide) ?[]const []const u32 {
+    const sel = term.rt.editor_diff_selection orelse return null;
+    if (sel.side != side) return null; // 반대 열에는 커서가 없다
+    const st = term.rt.editor_diff orelse return null;
+    if (st.view != .compare) return null;
+    const texts = if (side == .right) st.right_texts else st.left_texts;
+    if (texts.len == 0) return null;
+    if (sel.sel.focus.row >= texts.len) return null;
+
+    const rows_field = if (side == .right) &term.rt.editor_diff_caret_rows_right else &term.rt.editor_diff_caret_rows_left;
+    if (rows_field.len < texts.len) {
+        const grown = self.allocator.alloc([]const u32, texts.len) catch return null;
+        if (rows_field.len > 0) self.allocator.free(rows_field.*);
+        rows_field.* = grown;
+    }
+    const rows = rows_field.*[0..texts.len];
+    for (rows) |*r| r.* = &.{};
+
+    // **byte 도 자른다.** 행이 짧아진 프레임에서 옛 byte 를 그대로 쓰면 렌더가 줄 밖 열을 집는다.
+    const byte_field = if (side == .right) &term.rt.editor_diff_caret_byte_right else &term.rt.editor_diff_caret_byte_left;
+    byte_field[0] = @intCast(@min(sel.sel.focus.byte, texts[sel.sel.focus.row].len));
+    rows[sel.sel.focus.row] = byte_field[0..1];
+    return rows;
+}
+
 pub fn buildDiffSelectionMarksForTest(self: *AppSession, term: *Term, side: DiffSide) ?[]const []const chrome_editor.frame.Mark {
     return buildDiffSelectionMarks(self, term, side);
 }
@@ -6558,6 +6725,10 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_diff_marks_right.len > 0) self.allocator.free(term.rt.editor_diff_marks_right);
     if (term.rt.editor_diff_mark_buf_left.len > 0) self.allocator.free(term.rt.editor_diff_mark_buf_left);
     if (term.rt.editor_diff_mark_buf_right.len > 0) self.allocator.free(term.rt.editor_diff_mark_buf_right);
+    if (term.rt.editor_diff_caret_rows_left.len > 0) self.allocator.free(term.rt.editor_diff_caret_rows_left);
+    if (term.rt.editor_diff_caret_rows_right.len > 0) self.allocator.free(term.rt.editor_diff_caret_rows_right);
+    term.rt.editor_diff_caret_rows_left = &.{};
+    term.rt.editor_diff_caret_rows_right = &.{};
     term.rt.editor_diff_hit_rows_left = &.{};
     term.rt.editor_diff_hit_rows_right = &.{};
     term.rt.editor_diff_marks_left = &.{};
@@ -7495,6 +7666,8 @@ test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하
         .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 2 },
         0,
         0,
+        false, // caret_visible — 이 판정자는 높이만 잰다
+        .bar,
         false,
         chrome_editor.frame.default_tab_width,
         .{ .x = 0, .y = 0, .w = 800, .h = 300 },

@@ -1016,6 +1016,12 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
             .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands, .marks = &right_marks, .selection_marks = if (selecting) &right_selection else null },
         // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
         .first_line = if (scrolled) 40 else 0,
+        // **비교 골든은 커서를 끈다** — 제품은 비교 뷰에 caret 을 늘 세우지만, 단일 편집기 쪽이
+        // 이미 정한 규율이 여기에도 적용된다: caret 시나리오가 아닌 골든까지 커서를 켜면 그
+        // 캡처들이 깜빡임을 함께 떠안는다. 자리(`Side.carets`)는 안 채우므로 값은 무의미하지만,
+        // `Props` 가 기본값을 안 두는 이유(두 번째 출처 금지)대로 **명시한다**.
+        .caret_visible = false,
+        .caret_shape = .bar,
         .tab_width = lab_tab_width,
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)

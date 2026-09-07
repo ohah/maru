@@ -14381,6 +14381,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-phase",
         "Validate baseline signed leaf transaction ordering and cleanup",
     );
+    const session_host_release_adapter_candidate_upgrade_phase_step = b.step(
+        "test-session-host-release-adapter-candidate-upgrade-phase",
+        "Validate upgrade signed leaf transaction ordering and cleanup",
+    );
     const session_host_release_adapter_candidate_baseline_product_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-product",
         "Validate baseline signed product ownership and cleanup",
@@ -14652,6 +14656,27 @@ pub fn build(b: *std.Build) void {
         run_baseline_phase_tests.addArg("--maru-expect-tests=4");
         run_baseline_phase_tests.setCwd(b.path("."));
         session_host_release_adapter_candidate_baseline_phase_step.dependOn(&run_baseline_phase_tests.step);
+
+        const upgrade_phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_phase.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const upgrade_phase_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_phase.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{
+                    .name = "release_adapter_candidate_upgrade_phase",
+                    .module = upgrade_phase_mod,
+                }},
+            }),
+        });
+        const run_upgrade_phase_tests = b.addRunArtifact(upgrade_phase_tests);
+        run_upgrade_phase_tests.addArg("--maru-expect-tests=4");
+        run_upgrade_phase_tests.setCwd(b.path("."));
+        session_host_release_adapter_candidate_upgrade_phase_step.dependOn(&run_upgrade_phase_tests.step);
 
         const baseline_product_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_baseline_product.zig"),
@@ -16020,9 +16045,9 @@ pub fn build(b: *std.Build) void {
     // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
     // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
     //
-    // 166 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+    // 170 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
     // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-    const ra_all_expected_tests: usize = 166;
+    const ra_all_expected_tests: usize = 170;
     const ra_all_step = b.step(
         "test-session-host-release-adapter-all",
         "Run the posix session-host release adapter judges from one binary per optimize mode",

@@ -4230,6 +4230,49 @@ checkpoint/candidate residue를 canonical diagnostic JSON으로 남긴다. 이 �
 queue/network 또는 attestation 발급 시간은 아니다. GitHub-issued latency와 frozen signed U5 E2E는 `release.yml` 전체 배선 뒤 isolated
 시험 tag가 소유한다.
 
+### 11.82 validator command stage의 fresh-process 결속 경계
+
+`draft_authoring`, `aggregate_prepare`, `aggregate_finalize`, `publication`, `aggregate_cleanup`을 `release.yml`의 shell이
+validator exit code와 stderr 문자열로 직접 분류하지 않는다. `maru-session-host-release-workflow-command` 제품 executable은
+`run <checkpoint-root> <root-identity> <validator-argv...>`라는 닫힌 command 하나만 제공한다. 첫 validator argument는 기존
+`release_adapter_contract`의 exact 다섯 command 중 하나여야 하며, 그 command 자체가 §11.76의 `Invocation`과 stage를 유도한다.
+caller는 stage, reducer result, checkpoint leaf/index, validator executable pathname 또는 timeout을 별도 입력하지 않는다.
+validator executable은 current `GITHUB_WORKSPACE`에서 유도한 고정
+`zig-out/bin/maru-session-host-release-validator` pathname만 허용한다.
+
+제품은 먼저 validator argv를 기존 executable bootstrap으로 열어 current protected context·runner·GitHub CLI authority와 결속하고,
+fixed workspace validator를 no-follow regular executable로 pin한다. network stage의 exact credential과 stage 3의 canonical
+`GITHUB_WORKSPACE`도 admission 전에 검증한다. 그 뒤 owner가 expected checkpoint를 reopen하고 exact stage admission을 완료해야만
+validator를 별도 process로 한 번만 실행한다. held validator의 identity·mode·size·digest와 workspace parent를 child spawn 직전과
+reap 직후 다시 검증하며 drift는 보수적인 terminal 결과다. child argv는 contract가 먼저 canonical parse한 bounded 사본이고, environment는 current
+protected workflow context와 GitHub-hosted runner authority의 닫힌 이름만 새로 만든다. stage 3에는 exact `GITHUB_WORKSPACE`를,
+`draft_authoring`, `publication`, `aggregate_cleanup`에만 exact `GH_TOKEN`을 추가하며 credential-free aggregate 두 stage에는 token을
+전달하지 않는다. ambient `PATH`, `HOME`, Apple secret, checkpoint identity와
+`GITHUB_OUTPUT`은 child에 전달하지 않는다. stdout/stderr는 bounded 분리 capture하고 exact exit+stderr tuple과 stream EOF를 기존
+stage별 outcome vocabulary로 분류한다. spawn·capture·timeout·unknown tuple은 `cleanup_failed`이고,
+`prepare-candidate`의 exact `20/local_failure`만 `failed_before_remote_mutation`이다. owner가 이 결과를 같은 stage의 durable leaf로
+게시한 뒤에만 wrapper가 종료한다. 최종 state가 해당 stage의 `succeeded`일 때만 exit 0이고 모든 terminal 결과는 exit 1이며,
+stdout/stderr와 `GITHUB_OUTPUT`에는 아무 값도 쓰지 않는다.
+
+command argv의 context/tag/repository, checkout 전 pin한 GitHub CLI path/digest, Zig path/size/digest와 모든 fixed artifact pathname은
+기존 validator bootstrap이 다시 검증한다. bridge는 그 의미 검증을 복제하지 않으며, caller가 제출한 argv를 stage 권위로 쓰기 전에
+closed bootstrap과 current context에 교차 결속한다. admission 전 argv/environment/workspace/validator 오류는 checkpoint mutation 0이고,
+admission 뒤 child 또는 관측 실패는 terminal leaf를 exact once 게시한다. terminal/replay/skip/reverse invocation은 child 0회다.
+macOS pathname exec는 검증 descriptor 자체를 실행하는 API가 아니므로, 같은 inode·size·bytes로 되돌린 transient 교체 이력까지
+관측한다고 주장하지 않는다. protected fresh GitHub-hosted runner에서 repository code와 같은 trust domain만 child를 만들 수 있다는
+경계 안에서 pre/post identity fence를 사용하며, 이보다 강한 적대적 local-user 실행 모델은 이 공식 release CI 계약 밖이다.
+
+focused gate `test-session-host-release-workflow-command-cli`는 다섯 command의 exact stage/result vocabulary, credential-bearing 세 stage와
+credential-free 두 stage의 child environment 선택, closed argv와 fixed validator pathname을 unit으로 검증한다. unknown/noisy tuple의
+보수적 결과는 observation unit이, exec failure·timeout·exact environment와 FD 회수는 기존 bounded-process gate가, replay·skip·reverse와
+root/context drift의 child 0은 기존 owner gate가 각각 소유한다. 이 gate의 actual wrapper→synthetic-validator chain은 Debug·ReleaseFast의
+harness-owned private root에서 다섯 성공 stage와 stage-3 terminal failure, stdout/stderr 0과 checkpoint exact-once를 검증한다.
+actual-process measurement는 synthetic validator와 fixed-size
+fixture로 각 stage의 spawn→observe→checkpoint wall-clock median·p95·max, failure count, 다섯 상이한 child PID, parent FD delta와 residue를
+canonical diagnostic JSON으로 남긴다. 실제 앱 session-host 상태·GitHub release·credential은 건드리지 않는다. 이 slice는 다섯
+command process를 닫지만 두 action output과 fixed artifact pathname을 조립하는 `release.yml` 전체 배선, GitHub-issued timing과 frozen
+signed U5 E2E는 후속 live workflow caller가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

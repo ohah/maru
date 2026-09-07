@@ -1691,6 +1691,15 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
             _ = editor_ops.dragBodySelection(self, 3, x, y); // 안 끌고 뗀다 → 커서 추가
         }
         break :blk true;
+    } else if (std.mem.eql(u8, op, "key_fold_all")) blk: {
+        // **`⌥⌘0` 이 접기를 부르는지 화면으로 본다**(§접기 다섯의 chord). `handleKeyEvent` 를 태워
+        // **전역 표를 실제로 지나간다** — 판정자는 resolver 와 액션을 따로 재지만, 접힘이 화면에서
+        // 실제로 줄을 감추는지는 이것만 답한다.
+        _ = self.handleKeyEvent(.{
+            .key = .{ .char = '0' },
+            .modifiers = .{ .command = true, .option = true },
+        }) catch {};
+        break :blk true;
     } else if (std.mem.eql(u8, op, "opt_word")) blk: {
         // **`⌥더블클릭` 이 나머지 커서를 남기고 primary 만 낱말로 넓히는지 화면으로 본다**(§3.2d).
         // `opt_click` 과 같은 세 자리를 찍어 커서 셋을 만든 뒤, **마지막 자리에서 `⌥더블클릭`** 한다 —

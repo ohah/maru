@@ -1433,7 +1433,7 @@ runner나 live checkpoint/profile owner가 아니므로 frozen U5 제품 실행�
 
 U5 upgrade-B 격리 workspace와 signed child 경계는 `release_adapter_candidate_upgrade_workspace.zig`가 descriptor-owned private root에서
 두 session HOME·두 leaf·aggregate와 predecessor executable의 exact absent path만 유도한다. 봉인된 `0400` predecessor download는
-`release_adapter_candidate_upgrade_predecessor.zig`가 backing authority를 전후 재검증하며 별도 `0500` single-link executable로
+`release_adapter_candidate_upgrade_executable.zig`가 predecessor `0400`과 current `0600` backing authority를 전후 재검증하며 각각 별도 `0500` single-link executable로
 bounded copy하고 source/destination identity·size·SHA를 결속한다. `release_adapter_candidate_upgrade_child.zig`는 candidate와
 authenticated predecessor의 backing owner에서 이 실행 사본/current executable·trusted UUID·`1 | near-max`를 다시 유도해 held source
 cwd와 shared deadline으로 기존 signed harness를 실행한다. focused gate는 caller scalar/path 재제출 0, copy I/O fail-index,

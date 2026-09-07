@@ -295,6 +295,15 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
     //
     // **오른쪽이다.** 왼쪽은 git 이 준 HEAD 판이라 열려 있는 문서가 아니고, JetBrains 도 편집
     // 가능한 쪽을 오른쪽에 둔다. 행 배열이 비면 세울 자리가 없다.
+    //
+    // **이 게이트는 방어일 뿐 판정할 수 없다**(변이 4·5회차 C52·C46). 짝맞춤 빈 행이 들어차므로
+    // 좌우 길이가 늘 같고, 비교가 선 상태에서 `right_texts.len > 0` 은 항상 참이다 — 조건을
+    // `left_texts` 로 바꾸거나 아예 없애도 답이 같다. 조건부 단언을 두면 한 번도 안 도는 항진
+    // 판정자가 되므로(DCARET13 에서 그렇게 썼다가 걷어냈다) 여기 근거만 남긴다.
+    //
+    // **`invalidate` 가 먼저 선택을 버린다**(그래서 C65 — `if (== null)` 가드도 동치다). 그럼에도
+    // 무조건 덮는 형태로 두는 이유는 이 자리가 「비교가 설 때마다 caret 이 선다」를 말해야 하고,
+    // 그 성질이 앞 함수의 구현에 기대면 안 되기 때문이다.
     if (st.right_texts.len > 0) {
         term.rt.editor_diff_selection = .{
             .side = .right,

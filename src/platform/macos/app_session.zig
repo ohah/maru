@@ -76836,6 +76836,18 @@ test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대�
     try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
     // 목록도 그대로다 — 되풀이가 상태를 갉아먹지 않았다.
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
+    // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
+    // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
+    {
+        var quiet = GalleryWait.start(session.io);
+        while (quiet.pending() and
+            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+        {
+            _ = session.tick() catch {};
+        }
+    }
 }
 
 test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따른다 (적대적 E3)" {
@@ -76972,6 +76984,18 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
     _ = session.tick() catch {};
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows);
+
+    // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
+    // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
+    // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
+    {
+        var quiet = GalleryWait.start(session.io);
+        while (quiet.pending() and
+            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+        {
+            _ = session.tick() catch {};
+        }
+    }
 }
 
 test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {

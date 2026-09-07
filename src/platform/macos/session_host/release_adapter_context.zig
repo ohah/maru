@@ -130,13 +130,32 @@ pub fn parse(entries: []const Entry) Error!Context {
         error.InvalidBuild,
     ) catch return error.InvalidBuild;
 
-    return .{
+    const result: Context = .{
         .repository = .{ .id = repository_id, .owner = "ohah", .name = "maru" },
         .tag = tag,
         .source_commit = source_commit,
         .build = .{ .workflow_ref = workflow_ref, .run_id = run_id, .run_attempt = run_attempt },
         .protected_tag = true,
     };
+    try validateTrusted(result);
+    return result;
+}
+
+/// Revalidates a retained typed context without inventing a second release trust policy.
+pub fn validateTrusted(context: Context) Error!void {
+    if (context.repository.id == 0 or !std.mem.eql(u8, context.repository.owner, "ohah") or
+        !std.mem.eql(u8, context.repository.name, "maru")) return error.InvalidRepository;
+    if (!identity.canonicalTag(context.tag)) return error.InvalidRef;
+    if (!identity.lowerHex(context.source_commit, 40)) return error.InvalidSource;
+    if (context.build.run_id == 0 or context.build.run_attempt == 0) return error.InvalidBuild;
+    var expected_workflow: [max_value_bytes]u8 = undefined;
+    const expected = std.fmt.bufPrint(
+        &expected_workflow,
+        "ohah/maru/.github/workflows/release.yml@refs/tags/{s}",
+        .{context.tag},
+    ) catch return error.InvalidWorkflow;
+    if (!std.mem.eql(u8, context.build.workflow_ref, expected)) return error.InvalidWorkflow;
+    if (!context.protected_tag) return error.UnprotectedRef;
 }
 
 pub fn bindManifest(context: Context, manifest: release_manifest.Manifest) Error!void {

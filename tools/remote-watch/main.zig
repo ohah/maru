@@ -27,7 +27,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 6\n";
+pub const version_line = "maru-remote-watch 7\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
-    const root = args.next() orelse return exitWith(exit_unsupported);
+    const root = args.next() orelse exitUnsupportedWhy("no root argument");
 
     // **멱등 확인용 진입점.** 설치 쪽은 「이미 있고 **돌아가는가**」를 물어야 한다 — 파일 존재만 보면
     // 아키텍처가 틀린 바이너리나 잘린 파일을 「설치됨」으로 읽는다(그러면 감시가 조용히 안 된다).
@@ -128,9 +128,9 @@ pub fn main(init: std.process.Init) !void {
     // ⚠️ **실패를 삼키지 않는다**(적대적 검증 2026-09-04 15 회차). `collect` 는 못 여는 디렉터리를
     // 건너뛰는 것과 별개로 OOM 이면 **도중에** 멈춘다 — 그때 `catch {}` 로 넘어가면 남은 절반을 「전부」
     // 로 알고 무장해, §6 이 「최악」이라 못 박은 조용한 반쪽 감시가 된다. 못 하면 못 한다고 말한다.
-    collect(io, init.gpa, root, &dirs) catch return exitWith(exit_unsupported);
+    collect(io, init.gpa, root, &dirs) catch exitUnsupportedWhy("collect failed (out of memory)");
     // **0 개는 「볼 것이 없다」가 아니라 「못 봤다」다** — 루트를 못 열었다는 뜻이라 폴백해야 한다.
-    if (dirs.items.len == 0) return exitWith(exit_unsupported);
+    if (dirs.items.len == 0) exitUnsupportedWhy("root directory could not be opened");
     // ⚠️ **「닿았다」로 묻는다 — 「넘었다」로 물으면 영원히 거짓이다**(적대적 검증 2026-09-04 12 회차).
     // `collect` 는 `>= max_dirs` 에서 «멈추므로» 이 값은 `max_dirs` 를 절대 넘지 않는다. 앞 판은 `>` 로
     // 물어서 이 보고가 **죽은 코드**였고, 그래서 상한을 넘는 저장소가 §6 이 「최악」이라 못 박은 상태 —
@@ -146,12 +146,32 @@ pub fn main(init: std.process.Init) !void {
         // **폴링이다**(RW7c). kqueue 는 파일 «편집» 을 안 알리고 디렉터리마다 fd 를 써서 한도에도
         // 걸린다(§8.6 ①). 그래서 이 갈래는 저쪽에서 git 을 돌려 다이제스트를 비교한다.
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly => try watchPoll(init.gpa, root, git_prefix.items),
-        else => return exitWith(exit_unsupported),
+        else => exitUnsupportedWhy("this operating system has no watch backend"),
     }
 }
 
 fn exitWith(code: u8) noreturn {
     std.process.exit(code);
+}
+
+/// **`exit=3` 이 왜 났는지 남긴다.** 이 바이너리의 stderr 는 ssh 를 타고 GUI 의 `app.log` 로 간다
+/// (`spawnRemoteWatch` 는 자식의 fd 2 를 갈아끼우지 않는다 — 부모 것을 그대로 물려준다).
+///
+/// 왜 필요한가: `exit_unsupported` 는 **서로 완전히 다른 실패들**을 한 코드로 뭉갠다 — 루트 인자 없음
+/// / 수집 실패 / 루트를 못 엶 / 감시 API 못 엶 / git 앞머리 없음 / 첫 다이제스트 실패 / OS 미지원.
+/// 앱은 그중 무엇이든 `isPermanent` 로 읽어 **영구 포기**(`.gave_up` — 흡수 상태라 폴더를 접었다 펴도
+/// 안 풀린다)로 가는데, 화면에는 「이 원격은 변경을 감시하지 못합니다」 한 줄만 뜬다.
+///
+/// 2026-09-07 실측: 같은 저장소·같은 인자로 어떤 때는 15 초 넘게 정상 감시하고 어떤 때는 즉시 3 으로
+/// 나갔다. 가설 넷(저장소 아님 · git 앞머리 토큰 · 30 초 마감 · 디렉터리 상한)을 세워 **넷 다 실측에
+/// 반증**됐고, 그 사이 좁힐 수단이 하나도 없었다 — stderr 에 한 글자도 없기 때문이다.
+fn exitUnsupportedWhy(why: []const u8) noreturn {
+    const sys = std.posix.system;
+    const head = "maru-remote-watch: unsupported - ";
+    _ = sys.write(2, head.ptr, head.len);
+    _ = sys.write(2, why.ptr, why.len);
+    _ = sys.write(2, "\n", 1);
+    exitWith(exit_unsupported);
 }
 
 // ── 목록 모드(RF2) ──────────────────────────────────────────────────────────────────────────────
@@ -596,7 +616,7 @@ fn announce() bool {
 fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8, dirs: *std.ArrayList([]u8)) !void {
     const linux = std.os.linux;
     const ifd: i32 = @intCast(linux.inotify_init1(0));
-    if (ifd < 0) return exitWith(exit_unsupported);
+    if (ifd < 0) exitUnsupportedWhy("could not open the inotify instance");
     var fds = [_]std.posix.pollfd{
         .{ .fd = ifd, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // 채널이 끊기면 여기서 걸린다
@@ -624,8 +644,8 @@ fn watchLinux(io: std.Io, gpa: std.mem.Allocator, root: []const u8, git_prefix: 
         if (sawDirEvent(buf[0..@intCast(n)])) {
             for (dirs.items) |d| gpa.free(d);
             dirs.clearRetainingCapacity();
-            collect(io, gpa, root, dirs) catch return exitWith(exit_unsupported);
-            if (dirs.items.len == 0) return exitWith(exit_unsupported);
+            collect(io, gpa, root, dirs) catch exitUnsupportedWhy("rescan collect failed (out of memory)");
+            if (dirs.items.len == 0) exitUnsupportedWhy("rescan found no directories");
             if (dirs.items.len >= max_dirs) {
                 _ = std.c.close(ifd);
                 return watchPoll(gpa, root, git_prefix); // 재무장 중에 넘었다 — 같은 이유로 폴링이다
@@ -849,10 +869,10 @@ const Digest = struct { state: RunResult, value: u64 = 0 };
 /// ⚠️ 다이제스트는 **이 프로세스 안에서만** 산다. 밖으로 나가는 것은 여전히 `change` 한 줄이라
 /// 파싱 계약이 두 벌이 되지 않는다(계약 §2 · §10).
 fn watchPoll(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8) !void {
-    if (git_prefix.len == 0) return exitWith(exit_unsupported); // 앞머리가 없으면 git 을 못 돌린다
+    if (git_prefix.len == 0) exitUnsupportedWhy("no git prefix - polling needs one"); // 앞머리가 없으면 git 을 못 돌린다
     const first = digest(gpa, root, git_prefix);
     if (first.state == .channel_closed) return;
-    if (first.state != .ok) return exitWith(exit_unsupported);
+    if (first.state != .ok) exitUnsupportedWhy("first git digest read failed");
     var last = first.value;
 
     var fds = [_]std.posix.pollfd{

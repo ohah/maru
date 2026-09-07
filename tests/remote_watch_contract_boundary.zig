@@ -47,7 +47,14 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, code, "poll_tick_ms: c_int = 250") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "poll_interval_ns: i128 = 5 * std.time.ns_per_s") != null);
     // git 앞머리가 없으면 폴링을 못 한다 — 조용히 멈춰 있지 말고 말해야 한다.
-    try std.testing.expect(std.mem.indexOf(u8, poll_body, "git_prefix.len == 0) return exitWith(exit_unsupported)") != null);
+    //
+    // ⚠️ **사유까지 남겨야 한다**(2026-09-07). 예전에는 `exitWith(exit_unsupported)` 를 그대로 물었는데,
+    // 그 코드 하나가 서로 다른 실패 아홉을 뭉개고 stderr 에는 한 글자도 안 남아 「이 원격은 변경을
+    // 감시하지 못합니다」의 원인을 좁힐 수단이 없었다 — 그 자리에서 가설 넷이 실측에 반증됐다.
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "git_prefix.len == 0) exitUnsupportedWhy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "first.state != .ok) exitUnsupportedWhy(") != null);
+    // 사유 없는 종료가 되살아나면 빨개진다 — 그 침묵이 정확히 이 계약이 막는 것이다.
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "exitWith(exit_unsupported)") == null);
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
     // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
     const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 2048);

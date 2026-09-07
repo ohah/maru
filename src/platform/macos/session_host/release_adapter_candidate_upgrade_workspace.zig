@@ -28,6 +28,11 @@ pub const Workspace = struct {
         return self.paths();
     }
 
+    pub fn directoryDescriptor(self: *@This()) !std.c.fd_t {
+        if (self.owner != self) return error.InvalidOwner;
+        return self.root.rootDirectoryDescriptor();
+    }
+
     pub fn cleanup(self: *@This()) !void {
         if (self.owner != self) return error.InvalidOwner;
         self.root.cleanup() catch return error.CleanupFailed;

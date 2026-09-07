@@ -4198,6 +4198,38 @@ CLI가 owner API만 호출하는지 고정한다. fixture는 실제 앱 session-
 credential을 읽거나 수정하지 않는다. 이 slice는 trusted initial root와 identity handoff만 닫으며 candidate pinning, 여덟 live
 stage의 `release.yml` 배선, GitHub-issued timing과 frozen signed U5 E2E는 후속이다.
 
+### 11.81 signed candidate input의 fresh-process pinning 경계
+
+`candidate_pinning`은 이전 step의 열린 descriptor가 다음 GitHub Actions step까지 살아 있다고 가정하지 않는다. 각 step은 독립
+process이므로 stage 1이 증명하는 것은 **그 시점의** signed candidate inventory와 bytes이고, 바로 다음
+`candidate_attestation`이 같은 canonical pathname을 새 descriptor로 다시 pin해 GitHub attestation subject와 결속한다. durable
+checkpoint는 이 두 관측 사이의 실행 순서만 증명하며 파일 잠금이나 pathname 불변성을 대신하지 않는다.
+
+`maru-session-host-release-workflow-candidate-inputs` 제품 executable은
+`pin <checkpoint-root> <root-identity> <candidate-directory>`라는 닫힌 command 하나만 제공한다. candidate directory는 canonical
+absolute pathname이고 basename은 현재 protected tag에서 유도한 `session-host-candidate-<version>`과 exact하게 일치해야 한다.
+directory inventory는 `Maru.app`, `Maru-<version>-universal.dmg`, `maru-session-host-<version>` exact 세 entry뿐이며 symlink,
+hardlink, loose-mode directory, foreign·missing entry를 허용하지 않는다. 제품은 DMG, frozen executable과
+`Maru.app/Contents/MacOS/maru-macos-app`을 기존 `release_adapter_files.PinnedReleaseFile`로 no-follow pin하고 두 executable의
+실행 가능성, 세 distinct vnode, size와 SHA-256, pathname·parent identity를 고정한다. frozen과 app main은 size·SHA-256이 exact
+일치해야 하며 세 파일과 directory inventory를 다시 검증한다. caller가 basename, digest, size, mode,
+checkpoint stage/result 또는 workflow context scalar를 제출하지 않는다.
+
+실행 순서는 checkpoint `candidate_pinning` admission, candidate pin/revalidation, 동일 context/root의 `succeeded` checkpoint publication이다.
+admission 뒤 제품 검증이 실패하면 같은 stage의 `failed` leaf를 게시한 뒤 nonzero로 끝내며, admission 자체가 실패하면 candidate와
+checkpoint mutation 0이다. 성공·실패 모두 stdout/stderr와 `GITHUB_OUTPUT`에 값을 내지 않는다. 후속 action의 네 pathname/basename
+입력은 workflow가 protected tag와 `${{ github.workspace }}` 아래의 fixed candidate layout에서 동일하게 유도하며 이 executable의
+출력을 권위로 사용하지 않는다. credential, `GH_TOKEN`, Apple secret, 실제 앱 session-host registry·manifest·socket·process는 읽거나
+수정하지 않는다.
+
+focused gate `test-session-host-release-workflow-candidate-inputs-cli`는 closed argv/environment, exact inventory, 실제 별도 process의
+fresh success와 terminal failure, context/root/path/inventory/file drift, symlink·hardlink·mode·role 교환, 성공·실패 stream 0과
+checkpoint exact-once를 Debug·ReleaseFast의 harness-owned private root에서 검증한다. 같은 gate의 actual-process measurement는 별도
+candidate file 크기 표본으로 pin과 checkpoint를 반복 실행해 init 제외 stage wall-clock의 median·p95·max, failure count, FD delta,
+checkpoint/candidate residue를 canonical diagnostic JSON으로 남긴다. 이 수치는 로컬 filesystem·process spawn·SHA-256 비용이며 GitHub
+queue/network 또는 attestation 발급 시간은 아니다. GitHub-issued latency와 frozen signed U5 E2E는 `release.yml` 전체 배선 뒤 isolated
+시험 tag가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -1297,6 +1297,14 @@ U5 live workflow bootstrap은 별도 제품 executable의 closed `initialize <ro
 Debug·ReleaseFast unit과 actual-process gate가 isolated root, 단일 stdout line, stderr 0과 source-owner 단일성을 검증한다. candidate
 pinning, 실제 `release.yml` stage wiring, GitHub-issued timing과 frozen signed U5 E2E는 후속 증거다.
 
+U5 signed candidate input product는 current protected tag에서 candidate directory와 DMG/frozen 이름을 유도하고 closed three-entry
+inventory 안의 DMG·frozen·app main을 기존 no-follow file authority로 pin·재검증해 frozen↔app-main SHA를 결속한 뒤에만 `candidate_pinning` checkpoint를 전진시킨다. focused
+Debug·ReleaseFast gate는 actual fresh process의 성공/terminal failure, foreign inventory, path/context/root/file drift,
+symlink·hardlink·unsafe mode·role 교환, stdout/stderr 0과 checkpoint exact-once를 검증한다. 같은 gate는 local
+filesystem/process/SHA-256 stage wall-clock의 median·p95·max, failure count, FD delta와 residue를 canonical diagnostic JSON으로 남긴다.
+독립 Actions step 사이의 열린 descriptor 지속성은 주장하지 않으며 바로 다음 candidate attestation이 같은 pathname을 다시 pin한다.
+GitHub queue/network·attestation 발급 시간과 frozen signed U5 E2E는 후속 live workflow 증거다.
+
 U5 live workflow invocation owner는 candidate pinning product, candidate pair attestation action, `prepare-candidate`, authored pair
 attestation action, `prepare-candidate-aggregate`, `finalize-candidate-aggregate`, `resume-candidate-publication`,
 `cleanup-candidate-aggregate`의 여덟 닫힌 union tag가 stage와 exact 실행 identity를 함께 결정하게 한다. caller가 stage·command·action

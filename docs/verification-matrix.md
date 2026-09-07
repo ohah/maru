@@ -3310,9 +3310,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `PredecessorEvidenceIdentity`→`BoundPredecessor`를 결과 owner에 결속한다. caller ref/tag observation·predecessor
   scalar는 0이며, 성공 소비는 owner의 graph-wide `revalidate`만 통과한다. 실패는
   binding→identity→assets 역순 best-effort cleanup을 수행하고 불확실한 exact owner만 retry에 보존한다.
-  `test-session-host-release-adapter-profile-predecessor-authority`는 Debug·ReleaseFast에서 exact order/deadline,
-  initial/final four-field·manifest/file/asset/identity/binding drift, copied/pre-owned/alias, 모든 fail-index와
-  reverse best-effort cleanup/retry를 검증한다. signed runner, B manifest/checkpoint·live workflow·GitHub mutation·signed U5
+  `test-session-host-release-adapter-profile-predecessor-authority`는 Debug·ReleaseFast에서 exact order와 final
+  authority→deadline 순서, nested pre-owned/download-only 부분 소유, 모든 composition fail-index 및 reverse
+  best-effort cleanup/retry를 검증한다. profile four-field·manifest/file·tag-chain asset·identity·binding drift와
+  actual filesystem residue는 각각의 기존 focused leaf gate를 함께 증거로 사용한다. signed runner, B manifest/checkpoint·live workflow·GitHub mutation·signed U5
   실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,

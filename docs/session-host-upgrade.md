@@ -4144,6 +4144,34 @@ fixture는 harness-owned 임시 root만 사용하며 실제 앱 session-host 상
 slice는 stage 2를 하나의 표현 가능한 Actions step으로 닫지만 `release.yml`의 checkpoint/argv/output wiring, 실제 GitHub attestation
 발급과 frozen signed U5 E2E를 완료하지 않는다.
 
+### 11.79 action stage의 fresh-process checkpoint bridge
+
+GitHub composite action은 Zig의 process-local `Executor` callback을 호출할 수 없고 payload 전후의 shell도 서로 다른 process다.
+`maru-session-host-release-workflow-checkpoint` 제품 executable은 이 간극만 소유하며 `admit`과 `commit` 두 command를 제공한다.
+두 command는 checkpoint root의 canonical absolute pathname, 최초 trusted owner가 봉인한 `maru-root-v1` identity token과
+compile-time stage 이름만 받는다. `commit`만 그 stage의 닫힌 `succeeded|failed` result를 추가로 받는다. leaf pathname,
+checkpoint index, 이전/다음 state, workflow context scalar, success boolean, action path, bundle pathname 또는 credential은 argv로
+받지 않는다. executable은 `release_adapter_context.required_names`의 현재 GitHub 환경만 exact하게 읽어 protected tag workflow
+context를 다시 만들고, expected root identity로 root를 연 뒤 `admit` 또는 `advance`를 exact once 호출한다. stdout과
+`GITHUB_OUTPUT`에는 아무것도 쓰지 않는다.
+
+candidate/authored live wrapper는 checkpoint root와 identity 두 값을 추가 입력으로 받고 고정된
+`${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint`만 실행한다. 순서는 `admit -> payload -> commit`이며
+payload는 `continue-on-error`로 관찰하되 그 결과를 성공 권위로 사용하지 않는다. payload outcome이 exact `success`일 때만
+`succeeded`, exact `failure`일 때만 `failed`를 commit한다. `cancelled`, `skipped` 또는 알 수 없는 값은 commit을 시도하지 않고
+wrapper를 실패시킨다. 이는 취소 중 shell 실행을 성공 증거로 착각하지 않기 위한 fail-closed 경계다. payload가 실패했어도
+`failed` checkpoint를 먼저 durable publish한 뒤 wrapper가 nonzero로 끝난다. payload가 성공했으면 `succeeded` checkpoint publish가
+끝난 뒤에만 payload의 두 bundle pathname을 wrapper output으로 함께 내보낸다. admission/commit 실패, root/context drift,
+중복·역순 stage와 부분 output은 모두 wrapper 실패다.
+
+focused gate `test-session-host-release-workflow-checkpoint-cli`는 제품 executable의 closed argv/environment, canonical stage/result,
+실제 fresh-process admit/commit, context/root/leaf drift, skip/replay/reverse와 stdout 0을 Debug·ReleaseFast의 harness-owned private
+root에서 검증한다. candidate/authored action source gate는 두 wrapper의 exact 입력, 고정 executable pathname, admit→payload→commit 순서,
+payload exact once, failure checkpoint 뒤 nonzero와 commit 뒤 output publication을 정적으로 검증한다. fixture는
+실제 앱 session-host 상태·GitHub release·credential을 읽거나 수정하지 않는다. 이 bridge는 두 action stage의 checkpoint 결속을
+닫지만 candidate-pinning initial/root 생성, 여섯 command/product stage, `release.yml` 전체 wiring, GitHub-issued timing과 frozen
+signed U5 E2E는 별도 live workflow caller가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

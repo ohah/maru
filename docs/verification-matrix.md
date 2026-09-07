@@ -1060,6 +1060,16 @@ wrapper를 가리킨다. 따라서 후속 checkpoint bridge가 payload의 닫힌
 두 subject를 전후로 SHA-256 하는 로컬 stage 비용이며 `actions/attest`의 GitHub OIDC·service 왕복은 포함하지 않는다. 후자는 실제
 workflow 배선 뒤 GitHub-hosted runner 표본으로 별도 기록한다.
 
+U5 action-stage checkpoint bridge는 제품 `maru-session-host-release-workflow-checkpoint` executable의 closed
+`admit|commit` command로 candidate/authored live wrapper의 payload 전후를 durable reducer leaf에 결속한다. focused
+`test-session-host-release-workflow-checkpoint-cli`는 protected GitHub context를 executable 자신의 closed environment reader로
+재구성하고 expected root identity로 actual private root를 여는 fresh-process chain, argv/environment/context/root/leaf drift,
+skip·reverse·replay와 stdout 0을 Debug·ReleaseFast에서 검증한다. 두 action gate는 wrapper가 `admit -> payload -> commit` 순서와
+고정 executable pathname을 지키고, exact payload `success|failure`만 reducer result로 바꾸며, failed checkpoint 뒤 nonzero와
+succeeded checkpoint 뒤 pair output publication을 보장하는지 검증한다. cancelled/skipped/unknown outcome, checkpoint 실패와 부분
+output은 fail-closed다. fixture는 harness-owned 임시 root와 stub payload/bridge만 사용한다. initial/root 생성, 여섯 command/product
+stage, 실제 `release.yml` wiring과 GitHub OIDC/service latency는 아직 후속 증거다.
+
 U5 same-run candidate bundle 소비는 기존 final-address `CandidateAttestation` owner가 맡는다.
 `test-session-host-release-adapter-candidate-attestation`은 candidate DMG/frozen과 두 local bundle의 no-follow pin·pairwise distinct
 identity·role별 크기 상한, DMG→frozen `verifyBundleWith` exact order, token-free child, shared deadline, 각 child 전후 candidate/bundle/CLI

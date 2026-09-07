@@ -22,7 +22,7 @@ const Event = enum {
     cleanup_predecessor,
 };
 
-test "success uses one deadline and preserves all three outputs" {
+test "success uses one deadline and preserves three evidence outputs plus two copies" {
     var steps = Steps{};
     try phase.runWith(&steps);
     try std.testing.expectEqualSlices(Event, &.{

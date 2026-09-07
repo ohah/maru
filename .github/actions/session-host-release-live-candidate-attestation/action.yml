@@ -14,21 +14,65 @@ inputs:
   frozen-name:
     description: Exact frozen executable basename
     required: true
+  checkpoint-root:
+    description: Canonical absolute pathname of the private live workflow checkpoint root
+    required: true
+  checkpoint-root-identity:
+    description: Sealed maru-root-v1 identity token for the checkpoint root
+    required: true
 
 outputs:
   dmg-bundle-path:
-    value: ${{ steps.payload.outputs.dmg-bundle-path }}
+    value: ${{ steps.commit.outputs.dmg-bundle-path }}
   frozen-bundle-path:
-    value: ${{ steps.payload.outputs.frozen-bundle-path }}
+    value: ${{ steps.commit.outputs.frozen-bundle-path }}
 
 runs:
   using: composite
   steps:
+  - name: Admit candidate attestation checkpoint
+    shell: bash
+    env:
+      MARU_CHECKPOINT_ROOT: ${{ inputs.checkpoint-root }}
+      MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
+      MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
+    run: |
+      set -euo pipefail
+      "$MARU_CHECKPOINT_EXE" admit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation
+
   - name: Attest candidate pair payload
     id: payload
+    continue-on-error: true
     uses: ./.github/actions/session-host-release-attest-candidate
     with:
       dmg-path: ${{ inputs.dmg-path }}
       dmg-name: ${{ inputs.dmg-name }}
       frozen-path: ${{ inputs.frozen-path }}
       frozen-name: ${{ inputs.frozen-name }}
+
+  - name: Commit candidate attestation checkpoint
+    id: commit
+    if: always()
+    shell: bash
+    env:
+      MARU_CHECKPOINT_ROOT: ${{ inputs.checkpoint-root }}
+      MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
+      MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
+      MARU_PAYLOAD_OUTCOME: ${{ steps.payload.outcome }}
+      MARU_DMG_BUNDLE: ${{ steps.payload.outputs.dmg-bundle-path }}
+      MARU_FROZEN_BUNDLE: ${{ steps.payload.outputs.frozen-bundle-path }}
+    run: |
+      set -euo pipefail
+      case "$MARU_PAYLOAD_OUTCOME" in
+        success)
+          [[ -n "$MARU_DMG_BUNDLE" && "$MARU_DMG_BUNDLE" != *$'\n'* && "$MARU_DMG_BUNDLE" != *$'\r'* ]]
+          [[ -n "$MARU_FROZEN_BUNDLE" && "$MARU_FROZEN_BUNDLE" != *$'\n'* && "$MARU_FROZEN_BUNDLE" != *$'\r'* ]]
+          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation succeeded
+          printf 'dmg-bundle-path=%s\nfrozen-bundle-path=%s\n' "$MARU_DMG_BUNDLE" "$MARU_FROZEN_BUNDLE" >> "$GITHUB_OUTPUT"
+          ;;
+        failure)
+          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation failed
+          exit 1
+          ;;
+        *) exit 1 ;;
+      esac

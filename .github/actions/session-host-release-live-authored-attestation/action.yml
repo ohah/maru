@@ -17,18 +17,35 @@ inputs:
   manifest-name:
     description: Exact candidate manifest basename
     required: true
+  checkpoint-root:
+    description: Canonical absolute pathname of the private live workflow checkpoint root
+    required: true
+  checkpoint-root-identity:
+    description: Sealed maru-root-v1 identity token for the checkpoint root
+    required: true
 
 outputs:
   evidence-bundle-path:
-    value: ${{ steps.payload.outputs.evidence-bundle-path }}
+    value: ${{ steps.commit.outputs.evidence-bundle-path }}
   manifest-bundle-path:
-    value: ${{ steps.payload.outputs.manifest-bundle-path }}
+    value: ${{ steps.commit.outputs.manifest-bundle-path }}
 
 runs:
   using: composite
   steps:
+  - name: Admit authored attestation checkpoint
+    shell: bash
+    env:
+      MARU_CHECKPOINT_ROOT: ${{ inputs.checkpoint-root }}
+      MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
+      MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
+    run: |
+      set -euo pipefail
+      "$MARU_CHECKPOINT_EXE" admit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation
+
   - name: Attest authored pair payload
     id: payload
+    continue-on-error: true
     uses: ./.github/actions/session-host-release-attest-authored
     with:
       preparation-path: ${{ inputs.preparation-path }}
@@ -36,3 +53,30 @@ runs:
       evidence-name: ${{ inputs.evidence-name }}
       manifest-path: ${{ inputs.manifest-path }}
       manifest-name: ${{ inputs.manifest-name }}
+
+  - name: Commit authored attestation checkpoint
+    id: commit
+    if: always()
+    shell: bash
+    env:
+      MARU_CHECKPOINT_ROOT: ${{ inputs.checkpoint-root }}
+      MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
+      MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
+      MARU_PAYLOAD_OUTCOME: ${{ steps.payload.outcome }}
+      MARU_EVIDENCE_BUNDLE: ${{ steps.payload.outputs.evidence-bundle-path }}
+      MARU_MANIFEST_BUNDLE: ${{ steps.payload.outputs.manifest-bundle-path }}
+    run: |
+      set -euo pipefail
+      case "$MARU_PAYLOAD_OUTCOME" in
+        success)
+          [[ -n "$MARU_EVIDENCE_BUNDLE" && "$MARU_EVIDENCE_BUNDLE" != *$'\n'* && "$MARU_EVIDENCE_BUNDLE" != *$'\r'* ]]
+          [[ -n "$MARU_MANIFEST_BUNDLE" && "$MARU_MANIFEST_BUNDLE" != *$'\n'* && "$MARU_MANIFEST_BUNDLE" != *$'\r'* ]]
+          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation succeeded
+          printf 'evidence-bundle-path=%s\nmanifest-bundle-path=%s\n' "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" >> "$GITHUB_OUTPUT"
+          ;;
+        failure)
+          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation failed
+          exit 1
+          ;;
+        *) exit 1 ;;
+      esac

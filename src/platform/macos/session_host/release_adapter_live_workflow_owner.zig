@@ -50,7 +50,12 @@ pub const Executor = struct {
     }
 };
 
-pub const Error = checkpoint.Error || error{ InvalidExecutor, ExecutorBusy };
+pub const Error = checkpoint.Error || error{
+    ExecutorBusy,
+    InvalidActionResult,
+    InvalidExecutor,
+    InvalidExternalAction,
+};
 
 pub fn identity(invocation: Invocation) Identity {
     return switch (invocation) {
@@ -92,6 +97,42 @@ pub fn run(
     else
         observed;
     return checkpoint.advance(allocator, root, selected.stage, result, workflow);
+}
+
+/// Opens the fixed checkpoint authority inside the fresh process that precedes one composite
+/// action payload. Keeping this here preserves one production owner for checkpoint primitives.
+pub fn admitActionProcess(
+    allocator: std.mem.Allocator,
+    root_path: [:0]const u8,
+    root_identity: []const u8,
+    workflow: context.Context,
+    invocation: Invocation,
+) Error!void {
+    const selected = identity(invocation);
+    if (selected.kind != .action) return error.InvalidExternalAction;
+    var root: checkpoint.Root = .{};
+    try checkpoint.openRootExpected(&root, root_path, try checkpoint.decodeRootIdentity(root_identity));
+    defer root.deinit() catch {};
+    _ = try checkpoint.admit(allocator, &root, selected.stage, workflow);
+}
+
+/// Publishes only the two outcomes a GitHub action can prove. Command-specific cleanup and
+/// pre-mutation results stay unavailable at this boundary.
+pub fn commitActionProcess(
+    allocator: std.mem.Allocator,
+    root_path: [:0]const u8,
+    root_identity: []const u8,
+    workflow: context.Context,
+    invocation: Invocation,
+    result: phase.Result,
+) Error!void {
+    const selected = identity(invocation);
+    if (selected.kind != .action) return error.InvalidExternalAction;
+    if (result != .succeeded and result != .failed) return error.InvalidActionResult;
+    var root: checkpoint.Root = .{};
+    try checkpoint.openRootExpected(&root, root_path, try checkpoint.decodeRootIdentity(root_identity));
+    defer root.deinit() catch {};
+    _ = try checkpoint.advance(allocator, &root, selected.stage, result, workflow);
 }
 
 const CallContext = struct { executor: *Executor, identity: Identity };

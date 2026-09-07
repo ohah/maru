@@ -180,6 +180,12 @@ keybind = F4 = esc:[2J
   (`kind` 와 `foldsUnavailable`)을 갖고 있다 — 한쪽만 보고 「다섯 다」라고 적을 뻔했다.
 - **`fold`(개별 접기)는 chord 를 안 준다.** 그 액션은 없고, 개별 접기는 **gutter 화살표 클릭**이
   소유한다([시각 매핑](native-editor-visual-mapping.md) §4.1f).
+- **사용자가 config 로 다시 쓸 수 있다**(2026-09-07 적대적 검증 11·13회차). `parseKey` 가 숫자와
+  알파벳을 받고(`Alt+Cmd+0`·`Alt+Cmd+J`), `toConfigString` 이 숫자를 그대로 써서 **왕복이 성립한다** —
+  세팅 GUI 의 keybind recorder 가 그 왕복 위에 선다.
+- **팔레트가 발견성을 맡는다**(8·14·15회차). 다섯이 카탈로그에 **전부** 있어(실측) `chordForAction` 이
+  전역 표에서 chord 를 읽고, `formatChord` 가 숫자를 그대로 그린다. **모디파이어 홀드 HUD 는 이
+  경로가 아니다** — 그 배지는 chrome 요소(사이드바·탭)용이라 편집기 액션을 안 다룬다.
 - **메뉴 keyEquivalent 층을 지나야 산다.** 이 다섯은 팔레트 카탈로그에만 있고 메뉴 항목이 아니므로
   ②가 뺏을 것이 없다 — 그 층의 규칙은 [키 입력과 단축키](key-input-and-shortcuts.md) 가 소유한다.
 

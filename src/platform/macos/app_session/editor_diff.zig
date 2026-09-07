@@ -2698,4 +2698,45 @@ test "DCARET13: 왼쪽이 빈 새 파일에서도 caret 이 선다 (§4.1g 비�
     // 키도 닿는다 — 씨앗만 서고 이동이 안 되면 반쪽이다.
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
     try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // **거꾸로 — 지워진 파일에는 설 자리가 없다.** 오른쪽 배열이 비면 caret 을 세우지 않는다.
+    //    세우면 상태가 거짓말을 한다: 화면에는 없는 커서를 `editor_diff_selection` 이 든다.
+    var gone = testEntry("removed one\nremoved two\n", "");
+    fx.term.file_entry = &gone;
+    invalidate(fx.session, fx.term);
+    poll(fx.session, fx.term);
+    if (fx.term.rt.editor_diff) |st2| {
+        if (std.meta.activeTag(st2.view) == .compare and st2.right_texts.len == 0) {
+            try testing.expectEqual(@as(?@TypeOf(fx.term.rt.editor_diff_selection.?), null), fx.term.rt.editor_diff_selection);
+        }
+    }
+}
+
+test "DCARET14: 문서 끝으로 가도 마지막 화면이 비지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    const text = buf[0..w];
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    try diffCaretFixture(&fx, &entry, leaf);
+
+    // **상한은 `scrollLines` 가 쓰는 것과 같아야 한다.** 자동 스크롤이 상한을 안 지키면 끝에서
+    // 배경만 남은 화면이 나오고, 사용자는 문서가 끝났는지 뷰가 깨졌는지 알 수 없다.
+    const st = fx.term.rt.editor_diff.?;
+    const rows = fx.term.rt.editor_diff_hit_len_right;
+    try testing.expect(rows > 1);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .command = true } });
+    try testing.expectEqual(st.right_texts.len - 1, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    // 맨 위 행 + 보이는 행 수가 문서를 넘지 않는다 — 넘으면 아래가 빈다.
+    try testing.expect(fx.term.rt.editor_first_line + rows <= st.right_texts.len);
+    // 그리고 caret 은 보인다(맨 아래 행이 화면 안이다).
+    try testing.expect(fx.term.rt.editor_first_line <= st.right_texts.len - 1);
 }

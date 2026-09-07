@@ -2469,6 +2469,10 @@ pub fn remotePaneNonceFor(term: *Term, buf: *[maru.session.agent_hook_command.re
             hook_command.formatRuntimePane(&pane_buf, owned.runtime_id),
         );
     }
+    // **원격 Term 에 로컬 신원을 대신 끼우지 않는다.** 아래 조립은 GUI 가 띄운 자식(`<pid>_<surface>`)
+    // 의 것이다. 재부착 중에는 handle→runtime 이 잠깐 비는데, 그때 이 fallback 을 타면 원격 pane 이
+    // 실어 보낸 `host_…` 와 절대 안 맞는 값이 서고 — 굳으면 그 Term 은 영영 굶는다(2026-09-07 실측).
+    if (is_macos and term.surface.remote != null) return null;
     return hook_command.formatRemotePaneNonce(
         buf,
         hookInstanceToken(&inst_buf),

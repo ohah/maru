@@ -17376,7 +17376,7 @@ test "TIG2 활성 Term 종류 질의는 좁고 fail-open 이다 (선-가로채�
     try testing.expect(term_ops.activeTermIsTerminal(fx.session));
 }
 
-test "TIG6 질의는 활성 pane 의 Term 을 본다 — 첫 pane 이 아니다 (선-가로채기 게이트)" {
+test "TIG6 질의는 활성 탭·pane 의 Term 을 본다 — 첫 번째가 아니다 (선-가로채기 게이트)" {
     // **픽스처가 개념을 갈라야 한다.** pane 이 하나뿐이면 `panes[0]` 과 `panes[active_pane]` 이
     // **같은 자리**라, 활성 대신 첫 번째를 보는 변이가 살아남는다(3회차 `T19` 가 그랬다). 그러면
     // 좌우로 나눈 뒤 한쪽만 편집기일 때 게이트가 **엉뚱한 pane 을 보고** 답한다.
@@ -17421,9 +17421,35 @@ test "TIG6 질의는 활성 pane 의 Term 을 본다 — 첫 pane 이 아니다 
     active_term.kind = .editor;
     try testing.expect(!term_ops.activeTermIsTerminal(session));
 
-    // 세션 해제 전에 원래 종류로 되돌린다 — 편집기 종류로 둔 채 deinit 하면 없는 문서를 놓으려 한다.
     first_term.kind = .terminal;
     active_term.kind = .terminal;
+
+    // ⑶ **탭 축도 갈라야 한다.** 위까지는 탭이 하나뿐이라 `tabs[0]` 과 `tabs[active_tab]` 이 **같은
+    //    자리**였고, 활성 탭 대신 첫 탭을 보는 변이가 살아남았다(4회차 `T20`). 창을 여럿 쓰는
+    //    사용자에게는 **다른 탭의 Term 종류로 게이트가 답하는** 결함이다.
+    const second = try tab_ops.newTab(session);
+    _ = second;
+    try testing.expect(session.tabs.items.len >= 2);
+    try testing.expect(session.app_window.active_tab != 0); // 개념이 갈렸다
+
+    const first_tab = session.tabs.items[0];
+    const first_tab_term = first_tab.panes.items[first_tab.active_pane].terms.items[0];
+    const now_active = pane_ops.activePane(session).activeTerm();
+    try testing.expect(first_tab_term != now_active);
+
+    // 활성 탭이 편집기고 첫 탭이 터미널이면 **거짓**이어야 한다.
+    first_tab_term.kind = .terminal;
+    now_active.kind = .editor;
+    try testing.expect(!term_ops.activeTermIsTerminal(session));
+
+    // 반대(대조군).
+    first_tab_term.kind = .editor;
+    now_active.kind = .terminal;
+    try testing.expect(term_ops.activeTermIsTerminal(session));
+
+    // 세션 해제 전에 원래 종류로 되돌린다 — 편집기 종류로 둔 채 deinit 하면 없는 문서를 놓으려 한다.
+    first_tab_term.kind = .terminal;
+    now_active.kind = .terminal;
 }
 
 test "TIG3 프롬프트 점프는 편집기 Term 에 큐를 안 넣는다 (심층 방어)" {

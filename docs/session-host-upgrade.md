@@ -4365,16 +4365,17 @@ protected B tag E2E가 완료됐다는 증거가 아니다.
 
 §11.84의 production runner가 signed harness의 argv와 출력 경로를 직접 조립하지 않는다.
 `release_adapter_candidate_upgrade_workspace.zig`의 final-address owner는 기존 descriptor-owned private workspace를 재사용해
-`signed-one`·`signed-near-max`의 서로 다른 session root, 실행 전용 `predecessor-executable`, 두 canonical leaf와
+`signed-one`·`signed-near-max`의 서로 다른 session root, 실행 전용 `predecessor-executable`·`current-executable`, 두 canonical leaf와
 `upgrade-evidence.json`만 유도한다. 이 경로는
 ambient `HOME`, 실제 앱의 session-host registry·manifest·socket root나 caller가 제출한 leaf 이름에서 유도하지 않는다. 생성 시
 모든 child가 absent여야 하며, root·child pathname 교체 또는 잔여물이 있으면 foreign entry를 삭제하지 않고 실패한다.
 
-predecessor download는 불변 증거를 위해 `0400`으로 봉인되므로 직접 실행하지 않는다.
-`release_adapter_candidate_upgrade_predecessor.zig`의 final-address owner가 authenticated predecessor identity/manifest/file/download
-graph를 재검증하고, held `frozen_product_executable` bytes를 workspace의 absent leaf에 bounded streaming copy한 뒤 `0500`, 단일 link,
-size·SHA-256, parent와 source/destination inode 분리를 봉인한다. 복사 전후 source graph를 다시 검증하며 실패 시 자기 destination만
-identity-checked cleanup한다. caller `chmod`, pathname 재사용 또는 원본 download mode 변경은 허용하지 않는다.
+predecessor download는 불변 증거를 위해 `0400`, current candidate의 frozen executable은 immutable candidate file로 `0600`에
+봉인되므로 둘 다 직접 실행하지 않는다. 실행 사본 owner는 authenticated predecessor identity/manifest/file/download graph 또는
+final-address candidate identity/product graph를 각자 재검증하고, held source bytes를 workspace의 서로 다른 absent leaf에 bounded
+streaming copy한 뒤 `0500`, 단일 link, size·SHA-256, parent와 source/destination inode 분리를 봉인한다. 복사 전후 해당 source graph를
+다시 검증하며 실패 시 자기 destination만 identity-checked cleanup한다. caller `chmod`, pathname 재사용, 두 source/destination alias
+또는 원본 download/candidate mode 변경은 허용하지 않는다.
 
 `release_adapter_candidate_upgrade_child.zig`는 final-address candidate identity/product와 authenticated predecessor
 identity/manifest/file/download owner를 매 실행 전후 다시 검증하고, predecessor download set의
@@ -4384,7 +4385,7 @@ UUID, HOME 또는 output을 scalar로 다시 제출하지 않는다. kind는 `on
 `near-max`로만 매핑된다. harness는 held source directory와 하나의 남은 deadline 아래, ambient credential·Apple secret·사용자
 config 없이 실행된다. exit 0 뒤에도 양쪽 authority, toolchain과 exact private `0600` regular leaf를 다시 확인해야 성공이다.
 
-focused Debug·ReleaseFast gate는 predecessor copy의 모든 I/O 실패와 source/destination drift, 두 kind의 closed argv/environment,
+focused Debug·ReleaseFast gate는 두 executable copy의 모든 I/O 실패와 source/destination drift, 두 kind의 closed argv/environment,
 predecessor/current 방향과 output 분리, copied·pre-owned·alias owner, authority/toolchain drift, 기존·누락·symlink·loose leaf,
 timeout/nonzero/foreign capture와 역순 cleanup 가능성을 검증한다.
 실제 signed 실행 실측은 protected B 시험 tag에서 child별 monotonic wall-clock과 전체 phase wall-clock을 별도 canonical diagnostic으로

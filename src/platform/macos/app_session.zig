@@ -77026,6 +77026,107 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     }
 }
 
+test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적대적 K5)" {
+    // **오프셋은 픽셀이고 목록 길이는 소스·필터가 정한다.** 큰 목록에서 굴린 뒤 짧은 목록으로 가면
+    // `first` 가 끝을 넘어 화면이 비고, 그때 안내는 「자리가 없습니다」라고 **틀린 원인**을 말한다
+    // (적대적 H2). 리셋이 의미를 맞추고 clamp 가 방어인데, **그 clamp 를 지키는 판정자가 없었다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        try body.appendSlice(allocator, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_K\",");
+        try body.appendSlice(allocator, "\"name\":\"Bash\",\"input\":{\"command\":\"echo\",\"description\":\"줄 ");
+        var num_buf: [8]u8 = undefined;
+        const num = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable;
+        try body.appendSlice(allocator, num);
+        try body.appendSlice(allocator, "\"}}]}}\n");
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "k.jsonl", .data = body.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/k.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    session.image_gallery.key_focus = true;
+    try cycleGalleryTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 300), session.image_gallery.count());
+
+    // 끝까지 굴린다.
+    var spins: usize = 0;
+    while (spins < 3000) : (spins += 1) {
+        _ = image_gallery_ops.wheelScroll(session, -50, false, 0, 0);
+    }
+    try std.testing.expect(session.image_gallery.scroll.offset_y_px > 0);
+
+    // **목록만 짧아진다**(검색으로 줄인다 — 소스는 그대로라 스크롤 리셋 경로를 안 탄다).
+    // 여기가 clamp 가 유일하게 막는 자리다.
+    session.image_gallery.key_focus = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    // **ASCII 로 친다.** `handleKeyEvent` 는 코드포인트 하나를 받는데 한글은 UTF-8 3 바이트라
+    // 바이트 루프로 보내면 깨진 글자가 들어간다(이 판정자가 처음에 그렇게 실패했다).
+    for ("7") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    const few = session.image_gallery.count();
+    try std.testing.expect(few > 0 and few < 300);
+
+    // 창이 **목록 안**에 있다 — 넘어가면 화면이 빈다.
+    const win = image_gallery_ops.listWindow(session);
+    try std.testing.expect(win.first <= win.total);
+    try std.testing.expect(win.last <= win.total);
+    try std.testing.expect(win.first < win.last); // 한 줄이라도 보인다
+
+    // 그리고 안내가 「자리가 없다」로 거짓말하지 않는다.
+    var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        image_gallery_ops.noticeText(session, &buf),
+        maru.i18n.t(.image_gallery_too_narrow),
+    ));
+
+    {
+        var quiet = GalleryWait.start(session.io);
+        while (quiet.pending() and
+            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+        {
+            _ = session.tick() catch {};
+        }
+    }
+}
+
 test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     // 목록이 통째로 비는 길이 있다(좁은 도크·줄 높이 0). 그때 개수만 적으면 사용자에게는
     // 「목록이 없다」와 구분되지 않는다 — 계약 §2 가 가르라고 한 바로 그 둘이다. 격자는
@@ -77080,13 +77181,18 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
 
     // ── ① 자리를 얻었으면 개수를 말한다. **단위는 「장」이 아니다** — 명령을 그림으로 세지 않는다.
-    session.image_gallery.overflow = 0;
+    try std.testing.expectEqual(@as(usize, 0), image_gallery_ops.listOverflow(session));
     const normal = image_gallery_ops.noticeText(session, &buf);
     try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_activity_count_suffix)) != null);
     try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_count_suffix)) == null);
 
     // ── ② 하나도 못 그렸으면 그 사실을 말한다.
-    session.image_gallery.overflow = session.image_gallery.count();
+    //
+    // **상태를 시험하려면 상태를 만든다.** 예전에는 `overflow` 를 손으로 세팅했는데, 안내가 이제
+    // 그 잔값이 아니라 **직접 계산**을 보므로(I1·J5) 그 세팅은 무시된다 — 창을 실제로 낮춰
+    // 자리를 없앤다.
+    _ = try session.resize(1400, 40, 1000);
+    try std.testing.expectEqual(session.image_gallery.count(), image_gallery_ops.listOverflow(session));
     try std.testing.expectEqualStrings(
         maru.i18n.t(.image_gallery_too_narrow),
         image_gallery_ops.noticeText(session, &buf),
@@ -77094,7 +77200,6 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
 
     // ── ③ **격자는 이 문구를 쓰지 않는다** — 거기에는 「12장 중 8장」이 있다.
     try cycleGalleryTo(session, .images);
-    session.image_gallery.overflow = session.image_gallery.count();
     const grid_notice = image_gallery_ops.noticeText(session, &buf);
     try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.image_gallery_too_narrow)));
 }

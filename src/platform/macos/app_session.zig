@@ -77260,6 +77260,18 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
     try std.testing.expect(pixels2.len > 0);
+
+    // **워커를 재운 뒤 끝낸다.** `appendGpuImages` 는 `ensureTiles` 를 부르므로 여기서도 디코드가
+    // 걸린 채 끝날 수 있다 — 그 스레드가 남기는 누수는 **다음에 도는 남의 판정자에 붙는다**
+    // (적대적 검증 F2. D4·E2 에서 같은 형태를 고치고도 이 자리를 빠뜨렸다).
+    {
+        var quiet = GalleryWait.start(session.io);
+        while (quiet.pending() and
+            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+        {
+            _ = session.tick() catch {};
+        }
+    }
 }
 
 test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 남는다 (IG4-b)" {

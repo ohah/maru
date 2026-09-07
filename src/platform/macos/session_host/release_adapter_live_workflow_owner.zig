@@ -5,6 +5,19 @@ const checkpoint = @import("release_adapter_live_workflow_checkpoint");
 const context = @import("release_adapter_context");
 const phase = @import("release_adapter_live_workflow_phase");
 
+pub const max_bootstrap_token_bytes = checkpoint.max_root_identity_token_bytes;
+
+pub fn canonicalRootPath(path: []const u8) bool {
+    if (path.len < 2 or path[0] != '/' or path.len >= std.fs.max_path_bytes or path[path.len - 1] == '/') return false;
+    var components = std.mem.splitScalar(u8, path[1..], '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or component.len > std.fs.max_name_bytes or
+            std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..") or
+            std.mem.indexOfScalar(u8, component, 0) != null) return false;
+    }
+    return true;
+}
+
 pub const Kind = enum(u8) { product, action, command };
 
 pub const Invocation = union(enum) {
@@ -133,6 +146,21 @@ pub fn commitActionProcess(
     try checkpoint.openRootExpected(&root, root_path, try checkpoint.decodeRootIdentity(root_identity));
     defer root.deinit() catch {};
     _ = try checkpoint.advance(allocator, &root, selected.stage, result, workflow);
+}
+
+/// Initializes or recovers the exact initial-only workflow root and returns its sealed identity.
+/// The CLI owns only argv/environment framing; checkpoint mechanics remain in this owner graph.
+pub fn bootstrapProcess(
+    allocator: std.mem.Allocator,
+    root_path: [:0]const u8,
+    workflow: context.Context,
+    token_storage: *[checkpoint.max_root_identity_token_bytes:0]u8,
+) Error![:0]const u8 {
+    var root: checkpoint.Root = .{};
+    try checkpoint.openRoot(&root, root_path);
+    defer root.deinit() catch {};
+    const identity_value = try checkpoint.initializeOrRecoverInitial(allocator, &root, workflow);
+    return checkpoint.encodeRootIdentity(token_storage, identity_value);
 }
 
 const CallContext = struct { executor: *Executor, identity: Identity };

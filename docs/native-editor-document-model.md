@@ -105,6 +105,12 @@ ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱�
 
 **비교 뷰에는 문서 offset 축이 없다.** 화면에 서는 것은 원본 줄이 아니라 짝을 맞춰 정렬한 **행 배열**이고, 원본에 없는 빈 행이 섞여 있으며, 좌우가 서로 다른 두 버퍼다(왼쪽은 git이 준 HEAD 판이라 열려 있는 문서가 아니다). 그 축의 단일 출처는 [시각 매핑](native-editor-visual-mapping.md) **§4.1g "비교 뷰"**이고, 이 절은 그것을 가리키기만 한다.
 
+**그 축 위에 caret 이 선다**(2026-09-08). 문서 offset 이 없다고 caret 이 없는 것은 아니다 — 자리는
+`RowSelection.focus`(행, 행 안 byte)이고, **선택의 focus 가 곧 caret 이라 두 번째 출처가 없다**.
+비교 뷰가 읽기 전용인 것(`insertText`·`deleteBy`·`saveDocument`·`stepHistory` 들이 `editor_diff != null` 을 거절한다)은 그대로다: caret 은 편집
+권한이 아니라 읽는 도구다. 키 표와 그 결정의 근거는 [키 입력과 단축키](key-input-and-shortcuts.md)
+「비교 뷰에 caret 을 세운다」가 소유한다. **멀티 커서는 여전히 없다** — 아래 두 곳이 그것을 전제한다.
+
 ```text
 RowPos { row, byte }                         // 사전식 순서 — 전순서 스칼라가 아니다
 RowSelection { anchor_start, anchor_end, focus, kind }   // 위 Selection과 같은 계약

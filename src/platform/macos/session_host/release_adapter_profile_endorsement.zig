@@ -94,6 +94,9 @@ pub const Owner = struct {
     }
 
     pub fn revalidateEnvironment(self: *const @This(), allocator: std.mem.Allocator, context: context_mod.Context, environment: Environment) Error!Value {
+        if (self.owner != self or contextAliases(context, std.mem.asBytes(self)) or
+            !std.mem.eql(u8, &self.seal, &ownerSeal(self))) return error.InvalidOwner;
+        context_mod.validateTrusted(context) catch return error.AuthorityChanged;
         const first = environment.read() orelse return error.AuthorityChanged;
         const validated = try self.revalidateDocument(allocator, context, first);
         const second = environment.read() orelse return error.AuthorityChanged;
@@ -138,6 +141,7 @@ pub const Owner = struct {
 
 pub fn bindFromEnvironment(allocator: std.mem.Allocator, context: context_mod.Context, environment: Environment, result: *Owner) Error!void {
     if (!result.isPristineForComposition() or contextAliases(context, std.mem.asBytes(result))) return error.InvalidOwner;
+    context_mod.validateTrusted(context) catch return error.InvalidDocument;
     const first = environment.read() orelse return error.InvalidDocument;
     var staged: Owner = .{};
     try bindDocument(allocator, context, first, &staged);

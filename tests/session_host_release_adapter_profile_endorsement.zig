@@ -66,6 +66,8 @@ test "pre-owned copied and aliased owner storage is rejected" {
     var environment = TestEnvironment{ .first = baseline, .second = baseline };
     try std.testing.expectError(error.InvalidOwner, endorsement.bindFromEnvironment(std.testing.allocator, context(), environment.interface(), &owner));
     try std.testing.expectEqual(@as(usize, 0), environment.calls);
+    try std.testing.expectError(error.InvalidOwner, owner.revalidateEnvironment(std.testing.allocator, context(), environment.interface()));
+    try std.testing.expectEqual(@as(usize, 0), environment.calls);
     try std.testing.expectError(error.InvalidOwner, endorsement.bindDocumentForTest(std.testing.allocator, context(), baseline, &owner));
     owner = .{};
     var copied = owner;
@@ -76,6 +78,10 @@ test "pre-owned copied and aliased owner storage is rejected" {
     var alias_context = context();
     alias_context.tag = std.mem.asBytes(&owner)[0..6];
     try std.testing.expectError(error.InvalidOwner, endorsement.bindDocumentForTest(std.testing.allocator, alias_context, baseline, &owner));
+    var invalid_context = context();
+    invalid_context.protected_tag = false;
+    try std.testing.expectError(error.InvalidDocument, endorsement.bindFromEnvironment(std.testing.allocator, invalid_context, environment.interface(), &owner));
+    try std.testing.expectEqual(@as(usize, 0), environment.calls);
 }
 
 test "document and every protected run context component are revalidated" {

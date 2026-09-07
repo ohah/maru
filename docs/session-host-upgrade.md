@@ -4172,6 +4172,32 @@ payload exact once, failure checkpoint 뒤 nonzero와 commit 뒤 output publicat
 닫지만 candidate-pinning initial/root 생성, 여섯 command/product stage, `release.yml` 전체 wiring, GitHub-issued timing과 frozen
 signed U5 E2E는 별도 live workflow caller가 소유한다.
 
+### 11.80 live workflow checkpoint bootstrap의 재실행 가능 경계
+
+`release.yml`이 checkpoint root를 `mkdir`한 뒤 component 함수를 shell에서 흉내 내거나 root의 device/inode를
+`stat` 출력으로 조립하지 않는다. `maru-session-host-release-workflow-bootstrap` 제품 executable은 `initialize <root>`라는
+닫힌 command 하나만 제공한다. root는 caller가 `RUNNER_TEMP` 아래에 새로 만든 canonical absolute `0700` directory여야 하며,
+executable은 현재 protected GitHub context를 §11.79와 같은 environment reader로 다시 만든 뒤
+`release_adapter_live_workflow_owner`의 bootstrap 전용 entrypoint만 호출한다. 이 owner가 root를 no-follow로 열고
+`00-initial.state`를 배타 게시하며, initial state를 다시 열어 canonical empty reducer와 current context 결속을 확인하고
+`candidate_pinning` admission까지 성공한 뒤에만 canonical `maru-root-v1` identity token을 반환한다.
+
+GitHub step output 기록이 끊긴 뒤 같은 job을 다시 실행할 수 있도록 bootstrap은 정확히 같은 root의 canonical initial leaf만
+존재하는 경우 idempotent하게 identity를 다시 발급한다. 이 recovery는 `00-initial.state`의 bytes/context/root identity와
+`01-candidate-pinning.state` 부재를 모두 재검증하며 기존 leaf를 덮어쓰거나 삭제하지 않는다. malformed·foreign context,
+symlink/hardlink/loose-mode root 또는 leaf, root pathname 교체는 token publication 0으로 거부하고, foreign 또는 later
+entry는 initial leaf를 만들기 전에 거부해 checkpoint mutation도 0으로 유지한다. executable stdout은
+성공한 identity token과 newline 한 줄뿐이고 stderr, `GITHUB_OUTPUT`, credential, candidate pathname과 reducer result를 다루지 않는다.
+shell은 exact prefix/길이/단일 행을 확인한 token만 step output으로 옮긴다. 이 token은 secret이 아니라 이후 process가 같은 root
+object를 다시 확인하기 위한 public identity이지만, caller가 token을 새 root 권위로 사용하거나 재작성할 수는 없다.
+
+focused gate `test-session-host-release-workflow-bootstrap-cli`는 closed argv/environment, fresh initialize와 exact initial recovery,
+실제 별도 process token 한 줄, root/context/leaf drift와 성공·실패 stdout/stderr framing을 Debug·ReleaseFast의 harness-owned private root에서
+검증한다. source boundary는 checkpoint primitive의 production import/callsite가 계속 live workflow owner 하나에만 있고 bootstrap
+CLI가 owner API만 호출하는지 고정한다. fixture는 실제 앱 session-host registry·workspace·manifest·socket·process, GitHub release와
+credential을 읽거나 수정하지 않는다. 이 slice는 trusted initial root와 identity handoff만 닫으며 candidate pinning, 여덟 live
+stage의 `release.yml` 배선, GitHub-issued timing과 frozen signed U5 E2E는 후속이다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

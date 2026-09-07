@@ -1290,6 +1290,13 @@ root에서 init+여덟 stage를 서로 다른 process로 20회 spawn/reap하고 
 init/stage/total median·p95·max를 canonical JSON으로 남긴다. 이는 local APFS/process 비용의 실측이며 GitHub Actions step·network
 latency가 아니다. concrete command live owner, release.yml 배선과 frozen signed U5 E2E는 후속 경계다.
 
+U5 live workflow bootstrap은 별도 제품 executable의 closed `initialize <root>` command가 current protected GitHub context를 직접
+읽고 live workflow owner를 통해서만 private root의 canonical initial leaf를 배타 게시하게 한다. 성공은 initial reopen과
+`candidate_pinning` admission 뒤 canonical root identity token 한 줄만 출력한다. 같은 root의 exact initial-only 상태는 output 전달
+실패 복구를 위해 idempotent하게 재인증하지만, 다른 leaf·context/root/bytes/mode/link drift에서는 output 0이다. focused
+Debug·ReleaseFast unit과 actual-process gate가 isolated root, 단일 stdout line, stderr 0과 source-owner 단일성을 검증한다. candidate
+pinning, 실제 `release.yml` stage wiring, GitHub-issued timing과 frozen signed U5 E2E는 후속 증거다.
+
 U5 live workflow invocation owner는 candidate pinning product, candidate pair attestation action, `prepare-candidate`, authored pair
 attestation action, `prepare-candidate-aggregate`, `finalize-candidate-aggregate`, `resume-candidate-publication`,
 `cleanup-candidate-aggregate`의 여덟 닫힌 union tag가 stage와 exact 실행 identity를 함께 결정하게 한다. caller가 stage·command·action

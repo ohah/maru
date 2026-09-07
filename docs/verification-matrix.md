@@ -1441,6 +1441,17 @@ closed argv/environment, 양쪽 authority와 toolchain의 pre/post fence, exact 
 검증한다. protected B tag의 actual signed child/phase monotonic timing은 evidence와 분리된 diagnostic이 소유하며, unsigned synthetic
 실행이나 GitHub queue timing으로 대체하지 않는다. production profile runner와 checkpoint/publication은 후속이다.
 
+U5 pre-publish release profile은 protected `release` environment의 단일 GitHub variable
+`SESSION_HOST_RELEASE_PROFILE_V1`을 live-action step이 exact `MARU_SESSION_HOST_RELEASE_PROFILE_V1` environment로 투영한 canonical
+document만 선택 endorsement로 사용한다. action input/output이나 다른 child에는 전달하지 않는다. missing/empty를 baseline으로 내리지 않고,
+`baseline_a`는 predecessor 부재, `upgrade_b`는 exact A release ID/tag/commit/manifest SHA 네 필드를 요구한다. 제품 owner가 current
+protected-tag repository/tag/source/workflow/run context 전체와 canonical bytes digest를 final-address에 봉인하고 재관측 drift를 remote mutation 전에 거부한다. 이 값은
+A의 진위를 스스로 증명하지 않으며, 후속 composition이 exact A manifest/release/세 asset을 인증한 뒤 얻은
+`PredecessorEvidenceIdentity`와 일치할 때만 upgrade runner와 B manifest authoring으로 전진한다. 게시 후 B→A 검증은 기존 authenticated
+B manifest를 권위로 유지한다. focused Debug·ReleaseFast gate는 strict 1 KiB canonical document, closed profile union,
+unknown/duplicate/missing/noncanonical 입력, context/digest drift와 copied/pre-owned/alias owner를 credential/network/filesystem 없이
+검증한다. endorsement→A 인증→runner→manifest/checkpoint 배선과 protected B tag actual signed 실측은 후속 gate다.
+
 U5 candidate compatibility는 `release_adapter_candidate_compatibility.zig`가 final-address candidate files/product와 held frozen
 executable parent authority에서만 canonical compatibility probe를 실행해 frozen SHA·release/source/build identity와 함께 fixed owner에
 복사한다. current-manifest 검증과 동일 parser를 공유하고 실행 전후 inode·parent seal·candidate product를 재검증한다. focused gate는

@@ -2615,3 +2615,87 @@ test "DCARET10: 한 화면의 크기는 그 열이 그린 행 수다 (§4.1g 비
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .page_down, false));
     try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
 }
+
+test "DCARET11: 행 안 이동은 낱말·첫 글자·행 끝을 안다 — 그리고 그 행은 자기 열 것이다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // **좌우를 갈라 둔다.** 두 열의 행이 같은 모양이면 "자기 열을 읽는다"와 "반대 열을 읽는다"가
+    // 같은 답을 내 그 변이가 산다(2회차 C41). 들여쓰기와 낱말 둘도 여기서 갈린다.
+    var entry = testEntry("alpha\n  x\n", "alpha\n    beta gamma\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expect(st.left_texts[1].len != st.right_texts[1].len); // 픽스처 자기 검증
+
+    const row1 = st.right_texts[1]; // "    beta gamma"
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 0 }) };
+
+    // ⑴ **행 끝은 자기 열의 행 끝이다** — 반대 열을 읽으면 훨씬 짧은 자리에 선다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
+    try testing.expectEqual(row1.len, fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑵ **smart home** — 첫 글자와 행 머리를 오간다. 늘 0 으로 가면 여기서 갈린다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 4), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // "    " 뒤
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑶ **낱말 이동은 한 글자가 아니다.** 규칙은 `motion.wordRight` 가 소유한다 — 낱말을 먼저
+    //    지나고 공백을 건너뛴다. 행 머리(공백 넷) 에서는 그 공백을 지나 첫 낱말 머리에 선다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .option = true } });
+    const w1 = fx.term.rt.editor_diff_selection.?.sel.focus.byte;
+    try testing.expect(w1 > 1); // 글자 하나였다면 1 이다
+    try testing.expectEqual(@as(usize, 4), w1); // "    " 를 지난 자리
+
+    // 한 번 더 누르면 "beta" 를 지나 공백까지 건너뛴다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .option = true } });
+    try testing.expectEqual(@as(usize, 9), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑷ **거꾸로도 낱말이다** — 공백을 먼저 건너뛰고 낱말을 지난다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .option = true } });
+    try testing.expectEqual(@as(usize, 4), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // "beta" 머리
+}
+
+test "DCARET12: 옮기면 다시 그린다 — 그리고 범위 밖 자리에서도 안 죽는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+
+    // ⑴ **옮기면 다시 그린다.** 안 세우면 caret 이 옮겨져도 화면은 그대로다 — 다른 무엇이 화면을
+    //    더럽힐 때까지 커서가 옛 자리에 남는다.
+    fx.session.metal_dirty = false;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_down, false));
+    try testing.expect(fx.session.metal_dirty);
+
+    // ⑵ **범위 밖 자리에서 시작해도 안 죽고, 배열 안으로 들어온다.** 비교 내용이 다시 계산되면
+    //    행 배열이 짧아질 수 있는데(실측으로 선택을 든 채 40행 → 1행에서 죽은 적이 있다),
+    //    그 사이에 키가 오면 여기가 첫 소비처다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 9999, .byte = 9999 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false));
+    const f = fx.term.rt.editor_diff_selection.?.sel.focus;
+    try testing.expect(f.row < st.right_texts.len);
+    try testing.expect(f.byte <= st.right_texts[f.row].len);
+}
+
+test "DCARET13: 왼쪽이 빈 새 파일에서도 caret 이 선다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // **새로 추가된 파일은 HEAD 판이 없다** — 왼쪽 배열이 빈다. 씨앗을 왼쪽 길이로 가르면
+    // 그 화면에서만 caret 이 안 서고, 두 열이 다 찬 픽스처에서는 안 드러난다(2회차 C46).
+    var entry = testEntry("", "added one\nadded two\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expect(st.right_texts.len > 0);
+
+    const sel = fx.term.rt.editor_diff_selection orelse return error.NoCaret;
+    try testing.expectEqual(editor_ops.DiffSide.right, sel.side);
+    try testing.expectEqual(@as(usize, 0), sel.sel.focus.row);
+    // 키도 닿는다 — 씨앗만 서고 이동이 안 되면 반쪽이다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+}

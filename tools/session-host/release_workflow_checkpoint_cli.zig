@@ -67,8 +67,7 @@ pub fn execute(
 }
 
 fn target(root_path: []const u8, root_identity: []const u8, stage_text: []const u8) Error!Target {
-    if (root_path.len == 0 or root_path[0] != '/' or root_path.len >= std.fs.max_path_bytes)
-        return error.InvalidPath;
+    if (!owner.canonicalRootPath(root_path)) return error.InvalidPath;
     return .{
         .root_path = root_path,
         .root_identity = root_identity,

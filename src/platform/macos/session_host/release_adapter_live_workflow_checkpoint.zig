@@ -34,6 +34,7 @@ const stages = [_]phase.Stage{
 
 pub const Error = handoff.Error || error{
     InvalidCheckpoint,
+    InvalidInitialInventory,
     InvalidOwner,
     InvocationBusy,
     RootChanged,
@@ -182,6 +183,52 @@ pub fn initialize(root: *Root, workflow: context.Context) Error!void {
     const bytes = try handoff.encode(&storage, .{}, workflow);
     try files.publishSummaryExclusiveAt(root.fd, leaf_names[0], bytes);
     try root.revalidate();
+}
+
+/// Creates or reopens the only recoverable bootstrap state. No later or foreign root entry may
+/// be present when the identity crosses into the Actions step graph.
+pub fn initializeOrRecoverInitial(
+    allocator: std.mem.Allocator,
+    root: *Root,
+    workflow: context.Context,
+) Error!RootIdentity {
+    const has_initial = try classifyInitialInventory(root);
+    if (!has_initial) initialize(root, workflow) catch |err| switch (err) {
+        error.DestinationExists => {},
+        else => return err,
+    };
+    const state = try reopen(allocator, root, 0, workflow);
+    if (state.expectedStage() != .candidate_pinning) return error.InvalidInitialInventory;
+    try requireOnlyInitialEntry(root);
+    _ = try admit(allocator, root, .candidate_pinning, workflow);
+    try requireOnlyInitialEntry(root);
+    return root.value();
+}
+
+fn requireOnlyInitialEntry(root: *Root) Error!void {
+    if (!try classifyInitialInventory(root)) return error.InvalidInitialInventory;
+}
+
+fn classifyInitialInventory(root: *Root) Error!bool {
+    try root.revalidate();
+    const scan_fd = c.openat(root.fd, ".", posix.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+    if (scan_fd < 0) return error.InvalidInitialInventory;
+    const directory = c.fdopendir(scan_fd) orelse {
+        _ = c.close(scan_fd);
+        return error.InvalidInitialInventory;
+    };
+    defer _ = c.closedir(directory);
+    var count: usize = 0;
+    c._errno().* = 0;
+    while (c.readdir(directory)) |entry| {
+        const name = std.mem.sliceTo(entry.name[0..], 0);
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        count += 1;
+        if (count != 1 or !std.mem.eql(u8, name, leaf_names[0])) return error.InvalidInitialInventory;
+    }
+    if (c._errno().* != 0) return error.InvalidInitialInventory;
+    try root.revalidate();
+    return count == 1;
 }
 
 pub fn reopen(allocator: std.mem.Allocator, root: *Root, index: usize, workflow: context.Context) Error!phase.State {

@@ -1,19 +1,7 @@
-//! Closed public process vocabulary shared by aggregate command drivers and workflow observers.
+//! Compatibility facade for the shared validator process outcome vocabulary.
 
-pub const Outcome = enum(u8) { success, audit_required, cleanup_failed };
+const outcome_contract = @import("release_adapter_command_outcome");
 
-pub fn exitCode(outcome: Outcome) u8 {
-    return switch (outcome) {
-        .success => 0,
-        .audit_required => 21,
-        .cleanup_failed => 22,
-    };
-}
-
-pub fn stderrLine(outcome: Outcome) []const u8 {
-    return switch (outcome) {
-        .success => "success\n",
-        .audit_required => "audit_required\n",
-        .cleanup_failed => "cleanup_failed\n",
-    };
-}
+pub const Outcome = outcome_contract.Aggregate;
+pub const exitCode = outcome_contract.aggregateExitCode;
+pub const stderrLine = outcome_contract.aggregateStderrLine;

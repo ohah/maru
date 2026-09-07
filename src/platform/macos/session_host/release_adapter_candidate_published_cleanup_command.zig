@@ -8,6 +8,7 @@ const reopen_mod = @import("release_adapter_candidate_aggregate_reopen");
 const cleanup_recovery = @import("release_adapter_candidate_aggregate_cleanup_recovery");
 const published_authority = @import("release_adapter_candidate_published_cleanup_authority");
 const post = @import("release_adapter_github_post_publish_attestation");
+const outcome_contract = @import("release_adapter_command_outcome");
 
 pub const Bootstrap = bootstrap_mod.Bootstrap;
 pub const Plan = cleanup_recovery.Plan;
@@ -15,25 +16,9 @@ pub const max_response_bytes: usize = 64 * 1024;
 pub const timing_schema = "maru.session-host-release-cleanup-command-perf.v1";
 pub const Sample = enum { live, injected };
 
-pub const Outcome = enum { success, audit_required, cleanup_required, descriptor_close_failed };
-
-pub fn exitCode(outcome: Outcome) u8 {
-    return switch (outcome) {
-        .success => 0,
-        .audit_required => 21,
-        .cleanup_required => 22,
-        .descriptor_close_failed => 23,
-    };
-}
-
-pub fn stderrLine(outcome: Outcome) []const u8 {
-    return switch (outcome) {
-        .success => "success\n",
-        .audit_required => "audit_required\n",
-        .cleanup_required => "cleanup_required\n",
-        .descriptor_close_failed => "descriptor_close_failed\n",
-    };
-}
+pub const Outcome = outcome_contract.Cleanup;
+pub const exitCode = outcome_contract.cleanupExitCode;
+pub const stderrLine = outcome_contract.cleanupStderrLine;
 
 const StoredPath = struct {
     len: usize = 0,

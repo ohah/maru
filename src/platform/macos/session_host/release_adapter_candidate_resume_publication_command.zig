@@ -6,28 +6,15 @@ const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const deadline_mod = @import("release_adapter_deadline");
 const resume_product = @import("release_adapter_candidate_resume_authority_product");
 const publication_product = @import("release_adapter_candidate_resume_publication_product");
+const outcome_contract = @import("release_adapter_command_outcome");
 
 pub const Bootstrap = bootstrap_mod.Bootstrap;
 pub const AuditStage = publication_product.AuditStage;
 pub const max_response_bytes: usize = 64 * 1024;
 
-pub const Outcome = enum { success, audit_required, cleanup_failed };
-
-pub fn exitCode(outcome: Outcome) u8 {
-    return switch (outcome) {
-        .success => 0,
-        .audit_required => 21,
-        .cleanup_failed => 22,
-    };
-}
-
-pub fn stderrLine(outcome: Outcome) []const u8 {
-    return switch (outcome) {
-        .success => "success\n",
-        .audit_required => "audit_required\n",
-        .cleanup_failed => "cleanup_failed\n",
-    };
-}
+pub const Outcome = outcome_contract.Publication;
+pub const exitCode = outcome_contract.publicationExitCode;
+pub const stderrLine = outcome_contract.publicationStderrLine;
 
 const StoredPath = struct {
     len: usize = 0,

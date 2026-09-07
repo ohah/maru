@@ -111,6 +111,14 @@ backing_height_px
     것**이라 `c_like` 하나가 C·Java·JS·TS·Go·Rust·Swift 를 덮고, `displayName` 이 **`"C-like"`** 를
     낸다. 상태바에 그렇게 적으면 거짓말이다. `Grammar` 는 `zig`·`typescript`·`rust`·`python` 처럼
     **언어별로 갈린다**(19개).
+    - **다른 두 문서가 `Language` 를 가리키고 있었다**(2026-09-07 적대적 검증 11~14회차 —
+      [layering](native-editor-layering.md) 의 제공 표가 이 값을 *"§3.7a 언어 판정"* 이라 적고,
+      `language.zig` 머리말이 상태바를 **그 모듈의 소비처**로 꼽는다). **그대로 갔으면 `"C-like"` 가
+      떴다.** 두 문서를 함께 고친다.
+    - **`Language` 는 `Makefile` 도 못 쓴다**(14회차 실측). 그 함수는 확장자 없는 이름
+      (`Makefile`·`Dockerfile`·`.gitignore`·`.zshrc`)을 **전부 `shell` 로 묶는다** — `#` 주석이 같아서다.
+      주석 토글에는 그게 옳지만 상태바에 「Shell」이라고 적으면 **거짓**이다. `Grammar` 는 그것들을
+      `none` 으로 두므로 **비어 있고, 비어 있는 것이 맞다**.
   - **그런데 `Grammar` 가 Term 에 안 남는다**(실측). 지금은 문서를 열 때 `grammarForPath` 로 구해
     `syntax_color.open` 에 넘기고 **버린다**. 상태바가 읽으려면 그 값을 **Term 에 보관**해야 한다 —
     경로에서 다시 판정하면 **출처가 둘**이 되고, 그 둘은 파일이 이름을 바꾸는 날 갈린다.

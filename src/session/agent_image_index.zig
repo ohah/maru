@@ -126,6 +126,12 @@ pub const Hit = struct {
     /// 집던 결함을 이미 고쳤다) 링크도 줄이 아니라 **그 호출의 범위**에서 id 를 얻어야 한다.
     id_rel: u32 = 0,
     id_len: u8 = 0,
+    /// 이 호출이 적힌 **시각**의 자리 — `"timestamp":"` **키**의 줄 시작 상대 오프셋(AV2b).
+    /// **0 이면 모른다**(줄은 `{` 로 시작하므로 0 은 키의 자리가 될 수 없다).
+    ///
+    /// 값을 여기서 파싱하지 않는 이유는 층이다 — ISO 파서는 `agent_image_context` 가 소유하고,
+    /// 라벨 패스가 이미 그 모듈을 쓴다. 스캐너는 **자리만** 적는다.
+    time_rel: u32 = 0,
     /// 이 호출이 **어떻게 끝났나**(AV2 — 계약 §2.2·§3.2). 이미지와 결과를 못 찾은 호출은 기본값이다.
     ///
     /// **`Hit` 안에 든다**(라벨처럼 나란한 배열이 아니라). 요약은 **뒤에 오는 줄**에서 만들어져 **앞의
@@ -335,6 +341,23 @@ const output_key_base = "\"output\":";
 const text_key = "\"text\":\"";
 /// Claude 가 **자기가** 적는 실패 표시. 우리가 판정하지 않는다는 계약(§2.3)의 근거다.
 const is_error_true = "\"is_error\":true";
+
+/// 시각 키. 값 파싱은 `agent_image_context.timestampSeconds` 가 소유한다 — 여기서는 **자리만** 찾는다.
+const timestamp_key = "\"timestamp\":\"";
+
+/// 시각을 찾을 창 — **provider 마다 반대편이라 따로 잰다**(2026-09-07 실측, 이 맥의 최근 세션).
+///
+/// | | 있는 비율 | 자리 |
+/// |---|---|---|
+/// | Claude 호출 | 100%(40,676/40,676) | **마커 뒤**. 중앙 1,454 · p99 7,228 · 최대 38,753 |
+/// | Codex 호출 | 100%(185,033/185,033) | **줄 머리**. 중앙·p99·최대 모두 **1** |
+///
+/// ⚠️ 이 비대칭이 AV1-b 가 시각을 미룬 이유다 — 이미지 경로(payload 뒤 256 B, 앞 16 KB)를 그대로
+/// 쓰면 Claude 는 명령 뒤 한참 뒤에 있는 값을 못 보고, 잘못하면 **다음 레코드의 시각**을 집는다.
+/// 한 줄에 레코드가 하나라(계약 §3.1) 마커 뒤 첫 값이 곧 이 레코드의 것이고, 실측으로 그 줄에
+/// `"timestamp":"` 가 둘 이상인 경우는 **0 건**이다.
+const claude_time_window: usize = 64 * 1024;
+const codex_time_window: usize = 256;
 /// 대상 문자열의 자리를 정하는 키들. **순서가 계약이다**(계약 §2.2) — 앞의 것이 있으면 그것을 쓴다.
 const description_key = "\"description\":\"";
 const file_path_key = "\"file_path\":\"";
@@ -525,7 +548,9 @@ fn scanClaudeToolUses(
         // **자기 레코드 범위 안에서** id 를 찾는다(위 `scope` 와 같은 이유 — 한 줄에 호출이 둘이면
         // 줄 전체에서 찾은 id 는 남의 것일 수 있다).
         const id = findQuotedValueFull(scope, after, id_key);
-        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id);
+        // Claude 의 시각은 **마커 뒤**다(실측 40,676/40,676 · 중앙 1,454 · 최대 38,753).
+        const time_rel = timestampKeyRel(scope, after, claude_time_window);
+        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id, time_rel);
         if (end == line.len) break;
     }
 }
@@ -552,7 +577,9 @@ fn scanCodexToolCalls(
     const target = pickCodexTarget(scope, after) orelse name;
     // Codex 의 `call_id` 는 `type` **앞에** 올 수 있어 범위의 처음부터 찾는다(범위는 위에서 닫았다).
     const id = findQuotedValueFull(scope, 0, call_id_key);
-    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id);
+    // Codex 의 시각은 **줄 머리**다(실측 자리 중앙·p99·최대 모두 1) — 마커 뒤에서 찾으면 못 본다.
+    const time_rel = timestampKeyRel(scope, 0, codex_time_window);
+    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel);
 }
 
 /// 화면에 적을 **대상**의 자리를 고른다. 순서가 계약이다(§2.2) — 실측이 정한 순서다:
@@ -615,6 +642,8 @@ fn appendActivity(
     activity: Activity,
     /// 이 호출의 id(AV2). 없거나 상한을 넘으면 **링크를 안 한다** — 잘라 비교하면 남의 결과를 집는다.
     id: ?Span,
+    /// 이 호출이 적힌 **시각 키**의 자리(AV2b). 0 이면 모른다.
+    time_rel: u32,
 ) !void {
     if (target.len == 0) return;
     if (target.len > std.math.maxInt(u32)) return;
@@ -630,6 +659,7 @@ fn appendActivity(
     }
     try out.append(allocator, .{
         .line_offset = line_offset,
+        .time_rel = time_rel,
         .data_offset = line_offset + target.start,
         .data_len = @intCast(target.len),
         .kind = kind,
@@ -652,6 +682,14 @@ pub const ResultRecord = struct {
     id: Span,
     summary: ResultSummary,
 };
+
+/// 이 호출이 적힌 **시각 키**의 자리(줄 시작 상대). 못 찾으면 0(모른다).
+fn timestampKeyRel(line: []const u8, from: usize, window: usize) u32 {
+    if (from >= line.len) return 0;
+    const limit = @min(line.len, from + window);
+    const at = std.mem.indexOfPos(u8, line[0..limit], from, timestamp_key) orelse return 0;
+    return if (at <= std.math.maxInt(u32)) @intCast(at) else 0;
+}
 
 /// 이 줄이 **결과 레코드**면 그 id 와 요약. 아니면 null.
 ///
@@ -2519,4 +2557,64 @@ test "활동 결말: 같은 id 의 두 번째 결과가 앞의 결말을 덮지 
     try testing.expect(out.items[0].result.found);
     // **첫 결과가 이긴다** — 계약 §3.2 의 「id 가 맞는 **첫** 결과 레코드를 집는다」가 그 규칙이다.
     try testing.expectEqual(@as(u32, 3), out.items[0].result.lines);
+}
+
+// ── AV2b 판정자 — 시각의 자리는 provider 마다 반대다 ─────────────────────────────────────────
+
+/// 그 `Hit` 이 가리키는 시각 값(줄 안에서). 자리 판정만 보는 판정자용.
+fn timeValueForTest(line: []const u8, hit: Hit) []const u8 {
+    if (hit.time_rel == 0) return "";
+    const from = hit.time_rel + timestamp_key.len;
+    if (from >= line.len) return "";
+    const end = std.mem.indexOfScalarPos(u8, line, from, '"') orelse return "";
+    return line[from..end];
+}
+
+test "활동 시각: Claude 는 마커 **뒤**, Codex 는 줄 **머리** — 반대편을 보면 못 찾는다 (AV2b)" {
+    // AV1-b 가 시각을 미룬 이유가 이 비대칭이다(실측 2026-09-07): Claude 는 100% 가 마커 뒤이고
+    // 중앙 1,454 · 최대 38,753, Codex 는 100% 가 자리 **1** 이다. 이미지 경로(payload 앞뒤 창)를
+    // 그대로 쓰면 한쪽은 못 보고, 잘못하면 남의 시각을 집는다.
+    const allocator = testing.allocator;
+    {
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        const line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\"," ++
+            "\"id\":\"toolu_01\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"목록\"}}]}," ++
+            "\"timestamp\":\"2026-09-07T01:13:13.040Z\"}";
+        try scanLine(allocator, line, 0, &out);
+        try testing.expectEqual(@as(usize, 1), out.items.len);
+        try testing.expectEqualStrings("2026-09-07T01:13:13.040Z", timeValueForTest(line, out.items[0]));
+    }
+    {
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        const line = "{\"timestamp\":\"2026-09-04T12:42:04.137Z\",\"payload\":{\"call_id\":\"call_A\"," ++
+            "\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":\"ls -la\"}}";
+        try scanLine(allocator, line, 0, &out);
+        try testing.expectEqual(@as(usize, 1), out.items.len);
+        try testing.expectEqualStrings("2026-09-04T12:42:04.137Z", timeValueForTest(line, out.items[0]));
+    }
+}
+
+test "활동 시각: Claude 는 마커 앞의 시각을 안 집는다 — 남의 시각을 붙이지 않는다 (AV2b)" {
+    // 줄 머리에 다른 시각이 있고 레코드의 진짜 시각이 뒤에 있을 때, **뒤엣것**이 이 호출의 것이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line = "{\"timestamp\":\"1999-01-01T00:00:00.000Z\",\"message\":{\"content\":[{\"type\":\"tool_use\"," ++
+        "\"id\":\"toolu_02\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/a.txt\"}}]}," ++
+        "\"timestamp\":\"2026-09-07T02:00:00.000Z\"}";
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqualStrings("2026-09-07T02:00:00.000Z", timeValueForTest(line, out.items[0]));
+}
+
+test "활동 시각: 없으면 0 이다 — 지어내지 않는다 (AV2b)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line = "{\"payload\":{\"call_id\":\"call_B\",\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":\"ls\"}}";
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 0), out.items[0].time_rel);
 }

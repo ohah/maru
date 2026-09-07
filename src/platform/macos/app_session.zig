@@ -1727,6 +1727,13 @@ const TermRuntime = struct {
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
     editor_syntax: editor_ops.syntax_color.State = .{},
+
+    /// 이 문서에 쓰는 tree-sitter 문법. **상태바 언어 항목이 읽는다**(`status-bar.md` 「언어 항목」).
+    ///
+    /// **여기 보관하는 이유는 출처를 하나로 두기 위해서다.** 문서를 열 때 `grammarForPath`로 한 번
+    /// 정해 구문 강조와 이 필드가 **같은 값**을 쓴다 — 상태바가 경로에서 다시 판정하면 파일이 이름을
+    /// 바꾸는 날 둘이 갈린다. `editor_syntax.State`는 `provider`만 들고 이 값을 안 남긴다(실측).
+    editor_grammar: maru.session.editor.language.Grammar = .none,
     /// 체인 마디의 열 범위 — **렌더가 굳히고 클릭이 읽는다**(§7.5·§4.1g).
     editor_crumb_spans: std.ArrayList(maru.cell_text.ColSpan) = .empty,
     /// 마지막으로 그린 프레임이 센 **문서 전체 시각 행 수**(랩 포함). 0이면 아직 안 그렸다.
@@ -20783,6 +20790,25 @@ pub const AppSession = struct {
                     }
                 }
                 // ③ 줄바꿈: 파일이 쓰던 것을 그대로 말한다(저장이 되돌릴 값이기도 하다 — 문서 모델 §3.5).
+                // ③ 언어: 이 문서에 **무엇이 색을 입히고 있는가**를 말한다(`status-bar.md` 「언어 항목」).
+                // **줄바꿈보다 앞이다** — 이 배열 순서가 곧 **버려지는 순서**이고, 언어는 *"이 파일이
+                // 무엇인가"* 라 줄바꿈보다 자주 쓰인다.
+                //
+                // **`Grammar` 를 쓴다 — `Language` 가 아니다.** 그 열거는 주석 문법으로 묶은 것이라
+                // `c_like` 가 `"C-like"` 를 내고 `Makefile`·`Dockerfile` 을 `shell` 로 묶는다.
+                //
+                // **`none` 이면 말하지 않는다** — 그때 "Plain Text" 라고 적으면 강조가 없는 이유를
+                // 설명하는 대신 가린다(줄바꿈 `none` 을 안 적는 것과 같은 규율).
+                if (rn < max_status_bar_right_items) {
+                    if (active_term.rt.editor_grammar.displayName()) |text| {
+                        if (self.buildStatusBarItem(null, text, bar_cols, fg, icon_fg, .plain)) |dl| {
+                            right_frames[rn] = dl;
+                            right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                            right_ids[rn] = .editor_language;
+                            rn += 1;
+                        }
+                    }
+                }
                 // **인코딩은 넣지 않는다**: 이 편집기는 UTF-8만 열므로(같은 절) 그 자리는 늘 같은 값이고,
                 // 폭을 다투는 띠에서 변하지 않는 값은 자리만 먹는다. 다른 인코딩이 열리는 날 함께 넣는다.
                 if (active_term.rt.editor_doc) |*doc| {
@@ -21007,7 +21033,9 @@ pub const AppSession = struct {
             // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
             // 영속 세션 강등은 **표시 전용**이다. 다시 잇는 동작은 실제 socket reconnect(CR4)가 소유하므로
             // 여기서 만들지 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure, .session_host_disconnected => {},
+            // **언어도 표시 전용이다** — 문법을 사용자가 고르는 개념이 아직 없다(`grammarForPath`
+            // 위에 override 층이 필요하고 그건 별도 조각이다). 열 대상이 없으므로 호버도 안 준다.
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => {},
         }
         self.metal_dirty = true;
     }
@@ -21022,7 +21050,7 @@ pub const AppSession = struct {
             .viewport_narrowed => false, // 표시 전용 — 열 대상이 없다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure, .session_host_disconnected => false,
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => false,
         };
     }
 
@@ -60123,6 +60151,26 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     if (eol_at) |eol_i| {
         const entries = session.statusBarTree().entries;
         try std.testing.expect(entries[eol_i].rect.x < entries[readonly_at.?].rect.x);
+    }
+
+    // ②ʹ **언어는 읽기 전용과 줄바꿈 **사이**다**(`status-bar.md` 「언어 항목」). 자리를 x 로 잰다 —
+    //     "더하는 순서"는 구현이고 계약은 좌우다(위 ③ 과 같은 규율).
+    {
+        var lang_at: ?usize = null;
+        for (session.statusBarTree().entries, 0..) |e, i| {
+            if (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id)) == .editor_language) lang_at = i;
+        }
+        // 픽스처가 `selection.zig` 를 열었으므로 문법이 있다 — 항목이 **떠야** 한다.
+        try std.testing.expect(lang_at != null);
+        try std.testing.expectEqual(
+            maru.session.editor.language.Grammar.zig,
+            editor_term.rt.editor_grammar,
+        );
+        const entries = session.statusBarTree().entries;
+        try std.testing.expect(entries[lang_at.?].rect.x < entries[readonly_at.?].rect.x); // 읽기 전용보다 왼쪽
+        if (eol_at) |eol_i| {
+            try std.testing.expect(entries[eol_i].rect.x < entries[lang_at.?].rect.x); // 줄바꿈보다는 오른쪽
+        }
     }
     editor_term.rt.editor_doc.?.file.read_only = false;
 

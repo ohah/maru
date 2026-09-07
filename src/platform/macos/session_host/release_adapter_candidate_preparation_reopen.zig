@@ -1,4 +1,4 @@
-//! Reopens retained stage-3 preparation as a fresh, semantically verified descriptor owner.
+//! Reopens retained profile-aware stage-3 preparation as a fresh, semantically verified descriptor owner.
 
 const std = @import("std");
 const c = std.c;
@@ -194,10 +194,29 @@ pub fn open(allocator: std.mem.Allocator, context: context_mod.Context, director
         return error.InvalidMode;
     working.directory_device = @intCast(directory_stat.dev);
     working.directory_inode = @intCast(directory_stat.ino);
-    var discovered_storage: [std.fs.max_name_bytes]u8 = undefined;
-    const discovered = try discoverInventory(working.directory_fd, &discovered_storage);
-    copyZ(working.names[0].len, &working.names[0], &working.name_lens[0], handoff.evidence_name) catch return error.InvalidInventory;
-    copyZ(working.names[1].len, &working.names[1], &working.name_lens[1], discovered) catch return error.InvalidInventory;
+    var discovered_names: [handoff.role_count][std.fs.max_name_bytes]u8 = @splat(@splat(0));
+    var discovered_lens: [handoff.role_count]usize = @splat(0);
+    try discoverInventory(working.directory_fd, &discovered_names, &discovered_lens);
+    var evidence_index: ?usize = null;
+    var manifest_index: ?usize = null;
+    for (0..handoff.role_count) |index| {
+        const name = discovered_names[index][0..discovered_lens[index]];
+        var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&path_storage, "{s}/{s}", .{ directory, name }) catch return error.InvalidPath;
+        switch (try classifyArtifact(allocator, path)) {
+            .evidence => {
+                if (evidence_index != null) return error.InvalidInventory;
+                evidence_index = index;
+            },
+            .manifest => {
+                if (manifest_index != null) return error.InvalidInventory;
+                manifest_index = index;
+            },
+        }
+    }
+    const ordered = [_]usize{ evidence_index orelse return error.InvalidInventory, manifest_index orelse return error.InvalidInventory };
+    for (ordered, 0..) |source_index, destination_index|
+        copyZ(working.names[destination_index].len, &working.names[destination_index], &working.name_lens[destination_index], discovered_names[source_index][0..discovered_lens[source_index]]) catch return error.InvalidInventory;
     for (0..handoff.role_count) |index| {
         const path = std.fmt.bufPrintZ(&working.paths[index], "{s}/{s}", .{ directory, working.names[index][0..working.name_lens[index]] }) catch return error.InvalidPath;
         working.path_lens[index] = path.len;
@@ -211,7 +230,7 @@ pub fn open(allocator: std.mem.Allocator, context: context_mod.Context, director
         working.paths[0][0..working.path_lens[0] :0],
         working.paths[1][0..working.path_lens[1] :0],
     }, observations);
-    if (!std.mem.eql(u8, semantic.manifestName(), discovered)) return error.InvalidInventory;
+    if (!std.mem.eql(u8, semantic.manifestName(), working.names[1][0..working.name_lens[1]])) return error.InvalidInventory;
     result.* = working;
     result.owner = result;
     result.phase = .verified;
@@ -234,7 +253,42 @@ fn validateSemantic(allocator: std.mem.Allocator, context: context_mod.Context, 
     return semantic;
 }
 
-fn discoverInventory(directory_fd: c.fd_t, storage: *[std.fs.max_name_bytes]u8) Error![]const u8 {
+const ArtifactKind = enum { evidence, manifest };
+const SchemaHeader = struct { schema: []const u8 };
+
+fn classifyArtifact(allocator: std.mem.Allocator, path: [:0]const u8) Error!ArtifactKind {
+    var file: files.PinnedReleaseFile = .{};
+    try files.pinReleaseFileObserved(&file, path, false, evidence_mod.max_evidence_bytes);
+    const kind = classifyPinnedArtifact(allocator, path, &file) catch |err| {
+        file.deinit() catch return error.DescriptorCloseFailed;
+        return err;
+    };
+    try file.deinit();
+    return kind;
+}
+
+fn classifyPinnedArtifact(allocator: std.mem.Allocator, path: [:0]const u8, file: *const files.PinnedReleaseFile) Error!ArtifactKind {
+    var input = try file.readHeldAlloc(allocator, path, evidence_mod.max_evidence_bytes);
+    defer input.deinit(allocator);
+    var header = std.json.parseFromSlice(SchemaHeader, allocator, input.bytes, .{
+        .duplicate_field_behavior = .@"error",
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidInventory,
+    };
+    defer header.deinit();
+    const kind: ArtifactKind = if (std.mem.eql(u8, header.value.schema, evidence_mod.schema))
+        .evidence
+    else if (std.mem.eql(u8, header.value.schema, manifest_mod.schema))
+        .manifest
+    else
+        return error.InvalidInventory;
+    return kind;
+}
+
+fn discoverInventory(directory_fd: c.fd_t, names: *[handoff.role_count][std.fs.max_name_bytes]u8, lengths: *[handoff.role_count]usize) Error!void {
     const scan_fd = c.openat(directory_fd, ".", posix.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
     if (scan_fd < 0) return error.InvalidInventory;
     const directory = c.fdopendir(scan_fd) orelse {
@@ -242,8 +296,6 @@ fn discoverInventory(directory_fd: c.fd_t, storage: *[std.fs.max_name_bytes]u8) 
         return error.InvalidInventory;
     };
     defer _ = c.closedir(directory);
-    var manifest_len: usize = 0;
-    var evidence_found = false;
     var count: usize = 0;
     c._errno().* = 0;
     while (c.readdir(directory)) |entry| {
@@ -251,22 +303,28 @@ fn discoverInventory(directory_fd: c.fd_t, storage: *[std.fs.max_name_bytes]u8) 
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
         count += 1;
         if (count > handoff.role_count) return error.InvalidInventory;
-        if (std.mem.eql(u8, name, handoff.evidence_name)) evidence_found = true else {
-            if (manifest_len != 0 or !std.mem.startsWith(u8, name, "Maru-") or !std.mem.endsWith(u8, name, "-session-host-release.json") or name.len >= storage.len)
-                return error.InvalidInventory;
-            @memcpy(storage[0..name.len], name);
-            manifest_len = name.len;
-        }
+        if (name.len == 0 or name.len >= names[count - 1].len) return error.InvalidInventory;
+        @memcpy(names[count - 1][0..name.len], name);
+        lengths[count - 1] = name.len;
     }
-    if (c._errno().* != 0 or count != handoff.role_count or !evidence_found or manifest_len == 0) return error.InvalidInventory;
-    // The caller copies before the directory stream and this stack frame disappear.
-    return storage[0..manifest_len];
+    if (c._errno().* != 0 or count != handoff.role_count) return error.InvalidInventory;
 }
 
 fn exactInventory(directory_fd: c.fd_t, expected: [handoff.role_count][]const u8) Error!void {
-    var storage: [std.fs.max_name_bytes]u8 = undefined;
-    const found = try discoverInventory(directory_fd, &storage);
-    if (!std.mem.eql(u8, found, expected[1]) or !std.mem.eql(u8, expected[0], handoff.evidence_name)) return error.InvalidInventory;
+    var names: [handoff.role_count][std.fs.max_name_bytes]u8 = @splat(@splat(0));
+    var lengths: [handoff.role_count]usize = @splat(0);
+    try discoverInventory(directory_fd, &names, &lengths);
+    var matched: [handoff.role_count]bool = @splat(false);
+    for (0..handoff.role_count) |index| {
+        const found = names[index][0..lengths[index]];
+        var hit = false;
+        for (expected, 0..) |wanted, wanted_index| if (!matched[wanted_index] and std.mem.eql(u8, found, wanted)) {
+            matched[wanted_index] = true;
+            hit = true;
+            break;
+        };
+        if (!hit) return error.InvalidInventory;
+    }
 }
 
 fn pristine(value: *const ReopenedPreparation) bool {

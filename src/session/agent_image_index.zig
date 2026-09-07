@@ -120,6 +120,35 @@ pub const Hit = struct {
     /// 0 이 현재 세션이다. 스캐너 자신은 이 값을 안 건드린다(파일 하나를 훑을 뿐이다) — 여러 파일을
     /// 이어 담는 호출자가 채운다.
     file_index: u8 = 0,
+    /// 이 호출의 **id**(`tool_use_id`/`call_id`)가 줄 안 어디에 있나 — `name_rel` 과 같은 규약이다.
+    ///
+    /// **호출마다 자기 자리를 든다.** 한 줄에 호출이 둘일 수 있으므로(그 전제 위에서 라벨이 남의 값을
+    /// 집던 결함을 이미 고쳤다) 링크도 줄이 아니라 **그 호출의 범위**에서 id 를 얻어야 한다.
+    id_rel: u32 = 0,
+    id_len: u8 = 0,
+    /// 이 호출이 **어떻게 끝났나**(AV2 — 계약 §2.2·§3.2). 이미지와 결과를 못 찾은 호출은 기본값이다.
+    ///
+    /// **`Hit` 안에 든다**(라벨처럼 나란한 배열이 아니라). 요약은 **뒤에 오는 줄**에서 만들어져 **앞의
+    /// 호출**에 붙으므로, 나란한 배열이면 「스캔 순서대로 append」 규율이 깨져 정렬이 어긋난다.
+    result: ResultSummary = .{},
+};
+
+/// 호출의 **결말** — 화면의 요약 칸(계약 §2.2)이 읽는 값. **provider 가 쓴 것만 담는다.**
+///
+/// 실측(2026-09-07, 이 맥의 최근 Claude 12 · Codex 13 세션)이 이 모양을 정했다. 계획 초안은 「결과의
+/// **첫 줄**과 크기」였는데, 첫 줄은 대부분 잡음이었다 — Codex 첫 줄의 상위는 `Script completed`
+/// (133,852) · `Chunk ID`(14,940) · 파일명이고, 「무엇이 어떻게 끝났나」를 말하는 것은 극히 일부다.
+/// 그래서 **크기(줄 수)** 를 언제나 쓰고, **실패**는 provider 가 적었을 때만 말한다(사용자 결정 2026-09-07).
+pub const ResultSummary = struct {
+    /// 결과 레코드를 실제로 찾았나. 못 찾은 호출(취소·아직 안 끝난 것)은 false 이고, 그때 화면은 요약
+    /// 자리를 **비운다** — 「모른다」를 「0 줄」로 적지 않는다.
+    found: bool = false,
+    /// provider 가 **실패라고 적었나.** 우리가 명령이나 출력을 해석해 판정하지 않는다(계약 §2.3).
+    /// 근거는 둘뿐이다 — Claude `"is_error":true`(실측 714/40,424), Codex 결과 첫 줄의 `Exit code: N`·
+    /// `exit=N`(N≠0).
+    failed: bool = false,
+    /// 결과 텍스트의 줄 수(개행 + 1). 실측 Claude 중앙 5 · p99 82 · 최대 747.
+    lines: u32 = 0,
 };
 
 /// 같은 메시지(= 같은 줄)에 붙은 여러 장 중 **몇 번째**인가(§2.2).
@@ -272,6 +301,40 @@ const codex_custom_tool_call_marker = "\"type\":\"custom_tool_call\"";
 const codex_function_call_marker = "\"type\":\"function_call\"";
 
 const name_key = "\"name\":\"";
+/// 결과 레코드의 마커(AV2). **호출 마커와 안 겹친다** — 닫는 따옴표까지 들으므로
+/// `"custom_tool_call"` 이 `"custom_tool_call_output"` 에 안 걸리는 것과 같은 규율이다.
+const claude_tool_result_marker = "\"type\":\"tool_result\"";
+const codex_custom_output_marker = "\"type\":\"custom_tool_call_output\"";
+const codex_function_output_marker = "\"type\":\"function_call_output\"";
+
+/// 결과 마커를 찾을 **창**. 줄 머리에서 이만큼만 본다.
+///
+/// ⚠️ **실측이 이 창을 강제했다**(2026-09-07, 3.2 GB Codex rollout). 결과 마커를 **줄 전수**로 훑는
+/// 판은 5.1 초 → 7.4 초로 **+2.3 초(+46%)** 였다. 마커 탐색은 줄마다 전 바이트를 지나므로 그 자체가
+/// 스캔 비용이고, 이 파일은 줄 하나가 평균 5 KB 다.
+///
+/// **창은 실측으로 정했다**: Claude `"type":"tool_result"` 는 중앙 221 · **최대 250**, Codex 출력
+/// 마커는 중앙 74 · p99.9 90 이다. 512 B 는 Claude 최대의 2 배다.
+///
+/// **창 밖이면 못 잡는다 — 그 대가를 실제로 셌다**: 코퍼스 225,004 건 중 창 밖은 **132 건(0.07%)**
+/// 이고 **그 132 건이 전부 `compacted` 줄**이다(이전 대화 재수록 — 위에서 통째로 건너뛴다). 즉 이
+/// 창이 실제로 잃는 것은 **0 건**이다. 못 잡으면 그 호출은 요약 없이 남는다(틀린 값을 적지 않는다).
+const result_search_window: usize = 512;
+
+/// 호출 id 의 키. Claude 는 호출 레코드 안의 `"id"`, Codex 는 `"call_id"` 다.
+///
+/// ⚠️ `"id\":\"` 는 **여는 따옴표를 포함**하므로 `"tool_use_id":"` 에는 걸리지 않는다(그 앞 글자가 `_`
+/// 다). 그 성질이 없으면 결과 레코드의 id 를 호출 id 로 잘못 집는다.
+const id_key = "\"id\":\"";
+const call_id_key = "\"call_id\":\"";
+const tool_use_id_key = "\"tool_use_id\":\"";
+/// 결과 본문의 키. **따옴표를 안 붙인다** — 값이 문자열(`"…"`)일 수도 배열(`[…]`)일 수도 있어서
+/// 한 번 찾고 **다음 한 바이트**로 갈래를 정한다. 실측: Codex 출력 184,202 건 중 135,085 건이 배열이다.
+const content_key_base = "\"content\":";
+const output_key_base = "\"output\":";
+const text_key = "\"text\":\"";
+/// Claude 가 **자기가** 적는 실패 표시. 우리가 판정하지 않는다는 계약(§2.3)의 근거다.
+const is_error_true = "\"is_error\":true";
 /// 대상 문자열의 자리를 정하는 키들. **순서가 계약이다**(계약 §2.2) — 앞의 것이 있으면 그것을 쓴다.
 const description_key = "\"description\":\"";
 const file_path_key = "\"file_path\":\"";
@@ -459,7 +522,10 @@ fn scanClaudeToolUses(
         const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
         // 대상이 없으면 **이름이 대상이다** — 「무엇을 했는지」를 못 적느니 도구 이름이라도 적는다.
         const target = pickClaudeTarget(scope, after) orelse name;
-        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity);
+        // **자기 레코드 범위 안에서** id 를 찾는다(위 `scope` 와 같은 이유 — 한 줄에 호출이 둘이면
+        // 줄 전체에서 찾은 id 는 남의 것일 수 있다).
+        const id = findQuotedValueFull(scope, after, id_key);
+        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id);
         if (end == line.len) break;
     }
 }
@@ -484,7 +550,9 @@ fn scanCodexToolCalls(
     const name = findQuotedValue(scope, after, name_key) orelse return;
     const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
     const target = pickCodexTarget(scope, after) orelse name;
-    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity);
+    // Codex 의 `call_id` 는 `type` **앞에** 올 수 있어 범위의 처음부터 찾는다(범위는 위에서 닫았다).
+    const id = findQuotedValueFull(scope, 0, call_id_key);
+    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id);
 }
 
 /// 화면에 적을 **대상**의 자리를 고른다. 순서가 계약이다(§2.2) — 실측이 정한 순서다:
@@ -545,11 +613,21 @@ fn appendActivity(
     name: Span,
     kind: Kind,
     activity: Activity,
+    /// 이 호출의 id(AV2). 없거나 상한을 넘으면 **링크를 안 한다** — 잘라 비교하면 남의 결과를 집는다.
+    id: ?Span,
 ) !void {
     if (target.len == 0) return;
     if (target.len > std.math.maxInt(u32)) return;
     // 이름은 줄 시작 상대라 u32/u16 에 담는다. 한 줄 상한(16 MiB) 안이면 도달하지 않는 방어다.
     if (name.start > std.math.maxInt(u32) or name.len > std.math.maxInt(u16)) return;
+    var id_rel: u32 = 0;
+    var id_len: u8 = 0;
+    if (id) |v| {
+        if (v.len > 0 and v.len <= max_call_id_bytes and v.start <= std.math.maxInt(u32)) {
+            id_rel = @intCast(v.start);
+            id_len = @intCast(v.len);
+        }
+    }
     try out.append(allocator, .{
         .line_offset = line_offset,
         .data_offset = line_offset + target.start,
@@ -559,10 +637,267 @@ fn appendActivity(
         .activity = activity,
         .name_rel = @intCast(name.start),
         .name_len = @intCast(name.len),
+        .id_rel = id_rel,
+        .id_len = id_len,
     });
 }
 
 const Span = struct { start: usize, len: usize };
+
+// ── AV2 · 호출과 결과를 잇는다 (계약 §3.2) ─────────────────────────────────────────────────────
+
+/// 결과가 가리키는 **호출 id** 와 그 결말.
+pub const ResultRecord = struct {
+    /// 줄 안 상대 자리. 링크는 이 바이트를 **복사해** 든다 — 그 줄은 곧 이월 버퍼에서 사라진다.
+    id: Span,
+    summary: ResultSummary,
+};
+
+/// 이 줄이 **결과 레코드**면 그 id 와 요약. 아니면 null.
+///
+/// **호출 마커와 안 겹친다**: Codex 출력 마커는 `_output"` 까지 포함하고, Claude 결과는
+/// `"type":"tool_result"` 다. 그래서 같은 줄이 호출이자 결과로 읽히지 않는다.
+pub fn scanResultLine(line: []const u8) ?ResultRecord {
+    if (line.len == 0 or line.len > max_line_bytes) return null;
+    // compacted 는 이전 대화를 통째로 재수록한다 — 그 안의 결과를 세면 **지나간 호출**에 엉뚱한 결말이
+    // 붙는다(이미지 패스가 같은 이유로 이 줄을 통째로 건너뛴다).
+    if (isCompacted(line)) return null;
+    // **창 안에서만 본다**(`result_search_window` 의 실측 근거를 참조).
+    const head = line[0..@min(line.len, result_search_window)];
+
+    if (std.mem.indexOf(u8, head, claude_tool_result_marker)) |m| {
+        const id = findQuotedValueFull(line, 0, tool_use_id_key) orelse return null;
+        const body = claudeBody(line, m + claude_tool_result_marker.len);
+        if (!body.parsed) return null; // 본문을 못 읽었으면 「모른다」다 — 0 줄이라 적지 않는다
+        return .{
+            .id = id,
+            .summary = .{
+                .found = true,
+                // **provider 가 적은 것만** 믿는다(계약 §2.3) — 실측 714/40,424 가 이 필드를 든다.
+                .failed = errorFlagAfter(line, body.end),
+                .lines = body.lines,
+            },
+        };
+    }
+    if (std.mem.indexOf(u8, head, codex_custom_output_marker) orelse
+        std.mem.indexOf(u8, head, codex_function_output_marker)) |m|
+    {
+        const id = findQuotedValueFull(line, 0, call_id_key) orelse return null;
+        const body = codexBody(line, m);
+        if (!body.parsed) return null; // 위와 같은 이유
+        return .{ .id = id, .summary = .{
+            .found = true,
+            .failed = codexFailed(line, body.first),
+            .lines = body.lines,
+        } };
+    }
+    return null;
+}
+
+/// 결과 본문의 **줄 수**와 **첫 줄의 자리**.
+const Body = struct {
+    /// 본문을 **실제로 찾았나**. 못 찾았으면 줄 수를 모르는 것이고, 그때 화면은 요약을 안 그린다 —
+    /// 「모른다」를 `0줄` 로 적지 않는다(빈 결과의 0 줄과는 다른 사실이다).
+    parsed: bool = false,
+    lines: u32 = 0,
+    first: Span = .{ .start = 0, .len = 0 },
+    /// 값의 **끝 다음** 자리(문자열이면 닫는 따옴표). 실패 표시를 그 뒤 창에서만 찾는다.
+    end: usize = 0,
+};
+
+/// 값의 첫 바이트 자리. 키는 **창 안에서** 찾는다(마커와 같은 자리에 있다 — 실측 Claude `"content":`
+/// 최대 271, Codex `"output":` 중앙 194).
+fn bodyValueStart(line: []const u8, from: usize, key: []const u8) ?usize {
+    // ⚠️ **마커 뒤에서 찾는다.** Claude 줄에는 바깥 `message.content`(배열)가 **먼저** 나오므로, 줄
+    // 머리부터 찾으면 그 배열을 본문으로 착각한다 — 그러면 줄 수가 조용히 0 이 된다(판정자가 잡았다).
+    const limit = @min(line.len, from + result_search_window);
+    if (from >= limit) return null;
+    const k = std.mem.indexOfPos(u8, line[0..limit], from, key) orelse return null;
+    const v = k + key.len;
+    return if (v < line.len) v else null;
+}
+
+/// **Claude** 결과의 줄 수. 값의 **끝을 찾아 그 안만** 센다.
+///
+/// ⚠️ 꼬리까지 세면 안 된다 — Claude 는 `content` 뒤에 `toolUseResult` 로 **같은 텍스트를 다시** 싣는다.
+/// 실측(2026-09-07): 꼬리 세기가 정확한 값과 다른 비율이 **81.1%(32,849/40,495)** 이고 대개 두 배다.
+/// 값이 작아서(중앙 318 B · p99 21 KB) 끝을 찾는 대가는 싸다.
+fn claudeBody(line: []const u8, from: usize) Body {
+    const v = bodyValueStart(line, from, content_key_base) orelse return .{};
+    switch (line[v]) {
+        '"' => {
+            // **여는 따옴표 다음**부터가 값이다. 빈 값(`""`)은 길이 0 이라 `spanLines` 가 0 줄로 답한다.
+            const span = escapedSpanFrom(line, v + 1) orelse return .{};
+            return .{
+                .parsed = true,
+                .lines = spanLines(line, span),
+                .first = firstLineSpan(line, span),
+                .end = span.start + span.len,
+            };
+        },
+        // 배열(text 블록) — **첫 원소만** 센다. 실측 122/40,424(0.3%)이고, 배열의 끝을 안전하게 찾으려면
+        // JSON 을 실제로 파싱해야 한다(문자열 안의 `]` 때문에). 모자랄 수 있음을 여기 적어 둔다.
+        '[' => {
+            const span = findEscapedValueFull(line, v, text_key) orelse return .{};
+            return .{
+                .parsed = true,
+                .lines = spanLines(line, span),
+                .first = firstLineSpan(line, span),
+                .end = span.start + span.len,
+            };
+        },
+        else => return .{},
+    }
+}
+
+/// **Codex** 결과의 줄 수. 값 시작부터 **줄 끝까지** 센다 — 끝을 따로 찾지 않는다.
+///
+/// 실측(2026-09-07)이 이 지름길을 허락했다: 비어 있지 않은 출력 **179,396 건에서 꼬리 세기가 정확한
+/// 줄 수와 완전히 같았고**, 다른 2.7% 는 전부 「빈 출력」이라 아래 빈 값 검사가 가른다. 값 뒤에 오는
+/// 것은 `call_id`·`type` 뿐이라 개행이 없기 때문이다.
+///
+/// **왜 지름길이 필요한가**: 값의 끝을 찾으면 값 전체를 한 번 더 지나야 하는데, 3.2 GB rollout 에서
+/// 그 한 패스가 초 단위다(실측). 배열 형태(135,085/184,202)에서는 원소를 이어 세야 해서 더 든다.
+fn codexBody(line: []const u8, from: usize) Body {
+    const v = bodyValueStart(line, from, output_key_base) orelse return .{};
+    const rest = switch (line[v]) {
+        // 빈 문자열 `""` 은 **0 줄**이다(「없다」와 「한 줄」을 가른다).
+        // 빈 값은 **0 줄이라는 사실**이다 — 「모른다」가 아니다.
+        '"' => blk: {
+            if (v + 1 < line.len and line[v + 1] == '"') return .{ .parsed = true, .end = v + 2 };
+            break :blk line[v + 1 ..];
+        },
+        '[' => blk: {
+            if (v + 1 < line.len and line[v + 1] == ']') return .{ .parsed = true, .end = v + 2 };
+            break :blk line[v + 1 ..];
+        },
+        else => return .{},
+    };
+    const first = if (std.mem.indexOf(u8, rest, text_key)) |t|
+        firstLineSpanIn(line, (v + 1) + t + text_key.len)
+    else
+        firstLineSpanIn(line, v + 1);
+    return .{ .parsed = true, .lines = countEscapedNewlines(rest) +| 1, .first = first };
+}
+
+/// 값 하나의 줄 수 = 이스케이프된 개행 + 1. 빈 값은 0 줄이다(「없다」와 「한 줄」을 가른다).
+fn spanLines(line: []const u8, v: Span) u32 {
+    if (v.len == 0) return 0;
+    return countEscapedNewlines(line[v.start .. v.start + v.len]) +| 1;
+}
+
+fn firstLineSpan(line: []const u8, v: Span) Span {
+    const s = line[v.start .. v.start + v.len];
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, s, i, '\\')) |b| {
+        if (b + 1 >= s.len) break;
+        if (s[b + 1] == 'n') return .{ .start = v.start, .len = b };
+        i = b + 2;
+    }
+    return v;
+}
+
+/// 끝을 모르는 자리에서의 **첫 줄** — 개행이나 값의 닫는 따옴표 중 먼저 오는 곳까지다.
+fn firstLineSpanIn(line: []const u8, start: usize) Span {
+    if (start >= line.len) return .{ .start = start, .len = 0 };
+    const s = line[start..];
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        switch (s[i]) {
+            '\\' => {
+                if (i + 1 < s.len and s[i + 1] == 'n') return .{ .start = start, .len = i };
+                i += 1;
+            },
+            '"' => return .{ .start = start, .len = i },
+            else => {},
+        }
+    }
+    return .{ .start = start, .len = s.len };
+}
+
+/// **이스케이프를 인지해** 개행(`\n`)을 센다.
+///
+/// ⚠️ 그냥 `\n` 을 세면 안 된다 — 실측(2026-09-07)에서 **Codex 결과의 24.0%** 가 `\\n`(백슬래시 자체를
+/// 이스케이프한 것)이었다. 코드·경로가 담긴 출력에 흔하고, 그것을 개행으로 세면 「3 줄」이 「12 줄」이 된다.
+/// Claude 는 0.9% 라 티가 덜 나지만 규칙은 하나여야 한다.
+fn countEscapedNewlines(s: []const u8) u32 {
+    var n: u32 = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, s, i, '\\')) |b| {
+        if (b + 1 >= s.len) break;
+        if (s[b + 1] == 'n') n +|= 1;
+        // 이스케이프된 **한 글자**를 건너뛴다. 이것이 `\\n` 을 개행으로 안 세는 유일한 이유다.
+        i = b + 2;
+    }
+    return n;
+}
+
+/// Claude 의 실패 표시. **본문 값이 끝난 자리 뒤 창에서만** 찾는다.
+///
+/// ⚠️ 줄 전수로 훑으면 결과 하나가 616 KB 까지 가는 자리에서 그 자체가 스캔 비용이 된다. 실측
+/// (2026-09-07): `is_error":true` 는 **715/715 가 `content` 값 뒤**이고 거리가 **중앙·p99·최대 모두
+/// 2 바이트**다(JSON 의 `","` 하나). 창 512 B 는 그 256 배다.
+fn errorFlagAfter(line: []const u8, end: usize) bool {
+    if (end >= line.len) return false;
+    const limit = @min(line.len, end + result_search_window);
+    return std.mem.indexOf(u8, line[end..limit], is_error_true) != null;
+}
+
+/// Codex 가 **자기가 적은** 실패 표시인가. 명령이나 출력을 해석하지 않는다(계약 §2.3) — 결과의 **첫
+/// 줄**이 도구가 쓴 상태 줄일 때만 본다.
+///
+/// 실측(첫 줄 분포): `Exit code: 0` 7,076 · `exit=0` 504 · `exit=1` 255 · `exit=8` 60 ·
+/// `exit=undefined` 594 · `exit=running` 55. 두 표기가 다 있고, **숫자가 0 이 아닐 때만** 실패다
+/// (`undefined`·`running` 은 끝나지 않은 것이라 실패가 아니다).
+fn codexFailed(line: []const u8, first: Span) bool {
+    if (first.len == 0) return false;
+    const s = line[first.start .. first.start + first.len];
+    const digits = if (std.mem.startsWith(u8, s, "Exit code: "))
+        s["Exit code: ".len..]
+    else if (std.mem.startsWith(u8, s, "exit="))
+        s["exit=".len..]
+    else
+        return false;
+    var seen_digit = false;
+    var nonzero = false;
+    for (digits) |c| {
+        if (c < '0' or c > '9') break;
+        seen_digit = true;
+        if (c != '0') nonzero = true;
+    }
+    return seen_digit and nonzero;
+}
+
+/// `findQuotedValue` 의 **창 없는** 판. 결과 레코드의 id 는 줄 머리에서 멀 수 있다 — 실측
+/// `tool_use_id` 최대 4,571 · Codex `call_id` 최대 7,884,001 이라 512 B 창으로는 못 찾는다.
+/// 한 줄에 레코드가 하나라(계약 §3.1) 줄 전체를 봐도 남의 값을 집지 않는다.
+fn findQuotedValueFull(line: []const u8, from: usize, key: []const u8) ?Span {
+    const k = std.mem.indexOfPos(u8, line, from, key) orelse return null;
+    const start = k + key.len;
+    const end = std.mem.indexOfScalarPos(u8, line, start, '"') orelse return null;
+    return .{ .start = start, .len = end - start };
+}
+
+/// `findEscapedValue` 의 **끝까지** 판. 줄 수를 세려면 값 전체가 필요하다(라벨과 달리 잘린 자리로는
+/// 셀 수 없다). 끝은 **여는 따옴표의 짝**이고, 그 앞 백슬래시가 홀수면 그 따옴표는 값의 일부다.
+fn findEscapedValueFull(line: []const u8, from: usize, key: []const u8) ?Span {
+    const k = std.mem.indexOfPos(u8, line, from, key) orelse return null;
+    return escapedSpanFrom(line, k + key.len);
+}
+
+/// 여는 따옴표 **다음** 자리(`value_start`)부터 값의 끝까지. 끝은 **짝이 맞는 따옴표**이고, 그 앞
+/// 백슬래시가 홀수면 그 따옴표는 값의 일부다.
+fn escapedSpanFrom(line: []const u8, value_start: usize) ?Span {
+    var i = value_start;
+    while (std.mem.indexOfScalarPos(u8, line, i, '"')) |q| {
+        var b = q;
+        var bs: usize = 0;
+        while (b > value_start and line[b - 1] == '\\') : (bs += 1) b -= 1;
+        if (bs % 2 == 0) return .{ .start = value_start, .len = q - value_start };
+        i = q + 1;
+    }
+    return null;
+}
 
 /// `from`부터 `key_search_window` 안에서 `key`를 찾고, 그 뒤 따옴표 값의 범위를 돌려준다.
 /// base64와 mime 문자열에는 JSON 이스케이프가 없으므로 다음 `"`가 곧 끝이다.
@@ -632,6 +967,26 @@ pub const max_hits_per_file: usize = 4096;
 /// `Hit` 이 32 바이트 미만이므로 16,384개라도 512 KB 다.
 pub const max_activity_hits_per_file: usize = 16384;
 
+/// 호출 id 의 최대 길이(AV2). 실측(2026-09-07): Claude 는 30 고정, Codex 는 29 또는 41(최대 41).
+/// 그 1.17 배다. **넘는 id 는 링크하지 않는다** — 잘라서 비교하면 남의 결과를 집는다.
+pub const max_call_id_bytes: usize = 48;
+
+/// 결과를 기다리는 호출을 몇 개까지 들고 있나. 실측 호출→결과 거리는 Claude 중앙 1 · Codex 중앙 3 ·
+/// **최대 48 줄**이라 그 5 배가 넘는다. 넘치면 가장 오래된 것을 덮는다 — 그 자리는 이미 결과가 없는
+/// 호출(취소)일 가능성이 크고, 결과는 늘 가까이 오기 때문이다.
+///
+/// **줄 창이 아니라 개수 창이다**(계약 §3.2 — 「줄 수로 창을 고정하지 않는다」). 사이에 `reasoning` 이
+/// 몇 줄 끼든 그 사이에 **다른 호출이 256 개** 들어오지 않는 한 링크는 산다.
+pub const max_pending_calls: usize = 256;
+
+/// 결과를 기다리는 호출 하나. id 는 **사본**이다 — 그 줄은 곧 이월 버퍼에서 사라진다.
+const PendingCall = struct {
+    id: [max_call_id_bytes]u8 = undefined,
+    /// 0 이면 죽은 자리(이미 결말이 붙었다).
+    id_len: u8 = 0,
+    hit_index: u32 = 0,
+};
+
 /// 청크로 흘러오는 파일을 줄 경계로 이어 붙여 훑는다.
 ///
 /// **이 타입이 있는 이유는 청크 경계다.** 64 KiB 씩 읽으면 마커도 base64 도 경계에 걸린다. 걸친 조각을
@@ -660,9 +1015,17 @@ pub const StreamScanner = struct {
     /// 이월 버퍼를 앞으로 당긴 **횟수**. 진단용이자 회귀 가드다 — 개행을 못 만난 청크에서 이 값이
     /// 오르면 긴 줄 하나가 O(N²) 로 바이트를 옮기고 있다는 뜻이다(실측 52.9 초 → 10.1 초 수정).
     carry_moves: u64 = 0,
+    /// 아직 결과를 못 만난 호출들(AV2). **링 버퍼다** — 넘치면 가장 오래된 것을 덮는다.
+    pending: std.ArrayList(PendingCall) = .empty,
+    /// 링의 가장 오래된 자리. `pending` 이 상한에 닿기 전에는 언제나 0 이다.
+    pending_head: usize = 0,
+    /// **살아 있는** 기다림의 수(죽은 자리를 뺀 것). 0 이면 결과 줄을 볼 이유가 아예 없다 —
+    /// 그 짧은 회로가 큰 파일에서 결과 탐색을 통째로 건너뛴다.
+    pending_live: usize = 0,
 
     pub fn deinit(self: *StreamScanner, allocator: std.mem.Allocator) void {
         self.carry.deinit(allocator);
+        self.pending.deinit(allocator);
         self.* = .{};
     }
 
@@ -678,17 +1041,22 @@ pub const StreamScanner = struct {
     /// 버리는 방식은 그 물음의 **정반대**를 답한다 — 갤러리가 IG7 에서 똑같이 겪었다(151 장 중
     /// 4 장만 보이는데 그 4 장이 세션 맨 처음 것이었다). 실측 최악 세션은 활동이 상한의 11.1 배라
     /// 이 선택이 곧 기능의 쓸모다.
-    fn evictOldestActivities(self: *StreamScanner, out: *std.ArrayList(Hit)) void {
+    /// ⚠️ **이 함수는 `out` 의 인덱스를 무효화한다** — 제자리 압축이라 살아남은 항목의 자리가 앞으로
+    /// 당겨진다. 그 배열을 가리키는 인덱스를 드는 소비자(AV2 의 대기 링)는 `remapPendingAfterEvict`
+    /// 로 다시 맞춰야 한다. 버린 개수를 돌려주는 이유가 그것이다.
+    fn evictOldestActivities(self: *StreamScanner, out: *std.ArrayList(Hit)) usize {
         // **1/8 씩 버린다.** 절반씩 버리면 항목 수가 8,192 ~ 16,384 를 오가 최악에는 상한의 절반만
         // 남는다 — 1/8 이면 14,336 ~ 16,384 로 유지되고 amortized 비용은 그대로다(퇴출 한 번에
         // O(n), 그 사이 n/8 개를 받으므로 항목당 상수).
         const drop = self.activity_count / 8;
-        if (drop == 0) return;
+        if (drop == 0) return 0;
         var dropped: usize = 0;
+        var boundary: usize = 0; // 마지막으로 버린 **옛 인덱스**
         var w: usize = 0;
-        for (out.items) |h| {
+        for (out.items, 0..) |h, i| {
             if (!h.kind.isImage() and dropped < drop) {
                 dropped += 1;
+                boundary = i;
                 continue;
             }
             out.items[w] = h;
@@ -698,6 +1066,8 @@ pub const StreamScanner = struct {
         self.activity_count -= dropped;
         self.activity_partial = true;
         self.partial = true;
+        self.remapPendingAfterEvict(boundary, dropped);
+        return dropped;
     }
 
     /// 방금 줄에서 나온 `Hit` 들을 받아들인다.
@@ -705,7 +1075,9 @@ pub const StreamScanner = struct {
     /// **이미지와 활동의 규율이 다르다.** 이미지는 상한에서 **더 안 받는다**(격자는 최신 우선 정렬이
     /// 뒤에서 이뤄지고, 실측상 한 파일 최대가 770 장이라 상한에 잘 안 닿는다). 활동은 상한의 11 배가
     /// 오는 파일이 있으므로 **일단 받고 오래된 쪽을 버린다** — 그래야 최신이 남는다.
-    fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) void {
+    /// 돌려주는 것은 **새로 받은 것들의 시작 인덱스**다 — 퇴출이 앞을 지웠으면 `before` 는 이미
+    /// 낡았다(AV2 의 링크가 그 범위를 쓴다).
+    fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) usize {
         var w = before;
         for (out.items[before..]) |h| {
             if (h.kind.isImage()) {
@@ -722,7 +1094,96 @@ pub const StreamScanner = struct {
             w += 1;
         }
         out.shrinkRetainingCapacity(w);
-        if (self.activity_count > max_activity_hits_per_file) self.evictOldestActivities(out);
+        if (self.activity_count > max_activity_hits_per_file) {
+            // 퇴출은 **앞**을 지운다 — 방금 받은 것들의 자리도 그만큼 당겨진다.
+            return before -| self.evictOldestActivities(out);
+        }
+        return before;
+    }
+
+    /// 이 줄이 결과 레코드면 **앞서 담은 호출**에 결말을 붙인다(계약 §3.2).
+    ///
+    /// **줄 수로 창을 고정하지 않는다** — Codex 는 사이에 `reasoning` 이 끼어 최대 48 줄 뒤다. 대신
+    /// 기다리는 호출의 **개수**로 유계다(`max_pending_calls`).
+    fn linkResult(self: *StreamScanner, line: []const u8, out: *std.ArrayList(Hit)) void {
+        // **기다리는 호출이 없으면 결과를 볼 이유가 없다.** 결과 탐색은 줄마다 도는 일이라, 이 한 줄이
+        // 상한에 걸린 큰 파일에서 그 비용을 통째로 없앤다.
+        if (self.pending_live == 0) return;
+        const rec = scanResultLine(line) orelse return;
+        const id = line[rec.id.start .. rec.id.start + rec.id.len];
+        const idx = self.takePending(id) orelse return;
+        if (idx < out.items.len) out.items[idx].result = rec.summary;
+    }
+
+    /// 방금 담은 호출들의 id 를 **복사해** 든다. 그 줄은 다음 청크에서 이월 버퍼와 함께 사라진다.
+    fn noteCalls(
+        self: *StreamScanner,
+        allocator: std.mem.Allocator,
+        line: []const u8,
+        out: *std.ArrayList(Hit),
+        from: usize,
+    ) !void {
+        for (out.items[from..], from..) |h, i| {
+            // **id 는 그 호출이 스스로 든다**(`id_rel`/`id_len`). 줄에서 다시 찾으면 한 줄에 호출이
+            // 둘일 때 남의 id 를 집는다 — 라벨이 같은 이유로 이미 범위를 닫았다.
+            if (h.kind.isImage() or h.id_len == 0) continue;
+            const end: usize = @as(usize, h.id_rel) + h.id_len;
+            if (end > line.len) continue;
+            const id = line[h.id_rel..end];
+            if (i > std.math.maxInt(u32)) continue;
+            var e: PendingCall = .{ .id_len = @intCast(id.len), .hit_index = @intCast(i) };
+            @memcpy(e.id[0..id.len], id);
+            if (self.pending.items.len < max_pending_calls) {
+                try self.pending.append(allocator, e);
+                self.pending_live += 1;
+            } else {
+                // 덮는 자리가 아직 살아 있었으면 그 하나가 죽는다(수가 안 는다).
+                if (self.pending.items[self.pending_head].id_len == 0) self.pending_live += 1;
+                self.pending.items[self.pending_head] = e;
+                self.pending_head = (self.pending_head + 1) % max_pending_calls;
+            }
+        }
+    }
+
+    /// 이 id 를 기다리던 호출의 자리. **최신부터** 본다 — 결과는 대개 바로 다음 줄이다(실측 중앙 1).
+    ///
+    /// 찾은 자리는 **죽인다**: 같은 id 의 두 번째 결과가 와도 앞의 것을 덮지 않는다.
+    fn takePending(self: *StreamScanner, id: []const u8) ?u32 {
+        const n = self.pending.items.len;
+        if (n == 0) return null;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const idx = (self.pending_head + n - 1 - k) % n;
+            const e = &self.pending.items[idx];
+            if (e.id_len == 0) continue;
+            if (std.mem.eql(u8, e.id[0..e.id_len], id)) {
+                e.id_len = 0;
+                self.pending_live -= 1;
+                return e.hit_index;
+            }
+        }
+        return null;
+    }
+
+    /// 퇴출이 `out` 을 압축한 뒤 **대기 인덱스를 다시 맞춘다**(AV2).
+    ///
+    /// ⚠️ `evictOldestActivities` 는 `out` 을 제자리 압축하므로 **그 배열을 가리키던 인덱스를 전부
+    /// 무효화한다.** 대기 링이 그런 인덱스를 드는 **첫 소비자**라, 이 자리가 없으면 퇴출 뒤에 온
+    /// 결과가 **남의 줄에 결말을 붙인다**(상한의 11 배가 오는 파일이 실제로 있다).
+    ///
+    /// `boundary` 는 마지막으로 버린 **옛 인덱스**다. 대기 항목은 언제나 활동이므로, 그 이하면 그
+    /// 호출 자체가 버려진 것이고(죽인다) 넘으면 버린 개수만큼 당기면 된다.
+    fn remapPendingAfterEvict(self: *StreamScanner, boundary: usize, dropped: usize) void {
+        if (dropped == 0) return;
+        for (self.pending.items) |*e| {
+            if (e.id_len == 0) continue;
+            if (e.hit_index <= boundary) {
+                e.id_len = 0;
+                self.pending_live -= 1;
+                continue;
+            }
+            e.hit_index -= @intCast(dropped);
+        }
     }
 
     /// 청크 하나를 먹인다. `chunk` 는 `self.consumed + self.carry.len` 위치부터의 바이트여야 한다.
@@ -748,8 +1209,20 @@ pub const StreamScanner = struct {
         while (std.mem.indexOfScalarPos(u8, buf, search, '\n')) |nl| {
             if (self.image_count < max_hits_per_file or self.activity_count < max_activity_hits_per_file) {
                 const before = out.items.len;
-                try scanLine(allocator, buf[used..nl], base + used, out);
-                self.admit(out, before);
+                const line = buf[used..nl];
+                // ⚠️ **compacted 를 가장 먼저 본다.** `scanLine` 이 그 줄에서 곧장 되돌아가는 것과 같은
+                // 이유이고(그 줄이 실측 파일 바이트의 41%), AV2 의 링크를 그 앞에 두면 그 절약이 통째로
+                // 사라진다 — 실측으로 3.2 GB 파일에서 그 실수가 +1.4 초였다.
+                const skip = isCompacted(line);
+                try scanLine(allocator, line, base + used, out);
+                // 퇴출이 돌면 `before` 가 낡는다 — 새로 받은 것의 시작을 `admit` 이 알려 준다.
+                const added_from = self.admit(out, before);
+                if (!skip) {
+                    // **결과를 먼저, 호출을 나중에.** 한 줄이 둘 다일 수는 없지만(마커가 배타적이다),
+                    // 순서를 이렇게 두면 「자기 자신에게 결말을 붙이는」 경로가 원리적으로 없다.
+                    self.linkResult(line, out);
+                    try self.noteCalls(allocator, line, out, added_from);
+                }
             } else {
                 self.partial = true;
             }
@@ -1808,4 +2281,242 @@ test "활동: 이미지 줄과 활동 줄은 서로를 오염시키지 않는다
     // 이미지 쪽은 활동 축을 갖지 않는다 — 두 축이 섞이면 필터가 거짓말을 한다.
     try testing.expectEqual(Activity.none, hits.items[1].activity);
     try testing.expect(hits.items[1].kind.isImage());
+}
+
+// ── AV2 판정자 — 호출과 결과를 잇는다 (계약 §3.2) ────────────────────────────────────────────
+//
+// **`StreamScanner` 로 태운다.** 링크는 줄 사이의 상태이므로 `scanBuffer`(줄 단위 헬퍼)로는 재지
+// 못한다 — 그리고 제품이 실제로 지나는 길도 `feed` 다.
+
+fn scanDocForTest(allocator: std.mem.Allocator, doc: []const u8, out: *std.ArrayList(Hit)) !void {
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    try scanner.feed(allocator, doc, out);
+}
+
+test "활동 결말: Claude 결과가 바로 다음 줄이면 붙고, is_error 가 실패다 (AV2)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01AB","name":"Bash","input":{"command":"ls","description":"목록"}}]}}
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01AB","content":"a\nb\nc"}]}}
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_02CD","name":"Bash","input":{"command":"false","description":"실패한다"}}]}}
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_02CD","content":"boom","is_error":true}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expect(out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 3), out.items[0].result.lines);
+    try testing.expect(!out.items[0].result.failed);
+    try testing.expect(out.items[1].result.found);
+    try testing.expectEqual(@as(u32, 1), out.items[1].result.lines);
+    // **우리가 판정한 것이 아니다** — provider 가 적은 `is_error` 다(계약 §2.3).
+    try testing.expect(out.items[1].result.failed);
+}
+
+test "활동 결말: Codex 결과가 몇 줄 뒤여도 붙는다 — 사이에 reasoning 이 낀다 (AV2)" {
+    // 실측 거리: Claude 중앙 1 · Codex 중앙 3 · 최대 48. **줄 창을 고정하지 않는다**는 계약이 이것이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_A1","type":"custom_tool_call","name":"exec","input":"ls -la"}}
+        \\{"payload":{"type":"reasoning","summary":[]}}
+        \\{"payload":{"type":"reasoning","summary":[]}}
+        \\{"payload":{"type":"reasoning","summary":[]}}
+        \\{"payload":{"call_id":"call_A1","type":"custom_tool_call_output","output":"exit=1\nboom"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expect(out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 2), out.items[0].result.lines);
+    // 첫 줄이 도구가 쓴 상태 줄이고 코드가 0 이 아니다.
+    try testing.expect(out.items[0].result.failed);
+}
+
+test "활동 결말: 끝나지 않은 호출은 요약이 없다 — 0 줄이라고 적지 않는다 (AV2)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_ZZ","type":"custom_tool_call","name":"exec","input":"sleep 999"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expect(!out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 0), out.items[0].result.lines);
+}
+
+test "활동 결말: id 가 다르면 남의 결과를 안 집는다 (AV2)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_X","type":"custom_tool_call","name":"exec","input":"first"}}
+        \\{"payload":{"call_id":"call_Y","type":"custom_tool_call","name":"exec","input":"second"}}
+        \\{"payload":{"call_id":"call_Y","type":"custom_tool_call_output","output":"only mine"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    // 앞의 호출은 **결과가 없다**. 뒤의 것에만 붙는다.
+    try testing.expect(!out.items[0].result.found);
+    try testing.expect(out.items[1].result.found);
+    try testing.expectEqual(@as(u32, 1), out.items[1].result.lines);
+}
+
+test "활동 결말: `\\n` 은 개행이 아니다 — 실측 24% 오차의 회귀 가드 (AV2)" {
+    // 실측(2026-09-07): Codex 결과의 **24.0%** 가 이스케이프된 백슬래시였다. 그냥 세면 3 줄짜리가
+    // 12 줄이 된다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_E","type":"custom_tool_call","name":"exec","input":"grep"}}
+        \\{"payload":{"call_id":"call_E","type":"custom_tool_call_output","output":"printf 'a\\nb'"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expect(out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 1), out.items[0].result.lines);
+}
+
+test "활동 결말: Codex 배열 출력도 원소를 전부 센다 (AV2)" {
+    // 실측: 출력 184,202 건 중 **135,085 건이 배열**이고 원소는 평균 2.09 개다. 첫 원소만 세면 조용히 모자란다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_L","type":"function_call","name":"shell","arguments":"ls"}}
+        \\{"payload":{"call_id":"call_L","type":"function_call_output","output":[{"type":"output_text","text":"a\nb"},{"type":"output_text","text":"c\nd"}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expect(out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 3), out.items[0].result.lines);
+}
+
+test "활동 결말: compacted 안의 결과는 안 붙는다 — 지나간 호출에 남의 결말이 붙지 않게 (AV2)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_C","type":"custom_tool_call","name":"exec","input":"ls"}}
+        \\{"payload":{"type":"compacted","message":"{\"call_id\":\"call_C\",\"type\":\"custom_tool_call_output\",\"output\":\"old\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expect(!out.items[0].result.found);
+}
+
+test "활동 결말: 출력 레코드 자신은 호출로 안 세어진다 (AV2)" {
+    // `"custom_tool_call"` 마커가 `"custom_tool_call_output"` 에 걸리면 결과 줄마다 유령 호출이 선다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_O","type":"custom_tool_call_output","output":"orphan"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "활동 결말: 줄 수를 모르면 요약을 안 붙인다 — 「모른다」와 「빈 결과」를 가른다 (AV2)" {
+    // 적대적 검증 1 회차. 본문을 못 읽었는데 `found=true, lines=0` 이면 화면이 **「0줄」이라고 거짓말**한다.
+    // 실측: 247 MB Claude 세션에서 그런 결과가 380 건(3.9%)이고, 전부 본문이 이미지·참조 블록이라
+    // 줄 수가 애초에 없는 것들이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_09IM","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_09IM","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    // 이미지 `Hit` 도 함께 서므로 활동 `Hit` 만 골라 본다.
+    var activity: ?Hit = null;
+    for (out.items) |h| if (!h.kind.isImage()) {
+        activity = h;
+    };
+    try testing.expect(activity != null);
+    try testing.expect(!activity.?.result.found);
+}
+
+test "활동 결말: 빈 결과는 «0 줄» 이라는 사실이다 (AV2)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_EMPTY","type":"custom_tool_call","name":"exec","input":"true"}}
+        \\{"payload":{"call_id":"call_EMPTY","type":"custom_tool_call_output","output":""}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    // 찾았고(=결과가 왔고), 줄 수는 0 이다. 위 판정자의 「못 찾았다」와 **다른 사실**이다.
+    try testing.expect(out.items[0].result.found);
+    try testing.expectEqual(@as(u32, 0), out.items[0].result.lines);
+}
+
+test "활동 결말: 기다림은 개수로 유계다 — 너무 멀면 안 붙는다 (AV2)" {
+    // `max_pending_calls` 는 **줄 창이 아니라 개수 창**이다(계약 §3.2). 그 사이를 실제로 넘겨 본다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator,
+        \\{"payload":{"call_id":"call_FIRST","type":"custom_tool_call","name":"exec","input":"first"}}
+    );
+    try doc.append(allocator, '\n');
+    var i: usize = 0;
+    while (i < max_pending_calls) : (i += 1) {
+        try doc.print(
+            allocator,
+            "{{\"payload\":{{\"call_id\":\"call_f{d}\",\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":\"x\"}}}}\n",
+            .{i},
+        );
+    }
+    try doc.appendSlice(allocator,
+        \\{"payload":{"call_id":"call_FIRST","type":"custom_tool_call_output","output":"too late"}}
+    );
+    try doc.append(allocator, '\n');
+    try scanDocForTest(allocator, doc.items, &out);
+    try testing.expectEqual(max_pending_calls + 1, out.items.len);
+    // 첫 호출은 링에서 밀려났다 — 결말이 안 붙는다(틀린 결말이 붙는 것보다 낫다).
+    try testing.expect(!out.items[0].result.found);
+    // 그리고 **아무 데도 잘못 붙지 않았다**.
+    for (out.items) |h| try testing.expect(!h.result.found);
+}
+
+test "활동 결말: 같은 id 의 두 번째 결과가 앞의 결말을 덮지 않는다 (AV2)" {
+    // 적대적 검증 4 회차 — 뮤테이션(쓴 자리를 안 죽인다)이 **살아남아** 이 판정자가 생겼다.
+    // 죽이는 것은 표시만의 문제가 아니다: 살아 있는 기다림 수(`pending_live`)가 같은 자리에서 두 번
+    // 줄어 **0 아래로 내려간다**(usize 라 즉사한다).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    // ⚠️ **다른 호출 하나를 살려 둔다.** 안 그러면 살아 있는 기다림이 0 이 되어 짧은 회로가 먼저
+    // 막아 버리고, 그러면 이 판정자가 「쓴 자리를 죽이는가」를 못 잰다(4 회차에서 실제로 그랬다).
+    const doc =
+        \\{"payload":{"call_id":"call_DUP","type":"custom_tool_call","name":"exec","input":"ls"}}
+        \\{"payload":{"call_id":"call_OTHER","type":"custom_tool_call","name":"exec","input":"sleep"}}
+        \\{"payload":{"call_id":"call_DUP","type":"custom_tool_call_output","output":"a\nb\nc"}}
+        \\{"payload":{"call_id":"call_DUP","type":"custom_tool_call_output","output":"x\ny\nz\nw\nv\nu\nt\ns\nr\nq"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expect(out.items[0].result.found);
+    // **첫 결과가 이긴다** — 계약 §3.2 의 「id 가 맞는 **첫** 결과 레코드를 집는다」가 그 규칙이다.
+    try testing.expectEqual(@as(u32, 3), out.items[0].result.lines);
 }

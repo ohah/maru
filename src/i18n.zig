@@ -364,6 +364,11 @@ const Table = struct {
     image_gallery_remote_unsupported: [:0]const u8,
     image_gallery_empty: [:0]const u8,
     image_gallery_none_of_kind: [:0]const u8,
+    /// 활동 줄의 **결과 요약**(AV2 — 활동 뷰 계약 §2.2). 숫자 뒤에 붙는 단위라 「12줄」처럼 이어 붙인다.
+    image_gallery_result_lines_suffix: [:0]const u8,
+    /// 그 호출이 **실패로 끝났다**. provider 가 적은 것만 근거로 쓴다(계약 §2.3) — 우리가 명령이나
+    /// 출력을 해석해 판정하지 않는다.
+    image_gallery_result_failed: [:0]const u8,
     image_gallery_partial: [:0]const u8,
     /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
     image_gallery_scanning: [:0]const u8,
@@ -1405,6 +1410,8 @@ const en: Table = .{
     .image_gallery_count_suffix = " images",
     .image_gallery_activity_count_suffix = " actions",
     .image_gallery_too_narrow = "Not enough room to show the list",
+    .image_gallery_result_lines_suffix = " lines",
+    .image_gallery_result_failed = "failed",
     .image_gallery_shown_of = "{0} of {1} images",
     .image_gallery_open_failed = "Could not open this image",
     .image_gallery_search_prompt = "Filter: ",
@@ -2027,6 +2034,8 @@ const ko: Table = .{
     .image_gallery_count_suffix = "장",
     .image_gallery_activity_count_suffix = "개",
     .image_gallery_too_narrow = "목록을 그릴 자리가 없습니다",
+    .image_gallery_result_lines_suffix = "줄",
+    .image_gallery_result_failed = "실패",
     .image_gallery_shown_of = "{1}장 중 {0}장",
     .image_gallery_open_failed = "이 이미지를 열 수 없습니다",
     .image_gallery_search_prompt = "거르기: ",

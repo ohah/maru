@@ -37,20 +37,23 @@ const Fixture = struct {
 };
 
 const Profile = struct {
+    const Axis = enum { release_id, tag, commit, manifest_sha };
     fixture: *Fixture,
     calls: usize = 0,
     baseline: bool = false,
     drift_at: usize = 0,
+    drift_axis: Axis = .release_id,
     storage_override: ?[]const u8 = null,
 
     pub fn predecessor(self: *@This()) !manifest.Predecessor {
         self.calls += 1;
         if (self.baseline) return error.ProfileMismatch;
+        const drift = self.drift_at == self.calls;
         return .{
-            .release_id = if (self.drift_at == self.calls) 78 else 77,
-            .tag = "v1.2.3",
-            .commit = commit,
-            .manifest_sha256 = &self.fixture.sha,
+            .release_id = if (drift and self.drift_axis == .release_id) 78 else 77,
+            .tag = if (drift and self.drift_axis == .tag) "v1.2.2" else "v1.2.3",
+            .commit = if (drift and self.drift_axis == .commit) "ffffffffffffffffffffffffffffffffffffffff" else commit,
+            .manifest_sha256 = if (drift and self.drift_axis == .manifest_sha) "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" else &self.fixture.sha,
         };
     }
 
@@ -59,13 +62,20 @@ const Profile = struct {
     }
 };
 
-const Deadline = struct {};
+const Deadline = struct {
+    fail: bool = false,
+    pub fn remaining(self: *@This()) !i128 {
+        if (self.fail) return error.TimedOut;
+        return 1;
+    }
+};
 
 const Downloader = struct {
     fixture: *Fixture,
     calls: usize = 0,
     deadline_address: usize = 0,
     fail: bool = false,
+    foreign_capture: bool = false,
 
     pub fn fetch(self: *@This(), deadline: anytype, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, expected: anytype, output: []u8) !composition.Downloaded {
         self.calls += 1;
@@ -74,6 +84,8 @@ const Downloader = struct {
         try std.testing.expectEqualStrings("v1.2.3", expected.tag);
         try std.testing.expectEqualStrings(&self.fixture.sha, expected.sha256);
         @memcpy(output[0..self.fixture.bytes.len], self.fixture.bytes);
+        if (self.foreign_capture)
+            return .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = expected.sha256, .bytes = self.fixture.bytes };
         return .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = expected.sha256, .bytes = output[0..self.fixture.bytes.len] };
     }
 };
@@ -82,6 +94,7 @@ const Authenticator = struct {
     calls: usize = 0,
     deadline_address: usize = 0,
     fail: bool = false,
+    break_cleanup: bool = false,
 
     pub fn authenticate(self: *@This(), deadline: anytype, allocator: std.mem.Allocator, predecessor: manifest.Predecessor, bytes: []const u8, file: anytype, _: [:0]const u8, _: []const u8, _: []u8, result: *authenticated_mod.AuthenticatedManifest) !void {
         self.calls += 1;
@@ -90,12 +103,18 @@ const Authenticator = struct {
         const observed = try file.revalidate();
         try std.testing.expectEqualStrings(predecessor.manifest_sha256, observed.sha256);
         var parsed = try manifest.parseCanonical(allocator, bytes);
-        errdefer parsed.deinit();
+        var transferred = false;
+        defer if (!transferred) parsed.deinit();
         const candidate = parsed.value();
         if (candidate.role != .a or candidate.release.id != predecessor.release_id or
             !std.mem.eql(u8, candidate.release.tag, predecessor.tag) or
             !std.mem.eql(u8, candidate.source.commit, predecessor.commit)) return error.InvalidPredecessor;
         result.* = .{ .owner = result, .parsed = parsed };
+        transferred = true;
+        if (self.break_cleanup) {
+            try std.Io.Dir.deleteFileAbsolute(std.testing.io, observed.path);
+            return error.AttestationMismatch;
+        }
     }
 };
 
@@ -134,7 +153,7 @@ test "upgrade profile authenticates A with one deadline and explicit cleanup" {
     try workspace.cleanup();
 }
 
-test "baseline and profile drift never publish" {
+test "baseline and every endorsement field drift at every fence never publish" {
     var fixture = try Fixture.init(std.testing.allocator);
     defer fixture.deinit(std.testing.allocator);
     var tmp = std.testing.tmpDir(.{});
@@ -151,9 +170,13 @@ test "baseline and profile drift never publish" {
     var authenticator = Authenticator{};
     try std.testing.expectError(error.ProfileMismatch, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
     try std.testing.expectEqual(@as(usize, 0), downloader.calls);
-    profile = .{ .fixture = &fixture, .drift_at = 2 };
-    try std.testing.expectError(error.AuthorityChanged, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
-    try std.testing.expect(result.value() == null);
+    inline for (std.meta.tags(Profile.Axis)) |axis| {
+        inline for (2..6) |drift_at| {
+            profile = .{ .fixture = &fixture, .drift_at = drift_at, .drift_axis = axis };
+            try std.testing.expectError(error.AuthorityChanged, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
+            try std.testing.expect(result.value() == null);
+        }
+    }
     try workspace.cleanup();
 }
 
@@ -198,6 +221,67 @@ test "pre-owned and aliased output fail before callbacks" {
     profile.storage_override = std.mem.asBytes(&result);
     try std.testing.expectError(error.InvalidOwner, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
     try std.testing.expectEqual(@as(usize, 0), downloader.calls);
+}
+
+test "final deadline expiry cleans authenticated output before publication" {
+    var fixture = try Fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var workspace: workspace_mod.Workspace = .{};
+    try workspace_mod.prepare(&workspace, try absolute(&tmp, "phase", &path));
+    var profile = Profile{ .fixture = &fixture };
+    var downloader = Downloader{ .fixture = &fixture };
+    var authenticator = Authenticator{};
+    var deadline = Deadline{ .fail = true };
+    var output: [manifest.max_manifest_bytes]u8 = undefined;
+    var attestation: [64]u8 = undefined;
+    var result: composition.ProfileManifestInput = .{};
+    try std.testing.expectError(error.TimedOut, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
+    try std.testing.expect(result.value() == null);
+    try workspace.cleanup();
+}
+
+test "foreign downloader capture is rejected before filesystem mutation" {
+    var fixture = try Fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var profile = Profile{ .fixture = &fixture };
+    var downloader = Downloader{ .fixture = &fixture, .foreign_capture = true };
+    var authenticator = Authenticator{};
+    var deadline = Deadline{};
+    var workspace: workspace_mod.Workspace = .{};
+    try workspace_mod.prepare(&workspace, try absolute(&tmp, "phase", &path));
+    var output: [manifest.max_manifest_bytes]u8 = undefined;
+    var attestation: [64]u8 = undefined;
+    var result: composition.ProfileManifestInput = .{};
+    try std.testing.expectError(error.InvalidDownload, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
+    try std.testing.expectEqual(@as(usize, 0), authenticator.calls);
+    try std.testing.expect(result.value() == null);
+    try workspace.cleanup();
+}
+
+test "uncertain cleanup preserves the top-level retry owner" {
+    var fixture = try Fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    var workspace: workspace_mod.Workspace = .{};
+    try workspace_mod.prepare(&workspace, try absolute(&tmp, "phase", &path));
+    var profile = Profile{ .fixture = &fixture };
+    var downloader = Downloader{ .fixture = &fixture };
+    var authenticator = Authenticator{ .break_cleanup = true };
+    var deadline = Deadline{};
+    var output: [manifest.max_manifest_bytes]u8 = undefined;
+    var attestation: [64]u8 = undefined;
+    var result: composition.ProfileManifestInput = .{};
+    try std.testing.expectError(error.CleanupFailed, run(&profile, &downloader, &authenticator, &deadline, &workspace, &output, &attestation, &result));
+    try std.testing.expectEqual(&result, result.owner.?);
+    try std.testing.expectError(error.CleanupFailed, result.deinit(std.testing.allocator));
 }
 
 test "production entrypoint remains concrete" {

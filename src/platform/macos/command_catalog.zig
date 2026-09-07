@@ -418,9 +418,19 @@ test "KB_SYM3 팔레트가 편집기 액션의 chord 를 표시한다 — 배선
     try std.testing.expectEqualStrings("⌥⌘L", formatChord(chordForAction(resolver, .toggle_find_in_selection).?, &buf));
     try std.testing.expectEqualStrings("⌥⌘D", formatChord(chordForAction(resolver, .toggle_find_diff_side).?, &buf));
 
-    // **chord 가 없는 편집기 액션은 null 이어야 한다** — 없는 것을 있다고 그리면 사용자가
-    // 안 되는 키를 누른다. 이 여섯이 왜 비어 있는지는 docs/configuration-input.md 가 소유한다.
-    inline for (.{ Action.fold_all, Action.fold_level_1, Action.fold_level_2, Action.fold_level_3 }) |a| {
+    // ~~**chord 가 없는 편집기 액션은 null 이어야 한다**~~ → **접기 다섯에 chord 가 생겼다**
+    // (2026-09-07 — docs/configuration-input.md 「접기 다섯의 chord」). VSCode 의 `⌘K ⌘0` 두 키
+    // 시퀀스에서 선행 `⌘K` 만 뗀 모양이다. **이 단언을 지우지 않고 뒤집는 이유**는 원래 목적이
+    // 그대로이기 때문이다: 팔레트가 **실제 배선과 같은 것**을 그려야 한다.
+    try std.testing.expectEqualStrings("⌥⌘0", formatChord(chordForAction(resolver, .fold_all).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘J", formatChord(chordForAction(resolver, .unfold_all).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘1", formatChord(chordForAction(resolver, .fold_level_1).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘2", formatChord(chordForAction(resolver, .fold_level_2).?, &buf));
+    try std.testing.expectEqualStrings("⌥⌘3", formatChord(chordForAction(resolver, .fold_level_3).?, &buf));
+
+    // **아직 비어 있는 것들은 여전히 `null` 이어야 한다** — 없는 것을 있다고 그리면 사용자가
+    // 안 되는 키를 누른다. 왜 비어 있는지는 docs/configuration-input.md 가 소유한다.
+    inline for (.{ Action.transform_to_uppercase, Action.transform_to_lowercase }) |a| {
         try std.testing.expect(chordForAction(resolver, a) == null);
     }
 

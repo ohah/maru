@@ -75994,6 +75994,20 @@ fn galleryImageHits(session: *const AppSession) usize {
     return n;
 }
 
+/// 갤러리 필터를 **원하는 것이 될 때까지** 돌린다.
+///
+/// **순환 순서에 기대지 않는다.** 판정자들이 「cycleFilter 를 두 번 부르면 execs」처럼 순서를 박아
+/// 두었더니, 순서를 실측에 맞춰 바꾸는 순간(H5 — 「읽기」가 1.6% 라 첫 전환이 빈 화면이었다)
+/// 여섯 개가 한꺼번에 깨졌다. 판정자는 **의도**(어느 필터를 보고 싶은가)를 적어야 한다.
+fn cycleGalleryTo(session: *AppSession, want: image_gallery_ops.Filter) !void {
+    var guard: usize = 0;
+    while (session.image_gallery.filter != want) {
+        guard += 1;
+        if (guard > 8) return error.FilterNotReachable; // 순환이 그 필터에 안 닿는다
+        try std.testing.expect(image_gallery_ops.cycleFilter(session));
+    }
+}
+
 const GalleryWait = struct {
     io: std.Io,
     deadline_ns: i96,
@@ -76669,20 +76683,35 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
     try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
 
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → reads
-    try std.testing.expectEqual(image_gallery_ops.Filter.reads, session.image_gallery.filter);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count()); // Read 호출은 없다
 
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → execs
+    // ── ③ **첫 전환이 가장 많은 것을 보여준다**(계약 §2.1 — 실측이 정한 순환 순서).
+    // 「읽기」가 첫 자리였을 때는 첫 Tab 이 거의 항상 빈 화면이었다(실측 1.6%, Codex 0 건).
+    try std.testing.expect(image_gallery_ops.cycleFilter(session));
     try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
     // **대상은 명령이 아니라 설명이다**(계약 §2.2) — 실측이 정한 순서를 화면까지 지킨다.
     try std.testing.expectEqualStrings("foo 찾기", session.image_gallery.labels.items[0].text());
 
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → all
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
-
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // → images 로 돌아온다
+    // ── ④ 네 자리를 다 도는가. **어느 순서든** 네 번이면 제자리로 돌아와야 한다.
+    var seen_reads = false;
+    var seen_all = false;
+    var step: usize = 0;
+    while (step < 3) : (step += 1) {
+        try std.testing.expect(image_gallery_ops.cycleFilter(session));
+        switch (session.image_gallery.filter) {
+            .reads => {
+                seen_reads = true;
+                try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count()); // Read 호출은 없다
+            },
+            .all => {
+                seen_all = true;
+                try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(seen_reads and seen_all);
+    // 네 번이면 제자리다 — 순환이 닫혀 있다.
     try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 }
@@ -76751,9 +76780,11 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
 
     // ── ① 필터를 넘기면 얹힌 것도 없어진다. 남으면 격자 자리에 강조가 그려진다.
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    // 한 번만 넘겨도 얹힌 것이 없어져야 한다 — 어느 필터로 가든 격자를 떠난 것이기 때문이다.
+    try std.testing.expect(image_gallery_ops.cycleFilter(session));
     try std.testing.expect(session.image_gallery.hovered == null);
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    // 그 다음은 **의도**로 간다(순환 순서에 기대지 않는다).
+    try cycleGalleryTo(session, .execs);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
     // ── ② 목록 위 호버는 「얹힌 칸」을 만들지 않는다.
@@ -76897,8 +76928,7 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     // **스캔을 걸어 두고 그것이 끝나기 전에** 필터를 바꾼다.
     image_gallery_ops.refresh(session, true);
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try cycleGalleryTo(session, .execs);
     try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
 
     // 이제 스캔이 끝나기를 기다린다.
@@ -76969,8 +76999,7 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
         }
     }
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try cycleGalleryTo(session, .execs);
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 
     // **제품 경로로 그린다** — `tick()` 이 프레임을 조립하며 목록 렌더를 부른다.
@@ -76980,8 +77009,7 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.overflow);
 
     // ── 격자로 돌아가면 줄은 0 이다 — 옛 값이 남으면 이 판정자가 속는다.
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    try cycleGalleryTo(session, .images);
     _ = session.tick() catch {};
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows);
 
@@ -77046,8 +77074,7 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
         }
     }
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try cycleGalleryTo(session, .execs);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
     var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
@@ -77066,8 +77093,7 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     );
 
     // ── ③ **격자는 이 문구를 쓰지 않는다** — 거기에는 「12장 중 8장」이 있다.
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    try cycleGalleryTo(session, .images);
     session.image_gallery.overflow = session.image_gallery.count();
     const grid_notice = image_gallery_ops.noticeText(session, &buf);
     try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.image_gallery_too_narrow)));
@@ -77131,8 +77157,7 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     }
 
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try cycleGalleryTo(session, .execs);
     try std.testing.expectEqual(@as(usize, 200), session.image_gallery.count());
 
     // 한 화면에 다 못 담는다는 것을 먼저 못박는다 — 안 그러면 이 판정자는 아무것도 검증하지 않는다.
@@ -77209,8 +77234,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
 
     // ── ① 실행 필터로 간다.
     session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try cycleGalleryTo(session, .execs);
 
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
     var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
@@ -77235,8 +77259,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     // **타일을 다시 기다린다.** 필터를 바꾸면 `rebuildFilter` 가 타일을 버리므로(인덱스 도메인이
     // 새로 만들어진다) 되돌린 직후에는 픽셀이 없다 — 워커가 다시 풀어야 한다. 그 왕복을 안
     // 기다리면 이 판정자는 「그림이 안 실린다」를 결함이 아니라 **타이밍**으로 보게 된다.
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // all
-    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // images
+    try cycleGalleryTo(session, .images);
     {
         var wait = GalleryWait.start(session.io);
         while (wait.pending() and session.image_gallery.tiles.items.len == 0) {

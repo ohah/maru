@@ -6,7 +6,7 @@
 
 pub const Error = error{CleanupFailed};
 
-const output_count: usize = 3;
+const output_count: usize = 5;
 
 pub fn runWith(steps: anytype) !void {
     // Starting the deadline and the initial read-only fence create no output, so failures there
@@ -16,14 +16,20 @@ pub fn runWith(steps: anytype) !void {
     steps.validateInitialAuthorities(deadline) catch |err| return err;
 
     var attempted: usize = 1;
+    steps.materializePredecessor(deadline) catch |err| return fail(steps, attempted, err);
+
+    attempted = 2;
+    steps.materializeCurrent(deadline) catch |err| return fail(steps, attempted, err);
+
+    attempted = 3;
     steps.runSignedOne(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateAuthoritiesAfterOne(deadline) catch |err| return fail(steps, attempted, err);
 
-    attempted = 2;
+    attempted = 4;
     steps.runSignedNearMax(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateAuthoritiesAfterNearMax(deadline) catch |err| return fail(steps, attempted, err);
 
-    attempted = 3;
+    attempted = 5;
     steps.publishEvidence(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateFinalAuthorities(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateFinalDeadline(deadline) catch |err| return fail(steps, attempted, err);
@@ -42,13 +48,19 @@ fn unwind(steps: anytype, attempted: usize) bool {
     while (cursor > 0) {
         cursor -= 1;
         switch (cursor) {
-            2 => steps.cleanupEvidence() catch {
+            4 => steps.cleanupEvidence() catch {
                 clean = false;
             },
-            1 => steps.cleanupNearMax() catch {
+            3 => steps.cleanupNearMax() catch {
                 clean = false;
             },
-            0 => steps.cleanupOne() catch {
+            2 => steps.cleanupOne() catch {
+                clean = false;
+            },
+            1 => steps.cleanupCurrent() catch {
+                clean = false;
+            },
+            0 => steps.cleanupPredecessor() catch {
                 clean = false;
             },
             else => unreachable,

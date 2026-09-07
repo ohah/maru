@@ -6238,6 +6238,7 @@ pub const AppSession = struct {
     /// 이번 분배에서 **주인을 찾은** 이벤트 수(`consumeRemoteAgentLines` 가 올린다).
     remote_nonce_matched: usize = 0,
     remote_nonce_rebinds: u32 = 0,
+    rebind_logs: u32 = 0,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -14967,18 +14968,25 @@ pub const AppSession = struct {
     /// 설계다** — detached 안에서 도는 에이전트는 귀속할 Term 이 없어 버리기로 결정했다. 그러니 이 모양은
     /// 이상이 아니고, `orphan agent nonce` 로 말하면 정상 동작을 결함처럼 알리는 오탐이 된다.
     fn nonceIsUnresolvedSpoolName(nonce: []const u8) bool {
-        const at = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse return false;
-        const tail = nonce[at + 1 ..];
+        // **`_` 가 없는 모양도 있다.** 훅이 신원을 못 받았는데 `$TMUX_PANE` 은 있으면 그 이름(`t<pane>`)
+        // 으로 적는다(계획 §RA6) — 원격 스풀에서 실제로 보는 것은 대개 이쪽이다(`t36.ndjson`).
+        const tail = if (std.mem.lastIndexOfScalar(u8, nonce, '_')) |at| nonce[at + 1 ..] else nonce;
         if (tail.len < 2 or tail[0] != 't') return false;
         for (tail[1..]) |c| if (c < '0' or c > '9') return false;
         return true;
     }
+
+    const rebind_log_max: u32 = 8;
 
     /// 굳어 있던 pane nonce 가 지금 신원과 달라 갈아끼웠다. **이 줄이 뜨면 그 Term 은 그 전까지 자기
     /// 이벤트를 하나도 못 받고 있었다** — `orphan agent nonce` 의 원인 쪽이다. 둘이 같은 재현에서 나오면
     /// 「재부착으로 handle→runtime 매핑이 움직였다」가 확정된다.
     fn reportRemoteNonceRebind(self: *AppSession, dest: []const u8, old: []const u8, new: []const u8) void {
         self.remote_nonce_rebinds +|= 1;
+        // **진동하면 다른 로그를 묻는다.** registry 가 오가면 매 tick 갈아끼울 수 있어, 진단 값이 있는
+        // 앞쪽만 말하고 뒤는 셈에만 남긴다 — 몇 번 났는지는 `remote_nonce_rebinds` 가 들고 있다.
+        if (self.rebind_logs >= rebind_log_max) return;
+        self.rebind_logs +|= 1;
         std.log.scoped(.agent).warn(
             "remote agent nonce rebind: dest={s} old={s} new={s} (that term was orphaned until now)",
             .{ dest, old, new },
@@ -14992,8 +15000,6 @@ pub const AppSession = struct {
             return;
         }
         if (self.unmatched_event_nonce_len == 0) return;
-        // detached 는 **버리는 것이 계약**이다 — 그 모양까지 알리면 정상 동작이 결함으로 읽힌다.
-        if (nonceIsUnresolvedSpoolName(self.unmatched_event_nonce[0..self.unmatched_event_nonce_len])) return;
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
@@ -15010,6 +15016,10 @@ pub const AppSession = struct {
 
     /// 주인을 못 찾은 이벤트 nonce 와 그때 Term 의 nonce 를 담아 둔다(마지막 것만).
     pub fn noteUnmatchedRemoteNonce(self: *AppSession, event_nonce: []const u8, term_nonce: []const u8) void {
+        // **여기서 거른다 — 보고 자리가 아니라.** 담는 칸이 하나뿐이라, 나중에 온 detached 하나가 앞의
+        // 진짜 미매칭을 덮으면 그 tick 은 통째로 조용해진다. detached 는 버리는 것이 계약이니(§RA6)
+        // 아예 안 담아, **마지막 «진짜» 미매칭이 살아남게** 한다.
+        if (nonceIsUnresolvedSpoolName(event_nonce)) return;
         const en = @min(event_nonce.len, self.unmatched_event_nonce.len);
         @memcpy(self.unmatched_event_nonce[0..en], event_nonce[0..en]);
         self.unmatched_event_nonce_len = @intCast(en);
@@ -23351,6 +23361,53 @@ test "RF3: 세울 수 없는 순간에도 원격 Term 이 들고 있던 nonce �
     try std.testing.expectEqualStrings(mine, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
     try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 갈아낀 적 없다
 }
+test "RF3: detached 가 뒤에 와도 앞의 «진짜» 미매칭을 덮지 않는다" {
+    // 담는 칸이 하나뿐이라, 거르는 자리를 보고 쪽에 두면 **나중에 온 detached 가 진짜를 덮어** 그 tick
+    // 이 통째로 조용해진다. 열 세션 중 둘만 뜨던 그 상태에서 스풀에는 `t36` 도 함께 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.noteUnmatchedRemoteNonce("host_bbbb_real", "host_aaaa_mine"); // 진짜
+    session.noteUnmatchedRemoteNonce("t36", "host_aaaa_mine"); // 그 뒤에 온 detached
+
+    try std.testing.expectEqualStrings(
+        "host_bbbb_real",
+        session.unmatched_event_nonce[0..session.unmatched_event_nonce_len],
+    );
+}
+test "RF3: 재바인딩 로그는 상한에서 멈추고 셈만 이어간다" {
+    // registry 가 오가면 매 tick 갈아낄 수 있다. 그때 warn 을 계속 쏟으면 **다른 로그를 묻는다** —
+    // 진단 값이 있는 앞쪽만 말하고, 몇 번 났는지는 셈이 들고 있게 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var i: u32 = 0;
+    while (i < AppSession.rebind_log_max + 3) : (i += 1) {
+        session.reportRemoteNonceRebind("openClaw", "host_a_old", "host_a_new");
+    }
+    try std.testing.expectEqual(AppSession.rebind_log_max, session.rebind_logs); // 말한 것은 상한까지
+    try std.testing.expectEqual(AppSession.rebind_log_max + 3, session.remote_nonce_rebinds); // 셈은 다 남는다
+}
 test "RF3: detached 이벤트가 실제로 흘러도 orphan 을 말하지 않는다" {
     // 판별기만 잠그면 **그것을 부르는 자리**가 빠져도 초록이다(mutation 으로 확인). 그래서 분배 경로로
     // 흘려보내 확인한다 — 계약(§RA6)상 버리는 모양이니 경고가 서면 안 된다.
@@ -23389,6 +23446,11 @@ test "RF3: detached 스풀 이름은 orphan 으로 안 알린다 — 버리는 �
     // 안 맞는 것이 설계다**. 그 정상 동작을 결함처럼 알리면 다음 사람이 없는 병을 쫓는다.
     try std.testing.expect(AppSession.nonceIsUnresolvedSpoolName("host_aa_bb_t27"));
     try std.testing.expect(AppSession.nonceIsUnresolvedSpoolName("_t3"));
+    // **`_` 없는 모양** — 훅이 신원을 못 받고 `$TMUX_PANE` 만 있을 때의 이름이다(계획 §RA6). 원격
+    // 스풀에서 실제로 보는 것은 대개 이쪽이라, 이것을 놓치면 오탐 제거가 절반만 선다.
+    try std.testing.expect(AppSession.nonceIsUnresolvedSpoolName("t36"));
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("t")); // 숫자가 없다
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host")); // t 로 시작 안 한다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_bb")); // 정상 신원
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t")); // 숫자가 없다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t2x")); // 숫자가 아니다

@@ -76008,6 +76008,22 @@ fn cycleGalleryTo(session: *AppSession, want: image_gallery_ops.Filter) !void {
     }
 }
 
+/// 갤러리 워커(스캔·디코드)가 잠잠해질 때까지 tick 을 돌린다. **판정자는 자기가 깨운 것을 재우고
+/// 끝나야 한다** — 안 그러면 그 스레드가 다음 판정자가 도는 동안 살아 있고, 그때 잡히는 누수가
+/// **남의 판정자에 붙는다**(CI 에서 두 번 그랬다).
+///
+/// ⚠️ **`GalleryWait` 만으로는 모자란다.** 「built 될 때까지」 기다리는 루프는 **타임아웃으로도**
+/// 빠져나가는데, 그때 스캔은 계속 돈다 — 로컬(빠른 기계)에서는 늘 built 가 먼저라 안 보이고
+/// CI 에서만 열리는 길이다. 그래서 판정자 끝에서 **한 번 더** 재운다.
+fn quietGalleryWorkers(session: *AppSession) void {
+    var quiet = GalleryWait.start(session.io);
+    while (quiet.pending() and
+        (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+    {
+        _ = session.tick() catch {};
+    }
+}
+
 const GalleryWait = struct {
     io: std.Io,
     deadline_ns: i96,
@@ -76714,6 +76730,9 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
     // 네 번이면 제자리다 — 순환이 닫혀 있다.
     try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는다 (적대적 B2)" {
@@ -76796,6 +76815,9 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     try std.testing.expect(image_gallery_ops.handleDown(session, cx, cy));
     try std.testing.expect(session.image_gallery.key_focus); // 도크는 키를 가져간다
     try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
+
+    // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대적 E2)" {
@@ -76871,14 +76893,7 @@ test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대�
     // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
     // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
     // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
-    {
-        var quiet = GalleryWait.start(session.io);
-        while (quiet.pending() and
-            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
-        {
-            _ = session.tick() catch {};
-        }
-    }
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따른다 (적대적 E3)" {
@@ -76947,6 +76962,9 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     // 인덱스에는 둘 다 있다(이미지 1 + 활동 1) — 걸러진 것이지 안 담긴 것이 아니다.
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.all_hits.items.len);
     try std.testing.expectEqual(@as(usize, 1), galleryImageHits(session));
+
+    // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인한다 (적대적 D4)" {
@@ -77016,14 +77034,7 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
     // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
     // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
-    {
-        var quiet = GalleryWait.start(session.io);
-        while (quiet.pending() and
-            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
-        {
-            _ = session.tick() catch {};
-        }
-    }
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적대적 K5)" {
@@ -77117,14 +77128,7 @@ test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적
         maru.i18n.t(.image_gallery_too_narrow),
     ));
 
-    {
-        var quiet = GalleryWait.start(session.io);
-        while (quiet.pending() and
-            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
-        {
-            _ = session.tick() catch {};
-        }
-    }
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
@@ -77202,6 +77206,9 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     try cycleGalleryTo(session, .images);
     const grid_notice = image_gallery_ops.noticeText(session, &buf);
     try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.image_gallery_too_narrow)));
+
+    // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
@@ -77281,6 +77288,9 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     const want_max = content_h -| area.h;
     // **마지막 줄까지 닿는다.** 끝에서 멈추되 그 끝이 목록의 끝이어야 한다.
     try std.testing.expectEqual(want_max, session.image_gallery.scroll.offset_y_px);
+
+    // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
+    quietGalleryWorkers(session);
 }
 
 test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리고 되돌리면 다시 올린다 (AV1-b)" {
@@ -77392,14 +77402,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     // **워커를 재운 뒤 끝낸다.** `appendGpuImages` 는 `ensureTiles` 를 부르므로 여기서도 디코드가
     // 걸린 채 끝날 수 있다 — 그 스레드가 남기는 누수는 **다음에 도는 남의 판정자에 붙는다**
     // (적대적 검증 F2. D4·E2 에서 같은 형태를 고치고도 이 자리를 빠뜨렸다).
-    {
-        var quiet = GalleryWait.start(session.io);
-        while (quiet.pending() and
-            (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
-        {
-            _ = session.tick() catch {};
-        }
-    }
+    quietGalleryWorkers(session);
 }
 
 test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 남는다 (IG4-b)" {

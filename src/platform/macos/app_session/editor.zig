@@ -3865,6 +3865,10 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
 }
 
 /// 한 행을 한 줄로 본 `Line`. 줄바꿈은 **`.none`** 이다 — 위 `diffMove` doc 참조.
+///
+/// **`.lf` + `len + 1` 은 같은 값이다**(변이 1·5회차 C27 이 살아남아 확인했다) — `contentEnd()` 가
+/// 줄바꿈 byte 를 빼므로 둘 다 `text.len` 을 준다. 원리상 구분할 수 없어 판정자를 세우지 않는다.
+/// **한 byte 짧아지는 쪽**(`.lf` + `len`)은 다른 답이고, 그것은 DCARET5 가 잡는다(C27b).
 fn rowLine(text: []const u8) maru.session.editor.line_index.Line {
     return .{ .start = 0, .end_with_ending = text.len, .ending = .none };
 }

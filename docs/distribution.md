@@ -146,11 +146,13 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 `.github/workflows/release.yml`로 구현돼 있다. 서명 Secret을 caller가 고른 임의 ref에 노출하지 않도록 수동 실행은
 제공하지 않으며, canonical 태그 푸시(`v*`)에서만 다음 순서를 실행한다.
 
-1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비
+1. checkout 전에 runner-provided GitHub CLI를 고정하고, macOS 러너(Apple Silicon)에서 mise로 Zig 0.16을 준비·고정
 2. `.p12` Secret을 임시 키체인에 import
 3. `tools/build-macos-universal-dmg.sh` 실행(공증은 Secret 자격증명)
-4. 새 draft Release를 만들고 universal dmg를 무덮어쓰기 첨부
-5. draft의 exact-one asset을 다시 내려받아 로컬 DMG와 byte equality를 검증한 뒤 publish
+4. signed DMG·frozen host를 고정하고 GitHub artifact attestation을 검증
+5. baseline-A 제품 evidence와 manifest를 만든 뒤 둘도 attestation하고 네 subject의 aggregate를 확정
+6. 새 draft Release에 검증된 asset을 무덮어쓰기 첨부·재다운로드 검증한 뒤 publish하고 aggregate를 정리
+7. read-only 후속 job이 GitHub-issued live action 시간을 canonical artifact로 보존
 
 `ohah/homebrew-maru`의 cask version/sha256 bump PR(또는 formula version bump)은 tap repository write token을 추가하는
 별도 후속 단계다.
@@ -165,10 +167,12 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 | `KEYCHAIN_PASSWORD` | CI 임시 키체인 잠금 비번(아무 값, 잡 안에서만 씀) |
 | `APPLE_ID` · `APPLE_TEAM_ID` · `APPLE_APP_SPECIFIC_PASSWORD` | 공증 자격증명 |
 
-현재 워크플로는 dmg 빌드·서명·공증 뒤 `tools/publish-github-release.sh`가 새 draft만 생성하고, exact-one
-DMG를 `--clobber` 없이 올린 뒤 재다운로드 byte equality를 통과해야 publish한다. 같은 tag의 Release가 이미
-있거나 asset 이름·개수·bytes가 다르면 기존 Release를 재사용하거나 고치지 않고 실패한다. publish 뒤 asset
-교체·삭제 경로는 제공하지 않는다.
+현재 워크플로는 dmg 빌드·서명·공증 뒤
+`.github/actions/session-host-release-live/action.yml`의 여덟 단계가 candidate pinning부터 aggregate cleanup까지
+한 순서로 소유한다. 제품 validator가 새 draft 생성, 검증된 asset의 무덮어쓰기 업로드, 재다운로드 byte equality,
+publish를 닫힌 argv와 durable checkpoint로 집행한다. 같은 tag의 Release가 이미 있거나 asset 이름·개수·bytes,
+attestation 또는 manifest가 다르면 기존 Release를 임의로 고치지 않고 실패한다. 별도 legacy release writer와
+publish 뒤 asset 교체·삭제·`--clobber` 경로는 제공하지 않는다.
 
 ### Session host 호환 release
 

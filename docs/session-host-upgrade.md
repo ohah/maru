@@ -4273,6 +4273,73 @@ canonical diagnostic JSON으로 남긴다. 실제 앱 session-host 상태·GitHu
 command process를 닫지만 두 action output과 fixed artifact pathname을 조립하는 `release.yml` 전체 배선, GitHub-issued timing과 frozen
 signed U5 E2E는 후속 live workflow caller가 소유한다.
 
+### 11.83 repository-local live release workflow caller
+
+`.github/workflows/release.yml`은 §11.77의 여덟 binding을 shell step 여덟 개로 다시 쓰지 않는다. repository-local composite action
+`.github/actions/session-host-release-live/action.yml` 하나가 `release_adapter_live_workflow_binding.all()`과 같은 exact order의
+`session-host-candidate-pinning` → `session-host-candidate-attestation` → `session-host-draft-authoring` →
+`session-host-authored-attestation` → `session-host-aggregate-prepare` → `session-host-aggregate-finalize` →
+`session-host-publication` → `session-host-aggregate-cleanup` step ID를 소유한다. 각 step은 바로 앞 step이 성공한 경우에만 실행하며
+cleanup을 `always()`로 우회 실행하지 않는다. 앞 단계가 실패한 상태에서 뒤 단계가 remote state를 추측해 정리하는 경로는 없고,
+이미 durable terminal checkpoint를 게시한 해당 bridge가 실패를 보존한다.
+
+top-level workflow는 checkout 전 고정한 GitHub CLI path/SHA-256과 mise 직후 고정한 Zig path/size/SHA-256만 action input으로
+전달한다. action은 repository, tag, source SHA, run identity, runner identity를 input으로 받지 않고 GitHub가 현재 step에 발급한
+환경을 각 제품 executable이 직접 다시 읽게 한다. `GH_TOKEN`은 action 전체 input이 아니라 credential이 필요한 validator command
+step의 `env`에만 `${{ github.token }}`으로 주입한다. candidate pinning과 두 attestation wrapper 및 credential-free aggregate 두
+command에는 token을 명시적으로 전달하지 않는다. Apple signing secret, keychain pathname, ambient `HOME`/`PATH`, checkpoint leaf,
+reducer result와 draft/release ID는 action input/output이 아니다.
+release job permission은 기존 `contents: write`에 attestation 발급에 필요한 `id-token: write`와 `attestations: write`만 추가한다. fork PR,
+`pull_request_target`, caller-selected ref와 `workflow_dispatch`는 계속 없으므로 이 권한과 release environment secret은 protected tag
+push job에서만 열린다.
+
+workflow는 signed universal build 뒤 다음 ReleaseFast 제품 executable을 explicit build step 하나에서 고정
+`zig-out/bin`에 설치한다: `maru-session-host-release-validator`, `maru-session-host-release-workflow-bootstrap`,
+`maru-session-host-release-workflow-candidate-inputs`, `maru-session-host-release-workflow-checkpoint`,
+`maru-session-host-release-workflow-command`. composite action은 다른 executable pathname, `zig build` 또는 source-file 실행을
+선택하지 않는다. candidate directory와 그 세 product pathname은 `GITHUB_WORKSPACE`, protected tag와
+`dist/session-host-candidate-<version>` fixed layout에서 유도한다. checkpoint root와 live work root는 `RUNNER_TEMP` 직계 자식의
+서로 다른 absent pathname을 action이 배타 `0700`으로 만들고, bootstrap이 반환한 exact one-line `maru-root-v1` token만 이후
+step output으로 전달한다.
+
+action은 canonical lowercase RFC 4122 v4 test UUID를 한 번 생성해 stage 3에만 전달한다. live work root 아래의 DMG work,
+baseline workspace, manifest output, retained preparation과 aggregate는 서로 ancestor/descendant가 아닌 fixed sibling pathname이다.
+stage 3 성공 뒤 authored action의 evidence는 retained preparation의 exact `baseline-evidence.json`, manifest는 protected tag에서
+유도한 `Maru-<version>-session-host-release.json` 직계 자식으로만 계산한다. candidate attestation의 두 bundle output에는 계약상
+소비자가 둘 있다. stage 3 `prepare-candidate`가 draft 작성 입력으로 소비하고 stage 5 `prepare-candidate-aggregate`가 네 subject의
+aggregate 입력으로 다시 소비한다. authored attestation의 두 bundle output은 stage 5만 소비한다. 이 고정 fan-out은 locator를
+성공 권위로 승격하지 않으며 각 제품 process가 bundle을 다시 검증한다. pathname 존재도 성공 판정으로 사용하지 않는다. 다섯 command step은
+`maru-session-host-release-workflow-command run <root> <identity> <closed-validator-argv...>`만 호출하므로 shell이 exit/stderr를
+reducer event로 재분류하지 않는다.
+
+기존 `tools/publish-github-release.sh` 호출은 live action과 병행하지 않는다. 둘을 함께 두면 동일 tag의 draft/publish remote writer가
+둘이 되므로 live path가 활성화되는 변경에서 제거한다. workflow artifact upload는 release authority가 아니며 `if: always()`로
+signed candidate DMG를 보존할 수 있지만 GitHub Release asset을 수정하거나 실패를 성공으로 바꾸지 않는다. immutable release는
+live workflow와 validator가 실제 tag에서 성공한 뒤 별도 repository setting으로 켜는 기존 순서를 유지한다.
+
+`check-session-host-release-live-workflow`는 실제 workflow와 composite action bytes를 함께 검사한다. tag-only trigger와 protected
+`release` environment, trusted CLI/Zig capture의 predecessor, exact-one product build와 exact-one local action 호출, 기존 publish
+writer 0, 여덟 step ID/order/predecessor, fixed executable/action pathname, 단계별 token 최소화, fixed pathname derivation,
+bundle output의 exact consumer와 `GITHUB_ENV`/caller-authored success boolean 0을 고정한다. Linux에서 실행하는 synthetic source
+harness는 action expression을 치환한 뒤 harness-owned 임시 workspace/root와 inert validator/action fixture로 여덟 checkpoint의
+성공 순서, stage 2/4/command 실패에서 이후 side effect 0, output partial publication 0과 residue 정리를 검증한다. 실제
+attestation service, GitHub Release mutation, Apple product와 signed frozen N-1/current 실행을 성공으로 흉내 내지 않는다.
+
+GitHub-issued timing은 release writer와 분리되고 `actions: read`, `contents: read`만 가진 후속 job이 Jobs API에서 top-level
+`Run session host live release workflow` step의 `started_at/completed_at`을 조회해 canonical
+`maru.session-host-release-live-timing.v1` artifact로 게시한다. composite action의 내부 step을 Jobs API의 독립 timestamp로 세지 않는다.
+내부 여덟 단계별 시간은 action이 monotonic clock으로 남기는 별도 diagnostic이며 GitHub-issued 값이라고 부르지 않는다. timing
+artifact는 queue/service를 포함한 전체 live action 관측값이지 checkpoint 성공 권위가 아니며, top-level step 누락·중복·음수/역행
+timestamp를 실패로 처리한다. 실제 protected baseline-A 시험 tag에서 live action, 네 GitHub attestation, signed app Quit/default-false
+evidence와 publication이 성공하고 이 timing artifact가 같은 workflow run/attempt와 source SHA에 결속된 경우에만 baseline-A workflow
+배선의 원격 E2E 증거가 된다.
+
+이 여덟 단계 caller는 `release_adapter_candidate_preparation_handoff`가 허용하는 `baseline_a`만 실행한다. frozen executable을
+candidate subject로 attest하고 manifest에 넣는 사실은 frozen N-1→current migration 실행 증거가 아니다. `upgrade_b`의 signed
+1-runtime/near-max evidence, predecessor manifest/asset authority와 같은 reducer/checkpoint를 잇는 별도 profile owner가 추가되고 실제
+protected B 시험 tag가 성공하기 전에는 frozen signed U5 완료를 주장하지 않는다. source gate와 synthetic harness green도 그 외부
+gate를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -72,7 +72,7 @@ pub const Execution = struct {
     }
 
     pub fn needsCleanup(self: *const @This()) bool {
-        return self.owner == self and !self.timing.success and hasArtifacts(self);
+        return self.owner == self and self.inputs == null and hasArtifacts(self) and !self.ownsSuccessfulOutputs();
     }
 
     pub fn isPristineForComposition(self: *const @This()) bool {

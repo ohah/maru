@@ -27,6 +27,15 @@ test "pre-owned and copied execution values fail closed before input access" {
     try std.testing.expectError(error.InvalidOwner, runner.run(std.testing.io, std.testing.allocator, inputs, 1, &copied));
 }
 
+test "partially cleaned successful execution remains retryable" {
+    var execution: runner.Execution = .{};
+    execution.owner = &execution;
+    execution.timing = .{ .success = true, .signed_one_ns = 1, .signed_near_max_ns = 1, .phase_ns = 2 };
+    execution.one_present = true;
+    try std.testing.expect(!execution.ownsSuccessfulOutputs());
+    try std.testing.expect(execution.needsCleanup());
+}
+
 test "source composes the phase without ambient paths credentials or result booleans" {
     std.testing.refAllDecls(runner);
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_upgrade_runner.zig", std.testing.allocator, .limited(128 * 1024));

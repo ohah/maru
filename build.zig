@@ -5072,6 +5072,24 @@ pub fn build(b: *std.Build) void {
     ssh_keepalive_step.dependOn(&run_ssh_keepalive.step);
     boundary_step.dependOn(&run_ssh_keepalive.step);
 
+    const host_close_log_step = b.step(
+        "test-host-client-close-log",
+        "Host logs client closes that still had pending output (silence hid two investigations)",
+    );
+    const host_close_log_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/host_client_close_log_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_host_close_log = b.addRunArtifact(host_close_log_tests);
+    run_host_close_log.addArg("--maru-expect-tests=1");
+    run_host_close_log.addArg("--maru-expect-passed=1");
+    run_host_close_log.setCwd(b.path("."));
+    host_close_log_step.dependOn(&run_host_close_log.step);
+    boundary_step.dependOn(&run_host_close_log.step);
+
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",

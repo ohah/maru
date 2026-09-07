@@ -4348,13 +4348,13 @@ upgrade-B profile owner가 live checkpoint의 draft-authoring 단계에 연결�
 boolean을 받지 않는다. production runner가 final-address candidate identity와 authenticated predecessor identity의 backing owner에서
 같은 trusted run UUID, predecessor frozen executable, current frozen executable과 두 fixed output pathname을 유도해야 한다.
 
-순서는 하나의 absolute deadline 아래 `initial candidate+predecessor 재검증 → signed 1-runtime 실행 → 양쪽 권위 재검증 → signed
+순서는 하나의 absolute deadline 아래 `initial candidate+predecessor 재검증 → predecessor 실행 사본 → current 실행 사본 → signed 1-runtime 실행 → 양쪽 권위 재검증 → signed
 near-max 실행 → 양쪽 권위 재검증 → canonical upgrade evidence 게시 → 양쪽 권위와 deadline 최종 재검증`으로 닫는다. 두 leaf가
 서로 다른 UUID·signer requirement·predecessor/current 방향을 쓰거나, 한 leaf 뒤 candidate·predecessor manifest/asset/download inode가
 바뀌면 aggregate publication은 0이어야 한다. near-max는 한 runtime 반복 fixture가 아니라 `max_runtime_count - 1`개의 실제 PTY와 각
 GUI `RemoteRuntime` 재접속을 증명하는 기존 signed harness를 사용한다.
 
-실패 cleanup은 aggregate → near-max leaf → 1-runtime leaf의 역순이며, 한 cleanup 실패가 뒤의 독립 cleanup을 막지 않는다. cleanup
+실패 cleanup은 aggregate → near-max leaf → 1-runtime leaf → current 실행 사본 → predecessor 실행 사본의 역순이며, 한 cleanup 실패가 뒤의 독립 cleanup을 막지 않는다. cleanup
 실패는 원래 실행 오류보다 강한 `CleanupFailed`로 승격하고, 아직 정리되지 않은 exact owner를 후속 retry에 보존한다. 성공에서는 세
 artifact owner를 profile runner가 manifest authoring·attestation까지 보존한다. 이 phase의 focused Debug·ReleaseFast gate는 순서,
 동일 deadline pointer, 모든 실행 fail-index, authority drift, 역순 best-effort cleanup과 cleanup-failure 승격을 검증한다. 이 gate만

@@ -335,6 +335,23 @@ pub const default_app_bindings = [_]AppBinding{
     // 터미널에서 눌러도 전과 같고, Cmd 를 끼므로 터미널 Meta 입력을 안 뺏는다.
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '\\' } }, .action = .jump_to_bracket },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '|' } }, .action = .jump_to_bracket },
+    // Opt+Cmd+0/J/1~3: 접기 다섯([입력 설정](../../docs/configuration-input.md) 「접기 다섯의 chord」).
+    // **VSCode 의 `⌘K ⌘0`·`⌘K ⌘J`·`⌘K ⌘1~3` 에서 선행 `⌘K` 만 뗀 모양**이다 — `KeyChord` 에 두 키
+    // 시퀀스 개념이 없고 `⌘K` 는 `clear_screen` 이 갖고 있어서다.
+    //
+    // **전역 표에 둔다.** 다섯 다 `applyFold`·`unfoldAll` 이 `term.kind != .editor` 를 먼저 보고
+    // 거절하므로 `jump_to_bracket` 과 같은 부류다. 그리고 **뺏는 것이 0 이다** — 이 자리는 전역·터미널
+    // 표 어디에도 없었고(실측), 안 묶인 `⌘` 조합은 원래 `ignored` 로 떨어져 터미널에서 아무 일도
+    // 안 했다.
+    //
+    // **`⌥⌘[`·`⌥⌘]`(VSCode 의 커서 접기 자리)는 안 쓴다** — `previous_term`·`next_term` 이 갖고 있고,
+    // §9.1 경계 표가 *"창·탭 관리는 앱이 계속 먹는다"* 로 정했다. 빈 자리가 다섯이나 있어 예외를
+    // 만들 이유가 없다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '0' } }, .action = .fold_all },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'J' } }, .action = .unfold_all },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '1' } }, .action = .fold_level_1 },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '2' } }, .action = .fold_level_2 },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '3' } }, .action = .fold_level_3 },
     // Shift+Opt+Cmd+방향키: 열/블록 선택 확장(§3.2a). **전역 표에 둔다** — `⌘` 를 끼므로 터미널 Meta 를
     // 안 뺏고(그것이 편집기 Term 컨텍스트가 필요한 유일한 조건이다), 액션 자신이 편집기가 아니면
     // 거절한다. 이 조합은 기본 표에 **0개**였다(실측) — 뺏을 것이 없다.
@@ -1669,4 +1686,94 @@ test "EMK2 사용자 rebind·unbind 가 이기면 컨텍스트는 진다 (양보
     const unbinds = [_]KeyChord{chord};
     const r2 = KeyBindingResolver{ .unbinds = &unbinds };
     try std.testing.expect(r2.resolveEditorDetailed(cmd_d, false) == .consumed);
+}
+
+test "FKB1 접기 다섯이 ⌥⌘0·J·1~3 으로 풀리고 전역·터미널을 안 뺏는다" {
+    // **막고 있던 것이 「한 chord 로 못 적는다」였다**([입력 설정](../../docs/configuration-input.md)
+    // 「접기 다섯의 chord」). VSCode 의 `⌘K ⌘0` 두 키 시퀀스에서 선행 `⌘K` 만 뗀 모양이다.
+    const resolver = KeyBindingResolver{};
+    var buf: [32]u8 = undefined;
+
+    const Case = struct { ch: u21, want: action_mod.Action };
+    const cases = [_]Case{
+        .{ .ch = '0', .want = .fold_all },
+        .{ .ch = 'J', .want = .unfold_all },
+        .{ .ch = '1', .want = .fold_level_1 },
+        .{ .ch = '2', .want = .fold_level_2 },
+        .{ .ch = '3', .want = .fold_level_3 },
+    };
+    for (cases) |c| {
+        const ev: terminal.KeyEvent = .{
+            .key = .{ .char = c.ch },
+            .modifiers = .{ .command = true, .option = true },
+        };
+        // ⑴ **전역에서 그 액션이다** — 편집기 컨텍스트가 아니라 전역 표가 소유한다(액션이 스스로
+        //    편집기를 요구하므로 그래도 된다).
+        const g = try resolver.resolve(ev, &buf, .{});
+        try std.testing.expect(g == .app_action);
+        try std.testing.expectEqual(c.want, g.app_action);
+
+        // ⑵ **편집기에서도 같은 답이다.** 컨텍스트 표가 이 자리를 가리지 않는다.
+        const e = resolver.resolveEditorDetailed(ev, false);
+        try std.testing.expect(e == .app_action); // 컨텍스트 승리가 **아니다**
+        try std.testing.expectEqual(c.want, e.app_action);
+
+        // ⑶ **비교 뷰에서도 같다** — `needs_editable` 게이트를 지나지 않는다(전역이므로).
+        const d = resolver.resolveEditorDetailed(ev, true);
+        try std.testing.expect(d == .app_action);
+        try std.testing.expectEqual(c.want, d.app_action);
+    }
+
+    // ⑷ **`⌥⌘[`·`⌥⌘]` 는 그대로 Term 이동이다**(§9.1 경계 표를 안 건드렸다는 단언). 이것이 없으면
+    //    나중에 그 자리를 접기로 옮기는 변이가 조용히 산다.
+    const prev = try resolver.resolve(.{
+        .key = .{ .char = '[' },
+        .modifiers = .{ .command = true, .option = true },
+    }, &buf, .{});
+    try std.testing.expect(prev == .app_action);
+    try std.testing.expectEqual(action_mod.Action.previous_term, prev.app_action);
+    const next = try resolver.resolve(.{
+        .key = .{ .char = ']' },
+        .modifiers = .{ .command = true, .option = true },
+    }, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.next_term, next.app_action);
+
+    // ⑸ **`⌘0`·`⌘1` 은 안 바뀐다**(글꼴 초기화·탭 선택). `⌥` 를 빠뜨린 변이가 여기서 죽는다.
+    const cmd0 = try resolver.resolve(.{ .key = .{ .char = '0' }, .modifiers = .{ .command = true } }, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.reset_font_size, cmd0.app_action);
+    const cmd1 = try resolver.resolve(.{ .key = .{ .char = '1' }, .modifiers = .{ .command = true } }, &buf, .{});
+    try std.testing.expect(std.meta.eql(cmd1.app_action, action_mod.Action{ .select_tab = 0 }));
+}
+
+test "FKB2 접기 chord 는 사용자 설정이 이기고 unbind 로 끌 수 있다" {
+    // 빌트인을 더하는 것이 **사용자 것을 덮지 않는다**(resolve 순서: 사용자 → 빌트인 → ignored).
+    var buf: [32]u8 = undefined;
+    const chord = KeyChord{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '0' } };
+    const ev: terminal.KeyEvent = .{ .key = .{ .char = '0' }, .modifiers = .{ .command = true, .option = true } };
+
+    // ⑴ 사용자가 그 자리를 쓰면 그것이 이긴다.
+    const rebound = [_]AppBinding{.{ .chord = chord, .action = .new_tab }};
+    const r1 = KeyBindingResolver{ .app_bindings = &rebound };
+    const g1 = try r1.resolve(ev, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.new_tab, g1.app_action);
+
+    // ⑵ 명시적 unbind 로 끌 수 있다 — 빌트인이므로.
+    const unbinds = [_]KeyChord{chord};
+    const r2 = KeyBindingResolver{ .unbinds = &unbinds };
+    const g2 = try r2.resolve(ev, &buf, .{});
+    try std.testing.expect(g2 != .app_action);
+
+    // ⑶ **대조군** — 아무 설정이 없으면 접기다(위 둘이 항진명제가 아니다).
+    const g3 = try (KeyBindingResolver{}).resolve(ev, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.fold_all, g3.app_action);
+}
+
+test "FKB3 config 표기로 왕복한다 — 세팅 GUI 의 keybind recorder 가 그 위에 선다" {
+    var buf: [32]u8 = undefined;
+    for ([_]u21{ '0', 'J', '1', '2', '3' }) |ch| {
+        const c = KeyChord{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = ch } };
+        const text = c.toConfigString(&buf);
+        const parsed = try KeyChord.parse(text);
+        try std.testing.expect(parsed.eql(c));
+    }
 }

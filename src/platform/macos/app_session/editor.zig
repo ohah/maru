@@ -17477,6 +17477,62 @@ test "TIG3 프롬프트 점프는 편집기 Term 에 큐를 안 넣는다 (심�
     term.kind = saved_kind;
 }
 
+test "FKB4 접기 다섯이 팔레트에 chord 를 보여 주고 제품에서 동작한다" {
+    // **파생만 재면 배선이 빠져도 초록이다.** `FKB1` 은 resolver 를 재고, 이것은 ⑴ 팔레트 표시와
+    // ⑵ **키를 눌렀을 때 실제로 접히는지**를 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    // ⑴ **팔레트가 chord 를 보여 준다** — 이것이 없으면 키가 살아도 사용자가 못 찾는다.
+    {
+        const resolver = maru.config.KeyBindingResolver{};
+        const c = command_catalog.chordForAction(resolver, .fold_all) orelse return error.NoChord;
+        try testing.expect(c.modifiers.command and c.modifiers.option and !c.modifiers.shift);
+        try testing.expectEqual(@as(u21, '0'), c.key.char);
+        const j2 = command_catalog.chordForAction(resolver, .unfold_all) orelse return error.NoChord;
+        try testing.expectEqual(@as(u21, 'J'), j2.key.char);
+    }
+
+    // ⑵ **제품 경로로 눌러 본다.** 들여쓰기가 있는 문서를 열고 `⌥⌘0` 을 보내면 접힘이 선다.
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    try fx.dir.dir.writeFile(io_, .{
+        .sub_path = "f.txt",
+        .data = "root\n    child a\n    child b\nnext\n    child c\n",
+    });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "f.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+
+    _ = try fx.session.handleKeyEvent(.{
+        .key = .{ .char = '0' },
+        .modifiers = .{ .command = true, .option = true },
+    });
+    try testing.expect(term.rt.editor_folded_len > 0); // 접혔다
+
+    // ⑶ **`⌥⌘J` 가 편다**(대조군 — 한쪽만 재면 접기만 배선한 변이가 산다).
+    _ = try fx.session.handleKeyEvent(.{
+        .key = .{ .char = 'J' },
+        .modifiers = .{ .command = true, .option = true },
+    });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+
+    // ⑷ **터미널에서는 아무 일도 안 난다** — 액션이 스스로 거절한다(전역 표에 둔 근거).
+    const saved = term.kind;
+    term.kind = .terminal;
+    _ = try fx.session.handleKeyEvent(.{
+        .key = .{ .char = '0' },
+        .modifiers = .{ .command = true, .option = true },
+    });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    term.kind = saved;
+}
+
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {
     // **`AnchorKind`가 있는 이유를 재는 테스트다.** anchor가 점이면 단어를 잡고 뒤로 끌 때 그
     // 단어가 잘린다 — `selection.zig` 머리말이 anchor를 **범위**로 둔 근거가 그것이다.

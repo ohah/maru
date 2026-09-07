@@ -4320,15 +4320,16 @@ live workflow와 validator가 실제 tag에서 성공한 뒤 별도 repository s
 `check-session-host-release-live-workflow`는 실제 workflow와 composite action bytes를 함께 검사한다. tag-only trigger와 protected
 `release` environment, trusted CLI/Zig capture의 predecessor, exact-one product build와 exact-one local action 호출, 기존 publish
 writer 0, 여덟 step ID/order/predecessor, fixed executable/action pathname, 단계별 token 최소화, fixed pathname derivation,
-bundle output의 exact consumer와 `GITHUB_ENV`/caller-authored success boolean 0을 고정한다. Linux에서 실행하는 synthetic source
-harness는 action expression을 치환한 뒤 harness-owned 임시 workspace/root와 inert validator/action fixture로 여덟 checkpoint의
-성공 순서, stage 2/4/command 실패에서 이후 side effect 0, output partial publication 0과 residue 정리를 검증한다. 실제
-attestation service, GitHub Release mutation, Apple product와 signed frozen N-1/current 실행을 성공으로 흉내 내지 않는다.
+bundle output의 exact consumer, command별 closed option inventory와 `GITHUB_ENV`/caller-authored success boolean 0을 고정한다.
+이 source gate는 GitHub composite runner를 흉내 내어 action을 실행하지 않는다. 대신 candidate pinning·action outcome bridge·다섯
+command bridge의 기존 actual-process gate가 harness-owned 임시 workspace/root에서 checkpoint 성공 순서, terminal failure 뒤 child 0,
+FD delta와 residue 0을 별도로 실행한다. 둘을 합쳐도 실제 attestation service, GitHub Release mutation, Apple product와 signed frozen
+N-1/current 실행을 성공으로 흉내 내지 않는다.
 
 GitHub-issued timing은 release writer와 분리되고 `actions: read`, `contents: read`만 가진 후속 job이 Jobs API에서 top-level
 `Run session host live release workflow` step의 `started_at/completed_at`을 조회해 canonical
 `maru.session-host-release-live-timing.v1` artifact로 게시한다. composite action의 내부 step을 Jobs API의 독립 timestamp로 세지 않는다.
-내부 여덟 단계별 시간은 action이 monotonic clock으로 남기는 별도 diagnostic이며 GitHub-issued 값이라고 부르지 않는다. timing
+내부 command의 local monotonic 실측은 기존 actual-process gate의 별도 diagnostic이며 GitHub-issued 값이라고 부르지 않는다. timing
 artifact는 queue/service를 포함한 전체 live action 관측값이지 checkpoint 성공 권위가 아니며, top-level step 누락·중복·음수/역행
 timestamp를 실패로 처리한다. 실제 protected baseline-A 시험 tag에서 live action, 네 GitHub attestation, signed app Quit/default-false
 evidence와 publication이 성공하고 이 timing artifact가 같은 workflow run/attempt와 source SHA에 결속된 경우에만 baseline-A workflow

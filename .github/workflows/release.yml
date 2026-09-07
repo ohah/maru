@@ -18,9 +18,6 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write # GitHub Release 생성/업로드
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -29,6 +26,10 @@ jobs:
   universal-dmg:
     name: universal dmg (signed + notarized)
     environment: release
+    permissions:
+      contents: write # GitHub Release 생성/업로드
+      id-token: write # artifact attestation OIDC
+      attestations: write # artifact attestation publication
     # Apple Silicon — arm64 네이티브 + x86_64 cross.
     runs-on: macos-15
     steps:
@@ -102,12 +103,13 @@ jobs:
         env:
           RELEASE_REF_TYPE: ${{ github.ref_type }}
           RELEASE_TAG: ${{ github.ref_name }}
+          TRUSTED_ZIG: ${{ steps.trusted-zig.outputs.path }}
         run: |
           set -euo pipefail
           if [[ "$RELEASE_REF_TYPE" == tag ]]; then
-            zig build check-release-version -Drelease-tag="$RELEASE_TAG"
+            "$TRUSTED_ZIG" build check-release-version -Drelease-tag="$RELEASE_TAG"
           else
-            zig build check-release-version
+            "$TRUSTED_ZIG" build check-release-version
           fi
 
       - name: Import Developer ID certificate
@@ -143,24 +145,121 @@ jobs:
             --password "$APPLE_APP_SPECIFIC_PASSWORD"
 
       - name: Build signed + notarized universal dmg
+        env:
+          ZIG: ${{ steps.trusted-zig.outputs.path }}
         run: sh tools/build-macos-universal-dmg.sh
 
-      - name: Upload dmg to GitHub Release
+      - name: Build session host live release executables
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          TRUSTED_ZIG: ${{ steps.trusted-zig.outputs.path }}
         run: |
           set -euo pipefail
-          sh tools/publish-github-release.sh "$RELEASE_TAG" dist/Maru-*-universal.dmg
+          "$TRUSTED_ZIG" build \
+            session-host-release-validator \
+            session-host-release-workflow-bootstrap \
+            session-host-release-workflow-candidate-inputs \
+            session-host-release-workflow-checkpoint \
+            session-host-release-workflow-command \
+            -Doptimize=ReleaseFast
+
+      - name: Run session host live release workflow
+        id: session-host-live
+        uses: ./.github/actions/session-host-release-live
+        with:
+          gh-path: ${{ steps.trusted-gh.outputs.path }}
+          gh-sha256: ${{ steps.trusted-gh.outputs.sha256 }}
+          zig-path: ${{ steps.trusted-zig.outputs.path }}
+          zig-size: ${{ steps.trusted-zig.outputs.size }}
+          zig-sha256: ${{ steps.trusted-zig.outputs.sha256 }}
 
       - name: Upload dmg as workflow artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maru-universal-dmg
-          path: dist/Maru-*-universal.dmg
+          path: dist/session-host-candidate-*/Maru-*-universal.dmg
           if-no-files-found: warn
           retention-days: 14
 
       # TODO(후속): Homebrew tap(ohah/homebrew-maru) cask version/sha256 자동 bump PR.
       # tap repo write 토큰이 필요해 별도로 추가한다(distribution.md "CI 릴리스" 5단계).
+
+  session-host-release-live-timing:
+    name: session host live release timing
+    needs: universal-dmg
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Record GitHub-issued live action timing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARU_REPOSITORY: ${{ github.repository }}
+          MARU_RUN_ID: ${{ github.run_id }}
+          MARU_RUN_ATTEMPT: ${{ github.run_attempt }}
+          MARU_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$MARU_REPOSITORY" = ohah/maru
+          [[ "$MARU_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MARU_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MARU_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh_path=$(command -v gh)
+          GH=$(/usr/bin/realpath "$gh_path")
+          test -x "$GH"
+          response="$RUNNER_TEMP/session-host-release-live-jobs.json"
+          record="$RUNNER_TEMP/session-host-release-live-timing.json"
+          test ! -e "$response"
+          test ! -L "$response"
+          test ! -e "$record"
+          test ! -L "$record"
+          for attempt in $(/usr/bin/seq 1 12); do
+            "$GH" api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/$MARU_REPOSITORY/actions/runs/$MARU_RUN_ID/attempts/$MARU_RUN_ATTEMPT/jobs?per_page=100" > "$response"
+            if /usr/bin/jq -e \
+              --arg source "$MARU_SOURCE_SHA" \
+              '[.jobs[] | select(.name == "universal dmg (signed + notarized)")] as $jobs |
+               (.total_count <= 100) and ($jobs | length == 1) and
+               ($jobs[0].head_sha == $source) and ($jobs[0].conclusion == "success") and
+               ([$jobs[0].steps[] | select(.name == "Run session host live release workflow")] | length == 1) and
+               ([$jobs[0].steps[] | select(.name == "Run session host live release workflow")][0] |
+                 .conclusion == "success" and (.started_at | type == "string") and (.completed_at | type == "string"))' \
+              "$response" > /dev/null
+            then
+              break
+            fi
+            test "$attempt" -lt 12
+            /bin/sleep 5
+          done
+          started=$(/usr/bin/jq -r '.jobs[] | select(.name == "universal dmg (signed + notarized)") | .steps[] | select(.name == "Run session host live release workflow") | .started_at' "$response")
+          completed=$(/usr/bin/jq -r '.jobs[] | select(.name == "universal dmg (signed + notarized)") | .steps[] | select(.name == "Run session host live release workflow") | .completed_at' "$response")
+          started_ms=$(/usr/bin/date -u --date="$started" +%s%3N)
+          completed_ms=$(/usr/bin/date -u --date="$completed" +%s%3N)
+          test "$completed_ms" -gt "$started_ms"
+          duration_ms=$((completed_ms - started_ms))
+          /usr/bin/jq -cn \
+            --arg schema 'maru.session-host-release-live-timing.v1' \
+            --arg repository "$MARU_REPOSITORY" \
+            --arg workflow 'release.yml' \
+            --arg source_sha "$MARU_SOURCE_SHA" \
+            --arg job_name 'universal dmg (signed + notarized)' \
+            --arg step_name 'Run session host live release workflow' \
+            --arg started_at "$started" \
+            --arg completed_at "$completed" \
+            --argjson run_id "$MARU_RUN_ID" \
+            --argjson run_attempt "$MARU_RUN_ATTEMPT" \
+            --argjson duration_ms "$duration_ms" \
+            '{$schema,$repository,$workflow,$run_id,$run_attempt,$source_sha,$job_name,$step_name,$started_at,$completed_at,$duration_ms}' > "$record"
+          /usr/bin/jq -e '.schema == "maru.session-host-release-live-timing.v1" and .duration_ms > 0' "$record" > /dev/null
+
+      - name: Upload GitHub-issued live action timing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-release-live-timing-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-release-live-timing.json
+          if-no-files-found: error
+          retention-days: 90

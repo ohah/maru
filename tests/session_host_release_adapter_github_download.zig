@@ -102,6 +102,11 @@ test "predecessor download writes exact mapped assets and cleanup removes owned 
         const stat = try tmp.dir.statFile(std.testing.io, leaf, .{});
         try std.testing.expectEqual(@as(u32, 0o400), @as(u32, @intCast(stat.permissions.toMode() & 0o777)));
     }
+    const held = try set.openAssetDescriptor(.frozen_product_executable);
+    defer _ = std.c.close(held);
+    var held_bytes: [payloads[1].len]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, payloads[1].len), std.c.pread(held, &held_bytes, held_bytes.len, 0));
+    try std.testing.expectEqualStrings(payloads[1], &held_bytes);
     try set.cleanup();
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "work", .{}));
 }

@@ -3295,6 +3295,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   compose와 revalidation 때 모두 exact 비교한다. focused gate는 Debug·ReleaseFast actual filesystem에서 copied/pre-owned/alias owner,
   role/source/asset 교환·누락·mutation과 attestation/file mismatch의 publication 0을 검증한다. upgrade leaf 조립·publication과 U5
   frozen 제품 실행은 별도 gate다.
+  Pre-publish profile→A manifest bootstrap은 authenticated B manifest를 요구하는 post-publish entrypoint를 가장해
+  재사용하지 않는다. `release_adapter_profile_predecessor_manifest_input.zig`는 trusted context·environment에
+  결속된 `upgrade_b` profile에서 predecessor 네 필드를 유도하고, 기존 manifest download→file
+  materialize→artifact attestation leaf를 하나의 deadline으로 조립한다. 각 외부 경계 후 profile을 다시
+  관측하며 mismatch·deadline/CLI/file drift는 publication 0, 실패는 authenticated manifest→held file/directory
+  역순 cleanup으로 수렴한다. `test-session-host-release-adapter-profile-predecessor-manifest-input`은
+  Debug·ReleaseFast에서 fixed four-field snapshot과 exact ordering/deadline, baseline·four-field/environment drift,
+  copied/pre-owned/alias, callback-before-preflight 0, 모든 fail-index cleanup/retry와 actual filesystem caller-buffer reuse·explicit-cleanup
+  residue 0을 검증한다. A asset/release
+  authentication, identity/binding, signed runner, B manifest/checkpoint·GitHub mutation·frozen signed U5는 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

@@ -18,6 +18,7 @@ pub const rows = [_]Row{
     .{ .root = "src/platform/macos/session_host/release_adapter_apple_product.zig", .names = &.{"release_adapter_apple_product"}, .deps = &.{ "product_identity", "release_manifest" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_apple_transport.zig", .names = &.{"release_adapter_apple_transport"}, .deps = &.{ "bounded_process", "release_adapter_apple_product" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_baseline_phase.zig", .names = &.{"release_adapter_candidate_baseline_phase"}, .deps = &.{} },
+    .{ .root = "src/platform/macos/session_host/release_adapter_candidate_upgrade_phase.zig", .names = &.{"release_adapter_candidate_upgrade_phase"}, .deps = &.{} },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_baseline_product.zig", .names = &.{"release_adapter_candidate_baseline_product"}, .deps = &.{"release_adapter_candidate_baseline_phase"} },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_release_phase.zig", .names = &.{"release_adapter_candidate_release_phase"}, .deps = &.{} },
     .{ .root = "src/platform/macos/session_host/release_adapter_identity.zig", .names = &.{"release_adapter_identity"}, .deps = &.{} },

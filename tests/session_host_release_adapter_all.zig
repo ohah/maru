@@ -1,4 +1,4 @@
-//! session-host release adapter 판정자 23 개를 **한 바이너리로** 모은다 — 리눅스 `check` 잡의 `zig build test` 와 macOS 게이트 양쪽에서 이 파일이 쓰인다.
+//! session-host release adapter 판정자 24 개를 **한 바이너리로** 모은다 — 리눅스 `check` 잡의 `zig build test` 와 macOS 게이트 양쪽에서 이 파일이 쓰인다.
 //! 각 가족의 전용 스텝(`test-session-host-release-adapter-*`)과 `test-session-host` 는 그대로 자기 바이너리를 갖는다.
 //!
 //! 왜: 가족마다 바이너리를 만들면 같은 product 모듈 그래프를 그 수만큼 다시 컴파일한다(2026-09-05 CI 로그 실측:
@@ -15,6 +15,7 @@ test {
     _ = @import("session_host_release_adapter_apple_product.zig");
     _ = @import("session_host_release_adapter_apple_transport.zig");
     _ = @import("session_host_release_adapter_candidate_baseline_phase.zig");
+    _ = @import("session_host_release_adapter_candidate_upgrade_phase.zig");
     _ = @import("session_host_release_adapter_candidate_baseline_product.zig");
     _ = @import("session_host_release_adapter_candidate_release_phase.zig");
     _ = @import("session_host_release_adapter_context.zig");

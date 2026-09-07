@@ -6237,6 +6237,7 @@ pub const AppSession = struct {
 
     /// 이번 분배에서 **주인을 찾은** 이벤트 수(`consumeRemoteAgentLines` 가 올린다).
     remote_nonce_matched: usize = 0,
+    remote_nonce_rebinds: u32 = 0,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -14560,11 +14561,20 @@ pub const AppSession = struct {
 
         // **nonce 는 이 Term 이 원격에 실어 보낸 그 값이어야 한다.** 만드는 곳을 하나로 둔다 — `maru ssh`
         // 는 pane 셸 env 에서 읽고 이쪽은 같은 두 값을 Term 에서 읽는다(둘 다 `formatRemotePaneNonce`).
-        if (term.agent_remote_nonce_len == 0) {
+        // 출처가 둘이라 **굳히면 안 된다** — 한쪽이 움직이면 굳은 값은 영영 어긋나고, 그 Term 은 자기
+        // 이벤트를 하나도 못 받는다(2026-09-07 실측: 열 세션 중 둘만 떴다). 그래서 매 tick 다시 세우고
+        // 달라지면 따라간다. 세울 수 없는 순간(재부착 중 registry 공백)에는 **들고 있던 값을 지키고**,
+        // 처음부터 없었을 때만 물러난다 — 지우면 그 tick 의 이벤트를 통째로 버린다.
+        {
             var buf: [hc.remote_pane_nonce_max]u8 = undefined;
-            const nonce = agent_ops.remotePaneNonceFor(term, &buf) orelse return;
-            @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
-            term.agent_remote_nonce_len = @intCast(nonce.len);
+            if (agent_ops.remotePaneNonceFor(term, &buf)) |nonce| {
+                const cur = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
+                if (!std.mem.eql(u8, cur, nonce)) {
+                    if (cur.len != 0) self.reportRemoteNonceRebind(ctx.dest, cur, nonce);
+                    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+                    term.agent_remote_nonce_len = @intCast(nonce.len);
+                }
+            } else if (term.agent_remote_nonce_len == 0) return;
         }
 
         const gop = self.remote_agent_hosts.getOrPut(self.allocator, ctx.dest) catch return;
@@ -14952,22 +14962,48 @@ pub const AppSession = struct {
     ///
     /// **둘을 나란히 찍는다** — 온 nonce 와 Term 이 들고 있던 nonce. 하나만으로는 어디서 갈렸는지
     /// 모른다(앱 인스턴스 부분이 다른지, pane 부분이 다른지, 아예 비었는지).
-    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize) void {
+    /// 스트리머가 역조회에 실패해 **파일 이름을 그대로** 실어 보낸 nonce 인가([계획](../../../docs/plans/remote-agent-state.md)
+    /// §RA6). tmux 안에서는 그 이름에 `_t<pane>` 칸이 붙고, 그것은 **어느 Term 의 nonce 와도 안 맞는 것이
+    /// 설계다** — detached 안에서 도는 에이전트는 귀속할 Term 이 없어 버리기로 결정했다. 그러니 이 모양은
+    /// 이상이 아니고, `orphan agent nonce` 로 말하면 정상 동작을 결함처럼 알리는 오탐이 된다.
+    fn nonceIsUnresolvedSpoolName(nonce: []const u8) bool {
+        const at = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse return false;
+        const tail = nonce[at + 1 ..];
+        if (tail.len < 2 or tail[0] != 't') return false;
+        for (tail[1..]) |c| if (c < '0' or c > '9') return false;
+        return true;
+    }
+
+    /// 굳어 있던 pane nonce 가 지금 신원과 달라 갈아끼웠다. **이 줄이 뜨면 그 Term 은 그 전까지 자기
+    /// 이벤트를 하나도 못 받고 있었다** — `orphan agent nonce` 의 원인 쪽이다. 둘이 같은 재현에서 나오면
+    /// 「재부착으로 handle→runtime 매핑이 움직였다」가 확정된다.
+    fn reportRemoteNonceRebind(self: *AppSession, dest: []const u8, old: []const u8, new: []const u8) void {
+        self.remote_nonce_rebinds +|= 1;
+        std.log.scoped(.agent).warn(
+            "remote agent nonce rebind: dest={s} old={s} new={s} (that term was orphaned until now)",
+            .{ dest, old, new },
+        );
+    }
+
+    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize) void {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
         if (self.remote_nonce_matched > 0) {
             self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
             return;
         }
         if (self.unmatched_event_nonce_len == 0) return;
+        // detached 는 **버리는 것이 계약**이다 — 그 모양까지 알리면 정상 동작이 결함으로 읽힌다.
+        if (nonceIsUnresolvedSpoolName(self.unmatched_event_nonce[0..self.unmatched_event_nonce_len])) return;
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, none matched)",
+            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, {d} with nonce, none matched)",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
                 if (self.unmatched_term_nonce_len == 0) "(empty)" else self.unmatched_term_nonce[0..self.unmatched_term_nonce_len],
                 fed,
+                with_nonce,
             },
         );
     }
@@ -15026,11 +15062,12 @@ pub const AppSession = struct {
     fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
         self.remote_nonce_matched = 0;
         var fed: usize = 0;
+        var with_nonce: usize = 0;
         var no_channel: usize = 0;
         var no_dest: usize = 0;
         var other_dest: usize = 0;
         defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
-        defer self.reportOrphanNonce(dest, lines.len, fed);
+        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce);
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -15047,6 +15084,7 @@ pub const AppSession = struct {
                         continue;
                     }
                     fed += 1;
+                    if (term.agent_remote_nonce_len != 0) with_nonce += 1;
                     if (lines.len > 0)
                         agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
                     else
@@ -23254,6 +23292,167 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
 // 그 빌드 실패를 「판정자가 안 죽었다」로 읽었다. 카운터는 그대로 두고 **전달만 0 으로 바꾸는** 변형이
 // 옳다(그러면 컴파일되고 동작만 달라진다). 확인: `no_channel`·`no_dest` 전달을 0 으로 → 각각 죽는다.
 
+test "RF3: 원격 Term 에는 로컬 신원을 대신 끼우지 않는다" {
+    // `remotePaneNonceFor` 의 fallback 은 **GUI 가 띄운 자식**(`<pid>_<surface>`)의 모양이다. 재부착 중
+    // handle→runtime 이 비었다고 그것을 원격 Term 에 끼우면, 원격이 실어 보낸 `host_…` 와 **형식부터**
+    // 안 맞는 값이 선다 — 굳으면 그 Term 은 영영 굶는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var buf: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined;
+    try std.testing.expect(agent_ops.remotePaneNonceFor(term, &buf) != null); // 로컬 Term 은 세운다
+
+    // 순수 분기 테스트라 vtable 을 부르지 않는다(같은 주입을 쓰는 다른 테스트와 같은 규율).
+    term.surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
+    defer term.surface.remote = null;
+
+    // 원격인데 host 신원을 못 얻는다(이 세션에는 백엔드가 없다) — **물러나야 한다**.
+    try std.testing.expect(agent_ops.remotePaneNonceFor(term, &buf) == null);
+}
+test "RF3: 세울 수 없는 순간에도 원격 Term 이 들고 있던 nonce 를 지킨다" {
+    // 재부착 중에는 handle→runtime 이 잠깐 빈다. 그때 지우면 **그 tick 의 이벤트를 통째로 버린다** —
+    // 굳히기를 걷어낸 대가가 「없으면 지운다」가 되면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    term.surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
+    defer term.surface.remote = null;
+
+    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+    var ctl = [_]u8{'/'};
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+
+    try std.testing.expectEqualStrings(mine, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
+    try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 갈아낀 적 없다
+}
+test "RF3: detached 이벤트가 실제로 흘러도 orphan 을 말하지 않는다" {
+    // 판별기만 잠그면 **그것을 부르는 자리**가 빠져도 초록이다(mutation 으로 확인). 그래서 분배 경로로
+    // 흘려보내 확인한다 — 계약(§RA6)상 버리는 모양이니 경고가 서면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    session.unmatched_reported = false;
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_bbbb_t27\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expect(!session.unmatched_reported); // 정상 동작을 결함처럼 알리지 않는다
+}
+test "RF3: detached 스풀 이름은 orphan 으로 안 알린다 — 버리는 것이 계약이다" {
+    // 계획 §RA6: 역조회가 접히면 스트리머가 파일 이름(`…_t27`)을 그대로 싣고, 그것이 **어느 Term 과도
+    // 안 맞는 것이 설계다**. 그 정상 동작을 결함처럼 알리면 다음 사람이 없는 병을 쫓는다.
+    try std.testing.expect(AppSession.nonceIsUnresolvedSpoolName("host_aa_bb_t27"));
+    try std.testing.expect(AppSession.nonceIsUnresolvedSpoolName("_t3"));
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_bb")); // 정상 신원
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t")); // 숫자가 없다
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t2x")); // 숫자가 아니다
+    try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("3185_4")); // 로컬 신원
+}
+test "RF3: 신원이 그대로면 nonce 를 갈아끼우지 않는다" {
+    // 매 tick 다시 세우기로 했으니, **안 바뀌었을 때 조용한지**가 먼저다. 여기서 시끄러우면 재바인딩
+    // 로그는 신호가 아니라 잡음이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+    var ctl = [_]u8{'/'};
+
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    const first = try a.dupe(u8, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
+    defer a.free(first);
+    try std.testing.expect(first.len > 0);
+    try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 처음 세우는 것은 재바인딩이 아니다
+
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 2);
+    try std.testing.expectEqualStrings(first, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
+    try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 두 번째도 조용하다
+}
+test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
+    // **이 세션의 병.** 옛 값이 굳으면 그 Term 은 자기 이벤트를 하나도 못 받는다 — 열 세션 중 둘만
+    // 뜨던 자리(2026-09-07). 갈아끼우고, 그 순간을 세어 둔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    const stale = "host_aaaa_stale";
+    @memcpy(term.agent_remote_nonce[0..stale.len], stale);
+    term.agent_remote_nonce_len = stale.len;
+
+    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+    var ctl = [_]u8{'/'};
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+
+    const now = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
+    try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
+    try std.testing.expectEqual(@as(u32, 1), session.remote_nonce_rebinds); // 갈아낀 것을 세었다
+}
 test "RF2: 이벤트가 왔는데 아무 Term 도 안 가져가면 두 nonce 를 나란히 남긴다" {
     // **스풀·스트리머·분배가 다 정상인데 마지막 한 칸에서 갈리는 자리.** 2026-09-07 에 그 상태를
     // 만났고, 로그가 없어 원격에서 해시를 손으로 대조해야 했다.

@@ -162,9 +162,22 @@ keybind = F4 = esc:[2J
   `unfoldAll` 이 `term.kind != .editor` 를 먼저 보고, 비교 뷰는 `foldsUnavailable` 이 거절한다).
   `jump_to_bracket`(`⇧⌘\`)·`toggle_symbol_picker`(`⇧⌘O`)와 **같은 부류**다 — 컨텍스트 표는 *"전역에
   못 넣는 것"*(터미널 입력을 뺏는 Option 단독)을 위한 자리이고, 이 다섯은 그게 아니다.
+- **`⌥` 가 글자를 안 바꾼다**(2026-09-07 적대적 검증 5회차 — 이것이 안 맞았으면 자리 선택이 통째로
+  틀렸다). macOS 에서 `⌥0` 은 `º` 를 내지만, Swift 가 chord 를 만들 때 **`charactersIgnoringModifiers`**
+  를 쓰므로 `0` 으로 도달한다(실측). `⌥Z` 가 `Ω` 아닌 `Z` 로 오는 것도 같은 이유다.
+- **`option-as-meta` 설정에 안 걸린다**(6회차). 입력기 우회 판정(`bypassMods`)에 **`.command` 가 늘**
+  들어가므로 `⌥⌘` 조합은 그 설정과 **무관하게** 단축키 경로로 간다. **Option 단독(`⌥0`·`⌥J`)을 고르지
+  않은 실질적 이유가 이것이다** — 그쪽은 `input.option-as-meta = false` 면 `resolveEditor` 까지 오지도
+  않는다(이 문서의 「편집기 Term 컨텍스트」가 그 단서를 이미 적는다).
 - **`⌥⌘` 가족에 이미 여럿이 산다**(실측): `⌥⌘C/W/L/D`(찾기 규칙) · `⌥⌘T`(새 웹 탭) ·
   `⌥⌘↑↓`(위/아래 커서) · `⌥⌘←→`(pane 포커스) · `⌥⌘[]`(Term 이동). 숫자·`J` 를 더하는 것은 그
   가족에 자연스럽다.
+- **사용자 설정을 안 덮는다**(2026-09-07 적대적 검증 10회차). resolve 순서가 *"사용자 config 바인딩
+  → 빌트인 → 안 묶인 Cmd → ignored"* 라, 이미 그 chord 를 쓰던 사용자는 **자기 것이 이긴다**. 그리고
+  빌트인이므로 `=unbind` 로 끌 수 있다.
+- **다섯 다 스스로 거절하는 것을 전수로 확인했다**(9회차). `fold_level_1~3` 은 `applyFold` 를 타고
+  그 첫 줄이 `term.kind != .editor` 를 보며, **`unfoldAll` 은 별도 구현이지만 같은 가드 둘**
+  (`kind` 와 `foldsUnavailable`)을 갖고 있다 — 한쪽만 보고 「다섯 다」라고 적을 뻔했다.
 - **`fold`(개별 접기)는 chord 를 안 준다.** 그 액션은 없고, 개별 접기는 **gutter 화살표 클릭**이
   소유한다([시각 매핑](native-editor-visual-mapping.md) §4.1f).
 - **메뉴 keyEquivalent 층을 지나야 산다.** 이 다섯은 팔레트 카탈로그에만 있고 메뉴 항목이 아니므로

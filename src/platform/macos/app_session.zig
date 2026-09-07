@@ -80851,6 +80851,35 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
     };
 }
 
+test "활동 뷰 요약 칸: 크기는 언제나, 실패는 provider 가 적었을 때만 (AV2)" {
+    // 계약 §2.2 의 표가 이 세 갈래다. 화면 문자열이라 **지어내지 않는다**를 여기서 못 박는다 —
+    // 결과를 못 찾은 호출은 「0줄」이 아니라 **빈 칸**이다.
+    var buf: [64]u8 = undefined;
+
+    // ① 못 찾았다 → 빈 칸
+    try std.testing.expectEqualStrings("", image_gallery_ops.formatResultSummary(&buf, .{ .found = false }));
+    // ② 끝났다 → 크기만
+    {
+        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .lines = 12 });
+        try std.testing.expect(std.mem.startsWith(u8, out, "12"));
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_lines_suffix)) != null);
+        // 실패가 아니면 실패 낱말이 **없다**.
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_failed)) == null);
+    }
+    // ③ 실패했다 → 실패 + 크기(둘 다 있어야 한다 — 실패만 남기면 「얼마나」가 사라진다)
+    {
+        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 3 });
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_failed)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "3") != null);
+    }
+    // ④ 빈 결과는 0 줄이라고 **말한다**(못 찾은 것과 다른 사실이다).
+    {
+        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0 });
+        try std.testing.expect(out.len != 0);
+        try std.testing.expect(std.mem.startsWith(u8, out, "0"));
+    }
+}
+
 test "원격 탐색기 유지: 파일을 열어도 발행이 원격에 남는다 (RF7)" {
     // 사용자 보고 2026-09-07 — 계획 §10.18. 원격 트리에서 파일을 누르면 미러가 **로컬 열기
     // 파이프라인**을 타므로(RF4) 그 pane 의 활성 Term 이 파일 Term 이 된다. 그때 ⑴ follow 가

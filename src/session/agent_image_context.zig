@@ -192,6 +192,56 @@ pub fn splitLabelRow(all_cols: u16, prefix_cols: u16, time_cols: u16, gap: u16, 
     return out;
 }
 
+/// 활동 **줄 목록**의 자리 나누기 — 격자의 `splitLabelRow` 에 **결과 요약** 한 조각을 더한 판이다.
+///
+/// 줄은 `[접두] gap [대상] gap [요약] gap [시각]` 이고, 좁아지면 **시각부터, 그다음 요약, 그다음
+/// 접두** 순으로 버린다(활동 뷰 계약 §2.2 — 「대상은 마지막까지 지킨다」). 접두가 요약보다 먼저 자리를
+/// 얻는 이유는 격자에서 정한 것과 같다: 「전체」에 섞이는 이미지 줄에서 사용자가 던지는 첫 물음이
+/// 「내가 올린 것인가」이기 때문이다.
+pub const ActivityRowSplit = struct {
+    /// 0 이면 그 조각을 그리지 않는다.
+    prefix_cols: u16 = 0,
+    label_cols: u16 = 0,
+    summary_cols: u16 = 0,
+    time_cols: u16 = 0,
+};
+
+pub fn splitActivityRow(
+    all_cols: u16,
+    prefix_cols: u16,
+    summary_cols: u16,
+    time_cols: u16,
+    gap: u16,
+    min_label: u16,
+) ActivityRowSplit {
+    if (all_cols == 0) return .{};
+    var out: ActivityRowSplit = .{ .label_cols = all_cols };
+    // **가져가는 순서가 곧 버리는 순서의 반대다.** 앞엣것이 자리를 먼저 얻는다.
+    if (prefix_cols > 0) {
+        // u32 로 올려 더한다 — u16 으로 더하면 넘치고, 넘치면 「자리가 남는다」로 뒤집힌다.
+        const want: u32 = @as(u32, prefix_cols) + gap;
+        if (@as(u32, out.label_cols) >= want + min_label) {
+            out.prefix_cols = prefix_cols;
+            out.label_cols = @intCast(@as(u32, out.label_cols) - want);
+        }
+    }
+    if (summary_cols > 0) {
+        const want: u32 = @as(u32, summary_cols) + gap;
+        if (@as(u32, out.label_cols) >= want + min_label) {
+            out.summary_cols = summary_cols;
+            out.label_cols = @intCast(@as(u32, out.label_cols) - want);
+        }
+    }
+    if (time_cols > 0) {
+        const want: u32 = @as(u32, time_cols) + gap;
+        if (@as(u32, out.label_cols) >= want + min_label) {
+            out.time_cols = time_cols;
+            out.label_cols = @intCast(@as(u32, out.label_cols) - want);
+        }
+    }
+    return out;
+}
+
 fn foldAscii(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + 32 else c;
 }
@@ -928,4 +978,44 @@ test "활동 라벨: 상한을 넘겨도 잘려서 들어간다" {
 test "활동 라벨: 빈 대상은 빈 라벨이다 — 지어내지 않는다" {
     const l = activityLabel("", false);
     try testing.expect(l.isEmpty());
+}
+
+test "활동 줄 자리: 좁아지면 시각부터, 그다음 요약, 대상은 마지막까지 (AV2)" {
+    // 계약 §2.2 의 우선순위를 **순수 층에서** 못박는다 — 화면 없이 시험할 수 있어야 규칙이 하나로 산다.
+    const min_label: u16 = 8;
+    const gap: u16 = 1;
+    // ① 넉넉하면 넷 다 자리를 얻는다.
+    {
+        const s = splitActivityRow(48, 4, 6, 5, gap, min_label);
+        try testing.expectEqual(@as(u16, 4), s.prefix_cols);
+        try testing.expectEqual(@as(u16, 6), s.summary_cols);
+        try testing.expectEqual(@as(u16, 5), s.time_cols);
+        try testing.expectEqual(@as(u16, 48 - 5 - 7 - 6), s.label_cols);
+    }
+    // ② 시각을 넣으면 대상이 최소 아래로 가는 폭 → **시각부터 버린다**(요약·접두는 남는다).
+    {
+        const s = splitActivityRow(22, 4, 6, 5, gap, min_label);
+        try testing.expectEqual(@as(u16, 4), s.prefix_cols);
+        try testing.expectEqual(@as(u16, 6), s.summary_cols);
+        try testing.expectEqual(@as(u16, 0), s.time_cols);
+        try testing.expectEqual(@as(u16, 10), s.label_cols);
+    }
+    // ③ 더 좁으면 **요약까지** 버린다. 접두는 격자에서 정한 우선순위대로 남는다.
+    {
+        const s = splitActivityRow(15, 4, 6, 5, gap, min_label);
+        try testing.expectEqual(@as(u16, 4), s.prefix_cols);
+        try testing.expectEqual(@as(u16, 0), s.summary_cols);
+        try testing.expectEqual(@as(u16, 0), s.time_cols);
+        try testing.expectEqual(@as(u16, 10), s.label_cols);
+    }
+    // ④ 폭이 0 이면 아무것도 안 그린다.
+    try testing.expectEqual(@as(u16, 0), splitActivityRow(0, 4, 6, 5, gap, min_label).label_cols);
+    // ⑤ **넘침에 뒤집히지 않는다** — u16 으로 더하면 「자리가 남는다」가 된다.
+    {
+        const s = splitActivityRow(20, std.math.maxInt(u16), std.math.maxInt(u16), std.math.maxInt(u16), gap, min_label);
+        try testing.expectEqual(@as(u16, 0), s.prefix_cols);
+        try testing.expectEqual(@as(u16, 0), s.summary_cols);
+        try testing.expectEqual(@as(u16, 0), s.time_cols);
+        try testing.expectEqual(@as(u16, 20), s.label_cols);
+    }
 }

@@ -2443,11 +2443,20 @@ pub fn collectActivityList(
             time_text = formatImageTime(&time_buf, label.time_s, off, now_s, now_off);
         }
 
+        // **결과 요약**(AV2) — 그 호출이 어떻게 끝났나. 못 찾은 호출은 빈 문자열이라 자리를 안 먹는다.
+        var summary_buf: [max_result_summary_bytes]u8 = undefined;
+        const summary = if (i < self.image_gallery.hits.items.len)
+            formatResultSummary(&summary_buf, self.image_gallery.hits.items[i].result)
+        else
+            "";
+
         const y = area.y + @as(u32, @intCast((i - first) * row_h));
-        // 자리 나누기는 격자와 **같은 순수 함수**가 정한다 — 좁아지면 시각부터 버린다(§2.2.3).
-        const split = context_mod.splitLabelRow(
+        // 자리 나누기는 격자와 **같은 결의 순수 함수**가 정한다 — 좁아지면 시각부터, 그다음 요약을
+        // 버리고 대상은 마지막까지 지킨다(활동 뷰 계약 §2.2 · 갤러리 §2.2.3).
+        const split = context_mod.splitActivityRow(
             cols,
             displayColsOf(prefix),
+            displayColsOf(summary),
             displayColsOf(time_text),
             time_gap_cols,
             if (text.len == 0) 0 else min_label_cols,
@@ -2473,6 +2482,18 @@ pub fn collectActivityList(
             } });
             pieces += 1;
         }
+        // 요약은 시각 **왼쪽**이다(계약 §2.2 의 줄 모양 그대로). 시각이 버려졌으면 그 자리를 쓴다.
+        if (split.summary_cols > 0 and summary.len > 0) {
+            const tail: u32 = if (split.time_cols == 0) 0 else @as(u32, split.time_cols) +| time_gap_cols;
+            const summary_col: u32 = @as(u32, cols) -| tail -| split.summary_cols;
+            const sdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.summary_cols, summary, dim) catch continue;
+            self.collectShaped(collected, sdl, builder, .{ .pane = .{
+                .origin_x = area.x +| (summary_col *| self.cell_width_px),
+                .origin_y = y,
+                .colors = colors,
+            } });
+            pieces += 1;
+        }
         if (split.time_cols > 0 and time_text.len > 0) {
             // 시각은 **오른쪽 끝**에 붙인다(격자 라벨과 같은 자리 규약).
             const time_col: u32 = @as(u32, cols) -| split.time_cols;
@@ -2487,6 +2508,32 @@ pub fn collectActivityList(
     }
     self.image_gallery.drawn_rows = drawn;
     self.image_gallery.drawn_pieces = pieces;
+}
+
+/// 요약 문자열의 상한. 「실패 · 4294967295줄」이 가장 긴 모양이고 그 두 배다.
+const max_result_summary_bytes: usize = 64;
+
+/// 결말을 **한 조각**으로 적는다(계약 §2.2, 사용자 결정 2026-09-07).
+///
+/// 크기(줄 수)는 언제나 쓰고, **실패는 provider 가 적었을 때만** 앞에 붙인다. 결과를 못 찾은 호출은
+/// **빈 문자열**이다 — 「모른다」를 「0 줄」로 적지 않는다(취소된 호출이 실제로 그렇다).
+///
+/// 계획 초안은 「결과의 **첫 줄**과 크기」였는데 실측이 그것을 기각했다: Codex 결과 첫 줄의 상위는
+/// `Script completed`(133,852) · `Chunk ID`(14,940) · 파일명이라, 그대로 실으면 칸이 잡음으로 찬다.
+///
+/// **`pub` 인 이유는 판정자다** — 화면에 적히는 문자열이고, 도크 렌더를 통째로 세우지 않고 이 한 줄을
+/// 직접 잴 수 있어야 한다(`remoteWatchTargetForTest` 와 같은 규율).
+pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.ResultSummary) []const u8 {
+    if (!result.found) return "";
+    const suffix = maru.i18n.t(.image_gallery_result_lines_suffix);
+    if (result.failed) {
+        return std.fmt.bufPrint(buf, "{s} \u{00b7} {d}{s}", .{
+            maru.i18n.t(.image_gallery_result_failed),
+            result.lines,
+            suffix,
+        }) catch "";
+    }
+    return std.fmt.bufPrint(buf, "{d}{s}", .{ result.lines, suffix }) catch "";
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.

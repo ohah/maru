@@ -4640,9 +4640,12 @@ pathname은 기존 owner storage 및 서로 간 alias·동일/ancestor/descendan
 기존 profile owner·upgrade workspace·evidence·predecessor assets를 삭제하거나 정산하지 않는다. durable rename 뒤
 실패는 audit-required로 남겨 retained directory를 자동 삭제하지 않으며 exact stage와 로컬 cleanup 상태를 보존한다.
 
-focused Debug·ReleaseFast gate는 exact call/deadline/owner projection, B manifest predecessor와 signer 결속,
-profile/candidate/evidence/manifest/path drift, copied/pre-owned/alias, 모든 composition fail-index, retained commit 뒤
-source owner 생존, 역순 cleanup·retry와 actual private-filesystem residue 0을 검증한다. timing diagnostic publication,
+focused Debug·ReleaseFast gate는 reducer의 exact call/deadline/owner projection·모든 mutating stage 실패·retained
+commit·역순 best-effort cleanup/retry를 검증하고, 기존 manifest/handoff/profile focused gate와 함께 B manifest
+predecessor·signer 결속 및 profile/candidate/evidence/manifest/path drift를 닫는다. 같은 gate의 실제 APFS 행은
+harness-owned private root에서 manifest 작성→promotion→fence→retained close를 1회(Debug)·40회(ReleaseFast) 실행해
+전체 로컬 경과시간과 failure·FD delta·retained final·staging residue를 출력한다. 이 값은 로컬 diagnostic이며
+GitHub-issued timing이나 signed upgrade 성공 권위가 아니다. timing diagnostic publication,
 fresh-process command wiring, checkpoint·attestation, live workflow/GitHub mutation과 protected B tag 실측은 후속 gate다.
 
 ## 12. 필수 적대적 검증

@@ -1,4 +1,4 @@
-//! Authority-bound executable copy for one immutable predecessor or current candidate source.
+//! Authority-bound executable copy for one immutable predecessor download.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,13 +8,10 @@ const posix = std.posix;
 const copy_buffer_bytes: usize = 64 * 1024;
 const max_executable_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
 
-pub const SourceKind = enum { predecessor_download, current_candidate };
-
 pub const View = struct {
     source_fd: c.fd_t,
     source_size: u64,
     source_sha256: [64]u8,
-    source_kind: SourceKind,
     destination_dir_fd: c.fd_t,
     destination_path: []const u8,
     destination_leaf: [:0]const u8,
@@ -160,7 +157,7 @@ fn sameFile(stat: posix.Stat, result: *const Materialized) bool {
 fn validateSource(view: View) !posix.Stat {
     var stat: posix.Stat = undefined;
     if (c.fstat(view.source_fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.nlink != 1 or
-        stat.mode & 0o777 != sourceMode(view.source_kind) or stat.size < 0 or @as(u64, @intCast(stat.size)) != view.source_size)
+        stat.mode & 0o777 != 0o400 or stat.size < 0 or @as(u64, @intCast(stat.size)) != view.source_size)
         return error.InvalidAuthority;
     const digest = try hashExact(view.source_fd, view.source_size);
     if (!std.mem.eql(u8, &digest, &view.source_sha256)) return error.InvalidAuthority;
@@ -236,7 +233,7 @@ fn validateView(view: View) !void {
         !std.fs.path.isAbsolute(view.destination_path) or view.destination_leaf.len == 0 or
         view.destination_leaf.len > std.fs.max_name_bytes or
         !std.mem.eql(u8, std.fs.path.basename(view.destination_path), view.destination_leaf) or
-        !std.mem.eql(u8, view.destination_leaf, destinationName(view.source_kind)) or
+        !std.mem.eql(u8, view.destination_leaf, "predecessor-executable") or
         !lowerHex(&view.source_sha256)) return error.InvalidAuthority;
     var source: posix.Stat = undefined;
     var destination: posix.Stat = undefined;
@@ -260,25 +257,11 @@ fn sameDestination(result: *const Materialized, view: View) bool {
 }
 
 fn sameView(a: View, b: View) bool {
-    return a.source_fd == b.source_fd and a.source_size == b.source_size and a.source_kind == b.source_kind and
+    return a.source_fd == b.source_fd and a.source_size == b.source_size and
         std.mem.eql(u8, &a.source_sha256, &b.source_sha256) and
         a.destination_dir_fd == b.destination_dir_fd and
         std.mem.eql(u8, a.destination_path, b.destination_path) and
         std.mem.eql(u8, a.destination_leaf, b.destination_leaf);
-}
-
-fn sourceMode(kind: SourceKind) u32 {
-    return switch (kind) {
-        .predecessor_download => 0o400,
-        .current_candidate => 0o600,
-    };
-}
-
-fn destinationName(kind: SourceKind) []const u8 {
-    return switch (kind) {
-        .predecessor_download => "predecessor-executable",
-        .current_candidate => "current-executable",
-    };
 }
 
 fn abort(result: *Materialized) !void {

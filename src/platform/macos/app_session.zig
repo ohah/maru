@@ -76767,6 +76767,146 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
 }
 
+test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대적 E2)" {
+    // **반복이 없으면 누수는 안 보인다.** 필터 전환은 매번 `hits`·`labels` 를 다시 만들고 타일을
+    // 버린다 — 한 번 돌 때는 멀쩡해 보여도 되풀이하면 드러난다. `testing.allocator` 가 판정자
+    // 끝에서 누수를 잡으므로, 여기서는 **충분히 여러 번 도는 것** 자체가 검증이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_L1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo a\",\"description\":\"가나다\"}}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_L2\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/x/read.txt\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "l.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/l.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    session.image_gallery.key_focus = true;
+
+    // 네 필터를 스무 바퀴 돈다. 사이사이 tick 을 섞어 렌더·디코드 경로도 함께 탄다.
+    var round: usize = 0;
+    while (round < 20) : (round += 1) {
+        var step: usize = 0;
+        while (step < 4) : (step += 1) {
+            try std.testing.expect(image_gallery_ops.cycleFilter(session));
+            _ = session.tick() catch {};
+        }
+    }
+
+    // 한 바퀴가 4 걸음이므로 스무 바퀴 뒤에는 처음 자리(이미지)로 돌아와 있다.
+    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+    // 목록도 그대로다 — 되풀이가 상태를 갉아먹지 않았다.
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+}
+
+test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따른다 (적대적 E3)" {
+    // 스캔은 워커에서 돈다. 그 사이 필터를 바꾸면 **결과가 옛 필터로 걸러질** 수 있다 —
+    // 그러면 사용자는 「실행」을 골랐는데 이미지가 뜨는 화면을 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo z\",\"description\":\"실행 하나\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "r.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/r.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+
+    // **스캔을 걸어 두고 그것이 끝나기 전에** 필터를 바꾼다.
+    image_gallery_ops.refresh(session, true);
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // reads
+    try std.testing.expect(image_gallery_ops.cycleFilter(session)); // execs
+    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+
+    // 이제 스캔이 끝나기를 기다린다.
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expect(session.image_gallery.built);
+
+    // **결과가 「실행」으로 걸러져 있어야 한다** — 이미지 한 장은 여기 없다.
+    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqualStrings("실행 하나", session.image_gallery.labels.items[0].text());
+    // 인덱스에는 둘 다 있다(이미지 1 + 활동 1) — 걸러진 것이지 안 담긴 것이 아니다.
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.all_hits.items.len);
+    try std.testing.expectEqual(@as(usize, 1), galleryImageHits(session));
+}
+
 test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인한다 (적대적 D4)" {
     // **판정자들이 그림 채널만 보고 있었다.** 목록은 글자가 전부라, 렌더가 통째로 죽어도
     // 「활동이 없다」로 보일 뿐 CI 는 못 잡는다(격자가 비는 것과 달리 눈에도 안 띈다).

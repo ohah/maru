@@ -1778,15 +1778,28 @@ pub fn chipRowRect(self: *const AppSession) image_grid.Rect {
         .x = g.tree_content.x,
         .y = g.tree_content.y +| notice_h,
         .w = g.tree_content.w,
-        .h = @min(chipRowHeightPx(self), g.tree_content.h -| notice_h),
+        .h = @min(chipRowTakenPx(self), g.tree_content.h -| notice_h),
     };
+}
+
+/// 칩 줄이 **실제로 먹는** 높이. 크게 보기·펼침이 열려 있으면 0 이다 — 그때는 칩을 그리지 않기
+/// 때문이다(`collectFilterChips`).
+///
+/// **자리와 그리기가 갈리면 두 가지가 한꺼번에 깨진다.** 안 그리는데 자리만 빼면 ① 펼침이 한 줄을
+/// 빈 채로 잃어 「이하 생략」이 한 줄 일찍 오고, ② 그 한 줄이 펼침 영역(`gridArea`) **밖**이라
+/// 눌러도 안 닫히고 클릭이 뒤 터미널로 샌다 — 계약이 「펼침은 어디를 눌러도 닫는다」라고 못박은
+/// 것을 칩 줄만 예외로 만든다. AV3(펼침)와 AV4(칩)를 합치고 나서야 생긴 형태다.
+pub fn chipRowTakenPx(self: *const AppSession) u32 {
+    if (self.image_gallery.open != null) return 0;
+    return chipRowHeightPx(self);
 }
 
 pub fn gridArea(self: *const AppSession) image_grid.Rect {
     const g = dock_ops.dockGeometry(self);
     const notice_h: u32 = if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
-    // **칩 줄도 자리를 받는다.** 안 빼면 첫 항목이 칩 위에 겹쳐 그려진다.
-    const taken = notice_h +| chipRowHeightPx(self);
+    // **칩 줄도 자리를 받는다.** 안 빼면 첫 항목이 칩 위에 겹쳐 그려진다. 반대로 칩을 안 그리는
+    // 동안(크게 보기·펼침)에는 빼지 않는다 — `chipRowTakenPx` 가 그 하나를 정한다.
+    const taken = notice_h +| chipRowTakenPx(self);
     return .{
         .x = g.tree_content.x,
         .y = g.tree_content.y +| taken,
@@ -2555,9 +2568,14 @@ pub fn collectFilterChips(
     colors: metal_frame.CellColors,
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
+    // **안 그리면 0 이라고 말한다.** `drawn_chips` 는 「필터 UI 가 실제로 나갔나」를 값으로 보는
+    // 창인데, 안 그리고 나갈 때 지난 프레임의 수를 남겨 두면 그 창이 거짓말을 한다 — 안내 줄이
+    // 잔값을 읽던 결함(§2.2)과 같은 형태다.
+    self.image_gallery.drawn_chips = 0;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    // 크게 보기는 도크를 덮는다 — 그 위에 칩을 그리면 그림 위에 글자가 뜬다.
+    // 크게 보기·펼침은 도크를 덮는다 — 그 위에 칩을 그리면 내용 위에 글자가 뜬다. 자리도 함께
+    // 돌려준다(`chipRowTakenPx`).
     if (self.image_gallery.open != null) return;
 
     const rect = chipRowRect(self);

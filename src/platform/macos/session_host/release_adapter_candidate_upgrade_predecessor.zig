@@ -24,6 +24,16 @@ pub const Observation = struct {
     sha256: [64]u8,
 };
 
+pub const Faults = struct {
+    fail_at: usize,
+    calls: usize = 0,
+
+    fn beforeIo(self: *@This()) !void {
+        self.calls += 1;
+        if (self.calls == self.fail_at) return error.InjectedIoFailure;
+    }
+};
+
 pub const Materialized = struct {
     owner: ?*Materialized = null,
     fd: c.fd_t = -1,
@@ -50,7 +60,7 @@ pub const Materialized = struct {
     pub fn cleanup(self: *@This()) !void {
         if (self.owner != self or self.fd < 0 or self.dir_fd < 0) return error.InvalidOwner;
         if (self.present) {
-            _ = validateDestination(self) catch return error.CleanupFailed;
+            _ = validateDestination(self, null) catch return error.CleanupFailed;
             if (c.unlinkat(self.dir_fd, self.leaf[0..].ptr, 0) != 0) return error.CleanupFailed;
             self.present = false;
         }
@@ -62,36 +72,41 @@ pub const Materialized = struct {
 
     fn revalidateView(self: *const @This(), current: View) !Observation {
         if (self.owner != self or self.fd < 0 or self.dir_fd < 0) return error.InvalidOwner;
-        try validateView(current);
+        try validateView(current, null);
         if (!sameDestination(self, current)) return error.AuthorityChanged;
-        try validateBoundAuthorities(self, current);
-        const observed = try validateDestination(self);
+        try validateBoundAuthorities(self, current, null);
+        const observed = try validateDestination(self, null);
         return .{ .path = self.path[0..self.path_len :0], .size = observed.size, .mode = observed.mode, .sha256 = self.sha256 };
     }
 };
 
-pub fn materializeWith(authority: anytype, result: *Materialized) !void {
+pub fn materializeWith(authority: anytype, faults: *Faults, result: *Materialized) !void {
     if (!builtin.is_test) @compileError("materializeWith is a test-only seam");
-    return materialize(authority, result);
+    return materializeInternal(authority, faults, result);
 }
 
 pub fn materialize(authority: anytype, result: *Materialized) !void {
+    return materializeInternal(authority, null, result);
+}
+
+fn materializeInternal(authority: anytype, faults: ?*Faults, result: *Materialized) !void {
     if (!pristine(result) or overlaps(std.mem.asBytes(result), std.mem.asBytes(authority)))
         return error.InvalidOwner;
     const initial = try authority.revalidate();
-    try validateView(initial);
-    const source_stat = try validateSource(initial);
-    const dir_stat = try validateDirectory(initial.destination_dir_fd);
+    try validateView(initial, faults);
+    const source_stat = try validateSource(initial, faults);
+    const dir_stat = try validateDirectory(initial.destination_dir_fd, faults);
     try snapshotDestination(result, initial);
     result.source_device = @intCast(source_stat.dev);
     result.source_inode = @intCast(source_stat.ino);
     result.dir_device = @intCast(dir_stat.dev);
     result.dir_inode = @intCast(dir_stat.ino);
 
+    try beforeIo(faults);
     result.dir_fd = c.fcntl(initial.destination_dir_fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
     if (result.dir_fd < 0) return error.CreateFailed;
     result.owner = result;
-    const owned_dir = validateDirectory(result.dir_fd) catch {
+    const owned_dir = validateDirectory(result.dir_fd, faults) catch {
         abort(result) catch return error.CleanupFailed;
         return error.CreateFailed;
     };
@@ -100,13 +115,14 @@ pub fn materialize(authority: anytype, result: *Materialized) !void {
         return error.AuthorityChanged;
     }
 
-    materializeOwned(authority, result, initial) catch |err| {
+    materializeOwned(authority, faults, result, initial) catch |err| {
         abort(result) catch return error.CleanupFailed;
         return err;
     };
 }
 
-fn materializeOwned(authority: anytype, result: *Materialized, initial: View) !void {
+fn materializeOwned(authority: anytype, faults: ?*Faults, result: *Materialized, initial: View) !void {
+    try beforeIo(faults);
     result.fd = c.openat(result.dir_fd, result.leaf[0..].ptr, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
@@ -118,32 +134,39 @@ fn materializeOwned(authority: anytype, result: *Materialized, initial: View) !v
     result.present = true;
 
     var created: posix.Stat = undefined;
+    try beforeIo(faults);
     if (c.fstat(result.fd, &created) != 0 or !posix.S.ISREG(created.mode) or created.nlink != 1)
         return error.CreateFailed;
     result.device = @intCast(created.dev);
     result.inode = @intCast(created.ino);
     result.size = initial.source_size;
     result.sha256 = initial.source_sha256;
-    try copyExact(initial.source_fd, result.fd, initial.source_size);
-    if (c.fchmod(result.fd, 0o500) != 0 or c.fsync(result.fd) != 0 or c.fsync(result.dir_fd) != 0)
-        return error.SyncFailed;
+    try copyExact(initial.source_fd, result.fd, initial.source_size, faults);
+    try beforeIo(faults);
+    if (c.fchmod(result.fd, 0o500) != 0) return error.SyncFailed;
+    try beforeIo(faults);
+    if (c.fsync(result.fd) != 0) return error.SyncFailed;
+    try beforeIo(faults);
+    if (c.fsync(result.dir_fd) != 0) return error.SyncFailed;
 
     const current = try authority.revalidate();
     if (!sameView(initial, current)) return error.AuthorityChanged;
-    try validateBoundAuthorities(result, current);
-    _ = try validateDestination(result);
+    try validateBoundAuthorities(result, current, faults);
+    _ = try validateDestination(result, faults);
 }
 
 const Destination = struct { size: u64, mode: u32 };
 
-fn validateDestination(result: *const Materialized) !Destination {
+fn validateDestination(result: *const Materialized, faults: ?*Faults) !Destination {
     if (!result.present) return error.FileChanged;
     var held: posix.Stat = undefined;
     var named: posix.Stat = undefined;
-    if (c.fstat(result.fd, &held) != 0 or
-        c.fstatat(result.dir_fd, result.leaf[0..].ptr, &named, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+    try beforeIo(faults);
+    if (c.fstat(result.fd, &held) != 0) return error.FileChanged;
+    try beforeIo(faults);
+    if (c.fstatat(result.dir_fd, result.leaf[0..].ptr, &named, posix.AT.SYMLINK_NOFOLLOW) != 0 or
         !sameFile(held, result) or !sameFile(named, result)) return error.FileChanged;
-    const digest = try hashExact(result.fd, result.size);
+    const digest = try hashExact(result.fd, result.size, faults);
     if (!std.mem.eql(u8, &digest, &result.sha256)) return error.FileChanged;
     return .{ .size = result.size, .mode = @intCast(held.mode) };
 }
@@ -154,39 +177,42 @@ fn sameFile(stat: posix.Stat, result: *const Materialized) bool {
         @as(u64, @intCast(stat.size)) == result.size;
 }
 
-fn validateSource(view: View) !posix.Stat {
+fn validateSource(view: View, faults: ?*Faults) !posix.Stat {
     var stat: posix.Stat = undefined;
+    try beforeIo(faults);
     if (c.fstat(view.source_fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.nlink != 1 or
         stat.mode & 0o777 != 0o400 or stat.size < 0 or @as(u64, @intCast(stat.size)) != view.source_size)
         return error.InvalidAuthority;
-    const digest = try hashExact(view.source_fd, view.source_size);
+    const digest = try hashExact(view.source_fd, view.source_size, faults);
     if (!std.mem.eql(u8, &digest, &view.source_sha256)) return error.InvalidAuthority;
     return stat;
 }
 
-fn validateDirectory(fd: c.fd_t) !posix.Stat {
+fn validateDirectory(fd: c.fd_t, faults: ?*Faults) !posix.Stat {
     var stat: posix.Stat = undefined;
+    try beforeIo(faults);
     if (c.fstat(fd, &stat) != 0 or !posix.S.ISDIR(stat.mode) or stat.mode & 0o777 != 0o700)
         return error.InvalidAuthority;
     return stat;
 }
 
-fn validateBoundAuthorities(result: *const Materialized, view: View) !void {
-    const source = try validateSource(view);
-    const submitted_dir = try validateDirectory(view.destination_dir_fd);
-    const held_dir = try validateDirectory(result.dir_fd);
+fn validateBoundAuthorities(result: *const Materialized, view: View, faults: ?*Faults) !void {
+    const source = try validateSource(view, faults);
+    const submitted_dir = try validateDirectory(view.destination_dir_fd, faults);
+    const held_dir = try validateDirectory(result.dir_fd, faults);
     if (source.dev != result.source_device or source.ino != result.source_inode or
         submitted_dir.dev != result.dir_device or submitted_dir.ino != result.dir_inode or
         held_dir.dev != result.dir_device or held_dir.ino != result.dir_inode)
         return error.AuthorityChanged;
 }
 
-fn copyExact(source: c.fd_t, destination: c.fd_t, size_u64: u64) !void {
+fn copyExact(source: c.fd_t, destination: c.fd_t, size_u64: u64, faults: ?*Faults) !void {
     const size = std.math.cast(usize, size_u64) orelse return error.InvalidAuthority;
     var buffer: [copy_buffer_bytes]u8 = undefined;
     var offset: usize = 0;
     while (offset < size) {
         const wanted = @min(buffer.len, size - offset);
+        try beforeIo(faults);
         const count = c.pread(source, &buffer, wanted, @intCast(offset));
         if (count < 0) {
             if (posix.errno(-1) == .INTR) continue;
@@ -196,6 +222,7 @@ fn copyExact(source: c.fd_t, destination: c.fd_t, size_u64: u64) !void {
         const count_usize: usize = @intCast(count);
         var written: usize = 0;
         while (written < count_usize) {
+            try beforeIo(faults);
             const n = c.write(destination, buffer[written..count_usize].ptr, count_usize - written);
             if (n < 0) {
                 if (posix.errno(-1) == .INTR) continue;
@@ -207,15 +234,17 @@ fn copyExact(source: c.fd_t, destination: c.fd_t, size_u64: u64) !void {
         offset += @intCast(count);
     }
     var extra: [1]u8 = undefined;
+    try beforeIo(faults);
     if (c.pread(source, &extra, 1, @intCast(size)) != 0) return error.SourceChanged;
 }
 
-fn hashExact(fd: c.fd_t, size_u64: u64) ![64]u8 {
+fn hashExact(fd: c.fd_t, size_u64: u64, faults: ?*Faults) ![64]u8 {
     const size = std.math.cast(usize, size_u64) orelse return error.InvalidAuthority;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buffer: [copy_buffer_bytes]u8 = undefined;
     var offset: usize = 0;
     while (offset < size) {
+        try beforeIo(faults);
         const count = c.pread(fd, &buffer, @min(buffer.len, size - offset), @intCast(offset));
         if (count <= 0) return error.ReadFailed;
         hasher.update(buffer[0..@intCast(count)]);
@@ -226,7 +255,11 @@ fn hashExact(fd: c.fd_t, size_u64: u64) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn validateView(view: View) !void {
+fn beforeIo(faults: ?*Faults) !void {
+    if (faults) |value| try value.beforeIo();
+}
+
+fn validateView(view: View, faults: ?*Faults) !void {
     if (view.source_fd < 0 or view.destination_dir_fd < 0 or view.source_size == 0 or
         view.source_size > max_executable_bytes or
         view.destination_path.len < 2 or view.destination_path.len >= std.fs.max_path_bytes or
@@ -237,7 +270,10 @@ fn validateView(view: View) !void {
         !lowerHex(&view.source_sha256)) return error.InvalidAuthority;
     var source: posix.Stat = undefined;
     var destination: posix.Stat = undefined;
-    if (c.fstat(view.source_fd, &source) != 0 or c.fstat(view.destination_dir_fd, &destination) != 0 or
+    try beforeIo(faults);
+    if (c.fstat(view.source_fd, &source) != 0) return error.InvalidAuthority;
+    try beforeIo(faults);
+    if (c.fstat(view.destination_dir_fd, &destination) != 0 or
         !posix.S.ISREG(source.mode) or !posix.S.ISDIR(destination.mode) or
         (source.dev == destination.dev and source.ino == destination.ino)) return error.InvalidAuthority;
 }

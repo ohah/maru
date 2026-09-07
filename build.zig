@@ -15394,6 +15394,11 @@ pub fn build(b: *std.Build) void {
             run_candidate_upgrade_predecessor_tests.addArg("--maru-expect-tests=5");
             run_candidate_upgrade_predecessor_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_candidate_upgrade_predecessor_tests.step);
+            const signed_upgrade_isolation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_signed_upgrade_isolation_boundary.zig"), .target = target, .optimize = composition_optimize }) });
+            const run_signed_upgrade_isolation_tests = b.addRunArtifact(signed_upgrade_isolation_tests);
+            run_signed_upgrade_isolation_tests.addArg("--maru-expect-tests=2");
+            run_signed_upgrade_isolation_tests.setCwd(b.path("."));
+            session_host_release_adapter_candidate_upgrade_child_step.dependOn(&run_signed_upgrade_isolation_tests.step);
             const source_tree_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const source_tree_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_source_tree.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod } } }) });
             const run_source_tree_tests = b.addRunArtifact(source_tree_tests);

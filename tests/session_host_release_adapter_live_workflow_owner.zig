@@ -206,9 +206,9 @@ test "checkpoint invocation primitives have one production composition owner" {
         bootstraps += std.mem.count(u8, source, "checkpoint.initializeOrRecoverInitial(");
     }
     try std.testing.expectEqual(@as(usize, 1), imports);
-    try std.testing.expectEqual(@as(usize, 2), admits);
+    try std.testing.expectEqual(@as(usize, 3), admits);
     try std.testing.expectEqual(@as(usize, 1), invokes);
-    try std.testing.expectEqual(@as(usize, 2), advances);
+    try std.testing.expectEqual(@as(usize, 4), advances);
     try std.testing.expectEqual(@as(usize, 1), bootstraps);
 }
 

@@ -4576,9 +4576,10 @@ runner phase 합은 profile phase 이하여야 한다. 측정 구간은 첫 auth
 GitHub queue·runner allocation 시간은 포함하지 않는다. 실패·clock 역행·overflow에서는 diagnostic success를 게시하지 않고, timing은
 release 성공 권위·manifest evidence·checkpoint 입력으로 사용하지 않는다.
 
-focused Debug·ReleaseFast gate는 predecessor raw input 0, exact call/deadline/owner projection, 두 workspace disjoint, candidate/profile/
-predecessor/evidence drift, 모든 composition fail-index, runner success/partial cleanup 분기와 역순 best-effort retry, timing 양수·합계·역행·overflow를
-검증한다. 실제 local child 실측은 signed N-1/current fixture가 존재하는 macOS gate에서 canonical diagnostic을 보존한다. protected B
+focused Debug·ReleaseFast gate와 기존 candidate-upgrade runner·workspace leaf gate는 함께 predecessor raw input 0,
+exact call/deadline/owner projection, 두 workspace disjoint, candidate/profile/predecessor/evidence drift, 모든 composition fail-index,
+runner success/partial cleanup 분기와 역순 best-effort retry, timing 양수·합계·역행·overflow를 검증한다. 실제 local child 실측은 signed
+N-1/current fixture가 존재하는 macOS gate에서 canonical diagnostic을 보존한다. protected B
 시험 tag의 GitHub-issued timing, B manifest/checkpoint·attestation·draft publication과 frozen signed U5 완료 증거는 후속 live workflow가
 소유한다.
 

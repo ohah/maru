@@ -4,6 +4,7 @@ const std = @import("std");
 const checkpoint = @import("release_adapter_live_workflow_checkpoint");
 const context = @import("release_adapter_context");
 const phase = @import("release_adapter_live_workflow_phase");
+const candidate_inputs = @import("release_adapter_live_candidate_inputs");
 
 pub const max_bootstrap_token_bytes = checkpoint.max_root_identity_token_bytes;
 
@@ -68,6 +69,7 @@ pub const Error = checkpoint.Error || error{
     InvalidActionResult,
     InvalidExecutor,
     InvalidExternalAction,
+    InvalidCandidate,
 };
 
 pub fn identity(invocation: Invocation) Identity {
@@ -161,6 +163,26 @@ pub fn bootstrapProcess(
     defer root.deinit() catch {};
     const identity_value = try checkpoint.initializeOrRecoverInitial(allocator, &root, workflow);
     return checkpoint.encodeRootIdentity(token_storage, identity_value);
+}
+
+/// Validates one exact signed candidate graph and durably settles the product stage. The held
+/// file descriptors intentionally end with this process; the following action pins them again.
+pub fn candidateInputsProcess(
+    allocator: std.mem.Allocator,
+    root_path: [:0]const u8,
+    root_identity: []const u8,
+    workflow: context.Context,
+    candidate_directory: [:0]const u8,
+) Error!void {
+    var root: checkpoint.Root = .{};
+    try checkpoint.openRootExpected(&root, root_path, try checkpoint.decodeRootIdentity(root_identity));
+    defer root.deinit() catch {};
+    _ = try checkpoint.admit(allocator, &root, .candidate_pinning, workflow);
+    candidate_inputs.validate(workflow, candidate_directory) catch {
+        _ = try checkpoint.advance(allocator, &root, .candidate_pinning, .failed, workflow);
+        return error.InvalidCandidate;
+    };
+    _ = try checkpoint.advance(allocator, &root, .candidate_pinning, .succeeded, workflow);
 }
 
 const CallContext = struct { executor: *Executor, identity: Identity };

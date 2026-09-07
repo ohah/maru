@@ -1,4 +1,4 @@
-//! A sealed 0400 predecessor download becomes one separately-owned 0500 executable.
+//! Sealed predecessor/current files become separately-owned 0500 execution copies.
 
 const std = @import("std");
 const c = std.c;
@@ -38,13 +38,14 @@ const Fixture = struct {
         self.tmp.cleanup();
     }
 
-    fn authority(self: *@This()) Authority {
+    fn authority(self: *@This(), source_mode: u32) Authority {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         return .{ .view = .{
             .source_fd = self.source_fd,
             .source_size = bytes.len,
             .source_sha256 = std.fmt.bytesToHex(digest, .lower),
+            .source_mode = source_mode,
             .destination_dir_fd = self.root_fd,
             .destination_path = std.mem.sliceTo(&self.output_path, 0),
             .destination_leaf = "predecessor-executable",
@@ -64,27 +65,30 @@ const Authority = struct {
     }
 };
 
-test "0400 held source becomes an exact 0500 single-link executable" {
-    var fixture: Fixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    var authority = fixture.authority();
-    var output: predecessor.Materialized = .{};
-    try predecessor.materializeWith(&authority, &output);
-    const observed = try output.revalidate(&authority);
-    try std.testing.expectEqual(@as(u32, 0o500), observed.mode & 0o777);
-    try std.testing.expectEqual(@as(u64, bytes.len), observed.size);
-    try std.testing.expectEqual(@as(usize, 3), authority.calls);
-    authority.drift = true;
-    try output.cleanup();
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, fixture.output_path[0..std.mem.indexOfScalar(u8, &fixture.output_path, 0).?], .{}));
+test "0400 predecessor and 0600 current sources become exact 0500 single-link executables" {
+    inline for (.{ @as(u32, 0o400), @as(u32, 0o600) }) |source_mode| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try std.testing.expectEqual(@as(c_int, 0), c.chmod(fixture.source_path[0..].ptr, @intCast(source_mode)));
+        var authority = fixture.authority(source_mode);
+        var output: predecessor.Materialized = .{};
+        try predecessor.materializeWith(&authority, &output);
+        const observed = try output.revalidate(&authority);
+        try std.testing.expectEqual(@as(u32, 0o500), observed.mode & 0o777);
+        try std.testing.expectEqual(@as(u64, bytes.len), observed.size);
+        try std.testing.expectEqual(@as(usize, 3), authority.calls);
+        authority.drift = true;
+        try output.cleanup();
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, fixture.output_path[0..std.mem.indexOfScalar(u8, &fixture.output_path, 0).?], .{}));
+    }
 }
 
 test "source and destination descriptor alias is rejected before publication" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    var authority = fixture.authority();
+    var authority = fixture.authority(0o400);
     authority.view.destination_dir_fd = fixture.source_fd;
     var output: predecessor.Materialized = .{};
     try std.testing.expectError(error.InvalidAuthority, predecessor.materializeWith(&authority, &output));
@@ -97,7 +101,7 @@ test "existing destination remains byte-for-byte unchanged" {
     var workspace = try fixture.tmp.dir.openDir(std.testing.io, "workspace", .{});
     defer workspace.close(std.testing.io);
     try workspace.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
-    var authority = fixture.authority();
+    var authority = fixture.authority(0o400);
     var output: predecessor.Materialized = .{};
     try std.testing.expectError(error.DestinationExists, predecessor.materializeWith(&authority, &output));
     const found = try workspace.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
@@ -109,7 +113,7 @@ test "post-copy authority drift removes only the owned destination" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    var authority = fixture.authority();
+    var authority = fixture.authority(0o400);
     authority.drift = true;
     var output: predecessor.Materialized = .{};
     try std.testing.expectError(error.AuthorityChanged, predecessor.materializeWith(&authority, &output));
@@ -121,7 +125,7 @@ test "copied owner and replaced pathname cannot delete foreign bytes" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    var authority = fixture.authority();
+    var authority = fixture.authority(0o400);
     var output: predecessor.Materialized = .{};
     try predecessor.materializeWith(&authority, &output);
     var copied = output;

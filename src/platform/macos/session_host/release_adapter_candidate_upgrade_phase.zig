@@ -6,7 +6,7 @@
 
 pub const Error = error{CleanupFailed};
 
-const output_count: usize = 5;
+const output_count: usize = 4;
 
 pub fn runWith(steps: anytype) !void {
     // Starting the deadline and the initial read-only fence create no output, so failures there
@@ -19,17 +19,14 @@ pub fn runWith(steps: anytype) !void {
     steps.materializePredecessor(deadline) catch |err| return fail(steps, attempted, err);
 
     attempted = 2;
-    steps.materializeCurrent(deadline) catch |err| return fail(steps, attempted, err);
-
-    attempted = 3;
     steps.runSignedOne(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateAuthoritiesAfterOne(deadline) catch |err| return fail(steps, attempted, err);
 
-    attempted = 4;
+    attempted = 3;
     steps.runSignedNearMax(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateAuthoritiesAfterNearMax(deadline) catch |err| return fail(steps, attempted, err);
 
-    attempted = 5;
+    attempted = 4;
     steps.publishEvidence(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateFinalAuthorities(deadline) catch |err| return fail(steps, attempted, err);
     steps.validateFinalDeadline(deadline) catch |err| return fail(steps, attempted, err);
@@ -48,16 +45,13 @@ fn unwind(steps: anytype, attempted: usize) bool {
     while (cursor > 0) {
         cursor -= 1;
         switch (cursor) {
-            4 => steps.cleanupEvidence() catch {
+            3 => steps.cleanupEvidence() catch {
                 clean = false;
             },
-            3 => steps.cleanupNearMax() catch {
+            2 => steps.cleanupNearMax() catch {
                 clean = false;
             },
-            2 => steps.cleanupOne() catch {
-                clean = false;
-            },
-            1 => steps.cleanupCurrent() catch {
+            1 => steps.cleanupOne() catch {
                 clean = false;
             },
             0 => steps.cleanupPredecessor() catch {

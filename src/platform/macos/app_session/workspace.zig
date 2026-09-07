@@ -713,7 +713,10 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     old_file_tree_open_states.deinit(self.allocator);
     old_file_tree_rows.deinit(self.allocator);
     file_panel_ops.advanceFileTreeProjectionGeneration(self);
-    self.file_tree_rows_dirty = false;
+    // 발행 단계 **밖에서** 목록을 갈아 끼운 자리다 — 출처 플래그와 재빌드 예약을 그 불변식의
+    // 소유자에게 맡긴다(RF7 — 계획 §10.18). 손으로 `dirty = false` 만 적으면 원격이 활성인 동안
+    // **로컬 행이 화면에 남고**, 플래그가 낡아 원격 갈래가 로컬 행에 걸린다.
+    file_panel_ops.notePublishedLocalFileTreeRows(self);
     self.file_tree_watch_reset_pending = true;
     // **트리를 통째로 갈았으니 따라가기 기억도 버린다**(ET-CWD — docs/file-explorer.md §1). 남겨 두면
     // "이 cwd는 이미 따라갔다"로 읽혀, 복원된 root가 활성 터미널과 다른데도 `cd` 전까지 따라가지 않는다.

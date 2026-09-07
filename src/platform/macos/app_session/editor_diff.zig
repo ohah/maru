@@ -2301,8 +2301,13 @@ test "DCARET2: caret 은 활성 열에만 그려진다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
-    var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
+    // **좌우 행 길이를 일부러 갈라 둔다.** 같은 길이면 "자기 열 길이로 자른다"와 "반대 열 길이로
+    // 자른다"가 **같은 답**을 내 그 변이가 산다(1회차 C5 가 그렇게 살아남았다).
+    var entry = testEntry("alpha\nbb\n", "alpha\nBBBBBBBB\n");
     try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    // 픽스처가 정말 갈라졌는지 **먼저 확인한다** — 짝맞춤이 달라지면 아래 단언이 뜻을 잃는다.
+    try testing.expect(st.left_texts[1].len != st.right_texts[1].len);
 
     fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = .{
         .anchor_start = .{ .row = 1, .byte = 2 },
@@ -2316,13 +2321,20 @@ test "DCARET2: caret 은 활성 열에만 그려진다" {
     // **반대 열은 `null`** — 그것이 "이 열에는 커서가 없다"는 뜻이다.
     try testing.expectEqual(@as(?[]const []const u32, null), editor_ops.buildDiffCarets(fx.session, fx.term, .left));
 
-    // **byte 는 그 행 길이로 잘린다** — 행이 짧아진 프레임에서 줄 밖 열을 집으면 안 된다.
+    // **byte 는 그 행 길이로 잘린다 — 그리고 그 길이는 *자기* 열 것이다.**
     fx.term.rt.editor_diff_selection.?.sel.focus.byte = 9999;
     const clamped = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
-    try testing.expectEqual(@as(u32, 4), clamped[1][0]); // "BETA".len
+    try testing.expectEqual(@as(u32, @intCast(st.right_texts[1].len)), clamped[1][0]);
 
-    // **행 첨자가 배열 밖이면 아예 안 그린다.**
-    fx.term.rt.editor_diff_selection.?.sel.focus.row = 9999;
+    // **caret 을 옮기면 이전 행이 비워진다.** 행 배열은 프레임마다 재사용하므로 안 비우면 옛 자리에
+    // 커서가 하나 더 남는다 — 갓 잡은 배열이 우연히 0이라 그냥은 안 드러난다.
+    fx.term.rt.editor_diff_selection.?.sel.focus = .{ .row = 0, .byte = 1 };
+    const moved = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
+    try testing.expectEqual(@as(usize, 1), moved[0].len);
+    try testing.expectEqual(@as(usize, 0), moved[1].len);
+
+    // **행 첨자는 배열 길이 바로 밖에서 이미 거절한다** — 9999 처럼 멀리 두면 느슨한 상한도 통과한다.
+    fx.term.rt.editor_diff_selection.?.sel.focus.row = st.right_texts.len;
     try testing.expectEqual(@as(?[]const []const u32, null), editor_ops.buildDiffCarets(fx.session, fx.term, .right));
 }
 
@@ -2346,6 +2358,11 @@ test "DCARET3: 제품 입구에서 화살표가 caret 을 옮긴다 (handleKeyEv
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
     try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_diff_selection.?.sel.focus.row);
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑶ʹ **거꾸로도 넘는다** — 행 머리에서 `←` 는 앞 행 끝으로 간다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(fx.term.rt.editor_diff.?.right_texts[1].len, fx.term.rt.editor_diff_selection.?.sel.focus.byte);
 
     // ⑷ **⌘↑ 는 맨 위로** — 전에는 이 키가 프롬프트로 튀거나 아무 일도 안 했다.
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
@@ -2478,4 +2495,123 @@ test "DCARET8: caret 이 생겨도 비교 뷰는 읽기 전용이다" {
 
     // **단일 편집기 쪽 이동도 여전히 거절한다** — 심층 방어를 이 조각이 걷어내지 않았다.
     try testing.expect(!editor_ops.moveCarets(fx.session, fx.term, .line_down, false));
+}
+
+/// caret 이 없는 프레임과 **차이**를 낸다 — 모양으로 고르지 않는다. 막대 caret 은 2×셀높이인데
+/// 그 모양을 가진 quad 가 이 화면에 셋 더 있어(테두리·띠) 모양만 보면 못 가른다.
+const QuadKey = struct { x: f32, y: f32, w: f32, h: f32 };
+
+fn snapshotQuads(allocator: std.mem.Allocator, self: *AppSession) ![]QuadKey {
+    const out = try allocator.alloc(QuadKey, self.gpu_quads.items.len);
+    for (self.gpu_quads.items, 0..) |q, i| out[i] = .{ .x = q.x, .y = q.y, .w = q.w, .h = q.h };
+    return out;
+}
+
+/// 기준에 없던 quad 들. 기준에 같은 값이 있으면 **하나씩 소비한다**(같은 사각이 여럿일 수 있다).
+fn extraQuads(allocator: std.mem.Allocator, base: []const QuadKey, self: *AppSession) ![]QuadKey {
+    const used = try allocator.alloc(bool, base.len);
+    defer allocator.free(used);
+    @memset(used, false);
+    var list: std.ArrayList(QuadKey) = .empty;
+    errdefer list.deinit(allocator);
+    for (self.gpu_quads.items) |q| {
+        const k: QuadKey = .{ .x = q.x, .y = q.y, .w = q.w, .h = q.h };
+        var matched = false;
+        for (base, 0..) |b, i| {
+            if (used[i]) continue;
+            if (b.x == k.x and b.y == k.y and b.w == k.w and b.h == k.h) {
+                used[i] = true;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) try list.append(allocator, k);
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn drawOnce(fx: *Fixture, leaf: maru.session.SplitRect) !void {
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    d.dl.deinit(testing.allocator);
+}
+
+test "DCARET9: 그려진 caret 이 활성 열에 하나 선다 — 렌더 배선 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    var entry = testEntry("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    try diffCaretFixture(&fx, &entry, leaf);
+
+    // **`buildDiffCarets` 를 직접 부르는 판정자만으로는 배선이 안 잡힌다** — 좌우를 맞바꾸거나
+    // 아예 안 넘겨도(`Side.carets = null`) 그 함수는 여전히 옳은 답을 낸다. 1회차에서 그 변이
+    // 셋(C9·C10·C11)이 전부 살아남았고, 이 판정자가 그 구멍이다.
+    fx.session.blink_visible = true;
+    fx.term.rt.editor_diff_selection = null;
+    try drawOnce(&fx, leaf);
+    const base = try snapshotQuads(allocator, fx.session);
+    defer allocator.free(base);
+
+    // ⑴ caret 은 오른쪽 열에 **하나** 는다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 2 }) };
+    try drawOnce(&fx, leaf);
+    const right = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(right);
+    try testing.expectEqual(@as(usize, 1), right.len);
+
+    // ⑵ 왼쪽 열로 옮기면 **그 자리가 왼쪽으로** 간다 — 좌우를 맞바꾼 배선이면 여기서 갈린다.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 2 }) };
+    try drawOnce(&fx, leaf);
+    const left = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(left);
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expect(left[0].x < right[0].x);
+    // 같은 행이므로 높이는 같다 — 자리만 갈린다.
+    try testing.expectEqual(right[0].y, left[0].y);
+
+    // ⑶ **깜빡임이 꺼진 순간에는 안 그린다** — `caret_visible` 배선이 죽으면 늘 켜진 커서가 된다.
+    fx.session.blink_visible = false;
+    try drawOnce(&fx, leaf);
+    const blinked = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(blinked);
+    try testing.expectEqual(@as(usize, 0), blinked.len);
+}
+
+test "DCARET10: 한 화면의 크기는 그 열이 그린 행 수다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    const text = buf[0..w];
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    // ⑴ **자기 열이 그린 행 수를 쓴다.** 랩이 꺼진 화면에서는 좌우가 같은 수라 그냥은 안 갈린다
+    //    — 값을 **일부러 갈라** 두고 활성 열 것을 따라가는지 본다(1회차 C28 이 그래서 살았다).
+    fx.term.rt.editor_diff_hit_len_right = 7;
+    fx.term.rt.editor_diff_hit_len_left = 3;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .page_down, false));
+    try testing.expectEqual(@as(usize, 7), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑵ 왼쪽 열이면 왼쪽 수를 쓴다.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .page_down, false));
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑶ **한 프레임도 안 그렸으면 한 행이다 — 죽은 키가 되지 않는다.** 편집 직후 이 값이 0으로
+    //    비워지고 다음 프레임이 다시 채우는데, 그 사이에 PageDown 이 오면 0행 이동이 된다.
+    fx.term.rt.editor_diff_hit_len_right = 0;
+    fx.term.rt.editor_diff_hit_len_left = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .page_down, false));
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
 }

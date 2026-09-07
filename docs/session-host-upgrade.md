@@ -4542,9 +4542,11 @@ profile environment, manifest/file/assets/identity/binding graph 전체를 다�
 cleanup을 막지 않는다. 모든 자원이 회수되면 pristine으로 돌아가고, 하나라도 불확실하면
 borrowed context/token/buffer를 지운 뒤 exact owned capability만 남겨 `retryCleanup`을 허용한다.
 
-focused Debug·ReleaseFast gate는 product call order·same deadline, caller ref/tag/scalar 0, initial/final profile four-field
-drift, manifest/file/asset/identity/binding drift, copied/pre-owned/alias, tag transport/identity/binding 모든 fail-index와
-역순 best-effort cleanup·retry owner를 검증한다. actual filesystem은 성공 다운로드 소유과 explicit cleanup 후
+focused Debug·ReleaseFast gate와 재사용하는 manifest-input·tag-chain·identity·binding leaf gate는 함께 product call
+order·same deadline, caller ref/tag/scalar 0, initial/final profile four-field drift,
+manifest/file/asset/identity/binding drift, copied/pre-owned/alias, tag transport/identity/binding 모든 fail-index와
+역순 best-effort cleanup·retry owner를 검증한다. composition gate는 특히 nested download-only 부분 소유와 최종
+authority 재검증 뒤 deadline 순서를 고정한다. actual filesystem은 성공 다운로드 소유와 explicit cleanup 후
 residue 0을 기존 leaf gate와 함께 검증한다. 이 slice는 signed upgrade runner, B manifest/checkpoint,
 live workflow, GitHub mutation·frozen signed U5 실측을 완료했다고 주장하지 않는다.
 

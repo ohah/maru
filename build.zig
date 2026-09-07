@@ -14417,6 +14417,8 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-upgrade-runner",
         "Validate upgrade-B production composition and local timing",
     );
+    session_host_release_adapter_candidate_upgrade_runner_step.dependOn(session_host_release_adapter_candidate_upgrade_phase_step);
+    session_host_release_adapter_candidate_upgrade_runner_step.dependOn(session_host_release_adapter_candidate_upgrade_child_step);
     const session_host_release_adapter_zig_toolchain_authority_step = b.step(
         "test-session-host-release-adapter-zig-toolchain-authority",
         "Validate official release Zig toolchain authority",

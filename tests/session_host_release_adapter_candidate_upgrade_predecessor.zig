@@ -17,13 +17,18 @@ const Fixture = struct {
     fn init(self: *@This()) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source", .data = bytes });
-        try self.tmp.dir.chmod(std.testing.io, "source", .{ .mode = 0o400 });
-        var root: [std.fs.max_path_bytes]u8 = undefined;
-        const len = try self.tmp.dir.realPath(std.testing.io, &root);
-        _ = try std.fmt.bufPrintZ(&self.source_path, "{s}/source", .{root[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.output_path, "{s}/predecessor-executable", .{root[0..len]});
+        try self.tmp.dir.createDir(std.testing.io, "workspace", .default_dir);
+        var base: [std.fs.max_path_bytes:0]u8 = @splat(0);
+        const len = try self.tmp.dir.realPath(std.testing.io, &base);
+        base[len] = 0;
+        var root: [std.fs.max_path_bytes:0]u8 = @splat(0);
+        const root_path = try std.fmt.bufPrintZ(&root, "{s}/workspace", .{base[0..len]});
+        _ = try std.fmt.bufPrintZ(&self.source_path, "{s}/source", .{base[0..len]});
+        _ = try std.fmt.bufPrintZ(&self.output_path, "{s}/predecessor-executable", .{root_path});
+        if (c.chmod(self.source_path[0..].ptr, 0o400) != 0) return error.ChmodFailed;
+        if (c.chmod(root_path.ptr, 0o700) != 0) return error.ChmodFailed;
         self.source_fd = c.open(self.source_path[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true });
-        self.root_fd = c.open(root[0..len :0].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true });
+        self.root_fd = c.open(root_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true });
         if (self.source_fd < 0 or self.root_fd < 0) return error.OpenFailed;
     }
 
@@ -66,11 +71,12 @@ test "0400 held source becomes an exact 0500 single-link executable" {
     var authority = fixture.authority();
     var output: predecessor.Materialized = .{};
     try predecessor.materializeWith(&authority, &output);
-    const observed = try output.revalidateWith(&authority);
+    const observed = try output.revalidate(&authority);
     try std.testing.expectEqual(@as(u32, 0o500), observed.mode & 0o777);
     try std.testing.expectEqual(@as(u64, bytes.len), observed.size);
-    try std.testing.expectEqual(@as(usize, 2), authority.calls);
-    try output.cleanupWith(&authority);
+    try std.testing.expectEqual(@as(usize, 3), authority.calls);
+    authority.drift = true;
+    try output.cleanup();
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, fixture.output_path[0..std.mem.indexOfScalar(u8, &fixture.output_path, 0).?], .{}));
 }
 
@@ -88,11 +94,13 @@ test "existing destination remains byte-for-byte unchanged" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
+    var workspace = try fixture.tmp.dir.openDir(std.testing.io, "workspace", .{});
+    defer workspace.close(std.testing.io);
+    try workspace.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
     var authority = fixture.authority();
     var output: predecessor.Materialized = .{};
     try std.testing.expectError(error.DestinationExists, predecessor.materializeWith(&authority, &output));
-    const found = try fixture.tmp.dir.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
+    const found = try workspace.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(found);
     try std.testing.expectEqualStrings("foreign", found);
 }
@@ -117,11 +125,13 @@ test "copied owner and replaced pathname cannot delete foreign bytes" {
     var output: predecessor.Materialized = .{};
     try predecessor.materializeWith(&authority, &output);
     var copied = output;
-    try std.testing.expectError(error.InvalidOwner, copied.revalidateWith(&authority));
-    try fixture.tmp.dir.rename(std.testing.io, "predecessor-executable", "owned-moved");
-    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
-    try std.testing.expectError(error.CleanupFailed, output.cleanupWith(&authority));
-    const found = try fixture.tmp.dir.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
+    try std.testing.expectError(error.InvalidOwner, copied.revalidate(&authority));
+    var workspace = try fixture.tmp.dir.openDir(std.testing.io, "workspace", .{});
+    defer workspace.close(std.testing.io);
+    try workspace.rename("predecessor-executable", workspace, "owned-moved", std.testing.io);
+    try workspace.writeFile(std.testing.io, .{ .sub_path = "predecessor-executable", .data = "foreign" });
+    try std.testing.expectError(error.CleanupFailed, output.cleanup());
+    const found = try workspace.readFileAlloc(std.testing.io, "predecessor-executable", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(found);
     try std.testing.expectEqualStrings("foreign", found);
 }

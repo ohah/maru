@@ -2799,3 +2799,143 @@ test "DCARET15: 낡은 스크롤 위치는 이동할 때 상한으로 되돌아�
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false));
     try testing.expect(fx.term.rt.editor_first_line <= max_first);
 }
+
+/// 그 열의 행 배열에서 내용으로 행을 찾는다 — 짝맞춤 빈 행이 끼면 첨자가 밀리므로 **번호를
+/// 손으로 적지 않는다**.
+fn rowIndexOf(rows: []const []const u8, want: []const u8) ?usize {
+    for (rows, 0..) |r, i| {
+        if (std.mem.eql(u8, r, want)) return i;
+    }
+    return null;
+}
+
+test "DCARET16: 목표 열은 byte 가 아니라 **표시 열**이다 — 탭과 CJK (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 탭이 든 행 · 순수 ASCII 행 · CJK 행을 **이웃**으로 둔다. byte 와 열이 갈리는 자리가
+    // 그 둘뿐이라, ASCII 만으로 짠 픽스처에서는 목표 열을 byte 로 잡아도 답이 같다(6회차 C74·C75).
+    var entry = testEntry(
+        "keep\n\tAB\n11111111\n가나\nend\n",
+        "keep\n\txy\n12345678\n가나다\nend\n",
+    );
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const rows = fx.term.rt.editor_diff.?.right_texts;
+
+    const i_tab = rowIndexOf(rows, "\txy") orelse return error.NoTabRow;
+    const i_plain = rowIndexOf(rows, "12345678") orelse return error.NoPlainRow;
+    const i_cjk = rowIndexOf(rows, "가나다") orelse return error.NoCjkRow;
+    // 이웃이어야 한 번의 `↓`로 건너간다 — 짝맞춤이 끼면 여기서 크게 실패한다.
+    try testing.expectEqual(i_tab + 1, i_plain);
+    try testing.expectEqual(i_plain + 1, i_cjk);
+    try testing.expectEqual(@as(u16, 4), fx.term.rt.editor_tab_width); // 아래 수의 전제
+
+    // ⑴ **탭 뒤 자리는 열이 byte 보다 크다.** "\txy" 의 byte 2 는 탭(4열) + 'x' → 5열.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i_tab, .byte = 2 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(i_plain, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    // 순수 ASCII 행에서는 열 == byte 다 — byte 로 잡았다면 2 였다.
+    try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // ⑵ **CJK 는 한 글자가 두 열이고 세 byte 다.** 5열은 '가'(2열) + '나'(2열) 뒤 5열째 —
+    //    글자 가운데라 `byteAtPoint` 가 정하는 경계로 떨어진다. byte 로 잡았다면 5 였다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(i_cjk, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    const b = fx.term.rt.editor_diff_selection.?.sel.focus.byte;
+    try testing.expect(b == 6 or b == 9); // '다' 앞이거나 뒤 — 어느 쪽이든 byte 5 는 아니다
+    try testing.expect(b != 5);
+
+    // ⑶ **되돌아오면 열이 복원된다.**
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+    try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCARET17: 가로 이동은 글자 경계다 — byte 하나가 아니다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\n간다\n", "keep\n가나다\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const rows = fx.term.rt.editor_diff.?.right_texts;
+    const i = rowIndexOf(rows, "가나다") orelse return error.NoCjkRow;
+
+    // **한 글자가 세 byte 다.** byte 하나씩 움직이면 깨진 UTF-8 자리에 서고, 그 자리를 렌더가
+    // 열로 옮기면 화면과 어긋난다(6회차 C77·C78 이 그렇게 살아남았다).
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 0 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expectEqual(@as(usize, 6), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCARET18: 맨 위·맨 아래를 넘지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("a\nb\nc\n", "a\nB\nc\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const total = fx.term.rt.editor_diff.?.right_texts.len;
+
+    // ⑴ **맨 위에서 위로 눌러도 안 넘친다.** 포화 뺄셈이 아니면 여기서 언더플로로 죽는다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    _ = try fx.session.handleKeyEvent(.{ .key = .page_up });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑵ **맨 아래에서 아래로 눌러도 안 넘친다.** 상한을 안 걸면 배열 밖 행을 읽는다.
+    for (0..total + 3) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(total - 1, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    for (0..3) |_| _ = try fx.session.handleKeyEvent(.{ .key = .page_down });
+    try testing.expectEqual(total - 1, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+}
+
+test "DCARET19: 비교 갈래가 키를 삼킨다 — 아래로 흘리지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("a\nb\nc\n", "a\nB\nc\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    // **삼키지 않으면 같은 키가 아래 층에서 한 번 더 쓰인다.** caret 은 옮겨졌으니 상태만 보는
+    // 판정자는 전부 초록이고(6회차 C81), 갈리는 것은 «앱이 이 키를 처리했다»는 회계뿐이다.
+    const before = fx.session.total_app_key_events;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(before + 1, fx.session.total_app_key_events);
+
+    // **대조군** — 비교 뷰가 안 받는 키는 이 회계를 늘리지 않는다(그 키는 다른 층의 것이다).
+    const mid = fx.session.total_app_key_events;
+    _ = try fx.session.handleKeyEvent(.{ .key = .backspace });
+    try testing.expectEqual(mid, fx.session.total_app_key_events);
+}
+
+test "DCARET20: caret 배열을 못 잡으면 안 그린다 — 옛 배열을 쓰지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\nbeta\ngamma\n", "keep\nBETA\ngamma\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 1 }) };
+    // 저장소를 비워 **잡는 길**로 들어가게 한다(이미 잡혀 있으면 실패 주입이 뜻이 없다).
+    if (fx.term.rt.editor_diff_caret_rows_right.len > 0) testing.allocator.free(fx.term.rt.editor_diff_caret_rows_right);
+    fx.term.rt.editor_diff_caret_rows_right = &.{};
+
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    const saved = fx.session.allocator;
+    fx.session.allocator = fa.allocator();
+    const got = editor_ops.buildDiffCarets(fx.session, fx.term, .right);
+    fx.session.allocator = saved;
+
+    // **못 잡으면 `null`** — 옛(빈) 배열을 그대로 쓰면 길이 0 짜리를 훑어 아무 행에도 커서가 없고,
+    // 더 나쁘게는 이미 놓은 배열을 가리킬 수 있다.
+    try testing.expectEqual(@as(?[]const []const u32, null), got);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_caret_rows_right.len);
+    try testing.expect(fa.has_induced_failure);
+
+    // **그 뒤에도 정상으로 돌아온다** — 한 번의 실패가 상태를 망가뜨리지 않는다.
+    const again = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
+    try testing.expectEqual(@as(usize, 1), again[1].len);
+}

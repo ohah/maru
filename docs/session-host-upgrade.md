@@ -4494,6 +4494,9 @@ pre-publish workspace, checkout 전 pin한 GitHub CLI, token, download/attestati
 `github_manifest_download.fetchUntil` → `github_manifest_file.materialize` →
 `github_manifest_attestation.authenticateUntil`을 동일 deadline·CLI·endorsement로 실행한다. JSON parser,
 download argv, artifact-attestation predicate와 file writer를 복제하지 않는다.
+이 owner는 post-publish `PredecessorManifestInput`의 type alias가 아닌 별도 nominal move-only wrapper다. 내부
+manifest/file cleanup 구현은 기존 owner를 합성해 재사용하지만, post-publish entrypoint이 만든 값을
+pre-publish profile provenance로 정적 가장할 수 없어야 한다.
 최초 재검증이 돌려준 borrowed slice를 child 호출 사이의 권위로 보존하지 않고 release ID·tag·commit·manifest
 SHA를 bounded fixed local snapshot에 복사한다. 각 fence는 fresh profile 값을 이 snapshot과 비교하며 snapshot과
 profile/environment/caller buffer/result storage alias는 첫 callback 전에 거부한다.
@@ -4512,6 +4515,38 @@ copied/pre-owned/alias owner, 모든 leaf fail-index의 역순 cleanup·retry와
 actual filesystem gate는 성공 직후 held file의 존재·caller-buffer reuse와 명시 cleanup 후 residue 0을 검증한다. 이 slice는 A asset/release authentication,
 `PredecessorEvidenceIdentity`·`BoundPredecessor`, signed upgrade runner, B manifest/checkpoint, GitHub mutation 또는 frozen signed U5
 실측을 완료했다고 주장하지 않는다.
+
+### 11.90 authenticated pre-publish predecessor authority
+
+`release_adapter_profile_predecessor_authority.zig`의 final-address `AuthenticatedPredecessor`가 §11.89의 authenticated A
+manifest/file을 published immutable release·세 asset에 결속하고, evidence identity와 §11.88 binding까지 만드는
+단일 pre-publish owner다. 입력은 trusted current `Context`, exact profile environment/owner,
+`ProfileManifestInput`, descriptor-owned workspace, pinned GitHub CLI/token/response buffer와 §11.89와 같은
+final-address `Deadline`뿐이다. caller는 git ref/tag observation, release/asset expectation, predecessor scalar,
+download pathname, identity 필드나 success boolean을 제출하지 않는다.
+
+순서는 `profile↔authenticated manifest/file initial fence → workspace predecessor-assets child →
+github_tag_chain_transport.authenticateUntil → profile↔manifest/file fence →
+predecessor_evidence_identity.compose → profile_predecessor_binding.bind → final deadline/authority fence`다.
+initial fence는 fresh `upgrade_b` endorsement의 release ID·tag·commit·manifest SHA를 authenticated role-A manifest,
+attestation subject와 held file digest에 exact 비교한 뒤에만 network/filesystem 작업을 허용한다.
+tag-chain transport가 GitHub ref/annotated-tag chain을 직접 관측하고 release·manifest·세 asset attestation과
+downloaded inode/size/SHA를 기존 SSOT로 검증한다. composition은 git resolver, download argv, attestation
+predicate, manifest/identity parser를 복제하지 않는다.
+
+성공 owner는 `AuthenticatedPredecessorAssets`, `PredecessorEvidenceIdentity`, `BoundPredecessor`를 이 순서로 소유한다.
+후속 runner는 raw manifest/assets와 caller boolean을 보지 않고 owner의 `revalidate` entrypoint이 같은
+profile environment, manifest/file/assets/identity/binding graph 전체를 다시 관측해 돌려준 fixed predecessor만
+소비한다. copied/moved-from owner, profile/manifest/file/asset/tag-chain drift, deadline 만료는 fail-close다.
+실패 cleanup은 binding → identity → downloaded assets의 역순 best-effort이며 한 cleanup 실패가 뒤의 독립
+cleanup을 막지 않는다. 모든 자원이 회수되면 pristine으로 돌아가고, 하나라도 불확실하면
+borrowed context/token/buffer를 지운 뒤 exact owned capability만 남겨 `retryCleanup`을 허용한다.
+
+focused Debug·ReleaseFast gate는 product call order·same deadline, caller ref/tag/scalar 0, initial/final profile four-field
+drift, manifest/file/asset/identity/binding drift, copied/pre-owned/alias, tag transport/identity/binding 모든 fail-index와
+역순 best-effort cleanup·retry owner를 검증한다. actual filesystem은 성공 다운로드 소유과 explicit cleanup 후
+residue 0을 기존 leaf gate와 함께 검증한다. 이 slice는 signed upgrade runner, B manifest/checkpoint,
+live workflow, GitHub mutation·frozen signed U5 실측을 완료했다고 주장하지 않는다.
 
 ## 12. 필수 적대적 검증
 

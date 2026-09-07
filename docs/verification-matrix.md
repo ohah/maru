@@ -1424,6 +1424,13 @@ leaf와 기존 output에서는 publication 0이며 성공은 held output inode a
 `test-session-host-release-adapter-candidate-upgrade-evidence`가 이를 Debug·ReleaseFast actual filesystem에서 검증한다. signed leaf
 실행, aggregate attestation, manifest/draft publication과 U5 signed frozen 제품 실행은 이 행의 증거가 아니다.
 
+U5 upgrade-B signed leaf transaction의 논리 순서는 `release_adapter_candidate_upgrade_phase.zig`가 initial 양쪽 권위 재검증,
+signed 1-runtime, 재검증, signed near-max, 재검증, canonical aggregate 게시, final authority/deadline fence로 닫는다. focused gate
+`test-session-host-release-adapter-candidate-upgrade-phase`는 같은 deadline pointer, 각 fail-index의 aggregate→near-max→one 역순
+best-effort cleanup, cleanup failure의 terminal 승격과 성공 artifact 보존을 Debug·ReleaseFast에서 검증한다. 이 pure transaction은
+leaf 성공 boolean이나 profile/predecessor scalar를 받지 않지만, 아직 actual signed child·filesystem authority를 연결한 production
+runner나 live checkpoint/profile owner가 아니므로 frozen U5 제품 실행·publication 완료 판정을 바꾸지 않는다.
+
 U5 candidate compatibility는 `release_adapter_candidate_compatibility.zig`가 final-address candidate files/product와 held frozen
 executable parent authority에서만 canonical compatibility probe를 실행해 frozen SHA·release/source/build identity와 함께 fixed owner에
 복사한다. current-manifest 검증과 동일 parser를 공유하고 실행 전후 inode·parent seal·candidate product를 재검증한다. focused gate는

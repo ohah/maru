@@ -1314,6 +1314,19 @@ replay·skip·reverse와 root/context drift의 child 0은 owner gate가 소유�
 stage와 stage-3 terminal failure, 상이한 child PID, checkpoint exact-once, median·p95·max/FD/residue를 검증한다. fixture는 harness-owned private root와 synthetic validator만 사용한다. 실제 `release.yml`
 argv/output 조립, GitHub-issued latency와 frozen signed U5 E2E는 후속 증거다.
 
+U5 repository-local live release workflow caller는 **구현 전**이다. `.github/actions/session-host-release-live/action.yml` 하나가
+§11.77의 exact 여덟 step ID/order를 소유하고 `release.yml`은 checkout 전 GitHub CLI authority, mise 뒤 Zig authority와 signed
+candidate를 exact once 전달한다. 종료 gate `check-session-host-release-live-workflow`는 workflow/action source의 기존 publish writer 0,
+fixed five product executable build, local action exact-one, 단계별 최소 credential, fixed root/pathname과 candidate bundle의 exact-two·authored bundle의 exact-one consumer를
+검증하고 synthetic source harness가 여덟 checkpoint 성공 및 각 failure suffix의 side effect 0을 증명해야 한다. 이 source/synthetic
+gate는 실제 GitHub attestation/release service, Apple product, GitHub-issued timing이나 frozen signed U5 제품 E2E의 증거가 아니다.
+release job은 protected tag에서만 `contents: write`, `id-token: write`, `attestations: write`를 가지고 timing job은
+`actions: read`, `contents: read`만 가진다. 같은 protected baseline-A 시험 tag의 후속 timing job이 top-level live action step의
+GitHub-issued 시작/종료를 `maru.session-host-release-live-timing.v1`로 같은 run/attempt/source에 결속하고 signed app
+Quit/default-false evidence와 publication까지 성공한 때에만 baseline-A 원격 workflow E2E로 센다. composite 내부 여덟 단계별
+monotonic 진단은 GitHub-issued timestamp 증거가 아니다. 이 caller는 baseline-A 전용이며 frozen executable attestation만으로
+upgrade-B의 signed 1-runtime/near-max migration이나 U5 전체 완료를 증명하지 않는다.
+
 U5 live workflow invocation owner는 candidate pinning product, candidate pair attestation action, `prepare-candidate`, authored pair
 attestation action, `prepare-candidate-aggregate`, `finalize-candidate-aggregate`, `resume-candidate-publication`,
 `cleanup-candidate-aggregate`의 여덟 닫힌 union tag가 stage와 exact 실행 identity를 함께 결정하게 한다. caller가 stage·command·action

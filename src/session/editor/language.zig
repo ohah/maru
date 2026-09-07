@@ -130,6 +130,40 @@ pub const Grammar = enum {
     bash,
     css,
     html,
+
+    /// 상태바에 적는 이름. `none`이면 **적지 않는다** — `"Plain Text"`라고 쓰면 강조가 없는 이유를
+    /// 설명하는 대신 가린다(`status-bar.md` 「언어 항목」).
+    ///
+    /// **`Language.displayName`이 아니라 여기다.** 그 열거는 **주석 문법으로 묶은 것**이라
+    /// `c_like`가 C·Java·JS·TS·Go·Rust·Swift를 덮고 `"C-like"`를 내며, `Makefile`·`Dockerfile`을
+    /// `shell`로 묶는다 — 주석 토글에는 그것이 옳지만 상태바에 적으면 거짓이다.
+    ///
+    /// **문법 이름이지 파일 언어 이름이 아니다.** 확장자 여럿이 한 문법을 쓰므로 `.jsx`는
+    /// `JavaScript`, `.h`는 `C`로 나온다 — 이 칸이 답하는 것은 *"무엇이 색을 입히고 있는가"*이고,
+    /// 그래서 `none`에서 비어 있는 것이 설명이 된다.
+    pub fn displayName(self: Grammar) ?[]const u8 {
+        return switch (self) {
+            .none => null,
+            .zig => "Zig",
+            .json => "JSON",
+            .markdown => "Markdown",
+            .javascript => "JavaScript",
+            .typescript => "TypeScript",
+            .tsx => "TSX",
+            .c => "C",
+            .cpp => "C++",
+            .python => "Python",
+            .go => "Go",
+            .rust => "Rust",
+            .java => "Java",
+            .ruby => "Ruby",
+            .php => "PHP",
+            .kotlin => "Kotlin",
+            .bash => "Bash",
+            .css => "CSS",
+            .html => "HTML",
+        };
+    }
 };
 
 /// 파일 경로 → grammar. `forPath`와 **같은 확장자 추출**을 쓴다(마지막 점 뒤 — `app.min.js`는 js다).
@@ -274,4 +308,32 @@ test "LANG10 확장자가 grammar를 정한다 — 번들 목록과 1:1" {
     // 두 축이 실제로 다르다: `.go`는 주석 축에서 `c_like`, grammar 축에서 `go`다.
     try testing.expectEqual(Language.c_like, forPath("a.go"));
     try testing.expectEqual(Grammar.go, grammarForPath("a.go"));
+}
+
+test "SBL1 문법 표시 이름은 언어별로 갈리고, 모르면 없다" {
+    // **`Language.displayName` 이 아니라 이쪽인 이유를 고정한다**(`status-bar.md` 「언어 항목」).
+    // 그 열거는 주석 문법으로 묶은 것이라 상태바에 적으면 거짓이 된다.
+    try std.testing.expectEqualStrings("Zig", Grammar.zig.displayName().?);
+    try std.testing.expectEqualStrings("TypeScript", Grammar.typescript.displayName().?);
+    try std.testing.expectEqualStrings("Rust", Grammar.rust.displayName().?);
+    try std.testing.expectEqualStrings("C++", Grammar.cpp.displayName().?);
+
+    // **`none` 은 이름이 없다** — "Plain Text" 라고 적으면 강조가 없는 이유를 가린다.
+    try std.testing.expect(Grammar.none.displayName() == null);
+
+    // **모든 값이 이름을 갖거나 `none` 이다** — 문법을 더하고 이름을 잊으면 상태바가 조용히 빈다.
+    inline for (@typeInfo(Grammar).@"enum".fields) |f| {
+        const g: Grammar = @enumFromInt(f.value);
+        if (g != .none) try std.testing.expect(g.displayName() != null);
+    }
+
+    // **같은 경로에서 두 열거가 다른 답을 낸다 — 그것이 이 조각의 근거다.**
+    // `.h` 는 문법으로는 C 이고, 주석 묶음으로는 `c_like`("C-like")다.
+    try std.testing.expectEqualStrings("C", grammarForPath("a/b.h").displayName().?);
+    try std.testing.expectEqualStrings("C-like", forPath("a/b.h").displayName().?);
+
+    // **`Makefile` 은 문법이 없다.** `Language` 는 그것을 `shell` 로 묶지만(주석이 `#`),
+    // 상태바에 「Shell」이라고 적으면 거짓이다 — 그래서 비어 있는 것이 맞다.
+    try std.testing.expect(grammarForPath("x/Makefile").displayName() == null);
+    try std.testing.expectEqualStrings("Shell", forPath("x/Makefile").displayName().?);
 }

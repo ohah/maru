@@ -1376,9 +1376,12 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // grammar가 없는 언어면 `provider`가 `null`이고 그 문서는 끝까지 무색이다 — 실패가 아니라
     // 저하다(§5). 여는 값은 문서 크기에 비례하지만(154KB 5ms 실측) **파일당 한 번**이고, 편집은
     // 증분이라 65µs다.
+    // **한 번 정해 둘이 쓴다** — 구문 강조와 상태바 언어 항목이 **같은 값**을 본다(`status-bar.md`
+    // 「언어 항목」). 상태바가 경로에서 다시 판정하면 출처가 둘이 된다.
+    term.rt.editor_grammar = maru.session.editor.language.grammarForPath(prepared.path);
     term.rt.editor_syntax = syntax_color.open(
         term.rt.editor_doc.?.file.content,
-        maru.session.editor.language.grammarForPath(prepared.path),
+        term.rt.editor_grammar,
     );
 
     // **탭 폭을 config에서 받는다**(§9). 아래 파생값(접힘 겹수·`max_cols`)이 이 값에 달렸으므로
@@ -17531,6 +17534,41 @@ test "FKB4 접기 다섯이 팔레트에 chord 를 보여 주고 제품에서 �
     });
     try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
     term.kind = saved;
+}
+
+test "SBL2 문법은 문서를 열 때 한 번 정해 Term 에 남고, 없으면 none 이다 (상태바 언어 항목)" {
+    // **출처를 하나로 두는 것이 요점이다**(`status-bar.md` 「언어 항목」). 구문 강조와 상태바가
+    // **같은 값**을 봐야 파일 이름이 바뀌는 날 둘이 안 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io_ = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io_, &root_buf)];
+
+    // ⑴ **문법이 있는 파일** — 열자마자 Term 에 남는다.
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "a.zig", .data = "const x = 1;\n" });
+    const zp = try std.fs.path.join(allocator, &.{ root, "a.zig" });
+    defer allocator.free(zp);
+    const zt = try openPathInActivePane(fx.session, zp);
+    try testing.expectEqual(maru.session.editor.language.Grammar.zig, zt.rt.editor_grammar);
+    try testing.expectEqualStrings("Zig", zt.rt.editor_grammar.displayName().?);
+
+    // ⑵ **문법이 없는 파일은 `none`** — 상태바가 그때 비는 근거다. `Makefile` 은 `Language` 가
+    //    `shell` 로 묶지만 문법은 없다(그래서 「Shell」이라고 적지 않는다).
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "Makefile", .data = "all:\n\techo hi\n" });
+    const mp = try std.fs.path.join(allocator, &.{ root, "Makefile" });
+    defer allocator.free(mp);
+    const mt = try openPathInActivePane(fx.session, mp);
+    try testing.expectEqual(maru.session.editor.language.Grammar.none, mt.rt.editor_grammar);
+    try testing.expect(mt.rt.editor_grammar.displayName() == null);
+
+    // ⑶ **구문 강조와 같은 값이다** — 문법이 있으면 provider 가 서고, 없으면 안 선다.
+    //    두 값이 갈리면 상태바가 「Zig」라 적는데 화면은 무색인 상태가 난다.
+    try testing.expect(zt.rt.editor_syntax.provider != null);
+    try testing.expect(mt.rt.editor_syntax.provider == null);
 }
 
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {

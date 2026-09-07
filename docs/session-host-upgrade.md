@@ -4583,6 +4583,36 @@ N-1/current fixture가 존재하는 macOS gate에서 canonical diagnostic을 보
 시험 tag의 GitHub-issued timing, B manifest/checkpoint·attestation·draft publication과 frozen signed U5 완료 증거는 후속 live workflow가
 소유한다.
 
+### 11.92 profile-aware stage-3 durable preparation
+
+`release_adapter_candidate_preparation_handoff.zig`와
+`release_adapter_candidate_preparation_reopen.zig`의 stage-3 durable directory는 baseline-A 전용 이름을
+authority로 삼지 않는다. 두 모듈은 held canonical evidence의 닫힌 profile
+`baseline_a | upgrade_b`를 먼저 해석하고, 각각 exact `baseline-evidence.json |
+upgrade-evidence.json` 이름을 유도한다. 같은 profile과 이름은 authored manifest의
+`role a | b`, `evidence.summary_name`, evidence asset의 name/size/SHA와 모두 일치해야 한다.
+caller가 profile, role 또는 evidence basename을 별도 scalar로 제출하는 진입점은 두지 않는다.
+
+promotion은 evidence와 manifest의 held descriptor를 각각 두 번 관측해 source inode/size/SHA가
+고정된 동안에만 private staging directory로 복사하고, 두 leaf를 semantic 검증한 뒤 exclusive rename과
+parent sync로 게시한다. retained reopen은 directory의 두 entry 가운데 canonical evidence를 내용으로
+식별하고 나머지 하나를 manifest로 식별한 뒤 같은 semantic 결속을 다시 수행한다. 파일명만 보고
+evidence 종류를 선택하거나 baseline 이름 실패 뒤 upgrade 이름을 fallback으로 시도하지 않는다.
+unknown profile, profile↔role mismatch, 두 canonical evidence leaf 동시 존재, name swap, copied/moved owner,
+source/reopen drift와 추가 entry는 모두 publication 또는 소비 전에 fail-close한다.
+
+`DurablePreparation`과 `ReopenedPreparation`의 final-address seal에는 유도한 evidence basename과 두
+descriptor observation이 포함된다. 기존 baseline-A byte/경로 계약은 유지한다. 실패 cleanup과
+crash-retained recovery는 기존 exact directory owner만 역순으로 정산하며 실제 앱 session-host 상태,
+사용자 HOME, GitHub release와 credential을 건드리지 않는다.
+
+focused Debug·ReleaseFast gate는 baseline-A와 upgrade-B의 실제 canonical evidence/manifest pair,
+profile별 exact inventory, role/name/SHA swap, dual-evidence·unknown entry, 모든 promotion fail-index,
+source 제거 뒤 revalidate, retained close→fresh reopen과 cleanup retry를 검증한다. 이 slice는
+profile upgrade runner를 B manifest authoring에 연결하거나 timing diagnostic을 파일로 게시하거나 live
+workflow/GitHub mutation을 수행하지 않는다. 그 다음 profile-aware stage-3 product가 §11.91의 성공
+owner에서 upgrade evidence와 predecessor graph를 투영하고 이 공용 handoff를 사용한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

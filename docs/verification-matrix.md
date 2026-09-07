@@ -3323,6 +3323,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   ordering/deadline, owner-only predecessor projection, workspace/input alias preflight, 모든 fail-index와 runner success/partial cleanup retry,
   timing 합계·역행·overflow를 검증한다. protected B
   시험 tag의 GitHub-issued timing과 manifest/checkpoint·publication은 후속 gate다.
+  Stage-3 durable preparation은 evidence basename을 baseline 상수나 caller scalar에서 받지 않고 held
+  canonical evidence의 `baseline_a | upgrade_b`에서 `baseline-evidence.json | upgrade-evidence.json`을
+  유도한다. manifest role, evidence summary와 evidence asset의 name/size/SHA가 같은 profile에 결속돼야
+  promotion과 fresh-process reopen이 성공한다. `test-session-host-release-adapter-candidate-preparation-handoff`와
+  `test-session-host-release-adapter-candidate-preparation-reopen`은 Debug·ReleaseFast actual filesystem에서
+  A/B pair, dual/unknown inventory, role/name/SHA swap, source drift, fail-index, retained close·reopen과 cleanup
+  retry를 검증하며 harness-owned private root만 사용한다. profile-aware product, timing diagnostic publication,
+  live workflow와 protected B tag 실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

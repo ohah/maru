@@ -19165,6 +19165,8 @@ pub const AppSession = struct {
                             // 안 갖고 있고 훅·CLI 어디에도 「그 자리로 가라」가 없으므로, 트랜스크립트를
                             // 읽는 갤러리가 직접 보여준다(실측 94%에서 나오고 전부 라벨과 다른 정보다).
                             image_gallery_ops.collectOpenContext(self, &collected, pane_frame_builder, tabbar_colors);
+                            // 활동 줄을 펼치면 **그때 받은 명령·결과 전문**이 같은 자리에 뜬다(AV3).
+                            image_gallery_ops.collectOpenDetail(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -76883,6 +76885,103 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     var total_buf: [24]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&shown_buf, "{d}", .{image_count - l.overflow})) != null);
     try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&total_buf, "{d}", .{image_count})) != null);
+}
+
+test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이 뜬다 (AV3)" {
+    // 계약 §2.4 의 세로 — **파일을 다시 실행하지 않고** 트랜스크립트의 그 바이트를 읽는다.
+    // 줄 클릭은 main 이 「AV3 가 정의한다」로 비워 둔 자리였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 호출 하나 + 그 결과 하나(여러 줄). 결과는 **다음 줄**에 온다 — Claude 중앙 거리 1 의 모양이다.
+    const transcript =
+        "{\"payload\":{\"call_id\":\"call_AV3\",\"type\":\"custom_tool_call\",\"name\":\"exec\"," ++
+        "\"input\":\"grep -rn foo src/\"}}\n" ++
+        "{\"payload\":{\"call_id\":\"call_AV3\",\"type\":\"custom_tool_call_output\"," ++
+        "\"output\":\"first hit\\nsecond hit\"}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = transcript });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+    defer quietGalleryWorkers(session);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    // 실행 필터로 간다(순환 순서에 기대지 않는다). **필터 전환은 도크가 키를 쥐고 있을 때만** 돈다 —
+    // 터미널에서 Tab 을 뺏지 않기 위한 게이트다(계약 §8).
+    session.image_gallery.key_focus = true;
+    try cycleGalleryTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // ── ① **그린 자리를 누른다.** 창은 그리기와 같은 자리에서 온다(`listWindow`).
+    const w = image_gallery_ops.listWindow(session);
+    try std.testing.expect(w.row_h > 0);
+    const area = image_gallery_ops.gridArea(session);
+    try std.testing.expect(image_gallery_ops.handleDown(
+        session,
+        @floatFromInt(area.x + area.w / 2),
+        @floatFromInt(area.y + w.row_h / 2),
+    ));
+    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+
+    // ── ② 본문이 **그때의 바이트**다. 라벨은 한 줄로 접힌 것이고 이쪽은 원문이다.
+    const detail = session.image_gallery.open.?.detail;
+    try std.testing.expectEqualStrings("grep -rn foo src/", detail.command);
+    try std.testing.expect(detail.has_result);
+    // 결과는 **여러 줄 그대로**다 — 접혔으면 diff 도 로그도 못 읽는다.
+    try std.testing.expectEqualStrings("first hit\nsecond hit", detail.result);
+    try std.testing.expect(!detail.command_truncated);
+    try std.testing.expect(!detail.result_truncated);
+
+    // ── ③ 그리고 **그려진다**(자리만 잡고 안 그리면 사용자에게는 없는 기능이다).
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    image_gallery_ops.collectOpenDetail(session, &collected, builder, colors);
+    try std.testing.expect(collected.items.len >= 3); // 명령 + 「결과」 머리 + 결과 두 줄
+
+    // ── ③b **목록은 물러난다.** 안 비키면 본문 글자가 목록 글자 위에 얹혀 둘 다 못 읽는다
+    //     (적대적 검증 2 회차 — 격자가 크게 보기 앞에서 물러나는 것과 같은 규율).
+    const before_list = collected.items.len;
+    image_gallery_ops.collectActivityList(session, &collected, builder, colors);
+    try std.testing.expectEqual(before_list, collected.items.len);
+
+    // ── ④ Esc 로 닫히고 본문이 풀린다(크게 보기와 **같은 자리·같은 출구**).
+    try std.testing.expect(image_gallery_ops.handleEscape(session));
+    try std.testing.expect(session.image_gallery.open == null);
 }
 
 test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (IG4-b)" {

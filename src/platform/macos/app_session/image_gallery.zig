@@ -331,7 +331,10 @@ pub const State = struct {
 
     /// 크게 보기의 픽셀도 owned 다 — 소스가 갈리거나 닫을 때 반드시 여기서 푼다.
     pub fn dropOpen(self: *State, allocator: std.mem.Allocator) void {
-        if (self.open) |*op| allocator.free(op.pixels);
+        if (self.open) |*op| {
+            allocator.free(op.pixels);
+            op.detail.deinit(allocator); // 펼침 본문도 owned 다(AV3)
+        }
         self.open = null;
     }
 
@@ -545,6 +548,33 @@ pub const Tile = struct {
 
 /// 크게 보고 있는 한 장. 썸네일(`Tile`)과 **다른 픽셀**이다 — 이쪽은 텍스처 상한 안에서 원본 배율로
 /// 푼 것이라 장당 수 MB 다. 그래서 한 장만 들고, 닫으면 바로 푼다.
+/// 펼침이 그리는 본문 두 조각(AV3 — 계약 §2.4). **그때 받은 바이트**이지 지금 파일을 다시 실행한
+/// 결과가 아니다.
+pub const Detail = struct {
+    /// 명령 전문(**owned**). 라벨은 한 줄로 접힌 것이고 이쪽이 원문이다.
+    command: []u8 = &.{},
+    /// 결과 전문(**owned**). 결과를 못 찾은 호출은 비어 있고 `has_result` 가 그것을 가른다 —
+    /// 「결과가 없다」와 「결과가 빈 문자열이다」는 다른 사실이다.
+    result: []u8 = &.{},
+    command_truncated: bool = false,
+    result_truncated: bool = false,
+    has_result: bool = false,
+
+    pub fn deinit(self: *Detail, allocator: std.mem.Allocator) void {
+        allocator.free(self.command);
+        allocator.free(self.result);
+        self.* = .{};
+    }
+};
+
+/// 펼침이 한 조각에 읽어 들일 상한(계약 §2.4 — 「앞에서부터 상한까지 싣고 이하 생략」).
+///
+/// 실측이 이 값을 정했다: 결과 바이트는 Claude 중앙 318 · p99 21 KB · 최대 616 KB, Codex 중앙 1,190 ·
+/// p99 365 KB · **최대 2.8 MB** 이고, 명령은 최대 23,866 B 다. 8 KiB 는 **화면에 그릴 수 있는 것보다
+/// 크다** — 이 판의 패널은 스크롤이 없어 들어가는 줄만 그리고 나머지는 「이하 생략」이 말한다. 더 담아
+/// 봐야 못 그리고, 못 그리는 바이트를 위해 2.8 MB 를 읽을 이유가 없다.
+pub const max_detail_bytes: usize = 8 * 1024;
+
 pub const Open = struct {
     /// 인덱스의 몇 번째인가. 격자로 돌아가지 않아도 「무엇을 보고 있는지」의 유일한 키다.
     hit_index: usize,
@@ -561,6 +591,11 @@ pub const Open = struct {
     decoded_subsample: u8 = 1,
     /// 지금 도는 요청이 «원본으로 다시 풀기» 인가. 수확할 때 보던 자리를 지킬지 가른다.
     upgrading: bool = false,
+    /// 펼침(AV3)의 본문 — 명령 전문과 결과 전문. **owned** 이고 `dropOpen` 이 푼다.
+    ///
+    /// 이미지에는 없다(그림이 본체다). 활동 항목은 반대로 그림이 없고 이 둘이 본체다 — 같은 «크게
+    /// 보기» 자리를 쓰되(계약 §2.4) 채우는 것이 다르다.
+    detail: Detail = .{},
     /// 원본으로 다시 풀기를 **이미 해 봤나**. 텍스처 상한 때문에 원본을 달라고 해도 `subsample > 1`
     /// 로 돌아올 수 있어(계약 §5.3), `decoded_subsample` 만 보면 매 tick 다시 건다.
     full_tried: bool = false,
@@ -1197,7 +1232,67 @@ pub fn openAt(self: *AppSession, n: usize) void {
         n,
     );
     self.metal_dirty = true;
+    // **활동 항목에는 그림이 없다.** `ensureOpen` 을 부르면 명령 문자열을 이미지로 디코드하려 들어
+    // 「열지 못했습니다」가 뜬다(main 이 목록 클릭을 막아 두었던 그 이유다). 대신 그때 받은 바이트를
+    // 읽는다 — 같은 자리를 쓰되 채우는 것이 다르다(계약 §2.4).
+    if (n < self.image_gallery.hits.items.len and !self.image_gallery.hits.items[n].kind.isImage()) {
+        loadOpenDetail(self, n);
+        return;
+    }
     ensureOpen(self);
+}
+
+/// 펼침의 본문 두 조각을 **그때의 바이트에서** 읽는다(AV3 — 계약 §2.4).
+///
+/// **파일을 다시 실행하지 않는다.** `grep` 매치 줄이나 파이프 조합은 지금 다시 돌려서 되살릴 수 없고,
+/// 파일이 그새 바뀌었을 수도 있다. 트랜스크립트에 그대로 있는 바이트가 「에이전트가 본 것」이다.
+///
+/// **여기서 한 번만 읽는다** — 크게 보기의 문맥(`loadOpenContext`)과 같은 규율이다. 라벨처럼 워커가
+/// 미리 만들지 않는 이유도 같다: 12,200 개어치 8 KiB 를 늘 들고 있을 이유가 없다.
+fn loadOpenDetail(self: *AppSession, n: usize) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    if (n >= self.image_gallery.hits.items.len) return;
+    const hit = self.image_gallery.hits.items[n];
+    const path = pathFor(self, hit) orelse return;
+    const file = std.Io.Dir.cwd().openFile(self.io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return;
+    defer file.close(self.io);
+
+    op.detail.command = readDetailPart(self, file, hit.data_offset, &op.detail.command_truncated);
+    if (hit.result.found) {
+        op.detail.has_result = true;
+        op.detail.result = readDetailPart(self, file, hit.result.body_offset, &op.detail.result_truncated);
+    }
+    self.metal_dirty = true;
+}
+
+/// 한 조각을 읽어 **여러 줄 그대로** 푼다. 못 읽으면 빈 조각이다 — 없는 내용을 지어내지 않는다.
+fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, truncated: *bool) []u8 {
+    if (offset == 0) return &.{};
+    const raw = self.allocator.alloc(u8, max_detail_bytes) catch return &.{};
+    defer self.allocator.free(raw);
+    var read: usize = 0;
+    while (read < raw.len) {
+        const got = file.readPositional(self.io, &.{raw[read..]}, offset + read) catch break;
+        if (got == 0) break;
+        read += got;
+    }
+    if (read == 0) return &.{};
+    const out = self.allocator.alloc(u8, read) catch return &.{};
+    defer self.allocator.free(out);
+    const block = context_mod.unescapeBlock(out, raw[0..read]);
+    truncated.* = block.truncated;
+    if (block.len == 0) return &.{};
+    // ⚠️ **정확한 길이로 새로 잡아 복사한다.** `realloc` 이 실패했을 때 `out[0..len]` 을 돌려주면
+    // **할당 길이와 다른 슬라이스**가 밖으로 나가고, 그것을 `free` 하는 순간 할당자가 죽는다
+    // (적대적 검증 1 회차 — 성공 경로만 보면 안 보이는 자리다).
+    const exact = self.allocator.alloc(u8, block.len) catch return &.{};
+    @memcpy(exact, out[0..block.len]);
+    return exact;
 }
 
 /// 크게 보기에서 다음(+1)·이전(-1)으로 넘긴다. 소비했으면 `true`.
@@ -1519,6 +1614,13 @@ pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
     return hit != null;
 }
 
+/// 지금 열린 것이 **펼침**(활동)인가 — 그림이 아니라 글이다(AV3). 클릭·렌더가 같은 판정을 쓴다.
+pub fn isDetailOpen(self: *const AppSession) bool {
+    const op = if (self.image_gallery.open) |o| o else return false;
+    if (op.hit_index >= self.image_gallery.hits.items.len) return false;
+    return !self.image_gallery.hits.items[op.hit_index].kind.isImage();
+}
+
 /// 호버를 놓는다. 얹힌 칸이 없다는 뜻이므로 `false`.
 pub fn clearHover(self: *AppSession) bool {
     if (self.image_gallery.hovered != null) {
@@ -1540,6 +1642,12 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     self.image_gallery.key_focus = true;
 
     if (self.image_gallery.open) |*op| {
+        // **펼침에는 그림이 없다**(AV3). 「이미지 밖을 눌러 닫는다」의 «밖» 이 화면 전체이므로 어디를
+        // 눌러도 닫는다 — 안 그러면 아래 `pixels.len == 0` 이 클릭을 삼켜 **닫을 길이 없어진다**.
+        if (isDetailOpen(self)) {
+            closeOpen(self);
+            return true;
+        }
         if (op.pixels.len == 0) return true; // 아직 못 풀었다 — 격자가 보이지만 클릭은 삼킨다
         const vp = viewportRect(self);
         const r = image_view.destRect(op.view, vp, op.width, op.height);
@@ -1554,11 +1662,20 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         return true;
     }
 
-    // **줄 목록에서는 격자 히트테스트를 돌리지 않는다.** 좌표계가 다르므로 엉뚱한 항목이 잡히고,
-    // 그것이 활동 `Hit` 이면 `ensureOpen` 이 명령 문자열을 **이미지로 디코드**하려 들어 「열지
-    // 못했습니다」가 뜬다. 줄을 눌렀을 때의 동작(펼침)은 AV3 가 정의한다 — 그때까지는 도크를
-    // 눌렀다는 사실(키 포커스)만 받고 아무것도 열지 않는다.
-    if (!self.image_gallery.filter.isGrid()) return true;
+    // **줄 목록에서는 격자 히트테스트를 돌리지 않는다** — 좌표계가 다르다. 대신 줄 높이로 나눠
+    // **그 줄을 펼친다**(AV3). 창(`listWindow`)은 그리기와 같은 자리에서 오므로 눌린 줄과 그려진
+    // 줄이 갈리지 않는다.
+    if (!self.image_gallery.filter.isGrid()) {
+        const w = listWindow(self);
+        if (w.row_h == 0) return true;
+        const py: u32 = @intFromFloat(@max(0, y_px));
+        if (py < gx.y) return true;
+        const row: usize = @intCast((py - gx.y) / w.row_h);
+        const n = w.first +| row;
+        // 목록 끝 **아래의 빈 자리**를 누르면 아무 일도 없다 — 없는 항목을 열지 않는다.
+        if (n < w.last) openAt(self, n);
+        return true;
+    }
 
     const m = gridMetrics(self);
     const l = gridLayout(self);
@@ -2363,6 +2480,9 @@ pub fn collectActivityList(
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    // **펼치면 목록은 물러난다**(AV3 — 계약 §2.4 「크게 보기와 같은 자리」). 안 비키면 본문 글자가
+    // 목록 글자 위에 얹혀 **둘 다 못 읽는다** — 격자가 크게 보기 앞에서 물러나는 것과 같은 규율이다.
+    if (self.image_gallery.open != null) return;
     if (self.image_gallery.filter.isGrid()) {
         // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다.
         self.image_gallery.drawn_rows = 0;
@@ -2534,6 +2654,94 @@ pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.Res
         }) catch "";
     }
     return std.fmt.bufPrint(buf, "{d}{s}", .{ result.lines, suffix }) catch "";
+}
+
+/// 펼친 항목의 **본문**을 그린다(AV3 — 계약 §2.4). 명령 전문 → 빈 줄 → 「결과」 → 결과 전문 순이다.
+///
+/// **이미지의 크게 보기와 같은 자리를 쓴다**(계약 §2.4) — 둘 다 「한 항목을 크게 본다」이고 동시에
+/// 열릴 수 없다. 그래서 여기서 그리는 동안 격자·목록은 이미 물러나 있다.
+///
+/// **들어가는 줄만 그린다.** 이 판에는 패널 스크롤이 없으므로, 못 그린 뒤는 「이하 생략」이 말한다 —
+/// 그 한 줄이 「내용이 여기까지다」와 「자리가 여기까지다」를 가른다.
+pub fn collectOpenDetail(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!isDetailOpen(self)) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+
+    const area = gridArea(self);
+    const row_h = labelHeightPx(self);
+    if (area.w == 0 or area.h == 0 or row_h == 0) return;
+    const cols: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+    if (cols == 0) return;
+    const rows_fit: usize = @intCast(area.h / row_h);
+    if (rows_fit == 0) return;
+
+    const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        time_dim_percent,
+    ) };
+
+    var row: usize = 0;
+    const draw = struct {
+        fn one(
+            s: *AppSession,
+            c: *std.ArrayList(AppSession.CollectedPane),
+            b: coretext_frame_builder.CoreTextFrameBuilder,
+            col: metal_frame.CellColors,
+            a: @TypeOf(area),
+            h: u32,
+            n: usize,
+            w: u16,
+            text: []const u8,
+            fgc: maru.terminal.Color,
+        ) void {
+            if (text.len == 0) return; // 빈 줄은 자리만 차지한다 — 그리지 않는다
+            const dl = coretext_frame_builder.buildDockTileLabelDrawList(s.allocator, w, text, fgc) catch return;
+            s.collectShaped(c, dl, b, .{ .pane = .{
+                .origin_x = a.x,
+                .origin_y = a.y + @as(u32, @intCast(n)) * h,
+                .colors = col,
+            } });
+        }
+    }.one;
+
+    // ── 명령 전문
+    var it = std.mem.splitScalar(u8, op.detail.command, '\n');
+    while (it.next()) |line| {
+        if (row >= rows_fit) return;
+        draw(self, collected, builder, colors, area, row_h, row, cols, line, fg);
+        row += 1;
+    }
+    if (op.detail.command_truncated) {
+        if (row >= rows_fit) return;
+        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_truncated), dim);
+        row += 1;
+    }
+
+    // ── 결과 전문. **없으면 머리도 안 그린다** — 「결과가 없다」를 빈 칸으로 말한다.
+    if (!op.detail.has_result) return;
+    if (row + 1 >= rows_fit) return;
+    row += 1; // 빈 줄 하나로 가른다
+    draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_result), dim);
+    row += 1;
+    var rit = std.mem.splitScalar(u8, op.detail.result, '\n');
+    while (rit.next()) |line| {
+        if (row >= rows_fit) return;
+        draw(self, collected, builder, colors, area, row_h, row, cols, line, fg);
+        row += 1;
+    }
+    if (op.detail.result_truncated and row < rows_fit) {
+        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_truncated), dim);
+    }
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.

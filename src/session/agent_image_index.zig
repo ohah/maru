@@ -623,7 +623,13 @@ pub const max_hits_per_file: usize = 4096;
 /// 한 파일 최대 770개다. 같은 4096 을 나눠 쓰면 활동이 상한을 채운 파일에서 **이미지가 밀려나고**,
 /// 사용자에게는 「이미지가 없습니다」로 보인다 — 고장과 구분되지 않는 종류의 실패다.
 ///
-/// 값은 실측 최대(12,200)의 1.34 배다. `Hit` 이 32 바이트 미만이므로 16,384개라도 512 KB 다.
+/// **이 상한은 「최근 N 개」다 — 「앞에서부터 N 개」가 아니다.** 넘치면 오래된 쪽을 버린다(아래
+/// `evictOldestActivities`).
+///
+/// ⚠️ **실측이 처음 근거를 뒤집었다.** 12 세션 표본의 최대(12,200)를 보고 「그 1.34 배」로 정했는데,
+/// 이 맥의 최악 rollout 은 활동이 **181,907 건**(상한의 **11.1 배**)이다. 상한을 올려 쫓는 대신
+/// **무엇을 남길지**를 고쳤다 — 더 큰 파일이면 어차피 또 넘고, 사용자가 찾는 것은 최근이다.
+/// `Hit` 이 32 바이트 미만이므로 16,384개라도 512 KB 다.
 pub const max_activity_hits_per_file: usize = 16384;
 
 /// 청크로 흘러오는 파일을 줄 경계로 이어 붙여 훑는다.
@@ -638,8 +644,15 @@ pub const StreamScanner = struct {
     carry: std.ArrayList(u8) = .empty,
     /// 파일에서 **소비한** 바이트(= 마지막 개행 다음). 이어읽기(IG2)가 `last_offset` 으로 쓴다.
     consumed: u64 = 0,
-    /// 상한에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
+    /// 상한·손상으로 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
+    /// 이미지를 다 못 담았다(`max_hits_per_file`).
+    ///
+    /// **종류를 가르는 이유**: 활동만 잘렸는데 이미지 필터에서 「다 읽지 못했습니다」가 뜨면 그것은
+    /// 거짓말이다 — 실측 최악 파일에서 활동은 91% 가 잘리지만 이미지 27 장은 전부 들어온다.
+    image_partial: bool = false,
+    /// 활동을 다 못 담았다 — 오래된 쪽을 버렸다는 뜻이다(최신은 남아 있다).
+    activity_partial: bool = false,
     /// 지금까지 담은 이미지 수. **상한을 종류별로 세기 위해** 든다(`max_hits_per_file`).
     image_count: usize = 0,
     /// 지금까지 담은 활동 수(`max_activity_hits_per_file`).
@@ -658,27 +671,58 @@ pub const StreamScanner = struct {
     /// 넘친 것은 버리고 `partial` 로 밝힌다 — 「없다」와 「못 봤다」를 가르는 계약이다. 잘라내기가
     /// 아니라 **골라 담기**인 이유는 한 줄에서 두 종류가 함께 나올 수 있기 때문이다: 한쪽이 넘쳤다고
     /// 뒤를 통째로 자르면 아직 자리가 남은 다른 종류까지 잃는다.
-    fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) void {
-        var w = before;
-        for (out.items[before..]) |h| {
-            const is_image = h.kind.isImage();
-            const full = if (is_image)
-                self.image_count >= max_hits_per_file
-            else
-                self.activity_count >= max_activity_hits_per_file;
-            if (full) {
-                self.partial = true;
+    /// 상한을 넘은 활동에서 **오래된 절반을 버린다.** 한 개씩 버리면 배열 앞 이동이 매번 O(n) 이라
+    /// O(n²) 가 된다 — 절반씩이면 amortized O(1) 이다.
+    ///
+    /// **왜 오래된 쪽인가.** 이 뷰의 물음은 「**아까** 그 명령 뭐였지」다. 앞에서 채우고 넘치면
+    /// 버리는 방식은 그 물음의 **정반대**를 답한다 — 갤러리가 IG7 에서 똑같이 겪었다(151 장 중
+    /// 4 장만 보이는데 그 4 장이 세션 맨 처음 것이었다). 실측 최악 세션은 활동이 상한의 11.1 배라
+    /// 이 선택이 곧 기능의 쓸모다.
+    fn evictOldestActivities(self: *StreamScanner, out: *std.ArrayList(Hit)) void {
+        // **1/8 씩 버린다.** 절반씩 버리면 항목 수가 8,192 ~ 16,384 를 오가 최악에는 상한의 절반만
+        // 남는다 — 1/8 이면 14,336 ~ 16,384 로 유지되고 amortized 비용은 그대로다(퇴출 한 번에
+        // O(n), 그 사이 n/8 개를 받으므로 항목당 상수).
+        const drop = self.activity_count / 8;
+        if (drop == 0) return;
+        var dropped: usize = 0;
+        var w: usize = 0;
+        for (out.items) |h| {
+            if (!h.kind.isImage() and dropped < drop) {
+                dropped += 1;
                 continue;
             }
             out.items[w] = h;
             w += 1;
-            if (is_image) {
+        }
+        out.shrinkRetainingCapacity(w);
+        self.activity_count -= dropped;
+        self.activity_partial = true;
+        self.partial = true;
+    }
+
+    /// 방금 줄에서 나온 `Hit` 들을 받아들인다.
+    ///
+    /// **이미지와 활동의 규율이 다르다.** 이미지는 상한에서 **더 안 받는다**(격자는 최신 우선 정렬이
+    /// 뒤에서 이뤄지고, 실측상 한 파일 최대가 770 장이라 상한에 잘 안 닿는다). 활동은 상한의 11 배가
+    /// 오는 파일이 있으므로 **일단 받고 오래된 쪽을 버린다** — 그래야 최신이 남는다.
+    fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) void {
+        var w = before;
+        for (out.items[before..]) |h| {
+            if (h.kind.isImage()) {
+                if (self.image_count >= max_hits_per_file) {
+                    self.image_partial = true;
+                    self.partial = true;
+                    continue;
+                }
                 self.image_count += 1;
             } else {
                 self.activity_count += 1;
             }
+            out.items[w] = h;
+            w += 1;
         }
         out.shrinkRetainingCapacity(w);
+        if (self.activity_count > max_activity_hits_per_file) self.evictOldestActivities(out);
     }
 
     /// 청크 하나를 먹인다. `chunk` 는 `self.consumed + self.carry.len` 위치부터의 바이트여야 한다.
@@ -1655,6 +1699,60 @@ test "활동: 상한은 종류별이다 — 활동이 넘쳐도 이미지가 밀
     try testing.expectEqual(@as(usize, 1), images);
     try testing.expectEqual(max_hits_per_file + 64, activities);
     try testing.expect(!scanner.partial); // 둘 다 자기 상한 안이라 자른 것이 없다
+}
+
+test "활동: 상한을 넘으면 **오래된 쪽**을 버린다 — 최신이 남는다 (적대적 O4)" {
+    // **이 뷰의 물음은 「아까 그 명령 뭐였지」다.** 앞에서 채우고 넘치면 버리면 그 물음의 정반대를
+    // 답한다 — 갤러리가 IG7 에서 똑같이 겪었다. 실측 최악 세션은 활동이 상한의 **11.1 배**
+    // (181,907 건)라, 무엇을 남기느냐가 곧 기능의 쓸모다.
+    const line_head =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"description":"
+    ;
+    const line_tail =
+        \\"}}]}}
+    ;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    // 상한을 넘기고도 남게 쌓는다. 설명에 **번호**를 넣어 어느 것이 남았는지 본다.
+    const total = max_activity_hits_per_file + 1000;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        try text.appendSlice(testing.allocator, line_head);
+        var num_buf: [16]u8 = undefined;
+        const num = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable;
+        try text.appendSlice(testing.allocator, num);
+        try text.appendSlice(testing.allocator, line_tail);
+        try text.append(testing.allocator, '\n');
+    }
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(testing.allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(testing.allocator);
+    try scanner.feed(testing.allocator, text.items, &hits);
+
+    // 상한 안이고, 잘렸다는 사실을 **종류까지** 밝힌다.
+    try testing.expect(hits.items.len <= max_activity_hits_per_file);
+    // **너무 많이 버리지 않는다.** 퇴출은 1/8 씩이므로 항목은 상한의 7/8 아래로 안 내려간다 —
+    // 절반씩 버리던 때는 최악에 상한의 절반만 남았다(사용자 지적 2026-09-07).
+    try testing.expect(hits.items.len >= max_activity_hits_per_file / 8 * 7);
+    try testing.expect(scanner.activity_partial);
+    try testing.expect(!scanner.image_partial); // 이미지는 애초에 없었다 — 종류를 섞지 않는다
+
+    // **마지막 줄이 남아 있다.** 앞에서 채우고 버리는 방식이면 여기서 깨진다.
+    const last = hits.items[hits.items.len - 1];
+    const start: usize = @intCast(last.data_offset);
+    const label = text.items[start .. start + last.data_len];
+    var want_buf: [16]u8 = undefined;
+    const want = std.fmt.bufPrint(&want_buf, "{d}", .{total - 1}) catch unreachable;
+    try testing.expectEqualStrings(want, label);
+
+    // 그리고 **첫 줄은 버려졌다**(그것이 「오래된 쪽을 버린다」의 뜻이다).
+    const first = hits.items[0];
+    const fstart: usize = @intCast(first.data_offset);
+    const first_label = text.items[fstart .. fstart + first.data_len];
+    try testing.expect(!std.mem.eql(u8, first_label, "0"));
 }
 
 test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {

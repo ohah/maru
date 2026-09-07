@@ -243,6 +243,9 @@ pub const State = struct {
     labels: std.ArrayList(context.Label) = .empty,
     /// 상한(줄 길이·이미지 수)에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
+    /// 종류별 「다 못 봤다」(스캐너가 나눈 것을 그대로 받는다).
+    image_partial: bool = false,
+    activity_partial: bool = false,
     /// 마지막 스캔이 읽은 바이트와 걸린 시간. 계약 §4.1.1 의 근거가 이 자리에서 나왔다.
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
@@ -343,7 +346,12 @@ pub const State = struct {
         self.search_active = false;
         self.chain.clear();
         self.head_stamp = .{};
+        // **종류별 플래그도 함께 지운다.** 하나만 지우면 소스가 갈린 뒤에도 옛 세션의 「다 못
+        // 읽음」이 따라붙어 새 세션에서 거짓 경고가 뜬다(적대적 검증 O5 — 종류별로 나누면서
+        // 리셋 자리를 빠뜨렸다).
         self.partial = false;
+        self.image_partial = false;
+        self.activity_partial = false;
         self.scanned_bytes = 0;
         self.scan_ns = 0;
         self.built = false;
@@ -909,6 +917,8 @@ pub fn poll(self: *AppSession) void {
     // 리셋이 아니라 clamp 라, 보던 행이 아직 있으면 그 자리에 그대로 있는다.
     clampScroll(self);
     self.image_gallery.partial = result.partial;
+    self.image_gallery.image_partial = result.image_partial;
+    self.image_gallery.activity_partial = result.activity_partial;
     self.image_gallery.scanned_bytes = result.scanned_bytes;
     self.image_gallery.scan_ns = result.scan_ns;
     self.image_gallery.built = true;
@@ -2509,7 +2519,19 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     //
     // 다만 **한 바이트도 못 읽었으면**(`scanned_bytes == 0`) 그건 진짜로 못 읽은 것이다(파일 없음·
     // 열기 실패). 그때까지 「없다」로 뭉개면 갤러리가 멀쩡한 줄 안다 — IG1-e 가 그 자리를 잡았다.
-    if (self.image_gallery.partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {
+    // **지금 보는 종류가 잘렸을 때만 말한다.** 활동만 잘렸는데 이미지 필터에서 「다 읽지
+    // 못했습니다」가 뜨면 거짓말이다 — 실측 최악 파일에서 활동은 91% 가 잘리지만 이미지 27 장은
+    // 종류별 상한 덕에 전부 들어온다(적대적 검증 O1).
+    //
+    // 종류별 플래그가 아직 없던 스캔 결과(옛 세션)에서는 `partial` 하나로 물러난다.
+    const kind_partial = if (self.image_gallery.image_partial or self.image_gallery.activity_partial)
+        (if (self.image_gallery.filter.isGrid())
+            self.image_gallery.image_partial
+        else
+            self.image_gallery.activity_partial)
+    else
+        self.image_gallery.partial;
+    if (kind_partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {
         return maru.i18n.t(.image_gallery_partial);
     }
     if (n == 0) {

@@ -26,6 +26,9 @@ pub const Result = struct {
     /// 길이가 어긋나면 라벨이 남의 이미지에 붙는다. 그래서 `hits` 를 건드리는 자리는 이것도 같이 건든다.
     labels: std.ArrayList(context.Label) = .empty,
     partial: bool = false,
+    /// 종류별로 나눈 「다 못 봤다」 — 활동만 잘렸는데 이미지 필터에서 그 문구를 내면 거짓말이다.
+    image_partial: bool = false,
+    activity_partial: bool = false,
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
     /// 이 결과를 만든 요청. main actor 가 「지금 보고 있는 것」과 대조해 늦게 온 것을 버린다.
@@ -346,6 +349,8 @@ fn worker(job: *Job) void {
         // 이 파일에서 나온 것들에 **누가 준 오프셋인지** 표시한다.
         for (result.hits.items[first_hit..]) |*h| h.file_index = @intCast(fi);
         if (scanner.partial) result.partial = true;
+        if (scanner.image_partial) result.image_partial = true;
+        if (scanner.activity_partial) result.activity_partial = true;
     }
     // ── 라벨 패스 ────────────────────────────────────────────────────────────────────────────
     // 스캔이 끝난 뒤 **같은 워커에서** 만든다. 파일별로 한 번만 열고 positional read 로 창을 읽는다 —

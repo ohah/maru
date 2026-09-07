@@ -14419,6 +14419,10 @@ pub fn build(b: *std.Build) void {
     );
     session_host_release_adapter_candidate_upgrade_runner_step.dependOn(session_host_release_adapter_candidate_upgrade_phase_step);
     session_host_release_adapter_candidate_upgrade_runner_step.dependOn(session_host_release_adapter_candidate_upgrade_child_step);
+    const session_host_release_adapter_profile_endorsement_step = b.step(
+        "test-session-host-release-adapter-profile-endorsement",
+        "Validate protected release profile endorsement ownership",
+    );
     const session_host_release_adapter_zig_toolchain_authority_step = b.step(
         "test-session-host-release-adapter-zig-toolchain-authority",
         "Validate official release Zig toolchain authority",
@@ -15536,6 +15540,11 @@ pub fn build(b: *std.Build) void {
             run_candidate_upgrade_runner_tests.addArg("--maru-expect-tests=5");
             run_candidate_upgrade_runner_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_upgrade_runner_step.dependOn(&run_candidate_upgrade_runner_tests.step);
+            const profile_endorsement_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_endorsement.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
+            const profile_endorsement_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_profile_endorsement.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod } } }) });
+            const run_profile_endorsement_tests = b.addRunArtifact(profile_endorsement_tests);
+            run_profile_endorsement_tests.addArg("--maru-expect-tests=6");
+            session_host_release_adapter_profile_endorsement_step.dependOn(&run_profile_endorsement_tests.step);
             const compatibility_probe_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_compatibility_probe.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_manifest", .module = manifest_mod }} });
             const candidate_compatibility_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_compatibility.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_compatibility_probe", .module = compatibility_probe_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
             const candidate_compatibility_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_compatibility.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod }, .{ .name = "release_adapter_candidate_compatibility", .module = candidate_compatibility_mod } } }) });

@@ -2387,6 +2387,10 @@ test "DCARET4: ⇧ 는 anchor 를 두고 focus 만 옮긴다 (선택 확장)" {
     const sel = fx.term.rt.editor_diff_selection.?.sel;
     try testing.expectEqual(@as(usize, 0), sel.anchor_start.row);
     try testing.expectEqual(@as(usize, 0), sel.anchor_start.byte);
+    // **anchor 는 범위다 — 양 끝을 다 봐야 한다.** 끝만 focus 로 끌어오면 마우스로 잡은 낱말
+    // 단위가 조용히 사라지는데, 시작만 재면 그 변이가 산다(4회차 C62).
+    try testing.expectEqual(@as(usize, 0), sel.anchor_end.row);
+    try testing.expectEqual(@as(usize, 0), sel.anchor_end.byte);
     try testing.expectEqual(@as(usize, 1), sel.focus.byte);
     try testing.expect(!sel.isEmpty());
     // **띠가 실제로 그려진다** — 빈 선택이 아니게 됐으므로 표식이 나온다.
@@ -2679,6 +2683,21 @@ test "DCARET12: 옮기면 다시 그린다 — 그리고 범위 밖 자리에서
     const f = fx.term.rt.editor_diff_selection.?.sel.focus;
     try testing.expect(f.row < st.right_texts.len);
     try testing.expect(f.byte <= st.right_texts[f.row].len);
+
+    // ⑶ **caret 이 없으면 만들지 않는다.** 이동이 스스로 커서를 세우면 씨앗이 두 출처가 되고,
+    //    비교가 아직 안 선 프레임에서 키 하나로 커서가 생긴다.
+    fx.term.rt.editor_diff_selection = null;
+    try testing.expect(!editor_ops.diffMove(fx.session, fx.term, .line_down, false));
+    try testing.expect(fx.term.rt.editor_diff_selection == null);
+
+    // ⑷ **비교가 아니면 받지 않는다.** view 를 바꾼 채 끝나면 `release` 가 compare 자원을 안 놓아
+    //    누수가 나므로(DSEL4 와 같은 규율) 반드시 되돌린다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    const saved_view = fx.term.rt.editor_diff.?.view;
+    fx.term.rt.editor_diff.?.view = .loading;
+    try testing.expect(!editor_ops.diffMove(fx.session, fx.term, .line_down, false));
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    fx.term.rt.editor_diff.?.view = saved_view;
 }
 
 test "DCARET13: 왼쪽이 빈 새 파일에서도 caret 이 선다 (§4.1g 비교 뷰)" {
@@ -2699,17 +2718,17 @@ test "DCARET13: 왼쪽이 빈 새 파일에서도 caret 이 선다 (§4.1g 비�
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
     try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.row);
 
-    // **거꾸로 — 지워진 파일에는 설 자리가 없다.** 오른쪽 배열이 비면 caret 을 세우지 않는다.
-    //    세우면 상태가 거짓말을 한다: 화면에는 없는 커서를 `editor_diff_selection` 이 든다.
+    // **지워진 파일도 오른쪽 배열이 비지 않는다** — 짝맞춤 빈 행이 들어차므로 좌우 길이가 같다.
+    //    그래서 씨앗의 `right_texts.len > 0` 게이트는 **비교가 선 상태에서 늘 참**이고, 그것을
+    //    뒤집는 변이(4회차 C52·C46)는 원리상 잡을 수 없다 — 조건부 단언을 두면 한 번도 안 도는
+    //    항진 판정자가 된다(실제로 그렇게 썼다가 걷어냈다). 게이트는 방어로 남긴다.
     var gone = testEntry("removed one\nremoved two\n", "");
     fx.term.file_entry = &gone;
     invalidate(fx.session, fx.term);
     poll(fx.session, fx.term);
-    if (fx.term.rt.editor_diff) |st2| {
-        if (std.meta.activeTag(st2.view) == .compare and st2.right_texts.len == 0) {
-            try testing.expectEqual(@as(?@TypeOf(fx.term.rt.editor_diff_selection.?), null), fx.term.rt.editor_diff_selection);
-        }
-    }
+    const st2 = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(st2.left_texts.len, st2.right_texts.len);
+    try testing.expect(fx.term.rt.editor_diff_selection != null);
 }
 
 test "DCARET14: 문서 끝으로 가도 마지막 화면이 비지 않는다 (§4.1g 비교 뷰)" {
@@ -2739,4 +2758,35 @@ test "DCARET14: 문서 끝으로 가도 마지막 화면이 비지 않는다 (§
     try testing.expect(fx.term.rt.editor_first_line + rows <= st.right_texts.len);
     // 그리고 caret 은 보인다(맨 아래 행이 화면 안이다).
     try testing.expect(fx.term.rt.editor_first_line <= st.right_texts.len - 1);
+}
+
+test "DCARET15: 낡은 스크롤 위치는 이동할 때 상한으로 되돌아온다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    const text = buf[0..w];
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const st = fx.term.rt.editor_diff.?;
+    const rows = fx.term.rt.editor_diff_hit_len_right;
+    try testing.expect(rows > 2);
+    const total = st.right_texts.len;
+    const max_first = total - rows;
+
+    // **caret 이 화면 안에 있어도 상한은 지킨다.** 두 갈래(위로 나감·아래로 나감) 어느 쪽도 안
+    // 걸리는 자리에 caret 을 두면, 남는 일은 상한 clamp 하나다 — 그것이 없으면 낡은 위치가
+    // 그대로 남아 마지막 화면 아래가 빈다.
+    const stale = max_first + 5;
+    fx.term.rt.editor_first_line = stale;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = stale + 1, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false));
+    try testing.expect(fx.term.rt.editor_first_line <= max_first);
 }

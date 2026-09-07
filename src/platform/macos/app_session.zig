@@ -76994,11 +76994,22 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // **이미지 줄이 있어야 접두·시각을 시험할 수 있다.** 활동 줄에는 둘 다 없다(모르면 말하지
+    // 않는다) — 활동만 있는 fixture 로는 「조각 > 줄」이 성립하지 않는다.
     const transcript =
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_D\"," ++
         "\"name\":\"Bash\",\"input\":{\"command\":\"echo one\",\"description\":\"첫째 줄\"}}]}}\n" ++
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_E\"," ++
-        "\"name\":\"Bash\",\"input\":{\"command\":\"echo two\",\"description\":\"둘째 줄\"}}]}}\n";
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo two\",\"description\":\"둘째 줄\"}}]}}\n" ++
+        // **키 순서가 실측이다**(계약 §P2 — 구조는 실측, 값은 합성). 실제 레코드는
+        // `parentUuid · isSidechain · promptId · type · message · uuid · timestamp · …` 로,
+        // **`timestamp` 가 `message` 뒤**에 온다. `readTime` 은 payload **뒤**를 보므로 그 순서라야
+        // 시각을 찾는다 — 앞에 두면 편하지만 **시각 경로가 아예 안 타고**, 판정자는 쉬운 경우만 본다.
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"이 화면 좀 봐주세요\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]},\"uuid\":\"u\",\"timestamp\":\"2026-09-07T01:00:00.000Z\"}\n";
     try tmp.dir.writeFile(io, .{ .sub_path = "e.jsonl", .data = transcript });
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -77042,6 +77053,17 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.drawn_rows);
     // 자리를 다 얻었으므로 넘친 것이 없다(그 값이 「도크가 좁다」 문구를 가른다).
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.overflow);
+
+    // ── **접두·시각도 그려진다.** 「전체」에서 이미지 줄은 접두(첨부/읽음) + 본문 + 시각 = 3 조각,
+    // 활동 줄은 본문 하나다(활동 라벨에는 접두도 시각도 없다 — 모르면 말하지 않는다).
+    // 줄 수만 세면 그 둘이 통째로 사라져도 그대로라, 실제로 두 번 빠뜨리고도 몰랐다(L2).
+    try cycleGalleryTo(session, .all);
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.drawn_rows); // 활동 둘 + 이미지 하나
+    // **조각을 정확히 센다.** 활동 줄은 본문 하나씩(접두도 시각도 없다 — 모르면 말하지 않는다),
+    // 이미지 줄은 접두(첨부) + 본문 + 시각 셋이다. 부등호로 두면 시각이 통째로 빠져도(4) 통과하므로
+    // 정확한 수를 적는다 — 실제로 fixture 의 키 순서가 실측과 달라 **시각이 안 그려지고 있었다**.
+    try std.testing.expectEqual(@as(usize, 5), session.image_gallery.drawn_pieces);
 
     // ── 격자로 돌아가면 줄은 0 이다 — 옛 값이 남으면 이 판정자가 속는다.
     try cycleGalleryTo(session, .images);

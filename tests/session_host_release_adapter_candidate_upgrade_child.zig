@@ -48,6 +48,7 @@ const Expired = struct {
 };
 
 const Executor = struct {
+    home_path: [:0]const u8,
     output_path: [:0]const u8,
     expected_kind: child.Kind,
     create_leaf: bool = true,
@@ -71,14 +72,12 @@ const Executor = struct {
         try std.testing.expectEqualStrings("-Dsession-host-signed-n1-exe=/private/predecessor-executable", args[2]);
         try std.testing.expectEqualStrings("-Dsession-host-signed-current-exe=/candidate/current-maru", args[3]);
         try std.testing.expectEqualStrings("-Dsession-host-release-test-uuid=" ++ uuid, args[4]);
-        try std.testing.expectEqualStrings(switch (self.expected_kind) {
-            .one => "-Dsession-host-signed-upgrade-root=/private/signed-one",
-            .near_max => "-Dsession-host-signed-upgrade-root=/private/signed-near-max",
-        }, args[5]);
-        try std.testing.expectEqualStrings(switch (self.expected_kind) {
-            .one => "-Dsession-host-signed-upgrade-output=/private/signed-one.json",
-            .near_max => "-Dsession-host-signed-upgrade-output=/private/signed-near-max.json",
-        }, args[6]);
+        const root_prefix = "-Dsession-host-signed-upgrade-root=";
+        const output_prefix = "-Dsession-host-signed-upgrade-output=";
+        try std.testing.expect(std.mem.startsWith(u8, args[5], root_prefix));
+        try std.testing.expectEqualStrings(self.home_path, args[5][root_prefix.len..]);
+        try std.testing.expect(std.mem.startsWith(u8, args[6], output_prefix));
+        try std.testing.expectEqualStrings(self.output_path, args[6][output_prefix.len..]);
         try std.testing.expectEqualSlices([]const u8, &.{
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME=/var/empty",
@@ -125,7 +124,7 @@ test "both closed kinds receive exact sealed argv environment cwd and shared dea
         var authority = Authority{ .view = view(kind, home, output) };
         var toolchain: Toolchain = .{};
         var deadline: Deadline = .{};
-        var executor = Executor{ .output_path = output, .expected_kind = kind };
+        var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = kind };
         var capture: [32]u8 = undefined;
         try child.runWith(&executor, &authority, &toolchain, kind, 42, &deadline, &capture);
         try std.testing.expectEqual(@as(usize, 1), executor.calls);
@@ -146,7 +145,7 @@ test "existing missing loose and symlink leaves fail closed" {
         var authority = Authority{ .view = view(.one, home, output) };
         var toolchain: Toolchain = .{};
         var deadline: Deadline = .{};
-        var executor = Executor{ .output_path = output, .expected_kind = .one, .create_leaf = mode != 0, .mode = mode };
+        var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = .one, .create_leaf = mode != 0, .mode = mode };
         var capture: [32]u8 = undefined;
         try std.testing.expectError(if (mode == 0) error.MissingOutput else error.UnsafeOutput, child.runWith(&executor, &authority, &toolchain, .one, 42, &deadline, &capture));
     }
@@ -160,7 +159,7 @@ test "existing missing loose and symlink leaves fail closed" {
     var authority = Authority{ .view = view(.one, home, output) };
     var toolchain: Toolchain = .{};
     var deadline: Deadline = .{};
-    var executor = Executor{ .output_path = output, .expected_kind = .one };
+    var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = .one };
     var capture: [32]u8 = undefined;
     try std.testing.expectError(error.OutputExists, child.runWith(&executor, &authority, &toolchain, .one, 42, &deadline, &capture));
     try std.testing.expectEqual(@as(usize, 0), executor.calls);
@@ -178,18 +177,18 @@ test "deadline child capture authority and toolchain failures never become succe
         var authority = Authority{ .view = view(.one, home, output) };
         var toolchain: Toolchain = .{};
         var deadline: Expired = .{};
-        var executor = Executor{ .output_path = output, .expected_kind = .one };
+        var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = .one };
         try std.testing.expectError(error.Expired, child.runWith(&executor, &authority, &toolchain, .one, 42, &deadline, &capture));
     }
-    inline for (.{ @as(u8, 0), 1, 2, 3 }) |failure_kind| {
-        var authority = Authority{ .view = view(.one, home, output), .drift_after_first = failure_kind == 2 };
+    inline for (.{ @as(u8, 0), 1, 2, 3, 4 }) |failure_kind| {
+        var authority = Authority{ .view = view(.one, home, output), .drift_after_first = failure_kind == 2 or failure_kind == 4 };
         var toolchain = Toolchain{ .drift_after_first = failure_kind == 3 };
         var deadline: Deadline = .{};
-        var executor = Executor{ .output_path = output, .expected_kind = .one, .failure = if (failure_kind == 0) error.TimedOut else null, .foreign_capture = failure_kind == 1 };
+        var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = .one, .failure = if (failure_kind == 0 or failure_kind == 4) error.TimedOut else null, .foreign_capture = failure_kind == 1 };
         const expected = switch (failure_kind) {
             0 => error.TimedOut,
             1 => error.InvalidCapture,
-            2 => error.AuthorityChanged,
+            2, 4 => error.AuthorityChanged,
             3 => error.ExecutableChanged,
             else => unreachable,
         };
@@ -207,7 +206,7 @@ test "invalid directions kind cwd capture and scalar authority are rejected" {
     const output = try absolute(&tmp, "signed-one.json", &output_storage);
     var deadline: Deadline = .{};
     var toolchain: Toolchain = .{};
-    var executor = Executor{ .output_path = output, .expected_kind = .one };
+    var executor = Executor{ .home_path = home, .output_path = output, .expected_kind = .one };
     var capture: [32]u8 = undefined;
     var invalid = view(.one, home, output);
     invalid.current_executable = invalid.predecessor_executable;

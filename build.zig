@@ -14454,6 +14454,14 @@ pub fn build(b: *std.Build) void {
         "session-host-release-workflow-bootstrap",
         "Build the protected workflow checkpoint bootstrap executable",
     );
+    const session_host_release_workflow_candidate_inputs_cli_step = b.step(
+        "test-session-host-release-workflow-candidate-inputs-cli",
+        "Validate fresh-process signed candidate input pinning",
+    );
+    const session_host_release_workflow_candidate_inputs_product_step = b.step(
+        "session-host-release-workflow-candidate-inputs",
+        "Build the signed candidate input pinning executable",
+    );
     const session_host_release_adapter_live_workflow_owner_step = b.step(
         "test-session-host-release-adapter-live-workflow-owner",
         "Bind the eight live workflow invocations to durable checkpoints",
@@ -14801,6 +14809,18 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_live_workflow_checkpoint_step.dependOn(&run_workflow_checkpoint_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_checkpoint_tests.step);
 
+            const live_candidate_inputs_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_candidate_inputs.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_identity", .module = identity_mod },
+                    .{ .name = "safe_open", .module = safe_open_mod },
+                },
+            });
             const live_workflow_owner_mod = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_owner.zig"),
                 .target = target,
@@ -14810,6 +14830,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "release_adapter_context", .module = context_mod },
                     .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
                     .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    .{ .name = "release_adapter_live_candidate_inputs", .module = live_candidate_inputs_mod },
                 },
             });
             const live_workflow_owner_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
@@ -15030,6 +15051,81 @@ pub fn build(b: *std.Build) void {
             run_workflow_bootstrap_cli_process.addArtifactArg(workflow_bootstrap_cli_exe);
             run_workflow_bootstrap_cli_process.setCwd(b.path("."));
             session_host_release_workflow_bootstrap_cli_step.dependOn(&run_workflow_bootstrap_cli_process.step);
+            const workflow_candidate_inputs_cli_mod = b.createModule(.{
+                .root_source_file = b.path("tools/session-host/release_workflow_candidate_inputs_cli.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_environment", .module = workflow_checkpoint_environment_mod },
+                    .{ .name = "release_adapter_live_workflow_owner", .module = live_workflow_owner_mod },
+                },
+            });
+            const workflow_candidate_inputs_cli_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_workflow_candidate_inputs_cli.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                    .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
+                    .{ .name = "release_workflow_candidate_inputs_cli", .module = workflow_candidate_inputs_cli_mod },
+                },
+            }) });
+            const run_workflow_candidate_inputs_cli_tests = b.addRunArtifact(workflow_candidate_inputs_cli_tests);
+            run_workflow_candidate_inputs_cli_tests.addArg("--maru-expect-tests=5");
+            run_workflow_candidate_inputs_cli_tests.setCwd(b.path("."));
+            session_host_release_workflow_candidate_inputs_cli_step.dependOn(&run_workflow_candidate_inputs_cli_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_candidate_inputs_cli_tests.step);
+            test_step.dependOn(&run_workflow_candidate_inputs_cli_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_workflow_candidate_inputs_cli_tests.step);
+            const workflow_candidate_inputs_cli_exe = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-release-workflow-candidate-inputs-{s}", .{@tagName(composition_optimize)}),
+                .root_module = workflow_candidate_inputs_cli_mod,
+            });
+            if (composition_optimize == optimize) {
+                session_host_release_workflow_candidate_inputs_product_step.dependOn(
+                    &b.addInstallArtifact(workflow_candidate_inputs_cli_exe, .{
+                        .dest_sub_path = "maru-session-host-release-workflow-candidate-inputs",
+                    }).step,
+                );
+            }
+            const candidate_inputs_report_mod = b.createModule(.{
+                .root_source_file = b.path("tools/session-host/release_workflow_candidate_inputs_process_report.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+            });
+            const candidate_inputs_report_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_workflow_candidate_inputs_process_report.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .imports = &.{.{ .name = "release_workflow_candidate_inputs_process_report", .module = candidate_inputs_report_mod }},
+            }) });
+            const run_candidate_inputs_report_tests = b.addRunArtifact(candidate_inputs_report_tests);
+            run_candidate_inputs_report_tests.addArg("--maru-expect-tests=3");
+            run_candidate_inputs_report_tests.setCwd(b.path("."));
+            session_host_release_workflow_candidate_inputs_cli_step.dependOn(&run_candidate_inputs_report_tests.step);
+            const workflow_candidate_inputs_process = b.addExecutable(.{
+                .name = b.fmt("session-host-release-workflow-candidate-inputs-process-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_release_workflow_candidate_inputs_process.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_live_workflow_checkpoint", .module = workflow_checkpoint_mod },
+                        .{ .name = "release_workflow_candidate_inputs_process_report", .module = candidate_inputs_report_mod },
+                    },
+                }),
+            });
+            const run_workflow_candidate_inputs_process = b.addRunArtifact(workflow_candidate_inputs_process);
+            run_workflow_candidate_inputs_process.addArtifactArg(workflow_bootstrap_cli_exe);
+            run_workflow_candidate_inputs_process.addArtifactArg(workflow_candidate_inputs_cli_exe);
+            run_workflow_candidate_inputs_process.addArg(if (composition_optimize == .ReleaseFast) "20" else "1");
+            run_workflow_candidate_inputs_process.setCwd(b.path("."));
+            session_host_release_workflow_candidate_inputs_cli_step.dependOn(&run_workflow_candidate_inputs_process.step);
             const repository_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
             const release_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const draft_creation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_draft_creation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_release", .module = release_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });

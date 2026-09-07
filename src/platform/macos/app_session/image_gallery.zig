@@ -213,6 +213,12 @@ pub const State = struct {
     /// 보고 있었는데, 목록은 글자가 전부라 안 그려져도 「활동이 없다」로 보인다 — 격자가 빈 것과 달리
     /// 눈에 띄지도 않는다. `overflow` 와 짝이다(그것은 «못 그린 수», 이것은 «그린 수»).
     drawn_rows: usize = 0,
+    /// 마지막 프레임에 그린 **글자 조각 수**(접두 · 본문 · 시각을 각각 하나로 센다).
+    ///
+    /// **`drawn_rows` 만으로는 모자란다.** 줄 수는 접두나 시각이 통째로 사라져도 그대로다 —
+    /// 실제로 목록은 격자가 갖던 접두(D3)와 시각(I3)을 두 번 빠뜨렸고, 고친 뒤에도 **그것을 지키는
+    /// 판정자가 없었다**(적대적 검증 L2). 조각을 세면 그 손실이 값으로 드러난다.
+    drawn_pieces: usize = 0,
     /// 지금 무엇을 보고 있나(활동 뷰 계약 §2.1). **필터가 모양을 정한다** — 이미지는 격자,
     /// 나머지는 줄 목록이다.
     filter: Filter = .images,
@@ -2348,7 +2354,9 @@ pub fn collectActivityList(
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     if (self.image_gallery.filter.isGrid()) {
-        self.image_gallery.drawn_rows = 0; // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다
+        // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다.
+        self.image_gallery.drawn_rows = 0;
+        self.image_gallery.drawn_pieces = 0;
         return;
     }
 
@@ -2368,6 +2376,7 @@ pub fn collectActivityList(
     if (cols == 0 or row_h == 0) {
         self.image_gallery.overflow = win.total;
         self.image_gallery.drawn_rows = 0;
+        self.image_gallery.drawn_pieces = 0;
         return;
     }
 
@@ -2392,6 +2401,7 @@ pub fn collectActivityList(
     const now_off = utcOffsetAt(now_s);
 
     var drawn: usize = 0;
+    var pieces: usize = 0;
     var i = first;
     while (i < last) : (i += 1) {
         if (i >= self.image_gallery.labels.items.len) break;
@@ -2441,6 +2451,7 @@ pub fn collectActivityList(
                 .origin_y = y,
                 .colors = colors,
             } });
+            pieces += 1;
             at_col = @as(u32, split.prefix_cols) +| time_gap_cols;
         }
         if (text.len > 0 and split.label_cols > 0) {
@@ -2450,6 +2461,7 @@ pub fn collectActivityList(
                 .origin_y = y,
                 .colors = colors,
             } });
+            pieces += 1;
         }
         if (split.time_cols > 0 and time_text.len > 0) {
             // 시각은 **오른쪽 끝**에 붙인다(격자 라벨과 같은 자리 규약).
@@ -2460,9 +2472,11 @@ pub fn collectActivityList(
                 .origin_y = y,
                 .colors = colors,
             } });
+            pieces += 1;
         }
     }
     self.image_gallery.drawn_rows = drawn;
+    self.image_gallery.drawn_pieces = pieces;
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.

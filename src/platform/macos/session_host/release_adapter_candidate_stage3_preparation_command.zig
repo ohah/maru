@@ -6,29 +6,14 @@ const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const source_authority = @import("release_adapter_source_directory_authority");
 const zig_authority = @import("release_adapter_zig_toolchain_authority");
 const stage3_product = @import("release_adapter_candidate_stage3_preparation_product");
+const outcome_contract = @import("release_adapter_command_outcome");
 
 pub const Bootstrap = bootstrap_mod.Bootstrap;
 pub const max_scratch_bytes: usize = 64 * 1024;
 
-pub const Outcome = enum { success, local_failure, audit_required, cleanup_failed };
-
-pub fn exitCode(outcome: Outcome) u8 {
-    return switch (outcome) {
-        .success => 0,
-        .local_failure => 20,
-        .audit_required => 21,
-        .cleanup_failed => 22,
-    };
-}
-
-pub fn stderrLine(outcome: Outcome) []const u8 {
-    return switch (outcome) {
-        .success => "success\n",
-        .local_failure => "local_failure\n",
-        .audit_required => "audit_required\n",
-        .cleanup_failed => "cleanup_failed\n",
-    };
-}
+pub const Outcome = outcome_contract.Stage3;
+pub const exitCode = outcome_contract.stage3ExitCode;
+pub const stderrLine = outcome_contract.stage3StderrLine;
 
 const StoredPath = struct {
     len: usize = 0,

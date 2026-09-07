@@ -5,6 +5,7 @@ const checkpoint = @import("release_adapter_live_workflow_checkpoint");
 const context = @import("release_adapter_context");
 const phase = @import("release_adapter_live_workflow_phase");
 const candidate_inputs = @import("release_adapter_live_candidate_inputs");
+const command_process = @import("release_adapter_live_workflow_command_process");
 
 pub const max_bootstrap_token_bytes = checkpoint.max_root_identity_token_bytes;
 
@@ -64,12 +65,13 @@ pub const Executor = struct {
     }
 };
 
-pub const Error = checkpoint.Error || error{
+pub const Error = checkpoint.Error || command_process.Error || error{
     ExecutorBusy,
     InvalidActionResult,
     InvalidExecutor,
     InvalidExternalAction,
     InvalidCandidate,
+    CommandFailed,
 };
 
 pub fn identity(invocation: Invocation) Identity {
@@ -183,6 +185,42 @@ pub fn candidateInputsProcess(
         return error.InvalidCandidate;
     };
     _ = try checkpoint.advance(allocator, &root, .candidate_pinning, .succeeded, workflow);
+}
+
+/// Runs one validator-backed invocation through the same sealed executor and checkpoint owner.
+/// The command name inside the already validated argv is the sole stage selector.
+pub fn commandProcess(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_path: [:0]const u8,
+    root_identity: []const u8,
+    workflow: context.Context,
+    arguments: []const []const u8,
+    execution: *command_process.Execution,
+) Error!void {
+    try command_process.prepareCurrent(io, allocator, workflow, arguments, execution);
+    defer if (execution.owner == execution) execution.deinit() catch {};
+    const invocation: Invocation = switch (execution.selection) {
+        .draft_authoring => .{ .draft_authoring = {} },
+        .aggregate_prepare => .{ .aggregate_prepare = {} },
+        .aggregate_finalize => .{ .aggregate_finalize = {} },
+        .publication => .{ .publication = {} },
+        .aggregate_cleanup => .{ .aggregate_cleanup = {} },
+    };
+    var root: checkpoint.Root = .{};
+    try checkpoint.openRootExpected(&root, root_path, try checkpoint.decodeRootIdentity(root_identity));
+    defer root.deinit() catch {};
+    var executor: Executor = .{};
+    try executor.init(execution, executeCommandProcess);
+    const state = try run(allocator, &root, workflow, invocation, &executor);
+    if (state.outcome != .active and state.outcome != .succeeded) return error.CommandFailed;
+}
+
+fn executeCommandProcess(raw: *anyopaque, selected: Identity) phase.Result {
+    const execution: *command_process.Execution = @ptrCast(@alignCast(raw));
+    if (command_process.stage(execution.selection) != selected.stage or
+        !std.mem.eql(u8, command_process.commandName(execution.selection), selected.name)) return .cleanup_failed;
+    return command_process.run(execution);
 }
 
 const CallContext = struct { executor: *Executor, identity: Identity };

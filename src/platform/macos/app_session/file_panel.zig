@@ -1768,7 +1768,25 @@ fn followRemoteExplorer(self: *AppSession) void {
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = git_ops.remoteScmTarget(self, &dest_buf, &ctl_buf, &cwd_buf) orelse {
-        deactivateRemoteExplorer(self);
+        // ⚠️ **이 null 의 뜻이 둘이다**(RF7 — 계획 §10.18, 사용자 보고 2026-09-07).
+        //
+        // 「활성 터미널이 답했고 그 pane 은 원격이 아니다」면 내리는 것이 맞다. 그런데 활성 Term 이
+        // **터미널이 아니면** 판정은 첫 줄(`term.kind != .terminal`)에서 나가므로, 그 null 은
+        // 「로컬이다」가 아니라 **「물어볼 곳이 없다 = 모른다」**다. 그리고 그 상태는 원격 트리의
+        // **정상 사용 경로**다 — 원격 파일을 열면 미러가 로컬 열기 파이프라인을 타면서 그 pane 의
+        // 활성 Term 이 파일 Term 이 된다(`openFileTermInActivePane`). 내려 버리면 사용자가 방금 연
+        // 원격 파일 옆에서 **트리만 로컬로 되돌아간다**.
+        //
+        // 같은 상황을 로컬 축은 이미 「모르면 직전 값 유지」로(`termCwd` 의 null 계약), SCM 축은
+        // 3-상태로(`RepoTarget.unknown`) 정해 뒀다. 세 축이 같은 규칙을 쓴다.
+        //
+        // **술어를 새로 만들지 않는다** — 「활성 Term 이 터미널인가」는 `term_ops` 가 소유하고
+        // SCM 의 명령 주입(`injectIntoActiveTerminal`)이 같은 것을 쓴다.
+        //
+        // 여기서 나가면 아래의 설치·drain 을 못 지나지만 그 축은 `pumpRemoteWatch` 가 같은 tick 에
+        // 또 소유한다(git.zig — `beginWatchInstall`·`drainWatchInstall`). 원격이 활성인 동안
+        // 감시 채널은 계속 돈다.
+        if (term_ops.activeTermIsTerminal(self)) deactivateRemoteExplorer(self);
         return;
     };
     // 헬퍼 설치(판 3 이 `list` 를 보증한다) — RW 펌프가 그 축의 단일 소유자라 여기서는 **재사용**만
@@ -2714,8 +2732,29 @@ pub fn commitFileTreeCandidate(self: *AppSession, candidate: *file_tree.Tree, ca
     candidate.deinit();
     candidate.* = file_tree.Tree.init(self.allocator);
     advanceFileTreeProjectionGeneration(self);
-    self.file_tree_rows_dirty = false;
+    notePublishedLocalFileTreeRows(self);
     self.file_tree_watch_reset_pending = true;
+}
+
+/// **로컬 모델의 행을 발행했다**는 사실을 적는다 — 발행 목록(`file_tree_rows`)을 `updateFileTree` 의
+/// 발행 단계 **밖에서** 갈아 끼우는 자리는 전부 여기를 지난다(RF7 — 계획 §10.18).
+///
+/// 두 가지를 함께 놓기 때문에 한 자리여야 한다:
+///
+/// ⑴ **발행 출처를 행과 같이 움직인다**(`file_tree_rows_remote = false`). 갈리면 「행은 로컬인데
+///    펜스는 원격」인 창이 생겨 원격 갈래가 로컬 행에 걸린다 — §10.4 ③c 가 막아 둔 창의 반대
+///    방향이고, 키는 언제나 «발행 출처» 다.
+/// ⑵ **원격이 활성이면 재빌드를 예약한 채로 나간다.** 발행의 출처를 정하는 자리는 그 발행 단계
+///    하나이고, 여기서 dirty 를 내리면 그 자리가 다시 안 돌아 **로컬 행이 화면에 남는다.** 원격
+///    트리에서 파일을 열면 RF4 의 미러가 로컬 열기 파이프라인을 타므로 이 자리를 지난다
+///    (사용자 보고 2026-09-07). 커밋이 `updateFileTree` 안에서 일어나면 같은 tick 의 발행 단계가
+///    곧바로 원격 행으로 되돌린다.
+///
+/// **산문으로 두면 새 자리가 반드시 샌다** — 실제로 두 자리였고(트리 커밋·workspace 교체) 그중
+/// 하나만 고친 판이 적대적 검증 1 회차에서 잡혔다.
+pub fn notePublishedLocalFileTreeRows(self: *AppSession) void {
+    self.file_tree_rows_remote = false;
+    self.file_tree_rows_dirty = self.remote_explorer.active;
 }
 
 pub fn advanceFileTreeProjectionGeneration(self: *AppSession) void {

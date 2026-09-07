@@ -80203,6 +80203,118 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
     };
 }
 
+test "원격 탐색기 유지: 파일을 열어도 발행이 원격에 남는다 (RF7)" {
+    // 사용자 보고 2026-09-07 — 계획 §10.18. 원격 트리에서 파일을 누르면 미러가 **로컬 열기
+    // 파이프라인**을 타므로(RF4) 그 pane 의 활성 Term 이 파일 Term 이 된다. 그때 ⑴ follow 가
+    // `remoteScmTarget` 의 null 을 «로컬로 돌아갔다» 로 읽어 모델을 내렸고, ⑵ 커밋 자리가 로컬 행을
+    // 발행한 채 dirty 를 내려 재빌드가 예약되지 않았다 — 화면은 로컬 트리로 되돌아갔다.
+    //
+    // **둘 중 하나만 고치면 여전히 로컬이다**(⑴ 만 고치면 로컬 행이 남고, ⑵ 만 고치면 다음 tick 이
+    // 모델을 내린다). 그래서 이 판정자는 둘을 한 줄로 잇고, ④ 로 가드가 «항상 유지» 로 공허해지지
+    // 않았음을 같은 자리에서 증명한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 원격 root 는 RF3a 판정자와 같은 이유로 **실존하는 /tmp 경로**다(펜스가 뚫리면 로컬 열기가
+    // «정말로» 성공해 판정이 문다).
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/maru-rf7-judge.{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    // 여는 파일은 원격 root **밖**의 로컬 파일이다 — RF4 의 미러가 사는 자리(`~/.cache/maru/
+    // remote-view/…`)와 같은 성질이다(원격 트리를 보는 중에 열리는 로컬 실파일).
+    var mirror_dir_buf: [72]u8 = undefined;
+    const mirror_dir = try std.fmt.bufPrint(&mirror_dir_buf, "/tmp/maru-rf7-mirror.{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, mirror_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, mirror_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, mirror_dir) catch {};
+    var mirror_buf: [96]u8 = undefined;
+    const mirror = try std.fmt.bufPrint(&mirror_buf, "{s}/remote-note.md", .{mirror_dir});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = mirror, .data = "# remote\n" });
+
+    // 원격 스캔 요청은 **판정자가 소비한다** — 펌프가 죽은 소켓으로 실물 ssh 를 띄우지 않게
+    // (ssh 는 `-S` 소켓이 없으면 직접 접속으로 폴백한다 — 테스트가 네트워크를 만지면 안 된다).
+    const drainRemoteScans = struct {
+        fn f(s: *AppSession, alloc: std.mem.Allocator) void {
+            while (s.remote_explorer.tree.takeScanRequest()) |path| alloc.free(path);
+        }
+    }.f;
+
+    // ── ① 원격이 서고 행이 원격으로 발행된다(가시성 게이트 우회는 RF3a 판정자와 같은 이유다).
+    file_panel_ops.applyRemoteExplorerTarget(session, "me@build-box", "/maru-dead-ctl", root);
+    try std.testing.expect(file_panel_ops.explorerRemoteActive(session));
+    drainRemoteScans(session, a);
+    {
+        var ok_result: file_tree_backend.Result = .{
+            .path = try a.dupe(u8, root),
+            .ok = true,
+            .was_remote = true,
+            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @intFromEnum(file_tree.IdentityKind.directory) } },
+            .expected_root_generation = session.remote_explorer.tree.rootGeneration(),
+        };
+        try ok_result.entries.append(a, .{
+            .name = try a.dupe(u8, "over-there.txt"),
+            .kind = .file,
+            .identity = .{ .device = 7, .inode = 43, .kind = @intFromEnum(file_tree.IdentityKind.regular) },
+        });
+        session.file_tree_backend.pushResultForTest(ok_result);
+    }
+    try file_panel_ops.updateFileTree(session);
+    drainRemoteScans(session, a);
+    try std.testing.expect(session.file_tree_rows_remote);
+
+    // ── ② 파일을 연다 — 여기서 **로컬 커밋 자리**(commitFileTreeCandidate)를 지난다.
+    try std.testing.expectEqual(
+        AppSession.FilePanelOpenPathResult.opened,
+        file_panel_ops.openFilePanelPath(session, mirror),
+    );
+    // 발행 출처가 행과 **함께** 움직였고(방금 발행한 것은 로컬 행이다), 원격이 활성이므로 재빌드가
+    // 예약돼 있다. 이 둘이 처방 ⑵ 이고, 여기서 죽으면 화면은 로컬 트리로 남는다.
+    try std.testing.expect(!session.file_tree_rows_remote);
+    try std.testing.expect(session.file_tree_rows_dirty);
+
+    // ── ③ 도크를 탐색기로 세운다 = follow 가 **실제로 돈다**(제품 상태 — 파일을 열면 도크가 펴진다).
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .explorer;
+    try std.testing.expect(dock_ops.dockVisible(session));
+    try std.testing.expect(!term_ops.activeTermIsTerminal(session)); // 활성은 방금 연 파일 Term 이다
+    drainRemoteScans(session, a);
+    try file_panel_ops.updateFileTree(session);
+    drainRemoteScans(session, a);
+    // 처방 ⑴: «모른다» 를 «로컬이다» 로 읽지 않는다 — 원격 모델이 살아 있다.
+    try std.testing.expect(file_panel_ops.explorerRemoteActive(session));
+    // 그리고 화면(발행 목록)이 원격이다 — 사용자가 본 그 징후가 여기서 잡힌다.
+    try std.testing.expect(session.file_tree_rows_remote);
+    switch (session.file_tree_rows.items[0]) {
+        .root => |v| try std.testing.expectEqualStrings(root, v.path),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // ── ④ 활성 Term 을 터미널로 되돌리면 **내려간다.** 이 pane 의 터미널은 로컬이므로 그 null 은
+    //     «확정된 로컬» 이고, 그때까지 유지하면 로컬 pane 위에 원격 트리가 붙박인다.
+    pane_ops.activePane(session).active_term = 0;
+    try std.testing.expect(term_ops.activeTermIsTerminal(session));
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(!file_panel_ops.explorerRemoteActive(session));
+    try std.testing.expect(!session.file_tree_rows_remote);
+}
+
 test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_only · 실패·과대·바쁨은 안내 (RF4)" {
     // 전송 없이 태우는 수직이다 — 워커의 결말(finishRemoteFileOpen)은 제품 드레인 그 자체라
     // test-only 표식 없이 직접 부른다. 전송 실물(BatchMode·argv)은 RS3/RF2b 축 판정자들이 소유한다.

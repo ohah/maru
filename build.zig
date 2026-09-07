@@ -3334,7 +3334,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
-        run_remote_explorer_tests.addArg("--maru-expect-tests=10"); // 이름 있는 7 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+        run_remote_explorer_tests.addArg("--maru-expect-tests=11"); // 이름 있는 8 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
     }
@@ -4036,6 +4036,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_scan_identity_axis_boundary_tests = b.addRunArtifact(scan_identity_axis_boundary_tests);
     run_scan_identity_axis_boundary_tests.setCwd(b.path("."));
+
+    // 도크 트리의 **발행 목록**을 `updateFileTree` 의 발행 단계 밖에서 갈아 끼우는 자리는 출처 기록
+    // (`notePublishedLocalFileTreeRows`)을 반드시 지난다 — 안 지나면 「행은 로컬인데 펜스는 원격」이
+    // 되고 원격을 보는 중에 로컬 트리가 화면에 남는다(2026-09-07 사용자 보고 · RF7).
+    const file_tree_publish_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/file_tree_publish_axis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_file_tree_publish_axis_boundary_tests = b.addRunArtifact(file_tree_publish_axis_boundary_tests);
+    run_file_tree_publish_axis_boundary_tests.setCwd(b.path("."));
 
     // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
     // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
@@ -6214,6 +6227,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
     boundary_step.dependOn(&run_remote_cursor_axis_boundary_tests.step);
     boundary_step.dependOn(&run_scan_identity_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_file_tree_publish_axis_boundary_tests.step);
     boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);

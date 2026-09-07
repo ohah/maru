@@ -44,11 +44,28 @@ for input in dmg-path dmg-name frozen-path frozen-name; do
     test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
     test "$(grep -Fxc "      $input: \${{ inputs.$input }}" "$live_action")" -eq 1
 done
+for input in checkpoint-root checkpoint-root-identity; do
+    test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
+done
 test "$(grep -Fxc "    uses: $payload_action" "$live_action")" -eq 1
 test "$(grep -Fc 'uses: actions/attest@' "$live_action")" -eq 0
-test "$(grep -Fc 'checkpoint' "$live_action")" -eq 0
-test "$(grep -Fxc '    value: ${{ steps.payload.outputs.dmg-bundle-path }}' "$live_action")" -eq 1
-test "$(grep -Fxc '    value: ${{ steps.payload.outputs.frozen-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fc '/zig-out/bin/maru-session-host-release-workflow-checkpoint' "$live_action")" -eq 2
+admit_line=$(grep -nF 'name: Admit candidate attestation checkpoint' "$live_action" | cut -d: -f1)
+live_payload_line=$(grep -nF 'name: Attest candidate pair payload' "$live_action" | cut -d: -f1)
+commit_line=$(grep -nF 'name: Commit candidate attestation checkpoint' "$live_action" | cut -d: -f1)
+test "$admit_line" -lt "$live_payload_line"
+test "$live_payload_line" -lt "$commit_line"
+test "$(grep -Fxc '    continue-on-error: true' "$live_action")" -eq 1
+test "$(grep -Fxc '    if: always()' "$live_action")" -eq 1
+bundle_guard_line=$(grep -nF '[[ -n "$MARU_DMG_BUNDLE"' "$live_action" | cut -d: -f1)
+success_commit_line=$(grep -nF 'candidate_attestation succeeded' "$live_action" | cut -d: -f1)
+output_line=$(grep -nF "printf 'dmg-bundle-path=" "$live_action" | cut -d: -f1)
+test "$bundle_guard_line" -lt "$success_commit_line"
+test "$success_commit_line" -lt "$output_line"
+test "$(grep -Fxc '          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation failed' "$live_action")" -eq 1
+test "$(grep -Fxc '        *) exit 1 ;;' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.dmg-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.frozen-bundle-path }}' "$live_action")" -eq 1
 
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/maru-candidate-attest-action.XXXXXX")
 fixture_root=$(cd "$fixture_root" && pwd -P)

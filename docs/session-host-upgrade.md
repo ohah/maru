@@ -4393,6 +4393,31 @@ timeout/nonzero/foreign capture와 역순 cleanup 가능성을 검증한다.
 PTY 1개와 255개를 만드는 비용은 synthetic fixture로 대체하지 않고, signed N-1/current가 없는 일반 CI에서는 실행하지 않는다.
 이 slice만으로 profile runner, checkpoint·manifest·attestation·draft publication 또는 frozen signed U5 완료를 주장하지 않는다.
 
+### 11.86 upgrade-B production runner와 로컬 monotonic 실측
+
+`release_adapter_candidate_upgrade_runner.zig`의 final-address `Execution`이 §11.84 phase의 유일한 제품 adapter다. 입력은 candidate
+identity/files/product/source, authenticated predecessor identity/manifest/file/download, descriptor-owned upgrade workspace, pinned Zig
+toolchain, held source directory와 하나의 positive budget뿐이다. runner는 predecessor downloaded-set에서 exact frozen-product asset을
+no-follow로 열어 held inode를 소유하고, candidate pinned frozen file의 held fd와 함께 §11.85 실행 사본 owner 둘에 연결한다. caller가
+source fd·mode·SHA·실행 pathname·UUID·kind·output leaf를 다시 제출하는 API는 두지 않는다.
+
+`Execution`은 phase가 시도한 predecessor/current copy, signed-one/signed-near-max leaf와 aggregate owner를 final address에 보존한다.
+실패 cleanup이 전부 끝나면 pristine으로 돌아가고, 하나라도 실패하면 남은 exact owner와 cleanup cursor를 같은 주소에서 retry할 수
+있어야 한다. 성공 후에도 manifest authoring·attestation consumer가 세 evidence leaf를 소비할 때까지 보존하며, 명시 cleanup은
+aggregate→near-max→one→current copy→predecessor copy 순서로 진행한다. borrowed deadline variant는 caller deadline을 소유하거나
+초기화·해제하지 않으며 모든 leaf와 fence가 같은 pointer를 소비한다.
+
+runner는 release evidence와 별도의 `TimingDiagnostic`에 `signed_one_ns`, `signed_near_max_ns`, `phase_ns`를 actual monotonic clock으로
+기록한다. 각 child 값은 bounded child 호출 직전부터 성공 반환 직후까지이고, phase 값은 protected bootstrap/download가 끝나고
+phase 실행을 시작한 직후부터 final authority/deadline fence 성공까지다. 값은 모두 양수이고 `phase_ns >= signed_one_ns +
+signed_near_max_ns`여야 한다. child/phase 실패, clock 역행·overflow 또는 final fence 실패에서는 diagnostic success를 게시하지 않는다.
+이 값은 로컬 실행비용이며 GitHub queue/network timing, release 성공 권위, signed leaf 또는 canonical aggregate 필드가 아니다.
+
+focused Debug·ReleaseFast gate는 concrete authority의 predecessor/current 방향, held inode와 `0400|0600→0500` mode, 두 child의 fixed
+kind/path, 동일 deadline pointer, 모든 phase fail-index, child 실패와 동시 authority drift, timing 양수·ordering·역행, copied/pre-owned/
+alias `Execution`, 성공 보존과 cleanup retry를 검증한다. 이 runner가 green이어도 live checkpoint/profile 배선, attestation·manifest·draft
+publication 및 protected B tag의 실제 signed 실행은 별도 미완료다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

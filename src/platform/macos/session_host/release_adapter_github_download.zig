@@ -144,6 +144,23 @@ pub const DownloadedSet = struct {
         }
     }
 
+    /// Transfers one read-only descriptor for an already authenticated asset to the caller.
+    pub fn openAssetDescriptor(self: *const DownloadedSet, role: manifest.AssetRole) Error!c.fd_t {
+        try self.revalidate();
+        for (self.files[0..self.file_count]) |*record| {
+            if (record.role != role or !record.present) continue;
+            const fd = c.openat(self.dir_fd, record.name[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+            if (fd < 0) return error.FileChanged;
+            errdefer _ = c.close(fd);
+            var observed: posix.Stat = undefined;
+            if (c.fstat(fd, &observed) != 0 or !posix.S.ISREG(observed.mode) or observed.dev != record.device or
+                observed.ino != record.inode or observed.size != record.size or observed.nlink != 1 or observed.mode & 0o777 != 0o400)
+                return error.FileChanged;
+            return fd;
+        }
+        return error.FileChanged;
+    }
+
     pub fn cleanup(self: *DownloadedSet) Error!void {
         if (self.owner != self) return error.CleanupFailed;
         var failed = false;

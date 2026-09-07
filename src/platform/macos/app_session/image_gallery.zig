@@ -574,11 +574,17 @@ pub const Filter = enum {
         return self == .images;
     }
 
+    /// 다음 필터. **순서는 실측이 정한다**(적대적 검증 H5).
+    ///
+    /// 처음에는 표 순서대로 `images → reads → execs → all` 이었는데, 그러면 **첫 Tab 이 거의 항상
+    /// 빈 화면**이다 — 「읽기」로 세어지는 것(`Read`·`view_image`)은 실측 39,645 건 중 **634 건**
+    /// (1.6%)뿐이고 Codex 세션에서는 **0 건**이다. 사용자가 처음 만나는 화면이 비어 있으면 기능이
+    /// 고장난 것으로 읽힌다. 그래서 **가장 많은 것부터** 돈다 — `Bash`/`exec` 가 도구의 92% 다.
     pub fn next(self: Filter) Filter {
         return switch (self) {
-            .images => .reads,
-            .reads => .execs,
-            .execs => .all,
+            .images => .execs,
+            .execs => .reads,
+            .reads => .all,
             .all => .images,
         };
     }
@@ -757,6 +763,9 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 9 초 내내). 못 박는 불변식 자체는 `applyFilter` 가 지킨다 — 훑기 결과는 반드시 거길 지나므로
     // 여기 것은 그 창을 줄이는 몫이다(뮤테이션으로 확인: 이 줄만 지우면 test 는 통과한다).
     self.image_gallery.pendingClear();
+    // **보던 자리도 옛 세션의 것이다.** 오프셋은 픽셀이라 새 목록에서는 아무 뜻이 없고, 남겨 두면
+    // 짧은 목록에서 끝을 넘어 화면이 빈다(적대적 검증 H2). 필터 전환이 같은 이유로 같은 일을 한다.
+    if (!same) self.image_gallery.scroll.offset_y_px = 0;
 
     // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
     // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
@@ -2316,8 +2325,13 @@ pub fn collectActivityList(
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
     // 스크롤은 격자와 같은 값을 쓴다 — 필터를 바꿔도 「어디를 보고 있었나」가 이어진다.
-    const first: usize = @intCast(self.image_gallery.scroll.offset_y_px / row_h);
     const rows_fit: usize = @intCast(area.h / row_h);
+    // **스크롤을 목록 끝 안으로 잡아 둔다.** 오프셋은 픽셀이고 목록 길이는 소스·필터가 정하므로,
+    // 큰 목록에서 굴린 뒤 작은 pane 으로 옮기면 `first` 가 끝을 넘어 **화면이 빈다** — 그때
+    // 안내는 「자리가 없습니다」라고 **틀린 원인**을 말한다(적대적 검증 H2. F1 과 같은 형태다).
+    // 리셋(§`onSourceChanged`)이 의미를 맞추고, 이 clamp 가 **어느 경로로 어긋나도** 화면을 살린다.
+    const max_first = total -| rows_fit;
+    const first: usize = @min(@as(usize, @intCast(self.image_gallery.scroll.offset_y_px / row_h)), max_first);
     const last = @min(first +| rows_fit, total);
     // **자리를 못 얻은 수를 남긴다**(계약 §2 — 「없다」와 「안 보인다」를 가른다).
     self.image_gallery.overflow = total -| (last -| first);
@@ -2345,7 +2359,10 @@ pub fn collectActivityList(
             label.seq,
             label.seq_total,
         );
-        if (text.len == 0 and prefix.len == 0) continue; // 없는 설명을 지어내지 않는다
+        // 없는 설명을 지어내지 않는다. **자리는 지킨다** — `y` 를 `i` 로 계산하므로 못 그린 줄은
+        // 빈 자리로 남는다. 그것이 「뭔가 있었는데 못 그렸다」를 정직하게 보이고, 항목 위치가
+        // 인덱스와 1:1 이라 스크롤·클릭(AV3) 계산이 갈리지 않는다(적대적 검증 H3 의 결정).
+        if (text.len == 0 and prefix.len == 0) continue;
         drawn += 1;
 
         const y = area.y + @as(u32, @intCast((i - first) * row_h));

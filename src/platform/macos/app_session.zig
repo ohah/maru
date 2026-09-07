@@ -11729,15 +11729,6 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
-            // Tab 으로 종류 필터를 순환한다(이미지 → 읽기 → 실행 → 전체, 활동 뷰 계약 §2.1).
-            //
-            // **임시 수단이다.** 계약 §8 이 「필터 UI 의 자리」를 남은 결정으로 들고 있고, 그것이
-            // 정해지기 전까지 이 슬라이스의 결과를 만져 볼 길이 필요하다. 갤러리가 **키를 쥐고
-            // 있을 때만** 가져가므로(`cycleFilter` 안의 `ownsKeys`) 터미널의 Tab 이 사라지지 않는다.
-            if (event.key == .tab and image_gallery_ops.cycleFilter(self)) {
-                self.metal_dirty = true;
-                return input_ops.keyConsumedByApp(self);
-            }
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
         // until the later explicit dock-local action has been published as ready.
@@ -19158,6 +19149,8 @@ pub const AppSession = struct {
                                 } });
                             } else |_| {}
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
+                            // 종류 필터 칩 — 격자든 목록이든 늘 보인다(활동 뷰 계약 §2.1).
+                            image_gallery_ops.collectFilterChips(self, &collected, pane_frame_builder, tabbar_colors);
                             image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
                             // 활동 필터에서는 격자 대신 **줄 목록**이 그 자리를 쓴다(활동 뷰 계약 §2.1).
                             image_gallery_ops.collectActivityList(self, &collected, pane_frame_builder, tabbar_colors);
@@ -77465,6 +77458,135 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
     quietGalleryWorkers(session);
+}
+
+test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져간다 (AV4)" {
+    // **필터를 바꾸는 수단이 화면에 있어야 한다.** `Tab` 은 도크를 한 번 클릭하면 `key_focus` 가
+    // 남아 터미널 자동완성을 뺏었다(적대적 D1) — 칩이 제자리를 잡은 지금은 그 대가를 안 치른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_V\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo hi\",\"description\":\"인사\"}}]}}\n" ++
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]},\"uuid\":\"u\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "v.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/v.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    // ── ① **칩이 화면에 나간다.** 렌더가 죽으면 필터를 바꿀 길도 함께 사라진다.
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 4), session.image_gallery.drawn_chips);
+
+    // ── ② **보이는 칩 = 눌리는 칩.** 자리를 지어내지 않고 `chipSpans` 가 준 자리를 누른다.
+    var buf: [4]image_gallery_ops.ChipSpan = undefined;
+    const spans = image_gallery_ops.chipSpans(session, &buf);
+    try std.testing.expectEqual(@as(usize, 4), spans.len);
+    const rect = image_gallery_ops.chipRowRect(session);
+    const cy: f64 = @floatFromInt(rect.y + rect.h / 2);
+    // **칩 넷을 전부, 그리고 각 칩의 양 끝을 누른다.** 가운데 한 곳만 누르면 히트테스트가 몇 칸
+    // 밀려도 같은 칩 안이라 통과한다 — 실제로 뮤테이션(자리를 3 칸 어긋냄)이 그렇게 빠져나갔다.
+    for (spans) |sp| {
+        const left: f64 = @floatFromInt(rect.x + @as(u32, sp.col) * session.cell_width_px);
+        const right: f64 = @floatFromInt(rect.x + (@as(u32, sp.col) + sp.cols - 1) * session.cell_width_px);
+        for ([_]f64{ left, right }) |px| {
+            session.image_gallery.filter = if (sp.filter == .images) .all else .images; // 반드시 바뀌게
+            try std.testing.expect(image_gallery_ops.handleDown(session, px, cy));
+            try std.testing.expectEqual(sp.filter, session.image_gallery.filter);
+        }
+    }
+
+    // 실행 필터에서 목록이 맞는지 한 번 더 본다(칩이 필터만 바꾸고 목록은 안 따라오면 반쪽이다).
+    image_gallery_ops.setFilter(session, .images);
+    image_gallery_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count()); // Bash 하나
+
+    // ── ③ **Tab 은 이제 터미널 것이다.** 도크가 키를 쥔 상태에서도 갤러리가 안 삼킨다.
+    session.image_gallery.key_focus = true;
+    const before = session.image_gallery.filter;
+    const consumed = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    try std.testing.expectEqual(before, session.image_gallery.filter); // 필터가 안 바뀐다
+    _ = consumed; // 터미널이 가져갔는지는 그쪽 경로의 몫 — 여기서는 **갤러리가 안 바꿨다**만 본다
+
+    // ── ④ 칩 줄의 빈 자리는 삼키되 아무것도 안 바꾼다(뒤 터미널로 새지 않게).
+    const far: f64 = @floatFromInt(rect.x + rect.w - 1);
+    try std.testing.expect(image_gallery_ops.handleDown(session, far, cy));
+    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+
+    quietGalleryWorkers(session);
+}
+
+test "활동 뷰: 도크가 좁으면 고른 칩만 남는다 (AV4)" {
+    // 넷을 우겨넣어 글자를 자르면 무엇을 누르는지 알 수 없다. 「지금 무엇을 보고 있나」는
+    // 마지막까지 지킬 정보이므로 **고른 것 하나**를 남긴다(계약 §2.2.3 과 같은 규율).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    var wide: [4]image_gallery_ops.ChipSpan = undefined;
+    try std.testing.expectEqual(@as(usize, 4), image_gallery_ops.chipSpans(session, &wide).len);
+
+    // 도크를 좁힌다 — 넷은 못 들어가고 고른 것만 남아야 한다(`dock.size` 는 pt 폭이다).
+    session.dock.size = 60;
+    var narrow: [4]image_gallery_ops.ChipSpan = undefined;
+    const got = image_gallery_ops.chipSpans(session, &narrow);
+    try std.testing.expect(got.len <= 1);
+    if (got.len == 1) try std.testing.expectEqual(session.image_gallery.filter, got[0].filter);
 }
 
 test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인한다 (적대적 D4)" {

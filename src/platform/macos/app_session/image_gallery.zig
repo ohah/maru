@@ -219,6 +219,9 @@ pub const State = struct {
     /// 실제로 목록은 격자가 갖던 접두(D3)와 시각(I3)을 두 번 빠뜨렸고, 고친 뒤에도 **그것을 지키는
     /// 판정자가 없었다**(적대적 검증 L2). 조각을 세면 그 손실이 값으로 드러난다.
     drawn_pieces: usize = 0,
+    /// 마지막 프레임에 그린 **칩 수**. 판정자가 「필터 UI 가 실제로 나갔나」를 값으로 본다 —
+    /// `drawn_rows`·`drawn_pieces` 와 같은 역할이다(렌더가 죽어도 CI 가 모르는 것을 막는다).
+    drawn_chips: usize = 0,
     /// 지금 무엇을 보고 있나(활동 뷰 계약 §2.1). **필터가 모양을 정한다** — 이미지는 격자,
     /// 나머지는 줄 목록이다.
     filter: Filter = .images,
@@ -612,6 +615,54 @@ pub const Open = struct {
         return self.context[0..self.context_len];
     }
 };
+
+/// 칩 하나의 자리(칸 단위). **그리기와 히트테스트가 같은 함수를 쓴다** — 두 벌이면 「보이는 칩」과
+/// 「눌리는 칩」이 갈린다(이 저장소가 반복해서 당한 형태).
+pub const ChipSpan = struct { filter: Filter, col: u16, cols: u16 };
+
+/// 칩 넷을 왼쪽부터 놓는다. **폭이 모자라면 고른 것 하나만 남긴다** — 넷을 우겨넣어 글자를 자르면
+/// 무엇을 누르는지 알 수 없고, 「지금 무엇을 보고 있나」는 마지막까지 지켜야 할 정보다
+/// (계약 §2.2.3 의 「좁아지면 시각부터 버린다」와 같은 규율).
+pub fn chipSpans(self: *const AppSession, out: *[4]ChipSpan) []const ChipSpan {
+    const order = [_]Filter{ .images, .execs, .reads, .all };
+    const rect = chipRowRect(self);
+    const cols: u16 = if (self.cell_width_px > 0)
+        @intCast(@min(rect.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))))
+    else
+        0;
+    if (cols == 0) return out[0..0];
+
+    var want: u16 = 0;
+    for (order, 0..) |f, i| {
+        if (i > 0) want +|= chip_gap_cols;
+        want +|= displayColsOf(filterText(f));
+    }
+    if (want <= cols) {
+        var col: u16 = 0;
+        for (order, 0..) |f, i| {
+            const w = displayColsOf(filterText(f));
+            out[i] = .{ .filter = f, .col = col, .cols = w };
+            col +|= w +| chip_gap_cols;
+        }
+        return out[0..order.len];
+    }
+
+    // 좁다 — 고른 것 하나만. 그것도 안 들어가면 아무것도 안 그린다(잘린 글자를 남기지 않는다).
+    const cur = self.image_gallery.filter;
+    const w = displayColsOf(filterText(cur));
+    if (w > cols) return out[0..0];
+    out[0] = .{ .filter = cur, .col = 0, .cols = w };
+    return out[0..1];
+}
+
+fn filterText(f: Filter) []const u8 {
+    return switch (f) {
+        .images => maru.i18n.t(.image_gallery_filter_images),
+        .execs => maru.i18n.t(.image_gallery_filter_execs),
+        .reads => maru.i18n.t(.image_gallery_filter_reads),
+        .all => maru.i18n.t(.image_gallery_filter_all),
+    };
+}
 
 /// 종류 필터(활동 뷰 계약 §2.1). 순서가 곧 순환 순서다.
 ///
@@ -1322,15 +1373,10 @@ pub fn navigateOpen(self: *AppSession, delta: i32) bool {
 ///
 /// **갤러리가 키를 쥐고 있을 때만** 가져간다(`ownsKeys`). 검색 중에는 물러난다(그때 Tab 은 검색창 것).
 ///
-/// ⚠️ **그 게이트로도 터미널 Tab 을 뺏는다 — 알고 두는 것이다.** `key_focus` 는 도크를 한 번 클릭하면
-/// 켜진 채 남으므로, 그 뒤 터미널에 글자를 쳐도(문자는 터미널로 간다) **Tab 만 여기로 온다**.
-/// 사용자에게는 자동완성이 죽은 것으로 보인다. ←→(`navigateOpen`)는 이 위험 때문에 「크게 보기가
-/// 열렸을 때만」으로 좁혀 두었지만, 필터 전환은 크게 보기와 무관해서 같은 좁힘을 쓸 수 없다.
-///
-/// **사용자가 감수하기로 했다(2026-09-07).** 적대적 검증 D1 이 이 결함을 짚었고, 대안(안내 줄 클릭 ·
-/// `Cmd` 조합 · 아예 빼기)을 제시했으나 「뺏겨도 된다」는 결정이 나왔다. 그러니 이것은 **못 본 결함이
-/// 아니라 고른 트레이드오프**다 — 되돌리기 전에 그 결정부터 확인할 것. 제대로 된 필터 UI 는 AV4 다
-/// (계약 §8 「필터 UI 의 자리」).
+/// **키 라우팅에서는 빠졌다(AV4).** 이 함수는 이제 칩(`setFilter`)과 판정자만 부른다 — `Tab` 은
+/// 도크를 한 번 클릭하면 `key_focus` 가 남아 **터미널 자동완성을 뺏었고**(적대적 검증 D1), 제대로 된
+/// 자리(칩)가 생긴 지금은 그 대가를 치를 이유가 없다. 순환 자체는 남겨 둔다 — 나중에 키바인딩을
+/// 다시 준다면 그때 쓰는 것이 이 함수이고, 판정자도 「네 자리를 다 돈다」를 여기로 시험한다.
 pub fn cycleFilter(self: *AppSession) bool {
     if (!ownsKeys(self)) return false;
     if (self.image_gallery.search_active) return false;
@@ -1636,6 +1682,9 @@ pub fn clearHover(self: *AppSession) bool {
 /// 이미지 위는 아직 아무 일도 하지 않는다(팬은 IG4-c).
 pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return false;
+    // **칩이 먼저다.** 칩 줄은 격자 영역(`gridArea`) 밖이지만, 순서를 뒤에 두면 나중에 자리가
+    // 겹치도록 바뀌었을 때 조용히 격자가 이긴다.
+    if (handleChipDown(self, x_px, y_px)) return true;
     const gx = gridArea(self);
     if (x_px < @as(f64, @floatFromInt(gx.x)) or y_px < @as(f64, @floatFromInt(gx.y))) return false;
     if (x_px >= @as(f64, @floatFromInt(gx.x +| gx.w)) or y_px >= @as(f64, @floatFromInt(gx.y +| gx.h))) return false;
@@ -1706,14 +1755,43 @@ fn labelFor(self: *const AppSession, hit_index: usize) context.Label {
 ///
 /// **「문구가 보일 때만 비운다」로 하지 않는다.** 그러면 비우는 순간 용량이 줄어 `overflow` 가 커지고,
 /// 그 값이 다시 문구를 띄우는 되먹임이 된다 — 한 프레임 안에서 배치의 답이 두 개가 된다.
-pub fn gridArea(self: *const AppSession) image_grid.Rect {
+/// 칩 줄의 높이(px). 글자 한 줄에 위아래 여백을 둔다 — 눌러야 하는 것이라 글자에 딱 붙이면
+/// 손가락이 자주 빗나간다.
+pub fn chipRowHeightPx(self: *const AppSession) u32 {
+    const cell: u32 = if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
+    return cell +| chip_row_padding_px;
+}
+
+const chip_row_padding_px: u32 = 6;
+/// 칩 사이 간격(칸). 붙여 두면 어디까지가 한 칩인지 안 보인다.
+const chip_gap_cols: u16 = 2;
+
+/// 종류 필터 칩이 놓이는 줄 — 안내 줄 **아래**, 목록/격자 **위**다.
+///
+/// **왜 전용 줄인가.** 안내 줄은 검색 중에는 검색창이 되고(`searchOwnsInput`) 그때 글자가 줄
+/// 전체를 쓴다. 같은 줄에 칩을 얹으면 검색을 켜는 순간 필터가 사라지거나 글자를 밀어낸다 —
+/// 「지금 무엇을 보고 있나」는 검색 중에도 보여야 하는 정보다(계약 §2.1).
+pub fn chipRowRect(self: *const AppSession) image_grid.Rect {
     const g = dock_ops.dockGeometry(self);
     const notice_h: u32 = if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
     return .{
         .x = g.tree_content.x,
         .y = g.tree_content.y +| notice_h,
         .w = g.tree_content.w,
-        .h = g.tree_content.h -| notice_h,
+        .h = @min(chipRowHeightPx(self), g.tree_content.h -| notice_h),
+    };
+}
+
+pub fn gridArea(self: *const AppSession) image_grid.Rect {
+    const g = dock_ops.dockGeometry(self);
+    const notice_h: u32 = if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
+    // **칩 줄도 자리를 받는다.** 안 빼면 첫 항목이 칩 위에 겹쳐 그려진다.
+    const taken = notice_h +| chipRowHeightPx(self);
+    return .{
+        .x = g.tree_content.x,
+        .y = g.tree_content.y +| taken,
+        .w = g.tree_content.w,
+        .h = g.tree_content.h -| taken,
     };
 }
 
@@ -2462,6 +2540,100 @@ pub fn listWindow(self: *const AppSession) ListWindow {
         .cols = cols,
         .row_h = row_h,
     };
+}
+
+/// 종류 필터 칩을 그린다(계약 §2.1). **격자든 목록이든 늘 보인다** — 「지금 무엇을 보고 있나」는
+/// 모양과 무관한 정보이고, 사라지면 사용자가 필터를 바꿀 길도 함께 사라진다.
+///
+/// 고른 칩은 **또렷하게**, 나머지는 흐리게 그린다. 배경 사각형을 깔지 않는 이유는 도크가 좁을 때
+/// 글자 자리를 그만큼 먹기 때문이고, 밝기 차이만으로도 「지금 이것」이 읽힌다(격자 라벨의 접두·시각이
+/// 같은 규율을 쓴다).
+pub fn collectFilterChips(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    // 크게 보기는 도크를 덮는다 — 그 위에 칩을 그리면 그림 위에 글자가 뜬다.
+    if (self.image_gallery.open != null) return;
+
+    const rect = chipRowRect(self);
+    if (rect.h == 0) return;
+    var buf: [4]ChipSpan = undefined;
+    const spans = chipSpans(self, &buf);
+    if (spans.len == 0) return;
+
+    const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        time_dim_percent,
+    ) };
+    // 칩 글자를 줄 가운데에 둔다 — 위아래 여백을 반씩 나눈다.
+    const y = rect.y +| (chip_row_padding_px / 2);
+
+    var drawn: usize = 0;
+    for (spans) |span| {
+        const text = filterText(span.filter);
+        const color = if (span.filter == self.image_gallery.filter) fg else dim;
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, span.cols, text, color) catch continue;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = rect.x +| (@as(u32, span.col) *| self.cell_width_px),
+            .origin_y = y,
+            .colors = colors,
+        } });
+        drawn += 1;
+    }
+    self.image_gallery.drawn_chips = drawn;
+}
+
+/// 칩 줄을 눌렀나. 눌렀으면 그 필터로 바꾸고 `true`.
+///
+/// **자리는 `chipSpans` 가 정한다** — 그리기와 같은 함수라 「보이는 칩」과 「눌리는 칩」이 갈리지
+/// 않는다. 좁아서 칩이 하나뿐일 때는 그것을 눌러도 아무 일도 안 한다(이미 고른 것이다).
+pub fn handleChipDown(self: *AppSession, x_px: f64, y_px: f64) bool {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return false;
+    if (self.image_gallery.open != null) return false;
+    const rect = chipRowRect(self);
+    if (rect.h == 0) return false;
+    if (y_px < @as(f64, @floatFromInt(rect.y)) or y_px >= @as(f64, @floatFromInt(rect.y +| rect.h))) return false;
+    if (x_px < @as(f64, @floatFromInt(rect.x))) return false;
+
+    var buf: [4]ChipSpan = undefined;
+    const spans = chipSpans(self, &buf);
+    if (spans.len == 0) return false;
+    if (self.cell_width_px == 0) return false;
+
+    const rel = @as(u32, @intFromFloat(@max(0, x_px))) -| rect.x;
+    const col: u32 = rel / self.cell_width_px;
+    for (spans) |span| {
+        if (col >= span.col and col < @as(u32, span.col) +| span.cols) {
+            setFilter(self, span.filter);
+            return true;
+        }
+    }
+    // 칩 줄 안이지만 빈 자리다 — 도크를 눌렀다는 사실만 받고 삼킨다(뒤 터미널로 새지 않게).
+    self.image_gallery.key_focus = true;
+    return true;
+}
+
+/// 종류 필터를 **그것으로** 바꾼다. 같은 것이면 아무 일도 안 한다.
+///
+/// `cycleFilter` 와 같은 뒷정리를 한다 — 크게 보기를 닫고, 보던 자리·얹힌 칸·넘친 수를 되돌린다.
+/// 두 입구가 다른 정리를 하면 「Tab 으로 바꿨을 때와 눌러서 바꿨을 때가 다르다」가 된다.
+pub fn setFilter(self: *AppSession, want: Filter) void {
+    if (self.image_gallery.filter == want) return;
+    closeOpen(self);
+    self.image_gallery.filter = want;
+    self.image_gallery.scroll.offset_y_px = 0;
+    self.image_gallery.hovered = null;
+    self.image_gallery.overflow = 0;
+    rebuildFilter(self);
+    self.image_gallery.key_focus = true; // 도크를 눌렀다 = 키보드도 도크로
+    self.metal_dirty = true;
 }
 
 /// 활동을 **줄 목록**으로 그린다(활동 뷰 계약 §2.1·§2.2).

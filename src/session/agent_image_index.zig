@@ -155,6 +155,11 @@ pub const ResultSummary = struct {
     failed: bool = false,
     /// 결과 텍스트의 줄 수(개행 + 1). 실측 Claude 중앙 5 · p99 82 · 최대 747.
     lines: u32 = 0,
+    /// 결과 **본문의 첫 바이트**(파일 절대). 펼침(AV3)이 그 자리부터 다시 읽는다.
+    ///
+    /// **바이트를 안 담는다** — 결과는 최대 2.8 MB 이고 세션당 12,200 개다. 자리만 들고 있다가
+    /// 펼칠 때 그 구간만 읽는 것이 계약 §2.4 의 규율이다(라벨·이미지와 같은 결).
+    body_offset: u64 = 0,
 };
 
 /// 같은 메시지(= 같은 줄)에 붙은 여러 장 중 **몇 번째**인가(§2.2).
@@ -695,7 +700,7 @@ fn timestampKeyRel(line: []const u8, from: usize, window: usize) u32 {
 ///
 /// **호출 마커와 안 겹친다**: Codex 출력 마커는 `_output"` 까지 포함하고, Claude 결과는
 /// `"type":"tool_result"` 다. 그래서 같은 줄이 호출이자 결과로 읽히지 않는다.
-pub fn scanResultLine(line: []const u8) ?ResultRecord {
+pub fn scanResultLine(line: []const u8, line_offset: u64) ?ResultRecord {
     if (line.len == 0 or line.len > max_line_bytes) return null;
     // compacted 는 이전 대화를 통째로 재수록한다 — 그 안의 결과를 세면 **지나간 호출**에 엉뚱한 결말이
     // 붙는다(이미지 패스가 같은 이유로 이 줄을 통째로 건너뛴다).
@@ -714,6 +719,7 @@ pub fn scanResultLine(line: []const u8) ?ResultRecord {
                 // **provider 가 적은 것만** 믿는다(계약 §2.3) — 실측 714/40,424 가 이 필드를 든다.
                 .failed = errorFlagAfter(line, body.end),
                 .lines = body.lines,
+                .body_offset = line_offset + body.start,
             },
         };
     }
@@ -727,6 +733,7 @@ pub fn scanResultLine(line: []const u8) ?ResultRecord {
             .found = true,
             .failed = codexFailed(line, body.first),
             .lines = body.lines,
+            .body_offset = line_offset + body.start,
         } };
     }
     return null;
@@ -734,6 +741,8 @@ pub fn scanResultLine(line: []const u8) ?ResultRecord {
 
 /// 결과 본문의 **줄 수**와 **첫 줄의 자리**.
 const Body = struct {
+    /// 값의 **첫 바이트**(줄 안 상대). 펼침이 파일에서 그 자리부터 읽는다.
+    start: usize = 0,
     /// 본문을 **실제로 찾았나**. 못 찾았으면 줄 수를 모르는 것이고, 그때 화면은 요약을 안 그린다 —
     /// 「모른다」를 `0줄` 로 적지 않는다(빈 결과의 0 줄과는 다른 사실이다).
     parsed: bool = false,
@@ -767,6 +776,7 @@ fn claudeBody(line: []const u8, from: usize) Body {
             // **여는 따옴표 다음**부터가 값이다. 빈 값(`""`)은 길이 0 이라 `spanLines` 가 0 줄로 답한다.
             const span = escapedSpanFrom(line, v + 1) orelse return .{};
             return .{
+                .start = span.start,
                 .parsed = true,
                 .lines = spanLines(line, span),
                 .first = firstLineSpan(line, span),
@@ -778,6 +788,7 @@ fn claudeBody(line: []const u8, from: usize) Body {
         '[' => {
             const span = findEscapedValueFull(line, v, text_key) orelse return .{};
             return .{
+                .start = span.start,
                 .parsed = true,
                 .lines = spanLines(line, span),
                 .first = firstLineSpan(line, span),
@@ -802,11 +813,11 @@ fn codexBody(line: []const u8, from: usize) Body {
         // 빈 문자열 `""` 은 **0 줄**이다(「없다」와 「한 줄」을 가른다).
         // 빈 값은 **0 줄이라는 사실**이다 — 「모른다」가 아니다.
         '"' => blk: {
-            if (v + 1 < line.len and line[v + 1] == '"') return .{ .parsed = true, .end = v + 2 };
+            if (v + 1 < line.len and line[v + 1] == '"') return .{ .start = v + 1, .parsed = true, .end = v + 2 };
             break :blk line[v + 1 ..];
         },
         '[' => blk: {
-            if (v + 1 < line.len and line[v + 1] == ']') return .{ .parsed = true, .end = v + 2 };
+            if (v + 1 < line.len and line[v + 1] == ']') return .{ .start = v + 1, .parsed = true, .end = v + 2 };
             break :blk line[v + 1 ..];
         },
         else => return .{},
@@ -815,7 +826,9 @@ fn codexBody(line: []const u8, from: usize) Body {
         firstLineSpanIn(line, (v + 1) + t + text_key.len)
     else
         firstLineSpanIn(line, v + 1);
-    return .{ .parsed = true, .lines = countEscapedNewlines(rest) +| 1, .first = first };
+    // 배열이면 첫 원소의 `"text":"` 값부터가 본문이다 — 펼침이 그 자리부터 읽는다.
+    const body_start = if (std.mem.indexOf(u8, rest, text_key)) |t| (v + 1) + t + text_key.len else v + 1;
+    return .{ .start = body_start, .parsed = true, .lines = countEscapedNewlines(rest) +| 1, .first = first };
 }
 
 /// 값 하나의 줄 수 = 이스케이프된 개행 + 1. 빈 값은 0 줄이다(「없다」와 「한 줄」을 가른다).
@@ -1143,11 +1156,11 @@ pub const StreamScanner = struct {
     ///
     /// **줄 수로 창을 고정하지 않는다** — Codex 는 사이에 `reasoning` 이 끼어 최대 48 줄 뒤다. 대신
     /// 기다리는 호출의 **개수**로 유계다(`max_pending_calls`).
-    fn linkResult(self: *StreamScanner, line: []const u8, out: *std.ArrayList(Hit)) void {
+    fn linkResult(self: *StreamScanner, line: []const u8, line_offset: u64, out: *std.ArrayList(Hit)) void {
         // **기다리는 호출이 없으면 결과를 볼 이유가 없다.** 결과 탐색은 줄마다 도는 일이라, 이 한 줄이
         // 상한에 걸린 큰 파일에서 그 비용을 통째로 없앤다.
         if (self.pending_live == 0) return;
-        const rec = scanResultLine(line) orelse return;
+        const rec = scanResultLine(line, line_offset) orelse return;
         const id = line[rec.id.start .. rec.id.start + rec.id.len];
         const idx = self.takePending(id) orelse return;
         if (idx < out.items.len) out.items[idx].result = rec.summary;
@@ -1258,7 +1271,7 @@ pub const StreamScanner = struct {
                 if (!skip) {
                     // **결과를 먼저, 호출을 나중에.** 한 줄이 둘 다일 수는 없지만(마커가 배타적이다),
                     // 순서를 이렇게 두면 「자기 자신에게 결말을 붙이는」 경로가 원리적으로 없다.
-                    self.linkResult(line, out);
+                    self.linkResult(line, base + used, out);
                     try self.noteCalls(allocator, line, out, added_from);
                 }
             } else {
@@ -2617,4 +2630,40 @@ test "활동 시각: 없으면 0 이다 — 지어내지 않는다 (AV2b)" {
     try scanLine(allocator, line, 0, &out);
     try testing.expectEqual(@as(usize, 1), out.items.len);
     try testing.expectEqual(@as(u32, 0), out.items[0].time_rel);
+}
+
+test "활동 결말: 본문의 자리를 든다 — 펼침이 그 바이트를 다시 읽는다 (AV3)" {
+    // 계약 §2.4: 「자리(offset)만 들고 있다가 펼칠 때 그 구간만 읽는다」. 바이트를 담으면 세션당
+    // 12,200 개 × 최대 2.8 MB 다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_OFF","type":"custom_tool_call","name":"exec","input":"ls"}}
+        \\{"payload":{"call_id":"call_OFF","type":"custom_tool_call_output","output":"first\nsecond"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const r = out.items[0].result;
+    try testing.expect(r.found);
+    // 그 자리에서 시작하는 바이트가 **본문의 첫 글자**여야 한다(파일 절대 오프셋이다).
+    try testing.expect(r.body_offset > 0);
+    try testing.expectEqualStrings("first", doc[r.body_offset..][0..5]);
+}
+
+test "활동 결말: Claude 본문 자리도 값의 첫 바이트다 (AV3)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_0F","name":"Bash","input":{"command":"ls","description":"목록"}}]}}
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_0F","content":"alpha\nbeta"}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const r = out.items[0].result;
+    try testing.expect(r.found);
+    try testing.expectEqualStrings("alpha", doc[r.body_offset..][0..5]);
 }

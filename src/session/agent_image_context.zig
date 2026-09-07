@@ -118,6 +118,71 @@ pub fn activityLabel(raw: []const u8, is_path: bool) Label {
     return out;
 }
 
+/// 펼침(AV3)이 그리는 **여러 줄 그대로의 본문**. 라벨과 달리 줄바꿈을 접지 않는다.
+pub const Block = struct {
+    /// `out` 에 쓴 바이트.
+    len: usize = 0,
+    /// 상한에 걸려 **뒤가 잘렸다**. 화면은 그 사실을 말한다(계약 §2.4 — 「이하 생략」).
+    truncated: bool = false,
+};
+
+/// JSON 문자열 값의 바이트를 **여러 줄 그대로** 푼다(활동 뷰 계약 §2.4).
+///
+/// 라벨(`writeText`)과 갈리는 지점이 셋이다:
+///
+/// ⑴ **줄바꿈을 살린다.** 라벨은 한 줄에 접어야 하니 `\n` 을 공백으로 바꾸지만, 펼침의 값어치는
+///    「그때 받은 것 그대로」다(계약 §2.4) — 접으면 diff 도 로그도 못 읽는다.
+/// ⑵ **값의 끝에서 멈춘다.** 호출자가 파일에서 창 하나를 읽어 주므로 그 창에는 값 뒤의 JSON 이
+///    섞여 있다. 이스케이프 안 된 `"` 가 곧 끝이다.
+/// ⑶ **상한에서 자르되 글자를 쪼개지 않는다.** 반쪽 UTF-8 은 렌더러가 깨진 글자를 그린다.
+///
+/// 제어문자는 버린다(`\u001b` 같은 것). 터미널이 아니라 chrome 텍스트라 그대로 실으면 글자가 아니라
+/// 쓰레기가 된다 — 라벨이 같은 이유로 같은 선택을 한다.
+pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) {
+        var cp_buf: [4]u8 = undefined;
+        var chunk: []const u8 = undefined;
+        if (raw[i] == '"') break; // 이스케이프 안 된 따옴표 = 값의 끝
+        if (raw[i] == '\\' and i + 1 < raw.len) {
+            const c = raw[i + 1];
+            i += 2;
+            switch (c) {
+                // **줄바꿈·탭은 살린다** — 여기가 라벨과 갈리는 자리다.
+                'n' => chunk = "\n",
+                't' => chunk = "\t",
+                'r', 'b', 'f' => continue, // 화면에 뜻이 없다
+                'u' => {
+                    const cp = parseHex4(raw, i) orelse continue;
+                    i += 4;
+                    if (cp < 0x20) continue; // 제어문자는 버린다
+                    const n = std.unicode.utf8Encode(@intCast(cp), &cp_buf) catch continue;
+                    chunk = cp_buf[0..n];
+                },
+                else => {
+                    cp_buf[0] = c;
+                    chunk = cp_buf[0..1];
+                },
+            }
+        } else {
+            const n = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
+                i += 1;
+                continue; // 손상된 바이트는 버린다
+            };
+            if (i + n > raw.len) break;
+            chunk = raw[i .. i + n];
+            i += n;
+            if (chunk.len == 1 and chunk[0] < 0x20 and chunk[0] != '\n' and chunk[0] != '\t') continue;
+        }
+        // **글자 단위로만 쓴다.** 남는 자리가 이 글자보다 작으면 아예 안 쓰고 잘렸다고 말한다.
+        if (w + chunk.len > out.len) return .{ .len = w, .truncated = true };
+        @memcpy(out[w..][0..chunk.len], chunk);
+        w += chunk.len;
+    }
+    return .{ .len = w, .truncated = false };
+}
+
 pub fn matches(label_text: []const u8, query: []const u8) bool {
     if (query.len == 0) return true;
     if (label_text.len < query.len) return false;
@@ -1017,5 +1082,44 @@ test "활동 줄 자리: 좁아지면 시각부터, 그다음 요약, 대상은 
         try testing.expectEqual(@as(u16, 0), s.summary_cols);
         try testing.expectEqual(@as(u16, 0), s.time_cols);
         try testing.expectEqual(@as(u16, 20), s.label_cols);
+    }
+}
+
+test "펼침 본문: 줄바꿈을 살리고, 값의 끝에서 멈추고, 제어문자를 버린다 (AV3)" {
+    // 라벨(`writeText`)과 갈리는 세 지점을 한 자리에서 못박는다 — 접으면 diff 도 로그도 못 읽는다.
+    var buf: [64]u8 = undefined;
+    {
+        // ⑴ 줄바꿈·탭은 살아 있고, ⑵ 이스케이프 안 된 따옴표에서 멈춘다(그 뒤는 JSON 이다).
+        const b = unescapeBlock(&buf, "a\\nb\\tc\",\"call_id\":\"x\"");
+        try testing.expectEqualStrings("a\nb\tc", buf[0..b.len]);
+        try testing.expect(!b.truncated);
+    }
+    {
+        // ⑶ 이스케이프된 따옴표는 값의 일부다 — 거기서 멈추면 안 된다.
+        const b = unescapeBlock(&buf, "say \\\"hi\\\" now\"");
+        try testing.expectEqualStrings("say \"hi\" now", buf[0..b.len]);
+    }
+    {
+        // 제어문자는 버린다 — chrome 텍스트라 그대로 실으면 쓰레기가 된다.
+        const b = unescapeBlock(&buf, "A\\u001bB\\u0000C\"");
+        try testing.expectEqualStrings("ABC", buf[0..b.len]);
+    }
+}
+
+test "펼침 본문: 상한에서 자르되 글자를 쪼개지 않는다 (AV3)" {
+    // 계약 §2.4 의 완료 조건 그대로 — 반쪽 UTF-8 이 남으면 렌더러가 깨진 글자를 그린다.
+    {
+        var buf: [7]u8 = undefined; // 「한」 3 B × 2 = 6 B 까지만 들어간다
+        const b = unescapeBlock(&buf, "한글한글\"");
+        try testing.expectEqualStrings("한글", buf[0..b.len]);
+        try testing.expectEqual(@as(usize, 6), b.len); // 7 번째 바이트는 **안 쓴다**
+        try testing.expect(b.truncated); // 그리고 잘렸다고 말한다
+    }
+    {
+        // 딱 맞으면 잘리지 않았다고 말한다(경계에서 «잘렸다» 를 지어내지 않는다).
+        var buf: [6]u8 = undefined;
+        const b = unescapeBlock(&buf, "한글\"");
+        try testing.expectEqual(@as(usize, 6), b.len);
+        try testing.expect(!b.truncated);
     }
 }

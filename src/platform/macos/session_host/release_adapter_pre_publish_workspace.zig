@@ -24,6 +24,15 @@ pub const BaselineChild = enum {
     baseline_evidence,
 };
 
+pub const UpgradeChild = enum {
+    signed_one_home,
+    signed_near_max_home,
+    predecessor_executable,
+    signed_one_leaf,
+    signed_near_max_leaf,
+    evidence,
+};
+
 pub const Error = error{
     InvalidOwner,
     InvalidPath,
@@ -53,6 +62,10 @@ pub const Workspace = struct {
 
     pub fn baselineChildPath(self: *@This(), child: BaselineChild, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
         return self.childPathFor(baselineChildName(child), output);
+    }
+
+    pub fn upgradeChildPath(self: *@This(), child: UpgradeChild, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
+        return self.childPathFor(upgradeChildName(child), output);
     }
 
     fn childPathFor(self: *@This(), name: [:0]const u8, output: *[std.fs.max_path_bytes:0]u8) Error![:0]const u8 {
@@ -248,6 +261,17 @@ fn baselineChildName(child: BaselineChild) [:0]const u8 {
         .baseline_default_false_leaf => "default-false.json",
         .baseline_signed_app_quit_leaf => "signed-app-quit.json",
         .baseline_evidence => "baseline-evidence.json",
+    };
+}
+
+fn upgradeChildName(child: UpgradeChild) [:0]const u8 {
+    return switch (child) {
+        .signed_one_home => "signed-one",
+        .signed_near_max_home => "signed-near-max",
+        .predecessor_executable => "predecessor-executable",
+        .signed_one_leaf => "signed-one.json",
+        .signed_near_max_leaf => "signed-near-max.json",
+        .evidence => "upgrade-evidence.json",
     };
 }
 

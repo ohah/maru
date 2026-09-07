@@ -14,7 +14,39 @@ const workspace_mod = @import("release_adapter_pre_publish_workspace");
 const predecessor_input = @import("release_adapter_github_predecessor_manifest_input");
 
 pub const Downloaded = download_mod.Observed;
-pub const ProfileManifestInput = predecessor_input.PredecessorManifestInput;
+pub const ProfileManifestInput = struct {
+    owner: ?*@This() = null,
+    input: predecessor_input.PredecessorManifestInput = .{},
+
+    pub const View = struct {
+        manifest: *const manifest.Manifest,
+        authenticated: *const authenticated_mod.AuthenticatedManifest,
+        file: *const file_mod.ManifestFile,
+    };
+
+    pub fn view(self: *const @This()) ?View {
+        if (self.owner != self) return null;
+        const parsed_manifest = self.input.value() orelse return null;
+        return .{ .manifest = parsed_manifest, .authenticated = &self.input.authenticated, .file = &self.input.file };
+    }
+
+    pub fn value(self: *const @This()) ?*const manifest.Manifest {
+        const current = self.view() orelse return null;
+        return current.manifest;
+    }
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) !void {
+        if (self.owner != self) return error.InvalidOwner;
+        self.input.deinit(allocator) catch return error.CleanupFailed;
+        self.* = .{};
+    }
+
+    fn pristine(self: *const @This()) bool {
+        return self.owner == null and self.input.owner == null and self.input.file.owner == null and
+            self.input.authenticated.owner == null and self.input.authenticated.parsed == null and
+            self.input.authenticated.observed == null;
+    }
+};
 pub const Cli = struct { path: [:0]const u8, pinned: *const cli_authority.PinnedExecutable };
 
 const Snapshot = struct {
@@ -134,8 +166,7 @@ pub fn authenticateUntilWith(
     result: *ProfileManifestInput,
 ) !void {
     try validateDisjoint(profile, workspace, executable, token, download_output, attestation_output, deadline, result);
-    if (result.owner != null or result.file.owner != null or result.authenticated.owner != null or
-        result.authenticated.parsed != null or result.authenticated.observed != null) return error.InvalidOwner;
+    if (!result.pristine()) return error.InvalidOwner;
     const initial = try profile.predecessor();
     var snapshot = try Snapshot.init(initial);
     if (overlaps(std.mem.asBytes(&snapshot), profile.storage()) or overlaps(std.mem.asBytes(&snapshot), download_output) or
@@ -152,7 +183,7 @@ pub fn authenticateUntilWith(
     if (downloaded.bytes.ptr != download_output.ptr or downloaded.bytes.len == 0 or downloaded.bytes.len > download_output.len or
         !std.mem.eql(u8, downloaded.sha256, &snapshot.manifest_sha256)) return error.InvalidDownload;
     try fence(profile, &snapshot);
-    file_mod.materialize(&result.file, workdir, .{ .name = downloaded.name, .sha256 = downloaded.sha256, .bytes = downloaded.bytes }) catch |err| {
+    file_mod.materialize(&result.input.file, workdir, .{ .name = downloaded.name, .sha256 = downloaded.sha256, .bytes = downloaded.bytes }) catch |err| {
         abort(result, allocator) catch return error.CleanupFailed;
         return err;
     };
@@ -160,7 +191,7 @@ pub fn authenticateUntilWith(
         abort(result, allocator) catch return error.CleanupFailed;
         return err;
     };
-    authenticator.authenticate(deadline, allocator, snapshot.value(), downloaded.bytes, &result.file, executable, token, attestation_output, &result.authenticated) catch |err| {
+    authenticator.authenticate(deadline, allocator, snapshot.value(), downloaded.bytes, &result.input.file, executable, token, attestation_output, &result.input.authenticated) catch |err| {
         abort(result, allocator) catch return error.CleanupFailed;
         return err;
     };
@@ -172,6 +203,7 @@ pub fn authenticateUntilWith(
         abort(result, allocator) catch return error.CleanupFailed;
         return err;
     };
+    result.input.owner = &result.input;
     result.owner = result;
 }
 
@@ -181,13 +213,15 @@ fn fence(profile: anytype, snapshot: *const Snapshot) !void {
 }
 
 fn abort(result: *ProfileManifestInput, allocator: std.mem.Allocator) !void {
-    if (result.authenticated.owner != null) result.authenticated.deinit(allocator) catch {
+    if (result.input.authenticated.owner != null) result.input.authenticated.deinit(allocator) catch {
         result.owner = result;
+        result.input.owner = &result.input;
         return error.CleanupFailed;
     };
-    if (result.file.owner != null) {
-        result.file.cleanup() catch {
+    if (result.input.file.owner != null) {
+        result.input.file.cleanup() catch {
             result.owner = result;
+            result.input.owner = &result.input;
             return error.CleanupFailed;
         };
     }

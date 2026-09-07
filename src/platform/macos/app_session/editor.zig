@@ -17329,6 +17329,26 @@ test "TIG1 PageUp 은 편집기에서 caret 을 옮기고 터미널에서는 스
     term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{} });
     try testing.expect(term.rt.editor_selection.?.focus > 0);
+
+    // ⑸ **터미널에서도 Page 키가 아닌 것은 이 블록이 안 먹는다.** `page_delta != 0` 판정을 지운
+    //    변이가 여기서 죽는다 — 그러면 터미널에서 **모든 키가 소비**되어 타이핑이 죽는데, Page 키만
+    //    재면 그것을 못 본다(1회차 `T18` 이 그 자리였다).
+    //
+    //    소비는 `total_app_key_events` 로 관측한다 — 그 블록이 먹으면 그 수가 는다.
+    term.kind = .terminal;
+    fx.session.page_keys_scroll = true;
+    {
+        const before = fx.session.total_app_key_events;
+        _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
+        try testing.expectEqual(before, fx.session.total_app_key_events); // 앱이 안 먹었다
+    }
+    {
+        // **대조군** — 같은 자리에서 Page 키는 먹는다. 이것이 없으면 위 단언이 항진명제다.
+        const before = fx.session.total_app_key_events;
+        _ = try fx.session.handleKeyEvent(.{ .key = .page_down, .modifiers = .{} });
+        try testing.expect(fx.session.total_app_key_events > before);
+    }
+    term.kind = saved_kind;
 }
 
 test "TIG2 활성 Term 종류 질의는 좁고 fail-open 이다 (선-가로채기 게이트)" {
@@ -17354,6 +17374,56 @@ test "TIG2 활성 Term 종류 질의는 좁고 fail-open 이다 (선-가로채�
     //    터미널에서 `⌘↑`·`⇧PageUp` 이 조용히 사라진다.
     fx.session.surface_initialized = false;
     try testing.expect(term_ops.activeTermIsTerminal(fx.session));
+}
+
+test "TIG6 질의는 활성 pane 의 Term 을 본다 — 첫 pane 이 아니다 (선-가로채기 게이트)" {
+    // **픽스처가 개념을 갈라야 한다.** pane 이 하나뿐이면 `panes[0]` 과 `panes[active_pane]` 이
+    // **같은 자리**라, 활성 대신 첫 번째를 보는 변이가 살아남는다(3회차 `T19` 가 그랬다). 그러면
+    // 좌우로 나눈 뒤 한쪽만 편집기일 때 게이트가 **엉뚱한 pane 을 보고** 답한다.
+    //
+    // **`PaneFixture` 를 안 쓴다** — 그 위에서 split 하면 새 Term 의 core 가 샌다(실측). raw 세션은
+    // 기존 split 판정자들이 쓰는 그 패턴이고 누수가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try allocator.create(app_session_mod.AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // split 은 backing 이 잡혀야 의미 있다(termRect 입력) — 기존 split 판정자와 같은 규율.
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    session.surface_initialized = true;
+
+    try pane_ops.splitActivePane(session, .horizontal);
+    const tab = tab_ops.activeTab(session);
+    try testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+    try testing.expect(tab.active_pane != 0); // **개념이 갈렸다** — 이 단언이 픽스처를 지킨다
+
+    const first_pane = tab.panes.items[0];
+    const first_term = first_pane.terms.items[first_pane.active_term];
+    const active_term = pane_ops.activePane(session).activeTerm();
+    try testing.expect(first_term != active_term);
+
+    // ⑴ **활성이 터미널이고 첫 pane 이 편집기면 참이다.** 첫 pane 을 보는 변이는 여기서 거짓을 낸다.
+    first_term.kind = .editor;
+    active_term.kind = .terminal;
+    try testing.expect(term_ops.activeTermIsTerminal(session));
+
+    // ⑵ **반대도 재야 한다** — 한쪽만 재면 상수를 낸 변이가 산다.
+    first_term.kind = .terminal;
+    active_term.kind = .editor;
+    try testing.expect(!term_ops.activeTermIsTerminal(session));
+
+    // 세션 해제 전에 원래 종류로 되돌린다 — 편집기 종류로 둔 채 deinit 하면 없는 문서를 놓으려 한다.
+    first_term.kind = .terminal;
+    active_term.kind = .terminal;
 }
 
 test "TIG3 프롬프트 점프는 편집기 Term 에 큐를 안 넣는다 (심층 방어)" {

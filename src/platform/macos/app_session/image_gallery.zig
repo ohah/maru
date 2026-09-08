@@ -1620,7 +1620,17 @@ pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
 /// 처음으로 돌린다(걸러진 목록의 세 번째 행부터 보여 줄 이유가 없다).
 pub fn rebuildFilter(self: *AppSession) void {
     self.image_gallery.applyFilter(self.allocator);
-    self.image_gallery.dropTiles(self.allocator);
+    // **버리지 않고 다시 잇는다.** 예전에는 통째로 버렸는데, 그러면 「전체」↔「이미지」를 오갈 때마다
+    // 그림이 **사라졌다가 다시 뜬다** — 실측 11 장에서 **306 ms** 다. 칩으로 종류를 바꾸는 것이
+    // AV4 의 요점인데 그때마다 화면이 깜빡이면 그 기능이 값을 잃는다.
+    //
+    // 다시 잇는 것이 **가능해진 것은 AV5 덕이다**: `remapTiles` 가 `thumbSource` 로 찾으므로
+    // 그림 자신(「이미지」)과 접힌 호출(「전체」)이 **같은 키**(`file_index`·`data_offset`)를 갖는다.
+    // 그 전에는 두 도메인의 키가 달라 다시 이을 방법이 없었다.
+    //
+    // ⚠️ 그림을 안 담는 필터(「읽기」·「명령」)로 가면 여기서 전부 버려진다 — `remapTiles` 가
+    // `hits` 에 없는 타일의 픽셀을 푼다. 그쪽을 거쳐 돌아오면 다시 디코드한다(남은 여지).
+    remapTiles(self);
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.hovered = null;
     self.image_gallery.scroll = .{};

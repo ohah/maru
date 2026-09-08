@@ -135,13 +135,20 @@ fn loadOpenContext(self: *AppSession, n: usize) void {
 /// 다시 훑은 뒤 타일을 **새 인덱스에 다시 잇는다**. 못 찾은 타일만 버린다.
 ///
 /// 타일 수는 상한이 있고(`max_tiles`) 실측 세션도 수백 장이라 선형 탐색으로 충분하다.
-fn remapTiles(self: *AppSession) void {
+/// **`pub` 인 이유는 판정자다** — 다시 훑는 길(자동 갱신·검색어 변경)의 한가운데에 있어서,
+/// 도크를 통째로 세우지 않고 이 함수 하나를 직접 잴 수 있어야 한다(`formatResultSummary` 와 같은 규율).
+pub fn remapTiles(self: *AppSession) void {
     const hits = self.image_gallery.hits.items;
     var write: usize = 0;
     for (self.image_gallery.tiles.items) |tile| {
         var found: ?usize = null;
         for (hits, 0..) |hit, i| {
-            if (hit.file_index == tile.file_index and hit.data_offset == tile.data_offset) {
+            // ⚠️ **타일이 어디서 왔는지와 같은 함수로 찾는다**(AV5). 접힌 줄의 타일은 픽셀이
+            // **그림**의 것인데 그 줄의 `Hit` 은 **호출**이라, `hit.data_offset` 으로 찾으면
+            // (그것은 명령문 자리다) 영영 못 찾아 **매번 픽셀을 버리고 다시 디코드**한다 —
+            // 격자에서 「매 턴 비었다 다시 찬다」를 막으려고 만든 이 장치가 목록에서 무력해진다.
+            const src = thumbSource(hit) orelse continue;
+            if (src.file_index == tile.file_index and src.offset == tile.data_offset) {
                 found = i;
                 break;
             }
@@ -1231,16 +1238,22 @@ fn harvestOne(self: *AppSession) bool {
 
     // 이 픽셀이 **어느 이미지**의 것인지 함께 적어 둔다 — 다시 훑은 뒤 인덱스가 밀려도
     // 그 정체로 타일을 다시 이을 수 있다(`remapTiles`).
-    const src = if (r.hit_index < self.image_gallery.hits.items.len)
+    // ⚠️ **정체는 「무엇을 디코드했나」다.** 접힌 줄에서는 그것이 `Hit` 자신이 아니라 **결과가 든
+    // 그림의 자리**다(`thumbSource` — `ensureTiles` 가 제출할 때 쓴 바로 그 값). 여기서 `Hit` 의
+    // 오프셋(호출이면 명령문 자리)을 적으면 `remapTiles` 가 그 타일을 영영 못 찾아 **다시 훑을
+    // 때마다 픽셀을 버리고 새로 디코드**한다 — 격자에서 「매 턴 비었다 다시 찬다」를 막으려고
+    // 만든 장치가 목록에서 무력해진다. 제출·정체·재연결이 **같은 함수**를 봐야 한다.
+    const hit_src = if (r.hit_index < self.image_gallery.hits.items.len)
         self.image_gallery.hits.items[r.hit_index]
     else
         return true;
+    const thumb = thumbSource(hit_src) orelse return true;
 
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
         .hit_index = r.hit_index,
-        .file_index = src.file_index,
-        .data_offset = src.data_offset,
+        .file_index = thumb.file_index,
+        .data_offset = thumb.offset,
         .width = r.width,
         .height = r.height,
         .pixels = r.pixels,
@@ -2501,7 +2514,12 @@ pub fn appendGpuImages(
     // 그림이 없는 종류라 그대로 막는다(없는 것을 위해 창을 훑을 이유가 없다).
     const is_grid = self.image_gallery.filter.isGrid();
     const wants_thumbs = is_grid or self.image_gallery.filter == .all;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or !wants_thumbs) {
+    // ⚠️ **펼침이 열리면 목록도 썸네일도 없다.** 목록(`collectActivityList`)은 그 게이트를 이미
+    // 갖는데 썸네일이 안 가지면 **글자 없이 그림만** 펼침 본문 위에 남는다. 격자의 크게 보기는
+    // 아래에서 `appendOpenImage` 로 갈리지만(그쪽은 그림이 본체다), 펼침은 그림이 없어 그 갈래를
+    // 안 타고 그대로 내려온다 — AV3 와 AV5 를 합쳐야 생기는 자리다.
+    const detail_open = !is_grid and self.image_gallery.open != null;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or !wants_thumbs or detail_open) {
         self.image_gallery.markAllNeedUpload();
         self.image_gallery.markOpenNeedUpload();
         return;
@@ -2813,6 +2831,11 @@ pub fn collectActivityList(
     if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
     // **펼치면 목록은 물러난다**(AV3 — 계약 §2.4 「크게 보기와 같은 자리」). 안 비키면 본문 글자가
     // 목록 글자 위에 얹혀 **둘 다 못 읽는다** — 격자가 크게 보기 앞에서 물러나는 것과 같은 규율이다.
+    // **안 그리면 0 이라고 말한다.** 칩(`drawn_chips`)·펼침(`drawn_detail_rows`)이 이미 그 규율을
+    // 갖는데 목록만 빠져 있었다 — 펼침이 열리면 여기서 그냥 물러나므로 지난 프레임의 줄 수가 남고,
+    // 「지금 목록이 그려지고 있나」를 값으로 보는 창이 거짓말을 한다(적대적 1 회차).
+    self.image_gallery.drawn_rows = 0;
+    self.image_gallery.drawn_pieces = 0;
     if (self.image_gallery.open != null) return;
     if (self.image_gallery.filter.isGrid()) {
         // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다.

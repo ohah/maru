@@ -18,20 +18,48 @@ const Mock = struct {
         try self.push(value);
         if (self.fail == stage) return error.Injected;
     }
-    pub fn validatePreflight(self: *@This()) !void { try self.run(.preflight, 1); }
-    pub fn bindProfile(self: *@This()) !void { try self.run(.profile, 2); }
-    pub fn runPrerequisite(self: *@This()) !void { try self.run(.prerequisite, 3); }
-    pub fn prerequisiteNeedsAudit(self: *@This()) bool { return self.prerequisite_audit; }
-    pub fn preparePredecessorWorkspace(self: *@This()) !void { try self.run(.predecessor_workspace, 4); }
-    pub fn authenticateManifest(self: *@This()) !void { try self.run(.manifest_input, 5); }
-    pub fn prepareUpgradeWorkspace(self: *@This()) !void { try self.run(.upgrade_workspace, 6); }
-    pub fn bindAuthorities(self: *@This()) !void { try self.run(.authorities, 7); }
-    pub fn runProfileUpgrade(self: *@This()) !void { try self.run(.profile_upgrade, 8); }
-    pub fn prepareDurable(self: *@This()) !void { try self.run(.durable, 9); }
-    pub fn durableNeedsAudit(self: *@This()) bool { return self.retained_on_durable_failure; }
-    pub fn publishTiming(self: *@This()) !void { try self.run(.timing, 10); }
-    pub fn timingNeedsAudit(self: *@This()) bool { return self.timing_audit; }
-    pub fn closeTimingRetaining(self: *@This()) !void { try self.run(.retained_close, 11); }
+    pub fn validatePreflight(self: *@This()) !void {
+        try self.run(.preflight, 1);
+    }
+    pub fn bindProfile(self: *@This()) !void {
+        try self.run(.profile, 2);
+    }
+    pub fn runPrerequisite(self: *@This()) !void {
+        try self.run(.prerequisite, 3);
+    }
+    pub fn prerequisiteNeedsAudit(self: *@This()) bool {
+        return self.prerequisite_audit;
+    }
+    pub fn preparePredecessorWorkspace(self: *@This()) !void {
+        try self.run(.predecessor_workspace, 4);
+    }
+    pub fn authenticateManifest(self: *@This()) !void {
+        try self.run(.manifest_input, 5);
+    }
+    pub fn prepareUpgradeWorkspace(self: *@This()) !void {
+        try self.run(.upgrade_workspace, 6);
+    }
+    pub fn bindAuthorities(self: *@This()) !void {
+        try self.run(.authorities, 7);
+    }
+    pub fn runProfileUpgrade(self: *@This()) !void {
+        try self.run(.profile_upgrade, 8);
+    }
+    pub fn prepareDurable(self: *@This()) !void {
+        try self.run(.durable, 9);
+    }
+    pub fn durableRetained(self: *@This()) bool {
+        return self.retained_on_durable_failure;
+    }
+    pub fn publishTiming(self: *@This()) !void {
+        try self.run(.timing, 10);
+    }
+    pub fn timingNeedsAudit(self: *@This()) bool {
+        return self.timing_audit;
+    }
+    pub fn closeTimingRetaining(self: *@This()) !void {
+        try self.run(.retained_close, 11);
+    }
     pub fn cleanup(self: *@This(), stage: phase.Stage) !void {
         try self.push(100 + @intFromEnum(stage));
         if (self.cleanup_fail_once == stage) {
@@ -103,7 +131,9 @@ test "prerequisite failure preserves its own remote audit signal" {
     try std.testing.expectError(error.AuditRequired, phase.executeWith(&mock, &transaction));
     try std.testing.expect(transaction.needsAudit());
     try std.testing.expectEqual(phase.Stage.prerequisite, transaction.audit_stage);
+    try std.testing.expect(transaction.prerequisite_audit_preserved);
     try std.testing.expect(transaction.localCleanupComplete());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, mock.events[0..mock.len], &.{100 + @intFromEnum(phase.Stage.prerequisite)}));
 }
 
 test "timing owner established before publisher failure is preserved without deletion" {

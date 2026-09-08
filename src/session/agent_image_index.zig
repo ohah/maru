@@ -2489,12 +2489,19 @@ test "파일 번호: 퇴출이 배열을 당겨도 어긋나지 않는다 — �
         \\"}}]}}
     ;
 
-    // ── 파일 0: 활동 50 + 이미지 1. 활동은 퇴출의 첫 먹잇감이다.
+    // 퇴출은 한 번에 `activity_count / 8` 을 버린다. 그보다 넉넉히 넣어야 앞 파일 항목이 남는다.
+    const prev_activities: usize = max_activity_hits_per_file / 2;
+
+    // ── 파일 0: 활동 여럿 + 이미지 1. 활동은 퇴출의 첫 먹잇감이다.
     {
         var t0: std.ArrayList(u8) = .empty;
         defer t0.deinit(allocator);
+        // ⚠️ **앞 파일 활동을 퇴출이 다 못 먹을 만큼 넣는다.** 50 개만 두면 첫 퇴출에 전부 사라져
+        // 「앞 파일 항목이 제 번호를 지키는가」가 **표본 0 으로 안 재진다** — 적대적 2 회차에서
+        // 스탬프를 상수로 바꾼 뮤테이션이 이미지 단언에만 걸리고 이 축에는 안 걸리는 것으로
+        // 드러났다. 이미지가 없는 체인(Codex 가 대개 그렇다)에서는 그때 아무도 안 잡는다.
         var k: usize = 0;
-        while (k < 50) : (k += 1) {
+        while (k < prev_activities) : (k += 1) {
             try t0.appendSlice(allocator, head);
             try t0.appendSlice(allocator, "prev");
             try t0.appendSlice(allocator, tail);
@@ -2528,6 +2535,7 @@ test "파일 번호: 퇴출이 배열을 당겨도 어긋나지 않는다 — �
     var cur_wrong: usize = 0;
     var prev_wrong: usize = 0;
     var cur_total: usize = 0;
+    var prev_total: usize = 0;
     for (out.items) |h| {
         if (h.kind.isImage()) {
             // 파일 0 의 이미지는 퇴출 대상이 아니라 살아 있고, 번호도 0 이어야 한다.
@@ -2542,12 +2550,82 @@ test "파일 번호: 퇴출이 배열을 당겨도 어긋나지 않는다 — �
             cur_total += 1;
             if (h.file_index != 1) cur_wrong += 1;
         } else if (h.data_len == 4) { // "prev"
+            prev_total += 1;
             if (h.file_index != 0) prev_wrong += 1;
         }
     }
     try testing.expect(cur_total > 0);
-    try testing.expectEqual(@as(usize, 0), cur_wrong); // ← 사후 스탬프면 여기가 50 이 된다
+    try testing.expectEqual(@as(usize, 0), cur_wrong); // ← 사후 스탬프면 여기가 어긋난다
+    // **앞 파일 활동이 실제로 살아남았는가를 먼저 확인한다.** 표본이 0 이면 아래 단언은 아무것도
+    // 재지 않는다 — 「단언이 있다」와 「그 단언이 무언가를 본다」는 다른 사실이다.
+    try testing.expect(prev_total > 0);
     try testing.expectEqual(@as(usize, 0), prev_wrong);
+}
+
+test "파일 번호: 이미지가 없는 체인에서도 어긋나지 않는다 (적대적 2회차)" {
+    // ⚠️ **앞 판정자만으로는 부족했다.** 스탬프를 상수로 바꾸는 뮤테이션이 거기서는 **이미지
+    // 단언**에 먼저 걸린다 — 즉 「활동이 제 파일 번호를 지키는가」 축은 그 판정자가 실제로 재고
+    // 있지 않다. 그런데 Codex 세션에는 이미지가 거의 없다(실측: 결과가 이미지인 호출 242 건 대
+    // 호출 256,688 건). 그 체인에서는 아무도 안 잡는다.
+    //
+    // 그래서 **이미지가 하나도 없는 체인**을 따로 세운다. 여기서는 활동 축이 유일한 증거다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    const head =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"description":"
+    ;
+    const tail =
+        \\"}}]}}
+    ;
+
+    // 앞 파일: 퇴출이 다 못 먹을 만큼.
+    {
+        var t0: std.ArrayList(u8) = .empty;
+        defer t0.deinit(allocator);
+        var k: usize = 0;
+        while (k < max_activity_hits_per_file / 2) : (k += 1) {
+            try t0.appendSlice(allocator, head);
+            try t0.appendSlice(allocator, "prev");
+            try t0.appendSlice(allocator, tail);
+            try t0.append(allocator, '\n');
+        }
+        var s0: StreamScanner = .{ .file_index = 0 };
+        defer s0.deinit(allocator);
+        try s0.feed(allocator, t0.items, &out);
+    }
+
+    // 이 파일: 퇴출이 돌 만큼.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var i: usize = 0;
+    while (i < max_activity_hits_per_file + 100) : (i += 1) {
+        try text.appendSlice(allocator, head);
+        try text.appendSlice(allocator, "cur");
+        try text.appendSlice(allocator, tail);
+        try text.append(allocator, '\n');
+    }
+    var s1: StreamScanner = .{ .file_index = 2 }; // **0 도 1 도 아닌 값** — 상수 스탬프를 가른다
+    defer s1.deinit(allocator);
+    try s1.feed(allocator, text.items, &out);
+    try testing.expect(s1.activity_partial);
+
+    var prev_total: usize = 0;
+    var cur_total: usize = 0;
+    for (out.items) |h| {
+        try testing.expect(!h.kind.isImage()); // 이 체인에는 그림이 없다
+        if (h.data_len == 4) { // "prev"
+            prev_total += 1;
+            try testing.expectEqual(@as(u8, 0), h.file_index);
+        } else if (h.data_len == 3) { // "cur"
+            cur_total += 1;
+            try testing.expectEqual(@as(u8, 2), h.file_index);
+        }
+    }
+    // **표본이 둘 다 실제로 있어야** 위 단언이 무언가를 본다.
+    try testing.expect(prev_total > 0);
+    try testing.expect(cur_total > 0);
 }
 
 test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {

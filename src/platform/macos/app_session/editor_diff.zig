@@ -3691,3 +3691,33 @@ test "DSB8: 버퍼가 모자라면 글을 안 낸다 — 빈 글이 아니다" {
     var ok: [48]u8 = undefined;
     try testing.expect(editor_ops.formatDiffCursor(&ok, .{ .side = .right, .line = 12345, .column = 678, .truncated = true }) != null);
 }
+
+test "DSB9: 열은 **클러스터**를 센다 — 결합 문자가 한 글자다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // **결합 문자**(e + U+0301)와 **국기**(두 regional indicator) — 코드포인트로 세면 갈린다.
+    //    한글·탭만 쓰면 클러스터와 코드포인트가 같은 답을 낸다(4회차 V30 이 그래서 살았다).
+    var entry = testEntry("keep\nplain\n", "keep\ne\u{0301}x\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "e\u{0301}x") orelse return error.NoRow;
+    try testing.expectEqual(@as(usize, 4), st.right_texts[i].len); // 'e'(1) + U+0301(2) + 'x'(1)
+
+    // 결합 문자 **뒤**(byte 3)는 **2번째 글자**다. 코드포인트로 세면 3 이다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 3 }) };
+    try testing.expectEqual(@as(usize, 2), (editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos).column);
+
+    // 행 끝은 **3번째 글자**다(e\u{0301} · x 뒤).
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = 4;
+    try testing.expectEqual(@as(usize, 3), (editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos).column);
+}
+
+test "DSB10: 빈 행 갈래도 버퍼가 모자라면 글을 안 낸다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // **두 갈래를 다 재야 한다** — 한쪽만 재면 나머지에서 빈 글이 나가도 초록이다(4회차 V28).
+    var tiny: [3]u8 = undefined;
+    try testing.expectEqual(@as(?[]const u8, null), editor_ops.formatDiffCursor(&tiny, .{ .side = .left, .line = null, .column = 4567, .truncated = true }));
+    var ok: [48]u8 = undefined;
+    try testing.expectEqualStrings("L -:4567+", editor_ops.formatDiffCursor(&ok, .{ .side = .left, .line = null, .column = 4567, .truncated = true }).?);
+}

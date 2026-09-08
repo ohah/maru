@@ -208,9 +208,9 @@ pub fn buildEnvEntries(allocator: std.mem.Allocator, opts: EnvOptions) ![][]u8 {
         }
         try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "TERM={s}", .{opts.term}));
         try appendOwned(allocator, &entries, try allocator.dupe(u8, "COLORTERM=truecolor"));
-        // macOS 백엔드와 같은 값이다 — TUI들이 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트로
-        // 고르는데 maru는 그 명단에 없어서다. 근거는 `EnvStorage.appendParentEnv`의 주석이 단일 출처다.
-        try appendOwned(allocator, &entries, try allocator.dupe(u8, "TERM_PROGRAM=ghostty"));
+        // macOS 백엔드와 같은 값이다 — maru는 자기 이름을 말한다(한때 `ghostty`로 위장했다).
+        // 근거는 `EnvStorage.appendParentEnv`의 주석이 단일 출처다.
+        try appendOwned(allocator, &entries, try allocator.dupe(u8, "TERM_PROGRAM=maru"));
         if (opts.ssh_integration_bin) |bin| {
             try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "MARU_BIN={s}", .{bin}));
             try appendOwned(allocator, &entries, try allocator.dupe(u8, "MARU_SSH_INTEGRATION=1"));
@@ -404,7 +404,7 @@ test "buildEnvEntries: 부모를 물려받되 오염 항목은 떨구고 우리 
     try expectEnv(entries, "HOME", "C:\\Users\\me");
     try expectEnv(entries, "TERM", "xterm-256color");
     try expectEnv(entries, "COLORTERM", "truecolor");
-    try expectEnv(entries, "TERM_PROGRAM", "ghostty");
+    try expectEnv(entries, "TERM_PROGRAM", "maru");
     for ([_][]const u8{ "TERMINFO", "FORCE_COLOR", "MARU_PANE_ID", "MARU_HOOK_INSTANCE", "MARU_HOOK_PANE", "TMUX", "TMUX_PANE" }) |key|
         try std.testing.expect(findEnv(entries, key) == null);
     try std.testing.expect(hasExact(entries, "=C:=C:\\work"));

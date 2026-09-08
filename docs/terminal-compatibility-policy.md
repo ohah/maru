@@ -85,17 +85,22 @@ Maru는 자식 셸 env에서 부모 `TERM`/`COLORTERM`을 위 값으로 덮을 �
 
 근거(실측): `zig build`로 Maru를 띄우면 빌드 컨텍스트의 `CLICOLOR_FORCE=1`이 상속돼 자식 셸로 전파됐다. Rust `supports-color`(codex 등이 사용)는 `env_force_color`로 `CLICOLOR_FORCE!=0`·`FORCE_COLOR`을 **가장 먼저** 평가해 색 레벨을 강제(보통 basic 16색)하므로 `COLORTERM=truecolor`를 무시한다 → codex가 truecolor를 못 보고 입력창 회색 컴포저(pill 배경)를 끈다. GUI(Finder) 실행 시엔 이 변수가 없어 정상이라, 개발 중 `zig build`로 띄울 때만 나타나는 함정이었다. `NO_COLOR`/`CLICOLOR`는 사용자 의도(색 끄기 선호)일 수 있어 건드리지 않는다.
 
-### 데스크톱 알림 식별 (`TERM_PROGRAM=ghostty`)
+### 자기 신원 (`TERM_PROGRAM=maru`)
 
-Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남긴 `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`은 제거 후 덮어쓴다). Claude Code·Codex 같은 TUI는 데스크톱 알림을 보낼 터미널을 `TERM_PROGRAM` 화이트리스트(`iTerm.app`/`ghostty`/`kitty`/`WezTerm`)로 식별하는데, Maru는 그 명단에 없어 기본값에선 OSC 9 알림을 못 받기 때문이다(Claude의 `preferredNotifChannel`은 환경변수로 못 바꿔 우회 불가). `ghostty`를 고른 건 Maru가 kitty graphics·OSC 9/133/777을 Ghostty와 같은 셋으로 지원해, 식별 후 기대되는 기능과 어긋나지 않아서다(`iTerm.app`은 inline-image OSC 1337을 기대해 부적합).
+Maru는 자식 셸 env에 **`TERM_PROGRAM=maru`** 를 주입한다(부모가 남긴 `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`은 제거 후 덮어쓴다). `TERM_PROGRAM_VERSION`은 주입하지 않는다 — 자기식별의 정식 채널은 XTVERSION(`CSI > q` → `DCS > | maru <version> ST`)이고 이 값은 그 보조다.
 
-**⚠️ 이 식별값은 ssh 를 못 건넌다**(2026-08-29 실측). ssh 가 전달하는 환경변수는 `TERM` 뿐이라 원격 셸에는
+**한때 `ghostty`로 위장했다(2026-09-08 철회).** Claude Code·Codex 같은 TUI가 데스크톱 알림을 보낼 터미널을 `TERM_PROGRAM` 화이트리스트(`kitty`/`ghostty`/`wezterm`)로 고르는데 Maru는 그 명단에 없어 무설정 자동 알림을 못 받았고, "Maru가 kitty graphics·OSC 9/133/777을 Ghostty와 같은 셋으로 지원하니 식별 후 기대와 어긋나지 않는다"를 근거로 삼았다. **그 전제가 틀렸다는 것이 실측으로 드러났다**:
+
+> [terminal-browser](https://github.com/zenbu-labs/terminal-browser)(kitty graphics로 브라우저를 그리는 TUI)가 `TERM_PROGRAM=ghostty`를 보고 **AppleScript로 "Ghostty" 앱을 조작하려 들었다**(`terminals/src/terminals/ghostty.ts`). Ghostty가 설치돼 있으면 엉뚱한 창이 반응하고, 없으면 pane 열기가 실패한다. 터미널을 식별한 앱이 하는 일은 "기대되는 시퀀스를 보내는 것"에 그치지 않는다 — **그 이름의 앱을 스크립팅한다.** 이름을 빌리면 그 앱의 자동화 표면까지 빌리게 된다.
+
+위장의 명분도 사라졌다. 그 앱들은 **이미지 지원을 `TERM_PROGRAM`이 아니라 `a=q` APC 질의로 감지**한다(Claude Code 바이너리에 `\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA` 전송과 `;OK` 파싱이 들어 있다). Maru가 그 질의에 답하게 된 뒤로(kitty graphics K5) **이미지 경로는 이름과 무관하게 산다**. 남는 손실은 **자동 알림 하나**뿐이고, 그건 사용자가 provider 설정에서 채널을 명시해 되찾을 수 있다(계약과 값은 [agent-hooks.md](agent-hooks.md) §11). 신원을 속여 얻는 편의보다 **속이지 않는 쪽**을 택한다(사용자 결정 2026-09-08).
+
+**⚠️ 알림 식별은 어차피 ssh 를 못 건넌다**(2026-08-29 실측). ssh 가 전달하는 환경변수는 `TERM` 뿐이라 원격 셸에는
 `TERM_PROGRAM` 이 없고, 그래서 **원격에서 도는 claude/codex 는 알림을 하나도 못 보낸다** — 화이트리스트
-판정이 `no_method_available` 로 떨어지기 때문이다. 위 «환경변수로 못 바꿔 우회 불가» 는 그 자리에서도
-그대로지만, **설정 파일로는 바꿀 수 있다**: 원격 provider 설정에 채널을 명시하면 된다(계약과 값은
-[agent-hooks.md](agent-hooks.md) §11).
+판정이 `no_method_available` 로 떨어지기 때문이다. 즉 위장은 로컬에서만 듣던 편의였고, 원격에서는 처음부터
+설정 파일이 유일한 길이었다.
 
-이건 알림 호환을 위한 **식별값**이며 `TERM`(터미널 capability)과는 별개다 — `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 알림 식별용 고정값이다. 트레이드오프: Maru가 진짜 Ghostty는 아니므로 Ghostty 특화 시퀀스를 가정하는 프로그램과 미세한 차이가 날 수 있으나, Maru가 미지원하는 시퀀스는 무시하므로 무해하다. `TERM_PROGRAM_VERSION`은 주입하지 않는다(현재 식별 whitelist는 키 이름만 보므로 불요).
+Maru는 OSC 9/777을 직접 파싱해(`core.zig`) 네이티브 알림으로 띄우므로, **앱이 보내기만 하면 뜬다** — 바뀐 것은 "앱이 자동으로 보내기로 결정하는가"뿐이다. 이 값은 `TERM`(터미널 capability)과 별개다: `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 신원이라 고정이다.
 
 **현재 상태 — 기본값 `xterm-maru`로 전환됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
 `xterm-maru`, alias `maru`)를 바이너리에 embed해, 자식 셸마다 자기 캐시에 자동 컴파일하고 `TERMINFO`로

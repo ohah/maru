@@ -1881,7 +1881,7 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 ```
 
 명시가 필요한 이유는 **그 식별값이 원격에 도달하지 않기 때문**이다. maru 가 자식 pty 에 심는
-`TERM_PROGRAM=ghostty` 는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md) «데스크톱 알림 식별»
+`TERM_PROGRAM=maru` 는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md) «자기 신원»
 이 소유한다(그 문서가 «환경변수로는 못 바꿔 우회 불가» 라고 적어 둔 그 값이다 — **설정 파일로는 바꿀 수
 있다**). **ssh 는 그 변수를 안 넘기므로**([ssh-integration.md](ssh-integration.md) §1 의 `COLORTERM` 과 같은
 기전) 원격의 `auto` 판정이 `no_method_available` 로 죽는다.

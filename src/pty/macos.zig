@@ -1622,14 +1622,24 @@ const EnvStorage = struct {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "TERMINFO={s}", .{dir}, 0));
         }
         try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
-        // Claude Code/Codex 등 TUI는 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트
-        // (iTerm.app/ghostty/kitty/WezTerm)로 식별한다 — maru는 그 명단에 없어 기본(auto)에선 OSC 9 알림을
-        // 못 받는다(사용자가 settings.json·config.toml 수동 설정 필요; preferredNotifChannel은 env override가
-        // 불가해 우회 못 함). maru를 ghostty로 식별시켜 무설정 자동 알림을 받는다. ghostty를 고른 건 maru가 kitty
-        // graphics·OSC 9/133/777을 ghostty와 같은 셋으로 지원해 식별 후 기대되는 기능과 어긋나지 않기 때문이다
-        // (iTerm.app은 inline-image OSC 1337을 기대해 부적합). maru는 OSC 9를 직접 파싱해(core.zig) 네이티브
-        // 알림으로 띄운다. 베이스/결정: 알림 호환을 위한 식별값일 뿐 — 사용자가 config.term으로 TERM은 바꿔도 이 값은 고정.
-        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty"));
+        // **maru는 자기 이름을 말한다.** 한때 여기서 `ghostty`로 위장했다 — Claude Code/Codex 등 TUI가
+        // 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트(`kitty`/`ghostty`/`wezterm`)로 고르는데
+        // maru가 그 명단에 없어 무설정 자동 알림을 못 받기 때문이었다. 그 위장은 **알림 하나를 얻고 신원을
+        // 통째로 거짓말하는** 거래였고, 실제로 대가를 치렀다(2026-09-08 실측):
+        //
+        //   terminal-browser(kitty graphics로 브라우저를 그리는 TUI)가 `TERM_PROGRAM=ghostty`를 보고
+        //   **AppleScript로 "Ghostty" 앱을 조작하려 들었다** — 설치돼 있으면 엉뚱한 창이 반응하고, 없으면
+        //   pane 열기가 실패한다. 우리가 "나는 ghostty다"라고 말한 결과다.
+        //
+        // 위장의 명분도 사라졌다. 그 앱들이 **이미지 지원은 TERM_PROGRAM이 아니라 `a=q` APC 질의로
+        // 감지**하고(Claude Code 바이너리에 `\x1b_Gi=31,...,a=q,t=d,f=24;AAAA` + `;OK` 파싱이 들어 있다),
+        // maru가 이제 그 질의에 답하므로(K5) 이미지 경로는 이름과 무관하게 산다. 남는 손실은 **알림뿐**이고,
+        // 그건 사용자가 claude `settings.json`/codex `config.toml`에서 채널을 명시해 되찾을 수 있다.
+        // 신원을 속여서 얻는 편의보다 **속이지 않는 쪽**을 택한다(사용자 결정 2026-09-08).
+        //
+        // maru는 OSC 9/777을 직접 파싱해(core.zig) 네이티브 알림으로 띄우므로, 앱이 보내기만 하면 뜬다.
+        // 자기식별의 정식 채널은 XTVERSION(`CSI > q` → `DCS > | maru <version> ST`)이고 이 값은 그 보조다.
+        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "TERM_PROGRAM=maru"));
         if (zdotdir) |zd| {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
             if (old_zdotdir) |prev| {
@@ -2273,9 +2283,10 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 덮어씀, VERSION strip)" {
-    // Claude Code/Codex가 TERM_PROGRAM 화이트리스트로 알림 터미널을 식별하므로 maru를 ghostty로 알린다.
-    // 부모(상위 터미널/런처)가 남긴 TERM_PROGRAM·VERSION은 제거되고 ghostty 하나만 남아야 한다(중복 키는 첫 항목이 이김).
+test "EnvStorage forces TERM_PROGRAM to maru (자기 이름 — 부모 값 덮어씀, VERSION strip)" {
+    // maru는 자기 이름을 말한다(한때 알림 화이트리스트 때문에 `ghostty`로 위장했고, 그것을 본 앱이
+    // AppleScript로 진짜 Ghostty를 조작하려 들었다 — appendParentEnv 주석이 단일 출처).
+    // 부모(상위 터미널/런처)가 남긴 TERM_PROGRAM·VERSION은 제거되고 maru 하나만 남아야 한다(중복 키는 첫 항목이 이김).
     _ = setenv("TERM_PROGRAM", "Apple_Terminal", 1);
     _ = setenv("TERM_PROGRAM_VERSION", "447", 1);
     defer _ = unsetenv("TERM_PROGRAM");
@@ -2286,19 +2297,19 @@ test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 �
 
     var tp_count: usize = 0;
     var tpv_count: usize = 0;
-    var is_ghostty = false;
+    var is_maru = false;
     const envp = storage.envpPtr();
     var i: usize = 0;
     while (envp[i]) |entry| : (i += 1) {
         const slice = std.mem.span(entry);
         if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=")) {
             tp_count += 1;
-            is_ghostty = std.mem.eql(u8, slice, "TERM_PROGRAM=ghostty");
+            is_maru = std.mem.eql(u8, slice, "TERM_PROGRAM=maru");
         }
         if (std.mem.startsWith(u8, slice, "TERM_PROGRAM_VERSION=")) tpv_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), tp_count); // 부모 Apple_Terminal 제거 + ghostty 하나만
-    try std.testing.expect(is_ghostty);
+    try std.testing.expectEqual(@as(usize, 1), tp_count); // 부모 Apple_Terminal 제거 + maru 하나만
+    try std.testing.expect(is_maru);
     try std.testing.expectEqual(@as(usize, 0), tpv_count); // 부모 VERSION은 strip하고 주입 안 함
 }
 

@@ -266,9 +266,10 @@ test "actual APFS selector measures both profiles without FD growth" {
     std.mem.sort(u64, &baseline_ns, {}, std.sort.asc(u64));
     std.mem.sort(u64, &upgrade_ns, {}, std.sort.asc(u64));
     std.debug.print("profile_authored_attestation_selector_apfs schema=maru.session-host-profile-authored-attestation-selector-perf.v1 mode={s} samples_per_profile={d} failures=0 fd_delta=0 baseline_median_ns={d} baseline_p95_ns={d} baseline_max_ns={d} upgrade_median_ns={d} upgrade_p95_ns={d} upgrade_max_ns={d} retained_subjects=2/3 residue=0\n", .{
-        @tagName(builtin.mode), samples,
-        baseline_ns[samples / 2], baseline_ns[(samples * 95 - 1) / 100], baseline_ns[samples - 1],
-        upgrade_ns[samples / 2], upgrade_ns[(samples * 95 - 1) / 100], upgrade_ns[samples - 1],
+        @tagName(builtin.mode),               samples,
+        baseline_ns[samples / 2],             baseline_ns[(samples * 95 - 1) / 100],
+        baseline_ns[samples - 1],             upgrade_ns[samples / 2],
+        upgrade_ns[(samples * 95 - 1) / 100], upgrade_ns[samples - 1],
     });
 }
 

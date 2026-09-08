@@ -109,6 +109,16 @@ fn candidateArgs(path: []const u8) [37][]const u8 {
     };
 }
 
+fn profileStage3Args(path: []const u8) [39][]const u8 {
+    return .{
+        "prepare-profile-candidate",                "--repo",                               "ohah/maru",                        "--tag",                                                            "v1.2.3",                                           "--github-cli",                           path,                     "--github-cli-sha256",                   cli_sha,
+        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                            "/tmp/candidate/Maru-1.2.3-universal.dmg",                          "--frozen-executable",                              "/tmp/candidate/maru-session-host-1.2.3", "--candidate-dmg-bundle", "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
+        "/tmp/attest/candidate-frozen.bundle.json", "--dmg-work",                           "/tmp/dmg-work",                    "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                          "/tmp/source",            "--zig",                                 "/usr/local/bin/zig",
+        "--zig-size",                               "123456",                               "--zig-sha256",                     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--predecessor-workspace",                          "/tmp/predecessor-work",                  "--upgrade-workspace",    "/tmp/upgrade-work",                     "--durable-preparation",
+        "/tmp/handoff/profile-stage3",              "--timing-output",                      "/tmp/timing/profile-upgrade.json",
+    };
+}
+
 fn prepareAggregateArgs(path: []const u8) [21][]const u8 {
     return .{
         "prepare-candidate-aggregate",      "--repo",                           "ohah/maru",                      "--tag",                            "v1.2.3",
@@ -147,7 +157,7 @@ fn cleanupAggregateArgs(path: []const u8) [17][]const u8 {
 }
 
 test "all commands bind context and pin only after identity authority" {
-    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_aggregate, .finalize_aggregate, .resume_publication, .published_cleanup }) |kind| {
+    for ([_]enum { pre_publish, verify_predecessor, publish_candidate, prepare_profile_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup }{ .pre_publish, .verify_predecessor, .publish_candidate, .prepare_profile_candidate, .prepare_aggregate, .finalize_aggregate, .resume_publication, .published_cleanup }) |kind| {
         var trace = Trace{};
         var contexts = ContextReader{ .trace = &trace };
         var runners = RunnerReader{ .trace = &trace };
@@ -155,6 +165,7 @@ test "all commands bind context and pin only after identity authority" {
         const pre = prePublishArgs("/usr/local/bin/gh");
         const predecessor = predecessorArgs("/usr/local/bin/gh");
         const candidate = candidateArgs("/usr/local/bin/gh");
+        const profile = profileStage3Args("/usr/local/bin/gh");
         const prepare = prepareAggregateArgs("/usr/local/bin/gh");
         const finalize = finalizeAggregateArgs("/usr/local/bin/gh");
         const resume_args = resumePublicationArgs("/usr/local/bin/gh");
@@ -164,6 +175,7 @@ test "all commands bind context and pin only after identity authority" {
             .pre_publish => try bootstrap.bootstrapWith(std.testing.allocator, &pre, &contexts, &runners, &pinner, &result),
             .verify_predecessor => try bootstrap.bootstrapWith(std.testing.allocator, &predecessor, &contexts, &runners, &pinner, &result),
             .publish_candidate => try bootstrap.bootstrapWith(std.testing.allocator, &candidate, &contexts, &runners, &pinner, &result),
+            .prepare_profile_candidate => try bootstrap.bootstrapWith(std.testing.allocator, &profile, &contexts, &runners, &pinner, &result),
             .prepare_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &prepare, &contexts, &runners, &pinner, &result),
             .finalize_aggregate => try bootstrap.bootstrapWith(std.testing.allocator, &finalize, &contexts, &runners, &pinner, &result),
             .resume_publication => try bootstrap.bootstrapWith(std.testing.allocator, &resume_args, &contexts, &runners, &pinner, &result),
@@ -185,6 +197,11 @@ test "all commands bind context and pin only after identity authority" {
                 try std.testing.expectEqualStrings("/tmp/attest/candidate-frozen.bundle.json", command.candidate_frozen_bundle);
             },
             .prepare_candidate => |command| try std.testing.expectEqualStrings("/tmp/durable-stage3", command.durable_preparation),
+            .prepare_profile_candidate => |command| {
+                try std.testing.expectEqualStrings("/tmp/predecessor-work", command.predecessor_workspace);
+                try std.testing.expectEqualStrings("/tmp/upgrade-work", command.upgrade_workspace);
+                try std.testing.expectEqualStrings("/tmp/timing/profile-upgrade.json", command.timing_output);
+            },
             .prepare_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", command.aggregate),
             .finalize_candidate_aggregate => |command| try std.testing.expectEqualStrings("/tmp/artifacts/Maru.dmg", command.dmg),
             .resume_candidate_publication => |command| try std.testing.expectEqualStrings("/tmp/handoff/preparation", command.preparation),
@@ -194,6 +211,9 @@ test "all commands bind context and pin only after identity authority" {
         try std.testing.expect(!@hasField(bootstrap.VerifyPredecessor, "github_cli_sha256"));
         try std.testing.expect(!@hasField(bootstrap.PublishCandidate, "github_cli"));
         try std.testing.expect(!@hasField(bootstrap.PrepareCandidateAggregate, "github_cli"));
+        try std.testing.expect(!@hasField(bootstrap.PrepareProfileCandidate, "github_cli"));
+        try std.testing.expect(!@hasField(bootstrap.PrepareProfileCandidate, "profile"));
+        try std.testing.expect(!@hasField(bootstrap.PrepareProfileCandidate, "predecessor_release_id"));
         try std.testing.expect(!@hasField(bootstrap.FinalizeCandidateAggregate, "github_cli_sha256"));
         try std.testing.expect(!@hasField(bootstrap.ResumeCandidatePublication, "github_cli"));
         var copied = result;

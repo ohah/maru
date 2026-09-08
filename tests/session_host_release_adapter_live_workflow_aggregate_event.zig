@@ -66,6 +66,7 @@ test "every non-aggregate release command is rejected before observation mapping
         .verify_predecessor,
         .publish_candidate,
         .prepare_candidate,
+        .prepare_profile_candidate,
         .resume_candidate_publication,
         .cleanup_candidate_aggregate,
     };

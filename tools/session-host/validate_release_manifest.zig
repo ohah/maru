@@ -254,6 +254,9 @@ pub fn executeWith(
         .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .prepare_candidate => try drivers.prepareCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
+        // The reviewed argv/bootstrap boundary lands before the side-effecting profile driver.
+        // Returning here prevents a newly accepted command from being mistaken for a successful no-op.
+        .prepare_profile_candidate => return error.ProfileStage3DriverUnavailable,
         .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .resume_candidate_publication => try drivers.resumeCandidatePublication(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),

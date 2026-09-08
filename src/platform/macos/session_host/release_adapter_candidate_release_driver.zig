@@ -438,6 +438,7 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
             hashSlice(&hash, command.zig_sha256);
         },
         .prepare_candidate => hash.update("prepare-candidate"),
+        .prepare_profile_candidate => hash.update("prepare-profile-candidate"),
         .pre_publish => hash.update("pre-publish"),
         .verify_predecessor => hash.update("verify-predecessor"),
         .prepare_candidate_aggregate => hash.update("prepare-candidate-aggregate"),

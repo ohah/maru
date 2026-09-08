@@ -98,12 +98,17 @@ test "정책 경계: 굽는 셀은 코어가 정하고, 다시 굽기는 «build
     defer allocator.free(ios);
     const android = try readSource(allocator, "src/platform/android/android_app_host.c");
     defer allocator.free(android);
+    const header = try readSource(allocator, "src/platform/mobile/mobile_host_abi.h");
+    defer allocator.free(header);
+
+    // **옛 상수는 «지웠다».** 남겨 두면 굽는 자리가 다시 그것을 집는다 — 그 실수를 판정자로
+    // 막는 것보다 심볼 자체를 없애는 편이 세다(그러면 컴파일이 안 된다).
+    try std.testing.expectEqual(@as(usize, 0), count(header, "#define MARU_ATLAS_CELL_W"));
+    try std.testing.expectEqual(@as(usize, 0), count(header, "#define MARU_ATLAS_CELL_H "));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_ATLAS_CELL_MAX "));
 
     for ([_][]const u8{ ios, android }) |host| {
-        // **크기는 코어에 묻는다.** 옛 상수를 굽는 자리에서 쓰면 안 된다.
-        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_W,"));
-        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_H,"));
-        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_H;"));
+        // **크기는 코어에 묻는다.**
         try std.testing.expect(count(host, "maru_mobile_atlas_cell_h()") > 0);
         // **그리는 배율을 알린다.** 안 알리면 코어가 1배로 알고 작게 굽는다(그 결함으로 한 바퀴 돌았다).
         // 횟수는 안 고정한다 — Android 는 굽기 앞(한 번)과 프레임마다(배율이 바뀔 수 있다) 둘이다.

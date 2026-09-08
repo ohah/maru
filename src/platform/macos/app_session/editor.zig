@@ -2544,7 +2544,7 @@ fn movedOffset(
 /// 「가로도 caret 을 따라간다」).
 fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
     revealPrimaryCaretRows(self, term, 0);
-    revealPrimaryCaretCols(self, term);
+    revealPrimaryCaretCols(self, term, 0, 0);
 }
 
 /// caret 이 **가로로** 화면 밖이면 그 열만큼 민다.
@@ -2552,7 +2552,7 @@ fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
 /// **폭은 렌더가 굳힌 것을 쓴다**(§4.1g ②) — 여기서 pane 사각을 다시 구하면 마지막 프레임과 다른
 /// 값이 나온다. 아직 한 프레임도 안 그렸으면(`content_width == 0`) 아무 일도 안 한다: 그때는
 /// 「밖이다」를 판정할 기준이 없고, 다음 프레임이 그리고 나면 다음 이동이 잡는다.
-fn revealPrimaryCaretCols(self: *AppSession, term: *Term) void {
+fn revealPrimaryCaretCols(self: *AppSession, term: *Term, fallback_cols: u16, fallback_max: u32) void {
     const doc = term.rt.editor_doc orelse return;
     const sel = term.rt.editor_selection orelse return;
     const off = @min(sel.focus, doc.file.content.len);
@@ -2562,7 +2562,20 @@ fn revealPrimaryCaretCols(self: *AppSession, term: *Term) void {
     var pcm = productColumnMap(term);
     const map = pcm.map();
     const col = map.columnOf(map.ctx, doc.file.content[line.start..line.contentEnd()], end - line.start);
-    revealCaretColumn(self, term, false, col, term.rt.editor_hit_geom.content_width, term.rt.editor_max_cols);
+    // **편집 직후에는 스냅숏이 비어 있다**(`refreshAfterEdit`). 세로가 `fallback_rows` 로 푸는 그
+    // 자리라, 가로도 **편집 전 폭**을 쓴다 — 안 그러면 긴 줄 끝에서 글자를 칠 때마다 caret 이 화면
+    // 밖으로 나가 안 돌아온다.
+    const drawn_cols = term.rt.editor_hit_geom.content_width;
+    const visible = if (drawn_cols != 0) drawn_cols else fallback_cols;
+    // **상한도 편집 전 것을 쓴다.** `refreshAfterEdit` 는 `max_cols` **도** 버리는데(⑷ 파생 수치),
+    // 0 을 상한으로 쓰면 `max_col` 이 0 이 되어 **가로가 통째로 왼쪽 끝으로 튄다** — 스크롤한 채
+    // 글자를 치면 화면이 되감기는 회귀다(실측으로 잡았다).
+    const max_cols = if (term.rt.editor_max_cols != 0) term.rt.editor_max_cols else fallback_max;
+    // **모르면 안 움직인다.** 상한이 0 이면 `max_col` 도 0 이라 가로가 통째로 왼쪽 끝으로 튄다 —
+    // 세로가 *"모를 때는 움직이는 쪽이 덜 나쁘다"* 로 고른 것과 **반대**다: 가로에서 모를 때
+    // 움직이는 것은 「되감기」이고, 그건 사용자가 보던 자리를 잃는 것이다.
+    if (max_cols == 0) return;
+    revealCaretColumn(self, term, false, col, visible, max_cols);
 }
 
 /// 한 열의 가로 위치를 caret 이 보이게 민다 — **단일 편집기와 비교 뷰가 같이 쓴다**.
@@ -3247,6 +3260,8 @@ fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = changes }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -3260,6 +3275,7 @@ fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = changes });
     revealPrimaryCaretRows(self, term, rows_before);
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
@@ -5777,6 +5793,8 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -5846,6 +5864,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     //
     // 이것이 없어서 화면 밖에서 편집하면 **자기가 어디를 고치는지 못 봤다**(적대적 검증 2026-08-26).
     revealPrimaryCaretRows(self, term, rows_before);
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     return true;
 }
 
@@ -6153,6 +6172,8 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -6166,6 +6187,7 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     revealPrimaryCaretRows(self, term, rows_before);
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
@@ -6184,6 +6206,8 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     const before_primary = sels.primary;
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -6195,6 +6219,7 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges });
     revealPrimaryCaretRows(self, term, rows_before);
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
@@ -6654,6 +6679,8 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -6673,6 +6700,7 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = dedup.items });
     revealPrimaryCaretRows(self, term, rows_before); // 붙여넣은 자리를 보여 준다(§5.2)
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     breakUndoGroup(term); // 다음 타이핑도 새 묶음이다
     self.metal_dirty = true;
     return true;
@@ -6784,6 +6812,8 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
+    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -6812,6 +6842,7 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     //
     // 이것이 없어서 화면 밖에서 편집하면 **자기가 어디를 고치는지 못 봤다**(적대적 검증 2026-08-26).
     revealPrimaryCaretRows(self, term, rows_before);
+    revealPrimaryCaretCols(self, term, cols_before, max_before);
     return true;
 }
 
@@ -6854,6 +6885,10 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 /// **selection은 여기서 안 건드린다** — `delta.apply`가 이미 같은 연산에서 밀어 놓았다(§3.3).
 /// 여기서 또 손대면 그 매핑을 덮어쓴다.
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
+    // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
+    const kept_col = term.rt.editor_first_col;
+    const kept_col_right = term.rt.editor_first_col_right;
     const doc = term.rt.editor_doc orelse return;
 
     // **문서가 바뀌면 「선택 영역 내에서만」의 범위를 버린다**(§5.1). 굳혀 둔 offset 이 이제 다른
@@ -6888,8 +6923,13 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // (`ranges`·`folded`·`folded_prev`·`marks`·`out_lines`), 64 MiB 상한 문서면 편집 한 번마다
     // 수십 MB를 잡는다. 무엇보다 **부분 실패라 프로세스가 살아서 계속 그린다.**
     defer {
-        // ⑷ 파생 수치.
+        // ⑷ 파생 수치. **가로 위치는 파생이 아니다** — `invalidateFoldDerived` 가 상한(`max_cols`)과
+        // 함께 `first_col` 까지 0 으로 되돌리는데, 그것은 사용자가 밀어 둔 **자리**다(세로가
+        // `first_line` 을 안 버리는 것과 같은 부류). 편집마다 되감기면 스크롤한 채 한 글자만 쳐도
+        // 화면이 왼쪽 끝으로 튄다. 접힘·탭 폭 경로는 오늘 동작을 그대로 두고 **편집만** 지킨다.
         invalidateFoldDerived(self, term);
+        term.rt.editor_first_col = kept_col;
+        term.rt.editor_first_col_right = kept_col_right;
 
         // ⑸ **렌더 스냅숏.** 다음 프레임이 다시 굳힐 때까지 클릭이 답할 것이 없어야 한다 —
         // 옛 값을 남기는 것보다 "아직 없다"가 낫다(hit-test가 `len == 0`을 이미 그렇게 다룬다).
@@ -14488,6 +14528,54 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
 
 fn pressKey(fx: *PaneFixture, key: maru.terminal.input.Key, mods: maru.terminal.input.ModifierSet) !void {
     _ = try fx.session.handleKeyEvent(.{ .key = key, .modifiers = mods });
+}
+
+test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상한으로 푼다 (키 경로)" {
+    // **편집은 렌더 스냅숏과 파생 수치를 버린다**(`refreshAfterEdit` ⑷⑸). 그래서 그 순간
+    // `content_width` 도 `max_cols` 도 0 이고, 세로가 `fallback_rows` 로 푸는 자리를 가로도
+    // **편집 전 폭·상한**으로 풀어야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "dhs7.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 300)) return error.FixtureWidth;
+
+    // ⑴ **오른쪽 가장자리에서 한 글자 치면 따라온다.** 줄 **끝**이 아니라 화면 가장자리다 —
+    //    끝에서 재면 상한이 답을 덮어써 아무것도 안 움직인다(그것은 아래 「한계」의 자리다).
+    term.rt.editor_first_col = 0;
+    term.rt.editor_selection = editor_selection.Selection.at(5 + visible - 1);
+    if (term.rt.editor_hit_geom.content_width == 0) return error.SnapshotAlreadyEmpty;
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (term.rt.editor_hit_geom.content_width != 0) return error.SnapshotNotCleared;
+    if (term.rt.editor_max_cols != 0) return error.MaxColsNotCleared;
+    if (term.rt.editor_first_col == 0) return error.HorizontalDidNotFollow;
+
+    // ⑵ **스크롤한 채로 쳐도 왼쪽 끝으로 안 튄다.** 상한을 편집 전 값으로 안 두면 `max_col` 이 0 이
+    //    되어 가로가 통째로 되감긴다 — 구현하다 실제로 그렇게 만들었고 이 단언이 잡았다.
+    term.rt.editor_first_col = 50;
+    term.rt.editor_selection = editor_selection.Selection.at(5 + 60);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (term.rt.editor_first_col == 0) return error.SnappedBackToZero;
+    try testing.expectEqual(@as(u16, 50), term.rt.editor_first_col); // 이미 보이므로 안 움직인다
+
+    // ⑶ **랩이면 편집도 가로를 안 건드린다.**
+    term.rt.editor_wrap = true;
+    term.rt.editor_first_col = 7;
+    term.rt.editor_selection = editor_selection.Selection.at(5 + 400);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(@as(u16, 7), term.rt.editor_first_col);
 }
 
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {

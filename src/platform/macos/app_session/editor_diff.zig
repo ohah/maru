@@ -3149,6 +3149,16 @@ test "DCOL1: ⌃⇧Tab 이 열을 넘기고 행은 그대로다 (handleKeyEvent)
     // `⌃Tab` 도 아니다 — macOS 에서 그것은 Switcher 자리다.
     _ = try fx.session.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .control = true } });
     try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+
+    // ⑷ **키를 삼킨다.** 열은 이미 넘어갔으니 상태만 보는 단언은 전부 초록이고, 갈리는 것은
+    //    「앱이 이 키를 처리했다」는 회계뿐이다 — 안 삼키면 같은 키가 아래 층에서 한 번 더 쓰인다.
+    const before = fx.session.total_app_key_events;
+    try pressSwitch(&fx);
+    try testing.expectEqual(before + 1, fx.session.total_app_key_events);
+    // **대조군** — 비교 갈래가 안 받는 조합은 이 회계를 안 늘린다.
+    const mid = fx.session.total_app_key_events;
+    _ = try fx.session.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .control = true, .shift = true, .command = true } });
+    try testing.expectEqual(mid, fx.session.total_app_key_events);
 }
 
 test "DCOL2: 넘어갈 때 **표시 열**을 유지한다 — 탭과 CJK (§4.1g 비교 뷰)" {

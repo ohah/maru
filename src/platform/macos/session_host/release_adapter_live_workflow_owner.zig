@@ -201,7 +201,7 @@ pub fn commandProcess(
     try command_process.prepareCurrent(io, allocator, workflow, arguments, execution);
     defer if (execution.owner == execution) execution.deinit() catch {};
     const invocation: Invocation = switch (execution.selection) {
-        .draft_authoring => .{ .draft_authoring = {} },
+        .draft_authoring, .profile_draft_authoring => .{ .draft_authoring = {} },
         .aggregate_prepare => .{ .aggregate_prepare = {} },
         .aggregate_finalize => .{ .aggregate_finalize = {} },
         .publication => .{ .publication = {} },
@@ -218,8 +218,7 @@ pub fn commandProcess(
 
 fn executeCommandProcess(raw: *anyopaque, selected: Identity) phase.Result {
     const execution: *command_process.Execution = @ptrCast(@alignCast(raw));
-    if (command_process.stage(execution.selection) != selected.stage or
-        !std.mem.eql(u8, command_process.commandName(execution.selection), selected.name)) return .cleanup_failed;
+    if (!command_process.matchesCheckpointIdentity(execution.selection, selected.stage, selected.name)) return .cleanup_failed;
     return command_process.run(execution);
 }
 

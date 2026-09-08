@@ -14981,6 +14981,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "release_adapter_github_transport", .module = transport_mod }},
             });
+            const profile_endorsement_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_endorsement.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const live_command_mod = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_workflow_command.zig"),
                 .target = target,
@@ -15004,6 +15005,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "release_adapter_files", .module = files_mod },
                     .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
                     .{ .name = "release_adapter_token_environment", .module = live_command_token_environment_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
                     .{ .name = "release_adapter_live_workflow_command", .module = live_command_mod },
                     .{ .name = "release_adapter_live_workflow_phase", .module = aggregate_child_phase_mod },
                 },
@@ -15586,7 +15588,6 @@ pub fn build(b: *std.Build) void {
             run_candidate_upgrade_runner_tests.addArg("--maru-expect-tests=5");
             run_candidate_upgrade_runner_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_upgrade_runner_step.dependOn(&run_candidate_upgrade_runner_tests.step);
-            const profile_endorsement_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_endorsement.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const profile_predecessor_binding_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_predecessor_binding.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod }, .{ .name = "release_adapter_predecessor_evidence_identity", .module = predecessor_evidence_identity_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const profile_predecessor_binding_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_profile_predecessor_binding.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod }, .{ .name = "release_adapter_profile_predecessor_binding", .module = profile_predecessor_binding_mod } } }) });
             const run_profile_predecessor_binding_tests = b.addRunArtifact(profile_predecessor_binding_tests);

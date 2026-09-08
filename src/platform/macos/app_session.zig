@@ -73,6 +73,7 @@ extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host �
 pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
 pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
 pub const file_tree_backend = @import("file_tree_backend.zig");
+const detached_worker_wait = @import("detached_worker_wait.zig");
 pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 pub const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
 pub const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
@@ -21642,7 +21643,31 @@ pub const AppSession = struct {
         return frame;
     }
 
+    /// 판정자 전용 — 세션이 든 detached-worker backend 를 전부 재운다(`AppSession.deinit` 의 첫 줄).
+    ///
+    /// **새 backend 를 세션에 달면 여기에 한 줄 더한다.** 빠뜨리면 빠른 기계에서는 아무 일도 안 일어나고
+    /// 느린 CI 에서만, 그것도 **엉뚱한 판정자 이름으로** 터진다.
+    fn quietDetachedWorkersForTest(self: *AppSession) void {
+        if (self.file_tree_initialized) {
+            detached_worker_wait.quiet(&self.file_tree_backend, self.io);
+            detached_worker_wait.quiet(&self.file_tree_mutation_backend, self.io);
+            if (self.agent_session_archive_initialized) {
+                detached_worker_wait.quiet(&self.agent_session_archive_backend, self.io);
+                detached_worker_wait.quiet(&self.agent_session_archive_detail_backend, self.io);
+                detached_worker_wait.quiet(&self.agent_session_archive_scope_backend, self.io);
+            }
+        }
+        if (self.git_backend) |*backend| detached_worker_wait.quiet(backend, self.io);
+    }
+
     pub fn deinit(self: *AppSession) void {
+        // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
+        // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
+        // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각
+        // backend 의 `deinit` 이 그대로 든다. **여기 한 자리**인 이유는 이 backend 들을 쓰는 판정자가
+        // 수십 개라, 규율을 그만큼 나눠 두면 새로 쓰는 사람이 반드시 빠뜨리기 때문이다.
+        // 이미지 스캔·디코드 backend 는 제품 `deinit` 에서 이미 워커를 거두므로 여기 없다.
+        if (builtin.is_test) quietDetachedWorkersForTest(self);
         unregisterRecoveredSessionWindow(self);
         // 훅 이벤트 로그는 «기록» 이 아니라 «소비 즉시 비우는 큐» 다(docs/agent-hooks.md §4.2) — 그 안에는
         // 프롬프트 원문과 셸 명령이 평문으로 들어 있다. Term 을 놓기 **전에** 지운다(surfaceId 가 필요하다).

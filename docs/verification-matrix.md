@@ -3352,8 +3352,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   manifest와 다시 교차 결속하며 timing은 preparation의 sibling에서만 fresh reopen한다.
   `test-session-host-release-adapter-profile-authored-attestation-selector`는 Debug·ReleaseFast actual private APFS에서 두 profile의 exact 2/3
   subject, baseline timing 부재, nested timing 거부, profile/predecessor/environment/subject drift, caller pathname copy, copied owner seal과
-  allocation fail-index unwind를 검증한다. 아직 구현 전인 범위는 projection의 fresh-process CLI serialization, profile별 2/3 GitHub
-  attestation 호출, 독립 final-fence process, bundle 검증과 live action checkpoint 결속이다.
+  allocation fail-index unwind를 검증한다. 같은 gate의 fresh-process projection 행은 다섯 option의 exact-once parser와 control-byte 거부,
+  owner/seal/FD를 제외한 일곱 scalar의 canonical bytes, pre-output failure의 stdout 0과 실제 child 20회/profile의 median·p95·max,
+  stderr·FD·residue 0을 고정한다. 아직 구현 전인 범위는 profile별 2/3 GitHub attestation 호출, 독립 final-fence process, bundle 검증과
+  live action checkpoint 결속이다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.

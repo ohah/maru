@@ -2587,6 +2587,14 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
 
     const max_col: u32 = @min(max_cols -| visible, @as(u32, chrome_editor.frame.max_first_col));
     want = @min(want, max_col);
+    // **아래 넷은 방어이지 판정할 수 없다**(변이 1~4회차 H11·H19·H20·H22·H23).
+    //  · `want == first` 조기 반환: 같은 값을 다시 써도 상태가 안 바뀐다.
+    //  · `u16` 포화: 위 `max_col` 이 이미 `max_first_col`(10,000)로 묶어 65,535 를 넘을 수 없다.
+    //  · `metal_dirty`: 부르는 쪽(`moveCarets`·`diffMove`)이 곧바로 세운다 — `clampOneColumn` 이
+    //    같은 이유로 같은 줄을 갖고 있고, 그 관례를 여기서만 깨지 않는다.
+    //  · caret byte 자르기(단일의 `contentEnd()`·비교의 `text.len`): 이동이 그 밖에 caret 을 두지
+    //    않는다. 그래도 두는 이유는 `cursorPosition` 이 **CRLF 줄에서 CR 을 한 글자로 세는** 사고를
+    //    같은 clamp 로 막은 전례가 있어서다.
     if (want == first) return;
     slot.* = @intCast(@min(want, std.math.maxInt(u16)));
     self.metal_dirty = true;

@@ -66,6 +66,9 @@ runs:
         printf 'app-cli=%s/Maru.app/Contents/MacOS/maru\n' "$MARU_CANDIDATE"
         printf 'dmg-work=%s/dmg-work\n' "$MARU_LIVE_ROOT"
         printf 'baseline-workspace=%s/baseline-workspace\n' "$MARU_LIVE_ROOT"
+        printf 'predecessor-workspace=%s/predecessor-workspace\n' "$MARU_LIVE_ROOT"
+        printf 'upgrade-workspace=%s/upgrade-workspace\n' "$MARU_LIVE_ROOT"
+        printf 'timing-output=%s/profile-upgrade-timing.json\n' "$MARU_LIVE_ROOT"
         printf 'manifest=%s\n' "$MARU_MANIFEST"
         printf 'manifest-name=%s\n' "${MARU_MANIFEST##*/}"
         printf 'preparation=%s/durable-preparation\n' "$MARU_LIVE_ROOT"
@@ -98,7 +101,7 @@ runs:
       checkpoint-root: ${{ steps.setup.outputs.checkpoint-root }}
       checkpoint-root-identity: ${{ steps.setup.outputs.checkpoint-root-identity }}
 
-  - name: Author baseline evidence and draft
+  - name: Author profile-selected evidence and draft
     id: session-host-draft-authoring
     shell: bash
     env:
@@ -114,6 +117,9 @@ runs:
       MARU_FROZEN: ${{ steps.setup.outputs.frozen }}
       MARU_DMG_WORK: ${{ steps.setup.outputs.dmg-work }}
       MARU_BASELINE_WORKSPACE: ${{ steps.setup.outputs.baseline-workspace }}
+      MARU_PREDECESSOR_WORKSPACE: ${{ steps.setup.outputs.predecessor-workspace }}
+      MARU_UPGRADE_WORKSPACE: ${{ steps.setup.outputs.upgrade-workspace }}
+      MARU_TIMING_OUTPUT: ${{ steps.setup.outputs.timing-output }}
       MARU_APP_MAIN: ${{ steps.setup.outputs.app-main }}
       MARU_APP_CLI: ${{ steps.setup.outputs.app-cli }}
       MARU_MANIFEST: ${{ steps.setup.outputs.manifest }}
@@ -126,8 +132,8 @@ runs:
       MARU_PREPARATION: ${{ steps.setup.outputs.preparation }}
     run: |
       set -euo pipefail
-      "$MARU_WORKFLOW_EXE" run "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
-        prepare-candidate --repo ohah/maru --tag "$MARU_TAG" \
+      "$MARU_WORKFLOW_EXE" run-profiled-stage3 "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
+        --repo ohah/maru --tag "$MARU_TAG" \
         --github-cli "$MARU_GH" --github-cli-sha256 "$MARU_GH_SHA256" \
         --test-uuid "$MARU_UUID" --dmg "$MARU_DMG" --frozen-executable "$MARU_FROZEN" \
         --candidate-dmg-bundle "$MARU_DMG_BUNDLE" --candidate-frozen-bundle "$MARU_FROZEN_BUNDLE" \
@@ -135,7 +141,9 @@ runs:
         --app-main-executable "$MARU_APP_MAIN" --app-cli-executable "$MARU_APP_CLI" \
         --manifest "$MARU_MANIFEST" --source-root "$MARU_SOURCE_ROOT" \
         --zig "$MARU_ZIG" --zig-size "$MARU_ZIG_SIZE" --zig-sha256 "$MARU_ZIG_SHA256" \
-        --durable-preparation "$MARU_PREPARATION"
+        --durable-preparation "$MARU_PREPARATION" \
+        --predecessor-workspace "$MARU_PREDECESSOR_WORKSPACE" \
+        --upgrade-workspace "$MARU_UPGRADE_WORKSPACE" --timing-output "$MARU_TIMING_OUTPUT"
 
   - name: Attest authored evidence pair
     id: session-host-authored-attestation

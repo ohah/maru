@@ -121,6 +121,37 @@ test "profile stage3 bootstrap rejects missing injection and nested authority pa
     try std.testing.expectError(error.InvalidManifestAssetName, adapter.parseArgs(&wrong_manifest));
 }
 
+test "stage3 source root contains only immutable candidate products" {
+    var baseline: [39][]const u8 = undefined;
+    const publish = candidateArgs();
+    @memcpy(baseline[0..publish.len], &publish);
+    baseline[0] = "prepare-candidate";
+    baseline[publish.len] = "--durable-preparation";
+    baseline[publish.len + 1] = "/tmp/preparation";
+    _ = try adapter.parseArgs(&baseline);
+
+    var profile = profileStage3Args();
+    setOption(&profile, "--source-root", "/tmp/candidate");
+    _ = try adapter.parseArgs(&profile);
+
+    setOption(&profile, "--upgrade-workspace", "/tmp/candidate/upgrade-workspace");
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&profile));
+    setOption(&profile, "--upgrade-workspace", "/tmp/upgrade-work");
+    setOption(&profile, "--timing-output", "/tmp/candidate/timing.json");
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&profile));
+}
+
+fn setOption(args: [][]const u8, option: []const u8, value: []const u8) void {
+    var index: usize = 1;
+    while (index + 1 < args.len) : (index += 2) {
+        if (std.mem.eql(u8, args[index], option)) {
+            args[index + 1] = value;
+            return;
+        }
+    }
+    unreachable;
+}
+
 fn prepareAggregateArgs() [21][]const u8 {
     return .{
         "prepare-candidate-aggregate",      "--repo",                           "ohah/maru",                      "--tag",                                                            "v1.2.3",

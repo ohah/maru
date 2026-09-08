@@ -70,6 +70,10 @@ pub fn main(init: std.process.Init) !void {
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .missing);
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .noncanonical);
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .control);
+    try runProfiledDispatcherCase(init.io, init.gpa, wrapper, validator_fixture, iterations, baseline_document, "prepare-candidate", "profiled-baseline");
+    try runProfiledDispatcherCase(init.io, init.gpa, wrapper, validator_fixture, iterations, profile_document, "prepare-profile-candidate", "profiled-upgrade");
+    try runProfiledDispatcherFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, null, "profiled-missing");
+    try runProfiledDispatcherFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, "{}\nnoise", "profiled-noncanonical");
     if (successful == 0 or profile_successful == 0) return error.NoSuccessfulRuns;
     const fd_after = try openFdCount(init.io);
     if (fd_after < fd_before) return error.ProcessInvariantFailed;
@@ -229,6 +233,38 @@ fn runProfileEnvironmentFailureCase(io: std.Io, allocator: std.mem.Allocator, wr
     if (std.Io.Dir.cwd().access(io, workspace.preparationPath(), .{})) |_| return error.UnexpectedResidue else |_| {}
 }
 
+fn runProfiledDispatcherCase(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize, document: []const u8, expected_command: []const u8, mode: []const u8) !void {
+    var workspace = try Workspace.init(io, allocator, fixture, index, mode);
+    defer workspace.deinit(io);
+    var environment = try workspace.environment(allocator);
+    defer environment.deinit();
+    try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", document);
+    const token = try workspace.bootstrap(io, allocator);
+    try workspace.settle(io, allocator, token, .candidate_pinning);
+    try workspace.settle(io, allocator, token, .candidate_attestation);
+    var args = workspace.profiledArgs();
+    _ = try runProfiledWrapper(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+    try workspace.expectCommand(io, expected_command);
+    try workspace.expectCount(io, allocator, token, 3, .active);
+    workspace.remove(io);
+    if (workspace.exists(io)) return error.ProcessInvariantFailed;
+}
+
+fn runProfiledDispatcherFailureCase(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize, document: ?[]const u8, mode: []const u8) !void {
+    var workspace = try Workspace.init(io, allocator, fixture, index, mode);
+    defer workspace.deinit(io);
+    var environment = try workspace.environment(allocator);
+    defer environment.deinit();
+    if (document) |value| try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", value);
+    const token = try workspace.bootstrap(io, allocator);
+    try workspace.settle(io, allocator, token, .candidate_pinning);
+    try workspace.settle(io, allocator, token, .candidate_attestation);
+    var args = workspace.profiledArgs();
+    try runProfiledWrapperExpectFailure(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+    try workspace.expectCount(io, allocator, token, 2, .active);
+    if (std.Io.Dir.cwd().access(io, workspace.preparationPath(), .{})) |_| return error.UnexpectedResidue else |_| {}
+}
+
 fn runWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !u64 {
     const started = monotonicNs();
     const result = try invokeWrapper(io, allocator, wrapper, root, token, args, environment);
@@ -262,6 +298,43 @@ fn invokeWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, 
     argv[3] = token;
     for (args, 0..) |arg, index| argv[index + 4] = arg;
     return std.process.run(allocator, io, .{ .argv = argv[0 .. args.len + 4], .environ_map = environment, .stdout_limit = .limited(1), .stderr_limit = .limited(1) });
+}
+
+fn runProfiledWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !u64 {
+    var argv: [1 + 3 + 44][]const u8 = undefined;
+    argv[0] = wrapper;
+    argv[1] = "run-profiled-stage3";
+    argv[2] = root;
+    argv[3] = token;
+    for (args, 0..) |arg, index| argv[index + 4] = arg;
+    const started = monotonicNs();
+    const result = try std.process.run(allocator, io, .{ .argv = argv[0 .. args.len + 4], .environ_map = environment, .stdout_limit = .limited(1), .stderr_limit = .limited(1) });
+    const elapsed = monotonicNs() - started;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.WrapperFailed,
+        else => return error.WrapperFailed,
+    }
+    if (result.stdout.len != 0 or result.stderr.len != 0 or elapsed == 0) return error.UnexpectedOutput;
+    return elapsed;
+}
+
+fn runProfiledWrapperExpectFailure(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !void {
+    var argv: [1 + 3 + 44][]const u8 = undefined;
+    argv[0] = wrapper;
+    argv[1] = "run-profiled-stage3";
+    argv[2] = root;
+    argv[3] = token;
+    for (args, 0..) |arg, index| argv[index + 4] = arg;
+    const result = try std.process.run(allocator, io, .{ .argv = argv[0 .. args.len + 4], .environ_map = environment, .stdout_limit = .limited(1), .stderr_limit = .limited(1) });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code == 0) return error.ExpectedFailure,
+        else => return error.WrapperFailed,
+    }
+    if (result.stdout.len != 0 or result.stderr.len != 0) return error.UnexpectedOutput;
 }
 
 const Workspace = struct {
@@ -303,6 +376,7 @@ const Workspace = struct {
         var dir = try std.Io.Dir.openDirAbsolute(io, root, .{});
         defer dir.close(io);
         try dir.createDirPath(io, "zig-out/bin");
+        try dir.createDirPath(io, "checkout/dist/session-host-candidate-1.2.3/Maru.app/Contents/MacOS");
         try dir.createDir(io, "checkpoint", .default_dir);
         try dir.createDir(io, "work", .default_dir);
         var checkpoint_storage: [std.fs.max_path_bytes:0]u8 = undefined;
@@ -326,19 +400,19 @@ const Workspace = struct {
         errdefer allocator.free(aggregate);
         const manifest = try std.fmt.allocPrint(allocator, "{s}/work/Maru-1.2.3-session-host-release.json", .{root});
         errdefer allocator.free(manifest);
-        const dmg = try std.fmt.allocPrint(allocator, "{s}/work/Maru-1.2.3-universal.dmg", .{root});
+        const dmg = try std.fmt.allocPrint(allocator, "{s}/checkout/dist/session-host-candidate-1.2.3/Maru-1.2.3-universal.dmg", .{root});
         errdefer allocator.free(dmg);
-        const frozen_executable = try std.fmt.allocPrint(allocator, "{s}/work/maru-session-host-1.2.3", .{root});
+        const frozen_executable = try std.fmt.allocPrint(allocator, "{s}/checkout/dist/session-host-candidate-1.2.3/maru-session-host-1.2.3", .{root});
         errdefer allocator.free(frozen_executable);
         const dmg_work = try std.fmt.allocPrint(allocator, "{s}/work/dmg", .{root});
         errdefer allocator.free(dmg_work);
         const baseline_workspace = try std.fmt.allocPrint(allocator, "{s}/work/baseline", .{root});
         errdefer allocator.free(baseline_workspace);
-        const app_main_executable = try std.fmt.allocPrint(allocator, "{s}/work/maru-macos-app", .{root});
+        const app_main_executable = try std.fmt.allocPrint(allocator, "{s}/checkout/dist/session-host-candidate-1.2.3/Maru.app/Contents/MacOS/maru-macos-app", .{root});
         errdefer allocator.free(app_main_executable);
-        const app_cli_executable = try std.fmt.allocPrint(allocator, "{s}/work/maru", .{root});
+        const app_cli_executable = try std.fmt.allocPrint(allocator, "{s}/checkout/dist/session-host-candidate-1.2.3/Maru.app/Contents/MacOS/maru", .{root});
         errdefer allocator.free(app_cli_executable);
-        const source_root = try std.fmt.allocPrint(allocator, "{s}/source", .{root});
+        const source_root = try std.fmt.allocPrint(allocator, "{s}/checkout", .{root});
         errdefer allocator.free(source_root);
         const zig_path = try std.fmt.allocPrint(allocator, "{s}/work/zig-placeholder", .{root});
         errdefer allocator.free(zig_path);
@@ -514,7 +588,15 @@ const Workspace = struct {
     fn readPid(self: *Workspace, io: std.Io, marker: []const u8) !c.pid_t {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, marker, self.allocator, .limited(64));
         defer self.allocator.free(bytes);
-        return std.fmt.parseInt(c.pid_t, std.mem.trim(u8, bytes, "\r\n"), 10);
+        const separator = std.mem.lastIndexOfScalar(u8, std.mem.trim(u8, bytes, "\r\n"), ' ') orelse return error.InvalidMarker;
+        return std.fmt.parseInt(c.pid_t, std.mem.trim(u8, bytes[separator + 1 ..], "\r\n"), 10);
+    }
+
+    fn expectCommand(self: *Workspace, io: std.Io, expected: []const u8) !void {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, self.preparationPath(), self.allocator, .limited(128));
+        defer self.allocator.free(bytes);
+        const separator = std.mem.indexOfScalar(u8, bytes, ' ') orelse return error.InvalidMarker;
+        try std.testing.expectEqualStrings(expected, bytes[0..separator]);
     }
 
     fn prepareArgs(self: *Workspace) [39][]const u8 {
@@ -534,6 +616,19 @@ const Workspace = struct {
             self.candidate_frozen_bundle, "--dmg-work",                           self.dmg_work,      "--manifest",        self.manifestPath(),       "--source-root",            self.source_root,         "--zig",                   self.zig_path,
             "--zig-size",                 "1",                                    "--zig-sha256",     &self.validator_sha, "--predecessor-workspace", self.predecessor_workspace, "--upgrade-workspace",    self.upgrade_workspace,    "--durable-preparation",
             self.preparationPath(),       "--timing-output",                      self.timing_output,
+        };
+    }
+
+    fn profiledArgs(self: *Workspace) [44][]const u8 {
+        return .{
+            "--repo",                "ohah/maru",             "--tag",                   "v1.2.3",                               "--github-cli",              self.validator,
+            "--github-cli-sha256",   &self.validator_sha,     "--test-uuid",             "123e4567-e89b-42d3-a456-426614174000", "--dmg",                     self.dmg,
+            "--frozen-executable",   self.frozen_executable,  "--candidate-dmg-bundle",  self.candidate_dmg_bundle,              "--candidate-frozen-bundle", self.candidate_frozen_bundle,
+            "--dmg-work",            self.dmg_work,           "--baseline-workspace",    self.baseline_workspace,                "--app-main-executable",     self.app_main_executable,
+            "--app-cli-executable",  self.app_cli_executable, "--manifest",              self.manifestPath(),                    "--source-root",             self.source_root,
+            "--zig",                 self.zig_path,           "--zig-size",              "1",                                    "--zig-sha256",              &self.validator_sha,
+            "--durable-preparation", self.preparationPath(),  "--predecessor-workspace", self.predecessor_workspace,             "--upgrade-workspace",       self.upgrade_workspace,
+            "--timing-output",       self.timing_output,
         };
     }
 
@@ -584,3 +679,4 @@ fn monotonicNs() u64 {
 
 const source_sha = "0123456789abcdef0123456789abcdef01234567";
 const profile_document = "{\"schema\":\"maru.session-host-release-profile.v1\",\"profile\":\"upgrade_b\",\"predecessor\":{\"release_id\":41,\"tag\":\"v1.1.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"manifest_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}\n";
+const baseline_document = "{\"schema\":\"maru.session-host-release-profile.v1\",\"profile\":\"baseline_a\"}\n";

@@ -174,7 +174,10 @@ const inventory = [_]Entry{
     // 자리(뒤로가기 아이콘)까지 이름을 붙여야 스크린 리더가 읽으므로, 서술자를 다는 만큼 이 수는
     // 는다. **줄이 아니라 표면 전체가 걸린 문제다** — 모바일이 OS 로케일을 받는 슬라이스가 이
     // 원장을 통째로 0 으로 만든다.
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 81 },
+    // 84: 첫 실행이 서버 화면에서 서게 되면서(M16a), **목록이 답하는 글이 낭독기에도 읽혀야**
+    // 한다 — 「등록된 서버가 없습니다」·「받는 중」·「없다」에 서술자를 달았다(셋). 화면이 말하는데
+    // 낭독기에는 침묵이면 그 사용자에게 첫 화면은 줄 두 개뿐인 빈 목록이다.
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 84 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     // 9: `sectionOf` 가 namespace 마다 화면 헤더를 답하는데, 그 목록도 같은 comptime 테이블에서
     // 쓰인다 — `system_theme`(M13 시스템 다크/라이트)이 늘면서 한 줄이 늘었다. **줄이 아니라

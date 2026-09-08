@@ -81,8 +81,23 @@ esctest는 black-box로 응답을 *질의해 추론*하지만, Maru는 white-box
 | CPR `CSI 6 n` | `CSI row ; col R`(1-indexed) | ECMA-48 8.3.14 (CPR) |
 | DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`(Pm 0/1/2) | DEC STD 070, xterm ctlseqs (DECRQM/DECRPM) |
 
-DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. 우리는 아는 모드(2027/
-2004/25/1)는 현재 상태(1/2)를, 모르는 모드는 0을 답한다 — 앱이 mode 지원을 감지하고 켤 수 있게.
+DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. **`setPrivateModes`가 구현한
+모드는 전부** 현재 상태(1/2)를, 모르는 모드만 0을 답한다 — 앱이 mode 지원을 감지하고 켤 수 있게.
+
+> **0은 "그 기능이 없다"는 선언이다.** 구현해 둔 모드를 0으로 답하면 앱은 **쓸 수 있는 기능을 스스로
+> 끈다**. 이 문장은 한때 "아는 모드(2027/2004/25/1)"라고 적혀 6개만 답하는 상태를 정상으로 기술했고,
+> 그동안 1016(SGR-pixels)·1006·1000~1004처럼 **구현된** 모드가 전부 0을 받았다. 실측(2026-09-08):
+> terminal-browser가 `CSI ?1016$p`로 픽셀 마우스를 묻고 0을 받아 셀 단위 좌표로 폴백했다(브라우저
+> 클릭이 어긋남). 두 목록은 `parser.zig`에서 1:1로 붙어 있어야 하고, 판정자가 그것을 고정한다
+> (`DECRQM answers every private mode setPrivateModes implements`).
+
+XTWINOPS(`CSI Ps t`)는 **보고형만** 답한다 — 14=텍스트 영역 픽셀(`CSI 4;h;w t`), 16=셀 픽셀
+(`CSI 6;h;w t`), 18=문자 단위(`CSI 8;rows;cols t`). 셀 픽셀은 platform이 `setCellMetrics`로 주입한
+값이 단일 출처이고, 없으면(헤드리스) **답하지 않는다** — 0을 보고하면 앱이 그 값으로 나눠 기하가
+깨진다. 창 조작(이동·리사이즈·아이콘화)과 제목 보고(20/21)는 구현하지 않는다: 앞은 앱이 사용자
+창을 흔들게 하고, 뒤는 창 제목에 심은 문자열을 입력 스트림으로 되돌리는 주입 경로다(xterm ctlseqs
+가 직접 경고한다). 같은 셀 픽셀이 PTY winsize의 `ws_xpixel`/`ws_ypixel`에도 실린다(`pty/macos.zig`
+`winsizeFromTerminalSize`) — 이미지 앱은 그 둘 중 하나로 셀 크기를 구하므로 둘 다 채워야 한다.
 
 XTVERSION은 단말 **자기식별**의 백본이다. DA1/DA2가 범용 VT102/VT220 신원만 주는 것과 달리
 `DCS > | maru <version> ST`로 "이 단말은 maru다"를 이름으로 알려, terminfo 파일이 원격에 없어도

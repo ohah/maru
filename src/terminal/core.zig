@@ -7445,6 +7445,120 @@ test "DECRQM reports mode 2027 state so apps can detect support" {
     try std.testing.expectEqualStrings("\x1b[?9999;0$y", core.pendingResponse());
 }
 
+test "DECRQM answers every private mode setPrivateModes implements (1016 was reported unsupported)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // **회귀 판정**: maru는 SGR-pixels(1016)를 구현하는데 DECRQM이 0(미인식)을 답했다. 픽셀 마우스를
+    // 묻고 폴백하는 앱(terminal-browser)이 셀 단위 좌표로 떨어져 클릭이 어긋났다(2026-09-08 실측).
+    try core.write("\x1b[?1016$p");
+    try std.testing.expectEqualStrings("\x1b[?1016;2$y", core.pendingResponse()); // 인식하되 꺼짐
+    core.clearResponse();
+    try core.write("\x1b[?1016h\x1b[?1016$p");
+    try std.testing.expectEqualStrings("\x1b[?1016;1$y", core.pendingResponse());
+    core.clearResponse();
+    // 마우스 tracking/format은 enum 하나를 나눠 쓰므로 "켠 것만 1"이어야 한다(1006을 켜면 1016은 꺼진다).
+    try core.write("\x1b[?1006h\x1b[?1006$p\x1b[?1016$p");
+    try std.testing.expectEqualStrings("\x1b[?1006;1$y\x1b[?1016;2$y", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[?1003h\x1b[?1003$p\x1b[?1000$p");
+    try std.testing.expectEqualStrings("\x1b[?1003;1$y\x1b[?1000;2$y", core.pendingResponse());
+    core.clearResponse();
+    // alt screen 계열은 한 상태로 수렴한다 — 1049로 들어가면 47/1047도 set으로 보고한다.
+    try core.write("\x1b[?1049h\x1b[?47$p\x1b[?1047$p\x1b[?1049$p");
+    try std.testing.expectEqualStrings("\x1b[?47;1$y\x1b[?1047;1$y\x1b[?1049;1$y", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[?1049l");
+    core.clearResponse();
+    // **setPrivateModes가 아는 모드는 하나도 0(미인식)이면 안 된다** — 한쪽에만 모드를 더하는 사고를 막는다.
+    const known = [_]u16{ 1, 5, 6, 7, 9, 25, 47, 1000, 1002, 1003, 1004, 1006, 1007, 1015, 1016, 1047, 1049, 2004, 2026, 2027 };
+    for (known) |mode| {
+        var buf: [24]u8 = undefined;
+        try core.write(try std.fmt.bufPrint(&buf, "\x1b[?{d}$p", .{mode}));
+        try std.testing.expect(!std.mem.endsWith(u8, core.pendingResponse(), ";0$y"));
+        core.clearResponse();
+    }
+}
+
+test "XTWINOPS (CSI 14/16/18 t) reports pixel geometry, stays silent without cell metrics" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    // 셀 메트릭 미주입(헤드리스): 14/16은 **답하지 않는다**. 0을 보고하면 앱이 그 값으로 나눠
+    // 캔버스 해상도·마우스 환산이 통째로 깨진다(무응답이 오답보다 낫다).
+    try core.write("\x1b[14t\x1b[16t");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 18(문자 단위)은 메트릭 없이도 답한다.
+    try core.write("\x1b[18t");
+    try std.testing.expectEqualStrings("\x1b[8;24;80t", core.pendingResponse());
+    core.clearResponse();
+    core.setCellMetrics(9, 20);
+    try core.write("\x1b[16t"); // 셀 픽셀: CSI 6 ; height ; width t
+    try std.testing.expectEqualStrings("\x1b[6;20;9t", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[14t"); // 텍스트 영역 픽셀: 24*20 × 80*9
+    try std.testing.expectEqualStrings("\x1b[4;480;720t", core.pendingResponse());
+    core.clearResponse();
+    // 창 조작(deiconify·move·resize)과 제목 보고(20/21)는 구현하지 않는다 — 침묵한다.
+    try core.write("\x1b[1t\x1b[3;10;10t\x1b[4;100;100t\x1b[20t\x1b[21t");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // `CSI 14;2t`(창 전체 크기) 같은 변종도 답하지 않는다 — chrome 포함 크기를 코어는 모른다.
+    try core.write("\x1b[14;2t");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "kitty graphics replies (K5): query validates without storing, quiet levels, error codes" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // a=q(query): 저장하지 않고 OK만 회신한다. **이 응답 하나가 "이 터미널은 kitty graphics를
+    // 한다"의 유일한 증거**다 — terminal-browser·icat·timg가 모두 이걸로 감지한다(2026-09-08 실측:
+    // 무응답이라 maru가 미지원으로 판정됐다). f=24,s=1,v=1 → 3바이트, "AAAA"가 정확히 그것이다.
+    try core.write("\x1b_Gi=31,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=31;OK\x1b\\", core.pendingResponse());
+    try std.testing.expect(!core.kitty_images.map.contains(31)); // query는 저장하지 않는다
+    core.clearResponse();
+    // 전송 매체 f/t/s는 payload가 픽셀이 아니라 경로다 — 무음 폐기가 아니라 명시 거부해야 앱이 폴백한다.
+    try core.write("\x1b_Gi=300,a=q,t=f,f=32,s=1,v=1;L3RtcC94\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=300;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 정상 transmit은 OK.
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // q=2(quiet): 성공도 실패도 침묵 — terminal-browser가 매 frame 쓰는 경로다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=8,q=2;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try std.testing.expect(core.kitty_images.map.contains(8)); // 침묵해도 저장은 됐다
+    // q=1: 성공은 침묵, 실패는 보고.
+    try core.write("\x1b_Ga=t,f=99,s=2,v=2,i=9,q=1;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=9;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=10,q=1;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // display: 없는 이미지는 ENOENT, placement_id가 있으면 응답에 p=를 싣는다.
+    try core.write("\x1b_Ga=p,i=99,p=3\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=99,p=3;ENOENT:no such image\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b_Ga=p,i=7\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 애니메이션(a=a)은 미구현 — 침묵 대신 명시 거부.
+    try core.write("\x1b_Ga=a,i=7,r=1\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=7;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 식별자(i=)가 없으면 어느 명령의 응답인지 못 가리므로 보내지 않는다(명세).
+    try core.write("\x1b_Ga=t,f=32,s=2,v=2;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // delete는 성공을 보고하고, 미지원 타깃(d=c 커서 아래)은 ENOTSUPP다.
+    try core.write("\x1b_Ga=d,d=I,i=7\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b_Ga=d,d=c,i=8\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=8;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+}
+
 test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();

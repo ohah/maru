@@ -427,6 +427,11 @@ pub const PtySession = struct {
     // master_fd는 reader가 끝난(join) 뒤 deinit에서만 닫아 fd 재사용 레이스를 없앤다.
     wake_read_fd: std.posix.fd_t,
     wake_write_fd: std.atomic.Value(std.posix.fd_t),
+    /// PTY winsize의 픽셀 필드(`ws_xpixel`/`ws_ypixel`)를 채우기 위한 셀 픽셀 크기. platform이 폰트·DPI
+    /// 변경마다 `setCellPixels`로 갱신한다. **0이면 "모른다"**이고, 그때는 픽셀 필드를 0으로 둔다 —
+    /// 추정값을 보고하면 그것을 나누는 앱의 기하가 조용히 어긋난다(0은 앱이 폴백할 수 있는 신호다).
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
 
     /// Live host exec-upgrade eligibility. 이 값들은 serialization 대상이 아니라 quiesce barrier가 모두 false/open임을
     /// 증명하는 lifecycle guard다.
@@ -651,7 +656,7 @@ pub const PtySession = struct {
         var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane);
         defer env_storage.deinit();
 
-        var window_size = winsizeFromTerminalSize(request.size);
+        var window_size = winsizeFromTerminalSize(request.size, request.cell_width_px, request.cell_height_px);
         var master_fd: std.c.fd_t = undefined;
         var slave_fd: std.c.fd_t = undefined;
         if (openpty(&master_fd, &slave_fd, null, null, &window_size) < 0) return error.OpenptyFailed;
@@ -695,6 +700,9 @@ pub const PtySession = struct {
             .size = request.size,
             .wake_read_fd = wake_fds[0],
             .wake_write_fd = std.atomic.Value(std.posix.fd_t).init(wake_fds[1]),
+            // openpty에 넘긴 winsize와 같은 값을 보관한다 — 이후 setCellPixels의 "바뀌었나" 비교 기준.
+            .cell_width_px = request.cell_width_px,
+            .cell_height_px = request.cell_height_px,
         };
     }
 
@@ -925,9 +933,24 @@ pub const PtySession = struct {
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
         const fd = try self.activeMasterFd();
-        var window_size = winsizeFromTerminalSize(size);
+        var window_size = winsizeFromTerminalSize(size, self.cell_width_px, self.cell_height_px);
         if (std.c.ioctl(fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
         self.size = size;
+    }
+
+    /// 셀 픽셀 크기를 갱신하고, 바뀌었으면 현재 그리드로 winsize를 다시 적용한다.
+    ///
+    /// **폰트 크기·DPI가 바뀌면 rows/cols가 그대로여도 픽셀 크기는 달라진다** — 그때 `resize`는 안 불리므로
+    /// 이 경로가 유일한 갱신 지점이다. 값이 실제로 바뀔 때만 `TIOCSWINSZ`를 쏜다: 이 ioctl은 자식에게
+    /// `SIGWINCH`를 보내므로, 매 frame 주입되는 셀 메트릭을 그대로 흘리면 셸에 시그널 폭풍이 된다.
+    /// PTY가 이미 닫혔으면 조용히 값만 보관한다(다음 spawn/resize가 반영).
+    pub fn setCellPixels(self: *PtySession, cell_width_px: u32, cell_height_px: u32) !void {
+        if (self.cell_width_px == cell_width_px and self.cell_height_px == cell_height_px) return;
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+        const fd = self.activeMasterFd() catch return;
+        var window_size = winsizeFromTerminalSize(self.size, cell_width_px, cell_height_px);
+        if (std.c.ioctl(fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
     }
 
     pub fn currentSize(self: *PtySession) !terminal.Size {
@@ -1899,13 +1922,26 @@ fn decodeExitStatus(status: c_int) types.ExitStatus {
     return .{ .signaled = @intCast(wstatus) };
 }
 
-fn winsizeFromTerminalSize(size: terminal.Size) std.posix.winsize {
+/// `TIOCSWINSZ`/`openpty`에 넘길 winsize. **픽셀 필드를 채우는 것이 기능이다** — `ws_xpixel`/`ws_ypixel`은
+/// 이미지 프로토콜을 쓰는 앱이 셀 픽셀 크기를 구하는 표준 경로다(`ws_xpixel / ws_col`). 0으로 두면 그 앱은
+/// 셀 크기를 알 길이 없어 캔버스 해상도와 마우스 환산이 통째로 어긋난다 — 실측(2026-09-08): terminal-browser가
+/// `CSI 16t`(미구현) → winsize 픽셀(0) 순으로 물어보고 둘 다 비어 화면이 깨졌다.
+///
+/// 셀 픽셀을 모르면(0) 픽셀 필드도 0으로 둔다. 곱이 u16을 넘으면 saturate한다 — winsize의 픽셀 필드가
+/// u16이라 표현 못 하는 크기는 어차피 정확할 수 없고, wrap된 작은 값을 주는 것보다 최대값이 덜 해롭다.
+fn winsizeFromTerminalSize(size: terminal.Size, cell_width_px: u32, cell_height_px: u32) std.posix.winsize {
     return .{
         .row = size.rows,
         .col = size.cols,
-        .xpixel = 0,
-        .ypixel = 0,
+        .xpixel = pixelExtent(size.cols, cell_width_px),
+        .ypixel = pixelExtent(size.rows, cell_height_px),
     };
+}
+
+fn pixelExtent(cells: u16, cell_px: u32) u16 {
+    if (cell_px == 0) return 0; // 셀 크기 미상 — "모른다"를 그대로 알린다
+    const total = @as(u32, cells) * cell_px;
+    return if (total > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(total);
 }
 
 test "prepared inherited PTY adoption discard never signals or reaps the live child" {
@@ -2777,4 +2813,63 @@ test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
         try std.testing.expectEqualStrings("override-value", got.last.?);
         try std.testing.expectEqualStrings("ok", envValueCount(&storage, "FOO=").last.?);
     }
+}
+
+test "winsize carries pixel geometry so image apps can derive cell size" {
+    // **회귀 판정**: ws_xpixel/ws_ypixel을 0으로 두면 이미지 프로토콜 앱이 셀 크기를 구할 길이 없다
+    // (표준 경로가 `ws_xpixel / ws_col`이다). 실측 2026-09-08: terminal-browser가 `CSI 16t`(당시 미구현)
+    // → winsize 픽셀(0) 순으로 물어보고 둘 다 비어 캔버스와 마우스 환산이 어긋났다.
+    const with_metrics = winsizeFromTerminalSize(.{ .cols = 80, .rows = 24 }, 9, 20);
+    try std.testing.expectEqual(@as(u16, 80), with_metrics.col);
+    try std.testing.expectEqual(@as(u16, 24), with_metrics.row);
+    try std.testing.expectEqual(@as(u16, 720), with_metrics.xpixel); // 80 * 9
+    try std.testing.expectEqual(@as(u16, 480), with_metrics.ypixel); // 24 * 20
+
+    // 셀 크기를 모르면(0) 픽셀 필드도 0 — 추정값을 보고하면 그것을 나누는 앱이 조용히 어긋난다.
+    const unknown = winsizeFromTerminalSize(.{ .cols = 80, .rows = 24 }, 0, 0);
+    try std.testing.expectEqual(@as(u16, 0), unknown.xpixel);
+    try std.testing.expectEqual(@as(u16, 0), unknown.ypixel);
+
+    // u16을 넘는 곱은 saturate — wrap된 작은 값(예: 100000 % 65536 = 34464)을 주면 더 나쁘다.
+    const huge = winsizeFromTerminalSize(.{ .cols = 1000, .rows = 1000 }, 100, 100);
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), huge.xpixel);
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), huge.ypixel);
+}
+
+test "setCellPixels updates the live PTY winsize and is idempotent" {
+    var session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sleep",
+        .args = &.{"5"},
+        .size = .{ .cols = 40, .rows = 10 },
+    });
+    defer session.deinit();
+    // spawn 시점엔 셀 크기 미상 — 픽셀 0.
+    var ws: std.posix.winsize = undefined;
+    const fd = try session.activeMasterFd();
+    try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 0), ws.xpixel);
+
+    try session.setCellPixels(8, 16);
+    try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 320), ws.xpixel); // 40 * 8
+    try std.testing.expectEqual(@as(u16, 160), ws.ypixel); // 10 * 16
+
+    // grid resize도 픽셀을 유지한다(보관된 셀 크기로 다시 계산).
+    try session.resize(.{ .cols = 20, .rows = 5 });
+    try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 160), ws.xpixel); // 20 * 8
+    try std.testing.expectEqual(@as(u16, 80), ws.ypixel); // 5 * 16
+
+    // 같은 값 재적용은 **ioctl을 쏘지 않아야** 한다 — 이 ioctl은 자식에게 SIGWINCH를 보내므로, 매 frame
+    // 주입되는 셀 메트릭을 그대로 흘리면 셸에 시그널 폭풍이 된다. 밖에서 winsize를 흔들어 두고 같은 값을
+    // 다시 넣었을 때 **그 흔든 값이 살아 있으면** 우리가 안 쐈다는 증거다(값만 비교하면 구분이 안 된다).
+    var probe: std.posix.winsize = .{ .row = 5, .col = 20, .xpixel = 1234, .ypixel = 5678 };
+    try std.testing.expect(std.c.ioctl(fd, tio_cs_winsz, &probe) >= 0);
+    try session.setCellPixels(8, 16); // 같은 값 — no-op
+    try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 1234), ws.xpixel); // 우리가 덮어쓰지 않았다
+    // 값이 실제로 바뀌면 그때는 쏜다.
+    try session.setCellPixels(9, 18);
+    try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 180), ws.xpixel); // 20 * 9
 }

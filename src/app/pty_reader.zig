@@ -985,6 +985,11 @@ pub const PtyReader = struct {
                     core.owner_dbg.lock(mutex, self.io);
                     const effect = core_command.apply(core, entry.cmd);
                     if (effect.send_form_feed) appendResponseBounded(self.allocator, out_buf, out_head.*, "\x0c");
+                    // 셀 픽셀이 바뀌면 PTY winsize의 픽셀 필드(ws_xpixel/ws_ypixel)도 따라가야 한다 — 이미지
+                    // 앱은 그 값으로 셀 크기를 구한다. **여기가 로컬·host 공통 지점**이다: host runtime도
+                    // set_cell_metrics를 backend.enqueueCoreCommand로 넘겨 결국 이 reader가 적용한다.
+                    // 값이 바뀔 때만 ioctl이 나가고(setCellPixels가 가드), 실패는 무시한다 — 다음 resize가 고친다.
+                    if (effect.cell_pixels) |cp| self.session.setCellPixels(cp.width, cp.height) catch {};
                     const reply = core.pendingResponse();
                     if (reply.len > 0) {
                         appendResponseBounded(self.allocator, out_buf, out_head.*, reply);

@@ -348,6 +348,8 @@ pub const kitty_graphics_command_groups = [_]Group{
             "z",
             "no_cursor_move",
             "delete_what",
+            "quiet",
+            "medium",
         },
         .why = "a partial kitty transfer must resume with the exact parsed control command",
     },
@@ -396,8 +398,8 @@ pub const pty_session_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "wake_read_fd", "wake_write_fd", "owns_child_lifecycle" },
-        .why = "wake pipes are recreated and target sessions remain non-owning until the host-global graph commits",
+        .fields = &.{ "wake_read_fd", "wake_write_fd", "owns_child_lifecycle", "cell_width_px", "cell_height_px" },
+        .why = "wake pipes are recreated, target sessions remain non-owning until the host-global graph commits, and the cell pixel geometry is re-derived: the kernel keeps the winsize pixel fields with the inherited fd, and the client re-injects cell metrics every frame, so the struct copy only has to converge (a first post-exec injection may re-issue one identical TIOCSWINSZ)",
     },
     .{
         .disposition = .must_be_empty,

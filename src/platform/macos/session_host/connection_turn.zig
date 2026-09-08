@@ -851,7 +851,7 @@ pub const Client = struct {
     ) bool {
         const prepared = maybe_prepared orelse return true;
         const expected = self.process_identity orelse return false;
-        const current = process_seal_service.currentReadyIdentity() catch return false;
+        const current = readyIdentityOrLog("validatePreparedCatchup") orelse return false;
         if (@intFromPtr(prepared) != prepared.self_addr or prepared.active_raw != 1 or
             prepared.pid != expected.pid or prepared.process_nonce != expected.process_nonce or
             prepared.owner_addr != @intFromPtr(self) or
@@ -1251,10 +1251,38 @@ pub const Client = struct {
         slot.releaseBaseState(tracker) catch unreachable;
     }
 
+    /// 봉인을 읽지 못하면 **말하고** 실패한다.
+    ///
+    /// 세 검증자(`validateProcessIdentity`·`validatePreparedCatchup`·`commitCatchupArm`)가 모두 이걸
+    /// `catch return false` 로 삼켰다. 그 거짓은 호출부에서 `beginClose(.protocol_error)` 가 되는데,
+    /// 「봉인을 잠깐 못 읽었다」와 「상대가 정말 다른 프로세스다」가 같은 사유·같은 줄로 합쳐져
+    /// `why_ra` 로도 안 갈렸다. 둘은 고칠 곳이 다르다.
+    ///
+    /// `where` 는 어느 검증자가 물었는지다 — 셋이 같은 문구를 쓰면 다시 합쳐진다.
+    fn readyIdentityOrLog(where: []const u8) ?process_seal_service.ReadyIdentity {
+        return process_seal_service.currentReadyIdentity() catch |err| {
+            if (!builtin.is_test)
+                std.log.warn(
+                    "session host: process identity unreadable — treating as protocol_error: where={s} error={s}",
+                    .{ where, @errorName(err) },
+                );
+            return null;
+        };
+    }
+
+    /// 거짓을 돌려주면 호출부가 곧바로 `beginClose(.protocol_error)` 한다. 그런데 거짓이 되는 길이
+    /// **둘**이고 — 봉인을 읽지 못한 것과 실제로 신원이 달라진 것 — 호출부가 셋이라, `why_ra` 로도
+    /// 그 둘은 안 갈린다. 여기서 갈라 둔다.
+    ///
+    /// 둘은 고칠 곳이 다르다. 앞은 `process_seal_service` 가 잠깐 답을 못 준 것이고, 뒤는 상대가 정말
+    /// 다른 프로세스가 된 것이다.
     fn validateProcessIdentity(self: *const Client) bool {
         const expected = self.process_identity orelse return true;
-        const current = process_seal_service.currentReadyIdentity() catch return false;
-        return std.meta.eql(expected, current);
+        const current = readyIdentityOrLog("validateProcessIdentity") orelse return false;
+        if (std.meta.eql(expected, current)) return true;
+        if (!builtin.is_test)
+            std.log.warn("session host: process identity changed — closing as protocol_error", .{});
+        return false;
     }
 
     fn commitCatchupArm(
@@ -1264,7 +1292,7 @@ pub const Client = struct {
         if (prepared.self_addr != @intFromPtr(prepared) or prepared.active_raw != 1)
             return false;
         const expected_process = self.process_identity orelse return false;
-        const current_process = process_seal_service.currentReadyIdentity() catch return false;
+        const current_process = readyIdentityOrLog("commitCatchupArm") orelse return false;
         if (!std.meta.eql(expected_process, current_process) or
             prepared.pid != current_process.pid or
             prepared.process_nonce != current_process.process_nonce or

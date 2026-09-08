@@ -89,4 +89,24 @@ test "보낼 것을 든 채 끊긴 연결은 «정상» 으로 분류돼도 로�
     defer a.free(turn);
     try std.testing.expect(std.mem.indexOf(u8, turn, "noinline fn beginClose(") != null);
     try std.testing.expect(std.mem.indexOf(u8, turn, "self.close_ra = @returnAddress();") != null);
+
+    // ⑦ `validateProcessIdentity` 가 거짓이 되는 길은 **둘**인데(봉인을 못 읽음 / 신원이 달라짐) 호출부가
+    //    셋이라 `why_ra` 로도 안 갈린다. 두 길이 각자 말해야 한다 — 앞은 `process_seal_service` 를,
+    //    뒤는 상대 프로세스를 보게 만든다.
+    try std.testing.expect(std.mem.indexOf(u8, turn, "process identity unreadable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, turn, "process identity changed") != null);
+    //    말없이 거짓을 돌려주던 옛 모습이 되살아나면 빨개진다. 이 단언이 실제로 물어서, 처음에 놓친
+    //    두 곳(`validatePreparedCatchup`·`commitCatchupArm`)을 찾아냈다 — 셋 다 같은 침묵이었다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        turn,
+        "process_seal_service.currentReadyIdentity() catch return false;",
+    ) == null);
+    //    셋이 같은 문구를 쓰면 다시 합쳐지므로 `where=` 로 갈라 둔다.
+    try std.testing.expect(std.mem.indexOf(u8, turn, "where={s}") != null);
+    for ([_][]const u8{
+        "\"validateProcessIdentity\"",
+        "\"validatePreparedCatchup\"",
+        "\"commitCatchupArm\"",
+    }) |where| try std.testing.expect(std.mem.indexOf(u8, turn, where) != null);
 }

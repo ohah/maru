@@ -83571,7 +83571,6 @@ test "원격 탐색기 미러 정리: 오래된 것만 지우고 우리 하위 �
     try std.testing.expect(!file_panel_ops.mirrorEntryIsStale(now, now + 10 * day_ns));
 }
 
-
 /// kitty 이미지 채널을 만들 필요가 있는가 — 일반 placement 또는 **U=1 virtual placement** 중 하나라도
 /// 있으면 참이다.
 ///

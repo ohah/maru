@@ -637,6 +637,11 @@ public class MaruActivity extends android.app.NativeActivity {
         input.requestFocus();
         // **OS 값을 코어에 알린다.** 이 값은 기기·설정마다 다르다(실측: 에뮬레이터 400ms).
         applyLongPressTimeout();
+        // **글자 배율은 «첫 굽기보다 먼저» 알린다.** 네이티브 창은 이 뒤에 서고(APP_CMD_INIT_WINDOW)
+        // 아틀라스도 거기서 처음 구워진다 — 여기서 알려 두면 그 첫 굽기가 처음부터 맞는 크기다.
+        // `onResume` 에서만 알리면 시작할 때 한 번 다시 굽게 되고, 큰 글씨를 쓰는 사람일수록
+        // 그 한 번이 눈에 띈다(그 사람이 바로 이 기능의 대상이다).
+        applySystemFontScale();
         // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
         // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());

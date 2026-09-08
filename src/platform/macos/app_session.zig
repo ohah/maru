@@ -14975,6 +14975,25 @@ pub const AppSession = struct {
         self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 끝났다");
     }
 
+    /// 한 줄에 열 개를 담기 위한 상한 — `<8 자> ` 열 개 + 여유.
+    const term_nonce_tail_buf: usize = 16 * 9;
+
+    /// pane 부분 **뒤 8 자**만 이어 붙인다. 앞 32 자(앱 인스턴스)는 열이 전부 같아 자리만 먹고,
+    /// 뒤가 갈리는 자리다 — 넘치면 **조용히 자른다**(진단이 판정을 밀어내면 안 된다).
+    fn appendTermNonceTail(buf: *[term_nonce_tail_buf]u8, len: *usize, nonce: []const u8) void {
+        const at = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse 0;
+        const pane = if (at == 0) nonce else nonce[at + 1 ..];
+        const tail = pane[pane.len -| 8..];
+        const need = tail.len + @intFromBool(len.* != 0);
+        if (len.* + need > buf.len) return;
+        if (len.* != 0) {
+            buf[len.*] = ' ';
+            len.* += 1;
+        }
+        @memcpy(buf[len.*..][0..tail.len], tail);
+        len.* += tail.len;
+    }
+
     /// 이 오류가 **영원히 안 되는 것**인가. 계획 §RA5-b 가 「두 실패를 반드시 가른다」고 정했는데,
     /// 이 자리는 한 `catch` 로 둘을 뭉개고 있었다 — 경로가 규격(103 바이트)을 넘는 것은 dest 가 그대로인
     /// 한 안 바뀌지만, **할당 실패는 지금만**이다. 뭉개면 메모리가 잠깐 모자랐다는 이유로 그 목적지
@@ -15065,7 +15084,7 @@ pub const AppSession = struct {
         );
     }
 
-    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize) void {
+    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, mine: []const u8) void {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
         if (self.remote_nonce_matched > 0) {
             self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
@@ -15075,13 +15094,14 @@ pub const AppSession = struct {
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, {d} with nonce, none matched)",
+            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, {d} with nonce, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
                 if (self.unmatched_term_nonce_len == 0) "(empty)" else self.unmatched_term_nonce[0..self.unmatched_term_nonce_len],
                 fed,
                 with_nonce,
+                mine,
             },
         );
     }
@@ -15145,11 +15165,13 @@ pub const AppSession = struct {
         self.remote_nonce_matched = 0;
         var fed: usize = 0;
         var with_nonce: usize = 0;
+        var mine_buf: [term_nonce_tail_buf]u8 = undefined;
+        var mine_len: usize = 0;
         var no_channel: usize = 0;
         var no_dest: usize = 0;
         var other_dest: usize = 0;
         defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
-        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce);
+        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce, mine_buf[0..mine_len]);
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -15166,7 +15188,13 @@ pub const AppSession = struct {
                         continue;
                     }
                     fed += 1;
-                    if (term.agent_remote_nonce_len != 0) with_nonce += 1;
+                    if (term.agent_remote_nonce_len != 0) {
+                        with_nonce += 1;
+                        // **앱이 든 신원을 모은다.** orphan 이 뜰 때 「내가 뭘 들고 있었나」가 없으면
+                        // 원격에서 손으로 대조하는 수밖에 없다(2026-09-07·09 에 세 번 그랬다). pane
+                        // 부분 뒤 8 자면 한 줄에 열이 들어가고 구분에도 충분하다.
+                        appendTermNonceTail(&mine_buf, &mine_len, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
+                    }
                     if (lines.len > 0)
                         agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
                     else
@@ -23790,6 +23818,33 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
     const now = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
     try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
     try std.testing.expectEqual(@as(u32, 1), session.remote_nonce_rebinds); // 갈아낀 것을 세었다
+}
+test "RF4: orphan 은 앱이 들고 있던 신원 목록도 함께 남긴다" {
+    // 2026-09-07·09 에 세 번, 「내가 뭘 들고 있었나」가 없어 원격에서 손으로 대조했다. 마지막 미매칭
+    // 하나만으로는 **열이 서로 다른지 다 같은지**를 못 가른다 — 그 둘은 원인이 아주 다르다.
+    var buf: [AppSession.term_nonce_tail_buf]u8 = undefined;
+    var len: usize = 0;
+    AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_0123456789abcdef");
+    AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_fedcba9876543210");
+    try std.testing.expectEqualStrings("89abcdef 76543210", buf[0..len]);
+
+    // pane 이 8 자보다 짧으면 있는 만큼만.
+    len = 0;
+    AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_abc");
+    try std.testing.expectEqualStrings("abc", buf[0..len]);
+
+    // `_` 가 없으면 통째로 본다(로컬 신원이 섞여 든 경우도 보여야 한다).
+    len = 0;
+    AppSession.appendTermNonceTail(&buf, &len, "t36");
+    try std.testing.expectEqualStrings("t36", buf[0..len]);
+}
+test "RF4: 목록이 넘치면 조용히 자른다 — 진단이 판정을 밀어내지 않는다" {
+    var buf: [AppSession.term_nonce_tail_buf]u8 = undefined;
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_0123456789abcdef");
+    try std.testing.expect(len <= buf.len); // 넘치지 않았다
+    try std.testing.expect(len > 0); // 그래도 담을 수 있는 만큼은 담았다
 }
 test "RF2: 이벤트가 왔는데 아무 Term 도 안 가져가면 두 nonce 를 나란히 남긴다" {
     // **스풀·스트리머·분배가 다 정상인데 마지막 한 칸에서 갈리는 자리.** 2026-09-07 에 그 상태를

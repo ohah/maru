@@ -3352,7 +3352,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-contract`와 `test-session-host-release-adapter-executable-bootstrap`은 Debug·ReleaseFast에서 exact projection,
   option/path/injection 거부, authority ordering과 copied/pre-owned bootstrap을 검증한다. side-effecting driver가 아직 없는 동안 executable arm은
   명시적으로 실패하므로 성공 no-op이나 baseline command fallback이 없다.
-  profile stage-3 제품 driver, checkpoint·attestation, live workflow와 protected B tag 실측은 후속 gate다.
+  `test-session-host-release-adapter-profile-stage3-preparation-command`는 이 bootstrap 하나에서 profile environment, candidate prerequisite,
+  predecessor/upgrade workspace, authenticated predecessor manifest, source/Zig authority, signed execution, role-B durable preparation과 timing
+  retained close까지 이어지는 exact 제품 순서를 Debug·ReleaseFast로 검증한다. 모든 단계 fail-index의 local/audit 분류, durable commit 뒤 timing
+  실패, 역순 best-effort cleanup과 실패 owner의 borrowed input 0을 함께 고정하며 actual filesystem 행은 harness-owned private root만 쓴다.
+  checkpoint·attestation, live workflow와 protected B tag의 실제 signed/GitHub 실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

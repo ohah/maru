@@ -132,6 +132,8 @@ pub const Client = struct {
     connection: server.Connection,
     trackers: std.AutoHashMapUnmanaged(u64, slot_mod.ScreenTrackerKey) = .empty,
     state: State = .open,
+    /// `beginClose` 를 부른 지점(0 = 아직 안 닫음). 사유가 같은 호출부가 여럿이라 사유만으론 못 좁힌다.
+    close_ra: usize = 0,
     close_after_flush: ?CloseReason = null,
     pending_upgrade: ?u128 = null,
     upgrade_gate_closed: bool = false,
@@ -335,6 +337,15 @@ pub const Client = struct {
             .open => null,
             .closing => |reason| reason,
         };
+    }
+
+    /// `beginClose` 를 부른 지점의 return address. 아직 열려 있으면 0.
+    ///
+    /// 사후에 `atos -o <바이너리> -l <slide> <ra>` 로 푼다 — 슬라이드를 함께 남기는 이유는
+    /// `client.zig` 의 `logPoisonCallSite` 에 적어 둔 것과 같다(앱이 다시 뜨면 ASLR 이 달라져 주소만으론
+    /// 못 읽는다).
+    pub fn closeReturnAddress(self: *const Client) usize {
+        return self.close_ra;
     }
 
     pub fn isUpgradeDraining(self: *const Client) bool {
@@ -1326,8 +1337,15 @@ pub const Client = struct {
         self.beginClose(.upgrade_completed);
     }
 
-    fn beginClose(self: *Client, reason: CloseReason) void {
-        if (!self.isClosing()) self.state = .{ .closing = reason };
+    /// `noinline` 인 이유는 `@returnAddress()` 다. 인라인되면 이 함수가 돌려주는 주소는 **닫기로 한
+    /// 지점이 아니라 그 위 프레임**이 되어, 사유와 지점이 어긋난 채 로그에 남는다.
+    noinline fn beginClose(self: *Client, reason: CloseReason) void {
+        if (self.isClosing()) return;
+        self.state = .{ .closing = reason };
+        // 사유만으로는 못 좁힌다 — `socket_error` 는 호출부가 29 곳, `resource_exhausted` 는 18 곳이다.
+        // `client.zig` 의 poison 로그와 같은 관례로 호출 지점을 함께 남긴다. 슬라이드는 찍는 쪽에서
+        // 붙이므로 여기서는 주소만 든다.
+        self.close_ra = @returnAddress();
     }
 };
 

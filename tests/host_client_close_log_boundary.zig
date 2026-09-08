@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const source_path = "src/platform/macos/session_host/poll_owner.zig";
+const turn_source_path = "src/platform/macos/session_host/connection_turn.zig";
 const max_source_bytes = 8 * 1024 * 1024;
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -71,4 +72,21 @@ test "보낼 것을 든 채 끊긴 연결은 «정상» 으로 분류돼도 로�
     //    곳이 완전히 다르다.
     try std.testing.expect(std.mem.indexOf(u8, src, "why={s}") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "closeReason()") != null);
+
+    // ⑤ **사유만으로는 못 좁힌다.** `socket_error` 는 호출부가 29 곳, `resource_exhausted` 는 18 곳이라
+    //    사유 하나로는 어느 지점인지 갈리지 않는다. 호출 지점 주소와 ASLR 슬라이드를 함께 남겨
+    //    `atos -o <바이너리> -l <slide> <why_ra>` 로 사후 복원한다 — `client.zig` 의 poison 로그와 같은
+    //    관례다. 슬라이드가 빠지면 앱이 다시 뜬 순간 주소는 뜻 없는 숫자가 된다.
+    try std.testing.expect(std.mem.indexOf(u8, src, "why_ra=0x{x}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "slide=0x{x}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_dyld_get_image_vmaddr_slide") != null);
+
+    // ⑥ `beginClose` 는 **인라인되면 안 된다.** 인라인되면 `@returnAddress()` 가 닫기로 한 지점이 아니라
+    //    그 위 프레임을 가리켜, 사유와 지점이 어긋난 채 로그에 남는다.
+    const turn_raw = try read(a, turn_source_path);
+    defer a.free(turn_raw);
+    const turn = try stripComments(a, turn_raw);
+    defer a.free(turn);
+    try std.testing.expect(std.mem.indexOf(u8, turn, "noinline fn beginClose(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, turn, "self.close_ra = @returnAddress();") != null);
 }

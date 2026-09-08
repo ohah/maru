@@ -2,7 +2,7 @@ const std = @import("std");
 const validator = @import("release_validator");
 
 const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
-const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
+const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_profile_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
 
 const Harness = struct {
     events: [10]Event = undefined,
@@ -77,6 +77,25 @@ const Harness = struct {
                         .zig_size = 123,
                         .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                         .durable_preparation = "/tmp/durable-stage3",
+                    } },
+                    .prepare_profile_candidate => .{ .prepare_profile_candidate = .{
+                        .repo = "ohah/maru",
+                        .tag = "v1.2.3",
+                        .test_uuid = "123e4567-e89b-42d3-a456-426614174000",
+                        .dmg = "/tmp/dmg",
+                        .frozen_executable = "/tmp/exe",
+                        .candidate_dmg_bundle = "/tmp/candidate-dmg-bundle",
+                        .candidate_frozen_bundle = "/tmp/candidate-frozen-bundle",
+                        .dmg_work = "/tmp/dmg-work",
+                        .manifest = "/tmp/Maru-1.2.3-session-host-release.json",
+                        .source_root = "/tmp/source",
+                        .zig = "/tmp/zig",
+                        .zig_size = 123,
+                        .zig_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        .predecessor_workspace = "/tmp/predecessor-work",
+                        .upgrade_workspace = "/tmp/upgrade-work",
+                        .durable_preparation = "/tmp/durable-stage3",
+                        .timing_output = "/tmp/timing.json",
                     } },
                     .prepare_aggregate => .{ .prepare_candidate_aggregate = .{
                         .repo = "ohah/maru",
@@ -260,6 +279,13 @@ test "prepare-candidate dispatches exactly once after bootstrap and token" {
     var harness = Harness{ .phase = .prepare_candidate };
     try harness.run(&storage);
     try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .prepare_candidate }, harness.events[0..harness.count]);
+}
+
+test "profile stage3 bootstrap arm fails closed before token or product driver" {
+    var storage: validator.Storage = undefined;
+    var harness = Harness{ .phase = .prepare_profile_candidate, .token_error = true, .product_error = true };
+    try std.testing.expectError(error.ProfileStage3DriverUnavailable, harness.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{.bootstrap}, harness.events[0..harness.count]);
 }
 
 test "argv collector accepts the contract bound and rejects only bound plus one" {

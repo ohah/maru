@@ -78,6 +78,49 @@ fn candidateArgs() [37][]const u8 {
     };
 }
 
+fn profileStage3Args() [39][]const u8 {
+    return .{
+        "prepare-profile-candidate",                "--repo",                               "ohah/maru",                        "--tag",                                                            "v1.2.3",                                           "--github-cli",                           "/usr/local/bin/gh",      "--github-cli-sha256",                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                            "/tmp/candidate/Maru-1.2.3-universal.dmg",                          "--frozen-executable",                              "/tmp/candidate/maru-session-host-1.2.3", "--candidate-dmg-bundle", "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
+        "/tmp/attest/candidate-frozen.bundle.json", "--dmg-work",                           "/tmp/dmg-work",                    "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                          "/tmp/source",            "--zig",                                 "/usr/local/bin/zig",
+        "--zig-size",                               "123456",                               "--zig-sha256",                     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--predecessor-workspace",                          "/tmp/predecessor-work",                  "--upgrade-workspace",    "/tmp/upgrade-work",                     "--durable-preparation",
+        "/tmp/handoff/profile-stage3",              "--timing-output",                      "/tmp/timing/profile-upgrade.json",
+    };
+}
+
+test "release adapter parses exact profile stage3 bootstrap command" {
+    try std.testing.expectEqual(adapter.max_command_args, profileStage3Args().len);
+    const parsed = try adapter.parseArgs(&profileStage3Args());
+    const value = parsed.prepare_profile_candidate;
+    try std.testing.expectEqualStrings("/tmp/predecessor-work", value.predecessor_workspace);
+    try std.testing.expectEqualStrings("/tmp/upgrade-work", value.upgrade_workspace);
+    try std.testing.expectEqualStrings("/tmp/handoff/profile-stage3", value.durable_preparation);
+    try std.testing.expectEqualStrings("/tmp/timing/profile-upgrade.json", value.timing_output);
+    try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "profile"));
+    try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "predecessor_release_id"));
+    try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "timing"));
+    try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "success"));
+}
+
+test "profile stage3 bootstrap rejects missing injection and nested authority paths" {
+    const exact = profileStage3Args();
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(exact[0 .. exact.len - 2]));
+
+    inline for (.{ "--profile", "--predecessor-release-id", "--predecessor-tag", "--predecessor-commit", "--predecessor-manifest-sha256", "--evidence", "--manifest-role", "--signer-requirement", "--timing", "--success" }) |forbidden| {
+        var injected = exact;
+        injected[injected.len - 2] = forbidden;
+        try std.testing.expectError(error.UnknownOption, adapter.parseArgs(&injected));
+    }
+
+    var nested = exact;
+    nested[nested.len - 1] = "/tmp/handoff/profile-stage3/timing.json";
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&nested));
+
+    var wrong_manifest = exact;
+    wrong_manifest[22] = "/tmp/output/Maru-1.2.4-session-host-release.json";
+    try std.testing.expectError(error.InvalidManifestAssetName, adapter.parseArgs(&wrong_manifest));
+}
+
 fn prepareAggregateArgs() [21][]const u8 {
     return .{
         "prepare-candidate-aggregate",      "--repo",                           "ohah/maru",                      "--tag",                                                            "v1.2.3",

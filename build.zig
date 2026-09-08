@@ -13212,7 +13212,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
-        run_release_adapter_contract_tests.addArg("--maru-expect-tests=16");
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=18");
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
     }
@@ -15796,7 +15796,7 @@ pub fn build(b: *std.Build) void {
             const release_validator_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/validate_release_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_contract", .module = contract_mod }, .{ .name = "release_adapter_executable_bootstrap", .module = bootstrap_mod }, .{ .name = "release_adapter_token_environment", .module = token_environment_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_current_compatibility", .module = current_compatibility_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_pre_publish_product", .module = pre_publish_product_mod }, .{ .name = "release_adapter_verify_predecessor_product", .module = verify_predecessor_product_mod }, .{ .name = "release_adapter_candidate_release_driver", .module = candidate_release_driver_mod }, .{ .name = "release_adapter_candidate_stage3_preparation_command", .module = candidate_stage3_preparation_command_mod }, .{ .name = "release_adapter_candidate_resume_publication_command", .module = candidate_resume_publication_command_mod }, .{ .name = "release_adapter_candidate_published_cleanup_command", .module = candidate_published_cleanup_command_mod }, .{ .name = "release_adapter_candidate_aggregate_process", .module = candidate_aggregate_process_mod } } });
             const release_validator_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_validator_executable.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_validator", .module = release_validator_mod }} }) });
             const run_release_validator_tests = b.addRunArtifact(release_validator_tests);
-            run_release_validator_tests.addArg("--maru-expect-tests=10");
+            run_release_validator_tests.addArg("--maru-expect-tests=11");
             run_release_validator_tests.setCwd(b.path("."));
             session_host_release_validator_executable_step.dependOn(&run_release_validator_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_release_validator_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
@@ -16171,9 +16171,9 @@ pub fn build(b: *std.Build) void {
     // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
     // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
     //
-    // 170 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+    // 172 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
     // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-    const ra_all_expected_tests: usize = 170;
+    const ra_all_expected_tests: usize = 172;
     const ra_all_step = b.step(
         "test-session-host-release-adapter-all",
         "Run the posix session-host release adapter judges from one binary per optimize mode",

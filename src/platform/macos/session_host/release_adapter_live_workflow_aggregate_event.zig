@@ -88,6 +88,6 @@ fn classify(observation: Observation) phase.Result {
 }
 
 comptime {
-    if (@typeInfo(Command).@"enum".fields.len != 8)
+    if (@typeInfo(Command).@"enum".fields.len != 9)
         @compileError("release workflow command inventory drift");
 }

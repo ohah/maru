@@ -20796,15 +20796,9 @@ pub const AppSession = struct {
                 if (editor_ops.diffCursorPosition(active_term)) |pos| {
                     if (rn < max_status_bar_right_items) {
                         var buf: [48]u8 = undefined;
-                        // **`L`/`R` 을 붙인다** — 숫자만 보이면 어느 파일의 줄인지 알 수 없다.
-                        // **짝맞춤 빈 행은 `-`** 다: 그 행은 그 파일에 없는 자리라 번호가 없고,
-                        // 앞뒤 번호를 빌리면 없는 줄을 지어내는 것이다.
-                        const tag: []const u8 = if (pos.side == .right) "R" else "L";
-                        const plus: []const u8 = if (pos.truncated) "+" else "";
-                        const text = if (pos.line) |ln|
-                            std.fmt.bufPrint(&buf, "{s} {d}:{d}{s}", .{ tag, ln, pos.column, plus }) catch null
-                        else
-                            std.fmt.bufPrint(&buf, "{s} -:{d}{s}", .{ tag, pos.column, plus }) catch null;
+                        // **형식은 `editor_ops` 가 소유한다** — 여기 묻어 두면 판정자가 글자를
+                        // 못 읽는다(트리 항목은 id 와 사각만 든다).
+                        const text = editor_ops.formatDiffCursor(&buf, pos);
                         if (text) |txt| if (self.buildStatusBarItem(null, txt, bar_cols, fg, icon_fg, .plain)) |dl| {
                             // 단일 편집기와 **같은 가드** — 잘린 숫자는 다른 값으로 읽힌다.
                             // 이 글도 ASCII(`L`·` `·숫자·`:`·`-`·`+`)뿐이라 byte 수 = 셀 수다.

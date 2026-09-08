@@ -47,6 +47,34 @@ pub const KittyGraphicsCommand = struct {
     z: i32 = 0, // z: z-index(부호 있음)
     no_cursor_move: bool = false, // C=1이면 표시 후 커서를 옮기지 않음
     delete_what: u8 = 'a', // d: 삭제 타깃(a=d일 때). 기본 'a'(전체). 대문자=이미지 데이터도 free, 소문자=placement만
+    // q: 응답 억제 수준(0=OK와 에러 모두, 1=에러만, 2=침묵). 베이스: kitty graphics protocol의 quiet.
+    quiet: u8 = 0,
+    // t: 전송 매체(d=direct base64, f=파일, t=임시파일, s=공유메모리). **maru는 direct만 구현한다** —
+    // 파일/공유메모리는 payload가 픽셀이 아니라 **경로/이름**이라, 파싱하지 않으면 그것을 픽셀로 오인해
+    // 조용히 버린다(실측 2026-09-08: t=f 전송이 무음 폐기됐다). 여기서 값을 읽어 `ENOTSUPP`로 **명시
+    // 거부**해야 앱이 direct로 폴백한다(terminal-browser는 t=s→t=f→inline 순으로 물어본다).
+    medium: u8 = 'd',
+};
+
+/// kitty graphics 명령의 처리 결과 — 응답(`ESC _ G i=<id>;<코드> ESC \`)의 본문이 된다.
+/// 베이스: kitty graphics protocol "Control data — responses"(OK 또는 `<ERRCODE>:<msg>`).
+pub const KittyStatus = enum {
+    ok,
+    einval, // control/payload가 잘못됐다(형식·치수·base64·디코드 실패)
+    enoent, // 참조한 이미지가 없다(display)
+    enotsupp, // maru가 구현하지 않은 기능(전송 매체·애니메이션)
+    enomem, // 저장 실패(한 장이 한도 초과, evict로도 자리 부족)
+
+    /// 응답 본문. 에러는 `<코드>:<사람이 읽는 짧은 이유>` 형식이다(kitty 명세).
+    pub fn text(self: KittyStatus) []const u8 {
+        return switch (self) {
+            .ok => "OK",
+            .einval => "EINVAL:bad graphics command",
+            .enoent => "ENOENT:no such image",
+            .enotsupp => "ENOTSUPP:unsupported graphics feature",
+            .enomem => "ENOMEM:image storage full",
+        };
+    }
 };
 
 /// 저장된 kitty graphics placement(표시 중인 이미지 인스턴스). anchor_row는 절대 행(스크롤백
@@ -287,10 +315,11 @@ pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
 /// 이미지를 저장하되, 320MB 한도를 넘기면 먼저 evict해 자리를 만든다(K4b). 한 장이 한도보다 크면 거부.
 /// 같은 id 교체분은 회수되니 계산에서 뺀다. evict 정책은 evictKittyImagesFor — placement 없는 것·오래된
 /// 것 우선(kitty 명세 권장). evict 후에도 못 들어가면 add가 한도 체크로 거부한다(graceful, img.data free).
-fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
+/// 저장에 성공했으면 true. 실패(한 장이 한도 초과, evict로도 자리 부족)는 호출자가 `ENOMEM`으로 회신한다.
+fn storeKittyImage(self: *TerminalCore, img: KittyImage) bool {
     if (img.data.len > self.kitty_images.limit) { // 한 장이 전체 한도 초과 — 불가
         self.allocator.free(img.data);
-        return;
+        return false;
     }
     const existing: usize = if (self.kitty_images.map.get(img.id)) |old| old.data.len else 0;
     const after = self.kitty_images.total_bytes - existing + img.data.len;
@@ -300,7 +329,11 @@ fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
     self.kitty_images.add(self.allocator, img); // 같은-id 교체 + 최종 한도 체크(evict 후 통과)
     // add가 한도로 거부하면 같은 id의 기존 이미지는 이미 제거됐고(같은-id 교체 규칙) 새 것도 안 들어가
     // map에 그 id가 없다 — 그 id를 가리키던 placement가 orphan으로 남지 않게 함께 정리한다(code review #8).
-    if (!self.kitty_images.map.contains(img.id)) removePlacementsForImage(self, img.id);
+    if (!self.kitty_images.map.contains(img.id)) {
+        removePlacementsForImage(self, img.id);
+        return false;
+    }
+    return true;
 }
 
 /// 한도 초과 시 부족분(needed 바이트) 이상을 비우도록 이미지를 evict한다(exclude_id·그 이미지는 제외 —
@@ -361,20 +394,48 @@ fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
 
 // ── orchestrator(parser dispatchApc 진입점 + transmit/display/delete dispatch) ─────────────────────
 
-/// 파싱된 kitty graphics command를 실행한다. transmit(디코드+저장)·display(placement)·delete까지 —
-/// query 응답·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
+/// 파싱된 kitty graphics command를 실행하고 **결과를 앱에 회신한다**(K5). transmit(디코드+저장)·
+/// display(placement)·delete·query(a=q)를 처리한다. payload는 control(';' 전) 다음 base64다.
 /// parser.dispatchApc가 파싱한 command를 실행 — parser가 cross-file 호출하므로 pub.
+///
+/// **query(a=q)는 저장하지 않고 검증만 한다**(kitty 명세: "the terminal must not actually store
+/// the image"). 앱은 이 응답 하나로 "이 터미널이 kitty graphics를 하는가"를 판정하므로, 무응답은
+/// 곧 미지원 선언이다 — 실측(2026-09-08): terminal-browser·icat·timg가 모두 `a=q`로 감지한다.
 pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-    switch (cmd.action) {
-        't' => kittyTransmit(self, cmd, payload),
-        'T' => { // transmit + display(한 command로 저장 후 placement까지)
-            kittyTransmit(self, cmd, payload);
-            kittyDisplay(self, cmd);
+    const status: KittyStatus = switch (cmd.action) {
+        'q' => kittyTransmit(self, cmd, payload, false), // query: 검증만(저장 안 함)
+        't' => kittyTransmit(self, cmd, payload, true),
+        'T' => blk: { // transmit + display(한 command로 저장 후 placement까지)
+            const transmitted = kittyTransmit(self, cmd, payload, true);
+            if (transmitted != .ok) break :blk transmitted; // 저장이 실패했으면 display는 무의미
+            break :blk kittyDisplay(self, cmd);
         },
         'p' => kittyDisplay(self, cmd), // 기존 이미지를 placement로 표시
         'd' => kittyDelete(self, cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
-        else => {}, // q(query)·f/a/c(애니메이션)는 후속
-    }
+        else => .enotsupp, // 애니메이션(a=a/c/f)은 미구현 — 침묵 대신 명시 거부
+    };
+    kittyReply(self, cmd, status);
+}
+
+/// kitty graphics 응답을 host(PTY)로 보낸다 — `ESC _ G i=<id>[,p=<pid>];<본문> ESC \`.
+///
+/// **`q`(quiet)를 존중한다**: 0=성공·실패 모두 보고, 1=실패만, 2=침묵. 베이스: kitty graphics
+/// protocol. **식별자(`i=`)가 없으면 보내지 않는다** — 앱이 어느 명령의 응답인지 가릴 수 없어서
+/// 명세가 응답을 금지한다(그 바이트는 앱의 입력 스트림을 오염시킬 뿐이다).
+///
+/// **왜 이제 와서 응답을 보내기 시작하나**: 지금까지 maru는 어떤 graphics 명령에도 답하지 않았고,
+/// 그래서 앱들은 maru를 "이미지 못 그리는 터미널"로 판정해 왔다. kitty·Ghostty가 같은 자리에서
+/// 답하고 앱들이 그 응답을 전제로 만들어졌으므로, 표준 동작을 따르는 것이 맞다.
+fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatus) void {
+    if (cmd.image_id == 0) return; // 식별자 없는 명령엔 응답하지 않는다(명세)
+    if (cmd.quiet >= 2) return; // q=2: 전부 침묵
+    if (cmd.quiet == 1 and status == .ok) return; // q=1: 실패만 보고
+    var buf: [96]u8 = undefined;
+    const s = if (cmd.placement_id != 0)
+        std.fmt.bufPrint(&buf, "\x1b_Gi={d},p={d};{s}\x1b\\", .{ cmd.image_id, cmd.placement_id, status.text() }) catch return
+    else
+        std.fmt.bufPrint(&buf, "\x1b_Gi={d};{s}\x1b\\", .{ cmd.image_id, status.text() }) catch return;
+    self.appendResponse(s);
 }
 
 /// kitty graphics display(a=p/T): 저장된 이미지를 현재 커서 셀에 placement로 건다. 이미지가 없으면
@@ -384,9 +445,9 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload
 /// 내리고(kittyAdvanceRows — 렌더러 buildGpuImages와 같은 `PlacementGeometry` 공유), 메트릭이 없으면
 /// (헤드리스) 옮기지 않는다(K1 fallback). 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행으로 clamp한다(이미지 표시가
 /// 스크롤을 유발하지 않게). 베이스: kitty graphics protocol display.
-fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
-    if (cmd.image_id == 0) return;
-    if (!self.kitty_images.map.contains(cmd.image_id)) return; // 없는 이미지는 표시 안 함
+fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
+    if (cmd.image_id == 0) return .einval;
+    if (!self.kitty_images.map.contains(cmd.image_id)) return .enoent; // 없는 이미지는 표시 안 함
     addOrReplacePlacement(self, .{
         .image_id = cmd.image_id,
         .placement_id = cmd.placement_id,
@@ -409,13 +470,15 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
             self.screen.cursor.row = @intCast(@min(target, self.size.rows - 1));
         }
     }
+    return .ok;
 }
 
 /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
 /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
 /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
-/// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 graceful 무시.
-fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
+/// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 미지원인데,
+/// **무음 무시가 아니라 `ENOTSUPP`로 답한다**(K5) — 앱이 "지웠다"고 믿고 다음 단계로 가지 않게.
+fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     const c = cmd.delete_what;
     const free_image = (c >= 'A' and c <= 'Z'); // 대문자면 이미지 데이터도 free
     const target = if (free_image) c - 'A' + 'a' else c; // 소문자로 정규화
@@ -425,7 +488,7 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
             if (free_image) self.kitty_images.clear(self.allocator);
         },
         'i' => { // image_id로(+ 선택적 placement_id)
-            if (cmd.image_id == 0) return;
+            if (cmd.image_id == 0) return .einval;
             if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
                 removePlacementsForImage(self, cmd.image_id);
                 self.kitty_images.remove(self.allocator, cmd.image_id);
@@ -436,36 +499,42 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
             }
         },
         'z' => deleteByZ(self, cmd.z, free_image), // z-index로
-        else => {}, // c/n/p/q/x/y/r/f는 미지원(graceful) — 셀 span·이미지번호 필요
+        else => return .enotsupp, // c/n/p/q/x/y/r/f는 미지원 — 셀 span·이미지번호 필요
     }
+    return .ok;
 }
 
 /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
 /// zlib(o=z) 압축이면 base64 디코드 후 inflate한다(K3b). PNG(f=100)는 kittyTransmitPng. 베이스: kitty
 /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
-fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-    if (cmd.image_id == 0) return; // 필수 control 누락(저장 키)
-    if (cmd.format == 100) return kittyTransmitPng(self, cmd, payload); // PNG는 별도 경로(s/v는 PNG가 자기기술)
+/// `store=false`면 **검증만 하고 저장하지 않는다**(a=q query) — 픽셀을 끝까지 디코드해 같은 판정을
+/// 내리고 버린다. 그래야 query가 "이 이미지를 실제로 받을 수 있다"를 증명한다(kitty 명세).
+fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
+    // 전송 매체: direct(base64 픽셀)만 구현한다. f/t/s는 payload가 경로·이름이라 픽셀로 오인하면
+    // 쓰레기를 디코드한다 — 명시 거부해야 앱이 direct로 폴백한다.
+    if (cmd.medium != 'd') return .enotsupp;
+    if (cmd.image_id == 0) return .einval; // 필수 control 누락(저장 키)
+    if (cmd.format == 100) return kittyTransmitPng(self, cmd, payload, store); // PNG는 별도 경로(s/v는 PNG가 자기기술)
     const bpp: u8 = switch (cmd.format) {
         24 => 3,
         32 => 4,
-        else => return, // 알 수 없는 format
+        else => return .einval, // 알 수 없는 format
     };
-    if (cmd.width == 0 or cmd.height == 0) return; // raw 픽셀은 치수가 필수
+    if (cmd.width == 0 or cmd.height == 0) return .einval; // raw 픽셀은 치수가 필수
     // 치수(s/v)는 APC에서 상한 없이 오는 u32라 곱이 usize를 넘을 수 있다(악의적 대형 값) — 오버플로면
     // 거부한다(graceful). 안 그러면 Debug/ReleaseSafe에서 panic, ReleaseFast에선 wrap된다(code review).
-    const wh = std.math.mul(usize, cmd.width, cmd.height) catch return;
-    const expected = std.math.mul(usize, wh, bpp) catch return;
+    const wh = std.math.mul(usize, cmd.width, cmd.height) catch return .einval;
+    const expected = std.math.mul(usize, wh, bpp) catch return .einval;
 
     // base64 디코드 → raw 바이트(압축이면 압축 데이터, 아니면 곧 픽셀).
     const dec = std.base64.standard.Decoder;
-    const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
-    if (decoded_len == 0) return;
-    if (cmd.compression == 0 and decoded_len != expected) return; // 비압축은 디코드 크기 = 선언 크기여야(early reject)
-    const raw = self.allocator.alloc(u8, decoded_len) catch return;
+    const decoded_len = dec.calcSizeForSlice(payload) catch return .einval; // 잘못된 base64
+    if (decoded_len == 0) return .einval;
+    if (cmd.compression == 0 and decoded_len != expected) return .einval; // 비압축은 디코드 크기 = 선언 크기여야(early reject)
+    const raw = self.allocator.alloc(u8, decoded_len) catch return .enomem;
     dec.decode(raw, payload) catch {
         self.allocator.free(raw);
-        return;
+        return .einval;
     };
 
     // 압축 해제. o=z(zlib)만 지원, 그 외 압축은 거부. 없으면 raw가 곧 픽셀.
@@ -474,44 +543,52 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
         'z' => blk: {
             defer self.allocator.free(raw); // 압축 입력은 inflate 후 불필요
             // PNG IDAT 경로와 같은 exact-inflate 공유(중복 제거) — expected로 바운드하고 over-long 거부.
-            break :blk png.inflateExact(self.allocator, raw, expected) catch return;
+            break :blk png.inflateExact(self.allocator, raw, expected) catch return .einval;
         },
         else => {
             self.allocator.free(raw); // 알 수 없는 압축
-            return;
+            return .einval;
         },
     };
     if (data.len != expected) { // 선언 크기 ≠ 실제 픽셀(inflate가 보장하지만 비압축 경로 가드)
         self.allocator.free(data);
-        return;
+        return .einval;
     }
-    storeKittyImage(self, .{
+    if (!store) { // query: 여기까지 왔으면 받을 수 있다는 뜻이고, 저장은 하지 않는다
+        self.allocator.free(data);
+        return .ok;
+    }
+    return if (storeKittyImage(self, .{
         .id = cmd.image_id,
         .width = cmd.width,
         .height = cmd.height,
         .bpp = bpp,
         .data = data,
-    });
+    })) .ok else .enomem;
 }
 
 /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는
 /// PNG가 자기기술하므로 s/v control은 안 본다. 8-bit truecolor만 지원(미지원 변종·malformed는 graceful
 /// 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
 /// protocol(f=100) + PNG 명세.
-fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-    if (cmd.compression != 0) return; // PNG + 추가 압축은 미지원(rare)
+fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
+    if (cmd.compression != 0) return .enotsupp; // PNG + 추가 압축은 미지원(rare)
     const dec = std.base64.standard.Decoder;
-    const decoded_len = dec.calcSizeForSlice(payload) catch return;
-    if (decoded_len == 0) return;
-    const png_bytes = self.allocator.alloc(u8, decoded_len) catch return;
+    const decoded_len = dec.calcSizeForSlice(payload) catch return .einval;
+    if (decoded_len == 0) return .einval;
+    const png_bytes = self.allocator.alloc(u8, decoded_len) catch return .enomem;
     defer self.allocator.free(png_bytes); // PNG 파일 바이트는 디코드 후 불필요
-    dec.decode(png_bytes, payload) catch return;
-    const img = png.decode(self.allocator, png_bytes) catch return; // 미지원/malformed는 graceful 거부
-    storeKittyImage(self, .{
+    dec.decode(png_bytes, payload) catch return .einval;
+    const img = png.decode(self.allocator, png_bytes) catch return .einval; // 미지원/malformed는 graceful 거부
+    if (!store) { // query: 디코드까지 되면 받을 수 있다 — 픽셀은 버린다
+        self.allocator.free(img.data);
+        return .ok;
+    }
+    return if (storeKittyImage(self, .{
         .id = cmd.image_id,
         .width = img.width,
         .height = img.height,
         .bpp = img.bpp,
         .data = img.data, // storeKittyImage→add가 소유권 가져감
-    });
+    })) .ok else .enomem;
 }

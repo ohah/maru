@@ -373,6 +373,14 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
             'd' => if (val.len == 1) {
                 cmd.delete_what = val[0]; // 삭제 타깃 문자(a/A/i/I/z/Z/…)
             },
+            // q: 응답 억제(0=전부 보고·1=에러만·2=침묵). 안 읽으면 q=2를 쓴 앱에 응답을 뱉어
+            // 그 바이트가 앱 입력 스트림에 섞인다.
+            'q' => cmd.quiet = std.fmt.parseInt(u8, val, 10) catch 0,
+            // t: 전송 매체(d/f/t/s). maru는 d(direct)만 구현하고 나머지는 ENOTSUPP로 거부한다 —
+            // 안 읽으면 경로 문자열을 픽셀로 오인해 무음 폐기한다.
+            't' => if (val.len == 1) {
+                cmd.medium = val[0];
+            },
             else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
         }
     }
@@ -468,14 +476,33 @@ pub fn deviceStatusReport(self: *TerminalCore) void {
 /// DECRQM(CSI ? Ps $ p) 응답 — DECRPM(CSI ? Ps ; Pm $ y). Pm: 0=미인식, 1=set, 2=reset,
 /// 3=영구 set, 4=영구 reset. 우리가 추적하는 모드는 현재 상태(1/2)를 알려 앱이 지원을 감지하고
 /// 켤 수 있게 한다(특히 mode 2027). 모르는 모드는 0(미인식)으로 답해 앱이 폴백하게 둔다.
+///
+/// **`setPrivateModes`가 아는 모드는 여기서도 전부 답해야 한다.** 0(미인식)은 "이 터미널엔 그
+/// 기능이 없다"는 뜻이라, 실제로 구현한 모드를 0으로 답하면 앱이 **쓸 수 있는 기능을 스스로
+/// 끈다**. 실측(2026-09-08): terminal-browser가 `CSI ?1016$p`로 픽셀 마우스를 묻는데 maru가
+/// 0을 답해, 1016을 구현해 두고도 셀 단위 마우스로 폴백당했다(브라우저 클릭 좌표가 어긋남).
+/// 아래 목록은 `setPrivateModes`의 분기와 1:1로 맞춘다 — 한쪽에 모드를 더하면 다른 쪽도 더한다.
 pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
     const state: u8 = switch (mode) {
-        2027 => if (self.grapheme_cluster_mode) 1 else 2,
-        2026 => if (self.sync_output) 1 else 2,
-        2004 => if (self.bracketed_paste) 1 else 2,
-        25 => if (self.cursor_visible) 1 else 2,
-        1 => if (self.application_cursor_keys) 1 else 2,
+        1 => if (self.application_cursor_keys) 1 else 2, // DECCKM
+        5 => if (self.reverse_screen) 1 else 2, // DECSCNM(화면 반전)
         6 => if (self.origin_mode) 1 else 2, // DECOM(origin mode)
+        7 => if (self.autowrap) 1 else 2, // DECAWM(autowrap)
+        9 => if (self.mouse_tracking == .x10) 1 else 2, // X10 mouse
+        25 => if (self.cursor_visible) 1 else 2, // DECTCEM
+        // 47/1047/1049는 setPrivateModes에서 alt 진입/이탈 한 동작으로 수렴한다 — 보고도 같은 상태를 준다.
+        47, 1047, 1049 => if (self.alt_active) 1 else 2,
+        1000 => if (self.mouse_tracking == .normal) 1 else 2, // normal(press+release)
+        1002 => if (self.mouse_tracking == .button) 1 else 2, // button(+drag)
+        1003 => if (self.mouse_tracking == .any) 1 else 2, // any(+motion)
+        1004 => if (self.focus_events) 1 else 2, // focus reporting
+        1006 => if (self.mouse_format == .sgr) 1 else 2, // SGR 인코딩
+        1007 => if (self.alternate_scroll) 1 else 2, // alt screen 휠→화살표
+        1015 => if (self.mouse_format == .urxvt) 1 else 2, // urxvt 인코딩
+        1016 => if (self.mouse_format == .sgr_pixels) 1 else 2, // SGR-pixels(픽셀 좌표)
+        2004 => if (self.bracketed_paste) 1 else 2,
+        2026 => if (self.sync_output) 1 else 2,
+        2027 => if (self.grapheme_cluster_mode) 1 else 2,
         else => 0, // 미인식 — 앱이 보수적으로 폴백
     };
     var buf: [32]u8 = undefined;
@@ -490,6 +517,39 @@ pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
 /// 지원 flag가 늘면 이 마스크를 넓힌다.
 pub fn kittyFlagsFromParam(v: u16) core.KittyFlags {
     return .{ .disambiguate = (v & 1) != 0 };
+}
+
+/// XTWINOPS(CSI Ps t) 중 **보고형 질의만** 답한다 — 14=텍스트 영역 픽셀(`CSI 4;h;w t`),
+/// 16=셀 픽셀(`CSI 6;h;w t`), 18=문자 단위 크기(`CSI 8;rows;cols t`). 베이스: xterm ctlseqs
+/// "Window manipulation (dtterm)".
+///
+/// **창 조작(이동·리사이즈·아이콘화·raise)과 제목 보고(20/21)는 구현하지 않는다.** 앞은 앱이
+/// 사용자 창을 흔들게 하고, 뒤는 창 제목에 심어 둔 문자열을 입력 스트림으로 되돌려 주는 알려진
+/// 주입 경로다(xterm ctlseqs가 직접 경고한다). 미구현 Ps는 침묵한다 — 오답보다 무응답이 낫다.
+///
+/// **셀 픽셀은 platform이 `setCellMetrics`로 주입한 값이 단일 출처**이고, 없으면(헤드리스)
+/// 14/16에 답하지 않는다. 0을 보고하면 앱이 그 값으로 나눠 기하가 통째로 깨진다 — 실측
+/// (2026-09-08): terminal-browser는 `CSI 16t` → TIOCGWINSZ 픽셀 필드 순으로 셀 크기를 구하는데
+/// 둘 다 비어 캔버스 해상도와 마우스 환산이 어긋났다.
+pub fn reportWindowOps(self: *TerminalCore) void {
+    if (self.csiRawParam(1) != 0) return; // `CSI 14;2t`(창 전체 크기) 같은 변종은 답하지 않는다
+    var buf: [32]u8 = undefined;
+    const s = switch (self.csiRawParam(0)) {
+        14 => blk: {
+            if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+            break :blk std.fmt.bufPrint(&buf, "\x1b[4;{d};{d}t", .{
+                @as(u32, self.size.rows) * self.cell_height_px,
+                @as(u32, self.size.cols) * self.cell_width_px,
+            }) catch return;
+        },
+        16 => blk: {
+            if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+            break :blk std.fmt.bufPrint(&buf, "\x1b[6;{d};{d}t", .{ self.cell_height_px, self.cell_width_px }) catch return;
+        },
+        18 => std.fmt.bufPrint(&buf, "\x1b[8;{d};{d}t", .{ self.size.rows, self.size.cols }) catch return,
+        else => return,
+    };
+    self.appendResponse(s);
 }
 
 /// kitty keyboard query(CSI ? u) 응답: 현재 스택 최상단 flags를 CSI ? flags u로 보고한다.
@@ -796,6 +856,9 @@ fn dispatchCsi(self: *TerminalCore, final: u8) void {
         // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
         // 식별한다(CSI ?6c) — 현재 구현 수준(커서/erase/scroll region/IL/DL)과 부합.
         'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?6c"),
+
+        // XTWINOPS(CSI Ps t) — 보고형 질의만 답한다. 아래 "구현 범위" 참조.
+        't' => reportWindowOps(self),
         else => {},
     }
 }

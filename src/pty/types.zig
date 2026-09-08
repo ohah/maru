@@ -465,6 +465,11 @@ pub const SpawnRequest = struct {
     /// 값으로 바꾸는 것» 이 곧 «selector 를 거짓말하게 만드는 것» 이 된다(계약 §4).
     hook_pane: ?[]const u8 = null,
     size: terminal.Size = terminal.Size.default,
+    /// 셀 픽셀 크기 — PTY winsize의 `ws_xpixel`/`ws_ypixel`을 spawn 시점부터 채운다. 0(기본)이면 "모른다"로
+    /// 두고, 이후 `PtySession.setCellPixels`가 채운다. 시작하자마자 크기를 읽는 앱(이미지 TUI)이 첫 프레임을
+    /// 맞게 그리려면 spawn 시점 값이 필요하다.
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
 };
 
 /// 토큰 하나를 POSIX 셸의 작은따옴표로 감싸 `buf`에 붙인다. 안의 `'`는 `'\''`로 끊어 잇는다.

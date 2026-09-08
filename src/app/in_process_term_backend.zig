@@ -156,7 +156,12 @@ pub const InProcessTermBackend = struct {
         // reader가 시작되기 전의 원자적 bootstrap snapshot만 backend 계약으로 받는다. caller가 spawn 뒤 필드를 하나씩
         // 바꾸는 동안 child 첫 출력이 기본값으로 parse되는 race를 막고, 원격 host와 같은 first-output 의미론을 지킨다.
         // scrollback arena처럼 wire snapshot에 없는 client 메모리 정책은 계속 caller가 attach 전에 적용한다.
-        if (params.initial_config) |config| _ = core_command.apply(&slot.terminal.surface.core, .{ .set_runtime_config = config });
+        if (params.initial_config) |config| {
+            const effect = core_command.apply(&slot.terminal.surface.core, .{ .set_runtime_config = config });
+            // bootstrap이 셀 픽셀을 실어 왔으면 PTY winsize의 픽셀 필드도 **reader가 돌기 전에** 세운다 —
+            // 시작하자마자 크기를 읽는 이미지 앱이 첫 프레임부터 맞는 값을 보게(reader 경로는 이후 갱신 담당).
+            if (effect.cell_pixels) |cp| slot.terminal.live_pty.session.setCellPixels(cp.width, cp.height) catch {};
+        }
         return &slot.terminal.surface;
     }
 

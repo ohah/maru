@@ -88,18 +88,27 @@ pub const CoreCommand = union(enum) {
     reset_input_modes,
 };
 
+/// 적용 후 **코어 밖에서** 해야 할 일. 코어는 PTY를 모르므로(계층 경계) 여기에 실어 호출자에게 넘긴다.
+/// `cell_pixels`는 PTY winsize의 픽셀 필드(`ws_xpixel`/`ws_ypixel`)에 반영할 셀 크기다 — PTY를 아는 실행부
+/// (reader·host runtime)가 `PtySession.setCellPixels`로 옮기고, PTY가 없는 실행부(client remote core)는 무시한다.
+pub const ApplyEffect = struct {
+    send_form_feed: bool = false,
+    cell_pixels: ?CellMetrics = null,
+};
+
 /// 명령을 코어에 적용한다. **호출자가 코어 락(core_mutex)을 잡은 상태여야 한다** — reader는 `owner_dbg.lock`,
 /// non-interactive 직접 폴백은 `surface.lockCore`. 단일 mutator 계약상 적용은 한 스레드에서만 일어난다(§9.3).
 /// 응답을 만드는 명령(리포팅 — P3-3)은 적용 후 호출자가 `core.pendingResponse`를 PTY로 흘린다.
-pub const ApplyEffect = struct { send_form_feed: bool = false };
-
 pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) ApplyEffect {
     switch (cmd) {
         .scroll => |delta| core.scrollViewport(delta),
         .scroll_to_bottom => core.scrollToBottom(),
         .report_mouse => |m| core.reportMouse(m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods),
         .report_focus => |gained| core.reportFocus(gained),
-        .set_cell_metrics => |cm| core.setCellMetrics(cm.width, cm.height),
+        .set_cell_metrics => |cm| {
+            core.setCellMetrics(cm.width, cm.height);
+            return .{ .cell_pixels = cm }; // PTY winsize 픽셀 필드도 같은 값으로 따라가야 한다
+        },
         .set_default_colors => |colors| core.setDefaultColors(colors.foreground, colors.background),
         .set_config_palette => |palette| core.setConfigPalette(palette),
         .set_max_scrollback => |lines| core.setMaxScrollback(lines),
@@ -114,6 +123,9 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) ApplyEffect {
             core.setDefaultColors(config.default_colors.foreground, config.default_colors.background);
             if (config.cell_metrics) |metrics| core.setCellMetrics(metrics.width, metrics.height);
             core.setDefaultCursorShape(config.default_cursor_shape);
+            // attach/reconnect bootstrap도 PTY winsize 픽셀을 함께 세운다 — 재접속한 세션의 이미지 앱이
+            // 셀 크기를 다시 물어볼 때 0을 보지 않게(set_cell_metrics 단독 경로와 같은 결).
+            if (config.cell_metrics) |metrics| return .{ .cell_pixels = metrics };
         },
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
         .scroll_to_offset => |target| {

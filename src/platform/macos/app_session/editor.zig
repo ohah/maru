@@ -14580,6 +14580,19 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     if (term.rt.editor_first_col == 0) return error.SnappedBackToZeroWhenMaxUnknown;
     try testing.expectEqual(@as(u16, 40), term.rt.editor_first_col);
 
+    // ⑶ʹ **상한만 없고 폭은 있는 갈래**도 있다. `setEditorTabWidth` 는 `invalidateFoldDerived` 로
+    //    `max_cols` 를 버리면서 **렌더 스냅숏은 남긴다** — 그때 폭 가드는 안 걸리고 상한 가드만 남는다.
+    //    그 자리에서 0 으로 clamp 하면 화면이 되감긴다.
+    var drawn2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn2.dl.deinit(allocator);
+    if (term.rt.editor_hit_geom.content_width == 0) return error.SnapshotMissing;
+    term.rt.editor_max_cols = 0; // 상한만 없앤다(탭 폭 변경이 하는 일)
+    term.rt.editor_first_col = 40;
+    term.rt.editor_selection = editor_selection.Selection.at(5 + 350);
+    _ = moveCarets(fx.session, term, .char_right, false);
+    if (term.rt.editor_first_col == 0) return error.SnappedBackToZeroWithWidthKnown;
+    try testing.expectEqual(@as(u16, 40), term.rt.editor_first_col);
+
     // ⑷ **랩이면 편집도 가로를 안 건드린다.**
     term.rt.editor_wrap = true;
     term.rt.editor_first_col = 7;

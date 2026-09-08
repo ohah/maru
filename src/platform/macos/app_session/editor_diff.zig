@@ -3206,6 +3206,9 @@ test "DCOL3: 넘어가면 선택이 접힌다 — 좌우를 걸치지 않는다 
     // 띠도 사라진다 — 한 열에만 있던 선택이 통째로 접혔다.
     try testing.expectEqual(@as(?[]const []const maru.chrome.components.editor_view.frame.Mark, null), editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .right));
     try testing.expectEqual(@as(?[]const []const maru.chrome.components.editor_view.frame.Mark, null), editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .left));
+    // **단위도 풀린다.** `kind` 를 들고 넘어가면 그 뒤의 드래그가 글자가 아니라 낱말로 늘어난다
+    //    — `isEmpty()` 는 그대로라 그것만 재는 단언으로는 안 갈린다(18회차 U14).
+    try testing.expectEqual(maru.session.editor.selection.AnchorKind.simple, fx.term.rt.editor_diff_selection.?.sel.kind);
 }
 
 test "DCOL4: 짝맞춤 빈 행으로도 넘어간다 (§4.1g 비교 뷰)" {

@@ -515,13 +515,14 @@ test "actual fresh processes emit both profile projections without FD or stderr 
     });
 }
 
-test "product bridge has one selector output and no credential or checkpoint authority" {
+test "product bridge has one output per closed subcommand and no token or checkpoint authority" {
     const cli_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tools/session-host/release_workflow_authored_selector_cli.zig", std.testing.allocator, .limited(32 * 1024));
     defer std.testing.allocator.free(cli_source);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cli_source, "projection.compose("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cli_source, "fence_command.compose("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cli_source, "environment_mod.readCurrent()"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cli_source, "stdout_file_writer.interface.writeAll(output)"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cli_source, "try execution.deinit();"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, cli_source, "stdout_file_writer.interface.writeAll(output)"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, cli_source, "try execution.deinit();"));
     inline for (.{ "GH_TOKEN", "GITHUB_OUTPUT", "checkpoint", "actions/attest" }) |forbidden|
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, cli_source, forbidden));
 

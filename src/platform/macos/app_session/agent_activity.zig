@@ -1259,6 +1259,12 @@ pub fn poll(self: *AppSession) void {
         self.debug_agent_activity_open = null;
         openAt(self, n);
     }
+    // `MARU_FORCE_IMAGE_GALLERY_BODY` — `Enter` 를 누른 것처럼 본문까지 넓힌다. 예약은 한 번만 쓴다.
+    if (self.debug_agent_activity_body_search) {
+        self.debug_agent_activity_body_search = false;
+        self.agent_activity.search_active = false; // `Enter` 는 창을 닫는다 — 안내 줄이 보여야 한다
+        submitBodySearch(self);
+    }
     // `MARU_FORCE_IMAGE_GALLERY_HOVER=<n>` — 그 칸에 포인터가 얹힌 것처럼 세운다. 실제 호버는 마우스
     // 이동이 필요해 헤드리스로는 만들 수 없다(상태바 호버가 같은 이유로 같은 게이트를 둔다).
     if (self.debug_agent_activity_hover) |n| {

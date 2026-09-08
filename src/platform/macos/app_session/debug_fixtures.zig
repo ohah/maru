@@ -1655,6 +1655,13 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
     for (0..rights) |_| _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } }) catch {};
     // **열 넘기기도 키로 태운다**(`MARU_DIFF_SWITCH_SIDE=1`). `⌃⇧Tab` 이 AppKit 을 지나 `keyDown`
     // 까지 오는지는 판정자가 원리상 답할 수 없다 — 캡처가 그 자리를 메운다.
+    // **행 끝으로 보낸다**(`MARU_DIFF_LINE_END=1`) — 가로 추적은 한 화면보다 긴 줄에서만 보인다.
+    if (std.c.getenv("MARU_DIFF_LINE_END")) |le| {
+        const le_spec = std.mem.span(le);
+        if (le_spec.len > 0 and !std.mem.eql(u8, le_spec, "0")) {
+            _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } }) catch {};
+        }
+    }
     if (std.c.getenv("MARU_DIFF_SWITCH_SIDE")) |sw| {
         const sw_spec = std.mem.span(sw);
         if (sw_spec.len > 0 and !std.mem.eql(u8, sw_spec, "0")) {

@@ -14483,6 +14483,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-profile-upgrade-timing-artifact",
         "Publish the protected upgrade timing as a private canonical artifact",
     );
+    const session_host_release_adapter_profile_authored_attestation_selector_step = b.step(
+        "test-session-host-release-adapter-profile-authored-attestation-selector",
+        "Select freshly reopened authored subjects without credentials",
+    );
     const session_host_release_adapter_zig_toolchain_authority_step = b.step(
         "test-session-host-release-adapter-zig-toolchain-authority",
         "Validate official release Zig toolchain authority",
@@ -15767,6 +15771,34 @@ pub fn build(b: *std.Build) void {
             run_profile_upgrade_timing_artifact_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_upgrade_timing_artifact_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
+            const profile_authored_attestation_selector_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_selector.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_manifest", .module = manifest_mod },
+                .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod },
+                .{ .name = "release_adapter_candidate_preparation_reopen", .module = candidate_preparation_reopen_mod },
+                .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
+                .{ .name = "release_adapter_profile_upgrade_timing_artifact", .module = profile_upgrade_timing_artifact_mod },
+            } });
+            const profile_authored_attestation_selector_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_profile_authored_attestation_selector.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_evidence", .module = release_evidence_mod },
+                    .{ .name = "release_manifest", .module = manifest_mod },
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_selector", .module = profile_authored_attestation_selector_mod },
+                },
+            }) });
+            const run_profile_authored_attestation_selector_tests = b.addRunArtifact(profile_authored_attestation_selector_tests);
+            run_profile_authored_attestation_selector_tests.addArg("--maru-expect-tests=7");
+            run_profile_authored_attestation_selector_tests.setCwd(b.path("."));
+            session_host_release_adapter_profile_authored_attestation_selector_step.dependOn(&run_profile_authored_attestation_selector_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_authored_attestation_selector_tests.step);
             const profile_stage3_preparation_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_stage3_preparation_phase.zig"), .target = target, .optimize = composition_optimize });
             const profile_stage3_preparation_command_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_stage3_preparation_command_phase.zig"), .target = target, .optimize = composition_optimize });
             const profile_stage3_preparation_command_phase_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_profile_stage3_preparation_command_phase.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_profile_stage3_preparation_command_phase", .module = profile_stage3_preparation_command_phase_mod }} }) });

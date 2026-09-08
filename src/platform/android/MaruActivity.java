@@ -61,6 +61,7 @@ public class MaruActivity extends android.app.NativeActivity {
     /** 시스템 외관이 다크인지(`theme.follow-system` 이 켜졌을 때만 코어가 쓴다). */
     private static native void nativeSystemAppearance(int isDark);
     private static native void nativeSystemFontScale(int scaleMilli);
+    private static native void nativeLowPower(int on);
 
     /** 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
      *
@@ -662,6 +663,15 @@ public class MaruActivity extends android.app.NativeActivity {
      *
      *  **여기서 판단하지 않는다** — 따라갈지(`font.follow-system`)도, 얼마까지 키울지(범위)도
      *  코어가 든다. Java 가 그것을 알면 두 플랫폼이 갈린다. */
+    /** 저전력 모드를 코어에 그대로 싣는다(M14a).
+     *
+     *  **여기서 판단하지 않는다** — 얼마로 낮출지는 코어가 든다(iOS 와 같은 값이라야 한다). */
+    private void applyLowPower() {
+        android.os.PowerManager pm =
+                (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+        nativeLowPower(pm != null && pm.isPowerSaveMode() ? 1 : 0);
+    }
+
     private void applySystemFontScale() {
         float scale = getResources().getConfiguration().fontScale;
         nativeSystemFontScale(scale > 0f ? Math.round(scale * 1000f) : 0);
@@ -683,6 +693,7 @@ public class MaruActivity extends android.app.NativeActivity {
         applyLongPressTimeout();
         applySystemAppearance();
         applySystemFontScale();
+        applyLowPower();
         // **재접속은 여기서 안 정한다.** 돌아오면 창이 다시 서면서 config 를 다시 읽고
         // (docs/mobile-config.md §7), 브리지가 "원격 세션이 없으면" 붙어 달라고 요청한다 —
         // 그 판단이 여기 또 있으면 두 자리가 갈린다(SSH 에는 재개가 없어 되살리기는 없다).
@@ -705,6 +716,7 @@ public class MaruActivity extends android.app.NativeActivity {
         // `onResume` 에서만 알리면 시작할 때 한 번 다시 굽게 되고, 큰 글씨를 쓰는 사람일수록
         // 그 한 번이 눈에 띈다(그 사람이 바로 이 기능의 대상이다).
         applySystemFontScale();
+        applyLowPower();
         // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
         // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());

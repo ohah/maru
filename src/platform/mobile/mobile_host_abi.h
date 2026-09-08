@@ -59,6 +59,14 @@ unsigned int maru_mobile_atlas_text_px(void);
 /// 도달 가능한 값을 봐야 한다).
 #define MARU_FRAME_PACE_MIN_MS (MARU_FRAME_TARGET_MS * 0.75)
 #define MARU_FRAME_PACE_MAX_MS (MARU_FRAME_TARGET_MS * 1.30)
+/// **목표가 움직이면 창도 따라간다**(M14a — 저전력이면 코어가 더 낮은 값을 답한다). 창의 폭은
+/// 그대로 두고 **곱하는 대상**만 지금 목표로 바꾼다 — 상수에 못 박아 두면 저전력에서 설계대로
+/// 도는데도 `MARU_PACE` 가 붉게 나온다(실측: 15Hz 로 잘 내려갔는데 `verdict=FAIL` 이었다).
+/// 「판정자가 깨졌다고 제품을 되돌리기 전에 그 판정자의 기준선이 아직 참인지 먼저 묻는다」가
+/// 가리키는 바로 그 자리다.
+#define MARU_FRAME_PACE_TARGET_MS (1000.0 / (double)maru_mobile_frame_target_hz())
+#define MARU_FRAME_PACE_MIN_NOW_MS (MARU_FRAME_PACE_TARGET_MS * 0.75)
+#define MARU_FRAME_PACE_MAX_NOW_MS (MARU_FRAME_PACE_TARGET_MS * 1.30)
 /// 그 창에 넣을 표본을 **어떻게 고르는가**. 여기도 두 플랫폼이 같아야 한다 — 판정 기준만
 /// 같고 표본이 다르면 두 수를 나란히 놓는 것 자체가 무의미하다(실제로 Android 는 첫
 /// 프레임들을 버렸고 iOS 는 안 버려, 같은 이름의 로그가 다른 것을 재고 있었다).
@@ -251,6 +259,20 @@ void maru_mobile_set_system_appearance(unsigned int is_dark);
    `maru_mobile_atlas_cell_h()` 가 달라지고, host 는 그 프레임에 아틀라스를 **다시 구워야** 한다
    (두 host 다 `maru_mobile_build` 앞에서 그 비교를 이미 하고 있으므로 따로 할 일은 없다). */
 void maru_mobile_set_system_font_scale(unsigned int scale_milli);
+
+/* **저전력 모드**를 코어에 알린다(M14a). 외관·글자 배율과 같은 계약이다: **생성 직후 한 번,
+   그리고 바뀔 때마다**(iOS `NSProcessInfoPowerStateDidChangeNotification` · Android
+   `ACTION_POWER_SAVE_MODE_CHANGED`).
+
+   **얼마로 낮출지는 host 가 안 정한다** — 아래 `maru_mobile_frame_target_hz` 가 답한다. */
+void maru_mobile_set_low_power(unsigned int on);
+
+/* 지금 그릴 주기(Hz). host 는 이 값을 OS 에 선언하기만 한다 — iOS 는
+   `preferredFramesPerSecond`, Android 는 이 값으로 vsync 를 솎는다. **매 프레임 물어도 된다**
+   (싸고, 바뀌는 순간을 host 가 따로 알 필요가 없다).
+
+   모르면(=host 가 아직 안 알렸으면) 평소 값이다 — 모르는 값으로 화면을 느리게 하지 않는다. */
+unsigned int maru_mobile_frame_target_hz(void);
 
 /* 지금 **소리로 읽어 줄** 글자(M9a — 새 출력 알림). 채운 바이트 수를 돌려주고, 읽을 것이 없으면
    0 이고 아무것도 안 쓴다. **가져가면 사라진다** — 두 번 읽지 않는다. `maru_mobile_build` 뒤에

@@ -44,6 +44,9 @@ pub const RecordKind = enum(u16) {
     image_blob = 4,
     prompt_marks = 5, // OSC 133 행별 semantic prompt(분류+종료코드). full-replace라 snapshot·delta 공용.
     link_spans = 6, // 뷰포트 링크(자동 감지 + OSC 8). full-replace라 snapshot·delta 공용.
+    // U=1 virtual placement(unicode placeholder) 격자. full-replace라 snapshot·delta 공용 —
+    // 목록이 작고(이미지당 하나) 자주 안 바뀌어 증분 표현이 이득이 없다.
+    image_virtual = 7,
     // delta records (증분 변경)
     set_runs = 10,
     clear_rect = 11,
@@ -57,7 +60,7 @@ pub const RecordKind = enum(u16) {
 
     pub fn isKnown(self: RecordKind) bool {
         return switch (self) {
-            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove, .scroll_state => true,
+            .screen_meta, .row, .image_placement, .image_virtual, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove, .scroll_state => true,
             _ => false,
         };
     }
@@ -648,6 +651,40 @@ pub fn decodedCellCount(bytes: []const u8, expected_codec_version: u16) DecodeEr
         if (reader.pos != reader.bytes.len) return error.MalformedRecord;
     }
     return total;
+}
+
+/// U=1 virtual placement(unicode placeholder)의 격자 정의. 화면 위치는 placeholder 셀이 정하므로
+/// row/col 이 없고, 타일 크기를 정하는 `columns`×`rows` 와 z 만 건넌다.
+pub const ImageVirtualPlacement = struct {
+    image_id: u32,
+    placement_id: u32 = 0,
+    columns: u32 = 0,
+    rows: u32 = 0,
+    z: i32 = 0,
+};
+
+pub fn encodeImageVirtual(allocator: std.mem.Allocator, header: RecordHeader, p: ImageVirtualPlacement) DecodeError![]u8 {
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u32v(p.image_id);
+    try w.u32v(p.placement_id);
+    try w.u32v(p.columns);
+    try w.u32v(p.rows);
+    try w.i32v(p.z);
+    return finishRecord(allocator, .{ .kind = header.kind, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodeImageVirtual(body: []const u8) DecodeError!ImageVirtualPlacement {
+    var r = BodyReader{ .bytes = body };
+    // 필드 순서 = encode wire 순서(struct 리터럴 초기화는 소스 순으로 평가된다).
+    return .{
+        .image_id = try r.u32v(),
+        .placement_id = try r.u32v(),
+        .columns = try r.u32v(),
+        .rows = try r.u32v(),
+        .z = try r.i32v(),
+    };
 }
 
 pub fn encodeImagePlacement(allocator: std.mem.Allocator, header: RecordHeader, p: ImagePlacement) DecodeError![]u8 {

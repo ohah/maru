@@ -192,6 +192,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
     for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img);
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
+    for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &stream, opts.generation, vp);
     try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
     // 뷰포트 링크(있을 때만) — client가 Cmd+hover 밑줄을 그릴 유일한 근거다(client core는 빈 placeholder).
     var links: std.ArrayList(terminal.ViewportLink) = .empty;
@@ -304,6 +305,18 @@ fn placementsChanged(prev: []const screen_stream.ImagePlacement, cur: []const te
 }
 
 /// core의 뷰포트 상대 kitty placement를 image_placement 레코드로 방출한다(필드 1:1 — crop/offset/columns/rows 보존).
+fn appendImageVirtualRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, vp: terminal.KittyVirtualPlacement) screen_stream.DecodeError!void {
+    const rec = try screen_stream.encodeImageVirtual(allocator, .{ .kind = .image_virtual, .generation = generation }, .{
+        .image_id = vp.image_id,
+        .placement_id = vp.placement_id,
+        .columns = vp.columns,
+        .rows = vp.rows,
+        .z = vp.z,
+    });
+    defer allocator.free(rec);
+    try appendProjectedRecord(stream, allocator, rec);
+}
+
 fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, p: terminal.KittyPlacement) screen_stream.DecodeError!void {
     const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = generation }, .{
         .image_id = p.image_id,
@@ -667,6 +680,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     // client가 없는 것만 싣는다(#1 I4b). blob은 prev generation과 다른 이미지만, placement는 집합이 바뀌었을 때 clear+set.
     for (snap.images) |img| try appendImageBaseMeta(allocator, &snapshot, opts.generation, img); // 리뷰 #11: base엔 픽셀 없이 메타만.
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
+    for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
     for (snap.images) |img| {
         const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
         if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
@@ -908,6 +922,44 @@ test "screen snapshot: wide CJK cell projects width=2 and skips the continuation
     try testing.expectEqual(@as(u8, 2), row.runs[0].width); // wide는 width=2, continuation은 run으로 안 나온다.
     try testing.expectEqualStrings("A", row.runs[1].grapheme);
     try testing.expectEqual(@as(u8, 1), row.runs[1].width);
+}
+
+test "screen snapshot: U=1 virtual placement 가 host 스트림에 실린다(그리고 일반 placement 로 새지 않는다)" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+    // **회귀 판정**: 이 방출이 빠지면 client 는 격자를 못 받아 placeholder 셀이 타일 크기를 못 정한다
+    // → host-backed 세션에서 tmux 경유 이미지가 통째로 안 보인다. **client 쪽만 테스트하면 이 결함이
+    // 그대로 통과한다** — 적대적 검증에서 실제로 그랬다(방출을 지워도 client 판정자는 초록이었다).
+    var raw = [_]u8{0} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=7,U=1,c=4,r=2,z=-1,q=2;{s}\x1b\\", .{b64s}));
+
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 3 });
+    defer allocator.free(bytes);
+
+    var found_virtual = false;
+    var placement_count: usize = 0;
+    var rs = screen_stream.RecordStream{ .bytes = bytes };
+    while (try rs.next()) |rec| {
+        const s2 = try screen_stream.RecordStream.split(rec);
+        switch (s2.header.kind) {
+            .image_virtual => {
+                const vp = try screen_stream.decodeImageVirtual(s2.body);
+                try testing.expectEqual(@as(u32, 7), vp.image_id);
+                try testing.expectEqual(@as(u32, 4), vp.columns);
+                try testing.expectEqual(@as(u32, 2), vp.rows);
+                try testing.expectEqual(@as(i32, -1), vp.z);
+                found_virtual = true;
+            },
+            .image_placement => placement_count += 1,
+            else => {},
+        }
+    }
+    try testing.expect(found_virtual);
+    try testing.expectEqual(@as(usize, 0), placement_count); // U=1 은 일반 placement 로 새면 안 된다
 }
 
 test "screen snapshot: kitty image projects image_blob(디코드 픽셀) + image_placement" {

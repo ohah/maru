@@ -3667,6 +3667,7 @@ fn selectWordOrLineInDiff(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     const term = pane.activeTerm();
     if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
     const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
+    const was_side = diffSearchSide(self, term); // 바꾸기 **전**의 검색 열
     const st = term.rt.editor_diff orelse return false;
     const texts = if (hit.side == .right) st.right_texts else st.left_texts;
     if (hit.row >= texts.len) return false;
@@ -3690,6 +3691,9 @@ fn selectWordOrLineInDiff(self: *AppSession, pane: *Pane, whole_line: bool, x_px
         ),
     };
     self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
+    // **검색도 이 열의 것이 되어야 한다**(§5.1 — 강조·마커는 live 인데 목록은 캐시다). 열이 실제로
+    // 바뀌었을 때만 다시 센다 — 헬퍼가 그 판정을 한다.
+    find_ops.diffCaretSideChanged(self, term, was_side);
     self.metal_dirty = true;
     return true;
 }
@@ -3702,11 +3706,15 @@ pub fn beginDiffBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f
     if (term.kind != .editor) return false;
     if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
     const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
+    const was_side = diffSearchSide(self, term); // 바꾸기 **전**의 검색 열
     term.rt.editor_diff_selection = .{
         .side = hit.side,
         .sel = editor_selection.RowSelection.at(.{ .row = hit.row, .byte = hit.byte }),
     };
     self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
+    // **검색도 이 열의 것이 되어야 한다**(§5.1 — 강조·마커는 live 인데 목록은 캐시다). 열이 실제로
+    // 바뀌었을 때만 다시 센다 — 헬퍼가 그 판정을 한다.
+    find_ops.diffCaretSideChanged(self, term, was_side);
     self.metal_dirty = true;
     return true;
 }
@@ -3921,6 +3929,9 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
         .side = to,
         .sel = maru.session.editor.selection.RowSelection.at(.{ .row = row, .byte = landed }),
     };
+    // **검색도 이 열의 것이 되어야 한다.** 강조·막대 마커는 `diffSearchSide` 를 live 로 읽는데
+    // 매치 목록은 캐시라, 안 세면 «화면은 왼쪽인데 결과는 오른쪽 것»이 된다(§5.1 이 경고한 자리).
+    find_ops.diffCaretSideChanged(self, term, from);
     self.metal_dirty = true;
     return true;
 }

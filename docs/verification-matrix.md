@@ -3339,6 +3339,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   actual APFS 행은 private root에서 Debug 1회·ReleaseFast 40회의 전체 로컬 경과시간, failure·FD delta·retained final·staging
   residue를 기록한다. 기존 profile owner와 그 workspace/assets는 caller-owned라 이 제품의 cleanup
   대상이 아니다. timing publication, command/live workflow와 protected B tag 실측은 후속 gate다.
+  Upgrade-B profile timing artifact는 성공한 `ProfileUpgradeExecution`과 protected `Context`만 받아 canonical
+  `maru.session-host-profile-upgrade-timing.v1` JSON을 별도 private `0600` 파일로 atomic 게시한다. 다섯 duration과 current run identity는
+  typed owner에서만 투영하고 timing을 release 성공 권위로 쓰지 않으며 durable preparation의 exact 2-entry inventory에도 섞지 않는다.
+  `test-session-host-release-adapter-profile-upgrade-timing-artifact`는 Debug·ReleaseFast actual private APFS에서 canonical bytes, owner/context와
+  timing 합계·overflow, alias/path/mode/link/inode drift와 owner 확립 뒤 fence 실패의 audit/reopen/cleanup 및 FD·staging residue 0을
+  검증한다. 공용 `release_adapter_files` gate가 owner 인계 전 exclusive publication 실패의 same-inode cleanup·foreign replacement 보존을
+  단일 출처로 맡는다.
+  fresh-process profile stage-3 command, checkpoint·attestation, live workflow와 protected B tag 실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

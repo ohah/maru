@@ -164,7 +164,16 @@ test "정지 축: detached worker 를 띄우는 backend 는 자기 deinit 이나
             continue;
         };
         if (!spawns) continue;
-        if (std.mem.indexOf(u8, source, "refs: std.atomic.Value") == null) continue; // refcount backend 만
+        // **refcount backend 만** 이 축이다 — 「마지막 워커가 `State` 를 파괴한다」가 이 결함의 모양이다.
+        //
+        // ⚠️ **그 밖의 detached 워커가 안 지켜진다는 뜻이 아니다.** 감사해 보니(2026-09-08) 셋으로
+        // 갈린다: ⒜ 테스트 전용 spawn 은 위 `hasProductToken` 이 이미 걸러냈고, ⒝ `control_server`
+        // 처럼 핸들을 들고 **join** 하는 것, ⒞ `file_panel` 의 원격 rename·업로드처럼 자기 `deinit`
+        // 이 **inflight 를 스핀 대기**하는 것이다. 셋 다 자기 자리에서 지킨다.
+        //
+        // **새로 만든다면 그 셋 중 하나를 골라야 한다** — refcount 를 쓰면 이 축이 잡아 주고, 안
+        // 쓰면 잡아 주는 사람이 없으므로 `deinit` 이 직접 거둬야 한다.
+        if (std.mem.indexOf(u8, source, "refs: std.atomic.Value") == null) continue;
         found += 1;
 
         var listed: ?usize = null;

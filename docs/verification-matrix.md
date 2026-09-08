@@ -3354,8 +3354,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   subject, baseline timing 부재, nested timing 거부, profile/predecessor/environment/subject drift, caller pathname copy, copied owner seal과
   allocation fail-index unwind를 검증한다. 같은 gate의 fresh-process projection 행은 다섯 option의 exact-once parser와 control-byte 거부,
   owner/seal/FD를 제외한 일곱 scalar의 canonical bytes, pre-output failure의 stdout 0과 실제 child 20회/profile의 median·p95·max,
-  stderr·FD·residue 0을 고정한다. 아직 구현 전인 범위는 profile별 2/3 GitHub attestation 호출, 독립 final-fence process, bundle 검증과
-  live action checkpoint 결속이다.
+  stderr·FD·residue 0을 고정한다. `test-session-host-release-profile-authored-payload-action`은 일곱 projection scalar의
+  evidence/manifest/timing pathname·basename·required 상관관계를 첫 credential action 전에 실제 negative matrix로 닫고, baseline의
+  exact 2개와 upgrade의 exact 3개 single-subject action 호출 및 bundle-path-only 출력을 source gate로 고정한다. helper는 caller의
+  `errexit` 문맥과 무관하게 invalid tuple을 nonzero로 닫고 filesystem 존재, raw profile, token을 읽지 않는다. 아직 구현 전인 범위는
+  bundle 내용의 subject digest 재결속, 독립 final-fence process, checkpoint와 live action caller 결속이다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.

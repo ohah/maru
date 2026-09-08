@@ -4873,6 +4873,28 @@ allocation fail-index, encode cap/control byte 및 pre-output failure의 writer 
 GitHub OIDC/network, `actions/attest`, bundle 생성·final fence, authored checkpoint와 실제 앱 session-host registry를 건드리지 않으며,
 이후 live-action gate 전까지 11.99 전체는 부분 구현이다.
 
+#### 11.99b authenticated projection의 2/3 subject payload fan-out
+
+두 번째 제품 합성 gate는 §11.99a fresh-process selector의 일곱 canonical output만 소비하는 repository-local
+payload action을 둔다. action은 raw profile environment, preparation inventory, 파일 존재 여부나 basename으로 profile을 다시
+추론하지 않는다. `evidence-path`·`evidence-name`과 `manifest-path`·`manifest-name`은 항상 기존 single-subject attestation
+action에 exact once 전달하고, `timing-required=false`에서는 timing pathname/name이 둘 다 empty인 경우에만 두 호출로 끝난다.
+`timing-required=true`에서는 timing pathname/name이 둘 다 nonempty이고 basename이 exact 일치할 때에만 세 번째
+single-subject attestation을 호출한다. 다른 boolean spelling, control byte, path/name 불일치, required/path/name 모순은 첫
+credential-bearing action 호출 전에 거부한다.
+
+payload action은 profile scalar, attestation ID/URL, selector의 process-local owner·seal·descriptor를 input/output으로 받거나
+내보내지 않는다. 출력은 성공한 subject와 같은 순서의 `evidence-bundle-path`, `manifest-bundle-path`,
+`timing-bundle-path`뿐이며 baseline의 timing bundle은 empty다. 세 single-subject action은 각자 subject를 attestation 전후에
+pin/revalidate하는 기존 계약을 그대로 소유한다. source gate는 selector output 일곱 개의 exact 입력, raw profile/file-existence
+branch 0, evidence→manifest→optional timing 호출 순서, baseline 2회·upgrade 3회와 선택되지 않은 timing credential 호출 0을
+고정한다.
+
+이 gate만으로 bundle을 후속 단계에 공개하거나 `authored_attestation succeeded` checkpoint를 commit하지 않는다. payload
+성공 뒤 current context/profile/fixed pathname superset에서 selection을 독립적으로 다시 계산하고 세 bundle의 subject digest를
+검증하는 fresh final-fence process, 실패 checkpoint 정산, live caller 배선과 actual filesystem synthetic-bundle 실측은 바로 다음
+gate가 소유한다. 따라서 11.99b 완료 뒤에도 §11.99 전체와 profile-aware live authored attestation은 부분 구현이다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

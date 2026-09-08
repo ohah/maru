@@ -6538,6 +6538,16 @@ pub fn build(b: *std.Build) void {
     session_host_release_authored_attestation_action_step.dependOn(&session_host_release_authored_attestation_action_contract.step);
     if (posix_host_tests) test_step.dependOn(&session_host_release_authored_attestation_action_contract.step);
 
+    const session_host_release_profile_authored_payload_action_contract = b.addSystemCommand(&.{ "bash", "tools/test-session-host-release-profile-authored-payload-action.sh" });
+    session_host_release_profile_authored_payload_action_contract.setCwd(b.path("."));
+    session_host_release_profile_authored_payload_action_contract.stdio = .inherit;
+    const session_host_release_profile_authored_payload_action_step = b.step(
+        "test-session-host-release-profile-authored-payload-action",
+        "Check the profile-aware authored attestation payload fan-out",
+    );
+    session_host_release_profile_authored_payload_action_step.dependOn(&session_host_release_profile_authored_payload_action_contract.step);
+    if (posix_host_tests) test_step.dependOn(&session_host_release_profile_authored_payload_action_contract.step);
+
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 

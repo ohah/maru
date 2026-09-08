@@ -1,0 +1,77 @@
+name: Session host profile-aware authored attestation payload
+description: Attest the closed two-or-three subject projection without profile or filesystem inference
+
+inputs:
+  evidence-path:
+    description: Selector-authenticated evidence pathname
+    required: true
+  evidence-name:
+    description: Selector-authenticated evidence basename
+    required: true
+  manifest-path:
+    description: Selector-authenticated candidate manifest pathname
+    required: true
+  manifest-name:
+    description: Selector-authenticated candidate manifest basename
+    required: true
+  timing-required:
+    description: Selector-authenticated exact true or false timing discriminator
+    required: true
+  timing-path:
+    description: Selector-authenticated timing pathname, empty for baseline
+    required: false
+    default: ''
+  timing-name:
+    description: Selector-authenticated timing basename, empty for baseline
+    required: false
+    default: ''
+
+outputs:
+  evidence-bundle-path:
+    value: ${{ steps.evidence.outputs.bundle-path }}
+  manifest-bundle-path:
+    value: ${{ steps.manifest.outputs.bundle-path }}
+  timing-bundle-path:
+    value: ${{ steps.timing.outputs.bundle-path }}
+
+runs:
+  using: composite
+  steps:
+  - name: Validate closed authored subject projection
+    shell: bash
+    env:
+      MARU_EVIDENCE_PATH: ${{ inputs.evidence-path }}
+      MARU_EVIDENCE_NAME: ${{ inputs.evidence-name }}
+      MARU_MANIFEST_PATH: ${{ inputs.manifest-path }}
+      MARU_MANIFEST_NAME: ${{ inputs.manifest-name }}
+      MARU_TIMING_REQUIRED: ${{ inputs.timing-required }}
+      MARU_TIMING_PATH: ${{ inputs.timing-path }}
+      MARU_TIMING_NAME: ${{ inputs.timing-name }}
+    run: |
+      set -euo pipefail
+      "${{ github.action_path }}/validate-projection.sh" \
+        "$MARU_EVIDENCE_PATH" "$MARU_EVIDENCE_NAME" \
+        "$MARU_MANIFEST_PATH" "$MARU_MANIFEST_NAME" \
+        "$MARU_TIMING_REQUIRED" "$MARU_TIMING_PATH" "$MARU_TIMING_NAME"
+
+  - name: Attest selected evidence
+    id: evidence
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.evidence-path }}
+      subject-name: ${{ inputs.evidence-name }}
+
+  - name: Attest selected manifest
+    id: manifest
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.manifest-path }}
+      subject-name: ${{ inputs.manifest-name }}
+
+  - name: Attest authenticated upgrade timing
+    id: timing
+    if: ${{ inputs.timing-required == 'true' }}
+    uses: ./.github/actions/session-host-release-attest
+    with:
+      subject-path: ${{ inputs.timing-path }}
+      subject-name: ${{ inputs.timing-name }}

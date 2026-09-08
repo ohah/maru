@@ -3634,3 +3634,60 @@ test "DSB5: 열 텍스트·행 첨자·view 를 자기 것으로 본다" {
     try testing.expectEqual(@as(?editor_ops.DiffCursor, null), editor_ops.diffCursorPosition(fx.term));
     fx.term.rt.editor_diff.?.view = saved_view;
 }
+
+test "DSB7: 아주 긴 행에서 열을 상한까지만 세고 `+` 로 말한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **상한을 넘는 행을 만든다.** 안 넘으면 「상한을 본다」와 「안 본다」가 같은 답을 낸다
+    //    (3회차 V24·V25 가 그래서 살았다).
+    const limit = editor_ops.max_status_column;
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendNTimes(allocator, 'x', limit + 500);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "head\n");
+    try mod.appendSlice(allocator, long.items);
+
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len > limit) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+
+    // ⑴ **행 끝에 서면 상한까지만 세고 `+` 를 붙인다.**
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = st.right_texts[r].len }) };
+    const p = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expect(p.truncated);
+    try testing.expect(p.column <= limit + 1);
+
+    // ⑵ **상한 안이면 `+` 가 없다** — ⑴ 이 「늘 참」이 아니다.
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = 5;
+    const q = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expect(!q.truncated);
+    try testing.expectEqual(@as(usize, 6), q.column);
+
+    // ⑶ **`truncated` 는 「남은 byte 가 있나」다 — 열이 상한을 넘었나가 아니다.** 정확히 상한만큼인
+    //    자리는 끝까지 세고도 안 잘렸다(그 둘을 col 로 판정하면 여기서 갈린다).
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = limit;
+    const e = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expect(!e.truncated);
+}
+
+test "DSB8: 버퍼가 모자라면 글을 안 낸다 — 빈 글이 아니다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // **빈 글을 내면 상태바에 빈 항목이 선다** — 폭만 먹고 아무 말도 안 하는 자리가 된다.
+    //    `null` 이어야 호출자가 항목 자체를 안 만든다.
+    var tiny: [3]u8 = undefined;
+    try testing.expectEqual(@as(?[]const u8, null), editor_ops.formatDiffCursor(&tiny, .{ .side = .right, .line = 12345, .column = 678, .truncated = true }));
+    // 대조군 — 넉넉하면 낸다.
+    var ok: [48]u8 = undefined;
+    try testing.expect(editor_ops.formatDiffCursor(&ok, .{ .side = .right, .line = 12345, .column = 678, .truncated = true }) != null);
+}

@@ -4869,7 +4869,7 @@ held descriptor와 profile/timing owner를 역순으로 닫고 borrowed argv나 
 
 focused Debug·ReleaseFast gate는 parser exactness, 두 profile의 exact canonical bytes, profile/context/path/subject drift와 copied owner,
 allocation fail-index, encode cap/control byte 및 pre-output failure의 writer call 0을 검증한다. actual-process harness는 격리 private APFS에서
-두 profile을 실행해 stdout exactness, stderr 0, exit status, 서로 다른 child PID, parent FD delta와 filesystem residue 0을 기록한다. 이 gate는
+두 profile을 각각 20회 fresh child로 실행해 stdout exactness, stderr 0, exit status, median/p95/max, parent FD delta와 filesystem residue 0을 기록한다. 이 gate는
 GitHub OIDC/network, `actions/attest`, bundle 생성·final fence, authored checkpoint와 실제 앱 session-host registry를 건드리지 않으며,
 이후 live-action gate 전까지 11.99 전체는 부분 구현이다.
 

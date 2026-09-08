@@ -34,6 +34,7 @@ pub const CellGrid = struct {
     // **조립기 픽셀을 빌린다**(zero-copy — 매 프레임 MB 복사 회피). 격자는 apply마다 재구축되고 render는 mutex 아래
     // 읽으므로(RemoteScreen), 빌린 픽셀은 격자 수명 동안 유효하다(조립기가 mutex 밖에서 안 바뀜).
     placements: []terminal.KittyPlacement = &.{},
+    virtual_placements: []terminal.KittyVirtualPlacement = &.{},
     images: []terminal.KittyImageView = &.{},
     // 행별 OSC 133 prompt 마크(dense; 마크 없으면 empty). 이 격자가 소유(조립기 wire → terminal 타입 값 복사).
     prompt_marks: []terminal.RowPrompt = &.{},
@@ -49,6 +50,7 @@ pub const CellGrid = struct {
         for (self.graphemes.items) |g| self.allocator.free(g);
         self.graphemes.deinit(self.allocator);
         if (self.placements.len != 0) self.allocator.free(self.placements);
+        if (self.virtual_placements.len != 0) self.allocator.free(self.virtual_placements);
         if (self.images.len != 0) self.allocator.free(self.images); // 배열만 — 픽셀은 조립기 소유.
         if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
         if (self.links.len != 0) self.allocator.free(self.links);
@@ -70,6 +72,7 @@ pub const CellGrid = struct {
             // 이미지(#1 I4): placement + view(픽셀은 조립기 빌림)를 노출한다 — 렌더러 buildGpuImages가 image_id/generation으로
             // GPU 텍스처를 캐시해 in-process와 동일하게 그린다.
             .placements = self.placements,
+            .virtual_placements = self.virtual_placements,
             .images = self.images,
             .prompt_marks = self.prompt_marks, // OSC 133 거터(✓/✗)·prompt 네비 입력.
             .links = self.links, // Cmd+hover 밑줄·링크 커서 입력(host 해석 — docs/link-detection.md §원격(host-backed) 세션).
@@ -159,6 +162,21 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     };
     errdefer if (placements.len != 0) allocator.free(placements);
 
+    // U=1 virtual placement 격자 — placeholder 셀이 이 격자로 타일을 뜬다(화면 위치는 셀이 정하므로 1:1 복사).
+    const src_virtual = asm_.imageVirtualPlacements();
+    const virtual_placements: []terminal.KittyVirtualPlacement = if (src_virtual.len == 0) &.{} else vp: {
+        const arr = try allocator.alloc(terminal.KittyVirtualPlacement, src_virtual.len);
+        for (src_virtual, 0..) |v, i| arr[i] = .{
+            .image_id = v.image_id,
+            .placement_id = v.placement_id,
+            .columns = v.columns,
+            .rows = v.rows,
+            .z = v.z,
+        };
+        break :vp arr;
+    };
+    errdefer if (virtual_placements.len != 0) allocator.free(virtual_placements);
+
     // 저장된 **모든** 이미지를 노출한다(in-process buildImageViews와 동일 — placement 미참조도 포함, 리뷰 #10). 맵 키가
     // unique라 dedup 불요(placement별 O(n²) 스캔 제거, 리뷰 #13). 픽셀은 조립기 소유를 빌린다(zero-copy).
     var images: std.ArrayListUnmanaged(terminal.KittyImageView) = .empty;
@@ -226,6 +244,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .viewport_scrolled = (asm_.modes & screen_stream.ModeBit.viewport_scrolled) != 0,
         .ambiguous_wide = (asm_.modes & screen_stream.ModeBit.ambiguous_wide) != 0,
         .placements = placements,
+        .virtual_placements = virtual_placements,
         .images = images_slice,
         .prompt_marks = prompt_marks,
         .links = links,
@@ -977,6 +996,42 @@ test "remote screen: current host capability keeps hidden live cursor authoritat
     try testing.expect(surface.baseViewportScrolledLocked() == false);
 }
 
+test "remote screen: U=1 virtual placement 격자가 원격 wire 를 건넌다(tmux 경유 이미지의 전제)" {
+    const allocator = testing.allocator;
+    // **회귀 판정**: 이 배선이 없으면 host-backed 세션에서 placeholder 셀이 타일 크기를 못 정해
+    // tmux 경유 terminal-browser 화면이 통째로 안 보인다(2026-09-08).
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 4, .rows = 2 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    const px = [_]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+    const blob_rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1 }, .{ .image_id = 5, .generation = 9, .width = 2, .height = 1, .bpp = 4, .pixels = &px });
+    defer allocator.free(blob_rec);
+    try screen_stream.appendRecord(&stream, allocator, blob_rec);
+    const vp_rec = try screen_stream.encodeImageVirtual(allocator, .{ .kind = .image_virtual, .generation = 1 }, .{ .image_id = 5, .placement_id = 2, .columns = 4, .rows = 3, .z = -1 });
+    defer allocator.free(vp_rec);
+    try screen_stream.appendRecord(&stream, allocator, vp_rec);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(stream.items);
+
+    var grid = try build(allocator, &asm_);
+    defer grid.deinit();
+    const snap = grid.renderSnapshot();
+    try testing.expectEqual(@as(usize, 0), snap.placements.len); // U=1 은 일반 placement 가 아니다
+    try testing.expectEqual(@as(usize, 1), snap.virtual_placements.len);
+    try testing.expectEqual(@as(u32, 5), snap.virtual_placements[0].image_id);
+    try testing.expectEqual(@as(u32, 2), snap.virtual_placements[0].placement_id);
+    try testing.expectEqual(@as(u32, 4), snap.virtual_placements[0].columns);
+    try testing.expectEqual(@as(u32, 3), snap.virtual_placements[0].rows);
+    try testing.expectEqual(@as(i32, -1), snap.virtual_placements[0].z);
+    // 이미지도 함께 노출돼야 타일을 뜰 수 있다.
+    try testing.expectEqual(@as(usize, 1), snap.images.len);
+    try testing.expectEqual(@as(u32, 5), snap.images[0].image_id);
+}
+
 test "remote screen: build exposes kitty images + placements from the assembler (I4)" {
     const allocator = testing.allocator;
     // 이미지가 실린 snapshot 스트림: meta + image_blob(2x1 RGBA) + image_placement(row 1, col 2, z 3).
@@ -1025,12 +1080,8 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 /// 조립/노출)을 잊지 않게 한다. 색·이미지·dirty가 조용히 유실됐던(리뷰 #1 blank 렌더) 재발을 막는 안전망이다.
 fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "links", "scrollback_len", "view_offset", "dirty" };
-    // `virtual_placements`(U=1 unicode placeholder 격자)는 **아직 원격 wire에 안 실린다** — 새 레코드
-    // kind가 필요한 프로토콜 확장이라 별도 단위로 뺐다. 그래서 **host-backed 세션에서는 U=1 이미지가
-    // 안 보인다**(로컬 in-process 경로만 동작). 이 항목을 옮기는 것이 곧 그 후속의 완료 조건이다 —
-    // `compared`로 옮기고 screen_stream에 레코드를 추가한다.
-    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit", "virtual_placements" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "virtual_placements", "images", "prompt_marks", "links", "scrollback_len", "view_offset", "dirty" };
+    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
             var classified = false;
@@ -1077,6 +1128,10 @@ fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: termina
     // placements: 순서·전 필드 동일(원격 placement_list = 투영 순서 = local buildPlacementViews 순서).
     try testing.expectEqual(local.placements.len, remote.placements.len);
     for (local.placements, remote.placements) |lp, rp| try testing.expectEqual(lp, rp);
+    // virtual placements(U=1 격자): 같은 순서·전 필드 동일. **이게 어긋나면 host-backed 세션에서
+    // placeholder 셀이 타일 크기를 못 정해 tmux 경유 이미지가 통째로 안 보인다.**
+    try testing.expectEqual(local.virtual_placements.len, remote.virtual_placements.len);
+    for (local.virtual_placements, remote.virtual_placements) |lv, rv| try testing.expectEqual(lv, rv);
     // images: local은 전체(map 순), remote는 placement 참조분(placement 순)이라 image_id로 매칭 비교(순서 무관).
     for (remote.images) |ri| {
         var matched = false;

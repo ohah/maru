@@ -86,6 +86,8 @@ pub const ScreenAssembler = struct {
     // pending_images=재조립 중인 청크. snapshot은 이 셋을 리셋하고 record로 다시 채운다(host가 full snapshot에 전량 재송).
     image_store: std.AutoHashMapUnmanaged(u32, StoredImage) = .{},
     placement_list: std.ArrayListUnmanaged(screen_stream.ImagePlacement) = .empty,
+    // U=1 virtual placement 격자(unicode placeholder). 화면 위치가 없어 placement_list 와 별개 목록이다.
+    virtual_placement_list: std.ArrayListUnmanaged(screen_stream.ImageVirtualPlacement) = .empty,
     pending_images: std.AutoHashMapUnmanaged(u32, PendingImage) = .{},
     // 행별 OSC 133 prompt 마크(dense, positional; 마크 없으면 empty). remote_screen이 terminal.RowPrompt로 환산.
     prompt_marks: []screen_stream.RowPromptWire = &.{},
@@ -130,6 +132,7 @@ pub const ScreenAssembler = struct {
         self.clearImages();
         self.image_store.deinit(self.allocator);
         self.placement_list.deinit(self.allocator);
+        self.virtual_placement_list.deinit(self.allocator);
         self.pending_images.deinit(self.allocator);
         if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
         if (self.link_spans.len != 0) self.allocator.free(self.link_spans);
@@ -149,6 +152,7 @@ pub const ScreenAssembler = struct {
         while (it.next()) |img| self.allocator.free(img.pixels);
         self.image_store.clearRetainingCapacity();
         self.placement_list.clearRetainingCapacity();
+        self.virtual_placement_list.clearRetainingCapacity();
         var pit = self.pending_images.valueIterator();
         while (pit.next()) |p| p.buf.deinit(self.allocator);
         self.pending_images.clearRetainingCapacity();
@@ -232,6 +236,11 @@ pub const ScreenAssembler = struct {
     /// 현재 표시 중인 이미지 placement 목록(렌더 입력). remote_screen이 각 placement의 image_id로 `imageById`를 찾아 그린다.
     pub fn imagePlacements(self: *const ScreenAssembler) []const screen_stream.ImagePlacement {
         return self.placement_list.items;
+    }
+
+    /// U=1 virtual placement 격자 목록(렌더 입력). placeholder 셀이 이 격자로 타일을 뜬다.
+    pub fn imageVirtualPlacements(self: *const ScreenAssembler) []const screen_stream.ImageVirtualPlacement {
+        return self.virtual_placement_list.items;
     }
 
     /// image_id로 저장된 이미지를 찾는다(없으면 null — placement가 아직 안 온 blob을 가리키는 경우).
@@ -344,6 +353,10 @@ pub const ScreenAssembler = struct {
                 .image_placement => {
                     const p = try screen_stream.decodeImagePlacement(s.body);
                     self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
+                },
+                .image_virtual => {
+                    const vp = try screen_stream.decodeImageVirtual(s.body);
+                    self.virtual_placement_list.append(self.allocator, vp) catch return error.OutOfMemory;
                 },
                 .prompt_marks => self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body)),
                 .link_spans => self.setLinkSpans(try screen_stream.decodeLinkSpans(self.allocator, s.body)),

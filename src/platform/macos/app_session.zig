@@ -19446,7 +19446,11 @@ pub const AppSession = struct {
                     // kitty_uploaded를 같은 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도
                     // 빼, 다시 활성화되면 재업로드되게(Swift 캐시와 동기). 멀티 surface 전환 시 정합.
                     self.pruneKittyUploaded(kg_live_ids.items);
-                    if (snap.placements.len > 0) {
+                    // **U=1 virtual placement 도 그릴 것이 있다.** 일반 placement 가 0 이어도 화면의
+                    // placeholder 셀이 타일을 만들므로, 옛 `placements.len > 0` 가드는 그 경로를 통째로
+                    // 건너뛰었다 — 헤드리스 판정자는 `buildGpuImages` 를 직접 불러 이 가드를 안 밟는다(적대적
+                    // 검증 R2 가 화면 캡처로 잡았다: 이미지 대신 placeholder tofu 가 격자로 찍혔다).
+                    if (needsKittyImagePass(snap)) {
                         kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px, snap.cells, snap.graphemes, snap.virtual_placements) catch &.{};
                         for (kg_images) |*gi| {
                             gi.origin_x = active_origin_x;
@@ -83565,4 +83569,26 @@ test "원격 탐색기 미러 정리: 오래된 것만 지우고 우리 하위 �
     try std.testing.expect(file_panel_ops.mirrorEntryIsStale(now, now - 30 * day_ns));
     // 미래 mtime(시계가 뒤로 간 원격·NFS)은 **안 지운다** — 포화 뺄셈이 0 이 된다.
     try std.testing.expect(!file_panel_ops.mirrorEntryIsStale(now, now + 10 * day_ns));
+}
+
+
+/// kitty 이미지 채널을 만들 필요가 있는가 — 일반 placement 또는 **U=1 virtual placement** 중 하나라도
+/// 있으면 참이다.
+///
+/// **virtual placement 를 빠뜨리면** 화면의 placeholder 셀이 타일을 만들 수 있는데도 경로가 통째로
+/// 건너뛰어진다. 옛 조건은 `snap.placements.len > 0` 하나였고, U=1 은 일반 placement 를 만들지 않으므로
+/// tmux 경유 이미지가 **한 장도 안 그려졌다**. 헤드리스 판정자는 `buildGpuImages` 를 직접 불러 이 가드를
+/// 안 밟아서 초록이었다 — 화면 캡처(적대적 검증 R2)가 잡았다.
+fn needsKittyImagePass(snap: maru.terminal.RenderSnapshot) bool {
+    return snap.placements.len > 0 or snap.virtual_placements.len > 0;
+}
+
+test "kitty 이미지 패스 게이트는 U=1 virtual placement 도 센다" {
+    const empty: maru.terminal.RenderSnapshot = .{ .size = .{ .cols = 1, .rows = 1 } };
+    try std.testing.expect(!needsKittyImagePass(empty));
+    const placement = [_]maru.terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 0, .row = 0, .col = 0 }};
+    try std.testing.expect(needsKittyImagePass(.{ .size = .{ .cols = 1, .rows = 1 }, .placements = &placement }));
+    // **회귀 판정**: 일반 placement 가 0 이어도 virtual placement 가 있으면 패스를 돌아야 한다.
+    const virtual = [_]maru.terminal.KittyVirtualPlacement{.{ .image_id = 1, .placement_id = 0, .columns = 2, .rows = 2 }};
+    try std.testing.expect(needsKittyImagePass(.{ .size = .{ .cols = 1, .rows = 1 }, .virtual_placements = &virtual }));
 }

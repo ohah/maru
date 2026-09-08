@@ -7289,6 +7289,27 @@ test "M13c 시스템 글자 배율: 결과를 «스키마 범위» 로 자른다
     try T.expectEqual(lo, bridge.activeFontSizeForTest());
 }
 
+test "M13c 시스템 글자 배율: 파일이 범위 밖이면 «파서가» 거절한다" {
+    // **이 확인이 왜 여기 있나.** 「따라가기를 켜고 끄는 것만으로 사용자가 적은 값이 바뀌는 것
+    // 아니냐」를 의심했다 — `activeFontSize` 만 자르고 파일 경로는 안 자르면 토글이 값을 고치는
+    // 손잡이가 된다. 그런데 파일 파싱이 `schema.tryParse` 라 **거기서 이미 거절한다.** 그 사실이
+    // 깨지면(예: `parse_range` 를 넓게 열면) 위 자르기가 비대칭이 되므로 여기서 못박는다.
+    const T = std.testing;
+    bridge.resetSystemFontScaleForTest();
+    defer bridge.resetSystemFontScaleForTest();
+    const big = "font.size = 200\n";
+    bridge.maru_mobile_load_config(big, big.len);
+    defer bridge.maru_mobile_load_config("", 0);
+
+    const hi: u32 = bridge.mobile_config.FontConfig.schema.size.range.?[1];
+    try T.expect(bridge.activeFontSizeForTest() <= hi);
+
+    // 범위 «안» 값은 그대로 들어온다 — 위 단언이 「파싱이 통째로 안 된다」로 참이 되지 않게.
+    const ok = "font.size = 33\n";
+    bridge.maru_mobile_load_config(ok, ok.len);
+    try T.expectEqual(@as(u32, 33), bridge.activeFontSizeForTest());
+}
+
 test "M13c 시스템 글자 배율은 «셀 크기까지» 닿는다" {
     // **값이 맞아도 닿는 자리가 틀리면 무동작이다.** 실효 크기가 `lineHeight()` 한 자리에서
     // 갈라지므로 아틀라스 셀이 따라와야 하고, 그래야 M13a/M13b 의 다시 굽기가 걸린다.

@@ -200,6 +200,9 @@ test "정책 경계: 시스템 글자 배율은 «실어 나르기만» 한다 (
     // 에도 있어서 그쪽으로 맞아 버렸다).
     try expectPresentInBody(java, "public void onConfigurationChanged(", "applySystemFontScale();");
     try expectPresentInBody(java, "protected void onResume() {", "applySystemFontScale();");
+    // **첫 굽기보다 먼저.** 네이티브 창은 `onCreate` 뒤에 서고 아틀라스도 거기서 처음 구워진다 —
+    // 여기서 안 알리면 시작할 때 한 번 다시 굽게 되고, 큰 글씨를 쓰는 사람일수록 그 한 번이 보인다.
+    try expectPresentInBody(java, "protected void onCreate(Bundle state) {", "applySystemFontScale();");
 }
 
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.

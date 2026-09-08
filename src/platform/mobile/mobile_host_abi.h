@@ -252,6 +252,19 @@ void maru_mobile_set_system_appearance(unsigned int is_dark);
    (두 host 다 `maru_mobile_build` 앞에서 그 비교를 이미 하고 있으므로 따로 할 일은 없다). */
 void maru_mobile_set_system_font_scale(unsigned int scale_milli);
 
+/* 지금 **소리로 읽어 줄** 글자(M9a — 새 출력 알림). 채운 바이트 수를 돌려주고, 읽을 것이 없으면
+   0 이고 아무것도 안 쓴다. **가져가면 사라진다** — 두 번 읽지 않는다. `maru_mobile_build` 뒤에
+   프레임마다 묻는다.
+
+   **host 는 말하기만 한다**: iOS `UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, …)`,
+   Android `View.announceForAccessibility(…)`. 무엇을 언제 읽을지는 전부 코어가 정한다 — 바뀐 줄만,
+   20줄 상한, 출력이 잠잠해진 뒤, 그리고 입력이 오면 버린다(계약 §접근성). host 가 그 판단을 나눠
+   가지면 두 플랫폼이 다른 때에 다른 것을 읽는다.
+
+   자리가 모자라면 **0 이고 아무것도 안 쓴다**(잘라 주면 문장 가운데서 끊긴 말이 읽힌다). 그때
+   `maru_mobile_last_error()` 가 `a11y_announce_cap` 이다. */
+unsigned long maru_mobile_a11y_take_announcement(char *out, unsigned long cap);
+
 /* 이번 `maru_mobile_build` 가 낸 그림이 **지난 프레임과 다른가**(1=그려야 한다). build 뒤에 읽는다.
    0 이면 host 는 GPU 작업(획득·제출·프레젠트)을 통째로 건너뛴다 — 터미널은 대부분의 시간이
    정지 화면이라 여기서 얻는 것이 가장 크다(M14).

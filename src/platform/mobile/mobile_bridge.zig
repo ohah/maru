@@ -2004,6 +2004,11 @@ var input_out_len: usize = 0;
 /// 확정된 입력 한 조각. **모든 입력 경로가 여기를 지난다** — 조각마다 목적지를 따로 정하면
 /// 언젠가 한 곳을 빠뜨리고, 그 경로만 원격에 안 간다.
 fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
+    // **치기 시작하면 대기 중인 낭독을 버린다**(M9a). 키보드가 이미 읽어 준 글자를 터미널이 또
+    // 읽으면 두 번 들리고, 새 명령을 친 뒤에 낡은 출력을 읽어 주는 것도 틀린 안내다.
+    // **여기가 그 자리인 이유**: 이 함수가 「모든 입력 경로가 지나는 한 곳」이라 — 조각마다
+    // 갈고리를 달면 언젠가 한 곳을 빠뜨리고, 그 경로로 친 글자만 두 번 들린다.
+    dropAnnounce();
     if (input_sink == 0) {
         core.write(bytes) catch setLastError("core_write_input");
         return;
@@ -7578,6 +7583,10 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     sortA11yForReading();
+    // **모은 것을 여기서 판정한다**(M9a). 본문을 그리고 난 뒤라야 이번 프레임에 바뀐 줄이 다
+    // 들어와 있다. 터미널이 맨 위가 아니면 본문 줄이 아예 안 만들어지므로 줄 수를 0 으로 넘긴다 —
+    // 그러면 지난 지문이 지워지고, 돌아왔을 때 화면 전체를 「새로 바뀐 것」으로 읽는다.
+    stepAnnounce(screenTop() == .terminal, if (screenTop() == .terminal) body_rows else 0);
     noteFrameChanged();
     return @intCast(quad_count);
 }
@@ -7717,6 +7726,14 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
         }
     }
     const text = std.mem.trimEnd(u8, buf[0..len], " ");
+    // 절대 줄 번호 = 스크롤백 길이 − 지금 올라간 만큼 + 화면 안 순번.
+    const total = snap.scrollback_len + body_rows;
+    const absolute = snap.scrollback_len - @min(snap.scrollback_len, snap.view_offset) + row + 1;
+    // **읽어 줄 것도 여기서 모은다**(M9a). 서술자가 쓰는 그 글자를 그대로 넘긴다 — 따로 세면
+    // 보는 것과 읽는 것이 갈린다. 빈 줄은 아래에서 서술자를 안 내지만 **지문은 남겨야** 한다:
+    // 글자가 있던 줄이 비면 그것도 「바뀐 것」이고, 안 남기면 지난 지문이 그대로 살아 다음에 같은
+    // 글자가 와도 「안 바뀌었다」가 된다.
+    noteRowForAnnounce(row, absolute, text);
     if (text.len == 0) return;
 
     // 이름은 줄 번호다. **모자랄 수 없다** — 격자 행은 `u16` 이라 다섯 자리를 넘지 않는다.
@@ -7734,9 +7751,6 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
     // 스크린 리더 사용자는 지금 보는 것이 마지막인지, 위로 천 줄이 더 있는지 알 길이 없었다.
     // 수는 **보이는 줄이 아니라 있는 줄 전부**로 센다(목록 화면과 같은 규율 — 계약 `set_size`).
     //
-    // 절대 줄 번호 = 스크롤백 길이 − 지금 올라간 만큼 + 화면 안 순번.
-    const total = snap.scrollback_len + body_rows;
-    const absolute = snap.scrollback_len - @min(snap.scrollback_len, snap.view_offset) + row + 1;
     noteA11y(rect, .{
         .role = .text,
         .label = label,
@@ -7749,6 +7763,180 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
 
 /// 한 줄에서 읽어 낼 글자의 상한. 240칸 × 4바이트라 어떤 격자에서도 줄이 통째로 들어간다.
 const term_row_read_cap = 960;
+
+// ── M9a: 새 출력을 소리로 알린다(live region) ──────────────────────────────────
+//
+// **규칙은 계약이 소유한다**(`docs/mobile-platform.md` §접근성 — 「새 출력은 «바뀐 줄만,
+// 잠잠해진 뒤에» 알린다」). 여기는 그 규칙이 도는 자리다.
+//
+// **셋은 xterm.js `AccessibilityManager` 의 동작을 베이스로 삼았다**: 20줄 상한과 넘었을 때의
+// 대체 한마디, 그리고 「입력이 오면 대기열을 버린다」. 갈린 것은 **버리는 단위**다 — 저쪽은
+// 글자를 하나씩 소비해 방금 친 것만 빼는데(`_charsToConsume`), 우리는 줄 단위로 모으므로 그 셈이
+// 안 맞는다. 통째로 버리는 편이 「키보드가 읽고 터미널이 또 읽어 두 번 들린다」를 확실히 막는다.
+
+/// 한 번에 읽어 줄 줄 수의 상한. 넘으면 줄을 안 읽고 아래 한마디로 **대체**한다.
+const announce_row_cap = 20;
+
+/// **잠잠하다**고 볼 프레임 수. 30Hz 에서 0.2초다. **벽시계가 아니라 프레임 턴으로 센다** —
+/// 시계로 세면 답이 기기 속도에 달리고, 판정자가 시간을 못 넣어 그 갈래가 통째로 안 덮인다.
+const announce_quiet_frames = 6;
+
+var announce_buf: [announce_row_cap * term_row_read_cap]u8 = undefined;
+var announce_len: usize = 0;
+var announce_rows: u32 = 0;
+/// 상한을 넘었다 — 모은 줄을 버리고 한마디로 바꾼다.
+var announce_overflow = false;
+/// 바뀐 줄이 하나도 없던 프레임이 몇 번 이어졌나.
+var announce_quiet: u32 = 0;
+/// host 가 가져갈 것. 0 이면 이번엔 읽을 것이 없다.
+var announce_ready_len: usize = 0;
+// **줄의 신원은 화면 행이 아니라 «절대 줄 번호» 다.** 행 번호로 재면 화면이 꽉 찬 뒤 한 줄만
+// 와도 전부 한 칸씩 밀려 **모든 줄이 「바뀐 것」**이 되고, 그러면 늘 상한에 걸려 「출력이
+// 많습니다」만 들린다 — 흔한 경우가 통째로 못 쓰게 된다(판정자가 이것을 잡았다). 절대 번호로
+// 재면 밀려 올라간 줄은 번호도 글자도 그대로라 안 읽히고, **정말 새로 온 줄만** 읽힌다.
+//
+// 지난 프레임의 창은 절대 번호로 이어진 구간이므로 시작 번호 하나와 배열이면 찾을 수 있다.
+var announce_prev: [max_rows]u64 = @splat(0);
+var announce_prev_first: u64 = 0;
+var announce_prev_n: u16 = 0;
+var announce_now: [max_rows]u64 = @splat(0);
+var announce_now_first: u64 = 0;
+var announce_now_n: u16 = 0;
+
+/// 줄 글자의 지문. 바뀐 줄만 읽으려면 「지난 프레임과 같은가」를 알아야 하는데, 줄 글자를 통째로
+/// 들고 있으면 60줄 × 960바이트라 무겁다. `0` 은 「없다」로 쓰므로 그 값이 나오면 1 로 민다.
+fn rowDigest(text: []const u8) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(text);
+    const v = h.final();
+    return if (v == 0) 1 else v;
+}
+
+/// 이 줄이 지난 프레임과 다르면 읽을 것에 담는다. **`noteTerminalRow` 가 만든 그 글자**를 받는다 —
+/// 따로 세면 보는 것과 읽는 것이 갈린다. `abs` 는 스크롤백을 포함한 절대 줄 번호다.
+fn noteRowForAnnounce(row: u16, abs: u64, text: []const u8) void {
+    if (row >= max_rows) return;
+    const digest = rowDigest(text);
+    if (row == 0) announce_now_first = abs;
+    announce_now[row] = digest;
+    announce_now_n = row + 1;
+    // 지난 창에 그 번호가 있었고 글자도 같으면 **안 바뀐 것**이다 — 스크롤로 자리만 옮긴 줄이 여기서
+    // 걸러진다. 없던 번호면 새 줄이다.
+    if (abs >= announce_prev_first) {
+        const idx = abs - announce_prev_first;
+        if (idx < announce_prev_n and announce_prev[@intCast(idx)] == digest) return;
+    }
+    announce_quiet = 0;
+    if (announce_overflow) return; // 이미 넘쳤다 — 더 담지 않는다
+    if (announce_rows == announce_row_cap) {
+        announce_overflow = true;
+        return;
+    }
+    // 줄 사이는 개행으로 잇는다 — host 가 한 문장으로 넘기면 낭독기가 거기서 쉰다.
+    const sep: usize = if (announce_len == 0) 0 else 1;
+    if (announce_len + sep + text.len > announce_buf.len) {
+        announce_overflow = true;
+        return;
+    }
+    if (sep == 1) {
+        announce_buf[announce_len] = '\n';
+        announce_len += 1;
+    }
+    @memcpy(announce_buf[announce_len..][0..text.len], text);
+    announce_len += text.len;
+    announce_rows += 1;
+}
+
+/// 지난 프레임에 터미널이 맨 위였나. **들어오는 프레임을 가리는 데 쓴다**(아래).
+var announce_on_terminal = false;
+
+/// 프레임 끝에 부른다 — 잠잠해졌으면 모은 것을 host 가 가져갈 자리로 옮긴다.
+///
+/// **화면에서 사라진 줄도 「바뀐 것」이다.** 줄 수가 줄면 남은 자리의 지난 지문을 지워야, 나중에
+/// 그 자리에 같은 글자가 다시 와도 「바뀌었다」로 읽힌다.
+fn stepAnnounce(on_terminal: bool, rows_now: u16) void {
+    var r: u16 = rows_now;
+    while (r < max_rows) : (r += 1) announce_now[r] = 0;
+    announce_prev = announce_now;
+    announce_prev_first = announce_now_first;
+    announce_prev_n = @min(announce_now_n, rows_now);
+    announce_now_n = 0;
+
+    // **터미널로 «들어오는» 프레임은 기준만 잡는다.** 그 프레임에는 지난 지문이 없어서 화면에 있는
+    // 줄이 전부 「바뀐 것」이 된다 — 그대로 두면 터미널을 열 때마다 스무 줄 상한에 걸려 「출력이
+    // 많습니다」만 들린다. 사용자가 한 일은 화면을 연 것뿐인데 그것을 새 출력이라고 말하는 셈이다.
+    // 지문은 위에서 이미 잡았으니, 담은 것만 버리면 다음 프레임부터 **진짜 바뀐 줄**만 읽힌다.
+    const entering = on_terminal and !announce_on_terminal;
+    announce_on_terminal = on_terminal;
+    if (entering or !on_terminal) {
+        dropAnnounce();
+        return;
+    }
+
+    if (announce_len == 0 and !announce_overflow) return; // 모은 것이 없다
+    announce_quiet += 1;
+    if (announce_quiet < announce_quiet_frames) return;
+    // **읽을 것이 이미 있으면 덮지 않는다** — host 가 아직 안 가져갔는데 덮으면 그 낭독이 사라진다.
+    if (announce_ready_len == 0) {
+        if (announce_overflow) {
+            // **언어를 박아 넘긴다.** 이 파일의 그리는 경로가 전부 그렇다 — 모바일 설정 화면이
+            // 아직 언어 손잡이를 안 열어서, 화면에 나오는 말과 **읽히는 말이 같아야** 한다.
+            // 손잡이가 생기면 이 자리도 그 값을 따라간다(i18n 계약 §7.2 · 원장).
+            const much = maru.i18n.tIn(.ko, .mob_a11y_too_much_output);
+            const n = @min(much.len, announce_buf.len);
+            @memcpy(announce_buf[0..n], much[0..n]);
+            announce_ready_len = n;
+        } else {
+            announce_ready_len = announce_len;
+        }
+    }
+    announce_len = 0;
+    announce_rows = 0;
+    announce_overflow = false;
+    announce_quiet = 0;
+}
+
+/// **입력이 오면 대기 중인 것을 버린다.** 키보드가 이미 읽어 준 글자를 터미널이 또 읽으면 두 번
+/// 들리고, 새 명령을 친 뒤에 낡은 출력을 읽어 주는 것도 틀린 안내다(xterm.js `_handleKey` 와 같은
+/// 자리, 단위만 줄이다). **가져갈 것까지 버린다** — 아직 안 읽힌 것이면 지금이 버릴 마지막 때다.
+fn dropAnnounce() void {
+    announce_len = 0;
+    announce_rows = 0;
+    announce_overflow = false;
+    announce_quiet = 0;
+    announce_ready_len = 0;
+}
+
+/// 지금 읽어 줄 글자. **가져가면 사라진다** — 두 번 읽지 않는다. 없으면 0 이고 아무것도 안 쓴다.
+/// host 는 이것을 `UIAccessibilityPostNotification`·`announceForAccessibility` 로 넘기기만 한다.
+pub export fn maru_mobile_a11y_take_announcement(out: [*]u8, cap: usize) usize {
+    const n = announce_ready_len;
+    if (n == 0) return 0;
+    if (n > cap) {
+        setLastError("a11y_announce_cap");
+        return 0;
+    }
+    @memcpy(out[0..n], announce_buf[0..n]);
+    announce_ready_len = 0;
+    return n;
+}
+
+/// 판정자용 — 모은 것을 비운다(앱에는 이 전이가 화면 전환으로만 온다).
+pub fn resetAnnounceForTest() void {
+    dropAnnounce();
+    announce_prev = @splat(0);
+    announce_now = @splat(0);
+    announce_prev_first = 0;
+    announce_prev_n = 0;
+    announce_now_first = 0;
+    announce_now_n = 0;
+    announce_on_terminal = false;
+}
+
+/// 판정자용 — 지금 가져갈 것이 있나(가져가지 않고 본다).
+pub fn announceReadyForTest() bool {
+    return announce_ready_len != 0;
+}
 
 fn noteA11yClipped(rect: SetRect, clip: SetRect, sem: tree.Semantics) void {
     const top = @max(rect.y, clip.y);

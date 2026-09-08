@@ -8097,6 +8097,163 @@ test "M9 서술자: 이름은 «글자» 단위로 끊긴다 — 반쪽 UTF-8 �
     }
 }
 
+fn announceTake(buf: []u8) []const u8 {
+    const n = bridge.maru_mobile_a11y_take_announcement(buf.ptr, buf.len);
+    return buf[0..n];
+}
+
+/// 터미널 화면을 세우고 **기준 프레임까지** 지나간다 — 들어오는 프레임은 읽을 것을 안 만든다.
+fn announceEnterTerminal() void {
+    bridge.resetAnnounceForTest();
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+/// 출력이 잠잠하다고 볼 만큼 프레임을 돌린다.
+fn announceIdle(frames: usize) void {
+    var i: usize = 0;
+    while (i < frames) : (i += 1) _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+test "M9a 새 출력: 잠잠해진 «뒤에» 바뀐 줄을 읽는다" {
+    // **흐르는 도중에 읽으면 낡은 줄을 읽는다.** 그리고 기다림은 벽시계가 아니라 **프레임 턴**으로
+    // 센다 — 시계로 세면 답이 기기 속도에 달리고 판정자가 시간을 못 넣는다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [4096]u8 = undefined;
+
+    _ = bridge.maru_mobile_term_write("hello\r\n", 7);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // 바로 다음 프레임에는 아직 안 읽는다.
+    try T.expect(!bridge.announceReadyForTest());
+
+    announceIdle(8);
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "hello") != null);
+
+    // **가져가면 사라진다** — 두 번 읽지 않는다.
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_take_announcement(&buf, buf.len));
+}
+
+test "M9a 새 출력: 안 바뀌면 아무것도 안 읽는다" {
+    // 이 전제가 깨지면 위 판정자가 「무엇이든 읽는다」로 참이 된다 — 정지 화면에서 계속 말하는
+    // 결함이 그 모양이다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [4096]u8 = undefined;
+
+    _ = bridge.maru_mobile_term_write("hello\r\n", 7);
+    announceIdle(8);
+    _ = announceTake(&buf); // 한 번 읽고 비운다
+
+    announceIdle(20); // 아무것도 안 왔다
+    try T.expect(!bridge.announceReadyForTest());
+}
+
+test "M9a 새 출력: 스무 줄을 넘으면 «한마디로» 바꾼다" {
+    // `cat` 한 번에 수천 줄이 나오고 낭독은 멈추기 어렵다 — 넘으면 줄을 **안 읽고** 대체한다
+    // (xterm.js 의 `MAX_ROWS_TO_READ` 와 같은 값·같은 동작).
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [8192]u8 = undefined;
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        var line: [16]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "row{d}\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    announceIdle(8);
+    const said = announceTake(&buf);
+    const much = maru.i18n.tIn(.ko, .mob_a11y_too_much_output);
+    try T.expectEqualStrings(much, said);
+    // 줄은 **하나도** 안 들어 있다.
+    try T.expect(std.mem.indexOf(u8, said, "row") == null);
+}
+
+test "M9a 새 출력: 화면이 꽉 찬 뒤 한 줄이 와도 «그 한 줄만» 읽는다" {
+    // **이것이 흔한 경우다.** 줄의 신원을 화면 «행» 으로 재면 화면이 꽉 찬 뒤에는 한 줄만 와도
+    // 전부 한 칸씩 밀려 모든 줄이 「바뀐 것」이 되고, 늘 상한에 걸려 「출력이 많습니다」만 들린다 —
+    // 실제로 그렇게 짰다가 이 판정자에 걸렸다. 신원을 **절대 줄 번호**로 두면 밀려 올라간 줄은
+    // 번호도 글자도 그대로라 안 읽힌다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [8192]u8 = undefined;
+
+    // 화면을 채운다 — 그리고 그 줄들은 «들어오는» 프레임처럼 읽히지 않게 한 번 비운다.
+    var i: usize = 0;
+    while (i < 60) : (i += 1) {
+        var line: [16]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "fill{d}\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    announceIdle(8);
+    _ = announceTake(&buf);
+
+    // 이제 딱 한 줄.
+    _ = bridge.maru_mobile_term_write("only-one\r\n", 10);
+    announceIdle(8);
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "only-one") != null);
+    // **밀려 올라간 옛 줄은 안 읽힌다** — 이것이 없으면 위 단언은 「전부 읽어도」 참이다.
+    try T.expect(std.mem.indexOf(u8, said, "fill") == null);
+    const much = maru.i18n.tIn(.ko, .mob_a11y_too_much_output);
+    try T.expect(!std.mem.eql(u8, said, much));
+}
+
+test "M9a 새 출력: 치기 시작하면 대기 중인 것을 «버린다»" {
+    // 키보드가 이미 읽어 준 글자를 터미널이 또 읽으면 두 번 들리고, 새 명령을 친 뒤에 낡은 출력을
+    // 읽어 주는 것도 틀린 안내다. **가져갈 것까지 버린다** — 아직 안 읽힌 것이면 지금이 마지막 때다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [4096]u8 = undefined;
+
+    _ = bridge.maru_mobile_term_write("old output\r\n", 12);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_input("x", 1); // 사용자가 친다
+    announceIdle(12);
+    try T.expect(!bridge.announceReadyForTest());
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_take_announcement(&buf, buf.len));
+}
+
+test "M9a 새 출력: 터미널로 «들어오는» 프레임은 안 읽는다" {
+    // 그 프레임에는 지난 지문이 없어 화면에 있는 줄이 전부 「바뀐 것」이 된다 — 그대로 두면
+    // 터미널을 열 때마다 상한에 걸려 「출력이 많습니다」만 들린다. 사용자가 한 일은 화면을 연
+    // 것뿐인데 그것을 새 출력이라고 말하는 셈이다.
+    const T = std.testing;
+    bridge.resetAnnounceForTest();
+    defer bridge.resetAnnounceForTest();
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        var line: [16]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "old{d}\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    _ = bridge.maru_mobile_build(402, 874, now()); // 화면이 글자로 가득한 채 들어온다
+
+    // 다른 화면으로 갔다가 돌아온다 — 그때도 읽지 않는다.
+    bridge.setScreenForTest("settings");
+    announceIdle(3);
+    bridge.setScreenForTest("terminal");
+    announceIdle(12);
+    try T.expect(!bridge.announceReadyForTest());
+
+    // 그리고 **그 뒤에 온 것**은 읽는다 — 위 단언이 「영영 안 읽는다」로 참이 되지 않게.
+    _ = bridge.maru_mobile_term_write("fresh\r\n", 7);
+    announceIdle(8);
+    var buf: [4096]u8 = undefined;
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "fresh") != null);
+}
+
 test "M9 서술자: 프레임마다 다시 만든다 — 쌓이지 않는다" {
     // `buildUi` 는 **어느 화면이든 터미널 층을 먼저 세운다** — 코어 격자가 살아 있어야 돌아왔을 때
     // 화면이 그대로이고, `key_bar_ready` 가 거짓말을 안 하기 때문이다. 그러니 rect 는 늘 서 있고,

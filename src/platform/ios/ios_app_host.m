@@ -1240,6 +1240,25 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **서술자는 idle 로 빠지기 전에 견준다**(M9). 아래 M14 조기 return 뒤에 두면 화면이 멈춘
     // 프레임에서 알림이 안 나가고, 스크린 리더 커서가 옛 버튼에 남는다.
     [self noteAccessibilityChange];
+    // **새 출력을 소리로 알린다**(M9a). 무엇을 언제 읽을지는 **전부 코어가 정한다** — 여기서는
+    // 가져와서 넘기기만 한다. 가져가면 사라지므로 두 번 읽히지 않는다.
+    //
+    // **낭독기가 켜졌는지 여기서 묻지 않는다.** `UIAccessibilityPostNotification` 은 VoiceOver 가
+    // 꺼져 있으면 아무 일도 안 하고, Android 의 `announceForAccessibility` 도 그렇다 — 물어서
+    // 거르면 그 판단이 두 자리에 생겨 「iOS 만 안 읽는다」 같은 결함이 **소리로만** 드러난다.
+    {
+        char say[4096];
+        unsigned long said = maru_mobile_a11y_take_announcement(say, sizeof say);
+        if (said > 0) {
+            NSString *text = [[NSString alloc] initWithBytes:say length:said encoding:NSUTF8StringEncoding];
+            if (text) {
+                // **글자는 안 남긴다** — 터미널 출력에는 비밀이 섞인다. 길이만 남겨도 「나갔나」는
+                // 알 수 있고, 그것이 이 축에서 눈으로 볼 수 있는 유일한 신호다.
+                NSLog(@"MARU_A11Y announce bytes=%lu", said);
+                UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, text);
+            }
+        }
+    }
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.
     drainConfigWrite();

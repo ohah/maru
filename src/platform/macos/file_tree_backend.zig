@@ -5,6 +5,7 @@
 //! 메모리를 무제한 점유하지 않게 한다(docs/file-panel.md §7).
 
 const std = @import("std");
+const detached_worker_wait = @import("detached_worker_wait.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const path_shape = maru.path_shape;
@@ -339,6 +340,14 @@ pub const Backend = struct {
         state.mutex.lockUncancelable(state.io);
         defer state.mutex.unlock(state.io);
         return state.results_len;
+    }
+
+    /// 도는 워커가 **전부 자기 참조를 놓을 때까지** 기다린다 — **판정자 전용**이다.
+    /// 이유와 규율은 `detached_worker_wait` 가 단일 출처다. `deinit` 은 일부러 안 기다리고, 그 제품
+    /// 계약은 바로 아래 판정자 「retirement releases owner without waiting for worker generation」이 잰다.
+    pub fn quietForTest(self: *Backend) void {
+        const state = self.state orelse return;
+        detached_worker_wait.quiet(self, state.io);
     }
 
     pub fn deinit(self: *Backend) void {
@@ -1543,6 +1552,40 @@ test "file tree backend rejects mutual directory symlink cycles" {
         return;
     };
     return error.TestExpectedEqual;
+}
+
+test "판정자는 워커보다 오래 살면 안 된다 — quietForTest 가 도는 job 을 재운다" {
+    // **CI 만 빨갛던 실패의 재현**(2026-09-08). `deinit` 은 일부러 워커를 안 기다리므로(바로 아래
+    // 판정자가 그 제품 계약을 잰다), 판정자가 스캔을 던져 놓고 그냥 끝나면 아직 도는 job 의 경로
+    // 사본과 heap `State` 가 **테스트 할당자에게 누수로 잡힌다**. 그다음 워커가 해제된 자리를 만지면
+    // 누수 트레이스를 찍는 도중에 죽는다 — CI 샤드가 `dupe` 누수 → segfault → 134 로 abort 했다.
+    //
+    // 기계 속도에 기대지 않으려고 **느린 스캔을 강제한다**: 항목이 많은 디렉터리 하나.
+    // `quietForTest` 를 지우면 이 판정자가 누수로 죽는다(그게 이 판정자의 존재 이유다).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // **테스트 할당자를 쓰지 않는다.** 그러면 누수가 이 판정자가 아니라 **샤드 끝**에서 보고되고, 정작
+    // 이름이 안 남아 CI 로그가 「어느 판정자가 흘렸는지 모름」이 된다 — 우리가 지금 겪은 그 모양이다.
+    // 자기 할당자를 들고 그 자리에서 결산하면 실패가 이 판정자에 붙는다.
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = debug_allocator.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var name_buf: [32]u8 = undefined;
+    var made: usize = 0;
+    while (made < 4_000) : (made += 1) {
+        const name = std.fmt.bufPrint(&name_buf, "entry-{d}.txt", .{made}) catch unreachable;
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    }
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    var backend = try Backend.init(allocator, io);
+    try std.testing.expect(backend.submit(try allocator.dupe(u8, root), 0));
+    // 여기서 그냥 `deinit` 하면 워커가 우리보다 오래 산다 — 그 창을 이 한 줄이 닫는다.
+    backend.quietForTest();
+    backend.deinit();
+    try std.testing.expectEqual(std.heap.Check.ok, debug_allocator.deinit());
 }
 
 test "file tree backend retirement releases owner without waiting for worker generation" {

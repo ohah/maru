@@ -708,6 +708,9 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     new_file_tree_backend_owned = false;
     new_file_tree_open_states = .empty;
     new_file_tree_rows = .empty;
+    // 세션 deinit 과 같은 이유로 판정자에서만 워커를 재운다(`Backend.quietForTest`) — workspace 를
+    // 갈아 끼우면 물러난 백엔드의 워커가 **세션이 끝난 뒤까지** 남을 수 있는 두 번째 자리다.
+    if (builtin.is_test) old_file_tree_backend.quietForTest();
     old_file_tree_backend.deinit();
     old_file_tree.deinit();
     old_file_tree_open_states.deinit(self.allocator);

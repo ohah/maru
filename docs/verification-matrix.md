@@ -3081,11 +3081,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   child PID로 실행하고 첫 child의 정상 reap 뒤에만 둘째를 spawn한다. IPC는 canonical aggregate directory pathname 하나뿐이며
   inherited non-stdio fd와 process-local owner 전달은 0이다. 두 aggregate command는 trusted bootstrap/context/CLI를 공유하되
   `GH_TOKEN` lookup·전달이 0이고 finalize verifier에는 exact `GH_PROMPT_DISABLED=1`만 보낸다. actual temporary filesystem과
-  test-owned verifier로 fixed five-leaf handoff와 four-call semantic order를 검증한다. actual child 행은 missing/hostile token,
+  test-owned verifier로 baseline의 fixed five-leaf/four-call과 upgrade의 fixed six-leaf/five-call semantic order를 각각 검증한다. actual child 행은 missing/hostile token,
   기존 destination, inventory 오염, verifier 실패·timeout, CLI 교체와 artifact mutation의 후속 phase/publication 0 및 durable-byte
   보존을 확인하고 exhaustive mutation checkpoint는 handoff/reopen component gate가 소유한다. ReleaseFast 20회 actual process pair는 prepare/finalize/handoff-gap/total의
   median·p95·max, 실패 수, distinct PID pair, parent FD delta와 residue를 exact
-  `maru.session-host-release-aggregate-process-perf.v1` canonical diagnostic JSON으로 남기고 strict parser가 key 순서·count·trailing
+  `maru.session-host-release-aggregate-process-perf.v2` canonical diagnostic JSON에 profile을 함께 남기고 strict parser가 key 순서·count·trailing
   bytes를 독립 판정한다. 이 값은
   release evidence나 latency budget이 아니며 live GitHub bundle/workflow와 frozen signed U5 E2E는 후속 범위다.
   `test-session-host-release-adapter-live-workflow-phase`는 candidate pin→candidate bundle→draft+authoring→authored bundle→aggregate
@@ -3372,12 +3372,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   checkpoint commit failure, checkpoint 호출 exact once와 output 3/0을 검증한다. selector/fence child·FD·residue는 §11.99a/c gate가
   소유한다. aggregate/publication의 profile-aware evidence·timing bundle 소비와 protected B 실제 GitHub
   bundle/N-1-current 실측은 후속이므로 §11.99d green만으로 §11.99 전체 완료를 주장하지 않는다.
-  §11.99e profile-aware aggregate는 stage-4 final fence가 자기 output file에 다시 쓴 selected evidence pathname과 2/3 bundle pathname만
+  §11.99e profile-aware aggregate는 stage-4 final fence가 자기 output file에 다시 쓴 selected evidence·timing pathname과 2/3 bundle pathname만
   stage 5가 소비하게 하며 commit helper가 selector의 옛 pathname을 직접 공개하지 못하게 한다.
   fresh process는 caller profile scalar나 파일 존재 추론 대신 no-follow pin한 canonical evidence의 profile을 권위로 삼아 baseline의
   exact 5-entry/no-timing과 upgrade의 exact 6-entry/required-timing을 교차검증한다. durable owner seal은 profile·active count를 포함하고
   promote/reopen/final fence/retention/cleanup recovery는 active slot만 순회하되 inactive slot pristine을 요구한다. upgrade finalize는
-  timing subject와 timing bundle을 다섯 번째 verifier child로 결속하고 baseline의 foreign sixth entry, upgrade timing 누락, profile/name,
+  optional `--timing`을 aggregate evidence profile과 교차검증한 뒤 retained timing subject와 timing bundle을 다섯 번째 verifier child로
+  결속하고 baseline의 foreign sixth entry, upgrade timing subject/bundle 누락, profile/name,
   pathname/inode, SHA/run drift를 publication 0으로 닫는다. receipt와 cleanup recovery record는 exact 5/6 inventory를 보존하지만 timing은
   release manifest asset exact-set에 추가하지 않는다. focused gate는 harness-owned private APFS에서 두 profile의 actual-process
   prepare→fresh finalize, verifier 4/5, optional argv 모순과 fail-index cleanup, FD·staging/final residue 0 및 median·p95·max를 측정한다.

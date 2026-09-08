@@ -4967,9 +4967,10 @@ actual-process gate를 함께 증거로 사용한다. 이 로컬 결합은 GitHu
 
 stage 5 `prepare-candidate-aggregate`는 stage 4 final fence가 공개한 profile-aware bundle 집합을 잃지 않는 유일한 durable handoff
 owner다. 상위 live action은 stage 3의 fixed baseline/upgrade evidence pathname을 다시 선택하지 않고 stage 4가 공개한
-`evidence-path`, `evidence-bundle-path`, `manifest-bundle-path`, `timing-bundle-path`만 소비한다. 따라서 stage 4는 bundle 세 pathname뿐
+`evidence-path`, `timing-path`, `evidence-bundle-path`, `manifest-bundle-path`, `timing-bundle-path`만 소비한다. 따라서 stage 4는 bundle 세 pathname뿐
 아니라 final fence가 재검증하고 자신의 output file에 다시 쓴 selected evidence pathname도 공개하며, commit helper는 selector의 옛
-pathname을 직접 공개하지 않는다. baseline은 selected evidence+candidate 두 bundle+authored 두
+pathname을 직접 공개하지 않는다. final fence는 selected timing pathname도 다시 쓰며 baseline에서는 empty, upgrade에서는 canonical
+absolute path다. baseline은 selected evidence+candidate 두 bundle+authored 두
 bundle의 exact 5개, upgrade는 여기에 timing bundle을 더한 exact 6개다.
 
 aggregate command는 `--release-profile` 같은 caller-authored scalar를 받지 않는다. closed argv는 공통 다섯 source와 optional
@@ -4981,7 +4982,8 @@ unknown option, evidence basename/profile 불일치, timing과 다른 source의 
 durable aggregate는 최대 여섯 slot을 가지되 `profile`과 `active_count`를 final-address seal에 포함한다. baseline inventory는 timing
 entry가 없는 exact 5개이고 upgrade inventory는 `upgrade-timing.attestation.json`을 포함한 exact 6개다. promote, reopen, final fence,
 retention, cleanup tomb/recovery는 모두 sealed active count만 순회하고 inactive slot은 owner/fd/path/name/present가 pristine이어야 한다.
-upgrade finalize는 evidence와 manifest의 기존 네 attestation에 timing subject↔timing bundle 검증을 하나 더 수행한다. baseline에서
+upgrade finalize의 closed argv는 optional `--timing` subject pathname을 추가로 받고 aggregate evidence의 canonical profile과 다시
+상관 검증한다. evidence와 manifest의 기존 네 attestation에 retained timing subject↔timing bundle 검증을 하나 더 수행한다. baseline에서
 timing entry가 있거나 upgrade에서 빠진 경우, foreign sixth entry, profile/name drift, hardlink alias, bundle/subject SHA·run drift는
 publication 0이다.
 
@@ -4994,6 +4996,11 @@ focused gate는 baseline/upgrade actual-process prepare→fresh finalize를 모�
 distinct PID, canonical evidence profile, optional timing argv의 모든 모순, source/aggregate drift, fail-index 역순 정산, parent FD delta와
 staging/final residue 0을 검증한다. 로컬 실측은 harness-owned private APFS와 synthetic verifier만 사용한다. protected B tag의 실제
 GitHub-issued timing bundle과 signed N-1/current 실행 latency는 이 slice 뒤의 원격 gate가 별도로 측정한다.
+
+2026-09-09 ReleaseFast 로컬 실측 20회에서 baseline은 prepare/finalize/total median이 각각 6.813/319.344/326.017ms,
+upgrade는 8.208/345.481/352.578ms였다. 두 profile 모두 successful/distinct-PID pair 20/20, failure·parent-FD delta·aggregate/staging
+residue 0이었다. 이 값은 synthetic verifier를 사용한 local process-boundary 회귀 기준이며 GitHub network나 signed product latency
+예산으로 승격하지 않는다.
 
 ## 12. 필수 적대적 검증
 

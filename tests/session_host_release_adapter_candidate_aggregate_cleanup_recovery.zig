@@ -12,6 +12,7 @@ const Op = enum {
     rename,
     sync_parent_after_rename,
     inspect_inventory,
+    unlink_5,
     unlink_4,
     unlink_3,
     unlink_2,
@@ -34,7 +35,8 @@ const Model = struct {
     tomb: bool = false,
     intent: bool = false,
     completion: bool = false,
-    present: [recovery.entry_count]bool = @splat(true),
+    present: [recovery.entry_count]bool = .{ true, true, true, true, true, false },
+    active_count: usize = 5,
     foreign: ?usize = null,
     unexpected: bool = false,
     malformed_intent: bool = false,
@@ -83,10 +85,10 @@ const Model = struct {
     }
     pub fn inspectInventory(self: *@This()) !recovery.Inventory {
         try self.hit(.inspect_inventory);
-        return .{ .present = self.present, .foreign = self.foreign, .unexpected = self.unexpected };
+        return .{ .present = self.present, .active_count = self.active_count, .foreign = self.foreign, .unexpected = self.unexpected };
     }
     pub fn unlink(self: *@This(), index: usize) !void {
-        const op: Op = @enumFromInt(@intFromEnum(Op.unlink_4) + (recovery.entry_count - 1 - index));
+        const op: Op = @enumFromInt(@intFromEnum(Op.unlink_5) + (recovery.entry_count - 1 - index));
         try self.hit(op);
         if (!self.tomb or !self.present[index]) return error.InvalidState;
         self.present[index] = false;
@@ -142,6 +144,16 @@ test "fresh cleanup publishes intent before rename and completion before intent 
     var owner: recovery.Recovery = .{};
     try std.testing.expectEqual(recovery.Outcome.success, try recovery.testing_api.begin(&model, &owner));
     try std.testing.expectEqualSlices(Op, &success_order, model.calls.items);
+    try std.testing.expect(!model.original and !model.tomb and !model.intent and model.completion);
+    try std.testing.expect(owner.isPristine());
+}
+
+test "upgrade recovery removes the sixth timing bundle before the shared suffix" {
+    var model = Model{ .present = @splat(true), .active_count = 6 };
+    defer model.deinit();
+    var owner: recovery.Recovery = .{};
+    try std.testing.expectEqual(recovery.Outcome.success, try recovery.testing_api.begin(&model, &owner));
+    try std.testing.expect(std.mem.indexOfScalar(Op, model.calls.items, .unlink_5) != null);
     try std.testing.expect(!model.original and !model.tomb and !model.intent and model.completion);
     try std.testing.expect(owner.isPristine());
 }
@@ -203,7 +215,7 @@ test "foreign unexpected ambiguous and non-prefix inventories delete nothing" {
             0 => model.foreign = 4,
             1 => model.unexpected = true,
             2 => model.original = true,
-            3 => model.present = .{ true, false, true, true, true },
+            3 => model.present = .{ true, false, true, true, true, false },
             else => unreachable,
         }
         var owner: recovery.Recovery = .{};

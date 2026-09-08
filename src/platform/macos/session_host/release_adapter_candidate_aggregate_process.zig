@@ -116,6 +116,7 @@ pub fn prepare(
         command.candidate_frozen_bundle,
         command.evidence_bundle,
         command.manifest_bundle,
+        command.timing_bundle,
     };
     var path_storage: [handoff.role_count][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
     var root_storage: [handoff.role_count][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
@@ -125,7 +126,8 @@ pub fn prepare(
     defer {
         for (storage.sources[0..pinned]) |*source| source.deinit() catch {};
     }
-    for (paths, 0..) |path, index| {
+    const supplied_count: usize = if (command.timing_bundle.len == 0) handoff.baseline_role_count else handoff.role_count;
+    for (paths[0..supplied_count], 0..) |path, index| {
         const path_z = try copyPathZ(&path_storage[index], path);
         const root = std.fs.path.dirname(path) orelse return error.InvalidPath;
         const root_z = try copyPathZ(&root_storage[index], root);
@@ -134,13 +136,27 @@ pub fn prepare(
         pinned += 1;
         source_values[index] = .{ .file = &storage.sources[index], .root = root_z, .path = path_z };
     }
+    var evidence_input = try storage.sources[0].readHeldAlloc(allocator, source_values[0].path, evidence.max_evidence_bytes);
+    defer evidence_input.deinit(allocator);
+    var parsed_evidence = try evidence.parseCanonical(allocator, evidence_input.bytes);
+    defer parsed_evidence.deinit();
+    const profile = parsed_evidence.profile();
+    const expected_evidence_name = switch (profile) {
+        .baseline_a => "baseline-evidence.json",
+        .upgrade_b => "upgrade-evidence.json",
+    };
+    if (!std.mem.eql(u8, std.fs.path.basename(command.evidence), expected_evidence_name) or
+        supplied_count != (if (profile == .upgrade_b) handoff.role_count else handoff.baseline_role_count))
+        return error.InvalidProfileTuple;
     const destination = try copyPathZ(&destination_storage, command.aggregate);
     try handoff.promote(allocator, .{
+        .profile = profile,
         .evidence = source_values[0],
         .candidate_dmg_bundle = source_values[1],
         .candidate_frozen_bundle = source_values[2],
         .evidence_bundle = source_values[3],
         .manifest_bundle = source_values[4],
+        .timing_bundle = if (profile == .upgrade_b) source_values[5] else null,
     }, destination, &storage.aggregate);
     try storage.aggregate.closeRetaining();
 }
@@ -160,16 +176,18 @@ pub fn finalize(
     if (storage.aggregate.owner != null or storage.reopened.owner != null) return error.InvalidOwner;
     for (&storage.sources) |*source| if (source.owner != null) return error.InvalidOwner;
 
-    var paths: [4][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
+    var paths: [5][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
     const directory = try copyPathZ(&paths[0], command.aggregate);
     const dmg = try copyPathZ(&paths[1], command.dmg);
     const frozen = try copyPathZ(&paths[2], command.frozen_executable);
     const manifest = try copyPathZ(&paths[3], command.manifest);
+    const timing = if (command.timing.len == 0) null else try copyPathZ(&paths[4], command.timing);
     try reopen.openAndVerify(io, allocator, view.context, .{
         .directory = directory,
         .dmg = dmg,
         .frozen_executable = frozen,
         .manifest = manifest,
+        .timing = timing orelse "",
     }, .{
         .path = view.github_cli,
         .pinned = &bootstrap.cli,

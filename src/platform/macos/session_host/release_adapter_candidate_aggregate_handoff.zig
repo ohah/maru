@@ -13,8 +13,9 @@ extern "c" fn renameatx_np(from_dir_fd: c_int, from: [*:0]const u8, to_dir_fd: c
 const rename_excl: c_uint = 0x00000004;
 
 pub const max_attestation_bundle_bytes: u64 = bundle_contract.max_bytes;
-pub const max_aggregate_bytes: u64 = evidence_mod.max_evidence_bytes + 4 * max_attestation_bundle_bytes;
-pub const role_count: usize = 5;
+pub const max_aggregate_bytes: u64 = evidence_mod.max_evidence_bytes + 5 * max_attestation_bundle_bytes;
+pub const baseline_role_count: usize = 5;
+pub const role_count: usize = 6;
 
 pub const Error = files.Error || error{
     InvalidPath,
@@ -31,6 +32,7 @@ pub const Role = enum(u3) {
     candidate_frozen_bundle,
     evidence_bundle,
     manifest_bundle,
+    timing_bundle,
 };
 
 const bundle_names = [_][]const u8{
@@ -38,6 +40,7 @@ const bundle_names = [_][]const u8{
     "candidate-frozen.attestation.json",
     "evidence.attestation.json",
     "manifest.attestation.json",
+    "upgrade-timing.attestation.json",
 };
 
 pub fn destinationName(role: Role, evidence_name: []const u8) []const u8 {
@@ -47,6 +50,7 @@ pub fn destinationName(role: Role, evidence_name: []const u8) []const u8 {
         .candidate_frozen_bundle => bundle_names[1],
         .evidence_bundle => bundle_names[2],
         .manifest_bundle => bundle_names[3],
+        .timing_bundle => bundle_names[4],
     };
 }
 
@@ -57,19 +61,26 @@ pub const Source = struct {
 };
 
 pub const Sources = struct {
+    profile: evidence_mod.Profile,
     evidence: Source,
     candidate_dmg_bundle: Source,
     candidate_frozen_bundle: Source,
     evidence_bundle: Source,
     manifest_bundle: Source,
+    timing_bundle: ?Source = null,
 
-    pub fn at(self: @This(), role: Role) Source {
+    pub fn activeCount(self: @This()) usize {
+        return if (self.profile == .upgrade_b) role_count else baseline_role_count;
+    }
+
+    pub fn at(self: @This(), role: Role) ?Source {
         return switch (role) {
             .evidence => self.evidence,
             .candidate_dmg_bundle => self.candidate_dmg_bundle,
             .candidate_frozen_bundle => self.candidate_frozen_bundle,
             .evidence_bundle => self.evidence_bundle,
             .manifest_bundle => self.manifest_bundle,
+            .timing_bundle => self.timing_bundle,
         };
     }
 };
@@ -82,6 +93,8 @@ pub const Entry = struct {
 };
 
 pub const Value = struct {
+    profile: evidence_mod.Profile,
+    active_count: usize,
     directory: []const u8,
     entries: [role_count]Entry,
 };
@@ -93,6 +106,8 @@ pub const DurableAggregate = struct {
     directory_fd: c.fd_t = -1,
     directory_device: u64 = 0,
     directory_inode: u64 = 0,
+    profile: evidence_mod.Profile = .baseline_a,
+    active_count: usize = 0,
     destination: [std.fs.max_path_bytes:0]u8 = @splat(0),
     destination_len: usize = 0,
     directory_leaf: [std.fs.max_name_bytes:0]u8 = @splat(0),
@@ -108,14 +123,14 @@ pub const DurableAggregate = struct {
     pub fn value(self: *const @This()) ?Value {
         if (self.owner != self or self.phase != .open or !validStorage(self) or !std.mem.eql(u8, &self.seal, &metadataSeal(self))) return null;
         var entries: [role_count]Entry = undefined;
-        for (0..role_count) |index| {
+        for (0..self.active_count) |index| {
             if (self.files[index].owner != &self.files[index]) return null;
             entries[index] = .{
                 .path = self.paths[index][0..self.path_lens[index]],
                 .observation = self.files[index].value() orelse return null,
             };
         }
-        return .{ .directory = self.destination[0..self.destination_len], .entries = entries };
+        return .{ .profile = self.profile, .active_count = self.active_count, .directory = self.destination[0..self.destination_len], .entries = entries };
     }
 
     pub fn revalidate(self: *const @This()) Error!Value {
@@ -123,7 +138,7 @@ pub const DurableAggregate = struct {
         try self.revalidateDirectory();
         var result = current;
         var identities: [role_count]files.Identity = undefined;
-        for (0..role_count) |index| {
+        for (0..current.active_count) |index| {
             const path: [:0]const u8 = self.paths[index][0..self.path_lens[index] :0];
             const observed = self.files[index].revalidate(path) catch return error.FileChanged;
             if (!sameObservation(current.entries[index].observation, observed)) return error.FileChanged;
@@ -157,7 +172,7 @@ pub const DurableAggregate = struct {
 
     pub fn cleanupFailingForTest(self: *@This(), fail_after_unlinks: usize) TestError!void {
         if (!builtin.is_test) @compileError("cleanup fault injection is test-only");
-        if (fail_after_unlinks > role_count) return error.InvalidExpected;
+        if (fail_after_unlinks > self.active_count) return error.InvalidExpected;
         return self.cleanupCore(fail_after_unlinks);
     }
 
@@ -178,8 +193,8 @@ pub const DurableAggregate = struct {
         }
         var unlinked: usize = 0;
         if (fail_after_unlinks == 0) return error.InjectedFailure;
-        for (0..role_count) |offset| {
-            const index = role_count - 1 - offset;
+        for (0..self.active_count) |offset| {
+            const index = self.active_count - 1 - offset;
             if (!self.present[index]) continue;
             var held: posix.Stat = undefined;
             var named: posix.Stat = undefined;
@@ -228,6 +243,8 @@ pub const TestCheckpoint = enum {
     evidence_bundle_copied,
     manifest_bundle_written,
     manifest_bundle_copied,
+    timing_bundle_written,
+    timing_bundle_copied,
     staging_synced,
     final_renamed,
     parent_synced,
@@ -254,6 +271,8 @@ const Working = struct {
     directory_fd: c.fd_t,
     directory_device: u64,
     directory_inode: u64,
+    profile: evidence_mod.Profile,
+    active_count: usize,
     stage_leaf: [std.fs.max_name_bytes:0]u8,
     stage_leaf_len: usize,
     stage_path: [std.fs.max_path_bytes:0]u8,
@@ -270,8 +289,8 @@ const Working = struct {
     fn cleanupChecked(self: *@This()) Error!void {
         if (self.adopted) return;
         var failed = false;
-        for (0..role_count) |offset| {
-            const index = role_count - 1 - offset;
+        for (0..self.active_count) |offset| {
+            const index = self.active_count - 1 - offset;
             if (self.files[index].value() != null) {
                 const name: [:0]const u8 = self.names[index][0..self.name_lens[index] :0];
                 if (!unlinkExact(self.directory_fd, name, self.files[index].fd)) failed = true;
@@ -296,9 +315,10 @@ const Working = struct {
 
 fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]const u8, result: *DurableAggregate, injector: anytype) TestError!void {
     try validateInputs(sources, destination, result);
-    const observations = try sourceObservations(sources);
+    const active_count = sources.activeCount();
+    const observations = try sourceObservations(sources, active_count);
     var total: u64 = 0;
-    for (observations, 0..) |observation, index| {
+    for (observations[0..active_count], 0..) |observation, index| {
         const cap: u64 = if (index == 0) evidence_mod.max_evidence_bytes else max_attestation_bundle_bytes;
         if (observation.size > cap) return error.TooLarge;
         total = std.math.add(u64, total, observation.size) catch return error.AggregateTooLarge;
@@ -339,6 +359,8 @@ fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]
         .directory_fd = directory_fd,
         .directory_device = @intCast(directory_stat.dev),
         .directory_inode = @intCast(directory_stat.ino),
+        .profile = sources.profile,
+        .active_count = active_count,
         .stage_leaf = stage_leaf,
         .stage_leaf_len = stage_name.len,
         .stage_path = stage_path,
@@ -356,9 +378,9 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
 
     const evidence_name = std.fs.path.basename(sources.evidence.path);
     const stage_path_value: [:0]const u8 = working.stage_path[0..working.stage_path_len :0];
-    for (0..role_count) |index| {
+    for (0..working.active_count) |index| {
         const role: Role = @enumFromInt(index);
-        const source = sources.at(role);
+        const source = sources.at(role).?;
         const name = destinationName(role, evidence_name);
         if (!validComponent(name) or name.len >= working.names[index].len) return error.InvalidPath;
         for (0..index) |prior| if (std.mem.eql(u8, name, working.names[prior][0..working.name_lens[prior]])) return error.InvalidPath;
@@ -384,8 +406,8 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
         try injector.hit(@enumFromInt(@intFromEnum(TestCheckpoint.evidence_copied) + index * 2));
     }
     var copied_identities: [role_count]files.Identity = undefined;
-    for (&working.files, 0..) |*file, index| copied_identities[index] = file.value().?.identity;
-    try files.requireDistinct(&copied_identities);
+    for (working.files[0..working.active_count], 0..) |*file, index| copied_identities[index] = file.value().?.identity;
+    try files.requireDistinct(copied_identities[0..working.active_count]);
     if (c.fsync(working.directory_fd) != 0) return error.SyncFailed;
     try injector.hit(.staging_synced);
 
@@ -408,6 +430,8 @@ fn adoptAfterRename(working: *Working, destination: [:0]const u8, final_leaf: [:
         .directory_fd = working.directory_fd,
         .directory_device = working.directory_device,
         .directory_inode = working.directory_inode,
+        .profile = working.profile,
+        .active_count = working.active_count,
         .destination_len = destination.len,
         .directory_leaf_len = final_leaf.len,
     };
@@ -415,7 +439,7 @@ fn adoptAfterRename(working: *Working, destination: [:0]const u8, final_leaf: [:
     adopted.destination[destination.len] = 0;
     @memcpy(adopted.directory_leaf[0..final_leaf.len], final_leaf);
     adopted.directory_leaf[final_leaf.len] = 0;
-    for (0..role_count) |index| {
+    for (0..working.active_count) |index| {
         const name = working.names[index][0..working.name_lens[index]];
         const final_path = std.fmt.bufPrintZ(&adopted.paths[index], "{s}/{s}", .{ destination, name }) catch unreachable;
         adopted.path_lens[index] = final_path.len;
@@ -432,7 +456,7 @@ fn adoptAfterRename(working: *Working, destination: [:0]const u8, final_leaf: [:
     result.* = adopted;
     result.owner = result;
     result.phase = .open;
-    for (&result.files) |*file| file.owner = file;
+    for (result.files[0..result.active_count]) |*file| file.owner = file;
     result.seal = metadataSeal(result);
     working.adopted = true;
 }
@@ -443,31 +467,34 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
     const evidence_name = std.fs.path.basename(sources.evidence.path);
     const destination_parent = std.fs.path.dirname(destination) orelse return error.InvalidPath;
     if (destination_parent.len + 1 + ".maru-aggregate-ffffffffffffffff".len >= std.fs.max_path_bytes) return error.InvalidPath;
-    for (0..role_count) |index| {
+    const active_count = sources.activeCount();
+    if ((sources.profile == .baseline_a and sources.timing_bundle != null) or
+        (sources.profile == .upgrade_b and sources.timing_bundle == null)) return error.InvalidPath;
+    for (0..active_count) |index| {
         const name = destinationName(@enumFromInt(index), evidence_name);
         if (!validComponent(name) or destination.len + 1 + name.len >= std.fs.max_path_bytes) return error.InvalidPath;
         for (0..index) |prior| if (std.mem.eql(u8, name, destinationName(@enumFromInt(prior), evidence_name))) return error.InvalidPath;
     }
     const result_bytes = std.mem.asBytes(result);
     var identities: [role_count]files.Identity = undefined;
-    for (0..role_count) |index| {
-        const source = sources.at(@enumFromInt(index));
+    for (0..active_count) |index| {
+        const source = sources.at(@enumFromInt(index)).?;
         const observation = source.file.value() orelse return error.InvalidOwner;
         identities[index] = observation.identity;
         if (!canonicalAbsolute(source.root) or !canonicalAbsolute(source.path) or !directChild(source.root, source.path) or sameOrDescendant(source.root, destination)) return error.InvalidPath;
         if (overlaps(result_bytes, std.mem.asBytes(source.file)) or overlaps(result_bytes, source.root) or overlaps(result_bytes, source.path) or overlaps(result_bytes, destination)) return error.InvalidOwner;
         for (0..index) |prior| {
-            const previous = sources.at(@enumFromInt(prior));
+            const previous = sources.at(@enumFromInt(prior)).?;
             if (overlaps(std.mem.asBytes(source.file), std.mem.asBytes(previous.file))) return error.InvalidOwner;
         }
     }
-    try files.requireDistinct(&identities);
+    try files.requireDistinct(identities[0..active_count]);
 }
 
-fn sourceObservations(sources: Sources) Error![role_count]files.ExecutableObservation {
+fn sourceObservations(sources: Sources, active_count: usize) Error![role_count]files.ExecutableObservation {
     var result: [role_count]files.ExecutableObservation = undefined;
-    for (0..role_count) |index| {
-        const source = sources.at(@enumFromInt(index));
+    for (0..active_count) |index| {
+        const source = sources.at(@enumFromInt(index)).?;
         result[index] = source.file.revalidate(source.path) catch return error.SourceChanged;
     }
     return result;
@@ -558,7 +585,7 @@ fn sameDirectoryAt(parent_fd: c.fd_t, name: [:0]const u8, held_fd: c.fd_t) bool 
 }
 
 fn pristine(value: *const DurableAggregate) bool {
-    if (value.owner != null or value.phase != .pristine or value.parent_fd >= 0 or value.directory_fd >= 0 or value.destination_len != 0 or value.directory_leaf_len != 0) return false;
+    if (value.owner != null or value.phase != .pristine or value.parent_fd >= 0 or value.directory_fd >= 0 or value.destination_len != 0 or value.directory_leaf_len != 0 or value.active_count != 0) return false;
     for (value.files) |file| if (file.owner != null or file.fd >= 0 or file.parent_fd >= 0) return false;
     return true;
 }
@@ -566,15 +593,18 @@ fn pristine(value: *const DurableAggregate) bool {
 fn validStorage(value: *const DurableAggregate) bool {
     if (value.parent_fd < 0 or value.directory_fd < 0 or value.destination_len == 0 or value.destination_len >= value.destination.len or
         value.directory_leaf_len == 0 or value.directory_leaf_len >= value.directory_leaf.len or value.destination[value.destination_len] != 0 or
-        value.directory_leaf[value.directory_leaf_len] != 0 or !std.mem.eql(u8, std.fs.path.basename(value.destination[0..value.destination_len]), value.directory_leaf[0..value.directory_leaf_len])) return false;
+        value.directory_leaf[value.directory_leaf_len] != 0 or !std.mem.eql(u8, std.fs.path.basename(value.destination[0..value.destination_len]), value.directory_leaf[0..value.directory_leaf_len]) or
+        value.active_count != (if (value.profile == .upgrade_b) role_count else baseline_role_count)) return false;
     const evidence_name = value.names[0][0..value.name_lens[0]];
-    for (0..role_count) |index| {
+    for (0..value.active_count) |index| {
         if (value.path_lens[index] == 0 or value.path_lens[index] >= value.paths[index].len or value.name_lens[index] == 0 or value.name_lens[index] >= value.names[index].len or
             value.paths[index][value.path_lens[index]] != 0 or value.names[index][value.name_lens[index]] != 0 or
             !std.mem.eql(u8, std.fs.path.basename(value.paths[index][0..value.path_lens[index]]), value.names[index][0..value.name_lens[index]]) or
             !std.mem.eql(u8, std.fs.path.dirname(value.paths[index][0..value.path_lens[index]]) orelse return false, value.destination[0..value.destination_len]) or
             !std.mem.eql(u8, value.names[index][0..value.name_lens[index]], destinationName(@enumFromInt(index), evidence_name))) return false;
     }
+    for (value.active_count..role_count) |index| if (value.path_lens[index] != 0 or value.name_lens[index] != 0 or value.present[index] or
+        value.files[index].owner != null or value.files[index].fd != -1 or value.files[index].parent_fd != -1) return false;
     return true;
 }
 
@@ -584,11 +614,13 @@ fn metadataSeal(value: *const DurableAggregate) [32]u8 {
     hasher.update(std.mem.asBytes(&self_address));
     hasher.update(std.mem.asBytes(&value.directory_device));
     hasher.update(std.mem.asBytes(&value.directory_inode));
+    hasher.update(std.mem.asBytes(&value.profile));
+    hasher.update(std.mem.asBytes(&value.active_count));
     hasher.update(std.mem.asBytes(&value.destination_len));
     hasher.update(value.destination[0..value.destination_len]);
     hasher.update(std.mem.asBytes(&value.directory_leaf_len));
     hasher.update(value.directory_leaf[0..value.directory_leaf_len]);
-    for (0..role_count) |index| {
+    for (0..value.active_count) |index| {
         hasher.update(std.mem.asBytes(&value.path_lens[index]));
         hasher.update(value.paths[index][0..value.path_lens[index]]);
         hasher.update(std.mem.asBytes(&value.name_lens[index]));

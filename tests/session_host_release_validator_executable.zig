@@ -105,6 +105,7 @@ const Harness = struct {
                         .candidate_frozen_bundle = "/tmp/candidate-frozen",
                         .evidence_bundle = "/tmp/evidence-bundle",
                         .manifest_bundle = "/tmp/manifest-bundle",
+                        .timing_bundle = "",
                         .aggregate = "/tmp/aggregate",
                     } },
                     .finalize_aggregate => .{ .finalize_candidate_aggregate = .{
@@ -114,6 +115,7 @@ const Harness = struct {
                         .dmg = "/tmp/dmg",
                         .frozen_executable = "/tmp/exe",
                         .manifest = "/tmp/manifest",
+                        .timing = "",
                     } },
                     .resume_publication => .{ .resume_candidate_publication = .{
                         .repo = "ohah/maru",

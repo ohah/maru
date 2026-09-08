@@ -3,11 +3,45 @@
 const std = @import("std");
 const c = std.c;
 const report_mod = @import("release_aggregate_process_report");
+const evidence_mod = @import("release_evidence");
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
 const max_iterations: usize = @intCast(report_mod.max_iterations);
 const source_sha = "0123456789abcdef0123456789abcdef01234567";
+const test_uuid = "123e4567-e89b-42d3-a456-426614174000";
+const candidate_dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const candidate_exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const Profile = enum { baseline_a, upgrade_b };
+
+fn baselineEvidence(allocator: std.mem.Allocator) ![]u8 {
+    const common: evidence_mod.Common = .{
+        .test_uuid = test_uuid,
+        .repository = .{ .id = 123, .owner = "ohah", .name = "maru" },
+        .release = .{ .id = 456, .tag = "v1.2.3", .version = "1.2.3" },
+        .source = .{ .commit = source_sha, .tree = "1111111111111111111111111111111111111111" },
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 789, .run_attempt = 2 },
+        .candidate = .{ .dmg_sha256 = candidate_dmg_sha, .executable_sha256 = candidate_exe_sha },
+    };
+    const default_leaf = "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ candidate_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n";
+    const quit_leaf = "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ candidate_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+    return evidence_mod.assembleBaseline(allocator, common, default_leaf, quit_leaf);
+}
+
+fn upgradeEvidence(allocator: std.mem.Allocator) ![]u8 {
+    const common: evidence_mod.Common = .{
+        .test_uuid = test_uuid,
+        .repository = .{ .id = 123, .owner = "ohah", .name = "maru" },
+        .release = .{ .id = 456, .tag = "v1.2.3", .version = "1.2.3" },
+        .source = .{ .commit = source_sha, .tree = "1111111111111111111111111111111111111111" },
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 789, .run_attempt = 2 },
+        .candidate = .{ .dmg_sha256 = candidate_dmg_sha, .executable_sha256 = candidate_exe_sha },
+    };
+    const predecessor: evidence_mod.Predecessor = .{ .release_id = 455, .tag = "v1.2.2", .commit = "2222222222222222222222222222222222222222", .manifest_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .dmg_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", .executable_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" };
+    const one = "{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"signer_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"runtime_count\":1,\"runtime_set_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}\n";
+    const near = "{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"signer_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"runtime_count\":255,\"runtime_set_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}\n";
+    return evidence_mod.assembleUpgrade(allocator, common, predecessor, one, near);
+}
 
 const Times = report_mod.Times;
 
@@ -18,7 +52,9 @@ pub fn main(init: std.process.Init) !void {
     const validator_input = arguments.next() orelse return error.MissingValidator;
     const verifier_input = arguments.next() orelse return error.MissingVerifier;
     const iteration_text = arguments.next() orelse return error.MissingIterations;
+    const profile_text = arguments.next() orelse return error.MissingProfile;
     if (arguments.next() != null) return error.TooManyArguments;
+    const profile: Profile = std.meta.stringToEnum(Profile, profile_text) orelse return error.InvalidProfile;
     const iterations = try std.fmt.parseInt(usize, iteration_text, 10);
     if (iterations == 0 or iterations > max_iterations) return error.InvalidIterations;
 
@@ -50,17 +86,17 @@ pub fn main(init: std.process.Init) !void {
     try expectSuccess(warmup.term);
     try sealNonStdioForExec();
     const fd_before = try openFdCount(init.io);
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_000, .existing_destination) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_000, .existing_destination, profile) != null)
         return error.UnexpectedNegativeSample;
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_001, .inventory_drift) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_001, .inventory_drift, profile) != null)
         return error.UnexpectedNegativeSample;
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_002, .verifier_failure) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_002, .verifier_failure, profile) != null)
         return error.UnexpectedNegativeSample;
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_003, .verifier_timeout) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_003, .verifier_timeout, profile) != null)
         return error.UnexpectedNegativeSample;
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_004, .cli_drift) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_004, .cli_drift, profile) != null)
         return error.UnexpectedNegativeSample;
-    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_005, .artifact_drift) != null)
+    if (try runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, 10_005, .artifact_drift, profile) != null)
         return error.UnexpectedNegativeSample;
     var prepare_ns: [max_iterations]u64 = undefined;
     var handoff_gap_ns: [max_iterations]u64 = undefined;
@@ -73,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     var staging_residue: usize = 0;
 
     for (0..iterations) |index| {
-        const sample = (runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, index, .success) catch |err| {
+        const sample = (runPair(init.io, init.gpa, validator, verifier_bytes, &verifier_sha, root, index, .success, profile) catch |err| {
             std.debug.print("aggregate process pair {d} failed: {s}\n", .{ index, @errorName(err) });
             failures += 1;
             continue;
@@ -99,6 +135,7 @@ pub fn main(init: std.process.Init) !void {
     const total_stats = statistics(total_ns[0..successful_pairs]);
     const report: report_mod.Report = .{
         .schema = report_mod.schema,
+        .profile = @tagName(profile),
         .iterations = iterations,
         .successful_pairs = successful_pairs,
         .distinct_pid_pairs = distinct_pid_pairs,
@@ -138,7 +175,8 @@ const Sample = struct {
 
 const Scenario = enum { success, existing_destination, inventory_drift, verifier_failure, verifier_timeout, cli_drift, artifact_drift };
 
-fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, verifier_bytes: []const u8, verifier_sha: []const u8, root: []const u8, index: usize, scenario: Scenario) !?Sample {
+fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, verifier_bytes: []const u8, verifier_sha: []const u8, root: []const u8, index: usize, scenario: Scenario, profile: Profile) !?Sample {
+    const active_count: usize = if (profile == .upgrade_b) 6 else 5;
     var pair_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
     const pair = try std.fmt.bufPrintZ(&pair_storage, "{s}/pair-{d}", .{ root, index });
     try std.Io.Dir.createDirAbsolute(io, pair, .default_dir);
@@ -156,8 +194,8 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     try std.Io.Dir.createDirAbsolute(io, artifacts, .default_dir);
     try std.Io.Dir.createDirAbsolute(io, tools, .default_dir);
 
-    var paths: [9][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
-    const evidence = try childPath(&paths[0], source, "release-evidence.json");
+    var paths: [11][std.fs.max_path_bytes:0]u8 = @splat(@splat(0));
+    const evidence = try childPath(&paths[0], source, if (profile == .upgrade_b) "upgrade-evidence.json" else "baseline-evidence.json");
     const dmg_bundle = try childPath(&paths[1], source, "dmg.bundle.json");
     const frozen_bundle = try childPath(&paths[2], source, "frozen.bundle.json");
     const evidence_bundle = try childPath(&paths[3], source, "evidence.bundle.json");
@@ -166,14 +204,22 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     const dmg = try childPath(&paths[6], artifacts, "Maru-1.2.3-universal.dmg");
     const frozen = try childPath(&paths[7], artifacts, "maru-session-host-1.2.3");
     const manifest = try childPath(&paths[8], artifacts, "Maru-1.2.3-session-host-release.json");
+    const timing_bundle = try childPath(&paths[9], source, "timing.bundle.json");
+    const timing = try childPath(&paths[10], artifacts, "profile-upgrade-timing.json");
     var verifier_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
     const verifier = try childPath(&verifier_storage, tools, "gh");
     const cwd = std.Io.Dir.cwd();
-    try cwd.writeFile(io, .{ .sub_path = evidence, .data = "{\"schema\":\"maru.session-host-release-evidence.v1\"}\n" });
+    const evidence_bytes = if (profile == .upgrade_b) try upgradeEvidence(allocator) else try baselineEvidence(allocator);
+    defer allocator.free(evidence_bytes);
+    try cwd.writeFile(io, .{ .sub_path = evidence, .data = evidence_bytes });
     try cwd.writeFile(io, .{ .sub_path = dmg_bundle, .data = "dmg bundle\n" });
     try cwd.writeFile(io, .{ .sub_path = frozen_bundle, .data = "frozen bundle\n" });
     try cwd.writeFile(io, .{ .sub_path = evidence_bundle, .data = "evidence bundle\n" });
     try cwd.writeFile(io, .{ .sub_path = manifest_bundle, .data = "manifest bundle\n" });
+    if (profile == .upgrade_b) {
+        try cwd.writeFile(io, .{ .sub_path = timing_bundle, .data = "timing bundle\n" });
+        try cwd.writeFile(io, .{ .sub_path = timing, .data = "timing evidence\n" });
+    }
     try cwd.writeFile(io, .{ .sub_path = dmg, .data = "candidate dmg bytes\n" });
     try cwd.writeFile(io, .{ .sub_path = frozen, .data = "frozen executable bytes\n" });
     try cwd.writeFile(io, .{ .sub_path = manifest, .data = "manifest bytes\n" });
@@ -196,19 +242,30 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     var environment = try trustedEnvironment(allocator);
     defer environment.deinit();
     if (index % 2 == 1) try environment.put("GH_TOKEN", "hostile-ambient-token");
-    const prepare_args = [_][]const u8{
+    var prepare_args: [24][]const u8 = undefined;
+    const prepare_prefix = [_][]const u8{
         validator,             "prepare-candidate-aggregate", "--repo",            "ohah/maru",     "--tag",                  "v1.2.3",   "--github-cli",              verifier,
         "--github-cli-sha256", verifier_sha,                  "--evidence",        evidence,        "--candidate-dmg-bundle", dmg_bundle, "--candidate-frozen-bundle", frozen_bundle,
-        "--evidence-bundle",   evidence_bundle,               "--manifest-bundle", manifest_bundle, "--aggregate",            aggregate,
+        "--evidence-bundle",   evidence_bundle,               "--manifest-bundle", manifest_bundle,
     };
+    @memcpy(prepare_args[0..prepare_prefix.len], &prepare_prefix);
+    var prepare_len = prepare_prefix.len;
+    if (profile == .upgrade_b) {
+        prepare_args[prepare_len] = "--timing-bundle";
+        prepare_args[prepare_len + 1] = timing_bundle;
+        prepare_len += 2;
+    }
+    prepare_args[prepare_len] = "--aggregate";
+    prepare_args[prepare_len + 1] = aggregate;
+    prepare_len += 2;
     const total_started = monotonicNs();
     const prepare_started = total_started;
     if (scenario == .existing_destination) {
-        try runClosedAuditRequired(io, allocator, &prepare_args, &environment, 30 * std.time.ns_per_s);
+        try runClosedAuditRequired(io, allocator, prepare_args[0..prepare_len], &environment, 30 * std.time.ns_per_s);
         if (try directoryEntryCount(io, aggregate) != 1) return error.ExistingDestinationMutated;
         return null;
     }
-    var prepare_child = try std.process.spawn(io, .{ .argv = &prepare_args, .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
+    var prepare_child = try std.process.spawn(io, .{ .argv = prepare_args[0..prepare_len], .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
     const prepare_pid = prepare_child.id orelse return error.MissingPid;
     const prepare_succeeded = try waitResult(&prepare_child, 30 * std.time.ns_per_s);
     const prepare_reaped = monotonicNs();
@@ -227,16 +284,24 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
         try cwd.writeFile(io, .{ .sub_path = foreign, .data = "foreign\n" });
     }
 
-    const finalize_args = [_][]const u8{
+    var finalize_args: [20][]const u8 = undefined;
+    const finalize_prefix = [_][]const u8{
         validator,             "finalize-candidate-aggregate", "--repo",      "ohah/maru", "--tag", "v1.2.3", "--github-cli",        verifier,
         "--github-cli-sha256", verifier_sha,                   "--aggregate", aggregate,   "--dmg", dmg,      "--frozen-executable", frozen,
         "--manifest",          manifest,
     };
+    @memcpy(finalize_args[0..finalize_prefix.len], &finalize_prefix);
+    var finalize_len = finalize_prefix.len;
+    if (profile == .upgrade_b) {
+        finalize_args[finalize_len] = "--timing";
+        finalize_args[finalize_len + 1] = timing;
+        finalize_len += 2;
+    }
     const finalize_spawned = monotonicNs();
     if (scenario == .inventory_drift or scenario == .verifier_failure or scenario == .cli_drift or scenario == .artifact_drift) {
-        try runClosedAuditRequired(io, allocator, &finalize_args, &environment, 30 * std.time.ns_per_s);
+        try runClosedAuditRequired(io, allocator, finalize_args[0..finalize_len], &environment, 30 * std.time.ns_per_s);
         if (scenario == .inventory_drift) {
-            if (try directoryEntryCount(io, aggregate) != 6) return error.DurableAggregateMutated;
+            if (try directoryEntryCount(io, aggregate) != active_count + 1) return error.DurableAggregateMutated;
             var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
             const order_path = try childPath(&order_path_storage, durable, "verify-order");
             if (cwd.access(io, order_path, .{})) |_| return error.UnexpectedVerifier else |err| switch (err) {
@@ -245,7 +310,7 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
             }
             return null;
         }
-        if (try directoryEntryCount(io, aggregate) != 5) return error.DurableAggregateMutated;
+        if (try directoryEntryCount(io, aggregate) != active_count) return error.DurableAggregateMutated;
         var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
         const order_path = try childPath(&order_path_storage, durable, "verify-order");
         if (scenario == .artifact_drift) {
@@ -260,7 +325,7 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
         }
         return null;
     }
-    var finalize_child = try std.process.spawn(io, .{ .argv = &finalize_args, .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
+    var finalize_child = try std.process.spawn(io, .{ .argv = finalize_args[0..finalize_len], .environ_map = &environment, .stdin = .close, .stdout = .close, .stderr = if (scenario == .success) .inherit else .close, .pgid = 0 });
     const finalize_pid = finalize_child.id orelse return error.MissingPid;
     const finalize_succeeded = waitResult(&finalize_child, if (scenario == .verifier_timeout) std.time.ns_per_s else 30 * std.time.ns_per_s) catch |err| switch (err) {
         error.ChildTimedOut => if (scenario == .verifier_timeout) false else return err,
@@ -268,7 +333,7 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     };
     const finalize_reaped = monotonicNs();
     if (scenario == .verifier_timeout) {
-        if (finalize_succeeded or try directoryEntryCount(io, aggregate) != 5) return error.DurableAggregateMutated;
+        if (finalize_succeeded or try directoryEntryCount(io, aggregate) != active_count) return error.DurableAggregateMutated;
         var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
         const order_path = try childPath(&order_path_storage, durable, "verify-order");
         if (cwd.access(io, order_path, .{})) |_| {
@@ -287,11 +352,17 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
     const order_path = try childPath(&order_path_storage, durable, "verify-order");
     const order_bytes = try cwd.readFileAlloc(io, order_path, allocator, .limited(256));
     defer allocator.free(order_bytes);
-    const expected_order =
+    const expected_order: []const u8 = if (profile == .upgrade_b)
         "Maru-1.2.3-universal.dmg\n" ++
-        "maru-session-host-1.2.3\n" ++
-        "release-evidence.json\n" ++
-        "Maru-1.2.3-session-host-release.json\n";
+            "maru-session-host-1.2.3\n" ++
+            "upgrade-evidence.json\n" ++
+            "Maru-1.2.3-session-host-release.json\n" ++
+            "profile-upgrade-timing.json\n"
+    else
+        "Maru-1.2.3-universal.dmg\n" ++
+            "maru-session-host-1.2.3\n" ++
+            "baseline-evidence.json\n" ++
+            "Maru-1.2.3-session-host-release.json\n";
     if (!std.mem.eql(u8, order_bytes, expected_order)) return error.VerificationOrderDrift;
     try cwd.deleteTree(io, aggregate);
     if (cwd.access(io, aggregate, .{})) |_| return error.AggregateResidue else |err| switch (err) {
@@ -305,7 +376,7 @@ fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, veri
         .handoff_gap_ns = finalize_spawned - prepare_reaped,
         .finalize_ns = finalize_reaped - finalize_spawned,
         .total_ns = finalize_reaped - total_started,
-        .aggregate_residue = if (aggregate_count == 5) 0 else aggregate_count,
+        .aggregate_residue = if (aggregate_count == active_count) 0 else aggregate_count,
         .staging_residue = stage_count,
     };
 }

@@ -14,14 +14,14 @@ const retention = @import("release_adapter_candidate_aggregate_retention");
 const recovery = @import("release_adapter_candidate_aggregate_cleanup_recovery");
 
 const source_names = [_][]const u8{
-    "release-evidence.json",
+    "baseline-evidence.json",
     "dmg.bundle.json",
     "frozen.bundle.json",
     "evidence.bundle.json",
     "manifest.bundle.json",
 };
 const source_bytes = [_][]const u8{
-    "{\"schema\":\"maru.session-host-release-evidence.v1\"}\n",
+    "",
     "candidate dmg bundle\n",
     "candidate frozen bundle\n",
     "evidence bundle\n",
@@ -33,6 +33,10 @@ const artifact_names = [_][]const u8{
     "Maru-1.2.3-session-host-release.json",
 };
 const artifact_bytes = [_][]const u8{ "candidate dmg bytes\n", "frozen executable bytes\n", "manifest placeholder\n" };
+const timing_name = "profile-upgrade-timing.json";
+const timing_bundle_name = "timing.bundle.json";
+const timing_bytes = "upgrade timing evidence\n";
+const timing_bundle_bytes = "timing bundle\n";
 
 fn sha256Hex(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
@@ -40,18 +44,55 @@ fn sha256Hex(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn canonicalManifest(dmg_name: []const u8) ![]u8 {
+const evidence_uuid = "123e4567-e89b-42d3-a456-426614174000";
+const evidence_dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const evidence_exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn evidenceCommon() evidence.Common {
+    return .{
+        .test_uuid = evidence_uuid,
+        .repository = .{ .id = 55, .owner = "ohah", .name = "maru" },
+        .release = .{ .id = 88, .tag = "v1.2.3", .version = "1.2.3" },
+        .source = .{ .commit = "0123456789abcdef0123456789abcdef01234567", .tree = "1111111111111111111111111111111111111111" },
+        .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 7, .run_attempt = 1 },
+        .candidate = .{ .dmg_sha256 = evidence_dmg_sha, .executable_sha256 = evidence_exe_sha },
+    };
+}
+
+fn baselineEvidence() ![]u8 {
+    const default_leaf = "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"" ++ evidence_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ evidence_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ evidence_exe_sha ++ "\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n";
+    const quit_leaf = "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ evidence_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ evidence_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ evidence_exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+    return evidence.assembleBaseline(std.testing.allocator, evidenceCommon(), default_leaf, quit_leaf);
+}
+
+fn upgradeLeaf(comptime count: u64) []const u8 {
+    return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"runtime_count\":{d},\"runtime_set_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ evidence_uuid, evidence_exe_sha, count });
+}
+
+fn upgradeEvidence() ![]u8 {
+    const predecessor: evidence.Predecessor = .{
+        .release_id = 87,
+        .tag = "v1.2.2",
+        .commit = "2222222222222222222222222222222222222222",
+        .manifest_sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        .dmg_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .executable_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    };
+    return evidence.assembleUpgrade(std.testing.allocator, evidenceCommon(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
+}
+
+fn canonicalManifest(dmg_name: []const u8, evidence_bytes: []const u8, profile: evidence.Profile) ![]u8 {
     const dmg_sha = sha256Hex(artifact_bytes[0]);
     const frozen_sha = sha256Hex(artifact_bytes[1]);
-    const evidence_sha = sha256Hex(source_bytes[0]);
+    const evidence_sha = sha256Hex(evidence_bytes);
     const assets = [_]manifest_mod.Asset{
         .{ .role = .universal_dmg, .name = dmg_name, .sha256 = &dmg_sha, .size = artifact_bytes[0].len },
         .{ .role = .frozen_product_executable, .name = artifact_names[1], .sha256 = &frozen_sha, .size = artifact_bytes[1].len },
-        .{ .role = .evidence_summary, .name = source_names[0], .sha256 = &evidence_sha, .size = source_bytes[0].len },
+        .{ .role = .evidence_summary, .name = if (profile == .upgrade_b) "upgrade-evidence.json" else source_names[0], .sha256 = &evidence_sha, .size = evidence_bytes.len },
     };
     return manifest_mod.writeCanonical(std.testing.allocator, .{
         .schema = manifest_mod.schema,
-        .role = .a,
+        .role = if (profile == .upgrade_b) .b else .a,
         .repository = .{ .id = 55, .owner = "ohah", .name = "maru" },
         .release = .{ .id = 88, .tag = "v1.2.3", .version = "1.2.3" },
         .source = .{ .commit = "0123456789abcdef0123456789abcdef01234567", .tree = "1111111111111111111111111111111111111111" },
@@ -59,7 +100,8 @@ fn canonicalManifest(dmg_name: []const u8) ![]u8 {
         .compatibility = .{ .mrsh_major = 1, .screen_codec = 1, .handoff_reader_min = 1, .handoff_reader_max = 1, .app_host_abi = 1 },
         .signing = .{ .bundle_id = "com.maru.app", .bundle_short_version = "1.2.3", .bundle_version = "123", .team_id = "TEAMID1234", .designated_requirement_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", .architectures = &.{ "arm64", "x86_64" }, .notarization = "accepted", .stapled = true },
         .assets = &assets,
-        .evidence = .{ .test_uuid = "123e4567-e89b-12d3-a456-426614174000", .summary_name = source_names[0], .summary_sha256 = &evidence_sha, .result = "passed" },
+        .evidence = .{ .test_uuid = "123e4567-e89b-12d3-a456-426614174000", .summary_name = if (profile == .upgrade_b) "upgrade-evidence.json" else source_names[0], .summary_sha256 = &evidence_sha, .result = "passed" },
+        .predecessor = if (profile == .upgrade_b) .{ .release_id = 87, .tag = "v1.2.2", .commit = "2222222222222222222222222222222222222222", .manifest_sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } else null,
     });
 }
 
@@ -102,10 +144,10 @@ const Verifier = struct {
     add_entry_at: ?usize = null,
     extra_path: ?[:0]const u8 = null,
     allocate: bool = false,
-    artifact_paths: [4][]const u8 = @splat(""),
-    bundle_paths: [4][]const u8 = @splat(""),
-    names: [4][]const u8 = @splat(""),
-    digests: [4][64]u8 = @splat(@splat(0)),
+    artifact_paths: [5][]const u8 = @splat(""),
+    bundle_paths: [5][]const u8 = @splat(""),
+    names: [5][]const u8 = @splat(""),
+    digests: [5][64]u8 = @splat(@splat(0)),
 
     pub fn verifyBundleWith(
         self: *@This(),
@@ -118,7 +160,7 @@ const Verifier = struct {
         _: []u8,
         budget_ns: i128,
     ) !Observation {
-        if (budget_ns <= 0 or self.calls >= 4) return error.BadCall;
+        if (budget_ns <= 0 or self.calls >= 5) return error.BadCall;
         const index = self.calls;
         self.calls += 1;
         self.artifact_paths[index] = artifact_path;
@@ -181,16 +223,20 @@ const Fixture = struct {
     source_paths: [handoff.role_count][std.fs.max_path_bytes:0]u8 = @splat(@splat(0)),
     source_owners: [handoff.role_count]files.PinnedReleaseFile = @splat(.{}),
     destination: [std.fs.max_path_bytes:0]u8 = @splat(0),
-    artifact_paths: [3][std.fs.max_path_bytes:0]u8 = @splat(@splat(0)),
+    artifact_paths: [4][std.fs.max_path_bytes:0]u8 = @splat(@splat(0)),
     cli_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
     cli: cli_authority.PinnedExecutable = undefined,
     prepared: bool = false,
+    profile: evidence.Profile = .baseline_a,
 
     fn init(self: *@This()) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
         for ([_][]const u8{ "workspace", "bundles", "durable", "artifacts", "tools" }) |name|
             try self.tmp.dir.createDir(std.testing.io, name, .default_dir);
-        for (source_names, source_bytes, 0..) |name, bytes, index| {
+        const evidence_bytes = try baselineEvidence();
+        defer std.testing.allocator.free(evidence_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace/baseline-evidence.json", .data = evidence_bytes });
+        for (source_names[1..], source_bytes[1..], 1..) |name, bytes, index| {
             var relative: [std.fs.max_path_bytes]u8 = undefined;
             const path = try std.fmt.bufPrint(&relative, "{s}/{s}", .{ if (index == 0) "workspace" else "bundles", name });
             try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = bytes });
@@ -200,7 +246,7 @@ const Fixture = struct {
             const path = try std.fmt.bufPrint(&relative, "artifacts/{s}", .{name});
             try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = bytes });
         }
-        const manifest_bytes = try canonicalManifest(artifact_names[0]);
+        const manifest_bytes = try canonicalManifest(artifact_names[0], evidence_bytes, .baseline_a);
         defer std.testing.allocator.free(manifest_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/Maru-1.2.3-session-host-release.json", .data = manifest_bytes });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tools/gh", .data = "#!/bin/sh\nexit 1\n" });
@@ -236,25 +282,30 @@ const Fixture = struct {
         var aggregate: handoff.DurableAggregate = .{};
         try handoff.promote(std.testing.allocator, self.sources(), self.destinationPath(), &aggregate);
         try aggregate.closeRetaining();
-        for (&self.source_owners) |*owner| try owner.deinit();
+        const active_count = if (self.profile == .upgrade_b) handoff.role_count else handoff.baseline_role_count;
+        for (self.source_owners[0..active_count]) |*owner| try owner.deinit();
         try self.tmp.dir.deleteTree(std.testing.io, "workspace");
         try self.tmp.dir.deleteTree(std.testing.io, "bundles");
         self.prepared = true;
     }
 
     fn replaceManifest(self: *@This(), dmg_name: []const u8) !void {
-        const manifest_bytes = try canonicalManifest(dmg_name);
+        const evidence_bytes = try baselineEvidence();
+        defer std.testing.allocator.free(evidence_bytes);
+        const manifest_bytes = try canonicalManifest(dmg_name, evidence_bytes, .baseline_a);
         defer std.testing.allocator.free(manifest_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/Maru-1.2.3-session-host-release.json", .data = manifest_bytes });
     }
 
     fn sources(self: *@This()) handoff.Sources {
         return .{
+            .profile = self.profile,
             .evidence = self.source(0),
             .candidate_dmg_bundle = self.source(1),
             .candidate_frozen_bundle = self.source(2),
             .evidence_bundle = self.source(3),
             .manifest_bundle = self.source(4),
+            .timing_bundle = if (self.profile == .upgrade_b) self.source(5) else null,
         };
     }
 
@@ -268,7 +319,27 @@ const Fixture = struct {
             .dmg = std.mem.sliceTo(&self.artifact_paths[0], 0),
             .frozen_executable = std.mem.sliceTo(&self.artifact_paths[1], 0),
             .manifest = std.mem.sliceTo(&self.artifact_paths[2], 0),
+            .timing = if (self.profile == .upgrade_b) std.mem.sliceTo(&self.artifact_paths[3], 0) else "",
         };
+    }
+
+    fn makeUpgrade(self: *@This()) !void {
+        try self.source_owners[0].deinit();
+        try self.tmp.dir.deleteFile(std.testing.io, "workspace/baseline-evidence.json");
+        const evidence_bytes = try upgradeEvidence();
+        defer std.testing.allocator.free(evidence_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace/upgrade-evidence.json", .data = evidence_bytes });
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bundles/" ++ timing_bundle_name, .data = timing_bundle_bytes });
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/" ++ timing_name, .data = timing_bytes });
+        const manifest_bytes = try canonicalManifest(artifact_names[0], evidence_bytes, .upgrade_b);
+        defer std.testing.allocator.free(manifest_bytes);
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/Maru-1.2.3-session-host-release.json", .data = manifest_bytes });
+        const evidence_path = try absolute(&self.tmp, "workspace/upgrade-evidence.json", &self.source_paths[0]);
+        const bundle_path = try absolute(&self.tmp, "bundles/" ++ timing_bundle_name, &self.source_paths[5]);
+        _ = try absolute(&self.tmp, "artifacts/" ++ timing_name, &self.artifact_paths[3]);
+        try files.pinReleaseFileObserved(&self.source_owners[0], evidence_path, false, evidence.max_evidence_bytes);
+        try files.pinReleaseFileObserved(&self.source_owners[5], bundle_path, false, handoff.max_attestation_bundle_bytes);
+        self.profile = .upgrade_b;
     }
 
     fn cliInput(self: *@This()) reopen.Cli {
@@ -328,7 +399,7 @@ fn publicationSnapshot(fixture: *Fixture, aggregate: reopen.View) !post.Snapshot
         std.mem.sliceTo(&fixture.source_paths[0], 0),
         std.mem.sliceTo(&fixture.artifact_paths[2], 0),
     };
-    const snapshot_names = [_][]const u8{ artifact_names[0], artifact_names[1], source_names[0], artifact_names[2] };
+    const snapshot_names = [_][]const u8{ artifact_names[0], artifact_names[1], if (aggregate.profile == .upgrade_b) "upgrade-evidence.json" else source_names[0], artifact_names[2] };
     const observations = [_]files.ExecutableObservation{
         aggregate.artifacts[0],
         aggregate.artifacts[1],
@@ -532,6 +603,32 @@ test "production completion receipt copied or checksum-corrupted cannot replay s
     try std.testing.expect(owner.isPristine());
 }
 
+test "upgrade cleanup recovery seals profile and six-entry count in its durable receipt" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.makeUpgrade();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var aggregate: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &aggregate);
+    errdefer aggregate.deinit() catch {};
+    var verified: post.VerifiedRelease = .{};
+    try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
+    defer verified.deinit() catch {};
+    var owner: recovery.Recovery = .{};
+    try std.testing.expectEqual(recovery.Outcome.success, try recovery.begin(std.testing.allocator, &aggregate, &verified, &owner));
+    try std.testing.expect(owner.isPristine());
+    var completion_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const completion = try recovery.testing_api.completionPath(context(), fixture.destinationPath(), &completion_storage);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, completion, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"profile\":\"upgrade_b\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"entry_count\":6"));
+}
+
 test "production deletion preserves the aggregate when canonical manifest asset name is foreign" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -572,7 +669,7 @@ test "production deletion preserves a newly hardlinked entry before rename" {
     var verified: post.VerifiedRelease = .{};
     try verifyPublicationReceipt(try publicationSnapshot(&fixture, aggregate.value().?), &verified);
     defer verified.deinit() catch {};
-    try fixture.tmp.dir.hardLink("durable/handoff/release-evidence.json", fixture.tmp.dir, "durable/foreign-alias.json", std.testing.io, .{});
+    try fixture.tmp.dir.hardLink("durable/handoff/baseline-evidence.json", fixture.tmp.dir, "durable/foreign-alias.json", std.testing.io, .{});
     var deletion: retention.Deletion = .{};
     try std.testing.expectEqual(retention.Outcome.audit_required, try retention.deleteVerifiedAggregate(
         std.testing.allocator,
@@ -581,7 +678,7 @@ test "production deletion preserves a newly hardlinked entry before rename" {
         &deletion,
     ));
     try std.testing.expect(deletion.isPristine());
-    try fixture.tmp.dir.access(std.testing.io, "durable/handoff/release-evidence.json", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/handoff/baseline-evidence.json", .{});
     try fixture.tmp.dir.access(std.testing.io, "durable/foreign-alias.json", .{});
 }
 
@@ -611,7 +708,7 @@ test "production deletion leaves a foreign directory replacement untouched" {
     ));
     try std.testing.expect(deletion.isPristine());
     try fixture.tmp.dir.access(std.testing.io, "durable/handoff/foreign", .{});
-    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/release-evidence.json", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/baseline-evidence.json", .{});
 }
 
 test "production tomb fence rejects a foreign replacement before first unlink" {
@@ -637,7 +734,7 @@ test "production tomb fence rejects a foreign replacement before first unlink" {
     @memcpy(deletion.tomb[0..tomb.len], tomb);
     try std.testing.expectError(error.AuthorityChanged, retention.testing_api.fenceConcreteTomb(&aggregate, &deletion));
     try fixture.tmp.dir.access(std.testing.io, "durable/" ++ tomb ++ "/foreign", .{});
-    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/release-evidence.json", .{});
+    try fixture.tmp.dir.access(std.testing.io, "durable/held-original/baseline-evidence.json", .{});
 }
 
 test "retained aggregate reopens and binds four fixed artifact roles" {
@@ -661,6 +758,53 @@ test "retained aggregate reopens and binds four fixed artifact roles" {
     try std.testing.expect(copied.value() == null);
     try result.close();
     try std.testing.expect(result.value() == null);
+}
+
+test "upgrade aggregate derives its profile and binds the retained timing subject" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.makeUpgrade();
+    try fixture.prepare();
+    var verifier = Verifier{};
+    var cli = Cli{};
+    var deadline = Deadline{};
+    var result: reopen.ReopenedAggregate = .{};
+    try verify(&fixture, std.testing.allocator, &verifier, &cli, &deadline, &result);
+    defer result.deinit() catch {};
+    const value = result.value().?;
+    try std.testing.expectEqual(evidence.Profile.upgrade_b, value.profile);
+    try std.testing.expectEqual(handoff.role_count, value.active_count);
+    try std.testing.expectEqual(@as(usize, 5), verifier.calls);
+    try std.testing.expectEqualStrings(timing_name, verifier.names[4]);
+    try std.testing.expectEqualStrings(std.mem.sliceTo(&fixture.artifact_paths[3], 0), verifier.artifact_paths[4]);
+    try std.testing.expectEqualStrings(handoff.destinationName(.timing_bundle, "upgrade-evidence.json"), std.fs.path.basename(verifier.bundle_paths[4]));
+}
+
+test "evidence profile rejects missing or foreign timing subject before verification" {
+    inline for (.{ "upgrade_missing", "baseline_foreign" }) |mode| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        if (comptime std.mem.eql(u8, mode, "upgrade_missing")) {
+            try fixture.makeUpgrade();
+        } else {
+            try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "artifacts/" ++ timing_name, .data = timing_bytes });
+            _ = try absolute(&fixture.tmp, "artifacts/" ++ timing_name, &fixture.artifact_paths[3]);
+        }
+        try fixture.prepare();
+        var paths = fixture.paths();
+        paths.timing = if (comptime std.mem.eql(u8, mode, "upgrade_missing")) "" else std.mem.sliceTo(&fixture.artifact_paths[3], 0);
+        var verifier = Verifier{};
+        var cli = Cli{};
+        var deadline = Deadline{};
+        var executor = Executor{};
+        var output: [8192]u8 = undefined;
+        var result: reopen.ReopenedAggregate = .{};
+        try std.testing.expectError(error.InvalidInventory, reopen.openAndVerifyWith(&cli, &verifier, &executor, &deadline, std.testing.allocator, context(), paths, fixture.cliInput(), &output, &result));
+        try std.testing.expectEqual(@as(usize, 0), verifier.calls);
+        try std.testing.expect(result.value() == null);
+    }
 }
 
 test "reopen rejects missing extra and renamed fixed inventory" {
@@ -819,7 +963,9 @@ test "successful and failed reopen close every descriptor without deleting durab
     const evidence_path = try fixture.durablePath(source_names[0], &evidence_path_storage);
     var input = try files.readInputAlloc(std.testing.allocator, evidence_path, evidence.max_evidence_bytes);
     defer input.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings(source_bytes[0], input.bytes);
+    const expected_evidence = try baselineEvidence();
+    defer std.testing.allocator.free(expected_evidence);
+    try std.testing.expectEqualStrings(expected_evidence, input.bytes);
 }
 
 test "audit deinit closes descriptors after a verified artifact changes" {
@@ -857,7 +1003,9 @@ test "descriptor cleanup failure is observable and preserves durable bytes" {
     const evidence_path = try fixture.durablePath(source_names[0], &evidence_path_storage);
     var input = try files.readInputAlloc(std.testing.allocator, evidence_path, evidence.max_evidence_bytes);
     defer input.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings(source_bytes[0], input.bytes);
+    const expected_evidence = try baselineEvidence();
+    defer std.testing.allocator.free(expected_evidence);
+    try std.testing.expectEqualStrings(expected_evidence, input.bytes);
 }
 
 test "production entrypoint cannot select a fake verifier" {

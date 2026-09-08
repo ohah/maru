@@ -13,10 +13,11 @@ const reducer = @import("release_adapter_candidate_aggregate_cleanup_reducer.zig
 
 extern "c" fn renameatx_np(from_dir_fd: c_int, from: [*:0]const u8, to_dir_fd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
 const rename_excl: c_uint = 0x00000004;
-const intent_schema = "maru.session-host.aggregate-cleanup.v1";
-const completion_schema = "maru.session-host.aggregate-cleanup.done.v1";
+const intent_schema = "maru.session-host.aggregate-cleanup.v2";
+const completion_schema = "maru.session-host.aggregate-cleanup.done.v2";
 const max_record_bytes: usize = 32 * 1024;
-const roles = [_][]const u8{ "evidence", "candidate_dmg_bundle", "candidate_frozen_bundle", "evidence_bundle", "manifest_bundle" };
+const roles = [_][]const u8{ "evidence", "candidate_dmg_bundle", "candidate_frozen_bundle", "evidence_bundle", "manifest_bundle", "timing_bundle" };
+const RecordProfile = enum { baseline_a, upgrade_b };
 
 pub const entry_count = reducer.entry_count;
 pub const Outcome = reducer.Outcome;
@@ -120,6 +121,8 @@ const StoredEntry = struct {
 };
 
 const StoredRecord = struct {
+    profile: RecordProfile = .baseline_a,
+    entry_count: usize = 0,
     repository_id: u64 = 0,
     tag: [context_mod.max_value_bytes]u8 = @splat(0),
     tag_len: usize = 0,
@@ -159,6 +162,8 @@ const WireEntry = struct {
 
 const IntentWire = struct {
     schema: []const u8,
+    profile: RecordProfile,
+    entry_count: usize,
     repository_id: u64,
     tag: []const u8,
     source_commit: []const u8,
@@ -178,6 +183,8 @@ const IntentWire = struct {
 
 const CompletionWire = struct {
     schema: []const u8,
+    profile: RecordProfile,
+    entry_count: usize,
     repository_id: u64,
     tag: []const u8,
     source_commit: []const u8,
@@ -360,7 +367,7 @@ const ConcreteDriver = struct {
     pub fn inspectInventory(self: *@This()) !Inventory {
         try self.ensureDirectoryOpen();
         try self.requireTombIdentity();
-        var result = Inventory{ .present = @splat(false) };
+        var result = Inventory{ .present = @splat(false), .active_count = self.record.entry_count };
         var seen: [entry_count]bool = @splat(false);
         const scan_fd = c.openat(self.directory_fd, ".", posix.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
         if (scan_fd < 0) return error.InvalidRecord;
@@ -377,7 +384,7 @@ const ConcreteDriver = struct {
             const name = std.mem.sliceTo(entry.name[0..], 0);
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
             var matched: ?usize = null;
-            for (&self.record.entries, 0..) |*expected, index| if (std.mem.eql(u8, name, expected.nameValue())) {
+            for (self.record.entries[0..self.record.entry_count], 0..) |*expected, index| if (std.mem.eql(u8, name, expected.nameValue())) {
                 matched = index;
                 break;
             };
@@ -402,7 +409,7 @@ const ConcreteDriver = struct {
     }
 
     pub fn unlink(self: *@This(), index: usize) !void {
-        if (index >= entry_count) return error.InvalidOwner;
+        if (index >= self.record.entry_count) return error.InvalidOwner;
         try self.requireTombIdentity();
         try validateEntryAt(self.parent_fd, self.directory_fd, &self.record.entries[index]);
         if (c.unlinkat(self.directory_fd, self.record.entries[index].nameValue().ptr, 0) != 0) return error.CleanupFailed;
@@ -493,6 +500,8 @@ const ConcreteDriver = struct {
         var stat: posix.Stat = undefined;
         if (c.fstat(self.directory_fd, &stat) != 0 or !validOwnedDirectory(stat)) return error.InvalidRecord;
         self.record = .{
+            .profile = if (view.profile == .upgrade_b) .upgrade_b else .baseline_a,
+            .entry_count = view.active_count,
             .repository_id = view.context.repository.id,
             .release_id = receipt.release_id,
             .directory_device = @intCast(stat.dev),
@@ -507,7 +516,7 @@ const ConcreteDriver = struct {
         self.record.run_attempt = view.context.build.run_attempt;
         self.record.original_len = try storePath(&self.record.original, self.original_path[0..self.original_path_len]);
         self.record.tomb_len = try storeName(&self.record.tomb, self.names.tombValue());
-        for (&self.record.entries, 0..) |*entry, index| {
+        for (self.record.entries[0..self.record.entry_count], 0..) |*entry, index| {
             const observed = view.entries[index];
             entry.name_len = try storeName(&entry.name, aggregateName(self.aggregate.?, index));
             entry.device = observed.identity.device;
@@ -603,6 +612,8 @@ fn writeIntentPayload(allocator: std.mem.Allocator, record: *const StoredRecord)
     const entries = wireEntries(record);
     return writeJson(allocator, .{
         .schema = intent_schema,
+        .profile = record.profile,
+        .entry_count = record.entry_count,
         .repository_id = record.repository_id,
         .tag = record.tag[0..record.tag_len],
         .source_commit = &record.source_commit,
@@ -616,7 +627,7 @@ fn writeIntentPayload(allocator: std.mem.Allocator, record: *const StoredRecord)
         .directory_inode = record.directory_inode,
         .directory_uid = record.directory_uid,
         .directory_mode = record.directory_mode,
-        .entries = &entries,
+        .entries = entries[0..record.entry_count],
     });
 }
 
@@ -624,6 +635,8 @@ fn writeIntent(allocator: std.mem.Allocator, record: *const StoredRecord) ![]u8 
     const entries = wireEntries(record);
     return writeJson(allocator, .{
         .schema = intent_schema,
+        .profile = record.profile,
+        .entry_count = record.entry_count,
         .repository_id = record.repository_id,
         .tag = record.tag[0..record.tag_len],
         .source_commit = &record.source_commit,
@@ -637,7 +650,7 @@ fn writeIntent(allocator: std.mem.Allocator, record: *const StoredRecord) ![]u8 
         .directory_inode = record.directory_inode,
         .directory_uid = record.directory_uid,
         .directory_mode = record.directory_mode,
-        .entries = &entries,
+        .entries = entries[0..record.entry_count],
         .payload_sha256 = &record.payload_sha256,
     });
 }
@@ -648,6 +661,8 @@ fn writeCompletion(allocator: std.mem.Allocator, record: *const StoredRecord) ![
     const payload_sha256 = sha256Hex(payload);
     return writeJson(allocator, .{
         .schema = completion_schema,
+        .profile = record.profile,
+        .entry_count = record.entry_count,
         .repository_id = record.repository_id,
         .tag = record.tag[0..record.tag_len],
         .source_commit = &record.source_commit,
@@ -669,6 +684,8 @@ fn writeCompletion(allocator: std.mem.Allocator, record: *const StoredRecord) ![
 fn writeCompletionPayload(allocator: std.mem.Allocator, record: *const StoredRecord) ![]u8 {
     return writeJson(allocator, .{
         .schema = completion_schema,
+        .profile = record.profile,
+        .entry_count = record.entry_count,
         .repository_id = record.repository_id,
         .tag = record.tag[0..record.tag_len],
         .source_commit = &record.source_commit,
@@ -712,6 +729,8 @@ fn parseIntent(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed
 fn writeIntentWire(allocator: std.mem.Allocator, value: IntentWire) ![]u8 {
     return writeJson(allocator, .{
         .schema = value.schema,
+        .profile = value.profile,
+        .entry_count = value.entry_count,
         .repository_id = value.repository_id,
         .tag = value.tag,
         .source_commit = value.source_commit,
@@ -733,6 +752,8 @@ fn writeIntentWire(allocator: std.mem.Allocator, value: IntentWire) ![]u8 {
 fn writeIntentWirePayload(allocator: std.mem.Allocator, value: IntentWire) ![]u8 {
     return writeJson(allocator, .{
         .schema = value.schema,
+        .profile = value.profile,
+        .entry_count = value.entry_count,
         .repository_id = value.repository_id,
         .tag = value.tag,
         .source_commit = value.source_commit,
@@ -751,13 +772,14 @@ fn writeIntentWirePayload(allocator: std.mem.Allocator, value: IntentWire) ![]u8
 }
 
 fn validateIntent(allocator: std.mem.Allocator, value: IntentWire, context: context_mod.Context, original_path: []const u8, names: *const Names, output: ?*StoredRecord) !void {
-    if (!std.mem.eql(u8, value.schema, intent_schema) or value.repository_id != context.repository.id or
+    const expected_count: usize = if (value.profile == .upgrade_b) reopen.max_entry_count else reopen.baseline_entry_count;
+    if (value.entry_count != expected_count or !std.mem.eql(u8, value.schema, intent_schema) or value.repository_id != context.repository.id or
         !std.mem.eql(u8, value.tag, context.tag) or !std.mem.eql(u8, value.source_commit, context.source_commit) or
         !std.mem.eql(u8, value.workflow_ref, context.build.workflow_ref) or value.run_id != context.build.run_id or
         value.run_attempt != context.build.run_attempt or value.release_id == 0 or
         !std.mem.eql(u8, value.original, original_path) or !std.mem.eql(u8, value.tomb, names.tombValue()) or
         value.directory_device == 0 or value.directory_inode == 0 or value.directory_uid != @as(u64, @intCast(c.getuid())) or
-        value.directory_mode != 0o700 or value.entries.len != entry_count or !lowerHex(value.payload_sha256, 64)) return error.InvalidRecord;
+        value.directory_mode != 0o700 or value.entries.len != value.entry_count or !lowerHex(value.payload_sha256, 64)) return error.InvalidRecord;
     var seen_device: [entry_count]u64 = @splat(0);
     var seen_inode: [entry_count]u64 = @splat(0);
     for (value.entries, 0..) |entry, index| {
@@ -777,6 +799,8 @@ fn validateIntent(allocator: std.mem.Allocator, value: IntentWire, context: cont
 
 fn storeIntent(value: IntentWire, record: *StoredRecord) !void {
     record.* = .{
+        .profile = value.profile,
+        .entry_count = value.entry_count,
         .repository_id = value.repository_id,
         .release_id = value.release_id,
         .directory_device = value.directory_device,
@@ -792,7 +816,7 @@ fn storeIntent(value: IntentWire, record: *StoredRecord) !void {
     record.original_len = try storePath(&record.original, value.original);
     record.tomb_len = try storeName(&record.tomb, value.tomb);
     @memcpy(&record.payload_sha256, value.payload_sha256);
-    for (&record.entries, value.entries) |*stored, entry| {
+    for (record.entries[0..value.entry_count], value.entries) |*stored, entry| {
         stored.name_len = try storeName(&stored.name, entry.name);
         stored.device = entry.device;
         stored.inode = entry.inode;
@@ -815,7 +839,8 @@ fn parseCompletion(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Pa
 }
 
 fn validateCompletion(allocator: std.mem.Allocator, value: CompletionWire, context: context_mod.Context, names: *const Names, original_path: []const u8, record: ?*const StoredRecord) !void {
-    if (!std.mem.eql(u8, value.schema, completion_schema) or value.repository_id != context.repository.id or
+    const expected_count: usize = if (value.profile == .upgrade_b) reopen.max_entry_count else reopen.baseline_entry_count;
+    if (value.entry_count != expected_count or !std.mem.eql(u8, value.schema, completion_schema) or value.repository_id != context.repository.id or
         !std.mem.eql(u8, value.tag, context.tag) or !std.mem.eql(u8, value.source_commit, context.source_commit) or
         !std.mem.eql(u8, value.workflow_ref, context.build.workflow_ref) or value.run_id != context.build.run_id or
         value.run_attempt != context.build.run_attempt or value.release_id == 0 or
@@ -825,6 +850,8 @@ fn validateCompletion(allocator: std.mem.Allocator, value: CompletionWire, conte
         !lowerHex(value.intent_payload_sha256, 64) or !lowerHex(value.payload_sha256, 64)) return error.InvalidRecord;
     const payload = try writeJson(allocator, .{
         .schema = value.schema,
+        .profile = value.profile,
+        .entry_count = value.entry_count,
         .repository_id = value.repository_id,
         .tag = value.tag,
         .source_commit = value.source_commit,
@@ -844,7 +871,8 @@ fn validateCompletion(allocator: std.mem.Allocator, value: CompletionWire, conte
     const payload_digest = sha256Hex(payload);
     if (!std.crypto.timing_safe.eql([64]u8, payload_digest, value.payload_sha256[0..64].*)) return error.InvalidRecord;
     if (record) |expected| {
-        if (value.release_id != expected.release_id or value.directory_device != expected.directory_device or
+        if (value.profile != expected.profile or value.entry_count != expected.entry_count or
+            value.release_id != expected.release_id or value.directory_device != expected.directory_device or
             value.directory_inode != expected.directory_inode or value.directory_uid != expected.directory_uid or
             value.directory_mode != expected.directory_mode or
             !std.crypto.timing_safe.eql([64]u8, value.intent_payload_sha256[0..64].*, expected.payload_sha256))

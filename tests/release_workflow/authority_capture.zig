@@ -406,6 +406,9 @@ test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사�
     inline for (.{
         "steps.session-host-authored-attestation.outputs.evidence-bundle-path",
         "steps.session-host-authored-attestation.outputs.manifest-bundle-path",
+        "steps.session-host-authored-attestation.outputs.timing-bundle-path",
+        "steps.session-host-authored-attestation.outputs.evidence-path",
+        "steps.session-host-authored-attestation.outputs.timing-path",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, needle));
 }
 
@@ -431,17 +434,19 @@ test "live 릴리스 action: command 단계마다 closed argv와 credential 위�
 
     const prepare = blockUntil(text, "  - name: Prepare attestation aggregate", "  - name: Finalize attestation aggregate") orelse
         return error.LiveAggregatePrepareBlockMissing;
-    try expectClosedOptions(prepare, 10, &.{
+    try expectClosedOptions(prepare, 11, &.{
         "--repo ",                 "--tag ",                     "--github-cli ",      "--github-cli-sha256 ", "--evidence ",
         "--candidate-dmg-bundle ", "--candidate-frozen-bundle ", "--evidence-bundle ", "--manifest-bundle ",   "--aggregate ",
+        "--timing-bundle ",
     });
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(prepare, "GH_TOKEN"));
 
     const finalize = blockUntil(text, "  - name: Finalize attestation aggregate", "  - name: Publish candidate release") orelse
         return error.LiveAggregateFinalizeBlockMissing;
-    try expectClosedOptions(finalize, 8, &.{
+    try expectClosedOptions(finalize, 9, &.{
         "--repo ",      "--tag ", "--github-cli ",        "--github-cli-sha256 ",
         "--aggregate ", "--dmg ", "--frozen-executable ", "--manifest ",
+        "--timing ",
     });
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(finalize, "GH_TOKEN"));
 

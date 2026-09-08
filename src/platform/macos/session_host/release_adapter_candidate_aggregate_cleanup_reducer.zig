@@ -2,12 +2,14 @@
 
 const std = @import("std");
 
-pub const entry_count: usize = 5;
+pub const baseline_entry_count: usize = 5;
+pub const entry_count: usize = 6;
 pub const Outcome = enum { success, audit_required, cleanup_required, descriptor_close_failed };
 pub const Location = enum { original, tomb, removed, ambiguous };
 pub const CompletionState = enum { absent, durable_with_intent, durable };
 pub const Inventory = struct {
     present: [entry_count]bool,
+    active_count: usize,
     foreign: ?usize = null,
     unexpected: bool = false,
 };
@@ -117,10 +119,12 @@ fn closeAs(driver: anytype, outcome: Outcome) Outcome {
 }
 
 fn validateInventory(inventory: Inventory) !?usize {
-    if (inventory.foreign != null or inventory.unexpected) return error.InvalidInventory;
+    if (inventory.foreign != null or inventory.unexpected or
+        (inventory.active_count != baseline_entry_count and inventory.active_count != entry_count)) return error.InvalidInventory;
+    for (inventory.present[inventory.active_count..]) |present| if (present) return error.InvalidInventory;
     var saw_absent = false;
     var next: ?usize = null;
-    for (inventory.present, 0..) |present, index| {
+    for (inventory.present[0..inventory.active_count], 0..) |present, index| {
         if (!present) {
             saw_absent = true;
         } else {

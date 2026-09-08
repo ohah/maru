@@ -169,20 +169,26 @@ runs:
       MARU_TAG: ${{ github.ref_name }}
       MARU_GH: ${{ inputs.gh-path }}
       MARU_GH_SHA256: ${{ inputs.gh-sha256 }}
-      MARU_EVIDENCE: ${{ steps.setup.outputs.evidence }}
+      MARU_EVIDENCE: ${{ steps.session-host-authored-attestation.outputs.evidence-path }}
       MARU_DMG_BUNDLE: ${{ steps.session-host-candidate-attestation.outputs.dmg-bundle-path }}
       MARU_FROZEN_BUNDLE: ${{ steps.session-host-candidate-attestation.outputs.frozen-bundle-path }}
       MARU_EVIDENCE_BUNDLE: ${{ steps.session-host-authored-attestation.outputs.evidence-bundle-path }}
       MARU_MANIFEST_BUNDLE: ${{ steps.session-host-authored-attestation.outputs.manifest-bundle-path }}
+      MARU_TIMING_BUNDLE: ${{ steps.session-host-authored-attestation.outputs.timing-bundle-path }}
       MARU_AGGREGATE: ${{ steps.setup.outputs.aggregate }}
     run: |
       set -euo pipefail
-      "$MARU_WORKFLOW_EXE" run "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
+      args=("$MARU_WORKFLOW_EXE" run "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
         prepare-candidate-aggregate --repo ohah/maru --tag "$MARU_TAG" \
         --github-cli "$MARU_GH" --github-cli-sha256 "$MARU_GH_SHA256" \
         --evidence "$MARU_EVIDENCE" --candidate-dmg-bundle "$MARU_DMG_BUNDLE" \
         --candidate-frozen-bundle "$MARU_FROZEN_BUNDLE" --evidence-bundle "$MARU_EVIDENCE_BUNDLE" \
-        --manifest-bundle "$MARU_MANIFEST_BUNDLE" --aggregate "$MARU_AGGREGATE"
+        --manifest-bundle "$MARU_MANIFEST_BUNDLE")
+      if [[ -n "$MARU_TIMING_BUNDLE" ]]; then
+        args+=(--timing-bundle "$MARU_TIMING_BUNDLE")
+      fi
+      args+=(--aggregate "$MARU_AGGREGATE")
+      "${args[@]}"
 
   - name: Finalize attestation aggregate
     id: session-host-aggregate-finalize
@@ -198,13 +204,18 @@ runs:
       MARU_DMG: ${{ steps.setup.outputs.dmg }}
       MARU_FROZEN: ${{ steps.setup.outputs.frozen }}
       MARU_MANIFEST: ${{ steps.setup.outputs.manifest }}
+      MARU_TIMING: ${{ steps.session-host-authored-attestation.outputs.timing-path }}
     run: |
       set -euo pipefail
-      "$MARU_WORKFLOW_EXE" run "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
+      args=("$MARU_WORKFLOW_EXE" run "$MARU_ROOT" "$MARU_ROOT_IDENTITY" \
         finalize-candidate-aggregate --repo ohah/maru --tag "$MARU_TAG" \
         --github-cli "$MARU_GH" --github-cli-sha256 "$MARU_GH_SHA256" \
         --aggregate "$MARU_AGGREGATE" --dmg "$MARU_DMG" \
-        --frozen-executable "$MARU_FROZEN" --manifest "$MARU_MANIFEST"
+        --frozen-executable "$MARU_FROZEN" --manifest "$MARU_MANIFEST")
+      if [[ -n "$MARU_TIMING" ]]; then
+        args+=(--timing "$MARU_TIMING")
+      fi
+      "${args[@]}"
 
   - name: Publish candidate release
     id: session-host-publication

@@ -10,7 +10,7 @@ const post = @import("release_adapter_github_post_publish_attestation");
 
 extern "c" fn renameatx_np(from_dir_fd: c_int, from: [*:0]const u8, to_dir_fd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
 const rename_excl: c_uint = 0x00000004;
-const role_count: usize = 5;
+const role_count: usize = reopen.max_entry_count;
 
 pub const Outcome = enum { success, audit_required, cleanup_required, descriptor_close_failed };
 const State = enum { pristine, cleanup_required, descriptor_close_failed };
@@ -19,6 +19,7 @@ pub const Deletion = struct {
     owner: ?*Deletion = null,
     state: State = .pristine,
     remaining_entries: u8 = 0,
+    entry_count: u8 = 0,
     tomb_verified: bool = false,
     directory_synced: bool = false,
     directory_removed: bool = false,
@@ -75,11 +76,14 @@ fn executeCore(driver: anytype, verified: *const post.VerifiedRelease, deletion:
     const receipt = verified.value() orelse return .audit_required;
     driver.validate(receipt) catch return .audit_required;
     driver.fence() catch return .audit_required;
+    const entry_count = driver.entryCount() catch return .audit_required;
+    if (entry_count != reopen.baseline_entry_count and entry_count != reopen.max_entry_count) return .audit_required;
 
     deletion.* = .{
         .owner = deletion,
         .state = .cleanup_required,
-        .remaining_entries = role_count,
+        .remaining_entries = @intCast(entry_count),
+        .entry_count = @intCast(entry_count),
         .source_address = driver.sourceAddress(),
     };
     deletion.seal = metadataSeal(deletion);
@@ -159,6 +163,10 @@ const ConcreteDriver = struct {
         _ = try self.aggregate.fence();
     }
 
+    pub fn entryCount(self: *@This()) !usize {
+        return (self.aggregate.value() orelse return error.InvalidOwner).active_count;
+    }
+
     pub fn renameToTomb(self: *@This(), deletion: *Deletion) !void {
         if (deletion.tomb_len != 0 or deletion.source_address != @intFromPtr(self.aggregate)) return error.InvalidOwner;
         var nonce: u64 = undefined;
@@ -178,7 +186,7 @@ const ConcreteDriver = struct {
     }
 
     pub fn unlink(self: *@This(), deletion: *Deletion, index: usize) !void {
-        if (index >= role_count) return error.InvalidOwner;
+        if (index >= self.aggregate.active_count) return error.InvalidOwner;
         try self.requireTombIdentity(deletion);
         var held: posix.Stat = undefined;
         var named: posix.Stat = undefined;
@@ -227,7 +235,8 @@ const ConcreteDriver = struct {
 };
 
 fn bind(manifest: *const manifest_mod.Manifest, aggregate: reopen.View, receipt: post.View) !void {
-    if (manifest.role != .a or manifest.predecessor != null or manifest.release.id != receipt.release_id or
+    const expected_role: manifest_mod.Role = if (aggregate.profile == .upgrade_b) .b else .a;
+    if (manifest.role != expected_role or (manifest.predecessor != null) != (aggregate.profile == .upgrade_b) or manifest.release.id != receipt.release_id or
         !std.mem.eql(u8, manifest.release.tag, receipt.tag) or !std.mem.eql(u8, manifest.source.commit, receipt.source_commit) or
         manifest.repository.id != aggregate.context.repository.id or
         !std.mem.eql(u8, manifest.repository.owner, aggregate.context.repository.owner) or
@@ -258,7 +267,7 @@ fn bind(manifest: *const manifest_mod.Manifest, aggregate: reopen.View, receipt:
 }
 
 fn pristine(deletion: *const Deletion) bool {
-    return deletion.owner == null and deletion.state == .pristine and deletion.remaining_entries == 0 and
+    return deletion.owner == null and deletion.state == .pristine and deletion.remaining_entries == 0 and deletion.entry_count == 0 and
         !deletion.tomb_verified and !deletion.directory_synced and !deletion.directory_removed and !deletion.parent_synced and
         deletion.tomb_len == 0 and deletion.source_address == 0 and std.mem.allEqual(u8, &deletion.tomb, 0) and
         std.mem.allEqual(u8, &deletion.seal, 0);
@@ -266,11 +275,12 @@ fn pristine(deletion: *const Deletion) bool {
 
 fn valid(deletion: *const Deletion) bool {
     if (deletion.owner != deletion or (deletion.state != .cleanup_required and deletion.state != .descriptor_close_failed) or
-        deletion.remaining_entries > role_count or deletion.tomb_len == 0 or deletion.tomb_len >= deletion.tomb.len or
+        (deletion.entry_count != reopen.baseline_entry_count and deletion.entry_count != reopen.max_entry_count) or
+        deletion.remaining_entries > deletion.entry_count or deletion.tomb_len == 0 or deletion.tomb_len >= deletion.tomb.len or
         deletion.tomb[deletion.tomb_len] != 0 or deletion.source_address == 0 or
         !std.mem.startsWith(u8, deletion.tomb[0..deletion.tomb_len], ".maru-aggregate-cleanup-") or
         !std.crypto.timing_safe.eql([32]u8, deletion.seal, metadataSeal(deletion))) return false;
-    if (!deletion.tomb_verified and (deletion.remaining_entries != role_count or deletion.directory_synced or
+    if (!deletion.tomb_verified and (deletion.remaining_entries != deletion.entry_count or deletion.directory_synced or
         deletion.directory_removed or deletion.parent_synced)) return false;
     if (deletion.remaining_entries != 0 and (deletion.directory_synced or deletion.directory_removed or deletion.parent_synced)) return false;
     if (!deletion.directory_synced and (deletion.directory_removed or deletion.parent_synced)) return false;
@@ -286,6 +296,7 @@ fn metadataSeal(deletion: *const Deletion) [32]u8 {
     hasher.update(std.mem.asBytes(&address));
     hasher.update(std.mem.asBytes(&deletion.state));
     hasher.update(std.mem.asBytes(&deletion.remaining_entries));
+    hasher.update(std.mem.asBytes(&deletion.entry_count));
     hasher.update(std.mem.asBytes(&deletion.tomb_verified));
     hasher.update(std.mem.asBytes(&deletion.directory_synced));
     hasher.update(std.mem.asBytes(&deletion.directory_removed));

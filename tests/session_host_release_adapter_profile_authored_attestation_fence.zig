@@ -711,7 +711,7 @@ test "actual fresh fence processes verify both profiles without FD or stderr res
         const output = try runFenceProcess(executable, verifier, &verifier_sha, fixture.paths(), fixture.projection(), fixture.bundles(), &environment);
         baseline_ns[index] = monotonicNs() - started;
         defer std.testing.allocator.free(output);
-        try expectFenceOutput(output, fixture.bundles());
+        try expectFenceOutput(output, fixture.projection(), fixture.bundles());
         try expectAndRemoveVerificationMarkers(fixture.bundles(), 2);
     }
 
@@ -722,7 +722,7 @@ test "actual fresh fence processes verify both profiles without FD or stderr res
         const output = try runFenceProcess(executable, verifier, &verifier_sha, fixture.paths(), fixture.upgradeProjection(), fixture.upgradeBundles(), &environment);
         upgrade_ns[index] = monotonicNs() - started;
         defer std.testing.allocator.free(output);
-        try expectFenceOutput(output, fixture.upgradeBundles());
+        try expectFenceOutput(output, fixture.upgradeProjection(), fixture.upgradeBundles());
         try expectAndRemoveVerificationMarkers(fixture.upgradeBundles(), 3);
     }
     try runFenceProcessFailure(executable, verifier, &verifier_sha, fixture.paths(), fixture.upgradeProjection(), fixture.upgradeBundles(), &environment);
@@ -816,9 +816,9 @@ fn runFenceProcessFailure(executable: []const u8, verifier: []const u8, verifier
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
 }
 
-fn expectFenceOutput(actual: []const u8, bundles: fence.BundlePaths) !void {
+fn expectFenceOutput(actual: []const u8, projection_value: selector.Projection, bundles: fence.BundlePaths) !void {
     var storage: [command.max_output_bytes]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&storage, "evidence-bundle-path={s}\nmanifest-bundle-path={s}\ntiming-bundle-path={s}\n", .{ bundles.evidence, bundles.manifest, bundles.timing });
+    const expected = try std.fmt.bufPrint(&storage, "evidence-path={s}\ntiming-path={s}\nevidence-bundle-path={s}\nmanifest-bundle-path={s}\ntiming-bundle-path={s}\n", .{ projection_value.evidence_path, projection_value.timing_path, bundles.evidence, bundles.manifest, bundles.timing });
     try std.testing.expectEqualStrings(expected, actual);
 }
 

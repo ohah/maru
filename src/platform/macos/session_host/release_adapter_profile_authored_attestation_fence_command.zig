@@ -12,7 +12,7 @@ const attestation = @import("release_adapter_github_attestation");
 pub const option_count: usize = 17;
 pub const argument_count: usize = 1 + option_count * 2;
 pub const budget_ns: i128 = 120 * std.time.ns_per_s;
-pub const max_output_bytes: usize = 3 * std.fs.max_path_bytes + 96;
+pub const max_output_bytes: usize = 5 * std.fs.max_path_bytes + 128;
 
 pub const Execution = struct {
     owner: ?*@This() = null,
@@ -220,9 +220,9 @@ fn zValue(storage: *const [option_count][std.fs.max_path_bytes:0]u8, lengths: *c
 }
 
 fn encode(output: []u8, value: fence_mod.View) !usize {
-    inline for (.{ value.evidence_bundle, value.manifest_bundle, value.timing_bundle }) |path|
+    inline for (.{ value.projection.evidence_path, value.projection.timing_path, value.evidence_bundle, value.manifest_bundle, value.timing_bundle }) |path|
         if (hasControl(path)) return error.InvalidOutput;
-    const written = std.fmt.bufPrint(output, "evidence-bundle-path={s}\nmanifest-bundle-path={s}\ntiming-bundle-path={s}\n", .{ value.evidence_bundle, value.manifest_bundle, value.timing_bundle }) catch return error.OutputTooLarge;
+    const written = std.fmt.bufPrint(output, "evidence-path={s}\ntiming-path={s}\nevidence-bundle-path={s}\nmanifest-bundle-path={s}\ntiming-bundle-path={s}\n", .{ value.projection.evidence_path, value.projection.timing_path, value.evidence_bundle, value.manifest_bundle, value.timing_bundle }) catch return error.OutputTooLarge;
     return written.len;
 }
 

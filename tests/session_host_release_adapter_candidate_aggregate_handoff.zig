@@ -56,12 +56,23 @@ const Fixture = struct {
 
     fn sources(self: *@This()) handoff.Sources {
         return .{
+            .profile = .baseline_a,
             .evidence = self.source(0),
             .candidate_dmg_bundle = self.source(1),
             .candidate_frozen_bundle = self.source(2),
             .evidence_bundle = self.source(3),
             .manifest_bundle = self.source(4),
         };
+    }
+
+    fn upgradeSources(self: *@This()) !handoff.Sources {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bundles/timing.bundle.json", .data = "timing attestation bundle\n" });
+        const path = try absolute(&self.tmp, "bundles/timing.bundle.json", &self.paths[5]);
+        try files.pinReleaseFileObserved(&self.owners[5], path, false, handoff.max_attestation_bundle_bytes);
+        var result = self.sources();
+        result.profile = .upgrade_b;
+        result.timing_bundle = self.source(5);
+        return result;
     }
 
     fn source(self: *@This(), index: usize) handoff.Source {
@@ -83,7 +94,7 @@ const Fixture = struct {
     }
 
     fn closeSources(self: *@This()) !void {
-        for (&self.owners) |*owner| try owner.deinit();
+        for (self.owners[0..source_names.len]) |*owner| try owner.deinit();
     }
 };
 
@@ -110,10 +121,10 @@ test "aggregate promotion is atomic and survives source removal" {
     try std.testing.expectError(error.InvalidOwner, durable.cleanup());
     durable.names[1][0] = original_name_byte;
     const initial = try durable.revalidate();
-    try std.testing.expectEqual(@as(usize, handoff.role_count), initial.entries.len);
-    for (initial.entries, 0..) |entry, index| {
+    try std.testing.expectEqual(@as(usize, handoff.baseline_role_count), initial.active_count);
+    for (initial.entries[0..initial.active_count], 0..) |entry, index| {
         try std.testing.expectEqualStrings(handoff.destinationName(@enumFromInt(index), source_names[0]), std.fs.path.basename(entry.path));
-        try std.testing.expectEqualStrings(&sources.at(@enumFromInt(index)).file.value().?.sha256, &entry.observation.sha256);
+        try std.testing.expectEqualStrings(&sources.at(@enumFromInt(index)).?.file.value().?.sha256, &entry.observation.sha256);
     }
     try fixture.closeSources();
     try fixture.tmp.dir.deleteTree(std.testing.io, "workspace");
@@ -136,11 +147,43 @@ test "retained close preserves the complete aggregate and revokes old authority"
     try std.testing.expectError(error.InvalidOwner, durable.cleanup());
     try std.testing.expectError(error.InvalidOwner, durable.closeRetaining());
     try std.testing.expectError(error.InvalidOwner, handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable));
-    for (0..handoff.role_count) |index| {
+    for (0..handoff.baseline_role_count) |index| {
         const name = handoff.destinationName(@enumFromInt(index), source_names[0]);
         var path: [std.fs.max_path_bytes]u8 = undefined;
         const sub_path = try std.fmt.bufPrint(&path, "durable/handoff/{s}", .{name});
         _ = try fixture.tmp.dir.statFile(std.testing.io, sub_path, .{});
+    }
+}
+
+test "upgrade aggregate requires and atomically owns the sixth timing bundle" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const sources = try fixture.upgradeSources();
+    var durable: handoff.DurableAggregate = .{};
+    try handoff.promote(std.testing.allocator, sources, fixture.destinationPath(), &durable);
+    const value = try durable.revalidate();
+    try std.testing.expectEqual(evidence.Profile.upgrade_b, value.profile);
+    try std.testing.expectEqual(@as(usize, handoff.role_count), value.active_count);
+    try std.testing.expectEqualStrings("upgrade-timing.attestation.json", std.fs.path.basename(value.entries[5].path));
+    try durable.cleanup();
+
+    var missing = sources;
+    missing.timing_bundle = null;
+    try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, missing, fixture.destinationPath(), &durable));
+    var unexpected = sources;
+    unexpected.profile = .baseline_a;
+    try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, unexpected, fixture.destinationPath(), &durable));
+}
+
+test "upgrade timing copy failpoints publish no partial aggregate" {
+    inline for (.{ handoff.TestCheckpoint.timing_bundle_written, .timing_bundle_copied }) |checkpoint| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        var durable: handoff.DurableAggregate = .{};
+        try std.testing.expectError(error.InjectedFailure, handoff.promoteFailingForTest(std.testing.allocator, try fixture.upgradeSources(), fixture.destinationPath(), &durable, checkpoint));
+        try expectNoPublicationResidue(&fixture);
     }
 }
 
@@ -181,7 +224,22 @@ test "source drift leaves no final or staging directory" {
 }
 
 test "publication checkpoints never expose a partial final aggregate" {
-    inline for (std.meta.tags(handoff.TestCheckpoint)) |checkpoint| {
+    inline for (.{
+        handoff.TestCheckpoint.staging_created,
+        .evidence_written,
+        .evidence_copied,
+        .candidate_dmg_written,
+        .candidate_dmg_copied,
+        .candidate_frozen_written,
+        .candidate_frozen_copied,
+        .evidence_bundle_written,
+        .evidence_bundle_copied,
+        .manifest_bundle_written,
+        .manifest_bundle_copied,
+        .staging_synced,
+        .final_renamed,
+        .parent_synced,
+    }) |checkpoint| {
         var fixture: Fixture = undefined;
         try fixture.init();
         defer fixture.deinit();
@@ -212,7 +270,7 @@ test "cleanup preserves replacement directory and files" {
 }
 
 test "cleanup tomb retries every partial unlink boundary without final visibility" {
-    for (0..handoff.role_count + 1) |fail_after| {
+    for (0..handoff.baseline_role_count + 1) |fail_after| {
         var fixture: Fixture = undefined;
         try fixture.init();
         defer fixture.deinit();

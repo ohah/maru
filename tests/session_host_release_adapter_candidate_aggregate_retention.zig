@@ -59,12 +59,13 @@ fn receipt(result: *post.VerifiedRelease) !void {
     try post.testing_api.verify(&authority, &driver, &deadline, result);
 }
 
-const Op = enum { validate, fence, rename, fence_tomb, unlink_4, unlink_3, unlink_2, unlink_1, unlink_0, sync_directory, remove_directory, sync_parent, close };
+const Op = enum { validate, fence, rename, fence_tomb, unlink_5, unlink_4, unlink_3, unlink_2, unlink_1, unlink_0, sync_directory, remove_directory, sync_parent, close };
 
 const Driver = struct {
     calls: std.ArrayList(Op) = .empty,
     fail: ?Op = null,
     close_failed: bool = false,
+    active_count: usize = 5,
 
     fn record(self: *@This(), op: Op) !void {
         try self.calls.append(std.testing.allocator, op);
@@ -89,6 +90,10 @@ const Driver = struct {
         try self.record(.fence);
     }
 
+    pub fn entryCount(self: *@This()) !usize {
+        return self.active_count;
+    }
+
     pub fn renameToTomb(self: *@This(), deletion: *retention.Deletion) !void {
         deletion.tomb_len = ".maru-aggregate-cleanup-1".len;
         @memcpy(deletion.tomb[0..deletion.tomb_len], ".maru-aggregate-cleanup-1");
@@ -100,7 +105,7 @@ const Driver = struct {
     }
 
     pub fn unlink(self: *@This(), _: *retention.Deletion, index: usize) !void {
-        try self.record(@enumFromInt(@intFromEnum(Op.unlink_4) + (4 - index)));
+        try self.record(@enumFromInt(@intFromEnum(Op.unlink_5) + (5 - index)));
     }
 
     pub fn syncDirectory(self: *@This(), _: *retention.Deletion) !void {
@@ -136,6 +141,19 @@ test "sealed publication receipt permits one exact reverse deletion" {
     var deletion: retention.Deletion = .{};
     try std.testing.expectEqual(retention.Outcome.success, try retention.testing_api.execute(&driver, &verified, &deletion));
     try std.testing.expectEqualSlices(Op, &success_order, driver.calls.items);
+    try std.testing.expect(deletion.isPristine());
+}
+
+test "upgrade aggregate deletes all six entries in exact reverse order" {
+    var verified: post.VerifiedRelease = .{};
+    try receipt(&verified);
+    defer if (verified.value() != null) verified.deinit() catch {};
+    var driver = Driver{ .active_count = 6 };
+    defer driver.deinit();
+    var deletion: retention.Deletion = .{};
+    try std.testing.expectEqual(retention.Outcome.success, try retention.testing_api.execute(&driver, &verified, &deletion));
+    const expected = [_]Op{ .validate, .fence, .rename, .fence_tomb, .unlink_5, .unlink_4, .unlink_3, .unlink_2, .unlink_1, .unlink_0, .sync_directory, .remove_directory, .sync_parent, .close };
+    try std.testing.expectEqualSlices(Op, &expected, driver.calls.items);
     try std.testing.expect(deletion.isPristine());
 }
 

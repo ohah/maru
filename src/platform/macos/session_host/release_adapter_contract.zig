@@ -115,6 +115,7 @@ pub const PrepareCandidateAggregate = struct {
     candidate_frozen_bundle: []const u8,
     evidence_bundle: []const u8,
     manifest_bundle: []const u8,
+    timing_bundle: []const u8,
     aggregate: []const u8,
 };
 
@@ -127,6 +128,7 @@ pub const FinalizeCandidateAggregate = struct {
     dmg: []const u8,
     frozen_executable: []const u8,
     manifest: []const u8,
+    timing: []const u8,
 };
 
 pub const ResumeCandidatePublication = struct {
@@ -212,11 +214,13 @@ const Values = struct {
     candidate_frozen_bundle: ?[]const u8 = null,
     evidence_bundle: ?[]const u8 = null,
     manifest_bundle: ?[]const u8 = null,
+    timing_bundle: ?[]const u8 = null,
     aggregate: ?[]const u8 = null,
     durable_preparation: ?[]const u8 = null,
     predecessor_workspace: ?[]const u8 = null,
     upgrade_workspace: ?[]const u8 = null,
     timing_output: ?[]const u8 = null,
+    timing: ?[]const u8 = null,
     preparation: ?[]const u8 = null,
 };
 
@@ -456,10 +460,14 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const candidate_frozen_bundle = try aggregatePath(values.candidate_frozen_bundle);
             const evidence_bundle = try aggregatePath(values.evidence_bundle);
             const manifest_bundle = try aggregatePath(values.manifest_bundle);
+            const timing_bundle = if (values.timing_bundle) |path| try aggregatePath(path) else "";
             const aggregate = try aggregatePath(values.aggregate);
             const github_cli = try githubCli(&values);
             if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ evidence, candidate_dmg_bundle, candidate_frozen_bundle, evidence_bundle, manifest_bundle, aggregate, github_cli.path });
+            if (timing_bundle.len == 0)
+                try disjointPaths(&.{ evidence, candidate_dmg_bundle, candidate_frozen_bundle, evidence_bundle, manifest_bundle, aggregate, github_cli.path })
+            else
+                try disjointPaths(&.{ evidence, candidate_dmg_bundle, candidate_frozen_bundle, evidence_bundle, manifest_bundle, timing_bundle, aggregate, github_cli.path });
             break :blk .{ .prepare_candidate_aggregate = .{
                 .repo = repo,
                 .tag = tag,
@@ -470,6 +478,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .candidate_frozen_bundle = candidate_frozen_bundle,
                 .evidence_bundle = evidence_bundle,
                 .manifest_bundle = manifest_bundle,
+                .timing_bundle = timing_bundle,
                 .aggregate = aggregate,
             } };
         },
@@ -478,10 +487,14 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const dmg = try aggregatePath(values.dmg);
             const frozen_executable = try aggregatePath(values.frozen_executable);
             const manifest = try aggregatePath(values.manifest);
+            const timing = if (values.timing) |path| try aggregatePath(path) else "";
             try validateManifestAssetPath(manifest, tag[1..]);
             const github_cli = try githubCli(&values);
             if (!canonicalAggregatePath(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ aggregate, dmg, frozen_executable, manifest, github_cli.path });
+            if (timing.len == 0)
+                try disjointPaths(&.{ aggregate, dmg, frozen_executable, manifest, github_cli.path })
+            else
+                try disjointPaths(&.{ aggregate, dmg, frozen_executable, manifest, timing, github_cli.path });
             break :blk .{ .finalize_candidate_aggregate = .{
                 .repo = repo,
                 .tag = tag,
@@ -491,6 +504,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .dmg = dmg,
                 .frozen_executable = frozen_executable,
                 .manifest = manifest,
+                .timing = timing,
             } };
         },
         .resume_candidate_publication => blk: {
@@ -636,6 +650,8 @@ fn optionDestination(
             &values.evidence_bundle
         else if (std.mem.eql(u8, option, "--manifest-bundle"))
             &values.manifest_bundle
+        else if (std.mem.eql(u8, option, "--timing-bundle"))
+            &values.timing_bundle
         else if (std.mem.eql(u8, option, "--aggregate"))
             &values.aggregate
         else
@@ -646,6 +662,8 @@ fn optionDestination(
             &values.dmg
         else if (std.mem.eql(u8, option, "--frozen-executable"))
             &values.frozen_executable
+        else if (std.mem.eql(u8, option, "--timing"))
+            &values.timing
         else
             null,
         .resume_candidate_publication => if (std.mem.eql(u8, option, "--preparation"))

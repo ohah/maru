@@ -8171,6 +8171,27 @@ fn m9cRowIndex(screen_row_1based: u32) ?u32 {
     return null;
 }
 
+test "M14c 데이터: «시간만 흘러서는» 아무것도 안 보낸다" {
+    // 데이터 절약을 위해 줄일 것이 있는지 재 보니 **줄일 것이 없었다** — keep-alive 도, 세션
+    // 목록을 다시 묻는 폴링도 없다(실측: 세션을 붙여 둔 채 20초 동안 in/out 이 그대로).
+    // 그러니 끌 스위치를 만드는 대신 **그 사실이 깨지지 않게** 여기서 못박는다: 아무도 요청하지
+    // 않았는데 시간만 흐르면 행동은 언제나 `none` 이다.
+    const T = std.testing;
+    const NONE: c_int = 0;
+    // 붙어 있고(ssh_ready=1) 채널이 닫힌 평범한 상태 — 열려고 하면 여기서 열린다.
+    const closed: u32 = 4; // MARU_SSH_CONTROL_CLOSED — 브리지 상수와 같은 값이라야 이 판정자가 «닫힌 채널» 을 잰다
+    var clock: u64 = 0;
+    var i: usize = 0;
+    while (i < 600) : (i += 1) { // 30Hz 로 20초에 해당하는 tick
+        clock += 33;
+        try T.expectEqual(NONE, bridge.maru_mobile_control_tick(1, closed, clock));
+    }
+    // **그리고 요청이 있으면 «그때는» 연다** — 위 단언이 「영영 아무것도 안 한다」로 참이 되지
+    // 않게 한다(그러면 컨트롤 축이 통째로 죽어도 초록이다).
+    bridge.requestControlOpenForTest();
+    try T.expect(bridge.maru_mobile_control_tick(1, closed, clock + 33) != NONE);
+}
+
 test "M14a 저전력: 그리는 주기를 «반으로» 낮춘다 — 모르면 안 낮춘다" {
     // 배터리를 아끼겠다고 사용자가 이미 OS 에 대고 고른 것이라, 안 보는 앱은 그 뜻을 어긴다.
     // **모르면 안 낮춘다** — 모르는 값으로 화면을 느리게 하지 않는다(테마·글자 배율과 같은 규율).

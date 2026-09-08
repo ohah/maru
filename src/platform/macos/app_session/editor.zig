@@ -2539,10 +2539,57 @@ fn movedOffset(
 /// 못하면(그 사이 접힘·랩·탭 폭·폰트가 바뀌었으면) **묻지 않고 민다** — 모를 때는 움직이는 쪽이
 /// 덜 나쁘다. 그 규율과 대조식은 `revealCurrentFindMatch`가 값비싸게 세운 것을 그대로 쓴다.
 ///
-/// **줄 축만 본다.** 한 화면보다 긴 줄 안에서의 가로 이동은 이 함수가 못 잡는다 — §5.2가 소유할
-/// 2차원 reveal이고 그때 함께 닫힌다.
+/// **두 축을 다 본다**(2026-09-08 — 한동안 줄 축만 봤다). 한 화면보다 긴 줄에서 `⌘→` 를 누르면
+/// caret 이 화면 밖 오른쪽에 서고 뷰는 그대로였다([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
+/// 「가로도 caret 을 따라간다」).
 fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
     revealPrimaryCaretRows(self, term, 0);
+    revealPrimaryCaretCols(self, term);
+}
+
+/// caret 이 **가로로** 화면 밖이면 그 열만큼 민다.
+///
+/// **폭은 렌더가 굳힌 것을 쓴다**(§4.1g ②) — 여기서 pane 사각을 다시 구하면 마지막 프레임과 다른
+/// 값이 나온다. 아직 한 프레임도 안 그렸으면(`content_width == 0`) 아무 일도 안 한다: 그때는
+/// 「밖이다」를 판정할 기준이 없고, 다음 프레임이 그리고 나면 다음 이동이 잡는다.
+fn revealPrimaryCaretCols(self: *AppSession, term: *Term) void {
+    const doc = term.rt.editor_doc orelse return;
+    const sel = term.rt.editor_selection orelse return;
+    const off = @min(sel.focus, doc.file.content.len);
+    const line_idx = doc.file.lines.lineAt(off);
+    const line = doc.file.lines.line(line_idx) orelse return;
+    const end = @min(off, line.contentEnd());
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const col = map.columnOf(map.ctx, doc.file.content[line.start..line.contentEnd()], end - line.start);
+    revealCaretColumn(self, term, false, col, term.rt.editor_hit_geom.content_width, term.rt.editor_max_cols);
+}
+
+/// 한 열의 가로 위치를 caret 이 보이게 민다 — **단일 편집기와 비교 뷰가 같이 쓴다**.
+///
+/// **랩이면 아무 일도 안 한다.** 그때는 `effectiveFirstCol` 이 0 을 내 가로 축 자체가 없고, 저장된
+/// 값은 랩을 다시 껐을 때 돌아갈 자리다(그 규율을 여기서 건드리지 않는다).
+///
+/// **상한은 `clampOneColumn` 과 같은 출처다.** 두 곳에서 세면 끝까지 밀었을 때 한쪽만 더 간다.
+fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visible: u16, max_cols: u32) void {
+    if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) return;
+    if (visible == 0) return; // 아직 한 프레임도 안 그렸다
+    const slot = if (right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
+    const first: u32 = slot.*;
+
+    // **왼쪽으로 나가면 그 열, 오른쪽으로 나가면 그 열이 마지막 칸.** 둘 다 안 걸리면 이미 보인다.
+    var want: u32 = first;
+    if (col < first) {
+        want = col;
+    } else if (col >= first + visible) {
+        want = col + 1 - visible;
+    } else return;
+
+    const max_col: u32 = @min(max_cols -| visible, @as(u32, chrome_editor.frame.max_first_col));
+    want = @min(want, max_col);
+    if (want == first) return;
+    slot.* = @intCast(@min(want, std.math.maxInt(u16)));
+    self.metal_dirty = true;
 }
 
 /// `fallback_rows`: 스냅숏이 비어 있을 때 쓸 **편집 전 행 수**.
@@ -3932,6 +3979,7 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
     // 이 조각의 규율이다 — 섞는 순간 «비교 좌표를 단일 편집기 좌표로 훑는» 경로가 열린다.
     term.rt.editor_diff_selection = .{ .side = side, .sel = sel };
     scrollDiffCaretIntoView(self, term, next.row, texts.len, rows);
+    revealDiffCaretColumn(self, term, side, texts[next.row], next.byte, map);
     self.metal_dirty = true;
     return true;
 }
@@ -3992,9 +4040,21 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
     };
     // **검색도 이 열의 것이 되어야 한다.** 강조·막대 마커는 `diffSearchSide` 를 live 로 읽는데
     // 매치 목록은 캐시라, 안 세면 «화면은 왼쪽인데 결과는 오른쪽 것»이 된다(§5.1 이 경고한 자리).
+    // **넘어간 자리도 보여야 한다** — 반대 열의 가로 위치는 이 열과 따로 흐른다(§3.5).
+    revealDiffCaretColumn(self, term, to, dst[row], landed, map);
     find_ops.diffCaretSideChanged(self, term, from);
     self.metal_dirty = true;
     return true;
+}
+
+/// 비교 뷰 caret 을 **가로로** 보이게 민다 — `revealCaretColumn` 하나를 단일 편집기와 나눠 쓴다.
+///
+/// **caret 이 선 열만 민다**(§3.5 *"가로는 각자다"*). 폭·상한도 그 열의 것을 쓴다.
+fn revealDiffCaretColumn(self: *AppSession, term: *Term, side: DiffSide, text: []const u8, byte: usize, map: editor_motion.ColumnMap) void {
+    const right = side == .right;
+    const col = map.columnOf(map.ctx, text, @min(byte, text.len));
+    const max_cols = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
+    revealCaretColumn(self, term, right, col, term.rt.editor_diff_hit_geom.content_width, max_cols);
 }
 
 /// 한 행을 한 줄로 본 `Line`. 줄바꿈은 **`.none`** 이다 — 위 `diffMove` doc 참조.
@@ -14420,6 +14480,47 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
 
 fn pressKey(fx: *PaneFixture, key: maru.terminal.input.Key, mods: maru.terminal.input.ModifierSet) !void {
     _ = try fx.session.handleKeyEvent(.{ .key = key, .modifiers = mods });
+}
+
+test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {
+    // **두 뷰가 같은 규칙을 쓴다**([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
+    // 「가로도 caret 을 따라간다」). 비교 뷰만 재면 그 규칙이 한쪽에서만 산다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "dhs3.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    // 렌더가 폭을 굳혀야 한다 — 안 그리면 「밖이다」를 판정할 기준이 없다.
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    try testing.expect(visible > 0 and visible < 600); // 픽스처 자기 검증
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_first_col = 0;
+
+    // ⑴ **행 끝으로 가면 따라온다** — 상한(내용 폭)까지.
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(@as(usize, 600), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(u16, @intCast(600 - visible)), term.rt.editor_first_col);
+
+    // ⑵ **행 머리로 돌아오면 0 이다.**
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(u16, 0), term.rt.editor_first_col);
+
+    // ⑶ **랩이 켜지면 안 건드린다** — 그때는 가로 축이 없고, 저장된 값은 랩을 껐을 때 돌아갈 자리다.
+    term.rt.editor_wrap = true;
+    term.rt.editor_first_col = 9;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(@as(u16, 9), term.rt.editor_first_col);
 }
 
 test "MOV1 화살표가 커서를 옮긴다 — 키 경로 전체를 통과한다 (§3.2)" {

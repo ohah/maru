@@ -3721,3 +3721,102 @@ test "DSB10: 빈 행 갈래도 버퍼가 모자라면 글을 안 낸다" {
     var ok: [48]u8 = undefined;
     try testing.expectEqualStrings("L -:4567+", editor_ops.formatDiffCursor(&ok, .{ .side = .left, .line = null, .column = 4567, .truncated = true }).?);
 }
+
+// ── DHS: 가로도 caret 을 따라간다 ──────────────────────────────────────────────
+//
+// 계약은 [시각 매핑](../../../../docs/native-editor-visual-mapping.md) 「가로도 caret 을 따라간다」.
+
+test "DHS1: 비교 뷰에서 ⌘→ 를 누르면 가로가 따라온다 (handleKeyEvent)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **한 화면보다 긴 줄**이어야 한다 — 짧으면 「따라간다」와 「안 간다」가 같은 답을 낸다.
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "keep\n");
+    try long.appendNTimes(allocator, 'x', 600);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', 600);
+    try mod.append(allocator, '\n');
+
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len == 600) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+    const visible = fx.term.rt.editor_diff_hit_geom.content_width;
+    try testing.expect(visible > 0 and visible < 600); // 픽스처 자기 검증 — 화면보다 길다
+
+    fx.term.rt.editor_first_col_right = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+
+    // ⑴ **행 끝으로 가면 가로가 따라온다.**
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 600), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+    // **최소 이동이되, 내용 폭이 상한이다.** caret 은 마지막 글자보다 한 칸 뒤(600열)에 서는데
+    //    가로 상한은 `max_cols -| visible` 이라 그 칸까지 못 민다 — 계약이 「행 끝 caret 은 마지막
+    //    한 칸을 못 얻는다」로 적어 둔 남는 한계다. 여기서는 **그 상한값에 정확히 멈추는지**를 잰다.
+    try testing.expectEqual(@as(u16, @intCast(600 - visible)), fx.term.rt.editor_first_col_right);
+
+    // ⑵ **행 머리로 돌아오면 0 으로 돌아온다.**
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col_right);
+
+    // ⑶ **반대 열은 안 밀린다** — §3.5 「가로는 각자다」.
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
+    try testing.expect(fx.term.rt.editor_first_col_right > 0);
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
+
+    // ⑷ **열을 넘기면 그 열의 가로가 따라온다.**
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expect(fx.term.rt.editor_first_col > 0);
+}
+
+test "DHS2: 랩이 켜지면 가로를 안 건드린다 (§4 가로 축이 없다)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "keep\n");
+    try long.appendNTimes(allocator, 'x', 600);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', 600);
+    try mod.append(allocator, '\n');
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len == 600) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+
+    // **저장된 값은 랩을 다시 껐을 때 돌아갈 자리다** — 랩 중에는 건드리지 않는다.
+    fx.term.rt.editor_wrap = true;
+    fx.term.rt.editor_first_col_right = 7;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(u16, 7), fx.term.rt.editor_first_col_right);
+
+    // **대조군** — 랩을 끄면 따라간다.
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = 0;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
+    try testing.expect(fx.term.rt.editor_first_col_right != 7);
+}

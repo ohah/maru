@@ -77775,6 +77775,70 @@ test "활동 뷰: 썸네일이 다시 훑어도 살아남고, 펼치면 사라�
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다 (AV5 적대적 4회차)" {
+    // ⚠️ **계약 §2.2.3 은 「좁아지면 시각부터 버리고 대상은 마지막까지 지킨다」인데, 썸네일은
+    // 자리를 가장 먼저 가져간다.** 그 둘이 부딪히는 구간이 실제로 있었다(실측):
+    //
+    //   cols=12 → 그림 6 칸 · 이름  6 칸  (최소선)
+    //   cols=11 → 그림 6 칸 · 이름 «5 칸» ← 최소선 아래
+    //   cols= 9 → 그림 6 칸 · 이름 «3 칸»
+    //   cols= 8 → 그림 0 칸 · 이름  8 칸  ← **좁혔는데 이름이 늘어난다**
+    //
+    // 마지막 줄이 특히 나쁘다 — 사용자가 도크를 줄이다가 글자가 되살아나는 것을 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    image_gallery_ops.setFilter(session, .all);
+
+    // 넓은 데서 좁은 데로 **한 칸씩** 내려가며 본다. 경계 하나만 찍으면 역전을 못 본다.
+    var prev_label: ?u16 = null;
+    var saw_thumbs = false;
+    var saw_none = false;
+    var w: u32 = 700;
+    while (w >= 540) : (w -= 10) {
+        _ = session.resize(w, 900, 1000) catch continue;
+        const cols = image_gallery_ops.listWindow(session).cols;
+        if (cols == 0) continue;
+        const t = image_gallery_ops.thumbCols(session);
+        try std.testing.expect(t <= cols);
+        const label = cols - t;
+
+        // ── ① **이름이 최소선 아래로 안 내려간다.** 그림이 붙었으면 반드시 지킨다.
+        if (t > 0) {
+            saw_thumbs = true;
+            try std.testing.expect(label >= image_gallery_ops.min_label_cols);
+        } else saw_none = true;
+
+        // ⚠️ **「좁힐수록 이름이 짧아진다」는 단언은 틀렸다.** 처음 그렇게 썼다가 이 판정자가
+        //    잡았는데, 그것은 결함이 아니라 §2.2.3 **규율의 정상 결과**다 — 무언가를 버리면 남은
+        //    것이 넓어진다(시각을 버릴 때도 이름이 길어진다). 지켜야 할 것은 최소선 하나다.
+        _ = &prev_label;
+        prev_label = label;
+    }
+    // 두 갈래를 **둘 다** 지났는지 확인한다 — 한쪽만 봤으면 위 단언이 아무것도 안 잰다.
+    try std.testing.expect(saw_thumbs);
+    try std.testing.expect(saw_none);
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

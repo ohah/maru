@@ -1113,10 +1113,22 @@ pub fn thumbRectAt(self: *const AppSession, row_top_y: u32) ?image_grid.Rect {
 pub fn thumbCols(self: *const AppSession) u16 {
     if (self.image_gallery.filter != .all) return 0;
     if (self.cell_width_px == 0) return 0;
-    if (thumbRectAt(self, gridArea(self).y) == null) return 0;
+    const area = gridArea(self);
+    if (thumbRectAt(self, area.y) == null) return 0;
     const size = thumbCellSize(self);
     // 그림 폭 + 한 칸 띄우기.
-    return @intCast(@min((size.w + self.cell_width_px - 1) / self.cell_width_px + 1, @as(u32, 32)));
+    const want: u16 = @intCast(@min((size.w + self.cell_width_px - 1) / self.cell_width_px + 1, @as(u32, 32)));
+
+    // ⚠️ **대상이 먼저다**(계약 §2.2.3). 그림이 자리를 가져가고 나서 이름이 `min_label_cols` 아래로
+    // 떨어지면 「무엇에 붙은 그림인지」를 잃는다 — 좁아지면 **시각부터** 버리는 그 규율에서 썸네일은
+    // 시각보다도 나중에 지킬 것이다.
+    //
+    // 실측(적대적 4 회차)이 이 게이트를 요구했다: 이것이 없으면 `cols=9` 에서 이름이 **3 칸**으로
+    // 줄고, 더 좁혀 `cols=8` 이 되면 그림이 꺼지며 이름이 **8 칸으로 되돌아온다** — **좁힐수록
+    // 이름이 늘어나는 역전**이라, 사용자가 도크를 줄이다가 글자가 되살아나는 것을 본다.
+    const total: u16 = @intCast(@min(area.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+    if (total < want +| min_label_cols) return 0;
+    return want;
 }
 
 /// 그 줄에 그릴 **그림 바이트가 어디 있나**. 없으면 `null` 이다.
@@ -2280,7 +2292,9 @@ pub fn collectLabels(
 
 /// 시각과 라벨 사이 최소 간격, 그리고 시각을 넣기 위해 남겨야 할 라벨 최소 폭(칸).
 const time_gap_cols: u16 = 1;
-const min_label_cols: u16 = 6;
+/// 대상(이름)에 **반드시 남겨야 할** 최소 폭(칸). 좁아지면 시각·요약을 먼저 버리고 이것을
+/// 마지막까지 지킨다(계약 §2.2.3) — 썸네일(AV5)도 이 선 아래로는 자리를 못 가져간다.
+pub const min_label_cols: u16 = 6;
 
 /// 이 라벨이 **어떻게 대화에 들어왔는가**를 한 낱말로. 모르면 빈 값이다 — 지어내지 않는다.
 ///

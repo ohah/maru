@@ -8206,6 +8206,107 @@ test "M9a 새 출력: 화면이 꽉 찬 뒤 한 줄이 와도 «그 한 줄만»
     try T.expect(!std.mem.eql(u8, said, much));
 }
 
+test "M9a 새 출력: 스크롤은 «새 출력이 아니다»" {
+    // 위로 밀면 스크롤백 줄이 창에 들어오는데, 줄 번호로 보면 「지난 창에 없던 번호」라 전부 새
+    // 줄로 읽힌다 — 사용자는 손가락으로 훑는 중인데 「출력이 많습니다」가 끼어든다. 치는 것과
+    // 같은 규율로 버린다(적대적 검증 1회차).
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [8192]u8 = undefined;
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var line: [16]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "back{d}\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    announceIdle(8);
+    _ = announceTake(&buf); // 그 출력은 읽고 비운다
+
+    // 이제 위로 민다 — 스크롤백이 창에 들어온다.
+    // **먼저 「밀렸다」를 단언한다.** 안 밀렸는데 조용하면 이 판정자는 아무것도 안 재는 것이고,
+    // 실제로 바닥으로 가는 변이가 그렇게 빠져나갔다.
+    bridge.maru_mobile_scroll(2000);
+    try T.expect(bridge.maru_mobile_view_offset() > 0);
+    announceIdle(12);
+    try T.expect(!bridge.announceReadyForTest());
+
+    // 바닥으로 돌아오는 것도 마찬가지다 — 여기서도 창이 실제로 움직인다.
+    bridge.maru_mobile_scroll_to_bottom();
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    announceIdle(12);
+    try T.expect(!bridge.announceReadyForTest());
+
+    // 그리고 **그 뒤에 온 것**은 읽는다 — 「영영 안 읽는다」로 참이 되지 않게.
+    _ = bridge.maru_mobile_term_write("after-scroll\r\n", 14);
+    announceIdle(8);
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "after-scroll") != null);
+}
+
+test "M9a 새 출력: 격자가 바뀌면(회전) «새 출력이 아니다»" {
+    // 회전하거나 키보드가 오르내리면 줄이 다시 접혀 절대 번호가 통째로 어긋난다 — 화면에 있던
+    // 줄이 전부 「새 줄」이 되고, 사용자가 한 일은 기기를 돌린 것뿐인데 「출력이 많습니다」가
+    // 들린다(스크롤과 같은 부류. 적대적 검증 2회차).
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [8192]u8 = undefined;
+
+    // **긴 줄이라야 다시 접힌다.** 짧은 줄만 쓰면 폭이 바뀌어도 접을 것이 없어 번호가 안 흔들리고,
+    // 그러면 이 판정자는 아무것도 안 잰다 — 처음에 그렇게 썼다가 변이가 초록으로 빠져나갔다.
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        var line: [128]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "rot{d}-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    announceIdle(8);
+    _ = announceTake(&buf);
+
+    // 폭을 **좁힌다** — 긴 줄이 접히면서 절대 번호가 통째로 흔들린다.
+    const before_cols = bridge.maru_mobile_term_cols();
+    _ = bridge.maru_mobile_build(220, 874, now());
+    try T.expect(bridge.maru_mobile_term_cols() != before_cols); // 전제: 정말 달라졌다
+    var f: usize = 0;
+    while (f < 12) : (f += 1) _ = bridge.maru_mobile_build(220, 874, now());
+    try T.expect(!bridge.announceReadyForTest());
+
+    // 그리고 **그 뒤에 온 것**은 읽는다.
+    _ = bridge.maru_mobile_term_write("after-rotate\r\n", 14);
+    f = 0;
+    while (f < 8) : (f += 1) _ = bridge.maru_mobile_build(220, 874, now());
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "after-rotate") != null);
+}
+
+test "M9a 새 출력: 자리가 모자라면 «버리고 간다» — 영영 막히지 않는다" {
+    // host 가 작은 자리를 주면 그 낭독은 못 읽는다(자르지 않는다 — 문장 가운데서 끊긴 말을 읽느니
+    // 안 읽는 편이 낫다). **그때 들고 있으면 다음 것이 이 자리를 못 덮어**(그 조건이 `== 0` 이다)
+    // 낭독이 통째로 죽는다. 한 번 못 읽는 것과 그 뒤로 영영 못 읽는 것은 다른 결함이다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+
+    _ = bridge.maru_mobile_term_write("a-long-enough-line\r\n", 20);
+    announceIdle(8);
+    try T.expect(bridge.announceReadyForTest());
+
+    // 자리를 모자라게 준다 — 0 이고 아무것도 안 쓴다.
+    var tiny: [4]u8 = undefined;
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_take_announcement(&tiny, tiny.len));
+    // 그리고 **대기가 풀렸다** — 안 풀리면 아래 것이 영영 안 읽힌다.
+    try T.expect(!bridge.announceReadyForTest());
+
+    _ = bridge.maru_mobile_term_write("next-one\r\n", 10);
+    announceIdle(8);
+    var buf: [4096]u8 = undefined;
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "next-one") != null);
+}
+
 test "M9a 새 출력: 치기 시작하면 대기 중인 것을 «버린다»" {
     // 키보드가 이미 읽어 준 글자를 터미널이 또 읽으면 두 번 들리고, 새 명령을 친 뒤에 낡은 출력을
     // 읽어 주는 것도 틀린 안내다. **가져갈 것까지 버린다** — 아직 안 읽힌 것이면 지금이 마지막 때다.

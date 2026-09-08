@@ -103,6 +103,7 @@ pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
 pub const agent_activity_ops = @import("app_session/agent_activity.zig");
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
+const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
@@ -5453,6 +5454,9 @@ pub const AppSession = struct {
     agent_activity_backend: ?agent_image_scan_backend.Backend = null,
     /// 갤러리 **디코드** 워커(계약 §5.2). 스캔과 별개다 — 작업 단위가 파일이 아니라 이미지 한 장이다.
     agent_activity_decode_backend: ?agent_image_decode_backend.Backend = null,
+    /// 본문 검색 워커(계약 §2.1.1). **스캔과 따로 든다** — 스캔은 tick 이 걸고 이것은 `Enter` 가
+    /// 거는데, 한 backend 로 합치면 대화가 이어질 때마다 도는 재스캔이 사용자가 건 검색을 죽인다.
+    agent_activity_body_backend: ?agent_body_search_backend.Backend = null,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
@@ -6438,6 +6442,7 @@ pub const AppSession = struct {
             // `agent_activity_ops.refresh` 가 조용히 물러나고 그 뷰만 빈다(계약 §2 의 빈 상태와 같은 자리).
             self.agent_activity_backend = agent_image_scan_backend.Backend.init(allocator, io) catch null;
             self.agent_activity_decode_backend = agent_image_decode_backend.Backend.init(allocator, io) catch null;
+            self.agent_activity_body_backend = agent_body_search_backend.Backend.init(allocator, io) catch null;
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -13697,6 +13702,10 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .agent_activity_search => if (self.agent_activity.search.commitPreedit(self.allocator)) {
+                // 확정 글자로 검색어가 바뀌었다 — 본문 답은 남의 답이 된다(계약 §2.1.1).
+                // **한글은 이 길로만 들어온다.** `.char` 갈래에만 놓으면 한글로 친 검색은 옛
+                // 본문 결과를 계속 달고 다닌다.
+                agent_activity_ops.cancelBodySearch(self);
                 agent_activity_ops.rebuildFilter(self);
             },
             .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
@@ -21768,6 +21777,8 @@ pub const AppSession = struct {
         self.agent_activity_backend = null;
         if (self.agent_activity_decode_backend) |*b| b.deinit();
         self.agent_activity_decode_backend = null;
+        if (self.agent_activity_body_backend) |*b| b.deinit();
+        self.agent_activity_body_backend = null;
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -76928,7 +76939,8 @@ fn cycleActivityFilterTo(session: *AppSession, want: agent_activity_ops.Filter) 
 fn quietActivityWorkers(session: *AppSession) void {
     var quiet = ActivityWait.start(session.io);
     while (quiet.pending() and
-        (session.agent_activity.scanning() or session.agent_activity.pending_len > 0))
+        (session.agent_activity.scanning() or session.agent_activity.pending_len > 0 or
+            session.agent_activity.body.awaiting != 0))
     {
         _ = session.tick() catch {};
     }
@@ -78841,6 +78853,127 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
         try std.testing.expect(h.result.found);
         try std.testing.expect(h.result.image);
     }
+
+    quietActivityWorkers(session);
+}
+
+test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 명령·결과에서 걸린다 (BS1 · §2.1.1)" {
+    // **라벨만 보는 검색은 세션의 2.9% 만 본다**(실측 2026-09-09 · 최근 60 세션 · 호출 61,429:
+    // 라벨 3.1 MB · 명령 전문 58.4 MB · 결과 전문 45.3 MB). 명령의 69.3% 가 라벨 상한을 넘고
+    // 44.7% 가 여러 줄이라, 「어떤 grep 으로 뭐가 나왔나」를 라벨로는 사실상 못 찾는다 — 이 뷰가
+    // 있는 이유가 그 물음인데도 그렇다.
+    //
+    // 이 판정자가 재는 것: ⓐ 라벨 층은 **글자마다 즉시**, ⓑ `Enter` 가 명령 전문과 결과 전문까지
+    // 넓히고, ⓒ 화면이 **어디서 걸렸는지 갈라** 말하고, ⓓ 글자가 바뀌면 옛 답을 **놓는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 구조는 실측, 값은 합성. 셋을 **일부러 갈라 둔다** — 검색어 `zeta` 가
+    //   S1: 라벨(`description`)에만 · S2: 명령 전문에만 · S3: 결과 전문에만 있다.
+    // 하나짜리 표본이면 「라벨에서 걸린 것」과 「본문에서 걸린 것」이 겹쳐 어긋남을 감춘다.
+    const s1 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_S1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\",\"description\":\"zeta 라벨\"}}]}}\n";
+    const s2 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_S2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"grep -rn zeta src/\",\"description\":\"첫째 작업\"}}]}}\n";
+    const s3 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_S3\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls docs\",\"description\":\"둘째 작업\"}}]}}\n";
+    // 결과는 **여러 줄**이다(`\n` 은 JSON 안에서 두 바이트다) — 날것으로 대조하면 못 찾는 모양을
+    // 일부러 넣는다. 푸는 규칙이 펼침과 같은 하나여야 여기가 통과한다.
+    const s3_result =
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\"," ++
+        "\"content\":[{\"tool_use_id\":\"toolu_S3\",\"type\":\"tool_result\"," ++
+        "\"content\":\"alpha\\nzeta hit\\nomega\"}]},\"uuid\":\"u3\"," ++
+        "\"timestamp\":\"2026-09-09T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = s1 ++ s2 ++ s3 ++ s3_result });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+
+    // ── ① 라벨 층은 글자마다 즉시다. 그리고 **그것만으로는 하나**다 — 나머지 둘은 라벨에 없다.
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_label_matches);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.shown_body_matches);
+
+    // ── ② `Enter` 가 본문까지 넓힌다. 셋이 된다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.body.awaiting != 0) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_label_matches);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.shown_body_matches);
+
+    // ── ③ **어디서 걸렸는지**를 값으로 든다. 하나는 명령에서, 하나는 결과에서다.
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.body.matches.items.len);
+    var saw_command = false;
+    var saw_result = false;
+    for (session.agent_activity.body.matches.items) |m| {
+        if (m.in_command) saw_command = true;
+        if (m.in_result) saw_result = true;
+    }
+    try std.testing.expect(saw_command);
+    try std.testing.expect(saw_result);
+
+    // ── ④ 화면이 갈라 말한다 — 「라벨 1 · 본문 +2」. 이 줄이 없으면 라벨에 그 글자가 안 보이는
+    //    줄이 떠 있고 사용자는 「왜 이게 떴지」를 묻게 된다.
+    session.agent_activity.search_active = false; // 검색줄 대신 결과 문구를 본다
+    var notice_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+    var want_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        maru.i18n.format(&want_buf, maru.i18n.t(.agent_activity_match_split), &.{
+            .{ .d = 1 },
+            .{ .d = 2 },
+        }),
+        agent_activity_ops.noticeText(session, &notice_buf),
+    );
+
+    // ── ⑤ 글자가 바뀌면 **옛 답을 놓는다.** 안 놓으면 사용자가 글자를 더 쳤는데도 남의 줄이 남는다.
+    session.agent_activity.search_active = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'q' }, .modifiers = .{} });
+    try std.testing.expectEqualStrings("zetaq", session.agent_activity.queryText());
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.body.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
 
     quietActivityWorkers(session);
 }

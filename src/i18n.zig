@@ -395,6 +395,14 @@ const Table = struct {
     agent_activity_search_prompt: [:0]const u8,
     /// 검색어에 걸린 것이 없을 때. 「이 세션에 이미지가 없다」와 **다른 사실**이라 나눈다.
     agent_activity_no_match: [:0]const u8,
+    /// 검색줄 끝의 **곁말** — 「Enter 를 누르면 본문까지 넓힌다」(계약 §2.1.1). 자리가 남을 때만
+    /// 붙인다. 이것이 없으면 아래층 검색이 있다는 것을 알 길이 없다 — 라벨은 세션의 2.9% 다.
+    agent_activity_body_hint: [:0]const u8,
+    /// 본문을 훑는 중. 수백 ms 동안 「걸린 것이 없습니다」라고 하면 거짓말이라 따로 든다.
+    agent_activity_body_searching: [:0]const u8,
+    /// 검색이 **어디서** 맞았나 — `{0}` 라벨에서, `{1}` 본문에서만. 두 수를 가르는 이유는 사용자가
+    /// 「내가 친 말이 이름에 있었나 본문에 있었나」를 알아야 다음 검색어를 고르기 때문이다.
+    agent_activity_match_split: [:0]const u8,
     /// 라벨 앞에 붙는 **출처** — 이 이미지가 어떻게 대화에 들어왔는가(계약 §2.2).
     ///
     /// **왜 두 값을 가르나**: 라벨 텍스트만으로는 「내가 올린 것」과 「에이전트가 읽은 것」이 구분되지
@@ -1456,6 +1464,9 @@ const en: Table = .{
     .agent_activity_open_failed = "Could not open this image",
     .agent_activity_search_prompt = "Filter: ",
     .agent_activity_no_match = "No image matches",
+    .agent_activity_body_hint = " \u{23ce} full text",
+    .agent_activity_body_searching = "Searching full text\u{2026}",
+    .agent_activity_match_split = "{0} by label \u{00b7} +{1} by body",
     .agent_activity_filter_images = "Images",
     .agent_activity_filter_execs = "Commands",
     .agent_activity_filter_reads = "Reads",
@@ -2098,6 +2109,9 @@ const ko: Table = .{
     .agent_activity_open_failed = "이 이미지를 열 수 없습니다",
     .agent_activity_search_prompt = "거르기: ",
     .agent_activity_no_match = "걸린 이미지가 없습니다",
+    .agent_activity_body_hint = " \u{23ce} 본문",
+    .agent_activity_body_searching = "본문을 훑는 중\u{2026}",
+    .agent_activity_match_split = "라벨 {0} \u{00b7} 본문 +{1}",
     .agent_activity_filter_images = "이미지",
     .agent_activity_filter_execs = "명령",
     .agent_activity_filter_reads = "읽기",

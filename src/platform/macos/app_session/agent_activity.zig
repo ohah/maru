@@ -19,6 +19,7 @@ const agent_ops = @import("agent.zig");
 const chrome = maru.chrome;
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
+const body_backend = @import("../agent_body_search_backend.zig");
 const image_decode = @import("../image_decode.zig");
 const decode_backend = @import("../agent_image_decode_backend.zig");
 const image_scale = maru.session.image_scale;
@@ -242,6 +243,9 @@ pub const State = struct {
     search: chrome.components.overlay_input.OverlayInput = .{},
     /// 검색창이 키를 받고 있나.
     search_active: bool = false,
+    /// **아래층 검색**(계약 §2.1.1 — 「라벨은 즉시, 본문은 Enter」). 위층(`search`)은 라벨만 보고
+    /// 글자마다 즉시 거르는데 라벨은 세션의 **2.9%** 다(실측) — 나머지를 이것이 맡는다.
+    body: BodySearch = .{},
     /// **지금 보여줄 것**. 필터를 여기에 적용하므로 인덱스 도메인이 하나다 — 타일·크게보기·호버가
     /// 「전체 인덱스인가 표시 인덱스인가」를 물을 필요가 없다.
     hits: std.ArrayList(index.Hit) = .empty,
@@ -273,6 +277,11 @@ pub const State = struct {
     awaiting: u64 = 0,
     /// 워커가 바빠 아직 못 건 요청이 있다. 다음 tick 이 다시 건다.
     resubmit: bool = false,
+    /// 마지막 `applyFilter` 가 **어디서 맞았는지** 센 두 수(계약 §2.1.1). 「라벨 3 · 본문 +12」의
+    /// 근거이고, **세는 자리와 만드는 자리가 같아야** 그 줄이 거짓말을 안 한다(`Filter.admits` 를 한
+    /// 곳에 둔 것과 같은 규율).
+    shown_label_matches: usize = 0,
+    shown_body_matches: usize = 0,
     /// 격자에 자리를 못 얻은 이미지 수. **계산해 두고 안 쓰면 사용자가 이미지를 놓치고도 모른다** —
     /// 「없다」와 「안 보인다」를 가르는 값이다(계약 §2). 매 frame `appendGpuImages` 가 갱신한다.
     overflow: usize = 0,
@@ -306,6 +315,7 @@ pub const State = struct {
         self.all_hits.deinit(allocator);
         self.all_labels.deinit(allocator);
         self.search.deinit(allocator);
+        self.body.deinit(allocator);
         self.dropTiles(allocator);
         self.tiles.deinit(allocator);
         self.* = .{};
@@ -357,6 +367,9 @@ pub const State = struct {
         self.all_labels.clearAndFree(allocator);
         self.search.clear();
         self.search_active = false;
+        // **소스가 갈리면 본문 결과는 남의 파일 것이다.** 오프셋은 파일 절대값이라 그대로 두면
+        // 새 세션의 엉뚱한 호출이 「본문에서 맞았다」로 선다.
+        self.body.reset(allocator);
         self.chain.clear();
         self.head_stamp = .{};
         // **종류별 플래그도 함께 지운다.** 하나만 지우면 소스가 갈린 뒤에도 옛 세션의 「다 못
@@ -372,6 +385,8 @@ pub const State = struct {
         self.resubmit = false;
         self.pendingClear();
         self.overflow = 0;
+        self.shown_label_matches = 0;
+        self.shown_body_matches = 0;
         self.scroll = .{};
         self.hovered = null;
     }
@@ -430,13 +445,27 @@ pub const State = struct {
         self.labels.ensureTotalCapacity(allocator, total) catch return self.showAll(allocator);
 
         const q = self.queryText();
+        // **본문 결과는 「지금 검색어의 답」일 때만 쓴다.** 워커 왕복이라 그 사이 글자가 바뀔 수
+        // 있는데, 옛 검색어의 답을 그대로 두면 사용자가 글자를 지웠는데도 남의 줄이 남는다.
+        const use_body = self.body.appliesTo(q);
+        self.shown_label_matches = 0;
+        self.shown_body_matches = 0;
         const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
             // **종류 필터가 먼저다**(계약 §2.1). 이미지 필터면 그림만 받는다 — 안 거르면 활동
             // `Hit` 의 `data_offset`(사람이 읽는 문자열)이 디코더로 넘어가 빈 칸이 뜬다.
             if (!self.filter.admits(hit)) continue;
             const label: context.Label = if (paired) self.all_labels.items[i] else .{};
-            if (q.len > 0 and !context.matches(label.text(), q)) continue;
+            if (q.len > 0) {
+                // **라벨이 먼저다**(계약 §2.1.1 — 「라벨은 즉시, 본문은 Enter」). 두 층 다 걸린
+                // 줄은 **라벨로 센다**: 사용자가 친 말이 이름에 있었으면 그것이 답이고, 본문에도
+                // 있다는 사실은 그 답을 바꾸지 않는다.
+                if (context.matches(label.text(), q)) {
+                    self.shown_label_matches += 1;
+                } else if (use_body and self.body.find(hit) != null) {
+                    self.shown_body_matches += 1;
+                } else continue;
+            }
             self.hits.appendAssumeCapacity(hit);
             self.labels.appendAssumeCapacity(label);
         }
@@ -740,6 +769,67 @@ pub const Filter = enum {
     }
 };
 
+/// 본문 검색의 상태(계약 §2.1.1). **위층과 따로 든다** — 라벨 검색은 글자마다 즉시 다시 거르는데,
+/// 본문은 워커 왕복이라 「지금 화면의 검색어」와 「이 결과가 대답한 검색어」가 갈릴 수 있다.
+pub const BodySearch = struct {
+    /// 이 결과가 **대답한** 검색어. 화면의 검색어와 다르면 결과는 남의 답이라 안 쓴다.
+    query: std.ArrayList(u8) = .empty,
+    /// 워커가 준 것. `(file, data_offset)` 오름차순이라 이분 탐색으로 되짚는다.
+    ///
+    /// **자리가 아니라 값을 키로 든다.** 「`all_hits` 의 몇 번째」로 들면 퇴출과 화면의 뒤집기를
+    /// 따라 움직여야 하는데, 이 스택은 이미 그런 필드를 셋 만들었고(대기 링 · 접기 · 옛 파일 번호)
+    /// 넷째는 안 만들기로 했다(`ResultSummary.image_offset` 의 주석과 같은 결정).
+    matches: std.ArrayList(body_backend.Match) = .empty,
+    /// 기다리는 요청. 0 이면 기다리는 것이 없다 — 늦게 온 결과를 버리는 근거다.
+    awaiting: u64 = 0,
+    /// 워커가 바빠 아직 못 건 요청이 있다. 다음 tick 이 다시 건다.
+    resubmit: bool = false,
+    /// 열지 못한 파일이 있었다.
+    partial: bool = false,
+    read_bytes: u64 = 0,
+    search_ns: u64 = 0,
+
+    pub fn deinit(self: *BodySearch, allocator: std.mem.Allocator) void {
+        self.query.deinit(allocator);
+        self.matches.deinit(allocator);
+        self.* = .{};
+    }
+
+    /// 결과와 기다림을 통째로 놓는다. 검색어가 바뀌었거나 소스가 갈렸을 때다.
+    pub fn reset(self: *BodySearch, allocator: std.mem.Allocator) void {
+        self.query.clearAndFree(allocator);
+        self.matches.clearAndFree(allocator);
+        self.awaiting = 0;
+        self.resubmit = false;
+        self.partial = false;
+        self.read_bytes = 0;
+        self.search_ns = 0;
+    }
+
+    /// 이 결과가 **지금 검색어**에 대한 답인가. 아니면 없는 셈 친다 — 옛 검색어의 결과를 그대로
+    /// 두면 사용자가 글자를 지웠는데도 남의 줄이 남는다.
+    pub fn appliesTo(self: *const BodySearch, query: []const u8) bool {
+        return query.len > 0 and std.mem.eql(u8, self.query.items, query);
+    }
+
+    /// 그 호출이 본문에서 맞았나. 못 찾으면 `null`.
+    pub fn find(self: *const BodySearch, hit: index.Hit) ?body_backend.Match {
+        const key: body_backend.Match = .{ .file = hit.file_index, .data_offset = hit.data_offset };
+        var lo: usize = 0;
+        var hi: usize = self.matches.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const m = self.matches.items[mid];
+            if (body_backend.lessThan({}, m, key)) {
+                lo = mid + 1;
+            } else if (body_backend.lessThan({}, key, m)) {
+                hi = mid;
+            } else return m;
+        }
+        return null;
+    }
+};
+
 /// 뒤집힌 배열에서 `fold_owner` 를 새 자리로 옮긴다. `i` 였던 것은 `n - 1 - i` 가 된다.
 ///
 /// **`pub` 인 이유는 판정자다** — 뒤집기는 화면 경로 한가운데에 있어서 통째로 세우지 않고 이 한
@@ -886,6 +976,96 @@ fn decodeBackendPtr(self: *AppSession) ?*decode_backend.Backend {
     return null;
 }
 
+fn bodyBackendPtr(self: *AppSession) ?*body_backend.Backend {
+    if (self.agent_activity_body_backend) |*b| return b;
+    return null;
+}
+
+/// 본문 검색을 **놓는다** — 검색어가 바뀌었거나 뷰를 떠났다.
+///
+/// **취소까지 건다.** 상태만 지우면 워커는 계속 17.7 MB 를 읽고, 그 결과는 generation 이 안 맞아
+/// 어차피 버려진다 — 아무도 안 볼 것을 위해 디스크를 도는 셈이다.
+pub fn cancelBodySearch(self: *AppSession) void {
+    if (bodyBackendPtr(self)) |b| b.cancel();
+    self.agent_activity.body.reset(self.allocator);
+}
+
+/// `Enter` — 본문까지 넓힌다(계약 §2.1.1).
+///
+/// **파일 전체를 안 훑는다.** 인덱스가 이미 자리를 아니(`cmd_rel` · `result.body_offset`) 그 조각만
+/// 넘긴다 — 실측 파일의 12.0% 다. 그림(`kind.isImage()`)은 **안 넘긴다**: 그 `data_offset` 은
+/// base64 payload 라 읽어 봐야 뜻이 없고, 64 KiB 씩 헛도는 값만 치른다.
+pub fn submitBodySearch(self: *AppSession) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const backend = bodyBackendPtr(self) orelse return;
+    const q = self.agent_activity.queryText();
+    if (q.len == 0) return;
+    if (self.agent_activity.chain.isEmpty()) return;
+    // 같은 검색어로 이미 답을 받아 뒀으면 다시 훑지 않는다 — `Enter` 를 두 번 누르는 것이
+    // 17.7 MB 를 두 번 읽을 이유가 되지 않는다.
+    if (self.agent_activity.body.appliesTo(q) and self.agent_activity.body.awaiting == 0) return;
+
+    var probes: std.ArrayList(body_backend.Probe) = .empty;
+    defer probes.deinit(self.allocator);
+    probes.ensureTotalCapacity(self.allocator, self.agent_activity.all_hits.items.len) catch return;
+    for (self.agent_activity.all_hits.items) |hit| {
+        if (hit.kind.isImage()) continue;
+        // 펼침(`loadOpenDetail`)과 **같은 자리**를 본다 — 두 벌이 되면 「검색에는 걸리는데 펼치면
+        // 없는」 줄이 생긴다.
+        const cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset;
+        probes.appendAssumeCapacity(.{
+            .data_offset = hit.data_offset,
+            .cmd_offset = cmd_offset,
+            .body_offset = if (hit.result.found) hit.result.body_offset else 0,
+            .file = hit.file_index,
+        });
+    }
+    if (probes.items.len == 0) return;
+
+    // 새 검색어다 — 옛 답을 먼저 놓는다(안 놓으면 `appliesTo` 가 참인 채로 옛 줄이 남는다).
+    self.agent_activity.body.reset(self.allocator);
+    self.agent_activity.body.query.appendSlice(self.allocator, q) catch return;
+    if (backend.submit(self.agent_activity.chain, q, probes.items)) |generation| {
+        self.agent_activity.body.awaiting = generation;
+    } else {
+        // 워커가 바쁘다 — 다음 tick 이 다시 건다. `query` 는 남겨 둔다(그것이 「무엇을 물었나」다).
+        self.agent_activity.body.resubmit = true;
+    }
+    self.metal_dirty = true;
+}
+
+/// 본문 검색의 완료본을 거둔다. `poll` 이 tick 마다 부른다.
+fn pollBodySearch(self: *AppSession) void {
+    const backend = bodyBackendPtr(self) orelse return;
+    const state = &self.agent_activity.body;
+
+    if (state.resubmit and state.query.items.len > 0) {
+        // **다시 걸 때도 검색어는 그대로다.** `submitBodySearch` 는 「같은 답을 이미 받았으면
+        // 물러난다」로 시작하는데 아직 받은 것이 없으므로(`awaiting == 0` 이지만 `matches` 가 비었다)
+        // 그 게이트를 지난다.
+        state.resubmit = false;
+        submitBodySearch(self);
+    }
+
+    var result = backend.take() orelse return;
+    // **늦게 온 것은 버린다.** 검색어가 그 사이 바뀌었으면 이 결과는 남의 물음에 대한 답이다.
+    if (result.generation != state.awaiting or state.awaiting == 0) {
+        result.deinit(self.allocator);
+        return;
+    }
+    state.matches.deinit(self.allocator);
+    state.matches = result.matches; // 소유 이동 — 여기서부터 세션이 푼다
+    state.awaiting = 0;
+    state.partial = result.partial;
+    state.read_bytes = result.read_bytes;
+    state.search_ns = result.search_ns;
+    // 목록을 다시 만든다 — 이제 본문에서 걸린 줄이 더해진다.
+    self.agent_activity.applyFilter(self.allocator);
+    if (self.agent_activity.filter.holdsImages()) remapTiles(self);
+    clampScroll(self);
+    self.metal_dirty = true;
+}
+
 /// 갤러리 인덱스를 활성 pane 에 맞춘다. **파일을 여기서 읽지 않는다** — 워커에 요청만 건다.
 ///
 /// 호출자는 둘이다: 뷰에 들어올 때(`setDockView`)와 소스가 바뀐 것을 훅이 알려 줬을 때.
@@ -1004,6 +1184,7 @@ pub fn poll(self: *AppSession) void {
     harvestDecoded(self);
     ensureOpen(self);
     pollFreshness(self);
+    pollBodySearch(self);
 
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
@@ -1305,6 +1486,7 @@ pub fn onLeaveView(self: *AppSession) void {
     const backend = backendPtr(self) orelse return;
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel();
+    cancelBodySearch(self);
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
     self.agent_activity.pendingClear();
@@ -1692,6 +1874,7 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
                 self.agent_activity.search.preedit.items.len > 0)
             {
                 self.agent_activity.search.clear();
+                cancelBodySearch(self);
                 rebuildFilter(self);
             } else {
                 self.agent_activity.search_active = false;
@@ -1699,19 +1882,28 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
             }
         },
         .enter => {
-            // 확정 = 창만 닫고 **검색어는 유지**한다. 걸러진 목록에서 그대로 고르게 된다.
+            // 확정 = 창을 닫고 **검색어는 유지**한다. 걸러진 목록에서 그대로 고르게 된다.
+            //
+            // **그리고 본문까지 넓힌다**(계약 §2.1.1). 라벨만 보는 검색은 세션의 2.9% 라, 「어떤
+            // grep 으로 뭐가 나왔나」를 이 뷰가 답하려면 여기서 한 번 더 가야 한다. 글자마다 하지
+            // 않는 이유는 대가다 — 조각을 읽어 푸는 일이라 수백 ms 다.
             self.agent_activity.search_active = false;
+            submitBodySearch(self);
             self.metal_dirty = true;
         },
         .backspace => {
             if (self.agent_activity.search.query.items.len == 0) return true;
             self.agent_activity.search.backspace(); // codepoint 단위 — 바이트로 지우면 한글이 깨진다
+            // **검색어가 바뀌면 본문 답은 남의 답이다.** `appliesTo` 가 그것을 이미 막지만, 놓지
+            // 않으면 워커가 아무도 안 볼 것을 위해 계속 돈다.
+            cancelBodySearch(self);
             rebuildFilter(self);
         },
         .char => |codepoint| {
             if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return false;
             if (self.agent_activity.search.query.items.len + 4 > max_query_bytes) return true;
             self.agent_activity.search.appendChar(self.allocator, codepoint) catch return true;
+            cancelBodySearch(self);
             rebuildFilter(self);
         },
         // **그 밖의 키는 삼키지 않는다.** 검색 중이라는 이유로 전부 먹으면 도크에서 나갈 길이 막힌다.
@@ -1777,7 +1969,24 @@ fn searchLine(self: *const AppSession, buf: []u8) SearchLine {
         len += part.len;
         cols +|= part_cols;
     }
-    return .{ .text = buf[0..len], .caret_cols = cols };
+    // **caret 은 여기서 굳는다.** 아래 곁말은 사용자가 친 글자가 아니므로 그것까지 세면 후보창이
+    // 글자에서 떨어져 뜬다.
+    const caret_cols = cols;
+
+    // **「⏎ 본문」을 자리가 남을 때만 붙인다**(계약 §2.1.1). 이것이 없으면 아래층 검색이 있다는
+    // 것을 알 길이 없다 — 라벨은 세션의 2.9% 이므로, 사용자는 「없다」와 「라벨에 없다」를
+    // 구분하지 못한 채 검색을 포기한다.
+    //
+    // **이미 그 답을 받아 뒀으면 안 붙인다.** 누를 이유가 없어진 안내는 잡음이다.
+    if (!self.agent_activity.body.appliesTo(self.agent_activity.search.query.items)) {
+        const hint = maru.i18n.t(.agent_activity_body_hint);
+        const hint_cols = chrome.components.overlay_input.displayCols(hint);
+        if (len + hint.len <= buf.len and cols +| hint_cols <= searchLineCols(self)) {
+            @memcpy(buf[len..][0..hint.len], hint);
+            len += hint.len;
+        }
+    }
+    return .{ .text = buf[0..len], .caret_cols = caret_cols };
 }
 
 /// 알림 줄 버퍼 크기. 검색어 상한 + 앞머리 + 조합 글자가 들어갈 만큼이다.
@@ -3188,6 +3397,11 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         return maru.i18n.t(.agent_activity_no_agent);
     }
     if (self.agent_activity.scanning()) return maru.i18n.t(.agent_activity_scanning);
+    // **본문을 훑는 중이면 그렇게 말한다**(계약 §2.1.1). 수백 ms 동안 「걸린 것이 없습니다」라고
+    // 하면 사용자는 `Enter` 가 안 먹은 줄 안다 — 스캔에서 「세는 중」을 가른 것과 같은 이유다.
+    if (self.agent_activity.body.awaiting != 0 or self.agent_activity.body.resubmit) {
+        return maru.i18n.t(.agent_activity_body_searching);
+    }
     const n = self.agent_activity.count();
     // **「못 읽었다」는 찾은 것이 있을 때만 말한다**(사용자 보고). 대화 기록이 비어 있으면 스캔이
     // partial 로 끝나기 쉬운데, 그때 「세션을 다 읽지 못했습니다」라고 하면 사용자에게는 갤러리가
@@ -3218,6 +3432,17 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 사용자는 갤러리가 고장난 줄 안다(계약 §2 — 「없다」와 「안 보인다」를 가르는 규율의 연장).
         if (!self.agent_activity.filter.isGrid()) return maru.i18n.t(.agent_activity_none_of_kind);
         return maru.i18n.t(.agent_activity_empty);
+    }
+    // **어디서 맞았는지 가른다**(계약 §2.1.1). 「라벨 3 · 본문 +12」 — 사용자가 「내가 친 말이
+    // 이름에 있었나 본문에 있었나」를 알아야 다음 검색어를 고른다. 본문에서만 걸린 줄은 라벨에
+    // 그 글자가 **안 보이므로**, 이 줄이 없으면 「왜 이게 떴지」가 된다.
+    //
+    // 「12장 중 8장」보다 앞선다: 검색 중에는 **왜 이 목록인가**가 몇 장이 잘렸나보다 급하다.
+    if (self.agent_activity.shown_body_matches > 0) {
+        return maru.i18n.format(buf, maru.i18n.t(.agent_activity_match_split), &.{
+            .{ .d = @intCast(self.agent_activity.shown_label_matches) },
+            .{ .d = @intCast(self.agent_activity.shown_body_matches) },
+        });
     }
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.

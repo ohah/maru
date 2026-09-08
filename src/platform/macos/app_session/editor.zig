@@ -14492,6 +14492,9 @@ test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면�
 
     var doc: std.ArrayList(u8) = .empty;
     defer doc.deinit(allocator);
+    // **긴 줄을 첫 줄에 두지 않는다.** 첫 줄이면 `line.start == 0` 이라 「줄 텍스트로 센다」와
+    //    「문서 전체로 센다」가 **같은 답**을 낸다(3회차 H24 가 그래서 살았다).
+    try doc.appendSlice(allocator, "head\n");
     try doc.appendNTimes(allocator, 'x', 600);
     try doc.append(allocator, '\n');
     const term = try undoFixture(&fx, allocator, "dhs3.txt", doc.items);
@@ -14503,12 +14506,13 @@ test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면�
     const visible = term.rt.editor_hit_geom.content_width;
     try testing.expect(visible > 0 and visible < 600); // 픽스처 자기 검증
 
-    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // 둘째 줄(긴 줄) 머리에 선다 — `"head\n"` 이 5 byte 다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
     term.rt.editor_first_col = 0;
 
     // ⑴ **행 끝으로 가면 따라온다** — 상한(내용 폭)까지.
     try pressKey(&fx, .arrow_right, .{ .command = true });
-    try testing.expectEqual(@as(usize, 600), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 5 + 600), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(u16, @intCast(600 - visible)), term.rt.editor_first_col);
 
     // ⑵ **행 머리로 돌아오면 0 이다.**
@@ -14518,7 +14522,7 @@ test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면�
     // ⑶ **랩이 켜지면 안 건드린다** — 그때는 가로 축이 없고, 저장된 값은 랩을 껐을 때 돌아갈 자리다.
     term.rt.editor_wrap = true;
     term.rt.editor_first_col = 9;
-    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_selection = editor_selection.Selection.at(5);
     try pressKey(&fx, .arrow_right, .{ .command = true });
     try testing.expectEqual(@as(u16, 9), term.rt.editor_first_col);
 }

@@ -49,13 +49,23 @@ pub const Error = std.mem.Allocator.Error || error{
     StoreFull,
 };
 
+/// `InvalidValue` 를 조건별로 갈라 둔다 — 이유는 `notification_journal.HandoffError` 와 같다. 이 복원은
+/// exec 업그레이드의 활성화 단계에서 불리고, 지면 host 가 죽어 셸 전체가 SIGHUP 을 받는다. 사유를 오류
+/// 이름에 실으면 `restore_activation` 의 `stage=activate err={s}` 가 그대로 찍는다.
 pub const HandoffError = Error || error{
     DestinationNotEmpty,
     BadMagic,
     UnsupportedVersion,
     Truncated,
     TrailingBytes,
-    InvalidValue,
+
+    // 아래가 옛 `InvalidValue` 다.
+    EnabledFlagNotBool,
+    ConfigGenerationZeroWithState,
+    ControllerWithoutConfigGeneration,
+    LabelEmpty,
+    LabelTooLong,
+    LabelNotUtf8,
 };
 
 const Record = struct {
@@ -194,14 +204,19 @@ pub const MetadataStore = struct {
             const controller_generation = try reader.int(u64);
             const config_generation = try reader.int(u64);
             const enabled_raw = (try reader.take(1))[0];
-            if (enabled_raw > 1) return error.InvalidValue;
+            // 여섯 조건이 `InvalidValue` 하나로 뭉쳐 있었다. 이 함수는 `prepareRestoredGraph` 안에서
+            // exec 업그레이드의 활성화 단계에 불리므로, 여기서 지면 host 가 죽고 셸이 전부 SIGHUP 을
+            // 받는다. 사유는 오류 이름에 싣는다 — `restore_activation` 이 `err={s}` 로 이미 찍는다.
+            if (enabled_raw > 1) return error.EnabledFlagNotBool;
             if (config_generation == 0 and (controller_generation != 0 or enabled_raw != 0))
-                return error.InvalidValue;
-            if (controller_generation != 0 and config_generation == 0) return error.InvalidValue;
+                return error.ConfigGenerationZeroWithState;
+            if (controller_generation != 0 and config_generation == 0)
+                return error.ControllerWithoutConfigGeneration;
             const label_len = try reader.int(u16);
-            if (label_len == 0 or label_len > max_display_label_bytes) return error.InvalidValue;
+            if (label_len == 0) return error.LabelEmpty;
+            if (label_len > max_display_label_bytes) return error.LabelTooLong;
             const label_bytes = try reader.take(label_len);
-            if (!std.unicode.utf8ValidateSlice(label_bytes)) return error.InvalidValue;
+            if (!std.unicode.utf8ValidateSlice(label_bytes)) return error.LabelNotUtf8;
             const label = try self.allocator.dupe(u8, label_bytes);
             errdefer self.allocator.free(label);
             try candidate.records.put(self.allocator, runtime_id, .{

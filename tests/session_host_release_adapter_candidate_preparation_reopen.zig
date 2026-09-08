@@ -354,7 +354,7 @@ fn measureSample() !Sample {
     return .{ .open_ns = open_ns, .fence_ns = fence_ns, .close_ns = close_ns };
 }
 
-test "semantic reopen is credential-free with one resume product caller" {
+test "semantic reopen is credential-free with one resume product and one selector consumer" {
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_preparation_reopen.zig", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(source);
     inline for (.{ "GH_TOKEN", "release_adapter_github", "release_adapter_apple", "std.process", "std.posix.getenv" }) |forbidden|
@@ -363,15 +363,26 @@ test "semantic reopen is credential-free with one resume product caller" {
     defer src.close(std.testing.io);
     var walker = try posixWalk(src, std.testing.allocator);
     defer walker.deinit();
-    var product_callers: usize = 0;
+    var resume_product_seen = false;
+    var selector_seen = false;
+    var unexpected_callers: usize = 0;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind == .sym_link) return error.TestUnexpectedResult;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const product = try src.readFileAlloc(std.testing.io, entry.path, std.testing.allocator, .limited(16 * 1024 * 1024));
         defer std.testing.allocator.free(product);
-        product_callers += std.mem.count(u8, product, "release_adapter_candidate_preparation_reopen");
+        const callers = std.mem.count(u8, product, "release_adapter_candidate_preparation_reopen");
+        if (std.mem.eql(u8, entry.path, "platform/macos/session_host/release_adapter_candidate_resume_authority_product.zig")) {
+            try std.testing.expectEqual(@as(usize, 1), callers);
+            resume_product_seen = true;
+        } else if (std.mem.eql(u8, entry.path, "platform/macos/session_host/release_adapter_profile_authored_attestation_selector.zig")) {
+            try std.testing.expectEqual(@as(usize, 1), callers);
+            selector_seen = true;
+        } else unexpected_callers += callers;
     }
-    try std.testing.expectEqual(@as(usize, 1), product_callers);
+    try std.testing.expect(resume_product_seen);
+    try std.testing.expect(selector_seen);
+    try std.testing.expectEqual(@as(usize, 0), unexpected_callers);
 }
 
 fn openFdCount() !u32 {

@@ -1,6 +1,7 @@
 //! Credential-free profile selection owns freshly reopened authored subjects.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const evidence = @import("release_evidence");
 const manifest = @import("release_manifest");
@@ -230,6 +231,47 @@ test "upgrade selector fresh-reopens timing as the third retained subject" {
     _ = try fixture.tmp.dir.statFile(std.testing.io, "durable/profile-upgrade-timing.json", .{});
 }
 
+test "actual APFS selector measures both profiles without FD growth" {
+    const samples = 40;
+    var baseline_ns: [samples]u64 = undefined;
+    var upgrade_ns: [samples]u64 = undefined;
+    const fd_before = try openFdCount();
+    for (0..samples) |index| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        var environment: Environment = .{ .document = baseline_document };
+        var plan: selector.Plan = .{};
+        const started = monotonicNs();
+        try selector.select(std.testing.allocator, trustedContext(), environment.value(), fixture.paths(), &plan);
+        _ = try plan.fence(std.testing.allocator, trustedContext(), environment.value());
+        try plan.deinit();
+        baseline_ns[index] = monotonicNs() - started;
+    }
+    for (0..samples) |index| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.replaceWithUpgrade();
+        var environment: Environment = .{ .document = upgrade_document };
+        var plan: selector.Plan = .{};
+        const started = monotonicNs();
+        try selector.select(std.testing.allocator, trustedContext(), environment.value(), fixture.paths(), &plan);
+        _ = try plan.fence(std.testing.allocator, trustedContext(), environment.value());
+        try plan.deinit();
+        upgrade_ns[index] = monotonicNs() - started;
+    }
+    const fd_after = try openFdCount();
+    try std.testing.expectEqual(fd_before, fd_after);
+    std.mem.sort(u64, &baseline_ns, {}, std.sort.asc(u64));
+    std.mem.sort(u64, &upgrade_ns, {}, std.sort.asc(u64));
+    std.debug.print("profile_authored_attestation_selector_apfs schema=maru.session-host-profile-authored-attestation-selector-perf.v1 mode={s} samples_per_profile={d} failures=0 fd_delta=0 baseline_median_ns={d} baseline_p95_ns={d} baseline_max_ns={d} upgrade_median_ns={d} upgrade_p95_ns={d} upgrade_max_ns={d} retained_subjects=2/3 residue=0\n", .{
+        @tagName(builtin.mode), samples,
+        baseline_ns[samples / 2], baseline_ns[(samples * 95 - 1) / 100], baseline_ns[samples - 1],
+        upgrade_ns[samples / 2], upgrade_ns[(samples * 95 - 1) / 100], upgrade_ns[samples - 1],
+    });
+}
+
 test "borrowed path mutation is isolated and predecessor substitution is rejected" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -303,4 +345,19 @@ test "every allocation failure unwinds selector ownership" {
         break;
     }
     try std.testing.expect(fail_index > 0);
+}
+
+fn openFdCount() !u32 {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, "/dev/fd", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: u32 = 0;
+    while (try iterator.next(std.testing.io)) |_| count += 1;
+    return count;
+}
+
+fn monotonicNs() u64 {
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }

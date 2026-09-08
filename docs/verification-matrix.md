@@ -3346,6 +3346,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   timing 합계·overflow, alias/path/mode/link/inode drift와 owner 확립 뒤 fence 실패의 audit/reopen/cleanup 및 FD·staging residue 0을
   검증한다. 공용 `release_adapter_files` gate가 owner 인계 전 exclusive publication 실패의 same-inode cleanup·foreign replacement 보존을
   단일 출처로 맡는다.
+  GitHub-issued live timing record는 `release_adapter_live_timing_record.zig`의 credential-free final-address owner가 맡는다.
+  `test-session-host-release-adapter-live-timing-record`는 Debug·ReleaseFast에서 canonical v1 JSON의 exact repository/workflow/run/source/job/step,
+  RFC 3339 `Z`·numeric offset·0~9자리 fraction과 Gregorian calendar를 독립 환산하고 writer와 같은 millisecond truncation 뒤 duration을
+  교차검증한다. duplicate/unknown/reordered/trailing JSON, timestamp·identity·duration drift, 16 KiB 상한, input alias, copied/pre-owned owner,
+  post-parse storage mutation과 allocation fail-index는 publication 0이다. 이 component는 filesystem/network/token을 읽지 않으므로 실제
+  Actions artifact가 같은 run에서 왔다는 provenance와 protected release/U5 성공은 §11.100 후속 remote gate가 별도로 증명한다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

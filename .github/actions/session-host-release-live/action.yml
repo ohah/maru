@@ -1,4 +1,4 @@
-name: Session host baseline-A live release workflow
+name: Session host profile-aware live release workflow
 description: Run the closed eight-stage signed session-host release transaction
 
 inputs:

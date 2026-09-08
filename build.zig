@@ -14493,6 +14493,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-profile-upgrade-timing-artifact",
         "Publish the protected upgrade timing as a private canonical artifact",
     );
+    const session_host_release_adapter_live_timing_record_step = b.step(
+        "test-session-host-release-adapter-live-timing-record",
+        "Validate canonical GitHub-issued live timing records",
+    );
     const session_host_release_adapter_profile_authored_attestation_selector_step = b.step(
         "test-session-host-release-adapter-profile-authored-attestation-selector",
         "Select freshly reopened authored subjects without credentials",
@@ -15790,6 +15794,14 @@ pub fn build(b: *std.Build) void {
             run_profile_upgrade_timing_artifact_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_upgrade_timing_artifact_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
+            const live_timing_record_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_timing_record.zig"), .target = target, .optimize = composition_optimize });
+            const live_timing_record_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_live_timing_record.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_live_timing_record", .module = live_timing_record_mod }} }) });
+            const run_live_timing_record_tests = b.addRunArtifact(live_timing_record_tests);
+            run_live_timing_record_tests.addArg("--maru-expect-tests=12");
+            run_live_timing_record_tests.setCwd(b.path("."));
+            session_host_release_adapter_live_timing_record_step.dependOn(&run_live_timing_record_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_record_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
+            boundary_step.dependOn(&run_live_timing_record_tests.step);
             const profile_authored_attestation_selector_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_selector.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
                 .{ .name = "release_adapter_context", .module = context_mod },
                 .{ .name = "release_manifest", .module = manifest_mod },

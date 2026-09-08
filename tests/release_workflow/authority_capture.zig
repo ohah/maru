@@ -310,6 +310,10 @@ test "live 릴리스 timing job은 GitHub-issued top-level step만 read-only로 
         "/actions/runs/$MARU_RUN_ID/attempts/$MARU_RUN_ATTEMPT/jobs?per_page=100",
         "maru.session-host-release-live-timing.v1",
         "Run session host live release workflow",
+        "started_ms=$(/usr/bin/date -u --date=\"$started\" +%s%3N)",
+        "completed_ms=$(/usr/bin/date -u --date=\"$completed\" +%s%3N)",
+        "duration_ms=$((completed_ms - started_ms))",
+        "{$schema,$repository,$workflow,$run_id,$run_attempt,$source_sha,$job_name,$step_name,$started_at,$completed_at,$duration_ms}",
         "for attempt in $(/usr/bin/seq 1 12)",
         "test \"$attempt\" -lt 12",
         "/bin/sleep 5",
@@ -329,6 +333,7 @@ test "live 릴리스 action: eight-stage SSOT order와 최소 credential을 지�
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const text = try readLiveAction(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "name: Session host profile-aware live release workflow"));
 
     const ids = [_][]const u8{
         "session-host-candidate-pinning",

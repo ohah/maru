@@ -4805,6 +4805,53 @@ variable을 action environment 한 곳에만 투영하고 action이 `run-profile
 profile scalar output과 기존 baseline-only stage-3 호출이 0임을 고정한다. 이 slice는 authored evidence/timing attestation fan-out,
 aggregate/publication의 profile-aware evidence 선택과 protected B 시험 tag actual signed 실측을 완료하지 않는다.
 
+### 11.99 profile-aware authored evidence와 timing attestation plan
+
+stage 4 `authored_attestation` checkpoint와 action 호출 수는 profile에 따라 갈리지 않는다. 기존 repository-local live authored action은
+두 profile의 fixed pathname superset, 즉 durable preparation, baseline evidence, upgrade evidence, candidate manifest와 sibling timing output을
+항상 입력으로 받는다. YAML과 shell은 파일 존재 여부, evidence basename 또는 raw `MARU_SESSION_HOST_RELEASE_PROFILE_V1`을 읽어 profile을
+추론하지 않는다. 별도 credential-free 제품 selector가 current protected `Context`, canonical profile environment, retained preparation과 timing
+artifact를 함께 관측해 한 invocation 안의 final-address `Plan`을 만든 뒤 닫힌 projection만 GitHub attestation credential을 여는 payload
+action으로 넘긴다. process-local owner나 pointer, descriptor, seal, token을 GitHub step 사이에 직렬화하지 않는다.
+
+selector는 첫 filesystem·network·child callback 전에 모든 borrowed pathname을 bounded fixed storage로 복사하고, superset option exact-once,
+canonical absolute path와 manifest basename을 검증한다. preparation→baseline evidence, preparation→upgrade evidence,
+preparation→candidate manifest의 exact direct-child 관계만 허용하고 세 leaf는 서로 다르며, timing은 preparation과 그 세 child 모두의
+밖에 둔다. 이 명시 관계 밖의 same/ancestor/descendant는 금지한다. durable preparation은 fresh reopen하여 directory identity,
+mode `0700`, exact two-entry inventory, subject identity/mode `0600`/link count 1과 canonical evidence↔manifest semantic binding을 다시 확인한다.
+profile owner는 environment에서 bind한 뒤 같은 environment를 재관측하며, preparation의 evidence profile과 일치하지 않으면 output 0으로
+fail-close한다. copied/pre-owned/aliased plan, context·profile·pathname·inode·digest drift와 baseline/upgrade evidence 교환도 credential 호출 0이다.
+
+`baseline_a` plan은 `baseline-evidence.json`과 candidate manifest 두 subject만 소유하며 timing subject는 absent다. `upgrade_b` plan은
+`upgrade-evidence.json`, 같은 candidate manifest와 `profile-upgrade-timing.json` 세 subject를 소유한다. upgrade timing은 fresh reopen하여
+schema/profile/repository/tag/source commit/workflow ref/run id/run attempt가 evidence·manifest·current Context와 같고 다섯 timing 값이 모두
+0보다 크며 nested duration 불변을 만족하는지 검증한다. baseline에서 timing file이 존재하거나 upgrade에서 빠졌거나 빈/과대/느슨한 mode,
+symlink/hardlink, preparation 내부 중첩, evidence/manifest와 identity alias인 timing은 모두 거부한다. timing JSON에는 token, pathname,
+workspace, child output 또는 서명 credential을 넣지 않는다.
+
+제품 selector가 성공하면 profile scalar가 아니라 closed subject inventory를 출력한다. `evidence-path`, `evidence-name`, `manifest-path`,
+`manifest-name`, `timing-required`, `timing-path`, `timing-name`만 허용하고 각 pathname은 selector가 관측한 fixed superset 중 하나와 exact
+일치해야 한다. baseline의 `timing-required=false`에서는 timing path/name output이 둘 다 비어 있고 upgrade의 `true`에서는 둘 다 차 있다.
+live payload action은 evidence와 manifest attestation을 항상 한 번씩 호출하고 timing attestation은 오직 authenticated
+`timing-required=true`일 때 한 번 호출한다. payload 완료 뒤 별도 credential-free final-fence process는 selector의 in-memory owner를 복원한다고
+가정하지 않고 current Context/profile과 fixed pathname superset에서 선택을 독립적으로 다시 계산한다. 이 fresh selection이 pre-step projection과
+exact 일치하고 retained subjects와 생성 bundle을 모두 재관측하기 전에는 `authored_attestation succeeded` checkpoint를 commit하거나 bundle
+pathname을 후속 단계에 공개하지 않는다.
+
+bundle은 subject별 독립 GitHub attestation bundle이며 evidence/manifest/timing 사이 교환과 이전 run replay를 허용하지 않는다. final fence는
+각 bundle의 regular-file, owner, mode, link count, nonempty/16 MiB 상한과 subject 밖·preparation 밖 위치를 검증하고 plan의 subject digest 및
+current Context에 다시 결속한다. pre-step projection의 누락·중복·control byte·pathname/profile substitution, payload 실패, 조건과 timing output
+모순, bundle 누락·중복·alias·drift에서는 checkpoint를 정확히 한 번
+`failed`로 끝내며 부분 bundle output은 공개하지 않는다. cleanup은 GitHub가 이미 발행한 원격 attestation을 삭제할 수 있다고 추측하지 않고
+`audit_required`로 분류하며 local descriptor와 selector owner는 역순 best-effort로 닫는다.
+
+focused Debug·ReleaseFast gate는 두 profile의 exact 2/3 subject plan, environment/profile/preparation/timing/context drift, 모든 option/path
+오류, copied/pre-owned/alias/OOM과 callback-before-preflight 0을 검증한다. action source gate는 raw profile parse, file-existence branch,
+`GITHUB_ENV`, caller-selected subject와 baseline 이름 고정이 0이고 product plan→2/3 attestation→final fence→checkpoint 순서만 있음을 고정한다.
+actual filesystem harness는 baseline/upgrade 각각 fresh reopen, subject mutation과 bundle mutation, timing absent/present 경계, FD delta와 residue
+0을 검증하되 GitHub OIDC/network는 synthetic bundle writer로 대체한다. 이 slice는 profile-aware authored/timing bundle까지만 닫고 aggregate와
+publication의 evidence/bundle 선택, protected B tag의 실제 `actions/attest` 및 signed N-1/current 실측은 후속 gate로 남긴다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

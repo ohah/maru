@@ -7,6 +7,17 @@ cd "$repo_root"
 workflow=.github/workflows/release.yml
 live_action=.github/actions/session-host-release-live/action.yml
 
+required_unique_line() {
+    pattern=$1
+    file=$2
+    count=$(grep -F -c "$pattern" "$file" || true)
+    if test "$count" != 1; then
+        echo "error: expected exactly one '$pattern' in $file, found $count" >&2
+        exit 1
+    fi
+    grep -n -F "$pattern" "$file" | cut -d: -f1
+}
+
 test ! -e tools/publish-github-release.sh
 test -f "$live_action"
 test "$(grep -F -c 'uses: ./.github/actions/session-host-release-live' "$workflow")" = 1
@@ -14,14 +25,15 @@ test "$(grep -F -c 'name: Run session host live release workflow' "$workflow")" 
 test "$(grep -F -c 'id: session-host-live' "$workflow")" = 1
 ! grep -q -- '--clobber' "$workflow" "$live_action"
 
-pin_line=$(grep -n 'name: Pin signed candidate inputs' "$live_action" | cut -d: -f1)
-draft_line=$(grep -n 'name: Author baseline evidence and draft' "$live_action" | cut -d: -f1)
-publish_line=$(grep -n 'name: Publish candidate release' "$live_action" | cut -d: -f1)
-cleanup_line=$(grep -n 'name: Clean verified aggregate' "$live_action" | cut -d: -f1)
+pin_line=$(required_unique_line 'name: Pin signed candidate inputs' "$live_action")
+draft_line=$(required_unique_line 'name: Author profile-selected evidence and draft' "$live_action")
+publish_line=$(required_unique_line 'name: Publish candidate release' "$live_action")
+cleanup_line=$(required_unique_line 'name: Clean verified aggregate' "$live_action")
 test "$pin_line" -lt "$draft_line"
 test "$draft_line" -lt "$publish_line"
 test "$publish_line" -lt "$cleanup_line"
 test "$(grep -F -c 'GH_TOKEN: ${{ github.token }}' "$live_action")" = 3
+test "$(grep -F -c 'MARU_SESSION_HOST_RELEASE_PROFILE_V1: ${{ vars.SESSION_HOST_RELEASE_PROFILE_V1 }}' "$workflow")" = 1
 
 # Signing credentials are tag-only. A manual dispatcher can select an arbitrary
 # ref, so merely skipping the final upload would still expose Apple credentials

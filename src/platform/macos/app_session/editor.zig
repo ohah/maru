@@ -3706,6 +3706,9 @@ pub fn beginDiffBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f
     if (term.kind != .editor) return false;
     if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
     const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
+    // **`diffSearchSide` 로 뜬다 — `selection.side` 가 아니다.** 선택이 없으면 그 둘이 갈리는데
+    // (검색은 왼쪽으로 폴백한다), 지금은 씨앗이 늘 caret 을 세우므로 살아 있는 비교에서 그 상태가
+    // 도달 불가라 변이가 산다(16회차 T11). 그래도 셋이 읽는 그 답을 그대로 쓰는 것이 옳다.
     const was_side = diffSearchSide(self, term); // 바꾸기 **전**의 검색 열
     term.rt.editor_diff_selection = .{
         .side = hit.side,

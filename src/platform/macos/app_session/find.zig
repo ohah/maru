@@ -137,6 +137,10 @@ pub fn diffCaretSideChanged(self: *AppSession, term: *Term, was: editor_ops.Diff
     // **실제로 바뀌었을 때만** — 같은 열을 다시 클릭할 때도 다시 세면 `current` 가 0 으로 튀어
     // 사용자가 보던 매치를 잃는다. 판정은 `diffSearchSide` 하나로 한다(그 셋이 읽는 그 답이다).
     if (editor_ops.diffSearchSide(self, term) == was) return;
+    // **아래 `term` 을 `activeEditorTerm(self)` 로 바꿔도 답이 같다**(변이 14~16회차 T9·T13·T14) —
+    // 바로 위 가드가 둘을 같게 만들기 때문이다. 그래도 `term` 을 받는 이유는 **부른 쪽이 어느 Term
+    // 을 고쳤는지 말하게** 하기 위해서다: 가드가 언젠가 느슨해지면 그때 두 값이 갈리고, 그 갈림이
+    // 여기서 조용히 «활성 Term 을 고친다»가 되면 안 된다.
     self.chrome_host.find.current = 0;
     recomputeEditorFind(self, term);
     self.metal_dirty = true;

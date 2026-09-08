@@ -4743,6 +4743,28 @@ focused Debug·ReleaseFast gate는 exact 단계 순서와 projection, bootstrap/
 N-1/current child와 GitHub-issued `predecessor_auth_ns`, `signed_one_ns`, `signed_near_max_ns`, `runner_phase_ns`, `profile_phase_ns`를 최종 E2E
 실측으로 인정하며, workflow 배선과 checkpoint·attestation·draft publication 완료는 후속 slice다.
 
+### 11.97 profile-aware stage-3 command의 live checkpoint 결속
+
+live workflow의 stage 수와 checkpoint vocabulary는 profile에 따라 갈리지 않는다. baseline-A의 `prepare-candidate`와
+upgrade-B의 `prepare-profile-candidate`는 모두 기존 `draft_authoring` stage 하나를 소비하되,
+`release_adapter_live_workflow_command.zig`의 닫힌 `Selection`이 두 명령을 서로 다른 arm으로 보존한다. 두 arm은 같은
+stage-3 process outcome 분류와 credential/workspace 요구를 공유하지만 command identity는 각각 exact
+`prepare-candidate | prepare-profile-candidate`다. unknown command나 다른 stage command를 stage 3으로 축소하지 않는다.
+
+`release_adapter_live_workflow_owner.commandProcess`는 checkpoint의 fixed stage identity와 prepared child의 selected
+command identity를 함께 검증한다. checkpoint는 profile-independent `draft_authoring`만 알고, child owner만 두 exact command를
+안다. 따라서 profile-B를 아홉 번째 workflow stage로 추가하거나 기존 baseline command 이름을 환경에 따라 바꾸지 않는다.
+profile environment는 이 bridge가 해석하지 않고 credential-bearing child environment에 canonical
+`MARU_SESSION_HOST_RELEASE_PROFILE_V1` bytes를 exact once 전달한다. baseline arm은 이 값을 받지 않으며 ambient profile 값이
+있어도 child environment로 복사하지 않는다. copied/pre-owned execution, command/stage mismatch, profile environment 누락·빈 값·
+control byte·상한 초과는 child 실행과 checkpoint advance 0으로 fail-close한다.
+
+focused Debug·ReleaseFast gate는 두 stage-3 command의 distinct selection/identity, 동일 checkpoint stage와 outcome mapping,
+token/workspace/profile environment 최소화, validator argv의 exact 보존, baseline으로의 fallback 0을 검증한다. actual-process
+harness는 synthetic validator로 profile command의 success와 terminal failure가 기존 append-only checkpoint를 exact once 전진시키고
+stdout/stderr, FD delta와 residue가 0임을 검증한다. 이 slice는 fresh-process command→checkpoint bridge까지만 닫으며 composite
+action의 profile별 fixed pathname, authored attestation fan-out, release workflow caller와 protected B tag signed 실측은 후속 gate다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

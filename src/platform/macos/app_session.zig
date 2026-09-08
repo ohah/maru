@@ -20597,7 +20597,6 @@ pub const AppSession = struct {
         self.status_bar_hovered = null;
     }
 
-
     fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
         const h = self.statusBarHeightPx();
         if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) {

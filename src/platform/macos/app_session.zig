@@ -78171,6 +78171,97 @@ test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적대적 5회차 · #3330 과 같은 축)" {
+    // ⚠️ **이 스택의 첫 버그가 정확히 이 형태였다**(#3330): 크게 본 채 도크를 접으면 그림이 사라졌다.
+    // 원인은 「다시 올려야 함」 표시(`markAllNeedUpload`)가 **한 갈래를 빠뜨린** 것이었고, 뷰 전환은
+    // 열린 것을 닫아서 증상이 없고 **접기만** 그 길로 갔다.
+    //
+    // 목록 썸네일도 같은 길을 탄다 — GPU 텍스처는 회수되는데 `uploaded` 만 참으로 남으면 펴는
+    // 순간 그 자리가 빈다. 값으로 못박는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_K1\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/one.png\"}}]}}\n" ++
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_K1\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u1\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/c.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    image_gallery_ops.setFilter(session, .all);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+
+    // 실려 있는 상태를 확인한다 — 여기가 참이어야 아래가 무언가를 잰다.
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.tiles.items[0].uploaded) _ = session.tick() catch {};
+    }
+    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
+
+    // ── ① **접으면 「다시 올려야 함」으로 내려간다.** 텍스처가 회수되는데 표시가 안 내려가면
+    //    펴는 순간 그 자리가 빈다(#3330 이 그 결함이었다).
+    session.dock.collapsed = true;
+    session.metal_dirty = true; // 제품은 접기 토글에서 이 표시를 세운다 — 판정자가 그 자리를 대신한다
+    _ = session.tick() catch {};
+    try std.testing.expect(!session.image_gallery.tiles.items[0].uploaded);
+
+    // ── ② **펴면 돌아온다.** 픽셀은 그대로이므로 다시 디코드하지 않는다.
+    session.dock.collapsed = false;
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.tiles.items[0].uploaded) _ = session.tick() catch {};
+    }
+    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
+    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len); // 다시 안 풀었다
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

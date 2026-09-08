@@ -227,10 +227,15 @@ fn descendant(parent: []const u8, child: []const u8) bool {
 }
 
 fn canonicalAbsolute(path: []const u8) bool {
-    if (path.len < 2 or path[0] != '/' or path[path.len - 1] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    if (path.len < 2 or path[0] != '/' or path[path.len - 1] == '/' or hasControl(path)) return false;
     var it = std.mem.splitScalar(u8, path[1..], '/');
     while (it.next()) |component| if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
     return true;
+}
+
+fn hasControl(value: []const u8) bool {
+    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+    return false;
 }
 
 fn pathsAliasOwner(paths: Paths, owner: *const Plan) bool {

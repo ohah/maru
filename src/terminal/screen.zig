@@ -2104,6 +2104,7 @@ pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         // 바닥(스크롤 안 함)에서는 활성 화면이 최상단 — top_abs = sb_count(활성 행의 절대 시작).
         var snap = snapshot(self);
         snap.placements = self.buildPlacementViews(self.screen.sb.count);
+        snap.virtual_placements = self.kitty_virtual_placements.items; // U=1 격자(화면 위치는 placeholder 셀이 정한다)
         snap.images = self.buildImageViews();
         return snap;
     }
@@ -2155,6 +2156,7 @@ pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         .prompt_marks = self.viewport_prompt_marks,
         .last_command_exit = self.last_command_exit,
         .placements = self.buildPlacementViews(top_abs),
+        .virtual_placements = self.kitty_virtual_placements.items,
         .images = self.buildImageViews(),
         .dirty = self.dirty,
         // **스크롤 중에도 스크롤바 근거를 싣는다.** 이 둘이 빠져 기본값 0으로 나가던 것이

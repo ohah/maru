@@ -284,6 +284,21 @@ pub const KittyPlacement = struct {
     z: i32 = 0, // z-index(<0 텍스트 뒤, >=0 텍스트 앞).
 };
 
+/// **unicode placeholder(virtual placement)** — `a=p/T` 에 `U=1` 이 붙은 것. 커서 자리에 그리지 않고
+/// "이 이미지를 `columns`×`rows` 격자로 쓸 준비가 됐다"만 등록한다. 실제 위치는 화면에 찍힌 placeholder
+/// 셀(U+10EEEE + row/column diacritic 2개, 전경색 RGB = image_id)이 정하고, 렌더러가 그 셀을 타일로
+/// 환산한다. 베이스: kitty graphics protocol "Unicode placeholders".
+///
+/// **격자 크기를 여기 보관하는 이유**: placeholder 셀은 자기 타일 좌표만 갖고 전체 격자 크기를 모른다.
+/// 타일 픽셀 크기(= 이미지 크기 / 격자)를 알려면 이 값이 필요하다.
+pub const KittyVirtualPlacement = struct {
+    image_id: u32,
+    placement_id: u32,
+    columns: u32, // c: 격자 열 수
+    rows: u32, // r: 격자 행 수
+    z: i32 = 0,
+};
+
 /// kitty 이미지 placement의 source crop(UV용)과 목적지 픽셀 크기(quad/커서 advance용). buildGpuImages
 /// (렌더러)와 kittyDisplay의 자동 크기 커서 advance(코어)가 **같은 환산식**을 쓰도록 단일 출처로 둔다 —
 /// 어긋나면 화면에 그려진 이미지 행 수와 커서가 내려간 행 수가 달라진다.
@@ -437,6 +452,8 @@ pub const RenderSnapshot = struct {
     // 픽셀→셀 환산·클립은 렌더러 책임(코어는 셀 픽셀 크기를 모름). 좌표는 뷰포트 상대(row는 i32라 화면
     // 위로 벗어난 앵커도 노출 — 셀 span을 아는 렌더러가 가시성/클립을 정한다). 렌더는 후속 K-단계.
     placements: []const KittyPlacement = &.{},
+    // U=1 virtual placement(unicode placeholder). 화면의 placeholder 셀이 이 목록의 격자 크기로 타일을 뜬다.
+    virtual_placements: []const KittyVirtualPlacement = &.{},
     // kitty graphics 이미지(transmit된 픽셀)의 렌더용 뷰. 비어 있으면 이미지 없음(일반 경로 — 할당
     // 없음). 렌더러가 `placements`의 image_id로 여기서 픽셀을 찾아 GPU 텍스처를 캐시하고, `generation`이
     // 바뀔 때만 업로드한다(이미지당 개별 텍스처·upload-once). 매 frame 픽셀 복사 없이 storage 버퍼를

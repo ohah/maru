@@ -1026,7 +1026,11 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
     const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "links", "scrollback_len", "view_offset", "dirty" };
-    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
+    // `virtual_placements`(U=1 unicode placeholder 격자)는 **아직 원격 wire에 안 실린다** — 새 레코드
+    // kind가 필요한 프로토콜 확장이라 별도 단위로 뺐다. 그래서 **host-backed 세션에서는 U=1 이미지가
+    // 안 보인다**(로컬 in-process 경로만 동작). 이 항목을 옮기는 것이 곧 그 후속의 완료 조건이다 —
+    // `compared`로 옮기고 screen_stream에 레코드를 추가한다.
+    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit", "virtual_placements" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
             var classified = false;

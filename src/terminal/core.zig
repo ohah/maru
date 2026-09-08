@@ -483,6 +483,10 @@ pub const TerminalCore = struct {
     /// (max_kitty_placements)으로 악의적 대량 placement를 막는다 — 이미지 320MB 한계·APC 버퍼 한계와 같은
     /// 결의 방어선이다. K1(현재)은 저장/노출/생애주기(코어)까지 — 화면 렌더는 후속 K-단계.
     kitty_placements: std.ArrayListUnmanaged(StoredPlacement) = .empty,
+    /// U=1 virtual placement(unicode placeholder) — 화면 위치를 갖지 않고 «이 이미지를 c×r 격자로 쓴다»만
+    /// 등록한다. 실제 배치는 화면의 placeholder 셀이 정하므로 스크롤·eviction 보정 대상이 아니다(그 셀이
+    /// 텍스트와 함께 움직인다). 같은 (image_id, placement_id)는 교체한다.
+    kitty_virtual_placements: std.ArrayListUnmanaged(types.KittyVirtualPlacement) = .empty,
     /// renderSnapshot이 placement를 뷰포트 상대 KittyPlacement로 환산해 담는 재사용 버퍼(placement가
     /// 있을 때만 lazy 할당, viewport_cells와 같은 규율). 없으면 비어 있어 일반(placement 없는) 경로는
     /// 추가 비용이 없다.
@@ -644,6 +648,7 @@ pub const TerminalCore = struct {
         self.resetInputModes();
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
+        self.kitty_virtual_placements.clearRetainingCapacity(); // virtual placement(U=1)도 함께
         parser.abortKittyChunk(self); // 진행 중이던 chunked 전송도 폐기(parser 소유)
         parser.reclaimOscBuffer(self); // 방어적 백스톱 — RIS가 OSC 수집 잔재를 남기지 않게(다른 파서 버퍼 정리와 일관)
         self.grapheme_cluster_mode = false;
@@ -709,6 +714,7 @@ pub const TerminalCore = struct {
         self.response.deinit(self.allocator);
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
+        self.kitty_virtual_placements.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
         self.osc_buffer.deinit(self.allocator);
@@ -7557,6 +7563,42 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     core.clearResponse();
     try core.write("\x1b_Ga=d,d=c,i=8\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=8;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+}
+
+test "kitty U=1 unicode placeholder: virtual placement만 등록하고 커서 자리에 그리지 않는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [160]u8 = undefined;
+    // **회귀 판정**: U=1 을 안 읽던 시절엔 이 명령이 «즉시 커서 자리에 그리기»로 떨어져 엉뚱한 곳에
+    // 이미지가 떴다(tmux 경유 terminal-browser 가 정확히 이 경로다 — 2026-09-08 실측).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=5,U=1,c=4,r=2,q=2;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len); // 일반 placement 는 안 생긴다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+    const vp = core.kitty_virtual_placements.items[0];
+    try std.testing.expectEqual(@as(u32, 5), vp.image_id);
+    try std.testing.expectEqual(@as(u32, 4), vp.columns);
+    try std.testing.expectEqual(@as(u32, 2), vp.rows);
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row); // 커서도 안 움직인다
+    // 격자(c/r)가 없으면 타일 크기를 못 정하므로 거부한다(명세상 필수).
+    core.clearResponse();
+    try core.write("\x1b_Ga=p,i=5,U=1\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=5;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 같은 (image_id, placement_id) 는 교체한다.
+    try core.write("\x1b_Ga=p,i=5,U=1,c=8,r=3,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+    try std.testing.expectEqual(@as(u32, 8), core.kitty_virtual_placements.items[0].columns);
+    // delete 는 virtual placement 도 함께 지운다(orphan 금지).
+    try core.write("\x1b_Ga=d,d=I,i=5,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_virtual_placements.items.len);
+    // RIS 는 이미지·placement 와 함께 virtual placement 도 공장 초기화한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=6,U=1,c=2,r=2,q=2;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+    try core.write("\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_virtual_placements.items.len);
 }
 
 test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {

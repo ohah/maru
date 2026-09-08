@@ -19447,7 +19447,7 @@ pub const AppSession = struct {
                     // 빼, 다시 활성화되면 재업로드되게(Swift 캐시와 동기). 멀티 surface 전환 시 정합.
                     self.pruneKittyUploaded(kg_live_ids.items);
                     if (snap.placements.len > 0) {
-                        kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px) catch &.{};
+                        kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px, snap.cells, snap.graphemes, snap.virtual_placements) catch &.{};
                         for (kg_images) |*gi| {
                             gi.origin_x = active_origin_x;
                             gi.origin_y = active_origin_y;

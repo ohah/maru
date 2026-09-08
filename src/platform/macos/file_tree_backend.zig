@@ -73,6 +73,15 @@ pub const Result = struct {
     }
 };
 
+/// 워커 한 자리. `done` 은 **워커가 마지막에** 세우고, 다음 제출이 그 표시를 보고 거둔다(join).
+///
+/// **`done` 을 먼저 세우면 안 된다** — 뮤텍스를 쥔 채 join 하는 쪽과 그 뮤텍스를 기다리는 워커가
+/// 교착한다(디코드 백엔드가 같은 자리에 같은 주석을 갖는다).
+const Slot = struct {
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+};
+
 /// 원격 job 의 목적지(RF2b). 문자열은 **job 소유**다 — 관측 캐시를 가리키면 다음 갱신이 밑을 바꾼다
 /// (`remoteScmTarget` 이 버퍼 복사로 푸는 그 문제).
 const RemoteTarget = struct {
@@ -86,6 +95,8 @@ const RemoteTarget = struct {
 };
 
 const Job = struct {
+    /// 이 워커가 쓰는 슬롯. 끝날 때 그 자리의 `done` 을 세워 다음 제출이 거두게(join) 한다.
+    slot: usize = 0,
     state: *State,
     path: []u8,
     kind: ResultKind,
@@ -121,6 +132,17 @@ const State = struct {
     results: [max_results]Result = undefined,
     results_len: usize = 0,
     shutting_down: bool = false,
+    /// 도는 워커의 **스레드 핸들**. `deinit` 이 여기서 join 한다.
+    ///
+    /// ⚠️ **detach 하지 않는다.** 떼어 놓으면 그 스레드가 든 `State` 참조가 프로세스보다 오래
+    /// 살 수 있고, 그러면 마지막 `release` 가 안 돌아 **`State` 가 통째로 샌다** — CI 가 실제로
+    /// 그것을 잡았다(`file_tree_backend.zig:137 in init` 이 leaked 로 보고됐다). 그리고 그 뒤
+    /// 트레이스를 찍는 동안 살아 있는 워커가 같은 메모리를 만져 **segfault** 까지 났다.
+    ///
+    /// **로컬에서는 거의 안 드러난다** — 워커가 제때 끝나느냐가 기계 속도에 달렸기 때문이다.
+    /// 갤러리 스캔 워커가 **같은 결함을 먼저 겪고 같은 처방으로 고쳤다**
+    /// (`agent_image_scan_backend` 의 `worker_thread` 주석).
+    slots: [max_inflight]Slot = [_]Slot{.{}} ** max_inflight,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -222,12 +244,21 @@ pub const Backend = struct {
         _ = state.refs.fetchAdd(1, .monotonic);
         state.mutex.unlock(state.io);
 
+        // **쓸 자리를 먼저 잡는다.** 끝난 스레드는 여기서 거둔다(join 은 즉시 돌아온다).
+        // 못 잡으면 이 한 건을 미룬다 — `finish`(`inflight--`) 와 `done` 사이의 틈이라 다음 tick 에
+        // 다시 걸린다(디코드 백엔드의 `freeSlot` 과 같은 규율).
+        const slot = claimSlot(state) orelse {
+            if (remote != null) decrementRemote(state);
+            finishWithoutResult(state);
+            return false;
+        };
         const job = state.allocator.create(Job) catch {
             if (remote != null) decrementRemote(state);
             finishWithoutResult(state);
             return false;
         };
         job.* = .{
+            .slot = slot,
             .state = state,
             .path = path,
             .kind = kind,
@@ -244,8 +275,29 @@ pub const Backend = struct {
             finishWithoutResult(state);
             return false;
         };
-        thread.detach();
+        // **detach 하지 않는다** — 핸들을 슬롯에 둔다(`State.slots` 의 주석이 그 이유를 적는다).
+        state.mutex.lockUncancelable(state.io);
+        state.slots[slot].thread = thread;
+        state.mutex.unlock(state.io);
         return true;
+    }
+
+    /// 쓸 수 있는 슬롯 하나. 끝난 스레드는 여기서 거둔다.
+    ///
+    /// **도는 스레드는 절대 join 하지 않는다** — 그러면 프레임이 그 자리에서 멈춘다. `done` 이
+    /// 선 자리만 거둔다.
+    fn claimSlot(state: *State) ?usize {
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        for (&state.slots, 0..) |*slot, i| {
+            if (slot.thread == null) return i;
+            if (!slot.done.load(.acquire)) continue;
+            slot.thread.?.join(); // 이미 끝났다
+            slot.thread = null;
+            slot.done.store(false, .release);
+            return i;
+        }
+        return null;
     }
 
     fn finishWithoutResult(state: *State) void {
@@ -273,6 +325,7 @@ pub const Backend = struct {
         result.expected_root_generation = job.expected_root_generation;
         result.root_operation = job.root_operation;
         result.root_validation_round = job.root_validation_round;
+        const job_slot = job.slot;
         state.allocator.destroy(job);
 
         state.mutex.lockUncancelable(state.io);
@@ -287,7 +340,12 @@ pub const Backend = struct {
         }
         state.inflight -= 1;
         if (was_remote) state.remote_inflight -= 1;
+        const slot = job_slot;
         state.mutex.unlock(state.io);
+        // ⚠️ **`done` 은 참조를 놓기 전에, 뮤텍스를 놓은 뒤에 세운다.** 뮤텍스를 쥔 채 세우면
+        // 그 자리를 거두려고 join 하는 쪽과 교착한다. 그리고 `release` 보다 먼저 세워야 `State` 가
+        // 사라진 뒤 이 필드를 만지지 않는다.
+        state.slots[slot].done.store(true, .release);
         state.release();
     }
 
@@ -358,7 +416,21 @@ pub const Backend = struct {
         for (state.results[0..state.results_len]) |*result| result.deinit(state.allocator, state.io);
         state.results_len = 0;
         state.mutex.unlock(state.io);
-        // worker는 heap State ref를 보유한다. 느리거나 멈춘 FS I/O를 main actor에서 기다리지 않고 마지막 worker가 정리한다.
+        // **워커를 거두고 나간다.** 예전에는 detach 라 「마지막 워커가 정리한다」에 맡겼는데, 그러면
+        // 프로세스가 먼저 끝날 때 마지막 `release` 가 안 돌아 **`State` 가 통째로 샌다** — CI 가
+        // 실제로 그것을 잡았다(`file_tree_backend.zig:137 in init`).
+        //
+        // ⚠️ **그 대가는 안다**: 여기서 진행 중인 스캔이 끝날 때까지 기다린다. 로컬 디렉터리 하나는
+        // 밀리초지만 **원격(SSH)은 더 길 수 있다.** 그래도 이 길을 고른 이유는 ① `shutting_down` 이
+        // 이미 새 제출을 막아 대기가 **도는 것들로 유계**이고(최대 `max_inflight` = 4), ② 새는 쪽은
+        // 「조용히 그리고 남의 판정자에 붙어」 드러나 원인을 찾기가 훨씬 비싸기 때문이다. 갤러리
+        // 스캔 워커가 같은 결함을 먼저 겪고 같은 처방으로 고쳤다.
+        for (&state.slots) |*slot| {
+            if (slot.thread) |t| {
+                t.join();
+                slot.thread = null;
+            }
+        }
         state.release();
     }
 };
@@ -1602,6 +1674,42 @@ test "file tree backend retirement releases owner without waiting for worker gen
 }
 
 // ── 원격 wire → Result 매핑 판정자(RF2b) — ssh 없이, 어느 호스트에서든 돈다 ─────────────────────
+
+test "워커를 거두고 나간다 — 결과를 안 가져가도 State 가 안 샌다" {
+    // ⚠️ **CI 가 실제로 잡은 결함이다.** 예전에는 워커를 detach 하고 「마지막 워커가 정리한다」에
+    // 맡겼는데, 프로세스가 먼저 끝나면 마지막 `release` 가 안 돌아 **`State` 가 통째로 샌다**
+    // (`file_tree_backend.zig:137 in init` 이 leaked 로 보고됐다). 그 뒤 트레이스를 찍는 동안
+    // 살아 있는 워커가 같은 메모리를 만져 **segfault** 까지 났다.
+    //
+    // **로컬에서는 거의 안 드러난다** — 워커가 제때 끝나느냐가 기계 속도에 달렸다. 그래서 이
+    // 판정자는 「빨리 끝나기」에 기대지 않고 **결과를 한 번도 안 가져간 채** `deinit` 을 부른다.
+    // 그것이 「워커가 아직 돌거나 방금 끝났다」를 가장 확실히 만드는 모양이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "a" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "b" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    var backend = try Backend.init(allocator, io);
+    // **상한까지 채워 건다.** 하나만 걸면 「슬롯 하나」만 재고, 자리가 넷인 것을 안 잰다.
+    var submitted: usize = 0;
+    var i: usize = 0;
+    while (i < max_inflight) : (i += 1) {
+        const path = try allocator.dupe(u8, root);
+        if (backend.submit(path, 0)) submitted += 1 else allocator.free(path);
+    }
+    try std.testing.expect(submitted > 0);
+
+    // **결과를 안 가져간다.** 워커가 아직 돌거나 방금 끝난 상태에서 나간다 — 여기서 새면
+    // `testing.allocator` 가 프로세스 끝이 아니라 **이 판정자에서** 잡는다.
+    backend.deinit();
+}
 
 test "원격 매핑: 완결된 목록이 entries·신원·ok 로 풀린다" {
     const a = std.testing.allocator;

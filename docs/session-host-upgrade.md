@@ -4931,6 +4931,37 @@ max 451.677ms, upgrade median 32.140ms, p95 84.151ms, max 84.215ms였다. 실패
 재검증, synthetic attestation JSON parse/bind 및 2/3 child spawn을 포함한다. 실제 GitHub network·OIDC·bundle 발행 latency는 포함하지
 않으므로 이 수치를 live release wall time이나 원격 p95로 해석하지 않는다.
 
+#### 11.99d live authored checkpoint의 profile-aware 합성
+
+repository-local `session-host-release-live-authored-attestation` action이 stage 4의 유일한 합성 owner다. 이 action은 profile을
+파싱하거나 파일 존재 여부로 추론하지 않고, stage 3가 고정한 preparation·baseline evidence·upgrade evidence·manifest·timing의
+pathname superset과 checkout 전에 고정한 GitHub CLI pathname/SHA-256을 입력으로 받는다. checkpoint `admit` 뒤 credential-free
+selector process를 exact once 실행하고, 그 일곱 scalar만 profile-aware payload action에 넘긴다. payload가 성공한 뒤에는 같은 일곱
+scalar와 생성된 2/3 bundle pathname을 credential-free final-fence process에 exact once 넘긴다. selector와 final fence에는
+`GH_TOKEN`을 전달하지 않고, credential은 payload action의 기존 single-subject attestation 경계에서만 열린다.
+
+selector output과 final-fence output은 각각 별도 GitHub step output file에만 기록한다. shell은 stdout을 변수로 포획해 재파싱하거나
+`eval`, `source`, `GITHUB_ENV`로 복원하지 않는다. selector·payload·final-fence 세 step은 모두 `continue-on-error`로 terminal outcome을
+stage owner에게 돌려준다. payload는 selector success에서만, final fence는 selector와 payload가 모두 success일 때만 실행한다. 마지막
+`if: always()` checkpoint step 하나만 `selector outcome`, `payload outcome`, `fence outcome`, final-fence의 세 bundle output을 함께
+판정한다. 셋 다 success이고 baseline의 timing bundle이
+empty 또는 upgrade의 timing bundle이 nonempty인 canonical tuple일 때만 `authored_attestation succeeded`를 exact once commit한 뒤
+세 bundle pathname을 공개한다. 그 밖의 failure·cancelled·skipped·unknown outcome, 부분/개행/control-byte output, profile/timing
+모순은 `authored_attestation failed`를 exact once commit하고 output 0으로 끝낸다. admit 실패 전에는 payload/fence/checkpoint commit이
+없고, failed commit 자체가 실패하면 원래 원격 attestation을 삭제했다고 주장하지 않으며 action도 nonzero다.
+
+상위 live workflow는 baseline 이름을 고정하지 않는다. setup에서 두 evidence fixed pathname과 timing pathname을 만들고 stage-4
+action에 superset 그대로 넘긴다. stage-4의 공개 output은 `evidence-bundle-path`, `manifest-bundle-path`, `timing-bundle-path` 세 개이며,
+후속 aggregate는 profile-aware evidence pathname과 bundle 집합을 아직 소비하지 않는다. 따라서 이 slice는 selector→2/3 payload→
+final fence→checkpoint의 live action 결속까지만 닫는다. aggregate/publication의 profile-aware evidence·timing bundle 선택은 다음
+slice가 소유하고, protected B tag의 실제 GitHub-issued bundle과 N-1/current signed 실측은 최종 원격 gate가 소유한다.
+
+source gate는 action의 입력/output vocabulary, `admit→select→payload→fence→commit` 순서, selector/fence exact-one executable,
+payload exact-one action, 최소 credential 경계, `if: always()` commit owner와 기존 baseline-only payload 0을 고정한다. 합성 harness는
+실제 shell step을 흉내 내는 별도 fresh process에서 baseline/upgrade success, selector/payload/fence failure, invalid/unknown outcome과
+checkpoint commit failure를 실행해 succeeded/failed exact once, 공개 output 3/0, child call 1/0/1과 FD·temporary residue 0을
+검증한다. 이 로컬 harness는 GitHub expression engine·OIDC·network를 합성하므로 actual workflow 성공 증거로 해석하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

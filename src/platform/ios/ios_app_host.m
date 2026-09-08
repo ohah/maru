@@ -145,7 +145,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     /// 스타일 비트(0~3)로 바로 찾는다 — SGR 1/3 은 **다른 글리프**라 폰트 파일이 따로 있어야 한다.
     CTFontRef _atlasFaces[4];
     unsigned int _atlasH;
-    /// 지금 구워 둔 셀 크기(기기 픽셀). 코어가 원하는 값과 달라지면 다시 굽는다.
+    /// 지금 서 있는 텍스처의 격자(기기 픽셀). 코어가 원하는 값과 달라지면 다시 굽는다.
+    /// **자라는 글자는 이 격자에 굽는다** — 코어가 원하는 크기가 아니라. 둘이 갈리면
+    /// `replaceRegion:` 이 텍스처 밖을 가리킨다(다시 굽기가 실패한 프레임이 그 경우다).
+    unsigned int _bakedCellW;
     unsigned int _bakedCellH;
     CADisplayLink *_link;
     /// **조합 중 문자열만 담는 1줄짜리 가짜 문서.** 확정 전에는 여기 있고 코어엔 안 간다 —
@@ -235,9 +238,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
             font = korean;
             CTFontGetGlyphsForCharacters(font, &c, &glyph, 1);
         }
-        // **베이스라인은 셀에 비례한다**(옛 값 8 은 32px 셀 기준이었다). 셀이 커졌는데
+        // **여백과 베이스라인은 셀에 비례한다**(옛 값 1/8 은 24×32 셀 기준이었다). 셀이 커졌는데
         // 이 값을 상수로 두면 글자가 셀 아래에 붙어 위가 잘린다.
-        CGPoint pos = CGPointMake(col * CW + CW / 24 + 1, H - (row + 1) * CH + CH / 4);
+        //
+        // **옛 값을 그 크기에서 그대로 재현한다**: `CW/24` 는 CW=24 에서 1, `CH/4` 는 CH=32 에서
+        // 8 이다. 한때 `CW/24 + 1` 로 적었는데 그러면 옛 크기에서 2 가 돼 글자가 1px 오른쪽으로
+        // 밀렸다 — 0 이 될까 걱정한 것인데, 셀 하한(32)이 CW 를 24 아래로 못 내리므로 필요 없다.
+        CGPoint pos = CGPointMake(col * CW + CW / 24, H - (row + 1) * CH + CH / 4);
         if (glyph) CTFontDrawGlyphs(font, &glyph, &pos, 1, ctx);
         CGSize adv = CGSizeZero;
         if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
@@ -248,6 +255,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     }
     // 온디맨드 성장이 같은 폰트를 계속 쓰므로 여기서 소유권을 넘겨받는다 —
     // 아래 release 뒤에 retain 하면 해제된 객체를 만진다(그렇게 짰다가 앱이 죽었다).
+    // **다시 구울 때 옛 폰트를 놓는다.** 이 메서드는 이제 한 번만 도는 게 아니다(셀이 바뀌면
+    // 다시 돈다) — 안 놓으면 다시 구울 때마다 CTFont 다섯이 샌다. ivar 은 0 으로 시작하므로
+    // 첫 굽기에서는 아무것도 안 놓는다.
+    if (_atlasFont) CFRelease(_atlasFont);
     _atlasFont = (CTFontRef)CFRetain(base);
     // **굵게·기울임 판도 연다.** 가짜 굵게(획을 덧그리기)는 advance 가 달라져 자간이 어긋난다 —
     // Jetendard 는 네 판을 다 동봉하므로 파일로 고른다. 없으면 보통 판으로 되돌린다.
@@ -265,13 +276,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
             if (ds) CFRelease(ds);
         }
         if (!f) { NSLog(@"MARU_CHROME bundled_font_missing style=%d", s); f = (CTFontRef)CFRetain(base); }
+        if (_atlasFaces[s]) CFRelease(_atlasFaces[s]);
         _atlasFaces[s] = f;
     }
     CFRelease(base); CFRelease(korean);
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
     _atlasCols = COLS; _atlasRows = maru_mobile_atlas_rows(); _atlasH = H;
-    _bakedCellH = CH;
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
@@ -282,6 +293,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                            width:W height:H mipmapped:NO];
     _colorTex = [_dev newTextureWithDescriptor:ctd];
+    // **격자는 텍스처를 세운 «뒤» 에 기록한다** — 굽는 자리들이 이 값으로 슬롯을 계산한다.
+    // 만들기가 실패해도 그 두 자리는 텍스처가 nil 인 것을 보고 빠지므로 여기 조건은 안 둔다.
+    _bakedCellW = CW; _bakedCellH = CH;
     [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:gray bytesPerRow:W];
     // 래스터 결과를 남긴다 — 두 플랫폼의 픽셀 차이를 재는 하네스(`atlas_diff.py`)가 읽는다.
     // **요청할 때만 쓴다.** 제품이 매 실행마다 384KB 를 남길 이유가 없다.
@@ -863,7 +877,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
 - (BOOL)bakeColorGlyph:(const unsigned int *)cps count:(unsigned int)ncp style:(unsigned int)style {
     if (!_colorTex) return NO;
-    const unsigned int CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
+    // 커버리지 아틀라스와 **같은 격자**다(같은 크기로 함께 만들어진다) — 여기서도 코어가
+    // 원하는 크기가 아니라 서 있는 격자를 쓴다.
+    const unsigned int CW = _bakedCellW, CH = _bakedCellH;
     unsigned int slot = maru_mobile_next_color_slot(_atlasCols);
     if (slot == 0xFFFFFFFF) return NO;   // 버릴 자리도 없다(전부 이번 프레임 것)
     unsigned int col = slot >> 16, row = slot & 0xFFFF;
@@ -891,7 +907,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                 initWithString:str
                     attributes:@{(__bridge NSString *)kCTFontAttributeName: (__bridge id)face}]);
         if (line) {
-            CGContextSetTextPosition(ctx, CW / 24 + 1, CH * 3 / 16);  // 셀에 비례(옛 6/32)
+            CGContextSetTextPosition(ctx, CW / 24, CH * 3 / 16);  // 셀에 비례(옛 6/32)
             CTLineDraw(line, ctx);   // 컬러 글리프(sbix/COLR)는 CTLineDraw 가 색까지 그린다
             CFRelease(line);
             ok = YES;
@@ -916,7 +932,11 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **마지막 항목을 그 자리로** 당겨 오므로, 앞으로 진행하면 당겨진 것을 건너뛴다(실측).
     // 뒤에서부터 가면 지워지는 자리가 항상 훑은 뒤쪽이라 앞쪽이 흔들리지 않는다 —
     // 목록 크기를 host 가 따로 알 필요도 없어진다(그 상수를 양쪽에 두면 또 어긋난다).
-    const unsigned int CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
+    // **코어에 묻지 않는다 — 지금 서 있는 텍스처의 격자로 굽는다.** 코어는 「원하는」 크기를
+    // 답하는데, 다시 굽기가 실패한 프레임에서는 그 값이 텍스처 격자보다 크다. 그대로 쓰면
+    // 아래 `replaceRegion:` 이 텍스처 밖을 가리킨다. (텍스처가 서 있으면 이 값도 서 있다 —
+    // 둘을 같은 자리에서 세우므로 여기서 0 을 따로 막지 않는다.)
+    const unsigned int CW = _bakedCellW, CH = _bakedCellH;
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
@@ -976,7 +996,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         CGColorRelease(ink);
         double width = 0;
         if (line) {
-            CGContextSetTextPosition(ctx, CW / 24 + 1, CH / 4);  // 셀에 비례(옛 8/32) — 원점이 곧 셀 원점
+            CGContextSetTextPosition(ctx, CW / 24, CH / 4);  // 셀에 비례(옛 8/32) — 원점이 곧 셀 원점
             CTLineDraw(line, ctx);
             width = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
             CFRelease(line);
@@ -1182,15 +1202,22 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                                   (unsigned int)safe.top, (unsigned int)safe.bottom,
                                   (unsigned int)safe.left, (unsigned int)safe.right,
                                   (unsigned int)_keyboardH, 1000, &lw, &lh);
-    unsigned int n = maru_mobile_build(lw, lh,
-                                       (unsigned long long)(CACurrentMediaTime() * 1000.0));
-    // **굽는 크기가 어긋나면 다시 굽는다.** 처음 굽는 것은 첫 프레임보다 **먼저** 일어나서 그때는
-    // 기기 배율도 설정 글자 크기도 모른다 — 기본값으로 구운 뒤 여기서 바로잡는다. 이 줄이 없으면
-    // 셀을 코어가 정해도 아무 소용이 없다(그렇게 짰다가 선명도가 그대로였다).
+    // **굽는 크기가 어긋나면 다시 굽는다 — `build` 보다 먼저.** 처음 굽는 것은 첫 프레임보다
+    // **먼저** 일어나서 그때는 기기 배율도 설정 글자 크기도 모른다 — 기본값으로 구운 뒤 여기서
+    // 바로잡는다. 이 줄이 없으면 셀을 코어가 정해도 아무 소용이 없다(그렇게 짰다가 선명도가
+    // 그대로였다).
+    //
+    // **순서가 중요하다.** 다시 구우면 텍스처를 새로 만들므로 **자라난 글자(한글·이모지)의
+    // 그림이 사라진다** — 등록부를 비우는 것은 `maru_mobile_build` 안의
+    // `resetAtlasIfBakeSizeChanged` 라서, build 뒤에 다시 구우면 이번 프레임은 「등록은 있는데
+    // 그림은 없는」 칸을 그린다(한 프레임 동안 한글이 빈칸으로 뜬다). 먼저 구우면 같은 프레임의
+    // build 가 그 자리에서 등록부를 비우고 다시 굽는 목록에 올린다.
     if (_glyphTex && maru_mobile_atlas_cell_h() != _bakedCellH) {
         NSLog(@"MARU_ATLAS rebake cell=%u→%u", _bakedCellH, maru_mobile_atlas_cell_h());
         [self rasterizeAtlasOnDevice];
     }
+    unsigned int n = maru_mobile_build(lw, lh,
+                                       (unsigned long long)(CACurrentMediaTime() * 1000.0));
 
     // **서술자는 idle 로 빠지기 전에 견준다**(M9). 아래 M14 조기 return 뒤에 두면 화면이 멈춘
     // 프레임에서 알림이 안 나가고, 스크린 리더 커서가 옛 버튼에 남는다.

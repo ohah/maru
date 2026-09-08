@@ -271,6 +271,28 @@ unsigned long maru_mobile_a11y_take_announcement(char *out, unsigned long cap);
    = 20줄 상한 × 한 줄 상한(960바이트). */
 #define MARU_A11Y_ANNOUNCE_MAX 19200
 
+/* 낭독기가 **스크롤을 요청했다**(M9b). `back` 이면 위로(스크롤백 쪽), `page` 면 한 화면·아니면 한 줄.
+   **얼마나 미는지는 코어가 정한다** — host 는 방향과 단위만 말한다.
+
+   돌려주는 값은 「움직였나」다(1=움직였다). 그 답이 있어야 낭독기가 「더 없다」를 말할 수 있다:
+   iOS `accessibilityScroll:` 의 반환값이 곧 이것이고, Android 는 이 값으로 `ACTION_SCROLL_*` 를
+   낼지 정한다. 안 움직였는데 1 을 답하면 낭독기가 끝에서 계속 「됐다」고 말해 사용자가 갇힌다. */
+unsigned int maru_mobile_a11y_scroll(unsigned int back, unsigned int page);
+
+/* 그쪽으로 **갈 수 있나**(1=있다). Android 는 갈 수 있을 때만 `ACTION_SCROLL_*` 를 노드에 단다 —
+   늘 달면 끝에서도 손짓이 먹은 것처럼 굴어 사용자가 갇힌다. iOS 는 `accessibilityScroll:` 의
+   반환값으로 같은 것을 말하므로 따로 안 묻는다. */
+unsigned int maru_mobile_a11y_can_scroll(unsigned int back);
+
+/* 낭독기 **초점이 그 서술자에 닿았다**(M9b — 가장자리에서 이어지기). host 는 초점이 옮겨 갈 때마다
+   부른다(iOS `accessibilityElementDidBecomeFocused` · Android `ACTION_ACCESSIBILITY_FOCUS`).
+   초점이 우리 요소를 벗어났으면 없는 index(예: `maru_mobile_a11y_count()`)를 넘긴다.
+
+   **판단은 코어가 한다**: 본문 줄인지, 화면의 맨 끝인지, 밀 때가 됐는지(같은 가장자리에 다시
+   닿았을 때다 — 처음 닿은 것은 「거기까지 읽었다」이지 「더 가겠다」가 아니다). host 가 그것을
+   나눠 가지면 두 플랫폼이 다른 때에 움직인다. */
+void maru_mobile_a11y_focus(unsigned int index);
+
 /* 이번 `maru_mobile_build` 가 낸 그림이 **지난 프레임과 다른가**(1=그려야 한다). build 뒤에 읽는다.
    0 이면 host 는 GPU 작업(획득·제출·프레젠트)을 통째로 건너뛴다 — 터미널은 대부분의 시간이
    정지 화면이라 여기서 얻는 것이 가장 크다(M14).

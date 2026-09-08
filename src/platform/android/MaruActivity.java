@@ -91,6 +91,9 @@ public class MaruActivity extends android.app.NativeActivity {
     private static native int nativeA11ySetPos(int index);
     /** 두 번 두드리기 — **누르는 경로 그대로** 누른다. */
     private static native boolean nativeA11yClick(int index);
+    private static native void nativeA11yFocus(int index);
+    private static native int nativeA11yScroll(int back, int page);
+    private static native int nativeA11yCanScroll(int back);
 
     /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
      *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
@@ -144,6 +147,16 @@ public class MaruActivity extends android.app.NativeActivity {
                     // **자식을 붙이지 않으면 아무것도 못 찾는다.** 순서는 브리지가 정한
                     // 읽는 순서 그대로다 — 여기서 다시 세우지 않는다.
                     for (int i = 0; i < n; i++) host.addChild(view, i);
+                    // **스크롤백을 훑는 길**(M9b — 페이지 이동). TalkBack 은 이 동작이 붙어 있어야
+                    // 스크롤 손짓을 이리로 보낸다. **갈 수 있을 때만** 붙인다 — 늘 붙이면 끝에서도
+                    // 손짓이 먹은 것처럼 굴어 사용자가 갇힌다(그 판단은 코어가 답한다).
+                    boolean canBack = nativeA11yCanScroll(1) != 0;
+                    boolean canFwd = nativeA11yCanScroll(0) != 0;
+                    // **갈 곳이 있을 때만 「스크롤되는 것」이라고 말한다.** 늘 참으로 두면 TalkBack 이
+                    // 스크롤백이 없는 화면에서도 그렇게 읽어 주고, 사용자는 있지도 않은 곳을 찾는다.
+                    host.setScrollable(canBack || canFwd);
+                    if (canBack) host.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                    if (canFwd) host.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
                     return host;
                 }
                 if (virtualViewId < 0 || virtualViewId >= n) return null;
@@ -202,6 +215,12 @@ public class MaruActivity extends android.app.NativeActivity {
             @Override
             public boolean performAction(int virtualViewId, int action, Bundle arguments) {
                 if (virtualViewId == AccessibilityNodeProvider.HOST_VIEW_ID) {
+                    // **한 화면씩 민다.** 얼마나 미는지는 코어가 정하고, 「움직였나」를 그대로
+                    // 돌려준다 — 안 움직였는데 참을 주면 TalkBack 이 끝에서 계속 「됐다」고 말한다.
+                    if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+                        return nativeA11yScroll(1, 1) != 0;
+                    if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                        return nativeA11yScroll(0, 1) != 0;
                     return view.performAccessibilityAction(action, arguments);
                 }
                 if (virtualViewId < 0 || virtualViewId >= nativeA11yCount()) return false;
@@ -222,12 +241,19 @@ public class MaruActivity extends android.app.NativeActivity {
                             int[] at = new int[6];
                             view.a11yFocusLabel = nativeA11yNode(virtualViewId, at);
                         }
+                        // **코어에도 알린다**(M9b — 가장자리에서 이어지기). 읽다가 화면 맨 끝 줄을
+                        // 넘으려 하면 거기서 끊기는데, 그때 코어가 한 줄 민다. 판단은 전부 코어가
+                        // 한다 — 여기서는 「어디에 닿았다」만 넘긴다.
+                        nativeA11yFocus(virtualViewId);
                         sendA11yEvent(virtualViewId, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
                         return true;
                     case AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS:
                         if (view.a11yFocus == virtualViewId) {
                             view.a11yFocus = -1;
                             view.a11yFocusLabel = null;
+                            // 우리 요소를 벗어났다 — 없는 index 로 알려 기억을 지운다. 안 지우면
+                            // 나중에 그 가장자리로 돌아왔을 때 **한 번 만에** 밀린다.
+                            nativeA11yFocus(nativeA11yCount());
                         }
                         sendA11yEvent(virtualViewId,
                                 AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);

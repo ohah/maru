@@ -8103,9 +8103,16 @@ fn announceTake(buf: []u8) []const u8 {
 }
 
 /// 터미널 화면을 세우고 **기준 프레임까지** 지나간다 — 들어오는 프레임은 읽을 것을 안 만든다.
+///
+/// **바닥으로 내려놓고 시작한다.** 이 파일의 판정자들은 브리지 전역을 함께 쓰므로, 앞선 판정자가
+/// 스크롤백을 올려 둔 채 끝나면 여기 오는 판정자는 **다른 화면**을 보고 조용히 틀린다(M9b 를
+/// 더했을 때 실제로 다섯이 한꺼번에 붉었다). 전제를 여기서 박는다.
 fn announceEnterTerminal() void {
     bridge.resetAnnounceForTest();
+    bridge.resetA11yFocusForTest();
     bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
     _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_build(402, 874, now());
 }
@@ -8114,6 +8121,218 @@ fn announceEnterTerminal() void {
 fn announceIdle(frames: usize) void {
     var i: usize = 0;
     while (i < frames) : (i += 1) _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+/// 터미널을 세우고 스크롤백을 만든다 — M9b 판정자들이 함께 쓴다.
+fn m9bTerminalWithScrollback() void {
+    bridge.resetAnnounceForTest();
+    bridge.resetA11yFocusForTest();
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var line: [24]u8 = undefined;
+        const t = std.fmt.bufPrint(&line, "sb{d}\r\n", .{i}) catch unreachable;
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+/// 지금 본문 줄 서술자 중 화면 맨 위·맨 아래의 index.
+fn m9bEdgeIndices() struct { top: u32, bottom: u32 } {
+    const nodes = bridge.a11yNodesForTest();
+    var top: u32 = 0;
+    var bottom: u32 = 0;
+    var best_first: u32 = std.math.maxInt(u32);
+    var best_last: u32 = 0;
+    for (nodes, 0..) |n, i| {
+        if (n.sem.role != .text or n.sem.set_size == 0 or n.sem.position_in_set == 0) continue;
+        if (n.sem.position_in_set < best_first) {
+            best_first = n.sem.position_in_set;
+            top = @intCast(i);
+        }
+        if (n.sem.position_in_set > best_last) {
+            best_last = n.sem.position_in_set;
+            bottom = @intCast(i);
+        }
+    }
+    return .{ .top = top, .bottom = bottom };
+}
+
+test "M9b 스크롤백: 낭독기가 «한 줄» 과 «한 화면» 으로 민다" {
+    // 낭독기를 켜면 손가락 밀기를 낭독기가 가로채므로, 이 길이 없으면 스크롤백에 **아예 못 닿는다**.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    // **되돌려 놓는다** — 전역을 함께 쓰므로 올려 둔 채 끝나면 다음 판정자가 다른 화면을 본다.
+    defer bridge.maru_mobile_scroll_to_bottom();
+    defer bridge.resetAnnounceForTest();
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset()); // 전제: 바닥이다
+
+    // 한 줄 위로.
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_scroll(1, 0));
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_view_offset());
+
+    // 한 화면 위로 — 줄 하나보다 **훨씬** 많이 움직인다.
+    const before = bridge.maru_mobile_view_offset();
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_scroll(1, 1));
+    const after = bridge.maru_mobile_view_offset();
+    try T.expect(after > before + 1);
+    // 그 양이 **화면 줄 수**다 — 상수로 두면 회전·키보드로 격자가 바뀔 때 어긋난다.
+    try T.expectEqual(@as(u32, @intCast(bridge.maru_mobile_term_rows())), after - before);
+
+    // 아래로도 간다.
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_scroll(0, 1));
+    try T.expectEqual(before, bridge.maru_mobile_view_offset());
+}
+
+test "M9b 스크롤백: 끝에서는 «안 움직였다» 고 답한다" {
+    // 그 답이 있어야 낭독기가 「더 없다」를 말한다 — 안 움직였는데 참을 답하면 끝에서 계속
+    // 「됐다」고 말해 사용자가 갇힌다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer bridge.maru_mobile_scroll_to_bottom();
+    defer bridge.resetAnnounceForTest();
+
+    // 바닥에서 아래로 — 더 갈 곳이 없다.
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_scroll(0, 1));
+
+    // 꼭대기까지 밀고 나서 위로 — 역시 없다.
+    var guard: usize = 0;
+    while (bridge.maru_mobile_a11y_scroll(1, 1) == 1 and guard < 500) : (guard += 1) {}
+    try T.expect(guard < 500); // 전제: 언젠가 멈춘다(안 멈추면 위 단언이 무의미하다)
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_scroll(1, 1));
+}
+
+test "M9b 스크롤백: 밀어도 «생김새» 는 그대로다 — 낭독 커서가 안 튄다" {
+    // **이것이 이 기능의 핵심이다.** host 는 「이름과 자리」가 바뀌면 요소를 다시 만들고 낭독기에
+    // 알린다 — 그러면 커서가 처음으로 튕겨 읽던 자리를 잃는다. 줄 이름은 **화면 행 번호**라
+    // 스크롤해도 그대로이고 **값만** 바뀌므로, 밀어도 커서가 그 자리에 남아 읽기가 이어진다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+    }
+
+    var before_labels: [64][32]u8 = undefined;
+    var before_len: [64]usize = @splat(0);
+    var before_rect: [64]u64 = @splat(0);
+    var before_value_hash: u64 = 0;
+    var n: usize = 0;
+    for (bridge.a11yNodesForTest()) |node| {
+        if (node.sem.role != .text or node.sem.position_in_set == 0) continue;
+        if (n == before_labels.len) break;
+        const lab = node.sem.label;
+        before_len[n] = @min(lab.len, before_labels[n].len);
+        @memcpy(before_labels[n][0..before_len[n]], lab[0..before_len[n]]);
+        before_rect[n] = @as(u64, @bitCast(@as(i64, @intCast(@as(i32, @intFromFloat(node.rect.y))))));
+        var h = std.hash.Wyhash.init(0);
+        h.update(node.sem.value);
+        before_value_hash ^= h.final();
+        n += 1;
+    }
+    try T.expect(n > 2); // 전제: 본문 줄이 여럿이다
+
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_scroll(1, 0)); // 한 줄 민다
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    var m: usize = 0;
+    var after_value_hash: u64 = 0;
+    for (bridge.a11yNodesForTest()) |node| {
+        if (node.sem.role != .text or node.sem.position_in_set == 0) continue;
+        if (m == n) break;
+        // **이름이 그대로다** — 화면 행 번호라 스크롤과 무관하다.
+        try T.expectEqualStrings(before_labels[m][0..before_len[m]], node.sem.label);
+        // **자리도 그대로다** — 같은 행이 같은 픽셀에 있다.
+        try T.expectEqual(before_rect[m], @as(u64, @bitCast(@as(i64, @intCast(@as(i32, @intFromFloat(node.rect.y)))))));
+        var h = std.hash.Wyhash.init(0);
+        h.update(node.sem.value);
+        after_value_hash ^= h.final();
+        m += 1;
+    }
+    try T.expectEqual(n, m); // 줄 수도 그대로다
+    // **값은 바뀌었다** — 안 바뀌었으면 위 단언들이 「아무 일도 안 일어났다」로 참이 된다.
+    try T.expect(before_value_hash != after_value_hash);
+}
+
+test "M9b 스크롤백: 「갈 수 있다」와 「움직였다」가 «늘 같다»" {
+    // Android 는 「갈 수 있다」에만 스크롤 동작을 단다. 그 둘이 갈리면 **동작은 붙는데 눌러도 안
+    // 움직이는** 상태가 되고, 낭독기 사용자는 손짓이 먹었는지조차 모른다. 끝까지 오가며 견준다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+    }
+
+    var guard: usize = 0;
+    // 위로 끝까지 — 매 걸음 두 답을 견준다.
+    while (guard < 500) : (guard += 1) {
+        const can = bridge.maru_mobile_a11y_can_scroll(1);
+        const moved = bridge.maru_mobile_a11y_scroll(1, 1);
+        try T.expectEqual(can, moved);
+        if (can == 0) break;
+    }
+    try T.expect(guard > 0 and guard < 500); // 전제: 여러 번 움직이고 언젠가 멈췄다
+
+    // 아래로도 끝까지 — 줄 단위로도 같은지 본다.
+    guard = 0;
+    while (guard < 2000) : (guard += 1) {
+        const can = bridge.maru_mobile_a11y_can_scroll(0);
+        const moved = bridge.maru_mobile_a11y_scroll(0, 0);
+        try T.expectEqual(can, moved);
+        if (can == 0) break;
+    }
+    try T.expect(guard > 0 and guard < 2000);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset()); // 바닥에 닿았다
+}
+
+test "M9b 스크롤백: 가장자리에 «다시» 닿아야 이어진다" {
+    // 처음 그 줄에 닿은 것은 「거기까지 읽었다」이지 「더 가겠다」가 아니다 — 바로 밀면 마지막
+    // 줄을 읽으려던 사람이 읽기도 전에 화면이 움직인다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+        bridge.resetA11yFocusForTest();
+    }
+    const edge = m9bEdgeIndices();
+    const start = bridge.maru_mobile_view_offset();
+
+    bridge.maru_mobile_a11y_focus(edge.top); // 처음 닿았다 — 안 민다
+    try T.expectEqual(start, bridge.maru_mobile_view_offset());
+
+    bridge.maru_mobile_a11y_focus(edge.top); // 다시 닿았다 — 한 줄 민다
+    try T.expectEqual(start + 1, bridge.maru_mobile_view_offset());
+
+    // **연달아 미끄러지지 않는다** — 밀고 나면 다시 처음부터다.
+    bridge.maru_mobile_a11y_focus(edge.top);
+    try T.expectEqual(start + 1, bridge.maru_mobile_view_offset());
+}
+
+test "M9b 스크롤백: 본문 줄이 아니면 «안 민다»" {
+    // 버튼·목록에 닿았다고 터미널이 움직이면 사용자가 어디 있는지 모르게 된다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+        bridge.resetA11yFocusForTest();
+    }
+    const nodes = bridge.a11yNodesForTest();
+    var button: ?u32 = null;
+    for (nodes, 0..) |n, i| if (n.sem.role == .button) {
+        button = @intCast(i);
+        break;
+    };
+    try T.expect(button != null); // 전제: 앱 바·키바가 있다
+    const start = bridge.maru_mobile_view_offset();
+    bridge.maru_mobile_a11y_focus(button.?);
+    bridge.maru_mobile_a11y_focus(button.?);
+    try T.expectEqual(start, bridge.maru_mobile_view_offset());
 }
 
 test "M9a 새 출력: 잠잠해진 «뒤에» 바뀐 줄을 읽는다" {
@@ -8201,6 +8420,49 @@ test "M9a 새 출력: 화면이 꽉 찬 뒤 한 줄이 와도 «그 한 줄만»
     const said = announceTake(&buf);
     try T.expect(std.mem.indexOf(u8, said, "only-one") != null);
     // **밀려 올라간 옛 줄은 안 읽힌다** — 이것이 없으면 위 단언은 「전부 읽어도」 참이다.
+    try T.expect(std.mem.indexOf(u8, said, "fill") == null);
+    const much = maru.i18n.tIn(.ko, .mob_a11y_too_much_output);
+    try T.expect(!std.mem.eql(u8, said, much));
+}
+
+test "M9a 새 출력: 스크롤백이 «찬 뒤에도» 그 한 줄만 읽는다" {
+    // **이쪽이 오히려 평소 상태다.** 터미널을 오래 켜 두면 스크롤백이 상한에 차고, 그때부터는
+    // 절대 줄 번호가 **더 안 밀린다**(실측: `abs 1001 → 1001`) — 내용은 흐르는데 번호는 제자리라
+    // 번호로 신원을 재면 매 줄마다 전부 「바뀐 것」이 되어 「출력이 많습니다」만 들린다.
+    // 글자로 재면 밀려 올라간 줄이 지난 창에 그대로 있어 안 걸린다.
+    const T = std.testing;
+    announceEnterTerminal();
+    defer bridge.resetAnnounceForTest();
+    var buf: [8192]u8 = undefined;
+
+    // 상한을 넘겨 채운다 — 그 뒤로 번호가 멈춘다.
+    const cap = bridge.maru_mobile_scrollback_lines();
+    var i: usize = 0;
+    while (i < cap + 200) : (i += 1) {
+        var line: [24]u8 = undefined;
+        const t = try std.fmt.bufPrint(&line, "fill{d}\r\n", .{i});
+        _ = bridge.maru_mobile_term_write(t.ptr, t.len);
+    }
+    announceIdle(8);
+    _ = announceTake(&buf);
+
+    // **전제: 번호가 정말 멈췄다.** 안 멈췄으면 이 판정자는 위 판정자와 같은 것을 잰다.
+    const absOf = struct {
+        fn f() u32 {
+            for (bridge.a11yNodesForTest()) |n| {
+                if (n.sem.role == .text and n.sem.set_size != 0 and n.sem.position_in_set != 0)
+                    return @intCast(n.sem.position_in_set);
+            }
+            return 0;
+        }
+    }.f;
+    const abs_before = absOf();
+    _ = bridge.maru_mobile_term_write("only-this\r\n", 11);
+    announceIdle(8);
+    try T.expectEqual(abs_before, absOf()); // 번호가 안 밀렸다
+
+    const said = announceTake(&buf);
+    try T.expect(std.mem.indexOf(u8, said, "only-this") != null);
     try T.expect(std.mem.indexOf(u8, said, "fill") == null);
     const much = maru.i18n.tIn(.ko, .mob_a11y_too_much_output);
     try T.expect(!std.mem.eql(u8, said, much));

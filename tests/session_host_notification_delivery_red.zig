@@ -126,7 +126,9 @@ test "P4 N2b1 notification metadata handoff rejects impossible generations and i
     std.mem.writeInt(u64, impossible[36..44], 0, .big);
     var first = delivery.MetadataStore.init(std.testing.allocator);
     defer first.deinit();
-    try std.testing.expectError(error.InvalidValue, first.restoreHandoff(impossible));
+    // 사유가 갈렸다 — `config_generation=0` 인데 상태가 켜져 있는 경우다. 옛 `InvalidValue` 는 이 조건과
+    // 아래 UTF-8 깨짐을 같은 이름으로 냈고, 활성화 단계에서 지면 그 이름 하나만 로그에 남았다.
+    try std.testing.expectError(error.ConfigGenerationZeroWithState, first.restoreHandoff(impossible));
     try std.testing.expectEqual(@as(usize, 0), first.count());
 
     const invalid_utf8 = try std.testing.allocator.dupe(u8, encoded);
@@ -134,6 +136,6 @@ test "P4 N2b1 notification metadata handoff rejects impossible generations and i
     invalid_utf8[invalid_utf8.len - 1] = 0xff;
     var second = delivery.MetadataStore.init(std.testing.allocator);
     defer second.deinit();
-    try std.testing.expectError(error.InvalidValue, second.restoreHandoff(invalid_utf8));
+    try std.testing.expectError(error.LabelNotUtf8, second.restoreHandoff(invalid_utf8));
     try std.testing.expectEqual(@as(usize, 0), second.count());
 }

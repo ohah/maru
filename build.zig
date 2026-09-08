@@ -5121,6 +5121,24 @@ pub fn build(b: *std.Build) void {
     host_close_log_step.dependOn(&run_host_close_log.step);
     boundary_step.dependOn(&run_host_close_log.step);
 
+    const restore_reason_step = b.step(
+        "test-notification-restore-reason",
+        "Activation-stage handoff rejections name the field (InvalidValue alone cost 22 sessions)",
+    );
+    const restore_reason_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/notification_restore_reason_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_restore_reason = b.addRunArtifact(restore_reason_tests);
+    run_restore_reason.addArg("--maru-expect-tests=1");
+    run_restore_reason.addArg("--maru-expect-passed=1");
+    run_restore_reason.setCwd(b.path("."));
+    restore_reason_step.dependOn(&run_restore_reason.step);
+    boundary_step.dependOn(&run_restore_reason.step);
+
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",

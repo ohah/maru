@@ -52,6 +52,17 @@ pub const AdmissionError = error{
 pub const AckResult = enum { acknowledged, already_acknowledged, not_found, invalid_owner };
 pub const LogicalDigest = [32]u8;
 
+/// `InvalidValue` 를 **조건별로 갈라 둔다.**
+///
+/// 이 모듈은 pure owner 라 로그를 쓸 수 없다(import 는 `std` 하나로 못 박혀 있다 —
+/// `tests/session_host_notification_journal_boundary.zig`). 그래서 사유를 **오류 이름에** 싣는다.
+/// `restore_activation` 이 이미 `stage=activate err={s}` 로 `@errorName` 을 찍으므로, 갈라 두기만 하면
+/// 사유가 저절로 로그에 닿는다.
+///
+/// 왜 필요한가 — 이 함수는 exec 업그레이드의 활성화 단계에서 불린다. 여기서 지면 host 가 죽고 **PTY
+/// 소유자가 사라져 셸 전체가 SIGHUP** 을 받는다. 2026-09-05 에 이 자리에서 세션 22 개를 잃었는데 남은
+/// 것은 `InvalidValue` 라는 이름 하나뿐이라 어느 필드인지 끝내 몰랐고(`upgrade_bootstrap.decodeValidated`
+/// 주석), 2026-09-08 에 같은 오류로 또 죽었을 때도 마찬가지였다.
 pub const HandoffError = std.mem.Allocator.Error || error{
     InvalidOwner,
     DestinationNotEmpty,
@@ -61,8 +72,21 @@ pub const HandoffError = std.mem.Allocator.Error || error{
     TrailingBytes,
     ForeignHost,
     LimitsMismatch,
-    InvalidValue,
     LimitExceeded,
+
+    // 머리말 밖 — 아래가 옛 `InvalidValue` 다.
+    ExhaustedFlagNotBool,
+    ExhaustedDisagreesWithLastEventId,
+    EventIdZero,
+    EventIdNotIncreasing,
+    EventIdExceedsLast,
+    RuntimeIdZero,
+    FlagsEmpty,
+    FlagsUnknownBits,
+    TitleNotUtf8,
+    BodyNotUtf8,
+    LabelNotUtf8,
+    ResidentMismatch,
 };
 pub const EncodeHandoffError = std.mem.Allocator.Error || error{ InvalidOwner, LimitExceeded };
 
@@ -325,9 +349,9 @@ pub const Journal = struct {
         const permanent_drops = try reader.int(u64);
         const evicted_count = try reader.int(u64);
         const exhausted_raw = (try reader.take(1))[0];
-        if (exhausted_raw > 1) return error.InvalidValue;
+        if (exhausted_raw > 1) return error.ExhaustedFlagNotBool;
         const exhausted = exhausted_raw == 1;
-        if (exhausted != (last_event_id == std.math.maxInt(u64))) return error.InvalidValue;
+        if (exhausted != (last_event_id == std.math.maxInt(u64))) return error.ExhaustedDisagreesWithLastEventId;
         const row_count = try reader.int(u32);
         if (row_count > self.limits.max_events) return error.LimitExceeded;
         const encoded_resident = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded;
@@ -346,16 +370,23 @@ pub const Journal = struct {
             const runtime_id = try reader.int(u128);
             const occurred_at_ns = try reader.int(u64);
             const flags = (try reader.take(1))[0];
-            if (event_id == 0 or event_id <= previous_event_id or event_id > last_event_id or runtime_id == 0 or
-                flags == 0 or flags & ~@as(u8, 0x03) != 0) return error.InvalidValue;
+            // 여섯 조건을 갈라 둔다 — 뭉쳐 두면 「행 하나가 나쁘다」까지만 알고 끝난다.
+            if (event_id == 0) return error.EventIdZero;
+            if (event_id <= previous_event_id) return error.EventIdNotIncreasing;
+            if (event_id > last_event_id) return error.EventIdExceedsLast;
+            if (runtime_id == 0) return error.RuntimeIdZero;
+            if (flags == 0) return error.FlagsEmpty;
+            if (flags & ~@as(u8, 0x03) != 0) return error.FlagsUnknownBits;
             const title_len = try boundedLength(&reader, self.limits.max_title_bytes);
             const body_len = try boundedLength(&reader, self.limits.max_body_bytes);
             const label_len = try boundedLength(&reader, self.limits.max_label_bytes);
             const title_source = try reader.take(title_len);
             const body_source = try reader.take(body_len);
             const label_source = try reader.take(label_len);
-            if (!std.unicode.utf8ValidateSlice(title_source) or !std.unicode.utf8ValidateSlice(body_source) or
-                !std.unicode.utf8ValidateSlice(label_source)) return error.InvalidValue;
+            // 어느 필드가 깨졌는지 갈라 둔다. 제목·본문은 터미널이 준 바이트라 임의 값이 들어올 수 있다.
+            if (!std.unicode.utf8ValidateSlice(title_source)) return error.TitleNotUtf8;
+            if (!std.unicode.utf8ValidateSlice(body_source)) return error.BodyNotUtf8;
+            if (!std.unicode.utf8ValidateSlice(label_source)) return error.LabelNotUtf8;
             const row_bytes = std.math.add(usize, title_len, body_len) catch return error.LimitExceeded;
             resident = std.math.add(usize, resident, std.math.add(usize, row_bytes, label_len) catch return error.LimitExceeded) catch
                 return error.LimitExceeded;
@@ -379,7 +410,7 @@ pub const Journal = struct {
             previous_event_id = event_id;
         }
         if (reader.pos != reader.bytes.len) return error.TrailingBytes;
-        if (resident != encoded_resident) return error.InvalidValue;
+        if (resident != encoded_resident) return error.ResidentMismatch;
         self.rows = prepared;
         prepared = .empty;
         self.resident_bytes = resident;

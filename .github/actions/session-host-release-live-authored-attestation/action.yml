@@ -31,6 +31,10 @@ inputs:
     required: true
 
 outputs:
+  evidence-path:
+    value: ${{ steps.commit.outputs.evidence-path }}
+  timing-path:
+    value: ${{ steps.commit.outputs.timing-path }}
   evidence-bundle-path:
     value: ${{ steps.commit.outputs.evidence-bundle-path }}
   manifest-bundle-path:
@@ -131,6 +135,8 @@ runs:
       MARU_PAYLOAD_OUTCOME: ${{ steps.payload.outcome }}
       MARU_FENCE_OUTCOME: ${{ steps.fence.outcome }}
       MARU_TIMING_REQUIRED: ${{ steps.select.outputs.timing-required }}
+      MARU_EVIDENCE_PATH: ${{ steps.fence.outputs.evidence-path }}
+      MARU_TIMING_PATH: ${{ steps.fence.outputs.timing-path }}
       MARU_EVIDENCE_BUNDLE: ${{ steps.fence.outputs.evidence-bundle-path }}
       MARU_MANIFEST_BUNDLE: ${{ steps.fence.outputs.manifest-bundle-path }}
       MARU_TIMING_BUNDLE: ${{ steps.fence.outputs.timing-bundle-path }}
@@ -138,5 +144,5 @@ runs:
     run: |
       set -euo pipefail
       "$MARU_COMMIT_HELPER" "$MARU_SELECT_OUTCOME" "$MARU_PAYLOAD_OUTCOME" "$MARU_FENCE_OUTCOME" \
-        "$MARU_TIMING_REQUIRED" "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" "$MARU_TIMING_BUNDLE" \
+        "$MARU_TIMING_REQUIRED" "$MARU_EVIDENCE_PATH" "$MARU_TIMING_PATH" "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" "$MARU_TIMING_BUNDLE" \
         "$MARU_CHECKPOINT_EXE" "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" "$GITHUB_OUTPUT"

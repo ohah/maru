@@ -5,6 +5,8 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const release_manifest = @import("release_manifest");
+// The selected evidence is reparsed here so the durable aggregate cannot supply its profile as an ambient scalar.
+const release_evidence = @import("release_evidence");
 const context_mod = @import("release_adapter_context");
 const files = @import("release_adapter_files");
 const handoff = @import("release_adapter_candidate_aggregate_handoff");
@@ -13,8 +15,11 @@ const cli_authority = @import("release_adapter_github_cli_authority");
 const deadline_mod = @import("release_adapter_deadline");
 const safe_open = @import("safe_open");
 
-const artifact_count: usize = 3;
-const verification_count: usize = 4;
+const baseline_artifact_count: usize = 3;
+const artifact_count: usize = 4;
+const verification_count: usize = 5;
+pub const baseline_entry_count: usize = handoff.baseline_role_count;
+pub const max_entry_count: usize = handoff.role_count;
 
 pub const Error = files.Error || attestation.Error || cli_authority.Error || deadline_mod.Error || error{
     InvalidPath,
@@ -31,6 +36,7 @@ pub const Paths = struct {
     dmg: [:0]const u8,
     frozen_executable: [:0]const u8,
     manifest: [:0]const u8,
+    timing: [:0]const u8 = "",
 };
 
 pub const Cli = struct {
@@ -42,6 +48,8 @@ pub const Phase = enum { pristine, preparing, verified, closed };
 
 pub const View = struct {
     verified: bool,
+    profile: release_evidence.Profile,
+    active_count: usize,
     context: context_mod.Context,
     directory: []const u8,
     evidence_name: []const u8,
@@ -82,6 +90,9 @@ pub const ReopenedAggregate = struct {
     directory_fd: c.fd_t = -1,
     directory_device: u64 = 0,
     directory_inode: u64 = 0,
+    profile: release_evidence.Profile = .baseline_a,
+    active_count: usize = 0,
+    active_artifact_count: usize = 0,
     directory: [std.fs.max_path_bytes:0]u8 = @splat(0),
     directory_len: usize = 0,
     directory_leaf: [std.fs.max_name_bytes:0]u8 = @splat(0),
@@ -105,13 +116,15 @@ pub const ReopenedAggregate = struct {
         var entries: [handoff.role_count]files.ExecutableObservation = undefined;
         var artifact_names: [artifact_count][]const u8 = undefined;
         var artifacts: [artifact_count]files.ExecutableObservation = undefined;
-        for (&self.entries, 0..) |*entry, index| entries[index] = entry.value() orelse return null;
-        for (&self.artifacts, 0..) |*artifact, index| {
+        for (self.entries[0..self.active_count], 0..) |*entry, index| entries[index] = entry.value() orelse return null;
+        for (self.artifacts[0..self.active_artifact_count], 0..) |*artifact, index| {
             artifacts[index] = artifact.value() orelse return null;
             artifact_names[index] = std.fs.path.basename(self.artifact_paths[index][0..self.artifact_path_lens[index]]);
         }
         return .{
             .verified = true,
+            .profile = self.profile,
+            .active_count = self.active_count,
             .context = self.context.value(),
             .directory = self.directory[0..self.directory_len],
             .evidence_name = self.names[0][0..self.name_lens[0]],
@@ -147,12 +160,12 @@ pub const ReopenedAggregate = struct {
             !validStorage(self) or !std.mem.eql(u8, &self.seal, &metadataSeal(self))) return error.AuthorityChanged;
         try self.revalidateDirectory();
         try self.requireExactInventory();
-        for (&self.entries, 0..) |*entry, index| {
+        for (self.entries[0..self.active_count], 0..) |*entry, index| {
             const path: [:0]const u8 = self.paths[index][0..self.path_lens[index] :0];
             _ = entry.revalidate(path) catch return error.AuthorityChanged;
             if (!parentMatches(entry.parent_fd, self.directory_fd)) return error.AuthorityChanged;
         }
-        for (&self.artifacts, 0..) |*artifact, index| {
+        for (self.artifacts[0..self.active_artifact_count], 0..) |*artifact, index| {
             const path: [:0]const u8 = self.artifact_paths[index][0..self.artifact_path_lens[index] :0];
             _ = artifact.revalidate(path) catch return error.AuthorityChanged;
         }
@@ -191,9 +204,9 @@ pub const ReopenedAggregate = struct {
             const name = std.mem.sliceTo(entry.name[0..], 0);
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
             count = std.math.add(usize, count, 1) catch return error.AuthorityChanged;
-            if (count > handoff.role_count) return error.AuthorityChanged;
+            if (count > self.active_count) return error.AuthorityChanged;
             var matched = false;
-            for (0..handoff.role_count) |index| {
+            for (0..self.active_count) |index| {
                 if (std.mem.eql(u8, name, self.names[index][0..self.name_lens[index]])) {
                     if (observed[index]) return error.AuthorityChanged;
                     observed[index] = true;
@@ -204,8 +217,8 @@ pub const ReopenedAggregate = struct {
             if (!matched) return error.AuthorityChanged;
         }
         if (c._errno().* != 0) return error.AuthorityChanged;
-        if (count != handoff.role_count) return error.AuthorityChanged;
-        for (observed) |present| if (!present) return error.AuthorityChanged;
+        if (count != self.active_count) return error.AuthorityChanged;
+        for (observed[0..self.active_count]) |present| if (!present) return error.AuthorityChanged;
     }
 
     fn closeDescriptors(self: *@This(), reset: bool) Error!void {
@@ -327,7 +340,7 @@ fn openAndVerifyCore(
     };
     try openDirectory(result, paths.directory);
     try discoverNames(result);
-    try pinEntries(result);
+    try pinEntries(allocator, result);
     try pinArtifacts(result);
     result.seal = metadataSeal(result);
     try result.fenceInternal();
@@ -336,9 +349,10 @@ fn openAndVerifyCore(
         else => return err,
     };
 
-    const artifact_indexes = [_]usize{ 0, 1, 0, 2 };
-    const bundle_indexes = [_]usize{ 1, 2, 3, 4 };
-    for (0..verification_count) |index| {
+    const artifact_indexes = [_]usize{ 0, 1, 0, 2, 3 };
+    const bundle_indexes = [_]usize{ 1, 2, 3, 4, 5 };
+    const active_verification_count = result.active_count - 1;
+    for (0..active_verification_count) |index| {
         _ = try deadline.remaining();
         try result.fenceInternal();
         revalidateCli(cli_impl, allocator, cli.path, cli.pinned) catch |err| switch (err) {
@@ -426,6 +440,10 @@ fn validateInputs(context: context_mod.Context, paths: Paths, cli: Cli, output: 
         if (std.mem.eql(u8, left, right)) return error.InvalidPath;
     };
     for (all_paths[1..]) |path| if (sameOrDescendant(paths.directory, path)) return error.InvalidPath;
+    if (paths.timing.len != 0) {
+        if (!canonicalAbsolute(paths.timing) or sameOrDescendant(paths.directory, paths.timing)) return error.InvalidPath;
+        for (all_paths) |path| if (std.mem.eql(u8, path, paths.timing)) return error.InvalidPath;
+    }
     if (context.repository.id == 0 or !std.mem.eql(u8, context.repository.owner, "ohah") or
         !std.mem.eql(u8, context.repository.name, "maru") or !context.protected_tag or
         context.tag.len < 2 or context.tag.len > context_mod.max_value_bytes or
@@ -447,6 +465,7 @@ fn validateInputs(context: context_mod.Context, paths: Paths, cli: Cli, output: 
         context.repository.owner,   context.repository.name, context.tag,                 context.source_commit,
         context.build.workflow_ref, paths.directory,         paths.dmg,                   paths.frozen_executable,
         paths.manifest,             cli.path,                std.mem.asBytes(cli.pinned), output,
+        paths.timing,
     };
     for (regions, 0..) |region, index| {
         if (overlaps(owner, region)) return error.InvalidOwner;
@@ -459,6 +478,7 @@ fn storeInputs(result: *ReopenedAggregate, context: context_mod.Context, paths: 
     result.artifact_path_lens[0] = try storePath(&result.artifact_paths[0], paths.dmg);
     result.artifact_path_lens[1] = try storePath(&result.artifact_paths[1], paths.frozen_executable);
     result.artifact_path_lens[2] = try storePath(&result.artifact_paths[2], paths.manifest);
+    if (paths.timing.len != 0) result.artifact_path_lens[3] = try storePath(&result.artifact_paths[3], paths.timing);
     result.cli_path_len = try storePath(&result.cli_path, cli_path);
     result.context.repository_id = context.repository.id;
     result.context.tag_len = context.tag.len;
@@ -521,17 +541,21 @@ fn discoverNames(result: *ReopenedAggregate) Error!void {
         }
     }
     if (c._errno().* != 0) return error.InvalidInventory;
-    if (count != handoff.role_count or evidence_len == 0) return error.InvalidInventory;
-    for (found) |present| if (!present) return error.InvalidInventory;
+    const has_timing = found[verification_count - 1];
+    result.active_count = if (has_timing) handoff.role_count else handoff.baseline_role_count;
+    result.active_artifact_count = if (has_timing) artifact_count else baseline_artifact_count;
+    if (count != result.active_count or evidence_len == 0) return error.InvalidInventory;
+    for (found[0 .. result.active_count - 1]) |present| if (!present) return error.InvalidInventory;
+    for (found[result.active_count - 1 ..]) |present| if (present) return error.InvalidInventory;
     result.name_lens[0] = try storeName(&result.names[0], evidence_name[0..evidence_len]);
-    for (1..handoff.role_count) |index| {
+    for (1..result.active_count) |index| {
         result.name_lens[index] = try storeName(&result.names[index], handoff.destinationName(@enumFromInt(index), ""));
     }
 }
 
-fn pinEntries(result: *ReopenedAggregate) Error!void {
+fn pinEntries(allocator: std.mem.Allocator, result: *ReopenedAggregate) Error!void {
     const directory: [:0]const u8 = result.directory[0..result.directory_len :0];
-    for (0..handoff.role_count) |index| {
+    for (0..result.active_count) |index| {
         const name = result.names[index][0..result.name_lens[index]];
         const path = std.fmt.bufPrintZ(&result.paths[index], "{s}/{s}", .{ directory, name }) catch return error.InvalidPath;
         result.path_lens[index] = path.len;
@@ -539,14 +563,35 @@ fn pinEntries(result: *ReopenedAggregate) Error!void {
         const observation = result.entries[index].value().?;
         if (observation.mode & 0o777 != 0o600 or !parentMatches(result.entries[index].parent_fd, result.directory_fd)) return error.InvalidInventory;
     }
+    var evidence_input = result.entries[0].readHeldAlloc(allocator, result.paths[0][0..result.path_lens[0] :0], release_evidence.max_evidence_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidInventory,
+    };
+    defer evidence_input.deinit(allocator);
+    var parsed = release_evidence.parseCanonical(allocator, evidence_input.bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidInventory,
+    };
+    defer parsed.deinit();
+    result.profile = parsed.profile();
+    const expected_count = if (result.profile == .upgrade_b) handoff.role_count else handoff.baseline_role_count;
+    const expected_name = if (result.profile == .upgrade_b) "upgrade-evidence.json" else "baseline-evidence.json";
+    const timing_path_present = result.artifact_path_lens[3] != 0;
+    if (result.active_count != expected_count or timing_path_present != (result.profile == .upgrade_b) or
+        !std.mem.eql(u8, result.names[0][0..result.name_lens[0]], expected_name)) return error.InvalidInventory;
     var identities: [handoff.role_count]files.Identity = undefined;
-    for (&result.entries, 0..) |*entry, index| identities[index] = entry.value().?.identity;
-    files.requireDistinct(&identities) catch return error.InvalidInventory;
+    for (result.entries[0..result.active_count], 0..) |*entry, index| identities[index] = entry.value().?.identity;
+    files.requireDistinct(identities[0..result.active_count]) catch return error.InvalidInventory;
 }
 
 fn pinArtifacts(result: *ReopenedAggregate) Error!void {
-    const caps = [_]u64{ files.max_release_asset_bytes, files.max_release_asset_bytes, release_manifest.max_manifest_bytes };
-    for (&result.artifacts, 0..) |*artifact, index| {
+    const caps = [_]u64{
+        files.max_release_asset_bytes,
+        files.max_release_asset_bytes,
+        release_manifest.max_manifest_bytes,
+        files.max_release_asset_bytes,
+    };
+    for (result.artifacts[0..result.active_artifact_count], 0..) |*artifact, index| {
         const path: [:0]const u8 = result.artifact_paths[index][0..result.artifact_path_lens[index] :0];
         files.pinReleaseFileObserved(artifact, path, index == 1, caps[index]) catch return error.InvalidInventory;
     }
@@ -555,14 +600,15 @@ fn pinArtifacts(result: *ReopenedAggregate) Error!void {
 
 fn requireAllDistinct(result: *const ReopenedAggregate) Error!void {
     var identities: [handoff.role_count + artifact_count]files.Identity = undefined;
-    for (&result.entries, 0..) |*entry, index| identities[index] = (entry.value() orelse return error.AuthorityChanged).identity;
-    for (&result.artifacts, 0..) |*artifact, index| identities[handoff.role_count + index] = (artifact.value() orelse return error.AuthorityChanged).identity;
-    files.requireDistinct(&identities) catch return error.AuthorityChanged;
+    for (result.entries[0..result.active_count], 0..) |*entry, index| identities[index] = (entry.value() orelse return error.AuthorityChanged).identity;
+    for (result.artifacts[0..result.active_artifact_count], 0..) |*artifact, index| identities[result.active_count + index] = (artifact.value() orelse return error.AuthorityChanged).identity;
+    files.requireDistinct(identities[0 .. result.active_count + result.active_artifact_count]) catch return error.AuthorityChanged;
 }
 
 fn pristine(result: *const ReopenedAggregate) bool {
     if (result.owner != null or result.phase != .pristine or result.parent_fd >= 0 or result.directory_fd >= 0 or
-        result.directory_len != 0 or result.directory_leaf_len != 0 or result.cli_path_len != 0) return false;
+        result.directory_len != 0 or result.directory_leaf_len != 0 or result.cli_path_len != 0 or
+        result.active_count != 0 or result.active_artifact_count != 0) return false;
     for (result.entries) |entry| if (entry.owner != null or entry.fd >= 0 or entry.parent_fd >= 0) return false;
     for (result.artifacts) |artifact| if (artifact.owner != null or artifact.fd >= 0 or artifact.parent_fd >= 0) return false;
     return true;
@@ -573,15 +619,21 @@ fn validStorage(result: *const ReopenedAggregate) bool {
         result.directory_leaf_len == 0 or result.directory_leaf_len >= result.directory_leaf.len or result.directory_leaf[result.directory_leaf_len] != 0 or
         result.cli_path_len == 0 or result.cli_path_len >= result.cli_path.len or result.cli_path[result.cli_path_len] != 0 or
         !std.mem.eql(u8, std.fs.path.basename(result.directory[0..result.directory_len]), result.directory_leaf[0..result.directory_leaf_len])) return false;
-    for (0..handoff.role_count) |index| {
+    if (result.active_count != (if (result.profile == .upgrade_b) handoff.role_count else handoff.baseline_role_count) or
+        result.active_artifact_count != (if (result.profile == .upgrade_b) artifact_count else baseline_artifact_count)) return false;
+    for (0..result.active_count) |index| {
         if (result.name_lens[index] == 0 or result.name_lens[index] >= result.names[index].len or result.names[index][result.name_lens[index]] != 0 or
             result.path_lens[index] == 0 or result.path_lens[index] >= result.paths[index].len or result.paths[index][result.path_lens[index]] != 0 or
             !std.mem.eql(u8, std.fs.path.basename(result.paths[index][0..result.path_lens[index]]), result.names[index][0..result.name_lens[index]]) or
             !std.mem.eql(u8, std.fs.path.dirname(result.paths[index][0..result.path_lens[index]]) orelse return false, result.directory[0..result.directory_len])) return false;
     }
-    for (0..artifact_count) |index| if (result.artifact_path_lens[index] == 0 or
+    for (result.active_count..handoff.role_count) |index| if (result.name_lens[index] != 0 or result.path_lens[index] != 0 or
+        result.entries[index].owner != null or result.entries[index].fd != -1 or result.entries[index].parent_fd != -1) return false;
+    for (0..result.active_artifact_count) |index| if (result.artifact_path_lens[index] == 0 or
         result.artifact_path_lens[index] >= result.artifact_paths[index].len or
         result.artifact_paths[index][result.artifact_path_lens[index]] != 0) return false;
+    for (result.active_artifact_count..artifact_count) |index| if (result.artifact_path_lens[index] != 0 or
+        result.artifacts[index].owner != null or result.artifacts[index].fd != -1 or result.artifacts[index].parent_fd != -1) return false;
     return true;
 }
 
@@ -592,6 +644,9 @@ fn metadataSeal(result: *const ReopenedAggregate) [32]u8 {
     hasher.update(std.mem.asBytes(&result.phase));
     hasher.update(std.mem.asBytes(&result.directory_device));
     hasher.update(std.mem.asBytes(&result.directory_inode));
+    hasher.update(std.mem.asBytes(&result.profile));
+    hasher.update(std.mem.asBytes(&result.active_count));
+    hasher.update(std.mem.asBytes(&result.active_artifact_count));
     hasher.update(result.directory[0..result.directory_len]);
     hasher.update(result.directory_leaf[0..result.directory_leaf_len]);
     hasher.update(result.cli_path[0..result.cli_path_len]);
@@ -601,12 +656,12 @@ fn metadataSeal(result: *const ReopenedAggregate) [32]u8 {
     hasher.update(result.context.workflow_ref[0..result.context.workflow_ref_len]);
     hasher.update(std.mem.asBytes(&result.context.run_id));
     hasher.update(std.mem.asBytes(&result.context.run_attempt));
-    for (0..handoff.role_count) |index| {
+    for (0..result.active_count) |index| {
         hasher.update(result.names[index][0..result.name_lens[index]]);
         hasher.update(result.paths[index][0..result.path_lens[index]]);
         if (result.entries[index].value()) |observation| hashObservation(&hasher, observation);
     }
-    for (0..artifact_count) |index| {
+    for (0..result.active_artifact_count) |index| {
         hasher.update(result.artifact_paths[index][0..result.artifact_path_lens[index]]);
         if (result.artifacts[index].value()) |observation| hashObservation(&hasher, observation);
     }

@@ -104,6 +104,7 @@ pub const PrepareCandidateAggregate = struct {
     candidate_frozen_bundle: []const u8,
     evidence_bundle: []const u8,
     manifest_bundle: []const u8,
+    timing_bundle: []const u8,
     aggregate: []const u8,
 };
 
@@ -114,6 +115,7 @@ pub const FinalizeCandidateAggregate = struct {
     dmg: []const u8,
     frozen_executable: []const u8,
     manifest: []const u8,
+    timing: []const u8,
 };
 
 pub const ResumeCandidatePublication = struct {
@@ -349,6 +351,7 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .candidate_frozen_bundle = value.candidate_frozen_bundle,
                 .evidence_bundle = value.evidence_bundle,
                 .manifest_bundle = value.manifest_bundle,
+                .timing_bundle = value.timing_bundle,
                 .aggregate = value.aggregate,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
@@ -361,6 +364,7 @@ fn bindCommand(command: contract.Command, trusted: context_mod.Context) Error!Bo
                 .dmg = value.dmg,
                 .frozen_executable = value.frozen_executable,
                 .manifest = value.manifest,
+                .timing = value.timing,
             } },
             .cli = try bindValues(value.repo, value.tag, value.github_cli, value.github_cli_sha256, trusted),
         },

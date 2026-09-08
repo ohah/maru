@@ -4,6 +4,7 @@ const report = @import("release_aggregate_process_report");
 fn valid() report.Report {
     return .{
         .schema = report.schema,
+        .profile = "baseline_a",
         .iterations = 20,
         .successful_pairs = 20,
         .distinct_pid_pairs = 20,
@@ -53,6 +54,9 @@ test "aggregate process report rejects count schema and percentile drift" {
     try std.testing.expectError(error.InvalidReport, report.parseCanonical(std.testing.allocator, try report.render(&storage, value)));
     value = valid();
     value.schema = "foreign";
+    try std.testing.expectError(error.InvalidReport, report.parseCanonical(std.testing.allocator, try report.render(&storage, value)));
+    value = valid();
+    value.profile = "foreign";
     try std.testing.expectError(error.InvalidReport, report.parseCanonical(std.testing.allocator, try report.render(&storage, value)));
     value = valid();
     value.prepare_ns = .{ .median = 3, .p95 = 2, .max = 1 };

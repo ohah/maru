@@ -40,7 +40,10 @@ test "$(grep -Fc '"$owner" == "$(/usr/bin/id -u)"' "$helper")" -eq 3
 
 test -f "$live_action"
 for input in preparation-path baseline-evidence-path upgrade-evidence-path manifest-path timing-path gh-path gh-sha256; do
-    test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
+  expected_count=1
+  # timing-path is both a closed input and a final-fence output.
+  if [[ "$input" == timing-path ]]; then expected_count=2; fi
+  test "$(grep -Fxc "  $input:" "$live_action")" -eq "$expected_count"
     test "$(grep -Fc "inputs.$input" "$live_action")" -ge 1
 done
 for input in checkpoint-root checkpoint-root-identity; do
@@ -78,6 +81,8 @@ test -x "$checkpoint_fixture"
 test "$(grep -Fxc '      MARU_COMMIT_HELPER: ${{ github.action_path }}/commit-profile-authored.sh' "$live_action")" -eq 1
 test "$(grep -Fxc '      "$MARU_COMMIT_HELPER" "$MARU_SELECT_OUTCOME" "$MARU_PAYLOAD_OUTCOME" "$MARU_FENCE_OUTCOME" \' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.evidence-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.evidence-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.timing-path }}' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.manifest-bundle-path }}' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.timing-bundle-path }}' "$live_action")" -eq 1
 
@@ -92,27 +97,30 @@ export MARU_TEST_CHECKPOINT_LOG="$checkpoint_log"
 export MARU_TEST_CHECKPOINT_SENTINEL="$sentinel"
 
 run_commit() {
-    "$commit_helper" "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    "$commit_helper" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
         "$checkpoint_fixture" "$fixture_root/checkpoints" "$sentinel" "$live_output"
 }
 
-run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''
+run_commit success success success false "$fixture_root/evidence.json" '' "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''
 test "$(wc -l < "$checkpoint_log" | tr -d ' ')" -eq 1
 test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation succeeded"
-test "$(wc -l < "$live_output" | tr -d ' ')" -eq 3
-test "$(sed -n '3p' "$live_output")" = 'timing-bundle-path='
+test "$(wc -l < "$live_output" | tr -d ' ')" -eq 5
+test "$(sed -n '1p' "$live_output")" = "evidence-path=$fixture_root/evidence.json"
+test "$(sed -n '2p' "$live_output")" = 'timing-path='
+test "$(sed -n '5p' "$live_output")" = 'timing-bundle-path='
 
 : > "$checkpoint_log"
 : > "$live_output"
-run_commit success success success true "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/timing.bundle"
+run_commit success success success true "$fixture_root/evidence.json" "$fixture_root/timing.json" "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/timing.bundle"
 test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation succeeded"
-test "$(sed -n '3p' "$live_output")" = "timing-bundle-path=$fixture_root/timing.bundle"
+test "$(sed -n '2p' "$live_output")" = "timing-path=$fixture_root/timing.json"
+test "$(sed -n '5p' "$live_output")" = "timing-bundle-path=$fixture_root/timing.bundle"
 
 for outcomes in 'failure skipped skipped' 'success failure skipped' 'success success failure' 'cancelled skipped skipped'; do
     : > "$checkpoint_log"
     : > "$live_output"
     read -r select_outcome payload_outcome fence_outcome <<< "$outcomes"
-    if run_commit "$select_outcome" "$payload_outcome" "$fence_outcome" false '' '' ''; then
+    if run_commit "$select_outcome" "$payload_outcome" "$fence_outcome" false '' '' '' '' ''; then
         echo 'expected terminal outcome rejection' >&2
         exit 1
     fi
@@ -123,7 +131,7 @@ done
 
 : > "$checkpoint_log"
 : > "$live_output"
-if run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/unexpected-timing.bundle"; then
+if run_commit success success success false "$fixture_root/evidence.json" '' "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/unexpected-timing.bundle"; then
     echo 'expected baseline timing contradiction rejection' >&2
     exit 1
 fi
@@ -133,7 +141,7 @@ test ! -s "$live_output"
 for invalid_bundle in 'relative.bundle' '/tmp/a/../bundle' '/tmp/a/.' '/tmp/trailing/' $'/tmp/control\tbundle'; do
     : > "$checkpoint_log"
     : > "$live_output"
-    if run_commit success success success false "$invalid_bundle" "$fixture_root/manifest.bundle" ''; then
+    if run_commit success success success false "$fixture_root/evidence.json" '' "$invalid_bundle" "$fixture_root/manifest.bundle" ''; then
         echo 'expected noncanonical final-fence output rejection' >&2
         exit 1
     fi
@@ -145,7 +153,7 @@ done
 : > "$live_output"
 MARU_TEST_CHECKPOINT_FAIL=1
 export MARU_TEST_CHECKPOINT_FAIL
-if run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''; then
+if run_commit success success success false "$fixture_root/evidence.json" '' "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''; then
     echo 'expected checkpoint failure propagation' >&2
     exit 1
 fi

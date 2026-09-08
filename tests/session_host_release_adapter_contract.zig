@@ -162,6 +162,17 @@ fn prepareAggregateArgs() [21][]const u8 {
     };
 }
 
+fn prepareUpgradeAggregateArgs() [23][]const u8 {
+    const baseline = prepareAggregateArgs();
+    var result: [23][]const u8 = undefined;
+    @memcpy(result[0..19], baseline[0..19]);
+    result[19] = "--timing-bundle";
+    result[20] = "/tmp/source/timing-bundle.json";
+    result[21] = baseline[19];
+    result[22] = baseline[20];
+    return result;
+}
+
 fn finalizeAggregateArgs() [17][]const u8 {
     return .{
         "finalize-candidate-aggregate",     "--repo",                                              "ohah/maru",               "--tag",                                                            "v1.2.3",
@@ -169,6 +180,17 @@ fn finalizeAggregateArgs() [17][]const u8 {
         "/tmp/handoff/candidate-aggregate", "--dmg",                                               "/tmp/artifacts/Maru.dmg", "--frozen-executable",                                              "/tmp/artifacts/maru-session-host",
         "--manifest",                       "/tmp/artifacts/Maru-1.2.3-session-host-release.json",
     };
+}
+
+fn finalizeUpgradeAggregateArgs() [19][]const u8 {
+    const baseline = finalizeAggregateArgs();
+    var result: [19][]const u8 = undefined;
+    @memcpy(result[0..15], baseline[0..15]);
+    result[15] = "--timing";
+    result[16] = "/tmp/preparation/profile-upgrade-timing.json";
+    result[17] = baseline[15];
+    result[18] = baseline[16];
+    return result;
 }
 
 fn resumePublicationArgs() [17][]const u8 {
@@ -233,9 +255,15 @@ test "release adapter parses exact aggregate prepare and finalize commands" {
     const prepare = try adapter.parseArgs(&prepareAggregateArgs());
     try std.testing.expectEqualStrings("/tmp/source/evidence.json", prepare.prepare_candidate_aggregate.evidence);
     try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", prepare.prepare_candidate_aggregate.aggregate);
+    try std.testing.expectEqualStrings("", prepare.prepare_candidate_aggregate.timing_bundle);
+    const upgrade = try adapter.parseArgs(&prepareUpgradeAggregateArgs());
+    try std.testing.expectEqualStrings("/tmp/source/timing-bundle.json", upgrade.prepare_candidate_aggregate.timing_bundle);
     const finalize = try adapter.parseArgs(&finalizeAggregateArgs());
     try std.testing.expectEqualStrings("/tmp/handoff/candidate-aggregate", finalize.finalize_candidate_aggregate.aggregate);
     try std.testing.expectEqualStrings("/tmp/artifacts/maru-session-host", finalize.finalize_candidate_aggregate.frozen_executable);
+    try std.testing.expectEqualStrings("", finalize.finalize_candidate_aggregate.timing);
+    const upgrade_finalize = try adapter.parseArgs(&finalizeUpgradeAggregateArgs());
+    try std.testing.expectEqualStrings("/tmp/preparation/profile-upgrade-timing.json", upgrade_finalize.finalize_candidate_aggregate.timing);
 }
 
 test "release adapter closes aggregate command option and path authority" {

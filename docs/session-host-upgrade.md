@@ -4335,7 +4335,8 @@ timestamp를 실패로 처리한다. 실제 protected baseline-A 시험 tag에�
 evidence와 publication이 성공하고 이 timing artifact가 같은 workflow run/attempt와 source SHA에 결속된 경우에만 baseline-A workflow
 배선의 원격 E2E 증거가 된다.
 
-이 여덟 단계 caller는 `release_adapter_candidate_preparation_handoff`가 허용하는 `baseline_a`만 실행한다. frozen executable을
+이 하위 슬라이스 당시의 여덟 단계 caller는 `release_adapter_candidate_preparation_handoff`가 허용하는 `baseline_a`만 실행했다. 이후
+§11.98~§11.99가 같은 caller를 `baseline_a | upgrade_b`의 닫힌 profile 합성으로 확장했다. frozen executable을
 candidate subject로 attest하고 manifest에 넣는 사실은 frozen N-1→current migration 실행 증거가 아니다. `upgrade_b`의 signed
 1-runtime/near-max evidence, predecessor manifest/asset authority와 같은 reducer/checkpoint를 잇는 별도 profile owner가 추가되고 실제
 protected B 시험 tag가 성공하기 전에는 frozen signed U5 완료를 주장하지 않는다. source gate와 synthetic harness green도 그 외부
@@ -5001,6 +5002,53 @@ GitHub-issued timing bundle과 signed N-1/current 실행 latency는 이 slice �
 upgrade는 8.208/345.481/352.578ms였다. 두 profile 모두 successful/distinct-PID pair 20/20, failure·parent-FD delta·aggregate/staging
 residue 0이었다. 이 값은 synthetic verifier를 사용한 local process-boundary 회귀 기준이며 GitHub network나 signed product latency
 예산으로 승격하지 않는다.
+
+### 11.100 protected run 원격 실측 증거와 최종 판정
+
+로컬 synthetic verifier 실측은 process 경계와 회귀 비용을 보여 주지만, protected `release` environment에서 GitHub OIDC,
+`actions/attest`, signed/notarized N-1/current 제품과 실제 network를 거친 wall time을 대신하지 않는다. tag release workflow의 별도
+read-only 판정 job이 같은 workflow run의 signing job과 timing artifact, immutable Release와 GitHub attestation을 fresh 관측해
+`baseline_a | upgrade_b`별 canonical 원격 판정을 만든다. 이 job의 권한은 `actions: read`, `contents: read`뿐이며 tag, Release,
+asset, attestation, environment 또는 이전 실행을 생성·수정·삭제·재실행하지 않는다.
+
+판정 owner는 checkout 전에 고정한 GitHub CLI executable과 SHA-256, current repository/workflow/run ID/run attempt/source SHA/tag를
+권위로 삼는다. profile은 raw environment, artifact 이름, 파일 존재 여부 또는 caller scalar에서 얻지 않고 같은 run이 게시한
+authenticated release evidence의 canonical bytes에서만 얻는다. timing artifact와 Release asset·attestation은 repository, workflow,
+run ID, run attempt, source SHA, tag와 selected signing job/step가 모두 current Context와 exact 일치해야 한다. 다른 run/attempt의
+artifact replay, rerun에서 옛 artifact 혼입, 동일 이름 교체, source/tag drift, partial pagination과 mutable draft Release는 output 0으로
+fail-close한다.
+
+`baseline_a`는 protected workflow와 current signed 제품의 원격 경계를 세우는 A 증거만 게시하며 U5 완료를 주장하지 않는다.
+`upgrade_b`는 authenticated predecessor A, current B의 signed/notarized frozen 제품, profile-aware evidence·manifest·timing의 실제
+GitHub-issued attestation, stage 1~8 성공, publication receipt와 cleanup recovery까지 같은 attempt에 결속되어야 한다. 그 뒤에만
+최종 판정은 canonical pass record를 내보낸다. 실패한 원격 실행은 partial pass record를 게시하지 않고 이미 게시된 원격 객체를
+되돌렸다고 주장하지 않으며, audit-required evidence를 보존한다. 실제 앱 업데이트 뒤 PTY·PID·runtime 복구라는 U5 제품 경계는 이
+remote evidence와 signed frozen N-1→current 실행 증거가 모두 있어야 닫힌다.
+
+#### 11.100a GitHub-issued live timing canonical 입력
+
+첫 제품 합성 gate는 `maru.session-host-release-live-timing.v1` JSON을 bounded parse하는 OS-neutral value owner다. 입력은 최대
+16 KiB의 complete JSON object이며 exact `schema`, `repository`, `workflow`, `run_id`, `run_attempt`, `source_sha`, `job_name`,
+`step_name`, `started_at`, `completed_at`, `duration_ms`만 허용한다. duplicate·unknown·missing field, trailing bytes, JSON scalar type
+교환, NUL·control byte, 빈/과대 string과 allocation failure는 owner publication 전에 거부한다. canonical 값은 repository
+`ohah/maru`, workflow `release.yml`, signing job `universal dmg (signed + notarized)`, step `Run session host live release workflow`,
+positive run ID/attempt, lowercase 40-hex source SHA다.
+
+두 timestamp는 [GitHub Jobs API](https://docs.github.com/en/rest/actions/workflow-jobs)의 step 응답과 같은 strict RFC 3339
+`YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`이고 Gregorian calendar의 실제 날짜여야 한다. fraction은 absent 또는 1~9자리,
+offset hour/minute는 각각 `00...23`/`00...59`, leap second는 `00...59`초만 허용한다. parser는 offset을 반영한 epoch nanosecond를
+overflow 없이 직접 계산하고 workflow writer와 같은 millisecond truncation을 적용해 `completed_at > started_at`,
+`duration_ms == completed_epoch_ms-started_epoch_ms`, positive duration과 24시간 상한을 함께 검증한다. caller가 제공한 duration만
+믿거나 로컬 clock·artifact mtime·job 배열 순서를 사용하지 않는다. owner는 canonical field의 bounded copy와 derived duration을
+소유하며 copied/pre-owned/aliased owner를 거부하고 `deinit` 뒤 terminal inactive가 된다.
+
+focused Debug·ReleaseFast gate는 canonical parse/round-trip, `Z`/offset과 0~9자리 fraction, leap-year와 month/day 경계,
+timestamp 역전·불일치·overflow, 모든 field/type/size/control/duplicate/unknown/trailing 오류와 allocation fail-index unwind를
+검증한다. workflow source gate는 timing job이
+Jobs API를 exact current run attempt로 조회하고 exact signing job·step 하나의 timestamps로 canonical field 순서를 작성하며 positive
+duration을 검사한 뒤 artifact를 게시하는지 고정한다. 이 gate는 이미 캡처된 JSON 의미와 workflow source 계약만 검증하고 실제
+GitHub API·artifact provenance·Release/attestation 또는 U5 완료를 주장하지 않는다. 그 remote transport와 final verdict 결속은
+§11.100의 후속 gate가 소유한다.
 
 ## 12. 필수 적대적 검증
 

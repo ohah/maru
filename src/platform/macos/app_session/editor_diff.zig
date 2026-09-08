@@ -3195,9 +3195,15 @@ test "DCOL3: 넘어가면 선택이 접힌다 — 좌우를 걸치지 않는다 
 
     const rows = fx.term.rt.editor_diff.?.right_texts;
     const i = rowIndexOf(rows, "BETA") orelse return error.NoRow;
-    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 0 }) };
-    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
-    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
+    // **마우스로 낱말을 잡은 상태에서 넘긴다.** 넘기기 전이 이미 `.simple` 이면 「단위를 푼다」와
+    //    「단위를 들고 간다」가 같은 답을 낸다(19·20회차 U14 가 그래서 살았다).
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.fromAnchorRange(
+        .{ .row = i, .byte = 0 },
+        .{ .row = i, .byte = 4 },
+        .{ .row = i, .byte = 4 },
+        .word,
+    ) };
+    try testing.expectEqual(maru.session.editor.selection.AnchorKind.word, fx.term.rt.editor_diff_selection.?.sel.kind);
     try testing.expect(!fx.term.rt.editor_diff_selection.?.sel.isEmpty()); // 픽스처 자기 검증
 
     try pressSwitch(&fx);

@@ -692,6 +692,14 @@ pub const Filter = enum {
     /// 그 규칙에서 「전체」가 **활동 쪽만** 보게 된다 — 이미지가 상한에 잘려도 「전체」는 아무 말을
     /// 안 하고, 사용자는 「이미지」 필터로 가야만 그 사실을 안다. 필터가 **담는 종류**로 정해야
     /// 그 갈래가 안 생긴다.
+    /// 이 필터가 **그림을 담나**. 담지 않으면 썸네일도 타일도 그 화면의 것이 아니다.
+    ///
+    /// 타일을 **버릴지 말지**가 이 값에 걸린다 — 안 담는 필터(「읽기」·「명령」)에 잠깐 들렀다고
+    /// 픽셀을 버리면, 돌아올 때 다시 디코드해 화면이 깜빡인다(실측 11 장에 306 ms).
+    pub fn holdsImages(self: Filter) bool {
+        return self == .images or self == .all;
+    }
+
     pub fn partialOf(self: Filter, image_partial: bool, activity_partial: bool) bool {
         return switch (self) {
             .images => image_partial,
@@ -1039,7 +1047,12 @@ pub fn poll(self: *AppSession) void {
     // **타일은 버리지 않고 새 인덱스에 다시 잇는다.** 자동 갱신이 붙은 뒤로 이 길은 「같은 파일이
     // 자랐다」에도 쓰이는데, 통째로 버리면 대화가 이어지는 내내 격자가 매 턴 비었다 다시 찬다
     // (장당 ~20 ms). 인덱스는 밀려도 `(file_index, data_offset)` 은 그대로다.
-    remapTiles(self);
+    //
+    // ⚠️ **그림을 안 담는 필터에서는 여기서도 안 잇는다**(`rebuildFilter` 와 같은 규율). 그때
+    // `hits` 에는 그림이 없어 `remapTiles` 가 전부 버리는데, 「명령」을 보는 동안 대화가 이어지면
+    // 그 사이 픽셀이 통째로 사라져 돌아올 때 다시 디코드한다. 안 그리는 화면이므로 자리가 낡아도
+    // 무해하고, 돌아올 때 잇는다.
+    if (self.image_gallery.filter.holdsImages()) remapTiles(self);
     // 크게 보기는 그대로 버린다 — 자동 갱신은 애초에 열려 있으면 미루므로(`pollFreshness`) 여기
     // 도달하는 것은 소스가 갈렸을 때뿐이고, 그때는 다른 세션이라 닫는 것이 맞다.
     self.image_gallery.dropOpen(self.allocator);
@@ -1632,9 +1645,13 @@ pub fn rebuildFilter(self: *AppSession) void {
     // 그림 자신(「이미지」)과 접힌 호출(「전체」)이 **같은 키**(`file_index`·`data_offset`)를 갖는다.
     // 그 전에는 두 도메인의 키가 달라 다시 이을 방법이 없었다.
     //
-    // ⚠️ 그림을 안 담는 필터(「읽기」·「명령」)로 가면 여기서 전부 버려진다 — `remapTiles` 가
-    // `hits` 에 없는 타일의 픽셀을 푼다. 그쪽을 거쳐 돌아오면 다시 디코드한다(남은 여지).
-    remapTiles(self);
+    // ⚠️ **그림을 안 담는 필터에서는 그대로 둔다**(사용자 지적). 「읽기」·「명령」의 `hits` 에는
+    // 그림이 없으므로 `remapTiles` 를 부르면 **전부 버려진다** — 잠깐 들렀다 돌아오는 것만으로
+    // 화면이 깜빡인다. 그 화면에서는 애초에 안 그리므로(`wants_thumbs`) 타일의 자리(`hit_index`)가
+    // 낡아도 무해하고, 돌아올 때 `remapTiles` 가 다시 잇는다.
+    //
+    // 들고 있는 값은 최대 `max_tiles`(256 장 · 15 MB)로 이미 유계다.
+    if (self.image_gallery.filter.holdsImages()) remapTiles(self);
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.hovered = null;
     self.image_gallery.scroll = .{};

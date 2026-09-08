@@ -78546,14 +78546,21 @@ test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용�
     var before: [3]u64 = undefined;
     for (session.image_gallery.tiles.items, 0..) |t, k| before[k] = t.data_offset;
 
-    // ── 칩을 두 번 누른다: 「전체」 → 「이미지」 → 「전체」.
-    image_gallery_ops.setFilter(session, .images);
-    {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    // ── 칩을 눌러 **네 자리를 다 돈다**: 전체 → 이미지 → 읽기 → 명령 → 전체.
+    //
+    // ⚠️ **그림을 안 담는 자리를 거치는 것이 요점이다**(사용자 지적). 「읽기」·「명령」의 `hits` 에는
+    // 그림이 없어서, 거기서 다시 이으면 **전부 버려진다** — 잠깐 들렀다 돌아오는 것만으로 화면이
+    // 깜빡인다. 그 화면에서는 애초에 안 그리므로 자리가 낡아도 무해하다.
+    const path_around = [_]image_gallery_ops.Filter{ .images, .reads, .execs };
+    for (path_around) |f| {
+        image_gallery_ops.setFilter(session, f);
+        {
+            var wait = GalleryWait.start(session.io);
+            while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        }
+        // ① 어느 자리에서도 **그대로** 있다 — 하나라도 버리면 돌아올 때 다시 풀어야 한다.
+        try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
     }
-    // ① 격자에서도 **그대로** 있다 — 여기서 버리면 「이미지」로 갈 때도 깜빡인다.
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
 
     image_gallery_ops.setFilter(session, .all);
     {

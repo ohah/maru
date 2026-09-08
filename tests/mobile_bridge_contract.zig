@@ -7211,6 +7211,35 @@ test "아틀라스 셀은 «화면 셀 × 그리는 배율» 을 따라간다" {
     try T.expect(bridge.maru_mobile_atlas_text_px() > before);
 }
 
+test "굽는 크기가 바뀌면 «이모지 등록부도» 비운다" {
+    // **다시 구우면 host 가 두 텍스처를 둘 다 새로 만든다**(같은 격자라 크기가 함께 바뀐다).
+    // 글자 등록부만 비우면 이모지는 「등록은 있는데 그림은 없는」 칸을 영영 가리키고, 다시 굽는
+    // 목록에도 안 올라와 앱을 껐다 켤 때까지 빈칸이다. 셀이 상수였을 때는 이 경로가 아예 안
+    // 돌아서 안 드러났다 — 이 PR 이 그 경로를 열었다.
+    const T = std.testing;
+    bridge.maru_mobile_atlas_geometry(24, 32);
+    defer bridge.maru_mobile_atlas_geometry(24, 32);
+    _ = bridge.maru_mobile_build(400, 800, 1);
+
+    const emoji = [_]u32{0x1F600};
+    const letter = [_]u32{'가'};
+    bridge.maru_mobile_color_atlas_add(&emoji, 1, 0, 0, 0, 24);
+    bridge.maru_mobile_atlas_add(&letter, 1, 0, 1, 0, 24);
+    try T.expect(bridge.maru_mobile_color_atlas_count() > 0);
+    try T.expect(bridge.maru_mobile_atlas_count() > 0);
+
+    // 같은 크기로 한 프레임 더 — 아무것도 안 비운다.
+    _ = bridge.maru_mobile_build(400, 800, 2);
+    try T.expect(bridge.maru_mobile_color_atlas_count() > 0);
+    try T.expect(bridge.maru_mobile_atlas_count() > 0);
+
+    // host 가 «다른 크기로 구웠다» 고 알린 다음 프레임 — **둘 다** 비어야 한다.
+    bridge.maru_mobile_atlas_geometry(48, 64);
+    _ = bridge.maru_mobile_build(400, 800, 3);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_atlas_count());
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_color_atlas_count());
+}
+
 test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값이다" {
     // **한 덩어리로 주면 모바일에서 못 읽는다.** macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이
     // 있어 화면 전체를 값 하나로 줘도 줄 이동이 되지만(Ghostty 가 그 길이다), UIKit·Android 의

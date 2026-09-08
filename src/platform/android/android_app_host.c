@@ -142,7 +142,12 @@ static uint8_t *g_glyph_px = NULL;
 // 다시 굽지 않으므로, 원본이 없으면 재개 뒤 **이모지가 영영 안 보인다**(실측: 홈으로 나갔다
 // 돌아오니 이모지만 사라지고 한글·ASCII 는 멀쩡했다).
 static uint8_t *g_color_px = NULL;
-static unsigned int g_baked_cell_h = 0; // 지금 구워 둔 셀 크기(기기 픽셀)
+// 지금 서 있는 텍스처의 격자(기기 픽셀). **자라는 글자는 이 격자에 굽는다** — 코어가 원하는
+// 크기가 아니라. 둘이 갈리면 `vkCmdCopyBufferToImage` 가 이미지 밖으로 복사한다(Android 는
+// 아직 다시 굽지 않으므로 `font.size` 를 키우면 실제로 갈린다).
+static unsigned int g_baked_cell_w = 0;
+static unsigned int g_baked_cell_h = 0;
+static unsigned int g_stale_cell_logged = 0;  // 「어긋났다」를 이미 남긴 크기(같은 줄을 30Hz 로 안 찍는다)
 static unsigned long long g_a11y_shape = 0; // 지난 프레임 서술자 «생김새» 지문(M9)
 static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
@@ -232,7 +237,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         jstring s = (*env)->NewString(env, &cps[i], 1);
         uint32_t col = i % COLS, row = i / COLS;
         (*env)->CallVoidMethod(env, canvas, mDraw, s,
-                               (jfloat)(col * CW + CW / 24 + 1), (jfloat)(row * CH + CH - CH / 4), paint);
+                               (jfloat)(col * CW + CW / 24), (jfloat)(row * CH + CH - CH / 4), paint);
         jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
         uint32_t advance = (uint32_t)(adv + 0.5f);
         if (advance == 0) advance = CW / 2;
@@ -734,6 +739,18 @@ static void drawFrame(void) {
     // 그 동안 자물쇠를 쥐고 있으면 **타이핑이 GPU 를 기다리게 된다**. 성장이 만지는 등록부·
     // 미스 목록은 입력 스레드가 안 건드리므로 밖에 둬도 된다.
     pthread_mutex_lock(&g_bridge_lock);
+    // **다시 굽는 길이 아직 없다**(M13a — Vulkan 이미지를 다시 만들어야 한다). 그러니 어긋난
+    // 사실이라도 **읽히게** 남긴다: 안 남기면 「설정에서 글자를 키웠는데 흐리다」가 원인 없는
+    // 증상으로만 온다. 같은 크기로는 한 번만 찍는다(프레임마다 찍으면 30Hz 로 로그를 채운다).
+    //
+    // **자물쇠 «안» 이다** — 이 값은 `font.size` 에서 나오고 설정 쓰기는 이 자물쇠를 쥐고 돈다.
+    {
+        unsigned int want_cell = maru_mobile_atlas_cell_h();
+        if (g_baked_cell_h && want_cell != g_baked_cell_h && want_cell != g_stale_cell_logged) {
+            LOGI("MARU_ATLAS stale baked=%u want=%u (android rebake pending)", g_baked_cell_h, want_cell);
+            g_stale_cell_logged = want_cell;
+        }
+    }
     struct timespec fts;
     clock_gettime(CLOCK_MONOTONIC, &fts);
     unsigned int n = maru_mobile_build(lw, lh,
@@ -2361,7 +2378,7 @@ static int bakeGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int ncp, u
     jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
     if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
-    (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)(CW / 24 + 1), (jfloat)(CH - CH / 4), b->paint);
+    (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)(CW / 24), (jfloat)(CH - CH / 4), b->paint);
     jfloat adv = (*env)->CallFloatMethod(env, b->paint, b->measure, s);
     *advance = (uint32_t)(adv + 0.5f);
     if (*advance == 0) *advance = CW / 2;
@@ -2398,7 +2415,7 @@ static int bakeColorGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int n
     jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
     if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
-    (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)(CW / 24 + 1), (jfloat)(CH - CH / 4), b->paint);
+    (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)(CW / 24), (jfloat)(CH - CH / 4), b->paint);
 
     void *pixels = NULL;
     AndroidBitmapInfo info;
@@ -2489,7 +2506,12 @@ static void growAtlas(struct android_app *app) {
     // **마지막 항목을 그 자리로** 당겨 오므로, 앞으로 진행하면 당겨진 것을 건너뛴다(실측).
     // 뒤에서부터 가면 지워지는 자리가 항상 훑은 뒤쪽이라 앞쪽이 흔들리지 않는다 —
     // 목록 크기를 host 가 따로 알 필요도 없어진다(그 상수를 양쪽에 두면 또 어긋난다).
-    const uint32_t CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
+    // **코어에 묻지 않는다 — 지금 서 있는 텍스처의 격자로 굽는다.** 코어는 「원하는」 크기를
+    // 답하는데 Android 는 아직 다시 굽지 않으므로(M13a), `font.size` 를 키우면 그 답이 이미지
+    // 격자보다 커진다. 그대로 쓰면 아래 `uploadSlot` 이 `imageOffset = col*cw` 로 이미지 밖에
+    // 쓴다 — 적대적 검증에서 잡았다. (`glyph_image` 는 굽기가 성공했을 때만 서므로 — 위에서
+    // 이미 걸렀다 — 여기 값이 0 인 경우는 없다. 그래서 0 을 따로 막지 않는다.)
+    const uint32_t CW = g_baked_cell_w, CH = g_baked_cell_h;
     // **상한만큼 잡아 둔다** — 셀 크기는 설정·배율에 따라 달라지고, 그 상한은 헤더가 든다.
     uint8_t cell[MARU_ATLAS_CELL_MAX * MARU_ATLAS_CELL_MAX];
     unsigned int added = 0;
@@ -2597,8 +2619,10 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         maru_mobile_set_render_scale((unsigned int)(g.scale * 1000.0f + 0.5f));
         if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh))
             LOGI("atlas_raster_failed");
-        else
+        else {
+            g_baked_cell_w = maru_mobile_atlas_cell_w();
             g_baked_cell_h = maru_mobile_atlas_cell_h();
+        }
         if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
         // **처음부터 vsync 콜백이 주기를 쥔다**(30Hz). 여기서 등록하는 이유는
         // 메인 루프가 `pollOnce(-1)` 로 막혀 있어 거기서는 등록에 도달할 수

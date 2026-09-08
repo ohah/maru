@@ -26,7 +26,8 @@ extern "C" {
 unsigned int maru_mobile_atlas_cell_w(void);
 unsigned int maru_mobile_atlas_cell_h(void);
 /// 셀 상한(기기 픽셀). host 가 한 칸짜리 버퍼를 잡을 때 쓴다 — 코어의 상한과 **같은 값**이라야
-/// 하고, 코어가 그 위로는 안 답한다(텍스처가 제곱으로 커져 폰에 부담이다).
+/// 하고, 코어가 그 위로는 안 답한다: 텍스처가 제곱으로 커지고 **아틀라스가 둘이라**(커버리지 R8 +
+/// 이모지 RGBA8) 픽셀당 5바이트가 든다 — 96px 셀이면 둘이 합쳐 약 16.9 MiB 다.
 #define MARU_ATLAS_CELL_MAX 96
 /// **그리는 배율**(×1000) — 논리 좌표 하나가 기기 픽셀 몇 개가 되는가. 위 셀 크기가 이 값에
 /// 달렸다. `maru_mobile_available_logical` 의 배율과 다를 수 있다: iOS 는 그쪽에 1000 을 넘기고도

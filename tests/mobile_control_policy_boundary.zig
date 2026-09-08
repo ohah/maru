@@ -85,6 +85,92 @@ test "정책 경계: 코어가 베낀 ABI 상수는 헤더와 같은 값이다" 
     try std.testing.expectEqual(@as(usize, 1), count(bridge, "open = 2,"));
 }
 
+test "정책 경계: 굽는 셀은 코어가 정하고, 다시 굽기는 «build 앞» 이다" {
+    // **셀 크기는 정책이다.** 상수로 구우면 그 그림을 늘려 써서 흐려진다(실측: 22px 를 62px
+    // 자리에). 그 판단이 host 로 새면 두 플랫폼이 서로 다른 크기로 굽고, 픽셀 대조가 조용히
+    // 무의미해진다 — 예전에 네 자리에 흩어져 있던 그 상수다.
+    //
+    // **그리고 순서가 정책의 일부다.** 다시 구우면 텍스처를 새로 만들어 자라난 글자(한글·이모지)
+    // 그림이 사라지는데, 등록부를 비우는 것은 `maru_mobile_build` 안이다. build **뒤에** 구우면
+    // 그 프레임은 「등록은 있는데 그림은 없는」 칸을 그린다 — 한글이 한 프레임 빈칸으로 뜬다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+
+    for ([_][]const u8{ ios, android }) |host| {
+        // **크기는 코어에 묻는다.** 옛 상수를 굽는 자리에서 쓰면 안 된다.
+        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_W,"));
+        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_H,"));
+        try std.testing.expectEqual(@as(usize, 0), count(host, "MARU_ATLAS_CELL_H;"));
+        try std.testing.expect(count(host, "maru_mobile_atlas_cell_h()") > 0);
+        // **그리는 배율을 알린다.** 안 알리면 코어가 1배로 알고 작게 굽는다(그 결함으로 한 바퀴 돌았다).
+        // 횟수는 안 고정한다 — Android 는 굽기 앞(한 번)과 프레임마다(배율이 바뀔 수 있다) 둘이다.
+        try std.testing.expect(count(host, "maru_mobile_set_render_scale(") > 0);
+
+        // **여백·베이스라인은 «옛 크기에서 옛 값» 을 재현해야 한다.** 상수로 두면 셀이 커졌을 때
+        // 글자가 바닥에 붙어 위가 잘리고, 비율을 잘못 적으면 옛 크기에서 자리가 밀린다 —
+        // `CW / 24 + 1` 로 적었다가 CW=24 에서 1 이 아니라 2 가 돼 1px 밀린 것을 잡았다.
+        // (0 이 될까 걱정한 것인데, 셀 하한 32 가 CW 를 24 아래로 못 내리므로 필요 없다.)
+        try std.testing.expectEqual(@as(usize, 0), count(host, "CW / 24 + 1"));
+        try std.testing.expect(count(host, "CW / 24") >= 3);
+        try std.testing.expectEqual(@as(usize, 0), count(host, "CH - 8"));
+    }
+
+    // iOS 는 첫 굽기가 프레임보다 앞서 **다시** 굽는다 — 그 자리가 `build` 앞이어야 한다.
+    try expectPrecedesInSameBody(ios, "!= _bakedCellH", "maru_mobile_build(");
+
+    // Android 는 배율을 먼저 알므로 **첫 굽기 앞에서** 알린다(다시 굽는 길이 아직 없다 — M13a).
+    try expectPrecedesInSameBody(android, "maru_mobile_set_render_scale(", "!g_glyph_px && !rasterizeAtlasOnDevice(");
+
+    // **자라는 글자는 «서 있는 텍스처의 격자» 에 굽는다 — 코어가 원하는 크기가 아니라.**
+    // 코어는 설정·배율이 바뀌면 곧바로 새 크기를 답하는데, 텍스처는 다시 굽기 전까지 옛 격자다.
+    // 그 답으로 슬롯을 계산하면 Android 는 `vkCmdCopyBufferToImage` 가, iOS 는 `replaceRegion:`
+    // 이 이미지 밖을 가리킨다 — Android 는 다시 굽는 길이 아예 없어 `font.size` 만 키워도 그렇게
+    // 되고, iOS 는 다시 굽기가 실패한 프레임이 그 경우다. 적대적 검증에서 잡았다.
+    try expectAbsentFromBody(ios, "- (void)growAtlas {", "maru_mobile_atlas_cell_");
+    try expectAbsentFromBody(ios, "- (BOOL)bakeColorGlyph:", "maru_mobile_atlas_cell_");
+    try expectAbsentFromBody(android, "static void growAtlas(", "maru_mobile_atlas_cell_");
+
+    // **다시 굽는 자리는 옛 폰트를 놓아야 한다.** 이 메서드는 이제 한 번만 도는 게 아니다 —
+    // 셀이 바뀌면 다시 돈다. 안 놓으면 다시 구울 때마다 CTFont 다섯이 샌다(적대적 검증에서 잡았다).
+    try std.testing.expectEqual(@as(usize, 1), count(ios, "if (_atlasFont) CFRelease(_atlasFont);"));
+    try std.testing.expectEqual(@as(usize, 1), count(ios, "if (_atlasFaces[s]) CFRelease(_atlasFaces[s]);"));
+}
+
+/// `signature` 로 시작하는 함수 몸통 안에 `needle` 이 **없어야** 한다.
+/// 몸통은 그 자리부터 열 0 의 `}` 까지다(두 host 의 코드 스타일이 그렇다).
+///
+/// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입
+/// (`static void growAtlas(struct android_app *app);`)에 걸려 엉뚱한 몸통을 재고 변이가 초록으로
+/// 빠져나갔다. 그 줄에 `{` 가 있어야 정의다.
+fn expectAbsentFromBody(src: []const u8, signature: []const u8, needle: []const u8) !void {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, src, from, signature)) |at| {
+        from = at + signature.len;
+        const line_end = std.mem.indexOfScalarPos(u8, src, at, '\n') orelse src.len;
+        if (std.mem.indexOfScalar(u8, src[at..line_end], '{') == null) continue; // 선언이다
+        const rest = src[at..];
+        const end = std.mem.indexOf(u8, rest, "\n}\n") orelse rest.len;
+        if (std.mem.indexOf(u8, rest[0..end], needle) != null) return error.NeedleInBody;
+        return;
+    }
+    return error.DefinitionMissing;
+}
+
+/// `later` 바로 앞에 `earlier` 가 **같은 함수 안에** 있는가.
+///
+/// **파일 위치만 견주면 아무것도 안 잰다.** 처음에 그렇게 썼다가, Android 에서 굽기 앞의
+/// `set_render_scale` 을 통째로 지우는 변이가 **초록으로 빠져나갔다** — 같은 이름이 파일 앞쪽
+/// 다른 함수(`drawFrame`)에도 있어서 첫 자리가 우연히 앞이었다. 그래서 `later` 에서 **거꾸로**
+/// 가장 가까운 `earlier` 를 찾고, 그 사이에 함수가 끝나는 자리(열 0 의 `}`)가 없어야 한다.
+fn expectPrecedesInSameBody(src: []const u8, earlier: []const u8, later: []const u8) !void {
+    const later_at = std.mem.indexOf(u8, src, later) orelse return error.LaterMissing;
+    const at = std.mem.lastIndexOf(u8, src[0..later_at], earlier) orelse return error.EarlierMissing;
+    if (std.mem.indexOf(u8, src[at..later_at], "\n}\n") != null) return error.NotInSameBody;
+}
+
 /// 헤더의 `#define <name> <v>` 와 Zig 의 `const <name>: T = <v>` 가 같은 값인가.
 /// **괄호는 벗긴다** — C 는 음수를 `(-7)` 로 적는다.
 fn expectPair(header: []const u8, bridge: []const u8, c_prefix: []const u8, zig_prefix: []const u8) !void {

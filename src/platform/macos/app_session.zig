@@ -78044,6 +78044,100 @@ test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (적대적 12회차 · 판정자 공백)" {
+    // ⚠️ **판정자 커버리지를 전수로 훑다가 찾은 빈틈이다.** §2.2.1 이 「본문이 없는 그림 결과는
+    // 펼침에서 「이미지」라고 적는다」를 정했는데, **그것을 재는 판정자가 없었다.** 요약 칸
+    // (`formatResultSummary`)은 재고 있었지만 펼침은 다른 경로다(`loadOpenDetail`).
+    //
+    // 그 자리가 비면 「결과」 머리 줄만 서고 아래가 빈 채로 남아, 사용자에게는 「못 읽었다」로
+    // 보인다 — 계약 §2 가 가르라고 한 「없다」와 「못 봤다」가 거기서 뭉개진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 그림 결과 하나 + **본문이 있는** 결과 하나 — 두 갈래를 다 지나야 무언가를 잰다.
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_D1\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/one.png\"}}]}}\n" ++
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_D1\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u1\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_D2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"목록\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_D2\"," ++
+        "\"type\":\"tool_result\",\"content\":\"alpha\\nbeta\"}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "d.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/d.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    image_gallery_ops.setFilter(session, .all);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    const want = maru.i18n.t(.image_gallery_result_image);
+
+    // 두 줄을 **둘 다** 펼쳐 본다 — 한쪽만 보면 「전부 「이미지」라고 적는다」와 안 갈린다.
+    var saw_image_row = false;
+    var saw_text_row = false;
+    for (0..session.image_gallery.count()) |n| {
+        const hit = session.image_gallery.hits.items[n];
+        image_gallery_ops.openAt(session, n);
+        const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+        try std.testing.expect(op.detail.has_result);
+
+        if (hit.result.image and hit.result.lines == 0) {
+            saw_image_row = true;
+            // ① **「이미지」 한 줄이 실제로 담긴다.** 빈 채로 두면 「못 읽었다」로 보인다.
+            try std.testing.expectEqualStrings(want, op.detail.result);
+            try std.testing.expect(!op.detail.result_truncated);
+        } else {
+            saw_text_row = true;
+            // ② **본문이 있는 결과는 그 본문을 읽는다** — 「이미지」로 덮지 않는다.
+            try std.testing.expect(!std.mem.eql(u8, want, op.detail.result));
+            try std.testing.expect(op.detail.result.len > 0);
+        }
+    }
+    try std.testing.expect(saw_image_row);
+    try std.testing.expect(saw_text_row);
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

@@ -5,8 +5,11 @@ action=.github/actions/session-host-release-attest-authored/action.yml
 helper=.github/actions/session-host-release-attest-authored/pin-authored-pair.sh
 single_action='./.github/actions/session-host-release-attest'
 live_action=.github/actions/session-host-release-live-authored-attestation/action.yml
-payload_action='./.github/actions/session-host-release-attest-authored'
+payload_action='./.github/actions/session-host-release-attest-authored-profile'
+legacy_payload_action='./.github/actions/session-host-release-attest-authored'
 contract=src/platform/macos/session_host/release_adapter_attestation_bundle_contract.zig
+workflow=.github/workflows/release.yml
+build_file=build.zig
 
 test -f "$action"
 test -x "$helper"
@@ -36,36 +39,119 @@ test "$(grep -Fc '"$owner" == "$(/usr/bin/id -u)"' "$helper")" -eq 3
 ! grep -Eq 'GH_TOKEN|APPLE_|(^|[^A-Z_])HOME([^A-Z_]|$)|(^|[^A-Z_])PATH([^A-Z_]|$)' "$helper"
 
 test -f "$live_action"
-for input in preparation-path evidence-path evidence-name manifest-path manifest-name; do
+for input in preparation-path baseline-evidence-path upgrade-evidence-path manifest-path timing-path gh-path gh-sha256; do
     test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
-    test "$(grep -Fxc "      $input: \${{ inputs.$input }}" "$live_action")" -eq 1
+    test "$(grep -Fc "inputs.$input" "$live_action")" -ge 1
 done
 for input in checkpoint-root checkpoint-root-identity; do
     test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
 done
 test "$(grep -Fxc "    uses: $payload_action" "$live_action")" -eq 1
+test "$(grep -Fxc "    uses: $legacy_payload_action" "$live_action")" -eq 0
 test "$(grep -Fc 'uses: actions/attest@' "$live_action")" -eq 0
 test "$(grep -Fc '/zig-out/bin/maru-session-host-release-workflow-checkpoint' "$live_action")" -eq 2
 admit_line=$(grep -nF 'name: Admit authored attestation checkpoint' "$live_action" | cut -d: -f1)
-live_payload_line=$(grep -nF 'name: Attest authored pair payload' "$live_action" | cut -d: -f1)
+select_line=$(grep -nF 'name: Select authored subjects without credentials' "$live_action" | cut -d: -f1)
+live_payload_line=$(grep -nF 'name: Attest profile-selected authored payload' "$live_action" | cut -d: -f1)
+fence_line=$(grep -nF 'name: Fence authored bundles without credentials' "$live_action" | cut -d: -f1)
 commit_line=$(grep -nF 'name: Commit authored attestation checkpoint' "$live_action" | cut -d: -f1)
-test "$admit_line" -lt "$live_payload_line"
+test "$admit_line" -lt "$select_line"
+test "$select_line" -lt "$live_payload_line"
+test "$live_payload_line" -lt "$fence_line"
+test "$fence_line" -lt "$commit_line"
 test "$live_payload_line" -lt "$commit_line"
-test "$(grep -Fxc '    continue-on-error: true' "$live_action")" -eq 1
+test "$(grep -Fxc '    continue-on-error: true' "$live_action")" -eq 3
 test "$(grep -Fxc '    if: always()' "$live_action")" -eq 1
-bundle_guard_line=$(grep -nF '[[ -n "$MARU_EVIDENCE_BUNDLE"' "$live_action" | cut -d: -f1)
-success_commit_line=$(grep -nF 'authored_attestation succeeded' "$live_action" | cut -d: -f1)
-output_line=$(grep -nF "printf 'evidence-bundle-path=" "$live_action" | cut -d: -f1)
-test "$bundle_guard_line" -lt "$success_commit_line"
-test "$success_commit_line" -lt "$output_line"
-test "$(grep -Fxc '          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation failed' "$live_action")" -eq 1
-test "$(grep -Fxc '        *) exit 1 ;;' "$live_action")" -eq 1
+test "$(grep -Fxc '    if: ${{ steps.select.outcome == '\''success'\'' }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    if: ${{ steps.select.outcome == '\''success'\'' && steps.payload.outcome == '\''success'\'' }}' "$live_action")" -eq 1
+test "$(grep -Fc '/zig-out/bin/maru-session-host-release-workflow-authored-selector' "$live_action")" -eq 2
+test "$(grep -Fxc '            session-host-release-workflow-authored-selector \' "$workflow")" -eq 1
+test "$(grep -Fxc '        "session-host-release-workflow-authored-selector",' "$build_file")" -eq 1
+test "$(grep -Fxc '                        .dest_sub_path = "maru-session-host-release-workflow-authored-selector",' "$build_file")" -eq 1
+test "$(grep -Fc 'GH_TOKEN:' "$live_action")" -eq 0
+test "$(grep -Ec '(^|[[:space:]])(eval|source)([[:space:]]|$)' "$live_action")" -eq 0
+test "$(grep -Fc 'GITHUB_ENV' "$live_action")" -eq 0
+commit_helper=.github/actions/session-host-release-live-authored-attestation/commit-profile-authored.sh
+checkpoint_fixture=tools/session-host/test_profile_authored_checkpoint.sh
+test -x "$commit_helper"
+test -x "$checkpoint_fixture"
+test "$(grep -Fxc '      MARU_COMMIT_HELPER: ${{ github.action_path }}/commit-profile-authored.sh' "$live_action")" -eq 1
+test "$(grep -Fxc '      "$MARU_COMMIT_HELPER" "$MARU_SELECT_OUTCOME" "$MARU_PAYLOAD_OUTCOME" "$MARU_FENCE_OUTCOME" \' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.evidence-bundle-path }}' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.manifest-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.timing-bundle-path }}' "$live_action")" -eq 1
 
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/maru-authored-attest-action.XXXXXX")
 fixture_root=$(cd "$fixture_root" && pwd -P)
 trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+
+checkpoint_log="$fixture_root/checkpoint.log"
+live_output="$fixture_root/live.out"
+sentinel=sealed-test-root
+export MARU_TEST_CHECKPOINT_LOG="$checkpoint_log"
+export MARU_TEST_CHECKPOINT_SENTINEL="$sentinel"
+
+run_commit() {
+    "$commit_helper" "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+        "$checkpoint_fixture" "$fixture_root/checkpoints" "$sentinel" "$live_output"
+}
+
+run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''
+test "$(wc -l < "$checkpoint_log" | tr -d ' ')" -eq 1
+test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation succeeded"
+test "$(wc -l < "$live_output" | tr -d ' ')" -eq 3
+test "$(sed -n '3p' "$live_output")" = 'timing-bundle-path='
+
+: > "$checkpoint_log"
+: > "$live_output"
+run_commit success success success true "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/timing.bundle"
+test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation succeeded"
+test "$(sed -n '3p' "$live_output")" = "timing-bundle-path=$fixture_root/timing.bundle"
+
+for outcomes in 'failure skipped skipped' 'success failure skipped' 'success success failure' 'cancelled skipped skipped'; do
+    : > "$checkpoint_log"
+    : > "$live_output"
+    read -r select_outcome payload_outcome fence_outcome <<< "$outcomes"
+    if run_commit "$select_outcome" "$payload_outcome" "$fence_outcome" false '' '' ''; then
+        echo 'expected terminal outcome rejection' >&2
+        exit 1
+    fi
+    test "$(wc -l < "$checkpoint_log" | tr -d ' ')" -eq 1
+    test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation failed"
+    test ! -s "$live_output"
+done
+
+: > "$checkpoint_log"
+: > "$live_output"
+if run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" "$fixture_root/unexpected-timing.bundle"; then
+    echo 'expected baseline timing contradiction rejection' >&2
+    exit 1
+fi
+test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation failed"
+test ! -s "$live_output"
+
+for invalid_bundle in 'relative.bundle' '/tmp/a/../bundle' '/tmp/a/.' '/tmp/trailing/' $'/tmp/control\tbundle'; do
+    : > "$checkpoint_log"
+    : > "$live_output"
+    if run_commit success success success false "$invalid_bundle" "$fixture_root/manifest.bundle" ''; then
+        echo 'expected noncanonical final-fence output rejection' >&2
+        exit 1
+    fi
+    test "$(tail -n 1 "$checkpoint_log")" = "commit $fixture_root/checkpoints $sentinel authored_attestation failed"
+    test ! -s "$live_output"
+done
+
+: > "$checkpoint_log"
+: > "$live_output"
+MARU_TEST_CHECKPOINT_FAIL=1
+export MARU_TEST_CHECKPOINT_FAIL
+if run_commit success success success false "$fixture_root/evidence.bundle" "$fixture_root/manifest.bundle" ''; then
+    echo 'expected checkpoint failure propagation' >&2
+    exit 1
+fi
+unset MARU_TEST_CHECKPOINT_FAIL
+test "$(wc -l < "$checkpoint_log" | tr -d ' ')" -eq 1
+test ! -s "$live_output"
 
 preparation="$fixture_root/preparation"
 evidence="$preparation/baseline-evidence.json"

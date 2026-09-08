@@ -1038,7 +1038,7 @@ attestation과 draft attach/publish 및 frozen signed 제품 실행은 별도 ga
 U5 artifact attestation 발급 action은 한 invocation이 canonical absolute regular-file subject 정확히 하나만 소유한다.
 `test-session-host-release-attestation-action`은 local composite action의 pre-pin→immutable `actions/attest` exact once→post-pin 순서,
 고정 provenance mode, device/inode/link-count/size/SHA 불변과 glob·CSV 목록·symlink·hardlink·빈/control-character output 거부를 정적으로 고정한다. candidate DMG/frozen
-executable과 authored evidence/manifest는 최종 release workflow가 이 action을 네 번 따로 호출한다. 이 component는 workflow
+executable과 authored evidence/manifest/timing은 최종 release workflow가 baseline에서 네 번, upgrade에서 다섯 번 이 action을 호출한다. 이 component는 workflow
 permissions, protected environment, 실제 attestation 발급이나 draft attach/publish를 완료했다는 증거가 아니다.
 
 U5 authored pair attestation action은 retained stage-3 preparation의 owner-only exact-two-entry directory와 evidence/manifest를 전체
@@ -1047,15 +1047,15 @@ single-subject action을 evidence→manifest로 exact once씩만 호출하고, f
 canonical bounded bundle locator 검사가 끝난 뒤에만 두 output을 함께 게시하는지 고정한다. actual filesystem helper 행은 directory
 pathname·inventory/mode, subject identity/mode/SHA, role swap, symlink/hardlink와 subject/bundle pairwise alias를 Linux·macOS에서
 검증하고 current effective UID 비교와 bundle 상한은 source contract로 고정한다. action은 bundle JSON의 cryptographic/semantic authority를 주장하지
-않으며 retained preparation reopen, current draft 재인증, resume process, workflow와 frozen signed U5 E2E는 후속 범위다.
+않으며 이 baseline-only leaf의 semantic bundle 검증은 profile-aware final fence가 별도로 소유한다.
 
 U5 candidate pair attestation action은 reducer의 stage 2 하나를 GitHub `uses:` step 하나로 표현한다. focused
 `test-session-host-release-candidate-attestation-action`은 DMG→frozen 순서로 기존 single-subject action을 exact once씩만 재사용하고,
 두 subject의 전체 구간 identity/digest fence와 두 bundle의 canonical regular single-link·16 MiB 상한 및 네 vnode distinct를 통과한
 뒤에만 두 locator를 함께 출력하는지 actual filesystem에서 검증한다. direct `actions/attest`, digest·성공 scalar·bundle caller 입력과
-부분 output은 0이다. candidate/authored live wrapper는 각 payload action을 exact once 위임하고 top-level binding은 leaf가 아니라 이
-wrapper를 가리킨다. 따라서 후속 checkpoint bridge가 payload의 닫힌 입력 계약을 깨지 않고 같은 `uses:` step 안에 들어갈 자리가
-있다. wrapper 안의 실제 checkpoint admission/commit은 아직 후속 증거다. 2026-09-07 Apple Silicon 로컬 actual filesystem에서 64 MiB DMG와 8 MiB frozen executable의
+부분 output은 0이다. candidate live wrapper는 pair payload를 exact once 위임한다. authored live wrapper는 credential-free selector가
+만든 2/3 projection만 profile payload에 넘기고 semantic final fence 뒤 checkpoint를 정산한다. top-level binding은 두 leaf가 아니라
+각 live wrapper를 가리킨다. 2026-09-07 Apple Silicon 로컬 actual filesystem에서 64 MiB DMG와 8 MiB frozen executable의
 `pin -> verify` 전체를 warmup 3회 뒤 20회 측정한 값은 median 528.0 ms, p95 582.7 ms, max 636.5 ms였다. 이는
 두 subject를 전후로 SHA-256 하는 로컬 stage 비용이며 `actions/attest`의 GitHub OIDC·service 왕복은 포함하지 않는다. 후자는 실제
 workflow 배선 뒤 GitHub-hosted runner 표본으로 별도 기록한다.
@@ -1064,11 +1064,11 @@ U5 action-stage checkpoint bridge는 제품 `maru-session-host-release-workflow-
 `admit|commit` command로 candidate/authored live wrapper의 payload 전후를 durable reducer leaf에 결속한다. focused
 `test-session-host-release-workflow-checkpoint-cli`는 protected GitHub context를 executable 자신의 closed environment reader로
 재구성하고 expected root identity로 actual private root를 여는 fresh-process chain, argv/environment/context/root/leaf drift,
-skip·reverse·replay와 stdout 0을 Debug·ReleaseFast에서 검증한다. 두 action gate는 wrapper가 `admit -> payload -> commit` 순서와
-고정 executable pathname을 지키고, exact payload `success|failure`만 reducer result로 바꾸며, failed checkpoint 뒤 nonzero와
-succeeded checkpoint 뒤 pair output publication을 보장하는지 검증한다. cancelled/skipped/unknown outcome, checkpoint 실패와 부분
-output은 fail-closed다. fixture는 harness-owned 임시 root와 stub payload/bridge만 사용한다. initial/root 생성, 여섯 command/product
-stage, 실제 `release.yml` wiring과 GitHub OIDC/service latency는 아직 후속 증거다.
+skip·reverse·replay와 stdout 0을 Debug·ReleaseFast에서 검증한다. candidate action gate는 `admit→payload→commit`, authored action gate는
+`admit→select→payload→fence→commit`과 고정 executable pathname을 지킨다. authored helper는 세 terminal outcome을 하나의 reducer
+result로 바꾸며, failed checkpoint 뒤 nonzero와 succeeded checkpoint 뒤 final-fenced 2/3 output publication을 보장한다.
+cancelled/skipped/unknown outcome, checkpoint 실패와 부분 output은 fail-closed다. fixture는 harness-owned 임시 root와 synthetic
+checkpoint executable만 사용한다. GitHub OIDC/service latency와 protected-B signed 실측은 아직 후속 증거다.
 
 U5 same-run candidate bundle 소비는 기존 final-address `CandidateAttestation` owner가 맡는다.
 `test-session-host-release-adapter-candidate-attestation`은 candidate DMG/frozen과 두 local bundle의 no-follow pin·pairwise distinct
@@ -3362,14 +3362,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   selector를 다시 계산하고, held 2/3 subject와 distinct local bundle 및 SHA-256-pinned verifier를 각 child 전후 재검증하면서
   bundle statement를 exact subject digest/run에 결속한 뒤에만 bundle-path-only stdout을 내는지 검증한다. Debug·ReleaseFast actual
   private APFS의 20회/profile 행은 synthetic verifier의 O_EXCL marker로 baseline 2회·upgrade 3회 actual child를 세고, invalid tuple의
-  child 0, stderr·parent FD delta·marker/residue 0과 total median·p95·max를 기록한다. 아직 구현 전인 범위는 authored checkpoint와
-  live action caller 결속, protected B tag에서 실제 `actions/attest` bundle을 사용하는 원격 실측이다.
-  다음 §11.99d gate는 repository-local live authored action 하나가 checkpoint `admit` 뒤 credential-free selector, profile-aware
-  2/3 payload, credential-free final fence를 순서대로 exact once 실행하고 세 child의 terminal outcome을 마지막 `if: always()` owner만
+  child 0, stderr·parent FD delta·marker/residue 0과 total median·p95·max를 기록한다. protected B tag에서 실제 `actions/attest`
+  bundle을 사용하는 원격 실측은 아직 구현 전이다.
+  §11.99d gate는 repository-local live authored action 하나가 checkpoint `admit` 뒤 credential-free selector, profile-aware
+  2/3 payload, credential-free final fence를 순서대로 exact once 실행하고 세 step의 terminal outcome을 마지막 `if: always()` owner만
   판정해 succeeded/failed를 exact once
   commit하도록 결속한다. action output은 final fence가 재검증한 세 bundle pathname만 허용하며 baseline timing은 empty다. source gate와
-  fresh-process 합성 harness가 최소 credential, 기존 baseline-only payload 0, selector/payload/fence success·failure·unknown outcome, checkpoint commit failure,
-  output 3/0과 child/FD/residue를 검증한다. aggregate/publication의 profile-aware evidence·timing bundle 소비와 protected B 실제 GitHub
+  actual-process helper harness가 최소 credential, 기존 baseline-only payload 0, selector/payload/fence success·failure·unknown outcome,
+  checkpoint commit failure, checkpoint 호출 exact once와 output 3/0을 검증한다. selector/fence child·FD·residue는 §11.99a/c gate가
+  소유한다. aggregate/publication의 profile-aware evidence·timing bundle 소비와 protected B 실제 GitHub
   bundle/N-1-current 실측은 후속이므로 §11.99d green만으로 §11.99 전체 완료를 주장하지 않는다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing

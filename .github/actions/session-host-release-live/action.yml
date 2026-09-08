@@ -43,6 +43,7 @@ runs:
       MARU_LIVE_ROOT="$RUNNER_TEMP/maru-session-host-release-live"
       MARU_CANDIDATE="$MARU_WORKSPACE/dist/session-host-candidate-$MARU_VERSION"
       MARU_EVIDENCE="$MARU_LIVE_ROOT/durable-preparation/baseline-evidence.json"
+      MARU_UPGRADE_EVIDENCE="$MARU_LIVE_ROOT/durable-preparation/upgrade-evidence.json"
       MARU_MANIFEST="$MARU_LIVE_ROOT/Maru-$MARU_VERSION-session-host-release.json"
       test ! -e "$MARU_CHECKPOINT_ROOT"
       test ! -L "$MARU_CHECKPOINT_ROOT"
@@ -70,10 +71,9 @@ runs:
         printf 'upgrade-workspace=%s/upgrade-workspace\n' "$MARU_LIVE_ROOT"
         printf 'timing-output=%s/profile-upgrade-timing.json\n' "$MARU_LIVE_ROOT"
         printf 'manifest=%s\n' "$MARU_MANIFEST"
-        printf 'manifest-name=%s\n' "${MARU_MANIFEST##*/}"
         printf 'preparation=%s/durable-preparation\n' "$MARU_LIVE_ROOT"
         printf 'evidence=%s\n' "$MARU_EVIDENCE"
-        printf 'evidence-name=%s\n' "${MARU_EVIDENCE##*/}"
+        printf 'upgrade-evidence=%s\n' "$MARU_UPGRADE_EVIDENCE"
         printf 'aggregate=%s/durable-aggregate\n' "$MARU_LIVE_ROOT"
         printf 'test-uuid=%s\n' "$MARU_UUID"
       } >> "$GITHUB_OUTPUT"
@@ -150,10 +150,12 @@ runs:
     uses: ./.github/actions/session-host-release-live-authored-attestation
     with:
       preparation-path: ${{ steps.setup.outputs.preparation }}
-      evidence-path: ${{ steps.setup.outputs.evidence }}
-      evidence-name: ${{ steps.setup.outputs.evidence-name }}
+      baseline-evidence-path: ${{ steps.setup.outputs.evidence }}
+      upgrade-evidence-path: ${{ steps.setup.outputs.upgrade-evidence }}
       manifest-path: ${{ steps.setup.outputs.manifest }}
-      manifest-name: ${{ steps.setup.outputs.manifest-name }}
+      timing-path: ${{ steps.setup.outputs.timing-output }}
+      gh-path: ${{ inputs.gh-path }}
+      gh-sha256: ${{ inputs.gh-sha256 }}
       checkpoint-root: ${{ steps.setup.outputs.checkpoint-root }}
       checkpoint-root-identity: ${{ steps.setup.outputs.checkpoint-root-identity }}
 

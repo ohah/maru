@@ -1,21 +1,27 @@
-name: Session host live authored attestation stage
-description: Reserve one live stage boundary around the closed authored pair attestation payload
+name: Session host live profile-authored attestation stage
+description: Bind profile selection, two-or-three attestations, final fence, and one durable checkpoint
 
 inputs:
   preparation-path:
     description: Canonical absolute pathname of the retained stage-3 preparation directory
     required: true
-  evidence-path:
-    description: Canonical absolute pathname of the baseline evidence direct child
+  baseline-evidence-path:
+    description: Fixed canonical pathname of the baseline evidence subject
     required: true
-  evidence-name:
-    description: Exact baseline evidence basename
+  upgrade-evidence-path:
+    description: Fixed canonical pathname of the upgrade evidence subject
     required: true
   manifest-path:
-    description: Canonical absolute pathname of the candidate manifest direct child
+    description: Fixed canonical pathname of the candidate manifest subject
     required: true
-  manifest-name:
-    description: Exact candidate manifest basename
+  timing-path:
+    description: Fixed canonical pathname of the upgrade timing subject
+    required: true
+  gh-path:
+    description: Canonical runner-provided GitHub CLI pathname captured before checkout
+    required: true
+  gh-sha256:
+    description: SHA-256 of the captured GitHub CLI
     required: true
   checkpoint-root:
     description: Canonical absolute pathname of the private live workflow checkpoint root
@@ -29,6 +35,8 @@ outputs:
     value: ${{ steps.commit.outputs.evidence-bundle-path }}
   manifest-bundle-path:
     value: ${{ steps.commit.outputs.manifest-bundle-path }}
+  timing-bundle-path:
+    value: ${{ steps.commit.outputs.timing-bundle-path }}
 
 runs:
   using: composite
@@ -43,16 +51,73 @@ runs:
       set -euo pipefail
       "$MARU_CHECKPOINT_EXE" admit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation
 
-  - name: Attest authored pair payload
-    id: payload
+  - name: Select authored subjects without credentials
+    id: select
     continue-on-error: true
-    uses: ./.github/actions/session-host-release-attest-authored
+    shell: bash
+    env:
+      MARU_SELECTOR_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-authored-selector
+      MARU_PREPARATION: ${{ inputs.preparation-path }}
+      MARU_BASELINE_EVIDENCE: ${{ inputs.baseline-evidence-path }}
+      MARU_UPGRADE_EVIDENCE: ${{ inputs.upgrade-evidence-path }}
+      MARU_MANIFEST: ${{ inputs.manifest-path }}
+      MARU_TIMING: ${{ inputs.timing-path }}
+    run: |
+      set -euo pipefail
+      "$MARU_SELECTOR_EXE" select \
+        --preparation "$MARU_PREPARATION" --baseline-evidence "$MARU_BASELINE_EVIDENCE" \
+        --upgrade-evidence "$MARU_UPGRADE_EVIDENCE" --manifest "$MARU_MANIFEST" \
+        --timing "$MARU_TIMING" >> "$GITHUB_OUTPUT"
+
+  - name: Attest profile-selected authored payload
+    id: payload
+    if: ${{ steps.select.outcome == 'success' }}
+    continue-on-error: true
+    uses: ./.github/actions/session-host-release-attest-authored-profile
     with:
-      preparation-path: ${{ inputs.preparation-path }}
-      evidence-path: ${{ inputs.evidence-path }}
-      evidence-name: ${{ inputs.evidence-name }}
-      manifest-path: ${{ inputs.manifest-path }}
-      manifest-name: ${{ inputs.manifest-name }}
+      evidence-path: ${{ steps.select.outputs.evidence-path }}
+      evidence-name: ${{ steps.select.outputs.evidence-name }}
+      manifest-path: ${{ steps.select.outputs.manifest-path }}
+      manifest-name: ${{ steps.select.outputs.manifest-name }}
+      timing-required: ${{ steps.select.outputs.timing-required }}
+      timing-path: ${{ steps.select.outputs.timing-path }}
+      timing-name: ${{ steps.select.outputs.timing-name }}
+
+  - name: Fence authored bundles without credentials
+    id: fence
+    if: ${{ steps.select.outcome == 'success' && steps.payload.outcome == 'success' }}
+    continue-on-error: true
+    shell: bash
+    env:
+      MARU_SELECTOR_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-authored-selector
+      MARU_PREPARATION: ${{ inputs.preparation-path }}
+      MARU_BASELINE_EVIDENCE: ${{ inputs.baseline-evidence-path }}
+      MARU_UPGRADE_EVIDENCE: ${{ inputs.upgrade-evidence-path }}
+      MARU_MANIFEST: ${{ inputs.manifest-path }}
+      MARU_TIMING: ${{ inputs.timing-path }}
+      MARU_EVIDENCE_PATH: ${{ steps.select.outputs.evidence-path }}
+      MARU_EVIDENCE_NAME: ${{ steps.select.outputs.evidence-name }}
+      MARU_MANIFEST_PATH: ${{ steps.select.outputs.manifest-path }}
+      MARU_MANIFEST_NAME: ${{ steps.select.outputs.manifest-name }}
+      MARU_TIMING_REQUIRED: ${{ steps.select.outputs.timing-required }}
+      MARU_TIMING_PATH: ${{ steps.select.outputs.timing-path }}
+      MARU_TIMING_NAME: ${{ steps.select.outputs.timing-name }}
+      MARU_EVIDENCE_BUNDLE: ${{ steps.payload.outputs.evidence-bundle-path }}
+      MARU_MANIFEST_BUNDLE: ${{ steps.payload.outputs.manifest-bundle-path }}
+      MARU_TIMING_BUNDLE: ${{ steps.payload.outputs.timing-bundle-path }}
+      MARU_GH: ${{ inputs.gh-path }}
+      MARU_GH_SHA256: ${{ inputs.gh-sha256 }}
+    run: |
+      set -euo pipefail
+      "$MARU_SELECTOR_EXE" fence \
+        --preparation "$MARU_PREPARATION" --baseline-evidence "$MARU_BASELINE_EVIDENCE" \
+        --upgrade-evidence "$MARU_UPGRADE_EVIDENCE" --manifest "$MARU_MANIFEST" --timing "$MARU_TIMING" \
+        --evidence-path "$MARU_EVIDENCE_PATH" --evidence-name "$MARU_EVIDENCE_NAME" \
+        --manifest-path "$MARU_MANIFEST_PATH" --manifest-name "$MARU_MANIFEST_NAME" \
+        --timing-required "$MARU_TIMING_REQUIRED" --timing-path "$MARU_TIMING_PATH" \
+        --timing-name "$MARU_TIMING_NAME" --evidence-bundle "$MARU_EVIDENCE_BUNDLE" \
+        --manifest-bundle "$MARU_MANIFEST_BUNDLE" --timing-bundle "$MARU_TIMING_BUNDLE" \
+        --github-cli "$MARU_GH" --github-cli-sha256 "$MARU_GH_SHA256" >> "$GITHUB_OUTPUT"
 
   - name: Commit authored attestation checkpoint
     id: commit
@@ -62,21 +127,16 @@ runs:
       MARU_CHECKPOINT_ROOT: ${{ inputs.checkpoint-root }}
       MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
       MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
+      MARU_SELECT_OUTCOME: ${{ steps.select.outcome }}
       MARU_PAYLOAD_OUTCOME: ${{ steps.payload.outcome }}
-      MARU_EVIDENCE_BUNDLE: ${{ steps.payload.outputs.evidence-bundle-path }}
-      MARU_MANIFEST_BUNDLE: ${{ steps.payload.outputs.manifest-bundle-path }}
+      MARU_FENCE_OUTCOME: ${{ steps.fence.outcome }}
+      MARU_TIMING_REQUIRED: ${{ steps.select.outputs.timing-required }}
+      MARU_EVIDENCE_BUNDLE: ${{ steps.fence.outputs.evidence-bundle-path }}
+      MARU_MANIFEST_BUNDLE: ${{ steps.fence.outputs.manifest-bundle-path }}
+      MARU_TIMING_BUNDLE: ${{ steps.fence.outputs.timing-bundle-path }}
+      MARU_COMMIT_HELPER: ${{ github.action_path }}/commit-profile-authored.sh
     run: |
       set -euo pipefail
-      case "$MARU_PAYLOAD_OUTCOME" in
-        success)
-          [[ -n "$MARU_EVIDENCE_BUNDLE" && "$MARU_EVIDENCE_BUNDLE" != *$'\n'* && "$MARU_EVIDENCE_BUNDLE" != *$'\r'* ]]
-          [[ -n "$MARU_MANIFEST_BUNDLE" && "$MARU_MANIFEST_BUNDLE" != *$'\n'* && "$MARU_MANIFEST_BUNDLE" != *$'\r'* ]]
-          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation succeeded
-          printf 'evidence-bundle-path=%s\nmanifest-bundle-path=%s\n' "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" >> "$GITHUB_OUTPUT"
-          ;;
-        failure)
-          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" authored_attestation failed
-          exit 1
-          ;;
-        *) exit 1 ;;
-      esac
+      "$MARU_COMMIT_HELPER" "$MARU_SELECT_OUTCOME" "$MARU_PAYLOAD_OUTCOME" "$MARU_FENCE_OUTCOME" \
+        "$MARU_TIMING_REQUIRED" "$MARU_EVIDENCE_BUNDLE" "$MARU_MANIFEST_BUNDLE" "$MARU_TIMING_BUNDLE" \
+        "$MARU_CHECKPOINT_EXE" "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" "$GITHUB_OUTPUT"

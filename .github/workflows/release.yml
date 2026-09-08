@@ -160,6 +160,7 @@ jobs:
             session-host-release-workflow-candidate-inputs \
             session-host-release-workflow-checkpoint \
             session-host-release-workflow-command \
+            session-host-release-workflow-authored-selector \
             -Doptimize=ReleaseFast
 
       - name: Run session host live release workflow

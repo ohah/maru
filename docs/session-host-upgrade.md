@@ -4957,10 +4957,11 @@ final fence→checkpoint의 live action 결속까지만 닫는다. aggregate/pub
 slice가 소유하고, protected B tag의 실제 GitHub-issued bundle과 N-1/current signed 실측은 최종 원격 gate가 소유한다.
 
 source gate는 action의 입력/output vocabulary, `admit→select→payload→fence→commit` 순서, selector/fence exact-one executable,
-payload exact-one action, 최소 credential 경계, `if: always()` commit owner와 기존 baseline-only payload 0을 고정한다. 합성 harness는
-실제 shell step을 흉내 내는 별도 fresh process에서 baseline/upgrade success, selector/payload/fence failure, invalid/unknown outcome과
-checkpoint commit failure를 실행해 succeeded/failed exact once, 공개 output 3/0, child call 1/0/1과 FD·temporary residue 0을
-검증한다. 이 로컬 harness는 GitHub expression engine·OIDC·network를 합성하므로 actual workflow 성공 증거로 해석하지 않는다.
+payload exact-one action, 최소 credential 경계, `if: always()` commit owner와 기존 baseline-only payload 0을 고정한다. actual-process
+helper harness는 baseline/upgrade success, selector/payload/fence failure, invalid/unknown outcome과 checkpoint commit failure를 실행해
+succeeded/failed checkpoint 호출 exact once와 공개 output 3/0을 검증한다. selector와 fence 자체의 child/FD/residue는 §11.99a/c의
+actual-process gate를 함께 증거로 사용한다. 이 로컬 결합은 GitHub expression engine·OIDC·network를 실행하지 않으므로 actual workflow
+성공 증거로 해석하지 않는다.
 
 ## 12. 필수 적대적 검증
 

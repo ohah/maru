@@ -14497,6 +14497,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-profile-authored-attestation-selector",
         "Select freshly reopened authored subjects without credentials",
     );
+    const session_host_release_adapter_profile_authored_attestation_fence_step = b.step(
+        "test-session-host-release-adapter-profile-authored-attestation-fence",
+        "Fence profile-authored subjects against same-run local bundles",
+    );
     const session_host_release_adapter_zig_toolchain_authority_step = b.step(
         "test-session-host-release-adapter-zig-toolchain-authority",
         "Validate official release Zig toolchain authority",
@@ -15815,6 +15819,59 @@ pub fn build(b: *std.Build) void {
             run_profile_authored_attestation_selector_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_authored_attestation_selector_step.dependOn(&run_profile_authored_attestation_selector_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_authored_attestation_selector_tests.step);
+            const profile_authored_attestation_fence_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_fence.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                    .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                    .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                    .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_selector", .module = profile_authored_attestation_selector_mod },
+                },
+            });
+            const profile_authored_attestation_fence_command_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_fence_command.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_profile_authored_attestation_fence", .module = profile_authored_attestation_fence_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_selector", .module = profile_authored_attestation_selector_mod },
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
+                    .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                    .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                    .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                },
+            });
+            const profile_authored_attestation_fence_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_profile_authored_attestation_fence.zig"),
+                .target = target,
+                .optimize = composition_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "release_adapter_profile_authored_attestation_fence", .module = profile_authored_attestation_fence_mod },
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_selector", .module = profile_authored_attestation_selector_mod },
+                    .{ .name = "release_evidence", .module = release_evidence_mod },
+                    .{ .name = "release_manifest", .module = manifest_mod },
+                    .{ .name = "release_adapter_files", .module = files_mod },
+                    .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_fence_command", .module = profile_authored_attestation_fence_command_mod },
+                },
+            }) });
+            const run_profile_authored_attestation_fence_tests = b.addRunArtifact(profile_authored_attestation_fence_tests);
+            run_profile_authored_attestation_fence_tests.addArg("--maru-expect-tests=15");
+            run_profile_authored_attestation_fence_tests.setCwd(b.path("."));
+            session_host_release_adapter_profile_authored_attestation_fence_step.dependOn(&run_profile_authored_attestation_fence_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_authored_attestation_fence_tests.step);
             const profile_authored_attestation_selector_cli_mod = b.createModule(.{
                 .root_source_file = b.path("tools/session-host/release_workflow_authored_selector_cli.zig"),
                 .target = target,
@@ -15824,6 +15881,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "release_adapter_environment", .module = workflow_checkpoint_environment_mod },
                     .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
                     .{ .name = "release_adapter_profile_authored_attestation_projection", .module = profile_authored_attestation_projection_mod },
+                    .{ .name = "release_adapter_profile_authored_attestation_fence_command", .module = profile_authored_attestation_fence_command_mod },
                 },
             });
             const profile_authored_attestation_selector_cli = b.addExecutable(.{
@@ -15831,6 +15889,17 @@ pub fn build(b: *std.Build) void {
                 .root_module = profile_authored_attestation_selector_cli_mod,
             });
             run_profile_authored_attestation_selector_tests.addArtifactArg(profile_authored_attestation_selector_cli);
+            const profile_authored_attestation_verifier = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-profile-authored-attestation-verifier-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_profile_authored_attestation_verifier.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                }),
+            });
+            run_profile_authored_attestation_fence_tests.addArtifactArg(profile_authored_attestation_selector_cli);
+            run_profile_authored_attestation_fence_tests.addArtifactArg(profile_authored_attestation_verifier);
             if (composition_optimize == optimize) {
                 session_host_release_adapter_profile_authored_attestation_selector_step.dependOn(
                     &b.addInstallArtifact(profile_authored_attestation_selector_cli, .{

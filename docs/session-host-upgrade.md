@@ -4895,6 +4895,42 @@ branch 0, evidence→manifest→optional timing 호출 순서, baseline 2회·up
 검증하는 fresh final-fence process, 실패 checkpoint 정산, live caller 배선과 actual filesystem synthetic-bundle 실측은 바로 다음
 gate가 소유한다. 따라서 11.99b 완료 뒤에도 §11.99 전체와 profile-aware live authored attestation은 부분 구현이다.
 
+#### 11.99c fresh-process authored bundle final fence와 로컬 실측
+
+payload 완료 뒤의 credential-free final fence는 별도 `fence` process에서 current protected `Context`와 canonical profile
+environment를 새로 읽고 §11.99a의 다섯 fixed pathname superset으로 selector `Plan`을 독립적으로 다시 만든다. caller가 넘기는
+pre-step 일곱 scalar는 권위가 아니라 equality witness이며 fresh `Plan`의 projection과 byte-for-byte 일치해야 한다. `fence` command는
+그 일곱 scalar, evidence/manifest/timing bundle pathname과 checkout 전에 고정한 GitHub CLI pathname·SHA-256을 option exact-once로
+받는다. baseline의 timing path/name/bundle은 모두 empty이고 upgrade는 모두 nonempty여야 하며 unknown·missing·duplicate·control byte,
+profile/required/path/name 교환은 filesystem·CLI·child callback 전에 거부한다.
+
+final-address `Fence` owner는 fresh selector `Plan`, 선택된 2/3 bundle pathname의 bounded copy와 각 bundle의 no-follow held descriptor를
+소유한다. bundle은 regular file, link count 1, nonempty, 16 MiB 이하이고 서로 및 모든 subject와 inode가 달라야 하며 preparation의
+same/ancestor/descendant 밖에 있어야 한다. current subject와 bundle graph, selector environment fence, pinned GitHub CLI는 최초 검증 전,
+각 subject 검증 전후, 최종 publication 직전에 다시 관측한다. 각 bundle은 token 없는 exact
+`gh attestation verify <subject> --bundle <bundle>`로 검증하며 certificate와 statement가 current repository/tag/source commit/workflow
+run/attempt, subject basename과 fresh SHA-256에 결속되어야 한다. baseline은 evidence→manifest 두 호출, upgrade는
+evidence→manifest→timing 세 호출이며 partial success는 owner publication 0이다.
+
+모든 검증과 마지막 deadline fence가 성공한 뒤에만 process는 `evidence-bundle-path`, `manifest-bundle-path`,
+`timing-bundle-path` 세 canonical scalar를 bounded encode해 stdout에 한 번 쓰고 flush한다. validation·selector·CLI·bundle verifier·encode·
+write·flush·descriptor cleanup 실패는 nonzero이며 stdout 일부를 checkpoint 권위로 쓰지 않는다. bundle은 이미 발행된 원격
+attestation의 local proof이므로 실패 cleanup에서 삭제하지 않고 후속 live owner가 `audit_required`로 분류한다.
+
+focused Debug·ReleaseFast gate는 baseline/upgrade exact 2/3 verifier 순서, projection/context/profile/subject/bundle/CLI drift, bundle
+missing·empty·oversize·symlink·hardlink·inode/path graph 교환, copied/pre-owned/alias/OOM, 모든 fail-index와 callback-before-preflight 0을
+검증한다. actual filesystem/process harness는 synthetic bundle writer와 verifier executable을 사용해 두 profile을 각각 20회 fresh
+process로 실행하고 total median/p95/max, 성공/실패 수, verifier call count, parent FD delta와 filesystem residue 0을 기록한다. 실제
+GitHub OIDC/network는 사용하지 않으며 authored checkpoint와 live workflow 배선, protected B tag의 실제 `actions/attest` 실측은 후속
+gate가 소유한다. 따라서 11.99c 완료 뒤에도 §11.99 전체는 부분 구현이다.
+
+2026-09-09 로컬 APFS 실측은 각 표본마다 설치 대상과 같은 `fence` CLI를 새 process로 띄우고, SHA-256으로 고정한 synthetic verifier를
+baseline 2회 또는 upgrade 3회 별도 child로 실행했다. ReleaseFast 20회/profile에서 baseline median 23.653ms, p95 76.607ms,
+max 451.677ms, upgrade median 32.140ms, p95 84.151ms, max 84.215ms였다. 실패 0, invalid tuple 거부 1, exact verifier marker
+2/3, parent FD delta 0, stderr 0, 최종 marker/residue 0이었다. 이 total은 fresh selector/reopen, subject와 bundle SHA-256, CLI
+재검증, synthetic attestation JSON parse/bind 및 2/3 child spawn을 포함한다. 실제 GitHub network·OIDC·bundle 발행 latency는 포함하지
+않으므로 이 수치를 live release wall time이나 원격 p95로 해석하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

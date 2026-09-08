@@ -4762,7 +4762,12 @@ control byte·상한 초과는 child 실행과 checkpoint advance 0으로 fail-c
 focused Debug·ReleaseFast gate는 두 stage-3 command의 distinct selection/identity, 동일 checkpoint stage와 outcome mapping,
 token/workspace/profile environment 최소화, validator argv의 exact 보존, baseline으로의 fallback 0을 검증한다. actual-process
 harness는 synthetic validator로 profile command의 success와 terminal failure가 기존 append-only checkpoint를 exact once 전진시키고
-stdout/stderr, FD delta와 residue가 0임을 검증한다. 이 slice는 fresh-process command→checkpoint bridge까지만 닫으며 composite
+stdout/stderr, FD delta와 residue가 0임을 검증한다. process perf report는 baseline `prepare-candidate`와 profile
+`prepare-profile-candidate`의 `draft_authoring` 실제 자식 프로세스 경계를 같은 iteration 수로 각각 반복하고,
+`draft_authoring_ns | profile_draft_authoring_ns`의 median/p95/max, arm별 성공 횟수, 합산 child PID collision,
+parent FD delta와 arm별 checkpoint residue를 canonical v2 JSON으로 분리 기록한다. 한 arm의 실패나 residue를 다른 arm의 성공으로
+상쇄하지 않으며 두 arm 모두 requested iteration을 채우지 못하면 gate가 실패한다. 이 로컬 실측은 wrapper·validator·격리 filesystem·
+append-only checkpoint 비용을 포함하지만 GitHub API network latency를 대표하지 않는다. 이 slice는 fresh-process command→checkpoint bridge까지만 닫으며 composite
 action의 profile별 fixed pathname, authored attestation fan-out, release workflow caller와 protected B tag signed 실측은 후속 gate다.
 
 ## 12. 필수 적대적 검증

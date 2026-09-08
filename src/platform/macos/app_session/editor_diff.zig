@@ -3209,6 +3209,9 @@ test "DCOL3: 넘어가면 선택이 접힌다 — 좌우를 걸치지 않는다 
     // **단위도 풀린다.** `kind` 를 들고 넘어가면 그 뒤의 드래그가 글자가 아니라 낱말로 늘어난다
     //    — `isEmpty()` 는 그대로라 그것만 재는 단언으로는 안 갈린다(18회차 U14).
     try testing.expectEqual(maru.session.editor.selection.AnchorKind.simple, fx.term.rt.editor_diff_selection.?.sel.kind);
+    // **목표 열도 안 들고 간다.** 넘어간 caret 은 **새로 선 점**이다 — 옛 목표를 들고 가면 그 뒤의
+    //    `↓` 가 방금 선 자리가 아니라 건너오기 전의 열로 간다(19회차 U18).
+    try testing.expect(fx.term.rt.editor_diff_selection.?.sel.goal.eql(.none));
 }
 
 test "DCOL4: 짝맞춤 빈 행으로도 넘어간다 (§4.1g 비교 뷰)" {

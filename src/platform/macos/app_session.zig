@@ -60371,6 +60371,69 @@ test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경�
     try std.testing.expect(gone);
 }
 
+test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의 폭 가드" {
+    // **잘린 `R 12:3` → `R 12…` 는 다른 값으로 읽힌다.** 단일 편집기 커서 항목이 같은 가드를 같은
+    // 이유로 갖는다(그쪽 사고가 이 구조를 낳았다). 폭을 좁혀 그 갈래를 실제로 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const term = try editor_ops.createEditorTerm(session);
+    errdefer term_ops.destroyTerm(session, term);
+    try pane_ops.activePane(session).terms.append(allocator, term);
+    const pane = pane_ops.activePane(session);
+    for (pane.terms.items, 0..) |t, k| {
+        if (t == term) pane.active_term = k;
+    }
+    var entry: dock_panel.Entry = .{
+        .id = 1,
+        .path = @constCast("/tmp/t.txt"),
+        .kind = .diff,
+        .mode = dock_panel.Mode.defaultFor(.diff),
+        .diff_ready = true,
+        .diff_original = @constCast("keep\ntail\n"),
+        .diff_modified = @constCast("keep\nadded\ntail\n"),
+    };
+    defer term.file_entry = null;
+    term.file_entry = &entry;
+    editor_diff_ops.poll(session, term);
+    if (term.rt.editor_diff == null) return error.SkipZigTest;
+    if (std.meta.activeTag(term.rt.editor_diff.?.view) != .compare) return error.SkipZigTest;
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+
+    const Id = chrome.components.status_bar.ItemId;
+    const saved_width = session.backing_width_px;
+    defer session.backing_width_px = saved_width;
+
+    // ⑴ **넓으면 뜬다** — 아래 대조가 「원래 안 뜬다」가 아니게 한다.
+    session.collectStatusBarItems(&collected, builder, colors);
+    var wide_has = false;
+    for (session.statusBarTree().entries) |e| {
+        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) wide_has = true;
+    }
+    try std.testing.expect(wide_has);
+
+    // ⑵ **좁으면 아예 안 낸다.** 글자가 셀 몇 칸에 잘리는 폭으로 줄인다.
+    session.backing_width_px = session.cell_width_px * 3;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    var narrow_has = false;
+    for (session.statusBarTree().entries) |e| {
+        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) narrow_has = true;
+    }
+    try std.testing.expect(!narrow_has);
+}
+
 test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용이고, 문법이 없으면 없다" {
     // **`SB1` 은 접두어가 필터에 없어 `test-editor` 에서 안 돈다**(샤드에서만 돈다). 그래서 항목을
     // 통째로 지우거나 상한 검사를 빼먹은 변이가 **빠른 스위트에서 살아남았다**(2026-09-07 1회차

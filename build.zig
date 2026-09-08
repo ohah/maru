@@ -14497,6 +14497,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-profile-authored-attestation-selector",
         "Select freshly reopened authored subjects without credentials",
     );
+    const session_host_release_workflow_authored_selector_product_step = b.step(
+        "session-host-release-workflow-authored-selector",
+        "Build the credential-free authored selector and final-fence executable",
+    );
     const session_host_release_adapter_profile_authored_attestation_fence_step = b.step(
         "test-session-host-release-adapter-profile-authored-attestation-fence",
         "Fence profile-authored subjects against same-run local bundles",
@@ -15901,9 +15905,9 @@ pub fn build(b: *std.Build) void {
             run_profile_authored_attestation_fence_tests.addArtifactArg(profile_authored_attestation_selector_cli);
             run_profile_authored_attestation_fence_tests.addArtifactArg(profile_authored_attestation_verifier);
             if (composition_optimize == optimize) {
-                session_host_release_adapter_profile_authored_attestation_selector_step.dependOn(
+                session_host_release_workflow_authored_selector_product_step.dependOn(
                     &b.addInstallArtifact(profile_authored_attestation_selector_cli, .{
-                        .dest_sub_path = "maru-session-host-release-authored-selector",
+                        .dest_sub_path = "maru-session-host-release-workflow-authored-selector",
                     }).step,
                 );
             }

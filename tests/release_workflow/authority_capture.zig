@@ -275,6 +275,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
         "session-host-release-workflow-candidate-inputs",
         "session-host-release-workflow-checkpoint",
         "session-host-release-workflow-command",
+        "session-host-release-workflow-authored-selector",
     }) |step| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(build_block, step));
 
     const live_block = blockUntil(text, "      - name: Run session host live release workflow", "      - name: Upload dmg as workflow artifact") orelse
@@ -357,6 +358,29 @@ test "live 릴리스 action: eight-stage SSOT order와 최소 credential을 지�
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "if: always()"));
 }
 
+test "live 릴리스 action: authored stage는 profile superset과 pinned gh만 넘긴다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readLiveAction(arena_state.allocator());
+    const authored = blockUntil(text, "  - name: Attest authored evidence pair", "  - name: Prepare attestation aggregate") orelse
+        return error.LiveAuthoredStageMissing;
+
+    inline for (.{
+        "preparation-path: ${{ steps.setup.outputs.preparation }}",
+        "baseline-evidence-path: ${{ steps.setup.outputs.evidence }}",
+        "upgrade-evidence-path: ${{ steps.setup.outputs.upgrade-evidence }}",
+        "manifest-path: ${{ steps.setup.outputs.manifest }}",
+        "timing-path: ${{ steps.setup.outputs.timing-output }}",
+        "gh-path: ${{ inputs.gh-path }}",
+        "gh-sha256: ${{ inputs.gh-sha256 }}",
+        "checkpoint-root: ${{ steps.setup.outputs.checkpoint-root }}",
+        "checkpoint-root-identity: ${{ steps.setup.outputs.checkpoint-root-identity }}",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(authored, needle));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(authored, "evidence-name:"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(authored, "manifest-name:"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(authored, "GH_TOKEN:"));
+}
+
 test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사용한다" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -367,6 +391,7 @@ test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사�
         "$RUNNER_TEMP/maru-session-host-release-live",
         "dist/session-host-candidate-$MARU_VERSION",
         "baseline-evidence.json",
+        "upgrade-evidence.json",
         "Maru-$MARU_VERSION-session-host-release.json",
         "printf 'predecessor-workspace=%s/predecessor-workspace\\n' \"$MARU_LIVE_ROOT\"",
         "printf 'upgrade-workspace=%s/upgrade-workspace\\n' \"$MARU_LIVE_ROOT\"",

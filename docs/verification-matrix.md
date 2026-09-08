@@ -3346,7 +3346,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   timing 합계·overflow, alias/path/mode/link/inode drift와 owner 확립 뒤 fence 실패의 audit/reopen/cleanup 및 FD·staging residue 0을
   검증한다. 공용 `release_adapter_files` gate가 owner 인계 전 exclusive publication 실패의 same-inode cleanup·foreign replacement 보존을
   단일 출처로 맡는다.
-  fresh-process profile stage-3 command, checkpoint·attestation, live workflow와 protected B tag 실측은 후속 gate다.
+  Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
+  predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
+  output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.
+  `test-session-host-release-adapter-contract`와 `test-session-host-release-adapter-executable-bootstrap`은 Debug·ReleaseFast에서 exact projection,
+  option/path/injection 거부, authority ordering과 copied/pre-owned bootstrap을 검증한다. side-effecting driver가 아직 없는 동안 executable arm은
+  명시적으로 실패하므로 성공 no-op이나 baseline command fallback이 없다.
+  profile stage-3 제품 driver, checkpoint·attestation, live workflow와 protected B tag 실측은 후속 gate다.
   Apple 제품 component 판정자는 frozen executable SHA와 bounded codesign detail/requirement, plist JSON, lipo architecture 및
   strict signature·app/DMG staple·DMG Gatekeeper 성공 receipt를 교차검증해 `Signing`을 직접 만든다. identifier/team의 exact-one,
   Apple team designated requirement digest와 따옴표 밖 disjunction·negation 거부, `product_identity.bundle_id`·`bundle_version`, release version 결속과 exact `arm64 x86_64`를 닫고

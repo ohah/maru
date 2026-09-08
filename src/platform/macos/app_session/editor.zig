@@ -5106,6 +5106,50 @@ pub fn foldLevel(self: *AppSession, level: u16) bool {
     return applyFold(self, level);
 }
 
+/// 접힘을 바꾸기 **전에** 떠 두는 뷰 위치 — 맨 위 문서 줄과 가로 위치 둘.
+///
+/// **`rebuildVisible` 이 그 셋을 다 버린다**(`invalidateFoldDerived`). 세로는 예전부터
+/// `restoreTop` 으로 되찾고 있었고, 가로는 안 되찾고 있었다 — 그래서 블록 하나를 접었을 뿐인데
+/// **보던 열이 왼쪽 끝으로 튀었다**.
+const FoldViewKeep = struct { anchor: usize, col: u16, col_right: u16 };
+
+fn keepFoldView(term: *Term) FoldViewKeep {
+    return .{
+        .anchor = topDocLine(term), // 화면을 다시 만들기 **전에** 맨 위가 문서 몇째 줄인지 잡는다
+        .col = term.rt.editor_first_col,
+        .col_right = term.rt.editor_first_col_right,
+    };
+}
+
+/// 접힘이 바뀐 **뒤**의 마무리 — 보던 자리를 되찾고 **가로 상한을 다시 센다**.
+///
+/// **상한을 다시 세는 짝이 여기 없었다.** `rebuildVisible` 이 `max_cols` 를 0 으로 되돌리는데
+/// 제품에서 다시 세는 자리는 `finishAttach`·첫 가로 휠·탭 폭 세터뿐이라, 접은 직후에는 0 이
+/// 그대로 남아 `maxColsForRender` 가 `null` 을 내고 **가로 막대가 통째로 사라졌다** — 그 막대는
+/// 본문 아래 여백에서 자리를 먹으므로 접을 때마다 **본문 높이가 출렁였다**(`ensureMaxCols` doc 이
+/// 금지한 그 상태다. 탭 폭 경로는 같은 이유로 이미 재계산 짝을 갖고 있다).
+///
+/// **여기서는 전부 다시 센다**(편집 경로가 caret 줄만 세는 것과 다르다). 접힘은 **보이는 줄
+/// 자체가 갈리는** 변화라 caret 줄만 봐서는 답이 안 나오고, 접기는 드문 동작이라 문서 한 번
+/// 훑기(2만 줄 24ms)를 그대로 치러도 된다 — 글자마다 치를 수 없어 편집 경로가 피한 그 비용이다.
+///
+/// **가로 위치는 되돌린 뒤 clamp 가 정리한다.** 접혀서 긴 줄이 숨었으면 상한이 작아지고,
+/// `clampScrollToGeometry` 가 그리기 직전에 그만큼 되돌린다 — 여기서 0 으로 지우면 **접힘과
+/// 무관한 블록을 접었을 때도** 보던 열을 잃는다.
+///
+/// **비교 뷰는 여기 안 온다** — 세 경로가 전부 `foldsUnavailable(term)` 로 먼저 거절한다(§4.1f).
+/// 그래서 오른쪽 열(`first_col_right`)을 되돌리는 줄은 **오늘 관측되지 않는다**(그 변이가 살아남는
+/// 것이 정상이다 — 적대적 검증 F10). 그럼에도 두 열을 함께 쓰는 이유는 `effectiveFirstCol` 이
+/// 적어 둔 그것이다: *"열이 둘이어도 규칙은 하나다"* — 한쪽만 적으면 이 함수를 고칠 때 다른 쪽이
+/// 안 따라온다.
+fn finishFoldChange(self: *AppSession, term: *Term, keep: FoldViewKeep) void {
+    restoreTop(term, keep.anchor);
+    term.rt.editor_first_col = keep.col;
+    term.rt.editor_first_col_right = keep.col_right;
+    ensureMaxCols(term, false);
+    self.metal_dirty = true;
+}
+
 /// 접힘 집합을 바꾸는 **유일한 경로**. `level`이 `null`이면 전부, 아니면 그 레벨만 접는다.
 ///
 /// **실패하면 있던 집합으로 되돌린다 — 비우는 것이 아니다.** 이미 접힌 채로 다시 접다 실패하면
@@ -5135,14 +5179,13 @@ fn applyFold(self: *AppSession, level: ?u16) bool {
     if (n == 0) return false; // 그 레벨에 블록이 없다 — 위 doc
 
     term.rt.editor_folded_len = n;
-    const anchor = topDocLine(term); // 화면을 다시 만들기 **전에** 맨 위가 문서 몇째 줄인지 잡는다
+    const keep = keepFoldView(term);
     rebuildVisible(self, term) catch {
         @memcpy(term.rt.editor_folded_buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
         term.rt.editor_folded_len = prev_len; // 화면이 그대로니 상태도 그대로 둔다
         return false;
     };
-    restoreTop(term, anchor);
-    self.metal_dirty = true;
+    finishFoldChange(self, term, keep);
     return true;
 }
 
@@ -5196,14 +5239,13 @@ fn toggleFoldHead(self: *AppSession, term: *Term, head: u32) bool {
         term.rt.editor_folded_len = prev_len + 1;
     }
 
-    const anchor = topDocLine(term); // 화면을 다시 만들기 **전에** 맨 위가 문서 몇째 줄인지 잡는다
+    const keep = keepFoldView(term);
     rebuildVisible(self, term) catch {
         @memcpy(buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
         term.rt.editor_folded_len = prev_len;
         return false;
     };
-    restoreTop(term, anchor);
-    self.metal_dirty = true;
+    finishFoldChange(self, term, keep);
     return true;
 }
 
@@ -5213,11 +5255,10 @@ pub fn unfoldAll(self: *AppSession) bool {
     if (term.kind != .editor) return false;
     if (foldsUnavailable(term)) return false;
     if (term.rt.editor_folded_len == 0) return false;
-    const anchor = topDocLine(term);
+    const keep = keepFoldView(term);
     term.rt.editor_folded_len = 0;
     rebuildVisible(self, term) catch {}; // 펼치기는 배열을 푸는 쪽이라 실패할 것이 없다
-    restoreTop(term, anchor);
-    self.metal_dirty = true;
+    finishFoldChange(self, term, keep);
     return true;
 }
 
@@ -14814,6 +14855,94 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     var no_bar = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     no_bar.dl.deinit(allocator);
     if (term.rt.editor_horizontal_scrollbar != null) return error.BarDrawnWithoutMaxCols;
+}
+
+test "DHS9 접어도 가로 막대가 안 사라지고 보던 열이 남는다 — 접힘 경로도 상한을 다시 센다 (렌더 경계)" {
+    // **접힘도 편집과 같은 것을 버린다.** `rebuildVisible` 이 `invalidateFoldDerived` 로 `max_cols`
+    // 를 0 으로 되돌리는데, 접기 세 경로(`foldAll`·`toggleFoldHead`·`unfoldAll`) 뒤에 **다시 세는
+    // 짝이 없다** — 탭 폭 경로에는 있고(그 자리 주석이 *"막대가 사라지면 본문 높이가 출렁인다 —
+    // `ensureMaxCols` doc 이 금지한 상태"* 라고 적어 두었다), 접힘에는 없었다.
+    //
+    // **이미 있는 판정자는 이것을 못 본다** — 「가장 긴 줄이 접혀 숨으면 가로 상한도 다시 센다」는
+    // 접은 **뒤에 `scrollCols` 를 부르고** 재는데, 그 함수가 스스로 `ensureMaxCols` 를 부른다.
+    // 즉 재는 것은 「가로 스크롤이 다시 센다」이지 「접기가 다시 센다」가 아니다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **접혀 숨는 블록과, 접혀도 남는 긴 줄을 따로 둔다.** 긴 줄이 접히는 블록 안에 있으면
+    // 「상한이 줄어서 0 에 가깝다」와 「상한을 버렸다」가 같은 답을 낸다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head:\n  short\n");
+    try doc.appendNTimes(allocator, 'x', 600); // 접힘 밖(들여쓰기 없음) — 접어도 남는다
+    try doc.appendSlice(allocator, "\ntail\n");
+    // **세로로도 굴릴 수 있어야 한다** — 아래 「보던 줄도 지킨다」가 짧은 문서에서는 공허하다
+    // (`first_line` 이 어차피 0 이다). 블록으로 넣어 **접히면 숨는 몸통 줄** 위에 설 수 있게 한다.
+    for (0..40) |_| try doc.appendSlice(allocator, "h:\n  a\n  b\n");
+    const term = try undoFixture(&fx, allocator, "dhs9.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 300)) return error.FixtureWidth;
+    if (term.rt.editor_max_cols == 0) return error.MaxColsNotMeasured;
+    if (term.rt.editor_horizontal_scrollbar == null) return error.NoBarBeforeFold;
+
+    // 보던 열을 만든다 — 접기가 그것을 되돌리는지도 같이 잰다.
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -30, null);
+    const kept_col = term.rt.editor_first_col;
+    if (kept_col == 0) return error.HorizontalDidNotScroll;
+
+    // ⑴ **접는다.** 긴 줄은 접힘 밖이라 그대로 있다 — 상한이 줄어들 이유가 없다.
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (term.rt.editor_max_cols == 0) return error.FoldThrewAwayMaxCols;
+    try testing.expect(term.rt.editor_max_cols > visible);
+
+    var after_fold = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after_fold.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByFold;
+    try testing.expectEqual(kept_col, term.rt.editor_first_col);
+
+    // ⑴ʹ **보던 줄도 지킨다.** 세로는 `restoreTop` 이 예전부터 갖고 있는데, **그것을 재는
+    //     판정자가 이 빠른 고리에 없었다** — 있는 것(「접기·펼치기가 보던 자리를 지킨다」)은 이름에
+    //     접두가 없어 `test-editor` 필터가 안 고르고, 그래서 변이(F4)가 살아남았다. 같은 마무리를
+    //     건드리는 조각이므로 여기서 함께 잰다.
+    if (!unfoldAll(fx.session)) return error.UnfoldRejected;
+    _ = scrollLines(fx.session, term, fx.leaf_rect, -14); // 몸통 줄 위에 선다
+    const top_before = topDocLine(term);
+    if (top_before == 0) return error.VerticalDidNotScroll;
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    const top_after = topDocLine(term);
+    // 그 줄이 숨었으면 **품은 머리**로 간다(바로 앞의 보이는 줄) — 0 으로 튀지 않는다.
+    if (!(top_after <= top_before and top_before - top_after <= 2)) return error.TopJumpedOnFold;
+
+    // ⑴ʺ **화살표로 접는 경로도 같다.** 명령(`foldAll`)만 재면 `toggleFoldHead` 쪽에서 같은
+    //     되감김이 되살아나도 아무도 못 잡는다(실측: 변이 F6 이 그렇게 살았다). 셋이 같은 마무리를
+    //     쓰는지가 이 조각의 전제이므로 **셋째 입구도** 지난다.
+    _ = unfoldAll(fx.session);
+    _ = scrollLines(fx.session, term, fx.leaf_rect, 1000); // 맨 위로 — 머리 줄이 보이게
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -30, null);
+    const col_before_toggle = term.rt.editor_first_col;
+    if (col_before_toggle == 0) return error.HorizontalDidNotScroll;
+    if (!toggleFoldHead(fx.session, term, 0)) return error.ToggleRejected;
+    if (term.rt.editor_max_cols == 0) return error.ToggleThrewAwayMaxCols;
+    var after_toggle = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after_toggle.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByToggle;
+    try testing.expectEqual(col_before_toggle, term.rt.editor_first_col);
+    // ⑵ **편다.** 같은 규칙이 반대 방향에도 있어야 한다.
+    // **직전 값을 다시 읽는다** — 앞 단계들이 가로를 더 밀어 두었다. 맨 처음 값(`kept_col`)과
+    // 비교하면 「앞 단언이 남긴 상태」에 걸려 판정이 엉뚱한 것을 말한다(실측으로 걸렸다).
+    const col_before_unfold = term.rt.editor_first_col;
+    if (!unfoldAll(fx.session)) return error.UnfoldRejected;
+    if (term.rt.editor_max_cols == 0) return error.UnfoldThrewAwayMaxCols;
+    var after_unfold = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after_unfold.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByUnfold;
+    try testing.expectEqual(col_before_unfold, term.rt.editor_first_col);
 }
 
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {

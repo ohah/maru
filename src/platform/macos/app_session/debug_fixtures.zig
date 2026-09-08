@@ -1653,6 +1653,14 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
 
     for (0..downs) |_| _ = self.handleKeyEvent(.{ .key = .arrow_down }) catch {};
     for (0..rights) |_| _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } }) catch {};
+    // **열 넘기기도 키로 태운다**(`MARU_DIFF_SWITCH_SIDE=1`). `⌃⇧Tab` 이 AppKit 을 지나 `keyDown`
+    // 까지 오는지는 판정자가 원리상 답할 수 없다 — 캡처가 그 자리를 메운다.
+    if (std.c.getenv("MARU_DIFF_SWITCH_SIDE")) |sw| {
+        const sw_spec = std.mem.span(sw);
+        if (sw_spec.len > 0 and !std.mem.eql(u8, sw_spec, "0")) {
+            _ = self.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .control = true, .shift = true } }) catch {};
+        }
+    }
     self.debug_diff_caret_keys_done = true;
 }
 

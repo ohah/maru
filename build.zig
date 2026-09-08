@@ -15795,7 +15795,7 @@ pub fn build(b: *std.Build) void {
                 },
             }) });
             const run_profile_authored_attestation_selector_tests = b.addRunArtifact(profile_authored_attestation_selector_tests);
-            run_profile_authored_attestation_selector_tests.addArg("--maru-expect-tests=7");
+            run_profile_authored_attestation_selector_tests.addArg("--maru-expect-tests=8");
             run_profile_authored_attestation_selector_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_authored_attestation_selector_step.dependOn(&run_profile_authored_attestation_selector_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_authored_attestation_selector_tests.step);

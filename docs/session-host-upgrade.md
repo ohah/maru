@@ -4680,6 +4680,35 @@ staging의 write/file-sync/rename/parent-sync와 owner 인계 전 failure cleanu
 timing artifact publisher까지만 닫으며 fresh-process profile stage-3 command, checkpoint·attestation, live workflow 배선과 protected B tag
 실측은 후속 gate다.
 
+### 11.95 upgrade-B stage-3 fresh-process contract와 bootstrap
+
+`release_adapter_contract.zig`와 `release_adapter_executable_bootstrap.zig`는 profile-B 전용
+`prepare-profile-candidate` 명령을 닫힌 합집합에 추가한다. 이 단계는 fresh process가 후속 driver에 넘길 argv와 protected
+workflow authority만 고정하며 filesystem·network·child process·draft·manifest·durable preparation·timing artifact를 만들지 않는다.
+기존 baseline-A `prepare-candidate`의 의미나 인자 집합을 profile 환경에 따라 바꾸지 않는다.
+
+명령은 기존 candidate prerequisite 입력인 `repo`, `tag`, checkout에서 미리 pin한 GitHub CLI path/SHA,
+`test-uuid`, candidate DMG/frozen executable, 두 attestation bundle과 DMG work path에 더해 source root,
+pinned Zig path/size/SHA, predecessor workspace, upgrade workspace, role-B manifest output, durable preparation output,
+timing artifact output만 받는다. profile 이름·predecessor release/tag/commit/manifest SHA·evidence pathname·manifest role·signer
+requirement·timing 값·성공 boolean은 argv로 받지 않는다. profile document는
+`MARU_SESSION_HOST_RELEASE_PROFILE_V1`의 canonical `upgrade_b` 값에서만 읽으며 token은 기존 credential reader에서만 빌린다.
+
+parser는 모든 필수 option의 exact-once, bounded value, canonical absolute path와 manifest basename을 검증한다. GitHub CLI를 포함한
+모든 pathname은 서로 same/ancestor/descendant가 아니어야 하고 predecessor와 upgrade workspace도 분리한다. timing output은
+private parent 아래 absent leaf를 후속 publisher가 소유하므로 durable directory나 manifest 안에 중첩할 수 없다. bootstrap은 current
+protected `Context`와 hosted runner를 먼저 읽고 repo/tag를 결속한 뒤 checkout-pinned GitHub CLI를 검증한다. `Bootstrap.command`의 argv
+slice는 process lifetime 동안만 빌리며 CLI pathname만 bootstrap fixed storage에 복사해 pinned descriptor identity와 함께 final-address
+owner가 소유한다. 다음 driver는 첫 side-effect callback 전에 필요한 pathname을 bounded fixed storage로 복사하고 borrowed argv를 실패
+정산 owner에 남기지 않아야 한다.
+
+focused Debug·ReleaseFast gate는 exact argv 상한과 성공 projection, 빠진·중복·unknown option, baseline profile/predecessor scalar 주입,
+path alias·중첩, manifest basename, CLI digest와 context/runner drift, copied/pre-owned bootstrap을 검증한다. validator dispatch는 새 command를
+별도 arm으로만 식별하며 이 slice에서는 token/profile environment를 읽거나 제품 driver를 호출하지 않는다. 다음 slice의
+`release_adapter_profile_stage3_preparation_command.zig`가 이 bootstrap 하나를 소비해 profile owner → candidate prerequisite → 두 workspace와
+toolchain/source authority → `ProfileUpgradeExecution` → role-B stage-3 product → timing artifact publication/retained close를 하나의 정산 owner로
+연결한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const editor_ops = @import("editor.zig");
+const input_ops = @import("input.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -1652,8 +1653,15 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
 
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return; // 아직 비교가 안 열렸다 — 다음 tick 에 다시 본다
-    const st = term.rt.editor_diff orelse return;
-    if (st.view != .compare) return;
+    // **비교가 아니어도 단일 편집기면 태운다** — 가로 추적·편집 캡처는 단일 편집기에서만 뜻이
+    // 있는 것도 있다(비교는 읽기 전용이라 타이핑이 안 들어간다).
+    if (term.rt.editor_diff) |st| {
+        if (st.view != .compare) return;
+    } else if (term.rt.editor_doc == null) return
+    // **caret 이 설 때까지 기다린다.** 단일 편집기는 클릭 전에 선택이 없고, 그것을 세우는
+    // `applyForcedEditorCaret` 은 **프레임 경로**에서 돈다 — 먼저 돌고 래치하면 키가 허공에 간다
+    // (`MARU_OPEN_SCM_DIFF` 이 목록이 찰 때까지 기다리는 것과 같은 규율이다).
+    else if (term.rt.editor_selection == null) return;
 
     for (0..downs) |_| _ = self.handleKeyEvent(.{ .key = .arrow_down }) catch {};
     for (0..rights) |_| _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } }) catch {};
@@ -1664,6 +1672,14 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
         const le_spec = std.mem.span(le);
         if (le_spec.len > 0 and !std.mem.eql(u8, le_spec, "0")) {
             _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } }) catch {};
+        }
+    }
+    // **행 끝으로 보낸 뒤 한 글자 친다**(`MARU_DIFF_TYPE=1`) — 편집이 가로를 되감는지 본다.
+    //    비교는 읽기 전용이라 이 훅은 **단일 편집기**에서만 뜻이 있다.
+    if (std.c.getenv("MARU_DIFF_TYPE")) |tp| {
+        const tp_spec = std.mem.span(tp);
+        if (tp_spec.len > 0 and !std.mem.eql(u8, tp_spec, "0")) {
+            _ = input_ops.sendCommittedText(self, "Z");
         }
     }
     if (std.c.getenv("MARU_DIFF_SWITCH_SIDE")) |sw| {

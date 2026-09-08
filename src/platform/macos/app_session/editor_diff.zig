@@ -3820,3 +3820,95 @@ test "DHS2: 랩이 켜지면 가로를 안 건드린다 (§4 가로 축이 없�
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
     try testing.expect(fx.term.rt.editor_first_col_right != 7);
 }
+
+test "DHS4: 줄 가운데에서는 상한이 안 걸린다 — 최소 이동을 그대로 잰다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "keep\n");
+    try long.appendNTimes(allocator, 'x', 600);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', 600);
+    try mod.append(allocator, '\n');
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len == 600) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+    const visible = fx.term.rt.editor_diff_hit_geom.content_width;
+    try testing.expect(visible > 0 and visible < 300); // 픽스처 자기 검증
+
+    // **줄 **가운데**로 간다.** 행 끝에서 재면 상한(`max_cols -| visible`)이 답을 덮어써
+    //    「한 칸 어긋난 최소 이동」이 같은 값을 낸다(1회차 H7 이 그래서 살았다).
+    fx.term.rt.editor_first_col_right = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 300 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false)); // 301열로
+    try testing.expectEqual(@as(u16, @intCast(301 + 1 - visible)), fx.term.rt.editor_first_col_right);
+
+    // **이미 보이면 안 민다** — 한 글자 왼쪽으로 가도 화면 안이다(최소 이동의 뒷면).
+    const held = fx.term.rt.editor_first_col_right;
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_left, false));
+    try testing.expectEqual(held, fx.term.rt.editor_first_col_right);
+
+    // **왼쪽으로 나가면 그 열이 첫 칸이 된다.**
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_start, false));
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col_right);
+}
+
+test "DHS5: 한 프레임도 안 그렸으면 가로를 안 건드리고, 반대 열의 폭·상한을 안 쓴다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "keep\n");
+    try long.appendNTimes(allocator, 'x', 600);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', 40); // **오른쪽은 짧다** — 좌우 상한이 갈린다
+    try mod.append(allocator, '\n');
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.left_texts, 0..) |t, i| {
+        if (t.len == 600) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+    try testing.expect(fx.term.rt.editor_max_cols != fx.term.rt.editor_max_cols_right); // 픽스처 자기 검증
+
+    // ⑴ **폭이 0 이면 아무 일도 안 한다** — 「밖이다」를 판정할 기준이 없다(1회차 H3).
+    const saved_w = fx.term.rt.editor_diff_hit_geom.content_width;
+    fx.term.rt.editor_diff_hit_geom.content_width = 0;
+    fx.term.rt.editor_first_col = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
+    fx.term.rt.editor_diff_hit_geom.content_width = saved_w;
+
+    // ⑵ **자기 열의 상한을 쓴다.** 반대 열(40열)의 상한을 쓰면 훨씬 못 간다(1회차 H15).
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
+    try testing.expect(fx.term.rt.editor_first_col > 40);
+
+    // ⑶ **옮기면 다시 그린다**(1회차 H11).
+    fx.session.metal_dirty = false;
+    fx.term.rt.editor_first_col = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
+    try testing.expect(fx.session.metal_dirty);
+}

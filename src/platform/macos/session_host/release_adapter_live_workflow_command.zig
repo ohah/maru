@@ -7,6 +7,7 @@ const outcome = @import("release_adapter_command_outcome");
 
 pub const Selection = enum(u8) {
     draft_authoring,
+    profile_draft_authoring,
     aggregate_prepare,
     aggregate_finalize,
     publication,
@@ -39,6 +40,7 @@ pub fn select(arguments: []const []const u8) Error!Selection {
     const parsed = contract.parseArgs(arguments) catch return error.InvalidArguments;
     return switch (parsed) {
         .prepare_candidate => .draft_authoring,
+        .prepare_profile_candidate => .profile_draft_authoring,
         .prepare_candidate_aggregate => .aggregate_prepare,
         .finalize_candidate_aggregate => .aggregate_finalize,
         .resume_candidate_publication => .publication,
@@ -49,7 +51,7 @@ pub fn select(arguments: []const []const u8) Error!Selection {
 
 pub fn stage(selection: Selection) phase.Stage {
     return switch (selection) {
-        .draft_authoring => .draft_authoring,
+        .draft_authoring, .profile_draft_authoring => .draft_authoring,
         .aggregate_prepare => .aggregate_prepare,
         .aggregate_finalize => .aggregate_finalize,
         .publication => .publication,
@@ -59,13 +61,36 @@ pub fn stage(selection: Selection) phase.Stage {
 
 pub fn requiresToken(selection: Selection) bool {
     return switch (selection) {
-        .draft_authoring, .publication, .aggregate_cleanup => true,
+        .draft_authoring, .profile_draft_authoring, .publication, .aggregate_cleanup => true,
         .aggregate_prepare, .aggregate_finalize => false,
     };
 }
 
 pub fn requiresWorkspace(selection: Selection) bool {
-    return selection == .draft_authoring;
+    return selection == .draft_authoring or selection == .profile_draft_authoring;
+}
+
+pub fn requiresProfileEnvironment(selection: Selection) bool {
+    return selection == .profile_draft_authoring;
+}
+
+pub fn commandName(selection: Selection) []const u8 {
+    return switch (selection) {
+        .draft_authoring => "prepare-candidate",
+        .profile_draft_authoring => "prepare-profile-candidate",
+        .aggregate_prepare => "prepare-candidate-aggregate",
+        .aggregate_finalize => "finalize-candidate-aggregate",
+        .publication => "resume-candidate-publication",
+        .aggregate_cleanup => "cleanup-candidate-aggregate",
+    };
+}
+
+pub fn matchesCheckpointIdentity(selection: Selection, checkpoint_stage: phase.Stage, checkpoint_name: []const u8) bool {
+    if (stage(selection) != checkpoint_stage) return false;
+    return switch (selection) {
+        .draft_authoring, .profile_draft_authoring => std.mem.eql(u8, checkpoint_name, "prepare-candidate"),
+        else => std.mem.eql(u8, checkpoint_name, commandName(selection)),
+    };
 }
 
 pub fn classify(selection: Selection, observation: Observation) phase.Result {
@@ -76,7 +101,7 @@ pub fn classify(selection: Selection, observation: Observation) phase.Result {
         .signal, .unknown => return .cleanup_failed,
     };
     return switch (selection) {
-        .draft_authoring => classifyStage3(code, observation.stderr.bytes),
+        .draft_authoring, .profile_draft_authoring => classifyStage3(code, observation.stderr.bytes),
         .aggregate_prepare, .aggregate_finalize => classifyAggregate(code, observation.stderr.bytes),
         .publication => classifyPublication(code, observation.stderr.bytes),
         .aggregate_cleanup => classifyCleanup(code, observation.stderr.bytes),

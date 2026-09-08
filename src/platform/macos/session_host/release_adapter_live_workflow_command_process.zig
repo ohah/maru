@@ -8,13 +8,14 @@ const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const files = @import("release_adapter_files");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const token_environment = @import("release_adapter_token_environment");
+const profile_endorsement = @import("release_adapter_profile_endorsement");
 const command = @import("release_adapter_live_workflow_command");
 const phase = @import("release_adapter_live_workflow_phase");
 const c = std.c;
 
 pub const phase_budget_ns: i128 = 20 * std.time.ns_per_min;
 pub const validator_name = "maru-session-host-release-validator";
-const max_environment_entries = context.required_names.len + cli_authority.required_runner_names.len + 2;
+const max_environment_entries = context.required_names.len + cli_authority.required_runner_names.len + 3;
 const max_environment_value_bytes = @max(context.max_value_bytes, std.fs.max_path_bytes);
 const max_environment_entry_bytes = 32 + 1 + max_environment_value_bytes;
 
@@ -54,18 +55,8 @@ pub const Execution = struct {
     }
 };
 
-pub fn stage(selection: command.Selection) phase.Stage {
-    return command.stage(selection);
-}
-
-pub fn commandName(selection: command.Selection) []const u8 {
-    return switch (selection) {
-        .draft_authoring => "prepare-candidate",
-        .aggregate_prepare => "prepare-candidate-aggregate",
-        .aggregate_finalize => "finalize-candidate-aggregate",
-        .publication => "resume-candidate-publication",
-        .aggregate_cleanup => "cleanup-candidate-aggregate",
-    };
+pub fn matchesCheckpointIdentity(selection: command.Selection, checkpoint_stage: phase.Stage, checkpoint_name: []const u8) bool {
+    return command.matchesCheckpointIdentity(selection, checkpoint_stage, checkpoint_name);
 }
 
 pub fn prepareCurrent(
@@ -88,6 +79,11 @@ pub fn prepareCurrent(
         token_environment.readCurrent() catch return error.InvalidEnvironment
     else
         null;
+    const profile_document = if (command.requiresProfileEnvironment(selection)) blk: {
+        const value = currentValue(profile_endorsement.environment_name) orelse return error.MissingEnvironment;
+        if (value.len == 0 or value.len > profile_endorsement.max_document_bytes) return error.InvalidEnvironment;
+        break :blk value;
+    } else null;
 
     var validator_path: [std.fs.max_path_bytes:0]u8 = @splat(0);
     const validator = std.fmt.bufPrintZ(&validator_path, "{s}/zig-out/bin/{s}", .{ workspace, validator_name }) catch
@@ -104,7 +100,7 @@ pub fn prepareCurrent(
     files.pinReleaseFileObserved(&result.validator, result.validator_path[0..validator.len :0], true, cli_authority.max_executable_bytes) catch
         return error.InvalidPath;
     copyArguments(result, arguments) catch return error.InvalidEnvironment;
-    copyEnvironment(result, selection, view.context, view.runner, workspace, token) catch return error.InvalidEnvironment;
+    copyEnvironment(result, selection, view.context, view.runner, workspace, token, profile_document) catch return error.InvalidEnvironment;
 }
 
 pub fn run(execution: *Execution) phase.Result {
@@ -158,6 +154,7 @@ fn copyEnvironment(
     runner: cli_authority.RunnerAuthority,
     workspace: []const u8,
     token: ?[]const u8,
+    profile_document: ?[]const u8,
 ) !void {
     @memset(&result.environment, null);
     var count: usize = 0;
@@ -197,7 +194,26 @@ fn copyEnvironment(
     } else if (token != null) {
         return error.InvalidEnvironment;
     }
+    if (command.requiresProfileEnvironment(selection)) {
+        try appendProfileEnvironment(result, &count, profile_document orelse return error.MissingEnvironment);
+    } else if (profile_document != null) {
+        return error.InvalidEnvironment;
+    }
     result.environment_count = count;
+}
+
+fn appendProfileEnvironment(result: *Execution, count: *usize, value: []const u8) !void {
+    if (value.len < 2 or value.len > profile_endorsement.max_document_bytes or value[value.len - 1] != '\n')
+        return error.InvalidEnvironment;
+    for (value[0 .. value.len - 1]) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidEnvironment;
+    if (count.* >= max_environment_entries) return error.InvalidEnvironment;
+    const entry = std.fmt.bufPrintZ(
+        &result.environment_bytes[count.*],
+        "{s}={s}",
+        .{ profile_endorsement.environment_name, value },
+    ) catch return error.InvalidEnvironment;
+    result.environment[count.*] = entry.ptr;
+    count.* += 1;
 }
 
 fn appendEnvironment(result: *Execution, count: *usize, name: []const u8, value: []const u8) !void {

@@ -51,6 +51,11 @@ pub fn main(init: std.process.Init) !void {
         successful += 1;
     }
     try runTerminalCase(init.io, init.gpa, wrapper, validator_fixture, iterations);
+    try runProfileStage3Case(init.io, init.gpa, wrapper, validator_fixture, iterations, "profile-success", .active);
+    try runProfileStage3Case(init.io, init.gpa, wrapper, validator_fixture, iterations, "profile-local-failure", .local_failure);
+    try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .missing);
+    try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .noncanonical);
+    try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .control);
     if (successful == 0) return error.NoSuccessfulRuns;
     const fd_after = try openFdCount(init.io);
     if (fd_after < fd_before) return error.ProcessInvariantFailed;
@@ -90,6 +95,7 @@ fn runSuccessChain(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8
     defer workspace.deinit(io);
     var environment = try workspace.environment(allocator);
     defer environment.deinit();
+    try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", profile_document);
     const token = try workspace.bootstrap(io, allocator);
     try workspace.settle(io, allocator, token, .candidate_pinning);
     try workspace.settle(io, allocator, token, .candidate_attestation);
@@ -129,12 +135,55 @@ fn runTerminalCase(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8
     defer workspace.deinit(io);
     var environment = try workspace.environment(allocator);
     defer environment.deinit();
+    try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", profile_document);
     const token = try workspace.bootstrap(io, allocator);
     try workspace.settle(io, allocator, token, .candidate_pinning);
     try workspace.settle(io, allocator, token, .candidate_attestation);
     var args = workspace.prepareArgs();
     try runWrapperExpectFailure(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
     try workspace.expectFinal(io, allocator, token, .local_failure);
+}
+
+fn runProfileStage3Case(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize, mode: []const u8, expected: phase.Outcome) !void {
+    var workspace = try Workspace.init(io, allocator, fixture, index, mode);
+    defer workspace.deinit(io);
+    var environment = try workspace.environment(allocator);
+    defer environment.deinit();
+    try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", profile_document);
+    const token = try workspace.bootstrap(io, allocator);
+    try workspace.settle(io, allocator, token, .candidate_pinning);
+    try workspace.settle(io, allocator, token, .candidate_attestation);
+    var args = workspace.profilePrepareArgs();
+    if (expected == .active) {
+        _ = try runWrapper(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+        try workspace.expectCount(io, allocator, token, 3, .active);
+    } else {
+        try runWrapperExpectFailure(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+        try workspace.expectFinal(io, allocator, token, expected);
+    }
+    workspace.remove(io);
+    if (workspace.exists(io)) return error.ProcessInvariantFailed;
+}
+
+const ProfileEnvironmentFailure = enum { missing, noncanonical, control };
+
+fn runProfileEnvironmentFailureCase(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize, failure: ProfileEnvironmentFailure) !void {
+    var workspace = try Workspace.init(io, allocator, fixture, index, @tagName(failure));
+    defer workspace.deinit(io);
+    var environment = try workspace.environment(allocator);
+    defer environment.deinit();
+    switch (failure) {
+        .missing => {},
+        .noncanonical => try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", "{}\nnoise"),
+        .control => try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", "{\r}\n"),
+    }
+    const token = try workspace.bootstrap(io, allocator);
+    try workspace.settle(io, allocator, token, .candidate_pinning);
+    try workspace.settle(io, allocator, token, .candidate_attestation);
+    var args = workspace.profilePrepareArgs();
+    try runWrapperExpectFailure(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+    try workspace.expectCount(io, allocator, token, 2, .active);
+    if (std.Io.Dir.cwd().access(io, workspace.preparationPath(), .{})) |_| return error.UnexpectedResidue else |_| {}
 }
 
 fn runWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !u64 {
@@ -194,6 +243,9 @@ const Workspace = struct {
     evidence: []u8,
     evidence_bundle: []u8,
     manifest_bundle: []u8,
+    predecessor_workspace: []u8,
+    upgrade_workspace: []u8,
+    timing_output: []u8,
     validator_sha: [64]u8,
     token_storage: [checkpoint.max_root_identity_token_bytes:0]u8 = @splat(0),
     token_len: usize = 0,
@@ -225,7 +277,7 @@ const Workspace = struct {
         std.crypto.hash.sha2.Sha256.hash(fixture_bytes, &digest, .{});
         const checkpoint_path_owned = try std.fmt.allocPrint(allocator, "{s}/checkpoint", .{root});
         errdefer allocator.free(checkpoint_path_owned);
-        const preparation = try std.fmt.allocPrint(allocator, "{s}/work/{s}", .{ root, if (std.mem.eql(u8, mode, "local-failure")) "local-failure" else "preparation" });
+        const preparation = try std.fmt.allocPrint(allocator, "{s}/work/{s}", .{ root, if (std.mem.endsWith(u8, mode, "local-failure")) "local-failure" else "preparation" });
         errdefer allocator.free(preparation);
         const aggregate = try std.fmt.allocPrint(allocator, "{s}/work/aggregate", .{root});
         errdefer allocator.free(aggregate);
@@ -257,6 +309,12 @@ const Workspace = struct {
         errdefer allocator.free(evidence_bundle);
         const manifest_bundle = try std.fmt.allocPrint(allocator, "{s}/work/manifest-bundle.json", .{root});
         errdefer allocator.free(manifest_bundle);
+        const predecessor_workspace = try std.fmt.allocPrint(allocator, "{s}/work/predecessor", .{root});
+        errdefer allocator.free(predecessor_workspace);
+        const upgrade_workspace = try std.fmt.allocPrint(allocator, "{s}/work/upgrade", .{root});
+        errdefer allocator.free(upgrade_workspace);
+        const timing_output = try std.fmt.allocPrint(allocator, "{s}/work/profile-timing.json", .{root});
+        errdefer allocator.free(timing_output);
         return .{
             .allocator = allocator,
             .root = root,
@@ -279,12 +337,18 @@ const Workspace = struct {
             .evidence = evidence,
             .evidence_bundle = evidence_bundle,
             .manifest_bundle = manifest_bundle,
+            .predecessor_workspace = predecessor_workspace,
+            .upgrade_workspace = upgrade_workspace,
+            .timing_output = timing_output,
             .validator_sha = std.fmt.bytesToHex(digest, .lower),
         };
     }
 
     fn deinit(self: *Workspace, io: std.Io) void {
         if (!self.removed) std.Io.Dir.cwd().deleteTree(io, self.root) catch {};
+        self.allocator.free(self.timing_output);
+        self.allocator.free(self.upgrade_workspace);
+        self.allocator.free(self.predecessor_workspace);
         self.allocator.free(self.manifest_bundle);
         self.allocator.free(self.evidence_bundle);
         self.allocator.free(self.evidence);
@@ -367,6 +431,17 @@ const Workspace = struct {
         _ = io;
     }
 
+    fn expectCount(self: *Workspace, io: std.Io, allocator: std.mem.Allocator, token: []const u8, count: u8, expected: phase.Outcome) !void {
+        var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_storage, "{s}/checkpoint", .{self.root});
+        var root: checkpoint.Root = .{};
+        try checkpoint.openRootExpected(&root, path, try checkpoint.decodeRootIdentity(token));
+        defer root.deinit() catch {};
+        const state = try checkpoint.reopen(allocator, &root, count, workflowContext());
+        try std.testing.expectEqual(expected, state.outcome);
+        _ = io;
+    }
+
     fn environment(self: *Workspace, allocator: std.mem.Allocator) !std.process.Environ.Map {
         var map = std.process.Environ.Map.init(allocator);
         errdefer map.deinit();
@@ -406,6 +481,16 @@ const Workspace = struct {
             self.baseline_workspace,      "--app-main-executable",                self.app_main_executable, "--app-cli-executable", self.app_cli_executable, "--manifest",           self.manifestPath(),      "--source-root",           self.source_root,
             "--zig",                      self.zig_path,                          "--zig-size",             "1",                    "--zig-sha256",          &self.validator_sha,    "--candidate-dmg-bundle", self.candidate_dmg_bundle, "--candidate-frozen-bundle",
             self.candidate_frozen_bundle, "--durable-preparation",                self.preparationPath(),
+        };
+    }
+
+    fn profilePrepareArgs(self: *Workspace) [39][]const u8 {
+        return .{
+            "prepare-profile-candidate",  "--repo",                               "ohah/maru",        "--tag",             "v1.2.3",                  "--github-cli",             self.validator,           "--github-cli-sha256",     &self.validator_sha,
+            "--test-uuid",                "123e4567-e89b-42d3-a456-426614174000", "--dmg",            self.dmg,            "--frozen-executable",     self.frozen_executable,     "--candidate-dmg-bundle", self.candidate_dmg_bundle, "--candidate-frozen-bundle",
+            self.candidate_frozen_bundle, "--dmg-work",                           self.dmg_work,      "--manifest",        self.manifestPath(),       "--source-root",            self.source_root,         "--zig",                   self.zig_path,
+            "--zig-size",                 "1",                                    "--zig-sha256",     &self.validator_sha, "--predecessor-workspace", self.predecessor_workspace, "--upgrade-workspace",    self.upgrade_workspace,    "--durable-preparation",
+            self.preparationPath(),       "--timing-output",                      self.timing_output,
         };
     }
 
@@ -455,3 +540,4 @@ fn monotonicNs() u64 {
 }
 
 const source_sha = "0123456789abcdef0123456789abcdef01234567";
+const profile_document = "{\"schema\":\"maru.session-host-release-profile.v1\",\"profile\":\"upgrade_b\",\"predecessor\":{\"release_id\":41,\"tag\":\"v1.1.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"manifest_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}\n";

@@ -4648,6 +4648,38 @@ harness-owned private root에서 manifest 작성→promotion→fence→retained 
 GitHub-issued timing이나 signed upgrade 성공 권위가 아니다. timing diagnostic publication,
 fresh-process command wiring, checkpoint·attestation, live workflow/GitHub mutation과 protected B tag 실측은 후속 gate다.
 
+### 11.94 upgrade-B profile timing diagnostic publication
+
+`release_adapter_profile_upgrade_timing_artifact.zig`의 final-address `Artifact` owner는 성공한
+`ProfileUpgradeExecution`의 로컬 monotonic timing을 credential-free canonical JSON 파일 하나로 게시한다. 입력은 protected current
+`Context`, 성공한 execution owner, absent canonical absolute output pathname뿐이다. caller가 profile, success boolean 또는 다섯 duration을
+scalar로 다시 제출하는 API는 두지 않는다. publisher는 publication 전후에 execution owner와 timing 내부 합계, protected context를
+재검증하며 timing을 release·manifest·checkpoint 성공 권위로 해석하지 않는다.
+
+schema는 exact `maru.session-host-profile-upgrade-timing.v1`이다. UTF-8 JSON object의 key 순서는 `schema`, `profile`,
+`repository_id`, `repository`, `tag`, `source_commit`, `workflow_ref`, `run_id`, `run_attempt`, `predecessor_auth_ns`,
+`signed_one_ns`, `signed_near_max_ns`, `runner_phase_ns`, `profile_phase_ns`이고 마지막 LF 하나로 끝난다. `profile`은 exact
+`upgrade_b`다. identity는 전부 current `Context`에서 투영하며 다섯 duration은 execution의 `TimingDiagnostic`에서만 투영한다.
+값은 모두 양수이고 `runner_phase_ns >= signed_one_ns + signed_near_max_ns`,
+`profile_phase_ns >= predecessor_auth_ns + runner_phase_ns`여야 한다. overflow, owner/context drift, unknown/copied/pre-owned/aliased
+result 또는 output은 publication 0으로 fail-close한다.
+
+output은 effective user 소유 private parent 아래 absent basename에 exclusive staging file을 `0600`으로 쓰고 file sync→atomic rename→parent
+directory sync 뒤 held descriptor와 canonical bytes를 다시 검증해 성공한다. symlink·hardlink·non-regular·loose mode·기존 destination,
+pathname ancestor 교체와 short write/sync/rename 실패는 성공 artifact를 만들지 않는다. 공용 publication primitive가 owner를 넘기기 전에
+실패하면 held inode와 final pathname이 여전히 같은 경우에만 자신이 만든 leaf를 제거하고 parent를 다시 sync하며, foreign replacement는
+삭제하지 않는다. primitive 성공으로 artifact owner가 확립된 뒤 execution/context/final fence가 실패하면 final을 추측해 지우지 않고
+exact audit-required owner로 남기며 fresh reopen 또는 명시 cleanup이 같은 inode/bytes를 재검증한 뒤 정산한다. 이 artifact는 §11.92 durable
+preparation의 exact evidence+manifest 2-entry inventory 안에 넣지 않으며 별도 workflow artifact locator로만 전달한다.
+
+focused Debug·ReleaseFast gate는 canonical bytes와 exact field projection, timing 합계·overflow, copied/pre-owned/alias/path/mode/link/inode
+drift, retained failure와 cleanup/reopen을 실제 private APFS root에서 검증한다. 공용 `release_adapter_files` gate가 exclusive
+staging의 write/file-sync/rename/parent-sync와 owner 인계 전 failure cleanup을 단일 출처로 검증하고 이 focused gate가 그 owner의 인계 전·후
+상태 전이를 검증한다. 테스트 root는
+`std.testing.tmpDir`만 사용하며 실제 앱 session-host registry·사용자 HOME·GitHub release·credential을 읽거나 바꾸지 않는다. 이 slice는
+timing artifact publisher까지만 닫으며 fresh-process profile stage-3 command, checkpoint·attestation, live workflow 배선과 protected B tag
+실측은 후속 gate다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -6884,11 +6884,61 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 ///
 /// **selection은 여기서 안 건드린다** — `delta.apply`가 이미 같은 연산에서 밀어 놓았다(§3.3).
 /// 여기서 또 손대면 그 매핑을 덮어쓴다.
+/// 편집 뒤의 가로 상한 — **편집 전 값에 방금 건드린 줄만 더 센다**.
+///
+/// **전부 다시 세지 않는다.** `ensureMaxCols` 는 문서 전체를 훑고 2만 줄(2.1MB)에서 **24ms** 다
+/// (그 함수의 실측 주석) — 글자 하나마다 그것을 치르면 타이핑이 끊긴다. 반대로 0 으로 버리면 위
+/// `refreshAfterEdit` 머리의 두 가지가 무너진다. 그래서 **자란 쪽만 정확히** 따라간다: caret 이 있는
+/// 줄들은 방금 바뀐 줄이므로, 그것만 다시 세면 「긴 줄이 더 길어졌다」가 즉시 반영된다.
+///
+/// **줄어든 쪽은 늦게 따라온다**(의도한 절충). 가장 긴 줄에서 글자를 지우면 상한이 잠깐 실제보다
+/// 크고, 그만큼 오른쪽 빈 곳으로 밀 수 있다 — 다음 접힘 변경·탭 폭 변경·재적재가 0 으로 버리고
+/// 다시 세면 정확해진다. 반대(상한을 버리는 쪽)의 대가는 **매 글자마다 화면이 되감기고 막대가
+/// 사라지는 것**이라, 이 방향이 덜 나쁘다.
+///
+/// `kept == 0` 이면 애초에 **안 센 것**이라 0 을 그대로 둔다 — 여기서 지어내면 막대 길이가 거짓이 된다.
+///
+/// **아래 셋은 살아남는 것이 정상인 변이다**(적대적 검증 4회차 — 값이 같아서다. 읽고 확인했다):
+///  · `maxColsForRender` 의 `0 → null` 을 지워도 같다 — `frame.showsHorizontalBar` 가 `max_cols >
+///    view_cols` 를 요구하므로 `0` 도 `null` 도 막대를 안 그린다. 그래도 `null` 인 것은 **뜻**이
+///    다르기 때문이다("안 셌다" ≠ "폭이 0").
+///  · `lineColumnsUpTo` 에 넘기는 `limit` 을 없애도 같다 — 바로 아래 `@min(max, limit)` 이 값을 이미
+///    묶는다. 넘기는 이유는 값이 아니라 **비용**이다(그 너머는 세도 못 가는 열이다).
+///  · `max_cols_right` 까지 같이 되살려도 같다 — 오른쪽 열은 **비교 뷰**의 것이고 비교는 읽기
+///    전용이라 이 함수를 부르는 편집 경로가 그 Term 에는 없다.
+fn maxColsAfterEdit(term: *Term, kept: u32) u32 {
+    if (kept == 0) return 0;
+    const doc = term.rt.editor_doc orelse return kept;
+    const limit = chrome_editor.frame.max_cols_count_limit;
+    const tab_width = term.rt.editor_tab_width; // 렌더가 쓰는 그 값(`ensureMaxCols` 와 같은 출처)
+    var max = kept;
+    var i: usize = 0;
+    while (i <= term.rt.editor_extra_selections.len) : (i += 1) {
+        const sel = if (i == 0)
+            (term.rt.editor_selection orelse continue)
+        else
+            term.rt.editor_extra_selections[i - 1];
+        const off = @min(sel.focus, doc.file.content.len);
+        const line = doc.file.lines.line(doc.file.lines.lineAt(off)) orelse continue;
+        const text = doc.file.content[line.start..line.contentEnd()];
+        max = @max(max, chrome_editor.content.lineColumnsUpTo(text, tab_width, limit));
+    }
+    return @min(max, limit);
+}
+
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
     const kept_col_right = term.rt.editor_first_col_right;
+    // **상한도 같이 떠 둔다.** 아래 ⑷ 가 `max_cols` 도 0 으로 되돌리는데, 그것을 **다시 세는 곳이
+    // 프레임 경로에 없다**(`ensureMaxCols` 는 여는 경로·가로 스크롤·탭 폭에서만 돈다). 그래서
+    // 편집 뒤에는 0 이 그대로 남아 두 가지가 무너진다:
+    //  · `clampScrollToGeometry` 가 그리기 직전에 0 을 상한으로 믿어 **가로를 왼쪽 끝으로 되감는다**,
+    //  · `maxColsForRender` 가 `null` 을 내 **가로 막대가 사라지고** 그 자리만큼 본문 높이가 출렁인다.
+    // 캡처가 그 둘을 한 화면에서 보여 줬다(2026-09-08 — 415열 줄 끝에서 한 글자를 쳤더니 상태바는
+    // `2:417` 인데 뷰는 1열이었다).
+    const kept_max = term.rt.editor_max_cols;
     const doc = term.rt.editor_doc orelse return;
 
     // **문서가 바뀌면 「선택 영역 내에서만」의 범위를 버린다**(§5.1). 굳혀 둔 offset 이 이제 다른
@@ -6930,6 +6980,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
         invalidateFoldDerived(self, term);
         term.rt.editor_first_col = kept_col;
         term.rt.editor_first_col_right = kept_col_right;
+        term.rt.editor_max_cols = maxColsAfterEdit(term, kept_max);
 
         // ⑸ **렌더 스냅숏.** 다음 프레임이 다시 굳힐 때까지 클릭이 답할 것이 없어야 한다 —
         // 옛 값을 남기는 것보다 "아직 없다"가 낫다(hit-test가 `len == 0`을 이미 그렇게 다룬다).
@@ -14559,7 +14610,9 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     if (term.rt.editor_hit_geom.content_width == 0) return error.SnapshotAlreadyEmpty;
     if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
     if (term.rt.editor_hit_geom.content_width != 0) return error.SnapshotNotCleared;
-    if (term.rt.editor_max_cols != 0) return error.MaxColsNotCleared;
+    // **상한은 안 버린다**(`maxColsAfterEdit`) — 스냅숏과 갈리는 자리다. 버리면 다음 프레임의
+    // `clampScrollToGeometry` 가 0 을 상한으로 믿어 가로를 되감고 막대까지 사라진다(DHS8).
+    if (term.rt.editor_max_cols == 0) return error.MaxColsThrownAway;
     if (term.rt.editor_first_col == 0) return error.HorizontalDidNotFollow;
 
     // ⑵ **스크롤한 채로 쳐도 왼쪽 끝으로 안 튄다.** 상한을 편집 전 값으로 안 두면 `max_col` 이 0 이
@@ -14573,7 +14626,9 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     // ⑶ **상한을 모르면 안 움직인다 — 왼쪽으로 튀지 않는다.** 앞 편집이 `max_cols` 를 이미 버렸고
     //    그 사이 프레임이 없으면 상한을 모른다. 그때 0 으로 clamp 하면 화면이 되감긴다.
     //    caret 을 **화면 밖**에 두어 clamp 갈래까지 실제로 지난다(안 그러면 「이미 보인다」에서 끝난다).
-    if (term.rt.editor_max_cols != 0) return error.MaxColsShouldBeStale;
+    //    **그 상태를 여기서 만든다** — 편집은 더 이상 상한을 안 버리므로(`maxColsAfterEdit`), 남는
+    //    「모른다」는 아직 **한 번도 안 센** 문서다(`kept == 0` 갈래).
+    term.rt.editor_max_cols = 0;
     term.rt.editor_first_col = 40;
     term.rt.editor_selection = editor_selection.Selection.at(5 + 350);
     if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
@@ -14599,6 +14654,166 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     term.rt.editor_selection = editor_selection.Selection.at(5 + 400);
     if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
     try testing.expectEqual(@as(u16, 7), term.rt.editor_first_col);
+}
+
+test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상한·막대가 산다 (렌더 경계)" {
+    // **노출이 옳아도 화면은 되감길 수 있다.** DHS7 은 편집 **직후의 상태**를 재고 거기서 끝난다 —
+    // 그런데 되감는 자리는 그 뒤였다: `appendPaneFrame` 이 그리기 직전에 `clampScrollToGeometry` 를
+    // 부르고, 그것이 방금 버려진 `max_cols`(=0)를 상한으로 믿어 가로를 0 으로 되돌렸다.
+    //
+    // **캡처가 먼저 잡았다**(2026-09-08): 415열 줄 끝에서 한 글자를 쳤더니 상태바는 `2:417` 인데
+    // 뷰는 1열이었다. 판정자 여덟이 전부 초록이었던 이유가 이 한 줄이다 — 아무도 **편집 뒤에
+    // 프레임을 그리지 않았다**. 그래서 이 판정자는 그 경계를 넘는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n"); // 긴 줄을 **첫 줄로 두지 않는다**(`line.start == 0` 이면 두 뜻이 겹친다)
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    // **세로로도 굴릴 수 있어야 한다** — 아래 「세로 위치도 안 버린다」가 세 줄짜리 문서에서는
+    // 공허하다(`first_line` 이 어차피 0 이라 버리든 말든 같다).
+    for (0..60) |_| try doc.appendSlice(allocator, "tail\n");
+    const term = try undoFixture(&fx, allocator, "dhs8.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 300)) return error.FixtureWidth;
+    if (term.rt.editor_max_cols == 0) return error.MaxColsNotMeasured;
+
+    // 줄 끝으로 **이동**해 가로가 따라오게 한다(제품 경로 — 여기서 값을 심으면 clamp 가 무엇을
+    // 되돌리는지 못 본다).
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
+    const scrolled = term.rt.editor_first_col;
+    if (scrolled == 0) return error.HorizontalDidNotFollow;
+
+    // 그 자리에서 한 글자 친다 — 편집이 `max_cols` 를 버린다.
+    const max_before = term.rt.editor_max_cols;
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (term.rt.editor_hit_geom.content_width != 0) return error.SnapshotNotCleared; // 스냅숏은 버린다
+    if (term.rt.editor_max_cols == 0) return error.MaxColsThrownAway; // 상한은 안 버린다
+    // **자란 만큼 따라온다** — 가장 긴 줄 끝에 한 글자를 쳤으니 상한이 한 열 늘어야 한다. 옛 값을
+    // 그냥 되돌려 놓기만 하면 막대가 실제보다 짧고, 끝까지 밀어도 마지막 글자가 안 보인다.
+    try testing.expectEqual(max_before + 1, term.rt.editor_max_cols);
+    if (term.rt.editor_first_col == 0) return error.SnappedBackToZeroByReveal;
+
+    // **여기가 이 판정자의 몫이다** — 그 다음 프레임.
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after.dl.deinit(allocator);
+    if (term.rt.editor_first_col == 0) return error.SnappedBackToZeroByFrameClamp;
+    try testing.expect(term.rt.editor_first_col >= scrolled);
+
+    // **막대도 산다 — 렌더까지 가서 잰다.** 상한이 0 이면 가로 막대가 통째로 사라지고, 그 막대는
+    // 본문 아래 여백에서 자리를 먹으므로 **글자마다 본문 높이가 출렁인다**(§4.1a). `maxColsForRender`
+    // 를 직접 부르면 그 함수 안의 `0 → null` 규칙을 뒤집은 변이가 산다(실측: K16) — 방금 그린
+    // 프레임이 실어 둔 막대를 본다.
+    if (term.rt.editor_horizontal_scrollbar == null) return error.HorizontalBarVanished;
+
+    // **줄 연산도 같은 자리를 지난다.** 타이핑(`insertText`)만 재면 `applyLineEdit` 쪽에서 같은
+    // 되감김이 되살아나도 아무도 못 잡는다 — 편집 경로 여섯이 `refreshAfterEdit` 하나를 지나는
+    // 것이 이 슬라이스의 전제이므로, 그 전제를 **둘째 경로로** 확인한다.
+    const before_indent = term.rt.editor_first_col;
+    if (!indentLines(fx.session, term, false)) return error.IndentRejected;
+    if (term.rt.editor_max_cols == 0) return error.MaxColsThrownAwayByLineEdit;
+    var after3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after3.dl.deinit(allocator);
+    if (term.rt.editor_first_col == 0) return error.LineEditSnappedBackToZero;
+    try testing.expect(term.rt.editor_first_col >= before_indent);
+
+    // **clamp 는 여전히 자기 일을 한다** — 상한 밖으로 밀어 두면 그리기 직전에 되돌린다. 되감기를
+    // 막는다고 clamp 를 통째로 재우면 이 단언이 잡는다.
+    term.rt.editor_first_col = chrome_editor.frame.max_first_col; // 상한 밖으로 밀어 둔다
+    var after2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after2.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_first_col < chrome_editor.frame.max_first_col);
+
+    // **짧은 줄에 쳐도 상한이 줄지 않는다.** caret 줄의 폭으로 **덮어쓰면** 긴 줄이 그대로인데도
+    // 상한이 몇 열로 주저앉아 막대가 거짓이 되고 가로 축이 사라진다 — `@max` 가 그 자리다.
+    const wide_max = term.rt.editor_max_cols;
+    term.rt.editor_selection = editor_selection.Selection.at(0); // 첫 줄 "head"
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(wide_max, term.rt.editor_max_cols);
+
+    // **caret 이 여럿이면 그 줄들을 다 센다.** primary 만 보면 다른 caret 이 **긴 줄**을 늘렸을 때
+    // 상한이 모자라 끝 글자가 막대 밖에 남는다.
+    //
+    // **긴 줄이 나머지(extra)가 되도록 자리를 고른다.** `selectionsForEdit` 은 **문서 순서에서
+    // 마지막**을 primary 로 삼으므로(그 함수 주석), 긴 줄 **뒤에** caret 을 둬야 긴 줄이 나머지로
+    // 내려간다 — 첫 줄에 두면 편집 뒤 primary 가 긴 줄 쪽이 되어 「primary 만 센다」 변이가 산다
+    // (실측: 변이 K4 가 1회차에서 그렇게 살았다. 픽스처가 두 뜻을 안 가른 자리다).
+    const long_line = doc_lines: {
+        const idx = term.rt.editor_doc.?.file.lines.lineAt(6);
+        break :doc_lines term.rt.editor_doc.?.file.lines.line(idx).?;
+    };
+    const extras = try allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(long_line.contentEnd()); // 긴 줄 끝 → 나머지가 된다
+    clearExtraSelections(fx.session, term); // 있던 것부터 거둔다(빈 슬라이스면 무동작)
+    term.rt.editor_extra_selections = extras; // 세션이 자기 allocator 로 거둔다(픽스처와 같은 것)
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.content.len); // 문서 끝(짧은 줄)
+    const before_multi = term.rt.editor_max_cols;
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (term.rt.editor_selection.?.focus <= long_line.contentEnd()) return error.PrimaryLandedOnLongLine;
+    try testing.expectEqual(before_multi + 1, term.rt.editor_max_cols);
+
+    // **반대 배치도 센다 — primary 의 줄이 긴 줄일 때.** 위 ⑹ 만 두면 「나머지만 세고 primary 는
+    // 건너뛴다」 변이가 산다(실측: K11 이 2회차에서 그렇게 살았다). caret 이 여럿일 때 **어느
+    // 하나만** 보는 구현은 배치를 뒤집으면 바로 드러난다.
+    const extras2 = try allocator.alloc(editor_selection.Selection, 1);
+    extras2[0] = editor_selection.Selection.at(0); // 첫 줄(짧다) → 문서 순서가 앞이라 나머지가 된다
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_extra_selections = extras2;
+    term.rt.editor_selection = editor_selection.Selection.at(long_line.contentEnd()); // primary 가 긴 줄
+    const before_primary = term.rt.editor_max_cols;
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(before_primary + 1, term.rt.editor_max_cols);
+
+    // **세로 위치도 안 버린다.** 가로를 되돌리는 그 자리(`refreshAfterEdit` ⑷)가 세로를 건드리면
+    // 글자를 칠 때마다 화면이 문서 맨 위로 튄다 — 가로 주석이 *"세로가 `first_line` 을 안 버리는
+    // 것과 같은 부류"* 라고 근거로 들고 있는데 **그 근거를 재는 판정자가 없었다**(적대적 검증
+    // 5회차 K27 이 그 공백을 드러냈다). caret 은 보이는 창 **안**에 둔다 — 안 그러면 노출이
+    // 움직이는 것이 맞아서 이 단언이 뜻을 잃는다.
+    //
+    // **세로를 지키는 자리는 여기가 아니다** — `restoreScrollAnchor` 가 편집 전 anchor 를 다시
+    // 세운다. 그래서 ⑷ 안에서 `first_line` 을 0 으로 만드는 변이는 그 복원에 덮여 **살아남는다**
+    // (K27b). 이 단언이 재는 것은 **결과**다: 어느 자리가 지키든 화면이 안 튀면 된다.
+    clearExtraSelections(fx.session, term);
+    var scrolled_v = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    scrolled_v.dl.deinit(allocator);
+    setEditorTop(fx.session, term, 20);
+    const kept_line = term.rt.editor_first_line;
+    if (kept_line == 0) return error.VerticalDidNotScroll;
+    const visible_line = term.rt.editor_doc.?.file.lines.line(kept_line + 1).?;
+    term.rt.editor_selection = editor_selection.Selection.at(visible_line.start);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(kept_line, term.rt.editor_first_line);
+
+    // **탭 폭은 렌더가 쓰는 그 값이어야 한다.** 상수를 읽으면 탭이 있는 문서에서 상한이 화면과
+    // 갈린다 — `ensureMaxCols` 가 같은 실수로 **8열(29%)** 모자랐던 자리를 doc 에 적어 두고 있다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_tab_width = 8;
+    term.rt.editor_max_cols = 5; // 탭 한 칸(8열)보다 작게 — 그래야 답이 탭 폭으로 갈린다
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.content.len);
+    if (!insertText(fx.session, term, "\t")) return error.InsertRejected;
+    try testing.expectEqual(@as(u32, 8), term.rt.editor_max_cols);
+
+    // **안 센 문서에는 상한을 지어내지 않는다**(`kept == 0`). caret 줄 하나로 채우면 막대가 그
+    // 줄 길이만큼만 생겨 **거짓 길이**가 된다 — 없는 편이 낫다.
+    term.rt.editor_max_cols = 0;
+    term.rt.editor_selection = editor_selection.Selection.at(long_line.contentEnd());
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_max_cols);
+
+    // **그리고 그때는 막대를 안 그린다** — 위 「막대가 산다」의 짝이다. 둘을 같이 재야 「상한이
+    // 있으면 막대가 있고, 없으면 없다」가 단언이 된다(`0 → null` 규칙을 지우는 변이가 여기서 죽는다).
+    var no_bar = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    no_bar.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar != null) return error.BarDrawnWithoutMaxCols;
 }
 
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {

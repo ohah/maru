@@ -341,6 +341,40 @@ test "정책 경계: 선택 동작도 host 가 «나르기만» 한다 (M9c)" {
     try std.testing.expectEqual(@as(usize, 1), count(bridge, "const a11y_action_select_to: u32 = 1 << 1;"));
 }
 
+test "정책 경계: 저전력은 host 가 «나르기만» 하고, 판정 기준선도 따라 움직인다 (M14a)" {
+    // **얼마로 낮출지는 코어가 든다.** 두 곳에서 각자 정하면 한쪽만 낮춰지고, 그 차이는
+    // 배터리로만 드러나 화면으로는 안 보인다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+
+    // 두 host 가 「저전력인가」를 싣고, 「몇 Hz 인가」를 코어에 묻는다.
+    try std.testing.expect(count(ios, "maru_mobile_set_low_power(") > 0);
+    try std.testing.expect(count(android, "maru_mobile_set_low_power(") > 0);
+    try std.testing.expect(count(ios, "maru_mobile_frame_target_hz()") > 0);
+    try std.testing.expect(count(android, "maru_mobile_frame_target_hz()") > 0);
+
+    // **낮추는 값을 host 가 안 적는다.** 15 를 손으로 적으면 코어와 갈린다.
+    try expectAbsentFromBody(ios, "- (void)reportLowPower {", "15");
+    try expectAbsentFromBody(java, "private void applyLowPower() {", "15");
+    try expectAbsentFromBody(android, "static void frameCallback(", "15");
+
+    // **판정 기준선도 지금 목표를 따라간다.** 상수에 못 박아 두면 저전력에서 설계대로 도는데도
+    // `MARU_PACE` 가 붉게 나온다(실측으로 잡았다 — 15Hz 로 잘 내려갔는데 FAIL 이었다).
+    try std.testing.expectEqual(@as(usize, 0), count(ios, "MARU_FRAME_PACE_MIN_MS"));
+    try std.testing.expectEqual(@as(usize, 0), count(android, "MARU_FRAME_PACE_MIN_MS"));
+    try std.testing.expect(count(ios, "MARU_FRAME_PACE_MIN_NOW_MS") > 0);
+    try std.testing.expect(count(android, "MARU_FRAME_PACE_MIN_NOW_MS") > 0);
+
+    // **저전력은 바뀔 때마다 온다** — 한 번 읽는 것만으로는 앱이 떠 있는 채로 켠 경우를 놓친다.
+    try std.testing.expect(count(ios, "NSProcessInfoPowerStateDidChangeNotification") > 0);
+    try expectPresentInBody(java, "protected void onResume() {", "applyLowPower();");
+}
+
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.
 ///
 /// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입

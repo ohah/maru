@@ -149,6 +149,38 @@ pub fn resetSystemAppearanceForTest() void {
 /// `font.follow-system` 이 켜져 있어도 파일 크기를 쓴다(모르는 값으로 화면을 바꾸지 않는다).
 var system_font_scale_milli: ?u32 = null;
 
+/// host 가 마지막으로 알려 준 **저전력 모드**. `null` 이면 아직 못 들었다 — 그때는 평소 주기다
+/// (모르는 값으로 화면을 느리게 하지 않는다. 테마·글자 배율과 같은 규율).
+var system_low_power: ?bool = null;
+
+/// 저전력 모드인지 host 가 알려 준다(iOS `isLowPowerModeEnabled` · Android `isPowerSaveMode`).
+/// **생성 직후 한 번, 그리고 바뀔 때마다**다 — 외관·글자 배율과 같은 계약이다.
+pub export fn maru_mobile_set_low_power(on: u32) void {
+    system_low_power = on != 0;
+}
+
+/// 지금 그릴 주기(Hz). **얼마로 낮출지는 여기서 정한다** — host 는 이 값을 OS 에 선언하기만 한다
+/// (iOS `preferredFramesPerSecond` · Android 는 이 값으로 vsync 를 솎는다). 두 곳에서 각자 정하면
+/// 한쪽만 낮춰지고, 그 차이는 배터리로만 드러나 화면으로는 안 보인다.
+///
+/// **낮추는 것은 그리는 주기 하나다.** 입력도 출력도 그대로 흐른다 — 터미널은 대부분의 시간이
+/// 정지 화면이라 체감이 적고, 이미 서 있는 「안 바뀐 프레임은 GPU 를 안 쓴다」와 결이 같다.
+/// 커서 깜빡임은 안 건드린다: 커서가 어디 있는지는 화면에서 그것으로만 말한다.
+pub export fn maru_mobile_frame_target_hz() u32 {
+    const low = system_low_power orelse false;
+    return if (low) frame_target_hz_low else frame_target_hz;
+}
+
+/// 평소 주기와 저전력 주기. **헤더가 단일 출처다**(`MARU_FRAME_TARGET_HZ`) — 여기 값은 그것을
+/// 베낀 것이고, 갈리면 두 host 가 서로 다른 주기로 돈다(경계 판정자가 둘을 견준다).
+const frame_target_hz: u32 = 30;
+const frame_target_hz_low: u32 = 15;
+
+/// 판정자용 — 「아직 못 들었다」로 되돌린다.
+pub fn resetLowPowerForTest() void {
+    system_low_power = null;
+}
+
 /// 시스템 글자 배율을 host 가 알려 준다(iOS Dynamic Type · Android `Configuration.fontScale`).
 /// **생성 직후 한 번, 그리고 바뀔 때마다**다 — 외관과 같은 계약이고 host 도 같은 콜백에서 부른다.
 ///

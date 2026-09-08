@@ -8171,6 +8171,42 @@ fn m9cRowIndex(screen_row_1based: u32) ?u32 {
     return null;
 }
 
+test "M14a 저전력: 그리는 주기를 «반으로» 낮춘다 — 모르면 안 낮춘다" {
+    // 배터리를 아끼겠다고 사용자가 이미 OS 에 대고 고른 것이라, 안 보는 앱은 그 뜻을 어긴다.
+    // **모르면 안 낮춘다** — 모르는 값으로 화면을 느리게 하지 않는다(테마·글자 배율과 같은 규율).
+    const T = std.testing;
+    bridge.resetLowPowerForTest();
+    defer bridge.resetLowPowerForTest();
+
+    const normal = bridge.maru_mobile_frame_target_hz();
+    try T.expect(normal > 0);
+
+    bridge.maru_mobile_set_low_power(1);
+    const low = bridge.maru_mobile_frame_target_hz();
+    try T.expect(low < normal);
+    // **반이다** — 「낮아지기만 하면 통과」를 막는다.
+    try T.expectEqual(normal / 2, low);
+
+    // 끄면 돌아온다.
+    bridge.maru_mobile_set_low_power(0);
+    try T.expectEqual(normal, bridge.maru_mobile_frame_target_hz());
+
+    // 「아직 못 들었다」도 평소 값이다.
+    bridge.resetLowPowerForTest();
+    try T.expectEqual(normal, bridge.maru_mobile_frame_target_hz());
+}
+
+test "M14a 저전력: 평소 주기는 «헤더가» 정한 그 값이다" {
+    // 두 곳에 숫자를 적으면 두 host 가 서로 다른 주기로 돌고, 그 차이는 배터리로만 드러난다.
+    const T = std.testing;
+    bridge.resetLowPowerForTest();
+    defer bridge.resetLowPowerForTest();
+    const abi = @cImport({
+        @cInclude("mobile_host_abi.h");
+    });
+    try T.expectEqual(@as(u32, abi.MARU_FRAME_TARGET_HZ), bridge.maru_mobile_frame_target_hz());
+}
+
 test "M9c 선택: 줄 단위 동작으로 «만들 수 있다»" {
     // 낭독기를 켜면 길게 누르고 끄는 손짓을 낭독기가 가로채므로, 이 길이 없으면 **선택을 아예
     // 못 만든다** — 복사 버튼은 보이는데 누를 것이 영영 안 생긴다.

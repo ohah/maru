@@ -1099,6 +1099,14 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 ///
 /// **`traitCollection` 의 것을 쓴다.** 창에 붙기 전에는 앱 전역 값이 아직 안 정해져 있고, 그때
 /// 읽은 값으로 화면을 정하면 나중에 바뀐다 — 외관을 `didMoveToWindow` 에서 읽는 것과 같은 이유다.
+/// 저전력 모드를 코어에 알린다(M14a). **얼마로 낮출지는 코어가 정한다** — 여기서는 「그런가」만
+/// 나르고, 아래에서 코어가 답한 주기를 OS 에 선언한다.
+- (void)reportLowPower {
+    maru_mobile_set_low_power(NSProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0);
+    // **선언은 그 자리에서 갱신한다** — 나중에 하면 저전력을 켠 뒤 한동안 예전 주기로 돈다.
+    if (_link) _link.preferredFramesPerSecond = (NSInteger)maru_mobile_frame_target_hz();
+}
+
 - (void)reportSystemFontScale {
     UIFontMetrics *m = [UIFontMetrics defaultMetrics];
     CGFloat scaled = [m scaledValueForValue:1000.0 compatibleWithTraitCollection:self.traitCollection];
@@ -1109,6 +1117,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     [super didMoveToWindow];
     [self reportSystemAppearance];
     [self reportSystemFontScale];
+    [self reportLowPower];
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
@@ -1122,6 +1131,12 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 - (instancetype)initWithFrame:(CGRect)f {
     self = [super initWithFrame:f];
     if (!self) return nil;
+    // **저전력은 바뀔 때마다 온다** — 창에 붙을 때 한 번 읽는 것만으로는 앱이 떠 있는 채로 켠
+    // 경우를 놓친다(외관·글자 크기와 같은 자리다).
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(reportLowPower)
+                                               name:NSProcessInfoPowerStateDidChangeNotification
+                                             object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(maruKeyboardFrameChanged:)
                                                name:UIKeyboardWillChangeFrameNotification
@@ -1190,7 +1205,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         _link.preferredFrameRateRange =
             CAFrameRateRangeMake(MARU_FRAME_TARGET_HZ, MARU_FRAME_TARGET_HZ, MARU_FRAME_TARGET_HZ);
     } else {
-        _link.preferredFramesPerSecond = MARU_FRAME_TARGET_HZ;
+        _link.preferredFramesPerSecond = (NSInteger)maru_mobile_frame_target_hz();
     }
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
     // **제스처 인식기를 안 쓴다.** 인식되는 순간 UIKit 이 touchesMoved 를 끊어(cancel) 길게
@@ -1234,9 +1249,11 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     }
     _paceDone = YES;
     double med = _paceMs[MARU_FRAME_PACE_SAMPLES / 2];
+    // **기준선은 «지금» 목표다**(M14a) — 저전력이면 코어가 더 낮은 값을 답하고, 상수와 견주면
+    // 설계대로 도는데도 붉게 나온다.
     NSLog(@"MARU_PACE median_ms=%.2f n=%d target=%.2f verdict=%s", med, MARU_FRAME_PACE_SAMPLES,
-          MARU_FRAME_TARGET_MS,
-          (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS) ? "PASS" : "FAIL");
+          MARU_FRAME_PACE_TARGET_MS,
+          (med >= MARU_FRAME_PACE_MIN_NOW_MS && med <= MARU_FRAME_PACE_MAX_NOW_MS) ? "PASS" : "FAIL");
 }
 
 - (void)tick {

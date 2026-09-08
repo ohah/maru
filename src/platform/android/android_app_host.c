@@ -944,9 +944,12 @@ static void drawFrame(void) {
             // **계측은 동작을 바꾸지 않는다.** 예전에는 여기서 앱을 30Hz 로 전환해, 측정의
             // 부산물이 제품 동작이 됐다(그리고 iOS 엔 그 전환이 없어 두 플랫폼이 달랐다).
             double med = g.pace_ms[MARU_FRAME_PACE_SAMPLES / 2];
-            int paced = (med >= MARU_FRAME_PACE_MIN_MS && med <= MARU_FRAME_PACE_MAX_MS);
+            // **기준선은 «지금» 목표다**(M14a) — 저전력이면 코어가 더 낮은 값을 답하고, 상수와
+            // 견주면 설계대로 도는데도 붉게 나온다.
+            double want = MARU_FRAME_PACE_TARGET_MS;
+            int paced = (med >= MARU_FRAME_PACE_MIN_NOW_MS && med <= MARU_FRAME_PACE_MAX_NOW_MS);
             LOGI("MARU_PACE median_ms=%.2f n=%d target=%.2f verdict=%s",
-                 med, MARU_FRAME_PACE_SAMPLES, MARU_FRAME_TARGET_MS, paced ? "PASS" : "FAIL");
+                 med, MARU_FRAME_PACE_SAMPLES, want, paced ? "PASS" : "FAIL");
         }
     }
     g.frames++;
@@ -1353,6 +1356,16 @@ Java_dev_maru_MaruActivity_nativeSystemAppearance(JNIEnv *env, jclass cls, jint 
     (void)env;
     (void)cls;
     maru_mobile_set_system_appearance(is_dark != 0 ? 1u : 0u);
+}
+
+/// 저전력 모드(M14a). **판단은 코어가 한다** — 여기서는 그런가만 나른다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeLowPower(JNIEnv *env, jclass cls, jint on) {
+    (void)env;
+    (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_set_low_power(on != 0 ? 1u : 0u);
+    pthread_mutex_unlock(&g_bridge_lock);
 }
 
 /// 그 줄에서 할 수 있는 따로 동작(M9c). 비트 or.
@@ -2834,13 +2847,16 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
 // **경과 시간으로 정한다. vsync 를 세지 않는다.** 전에는 "한 번 걸러" 그렸는데, 그건 30Hz 가
 // 아니라 **패널 주사율의 절반**이다 — 90Hz 폰에서 45, 120Hz 에서 60 이 나온다. comfort 값을
 // 배터리·발열 때문에 골라 놓고 고주사율 기기에서 두 배로 그리고 있었다(에뮬레이터가 60Hz 라
-// 안 드러났다). `MARU_PACE` 의 PASS 창(`MARU_FRAME_PACE_MIN_MS`~`MAX_MS`)도 120Hz 에서는
+// 안 드러났다). `MARU_PACE` 의 PASS 창(`MARU_FRAME_PACE_MIN_NOW_MS`~`MAX_NOW_MS`)도 120Hz 에서는
 // 16.7ms 로 떨어져 실패한다 — 숫자는 헤더가 소유하므로 여기 다시 적지 않는다.
 static void frameCallback(int64_t frame_time_ns, void *data) {
     // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
     // 사용자에게 보인다. iOS 도 같은 값이다(`preferredFrameRateRange`). 데스크톱은 60 이라
     // **다르다** — 데스크톱은 hover/scroll 지연을 우선하고 전력 여유가 있다.
-    const int64_t target_ns = MARU_FRAME_TARGET_NS; // 값은 ABI 헤더가 소유한다
+    // **저전력이면 코어가 더 낮은 값을 답한다**(M14a). 얼마로 낮출지는 여기서 안 정한다 —
+    // 매 프레임 물어도 되는 값이라(싸다) 바뀌는 순간을 따로 알 필요가 없다.
+    const unsigned int hz = maru_mobile_frame_target_hz();
+    const int64_t target_ns = (hz > 0) ? (1000000000LL / (int64_t)hz) : MARU_FRAME_TARGET_NS;
     // 패널 주기를 재서 문턱을 반 주기 당긴다. 정확히 `target_ns` 를 요구하면 vsync 지터로
     // 한 주기를 통째로 놓쳐 **실효 주기가 절반으로 떨어졌다 돌아오는** 널뛰기가 된다.
     const int64_t vsync_dt = (g.last_vsync_ns != 0) ? frame_time_ns - g.last_vsync_ns : 0;

@@ -3526,3 +3526,66 @@ test "DCOL11: 오버레이를 닫아도(⌘G 항해 중) 열을 넘기면 목록
     try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
     try testing.expectEqual(idle, fx.session.chrome_host.find.match_count);
 }
+
+// ── DSB: 비교 뷰의 상태바 커서 위치 ────────────────────────────────────────────
+//
+// 계약은 [상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」가 소유한다.
+
+test "DSB1: 줄은 gutter 가 그리는 파일 번호이고, 짝맞춤 빈 행에는 번호가 없다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 오른쪽에만 있는 줄 — 왼쪽 그 자리는 짝맞춤 빈 행이라 번호가 없다.
+    var entry = testEntry("keep\ntail\n", "keep\nadded\ntail\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "added") orelse return error.NoRow;
+    try testing.expectEqual(@as(?u32, null), st.left_numbers[i]); // 픽스처 자기 검증
+
+    // ⑴ **줄은 행 첨자가 아니라 파일 번호다.** "added" 는 오른쪽 파일의 2번째 줄이다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 0 }) };
+    const r = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expectEqual(editor_ops.DiffSide.right, r.side);
+    try testing.expectEqual(st.right_numbers[i], r.line);
+    try testing.expectEqual(@as(?u32, 2), r.line);
+    try testing.expectEqual(@as(usize, 1), r.column);
+    try testing.expect(!r.truncated);
+
+    // ⑵ **짝맞춤 빈 행에는 번호가 없다** — 앞뒤 줄에서 빌려 오지 않는다.
+    fx.term.rt.editor_diff_selection.?.side = .left;
+    const l = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expectEqual(editor_ops.DiffSide.left, l.side);
+    try testing.expectEqual(@as(?u32, null), l.line);
+    try testing.expectEqual(@as(usize, 1), l.column);
+
+    // ⑶ **행 첨자와 파일 번호는 실제로 다르다** — 그 둘이 같으면 이 판정자가 아무것도 안 지킨다.
+    const tail = rowIndexOf(st.left_texts, "tail") orelse return error.NoRow;
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = tail, .byte = 0 }) };
+    const t2 = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expectEqual(@as(?u32, 2), t2.line); // 왼쪽 파일에서는 2번째 줄
+    try testing.expectEqual(@as(usize, 2), tail); // 그런데 행 첨자는 2다 → 1-based 라 갈린다
+}
+
+test "DSB2: 열은 그래핌 클러스터 1-based 이고 탭은 한 글자다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 탭과 CJK — 렌더의 열(탭이 탭스톱까지, CJK 가 두 칸)을 쓰면 여기서 갈린다.
+    var entry = testEntry("keep\nxx\n", "keep\n\t가나\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "\t가나") orelse return error.NoRow;
+
+    // 탭(1글자) + '가'(1글자) 뒤 = **3번째 글자**. 표시 열이라면 탭 4 + 가 2 = 7 이다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 1 + 3 }) };
+    const p = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 3), p.column);
+
+    // 행 머리는 1 이다(1-based).
+    fx.term.rt.editor_diff_selection.?.sel.focus.byte = 0;
+    try testing.expectEqual(@as(usize, 1), (editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos).column);
+
+    // **caret 이 없거나 비교가 아니면 답하지 않는다.**
+    fx.term.rt.editor_diff_selection = null;
+    try testing.expectEqual(@as(?@TypeOf(p), null), editor_ops.diffCursorPosition(fx.term));
+}

@@ -205,6 +205,40 @@ test "정책 경계: 시스템 글자 배율은 «실어 나르기만» 한다 (
     try expectPresentInBody(java, "protected void onCreate(Bundle state) {", "applySystemFontScale();");
 }
 
+test "정책 경계: 새 출력 낭독은 host 가 «말하기만» 한다 (M9a)" {
+    // **무엇을 언제 읽을지는 코어가 정한다.** host 가 그 판단을 나눠 가지면 두 플랫폼이 다른 때에
+    // 다른 것을 읽고, 그 차이는 **소리로만 드러나** 화면으로는 영영 안 보인다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+
+    // 두 host 가 코어에 묻고 그 답을 그대로 넘긴다.
+    try std.testing.expectEqual(@as(usize, 1), count(ios, "maru_mobile_a11y_take_announcement("));
+    try std.testing.expectEqual(@as(usize, 1), count(android, "maru_mobile_a11y_take_announcement("));
+    try std.testing.expect(count(ios, "UIAccessibilityAnnouncementNotification") > 0);
+    try std.testing.expect(count(java, "announceForAccessibility") > 0);
+
+    // **정책이 host 로 새지 않았다.** 상한도 기다림도 「무엇을 읽을지」도 여기 있으면 안 된다.
+    for ([_][]const u8{ ios, java, android }) |host| {
+        try std.testing.expectEqual(@as(usize, 0), count(host, "too much"));
+        try std.testing.expectEqual(@as(usize, 0), count(host, "출력이 많"));
+    }
+    try expectAbsentFromBody(android, "static void drainA11yAnnouncement(void) {", "for (");
+    // **낭독기가 켜졌는지도 host 가 안 묻는다.** 두 OS 다 꺼져 있으면 no-op 이라 물을 필요가
+    // 없는데, 한쪽만 물으면 「iOS 만 안 읽는다」 같은 결함이 **소리로만** 드러난다.
+    try std.testing.expectEqual(@as(usize, 0), count(ios, "UIAccessibilityIsVoiceOverRunning"));
+    try std.testing.expectEqual(@as(usize, 0), count(java, "isTouchExplorationEnabled"));
+    try expectAbsentFromBody(java, "public static void a11yAnnounce(", "length()");
+
+    // **절전 게이트 «앞» 이다.** 뒤에 두면 화면이 안 바뀐 프레임에서 말이 안 나가는데, 잠잠해졌다는
+    // 판정이 곧 「읽을 때가 됐다」라서 하필 그 프레임이 절전에 걸려 영영 안 읽힌다.
+    try expectPrecedesInSameBody(android, "drainA11yAnnouncement();", "if (!frame_changed && g.pace_done)");
+}
+
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.
 ///
 /// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입

@@ -136,6 +136,7 @@ static unsigned long long nowMs(void) {
 
 static void drainHostKeyDecision(void);
 static void noteA11yChange(void); // 서술자 묶음이 바뀌면 TalkBack 에 알린다(M9)
+static void drainA11yAnnouncement(void); // 새 출력을 소리로 알린다(M9a) — drawFrame 이 먼저다
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 // **컬러 아틀라스도 원본을 들고 있는다**(글자 아틀라스의 `g_glyph_px` 와 같은 이유·같은 격자).
@@ -819,6 +820,10 @@ static void drawFrame(void) {
     // 섞이면 거짓으로 붉어진다. 그 측정은 시작할 때 표본을 다 채우면 끝나므로(`pace_done`), 그
     // 뒤부터 쉰다 — 판정자도 살고 테스트 전용 스위치도 필요 없다.
     noteA11yChange();
+    // **소리로 알리는 것은 절전 게이트 «앞» 이다**(M9a). 아래 조기 return 뒤에 두면 화면이 안
+    // 바뀐 프레임에서 말이 안 나간다 — 잠잠해졌다는 판정이 곧 「읽을 때가 됐다」이므로, 하필 그
+    // 프레임이 절전에 걸려 영영 안 읽히게 된다(서술자 알림을 여기 둔 것과 같은 이유다).
+    drainA11yAnnouncement();
     if (!frame_changed && g.pace_done) {
         g.last_ms = 0;  // 다음에 그린 프레임이 «쉰 만큼» 을 간격으로 세지 않게(MARU_PACE)
         g.idle_skips++;
@@ -1448,6 +1453,41 @@ static void noteA11yChange(void) {
     // 처음에는 이 한 줄이 빠져 있었고, 그러면 그리는 스레드가 JVM 에 붙은 채로 남는다).
     (*vm)->DetachCurrentThread(vm);
     LOGI("MARU_A11Y elements=%u", n);
+}
+
+/// **새 출력을 소리로 알린다**(M9a). 무엇을 언제 읽을지는 **전부 코어가 정한다** — 여기서는
+/// 가져와서 Java 로 넘기기만 한다(`View.announceForAccessibility`). 가져가면 사라지므로 두 번
+/// 읽히지 않는다. `noteA11yChange` 와 같은 자물쇠 규율이다: **재는 동안만 잠그고 Java 를 부를
+/// 때는 놓는다**(락을 쥔 채 JNI 로 올라가면 그쪽이 다시 내려올 때 맞물린다).
+static void drainA11yAnnouncement(void) {
+    if (!g_activity_cls || !g_app) return;
+    char say[4096];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long said = maru_mobile_a11y_take_announcement(say, sizeof say);
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (said == 0) return;
+    // **글자는 안 남긴다** — 터미널 출력에는 비밀이 섞인다. 길이만 남겨도 「나갔나」는 알 수 있고,
+    // 그것이 이 축에서 눈으로 볼 수 있는 유일한 신호다(소리는 이 환경에서 못 잡는다).
+    LOGI("MARU_A11Y announce bytes=%lu", said);
+
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    // **modified UTF-8 함정을 피한다** — `NewStringUTF` 는 4바이트 UTF-8(이모지)에서 깨진다.
+    // 서술자 이름과 같은 길을 쓴다.
+    jsize units = 0;
+    static jchar utf16[4096];
+    units = utf8ToUtf16(say, said, utf16, (jsize)(sizeof utf16 / sizeof utf16[0]));
+    if (units > 0) {
+        jstring text = (*env)->NewString(env, utf16, units);
+        if (text) {
+            jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "a11yAnnounce",
+                                                    "(Ljava/lang/String;)V");
+            if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m, text);
+            (*env)->DeleteLocalRef(env, text);
+        }
+    }
+    (*vm)->DetachCurrentThread(vm);
 }
 
 // ── 접근성 어댑터 (M9) ─────────────────────────────────────────────────────

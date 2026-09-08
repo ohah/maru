@@ -508,6 +508,21 @@ public class MaruActivity extends android.app.NativeActivity {
      *  이 새 `inputType` 으로 다시 불린다). UI 스레드에서 해야 한다. */
     /** 네이티브가 부른다 — 키보드를 **다시** 올린다(사용자가 내렸을 수 있다). 아래 인스턴스
      *  `showKeyboard` 는 시작 때 한 번 부르는 것이고, 이쪽은 편집이 시작될 때마다다. */
+    /** 네이티브가 부른다 — **새 출력을 소리로 알린다**(M9a).
+     *
+     *  무엇을 언제 읽을지는 코어가 정하고 여기서는 말하기만 한다. `announceForAccessibility` 는
+     *  TalkBack 이 꺼져 있으면 아무 일도 안 하므로 여기서 따로 묻지 않는다 — 물어서 거르면 그
+     *  판단이 두 자리(iOS·여기)에 생긴다. UI 스레드에서 해야 한다. */
+    public static void a11yAnnounce(final String text) {
+        final MaruActivity a = current;
+        if (a == null || a.input == null || text == null || text.isEmpty()) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                a.input.announceForAccessibility(text);
+            }
+        });
+    }
+
     public static void raiseKeyboard() {
         final MaruActivity a = current;
         if (a == null) return;

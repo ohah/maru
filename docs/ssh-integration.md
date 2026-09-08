@@ -52,7 +52,7 @@
 
 **같은 기전이 원격 에이전트 알림도 죽인다**(2026-08-29 실측). ssh 가 `TERM_PROGRAM` 을 안 넘겨
 데스크톱 알림 식별값이 원격에 도달하지 않기 때문이다 — 그 값의 단일 출처는
-[터미널 호환성/보안 정책](terminal-compatibility-policy.md) «데스크톱 알림 식별» 이고, 원격에서 무엇을
+[터미널 호환성/보안 정책](terminal-compatibility-policy.md) «자기 신원» 이고, 원격에서 무엇을
 설정해야 하는지는 [agent-hooks.md](agent-hooks.md) §11 이 소유한다. **`COLORTERM` 과 달리 서버 협조가
 필요 없다** — 원격 provider 설정에 채널을 명시하면 끝난다.
 

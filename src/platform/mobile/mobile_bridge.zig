@@ -3867,9 +3867,19 @@ fn resetAtlasIfBakeSizeChanged() void {
 }
 
 pub export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
+    // **격자가 바뀐 프레임은 «바뀐 프레임» 이다.** 다음 프레임의 quad 가 지난 것과 바이트까지
+    // 같아도 **샘플링하는 텍스처가 다르다** — host 가 그 자리에서 아틀라스를 다시 구웠기
+    // 때문이다. 그것을 안 실으면 M14 의 「안 바뀌면 GPU 를 안 쓴다」가 새 아틀라스를 **다음
+    // 입력이 올 때까지** 안 보여 준다(정지 화면에서 글자 크기를 바꾸면 그대로 멈춰 보인다).
+    //
+    // **판단은 코어가 한다** — host 가 「다시 그려라」를 스스로 정하면 두 플랫폼이 갈린다.
+    if (cell_w != atlas_cell_w or cell_h != atlas_cell_h) atlas_geometry_changed = true;
     atlas_cell_w = cell_w;
     atlas_cell_h = cell_h;
 }
+
+/// 위에서 세우고 `noteFrameChanged` 가 한 번 쓰고 내린다.
+var atlas_geometry_changed: bool = false;
 
 /// 굵게(1)·기울임(2) 비트. **Android `Typeface` 상수와 같은 값**이라 host 가 그대로 넘긴다
 /// (0=NORMAL·1=BOLD·2=ITALIC·3=BOLD_ITALIC). iOS 는 이 비트로 번들 폰트 파일을 고른다.
@@ -7862,7 +7872,10 @@ fn noteFrameChanged() void {
     // **바이트로 견준다.** `MaruQuad` 는 `extern struct` 라 패딩 없는 평평한 값이고, 그래서
     // 「같은 그림인가」가 「같은 바이트인가」와 정확히 같은 물음이 된다(`std.mem.eql` 은 구조체에
     // `!=` 를 못 쓴다).
-    frame_changed = now.len != before.len or
+    // **한 번만 쓴다.** 안 내리면 그 뒤 모든 프레임이 「바뀜」이 돼 절전이 통째로 죽는다.
+    const geometry_changed = atlas_geometry_changed;
+    atlas_geometry_changed = false;
+    frame_changed = geometry_changed or now.len != before.len or
         !std.mem.eql(u8, std.mem.sliceAsBytes(now), std.mem.sliceAsBytes(before));
     if (!frame_changed) return;
     // 바뀐 프레임만 기억한다 — 안 바뀌었으면 지난 것이 이미 그 값이다.

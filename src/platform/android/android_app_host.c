@@ -112,7 +112,8 @@ static struct {
 // 체인은 앱 수명 동안 하나면 된다. 창이 없을 때는 drawFrame 이 알아서 쉰다.
 static int g_chor_started = 0;
 static struct android_app *g_app = NULL;
-static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
+static void growAtlas(struct android_app *app);   // drawFrame 이 먼저라 선언이 필요하다
+static void rebakeAtlas(struct android_app *app);  // 같은 이유
 static void recreateVulkan(struct android_app *app);
 // 정의는 아래고 프레임 경로가 먼저 부른다 — 선언이 없으면 implicit declaration 이다.
 static void drainConfigWrite(struct android_app *app);
@@ -147,7 +148,6 @@ static uint8_t *g_color_px = NULL;
 // 아직 다시 굽지 않으므로 `font.size` 를 키우면 실제로 갈린다).
 static unsigned int g_baked_cell_w = 0;
 static unsigned int g_baked_cell_h = 0;
-static unsigned int g_stale_cell_logged = 0;  // 「어긋났다」를 이미 남긴 크기(같은 줄을 30Hz 로 안 찍는다)
 static unsigned long long g_a11y_shape = 0; // 지난 프레임 서술자 «생김새» 지문(M9)
 static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
@@ -738,19 +738,14 @@ static void drawFrame(void) {
     // **아틀라스 성장은 밖에 둔다.** 굽기는 글자마다 `vkQueueWaitIdle` 로 GPU 를 기다리는데,
     // 그 동안 자물쇠를 쥐고 있으면 **타이핑이 GPU 를 기다리게 된다**. 성장이 만지는 등록부·
     // 미스 목록은 입력 스레드가 안 건드리므로 밖에 둬도 된다.
-    pthread_mutex_lock(&g_bridge_lock);
-    // **다시 굽는 길이 아직 없다**(M13a — Vulkan 이미지를 다시 만들어야 한다). 그러니 어긋난
-    // 사실이라도 **읽히게** 남긴다: 안 남기면 「설정에서 글자를 키웠는데 흐리다」가 원인 없는
-    // 증상으로만 온다. 같은 크기로는 한 번만 찍는다(프레임마다 찍으면 30Hz 로 로그를 채운다).
+    // **굽는 크기가 어긋나면 다시 굽는다 — `build` 보다 먼저**(M13b, iOS 와 같은 규율).
+    // 다시 구우면 텍스처를 새로 만들어 자라난 글자의 그림이 사라지는데, 등록부를 비우는 것은
+    // `maru_mobile_build` 안의 `resetAtlasIfBakeSizeChanged` 다 — 뒤에 두면 그 프레임이
+    // 「등록은 있는데 그림은 없는」 칸을 그린다.
     //
-    // **자물쇠 «안» 이다** — 이 값은 `font.size` 에서 나오고 설정 쓰기는 이 자물쇠를 쥐고 돈다.
-    {
-        unsigned int want_cell = maru_mobile_atlas_cell_h();
-        if (g_baked_cell_h && want_cell != g_baked_cell_h && want_cell != g_stale_cell_logged) {
-            LOGI("MARU_ATLAS stale baked=%u want=%u (android rebake pending)", g_baked_cell_h, want_cell);
-            g_stale_cell_logged = want_cell;
-        }
-    }
+    // **자물쇠 밖이다.** 굽기는 글자마다 GPU 를 기다리므로, 성장과 같은 이유로 밖에 둔다.
+    if (g_app) rebakeAtlas(g_app);
+    pthread_mutex_lock(&g_bridge_lock);
     struct timespec fts;
     clock_gettime(CLOCK_MONOTONIC, &fts);
     unsigned int n = maru_mobile_build(lw, lh,
@@ -2495,6 +2490,78 @@ static int uploadSlot(VkImage target, uint32_t col, uint32_t row,
     vkDestroyBuffer(g.dev, stage, NULL);
     vkFreeMemory(g.dev, mem, NULL);
     return 1;
+}
+
+// **셀 크기가 바뀌면 아틀라스를 통째로 다시 굽는다**(M13b). 설정에서 글자를 키우거나 시스템
+// 접근성 글자 배율이 바뀌면 코어가 원하는 셀이 커지는데, 그때 옛 격자에 계속 구우면 그 그림을
+// 늘려 써서 흐려진다(M13a 가 잰 그 흐림이다).
+//
+// **iOS 보다 할 일이 많다.** 저쪽은 `MTLTexture` 를 새로 만들어 ivar 에 갈아 끼우면 끝이지만,
+// Vulkan 은 이미지·뷰·메모리를 놓고 다시 만든 뒤 **디스크립터까지 다시 써야** 한다 — 안 쓰면
+// 셰이더가 파괴된 뷰를 샘플링한다. 그리고 그리는 중에 놓으면 안 되므로 `vkDeviceWaitIdle` 로
+// in-flight 프레임을 먼저 비운다(30Hz 에서 한 프레임 값이고, 셀이 바뀔 때만 한 번 돈다).
+static void rebakeAtlas(struct android_app *app) {
+    if (!g.dev || !g_baked_cell_h) return;   // 아직 한 번도 안 구웠다 — 첫 굽기는 INIT_WINDOW 것이다
+    unsigned int want = maru_mobile_atlas_cell_h();
+    if (want == g_baked_cell_h) return;
+    LOGI("MARU_ATLAS rebake cell=%u→%u", g_baked_cell_h, want);
+
+    uint8_t *px = NULL;
+    uint32_t gw = 0, gh = 0;
+    if (!rasterizeAtlasOnDevice(app, &px, &gw, &gh)) {
+        // **실패하면 코어의 격자를 되돌린다.** 굽기는 시작하자마자 `maru_mobile_atlas_geometry`
+        // 로 새 격자를 알리므로, 여기서 그냥 나가면 코어는 새 격자를, 텍스처는 옛 격자를 믿는다
+        // — 자라는 글자가 슬롯보다 크게 구워져 잘린다.
+        maru_mobile_atlas_geometry(g_baked_cell_w, g_baked_cell_h);
+        LOGI("atlas_rebake_failed");
+        return;
+    }
+
+    // **그리는 것이 끝난 뒤에 놓는다.** 새 그림을 손에 쥔 다음에 기다리는 이유는, 굽기가
+    // 실패하면 기다릴 필요조차 없기 때문이다.
+    vkDeviceWaitIdle(g.dev);
+
+    free(g_glyph_px);
+    g_glyph_px = px;
+    g_gw = gw;
+    g_gh = gh;
+    // 이모지 원본은 **버린다** — 격자가 달라져 옛 픽셀이 엉뚱한 칸을 가리킨다. 등록부도 같은
+    // 프레임의 `build` 가 비우므로(`resetAtlasIfBakeSizeChanged`) 보이던 이모지는 다시 구워진다.
+    free(g_color_px);
+    g_color_px = calloc((size_t)g_gw * g_gh * 4, 1);
+    g_baked_cell_w = maru_mobile_atlas_cell_w();
+    g_baked_cell_h = maru_mobile_atlas_cell_h();
+
+    if (g.glyph_view) vkDestroyImageView(g.dev, g.glyph_view, NULL);
+    if (g.glyph_image) vkDestroyImage(g.dev, g.glyph_image, NULL);
+    if (g.glyph_mem) vkFreeMemory(g.dev, g.glyph_mem, NULL);
+    g.glyph_view = VK_NULL_HANDLE; g.glyph_image = VK_NULL_HANDLE; g.glyph_mem = VK_NULL_HANDLE;
+    if (g.color_view) vkDestroyImageView(g.dev, g.color_view, NULL);
+    if (g.color_image) vkDestroyImage(g.dev, g.color_image, NULL);
+    if (g.color_mem) vkFreeMemory(g.dev, g.color_mem, NULL);
+    g.color_view = VK_NULL_HANDLE; g.color_image = VK_NULL_HANDLE; g.color_mem = VK_NULL_HANDLE;
+
+    uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM,
+                  &g.glyph_view, &g.glyph_image, &g.glyph_mem);
+    g.glyph_w = g_gw; g.glyph_h = g_gh;
+    if (g_color_px)
+        uploadTexture(g_color_px, g_gw, g_gh, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                      &g.color_view, &g.color_image, &g.color_mem);
+
+    // **디스크립터를 다시 쓴다** — 빈 바인딩은 검증 계층이 막으므로 없으면 아이콘 뷰로 채운다
+    // (`initVulkan` 과 같은 규칙이다).
+    VkDescriptorImageInfo dii[2] = {
+        {g.sampler, g.glyph_view ? g.glyph_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g.sampler, g.color_view ? g.color_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet wds[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 0,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 3,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1]}};
+    vkUpdateDescriptorSets(g.dev, 2, wds, 0, NULL);
+    // **다시 그리라고 여기서 말하지 않는다.** 「격자가 바뀐 프레임은 바뀐 프레임」은 코어가
+    // 안다(`maru_mobile_atlas_geometry` 가 세우고 `frame_changed` 가 싣는다) — host 가 각자
+    // 정하면 두 플랫폼이 갈린다.
 }
 
 // **아틀라스를 키운다.** 텍스처를 다시 만들지 않고 그 셀 자리에만 복사한다 —

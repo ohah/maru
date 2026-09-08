@@ -126,8 +126,15 @@ test "정책 경계: 굽는 셀은 코어가 정하고, 다시 굽기는 «build
     // iOS 는 첫 굽기가 프레임보다 앞서 **다시** 굽는다 — 그 자리가 `build` 앞이어야 한다.
     try expectPrecedesInSameBody(ios, "!= _bakedCellH", "maru_mobile_build(");
 
-    // Android 는 배율을 먼저 알므로 **첫 굽기 앞에서** 알린다(다시 굽는 길이 아직 없다 — M13a).
+    // Android 는 배율을 먼저 알므로 **첫 굽기 앞에서** 알린다.
     try expectPrecedesInSameBody(android, "maru_mobile_set_render_scale(", "!g_glyph_px && !rasterizeAtlasOnDevice(");
+    // 그리고 **다시 굽는 것도 `build` 앞이다**(M13b) — iOS 와 같은 규율이다.
+    try expectPrecedesInSameBody(android, "rebakeAtlas(g_app)", "maru_mobile_build(");
+
+    // **「다시 그려라」는 host 가 정하지 않는다.** 격자가 바뀐 프레임을 「바뀐 프레임」으로 세는
+    // 것은 코어의 판단이다(`maru_mobile_atlas_geometry`) — host 가 각자 프레임 카운터를 되돌리면
+    // 두 플랫폼이 갈리고, 그 되돌림이 페이싱 측정·첫 프레임 로그까지 건드린다.
+    try expectAbsentFromBody(android, "static void rebakeAtlas(", "g.frames = 0");
 
     // **자라는 글자는 «서 있는 텍스처의 격자» 에 굽는다 — 코어가 원하는 크기가 아니라.**
     // 코어는 설정·배율이 바뀌면 곧바로 새 크기를 답하는데, 텍스처는 다시 굽기 전까지 옛 격자다.

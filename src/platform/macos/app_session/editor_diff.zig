@@ -3589,3 +3589,48 @@ test "DSB2: 열은 그래핌 클러스터 1-based 이고 탭은 한 글자다" {
     fx.term.rt.editor_diff_selection = null;
     try testing.expectEqual(@as(?@TypeOf(p), null), editor_ops.diffCursorPosition(fx.term));
 }
+
+test "DSB4: 상태바 글자가 `R 2:1`·`L -:1`·`+` 를 그대로 낸다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var buf: [48]u8 = undefined;
+    // **형식을 함수로 꺼내 두지 않으면 이 넷을 못 잰다** — 트리 항목은 id 와 사각만 든다.
+    //    1회차에서 `L`/`R` 을 지우거나 맞바꾸거나 빈 행의 `-` 를 `0` 으로 바꾼 변이가 다 살았다.
+    try testing.expectEqualStrings("R 2:1", editor_ops.formatDiffCursor(&buf, .{ .side = .right, .line = 2, .column = 1, .truncated = false }).?);
+    try testing.expectEqualStrings("L 2:1", editor_ops.formatDiffCursor(&buf, .{ .side = .left, .line = 2, .column = 1, .truncated = false }).?);
+    try testing.expectEqualStrings("L -:1", editor_ops.formatDiffCursor(&buf, .{ .side = .left, .line = null, .column = 1, .truncated = false }).?);
+    try testing.expectEqualStrings("R 9:120+", editor_ops.formatDiffCursor(&buf, .{ .side = .right, .line = 9, .column = 120, .truncated = true }).?);
+    try testing.expectEqualStrings("R -:3+", editor_ops.formatDiffCursor(&buf, .{ .side = .right, .line = null, .column = 3, .truncated = true }).?);
+
+    // **ASCII 뿐이다** — 상태바의 잘림 가드가 «byte 수 = 셀 수» 를 전제한다.
+    const s = editor_ops.formatDiffCursor(&buf, .{ .side = .right, .line = 12345, .column = 678, .truncated = false }).?;
+    for (s) |c| try testing.expect(c < 0x80);
+}
+
+test "DSB5: 열 텍스트·행 첨자·view 를 자기 것으로 본다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // **좌우 같은 행의 길이를 갈라 둔다** — 같으면 「자기 열을 읽는다」와 「반대 열을 읽는다」가
+    //    같은 답을 낸다(1회차 V10 이 그래서 살았다).
+    var entry = testEntry("keep\nab\n", "keep\nABCDEFGH\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "ABCDEFGH") orelse return error.NoRow;
+    try testing.expect(st.left_texts[i].len != st.right_texts[i].len); // 픽스처 자기 검증
+
+    // ⑴ **자기 열의 글자를 센다.** 반대 열을 읽으면 byte 5 가 그 행 길이(2)로 잘려 열이 3 이 된다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 5 }) };
+    try testing.expectEqual(@as(usize, 6), (editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos).column);
+
+    // ⑵ **행 첨자를 자른다.** 비교가 다시 계산되면 행이 짧아질 수 있고, 그 사이에 이 값을 읽는다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 9999, .byte = 0 }) };
+    const clamped = editor_ops.diffCursorPosition(fx.term) orelse return error.NoPos;
+    try testing.expectEqual(st.right_numbers[st.right_texts.len - 1], clamped.line);
+
+    // ⑶ **비교가 아니면 답하지 않는다.** view 를 바꾼 채 끝나면 `release` 가 compare 자원을 안 놓아
+    //    누수가 나므로 반드시 되돌린다(DSEL4 와 같은 규율).
+    const saved_view = fx.term.rt.editor_diff.?.view;
+    fx.term.rt.editor_diff.?.view = .loading;
+    try testing.expectEqual(@as(?editor_ops.DiffCursor, null), editor_ops.diffCursorPosition(fx.term));
+    fx.term.rt.editor_diff.?.view = saved_view;
+}

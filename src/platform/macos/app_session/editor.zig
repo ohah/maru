@@ -614,7 +614,7 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
 /// **줄 끝 clamp 가 없다.** 비교 행 배열은 줄 끝 문자가 이미 떼어져 있어(§3.8 가시화, 뗀 것은
 /// `*_endings` 가 따로 든다), 단일 편집기가 CRLF 줄에서 CR 을 한 글자로 세지 않으려고 `contentEnd()`
 /// 로 묶는 그 이유가 여기엔 없다. 열 상한은 **같은 값**을 쓴다.
-pub fn diffCursorPosition(term: *const Term) ?struct { side: DiffSide, line: ?u32, column: usize, truncated: bool } {
+pub fn diffCursorPosition(term: *const Term) ?DiffCursor {
     if (term.kind != .editor) return null;
     const st = term.rt.editor_diff orelse return null;
     if (st.view != .compare) return null;
@@ -636,6 +636,28 @@ pub fn diffCursorPosition(term: *const Term) ?struct { side: DiffSide, line: ?u3
     // **줄 번호는 그 행의 것이고, 없으면 없다.** 배열이 짧을 수 있는 것은 계약이 아니라 방어다.
     const line: ?u32 = if (row < numbers.len) numbers[row] else null;
     return .{ .side = sel.side, .line = line, .column = col, .truncated = i < byte };
+}
+
+/// 비교 뷰 커서 위치를 **상태바 글자로** 만든다 — `R 2:1` · `L -:1` · `R 9:120+`
+/// ([상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
+///
+/// **형식을 함수로 꺼내 둔다.** 상태바 조립 안에 묻어 두면 **판정자가 글자를 못 읽는다** — 트리
+/// 항목은 id 와 사각만 들기 때문이다. 실제로 `L`/`R` 을 지우거나 맞바꾸거나 빈 행의 `-` 를 `0` 으로
+/// 바꾼 변이가 **넷 다 살아남았다**(2026-09-08 1회차 V11·V12·V13).
+/// 비교 뷰 커서 위치의 답. **이름을 붙인 이유는 두 함수가 같은 값을 주고받기 때문이다** —
+/// 익명 struct 로 두면 형식 함수와 환산 함수의 타입이 서로 다른 것이 된다.
+pub const DiffCursor = struct { side: DiffSide, line: ?u32, column: usize, truncated: bool };
+
+pub fn formatDiffCursor(buf: []u8, pos: DiffCursor) ?[]const u8 {
+    // **`L`/`R` 은 어느 파일의 줄인지를 말한다** — 좌우는 서로 다른 두 버퍼다.
+    const tag: []const u8 = if (pos.side == .right) "R" else "L";
+    // **상한을 넘으면 `+`** — 그 너머는 세지 않았다는 사실을 숨기지 않는다(단일 편집기와 같다).
+    const plus: []const u8 = if (pos.truncated) "+" else "";
+    // **짝맞춤 빈 행은 `-`** — 그 행은 그 파일에 없는 자리라 번호가 없다.
+    return if (pos.line) |ln|
+        std.fmt.bufPrint(buf, "{s} {d}:{d}{s}", .{ tag, ln, pos.column, plus }) catch null
+    else
+        std.fmt.bufPrint(buf, "{s} -:{d}{s}", .{ tag, pos.column, plus }) catch null;
 }
 
 /// 상태바 열을 **여기까지만 센다**.

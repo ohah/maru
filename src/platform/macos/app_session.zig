@@ -20597,6 +20597,7 @@ pub const AppSession = struct {
         self.status_bar_hovered = null;
     }
 
+
     fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
         const h = self.statusBarHeightPx();
         if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) {
@@ -20793,7 +20794,33 @@ pub const AppSession = struct {
                 // ⓪ 커서 위치(줄:열). §2.2 표의 첫 항목이라 **가장 오래 살아남아야 한다** — 우측
                 //    묶음은 먼저 더한 것이 오른쪽에 서고 뒤로 갈수록 먼저 버려지므로 맨 앞에 둔다.
                 //    선택이 없으면 항목 자체가 없다(읽기 전용이라 caret이 늘 있지는 않다).
-                if (editor_ops.cursorPosition(active_term)) |pos| {
+                if (editor_ops.diffCursorPosition(active_term)) |pos| {
+                    if (rn < max_status_bar_right_items) {
+                        var buf: [48]u8 = undefined;
+                        // **`L`/`R` 을 붙인다** — 숫자만 보이면 어느 파일의 줄인지 알 수 없다.
+                        // **짝맞춤 빈 행은 `-`** 다: 그 행은 그 파일에 없는 자리라 번호가 없고,
+                        // 앞뒤 번호를 빌리면 없는 줄을 지어내는 것이다.
+                        const tag: []const u8 = if (pos.side == .right) "R" else "L";
+                        const plus: []const u8 = if (pos.truncated) "+" else "";
+                        const text = if (pos.line) |ln|
+                            std.fmt.bufPrint(&buf, "{s} {d}:{d}{s}", .{ tag, ln, pos.column, plus }) catch null
+                        else
+                            std.fmt.bufPrint(&buf, "{s} -:{d}{s}", .{ tag, pos.column, plus }) catch null;
+                        if (text) |txt| if (self.buildStatusBarItem(null, txt, bar_cols, fg, icon_fg, .plain)) |dl| {
+                            // 단일 편집기와 **같은 가드** — 잘린 숫자는 다른 값으로 읽힌다.
+                            // 이 글도 ASCII(`L`·` `·숫자·`:`·`-`·`+`)뿐이라 byte 수 = 셀 수다.
+                            if (dl.size.cols >= txt.len) {
+                                right_frames[rn] = dl;
+                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                                right_ids[rn] = .editor_cursor;
+                                rn += 1;
+                            } else {
+                                var truncated = dl;
+                                truncated.deinit(self.allocator);
+                            }
+                        };
+                    }
+                } else if (editor_ops.cursorPosition(active_term)) |pos| {
                     if (rn < max_status_bar_right_items) {
                         var buf: [48]u8 = undefined;
                         // 상한을 넘으면 `+`를 붙인다 — 그 너머는 세지 않았다는 사실을 숨기지 않는다.
@@ -60290,6 +60317,67 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
 
 // SB1: **긴 경로는 잎이 남아야 한다.** 순수 함수(`text_layout.elidePathMiddle`)만 통과하고 배선이 빠지면
 // 화면은 그대로 끝이 잘린다 — 그래서 실제 항목 DrawList에 잎(마지막 디렉터리)이 실렸는지로 본다.
+test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경계 (§상태바 「비교 뷰의 커서 위치」)" {
+    // **`diffCursorPosition` 만 재면 배선이 죽어도 초록이다.** 이 조각 계열이 같은 자리에서 여러 번
+    // 물렸다(렌더 배선·키 층). 여기서는 상태바 트리까지 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const term = try editor_ops.createEditorTerm(session);
+    errdefer term_ops.destroyTerm(session, term);
+    try pane_ops.activePane(session).terms.append(allocator, term);
+    const pane = pane_ops.activePane(session);
+    for (pane.terms.items, 0..) |t, k| {
+        if (t == term) pane.active_term = k;
+    }
+    var entry: dock_panel.Entry = .{
+        .id = 1,
+        .path = @constCast("/tmp/t.txt"),
+        .kind = .diff,
+        .mode = dock_panel.Mode.defaultFor(.diff),
+        .diff_ready = true,
+        .diff_original = @constCast("keep\ntail\n"),
+        .diff_modified = @constCast("keep\nadded\ntail\n"),
+    };
+    defer term.file_entry = null;
+    term.file_entry = &entry;
+    editor_diff_ops.poll(session, term);
+    if (term.rt.editor_diff == null) return error.SkipZigTest;
+    if (std.meta.activeTag(term.rt.editor_diff.?.view) != .compare) return error.SkipZigTest;
+    try std.testing.expect(term.rt.editor_diff_selection != null); // 씨앗이 caret 을 세웠다
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    const Id = chrome.components.status_bar.ItemId;
+    var cursor_at: ?usize = null;
+    for (session.statusBarTree().entries, 0..) |e, i| {
+        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) cursor_at = i;
+    }
+    // ⑴ **뜬다** — 전에는 `cursorPosition` 이 비교에서 `null` 을 내 이 항목이 없었다.
+    try std.testing.expect(cursor_at != null);
+
+    // ⑵ **대조군** — caret 이 없으면 항목도 없다. 늘 뜨는 것이 아니라 caret 이 있어서 뜬다.
+    term.rt.editor_diff_selection = null;
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    var gone = true;
+    for (session.statusBarTree().entries) |e| {
+        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) gone = false;
+    }
+    try std.testing.expect(gone);
+}
+
 test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용이고, 문법이 없으면 없다" {
     // **`SB1` 은 접두어가 필터에 없어 `test-editor` 에서 안 돈다**(샤드에서만 돈다). 그래서 항목을
     // 통째로 지우거나 상한 검사를 빼먹은 변이가 **빠른 스위트에서 살아남았다**(2026-09-07 1회차

@@ -602,6 +602,42 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
     return .{ .line = line_idx + 1, .column = col, .truncated = i < text.len };
 }
 
+/// 비교 뷰의 커서 위치 — `(어느 열, 파일 줄 번호, 글자 열)`
+/// ([상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
+///
+/// **`cursorPosition` 과 따로 두는 이유는 답의 모양이 다르기 때문이다.** 이쪽은 **어느 열인지**를
+/// 함께 답해야 하고(좌우는 서로 다른 두 버퍼다), 줄 번호가 **없을 수 있다**(짝맞춤 빈 행).
+///
+/// **줄은 gutter 가 그리는 그 수다** — 행 첨자가 아니다. 짝맞춤 빈 행이 섞여 있어 첨자는 파일
+/// 어디와도 안 맞는다.
+///
+/// **줄 끝 clamp 가 없다.** 비교 행 배열은 줄 끝 문자가 이미 떼어져 있어(§3.8 가시화, 뗀 것은
+/// `*_endings` 가 따로 든다), 단일 편집기가 CRLF 줄에서 CR 을 한 글자로 세지 않으려고 `contentEnd()`
+/// 로 묶는 그 이유가 여기엔 없다. 열 상한은 **같은 값**을 쓴다.
+pub fn diffCursorPosition(term: *const Term) ?struct { side: DiffSide, line: ?u32, column: usize, truncated: bool } {
+    if (term.kind != .editor) return null;
+    const st = term.rt.editor_diff orelse return null;
+    if (st.view != .compare) return null;
+    const sel = term.rt.editor_diff_selection orelse return null;
+
+    const texts = if (sel.side == .right) st.right_texts else st.left_texts;
+    const numbers = if (sel.side == .right) st.right_numbers else st.left_numbers;
+    if (texts.len == 0) return null;
+    const row = @min(sel.sel.focus.row, texts.len - 1);
+    const byte = @min(sel.sel.focus.byte, texts[row].len);
+
+    // 행 머리에서 caret 까지 **클러스터를 센다** — 상한까지만. 단일 편집기와 같은 셈이다.
+    var col: usize = 1;
+    var i: usize = 0;
+    while (i < byte and col <= max_status_column) {
+        i = maru.grapheme.clusterEnd(texts[row], i);
+        col += 1;
+    }
+    // **줄 번호는 그 행의 것이고, 없으면 없다.** 배열이 짧을 수 있는 것은 계약이 아니라 방어다.
+    const line: ?u32 = if (row < numbers.len) numbers[row] else null;
+    return .{ .side = sel.side, .line = line, .column = col, .truncated = i < byte };
+}
+
 /// 상태바 열을 **여기까지만 센다**.
 ///
 /// **상한이 없으면 매 프레임 줄 전체를 훑는다.** 상태바는 프레임마다 다시 조립되는데, 긴 줄 끝에

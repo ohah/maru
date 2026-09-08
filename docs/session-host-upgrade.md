@@ -4963,6 +4963,38 @@ succeeded/failed checkpoint 호출 exact once와 공개 output 3/0을 검증한�
 actual-process gate를 함께 증거로 사용한다. 이 로컬 결합은 GitHub expression engine·OIDC·network를 실행하지 않으므로 actual workflow
 성공 증거로 해석하지 않는다.
 
+#### 11.99e profile-aware aggregate handoff와 publication 입력
+
+stage 5 `prepare-candidate-aggregate`는 stage 4 final fence가 공개한 profile-aware bundle 집합을 잃지 않는 유일한 durable handoff
+owner다. 상위 live action은 stage 3의 fixed baseline/upgrade evidence pathname을 다시 선택하지 않고 stage 4가 공개한
+`evidence-path`, `evidence-bundle-path`, `manifest-bundle-path`, `timing-bundle-path`만 소비한다. 따라서 stage 4는 bundle 세 pathname뿐
+아니라 final fence가 재검증하고 자신의 output file에 다시 쓴 selected evidence pathname도 공개하며, commit helper는 selector의 옛
+pathname을 직접 공개하지 않는다. baseline은 selected evidence+candidate 두 bundle+authored 두
+bundle의 exact 5개, upgrade는 여기에 timing bundle을 더한 exact 6개다.
+
+aggregate command는 `--release-profile` 같은 caller-authored scalar를 받지 않는다. closed argv는 공통 다섯 source와 optional
+`--timing-bundle`만 허용하고, fresh process가 no-follow pin한 selected evidence의 canonical bytes를 bounded parse해 profile 권위를
+얻는다. `baseline_a`이면 timing option은 없어야 하고 `upgrade_b`이면 exact once 존재해야 한다. 반대 조합, 빈 option, duplicate,
+unknown option, evidence basename/profile 불일치, timing과 다른 source의 pathname·inode alias는 remote mutation 전에 실패한다. 이
+상관관계는 파일 존재 여부나 bundle 이름 추론이 아니라 evidence semantic에서 결정한다.
+
+durable aggregate는 최대 여섯 slot을 가지되 `profile`과 `active_count`를 final-address seal에 포함한다. baseline inventory는 timing
+entry가 없는 exact 5개이고 upgrade inventory는 `upgrade-timing.attestation.json`을 포함한 exact 6개다. promote, reopen, final fence,
+retention, cleanup tomb/recovery는 모두 sealed active count만 순회하고 inactive slot은 owner/fd/path/name/present가 pristine이어야 한다.
+upgrade finalize는 evidence와 manifest의 기존 네 attestation에 timing subject↔timing bundle 검증을 하나 더 수행한다. baseline에서
+timing entry가 있거나 upgrade에서 빠진 경우, foreign sixth entry, profile/name drift, hardlink alias, bundle/subject SHA·run drift는
+publication 0이다.
+
+stage 6 이후의 publication owner는 verified aggregate가 보존한 profile과 exact 5/6 inventory를 receipt·retention·cleanup recovery에
+그대로 전달한다. upgrade timing은 release asset으로 새로 게시하는 제품 artifact가 아니라 protected run의 authored attestation
+subject이므로 기존 manifest asset exact-set은 바꾸지 않는다. 다만 aggregate receipt와 cleanup recovery record에는 timing entry의
+role/name/device/inode/size/SHA-256이 포함되어야 하며 abrupt death 뒤에도 exact 6개를 재발견·정리한다.
+
+focused gate는 baseline/upgrade actual-process prepare→fresh finalize를 모두 실행하고, exact 5/6 inventory, verifier child 4/5,
+distinct PID, canonical evidence profile, optional timing argv의 모든 모순, source/aggregate drift, fail-index 역순 정산, parent FD delta와
+staging/final residue 0을 검증한다. 로컬 실측은 harness-owned private APFS와 synthetic verifier만 사용한다. protected B tag의 실제
+GitHub-issued timing bundle과 signed N-1/current 실행 latency는 이 slice 뒤의 원격 gate가 별도로 측정한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

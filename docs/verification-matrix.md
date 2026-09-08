@@ -3372,6 +3372,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   checkpoint commit failure, checkpoint 호출 exact once와 output 3/0을 검증한다. selector/fence child·FD·residue는 §11.99a/c gate가
   소유한다. aggregate/publication의 profile-aware evidence·timing bundle 소비와 protected B 실제 GitHub
   bundle/N-1-current 실측은 후속이므로 §11.99d green만으로 §11.99 전체 완료를 주장하지 않는다.
+  §11.99e profile-aware aggregate는 stage-4 final fence가 자기 output file에 다시 쓴 selected evidence pathname과 2/3 bundle pathname만
+  stage 5가 소비하게 하며 commit helper가 selector의 옛 pathname을 직접 공개하지 못하게 한다.
+  fresh process는 caller profile scalar나 파일 존재 추론 대신 no-follow pin한 canonical evidence의 profile을 권위로 삼아 baseline의
+  exact 5-entry/no-timing과 upgrade의 exact 6-entry/required-timing을 교차검증한다. durable owner seal은 profile·active count를 포함하고
+  promote/reopen/final fence/retention/cleanup recovery는 active slot만 순회하되 inactive slot pristine을 요구한다. upgrade finalize는
+  timing subject와 timing bundle을 다섯 번째 verifier child로 결속하고 baseline의 foreign sixth entry, upgrade timing 누락, profile/name,
+  pathname/inode, SHA/run drift를 publication 0으로 닫는다. receipt와 cleanup recovery record는 exact 5/6 inventory를 보존하지만 timing은
+  release manifest asset exact-set에 추가하지 않는다. focused gate는 harness-owned private APFS에서 두 profile의 actual-process
+  prepare→fresh finalize, verifier 4/5, optional argv 모순과 fail-index cleanup, FD·staging/final residue 0 및 median·p95·max를 측정한다.
+  protected B의 실제 GitHub-issued bundle과 signed N-1/current latency는 후속 원격 gate다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.

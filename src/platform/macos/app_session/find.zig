@@ -132,7 +132,11 @@ pub fn recomputeEditorFindPublic(self: *AppSession, term: *Term) void {
 /// **첫 매치로 되돌린다** — 목록이 통째로 달라지는 사건이라 `current` 를 들고 있으면 엉뚱한 자리다.
 pub fn diffCaretSideChanged(self: *AppSession, term: *Term, was: editor_ops.DiffSide) void {
     if (self.chrome_host.find.diff_side != null) return;
-    if (!isEditorFindTarget(self)) return;
+    // **오버레이가 닫혀도 `find_nav` 면 매치를 쓴다** — 하이라이트와 `⌘G` 가 목록을 그대로 읽는다
+    // (`wantedEditorFindSource` 가 그 둘을 함께 본다). `isEditorFindTarget` 만 쓰면 그 상태를
+    // 놓쳐 같은 어긋남이 난다 — 17회차가 그 자리를 열었다.
+    if (!(self.chrome_host.find.open or self.find_nav)) return;
+    if (self.chrome_host.find.target != .editor) return;
     if (activeEditorTerm(self) != term) return;
     // **실제로 바뀌었을 때만** — 같은 열을 다시 클릭할 때도 다시 세면 `current` 가 0 으로 튀어
     // 사용자가 보던 매치를 잃는다. 판정은 `diffSearchSide` 하나로 한다(그 셋이 읽는 그 답이다).

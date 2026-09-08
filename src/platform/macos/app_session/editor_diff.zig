@@ -3478,3 +3478,39 @@ test "DCOL10: 마우스로 열을 바꿔도 검색이 따라오고, 검색 대�
     try testing.expectEqual(before, fx.session.chrome_host.find.match_count);
     fx.session.chrome_host.find.target = .editor;
 }
+
+test "DCOL11: 오버레이를 닫아도(⌘G 항해 중) 열을 넘기면 목록이 따라온다 (§5.1)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("aa\nbb\n", "aa\naa\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, k| {
+        if (t == fx.term) pane.active_term = k;
+    }
+
+    find_ops.toggleFind(fx.session);
+    fx.session.chrome_host.find.target = .editor;
+    try fx.session.chrome_host.find.input.query.appendSlice(fx.session.allocator, "aa");
+    find_ops.recomputeEditorFindPublic(fx.session, fx.term);
+    try testing.expect(fx.session.chrome_host.find.match_count >= 2);
+
+    // **오버레이를 닫아도 항해는 살아 있다.** `find_nav` 가 참이면 하이라이트와 `⌘G` 가 그대로
+    //    매치 목록을 쓴다 — 그 상태에서 열을 넘기면 같은 어긋남이 난다. 가드를 `find.open` 으로만
+    //    쓰면 이 자리를 놓친다(17회차가 그 자리를 열었다).
+    find_ops.toggleFind(fx.session); // 닫는다
+    fx.session.find_nav = true;
+    try testing.expect(!fx.session.chrome_host.find.open);
+    try testing.expect(fx.session.chrome_host.find.match_count >= 2);
+
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expectEqual(editor_ops.DiffSide.left, editor_ops.diffSearchSide(fx.session, fx.term));
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
+
+    // **대조군** — 항해도 아니고 오버레이도 닫혔으면 아무 일도 안 한다(쓰는 사람이 없다).
+    fx.session.find_nav = false;
+    const idle = fx.session.chrome_host.find.match_count;
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expectEqual(idle, fx.session.chrome_host.find.match_count);
+}

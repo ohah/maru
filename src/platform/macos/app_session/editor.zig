@@ -3899,6 +3899,11 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
     // (`materialize` 가 따로 잡는다), 한쪽 길이로만 자르면 그 불변식이 깨지는 날 범위 밖을 읽는다.
     const row = @min(state.sel.focus.row, @min(src.len, dst.len) - 1);
     const byte = @min(state.sel.focus.byte, src[row].len);
+    // **위 두 자르기와 아래 빈 배열 거절은 방어이지 판정할 수 없다**(변이 11~13회차 S4·S11·S18).
+    // 좌우 길이가 같다는 계약 때문에 `@min(src.len, dst.len)` 과 `src.len` 이 같은 답을 내고,
+    // `or` 를 `and` 로 바꿔도 도달할 상태가 없으며, `columnsAtOffsets` 는 줄 밖 offset 에 **스스로
+    // 줄 끝 열**을 채운다(마지막 `while` 이 남은 offset 을 `col` 로 메운다). 그래도 두는 이유는
+    // 그 계약이 깨지는 날 **여기가 먼저 틀리지 않게** 하기 위해서다.
 
     var pcm = productColumnMap(term);
     const map = pcm.map();

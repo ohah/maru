@@ -4068,6 +4068,19 @@ pub fn build(b: *std.Build) void {
     const run_file_tree_publish_axis_boundary_tests = b.addRunArtifact(file_tree_publish_axis_boundary_tests);
     run_file_tree_publish_axis_boundary_tests.setCwd(b.path("."));
 
+    // detached worker 를 띄우는 backend 는 자기 `deinit` 이나 세션 종료가 반드시 거둔다 — 안 거두면
+    // 아직 도는 job 의 할당이 **다른 판정자의** 누수로 잡히고 트레이스를 찍다 죽는다(2026-09-08 CI
+    // abort: `dupe` 누수 → segfault → 134). 빠른 기계에서는 안 보여 소스 스캔만이 이 축을 CI 로 끌어온다.
+    const detached_worker_quiesce_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/detached_worker_quiesce_axis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_detached_worker_quiesce_axis_boundary_tests = b.addRunArtifact(detached_worker_quiesce_axis_boundary_tests);
+    run_detached_worker_quiesce_axis_boundary_tests.setCwd(b.path("."));
+
     // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
     // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
     const neutral_path_join_boundary_tests = addProjectTest(b, .{
@@ -6246,6 +6259,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_remote_cursor_axis_boundary_tests.step);
     boundary_step.dependOn(&run_scan_identity_axis_boundary_tests.step);
     boundary_step.dependOn(&run_file_tree_publish_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_detached_worker_quiesce_axis_boundary_tests.step);
     boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);

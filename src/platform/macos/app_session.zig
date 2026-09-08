@@ -21652,8 +21652,6 @@ pub const AppSession = struct {
             detached_worker_wait.quiet(&self.file_tree_backend, self.io);
             detached_worker_wait.quiet(&self.file_tree_mutation_backend, self.io);
             if (self.agent_session_archive_initialized) {
-                detached_worker_wait.quiet(&self.agent_session_archive_backend, self.io);
-                detached_worker_wait.quiet(&self.agent_session_archive_detail_backend, self.io);
                 detached_worker_wait.quiet(&self.agent_session_archive_scope_backend, self.io);
             }
         }
@@ -21666,7 +21664,10 @@ pub const AppSession = struct {
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각
         // backend 의 `deinit` 이 그대로 든다. **여기 한 자리**인 이유는 이 backend 들을 쓰는 판정자가
         // 수십 개라, 규율을 그만큼 나눠 두면 새로 쓰는 사람이 반드시 빠뜨리기 때문이다.
-        // 이미지 스캔·디코드 backend 는 제품 `deinit` 에서 이미 워커를 거두므로 여기 없다.
+        // **여기 목록은 「게이트 없는」 backend 뿐이다.** 워커가 `shutting_down` 을 봐야 빠져나오는
+        // backend(에이전트 세션 아카이브 본체·상세)는 그 플래그를 자기 `deinit` 이 세우므로, 그 **앞**
+        // 에서 기다리면 영원히 안 끝난다 — 실제로 상한까지 헛돌았다(적대적 검증 1 회차 실측). 그런
+        // backend 는 자기 `deinit` 안에서, **취소한 뒤에** 거둔다. 이미지 스캔·디코드도 마찬가지다.
         if (builtin.is_test) quietDetachedWorkersForTest(self);
         unregisterRecoveredSessionWindow(self);
         // 훅 이벤트 로그는 «기록» 이 아니라 «소비 즉시 비우는 큐» 다(docs/agent-hooks.md §4.2) — 그 안에는

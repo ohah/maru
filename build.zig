@@ -15722,10 +15722,10 @@ pub fn build(b: *std.Build) void {
             run_profile_upgrade_execution_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_upgrade_execution_step.dependOn(&run_profile_upgrade_execution_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_upgrade_execution_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
-            const profile_upgrade_timing_artifact_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_upgrade_timing_artifact.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_profile_upgrade_execution", .module = profile_upgrade_execution_mod }, .{ .name = "release_adapter_files", .module = files_mod } } });
-            const profile_upgrade_timing_artifact_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_profile_upgrade_timing_artifact.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_profile_upgrade_timing_artifact", .module = profile_upgrade_timing_artifact_mod }} }) });
+            const profile_upgrade_timing_artifact_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_upgrade_timing_artifact.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_profile_upgrade_execution", .module = profile_upgrade_execution_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
+            const profile_upgrade_timing_artifact_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_profile_upgrade_timing_artifact.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_profile_upgrade_timing_artifact", .module = profile_upgrade_timing_artifact_mod }, .{ .name = "release_adapter_context", .module = context_mod } } }) });
             const run_profile_upgrade_timing_artifact_tests = b.addRunArtifact(profile_upgrade_timing_artifact_tests);
-            run_profile_upgrade_timing_artifact_tests.addArg("--maru-expect-tests=5");
+            run_profile_upgrade_timing_artifact_tests.addArg("--maru-expect-tests=11");
             run_profile_upgrade_timing_artifact_tests.setCwd(b.path("."));
             session_host_release_adapter_profile_upgrade_timing_artifact_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_profile_upgrade_timing_artifact_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
@@ -16488,6 +16488,7 @@ pub fn build(b: *std.Build) void {
         run_frozen_executable_tests.setCwd(b.path("."));
         session_host_release_adapter_frozen_executable_authority_step.dependOn(&run_frozen_executable_tests.step);
     };
+    session_host_release_adapter_profile_upgrade_timing_artifact_step.dependOn(session_host_release_adapter_files_step);
     const session_host_bounded_process_step = b.step(
         "test-session-host-bounded-process",
         "Validate the shared bounded macOS child-process capture authority",

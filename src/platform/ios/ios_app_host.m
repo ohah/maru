@@ -1247,7 +1247,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // 꺼져 있으면 아무 일도 안 하고, Android 의 `announceForAccessibility` 도 그렇다 — 물어서
     // 거르면 그 판단이 두 자리에 생겨 「iOS 만 안 읽는다」 같은 결함이 **소리로만** 드러난다.
     {
-        char say[4096];
+        char say[MARU_A11Y_ANNOUNCE_MAX];
         unsigned long said = maru_mobile_a11y_take_announcement(say, sizeof say);
         if (said > 0) {
             NSString *text = [[NSString alloc] initWithBytes:say length:said encoding:NSUTF8StringEncoding];

@@ -1461,7 +1461,7 @@ static void noteA11yChange(void) {
 /// 때는 놓는다**(락을 쥔 채 JNI 로 올라가면 그쪽이 다시 내려올 때 맞물린다).
 static void drainA11yAnnouncement(void) {
     if (!g_activity_cls || !g_app) return;
-    char say[4096];
+    char say[MARU_A11Y_ANNOUNCE_MAX];
     pthread_mutex_lock(&g_bridge_lock);
     unsigned long said = maru_mobile_a11y_take_announcement(say, sizeof say);
     pthread_mutex_unlock(&g_bridge_lock);
@@ -1475,8 +1475,11 @@ static void drainA11yAnnouncement(void) {
     if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
     // **modified UTF-8 함정을 피한다** — `NewStringUTF` 는 4바이트 UTF-8(이모지)에서 깨진다.
     // 서술자 이름과 같은 길을 쓴다.
+    // **이 자리도 같은 상한으로 잡는다.** ASCII 면 바이트 하나가 UTF-16 한 칸이라 최악이 같다 —
+    // 작게 잡으면 잘린 말이 읽힌다(그럴 바엔 안 읽는 편이 낫다는 것이 이 축의 규율이다).
+    // `static` 이라 스택에 안 올린다.
     jsize units = 0;
-    static jchar utf16[4096];
+    static jchar utf16[MARU_A11Y_ANNOUNCE_MAX];
     units = utf8ToUtf16(say, said, utf16, (jsize)(sizeof utf16 / sizeof utf16[0]));
     if (units > 0) {
         jstring text = (*env)->NewString(env, utf16, units);

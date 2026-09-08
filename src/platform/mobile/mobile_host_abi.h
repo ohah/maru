@@ -265,6 +265,12 @@ void maru_mobile_set_system_font_scale(unsigned int scale_milli);
    `maru_mobile_last_error()` 가 `a11y_announce_cap` 이다. */
 unsigned long maru_mobile_a11y_take_announcement(char *out, unsigned long cap);
 
+/* 그 글자가 가장 길 때의 크기(바이트). **host 는 이 값으로 버퍼를 잡는다** — 작게 잡으면 긴
+   낭독이 통째로 버려진다(코어가 자리를 안 넘겨 자르지 않는다: 문장 가운데서 끊긴 말을 읽느니
+   안 읽는 편이 낫다). 코어의 상한과 **같은 값**이라야 하고, 경계 판정자가 그 둘을 견준다.
+   = 20줄 상한 × 한 줄 상한(960바이트). */
+#define MARU_A11Y_ANNOUNCE_MAX 19200
+
 /* 이번 `maru_mobile_build` 가 낸 그림이 **지난 프레임과 다른가**(1=그려야 한다). build 뒤에 읽는다.
    0 이면 host 는 GPU 작업(획득·제출·프레젠트)을 통째로 건너뛴다 — 터미널은 대부분의 시간이
    정지 화면이라 여기서 얻는 것이 가장 크다(M14).

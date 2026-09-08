@@ -232,6 +232,22 @@ test "정책 경계: 새 출력 낭독은 host 가 «말하기만» 한다 (M9a)
     // 없는데, 한쪽만 물으면 「iOS 만 안 읽는다」 같은 결함이 **소리로만** 드러난다.
     try std.testing.expectEqual(@as(usize, 0), count(ios, "UIAccessibilityIsVoiceOverRunning"));
     try std.testing.expectEqual(@as(usize, 0), count(java, "isTouchExplorationEnabled"));
+
+    // **버퍼 상한이 두 곳에서 같아야 한다.** host 가 작게 잡으면 긴 낭독이 통째로 버려진다 —
+    // 코어는 자리를 안 넘겨 자르지 않는다(문장 가운데서 끊긴 말을 읽느니 안 읽는 편이 낫다).
+    // 그리고 host 는 **그 이름으로** 잡아야 한다: 숫자를 손으로 적으면 다음에 상한이 바뀔 때 갈린다.
+    const header = try readSource(allocator, "src/platform/mobile/mobile_host_abi.h");
+    defer allocator.free(header);
+    const bridge = try readSource(allocator, "src/platform/mobile/mobile_bridge.zig");
+    defer allocator.free(bridge);
+    const cap = try valueAfter(header, "#define MARU_A11Y_ANNOUNCE_MAX ");
+    const rows = try valueAfter(bridge, "const announce_row_cap = ");
+    const per_row = try valueAfter(bridge, "const term_row_read_cap = ");
+    const want = (try std.fmt.parseInt(usize, std.mem.trim(u8, rows, ";"), 10)) *
+        (try std.fmt.parseInt(usize, std.mem.trim(u8, per_row, ";"), 10));
+    try std.testing.expectEqual(want, try std.fmt.parseInt(usize, cap, 10));
+    try std.testing.expect(count(ios, "MARU_A11Y_ANNOUNCE_MAX") > 0);
+    try std.testing.expect(count(android, "MARU_A11Y_ANNOUNCE_MAX") > 0);
     try expectAbsentFromBody(java, "public static void a11yAnnounce(", "length()");
 
     // **절전 게이트 «앞» 이다.** 뒤에 두면 화면이 안 바뀐 프레임에서 말이 안 나가는데, 잠잠해졌다는

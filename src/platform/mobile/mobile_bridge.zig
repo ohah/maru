@@ -2340,6 +2340,7 @@ pub fn maru_mobile_scroll(dy_px: f32) void {
     }
     // clamp 는 코어가 한다 — 여기서 또 하면 두 곳이 갈린다.
     core.scrollViewport(lines);
+    noteViewportMoved();
 }
 
 // ── 포인터: 끌면 스크롤, 길게 누르면 선택 ────────────────────────────────────
@@ -3156,6 +3157,7 @@ pub export fn maru_mobile_scroll_to_bottom() void {
     const core = &(term_core orelse return);
     core.scrollToBottom();
     scroll_px_carry = 0;
+    noteViewportMoved();
 }
 
 pub export fn maru_mobile_view_offset() u32 {
@@ -3474,6 +3476,10 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
     body_cell_w = cell_w;
     body_line_h = line_h;
+    // **격자가 달라지면 읽을 것의 기준도 다시 잡는다**(M9a). 회전하거나 키보드가 오르내리면 줄이
+    // 다시 접혀 절대 번호가 통째로 어긋난다 — 그러면 화면에 있던 줄이 전부 「새 줄」이 되고,
+    // 사용자가 한 일은 기기를 돌린 것뿐인데 「출력이 많습니다」가 들린다(스크롤과 같은 부류다).
+    if (body_cols != grid_cols or body_rows != grid_rows) noteViewportMoved();
     body_cols = grid_cols;
     body_rows = grid_rows;
 
@@ -7868,7 +7874,8 @@ fn stepAnnounce(on_terminal: bool, rows_now: u16) void {
     // 지문은 위에서 이미 잡았으니, 담은 것만 버리면 다음 프레임부터 **진짜 바뀐 줄**만 읽힌다.
     const entering = on_terminal and !announce_on_terminal;
     announce_on_terminal = on_terminal;
-    if (entering or !on_terminal) {
+    if (entering or announce_rebaseline or !on_terminal) {
+        announce_rebaseline = false;
         dropAnnounce();
         return;
     }
@@ -7899,6 +7906,23 @@ fn stepAnnounce(on_terminal: bool, rows_now: u16) void {
 /// **입력이 오면 대기 중인 것을 버린다.** 키보드가 이미 읽어 준 글자를 터미널이 또 읽으면 두 번
 /// 들리고, 새 명령을 친 뒤에 낡은 출력을 읽어 주는 것도 틀린 안내다(xterm.js `_handleKey` 와 같은
 /// 자리, 단위만 줄이다). **가져갈 것까지 버린다** — 아직 안 읽힌 것이면 지금이 버릴 마지막 때다.
+/// **창이 옮겨 갔다 — 그것은 새 출력이 아니다**(M9a). 위로 밀면 스크롤백 줄이 들어오는데, 줄
+/// 번호로 보면 「지난 창에 없던 번호」라 전부 새 줄로 읽힌다: 사용자는 손가락으로 훑는 중인데
+/// 「출력이 많습니다」가 끼어든다. 치는 것과 같은 규율로 **대기 중인 것을 버린다** — 스크롤은
+/// 사용자가 스스로 읽겠다는 뜻이고, 낭독기는 그 자리에서 줄 서술자로 읽어 준다.
+///
+/// **두 자리에서 부른다**(민 것·바닥으로 간 것). 그 둘이 창을 옮기는 전부다.
+fn noteViewportMoved() void {
+    // **한 번 버리는 것으로는 모자란다.** 다음 프레임이 같은 줄들을 다시 「지난 창에 없던 번호」로
+    // 보고 또 모은다 — 그래서 「기준을 다시 잡아라」로 표시하고, 그 프레임은 지문만 잡고 담은 것은
+    // 버린다(터미널로 들어오는 프레임과 같은 처리다. 판정자가 이 차이를 잡았다).
+    announce_rebaseline = true;
+    dropAnnounce();
+}
+
+/// 다음 프레임은 **기준만 잡는다**(담은 것을 버린다). 창이 옮겨 갔거나 터미널로 들어왔을 때 선다.
+var announce_rebaseline = false;
+
 fn dropAnnounce() void {
     announce_len = 0;
     announce_rows = 0;
@@ -7913,6 +7937,13 @@ pub export fn maru_mobile_a11y_take_announcement(out: [*]u8, cap: usize) usize {
     const n = announce_ready_len;
     if (n == 0) return 0;
     if (n > cap) {
+        // **버리고 간다 — 들고 있으면 «영영» 막힌다.** 아래에서 `announce_ready_len` 을 안 비우면
+        // 다음 것이 이 자리를 못 덮어(그 조건이 `== 0` 이다) 낭독이 통째로 죽는다. 한 번 못 읽는
+        // 것과 그 뒤로 영영 못 읽는 것은 다른 결함이다.
+        //
+        // 자리가 모자란 것 자체는 **일어나면 안 되는 일**이다 — host 는 `MARU_A11Y_ANNOUNCE_MAX`
+        // 로 버퍼를 잡고, 그 값이 이 버퍼와 같은지는 경계 판정자가 본다.
+        announce_ready_len = 0;
         setLastError("a11y_announce_cap");
         return 0;
     }
@@ -7931,6 +7962,7 @@ pub fn resetAnnounceForTest() void {
     announce_now_first = 0;
     announce_now_n = 0;
     announce_on_terminal = false;
+    announce_rebaseline = false;
 }
 
 /// 판정자용 — 지금 가져갈 것이 있나(가져가지 않고 본다).

@@ -35500,6 +35500,77 @@ test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모�
     try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
 }
 
+test "git_ops.readGitBranch: 워크트리는 제 브랜치를 말한다 — 부모로 새지 않는다" {
+    // **실측 재현(2026-09-08)**: 워크트리에서는 `.git` 이 `gitdir: <경로>` 한 줄이 든 **파일**이라
+    // `<dir>/.git/HEAD` 읽기가 실패하고, 예전 walk-up 은 그대로 **부모로 올라갔다**. 워크트리를 저장소
+    // 안에 두면(`.claude/worktrees/…` 가 그 모양) 부모의 `.git/HEAD` 에 닿아 **성공**한다 — 결과가
+    // 「없음」이 아니라 **남의 브랜치**였다(격리 저장소에서 폴더는 `feature2` 인데 화면은 `main`).
+    //
+    // 그래서 배치 **둘**을 다 잰다. 하나짜리 표본은 이 어긋남을 감춘다 — 바깥 배치만 재면 「null 이
+    // 나온다」로 보여 결함이 순해 보이고, 안쪽 배치만 재면 walk-up 이 멈추는지를 못 본다.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // 부모 저장소: 일반 체크아웃(`.git` 은 디렉터리)이고 `main` 에 서 있다.
+    try tmp.dir.createDirPath(io, "parent/.git");
+    try tmp.dir.writeFile(io, .{ .sub_path = "parent/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    // 그 저장소가 든 워크트리의 git 디렉터리 — 여기 HEAD 가 **그 워크트리의 것**이다.
+    try tmp.dir.createDirPath(io, "parent/.git/worktrees/w");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "parent/.git/worktrees/w/HEAD",
+        .data = "ref: refs/heads/feature2\n",
+    });
+
+    // ── ① 워크트리가 부모 **안**에 있는 배치(사용자의 `.claude/worktrees/…` 와 같은 모양).
+    try tmp.dir.createDirPath(io, "parent/inside/work");
+    {
+        const pointer = try std.fmt.allocPrint(a, "gitdir: {s}/parent/.git/worktrees/w\n", .{root});
+        defer a.free(pointer);
+        try tmp.dir.writeFile(io, .{ .sub_path = "parent/inside/work/.git", .data = pointer });
+    }
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/work", .{root});
+        defer a.free(cwd);
+        const branch = git_ops.readGitBranch(io, a, cwd) orelse return error.TestUnexpectedResult;
+        defer a.free(branch);
+        // **부모의 `main` 이 아니라 제 브랜치다.** 고치기 전에는 여기서 `main` 이 나왔다.
+        try std.testing.expectEqualStrings("feature2", branch);
+    }
+
+    // ── ② 하위 폴더에서 시작해도 같다(walk-up 이 워크트리 루트에서 답을 얻는다).
+    try tmp.dir.createDirPath(io, "parent/inside/work/src/deep");
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/work/src/deep", .{root});
+        defer a.free(cwd);
+        const branch = git_ops.readGitBranch(io, a, cwd) orelse return error.TestUnexpectedResult;
+        defer a.free(branch);
+        try std.testing.expectEqualStrings("feature2", branch);
+    }
+
+    // ── ③ `.git` 은 있는데 **못 읽는** 경우: 부모로 새지 않고 **모른다**로 답한다.
+    //     (포인터가 깨졌거나 그 git 디렉터리가 사라진 상태 — 「없음」이 「남의 값」보다 낫다.)
+    try tmp.dir.createDirPath(io, "parent/inside/broken");
+    try tmp.dir.writeFile(io, .{ .sub_path = "parent/inside/broken/.git", .data = "gitdir: /nonexistent/x\n" });
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/broken", .{root});
+        defer a.free(cwd);
+        try std.testing.expect(git_ops.readGitBranch(io, a, cwd) == null);
+    }
+
+    // ── ④ 일반 체크아웃은 지금까지대로다(고친 갈래가 옛 길을 안 건드린다).
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent", .{root});
+        defer a.free(cwd);
+        const branch = git_ops.readGitBranch(io, a, cwd) orelse return error.TestUnexpectedResult;
+        defer a.free(branch);
+        try std.testing.expectEqualStrings("main", branch);
+    }
+}
+
 test "git_ops.parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
     try std.testing.expectEqualStrings("main", git_ops.parseGitHead("ref: refs/heads/main\n").?);
     try std.testing.expectEqualStrings("feature/x", git_ops.parseGitHead("ref: refs/heads/feature/x").?); // 슬래시 포함 브랜치

@@ -4852,6 +4852,27 @@ actual filesystem harness는 baseline/upgrade 각각 fresh reopen, subject mutat
 0을 검증하되 GitHub OIDC/network는 synthetic bundle writer로 대체한다. 이 slice는 profile-aware authored/timing bundle까지만 닫고 aggregate와
 publication의 evidence/bundle 선택, protected B tag의 실제 `actions/attest` 및 signed N-1/current 실측은 후속 gate로 남긴다.
 
+#### 11.99a fresh-process authored selector projection
+
+첫 제품 합성 gate는 credential-free selector를 별도 fresh process로 노출하되 attestation이나 checkpoint를 아직 열지 않는다. 실행파일은
+`select`와 `--preparation`, `--baseline-evidence`, `--upgrade-evidence`, `--manifest`, `--timing`의 다섯 option/value pair만 받는다.
+option은 순서와 무관하지만 exact once여야 하고 unknown·missing·duplicate·빈 값·상한 초과·control byte를 첫 filesystem 관측 전에
+거부한다. current protected `Context`와 canonical profile document는 environment에서만 읽으며 argv나 stdout으로 복제하지 않는다.
+
+성공 stdout은 GitHub output-file 문법의 단일행 scalar 일곱 개를 exact 순서로 한 번만 쓴다. key는 `evidence-path`, `evidence-name`,
+`manifest-path`, `manifest-name`, `timing-required`, `timing-path`, `timing-name`이고 다른 key, profile scalar, inode·digest·owner·seal·fd·token은
+출력하지 않는다. 값에는 NUL·CR·LF와 그 밖의 ASCII control byte가 없으며 baseline은 마지막 두 값이 empty이고 `timing-required=false`,
+upgrade는 canonical timing path/name과 `true`다. selector의 `Plan`은 stdout write 전에 environment와 retained subject를 한 번 더 fence하고,
+projection 전체를 bounded stack buffer에 먼저 canonical encode한다. 따라서 validation·selection·fence·encode가 실패하면 stdout은 0 byte다.
+write/flush 실패는 process failure이며 부분 stdout을 권위로 소비하지 않는 것은 다음 live-action gate가 소유한다. process는 성공·실패 모두
+held descriptor와 profile/timing owner를 역순으로 닫고 borrowed argv나 environment bytes를 보존하지 않는다.
+
+focused Debug·ReleaseFast gate는 parser exactness, 두 profile의 exact canonical bytes, profile/context/path/subject drift와 copied owner,
+allocation fail-index, encode cap/control byte 및 pre-output failure의 writer call 0을 검증한다. actual-process harness는 격리 private APFS에서
+두 profile을 실행해 stdout exactness, stderr 0, exit status, 서로 다른 child PID, parent FD delta와 filesystem residue 0을 기록한다. 이 gate는
+GitHub OIDC/network, `actions/attest`, bundle 생성·final fence, authored checkpoint와 실제 앱 session-host registry를 건드리지 않으며,
+이후 live-action gate 전까지 11.99 전체는 부분 구현이다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

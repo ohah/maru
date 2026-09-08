@@ -77930,6 +77930,120 @@ test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적�
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대적 6회차)" {
+    // ⚠️ **이 스택에서 네 번 밟은 형태를 여기서도 밟고 있었다.** AV5 판정자는 그림을 **하나만**
+    // 뒀는데, 하나면 「전부 같은 줄에 붙는다」와 「각자 제 줄에 붙는다」가 안 갈린다. 자리를
+    // 잇는 값이 셋(`hit_index` · `file_index` · `data_offset`)이라 섞일 길이 실제로 있다.
+    //
+    // 그림 셋을 서로 다른 바이트로 두고, **각 타일이 가리키는 줄의 결과 자리**와 타일의 정체가
+    // 같은지 본다. 하나라도 어긋나면 화면에서는 「남의 그림이 뜬다」로 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 서로 **다른** 픽셀이어야 자리가 섞였을 때 드러난다(같은 바이트면 우연히 맞는다).
+    const png_a = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const png_b = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP8z8Dwn4GBgYEBAA7+Av9BXjVLAAAAAElFTkSuQmCC";
+    const png_c = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGNkYPjPwMDAwMDAwAAABQABtZ7VvAAAAABJRU5ErkJggg==";
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    const pngs = [_][]const u8{ png_a, png_b, png_c };
+    for (pngs, 0..) |png, i| {
+        // 그림 결과 호출 하나 + 그 사이에 **텍스트 호출**을 끼워 줄이 섞이게 한다.
+        var buf: [512]u8 = undefined;
+        const call = try std.fmt.bufPrint(&buf, "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_M{d}\"," ++
+            "\"name\":\"Read\",\"input\":{{\"file_path\":\"/tmp/img{d}.png\"}}}}]}}}}\n", .{ i, i });
+        try doc.appendSlice(allocator, call);
+        try doc.appendSlice(allocator, "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[");
+        var idbuf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&idbuf, "{{\"tool_use_id\":\"toolu_M{d}\",", .{i}));
+        try doc.appendSlice(allocator, "\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"data\":\"");
+        try doc.appendSlice(allocator, png);
+        try doc.appendSlice(allocator, "\",\"media_type\":\"image/png\"}}]}]}}\n");
+
+        var tbuf: [320]u8 = undefined;
+        const txt = try std.fmt.bufPrint(&tbuf, "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_T{d}\"," ++
+            "\"name\":\"Bash\",\"input\":{{\"command\":\"ls\",\"description\":\"목록{d}\"}}}}]}}}}\n", .{ i, i });
+        try doc.appendSlice(allocator, txt);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "m.jsonl", .data = doc.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/m.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    image_gallery_ops.setFilter(session, .all);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    // 호출 여섯(그림 셋 + 텍스트 셋)이 서고 그림은 접혀 들어간다.
+    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
+
+    // 셋이 **다** 실릴 때까지 기다린다 — 하나만 보고 끝내면 이 판정자의 요점이 사라진다.
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len < 3) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+
+    // ⚠️ **다시 훑는 길도 지난다.** 이것이 없으면 이 판정자는 「처음 붙을 때」만 보고, 재연결이
+    //    아무 줄이나 잡아도 통과한다 — 실제로 그 뮤테이션이 빠져나갔다. 1 회차 판정자가 재연결을
+    //    재지만 그림이 **하나**라, 「여럿 × 재연결」의 교집합이 비어 있었다.
+    image_gallery_ops.remapTiles(session);
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+
+    // ── **각 타일이 가리키는 줄의 그림 자리와 타일의 정체가 같다.**
+    var seen_offsets: [3]u64 = .{ 0, 0, 0 };
+    for (session.image_gallery.tiles.items, 0..) |tile, k| {
+        const n = tile.hit_index;
+        try std.testing.expect(n < session.image_gallery.hits.items.len);
+        const row = session.image_gallery.hits.items[n];
+        // 그 줄은 **호출**이고 결과가 그림이다.
+        try std.testing.expect(!row.kind.isImage());
+        try std.testing.expect(row.result.image);
+        // 그리고 타일이 든 정체가 **그 줄의 그림**이다 — 남의 것이면 여기서 갈린다.
+        try std.testing.expectEqual(row.result.image_offset, tile.data_offset);
+        try std.testing.expectEqual(row.result.image_file, tile.file_index);
+        seen_offsets[k] = tile.data_offset;
+    }
+    // 셋이 **서로 다른** 그림이다(같은 것을 세 번 붙이지 않았다).
+    try std.testing.expect(seen_offsets[0] != seen_offsets[1]);
+    try std.testing.expect(seen_offsets[1] != seen_offsets[2]);
+    try std.testing.expect(seen_offsets[0] != seen_offsets[2]);
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

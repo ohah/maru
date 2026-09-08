@@ -117,6 +117,17 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 @end
 
 @implementation MaruA11yElement
+/// **VoiceOver 커서가 이 줄에 닿았다**(M9b — 가장자리에서 이어지기). 읽다가 화면 맨 끝 줄을
+/// 넘으려 하면 거기서 끊기는데, 그때 코어가 한 줄 밀어 읽기가 이어지게 한다.
+///
+/// **판단은 전부 코어가 한다** — 여기서는 「어디에 닿았다」만 넘긴다. 본문 줄인지·가장자리인지·
+/// 밀 때가 됐는지를 host 가 나눠 가지면 두 플랫폼이 다른 때에 움직인다.
+- (void)accessibilityElementDidBecomeFocused {
+    // **super 를 먼저 부른다** — UIKit 이 이 자리에서 자기 상태를 갱신한다. 우리 일만 하고 말면
+    // 그 갱신이 빠지고, 그 결과는 VoiceOver 안에서만 드러나 화면으로는 안 보인다.
+    [super accessibilityElementDidBecomeFocused];
+    maru_mobile_a11y_focus(self.bridgeIndex);
+}
 @end
 
 @interface ChromeView : UIView <UITextInput>
@@ -402,6 +413,22 @@ static NSString *maruA11yValue(unsigned int index) {
         _a11yElements = [self buildAccessibilityElements];
     }
     return _a11yElements;
+}
+
+/// **VoiceOver 의 세 손가락 쓸기**(M9b — 페이지 이동). 수백 줄 위로 뛰려면 한 줄씩으로는 못 간다.
+///
+/// **얼마나 미는지는 코어가 정한다** — 여기서는 방향만 넘기고 「움직였나」를 그대로 돌려준다.
+/// 그 값이 곧 VoiceOver 가 「더 없다」를 말할지 정하는 근거다: 안 움직였는데 `YES` 를 주면 끝에서
+/// 계속 「됐다」고 말해 사용자가 갇힌다.
+- (BOOL)accessibilityScroll:(UIAccessibilityScrollDirection)direction {
+    unsigned int back;
+    switch (direction) {
+        case UIAccessibilityScrollDirectionUp: back = 1; break;   // 위로 = 스크롤백 쪽
+        case UIAccessibilityScrollDirectionDown: back = 0; break;
+        // 좌우는 우리 것이 아니다 — 삼키면 VoiceOver 가 화면 넘기기를 못 한다.
+        default: return NO;
+    }
+    return maru_mobile_a11y_scroll(back, 1) != 0;
 }
 
 /// 서술자 묶음이 바뀌었나를 **두 숫자로** 잰다.

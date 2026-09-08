@@ -3160,6 +3160,39 @@ pub export fn maru_mobile_scroll_to_bottom() void {
     noteViewportMoved();
 }
 
+/// 낭독기가 요청한 스크롤. **얼마나 미는지는 여기서 정한다** — host 는 「어느 쪽으로, 줄인가
+/// 화면인가」만 말한다(M9b). `back` 이면 위로(스크롤백 쪽), `page` 면 한 화면이다.
+///
+/// **답은 「움직였나」다.** 그 답이 있어야 낭독기가 「더 없다」를 말할 수 있다 — iOS 는
+/// `accessibilityScroll:` 의 반환값이 곧 그것이고, Android 는 그 값으로 동작을 낼지 정한다.
+/// 안 움직였는데 참을 답하면 낭독기가 끝에서 계속 「됐다」고 말해 사용자가 갇힌다.
+///
+/// **민 것은 새 출력이 아니다** — 손가락으로 민 것과 같은 자리를 지나 낭독 대기열을 비운다(M9a).
+/// 안 그러면 스스로 훑는 중에 「출력이 많습니다」가 끼어든다.
+/// 그쪽으로 **갈 수 있나**(1=있다). Android 는 갈 수 있을 때만 스크롤 동작을 노드에 단다 —
+/// 늘 달면 끝에서도 손짓이 먹은 것처럼 굴어 사용자가 갇힌다.
+///
+/// **판단이 `a11y_scroll` 과 같은 자리에 있다** — host 가 「스크롤백이 얼마나 남았나」를 따로
+/// 세면 그 둘이 갈려, 동작은 붙는데 눌러도 안 움직이는 상태가 된다.
+pub export fn maru_mobile_a11y_can_scroll(back: u32) u32 {
+    const core = &(term_core orelse return 0);
+    if (back != 0) return if (core.viewOffset() < core.scrollbackLen()) 1 else 0;
+    return if (core.viewOffset() > 0) 1 else 0;
+}
+
+pub export fn maru_mobile_a11y_scroll(back: u32, page: u32) u32 {
+    const core = &(term_core orelse return 0);
+    // **화면 하나는 「지금 보이는 줄 수」다.** 상수로 두면 회전·키보드로 격자가 바뀔 때 실제
+    // 화면과 어긋나 한 번에 건너뛰는 양이 달라진다.
+    const step: isize = if (page != 0) @max(1, @as(isize, body_rows)) else 1;
+    const before = core.viewOffset();
+    core.scrollViewport(if (back != 0) step else -step);
+    const after = core.viewOffset();
+    if (after == before) return 0; // 끝이다 — 낭독기가 「더 없다」를 말한다
+    noteViewportMoved();
+    return 1;
+}
+
 pub export fn maru_mobile_view_offset() u32 {
     const core = &(term_core orelse return 0);
     return @intCast(core.viewOffset());
@@ -7739,7 +7772,7 @@ fn noteTerminalRow(row: u16, snap: anytype, core: *terminal.core.TerminalCore, r
     // 보는 것과 읽는 것이 갈린다. 빈 줄은 아래에서 서술자를 안 내지만 **지문은 남겨야** 한다:
     // 글자가 있던 줄이 비면 그것도 「바뀐 것」이고, 안 남기면 지난 지문이 그대로 살아 다음에 같은
     // 글자가 와도 「안 바뀌었다」가 된다.
-    noteRowForAnnounce(row, absolute, text);
+    noteRowForAnnounce(row, text);
     if (text.len == 0) return;
 
     // 이름은 줄 번호다. **모자랄 수 없다** — 격자 행은 `u16` 이라 다섯 자리를 넘지 않는다.
@@ -7796,17 +7829,24 @@ var announce_overflow = false;
 var announce_quiet: u32 = 0;
 /// host 가 가져갈 것. 0 이면 이번엔 읽을 것이 없다.
 var announce_ready_len: usize = 0;
-// **줄의 신원은 화면 행이 아니라 «절대 줄 번호» 다.** 행 번호로 재면 화면이 꽉 찬 뒤 한 줄만
-// 와도 전부 한 칸씩 밀려 **모든 줄이 「바뀐 것」**이 되고, 그러면 늘 상한에 걸려 「출력이
-// 많습니다」만 들린다 — 흔한 경우가 통째로 못 쓰게 된다(판정자가 이것을 잡았다). 절대 번호로
-// 재면 밀려 올라간 줄은 번호도 글자도 그대로라 안 읽히고, **정말 새로 온 줄만** 읽힌다.
+// **줄의 신원은 «글자 자체» 다** — 자리도 번호도 아니다.
 //
-// 지난 프레임의 창은 절대 번호로 이어진 구간이므로 시작 번호 하나와 배열이면 찾을 수 있다.
+// 두 번 틀렸고 두 번 다 판정자가 잡았다.
+//  ① **화면 행**으로 재면 화면이 꽉 찬 뒤 한 줄만 와도 전부 한 칸씩 밀려 모든 줄이 「바뀐 것」이
+//     된다 — 늘 상한에 걸려 「출력이 많습니다」만 들린다.
+//  ② **절대 줄 번호**로 재면 ①은 풀리지만, **스크롤백이 상한에 차면 번호가 더 안 밀린다** —
+//     내용은 흐르는데 번호는 제자리라 다시 모든 줄이 「바뀐 것」이 된다. 터미널은 오래 켜 두면
+//     반드시 그 상태가 되므로, 이쪽이 오히려 **평소 상태**다(실측: `abs 1001 → 1001`).
+//
+// 글자로 재면 둘 다 안 걸린다: 밀려 올라간 줄은 글자가 그대로라 지난 창에 **있고**, 새로 온 줄만
+// 없다. 지난 창은 순서 없는 **집합**으로 본다 — 자리를 안 보므로 밀림이 아예 문제가 되지 않는다.
+//
+// **같은 글자가 두 줄이면 한 줄로 친다.** 지난 창에 그 글자가 있으면 새 줄이 아니라고 보므로,
+// 똑같은 줄이 연달아 나오면 뒤엣것은 안 읽힌다 — 낭독에서는 중복을 흘리는 편이 낫다(같은 말을
+// 두 번 듣는 것보다 낫고, 그 판단이 이 축에서 유일하게 잃는 것이다).
 var announce_prev: [max_rows]u64 = @splat(0);
-var announce_prev_first: u64 = 0;
 var announce_prev_n: u16 = 0;
 var announce_now: [max_rows]u64 = @splat(0);
-var announce_now_first: u64 = 0;
 var announce_now_n: u16 = 0;
 
 /// 줄 글자의 지문. 바뀐 줄만 읽으려면 「지난 프레임과 같은가」를 알아야 하는데, 줄 글자를 통째로
@@ -7820,17 +7860,15 @@ fn rowDigest(text: []const u8) u64 {
 
 /// 이 줄이 지난 프레임과 다르면 읽을 것에 담는다. **`noteTerminalRow` 가 만든 그 글자**를 받는다 —
 /// 따로 세면 보는 것과 읽는 것이 갈린다. `abs` 는 스크롤백을 포함한 절대 줄 번호다.
-fn noteRowForAnnounce(row: u16, abs: u64, text: []const u8) void {
+fn noteRowForAnnounce(row: u16, text: []const u8) void {
     if (row >= max_rows) return;
     const digest = rowDigest(text);
-    if (row == 0) announce_now_first = abs;
     announce_now[row] = digest;
     announce_now_n = row + 1;
-    // 지난 창에 그 번호가 있었고 글자도 같으면 **안 바뀐 것**이다 — 스크롤로 자리만 옮긴 줄이 여기서
-    // 걸러진다. 없던 번호면 새 줄이다.
-    if (abs >= announce_prev_first) {
-        const idx = abs - announce_prev_first;
-        if (idx < announce_prev_n and announce_prev[@intCast(idx)] == digest) return;
+    // 지난 창에 그 글자가 **있었으면** 새 줄이 아니다 — 밀려 올라간 줄이 여기서 걸러진다.
+    // 자리를 안 보므로 스크롤백이 차서 번호가 멈춰도 그대로 돈다.
+    for (announce_prev[0..announce_prev_n]) |d| {
+        if (d == digest) return;
     }
     announce_quiet = 0;
     if (announce_overflow) return; // 이미 넘쳤다 — 더 담지 않는다
@@ -7864,7 +7902,6 @@ fn stepAnnounce(on_terminal: bool, rows_now: u16) void {
     var r: u16 = rows_now;
     while (r < max_rows) : (r += 1) announce_now[r] = 0;
     announce_prev = announce_now;
-    announce_prev_first = announce_now_first;
     announce_prev_n = @min(announce_now_n, rows_now);
     announce_now_n = 0;
 
@@ -7957,9 +7994,7 @@ pub fn resetAnnounceForTest() void {
     dropAnnounce();
     announce_prev = @splat(0);
     announce_now = @splat(0);
-    announce_prev_first = 0;
     announce_prev_n = 0;
-    announce_now_first = 0;
     announce_now_n = 0;
     announce_on_terminal = false;
     announce_rebaseline = false;
@@ -8111,6 +8146,68 @@ pub export fn maru_mobile_a11y_set_pos(index: u32) u32 {
     const sem = a11y_nodes[index].sem;
     return (@as(u32, @intCast(@min(sem.position_in_set, 0xFFFF))) << 16) |
         @as(u32, @intCast(@min(sem.set_size, 0xFFFF)));
+}
+
+/// **낭독기 초점이 그 서술자에 닿았다**(M9b — 가장자리에서 이어지기).
+///
+/// 읽다가 화면 맨 끝 줄을 넘으려 하면 거기서 끊긴다 — 그때 **한 줄 밀어** 읽기가 이어지게 한다.
+/// xterm.js 는 위아래에 요소를 하나씩 더 두고 거기 초점이 닿는 것으로 이 순간을 잡는데(웹은 초점이
+/// DOM 요소를 탄다), 우리는 **요소를 더 두지 않는다**: 그러면 읽히는 줄 수가 화면과 달라져
+/// 「몇째 줄 / 전부 몇」이 어긋난다. 대신 host 가 초점이 닿은 자리를 그대로 알려 준다
+/// (iOS `accessibilityElementDidBecomeFocused` · Android `ACTION_ACCESSIBILITY_FOCUS`).
+///
+/// **본문 줄에만 걸린다.** 버튼·목록에 닿았다고 터미널이 움직이면 사용자가 어디 있는지 모르게 된다.
+///
+/// **한 번 더 닿아야 민다.** 처음 그 줄에 닿은 것은 「거기까지 읽었다」이지 「더 가겠다」가 아니다 —
+/// 바로 밀면 마지막 줄을 읽으려던 사람이 읽기도 전에 화면이 움직인다. 같은 자리에 **다시** 닿았을
+/// 때가 「더 가겠다」다.
+pub export fn maru_mobile_a11y_focus(index: u32) void {
+    if (index >= a11y_count) {
+        a11y_focus_edge = .none;
+        return;
+    }
+    const sem = a11y_nodes[index].sem;
+    // **본문 줄에만 걸린다.** 버튼·목록에 닿았다고 터미널이 움직이면 사용자가 어디 있는지 모르게
+    // 된다.
+    //
+    // **화면까지 따로 묻지는 않는다.** 「터미널이 맨 위일 때만」을 한 줄 더 넣어 봤는데, 지금
+    // `text` 에 「몇째/전부 몇」을 다는 자리는 **본문 줄 하나뿐**이고(목록·팝업·서버 줄은 전부
+    // `list_item` 이다) 본문 줄 서술자 자체가 터미널이 맨 위일 때만 만들어진다 — 도달할 수 없는
+    // 가드라 변이 검사에서 무동작으로 드러났다. 새 화면이 `text` + 「몇째」를 달면 그때 이 조건이
+    // 실제로 갈라진다.
+    if (sem.role != .text or sem.set_size == 0 or sem.position_in_set == 0) {
+        a11y_focus_edge = .none;
+        return;
+    }
+    // 이 서술자가 **화면의** 맨 위/맨 아래 줄인가. 절대 번호가 아니라 이번 프레임 서술자 안에서의
+    // 자리로 본다 — 스크롤백 맨 위·맨 아래는 아래 `a11y_scroll` 이 「안 움직였다」로 답한다.
+    const edge: FocusEdge = edge: {
+        var first_row: u32 = std.math.maxInt(u32);
+        var last_row: u32 = 0;
+        for (a11y_nodes[0..a11y_count]) |n| {
+            if (n.sem.role != .text or n.sem.set_size == 0 or n.sem.position_in_set == 0) continue;
+            first_row = @min(first_row, n.sem.position_in_set);
+            last_row = @max(last_row, n.sem.position_in_set);
+        }
+        if (sem.position_in_set == first_row and first_row != last_row) break :edge .top;
+        if (sem.position_in_set == last_row and first_row != last_row) break :edge .bottom;
+        break :edge .none;
+    };
+    // **같은 가장자리에 다시 닿았을 때만 민다.**
+    if (edge != .none and edge == a11y_focus_edge) {
+        _ = maru_mobile_a11y_scroll(if (edge == .top) 1 else 0, 0);
+        a11y_focus_edge = .none; // 밀었으니 다시 처음부터 — 연달아 미끄러지지 않는다
+        return;
+    }
+    a11y_focus_edge = edge;
+}
+
+const FocusEdge = enum { none, top, bottom };
+var a11y_focus_edge: FocusEdge = .none;
+
+/// 판정자용 — 초점 기억을 지운다.
+pub fn resetA11yFocusForTest() void {
+    a11y_focus_edge = .none;
 }
 
 /// 판정자가 보는 서술자 한 줄. `A11yNode` 를 그대로 내면 그 타입이 밖으로 새므로 뷰만 낸다.

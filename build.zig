@@ -10428,7 +10428,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"정책 경계"},
         });
         const run_mobile_control_policy_boundary_tests = b.addRunArtifact(mobile_control_policy_boundary_tests);
-        run_mobile_control_policy_boundary_tests.addArg("--maru-expect-tests=" ++ "6");
+        run_mobile_control_policy_boundary_tests.addArg("--maru-expect-tests=" ++ "7");
         run_mobile_control_policy_boundary_tests.setCwd(b.path("."));
         boundary_step.dependOn(&run_mobile_control_policy_boundary_tests.step);
 

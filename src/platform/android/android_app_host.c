@@ -1355,6 +1355,39 @@ Java_dev_maru_MaruActivity_nativeSystemAppearance(JNIEnv *env, jclass cls, jint 
     maru_mobile_set_system_appearance(is_dark != 0 ? 1u : 0u);
 }
 
+/// 낭독기 초점이 그 서술자에 닿았다(M9b). **판단은 코어가 한다** — 여기서는 자리만 넘긴다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeA11yFocus(JNIEnv *env, jclass cls, jint index) {
+    (void)env;
+    (void)cls;
+    if (index < 0) return;
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_a11y_focus((unsigned int)index);
+    pthread_mutex_unlock(&g_bridge_lock);
+}
+
+/// 낭독기가 요청한 스크롤(M9b). 「움직였나」를 그대로 돌려준다 — 그 답이 TalkBack 의 「더 없다」다.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yScroll(JNIEnv *env, jclass cls, jint back, jint page) {
+    (void)env;
+    (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int moved = maru_mobile_a11y_scroll(back != 0 ? 1u : 0u, page != 0 ? 1u : 0u);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)moved;
+}
+
+/// 그쪽으로 갈 수 있나(M9b). 갈 수 있을 때만 동작을 노드에 단다.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yCanScroll(JNIEnv *env, jclass cls, jint back) {
+    (void)env;
+    (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int can = maru_mobile_a11y_can_scroll(back != 0 ? 1u : 0u);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)can;
+}
+
 /// 시스템 **글자 배율**(접근성). `scale_milli` 는 ×1000 이고 0 은 「모른다」다 — 정책은 코어가 든다
 /// (`font.follow-system`·범위 자르기). Java 는 `Configuration.fontScale` 을 그대로 실어 보낸다.
 JNIEXPORT void JNICALL

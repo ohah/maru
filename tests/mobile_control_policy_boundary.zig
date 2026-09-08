@@ -255,6 +255,52 @@ test "정책 경계: 새 출력 낭독은 host 가 «말하기만» 한다 (M9a)
     try expectPrecedesInSameBody(android, "drainA11yAnnouncement();", "if (!frame_changed && g.pace_done)");
 }
 
+test "정책 경계: 스크롤백 훑기도 host 가 «나르기만» 한다 (M9b)" {
+    // **얼마나 미는지·언제 미는지는 코어가 정한다.** host 가 그 판단을 나눠 가지면 두 플랫폼이
+    // 다른 때에 다른 만큼 움직이고, 그 차이는 낭독기를 켠 사람에게만 드러난다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+
+    // 두 길이 두 host 에 다 있다 — 한쪽만 있으면 그 플랫폼에서는 스크롤백에 못 닿는다.
+    try std.testing.expect(count(ios, "accessibilityElementDidBecomeFocused") > 0);
+    try std.testing.expect(count(ios, "accessibilityScroll:") > 0);
+    try std.testing.expect(count(java, "nativeA11yFocus(") > 0);
+    // **몸통을 본다 — 글자 세기로는 못 잡는다.** 같은 이름이 `performAction` 의 `switch` 에도
+    // 있어서, 노드에 동작을 다는 줄을 통째로 지운 변이가 「어딘가 있다」로 초록이었다.
+    try expectPresentInBody(java, "public AccessibilityNodeInfo createAccessibilityNodeInfo(", "ACTION_SCROLL_BACKWARD");
+    try expectPresentInBody(java, "public AccessibilityNodeInfo createAccessibilityNodeInfo(", "ACTION_SCROLL_FORWARD");
+    // **위·아래 둘 다** 코어에 넘긴다 — 하나만 넘기면 한쪽으로만 훑을 수 있다.
+    try expectCountInBody(java, "public boolean performAction(", "nativeA11yScroll(", 2);
+
+    // **「움직였나」를 그대로 돌려준다.** 삼키고 참을 답하면 낭독기가 끝에서 계속 「됐다」고 말해
+    // 사용자가 갇힌다.
+    try expectPresentInBody(ios, "- (BOOL)accessibilityScroll:", "return maru_mobile_a11y_scroll(");
+
+    // **얼마나 미는지를 host 가 안 센다.** 화면 줄 수·스크롤백 길이를 여기서 세면 코어와 갈린다.
+    try expectAbsentFromBody(ios, "- (BOOL)accessibilityScroll:", "maru_mobile_term_rows");
+    try expectAbsentFromBody(ios, "- (void)accessibilityElementDidBecomeFocused {", "a11y_set_pos");
+    try std.testing.expectEqual(@as(usize, 0), count(java, "maru_mobile_term_rows"));
+    try std.testing.expectEqual(@as(usize, 0), count(java, "nativeScrollbackLen"));
+
+    // **「갈 수 있나」도 코어가 답한다** — host 가 따로 세면 동작은 붙는데 눌러도 안 움직인다.
+    // 여기도 몸통을 본다: 선언 줄이 따로 있어 이름만 세면 조건을 `true` 로 바꾼 변이가 빠져나간다.
+    // **위·아래를 각각 묻는다.** 「있다」로 재면 하나를 `true` 로 바꾼 변이가 나머지에 걸려 통과한다.
+    try expectCountInBody(java, "public AccessibilityNodeInfo createAccessibilityNodeInfo(", "nativeA11yCanScroll(", 2);
+    // **갈 곳이 있을 때만 「스크롤되는 것」이라고 말한다** — 늘 참으로 두면 스크롤백이 없는
+    // 화면에서도 TalkBack 이 그렇게 읽어 주고, 사용자는 있지도 않은 곳을 찾는다.
+    try std.testing.expectEqual(@as(usize, 0), count(java, "setScrollable(true)"));
+    try std.testing.expect(count(android, "maru_mobile_a11y_can_scroll(") > 0);
+
+    // **초점이 우리 요소를 벗어난 것도 알린다** — 안 알리면 나중에 그 가장자리로 돌아왔을 때
+    // 「다시 닿았다」로 보여 한 번 만에 밀린다.
+    try expectPresentInBody(java, "public boolean performAction(", "nativeA11yFocus(nativeA11yCount())");
+}
+
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.
 ///
 /// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입
@@ -290,6 +336,16 @@ fn bodyOf(src: []const u8, signature: []const u8) ![]const u8 {
 fn expectPresentInBody(src: []const u8, signature: []const u8, needle: []const u8) !void {
     const body = try bodyOf(src, signature);
     if (std.mem.indexOf(u8, body, needle) == null) return error.NeedleMissingFromBody;
+}
+
+/// 그 몸통 안에 `needle` 이 **몇 개** 있는가를 고정한다.
+///
+/// **「있다」로는 모자란 자리가 있다.** 위/아래처럼 짝으로 있어야 하는 것은 하나를 지워도 나머지가
+/// 「있다」를 만족시켜 변이가 초록으로 빠져나간다 — 실제로 두 번 겪었다(스크롤 동작을 다는 자리,
+/// 그것을 코어에 넘기는 자리).
+fn expectCountInBody(src: []const u8, signature: []const u8, needle: []const u8, want: usize) !void {
+    const body = try bodyOf(src, signature);
+    try std.testing.expectEqual(want, count(body, needle));
 }
 
 /// 그 몸통 안에 `needle` 이 **없어야** 한다.

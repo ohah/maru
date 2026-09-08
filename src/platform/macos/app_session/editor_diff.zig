@@ -2619,6 +2619,12 @@ test "DCARET10: 한 화면의 크기는 그 열이 그린 행 수다 (§4.1g 비
     fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .page_down, false));
     try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    // **열은 이동이 바꾸지 않는다.** 클릭으로 왼쪽을 고른 사용자가 키를 누르면 오른쪽으로 튀는
+    //    변이(8회차 C109)는 행 번호만 재는 판정자로는 안 잡힌다 — 두 열의 행 수를 갈라 놨으니
+    //    번호는 이미 갈리지만, 열 자체를 단언해야 그 뜻이 분명하다.
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false));
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
 
     // ⑶ **한 프레임도 안 그렸으면 한 행이다 — 죽은 키가 되지 않는다.** 편집 직후 이 값이 0으로
     //    비워지고 다음 프레임이 다시 채우는데, 그 사이에 PageDown 이 오면 0행 이동이 된다.
@@ -3040,4 +3046,39 @@ test "DCARET23: caret 뿐이면 복사할 것이 없고, 검색은 caret 이 선
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("B", fx.session.chrome_clipboard_write);
+}
+
+test "DCARET24: caret 은 **caret 이 선 열**에 그려진다 — 검색 열이 달라도 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    var entry = testEntry("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    try diffCaretFixture(&fx, &entry, leaf);
+
+    fx.session.blink_visible = true;
+    fx.term.rt.editor_diff_selection = null;
+    try drawOnce(&fx, leaf);
+    const base = try snapshotQuads(allocator, fx.session);
+    defer allocator.free(base);
+
+    // **caret 열과 검색 열은 다른 값이다.** 대개 같아서(검색 기본이 caret 열이다) 렌더가 검색
+    // 열을 봐도 안 드러난다 — 명시로 갈라 놓아야 그 변이(8회차 C111)가 죽는다.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 2 }) };
+    fx.session.chrome_host.find.diff_side = .right;
+    defer fx.session.chrome_host.find.diff_side = null;
+    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term)); // 픽스처 자기 검증
+    try drawOnce(&fx, leaf);
+    const left_caret = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(left_caret);
+    try testing.expectEqual(@as(usize, 1), left_caret.len);
+
+    // 오른쪽에 세운 caret 과 견주면 왼쪽이 더 앞이다 — 검색 열(오른쪽)을 따라갔다면 같은 자리다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 2 }) };
+    try drawOnce(&fx, leaf);
+    const right_caret = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(right_caret);
+    try testing.expectEqual(@as(usize, 1), right_caret.len);
+    try testing.expect(left_caret[0].x < right_caret[0].x);
 }

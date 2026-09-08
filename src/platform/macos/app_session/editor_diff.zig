@@ -2431,6 +2431,15 @@ test "DCARET5: 세로 이동이 목표 열을 유지한다" {
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
     try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // **⇧ 로 늘릴 때도 목표 열을 든다.** 확장만 목표를 안 세우면 짧은 행을 지나며 열이 잘리고
+    //    돌아오지 않는다 — 확장이 아닌 이동만 재는 판정자로는 안 잡힌다(9회차 C117).
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 6 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .shift = true } });
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // "bb" 끝
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .shift = true } });
+    try testing.expectEqual(@as(usize, 6), fx.term.rt.editor_diff_selection.?.sel.focus.byte); // 목표 열 복원
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.anchor_start.row); // anchor 는 그대로
 }
 
 test "DCARET6: caret 이 화면 밖으로 나가면 뷰가 따라간다" {
@@ -3046,6 +3055,13 @@ test "DCARET23: caret 뿐이면 복사할 것이 없고, 검색은 caret 이 선
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("B", fx.session.chrome_clipboard_write);
+
+    // ⑸ **복사는 caret 이 선 열을 따른다 — 검색 열이 아니다.** 둘이 대개 같아서 검색 열로 골라도
+    //    같은 바이트가 나온다(9회차 C122). 명시로 갈라 놓으면 그 갈래가 처음으로 갈린다.
+    fx.session.chrome_host.find.diff_side = .left;
+    defer fx.session.chrome_host.find.diff_side = null;
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("B", fx.session.chrome_clipboard_write); // 왼쪽이면 "b" 다
 }
 
 test "DCARET24: caret 은 **caret 이 선 열**에 그려진다 — 검색 열이 달라도 (§4.1g 비교 뷰)" {
@@ -3081,4 +3097,14 @@ test "DCARET24: caret 은 **caret 이 선 열**에 그려진다 — 검색 열�
     defer allocator.free(right_caret);
     try testing.expectEqual(@as(usize, 1), right_caret.len);
     try testing.expect(left_caret[0].x < right_caret[0].x);
+
+    // **거울 경우도 재야 한다.** 위 둘은 검색 열이 늘 오른쪽이라, 렌더가 «검색 열일 때만
+    //    오른쪽에 그린다»로 바뀌어도 답이 같다(9회차 C111 이 그렇게 살아남았다). 검색을 왼쪽으로
+    //    돌리고 caret 을 오른쪽에 두면 그 갈래가 처음으로 갈린다.
+    fx.session.chrome_host.find.diff_side = .left;
+    try drawOnce(&fx, leaf);
+    const mirrored = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(mirrored);
+    try testing.expectEqual(@as(usize, 1), mirrored.len);
+    try testing.expectEqual(right_caret[0].x, mirrored[0].x);
 }

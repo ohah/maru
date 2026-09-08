@@ -3364,6 +3364,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   private APFS의 20회/profile 행은 synthetic verifier의 O_EXCL marker로 baseline 2회·upgrade 3회 actual child를 세고, invalid tuple의
   child 0, stderr·parent FD delta·marker/residue 0과 total median·p95·max를 기록한다. 아직 구현 전인 범위는 authored checkpoint와
   live action caller 결속, protected B tag에서 실제 `actions/attest` bundle을 사용하는 원격 실측이다.
+  다음 §11.99d gate는 repository-local live authored action 하나가 checkpoint `admit` 뒤 credential-free selector, profile-aware
+  2/3 payload, credential-free final fence를 순서대로 exact once 실행하고 세 child의 terminal outcome을 마지막 `if: always()` owner만
+  판정해 succeeded/failed를 exact once
+  commit하도록 결속한다. action output은 final fence가 재검증한 세 bundle pathname만 허용하며 baseline timing은 empty다. source gate와
+  fresh-process 합성 harness가 최소 credential, 기존 baseline-only payload 0, selector/payload/fence success·failure·unknown outcome, checkpoint commit failure,
+  output 3/0과 child/FD/residue를 검증한다. aggregate/publication의 profile-aware evidence·timing bundle 소비와 protected B 실제 GitHub
+  bundle/N-1-current 실측은 후속이므로 §11.99d green만으로 §11.99 전체 완료를 주장하지 않는다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.

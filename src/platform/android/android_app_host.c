@@ -2875,6 +2875,18 @@ static void frameCallback(int64_t frame_time_ns, void *data) {
         g.needs_recreate = 0;
         recreateVulkan((struct android_app *)data);
     }
+    // **그릴 것이 없으면 다음 프레임을 안 건다**(M14b). 창이 부서지면 `teardownVulkan` 이 `g` 를
+    // 통째로 지워 `g.ready` 가 0 이 되는데, 그래도 콜백은 vsync 마다 다시 걸려 **아무 일도 안
+    // 하면서 깨어나고 있었다**(실측: 배경 20초에 CPU 0.06초 — 같은 시간 포그라운드 정지 화면의
+    // 43%다). iOS 는 `CADisplayLink` 를 멈추므로 Android 만 그랬고, 그 차이는 화면으로는 안
+    // 보이고 배터리로만 드러난다.
+    //
+    // **다시 거는 자리는 하나다** — 창이 서는 `APP_CMD_INIT_WINDOW` 다. 여기서 멈출 때
+    // `g_chor_started` 를 0 으로 되돌려야 그 자리가 다시 걸 수 있다(안 되돌리면 영영 안 그려진다).
+    if (!g.ready) {
+        g_chor_started = 0;
+        return;
+    }
     AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, data);
 }
 

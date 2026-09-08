@@ -10879,8 +10879,22 @@ pub const Client = struct {
                     return error.ConnectionClosed;
                 }
                 if (count == 0) {
-                    self.poison(if (self.parser.bufferedBytes() == 0) .connection_eof else .frame_malformed);
-                    return if (self.parser.bufferedBytes() == 0) error.ConnectionClosed else error.ProtocolError;
+                    const buffered = self.parser.bufferedBytes();
+                    // **끊길 때 무엇을 주고받던 중이었는지 남긴다.** `poison` 이 찍는 reason·주소만으로는
+                    // host 로그와 이어붙일 수 없다 — 2026-09-08 에 GUI 가 `connection_eof` 를 네 번 찍는
+                    // 동안 host 로그는 40 분간 한 줄도 늘지 않았고, 두 기록을 맞출 값이 없었다.
+                    // `poll_owner.ClientCloseReason.peer_broken` 주석이 2026-09-04 에 요구한 것이 이것이다.
+                    //
+                    // **여기서 찍는 이유**: `poison` 안은 fence 를 잡기 전이라 Client 저장소를 읽으면 안
+                    // 된다(그 함수 주석 — exclusive cleanup 콜백에서는 지연 poison 조차 저장소를 못
+                    // 건드린다). 이 자리는 `requireBlockingMode` 를 지난 뒤이고, 바로 아래 줄이 이미
+                    // `parser` 를 읽는다. 같은 종류의 접근이라 새로 여는 위험이 없다.
+                    std.log.info(
+                        "client read eof: last_success={d} in_flight={d} buffered={d}",
+                        .{ self.last_success_request_id, self.next_request_id -| 1 -| self.last_success_request_id, buffered },
+                    );
+                    self.poison(if (buffered == 0) .connection_eof else .frame_malformed);
+                    return if (buffered == 0) error.ConnectionClosed else error.ProtocolError;
                 }
                 self.parser.push(buf[0..@intCast(count)]) catch {
                     self.poison(.local_resource_exhausted);
@@ -15240,10 +15254,18 @@ pub const Client = struct {
         // dyld 이미지 0 은 main executable 이고 `client.zig` 는 거기 링크된다. 슬라이드를 함께 남기면
         // 사후에도 `atos -o <바이너리> -l <slide> <return_address>` 로 복원된다.
         const slide: usize = @intCast(std.c._dyld_get_image_vmaddr_slide(0));
+        // **시각을 함께 남긴다.** maru 의 로그 줄에는 타임스탬프가 없어서(2026-09-09 실측: 4414 줄 중
+        // 6 줄만, 그마저 macOS 가 찍은 것) 「언제 죽었나」를 알 수 없었다. 발견하는 자리
+        // (`recordHostConnectFailure` 의 `runtime_death`)도 같은 값을 찍으므로, 둘의 차이가
+        // **조용히 죽어 있던 시간**이다 — 16 시간이면 재연결이 없는 것이고, 몇 초면 절단 자체가 원인이다.
+        // `self` 를 읽지 않으므로 fence 앞이어도 안전하다.
+        // Zig 0.16 은 `std.time.timestamp` 를 뺐다. 이 저장소의 관례대로 `clock_gettime` 을 직접 쓴다.
+        var wall: std.c.timespec = undefined;
+        const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
         if (decision.expected) {
-            std.log.info("client poison: reason={s} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), ra, slide });
+            std.log.info("client poison: reason={s} at_unix={d} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), at, ra, slide });
         } else {
-            std.log.err("client poison: reason={s} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), ra, slide });
+            std.log.err("client poison: reason={s} at_unix={d} return_address=0x{x} slide=0x{x}", .{ @tagName(reason), at, ra, slide });
         }
     }
 

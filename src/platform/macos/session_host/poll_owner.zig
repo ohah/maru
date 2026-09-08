@@ -447,7 +447,13 @@ pub const Owner = struct {
     /// 그대로 침묵한다 — 연결이 닫힐 때마다 찍으면 그 소음이 다시 이 로그를 못 읽게 만든다.
     fn logClientClosed(self: *const Owner, index: usize, reason: ClientCloseReason) void {
         if (builtin.is_test) return;
-        if (reason.isExpected() and self.producer_remaining[index] == 0) return;
+        // **남은 침묵도 없앤다.** 전에는 「예정된 사유이고 보낼 것도 없으면」 조용했는데, 2026-09-08 에
+        // 정확히 그 모양으로 끊겼다 — GUI 는 `connection_eof` 를 네 번 찍고 in-process 로 내려갔는데
+        // host 로그는 **40 분간 한 줄도 늘지 않았다**. 사유를 아무리 잘게 갈라 놔도 줄 자체가 안 나가면
+        // 소용이 없다.
+        //
+        // 닫기는 연결마다 한 번뿐이라(프레임마다가 아니다) 전부 남겨도 로그가 넘치지 않는다. 대신
+        // 「조용하다」가 「아무 일도 없었다」와 「기록을 안 했다」 중 무엇인지 구별된다.
         // **안쪽 사유까지 싣는다.** 바깥 `reason` 은 「누가 닫았나」이고 `why` 는 「host 상태기가 왜
         // 닫기로 했나」다. `client_closing` 하나가 열 가지를 뭉개던 자리가 여기다(2026-09-08).
         var why: []const u8 = "gone";

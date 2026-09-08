@@ -36,7 +36,7 @@
 | **IG3-c3** overflow 표시 | ✅ 완료 — 다 못 보여 줄 때 「12장 중 8장」. 「없다」와 「안 보인다」를 가른다(계약 §2) |
 | **IG4-a** 팬·줌 순수 계산 | ✅ 완료 — `session/image_view.zig`(단위 9개) + `image_grid.hitTest`(3개, `rectAt` 파생) |
 | **IG4-b** 열기·닫기·원본 렌더 | ✅ 완료 — 칸 클릭 → 워커가 원본을 풀고 뷰포트에 letterbox. Esc·이미지 밖 클릭으로 닫는다 |
-| **IG4-c** 휠 줌·드래그 팬 | ✅ 완료 — 휠=포인터 붙잡고 확대/축소, 드래그=`image_gallery_pan` 제스처. test 는 `scrollWheel`·`session.mouse` 제품 진입점을 탄다 |
+| **IG4-c** 휠 줌·드래그 팬 | ✅ 완료 — 휠=포인터 붙잡고 확대/축소, 드래그=`agent_activity_pan` 제스처. test 는 `scrollWheel`·`session.mouse` 제품 진입점을 탄다 |
 | **IG5-a** 문맥 파서 | ✅ 완료 — `session/agent_image_context.zig`(단위 11개). **실측이 설계를 두 번 고쳤다**: 같은 줄 11.0% → `tool_use_id` 직전 줄 매칭 100% |
 | **IG5-b** 격자 라벨 띠 | ✅ 완료 — `Metrics.label`+`labelRectAt`(단위 16개). 라벨도 그 칸이라 눌러도 열린다 |
 | **IG5-c** 라벨 그리기 | ✅ 완료 — 타일 아래 한 줄. 헤드리스 캡처로 눈 확인 |
@@ -220,7 +220,7 @@ pub fn dockViewSlotIndex(self: *const AppSession) usize {
 
 ### 3.3 도크 뷰 껍데기
 
-- `dock_panel.View`에 `image_gallery` 추가, `forSlot`/`slot`에 3번 슬롯, `dock_view_bar.slot_count` 3→4.
+- `dock_panel.View`에 `agent_activity` 추가, `forSlot`/`slot`에 3번 슬롯, `dock_view_bar.slot_count` 3→4.
 - 아이콘 하나를 SVG→coverage 파이프라인에 추가(PUA 0xF0000~ 등록 집합).
 - workspace 영속은 기존 `View.parse` 경로가 그대로 처리한다(`workspace.zig`의 clamp가 이미 있다).
 - 격자는 **자리표시자 사각형**만 그린다. 디코드는 IG3이다.

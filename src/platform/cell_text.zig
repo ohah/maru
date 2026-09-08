@@ -1006,7 +1006,7 @@ fn iconKindForDockView(view: dock_panel.View) file_tree_icon.IconKind {
         .explorer => .folder,
         .source_control => .git,
         .agent_sessions => .code,
-        .image_gallery => .image,
+        .agent_activity => .image,
     };
 }
 
@@ -1371,9 +1371,9 @@ test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image �
     try std.testing.expectEqual(@as(usize, dock_view_bar.slot_count), list.cells.len);
 
     // 갤러리 칸의 글리프가 image 아이콘이다.
-    const gallery_slot = dock_panel.View.image_gallery.slot();
+    const activity_slot = dock_panel.View.agent_activity.slot();
     const want = file_tree_icon.codepointFromRaw(@intFromEnum(file_tree_icon.IconKind.image)).?;
-    try std.testing.expectEqual(want, list.cells[gallery_slot].codepoint);
+    try std.testing.expectEqual(want, list.cells[activity_slot].codepoint);
 
     // 각 아이콘은 자기 슬롯 안에 있다(그린 자리와 눌리는 자리가 갈라지지 않는다).
     for (list.cells, 0..) |cell, i| {

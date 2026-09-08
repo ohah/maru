@@ -20,7 +20,7 @@ pub const Side = enum { right, bottom };
 /// | `explorer` | `app_session/file_panel.zig` · `followActiveTerminalCwd` |
 /// | `source_control` | `app_session/git.zig` · `followActiveTerminalRepo` |
 /// | `agent_sessions` | `app_session/agent_dock.zig` · `refreshAgentSessionArchiveProjectScopeForFocus` |
-/// | `image_gallery` | `app_session/image_gallery.zig` · `refreshForFocus` |
+/// | `agent_activity` | `app_session/agent_activity.zig` · `refreshForFocus` |
 ///
 /// 이 표를 판정자가 **exhaustive switch 로** 물고 있다(`app_session.zig` — 「도크 뷰는 전부 활성 pane 을
 /// 따라간다」). 값이 늘면 **거기서 컴파일이 깨진다** — 런타임 판정자는 그 사람이 안 돌리면 그만이라,
@@ -30,7 +30,7 @@ pub const View = enum {
     source_control,
     agent_sessions,
     /// IG1: 에이전트와 주고받은 이미지 격자(docs/agent-image-gallery.md). 범위는 **활성 pane**이다.
-    image_gallery,
+    agent_activity,
 
     /// 뷰 스위처 바의 **슬롯 순서**. 화면 왼쪽부터 이 차례다.
     ///
@@ -42,7 +42,7 @@ pub const View = enum {
             0 => .explorer,
             1 => .source_control,
             2 => .agent_sessions,
-            3 => .image_gallery,
+            3 => .agent_activity,
             else => null,
         };
     }
@@ -53,7 +53,7 @@ pub const View = enum {
             .explorer => 0,
             .source_control => 1,
             .agent_sessions => 2,
-            .image_gallery => 3,
+            .agent_activity => 3,
         };
     }
 

@@ -36,22 +36,22 @@ const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 ///
 /// **스로틀이 필요하다**: 이 함수는 60 Hz 로 불린다. 그대로 두면 초당 60 번 파일을 연다.
 fn pollFreshness(self: *AppSession) void {
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    if (self.image_gallery.chain.isEmpty() or !self.image_gallery.built) return;
-    if (self.image_gallery.scanning()) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
+    if (self.agent_activity.chain.isEmpty() or !self.agent_activity.built) return;
+    if (self.agent_activity.scanning()) return;
     // **크게 보기 중에는 미룬다.** 다시 훑으면 새 이미지가 맨 앞에 와 인덱스가 전부 밀리므로
     // (최신 우선, §IG7) 열어 둔 칸이 다른 그림이 된다. 닫으면 다음 tick 이 잡는다 —
     // 에이전트가 줄 하나 적었다고 보던 이미지가 바뀌는 것보다 잠깐 낡은 편이 낫다.
-    if (self.image_gallery.open != null) return;
+    if (self.agent_activity.open != null) return;
 
     // **단조 시계다.** 벽시계(`Clock.real`)는 NTP 보정으로 뒤로 갈 수 있고, 그러면 아래 뺄셈이
     // 0 으로 포화해 자동 갱신이 그 시간만큼 **조용히 멈춘다**. 「얼마나 지났나」는 `awake` 가 답한다.
     const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
     // 그래도 뒤로 간 값이 보이면(시계 구현이 보장을 못 지키면) **밀린 것으로 보고 지금을 기준으로
     // 다시 잡는다** — 영원히 이른 상태로 갇히지 않는다.
-    if (now_ms < self.image_gallery.last_stat_ms) self.image_gallery.last_stat_ms = now_ms;
-    if (now_ms -| self.image_gallery.last_stat_ms < freshnessIntervalMs(self)) return;
-    self.image_gallery.last_stat_ms = now_ms;
+    if (now_ms < self.agent_activity.last_stat_ms) self.agent_activity.last_stat_ms = now_ms;
+    if (now_ms -| self.agent_activity.last_stat_ms < freshnessIntervalMs(self)) return;
+    self.agent_activity.last_stat_ms = now_ms;
 
     const path = activeSourcePath(self) orelse return;
     if (!headChanged(self, path)) return;
@@ -68,7 +68,7 @@ fn pollFreshness(self: *AppSession) void {
 /// 대면: 중앙 11 ms → 그대로 500 ms · p99 1,175 ms → 11.8 초 · 최대 9,007 ms → 90 초.
 /// 흔한 세션은 영향이 없고, 비싼 세션만 느리게 따라온다.
 fn freshnessIntervalMs(self: *const AppSession) i64 {
-    return restIntervalMs(self.image_gallery.scan_ns / std.time.ns_per_ms);
+    return restIntervalMs(self.agent_activity.scan_ns / std.time.ns_per_ms);
 }
 
 /// 위 규칙의 **순수** 부분 — 화면 없이 짚을 수 있게 갈라 둔다.
@@ -102,10 +102,10 @@ const freshness_max_ms: i64 = 120_000;
 /// 512 B 를 늘 들고 있을 이유가 없다(2 MB).
 fn loadOpenContext(self: *AppSession, n: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    const op = if (self.image_gallery.open) |*o| o else return;
+    const op = if (self.agent_activity.open) |*o| o else return;
     op.context_len = 0;
-    if (n >= self.image_gallery.hits.items.len) return;
-    const hit = self.image_gallery.hits.items[n];
+    if (n >= self.agent_activity.hits.items.len) return;
+    const hit = self.agent_activity.hits.items[n];
     const path = pathFor(self, hit) orelse return;
 
     const back: u64 = @min(hit.line_offset, @as(u64, context_mod.max_prev_line_bytes));
@@ -138,9 +138,9 @@ fn loadOpenContext(self: *AppSession, n: usize) void {
 /// **`pub` 인 이유는 판정자다** — 다시 훑는 길(자동 갱신·검색어 변경)의 한가운데에 있어서,
 /// 도크를 통째로 세우지 않고 이 함수 하나를 직접 잴 수 있어야 한다(`formatResultSummary` 와 같은 규율).
 pub fn remapTiles(self: *AppSession) void {
-    const hits = self.image_gallery.hits.items;
+    const hits = self.agent_activity.hits.items;
     var write: usize = 0;
-    for (self.image_gallery.tiles.items) |tile| {
+    for (self.agent_activity.tiles.items) |tile| {
         var found: ?usize = null;
         for (hits, 0..) |hit, i| {
             // ⚠️ **타일이 어디서 왔는지와 같은 함수로 찾는다**(AV5). 접힌 줄의 타일은 픽셀이
@@ -160,13 +160,13 @@ pub fn remapTiles(self: *AppSession) void {
             // 빈 칸이 안 된다 — 픽셀은 그대로라 다시 디코드하지는 않는다.
             kept.uploaded = false;
             kept.label = labelFor(self, n);
-            self.image_gallery.tiles.items[write] = kept;
+            self.agent_activity.tiles.items[write] = kept;
             write += 1;
         } else {
             self.allocator.free(tile.pixels); // 사라진 이미지 — 픽셀을 여기서 푼다
         }
     }
-    self.image_gallery.tiles.shrinkRetainingCapacity(write);
+    self.agent_activity.tiles.shrinkRetainingCapacity(write);
 }
 
 /// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
@@ -192,7 +192,7 @@ fn stampOf(self: *AppSession, path: []const u8) Stamp {
 fn headChanged(self: *AppSession, path: []const u8) bool {
     const now = stampOf(self, path);
     if (!now.known) return false;
-    return !Stamp.eql(self.image_gallery.head_stamp, now);
+    return !Stamp.eql(self.agent_activity.head_stamp, now);
 }
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
@@ -331,7 +331,7 @@ pub const State = struct {
     /// (`tiles`), 크게 보기 한 장은 그 표시에서 빠져 있었다.
     ///
     /// 실제로 그렇게 났다(사용자 보고): 이미지를 눌러 크게 본 채 **도크를 접으면** 그 프레임에
-    /// `gallery_open_image_id` 가 `live_ids` 에 안 실려 텍스처가 evict 되는데 `uploaded` 는 참으로
+    /// `activity_open_image_id` 가 `live_ids` 에 안 실려 텍스처가 evict 되는데 `uploaded` 는 참으로
     /// 남는다. 도크를 다시 펴면 크게 보기 화면은 돌아오지만 **그림 자리가 빈다** — 업로드 없이 id 만
     /// 실리기 때문이다. 뷰를 바꿔 나갈 때는 `onLeaveView` 가 아예 닫아서(`dropOpen`) 이 길에 안
     /// 들어오고, **접기만** 그 길로 간다.
@@ -655,7 +655,7 @@ pub fn chipSpans(self: *const AppSession, out: *[4]ChipSpan) []const ChipSpan {
     }
 
     // 좁다 — 고른 것 하나만. 그것도 안 들어가면 아무것도 안 그린다(잘린 글자를 남기지 않는다).
-    const cur = self.image_gallery.filter;
+    const cur = self.agent_activity.filter;
     const w = displayColsOf(filterText(cur));
     if (w > cols) return out[0..0];
     out[0] = .{ .filter = cur, .col = 0, .cols = w };
@@ -664,10 +664,10 @@ pub fn chipSpans(self: *const AppSession, out: *[4]ChipSpan) []const ChipSpan {
 
 fn filterText(f: Filter) []const u8 {
     return switch (f) {
-        .images => maru.i18n.t(.image_gallery_filter_images),
-        .execs => maru.i18n.t(.image_gallery_filter_execs),
-        .reads => maru.i18n.t(.image_gallery_filter_reads),
-        .all => maru.i18n.t(.image_gallery_filter_all),
+        .images => maru.i18n.t(.agent_activity_filter_images),
+        .execs => maru.i18n.t(.agent_activity_filter_execs),
+        .reads => maru.i18n.t(.agent_activity_filter_reads),
+        .all => maru.i18n.t(.agent_activity_filter_all),
     };
 }
 
@@ -760,7 +760,7 @@ pub fn reverseFoldOwners(hits: []index.Hit) void {
 
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
 /// 사이에 둔다 — 같은 텍스처 캐시를 쓰므로 id 가 겹치면 남의 그림이 나온다.
-pub const gallery_image_id_base: u32 = 0xFFF0_0000;
+pub const activity_image_id_base: u32 = 0xFFF0_0000;
 
 /// 검색어 상한(바이트). 아카이브 검색과 같은 값이다.
 pub const max_query_bytes: usize = 256;
@@ -775,7 +775,7 @@ pub const max_tiles: usize = 256;
 /// 바뀔 때 같은 타일의 id 가 달라지고, 두 타일이 id 를 맞바꾸면 한 프레임 동안 엉뚱한 그림이 뜬다.
 /// 그래서 구간을 인덱스 상한(`max_hits_per_file`)만큼 잡는다 — 0xFFF0_0000 위로 백만 개가 남아 있어
 /// 배경(0xFFFF_FFFF)과 부딪히지 않는다.
-pub const gallery_open_image_id: u32 = gallery_image_id_base +| 0x10000;
+pub const activity_open_image_id: u32 = activity_image_id_base +| 0x10000;
 
 /// 활성 Term 의 트랜스크립트 경로. 없으면 null — 에이전트가 붙지 않은 pane(셸만 띄운 창)이 그렇다.
 ///
@@ -791,8 +791,8 @@ fn activeSourcePath(self: *AppSession) ?[]const u8 {
     //
     // **판정은 여기 한 곳이다.** 채택하는 쪽에도 두면 둘이 갈린다(바로 아래 `refresh` 주석의 그 이유).
     // 한 곳이라서 ssh **이전**에 담아 둔 로컬 소스가 남아 있는 경우까지 같이 막힌다.
-    self.image_gallery.source_remote = agent_ops.isRemoteAgentPane(term);
-    if (self.image_gallery.source_remote) return null;
+    self.agent_activity.source_remote = agent_ops.isRemoteAgentPane(term);
+    if (self.agent_activity.source_remote) return null;
     // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
     // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
     agent_ops.adoptFallbackImageSource(self, term);
@@ -877,12 +877,12 @@ fn readCodexParentId(self: *AppSession, path: []const u8, out: []u8) []const u8 
 }
 
 fn backendPtr(self: *AppSession) ?*scan_backend.Backend {
-    if (self.image_gallery_backend) |*b| return b;
+    if (self.agent_activity_backend) |*b| return b;
     return null;
 }
 
 fn decodeBackendPtr(self: *AppSession) ?*decode_backend.Backend {
-    if (self.image_gallery_decode_backend) |*b| return b;
+    if (self.agent_activity_decode_backend) |*b| return b;
     return null;
 }
 
@@ -893,15 +893,15 @@ pub fn refresh(self: *AppSession, force: bool) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     const path = activeSourcePath(self) orelse {
-        if (self.image_gallery.built or self.image_gallery.scanning() or !self.image_gallery.chain.isEmpty()) {
+        if (self.agent_activity.built or self.agent_activity.scanning() or !self.agent_activity.chain.isEmpty()) {
             backend.cancel();
             if (decodeBackendPtr(self)) |d| d.cancel();
-            self.image_gallery.clear(self.allocator);
+            self.agent_activity.clear(self.allocator);
             self.metal_dirty = true;
         }
         return;
     };
-    const same = std.mem.eql(u8, self.image_gallery.chain.head(), path);
+    const same = std.mem.eql(u8, self.agent_activity.chain.head(), path);
     // 같은 파일을 이미 훑었거나 훑는 중이면 여기서 물러난다.
     //
     // **신선도는 여기서 안 본다.** 파일이 자랐는지 보는 일은 `pollFreshness` 하나가 맡는다 —
@@ -909,7 +909,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 짚었다: 이 자리에 신선도 검사를 두어도 `pollFreshness` 가 `force` 로 부르므로 **test 가
     // 지키지 못하는 코드**가 된다. 뷰에 다시 들어오면 다음 tick 의 `pollFreshness` 가 곧바로 잡는다
     // (첫 검사는 스로틀에 안 걸린다).
-    if (!force and same and (self.image_gallery.built or self.image_gallery.scanning())) return;
+    if (!force and same and (self.agent_activity.built or self.agent_activity.scanning())) return;
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
@@ -919,10 +919,10 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 죽은 항목이 자리를 차지한 동안 그 칸들은 다시 걸리지 못해 **비어 보인다**(큰 파일이면 훑는
     // 9 초 내내). 못 박는 불변식 자체는 `applyFilter` 가 지킨다 — 훑기 결과는 반드시 거길 지나므로
     // 여기 것은 그 창을 줄이는 몫이다(뮤테이션으로 확인: 이 줄만 지우면 test 는 통과한다).
-    self.image_gallery.pendingClear();
+    self.agent_activity.pendingClear();
     // **보던 자리도 옛 세션의 것이다.** 오프셋은 픽셀이라 새 목록에서는 아무 뜻이 없고, 남겨 두면
     // 짧은 목록에서 끝을 넘어 화면이 빈다(적대적 검증 H2). 필터 전환이 같은 이유로 같은 일을 한다.
-    if (!same) self.image_gallery.scroll.offset_y_px = 0;
+    if (!same) self.agent_activity.scroll.offset_y_px = 0;
 
     // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
     // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
@@ -930,17 +930,17 @@ pub fn refresh(self: *AppSession, force: bool) void {
     //
     // 결과가 오면 `poll` 이 목록을 통째로 바꾸고 그 위에 쌓인 것(타일·크게보기·호버)도 그때 버린다.
     // 그때까지는 조금 낡은 목록이 보인다 — 빈 화면보다 정직하다. 검색어도 자연히 남는다.
-    if (!same) self.image_gallery.clear(self.allocator);
-    self.image_gallery.chain = buildChain(self, path);
+    if (!same) self.agent_activity.clear(self.allocator);
+    self.agent_activity.chain = buildChain(self, path);
     self.metal_dirty = true;
 
     // **훑기 직전의 자국을 찍는다.** 훑은 뒤에 찍으면 그 사이 붙은 줄을 「이미 봤다」로 오해한다.
-    self.image_gallery.head_stamp = stampOf(self, path);
-    if (backend.submit(self.image_gallery.chain)) |generation| {
-        self.image_gallery.awaiting = generation;
+    self.agent_activity.head_stamp = stampOf(self, path);
+    if (backend.submit(self.agent_activity.chain)) |generation| {
+        self.agent_activity.awaiting = generation;
     } else {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
-        self.image_gallery.resubmit = true;
+        self.agent_activity.resubmit = true;
     }
 }
 
@@ -963,17 +963,17 @@ pub fn refresh(self: *AppSession, force: bool) void {
 /// **비운다/채운다를 여기서 가르지 않는다.** `refresh` 가 「소스가 없으면 비운다」 갈래를 이미 갖고
 /// 있으므로 그 판정을 여기 복사하지 않는다 — 두 자리에 두면 한쪽만 고쳐진다.
 pub fn refreshForFocus(self: *AppSession) void {
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
     const surface_id = activeSourceSurfaceId(self);
-    if (self.image_gallery.focus_surface_id == surface_id) return;
-    self.image_gallery.focus_surface_id = surface_id;
+    if (self.agent_activity.focus_surface_id == surface_id) return;
+    self.agent_activity.focus_surface_id = surface_id;
     refresh(self, false);
 }
 
 /// 뷰로 들어올 때 한 번 훑는다(계약 §4.1) — **그리고 그 순간의 pane 을 기록한다.** 기록하지 않으면
 /// 곧바로 다음 tick 의 `refreshForFocus` 가 같은 소스로 스캔을 한 번 더 건다(1.68 GB 짜리 파일이 있다).
 pub fn onEnterView(self: *AppSession) void {
-    self.image_gallery.focus_surface_id = activeSourceSurfaceId(self);
+    self.agent_activity.focus_surface_id = activeSourceSurfaceId(self);
     refresh(self, false);
 }
 
@@ -994,10 +994,10 @@ pub fn poll(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
 
-    if (self.image_gallery.resubmit and !self.image_gallery.chain.isEmpty()) {
-        if (backend.submit(self.image_gallery.chain)) |generation| {
-            self.image_gallery.awaiting = generation;
-            self.image_gallery.resubmit = false;
+    if (self.agent_activity.resubmit and !self.agent_activity.chain.isEmpty()) {
+        if (backend.submit(self.agent_activity.chain)) |generation| {
+            self.agent_activity.awaiting = generation;
+            self.agent_activity.resubmit = false;
         }
     }
 
@@ -1007,23 +1007,23 @@ pub fn poll(self: *AppSession) void {
 
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
-    if (result.generation != self.image_gallery.awaiting) {
+    if (result.generation != self.agent_activity.awaiting) {
         result.deinit(self.allocator);
         return;
     }
-    self.image_gallery.all_hits.deinit(self.allocator);
-    self.image_gallery.all_hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
-    self.image_gallery.all_labels.deinit(self.allocator);
-    self.image_gallery.all_labels = result.labels;
+    self.agent_activity.all_hits.deinit(self.allocator);
+    self.agent_activity.all_hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
+    self.agent_activity.all_labels.deinit(self.allocator);
+    self.agent_activity.all_labels = result.labels;
     // 길이가 어긋나면 라벨을 통째로 버린다 — 남의 이미지에 붙은 설명보다 없는 편이 낫다.
-    if (self.image_gallery.all_labels.items.len != self.image_gallery.all_hits.items.len) {
-        self.image_gallery.all_labels.clearRetainingCapacity();
+    if (self.agent_activity.all_labels.items.len != self.agent_activity.all_hits.items.len) {
+        self.agent_activity.all_labels.clearRetainingCapacity();
     }
     // **순번은 여기서만 채운다**(계약 §2.2). 스캐너는 한 장씩 라벨을 만들어 이웃을 못 보고,
     // 걸러 낸 목록(`hits`)은 묶음이 쪼개져 「1/1」이 된다. 전체가 다 모인 지금이 유일하게 옳은 자리다.
-    if (self.image_gallery.all_labels.items.len == self.image_gallery.all_hits.items.len) {
-        const scanned = self.image_gallery.all_hits.items;
-        for (self.image_gallery.all_labels.items, 0..) |*l, i| {
+    if (self.agent_activity.all_labels.items.len == self.agent_activity.all_hits.items.len) {
+        const scanned = self.agent_activity.all_hits.items;
+        for (self.agent_activity.all_labels.items, 0..) |*l, i| {
             const seq = index.sequenceAt(scanned, i);
             l.seq = seq.index;
             l.seq_total = seq.total;
@@ -1033,17 +1033,17 @@ pub fn poll(self: *AppSession) void {
     // 「**아까** 그 스크린샷 어디 갔지」다. 실제 세션으로 재 보니 151 장 중 4 장만 보이는데
     // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
     // 이 결함을 원리적으로 못 본다).
-    std.mem.reverse(index.Hit, self.image_gallery.all_hits.items);
+    std.mem.reverse(index.Hit, self.agent_activity.all_hits.items);
     // **접기의 주인도 같이 뒤집는다**(§2.2.1). `fold_owner` 는 이 배열의 **자리**이므로, 뒤집고
     // 그대로 두면 엉뚱한 호출을 가리킨다 — 접힌 이미지가 남의 줄에 붙거나, 「전체」에서 사라진다.
     // 퇴출(`remapFoldsAfterEvict`)과 **같은 규율**이고 같은 이유로 판정자가 따로 못박는다.
-    reverseFoldOwners(self.image_gallery.all_hits.items);
+    reverseFoldOwners(self.agent_activity.all_hits.items);
     // **라벨도 같이 뒤집는다.** 안 뒤집으면 첫 칸에 마지막 이미지의 설명이 붙는다.
-    if (self.image_gallery.all_labels.items.len == self.image_gallery.all_hits.items.len) {
-        std.mem.reverse(context.Label, self.image_gallery.all_labels.items);
+    if (self.agent_activity.all_labels.items.len == self.agent_activity.all_hits.items.len) {
+        std.mem.reverse(context.Label, self.agent_activity.all_labels.items);
     }
     // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부).
-    self.image_gallery.applyFilter(self.allocator);
+    self.agent_activity.applyFilter(self.allocator);
     // **타일은 버리지 않고 새 인덱스에 다시 잇는다.** 자동 갱신이 붙은 뒤로 이 길은 「같은 파일이
     // 자랐다」에도 쓰이는데, 통째로 버리면 대화가 이어지는 내내 격자가 매 턴 비었다 다시 찬다
     // (장당 ~20 ms). 인덱스는 밀려도 `(file_index, data_offset)` 은 그대로다.
@@ -1052,37 +1052,37 @@ pub fn poll(self: *AppSession) void {
     // `hits` 에는 그림이 없어 `remapTiles` 가 전부 버리는데, 「명령」을 보는 동안 대화가 이어지면
     // 그 사이 픽셀이 통째로 사라져 돌아올 때 다시 디코드한다. 안 그리는 화면이므로 자리가 낡아도
     // 무해하고, 돌아올 때 잇는다.
-    if (self.image_gallery.filter.holdsImages()) remapTiles(self);
+    if (self.agent_activity.filter.holdsImages()) remapTiles(self);
     // 크게 보기는 그대로 버린다 — 자동 갱신은 애초에 열려 있으면 미루므로(`pollFreshness`) 여기
     // 도달하는 것은 소스가 갈렸을 때뿐이고, 그때는 다른 세션이라 닫는 것이 맞다.
-    self.image_gallery.dropOpen(self.allocator);
+    self.agent_activity.dropOpen(self.allocator);
     // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
     // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
-    self.image_gallery.hovered = null;
+    self.agent_activity.hovered = null;
     // **스크롤을 새 상한으로 끌어내린다.** 목록이 줄었는데 옛 위치가 남으면, 위로 굴려도 한동안
     // 화면이 안 움직인다 — `scrollByPx` 는 내려갈 때만 상한을 보기 때문이다(올라갈 때는 그냥 뺀다).
     // 리셋이 아니라 clamp 라, 보던 행이 아직 있으면 그 자리에 그대로 있는다.
     clampScroll(self);
-    self.image_gallery.partial = result.partial;
-    self.image_gallery.image_partial = result.image_partial;
-    self.image_gallery.activity_partial = result.activity_partial;
-    self.image_gallery.scanned_bytes = result.scanned_bytes;
-    self.image_gallery.scan_ns = result.scan_ns;
-    self.image_gallery.built = true;
-    self.image_gallery.awaiting = 0;
-    self.image_gallery.resubmit = false;
+    self.agent_activity.partial = result.partial;
+    self.agent_activity.image_partial = result.image_partial;
+    self.agent_activity.activity_partial = result.activity_partial;
+    self.agent_activity.scanned_bytes = result.scanned_bytes;
+    self.agent_activity.scan_ns = result.scan_ns;
+    self.agent_activity.built = true;
+    self.agent_activity.awaiting = 0;
+    self.agent_activity.resubmit = false;
     self.metal_dirty = true;
     // 디버그 훅(`MARU_FORCE_IMAGE_GALLERY_OPEN`)이 예약해 둔 크게 보기를 **여기서** 연다 — 인덱스가
     // 방금 생겼기 때문이다. 예약은 한 번만 쓴다.
-    if (self.debug_image_gallery_open) |n| {
-        self.debug_image_gallery_open = null;
+    if (self.debug_agent_activity_open) |n| {
+        self.debug_agent_activity_open = null;
         openAt(self, n);
     }
     // `MARU_FORCE_IMAGE_GALLERY_HOVER=<n>` — 그 칸에 포인터가 얹힌 것처럼 세운다. 실제 호버는 마우스
     // 이동이 필요해 헤드리스로는 만들 수 없다(상태바 호버가 같은 이유로 같은 게이트를 둔다).
-    if (self.debug_image_gallery_hover) |n| {
-        self.debug_image_gallery_hover = null;
-        if (n < self.image_gallery.count()) self.image_gallery.hovered = n;
+    if (self.debug_agent_activity_hover) |n| {
+        self.debug_agent_activity_hover = null;
+        if (n < self.agent_activity.count()) self.agent_activity.hovered = n;
     }
 }
 
@@ -1124,7 +1124,7 @@ pub fn thumbRectAt(self: *const AppSession, row_top_y: u32) ?image_grid.Rect {
 /// 그림이 붙는 줄은 드물지만(실측 60 줄에 한 줄) **자리는 모든 줄이 똑같이 비운다** — 줄마다
 /// 들쭉날쭉하면 이름이 세로로 안 맞아 훑기 어렵다.
 pub fn thumbCols(self: *const AppSession) u16 {
-    if (self.image_gallery.filter != .all) return 0;
+    if (self.agent_activity.filter != .all) return 0;
     if (self.cell_width_px == 0) return 0;
     const area = gridArea(self);
     if (thumbRectAt(self, area.y) == null) return 0;
@@ -1169,26 +1169,26 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = decodeBackendPtr(self) orelse return;
     // **크게 보기가 워커를 먼저 쓴다.** 사용자가 방금 누른 것보다 아직 안 보이는 칸이 급할 리 없다.
-    if (self.image_gallery.open != null) return;
-    if (self.image_gallery.chain.isEmpty()) return;
+    if (self.agent_activity.open != null) return;
+    if (self.agent_activity.chain.isEmpty()) return;
 
     // **보이는 칸 중 아직 없는 것**을 채운다. 창을 통째로 버리지 않는 이유는 그렇게 하면 스크롤할
     // 때마다 격자가 ~160 ms(8장 × 20 ms) 비어 깜빡이기 때문이다. 상한(`max_tiles` = 15 MB)은
     // 계약 §5.2 가 허용하는 값이고 실측 세션이 151 장이라 실제로는 거의 안 걸린다.
     // **빈 칸을 상한까지 채워 건다.** 하나만 걸고 물러나면 나머지는 다음 틱을 기다린다 —
     // 그것이 12 칸에 200 ms 를 쓰게 하던 원인이다(실측: 실제 일은 52 ms).
-    const last = @min(first +| visible, self.image_gallery.count());
+    const last = @min(first +| visible, self.agent_activity.count());
     var next: usize = first;
     while (next < last) : (next += 1) {
-        if (self.image_gallery.tileFor(next) != null) continue; // 이미 있다
-        if (self.image_gallery.pendingContains(next)) continue; // 이미 걸었다
+        if (self.agent_activity.tileFor(next) != null) continue; // 이미 있다
+        if (self.agent_activity.pendingContains(next)) continue; // 이미 걸었다
 
-        const hit = self.image_gallery.hits.items[next];
+        const hit = self.agent_activity.hits.items[next];
         // ⚠️ **없으면 건너뛴다(포기하지 않는다).** 격자에서는 모든 항목이 그림이라 차이가 없지만,
         // 「전체」 목록에서는 그림 있는 줄이 **60 줄에 한 줄**이다(실측 중앙 1.7%) — 여기서 물러나면
         // 첫 번째 그림 없는 줄에서 멈춰 뒤쪽 그림을 영영 안 건다.
         const src = thumbSource(hit) orelse continue;
-        const path = self.image_gallery.chain.get(src.file_index) orelse continue;
+        const path = self.agent_activity.chain.get(src.file_index) orelse continue;
         if (backend.submit(
             path,
             src.offset,
@@ -1196,7 +1196,7 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
             thumbnail_side,
             next,
         )) |generation| {
-            self.image_gallery.pendingAdd(generation, next);
+            self.agent_activity.pendingAdd(generation, next);
         } else break; // 상한에 닿았다 — 다음 틱이 이어 건다
     }
 }
@@ -1220,7 +1220,7 @@ fn harvestOne(self: *AppSession) bool {
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
 
     // **크게 보기 것이 먼저다.** 두 요청은 같은 워커를 쓰므로 generation 으로 가른다.
-    if (self.image_gallery.open) |*op| {
+    if (self.agent_activity.open) |*op| {
         if (op.decoding != 0 and r.generation == op.decoding) {
             // **못 풀었으면 가진 것을 지킨다.** 승급은 덤이라, 실패했다고 보고 있던 그림을
             // 버리면 화면이 빈다(원본 디코드는 크기 때문에 실제로 실패할 수 있다).
@@ -1255,11 +1255,11 @@ fn harvestOne(self: *AppSession) bool {
     }
 
     // **내가 건 것인가.** 여럿이 도니 generation 으로 집합에서 찾는다.
-    const submitted_index = self.image_gallery.pendingTake(r.generation) orelse return true;
+    const submitted_index = self.agent_activity.pendingTake(r.generation) orelse return true;
     // **내가 건 그 칸의 것인가.** 배열 위치가 아니라 인덱스로 판정한다 — 스크롤이 배열 순서를
     // 바꾸므로 순서로 판정하면 결과가 조용히 버려진다.
     if (r.hit_index != submitted_index) return true;
-    if (self.image_gallery.tileFor(r.hit_index) != null) return true; // 이미 있다(중복 제출 방어)
+    if (self.agent_activity.tileFor(r.hit_index) != null) return true; // 이미 있다(중복 제출 방어)
 
     // 이 픽셀이 **어느 이미지**의 것인지 함께 적어 둔다 — 다시 훑은 뒤 인덱스가 밀려도
     // 그 정체로 타일을 다시 이을 수 있다(`remapTiles`).
@@ -1268,14 +1268,14 @@ fn harvestOne(self: *AppSession) bool {
     // 오프셋(호출이면 명령문 자리)을 적으면 `remapTiles` 가 그 타일을 영영 못 찾아 **다시 훑을
     // 때마다 픽셀을 버리고 새로 디코드**한다 — 격자에서 「매 턴 비었다 다시 찬다」를 막으려고
     // 만든 장치가 목록에서 무력해진다. 제출·정체·재연결이 **같은 함수**를 봐야 한다.
-    const hit_src = if (r.hit_index < self.image_gallery.hits.items.len)
-        self.image_gallery.hits.items[r.hit_index]
+    const hit_src = if (r.hit_index < self.agent_activity.hits.items.len)
+        self.agent_activity.hits.items[r.hit_index]
     else
         return true;
     const thumb = thumbSource(hit_src) orelse return true;
 
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
-    self.image_gallery.tiles.append(self.allocator, .{
+    self.agent_activity.tiles.append(self.allocator, .{
         .hit_index = r.hit_index,
         .file_index = thumb.file_index,
         .data_offset = thumb.offset,
@@ -1286,7 +1286,7 @@ fn harvestOne(self: *AppSession) bool {
         .label = labelFor(self, r.hit_index),
     }) catch return true;
     r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
-    self.image_gallery.evictFarthest(self.allocator, r.hit_index);
+    self.agent_activity.evictFarthest(self.allocator, r.hit_index);
     self.metal_dirty = true;
     return true;
 }
@@ -1294,23 +1294,23 @@ fn harvestOne(self: *AppSession) bool {
 /// 훅이 소스를 바꿨을 때. **갤러리를 보고 있을 때만 건다** — 안 보는 뷰 때문에 1.68 GB 를 훑지 않는다.
 /// 보고 있지 않으면 다음에 들어올 때 `refresh` 가 경로 불일치를 보고 알아서 건다.
 pub fn onSourceChanged(self: *AppSession) void {
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
     refresh(self, false);
 }
 
 /// 갤러리를 떠날 때. 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
 pub fn onLeaveView(self: *AppSession) void {
-    self.image_gallery.search_active = false;
+    self.agent_activity.search_active = false;
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel();
-    self.image_gallery.awaiting = 0;
-    self.image_gallery.resubmit = false;
-    self.image_gallery.pendingClear();
+    self.agent_activity.awaiting = 0;
+    self.agent_activity.resubmit = false;
+    self.agent_activity.pendingClear();
     // 크게 보기도 닫는다 — 원본 픽셀은 수 MB 라, 안 보는 뷰 때문에 들고 있을 이유가 없다.
-    self.image_gallery.dropOpen(self.allocator);
-    self.image_gallery.key_focus = false;
+    self.agent_activity.dropOpen(self.allocator);
+    self.agent_activity.key_focus = false;
 }
 
 /// 격자 썸네일의 한 변(px). 계약 §5.2 — 장당 0.06 MB 라 200장 상주해도 12 MB 다. 원본 해상도로 들면
@@ -1327,9 +1327,9 @@ pub const thumbnail_side: u32 = 160;
 /// **프로세스가 abort** 한다(계약 §5.3).
 pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
     if (!builtin.target.os.tag.isDarwin()) return null;
-    if (n >= self.image_gallery.hits.items.len) return null;
-    if (self.image_gallery.chain.isEmpty()) return null;
-    const hit = self.image_gallery.hits.items[n];
+    if (n >= self.agent_activity.hits.items.len) return null;
+    if (self.agent_activity.chain.isEmpty()) return null;
+    const hit = self.agent_activity.hits.items[n];
 
     const io = self.io;
     const path = pathFor(self, hit) orelse return null;
@@ -1389,7 +1389,7 @@ pub fn viewportRect(self: *const AppSession) image_view.Rect {
 /// 가 실제로 그리는 줄이 어긋나면 글자가 그림 위에 얹히거나 아래가 잘린다 — 두 곳이 같은 함수를
 /// 부르게 해 그 어긋남을 원리적으로 막는다.
 fn contextRows(self: *const AppSession) u32 {
-    const op = if (self.image_gallery.open) |*o| o else return 0;
+    const op = if (self.agent_activity.open) |*o| o else return 0;
     var rows: u32 = 0;
     var buf: [context_mod.max_label_bytes]u8 = undefined;
     if (openPrefix(self, &buf).len > 0) rows += 1;
@@ -1402,7 +1402,7 @@ fn contextRows(self: *const AppSession) u32 {
 /// **격자에만 붙이면 절반만 답한 것이다.** 눌러서 크게 본 화면에는 격자가 없으므로, 거기서 「이건
 /// 내가 올린 것인가」를 물으면 답할 길이 사라진다 — 정작 그 물음이 나오는 자리가 여기다.
 fn openPrefix(self: *const AppSession, buf: []u8) []const u8 {
-    const op = if (self.image_gallery.open) |*o| o else return buf[0..0];
+    const op = if (self.agent_activity.open) |*o| o else return buf[0..0];
     return context_mod.originPrefix(buf, originText(op.label.source), op.label.seq, op.label.seq_total);
 }
 
@@ -1413,25 +1413,25 @@ pub const max_context_rows: u32 = 3;
 /// `n` 번째 이미지를 크게 연다. **픽셀은 여기서 안 푼다** — 워커에 요청만 걸고, 그동안 격자가 계속 보인다.
 /// 다 풀리기 전에 격자를 지우면 클릭이 「화면이 비었다」로 보인다.
 pub fn openAt(self: *AppSession, n: usize) void {
-    if (n >= self.image_gallery.count()) return;
-    self.image_gallery.dropOpen(self.allocator);
-    self.image_gallery.open = .{ .hit_index = n, .label = labelFor(self, n) };
+    if (n >= self.agent_activity.count()) return;
+    self.agent_activity.dropOpen(self.allocator);
+    self.agent_activity.open = .{ .hit_index = n, .label = labelFor(self, n) };
     loadOpenContext(self, n);
     // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
     // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
     // 이미지가 화면 밖에 있다. 여는 자리 한 곳에서 하므로 두 입구가 갈리지 않는다.
-    self.image_gallery.scroll.offset_y_px = image_grid.scrollToShow(
+    self.agent_activity.scroll.offset_y_px = image_grid.scrollToShow(
         gridArea(self),
         gridMetrics(self),
-        self.image_gallery.count(),
-        self.image_gallery.scroll.offset_y_px,
+        self.agent_activity.count(),
+        self.agent_activity.scroll.offset_y_px,
         n,
     );
     self.metal_dirty = true;
     // **활동 항목에는 그림이 없다.** `ensureOpen` 을 부르면 명령 문자열을 이미지로 디코드하려 들어
     // 「열지 못했습니다」가 뜬다(main 이 목록 클릭을 막아 두었던 그 이유다). 대신 그때 받은 바이트를
     // 읽는다 — 같은 자리를 쓰되 채우는 것이 다르다(계약 §2.4).
-    if (n < self.image_gallery.hits.items.len and !self.image_gallery.hits.items[n].kind.isImage()) {
+    if (n < self.agent_activity.hits.items.len and !self.agent_activity.hits.items[n].kind.isImage()) {
         loadOpenDetail(self, n);
         return;
     }
@@ -1447,9 +1447,9 @@ pub fn openAt(self: *AppSession, n: usize) void {
 /// 미리 만들지 않는 이유도 같다: 12,200 개어치 8 KiB 를 늘 들고 있을 이유가 없다.
 fn loadOpenDetail(self: *AppSession, n: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    const op = if (self.image_gallery.open) |*o| o else return;
-    if (n >= self.image_gallery.hits.items.len) return;
-    const hit = self.image_gallery.hits.items[n];
+    const op = if (self.agent_activity.open) |*o| o else return;
+    if (n >= self.agent_activity.hits.items.len) return;
+    const hit = self.agent_activity.hits.items[n];
     const path = pathFor(self, hit) orelse return;
     const file = std.Io.Dir.cwd().openFile(self.io, path, .{
         .mode = .read_only,
@@ -1471,7 +1471,7 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
         //
         // Codex 는 `output` 첫 원소가 `text` 라 읽을 것이 있다 — 그쪽은 아래 갈래로 간다.
         if (hit.result.image and hit.result.lines == 0) {
-            op.detail.result = self.allocator.dupe(u8, maru.i18n.t(.image_gallery_result_image)) catch &.{};
+            op.detail.result = self.allocator.dupe(u8, maru.i18n.t(.agent_activity_result_image)) catch &.{};
             op.detail.result_truncated = false;
         } else {
             op.detail.result = readDetailPart(self, file, hit.result.body_offset, &op.detail.result_truncated);
@@ -1514,9 +1514,9 @@ fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, truncated: 
 /// 본다 — 151 장짜리 실제 세션에서는 그 차이가 크다.
 pub fn navigateOpen(self: *AppSession, delta: i32) bool {
     if (!ownsKeys(self)) return false;
-    if (self.image_gallery.search_active) return false; // 타이핑 중 화살표는 검색창 것이다
-    const op = if (self.image_gallery.open) |o| o else return false;
-    const count = self.image_gallery.count();
+    if (self.agent_activity.search_active) return false; // 타이핑 중 화살표는 검색창 것이다
+    const op = if (self.agent_activity.open) |o| o else return false;
+    const count = self.agent_activity.count();
     if (count == 0) return false;
 
     const cur: i64 = @intCast(op.hit_index);
@@ -1538,17 +1538,17 @@ pub fn navigateOpen(self: *AppSession, delta: i32) bool {
 /// 다시 준다면 그때 쓰는 것이 이 함수이고, 판정자도 「네 자리를 다 돈다」를 여기로 시험한다.
 pub fn cycleFilter(self: *AppSession) bool {
     if (!ownsKeys(self)) return false;
-    if (self.image_gallery.search_active) return false;
+    if (self.agent_activity.search_active) return false;
     // 크게 보기는 닫는다 — 그 그림이 다음 필터에는 없을 수 있고, 남겨 두면 「목록을 바꿨는데 남의
     // 그림이 떠 있다」가 된다.
     closeOpen(self);
-    self.image_gallery.filter = self.image_gallery.filter.next();
+    self.agent_activity.filter = self.agent_activity.filter.next();
     // 목록이 통째로 바뀌므로 보던 자리도, 얹혀 있던 칸도 뜻을 잃는다.
-    self.image_gallery.scroll.offset_y_px = 0;
-    self.image_gallery.hovered = null;
+    self.agent_activity.scroll.offset_y_px = 0;
+    self.agent_activity.hovered = null;
     // **넘친 수도 옛 모양의 것이다.** 격자에서 넘쳐 있었다면 그 값이 남아, 목록의 첫 프레임이
     // 그려지기 전에 「도크가 좁아 못 그립니다」가 한 번 스친다. 렌더가 다시 채운다.
-    self.image_gallery.overflow = 0;
+    self.agent_activity.overflow = 0;
     rebuildFilter(self);
     self.metal_dirty = true;
     return true;
@@ -1556,8 +1556,8 @@ pub fn cycleFilter(self: *AppSession) bool {
 
 /// 크게 보기를 닫고 격자로 돌아간다. 원본 픽셀(수 MB)을 여기서 푼다.
 pub fn closeOpen(self: *AppSession) void {
-    if (self.image_gallery.open == null) return;
-    self.image_gallery.dropOpen(self.allocator);
+    if (self.agent_activity.open == null) return;
+    self.agent_activity.dropOpen(self.allocator);
     self.metal_dirty = true;
 }
 
@@ -1572,10 +1572,10 @@ pub fn closeOpen(self: *AppSession) void {
 /// 다시는 안 건다 — 되풀이가 없다.
 pub fn ensureOpen(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    const op = if (self.image_gallery.open) |*o| o else return;
+    const op = if (self.agent_activity.open) |*o| o else return;
     if (op.decoding != 0) return;
-    if (self.image_gallery.chain.isEmpty()) return;
-    if (op.hit_index >= self.image_gallery.count()) return;
+    if (self.agent_activity.chain.isEmpty()) return;
+    if (op.hit_index >= self.agent_activity.count()) return;
     const backend = decodeBackendPtr(self) orelse return;
 
     const have = op.pixels.len > 0;
@@ -1590,7 +1590,7 @@ pub fn ensureOpen(self: *AppSession) void {
         break :blk @intFromFloat(side);
     };
 
-    const hit = self.image_gallery.hits.items[op.hit_index];
+    const hit = self.agent_activity.hits.items[op.hit_index];
     const path = pathFor(self, hit) orelse return;
     if (backend.submit(
         path,
@@ -1611,7 +1611,7 @@ pub fn ensureOpen(self: *AppSession) void {
 /// 트랙패드(`precise`)는 점 단위라 눈금보다 훨씬 촘촘히 온다 — 같은 계수를 쓰면 한 번 쓸어도 최대
 /// 배율에 닿는다. 그래서 계수를 나누고, 한 이벤트가 만드는 배율 변화를 e^±1 로 묶는다.
 pub fn wheelZoom(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) void {
-    const op = if (self.image_gallery.open) |*o| o else return;
+    const op = if (self.agent_activity.open) |*o| o else return;
     if (op.pixels.len == 0) return;
     if (!std.math.isFinite(delta_y) or delta_y == 0) return;
     const per: f64 = if (precise) 0.006 else 0.12;
@@ -1623,7 +1623,7 @@ pub fn wheelZoom(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px
 
 /// 드래그로 민다. **화면 이동량 그대로**다 — 잡은 곳이 손끝을 따라와야 한다.
 pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
-    const op = if (self.image_gallery.open) |*o| o else return;
+    const op = if (self.agent_activity.open) |*o| o else return;
     if (op.pixels.len == 0) return;
     if (!std.math.isFinite(dx) or !std.math.isFinite(dy)) return;
     op.view = image_view.panBy(op.view, viewportRect(self), op.width, op.height, @floatCast(dx), @floatCast(dy));
@@ -1636,7 +1636,7 @@ pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
 /// 바꾼다 — 안 버리면 「엉뚱한 이미지가 뜬다」가 되는데 그 증상은 원인을 짐작하기 어렵다. 스크롤도
 /// 처음으로 돌린다(걸러진 목록의 세 번째 행부터 보여 줄 이유가 없다).
 pub fn rebuildFilter(self: *AppSession) void {
-    self.image_gallery.applyFilter(self.allocator);
+    self.agent_activity.applyFilter(self.allocator);
     // **버리지 않고 다시 잇는다.** 예전에는 통째로 버렸는데, 그러면 「전체」↔「이미지」를 오갈 때마다
     // 그림이 **사라졌다가 다시 뜬다** — 실측 11 장에서 **306 ms** 다. 칩으로 종류를 바꾸는 것이
     // AV4 의 요점인데 그때마다 화면이 깜빡이면 그 기능이 값을 잃는다.
@@ -1651,10 +1651,10 @@ pub fn rebuildFilter(self: *AppSession) void {
     // 낡아도 무해하고, 돌아올 때 `remapTiles` 가 다시 잇는다.
     //
     // 들고 있는 값은 최대 `max_tiles`(256 장 · 15 MB)로 이미 유계다.
-    if (self.image_gallery.filter.holdsImages()) remapTiles(self);
-    self.image_gallery.dropOpen(self.allocator);
-    self.image_gallery.hovered = null;
-    self.image_gallery.scroll = .{};
+    if (self.agent_activity.filter.holdsImages()) remapTiles(self);
+    self.agent_activity.dropOpen(self.allocator);
+    self.agent_activity.hovered = null;
+    self.agent_activity.scroll = .{};
     self.metal_dirty = true;
 }
 
@@ -1663,7 +1663,7 @@ pub fn focusSearch(self: *AppSession) bool {
     // **갤러리가 키를 쥐고 있을 때만**이다. 도크가 보인다는 것만으로 열면, 터미널에 타이핑하던 사용자의
     // ⌘F 가 터미널 찾기 대신 갤러리 검색을 연다.
     if (!ownsKeys(self)) return false;
-    self.image_gallery.search_active = true;
+    self.agent_activity.search_active = true;
     self.metal_dirty = true;
     return true;
 }
@@ -1671,7 +1671,7 @@ pub fn focusSearch(self: *AppSession) bool {
 /// 검색창이 키·IME 를 쥐고 있나. `AppSession.inputFocus` 의 유일한 근거다 — 조합 글자가 뒤 터미널로
 /// 새지 않으려면 이 판정이 focus 표에 올라 있어야 한다(설정 검색이 한때 빠져 있어 새던 그 자리다).
 pub fn searchOwnsInput(self: *const AppSession) bool {
-    return self.image_gallery.search_active and ownsKeys(self);
+    return self.agent_activity.search_active and ownsKeys(self);
 }
 
 /// 검색창이 키를 받는다. 소비했으면 `true`.
@@ -1681,37 +1681,37 @@ pub fn searchOwnsInput(self: *const AppSession) bool {
 /// 비롯한 조합 입력은 `imeSetPreedit`/`commitPreedit` 로 들어온다.
 pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
     if (!searchOwnsInput(self)) {
-        self.image_gallery.search_active = false; // 뷰가 바뀌었다 — 창은 닫고 키는 넘긴다
+        self.agent_activity.search_active = false; // 뷰가 바뀌었다 — 창은 닫고 키는 넘긴다
         return false;
     }
     switch (event.key) {
         .escape => {
             // 첫 Esc 는 **검색어만** 지운다(창은 열어 둔다). 다 지운 뒤 Esc 면 창을 닫는다 —
             // 한 번에 닫으면 오타 하나 물리려다 검색을 통째로 잃는다.
-            if (self.image_gallery.search.query.items.len > 0 or
-                self.image_gallery.search.preedit.items.len > 0)
+            if (self.agent_activity.search.query.items.len > 0 or
+                self.agent_activity.search.preedit.items.len > 0)
             {
-                self.image_gallery.search.clear();
+                self.agent_activity.search.clear();
                 rebuildFilter(self);
             } else {
-                self.image_gallery.search_active = false;
+                self.agent_activity.search_active = false;
                 self.metal_dirty = true;
             }
         },
         .enter => {
             // 확정 = 창만 닫고 **검색어는 유지**한다. 걸러진 목록에서 그대로 고르게 된다.
-            self.image_gallery.search_active = false;
+            self.agent_activity.search_active = false;
             self.metal_dirty = true;
         },
         .backspace => {
-            if (self.image_gallery.search.query.items.len == 0) return true;
-            self.image_gallery.search.backspace(); // codepoint 단위 — 바이트로 지우면 한글이 깨진다
+            if (self.agent_activity.search.query.items.len == 0) return true;
+            self.agent_activity.search.backspace(); // codepoint 단위 — 바이트로 지우면 한글이 깨진다
             rebuildFilter(self);
         },
         .char => |codepoint| {
             if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return false;
-            if (self.image_gallery.search.query.items.len + 4 > max_query_bytes) return true;
-            self.image_gallery.search.appendChar(self.allocator, codepoint) catch return true;
+            if (self.agent_activity.search.query.items.len + 4 > max_query_bytes) return true;
+            self.agent_activity.search.appendChar(self.allocator, codepoint) catch return true;
             rebuildFilter(self);
         },
         // **그 밖의 키는 삼키지 않는다.** 검색 중이라는 이유로 전부 먹으면 도크에서 나갈 길이 막힌다.
@@ -1757,13 +1757,13 @@ pub fn searchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
 /// 자기가 무엇을 치고 있는지 알 수 없다.
 pub const SearchLine = struct { text: []const u8, caret_cols: u32 };
 fn searchLine(self: *const AppSession, buf: []u8) SearchLine {
-    const prompt = maru.i18n.t(.image_gallery_search_prompt);
-    const pre = self.image_gallery.search.preedit.items;
+    const prompt = maru.i18n.t(.agent_activity_search_prompt);
+    const pre = self.agent_activity.search.preedit.items;
     const prompt_cols = chrome.components.overlay_input.displayCols(prompt);
     const pre_cols = chrome.components.overlay_input.displayCols(pre);
     const text_cols = searchLineCols(self) -| prompt_cols;
     const q_tail = chrome.components.overlay_input.tailWindow(
-        self.image_gallery.search.query.items,
+        self.agent_activity.search.query.items,
         text_cols -| pre_cols,
     );
 
@@ -1786,20 +1786,20 @@ pub const notice_buf_bytes: usize = max_query_bytes + 128;
 /// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
 /// Esc 가 셸이 아니라 크게 보기를 닫는다.
 pub fn ownsKeys(self: *const AppSession) bool {
-    return dock_ops.dockVisible(self) and self.dock.view == .image_gallery and self.image_gallery.key_focus;
+    return dock_ops.dockVisible(self) and self.dock.view == .agent_activity and self.agent_activity.key_focus;
 }
 
 /// 터미널을 눌렀다 = 키보드를 놓는다. **크게 보기는 그대로 둔다** — 보던 것을 클릭 한 번에 잃지 않는다.
 pub fn releaseKeyFocus(self: *AppSession) void {
-    if (!self.image_gallery.key_focus) return;
-    self.image_gallery.key_focus = false;
+    if (!self.agent_activity.key_focus) return;
+    self.agent_activity.key_focus = false;
     self.metal_dirty = true;
 }
 
 /// Esc. 크게 보기를 닫는다. 소비했으면 `true`.
 pub fn handleEscape(self: *AppSession) bool {
     if (!ownsKeys(self)) return false;
-    if (self.image_gallery.open == null) return false;
+    if (self.agent_activity.open == null) return false;
     closeOpen(self);
     return true;
 }
@@ -1812,10 +1812,10 @@ pub fn handleEscape(self: *AppSession) bool {
 /// 크게 보기 중에는 격자가 없으므로 호버도 없다.
 pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!builtin.target.os.tag.isDarwin()) return false;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return clearHover(self);
-    if (self.image_gallery.open != null) return clearHover(self);
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return clearHover(self);
+    if (self.agent_activity.open != null) return clearHover(self);
     // 줄 목록에는 「얹힌 칸」이 없다 — 격자 좌표로 판정하면 남의 자리를 밝힌다(클릭과 같은 이유).
-    if (!self.image_gallery.filter.isGrid()) return clearHover(self);
+    if (!self.agent_activity.filter.isGrid()) return clearHover(self);
 
     const area = gridArea(self);
     if (x_px < @as(f64, @floatFromInt(area.x)) or y_px < @as(f64, @floatFromInt(area.y))) return clearHover(self);
@@ -1826,8 +1826,8 @@ pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
     const px: u32 = @intFromFloat(@max(0, x_px));
     const py: u32 = @intFromFloat(@max(0, y_px));
     const hit = image_grid.hitTest(area, gridMetrics(self), gridLayout(self), px, py);
-    if (hit != self.image_gallery.hovered) {
-        self.image_gallery.hovered = hit;
+    if (hit != self.agent_activity.hovered) {
+        self.agent_activity.hovered = hit;
         self.metal_dirty = true;
     }
     return hit != null;
@@ -1835,15 +1835,15 @@ pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
 
 /// 지금 열린 것이 **펼침**(활동)인가 — 그림이 아니라 글이다(AV3). 클릭·렌더가 같은 판정을 쓴다.
 pub fn isDetailOpen(self: *const AppSession) bool {
-    const op = if (self.image_gallery.open) |o| o else return false;
-    if (op.hit_index >= self.image_gallery.hits.items.len) return false;
-    return !self.image_gallery.hits.items[op.hit_index].kind.isImage();
+    const op = if (self.agent_activity.open) |o| o else return false;
+    if (op.hit_index >= self.agent_activity.hits.items.len) return false;
+    return !self.agent_activity.hits.items[op.hit_index].kind.isImage();
 }
 
 /// 호버를 놓는다. 얹힌 칸이 없다는 뜻이므로 `false`.
 pub fn clearHover(self: *AppSession) bool {
-    if (self.image_gallery.hovered != null) {
-        self.image_gallery.hovered = null;
+    if (self.agent_activity.hovered != null) {
+        self.agent_activity.hovered = null;
         self.metal_dirty = true;
     }
     return false;
@@ -1854,16 +1854,16 @@ pub fn clearHover(self: *AppSession) bool {
 /// 두 모드가 다르다 — 격자에서는 **칸을 눌러 연다**, 크게 보기에서는 **이미지 밖을 눌러 닫는다**.
 /// 이미지 위는 아직 아무 일도 하지 않는다(팬은 IG4-c).
 pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return false;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return false;
     // **칩이 먼저다.** 칩 줄은 격자 영역(`gridArea`) 밖이지만, 순서를 뒤에 두면 나중에 자리가
     // 겹치도록 바뀌었을 때 조용히 격자가 이긴다.
     if (handleChipDown(self, x_px, y_px)) return true;
     const gx = gridArea(self);
     if (x_px < @as(f64, @floatFromInt(gx.x)) or y_px < @as(f64, @floatFromInt(gx.y))) return false;
     if (x_px >= @as(f64, @floatFromInt(gx.x +| gx.w)) or y_px >= @as(f64, @floatFromInt(gx.y +| gx.h))) return false;
-    self.image_gallery.key_focus = true;
+    self.agent_activity.key_focus = true;
 
-    if (self.image_gallery.open) |*op| {
+    if (self.agent_activity.open) |*op| {
         // **펼침에는 그림이 없다**(AV3). 「이미지 밖을 눌러 닫는다」의 «밖» 이 화면 전체이므로 어디를
         // 눌러도 닫는다 — 안 그러면 아래 `pixels.len == 0` 이 클릭을 삼켜 **닫을 길이 없어진다**.
         if (isDetailOpen(self)) {
@@ -1879,7 +1879,7 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         // 이미지 위 = 잡고 밀기, 밖 = 닫기. **밖을 닫기로 둔 이유**는 크게 보기가 도크를 통째로
         // 덮어 「어디를 눌러야 돌아가지」의 답이 하나뿐이기 때문이다(Esc 와 짝).
         if (inside) {
-            self.beginPointerGesture(.{ .image_gallery_pan = .{ .x = x_px, .y = y_px } });
+            self.beginPointerGesture(.{ .agent_activity_pan = .{ .x = x_px, .y = y_px } });
         } else closeOpen(self);
         return true;
     }
@@ -1887,7 +1887,7 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     // **줄 목록에서는 격자 히트테스트를 돌리지 않는다** — 좌표계가 다르다. 대신 줄 높이로 나눠
     // **그 줄을 펼친다**(AV3). 창(`listWindow`)은 그리기와 같은 자리에서 오므로 눌린 줄과 그려진
     // 줄이 갈리지 않는다.
-    if (!self.image_gallery.filter.isGrid()) {
+    if (!self.agent_activity.filter.isGrid()) {
         const w = listWindow(self);
         if (w.row_h == 0) return true;
         const py: u32 = @intFromFloat(@max(0, y_px));
@@ -1910,13 +1910,13 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 /// 그 hit 의 오프셋이 가리키는 **파일**. 체인이 여럿이면 `file_index` 가 유일한 답이다 —
 /// 첫 파일로 고정하면 부모 이미지를 현재 파일에서 읽어 엉뚱한 바이트를 디코드한다.
 fn pathFor(self: *const AppSession, hit: index.Hit) ?[]const u8 {
-    return self.image_gallery.chain.get(hit.file_index);
+    return self.agent_activity.chain.get(hit.file_index);
 }
 
 /// 그 칸의 라벨. **스캔 워커가 이미 만들어 뒀다** — 예전에는 타일이 생길 때 파일을 열어 읽었는데,
 /// 그러면 보이는 칸만 라벨이 있어 필터가 성립하지 않는다(§2.2).
 fn labelFor(self: *const AppSession, hit_index: usize) context.Label {
-    const labels = self.image_gallery.labels.items;
+    const labels = self.agent_activity.labels.items;
     return if (hit_index < labels.len) labels[hit_index] else .{};
 }
 
@@ -1963,7 +1963,7 @@ pub fn chipRowRect(self: *const AppSession) image_grid.Rect {
 /// 눌러도 안 닫히고 클릭이 뒤 터미널로 샌다 — 계약이 「펼침은 어디를 눌러도 닫는다」라고 못박은
 /// 것을 칩 줄만 예외로 만든다. AV3(펼침)와 AV4(칩)를 합치고 나서야 생긴 형태다.
 pub fn chipRowTakenPx(self: *const AppSession) u32 {
-    if (self.image_gallery.open != null) return 0;
+    if (self.agent_activity.open != null) return 0;
     return chipRowHeightPx(self);
 }
 
@@ -2031,7 +2031,7 @@ fn appendOpenImage(
         return;
     }
 
-    const id = gallery_open_image_id;
+    const id = activity_open_image_id;
     const img: metal_frame.GpuImage = .{
         .image_id = id,
         .dest_x = x0,
@@ -2098,8 +2098,8 @@ pub fn collectOpenContext(
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    const op = if (self.image_gallery.open) |*o| o else return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
+    const op = if (self.agent_activity.open) |*o| o else return;
     const text = op.contextText();
     var prefix_buf: [context_mod.max_label_bytes]u8 = undefined;
     const prefix = openPrefix(self, &prefix_buf);
@@ -2237,10 +2237,10 @@ pub fn collectLabels(
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    if (!self.image_gallery.filter.isGrid()) return; // 줄 목록은 자기 라벨을 스스로 그린다
-    if (self.image_gallery.open != null) return;
-    if (self.image_gallery.tiles.items.len == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
+    if (!self.agent_activity.filter.isGrid()) return; // 줄 목록은 자기 라벨을 스스로 그린다
+    if (self.agent_activity.open != null) return;
+    if (self.agent_activity.tiles.items.len == 0) return;
 
     const area = gridArea(self);
     const m = gridMetrics(self);
@@ -2257,7 +2257,7 @@ pub fn collectLabels(
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
     const now_off = utcOffsetAt(now_s);
 
-    for (self.image_gallery.tiles.items) |*tile| {
+    for (self.agent_activity.tiles.items) |*tile| {
         const text = tile.label.text();
         // **출처와 순번은 라벨보다 앞서 붙는다**(계약 §2.2) — 이 줄에 사용자가 던지는 첫 물음이
         // 「내가 올린 것인가」이기 때문이다.
@@ -2335,8 +2335,8 @@ pub const min_label_cols: u16 = 6;
 fn originText(source: context_mod.Source) []const u8 {
     return switch (source) {
         // codex 래퍼의 경로도 **사용자가 보낸 것**이다 — 래퍼는 provider 가 붙인 껍데기일 뿐이다.
-        .message_text, .codex_wrapper_path => maru.i18n.t(.image_gallery_origin_sent),
-        .tool_file_path => maru.i18n.t(.image_gallery_origin_read),
+        .message_text, .codex_wrapper_path => maru.i18n.t(.agent_activity_origin_sent),
+        .tool_file_path => maru.i18n.t(.agent_activity_origin_read),
         .none => "",
     };
 }
@@ -2416,9 +2416,9 @@ fn utcOffsetAt(unix_s: i64) i64 {
 /// 스크롤 위치를 지금 목록의 상한 안으로 끌어내린다. 목록이 **줄어든** 뒤에 부른다.
 fn clampScroll(self: *AppSession) void {
     const max = gridLayout(self).max_scroll;
-    if (self.image_gallery.scroll.offset_y_px > max) {
-        self.image_gallery.scroll.offset_y_px = max;
-        self.image_gallery.scroll.dropWheelResidue(); // 가는 도중의 잔여는 위치가 확정되면 뜻이 없다
+    if (self.agent_activity.scroll.offset_y_px > max) {
+        self.agent_activity.scroll.offset_y_px = max;
+        self.agent_activity.scroll.dropWheelResidue(); // 가는 도중의 잔여는 위치가 확정되면 뜻이 없다
     }
 }
 
@@ -2428,8 +2428,8 @@ pub fn gridLayout(self: *const AppSession) image_grid.Layout {
     return image_grid.layout(
         gridArea(self),
         gridMetrics(self),
-        self.image_gallery.count(),
-        self.image_gallery.scroll.offset_y_px,
+        self.agent_activity.count(),
+        self.agent_activity.scroll.offset_y_px,
     );
 }
 
@@ -2438,12 +2438,12 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
     // **줄 목록은 자기 자를 쓴다.** 격자의 `max_scroll` 은 타일 크기와 열 수에서 나오므로 줄 목록의
     // 실제 높이(항목 수 × 줄 높이)와 다르다. 그대로 쓰면 **끝까지 내려가지 않는다** — 4,084개짜리
     // 세션에서 앞부분만 닿는다. 눈금도 한 줄이어야 「한 칸씩」이 뜻을 갖는다.
-    if (!self.image_gallery.filter.isGrid()) {
+    if (!self.agent_activity.filter.isGrid()) {
         const area = gridArea(self);
         const row_h = listRowHeightPx(self);
         if (row_h == 0) return false;
         const content_h: u32 = @intCast(@min(
-            @as(u64, self.image_gallery.count()) * @as(u64, row_h),
+            @as(u64, self.agent_activity.count()) * @as(u64, row_h),
             @as(u64, std.math.maxInt(u32)),
         ));
         const max_scroll = content_h -| area.h;
@@ -2452,7 +2452,7 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
             @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
         else
             @floatFromInt(row_h);
-        if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, max_scroll)) {
+        if (self.agent_activity.scroll.scrollByWheel(delta_y, unit, max_scroll)) {
             self.metal_dirty = true;
         }
         return true; // 경계에서도 소비한다 — 안 그러면 제스처가 뒤 터미널로 샌다
@@ -2469,7 +2469,7 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
         @floatFromInt(l.tile_h +| gridMetrics(self).label +| gridMetrics(self).gap);
     // **부호를 여기서 뒤집지 않는다.** `scrollByWheel` 이 이미 `scrollByPx(-whole)` 로 뒤집으므로
     // 한 번 더 뒤집으면 위아래가 반대가 된다(에이전트 도크도 `delta_y` 를 그대로 넘긴다).
-    if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, l.max_scroll)) {
+    if (self.agent_activity.scroll.scrollByWheel(delta_y, unit, l.max_scroll)) {
         // **굴리면 커서 아래 칸이 바뀐다.** 포인터는 그대로인데 격자가 움직였으므로, 옛 칸이 강조된 채
         // 남거나(다른 그림이 그 자리에 온다) 강조가 사라진다. 마우스가 다시 움직일 때까지 그 상태로
         // 있으므로 여기서 같은 좌표로 다시 잡는다.
@@ -2489,11 +2489,11 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
 /// 크게 보기 중에는 격자가 없으니 아무것도 안 그린다.
 pub fn appendHoverQuad(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
-    if (self.image_gallery.open != null) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
+    if (self.agent_activity.open != null) return;
     // **필터가 바뀌어도 `hovered` 는 남는다.** 격자 좌표로 그리면 목록 화면에 뜬금없는 강조가 뜬다.
-    if (!self.image_gallery.filter.isGrid()) return;
-    const n = self.image_gallery.hovered orelse return;
+    if (!self.agent_activity.filter.isGrid()) return;
+    const n = self.agent_activity.hovered orelse return;
 
     const area = gridArea(self);
     const l = gridLayout(self);
@@ -2553,16 +2553,16 @@ pub fn appendGpuImages(
     // 채 `uploaded` 만 참으로 남으면 격자가 빈다(도크 접기에서 겪은 것과 같은 결함).
     // **「전체」도 그림을 싣는다**(AV5). 접힌 줄에 작은 썸네일이 붙기 때문이다 — 「읽기」·「명령」은
     // 그림이 없는 종류라 그대로 막는다(없는 것을 위해 창을 훑을 이유가 없다).
-    const is_grid = self.image_gallery.filter.isGrid();
-    const wants_thumbs = is_grid or self.image_gallery.filter == .all;
+    const is_grid = self.agent_activity.filter.isGrid();
+    const wants_thumbs = is_grid or self.agent_activity.filter == .all;
     // ⚠️ **펼침이 열리면 목록도 썸네일도 없다.** 목록(`collectActivityList`)은 그 게이트를 이미
     // 갖는데 썸네일이 안 가지면 **글자 없이 그림만** 펼침 본문 위에 남는다. 격자의 크게 보기는
     // 아래에서 `appendOpenImage` 로 갈리지만(그쪽은 그림이 본체다), 펼침은 그림이 없어 그 갈래를
     // 안 타고 그대로 내려온다 — AV3 와 AV5 를 합쳐야 생기는 자리다.
-    const detail_open = !is_grid and self.image_gallery.open != null;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or !wants_thumbs or detail_open) {
-        self.image_gallery.markAllNeedUpload();
-        self.image_gallery.markOpenNeedUpload();
+    const detail_open = !is_grid and self.agent_activity.open != null;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity or !wants_thumbs or detail_open) {
+        self.agent_activity.markAllNeedUpload();
+        self.agent_activity.markOpenNeedUpload();
         return;
     }
 
@@ -2573,14 +2573,14 @@ pub fn appendGpuImages(
     //
     // ⚠️ 목록에서는 건드리지 않는다 — 그 값은 `listOverflow` 가 `listWindow` 에서 따로 낸다.
     // 격자의 셈을 목록에 흘리면 안내 줄이 「12개 중 8개」를 엉뚱한 수로 말한다(적대적 I1·J1).
-    if (is_grid) self.image_gallery.overflow = l.overflow;
+    if (is_grid) self.agent_activity.overflow = l.overflow;
 
     // **크게 보기는 격자를 대체한다.** 겹쳐 그리면 어느 것을 누르는지 알 수 없다. 다만 아직 못 푼
     // 동안에는 격자를 그대로 둔다 — 클릭 직후 화면이 비면 「눌렀더니 사라졌다」로 보인다.
-    if (self.image_gallery.open) |*op| {
+    if (self.agent_activity.open) |*op| {
         if (op.pixels.len > 0) {
             // 크게 보기가 격자를 **대체**하므로 타일이 하나도 안 실린다 — 닫을 때 다시 올려야 한다.
-            self.image_gallery.markAllNeedUpload();
+            self.agent_activity.markAllNeedUpload();
             appendOpenImage(self, op, images, uploads, pixels, live_ids);
             return;
         }
@@ -2591,7 +2591,7 @@ pub fn appendGpuImages(
     const first: usize = if (is_grid) l.first else w.first;
     const visible: usize = if (is_grid) l.visible else w.last -| w.first;
     if (visible == 0) {
-        self.image_gallery.markAllNeedUpload();
+        self.agent_activity.markAllNeedUpload();
         return;
     }
 
@@ -2605,7 +2605,7 @@ pub fn appendGpuImages(
     var new_pixels: std.ArrayList(u8) = .empty;
     defer new_pixels.deinit(self.allocator);
 
-    for (self.image_gallery.tiles.items, 0..) |*tile, i| {
+    for (self.agent_activity.tiles.items, 0..) |*tile, i| {
         const n = tile.hit_index; // **자리는 인덱스가 정한다** — 배열 순서가 아니다
         if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
         const cell = if (is_grid) image_grid.rectAt(area, m, l, n) orelse {
@@ -2627,7 +2627,7 @@ pub fn appendGpuImages(
         // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
         const r = image_grid.fitInside(cell, tile.width, tile.height);
         // id 는 **인덱스**로 짓는다 — 배열 위치는 퇴출·추가로 바뀐다(위 주석).
-        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(@min(n, 0xFFFF)));
+        const id: u32 = activity_image_id_base +| @as(u32, @intCast(@min(n, 0xFFFF)));
 
         new_images.append(self.allocator, .{
             .image_id = id,
@@ -2644,7 +2644,7 @@ pub fn appendGpuImages(
             .z = @intCast(@min(i, 255)),
             .pass = 2, // above_text — 도크 배경 셀 위에 그린다
         }) catch {
-            self.image_gallery.markAllNeedUpload();
+            self.agent_activity.markAllNeedUpload();
             return;
         };
         live_ids.append(self.allocator, id) catch {};
@@ -2659,11 +2659,11 @@ pub fn appendGpuImages(
                 .pixels_offset = pixels.len + new_pixels.items.len,
                 .pixels_len = tile.pixels.len,
             }) catch {
-                self.image_gallery.markAllNeedUpload();
+                self.agent_activity.markAllNeedUpload();
                 return;
             };
             new_pixels.appendSlice(self.allocator, tile.pixels) catch {
-                self.image_gallery.markAllNeedUpload();
+                self.agent_activity.markAllNeedUpload();
                 return;
             };
             tile.uploaded = true;
@@ -2675,7 +2675,7 @@ pub fn appendGpuImages(
     // **여기서 나가면 이 프레임에 아무것도 안 실린다** = 전부 evict 인데 `uploaded` 는 참이다.
     // 방금 고친 것과 같은 결함이라 같은 규율로 막는다 — 안 그리고 나가는 길은 예외 없이 표시한다.
     const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + new_images.items.len) catch {
-        self.image_gallery.markAllNeedUpload();
+        self.agent_activity.markAllNeedUpload();
         return;
     };
     @memcpy(merged_images[0..images.len], images.*);
@@ -2686,12 +2686,12 @@ pub fn appendGpuImages(
     if (new_uploads.items.len > 0) {
         // 이미지는 이미 실렸지만 **업로드가 빠지면** 텍스처 없는 id 가 실려 빈 자리가 된다.
         const merged_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, uploads.len + new_uploads.items.len) catch {
-            self.image_gallery.markAllNeedUpload();
+            self.agent_activity.markAllNeedUpload();
             return;
         };
         const merged_pixels = std.mem.concat(self.allocator, u8, &.{ pixels.*, new_pixels.items }) catch {
             self.allocator.free(merged_uploads);
-            self.image_gallery.markAllNeedUpload();
+            self.agent_activity.markAllNeedUpload();
             return;
         };
         @memcpy(merged_uploads[0..uploads.len], uploads.*);
@@ -2731,7 +2731,7 @@ pub fn listOverflow(self: *const AppSession) usize {
 pub const ListWindow = struct { total: usize, first: usize, last: usize, rows_fit: usize, cols: u16, row_h: u32 };
 
 pub fn listWindow(self: *const AppSession) ListWindow {
-    const total = self.image_gallery.count();
+    const total = self.agent_activity.count();
     const empty: ListWindow = .{ .total = total, .first = 0, .last = 0, .rows_fit = 0, .cols = 0, .row_h = 0 };
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return empty;
     const area = gridArea(self);
@@ -2744,7 +2744,7 @@ pub fn listWindow(self: *const AppSession) ListWindow {
     // **스크롤을 목록 끝 안으로 잡아 둔다**(H2) — 큰 목록에서 굴린 뒤 짧은 pane 으로 옮기면
     // `first` 가 끝을 넘어 화면이 비고, 안내가 틀린 원인을 말한다.
     const max_first = total -| rows_fit;
-    const first: usize = @min(@as(usize, @intCast(self.image_gallery.scroll.offset_y_px / row_h)), max_first);
+    const first: usize = @min(@as(usize, @intCast(self.agent_activity.scroll.offset_y_px / row_h)), max_first);
     return .{
         .total = total,
         .first = first,
@@ -2771,12 +2771,12 @@ pub fn collectFilterChips(
     // **안 그리면 0 이라고 말한다.** `drawn_chips` 는 「필터 UI 가 실제로 나갔나」를 값으로 보는
     // 창인데, 안 그리고 나갈 때 지난 프레임의 수를 남겨 두면 그 창이 거짓말을 한다 — 안내 줄이
     // 잔값을 읽던 결함(§2.2)과 같은 형태다.
-    self.image_gallery.drawn_chips = 0;
+    self.agent_activity.drawn_chips = 0;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
     // 크게 보기·펼침은 도크를 덮는다 — 그 위에 칩을 그리면 내용 위에 글자가 뜬다. 자리도 함께
     // 돌려준다(`chipRowTakenPx`).
-    if (self.image_gallery.open != null) return;
+    if (self.agent_activity.open != null) return;
 
     const rect = chipRowRect(self);
     if (rect.h == 0) return;
@@ -2796,7 +2796,7 @@ pub fn collectFilterChips(
     var drawn: usize = 0;
     for (spans) |span| {
         const text = filterText(span.filter);
-        const color = if (span.filter == self.image_gallery.filter) fg else dim;
+        const color = if (span.filter == self.agent_activity.filter) fg else dim;
         const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, span.cols, text, color) catch continue;
         self.collectShaped(collected, dl, builder, .{ .pane = .{
             .origin_x = rect.x +| (@as(u32, span.col) *| self.cell_width_px),
@@ -2805,7 +2805,7 @@ pub fn collectFilterChips(
         } });
         drawn += 1;
     }
-    self.image_gallery.drawn_chips = drawn;
+    self.agent_activity.drawn_chips = drawn;
 }
 
 /// 칩 줄을 눌렀나. 눌렀으면 그 필터로 바꾸고 `true`.
@@ -2813,8 +2813,8 @@ pub fn collectFilterChips(
 /// **자리는 `chipSpans` 가 정한다** — 그리기와 같은 함수라 「보이는 칩」과 「눌리는 칩」이 갈리지
 /// 않는다. 좁아서 칩이 하나뿐일 때는 그것을 눌러도 아무 일도 안 한다(이미 고른 것이다).
 pub fn handleChipDown(self: *AppSession, x_px: f64, y_px: f64) bool {
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return false;
-    if (self.image_gallery.open != null) return false;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return false;
+    if (self.agent_activity.open != null) return false;
     const rect = chipRowRect(self);
     if (rect.h == 0) return false;
     if (y_px < @as(f64, @floatFromInt(rect.y)) or y_px >= @as(f64, @floatFromInt(rect.y +| rect.h))) return false;
@@ -2834,7 +2834,7 @@ pub fn handleChipDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         }
     }
     // 칩 줄 안이지만 빈 자리다 — 도크를 눌렀다는 사실만 받고 삼킨다(뒤 터미널로 새지 않게).
-    self.image_gallery.key_focus = true;
+    self.agent_activity.key_focus = true;
     return true;
 }
 
@@ -2843,14 +2843,14 @@ pub fn handleChipDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 /// `cycleFilter` 와 같은 뒷정리를 한다 — 크게 보기를 닫고, 보던 자리·얹힌 칸·넘친 수를 되돌린다.
 /// 두 입구가 다른 정리를 하면 「Tab 으로 바꿨을 때와 눌러서 바꿨을 때가 다르다」가 된다.
 pub fn setFilter(self: *AppSession, want: Filter) void {
-    if (self.image_gallery.filter == want) return;
+    if (self.agent_activity.filter == want) return;
     closeOpen(self);
-    self.image_gallery.filter = want;
-    self.image_gallery.scroll.offset_y_px = 0;
-    self.image_gallery.hovered = null;
-    self.image_gallery.overflow = 0;
+    self.agent_activity.filter = want;
+    self.agent_activity.scroll.offset_y_px = 0;
+    self.agent_activity.hovered = null;
+    self.agent_activity.overflow = 0;
     rebuildFilter(self);
-    self.image_gallery.key_focus = true; // 도크를 눌렀다 = 키보드도 도크로
+    self.agent_activity.key_focus = true; // 도크를 눌렀다 = 키보드도 도크로
     self.metal_dirty = true;
 }
 
@@ -2869,19 +2869,19 @@ pub fn collectActivityList(
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
     // **펼치면 목록은 물러난다**(AV3 — 계약 §2.4 「크게 보기와 같은 자리」). 안 비키면 본문 글자가
     // 목록 글자 위에 얹혀 **둘 다 못 읽는다** — 격자가 크게 보기 앞에서 물러나는 것과 같은 규율이다.
     // **안 그리면 0 이라고 말한다.** 칩(`drawn_chips`)·펼침(`drawn_detail_rows`)이 이미 그 규율을
     // 갖는데 목록만 빠져 있었다 — 펼침이 열리면 여기서 그냥 물러나므로 지난 프레임의 줄 수가 남고,
     // 「지금 목록이 그려지고 있나」를 값으로 보는 창이 거짓말을 한다(적대적 1 회차).
-    self.image_gallery.drawn_rows = 0;
-    self.image_gallery.drawn_pieces = 0;
-    if (self.image_gallery.open != null) return;
-    if (self.image_gallery.filter.isGrid()) {
+    self.agent_activity.drawn_rows = 0;
+    self.agent_activity.drawn_pieces = 0;
+    if (self.agent_activity.open != null) return;
+    if (self.agent_activity.filter.isGrid()) {
         // 격자에는 줄이 없다 — 옛 값이 남으면 판정자가 속는다.
-        self.image_gallery.drawn_rows = 0;
-        self.image_gallery.drawn_pieces = 0;
+        self.agent_activity.drawn_rows = 0;
+        self.agent_activity.drawn_pieces = 0;
         return;
     }
 
@@ -2903,9 +2903,9 @@ pub fn collectActivityList(
     const cols = win.cols -| thumb_cols;
     const row_h = win.row_h;
     if (cols == 0 or row_h == 0) {
-        self.image_gallery.overflow = win.total;
-        self.image_gallery.drawn_rows = 0;
-        self.image_gallery.drawn_pieces = 0;
+        self.agent_activity.overflow = win.total;
+        self.agent_activity.drawn_rows = 0;
+        self.agent_activity.drawn_pieces = 0;
         return;
     }
 
@@ -2918,7 +2918,7 @@ pub fn collectActivityList(
     // 안내가 직접 부르는 `listWindow` 이고, **이 필드를 읽는 제품 코드는 없다** — 판정자가 렌더를
     // 들여다보는 창일 뿐이다(`drawn_rows` 와 같은 역할, 적대적 검증 K1 이 전수로 확인했다).
     // 그 사실을 안 적으면 다음 사람이 「안내가 이걸 읽겠지」로 오해해 순서 의존을 되살린다.
-    self.image_gallery.overflow = win.total -| (last -| first);
+    self.agent_activity.overflow = win.total -| (last -| first);
 
     // 접두·시각은 라벨보다 **흐리게** — 곁말이 본문보다 먼저 읽히면 안 된다(격자 라벨과 같은 규율).
     const dim: maru.terminal.Color = .{ .rgb = towardBg(
@@ -2933,8 +2933,8 @@ pub fn collectActivityList(
     var pieces: usize = 0;
     var i = first;
     while (i < last) : (i += 1) {
-        if (i >= self.image_gallery.labels.items.len) break;
-        const label = self.image_gallery.labels.items[i];
+        if (i >= self.agent_activity.labels.items.len) break;
+        const label = self.agent_activity.labels.items[i];
         const text = label.text();
         // **「전체」에는 이미지도 섞인다.** 그 줄의 「첨부 / 읽음」은 계약 §2.2.1 이 「이 화면에 사용자가
         // 던지는 첫 물음」이라고 못박은 정보다 — 목록이라고 버리면 격자에서 답하던 것을 못 답한다.
@@ -2964,8 +2964,8 @@ pub fn collectActivityList(
 
         // **결과 요약**(AV2) — 그 호출이 어떻게 끝났나. 못 찾은 호출은 빈 문자열이라 자리를 안 먹는다.
         var summary_buf: [max_result_summary_bytes]u8 = undefined;
-        const summary = if (i < self.image_gallery.hits.items.len)
-            formatResultSummary(&summary_buf, self.image_gallery.hits.items[i].result)
+        const summary = if (i < self.agent_activity.hits.items.len)
+            formatResultSummary(&summary_buf, self.agent_activity.hits.items[i].result)
         else
             "";
 
@@ -3025,8 +3025,8 @@ pub fn collectActivityList(
             pieces += 1;
         }
     }
-    self.image_gallery.drawn_rows = drawn;
-    self.image_gallery.drawn_pieces = pieces;
+    self.agent_activity.drawn_rows = drawn;
+    self.agent_activity.drawn_pieces = pieces;
 }
 
 /// 요약 문자열의 상한. 「실패 · 4294967295줄」이 가장 긴 모양이고 그 두 배다.
@@ -3051,14 +3051,14 @@ pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.Res
     // 라 **실제 텍스트가 있다**(실측: 첫 원소가 `text`, 원소 3 개). 그것을 「이미지」로 덮으면
     // provider 가 적어 준 말을 우리가 지운다 — 본문이 있으면 줄 수가 여전히 맞는 답이다.
     if (result.image and result.lines == 0) {
-        const text = maru.i18n.t(.image_gallery_result_image);
+        const text = maru.i18n.t(.agent_activity_result_image);
         // **실패는 삼키지 않는다.** provider 가 적은 유일한 근거이므로(계약 §2.3), 종류를 바꿔
         // 말한다고 그것을 지우면 안 된다. 줄 수 갈래를 그대로 쓰면 「실패 · 0줄」이 되는데 그건
         // 더 나쁜 거짓말이라, 여기서 「실패 · 이미지」로 붙인다. (실측 이미지 결과의 실패는 0 건이지만
         // 근거를 삼키는 코드를 두지 않는다.)
         if (result.failed) {
             return std.fmt.bufPrint(buf, "{s} \u{00b7} {s}", .{
-                maru.i18n.t(.image_gallery_result_failed),
+                maru.i18n.t(.agent_activity_result_failed),
                 text,
             }) catch text;
         }
@@ -3066,10 +3066,10 @@ pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.Res
         @memcpy(buf[0..text.len], text);
         return buf[0..text.len];
     }
-    const suffix = maru.i18n.t(.image_gallery_result_lines_suffix);
+    const suffix = maru.i18n.t(.agent_activity_result_lines_suffix);
     if (result.failed) {
         return std.fmt.bufPrint(buf, "{s} \u{00b7} {d}{s}", .{
-            maru.i18n.t(.image_gallery_result_failed),
+            maru.i18n.t(.agent_activity_result_failed),
             result.lines,
             suffix,
         }) catch "";
@@ -3092,9 +3092,9 @@ pub fn collectOpenDetail(
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return;
     if (!isDetailOpen(self)) return;
-    const op = if (self.image_gallery.open) |*o| o else return;
+    const op = if (self.agent_activity.open) |*o| o else return;
 
     const area = gridArea(self);
     const row_h = labelHeightPx(self);
@@ -3144,7 +3144,7 @@ pub fn collectOpenDetail(
     }
     if (op.detail.command_truncated) {
         if (row >= rows_fit) return;
-        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_truncated), dim);
+        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_detail_truncated), dim);
         row += 1;
     }
 
@@ -3152,7 +3152,7 @@ pub fn collectOpenDetail(
     if (!op.detail.has_result) return;
     if (row + 1 >= rows_fit) return;
     row += 1; // 빈 줄 하나로 가른다
-    draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_result), dim);
+    draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_detail_result), dim);
     row += 1;
     var rit = std.mem.splitScalar(u8, op.detail.result, '\n');
     while (rit.next()) |line| {
@@ -3161,7 +3161,7 @@ pub fn collectOpenDetail(
         row += 1;
     }
     if (op.detail.result_truncated and row < rows_fit) {
-        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.image_gallery_detail_truncated), dim);
+        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_detail_truncated), dim);
     }
 }
 
@@ -3175,20 +3175,20 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 조합 중인 글자(`preedit`)도 붙여 그린다 — 한글은 확정 전에 보이지 않으면 못 친다.
     if (searchOwnsInput(self)) return searchLine(self, buf).text;
     // **크게 보기가 먼저다.** 열려 있으면 격자 개수는 지금 사용자가 보는 것과 무관하다.
-    if (self.image_gallery.open) |op| {
+    if (self.agent_activity.open) |op| {
         if (op.pixels.len > 0) return "";
         // 도는 것이 없는데 픽셀도 없다 = 못 풀었다. 조용히 닫으면 클릭이 안 먹은 것처럼 보인다.
-        if (op.decoding == 0) return maru.i18n.t(.image_gallery_open_failed);
+        if (op.decoding == 0) return maru.i18n.t(.agent_activity_open_failed);
     }
-    if (self.image_gallery.chain.isEmpty()) {
+    if (self.agent_activity.chain.isEmpty()) {
         // **「없다」와 「못 읽는다」는 다르다.** 원격 pane 에는 에이전트가 **있는데도**(사이드바 배지가
         // 그것을 보여준다) 갤러리가 그 파일을 못 연다. 거기에 「에이전트가 없습니다」라고 하면
         // 사용자는 훅이 깨진 줄 알고 설치부터 다시 훑는다 — 실제로 그 길을 걸어 본 뒤에 나눈다.
-        if (self.image_gallery.source_remote) return maru.i18n.t(.image_gallery_remote_unsupported);
-        return maru.i18n.t(.image_gallery_no_agent);
+        if (self.agent_activity.source_remote) return maru.i18n.t(.agent_activity_remote_unsupported);
+        return maru.i18n.t(.agent_activity_no_agent);
     }
-    if (self.image_gallery.scanning()) return maru.i18n.t(.image_gallery_scanning);
-    const n = self.image_gallery.count();
+    if (self.agent_activity.scanning()) return maru.i18n.t(.agent_activity_scanning);
+    const n = self.agent_activity.count();
     // **「못 읽었다」는 찾은 것이 있을 때만 말한다**(사용자 보고). 대화 기록이 비어 있으면 스캔이
     // partial 로 끝나기 쉬운데, 그때 「세션을 다 읽지 못했습니다」라고 하면 사용자에게는 갤러리가
     // 고장난 것으로 보인다 — 실제로는 **없는 것**이다.
@@ -3200,33 +3200,33 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 종류별 상한 덕에 전부 들어온다(적대적 검증 O1).
     //
     // 종류별 플래그가 아직 없던 스캔 결과(옛 세션)에서는 `partial` 하나로 물러난다.
-    const kind_partial = if (self.image_gallery.image_partial or self.image_gallery.activity_partial)
-        self.image_gallery.filter.partialOf(
-            self.image_gallery.image_partial,
-            self.image_gallery.activity_partial,
+    const kind_partial = if (self.agent_activity.image_partial or self.agent_activity.activity_partial)
+        self.agent_activity.filter.partialOf(
+            self.agent_activity.image_partial,
+            self.agent_activity.activity_partial,
         )
     else
-        self.image_gallery.partial;
-    if (kind_partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {
-        return maru.i18n.t(.image_gallery_partial);
+        self.agent_activity.partial;
+    if (kind_partial and (n > 0 or self.agent_activity.scanned_bytes == 0)) {
+        return maru.i18n.t(.agent_activity_partial);
     }
     if (n == 0) {
         // 거르고 있는데 0 이면 「세션에 이미지가 없다」가 **아니다**. 그렇게 말하면 사용자는 검색어를
         // 지울 생각을 못 하고 갤러리가 고장났다고 읽는다.
-        if (self.image_gallery.queryText().len > 0) return maru.i18n.t(.image_gallery_no_match);
+        if (self.agent_activity.queryText().len > 0) return maru.i18n.t(.agent_activity_no_match);
         // **「이미지가 없다」는 이미지 필터에서만 참이다.** 실행 필터에서 그 문구를 내면 거짓말이고,
         // 사용자는 갤러리가 고장난 줄 안다(계약 §2 — 「없다」와 「안 보인다」를 가르는 규율의 연장).
-        if (!self.image_gallery.filter.isGrid()) return maru.i18n.t(.image_gallery_none_of_kind);
-        return maru.i18n.t(.image_gallery_empty);
+        if (!self.agent_activity.filter.isGrid()) return maru.i18n.t(.agent_activity_none_of_kind);
+        return maru.i18n.t(.agent_activity_empty);
     }
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.
-    if (self.image_gallery.tiles.items.len > 0) {
+    if (self.agent_activity.tiles.items.len > 0) {
         // **렌더가 남긴 값이 아니라 지금 계산을 본다.** 그리는 순서가 「안내 → 격자」라 잔값을 읽으면
         // 한 프레임 늦는다 — 목록에서 고친 것과 **같은 결함**이고, 그때 격자를 빠뜨렸다(적대적 검증 J5).
         const grid_overflow = gridLayout(self).overflow;
         if (grid_overflow == 0) return "";
-        return maru.i18n.format(buf, maru.i18n.t(.image_gallery_shown_of), &.{
+        return maru.i18n.format(buf, maru.i18n.t(.agent_activity_shown_of), &.{
             .{ .d = @intCast(n -| grid_overflow) },
             .{ .d = @intCast(n) },
         });
@@ -3235,16 +3235,16 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 높이 0), 그때 개수만 적으면 사용자에게는 「목록이 없다」와 구분되지 않는다 — 계약 §2 가
     // 가르라고 한 바로 그 둘이다. 격자는 「12장 중 8장」이 그 몫을 하지만 목록에는 타일이 없어
     // 그 경로를 안 탄다.
-    if (!self.image_gallery.filter.isGrid() and listOverflow(self) >= n) {
-        return maru.i18n.t(.image_gallery_too_narrow);
+    if (!self.agent_activity.filter.isGrid() and listOverflow(self) >= n) {
+        return maru.i18n.t(.agent_activity_too_narrow);
     }
     // **단위도 종류를 따른다.** 명령을 「장」으로 세면 안 된다 — 헤드리스 캡처가 실제로 「4084장」을
     // 잡아냈고, 값 판정자로는 안 보이는 종류의 결함이다(계약 §2.2 의 「지어내지 않는다」와 같은 축:
     // 이미지의 단위를 활동에 빌려 쓰면 화면이 거짓을 말한다).
-    const suffix = if (self.image_gallery.filter.isGrid())
-        maru.i18n.t(.image_gallery_count_suffix)
+    const suffix = if (self.agent_activity.filter.isGrid())
+        maru.i18n.t(.agent_activity_count_suffix)
     else
-        maru.i18n.t(.image_gallery_activity_count_suffix);
+        maru.i18n.t(.agent_activity_activity_count_suffix);
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
     return std.fmt.bufPrint(buf, "{d}{s}", .{ n, suffix }) catch buf[0..0];
 }

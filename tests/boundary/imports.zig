@@ -7670,7 +7670,7 @@ test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 �
     try std.testing.expect(countOccurrences(agent_src, "openAgentDirAbsolute(self,") >= 7);
 
     // 갤러리는 자리가 하나라 인라인 가드를 쓴다 — **그 가드가 있는지**를 센다.
-    const gallery_src = try readZigFileZ(allocator, "src/platform/macos/app_session/image_gallery.zig");
+    const gallery_src = try readZigFileZ(allocator, "src/platform/macos/app_session/agent_activity.zig");
     defer allocator.free(gallery_src);
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "std.Io.Dir.openDirAbsolute("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "if (!std.fs.path.isAbsolute(root_path)) break;"));

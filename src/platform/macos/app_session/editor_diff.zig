@@ -2939,3 +2939,105 @@ test "DCARET20: caret 배열을 못 잡으면 안 그린다 — 옛 배열을 �
     const again = editor_ops.buildDiffCarets(fx.session, fx.term, .right) orelse return error.NoCarets;
     try testing.expectEqual(@as(usize, 1), again[1].len);
 }
+
+test "DCARET21: 사용자가 옮긴 caret 은 다음 tick 에 안 되돌아온다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("a\nb\nc\nd\n", "a\nB\nc\nd\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    const moved = fx.term.rt.editor_diff_selection.?.sel.focus;
+    try testing.expectEqual(@as(usize, 2), moved.row);
+
+    // **씨앗은 비교가 **다시 설 때**만 돈다.** 매 tick 돌면 사용자가 옮긴 caret 이 눈앞에서
+    // 맨 위로 튄다 — 상태만 보는 판정자로는 한 번의 `poll` 뒤에도 값이 같아 안 드러난다.
+    for (0..5) |_| poll(fx.session, fx.term);
+    try testing.expectEqual(moved.row, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(moved.byte, fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // **거꾸로 — 내용이 다시 계산되면 되돌아온다.** 옛 행 첨자를 들고 있으면 안 되기 때문이다.
+    invalidate(fx.session, fx.term);
+    poll(fx.session, fx.term);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+}
+
+test "DCARET22: ⇧이동이 마우스로 잡은 낱말 단위를 지킨다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\nalpha beta gamma\n", "keep\nalpha BETA gamma\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const rows = fx.term.rt.editor_diff.?.right_texts;
+    const i = rowIndexOf(rows, "alpha BETA gamma") orelse return error.NoRow;
+
+    // 마우스로 낱말을 잡은 상태 — anchor 가 **범위**이고 `kind` 가 `.word` 다.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.fromAnchorRange(
+        .{ .row = i, .byte = 6 },
+        .{ .row = i, .byte = 10 },
+        .{ .row = i, .byte = 10 },
+        .word,
+    ) };
+
+    // ⑴ **범위 안에서 당기면 줄어든다.** focus 가 아직 anchor 범위의 시작보다 뒤면 고정단은
+    //    그 시작이고, 사용자는 앞으로 뻗은 선택을 되감는 중이다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .shift = true } });
+    {
+        const sel = fx.term.rt.editor_diff_selection.?.sel;
+        try testing.expectEqual(@as(usize, 6), sel.start().byte);
+        try testing.expectEqual(@as(usize, 9), sel.end().byte);
+    }
+
+    // ⑵ **범위를 넘어 뒤로 가면 잡은 낱말이 통째로 남는다.** 고정단이 anchor 범위의 **끝**으로
+    //    바뀐다 — anchor 를 점으로 두면 그 낱말이 사라진다(단일 편집기 §3.2 가 anchor 를 범위로
+    //    둔 근거이고, 비교 뷰 쪽은 그것이 없어 더블클릭한 낱말을 잃은 적이 있다).
+    for (0..4) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .shift = true } });
+    const sel = fx.term.rt.editor_diff_selection.?.sel;
+    try testing.expectEqual(@as(usize, 5), sel.start().byte);
+    try testing.expectEqual(@as(usize, 10), sel.end().byte); // 잡은 낱말의 끝이 살아 있다
+    try testing.expectEqual(maru.session.editor.selection.AnchorKind.word, sel.kind);
+
+    // ⑶ **⇧ 없이 움직이면 단위가 풀린다** — 새 caret 은 점이다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expect(fx.term.rt.editor_diff_selection.?.sel.isEmpty());
+    try testing.expectEqual(maru.session.editor.selection.AnchorKind.simple, fx.term.rt.editor_diff_selection.?.sel.kind);
+}
+
+test "DCARET23: caret 뿐이면 복사할 것이 없고, 검색은 caret 이 선 열에서 시작한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\nbeta\n", "keep\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    // ⑴ **caret 뿐인 선택은 복사하지 않는다.** 단일 편집기는 선택이 없으면 caret 줄 전체를
+    //    담지만(COPY1), 비교 뷰는 그 계약이 없다 — 늘 서 있는 caret 이 줄 복사를 뜻하면
+    //    `⌘C` 가 비교 뷰에서만 다른 일을 한다.
+    try testing.expect(!editor_ops.copyDiffSelection(fx.session));
+
+    // ⑵ **검색은 caret 이 선 열에서 시작한다.** 씨앗이 오른쪽이므로 기본이 오른쪽이고,
+    //    caret 을 왼쪽으로 옮기면 검색도 따라간다.
+    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term));
+    fx.term.rt.editor_diff_selection.?.side = .left;
+    try testing.expectEqual(editor_ops.DiffSide.left, editor_ops.diffSearchSide(fx.session, fx.term));
+
+    // ⑶ **명시값은 여전히 이긴다** — 검색 UI 가 열을 고르면 caret 보다 그쪽이 먼저다.
+    fx.session.chrome_host.find.diff_side = .right;
+    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term));
+    fx.session.chrome_host.find.diff_side = null;
+
+    // ⑷ **선택이 생기면 복사된다** — ⑴ 이 "늘 false" 가 아니다.
+    const rows = fx.term.rt.editor_diff.?.right_texts;
+    const i = rowIndexOf(rows, "BETA") orelse return error.NoRow;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 0 }) };
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, k| {
+        if (t == fx.term) pane.active_term = k;
+    }
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("B", fx.session.chrome_clipboard_write);
+}

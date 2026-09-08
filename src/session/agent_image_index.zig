@@ -130,6 +130,14 @@ pub const Hit = struct {
     /// 집던 결함을 이미 고쳤다) 링크도 줄이 아니라 **그 호출의 범위**에서 id 를 얻어야 한다.
     id_rel: u32 = 0,
     id_len: u8 = 0,
+    /// **펼침이 보여 줄 명령**의 자리 — 줄 시작 상대(AV3 적대적 검증). **0 이면 대상이 곧 명령이다.**
+    ///
+    /// ⚠️ 라벨의 대상(`data_offset`)과 **다를 수 있다.** 라벨은 사람이 읽기 좋은 것을 먼저 고르므로
+    /// (`description` → `file_path` → 명령, 계약 §2.2) Claude Bash 의 68.8% 에서 대상은 **모델이 쓴
+    /// 요약**이다. 그런데 계약 §2.2 는 그 대가를 이렇게 갚기로 했다 — 「`description` 은 명령과 어긋날
+    /// 수 있다, **그래서 펼치면 언제나 명령 전문이 먼저 나온다**」. 그 약속을 지키려면 명령의 자리를
+    /// 따로 들어야 한다.
+    cmd_rel: u32 = 0,
     /// 이 호출이 적힌 **시각**의 자리 — `"timestamp":"` **키**의 줄 시작 상대 오프셋(AV2b).
     /// **0 이면 모른다**(줄은 `{` 로 시작하므로 0 은 키의 자리가 될 수 없다).
     ///
@@ -579,13 +587,21 @@ fn scanClaudeToolUses(
         const name = findQuotedValue(scope, after, name_key) orelse continue;
         const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
         // 대상이 없으면 **이름이 대상이다** — 「무엇을 했는지」를 못 적느니 도구 이름이라도 적는다.
-        const target = pickClaudeTarget(scope, after) orelse name;
+        const picked = pickClaudeTargetKeyed(scope, after);
+        const target = picked.span orelse name;
+        // **펼침은 명령을 보여 준다**(계약 §2.2 ⚠️). 대상이 이미 명령이면 다시 안 찾는다.
+        const cmd_rel: u32 = if (picked.is_command)
+            0
+        else if (findEscapedValue(scope, after, command_key)) |c|
+            (if (c.start <= std.math.maxInt(u32)) @intCast(c.start) else 0)
+        else
+            0;
         // **자기 레코드 범위 안에서** id 를 찾는다(위 `scope` 와 같은 이유 — 한 줄에 호출이 둘이면
         // 줄 전체에서 찾은 id 는 남의 것일 수 있다).
         const id = findQuotedValueFull(scope, after, id_key);
         // Claude 의 시각은 **마커 뒤**다(실측 40,676/40,676 · 중앙 1,454 · 최대 38,753).
         const time_rel = timestampKeyRel(scope, after, claude_time_window);
-        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id, time_rel);
+        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id, time_rel, cmd_rel);
         if (end == line.len) break;
     }
 }
@@ -614,17 +630,24 @@ fn scanCodexToolCalls(
     const id = findQuotedValueFull(scope, 0, call_id_key);
     // Codex 의 시각은 **줄 머리**다(실측 자리 중앙·p99·최대 모두 1) — 마커 뒤에서 찾으면 못 본다.
     const time_rel = timestampKeyRel(scope, 0, codex_time_window);
-    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel);
+    // Codex 는 대상이 곧 명령이다(`input`/`arguments`) — 따로 들 것이 없다.
+    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel, 0);
 }
 
 /// 화면에 적을 **대상**의 자리를 고른다. 순서가 계약이다(§2.2) — 실측이 정한 순서다:
 /// `description` 은 Bash 의 68.8% 에 있고 중앙 26 B 라 라벨에 언제나 들어가는 반면, 명령 첫 줄은
 /// **52.4% 가 여러 줄**이고 **27.4%** 가 라벨 상한을 넘는다.
 fn pickClaudeTarget(line: []const u8, from: usize) ?Span {
-    if (findEscapedValue(line, from, description_key)) |v| return v;
-    if (findEscapedValue(line, from, file_path_key)) |v| return v;
-    if (findEscapedValue(line, from, command_key)) |v| return v;
-    return null;
+    return pickClaudeTargetKeyed(line, from).span;
+}
+
+/// 위와 같되 **무엇이 골라졌는지**도 알려 준다. 펼침이 명령을 따로 찾아야 하는지 그 답으로 정한다 —
+/// 이미 명령이 골라졌으면 같은 줄을 한 번 더 훑을 이유가 없다(AV2 가 배운 그 비용이다).
+fn pickClaudeTargetKeyed(line: []const u8, from: usize) struct { span: ?Span, is_command: bool } {
+    if (findEscapedValue(line, from, description_key)) |v| return .{ .span = v, .is_command = false };
+    if (findEscapedValue(line, from, file_path_key)) |v| return .{ .span = v, .is_command = false };
+    if (findEscapedValue(line, from, command_key)) |v| return .{ .span = v, .is_command = true };
+    return .{ .span = null, .is_command = false };
 }
 
 /// Codex 호출 레코드에는 **사람이 읽는 설명 필드가 없다**(키 실측: `call_id,id,input,…,name,status,type`).
@@ -679,6 +702,8 @@ fn appendActivity(
     id: ?Span,
     /// 이 호출이 적힌 **시각 키**의 자리(AV2b). 0 이면 모른다.
     time_rel: u32,
+    /// 펼침이 보여 줄 명령의 자리(AV3). 0 이면 대상이 곧 명령이다.
+    cmd_rel: u32,
 ) !void {
     if (target.len == 0) return;
     if (target.len > std.math.maxInt(u32)) return;
@@ -695,6 +720,7 @@ fn appendActivity(
     try out.append(allocator, .{
         .line_offset = line_offset,
         .time_rel = time_rel,
+        .cmd_rel = cmd_rel,
         .data_offset = line_offset + target.start,
         .data_len = @intCast(target.len),
         .kind = kind,
@@ -3055,4 +3081,61 @@ test "활동 결말: Claude 본문 자리도 값의 첫 바이트다 (AV3)" {
     const r = out.items[0].result;
     try testing.expect(r.found);
     try testing.expectEqualStrings("alpha", doc[r.body_offset..][0..5]);
+}
+
+test "펼침 대상: 라벨은 요약이어도 펼침은 **명령**을 가리킨다 (AV3 적대적)" {
+    // 계약 §2.2 ⚠️ 가 명시적으로 갚기로 한 대가다 — 「`description` 은 명령과 어긋날 수 있다, **그래서
+    // 펼치면 언제나 명령 전문이 먼저 나온다**」. 라벨 대상을 그대로 읽으면 같은 요약을 두 번 보여 주고
+    // 명령은 영영 안 보인다(실측: Claude Bash 의 68.8% 가 `description` 을 든다).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_C1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"grep -rn foo src/\",\"description\":\"foo 쓰는 자리 찾기\"}}]}}";
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const hit = out.items[0];
+    // 라벨의 대상은 **요약**이다(그 편이 한 줄에 읽기 좋다).
+    try testing.expectEqualStrings("foo 쓰는 자리 찾기", line[hit.data_offset..][0.."foo 쓰는 자리 찾기".len]);
+    // 그런데 펼침의 자리는 **명령**이다.
+    try testing.expect(hit.cmd_rel != 0);
+    try testing.expectEqualStrings("grep -rn foo src/", line[hit.cmd_rel..][0.."grep -rn foo src/".len]);
+}
+
+test "펼침 대상: 대상이 이미 명령이면 따로 안 든다 (AV3 적대적)" {
+    // 같은 줄을 한 번 더 훑을 이유가 없다 — AV2 가 배운 그 비용이다. 0 은 「대상이 곧 명령」이라는 뜻이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_C2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\"}}]}}";
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 0), out.items[0].cmd_rel);
+    try testing.expectEqualStrings("ls -la", line[out.items[0].data_offset..][0..6]);
+}
+
+test "펼침 대상: 한 줄에 호출이 둘이면 **각자 제 명령**을 가리킨다 (AV3 적대적)" {
+    // ⚠️ **하나짜리 표본은 어긋남을 감춘다.** 호출이 하나뿐이면 자리를 잘못 골라도 「그 줄의 명령」이라
+    // 우연히 맞는다. main 이 라벨에서 같은 이유로 레코드 범위를 닫았고(한 줄에 둘일 때 남의 값을 집던
+    // 결함), 펼침의 자리도 그 범위를 지켜야 한다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line = "{\"type\":\"assistant\",\"message\":{\"content\":[" ++
+        "{\"type\":\"tool_use\",\"id\":\"toolu_E1\",\"name\":\"Bash\"," ++
+        "\"input\":{\"command\":\"first cmd\",\"description\":\"첫째\"}}," ++
+        "{\"type\":\"tool_use\",\"id\":\"toolu_E2\",\"name\":\"Bash\"," ++
+        "\"input\":{\"command\":\"second cmd\",\"description\":\"둘째\"}}]}}";
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    // 라벨은 각자의 요약이고,
+    try testing.expectEqualStrings("첫째", line[out.items[0].data_offset..][0.."첫째".len]);
+    try testing.expectEqualStrings("둘째", line[out.items[1].data_offset..][0.."둘째".len]);
+    // 펼침 자리도 **각자의 명령**이다 — 둘 다 첫 명령을 가리키면 여기서 죽는다.
+    try testing.expectEqualStrings("first cmd", line[out.items[0].cmd_rel..][0.."first cmd".len]);
+    try testing.expectEqualStrings("second cmd", line[out.items[1].cmd_rel..][0.."second cmd".len]);
+    // 그리고 id 도 각자 것이다(같은 규율의 다른 축 — 링크가 남의 결과를 집지 않는 근거다).
+    try testing.expectEqualStrings("toolu_E1", line[out.items[0].id_rel..][0.."toolu_E1".len]);
+    try testing.expectEqualStrings("toolu_E2", line[out.items[1].id_rel..][0.."toolu_E2".len]);
 }

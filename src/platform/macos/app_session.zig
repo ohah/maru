@@ -77085,6 +77085,63 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&total_buf, "{d}", .{image_count})) != null);
 }
 
+test "활동 뷰 펼침: 라벨이 요약이어도 펼침은 명령을 읽는다 (AV3 적대적)" {
+    // 계약 §2.2 ⚠️ 가 갚기로 한 대가의 **세로**다. 순수 판정자는 「자리를 바르게 골랐나」를 재고,
+    // 여기서는 **그 자리를 실제로 읽는가**를 잰다 — 읽는 쪽이 대상 자리로 되돌아가면 여기서 죽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_D1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"zig build test\",\"description\":\"판정자를 돌린다\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "d.jsonl", .data = transcript });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/d.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    defer quietGalleryWorkers(session);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    session.image_gallery.key_focus = true;
+    try cycleGalleryTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 라벨은 **요약**이다 — 한 줄에 읽기 좋은 쪽을 고른 것이 계약이다.
+    try std.testing.expectEqualStrings("판정자를 돌린다", session.image_gallery.labels.items[0].text());
+
+    image_gallery_ops.openAt(session, 0);
+    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    // 그런데 펼침은 **명령**을 보여 준다. 대상 자리를 그대로 읽으면 같은 요약이 두 번 뜬다.
+    try std.testing.expectEqualStrings("zig build test", session.image_gallery.open.?.detail.command);
+}
+
 test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이 뜬다 (AV3)" {
     // 계약 §2.4 의 세로 — **파일을 다시 실행하지 않고** 트랜스크립트의 그 바이트를 읽는다.
     // 줄 클릭은 main 이 「AV3 가 정의한다」로 비워 둔 자리였다.

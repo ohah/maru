@@ -1354,7 +1354,11 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
     }) catch return;
     defer file.close(self.io);
 
-    op.detail.command = readDetailPart(self, file, hit.data_offset, &op.detail.command_truncated);
+    // **명령 전문을 보여 준다**(계약 §2.2 ⚠️ — 「description 은 명령과 어긋날 수 있다, 그래서 펼치면
+    // 언제나 명령 전문이 먼저 나온다」). 라벨의 대상은 대개 그 요약이므로 **대상 자리를 그대로 읽으면
+    // 같은 요약을 두 번 보여 주고 명령은 영영 안 보인다**(적대적 검증에서 잡았다).
+    const cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset;
+    op.detail.command = readDetailPart(self, file, cmd_offset, &op.detail.command_truncated);
     if (hit.result.found) {
         op.detail.has_result = true;
         // **본문이 없는 그림 결과는 「이미지」라고 적는다.** Claude 는 `content` 가 이미지 블록만

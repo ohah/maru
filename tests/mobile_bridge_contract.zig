@@ -7179,6 +7179,38 @@ test "M9 본문: 화면이 가득 차도 글자 자리가 안 넘친다" {
     }
 }
 
+test "아틀라스 셀은 «화면 셀 × 그리는 배율» 을 따라간다" {
+    // **늘려 쓰면 흐려진다.** 셀이 상수 32 였을 때 기본 설정에서도 22px 그림을 62px 자리에
+    // 늘리고 있었다 — 실기(갤럭시 S25 FE, 배율 2.8)에서 글자 가장자리가 시스템 글자보다
+    // 한 픽셀 더 번지는 것으로 재었고, 고친 뒤 같아졌다(iOS 3px→2px, Android 1px).
+    const T = std.testing;
+    bridge.maru_mobile_set_render_scale(1000);
+    const at1x = bridge.maru_mobile_atlas_cell_h();
+    bridge.maru_mobile_set_render_scale(3000);
+    const at3x = bridge.maru_mobile_atlas_cell_h();
+    try T.expect(at3x > at1x); // 배율을 알면 더 크게 굽는다
+    defer bridge.maru_mobile_set_render_scale(1000);
+
+    // **화면 셀에 맞는다** — 줄 높이 × 배율(상한 안에서).
+    const want = @as(u32, @intCast(bridge.lineHeightForTest())) * 3;
+    try T.expectEqual(@min(@as(u32, 96), want), at3x);
+
+    // 가로는 세로와 같은 비율(3/4)이다 — 깨지면 좌우가 잘리거나 남는다.
+    try T.expectEqual(at3x * 3 / 4, bridge.maru_mobile_atlas_cell_w());
+
+    // **상한이 있다**(텍스처가 제곱으로 커진다). 그 위는 다시 늘어나지만 옛날보다는 낫다.
+    bridge.maru_mobile_set_render_scale(9000);
+    try T.expectEqual(@as(u32, 96), bridge.maru_mobile_atlas_cell_h());
+
+    // **굽는 글자 크기는 «host 가 실제로 구운» 셀에서 나온다** — 원하는 값이 아니라. 그 둘을
+    // 섞으면 텍스처는 작은데 글자만 크게 구워 셀을 넘친다. host 가 그 크기로 구웠다고 알린 뒤에야
+    // 따라 커진다(판정자가 이 결을 짚어 냈다 — 처음에는 원하는 값으로 재려다 붉었다).
+    const before = bridge.maru_mobile_atlas_text_px();
+    bridge.maru_mobile_atlas_geometry(72, 96);
+    defer bridge.maru_mobile_atlas_geometry(24, 32);
+    try T.expect(bridge.maru_mobile_atlas_text_px() > before);
+}
+
 test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값이다" {
     // **한 덩어리로 주면 모바일에서 못 읽는다.** macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이
     // 있어 화면 전체를 값 하나로 줘도 줄 이동이 되지만(Ghostty 가 그 길이다), UIKit·Android 의

@@ -1250,6 +1250,10 @@ pub export fn maru_mobile_available_logical(
     const keyboard_over_inset = keyboard_from_bottom -| inset_bottom;
     const w_px = extent_w -| inset_left -| inset_right;
     const h_px = extent_h -| inset_top -| inset_bottom -| keyboard_over_inset;
+    // **여기 배율로 아틀라스를 굽지 않는다.** iOS 는 이 자리에 1000 을 넘기고도 3배로 그리므로
+    // (UIKit 이 이미 pt 를 준다) 이 값은 「그리는 배율」이 아니다. 굽는 크기는
+    // `maru_mobile_set_render_scale` 로 따로 받는다 — 한때 여기서 기억해 두었는데, 읽는 곳이
+    // 없는 채로 「여기 달렸다」는 주석만 남아 있었다.
     const scale = if (scale_milli == 0) 1000 else scale_milli;
     out_w.* = @max(1, w_px * 1000 / scale);
     out_h.* = @max(1, h_px * 1000 / scale);
@@ -3313,6 +3317,11 @@ fn lineHeight() i32 {
     return @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
 }
 
+/// 판정자용 — 지금 줄 높이(논리 px).
+pub fn lineHeightForTest() i32 {
+    return lineHeight();
+}
+
 fn pushTerminal(rect: anytype, tk: anytype) void {
     // **본문 영역을 터미널 배경으로 깐다.** 창 전체는 chrome 표면색으로 칠해져 있는데(위
     // `push` 한 장), 본문은 그 위에 자기 배경을 가져야 한다 — 안 그러면 `theme.background`
@@ -3780,6 +3789,41 @@ var atlas_cell_h: u32 = 32;
 /// **셀에 안 넘치게 자른다.** 아틀라스 슬롯은 고정 기하(`MARU_ATLAS_CELL_W/H`)라 그보다 큰
 /// 글자를 구우면 이웃 슬롯을 침범한다 — 어센더·디센더 여유로 셀 높이의 0.7 을 상한으로 둔다
 /// (지금 값 22/32 가 그 비율이다).
+/// **그리는 배율**(×1000) — 논리 좌표 하나가 기기 픽셀 몇 개가 되는가.
+///
+/// `maru_mobile_available_logical` 의 배율과 **다른 값일 수 있다.** iOS 는 UIKit 이 이미 pt 를
+/// 주므로 그쪽에 1000 을 넘기는데, 그리는 것은 3배 드로어블이라 NDC 변환에서 3배로 커진다 —
+/// 브리지가 그 사실을 모르면 아틀라스를 1배로 구워 놓고 3배로 늘려 쓴다(그렇게 짰다가 선명도가
+/// 그대로였다). 그래서 host 가 **그리는 배율을 따로** 알려 준다.
+pub export fn maru_mobile_set_render_scale(scale_milli: u32) void {
+    render_scale_milli = if (scale_milli == 0) 1000 else scale_milli;
+}
+var render_scale_milli: u32 = 1000;
+
+/// **아틀라스 셀을 얼마로 구울지 — 코어가 정한다.**
+///
+/// 화면의 한 칸은 `줄 높이(논리) × 그리는 배율` 만큼의 기기 픽셀을 차지한다. 굽는 셀이 그보다
+/// 작으면 그림을 늘려 쓰므로 흐려진다 — 지금까지 셀이 상수 32 였고, 기본 설정(줄 높이 22)에
+/// 배율 2.8 인 기기에서 **62px 자리에 22px 그림**을 늘리고 있었다(실측으로 확인했다).
+///
+/// **상한을 두는 이유**: 텍스처는 `열 16 × 행 32` 칸이라 셀이 커지면 넓이가 제곱으로 는다.
+/// 96px 셀이면 1152×3072 ≈ 3.5 MiB 인데 그 위는 폰에 부담이다. 상한을 넘는 크기는 다시
+/// 확대가 되지만, 그때도 지금(2.8배)보다는 훨씬 낫다.
+///
+/// **하한(32)** 은 옛 값이다 — 작은 글자에서 굳이 더 작게 구우면 획이 뭉개진다.
+const atlas_cell_min: u32 = 32;
+const atlas_cell_max: u32 = 96;
+pub export fn maru_mobile_atlas_cell_h() u32 {
+    const want = @as(u32, @intCast(@max(1, lineHeight()))) * render_scale_milli / 1000;
+    return @min(atlas_cell_max, @max(atlas_cell_min, want));
+}
+
+/// 셀 가로. **세로와 같은 비율(3/4)을 지킨다** — 옛 값 24/32 가 그 비율이고, 그 비율이 깨지면
+/// 좌우가 잘리거나 남는다.
+pub export fn maru_mobile_atlas_cell_w() u32 {
+    return @max(1, maru_mobile_atlas_cell_h() * 3 / 4);
+}
+
 pub export fn maru_mobile_atlas_text_px() u32 {
     // **셀에 맞춰 굽는다 — 설정 글자 크기를 따라가지 않는다.**
     //
@@ -4091,7 +4135,10 @@ pub export fn maru_mobile_atlas_count() u32 {
 /// `bytes_per_row >= w*4` 를 요구하고 커버리지는 **alpha 채널**로 온다. 단일 채널 버퍼를
 /// 그대로 주면 조용히 null 이다. 아이콘에서 `filled=0/6` 으로 한 번 헤맨 그 함정이고, 여기서
 /// 또 걸렸다(`isSynthesizedCodepoint` 는 true 인데 잉크가 0 이었다).
-var synth_rgba: [24 * 32 * 4]u8 = undefined;
+/// **셀 상한에 맞춰 잡는다.** 24×32 로 두었더니 셀이 커진 순간 `synth_slot_too_small` 이 났다 —
+/// 합성 글리프(박스·블록·브라유)가 통째로 안 보이는 결함이고, 우리 오류 신호가 그것을 잡았다.
+/// 가로는 셀의 절반이므로 `상한/2 × 상한 × 4` 면 어떤 셀 크기에서도 든다.
+var synth_rgba: [(atlas_cell_max / 2) * atlas_cell_max * 4]u8 = undefined;
 
 pub export fn maru_mobile_synthesize(cp: u32, out: [*]u8, stride: u32) u32 {
     const w = atlas_cell_w / 2;

@@ -3858,6 +3858,9 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
         sel = maru.session.editor.selection.RowSelection.at(next);
         sel.goal = goal;
     }
+    // **단일 편집기 쪽 선택은 건드리지 않는다.** 비교 Term 에서 `editor_selection` 은 아무도 안
+    // 읽으므로 건드려도 관측되지 않지만(변이 C108 이 그래서 살아남았다), 두 축을 섞지 않는 것이
+    // 이 조각의 규율이다 — 섞는 순간 «비교 좌표를 단일 편집기 좌표로 훑는» 경로가 열린다.
     term.rt.editor_diff_selection = .{ .side = side, .sel = sel };
     scrollDiffCaretIntoView(self, term, next.row, texts.len, rows);
     self.metal_dirty = true;
@@ -3882,6 +3885,14 @@ fn diffPageRows(term: *Term, side: DiffSide) usize {
 
 /// caret 이 화면 밖으로 나가면 뷰가 따라간다. 세로 상한은 `scrollLines` 가 쓰는 `maxFirstLine`
 /// **하나**를 쓴다 — 두 곳에서 세면 마지막 화면이 비는 자리가 갈린다.
+///
+/// **가로는 안 따라간다**(빚). 단일 편집기도 같다 — `moveCarets` 도 `editor_first_col` 을 건드리지
+/// 않고, 가로는 휠·막대 드래그만 움직인다. 그래서 긴 행에서 `⌘→` 를 누르면 caret 이 화면 밖에
+/// 설 수 있다. 이 조각이 만든 회귀가 아니라 **두 뷰가 함께 진 빚**이라 여기서 갚지 않는다.
+///
+/// **총 행 수를 어느 열로 세도 같다**(변이 8~10회차 C93 이 살아남아 확인했다) — 좌우 배열 길이가
+/// 같다는 것이 `scrollLines` 가 이미 기대는 계약이다. 자기 열 것을 넘기는 이유는 그 계약이
+/// 깨지는 날 **여기가 먼저 틀리지 않게** 하기 위해서다.
 fn scrollDiffCaretIntoView(self: *AppSession, term: *Term, row: usize, total: usize, visible: usize) void {
     const first = term.rt.editor_first_line;
     var want = first;

@@ -964,8 +964,14 @@ pub fn buildGpuImages(
     size: terminal.Size,
     cell_width_px: u32,
     cell_height_px: u32,
+    // unicode placeholder(U=1) 경로: 화면 셀이 배치를 정하므로 셀·grapheme·격자 정의를 함께 받는다.
+    // 빈 슬라이스면 그 경로는 통째로 건너뛴다(기존 호출과 동작 동일).
+    snapshot_cells: []const terminal.Cell,
+    graphemes: []const []const u21,
+    virtual_placements: []const terminal.KittyVirtualPlacement,
 ) ![]GpuImage {
-    if (placements.len == 0 or cell_width_px == 0 or cell_height_px == 0) return &.{};
+    if (cell_width_px == 0 or cell_height_px == 0) return &.{};
+    if (placements.len == 0 and virtual_placements.len == 0) return &.{};
     var out: std.ArrayList(GpuImage) = .empty;
     errdefer out.deinit(allocator);
 
@@ -1015,10 +1021,166 @@ pub fn buildGpuImages(
         });
     }
 
+    // unicode placeholder 셀 → 타일 quad(일반 placement 와 같은 목록에 넣어 z/pass 정렬을 공유한다).
+    try appendPlaceholderQuads(allocator, &out, snapshot_cells, graphemes, virtual_placements, images, size, cw, ch);
+
     const result = try out.toOwnedSlice(allocator);
     // (pass, z) 오름차순 — 호출자가 패스별 구간으로 그린다(같은 pass 안 z 순서로 겹침 처리).
     std.sort.pdq(GpuImage, result, {}, lessGpuImage);
     return result;
+}
+
+/// kitty unicode placeholder 의 row/column diacritic 표 — 결합 문자 하나가 곧 0-based 인덱스다.
+/// 베이스: kitty graphics protocol "Unicode placeholders" 가 배포하는 `rowcolumn-diacritics.txt`
+/// (https://sw.kovidgoyal.net/kitty/_downloads/f0a0de9ec8d9ff4456206db8e0814937/rowcolumn-diacritics.txt).
+/// 명세가 정한 **데이터**라 값 자체가 계약이다 — 순서를 바꾸면 좌표가 통째로 어긋난다.
+const row_column_diacritics = [_]u21{
+    0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C,
+    0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+    0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592,
+    0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+    0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611, 0x0612, 0x0613, 0x0614, 0x0615,
+    0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6, 0x06D7, 0x06D8,
+    0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2, 0x06E4, 0x06E7, 0x06E8, 0x06EB,
+    0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743,
+    0x0745, 0x0747, 0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3,
+    0x0816, 0x0817, 0x0818, 0x0819, 0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
+    0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C, 0x082D, 0x0951, 0x0953, 0x0954,
+    0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD, 0x193A, 0x1A17, 0x1A75, 0x1A76,
+    0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F, 0x1B70, 0x1B71,
+    0x1B72, 0x1B73, 0x1CD0, 0x1CD1, 0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+    0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5,
+    0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1,
+    0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1, 0x20D4, 0x20D5, 0x20D6, 0x20D7,
+    0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0, 0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2,
+    0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA, 0x2DEB, 0x2DEC, 0x2DED, 0x2DEE,
+    0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+    0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1,
+    0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
+    0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1,
+    0xFE20, 0xFE21, 0xFE22, 0xFE23, 0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
+    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+};
+
+/// 결합 문자 → 0-based 인덱스. 표에 없으면 null(그 셀은 placeholder 로 치지 않는다).
+fn diacriticIndex(cp: u21) ?u32 {
+    for (row_column_diacritics, 0..) |d, i| {
+        if (d == cp) return @intCast(i);
+    }
+    return null;
+}
+
+/// kitty unicode placeholder 셀의 base codepoint(U+10EEEE).
+pub const placeholder_codepoint: u21 = 0x10EEEE;
+
+/// 한 placeholder 셀이 가리키는 것 — 어느 이미지의 어느 타일인가.
+const PlaceholderCell = struct {
+    image_id: u32,
+    tile_row: u32,
+    tile_col: u32,
+};
+
+/// 셀 하나를 placeholder 로 해석한다. 아니면 null.
+///
+/// **인코딩**(명세): base 는 U+10EEEE, 뒤따르는 결합 문자 둘이 각각 tile row·column 인덱스이고,
+/// **전경색 RGB 가 image_id** 다(`38;2;r;g;b` → id = r<<16 | g<<8 | b). 열 diacritic 이 없으면
+/// 열 0 으로 본다(명세: 생략 가능). 전경색이 RGB 가 아니면 어느 이미지인지 알 수 없어 건너뛴다.
+fn placeholderAt(cell: terminal.Cell, graphemes: []const []const u21) ?PlaceholderCell {
+    if (cell.codepoint != placeholder_codepoint) return null;
+    const rgb = switch (cell.style.foreground) {
+        .rgb => |v| v,
+        else => return null,
+    };
+    const image_id = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
+    if (image_id == 0) return null;
+    if (cell.grapheme_id == 0 or cell.grapheme_id > graphemes.len) return null;
+    const extras = graphemes[cell.grapheme_id - 1];
+    if (extras.len == 0) return null;
+    const tile_row = diacriticIndex(extras[0]) orelse return null;
+    const tile_col = if (extras.len > 1) (diacriticIndex(extras[1]) orelse 0) else 0;
+    return .{ .image_id = image_id, .tile_row = tile_row, .tile_col = tile_col };
+}
+
+/// placeholder 셀들을 이미지 타일 quad 로 환산해 `out` 에 넣는다.
+///
+/// **행 안에서 연속된 셀을 하나의 quad 로 묶는다**(같은 이미지·같은 tile_row·tile_col 이 1씩 증가).
+/// 안 묶으면 전체 화면을 덮는 이미지가 셀 수만큼(수천 개) quad 를 만든다 — 브라우저 TUI 가 정확히
+/// 그 경우다. 묶으면 행 수만큼으로 줄어든다.
+fn appendPlaceholderQuads(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(GpuImage),
+    snapshot_cells: []const terminal.Cell,
+    graphemes: []const []const u21,
+    virtual_placements: []const terminal.KittyVirtualPlacement,
+    images: []const terminal.KittyImageView,
+    size: terminal.Size,
+    cw: f32,
+    ch: f32,
+) !void {
+    if (virtual_placements.len == 0 or snapshot_cells.len == 0) return;
+    var row: u16 = 0;
+    while (row < size.rows) : (row += 1) {
+        const row_start = @as(usize, row) * @as(usize, size.cols);
+        if (row_start + size.cols > snapshot_cells.len) break;
+        var col: u16 = 0;
+        while (col < size.cols) {
+            const first = placeholderAt(snapshot_cells[row_start + col], graphemes) orelse {
+                col += 1;
+                continue;
+            };
+            // 이 이미지의 격자 정의(c×r)를 찾는다 — 없으면 타일 크기를 못 정하므로 건너뛴다.
+            const vp = findVirtualPlacement(virtual_placements, first.image_id) orelse {
+                col += 1;
+                continue;
+            };
+            const img = findImage(images, first.image_id) orelse {
+                col += 1;
+                continue;
+            };
+            if (img.width == 0 or img.height == 0 or vp.columns == 0 or vp.rows == 0) {
+                col += 1;
+                continue;
+            }
+            // 연속 런: 같은 이미지·같은 tile_row 이면서 tile_col 이 1씩 오르는 동안 이어 붙인다.
+            var run_len: u16 = 1;
+            while (col + run_len < size.cols) : (run_len += 1) {
+                const nxt = placeholderAt(snapshot_cells[row_start + col + run_len], graphemes) orelse break;
+                if (nxt.image_id != first.image_id or nxt.tile_row != first.tile_row) break;
+                if (nxt.tile_col != first.tile_col + run_len) break;
+            }
+            const tex_w: f32 = @floatFromInt(img.width);
+            const tex_h: f32 = @floatFromInt(img.height);
+            const tile_w = tex_w / @as(f32, @floatFromInt(vp.columns));
+            const tile_h = tex_h / @as(f32, @floatFromInt(vp.rows));
+            // `u0`/`u1` 은 Zig primitive 타입 이름이라 쓸 수 없다 — uv_ 접두를 붙인다.
+            const uv_left = (@as(f32, @floatFromInt(first.tile_col)) * tile_w) / tex_w;
+            const uv_right = (@as(f32, @floatFromInt(first.tile_col + run_len)) * tile_w) / tex_w;
+            const uv_top = (@as(f32, @floatFromInt(first.tile_row)) * tile_h) / tex_h;
+            const uv_bottom = (@as(f32, @floatFromInt(first.tile_row + 1)) * tile_h) / tex_h;
+            const pass: u32 = if (vp.z < kitty_z_bg_limit) 0 else if (vp.z < 0) 1 else 2;
+            try out.append(allocator, .{
+                .image_id = first.image_id,
+                .dest_x = @as(f32, @floatFromInt(col)) * cw,
+                .dest_y = @as(f32, @floatFromInt(row)) * ch,
+                .dest_w = @as(f32, @floatFromInt(run_len)) * cw,
+                .dest_h = ch,
+                .src_u0 = uv_left,
+                .src_v0 = uv_top,
+                .src_u1 = @min(uv_right, 1.0),
+                .src_v1 = @min(uv_bottom, 1.0),
+                .z = vp.z,
+                .pass = pass,
+            });
+            col += run_len;
+        }
+    }
+}
+
+fn findVirtualPlacement(list: []const terminal.KittyVirtualPlacement, image_id: u32) ?terminal.KittyVirtualPlacement {
+    for (list) |vp| {
+        if (vp.image_id == image_id) return vp;
+    }
+    return null;
 }
 
 fn findImage(images: []const terminal.KittyImageView, image_id: u32) ?terminal.KittyImageView {
@@ -2797,7 +2959,7 @@ test "setCellsPaneOrigin stamps the panel pixel origin on every terminal cell" {
 test "buildGpuImages: 셀 메트릭으로 dest 사각형 + source 전체 UV + above_text 패스" {
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
     const placements = [_]terminal.KittyPlacement{.{ .image_id = 7, .placement_id = 0, .row = 1, .col = 2, .columns = 3, .rows = 2, .z = 0 }};
-    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
     try std.testing.expectEqual(@as(usize, 1), out.len);
     const g = out[0];
@@ -2829,7 +2991,7 @@ test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
         .rows = 1,
         .z = 0,
     }};
-    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
     const g = out[0];
     try std.testing.expectEqual(@as(f32, 4), g.dest_x); // col0 + X4
@@ -2843,7 +3005,7 @@ test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
 test "buildGpuImages: c/r 미지정이면 source 픽셀 크기, w/h=0이면 전체" {
     const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 64, .height = 48, .bpp = 4, .generation = 1, .pixels = &.{} }};
     const placements = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 0, .row = 0, .col = 0, .z = 0 }};
-    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 20, .rows = 20 }, 10, 20);
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 20, .rows = 20 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
     const g = out[0];
     try std.testing.expectEqual(@as(f32, 64), g.dest_w); // 이미지 폭 픽셀
@@ -2858,7 +3020,7 @@ test "buildGpuImages: z-pass 분류와 (pass,z) 정렬" {
         .{ .image_id = 1, .placement_id = 2, .row = 0, .col = 0, .z = -1 }, // below_text
         .{ .image_id = 1, .placement_id = 3, .row = 0, .col = 0, .z = big_neg }, // below_bg
     };
-    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 10 }, 10, 20);
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 10 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
     try std.testing.expectEqual(@as(usize, 3), out.len);
     try std.testing.expectEqual(@as(u32, 0), out[0].pass); // below_bg 먼저
@@ -2870,20 +3032,20 @@ test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유
     const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &.{} }};
     // (a) 완전히 화면 위(row=-10, 높이 10셀? 여기선 자동크기 10px라 dest_y=-200, +10 <= 0) → cull
     const above = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -10, .col = 0, .z = 0 }};
-    const out_a = try buildGpuImages(std.testing.allocator, &above, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    const out_a = try buildGpuImages(std.testing.allocator, &above, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out_a);
     try std.testing.expectEqual(@as(usize, 0), out_a.len);
 
     // (b) 위로 일부만 걸침(row=-1, rows=3 → dest_y=-20, dest_h=60 → 화면과 겹침) → 유지(dest_y 음수)
     const partial = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -1, .col = 0, .rows = 3, .columns = 2, .z = 0 }};
-    const out_b = try buildGpuImages(std.testing.allocator, &partial, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    const out_b = try buildGpuImages(std.testing.allocator, &partial, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out_b);
     try std.testing.expectEqual(@as(usize, 1), out_b.len);
     try std.testing.expectEqual(@as(f32, -20), out_b[0].dest_y);
 
     // (c) 없는 image_id → skip
     const missing = [_]terminal.KittyPlacement{.{ .image_id = 99, .placement_id = 1, .row = 0, .col = 0, .z = 0 }};
-    const out_c = try buildGpuImages(std.testing.allocator, &missing, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    const out_c = try buildGpuImages(std.testing.allocator, &missing, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out_c);
     try std.testing.expectEqual(@as(usize, 0), out_c.len);
 }
@@ -3357,4 +3519,46 @@ test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리
     inline for (@typeInfo(ChromeGeometry).@"struct".fields) |field| {
         try std.testing.expectEqual(@field(geometry, field.name), @field(frame, field.name));
     }
+}
+
+
+test "unicode placeholder 셀이 이미지 타일 quad 로 환산되고, 행 안에서 런으로 묶인다" {
+    // 4x2 격자 이미지(픽셀 40x20 → 타일 10x10), 셀은 10x20 px.
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 40, .height = 20, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const vps = [_]terminal.KittyVirtualPlacement{.{ .image_id = 7, .placement_id = 0, .columns = 4, .rows = 2 }};
+    // image_id 7 → 전경색 rgb(0,0,7). grapheme extras = [row diacritic, col diacritic].
+    const fg: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0, .g = 0, .b = 7 } } };
+    const g0 = [_]u21{ row_column_diacritics[0], row_column_diacritics[0] }; // tile (0,0)
+    const g1 = [_]u21{ row_column_diacritics[0], row_column_diacritics[1] }; // tile (0,1)
+    const g2 = [_]u21{ row_column_diacritics[0], row_column_diacritics[2] }; // tile (0,2)
+    const graphemes = [_][]const u21{ &g0, &g1, &g2 };
+    const ph = placeholder_codepoint;
+    // 한 행에 연속 3칸(타일 0,1,2) — 하나의 quad 로 묶여야 한다.
+    const cells = [_]terminal.Cell{
+        .{ .codepoint = ph, .style = fg, .grapheme_id = 1 },
+        .{ .codepoint = ph, .style = fg, .grapheme_id = 2 },
+        .{ .codepoint = ph, .style = fg, .grapheme_id = 3 },
+        .{ .codepoint = 'x' },
+    };
+    const out = try buildGpuImages(std.testing.allocator, &.{}, &images, .{ .cols = 4, .rows = 1 }, 10, 20, &cells, &graphemes, &vps);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 1), out.len); // 셀마다가 아니라 런 하나
+    try std.testing.expectEqual(@as(u32, 7), out[0].image_id);
+    try std.testing.expectEqual(@as(f32, 0), out[0].dest_x);
+    try std.testing.expectEqual(@as(f32, 30), out[0].dest_w); // 3칸 * 10px
+    try std.testing.expectEqual(@as(f32, 20), out[0].dest_h); // 한 행
+    try std.testing.expectEqual(@as(f32, 0), out[0].src_u0);
+    try std.testing.expectEqual(@as(f32, 0.75), out[0].src_u1); // 타일 0..3 / 4열
+    try std.testing.expectEqual(@as(f32, 0.5), out[0].src_v1); // 타일 행 0..1 / 2행
+
+    // 격자 정의(virtual placement)가 없으면 그리지 않는다 — 타일 크기를 알 수 없다.
+    const none = try buildGpuImages(std.testing.allocator, &.{}, &images, .{ .cols = 4, .rows = 1 }, 10, 20, &cells, &graphemes, &.{});
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+
+    // 전경색이 RGB 가 아니면 어느 이미지인지 알 수 없어 건너뛴다(placeholder 로 안 본다).
+    const indexed_cells = [_]terminal.Cell{.{ .codepoint = ph, .style = .{ .foreground = .{ .indexed = 7 } }, .grapheme_id = 1 }};
+    const skipped = try buildGpuImages(std.testing.allocator, &.{}, &images, .{ .cols = 1, .rows = 1 }, 10, 20, &indexed_cells, &graphemes, &vps);
+    defer std.testing.allocator.free(skipped);
+    try std.testing.expectEqual(@as(usize, 0), skipped.len);
 }

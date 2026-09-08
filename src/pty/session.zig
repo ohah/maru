@@ -125,6 +125,15 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 setCellPixels(winsize 픽셀 필드 갱신)와 구조 동기.
+    /// 이 경로는 PTY 자체가 없어 **오류가 아니라 무동작**이다: 호출부(`pty_reader`)는 셀 메트릭을
+    /// best-effort 로 흘리고 실패를 무시하므로, 여기서 오류를 내도 아무 의미가 없다.
+    pub fn setCellPixels(self: *UnsupportedPtySession, cell_width_px: u32, cell_height_px: u32) !void {
+        _ = self;
+        _ = cell_width_px;
+        _ = cell_height_px;
+    }
+
     /// 비-macOS 스텁 — macOS backend의 resourceSamples와 구조 동기. 지원 backend가 없어 표본이 없다.
     pub fn resourceSamples(self: *UnsupportedPtySession, out: []types.ProcessResourceSample) usize {
         _ = self;

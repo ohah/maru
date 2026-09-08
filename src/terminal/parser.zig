@@ -381,6 +381,10 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
             't' => if (val.len == 1) {
                 cmd.medium = val[0];
             },
+            // U=1: **unicode placeholder**(virtual placement). 지금 그리지 말고 등록만 하라는 뜻이고,
+            // 실제 위치는 화면에 찍힌 U+10EEEE placeholder 셀이 정한다. 안 읽으면 「즉시 커서 자리에
+            // 그리기」로 떨어져 엉뚱한 곳에 이미지가 뜬다(무시보다 나쁜 오작동).
+            'U' => cmd.virtual = (val.len == 1 and val[0] == '1'),
             else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
         }
     }

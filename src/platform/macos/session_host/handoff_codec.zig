@@ -157,6 +157,9 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 80, .name = "reverse_screen" },
     .{ .tag = 81, .name = "kitty_images" },
     .{ .tag = 82, .name = "kitty_placements" },
+    // U=1 virtual placement(unicode placeholder). **optional** — 구 host 는 이 tag 를 모르므로
+    // 건너뛰게 한다(신→구 rollback 이관에서 UnknownRequiredField 로 죽지 않게).
+    .{ .tag = 92, .name = "kitty_virtual_placements", .optional = true },
     .{ .tag = 83, .name = "cwd" },
     .{ .tag = 84, .name = "ssh_remote_dest" },
     .{ .tag = 85, .name = "title" },

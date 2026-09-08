@@ -465,6 +465,9 @@ const IoState = struct {
 };
 
 pub const PtySession = struct {
+    /// ConPTY 는 픽셀을 안 쓰지만 백엔드 계약을 맞추려 값은 보관한다(`setCellPixels`).
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
     allocator: std.mem.Allocator,
     io: *IoState,
 
@@ -1067,6 +1070,14 @@ pub const PtySession = struct {
     }
 
     // ── 크기 ──────────────────────────────────────────────────────────────────────────────────
+
+    /// 셀 픽셀 크기 — **ConPTY 에는 픽셀 개념이 없다**(`COORD` 는 문자 단위이고 winsize 픽셀 필드에
+    /// 해당하는 것이 없다). 그래서 값만 보관하고 아무것도 보내지 않는다. macOS 쪽과 시그니처를 맞춰
+    /// 공통 호출부(`pty_reader`)가 백엔드를 안 가리게 한다.
+    pub fn setCellPixels(self: *PtySession, cell_width_px: u32, cell_height_px: u32) !void {
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+    }
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
         if (size.cols == 0 or size.rows == 0) return error.InvalidSize;

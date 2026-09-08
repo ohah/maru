@@ -49,6 +49,9 @@ pub const KittyGraphicsCommand = struct {
     delete_what: u8 = 'a', // d: 삭제 타깃(a=d일 때). 기본 'a'(전체). 대문자=이미지 데이터도 free, 소문자=placement만
     // q: 응답 억제 수준(0=OK와 에러 모두, 1=에러만, 2=침묵). 베이스: kitty graphics protocol의 quiet.
     quiet: u8 = 0,
+    // U=1: unicode placeholder(virtual placement) — 커서 자리에 그리지 않고 등록만 하고, 실제 배치는
+    // 화면의 U+10EEEE placeholder 셀이 정한다. 베이스: kitty graphics protocol "Unicode placeholders".
+    virtual: bool = false,
     // t: 전송 매체(d=direct base64, f=파일, t=임시파일, s=공유메모리). **maru는 direct만 구현한다** —
     // 파일/공유메모리는 payload가 픽셀이 아니라 **경로/이름**이라, 파싱하지 않으면 그것을 픽셀로 오인해
     // 조용히 버린다(실측 2026-09-08: t=f 전송이 무음 폐기됐다). 여기서 값을 읽어 `ENOTSUPP`로 **명시
@@ -448,6 +451,18 @@ fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatu
 fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     if (cmd.image_id == 0) return .einval;
     if (!self.kitty_images.map.contains(cmd.image_id)) return .enoent; // 없는 이미지는 표시 안 함
+    // U=1(unicode placeholder): 커서 자리에 그리지 않는다 — 등록만 하고, 실제 배치는 화면에 찍힌
+    // placeholder 셀이 정한다. 격자(c×r)가 없으면 타일 크기를 못 정하므로 거부한다(명세상 필수).
+    if (cmd.virtual) {
+        if (cmd.columns == 0 or cmd.rows == 0) return .einval;
+        return addOrReplaceVirtualPlacement(self, .{
+            .image_id = cmd.image_id,
+            .placement_id = cmd.placement_id,
+            .columns = cmd.columns,
+            .rows = cmd.rows,
+            .z = cmd.z,
+        });
+    }
     addOrReplacePlacement(self, .{
         .image_id = cmd.image_id,
         .placement_id = cmd.placement_id,
@@ -473,6 +488,31 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     return .ok;
 }
 
+/// virtual placement(U=1)를 등록한다 — 같은 `(image_id, placement_id)` 키는 교체한다(일반 placement와
+/// 같은 규칙). 상한은 일반 placement와 같은 방어선을 쓴다.
+fn addOrReplaceVirtualPlacement(self: *TerminalCore, vp: types.KittyVirtualPlacement) KittyStatus {
+    for (self.kitty_virtual_placements.items) |*existing| {
+        if (existing.image_id == vp.image_id and existing.placement_id == vp.placement_id) {
+            existing.* = vp;
+            return .ok;
+        }
+    }
+    if (self.kitty_virtual_placements.items.len >= TerminalCore.max_kitty_placements) return .enomem;
+    self.kitty_virtual_placements.append(self.allocator, vp) catch return .enomem;
+    return .ok;
+}
+
+/// image_id 로 virtual placement 를 지운다(delete 경로 공용) — placement_id 가 0 이면 그 이미지의 전부.
+fn removeVirtualPlacements(self: *TerminalCore, image_id: u32, placement_id: u32) void {
+    var i: usize = 0;
+    while (i < self.kitty_virtual_placements.items.len) {
+        const vp = self.kitty_virtual_placements.items[i];
+        if (vp.image_id == image_id and (placement_id == 0 or vp.placement_id == placement_id)) {
+            _ = self.kitty_virtual_placements.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
 /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
 /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
 /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
@@ -485,17 +525,21 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     switch (target) {
         'a' => { // 전체
             self.kitty_placements.clearRetainingCapacity();
+            self.kitty_virtual_placements.clearRetainingCapacity();
             if (free_image) self.kitty_images.clear(self.allocator);
         },
         'i' => { // image_id로(+ 선택적 placement_id)
             if (cmd.image_id == 0) return .einval;
             if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
                 removePlacementsForImage(self, cmd.image_id);
+                removeVirtualPlacements(self, cmd.image_id, 0);
                 self.kitty_images.remove(self.allocator, cmd.image_id);
             } else if (cmd.placement_id != 0) {
                 removeOnePlacement(self, cmd.image_id, cmd.placement_id);
+                removeVirtualPlacements(self, cmd.image_id, cmd.placement_id);
             } else {
                 removePlacementsForImage(self, cmd.image_id);
+                removeVirtualPlacements(self, cmd.image_id, 0);
             }
         },
         'z' => deleteByZ(self, cmd.z, free_image), // z-index로

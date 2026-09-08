@@ -45,6 +45,7 @@ pub const KeyEvent = input.KeyEvent;
 pub const ModifierSet = input.ModifierSet;
 pub const RenderSnapshot = types.RenderSnapshot;
 pub const KittyPlacement = types.KittyPlacement;
+pub const KittyVirtualPlacement = types.KittyVirtualPlacement;
 pub const KittyImageView = types.KittyImageView;
 pub const PlacementGeometry = types.PlacementGeometry;
 pub const PreeditOverlay = preedit.Overlay;

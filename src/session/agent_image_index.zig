@@ -1120,6 +1120,18 @@ pub const StreamScanner = struct {
     /// **살아 있는** 기다림의 수(죽은 자리를 뺀 것). 0 이면 결과 줄을 볼 이유가 아예 없다 —
     /// 그 짧은 회로가 큰 파일에서 결과 탐색을 통째로 건너뛴다.
     pending_live: usize = 0,
+    /// 지금 훑고 있는 파일이 `Chain` 의 몇 번째인가. **받아들이는 `Hit` 마다 여기서 찍는다.**
+    ///
+    /// ⚠️ **호출자가 사후에 찍으면 안 된다.** 예전에는 백엔드가 파일마다 `hits.items.len` 을 잡아
+    /// 두고 스캔이 끝난 뒤 그 뒤쪽에 번호를 찍었는데, **퇴출은 배열을 제자리 압축한다** — 앞 파일
+    /// 항목이 버려지면 살아남은 것들이 앞으로 당겨지고, 그만큼 이 파일의 앞부분이 그 자리 **밖**으로
+    /// 밀려 번호를 못 받는다(기본값 0 = 첫 파일로 읽힌다). 그러면 라벨·펼침·디코드가 **엉뚱한 파일**의
+    /// 바이트를 읽는다.
+    ///
+    /// 스탬프가 `Hit` 과 함께 움직이면 압축이 무의미해진다. 대기 링(`remapPendingAfterEvict`)과
+    /// 접기(`remapFoldsAfterEvict`)가 자리를 **따라가야** 했던 것과 달리, 이쪽은 애초에 자리에
+    /// 매이지 않는 것이 답이다.
+    file_index: u8 = 0,
 
     pub fn deinit(self: *StreamScanner, allocator: std.mem.Allocator) void {
         self.carry.deinit(allocator);
@@ -1198,7 +1210,11 @@ pub const StreamScanner = struct {
     /// 낡았다(AV2 의 링크가 그 범위를 쓴다).
     fn admit(self: *StreamScanner, out: *std.ArrayList(Hit), before: usize) usize {
         var w = before;
-        for (out.items[before..]) |h| {
+        for (out.items[before..]) |src| {
+            var h = src;
+            // **받아들이는 자리에서 찍는다.** 여기가 「이 스캐너가 이 히트를 자기 것으로 삼는」
+            // 유일한 길목이고, 그 뒤로는 어떤 압축이 와도 스탬프가 값과 함께 움직인다.
+            h.file_index = self.file_index;
             if (h.kind.isImage()) {
                 if (self.image_count >= max_hits_per_file) {
                     self.image_partial = true;
@@ -2452,6 +2468,86 @@ test "접기: 퇴출이 주인을 버리면 접기도 풀린다 — 이미지가
     try testing.expectEqual(@as(usize, 1), loose);
     // ④ 살아남은 쪽은 **여전히 접혀 있다**(접기를 통째로 포기하지 않았다).
     try testing.expectEqual(@as(usize, 1), folded);
+}
+
+test "파일 번호: 퇴출이 배열을 당겨도 어긋나지 않는다 — 스캐너가 찍는다" {
+    // ⚠️ **사후에 찍으면 어긋난다.** 예전 백엔드는 파일마다 `hits.items.len` 을 잡아 두고 스캔이
+    // 끝난 뒤 그 **뒤쪽**에 번호를 찍었다. 그런데 퇴출은 배열을 제자리 압축하므로, 앞 파일 항목이
+    // 버려지면 이 파일의 앞부분이 그 자리 **밖**으로 밀려 번호를 못 받는다(기본값 0 = 첫 파일).
+    // 그러면 라벨·펼침·디코드가 **엉뚱한 파일**의 바이트를 읽는다.
+    //
+    // 실측 프로브: 앞 파일 51 개 중 **50 개가 버려지자** 이 파일의 앞 **50 개**가 0 으로 남았다.
+    // 조건(다중 파일 체인 + 한 파일이 활동 상한 초과)은 둘 다 실측에 있다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    const head =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"description":"
+    ;
+    const tail =
+        \\"}}]}}
+    ;
+
+    // ── 파일 0: 활동 50 + 이미지 1. 활동은 퇴출의 첫 먹잇감이다.
+    {
+        var t0: std.ArrayList(u8) = .empty;
+        defer t0.deinit(allocator);
+        var k: usize = 0;
+        while (k < 50) : (k += 1) {
+            try t0.appendSlice(allocator, head);
+            try t0.appendSlice(allocator, "prev");
+            try t0.appendSlice(allocator, tail);
+            try t0.append(allocator, '\n');
+        }
+        try t0.appendSlice(allocator,
+            \\{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"AAAA","media_type":"image/png"}}]}}
+        );
+        try t0.append(allocator, '\n');
+        var s0: StreamScanner = .{ .file_index = 0 };
+        defer s0.deinit(allocator);
+        try s0.feed(allocator, t0.items, &out);
+    }
+
+    // ── 파일 1: 퇴출이 돌 만큼 쏟는다. 백엔드는 여기서 스캐너를 새로 세운다.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var i: usize = 0;
+    while (i < max_activity_hits_per_file + 100) : (i += 1) {
+        try text.appendSlice(allocator, head);
+        try text.appendSlice(allocator, "cur");
+        try text.appendSlice(allocator, tail);
+        try text.append(allocator, '\n');
+    }
+    var s1: StreamScanner = .{ .file_index = 1 };
+    defer s1.deinit(allocator);
+    try s1.feed(allocator, text.items, &out);
+    try testing.expect(s1.activity_partial); // 실제로 퇴출이 돌았다
+
+    // **번호가 값을 따라간다.** 라벨이 "cur" 인 활동은 전부 파일 1, "prev" 는 전부 파일 0 이다.
+    var cur_wrong: usize = 0;
+    var prev_wrong: usize = 0;
+    var cur_total: usize = 0;
+    for (out.items) |h| {
+        if (h.kind.isImage()) {
+            // 파일 0 의 이미지는 퇴출 대상이 아니라 살아 있고, 번호도 0 이어야 한다.
+            try testing.expectEqual(@as(u8, 0), h.file_index);
+            continue;
+        }
+        const st: usize = @intCast(h.data_offset);
+        const src = if (h.file_index == 0) text.items else text.items; // 어느 쪽이든 길이만 본다
+        _ = src;
+        _ = st;
+        if (h.data_len == 3) { // "cur"
+            cur_total += 1;
+            if (h.file_index != 1) cur_wrong += 1;
+        } else if (h.data_len == 4) { // "prev"
+            if (h.file_index != 0) prev_wrong += 1;
+        }
+    }
+    try testing.expect(cur_total > 0);
+    try testing.expectEqual(@as(usize, 0), cur_wrong); // ← 사후 스탬프면 여기가 50 이 된다
+    try testing.expectEqual(@as(usize, 0), prev_wrong);
 }
 
 test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {

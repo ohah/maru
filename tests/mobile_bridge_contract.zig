@@ -7240,6 +7240,36 @@ test "굽는 크기가 바뀌면 «이모지 등록부도» 비운다" {
     try T.expectEqual(@as(u32, 0), bridge.maru_mobile_color_atlas_count());
 }
 
+test "굽는 격자가 바뀐 프레임은 «바뀐 프레임» 이다" {
+    // **quad 만 견주면 못 본다.** 정지 화면에서 글자 크기를 바꾸면 host 가 아틀라스를 다시 굽는데,
+    // 그 프레임의 quad 는 지난 것과 바이트까지 같을 수 있다 — 그림이 아니라 **샘플링하는 텍스처**가
+    // 달라진 것이라서다. 그대로 두면 M14 의 절전 게이트가 새 아틀라스를 «다음 입력이 올 때까지»
+    // 안 보여 준다. 두 host 에 공통이라 코어가 판단한다.
+    const T = std.testing;
+    bridge.maru_mobile_atlas_geometry(24, 32);
+    defer bridge.maru_mobile_atlas_geometry(24, 32);
+    _ = bridge.maru_mobile_build(400, 800, 10);
+    _ = bridge.maru_mobile_build(400, 800, 20);
+
+    // 같은 화면을 한 번 더 그리면 «안 바뀜» 이다 — 이 전제가 깨지면 아래 단언이 아무것도 안 잰다.
+    _ = bridge.maru_mobile_build(400, 800, 30);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+
+    // 격자만 바뀌면(그림은 그대로) **바뀐 프레임**이다.
+    bridge.maru_mobile_atlas_geometry(48, 64);
+    _ = bridge.maru_mobile_build(400, 800, 40);
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_frame_changed());
+
+    // **한 번만 쓴다.** 안 내리면 그 뒤 모든 프레임이 「바뀜」이 돼 절전이 통째로 죽는다.
+    _ = bridge.maru_mobile_build(400, 800, 50);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+
+    // 같은 값을 다시 알리는 것은 바뀐 것이 아니다 — host 는 프레임마다 알릴 수 있다.
+    bridge.maru_mobile_atlas_geometry(48, 64);
+    _ = bridge.maru_mobile_build(400, 800, 60);
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_frame_changed());
+}
+
 test "M9 본문: 줄마다 하나씩, 이름은 «번호» 이고 글자는 값이다" {
     // **한 덩어리로 주면 모바일에서 못 읽는다.** macOS 는 텍스트 영역 프로토콜(줄·범위 조회)이
     // 있어 화면 전체를 값 하나로 줘도 줄 이동이 되지만(Ghostty 가 그 길이다), UIKit·Android 의

@@ -7240,6 +7240,74 @@ test "굽는 크기가 바뀌면 «이모지 등록부도» 비운다" {
     try T.expectEqual(@as(u32, 0), bridge.maru_mobile_color_atlas_count());
 }
 
+test "M13c 시스템 글자 배율: 켜져 있고 «들었을 때만» 따라간다" {
+    // **모르는 값으로 화면을 바꾸지 않는다.** host 가 아직 안 알려 줬으면 켜져 있어도 파일 크기다
+    // (테마의 `system_is_dark == null` 과 같은 규율). 그리고 끄면 배율을 알아도 안 따라간다.
+    const T = std.testing;
+    bridge.resetSystemFontScaleForTest();
+    defer bridge.resetSystemFontScaleForTest();
+    const on20 = "font.size = 20\nfont.follow-system = true\n";
+    bridge.maru_mobile_load_config(on20, on20.len);
+    defer bridge.maru_mobile_load_config("", 0);
+
+    try T.expectEqual(@as(u32, 20), bridge.activeFontSizeForTest()); // 아직 못 들었다
+    try T.expect(!bridge.followingSystemFontScale());
+
+    bridge.maru_mobile_set_system_font_scale(1500);
+    try T.expect(bridge.followingSystemFontScale());
+    try T.expectEqual(@as(u32, 30), bridge.activeFontSizeForTest()); // 20 × 1.5
+
+    // **0 은 「모른다」다** — host 가 값을 못 읽었을 때의 신호이고, 파일 크기로 돌아간다.
+    bridge.maru_mobile_set_system_font_scale(0);
+    try T.expect(!bridge.followingSystemFontScale());
+    try T.expectEqual(@as(u32, 20), bridge.activeFontSizeForTest());
+
+    // 끄면 배율을 알아도 안 따라간다.
+    bridge.maru_mobile_set_system_font_scale(1500);
+    const off20 = "font.size = 20\nfont.follow-system = false\n";
+    bridge.maru_mobile_load_config(off20, off20.len);
+    try T.expect(!bridge.followingSystemFontScale());
+    try T.expectEqual(@as(u32, 20), bridge.activeFontSizeForTest());
+}
+
+test "M13c 시스템 글자 배율: 결과를 «스키마 범위» 로 자른다" {
+    // 접근성 배율은 3배도 넘는다(iOS AX 크기). 셀 상한 위로 올라가 봐야 다시 확대돼 흐려질
+    // 뿐이라 `font.size` 와 같은 범위로 자르고, **그 범위는 스키마가 소유한다**(두 곳에 숫자를
+    // 적으면 갈린다).
+    const T = std.testing;
+    const lo: u32 = bridge.mobile_config.FontConfig.schema.size.range.?[0];
+    const hi: u32 = bridge.mobile_config.FontConfig.schema.size.range.?[1];
+    bridge.resetSystemFontScaleForTest();
+    defer bridge.resetSystemFontScaleForTest();
+    const on20b = "font.size = 20\nfont.follow-system = true\n";
+    bridge.maru_mobile_load_config(on20b, on20b.len);
+    defer bridge.maru_mobile_load_config("", 0);
+
+    bridge.maru_mobile_set_system_font_scale(5000); // 20 × 5 = 100
+    try T.expectEqual(hi, bridge.activeFontSizeForTest());
+    bridge.maru_mobile_set_system_font_scale(100); // 20 × 0.1 = 2
+    try T.expectEqual(lo, bridge.activeFontSizeForTest());
+}
+
+test "M13c 시스템 글자 배율은 «셀 크기까지» 닿는다" {
+    // **값이 맞아도 닿는 자리가 틀리면 무동작이다.** 실효 크기가 `lineHeight()` 한 자리에서
+    // 갈라지므로 아틀라스 셀이 따라와야 하고, 그래야 M13a/M13b 의 다시 굽기가 걸린다.
+    const T = std.testing;
+    bridge.resetSystemFontScaleForTest();
+    defer bridge.resetSystemFontScaleForTest();
+    bridge.maru_mobile_set_render_scale(3000);
+    defer bridge.maru_mobile_set_render_scale(1000);
+    const on14 = "font.size = 14\nfont.follow-system = true\n";
+    bridge.maru_mobile_load_config(on14, on14.len);
+    defer bridge.maru_mobile_load_config("", 0);
+
+    const before = bridge.maru_mobile_atlas_cell_h();
+    bridge.maru_mobile_set_system_font_scale(2000);
+    const after = bridge.maru_mobile_atlas_cell_h();
+    try T.expect(after > before);
+    try T.expectEqual(@as(u32, @intCast(bridge.lineHeightForTest())) * 3, after);
+}
+
 test "굽는 격자가 바뀐 프레임은 «바뀐 프레임» 이다" {
     // **quad 만 견주면 못 본다.** 정지 화면에서 글자 크기를 바꾸면 host 가 아틀라스를 다시 굽는데,
     // 그 프레임의 quad 는 지난 것과 바이트까지 같을 수 있다 — 그림이 아니라 **샘플링하는 텍스처**가

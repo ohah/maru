@@ -20,10 +20,14 @@
     <!-- debuggable 은 개발 빌드 전용이다 — run-as 로 앱 내부의 래스터 결과를 꺼내
          두 플랫폼 픽셀을 대조한다(tools/mobile-harness/atlas_diff.py). 배포에는 빼야 한다. -->
     <application android:label="MaruChrome" android:debuggable="true">
+        <!-- configChanges 에 fontScale 을 넣는 이유: 안 넣으면 시스템 글자 크기를 바꿀 때
+             액티비티가 **통째로 재생성**된다 — NativeActivity 라 창·스왑체인·아틀라스가 다 다시
+             서고 화면이 한 번 끊긴다. 직접 받으면 onConfigurationChanged 에서 배율만 알리고
+             그 프레임에 아틀라스를 다시 굽는다(M13b·M13c). -->
         <activity android:name="dev.maru.MaruActivity"
                   android:label="MaruChrome"
                   android:screenOrientation="unspecified"
-                  android:configChanges="orientation|keyboardHidden|screenSize|uiMode"
+                  android:configChanges="orientation|keyboardHidden|screenSize|uiMode|fontScale"
                   android:windowSoftInputMode="adjustResize"
                   android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="maruchrome" />

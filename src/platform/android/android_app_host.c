@@ -1350,6 +1350,15 @@ Java_dev_maru_MaruActivity_nativeSystemAppearance(JNIEnv *env, jclass cls, jint 
     maru_mobile_set_system_appearance(is_dark != 0 ? 1u : 0u);
 }
 
+/// 시스템 **글자 배율**(접근성). `scale_milli` 는 ×1000 이고 0 은 「모른다」다 — 정책은 코어가 든다
+/// (`font.follow-system`·범위 자르기). Java 는 `Configuration.fontScale` 을 그대로 실어 보낸다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeSystemFontScale(JNIEnv *env, jclass cls, jint scale_milli) {
+    (void)env;
+    (void)cls;
+    maru_mobile_set_system_font_scale(scale_milli > 0 ? (unsigned int)scale_milli : 0u);
+}
+
 /// 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
 ///
 /// **`adjustResize` 로는 안 된다** — targetSdk 35(Android 15)부터 edge-to-edge 가 강제되어

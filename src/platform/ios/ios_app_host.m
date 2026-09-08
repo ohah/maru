@@ -1030,14 +1030,32 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     maru_mobile_set_system_appearance(self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ? 1 : 0);
 }
 
+/// 시스템 **글자 배율**(Dynamic Type)을 코어에 알린다(M13c).
+///
+/// **`preferredContentSizeCategory` 를 우리가 표로 옮기지 않는다.** 그 카테고리 이름에 붙은
+/// 실제 배율은 UIKit 이 소유하고 iOS 판마다 바뀔 수 있다 — `UIFontMetrics` 에게 「1000 은 얼마가
+/// 되나」를 물으면 그 표를 그대로 얻는다. 접근성 크기(AX1~AX5)까지 한 함수가 답한다.
+///
+/// **`traitCollection` 의 것을 쓴다.** 창에 붙기 전에는 앱 전역 값이 아직 안 정해져 있고, 그때
+/// 읽은 값으로 화면을 정하면 나중에 바뀐다 — 외관을 `didMoveToWindow` 에서 읽는 것과 같은 이유다.
+- (void)reportSystemFontScale {
+    UIFontMetrics *m = [UIFontMetrics defaultMetrics];
+    CGFloat scaled = [m scaledValueForValue:1000.0 compatibleWithTraitCollection:self.traitCollection];
+    maru_mobile_set_system_font_scale((unsigned int)(scaled + 0.5));
+}
+
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [self reportSystemAppearance];
+    [self reportSystemFontScale];
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
     if (previous.userInterfaceStyle != self.traitCollection.userInterfaceStyle) [self reportSystemAppearance];
+    // **글자 크기는 외관과 «따로» 본다.** 하나의 trait 변화에 둘 다 실려 오지 않는다.
+    if (![previous.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory])
+        [self reportSystemFontScale];
 }
 
 - (instancetype)initWithFrame:(CGRect)f {

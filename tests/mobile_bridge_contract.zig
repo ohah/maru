@@ -41,6 +41,13 @@ fn clearSelection(x: f32, y: f32) void {
     bridge.maru_mobile_pointer(2, 1, x, y, now());
 }
 
+/// **터미널을 재는 판정자의 전제**(M16a). 앱은 붙을 수 있는 서버가 하나도 없으면 서버 화면에서
+/// 서므로(UX §3), config 없이 첫 프레임을 돌리면 그 자리는 터미널이 아니다 — 전제를 안 적으면
+/// 이 파일에서 «먼저 도는» 판정자가 무엇을 남겼는지에 따라 초록·빨강이 갈린다.
+fn enterTerminal() void {
+    bridge.setScreenForTest("terminal");
+}
+
 // 가짜 단조 시계. 프레임마다 조금씩 흐른다 — 길게 누름 판정이 시계를 보기 때문이다.
 var fake_ms: u64 = 0;
 fn now() u64 {
@@ -66,6 +73,7 @@ fn holdPast(ms: u64) void {
 // 반환값은 **코어에 전달한** 누적 바이트다(헤더가 그 값으로 입력이 죽었는지 판정하라고
 // 적어 뒀다). 코어가 아직 없을 때도 그냥 더하고 있어서, 값이 "닿았다" 고 거짓말했다.
 test "코어가 없을 때는 세지 않고 알린다" {
+    enterTerminal();
     const before = bridge.maru_mobile_input("abc", 3); // 아직 build 전 — 코어가 없다
     try std.testing.expectEqual(@as(u32, 0), before);
     try std.testing.expectEqualStrings("input_before_core", std.mem.span(bridge.maru_mobile_last_error()));
@@ -87,6 +95,7 @@ test "코어가 없을 때는 세지 않고 알린다" {
 // **복사는 잡은 것을 꺼내는 일이다.** 추출은 코어가 하고(soft-wrap 잇기·2셀 뒷칸 제외가
 // 거기 있다) 플랫폼은 클립보드에 쓰기만 한다 — 브리지엔 OS 호출이 없다(§3).
 test "선택을 복사로 꺼낸다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
@@ -147,6 +156,7 @@ test "용량은 build 전에 물어도 0 이 아니다" {
 // free 가 no-op 이라 격자가 바뀔 때마다 옛 격자를 못 돌려받았고, **resize 7번**이면
 // OutOfMemory 였다. 모바일에서 키보드를 올렸다 내리면 창이 리사이즈되므로 서너 번이면 닿는다.
 test "크기를 계속 바꿔도 본문이 살아 있다" {
+    enterTerminal();
     var i: u32 = 0;
     while (i < 60) : (i += 1) {
         // 키보드 토글이 만드는 것과 같은 왕복(본문 높이가 오르내린다)
@@ -185,6 +195,7 @@ test "본문 밖과 격자 밖은 둘 다 없음으로 답한다" {
 // 같은 함수가 셸 이벤트(OSC 133)도 비운다. 그쪽은 브리지 밖에서 볼 방법이 없어서
 // (읽는 ABI 가 없다) 여기 호출이 도는 것으로 대신 잡는다.
 test "코어가 만든 답을 치우고 그 사실을 알린다" {
+    enterTerminal();
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     _ = bridge.maru_mobile_input("\x1b[c", 3); // DA1 — 장치 속성 질의
@@ -196,6 +207,7 @@ test "코어가 만든 답을 치우고 그 사실을 알린다" {
 // 아슬아슬했다). 지금은 버퍼 크기를 격자 상한에서 계산하므로 어느 크기든 안 넘쳐야 한다.
 // 이 테스트는 아래 "슬롯이 다 차면" 보다 **앞**에 있어야 한다 — 그쪽이 등록부를 채운다.
 test "화면을 꽉 채워도 quad 가 안 잘린다" {
+    enterTerminal();
     // 헤드리스에는 굽는 host 가 없다 — 등록부만 채워 "그릴 글리프가 있는" 상태로 만든다.
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
@@ -253,6 +265,7 @@ test "합성 대상은 잉크를 내고 보통 글자는 0" {
 // 키는 **코어의 인코더**를 타야 한다. host 가 바이트를 손으로 적으면 DECCKM·수정자·kitty
 // 프로토콜이 전부 빠진다. 화살표가 실제로 `CSI A` 로 나가는지로 확인한다.
 test "화살표는 코어가 인코딩한다" {
+    enterTerminal();
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const before = bridge.maru_mobile_input("", 0);
@@ -269,6 +282,7 @@ test "화살표는 코어가 인코딩한다" {
 // 쓰면 LF 가 나가고, 하드웨어 Return 은 키 경로로 CR 이 나간다 — 같은 Enter 가 입력 수단에
 // 따라 다른 바이트가 되면 안 된다.
 test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
+    enterTerminal();
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
     const base = bridge.maru_mobile_input("", 0);
@@ -294,6 +308,7 @@ test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
 // IME 가 없고, 영어 Gboard 는 `NO_SUGGESTIONS` 때문에 조합 없이 확정한다). 우리가 소유한
 // 절반 — 받으면 그리고, 확정되면 지우고, 코어를 안 더럽힌다 — 만 여기서 고정한다.
 test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
+    enterTerminal();
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
     const plain = bridge.maru_mobile_build(402, 874, now());
@@ -330,6 +345,7 @@ test "재현: 조합 폭은 바이트도 글자 수도 아니다 — 칸이다" 
 }
 
 test "재현: 조합 중에는 커서와 후보창 앵커가 그 뒤에 선다" {
+    enterTerminal();
     // **기기에서 커서가 조합 첫 글자를 덮고 앉았다** — `mux` 를 치는 동안 블록이 `m` 위에
     // 그대로 있었다. 조합은 아직 코어에 안 들어갔지만 화면에서는 이미 커서 앞자리를 차지한다.
     //
@@ -365,6 +381,7 @@ test "재현: 조합 중에는 커서와 후보창 앵커가 그 뒤에 선다" 
 // 헤더가 숫자 표의 단일 출처다. **한쪽만 고치면 host 가 모르는 id 를 보내고 키가 사라진다** —
 // 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
 test "헤더의 키 id 를 브리지가 전부 안다" {
+    enterTerminal();
     const src = @embedFile("mobile_host_abi_for_test");
     _ = bridge.maru_mobile_build(402, 874, now());
     var checked: u32 = 0;
@@ -415,6 +432,7 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
 // 커서는 **모양도 표시 여부도 코어가 정한다**(DECSCUSR·DECTCEM). 데스크톱과 같은 세 모양을
 // 다 그리는지, 그리고 TUI 가 숨기면(`CSI ?25 l`) 실제로 사라지는지 본다.
 test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
@@ -448,6 +466,7 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
 // 그때 이 테스트는 "스크롤백에서는 안 그린다" 라는 이름을 달고 있었지만 `viewOffset() == 0`
 // 을 지워도 그대로 통과했다(변이로 확인). 이제 만들 수 있으므로 양쪽을 다 본다.
 test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안에는 안 그린다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
@@ -481,6 +500,7 @@ test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안�
 // 누적해야 한다 — 그리고 그 누적은 바닥으로 스냅할 때 함께 비워져야 한다(안 그러면 다음
 // 스크롤이 옛 나머지만큼 튄다).
 test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
@@ -606,6 +626,7 @@ test "화면을 밀면 관성은 돌아와도 되살아나지 않는다" {
 // 네 배다). 선택 중 `move` 는 속도 코드를 건너뛰므로 그 값이 **그대로 살아남아**, 손을 떼는
 // 순간 관성이 돌아 방금 고른 글자가 화면 밖으로 흘러간다.
 test "길게 눌러 선택하고 떼면 화면이 안 미끄러진다" {
+    enterTerminal();
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
@@ -693,6 +714,7 @@ test "소유권을 이어받아도 앞 손가락의 속도는 안 따라온다" 
 // 키를 누르는 사람은 없고, 키를 누르려던 사람이 화면까지 멈추기를 바라지도 않는다.
 // **행동이 바뀐 자리이므로 테스트로 적어 둔다**(사고가 아니라 결정이라는 뜻이다).
 test "관성은 오래 멈췄다 온 프레임에 튀지 않는다" {
+    enterTerminal();
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
@@ -723,6 +745,7 @@ test "관성은 오래 멈췄다 온 프레임에 튀지 않는다" {
 // **입력하면 바닥으로 스냅한다.** 과거를 보는 중에 친 글자가 화면 밖에 찍히면 친 것이
 // 사라진 것처럼 보인다(데스크톱의 "입력하면 live 복귀" 와 같은 규칙).
 test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     var i: u32 = 0;
@@ -1159,6 +1182,7 @@ fn pointForCell(row: u16, col: u16) ?struct { x: f32, y: f32 } {
 // 손가락 하나가 **끌면 스크롤, 길게 누르면 선택**이다. 그 판단이 플랫폼마다 갈리면 같은
 // 동작이 기기에 따라 다른 뜻이 되므로 코어가 정한다(§3.1). 여기서 그 갈림을 고정한다.
 test "끌면 스크롤이고 길게 누르면 선택이다" {
+    enterTerminal();
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     // **개행으로 줄을 못 늘린다.** `maru_mobile_input` 의 개행은 Enter 키(CR)라 열만 0 으로
@@ -8807,4 +8831,214 @@ test "M9 서술자: 프레임마다 다시 만든다 — 쌓이지 않는다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_state(first));
     var buf: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_label(first, &buf, buf.len));
+}
+
+// ── M16a 첫 실행 ────────────────────────────────────────────────────────────
+//
+// **처음 켠 화면이 앱 바 하나와 아무 말 없는 검은 사각형이었다**(2026-09-09, `pm clear` 후 실측).
+// 원격 전용(계약 §1)이라 붙을 서버가 없으면 그 자리엔 영영 아무것도 안 오는데, 뒤로 갈 수 있다는
+// 표시조차 없었다. 그리고 뒤로 갔을 때 나오는 세션 목록은 **영영 「불러오는 중」**이었다.
+// 규칙은 [UX §2.2·§3](../docs/mobile-ux.md)이 소유한다.
+
+/// 서버 하나짜리 config 본문. `isComplete` 는 host·user 를 본다.
+const one_complete_server = "ssh.server.1.host = 10.0.0.5\nssh.server.1.user = me\n";
+/// **주소만 적다 만 줄.** 목록은 이것을 "접속할 수 없다" 고 이미 말한다 — 설 자리를 고르는
+/// 판정도 같은 사실을 봐야 한다.
+const one_half_written_server = "ssh.server.1.host = 10.0.0.5\n";
+
+/// 앱을 방금 뜬 상태로 되돌리고 그 config 로 첫 프레임을 돌린다. **`load_config` 를 먼저 부르고
+/// 그 다음에 되돌린다** — 그래야 「설 자리를 고르는 것이 config 로드가 아니라 첫 프레임」이
+/// 판정에 걸린다(고르기를 `load_config` 로 옮기면 이 순서에서 아무 일도 안 일어난다).
+fn relaunchWith(src: []const u8) void {
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect(); // 자동 요청은 이 판정의 축이 아니다
+    bridge.resetFirstLandingForTest();
+    // 되돌리며 선 자판 요청을 치운다 — 안 치우면 아래 판정이 **되돌리기가 남긴 것**을 잰다.
+    _ = bridge.maru_mobile_take_keyboard_raise();
+    _ = bridge.maru_mobile_take_keyboard_hide();
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+test "M16a 첫 실행: 붙을 서버가 없으면 빈 터미널이 아니라 서버 화면에서 선다" {
+    relaunchWith("");
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+
+    // **그 «첫 프레임이» 서버 화면이다.** 이름만 보면 고르는 자리가 그리기 «뒤» 로 밀려도
+    // 초록이다 — 그러면 사용자는 빈 터미널을 한 장 보고 나서 넘어간다. 이번 프레임이 실제로
+    // 그 화면을 그렸는지는 **그 화면만 내는 서술자**로 판정한다.
+    try std.testing.expect(a11yFind(maru.i18n.tIn(.ko, .mob_server_add)) != null);
+
+    // **자판은 내린다** — 목록에서 고르는데 화면 절반이 자판이면 안 된다(UX §3).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_keyboard_hide());
+
+    // **왜 비었는지도 «읽힌다».** 안 그러면 스크린 리더 사용자에게 첫 화면은 「뒤로·서버 추가」
+    // 둘뿐이라, 목록이 빈 이유도 무엇을 해야 하는지도 알 길이 없다.
+    const empty_msg = a11yFind(maru.i18n.tIn(.ko, .mob_servers_empty)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(empty_msg.rect.w > 0 and empty_msg.rect.h > 0);
+
+    // **뿌리는 안 바뀌었다** — 뒤로 가면 세션 목록이 나온다(UX §2.1 이 뿌리 재배치를 U2 로 미뤘다).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+    // 그리고 그 아래로는 더 못 간다(뿌리다) — 앱이 내려간다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_pop_screen());
+}
+
+test "M16a 첫 실행: 붙을 수 있는 서버가 있으면 터미널에서 선다" {
+    // 앱의 주 용도는 터미널이다 — 서버가 있는데 목록을 거치게 하면 탭이 하나 더 붙는다(UX §3).
+    relaunchWith(one_complete_server);
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    // 그리고 **자판을 내리라고 안 한다** — 터미널은 들어가자마자 치는 자리다(UX §3).
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_keyboard_hide());
+}
+
+test "M16a 첫 실행: 반쯤 적은 줄은 «있다»로 안 센다" {
+    // 주소만 적다 만 줄이 하나 있어도 터미널은 똑같이 비어 있다. 「서버가 있나」로 세면 그
+    // 사용자는 다시 아무 말 없는 검은 사각형을 본다.
+    relaunchWith(one_half_written_server);
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+}
+
+test "M16a 설 자리는 «첫 프레임»이 고른다 — config 파일이 없는 기기가 그 경우다" {
+    // **config 파일이 없으면 host 는 `maru_mobile_load_config` 를 아예 안 부른다**(양쪽 host 가
+    // "없는 것이 정상" 이라 그냥 돌아온다) — 그 경우가 바로 가장 첫 실행이다. 고르기를 로드에
+    // 걸면 **고쳐야 할 그 한 경우에서만** 안 걸린다.
+    //
+    // 그래서 여기서는 로드를 **되돌리기 전에** 끝내 두고, 그 뒤로는 한 번도 안 부른다.
+    const src = one_complete_server;
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const empty = "";
+    bridge.maru_mobile_load_config(empty.ptr, 0); // 서버가 사라진 파일
+    _ = bridge.maru_mobile_take_server_connect();
+
+    bridge.resetFirstLandingForTest();
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName()); // 아직 안 골랐다
+    _ = bridge.maru_mobile_build(402, 874, now()); // **여기서 고른다**
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+}
+
+test "M16a 설 자리는 «한 번만» 고른다 — 배경에서 돌아왔다고 화면이 안 튄다" {
+    // config 는 배경에서 돌아올 때마다 다시 읽힌다(계약 §7). 매번 고르면 서버를 다 지운
+    // 사용자가 보던 화면에서 서버 목록으로 튄다.
+    //
+    // **`setScreenForTest` 로 옮기면 이 판정이 죽는다**(적대적 검증 1회차): 그 도우미가 「판정자가
+    // 자리를 정했다」고 빗장을 대신 걸어 주어, 제품에서 빗장을 빼도 초록이었다. 그래서 **손짓으로**
+    // 옮긴다.
+    relaunchWith(one_complete_server);
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+
+    // ① 보던 자리가 터미널일 때 — 서버가 사라져도 그 자리에 있는다.
+    const empty = "";
+    bridge.maru_mobile_load_config(empty.ptr, 0); // 서버를 다 지웠다
+    _ = bridge.maru_mobile_take_server_connect();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+
+    // ② 설정 화면에 들어가 있을 때도 마찬가지다 — 손짓으로 들어간다(톱니를 누른다).
+    openSettings(402, 874);
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
+    bridge.maru_mobile_load_config(empty.ptr, 0);
+    _ = bridge.maru_mobile_take_server_connect();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M16a 세션 목록: 붙은 적이 없으면 «불러오는 중»이라 안 한다" {
+    // 부를 것이 없는데 진행 중이라 말하면 그 화면은 영영 안 끝난다(UX §2.2).
+    bridge.maru_mobile_control_reset();
+    relaunchWith("");
+    bridge.setScreenForTest("sessions");
+    bridge.maru_mobile_set_ssh_status(0, "", 0); // 아직 아무것도 시작 안 했다
+    advanceFrame(402, 874, 16);
+
+    try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_sessions_no_server),
+        bridge.remoteOffMessage(),
+    );
+    // **그 말이 «읽히기도» 한다.** 목록이 답하는 유일한 글인데 서술자가 없으면, 스크린 리더
+    // 사용자에게 이 화면은 줄 두 개뿐인 빈 목록이다.
+    try std.testing.expect(a11yFind(maru.i18n.tIn(.ko, .mob_sessions_no_server)) != null);
+    // **그리고 옛 문구가 아니다** — 위 단언만으로는 두 문구가 같아도 초록이다.
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        maru.i18n.tIn(.ko, .mob_sessions_no_server),
+        maru.i18n.tIn(.ko, .mob_sessions_loading),
+    ));
+}
+
+test "M16a 세션 목록: 서버는 있는데 아직 안 골랐으면 «다른» 말을 한다" {
+    // 할 일이 다르다 — 하나는 등록이고 하나는 고르기다.
+    bridge.maru_mobile_control_reset();
+    relaunchWith(one_complete_server);
+    bridge.setScreenForTest("sessions");
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    advanceFrame(402, 874, 16);
+
+    try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_sessions_not_connected),
+        bridge.remoteOffMessage(),
+    );
+}
+
+test "M16a 세션 목록: 반쯤 적은 줄뿐이면 «먼저 등록»이다" {
+    // 「골라 연결하라」고 하면 사용자는 눌러 보고서야 그 줄로는 못 붙는 것을 안다.
+    bridge.maru_mobile_control_reset();
+    relaunchWith(one_half_written_server);
+    bridge.setScreenForTest("sessions");
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    advanceFrame(402, 874, 16);
+
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_sessions_no_server),
+        bridge.remoteOffMessage(),
+    );
+}
+
+test "M16a 세션 목록: 진행 중·실패는 그대로 그 말을 한다" {
+    // 새 갈래가 **연결 축의 말을 가로채면** 「붙는 중」·「인증 실패」가 사라진다.
+    bridge.maru_mobile_control_reset();
+    relaunchWith("");
+    bridge.setScreenForTest("sessions");
+
+    bridge.maru_mobile_set_ssh_status(1, "", 0); // 붙는 중
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_conn_connecting),
+        bridge.remoteOffMessage(),
+    );
+
+    bridge.maru_mobile_set_ssh_status(2, "AuthFailed", 10);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_conn_auth),
+        bridge.remoteOffMessage(),
+    );
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+}
+
+test "M16a 세션 목록: 붙고 나면 «받는 중»이 여전히 있다" {
+    // 「시작도 안 했다」를 고치면서 **진짜 받는 중**까지 없애면, 목록이 오기 전에 「없다」고
+    // 말하게 된다(S10d-2 가 갈라 둔 그 셋이 무너진다).
+    bridge.maru_mobile_control_reset();
+    relaunchWith(one_complete_server);
+    gotoSessionsScreen(); // READY 로 세운다
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.loading, bridge.remoteSessionsShown());
+    bridge.maru_mobile_control_reset();
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+
+    // **뒤에 오는 판정자에게 앞 판정자의 config 를 안 남긴다.** 이 묶음은 서버 목록을 바꾸는
+    // 유일한 자리라, 그대로 두면 다음에 붙는 판정자가 「서버가 있는 앱」을 물려받는다.
+    const empty = "";
+    bridge.maru_mobile_load_config(empty.ptr, 0);
+    _ = bridge.maru_mobile_take_server_connect();
+    enterTerminal();
 }

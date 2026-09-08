@@ -791,6 +791,11 @@ const Table = struct {
     /// 사실을 말한다.
     mob_sessions_loading: [:0]const u8,
     mob_sessions_none: [:0]const u8,
+    /// **시작도 안 한 것은 「받는 중」이 아니다**(M16a). 붙은 적이 한 번도 없으면 부를 목록이
+    /// 없는데, 그 자리가 `mob_sessions_loading` 으로 떨어져 첫 화면이 **영영 받는 중**이었다.
+    /// 둘로 갈린다 — 붙을 수 있는 서버가 없다 · 아직 고르지 않았다(할 일이 각각 다르다).
+    mob_sessions_no_server: [:0]const u8,
+    mob_sessions_not_connected: [:0]const u8,
     /// 컨트롤 축이 꺼진 이유. 사용자가 **고칠 자리를 알 수 있게** 갈라 적는다.
     mob_control_off_timeout: [:0]const u8,
     mob_control_off_noise: [:0]const u8,
@@ -1288,6 +1293,8 @@ const en: Table = .{
     .mob_servers_empty = "No servers added yet",
     .mob_sessions_loading = "Loading sessions...",
     .mob_sessions_none = "No sessions are running",
+    .mob_sessions_no_server = "No servers added yet. Add one first",
+    .mob_sessions_not_connected = "Not connected yet. Choose a server to connect",
     .mob_control_off_timeout = "The server is not responding. Make sure maru is running on it",
     .mob_control_off_noise = "Unexpected response. The server appears to enforce a fixed command",
     .mob_control_off_protocol = "The maru version on the server is not compatible. It needs an update",
@@ -1923,6 +1930,8 @@ const ko: Table = .{
     .mob_servers_empty = "등록된 서버가 없습니다",
     .mob_sessions_loading = "세션 목록을 불러오는 중...",
     .mob_sessions_none = "실행 중인 세션이 없습니다",
+    .mob_sessions_no_server = "등록된 서버가 없습니다. 서버를 먼저 추가해 주세요",
+    .mob_sessions_not_connected = "아직 연결하지 않았습니다. 서버를 골라 연결해 주세요",
     .mob_control_off_timeout = "서버가 응답하지 않습니다. maru가 실행 중인지 확인해 주세요",
     .mob_control_off_noise = "예상과 다른 응답이 왔습니다. 서버가 지정된 명령만 허용하는 것 같습니다",
     .mob_control_off_protocol = "서버의 maru 버전이 호환되지 않습니다. 업데이트가 필요합니다",

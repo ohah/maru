@@ -4435,9 +4435,15 @@ fn pushTextWrapped(text: []const u8, x: i32, y: i32, max_w: i32, font_px: i32, c
 /// 빼면 두 곳이 같은 것을 부르므로 갈릴 일이 없다.
 ///
 /// 접은 뒤에는 **되감은 구간만** 다시 잰다(`cut..end`, 마지막 단어 정도라 짧다).
+/// 접은 글의 **줄 높이**. 그리는 쪽과 그 글을 덮는 사각형(서술자)이 같은 값을 써야 한다 —
+/// 두 벌로 두면 한쪽만 고쳐져 읽는 자리와 보이는 자리가 어긋난다.
+fn wrappedLineHeight(font_px: i32) i32 {
+    return font_px + @divTrunc(font_px, 4); // 줄 사이를 조금 벌린다(글자가 붙어 보인다)
+}
+
 fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32, y: i32) u32 {
     if (max_w <= 0) return 0;
-    const line_h: i32 = font_px + @divTrunc(font_px, 4); // 줄 사이를 조금 벌린다(글자가 붙어 보인다)
+    const line_h: i32 = wrappedLineHeight(font_px);
     var view = std.unicode.Utf8View.init(text) catch {
         setLastError("text_bad_utf8");
         return 0;
@@ -4878,6 +4884,9 @@ const Screen = enum { sessions, terminal, settings, servers, server_edit, passwo
 var nav: [4]Screen = .{ .sessions, .terminal, .terminal, .terminal };
 /// 스택에 실제로 쌓인 수. **앱은 터미널에서 시작한다** — 세션 목록은 그 아래에 있고 뒤로
 /// 가면 나온다. 매번 목록을 거치게 하면 이 앱의 주 용도에 탭이 하나 더 붙는다.
+///
+/// **다만 붙을 서버가 있을 때뿐이다**(M16a) — 없으면 첫 프레임이 이 자리를 서버 화면으로
+/// 바꾼다(`landFirstScreen`). 뿌리는 그대로다.
 var nav_len: usize = 2;
 
 /// 누른 원격 줄을 연다. **누를 때 잡아 두는 것은 «그 세션의 id» 다** — 자리(좌표)도 순번(index)도
@@ -4920,6 +4929,32 @@ fn remoteRowAt(x: f32, y: f32) ?usize {
     // 줄 사이 divider 를 누른 것은 어느 줄도 아니다.
     if (rel - idx_f * pitch > remote_row0.h) return null;
     return if (control_rows[idx].has_runtime) idx else null;
+}
+
+/// 앱이 설 자리를 **한 번** 고른다(M16a). 규칙은 [UX §3](../../../docs/mobile-ux.md)이 소유한다.
+///
+/// 붙을 수 있는 서버가 하나도 없으면 터미널은 **영영 빈 화면**이다 — 원격 전용(계약 §1)이라
+/// 그 자리에 올 것이 없다. 처음 켠 사람이 본 것이 그것이었다: 앱 바 하나와 아무 말 없는 검은
+/// 사각형, 뒤로 갈 수 있다는 표시도 없다. 그때는 **서버 화면**에서 선다(첫 물음이 "무엇에
+/// 연결할까" 이므로 세션 목록에서 서면 탭이 하나 더 붙는다).
+///
+/// **뿌리는 안 바꾼다** — `nav[0]` 은 그대로 세션 목록이라 뒤로 가면 목록이 나온다(UX §2.1 이
+/// 뿌리 재배치를 U2 로 미뤄 뒀다).
+///
+/// **`load_config` 가 아니라 첫 프레임에서 고른다.** config 파일이 없으면 host 는
+/// `maru_mobile_load_config` 를 **아예 안 부르는데**(양쪽 host 가 "없는 것이 정상" 이라 그냥
+/// 돌아온다) 그 경우가 바로 가장 첫 실행이다 — 거기 걸면 고쳐야 할 그 한 경우에서만 안 걸린다.
+///
+/// **한 번뿐이다.** config 는 배경에서 돌아올 때마다 다시 읽히므로(계약 §7) 매번 고르면 서버를
+/// 다 지운 사용자가 설정 화면에 있는 동안 화면이 튄다.
+var first_landing_done = false;
+
+fn landFirstScreen() void {
+    if (first_landing_done) return;
+    first_landing_done = true;
+    if (firstComplete(servers()) != null) return;
+    nav[1] = .servers;
+    syncKeyboardForScreen();
 }
 
 /// 지금 보이는 화면 — 스택의 꼭대기다.
@@ -5190,7 +5225,8 @@ var sess_pressed: enum { none, gear, row, servers, remote_row } = .none;
 var remote_pressed_id: ?[32]u8 = null;
 /// 서버 목록으로 들어가는 줄. **여기서 들어간다** — UX 계약(§2.1)은 서버 목록을 세션 목록
 /// *위*에 두지만, 뿌리를 바꾸면 앱이 뜨는 자리와 뒤로가기 스택이 함께 움직인다(그 재배치는
-/// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다.
+/// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다. **첫 실행만 예외로 앱이 그
+/// 화면에서 뜬다**(M16a — `landFirstScreen`): 뿌리는 그대로라 뒤로 가면 이 목록이 나온다.
 var sess_servers_rect: SetRect = .{};
 /// 세션 목록의 제스처. **설정 화면과 나눠 쓰지 않는다** — 전에는 `set_active`·`set_moved` 를
 /// 그대로 썼고(한 번에 한 화면만 떠서 동작하기는 했다), 이름이 거짓말을 하는 데다 둘 중
@@ -5393,6 +5429,37 @@ pub fn remoteOffMessage() []const u8 {
     return remote_off_msg[0..remote_off_msg_len];
 }
 
+/// 아직 한 번도 안 붙었을 때(`conn_state == 0`) 목록이 할 말. **기다리라는 말이 아니라 지금
+/// 할 일**이다 — 그리고 할 일이 둘로 갈린다: 붙을 수 있는 서버가 아예 없으면 **먼저 등록**해야
+/// 하고, 있으면 **골라서 연결**하면 된다.
+///
+/// **「있나」가 아니라 「붙을 수 있나」다**(`firstComplete`). 주소만 적다 만 줄이 하나 있어도
+/// 그것으로는 못 붙으므로, 「골라 연결하라」고 하면 사용자는 눌러 보고서야 안다 — 설 자리를
+/// 고르는 판정(`landFirstScreen`)과 **같은 사실**을 본다.
+fn notConnectedYetMessage() []const u8 {
+    return maru.i18n.tIn(.ko, if (firstComplete(servers()) == null)
+        .mob_sessions_no_server
+    else
+        .mob_sessions_not_connected);
+}
+
+/// 목록이 **말로 답하는** 자리. 그린 문구를 그대로 서술자로도 낸다.
+///
+/// **화면이 말하는데 낭독기에는 침묵이었다**(M16a 를 재면서 잡았다). 이 네 자리(연결 사유·축이
+/// 꺼진 사유·받는 중·없다)는 전부 "지금 무엇을 해야 하나" 를 답하는 유일한 글인데, 서술자가
+/// 없으면 스크린 리더 사용자에게 그 화면은 **줄 두 개뿐인 빈 목록**이다. 첫 실행이 이 자리에서
+/// 시작하게 된 지금은 그 침묵이 곧 "앱을 못 쓴다" 다.
+///
+/// 누를 수 없는 글이라 역할은 `text` 다 — 누르는 자리로 내면 눌러 보고서야 아무 일도 안 남을 안다
+/// (원격 화면의 `mob_remote_screen_*` 이 쓰는 것과 같은 자리·같은 역할).
+fn noteListMessageA11y(win: SetRect, y: f32, h: f32, text: []const u8) void {
+    noteA11yClipped(
+        .{ .x = win.x + 16, .y = y, .w = win.w - 32, .h = h },
+        sess_list,
+        .{ .role = .text, .label = text },
+    );
+}
+
 /// 그린 **내용 높이**를 돌려준다 — 부르는 쪽이 그것으로 스크롤 상한을 잡는다.
 fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
     // **여는 판정은 그리는 자리에서 한다.** 화면 전환은 여러 경로로 일어나므로 그 전부에
@@ -5413,8 +5480,13 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
     // 연결 상태는 터미널 축의 사실이고 이미 사람 말로 바꾸는 자리가 있다 — 그것을 그대로 쓴다
     // (같은 사실을 두 곳에서 말하면 갈린다).
     if (conn_state != 11) { // MARU_SSH_STATE_READY 가 아니면 축이 설 자리가 없다
-        const msg = connectionMessage() orelse maru.i18n.tIn(.ko, .mob_sessions_loading);
-        _ = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
+        // `connectionMessage()` 가 여기서 null 인 것은 **아직 아무것도 시작 안 했다**는 뜻
+        // 하나뿐이다(READY 갈래는 위 `conn_state != 11` 이 이미 걸렀다). 그 자리를 예전에는
+        // 「불러오는 중」으로 적었는데, **부를 것이 없다** — 붙은 적이 없으므로 그 문장은 영영
+        // 안 끝난다(UX §2.2 「받는 중은 끝이 있어야 한다」가 다른 갈래로 깨져 있었다).
+        const msg = connectionMessage() orelse notConnectedYetMessage();
+        const msg_lines = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
+        noteListMessageA11y(win, y + 10, @floatFromInt(msg_lines * @as(u32, @intCast(wrappedLineHeight(15)))), msg);
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);
         @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
         remote_shown = .off;
@@ -5443,7 +5515,8 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
         // **접어 그린다** — 축이 꺼진 이유는 무엇을 고치라는 말이라 잘리면 쓸모가 없다.
         // 이 자리는 메시지를 그리고 바로 돌아가므로(아래 세션 행이 안 그려진다) 줄이 늘어도
         // 겹칠 것이 없다.
-        _ = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
+        const msg_lines = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
+        noteListMessageA11y(win, y + 10, @floatFromInt(msg_lines * @as(u32, @intCast(wrappedLineHeight(15)))), msg);
         // **그린 문구 그대로**를 남긴다 — 이유가 갈렸다는 것만 재면 사용자가 읽는 말이 뒤바뀌어도
         // 초록이다(같은 함정을 렌더 쪽에서 이미 겪었다).
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);
@@ -5455,12 +5528,14 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
     if (!control_listed) {
         // 아직 안 받았다. **비어 있다고 말하지 않는다.**
         pushText(maru.i18n.tIn(.ko, .mob_sessions_loading), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        noteListMessageA11y(win, y, row_h, maru.i18n.tIn(.ko, .mob_sessions_loading));
         remote_shown = .loading;
         return row_h;
     }
 
     if (control_row_count == 0) {
         pushText(maru.i18n.tIn(.ko, .mob_sessions_none), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        noteListMessageA11y(win, y, row_h, maru.i18n.tIn(.ko, .mob_sessions_none));
         remote_shown = .none;
         return row_h;
     }
@@ -6173,6 +6248,13 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
     if (list.len == 0) {
         // 안내는 **추가 줄 아래**에 둔다 — 줄이 먼저 보여야 무엇을 누를지 안다.
         pushText(maru.i18n.tIn(.ko, .mob_servers_empty), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(srv_list.y + srv_row_h + 20), 17, tk.get(.surface_fg));
+        // **이 화면이 첫 실행의 앞문이다**(M16a) — 이 한 줄이 안 읽히면 스크린 리더 사용자에게
+        // 첫 화면은 「뒤로·서버 추가」뿐이라, 왜 목록이 비었는지 알 길이 없다.
+        noteA11yClipped(
+            .{ .x = srv_list.x + set_pad_x, .y = srv_list.y + srv_row_h + 20, .w = srv_list.w - set_pad_x * 2, .h = 24 },
+            srv_list,
+            .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_servers_empty) },
+        );
     }
 
     // **추가 줄은 목록 끝에 있다**(iOS·Android 설정 앱 관례). 목록이 비어도 이 줄은 있다 —
@@ -7644,6 +7726,9 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
+    // **설 자리를 고르는 것이 그리기보다 먼저다**(M16a) — 첫 프레임이 이미 터미널을 그리고 나면
+    // 사용자는 그 한 장을 본다.
+    landFirstScreen();
     resetAtlasIfBakeSizeChanged();
     stepSetFling();
     stepBodyFling();
@@ -8422,6 +8507,16 @@ pub fn resetFrameCompareForTest() void {
     frame_changed = true;
 }
 
+/// 판정자용 — **앱이 방금 뜬 것처럼** 되돌린다(M16a). 설 자리 고르기는 프로세스에 한 번뿐이라,
+/// 앞선 판정자가 프레임을 한 장이라도 돌렸으면 이미 써 버린 뒤다. 스택도 뜰 때 모양으로 되돌린다 —
+/// 안 되돌리면 앞 판정자가 밀어 둔 화면 위에서 재게 되어, **안 옮긴 것**을 옮겼다고 믿는다.
+pub fn resetFirstLandingForTest() void {
+    first_landing_done = false;
+    nav = .{ .sessions, .terminal, .terminal, .terminal };
+    nav_len = 2;
+    syncKeyboardForScreen();
+}
+
 /// 판정자용 — **화면 스택을 그 화면 하나로 맞춘다.** 제품 경로는 손짓으로만 옮기는데(탭·뒤로가기),
 /// 「화면을 옮기면 달라지는가」를 재려면 **옮긴 것이 확실해야** 한다.
 ///
@@ -8430,6 +8525,9 @@ pub fn resetFrameCompareForTest() void {
 /// 것**을 잰다. 뿌리가 `.sessions` 이고 그 위가 다 `.terminal` 이라 터미널을 재는 판정자는 그래도
 /// 초록이어서 **아무도 안 알려 준다** — 실제로 그 함정에 두 번 걸렸다(M14 는 붉게, M9 는 초록으로).
 pub fn setScreenForTest(name: []const u8) void {
+    // **판정자가 자리를 정했으면 앱은 다시 안 고른다**(M16a). 안 그러면 첫 프레임의
+    // `landFirstScreen` 이 이 지정을 덮어, 판정자는 옮겼다고 믿은 채 다른 화면을 잰다.
+    first_landing_done = true;
     inline for (@typeInfo(Screen).@"enum".fields) |f| {
         if (std.mem.eql(u8, f.name, name)) {
             const s: Screen = @enumFromInt(f.value);

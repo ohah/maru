@@ -14973,9 +14973,12 @@ pub const AppSession = struct {
     /// 한 안 바뀌지만, **할당 실패는 지금만**이다. 뭉개면 메모리가 잠깐 모자랐다는 이유로 그 목적지
     /// 배지가 앱 수명 내내 죽는다.
     fn controlPathErrorIsPermanent(err: maru.cli.ssh.ControlPathError) bool {
+        // **`else` 를 안 쓴다.** 그러면 이 집합에 사유가 하나 늘 때 컴파일이 깨져, 그것이 「영원히」인지
+        // 「지금만」인지 사람이 고르게 된다 — `else` 는 새 사유를 조용히 재시도 쪽으로 삼켜, 영원히 안
+        // 되는 것에 예산 여섯을 쓰고 로그만 시끄러워진다.
         return switch (err) {
             error.ControlPathTooLong => true,
-            else => false, // OutOfMemory — 다음 기회에 다시 만든다
+            error.OutOfMemory => false, // 다음 기회에 다시 만든다
         };
     }
 
@@ -23554,6 +23557,82 @@ test "RF3: detached 스풀 이름은 orphan 으로 안 알린다 — 버리는 �
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t")); // 숫자가 없다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("host_aa_t2x")); // 숫자가 아니다
     try std.testing.expect(!AppSession.nonceIsUnresolvedSpoolName("3185_4")); // 로컬 신원
+}
+test "RS1: 할당이 실패하면 제품 경로에서도 재시도로 간다 — 굳히지 않는다" {
+    // 짝이 되는 판정자다. 위가 「영원히」쪽 자리를 잠근다면 이쪽은 **「지금만」쪽**을 잠근다 — 그것이
+    // 없으면 호출부를 「항상 굳힌다」로 바꿔도 초록이었다(적대적 검증 4 회차 mutation).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var host: AppSession.RemoteAgentHost = .{};
+    defer host.pending.deinit(a);
+    defer host.install_out.deinit(a);
+    defer host.cursors.deinit(a);
+    host.install_done = true;
+    host.stream_started = false;
+    host.retry_at_ms = 1;
+
+    // **다음 할당 하나만** 실패시킨다 — `controlSocketPath` 의 `allocPrint` 가 그것이다.
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const saved_alloc = session.allocator;
+    session.allocator = failing.allocator();
+    session.drainRemoteAgentHost("openClaw", &host, 1000);
+    session.allocator = saved_alloc;
+
+    try std.testing.expect(!host.stopped); // 굳히지 않았다
+    try std.testing.expectEqual(@as(u8, 1), host.retries); // 예산을 하나 썼다
+    try std.testing.expect(host.retry_at_ms > 0); // 다시 띄울 때를 잡았다
+}
+test "RS1: 규격을 넘는 경로는 제품 경로에서도 굳는다 — 헬퍼를 부르는 자리까지 잠근다" {
+    // ⚠️ 순수 판정자만 두면 **그것을 부르는 자리가 빠져도 초록**이다(적대적 검증 4 회차 mutation 으로
+    // 확인: 호출부를 「항상 굳힌다」·「항상 재시도」로 바꿔도 살아남았다). 그래서 `HOME` 을 길게 만들어
+    // 실제 `ControlPathTooLong` 을 내고 제품 경로를 태운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 103 바이트 규격을 넘기려면 home 이 길면 된다(`<home>/.cache/maru/ctl-<hash>`).
+    const long_home = "/" ++ ("h" ** 200);
+    const saved = std.c.getenv("HOME");
+    _ = setenv("HOME", long_home, 1);
+    defer if (saved) |v| {
+        _ = setenv("HOME", v, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+
+    var host: AppSession.RemoteAgentHost = .{};
+    defer host.pending.deinit(a);
+    defer host.install_out.deinit(a);
+    defer host.cursors.deinit(a);
+    host.install_done = true; // 설치는 끝났고
+    host.stream_started = false; // 스트리머는 아직이며
+    host.retry_at_ms = 1; // 다시 띄울 때가 지났다
+
+    session.drainRemoteAgentHost("openClaw", &host, 1000);
+
+    // 「영원히」쪽이므로 **굳고**, 재시도 예산은 안 쓴다.
+    try std.testing.expect(host.stopped);
+    try std.testing.expectEqual(@as(u8, 0), host.retries);
 }
 test "RS1: control socket 경로 실패는 두 갈래다 — 길이는 영원, 할당은 지금만" {
     // 계획 §RA5-b 는 「두 실패를 반드시 가른다」고 정했다(`hello` 실패는 영구, EOF 는 재시도). 그런데

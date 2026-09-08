@@ -4709,6 +4709,40 @@ path alias·중첩, manifest basename, CLI digest와 context/runner drift, copie
 toolchain/source authority → `ProfileUpgradeExecution` → role-B stage-3 product → timing artifact publication/retained close를 하나의 정산 owner로
 연결한다.
 
+### 11.96 upgrade-B stage-3 fresh-process driver와 timing retained close
+
+`release_adapter_profile_stage3_preparation_command.zig`의 final-address `Execution`은 §11.95의
+`prepare-profile-candidate` bootstrap 하나만 소비해 upgrade-B stage-3 전체를 실행하는 유일한 executable driver다. 시작 시 모든 borrowed
+pathname을 bounded fixed storage로 복사하고 bootstrap/context/runner/CLI identity와 그 path graph를 seal한 뒤에만 첫 environment,
+filesystem, network 또는 child callback을 연다. 저장한 path는 서로 same/ancestor/descendant가 아니며 predecessor workspace, upgrade
+workspace, manifest, durable preparation과 timing output은 서로 독립된 정산 단위다.
+
+driver의 닫힌 순서는 `profile_endorsement.bindFromEnvironment(upgrade_b 확인)` → candidate prerequisite → predecessor pre-publish workspace →
+profile predecessor manifest input → upgrade workspace → source directory와 pinned Zig authority → `ProfileUpgradeExecution` →
+`profile_stage3_preparation_product` → timing artifact publication → timing artifact retained close다. candidate prerequisite의 identity/files/product/
+source/compatibility만 뒤 단계에 투영하며 caller가 profile, predecessor, evidence, manifest role, signer, timing 또는 success scalar를 다시
+조립하지 않는다. 두 workspace와 모든 child는 driver 내부 final-address owner가 소유하고 profile document와 token은 실행 중에만 빌리며
+실패·audit owner와 성공 뒤 retained state에 저장하지 않는다.
+
+성공 commit은 role-B durable preparation directory와 canonical timing JSON file 두 개다. durable product가 retained close된 뒤 timing
+publication이 실패하면 durable commit을 추측해 삭제하지 않고 `audit_required`로 분류한다. timing publisher가 owner를 넘긴 뒤 final fence나
+retained close가 실패하면 exact timing artifact owner를 보존한다. `Artifact.closeRetaining`은 held pathname/inode/private parent/canonical bytes를
+마지막으로 재검증하고 file descriptor와 parent descriptor를 닫은 뒤 `retained_closed`로 전이한다. 이 상태에는 cleanup capability가 없고,
+fresh reopen만 이후 workflow upload/정산 권위를 다시 만든다. 성공 driver는 두 retained pathname만 외부 workflow가 이미 소유한 argv로 남기고
+모든 local owner와 descriptor를 정산해 pristine으로 돌아간다.
+
+pre-commit 실패 cleanup은 timing artifact → profile stage-3 local owner → profile execution → upgrade workspace → predecessor manifest input →
+predecessor workspace → candidate prerequisite → Zig/source authority → profile owner 역순 best-effort다. remote draft가 생겼거나 durable/timing
+publication의 결과를 안전하게 지울 수 없는 순간부터는 local failure로 축소하지 않고 exact audit stage를 보존한다. cleanup 하나가 실패해도
+독립된 뒤쪽 cleanup은 계속하며, 재시도 owner는 token, response/scratch, environment context, bootstrap 또는 borrowed argv를 보존하지 않는다.
+
+focused Debug·ReleaseFast gate는 exact 단계 순서와 projection, bootstrap/path/profile/CLI drift, 모든 단계 fail-index, draft 전 local retry와 draft
+후 audit, durable commit 뒤 timing failure, timing retained-close 실패, 역순 best-effort cleanup과 borrowed input 0을 검증한다. actual filesystem
+행은 harness-owned private root에서 timing publish→retained close→fresh reopen을 검증하고 실제 앱 session-host registry·사용자 HOME·GitHub release는
+건드리지 않는다. validator는 이 driver를 단 한 번 호출하고 token은 bootstrap 성공 뒤에만 읽는다. protected B 시험 tag에서만 실제 signed
+N-1/current child와 GitHub-issued `predecessor_auth_ns`, `signed_one_ns`, `signed_near_max_ns`, `runner_phase_ns`, `profile_phase_ns`를 최종 E2E
+실측으로 인정하며, workflow 배선과 checkpoint·attestation·draft publication 완료는 후속 slice다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

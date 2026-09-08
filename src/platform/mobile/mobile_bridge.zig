@@ -1468,6 +1468,11 @@ const ssh_err_not_ready: c_int = -7;
 /// 「열자」는 뜻을 집는다. **`maru_mobile_control_tick` 안에서만 쓴다** — `export` 를 뺀 것은
 /// host 가 이것과 `takeControlClose` 를 **제 순서로** 부르다 「열고 그 자리에서 닫기」를 만든
 /// 적이 있기 때문이다(실기 2026-09-04). 순서는 이제 코어가 정한다.
+/// 판정자용 — 「열자」는 뜻을 세운다. 제품에서는 화면(원격 세션 목록)이 그것을 정한다.
+pub fn requestControlOpenForTest() void {
+    control_open_req = true;
+}
+
 pub fn takeControlOpen() c_int {
     if (!control_open_req) return 0;
     // **가져간 순간 그것이 돌고 있는 것이 된다.** host 는 채널이 열릴 수 있을 때만 이걸 부르므로

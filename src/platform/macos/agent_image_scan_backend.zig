@@ -330,8 +330,11 @@ fn worker(job: *Job) void {
         // 파일이 바뀌면 스캐너의 이월 버퍼도 새로 시작해야 한다 — 앞 파일의 잘린 꼬리가 다음 파일의
         // 첫 줄에 이어 붙으면 없던 이미지가 생긴다.
         scanner.deinit(state.allocator);
-        scanner = .{};
-        const first_hit = result.hits.items.len;
+        // **파일 번호는 스캐너가 찍는다**(`StreamScanner.file_index`). 예전에는 여기서 자리를
+        // 잡아 두고 스캔 뒤에 찍었는데, 퇴출이 배열을 앞으로 당기면 그 자리가 낡아 이 파일의
+        // 앞부분이 번호를 못 받았다 — 실측 프로브에서 앞 파일 51 개 중 50 개가 버려지자 이 파일의
+        // 앞 50 개가 첫 파일 번호(0)로 남았다.
+        scanner = .{ .file_index = @intCast(fi) };
 
         const file = std.Io.Dir.cwd().openFile(io, path, .{
             .mode = .read_only,
@@ -363,8 +366,6 @@ fn worker(job: *Job) void {
             };
         }
         result.scanned_bytes += offset;
-        // 이 파일에서 나온 것들에 **누가 준 오프셋인지** 표시한다.
-        for (result.hits.items[first_hit..]) |*h| h.file_index = @intCast(fi);
         if (scanner.partial) result.partial = true;
         if (scanner.image_partial) result.image_partial = true;
         if (scanner.activity_partial) result.activity_partial = true;

@@ -21724,7 +21724,14 @@ pub const AppSession = struct {
         // 갤러리 인덱스도 힙이다 — `Source`는 고정 배열이지만 `hits`는 아니다. 뷰를 열어 둔 채 창을 닫으면
         // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
         self.image_gallery.deinit(self.allocator);
-        // 워커는 detached 다 — 여기서 파괴하지 않고 refcount 에 맡긴다(취소만 건다).
+        // **워커를 거두고 나간다.** 스캔·디코드 둘 다 `deinit` 이 취소를 걸고 스레드를 join 한다 —
+        // 떼어 놓으면 그 스레드가 든 할당(경로 사본)이 세션보다 오래 살아 누수로 보고된다
+        // (`agent_image_scan_backend` 의 `worker_thread` 주석이 그 사고를 적고 있다).
+        //
+        // ⚠️ 예전 주석은 「detached 라 refcount 에 맡긴다」였는데 **그때 이미 거짓**이었다 —
+        // detach 를 join 으로 바꾼 수정이 이 주석을 안 고쳤다. 그 거짓 때문에 CI 누수를 쫓다가
+        // 「판정자가 워커를 안 재워서」라는 **잘못된 처방**으로 갈 뻔했다. 실측으로 껐다: 대기
+        // 예산을 1 ms 로 줄여 판정자가 워커를 남긴 채 끝나게 해도 **누수가 0** 이다.
         if (self.image_gallery_backend) |*b| b.deinit();
         self.image_gallery_backend = null;
         if (self.image_gallery_decode_backend) |*b| b.deinit();

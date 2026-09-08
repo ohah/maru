@@ -373,6 +373,17 @@ test "정책 경계: 저전력은 host 가 «나르기만» 하고, 판정 기�
     // **저전력은 바뀔 때마다 온다** — 한 번 읽는 것만으로는 앱이 떠 있는 채로 켠 경우를 놓친다.
     try std.testing.expect(count(ios, "NSProcessInfoPowerStateDidChangeNotification") > 0);
     try expectPresentInBody(java, "protected void onResume() {", "applyLowPower();");
+
+    // **배경에서는 아예 안 깨어난다**(M14b). 그릴 것이 없으면 다음 프레임을 안 건다 —
+    // iOS 는 `CADisplayLink` 를 멈추고, Android 는 콜백 체인을 끊는다.
+    // 몸통을 본다 — 「어딘가 있다」로 재면 메서드 «정의» 가 조건을 만족시켜 부르는 자리를
+    // 지운 변이가 빠져나간다(변이 검사에서 잡았다).
+    try expectPresentInBody(ios, "- (void)applicationDidEnterBackground:", "setRenderingPaused:");
+    try expectPresentInBody(android, "static void frameCallback(", "g_chor_started = 0;");
+    // **다시 거는 자리는 «하나» 다.** 멈추는 자리와 거는 자리가 갈리면 「영영 안 그려진다」가
+    // 생기고, 그것은 화면이 통째로 언 것으로만 보인다. 그래서 «거는» 곳의 수를 고정한다.
+    try std.testing.expectEqual(@as(usize, 2), count(android, "AChoreographer_postFrameCallback64("));
+    try expectPresentInBody(android, "static void onAppCmd(", "AChoreographer_postFrameCallback64(");
 }
 
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.

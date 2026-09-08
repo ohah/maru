@@ -2596,6 +2596,14 @@ pub export fn maru_mobile_selection_span() u64 {
         (@as(u64, s.end.row) << 16) | @as(u64, s.end.col);
 }
 
+/// 지금 선택이 몇 «줄» 인가(M9c). 화면 낭독기에 「무엇을 복사하나」를 말해 주는 값이다.
+/// 선택이 없으면 0. **끝 줄은 포함이다**(선택 범위의 약속과 같다).
+fn selectedLineCount() u32 {
+    const core = &(term_core orelse return 0);
+    const s = core.selectionViewportSpan() orelse return 0;
+    return @as(u32, s.end.row - s.start.row) + 1;
+}
+
 pub export fn maru_mobile_has_selection() u32 {
     const core = &(term_core orelse return 0);
     return if (core.selectionViewportSpan() != null) 1 else 0;
@@ -2873,7 +2881,23 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     term_copy_rect = .{};
     if (copyEnabled()) {
         term_copy_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
-        noteA11y(term_copy_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_copy) });
+        // **무엇을 복사할지 말한다**(M9c). 이름만 「복사」면 무엇이 복사되는지 알 수 없다 —
+        // 목록 줄이 「몇 분의 몇」을 말하는 것과 같은 규율로, 몇 줄인지를 **값**으로 낸다.
+        // 값과 이름을 따로 내는 이유도 그 자리와 같다: 이어 붙이면 줄 수가 바뀔 때마다 낭독기가
+        // 「이름이 바뀌었다」로 보고 커서를 처음으로 튕긴다.
+        var copy_val: [48]u8 = undefined;
+        const copy_lines = selectedLineCount();
+        // 언어를 박는 이유는 위 `a11y_action_label` 과 같다 — 보이는 말과 읽히는 말이 같아야 한다.
+        const copy_value = if (copy_lines == 0) "" else (std.fmt.bufPrint(
+            &copy_val,
+            "{d} {s}",
+            .{ copy_lines, maru.i18n.tIn(.ko, .mob_a11y_selected_lines) },
+        ) catch "");
+        noteA11y(term_copy_rect, .{
+            .role = .button,
+            .label = maru.i18n.tIn(.ko, .mob_copy),
+            .value = copy_value,
+        });
         if (term_copy_pressed) push(.{
             .x = @intFromFloat(term_copy_rect.x),
             .y = @intFromFloat(term_copy_rect.y),
@@ -8146,6 +8170,98 @@ pub export fn maru_mobile_a11y_set_pos(index: u32) u32 {
     const sem = a11y_nodes[index].sem;
     return (@as(u32, @intCast(@min(sem.position_in_set, 0xFFFF))) << 16) |
         @as(u32, @intCast(@min(sem.set_size, 0xFFFF)));
+}
+
+// ── M9c: 선택을 «줄 단위 동작» 으로 만든다 ───────────────────────────────────────
+//
+// 낭독기를 켜면 길게 누르고 끄는 손짓을 낭독기가 가로채므로 **선택을 아예 못 만든다** — 복사
+// 버튼은 보이는데 누를 것이 영영 안 생긴다. 그래서 줄마다 동작 둘을 단다: 낭독기가 이것을 제
+// 목록(iOS 로터·Android 동작 메뉴)으로 보여 주므로 따로 배울 손짓이 없다.
+//
+// **번호는 헤더가 든다**(역할·상태 비트와 같은 규율) — 여기 상수는 그 값을 베낀 것이고, 둘이
+// 갈리면 host 가 조용히 다른 동작을 한다.
+const a11y_action_select_from: u32 = 1 << 0;
+const a11y_action_select_to: u32 = 1 << 1;
+
+/// 그 줄에서 할 수 있는 동작. **본문 줄에만 붙는다** — 버튼·목록에 선택 동작이 붙으면 낭독기가
+/// 그것을 읽어 주고, 눌러 봐야 아무 일도 안 난다.
+pub export fn maru_mobile_a11y_actions(index: u32) u32 {
+    if (index >= a11y_count) return 0;
+    const sem = a11y_nodes[index].sem;
+    if (sem.role != .text or sem.set_size == 0 or sem.position_in_set == 0) return 0;
+    // **「여기까지」는 시작이 있을 때만 낸다.** 없는데 내면 낭독기가 읽어 주고, 눌러도 아무 일이
+    // 안 난다 — 할 수 없는 것을 목록에 두지 않는 것이 이 축의 규율이다(못 쓰는 컨트롤은 빼지
+    // 않고 `enabled = false` 로 내지만, 여기는 **없는 동작**이라 아예 안 낸다).
+    const core = &(term_core orelse return a11y_action_select_from);
+    if (core.selectionViewportSpan() == null and !a11y_select_pending) return a11y_action_select_from;
+    return a11y_action_select_from | a11y_action_select_to;
+}
+
+/// 「여기서부터」를 눌러 시작만 놓인 상태. 코어의 선택은 시작=끝이면 없는 것으로 치므로, 「여기까지」를
+/// 낼지 정하려면 그 사실을 따로 든다.
+var a11y_select_pending = false;
+
+pub export fn maru_mobile_a11y_action_label(action: u32, out: [*]u8, cap: usize) usize {
+    // **언어를 박아 넘긴다.** 이 파일의 그리는 경로가 전부 그렇다 — 모바일 설정 화면이 아직 언어
+    // 손잡이를 안 열어서, 화면에 나오는 말과 **읽히는 말이 같아야** 한다. 손잡이가 생기면 이 자리도
+    // 그 값을 따라간다(i18n 계약 §7.2 · 원장).
+    const text = switch (action) {
+        a11y_action_select_from => maru.i18n.tIn(.ko, .mob_a11y_select_from),
+        a11y_action_select_to => maru.i18n.tIn(.ko, .mob_a11y_select_to),
+        else => return 0,
+    };
+    if (text.len == 0 or text.len > cap) return 0;
+    @memcpy(out[0..text.len], text);
+    return text.len;
+}
+
+/// 그 동작을 한다. **안 했으면 0 이다** — 낭독기가 그 값으로 「됐다」를 말하므로, 안 했는데 1 을
+/// 답하면 사용자는 왜 아무 일도 안 났는지 모른다.
+pub export fn maru_mobile_a11y_perform(index: u32, action: u32) u32 {
+    const core = &(term_core orelse return 0);
+    // **문턱은 한 자리다** — 「본문 줄인가」와 「화면 몇째 줄인가」를 함께 답한다. 처음에는 여기서
+    // 역할을 한 번 더 봤는데, 아래 함수가 이름을 숫자로 못 읽어 이미 막고 있어서 도달할 수 없는
+    // 가드였다(변이 검사에서 무동작으로 드러났다). 문턱이 둘이면 나중에 한쪽만 고쳐진다.
+    const row = a11yBodyRowOf(index) orelse return 0;
+    switch (action) {
+        a11y_action_select_from => {
+            // **앞의 선택은 여기서 따로 안 지운다** — `selectionStart` 가 anchor 와 head 를 통째로
+            // 새로 놓아 이미 새 선택이다(코어를 읽어 확인했다. 지우는 줄을 앞에 뒀다가 변이 검사에서
+            // 무동작으로 드러났다).
+            core.selectionStart(row, 0);
+            a11y_select_pending = true;
+            return 1;
+        },
+        a11y_action_select_to => {
+            if (!a11y_select_pending and core.selectionViewportSpan() == null) return 0;
+            core.selectionExtend(row, if (body_cols == 0) 0 else body_cols - 1);
+            a11y_select_pending = false;
+            return 1;
+        },
+        else => return 0,
+    }
+}
+
+/// 그 서술자가 본문 몇 번째 «화면» 줄인가. **본문 줄이 아니면 없다** — 이 함수가 선택 동작의
+/// 유일한 문턱이다.
+///
+/// 이름이 곧 그 번호다(M9 계약: 이름은 화면 행 번호이고 글자는 값이다) — 자리로 되짚으면 픽셀
+/// 반올림에 걸린다.
+fn a11yBodyRowOf(index: u32) ?u16 {
+    if (index >= a11y_count) return null;
+    const sem = a11y_nodes[index].sem;
+    if (sem.role != .text or sem.set_size == 0 or sem.position_in_set == 0) return null;
+    // **읽기 실패는 오류가 아니라 «문턱» 이다.** 본문 줄이 아닌 서술자의 이름은 숫자가 아니고
+    // (「복사」·「esc」), 그것이 곧 「이 줄에는 선택 동작이 없다」는 답이다 — 그래서 이름을 안
+    // 남긴다(계약 §5 는 «조용히 실패하지 않는다» 이지 «모든 갈래를 오류로 적는다» 가 아니다).
+    const n = if (std.fmt.parseInt(u16, sem.label, 10)) |v| v else |_| return null;
+    if (n == 0 or n > body_rows) return null;
+    return n - 1;
+}
+
+/// 판정자용 — 「시작만 놓였다」를 지운다.
+pub fn resetA11ySelectForTest() void {
+    a11y_select_pending = false;
 }
 
 /// **낭독기 초점이 그 서술자에 닿았다**(M9b — 가장자리에서 이어지기).

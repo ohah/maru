@@ -35551,12 +35551,40 @@ test "git_ops.readGitBranch: 워크트리는 제 브랜치를 말한다 — 부�
         try std.testing.expectEqualStrings("feature2", branch);
     }
 
+    // ── ②b **상대 경로 포인터**도 푼다. git 은 절대경로가 기본이지만 `worktree.useRelativePaths`
+    //     (또는 `--relative-paths`)면 `gitdir: ../../.git/worktrees/w` 처럼 적는다. 경로 해석기가 그
+    //     갈래를 이미 갖고 있는데(감시 축이 쓴다) 브랜치 축 판정자가 절대경로만 재면 그 갈래는
+    //     **아무도 안 지키는 코드**가 된다(적대적 검증 3 회차).
+    try tmp.dir.createDirPath(io, "parent/inside/rel");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "parent/inside/rel/.git",
+        .data = "gitdir: ../../.git/worktrees/w\n",
+    });
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/rel", .{root});
+        defer a.free(cwd);
+        const branch = git_ops.readGitBranch(io, a, cwd) orelse return error.TestUnexpectedResult;
+        defer a.free(branch);
+        try std.testing.expectEqualStrings("feature2", branch);
+    }
+
     // ── ③ `.git` 은 있는데 **못 읽는** 경우: 부모로 새지 않고 **모른다**로 답한다.
     //     (포인터가 깨졌거나 그 git 디렉터리가 사라진 상태 — 「없음」이 「남의 값」보다 낫다.)
     try tmp.dir.createDirPath(io, "parent/inside/broken");
     try tmp.dir.writeFile(io, .{ .sub_path = "parent/inside/broken/.git", .data = "gitdir: /nonexistent/x\n" });
     {
         const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/broken", .{root});
+        defer a.free(cwd);
+        try std.testing.expect(git_ops.readGitBranch(io, a, cwd) == null);
+    }
+
+    // ── ③b **`.git` 이 디렉터리인데 `HEAD` 를 못 읽는** 저장소도 부모로 새지 않는다.
+    //     ⑶ 과 갈래가 다르다 — 저쪽은 워크트리 포인터가 깨진 경우이고 이쪽은 일반 저장소가 답을 못
+    //     주는 경우다. 리팩터로 두 갈래가 갈리면서 이 자리가 판정 밖으로 나갔고, 뮤테이션이 살아남아
+    //     드러났다(적대적 검증 4 회차).
+    try tmp.dir.createDirPath(io, "parent/inside/headless/.git");
+    {
+        const cwd = try std.fmt.allocPrint(a, "{s}/parent/inside/headless", .{root});
         defer a.free(cwd);
         try std.testing.expect(git_ops.readGitBranch(io, a, cwd) == null);
     }

@@ -1810,11 +1810,20 @@ pub fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) 
         // 즉 결과가 「없음」이 아니라 **남의 브랜치**였다(격리 재현 2026-09-08: 폴더는 `feature2` 인데
         // 화면은 `main`). 감시 축은 이미 이 파일을 풀어 보고 있었고(`gitWatchTarget`), 브랜치 축만
         // 그 규율 밖에 있었다.
-        if (readGitDirHead(io, allocator, dir, &buf)) |b| return b;
-        // **`.git` 이 있으면 여기서 멈춘다.** 그것이 곧 「이 폴더가 저장소 루트다」이고, 못 읽었다면
-        // 이 저장소의 답이 **없는** 것이다. 더 올라가면 부모 저장소의 브랜치를 말하게 된다 — 「모른다」와
-        // 「남의 값」은 다르고, 뒤엣것이 훨씬 나쁘다(§9.4 가 원격 축에서 막아 둔 그 함정과 같은 결).
-        if (dotGitExists(io, dir)) return null;
+        // **`.git` 을 한 번만 잰다**(적대적 검증 4 회차 — 읽기와 존재 확인을 따로 하면 저장소 밖
+        // cwd 에서 레벨마다 syscall 이 둘씩 는다. 그 walk-up 은 루트까지 갈 수 있다).
+        switch (dotGitKind(io, dir)) {
+            // 없으면 여기가 저장소 루트가 아니다 — 위로 간다.
+            .missing => {},
+            // 파일이면 **워크트리**다: 포인터를 풀어 그 HEAD 를 읽는다.
+            .file => return readGitDirHead(io, allocator, dir, &buf),
+            // 디렉터리인데 위에서 `HEAD` 를 못 읽었다 = 이 저장소의 답이 **없다**.
+            //
+            // **여기서 멈추는 것이 이 수정의 절반이다.** 더 올라가면 부모 저장소의 브랜치를 말하게
+            // 된다 — 「모른다」와 「남의 값」은 다르고 뒤엣것이 훨씬 나쁘다(§9.4 가 원격 축에서 막아
+            // 둔 그 함정과 같은 결).
+            .directory => return null,
+        }
         const parent = std.fs.path.dirname(dir) orelse return null;
         if (parent.len >= dir.len) return null; // 진전 없음(루트 도달)
         dir = parent;
@@ -1845,12 +1854,17 @@ fn readGitDirHead(
     return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
 }
 
-/// 이 폴더에 `.git` 이 **있는가**(디렉터리든 파일이든). 있으면 저장소 루트라 walk-up 을 멈춘다.
-fn dotGitExists(io: std.Io, dir: []const u8) bool {
+/// 이 폴더의 `.git` 이 무엇인가 — walk-up 의 세 갈래를 한 번의 `stat` 으로 가른다.
+///
+/// **심링크는 따라간다.** `.git` 이 링크면 가리키는 실체(디렉터리든 워크트리 포인터 파일이든)가
+/// 곧 답이고, 링크 자신은 답이 아니다.
+const DotGitKind = enum { missing, file, directory };
+
+fn dotGitKind(io: std.Io, dir: []const u8) DotGitKind {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dot_git = std.fmt.bufPrint(&buf, "{s}/.git", .{dir}) catch return false;
-    _ = std.Io.Dir.cwd().statFile(io, dot_git, .{ .follow_symlinks = false }) catch return false;
-    return true;
+    const dot_git = std.fmt.bufPrint(&buf, "{s}/.git", .{dir}) catch return .missing;
+    const st = std.Io.Dir.cwd().statFile(io, dot_git, .{}) catch return .missing;
+    return if (st.kind == .file) .file else .directory;
 }
 
 // --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---

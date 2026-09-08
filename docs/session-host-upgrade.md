@@ -4695,7 +4695,9 @@ requirement·timing 값·성공 boolean은 argv로 받지 않는다. profile doc
 `MARU_SESSION_HOST_RELEASE_PROFILE_V1`의 canonical `upgrade_b` 값에서만 읽으며 token은 기존 credential reader에서만 빌린다.
 
 parser는 모든 필수 option의 exact-once, bounded value, canonical absolute path와 manifest basename을 검증한다. GitHub CLI를 포함한
-모든 pathname은 서로 same/ancestor/descendant가 아니어야 하고 predecessor와 upgrade workspace도 분리한다. timing output은
+모든 mutable/output pathname은 서로 same/ancestor/descendant가 아니어야 하고 predecessor와 upgrade workspace도 분리한다. held
+source root는 current candidate DMG와 frozen executable의 strict ancestor일 수 있지만 그 둘 외의 work/output/tool pathname과는
+분리한다. timing output은
 private parent 아래 absent leaf를 후속 publisher가 소유하므로 durable directory나 manifest 안에 중첩할 수 없다. bootstrap은 current
 protected `Context`와 hosted runner를 먼저 읽고 repo/tag를 결속한 뒤 checkout-pinned GitHub CLI를 검증한다. `Bootstrap.command`의 argv
 slice는 process lifetime 동안만 빌리며 CLI pathname만 bootstrap fixed storage에 복사해 pinned descriptor identity와 함께 final-address
@@ -4781,7 +4783,8 @@ profile environment를 함께 읽고, baseline-A의 exact `prepare-candidate` �
 
 composite action의 setup은 checkout·runner input과 무관한 fixed live root 아래에 두 profile이 필요로 하는 pathname의 닫힌 superset을
 항상 유도한다. 공통 candidate/DMG/frozen/manifest/source/Zig/durable-preparation pathname에 더해 baseline workspace와 두 app executable,
-upgrade-B predecessor workspace, upgrade workspace와 timing artifact output을 서로 same/ancestor/descendant가 아니게 둔다. shell은
+upgrade-B predecessor workspace, upgrade workspace와 timing artifact output을 서로 same/ancestor/descendant가 아니게 둔다. source root는
+이미 서명된 candidate DMG/frozen과 app executable의 strict ancestor만 허용하고 다른 work/output/tool pathname과는 분리한다. shell은
 profile에 따라 basename이나 directory를 바꾸지 않고, profile document를 input/output으로 복사하지 않으며, 모든 pathname을
 `run-profiled-stage3`에 exact once 전달한다. dispatcher는 첫 filesystem·network·child callback 전에 superset의 option exact-once,
 canonical absolute path, manifest basename과 전체 path graph disjoint를 검증한다.

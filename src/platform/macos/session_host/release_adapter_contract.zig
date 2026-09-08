@@ -381,7 +381,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const durable_preparation = try candidatePath(values.durable_preparation);
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, source_root, github_cli.path, zig, durable_preparation });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig, durable_preparation });
+            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable, app_main_executable, app_cli_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, github_cli.path, zig, durable_preparation });
             break :blk .{ .prepare_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -425,7 +426,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const timing_output = try candidatePath(values.timing_output);
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, source_root, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
+            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
             break :blk .{ .prepare_profile_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -531,6 +533,21 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             } };
         },
     };
+}
+
+/// A profiled stage-3 caller presents both closed argv shapes before it knows which profile the
+/// protected environment selects. Each command parser already checks its own paths against all
+/// common inputs; this final cross-check prevents the three dormant paths from aliasing the three
+/// selected paths and becoming a hidden authority channel when the profile changes.
+pub fn validateProfiledStage3Pair(baseline: PrepareCandidate, profile: PrepareProfileCandidate) Error!void {
+    try disjointPaths(&.{
+        baseline.baseline_workspace,
+        baseline.app_main_executable,
+        baseline.app_cli_executable,
+        profile.predecessor_workspace,
+        profile.upgrade_workspace,
+        profile.timing_output,
+    });
 }
 
 fn canonicalReleaseTestUuid(value: []const u8) bool {
@@ -759,6 +776,17 @@ fn disjointPaths(paths: []const []const u8) Error!void {
             if (pathTreeOverlaps(path, other)) return error.PathAlias;
         }
     }
+}
+
+fn validateSourceRootProducts(source_root: []const u8, products: []const []const u8, other_paths: []const []const u8) Error!void {
+    for (products) |product| {
+        if (pathTreeOverlaps(source_root, product) and !strictAncestor(source_root, product)) return error.PathAlias;
+    }
+    for (other_paths) |path| if (pathTreeOverlaps(source_root, path)) return error.PathAlias;
+}
+
+fn strictAncestor(parent: []const u8, child: []const u8) bool {
+    return parent.len < child.len and std.mem.startsWith(u8, child, parent) and child[parent.len] == '/';
 }
 
 fn pathTreeOverlaps(left: []const u8, right: []const u8) bool {

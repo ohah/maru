@@ -284,7 +284,9 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-path: ${{ steps.trusted-zig.outputs.path }}"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-size: ${{ steps.trusted-zig.outputs.size }}"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "zig-sha256: ${{ steps.trusted-zig.outputs.sha256 }}"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(live_block, "MARU_SESSION_HOST_RELEASE_PROFILE_V1: ${{ vars.SESSION_HOST_RELEASE_PROFILE_V1 }}"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "profile:"));
 
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "zig build"));
     try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
@@ -366,6 +368,9 @@ test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사�
         "dist/session-host-candidate-$MARU_VERSION",
         "baseline-evidence.json",
         "Maru-$MARU_VERSION-session-host-release.json",
+        "printf 'predecessor-workspace=%s/predecessor-workspace\\n' \"$MARU_LIVE_ROOT\"",
+        "printf 'upgrade-workspace=%s/upgrade-workspace\\n' \"$MARU_LIVE_ROOT\"",
+        "printf 'timing-output=%s/profile-upgrade-timing.json\\n' \"$MARU_LIVE_ROOT\"",
         "/usr/bin/uuidgen",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, needle));
 
@@ -384,13 +389,18 @@ test "live 릴리스 action: command 단계마다 closed argv와 credential 위�
     defer arena_state.deinit();
     const text = try readLiveAction(arena_state.allocator());
 
-    const draft = blockUntil(text, "  - name: Author baseline evidence and draft", "  - name: Attest authored evidence pair") orelse
+    const draft = blockUntil(text, "  - name: Author profile-selected evidence and draft", "  - name: Attest authored evidence pair") orelse
         return error.LiveDraftBlockMissing;
-    try expectClosedOptions(draft, 19, &.{
-        "--repo ",                "--tag ",                  "--github-cli ",              "--github-cli-sha256 ", "--test-uuid ",          "--dmg ",
-        "--frozen-executable ",   "--candidate-dmg-bundle ", "--candidate-frozen-bundle ", "--dmg-work ",          "--baseline-workspace ", "--app-main-executable ",
-        "--app-cli-executable ",  "--manifest ",             "--source-root ",             "--zig ",               "--zig-size ",           "--zig-sha256 ",
-        "--durable-preparation ",
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(draft, "run-profiled-stage3"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "prepare-candidate "));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "prepare-profile-candidate "));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "baseline_a"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "upgrade_b"));
+    try expectClosedOptions(draft, 22, &.{
+        "--repo ",                "--tag ",                   "--github-cli ",              "--github-cli-sha256 ", "--test-uuid ",          "--dmg ",
+        "--frozen-executable ",   "--candidate-dmg-bundle ",  "--candidate-frozen-bundle ", "--dmg-work ",          "--baseline-workspace ", "--app-main-executable ",
+        "--app-cli-executable ",  "--manifest ",              "--source-root ",             "--zig ",               "--zig-size ",           "--zig-sha256 ",
+        "--durable-preparation ", "--predecessor-workspace ", "--upgrade-workspace ",       "--timing-output ",
     });
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(draft, "GH_TOKEN: ${{ github.token }}"));
 

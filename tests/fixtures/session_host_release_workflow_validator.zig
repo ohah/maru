@@ -42,8 +42,8 @@ pub fn main(init: std.process.Init) !void {
         previous = value;
     }
     const path = marker orelse return error.MissingMarker;
-    var storage: [64]u8 = undefined;
-    const bytes = try std.fmt.bufPrint(&storage, "{d}\n", .{c.getpid()});
+    var storage: [128]u8 = undefined;
+    const bytes = try std.fmt.bufPrint(&storage, "{s} {d}\n", .{ command, c.getpid() });
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = bytes });
     if (std.mem.endsWith(u8, path, "local-failure")) {
         std.debug.print("local_failure\n", .{});

@@ -13244,7 +13244,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
-        run_release_adapter_contract_tests.addArg("--maru-expect-tests=18");
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=19");
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
     }
@@ -15347,6 +15347,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "release_adapter_environment", .module = workflow_checkpoint_environment_mod },
                     .{ .name = "release_adapter_live_workflow_owner", .module = live_workflow_owner_mod },
                     .{ .name = "release_adapter_live_workflow_command_process", .module = live_command_process_mod },
+                    .{ .name = "release_adapter_profile_endorsement", .module = profile_endorsement_mod },
                 },
             });
             const workflow_command_cli_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
@@ -15357,7 +15358,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "release_workflow_command_cli", .module = workflow_command_cli_mod }},
             }) });
             const run_workflow_command_cli_tests = b.addRunArtifact(workflow_command_cli_tests);
-            run_workflow_command_cli_tests.addArg("--maru-expect-tests=3");
+            run_workflow_command_cli_tests.addArg("--maru-expect-tests=5");
             run_workflow_command_cli_tests.setCwd(b.path("."));
             session_host_release_workflow_command_cli_step.dependOn(&run_workflow_command_cli_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_workflow_command_cli_tests.step);
@@ -16222,9 +16223,9 @@ pub fn build(b: *std.Build) void {
     // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
     // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
     //
-    // 172 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+    // 173 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
     // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-    const ra_all_expected_tests: usize = 172;
+    const ra_all_expected_tests: usize = 173;
     const ra_all_step = b.step(
         "test-session-host-release-adapter-all",
         "Run the posix session-host release adapter judges from one binary per optimize mode",

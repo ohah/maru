@@ -14570,7 +14570,17 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     if (term.rt.editor_first_col == 0) return error.SnappedBackToZero;
     try testing.expectEqual(@as(u16, 50), term.rt.editor_first_col); // 이미 보이므로 안 움직인다
 
-    // ⑶ **랩이면 편집도 가로를 안 건드린다.**
+    // ⑶ **상한을 모르면 안 움직인다 — 왼쪽으로 튀지 않는다.** 앞 편집이 `max_cols` 를 이미 버렸고
+    //    그 사이 프레임이 없으면 상한을 모른다. 그때 0 으로 clamp 하면 화면이 되감긴다.
+    //    caret 을 **화면 밖**에 두어 clamp 갈래까지 실제로 지난다(안 그러면 「이미 보인다」에서 끝난다).
+    if (term.rt.editor_max_cols != 0) return error.MaxColsShouldBeStale;
+    term.rt.editor_first_col = 40;
+    term.rt.editor_selection = editor_selection.Selection.at(5 + 350);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (term.rt.editor_first_col == 0) return error.SnappedBackToZeroWhenMaxUnknown;
+    try testing.expectEqual(@as(u16, 40), term.rt.editor_first_col);
+
+    // ⑷ **랩이면 편집도 가로를 안 건드린다.**
     term.rt.editor_wrap = true;
     term.rt.editor_first_col = 7;
     term.rt.editor_selection = editor_selection.Selection.at(5 + 400);

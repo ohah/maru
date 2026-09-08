@@ -1695,6 +1695,18 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
             _ = input_ops.sendCommittedText(self, "Z");
         }
     }
+    // **민 뒤에 접는다**(`MARU_FOLD_AFTER=1`). `MARU_EDIT_OP=key_fold_all` 은 tick 에서 **이 훅보다
+    // 앞**이라 늘 「접고 나서 민다」가 되는데, 접힘이 가로 위치·상한을 지키는지는 **밀어 둔 뒤에
+    // 접어야** 보인다. 여기서도 chord 를 그대로 태운다(`⌥⌘0` — 전역 표를 실제로 지난다).
+    if (std.c.getenv("MARU_FOLD_AFTER")) |fa| {
+        const fa_spec = std.mem.span(fa);
+        if (fa_spec.len > 0 and !std.mem.eql(u8, fa_spec, "0")) {
+            _ = self.handleKeyEvent(.{
+                .key = .{ .char = '0' },
+                .modifiers = .{ .command = true, .option = true },
+            }) catch {};
+        }
+    }
     if (std.c.getenv("MARU_DIFF_SWITCH_SIDE")) |sw| {
         const sw_spec = std.mem.span(sw);
         if (sw_spec.len > 0 and !std.mem.eql(u8, sw_spec, "0")) {

@@ -77676,6 +77676,105 @@ test "활동 뷰: 그림 결과라도 실패를 삼키지 않는다 (§2.2.1 적
     try std.testing.expect(std.mem.indexOfScalar(u8, out, '0') == null);
 }
 
+test "활동 뷰: 썸네일이 다시 훑어도 살아남고, 펼치면 사라진다 (AV5 적대적 1회차)" {
+    // ⚠️ **둘 다 합쳐야 생기는 결함이다.**
+    // ① 타일 재연결(`remapTiles`)이 `hit.data_offset` 으로 찾는데, 접힌 줄의 타일은 픽셀이
+    //    **그림**의 것이고 그 줄의 `Hit` 은 **호출**이다 — 영영 못 찾아 매번 다시 디코드한다.
+    // ② 펼침(AV3)이 열리면 목록은 안 그리는데 썸네일이 그 게이트를 안 가지면 **글자 없이 그림만**
+    //    본문 위에 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_H1\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/one.png\"}}]}}\n" ++
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_H1\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u1\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "r.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/r.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    image_gallery_ops.setFilter(session, .all);
+    // ⚠️ **필터를 바꾸면 인덱스 도메인이 다시 만들어진다** — 그 왕복을 기다리지 않으면 아래
+    //    타일 대기가 빈 목록 위에서 돌다 예산만 쓴다(`GalleryWait` 는 타임아웃으로도 빠져나간다).
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 썸네일 하나가 실제로 만들어질 때까지 tick 한다.
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    const kept_offset = session.image_gallery.tiles.items[0].data_offset;
+
+    // ── ① **다시 훑어도 살아남는다.** 자동 갱신·검색어 변경이 이 길로 온다 — 여기서 버리면
+    //    「전체」의 그림이 매 턴 비었다 다시 찬다(격자가 IG 때 겪은 것과 같은 결함).
+    image_gallery_ops.remapTiles(session);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(kept_offset, session.image_gallery.tiles.items[0].data_offset);
+    // 그리고 그 자리는 **호출 줄**을 가리킨다(그림이 아니라 — 「전체」에서는 그림이 접혀 있다).
+    const n = session.image_gallery.tiles.items[0].hit_index;
+    try std.testing.expect(n < session.image_gallery.hits.items.len);
+    try std.testing.expect(!session.image_gallery.hits.items[n].kind.isImage());
+
+    // ── ② **펼치면 그림도 사라진다.** 목록이 안 그려지는데 그림만 남으면 뜬금없다.
+    image_gallery_ops.openAt(session, 0);
+    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    _ = session.tick() catch {};
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows); // 목록은 안 그린다
+    var thumbs: usize = 0;
+    for (session.image_gallery.tiles.items) |t| {
+        if (t.uploaded) thumbs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), thumbs); // 그림도 안 실린다
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

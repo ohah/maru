@@ -106,6 +106,26 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_HOVER")) |raw_n| {
                 self.debug_agent_activity_hover = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
             }
+            // MARU_FORCE_IMAGE_GALLERY_SEARCH=<검색어> — 검색창을 열고 그 글자를 세운다.
+            // **검색 화면의 픽셀을 헤드리스로 찍는 유일한 길**이다: 제품에서 글자를 넣는 수단은
+            // 키 입력뿐인데 헤드리스에는 키보드가 없다(필터가 `Tab` 이라 훅이 필요했던 것과 같다).
+            //
+            // 환경변수 문자열은 프로세스 수명이라 `span` 을 그대로 복사한다.
+            if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_SEARCH")) |raw_q| {
+                const q = std.mem.span(raw_q);
+                self.agent_activity.search.query.appendSlice(self.allocator, q) catch {};
+                self.agent_activity.search_active = true;
+                self.agent_activity.key_focus = true;
+            }
+            // MARU_FORCE_IMAGE_GALLERY_BODY=1 — `Enter` 를 누른 것처럼 **본문 검색까지 넓힌다**
+            // (계약 §2.1.1). 지금은 인덱스가 비어 있으므로(스캔이 워커다) 예약만 한다 — `OPEN` 과
+            // 같은 규율이고, 수확한 `poll` 이 그 자리에서 건다.
+            //
+            // ⚠️ **찍을 때 `MARU_SCREENSHOT_DELAY_MS` 가 필요하다.** 본문 검색도 워커라, 첫 frame
+            // 에는 「본문을 훑는 중」이 서 있다.
+            if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_BODY") != null) {
+                self.debug_agent_activity_body_search = true;
+            }
         }
     }
     if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {

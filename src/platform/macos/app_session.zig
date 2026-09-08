@@ -5264,6 +5264,9 @@ pub const AppSession = struct {
     debug_agent_activity_open: ?usize = null,
     /// MARU_FORCE_IMAGE_GALLERY_HOVER=<n> — 그 칸에 포인터가 얹힌 것처럼 세운다(헤드리스 확인용).
     debug_agent_activity_hover: ?usize = null,
+    /// `MARU_FORCE_IMAGE_GALLERY_BODY` 가 예약한 본문 검색(계약 §2.1.1). 인덱스가 생긴 뒤에야
+    /// 걸 수 있어(`Enter` 와 같은 자리) 예약으로 든다 — 크게 보기 예약과 같은 규율이다.
+    debug_agent_activity_body_search: bool = false,
     /// 캡처 전용 — `MARU_FORCE_TAB_COUNT` 이 탭을 이미 늘렸나(`applyForcedTabCount`, 한 번만).
     debug_tab_count_applied: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.

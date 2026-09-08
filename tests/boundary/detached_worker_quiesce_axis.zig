@@ -70,6 +70,10 @@ const in_deinit = [_]InDeinit{
         .file = "agent_image_decode_backend.zig",
         .why = "제품 `deinit` 이 스레드를 **join** 한다(테스트 전용이 아니다) — 대기가 한 장 디코드(실측 평균 4.4 ms)로 한정된다.",
     },
+    .{
+        .file = "agent_body_search_backend.zig",
+        .why = "제품 `deinit` 이 취소를 걸고 스레드를 **join** 한다(스캔 워커와 같은 결) — 취소를 조각마다 보므로 대기가 64 KiB 한 조각으로 한정된다.",
+    },
 };
 
 fn readFileZ(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {

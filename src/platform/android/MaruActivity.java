@@ -94,6 +94,12 @@ public class MaruActivity extends android.app.NativeActivity {
     private static native void nativeA11yFocus(int index);
     private static native int nativeA11yScroll(int back, int page);
     private static native int nativeA11yCanScroll(int back);
+    private static native int nativeA11yActions(int index);
+    private static native String nativeA11yActionLabel(int action);
+    private static native int nativeA11yPerform(int index, int action);
+    /** 따로 동작의 id 바닥. **플랫폼 상수와 안 겹치는 자리**여야 한다 —
+     *  겹치면 TalkBack 이 우리 동작을 제 것으로 알고 엉뚱하게 부른다. */
+    private static final int A11Y_ACTION_BASE = 0x6D617200;
 
     /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
      *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
@@ -187,6 +193,17 @@ public class MaruActivity extends android.app.NativeActivity {
                         && role != MARU_MOBILE_A11Y_ROLE_GROUP;
                 node.setClickable(actionable);
                 if (actionable) node.addAction(AccessibilityNodeInfo.ACTION_CLICK);
+                // **선택은 «따로 동작» 으로 낸다**(M9c). TalkBack 은 길게 누르기를 가로채므로
+                // 그 손짓으로는 선택을 못 만든다 — 동작 메뉴에 올려 두면 따로 배울 것이 없다.
+                // **이름도 할 수 있는지도 코어가 답한다**(iOS 와 같은 말이 읽혀야 한다).
+                int acts = nativeA11yActions(virtualViewId);
+                for (int bit = 1; bit <= 2; bit <<= 1) {
+                    if ((acts & bit) == 0) continue;
+                    String name = nativeA11yActionLabel(bit);
+                    if (name == null || name.isEmpty()) continue;
+                    node.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                            A11Y_ACTION_BASE + bit, name));
+                }
                 node.addAction(view.a11yFocus == virtualViewId
                         ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                         : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
@@ -235,6 +252,11 @@ public class MaruActivity extends android.app.NativeActivity {
                             if (!view.a11yFocusLabel.equals(nativeA11yNode(virtualViewId, now))) return false;
                         }
                         return nativeA11yClick(virtualViewId);
+                    case A11Y_ACTION_BASE + 1:
+                    case A11Y_ACTION_BASE + 2:
+                        // **「했나」를 그대로 돌려준다** — 안 했는데 참을 주면 TalkBack 이 됐다고
+                        // 말하고 사용자는 왜 아무 일도 안 났는지 모른다.
+                        return nativeA11yPerform(virtualViewId, action - A11Y_ACTION_BASE) != 0;
                     case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:
                         view.a11yFocus = virtualViewId;
                         {

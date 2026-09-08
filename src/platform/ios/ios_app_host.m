@@ -500,12 +500,46 @@ static NSString *maruA11yValue(unsigned int index) {
         e.accessibilityValue = maruA11yValue(i);
         e.accessibilityFrameInContainerSpace = CGRectMake(x + safe.left, y + safe.top, w, h);
         e.accessibilityTraits = maruA11yTraits(maru_mobile_a11y_role(i), maru_mobile_a11y_state(i));
+        e.accessibilityCustomActions = maruA11yActions(i, self);
         [out addObject:e];
     }
     // **순서는 브리지가 정한다.** 서술자는 이미 보는 순서(위에서 아래로, 그다음 왼쪽에서
     // 오른쪽으로)로 나온다 — 여기서 다시 세우면 Android 어댑터와 조용히 갈리고, 그 갈림은
     // 스크린 리더에게만 보인다. 좌우가 뒤집히는 언어를 아는 자리도 문구가 있는 그 층이다.
     return out;
+}
+
+/// **그 줄에서 할 수 있는 따로 동작**(M9c — 선택). VoiceOver 는 이것을 로터로 보여 주므로 따로
+/// 배울 손짓이 없다 — 길게 누르고 끄는 손짓은 VoiceOver 가 가로채서 못 쓴다.
+///
+/// **이름도 할 수 있는지도 코어가 답한다** — 여기서 문구를 적으면 Android 와 다른 말이 읽힌다.
+static NSArray<UIAccessibilityCustomAction *> *maruA11yActions(unsigned int index, ChromeView *view) {
+    unsigned int bits = maru_mobile_a11y_actions(index);
+    if (bits == 0) return nil;
+    NSMutableArray *acts = [NSMutableArray array];
+    const unsigned int all[] = {MARU_MOBILE_A11Y_ACTION_SELECT_FROM, MARU_MOBILE_A11Y_ACTION_SELECT_TO};
+    for (unsigned k = 0; k < sizeof all / sizeof all[0]; k++) {
+        if ((bits & all[k]) == 0) continue;
+        // **비트를 값으로 옮겨 담는다** — 블록은 배열 원소를 그대로 못 캡처한다(컴파일 오류).
+        const unsigned int bit = all[k];
+        char buf[128];
+        unsigned long got = maru_mobile_a11y_action_label(bit, buf, sizeof buf);
+        if (got == 0) continue;
+        NSString *name = [[NSString alloc] initWithBytes:buf length:got encoding:NSUTF8StringEncoding];
+        if (name.length == 0) continue;
+        UIAccessibilityCustomAction *a = [[UIAccessibilityCustomAction alloc]
+            initWithName:name
+           actionHandler:^BOOL(UIAccessibilityCustomAction *action) {
+               (void)action;
+               // **한 자리에서 판단한다** — 여기서는 「했나」를 그대로 돌려준다. 안 했는데 YES 를
+               // 주면 VoiceOver 가 됐다고 말하고 사용자는 왜 아무 일도 안 났는지 모른다.
+               BOOL ok = maru_mobile_a11y_perform(index, bit) != 0;
+               if (ok) [view setNeedsDisplay];
+               return ok;
+           }];
+        [acts addObject:a];
+    }
+    return acts.count > 0 ? acts : nil;
 }
 
 /// 서술자 묶음이 바뀌면 다시 만들고, **생김새가 바뀌었을 때만** 스크린 리더에게 알린다.

@@ -347,6 +347,29 @@ enum {
 };
 unsigned int maru_mobile_a11y_state(unsigned int index);
 
+/* **그 줄에서 할 수 있는 «따로 동작»**(M9c — 선택). 비트를 or 로 돌려준다. 0 이면 없다.
+
+   낭독기를 켜면 길게 누르고 끄는 손짓을 낭독기가 가로채므로 **선택을 아예 못 만든다** — 복사
+   버튼은 보이는데 누를 것이 영영 안 생긴다. 그래서 선택을 **줄 단위 동작**으로 낸다: 낭독기가
+   이것을 제 목록(iOS 로터·Android 동작 메뉴)으로 보여 주므로 따로 배울 손짓이 없다.
+
+   **칸이 아니라 줄이다** — 낭독기로는 칸을 짚을 수 없다(손가락 자리가 없다). */
+enum {
+    MARU_MOBILE_A11Y_ACTION_SELECT_FROM = 1u << 0, /* 이 줄 첫 칸에 선택 시작을 놓는다 */
+    MARU_MOBILE_A11Y_ACTION_SELECT_TO = 1u << 1,   /* 이 줄 끝 칸까지 늘린다 */
+};
+unsigned int maru_mobile_a11y_actions(unsigned int index);
+
+/* 그 동작의 **이름**. 비트 하나를 넘긴다(위 enum). 채운 바이트 수를 돌려주고, 자리가 모자라거나
+   모르는 비트면 0 이고 아무것도 안 쓴다. **말은 코어가 든다** — host 마다 다르게 적으면 같은
+   동작이 두 플랫폼에서 다른 이름으로 읽힌다. */
+unsigned long maru_mobile_a11y_action_label(unsigned int action, char *out, unsigned long cap);
+
+/* 그 동작을 **한다**. 1 이면 했다(낭독기가 그 값으로 「됐다」를 말한다). 없는 index·모르는 비트·
+   할 수 없는 때(예: 시작 없이 「여기까지」)는 0 이다 — 안 했는데 1 을 답하면 낭독기가 됐다고
+   말하고 사용자는 왜 아무 일도 안 났는지 모른다. */
+unsigned int maru_mobile_a11y_perform(unsigned int index, unsigned int action);
+
 /* **스크린 리더가 누를 때 쓰는 손가락 id.** 진짜 손가락은 플랫폼이 주는 번호(0 부터)를 쓰므로,
    같은 값을 쓰면 손가락이 내려와 있는 동안 스크린 리더가 활성화했을 때 **그 손가락의 자리를
    덮어쓴다** — 화면이 튀거나 끌던 것이 끊긴다. 겹치지 않는 값을 **헤더가 단일 출처로** 든다

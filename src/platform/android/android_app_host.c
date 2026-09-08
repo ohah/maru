@@ -1355,6 +1355,46 @@ Java_dev_maru_MaruActivity_nativeSystemAppearance(JNIEnv *env, jclass cls, jint 
     maru_mobile_set_system_appearance(is_dark != 0 ? 1u : 0u);
 }
 
+/// 그 줄에서 할 수 있는 따로 동작(M9c). 비트 or.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yActions(JNIEnv *env, jclass cls, jint index) {
+    (void)env;
+    (void)cls;
+    if (index < 0) return 0;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int bits = maru_mobile_a11y_actions((unsigned int)index);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)bits;
+}
+
+/// 그 동작의 이름(M9c). **말은 코어가 든다** — host 마다 적으면 두 플랫폼이 다른 이름을 읽는다.
+JNIEXPORT jstring JNICALL
+Java_dev_maru_MaruActivity_nativeA11yActionLabel(JNIEnv *env, jclass cls, jint action) {
+    (void)cls;
+    char buf[128];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned long got = maru_mobile_a11y_action_label((unsigned int)action, buf, sizeof buf);
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (got == 0) return NULL;
+    // **modified UTF-8 함정을 피한다** — 서술자 이름과 같은 길이다.
+    jchar u16[128];
+    jsize units = utf8ToUtf16(buf, got, u16, (jsize)(sizeof u16 / sizeof u16[0]));
+    if (units <= 0) return NULL;
+    return (*env)->NewString(env, u16, units);
+}
+
+/// 그 동작을 한다(M9c). 1 이면 했다.
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeA11yPerform(JNIEnv *env, jclass cls, jint index, jint action) {
+    (void)env;
+    (void)cls;
+    if (index < 0 || action < 0) return 0;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int ok = maru_mobile_a11y_perform((unsigned int)index, (unsigned int)action);
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)ok;
+}
+
 /// 낭독기 초점이 그 서술자에 닿았다(M9b). **판단은 코어가 한다** — 여기서는 자리만 넘긴다.
 JNIEXPORT void JNICALL
 Java_dev_maru_MaruActivity_nativeA11yFocus(JNIEnv *env, jclass cls, jint index) {

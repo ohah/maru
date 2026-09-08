@@ -8160,6 +8160,119 @@ fn m9bEdgeIndices() struct { top: u32, bottom: u32 } {
     return .{ .top = top, .bottom = bottom };
 }
 
+/// 본문 줄 서술자 index 를 화면 행 번호(1부터)로 찾는다.
+fn m9cRowIndex(screen_row_1based: u32) ?u32 {
+    var buf: [8]u8 = undefined;
+    const want = std.fmt.bufPrint(&buf, "{d}", .{screen_row_1based}) catch return null;
+    for (bridge.a11yNodesForTest(), 0..) |n, i| {
+        if (n.sem.role != .text or n.sem.position_in_set == 0) continue;
+        if (std.mem.eql(u8, n.sem.label, want)) return @intCast(i);
+    }
+    return null;
+}
+
+test "M9c 선택: 줄 단위 동작으로 «만들 수 있다»" {
+    // 낭독기를 켜면 길게 누르고 끄는 손짓을 낭독기가 가로채므로, 이 길이 없으면 **선택을 아예
+    // 못 만든다** — 복사 버튼은 보이는데 누를 것이 영영 안 생긴다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+        bridge.resetA11ySelectForTest();
+    }
+    const A_FROM: u32 = 1 << 0;
+    const A_TO: u32 = 1 << 1;
+
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection()); // 전제: 없다
+    const r2 = m9cRowIndex(2) orelse return error.TestUnexpectedResult;
+    const r5 = m9cRowIndex(5) orelse return error.TestUnexpectedResult;
+
+    // **시작이 없으면 「여기까지」는 아예 안 낸다** — 할 수 없는 것을 목록에 두지 않는다.
+    try T.expectEqual(A_FROM, bridge.maru_mobile_a11y_actions(r2));
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_perform(r5, A_TO));
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+
+    // 「여기서부터」 → 그 다음부터 「여기까지」가 목록에 뜬다.
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_perform(r2, A_FROM));
+    try T.expectEqual(A_FROM | A_TO, bridge.maru_mobile_a11y_actions(r5));
+
+    // 「여기까지」 → 선택이 선다.
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_perform(r5, A_TO));
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // **어느 줄인지까지 본다.** 줄 수만 세면 한 칸 밀린 선택도 같은 수라 통과한다 — 이름(1부터)을
+    // 화면 행(0부터)으로 되짚는 그 자리가 실제로 맞는지가 여기서 갈린다(변이 검사에서 잡았다).
+    const span = bridge.maru_mobile_selection_span();
+    try T.expectEqual(@as(u64, 1), (span >> 48) & 0xFFFF); // 화면 2번째 줄 = 0부터 세어 1
+    try T.expectEqual(@as(u64, 4), (span >> 16) & 0xFFFF); // 화면 5번째 줄 = 4
+    // **줄 «전체» 를 담는다** — 첫 칸에서 시작해 마지막 칸까지다. 줄 수만 세면 가운데만 잡은
+    // 선택도 같은 수라 통과한다(변이 검사에서 잡았다).
+    try T.expectEqual(@as(u64, 0), (span >> 32) & 0xFFFF);
+    try T.expectEqual(@as(u64, @intCast(bridge.maru_mobile_term_cols() - 1)), span & 0xFFFF);
+
+    // 2 부터 5 까지 = 네 줄이다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    var found: ?[]const u8 = null;
+    for (bridge.a11yNodesForTest()) |n| {
+        if (n.sem.role == .button and std.mem.eql(u8, n.sem.label, maru.i18n.tIn(.ko, .mob_copy)))
+            found = n.sem.value;
+    }
+    const value = found orelse return error.TestUnexpectedResult; // 전제: 복사 버튼이 떴다
+    try T.expect(std.mem.startsWith(u8, value, "4 "));
+    try T.expect(std.mem.indexOf(u8, value, maru.i18n.tIn(.ko, .mob_a11y_selected_lines)) != null);
+
+    // **다시 「여기서부터」를 하면 옛 선택을 버리고 새로 시작한다.** 안 버리면 두 선택이 이어져
+    // 사용자가 고르지 않은 줄까지 복사된다.
+    const r8 = m9cRowIndex(8) orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_perform(r8, A_FROM));
+    const r9 = m9cRowIndex(9) orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u32, 1), bridge.maru_mobile_a11y_perform(r9, A_TO));
+    const span2 = bridge.maru_mobile_selection_span();
+    try T.expectEqual(@as(u64, 7), (span2 >> 48) & 0xFFFF); // 2 가 아니라 8 에서 시작한다
+    try T.expectEqual(@as(u64, 8), (span2 >> 16) & 0xFFFF);
+}
+
+test "M9c 선택: 본문 줄이 아니면 «동작이 없다»" {
+    // 버튼·목록에 선택 동작이 붙으면 낭독기가 그것을 읽어 주고, 눌러 봐야 아무 일도 안 난다.
+    const T = std.testing;
+    m9bTerminalWithScrollback();
+    defer {
+        bridge.maru_mobile_scroll_to_bottom();
+        bridge.resetAnnounceForTest();
+        bridge.resetA11ySelectForTest();
+    }
+    var button: ?u32 = null;
+    for (bridge.a11yNodesForTest(), 0..) |n, i| if (n.sem.role == .button) {
+        button = @intCast(i);
+        break;
+    };
+    const b = button orelse return error.TestUnexpectedResult; // 전제: 버튼이 있다
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_actions(b));
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_perform(b, 1 << 0));
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+
+    // 없는 index·모르는 비트도 아무 일 없다.
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_actions(9999));
+    const r1 = m9cRowIndex(1) orelse return error.TestUnexpectedResult;
+    try T.expectEqual(@as(u32, 0), bridge.maru_mobile_a11y_perform(r1, 1 << 7));
+}
+
+test "M9c 선택: 동작 이름은 «코어» 가 든다" {
+    // host 마다 다르게 적으면 같은 동작이 두 플랫폼에서 다른 이름으로 읽힌다.
+    const T = std.testing;
+    var buf: [64]u8 = undefined;
+    const n1 = bridge.maru_mobile_a11y_action_label(1 << 0, &buf, buf.len);
+    try T.expectEqualStrings(maru.i18n.tIn(.ko, .mob_a11y_select_from), buf[0..n1]);
+    const n2 = bridge.maru_mobile_a11y_action_label(1 << 1, &buf, buf.len);
+    try T.expectEqualStrings(maru.i18n.tIn(.ko, .mob_a11y_select_to), buf[0..n2]);
+
+    // 모르는 비트·모자란 자리는 **0 이고 아무것도 안 쓴다** — 반쪽 이름을 읽어 주지 않는다.
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_action_label(1 << 5, &buf, buf.len));
+    var tiny: [2]u8 = undefined;
+    try T.expectEqual(@as(usize, 0), bridge.maru_mobile_a11y_action_label(1 << 0, &tiny, tiny.len));
+}
+
 test "M9b 스크롤백: 낭독기가 «한 줄» 과 «한 화면» 으로 민다" {
     // 낭독기를 켜면 손가락 밀기를 낭독기가 가로채므로, 이 길이 없으면 스크롤백에 **아예 못 닿는다**.
     const T = std.testing;

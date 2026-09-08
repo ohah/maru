@@ -301,6 +301,46 @@ test "정책 경계: 스크롤백 훑기도 host 가 «나르기만» 한다 (M9
     try expectPresentInBody(java, "public boolean performAction(", "nativeA11yFocus(nativeA11yCount())");
 }
 
+test "정책 경계: 선택 동작도 host 가 «나르기만» 한다 (M9c)" {
+    // **말도 판단도 코어가 든다.** host 가 문구를 적으면 같은 동작이 두 플랫폼에서 다른 이름으로
+    // 읽히고, 할 수 있는지를 host 가 정하면 한쪽만 눌러도 아무 일이 안 난다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+    const header = try readSource(allocator, "src/platform/mobile/mobile_host_abi.h");
+    defer allocator.free(header);
+    const bridge = try readSource(allocator, "src/platform/mobile/mobile_bridge.zig");
+    defer allocator.free(bridge);
+
+    // 두 host 가 셋을 다 쓴다 — 하나라도 빠지면 그 플랫폼에서 선택을 못 만든다.
+    for ([_][]const u8{ ios, android }) |host| {
+        try std.testing.expect(count(host, "maru_mobile_a11y_actions(") > 0);
+        try std.testing.expect(count(host, "maru_mobile_a11y_action_label(") > 0);
+        try std.testing.expect(count(host, "maru_mobile_a11y_perform(") > 0);
+    }
+
+    // **문구가 host 에 없다.** 있으면 두 플랫폼이 다른 말을 읽는다.
+    for ([_][]const u8{ ios, java, android }) |host| {
+        try std.testing.expectEqual(@as(usize, 0), count(host, "여기서부터"));
+        try std.testing.expectEqual(@as(usize, 0), count(host, "여기까지"));
+        try std.testing.expectEqual(@as(usize, 0), count(host, "select from here"));
+    }
+
+    // **「했나」를 그대로 돌려준다** — 삼키고 참을 답하면 낭독기가 됐다고 말한다.
+    try expectPresentInBody(java, "public boolean performAction(", "nativeA11yPerform(");
+    try std.testing.expectEqual(@as(usize, 0), count(java, "nativeA11yPerform(virtualViewId, action - A11Y_ACTION_BASE);"));
+
+    // **동작 번호의 단일 출처는 헤더다**(역할·상태 비트와 같은 규율).
+    try std.testing.expectEqual(@as(usize, 1), count(header, "MARU_MOBILE_A11Y_ACTION_SELECT_FROM = 1u << 0"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "MARU_MOBILE_A11Y_ACTION_SELECT_TO = 1u << 1"));
+    try std.testing.expectEqual(@as(usize, 1), count(bridge, "const a11y_action_select_from: u32 = 1 << 0;"));
+    try std.testing.expectEqual(@as(usize, 1), count(bridge, "const a11y_action_select_to: u32 = 1 << 1;"));
+}
+
 /// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.
 ///
 /// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입

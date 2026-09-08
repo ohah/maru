@@ -1804,11 +1804,53 @@ pub fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) 
             // .git/HEAD가 있으니 이미 repo 안 — 파싱 결과가 null이어도 더 올라가지 않는다.
             return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
         } else |_| {}
+        // ⚠️ **워크트리에서는 `.git` 이 디렉터리가 아니라 파일이다**(`gitdir: <경로>` 한 줄). 위 읽기가
+        // 실패하는 것이 그 때문인데, 예전에는 그대로 **부모로 올라갔다** — 그리고 워크트리를 저장소
+        // 안에 두면(`.claude/worktrees/…` 가 그 모양이다) 부모의 `.git/HEAD` 에 닿아 **성공**한다.
+        // 즉 결과가 「없음」이 아니라 **남의 브랜치**였다(격리 재현 2026-09-08: 폴더는 `feature2` 인데
+        // 화면은 `main`). 감시 축은 이미 이 파일을 풀어 보고 있었고(`gitWatchTarget`), 브랜치 축만
+        // 그 규율 밖에 있었다.
+        if (readGitDirHead(io, allocator, dir, &buf)) |b| return b;
+        // **`.git` 이 있으면 여기서 멈춘다.** 그것이 곧 「이 폴더가 저장소 루트다」이고, 못 읽었다면
+        // 이 저장소의 답이 **없는** 것이다. 더 올라가면 부모 저장소의 브랜치를 말하게 된다 — 「모른다」와
+        // 「남의 값」은 다르고, 뒤엣것이 훨씬 나쁘다(§9.4 가 원격 축에서 막아 둔 그 함정과 같은 결).
+        if (dotGitExists(io, dir)) return null;
         const parent = std.fs.path.dirname(dir) orelse return null;
         if (parent.len >= dir.len) return null; // 진전 없음(루트 도달)
         dir = parent;
     }
     return null;
+}
+
+/// 워크트리의 `.git` **파일**을 풀어 그 git 디렉터리의 `HEAD` 를 읽는다. 아니면 null.
+///
+/// **경로 해석은 `repo_path.gitDirFromDotGitFile` 하나가 소유한다** — 감시 축이 쓰는 그 함수다.
+/// 두 벌로 두면 「감시는 워크트리를 아는데 브랜치는 모른다」 같은 어긋남이 다시 생긴다.
+fn readGitDirHead(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    buf: []u8,
+) ?[]const u8 {
+    var dot_git_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dot_git = std.fmt.bufPrint(&dot_git_buf, "{s}/.git", .{dir}) catch return null;
+    // 디렉터리면 읽기가 실패한다 — 그게 일반 저장소이고, 그때는 이 갈래가 아니다.
+    const content = std.Io.Dir.cwd().readFileAlloc(io, dot_git, allocator, .limited(4096)) catch return null;
+    defer allocator.free(content);
+    var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_dir = maru.session.repo_path.gitDirFromDotGitFile(content, dir, &git_dir_buf) orelse return null;
+    const head_path = std.fmt.bufPrint(buf, "{s}/HEAD", .{git_dir}) catch return null;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, head_path, allocator, .limited(4096)) catch return null;
+    defer allocator.free(data);
+    return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
+}
+
+/// 이 폴더에 `.git` 이 **있는가**(디렉터리든 파일이든). 있으면 저장소 루트라 walk-up 을 멈춘다.
+fn dotGitExists(io: std.Io, dir: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dot_git = std.fmt.bufPrint(&buf, "{s}/.git", .{dir}) catch return false;
+    _ = std.Io.Dir.cwd().statFile(io, dot_git, .{ .follow_symlinks = false }) catch return false;
+    return true;
 }
 
 // --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---

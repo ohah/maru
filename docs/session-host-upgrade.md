@@ -4770,6 +4770,38 @@ parent FD delta와 arm별 checkpoint residue를 canonical v2 JSON으로 분리 �
 append-only checkpoint 비용을 포함하지만 GitHub API network latency를 대표하지 않는다. 이 slice는 fresh-process command→checkpoint bridge까지만 닫으며 composite
 action의 profile별 fixed pathname, authored attestation fan-out, release workflow caller와 protected B tag signed 실측은 후속 gate다.
 
+### 11.98 live action의 제품 profile 선택과 fixed stage-3 pathname
+
+top-level release job과 repository-local composite action은 `MARU_SESSION_HOST_RELEASE_PROFILE_V1` JSON을 parse하거나
+`profile=baseline_a | upgrade_b` scalar를 `GITHUB_OUTPUT`, action input 또는 shell exit code로 다시 표현하지 않는다. 대신 기존
+`maru-session-host-release-workflow-command` executable의 별도 `run-profiled-stage3` 진입점이 current protected `Context`와 canonical
+profile environment를 함께 읽고, baseline-A의 exact `prepare-candidate` 또는 upgrade-B의 exact
+`prepare-profile-candidate` argv를 고른다. 기존 `run` 진입점과 두 validator command identity, 여덟 checkpoint stage vocabulary는
+변하지 않는다.
+
+composite action의 setup은 checkout·runner input과 무관한 fixed live root 아래에 두 profile이 필요로 하는 pathname의 닫힌 superset을
+항상 유도한다. 공통 candidate/DMG/frozen/manifest/source/Zig/durable-preparation pathname에 더해 baseline workspace와 두 app executable,
+upgrade-B predecessor workspace, upgrade workspace와 timing artifact output을 서로 same/ancestor/descendant가 아니게 둔다. shell은
+profile에 따라 basename이나 directory를 바꾸지 않고, profile document를 input/output으로 복사하지 않으며, 모든 pathname을
+`run-profiled-stage3`에 exact once 전달한다. dispatcher는 첫 filesystem·network·child callback 전에 superset의 option exact-once,
+canonical absolute path, manifest basename과 전체 path graph disjoint를 검증한다.
+
+dispatcher의 final-address `Execution`은 profile owner를 environment에서 bind하고 같은 environment를 재관측한 뒤에만 선택한다.
+`baseline_a`면 baseline 전용 세 option만 포함한 기존 39-argument `prepare-candidate` argv를 만들고 profile document를 validator child에
+전달하지 않는다. `upgrade_b`면 upgrade 전용 세 option만 포함한 기존 39-argument `prepare-profile-candidate` argv를 만들고 canonical
+profile document를 credential-bearing validator child 하나에만 전달한다. 선택하지 않은 profile의 pathname은 validator argv와 child
+environment에 들어가지 않는다. 두 arm 모두 caller가 준 공통 값을 재조립하지 않고 bounded fixed storage에 복사한 뒤 기존
+`live_workflow_owner.commandProcess`를 exact once 호출한다. profile 누락·비정규·두 번째 관측 drift, copied/pre-owned/aliased execution,
+unknown/duplicate/missing option, path graph drift는 checkpoint advance와 child 실행 0으로 fail-close한다.
+
+focused Debug·ReleaseFast gate는 두 canonical profile의 exact command/argv/environment projection, baseline의 ambient profile child 전달 0,
+upgrade-B의 exact profile 전달 1, 선택하지 않은 pathname 누출 0, 모든 option/path/profile drift와 callback-before-preflight 0을 검증한다.
+actual-process harness는 synthetic validator와 격리 checkpoint root로 두 arm이 같은 `draft_authoring` checkpoint를 exact once 전진시키고
+실패·PID collision·FD delta·checkpoint residue가 profile별로 상쇄되지 않음을 검증한다. live workflow source gate는 top-level이 raw
+variable을 action environment 한 곳에만 투영하고 action이 `run-profiled-stage3`를 한 번 호출하며 shell profile parse, `GITHUB_ENV`,
+profile scalar output과 기존 baseline-only stage-3 호출이 0임을 고정한다. 이 slice는 authored evidence/timing attestation fan-out,
+aggregate/publication의 profile-aware evidence 선택과 protected B 시험 tag actual signed 실측을 완료하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -2584,6 +2584,55 @@ test "파일 번호: 퇴출이 배열을 당겨도 어긋나지 않는다 — �
     try testing.expectEqual(@as(usize, 0), prev_wrong);
 }
 
+test "접기: 접힌 그림의 파일 번호는 이미 찍힌 값이다 (AV5 적대적 2회차)" {
+    // ⚠️ **두 슬라이스가 순서로 묶여 있다.** 파일 번호는 `admit` 이 찍고(#3380), 접기는
+    // `linkResult` 가 그 값을 **복사**한다(AV5). `feed` 안에서 `admit` 이 먼저 돌기 때문에
+    // 맞는 값이 복사되는데, 그 순서가 뒤집히면 **`image_file` 이 0 으로 남아** 다중 파일 체인에서
+    // 디코드가 **첫 파일**의 엉뚱한 바이트를 읽는다 — 증상은 「그림이 안 열린다」거나 더 나쁘게
+    // 「남의 그림이 뜬다」이고, 원인은 화면에 안 보인다.
+    //
+    // 그 결합을 여기서 못박는다. 두 파일을 서로 다른 번호로 훑어 **0 이 아닌 값**이 복사되는지 본다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_P1","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_P1","type":"tool_result","content":[{"type":"image","source":{"type":"base64","data":"AAAABBBB","media_type":"image/png"}}]}]}}
+        \\
+    ;
+
+    // 파일 0 — 아무것도 안 담는다(자리만 만든다). 실제 백엔드도 파일마다 스캐너를 새로 세운다.
+    {
+        var s0: StreamScanner = .{ .file_index = 0 };
+        defer s0.deinit(allocator);
+        try s0.feed(allocator,
+            \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_Z","name":"Bash","input":{"description":"x"}}]}}
+        ++ "\n", &out);
+    }
+    // 파일 **2** — 0 도 1 도 아닌 값이라 「안 찍혔다」와 「1 로 굳었다」를 둘 다 가른다.
+    var s2: StreamScanner = .{ .file_index = 2 };
+    defer s2.deinit(allocator);
+    try s2.feed(allocator, doc, &out);
+
+    var call: ?Hit = null;
+    var image: ?Hit = null;
+    for (out.items) |h| {
+        if (h.kind.isImage()) image = h else if (h.result.image) call = h;
+    }
+    try testing.expect(call != null);
+    try testing.expect(image != null);
+
+    // ① 그림 자신이 파일 2 다(#3380 의 스탬프).
+    try testing.expectEqual(@as(u8, 2), image.?.file_index);
+    // ② **그리고 호출이 든 값도 파일 2 다**(AV5 의 복사). 여기가 0 이면 디코드가 첫 파일을 읽는다.
+    try testing.expectEqual(@as(u8, 2), call.?.result.image_file);
+    // ③ 자리도 그림의 것이지 명령문의 것이 아니다.
+    try testing.expectEqual(image.?.data_offset, call.?.result.image_offset);
+    try testing.expectEqual(image.?.data_len, call.?.result.image_len);
+    try testing.expect(call.?.result.image_offset != call.?.data_offset);
+}
+
 test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {
     // **위 판정자만으로는 부족했다.** 뮤테이션으로 마커에서 닫는 따옴표를 빼도 그 판정자가 통과했다 —
     // 실제로 막고 있던 것은 마커가 아니라 「결과 레코드에 `name` 이 없다」는 성질이었기 때문이다

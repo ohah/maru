@@ -3912,3 +3912,44 @@ test "DHS5: 한 프레임도 안 그렸으면 가로를 안 건드리고, 반대
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
     try testing.expect(fx.session.metal_dirty);
 }
+
+test "DHS6: `max_first_col` 을 넘는 줄에서는 그 상한에서 멈춘다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **10,000열을 넘겨야 한다.** 그보다 짧으면 `max_first_col` 이 상한에 안 걸려, 그것을 뺀
+    //    변이와 답이 같다(2회차 H10·H19). 그 상한은 열↔byte 인덱스가 없어서 있는 것이다(§4.1c).
+    const limit: usize = maru.chrome.components.editor_view.frame.max_first_col;
+    const len = limit + 600;
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "keep\n");
+    try long.appendNTimes(allocator, 'x', len);
+    try long.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', len);
+    try mod.append(allocator, '\n');
+    var entry = testEntry(long.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len == len) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+    const visible = fx.term.rt.editor_diff_hit_geom.content_width;
+    try testing.expect(visible > 0);
+    // 픽스처 자기 검증 — 내용 상한이 `max_first_col` 보다 크다(안 그러면 이 판정자가 공허하다).
+    try testing.expect(fx.term.rt.editor_max_cols_right -| visible > limit);
+
+    fx.term.rt.editor_first_col_right = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
+
+    // **`max_first_col` 에서 멈춘다** — 그것을 빼면 더 간다(그리고 u16 을 넘겨 캐스트가 죽는다).
+    try testing.expectEqual(@as(u16, @intCast(limit)), fx.term.rt.editor_first_col_right);
+}

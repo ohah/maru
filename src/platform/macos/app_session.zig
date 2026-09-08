@@ -11887,6 +11887,12 @@ pub const AppSession = struct {
                     if (motion) |how| {
                         if (editor_ops.diffMove(self, active, how, m.shift)) return input_ops.keyConsumedByApp(self);
                     }
+                    // **열 넘기기**(`⌃⇧Tab` — JetBrains macOS keymap 과 같다). 이 갈래가 편집 갈래보다
+                    // **앞이라** 여기서 잡힌다 — 그쪽 `.tab` 은 수식자를 안 보므로 안 잡으면 탭 문자가
+                    // 들어가려다 비교의 거절에 걸려 죽은 키가 된다.
+                    if (key_event.key == .tab and m.control and m.shift and !m.command and !m.option) {
+                        if (editor_ops.diffSwitchSide(self, active)) return input_ops.keyConsumedByApp(self);
+                    }
                 }
                 if (ed == .editor and !is_diff) {
                     // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,

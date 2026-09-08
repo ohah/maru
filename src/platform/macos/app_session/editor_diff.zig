@@ -3111,3 +3111,219 @@ test "DCARET24: caret 은 **caret 이 선 열**에 그려진다 — 검색 열�
     try testing.expectEqual(@as(usize, 1), mirrored.len);
     try testing.expectEqual(right_caret[0].x, mirrored[0].x);
 }
+
+// ── DCOL: 비교 뷰 열 넘기기(`⌃⇧Tab`) ─────────────────────────────────────────
+//
+// 계약은 [키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로
+// 넘긴다」가 소유한다. **판정자 둘이 제품 입구를 지난다** — `handleKeyEvent` 와 렌더.
+
+/// `⌃⇧Tab` 한 번.
+fn pressSwitch(fx: *Fixture) !void {
+    _ = try fx.session.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .control = true, .shift = true } });
+}
+
+test "DCOL1: ⌃⇧Tab 이 열을 넘기고 행은 그대로다 (handleKeyEvent)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+    const row = fx.term.rt.editor_diff_selection.?.sel.focus.row;
+
+    // ⑴ 오른쪽 → 왼쪽. **행은 그대로다** — 좌우가 짝을 맞춰 정렬돼 있어 같은 첨자가 같은 높이다.
+    try pressSwitch(&fx);
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expectEqual(row, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑵ 한 번 더 누르면 돌아온다 — 토글이다.
+    try pressSwitch(&fx);
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expectEqual(row, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+
+    // ⑶ **대조군** — `⇧Tab` 만으로는 안 넘어간다(그것은 단일 편집기의 내어쓰기다).
+    _ = try fx.session.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .shift = true } });
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+    // `⌃Tab` 도 아니다 — macOS 에서 그것은 Switcher 자리다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .tab, .modifiers = .{ .control = true } });
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+}
+
+test "DCOL2: 넘어갈 때 **표시 열**을 유지한다 — 탭과 CJK (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 같은 행의 좌우가 **다른 폭 문자**로 시작한다 — byte 를 그대로 옮기면 보이는 자리가 튄다.
+    var entry = testEntry("keep\n\tAB\n", "keep\n가나다\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "가나다") orelse return error.NoRow;
+    try testing.expectEqualStrings("\tAB", st.left_texts[i]); // 픽스처 자기 검증
+    try testing.expectEqual(@as(u16, 4), fx.term.rt.editor_tab_width);
+
+    // 오른쪽 "가나다" 의 byte 6 = '다' 앞 = **4열**(가·나가 각 2열).
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 6 }) };
+    try pressSwitch(&fx);
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    // 왼쪽 "\tAB" 에서 4열은 탭(0~3열) 바로 뒤 = **byte 1**. byte 를 그대로 옮겼다면 3(=len)이다.
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // 되돌아오면 다시 4열 — 왼쪽 byte 1 은 4열이고, 오른쪽에서 4열은 byte 6 이다.
+    try pressSwitch(&fx);
+    try testing.expectEqual(@as(usize, 6), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCOL3: 넘어가면 선택이 접힌다 — 좌우를 걸치지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\nbeta\n", "keep\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const rows = fx.term.rt.editor_diff.?.right_texts;
+    const i = rowIndexOf(rows, "BETA") orelse return error.NoRow;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 0 }) };
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } });
+    try testing.expect(!fx.term.rt.editor_diff_selection.?.sel.isEmpty()); // 픽스처 자기 검증
+
+    try pressSwitch(&fx);
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expect(fx.term.rt.editor_diff_selection.?.sel.isEmpty());
+    // 띠도 사라진다 — 한 열에만 있던 선택이 통째로 접혔다.
+    try testing.expectEqual(@as(?[]const []const maru.chrome.components.editor_view.frame.Mark, null), editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .right));
+    try testing.expectEqual(@as(?[]const []const maru.chrome.components.editor_view.frame.Mark, null), editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .left));
+}
+
+test "DCOL4: 짝맞춤 빈 행으로도 넘어간다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 오른쪽에만 있는 줄 — 왼쪽 그 자리는 짝맞춤 빈 행이다.
+    var entry = testEntry("keep\ntail\n", "keep\nadded\ntail\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const i = rowIndexOf(st.right_texts, "added") orelse return error.NoRow;
+    try testing.expectEqual(@as(usize, 0), st.left_texts[i].len); // 그 자리가 빈 행이다
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = i, .byte = 3 }) };
+    try pressSwitch(&fx);
+    // **거절하지 않는다** — 그 빈 행은 화면에 실제로 그려져 있다.
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expectEqual(i, fx.term.rt.editor_diff_selection.?.sel.focus.row);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+
+    // 되돌아오면 그 행의 열 0 이다 — 빈 행에는 들고 갈 열이 없다.
+    try pressSwitch(&fx);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+}
+
+test "DCOL5: caret 이 없거나 비교가 아니면 안 넘긴다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("keep\nbeta\n", "keep\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    fx.term.rt.editor_diff_selection = null;
+    try testing.expect(!editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expect(fx.term.rt.editor_diff_selection == null);
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }) };
+    const saved_view = fx.term.rt.editor_diff.?.view;
+    fx.term.rt.editor_diff.?.view = .loading;
+    try testing.expect(!editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+    fx.term.rt.editor_diff.?.view = saved_view;
+
+    // **옮기면 다시 그린다** — 안 세우면 caret 이 열을 옮겨도 화면은 그대로다.
+    fx.session.metal_dirty = false;
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expect(fx.session.metal_dirty);
+}
+
+test "DCOL6: 넘어간 열에 caret 이 그려지고 검색도 따라간다 (렌더 배선)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    var entry = testEntry("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    try diffCaretFixture(&fx, &entry, leaf);
+
+    fx.session.blink_visible = true;
+    fx.term.rt.editor_diff_selection = null;
+    try drawOnce(&fx, leaf);
+    const base = try snapshotQuads(allocator, fx.session);
+    defer allocator.free(base);
+
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 1, .byte = 2 }) };
+    try drawOnce(&fx, leaf);
+    const right = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(right);
+    try testing.expectEqual(@as(usize, 1), right.len);
+    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term));
+
+    try pressSwitch(&fx);
+    try drawOnce(&fx, leaf);
+    const left = try extraQuads(allocator, base, fx.session);
+    defer allocator.free(left);
+    try testing.expectEqual(@as(usize, 1), left.len);
+    // **그려진 자리가 왼쪽으로 간다** — 상태만 보면 배선이 죽어도 초록이다.
+    try testing.expect(left[0].x < right[0].x);
+    // **검색 열도 따라간다** — 명시값이 없으면 caret 열을 본다.
+    try testing.expectEqual(editor_ops.DiffSide.left, editor_ops.diffSearchSide(fx.session, fx.term));
+}
+
+test "DCOL7: 왕복은 ASCII 에서 제자리이고, 어디서나 **한 번 뒤에는 멈춘다** (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    // 탭·CJK·빈 행·긴 행을 섞는다 — 열 산술이 갈리는 자리를 한 판정자가 다 지난다.
+    var entry = testEntry("keep\n\tAB\nshort\n\nlonger left line\n", "keep\n가나다\nmuch longer right\nadded\nx\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    const n = @min(st.left_texts.len, st.right_texts.len);
+    try testing.expect(n >= 3);
+
+    // **한 번 왕복한 뒤에는 멈춘다.** 좌우의 셀 폭이 다르면(탭 4열 · CJK 2열) 반대 열에 **그 열이
+    // 없을 수 있고**, 그때 `byteAtPoint` 가 cluster 경계로 스냅한다 — 그래서 첫 왕복은 제자리가 아닐
+    // 수 있다(실측: 오른쪽 `"가나다"` byte 3 = 2열 → 왼쪽 `"\tAB"` 에서 2열은 탭 **안**이라 byte 1(4열)
+    // 로 스냅 → 돌아오면 byte 6). 지켜야 하는 것은 **그 뒤로는 안 흐른다**는 것이다 — 안 그러면 키를
+    // 누를수록 caret 이 계속 밀린다.
+    var checked: usize = 0;
+    for (0..n) |row| {
+        const text = st.right_texts[row];
+        var b: usize = 0;
+        while (true) {
+            fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = row, .byte = b }) };
+            for (0..2) |_| try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+            const after_one = fx.term.rt.editor_diff_selection.?.sel.focus;
+            try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+            try testing.expectEqual(row, after_one.row);
+            for (0..2) |_| try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+            const after_two = fx.term.rt.editor_diff_selection.?.sel.focus;
+            try testing.expectEqual(after_one.row, after_two.row);
+            try testing.expectEqual(after_one.byte, after_two.byte);
+            checked += 1;
+            if (b >= text.len) break;
+            b = editor_ops.nextCharBoundaryForTest(text, b);
+        }
+    }
+    try testing.expect(checked >= 12); // 공허해질 수 없게 센다
+
+    // **셀 폭이 같으면 첫 왕복부터 제자리다.** 위 완화가 "아무 데서나 밀려도 된다"가 아니다.
+    var plain = testEntry("keep\nalpha beta\ntail\n", "keep\nALPHA BETA!\ntail\n");
+    fx.term.file_entry = &plain;
+    invalidate(fx.session, fx.term);
+    poll(fx.session, fx.term);
+    const st2 = fx.term.rt.editor_diff.?;
+    const plain_row = rowIndexOf(st2.right_texts, "ALPHA BETA!") orelse return error.NoRow;
+    for (0..st2.left_texts[plain_row].len + 1) |b2| {
+        fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = plain_row, .byte = b2 }) };
+        for (0..2) |_| try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+        try testing.expectEqual(b2, fx.term.rt.editor_diff_selection.?.sel.focus.byte);
+    }
+}

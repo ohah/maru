@@ -3867,6 +3867,59 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
     return true;
 }
 
+/// 비교 뷰의 **열을 넘긴다** — `⌃⇧Tab`
+/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로 넘긴다」).
+///
+/// **키로 열을 바꿀 길이 이것뿐이다.** `editor_diff_selection` 을 쓰는 자리가 넷인데(마우스 둘·씨앗·
+/// 이동) 이동은 열을 **유지**하고, 검색의 「열 넘기기」는 `find.diff_side` 만 세운다.
+///
+/// **행은 그대로, 표시 열을 유지한다.** 좌우 행 배열은 짝을 맞춰 정렬돼 있어 같은 첨자가 같은 높이다
+/// (§3.5). byte 를 그대로 옮기면 탭·CJK 가 든 행에서 **눈에 보이는 자리가 튄다** — 세로 이동이 쓰는
+/// `goalAt` → `offsetForGoal` **하나**를 그대로 쓴다.
+///
+/// **선택은 접힌다.** *"좌우를 걸치는 선택은 만들지 않는다"* 가 이미 계약이라(그래서 `side` 가 하나다),
+/// 늘린 선택을 들고 넘어가면 그 계약이 깨진다.
+/// 판정자용 — 글자 경계를 밖에서 걷게 한다(왕복 판정이 모든 경계를 지나야 한다).
+pub fn nextCharBoundaryForTest(bytes: []const u8, offset: usize) usize {
+    return editor_motion.nextCharBoundary(bytes, offset);
+}
+
+pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
+    const st = term.rt.editor_diff orelse return false;
+    if (st.view != .compare) return false;
+    const state = term.rt.editor_diff_selection orelse return false;
+
+    const from = state.side;
+    const to: DiffSide = if (from == .right) .left else .right;
+    const src = if (from == .right) st.right_texts else st.left_texts;
+    const dst = if (to == .right) st.right_texts else st.left_texts;
+    if (src.len == 0 or dst.len == 0) return false;
+
+    // **두 배열 길이의 작은 쪽으로 자른다.** 좌우가 같다는 것은 계약이지 타입이 아니라
+    // (`materialize` 가 따로 잡는다), 한쪽 길이로만 자르면 그 불변식이 깨지는 날 범위 밖을 읽는다.
+    const row = @min(state.sel.focus.row, @min(src.len, dst.len) - 1);
+    const byte = @min(state.sel.focus.byte, src[row].len);
+
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    // **`goalAt` 을 쓰지 않는다 — 표시 열을 그대로 잰다.** 그 함수는 줄 끝에 있으면 `.line_end` 를
+    // 주는데(어느 줄에서도 그 줄 끝으로 붙는 **세로 이동**의 성질이다), 열 넘기기에 그것을 적용하면
+    // **왕복이 깨진다**: 짝맞춤 빈 행은 열 0 이 곧 줄 끝이라 넘어갔다 돌아오면 반대 행의 **끝**에
+    // 선다(실측 — `""` → `"added"` 의 byte 5). 여기서 지켜야 하는 것은 "보이던 열"이므로 열을 직접
+    // 재고, 되돌리는 것은 `offsetForGoal` 의 `.col` 갈래 하나를 그대로 쓴다(같은 출처다).
+    const goal: maru.session.editor.selection.Goal = .{ .col = map.columnOf(map.ctx, src[row], byte) };
+    const landed = editor_motion.offsetForGoal(dst[row], rowLine(dst[row]), goal, map);
+
+    // **짝맞춤 빈 행으로도 간다** — 그 행은 화면에 실제로 그려져 있다. 거절하면 «어떤 행에서는 키가
+    // 죽는다»가 되고 그 편이 나쁘다. 빈 행이면 `offsetForGoal` 이 0 을 준다.
+    term.rt.editor_diff_selection = .{
+        .side = to,
+        .sel = maru.session.editor.selection.RowSelection.at(.{ .row = row, .byte = landed }),
+    };
+    self.metal_dirty = true;
+    return true;
+}
+
 /// 한 행을 한 줄로 본 `Line`. 줄바꿈은 **`.none`** 이다 — 위 `diffMove` doc 참조.
 ///
 /// **`.lf` + `len + 1` 은 같은 값이다**(변이 1·5회차 C27 이 살아남아 확인했다) — `contentEnd()` 가

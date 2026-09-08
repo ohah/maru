@@ -637,7 +637,7 @@
 **`⇧⌘O`(Go to Symbol in File)가 섰다(2026-08-31).** ~~나머지 여섯은 여전히 팔레트 전용이다.~~
 → **낡았다(2026-09-07 재실측)**: `toggle_editor_wrap`(`⌥Z`)·`duplicate_lines`·`move_lines_up`/`_down`
 도 그 뒤에 섰고, `⌘D`·`⌥⌘↑`/`⌥⌘↓`·`⇧⌘\`·열 선택 넷까지 더해 **chord 가 붙은 것이 열넷**이다.
-**키가 없는 편집기 액션은 열이고, 그중 진짜로 막힌 것은 접기 다섯뿐이다.** 나머지 다섯의 이유는
+**키가 없는 편집기 액션은 다섯이다**(2026-09-08 재실측 — 「열이고 그중 접기 다섯이 막혔다」는 **낡았다**). 접기 다섯은 `⌥⌘0`·`⌥⌘J`·`⌥⌘1`·`⌥⌘2`·`⌥⌘3` 으로 **섰다**(`default_app_bindings`) — VSCode 의 두 키 시퀀스를 따라가는 대신 한 chord 를 골랐고, 그 결정은 [입력 설정](../configuration-input.md) 「접기 다섯의 chord」가 소유한다. 나머지 다섯의 이유는
 **두 문서에 나뉘어 있다**(2026-09-07 적대적 검증이 이 가리킴을 고쳤다 — 처음엔 한 문서로 뭉뚱그렸다):
 `transform_to_uppercase`/`_lowercase`(레퍼런스도 안 준다)·`indent_lines`/`outdent_lines`(`Tab`·`⇧Tab`
 이 이미 닿는다)는 [입력 설정](../configuration-input.md) 의 표가, **`copy_editor_selection` 은
@@ -652,9 +652,10 @@
 **그 여섯이 남은 이유는 하나가 아니다** — 「컨텍스트가 없어서」가 아니다(그 조건은 남이 쓰는 chord를
 양보받을 때의 것이다). 셋으로 갈리고, 표는 [configuration-input.md](../configuration-input.md)
 "편집기 전용 action"이 소유한다: `toggle_editor_wrap`은 VSCode `⌥Z`가 **Option 단독**이라
-터미널 Meta 입력을 뺏고(기본 표의 모든 `⌥` 가 `⌘` 과 함께다 — Option 단독이 **0개**다), 접기 다섯은 VSCode가
-`⌘K ⌘0` 같은 **두 키 시퀀스**를 쓰는데 `KeyChord`가 수식자+키 하나뿐이며 `⌘K`는 `clear_screen`,
-`⌥⌘[`·`⌥⌘]`는 `previous_term`·`next_term`이 이미 갖고 있다.
+터미널 Meta 입력을 뺏고(기본 표의 모든 `⌥` 가 `⌘` 과 함께다 — Option 단독이 **0개**다), 접기 다섯이 오래 못 섰던 이유는 VSCode 가
+`⌘K ⌘0` 같은 **두 키 시퀀스**를 쓰는데 `KeyChord` 가 수식자+키 하나뿐이고 `⌘K` 는 `clear_screen`,
+`⌥⌘[`·`⌥⌘]` 는 `previous_term`·`next_term` 이 이미 갖고 있어서다 — **2026-09-07 에 한 chord**
+(`⌥⌘0/J/1/2/3`)**를 골라 풀었다**.
 
 **`⇧⌘O`는 위 셋과 같은 부류였다** — 기본 표 어디에도 없어 `.ignored`였고, 컨텍스트 게이트는
 `symbolPickerReadiness`가 `.not_editor`로 이미 갖고 있었다.

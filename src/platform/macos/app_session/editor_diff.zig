@@ -3252,6 +3252,18 @@ test "DCOL5: caret 이 없거나 비교가 아니면 안 넘긴다 (§4.1g 비�
     fx.session.metal_dirty = false;
     try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
     try testing.expect(fx.session.metal_dirty);
+
+    // **범위 밖 자리에서 넘겨도 안 죽고 배열 안으로 들어온다.** 비교가 다시 계산되면 행이 짧아질 수
+    //    있는데, 그 사이에 키가 오면 여기가 첫 소비처다. 출발 행 길이로 안 자르면 `columnOf` 가 줄
+    //    밖 byte 를 받는다(12회차 S18).
+    const st = fx.term.rt.editor_diff.?;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 9999, .byte = 9999 }) };
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    const f = fx.term.rt.editor_diff_selection.?.sel.focus;
+    try testing.expect(f.row < st.left_texts.len);
+    try testing.expect(f.byte <= st.left_texts[f.row].len);
+    // 그리고 **그 행의 끝**에 선다 — 잘린 열이 그 행에서 갈 수 있는 가장 먼 자리다.
+    try testing.expectEqual(st.left_texts[f.row].len, f.byte);
 }
 
 test "DCOL6: 넘어간 열에 caret 이 그려지고 검색도 따라간다 (렌더 배선)" {

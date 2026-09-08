@@ -8050,6 +8050,43 @@ pub const AppSession = struct {
         // not persistent at all. Do not let a stale upgrade notice overwrite that user-visible fact.
         self.session_host_upgrade_notice_pending = null;
         if (!builtin.is_test) {
+            // **언제 죽었는지를 같이 남긴다.** 2026-09-09 실측: `stage=runtime_death
+            // error=ConnectionClosed` 한 줄이 나왔는데, 그 앞 16 시간 동안 host 관련 로그가 **한 줄도**
+            // 없었다. 소켓은 양끝 다 열려 있었고 host 도 `Clients: 1` 로 멀쩡했다. 그래서 「16 시간 전부터
+            // 죽어 있었다」와 「방금 죽었다」를 구별할 수 없었다 — 이 단계는 새 터미널을 열 때 비로소
+            // 발견되므로, 발견 시각은 사망 시각이 아니다.
+            //
+            // 클라이언트가 이미 poison 이면 그 사유가 진짜 원인이고 여기 `ConnectionClosed` 는 그 뒤에
+            // 오는 증상일 뿐이다. `last_success` 는 host 로그의 request-id 와 맞춰 보는 손잡이다.
+            if (is_macos and stage == .runtime_death) {
+                var wall: std.c.timespec = undefined;
+                const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
+                // **읽지 않은 상태를 단정하지 않는다.** `app_remote_client` 는 **비풀(legacy) 전용**이다 —
+                // `term.zig` 가 `const legacy_client = if (!pooled) app_remote_client else null` 로 가른다.
+                // 풀 구성에서 실제 클라이언트는 풀 안에 있고, 실패 지점에는 host_id 가 없어 그것을 집을 수
+                // 없다. 그런데도 `app_remote_client` 를 읽어 `poisoned=no` 를 찍으면 **엉뚱한 객체의 상태**를
+                // 죽은 연결의 상태인 양 말하게 된다 — 없는 진단보다 나쁘다.
+                //
+                // 그래서 구성을 먼저 밝히고, 상태는 그 구성에서 실제로 쓰이는 객체일 때만 싣는다.
+                if (app_remote_host_pool) |*pool| {
+                    std.log.err(
+                        "host link state at failure: at_unix={d} pooled=yes pool_hosts={d} client_state=unread",
+                        .{ at, pool.entries.count() },
+                    );
+                } else if (app_remote_client) |*client| {
+                    std.log.err(
+                        "host link state at failure: at_unix={d} pooled=no poisoned={s} last_success={d} in_flight={d}",
+                        .{
+                            at,
+                            if (client.first_poison_reason) |r| @tagName(r) else "no",
+                            client.last_success_request_id,
+                            client.next_request_id -| 1 -| client.last_success_request_id,
+                        },
+                    );
+                } else {
+                    std.log.err("host link state at failure: at_unix={d} pooled=no client=absent", .{at});
+                }
+            }
             var buf: [96]u8 = undefined;
             std.log.err(
                 "persistent session host unavailable: {s} — terminals fall back to in-process",
@@ -14200,8 +14237,27 @@ pub const AppSession = struct {
         });
     }
 
-    fn failUserAction(self: *AppSession, id: u64) void {
+    /// 사용자에게는 「세션 정보를 동기화하지 못했습니다」 한 문장이지만, 여기 오는 길은 **다섯**이다 —
+    /// probe 요청 실패 · host 가 계약을 모름 · 응답이 낡음 · 시한 초과(두 자리). 지금까지 그 다섯이
+    /// 로그에 아무 흔적도 남기지 않아, 사용자가 「이미지가 안 붙는다」고 해도 어느 갈래인지 알 수 없었다.
+    ///
+    /// 2026-09-09 실측: GUI 가 host 와 끊겨 in-process 로 폴백한 상태에서 `cmd+v` 가 이 문구를 냈다.
+    /// 링크가 죽은 것이 원인으로 **보였지만** 다섯 중 무엇인지 가릴 근거가 없었다.
+    fn failUserAction(self: *AppSession, id: u64, why: []const u8) void {
         const slot = self.userActionSlot(id) orelse return;
+        if (!builtin.is_test) {
+            var wall: std.c.timespec = undefined;
+            const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
+            std.log.warn(
+                "user action failed: at_unix={d} why={s} kind={s} host_link={s}",
+                .{
+                    at,
+                    why,
+                    @tagName(slot.*.?.payload),
+                    if (host_connect_failed) "failed" else "ok",
+                },
+            );
+        }
         self.showUserActionFailure(&slot.*.?);
         self.freeUserAction(id);
     }
@@ -14359,11 +14415,11 @@ pub const AppSession = struct {
                     if (slot.*.?.probe_sent)
                         _ = backend.abandonUserActionObservationProbe(slot.*.?.target.runtime_handle, active_id);
                 }
-                self.failUserAction(active_id);
+                self.failUserAction(active_id, "active_expired");
             }
         }
         if (self.user_action_queue.active_id == null) switch (self.user_action_queue.takeNext(now)) {
-            .expired => self.failUserAction(self.user_action_queue.last_terminal_id),
+            .expired => self.failUserAction(self.user_action_queue.last_terminal_id, "queued_expired"),
             else => {},
         };
         const id = self.user_action_queue.active_id orelse return;
@@ -14374,7 +14430,7 @@ pub const AppSession = struct {
         if (!slot.*.?.probe_sent) {
             const admission = backend.requestUserActionObservationProbe(slot.*.?.target.runtime_handle, id) catch {
                 _ = self.user_action_queue.finishActive(id);
-                self.failUserAction(id);
+                self.failUserAction(id, "probe_request_failed");
                 return;
             };
             switch (admission) {
@@ -14382,7 +14438,7 @@ pub const AppSession = struct {
                 .busy => return,
                 .unsupported => {
                     _ = self.user_action_queue.finishActive(id);
-                    self.failUserAction(id);
+                    self.failUserAction(id, "probe_unsupported");
                     return;
                 },
             }
@@ -14391,25 +14447,25 @@ pub const AppSession = struct {
             .pending => {},
             .stale => {
                 _ = self.user_action_queue.finishActive(id);
-                self.failUserAction(id);
+                self.failUserAction(id, "probe_stale");
             },
             .completed => {
                 const term = self.userActionTerm(slot.*.?.target) orelse {
                     _ = self.user_action_queue.finishActive(id);
-                    self.failUserAction(id);
+                    self.failUserAction(id, "target_term_gone");
                     return;
                 };
                 const current = self.userActionIdentity(term, slot.*.?.target.surface_id) orelse {
                     _ = self.user_action_queue.finishActive(id);
-                    self.failUserAction(id);
+                    self.failUserAction(id, "identity_unavailable");
                     return;
                 };
                 if (self.user_action_queue.complete(id, current) != .apply) {
-                    self.failUserAction(id);
+                    self.failUserAction(id, "identity_changed");
                     return;
                 }
                 self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, false) catch {
-                    self.failUserAction(id);
+                    self.failUserAction(id, "observation_read_failed");
                     return;
                 };
                 self.applyUserAction(term, &slot.*.?);

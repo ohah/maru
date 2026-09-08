@@ -145,6 +145,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     /// 스타일 비트(0~3)로 바로 찾는다 — SGR 1/3 은 **다른 글리프**라 폰트 파일이 따로 있어야 한다.
     CTFontRef _atlasFaces[4];
     unsigned int _atlasH;
+    /// 지금 구워 둔 셀 크기(기기 픽셀). 코어가 원하는 값과 달라지면 다시 굽는다.
+    unsigned int _bakedCellH;
     CADisplayLink *_link;
     /// **조합 중 문자열만 담는 1줄짜리 가짜 문서.** 확정 전에는 여기 있고 코어엔 안 간다 —
     /// 그게 IME 계약이다(자모가 셸로 새면 명령어 일부가 된다).
@@ -181,7 +183,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 폴백(AppleSDGothicNeo)이 필요하고, 진행 폭은 `CTFontGetAdvancesForGlyphs` 가 준다.
 - (BOOL)rasterizeAtlasOnDevice {
     NSString *chars = @MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
-    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = maru_mobile_atlas_cols();
+    // **셀 크기는 코어가 정한다**(화면 셀 × 그리는 배율). 상수로 구우면 그 그림을 늘려 써서
+    // 흐려진다 — 실측: 기본 설정에서도 22px 를 62px 자리에 늘리고 있었다.
+    const unsigned int CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h(), COLS = maru_mobile_atlas_cols();
     NSMutableArray<NSNumber *> *cps = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
     [chars enumerateSubstringsInRange:NSMakeRange(0, chars.length)
@@ -231,7 +235,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
             font = korean;
             CTFontGetGlyphsForCharacters(font, &c, &glyph, 1);
         }
-        CGPoint pos = CGPointMake(col * CW + 1, H - (row + 1) * CH + 8);
+        // **베이스라인은 셀에 비례한다**(옛 값 8 은 32px 셀 기준이었다). 셀이 커졌는데
+        // 이 값을 상수로 두면 글자가 셀 아래에 붙어 위가 잘린다.
+        CGPoint pos = CGPointMake(col * CW + CW / 24 + 1, H - (row + 1) * CH + CH / 4);
         if (glyph) CTFontDrawGlyphs(font, &glyph, &pos, 1, ctx);
         CGSize adv = CGSizeZero;
         if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
@@ -265,6 +271,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
     _atlasCols = COLS; _atlasRows = maru_mobile_atlas_rows(); _atlasH = H;
+    _bakedCellH = CH;
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
@@ -856,7 +863,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
 
 - (BOOL)bakeColorGlyph:(const unsigned int *)cps count:(unsigned int)ncp style:(unsigned int)style {
     if (!_colorTex) return NO;
-    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
+    const unsigned int CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
     unsigned int slot = maru_mobile_next_color_slot(_atlasCols);
     if (slot == 0xFFFFFFFF) return NO;   // 버릴 자리도 없다(전부 이번 프레임 것)
     unsigned int col = slot >> 16, row = slot & 0xFFFF;
@@ -884,7 +891,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                 initWithString:str
                     attributes:@{(__bridge NSString *)kCTFontAttributeName: (__bridge id)face}]);
         if (line) {
-            CGContextSetTextPosition(ctx, 1, 6);
+            CGContextSetTextPosition(ctx, CW / 24 + 1, CH * 3 / 16);  // 셀에 비례(옛 6/32)
             CTLineDraw(line, ctx);   // 컬러 글리프(sbix/COLR)는 CTLineDraw 가 색까지 그린다
             CFRelease(line);
             ok = YES;
@@ -909,7 +916,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **마지막 항목을 그 자리로** 당겨 오므로, 앞으로 진행하면 당겨진 것을 건너뛴다(실측).
     // 뒤에서부터 가면 지워지는 자리가 항상 훑은 뒤쪽이라 앞쪽이 흔들리지 않는다 —
     // 목록 크기를 host 가 따로 알 필요도 없어진다(그 상수를 양쪽에 두면 또 어긋난다).
-    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
+    const unsigned int CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
@@ -969,7 +976,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         CGColorRelease(ink);
         double width = 0;
         if (line) {
-            CGContextSetTextPosition(ctx, 1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
+            CGContextSetTextPosition(ctx, CW / 24 + 1, CH / 4);  // 셀에 비례(옛 8/32) — 원점이 곧 셀 원점
             CTLineDraw(line, ctx);
             width = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
             CFRelease(line);
@@ -1142,6 +1149,9 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
+    // **그리는 배율을 코어에 알린다.** 아래 NDC 변환이 논리 좌표를 이 배율로 키우므로, 아틀라스를
+    // 그만큼 크게 구워야 늘리지 않는다(안 알리면 1배로 구워 3배로 늘린다 — 실측으로 잡았다).
+    maru_mobile_set_render_scale((unsigned int)(scale * 1000));
     l.drawableSize = px;
     // **드로어블은 여기서 안 잡는다**(M14). 한 번 잡으면 되돌릴 수 없어서, 먼저 잡아 두고
     // 나중에 "안 그린다" 를 못 한다 — 빌드가 끝나 «바뀌었나» 를 안 뒤에 잡는다(Vulkan 획득과
@@ -1174,6 +1184,14 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
                                   (unsigned int)_keyboardH, 1000, &lw, &lh);
     unsigned int n = maru_mobile_build(lw, lh,
                                        (unsigned long long)(CACurrentMediaTime() * 1000.0));
+    // **굽는 크기가 어긋나면 다시 굽는다.** 처음 굽는 것은 첫 프레임보다 **먼저** 일어나서 그때는
+    // 기기 배율도 설정 글자 크기도 모른다 — 기본값으로 구운 뒤 여기서 바로잡는다. 이 줄이 없으면
+    // 셀을 코어가 정해도 아무 소용이 없다(그렇게 짰다가 선명도가 그대로였다).
+    if (_glyphTex && maru_mobile_atlas_cell_h() != _bakedCellH) {
+        NSLog(@"MARU_ATLAS rebake cell=%u→%u", _bakedCellH, maru_mobile_atlas_cell_h());
+        [self rasterizeAtlasOnDevice];
+    }
+
     // **서술자는 idle 로 빠지기 전에 견준다**(M9). 아래 M14 조기 return 뒤에 두면 화면이 멈춘
     // 프레임에서 알림이 안 나가고, 스크린 리더 커서가 옛 버튼에 남는다.
     [self noteAccessibilityChange];

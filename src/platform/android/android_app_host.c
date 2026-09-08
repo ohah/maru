@@ -142,6 +142,7 @@ static uint8_t *g_glyph_px = NULL;
 // 다시 굽지 않으므로, 원본이 없으면 재개 뒤 **이모지가 영영 안 보인다**(실측: 홈으로 나갔다
 // 돌아오니 이모지만 사라지고 한글·ASCII 는 멀쩡했다).
 static uint8_t *g_color_px = NULL;
+static unsigned int g_baked_cell_h = 0; // 지금 구워 둔 셀 크기(기기 픽셀)
 static unsigned long long g_a11y_shape = 0; // 지난 프레임 서술자 «생김새» 지문(M9)
 static jclass g_activity_cls = NULL; // MaruActivity — 네이티브 스레드에서 FindClass 가 안 된다
 static uint32_t g_gw, g_gh;
@@ -151,11 +152,13 @@ static uint32_t g_gw, g_gh;
 // 래스터할 수 있다 — iOS 의 CoreText 와 대응하는 자리다. 외부 라이브러리(FreeType 등) 없이
 // 선다는 것이 이 함수가 확인하는 것이다.
 //
-// 좌표는 호스트 아틀라스와 같은 배치를 쓴다(행 r 의 baseline = r*CH + CH - 8) — 그래야
+// 좌표는 호스트 아틀라스와 같은 배치를 쓴다(행 r 의 baseline = r*CH + CH - CH/4) — 그래야
 // 같은 셰이더가 두 아틀라스를 똑같이 샘플링한다.
 static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32_t *ow, uint32_t *oh) {
     static const char *CHARS = MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
-    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = maru_mobile_atlas_cols();
+    // **셀 크기는 코어가 정한다**(화면 셀 × 그리는 배율). 상수로 구우면 그 그림을 늘려 써서
+    // 흐려진다 — iOS 에서 픽셀로 재어 잡았고(전이 3px → 2px), 두 host 가 같은 규율을 쓴다.
+    const uint32_t CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h(), COLS = maru_mobile_atlas_cols();
 
     // UTF-8 → BMP 코드포인트, 중복 제거.
     static uint16_t cps[256];
@@ -229,7 +232,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         jstring s = (*env)->NewString(env, &cps[i], 1);
         uint32_t col = i % COLS, row = i / COLS;
         (*env)->CallVoidMethod(env, canvas, mDraw, s,
-                               (jfloat)(col * CW + 1), (jfloat)(row * CH + CH - 8), paint);
+                               (jfloat)(col * CW + CW / 24 + 1), (jfloat)(row * CH + CH - CH / 4), paint);
         jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
         uint32_t advance = (uint32_t)(adv + 0.5f);
         if (advance == 0) advance = CW / 2;
@@ -714,6 +717,9 @@ static void drawFrame(void) {
     // **잰 값을 그대로 준다.** 하단 inset·키보드 겹침 보정과 하한은 코어가 한다
     // (`maru_mobile_available_logical`) — 예전에는 그 규칙이 여기와 iOS 의 ObjC 에 **각자**
     // 적혀 있었고, Java 의 `ImeInsets` 가 한 번 더 접고 있었다. 셋을 하나로 모았다.
+    // **그리는 배율을 코어에 알린다.** 아래 quad 를 이 배율로 키워 그리므로(`q->x * scale`),
+    // 아틀라스도 그만큼 크게 구워야 늘리지 않는다. iOS 와 같은 규율이다.
+    maru_mobile_set_render_scale((unsigned int)(scale * 1000.0f + 0.5f));
     unsigned int lw = 0, lh = 0;
     maru_mobile_available_logical((unsigned int)g.extent.width, (unsigned int)g.extent.height,
                                   (unsigned int)g.inset_top, (unsigned int)g.inset_bottom,
@@ -2355,7 +2361,7 @@ static int bakeGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int ncp, u
     jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
     if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
-    (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
+    (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)(CW / 24 + 1), (jfloat)(CH - CH / 4), b->paint);
     jfloat adv = (*env)->CallFloatMethod(env, b->paint, b->measure, s);
     *advance = (uint32_t)(adv + 0.5f);
     if (*advance == 0) *advance = CW / 2;
@@ -2392,7 +2398,7 @@ static int bakeColorGlyph(GlyphBaker *b, const unsigned int *cps, unsigned int n
     jsize unit_n = clusterToUtf16(cps, ncp, units, (jsize)(sizeof units / sizeof units[0]));
     if (unit_n == 0) return 0;
     jstring s = (*env)->NewString(env, units, unit_n);
-    (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
+    (*env)->CallVoidMethod(env, b->ccanvas, b->draw, s, (jfloat)(CW / 24 + 1), (jfloat)(CH - CH / 4), b->paint);
 
     void *pixels = NULL;
     AndroidBitmapInfo info;
@@ -2483,8 +2489,9 @@ static void growAtlas(struct android_app *app) {
     // **마지막 항목을 그 자리로** 당겨 오므로, 앞으로 진행하면 당겨진 것을 건너뛴다(실측).
     // 뒤에서부터 가면 지워지는 자리가 항상 훑은 뒤쪽이라 앞쪽이 흔들리지 않는다 —
     // 목록 크기를 host 가 따로 알 필요도 없어진다(그 상수를 양쪽에 두면 또 어긋난다).
-    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
-    uint8_t cell[MARU_ATLAS_CELL_W * MARU_ATLAS_CELL_H];
+    const uint32_t CW = maru_mobile_atlas_cell_w(), CH = maru_mobile_atlas_cell_h();
+    // **상한만큼 잡아 둔다** — 셀 크기는 설정·배율에 따라 달라지고, 그 상한은 헤더가 든다.
+    uint8_t cell[MARU_ATLAS_CELL_MAX * MARU_ATLAS_CELL_MAX];
     unsigned int added = 0;
     GlyphBaker baker;
     if (!bakerOpen(app, &baker, CW, CH)) { maru_mobile_missing_clear(); return; }
@@ -2581,8 +2588,17 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
              g.inset_top, g.inset_bottom, g.inset_left, g.inset_right);
         // 기기에서 굽는다. 실패하면 글리프 없이 뜨는 편이 낫다 — 예전 폴백은 개발
         // 스크립트가 push 한 파일에 기대는 것이라 실제 앱에는 그 파일이 없었다.
+        // **굽기 전에 그리는 배율을 알린다.** 코어가 셀 크기를 그 배율로 정하므로 순서가 중요하다 —
+        // 뒤에 알리면 이미 작게 구운 뒤다(iOS 는 첫 굽기가 프레임보다 앞서 그 자리에서 다시
+        // 굽는데, 여기서는 배율을 이 시점에 이미 알아서 한 번에 맞출 수 있다).
+        //
+        // **설정으로 글자 크기를 바꾸면 아직 다시 안 굽는다** — Vulkan 이미지를 다시 만들어야
+        // 해서 그 자리는 다음 슬라이스다(계획에 적었다). 그때까지 그 경우만 예전처럼 늘어난다.
+        maru_mobile_set_render_scale((unsigned int)(g.scale * 1000.0f + 0.5f));
         if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh))
             LOGI("atlas_raster_failed");
+        else
+            g_baked_cell_h = maru_mobile_atlas_cell_h();
         if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
         // **처음부터 vsync 콜백이 주기를 쥔다**(30Hz). 여기서 등록하는 이유는
         // 메인 루프가 `pollOnce(-1)` 로 막혀 있어 거기서는 등록에 도달할 수

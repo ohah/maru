@@ -305,7 +305,8 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
     const iterations = 1_000;
     const start = now(io);
     for (0..iterations) |_| {
-        const gpu = try maru.renderer.metal_frame.buildGpuImages(allocator, &placements, &images, size, 8, 16);
+        // unicode placeholder(U=1) 채널은 이 측정의 대상이 아니다 — 빈 슬라이스면 그 경로를 건너뛴다.
+        const gpu = try maru.renderer.metal_frame.buildGpuImages(allocator, &placements, &images, size, 8, 16, &.{}, &.{}, &.{});
         defer allocator.free(gpu);
         const plan = try maru.renderer.metal_frame.planImageUploads(allocator, gpu, &images, &uploaded);
         allocator.free(plan.uploads);

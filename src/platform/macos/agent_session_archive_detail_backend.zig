@@ -7,6 +7,7 @@
 //! results on its frame path.
 
 const std = @import("std");
+const detached_worker_wait = @import("detached_worker_wait.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const archive = maru.session.agent_session_archive;
@@ -142,6 +143,11 @@ pub const Backend = struct {
         for (state.results.items) |*result| result.deinit(state.allocator);
         state.results.clearRetainingCapacity();
         state.mutex.unlock(state.io);
+        // 판정자에서는 워커가 세션보다 오래 살면 안 된다(`detached_worker_wait` 가 단일 출처다).
+        // **여기여야 한다** — 이 backend 의 워커는 `waitForTestGate` 에서 `shutting_down` 을 봐야
+        // 나오므로, 그 플래그를 세우기 **전에** 기다리면 영원히 안 끝난다. 아카이브 본체가 자기
+        // `deinit` 에서 거두는 것과 같은 이유이고, 같은 자리다.
+        if (builtin.is_test) detached_worker_wait.quietState(state, state.io);
         state.release();
     }
 };
@@ -242,6 +248,76 @@ fn openedDevice(file: std.Io.File) u64 {
     if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
     return @intCast(stat.dev);
 }
+
+test "상세 backend: 게이트에 세워 둔 워커는 deinit 이 거두고 나간다" {
+    // **취소 순서가 이 판정자의 주제다.** 이 워커는 `waitForTestGate` 에서 `shutting_down` 을 봐야
+    // 빠져나오는데, 그 플래그를 세우는 것은 `deinit` 이다. 그래서 거둠은 반드시 `deinit` **안에서,
+    // 취소한 뒤에** 일어나야 한다 — 세션 쪽에서 `deinit` **앞**에 기다리면 영원히 안 끝난다(그 판을
+    // 실제로 만들었다가 상한까지 헛도는 것을 실측하고 되돌렸다: 적대적 검증 1 회차).
+    //
+    // 게이트를 쓰므로 **기계 속도에 기대지 않는다** — 워커가 반드시 도는 중일 때 `deinit` 을 부른다.
+    // 결산은 자기 `DebugAllocator` 로 그 자리에서 한다(테스트 할당자를 쓰면 누수가 샤드 끝에서
+    // 이름 없이 보고되어, 정작 어느 판정자가 흘렸는지 못 읽는다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = debug_allocator.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 게이트를 지난 뒤의 일감을 실제로 만든다 — 빈 경로면 워커가 곧장 끝나 거둠이 있으나 없으나 같다.
+    var line_buf: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{s}\"}}}}\n", .{"x" ** 200}) catch unreachable;
+    {
+        var file = try tmp.dir.createFile(io, "detail.jsonl", .{});
+        defer file.close(io);
+        var write_buf: [4096]u8 = undefined;
+        var writer = file.writer(io, &write_buf);
+        var written: usize = 0;
+        while (written < 4_000) : (written += 1) try writer.interface.writeAll(line);
+        try writer.interface.flush();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const source_path = try std.fs.path.join(allocator, &.{ dir_path, "detail.jsonl" });
+    const stat = try std.Io.Dir.cwd().statFile(io, source_path, .{});
+
+    var backend = try Backend.init(allocator, io);
+    backend.setTestGate(true);
+    try std.testing.expect(backend.submit(.{
+        .provider = .codex,
+        .source_path = source_path,
+        .inode = stat.inode,
+        .device = 0,
+    }, 1));
+
+    // 워커가 게이트에 **실제로 도착할 때까지** 기다린다 — 여기서 그 스레드는 확실히 살아 있다.
+    var waited = GateWait.start(io);
+    while (!backend.testGateReached() and waited.pending()) {}
+    try std.testing.expect(backend.testGateReached());
+
+    backend.deinit();
+    try std.testing.expect(backend.state == null);
+    // 거둠이 없으면 이 줄에서 워커의 할당이 잡힌다.
+    try std.testing.expectEqual(std.heap.Check.ok, debug_allocator.deinit());
+}
+
+/// 반복 상한이 아니라 **벽시계**로 잰다 — `spins < N` 은 부하 걸린 기계에서 먼저 끊어진다(IG14).
+const GateWait = struct {
+    io: std.Io,
+    deadline_ns: i128,
+    ticks: usize = 0,
+
+    fn start(io: std.Io) GateWait {
+        return .{ .io = io, .deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + 30 * std.time.ns_per_s };
+    }
+
+    fn pending(self: *GateWait) bool {
+        self.ticks += 1;
+        if (self.ticks & 0xff != 0) return true;
+        return std.Io.Clock.awake.now(self.io).nanoseconds < self.deadline_ns;
+    }
+};
 
 test "detail worker smoke gate waits without blocking the releasing actor" {
     var backend = try Backend.init(std.testing.allocator, std.testing.io);

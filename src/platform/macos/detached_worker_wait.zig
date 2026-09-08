@@ -16,8 +16,16 @@
 //!
 //! ## 규율
 //!
-//! 부르는 자리는 **세션이 backend 를 놓는 곳**이지 판정자 하나하나가 아니다. 이 backend 들을 쓰는
-//! 판정자가 수십 개인데 규율을 그만큼 나눠 두면 새로 쓰는 사람이 반드시 빠뜨린다.
+//! 부르는 자리는 판정자 하나하나가 아니다 — 이 backend 들을 쓰는 판정자가 수십 개인데 규율을 그만큼
+//! 나눠 두면 새로 쓰는 사람이 반드시 빠뜨린다. **어디서 부르는지는 「게이트가 있는가」로 갈린다**:
+//!
+//! - 워커가 `shutting_down` 을 봐야 나오는 backend 는 **자기 `deinit` 안에서, 취소한 뒤에** 부른다.
+//!   그 플래그를 세우는 것이 `deinit` 자신이라, 그 **앞**에서 기다리면 영원히 안 끝난다 — 처음 판이
+//!   정확히 그 실수였고 상한까지 헛도는 것을 실측했다(도크 판정자 셋이 매번 30 초씩 멈췄고, 그 부하가
+//!   무관한 signal 판정자 셋까지 함께 넘어뜨렸다).
+//! - 게이트가 없는 backend 는 **세션이 물러나는 한 자리**(`AppSession.deinit`)에서 부른다.
+//!
+//! 새 backend 가 이 규율을 빠뜨리는 것은 `tests/boundary/detached_worker_quiesce_axis.zig` 가 막는다.
 //!
 //! `inflight == 0` 이 아니라 **참조수**를 본다. 워커는 자기 카운터를 줄인 **뒤에도** `state.release()` 를
 //! 한 번 더 만지므로, 카운터만 보고 나가면 그 사이에 판정자가 끝나 state 자체가 누수로 잡히는 좁은 창이
@@ -41,6 +49,12 @@ pub fn quiet(backend: anytype, io: std.Io) void {
         .optional => field orelse return,
         else => field,
     };
+    quietState(state, io);
+}
+
+/// `quiet` 와 같은 대기인데 **state 를 직접** 받는다. 자기 `deinit` 안에서 부르는 backend 는 이미
+/// `self.state` 를 비운 뒤라 backend 를 넘길 수 없다 — 그 자리를 위한 입구다.
+pub fn quietState(state: anytype, io: std.Io) void {
     const deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + timeout_ns;
     var spins: usize = 0;
     while (state.refs.load(.acquire) != 1) {

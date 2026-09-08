@@ -17,6 +17,7 @@ const pre_publish_product = @import("release_adapter_pre_publish_product");
 const verify_predecessor_product = @import("release_adapter_verify_predecessor_product");
 const candidate_release_driver = @import("release_adapter_candidate_release_driver");
 const candidate_stage3_command = @import("release_adapter_candidate_stage3_preparation_command");
+const profile_stage3_command = @import("release_adapter_profile_stage3_preparation_command");
 const candidate_resume_publication_command = @import("release_adapter_candidate_resume_publication_command");
 const candidate_published_cleanup_command = @import("release_adapter_candidate_published_cleanup_command");
 const candidate_aggregate_process = @import("release_adapter_candidate_aggregate_process");
@@ -37,6 +38,7 @@ pub const Storage = struct {
     apple: apple_transport.Storage = undefined,
     candidate: candidate_release_driver.Execution = .{},
     stage3: candidate_stage3_command.Execution = .{},
+    profile_stage3: profile_stage3_command.Execution = .{},
     resume_publication: candidate_resume_publication_command.Execution = .{},
     published_cleanup: candidate_published_cleanup_command.Execution = .{},
     aggregate_process: candidate_aggregate_process.Storage = .{},
@@ -139,6 +141,38 @@ const ProductDrivers = struct {
         };
     }
 
+    pub fn prepareProfileCandidate(
+        _: *@This(),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bootstrap: *bootstrap_mod.Bootstrap,
+        token: []const u8,
+        budget_ns: i128,
+        storage: *Storage,
+    ) !void {
+        var current_environment = CurrentProfileEnvironment{};
+        const outcome = profile_stage3_command.runOutcome(
+            io,
+            allocator,
+            bootstrap,
+            .{ .context = &current_environment, .read_fn = CurrentProfileEnvironment.read },
+            token,
+            .{
+                .github_response = &storage.github_response,
+                .manifest_download = &storage.manifest_download,
+                .attestation_response = &storage.attestation,
+            },
+            budget_ns,
+            &storage.profile_stage3,
+        );
+        return switch (outcome) {
+            .success => {},
+            .local_failure => error.ProfileStage3LocalFailure,
+            .audit_required => error.ProfileStage3AuditRequired,
+            .cleanup_failed => error.ProfileStage3CleanupFailed,
+        };
+    }
+
     pub fn resumeCandidatePublication(
         _: *@This(),
         io: std.Io,
@@ -222,6 +256,13 @@ const ProductDrivers = struct {
     }
 };
 
+const CurrentProfileEnvironment = struct {
+    fn read(_: *anyopaque, name: [:0]const u8) ?[]const u8 {
+        const raw = std.c.getenv(name.ptr) orelse return null;
+        return std.mem.span(raw);
+    }
+};
+
 fn settleProductFailure(execution: anytype, original: anyerror) anyerror {
     if (execution.owner != null) execution.retryCleanup() catch return error.CleanupFailed;
     return original;
@@ -254,9 +295,7 @@ pub fn executeWith(
         .verify_predecessor => try drivers.verifyPredecessor(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .publish_candidate => try drivers.publishCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .prepare_candidate => try drivers.prepareCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
-        // The reviewed argv/bootstrap boundary lands before the side-effecting profile driver.
-        // Returning here prevents a newly accepted command from being mistaken for a successful no-op.
-        .prepare_profile_candidate => return error.ProfileStage3DriverUnavailable,
+        .prepare_profile_candidate => try drivers.prepareProfileCandidate(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),
         .prepare_candidate_aggregate => try drivers.prepareCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .finalize_candidate_aggregate => try drivers.finalizeCandidateAggregate(io, allocator, &bootstrap, phase_budget_ns, storage),
         .resume_candidate_publication => try drivers.resumeCandidatePublication(io, allocator, &bootstrap, try tokens.read(), phase_budget_ns, storage),

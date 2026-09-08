@@ -3350,8 +3350,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.
   `test-session-host-release-adapter-contract`와 `test-session-host-release-adapter-executable-bootstrap`은 Debug·ReleaseFast에서 exact projection,
-  option/path/injection 거부, authority ordering과 copied/pre-owned bootstrap을 검증한다. side-effecting driver가 아직 없는 동안 executable arm은
-  명시적으로 실패하므로 성공 no-op이나 baseline command fallback이 없다.
+  option/path/injection 거부, authority ordering과 copied/pre-owned bootstrap을 검증한다. validator는 bootstrap 성공 뒤 token을 exact once
+  읽고 profile driver만 호출하며 성공 no-op이나 baseline command fallback을 두지 않는다.
   `test-session-host-release-adapter-profile-stage3-preparation-command`는 이 bootstrap 하나에서 profile environment, candidate prerequisite,
   predecessor/upgrade workspace, authenticated predecessor manifest, source/Zig authority, signed execution, role-B durable preparation과 timing
   retained close까지 이어지는 exact 제품 순서를 Debug·ReleaseFast로 검증한다. 모든 단계 fail-index의 local/audit 분류, durable commit 뒤 timing

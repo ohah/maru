@@ -27,12 +27,13 @@ pub const Transaction = struct {
     durable_retained: bool = false,
     timing_retained: bool = false,
     timing_audit_preserved: bool = false,
+    prerequisite_audit_preserved: bool = false,
     live: [last_local + 1]bool = @splat(false),
 
     pub fn isPristineForComposition(self: *const @This()) bool {
         return self.owner == null and !self.audit_required and !self.cleanup_required and
             self.audit_stage == .none and !self.remote_commit_observed and !self.durable_retained and
-            !self.timing_retained and !self.timing_audit_preserved and !self.anyLive();
+            !self.timing_retained and !self.timing_audit_preserved and !self.prerequisite_audit_preserved and !self.anyLive();
     }
     pub fn needsAudit(self: *const @This()) bool {
         return self.owner == self and self.audit_required and !self.cleanup_required and
@@ -61,7 +62,11 @@ pub fn executeWith(steps: anytype, transaction: *Transaction) !void {
     transaction.live[@intFromEnum(Stage.prerequisite)] = true;
     steps.runPrerequisite() catch |err| {
         const audit = steps.prerequisiteNeedsAudit();
-        if (audit) transaction.remote_commit_observed = true;
+        if (audit) {
+            transaction.remote_commit_observed = true;
+            transaction.live[@intFromEnum(Stage.prerequisite)] = false;
+            transaction.prerequisite_audit_preserved = true;
+        }
         return settle(steps, transaction, .prerequisite, err, audit);
     };
     transaction.remote_commit_observed = true;
@@ -78,7 +83,7 @@ pub fn executeWith(steps: anytype, transaction: *Transaction) !void {
 
     transaction.live[@intFromEnum(Stage.durable)] = true;
     steps.prepareDurable() catch |err| {
-        if (steps.durableNeedsAudit()) transaction.durable_retained = true;
+        if (steps.durableRetained()) transaction.durable_retained = true;
         return settle(steps, transaction, .durable, err, true);
     };
     transaction.live[@intFromEnum(Stage.durable)] = false;

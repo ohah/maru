@@ -1,7 +1,7 @@
 const std = @import("std");
 const validator = @import("release_validator");
 
-const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
+const Event = enum { bootstrap, token, pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_profile_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
 const Phase = enum { pre_publish, verify_predecessor, publish_candidate, prepare_candidate, prepare_profile_candidate, prepare_aggregate, finalize_aggregate, resume_publication, published_cleanup };
 
 const Harness = struct {
@@ -179,6 +179,13 @@ const Harness = struct {
                 try std.testing.expectEqual(validator.github_capture_bytes, storage.github_response.len);
                 if (self.harness.product_error) return error.ProductInjected;
             }
+            pub fn prepareProfileCandidate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, token: []const u8, budget: i128, storage: *validator.Storage) !void {
+                self.harness.push(.prepare_profile_candidate);
+                try std.testing.expectEqualStrings("token", token);
+                try std.testing.expectEqual(validator.phase_budget_ns, budget);
+                try std.testing.expectEqual(validator.manifest_capture_bytes, storage.manifest_download.len);
+                if (self.harness.product_error) return error.ProductInjected;
+            }
             pub fn prepareCandidateAggregate(self: *@This(), _: std.Io, _: std.mem.Allocator, _: anytype, budget: i128, _: *validator.Storage) !void {
                 self.harness.push(.prepare_aggregate);
                 try std.testing.expectEqual(validator.phase_budget_ns, budget);
@@ -281,11 +288,14 @@ test "prepare-candidate dispatches exactly once after bootstrap and token" {
     try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .prepare_candidate }, harness.events[0..harness.count]);
 }
 
-test "profile stage3 bootstrap arm fails closed before token or product driver" {
+test "profile stage3 dispatches exactly once after bootstrap and token" {
     var storage: validator.Storage = undefined;
-    var harness = Harness{ .phase = .prepare_profile_candidate, .token_error = true, .product_error = true };
-    try std.testing.expectError(error.ProfileStage3DriverUnavailable, harness.run(&storage));
-    try std.testing.expectEqualSlices(Event, &.{.bootstrap}, harness.events[0..harness.count]);
+    var harness = Harness{ .phase = .prepare_profile_candidate };
+    try harness.run(&storage);
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token, .prepare_profile_candidate }, harness.events[0..harness.count]);
+    var token_failure = Harness{ .phase = .prepare_profile_candidate, .token_error = true };
+    try std.testing.expectError(error.TokenInjected, token_failure.run(&storage));
+    try std.testing.expectEqualSlices(Event, &.{ .bootstrap, .token }, token_failure.events[0..token_failure.count]);
 }
 
 test "argv collector accepts the contract bound and rejects only bound plus one" {

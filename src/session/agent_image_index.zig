@@ -193,6 +193,18 @@ pub const ResultSummary = struct {
     /// 찾지 않는다 — 그러면 「무엇이 이미지인가」의 규칙이 두 벌이 되고, 이 저장소가 반복해서 당한
     /// 형태다. 같은 줄에서 이미지 `Hit` 이 나왔다는 사실을 그대로 쓴다.
     image: bool = false,
+    /// 그 그림의 **자리**(AV5) — 접힌 줄에 썸네일을 붙일 때 디코드가 읽을 바이트다.
+    /// `image` 가 참일 때만 뜻이 있고, 길이 0 이면 「자리를 모른다」다.
+    ///
+    /// **자리(인덱스)가 아니라 값이다.** 「그 이미지가 `Hit` 배열의 몇 번째인가」로 들면 배열이
+    /// 움직일 때마다 따라가야 하는데(퇴출 · 화면의 뒤집기), 오프셋은 **파일 안에서 변하지 않는다** —
+    /// 타일 재연결이 `(file_index, data_offset)` 을 키로 쓰는 것과 같은 이유다. 이 스택에서 그
+    /// 「따라가야 하는 필드」를 이미 셋 만들었고(대기 링 · 접기 · 옛 파일 번호), 넷째는 안 만든다.
+    image_offset: u64 = 0,
+    image_len: u32 = 0,
+    /// 그 그림이 **어느 파일**에 있나. 호출과 결과는 같은 파일 안에서만 이어지지만(스캐너가 파일마다
+    /// 새로 선다) 값으로 들어 두면 소비자가 그 전제를 몰라도 된다.
+    image_file: u8 = 0,
     /// 결과 **본문의 첫 바이트**(파일 절대). 펼침(AV3)이 그 자리부터 다시 읽는다.
     ///
     /// **바이트를 안 담는다** — 결과는 최대 2.8 MB 이고 세션당 12,200 개다. 자리만 들고 있다가
@@ -1295,8 +1307,18 @@ pub const StreamScanner = struct {
         //
         // 한 줄의 이미지 전부에 같은 주인을 준다 — 실측(542/542)에서 이미지 결과의 `content` 는
         // **이미지 블록만** 들고, 사본(`toolUseResult`)은 그 앞에서 이미 접혔다.
+        var first_image = true;
         for (out.items[@min(added_from, out.items.len)..]) |*h| {
-            if (h.kind.isImage()) h.fold_owner = idx;
+            if (!h.kind.isImage()) continue;
+            h.fold_owner = idx;
+            // **첫 장의 자리를 호출이 든다**(AV5). 실측(542/542)에서 이미지 결과의 `content` 는
+            // 그림 하나만 들지만, 여럿이면 줄 하나에 하나만 붙일 수 있으므로 **처음 것**으로 정한다.
+            if (first_image) {
+                first_image = false;
+                out.items[idx].result.image_offset = h.data_offset;
+                out.items[idx].result.image_len = h.data_len;
+                out.items[idx].result.image_file = h.file_index;
+            }
         }
     }
 

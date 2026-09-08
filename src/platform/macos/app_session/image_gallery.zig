@@ -1071,6 +1071,68 @@ pub fn poll(self: *AppSession) void {
 /// 장당 ~20 ms 라(계약 §5.2) 24칸을 한 프레임에 풀면 480 ms 가 멈춘다. 한 장씩 차오르게 두면 각 프레임은
 /// 한 장 몫만 쓰고 격자가 눈앞에서 채워진다. **이것은 워커의 대체가 아니라 그 전 단계다** — 한 장 20 ms 도
 /// 프레임 예산(16.7 ms)을 넘으므로, 디코드 워커는 후속에서 붙인다.
+/// 「전체」의 줄 왼쪽에 두는 썸네일의 **자리**(AV5, 사용자 결정 2026-09-08).
+///
+/// **줄 높이에 맞춘다** — 줄마다 높이가 다르면 `listWindow` 의 스크롤·창 계산이 통째로 가변이
+/// 되고, 계약 §2.2.3 의 「좁아지면 시각부터 버린다」와도 부딪힌다. 그 대가로 그림은 작아서
+/// 「무슨 그림인가」까지는 못 말하지만 **「여기 그림이 있다」는 확실히 말한다** — 실측상 그런
+/// 줄이 60 줄에 한 줄이라(중앙 1.7%) 훑을 때의 표지로 값이 있다.
+///
+/// 세로로는 줄 안에 여백을 남긴다. 줄에 꽉 채우면 위아래 줄과 붙어 목록이 답답해진다.
+const thumb_row_padding_px: u32 = 2;
+
+/// 썸네일 칸의 **가로 폭**(px). 격자 타일이 2:1 이므로(`gridMetrics`) 같은 비율로 잡는다 —
+/// 실측에서 가로로 긴 그림이 79% 라 세로에 맞추면 대부분 이 폭을 다 쓴다.
+fn thumbCellSize(self: *const AppSession) struct { w: u32, h: u32 } {
+    const h = listRowHeightPx(self) -| (thumb_row_padding_px *| 2);
+    return .{ .w = h *| 2, .h = h };
+}
+
+/// 그 줄의 썸네일 사각형. 목록이 아니거나 자리가 없으면 `null`.
+pub fn thumbRectAt(self: *const AppSession, row_top_y: u32) ?image_grid.Rect {
+    const area = gridArea(self);
+    const size = thumbCellSize(self);
+    if (size.h == 0 or size.w == 0) return null;
+    // **글자가 설 자리가 없으면 그림도 안 그린다.** 그림이 줄을 통째로 먹으면 무엇에 붙은
+    // 그림인지 알 수 없다(§2.2.3 과 같은 규율 — 마지막까지 지키는 것은 「무엇인가」다).
+    if (area.w <= size.w *| 2) return null;
+    return .{ .x = area.x, .y = row_top_y +| thumb_row_padding_px, .w = size.w, .h = size.h };
+}
+
+/// 목록에서 썸네일이 **글자를 미는 칸 수**. 0 이면 안 민다.
+///
+/// 그림이 붙는 줄은 드물지만(실측 60 줄에 한 줄) **자리는 모든 줄이 똑같이 비운다** — 줄마다
+/// 들쭉날쭉하면 이름이 세로로 안 맞아 훑기 어렵다.
+pub fn thumbCols(self: *const AppSession) u16 {
+    if (self.image_gallery.filter != .all) return 0;
+    if (self.cell_width_px == 0) return 0;
+    if (thumbRectAt(self, gridArea(self).y) == null) return 0;
+    const size = thumbCellSize(self);
+    // 그림 폭 + 한 칸 띄우기.
+    return @intCast(@min((size.w + self.cell_width_px - 1) / self.cell_width_px + 1, @as(u32, 32)));
+}
+
+/// 그 줄에 그릴 **그림 바이트가 어디 있나**. 없으면 `null` 이다.
+///
+/// 두 갈래를 여기서 합친다 — 이미지 항목은 **자기 자리**를, 결과가 그림인 호출은 **접힌 그림의
+/// 자리**를 준다(AV5 · §2.2.1). 두 벌로 두면 「격자에는 뜨는데 목록에는 안 뜬다」가 생긴다.
+pub const ThumbSource = struct { file_index: u8, offset: u64, len: u32 };
+
+pub fn thumbSource(hit: index.Hit) ?ThumbSource {
+    if (hit.kind.isImage()) return .{
+        .file_index = hit.file_index,
+        .offset = hit.data_offset,
+        .len = hit.data_len,
+    };
+    // 접힌 그림 — 그 줄은 호출이고, 그림 자리는 결과가 든다.
+    if (hit.result.image and hit.result.image_len > 0) return .{
+        .file_index = hit.result.image_file,
+        .offset = hit.result.image_offset,
+        .len = hit.result.image_len,
+    };
+    return null;
+}
+
 pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = decodeBackendPtr(self) orelse return;
@@ -1090,11 +1152,15 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
         if (self.image_gallery.pendingContains(next)) continue; // 이미 걸었다
 
         const hit = self.image_gallery.hits.items[next];
-        const path = pathFor(self, hit) orelse return;
+        // ⚠️ **없으면 건너뛴다(포기하지 않는다).** 격자에서는 모든 항목이 그림이라 차이가 없지만,
+        // 「전체」 목록에서는 그림 있는 줄이 **60 줄에 한 줄**이다(실측 중앙 1.7%) — 여기서 물러나면
+        // 첫 번째 그림 없는 줄에서 멈춰 뒤쪽 그림을 영영 안 건다.
+        const src = thumbSource(hit) orelse continue;
+        const path = self.image_gallery.chain.get(src.file_index) orelse continue;
         if (backend.submit(
             path,
-            hit.data_offset,
-            hit.data_len,
+            src.offset,
+            src.len,
             thumbnail_side,
             next,
         )) |generation| {
@@ -2431,9 +2497,11 @@ pub fn appendGpuImages(
     // 격자가 아닌 필터에서는 그림을 하나도 안 싣는다 — 줄 목록이 그 자리를 쓴다(계약 §2.1).
     // **여기도 「안 그리고 나가는 길」이라 표시를 남긴다**: 필터를 되돌렸을 때 텍스처가 거둬진
     // 채 `uploaded` 만 참으로 남으면 격자가 빈다(도크 접기에서 겪은 것과 같은 결함).
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or
-        !self.image_gallery.filter.isGrid())
-    {
+    // **「전체」도 그림을 싣는다**(AV5). 접힌 줄에 작은 썸네일이 붙기 때문이다 — 「읽기」·「명령」은
+    // 그림이 없는 종류라 그대로 막는다(없는 것을 위해 창을 훑을 이유가 없다).
+    const is_grid = self.image_gallery.filter.isGrid();
+    const wants_thumbs = is_grid or self.image_gallery.filter == .all;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery or !wants_thumbs) {
         self.image_gallery.markAllNeedUpload();
         self.image_gallery.markOpenNeedUpload();
         return;
@@ -2443,7 +2511,10 @@ pub fn appendGpuImages(
     const m = gridMetrics(self);
     const l = gridLayout(self);
     // **자리를 못 얻은 수를 남긴다.** 0 칸이어도(좁은 도크) 남겨야 「없다」로 거짓말하지 않는다.
-    self.image_gallery.overflow = l.overflow;
+    //
+    // ⚠️ 목록에서는 건드리지 않는다 — 그 값은 `listOverflow` 가 `listWindow` 에서 따로 낸다.
+    // 격자의 셈을 목록에 흘리면 안내 줄이 「12개 중 8개」를 엉뚱한 수로 말한다(적대적 I1·J1).
+    if (is_grid) self.image_gallery.overflow = l.overflow;
 
     // **크게 보기는 격자를 대체한다.** 겹쳐 그리면 어느 것을 누르는지 알 수 없다. 다만 아직 못 푼
     // 동안에는 격자를 그대로 둔다 — 클릭 직후 화면이 비면 「눌렀더니 사라졌다」로 보인다.
@@ -2456,13 +2527,17 @@ pub fn appendGpuImages(
         }
     }
 
-    if (l.visible == 0) {
+    // **창은 모양이 정한다.** 격자는 칸 배치가, 목록은 줄 높이가 「지금 보이는 것」을 안다.
+    const w = listWindow(self);
+    const first: usize = if (is_grid) l.first else w.first;
+    const visible: usize = if (is_grid) l.visible else w.last -| w.first;
+    if (visible == 0) {
         self.image_gallery.markAllNeedUpload();
         return;
     }
 
     // 보이는 창만큼 채운다(tick 당 상한 `max_inflight` 장). 다 차기 전에도 있는 것부터 그린다.
-    ensureTiles(self, l.first, l.visible);
+    ensureTiles(self, first, visible);
 
     var new_images: std.ArrayList(metal_frame.GpuImage) = .empty;
     defer new_images.deinit(self.allocator);
@@ -2474,10 +2549,21 @@ pub fn appendGpuImages(
     for (self.image_gallery.tiles.items, 0..) |*tile, i| {
         const n = tile.hit_index; // **자리는 인덱스가 정한다** — 배열 순서가 아니다
         if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
-        const cell = image_grid.rectAt(area, m, l, n) orelse {
+        const cell = if (is_grid) image_grid.rectAt(area, m, l, n) orelse {
             // 창 밖이라 안 그린다 = 이 프레임에 evict 된다. 돌아올 때 다시 올려야 한다.
             tile.uploaded = false;
             continue;
+        } else blk: {
+            // 목록: 그 줄의 왼쪽. 창 밖이면 격자와 **같은 규율**로 내린다.
+            if (n < w.first or n >= w.last or w.row_h == 0) {
+                tile.uploaded = false;
+                continue;
+            }
+            const row_y = area.y +| (@as(u32, @intCast(n - w.first)) *| w.row_h);
+            break :blk thumbRectAt(self, row_y) orelse {
+                tile.uploaded = false;
+                continue;
+            };
         };
         // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
         const r = image_grid.fitInside(cell, tile.width, tile.height);
@@ -2746,7 +2832,11 @@ pub fn collectActivityList(
     // (적대적 검증 F1 이 「좁아서」라고 적힌 것을 잡았다 — 틀린 원인을 말하고 있었다).
     const win = listWindow(self);
     const area = gridArea(self);
-    const cols = win.cols;
+    // **썸네일이 자리를 먼저 받는다**(AV5). 그림이 붙는 줄은 드물지만(실측 60 줄에 한 줄) 자리는
+    // 모든 줄이 똑같이 비운다 — 줄마다 들쭉날쭉하면 이름이 세로로 안 맞아 훑기 어렵다.
+    const thumb_cols = thumbCols(self);
+    const text_x = area.x +| (@as(u32, thumb_cols) *| self.cell_width_px);
+    const cols = win.cols -| thumb_cols;
     const row_h = win.row_h;
     if (cols == 0 or row_h == 0) {
         self.image_gallery.overflow = win.total;
@@ -2831,7 +2921,7 @@ pub fn collectActivityList(
         if (split.prefix_cols > 0) {
             const pdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.prefix_cols, prefix, dim) catch continue;
             self.collectShaped(collected, pdl, builder, .{ .pane = .{
-                .origin_x = area.x,
+                .origin_x = text_x,
                 .origin_y = y,
                 .colors = colors,
             } });
@@ -2841,7 +2931,7 @@ pub fn collectActivityList(
         if (text.len > 0 and split.label_cols > 0) {
             const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.label_cols, text, fg) catch continue;
             self.collectShaped(collected, dl, builder, .{ .pane = .{
-                .origin_x = area.x +| (at_col *| self.cell_width_px),
+                .origin_x = text_x +| (at_col *| self.cell_width_px),
                 .origin_y = y,
                 .colors = colors,
             } });
@@ -2853,7 +2943,7 @@ pub fn collectActivityList(
             const summary_col: u32 = @as(u32, cols) -| tail -| split.summary_cols;
             const sdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.summary_cols, summary, dim) catch continue;
             self.collectShaped(collected, sdl, builder, .{ .pane = .{
-                .origin_x = area.x +| (summary_col *| self.cell_width_px),
+                .origin_x = text_x +| (summary_col *| self.cell_width_px),
                 .origin_y = y,
                 .colors = colors,
             } });
@@ -2864,7 +2954,7 @@ pub fn collectActivityList(
             const time_col: u32 = @as(u32, cols) -| split.time_cols;
             const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, split.time_cols, time_text, dim) catch continue;
             self.collectShaped(collected, tdl, builder, .{ .pane = .{
-                .origin_x = area.x +| (time_col *| self.cell_width_px),
+                .origin_x = text_x +| (time_col *| self.cell_width_px),
                 .origin_y = y,
                 .colors = colors,
             } });

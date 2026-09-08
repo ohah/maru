@@ -78008,6 +78008,95 @@ test "활동 뷰: 그림 결과라도 실패를 삼키지 않는다 (§2.2.1 적
     try std.testing.expect(std.mem.indexOfScalar(u8, out, '0') == null);
 }
 
+test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
+    // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
+    // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를
+    // 모든 줄이 비우되 그림은 있는 줄에만 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 그림이 붙는 호출 하나 + 안 붙는 호출 하나 — **표본을 둘 다** 둔다.
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_G1\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/one.png\"}}]}}\n" ++
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_G1\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u1\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_G2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"목록\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_G2\"," ++
+        "\"type\":\"tool_result\",\"content\":\"a\\nb\"}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/t.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+    image_gallery_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count()); // 호출 둘
+
+    // ── ① **그림 자리는 접힌 줄만 안다.** 두 줄 중 하나만 소스가 있다.
+    var with_src: usize = 0;
+    for (session.image_gallery.hits.items) |h| {
+        if (image_gallery_ops.thumbSource(h) != null) with_src += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), with_src);
+
+    // ── ② 그 자리는 **그림의 바이트**를 가리킨다(호출의 명령문이 아니라).
+    const read_row = for (session.image_gallery.hits.items) |h| {
+        if (h.result.image) break h;
+    } else return error.TestExpectedEqual;
+    const src = image_gallery_ops.thumbSource(read_row).?;
+    try std.testing.expect(src.len > 0);
+    try std.testing.expect(src.offset != read_row.data_offset); // 명령문 자리와 다르다
+    try std.testing.expectEqual(read_row.result.image_len, src.len);
+
+    // ── ③ **자리는 모든 줄이 똑같이 비운다.** 줄마다 들쭉날쭉하면 이름이 세로로 안 맞는다.
+    const tcols = image_gallery_ops.thumbCols(session);
+    try std.testing.expect(tcols > 0);
+
+    // ── ④ **다른 종류에서는 자리를 안 먹는다** — 그림이 없는 필터에 빈 칸을 남기면 낭비다.
+    image_gallery_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(u16, 0), image_gallery_ops.thumbCols(session));
+    image_gallery_ops.setFilter(session, .images);
+    try std.testing.expectEqual(@as(u16, 0), image_gallery_ops.thumbCols(session)); // 격자는 제 자리가 있다
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이다 (§2.2.1)" {
     // 「전체」를 켜는 순간 같은 일이 **활동 줄과 이미지 항목으로 두 번** 뜬다 — 실측 542 건이 그
     // 모양이다(호출 기준 1.25% 지만 **이미지 기준으로는 대다수**). 접는 것은 「전체」에서뿐이고,

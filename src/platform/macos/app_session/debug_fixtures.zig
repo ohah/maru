@@ -1123,6 +1123,12 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
 /// 바꾸므로 픽스처가 내부 축을 알 필요가 없다.
 pub fn applyForcedEditorCaret(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_EDITOR_CARET") orelse return;
+    // **키를 태운 뒤에는 되돌리지 않는다.** 이 훅은 매 프레임 돌아 caret 을 같은 자리에 다시
+    // 세우는데(캡처 도중 다른 경로가 선택을 지워도 자리가 남게), `MARU_DIFF_CARET_KEYS` 가 태운
+    // 이동·편집을 그 되돌림이 그대로 지웠다 — 행 끝으로 보내고 한 글자 쳐도 다음 프레임이면
+    // 다시 요청한 줄·열이라, 캡처에는 아무 일도 안 일어난 화면이 남았다(실측으로 걸렸다).
+    // 키 훅은 caret 이 **선 뒤에** 한 번만 도므로, 그 래치가 서면 여기서 손을 뗀다.
+    if (self.debug_diff_caret_keys_done) return;
     const spec = std.mem.span(raw);
     const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return;
     const want_line = std.fmt.parseInt(usize, spec[0..colon], 10) catch return;
@@ -1662,6 +1668,13 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
     // `applyForcedEditorCaret` 은 **프레임 경로**에서 돈다 — 먼저 돌고 래치하면 키가 허공에 간다
     // (`MARU_OPEN_SCM_DIFF` 이 목록이 찰 때까지 기다리는 것과 같은 규율이다).
     else if (term.rt.editor_selection == null) return;
+
+    // **알림을 먼저 닫는다.** 토스트가 떠 있으면 `inputFocus()` 가 `.notice` 라 키를 그쪽이 먹고
+    // 편집기까지 오지 않는다 — 실측으로 걸렸다: `⌘→` 가 알림만 닫고 caret 은 제자리였다(격리한
+    // HOME 으로 띄우면 「새 터미널이 유지되지 않습니다」 토스트가 늘 뜬다). 닫는 것도 **키로**
+    // 태운다: 판정자들이 `notice.dismiss()` 를 직접 부르는 것과 달리, 여기서는 그 배관을 건너뛰면
+    // 캡처가 확인하려는 것(키가 실제로 닿는가)이 흐려진다.
+    if (self.inputFocus() == .notice) _ = self.handleKeyEvent(.{ .key = .escape }) catch {};
 
     for (0..downs) |_| _ = self.handleKeyEvent(.{ .key = .arrow_down }) catch {};
     for (0..rights) |_| _ = self.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .shift = true } }) catch {};

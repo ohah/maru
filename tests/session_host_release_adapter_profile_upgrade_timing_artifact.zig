@@ -98,6 +98,26 @@ test "actual private filesystem publication emits exact canonical bytes and clea
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private/profile-timing.json", .{}));
 }
 
+test "retained close releases descriptors while preserving canonical bytes for fresh reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try privateDirectory(&tmp);
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "private/profile-timing.json", &path_buf);
+    var authority = Authority{};
+    var result: artifact.Artifact = .{};
+    const fd_before = try openFdCount();
+    try artifact.publishWith(std.testing.allocator, &authority, path, &result);
+    try result.closeRetaining();
+    try std.testing.expectEqual(artifact.Phase.retained_closed, result.phase);
+    try std.testing.expect(result.value() == null);
+    try std.testing.expectEqual(fd_before, try openFdCount());
+    var reopened: artifact.Artifact = .{};
+    try artifact.reopen(std.testing.allocator, path, context, &reopened);
+    _ = try reopened.revalidate();
+    try reopened.cleanup();
+}
+
 test "post-owner authority drift retains an auditable artifact that fresh process can reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

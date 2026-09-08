@@ -26,7 +26,7 @@ pub const Snapshot = struct {
     timing: TimingView,
 };
 
-pub const Phase = enum { pristine, open, audit_required, cleanup_required };
+pub const Phase = enum { pristine, open, audit_required, cleanup_required, retained_closed };
 
 pub const Value = struct {
     path: []const u8,
@@ -66,6 +66,17 @@ pub const Artifact = struct {
         if (!sameObservation(current.observation, observation)) return error.FileChanged;
         try validatePrivateParent(self.file.parent_fd);
         return .{ .path = path, .observation = observation, .audit_required = current.audit_required };
+    }
+
+    /// Drops descriptor authority only after the final pathname, inode, bytes, and private parent
+    /// fence. The retained pathname is deliberately not a cleanup capability; a later process
+    /// must reopen and authenticate it before either upload or deletion.
+    pub fn closeRetaining(self: *@This()) !void {
+        if (self.owner != self or self.phase != .open or !self.leaf_present or
+            self.file.owner != &self.file or !validStorage(self)) return error.InvalidOwner;
+        _ = try self.revalidate();
+        try self.file.deinit();
+        self.phase = .retained_closed;
     }
 
     pub fn cleanup(self: *@This()) !void {

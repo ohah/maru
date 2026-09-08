@@ -317,7 +317,9 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
   `Claude is waiting for your input`. Maru는 이를 가공 없이 인앱 알림 센터와 OS 배너로 전달한다(제목이 비면 팬 라벨로 채운다).
   **다만 시퀀스와 활성화 조건이 서로 다르다**(2.1.226 / 0.146.1 raw PTY 실측):
   - **claude는 OSC 777**(`notify;<title>;<body>`)을 쓴다. 알림 채널을 `TERM_PROGRAM` 화이트리스트로 **자동 선택**하므로
-    사용자 설정 없이 켜진다 — Maru가 `TERM_PROGRAM=ghostty`를 심는 것(`src/pty/macos.zig`)이 이 경로를 여는 조건이다.
+    사용자 설정 없이 켜지는데, 그 화이트리스트는 `kitty`/`ghostty`/`wezterm`이고 **Maru는 그 명단에 없다**
+    (한때 `TERM_PROGRAM=ghostty`로 위장해 열어 뒀으나 2026-09-08 철회 — [터미널 호환성/보안 정책](terminal-compatibility-policy.md)
+    «자기 신원»이 단일 출처다). 자동 선택이 안 되므로 **provider 설정에서 채널을 명시**해야 한다(§11).
     본문으로 종류를 구분한다: 플랜 승인은 `Claude Code needs your approval for the plan`, 도구 권한은
     `Claude needs your permission`. 종결자는 ST가 아니라 **BEL**이다.
   - **codex는 OSC 9**이며 `[tui] notifications`가 **opt-in**이다. 설정이 없는 기본값에서는 승인·플랜 승인 화면이 떠 있어도

@@ -35,10 +35,14 @@ pub fn main(init: std.process.Init) !void {
     }
     const fd_before = try openFdCount(init.io);
     var durations: [stage_count][max_iterations]u64 = undefined;
+    var profile_durations: [max_iterations]u64 = undefined;
     var successful: usize = 0;
+    var profile_successful: usize = 0;
     var failures: usize = 0;
+    var profile_failures: usize = 0;
     var pid_collisions: usize = 0;
     var checkpoint_residue: usize = 0;
+    var profile_checkpoint_residue: usize = 0;
     for (0..iterations) |index| {
         const sample = runSuccessChain(init.io, init.gpa, wrapper, validator_fixture, index) catch |err| {
             std.debug.print("workflow command process {d} failed: {s}\n", .{ index, @errorName(err) });
@@ -50,30 +54,45 @@ pub fn main(init: std.process.Init) !void {
         checkpoint_residue += sample.checkpoint_residue;
         successful += 1;
     }
+    for (0..iterations) |index| {
+        const profile_sample = runProfileSuccessMeasurement(init.io, init.gpa, wrapper, validator_fixture, index) catch |err| {
+            std.debug.print("profile workflow command process {d} failed: {s}\n", .{ index, @errorName(err) });
+            profile_failures += 1;
+            continue;
+        };
+        profile_durations[profile_successful] = profile_sample.duration;
+        pid_collisions += profile_sample.pid_collisions;
+        profile_checkpoint_residue += profile_sample.checkpoint_residue;
+        profile_successful += 1;
+    }
     try runTerminalCase(init.io, init.gpa, wrapper, validator_fixture, iterations);
-    try runProfileStage3Case(init.io, init.gpa, wrapper, validator_fixture, iterations, "profile-success", .active);
     try runProfileStage3Case(init.io, init.gpa, wrapper, validator_fixture, iterations, "profile-local-failure", .local_failure);
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .missing);
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .noncanonical);
     try runProfileEnvironmentFailureCase(init.io, init.gpa, wrapper, validator_fixture, iterations, .control);
-    if (successful == 0) return error.NoSuccessfulRuns;
+    if (successful == 0 or profile_successful == 0) return error.NoSuccessfulRuns;
     const fd_after = try openFdCount(init.io);
     if (fd_after < fd_before) return error.ProcessInvariantFailed;
     var times: [stage_count]report_mod.Times = undefined;
     for (0..stage_count) |index| times[index] = summarize(durations[index][0..successful]);
+    const profile_times = summarize(profile_durations[0..profile_successful]);
     const report: report_mod.Report = .{
         .schema = report_mod.schema,
         .iterations = iterations,
         .successful_runs = successful,
+        .profile_successful_runs = profile_successful,
         .draft_authoring_ns = times[0],
+        .profile_draft_authoring_ns = profile_times,
         .aggregate_prepare_ns = times[1],
         .aggregate_finalize_ns = times[2],
         .publication_ns = times[3],
         .aggregate_cleanup_ns = times[4],
         .failures = failures,
+        .profile_failures = profile_failures,
         .child_pid_collisions = pid_collisions,
         .parent_fd_delta = fd_after - fd_before,
         .checkpoint_residue = checkpoint_residue,
+        .profile_checkpoint_residue = profile_checkpoint_residue,
     };
     var storage: [4096]u8 = undefined;
     const bytes = try report_mod.render(&storage, report);
@@ -84,11 +103,35 @@ pub fn main(init: std.process.Init) !void {
     try writer.interface.writeAll(bytes);
     try writer.interface.writeByte('\n');
     try writer.interface.flush();
-    if (successful != iterations or failures != 0 or pid_collisions != 0 or report.parent_fd_delta != 0 or checkpoint_residue != 0)
+    if (successful != iterations or profile_successful != iterations or failures != 0 or profile_failures != 0 or
+        pid_collisions != 0 or report.parent_fd_delta != 0 or checkpoint_residue != 0 or profile_checkpoint_residue != 0)
         return error.ProcessInvariantFailed;
 }
 
 const Sample = struct { durations: [stage_count]u64, pid_collisions: usize, checkpoint_residue: usize };
+const ProfileSample = struct { duration: u64, pid_collisions: usize, checkpoint_residue: usize };
+
+fn runProfileSuccessMeasurement(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize) !ProfileSample {
+    var workspace = try Workspace.init(io, allocator, fixture, index, "profile-measurement");
+    defer workspace.deinit(io);
+    var environment = try workspace.environment(allocator);
+    defer environment.deinit();
+    try environment.put("MARU_SESSION_HOST_RELEASE_PROFILE_V1", profile_document);
+    const token = try workspace.bootstrap(io, allocator);
+    try workspace.settle(io, allocator, token, .candidate_pinning);
+    try workspace.settle(io, allocator, token, .candidate_attestation);
+    var args = workspace.profilePrepareArgs();
+    const duration = try runWrapper(io, allocator, wrapper, workspace.checkpointPath(), token, &args, &environment);
+    const child_pid = try workspace.readPid(io, workspace.preparationPath());
+    try workspace.expectCount(io, allocator, token, 3, .active);
+    const pid_collisions: usize = if (child_pid == c.getpid()) 1 else 0;
+    workspace.remove(io);
+    return .{
+        .duration = duration,
+        .pid_collisions = pid_collisions,
+        .checkpoint_residue = if (workspace.exists(io)) 1 else 0,
+    };
+}
 
 fn runSuccessChain(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, fixture: []const u8, index: usize) !Sample {
     var workspace = try Workspace.init(io, allocator, fixture, index, "success");

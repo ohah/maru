@@ -369,6 +369,9 @@ const Table = struct {
     /// 그 호출이 **실패로 끝났다**. provider 가 적은 것만 근거로 쓴다(계약 §2.3) — 우리가 명령이나
     /// 출력을 해석해 판정하지 않는다.
     image_gallery_result_failed: [:0]const u8,
+    /// 그 호출의 **결과가 그림이었다**(§2.2.1). 줄 수 대신 이것을 적는다 — 그림에 「1줄」은 사실이
+    /// 아니라 base64 한 덩이를 센 값이다.
+    image_gallery_result_image: [:0]const u8,
     /// 펼침(AV3)이 상한에서 잘렸다. **「없다」와 「안 보인다」를 가르는** 그 규율이다 — 잘린 것을
     /// 말하지 않으면 사용자가 그것을 전부로 읽는다.
     image_gallery_detail_truncated: [:0]const u8,
@@ -1421,6 +1424,7 @@ const en: Table = .{
     .image_gallery_too_narrow = "Not enough room to show the list",
     .image_gallery_result_lines_suffix = " lines",
     .image_gallery_result_failed = "failed",
+    .image_gallery_result_image = "image",
     .image_gallery_detail_truncated = "… truncated",
     .image_gallery_detail_result = "Result",
     .image_gallery_shown_of = "{0} of {1} images",
@@ -2051,6 +2055,7 @@ const ko: Table = .{
     .image_gallery_too_narrow = "목록을 그릴 자리가 없습니다",
     .image_gallery_result_lines_suffix = "줄",
     .image_gallery_result_failed = "실패",
+    .image_gallery_result_image = "이미지",
     .image_gallery_detail_truncated = "… 이하 생략",
     .image_gallery_detail_result = "결과",
     .image_gallery_shown_of = "{1}장 중 {0}장",

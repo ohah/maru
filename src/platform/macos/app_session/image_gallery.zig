@@ -701,10 +701,33 @@ pub const Filter = enum {
             .images => hit.kind.isImage(),
             .reads => hit.activity == .read,
             .execs => hit.activity == .exec,
-            .all => true,
+            // **결과가 이미지인 호출은 한 줄이다**(계약 §2.2.1). 그 이미지는 자기를 부른 호출 줄이
+            // 이미 대신하고 있으므로 여기서 뺀다 — 안 빼면 같은 일이 두 줄로 뜬다(실측 542 건).
+            //
+            // 「이미지」 필터는 그대로 보여 준다: 접는 것은 **남의 줄과 겹칠 때뿐**이고, 격자는
+            // 애초에 그림만 세는 자리다.
+            .all => hit.fold_owner == index.no_fold,
         };
     }
 };
+
+/// 뒤집힌 배열에서 `fold_owner` 를 새 자리로 옮긴다. `i` 였던 것은 `n - 1 - i` 가 된다.
+///
+/// **`pub` 인 이유는 판정자다** — 뒤집기는 화면 경로 한가운데에 있어서 통째로 세우지 않고 이 한
+/// 함수만 직접 잴 수 있어야 한다(`formatResultSummary` 와 같은 규율).
+pub fn reverseFoldOwners(hits: []index.Hit) void {
+    const n = hits.len;
+    if (n == 0) return;
+    for (hits) |*h| {
+        if (h.fold_owner == index.no_fold) continue;
+        // 자리를 벗어난 값은 **접기를 푼다.** 지어낸 주인을 가리키느니 제 줄로 서는 편이 낫다.
+        if (h.fold_owner >= n) {
+            h.fold_owner = index.no_fold;
+            continue;
+        }
+        h.fold_owner = @intCast(n - 1 - h.fold_owner);
+    }
+}
 
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
 /// 사이에 둔다 — 같은 텍스처 캐시를 쓰므로 id 가 겹치면 남의 그림이 나온다.
@@ -982,6 +1005,10 @@ pub fn poll(self: *AppSession) void {
     // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
     // 이 결함을 원리적으로 못 본다).
     std.mem.reverse(index.Hit, self.image_gallery.all_hits.items);
+    // **접기의 주인도 같이 뒤집는다**(§2.2.1). `fold_owner` 는 이 배열의 **자리**이므로, 뒤집고
+    // 그대로 두면 엉뚱한 호출을 가리킨다 — 접힌 이미지가 남의 줄에 붙거나, 「전체」에서 사라진다.
+    // 퇴출(`remapFoldsAfterEvict`)과 **같은 규율**이고 같은 이유로 판정자가 따로 못박는다.
+    reverseFoldOwners(self.image_gallery.all_hits.items);
     // **라벨도 같이 뒤집는다.** 안 뒤집으면 첫 칸에 마지막 이미지의 설명이 붙는다.
     if (self.image_gallery.all_labels.items.len == self.image_gallery.all_hits.items.len) {
         std.mem.reverse(context.Label, self.image_gallery.all_labels.items);
@@ -1316,7 +1343,17 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
     op.detail.command = readDetailPart(self, file, hit.data_offset, &op.detail.command_truncated);
     if (hit.result.found) {
         op.detail.has_result = true;
-        op.detail.result = readDetailPart(self, file, hit.result.body_offset, &op.detail.result_truncated);
+        // **본문이 없는 그림 결과는 「이미지」라고 적는다.** Claude 는 `content` 가 이미지 블록만
+        // 들어(실측 542/542) 읽을 자리가 없다 — 그대로 두면 「결과」 칸이 빈 채로 서서 「못 읽었다」
+        // 처럼 보인다. AV5 가 여기에 썸네일을 붙일 자리이기도 하다.
+        //
+        // Codex 는 `output` 첫 원소가 `text` 라 읽을 것이 있다 — 그쪽은 아래 갈래로 간다.
+        if (hit.result.image and hit.result.lines == 0) {
+            op.detail.result = self.allocator.dupe(u8, maru.i18n.t(.image_gallery_result_image)) catch &.{};
+            op.detail.result_truncated = false;
+        } else {
+            op.detail.result = readDetailPart(self, file, hit.result.body_offset, &op.detail.result_truncated);
+        }
     }
     self.metal_dirty = true;
 }
@@ -2835,6 +2872,18 @@ const max_result_summary_bytes: usize = 64;
 /// 직접 잴 수 있어야 한다(`remoteWatchTargetForTest` 와 같은 규율).
 pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.ResultSummary) []const u8 {
     if (!result.found) return "";
+    // **본문이 없는 결과가 있다.** Claude 의 이미지 결과는 `content` 가 이미지 블록만 든 배열이라
+    // (실측 542/542) 셀 줄이 아예 없다 — 그때 「0줄」은 사실이 아니고 빈 칸은 「모른다」로 읽힌다.
+    //
+    // ⚠️ **이미지라고 무조건 덮지 않는다.** Codex 의 이미지 결과는 `output` 이 `[{text}, …, {input_image}]`
+    // 라 **실제 텍스트가 있다**(실측: 첫 원소가 `text`, 원소 3 개). 그것을 「이미지」로 덮으면
+    // provider 가 적어 준 말을 우리가 지운다 — 본문이 있으면 줄 수가 여전히 맞는 답이다.
+    if (result.image and result.lines == 0) {
+        const text = maru.i18n.t(.image_gallery_result_image);
+        if (text.len > buf.len) return text; // 상수 문자열이라 버퍼 없이도 안전하다
+        @memcpy(buf[0..text.len], text);
+        return buf[0..text.len];
+    }
     const suffix = maru.i18n.t(.image_gallery_result_lines_suffix);
     if (result.failed) {
         return std.fmt.bufPrint(buf, "{s} \u{00b7} {d}{s}", .{

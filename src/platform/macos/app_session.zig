@@ -77633,6 +77633,164 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이다 (§2.2.1)" {
+    // 「전체」를 켜는 순간 같은 일이 **활동 줄과 이미지 항목으로 두 번** 뜬다 — 실측 542 건이 그
+    // 모양이다(호출 기준 1.25% 지만 **이미지 기준으로는 대다수**). 접는 것은 「전체」에서뿐이고,
+    // 「이미지」 필터는 그대로 보여 준다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 키 순서는 실측이다(`tool_use_id` → `type` → `content`, 그 안은 이미지 블록만).
+    //
+    // ⚠️ **쌍이 둘이어야 한다.** 하나면 주인이 어긋나도 개수가 안 변해서(자기 자신을 가리켜도 여전히
+    // 「접혔다」) 뮤테이션이 빠져나간다 — 실제로 뒤집기 remap 을 지운 뮤테이션이 그렇게 통과했다.
+    const call1 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_F1\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/one.png\"}}]}}\n";
+    const res1 =
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_F1\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u1\",\"timestamp\":\"2026-09-08T01:00:00.000Z\"}\n";
+    const call2 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_F2\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/two.png\"}}]}}\n";
+    const res2 =
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"tool_use_id\":\"toolu_F2\",\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":" ++
+        "{\"type\":\"base64\",\"data\":\"" ++ png_b64 ++ "\",\"media_type\":\"image/png\"}}]}]}," ++
+        "\"uuid\":\"u2\",\"timestamp\":\"2026-09-08T01:00:02.000Z\"}\n";
+    const transcript = call1 ++ res1 ++ call2 ++ res2;
+    try tmp.dir.writeFile(io, .{ .sub_path = "f.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/f.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    // 스캔은 **넷 다** 담는다 — 접기는 화면의 일이지 인덱스가 버리는 것이 아니다.
+    const all = session.image_gallery.all_hits.items;
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+
+    // ── ① **접힌 이미지는 제 호출을 가리킨다.** 화면은 최신을 앞에 놓으려 배열을 뒤집는데,
+    //    그때 자리를 같이 옮기지 않으면 이 단언이 깨진다(주인이 이미지가 되거나 남의 줄이 된다).
+    var folded: usize = 0;
+    for (all) |h| {
+        if (!h.kind.isImage()) continue;
+        try std.testing.expect(h.fold_owner != maru.session.agent_image_index.no_fold);
+        try std.testing.expect(h.fold_owner < all.len);
+        const owner = all[h.fold_owner];
+        try std.testing.expect(!owner.kind.isImage()); // 주인은 **호출**이다
+        try std.testing.expect(owner.result.image); // 그리고 자기 결과가 그림임을 안다
+        // 결과 줄은 호출 줄 **뒤**에 온다 — 뒤집힌 배열에서는 주인이 자기보다 뒤에 있다.
+        try std.testing.expect(h.line_offset > owner.line_offset);
+        folded += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), folded);
+
+    // ── ② 「이미지」 필터: 그림은 그대로 보인다(접었다고 잃는 것이 아니다).
+    image_gallery_ops.setFilter(session, .images);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    // ── ③ 「전체」: **두 줄**이다(넷이 아니라). 접기가 없으면 여기가 4 가 된다.
+    image_gallery_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    for (session.image_gallery.hits.items) |h| {
+        // 남은 줄은 전부 **호출**이다 — 이미지가 아니라 활동이 대표한다(계약 §2.2.1).
+        try std.testing.expect(!h.kind.isImage());
+        try std.testing.expectEqual(maru.session.agent_image_index.Activity.read, h.activity);
+        // 그리고 그 줄은 **결과가 그림이라고 알고 있다**(AV5 가 여기에 썸네일을 붙인다).
+        try std.testing.expect(h.result.found);
+        try std.testing.expect(h.result.image);
+    }
+
+    quietGalleryWorkers(session);
+}
+
+test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적대적)" {
+    // 화면은 최신을 앞에 놓으려 배열을 **뒤집는다**. `fold_owner` 는 그 배열의 자리이므로 같이
+    // 옮겨야 한다 — 안 옮기면 엉뚱한 호출로 접히거나 「전체」에서 사라진다. 퇴출 쪽과 **같은 규율**
+    // 이고, 그래서 여기서 그 함수 하나만 직접 잰다.
+    var hits = [_]maru.session.agent_image_index.Hit{
+        .{ .line_offset = 0, .data_offset = 0, .data_len = 0, .kind = .claude_tool_use, .mime = .unknown },
+        .{ .line_offset = 1, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .png, .fold_owner = 0 },
+        .{ .line_offset = 2, .data_offset = 0, .data_len = 0, .kind = .claude_tool_use, .mime = .unknown },
+        .{ .line_offset = 3, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .png, .fold_owner = 2 },
+    };
+    std.mem.reverse(maru.session.agent_image_index.Hit, &hits);
+    image_gallery_ops.reverseFoldOwners(&hits);
+
+    // 뒤집힌 뒤에도 **각 이미지가 자기 호출을 가리킨다**. 자리로만 재면 우연히 맞을 수 있으므로
+    // 「가리킨 것이 그 줄인가」를 `line_offset` 으로 확인한다.
+    for (hits) |h| {
+        if (!h.kind.isImage()) continue;
+        try std.testing.expect(h.fold_owner < hits.len);
+        const owner = hits[h.fold_owner];
+        try std.testing.expect(!owner.kind.isImage());
+        // 이미지가 `n` 이면 그 주인은 `n - 1` 이다(호출 줄 바로 뒤에 결과가 왔다).
+        try std.testing.expectEqual(h.line_offset - 1, owner.line_offset);
+    }
+
+    // 자리를 벗어난 값은 **접기를 푼다** — 지어낸 주인을 가리키느니 제 줄로 선다.
+    var lone = [_]maru.session.agent_image_index.Hit{
+        .{ .line_offset = 0, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .png, .fold_owner = 99 },
+    };
+    image_gallery_ops.reverseFoldOwners(&lone);
+    try std.testing.expectEqual(maru.session.agent_image_index.no_fold, lone[0].fold_owner);
+}
+
+test "활동 뷰: 결과 요약은 본문이 없을 때만 「이미지」다 (§2.2.1)" {
+    // Claude 의 이미지 결과는 셀 줄이 없다(실측 542/542 가 이미지 블록만 든 배열). 그때 「0줄」은
+    // 사실이 아니다. 그런데 Codex 는 `output` 이 `[{text}, …, {input_image}]` 라 **본문이 있다** —
+    // 그것까지 「이미지」로 덮으면 provider 가 적어 준 말을 우리가 지운다.
+    var buf: [64]u8 = undefined;
+    const img = maru.i18n.t(.image_gallery_result_image);
+
+    // 본문이 없는 그림 결과 → 「이미지」
+    try std.testing.expectEqualStrings(
+        img,
+        image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 0 }),
+    );
+    // 본문이 있는 그림 결과 → **줄 수가 남는다**
+    const with_body = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 3 });
+    try std.testing.expect(!std.mem.eql(u8, img, with_body));
+    try std.testing.expect(std.mem.indexOfScalar(u8, with_body, '3') != null);
+    // 결과를 못 찾은 호출은 여전히 **빈 칸**이다 — 「모른다」를 「이미지」로 적지 않는다.
+    try std.testing.expectEqualStrings("", image_gallery_ops.formatResultSummary(&buf, .{ .image = true }));
+}
+
 test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져간다 (AV4)" {
     // **필터를 바꾸는 수단이 화면에 있어야 한다.** `Tab` 은 도크를 한 번 클릭하면 `key_focus` 가
     // 남아 터미널 자동완성을 뺏었다(적대적 D1) — 칩이 제자리를 잡은 지금은 그 대가를 안 치른다.

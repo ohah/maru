@@ -98,6 +98,10 @@ pub const Mime = enum {
     }
 };
 
+/// 「접힌 곳이 없다」. `Hit.fold_owner` 의 기본값이며, 0 을 쓸 수 없어서(0 은 첫 `Hit` 의 자리다)
+/// 상한값을 센티넬로 쓴다.
+pub const no_fold: u32 = std.math.maxInt(u32);
+
 /// 이미지 하나의 **자리**. 바이트는 담지 않는다.
 pub const Hit = struct {
     /// 이 이미지가 든 줄의 시작(파일 절대). 문맥 복원(§2.2)이 이 값으로 앞뒤 줄을 찾는다.
@@ -132,6 +136,21 @@ pub const Hit = struct {
     /// 값을 여기서 파싱하지 않는 이유는 층이다 — ISO 파서는 `agent_image_context` 가 소유하고,
     /// 라벨 패스가 이미 그 모듈을 쓴다. 스캐너는 **자리만** 적는다.
     time_rel: u32 = 0,
+    /// **이 이미지가 어느 호출의 결과인가** — 그 호출 `Hit` 의 자리(§2.2.1). 활동이거나 호출을 못
+    /// 찾은 이미지는 `no_fold` 다.
+    ///
+    /// 「전체」가 이 값으로 **접는다**: 결과가 이미지인 호출은 활동 줄과 이미지 항목으로 **두 번**
+    /// 뜨는데(실측 542/542 가 그 모양이다), 접으면 한 줄이다. 「이미지」 필터는 그대로 보여 준다 —
+    /// 접는 것은 「전체」에서 남의 줄과 겹칠 때뿐이다.
+    ///
+    /// **자리(인덱스)를 드는 이유**는 「호출이 사라지면 접기도 풀려야」 하기 때문이다. 상한을 넘긴
+    /// 파일은 오래된 호출을 버리는데(`evictOldestActivities`), 접힌 채로 두면 그 이미지는 「전체」에서
+    /// **통째로 사라진다** — 「없다」와 「못 봤다」를 가르는 계약이 그것을 금한다.
+    ///
+    /// ⚠️ 그래서 이 값은 **배열이 움직일 때마다 따라 움직여야 한다**: 퇴출(`remapFoldsAfterEvict`)과
+    /// 화면이 최신을 앞에 놓으려 뒤집을 때(`image_gallery.applyScan`) 둘이다. 대기 링(`PendingCall`)과
+    /// 같은 규율이고, 같은 이유로 판정자가 그 둘을 각각 못박는다.
+    fold_owner: u32 = no_fold,
     /// 이 호출이 **어떻게 끝났나**(AV2 — 계약 §2.2·§3.2). 이미지와 결과를 못 찾은 호출은 기본값이다.
     ///
     /// **`Hit` 안에 든다**(라벨처럼 나란한 배열이 아니라). 요약은 **뒤에 오는 줄**에서 만들어져 **앞의
@@ -155,6 +174,17 @@ pub const ResultSummary = struct {
     failed: bool = false,
     /// 결과 텍스트의 줄 수(개행 + 1). 실측 Claude 중앙 5 · p99 82 · 최대 747.
     lines: u32 = 0,
+    /// 결과가 **이미지**였나(§2.2.1). 「전체」가 이 호출로 이미지를 접고, AV5 가 여기에 썸네일을 붙인다.
+    ///
+    /// **본문이 없는 것과는 다른 사실이다.** Claude 는 `content` 가 이미지 블록만 들어(실측 542/542)
+    /// 셀 줄이 없지만, Codex 는 `output` 이 `[{text}, …, {input_image}]` 라 **텍스트가 함께 온다**.
+    /// 그래서 화면은 「이미지면 무조건 이미지라고 적는다」가 아니라 **본문이 없을 때만** 그렇게 적는다 —
+    /// 아니면 provider 가 적어 준 말을 우리가 지운다.
+    ///
+    /// **스캐너의 이미지 패스가 이 사실의 유일한 출처다.** 결과 줄을 다시 뒤져 `"type":"image"` 를
+    /// 찾지 않는다 — 그러면 「무엇이 이미지인가」의 규칙이 두 벌이 되고, 이 저장소가 반복해서 당한
+    /// 형태다. 같은 줄에서 이미지 `Hit` 이 나왔다는 사실을 그대로 쓴다.
+    image: bool = false,
     /// 결과 **본문의 첫 바이트**(파일 절대). 펼침(AV3)이 그 자리부터 다시 읽는다.
     ///
     /// **바이트를 안 담는다** — 결과는 최대 2.8 MB 이고 세션당 12,200 개다. 자리만 들고 있다가
@@ -700,7 +730,14 @@ fn timestampKeyRel(line: []const u8, from: usize, window: usize) u32 {
 ///
 /// **호출 마커와 안 겹친다**: Codex 출력 마커는 `_output"` 까지 포함하고, Claude 결과는
 /// `"type":"tool_result"` 다. 그래서 같은 줄이 호출이자 결과로 읽히지 않는다.
-pub fn scanResultLine(line: []const u8, line_offset: u64) ?ResultRecord {
+/// `has_image` 는 **같은 줄에서 이미지 `Hit` 이 나왔나**다. 스캐너의 이미지 패스가 이미 답한 것을
+/// 그대로 받는다 — 여기서 `"type":"image"` 를 다시 찾으면 「무엇이 이미지인가」의 규칙이 두 벌이 된다.
+///
+/// 그 값이 필요한 이유는 **Claude 의 이미지 결과에는 본문이 없기** 때문이다: `content` 가 이미지
+/// 블록만 든 배열이라(실측 542/542) `"text":` 를 못 찾아 `parsed` 가 false 가 되고, 그러면 이 함수가
+/// null 을 돌려 **링크 자체가 안 선다** — 그 호출은 요약이 비고, 「전체」에서 이미지가 따로 한 줄 더
+/// 뜬다(§2.2.1 이 없애려는 바로 그 중복이다).
+pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?ResultRecord {
     if (line.len == 0 or line.len > max_line_bytes) return null;
     // compacted 는 이전 대화를 통째로 재수록한다 — 그 안의 결과를 세면 **지나간 호출**에 엉뚱한 결말이
     // 붙는다(이미지 패스가 같은 이유로 이 줄을 통째로 건너뛴다).
@@ -711,7 +748,12 @@ pub fn scanResultLine(line: []const u8, line_offset: u64) ?ResultRecord {
     if (std.mem.indexOf(u8, head, claude_tool_result_marker)) |m| {
         const id = findQuotedValueFull(line, 0, tool_use_id_key) orelse return null;
         const body = claudeBody(line, m + claude_tool_result_marker.len);
-        if (!body.parsed) return null; // 본문을 못 읽었으면 「모른다」다 — 0 줄이라 적지 않는다
+        if (!body.parsed) {
+            // 본문을 못 읽었으면 「모른다」다 — 0 줄이라 적지 않는다. **다만 이미지 결과는 다르다**:
+            // 본문이 없는 것이 아니라 본문이 **그림**이고, 그 사실은 이미 알고 있다.
+            if (!has_image) return null;
+            return .{ .id = id, .summary = .{ .found = true, .image = true } };
+        }
         return .{
             .id = id,
             .summary = .{
@@ -719,6 +761,7 @@ pub fn scanResultLine(line: []const u8, line_offset: u64) ?ResultRecord {
                 // **provider 가 적은 것만** 믿는다(계약 §2.3) — 실측 714/40,424 가 이 필드를 든다.
                 .failed = errorFlagAfter(line, body.end),
                 .lines = body.lines,
+                .image = has_image,
                 .body_offset = line_offset + body.start,
             },
         };
@@ -728,11 +771,15 @@ pub fn scanResultLine(line: []const u8, line_offset: u64) ?ResultRecord {
     {
         const id = findQuotedValueFull(line, 0, call_id_key) orelse return null;
         const body = codexBody(line, m);
-        if (!body.parsed) return null; // 위와 같은 이유
+        if (!body.parsed) {
+            if (!has_image) return null; // 위와 같은 이유
+            return .{ .id = id, .summary = .{ .found = true, .image = true } };
+        }
         return .{ .id = id, .summary = .{
             .found = true,
             .failed = codexFailed(line, body.first),
             .lines = body.lines,
+            .image = has_image,
             .body_offset = line_offset + body.start,
         } };
     }
@@ -1118,7 +1165,28 @@ pub const StreamScanner = struct {
         self.activity_partial = true;
         self.partial = true;
         self.remapPendingAfterEvict(boundary, dropped);
+        remapFoldsAfterEvict(out, boundary, dropped);
         return dropped;
+    }
+
+    /// 퇴출이 `out` 을 압축한 뒤 **접힌 이미지의 주인을 다시 맞춘다**(§2.2.1).
+    ///
+    /// ⚠️ 대기 링과 **같은 이유**로 필요하다 — 제자리 압축이 인덱스를 전부 무효화한다. 다만 이쪽은
+    /// 결과가 더 나쁘다: 대기 링이 어긋나면 남의 줄에 결말이 붙지만, 접기가 어긋나면 **엉뚱한 호출로
+    /// 접히거나**, 주인이 버려진 이미지가 「전체」에서 **통째로 사라진다**.
+    ///
+    /// 주인을 잃은 이미지는 **접기를 푼다** — 그때 그 이미지는 더 이상 남의 줄과 겹치지 않으므로
+    /// 「전체」에 제 줄로 서는 것이 맞다.
+    fn remapFoldsAfterEvict(out: *std.ArrayList(Hit), boundary: usize, dropped: usize) void {
+        if (dropped == 0) return;
+        for (out.items) |*h| {
+            if (h.fold_owner == no_fold) continue;
+            if (h.fold_owner <= boundary) {
+                h.fold_owner = no_fold; // 주인이 버려졌다
+                continue;
+            }
+            h.fold_owner -= @intCast(dropped);
+        }
     }
 
     /// 방금 줄에서 나온 `Hit` 들을 받아들인다.
@@ -1156,14 +1224,38 @@ pub const StreamScanner = struct {
     ///
     /// **줄 수로 창을 고정하지 않는다** — Codex 는 사이에 `reasoning` 이 끼어 최대 48 줄 뒤다. 대신
     /// 기다리는 호출의 **개수**로 유계다(`max_pending_calls`).
-    fn linkResult(self: *StreamScanner, line: []const u8, line_offset: u64, out: *std.ArrayList(Hit)) void {
+    fn linkResult(
+        self: *StreamScanner,
+        line: []const u8,
+        line_offset: u64,
+        out: *std.ArrayList(Hit),
+        added_from: usize,
+    ) void {
         // **기다리는 호출이 없으면 결과를 볼 이유가 없다.** 결과 탐색은 줄마다 도는 일이라, 이 한 줄이
         // 상한에 걸린 큰 파일에서 그 비용을 통째로 없앤다.
         if (self.pending_live == 0) return;
-        const rec = scanResultLine(line, line_offset) orelse return;
+        // **이 줄에서 이미지가 나왔나**는 이미 답이 나와 있다(위의 `scanLine`). 그 사실을 결과 해석에
+        // 넘긴다 — 줄을 다시 뒤져 마커를 찾으면 규칙이 두 벌이 된다.
+        var has_image = false;
+        for (out.items[@min(added_from, out.items.len)..]) |h| {
+            if (h.kind.isImage()) {
+                has_image = true;
+                break;
+            }
+        }
+        const rec = scanResultLine(line, line_offset, has_image) orelse return;
         const id = line[rec.id.start .. rec.id.start + rec.id.len];
         const idx = self.takePending(id) orelse return;
-        if (idx < out.items.len) out.items[idx].result = rec.summary;
+        if (idx >= out.items.len) return;
+        out.items[idx].result = rec.summary;
+        if (!has_image) return;
+        // **이 줄의 이미지들은 그 호출의 결과다.** 「전체」가 이 표시로 접는다(§2.2.1).
+        //
+        // 한 줄의 이미지 전부에 같은 주인을 준다 — 실측(542/542)에서 이미지 결과의 `content` 는
+        // **이미지 블록만** 들고, 사본(`toolUseResult`)은 그 앞에서 이미 접혔다.
+        for (out.items[@min(added_from, out.items.len)..]) |*h| {
+            if (h.kind.isImage()) h.fold_owner = idx;
+        }
     }
 
     /// 방금 담은 호출들의 id 를 **복사해** 든다. 그 줄은 다음 청크에서 이월 버퍼와 함께 사라진다.
@@ -1271,7 +1363,7 @@ pub const StreamScanner = struct {
                 if (!skip) {
                     // **결과를 먼저, 호출을 나중에.** 한 줄이 둘 다일 수는 없지만(마커가 배타적이다),
                     // 순서를 이렇게 두면 「자기 자신에게 결말을 붙이는」 경로가 원리적으로 없다.
-                    self.linkResult(line, base + used, out);
+                    self.linkResult(line, base + used, out, added_from);
                     try self.noteCalls(allocator, line, out, added_from);
                 }
             } else {
@@ -2279,6 +2371,89 @@ test "활동: 상한을 넘으면 **오래된 쪽**을 버린다 — 최신이 �
     try testing.expect(!std.mem.eql(u8, first_label, "0"));
 }
 
+test "접기: 퇴출이 주인을 버리면 접기도 풀린다 — 이미지가 「전체」에서 사라지지 않게 (§2.2.1 적대적)" {
+    // ⚠️ **접기는 자리(인덱스)로 매어 있다.** 퇴출은 `out` 을 제자리 압축하므로 그 자리를 전부
+    // 무효화한다 — 대기 링이 같은 이유로 `remapPendingAfterEvict` 를 갖는다. 접기를 안 맞추면
+    // 결과가 더 나쁘다: 주인이 버려진 이미지가 **접힌 채 남아 「전체」에서 통째로 사라진다.**
+    //
+    // 실측 최악 세션은 활동이 상한의 11.1 배라 이 길은 상상이 아니다.
+    const allocator = testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+
+    const call_head =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_
+    ;
+    const call_tail =
+        \\","name":"Bash","input":{"description":"x"}}]}}
+    ;
+    // 이미지 결과 하나 — 실측 키 순서(`tool_use_id` → `type` → `content`)를 따른다.
+    const img_head =
+        \\{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_
+    ;
+    const img_tail =
+        \\","type":"tool_result","content":[{"type":"image","source":{"type":"base64","data":"AAAABBBB","media_type":"image/png"}}]}]}}
+    ;
+
+    // 이른 것 하나(반드시 버려진다) · 늦은 것 하나(반드시 남는다).
+    const early_id = "E";
+    const late_id = "L";
+    const total = max_activity_hits_per_file + max_activity_hits_per_file / 4;
+
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        var buf: [24]u8 = undefined;
+        const id = if (i == 0)
+            early_id
+        else if (i == total - 1)
+            late_id
+        else
+            std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable;
+        try text.appendSlice(allocator, call_head);
+        try text.appendSlice(allocator, id);
+        try text.appendSlice(allocator, call_tail);
+        try text.append(allocator, '\n');
+        // 그 호출의 결과가 곧바로 이미지인 경우는 처음과 끝뿐이다.
+        if (i == 0 or i == total - 1) {
+            try text.appendSlice(allocator, img_head);
+            try text.appendSlice(allocator, id);
+            try text.appendSlice(allocator, img_tail);
+            try text.append(allocator, '\n');
+        }
+    }
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    try scanner.feed(allocator, text.items, &hits);
+    try testing.expect(scanner.activity_partial); // 실제로 퇴출이 돌았다
+
+    // 이미지는 **둘 다 살아 있다** — 퇴출은 활동만 버린다.
+    var images: usize = 0;
+    var folded: usize = 0;
+    var loose: usize = 0;
+    for (hits.items) |h| {
+        if (!h.kind.isImage()) continue;
+        images += 1;
+        if (h.fold_owner == no_fold) {
+            loose += 1;
+            continue;
+        }
+        folded += 1;
+        // ① **가리키는 자리가 배열 안이고, 그것이 활동이다.** 어긋나면 남의 줄로 접힌다.
+        try testing.expect(h.fold_owner < hits.items.len);
+        try testing.expect(!hits.items[h.fold_owner].kind.isImage());
+        // ② 그리고 그 호출은 **결과가 이미지라고 알고 있다** — 양쪽이 같은 사실을 말한다.
+        try testing.expect(hits.items[h.fold_owner].result.image);
+    }
+    try testing.expectEqual(@as(usize, 2), images);
+    // ③ 주인이 버려진 쪽은 **접기가 풀렸다**(그래야 「전체」에 제 줄로 선다).
+    try testing.expectEqual(@as(usize, 1), loose);
+    // ④ 살아남은 쪽은 **여전히 접혀 있다**(접기를 통째로 포기하지 않았다).
+    try testing.expectEqual(@as(usize, 1), folded);
+}
+
 test "활동: Codex 호출 마커는 결과 레코드에 걸리지 않는다 — 방어를 직접 시험한다" {
     // **위 판정자만으로는 부족했다.** 뮤테이션으로 마커에서 닫는 따옴표를 빼도 그 판정자가 통과했다 —
     // 실제로 막고 있던 것은 마커가 아니라 「결과 레코드에 `name` 이 없다」는 성질이었기 때문이다
@@ -2365,6 +2540,94 @@ test "활동 결말: Claude 결과가 바로 다음 줄이면 붙고, is_error �
     try testing.expectEqual(@as(u32, 1), out.items[1].result.lines);
     // **우리가 판정한 것이 아니다** — provider 가 적은 `is_error` 다(계약 §2.3).
     try testing.expect(out.items[1].result.failed);
+}
+
+test "접기: 결과가 이미지인 Claude 호출은 한 줄이다 (§2.2.1)" {
+    // 픽스처의 **키 순서는 실측**이다(2026-09-08, 실제 기록 542 건): 블록 안이 `tool_use_id` → `type`
+    // → `content` 이고, `content` 는 이미지 블록만 든다. 그 배열에는 `"text"` 가 없어서 본문 파서가
+    // 되돌아가는데, 그러면 **링크 자체가 안 서서** 그 호출은 결말이 비고 이미지가 따로 한 줄 더 뜬다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01AB","name":"Read","input":{"file_path":"/tmp/shot.png"}}]}}
+        \\{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01AB","type":"tool_result","content":[{"type":"image","source":{"type":"base64","data":"AAAABBBB","media_type":"image/png"}}]}]},"uuid":"u","timestamp":"2026-09-08T01:00:00.000Z"}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+
+    // 호출 하나 + 이미지 하나. **이미지가 사라지는 것이 아니다** — 「이미지」 필터는 그대로 본다.
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expect(!out.items[0].kind.isImage());
+    try testing.expect(out.items[1].kind.isImage());
+
+    // ① 호출은 이제 **결말을 안다**(전에는 본문 파싱 실패로 링크가 안 섰다).
+    try testing.expect(out.items[0].result.found);
+    try testing.expect(out.items[0].result.image);
+    try testing.expectEqual(@as(u32, 0), out.items[0].result.lines); // 셀 줄이 없다
+    try testing.expect(!out.items[0].result.failed);
+
+    // ② 이미지는 **그 호출로 접힌다**. 「전체」가 이 값으로 두 줄을 한 줄로 만든다.
+    try testing.expectEqual(@as(u32, 0), out.items[1].fold_owner);
+    // ③ 호출 자신은 접히지 않는다 — 접히는 것은 겹치는 쪽뿐이다.
+    try testing.expectEqual(no_fold, out.items[0].fold_owner);
+}
+
+test "접기: Codex 이미지 결과는 텍스트도 함께 온다 — 줄 수를 지우지 않는다 (§2.2.1)" {
+    // 실측(2026-09-08): Codex 의 이미지 결과는 `output` 이 `[{text}, …, {input_image}]` 다. 그래서
+    // **본문이 있다** — 「이미지니까 이미지라고만 적는다」로 뭉개면 provider 가 적어 준 말을 지운다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"timestamp":"2026-09-08T01:00:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"c1","call_id":"call_9","name":"view_image","input":"{\"path\":\"/tmp/a.png\"}"}}
+        \\{"timestamp":"2026-09-08T01:00:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","id":"c2","call_id":"call_9","output":[{"type":"input_text","text":"attached image"},{"type":"input_image","image_url":"data:image/png;base64,CCCCDDDD"}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expect(!out.items[0].kind.isImage());
+    try testing.expect(out.items[1].kind.isImage());
+
+    try testing.expect(out.items[0].result.found);
+    try testing.expect(out.items[0].result.image);
+    // **줄 수가 살아 있다** — 본문이 있기 때문이다(Claude 쪽과 갈리는 지점).
+    try testing.expect(out.items[0].result.lines > 0);
+    try testing.expectEqual(@as(u32, 0), out.items[1].fold_owner);
+}
+
+test "접기: 사용자가 붙인 이미지는 안 접힌다 — 부른 호출이 없다 (§2.2.1)" {
+    // 실측에서 Codex `message`(role=user) 이미지가 49 건이었다. 그것들은 **결과가 아니라 입력**이라
+    // 접을 주인이 없다 — 접으면 「전체」에서 통째로 사라진다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01AB","name":"Bash","input":{"command":"ls","description":"목록"}}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"EEEEFFFF","media_type":"image/png"}}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expect(out.items[1].kind.isImage());
+    try testing.expectEqual(no_fold, out.items[1].fold_owner);
+    // 그 호출은 결말을 못 찾은 채로 남는다 — 남의 이미지를 자기 결과라고 우기지 않는다.
+    try testing.expect(!out.items[0].result.found);
+}
+
+test "접기: id 가 다르면 남의 이미지로 접히지 않는다 (§2.2.1 적대적)" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01AB","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}
+        \\{"parentUuid":"p","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_ZZZZ","type":"tool_result","content":[{"type":"image","source":{"type":"base64","data":"AAAABBBB","media_type":"image/png"}}]}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expectEqual(no_fold, out.items[1].fold_owner); // 주인을 못 찾았으면 제 줄로 선다
+    try testing.expect(!out.items[0].result.found);
 }
 
 test "활동 결말: Codex 결과가 몇 줄 뒤여도 붙는다 — 사이에 reasoning 이 낀다 (AV2)" {

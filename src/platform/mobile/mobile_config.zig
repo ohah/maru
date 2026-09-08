@@ -46,9 +46,21 @@ pub const FontConfig = struct {
     /// 유지하면서 더 보고 싶다). 낮추면 글자는 그대로 두고 줄만 늘릴 수 있다.
     line_height: u32 = 100,
 
+    /// OS 의 **접근성 글자 크기**를 따라간다(iOS Dynamic Type · Android `fontScale`).
+    ///
+    /// **기본이 켬이다 — `theme.follow-system`(기본 끔)과 반대다.** 테마는 취향이라 사용자가
+    /// 고르기 전에는 파일 색을 지키는 것이 맞지만, 글자 크기는 **사용자가 이미 OS 에 대고 고른
+    /// 것**이다. 그 설정을 안 보는 앱은 접근성 관점에서 고장 난 앱이고, 두 플랫폼의 지침도
+    /// 그렇게 말한다. 끄면 `size` 만 쓴다.
+    ///
+    /// 배율은 `size` 에 **곱해지고**, 결과는 `size` 와 같은 범위로 자른다 — 96px 셀 상한
+    /// (`MARU_ATLAS_CELL_MAX`) 위로 올라가 봐야 다시 확대돼 흐려질 뿐이다.
+    follow_system: bool = true,
+
     pub const schema = .{
         .size = theme.Meta{ .doc = .cfg_font_size, .range = .{ 12, 40 }, .widget = .number },
         .line_height = theme.Meta{ .doc = .cfg_mob_font_line_height, .range = .{ 60, 200 }, .widget = .number },
+        .follow_system = theme.Meta{ .doc = .cfg_font_follow_system, .widget = .toggle },
     };
 };
 

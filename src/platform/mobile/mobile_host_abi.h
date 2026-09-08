@@ -242,6 +242,16 @@ void maru_mobile_load_config(const unsigned char *bytes, unsigned long len);
    `theme.follow-system` 이 꺼져 있으면 코어가 무시한다 — host 는 그 설정을 안 본다. */
 void maru_mobile_set_system_appearance(unsigned int is_dark);
 
+/* 시스템 **글자 배율**(접근성)을 코어에 알린다 — `scale_milli` 는 ×1000 이고 **0 은 「모른다」**다.
+   외관과 같은 계약이다: **생성 직후 한 번, 그리고 바뀔 때마다**(iOS `traitCollectionDidChange`
+   에서 `preferredContentSizeCategory` 가 바뀐 그 자리, Android `onConfigurationChanged`).
+   `font.follow-system` 이 꺼져 있으면 코어가 무시한다 — host 는 그 설정을 안 본다.
+
+   **셀 크기가 이 값에 딸려 움직인다.** 코어가 실효 글자 크기를 다시 정하면
+   `maru_mobile_atlas_cell_h()` 가 달라지고, host 는 그 프레임에 아틀라스를 **다시 구워야** 한다
+   (두 host 다 `maru_mobile_build` 앞에서 그 비교를 이미 하고 있으므로 따로 할 일은 없다). */
+void maru_mobile_set_system_font_scale(unsigned int scale_milli);
+
 /* 이번 `maru_mobile_build` 가 낸 그림이 **지난 프레임과 다른가**(1=그려야 한다). build 뒤에 읽는다.
    0 이면 host 는 GPU 작업(획득·제출·프레젠트)을 통째로 건너뛴다 — 터미널은 대부분의 시간이
    정지 화면이라 여기서 얻는 것이 가장 크다(M14).

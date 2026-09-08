@@ -151,24 +151,98 @@ test "정책 경계: 굽는 셀은 코어가 정하고, 다시 굽기는 «build
     try std.testing.expectEqual(@as(usize, 1), count(ios, "if (_atlasFaces[s]) CFRelease(_atlasFaces[s]);"));
 }
 
-/// `signature` 로 시작하는 함수 몸통 안에 `needle` 이 **없어야** 한다.
-/// 몸통은 그 자리부터 열 0 의 `}` 까지다(두 host 의 코드 스타일이 그렇다).
+test "정책 경계: 시스템 글자 배율은 «실어 나르기만» 한다 (M13c)" {
+    // **따라갈지도, 얼마까지 키울지도 코어가 든다.** host 가 그것을 알면 두 플랫폼이 갈리고,
+    // 「iOS 는 따라가는데 Android 는 안 따라간다」 같은 결함이 화면으로만 드러난다.
+    const allocator = std.testing.allocator;
+    const ios = try readSource(allocator, "src/platform/ios/ios_app_host.m");
+    defer allocator.free(ios);
+    const java = try readSource(allocator, "src/platform/android/MaruActivity.java");
+    defer allocator.free(java);
+    const android = try readSource(allocator, "src/platform/android/android_app_host.c");
+    defer allocator.free(android);
+    const manifest = try readSource(allocator, "src/platform/android/AndroidManifest.xml");
+    defer allocator.free(manifest);
+
+    // 두 host 가 코어에 싣는다.
+    try std.testing.expect(count(ios, "maru_mobile_set_system_font_scale(") > 0);
+    try std.testing.expect(count(android, "maru_mobile_set_system_font_scale(") > 0);
+
+    // **host 는 범위를 안 자른다.** 자르는 자리가 둘이 되면 두 플랫폼이 다른 상한을 갖는다.
+    // 글자 세기로는 못 잡는다 — 「안 본다」고 적은 **주석**까지 세기 때문이다(그렇게 짰다가
+    // 판정자가 자기 설명문에 걸렸다). 그러니 **어길 수 있는 자리**, 즉 그 함수 몸통을 본다.
+    try expectAbsentFromBody(java, "private void applySystemFontScale() {", "Math.min");
+    try expectAbsentFromBody(java, "private void applySystemFontScale() {", "Math.max");
+    try expectAbsentFromBody(ios, "- (void)reportSystemFontScale {", "MIN(");
+    try expectAbsentFromBody(ios, "- (void)reportSystemFontScale {", "MAX(");
+
+    // **iOS 는 배율 표를 스스로 만들지 않는다.** 카테고리 이름에 붙은 실제 배율은 UIKit 이
+    // 소유하고 iOS 판마다 바뀔 수 있다 — `UIFontMetrics` 에게 물어야 접근성 크기(AX1~AX5)까지
+    // 한 자리에서 맞는다.
+    try std.testing.expect(count(ios, "UIFontMetrics") > 0);
+    try std.testing.expectEqual(@as(usize, 0), count(ios, "UIContentSizeCategoryAccessibility"));
+
+    // **외관과 «따로» 본다.** 한 trait 변화에 둘 다 실려 오지 않는다 — 하나의 `if` 로 묶으면
+    // 글자 크기만 바뀐 변화를 놓친다.
+    // **콜백 몸통을 본다** — 글자 세기로는 못 잡는다. 이 이름은 위 `reportSystemFontScale` 의
+    // 설명 주석에도 있어서, 콜백에서 통째로 지운 변이가 「어딘가 있다」로 초록이었다.
+    try expectPresentInBody(ios, "- (void)traitCollectionDidChange:", "preferredContentSizeCategory");
+    try expectPresentInBody(ios, "- (void)traitCollectionDidChange:", "reportSystemFontScale");
+    try expectPresentInBody(ios, "- (void)didMoveToWindow {", "reportSystemFontScale");
+
+    // **Android 는 재생성 말고 그 자리에서 받는다.** manifest 에 `fontScale` 이 없으면 액티비티가
+    // 통째로 다시 서서 창·스왑체인·아틀라스가 전부 다시 만들어지고 화면이 한 번 끊긴다.
+    try std.testing.expect(count(manifest, "uiMode|fontScale") > 0);
+
+    // **두 자리 다 알려야 한다** — 뜬 채로 바뀌는 것(`onConfigurationChanged`)과 돌아오는 것
+    // (`onResume`)은 다른 길이다. 「어딘가 한 번 부른다」로 재면 한쪽을 지워도 초록이다:
+    // 실제로 `onConfigurationChanged` 쪽을 지운 변이가 순서 단언을 빠져나갔다(짝이 `onResume`
+    // 에도 있어서 그쪽으로 맞아 버렸다).
+    try expectPresentInBody(java, "public void onConfigurationChanged(", "applySystemFontScale();");
+    try expectPresentInBody(java, "protected void onResume() {", "applySystemFontScale();");
+}
+
+/// `signature` 로 여는 함수의 **몸통**. 없으면 오류다.
 ///
 /// **정의만 본다 — 선언은 건너뛴다.** 처음에 첫 자리를 그냥 썼다가, Android 의 앞선 프로토타입
 /// (`static void growAtlas(struct android_app *app);`)에 걸려 엉뚱한 몸통을 재고 변이가 초록으로
 /// 빠져나갔다. 그 줄에 `{` 가 있어야 정의다.
-fn expectAbsentFromBody(src: []const u8, signature: []const u8, needle: []const u8) !void {
+///
+/// **닫는 자리는 «서명의 들여쓰기» 로 찾는다.** 열 0 의 `}` 로 고정하면 Java 처럼 클래스 안에
+/// 4칸 들여쓴 메서드에서 몸통이 파일 끝까지 늘어나 옆 메서드의 내용까지 보게 된다 — 그러면
+/// 「이 콜백이 부르는가」가 「어딘가 부르는가」로 바뀌어 변이가 빠져나간다(실제로 겪었다).
+fn bodyOf(src: []const u8, signature: []const u8) ![]const u8 {
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, src, from, signature)) |at| {
         from = at + signature.len;
         const line_end = std.mem.indexOfScalarPos(u8, src, at, '\n') orelse src.len;
         if (std.mem.indexOfScalar(u8, src[at..line_end], '{') == null) continue; // 선언이다
+        const line_start = if (std.mem.lastIndexOfScalar(u8, src[0..at], '\n')) |nl| nl + 1 else 0;
+        var closer_buf: [34]u8 = undefined;
+        const indent = at - line_start;
+        if (indent + 3 > closer_buf.len) return error.IndentTooDeep;
+        closer_buf[0] = '\n';
+        @memset(closer_buf[1 .. 1 + indent], ' ');
+        closer_buf[1 + indent] = '}';
+        closer_buf[2 + indent] = '\n';
+        const closer = closer_buf[0 .. 3 + indent];
         const rest = src[at..];
-        const end = std.mem.indexOf(u8, rest, "\n}\n") orelse rest.len;
-        if (std.mem.indexOf(u8, rest[0..end], needle) != null) return error.NeedleInBody;
-        return;
+        const end = std.mem.indexOf(u8, rest, closer) orelse rest.len;
+        return rest[0..end];
     }
     return error.DefinitionMissing;
+}
+
+/// 그 몸통 안에 `needle` 이 **있어야** 한다.
+fn expectPresentInBody(src: []const u8, signature: []const u8, needle: []const u8) !void {
+    const body = try bodyOf(src, signature);
+    if (std.mem.indexOf(u8, body, needle) == null) return error.NeedleMissingFromBody;
+}
+
+/// 그 몸통 안에 `needle` 이 **없어야** 한다.
+fn expectAbsentFromBody(src: []const u8, signature: []const u8, needle: []const u8) !void {
+    const body = try bodyOf(src, signature);
+    if (std.mem.indexOf(u8, body, needle) != null) return error.NeedleInBody;
 }
 
 /// `later` 바로 앞에 `earlier` 가 **같은 함수 안에** 있는가.

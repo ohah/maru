@@ -60,6 +60,7 @@ public class MaruActivity extends android.app.NativeActivity {
 
     /** 시스템 외관이 다크인지(`theme.follow-system` 이 켜졌을 때만 코어가 쓴다). */
     private static native void nativeSystemAppearance(int isDark);
+    private static native void nativeSystemFontScale(int scaleMilli);
 
     /** 소프트 키보드가 덮는 높이(px). 레이아웃 가용 높이에서 뺀다.
      *
@@ -594,12 +595,23 @@ public class MaruActivity extends android.app.NativeActivity {
         nativeSystemAppearance(mode == android.content.res.Configuration.UI_MODE_NIGHT_YES ? 1 : 0);
     }
 
+    /** 시스템 **글자 배율**(접근성)을 코어에 그대로 싣는다(M13c).
+     *
+     *  **여기서 판단하지 않는다** — 따라갈지(`font.follow-system`)도, 얼마까지 키울지(범위)도
+     *  코어가 든다. Java 가 그것을 알면 두 플랫폼이 갈린다. */
+    private void applySystemFontScale() {
+        float scale = getResources().getConfiguration().fontScale;
+        nativeSystemFontScale(scale > 0f ? Math.round(scale * 1000f) : 0);
+    }
+
     @Override
     public void onConfigurationChanged(android.content.res.Configuration cfg) {
         super.onConfigurationChanged(cfg);
         // 액티비티가 `configChanges` 로 회전·야간 모드를 직접 받는다(재생성 없음) — 그래서 여기서
         // 다시 알려야 한다. 안 그러면 앱이 떠 있는 채로 다크를 켰을 때 그대로다.
         applySystemAppearance();
+        // 글자 배율도 같은 이유로 여기서 다시 알린다 — `fontScale` 은 이 콜백으로 온다.
+        applySystemFontScale();
     }
 
     @Override
@@ -607,6 +619,7 @@ public class MaruActivity extends android.app.NativeActivity {
         super.onResume();
         applyLongPressTimeout();
         applySystemAppearance();
+        applySystemFontScale();
         // **재접속은 여기서 안 정한다.** 돌아오면 창이 다시 서면서 config 를 다시 읽고
         // (docs/mobile-config.md §7), 브리지가 "원격 세션이 없으면" 붙어 달라고 요청한다 —
         // 그 판단이 여기 또 있으면 두 자리가 갈린다(SSH 에는 재개가 없어 되살리기는 없다).

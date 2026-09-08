@@ -145,6 +145,52 @@ pub fn resetSystemAppearanceForTest() void {
     system_is_dark = null;
 }
 
+/// host 가 마지막으로 알려 준 **시스템 글자 배율**(×1000). `null` 이면 아직 못 들었다 — 그때는
+/// `font.follow-system` 이 켜져 있어도 파일 크기를 쓴다(모르는 값으로 화면을 바꾸지 않는다).
+var system_font_scale_milli: ?u32 = null;
+
+/// 시스템 글자 배율을 host 가 알려 준다(iOS Dynamic Type · Android `Configuration.fontScale`).
+/// **생성 직후 한 번, 그리고 바뀔 때마다**다 — 외관과 같은 계약이고 host 도 같은 콜백에서 부른다.
+///
+/// **0 은 「모른다」다.** host 가 값을 못 읽었을 때 0 을 넘기면 되고, 그러면 파일 크기를 쓴다.
+pub export fn maru_mobile_set_system_font_scale(scale_milli: u32) void {
+    system_font_scale_milli = if (scale_milli == 0) null else scale_milli;
+}
+
+/// 지금 화면에 쓸 글자 크기. **여기가 `font.follow-system` 이 사는 유일한 자리다.**
+///
+/// `activeTheme` 과 같은 모양이다 — config 를 안 고치고 **그릴 때** 정한다. 그래서 설정 화면의
+/// 「폰트 크기」 줄은 파일이 말하는 것을 그대로 보이고(시스템이 키운 값을 거기 비추면 사용자가
+/// 안 고른 것을 고른 것처럼 읽는다), 저장 경로가 시스템 배율을 실을 길 자체가 없다.
+///
+/// **결과를 `size` 와 같은 범위로 자른다.** 접근성 배율은 3배도 넘을 수 있는데(iOS 의 큰 글씨
+/// 접근성 크기), 셀 상한(`MARU_ATLAS_CELL_MAX`) 위로 올라가면 어차피 다시 확대돼 흐려진다 —
+/// 범위는 스키마가 소유한다(두 곳에 숫자를 적으면 갈린다).
+fn activeFontSize() u32 {
+    const c = cfg();
+    if (!c.font.follow_system) return c.font.size;
+    const scale = system_font_scale_milli orelse return c.font.size;
+    const lo: u32 = mobile_config.FontConfig.schema.size.range.?[0];
+    const hi: u32 = mobile_config.FontConfig.schema.size.range.?[1];
+    const want = @as(u64, c.font.size) * scale / 1000;
+    return @intCast(@min(@as(u64, hi), @max(@as(u64, lo), want)));
+}
+
+/// 지금 따라가는 중인가(판정자용). 켜져 있어도 host 가 아직 안 알려 줬으면 **안 따라간다**.
+pub fn followingSystemFontScale() bool {
+    return cfg().font.follow_system and system_font_scale_milli != null;
+}
+
+/// 지금 쓰는 실효 글자 크기(판정자용).
+pub fn activeFontSizeForTest() u32 {
+    return activeFontSize();
+}
+
+/// 「아직 못 들었다」로 되돌린다(판정자용).
+pub fn resetSystemFontScaleForTest() void {
+    system_font_scale_milli = null;
+}
+
 /// **config 가 들고 있는** 배경색 글자(판정자용). 화면 색(`terminalBackgroundColor`)과 갈라
 /// 보려고 둔다 — follow-system 이 파일을 안 건드리는지가 그 둘의 차이로 드러난다.
 pub fn configThemeBackgroundForTest() []const u8 {
@@ -3314,7 +3360,9 @@ const Run = struct {
 /// 남는가」로 갈리는데, 그 식이 여기와 레이아웃에 따로 있으면 둘이 갈린다. 원격 화면(U2)도
 /// 같은 값을 쓴다("여기서 따로 세면 본문과 갈린다" — 그 주석이 가리키던 자리가 여기다).
 fn lineHeight() i32 {
-    return @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
+    // **`font.size` 가 아니라 실효 크기다** — 시스템 접근성 글자 배율이 여기로 들어온다(M13c).
+    // 이 한 자리에서 갈라지면 아틀라스 셀·다시 굽기·레이아웃이 **전부** 따라온다.
+    return @max(1, @as(i32, @intCast(activeFontSize() * cfg().font.line_height / 100)));
 }
 
 /// 판정자용 — 지금 줄 높이(논리 px).

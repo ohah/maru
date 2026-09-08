@@ -121,6 +121,27 @@ pub fn recomputeEditorFindPublic(self: *AppSession, term: *Term) void {
     recomputeEditorFind(self, term);
 }
 
+/// 비교 뷰의 **활성 열이 바뀌었다** — 매치 목록을 그 열에서 다시 센다.
+///
+/// **이 문서가 이미 경고한 자리다**: `diffSearchSide` 를 **셋이** 읽는데(줄 배열 `findLines`·강조
+/// `diffSearchMarksFor`·막대 마커 `diffMarkerLinesFor`) 강조와 마커는 **live** 로 읽고 목록은
+/// `editor_find_matches` 에 **캐시**된다. 열이 바뀌었는데 목록을 안 세면 «화면은 왼쪽인데 결과는
+/// 오른쪽 것»이 된다 — `toggleFindDiffSide` 가 `refilterAfterRuleChange` 를 부르는 이유와 같다.
+///
+/// **명시값이 있으면 아무 일도 안 한다** — 그때는 caret 이 옮겨져도 검색 열이 안 바뀐다.
+/// **첫 매치로 되돌린다** — 목록이 통째로 달라지는 사건이라 `current` 를 들고 있으면 엉뚱한 자리다.
+pub fn diffCaretSideChanged(self: *AppSession, term: *Term, was: editor_ops.DiffSide) void {
+    if (self.chrome_host.find.diff_side != null) return;
+    if (!isEditorFindTarget(self)) return;
+    if (activeEditorTerm(self) != term) return;
+    // **실제로 바뀌었을 때만** — 같은 열을 다시 클릭할 때도 다시 세면 `current` 가 0 으로 튀어
+    // 사용자가 보던 매치를 잃는다. 판정은 `diffSearchSide` 하나로 한다(그 셋이 읽는 그 답이다).
+    if (editor_ops.diffSearchSide(self, term) == was) return;
+    self.chrome_host.find.current = 0;
+    recomputeEditorFind(self, term);
+    self.metal_dirty = true;
+}
+
 pub fn clearEditorFind(self: *AppSession) void {
     self.editor_find_matches.clearRetainingCapacity();
     self.editor_find_source = 0;

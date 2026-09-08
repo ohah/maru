@@ -4805,7 +4805,7 @@ variable을 action environment 한 곳에만 투영하고 action이 `run-profile
 profile scalar output과 기존 baseline-only stage-3 호출이 0임을 고정한다. 이 slice는 authored evidence/timing attestation fan-out,
 aggregate/publication의 profile-aware evidence 선택과 protected B 시험 tag actual signed 실측을 완료하지 않는다.
 
-### 11.99 profile-aware authored evidence와 timing attestation plan
+### 11.99 profile-aware authored evidence와 timing attestation
 
 stage 4 `authored_attestation` checkpoint와 action 호출 수는 profile에 따라 갈리지 않는다. 기존 repository-local live authored action은
 두 profile의 fixed pathname superset, 즉 durable preparation, baseline evidence, upgrade evidence, candidate manifest와 sibling timing output을

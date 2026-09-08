@@ -3346,6 +3346,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   timing 합계·overflow, alias/path/mode/link/inode drift와 owner 확립 뒤 fence 실패의 audit/reopen/cleanup 및 FD·staging residue 0을
   검증한다. 공용 `release_adapter_files` gate가 owner 인계 전 exclusive publication 실패의 same-inode cleanup·foreign replacement 보존을
   단일 출처로 맡는다.
+  Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
+  fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
+  baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B
+  manifest와 다시 교차 결속하며 timing은 preparation의 sibling에서만 fresh reopen한다.
+  `test-session-host-release-adapter-profile-authored-attestation-selector`는 Debug·ReleaseFast actual private APFS에서 두 profile의 exact 2/3
+  subject, baseline timing 부재, nested timing 거부, profile/predecessor/environment/subject drift, caller pathname copy, copied owner seal과
+  allocation fail-index unwind를 검증한다. 아직 구현 전인 범위는 projection의 fresh-process CLI serialization, profile별 2/3 GitHub
+  attestation 호출, 독립 final-fence process, bundle 검증과 live action checkpoint 결속이다.
   Upgrade-B fresh-process contract/bootstrap은 별도 `prepare-profile-candidate` command의 19개 option/value pair만 허용하고 profile 이름,
   predecessor 네 scalar, evidence/role/signer/timing/success를 argv에서 받지 않는다. predecessor·upgrade workspace와 manifest/durable/timing
   output을 포함한 모든 pathname은 disjoint이며 protected context와 hosted runner를 결속한 뒤에만 checkout-pinned CLI를 연다.

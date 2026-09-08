@@ -448,9 +448,15 @@ pub const Owner = struct {
     fn logClientClosed(self: *const Owner, index: usize, reason: ClientCloseReason) void {
         if (builtin.is_test) return;
         if (reason.isExpected() and self.producer_remaining[index] == 0) return;
+        // **안쪽 사유까지 싣는다.** 바깥 `reason` 은 「누가 닫았나」이고 `why` 는 「host 상태기가 왜
+        // 닫기로 했나」다. `client_closing` 하나가 열 가지를 뭉개던 자리가 여기다(2026-09-08).
+        const why: []const u8 = if (self.clients[index]) |client|
+            if (client.closeReason()) |r| @tagName(r) else "open"
+        else
+            "gone";
         host_log.line(
-            "session host closed client connection: slot={d} reason={s} pending_out={d} clients={d}",
-            .{ index, @tagName(reason), self.producer_remaining[index], self.activeCount() },
+            "session host closed client connection: slot={d} reason={s} why={s} pending_out={d} clients={d}",
+            .{ index, @tagName(reason), why, self.producer_remaining[index], self.activeCount() },
         );
     }
 

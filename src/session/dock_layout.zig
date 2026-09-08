@@ -19,7 +19,7 @@ pub const default_agent_sessions_right_pt: u32 = 640;
 /// 이미지 갤러리는 **격자**라 한 열짜리 목록보다 넓어야 열이 선다. 썸네일이 160px(계약 §5.2)이고 2x 디스플레이면
 /// 80pt이므로, 4열(320pt)에 여백과 스크롤 거터를 더한 자리다. **첫 값이며 격자를 실제로 그린 뒤 조정한다** —
 /// 지금은 열 수를 실측한 적이 없다.
-pub const default_image_gallery_right_pt: u32 = 420;
+pub const default_agent_activity_right_pt: u32 = 420;
 pub const min_right_pt: u32 = 120;
 /// bottom은 가로 띠라 성격이 다르다(폭이 아니라 높이). 트리 행이 몇 줄은 보여야 하므로 그대로 둔다.
 pub const default_bottom_pt: u32 = 300;
@@ -268,7 +268,7 @@ pub const Input = struct {
 pub fn defaultRightPtForView(view: dock_panel.View) u32 {
     return switch (view) {
         .agent_sessions => default_agent_sessions_right_pt,
-        .image_gallery => default_image_gallery_right_pt,
+        .agent_activity => default_agent_activity_right_pt,
         .explorer, .source_control => default_right_pt,
     };
 }

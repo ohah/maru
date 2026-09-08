@@ -34,7 +34,7 @@ const dock_view_bar = app_session_mod.dock_view_bar;
 const icons = app_session_mod.icons;
 const AgentSessionArchiveSmokeProbe = app_session_mod.AgentSessionArchiveSmokeProbe;
 const scm_dock_ops = @import("scm_dock.zig");
-const image_gallery_ops = @import("image_gallery.zig");
+const agent_activity_ops = @import("agent_activity.zig");
 const agent_dock = app_session_mod.agent_dock;
 const dock_list_scroll_ids = app_session_mod.dock_list_scroll_ids;
 const dock_list_scroll_max_entries = app_session_mod.dock_list_scroll_max_entries;
@@ -487,7 +487,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     // 클릭 없이 살아난다 — Session Dock 키 포커스를 같은 이유로 놓는 자리다.
     if (self.dock.view == .source_control and view != .source_control) scm_dock_ops.blurCommit(self);
     // 갤러리를 떠나면 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
-    if (self.dock.view == .image_gallery and view != .image_gallery) image_gallery_ops.onLeaveView(self);
+    if (self.dock.view == .agent_activity and view != .agent_activity) agent_activity_ops.onLeaveView(self);
     self.dock.view = view;
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
     // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
@@ -501,7 +501,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     // 갤러리는 **들어올 때 한 번** 훑는다(계약 §4.1) — 소스 컨트롤·아카이브와 같은 자리·같은 규율이다.
     // 폴링하지 않는다: 파일이 자란 것은 훅이 알려 준다. 진입 시점의 활성 pane 도 함께 적어 둔다 —
     // 그래야 tick 의 `refreshForFocus` 가 같은 소스를 한 번 더 훑지 않는다(계약 §2.1).
-    if (view == .image_gallery) image_gallery_ops.onEnterView(self);
+    if (view == .agent_activity) agent_activity_ops.onEnterView(self);
     if (view == .agent_sessions) {
         agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
         self.agent_session_archive_project_scope_surface_id = term_ops.activeSurface(self).id;

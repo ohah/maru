@@ -156,7 +156,7 @@ pub const Hit = struct {
     /// **통째로 사라진다** — 「없다」와 「못 봤다」를 가르는 계약이 그것을 금한다.
     ///
     /// ⚠️ 그래서 이 값은 **배열이 움직일 때마다 따라 움직여야 한다**: 퇴출(`remapFoldsAfterEvict`)과
-    /// 화면이 최신을 앞에 놓으려 뒤집을 때(`image_gallery.applyScan`) 둘이다. 대기 링(`PendingCall`)과
+    /// 화면이 최신을 앞에 놓으려 뒤집을 때(`agent_activity.applyScan`) 둘이다. 대기 링(`PendingCall`)과
     /// 같은 규율이고, 같은 이유로 판정자가 그 둘을 각각 못박는다.
     fold_owner: u32 = no_fold,
     /// 이 호출이 **어떻게 끝났나**(AV2 — 계약 §2.2·§3.2). 이미지와 결과를 못 찾은 호출은 기본값이다.

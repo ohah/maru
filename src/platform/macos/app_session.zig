@@ -101,7 +101,7 @@ const symbol_picker = @import("symbol_picker.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
-pub const image_gallery_ops = @import("app_session/image_gallery.zig");
+pub const agent_activity_ops = @import("app_session/agent_activity.zig");
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
 const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
@@ -2587,7 +2587,7 @@ const PointerGestureOwner = union(enum) {
     dock_outer_divider: struct { offset_px: f64 },
     /// 갤러리 크게 보기 팬. **직전 좌표를 든다** — 시작점이 아니라 직전 점과의 차이를 밀어야
     /// 가장자리에서 clamp 된 뒤 손을 되돌릴 때 그림이 곧바로 따라온다.
-    image_gallery_pan: struct { x: f64, y: f64 },
+    agent_activity_pan: struct { x: f64, y: f64 },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
     address_selection,
@@ -5260,9 +5260,9 @@ pub const AppSession = struct {
     debug_settings_opened: bool = false,
     /// MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 스캔이 끝나면 n 번째를 크게 연다. **첫 frame 에 열 수 없다** —
     /// 스캔이 워커라 그때는 인덱스가 비어 있다. 그래서 값을 남겨 두고 `poll` 이 결과를 받은 tick 에 연다.
-    debug_image_gallery_open: ?usize = null,
+    debug_agent_activity_open: ?usize = null,
     /// MARU_FORCE_IMAGE_GALLERY_HOVER=<n> — 그 칸에 포인터가 얹힌 것처럼 세운다(헤드리스 확인용).
-    debug_image_gallery_hover: ?usize = null,
+    debug_agent_activity_hover: ?usize = null,
     /// 캡처 전용 — `MARU_FORCE_TAB_COUNT` 이 탭을 이미 늘렸나(`applyForcedTabCount`, 한 번만).
     debug_tab_count_applied: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
@@ -5447,12 +5447,12 @@ pub const AppSession = struct {
     agent_session_archive_partial: bool = false,
     /// 이미지 갤러리 도크 뷰의 인덱스(docs/agent-image-gallery.md). **메모리 전용**이라 앱을 끄면
     /// 사라진다 — 계약 §4.5 가 디스크에 아무것도 남기지 않기로 한 결과다.
-    image_gallery: image_gallery_ops.State = .{},
+    agent_activity: agent_activity_ops.State = .{},
     /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
     /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
-    image_gallery_backend: ?agent_image_scan_backend.Backend = null,
+    agent_activity_backend: ?agent_image_scan_backend.Backend = null,
     /// 갤러리 **디코드** 워커(계약 §5.2). 스캔과 별개다 — 작업 단위가 파일이 아니라 이미지 한 장이다.
-    image_gallery_decode_backend: ?agent_image_decode_backend.Backend = null,
+    agent_activity_decode_backend: ?agent_image_decode_backend.Backend = null,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
@@ -6435,9 +6435,9 @@ pub const AppSession = struct {
             self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_scope_backend.deinit();
             // **실패해도 세션은 연다.** 갤러리 하나 때문에 창을 못 여는 것이 더 나쁘다 — null 이면
-            // `image_gallery_ops.refresh` 가 조용히 물러나고 그 뷰만 빈다(계약 §2 의 빈 상태와 같은 자리).
-            self.image_gallery_backend = agent_image_scan_backend.Backend.init(allocator, io) catch null;
-            self.image_gallery_decode_backend = agent_image_decode_backend.Backend.init(allocator, io) catch null;
+            // `agent_activity_ops.refresh` 가 조용히 물러나고 그 뷰만 빈다(계약 §2 의 빈 상태와 같은 자리).
+            self.agent_activity_backend = agent_image_scan_backend.Backend.init(allocator, io) catch null;
+            self.agent_activity_decode_backend = agent_image_decode_backend.Backend.init(allocator, io) catch null;
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -11717,7 +11717,7 @@ pub const AppSession = struct {
         //
         // 게이트는 함수 안에 있다(`ownsKeys` + 열려 있는가) — 여기서 다시 판정하면 두 곳이 갈린다.
         // **검색창이 먼저다.** 열려 있으면 글자·Backspace·Esc·Enter 를 가져간다(그 밖의 키는 안 삼킨다).
-        if (image_gallery_ops.handleSearchKey(self, event)) {
+        if (agent_activity_ops.handleSearchKey(self, event)) {
             return input_ops.keyConsumedByApp(self);
         }
         // ⌘F 로 검색창을 연다 — 터미널 찾기와 같은 손가락이다. **게이트는 `focusSearch` 안에 있다**
@@ -11726,23 +11726,23 @@ pub const AppSession = struct {
             switch (event.key) {
                 .char => |cp| cp == 'f' or cp == 'F',
                 else => false,
-            } and image_gallery_ops.focusSearch(self))
+            } and agent_activity_ops.focusSearch(self))
         {
             return input_ops.keyConsumedByApp(self);
         }
         if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift) {
-            if (event.key == .escape and image_gallery_ops.handleEscape(self)) {
+            if (event.key == .escape and agent_activity_ops.handleEscape(self)) {
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
             // ←→(↑↓)는 **크게 보기 중일 때만** 가져간다. 격자만 보고 있을 때 삼키면 터미널의
             // 히스토리 탐색이 사라진다 — `navigateOpen` 이 열려 있지 않으면 `false` 를 준다.
-            const gallery_step: i32 = switch (event.key) {
+            const activity_step: i32 = switch (event.key) {
                 .arrow_right, .arrow_down => 1,
                 .arrow_left, .arrow_up => -1,
                 else => 0,
             };
-            if (gallery_step != 0 and image_gallery_ops.navigateOpen(self, gallery_step)) {
+            if (activity_step != 0 and agent_activity_ops.navigateOpen(self, activity_step)) {
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
@@ -12103,7 +12103,7 @@ pub const AppSession = struct {
         if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
-            image_gallery_ops.searchOwnsInput(self) or self.scmCommitOwnsInput() or
+            agent_activity_ops.searchOwnsInput(self) or self.scmCommitOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
@@ -12410,11 +12410,11 @@ pub const AppSession = struct {
         // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
         // 갤러리 팬은 divider 캡처와 같은 자리에 둔다 — down 이 잡았으면 이후 drag/up 은 좌표와
         // 무관하게 이 제스처의 것이다(도크 밖으로 끌고 나가도 그림이 손을 따라온다).
-        if (self.pointerGestureIs(.image_gallery_pan) and (kind == 2 or kind == 3)) {
+        if (self.pointerGestureIs(.agent_activity_pan) and (kind == 2 or kind == 3)) {
             if (kind == 2) {
-                const g = self.pointer_gesture_owner.image_gallery_pan;
-                image_gallery_ops.panDrag(self, x_px - g.x, y_px - g.y);
-                self.pointer_gesture_owner.image_gallery_pan = .{ .x = x_px, .y = y_px };
+                const g = self.pointer_gesture_owner.agent_activity_pan;
+                agent_activity_ops.panDrag(self, x_px - g.x, y_px - g.y);
+                self.pointer_gesture_owner.agent_activity_pan = .{ .x = x_px, .y = y_px };
             } else self.finishPointerGesture();
             return true;
         }
@@ -12920,8 +12920,8 @@ pub const AppSession = struct {
                 }
                 // 갤러리는 자기 격자로 판정한다. 탐색기 행 판정을 그대로 타면 이 뷰에는 그런 행이
                 // 없어 클릭이 통째로 흘러가 버린다(소스 컨트롤이 같은 이유로 자기 분기를 둔다).
-                if (self.dock.view == .image_gallery) {
-                    if (image_gallery_ops.handleDown(self, x_px, y_px)) return;
+                if (self.dock.view == .agent_activity) {
+                    if (agent_activity_ops.handleDown(self, x_px, y_px)) return;
                 }
                 if (self.dock.view == .explorer) {
                     if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
@@ -12952,7 +12952,7 @@ pub const AppSession = struct {
             // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
             // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
             agent_dock.releaseAgentSessionDockKeyFocus(self);
-            image_gallery_ops.releaseKeyFocus(self); // 크게 보기는 그대로 두고 키보드만 놓는다
+            agent_activity_ops.releaseKeyFocus(self); // 크게 보기는 그대로 두고 키보드만 놓는다
             if (self.focus_owner != .workspace or self.pending_dock_focus != null) workspace_ops.focusWorkspaceInput(self);
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
@@ -13626,7 +13626,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, symbol_picker, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -13638,7 +13638,7 @@ pub const AppSession = struct {
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.agentSessionSearchOwnsInput()) return .agent_session_search;
         // 갤러리 검색줄. 아카이브 검색과 같은 자리(도크 상주 입력)이고, 둘은 뷰가 달라 배타적이다.
-        if (image_gallery_ops.searchOwnsInput(self)) return .image_gallery_search;
+        if (agent_activity_ops.searchOwnsInput(self)) return .agent_activity_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         if (self.chrome_host.symbol_picker.open) return .symbol_picker;
@@ -13696,8 +13696,8 @@ pub const AppSession = struct {
                 sidebar_ops.rebuildSidebar(self) catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
             },
-            .image_gallery_search => if (self.image_gallery.search.commitPreedit(self.allocator)) {
-                image_gallery_ops.rebuildFilter(self);
+            .agent_activity_search => if (self.agent_activity.search.commitPreedit(self.allocator)) {
+                agent_activity_ops.rebuildFilter(self);
             },
             .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
                 agent_dock.rebuildAgentSessionArchiveFilter(self);
@@ -15962,13 +15962,13 @@ pub const AppSession = struct {
             }
             // 갤러리도 자기 격자로 판정한다 — 같은 이유다. 그리고 **호버 갱신과 커서 판정이 한 호출**이라
             // 강조된 칸과 열리는 칸이 갈릴 수 없다.
-            if (self.dock.view == .image_gallery) {
+            if (self.dock.view == .agent_activity) {
                 if (layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
                     tab_ops.setHoveredTab(self, null);
                     self.clearHoverUrlAnchor();
-                    return if (image_gallery_ops.handleHover(self, x_px, y_px)) .link else .default;
+                    return if (agent_activity_ops.handleHover(self, x_px, y_px)) .link else .default;
                 }
-                _ = image_gallery_ops.clearHover(self);
+                _ = agent_activity_ops.clearHover(self);
             }
             // 소스 컨트롤은 자기 tree로 판정한다. 탐색기 행 판정(`fileTreeRowAt`)을 그대로 쓰면 이 뷰에는
             // 그런 행이 없어 **도크 전체가 화살표**가 된다(사용자 지적 2026-08-17).
@@ -17977,7 +17977,7 @@ pub const AppSession = struct {
         agent_dock.refreshAgentSessionArchiveProjectScopeForFocus(self); // active-surface id 비교만; root I/O는 worker
         // 갤러리의 **범위도 활성 pane 이다**(docs/agent-image-gallery.md §2.1) — 스코프 칩·저장소와 같은
         // 축으로 따라간다. 여기서도 비교는 surface id 하나이고 스캔 자체는 worker 가 한다.
-        image_gallery_ops.refreshForFocus(self);
+        agent_activity_ops.refreshForFocus(self);
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
@@ -18201,7 +18201,7 @@ pub const AppSession = struct {
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
-        image_gallery_ops.poll(self);
+        agent_activity_ops.poll(self);
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -18579,7 +18579,7 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
-            self.dropQuadsByLayer(image_gallery_ops.hover_layer); // 갤러리 호버 테두리도 per-frame — drop 과 append 를 짝짓는다.
+            self.dropQuadsByLayer(agent_activity_ops.hover_layer); // 갤러리 호버 테두리도 per-frame — drop 과 append 를 짝짓는다.
             self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(bottom)도 per-frame — drop과 append를 짝짓는다.
             // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
             // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
@@ -19199,13 +19199,13 @@ pub const AppSession = struct {
                         }
                         // IG1-d: 아직 격자가 아니라 **한 줄**이다(docs/agent-image-gallery.md). 이 슬라이스가
                         // 보이려는 것은 사슬이 이어지는지 하나다 — 훅 경로 → 스캔 → 화면. 썸네일 격자는 IG3·IG4 다.
-                        // 스캔은 여기서 하지 않는다(`image_gallery_ops.refresh` 가 뷰 진입·소스 변경 때만 돈다) —
+                        // 스캔은 여기서 하지 않는다(`agent_activity_ops.refresh` 가 뷰 진입·소스 변경 때만 돈다) —
                         // 프레임에서 읽으면 실측 최대 1,626 MB 파일을 초당 60번 훑는다.
-                        if (self.dock.view == .image_gallery and tree_content_cols > 0 and visible_rows > 0) {
+                        if (self.dock.view == .agent_activity and tree_content_cols > 0 and visible_rows > 0) {
                             // 검색줄(검색어 상한 + 앞머리 + 조합 글자)까지 담는다 — 모자라면
                             // `bufPrint` 가 실패해 **빈 줄**이 되고, 사용자는 자기가 친 글자를 잃는다.
-                            var notice_buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
-                            const notice = image_gallery_ops.noticeText(self, &notice_buf);
+                            var notice_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+                            const notice = agent_activity_ops.noticeText(self, &notice_buf);
                             if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
                                 self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
                                     .origin_x = dg.tree_content.x,
@@ -19215,16 +19215,16 @@ pub const AppSession = struct {
                             } else |_| {}
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
                             // 종류 필터 칩 — 격자든 목록이든 늘 보인다(활동 뷰 계약 §2.1).
-                            image_gallery_ops.collectFilterChips(self, &collected, pane_frame_builder, tabbar_colors);
-                            image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
+                            agent_activity_ops.collectFilterChips(self, &collected, pane_frame_builder, tabbar_colors);
+                            agent_activity_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
                             // 활동 필터에서는 격자 대신 **줄 목록**이 그 자리를 쓴다(활동 뷰 계약 §2.1).
-                            image_gallery_ops.collectActivityList(self, &collected, pane_frame_builder, tabbar_colors);
+                            agent_activity_ops.collectActivityList(self, &collected, pane_frame_builder, tabbar_colors);
                             // 크게 보기 아래 「그때 무슨 얘기였나」. 터미널이 alt screen 이라 그 이력을
                             // 안 갖고 있고 훅·CLI 어디에도 「그 자리로 가라」가 없으므로, 트랜스크립트를
                             // 읽는 갤러리가 직접 보여준다(실측 94%에서 나오고 전부 라벨과 다른 정보다).
-                            image_gallery_ops.collectOpenContext(self, &collected, pane_frame_builder, tabbar_colors);
+                            agent_activity_ops.collectOpenContext(self, &collected, pane_frame_builder, tabbar_colors);
                             // 활동 줄을 펼치면 **그때 받은 명령·결과 전문**이 같은 자리에 뜬다(AV3).
-                            image_gallery_ops.collectOpenDetail(self, &collected, pane_frame_builder, tabbar_colors);
+                            agent_activity_ops.collectOpenDetail(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -19477,8 +19477,8 @@ pub const AppSession = struct {
                 // IG3-c2 이미지 갤러리 타일: 배경 이미지와 **같은 패턴**으로 프레임 이미지 채널에 얹는다
                 // (예약 id·live 집합·generation 1회 업로드). 렌더러를 고치지 않고 kitty graphics 의
                 // 텍스처 캐시·image quad 인프라를 그대로 재사용한다. 갤러리 뷰가 아니면 즉시 돌아온다.
-                image_gallery_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
-                image_gallery_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
+                agent_activity_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
+                agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
@@ -21723,7 +21723,7 @@ pub const AppSession = struct {
         self.turn_captures.deinit(self.allocator);
         // 갤러리 인덱스도 힙이다 — `Source`는 고정 배열이지만 `hits`는 아니다. 뷰를 열어 둔 채 창을 닫으면
         // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
-        self.image_gallery.deinit(self.allocator);
+        self.agent_activity.deinit(self.allocator);
         // **워커를 거두고 나간다.** 스캔·디코드 둘 다 `deinit` 이 취소를 걸고 스레드를 join 한다 —
         // 떼어 놓으면 그 스레드가 든 할당(경로 사본)이 세션보다 오래 살아 누수로 보고된다
         // (`agent_image_scan_backend` 의 `worker_thread` 주석이 그 사고를 적고 있다).
@@ -21732,10 +21732,10 @@ pub const AppSession = struct {
         // detach 를 join 으로 바꾼 수정이 이 주석을 안 고쳤다. 그 거짓 때문에 CI 누수를 쫓다가
         // 「판정자가 워커를 안 재워서」라는 **잘못된 처방**으로 갈 뻔했다. 실측으로 껐다: 대기
         // 예산을 1 ms 로 줄여 판정자가 워커를 남긴 채 끝나게 해도 **누수가 0** 이다.
-        if (self.image_gallery_backend) |*b| b.deinit();
-        self.image_gallery_backend = null;
-        if (self.image_gallery_decode_backend) |*b| b.deinit();
-        self.image_gallery_decode_backend = null;
+        if (self.agent_activity_backend) |*b| b.deinit();
+        self.agent_activity_backend = null;
+        if (self.agent_activity_decode_backend) |*b| b.deinit();
+        self.agent_activity_decode_backend = null;
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -69036,11 +69036,11 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
                 .call_fn = "refreshAgentSessionArchiveProjectScopeForFocus(self);",
             },
             // 격자의 소스 세션 목록이 활성 pane 을 따라간다(IG1 §2.1).
-            .image_gallery => .{
-                .file = "src/platform/macos/app_session/image_gallery.zig",
+            .agent_activity => .{
+                .file = "src/platform/macos/app_session/agent_activity.zig",
                 .follow = "pub fn refreshForFocus(self: *AppSession) void {",
                 .call_file = "src/platform/macos/app_session.zig",
-                .call_mod = "image_gallery_ops.",
+                .call_mod = "agent_activity_ops.",
                 .call_fn = "refreshForFocus(self);",
             },
         };
@@ -69100,7 +69100,7 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
             "updateFileTree", //     → followActiveTerminalCwd
             "drainGitStatus", //     → followActiveTerminalRepo
             "ProjectScopeForFocus", //  agent_sessions
-            "refreshForFocus", //       image_gallery
+            "refreshForFocus", //       agent_activity
         }) |needle_frag| {
             try std.testing.expect(std.mem.indexOf(u8, body, needle_frag) != null);
         }
@@ -74856,7 +74856,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .rename,
         .sidebar_search,
         .agent_session_search,
-        .image_gallery_search,
+        .agent_activity_search,
         .find,
         .palette,
         // 심볼 피커도 텍스트를 받는 모달이라 터미널이 first responder 를 내줘야 한다(§7.5).
@@ -74898,18 +74898,18 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
             session.agent_session_archive_initialized = true;
             session.agent_session_archive_search_active = true;
         },
-        .image_gallery_search => {
+        .agent_activity_search => {
             session.dock_initialized = true;
             session.chrome_minimal = false;
             session.dock.presented = true;
             session.dock.collapsed = false;
             session.dock.side = .right;
-            dock_ops.setDockView(session, .image_gallery);
+            dock_ops.setDockView(session, .agent_activity);
             // **키보드를 쥔 상태까지 만들어야 한다.** `searchOwnsInput` 은 `ownsKeys`(도크를 눌렀다)
             // 위에 서 있다 — 그것 없이 `search_active` 만 켜면 터미널을 클릭한 뒤에도 키를 훔치는
             // 상태가 되고, 이 표는 그 잘못된 상태를 기대값으로 굳혀 버린다.
-            session.image_gallery.key_focus = true;
-            session.image_gallery.search_active = true;
+            session.agent_activity.key_focus = true;
+            session.agent_activity.search_active = true;
         },
         // pending dock focus는 live entry + async epoch가 맞아야 참이 된다(`pendingDockEntryOwnsInput`).
         // 그 조합은 파일 패널 fixture가 소유하므로 여기서는 만들지 않는다 — 기대표에는 남아 있어
@@ -76837,9 +76837,9 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
 /// 스캐너가 도구 호출까지 담기 시작했으므로(활동 뷰 계약 §4.1) `all_hits.items.len` 은 더 이상
 /// 「이미지 수」가 아니다. 그 값으로 「두 장이 왔나」를 기다리면 **활동 `Hit` 이 그 수를 미리 채워**
 /// 갱신을 안 기다리고 빠져나간다 — 실제로 그렇게 판정자 하나가 깨졌다.
-fn galleryImageHits(session: *const AppSession) usize {
+fn activityImageHits(session: *const AppSession) usize {
     var n: usize = 0;
-    for (session.image_gallery.all_hits.items) |h| {
+    for (session.agent_activity.all_hits.items) |h| {
         if (h.kind.isImage()) n += 1;
     }
     return n;
@@ -76850,12 +76850,12 @@ fn galleryImageHits(session: *const AppSession) usize {
 /// **순환 순서에 기대지 않는다.** 판정자들이 「cycleFilter 를 두 번 부르면 execs」처럼 순서를 박아
 /// 두었더니, 순서를 실측에 맞춰 바꾸는 순간(H5 — 「읽기」가 1.6% 라 첫 전환이 빈 화면이었다)
 /// 여섯 개가 한꺼번에 깨졌다. 판정자는 **의도**(어느 필터를 보고 싶은가)를 적어야 한다.
-fn cycleGalleryTo(session: *AppSession, want: image_gallery_ops.Filter) !void {
+fn cycleActivityFilterTo(session: *AppSession, want: agent_activity_ops.Filter) !void {
     var guard: usize = 0;
-    while (session.image_gallery.filter != want) {
+    while (session.agent_activity.filter != want) {
         guard += 1;
         if (guard > 8) return error.FilterNotReachable; // 순환이 그 필터에 안 닿는다
-        try std.testing.expect(image_gallery_ops.cycleFilter(session));
+        try std.testing.expect(agent_activity_ops.cycleFilter(session));
     }
 }
 
@@ -76863,28 +76863,28 @@ fn cycleGalleryTo(session: *AppSession, want: image_gallery_ops.Filter) !void {
 /// 끝나야 한다** — 안 그러면 그 스레드가 다음 판정자가 도는 동안 살아 있고, 그때 잡히는 누수가
 /// **남의 판정자에 붙는다**(CI 에서 두 번 그랬다).
 ///
-/// ⚠️ **`GalleryWait` 만으로는 모자란다.** 「built 될 때까지」 기다리는 루프는 **타임아웃으로도**
+/// ⚠️ **`ActivityWait` 만으로는 모자란다.** 「built 될 때까지」 기다리는 루프는 **타임아웃으로도**
 /// 빠져나가는데, 그때 스캔은 계속 돈다 — 로컬(빠른 기계)에서는 늘 built 가 먼저라 안 보이고
 /// CI 에서만 열리는 길이다. 그래서 판정자 끝에서 **한 번 더** 재운다.
-fn quietGalleryWorkers(session: *AppSession) void {
-    var quiet = GalleryWait.start(session.io);
+fn quietActivityWorkers(session: *AppSession) void {
+    var quiet = ActivityWait.start(session.io);
     while (quiet.pending() and
-        (session.image_gallery.scanning() or session.image_gallery.pending_len > 0))
+        (session.agent_activity.scanning() or session.agent_activity.pending_len > 0))
     {
         _ = session.tick() catch {};
     }
 }
 
-const GalleryWait = struct {
+const ActivityWait = struct {
     io: std.Io,
     deadline_ns: i96,
     ticks: usize = 0,
 
-    fn start(io: std.Io) GalleryWait {
+    fn start(io: std.Io) ActivityWait {
         return .{ .io = io, .deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + 30 * std.time.ns_per_s };
     }
 
-    fn pending(self: *GalleryWait) bool {
+    fn pending(self: *ActivityWait) bool {
         self.ticks += 1;
         if (self.ticks & 0xff != 0) return true;
         return std.Io.Clock.awake.now(self.io).nanoseconds < self.deadline_ns;
@@ -76934,94 +76934,94 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     // 하는 것이다(IG1-c 에서 그 부류를 한 번 냈다).
     const Wait = struct {
         fn until(sess: *AppSession) !void {
-            var wait = GalleryWait.start(sess.io);
+            var wait = ActivityWait.start(sess.io);
             while (wait.pending()) {
                 _ = sess.tick() catch {};
-                if (sess.image_gallery.built) return;
+                if (sess.agent_activity.built) return;
             }
             return error.ScanNeverFinished;
         }
     };
 
     // ── 에이전트가 없으면 「없다」가 아니라 「에이전트가 없다」다 ────────────────────────────
-    image_gallery_ops.refresh(session, false);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    agent_activity_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
     {
         var buf: [64]u8 = undefined;
         try std.testing.expectEqualStrings(
-            maru.i18n.t(.image_gallery_no_agent),
-            image_gallery_ops.noticeText(session, &buf),
+            maru.i18n.t(.agent_activity_no_agent),
+            agent_activity_ops.noticeText(session, &buf),
         );
     }
 
     // ── 소스가 붙으면 워커가 훑는다 ─────────────────────────────────────────────────────
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
 
     // **거는 즉시 「세는 중」이다.** 3.6 초짜리 스캔 동안 「이미지가 없습니다」라고 거짓말하지 않는다.
-    try std.testing.expect(session.image_gallery.scanning());
+    try std.testing.expect(session.agent_activity.scanning());
     {
         var buf: [64]u8 = undefined;
         try std.testing.expectEqualStrings(
-            maru.i18n.t(.image_gallery_scanning),
-            image_gallery_ops.noticeText(session, &buf),
+            maru.i18n.t(.agent_activity_scanning),
+            agent_activity_ops.noticeText(session, &buf),
         );
     }
 
     try Wait.until(session);
 
     // 이미지 둘: user 메시지 하나(media_type 있음) + tool_result 하나(없음).
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
-    try std.testing.expect(!session.image_gallery.partial);
-    try std.testing.expect(!session.image_gallery.scanning());
-    try std.testing.expectEqual(@as(u64, transcript.len), session.image_gallery.scanned_bytes);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
+    try std.testing.expect(!session.agent_activity.partial);
+    try std.testing.expect(!session.agent_activity.scanning());
+    try std.testing.expectEqual(@as(u64, transcript.len), session.agent_activity.scanned_bytes);
     // **최신이 먼저다**(IG7). 스캐너는 파일 순서로 담지만 갤러리는 뒤집어 든다 — 이 기능의 물음이
     // 「**아까** 그 스크린샷」이기 때문이다. 그래서 `[0]` 은 파일의 **마지막** 이미지(= media_type
     // 없는 tool_result 쪽)이고 `[1]` 이 첫 이미지다. 이 순서가 바뀌면 실제 세션에서 세션 맨 처음
     // 이미지만 보이게 된다(실측으로 그 상태를 확인하고 뒤집었다).
     try std.testing.expectEqual(
         maru.session.agent_image_index.Mime.unknown,
-        session.image_gallery.hits.items[0].mime,
+        session.agent_activity.hits.items[0].mime,
     );
     try std.testing.expectEqual(
         maru.session.agent_image_index.Mime.png,
-        session.image_gallery.hits.items[1].mime,
+        session.agent_activity.hits.items[1].mime,
     );
     // **오프셋이 파일 절대값인지 그 자리에서 본다.** 상대값이면 나중에 그 구간을 읽어 디코드할 때
     // 엉뚱한 바이트가 나오는데, 그때는 원인이 여기라는 것을 알기 어렵다.
     // `[1]` 이 파일의 **첫** 이미지다(최신 우선이라 뒤집혀 있다).
-    const h_first = session.image_gallery.hits.items[1];
+    const h_first = session.agent_activity.hits.items[1];
     try std.testing.expectEqualStrings("AAAABBBB", transcript[h_first.data_offset..][0..h_first.data_len]);
-    const h_last = session.image_gallery.hits.items[0];
+    const h_last = session.agent_activity.hits.items[0];
     try std.testing.expectEqualStrings("CCCC", transcript[h_last.data_offset..][0..h_last.data_len]);
 
     {
         var buf: [64]u8 = undefined;
-        const notice = image_gallery_ops.noticeText(session, &buf);
+        const notice = agent_activity_ops.noticeText(session, &buf);
         try std.testing.expect(std.mem.startsWith(u8, notice, "2"));
     }
 
     // ── 같은 소스면 다시 걸지 않는다 ────────────────────────────────────────────────────
     // 매번 걸면 실측 3.6 초짜리를 뷰에 들어올 때마다 다시 훑는다.
-    image_gallery_ops.refresh(session, false);
-    try std.testing.expect(!session.image_gallery.scanning());
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    agent_activity_ops.refresh(session, false);
+    try std.testing.expect(!session.agent_activity.scanning());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     // ── 소스가 갈리면(= `/clear` 로 새 파일) 통째로 버리고 다시 훑는다 ──────────────────
     try tmp.dir.writeFile(io, .{ .sub_path = "u.jsonl", .data = "{\"type\":\"assistant\"}\n" });
     const path2 = try std.fmt.allocPrint(allocator, "{s}/u.jsonl", .{root});
     defer allocator.free(path2);
     try std.testing.expect(term.agent_image_source.set(path2));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.until(session);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
-    try std.testing.expect(!session.image_gallery.partial); // 「비었다」이지 「못 봤다」가 아니다
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+    try std.testing.expect(!session.agent_activity.partial); // 「비었다」이지 「못 봤다」가 아니다
     {
         var buf: [64]u8 = undefined;
         try std.testing.expectEqualStrings(
-            maru.i18n.t(.image_gallery_empty),
-            image_gallery_ops.noticeText(session, &buf),
+            maru.i18n.t(.agent_activity_empty),
+            agent_activity_ops.noticeText(session, &buf),
         );
     }
 
@@ -77029,14 +77029,14 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     const missing = try std.fmt.allocPrint(allocator, "{s}/does-not-exist.jsonl", .{root});
     defer allocator.free(missing);
     try std.testing.expect(term.agent_image_source.set(missing));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.until(session);
-    try std.testing.expect(session.image_gallery.partial);
+    try std.testing.expect(session.agent_activity.partial);
     {
         var buf: [64]u8 = undefined;
         try std.testing.expectEqualStrings(
-            maru.i18n.t(.image_gallery_partial),
-            image_gallery_ops.noticeText(session, &buf),
+            maru.i18n.t(.agent_activity_partial),
+            agent_activity_ops.noticeText(session, &buf),
         );
     }
 
@@ -77044,9 +77044,9 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     // 여기서 비우고 끝내면 `deinit` 이 `hits` 를 푸는지 이 test 가 못 본다 — 뷰를 열어 둔 채 창을 닫는
     // 실제 경로가 바로 이 모양이다. test 할당자가 누수를 잡게 인덱스가 살아 있는 상태로 둔다.
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.until(session);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 }
 
 test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드한다 (IG3-b)" {
@@ -77086,16 +77086,16 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expect(session.image_gallery.built);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expect(session.agent_activity.built);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // **오프셋이 정확한지는 디코드가 증명한다.** 한 바이트만 어긋나도 base64 가 깨져 null 이 온다.
-    var img = image_gallery_ops.decodeThumbnail(session, 0) orelse return error.DecodeReturnedNull;
+    var img = agent_activity_ops.decodeThumbnail(session, 0) orelse return error.DecodeReturnedNull;
     defer img.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 2), img.width);
     try std.testing.expectEqual(@as(u32, 2), img.height);
@@ -77110,8 +77110,8 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
     try std.testing.expect(saw_red);
 
     // 범위 밖은 null — 지어내지 않는다.
-    try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 1) == null);
-    try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 999) == null);
+    try std.testing.expect(agent_activity_ops.decodeThumbnail(session, 1) == null);
+    try std.testing.expect(agent_activity_ops.decodeThumbnail(session, 999) == null);
 }
 
 test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG3-c2)" {
@@ -77155,21 +77155,21 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 격자에 자리가 있어야 한다 — 없으면 이 test 는 아무것도 검증하지 않는다(그 사실을 먼저 못박는다).
-    const area = image_gallery_ops.gridArea(session);
-    const l = maru.session.image_grid.layout(area, image_gallery_ops.gridMetrics(session), 1, 0);
+    const area = agent_activity_ops.gridArea(session);
+    const l = maru.session.image_grid.layout(area, agent_activity_ops.gridMetrics(session), 1, 0);
     try std.testing.expect(l.visible == 1);
 
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
@@ -77186,20 +77186,20 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     // `tick()` 이 프레임을 조립하며 `appendGpuImages` → `ensureTiles` 를 부르고, 디코드 워커가 푼 것을
     // 다음 tick 의 `poll` 이 수확한다. 위 spin 을 도는 동안 그 왕복이 끝났다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
-    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
-    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
+    try std.testing.expect(session.agent_activity.tiles.items[0].pixels.len > 0);
+    try std.testing.expect(session.agent_activity.tiles.items[0].uploaded);
 
     // ── ② 무엇이 실리는지 값으로 본다 ────────────────────────────────────────────────────
     // 「처음 그리는 프레임」과 같은 상태로 되돌린다. 타일을 버리면 디코드를 다시 기다려야 하므로
     // **업로드 표시만** 되돌린다 — 이 단계가 보려는 것은 디코드가 아니라 **무엇이 채널에 실리는가**다.
-    session.image_gallery.tiles.items[0].uploaded = false;
-    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    session.agent_activity.tiles.items[0].uploaded = false;
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
 
     try std.testing.expectEqual(@as(usize, 1), images.len);
     try std.testing.expectEqual(@as(usize, 1), uploads.len);
@@ -77207,7 +77207,7 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     try std.testing.expectEqual(@as(usize, 1), live.items.len);
 
     // id 가 예약 범위이고 live 집합에 들어 있다 — 안 그러면 eviction 이 텍스처를 거둬 간다.
-    try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images[0].image_id);
+    try std.testing.expectEqual(agent_activity_ops.activity_image_id_base, images[0].image_id);
     try std.testing.expectEqual(images[0].image_id, live.items[0]);
     try std.testing.expectEqual(images[0].image_id, uploads[0].image_id);
     try std.testing.expectEqual(@as(u32, 4), uploads[0].bpp);
@@ -77229,7 +77229,7 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len); // 그리기는 계속한다
     try std.testing.expectEqual(@as(usize, 0), uploads2.len); // 업로드는 한 번뿐이다
     try std.testing.expectEqual(@as(usize, 0), pixels2.len);
@@ -77278,30 +77278,30 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(image_count, session.image_gallery.count());
+    try std.testing.expectEqual(image_count, session.agent_activity.count());
 
     // 타일이 하나라도 나와야 격자를 그리는 상태다 — 그 전에는 「스캔 중」이 문구를 가진다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expect(session.image_gallery.tiles.items.len > 0);
+    try std.testing.expect(session.agent_activity.tiles.items.len > 0);
 
     const l = maru.session.image_grid.layout(
-        image_gallery_ops.gridArea(session),
-        image_gallery_ops.gridMetrics(session),
+        agent_activity_ops.gridArea(session),
+        agent_activity_ops.gridMetrics(session),
         image_count,
         0,
     );
@@ -77318,16 +77318,16 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
-    try std.testing.expectEqual(l.overflow, session.image_gallery.overflow);
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    try std.testing.expectEqual(l.overflow, session.agent_activity.overflow);
 
     var buf: [64]u8 = undefined;
     var want_buf: [64]u8 = undefined;
-    const want = maru.i18n.format(&want_buf, maru.i18n.t(.image_gallery_shown_of), &.{
+    const want = maru.i18n.format(&want_buf, maru.i18n.t(.agent_activity_shown_of), &.{
         .{ .d = @intCast(image_count - l.overflow) },
         .{ .d = @intCast(image_count) },
     });
-    try std.testing.expectEqualStrings(want, image_gallery_ops.noticeText(session, &buf));
+    try std.testing.expectEqualStrings(want, agent_activity_ops.noticeText(session, &buf));
     // 문구가 «두 수를 다 말하는지» 본다 — 어순은 언어마다 다르지만 두 숫자는 어느 쪽에도 있어야 한다.
     var shown_buf: [24]u8 = undefined;
     var total_buf: [24]u8 = undefined;
@@ -77369,27 +77369,27 @@ test "활동 뷰 펼침: 라벨이 요약이어도 펼침은 명령을 읽는다
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
-    defer quietGalleryWorkers(session);
+    dock_ops.setDockView(session, .agent_activity);
+    defer quietActivityWorkers(session);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 라벨은 **요약**이다 — 한 줄에 읽기 좋은 쪽을 고른 것이 계약이다.
-    try std.testing.expectEqualStrings("판정자를 돌린다", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqualStrings("판정자를 돌린다", session.agent_activity.labels.items[0].text());
 
-    image_gallery_ops.openAt(session, 0);
-    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expect(agent_activity_ops.isDetailOpen(session));
     // 그런데 펼침은 **명령**을 보여 준다. 대상 자리를 그대로 읽으면 같은 요약이 두 번 뜬다.
-    try std.testing.expectEqualStrings("zig build test", session.image_gallery.open.?.detail.command);
+    try std.testing.expectEqualStrings("zig build test", session.agent_activity.open.?.detail.command);
 }
 
 test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이 뜬다 (AV3)" {
@@ -77429,37 +77429,37 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
-    defer quietGalleryWorkers(session);
+    defer quietActivityWorkers(session);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     // 실행 필터로 간다(순환 순서에 기대지 않는다). **필터 전환은 도크가 키를 쥐고 있을 때만** 돈다 —
     // 터미널에서 Tab 을 뺏지 않기 위한 게이트다(계약 §8).
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // ── ① **그린 자리를 누른다.** 창은 그리기와 같은 자리에서 온다(`listWindow`).
-    const w = image_gallery_ops.listWindow(session);
+    const w = agent_activity_ops.listWindow(session);
     try std.testing.expect(w.row_h > 0);
-    const area = image_gallery_ops.gridArea(session);
-    try std.testing.expect(image_gallery_ops.handleDown(
+    const area = agent_activity_ops.gridArea(session);
+    try std.testing.expect(agent_activity_ops.handleDown(
         session,
         @floatFromInt(area.x + area.w / 2),
         @floatFromInt(area.y + w.row_h / 2),
     ));
-    try std.testing.expect(session.image_gallery.open != null);
-    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    try std.testing.expect(session.agent_activity.open != null);
+    try std.testing.expect(agent_activity_ops.isDetailOpen(session));
 
     // ── ② 본문이 **그때의 바이트**다. 라벨은 한 줄로 접힌 것이고 이쪽은 원문이다.
-    const detail = session.image_gallery.open.?.detail;
+    const detail = session.agent_activity.open.?.detail;
     try std.testing.expectEqualStrings("grep -rn foo src/", detail.command);
     try std.testing.expect(detail.has_result);
     // 결과는 **여러 줄 그대로**다 — 접혔으면 diff 도 로그도 못 읽는다.
@@ -77475,18 +77475,18 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
     }
     const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    image_gallery_ops.collectOpenDetail(session, &collected, builder, colors);
+    agent_activity_ops.collectOpenDetail(session, &collected, builder, colors);
     try std.testing.expect(collected.items.len >= 3); // 명령 + 「결과」 머리 + 결과 두 줄
 
     // ── ③b **목록은 물러난다.** 안 비키면 본문 글자가 목록 글자 위에 얹혀 둘 다 못 읽는다
     //     (적대적 검증 2 회차 — 격자가 크게 보기 앞에서 물러나는 것과 같은 규율).
     const before_list = collected.items.len;
-    image_gallery_ops.collectActivityList(session, &collected, builder, colors);
+    agent_activity_ops.collectActivityList(session, &collected, builder, colors);
     try std.testing.expectEqual(before_list, collected.items.len);
 
     // ── ④ Esc 로 닫히고 본문이 풀린다(크게 보기와 **같은 자리·같은 출구**).
-    try std.testing.expect(image_gallery_ops.handleEscape(session));
-    try std.testing.expect(session.image_gallery.open == null);
+    try std.testing.expect(agent_activity_ops.handleEscape(session));
+    try std.testing.expect(session.agent_activity.open == null);
 }
 
 test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (IG4-b)" {
@@ -77528,49 +77528,49 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
 
     // ── ① **그린 자리를 누른다.** 좌표를 지어내면 이 test 는 배치가 바뀌어도 계속 통과한다.
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
     const l = maru.session.image_grid.layout(area, m, 1, 0);
     const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
-    try std.testing.expect(image_gallery_ops.handleDown(
+    try std.testing.expect(agent_activity_ops.handleDown(
         session,
         @floatFromInt(cell.x + cell.w / 2),
         @floatFromInt(cell.y + cell.h / 2),
     ));
-    try std.testing.expect(session.image_gallery.open != null);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
-    try std.testing.expect(session.image_gallery.key_focus); // 도크를 눌렀다 = 키보드도 도크로
+    try std.testing.expect(session.agent_activity.open != null);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.open.?.hit_index);
+    try std.testing.expect(session.agent_activity.key_focus); // 도크를 눌렀다 = 키보드도 도크로
 
     // ── ② 원본이 풀릴 때까지 tick. **워커가 푼다** — main actor 는 수확만 한다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.open.?.pixels.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.open.?.pixels.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expect(session.image_gallery.open.?.pixels.len > 0);
+    try std.testing.expect(session.agent_activity.open.?.pixels.len > 0);
     // `target_side = 0` 이므로 **원본 크기 그대로**다(썸네일 경로였다면 여기서 갈린다).
-    try std.testing.expectEqual(@as(u32, 2), session.image_gallery.open.?.width);
-    try std.testing.expectEqual(@as(u32, 2), session.image_gallery.open.?.height);
+    try std.testing.expectEqual(@as(u32, 2), session.agent_activity.open.?.width);
+    try std.testing.expectEqual(@as(u32, 2), session.agent_activity.open.?.height);
 
     // ── ③ 격자가 아니라 **크게 보기 한 장만** 실린다.
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
@@ -77585,15 +77585,15 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     }
     // 「처음 그리는 프레임」과 같은 상태로 되돌린다 — 위 spin 이 도는 동안 제품 tick 이 이미 올렸다
     // (IG3-c2 가 같은 이유로 같은 되돌림을 한다). 여기서 보려는 것은 **무엇이 채널에 실리는가**다.
-    session.image_gallery.open.?.uploaded = false;
-    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    session.agent_activity.open.?.uploaded = false;
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
     try std.testing.expectEqual(@as(usize, 1), images.len);
-    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images[0].image_id);
+    try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images[0].image_id);
     try std.testing.expectEqual(@as(usize, 1), uploads.len);
     try std.testing.expectEqual(@as(usize, 2 * 2 * 4), pixels.len);
 
     // **도크 안에 그린다.** 확대하면 UV 로 자르므로, 어떤 상태에서도 뷰포트를 넘지 않아야 한다.
-    const vp = image_gallery_ops.viewportRect(session);
+    const vp = agent_activity_ops.viewportRect(session);
     try std.testing.expect(images[0].dest_x >= vp.x);
     try std.testing.expect(images[0].dest_y >= vp.y);
     try std.testing.expect(images[0].dest_x + images[0].dest_w <= vp.x + vp.w);
@@ -77602,23 +77602,23 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
 
     // 크게 보고 있으면 개수 문구를 겹쳐 내지 않는다 — 지금 보는 것과 무관한 수다.
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("", image_gallery_ops.noticeText(session, &buf));
+    try std.testing.expectEqualStrings("", agent_activity_ops.noticeText(session, &buf));
 
     // ── ④ Esc 로 닫힌다. **소유권 게이트가 있다** — 터미널로 돌아간 뒤의 Esc 는 가져가지 않는다.
-    image_gallery_ops.releaseKeyFocus(session);
-    try std.testing.expect(!image_gallery_ops.handleEscape(session));
-    try std.testing.expect(session.image_gallery.open != null); // 남의 Esc 로 닫히지 않았다
+    agent_activity_ops.releaseKeyFocus(session);
+    try std.testing.expect(!agent_activity_ops.handleEscape(session));
+    try std.testing.expect(session.agent_activity.open != null); // 남의 Esc 로 닫히지 않았다
 
-    session.image_gallery.key_focus = true;
-    try std.testing.expect(image_gallery_ops.handleEscape(session));
-    try std.testing.expect(session.image_gallery.open == null);
+    session.agent_activity.key_focus = true;
+    try std.testing.expect(agent_activity_ops.handleEscape(session));
+    try std.testing.expect(session.agent_activity.open == null);
 
     // ── **열었다 닫으면 텍스처를 다시 올린다.** 안 그러면 라벨만 남고 그림이 사라진다.
     //
     // 렌더러는 `live_ids` 에 없는 텍스처를 evict 한다(kitty K4c). 크게 보기가 격자를 대체하는 동안
     // 타일 id 가 한 프레임도 안 실리므로 전부 evict 되는데, `uploaded` 가 참으로 남으면 다음에
     // **업로드 없이 id 만** 실어 빈 자리가 된다. 사용자가 실제로 그 화면을 보고 신고했다.
-    for (session.image_gallery.tiles.items) |tile| {
+    for (session.agent_activity.tiles.items) |tile| {
         try std.testing.expect(!tile.uploaded); // 크게 보기를 지나며 「다시 올려야 함」으로 바뀌었다
     }
 
@@ -77633,9 +77633,9 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
-    try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images2[0].image_id);
+    try std.testing.expectEqual(agent_activity_ops.activity_image_id_base, images2[0].image_id);
     // **업로드가 함께 실린다** — 텍스처가 evict 됐으므로 id 만 실으면 아무것도 안 그려진다.
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
     try std.testing.expect(pixels2.len > 0);
@@ -77682,62 +77682,62 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
 
     // ── ① 기본은 이미지다. 활동이 인덱스에 있어도 갤러리는 그대로다.
-    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expectEqual(@as(usize, 1), galleryImageHits(session));
+    try std.testing.expectEqual(agent_activity_ops.Filter.images, session.agent_activity.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), activityImageHits(session));
 
     // ── ② Tab 은 **갤러리가 키를 쥐고 있을 때만** 가져간다. 안 그러면 터미널의 Tab 이 사라진다.
-    try std.testing.expect(!image_gallery_ops.cycleFilter(session));
-    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+    try std.testing.expect(!agent_activity_ops.cycleFilter(session));
+    try std.testing.expectEqual(agent_activity_ops.Filter.images, session.agent_activity.filter);
 
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
 
     // ── ③ **첫 전환이 가장 많은 것을 보여준다**(계약 §2.1 — 실측이 정한 순환 순서).
     // 「읽기」가 첫 자리였을 때는 첫 Tab 이 거의 항상 빈 화면이었다(실측 1.6%, Codex 0 건).
-    try std.testing.expect(image_gallery_ops.cycleFilter(session));
-    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expect(agent_activity_ops.cycleFilter(session));
+    try std.testing.expectEqual(agent_activity_ops.Filter.execs, session.agent_activity.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
     // **대상은 명령이 아니라 설명이다**(계약 §2.2) — 실측이 정한 순서를 화면까지 지킨다.
-    try std.testing.expectEqualStrings("foo 찾기", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqualStrings("foo 찾기", session.agent_activity.labels.items[0].text());
 
     // ── ④ 네 자리를 다 도는가. **어느 순서든** 네 번이면 제자리로 돌아와야 한다.
     var seen_reads = false;
     var seen_all = false;
     var step: usize = 0;
     while (step < 3) : (step += 1) {
-        try std.testing.expect(image_gallery_ops.cycleFilter(session));
-        switch (session.image_gallery.filter) {
+        try std.testing.expect(agent_activity_ops.cycleFilter(session));
+        switch (session.agent_activity.filter) {
             .reads => {
                 seen_reads = true;
-                try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count()); // Read 호출은 없다
+                try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count()); // Read 호출은 없다
             },
             .all => {
                 seen_all = true;
-                try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+                try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
             },
             else => {},
         }
     }
     try std.testing.expect(seen_reads and seen_all);
     // 네 번이면 제자리다 — 순환이 닫혀 있다.
-    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(agent_activity_ops.Filter.images, session.agent_activity.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는다 (적대적 B2)" {
@@ -77780,49 +77780,49 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
 
     // 격자에서 한 칸에 얹어 둔다 — 그 상태를 들고 필터를 넘긴다.
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
-    const l = maru.session.image_grid.layout(area, m, session.image_gallery.count(), 0);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
+    const l = maru.session.image_grid.layout(area, m, session.agent_activity.count(), 0);
     const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
     const cx: f64 = @floatFromInt(cell.x + cell.w / 2);
     const cy: f64 = @floatFromInt(cell.y + cell.h / 2);
-    _ = image_gallery_ops.handleHover(session, cx, cy);
-    try std.testing.expectEqual(@as(?usize, 0), session.image_gallery.hovered);
+    _ = agent_activity_ops.handleHover(session, cx, cy);
+    try std.testing.expectEqual(@as(?usize, 0), session.agent_activity.hovered);
 
     // ── ① 필터를 넘기면 얹힌 것도 없어진다. 남으면 격자 자리에 강조가 그려진다.
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     // 한 번만 넘겨도 얹힌 것이 없어져야 한다 — 어느 필터로 가든 격자를 떠난 것이기 때문이다.
-    try std.testing.expect(image_gallery_ops.cycleFilter(session));
-    try std.testing.expect(session.image_gallery.hovered == null);
+    try std.testing.expect(agent_activity_ops.cycleFilter(session));
+    try std.testing.expect(session.agent_activity.hovered == null);
     // 그 다음은 **의도**로 간다(순환 순서에 기대지 않는다).
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // ── ② 목록 위 호버는 「얹힌 칸」을 만들지 않는다.
-    _ = image_gallery_ops.handleHover(session, cx, cy);
-    try std.testing.expect(session.image_gallery.hovered == null);
+    _ = agent_activity_ops.handleHover(session, cx, cy);
+    try std.testing.expect(session.agent_activity.hovered == null);
 
     // ── ③ 목록을 눌러도 크게 보기가 열리지 않는다(도크를 눌렀다는 사실만 받는다).
-    session.image_gallery.key_focus = false;
-    try std.testing.expect(image_gallery_ops.handleDown(session, cx, cy));
-    try std.testing.expect(session.image_gallery.key_focus); // 도크는 키를 가져간다
-    try std.testing.expect(session.image_gallery.open == null); // **열리지 않는다**
+    session.agent_activity.key_focus = false;
+    try std.testing.expect(agent_activity_ops.handleDown(session, cx, cy));
+    try std.testing.expect(session.agent_activity.key_focus); // 도크는 키를 가져간다
+    try std.testing.expect(session.agent_activity.open == null); // **열리지 않는다**
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대적 E2)" {
@@ -77867,38 +77867,38 @@ test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
 
     // 네 필터를 스무 바퀴 돈다. 사이사이 tick 을 섞어 렌더·디코드 경로도 함께 탄다.
     var round: usize = 0;
     while (round < 20) : (round += 1) {
         var step: usize = 0;
         while (step < 4) : (step += 1) {
-            try std.testing.expect(image_gallery_ops.cycleFilter(session));
+            try std.testing.expect(agent_activity_ops.cycleFilter(session));
             _ = session.tick() catch {};
         }
     }
 
     // 한 바퀴가 4 걸음이므로 스무 바퀴 뒤에는 처음 자리(이미지)로 돌아와 있다.
-    try std.testing.expectEqual(image_gallery_ops.Filter.images, session.image_gallery.filter);
+    try std.testing.expectEqual(agent_activity_ops.Filter.images, session.agent_activity.filter);
     // 목록도 그대로다 — 되풀이가 상태를 갉아먹지 않았다.
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
     // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
     // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따른다 (적대적 E3)" {
@@ -77940,43 +77940,43 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
 
     // **스캔을 걸어 두고 그것이 끝나기 전에** 필터를 바꾼다.
-    image_gallery_ops.refresh(session, true);
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+    agent_activity_ops.refresh(session, true);
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(agent_activity_ops.Filter.execs, session.agent_activity.filter);
 
     // 이제 스캔이 끝나기를 기다린다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expect(session.image_gallery.built);
+    try std.testing.expect(session.agent_activity.built);
 
     // **결과가 「실행」으로 걸러져 있어야 한다** — 이미지 한 장은 여기 없다.
-    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expectEqualStrings("실행 하나", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqual(agent_activity_ops.Filter.execs, session.agent_activity.filter);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqualStrings("실행 하나", session.agent_activity.labels.items[0].text());
     // 인덱스에는 둘 다 있다(이미지 1 + 활동 1) — 걸러진 것이지 안 담긴 것이 아니다.
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.all_hits.items.len);
-    try std.testing.expectEqual(@as(usize, 1), galleryImageHits(session));
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.all_hits.items.len);
+    try std.testing.expectEqual(@as(usize, 1), activityImageHits(session));
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 「전체」는 이미지가 잘린 것도 말한다 (§2.2.1 적대적 2회차)" {
     // ⚠️ **「전체」는 두 종류를 다 담는다.** 예전 규칙(「격자면 이미지, 아니면 활동」)에서는 「전체」가
     // **활동 쪽만** 봐서, 이미지가 상한에 잘려도 아무 말을 안 했다 — 사용자는 「이미지」 필터로
     // 가야만 그 사실을 안다. 계약 §2 가 가르라고 한 「없다」와 「못 봤다」가 거기서 뭉개진다.
-    const F = image_gallery_ops.Filter;
+    const F = agent_activity_ops.Filter;
 
     // 이미지만 잘렸을 때
     try std.testing.expect(F.images.partialOf(true, false));
@@ -78000,10 +78000,10 @@ test "활동 뷰: 그림 결과라도 실패를 삼키지 않는다 (§2.2.1 적
     // provider 가 적은 실패는 우리가 가진 **유일한 근거**다(계약 §2.3). 종류를 바꿔 말한다고
     // 그것을 지우면, 화면은 실패한 호출을 성공처럼 보여 준다.
     var buf: [64]u8 = undefined;
-    const img = maru.i18n.t(.image_gallery_result_image);
-    const failed = maru.i18n.t(.image_gallery_result_failed);
+    const img = maru.i18n.t(.agent_activity_result_image);
+    const failed = maru.i18n.t(.agent_activity_result_failed);
 
-    const out = image_gallery_ops.formatResultSummary(&buf, .{
+    const out = agent_activity_ops.formatResultSummary(&buf, .{
         .found = true,
         .image = true,
         .failed = true,
@@ -78058,60 +78058,60 @@ test "활동 뷰: 썸네일이 다시 훑어도 살아남고, 펼치면 사라�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     // ⚠️ **필터를 바꾸면 인덱스 도메인이 다시 만들어진다** — 그 왕복을 기다리지 않으면 아래
-    //    타일 대기가 빈 목록 위에서 돌다 예산만 쓴다(`GalleryWait` 는 타임아웃으로도 빠져나간다).
+    //    타일 대기가 빈 목록 위에서 돌다 예산만 쓴다(`ActivityWait` 는 타임아웃으로도 빠져나간다).
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 썸네일 하나가 실제로 만들어질 때까지 tick 한다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
-    const kept_offset = session.image_gallery.tiles.items[0].data_offset;
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
+    const kept_offset = session.agent_activity.tiles.items[0].data_offset;
 
     // ── ① **다시 훑어도 살아남는다.** 자동 갱신·검색어 변경이 이 길로 온다 — 여기서 버리면
     //    「전체」의 그림이 매 턴 비었다 다시 찬다(격자가 IG 때 겪은 것과 같은 결함).
-    image_gallery_ops.remapTiles(session);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
-    try std.testing.expectEqual(kept_offset, session.image_gallery.tiles.items[0].data_offset);
+    agent_activity_ops.remapTiles(session);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
+    try std.testing.expectEqual(kept_offset, session.agent_activity.tiles.items[0].data_offset);
     // 그리고 그 자리는 **호출 줄**을 가리킨다(그림이 아니라 — 「전체」에서는 그림이 접혀 있다).
-    const n = session.image_gallery.tiles.items[0].hit_index;
-    try std.testing.expect(n < session.image_gallery.hits.items.len);
-    try std.testing.expect(!session.image_gallery.hits.items[n].kind.isImage());
+    const n = session.agent_activity.tiles.items[0].hit_index;
+    try std.testing.expect(n < session.agent_activity.hits.items.len);
+    try std.testing.expect(!session.agent_activity.hits.items[n].kind.isImage());
 
     // ── ② **펼치면 그림도 사라진다.** 목록이 안 그려지는데 그림만 남으면 뜬금없다.
-    image_gallery_ops.openAt(session, 0);
-    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expect(agent_activity_ops.isDetailOpen(session));
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows); // 목록은 안 그린다
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.drawn_rows); // 목록은 안 그린다
     var thumbs: usize = 0;
-    for (session.image_gallery.tiles.items) |t| {
+    for (session.agent_activity.tiles.items) |t| {
         if (t.uploaded) thumbs += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), thumbs); // 그림도 안 실린다
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다 (AV5 적대적 4회차)" {
@@ -78143,8 +78143,8 @@ test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
-    image_gallery_ops.setFilter(session, .all);
+    dock_ops.setDockView(session, .agent_activity);
+    agent_activity_ops.setFilter(session, .all);
 
     // 넓은 데서 좁은 데로 **한 칸씩** 내려가며 본다. 경계 하나만 찍으면 역전을 못 본다.
     var prev_label: ?u16 = null;
@@ -78153,16 +78153,16 @@ test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다
     var w: u32 = 700;
     while (w >= 540) : (w -= 10) {
         _ = session.resize(w, 900, 1000) catch continue;
-        const cols = image_gallery_ops.listWindow(session).cols;
+        const cols = agent_activity_ops.listWindow(session).cols;
         if (cols == 0) continue;
-        const t = image_gallery_ops.thumbCols(session);
+        const t = agent_activity_ops.thumbCols(session);
         try std.testing.expect(t <= cols);
         const label = cols - t;
 
         // ── ① **이름이 최소선 아래로 안 내려간다.** 그림이 붙었으면 반드시 지킨다.
         if (t > 0) {
             saw_thumbs = true;
-            try std.testing.expect(label >= image_gallery_ops.min_label_cols);
+            try std.testing.expect(label >= agent_activity_ops.min_label_cols);
         } else saw_none = true;
 
         // ⚠️ **「좁힐수록 이름이 짧아진다」는 단언은 틀렸다.** 처음 그렇게 썼다가 이 판정자가
@@ -78175,7 +78175,7 @@ test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다
     try std.testing.expect(saw_thumbs);
     try std.testing.expect(saw_none);
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적대적 5회차 · #3330 과 같은 축)" {
@@ -78222,51 +78222,51 @@ test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
 
     // 실려 있는 상태를 확인한다 — 여기가 참이어야 아래가 무언가를 잰다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.tiles.items[0].uploaded) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.tiles.items[0].uploaded) _ = session.tick() catch {};
     }
-    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
+    try std.testing.expect(session.agent_activity.tiles.items[0].uploaded);
 
     // ── ① **접으면 「다시 올려야 함」으로 내려간다.** 텍스처가 회수되는데 표시가 안 내려가면
     //    펴는 순간 그 자리가 빈다(#3330 이 그 결함이었다).
     session.dock.collapsed = true;
     session.metal_dirty = true; // 제품은 접기 토글에서 이 표시를 세운다 — 판정자가 그 자리를 대신한다
     _ = session.tick() catch {};
-    try std.testing.expect(!session.image_gallery.tiles.items[0].uploaded);
+    try std.testing.expect(!session.agent_activity.tiles.items[0].uploaded);
 
     // ── ② **펴면 돌아온다.** 픽셀은 그대로이므로 다시 디코드하지 않는다.
     session.dock.collapsed = false;
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.tiles.items[0].uploaded) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.tiles.items[0].uploaded) _ = session.tick() catch {};
     }
-    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
-    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len); // 다시 안 풀었다
+    try std.testing.expect(session.agent_activity.tiles.items[0].uploaded);
+    try std.testing.expect(session.agent_activity.tiles.items[0].pixels.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len); // 다시 안 풀었다
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대적 6회차)" {
@@ -78331,42 +78331,42 @@ test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     // 호출 여섯(그림 셋 + 텍스트 셋)이 서고 그림은 접혀 들어간다.
-    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 6), session.agent_activity.count());
 
     // 셋이 **다** 실릴 때까지 기다린다 — 하나만 보고 끝내면 이 판정자의 요점이 사라진다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len < 3) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len < 3) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.tiles.items.len);
 
     // ⚠️ **다시 훑는 길도 지난다.** 이것이 없으면 이 판정자는 「처음 붙을 때」만 보고, 재연결이
     //    아무 줄이나 잡아도 통과한다 — 실제로 그 뮤테이션이 빠져나갔다. 1 회차 판정자가 재연결을
     //    재지만 그림이 **하나**라, 「여럿 × 재연결」의 교집합이 비어 있었다.
-    image_gallery_ops.remapTiles(session);
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+    agent_activity_ops.remapTiles(session);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.tiles.items.len);
 
     // ── **각 타일이 가리키는 줄의 그림 자리와 타일의 정체가 같다.**
     var seen_offsets: [3]u64 = .{ 0, 0, 0 };
-    for (session.image_gallery.tiles.items, 0..) |tile, k| {
+    for (session.agent_activity.tiles.items, 0..) |tile, k| {
         const n = tile.hit_index;
-        try std.testing.expect(n < session.image_gallery.hits.items.len);
-        const row = session.image_gallery.hits.items[n];
+        try std.testing.expect(n < session.agent_activity.hits.items.len);
+        const row = session.agent_activity.hits.items[n];
         // 그 줄은 **호출**이고 결과가 그림이다.
         try std.testing.expect(!row.kind.isImage());
         try std.testing.expect(row.result.image);
@@ -78380,7 +78380,7 @@ test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대
     try std.testing.expect(seen_offsets[1] != seen_offsets[2]);
     try std.testing.expect(seen_offsets[0] != seen_offsets[2]);
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (적대적 12회차 · 판정자 공백)" {
@@ -78432,31 +78432,31 @@ test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
-    const want = maru.i18n.t(.image_gallery_result_image);
+    const want = maru.i18n.t(.agent_activity_result_image);
 
     // 두 줄을 **둘 다** 펼쳐 본다 — 한쪽만 보면 「전부 「이미지」라고 적는다」와 안 갈린다.
     var saw_image_row = false;
     var saw_text_row = false;
-    for (0..session.image_gallery.count()) |n| {
-        const hit = session.image_gallery.hits.items[n];
-        image_gallery_ops.openAt(session, n);
-        const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    for (0..session.agent_activity.count()) |n| {
+        const hit = session.agent_activity.hits.items[n];
+        agent_activity_ops.openAt(session, n);
+        const op = &(session.agent_activity.open orelse return error.TestExpectedEqual);
         try std.testing.expect(op.detail.has_result);
 
         if (hit.result.image and hit.result.lines == 0) {
@@ -78474,7 +78474,7 @@ test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (
     try std.testing.expect(saw_image_row);
     try std.testing.expect(saw_text_row);
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용자 지적)" {
@@ -78529,54 +78529,54 @@ test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len < 3) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len < 3) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.tiles.items.len);
 
     // 어느 픽셀이 살아남았는지 보려고 **정체**를 적어 둔다(개수만 세면 새로 푼 것과 안 갈린다).
     var before: [3]u64 = undefined;
-    for (session.image_gallery.tiles.items, 0..) |t, k| before[k] = t.data_offset;
+    for (session.agent_activity.tiles.items, 0..) |t, k| before[k] = t.data_offset;
 
     // ── 칩을 눌러 **네 자리를 다 돈다**: 전체 → 이미지 → 읽기 → 명령 → 전체.
     //
     // ⚠️ **그림을 안 담는 자리를 거치는 것이 요점이다**(사용자 지적). 「읽기」·「명령」의 `hits` 에는
     // 그림이 없어서, 거기서 다시 이으면 **전부 버려진다** — 잠깐 들렀다 돌아오는 것만으로 화면이
     // 깜빡인다. 그 화면에서는 애초에 안 그리므로 자리가 낡아도 무해하다.
-    const path_around = [_]image_gallery_ops.Filter{ .images, .reads, .execs };
+    const path_around = [_]agent_activity_ops.Filter{ .images, .reads, .execs };
     for (path_around) |f| {
-        image_gallery_ops.setFilter(session, f);
+        agent_activity_ops.setFilter(session, f);
         {
-            var wait = GalleryWait.start(session.io);
-            while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+            var wait = ActivityWait.start(session.io);
+            while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
         }
         // ① 어느 자리에서도 **그대로** 있다 — 하나라도 버리면 돌아올 때 다시 풀어야 한다.
-        try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+        try std.testing.expectEqual(@as(usize, 3), session.agent_activity.tiles.items.len);
     }
 
-    image_gallery_ops.setFilter(session, .all);
+    agent_activity_ops.setFilter(session, .all);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     // ② 돌아와서도 **그대로**다. 개수뿐 아니라 **같은 픽셀**인지까지 본다.
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
-    for (session.image_gallery.tiles.items) |t| {
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.tiles.items.len);
+    for (session.agent_activity.tiles.items) |t| {
         var found = false;
         for (before) |b| {
             if (b == t.data_offset) found = true;
@@ -78584,11 +78584,11 @@ test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용�
         try std.testing.expect(found);
         try std.testing.expect(t.pixels.len > 0); // 새로 푸는 중이 아니라 이미 있다
         // ③ 그리고 그 자리는 **호출 줄**을 가리킨다 — 「전체」의 도메인으로 다시 이어졌다.
-        try std.testing.expect(t.hit_index < session.image_gallery.hits.items.len);
-        try std.testing.expect(!session.image_gallery.hits.items[t.hit_index].kind.isImage());
+        try std.testing.expect(t.hit_index < session.agent_activity.hits.items.len);
+        try std.testing.expect(!session.agent_activity.hits.items[t.hit_index].kind.isImage());
     }
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
@@ -78637,47 +78637,47 @@ test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    image_gallery_ops.setFilter(session, .all);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count()); // 호출 둘
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count()); // 호출 둘
 
     // ── ① **그림 자리는 접힌 줄만 안다.** 두 줄 중 하나만 소스가 있다.
     var with_src: usize = 0;
-    for (session.image_gallery.hits.items) |h| {
-        if (image_gallery_ops.thumbSource(h) != null) with_src += 1;
+    for (session.agent_activity.hits.items) |h| {
+        if (agent_activity_ops.thumbSource(h) != null) with_src += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), with_src);
 
     // ── ② 그 자리는 **그림의 바이트**를 가리킨다(호출의 명령문이 아니라).
-    const read_row = for (session.image_gallery.hits.items) |h| {
+    const read_row = for (session.agent_activity.hits.items) |h| {
         if (h.result.image) break h;
     } else return error.TestExpectedEqual;
-    const src = image_gallery_ops.thumbSource(read_row).?;
+    const src = agent_activity_ops.thumbSource(read_row).?;
     try std.testing.expect(src.len > 0);
     try std.testing.expect(src.offset != read_row.data_offset); // 명령문 자리와 다르다
     try std.testing.expectEqual(read_row.result.image_len, src.len);
 
     // ── ③ **자리는 모든 줄이 똑같이 비운다.** 줄마다 들쭉날쭉하면 이름이 세로로 안 맞는다.
-    const tcols = image_gallery_ops.thumbCols(session);
+    const tcols = agent_activity_ops.thumbCols(session);
     try std.testing.expect(tcols > 0);
 
     // ── ④ **다른 종류에서는 자리를 안 먹는다** — 그림이 없는 필터에 빈 칸을 남기면 낭비다.
-    image_gallery_ops.setFilter(session, .execs);
-    try std.testing.expectEqual(@as(u16, 0), image_gallery_ops.thumbCols(session));
-    image_gallery_ops.setFilter(session, .images);
-    try std.testing.expectEqual(@as(u16, 0), image_gallery_ops.thumbCols(session)); // 격자는 제 자리가 있다
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(u16, 0), agent_activity_ops.thumbCols(session));
+    agent_activity_ops.setFilter(session, .images);
+    try std.testing.expectEqual(@as(u16, 0), agent_activity_ops.thumbCols(session)); // 격자는 제 자리가 있다
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이다 (§2.2.1)" {
@@ -78735,20 +78735,20 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
 
     // 스캔은 **넷 다** 담는다 — 접기는 화면의 일이지 인덱스가 버리는 것이 아니다.
-    const all = session.image_gallery.all_hits.items;
+    const all = session.agent_activity.all_hits.items;
     try std.testing.expectEqual(@as(usize, 4), all.len);
 
     // ── ① **접힌 이미지는 제 호출을 가리킨다.** 화면은 최신을 앞에 놓으려 배열을 뒤집는데,
@@ -78768,13 +78768,13 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
     try std.testing.expectEqual(@as(usize, 2), folded);
 
     // ── ② 「이미지」 필터: 그림은 그대로 보인다(접었다고 잃는 것이 아니다).
-    image_gallery_ops.setFilter(session, .images);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    agent_activity_ops.setFilter(session, .images);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     // ── ③ 「전체」: **두 줄**이다(넷이 아니라). 접기가 없으면 여기가 4 가 된다.
-    image_gallery_ops.setFilter(session, .all);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
-    for (session.image_gallery.hits.items) |h| {
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
+    for (session.agent_activity.hits.items) |h| {
         // 남은 줄은 전부 **호출**이다 — 이미지가 아니라 활동이 대표한다(계약 §2.2.1).
         try std.testing.expect(!h.kind.isImage());
         try std.testing.expectEqual(maru.session.agent_image_index.Activity.read, h.activity);
@@ -78783,7 +78783,7 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
         try std.testing.expect(h.result.image);
     }
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적대적)" {
@@ -78797,7 +78797,7 @@ test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적
         .{ .line_offset = 3, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .png, .fold_owner = 2 },
     };
     std.mem.reverse(maru.session.agent_image_index.Hit, &hits);
-    image_gallery_ops.reverseFoldOwners(&hits);
+    agent_activity_ops.reverseFoldOwners(&hits);
 
     // 뒤집힌 뒤에도 **각 이미지가 자기 호출을 가리킨다**. 자리로만 재면 우연히 맞을 수 있으므로
     // 「가리킨 것이 그 줄인가」를 `line_offset` 으로 확인한다.
@@ -78814,7 +78814,7 @@ test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적
     var lone = [_]maru.session.agent_image_index.Hit{
         .{ .line_offset = 0, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .png, .fold_owner = 99 },
     };
-    image_gallery_ops.reverseFoldOwners(&lone);
+    agent_activity_ops.reverseFoldOwners(&lone);
     try std.testing.expectEqual(maru.session.agent_image_index.no_fold, lone[0].fold_owner);
 }
 
@@ -78823,19 +78823,19 @@ test "활동 뷰: 결과 요약은 본문이 없을 때만 「이미지」다 (�
     // 사실이 아니다. 그런데 Codex 는 `output` 이 `[{text}, …, {input_image}]` 라 **본문이 있다** —
     // 그것까지 「이미지」로 덮으면 provider 가 적어 준 말을 우리가 지운다.
     var buf: [64]u8 = undefined;
-    const img = maru.i18n.t(.image_gallery_result_image);
+    const img = maru.i18n.t(.agent_activity_result_image);
 
     // 본문이 없는 그림 결과 → 「이미지」
     try std.testing.expectEqualStrings(
         img,
-        image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 0 }),
+        agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 0 }),
     );
     // 본문이 있는 그림 결과 → **줄 수가 남는다**
-    const with_body = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 3 });
+    const with_body = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 3 });
     try std.testing.expect(!std.mem.eql(u8, img, with_body));
     try std.testing.expect(std.mem.indexOfScalar(u8, with_body, '3') != null);
     // 결과를 못 찾은 호출은 여전히 **빈 칸**이다 — 「모른다」를 「이미지」로 적지 않는다.
-    try std.testing.expectEqualStrings("", image_gallery_ops.formatResultSummary(&buf, .{ .image = true }));
+    try std.testing.expectEqualStrings("", agent_activity_ops.formatResultSummary(&buf, .{ .image = true }));
 }
 
 test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져간다 (AV4)" {
@@ -78877,27 +78877,27 @@ test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
 
     // ── ① **칩이 화면에 나간다.** 렌더가 죽으면 필터를 바꿀 길도 함께 사라진다.
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 4), session.image_gallery.drawn_chips);
+    try std.testing.expectEqual(@as(usize, 4), session.agent_activity.drawn_chips);
 
     // ── ② **보이는 칩 = 눌리는 칩.** 자리를 지어내지 않고 `chipSpans` 가 준 자리를 누른다.
-    var buf: [4]image_gallery_ops.ChipSpan = undefined;
-    const spans = image_gallery_ops.chipSpans(session, &buf);
+    var buf: [4]agent_activity_ops.ChipSpan = undefined;
+    const spans = agent_activity_ops.chipSpans(session, &buf);
     try std.testing.expectEqual(@as(usize, 4), spans.len);
-    const rect = image_gallery_ops.chipRowRect(session);
+    const rect = agent_activity_ops.chipRowRect(session);
     const cy: f64 = @floatFromInt(rect.y + rect.h / 2);
     // **칩 넷을 전부, 그리고 각 칩의 양 끝을 누른다.** 가운데 한 곳만 누르면 히트테스트가 몇 칸
     // 밀려도 같은 칩 안이라 통과한다 — 실제로 뮤테이션(자리를 3 칸 어긋냄)이 그렇게 빠져나갔다.
@@ -78905,30 +78905,30 @@ test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져
         const left: f64 = @floatFromInt(rect.x + @as(u32, sp.col) * session.cell_width_px);
         const right: f64 = @floatFromInt(rect.x + (@as(u32, sp.col) + sp.cols - 1) * session.cell_width_px);
         for ([_]f64{ left, right }) |px| {
-            session.image_gallery.filter = if (sp.filter == .images) .all else .images; // 반드시 바뀌게
-            try std.testing.expect(image_gallery_ops.handleDown(session, px, cy));
-            try std.testing.expectEqual(sp.filter, session.image_gallery.filter);
+            session.agent_activity.filter = if (sp.filter == .images) .all else .images; // 반드시 바뀌게
+            try std.testing.expect(agent_activity_ops.handleDown(session, px, cy));
+            try std.testing.expectEqual(sp.filter, session.agent_activity.filter);
         }
     }
 
     // 실행 필터에서 목록이 맞는지 한 번 더 본다(칩이 필터만 바꾸고 목록은 안 따라오면 반쪽이다).
-    image_gallery_ops.setFilter(session, .images);
-    image_gallery_ops.setFilter(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count()); // Bash 하나
+    agent_activity_ops.setFilter(session, .images);
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count()); // Bash 하나
 
     // ── ③ **Tab 은 이제 터미널 것이다.** 도크가 키를 쥔 상태에서도 갤러리가 안 삼킨다.
-    session.image_gallery.key_focus = true;
-    const before = session.image_gallery.filter;
+    session.agent_activity.key_focus = true;
+    const before = session.agent_activity.filter;
     const consumed = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
-    try std.testing.expectEqual(before, session.image_gallery.filter); // 필터가 안 바뀐다
+    try std.testing.expectEqual(before, session.agent_activity.filter); // 필터가 안 바뀐다
     _ = consumed; // 터미널이 가져갔는지는 그쪽 경로의 몫 — 여기서는 **갤러리가 안 바꿨다**만 본다
 
     // ── ④ 칩 줄의 빈 자리는 삼키되 아무것도 안 바꾼다(뒤 터미널로 새지 않게).
     const far: f64 = @floatFromInt(rect.x + rect.w - 1);
-    try std.testing.expect(image_gallery_ops.handleDown(session, far, cy));
-    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+    try std.testing.expect(agent_activity_ops.handleDown(session, far, cy));
+    try std.testing.expectEqual(agent_activity_ops.Filter.execs, session.agent_activity.filter);
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 펼치면 칩 줄이 자리를 돌려준다 — 그 줄을 눌러도 닫힌다 (AV3+AV4)" {
@@ -78967,51 +78967,51 @@ test "활동 뷰: 펼치면 칩 줄이 자리를 돌려준다 — 그 줄을 눌
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    image_gallery_ops.setFilter(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 닫혀 있을 때: 칩 줄이 자리를 먹고, 그 줄은 목록 영역 **위**다.
-    const closed_area = image_gallery_ops.gridArea(session);
-    const chip_rect = image_gallery_ops.chipRowRect(session);
+    const closed_area = agent_activity_ops.gridArea(session);
+    const chip_rect = agent_activity_ops.chipRowRect(session);
     try std.testing.expect(chip_rect.h > 0);
     try std.testing.expectEqual(chip_rect.y +| chip_rect.h, closed_area.y);
 
     // 첫 줄을 눌러 펼친다.
     const row_y: f64 = @floatFromInt(closed_area.y + 1);
     const row_x: f64 = @floatFromInt(closed_area.x + 1);
-    try std.testing.expect(image_gallery_ops.handleDown(session, row_x, row_y));
-    try std.testing.expect(image_gallery_ops.isDetailOpen(session));
+    try std.testing.expect(agent_activity_ops.handleDown(session, row_x, row_y));
+    try std.testing.expect(agent_activity_ops.isDetailOpen(session));
 
     // ── ⓪ **안 그렸으면 0 이라고 말한다.** 잔값이 남으면 「필터 UI 가 나갔나」를 값으로 보는 창이
     //    거짓말을 한다.
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_chips);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.drawn_chips);
 
     // ── ① **자리를 돌려받는다.** 안 그리는 줄이 자리를 쥐고 있으면 「이하 생략」이 한 줄 일찍 온다.
-    const open_area = image_gallery_ops.gridArea(session);
+    const open_area = agent_activity_ops.gridArea(session);
     try std.testing.expect(open_area.y < closed_area.y);
-    try std.testing.expectEqual(@as(u32, 0), image_gallery_ops.chipRowTakenPx(session));
-    try std.testing.expectEqual(@as(u32, 0), image_gallery_ops.chipRowRect(session).h);
+    try std.testing.expectEqual(@as(u32, 0), agent_activity_ops.chipRowTakenPx(session));
+    try std.testing.expectEqual(@as(u32, 0), agent_activity_ops.chipRowRect(session).h);
 
     // ── ② **그 줄을 눌러도 닫힌다.** 계약이 못박은 「펼침은 어디를 눌러도 닫는다」에 예외가 없다.
     const chip_y: f64 = @floatFromInt(chip_rect.y + chip_rect.h / 2);
-    try std.testing.expect(image_gallery_ops.handleDown(session, row_x, chip_y));
-    try std.testing.expect(session.image_gallery.open == null);
+    try std.testing.expect(agent_activity_ops.handleDown(session, row_x, chip_y));
+    try std.testing.expect(session.agent_activity.open == null);
     // 필터는 그대로다 — 칩이 클릭을 가로채 종류를 바꿔 버리면 안 된다.
-    try std.testing.expectEqual(image_gallery_ops.Filter.execs, session.image_gallery.filter);
+    try std.testing.expectEqual(agent_activity_ops.Filter.execs, session.agent_activity.filter);
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 도크가 좁으면 고른 칩만 남는다 (AV4)" {
@@ -79037,17 +79037,17 @@ test "활동 뷰: 도크가 좁으면 고른 칩만 남는다 (AV4)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
-    var wide: [4]image_gallery_ops.ChipSpan = undefined;
-    try std.testing.expectEqual(@as(usize, 4), image_gallery_ops.chipSpans(session, &wide).len);
+    var wide: [4]agent_activity_ops.ChipSpan = undefined;
+    try std.testing.expectEqual(@as(usize, 4), agent_activity_ops.chipSpans(session, &wide).len);
 
     // 도크를 좁힌다 — 넷은 못 들어가고 고른 것만 남아야 한다(`dock.size` 는 pt 폭이다).
     session.dock.size = 60;
-    var narrow: [4]image_gallery_ops.ChipSpan = undefined;
-    const got = image_gallery_ops.chipSpans(session, &narrow);
+    var narrow: [4]agent_activity_ops.ChipSpan = undefined;
+    const got = agent_activity_ops.chipSpans(session, &narrow);
     try std.testing.expect(got.len <= 1);
-    if (got.len == 1) try std.testing.expectEqual(session.image_gallery.filter, got[0].filter);
+    if (got.len == 1) try std.testing.expectEqual(session.agent_activity.filter, got[0].filter);
 }
 
 test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인한다 (적대적 D4)" {
@@ -79099,47 +79099,47 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     // **제품 경로로 그린다** — `tick()` 이 프레임을 조립하며 목록 렌더를 부른다.
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.drawn_rows);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.drawn_rows);
     // 자리를 다 얻었으므로 넘친 것이 없다(그 값이 「도크가 좁다」 문구를 가른다).
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.overflow);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.overflow);
 
     // ── **접두·시각도 그려진다.** 「전체」에서 이미지 줄은 접두(첨부/읽음) + 본문 + 시각 = 3 조각,
     // 활동 줄은 본문 하나다(활동 라벨에는 접두도 시각도 없다 — 모르면 말하지 않는다).
     // 줄 수만 세면 그 둘이 통째로 사라져도 그대로라, 실제로 두 번 빠뜨리고도 몰랐다(L2).
-    try cycleGalleryTo(session, .all);
+    try cycleActivityFilterTo(session, .all);
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.drawn_rows); // 활동 둘 + 이미지 하나
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.drawn_rows); // 활동 둘 + 이미지 하나
     // **조각을 정확히 센다.** 활동 줄은 본문 하나씩(접두도 시각도 없다 — 모르면 말하지 않는다),
     // 이미지 줄은 접두(첨부) + 본문 + 시각 셋이다. 부등호로 두면 시각이 통째로 빠져도(4) 통과하므로
     // 정확한 수를 적는다 — 실제로 fixture 의 키 순서가 실측과 달라 **시각이 안 그려지고 있었다**.
-    try std.testing.expectEqual(@as(usize, 5), session.image_gallery.drawn_pieces);
+    try std.testing.expectEqual(@as(usize, 5), session.agent_activity.drawn_pieces);
 
     // ── 격자로 돌아가면 줄은 0 이다 — 옛 값이 남으면 이 판정자가 속는다.
-    try cycleGalleryTo(session, .images);
+    try cycleActivityFilterTo(session, .images);
     _ = session.tick() catch {};
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.drawn_rows);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.drawn_rows);
 
     // **워커를 재운 뒤 끝낸다.** 디코드·스캔 요청을 걸어 둔 채 판정자가 끝나면 그 스레드가 다음
     // 판정자가 도는 동안 살아 있고, 그때 잡히는 누수는 **남의 판정자에 붙는다** — CI 에서 실제로
     // 그랬다(매번 다른 파일 탐색기·사이드바 테스트가 `leaked` 로 죽었고, 원인은 여기였다).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적대적 K5)" {
@@ -79187,53 +79187,53 @@ test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 300), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 300), session.agent_activity.count());
 
     // 끝까지 굴린다.
     var spins: usize = 0;
     while (spins < 3000) : (spins += 1) {
-        _ = image_gallery_ops.wheelScroll(session, -50, false, 0, 0);
+        _ = agent_activity_ops.wheelScroll(session, -50, false, 0, 0);
     }
-    try std.testing.expect(session.image_gallery.scroll.offset_y_px > 0);
+    try std.testing.expect(session.agent_activity.scroll.offset_y_px > 0);
 
     // **목록만 짧아진다**(검색으로 줄인다 — 소스는 그대로라 스크롤 리셋 경로를 안 탄다).
     // 여기가 clamp 가 유일하게 막는 자리다.
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
     // **ASCII 로 친다.** `handleKeyEvent` 는 코드포인트 하나를 받는데 한글은 UTF-8 3 바이트라
     // 바이트 루프로 보내면 깨진 글자가 들어간다(이 판정자가 처음에 그렇게 실패했다).
     for ("7") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    const few = session.image_gallery.count();
+    const few = session.agent_activity.count();
     try std.testing.expect(few > 0 and few < 300);
 
     // 창이 **목록 안**에 있다 — 넘어가면 화면이 빈다.
-    const win = image_gallery_ops.listWindow(session);
+    const win = agent_activity_ops.listWindow(session);
     try std.testing.expect(win.first <= win.total);
     try std.testing.expect(win.last <= win.total);
     try std.testing.expect(win.first < win.last); // 한 줄이라도 보인다
 
     // 그리고 안내가 「자리가 없다」로 거짓말하지 않는다.
-    var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
+    var buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
     try std.testing.expect(!std.mem.eql(
         u8,
-        image_gallery_ops.noticeText(session, &buf),
-        maru.i18n.t(.image_gallery_too_narrow),
+        agent_activity_ops.noticeText(session, &buf),
+        maru.i18n.t(.agent_activity_too_narrow),
     ));
 
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
@@ -79272,28 +79272,28 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
-    var buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
+    var buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
 
     // ── ① 자리를 얻었으면 개수를 말한다. **단위는 「장」이 아니다** — 명령을 그림으로 세지 않는다.
-    try std.testing.expectEqual(@as(usize, 0), image_gallery_ops.listOverflow(session));
-    const normal = image_gallery_ops.noticeText(session, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_activity_count_suffix)) != null);
-    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.image_gallery_count_suffix)) == null);
+    try std.testing.expectEqual(@as(usize, 0), agent_activity_ops.listOverflow(session));
+    const normal = agent_activity_ops.noticeText(session, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.agent_activity_activity_count_suffix)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, normal, maru.i18n.t(.agent_activity_count_suffix)) == null);
 
     // ── ② 하나도 못 그렸으면 그 사실을 말한다.
     //
@@ -79301,19 +79301,19 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     // 그 잔값이 아니라 **직접 계산**을 보므로(I1·J5) 그 세팅은 무시된다 — 창을 실제로 낮춰
     // 자리를 없앤다.
     _ = try session.resize(1400, 40, 1000);
-    try std.testing.expectEqual(session.image_gallery.count(), image_gallery_ops.listOverflow(session));
+    try std.testing.expectEqual(session.agent_activity.count(), agent_activity_ops.listOverflow(session));
     try std.testing.expectEqualStrings(
-        maru.i18n.t(.image_gallery_too_narrow),
-        image_gallery_ops.noticeText(session, &buf),
+        maru.i18n.t(.agent_activity_too_narrow),
+        agent_activity_ops.noticeText(session, &buf),
     );
 
     // ── ③ **격자는 이 문구를 쓰지 않는다** — 거기에는 「12장 중 8장」이 있다.
-    try cycleGalleryTo(session, .images);
-    const grid_notice = image_gallery_ops.noticeText(session, &buf);
-    try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.image_gallery_too_narrow)));
+    try cycleActivityFilterTo(session, .images);
+    const grid_notice = agent_activity_ops.noticeText(session, &buf);
+    try std.testing.expect(!std.mem.eql(u8, grid_notice, maru.i18n.t(.agent_activity_too_narrow)));
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
@@ -79361,25 +79361,25 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) {
             _ = session.tick() catch {};
         }
     }
 
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 200), session.image_gallery.count());
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
+    try std.testing.expectEqual(@as(usize, 200), session.agent_activity.count());
 
     // 한 화면에 다 못 담는다는 것을 먼저 못박는다 — 안 그러면 이 판정자는 아무것도 검증하지 않는다.
-    const area = image_gallery_ops.gridArea(session);
-    const row_h = image_gallery_ops.listRowHeightPx(session);
+    const area = agent_activity_ops.gridArea(session);
+    const row_h = agent_activity_ops.listRowHeightPx(session);
     try std.testing.expect(row_h > 0);
     const rows_fit = area.h / row_h;
     try std.testing.expect(rows_fit < 200);
@@ -79387,15 +79387,15 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     // 아래로 충분히 굴린다. 격자 자를 쓰면 여기서 멈춘다.
     var spins: usize = 0;
     while (spins < 2000) : (spins += 1) {
-        _ = image_gallery_ops.wheelScroll(session, -50, false, 0, 0);
+        _ = agent_activity_ops.wheelScroll(session, -50, false, 0, 0);
     }
     const content_h = 200 * row_h;
     const want_max = content_h -| area.h;
     // **마지막 줄까지 닿는다.** 끝에서 멈추되 그 끝이 목록의 끝이어야 한다.
-    try std.testing.expectEqual(want_max, session.image_gallery.scroll.offset_y_px);
+    try std.testing.expectEqual(want_max, session.agent_activity.scroll.offset_y_px);
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리고 되돌리면 다시 올린다 (AV1-b)" {
@@ -79439,22 +79439,22 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
 
     // ── ① 실행 필터로 간다.
-    session.image_gallery.key_focus = true;
-    try cycleGalleryTo(session, .execs);
+    session.agent_activity.key_focus = true;
+    try cycleActivityFilterTo(session, .execs);
 
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
     var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
@@ -79466,11 +79466,11 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
     try std.testing.expectEqual(@as(usize, 0), images.len); // 그림은 하나도 안 실린다
     try std.testing.expectEqual(@as(usize, 0), live.items.len);
     // 안 그리고 나갔으므로 「다시 올려야 함」으로 바뀌어 있다.
-    for (session.image_gallery.tiles.items) |tile| {
+    for (session.agent_activity.tiles.items) |tile| {
         try std.testing.expect(!tile.uploaded);
     }
 
@@ -79479,16 +79479,16 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     // **타일을 다시 기다린다.** 필터를 바꾸면 `rebuildFilter` 가 타일을 버리므로(인덱스 도메인이
     // 새로 만들어진다) 되돌린 직후에는 픽셀이 없다 — 워커가 다시 풀어야 한다. 그 왕복을 안
     // 기다리면 이 판정자는 「그림이 안 실린다」를 결함이 아니라 **타이밍**으로 보게 된다.
-    try cycleGalleryTo(session, .images);
+    try cycleActivityFilterTo(session, .images);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
     // 「처음 그리는 프레임」과 같은 상태로 되돌린다(IG3-c2·IG4-b 가 같은 이유로 같은 되돌림을 한다).
-    session.image_gallery.tiles.items[0].uploaded = false;
+    session.agent_activity.tiles.items[0].uploaded = false;
     var images2: []maru.renderer.metal_frame.GpuImage = &.{};
     var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
     var pixels2: []u8 = &.{};
@@ -79499,7 +79499,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
     try std.testing.expect(pixels2.len > 0);
@@ -79507,7 +79507,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     // **워커를 재운 뒤 끝낸다.** `appendGpuImages` 는 `ensureTiles` 를 부르므로 여기서도 디코드가
     // 걸린 채 끝날 수 있다 — 그 스레드가 남기는 누수는 **다음에 도는 남의 판정자에 붙는다**
     // (적대적 검증 F2. D4·E2 에서 같은 형태를 고치고도 이 자리를 빠뜨렸다).
-    quietGalleryWorkers(session);
+    quietActivityWorkers(session);
 }
 
 test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 남는다 (IG4-b)" {
@@ -79556,26 +79556,26 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
         var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+        while (spins < 200_000 and !session.agent_activity.built) : (spins += 1) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
-    image_gallery_ops.openAt(session, 0);
+    agent_activity_ops.openAt(session, 0);
     {
         var spins: usize = 0;
-        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+        while (spins < 200_000 and session.agent_activity.open.?.pixels.len == 0) : (spins += 1) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expect(session.image_gallery.open.?.pixels.len > 0);
+    try std.testing.expect(session.agent_activity.open.?.pixels.len > 0);
 
     // ── ① 한 프레임 그려 「이미 올렸다」 상태를 만든다. 여기서부터가 사용자의 화면이다.
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
@@ -79588,10 +79588,10 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
     try std.testing.expectEqual(@as(usize, 1), images.len);
-    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images[0].image_id);
-    try std.testing.expect(session.image_gallery.open.?.uploaded);
+    try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images[0].image_id);
+    try std.testing.expect(session.agent_activity.open.?.uploaded);
 
     // ── ② **도크를 접는다.** 크게 보기는 그대로 열려 있다(접기는 닫기가 아니다).
     session.dock.collapsed = true;
@@ -79606,12 +79606,12 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels_hidden);
         live_hidden.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images_hidden, &uploads_hidden, &pixels_hidden, &live_hidden);
+    agent_activity_ops.appendGpuImages(session, &images_hidden, &uploads_hidden, &pixels_hidden, &live_hidden);
     try std.testing.expectEqual(@as(usize, 0), images_hidden.len);
     try std.testing.expectEqual(@as(usize, 0), live_hidden.items.len); // 안 실렸다 = 텍스처가 거둬진다
-    try std.testing.expect(session.image_gallery.open != null); // 접기는 크게 보기를 닫지 않는다
+    try std.testing.expect(session.agent_activity.open != null); // 접기는 크게 보기를 닫지 않는다
     // **여기가 결함의 자리였다** — 안 그린 프레임을 지나면 「다시 올려야 함」이어야 한다.
-    try std.testing.expect(!session.image_gallery.open.?.uploaded);
+    try std.testing.expect(!session.agent_activity.open.?.uploaded);
 
     // ── ③ 다시 편다. 그림이 돌아오려면 **업로드가 함께 실려야** 한다.
     session.dock.collapsed = false;
@@ -79625,13 +79625,13 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
-    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images2[0].image_id);
+    try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images2[0].image_id);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
-    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, uploads2[0].image_id);
+    try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, uploads2[0].image_id);
     try std.testing.expectEqual(@as(usize, 2 * 2 * 4), pixels2.len); // 2×2 RGBA 가 실제로 다시 간다
-    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, live2.items[0]);
+    try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, live2.items[0]);
 }
 
 test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 민다 (IG4-c)" {
@@ -79676,100 +79676,100 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
 
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
     const l = maru.session.image_grid.layout(area, m, 1, 0);
     const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
     session.mouse(1, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
     session.mouse(3, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
-    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expect(session.agent_activity.open != null);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.open.?.pixels.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.open.?.pixels.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(u32, 640), session.image_gallery.open.?.width);
-    try std.testing.expectEqual(@as(u32, 480), session.image_gallery.open.?.height);
+    try std.testing.expectEqual(@as(u32, 640), session.agent_activity.open.?.width);
+    try std.testing.expectEqual(@as(u32, 480), session.agent_activity.open.?.height);
 
-    const vp = image_gallery_ops.viewportRect(session);
-    const w = session.image_gallery.open.?.width;
-    const h = session.image_gallery.open.?.height;
+    const vp = agent_activity_ops.viewportRect(session);
+    const w = session.agent_activity.open.?.width;
+    const h = session.agent_activity.open.?.height;
     // 처음 배율은 fit 이다 — 열자마자 전체가 보인다.
     const fit = image_view.fitScale(vp, w, h);
     try std.testing.expect(fit > 0 and fit < 1.0); // 640 px 는 도크보다 넓다 = 줄여 넣는다
-    try std.testing.expectEqual(fit, image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale);
+    try std.testing.expectEqual(fit, image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale);
 
     // ── ① 휠은 확대한다. **제품 진입점**(`scrollWheel`)으로 들어간다 — 배선이 빠지면 여기서 잡힌다.
     const cx: f64 = @floatCast(vp.x + vp.w / 2);
     const cy: f64 = @floatCast(vp.y + vp.h / 2);
     scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
-    const after_one = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale;
+    const after_one = image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale;
     try std.testing.expect(after_one > fit);
 
     // 내용이 뷰포트보다 커질 때까지 굴린다 — 그래야 「밀린다」를 확인할 수 있다.
     {
         var spins: usize = 0;
         while (spins < 20 and
-            @as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
+            @as(f32, @floatFromInt(w)) * image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
         {
             scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
         }
     }
-    const zoomed = image_view.clamp(session.image_gallery.open.?.view, vp, w, h);
+    const zoomed = image_view.clamp(session.agent_activity.open.?.view, vp, w, h);
     try std.testing.expect(@as(f32, @floatFromInt(w)) * zoomed.scale > vp.w);
 
     // ── ② 아래로 굴리면 축소한다(부호가 뒤집혀 있으면 여기서 드러난다).
     scroll_ops.scrollWheel(session, -10.0, 0, false, cx, cy);
-    try std.testing.expect(image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale < zoomed.scale);
+    try std.testing.expect(image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale < zoomed.scale);
 
     // 축소가 **실제로 먹었기 때문에** 내용이 다시 뷰포트보다 작아졌을 수 있다. 그 상태에서는 팬이
     // 언제나 0 으로 clamp 되므로(가운데 고정), 밀리는지 보려면 먼저 다시 키운다.
     {
         var spins: usize = 0;
         while (spins < 20 and
-            @as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
+            @as(f32, @floatFromInt(w)) * image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
         {
             scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
         }
     }
-    try std.testing.expect(@as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale > vp.w);
+    try std.testing.expect(@as(f32, @floatFromInt(w)) * image_view.clamp(session.agent_activity.open.?.view, vp, w, h).scale > vp.w);
 
     // ── ③ 드래그는 민다. down → drag → up 을 **제품 마우스 경로**로 태운다.
-    const before_pan = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).pan_x;
+    const before_pan = image_view.clamp(session.agent_activity.open.?.view, vp, w, h).pan_x;
     session.mouse(1, cx, cy, 0, 0); // 이미지 위 = 잡기(닫기가 아니다)
-    try std.testing.expect(session.image_gallery.open != null); // 이미지 위 클릭은 닫지 않는다
-    try std.testing.expect(session.pointerGestureIs(.image_gallery_pan));
+    try std.testing.expect(session.agent_activity.open != null); // 이미지 위 클릭은 닫지 않는다
+    try std.testing.expect(session.pointerGestureIs(.agent_activity_pan));
     session.mouse(2, cx + 40, cy, 0, 0);
-    const after_pan = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).pan_x;
+    const after_pan = image_view.clamp(session.agent_activity.open.?.view, vp, w, h).pan_x;
     try std.testing.expect(after_pan > before_pan); // 잡은 곳이 손끝을 따라온다
     session.mouse(3, cx + 40, cy, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.image_gallery_pan));
+    try std.testing.expect(!session.pointerGestureIs(.agent_activity_pan));
 
     // ── ④ 이미지 **밖**을 누르면 닫힌다. 확대돼 있어도 뷰포트 모서리는 여전히 이미지 밖일 수 있으므로
     // 먼저 fit 으로 되돌린다(그 상태에서 좌우 여백이 확실히 생긴다).
-    session.image_gallery.open.?.view = .{};
-    const r = image_view.destRect(session.image_gallery.open.?.view, vp, w, h);
+    session.agent_activity.open.?.view = .{};
+    const r = image_view.destRect(session.agent_activity.open.?.view, vp, w, h);
     try std.testing.expect(r.y > vp.y); // 위아래 여백이 있다 = 밖을 누를 자리가 있다
     session.mouse(1, cx, @floatCast(vp.y + 1), 0, 0);
-    try std.testing.expect(session.image_gallery.open == null);
+    try std.testing.expect(session.agent_activity.open == null);
 }
 
 test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스크립트로 메운다 (IG6-b)" {
@@ -79904,10 +79904,10 @@ test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는�
 
     const Wait = struct {
         fn until(sess: *AppSession) !void {
-            var wait = GalleryWait.start(sess.io);
+            var wait = ActivityWait.start(sess.io);
             while (wait.pending()) {
                 _ = sess.tick() catch {};
-                if (sess.image_gallery.built) return;
+                if (sess.agent_activity.built) return;
             }
             return error.ScanNeverFinished;
         }
@@ -79917,32 +79917,32 @@ test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는�
 
     // ── ① 대조군: 로컬 pane 이면 그 파일을 읽는다. 이것이 서야 ② 의 0 이 «원격이라서» 가 된다.
     _ = term.agent_image_source.set(path);
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.until(session);
-    try std.testing.expect(session.image_gallery.count() > 0);
+    try std.testing.expect(session.agent_activity.count() > 0);
 
     // ── ② 같은 pane 이 원격이 되면 **안 읽는다**. 채널이 원격의 증거다(계약 §11.1).
     //    소스 경로는 ① 그대로다 — 파일은 여전히 거기 있는데도 안 읽는 것이 요점이다.
     term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
-    image_gallery_ops.refresh(session, false);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    agent_activity_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
 
     // ── ③ 그리고 「없다」가 아니라 「못 읽는다」라고 말한다. 원격에는 에이전트가 **있으므로**
     //    「에이전트가 없습니다」는 거짓이고, 사용자를 훅 설치 점검으로 헛돌게 한다.
     {
         var buf: [128]u8 = undefined;
         try std.testing.expectEqualStrings(
-            maru.i18n.t(.image_gallery_remote_unsupported),
-            image_gallery_ops.noticeText(session, &buf),
+            maru.i18n.t(.agent_activity_remote_unsupported),
+            agent_activity_ops.noticeText(session, &buf),
         );
     }
 
     // ── ④ ssh 를 빠져나오면 다시 읽는다 — **래치가 아니다**. 이 저장소에서 반복해 낸 결함이
     //    「한 번 막히면 영영 막히는 것」이라 그 축을 여기서 못 박는다.
     term.agent_remote_channel = null;
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.until(session);
-    try std.testing.expect(session.image_gallery.count() > 0);
+    try std.testing.expect(session.agent_activity.count() > 0);
 }
 
 test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-c)" {
@@ -79993,38 +79993,38 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
     // **2중 저장이 접혔다** — 접지 않으면 3장이 된다(실측 코퍼스에서 44%가 이 사본이었다).
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len < 2) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len < 2) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.tiles.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.tiles.items.len);
 
     // **최신이 먼저다**(IG7) — 뒤에 온 도구 읽기가 첫 칸이다.
     // 도구 읽기 = **직전 줄**의 file_path 파일명.
     //
     // 배열 위치가 아니라 **인덱스로 찾는다**. 여럿이 동시에 풀리므로 완료 순서가 제출 순서와
     // 다르고, 그리기도 `hit_index` 로 자리를 잡는다 — 배열 순서에는 뜻이 없다.
-    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tileFor(0).?.label.text());
+    try std.testing.expectEqualStrings("dock.png", session.agent_activity.tileFor(0).?.label.text());
     // 붙여넣기 = 같은 줄 텍스트, 상용구는 벗겨진다.
-    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tileFor(1).?.label.text());
+    try std.testing.expectEqualStrings("이 화면", session.agent_activity.tileFor(1).?.label.text());
 
     // 격자가 라벨 자리를 실제로 잡는다 — 안 그러면 글자를 그릴 곳이 없다.
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
     try std.testing.expect(m.label > 0);
     const l = maru.session.image_grid.layout(area, m, 2, 0);
     const tile0 = maru.session.image_grid.rectAt(area, m, l, 0).?;
@@ -80087,31 +80087,31 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 30), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 30), session.agent_activity.count());
 
     // ── ① **최신이 먼저다.** 0 번 칸이 마지막 이미지(n29)여야 한다.
     //
     // 「첫 타일」이 아니라 **0 번 칸**을 기다린다 — 여럿이 동시에 풀려 배열에 먼저 담기는 것이
     // 0 번이라는 보장이 없다(그리기는 `hit_index` 로 자리를 잡으므로 순서는 무관하다).
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqualStrings("n29", session.image_gallery.tileFor(0).?.label.text());
+    try std.testing.expectEqualStrings("n29", session.agent_activity.tileFor(0).?.label.text());
 
     // ── ② 스크롤할 곳이 있다(30장이 한 화면에 안 들어간다).
-    const l0 = image_gallery_ops.gridLayout(session);
+    const l0 = agent_activity_ops.gridLayout(session);
     try std.testing.expect(l0.max_scroll > 0);
     try std.testing.expectEqual(@as(usize, 0), l0.first);
 
@@ -80120,38 +80120,38 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     const cx: f64 = @floatFromInt(dg.tree_content.x + dg.tree_content.w / 2);
     const cy: f64 = @floatFromInt(dg.tree_content.y + dg.tree_content.h / 2);
     scroll_ops.scrollWheel(session, -3.0, 0, false, cx, cy); // 아래로
-    const l1 = image_gallery_ops.gridLayout(session);
+    const l1 = agent_activity_ops.gridLayout(session);
     try std.testing.expect(l1.first > 0);
     try std.testing.expect(l1.scroll_px > 0);
 
     // ── ④ **끝까지 내리면 마지막(= 가장 오래된) 것에 닿는다.** 스크롤이 없던 동안 못 보던 것들이다.
     {
         var guard: usize = 0;
-        while (guard < 200 and image_gallery_ops.gridLayout(session).scroll_px < l0.max_scroll) : (guard += 1) {
+        while (guard < 200 and agent_activity_ops.gridLayout(session).scroll_px < l0.max_scroll) : (guard += 1) {
             scroll_ops.scrollWheel(session, -3.0, 0, false, cx, cy);
         }
     }
-    const lend = image_gallery_ops.gridLayout(session);
+    const lend = agent_activity_ops.gridLayout(session);
     try std.testing.expectEqual(l0.max_scroll, lend.scroll_px);
     try std.testing.expectEqual(@as(usize, 30), lend.first + lend.visible); // 마지막 칸이 창 안에 있다
 
     // ── ④-b **되돌아왔을 때 격자가 비지 않는다.** 창을 통째로 버리면 스크롤할 때마다
     // 8장 × 20 ms 동안 빈 화면이 된다. 타일은 «창» 이 아니라 `hit_index` 로 찾는 보관함이라
     // 멀어졌다 돌아와도 앞서 푼 것이 남아 있다.
-    try std.testing.expect(session.image_gallery.tileFor(0) != null);
+    try std.testing.expect(session.agent_activity.tileFor(0) != null);
 
     // ── ⑤ **누른 자리와 열리는 것이 같다.** 스크롤을 되더하지 않으면 여기서 어긋난다.
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
     const target = lend.first + lend.visible - 1; // 마지막 칸 = 가장 오래된 이미지
     const r = maru.session.image_grid.rectAt(area, m, lend, target).?;
-    try std.testing.expect(image_gallery_ops.handleDown(
+    try std.testing.expect(agent_activity_ops.handleDown(
         session,
         @floatFromInt(r.x + r.w / 2),
         @floatFromInt(r.y + r.h / 2),
     ));
-    try std.testing.expect(session.image_gallery.open != null);
-    try std.testing.expectEqual(target, session.image_gallery.open.?.hit_index);
+    try std.testing.expect(session.agent_activity.open != null);
+    try std.testing.expectEqual(target, session.agent_activity.open.?.hit_index);
     // 그 칸은 **가장 오래된** 이미지(n0)다 — 최신 우선 정렬의 반대쪽 끝.
     try std.testing.expectEqual(@as(usize, 29), target);
 }
@@ -80232,36 +80232,36 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(child_path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
 
     // ── ① 체인이 부모까지 잇는다.
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.chain.len);
-    try std.testing.expectEqualStrings(child_path, session.image_gallery.chain.head());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.chain.len);
+    try std.testing.expectEqualStrings(child_path, session.agent_activity.chain.head());
 
     // ── ② **자식에는 살아 있는 이미지가 0장인데 1장이 보인다** — 부모에서 왔다.
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    const hit = session.image_gallery.hits.items[0];
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    const hit = session.agent_activity.hits.items[0];
     try std.testing.expectEqual(@as(u8, 1), hit.file_index); // 0 이면 자식 — 그럼 오프셋이 남의 것이다
 
     // ── ③ 그 오프셋으로 **부모 파일**을 열어 실제로 푼다. 파일을 잘못 고르면 여기서 깨진다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
-    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
+    try std.testing.expect(session.agent_activity.tiles.items[0].pixels.len > 0);
     // 라벨도 **부모 파일** 안에서 읽는다(`call_id` → 앞선 줄의 `path`).
-    try std.testing.expectEqualStrings("from-parent.png", session.image_gallery.tiles.items[0].label.text());
+    try std.testing.expectEqualStrings("from-parent.png", session.agent_activity.tiles.items[0].label.text());
 }
 
 test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에서는 화살표를 안 가져간다 (IG9)" {
@@ -80306,24 +80306,24 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(image_count, session.image_gallery.count());
+    try std.testing.expectEqual(image_count, session.agent_activity.count());
 
     // ── ① **격자만 보고 있을 때는 화살표를 안 가져간다.** 여기가 회귀 지점이다.
     //
     // **제품 키 경로로 본다.** 직전에 Esc 가 「함수는 맞는데 제품이 그 함수에 안 닿는」 상태로 머지된
     // 적이 있다 — 회귀 가드가 같은 함정에 빠지면 지키는 것이 없다. `total_app_key_events` 는 앱이
     // 삼킨 키 수이므로, 안 늘면 그 키는 터미널로 갔다는 뜻이다.
-    session.image_gallery.key_focus = true; // 도크가 키를 쥐어도
-    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1)); // 열린 것이 없으면 안 가져간다
+    session.agent_activity.key_focus = true; // 도크가 키를 쥐어도
+    try std.testing.expect(!agent_activity_ops.navigateOpen(session, 1)); // 열린 것이 없으면 안 가져간다
     {
         const before = session.total_app_key_events;
         _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
@@ -80335,49 +80335,49 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     }
 
     // ── ② 열고 나면 넘어간다.
-    image_gallery_ops.openAt(session, 0);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
-    try std.testing.expect(image_gallery_ops.navigateOpen(session, 1));
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.open.?.hit_index);
-    try std.testing.expect(image_gallery_ops.navigateOpen(session, -1));
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.open.?.hit_index);
+    try std.testing.expect(agent_activity_ops.navigateOpen(session, 1));
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.open.?.hit_index);
+    try std.testing.expect(agent_activity_ops.navigateOpen(session, -1));
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.open.?.hit_index);
 
     // ── ③ **끝에서 멈춘다(순환하지 않는다).** 순환하면 끝에 닿은 것을 모르고 같은 것을 두 번 본다.
-    try std.testing.expect(image_gallery_ops.navigateOpen(session, -1)); // 소비는 한다
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index); // 그대로
+    try std.testing.expect(agent_activity_ops.navigateOpen(session, -1)); // 소비는 한다
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.open.?.hit_index); // 그대로
 
     // ── ④ **터미널로 돌아가면 화살표를 놓는다.** 이미지는 열린 채다.
-    image_gallery_ops.releaseKeyFocus(session);
-    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1));
-    try std.testing.expect(session.image_gallery.open != null);
-    session.image_gallery.key_focus = true;
+    agent_activity_ops.releaseKeyFocus(session);
+    try std.testing.expect(!agent_activity_ops.navigateOpen(session, 1));
+    try std.testing.expect(session.agent_activity.open != null);
+    session.agent_activity.key_focus = true;
 
     // ── ⑤ 멀리 넘어가면 **격자가 따라온다.** 안 그러면 닫는 순간 옛 자리를 보여준다.
     var guard: usize = 0;
-    while (guard < 100 and session.image_gallery.open.?.hit_index < image_count - 1) : (guard += 1) {
-        _ = image_gallery_ops.navigateOpen(session, 1);
+    while (guard < 100 and session.agent_activity.open.?.hit_index < image_count - 1) : (guard += 1) {
+        _ = agent_activity_ops.navigateOpen(session, 1);
     }
     const last = image_count - 1;
-    try std.testing.expectEqual(last, session.image_gallery.open.?.hit_index);
-    const l = image_gallery_ops.gridLayout(session);
+    try std.testing.expectEqual(last, session.agent_activity.open.?.hit_index);
+    const l = agent_activity_ops.gridLayout(session);
     try std.testing.expect(last >= l.first and last < l.first + l.visible);
     try std.testing.expect(l.scroll_px > 0); // 실제로 내려갔다
 
     // ── ⑥ **제품 키 경로**로도 같은 일이 일어난다(배선이 빠지면 여기서 잡힌다).
-    image_gallery_ops.openAt(session, 5);
+    agent_activity_ops.openAt(session, 5);
     _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.open.?.hit_index);
+    try std.testing.expectEqual(@as(usize, 6), session.agent_activity.open.?.hit_index);
     _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 5), session.image_gallery.open.?.hit_index);
+    try std.testing.expectEqual(@as(usize, 5), session.agent_activity.open.?.hit_index);
 
     // ── ⑦ **Esc 도 제품 키 경로로 닫힌다.** 이 단언이 없어서 Esc 가 에이전트 도크 전용 블록 안에
     // 갇힌 채 머지됐다 — IG4-b test 가 `handleEscape` 를 **직접 불러** 통과하는 바람에 못 봤다.
-    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expect(session.agent_activity.open != null);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try std.testing.expect(session.image_gallery.open == null);
+    try std.testing.expect(session.agent_activity.open == null);
 
     // ── ⑧ 닫으면 화살표를 놓는다 — 이것도 **제품 경로**로 본다.
-    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1));
+    try std.testing.expect(!agent_activity_ops.navigateOpen(session, 1));
     {
         const before = session.total_app_key_events;
         _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
@@ -80386,14 +80386,14 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
 
     // ── ⑨ **수식키가 붙은 화살표는 갤러리 것이 아니다.** ⌥←(단어 이동)·⇧←(선택) 같은 것을 삼키면
     // 터미널 편집이 망가진다.
-    image_gallery_ops.openAt(session, 3);
-    session.image_gallery.key_focus = true;
+    agent_activity_ops.openAt(session, 3);
+    session.agent_activity.key_focus = true;
     {
         const before = session.total_app_key_events;
         _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .option = true } });
         _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .shift = true } });
         try std.testing.expectEqual(before, session.total_app_key_events);
-        try std.testing.expectEqual(@as(usize, 3), session.image_gallery.open.?.hit_index); // 안 움직였다
+        try std.testing.expectEqual(@as(usize, 3), session.agent_activity.open.?.hit_index); // 안 움직였다
     }
 }
 
@@ -80438,72 +80438,72 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 6), session.agent_activity.count());
 
-    const area = image_gallery_ops.gridArea(session);
-    const m = image_gallery_ops.gridMetrics(session);
-    const l = image_gallery_ops.gridLayout(session);
+    const area = agent_activity_ops.gridArea(session);
+    const m = agent_activity_ops.gridMetrics(session);
+    const l = agent_activity_ops.gridLayout(session);
     const cell1 = maru.session.image_grid.rectAt(area, m, l, 1).?;
 
     // ── ① 칸 위면 얹힌 것으로 보고 **누를 수 있다고 답한다**(호출자가 커서를 손가락으로 바꾼다).
-    try std.testing.expect(image_gallery_ops.handleHover(
+    try std.testing.expect(agent_activity_ops.handleHover(
         session,
         @floatFromInt(cell1.x + cell1.w / 2),
         @floatFromInt(cell1.y + cell1.h / 2),
     ));
-    try std.testing.expectEqual(@as(?usize, 1), session.image_gallery.hovered);
+    try std.testing.expectEqual(@as(?usize, 1), session.agent_activity.hovered);
 
     // ── ② **강조되는 칸 = 눌리는 칸.** 같은 점을 눌러 그 칸이 열리는지 본다.
-    try std.testing.expect(image_gallery_ops.handleDown(
+    try std.testing.expect(agent_activity_ops.handleDown(
         session,
         @floatFromInt(cell1.x + cell1.w / 2),
         @floatFromInt(cell1.y + cell1.h / 2),
     ));
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.open.?.hit_index);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.open.?.hit_index);
 
     // ── ③ **크게 보기 중에는 호버가 없다** — 격자가 화면에 없다.
-    try std.testing.expect(!image_gallery_ops.handleHover(
+    try std.testing.expect(!agent_activity_ops.handleHover(
         session,
         @floatFromInt(cell1.x + cell1.w / 2),
         @floatFromInt(cell1.y + cell1.h / 2),
     ));
-    try std.testing.expect(session.image_gallery.hovered == null);
-    image_gallery_ops.closeOpen(session);
+    try std.testing.expect(session.agent_activity.hovered == null);
+    agent_activity_ops.closeOpen(session);
 
     // ── ④ 간격·여백은 얹힌 것이 아니다 — 칸이 아닌 곳에서 손가락 커서가 뜨면 거짓말이다.
-    try std.testing.expect(!image_gallery_ops.handleHover(
+    try std.testing.expect(!agent_activity_ops.handleHover(
         session,
         @floatFromInt(area.x),
         @floatFromInt(area.y),
     ));
-    try std.testing.expect(session.image_gallery.hovered == null);
+    try std.testing.expect(session.agent_activity.hovered == null);
 
     // ── ⑤ 도크 밖도 마찬가지.
-    try std.testing.expect(image_gallery_ops.handleHover(
+    try std.testing.expect(agent_activity_ops.handleHover(
         session,
         @floatFromInt(cell1.x + 2),
         @floatFromInt(cell1.y + 2),
     ));
-    try std.testing.expect(!image_gallery_ops.handleHover(session, 10, 10));
-    try std.testing.expect(session.image_gallery.hovered == null);
+    try std.testing.expect(!agent_activity_ops.handleHover(session, 10, 10));
+    try std.testing.expect(session.agent_activity.hovered == null);
 
     // ── ⑥ **판이 실제로 그려진다.** 상태만 있고 안 그리면 사용자에게는 아무 변화가 없다.
-    _ = image_gallery_ops.handleHover(
+    _ = agent_activity_ops.handleHover(
         session,
         @floatFromInt(cell1.x + 2),
         @floatFromInt(cell1.y + 2),
     );
     const before = session.gpu_quads.items.len;
-    image_gallery_ops.appendHoverQuad(session);
+    agent_activity_ops.appendHoverQuad(session);
     try std.testing.expectEqual(before + 1, session.gpu_quads.items.len);
     const q = session.gpu_quads.items[session.gpu_quads.items.len - 1];
     try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.x)), q.x);
@@ -80511,7 +80511,7 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.w)), q.w);
     // **프레임 레이어다**(사용자 보고 회귀 방지). 예전엔 0 이었는데 그 값은 사이드바가 소유한
     // «유지» 버킷이라 `dropQuadsByLayer` 가 안 건드려, 얹은 칸마다 강조가 영구히 쌓였다.
-    try std.testing.expectEqual(image_gallery_ops.hover_layer, q.layer);
+    try std.testing.expectEqual(agent_activity_ops.hover_layer, q.layer);
     try std.testing.expect(q.layer != 0);
     // **채우지 않는다** — 이 레이어는 그림 «위» 라 채우면 썸네일이 그 색에 잠긴다. 테두리만 그린다.
     try std.testing.expectEqual(@as(u32, 0), q.fill_color0);
@@ -80519,9 +80519,9 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     try std.testing.expect(q.border_widths[0] > 0);
 
     // 얹힌 칸이 없으면 아무것도 안 그린다.
-    _ = image_gallery_ops.clearHover(session);
+    _ = agent_activity_ops.clearHover(session);
     const before2 = session.gpu_quads.items.len;
-    image_gallery_ops.appendHoverQuad(session);
+    agent_activity_ops.appendHoverQuad(session);
     try std.testing.expectEqual(before2, session.gpu_quads.items.len);
 }
 
@@ -80574,85 +80574,85 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
     // 라벨은 **스캔 워커가** 만든다(IG11-a) — 타일이 아직 없어도 전부 있어야 거를 수 있다.
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.labels.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.labels.items.len);
 
     // ── ① 도크를 안 쥐고 있으면 ⌘F 는 갤러리 것이 **아니다** — 터미널 찾기가 주인이다.
     //
     // 갤러리가 아니라 **찾기 오버레이가 열리는 것**까지 확인한다. 「갤러리가 안 열렸다」만 보면
     // ⌘F 를 아무도 안 받는 상태와 구분이 안 되는데, 그러면 터미널 찾기를 훔쳐 놓고도 통과한다.
-    session.image_gallery.key_focus = false;
+    session.agent_activity.key_focus = false;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
-    try std.testing.expect(!session.image_gallery.search_active);
+    try std.testing.expect(!session.agent_activity.search_active);
     try std.testing.expect(session.chrome_host.find.open);
     find_ops.toggleFind(session); // 열린 찾기를 닫는다 — 안 닫으면 다음 ⌘F 를 오버레이가 먼저 먹는다
     try std.testing.expect(!session.chrome_host.find.open);
 
     // ── ② 도크를 쥐면 ⌘F 가 검색창을 연다.
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
-    try std.testing.expect(session.image_gallery.search_active);
+    try std.testing.expect(session.agent_activity.search_active);
     // 조합 글자가 뒤 터미널로 새지 않는다 — focus 표에 올라 있어야 한다.
-    try std.testing.expectEqual(AppSession.InputFocus.image_gallery_search, session.inputFocus());
+    try std.testing.expectEqual(AppSession.InputFocus.agent_activity_search, session.inputFocus());
 
     // ── ③ 글자를 치면 그 자리에서 걸러진다. **대소문자를 안 가린다**(TAB.png 가 "tab" 에 걸린다).
     for ("tab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expectEqualStrings("TAB.png", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqualStrings("TAB.png", session.agent_activity.labels.items[0].text());
     // 걸러진 목록도 **인덱스 도메인이 하나**다 — 0번을 열면 걸린 그것이 열린다.
-    image_gallery_ops.openAt(session, 0);
-    try std.testing.expect(session.image_gallery.open != null);
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expect(session.agent_activity.open != null);
 
     // ── ④ Backspace 는 **글자 하나**다. "ta" 면 TAB.png 만 남는다.
     _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
-    try std.testing.expectEqualStrings("ta", session.image_gallery.queryText());
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqualStrings("ta", session.agent_activity.queryText());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
     // 필터가 바뀌면 **크게 보기를 버린다** — 옛 인덱스를 가리키던 것이 남으면 엉뚱한 게 뜬다.
-    try std.testing.expect(session.image_gallery.open == null);
+    try std.testing.expect(session.agent_activity.open == null);
 
     // ── ⑤ 한글도 걸린다(붙여넣기 라벨). 여기서는 확정 텍스트 경로를 흉내낸다.
-    session.image_gallery.search.clear();
-    try session.image_gallery.search.query.appendSlice(allocator, "붙여넣은");
-    image_gallery_ops.rebuildFilter(session);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expectEqualStrings("붙여넣은 화면", session.image_gallery.labels.items[0].text());
+    session.agent_activity.search.clear();
+    try session.agent_activity.search.query.appendSlice(allocator, "붙여넣은");
+    agent_activity_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqualStrings("붙여넣은 화면", session.agent_activity.labels.items[0].text());
 
     // ── ⑥ 안 걸리면 「없다」가 아니라 **「걸린 것이 없다」**라고 말한다.
-    session.image_gallery.search.clear();
-    try session.image_gallery.search.query.appendSlice(allocator, "zzzz");
-    image_gallery_ops.rebuildFilter(session);
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
-    var notice_buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
-    session.image_gallery.search_active = false; // 검색줄 대신 결과 문구를 본다
+    session.agent_activity.search.clear();
+    try session.agent_activity.search.query.appendSlice(allocator, "zzzz");
+    agent_activity_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+    var notice_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+    session.agent_activity.search_active = false; // 검색줄 대신 결과 문구를 본다
     try std.testing.expectEqualStrings(
-        maru.i18n.t(.image_gallery_no_match),
-        image_gallery_ops.noticeText(session, &notice_buf),
+        maru.i18n.t(.agent_activity_no_match),
+        agent_activity_ops.noticeText(session, &notice_buf),
     );
-    session.image_gallery.search_active = true;
+    session.agent_activity.search_active = true;
 
     // ── ⑦ 첫 Esc 는 검색어만 지운다 → 전부 돌아온다. 창은 아직 열려 있다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
-    try std.testing.expect(session.image_gallery.search_active);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expect(session.agent_activity.search_active);
     // ── ⑧ 빈 상태에서 Esc 면 창이 닫힌다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try std.testing.expect(!session.image_gallery.search_active);
+    try std.testing.expect(!session.agent_activity.search_active);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
     // ── ⑨ 터미널을 누르면 검색창이 키를 놓는다 — 도크가 보인다는 이유로 계속 훔치면 안 된다.
-    session.image_gallery.search_active = true;
-    session.image_gallery.key_focus = false;
-    try std.testing.expect(!image_gallery_ops.searchOwnsInput(session));
+    session.agent_activity.search_active = true;
+    session.agent_activity.key_focus = false;
+    try std.testing.expect(!agent_activity_ops.searchOwnsInput(session));
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
 
@@ -80697,20 +80697,20 @@ test "이미지 갤러리: 라벨과 함께 「언제」도 붙는다 (IG12)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
     // **워커가 시각까지 만들었다.** 2026-08-30T09:13:22Z = 1788081202.
-    try std.testing.expectEqual(@as(i64, 1788081202), session.image_gallery.labels.items[0].time_s);
+    try std.testing.expectEqual(@as(i64, 1788081202), session.agent_activity.labels.items[0].time_s);
     // 라벨과 한 몸으로 다닌다 — 따로 배열을 들면 어긋난다.
-    try std.testing.expectEqualStrings("붙여넣은 화면", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqualStrings("붙여넣은 화면", session.agent_activity.labels.items[0].text());
 }
 
 test "이미지 갤러리: 시각은 오늘이면 시:분, 아니면 날짜까지 (IG12)" {
@@ -80723,22 +80723,22 @@ test "이미지 갤러리: 시각은 오늘이면 시:분, 아니면 날짜까�
     // 같은 날이면 시:분만.
     try std.testing.expectEqualStrings(
         "12:34",
-        image_gallery_ops.testFormatImageTime(&buf, noon, 0, noon + 60, 0),
+        agent_activity_ops.testFormatImageTime(&buf, noon, 0, noon + 60, 0),
     );
     // 하루 전이면 날짜가 붙는다.
     try std.testing.expectEqualStrings(
         "01-01 12:34",
-        image_gallery_ops.testFormatImageTime(&buf, noon, 0, noon + day, 0),
+        agent_activity_ops.testFormatImageTime(&buf, noon, 0, noon + day, 0),
     );
     // **오프셋이 「오늘」 판정을 바꾼다.** UTC 23:30 은 +09:00 에서 다음 날 08:30 이다.
     const late: i64 = 23 * 3600 + 30 * 60;
     const kst: i64 = 9 * 3600;
     try std.testing.expectEqualStrings(
         "08:30",
-        image_gallery_ops.testFormatImageTime(&buf, late, kst, late + 3600, kst),
+        agent_activity_ops.testFormatImageTime(&buf, late, kst, late + 3600, kst),
     );
     // epoch 이전은 그릴 값이 아니다.
-    try std.testing.expectEqualStrings("", image_gallery_ops.testFormatImageTime(&buf, -1, 0, 0, 0));
+    try std.testing.expectEqualStrings("", agent_activity_ops.testFormatImageTime(&buf, -1, 0, 0, 0));
 }
 
 test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항목의 시각을 읽지 않는다 (IG12)" {
@@ -80783,19 +80783,19 @@ test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
     // **그 줄 자신의 시각**이어야 한다. 01:00:00Z = 1788051600.
     // 줄 끝에서 안 자르면 다음 줄의 23:59:59Z(1788134399)를 읽는다 — 하루가 통째로 틀린다.
-    try std.testing.expectEqual(@as(i64, 1788051600), session.image_gallery.labels.items[0].time_s);
+    try std.testing.expectEqual(@as(i64, 1788051600), session.agent_activity.labels.items[0].time_s);
 }
 
 test "이미지 갤러리: 할당이 실패해도 라벨이 밀리지 않는다 (IG11)" {
@@ -80810,7 +80810,7 @@ test "이미지 갤러리: 할당이 실패해도 라벨이 밀리지 않는다 
         var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_at });
         const a = failing.allocator();
 
-        var st: image_gallery_ops.State = .{};
+        var st: agent_activity_ops.State = .{};
         defer st.deinit(gpa); // 정리는 성공하는 할당자로 — 누수 검사가 진짜 결함만 보게 한다
         // 원본은 성공하는 할당자로 채운다(필터가 읽기만 하는 쪽이다).
         for (0..6) |i| {
@@ -80881,16 +80881,16 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // ── 대화가 이어진다: **같은 파일**에 이미지가 하나 더 붙는다.
     {
@@ -80910,21 +80910,21 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
         // 폴러가 파일이 자란 것을 알아채면 바로 넘어간다. 무조건 50,000 tick 을 돌리던 때는 이 test 하나가
         // 31 초(CI)였다 — 기다리는 건 tick 수가 아니라 「갤러리가 따라왔는가」다. 못 따라오면 끝까지 돌고
         // 아래 물음이 그대로 실패한다.
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.count() < 2) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() < 2) _ = session.tick() catch {};
     }
 
     // ── ② 갤러리를 떠났다가 다시 들어온다.
     dock_ops.setDockView(session, .agent_sessions);
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
     {
         // 다시 들어온 뒤 재구축이 «끝나기»까지 기다린다 — 도는 중에 읽으면 낡은 값과 구분이 안 된다.
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and (!session.image_gallery.built or session.image_gallery.count() < 2)) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and (!session.agent_activity.built or session.agent_activity.count() < 2)) _ = session.tick() catch {};
     }
 
     // **여기가 이 test 의 물음이다.** 2 장이면 갤러리가 따라온 것이고, 1 장이면 낡은 것이다.
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 }
 
 // [사용자 보고 2026-08-31] 「변경사항이나 오른쪽 도크가 활성 pane 기준으로 갱신되지 않는다」.
@@ -80953,7 +80953,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
         fn scanned(sess: *AppSession, want: usize) !void {
             for (0..5_000) |_| {
                 _ = sess.tick() catch {};
-                if (sess.image_gallery.built and sess.image_gallery.count() == want) return;
+                if (sess.agent_activity.built and sess.agent_activity.count() == want) return;
                 std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
             }
             return error.ScanNeverFinished;
@@ -80962,7 +80962,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
         /// 「자국을 방금 찍었다」로 만들어 `pollFreshness` 를 휴지기 안에 가둔다 — 그 경로가 대신
         /// 답하면 포커스 훅이 없어도 아래 단언이 통과한다.
         fn sealFreshness(sess: *AppSession) void {
-            sess.image_gallery.last_stat_ms = @intCast(@divFloor(std.Io.Clock.awake.now(sess.io).nanoseconds, std.time.ns_per_ms));
+            sess.agent_activity.last_stat_ms = @intCast(@divFloor(std.Io.Clock.awake.now(sess.io).nanoseconds, std.time.ns_per_ms));
         }
     };
 
@@ -81000,12 +81000,12 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     // ── pane A: 1 장짜리 세션. 소스를 세우는 것은 훅이므로 그 자리(`onSourceChanged`)로 민다.
     const pane_a = pane_ops.activePane(session);
     try std.testing.expect(pane_a.activeTerm().agent_image_source.set(path_a));
-    image_gallery_ops.onSourceChanged(session);
+    agent_activity_ops.onSourceChanged(session);
     try Gallery.scanned(session, 1);
 
     // ── pane B: 나눠 연 pane 의 세션은 2 장이다(split 은 새 pane 을 활성으로 만든다).
@@ -81013,14 +81013,14 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     const pane_b = pane_ops.activePane(session);
     try std.testing.expect(pane_b != pane_a);
     try std.testing.expect(pane_b.activeTerm().agent_image_source.set(path_b));
-    image_gallery_ops.onSourceChanged(session);
+    agent_activity_ops.onSourceChanged(session);
     try Gallery.scanned(session, 2);
 
     // ── ⑶ 포커스만 A 로 되돌린다. 소스는 이미 서 있으므로 여기서 재는 것은 **포커스 훅 하나**다.
     Gallery.sealFreshness(session);
     try std.testing.expect(pane_ops.focusPaneByPtr(session, pane_a));
     _ = session.tick() catch {};
-    try std.testing.expectEqualStrings(path_a, session.image_gallery.chain.head());
+    try std.testing.expectEqualStrings(path_a, session.agent_activity.chain.head());
     try Gallery.scanned(session, 1);
 
     // ── ⑵ 에이전트가 안 붙은 pane 으로 가면 **비운다.** 남겨 두면 사용자는 그 이미지를 지금 보는
@@ -81031,8 +81031,8 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     try std.testing.expect(pane_c != pane_a and pane_c != pane_b);
     try std.testing.expect(pane_c.activeTerm().agent_image_source.isEmpty());
     _ = session.tick() catch {};
-    try std.testing.expect(session.image_gallery.chain.isEmpty());
-    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    try std.testing.expect(session.agent_activity.chain.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
 
     // ── ⑴ 그 빈 상태에서 다시 에이전트 pane 으로. 옛 동작에서 **영영 안 채워지던** 자리다.
     //
@@ -81041,11 +81041,11 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     // 초록이었다). 뷰를 나갔다 들어와 «에이전트 없는 pane 에서 갤러리를 열었다» 를 제품 경로로 다시
     // 만든다 — 그러면 이 단언 하나가 ⑴ 방향을 단독으로 잡는다.
     dock_ops.setDockView(session, .explorer);
-    dock_ops.setDockView(session, .image_gallery);
-    try std.testing.expect(session.image_gallery.chain.isEmpty());
+    dock_ops.setDockView(session, .agent_activity);
+    try std.testing.expect(session.agent_activity.chain.isEmpty());
     try std.testing.expect(pane_ops.focusPaneByPtr(session, pane_b));
     _ = session.tick() catch {};
-    try std.testing.expectEqualStrings(path_b, session.image_gallery.chain.head());
+    try std.testing.expectEqualStrings(path_b, session.agent_activity.chain.head());
     try Gallery.scanned(session, 2);
 }
 
@@ -81062,7 +81062,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
         fn built(sess: *AppSession) !void {
             for (0..5_000) |_| {
                 _ = sess.tick() catch {};
-                if (sess.image_gallery.built) return;
+                if (sess.agent_activity.built) return;
                 std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
             }
             return error.ScanNeverFinished;
@@ -81071,7 +81071,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
         fn settled(sess: *AppSession) !void {
             for (0..5_000) |_| {
                 _ = sess.tick() catch {};
-                if (!sess.image_gallery.scanning()) return;
+                if (!sess.agent_activity.scanning()) return;
                 std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
             }
             return error.ScanNeverFinished;
@@ -81110,39 +81110,39 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     try Wait.built(session);
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // ── ① 검색어를 친 채로 파일이 자란다 → 검색어가 남아 있어야 한다.
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
-    try std.testing.expect(session.image_gallery.search_active);
+    try std.testing.expect(session.agent_activity.search_active);
     for ("keep") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
+    try std.testing.expectEqualStrings("keep", session.agent_activity.queryText());
 
     {
         var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
         defer f.close(io);
         _ = try f.writePositional(io, &.{line}, line.len);
     }
-    image_gallery_ops.refresh(session, true);
+    agent_activity_ops.refresh(session, true);
     try Wait.settled(session);
     // 다시 훑었어도 **친 글자는 그대로**다.
-    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
-    try std.testing.expect(session.image_gallery.search_active);
+    try std.testing.expectEqualStrings("keep", session.agent_activity.queryText());
+    try std.testing.expect(session.agent_activity.search_active);
 
     // ── ② 크게 보기를 열어 두면 자동 갱신이 미뤄진다 — 보던 그림이 안 바뀐다.
-    session.image_gallery.search.clear();
-    image_gallery_ops.rebuildFilter(session);
+    session.agent_activity.search.clear();
+    agent_activity_ops.rebuildFilter(session);
     // `openAt`은 index hit만 필요하고 decode를 비동기로 건다. 썸네일 생성은 이 계약과 무관하다.
-    image_gallery_ops.openAt(session, 0);
-    try std.testing.expect(session.image_gallery.open != null);
-    const before = session.image_gallery.count();
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expect(session.agent_activity.open != null);
+    const before = session.agent_activity.count();
 
     {
         var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
@@ -81153,8 +81153,8 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     // 불변을 전부 지나며, wall-clock 간격을 채우려고 20만 frame을 재생하는 것은 증거를 더하지 않는다.
     _ = try session.tick();
     // 크게 보기가 살아 있고, 개수도 안 바뀌었다(갱신을 미뤘다).
-    try std.testing.expect(session.image_gallery.open != null);
-    try std.testing.expectEqual(before, session.image_gallery.count());
+    try std.testing.expect(session.agent_activity.open != null);
+    try std.testing.expectEqual(before, session.agent_activity.count());
 }
 
 test "이미지 갤러리: 자동 갱신이 워커를 쉬지 않게 돌리지 않는다 (IG2 적대적)" {
@@ -81163,7 +81163,7 @@ test "이미지 갤러리: 자동 갱신이 워커를 쉬지 않게 돌리지 �
     // 폭발」). 델타 읽기를 안 했으므로 **쉬는 시간**으로 막았고, 그 규칙을 여기서 못박는다.
     //
     // 순수 계산이라 화면 없이 짚는다: 「직전 스캔 시간의 10 배는 쉰다, 최소 500 ms」.
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     try std.testing.expectEqual(@as(i64, 500), g.testFreshnessIntervalMs(0));
     try std.testing.expectEqual(@as(i64, 500), g.testFreshnessIntervalMs(11)); // 중앙 세션
     try std.testing.expectEqual(@as(i64, 11750), g.testFreshnessIntervalMs(1175)); // p99
@@ -81215,16 +81215,16 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 파일이 자란 뒤 **다시 훑기를 걸자마자** 화면을 본다 — 결과가 오기 전이다.
     {
@@ -81232,19 +81232,19 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
         defer f.close(io);
         _ = try f.writePositional(io, &.{one}, one.len);
     }
-    image_gallery_ops.refresh(session, true);
+    agent_activity_ops.refresh(session, true);
     // **보이던 것이 그대로 있다.** 0 이면 그 사이 갤러리가 빈 것이다.
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expect(session.image_gallery.built);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expect(session.agent_activity.built);
 
     // 결과가 오면 바뀐다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.count() < 2) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() < 2) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 }
 
 test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (IG2 적대적)" {
@@ -81284,16 +81284,16 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 파일이 사라진다. 갤러리는 **보던 것을 그대로 두고** 다시 훑지 않는다.
     try tmp.dir.deleteFile(io, "s.jsonl");
@@ -81306,15 +81306,15 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
             std.Io.Clock.real.now(session.io).nanoseconds - started_ns < 1_500 * std.time.ns_per_ms) : (spins += 1)
             _ = session.tick() catch {};
     }
-    try std.testing.expect(!session.image_gallery.scanning());
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expect(!session.agent_activity.scanning());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 }
 
 test "이미지 갤러리: 쉬는 시간에 상한이 있다 — 조용히 죽지 않는다 (IG2 적대적)" {
     // **적대적 검증 4 회차.** `scan_ns` 는 벽시계 경과라 스캔 중에 기계가 잠들면 그 시간이 통째로
     // 들어간다 — 1 시간 자면 쉬는 시간이 10 시간이 되어 그 세션 내내 갱신이 안 온다. 상한에 걸리면
     // 점유율 보장은 깨지지만, **기능이 멈추는 것보다 낫다**.
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     try std.testing.expect(g.testFreshnessIntervalMs(60 * 60 * 1000) <= 120_000); // 1 시간 스캔
     try std.testing.expect(g.testFreshnessIntervalMs(std.math.maxInt(u64)) <= 120_000); // 말도 안 되는 값
     // 실측 최악(9,007 ms → 90 초)은 상한 아래라 점유율 보장이 그대로 산다.
@@ -81359,19 +81359,19 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
-    const kept_pixels = session.image_gallery.tiles.items[0].pixels.ptr;
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.tiles.items.len);
+    const kept_pixels = session.agent_activity.tiles.items[0].pixels.ptr;
 
     // 파일이 자란다 → 새 이미지가 **맨 앞**에 오므로 옛 이미지는 인덱스 0 → 1 로 밀린다.
     {
@@ -81379,17 +81379,17 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
         defer f.close(io);
         _ = try f.writePositional(io, &.{one}, one.len);
     }
-    image_gallery_ops.refresh(session, true);
+    agent_activity_ops.refresh(session, true);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.count() < 2) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() < 2) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     // **옛 타일이 살아 있고, 새 인덱스(1)로 옮겨졌다.** 픽셀 포인터가 같다 = 다시 디코드하지 않았다.
-    const tile = session.image_gallery.tileFor(1) orelse return error.TestExpectedEqual;
+    const tile = session.agent_activity.tileFor(1) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(kept_pixels, tile.pixels.ptr);
     try std.testing.expectEqual(@as(usize, 1), tile.hit_index);
     // (`uploaded` 는 단언하지 않는다 — remap 이 내려 두지만 그 뒤 렌더가 곧바로 다시 올리므로
@@ -81444,24 +81444,24 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // 검색을 켜고 keep 만 남긴다.
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
     for ("keep") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // **다른 라벨**의 이미지가 붙는다 → 걸러지므로 목록은 그대로 1 이어야 한다.
     {
@@ -81469,28 +81469,28 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
         defer f.close(io);
         _ = try f.writePositional(io, &.{other_pair}, keep_pair.len);
     }
-    image_gallery_ops.refresh(session, true);
+    agent_activity_ops.refresh(session, true);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and galleryImageHits(session) < 2) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and activityImageHits(session) < 2) {
             _ = session.tick() catch {};
         }
     }
     // 원본은 둘, 보여줄 것은 하나 — **인덱스 도메인이 하나**라는 불변식이 여기서 시험된다.
     // **그림만 센다**: 이 fixture 는 `tool_use` + `tool_result` 짝이라 인덱스에는 활동 `Hit` 도 들어
     // 있다(계약 §4.1). 전체 길이로 세면 「두 장이 왔다」를 활동이 대신 만족시켜 버린다.
-    try std.testing.expectEqual(@as(usize, 2), galleryImageHits(session));
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
-    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
+    try std.testing.expectEqual(@as(usize, 2), activityImageHits(session));
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqualStrings("keep", session.agent_activity.queryText());
     // **라벨과 목록이 같은 세대다.** 어긋나면 남의 설명이 붙는다.
-    try std.testing.expectEqual(session.image_gallery.hits.items.len, session.image_gallery.labels.items.len);
-    try std.testing.expectEqualStrings("keep.png", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqual(session.agent_activity.hits.items.len, session.agent_activity.labels.items.len);
+    try std.testing.expectEqualStrings("keep.png", session.agent_activity.labels.items[0].text());
 
     // 검색을 지우면 둘 다 보인다.
-    session.image_gallery.search.clear();
-    image_gallery_ops.rebuildFilter(session);
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
-    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.labels.items.len);
+    session.agent_activity.search.clear();
+    agent_activity_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.labels.items.len);
 }
 
 test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 않는다 (IG2 적대적)" {
@@ -81530,14 +81530,14 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
 
     // 대화가 여덟 턴 이어진다.
@@ -81548,23 +81548,23 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
             defer f.close(io);
             _ = try f.writePositional(io, &.{one}, one.len * turn);
         }
-        image_gallery_ops.refresh(session, true);
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.count() < turn + 1) {
+        agent_activity_ops.refresh(session, true);
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() < turn + 1) {
             _ = session.tick() catch {};
         }
-        try std.testing.expectEqual(turn + 1, session.image_gallery.count());
+        try std.testing.expectEqual(turn + 1, session.agent_activity.count());
 
         // ── 매 턴 불변식을 짚는다.
         try std.testing.expectEqual(
-            session.image_gallery.hits.items.len,
-            session.image_gallery.labels.items.len,
+            session.agent_activity.hits.items.len,
+            session.agent_activity.labels.items.len,
         );
-        for (session.image_gallery.tiles.items) |tile| {
-            try std.testing.expect(tile.hit_index < session.image_gallery.count());
+        for (session.agent_activity.tiles.items) |tile| {
+            try std.testing.expect(tile.hit_index < session.agent_activity.count());
         }
-        const l = image_gallery_ops.gridLayout(session);
-        try std.testing.expect(session.image_gallery.scroll.offset_y_px <= l.max_scroll);
+        const l = agent_activity_ops.gridLayout(session);
+        try std.testing.expect(session.agent_activity.scroll.offset_y_px <= l.max_scroll);
     }
 }
 
@@ -81615,24 +81615,24 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
     // 격자에서는 라벨이 「무엇인가」에 답한다.
-    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
+    try std.testing.expectEqualStrings("dock.png", session.agent_activity.tiles.items[0].label.text());
 
     // ── 크게 보기를 열면 문맥이 실린다.
-    image_gallery_ops.openAt(session, 0);
-    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    agent_activity_ops.openAt(session, 0);
+    const op = &(session.agent_activity.open orelse return error.TestExpectedEqual);
     try std.testing.expectEqualStrings(
         "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
         op.contextText(),
@@ -81648,14 +81648,14 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
         const saved_src = op.label.source;
         op.context_len = 0;
         op.label.source = .none;
-        const v = image_gallery_ops.viewportRect(session);
+        const v = agent_activity_ops.viewportRect(session);
         op.context_len = saved_ctx;
         op.label.source = saved_src;
         break :blk v;
     };
 
     // ── 문맥이 있으면 그림 자리가 그만큼 줄어든다. 안 줄이면 글자가 그림 위에 얹힌다.
-    const vp_after = image_gallery_ops.viewportRect(session);
+    const vp_after = agent_activity_ops.viewportRect(session);
     try std.testing.expect(vp_after.h < vp_none.h);
 
     // ── **출처는 열 때 스냅샷으로 굳는다**(§2.2.1). `hit_index` 로 매 프레임 목록을 다시 뒤지면,
@@ -81668,13 +81668,13 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     // ── 문맥이 없어도 **출처 한 줄**은 남는다 — 그것은 빈 띠가 아니라 실제로 그리는 줄이다.
     //    (이 fixture 는 에이전트가 Read 한 이미지라 「읽음」이 붙는다.)
     op.context_len = 0;
-    const vp_origin_only = image_gallery_ops.viewportRect(session);
+    const vp_origin_only = agent_activity_ops.viewportRect(session);
     try std.testing.expect(vp_origin_only.h > vp_after.h); // 문맥 줄이 빠진 만큼 그림 자리가 늘었다
     try std.testing.expect(vp_origin_only.h < vp_none.h); // 그래도 출처 한 줄은 예약한다
 
     // ── 출처도 문맥도 없으면 빈 띠를 남기지 않는다 — 기준선으로 정확히 돌아온다.
     op.label.source = .none;
-    try std.testing.expectEqual(vp_none.h, image_gallery_ops.viewportRect(session).h);
+    try std.testing.expectEqual(vp_none.h, agent_activity_ops.viewportRect(session).h);
 }
 
 test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
@@ -81714,20 +81714,20 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tiles.items.len == 0) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tiles.items.len == 0) {
             _ = session.tick() catch {};
         }
     }
-    const vp_before = image_gallery_ops.viewportRect(session);
-    image_gallery_ops.openAt(session, 0);
-    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    const vp_before = agent_activity_ops.viewportRect(session);
+    agent_activity_ops.openAt(session, 0);
+    const op = &(session.agent_activity.open orelse return error.TestExpectedEqual);
     try std.testing.expectEqualStrings("", op.contextText());
     // 빈 띠를 남기지 않는다 — 그림이 그만큼 커야 한다.
     //
@@ -81735,10 +81735,10 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     // 자리를 돌려준다(`chipRowTakenPx`). 그래서 「같다」가 아니라 「정확히 칩 줄만큼 크다」가 참이다 —
     // 예약 줄이 새어 들어오면(빈 띠) 이보다 작아지고, 칩 줄이 안 그려지면서 자리만 쥐고 있으면
     // 이보다 작아진다. 두 결함 다 이 한 줄이 잡는다.
-    const chip_give_back: @TypeOf(vp_before.h) = @floatFromInt(image_gallery_ops.chipRowHeightPx(session));
+    const chip_give_back: @TypeOf(vp_before.h) = @floatFromInt(agent_activity_ops.chipRowHeightPx(session));
     try std.testing.expectEqual(
         vp_before.h + chip_give_back,
-        image_gallery_ops.viewportRect(session).h,
+        agent_activity_ops.viewportRect(session).h,
     );
 }
 
@@ -81750,7 +81750,7 @@ test "이미지 갤러리: 문맥 줄바꿈이 글자를 흘리지 않는다 (IG
     //
     // 이제 한 함수(`wrapNextBytes`)가 그리기와 진행 둘 다 답한다. 그 불변식을 여기서 짚는다:
     // **줄을 이어 붙이면 원문이 그대로 나온다** — 한 글자도 빠지거나 겹치지 않는다.
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     const texts = [_][]const u8{
         "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
         "abcdefghijklmnopqrstuvwxyz 0123456789",
@@ -81783,7 +81783,7 @@ test "이미지 갤러리: 문맥 줄바꿈이 글자를 흘리지 않는다 (IG
 test "이미지 갤러리: 문맥 줄바꿈이 UTF-8 을 쪼개지 않는다 (IG13 적대적)" {
     // 바이트로 자르면 한글이 깨진다. 칸이 글자보다 좁아도(1 칸에 2 칸짜리 한글) 한 글자는 통째로 낸다 —
     // 안 그러면 영영 안 나아가서 무한 루프가 된다.
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     const text: []const u8 = "한글만있는문장입니다";
     var cols: u16 = 1;
     while (cols <= 8) : (cols += 1) {
@@ -81804,7 +81804,7 @@ test "이미지 갤러리: 문맥 줄 나누기가 원문을 잃지 않는다 (I
     //
     // 그래서 「어느 글자를 어느 줄에」를 순수 함수(`layoutContext`)로 갈랐다. 여기서 그 계약을 짚는다:
     // **줄을 이어 붙이면 원문의 앞부분이 그대로 나온다.**
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     const texts = [_][]const u8{
         "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
         "abcdefghijklmnopqrstuvwxyz 0123456789 the quick brown fox",
@@ -81852,7 +81852,7 @@ test "이미지 갤러리: 문맥 줄 나누기가 원문을 잃지 않는다 (I
 
 test "이미지 갤러리: 문맥 줄 나누기가 폭 0·줄 0 에서 멈춘다 (IG13 적대적)" {
     // 좁은 도크에서 `cols` 가 0 이 될 수 있다. 그때 무한 루프나 빈 줄을 만들지 않는다.
-    const g = image_gallery_ops;
+    const g = agent_activity_ops;
     try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 0, 3).count);
     try std.testing.expectEqual(@as(u32, 0), g.layoutContext("무엇이든", 10, 0).count);
     try std.testing.expectEqual(@as(u32, 0), g.layoutContext("", 10, 3).count);
@@ -81917,24 +81917,24 @@ test "이미지 갤러리: 한 틱에 여러 장을 동시에 건다 (IG14)" {
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 40), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 40), session.agent_activity.count());
 
     // 빈 칸이 넉넉하다 — 40 장이 한 화면에 다 들어가지 않는다.
-    const l = image_gallery_ops.gridLayout(session);
+    const l = agent_activity_ops.gridLayout(session);
     try std.testing.expect(l.visible >= 2);
 
     // 한 틱을 돌린다. 「한 번에 한 장」이던 시절에는 이 값이 **1 을 넘을 수 없었다**.
     _ = session.tick() catch {};
-    try std.testing.expect(session.image_gallery.pending_len >= 2);
+    try std.testing.expect(session.agent_activity.pending_len >= 2);
 }
 
 test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대적)" {
@@ -81989,39 +81989,39 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path_a));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
 
     // ── ① 자리를 **가득** 채운 채로 소스를 바꾼다(그래야 죽은 항목이 전부를 막는다).
     _ = session.tick() catch {};
     try std.testing.expectEqual(
         @as(usize, agent_image_decode_backend.max_inflight),
-        session.image_gallery.pending_len,
+        session.agent_activity.pending_len,
     );
 
     // ── ② 다른 세션으로 갈린다 — 도는 디코드는 옛 파일의 오프셋이라 전부 취소된다.
     try std.testing.expect(term.agent_image_source.set(path_b));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
 
     // ── ③ 다시 채워진다. 비우지 않으면 여기서 **한 장도** 안 온다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
-    try std.testing.expect(session.image_gallery.tileFor(0) != null);
+    try std.testing.expect(session.agent_activity.tileFor(0) != null);
 }
 
 test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다 (IG14 적대적)" {
@@ -82086,38 +82086,38 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
-    try std.testing.expectEqualStrings("sq5", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqual(@as(usize, 6), session.agent_activity.count());
+    try std.testing.expectEqualStrings("sq5", session.agent_activity.labels.items[0].text());
 
     // ── ① 0 번(정사각)을 **걸어 둔 채로** 검색어를 친다. 훑기가 끝난 그 tick 이 이미 앞 칸들을
     //     워커에 걸었고, 디코드는 ms 단위라 아직 안 왔다. 여기서 한 tick 이라도 더 돌리면 그 사이
     //     수확돼 전제가 사라진다.
-    try std.testing.expect(session.image_gallery.pendingContains(0));
+    try std.testing.expect(session.agent_activity.pendingContains(0));
 
-    session.image_gallery.key_focus = true;
+    session.agent_activity.key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
-    try std.testing.expect(session.image_gallery.search_active);
+    try std.testing.expect(session.agent_activity.search_active);
     for ("wide") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
-    try std.testing.expectEqualStrings("wide4", session.image_gallery.labels.items[0].text());
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expectEqualStrings("wide4", session.agent_activity.labels.items[0].text());
 
     // ── ② 0 번 칸이 차기를 기다린다.
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and session.image_gallery.tileFor(0) == null) {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.tileFor(0) == null) {
             _ = session.tick() catch {};
         }
     }
-    const t0 = session.image_gallery.tileFor(0) orelse return error.TestUnexpectedResult;
+    const t0 = session.agent_activity.tileFor(0) orelse return error.TestUnexpectedResult;
 
     // ── ③ **가로로 긴 것이어야 한다.** 걸어 둔 것을 안 버리면 옛 0 번(정사각 `sq5`)의 픽셀이
     //     여기 붙는다 — 라벨은 `wide4` 인데 그림은 `sq5` 다.
@@ -82170,29 +82170,29 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
     session.dock.presented = true;
     session.dock.collapsed = false;
     session.dock.side = .right;
-    dock_ops.setDockView(session, .image_gallery);
+    dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
-    image_gallery_ops.refresh(session, false);
+    agent_activity_ops.refresh(session, false);
     {
-        var wait = GalleryWait.start(session.io);
-        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
 
     // ── ① 열면 **뷰포트만큼만** 푼다. 원본(8×1600)이 아니라 절반이다.
-    image_gallery_ops.openAt(session, 0);
+    agent_activity_ops.openAt(session, 0);
     {
-        var wait = GalleryWait.start(session.io);
+        var wait = ActivityWait.start(session.io);
         while (wait.pending()) {
             _ = session.tick() catch {};
-            const o = session.image_gallery.open orelse break;
+            const o = session.agent_activity.open orelse break;
             if (o.pixels.len > 0) break;
         }
     }
     {
-        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        const o = session.agent_activity.open orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, 4), o.width);
         try std.testing.expectEqual(@as(u32, 800), o.height);
         try std.testing.expectEqual(@as(u8, 2), o.decoded_subsample);
@@ -82200,26 +82200,26 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
 
     // ── ② 확대해서 가진 픽셀을 늘려 그리기 시작하면 **원본으로 올린다**.
     //     휠은 제품 진입점이다 — 여기를 안 타면 「그리는 자리와 눌리는 자리」가 갈릴 수 있다.
-    const vp = image_gallery_ops.viewportRect(session);
+    const vp = agent_activity_ops.viewportRect(session);
     var guard: usize = 0;
     while (guard < 200) : (guard += 1) {
-        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        const o = session.agent_activity.open orelse return error.TestUnexpectedResult;
         if (o.view.scale > 1.0) break;
-        image_gallery_ops.wheelZoom(session, 3.0, false, vp.x + vp.w / 2, vp.y + vp.h / 2);
+        agent_activity_ops.wheelZoom(session, 3.0, false, vp.x + vp.w / 2, vp.y + vp.h / 2);
     }
     {
-        const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+        const o = session.agent_activity.open orelse return error.TestUnexpectedResult;
         try std.testing.expect(o.view.scale > 1.0);
     }
     {
-        var wait = GalleryWait.start(session.io);
+        var wait = ActivityWait.start(session.io);
         while (wait.pending()) {
             _ = session.tick() catch {};
-            const o = session.image_gallery.open orelse break;
+            const o = session.agent_activity.open orelse break;
             if (o.decoded_subsample == 1) break;
         }
     }
-    const o = session.image_gallery.open orelse return error.TestUnexpectedResult;
+    const o = session.agent_activity.open orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 8), o.width);
     try std.testing.expectEqual(@as(u32, 1600), o.height);
     try std.testing.expectEqual(@as(u8, 1), o.decoded_subsample);
@@ -82944,24 +82944,24 @@ test "활동 뷰 요약 칸: 크기는 언제나, 실패는 provider 가 적었�
     var buf: [64]u8 = undefined;
 
     // ① 못 찾았다 → 빈 칸
-    try std.testing.expectEqualStrings("", image_gallery_ops.formatResultSummary(&buf, .{ .found = false }));
+    try std.testing.expectEqualStrings("", agent_activity_ops.formatResultSummary(&buf, .{ .found = false }));
     // ② 끝났다 → 크기만
     {
-        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .lines = 12 });
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 12 });
         try std.testing.expect(std.mem.startsWith(u8, out, "12"));
-        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_lines_suffix)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_lines_suffix)) != null);
         // 실패가 아니면 실패 낱말이 **없다**.
-        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_failed)) == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_failed)) == null);
     }
     // ③ 실패했다 → 실패 + 크기(둘 다 있어야 한다 — 실패만 남기면 「얼마나」가 사라진다)
     {
-        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 3 });
-        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.image_gallery_result_failed)) != null);
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 3 });
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_failed)) != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "3") != null);
     }
     // ④ 빈 결과는 0 줄이라고 **말한다**(못 찾은 것과 다른 사실이다).
     {
-        const out = image_gallery_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0 });
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0 });
         try std.testing.expect(out.len != 0);
         try std.testing.expect(std.mem.startsWith(u8, out, "0"));
     }

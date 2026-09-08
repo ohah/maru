@@ -31,7 +31,7 @@ const pane_ops = @import("pane.zig");
 const file_panel_ops = @import("file_panel.zig"); // MARU_OPEN_EXPLORER_FILE 이 원격 행을 클릭과 같은 길로 활성화할 때 쓴다
 const find_ops = @import("find.zig");
 const git_ops = @import("git.zig");
-const image_gallery_ops = @import("image_gallery.zig"); // MARU_FORCE_IMAGE_GALLERY 가 갤러리를 첫 frame 에 세울 때 쓴다
+const agent_activity_ops = @import("agent_activity.zig"); // MARU_FORCE_IMAGE_GALLERY 가 활동 뷰를 첫 frame 에 세울 때 쓴다
 
 /// 시각 확인 디버그 훅 — MARU_OPEN_SETTINGS env가 설정됐고 surface가 준비됐으면 세팅 화면을 한 번 자동으로 연다.
 /// 스크린샷 하니스(MARU_SCREENSHOT)가 입력 없이 모달 상태를 캡처하도록(self-verify). env 미설정이면 무동작 —
@@ -69,21 +69,25 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             null;
     }
     // MARU_FORCE_BLOCKED=1 — 활성 Term을 blocked로 세워 상태바 blocked 항목을 헤드리스로 찍는다.
-    // MARU_FORCE_IMAGE_GALLERY=<트랜스크립트 절대경로> — 도크를 갤러리 뷰로 열고 활성 Term 의 소스를
+    // MARU_FORCE_IMAGE_GALLERY=<트랜스크립트 절대경로> — 도크를 활동 뷰로 열고 활성 Term 의 소스를
+    //
+    // ⚠️ **뷰 이름이 바뀌어도(AV6) 이 환경변수는 그대로다.** 디버그 훅의 이름은 저장소 밖의 캡처
+    // 스크립트·문서가 참조하므로, 바꾸면 그것들이 **조용히** 안 먹는다. 이름을 맞추는 것은 별개
+    // 축이고, 지금은 「무엇을 켜는가」가 주석으로 분명하면 된다.
     // 그 파일로 세운다. **실제 픽셀을 헤드리스로 찍기 위한 유일한 길**이다 — 갤러리 소스는 provider 훅이
     // 채우는데, 첫 frame 에는 훅이 아직 한 번도 안 돌았다(MARU_FORCE_AGENT 가 필요한 것과 같은 이유).
     if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY")) |raw| {
         const path = std.mem.span(raw);
         const t = pane_ops.activePane(self).activeTerm();
         if (t.agent_image_source.set(path)) {
-            dock_ops.openDockTo(self, .image_gallery);
+            dock_ops.openDockTo(self, .agent_activity);
             // MARU_FORCE_IMAGE_GALLERY_FILTER=<images|reads|execs|all> — 종류 필터를 세운다.
             // **활동 목록의 픽셀을 헤드리스로 찍는 유일한 길**이다: 제품에서 필터를 바꾸는 수단은
             // 지금 `Tab`(키 입력)뿐인데 헤드리스에는 키보드가 없다. 필터는 인덱스와 무관한 상태라
             // 스캔 전에 세워도 되고, 바로 아래 `refresh` 가 그 필터로 목록을 만든다.
             if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_FILTER")) |raw_f| {
                 const name = std.mem.span(raw_f);
-                self.image_gallery.filter = if (std.mem.eql(u8, name, "reads"))
+                self.agent_activity.filter = if (std.mem.eql(u8, name, "reads"))
                     .reads
                 else if (std.mem.eql(u8, name, "execs"))
                     .execs
@@ -92,14 +96,14 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 else
                     .images;
             }
-            image_gallery_ops.refresh(self, true);
+            agent_activity_ops.refresh(self, true);
             // MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 그 칸을 크게 연다. 실제 열기는 클릭이라 헤드리스로는
             // 만들 수 없고(마우스가 없다), 스캔이 워커라 지금은 인덱스가 비어 있다 — 그래서 예약만 한다.
             if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_OPEN")) |raw_n| {
-                self.debug_image_gallery_open = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
+                self.debug_agent_activity_open = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
             }
             if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_HOVER")) |raw_n| {
-                self.debug_image_gallery_hover = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
+                self.debug_agent_activity_hover = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
             }
         }
     }

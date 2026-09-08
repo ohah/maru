@@ -3459,6 +3459,16 @@ test "DCOL10: 마우스로 열을 바꿔도 검색이 따라오고, 검색 대�
     try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
     fx.session.clearPointerGesture();
 
+    // **더블클릭도 같은 자리를 지난다.** 열이 바뀌는 마우스 길이 **둘**이라(누름·더블/트리플),
+    //    한쪽만 재면 나머지 배선이 죽어도 초록이다(15회차 T2 가 그 자리였다).
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term)); // 오른쪽으로 돌려 놓는다
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expectEqual(right_count, fx.session.chrome_host.find.match_count);
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, left_x, y0, 0));
+    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
+    fx.session.clearPointerGesture();
+
     // **검색 대상이 편집기가 아니면 안 건드린다.** 터미널을 검색하는 중에 비교 뷰를 클릭했다고
     //    편집기 매치를 다시 세면, 사용자가 보던 터미널 검색 결과가 통째로 갈린다.
     fx.session.chrome_host.find.target = .scrollback;

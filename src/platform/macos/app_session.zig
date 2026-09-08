@@ -78470,6 +78470,113 @@ test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용자 지적)" {
+    // ⚠️ **실측이 이 판정자를 요구했다.** 예전에는 필터를 바꿀 때 타일을 통째로 버렸고, 그러면
+    // 「전체」↔「이미지」를 오갈 때마다 그림이 **사라졌다가 다시 뜬다** — 실측 11 장에서 **306 ms**
+    // 였다. 칩으로 종류를 바꾸는 것이 AV4 의 요점인데 그때마다 화면이 깜빡이면 그 기능이 값을 잃는다.
+    //
+    // 다시 잇는 것이 가능해진 것은 AV5 덕이다: `remapTiles` 가 `thumbSource` 로 찾으므로 그림
+    // 자신(「이미지」)과 접힌 호출(「전체」)이 **같은 키**를 갖는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 그림 결과 셋 — 하나면 「전부 살았다」와 「하나만 살았다」가 안 갈린다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        var b1: [320]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&b1, "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_S{d}\"," ++
+            "\"name\":\"Read\",\"input\":{{\"file_path\":\"/tmp/s{d}.png\"}}}}]}}}}\n", .{ i, i }));
+        var b2: [96]u8 = undefined;
+        try doc.appendSlice(allocator, "{\"parentUuid\":\"p\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[");
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&b2, "{{\"tool_use_id\":\"toolu_S{d}\",", .{i}));
+        try doc.appendSlice(allocator, "\"type\":\"tool_result\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"data\":\"");
+        try doc.appendSlice(allocator, png_b64);
+        try doc.appendSlice(allocator, "\",\"media_type\":\"image/png\"}}]}]}}\n");
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = doc.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    image_gallery_ops.setFilter(session, .all);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and session.image_gallery.tiles.items.len < 3) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+
+    // 어느 픽셀이 살아남았는지 보려고 **정체**를 적어 둔다(개수만 세면 새로 푼 것과 안 갈린다).
+    var before: [3]u64 = undefined;
+    for (session.image_gallery.tiles.items, 0..) |t, k| before[k] = t.data_offset;
+
+    // ── 칩을 두 번 누른다: 「전체」 → 「이미지」 → 「전체」.
+    image_gallery_ops.setFilter(session, .images);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    // ① 격자에서도 **그대로** 있다 — 여기서 버리면 「이미지」로 갈 때도 깜빡인다.
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+
+    image_gallery_ops.setFilter(session, .all);
+    {
+        var wait = GalleryWait.start(session.io);
+        while (wait.pending() and !session.image_gallery.built) _ = session.tick() catch {};
+    }
+    // ② 돌아와서도 **그대로**다. 개수뿐 아니라 **같은 픽셀**인지까지 본다.
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.tiles.items.len);
+    for (session.image_gallery.tiles.items) |t| {
+        var found = false;
+        for (before) |b| {
+            if (b == t.data_offset) found = true;
+        }
+        try std.testing.expect(found);
+        try std.testing.expect(t.pixels.len > 0); // 새로 푸는 중이 아니라 이미 있다
+        // ③ 그리고 그 자리는 **호출 줄**을 가리킨다 — 「전체」의 도메인으로 다시 이어졌다.
+        try std.testing.expect(t.hit_index < session.image_gallery.hits.items.len);
+        try std.testing.expect(!session.image_gallery.hits.items[t.hit_index].kind.isImage());
+    }
+
+    quietGalleryWorkers(session);
+}
+
 test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     // 접기(§2.2.1)가 그림을 호출 줄로 합쳤으니, 그 줄이 **그림도 보여 준다**(계약 §2.1 의 표).
     // 실측: 그림이 붙는 줄은 이미지가 있는 세션에서도 **60 줄에 한 줄**(중앙 1.7%)이라, 자리를

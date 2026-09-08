@@ -2743,26 +2743,44 @@ test "활동 결말: 출력 레코드 자신은 호출로 안 세어진다 (AV2)
     try testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
-test "활동 결말: 줄 수를 모르면 요약을 안 붙인다 — 「모른다」와 「빈 결과」를 가른다 (AV2)" {
-    // 적대적 검증 1 회차. 본문을 못 읽었는데 `found=true, lines=0` 이면 화면이 **「0줄」이라고 거짓말**한다.
-    // 실측: 247 MB Claude 세션에서 그런 결과가 380 건(3.9%)이고, 전부 본문이 이미지·참조 블록이라
-    // 줄 수가 애초에 없는 것들이다.
+test "활동 결말: 줄 수를 모르면 「0 줄」이라고 적지 않는다 (AV2 · §2.2.1 이 갱신)" {
+    // 적대적 검증 1 회차가 세운 판정자다. 본문을 못 읽었는데 `found=true, lines=0` 이면 화면이
+    // **「0줄」이라고 거짓말**한다. 실측: 247 MB Claude 세션에서 그런 결과가 380 건(3.9%)이고,
+    // 전부 본문이 **이미지·참조 블록**이라 줄 수가 애초에 없는 것들이다.
+    //
+    // ⚠️ **그중 이미지 쪽은 §2.2.1 이 답을 바꿨다.** 그때는 「모른다(`found=false`)」로 두는 것이
+    // 유일한 정직한 답이었는데, 지금은 **「이미지」라고 말할 수 있다** — 그러면 접기도 서고 요약도
+    // 거짓이 아니다. 이 판정자가 지키던 성질(「0 줄」이라고 적지 않는다)은 그대로 지킨다.
     const allocator = testing.allocator;
     var out: std.ArrayList(Hit) = .empty;
     defer out.deinit(allocator);
     const doc =
         \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_09IM","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}
-        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_09IM","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}]}}
+        \\{"type":"user","message":{"content":[{"tool_use_id":"toolu_09IM","type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}]}}
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_09RF","name":"Read","input":{"file_path":"/tmp/b.txt"}}]}}
+        \\{"type":"user","message":{"content":[{"tool_use_id":"toolu_09RF","type":"tool_result","content":[{"type":"tool_use_ref","ref":"x"}]}]}}
         \\
     ;
     try scanDocForTest(allocator, doc, &out);
-    // 이미지 `Hit` 도 함께 서므로 활동 `Hit` 만 골라 본다.
-    var activity: ?Hit = null;
-    for (out.items) |h| if (!h.kind.isImage()) {
-        activity = h;
-    };
-    try testing.expect(activity != null);
-    try testing.expect(!activity.?.result.found);
+
+    var image_call: ?Hit = null;
+    var ref_call: ?Hit = null;
+    for (out.items) |h| {
+        if (h.kind.isImage()) continue;
+        if (h.result.image) image_call = h else ref_call = h;
+    }
+
+    // ── ① **이미지 결과는 이제 말할 수 있다** — 줄 수가 아니라 종류로.
+    try testing.expect(image_call != null);
+    try testing.expect(image_call.?.result.found);
+    try testing.expectEqual(@as(u32, 0), image_call.?.result.lines);
+    // 화면이 「0줄」이라고 적지 않는 근거가 이 값이다(`formatResultSummary` 가 이것으로 갈린다).
+    try testing.expect(image_call.?.result.image);
+
+    // ── ② **이미지도 아니고 본문도 못 읽으면 여전히 「모른다」다.** 참조 블록이 그 경우다 —
+    //    여기서 `found` 가 서면 화면이 「0줄」이라고 거짓말한다(이 판정자의 원래 물음).
+    try testing.expect(ref_call != null);
+    try testing.expect(!ref_call.?.result.found);
 }
 
 test "활동 결말: 빈 결과는 «0 줄» 이라는 사실이다 (AV2)" {

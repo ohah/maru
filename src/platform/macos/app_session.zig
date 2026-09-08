@@ -77633,6 +77633,49 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     quietGalleryWorkers(session);
 }
 
+test "활동 뷰: 「전체」는 이미지가 잘린 것도 말한다 (§2.2.1 적대적 2회차)" {
+    // ⚠️ **「전체」는 두 종류를 다 담는다.** 예전 규칙(「격자면 이미지, 아니면 활동」)에서는 「전체」가
+    // **활동 쪽만** 봐서, 이미지가 상한에 잘려도 아무 말을 안 했다 — 사용자는 「이미지」 필터로
+    // 가야만 그 사실을 안다. 계약 §2 가 가르라고 한 「없다」와 「못 봤다」가 거기서 뭉개진다.
+    const F = image_gallery_ops.Filter;
+
+    // 이미지만 잘렸을 때
+    try std.testing.expect(F.images.partialOf(true, false));
+    try std.testing.expect(!F.reads.partialOf(true, false)); // 읽기는 활동만 담는다
+    try std.testing.expect(!F.execs.partialOf(true, false));
+    try std.testing.expect(F.all.partialOf(true, false)); // ← 예전 규칙이 놓치던 자리
+
+    // 활동만 잘렸을 때
+    try std.testing.expect(!F.images.partialOf(false, true));
+    try std.testing.expect(F.reads.partialOf(false, true));
+    try std.testing.expect(F.execs.partialOf(false, true));
+    try std.testing.expect(F.all.partialOf(false, true));
+
+    // 아무것도 안 잘렸으면 아무도 말하지 않는다.
+    inline for (.{ F.images, F.reads, F.execs, F.all }) |f| {
+        try std.testing.expect(!f.partialOf(false, false));
+    }
+}
+
+test "활동 뷰: 그림 결과라도 실패를 삼키지 않는다 (§2.2.1 적대적 2회차)" {
+    // provider 가 적은 실패는 우리가 가진 **유일한 근거**다(계약 §2.3). 종류를 바꿔 말한다고
+    // 그것을 지우면, 화면은 실패한 호출을 성공처럼 보여 준다.
+    var buf: [64]u8 = undefined;
+    const img = maru.i18n.t(.image_gallery_result_image);
+    const failed = maru.i18n.t(.image_gallery_result_failed);
+
+    const out = image_gallery_ops.formatResultSummary(&buf, .{
+        .found = true,
+        .image = true,
+        .failed = true,
+        .lines = 0,
+    });
+    // 둘 다 적힌다 — 그리고 「0줄」은 여전히 안 적는다(그것이 더 나쁜 거짓말이다).
+    try std.testing.expect(std.mem.indexOf(u8, out, failed) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, img) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, '0') == null);
+}
+
 test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이다 (§2.2.1)" {
     // 「전체」를 켜는 순간 같은 일이 **활동 줄과 이미지 항목으로 두 번** 뜬다 — 실측 542 건이 그
     // 모양이다(호출 기준 1.25% 지만 **이미지 기준으로는 대다수**). 접는 것은 「전체」에서뿐이고,

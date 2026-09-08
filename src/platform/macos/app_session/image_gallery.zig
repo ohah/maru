@@ -679,6 +679,20 @@ pub const Filter = enum {
         return self == .images;
     }
 
+    /// 이 필터가 보고 있는 것 중 **잘린 것이 있나**(계약 §2 — 「없다」와 「못 봤다」를 가른다).
+    ///
+    /// ⚠️ **「전체」는 두 종류를 다 담는다.** 예전에는 「격자면 이미지, 아니면 활동」으로 갈랐는데,
+    /// 그 규칙에서 「전체」가 **활동 쪽만** 보게 된다 — 이미지가 상한에 잘려도 「전체」는 아무 말을
+    /// 안 하고, 사용자는 「이미지」 필터로 가야만 그 사실을 안다. 필터가 **담는 종류**로 정해야
+    /// 그 갈래가 안 생긴다.
+    pub fn partialOf(self: Filter, image_partial: bool, activity_partial: bool) bool {
+        return switch (self) {
+            .images => image_partial,
+            .reads, .execs => activity_partial,
+            .all => image_partial or activity_partial,
+        };
+    }
+
     /// 다음 필터. **순서는 실측이 정한다**(적대적 검증 H5).
     ///
     /// 처음에는 표 순서대로 `images → reads → execs → all` 이었는데, 그러면 **첫 Tab 이 거의 항상
@@ -2880,6 +2894,16 @@ pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.Res
     // provider 가 적어 준 말을 우리가 지운다 — 본문이 있으면 줄 수가 여전히 맞는 답이다.
     if (result.image and result.lines == 0) {
         const text = maru.i18n.t(.image_gallery_result_image);
+        // **실패는 삼키지 않는다.** provider 가 적은 유일한 근거이므로(계약 §2.3), 종류를 바꿔
+        // 말한다고 그것을 지우면 안 된다. 줄 수 갈래를 그대로 쓰면 「실패 · 0줄」이 되는데 그건
+        // 더 나쁜 거짓말이라, 여기서 「실패 · 이미지」로 붙인다. (실측 이미지 결과의 실패는 0 건이지만
+        // 근거를 삼키는 코드를 두지 않는다.)
+        if (result.failed) {
+            return std.fmt.bufPrint(buf, "{s} \u{00b7} {s}", .{
+                maru.i18n.t(.image_gallery_result_failed),
+                text,
+            }) catch text;
+        }
         if (text.len > buf.len) return text; // 상수 문자열이라 버퍼 없이도 안전하다
         @memcpy(buf[0..text.len], text);
         return buf[0..text.len];
@@ -3019,10 +3043,10 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     //
     // 종류별 플래그가 아직 없던 스캔 결과(옛 세션)에서는 `partial` 하나로 물러난다.
     const kind_partial = if (self.image_gallery.image_partial or self.image_gallery.activity_partial)
-        (if (self.image_gallery.filter.isGrid())
-            self.image_gallery.image_partial
-        else
-            self.image_gallery.activity_partial)
+        self.image_gallery.filter.partialOf(
+            self.image_gallery.image_partial,
+            self.image_gallery.activity_partial,
+        )
     else
         self.image_gallery.partial;
     if (kind_partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {

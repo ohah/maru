@@ -439,8 +439,14 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
     // `I=`(image number)를 image id 로 푼다 — 같은 번호는 같은 id 를 재사용해 이전 이미지를 교체한다.
     // **`i=` 가 함께 오면 그쪽이 이긴다**(id 가 더 구체적인 지정이다 — 명세). 배정에 실패하면 거부한다.
     if (cmd.image_number != 0 and cmd.image_id == 0) {
-        cmd.image_id = resolveImageNumber(self, cmd.image_number);
-        if (cmd.image_id == 0) return kittyReply(self, cmd, .enomem);
+        if (cmd.action == 'd') {
+            // **delete 는 배정하지 않는다 — 조회만 한다.** 여기서 resolveImageNumber 를 부르면 없는
+            // 번호를 지우라는 명령이 새 id 를 배정하고 표를 한 칸 늘린다(지우는 명령이 상태를 만든다).
+            cmd.image_id = lookupImageNumber(self, cmd.image_number) orelse 0;
+        } else {
+            cmd.image_id = resolveImageNumber(self, cmd.image_number);
+            if (cmd.image_id == 0) return kittyReply(self, cmd, .enomem);
+        }
     }
     const status: KittyStatus = switch (cmd.action) {
         'q' => kittyTransmit(self, cmd, payload, false), // query: 검증만(저장 안 함)
@@ -551,9 +557,7 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
 /// 대체). 새 번호면 안 쓰이는 id 를 위에서부터 내려오며 고른다 — 클라이언트가 흔히 쓰는 작은 id 와
 /// 부딪히지 않게. 배정에 실패하면(표가 꽉 참·OOM) 0 을 돌려주고 호출자가 거부한다.
 fn resolveImageNumber(self: *TerminalCore, number: u32) u32 {
-    for (self.kitty_image_numbers.items) |entry| {
-        if (entry.number == number) return entry.image_id;
-    }
+    if (lookupImageNumber(self, number)) |id| return id;
     // 안 쓰이는 id 를 찾는다. 이미 저장된 이미지와 다른 번호에 배정된 id 를 모두 피한다.
     var candidate = self.kitty_next_auto_id;
     var tries: u32 = 0;
@@ -571,6 +575,15 @@ fn resolveImageNumber(self: *TerminalCore, number: u32) u32 {
     self.kitty_image_numbers.append(self.allocator, .{ .number = number, .image_id = candidate }) catch return 0;
     self.kitty_next_auto_id = candidate -% 1;
     return candidate;
+}
+
+/// 번호에 **이미 배정된** id 를 조회한다 — 없으면 null. 배정을 만들지 않는다.
+/// delete 경로가 이것을 쓴다: 삭제가 없는 번호를 새로 배정하면 «지우는 명령이 상태를 만드는» 꼴이다.
+fn lookupImageNumber(self: *const TerminalCore, number: u32) ?u32 {
+    for (self.kitty_image_numbers.items) |entry| {
+        if (entry.number == number) return entry.image_id;
+    }
+    return null;
 }
 
 /// 이 id 가 이미 어떤 번호에 배정돼 있는가(저장소에 아직 이미지가 없어도 예약된 것으로 본다).
@@ -640,6 +653,68 @@ fn removeOrphanedRelatives(self: *TerminalCore) void {
     }
 }
 
+/// placement 가 덮는 셀 크기(열·행). `c`/`r` 이 명시됐으면 그대로, 아니면 셀 메트릭으로 환산한다.
+/// 메트릭이 없으면(헤드리스) 환산할 수 없어 **1×1** 로 본다 — 앵커 셀 하나만 덮는 것으로 취급한다.
+/// 그 폴백은 「덜 지우는」 쪽이라, 모르는 채로 남의 이미지를 지우는 것보다 안전하다.
+fn placementCellSpan(self: *const TerminalCore, p: StoredPlacement) struct { cols: u16, rows: u16 } {
+    if (p.columns > 0 and p.rows > 0)
+        return .{ .cols = @intCast(@min(p.columns, 0xFFFF)), .rows = @intCast(@min(p.rows, 0xFFFF)) };
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return .{ .cols = 1, .rows = 1 };
+    const img = self.kitty_images.map.get(p.image_id) orelse return .{ .cols = 1, .rows = 1 };
+    const geom = types.PlacementGeometry.compute(
+        img.width,
+        img.height,
+        p.src_x,
+        p.src_y,
+        p.src_width,
+        p.src_height,
+        p.columns,
+        p.rows,
+        self.cell_width_px,
+        self.cell_height_px,
+    ) orelse return .{ .cols = 1, .rows = 1 };
+    // 픽셀 → 셀은 **올림**이다. 한 픽셀이라도 걸치면 그 셀을 덮는다.
+    const cw: f32 = @floatFromInt(self.cell_width_px);
+    const ch: f32 = @floatFromInt(self.cell_height_px);
+    const cols = @ceil(geom.dest_w / cw);
+    const rows = @ceil(geom.dest_h / ch);
+    return .{
+        .cols = @intFromFloat(@max(1, @min(cols, 65535))),
+        .rows = @intFromFloat(@max(1, @min(rows, 65535))),
+    };
+}
+
+/// 이 placement 가 주어진 셀(절대 행·열)을 덮는가 — `d=c`(커서 위치) 판정에 쓴다.
+fn placementCoversCell(self: *const TerminalCore, p: StoredPlacement, abs_row: usize, col: u16) bool {
+    const span = placementCellSpan(self, p);
+    if (abs_row < p.anchor_row) return false;
+    if (abs_row - p.anchor_row >= span.rows) return false;
+    if (col < p.anchor_col) return false;
+    return col - p.anchor_col < span.cols;
+}
+
+/// 커서가 놓인 셀을 덮는 placement 를 모두 지운다(`d=c`/`d=C`). 대문자면 그 placement 가 마지막
+/// 사용처였던 이미지 데이터까지 free 한다. 가상 placement(U=1)는 셀 좌표에 앵커가 없다 — 화면
+/// 텍스트의 placeholder 가 위치를 정한다 — 그래서 커서 판정 대상이 아니다.
+fn deleteAtCursor(self: *TerminalCore, free_image: bool) void {
+    const abs_row = self.screen.sb.count + self.screen.cursor.row;
+    const col = self.screen.cursor.col;
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        const p = self.kitty_placements.items[i];
+        if (!placementCoversCell(self, p, abs_row, col)) {
+            i += 1;
+            continue;
+        }
+        _ = self.kitty_placements.orderedRemove(i);
+        if (free_image) {
+            removeVirtualPlacements(self, p.image_id, 0);
+            self.kitty_images.remove(self.allocator, p.image_id);
+            forgetImageNumberFor(self, p.image_id);
+        }
+    }
+}
+
 /// relative placement 의 부모를 찾는다 — 일반 placement 를 먼저, 없으면 virtual 을 본다.
 ///
 /// **부모는 virtual 이어도 된다**(명세). 다만 virtual 은 화면 위치를 갖지 않고 placeholder 셀이
@@ -685,7 +760,9 @@ fn resolveRelativeAnchor(self: *TerminalCore, p: StoredPlacement) ?struct { row:
 
 /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
 /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
-/// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
+/// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index)·n/N(이미지 번호 I=)·
+/// c/C(커서를 덮는 placement). 나머지(p/q/x/y/r/f)는 ENOTSUPP 로 명시 거부한다 — 침묵하면 앱이
+/// 지워진 줄 알고 계속 그린다.
 /// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 미지원인데,
 /// **무음 무시가 아니라 `ENOTSUPP`로 답한다**(K5) — 앱이 "지웠다"고 믿고 다음 단계로 가지 않게.
 fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
@@ -717,7 +794,25 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
             }
         },
         'z' => deleteByZ(self, cmd.z, free_image), // z-index로
-        else => return .enotsupp, // c/n/p/q/x/y/r/f는 미지원 — 셀 span·이미지번호 필요
+        'n' => { // 이미지 번호(I=)로 — 그 번호에 배정된 id 를 찾아 'i' 와 같은 일을 한다
+            if (cmd.image_number == 0) return .einval;
+            const image_id = cmd.image_id; // execKittyGraphics 가 조회해 둔다(없는 번호면 0)
+            if (image_id == 0) return .ok; // 배정된 적 없는 번호 — 지울 것이 없다(성공)
+            if (free_image) {
+                removePlacementsForImage(self, image_id);
+                removeVirtualPlacements(self, image_id, 0);
+                self.kitty_images.remove(self.allocator, image_id);
+                forgetImageNumberFor(self, image_id);
+            } else if (cmd.placement_id != 0) {
+                removeOnePlacement(self, image_id, cmd.placement_id);
+                removeVirtualPlacements(self, image_id, cmd.placement_id);
+            } else {
+                removePlacementsForImage(self, image_id);
+                removeVirtualPlacements(self, image_id, 0);
+            }
+        },
+        'c' => deleteAtCursor(self, free_image), // 커서가 놓인 셀을 덮는 placement
+        else => return .enotsupp, // p/q/x/y/r/f 는 미지원
     }
     // 부모가 사라졌으면 그것을 기준으로 놓인 relative placement 도 함께 거둔다(명세의 수명 연동).
     removeOrphanedRelatives(self);

@@ -7567,11 +7567,11 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     // 식별자(i=)가 없으면 어느 명령의 응답인지 못 가리므로 보내지 않는다(명세).
     try core.write("\x1b_Ga=t,f=32,s=2,v=2;AAAA\x1b\\");
     try std.testing.expectEqualStrings("", core.pendingResponse());
-    // delete는 성공을 보고하고, 미지원 타깃(d=c 커서 아래)은 ENOTSUPP다.
+    // delete는 성공을 보고하고, 아직 미지원인 타깃(d=x 열 지정)은 ENOTSUPP다.
     try core.write("\x1b_Ga=d,d=I,i=7\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
-    try core.write("\x1b_Ga=d,d=c,i=8\x1b\\");
+    try core.write("\x1b_Ga=d,d=x,i=8\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=8;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
 }
 
@@ -9315,4 +9315,87 @@ test "OSC 5379 ssh: 같은 목적지를 다시 통지해도 cwd 를 안 버린�
     // **다른 목적지로 갈아타면 버린다** — 그 경로는 앞 호스트의 것이다.
     try core.write("\x1b]5379;ssh;me@other-box\x07");
     try std.testing.expectEqualStrings("", core.currentCwd());
+}
+
+test "kitty graphics delete: d=n 이 이미지 번호로 지운다(대문자면 이미지까지)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 24, .rows = 10 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [160]u8 = undefined;
+
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,I=42;{s}\x1b\\", .{encoded}));
+    const assigned = core.kitty_image_numbers.items[0].image_id;
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    core.clearResponse();
+
+    // 소문자 n: placement 만 지운다 — 이미지와 번호 배정은 남아 다시 display 할 수 있어야 한다.
+    try core.write("\x1b_Ga=d,d=n,I=42\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.contains(assigned));
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_image_numbers.items.len);
+    core.clearResponse();
+
+    // 대문자 N: 이미지 데이터와 번호 배정까지 놓아준다.
+    try core.write("\x1b_Ga=p,I=42\x1b\\");
+    core.clearResponse();
+    try core.write("\x1b_Ga=d,d=N,I=42\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(!core.kitty_images.map.contains(assigned));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_image_numbers.items.len);
+}
+
+test "kitty graphics delete: 없는 번호를 지워도 배정을 만들지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 24, .rows = 10 });
+    defer core.deinit();
+
+    // **회귀 판정**: execKittyGraphics 가 모든 action 에서 `I=` 를 resolveImageNumber 로 풀던 시절엔,
+    // «없는 번호를 지워라» 가 새 id 를 배정하고 표를 한 칸 늘렸다 — 지우는 명령이 상태를 만들었다.
+    // 그 상태로 delete 를 반복하면 표가 한도(max_kitty_placements)까지 자란다.
+    var i: u32 = 1;
+    while (i <= 5) : (i += 1) {
+        var seq: [64]u8 = undefined;
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=d,d=n,I={d}\x1b\\", .{i}));
+        core.clearResponse();
+    }
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_image_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.map.count());
+}
+
+test "kitty graphics delete: d=c 가 커서를 덮는 placement 만 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 24, .rows = 10 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20); // 셀 span 환산의 단일 출처
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 5, 5, 5, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [200]u8 = undefined;
+
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{encoded}));
+    core.clearResponse();
+
+    // (행0,열0)에 2×2 셀, (행5,열5)에 1×1 셀을 건다.
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=1,p=1,c=2,r=2\x1b\\");
+    core.clearResponse();
+    try core.write("\x1b[6;6H\x1b_Ga=p,i=1,p=2,c=1,r=1\x1b\\");
+    core.clearResponse();
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+
+    // 커서를 (행1,열1)로 — 첫 placement 의 2×2 안이고 두 번째와는 무관하다.
+    try core.write("\x1b[2;2H\x1b_Ga=d,d=c\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].placement_id);
+    try std.testing.expect(core.kitty_images.map.contains(1)); // 소문자는 이미지를 남긴다
+    core.clearResponse();
+
+    // 아무것도 안 덮는 자리에서는 아무 일도 없어야 한다.
+    try core.write("\x1b[9;9H\x1b_Ga=d,d=c\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    core.clearResponse();
+
+    // 대문자 C: 커서를 덮는 placement 와 그 이미지 데이터까지.
+    try core.write("\x1b[6;6H\x1b_Ga=d,d=C\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(!core.kitty_images.map.contains(1));
 }

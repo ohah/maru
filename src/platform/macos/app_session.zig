@@ -6880,7 +6880,14 @@ pub const AppSession = struct {
 
     pub const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
 
-    pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
+    /// 파일 헤더 밴드가 그릴 것: 사각과 **그 항목**, 그리고 **그 항목을 뽑은 Term**.
+    ///
+    /// **Term 을 함께 든 이유**: `entry` 는 `pane.activeTerm().file_entry` 에서 나오는데, 호출부가
+    /// 심볼 체인을 얻으려고 `leaf.activeTerm()` 을 **다시 한 번** 구하고 있었다 — 같은 사실이 두
+    /// 곳에서 말해지면 갈릴 수 있고, 갈리면 한 줄에 **A 파일의 경로 + B 파일의 심볼 체인**이 뜬다
+    /// (pane 은 파일 Term 을 여럿 들 수 있다). 적대적 검증에서 그 둘을 어긋내는 변이가 살아남았고,
+    /// **판정자로 감시하는 대신 두 번째 출처를 없앴다** — 이제 다른 Term 을 짝지을 방법이 없다.
+    pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry, term: *Term };
 
     pub const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
 
@@ -19075,8 +19082,7 @@ pub const AppSession = struct {
                         // 중복이지만 심볼은 다른 데 없다).
                         // **마디 열 범위를 이 프레임에 굳힌다**(§7.5) — 그리는 것과 재는 것이 같은
                         // `plan` 을 타므로 「그려진 것 = 클릭되는 것」이다.
-                        const band_term = lr.leaf.activeTerm();
-                        const band_text = bandLabelFor(self, band_term, band.entry);
+                        const band_text = bandLabelFor(self, band.term, band.entry);
                         const band_label = band_text.text;
                         const seg_bounds = band_text.bounds;
                         const seg_spans = band_text.spans;

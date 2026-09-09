@@ -20814,6 +20814,25 @@ test "CRUMB2 밴드가 그리는 것은 «경로 + 체인» 이고, 마디 경�
     // ⑶ **마디 경계가 함께 실린다** — 안 실으면 「그려진 것 = 클릭되는 것」이 깨진다.
     try testing.expect(band.bounds.len >= 2);
     try testing.expectEqual(band.bounds.len - 1, band.spans.len);
+
+    // ⑷ **caret 이 없으면 경로만이다.** 아직 한 번도 안 누른 파일에 체인을 그리면, 사용자가 커서를
+    //    둔 적 없는데 화면이 「지금 여기」라고 말한다 — 문서 머리를 caret 인 척하는 셈이다
+    //    (적대적 검증 2026-09-09 W14 가 그 변이로 살아남았다).
+    const saved_sel = fx.term.rt.editor_selection;
+    fx.term.rt.editor_selection = null;
+    try testing.expectEqualStrings("src/a.zig", app_session_mod.bandLabelFor(fx.session, fx.term, &entry).text);
+    fx.term.rt.editor_selection = saved_sel;
+
+    // ⑸ **문서 밖 선택이면 체인이 없다** — 밖에서 파일이 짧아진 프레임에서는 `focus` 가 문서보다
+    //    클 수 있다. 그때 화면이 말할 것은 경로뿐이다.
+    //
+    //    **`@min(focus, content.len)` 자체는 판정할 수 없다**(그 변이가 살아남는 것이 정상이다 —
+    //    적대적 검증 W15): 자르든 안 자르든 그 자리에는 심볼이 없어 `chainAt` 이 0 을 낸다. 그래도
+    //    자르는 이유는 **범위를 묻는 쪽에 문서 밖 값을 넘기지 않는다**는 규율이다(그 아래
+    //    `breadcrumb` 이 `u32` 로 좁히는 자리와 같은 부류).
+    fx.term.rt.editor_selection = editor_selection.Selection.at(doc.file.content.len + 1_000);
+    try testing.expectEqualStrings("src/a.zig", app_session_mod.bandLabelFor(fx.session, fx.term, &entry).text);
+    fx.term.rt.editor_selection = saved_sel;
 }
 
 test "ES31 비교 뷰는 체인을 그리지 않는다 — 문서가 둘이다 (§7.5)" {
@@ -21438,6 +21457,12 @@ pub fn crumbSegmentAt(self: *AppSession, term: *Term, band: maru.session.SplitRe
 
     const spans = term.rt.editor_crumb_spans.items;
     const syms = term.rt.editor_syntax.crumb_syms.items;
+    // **아래 둘은 살아남는 것이 정상인 변이다**(적대적 검증 2026-09-09 W2·W4 — 값이 같아서다):
+    //  · `@min(spans.len, syms.len)`: 두 배열은 늘 같은 길이로 선다(`crumbSpanBuf(n)` 의 `n` 이
+    //    `crumb_syms` 개수다). 그래도 짧은 쪽까지만 도는 이유는 **둘이 갈리는 날**이다 — 한쪽만
+    //    갱신된 프레임에서 이 줄이 없으면 남의 심볼을 답한다.
+    //  · `sp.start == sp.end` 조기 넘김: 빈 범위는 아래 `col >= start and col < end` 에 어차피 안
+    //    걸린다. 그래도 두는 이유는 **뜻**이다("안 그려진 마디" 를 여기서 한 번 말한다).
     for (spans[0..@min(spans.len, syms.len)], 0..) |sp, i| {
         if (sp.start == sp.end) continue; // 안 그려진 마디
         if (col >= sp.start and col < sp.end) return syms[i];
@@ -21804,13 +21829,19 @@ test "SP18 안 그려진 마디는 클릭 대상이 아니다 — 보이는 것 
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    // 열 범위를 손으로 심는다 — 하나는 그려졌고(5..10) 하나는 안 그려졌다(0..0).
-    try fx.term.rt.editor_crumb_spans.resize(allocator, 2);
+    // 열 범위를 손으로 심는다 — 하나는 안 그려졌고(0..0) **그려진 둘이 맞붙는다**(5..10, 10..14).
+    //
+    // **맞붙는 둘이어야 두 가지가 갈린다**(적대적 검증 2026-09-09): 그려진 마디가 하나뿐이면
+    // ⑴ 인덱스를 하나 미는 변이가 **마지막에서 제자리로 잘려** 같은 답을 내고(W3),
+    // ⑵ 오른쪽 경계를 포함하는 변이(`col <= end`)도 이웃이 없어 안 드러난다(W1).
+    try fx.term.rt.editor_crumb_spans.resize(allocator, 3);
     fx.term.rt.editor_crumb_spans.items[0] = .{ .start = 0, .end = 0 };
     fx.term.rt.editor_crumb_spans.items[1] = .{ .start = 5, .end = 10 };
-    try fx.term.rt.editor_syntax.crumb_syms.resize(allocator, 2);
+    fx.term.rt.editor_crumb_spans.items[2] = .{ .start = 10, .end = 14 };
+    try fx.term.rt.editor_syntax.crumb_syms.resize(allocator, 3);
     fx.term.rt.editor_syntax.crumb_syms.items[0] = 7;
     fx.term.rt.editor_syntax.crumb_syms.items[1] = 9;
+    fx.term.rt.editor_syntax.crumb_syms.items[2] = 11;
 
     // **밴드 원점을 0 이 아니게 둔다.** 사이드바가 있으면 밴드는 화면 왼쪽에 안 붙는데, `x = 0` 으로
     // 재면 가로 원점을 빼는지 안 빼는지 **구별되지 않는다**(뮤테이션에서 그 뺄셈을 지웠는데 안 죽었다).
@@ -21822,8 +21853,13 @@ test "SP18 안 그려진 마디는 클릭 대상이 아니다 — 보이는 것 
 
     // 그려진 마디 안 — 그 심볼이 나온다(**밴드 원점을 더한 창 좌표**로 준다).
     try testing.expectEqual(@as(?usize, 9), crumbSegmentAt(fx.session, fx.term, band, bx + 6 * cw + 1, by + 5));
+    // **둘째 마디 안 — 그 심볼이 나온다.** 인덱스를 미는 변이가 여기서 갈린다.
+    try testing.expectEqual(@as(?usize, 11), crumbSegmentAt(fx.session, fx.term, band, bx + 11 * cw + 1, by + 5));
+    // **경계 열은 뒤 마디의 것이다**(구간은 반열림 `[start, end)`). 앞 마디가 `end` 를 먹으면
+    // 여기서 9 가 나온다 — 「이웃으로 새는」 그 자리다.
+    try testing.expectEqual(@as(?usize, 11), crumbSegmentAt(fx.session, fx.term, band, bx + 10 * cw + 1, by + 5));
     // 그려진 범위 밖 — 없다.
-    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx + 12 * cw + 1, by + 5));
+    try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx + 15 * cw + 1, by + 5));
     // **빈 범위(0..0)는 어떤 좌표로도 안 잡힌다.**
     try testing.expectEqual(@as(?usize, null), crumbSegmentAt(fx.session, fx.term, band, bx, by + 5));
     // **밴드 왼쪽 바깥** — 원점을 안 빼면 여기가 마디 안으로 잘못 잡힌다.

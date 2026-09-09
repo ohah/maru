@@ -146,6 +146,12 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 69, .name = "notification_title" },
     .{ .tag = 70, .name = "notification_body" },
     .{ .tag = 71, .name = "agent_progress" },
+    // OSC 99 조립 조각. **새 tag 는 끝에서 이어 붙인다** — 가운데에 끼우면 이미 나간 handoff 의
+    // 같은 번호가 다른 뜻이 돼 업그레이드가 남의 필드를 읽는다.
+    .{ .tag = 95, .name = "osc99_title" },
+    .{ .tag = 96, .name = "osc99_body" },
+    .{ .tag = 97, .name = "osc99_id" },
+    .{ .tag = 98, .name = "osc99_active" },
     .{ .tag = 72, .name = "charset_g0" },
     .{ .tag = 73, .name = "charset_g1" },
     .{ .tag = 74, .name = "charset_gl" },
@@ -1244,6 +1250,28 @@ test "handoff v1 round-trips partial UTF-8 and escape parser continuations" {
     try expectCoreContinuation("\x1b]2;partial", "\x07");
     try expectCoreContinuation("\x1bP$q", "m\x1b\\");
     try expectCoreContinuation("\x1b_Ga=t,f=32,s=1,v=1,i=7;AAAA", "\x1b\\");
+}
+
+test "handoff v1 이 조립 중인 OSC 99 알림을 넘긴다 (적대적 검증: 조합 경로)" {
+    // **화면 왕복 판정자는 이걸 못 잡는다** — 조립 중인 알림은 아무것도 렌더하지 않아서, 통째로
+    // 잃어도 `dumpUtf8` 비교가 초록이다. 그래서 조합 경로를 따로 꿴다: `d=0` 로 절반을 보낸 뒤
+    // exec 를 건너가고, 나머지 `d=1` 조각을 **복원된 코어에** 먹여 온전한 알림이 서는지 본다.
+    // 잃으면 뒤이어 오는 마지막 조각이 **제목 없는 알림**을 띄운다.
+    const allocator = std.testing.allocator;
+    var before = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer before.deinit();
+    try before.write("\x1b]99;i=build:d=0;빌드\x1b\\");
+    try before.write("\x1b]99;i=build:d=0:p=body;4174개\x1b\\");
+
+    const bytes = try encodeCore(allocator, &before);
+    defer allocator.free(bytes);
+    var restored = try decodeCore(allocator, bytes);
+    defer restored.deinit();
+
+    try restored.write("\x1b]99;i=build:p=title; 완료\x1b\\");
+    try std.testing.expectEqualStrings("빌드 완료", restored.notification_title.items);
+    try std.testing.expectEqualStrings("4174개", restored.notification_body.items);
+    try std.testing.expect(restored.notification_pending);
 }
 
 test "handoff v1 rejects checksum damage before candidate publication" {

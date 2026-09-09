@@ -460,6 +460,19 @@ pub const TerminalCore = struct {
     // ConEmu OSC 9;4 progress의 최신 payload. 에이전트 관측기가 터미널이 이미 받은 공개 프로토콜 신호를
     // 읽을 뿐이며, 알림으로 발사하지 않는다. bounded OSC parser가 입력 크기를 제한하고 마지막 값만 보관한다.
     agent_progress: std.ArrayListUnmanaged(u8) = .empty,
+    /// OSC 99(kitty 데스크톱 알림)의 **조립 중인** 알림. 그 프로토콜은 한 알림을 여러 escape 로
+    /// 나눠 보낼 수 있어(`d=0` = 아직 더 온다), 마지막 조각(`d=1`)이 올 때까지 여기에 쌓는다.
+    /// 완성되면 `notification_title`/`notification_body` 로 넘어가고 여기는 비워진다.
+    ///
+    /// **상한이 있다**(`max_osc99_assembly_bytes`). `d=0` 만 계속 보내는 스트림은 완성되지 않으므로,
+    /// 상한이 없으면 끝나지 않는 알림 하나가 메모리를 무한히 먹는다.
+    osc99_title: std.ArrayListUnmanaged(u8) = .empty,
+    osc99_body: std.ArrayListUnmanaged(u8) = .empty,
+    /// 조립 중인 알림의 식별자(`i=`). 다른 식별자가 오면 조립 중이던 것을 버리고 새로 시작한다 —
+    /// 여러 알림을 동시에 조립하지 않는다(둘을 섞으면 제목과 본문이 뒤바뀐 알림이 뜬다).
+    osc99_id: std.ArrayListUnmanaged(u8) = .empty,
+    /// 조립을 시작한 적이 있는가. 빈 식별자(`i=` 생략)와 «아직 아무것도 안 왔다» 를 구분한다.
+    osc99_active: bool = false,
     // G3 charset: G0/G1 G-set 지정과 GL 호출. `ESC ( <f>`→G0, `ESC ) <f>`→G1(f='0'=dec_special·'B'=ascii).
     // SI(0x0f)→GL=G0, SO(0x0e)→GL=G1. print 시 GL의 charset으로 codepoint를 변환한다. RIS에서 전부 초기화.
     charset_g0: Charset = .ascii,
@@ -681,6 +694,7 @@ pub const TerminalCore = struct {
         self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
         self.default_bg_override = null;
         self.agent_progress.clearRetainingCapacity(); // 이전 프로그램의 progress를 상태 근거로 재사용하지 않는다.
+        osc.resetNotify99(self); // 조립 중이던 OSC 99 조각도 버린다 — 다음 프로그램의 알림에 섞이면 안 된다.
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
@@ -740,6 +754,9 @@ pub const TerminalCore = struct {
         self.clipboard_read_target.deinit(self.allocator);
         self.notification_title.deinit(self.allocator);
         self.notification_body.deinit(self.allocator);
+        self.osc99_title.deinit(self.allocator);
+        self.osc99_body.deinit(self.allocator);
+        self.osc99_id.deinit(self.allocator);
         self.agent_progress.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
@@ -9440,4 +9457,178 @@ test "kitty I=: 배정하는 image id 는 24비트 안이다 (placeholder 가 �
         try std.testing.expect(entry.image_id != 0);
         try std.testing.expect(entry.image_id <= 0x00FF_FFFF); // 24비트 안
     }
+}
+
+test "OSC 99: 제목·본문·조각 조립·base64 (kitty 데스크톱 알림)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 가장 단순한 형태 — metadata 없이 payload 가 제목이다.
+    try core.write("\x1b]99;;Hello\x1b\\");
+    try std.testing.expect(core.notification_pending);
+    try std.testing.expectEqualStrings("Hello", core.notification_title.items);
+    try std.testing.expectEqualStrings("", core.notification_body.items);
+
+    // p=body 는 본문으로 간다. 같은 식별자의 두 조각을 `d=0`/`d=1` 로 이어 붙인다.
+    const gen = core.notification_generation;
+    try core.write("\x1b]99;i=7:d=0;빌드\x1b\\");
+    try std.testing.expectEqual(gen, core.notification_generation); // 아직 안 쐈다
+    try core.write("\x1b]99;i=7:d=0:p=title; 완료\x1b\\");
+    try core.write("\x1b]99;i=7:p=body;테스트 4168개 초록\x1b\\");
+    try std.testing.expectEqualStrings("빌드 완료", core.notification_title.items);
+    try std.testing.expectEqualStrings("테스트 4168개 초록", core.notification_body.items);
+    try std.testing.expect(core.notification_generation > gen);
+    // 발사 후에는 조립 버퍼가 비어 다음 알림에 안 섞인다.
+    try std.testing.expect(!core.osc99_active);
+    try std.testing.expectEqual(@as(usize, 0), core.osc99_title.items.len);
+
+    // e=1 은 base64 payload 다.
+    var b64: [64]u8 = undefined;
+    const enc = std.base64.standard.Encoder.encode(&b64, "안녕");
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b]99;e=1;{s}\x1b\\", .{enc}));
+    try std.testing.expectEqualStrings("안녕", core.notification_title.items);
+}
+
+test "OSC 99: 모르는 payload 종류를 제목에 싣지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: `p=` 를 안 읽거나 모르는 값을 title 로 떨구면, 아이콘 이름·버튼 라벨이
+    // 알림 제목으로 뜬다 — 무시보다 나쁜 오작동이다.
+    try core.write("\x1b]99;i=1:d=0;진짜 제목\x1b\\");
+    try core.write("\x1b]99;i=1:d=0:p=icon;network-error\x1b\\");
+    try core.write("\x1b]99;i=1:d=0:p=buttons;확인\u{2028}취소\x1b\\");
+    try core.write("\x1b]99;i=1:p=body;진짜 본문\x1b\\");
+    try std.testing.expectEqualStrings("진짜 제목", core.notification_title.items);
+    try std.testing.expectEqualStrings("진짜 본문", core.notification_body.items);
+}
+
+test "OSC 99: 식별자가 바뀌면 조립을 버린다 — 제목과 본문이 뒤섞이지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 알림 A 를 절반 보내고, 알림 B 가 끼어든다. 섞으면 A 의 제목에 B 가 붙는다.
+    try core.write("\x1b]99;i=A:d=0;에이\x1b\\");
+    try core.write("\x1b]99;i=B;비\x1b\\");
+    try std.testing.expectEqualStrings("비", core.notification_title.items);
+    try std.testing.expect(!core.osc99_active); // B 는 d=1 이라 발사되고 비워졌다
+    // A 의 나머지가 뒤늦게 와도 B 의 잔재가 안 붙는다.
+    try core.write("\x1b]99;i=A;에이2\x1b\\");
+    try std.testing.expectEqualStrings("에이2", core.notification_title.items);
+}
+
+test "OSC 99: 끝나지 않는 조각은 상한에서 멈춘다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: `d=0` 만 계속 보내는 스트림은 영원히 완성되지 않는다. 상한이 없으면 끝나지
+    // 않는 알림 하나가 메모리를 무한히 먹는다(악의적 스트림 한 줄로).
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try core.write("\x1b]99;i=z:d=0;0123456789012345678901234567890123456789\x1b\\");
+    }
+    try std.testing.expect(core.osc99_title.items.len <= osc.max_osc99_assembly_bytes);
+    // RIS 는 조립 중이던 것을 버린다 — 다음 프로그램의 알림에 섞이면 안 된다.
+    try core.write("\x1bc");
+    try std.testing.expect(!core.osc99_active);
+    try std.testing.expectEqual(@as(usize, 0), core.osc99_title.items.len);
+}
+
+test "OSC 99: metadata 구분자가 없으면 아무 일도 안 한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    // payload 구분자(`;`)가 없는 형태는 이 프로토콜의 문장이 아니다. 그대로 제목으로 삼으면
+    // metadata 문자열(`i=1:d=0`)이 알림 제목으로 뜬다.
+    try core.write("\x1b]99;i=1:d=0\x1b\\");
+    try std.testing.expect(!core.notification_pending);
+    try std.testing.expect(!core.osc99_active);
+}
+
+test "OSC 99: 상한을 넘긴 알림은 무음 폐기가 아니라 거부로 표면화한다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: 오버플로 래치가 777/9 만 알고 99 를 몰랐다. 큰 알림 하나가 아무 흔적 없이
+    // 사라져, 사용자는 «왜 알림이 안 떴는지» 를 알 길이 없었다 — 클립보드 거부를 표면화하는 것과
+    // 같은 이유로 이것도 표면화해야 한다.
+    try std.testing.expect(!core.notification_write_rejected);
+    try core.write("\x1b]99;;");
+    var i: usize = 0;
+    while (i < 40) : (i += 1) try core.write("0123456789012345678901234567890123456789012345678901234567890123");
+    try core.write("\x1b\\");
+    try std.testing.expect(core.notification_write_rejected);
+    try std.testing.expect(!core.notification_pending); // 잘린 알림을 띄우지는 않는다
+}
+test "OSC 99: 적대적 입력에 죽지 않는다 (R4 fuzz)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // APC/OSC 값은 신뢰 경계 밖이다. 아래는 전부 «파서를 죽이려는» 문장이고, 하나도 panic 하면 안 된다.
+    const hostile = [_][]const u8{
+        "\x1b]99\x1b\\", // metadata 도 payload 도 없다
+        "\x1b]99;\x1b\\", // 구분자만
+        "\x1b]99;;\x1b\\", // 빈 제목
+        "\x1b]99;=;x\x1b\\", // 키 없는 =
+        "\x1b]99;p=;x\x1b\\", // 빈 값
+        "\x1b]99;pp=title;x\x1b\\", // 두 글자 키(명세에 없다)
+        "\x1b]99;::::;x\x1b\\", // 빈 쌍만
+        "\x1b]99;d=;x\x1b\\", // d 가 빈 값 — 기본(done)이어야 한다
+        "\x1b]99;e=1;!!!not-base64!!!\x1b\\", // 잘못된 base64
+        "\x1b]99;e=1;\x1b\\", // base64 인데 payload 가 없다
+        "\x1b]99;i=" ++ "x" ** 500 ++ ";t\x1b\\", // 아주 긴 식별자
+        "\x1b]99;p=title:p=body:p=icon;x\x1b\\", // 같은 키 반복 — 마지막이 이긴다
+        "\x1b]99;d=0;a\x1b\\\x1b]99;d=0;b\x1b\\\x1b]99;;c\x1b\\", // 식별자 없이 이어 붙이기
+        "\x1b]99;;\xff\xfe\xfd\x1b\\", // 잘못된 UTF-8 페이로드
+        "\x1b]99;;title;with;semicolons\x1b\\", // payload 안의 `;` 는 payload 다
+    };
+    for (hostile) |seq| try core.write(seq);
+
+    // 마지막 문장의 payload 는 첫 `;` 뒤 전부여야 한다 — 잘라 먹으면 제목이 반쪽이 된다.
+    try std.testing.expectEqualStrings("title;with;semicolons", core.notification_title.items);
+    // 파서가 ground 로 돌아와 평범한 텍스트를 계속 받는다.
+    try core.write("ok");
+    try std.testing.expectEqual(@as(u21, 'o'), core.screen.cells[0].codepoint);
+}
+
+test "OSC 99: close·query 는 빈 알림을 띄우지 않는다 (적대적 검증 R5)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: `p=close`(알림 닫기)와 `p=?`(질의)는 «보여 달라» 가 아니다. 그런데 `d` 기본값이
+    // done 이라, 종류만 보고 payload 를 안 쌓은 채 그대로 발사하면 **제목도 본문도 빈 알림**이 뜬다.
+    // 앱이 알림을 닫으려 할 때마다 빈 알림이 하나씩 뜨는 꼴이다.
+    try core.write("\x1b]99;i=1:p=close;\x1b\\");
+    try std.testing.expect(!core.notification_pending);
+    try core.write("\x1b]99;i=2:p=?;\x1b\\");
+    try std.testing.expect(!core.notification_pending);
+    // 아이콘만 보내고 끝나도 마찬가지다.
+    try core.write("\x1b]99;i=3:p=icon;network-error\x1b\\");
+    try std.testing.expect(!core.notification_pending);
+    // 내용이 있으면 당연히 뜬다 — 게이트가 넓으면 진짜 알림이 사라진다.
+    try core.write("\x1b]99;i=4;진짜\x1b\\");
+    try std.testing.expect(core.notification_pending);
+    try std.testing.expectEqualStrings("진짜", core.notification_title.items);
+    // 본문만 있는 알림도 뜬다(OSC 9 와 같은 형태).
+    core.notification_pending = false;
+    try core.write("\x1b]99;i=5:p=body;본문만\x1b\\");
+    try std.testing.expect(core.notification_pending);
+    try std.testing.expectEqualStrings("본문만", core.notification_body.items);
+}
+
+test "OSC 99: metadata 구분자는 콜론과 쉼표를 둘 다 받는다 (적대적 검증 R6)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 명세가 정한 구분자는 콜론인데 그걸 이 저장소 안에서 교차 확인할 근거를 못 찾았다. 한쪽만
+    // 골랐다가 틀리면 `d=` 를 못 읽어 **여러 조각으로 오는 알림이 전부 반쪽**이 된다. 둘 다 받는다.
+    try core.write("\x1b]99;i=1:d=0;콜론\x1b\\");
+    try core.write("\x1b]99;i=1:p=body;본문\x1b\\");
+    try std.testing.expectEqualStrings("콜론", core.notification_title.items);
+    try std.testing.expectEqualStrings("본문", core.notification_body.items);
+
+    try core.write("\x1b]99;i=2,d=0;쉼표\x1b\\");
+    try core.write("\x1b]99;i=2,p=body;본문2\x1b\\");
+    try std.testing.expectEqualStrings("쉼표", core.notification_title.items);
+    try std.testing.expectEqualStrings("본문2", core.notification_body.items);
 }

@@ -144,8 +144,6 @@ fn downloadCore(operations: anytype, allocator: std.mem.Allocator, release_fence
     var frozen: Frozen = undefined;
     freeze(&frozen, initial);
     try prepare(result, workspace, release_fence, deadline, cli.pinned);
-    var succeeded = false;
-    defer if (!succeeded) cleanup(result) catch {};
 
     for (0..count) |index| {
         const before = release_fence.candidateFor(deadline, cli.pinned) orelse return fail(result, error.InvalidFence);
@@ -173,7 +171,6 @@ fn downloadCore(operations: anytype, allocator: std.mem.Allocator, release_fence
         if (file.device == prior.device and file.inode == prior.inode) return fail(result, error.AssetAlias);
     result.complete = true;
     result.seal = ownerSeal(result);
-    succeeded = true;
 }
 
 fn resultFileFd(result: *Assets, index: usize) !c.fd_t {

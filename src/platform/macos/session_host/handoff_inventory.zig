@@ -181,6 +181,12 @@ pub const terminal_core_groups = [_]Group{
             "notification_title",
             "notification_body",
             "agent_progress",
+            // OSC 99 조립 중인 조각. 논리 상태다 — 세션 호스트가 exec 로 넘어가는 동안 `d=0` 로
+            // 반쯤 온 알림을 버리면, 뒤이어 오는 `d=1` 이 **제목 없는 알림**을 띄운다.
+            "osc99_title",
+            "osc99_body",
+            "osc99_id",
+            "osc99_active",
             "charset_g0",
             "charset_g1",
             "charset_gl",

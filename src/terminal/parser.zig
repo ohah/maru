@@ -49,6 +49,7 @@ pub fn dispatchOsc(self: *TerminalCore) void {
         if (self.osc_large_ok) self.clipboard_write_rejected = true;
         const body = self.osc_buffer.items;
         if ((std.mem.startsWith(u8, body, "777;notify;")) or
+            (std.mem.startsWith(u8, body, "99;")) or
             (std.mem.startsWith(u8, body, "9;") and osc.isNotify9Body(body[2..])))
             self.notification_write_rejected = true;
         return;
@@ -79,6 +80,8 @@ pub fn dispatchOsc(self: *TerminalCore) void {
     } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
         // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
         osc.dispatchPaletteReset(self, if (body.len > 4) body[4..] else "");
+    } else if (std.mem.startsWith(u8, body, "99;")) {
+        osc.dispatchNotify99(self, body[3..]); // OSC 99 = kitty 데스크톱 알림(metadata;payload, 조각 조립)
     } else if (std.mem.startsWith(u8, body, "777;")) {
         osc.dispatchNotify777(self, body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
     } else if (std.mem.startsWith(u8, body, "9;")) {

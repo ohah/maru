@@ -429,3 +429,105 @@ fn percentDecodeAlloc(self: *TerminalCore, s: []const u8) ![]u8 {
     }
     return out.toOwnedSlice(self.allocator);
 }
+
+/// OSC 99(kitty 데스크톱 알림)의 조립 버퍼 상한. `d=0`(아직 더 온다)만 계속 보내는 스트림은 영원히
+/// 완성되지 않으므로, 상한이 없으면 **끝나지 않는 알림 하나가 메모리를 무한히 먹는다**. 비-클립보드
+/// OSC 한 개의 상한(`max_osc_small_bytes`)과 같은 결의 방어선이고, 제목·본문 각각에 건다.
+pub const max_osc99_assembly_bytes: usize = 2048;
+
+/// 조립 중이던 OSC 99 상태를 버린다. RIS 와 «식별자가 바뀜» 두 자리에서 부른다.
+pub fn resetNotify99(self: *TerminalCore) void {
+    self.osc99_title.clearRetainingCapacity();
+    self.osc99_body.clearRetainingCapacity();
+    self.osc99_id.clearRetainingCapacity();
+    self.osc99_active = false;
+}
+
+/// OSC 99 — **kitty 데스크톱 알림 프로토콜**. `OSC 99 ; <metadata> ; <payload> ST`
+///
+/// metadata 는 **콜론으로 나뉜** `key=value` 쌍이다(OSC 자체의 구분자가 `;` 라 그것과 겹치지 않게).
+/// payload 는 두 번째 `;` 뒤 **전부**다 — 그 안의 `;` 는 payload 의 일부다.
+///
+/// maru 가 읽는 키:
+///   - `p=` payload 종류: `title`(기본)·`body`. 나머지(`icon`·`buttons`·`alive`·`close`·`?`)는
+///     **조용히 소비**한다 — 모르는 종류의 payload 를 제목에 이어 붙이면 아이콘 이름이나 버튼
+///     라벨이 알림 제목으로 뜬다(무시보다 나쁜 오작동).
+///   - `d=` done: `0` 이면 아직 더 온다(조립 계속), `1`(기본)이면 이 조각이 마지막 → 알림 발사.
+///   - `i=` 식별자: 다른 식별자가 오면 조립 중이던 것을 버리고 새로 시작한다.
+///   - `e=` payload 가 base64 인가(`1`). 기본은 UTF-8 평문.
+///
+/// **읽지만 쓰지 않는 키**(`u=` 긴급도·`a=` 동작·`o=` 표시 조건·`w=` 만료·`s=` 소리 등)는 파싱만 하고
+/// 버린다. maru 의 알림 저장소는 (제목, 본문) 둘뿐이라 실을 자리가 없다 — 지어내지 않는다.
+///
+/// **질의(`p=?`)에는 답하지 않는다.** 응답 형식을 명세로 확정하지 못했고, 틀린 형식으로 답하면 앱이
+/// 없는 능력을 켠다. 이 프로토콜에서 무응답은 «지원 안 함» 의 정의된 신호라 침묵이 안전하다.
+///
+/// 베이스: kitty desktop notification protocol(공개 명세). 기존 OSC 777/9 와 같은 저장소
+/// (`setNotification`)로 수렴해, 알림을 소비하는 쪽은 출처를 구분할 필요가 없다.
+pub fn dispatchNotify99(self: *TerminalCore, body: []const u8) void {
+    const sep = std.mem.indexOfScalar(u8, body, ';') orelse return; // metadata 와 payload 사이 구분자가 없다
+    const metadata = body[0..sep];
+    const payload = body[sep + 1 ..];
+
+    var kind: u8 = 't'; // 't'=title, 'b'=body, 0=그 외(소비만)
+    var done = true;
+    var base64 = false;
+    var id: []const u8 = "";
+
+    // **구분자를 `:` 와 `,` 둘 다로 나눈다.** 명세가 정한 것은 콜론이지만, 그것을 이 저장소 안에서
+    // 교차 확인할 근거(레퍼런스 구현·실제 트래픽)를 못 찾았다. 둘 다 받으면 어느 쪽이 맞든 파싱이
+    // 옳고, 잃는 것은 «값 안의 쉼표»(`a=report,focus` 같은 동작 목록)가 쪼개지는 것뿐인데 그 키들은
+    // 어차피 안 쓴다. 반대로 한쪽만 골랐다가 틀리면 `d=`(조각 이어붙이기)를 통째로 못 읽어
+    // **여러 조각으로 오는 알림이 전부 반쪽**이 된다 — 틀렸을 때의 대가가 비대칭이라 넓게 받는다.
+    var it = std.mem.splitAny(u8, metadata, ":,");
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const key = pair[0..eq];
+        const val = pair[eq + 1 ..];
+        if (key.len != 1) continue; // kitty metadata key 는 모두 한 글자
+        switch (key[0]) {
+            'p' => kind = if (std.mem.eql(u8, val, "title"))
+                't'
+            else if (std.mem.eql(u8, val, "body"))
+                'b'
+            else
+                0,
+            'd' => done = !std.mem.eql(u8, val, "0"),
+            'e' => base64 = std.mem.eql(u8, val, "1"),
+            'i' => id = val,
+            else => {}, // u/a/o/w/s/g/n/t/c — 파싱만 하고 버린다(저장소에 실을 자리가 없다)
+        }
+    }
+
+    // 식별자가 바뀌면 조립 중이던 것을 버린다. 둘을 섞으면 **제목과 본문이 뒤바뀐 알림**이 뜬다.
+    if (self.osc99_active and !std.mem.eql(u8, id, self.osc99_id.items)) resetNotify99(self);
+    if (!self.osc99_active) {
+        self.osc99_id.appendSlice(self.allocator, id) catch return resetNotify99(self);
+        self.osc99_active = true;
+    }
+
+    if (kind != 0) {
+        var decoded: [max_osc99_assembly_bytes]u8 = undefined;
+        const text = if (base64) blk: {
+            const dec = std.base64.standard.Decoder;
+            const n = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64 — 쓰레기를 제목에 싣지 않는다
+            if (n > decoded.len) return; // 상한 초과 — 통째로 버린다(잘라 붙이면 반쪽 UTF-8 이 남는다)
+            dec.decode(decoded[0..n], payload) catch return;
+            break :blk decoded[0..n];
+        } else payload;
+
+        const target = if (kind == 't') &self.osc99_title else &self.osc99_body;
+        // **상한을 넘으면 더 안 쌓는다.** 앞부분은 남겨 둔다 — 알림이 잘려도 뜨는 편이 안 뜨는 것보다 낫다.
+        if (target.items.len + text.len <= max_osc99_assembly_bytes)
+            target.appendSlice(self.allocator, text) catch return resetNotify99(self);
+    }
+
+    if (!done) return; // `d=0` — 다음 조각을 기다린다
+
+    // **내용이 없으면 안 띄운다.** `p=close`(알림 닫기)·`p=?`(질의)·`p=icon` 같은 문장은 «보여 달라»
+    // 가 아닌데, `d` 기본값이 done 이라 그냥 발사하면 **제목도 본문도 빈 알림**이 뜬다. 앱이 알림을
+    // 닫으려 할 때마다 빈 알림이 하나씩 뜨는 꼴이다(적대적 검증 R5 실측).
+    if (self.osc99_title.items.len > 0 or self.osc99_body.items.len > 0)
+        setNotification(self, self.osc99_title.items, self.osc99_body.items);
+    resetNotify99(self);
+}

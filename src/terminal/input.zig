@@ -227,9 +227,14 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
 
     // **legacy/텍스트로 나가는 키는 release 를 보고하지 않는다**(명세: "The Enter, Tab and Backspace
     // keys will not have release events unless Report all keys as escape codes is also set"). 평문
-    // 텍스트 키도 UTF-8 로만 나가 event type 을 실을 자리가 없다. 그 키들의 release 는 **침묵**이다 —
+    // 텍스트 키도 UTF-8 로만 나가 event type 을 실을 자리가 없다. 그 키들의 **release 만** 침묵이다 —
     // 안 그러면 Enter 를 뗄 때 `\r` 이 한 번 더 들어가 줄이 두 번 입력된다.
-    if (event.event_type != .press) {
+    //
+    // **repeat 은 침묵이 아니다.** 그 키들은 event type 을 실을 자리가 없을 뿐이라, 반복은 press 와
+    // **같은 바이트를 다시** 보낸다 — 길게 누르면 글자가 반복되는 평범한 터미널 동작이다. 한때 여기서
+    // repeat 까지 버려 **키를 길게 눌러도 한 글자만 들어갔다**(CGEvent 로 실제 키를 합성해 잡았다:
+    // autorepeat 3회를 보냈는데 기록에 `a` 가 하나였다).
+    if (event.event_type == .release) {
         switch (event.key) {
             .enter, .tab, .backspace => if (!has_any_mod) return buffer[0..0],
             .char => if (!has_ctrl_alt) return buffer[0..0],
@@ -743,6 +748,11 @@ test "encodeKey kitty report_events: release/repeat 는 CSI u 키만, legacy·�
     try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .backspace, .event_type = .release }, &buf, on));
     // 평문 텍스트 키도 UTF-8 로만 나가므로 release 를 실을 자리가 없다 → 침묵.
     try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .release }, &buf, on));
+    // **repeat 은 침묵이 아니라 같은 바이트를 다시 보낸다** — 길게 누르면 글자가 반복되는 평범한
+    // 동작이다. 여기서 버리면 키를 길게 눌러도 한 글자만 들어간다(실제 키 합성으로 잡은 결함).
+    try std.testing.expectEqualStrings("a", try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .repeat }, &buf, on));
+    try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter, .event_type = .repeat }, &buf, on));
+    try std.testing.expectEqualStrings("\x7f", try encodeKey(.{ .key = .backspace, .event_type = .repeat }, &buf, on));
     // 단 수식자가 붙으면 그 키들도 CSI u 로 나가므로 release 가 보고된다.
     try std.testing.expectEqualStrings("\x1b[13;2:3u", try encodeKey(.{ .key = .enter, .modifiers = .{ .shift = true }, .event_type = .release }, &buf, on));
 

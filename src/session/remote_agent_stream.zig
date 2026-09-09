@@ -191,6 +191,16 @@ pub const Channel = struct {
         return .{ .opened_at_ms = now_ms, .last_alive_ms = now_ms };
     }
 
+    /// **이미 `hello` 를 본 스트림**에 뒤늦게 붙는 채널.
+    ///
+    /// 스트리머는 `hello` 를 **연결 시작에 한 번만** 보낸다. 그래서 그 줄이 지나간 뒤에 열린 채널을
+    /// `waiting_hello` 로 두면 5 초 뒤 `no_hello` 로 죽고, **그 Term 은 자기 이벤트가 와도 영영 못
+    /// 본다** — 죽은 채널도 `null` 이 아니라 분배 셈에는 들어가, 로그에는 「열을 다 먹였는데 하나도
+    /// 안 맞는다」로 보인다(2026-09-10 실측: 열 세션 중 둘만 배지가 섰다).
+    pub fn initOpen(now_ms: u64) Channel {
+        return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms };
+    }
+
     /// 한 줄을 먹인다. 돌려주는 프레임은 **`open` 일 때만** 의미가 있다.
     pub fn feed(self: *Channel, line: []const u8, now_ms: u64) Frame {
         switch (self.state) {
@@ -242,6 +252,40 @@ pub fn hookEventFrom(unescaped: []const u8) ?hook_event.Event {
 }
 
 const testing = std.testing;
+
+test "RA5: 이미 hello 를 본 스트림에 뒤늦게 붙는 채널은 바로 이벤트를 낸다" {
+    // 스트리머는 `hello` 를 **연결 시작에 한 번만** 보낸다. 그 뒤에 연 채널이 `waiting_hello` 로 남으면
+    // 5 초 뒤 죽고, 그 Term 은 **자기 이벤트가 와도 영영 못 본다** — 죽은 채널도 분배 셈에는 들어가서
+    // 로그에는 「열을 다 먹였는데 하나도 안 맞는다」로 보인다(2026-09-10 실측).
+    var late = Channel.initOpen(0);
+    const frame = late.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 1);
+    switch (frame) {
+        .event => |e| try std.testing.expectEqualStrings("host_a_b", e.nonce),
+        else => return error.LateChannelDroppedEvent,
+    }
+}
+test "RA5: 이미 열린 채널에 hello 가 또 와도 이벤트로 안 읽는다" {
+    // 스트리머가 다시 뜨면 `hello` 가 한 번 더 온다. `initOpen` 으로 연 채널은 그 줄을 `waiting_hello`
+    // 관문이 아니라 **`parseFrame` 으로** 보는데, 거기서 이벤트로 읽히면 배지가 흔들린다.
+    var ch = Channel.initOpen(0);
+    try std.testing.expect(ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 1) == .ignored);
+    // 그리고 그 뒤 진짜 이벤트는 여전히 받는다.
+    try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 2) == .event);
+}
+test "RA5: 뒤늦게 붙은 채널도 hello 시한에 안 죽는다" {
+    // `no_hello` 는 **제한 서버**(`ForceCommand`)를 가리는 신호다. 뒤늦게 연 채널이 그 사유로 죽으면
+    // 멀쩡한 서버가 제한 서버로 보인다.
+    var late = Channel.initOpen(0);
+    late.tick(hello_deadline_ms + 1_000);
+    const frame = late.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", hello_deadline_ms + 2_000);
+    try std.testing.expect(frame == .event);
+}
+test "RA5: 아직 hello 전이면 예전대로 기다린다 — 잡음을 이벤트로 읽지 않는다" {
+    // 갈라 준 것이지 없앤 것이 아니다. `hello` 를 못 본 스트림에서 첫 줄을 이벤트로 삼으면 MOTD·rc
+    // 출력이 배지를 흔든다.
+    var fresh = Channel.init(0);
+    try std.testing.expect(fresh.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 1) == .ignored);
+}
 
 test "RA7 pane 축이 실려 오면 프레임에 담긴다 — nonce 와 따로 나른다" {
     const f = parseFrame("{\"nonce\":\"host_00000000000000000000000000000001_00000000000000000000000000000002\",\"line\":\"claude\\t{}\",\"pane\":\"%27\"}");

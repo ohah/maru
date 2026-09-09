@@ -139,8 +139,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v181 session config bootstrap observation and notification cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 181), abi_version);
+test "ABI v182 session config bootstrap observation and notification cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 182), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -532,6 +532,8 @@ pub const KeyEvent = extern struct {
     modifier_option: u32,
     modifier_command: u32,
     is_repeat: u32,
+    /// AppKit keyUp 인가(release). kitty report_events 가 켜졌을 때만 인코딩에 실린다(v182).
+    is_release: u32,
     // macOS 물리 키코드(NSEvent.keyCode). Ctrl/Cmd 단축키를 레이아웃과 무관하게(한글 입력
     // 모드에서도) 매칭하기 위해 Swift가 그대로 싣는다 — 변환은 Zig(keycode.zig)가 소유한다.
     raw_key_code: u32,
@@ -4773,6 +4775,9 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
             null,
         // G10: numpad 키 판정은 macOS 물리 키코드로(platform). application keypad 모드면 encodeKey가 SS3로.
         .keypad = keycode.isKeypad(event.raw_key_code),
+        // kitty report_events(flag 2): release > repeat > press 순으로 본다. 플래그가 꺼져 있으면
+        // encodeKey 가 press 외의 이벤트를 조용히 버리므로 여기서 거르지 않는다(정책은 인코더 소유).
+        .event_type = if (event.is_release != 0) .release else if (event.is_repeat != 0) .repeat else .press,
     };
 }
 // ══ 세션 컨트롤 플레인 라이브 서버(Track C A2b) ══════════════════════════════════════════════════════════════
@@ -6883,7 +6888,7 @@ test "macOS app host capabilities describe ownership before runtime exists" {
 test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     // Swift struct layout을 추측해서 포인터로 넘기면 위험하다. C header와 같은 fixed-width
     // record만 ABI에 둬야 key input, resize, close event가 platform 별로 흔들리지 않는다.
-    try std.testing.expectEqual(@as(usize, 36), @sizeOf(KeyEvent));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(KeyEvent)); // is_release 추가(v182)
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
@@ -7087,6 +7092,7 @@ test "Metal key-down ABI: 터미널이 활성이면 Cmd+W가 파일 패널을 �
         .modifier_option = 0,
         .modifier_command = 1,
         .is_repeat = 0,
+        .is_release = 0,
         .raw_key_code = 0x0D,
     };
     var summary: AppFrameSummary = undefined;
@@ -7284,6 +7290,7 @@ test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via 
         .modifier_option = 0,
         .modifier_command = 0,
         .is_repeat = 0,
+        .is_release = 0,
         .raw_key_code = 0x0B, // kVK_ANSI_B
     };
     const key_event = try keyEventFromAbi(event);
@@ -7306,6 +7313,7 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
         .modifier_option = 0,
         .modifier_command = 0,
         .is_repeat = 0,
+        .is_release = 0,
         .raw_key_code = 0x0B, // 물리 B여도
     };
     const key_event = try keyEventFromAbi(event);
@@ -7315,7 +7323,7 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
 test "keyEventFromAbi maps function keys to terminal.Key" {
     const mk = struct {
         fn f(code: KeyCode) KeyEvent {
-            return .{ .codepoint = 0, .base_codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .raw_key_code = 0 };
+            return .{ .codepoint = 0, .base_codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .is_release = 0, .raw_key_code = 0 };
         }
     }.f;
     try std.testing.expectEqual(terminal.input.Key.delete, (try keyEventFromAbi(mk(.delete))).key);
@@ -7338,6 +7346,7 @@ test "keypad Enter chains through ABI to terminal .enter (keypad=true) — confi
         .modifier_option = 0,
         .modifier_command = 0,
         .is_repeat = 0,
+        .is_release = 0,
         .raw_key_code = 0x4C, // kVK_ANSI_KeypadEnter
     };
     const ev = try keyEventFromAbi(abi_event);
@@ -7359,6 +7368,7 @@ test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
         .modifier_option = 1,
         .modifier_command = 0,
         .is_repeat = 0,
+        .is_release = 0,
         .raw_key_code = 51,
     };
     const ev = try keyEventFromAbi(abi_event);

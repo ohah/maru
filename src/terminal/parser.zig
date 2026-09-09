@@ -524,7 +524,11 @@ pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
 /// release·대체키·연관텍스트를 기대), 인코딩은 disambiguate 수준만 나가 광고와 동작이 어긋난다.
 /// 지원 flag가 늘면 이 마스크를 넓힌다.
 pub fn kittyFlagsFromParam(v: u16) core.KittyFlags {
-    return .{ .disambiguate = (v & 1) != 0 };
+    return .{
+        .disambiguate = (v & 1) != 0,
+        // report_events(2): key up/repeat 를 CSI u 의 event sub-field 로 보고한다(구현됨).
+        .report_events = (v & 2) != 0,
+    };
 }
 
 /// XTWINOPS(CSI Ps t) 중 **보고형 질의만** 답한다 — 14=텍스트 영역 픽셀(`CSI 4;h;w t`),

@@ -7764,11 +7764,16 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
     try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
     core.clearResponse();
 
-    // 미구현 flag는 마스킹된다(거짓 광고 방지): =2;2u(or report_events)는 report_events를 안 켜고
-    // disambiguate만 유지한다 — Maru는 disambiguate 수준만 인코딩하기 때문.
+    // report_events(2)는 **구현됐으므로** 켜진다 — `=2;2u`(or)로 disambiguate 위에 얹는다.
     try core.write("\x1b[=2;2u");
     try std.testing.expect(core.kitty_flags.current().disambiguate);
-    try std.testing.expect(!core.kitty_flags.current().report_events);
+    try std.testing.expect(core.kitty_flags.current().report_events);
+    // 여전히 미구현인 flag(alternates 4·all 8·associated 16)는 마스킹된다(거짓 광고 방지) —
+    // 켜진 줄 알면 앱이 대체 키·연관 텍스트를 기다린다.
+    try core.write("\x1b[=28;2u");
+    try std.testing.expect(!core.kitty_flags.current().report_alternates);
+    try std.testing.expect(!core.kitty_flags.current().report_all);
+    try std.testing.expect(!core.kitty_flags.current().report_associated);
 
     try core.write("\x1b[<1u"); // pop → 이전 레벨(disabled)
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
@@ -7780,14 +7785,18 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
 test "kitty keyboard query는 미구현 flag를 활성으로 거짓 보고하지 않는다 (audit HIGH)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
-    // 앱이 report_events(>2u)만 켜려 하면 — Maru는 미구현이라 스택에 저장하지 않고, query는 0(비활성)을
-    // 보고한다. 예전엔 2를 그대로 저장·보고해 "report_events 활성"이라 거짓 광고했다(인코딩은 disambiguate만).
+    // report_events(>2u)는 **구현됐으므로** 그대로 보고된다.
     try core.write("\x1b[>2u\x1b[?u");
-    try std.testing.expectEqualStrings("\x1b[?0u", core.pendingResponse());
+    try std.testing.expectEqualStrings("\x1b[?2u", core.pendingResponse());
     core.clearResponse();
-    // disambiguate는 지원하므로 보고된다 — 9(=disambiguate 1 + report_all 8)를 켜도 미구현 비트는 떨구고 1만.
-    try core.write("\x1b[>9u\x1b[?u");
+    // 미구현 비트는 여전히 떨군다 — 9(=disambiguate 1 + report_all 8)를 켜도 1만 보고한다.
+    // 거짓 광고하면 앱이 「모든 키가 escape 로 온다」고 믿고 텍스트 경로를 꺼 버린다.
+    try core.write("\x1b[<1u\x1b[>9u\x1b[?u");
     try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
+    core.clearResponse();
+    // 구현된 둘을 함께 켜면 둘 다 보고된다(1|2=3).
+    try core.write("\x1b[<1u\x1b[>3u\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?3u", core.pendingResponse());
 }
 
 test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 새지 않는다 (graphics 토대)" {

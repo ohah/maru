@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 181u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 182u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -197,6 +197,10 @@ typedef struct MaruAppHostKeyEvent {
     uint32_t modifier_option;
     uint32_t modifier_command;
     uint32_t is_repeat;
+    /* 이 이벤트가 키를 **뗀 것**인가(AppKit keyUp). kitty keyboard 의 report_events(flag 2)가 켜졌을
+       때만 인코딩에 실린다 — 안 켜졌으면 Zig 가 조용히 버린다(요청 안 한 이벤트를 보내면 앱이 입력을
+       두 배로 받는다). v182. */
+    uint32_t is_release;
     /* macOS 물리 키코드(NSEvent.keyCode). Ctrl/Cmd 단축키의 레이아웃 독립 매칭(한글 입력
        모드에서도 Ctrl+B 동작)에 쓴다 — US 배열 변환은 Zig가 소유한다. */
     uint32_t raw_key_code;

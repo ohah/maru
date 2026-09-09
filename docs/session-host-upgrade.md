@@ -5146,6 +5146,28 @@ set·URL·digest·type drift, unknown extension 허용, duplicate/trailing/size 
 않는다. 다음 하위 gate가 pinned `gh` GET과 private held-file download, attestation, evidence semantic, before/after metadata fence를
 합성한다.
 
+#### 11.100e current Release metadata의 전후 원격 fence
+
+두 번째 하위 gate `release_adapter_remote_release_fence.zig`는 asset download와 attestation을 열기 전후에 같은 current-tag
+`published_release` endpoint를 관측하는 read-only transaction이다. 입력은 current protected `Context`, final-address shared
+`Deadline`, checkout 전에 고정한 `PinnedExecutable`, bounded token과 caller-owned response scratch뿐이다. 첫 관측과 마지막 관측은
+각각 child 전후 pinned CLI identity를 재검증하며, 하나의 deadline에서 남은 시간만 `gh api --method GET`에 전달한다. PATH, shell,
+generic URL, caller endpoint·HTTP method·repository·tag는 받지 않는다.
+
+`beginUntil`은 첫 응답을 §11.100d owner로 결속해 final-address `Fence` 안에 보존한다. 중간 download/attestation gate는
+`candidate()`로 이 canonical role-ordered snapshot을 빌릴 수 있지만, 이것은 최종 성공 capability가 아니다. `verifyAfterUntil`은
+같은 endpoint를 다시 읽고 별도 metadata owner로 결속한 뒤 release ID/tag/source와 네 asset의 canonical role별
+ID/name/size/SHA-256이 첫 snapshot과 exact 일치할 때만 fence를 완료한다. lifecycle은 두 응답 모두 parser가 독립 검증한다.
+두 번째 호출, copied/pre-owned/변조 owner, 다른 context/deadline/CLI, expired deadline, response/result/context/token/executable alias,
+child·parse·CLI revalidation 실패는 completed publication 없이 fail-close한다. 첫 관측 뒤 실패한 fence는 명시적 `deinit`으로만
+철회하며 token·response bytes·deadline·CLI pathname은 결과에 보존하지 않는다.
+
+focused Debug·ReleaseFast gate는 exact request/environment/order, shared deadline, 첫/마지막 배열 순서 차이 허용, 모든
+release/asset field drift, first/second malformed response, pre/post CLI drift, timeout, copied/pre-owned/mutated/aliased fence와 allocation
+fail-index unwind를 검증한다. injected child를 쓰므로 실제 GitHub network를 증명하지 않고 filesystem·asset bytes·attestation·evidence
+profile도 아직 열지 않는다. 다음 하위 gate가 이 fence의 candidate 사이에서 private held-file download와 GitHub-issued attestation,
+canonical evidence semantic을 실행한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

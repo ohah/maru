@@ -354,6 +354,10 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
             's' => cmd.width = std.fmt.parseInt(u32, val, 10) catch 0,
             'v' => cmd.height = std.fmt.parseInt(u32, val, 10) catch 0,
             'i' => cmd.image_id = std.fmt.parseInt(u32, val, 10) catch 0,
+            // I: **image number**(클라이언트가 정하는 번호) — 터미널이 여기에 image id 를 배정한다.
+            // id 충돌을 피하려는 클라이언트가 `i=` 대신 쓴다. 안 읽으면 그런 전송이 **저장 키를 잃어**
+            // 이미지가 아예 안 뜬다. 베이스: kitty graphics protocol "image numbers".
+            'I' => cmd.image_number = std.fmt.parseInt(u32, val, 10) catch 0,
             'm' => cmd.more = (val.len == 1 and val[0] == '1'),
             'o' => if (val.len == 1) {
                 cmd.compression = val[0];

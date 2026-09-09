@@ -160,6 +160,9 @@ const core_fields_v1 = [_]FieldSpec{
     // U=1 virtual placement(unicode placeholder). **optional** — 구 host 는 이 tag 를 모르므로
     // 건너뛰게 한다(신→구 rollback 이관에서 UnknownRequiredField 로 죽지 않게).
     .{ .tag = 92, .name = "kitty_virtual_placements", .optional = true },
+    // `I=`(image number) 배정표와 다음 auto id. **optional** — 구 host 는 이 tag 를 모른다.
+    .{ .tag = 93, .name = "kitty_image_numbers", .optional = true },
+    .{ .tag = 94, .name = "kitty_next_auto_id", .optional = true },
     .{ .tag = 83, .name = "cwd" },
     .{ .tag = 84, .name = "ssh_remote_dest" },
     .{ .tag = 85, .name = "title" },

@@ -284,6 +284,14 @@ pub const KittyPlacement = struct {
     z: i32 = 0, // z-index(<0 텍스트 뒤, >=0 텍스트 앞).
 };
 
+/// `I=`(image number) → 터미널이 배정한 image id. **HashMap 이 아니라 목록**인 이유는 세션 host
+/// handoff 가 리플렉션으로 직렬화하는데 HashMap 은 raw pointer 를 품기 때문이다(`kitty_placements`
+/// 와 같은 결). 항목 수는 이미지 개수 수준이라 선형 탐색으로 충분하다.
+pub const KittyImageNumber = struct {
+    number: u32,
+    image_id: u32,
+};
+
 /// **unicode placeholder(virtual placement)** — `a=p/T` 에 `U=1` 이 붙은 것. 커서 자리에 그리지 않고
 /// "이 이미지를 `columns`×`rows` 격자로 쓸 준비가 됐다"만 등록한다. 실제 위치는 화면에 찍힌 placeholder
 /// 셀(U+10EEEE + row/column diacritic 2개, 전경색 RGB = image_id)이 정하고, 렌더러가 그 셀을 타일로

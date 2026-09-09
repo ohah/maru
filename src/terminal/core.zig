@@ -487,6 +487,14 @@ pub const TerminalCore = struct {
     /// 등록한다. 실제 배치는 화면의 placeholder 셀이 정하므로 스크롤·eviction 보정 대상이 아니다(그 셀이
     /// 텍스트와 함께 움직인다). 같은 (image_id, placement_id)는 교체한다.
     kitty_virtual_placements: std.ArrayListUnmanaged(types.KittyVirtualPlacement) = .empty,
+    /// image **number**(`I=`) → 배정한 image id. 클라이언트가 id 충돌을 피하려고 번호로 보낼 때,
+    /// 터미널이 id 를 정하고 이 표로 기억한다 — 같은 번호로 다시 오면 **같은 id 를 재사용**해
+    /// 이전 이미지를 교체한다(명세: 같은 번호는 이전 것을 대체). display/delete 도 번호로 참조한다.
+    kitty_image_numbers: std.ArrayListUnmanaged(types.KittyImageNumber) = .empty,
+    /// 번호에 배정할 다음 id. **위에서부터 내려온다** — 클라이언트가 흔히 쓰는 작은 id(1,2,3…)와
+    /// 부딪히지 않게 하려는 것이고, 배경 이미지가 예약한 `0xFFFF_FFFF` 는 건너뛴다. 이미 쓰이는 id 는
+    /// 넘겨 짚는다(아래 assignImageId).
+    kitty_next_auto_id: u32 = 0xFFFF_FFFE,
     /// renderSnapshot이 placement를 뷰포트 상대 KittyPlacement로 환산해 담는 재사용 버퍼(placement가
     /// 있을 때만 lazy 할당, viewport_cells와 같은 규율). 없으면 비어 있어 일반(placement 없는) 경로는
     /// 추가 비용이 없다.
@@ -649,6 +657,7 @@ pub const TerminalCore = struct {
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         self.kitty_virtual_placements.clearRetainingCapacity(); // virtual placement(U=1)도 함께
+        self.kitty_image_numbers.clearRetainingCapacity(); // 번호→id 배정도 공장 초기화
         parser.abortKittyChunk(self); // 진행 중이던 chunked 전송도 폐기(parser 소유)
         parser.reclaimOscBuffer(self); // 방어적 백스톱 — RIS가 OSC 수집 잔재를 남기지 않게(다른 파서 버퍼 정리와 일관)
         self.grapheme_cluster_mode = false;
@@ -715,6 +724,7 @@ pub const TerminalCore = struct {
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
         self.kitty_virtual_placements.deinit(self.allocator);
+        self.kitty_image_numbers.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
         self.osc_buffer.deinit(self.allocator);
@@ -7563,6 +7573,61 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     core.clearResponse();
     try core.write("\x1b_Ga=d,d=c,i=8\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=8;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+}
+
+test "kitty I= image number: 번호에 id를 배정하고 같은 번호는 이전 이미지를 교체한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [160]u8 = undefined;
+
+    // **회귀 판정**: `I=` 를 안 읽던 시절엔 저장 키가 없어(i=0) 전송이 통째로 거부됐다 — 번호로만
+    // 보내는 클라이언트는 이미지가 아예 안 떴다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,I=7;{s}\x1b\\", .{encoded}));
+    const reply = core.pendingResponse();
+    // 응답은 번호와 배정된 id 를 함께 싣는다 — 클라이언트가 이후 display/delete 에 쓸 id 를 알아야 한다.
+    try std.testing.expect(std.mem.startsWith(u8, reply, "\x1b_GI=7,i="));
+    try std.testing.expect(std.mem.endsWith(u8, reply, ";OK\x1b\\"));
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_image_numbers.items.len);
+    const assigned = core.kitty_image_numbers.items[0].image_id;
+    try std.testing.expect(assigned != 0);
+    try std.testing.expect(core.kitty_images.map.contains(assigned));
+    core.clearResponse();
+
+    // 같은 번호로 다시 보내면 **같은 id 를 재사용**해 이전 이미지를 교체한다(명세).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,I=7;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_image_numbers.items.len); // 새 배정이 아니다
+    try std.testing.expectEqual(assigned, core.kitty_image_numbers.items[0].image_id);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_images.map.count()); // 이미지도 한 장뿐
+    core.clearResponse();
+
+    // 다른 번호는 **다른 id** 를 받는다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,I=8;{s}\x1b\\", .{encoded}));
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_image_numbers.items.len);
+    try std.testing.expect(core.kitty_image_numbers.items[1].image_id != assigned);
+    core.clearResponse();
+
+    // 번호로 display 도 된다 — 배정된 id 의 이미지를 건다.
+    try core.write("\x1b_Ga=p,I=7\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(assigned, core.kitty_placements.items[0].image_id);
+    core.clearResponse();
+
+    // **`i=` 가 함께 오면 그쪽이 이긴다**(id 가 더 구체적인 지정 — 명세).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=99,I=7;{s}\x1b\\", .{encoded}));
+    try std.testing.expect(core.kitty_images.map.contains(99));
+    try std.testing.expectEqual(assigned, core.kitty_image_numbers.items[0].image_id); // 배정은 안 바뀐다
+    core.clearResponse();
+
+    // 이미지를 지우면 번호 배정도 놓아준다 — 표가 무한히 자라거나 stale id 를 재사용하지 않게.
+    var del: [64]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&del, "\x1b_Ga=d,d=I,i={d},q=2\x1b\\", .{assigned}));
+    for (core.kitty_image_numbers.items) |entry| try std.testing.expect(entry.image_id != assigned);
+    // RIS 는 배정표를 통째로 비운다.
+    try core.write("\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_image_numbers.items.len);
 }
 
 test "kitty U=1 unicode placeholder: virtual placement만 등록하고 커서 자리에 그리지 않는다" {

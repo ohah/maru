@@ -26,6 +26,7 @@ const term_ops = @import("term.zig");
 const pane_ops = @import("pane.zig");
 const find_ops = @import("find.zig");
 const scroll_ops = @import("scroll.zig");
+const settings_ops = @import("settings.zig");
 
 /// diff Term 하나가 드는 것. **행들은 줄 배열을 빌리고, 줄 배열은 entry의 두 쪽 버퍼를 빌린다** —
 /// 그래서 entry 내용이 갈릴 때 `invalidate`가 먼저 불려야 한다(호출자 계약).
@@ -3867,6 +3868,127 @@ test "DHS4: 줄 가운데에서는 상한이 안 걸린다 — 최소 이동을 
     // **왼쪽으로 나가면 그 열이 첫 칸이 된다.**
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_start, false));
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col_right);
+}
+
+test "DHS14: 탭 폭을 바꾸면 **두 열** 다 상한을 다시 센다 — 오른쪽 막대가 안 사라진다" {
+    // **비교는 두 문서라 두 번 세야 한다**(`ensureMaxColsForDiff`). 왼쪽만 세면 오른쪽 `max_cols` 가
+    // 0 으로 남고, `maxColsForRender` 가 `null` 을 내 **오른쪽 가로 막대가 사라진다** — 그 자리는
+    // 본문 아래 여백을 먹으므로 높이가 출렁인다(단일 편집기에서 같은 부류를 이미 고쳤다).
+    // 그 재계산 짝이 왼쪽만 세도 아무도 안 잡았다(적대적 검증 T5).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var lb: std.ArrayList(u8) = .empty;
+    defer lb.deinit(allocator);
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    // **양쪽 다 탭으로 시작한다** — 탭 폭이 바뀌면 두 열의 상한이 **둘 다** 달라져야 한다.
+    for (0..3) |_| try lb.appendSlice(allocator, "\t\tleft side\n");
+    for (0..3) |_| try rb.appendSlice(allocator, "\t\tright side is longer here\n");
+    var entry = testEntry(lb.items, rb.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    try testing.expect(fx.term.rt.editor_max_cols > 0);
+    try testing.expect(fx.term.rt.editor_max_cols_right > 0);
+    const left_before = fx.term.rt.editor_max_cols;
+    const right_before = fx.term.rt.editor_max_cols_right;
+
+    // **제품 진입점을 탄다** — 세터를 직접 부르면 배선이 지워져도 통과한다(TAB1 이 같은 규율이다).
+    fx.session.loaded_config.config.editor.tab_width = 8;
+    settings_ops.applyLoadedConfig(fx.session, true);
+    try testing.expectEqual(@as(u8, 8), fx.term.rt.editor_tab_width);
+    if (fx.term.rt.editor_max_cols == 0) return error.LeftMaxColsLost;
+    if (fx.term.rt.editor_max_cols_right == 0) return error.RightMaxColsLost;
+    // 탭이 넓어졌으니 **둘 다** 늘어야 한다 — 한쪽만 보면 「안 버렸다」와 「다시 셌다」가 겹친다.
+    try testing.expect(fx.term.rt.editor_max_cols > left_before);
+    try testing.expect(fx.term.rt.editor_max_cols_right > right_before);
+}
+
+test "DHS15: 그리기 직전 clamp 는 **그 열의 폭**으로 되돌린다 (비교 뷰)" {
+    // `columns()` 가 나머지 픽셀을 오른쪽에 주므로 오른쪽 열이 더 넓을 수 있다. 왼쪽을 되돌릴 때
+    // 오른쪽 폭을 쓰면 **왼쪽이 자기 상한을 넘은 채 남아** 오른쪽 끝에 빈 칸이 생긴다 —
+    // 휠 경로에는 그것을 재는 판정자가 있었지만 **그리기 직전 clamp 에는 없었다**(적대적 검증 T2).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **좌우 길이를 갈라 둔다.** 같은 길이면 두 열의 상한이 같은 값이라 「자기 상한을 쓴다」와
+    // 「반대 열 상한을 쓴다」가 **같은 답**을 낸다(실측: 변이 T9 가 그래서 살았다). 폭(픽셀)만
+    // 갈라 두는 것으로는 부족하다 — **상한(내용 열 수)도** 갈라야 한다.
+    var lb: std.ArrayList(u8) = .empty;
+    defer lb.deinit(allocator);
+    try lb.appendNTimes(allocator, 'L', 300);
+    try lb.append(allocator, '\n');
+    var rb: std.ArrayList(u8) = .empty;
+    defer rb.deinit(allocator);
+    try rb.appendNTimes(allocator, 'R', 500);
+    try rb.append(allocator, '\n');
+    var entry = testEntry(lb.items, rb.items);
+    // 홀수 폭이라 나머지가 오른쪽에 붙는다 — 두 열의 폭이 갈린다.
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 903, .h = 400 };
+    try diffCaretFixture(&fx, &entry, leaf);
+
+    const body = editor_ops.editorBodyRect(fx.session, leaf, fx.term);
+    const left_w = editor_ops.visibleColsForTest(fx.session, body, fx.term, false);
+    const right_w = editor_ops.visibleColsForTest(fx.session, body, fx.term, true);
+    try testing.expect(right_w > left_w); // 픽스처 자기 검증 — 아니면 두 뜻이 겹친다
+    try testing.expect(fx.term.rt.editor_max_cols_right > fx.term.rt.editor_max_cols); // 상한도 갈렸다
+
+    // **왼쪽을 자기 상한 밖으로 밀어 둔다.** 그리기 직전 clamp 가 왼쪽 폭으로 되돌려야 한다.
+    const beyond = fx.session.loaded_config.config.editor.scroll_beyond_last_column;
+    const left_max: u32 = (fx.term.rt.editor_max_cols +| beyond) -| left_w;
+    fx.term.rt.editor_first_col = @intCast(left_max + 5);
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expectEqual(@as(u16, @intCast(left_max)), fx.term.rt.editor_first_col);
+
+    // **오른쪽도 자기 폭으로 되돌린다.** 왼쪽만 재면 반대 자리가 그대로 남는다 — 두 열이 갈리는
+    // 규칙은 **양쪽에서** 재야 뜻이 있다(실측: T8 이 오른쪽만 어긋내고 살아남았다).
+    const right_max: u32 = (fx.term.rt.editor_max_cols_right +| beyond) -| right_w;
+    fx.term.rt.editor_first_col_right = @intCast(right_max + 5);
+    var drawn2 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    drawn2.dl.deinit(allocator);
+    try testing.expectEqual(@as(u16, @intCast(right_max)), fx.term.rt.editor_first_col_right);
+}
+
+test "DHS12: 오른쪽 열의 caret 도 자기 상한을 쓴다 — 비대칭을 뒤집어 잰다" {
+    // **DHS5 는 왼쪽에만 caret 을 세운다.** 그래서 「늘 왼쪽 상한을 쓴다」로 바꾼 변이는 그
+    // 픽스처에서 **같은 답**을 낸다(실측: G6 이 그렇게 살았다). 두 열이 갈리는 규칙(§3.5
+    // *"가로는 각자다"*)은 **양쪽에서** 재야 뜻이 있다 — 여기서는 긴 쪽을 오른쪽에 둔다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var base: std.ArrayList(u8) = .empty;
+    defer base.deinit(allocator);
+    try base.appendSlice(allocator, "keep\n");
+    try base.appendNTimes(allocator, 'x', 40); // **왼쪽이 짧다** — 반대 열의 상한을 쓰면 못 간다
+    try base.append(allocator, '\n');
+    var mod: std.ArrayList(u8) = .empty;
+    defer mod.deinit(allocator);
+    try mod.appendSlice(allocator, "keep\n");
+    try mod.appendNTimes(allocator, 'y', 600);
+    try mod.append(allocator, '\n');
+    var entry = testEntry(base.items, mod.items);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    const st = fx.term.rt.editor_diff.?;
+    var row: ?usize = null;
+    for (st.right_texts, 0..) |t, i| {
+        if (t.len == 600) row = i;
+    }
+    const r = row orelse return error.NoLongRow;
+    try testing.expect(fx.term.rt.editor_max_cols_right != fx.term.rt.editor_max_cols); // 픽스처 자기 검증
+
+    fx.term.rt.editor_first_col_right = 0;
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
+    // 반대 열(40열)의 상한을 쓰면 `max_col` 이 0 이라 **아예 안 민다**.
+    try testing.expect(fx.term.rt.editor_first_col_right > 40);
+    // **왼쪽은 그대로다** — 한쪽을 밀 때 다른 쪽이 따라가면 §3.5 가 깨진다.
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
 }
 
 test "DHS5: 한 프레임도 안 그렸으면 가로를 안 건드리고, 반대 열의 폭·상한을 안 쓴다" {

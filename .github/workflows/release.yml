@@ -331,3 +331,71 @@ jobs:
           test ! -s "$stdout"
           test ! -s "$stderr"
           test ! -e "$workspace"
+
+  session-host-release-remote-verification:
+    name: session host remote release verification
+    needs: session-host-release-live-timing-verification
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Capture trusted GitHub CLI before checkout
+        id: trusted-gh
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovered=$(command -v gh)
+          canonical=$(/usr/bin/realpath "$discovered")
+          case "$canonical" in
+            /*) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$canonical" != *$'\n'* && "$canonical" != *$'\r'* ]]
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          case "$sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#sha256}" = 64
+          printf 'path=%s\n' "$canonical" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Build remote Release verifier
+        run: mise exec -- zig build session-host-release-remote-verifier -Doptimize=ReleaseFast
+
+      - name: Verify current remote Release verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_GH: ${{ steps.trusted-gh.outputs.path }}
+          TRUSTED_GH_SHA256: ${{ steps.trusted-gh.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          timing_workspace="$RUNNER_TEMP/maru-session-host-remote-timing-$GITHUB_RUN_ATTEMPT"
+          release_workspace="$RUNNER_TEMP/maru-session-host-remote-release-$GITHUB_RUN_ATTEMPT"
+          stdout="$RUNNER_TEMP/maru-session-host-remote-verifier.stdout"
+          stderr="$RUNNER_TEMP/maru-session-host-remote-verifier.stderr"
+          test ! -e "$timing_workspace"
+          test ! -e "$release_workspace"
+          test ! -e "$stdout"
+          test ! -e "$stderr"
+          cleanup() {
+            /bin/rm -f "$stdout" "$stderr"
+          }
+          trap cleanup EXIT
+          verifier="$GITHUB_WORKSPACE/zig-out/bin/maru-session-host-release-remote-verifier"
+          "$verifier" verify "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$timing_workspace" "$release_workspace" > "$stdout" 2> "$stderr"
+          test ! -s "$stdout"
+          test ! -s "$stderr"
+          test ! -e "$timing_workspace"
+          test ! -e "$release_workspace"

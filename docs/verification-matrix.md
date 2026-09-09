@@ -3417,7 +3417,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   다음 제품 gate는 `maru-session-host-release-remote-verifier`가 timing transport→Release fence→exact-ID download→
   attestation/semantic→final verdict를 하나의 protected context·CLI·deadline으로 조립하고, `release.yml`의
   `macos-15` read-only job이 `actions: read`·`contents: read`만으로 exact once 실행한다. focused gate는
-  단계 순서·fail-stop·역순 cleanup·actual-process output/FD/workspace residue 0을, workflow source gate는 checkout 전
+  단계 순서·fail-stop·역순 cleanup·cleanup 실패의 성공 거부를, product/workflow source gate는 token zeroize·checkout 전
   CLI pin·needs·permission·closed argv·upload/summary 부재를 검증한다. 병합 뒤 첫 protected `v*` tag만 실제
   GitHub network 실측이며 pass-record publication과 signed N-1→current U5 E2E는 여전히 후속이다
   (`session-host-upgrade.md` §11.100i).

@@ -4774,6 +4774,10 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
         else
             null,
         // G10: numpad 키 판정은 macOS 물리 키코드로(platform). application keypad 모드면 encodeKey가 SS3로.
+        // kitty `report_alternates`(flag 4)의 «base layout key». 물리 키코드의 US 배열 글자이고,
+        // 현재 입력 소스와 무관하다 — 앱이 Dvorak·한글 배열에서도 같은 물리 키를 알아본다.
+        // 표에 없는 키(기능키 등)는 null 이라 안 실린다.
+        .layout_codepoint = keycode.usAsciiForKeyCode(event.raw_key_code),
         .keypad = keycode.isKeypad(event.raw_key_code),
         // kitty report_events(flag 2): release > repeat > press 순으로 본다. 플래그가 꺼져 있으면
         // encodeKey 가 press 외의 이벤트를 조용히 버리므로 여기서 거르지 않는다(정책은 인코더 소유).

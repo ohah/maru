@@ -7846,12 +7846,18 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
     try core.write("\x1b[=2;2u");
     try std.testing.expect(core.kitty_flags.current().disambiguate);
     try std.testing.expect(core.kitty_flags.current().report_events);
-    // 여전히 미구현인 flag(alternates 4·all 8·associated 16)는 마스킹된다(거짓 광고 방지) —
-    // 켜진 줄 알면 앱이 대체 키·연관 텍스트를 기다린다.
+    // alternates(4)·all(8)·associated(16)도 **구현됐으므로** 켜진다. 이 단언은 광고와 인코딩이 같은
+    // 상태여야 한다는 계약이다 — 켜졌다고 답하면 `input.encodeKitty` 가 실제로 그 자리를 실어야 한다.
     try core.write("\x1b[=28;2u");
-    try std.testing.expect(!core.kitty_flags.current().report_alternates);
-    try std.testing.expect(!core.kitty_flags.current().report_all);
-    try std.testing.expect(!core.kitty_flags.current().report_associated);
+    try std.testing.expect(core.kitty_flags.current().report_alternates);
+    try std.testing.expect(core.kitty_flags.current().report_all);
+    try std.testing.expect(core.kitty_flags.current().report_associated);
+    // query 는 스택 최상단을 그대로 답한다 — 다섯 비트가 모두 켜지면 31.
+    try core.write("\x1b[=31;1u");
+    core.clearResponse();
+    try core.write("\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?31u", core.pendingResponse());
+    core.clearResponse();
 
     try core.write("\x1b[<1u"); // pop → 이전 레벨(disabled)
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
@@ -7860,19 +7866,25 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
 }
 
-test "kitty keyboard query는 미구현 flag를 활성으로 거짓 보고하지 않는다 (audit HIGH)" {
+test "kitty keyboard query는 광고와 인코딩을 같은 상태로 유지한다 (audit HIGH)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
-    // report_events(>2u)는 **구현됐으므로** 그대로 보고된다.
+    // report_events(>2u)는 그대로 보고된다.
     try core.write("\x1b[>2u\x1b[?u");
     try std.testing.expectEqualStrings("\x1b[?2u", core.pendingResponse());
     core.clearResponse();
-    // 미구현 비트는 여전히 떨군다 — 9(=disambiguate 1 + report_all 8)를 켜도 1만 보고한다.
-    // 거짓 광고하면 앱이 「모든 키가 escape 로 온다」고 믿고 텍스트 경로를 꺼 버린다.
-    try core.write("\x1b[<1u\x1b[>9u\x1b[?u");
-    try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
+    // 다섯 flag 가 모두 구현됐으므로 31 을 켜면 31 이 그대로 돌아온다. **이 단언의 뜻은 «전부
+    // 켜진다» 가 아니라 «광고한 것을 실제로 인코딩한다» 다** — 비트를 더할 때 `input.encodeKitty`
+    // 가 그 자리를 싣는지 먼저 확인해야 한다는 계약이고, `kittyFlagsFromParam` 이 단일 출처다.
+    try core.write("\x1b[<1u\x1b[>31u\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?31u", core.pendingResponse());
     core.clearResponse();
-    // 구현된 둘을 함께 켜면 둘 다 보고된다(1|2=3).
+    // **명세에 없는 비트는 떨군다.** 32 이상은 정의된 flag 가 아니라, 그대로 보고하면 앱이 모르는
+    // 능력을 켠 줄 안다. 거짓 광고를 막는 자리는 여기 하나로 남는다.
+    try core.write("\x1b[<1u\x1b[>32u\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?0u", core.pendingResponse());
+    core.clearResponse();
+    // 구현된 둘만 켜면 둘만 보고된다(1|2=3).
     try core.write("\x1b[<1u\x1b[>3u\x1b[?u");
     try std.testing.expectEqualStrings("\x1b[?3u", core.pendingResponse());
 }

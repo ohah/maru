@@ -159,6 +159,20 @@ pub fn parseCanonical(allocator: std.mem.Allocator, bytes: []const u8) !Parsed {
     return .{ .inner = inner };
 }
 
+/// Rebinds a preserved record to the current protected workflow without
+/// pretending to re-observe the release or timing artifact named by it.
+pub fn validateForContext(context: context_mod.Context, record: Record) !void {
+    try context_mod.validateTrusted(context);
+    try validateIntrinsic(record);
+    if (record.repository.id != context.repository.id or
+        !std.mem.eql(u8, record.repository.owner, context.repository.owner) or
+        !std.mem.eql(u8, record.repository.name, context.repository.name) or
+        !std.mem.eql(u8, record.release.tag, context.tag) or
+        !std.mem.eql(u8, record.source_sha, context.source_commit) or
+        !std.mem.eql(u8, record.workflow_ref, context.build.workflow_ref) or
+        record.run_id != context.build.run_id or record.run_attempt != context.build.run_attempt) return error.BindingMismatch;
+}
+
 pub fn writeCanonical(allocator: std.mem.Allocator, record: Record) ![]u8 {
     try validateIntrinsic(record);
     var output: std.Io.Writer.Allocating = .init(allocator);

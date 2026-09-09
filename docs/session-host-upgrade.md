@@ -5311,8 +5311,9 @@ fence가 완료된 뒤에도 remote Release를 수정·삭제·재게시하지 �
 `actions: read`, `contents: read`만으로 이 executable을 exact once 실행한다. checkout 전 `gh` pathname/SHA-256
 고정, immutable third-party action, ReleaseFast build, closed argv, step-local `${{ github.token }}`, 두 absent workspace,
 output/upload/summary 부재를 source gate가 고정한다. focused Debug·ReleaseFast gate는 조립 순서, 단일 deadline·context·CLI
-권위, 모든 단계 실패의 후속 호출 0, 역순 cleanup, copied/pre-owned/aliased owner, actual-process
-stdout/stderr/FD/workspace residue 0을 검증한다.
+권위, 모든 단계 실패의 후속 호출 0, 역순 cleanup과 cleanup 실패의 성공 거부를 검증한다. product CLI
+source gate는 context·runner를 token보다 먼저 읽고 bounded token copy를 반환 전 zeroize하며 stdout/stderr writer를
+소유하지 않는지 고정한다. 전체 remote success actual-process 증거는 병합 뒤 protected tag job이 처음 소유한다.
 
 이 gate가 병합되기 전의 로컬 synthetic child·private APFS timing은 process/filesystem 회귀 수치일 뿐 실제 GitHub
 network 실측이 아니다. 병합 뒤 protected `v*` tag의 job URL, run/attempt/source, GitHub Jobs API의

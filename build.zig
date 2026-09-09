@@ -14547,6 +14547,14 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-remote-release-verdict",
         "Bind remote timing and immutable Release observation into a final verdict",
     );
+    const session_host_release_adapter_remote_release_verifier_step = b.step(
+        "test-session-host-release-adapter-remote-release-verifier",
+        "Verify one protected-run remote Release through the product boundary",
+    );
+    const session_host_release_remote_verifier_product_step = b.step(
+        "session-host-release-remote-verifier",
+        "Build the zero-output protected-run remote Release verifier",
+    );
     const session_host_release_adapter_live_timing_artifact_step = b.step(
         "test-session-host-release-adapter-live-timing-artifact",
         "Bind one GitHub Actions artifact and its timing archive to the current attempt",
@@ -15972,6 +15980,25 @@ pub fn build(b: *std.Build) void {
             if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_verifier_tests.step);
             boundary_step.dependOn(&run_live_timing_verifier_tests.step);
             const live_timing_environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_environment.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_context", .module = context_mod }} });
+            const remote_release_verifier_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_live_timing_transport", .module = live_timing_transport_mod },
+                .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod },
+                .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod },
+                .{ .name = "release_adapter_remote_release_observation", .module = remote_release_observation_mod },
+                .{ .name = "release_adapter_remote_release_verdict", .module = remote_release_verdict_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_github_transport", .module = transport_mod },
+                .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+            } });
+            const remote_release_verifier_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_verifier.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_remote_release_verifier", .module = remote_release_verifier_mod }} }) });
+            const run_remote_release_verifier_tests = b.addRunArtifact(remote_release_verifier_tests);
+            run_remote_release_verifier_tests.addArg("--maru-expect-tests=7");
+            session_host_release_adapter_remote_release_verifier_step.dependOn(&run_remote_release_verifier_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_verifier_tests.step);
+            boundary_step.dependOn(&run_remote_release_verifier_tests.step);
             const live_timing_verifier_cli_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/release_live_timing_verifier_cli.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
                 .{ .name = "release_adapter_environment", .module = live_timing_environment_mod },
                 .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
@@ -15982,6 +16009,23 @@ pub fn build(b: *std.Build) void {
                 .name = b.fmt("maru-session-host-release-live-timing-verifier-{s}", .{@tagName(composition_optimize)}),
                 .root_module = live_timing_verifier_cli_mod,
             });
+            const remote_release_verifier_cli_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/release_remote_verifier_cli.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_environment", .module = live_timing_environment_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                .{ .name = "release_adapter_github_transport", .module = transport_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_remote_release_verifier", .module = remote_release_verifier_mod },
+            } });
+            const remote_release_verifier_exe = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-release-remote-verifier-{s}", .{@tagName(composition_optimize)}),
+                .root_module = remote_release_verifier_cli_mod,
+            });
+            if (composition_optimize == optimize) {
+                session_host_release_remote_verifier_product_step.dependOn(
+                    &b.addInstallArtifact(remote_release_verifier_exe, .{ .dest_sub_path = "maru-session-host-release-remote-verifier" }).step,
+                );
+            }
             if (composition_optimize == optimize) {
                 session_host_release_live_timing_verifier_product_step.dependOn(
                     &b.addInstallArtifact(live_timing_verifier_exe, .{

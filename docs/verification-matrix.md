@@ -3388,11 +3388,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   실패, copied/pre-owned/aliased owner, pathname 교체 보존과 residue 0을 검증한다. 이 gate만으로 attestation/evidence
   semantic, after fence, actual GitHub network 실측을 주장하지 않는다
   (`session-host-upgrade.md` §11.100f).
-  Downloaded Release attested semantic transaction은 **계획**이다. `release_adapter_remote_release_observation.zig`가
+  Downloaded Release attested semantic transaction은 **구현**됐다. `release_adapter_remote_release_observation.zig`가
   미완료 fence와 exact-ID `Assets`를 같은 deadline에서 소비해 네 GitHub-issued attestation, canonical
   manifest/evidence parse·cross-binding, final metadata fence를 순서대로 닫은 뒤에만 sealed profile observation을
   게시한다. 기존 attestation verifier와 held semantic-files bridge를 재사용하며 transaction-owned partial receipt와
-  semantic owner만 역순 해제하고 caller-owned Assets/Fence는 보존한다. completed fence 뒤 최종 deadline 만료도
+  semantic owner만 역순 해제하고 caller-owned Assets/Fence는 보존한다. completed fence 뒤 최종 CLI drift·deadline 만료도
   publication 0으로 닫는다. focused Debug·ReleaseFast gate는 role/profile/identity/digest/final-fence drift·fail-index·alias·unwind를
   닫으며, protected-tag read-only workflow의 구간별 기록 전에는 actual GitHub network 실측을 주장하지 않는다
   (`session-host-upgrade.md` §11.100g).

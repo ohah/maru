@@ -76,10 +76,20 @@ pub const Assets = struct {
 
     pub fn revalidate(self: *@This()) !View {
         const view = self.value() orelse return error.InvalidOwner;
-        _ = self.fence_owner.?.candidateFor(self.deadline_owner.?, self.pinned_owner.?) orelse return error.InvalidFence;
+        _ = self.fence_owner.?.snapshotFor(self.deadline_owner.?, self.pinned_owner.?) orelse return error.InvalidFence;
         try validateDirectory(self);
         for (&self.files) |*file| try validateFile(self.dir_fd, file);
         return view;
+    }
+
+    pub fn revalidateFor(self: *@This(), release_fence: *const fence_mod.Fence, deadline: *deadline_mod.Deadline, pinned: *const PinnedExecutable) !View {
+        if (self.fence_owner != release_fence or self.deadline_owner != deadline or self.pinned_owner != pinned) return error.InvalidFence;
+        return self.revalidate();
+    }
+
+    pub fn directoryFdFor(self: *@This(), release_fence: *const fence_mod.Fence, deadline: *deadline_mod.Deadline, pinned: *const PinnedExecutable) !c.fd_t {
+        _ = try self.revalidateFor(release_fence, deadline, pinned);
+        return self.dir_fd;
     }
 
     pub fn openAssetDescriptor(self: *@This(), role: Role) !c.fd_t {

@@ -30,6 +30,11 @@ pub const Fence = struct {
         return self.candidate();
     }
 
+    pub fn snapshotFor(self: *const @This(), deadline: *const deadline_mod.Deadline, pinned: *const PinnedExecutable) ?metadata.View {
+        if (self.deadline_owner != deadline or self.pinned_owner != pinned or !valid(self)) return null;
+        return self.before.value();
+    }
+
     pub fn metadataOwnerFor(self: *const @This(), deadline: *const deadline_mod.Deadline, pinned: *const PinnedExecutable) ?*const metadata.Owner {
         _ = self.candidateFor(deadline, pinned) orelse return null;
         return &self.before;

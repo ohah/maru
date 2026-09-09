@@ -5218,6 +5218,14 @@ evidence filename은 파싱된 profile과 일치해야 하지만 profile의 출�
 filesystem·credential·process를 열지 않는 `release_adapter_remote_release_semantics.zig` value owner가 이
 manifest/evidence canonical parse·cross-binding의 단일 출처다. 상위 transaction은 held descriptor에서 읽은
 exact bytes와 begun snapshot을 이 owner에 넘기고, 자신이 JSON field를 다시 판정하지 않는다.
+`release_adapter_remote_release_semantic_files.zig`는 그 filesystem→semantic 경계의 단일 소유자다.
+`Assets.revalidate()`의 canonical manifest/evidence record에서 size cap을 정하고 role별 read-only descriptor를
+새로 빌려 exact byte 수만 offset read한 뒤 EOF를 확인한다. read 전/후에 assets·fence candidate·file
+identity/mode/link-count/size/digest를 다시 확인하고, begun fence의 sealed metadata owner와 읽은 두 byte copy만
+`remote_release_semantics.bind`에 넘긴다. 상위 transaction이 JSON을 다시 파싱하거나 pathname으로
+다시 열지 않는다. short/long/read error, descriptor/file/fence drift, cap 위반, input/result alias와 allocation
+fail-index는 semantic publication 0·temporary byte/descriptor cleanup으로 닫히며 downloaded `Assets`의 cleanup 권위는
+caller에 남는다.
 
 모든 semantic·attestation 검증 후 `verifyAfterUntil`로 같은 published Release를 다시 읽어 begun snapshot과
 exact 일치시켜야만 `Observation` owner를 게시한다. 성공 owner는 owned canonical manifest/evidence bytes와

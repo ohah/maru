@@ -3400,6 +3400,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   transaction이 외부 효과 순서를 단일 소유하게 한다. focused Debug·ReleaseFast 5개가
   baseline/upgrade publication, metadata·role·profile·digest drift, noncanonical bytes, copied/reused upstream owner,
   post-publication owned-byte mutation, pre-owned/aliased result·allocation fail-index unwind를 닫는다.
+  Filesystem→semantic bridge는 **계획**이다. `release_adapter_remote_release_semantic_files.zig`가 exact-ID
+  `Assets`의 held manifest/evidence descriptor를 bounded exact read·EOF·pre/post revalidation하고 begun fence metadata owner와
+  함께 위 semantic owner에만 전달한다. focused Debug·ReleaseFast actual private filesystem gate가 exact read,
+  file/fence drift, cap·alias·allocation unwind·FD/residue 0을 닫으며 network·attestation·final fence는
+  상위 transaction에 남는다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

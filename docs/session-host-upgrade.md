@@ -2257,6 +2257,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료를 주장하지 않는다.
 
+### 11.28 U5 restore activation 전 구간 failure matrix
+
 - **failure matrix의 첫 named gate:** `test-session-host-upgrade-failure-matrix`는 이미 독립적으로 존재하던
   U3 same-PID process failure 14개와 U5 zero/non-empty 제품 rollback activation을 한 진입점에서 실행한다.
   이 gate는 corrupt primary·corrupt/divergent backup, incompatible/hung target preflight, old/second exec 반환,
@@ -2327,6 +2329,45 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   ambient environment, MRSH command, 공개 coordinator `Context`와 제품 error mapping을 넓히지 않는다. 이 gate는 실제
   write-side disk-full admission과 pre-quiesce 생존만 닫는다. ENOSPC 뒤 성공하는 fsync를 fsync fault로 세지 않으며 delayed
   fsync fault와 실제 서명 release artifact는 여전히 별도다.
+
+  세 번째 제품 gate `test-session-host-upgrade-restore-precommit-failure-matrix`는
+  `restore_activation.activateValidated`의 rollback 금지선 전 순서를 하나의 source-host→same-PID exec fixture에서 관통한다.
+  주입점은 `after_output_wake`, `after_restored_graph`, `after_socket_bind`, `after_manifest_adoption`,
+  `after_rollback_authority`, `after_attempt_restore`, `after_prepared_authority`, `reader_prepare_timeout`,
+  `after_graph_revalidate`, `manifest_ready_rejected`, `manifest_ready_poisoned`의 닫힌 enum이다. 이름이나 개수는 test와 제품 구현에
+  두 벌로 복제하지 않고 `restore_activation.zig`의 test-only enum과 boundary inventory가 한 목록을 읽는다. `after_*` 행은 owner를
+  실제로 얻은 직후 실패해 defer unwind를 밟고, `reader_prepare_timeout`은 실제 reader start gate 하나를 닫힌 채 두어 bounded
+  deadline을 밟는다. ready publication 두 행은 `host_manifest`의 기존 commit/rollback failpoint를 adapter로 재사용한다.
+
+  `manifest_ready_rejected`까지의 rollback-safe 실패는 `rollback_allowed=true`여야 한다. target은 attempt가 고정한 canonical rollback image를
+  같은 PID에서 exact once exec하고, 부모 검증자는 old build/epoch의 ready manifest, 같은 listener/host PID, 저장한 exact runtime
+  ID·child PID, pre-marker와 post-input을 실제 MRSH로 다시 관측한다. 실패한 target의 socket·reader·prepared graph·working owner dup은
+  남지 않아야 하고 rollback bootstrap이 쓸 inherited owner/state/PTY fd는 보존되어야 한다. 단순 error 반환, marker file 또는
+  component mock은 이 행의 성공 증거가 아니다.
+
+  `manifest_ready_poisoned`는 manifest 교환의 rollback 결과가 불확정인 `AuthorityPoisoned`다. flag 값만 보고 canonical rollback을
+  실행하지 않으며 재귀 exec 0, process nonzero, listener 부재를 요구한다. manifest/owner/temporary pathname은 성공 cleanup으로
+  추측해 지우지 않고 exact root에 audit-required residue로 보존할 수 있다. 부모는 그 inventory와 inode를 기록하고 새 ready host나
+  upgrade 성공을 합성하지 않는다. 이 행을 rollback-safe 실패 또는 ready-committed 실패와 합치지 않는다.
+
+  네 번째 제품 gate `test-session-host-upgrade-restore-postcommit-failure-matrix`는 성공한 `HostAuthority.activateReady`가
+  `rollback_allowed=false`를 게시한 뒤의 `rollback_cleanup_activation`, `inherited_fd_close`, `rollback_promotion`,
+  `attempt_report`를 별도 root에서 실행한다. ready commit 뒤에는 재귀 rollback exec가 0이어야 한다. `rollback_cleanup_activation`과
+  `inherited_fd_close` 실패는 ready authority를 draining으로 바꾸고 admission을 열지 않은 채 process를 nonzero fail-stop하며,
+  listener pathname과 owner lease를 회수하고 inherited fd allowlist 밖 잔존을 0으로 만든다. `rollback_promotion` 실패는 이미 복원된
+  graph를 죽이지 않고 committed report의 `promotion_failed`, upgrade status-only controller와 upgrade capability 철회로 수렴한다.
+  `attempt_report` 실패는 promotion 성공 뒤 상태를 추측해 공개하지 않고 fail-stop한다. 각 행은 child exit/reap, socket·owner·attempt/
+  target residue, parent FD delta까지 terminal 상태를 관측하며 다음 행과 root를 공유하지 않는다.
+
+  fault 선택은 제품 공개 `RestoreInvocation`, MRSH command, ambient environment에 필드를 추가하지 않는다. 별도 test artifact만
+  compile-time으로 여는 strict `--restore-activation-fault <closed-name>` prefix를 target entry에서 먼저 소비한 뒤 남은 canonical
+  restore argv를 공용 parser에 넘기고 typed enum을 `runForTest`에 전달한다. `PreparedRollbackExec`이 만드는 rollback argv에는 이 prefix와
+  fault 이름이 0개여야 하며 rollback image는 일반 strict restore entry만 실행한다. fault는 해당 product call 직전에 exact once
+  소비되고, 주입되지 않은 전후 revalidation과 cleanup은 실제 구현을 그대로 돈다. boundary gate는
+  production `run`·`runWithNotificationAdapter`가 test seam을 호출하지 않는 것, 제품 binary에 option 문자열과 fault 이름이 없는 것,
+  각 enum 행의 exact-one process execution을 함께 고정한다. precommit과 postcommit은 별도 named step·artifact로 실행해 한쪽의
+  긴 reader timeout이나 process crash가 다른 쪽 증거를 가리지 않는다. 이 matrix는 current source로 만든 target/rollback artifact의 오류 의미를
+  닫지만 signed frozen release provenance나 실제 kernel delayed-fsync fault를 대신하지 않는다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

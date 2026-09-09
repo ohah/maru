@@ -672,11 +672,15 @@ fn resolveRelativeAnchor(self: *TerminalCore, p: StoredPlacement) ?struct { row:
     // 부모가 relative 면 그 부모부터 풀어야 하지만, 한 단계만 본다 — 사슬은 드물고, 순환이면
     // 무한 재귀가 된다. 다단계는 실제 사용례가 나오면 그때 사이클 검사와 함께 넣는다.
     if (base.parent_image_id != 0) return null;
-    const row_i = @as(i64, @intCast(base.anchor_row)) + p.parent_offset_y;
+    // **i64 로 더한다.** `H`/`V` 는 APC 에서 상한 없이 오는 i32 라, 좁은 타입으로 더하면 넘친다 —
+    // `anchor_col(u16) + 2147483647` 이 i32 를 넘어 **터미널이 패닉했다**(적대적 검증 실측: 살아 있는
+    // maru 에 그 한 줄을 보내자 앱이 죽었다). 악의적 스트림 한 줄로 앱을 죽일 수 있는 자리라, 범위를
+    // 벗어나면 조용히 «그릴 자리 없음» 으로 떨군다.
+    const row_i = @as(i64, @intCast(base.anchor_row)) + @as(i64, p.parent_offset_y);
     if (row_i < 0) return null; // 스크롤백 위로 벗어남 — 그릴 자리가 없다
-    const col_i = @as(i32, base.anchor_col) + p.parent_offset_x;
-    if (col_i < 0) return null;
-    return .{ .row = @intCast(row_i), .col = @intCast(@min(col_i, @as(i32, std.math.maxInt(u16)))) };
+    const col_i = @as(i64, base.anchor_col) + @as(i64, p.parent_offset_x);
+    if (col_i < 0 or col_i > std.math.maxInt(u16)) return null; // 열 범위 밖 — 화면에 닿지 않는다
+    return .{ .row = @intCast(row_i), .col = @intCast(col_i) };
 }
 
 /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지

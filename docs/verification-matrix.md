@@ -3374,9 +3374,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   권위로 노출하지 않는다. Debug·ReleaseFast gate가 JSON 확장 허용과 duplicate/trailing/cap, lifecycle/context/asset drift, owner lifetime 및
   allocation unwind를 닫는다. pinned `gh` 조회·download·attestation·evidence semantic과 before/after metadata fence는 그 다음 transport가
   소유하며, value owner만으로 실제 GitHub Release나 final verdict를 주장하지 않는다(`session-host-upgrade.md` §11.100d).
-  그중 current Release metadata 전후 fence는 **구현 전**이다. 같은 `published_release` endpoint를 pinned CLI와 하나의 deadline으로
-  작업 전후 조회하고 canonical role별 release/asset snapshot exact 일치 뒤에만 완료 capability를 게시한다. download·attestation과
-  evidence semantic은 fence의 두 관측 사이를 사용하는 다음 gate가 소유한다(`session-host-upgrade.md` §11.100e).
+  그중 current Release metadata 전후 fence는 **구현**됐다. `release_adapter_remote_release_fence.zig`가 같은
+  `published_release` endpoint를 checkout 전 pinned CLI와 하나의 final-address deadline으로 작업 전후 조회하고, 각 child 전후 CLI
+  재검증과 canonical role별 release/asset snapshot exact 일치 뒤에만 완료 capability를 게시한다.
+  `test-session-host-release-adapter-remote-release-fence`는 Debug·ReleaseFast에서 exact argv/environment, 배열 순서 독립성,
+  lifecycle/context/release/asset/CLI drift, deadline·owner·입력 alias, copied/mutated owner와 양쪽 metadata allocation unwind를 검증한다.
+  injected child를 사용하므로 실제 GitHub network latency나 live Release 성공의 실측은 아니며, download·attestation과 evidence semantic은
+  fence의 두 관측 사이를 사용하는 다음 gate가 소유한다(`session-host-upgrade.md` §11.100e).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

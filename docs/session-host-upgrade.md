@@ -5071,10 +5071,25 @@ repository/run ID/**run attempt**/source SHA가 current Context 및 artifact 이
 
 focused Debug·ReleaseFast gate는 canonical metadata+stored/deflate archive 성공, 이름에 맞지만 record attempt가 다른 replay,
 목록 duplicate/overflow와 모든 metadata drift, ZIP slip·duplicate entry·trailing/concatenated archive·header/CRC/digest/size/ratio
-불일치, unsupported/encrypted/link entry, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다. transport executor
-gate는 pinned GitHub CLI에 closed argv로 list/get/download만 허용하고 token·response bytes·temporary pathname을 결과에 보존하지
-않는다. synthetic response/archive를 쓰는 이 gate는 실제 GitHub 호출이나 protected tag 실측을 대신하지 않으며, live workflow
-판정 job 배선과 실제 GitHub-issued artifact 표본은 다음 gate가 소유한다.
+불일치, unsupported/encrypted/link entry, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다.
+
+transport executor의 단일 소유자는 `release_adapter_live_timing_transport.zig`다. 입력은 current `Expected`, checkout 전에 고정한
+`PinnedExecutable`, validated token, positive shared deadline budget, caller가 제공한 bounded metadata buffer와 absolute absent
+workspace pathname뿐이다. executor가 만드는 GitHub CLI command는 exact 두 개다. 첫 command는
+`/repos/ohah/maru/actions/runs/<run-id>/artifacts?per_page=100&name=session-host-release-live-timing-<run-attempt>`를 GET하고, 그 응답을
+`selectMetadata`로 검증한 뒤에만 두 번째 command가 selected ID의 `/repos/ohah/maru/actions/artifacts/<artifact-id>/zip`을 GET한다.
+두 command 모두 absolute pinned CLI를 실행하고 `GH_TOKEN`·`GH_PROMPT_DISABLED=1`만 상속하며 실행 직전과 종료 직후 pathname
+authority를 재검증한다. caller가 endpoint·artifact ID·이름·argv나 child environment를 문자열로 주입하는 API는 두지 않는다.
+
+workspace는 no-follow로 연 parent 아래 exclusive 0700 directory이며 archive leaf는 `O_EXCL|O_NOFOLLOW`, 0600 regular file이다.
+download child stdout은 shell redirect나 범용 downloader를 거치지 않고 이미 연 fd로 직접 보내며 metadata가 선언한 exact size를
+hard cap으로 삼는다. child exit 0과 EOF 뒤 file `fsync`, pathname/held-fd identity·mode·link-count·size 재검증, bounded single read를
+마친 bytes만 `bindArchive`에 넘긴다. 성공·실패 모두 archive unlink와 empty-directory removal 및 parent sync를 수행하고, cleanup이나
+deadline finalization이 실패하면 이미 만든 provenance도 철회한다. 성공 결과는 sealed `Provenance` 하나뿐이며 token, metadata/archive
+bytes, fd, response storage와 temporary pathname은 보존하지 않는다. focused transport gate는 actual macOS process와 private APFS에서
+exact argv/environment/order, metadata-before-download, CLI/file replacement, cap·short/long download·timeout·child failure, 모든 단계의
+residue/FD 0과 result publication 0을 Debug·ReleaseFast로 검증한다. synthetic local child를 쓰므로 실제 GitHub 호출이나 protected tag
+실측을 대신하지 않으며, live workflow 판정 job 배선과 실제 GitHub-issued artifact 표본은 다음 gate가 소유한다.
 
 ## 12. 필수 적대적 검증
 

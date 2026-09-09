@@ -3381,6 +3381,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   lifecycle/context/release/asset/CLI drift, deadline·owner·입력 alias, copied/mutated owner와 양쪽 metadata allocation unwind를 검증한다.
   injected child를 사용하므로 실제 GitHub network latency나 live Release 성공의 실측은 아니며, download·attestation과 evidence semantic은
   fence의 두 관측 사이를 사용하는 다음 gate가 소유한다(`session-host-upgrade.md` §11.100e).
+  Current Release exact-ID private asset download는 **구현 전**이다. 다음 focused gate는 begun fence의 canonical
+  네 asset ID만으로 pinned `gh api`를 role 순서로 실행하고, shared deadline의 fresh remaining·child 전후 CLI/fence
+  재검증·exact size/SHA·private 0400 held inode·failure cleanup retry를 Debug·ReleaseFast actual filesystem에서 닫아야
+  한다. 이 gate만으로 attestation/evidence semantic, after fence, actual GitHub network 실측을 주장하지 않는다
+  (`session-host-upgrade.md` §11.100f).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

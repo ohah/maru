@@ -361,6 +361,35 @@ for f in $A $I; do
   ck "처리기가 안전한 것만 쓴다 ${f##*/}" 0 "$(crashBody $f | sed 's,//.*,,' | grep -cE 'malloc|printf|NSLog|pthread_mutex|fopen')"
 done
 
+echo "§하네스 — 조용히 빗나가지 않는다 (M8)"
+R=tools/mobile-harness/sim_input.swift
+# **좌표를 손으로 박지 않는다.** 창 세로 여유(66)보다 큰 오프셋(70)이 박혀 있어 보내는 점이
+# 통째로 어긋났고, 그래서 손짓이 아무 데도 안 닿았다 — 그런데 **아무 말도 없었다**.
+ck "박은 세로 오프셋이 없다" 0 "$(grep -c 'padY' $R)"
+# 보정이 없으면 **말하고 멈춘다.** 어림값으로 보내면 조용히 빗나가고, 그 침묵을 「기능이 안 된다」
+# 로 읽게 된다(실제로 슬라이스 둘의 iOS 확인을 그렇게 놓쳤다).
+ck "보정이 없으면 안 보낸다" 1 "$(grep -c 'guard let cal = loadCalibration()' $R)"
+ck "보정 모드가 있다" 1 "$(grep -c 'if mode == \"calibrate\"' $R)"
+# **낡은 단정을 남기지 않는다** — `features-ios` 는 다시 도는 것을 확인했다(5 PASS / 1 FAIL).
+ck "features-ios 가 멈춘다고 안 적는다" 0 "$(grep -c '지금 멈춘다' tools/mobile-harness/README.md)"
+# **낡음을 «숫자»에 묶는다.** 위 판정자는 문구 하나를 무는 것이라 바꿔 적으면 빠져나간다 —
+# 실측값이 함께 있어야 다음 사람이 다시 재 보고 고칠 수 있다.
+ck "그 자리에 실측값이 있다" 1 "$(grep -c '5 PASS / 1 FAIL' tools/mobile-harness/README.md)"
+# **성공 경로가 «한 번도 안 돈» 채로 남지 않게** 한다. CGEvent 가 이 기계에서 시뮬레이터에 안
+# 닿아서 보정은 실패로만 돌았다 — 사상을 푸는 산술은 시뮬레이터 없이도 재어져야 한다.
+# (첫 실행에서 진짜 결함을 잡았다: 보정을 적어 두고도 다시 못 읽었다.)
+ck "시뮬레이터 없이 도는 자가 검사" 1 "$(grep -c 'if mode == \"selftest\"' $R)"
+# **자가 검사가 «사본»을 검사하면 아무것도 안 지킨다** — 푸는 자리가 하나여야 한다.
+ck "푸는 자리가 하나다" 1 "$(grep -c '^func solve(' $R)"
+# **여기서 실제로 돌린다** — 있는지만 세면 그 안이 깨져도 초록이다. `swift` 가 없는 자리(CI 는
+# ubuntu 다)에서는 **건너뛴다고 말한다**: 조용히 안 도는 게이트는 게이트가 아니다(이 저장소가
+# 겪은 그 모양).
+if command -v swift >/dev/null 2>&1; then
+  ck "자가 검사가 통과한다" "전부 통과" "$(swift $R selftest 2>/dev/null | tail -1 | sed 's/selftest: //')"
+else
+  printf "  건너뜀 %-40s swift 없음\n" "자가 검사"
+fi
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

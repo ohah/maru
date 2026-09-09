@@ -14497,6 +14497,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-timing-record",
         "Validate canonical GitHub-issued live timing records",
     );
+    const session_host_release_adapter_remote_release_metadata_step = b.step(
+        "test-session-host-release-adapter-remote-release-metadata",
+        "Validate credential-free current immutable GitHub Release metadata",
+    );
     const session_host_release_adapter_live_timing_artifact_step = b.step(
         "test-session-host-release-adapter-live-timing-artifact",
         "Bind one GitHub Actions artifact and its timing archive to the current attempt",
@@ -14876,6 +14880,14 @@ pub fn build(b: *std.Build) void {
             const git_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_git.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const resolver_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_git_resolver.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const context_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
+            const remote_release_metadata_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_metadata.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod } } });
+            const remote_release_metadata_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_metadata.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod } } }) });
+            const run_remote_release_metadata_tests = b.addRunArtifact(remote_release_metadata_tests);
+            run_remote_release_metadata_tests.addArg("--maru-expect-tests=6");
+            run_remote_release_metadata_tests.setCwd(b.path("."));
+            session_host_release_adapter_remote_release_metadata_step.dependOn(&run_remote_release_metadata_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_metadata_tests.step);
+            boundary_step.dependOn(&run_remote_release_metadata_tests.step);
             const attestation_bundle_contract_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_attestation_bundle_contract.zig"), .target = target, .optimize = composition_optimize });
             const artifact_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
             const cli_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });

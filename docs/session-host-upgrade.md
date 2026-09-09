@@ -5141,7 +5141,7 @@ evidence asset 이름은 **다운로드 후보를 고르는 데만** 사용하�
 release ID, lifecycle과 네 asset ID/name/size/digest/URL exact snapshot이 유지되는지 fence해야 한다.
 
 focused Debug·ReleaseFast gate는 canonical 성공과 배열 순서 독립성, baseline/upgrade evidence candidate, context/lifecycle/asset
-set·URL·digest·type drift, duplicate/unknown/trailing/size cap, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다.
+set·URL·digest·type drift, unknown extension 허용, duplicate/trailing/size cap 거부, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다.
 이 value gate는 filesystem, clock, token, process와 network를 읽지 않으며 실제 Release·attestation·profile 또는 U5 성공을 증명하지
 않는다. 다음 하위 gate가 pinned `gh` GET과 private held-file download, attestation, evidence semantic, before/after metadata fence를
 합성한다.

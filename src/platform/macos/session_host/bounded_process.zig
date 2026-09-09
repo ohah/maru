@@ -18,6 +18,7 @@ pub const Error = error{
     InvalidExecutable,
     InvalidDirectoryFd,
     InvalidInputFd,
+    InvalidOutputFd,
     InvalidExpectedSize,
     InvalidBudget,
     AliasedOutput,
@@ -307,6 +308,132 @@ pub fn runDigestEnvironmentStdout(
     if (failure) |err| return err;
     const unsigned_status: u32 = @bitCast(status);
     if (!eof or !c.W.IFEXITED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0) return error.ChildFailed;
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return .{ .size = used, .sha256 = std.fmt.bytesToHex(digest, .lower) };
+}
+
+/// Streams bounded stdout into one already-held regular file while hashing the exact bytes.
+/// The pathname is never reopened and a short or oversized body is rejected.
+pub fn runWriteEnvironmentStdout(
+    io: std.Io,
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    output_fd: c.fd_t,
+    expected_size: u64,
+    budget_ns: i128,
+) Error!Digest {
+    if (executable.len < 2 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null)
+        return error.InvalidExecutable;
+    if (!validOutputFd(output_fd)) return error.InvalidOutputFd;
+    if (expected_size == 0 or expected_size > std.math.maxInt(usize)) return error.InvalidExpectedSize;
+    if (budget_ns <= 0) return error.InvalidBudget;
+
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+    if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return error.PipeFailed;
+    }
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return error.SpawnSetupFailed;
+    }
+    const pid = spawnChild(executable, argv, environment, null, null, pipe_fds, null, dev_null, .stdout_only) catch |err| {
+        _ = c.close(dev_null);
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        return err;
+    };
+    _ = c.close(dev_null);
+    _ = c.close(pipe_fds[1]);
+    if (!establishProcessGroup(pid)) {
+        terminateGroup(pid);
+        _ = reapChild(pid, null);
+        _ = c.close(pipe_fds[0]);
+        return error.ProcessGroupFailed;
+    }
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var used: u64 = 0;
+    var eof = false;
+    var child_reaped = false;
+    var status: c_int = 0;
+    const start = std.Io.Clock.awake.now(io).nanoseconds;
+    const expires = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
+    var failure: ?Error = null;
+    while (!(eof and child_reaped)) {
+        if (!child_reaped) switch (pollChild(pid, &status)) {
+            .running => {},
+            .reaped => child_reaped = true,
+            .failed => {
+                failure = error.WaitFailed;
+                break;
+            },
+        };
+        if (eof and child_reaped) break;
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (now >= expires) {
+            failure = error.TimedOut;
+            break;
+        }
+        const remaining_ms = @divTrunc(expires - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        const wait_ms: c_int = @intCast(@min(remaining_ms, poll_quantum_ms));
+        var fds = [_]c.pollfd{.{ .fd = if (eof) -1 else pipe_fds[0], .events = c.POLL.IN, .revents = 0 }};
+        const rc = c.poll(&fds, if (eof) 0 else 1, wait_ms);
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (rc == 0 or eof) continue;
+        if (fds[0].revents & (c.POLL.ERR | c.POLL.NVAL) != 0) {
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (fds[0].revents & (c.POLL.IN | c.POLL.HUP) == 0) continue;
+        var bytes: [64 * 1024]u8 = undefined;
+        const remaining = expected_size - used;
+        const capacity: usize = if (remaining >= bytes.len) bytes.len else @intCast(remaining + 1);
+        const count = c.read(pipe_fds[0], &bytes, capacity);
+        if (count < 0) {
+            if (posix.errno(count) == .INTR) continue;
+            failure = error.CaptureFailed;
+            break;
+        }
+        if (count == 0) {
+            eof = true;
+        } else if (@as(u64, @intCast(count)) > remaining) {
+            failure = error.OutputTooLarge;
+            break;
+        } else {
+            const amount: usize = @intCast(count);
+            var written: usize = 0;
+            while (written < amount) {
+                const wrote = c.pwrite(output_fd, bytes[written..amount].ptr, amount - written, @intCast(used + written));
+                if (wrote < 0 and posix.errno(wrote) == .INTR) continue;
+                if (wrote <= 0) {
+                    failure = error.CaptureFailed;
+                    break;
+                }
+                written += @intCast(wrote);
+            }
+            if (failure != null) break;
+            hasher.update(bytes[0..amount]);
+            used += amount;
+        }
+    }
+    _ = c.close(pipe_fds[0]);
+    if (failure != null or !child_reaped) terminateGroup(pid);
+    if (!child_reaped and !reapChild(pid, null)) return error.WaitFailed;
+    if (failure) |err| return err;
+    const unsigned_status: u32 = @bitCast(status);
+    if (!eof or !c.W.IFEXITED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0) return error.ChildFailed;
+    if (used != expected_size) return error.InvalidExpectedSize;
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return .{ .size = used, .sha256 = std.fmt.bytesToHex(digest, .lower) };
@@ -651,6 +778,16 @@ fn validInputFd(io: std.Io, fd: c.fd_t) bool {
     const file = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
     const stat = file.stat(io) catch return false;
     return stat.kind == .file;
+}
+
+fn validOutputFd(fd: c.fd_t) bool {
+    if (fd < 3 or c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0) return false;
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return false;
+    const open_flags: c.O = @bitCast(@as(u32, @intCast(flags)));
+    if (open_flags.ACCMODE == .RDONLY) return false;
+    var stat: posix.Stat = undefined;
+    return c.fstat(fd, &stat) == 0 and posix.S.ISREG(stat.mode);
 }
 
 fn validHeldExecutable(executable: [:0]const u8) bool {

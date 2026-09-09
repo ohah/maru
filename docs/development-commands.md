@@ -730,6 +730,13 @@ CI 러너는 매번 새 머신이라 이 명령이 필요 없다 — 개발 머�
 Debug·ReleaseFast focused step으로 등록하고, 실제 GitHub artifact 표본은 병합 뒤 protected `v*` tag에서만 판정한다
 (`session-host-upgrade.md` §11.100j).
 
+```sh
+zig build test-session-host-release-adapter-remote-release-pass-record
+zig build test-session-host-release-adapter-remote-release-pass-file
+zig build test-session-host-release-adapter-remote-release-verifier
+zig build check-session-host-release-workflow
+```
+
 코드나 빌드 설정을 바꾼 PR은 기본적으로 다음을 통과해야 한다.
 
 ```sh

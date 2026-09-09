@@ -14547,6 +14547,14 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-remote-release-verdict",
         "Bind remote timing and immutable Release observation into a final verdict",
     );
+    const session_host_release_adapter_remote_release_pass_record_step = b.step(
+        "test-session-host-release-adapter-remote-release-pass-record",
+        "Encode the canonical protected-run remote Release pass record",
+    );
+    const session_host_release_adapter_remote_release_pass_file_step = b.step(
+        "test-session-host-release-adapter-remote-release-pass-file",
+        "Publish the canonical protected-run remote Release pass record",
+    );
     const session_host_release_adapter_remote_release_verifier_step = b.step(
         "test-session-host-release-adapter-remote-release-verifier",
         "Verify one protected-run remote Release through the product boundary",
@@ -15941,6 +15949,67 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_remote_release_verdict_step.dependOn(&run_remote_release_verdict_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_verdict_tests.step);
             boundary_step.dependOn(&run_remote_release_verdict_tests.step);
+            const remote_release_pass_record_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_pass_record.zig"), .target = target, .optimize = composition_optimize, .imports = &.{
+                .{ .name = "release_evidence", .module = remote_release_evidence_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_remote_release_verdict", .module = remote_release_verdict_mod },
+            } });
+            const remote_release_pass_record_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_pass_record.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_remote_release_pass_record", .module = remote_release_pass_record_mod },
+                .{ .name = "release_adapter_remote_release_verdict", .module = remote_release_verdict_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_live_timing_record", .module = live_timing_record_mod },
+                .{ .name = "release_adapter_remote_release_observation", .module = remote_release_observation_mod },
+                .{ .name = "release_adapter_remote_release_semantic_files", .module = remote_release_semantic_files_mod },
+                .{ .name = "release_adapter_remote_release_semantics", .module = remote_release_semantics_mod },
+                .{ .name = "release_evidence", .module = remote_release_evidence_mod },
+                .{ .name = "release_manifest", .module = manifest_mod },
+                .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod },
+                .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod },
+                .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "bounded_process", .module = bounded_mod },
+            } }) });
+            const run_remote_release_pass_record_tests = b.addRunArtifact(remote_release_pass_record_tests);
+            run_remote_release_pass_record_tests.addArg("--maru-expect-tests=46");
+            run_remote_release_pass_record_tests.setCwd(b.path("."));
+            session_host_release_adapter_remote_release_pass_record_step.dependOn(&run_remote_release_pass_record_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_pass_record_tests.step);
+            boundary_step.dependOn(&run_remote_release_pass_record_tests.step);
+            const remote_release_pass_file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_pass_file.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_remote_release_pass_record", .module = remote_release_pass_record_mod },
+                .{ .name = "release_adapter_files", .module = files_mod },
+            } });
+            const remote_release_pass_file_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_pass_file.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_remote_release_pass_file", .module = remote_release_pass_file_mod },
+                .{ .name = "release_adapter_remote_release_pass_record", .module = remote_release_pass_record_mod },
+                .{ .name = "release_adapter_files", .module = files_mod },
+                .{ .name = "release_adapter_remote_release_verdict", .module = remote_release_verdict_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_live_timing_record", .module = live_timing_record_mod },
+                .{ .name = "release_adapter_remote_release_observation", .module = remote_release_observation_mod },
+                .{ .name = "release_adapter_remote_release_semantic_files", .module = remote_release_semantic_files_mod },
+                .{ .name = "release_adapter_remote_release_semantics", .module = remote_release_semantics_mod },
+                .{ .name = "release_evidence", .module = remote_release_evidence_mod },
+                .{ .name = "release_manifest", .module = manifest_mod },
+                .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod },
+                .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod },
+                .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "bounded_process", .module = bounded_mod },
+            } }) });
+            const run_remote_release_pass_file_tests = b.addRunArtifact(remote_release_pass_file_tests);
+            run_remote_release_pass_file_tests.addArg("--maru-expect-tests=50");
+            run_remote_release_pass_file_tests.setCwd(b.path("."));
+            session_host_release_adapter_remote_release_pass_file_step.dependOn(&run_remote_release_pass_file_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_pass_file_tests.step);
+            boundary_step.dependOn(&run_remote_release_pass_file_tests.step);
             const live_timing_transport_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_timing_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
                 .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
                 .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
@@ -15988,6 +16057,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod },
                 .{ .name = "release_adapter_remote_release_observation", .module = remote_release_observation_mod },
                 .{ .name = "release_adapter_remote_release_verdict", .module = remote_release_verdict_mod },
+                .{ .name = "release_adapter_remote_release_pass_record", .module = remote_release_pass_record_mod },
+                .{ .name = "release_adapter_remote_release_pass_file", .module = remote_release_pass_file_mod },
+                .{ .name = "release_adapter_files", .module = files_mod },
                 .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
                 .{ .name = "release_adapter_github_transport", .module = transport_mod },
                 .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod },
@@ -15995,7 +16067,7 @@ pub fn build(b: *std.Build) void {
             } });
             const remote_release_verifier_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_verifier.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_remote_release_verifier", .module = remote_release_verifier_mod }} }) });
             const run_remote_release_verifier_tests = b.addRunArtifact(remote_release_verifier_tests);
-            run_remote_release_verifier_tests.addArg("--maru-expect-tests=7");
+            run_remote_release_verifier_tests.addArg("--maru-expect-tests=10");
             session_host_release_adapter_remote_release_verifier_step.dependOn(&run_remote_release_verifier_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_verifier_tests.step);
             boundary_step.dependOn(&run_remote_release_verifier_tests.step);

@@ -369,7 +369,7 @@ test "live timing verifier job은 current artifact를 read-only zero-output 제�
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(capture_block, "GITHUB_ENV"));
 }
 
-test "remote Release verifier job은 final verdict를 read-only zero-output 제품으로 검증한다" {
+test "remote Release verifier job은 final verdict 뒤 canonical pass record만 보존한다" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const text = try readWorkflow(arena_state.allocator());
@@ -385,20 +385,29 @@ test "remote Release verifier job은 final verdict를 read-only zero-output 제�
         "jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac",
         "mise exec -- zig build session-host-release-remote-verifier -Doptimize=ReleaseFast",
         "GH_TOKEN: ${{ github.token }}",
-        "verify \"$TRUSTED_GH\" \"$TRUSTED_GH_SHA256\" \"$timing_workspace\" \"$release_workspace\"",
+        "verify-and-record \"$TRUSTED_GH\" \"$TRUSTED_GH_SHA256\" \"$timing_workspace\" \"$release_workspace\" \"$pass_record\"",
         "test ! -s \"$stdout\"",
         "test ! -s \"$stderr\"",
+        "test \"$(/usr/bin/stat -f '%HT' \"$pass_record\")\" = 'Regular File'",
+        "test \"$(/usr/bin/stat -f '%Lp' \"$pass_record\")\" = '400'",
+        "test \"$(/usr/bin/stat -f '%l' \"$pass_record\")\" = '1'",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "name: session-host-release-remote-pass-${{ github.run_attempt }}",
+        "path: ${{ runner.temp }}/session-host-release-remote-pass.json",
+        "if-no-files-found: error",
+        "retention-days: 90",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(job, needle));
     try std.testing.expectEqual(@as(usize, 2), countMatchingLines(job, "test ! -e \"$timing_workspace\""));
     try std.testing.expectEqual(@as(usize, 2), countMatchingLines(job, "test ! -e \"$release_workspace\""));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(job, "    permissions:"));
-    inline for (.{ "contents: write", "id-token: write", "attestations: write", "actions/upload-artifact", "gh release", "gh run", "GITHUB_STEP_SUMMARY" }) |forbidden|
+    inline for (.{ "contents: write", "id-token: write", "attestations: write", "gh release", "gh run", "GITHUB_STEP_SUMMARY", "if: always()" }) |forbidden|
         try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, forbidden));
     const capture = lineOf(job, "      - name: Capture trusted GitHub CLI before checkout").?;
     const checkout = lineOf(job, pinned_checkout).?;
     const build = lineOf(job, "      - name: Build remote Release verifier").?;
     const verify = lineOf(job, "      - name: Verify current remote Release verdict").?;
-    try std.testing.expect(capture < checkout and checkout < build and build < verify);
+    const upload = lineOf(job, "      - name: Upload canonical remote Release pass record").?;
+    try std.testing.expect(capture < checkout and checkout < build and build < verify and verify < upload);
 }
 
 test "remote Release verifier CLI는 trusted authority를 token보다 먼저 읽고 copy를 지운다" {

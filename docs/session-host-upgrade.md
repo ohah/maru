@@ -5349,7 +5349,8 @@ pathname·fd·credential이나 성공 capability는 갖지 않는다. 그 다음
 **cleanup 성공 뒤에만** private sibling temporary leaf를 `O_CREAT|O_EXCL|O_NOFOLLOW`, 0600으로 쓴다. short write·sync·identity·mode·link-count
 검증 중 하나라도 실패하면 temporary leaf를 지우고 final record를 만들지 않는다. record는 같은 parent 안에서 absent final
 leaf로 no-replace rename하고 parent sync한 뒤 0400 regular, link-count 1, exact device/inode/size/SHA-256과 canonical parse를
-다시 확인해야 게시된다. cleanup이 실패하면 filesystem publication을 호출하지 않으므로 성공 record와 실패 exit가 공존하지 않는다.
+결속해야 게시된다. allocation이 필요한 canonical parse는 rename 전에 끝내고, held fd의 exact byte digest를 rename 뒤 다시 확인해
+같은 canonical bytes임을 증명한다. cleanup이 실패하면 filesystem publication을 호출하지 않으므로 성공 record와 실패 exit가 공존하지 않는다.
 publication 자체의 cleanup이 실패한 경우 command는 nonzero이고 workflow는 upload를 실행하지 않으며, 남은 local pathname은 audit
 대상이지 pass record가 아니다.
 stdout, stderr, `GITHUB_OUTPUT`과 summary에는 record bytes·pathname·digest를 내지 않는다.
@@ -5363,10 +5364,12 @@ asset, attestation, environment나 다른 run을 수정하지 않는다. GitHub 
 record 내부 run attempt/source를 함께 보는 후속 audit가 rerun 혼입을 판정한다. artifact ID나 archive digest를 record 자신에
 넣지는 않는다. 업로드 뒤에만 생기는 값을 미리 넣으면 self-reference 또는 caller scalar가 권위가 되기 때문이다.
 
-focused Debug·ReleaseFast gate는 두 profile의 canonical encode/parse/round-trip, 모든 field drift·duplicate·unknown·missing·
-type/trailing/size 오류, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다. actual private APFS gate는
-record temp/final의 symlink·hardlink·preexist·pathname 교체, write/sync/rename/parent-sync/cleanup 각 fail-index, 성공·실패의
-FD delta와 residue를 검증한다. workflow source gate는 closed command와 세 sibling leaf, verifier 성공 뒤에만 exact-one upload,
+focused Debug·ReleaseFast gate는 두 profile의 canonical encode/parse/round-trip, profile·identity 결속,
+canonical 순서와 duplicate·unknown·trailing 거부, owner/byte drift, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다.
+actual private APFS gate는 기존 `release_adapter_files.zig`의 held-fd/no-follow/no-replace/write·sync·rename·parent-sync 계약을 재사용하고,
+record의 0400 exact bytes, final regular file·symlink·hardlink preexist 보존, 잘못된 basename·storage alias 거부와
+pre-publication allocation 실패의 final residue 0을 직접 검증한다.
+제품 조립 gate는 upstream stage/cleanup 실패 뒤 publication 호출 0을 고정한다. workflow source gate는 closed command와 세 sibling leaf, verifier 성공 뒤에만 exact-one upload,
 fixed artifact/file name, retention, 권한과 output/summary 부재를 고정한다. PR CI의 synthetic transaction과 source 검사는 실제
 GitHub artifact 발행이나 원격 실측 표본을 대신하지 않는다. 병합 뒤 첫 protected `v*` tag에서 remote verifier job과 pass artifact가
 함께 성공한 run/attempt/source만 첫 canonical 표본이며, `baseline_a` 표본만으로 U5를 완료 처리하지 않는다.

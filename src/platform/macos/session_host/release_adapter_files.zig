@@ -685,7 +685,7 @@ pub fn publishSummaryExclusiveAt(parent_fd: c.fd_t, leaf: [:0]const u8, bytes: [
     const owned_parent = c.fcntl(parent_fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
     if (owned_parent < 0) return error.UnsafePath;
     var published: PinnedReleaseFile = .{};
-    try publishSummaryOwnedExclusiveParent(&published, owned_parent, leaf, null, bytes);
+    try publishSummaryOwnedExclusiveParent(&published, owned_parent, leaf, null, bytes, 0o600);
     try published.deinit();
 }
 
@@ -693,10 +693,18 @@ pub fn publishSummaryExclusiveAt(parent_fd: c.fd_t, leaf: [:0]const u8, bytes: [
 /// descriptor becomes the final leaf descriptor after the exclusive rename, so size and digest
 /// authority cross the publication boundary without a pathname TOCTOU window.
 pub fn publishSummaryOwnedExclusive(result: *PinnedReleaseFile, path: [:0]const u8, bytes: []const u8) Error!void {
+    return publishSummaryOwnedExclusiveMode(result, path, bytes, 0o600);
+}
+
+/// The remote pass record is immutable input to the artifact uploader, so it is published
+/// read-only. Keep the mode choice inside this existing no-follow publication boundary rather
+/// than chmodding a pathname after its held identity has been sealed.
+pub fn publishSummaryOwnedExclusiveMode(result: *PinnedReleaseFile, path: [:0]const u8, bytes: []const u8, mode: c.mode_t) Error!void {
     if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
+    if (mode != 0o400 and mode != 0o600) return error.InvalidExpected;
     var leaf_buf: [std.fs.max_name_bytes:0]u8 = undefined;
     const parent = try openParent(path, &leaf_buf);
-    return publishSummaryOwnedExclusiveParent(result, parent.fd, parent.leaf, path, bytes);
+    return publishSummaryOwnedExclusiveParent(result, parent.fd, parent.leaf, path, bytes, mode);
 }
 
 fn publishSummaryOwnedExclusiveParent(
@@ -705,6 +713,7 @@ fn publishSummaryOwnedExclusiveParent(
     leaf: [:0]const u8,
     path: ?[:0]const u8,
     bytes: []const u8,
+    mode: c.mode_t,
 ) Error!void {
     if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
     if (bytes.len == 0 or bytes.len > summary_cap) return error.TooLarge;
@@ -756,11 +765,11 @@ fn publishSummaryOwnedExclusiveParent(
         if (count == 0) return error.WriteFailed;
         offset += @intCast(count);
     }
-    if (c.fchmod(fd, 0o600) != 0 or c.fsync(fd) != 0) return error.SyncFailed;
+    if (c.fchmod(fd, mode) != 0 or c.fsync(fd) != 0) return error.SyncFailed;
     var before_stat: posix.Stat = undefined;
     if (c.fstat(fd, &before_stat) != 0) return error.ReadFailed;
     const before = try releaseFingerprint(before_stat, false);
-    if (before.link_count != 1 or before.size != bytes.len or before.mode & 0o777 != 0o600)
+    if (before.link_count != 1 or before.size != bytes.len or before.mode & 0o777 != mode)
         return error.FileChanged;
     const digest = try hashExact(fd, before.size);
     if (renameatx_np(parent_fd, temp.ptr, parent_fd, leaf.ptr, rename_excl) != 0) {
@@ -789,7 +798,7 @@ fn publishSummaryOwnedExclusiveParent(
     // mode and a second digest while requiring the post-rename held/reopened fingerprints exactly.
     if (before.identity.device != held.identity.device or before.identity.inode != held.identity.inode or
         before.size != held.size or before.mode != held.mode or !sameFingerprint(held, reopened) or held.link_count != 1 or held.size != bytes.len or
-        held.mode & 0o777 != 0o600 or !std.mem.eql(u8, &digest, &final_digest))
+        held.mode & 0o777 != mode or !std.mem.eql(u8, &digest, &final_digest))
         return error.FileChanged;
     const parent_fingerprint = directoryFingerprint(parent_stat) catch return error.FileChanged;
     var path_digest: [32]u8 = @splat(0);

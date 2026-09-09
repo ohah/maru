@@ -5277,6 +5277,48 @@ network를 실행하거나 canonical pass record를 파일/summary/artifact로 �
 PTY·PID·runtime 복구를 수행하지 않는다. 따라서 U5 완료 표시는 후속 제품 executable·read-only workflow wiring과 실제 protected-tag
 baseline/upgrade 실측이 모두 성공한 뒤에만 가능하다.
 
+#### 11.100i final verdict의 제품 진입점과 read-only 원격 gate
+
+첫 제품 진입점 `maru-session-host-release-remote-verifier`는 canonical pass record를 성급히 게시하지 않고
+§11.100b·e·f·g·h를 하나의 final-address transaction으로 조립한다. closed command는
+`verify <checkout-before-pinned-gh-absolute-path> <lowercase-sha256> <absolute-absent-timing-workspace>
+<absolute-absent-release-workspace>` 하나다. context, runner authority, `GH_TOKEN`은 §11.100c와 동일한 제품 경계에서만
+얻고, repository·tag·source·run·attempt·profile·release/asset ID를 argv, environment 추가 필드, pathname 또는 caller
+boolean으로 받지 않는다. 두 workspace는 서로 disjoint한 `RUNNER_TEMP` 직계 absent leaf여야 하며 앱의 session-host
+상태 디렉터리나 candidate publication workspace를 가리키지 않는다.
+
+```mermaid
+flowchart TD
+    A[Read protected context and runner authority] --> B[Pin GitHub CLI and start one deadline]
+    B --> C[Fetch and bind current timing artifact]
+    C --> D[Begin immutable Release fence]
+    D --> E[Download four exact asset IDs]
+    E --> F[Verify attestations and canonical semantics]
+    F --> G[Complete the Release fence]
+    G --> H[Bind timing and Release into final verdict]
+    H --> I[Revalidate verdict then exit with no output]
+    I --> J[Release local owners and remove both workspaces]
+```
+
+하나의 positive monotonic deadline을 timing transport, Release 전 관측, 네 asset download, 네 attestation, semantic binding,
+Release 후 관측과 final verdict 결속이 함께 소비한다. 성공은 `Verdict.value()`를 마지막으로 한 번 더
+재검증한 뒤 exit 0·stdout 0·stderr 0으로만 표현한다. 실패는 nonzero·output 0이며 timing provenance,
+observation, attestation receipt, downloaded asset, begun fence와 deadline을 생성의 역순으로 정리한다.
+fence가 완료된 뒤에도 remote Release를 수정·삭제·재게시하지 않으며, local cleanup 실패를 remote 성공으로
+낮추지 않는다. token은 bounded copy 이외의 owner, argv, file, stdout/stderr에 남지 않고 반환 전 zeroize한다.
+
+`release.yml`의 별도 `macos-15` job은 timing upload와 immutable Release publication을 모두 `needs`로 요구한 뒤
+`actions: read`, `contents: read`만으로 이 executable을 exact once 실행한다. checkout 전 `gh` pathname/SHA-256
+고정, immutable third-party action, ReleaseFast build, closed argv, step-local `${{ github.token }}`, 두 absent workspace,
+output/upload/summary 부재를 source gate가 고정한다. focused Debug·ReleaseFast gate는 조립 순서, 단일 deadline·context·CLI
+권위, 모든 단계 실패의 후속 호출 0, 역순 cleanup, copied/pre-owned/aliased owner, actual-process
+stdout/stderr/FD/workspace residue 0을 검증한다.
+
+이 gate가 병합되기 전의 로컬 synthetic child·private APFS timing은 process/filesystem 회귀 수치일 뿐 실제 GitHub
+network 실측이 아니다. 병합 뒤 protected `v*` tag의 job URL, run/attempt/source, GitHub Jobs API의
+started/completed timestamp와 제품 verifier 결과가 첫 원격 표본이다. 이 무출력 gate는 canonical pass-record
+publication이나 signed N-1→current PTY·PID·runtime U5 E2E 완료를 대신하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

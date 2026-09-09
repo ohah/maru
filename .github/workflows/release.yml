@@ -266,3 +266,68 @@ jobs:
           path: ${{ runner.temp }}/session-host-release-live-timing.json
           if-no-files-found: error
           retention-days: 90
+
+  session-host-release-live-timing-verification:
+    name: session host live timing verification
+    needs: session-host-release-live-timing
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Capture trusted GitHub CLI before checkout
+        id: trusted-gh
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovered=$(command -v gh)
+          canonical=$(/usr/bin/realpath "$discovered")
+          case "$canonical" in
+            /*) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$canonical" != *$'\n'* && "$canonical" != *$'\r'* ]]
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          case "$sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#sha256}" = 64
+          printf 'path=%s\n' "$canonical" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Build live timing verifier
+        run: mise exec -- zig build session-host-release-live-timing-verifier -Doptimize=ReleaseFast
+
+      - name: Verify current GitHub-issued live timing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_GH: ${{ steps.trusted-gh.outputs.path }}
+          TRUSTED_GH_SHA256: ${{ steps.trusted-gh.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          workspace="$RUNNER_TEMP/maru-session-host-live-timing-verifier-$GITHUB_RUN_ATTEMPT"
+          stdout="$RUNNER_TEMP/maru-session-host-live-timing-verifier.stdout"
+          stderr="$RUNNER_TEMP/maru-session-host-live-timing-verifier.stderr"
+          test ! -e "$workspace"
+          test ! -e "$stdout"
+          test ! -e "$stderr"
+          cleanup() {
+            /bin/rm -f "$stdout" "$stderr"
+          }
+          trap cleanup EXIT
+          verifier="$GITHUB_WORKSPACE/zig-out/bin/maru-session-host-release-live-timing-verifier"
+          "$verifier" verify "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$workspace" > "$stdout" 2> "$stderr"
+          test ! -s "$stdout"
+          test ! -s "$stderr"
+          test ! -e "$workspace"

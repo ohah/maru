@@ -1405,6 +1405,9 @@ pub fn enterAltScreen(self: *TerminalCore) void {
     // prompt_marks는 전부 .unknown이다. 보던 과거를 닫고 선택도 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가
     // 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
     self.saved_screen = self.screen;
+    // 키보드 모드도 그 화면의 상태다 — alt 는 자기 스택에서 시작하고, 떠날 때 primary 것이 돌아온다.
+    self.saved_kitty_flags = self.kitty_flags;
+    self.kitty_flags = .{};
     self.screen = .{ .cells = alt_cells, .wrapped = alt_wrapped, .prompt_marks = alt_prompt_marks };
     self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
     self.alt_active = true;
@@ -1429,6 +1432,8 @@ pub fn leaveAltScreen(self: *TerminalCore) void {
     self.screen.sb.deinit(self.allocator); // alt의 빈 스크롤백 해제(보통 ring 미할당 — no-op)
     self.screen = self.saved_screen; // primary 화면(grid+스크롤백+커서) 통째 복원
     self.saved_screen = .{};
+    self.kitty_flags = self.saved_kitty_flags; // 그 화면의 키보드 모드도 함께 — alt 의 flag 가 셸로 새지 않는다
+    self.saved_kitty_flags = .{};
     self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
     self.alt_active = false;
     self.pen_link = 0; // 화면 전환 — 열린 링크를 닫는다(Ghostty endHyperlink)

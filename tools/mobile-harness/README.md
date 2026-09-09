@@ -12,23 +12,52 @@ sh tools/mobile-harness/run.sh chrome-ios          # 시뮬레이터에 설치·
 sh tools/mobile-harness/run.sh chrome-android-app  # 에뮬레이터에 설치·실행 + 스크린샷
 sh tools/mobile-harness/run.sh present-ios         # present 페이싱을 표시 클럭으로 실측
 sh tools/mobile-harness/run.sh features-android    # Vulkan 으로 여섯 기능 판정
-sh tools/mobile-harness/run.sh features-ios        # 같은 판정 (지금 멈춘다 — 아래)
+sh tools/mobile-harness/run.sh features-ios        # 같은 판정 (5 PASS / 1 FAIL — 아래)
 #
 # 아틀라스 덤프(픽셀 대조용) — **요청할 때만** 쓴다. 제품이 매 실행 384KB 를 남길 이유가 없다.
 #   Android: adb shell setprop debug.maru.atlas_dump 1  뒤 앱 재실행 → adb exec-out run-as … cat
 #   iOS:     simctl launch 에 MARU_ATLAS_DUMP=1 환경변수
 #
 # 입력: adb shell input tap <키 좌표>  — `input text` 는 IME 를 우회하므로 이 검증에 못 쓴다
-# 터치: adb shell input tap 525 753 · idb ui tap 200 300
+# 터치: adb shell input tap 525 753 · idb ui tap 200 300 · idb ui swipe 200 700 200 200
 # 생명주기: adb shell input keyevent KEYCODE_HOME 뒤 am start 재실행
 ```
 
-**`features-ios` 는 지금 이 환경에서 멈춘다.** `simctl spawn` 으로 띄운 프로세스가 첫
-`printf` 전에 걸린다 — `MTLCreateSystemDefaultDevice()` 아니면 런타임 셰이더 컴파일이다.
-시뮬레이터를 재부팅해도 같다. **앱으로 설치해 돌리는 `chrome-ios`·`present-ios` 는 정상**
-이라 Metal 자체가 아니라 `simctl spawn` 환경의 문제로 보인다. 아래 표의 iOS 여섯 기능 값은
-이 증상이 나기 전 실행에서 받은 것이고, 다시 받으려면 이 모드를 앱으로 바꿔야 한다
-(계획 M8). `features-android` 는 정상이다(재실행 확인).
+## iOS 입력 — 어느 도구를 언제 쓰나 (M8)
+
+**둘이 닿는 자리가 다르다.** 이걸 안 적어 둬서 슬라이스 둘(M15a·M15b)의 iOS 확인을 놓쳤다 —
+`sim_input.swift` 로 밀었는데 아무 일도 안 나자 「하네스 한계」로 적고 넘어갔다. 실측하니
+그 도구가 이 환경에서 **앱에 한 줄도 안 닿고 있었다**(`MARU_TOUCH` 0줄).
+
+| 무엇을 재나 | 도구 | 왜 |
+|---|---|---|
+| **우리 화면**(목록 밀기·행 누르기·키바) | `idb ui tap` · `idb ui swipe` | 우리는 `touchesBegan/Moved/Ended` 를 **직접** 받아 `maru_mobile_pointer` 로 넘긴다 — 제스처 인식기를 안 쓰므로 합성 터치로 충분하다. 설정 목록을 끝까지 밀어 「진단」을 여는 것까지 된다(실측) |
+| **OS 인식기**(좌측 가장자리 뒤로가기 등) | `sim_input.swift`(CGEvent) | 합성 터치는 `UIPanGestureRecognizer` 에 **안 닿는다**(실측) |
+
+**`sim_input.swift` 는 이 기계에서 지금 안 닿는다.** CGEvent 는 정상으로 posting 되는데
+(커서가 움직인다) 시뮬레이터가 그것을 기기 터치로 안 바꾼다. 그래서 그 도구는 이제
+**조용히 빗나가지 않는다**: 좌표를 손으로 박아 두던 두 상수를 없애고 `calibrate` 로 재게 했고,
+보정이 없거나 앱이 점을 못 받으면 **말하고 멈춘다**.
+
+```sh
+swift tools/mobile-harness/sim_input.swift selftest    # 시뮬레이터 없이 — 사상 산술을 판정한다
+swift tools/mobile-harness/sim_input.swift calibrate   # 앱을 띄워 두고 한 번
+```
+
+**보정은 스스로를 확인하고 나서 저장한다** — 푼 사상으로 셋째 점을 보내고 앱이 그 자리를 받았는지
+본다(2pt 안). 안 맞으면 **저장하지 않는다**: 틀린 값을 적어 두면 그 뒤 모든 손짓이 조용히 빗나간다.
+`selftest` 는 시뮬레이터 없이 도는 판정이라 `doc_claims.sh` 가 함께 돌린다(`swift` 가 없는 자리
+에서는 **건너뛴다고 말한다** — 조용히 안 도는 게이트는 게이트가 아니다).
+
+~~**`features-ios` 는 지금 이 환경에서 멈춘다.**~~ — **다시 도는 것을 확인했다**(2026-09-09).
+`simctl spawn` 으로 다섯을 판정하고(전부 PASS) 여섯째만 FAIL 인데, 그 FAIL 은 고장이 아니라
+**원리상 못 재는 것**이다: 오프스크린에는 「표시 시각」이 없다(`present 페이싱 — 오프스크린 범위
+밖, CAMetalLayer 필요`). 그 하나는 **`present-ios` 앱이 이미 판정한다**(`verdict=PASS paced=1
+slower_than_free=1`, 실측 free 16.67ms vs throttled 33.33ms).
+
+**그래서 「여섯을 한 앱으로 옮긴다」는 안 한다**(계획 M8 정정). 다섯은 오프스크린이 더 싸고
+빠르며, 앱이 **꼭 필요한 것은 하나**다 — 그 하나만 앱이다. 갈라 둔 것이 결론이고, 그 사실을
+여기 적어 둔다.
 
 **초기 단계 하네스(`ios`·`ios-app`·`android`·`chrome-android`)는 지웠다.** 위 두 모드가 그
 일을 포함하고, 남겨 두면 어느 쪽이 진짜인지 흐려진다. 측정 **결과**(아래 표·스크린샷)는

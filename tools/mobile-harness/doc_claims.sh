@@ -425,7 +425,7 @@ ck "사유를 밝힐 API 없음" 1 "$(grep -c '<key>NSPrivacyAccessedAPITypes</k
 # 붉어져서 선언을 함께 고치게 한다(2026-09-09 실측: 전부 0건).
 ck "사유를 밝힐 API 를 안 쓴다" 0 "$(sed 's,//.*,,' $I | grep -cE 'NSUserDefaults|systemUptime|NSFileCreationDate|NSFileModificationDate|attributesOfItemAtPath|statfs|activeInputModes')"
 
-echo "§아이콘 — 한 그림이 세 플랫폼을 덮는다 (M11b)"
+echo "§아이콘 — 한 그림이 세 플랫폼을 덮는다 (M11b·M11c)"
 G=assets/icon/render.py
 # **그리는 자리가 하나다.** 크기가 스물 몇 개라 손으로 맞추면 한 자리만 낡고, 그 한 자리는
 # 그 크기에서만 드러난다(작은 아이콘이 특히 그렇다).
@@ -436,6 +436,18 @@ ck "Android 아이콘이 다 있다" 10 "$(ls assets/icon/android/mipmap-*/*.png
 # **색은 제품에서 온다.** 여기 숫자를 새로 만들면 브랜드가 두 벌이 된다.
 ck "앰버가 브랜드 강조색이다" 1 "$(grep -ci 'AMBER = (0xDD, 0xA1, 0x5E)' $G)"
 ck "그 앰버가 제품 값이다" 1 "$(grep -ci 'accent_default = #dda15e' src/config/appearance.zig)"
+# **모티프의 비율은 문서와 코드가 같은 수를 말해야 한다.** `ㅁ` 을 셀 비율(1:1.9)로 두면 글자가
+# 「미」로 읽혀서 눕혔다 — 그 수가 갈리면 어느 쪽이 규칙인지 알 수 없다.
+ck "ㅁ 을 눕힌 비율이 코드에 있다" 1 "$(grep -c 'ch / 1.25' $G)"
+ck "그 비율이 문서에도 있다" 1 "$(grep -c '1:1.25' docs/distribution.md)"
+# **여기서 실제로 돌린다** — 자산이 있는지만 세면 생성기를 고치고 다시 안 뽑아도 초록이다.
+# `.icns` 는 `iconutil`(macOS 전용)이 손으로 굽는 산출물이라 이 판정이 유일한 파수꾼이다.
+# CI(ubuntu)도 Pillow 를 쓴다(`tools/svg_to_coverage.py`) — 그래서 여기서도 돈다.
+ck "뽑아 둔 자산이 규칙과 같다" 0 "$("$PY" $G --check >/dev/null 2>&1; echo $?)"
+# **「작아도 안 뭉친다」를 눈이 아니라 자로 잰다.** 안전 원을 0.6px 넘은 것을 이게 잡았다.
+ck "작은 크기·안전 영역을 잰다" 0 "$("$PY" $G --selftest >/dev/null 2>&1; echo $?)"
+# **재료는 커밋하지 않는다** — 그러면 생성기를 돌릴 때마다 작업 나무가 더러워진다.
+ck "iconset 은 무시한다" 1 "$(grep -c 'assets/icon/Maru.iconset/' .gitignore)"
 # **적응형 배경색은 두 곳에 적힌다**(XML 이 색을 요구하고 생성기는 PNG 를 굽는다) — 묶어 둔다.
 ck "적응형 배경이 생성기 바탕과 같다" 1 "$(grep -c '#1E1E2E' src/platform/android/res/values/colors.xml)"
 ck "생성기 바탕도 그 값이다" 1 "$(grep -c 'GROUND = (0x1E, 0x1E, 0x2E)' $G)"

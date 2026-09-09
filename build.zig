@@ -14505,6 +14505,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-remote-release-fence",
         "Fence current immutable GitHub Release metadata before and after remote work",
     );
+    const session_host_release_adapter_remote_release_assets_step = b.step(
+        "test-session-host-release-adapter-remote-release-assets",
+        "Download current immutable GitHub Release assets by exact ID",
+    );
     const session_host_release_adapter_live_timing_artifact_step = b.step(
         "test-session-host-release-adapter-live-timing-artifact",
         "Bind one GitHub Actions artifact and its timing archive to the current attempt",
@@ -14920,6 +14924,14 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_remote_release_fence_step.dependOn(&run_remote_release_fence_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_fence_tests.step);
             boundary_step.dependOn(&run_remote_release_fence_tests.step);
+            const remote_release_assets_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod }, .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_github_transport", .module = transport_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
+            const remote_release_assets_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_assets.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod }, .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "bounded_process", .module = bounded_mod } } }) });
+            const run_remote_release_assets_tests = b.addRunArtifact(remote_release_assets_tests);
+            run_remote_release_assets_tests.addArg("--maru-expect-tests=8");
+            run_remote_release_assets_tests.setCwd(b.path("."));
+            session_host_release_adapter_remote_release_assets_step.dependOn(&run_remote_release_assets_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_assets_tests.step);
+            boundary_step.dependOn(&run_remote_release_assets_tests.step);
             const tag_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_tag_authority.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_git_resolver", .module = resolver_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod } } });
             const tag_chain_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_tag_chain_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_tag_authority", .module = tag_authority_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
             const contract_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"), .target = target, .optimize = composition_optimize });

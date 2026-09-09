@@ -67,7 +67,8 @@ pub const Result = struct {
     generation: u64 = 0,
     read_bytes: u64 = 0,
     search_ns: u64 = 0,
-    /// 열지 못한 파일이 있었다 — 「없다」가 아니라 「다 못 봤다」다.
+    /// **다 못 봤다.** 파일을 못 열었거나, 조각이 `max_probe_bytes` 에 걸려 끝까지 안 읽혔다.
+    /// 「걸린 것이 없다」와 **다른 사실**이라 따로 든다.
     partial: bool = false,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -255,6 +256,10 @@ fn probeMatches(
     raw: []u8,
     out: []u8,
     read_bytes: *u64,
+    /// 상한(`max_probe_bytes`)에 걸려 **끝까지 못 본** 조각이 있었나. 실측상 0 건이지만(최대
+    /// 46.8 KB < 64 KiB) 그 사실을 안 들면 화면이 「없다」와 「못 봤다」를 섞는다 — 이 뷰의 계약
+    /// §2 가 금하는 바로 그 혼동이고, 여기가 그것을 아는 유일한 자리다(적대적 2회차).
+    truncated: *bool,
 ) bool {
     if (offset == 0) return false;
     var got: usize = 0;
@@ -266,6 +271,8 @@ fn probeMatches(
     if (got == 0) return false;
     read_bytes.* +|= got;
     const block = context.unescapeBlock(out, raw[0..got]);
+    // 값의 끝을 못 봤다 = 이 조각은 **끝까지 안 봤다**. 뒤에 검색어가 있었을 수 있다.
+    if (!block.complete) truncated.* = true;
     if (block.len == 0) return false;
     return context.matches(out[0..block.len], query);
 }
@@ -326,8 +333,8 @@ fn worker(job: *Job) void {
         }
         const file = open_file orelse continue;
 
-        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes);
-        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes);
+        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, &result.partial);
+        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, &result.partial);
         if (!in_command and !in_result) continue;
         result.matches.append(state.allocator, .{
             .data_offset = probe.data_offset,

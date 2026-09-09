@@ -77422,7 +77422,19 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
         "\"input\":\"grep -rn foo src/\"}}\n" ++
         "{\"payload\":{\"call_id\":\"call_AV3\",\"type\":\"custom_tool_call_output\"," ++
         "\"output\":\"first hit\\nsecond hit\"}}\n";
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = transcript });
+    // **상한을 넘는 명령 하나**를 앞(= 오래된 쪽)에 둔다. 화면은 최신을 앞에 놓으므로 위 줄은
+    // 그대로 0 번이고 이것이 1 번이다 — 아래 단언을 한 줄도 안 흔든다.
+    const long_head = "{\"payload\":{\"call_id\":\"call_LONG\",\"type\":\"custom_tool_call\"," ++
+        "\"name\":\"exec\",\"input\":\"echo ";
+    const long_len = agent_activity_ops.max_detail_bytes + 512;
+    const long_line = try allocator.alloc(u8, long_head.len + long_len + "\"}}\n".len);
+    defer allocator.free(long_line);
+    @memcpy(long_line[0..long_head.len], long_head);
+    @memset(long_line[long_head.len..][0..long_len], 'x');
+    @memcpy(long_line[long_head.len + long_len ..], "\"}}\n");
+    const whole = try std.mem.concat(allocator, u8, &.{ long_line, transcript });
+    defer allocator.free(whole);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = whole });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
@@ -77459,7 +77471,7 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
     // 터미널에서 Tab 을 뺏지 않기 위한 게이트다(계약 §8).
     session.agent_activity.key_focus = true;
     try cycleActivityFilterTo(session, .execs);
-    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
 
     // ── ① **그린 자리를 누른다.** 창은 그리기와 같은 자리에서 온다(`listWindow`).
     const w = agent_activity_ops.listWindow(session);
@@ -77481,6 +77493,21 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
     try std.testing.expectEqualStrings("first hit\nsecond hit", detail.result);
     try std.testing.expect(!detail.command_truncated);
     try std.testing.expect(!detail.result_truncated);
+
+    // ── ②-b **상한을 넘으면 그렇게 말한다**(계약 §2.4 — 「이하 생략」).
+    //
+    // ⚠️ 이 단언은 오래 **공허했다**: 잘림을 `unescapeBlock` 의 `truncated` 로 물었는데, 푸는 일은
+    //    바이트를 늘리지 않으므로(`\n` 둘→하나 · `\uXXXX` 여섯→넷 이하 · 나머지 1:1) 받는 버퍼를
+    //    읽어 온 만큼 잡아 주는 이 소비자에게 그 깃발은 **영원히 거짓**이었다. 8 KiB 를 넘는 명령이
+    //    **잘렸다는 말 없이** 잘려 있었고, 위의 「짧으면 안 잘린다」만으로는 그것이 안 보인다
+    //    (적대적 2회차 — 본문 검색이 같은 함수를 두 번째로 쓰다가 드러났다).
+    agent_activity_ops.openAt(session, 1);
+    const long_detail = session.agent_activity.open.?.detail;
+    try std.testing.expect(long_detail.command_truncated);
+    try std.testing.expectEqual(agent_activity_ops.max_detail_bytes, long_detail.command.len);
+    // 다시 0 번을 열어 아래 그리기 단언의 기준선을 되돌린다.
+    agent_activity_ops.openAt(session, 0);
+    try std.testing.expect(agent_activity_ops.isDetailOpen(session));
 
     // ── ③ 그리고 **그려진다**(자리만 잡고 안 그리면 사용자에게는 없는 기능이다).
     var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
@@ -78920,6 +78947,228 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
     try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
 
     quietActivityWorkers(session);
+}
+
+test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·재제출·「다 못 봤다」 (BS1 적대적 1~3회차)" {
+    // 세 회차가 각각 다른 각도로 찾은 것을 한 자리에 못박는다. 셋 다 **성공 경로만 보면 안 보이는**
+    // 자리다 — 「걸었고 답이 왔다」는 어느 쪽이든 통과한다.
+    //
+    // ⓐ **1회차(수명·재제출)**: 워커가 바빠 못 건 요청을 `pollBodySearch` 가 다시 거는데, 그때
+    //    `query` 는 이미 채워져 있고 `awaiting` 은 0 이다 — 옛 게이트(`appliesTo and awaiting == 0`)가
+    //    정확히 그 모양을 「이미 답했다」로 읽어 **되돌아갔다**. 그 요청은 영구히 사라지고 검색어를
+    //    바꾸기 전엔 복구되지 않는다.
+    // ⓑ **3회차(사용자 흐름)**: 스캔은 워커라 큰 세션은 3.6 초인데, 사용자는 도크를 열자마자 치고
+    //    `Enter` 를 누른다. 그때 `all_hits` 가 비어 있어 **조용히 아무 일도 안 일어났다** — 창은
+    //    이미 닫혀 있어 다시 누를 수도 없다.
+    // ⓒ **2회차(「없다」와 「못 봤다」)**: 워커가 파일을 못 열어도 화면은 개수만 말했다 — 이 뷰의
+    //    계약(§2)이 금하는 바로 그 혼동이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 앞 판정자와 같은 갈래(라벨 / 명령 / 결과)다 — 「본문까지 봤나」를 개수로 가르려면 필요하다.
+    const s1 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R1\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\",\"description\":\"zeta 라벨\"}}]}}\n";
+    const s2 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"grep -rn zeta src/\",\"description\":\"첫째 작업\"}}]}}\n";
+    const s3 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R3\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"ls docs\",\"description\":\"둘째 작업\"}}]}}\n";
+    const s3_result =
+        "{\"parentUuid\":\"p\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\"," ++
+        "\"content\":[{\"tool_use_id\":\"toolu_R3\",\"type\":\"tool_result\"," ++
+        "\"content\":\"alpha\\nzeta hit\\nomega\"}]},\"uuid\":\"u3\"," ++
+        "\"timestamp\":\"2026-09-09T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = s1 ++ s2 ++ s3 ++ s3_result });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .execs);
+
+    // ── ⓑ **스캔이 끝나기 전에** 검색어를 치고 `Enter` 를 누른다. tick 을 한 번도 안 돌렸으므로
+    //    인덱스는 비어 있다 — 제품에서 도크를 막 연 순간이 정확히 이 상태다.
+    agent_activity_ops.refresh(session, false);
+    try std.testing.expect(!session.agent_activity.built);
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+
+    // **예약이 남아 있어야 한다.** 그냥 돌아갔다면 둘 다 비어 있고, 그 `Enter` 는 사라진 것이다.
+    try std.testing.expect(session.agent_activity.body.resubmit);
+    try std.testing.expectEqualStrings("zeta", session.agent_activity.body.query.items);
+
+    // ── ⓑ 이어서: tick 만 돌려도 **자동으로** 걸려 본문까지 온다(사용자가 다시 누르지 않는다).
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.body.answered) _ = session.tick() catch {};
+    }
+    try std.testing.expect(session.agent_activity.body.answered);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.shown_body_matches);
+
+    // ── 같은 검색어로 다시 `Enter` 를 눌러도 **다시 훑지 않는다**. 17.7 MB 를 두 번 읽을 이유가 없다.
+    session.agent_activity.search_active = true;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.body.awaiting);
+    try std.testing.expect(!session.agent_activity.body.resubmit);
+
+    // ── ⓐ **못 걸었던 요청**을 세운다(워커가 바빠 `submit` 이 null 을 준 직후의 상태 그대로:
+    //    `query` 는 있고 `answered` 는 거짓이고 `awaiting` 은 0 이다). tick 이 이것을 **다시 걸어야**
+    //    한다 — 옛 게이트는 여기서 자기 자신에게 막혀 영영 안 걸었다.
+    session.agent_activity.body.matches.clearRetainingCapacity();
+    session.agent_activity.body.answered = false;
+    session.agent_activity.body.resubmit = true;
+    agent_activity_ops.rebuildFilter(session); // 본문 답이 없는 화면으로 되돌린다
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.body.answered) _ = session.tick() catch {};
+    }
+    try std.testing.expect(session.agent_activity.body.answered);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+
+    // ── ⓒ 워커가 **파일을 못 열었을 때**는 개수가 아니라 그 사실을 말한다.
+    session.agent_activity.search_active = false; // 검색줄 대신 결과 문구를 본다
+    var notice_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+    session.agent_activity.body.partial = true;
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.agent_activity_body_partial),
+        agent_activity_ops.noticeText(session, &notice_buf),
+    );
+    // 되돌리면 다시 개수다 — 문구가 «항상» 그것이면 이 판정자는 공허하다.
+    session.agent_activity.body.partial = false;
+    var want_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        maru.i18n.format(&want_buf, maru.i18n.t(.agent_activity_match_split), &.{
+            .{ .d = 1 },
+            .{ .d = 2 },
+        }),
+        agent_activity_ops.noticeText(session, &notice_buf),
+    );
+
+    // ── ⓕ **인덱스가 자라면 본문 답도 따라간다**(적대적 3회차). 자동 갱신이 붙어 있어 대화가
+    //    이어지는 내내 이 길로 오는데, 옛 답을 그대로 두면 **라벨 층만 새 줄을 잡고 본문 층은
+    //    못 잡는다** — 사용자에게는 「어떤 건 걸리고 어떤 건 안 걸린다」로 보인다.
+    const s4 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R4\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"echo zeta again\",\"description\":\"넷째 작업\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = s1 ++ s2 ++ s3 ++ s3_result ++ s4 });
+    agent_activity_ops.refresh(session, true);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() != 4) _ = session.tick() catch {};
+    }
+    // 새 줄은 라벨에 `zeta` 가 **없다** — 본문 층이 다시 훑었을 때만 잡힌다.
+    try std.testing.expectEqual(@as(usize, 4), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_label_matches);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.shown_body_matches);
+
+    // ── ⓖ **뷰를 떠났다 와도 본문 답은 남는다**(적대적 3회차). 검색어(`search.query`)는 뷰를
+    //    떠나도 살아 있어 라벨 층 필터가 그대로 걸리는데, 본문 층만 버리면 사용자에게는 **자기가
+    //    한 일 없이 목록이 줄어든 것**으로 보인다. 두 층은 같이 살고 같이 죽어야 한다.
+    agent_activity_ops.onLeaveView(session);
+    try std.testing.expect(session.agent_activity.body.answered);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.body.matches.items.len);
+    try std.testing.expectEqualStrings("zeta", session.agent_activity.body.query.items);
+    // 도는 요청은 접는다 — 안 보는 뷰를 위해 디스크를 돌 이유가 없다.
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.body.awaiting);
+    try std.testing.expect(!session.agent_activity.body.resubmit);
+
+    quietActivityWorkers(session);
+}
+
+test "본문 검색 워커: 조각이 상한에 걸리면 「없다」가 아니라 「다 못 봤다」다 (BS1 적대적 2회차)" {
+    // **워커 축만 직접 잰다** — `AppSession` 을 안 세운다. 이 사실을 아는 자리가 워커뿐이라
+    // (`unescapeBlock` 의 `truncated`), 도크를 통째로 세우면 오히려 무엇을 재는지 흐려진다
+    // (`formatResultSummary` 와 같은 규율).
+    //
+    // 실측상 이 자리는 **0 건**이다(조각 최대 46.8 KB < 64 KiB). 그래도 못박는 이유는 계약 §2 다 —
+    // 「걸린 것이 0 건」과 「끝까지 못 봤다」는 다른 사실이고, 섞이면 사용자는 검색이 답했다고 믿는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 상한을 **넘는** 조각 하나. JSON 문자열 값이므로 여는 따옴표 다음이 본문의 시작이고,
+    // `unescapeBlock` 은 닫는 따옴표에서 멈춘다 — 여기서는 그 전에 상한이 먼저 온다.
+    const big_len = agent_body_search_backend.max_probe_bytes + 1024;
+    const big = try allocator.alloc(u8, big_len + 2);
+    defer allocator.free(big);
+    big[0] = '"';
+    @memset(big[1..][0..big_len], 'a');
+    big[big_len + 1] = '"';
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.txt", .data = big });
+    // 대조군: 상한 안에 들어가는 조각. 「항상 다 못 봤다고 말한다」면 이 판정자는 공허하다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "small.txt", .data = "\"aaaa\"" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    const Case = struct { file: []const u8, want_partial: bool };
+    for ([_]Case{
+        .{ .file = "big.txt", .want_partial = true },
+        .{ .file = "small.txt", .want_partial = false },
+    }) |case| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, case.file });
+        defer allocator.free(path);
+        var chain: maru.session.agent_image_index.Chain = .{};
+        try std.testing.expect(chain.append(path));
+
+        var backend = try agent_body_search_backend.Backend.init(allocator, io);
+        defer backend.deinit();
+
+        // 검색어는 조각 안에 **없는** 것이다 — 걸린 것은 0 건이고, 그 0 의 뜻을 가른다.
+        const probes = [_]agent_body_search_backend.Probe{
+            .{ .data_offset = 1, .body_offset = 1, .file = 0 },
+        };
+        const generation = backend.submit(chain, "zzzz", &probes) orelse
+            return error.TestUnexpectedResult;
+
+        var result: ?agent_body_search_backend.Result = null;
+        defer if (result) |*r| r.deinit(allocator);
+        var spins: usize = 0;
+        while (spins < 5_000_000) : (spins += 1) {
+            if (backend.take()) |r| {
+                result = r;
+                break;
+            }
+        }
+        const got = result orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(generation, got.generation);
+        try std.testing.expectEqual(@as(usize, 0), got.matches.items.len);
+        try std.testing.expectEqual(case.want_partial, got.partial);
+    }
 }
 
 test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적대적)" {

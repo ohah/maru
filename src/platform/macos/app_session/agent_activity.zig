@@ -1056,7 +1056,7 @@ fn suspendBodySearch(self: *AppSession) void {
 
 /// `Enter` — 본문까지 넓힌다(계약 §2.1.1).
 ///
-/// **파일 전체를 안 훑는다.** 인덱스가 이미 자리를 아니(`cmd_rel` · `result.body_offset`) 그 조각만
+/// **파일 전체를 안 훑는다.** 인덱스가 이미 자리를 아니(`cmd_rel` · `result.body.offset`) 그 조각만
 /// 넘긴다 — 실측 파일의 12.0% 다. 그림(`kind.isImage()`)은 **안 넘긴다**: 그 `data_offset` 은
 /// base64 payload 라 읽어 봐야 뜻이 없고, 64 KiB 씩 헛도는 값만 치른다.
 pub fn submitBodySearch(self: *AppSession) void {
@@ -1092,7 +1092,8 @@ pub fn submitBodySearch(self: *AppSession) void {
         probes.appendAssumeCapacity(.{
             .data_offset = hit.data_offset,
             .cmd_offset = cmd_offset,
-            .body_offset = if (hit.result.found) hit.result.body_offset else 0,
+            .body_offset = if (hit.result.found) hit.result.body.offset else 0,
+            .body_is_array = hit.result.body.is_array,
             .file = hit.file_index,
         });
     }
@@ -1759,7 +1760,9 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
     // 언제나 명령 전문이 먼저 나온다」). 라벨의 대상은 대개 그 요약이므로 **대상 자리를 그대로 읽으면
     // 같은 요약을 두 번 보여 주고 명령은 영영 안 보인다**(적대적 검증에서 잡았다).
     const cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset;
-    op.detail.command = readDetailPart(self, file, cmd_offset, &op.detail.command_truncated);
+    // 명령은 언제나 **값 하나**다(배열이 아니다) — Codex 는 `input` 이 문자열이고, Claude 는
+    // 라벨이 고른 값 하나를 가리킨다.
+    op.detail.command = readDetailPart(self, file, cmd_offset, false, &op.detail.command_truncated);
     if (hit.result.found) {
         op.detail.has_result = true;
         // **본문이 없는 그림 결과는 「이미지」라고 적는다.** Claude 는 `content` 가 이미지 블록만
@@ -1771,14 +1774,24 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
             op.detail.result = self.allocator.dupe(u8, maru.i18n.t(.agent_activity_result_image)) catch &.{};
             op.detail.result_truncated = false;
         } else {
-            op.detail.result = readDetailPart(self, file, hit.result.body_offset, &op.detail.result_truncated);
+            op.detail.result = readDetailPart(
+                self,
+                file,
+                hit.result.body.offset,
+                hit.result.body.is_array,
+                &op.detail.result_truncated,
+            );
         }
     }
     self.metal_dirty = true;
 }
 
 /// 한 조각을 읽어 **여러 줄 그대로** 푼다. 못 읽으면 빈 조각이다 — 없는 내용을 지어내지 않는다.
-fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, truncated: *bool) []u8 {
+///
+/// `is_array` 면 값 하나가 아니라 **배열 안 `text` 들을 순서대로 잇는다**(Codex `output`). 그 규칙은
+/// 순수 모듈이 소유하고, 여기서는 어느 쪽인지만 고른다 — 「무엇이 배열인가」의 판정은 스캐너가 이미
+/// 했고(`ResultSummary.body_is_array`), 여기서 바이트를 보고 다시 짐작하면 규칙이 두 벌이 된다.
+fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, is_array: bool, truncated: *bool) []u8 {
     if (offset == 0) return &.{};
     const raw = self.allocator.alloc(u8, max_detail_bytes) catch return &.{};
     defer self.allocator.free(raw);
@@ -1791,7 +1804,10 @@ fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, truncated: 
     if (read == 0) return &.{};
     const out = self.allocator.alloc(u8, read) catch return &.{};
     defer self.allocator.free(out);
-    const block = context_mod.unescapeBlock(out, raw[0..read]);
+    const block = if (is_array)
+        context_mod.unescapeTextArray(out, raw[0..read])
+    else
+        context_mod.unescapeBlock(out, raw[0..read]);
     // **「다 봤나」는 `complete` 가 답한다**(적대적 2회차). `truncated` 만 보면 이 깃발은 영원히
     // 거짓이다 — `out` 을 읽어 온 만큼 잡아 주는데 푸는 일은 바이트를 늘리지 않기 때문이다.
     // 그래서 8 KiB 를 넘는 명령·결과가 **잘렸다는 말 없이** 잘려 있었다(계약 §2.4 위반).

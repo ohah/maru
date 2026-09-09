@@ -172,6 +172,24 @@ pub const Hit = struct {
 /// **첫 줄**과 크기」였는데, 첫 줄은 대부분 잡음이었다 — Codex 첫 줄의 상위는 `Script completed`
 /// (133,852) · `Chunk ID`(14,940) · 파일명이고, 「무엇이 어떻게 끝났나」를 말하는 것은 극히 일부다.
 /// 그래서 **크기(줄 수)** 를 언제나 쓰고, **실패**는 provider 가 적었을 때만 말한다(사용자 결정 2026-09-07).
+/// 결과 본문의 **자리와 모양**. `ResultSummary` 가 값으로 든다.
+pub const ResultBody = struct {
+    /// 본문의 첫 바이트(파일 절대). 펼침(AV3)과 본문 검색(§2.1.1)이 그 자리부터 읽는다.
+    ///
+    /// **바이트를 안 담는다** — 결과는 최대 2.8 MB 이고 세션당 12,200 개다. 자리만 들고 있다가
+    /// 읽을 때 그 구간만 보는 것이 계약 §2.4 의 규율이다(라벨·이미지와 같은 결).
+    ///
+    /// ⚠️ **`is_array` 가 이 값의 뜻을 바꾼다.** 참이면 여는 `[` **다음**이고, 거짓이면 값의 첫
+    /// 바이트다. 하나만 읽으면 안 된다.
+    offset: u64 = 0,
+    /// 본문이 **배열**인가(Codex `output`). 참이면 읽는 쪽이 원소들의 `text` 를 **순서대로 이어야**
+    /// 한다(`agent_image_context.unescapeTextArray`).
+    ///
+    /// **이 사실을 값으로 드는 이유**는 소비자가 바이트를 보고 짐작하지 않게 하려는 것이다 —
+    /// 창 첫 글자가 `{` 인지로 가르면 그 규칙이 스캐너와 갈리고, 갈리는 순간 본문이 통째로 빈다.
+    is_array: bool = false,
+};
+
 pub const ResultSummary = struct {
     /// 결과 레코드를 실제로 찾았나. 못 찾은 호출(취소·아직 안 끝난 것)은 false 이고, 그때 화면은 요약
     /// 자리를 **비운다** — 「모른다」를 「0 줄」로 적지 않는다.
@@ -205,11 +223,13 @@ pub const ResultSummary = struct {
     /// 그 그림이 **어느 파일**에 있나. 호출과 결과는 같은 파일 안에서만 이어지지만(스캐너가 파일마다
     /// 새로 선다) 값으로 들어 두면 소비자가 그 전제를 몰라도 된다.
     image_file: u8 = 0,
-    /// 결과 **본문의 첫 바이트**(파일 절대). 펼침(AV3)이 그 자리부터 다시 읽는다.
+    /// 결과 **본문을 어디서 어떻게 읽나**. 자리와 「배열인가」는 **떼면 안 되는 짝**이라 한 값으로 든다.
     ///
-    /// **바이트를 안 담는다** — 결과는 최대 2.8 MB 이고 세션당 12,200 개다. 자리만 들고 있다가
-    /// 펼칠 때 그 구간만 읽는 것이 계약 §2.4 의 규율이다(라벨·이미지와 같은 결).
-    body_offset: u64 = 0,
+    /// **왜 묶나**(적대적 9회차): 둘이 나란한 필드였을 때는 새 소비자가 `body_offset` 만 읽고
+    /// `body_is_array` 를 잊어도 **컴파일이 통과한다** — 그리고 Codex 결과에서 조용히 빈 본문을
+    /// 낸다. 묶어 두면 `body.` 를 치는 순간 둘이 함께 보이고, 이름이 바뀌었으므로 **기존 소비자
+    /// 전부가 한 번은 이 자리를 지나게** 된다.
+    body: ResultBody = .{},
 };
 
 /// 같은 메시지(= 같은 줄)에 붙은 여러 장 중 **몇 번째**인가(§2.2).
@@ -800,7 +820,7 @@ pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?Resu
                 .failed = errorFlagAfter(line, body.end),
                 .lines = body.lines,
                 .image = has_image,
-                .body_offset = line_offset + body.start,
+                .body = .{ .offset = line_offset + body.start },
             },
         };
     }
@@ -818,7 +838,7 @@ pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?Resu
             .failed = codexFailed(line, body.first),
             .lines = body.lines,
             .image = has_image,
-            .body_offset = line_offset + body.start,
+            .body = .{ .offset = line_offset + body.start, .is_array = body.is_array },
         } };
     }
     return null;
@@ -826,6 +846,9 @@ pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?Resu
 
 /// 결과 본문의 **줄 수**와 **첫 줄의 자리**.
 const Body = struct {
+    /// 값이 **배열**인가(Codex `output`). 소비자가 원소들의 `text` 를 이어 읽어야 한다는 뜻이고,
+    /// 그때 `start` 는 여는 `[` **다음**을 가리킨다.
+    is_array: bool = false,
     /// 값의 **첫 바이트**(줄 안 상대). 펼침이 파일에서 그 자리부터 읽는다.
     start: usize = 0,
     /// 본문을 **실제로 찾았나**. 못 찾았으면 줄 수를 모르는 것이고, 그때 화면은 요약을 안 그린다 —
@@ -894,6 +917,7 @@ fn claudeBody(line: []const u8, from: usize) Body {
 /// 그 한 패스가 초 단위다(실측). 배열 형태(135,085/184,202)에서는 원소를 이어 세야 해서 더 든다.
 fn codexBody(line: []const u8, from: usize) Body {
     const v = bodyValueStart(line, from, output_key_base) orelse return .{};
+    var is_array = false;
     const rest = switch (line[v]) {
         // 빈 문자열 `""` 은 **0 줄**이다(「없다」와 「한 줄」을 가른다).
         // 빈 값은 **0 줄이라는 사실**이다 — 「모른다」가 아니다.
@@ -903,6 +927,7 @@ fn codexBody(line: []const u8, from: usize) Body {
         },
         '[' => blk: {
             if (v + 1 < line.len and line[v + 1] == ']') return .{ .start = v + 1, .parsed = true, .end = v + 2 };
+            is_array = true;
             break :blk line[v + 1 ..];
         },
         else => return .{},
@@ -911,9 +936,23 @@ fn codexBody(line: []const u8, from: usize) Body {
         firstLineSpanIn(line, (v + 1) + t + text_key.len)
     else
         firstLineSpanIn(line, v + 1);
-    // 배열이면 첫 원소의 `"text":"` 값부터가 본문이다 — 펼침이 그 자리부터 읽는다.
-    const body_start = if (std.mem.indexOf(u8, rest, text_key)) |t| (v + 1) + t + text_key.len else v + 1;
-    return .{ .start = body_start, .parsed = true, .lines = countEscapedNewlines(rest) +| 1, .first = first };
+    // **배열이면 여는 `[` 다음부터가 본문이다** — 소비자가 원소들의 `text` 를 **순서대로 이어** 읽는다
+    // (`agent_image_context.unescapeTextArray`).
+    //
+    // ⚠️ 예전에는 **첫 원소의 값**을 가리켰다. 그런데 실측(2026-09-09)이 그것을 기각했다: 배열
+    // 151,914 건 중 **99.9%** 가 원소 둘 이상이고 첫 원소는 **99.0%** 가 `Script completed /
+    // Wall time / Output:` 머리말이라, 결과 텍스트의 **0.8%** 만 보고 있었다(펼침도 검색도).
+    //
+    // **끝을 여기서 찾지 않는다.** 값 안의 `]` 는 이스케이프되지 않으므로 배열의 끝을 알려면 JSON 을
+    // 실제로 따라가야 하는데, 그 한 패스가 3.2 GB rollout 에서 초 단위다. 소비자는 **창 하나**만
+    // 보므로 거기서 따라가는 것이 싸다 — 스캐너는 자리만 든다(계약 §4.2 의 규율 그대로).
+    return .{
+        .start = v + 1,
+        .parsed = true,
+        .lines = countEscapedNewlines(rest) +| 1,
+        .first = first,
+        .is_array = is_array,
+    };
 }
 
 /// 값 하나의 줄 수 = 이스케이프된 개행 + 1. 빈 값은 0 줄이다(「없다」와 「한 줄」을 가른다).
@@ -3134,8 +3173,46 @@ test "활동 결말: 본문의 자리를 든다 — 펼침이 그 바이트를 �
     const r = out.items[0].result;
     try testing.expect(r.found);
     // 그 자리에서 시작하는 바이트가 **본문의 첫 글자**여야 한다(파일 절대 오프셋이다).
-    try testing.expect(r.body_offset > 0);
-    try testing.expectEqualStrings("first", doc[r.body_offset..][0..5]);
+    try testing.expect(r.body.offset > 0);
+    try testing.expectEqualStrings("first", doc[r.body.offset..][0..5]);
+}
+
+test "활동 결말: Codex 결과가 배열이면 자리는 여는 [ 다음이고 그 사실을 든다 (적대적 2회차)" {
+    // **가운데 층이 비어 있었다.** 순수 모듈이 「배열을 어떻게 푸나」를 재고 제품 판정자가
+    // end-to-end 를 재는데, **스캐너가 어디를 가리키나**는 그 층에서 아무도 안 쟀다 — 위의
+    // 「Codex 본문 자리는 값의 첫 바이트다」가 **문자열 케이스만** 본다.
+    //
+    // 이 자리의 뜻은 이 슬라이스에서 **바뀌었다**(첫 원소의 값 → 여는 `[` 다음). 뜻이 바뀐 필드는
+    // 그 층에서 못박아야 다음 사람이 옛 뜻으로 되돌리지 못한다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_ARR","type":"custom_tool_call","name":"exec","input":"ls"}}
+        \\{"payload":{"call_id":"call_ARR","type":"custom_tool_call_output","output":[{"type":"input_text","text":"head\n"},{"type":"input_text","text":"body"}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const r = out.items[0].result;
+    try testing.expect(r.found);
+    // **사실을 값으로 든다** — 소비자가 바이트를 보고 짐작하면 규칙이 두 벌이 된다.
+    try testing.expect(r.body.is_array);
+    // 자리는 여는 `[` **다음** = 첫 원소의 `{` 다. 여기서 시작해야 소비자가 원소를 걸어갈 수 있다.
+    try testing.expectEqualStrings("{\"type\"", doc[r.body.offset..][0..7]);
+
+    // 문자열 결과는 **여전히 값의 첫 바이트**이고 배열이 아니라고 말한다(둘이 갈려 있어야 한다).
+    out.clearRetainingCapacity();
+    const doc_str =
+        \\{"payload":{"call_id":"call_STR","type":"custom_tool_call","name":"exec","input":"ls"}}
+        \\{"payload":{"call_id":"call_STR","type":"custom_tool_call_output","output":"plain"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc_str, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const rs = out.items[0].result;
+    try testing.expect(!rs.body.is_array);
+    try testing.expectEqualStrings("plain", doc_str[rs.body.offset..][0..5]);
 }
 
 test "활동 결말: Claude 본문 자리도 값의 첫 바이트다 (AV3)" {
@@ -3151,7 +3228,7 @@ test "활동 결말: Claude 본문 자리도 값의 첫 바이트다 (AV3)" {
     try testing.expectEqual(@as(usize, 1), out.items.len);
     const r = out.items[0].result;
     try testing.expect(r.found);
-    try testing.expectEqualStrings("alpha", doc[r.body_offset..][0..5]);
+    try testing.expectEqualStrings("alpha", doc[r.body.offset..][0..5]);
 }
 
 test "펼침 대상: 라벨은 요약이어도 펼침은 **명령**을 가리킨다 (AV3 적대적)" {

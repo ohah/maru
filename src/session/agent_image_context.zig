@@ -150,6 +150,23 @@ pub const Block = struct {
 /// 제어문자는 버린다(`\u001b` 같은 것). 터미널이 아니라 chrome 텍스트라 그대로 실으면 글자가 아니라
 /// 쓰레기가 된다 — 라벨이 같은 이유로 같은 선택을 한다.
 pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
+    const run = unescapeValue(out, raw);
+    return .{ .len = run.written, .truncated = run.truncated, .complete = run.closed };
+}
+
+/// 값 하나를 푸는 **한 걸음**. `unescapeBlock` 과 `unescapeTextArray` 가 이것을 공유한다 —
+/// 규칙이 두 벌이 되면 「배열이면 다르게 풀린다」가 되고, 그건 사용자가 못 볼 어긋남이다.
+const ValueRun = struct {
+    /// `out` 에 쓴 바이트.
+    written: usize = 0,
+    /// **입력에서 지나간 바이트** — 닫는 따옴표를 포함한다. 배열 걷기가 다음 자리를 여기서 얻는다.
+    consumed: usize = 0,
+    /// 닫는 따옴표를 봤나(= 이 값을 끝까지 봤나).
+    closed: bool = false,
+    truncated: bool = false,
+};
+
+fn unescapeValue(out: []u8, raw: []const u8) ValueRun {
     var w: usize = 0;
     var i: usize = 0;
     var complete = false;
@@ -158,6 +175,7 @@ pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
         var chunk: []const u8 = undefined;
         if (raw[i] == '"') {
             complete = true; // 이스케이프 안 된 따옴표 = 값의 끝 — **여기까지 왔으면 다 본 것이다**
+            i += 1;
             break;
         }
         if (raw[i] == '\\' and i + 1 < raw.len) {
@@ -191,11 +209,181 @@ pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
             if (chunk.len == 1 and chunk[0] < 0x20 and chunk[0] != '\n' and chunk[0] != '\t') continue;
         }
         // **글자 단위로만 쓴다.** 남는 자리가 이 글자보다 작으면 아예 안 쓰고 잘렸다고 말한다.
-        if (w + chunk.len > out.len) return .{ .len = w, .truncated = true, .complete = false };
+        if (w + chunk.len > out.len) return .{ .written = w, .consumed = i, .truncated = true };
         @memcpy(out[w..][0..chunk.len], chunk);
         w += chunk.len;
     }
-    return .{ .len = w, .truncated = false, .complete = complete };
+    return .{ .written = w, .consumed = i, .closed = complete };
+}
+
+/// JSON **배열** 안의 `"text"` 값들을 **순서대로 이어** 푼다(활동 뷰 계약 §2.4).
+///
+/// **왜 필요한가 — 실측이 요구했다.** Codex 의 `custom_tool_call_output` 은 `output` 이 배열이고
+/// (2026-09-09 실측 151,914 건 중 **99.9%** 가 원소 둘 이상), 첫 원소는 **99.0%** 가
+/// `Script completed / Wall time / Output:` 머리말이다. 첫 원소만 읽으면 결과 텍스트의
+/// **0.8%** 만 보게 되고, 실제 명령 출력이 든 둘째 원소부터가 통째로 사라진다.
+///
+/// **이음매는 「앞이 개행으로 안 끝났을 때만」 가른다.** 실측(2026-09-09, 이음매 181,927)이 셋으로
+/// 갈랐다 — ⑴ **93.73%** 는 앞이 개행으로 끝나므로 **넣으면 빈 줄이 생긴다** ⑵ **0.61%** 는 한쪽이
+/// 빈 원소라 붙을 것이 없다 ⑶ **5.66%** 는 앞이 Codex 의 chunk 꼬리표(`{"chunk_id":…,"exit_code":0}`)
+/// 로 개행 없이 끝나고 뒤에 새 내용이 오므로, **안 넣으면 메타와 내용이 한 줄로 붙는다**.
+///
+/// ⚠️ 처음에는 「첫 원소가 개행으로 끝나는 비율 100%」만 보고 **아무것도 안 넣기로** 했다. 그 100%
+/// 는 **첫 이음매**의 값이고, 모든 이음매로는 93.73% 다 — 첫 표본으로 전체를 일반화한 과장이었다
+/// (적대적 3회차). 지금 규칙은 **provider 가 나눈 경계를 화면에서 뭉개지 않는다**는 것이고, 그것은
+/// 원소 경계라는 **구조적 사실**의 보존이지 내용의 해석이 아니다(§2.3 과 부딪히지 않는다).
+///
+/// **머리말을 알아보고 건너뛰지 않는다.** `Script completed` 를 문자열로 판정하는 것은 계약 §2.3
+/// (「provider 가 적은 것만 쓴다」)에 어긋난다 — 전부 잇고, 무엇이 잡음인지는 사람이 본다.
+///
+/// `raw` 는 **여는 `[` 다음**부터다. 문자열 **밖**에서 `]` 를 만나면 끝이다 — 값 안의 `]` 는
+/// 이스케이프되지 않으므로(JSON) 문자열 안팎을 실제로 따라가야 한다. 그것이 이 함수가 있는 이유고,
+/// 스캐너가 이 일을 안 하는 이유이기도 하다(3.2 GB 를 한 패스 더 지나는 값이 없다 — 소비자는 창
+/// 하나만 본다).
+pub fn unescapeTextArray(out: []u8, raw: []const u8) Block {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) {
+        switch (raw[i]) {
+            // 문자열 **밖**의 `]` = 배열의 끝 = 다 봤다.
+            ']' => return .{ .len = w, .complete = true },
+            '"' => {},
+            else => {
+                i += 1;
+                continue;
+            },
+        }
+        // 문자열 하나를 지난다. 그것이 `text` 키였고 뒤에 `:` 와 값이 오면 **그 값을 잇는다**.
+        const key = scanString(raw, i) orelse return .{ .len = w };
+        i = key.end;
+        if (!std.mem.eql(u8, raw[key.start..key.stop], "text")) continue;
+        var j = i;
+        while (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
+        if (j >= raw.len or raw[j] != ':') continue;
+        j += 1;
+        while (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
+        if (j >= raw.len or raw[j] != '"') continue;
+        // **이음매를 가른다**(위 ⚠️). 앞에 쓴 것이 있고 그것이 개행으로 안 끝났으면 개행 하나.
+        // 빈 원소는 아무것도 안 썼으므로 `w` 가 안 변해, 그 앞의 **실제 마지막 글자**를 본다.
+        //
+        // ⚠️ **아무것도 안 쓴 원소 앞에서는 되돌린다**(적대적 6회차). 구분자를 먼저 쓰고 값을 푸는
+        // 순서라, 그 값이 **빈 문자열**이면 없던 개행만 남는다 — 그것이 배열의 마지막이면 결과
+        // 끝에 **빈 줄**이 붙는다(실측 258 건 · 0.17%). 「그때 받은 것 그대로」(§2.4)가 아니다.
+        const sep_at = w;
+        var wrote_sep = false;
+        if (w > 0 and out[w - 1] != '\n') {
+            if (w + 1 > out.len) return .{ .len = w, .truncated = true };
+            out[w] = '\n';
+            w += 1;
+            wrote_sep = true;
+        }
+        const run = unescapeValue(out[w..], raw[j + 1 ..]);
+        if (wrote_sep and run.written == 0) w = sep_at else w += run.written;
+        if (run.truncated) return .{ .len = w, .truncated = true };
+        if (!run.closed) return .{ .len = w }; // 창이 값 도중에 끝났다 — 다 못 봤다
+        i = j + 1 + run.consumed;
+    }
+    return .{ .len = w }; // `]` 를 못 보고 창이 끝났다
+}
+
+/// `raw[at]` 의 여는 따옴표부터 문자열 하나를 지난다. `start`/`stop` 은 **내용**(따옴표 제외),
+/// `end` 는 닫는 따옴표 **다음**이다. 닫히지 않으면 `null`.
+const StringSpan = struct { start: usize, stop: usize, end: usize };
+
+fn scanString(raw: []const u8, at: usize) ?StringSpan {
+    var i = at + 1;
+    while (i < raw.len) {
+        if (raw[i] == '\\') {
+            i += 2;
+            continue;
+        }
+        if (raw[i] == '"') return .{ .start = at + 1, .stop = i, .end = i + 1 };
+        i += 1;
+    }
+    return null;
+}
+
+test "펼침 본문: 배열이면 원소들의 text 를 순서대로 잇는다 (Codex 결과)" {
+    // **실측이 이 함수를 요구했다**(2026-09-09): Codex `custom_tool_call_output` 의 `output` 은
+    // 배열이고 151,914 건 중 **99.9%** 가 원소 둘 이상인데, 첫 원소는 **99.0%** 가
+    // `Script completed / Wall time / Output:` 머리말이다. 첫 원소만 읽으면 결과 텍스트의
+    // **0.8%** 만 보게 된다.
+    var out: [256]u8 = undefined;
+
+    // ⑴ 실측 모양 그대로 — 머리말 + 실제 출력. 앞이 **개행으로 끝나므로 아무것도 안 넣는다**
+    //    (이음매의 93.73% 가 이 모양이고, 여기서 넣으면 **빈 줄**이 생긴다).
+    const two =
+        "{\"type\":\"input_text\",\"text\":\"Script completed\\nOutput:\\n\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"src/a.zig:12\\nsrc/b.zig:34\"}]";
+    const r2 = unescapeTextArray(&out, two);
+    try testing.expect(r2.complete);
+    try testing.expect(!r2.truncated);
+    try testing.expectEqualStrings(
+        "Script completed\nOutput:\nsrc/a.zig:12\nsrc/b.zig:34",
+        out[0..r2.len],
+    );
+
+    // ⑵ **`text` 가 아닌 원소는 건너뛴다**(이미지 등 — 실측 304 건). 그리고 `type` 값이 문자열이라
+    //    키 판정이 값에 걸리면 안 된다.
+    const mixed =
+        "{\"type\":\"input_image\",\"image_url\":\"data:...\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"only this\"}]";
+    const rm = unescapeTextArray(&out, mixed);
+    try testing.expect(rm.complete);
+    try testing.expectEqualStrings("only this", out[0..rm.len]);
+
+    // ⑵-b **앞이 개행으로 안 끝나면 개행 하나로 가른다**(적대적 3회차). 실측 이음매의 **5.66%**
+    //    가 이 모양이다 — 앞이 Codex 의 chunk 꼬리표(`{"chunk_id":…,"exit_code":0}`)로 끝나고 뒤에
+    //    새 내용이 온다. 안 가르면 **메타와 내용이 한 줄로 붙는다**.
+    //
+    //    ⚠️ 처음에는 「첫 원소가 개행으로 끝나는 비율 100%」만 보고 아무것도 안 넣기로 했다. 그
+    //    100% 는 **첫 이음매**의 값이고 모든 이음매로는 93.73% 다.
+    const glued =
+        "{\"type\":\"input_text\",\"text\":\"{\\\"chunk_id\\\":\\\"eb14a3\\\"}\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"real output\"}]";
+    const rg = unescapeTextArray(&out, glued);
+    try testing.expect(rg.complete);
+    try testing.expectEqualStrings("{\"chunk_id\":\"eb14a3\"}\nreal output", out[0..rg.len]);
+
+    // ⑵-c **빈 원소는 이음매를 만들지 않는다** — 아무것도 안 쓴 원소 뒤에서는 그 앞의 실제
+    //    마지막 글자를 본다(실측 0.61%).
+    const empty_mid =
+        "{\"type\":\"input_text\",\"text\":\"head\\n\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"tail\"}]";
+    const re = unescapeTextArray(&out, empty_mid);
+    try testing.expect(re.complete);
+    try testing.expectEqualStrings("head\ntail", out[0..re.len]);
+
+    // ⑵-d **마지막 원소가 비면 없던 개행이 안 붙는다**(적대적 6회차). 구분자를 먼저 쓰고 값을
+    //    푸는 순서라, 되돌리지 않으면 결과 **끝에 빈 줄**이 생긴다(실측 258 건 · 0.17%).
+    const trailing_empty =
+        "{\"type\":\"input_text\",\"text\":\"no newline\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"\"}]";
+    const rte = unescapeTextArray(&out, trailing_empty);
+    try testing.expect(rte.complete);
+    try testing.expectEqualStrings("no newline", out[0..rte.len]);
+
+    // ⑶ **값 안의 `]` 는 배열의 끝이 아니다.** JSON 은 `]` 를 이스케이프하지 않으므로 문자열
+    //    안팎을 실제로 따라가야 한다 — 이 갈래가 「그냥 `]` 를 찾으면 된다」를 기각한다.
+    const bracket = "{\"type\":\"input_text\",\"text\":\"arr[0] ]] done\"},{\"type\":\"input_text\",\"text\":\"tail\"}]";
+    const rb = unescapeTextArray(&out, bracket);
+    try testing.expect(rb.complete);
+    try testing.expectEqualStrings("arr[0] ]] done\ntail", out[0..rb.len]);
+
+    // ⑷ **창이 배열 도중에 끝나면 「다 못 봤다」**다(`complete` 거짓) — 소비자가 그때
+    //    「이하 생략」·「다 훑지 못했습니다」를 낸다.
+    const cut = "{\"type\":\"input_text\",\"text\":\"head\\n\"},{\"type\":\"input_text\",\"text\":\"tail no close";
+    // (앞이 개행으로 끝나므로 이음매에 넣는 것이 없다.)
+    const rc = unescapeTextArray(&out, cut);
+    try testing.expect(!rc.complete);
+    try testing.expectEqualStrings("head\ntail no close", out[0..rc.len]);
+
+    // ⑸ 받는 버퍼가 모자라도 「못 봤다」다.
+    var tiny: [6]u8 = undefined;
+    const rt = unescapeTextArray(&tiny, two);
+    try testing.expect(!rt.complete);
+    try testing.expect(rt.truncated);
 }
 
 test "unescapeBlock: 값의 끝을 봤는지 말한다 — 「다 봤나」의 단일 출처" {

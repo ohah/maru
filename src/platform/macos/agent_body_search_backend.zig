@@ -4,7 +4,7 @@
 //! (라벨 3.1 MB · 명령 전문 58.4 MB · 결과 전문 45.3 MB). 나머지를 보려면 가장 큰 세션에서 **17.7 MB**
 //! 를 읽어 풀어야 하고, 그것은 프레임 예산 16.7 ms 안에 절대 안 들어간다.
 //!
-//! **파일 전체를 안 훑는다.** 인덱스가 이미 자리를 안다(`Hit.cmd_rel` · `ResultSummary.body_offset`) —
+//! **파일 전체를 안 훑는다.** 인덱스가 이미 자리를 안다(`Hit.cmd_rel` · `ResultSummary.body.offset`) —
 //! 그 조각만 읽으면 **파일의 12.0%** 다(실측 821 MB 중 99 MB). 그래서 `Enter` 한 번의 대가가 초가
 //! 아니라 수백 ms 다.
 //!
@@ -41,6 +41,9 @@ pub const Probe = struct {
     cmd_offset: u64 = 0,
     /// 결과 본문의 시작(파일 절대). 0 이면 읽지 않는다.
     body_offset: u64 = 0,
+    /// 그 본문이 **배열**인가(Codex `output`) — 참이면 원소들의 `text` 를 이어 읽는다.
+    /// 스캐너가 이미 판정한 사실을 그대로 나른다(`ResultSummary.body.is_array`).
+    body_is_array: bool = false,
     file: u8 = 0,
 };
 
@@ -256,6 +259,8 @@ fn probeMatches(
     raw: []u8,
     out: []u8,
     read_bytes: *u64,
+    /// 값 하나가 아니라 **배열 안 `text` 들을 이어** 읽어야 하나(Codex `output`).
+    is_array: bool,
     /// 상한(`max_probe_bytes`)에 걸려 **끝까지 못 본** 조각이 있었나. 실측상 0 건이지만(최대
     /// 46.8 KB < 64 KiB) 그 사실을 안 들면 화면이 「없다」와 「못 봤다」를 섞는다 — 이 뷰의 계약
     /// §2 가 금하는 바로 그 혼동이고, 여기가 그것을 아는 유일한 자리다(적대적 2회차).
@@ -270,7 +275,10 @@ fn probeMatches(
     }
     if (got == 0) return false;
     read_bytes.* +|= got;
-    const block = context.unescapeBlock(out, raw[0..got]);
+    const block = if (is_array)
+        context.unescapeTextArray(out, raw[0..got])
+    else
+        context.unescapeBlock(out, raw[0..got]);
     // 값의 끝을 못 봤다 = 이 조각은 **끝까지 안 봤다**. 뒤에 검색어가 있었을 수 있다.
     if (!block.complete) truncated.* = true;
     if (block.len == 0) return false;
@@ -333,8 +341,9 @@ fn worker(job: *Job) void {
         }
         const file = open_file orelse continue;
 
-        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, &result.partial);
-        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, &result.partial);
+        // 명령은 언제나 **값 하나**다 — 배열은 결과 쪽에만 온다.
+        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, false, &result.partial);
+        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, probe.body_is_array, &result.partial);
         if (!in_command and !in_result) continue;
         result.matches.append(state.allocator, .{
             .data_offset = probe.data_offset,

@@ -79312,6 +79312,110 @@ test "본문 검색 워커: 조각이 상한에 걸리면 「없다」가 아니
     }
 }
 
+test "활동 뷰: Codex 결과 배열은 원소를 이어 보여 주고, 거기서 검색이 걸린다 (§2.4·§2.1.1)" {
+    // **실측이 이 슬라이스를 요구했다**(2026-09-09): Codex `custom_tool_call_output` 의 `output` 은
+    // 배열이고 151,914 건 중 **99.9%** 가 원소 둘 이상인데, 첫 원소는 **99.0%** 가
+    // `Script completed / Wall time / Output:` 머리말이다. 스캐너가 **첫 원소**를 가리키고 있어서
+    // 결과 텍스트의 **99.2%(801.7 MB)** 를 **펼침도 검색도** 못 봤다 — 「그 명령이 뭘 뱉었나」가
+    // 이 뷰의 물음인데도 그랬다.
+    //
+    // 재는 것 넷: ⓐ 펼치면 **둘째 원소가 보인다** ⓑ 원소 사이에 **아무것도 안 넣는다**(첫 원소가
+    // 개행으로 끝나는 비율이 실측 100%) ⓒ 그 자리에서 **검색이 걸린다** ⓓ 머리말에만 있는 말도
+    // 여전히 걸린다(잘라 내지 않았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 구조는 실측 그대로 — 머리말 원소 + 실제 출력 원소. 값 안에 `]` 를 넣어 「그냥 `]` 를 찾으면
+    // 된다」가 아님을 제품 경로에서도 못박는다.
+    const transcript =
+        "{\"payload\":{\"call_id\":\"call_CX\",\"type\":\"custom_tool_call\",\"name\":\"exec\"," ++
+        "\"input\":\"rg -n needle src/\"}}\n" ++
+        "{\"payload\":{\"call_id\":\"call_CX\",\"type\":\"custom_tool_call_output\",\"output\":[" ++
+        "{\"type\":\"input_text\",\"text\":\"Script completed\\nWall time 0.3 seconds\\nOutput:\\n\"}," ++
+        "{\"type\":\"input_text\",\"text\":\"src/a.zig:12: arr[0] needle-hit\\nsrc/b.zig:34: tail\"}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+    defer quietActivityWorkers(session);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    // 스캐너가 **배열이라는 사실**을 들고 있어야 소비자가 이어 읽는다.
+    try std.testing.expect(session.agent_activity.hits.items[0].result.body.is_array);
+
+    // ── ⓐⓑ 펼치면 **머리말 + 실제 출력**이 이어져 나온다. 원소 사이에 넣은 것이 없다.
+    agent_activity_ops.openAt(session, 0);
+    const detail = (session.agent_activity.open orelse return error.TestUnexpectedResult).detail;
+    try std.testing.expectEqualStrings(
+        "Script completed\nWall time 0.3 seconds\nOutput:\nsrc/a.zig:12: arr[0] needle-hit\nsrc/b.zig:34: tail",
+        detail.result,
+    );
+    try std.testing.expect(!detail.result_truncated);
+    session.agent_activity.dropOpen(session.allocator);
+
+    // ── ⓒ **둘째 원소에서 검색이 걸린다.** 라벨(`rg -n needle src/` 의 첫 줄)에도 명령에도 없는
+    //    말을 고른다 — 그래야 「본문에서 걸렸다」가 참임이 드러난다.
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("tail") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count()); // 라벨 층엔 없다
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.body.answered) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_body_matches);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.body.matches.items.len);
+    try std.testing.expect(session.agent_activity.body.matches.items[0].in_result);
+
+    // ── ⓓ **머리말에만 있는 말도 여전히 걸린다** — 잘라 낸 것이 아니라 이어 붙인 것이다.
+    //    (`Script completed` 를 알아보고 건너뛰는 것은 계약 §2.3 에 어긋난다.)
+    session.agent_activity.search_active = true;
+    session.agent_activity.search.clear();
+    agent_activity_ops.cancelBodySearch(session);
+    try session.agent_activity.search.query.appendSlice(allocator, "Wall time");
+    agent_activity_ops.rebuildFilter(session);
+    agent_activity_ops.submitBodySearch(session);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.body.answered) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+}
+
 test "활동 뷰: 뒤집어도 접기가 주인을 잃지 않는다 (§2.2.1 적대적)" {
     // 화면은 최신을 앞에 놓으려 배열을 **뒤집는다**. `fold_owner` 는 그 배열의 자리이므로 같이
     // 옮겨야 한다 — 안 옮기면 엉뚱한 호출로 접히거나 「전체」에서 사라진다. 퇴출 쪽과 **같은 규율**

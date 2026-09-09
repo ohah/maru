@@ -9,6 +9,15 @@ const record =
 const metadata_response =
     "{\"total_count\":1,\"artifacts\":[{\"id\":987,\"name\":\"session-host-release-live-timing-2\",\"size_in_bytes\":321,\"url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987\",\"archive_download_url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987/zip\",\"expired\":false,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"workflow_run\":{\"id\":333,\"repository_id\":1257870483,\"head_repository_id\":1257870483,\"head_sha\":\"0123456789abcdef0123456789abcdef01234567\"}}]}";
 
+pub fn makeProvenance(allocator: std.mem.Allocator, result: *artifact.Provenance) !void {
+    const archive_bytes = try makeStoredArchive(allocator, record, false);
+    defer allocator.free(archive_bytes);
+    var selected: artifact.Metadata = .{};
+    try selectForArchiveWithAllocator(allocator, archive_bytes, &selected);
+    defer selected.deinit() catch unreachable;
+    try artifact.bindArchive(allocator, &selected, archive_bytes, result);
+}
+
 test "one current-attempt timing artifact owns canonical remote identity" {
     var selected: artifact.Metadata = .{};
     try artifact.selectMetadata(std.testing.allocator, metadata_response, .{
@@ -260,13 +269,17 @@ fn expectArchiveRejected(bytes: []const u8) !void {
 }
 
 fn selectForArchive(archive_bytes: []const u8, selected: *artifact.Metadata) !void {
+    return selectForArchiveWithAllocator(std.testing.allocator, archive_bytes, selected);
+}
+
+fn selectForArchiveWithAllocator(allocator: std.mem.Allocator, archive_bytes: []const u8, selected: *artifact.Metadata) !void {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(archive_bytes, &digest, .{});
     var hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&hex, "{x}", .{digest});
-    const response = try std.fmt.allocPrint(std.testing.allocator, "{{\"total_count\":1,\"artifacts\":[{{\"id\":987,\"name\":\"session-host-release-live-timing-2\",\"size_in_bytes\":{d},\"url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987\",\"archive_download_url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987/zip\",\"expired\":false,\"digest\":\"sha256:{s}\",\"workflow_run\":{{\"id\":333,\"repository_id\":1257870483,\"head_repository_id\":1257870483,\"head_sha\":\"{s}\"}}}}]}}", .{ archive_bytes.len, &hex, source });
-    defer std.testing.allocator.free(response);
-    try artifact.selectMetadata(std.testing.allocator, response, .{ .repository_id = 1257870483, .run_id = 333, .run_attempt = 2, .source_sha = source }, selected);
+    const response = try std.fmt.allocPrint(allocator, "{{\"total_count\":1,\"artifacts\":[{{\"id\":987,\"name\":\"session-host-release-live-timing-2\",\"size_in_bytes\":{d},\"url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987\",\"archive_download_url\":\"https://api.github.com/repos/ohah/maru/actions/artifacts/987/zip\",\"expired\":false,\"digest\":\"sha256:{s}\",\"workflow_run\":{{\"id\":333,\"repository_id\":1257870483,\"head_repository_id\":1257870483,\"head_sha\":\"{s}\"}}}}]}}", .{ archive_bytes.len, &hex, source });
+    defer allocator.free(response);
+    try artifact.selectMetadata(allocator, response, .{ .repository_id = 1257870483, .run_id = 333, .run_attempt = 2, .source_sha = source }, selected);
 }
 
 fn makeStoredArchive(allocator: std.mem.Allocator, content: []const u8, descriptor: bool) ![]u8 {

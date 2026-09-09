@@ -20,6 +20,10 @@ test "baseline held release publishes only after four attestations semantics and
     defer result.deinit(std.testing.allocator) catch {};
     try std.testing.expectEqual(evidence.Profile.baseline_a, result.value().?.profile);
     try std.testing.expectEqual(@as(u64, 88), result.value().?.release_id);
+    try std.testing.expectEqual(@as(u64, 1257870483), result.value().?.repository_id);
+    try std.testing.expectEqual(@as(u64, 333), result.value().?.run_id);
+    try std.testing.expectEqual(@as(u64, 2), result.value().?.run_attempt);
+    try std.testing.expectEqualStrings(asset_tests.context().source_commit, result.value().?.source_commit);
     try std.testing.expectEqual(@as(usize, 4), fixture.attestor.calls);
     try std.testing.expectEqual(@as(usize, 1), fixture.fence_verifier.calls);
     try std.testing.expect(fixture.assets.fence.value() != null);
@@ -186,7 +190,7 @@ fn allocationPath(allocator: std.mem.Allocator) !void {
     try result.deinit(allocator);
 }
 
-const Fixture = struct {
+pub const Fixture = struct {
     semantic: semantic_tests.Fixture,
     assets: asset_tests.Fixture,
     authority: Authority = .{},
@@ -197,7 +201,7 @@ const Fixture = struct {
     metadata_response: [64 * 1024]u8 = undefined,
     attestation_output: [64 * 1024]u8 = undefined,
 
-    fn init(self: *@This(), profile: evidence.Profile) !void {
+    pub fn init(self: *@This(), profile: evidence.Profile) !void {
         self.semantic = try semantic_tests.Fixture.init(profile);
         errdefer self.semantic.deinit();
         if (profile == .baseline_a)
@@ -214,11 +218,11 @@ const Fixture = struct {
         try self.assets.run();
     }
 
-    fn compose(self: *@This(), allocator: std.mem.Allocator, result: *observation.Observation) !void {
+    pub fn compose(self: *@This(), allocator: std.mem.Allocator, result: *observation.Observation) !void {
         try observation.composeUntilWith(&self.authority, &self.attestor, &self.executor, &self.binder, &self.fence_verifier, allocator, asset_tests.context(), &self.assets.fence, &self.assets.result, "/fake-gh", &self.assets.pinned, "token", &self.metadata_response, &self.attestation_output, &self.assets.deadline, result);
     }
 
-    fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         self.assets.deinit();
         self.semantic.deinit();
     }

@@ -9666,3 +9666,65 @@ test "kitty keyboard: alt 화면을 떠나면 그 화면의 flags 도 함께 돌
     try std.testing.expect(core.kitty_flags.current().disambiguate);
     try std.testing.expect(!core.kitty_flags.current().report_all);
 }
+
+test "OSC 99: 조립 중 할당이 실패해도 이전 알림과 generation 을 안 건드린다 (적대적 검증)" {
+    inline for (0..4) |fail_index| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+        defer core.deinit();
+        osc.dispatchNotify777(&core, "notify;old-title;old-body");
+        const before = core.pendingNotification().?;
+        const generation_before = before.generation;
+
+        // 조립 중(`d=0`)에 할당이 실패하면 조립을 버린다. 그때 **이전에 떠 있던 알림**은 그대로여야
+        // 한다 — 실패한 새 알림이 옛 알림을 반쯤 덮어쓰면, 사용자는 두 알림이 섞인 것을 본다.
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        core.allocator = failing.allocator();
+        osc.dispatchNotify99(&core, "i=new-and-long-identifier:d=0;replacement-title-that-allocates");
+        osc.dispatchNotify99(&core, "i=new-and-long-identifier:p=body;replacement-body-that-allocates");
+        core.allocator = std.testing.allocator;
+
+        const after = core.pendingNotification().?;
+        // 실패했으면 옛 알림 그대로, 성공했으면 새 알림 — 둘 중 하나여야 하고 **섞이면 안 된다**.
+        if (after.generation == generation_before) {
+            try std.testing.expectEqualStrings("old-title", after.title);
+            try std.testing.expectEqualStrings("old-body", after.body);
+        } else {
+            try std.testing.expectEqualStrings("replacement-title-that-allocates", after.title);
+            try std.testing.expectEqualStrings("replacement-body-that-allocates", after.body);
+        }
+        // 어느 쪽이든 조립 버퍼는 깨끗해야 한다 — 남으면 다음 알림에 옛 조각이 붙는다.
+        if (!core.osc99_active) try std.testing.expectEqual(@as(usize, 0), core.osc99_title.items.len);
+    }
+}
+
+test "kitty graphics: 실제 앱(terminal-browser)이 내보내는 바이트를 그대로 재생한다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 아래 시퀀스는 **지어낸 것이 아니라** `references/terminal-browser` 에서 그대로 뽑은 것이다.
+    // 합성 입력만으로 짠 판정자는 «내가 생각한 문장» 만 덮는다 — 실제 앱이 내보내는 형태를 한 벌
+    // 따로 고정해 둔다.
+
+    // (1) 감지 프로브. 이 응답이 없으면 앱은 maru 를 «이미지 못 그리는 터미널» 로 판정한다.
+    try core.write("\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=4207;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // (2) **APC 안의 이중 ESC**. 픽스처에 그대로 있는 형태다(`ESC ESC \`). 첫 ESC 가 새 escape 를
+    // 시작하고 뒤의 `\` 가 ST 로 닫는다 — payload 가 화면에 새거나 커서를 움직이면 안 되고,
+    // `q=2` 를 준 명령이니 응답도 없어야 한다.
+    try core.write("\x1b_Ga=d,d=I,i=5,q=2\x1b\x1b\\\x1b\\");
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
+    try std.testing.expect(types.isUnwritten(core.screen.cells[0]));
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+
+    // (3) 그 뒤 평범한 텍스트가 정상으로 들어간다(ground 복귀) — 여기가 깨지면 화면이 통째로 죽는다.
+    try core.write("ok");
+    try std.testing.expectEqual(@as(u21, 'o'), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'k'), core.screen.cells[1].codepoint);
+    try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
+}

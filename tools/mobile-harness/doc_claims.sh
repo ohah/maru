@@ -474,10 +474,35 @@ ck "생성기 바탕도 그 값이다" 1 "$(grep -c 'GROUND = (0x1E, 0x1E, 0x2E)
 # **번들이 실제로 든다.** 자산만 있고 안 실으면 아무 데도 안 보인다.
 ck "macOS 번들이 싣는다" 1 "$(grep -c 'assets/icon/Maru.icns zig-out/Maru.app' build.zig)"
 ck "macOS plist 가 가리킨다" 1 "$(grep -c 'CFBundleIconFile' src/platform/macos/MaruAppHost-Info.plist.in)"
-ck "iOS plist 가 가리킨다" 1 "$(grep -c 'CFBundleIconFiles' src/platform/ios/Info.plist.in)"
-ck "iOS 번들이 싣는다" 1 "$(grep -c 'assets/icon/ios' $H_RUN)"
+ck "iOS plist 가 가리킨다" 1 "$(sed '/<!--/,/-->/d' src/platform/ios/Info.plist.in | grep -c 'CFBundleIconFiles')"
+ck "iOS 번들이 싣는다" 1 "$(grep -c 'assets/icon/ios/' $H_RUN)"
 ck "Android 매니페스트가 가리킨다" 1 "$(grep -c 'android:icon=' $N)"
 ck "Android 가 res 를 컴파일해 링크한다" 1 "$(grep -c 'aapt2\" compile --dir' $H_RUN)"
+
+echo "§런치 스크린 — 켤 때 번쩍이지 않는다 (M11d)"
+T=src/platform/android/res/values/themes.xml
+P=src/platform/ios/Info.plist.in
+# **테마가 있고 매니페스트가 그것을 가리킨다.** 테마만 두고 안 가리키면 시스템 기본이 그대로
+# 뜬다 — 파일이 있다는 것과 그것이 쓰인다는 것은 다른 말이다(이 저장소에서 이미 한 번 겪었다).
+ck "런치 테마가 있다" 1 "$(grep -c 'name=\"Theme.Maru\"' $T)"
+ck "매니페스트가 그 테마를 쓴다" 1 "$(grep -c 'android:theme=\"@style/Theme.Maru\"' $N)"
+# **색을 두 번 적지 않는다.** 아이콘 배경과 «같은 자원»을 가리켜야 둘이 갈릴 수가 없다.
+ck "테마가 아이콘 배경 자원을 쓴다" 2 "$(sed 's,<!--.*,,' $T | grep -c '@color/ic_launcher_background')"
+ck "새 색 상수를 안 만든다" 0 "$(sed 's,<!--.*,,' $T | grep -c '#[0-9A-Fa-f]\{6\}')"
+# **API 31+ 의 스플래시도 못 박는다** — 이게 없으면 바탕만 어둡고 아이콘은 시스템이 고른다.
+ck "스플래시 바탕을 준다" 1 "$(grep -c 'windowSplashScreenBackground' $T)"
+ck "스플래시 아이콘을 준다" 1 "$(grep -c 'windowSplashScreenAnimatedIcon' $T)"
+# **iOS 의 빈 `<dict/>` 는 「기본을 따라간다」는 뜻이다** — 그 상태가 흰 화면을 냈다.
+ck "iOS 런치가 비어 있지 않다" 0 "$(grep -c 'UILaunchScreen</key><dict/>' $P)"
+ck "iOS 가 바탕색을 이름으로 든다" 1 "$(grep -c 'LaunchGround' $P)"
+ck "iOS 가 표식을 이름으로 든다" 1 "$(grep -c 'LaunchIcon' $P)"
+# **그 이름은 카탈로그에만 있다** — 생성기가 뽑고 하네스가 굽는다. 한 고리라도 빠지면 이름이
+# 안 풀려 **조용히 아무것도 안 뜬다**(오류가 아니라 빈 화면이다).
+ck "생성기가 카탈로그를 뽑는다" 1 "$(grep -c 'ios-launch.xcassets' $G)"
+ck "카탈로그 색이 GROUND 에서 온다" 1 "$(grep -c 'r, g, b = GROUND' $G)"
+ck "하네스가 카탈로그를 굽는다" 1 "$(grep -c 'xcrun actool' $H_RUN)"
+ck "구운 것이 있는지 본다" 1 "$(grep -c 'Assets.car' $H_RUN)"
+ck "뽑아 둔 카탈로그가 있다" 3 "$(ls assets/icon/ios-launch.xcassets/LaunchIcon.imageset/*.png 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

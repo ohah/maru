@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- **런치 스크린**(M11d). 아이콘을 누른 순간부터 앱이 첫 프레임을 그릴 때까지 **OS 가 대신
+     띄우는 화면**이다. 앱 코드는 아직 안 돌아서 여기 로직을 둘 수 없고, 정지 그림 한 장이다.
+
+     테마를 안 주면 시스템 기본을 따라간다 — 라이트 모드에서 **거의 흰 바탕**이 뜬다(실측:
+     가운데 평균 RGB 226,224,226 이 약 350ms). 게다가 API 31+ 는 그 바탕 위에 런처 아이콘을
+     얹어 주는데, 우리 아이콘은 **어두운 바탕에 앰버**라 흰 바탕에서 허옇게 날아간다.
+
+     그래서 색을 못 박는다. 여기 새 색을 만들지 않는다 — 적응형 아이콘 배경과 **같은 자원**을
+     가리켜서, 아이콘과 런치 스크린이 갈릴 수 없게 한다. -->
+<resources>
+    <style name="Theme.Maru" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+        <!-- **API 31+ 의 스플래시.** 아래 두 값은 그 이전 판에서는 «모르는 속성»이라 조용히
+             무시된다 — 그래서 자격자(`values-v31`)로 가르지 않고 한자리에 둔다. minSdk 는 29 다. -->
+        <item name="android:windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+    </style>
+</resources>

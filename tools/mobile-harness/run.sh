@@ -245,6 +245,15 @@ chrome-ios)
     # **개인정보 선언도 번들에 든다**(M11a). 여기서 «만들지» 않고 제품 자리 것을 가져다 넣는다 —
     # 하네스가 자기 사본을 두면 번들과 제품이 갈리고, 그 차이는 심사에서야 드러난다.
     cp "$IOS/PrivacyInfo.xcprivacy" "$APP/PrivacyInfo.xcprivacy"
+    # **런치 스크린 자원**(M11d). `UILaunchScreen` 은 색·그림을 **이름으로만** 받고 그 이름은
+    # 에셋 카탈로그에만 있다 — 그래서 굽는다. `actool` 은 Xcode 에 있고 이 갈래는 이미
+    # `xcrun clang -sdk iphonesimulator` 를 쓰므로 새 의존이 아니다. 카탈로그 자체는
+    # `assets/icon/render.py` 가 뽑는다(색이 거기 `GROUND` 하나뿐이게).
+    [ -d "$ROOT/assets/icon/ios-launch.xcassets" ] || { echo "런치 카탈로그가 없다 — assets/icon/render.py 로 다시 뽑는다" >&2; exit 1; }
+    xcrun actool "$ROOT/assets/icon/ios-launch.xcassets" --compile "$APP" \
+        --platform iphonesimulator --minimum-deployment-target 17.0 \
+        --output-partial-info-plist "$OUT/launch-partial.plist" > /dev/null
+    [ -s "$APP/Assets.car" ] || { echo "actool 이 Assets.car 를 안 냈다" >&2; exit 1; }
     # **앱 아이콘도 번들에 든다**(M11b). 에셋 카탈로그가 없는 번들이라 PNG 를 뿌리에 두고
     # `Info.plist` 의 `CFBundleIconFiles` 가 이름으로 가리킨다. 그림은 `assets/icon/` 이 소유한다.
     cp "$ROOT"/assets/icon/ios/*.png "$APP/"

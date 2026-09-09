@@ -1,0 +1,20 @@
+{
+  "info": {
+    "author": "maru",
+    "version": 1
+  },
+  "colors": [
+    {
+      "idiom": "universal",
+      "color": {
+        "color-space": "srgb",
+        "components": {
+          "red": "0x1E",
+          "green": "0x1E",
+          "blue": "0x2E",
+          "alpha": "1.000"
+        }
+      }
+    }
+  ]
+}

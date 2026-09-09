@@ -62,18 +62,32 @@ pub const Activity = enum {
     none,
     /// Claude `Read` · Codex `view_image`.
     read,
-    /// Claude `Bash` · Codex `exec`/`shell`.
+    /// Claude `Bash` · Codex `exec`/`shell`/`exec_command`/`write_stdin`.
     exec,
-    /// 그 밖 전부(Edit·Write·MCP·provider 가 새로 만든 도구).
+    /// 그 밖 전부(Edit·Write·`apply_patch`·MCP·provider 가 새로 만든 도구).
     other,
 
     /// 도구 이름을 축으로 옮긴다. **모르는 이름은 `other`** — 없는 분류를 지어내지 않는다.
+    ///
+    /// **이름으로만 가른다**(§2.3). `grep` 이 읽기인지는 명령을 해석해야 알 수 있고, 그러면 규칙이
+    /// 두 벌이 된다 — 필터는 도구 이름만 보고 펼침이 「실제로 읽어 낸 텍스트」로 답한다.
+    ///
+    /// ⚠️ **Codex 어휘가 두 벌이다.** 같은 도구가 세션에 따라 바깥 이름으로 오기도 하고(옛 형식 ·
+    /// 실측 117,413 건) JS 껍데기 안쪽 이름으로 오기도 한다(§2.2 · 197,921 건). 표는 **둘 다**
+    /// 같은 이름을 보므로 한 벌만 알면 된다.
+    ///
+    /// 실측(2026-09-10 · Codex 호출 315,334)이 이 표를 정했다 — `exec_command` 152,235 ·
+    /// `write_stdin` 82,027 이 실행이고, `apply_patch` 34,785 는 **파일을 고치는 일**이라
+    /// Claude 의 `Edit`·`Write` 와 같은 칸(`other`)에 든다.
     pub fn fromToolName(name: []const u8) Activity {
         if (std.mem.eql(u8, name, "Read")) return .read;
         if (std.mem.eql(u8, name, "view_image")) return .read;
         if (std.mem.eql(u8, name, "Bash")) return .exec;
         if (std.mem.eql(u8, name, "exec")) return .exec;
         if (std.mem.eql(u8, name, "shell")) return .exec;
+        // Codex 2026-07 어휘 — 껍데기(`exec`)가 아니라 **실제로 돈 도구**의 이름이다.
+        if (std.mem.eql(u8, name, "exec_command")) return .exec;
+        if (std.mem.eql(u8, name, "write_stdin")) return .exec;
         return .other;
     }
 };
@@ -686,16 +700,17 @@ fn scanCodexToolCalls(
     const inner_limit = @min(scope.len, (if (outer_target) |t| t.start else 0) + max_inner_scan_bytes);
     const inner = if (outer_target) |t| pickCodexInnerCall(scope, t.start, inner_limit) else null;
     const name = if (inner) |v| v.name else outer_name;
-    // ⚠️ **갈래는 바깥 이름으로 가른다.** 화면에 적을 이름은 안쪽 것이 낫지만, 갈래까지 안쪽
-    // 이름으로 가르면 `Activity.fromToolName` 이 모르는 이름(`exec_command`·`write_stdin`)이
-    // 들어와 **「실행」이 171,379 → 106 으로 무너진다**(실측 2026-09-10 · 74.6% 가 「그 밖」으로
-    // 이동). 이 슬라이스는 **무엇을 보여 주나**를 바꾸는 것이지 **어느 칸에 담기나**를 바꾸는
-    // 것이 아니다 — 그건 별개 축이다(§6).
+    // **갈래도 안쪽 이름이 정한다.** 바깥 `exec` 는 JS 샌드박스라는 **껍데기**일 뿐이라, 그것으로
+    // 가르면 파일을 고치는 `apply_patch` 와 계획을 적는 `update_plan` 이 「명령」에 들어앉고
+    // (실측 27,168 건) 그림을 여는 `view_image` 226 건은 「읽기」에 못 간다.
     //
-    // 그 축이 실제로 남아 있다: 계약 §2.1 표는 「읽기 … Codex `view_image`」라고 적는데, 바깥
-    // 이름이 `exec` 라 지금도 그 206 건이 **실행으로** 분류된다. 안쪽 이름을 쓰면 그것이 고쳐지지만
-    // 같은 변경이 위의 붕괴를 부르므로, 갈래표(`fromToolName`)를 먼저 넓혀야 한다.
-    const activity = Activity.fromToolName(scope[outer_name.start .. outer_name.start + outer_name.len]);
+    // ⚠️ **표를 먼저 넓히지 않고 이 줄만 바꾸면 「명령」이 무너진다** — 앞선 슬라이스가 실측으로
+    // 확인했다(171,379 → 106 · 74.6% 가 「그 밖」으로). 순서가 곧 결함이므로 둘을 한 커밋에 둔다.
+    //
+    // 모르는 안쪽 이름은 **바깥으로 안 돌아간다**. 바깥은 언제나 `exec` 이므로 돌아가면 모르는
+    // 도구가 전부 「명령」이 된다 — `mcp__codex_apps__github_*` 이 명령일 리 없다. 껍데기를 벗긴
+    // 이상 안쪽 이름이 그 호출의 **진짜 이름**이고, 모르면 `other` 가 정확한 답이다(§2.3).
+    const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
     const target = blk: {
         if (inner) |v| {
             // ⚠️ **빈 대상은 줄을 통째로 없앤다** — `appendActivity` 가 `target.len == 0` 이면 담지
@@ -3599,12 +3614,12 @@ test "Codex 활동: 값이 뒤에 있으면 창을 다 써도 찾아낸다 (적�
     try testing.expectEqualStrings("rg -n needle", line.items[t.start .. t.start + t.len]);
 }
 
-test "Codex 활동: 이름은 안쪽 것이라도 **갈래는 바깥 이름**으로 가른다 (적대적 1회차)" {
-    // 🔥 **이것을 놓치면 「명령」 필터가 무너진다.** `Activity.fromToolName` 은 `exec` 를 실행으로
-    // 아는데 안쪽 이름(`exec_command`·`write_stdin`)은 모른다 — 갈래까지 안쪽 이름으로 가르면
-    // 실측 229,672 호출에서 **실행이 171,379 → 106** 으로 떨어지고 74.6% 가 「그 밖」으로 간다.
+test "Codex 활동: 갈래도 **안쪽 이름**이 정한다 — 표가 그 어휘를 안다" {
+    // 🔥 **표를 먼저 넓히지 않고 이 줄만 바꾸면 「명령」이 무너진다.** 앞선 슬라이스가 실측으로
+    // 확인했다 — `fromToolName` 이 `exec_command`·`write_stdin` 을 모르던 때 갈래를 안쪽 이름으로
+    // 옮기자 **실행이 171,379 → 106** 으로 떨어지고 74.6% 가 「그 밖」으로 갔다.
     //
-    // 이 슬라이스는 **무엇을 보여 주나**를 바꾸는 것이지 **어느 칸에 담기나**를 바꾸는 것이 아니다.
+    // 지금은 표가 그 어휘를 안다. 그래서 안쪽 이름이 갈래를 정해도 이 호출은 「명령」에 남는다.
     const allocator = testing.allocator;
     var out: std.ArrayList(Hit) = .empty;
     defer out.deinit(allocator);
@@ -3617,8 +3632,87 @@ test "Codex 활동: 이름은 안쪽 것이라도 **갈래는 바깥 이름**으
     const h = out.items[0];
     // 화면에 적을 이름은 **안쪽** 것이다.
     try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
-    // 갈래는 **바깥** 이름이 정한다 — 「명령」 필터가 이 줄을 계속 담아야 한다.
+    // 갈래도 그 이름이 정한다 — 「명령」 필터가 이 줄을 계속 담아야 한다.
     try testing.expectEqual(Activity.exec, h.activity);
+}
+
+test "Codex 활동: 돌고 있는 셸에 보내는 입력도 「명령」이다 — `write_stdin`" {
+    // 실측 **82,027 건**으로 `exec_command` 다음이다. 이름은 「표준입력에 쓴다」지만 사용자가 묻는
+    // 것은 「무엇을 돌렸나」이고, 돌고 있는 셸에 친 글자는 그 답의 일부다 — 같은 칸에 든다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_W","type":"custom_tool_call","name":"exec","input":"await tools.write_stdin({session_id:1,chars:\\"y\\\\n\\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("write_stdin", doc[h.name_rel .. h.name_rel + h.name_len]);
+    try testing.expectEqual(Activity.exec, h.activity);
+}
+
+test "Codex 활동: 파일을 고치는 일은 「명령」이 아니다 — `apply_patch` 는 그 밖이다" {
+    // 🔥 **실측 24,558 건이 「명령」에 잘못 들어앉아 있었다.** 바깥 이름이 언제나 `exec` 라서다.
+    // 파일을 고치는 일은 Claude 의 `Edit`·`Write` 와 같은 칸이어야 한다 — 그래야 두 provider 가
+    // 같은 물음에 같은 답을 준다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_P","type":"custom_tool_call","name":"exec","input":"await tools.apply_patch({input:\\"*** Begin Patch\\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(Activity.other, out.items[0].activity);
+}
+
+test "Codex 활동: 그림을 여는 일은 「읽기」다 — 껍데기가 가리고 있었다" {
+    // 계약 §2.1 표가 「읽기 … Codex `view_image`」라고 적는데도 실측 226 건이 **실행으로** 갔다.
+    // 바깥 이름이 `exec` 였기 때문이다 — 문서가 코드보다 많이 약속하던 자리다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_V","type":"custom_tool_call","name":"exec","input":"await tools.view_image({path:\\"/tmp/shot.png\\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(Activity.read, out.items[0].activity);
+}
+
+test "Codex 활동: 모르는 안쪽 이름은 **바깥으로 안 돌아간다**" {
+    // 바깥은 언제나 `exec` 이므로 돌아가면 **모르는 도구가 전부 「명령」**이 된다. 껍데기를 벗긴
+    // 이상 안쪽 이름이 그 호출의 진짜 이름이고, 모르면 `other` 가 정확한 답이다(§2.3).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_M","type":"custom_tool_call","name":"exec","input":"await tools.mcp__codex_apps__github_get_pr_info({url:\\"https://x/pull/1\\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(Activity.other, out.items[0].activity);
+}
+
+test "Codex 활동: 옛 형식은 **바깥 이름**이 같은 어휘다 — 표 하나로 둘 다 든다" {
+    // ⚠️ **어휘가 두 벌이 아니라 자리가 두 벌이다.** 같은 `exec_command` 가 세션에 따라 껍데기
+    // 안쪽으로 오기도 하고(197,921 건) 바깥 이름으로 곧장 오기도 한다(실측 117,413 건 중 41,509).
+    // 표가 이름 하나만 알면 둘 다 제자리에 든다 — 그 전에는 이 41,509 건이 「그 밖」에 갇혀 있었다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_O","type":"custom_tool_call","name":"exec_command","input":"{\\"cmd\\":\\"ls -al\\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(Activity.exec, out.items[0].activity);
 }
 
 test "Codex 활동: 껍데기를 못 벗기면 옛 동작 그대로다 (폴백)" {

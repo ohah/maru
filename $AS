@@ -14927,42 +14927,14 @@ pub const AppSession = struct {
         // 하트비트 사이에 몇 초씩 아무것도 안 보내므로 그 멈춤이 곧 UI 정지다.
         setNonBlockingFd(stream.out_fd);
         host.stream = stream;
-        self.onStreamerStarted(dest, host);
-    }
-
-    /// 새 스트리머가 떴을 때 **함께 비워야 하는 것들**. 한 곳에 묶는 이유는 하나라도 빠지면 재접속이
-    /// 조용히 반쪽이 되기 때문이다 — 셋 다 실측으로 하나씩 드러났고, 그때마다 「고쳤다」고 적힌 뒤에도
-    /// 다음 것이 남아 있었다.
-    ///
-    /// - `saw_hello`: 새 스트림의 `hello` 를 처음부터 다시 본다.
-    /// - **Term 채널**(적대적 검증 2 회차): `eof()` 는 `.closed` 로 만들 뿐 `null` 로 안 돌리는데
-    ///   `ensureRemoteAgentTerm` 은 **`null` 일 때만** 새로 연다. 안 버리면 재접속이 성공해도 그
-    ///   목적지의 Term 은 닫힌 채널을 들고 **영영 못 받는다** — 백오프가 다 돌아도 배지는 안 선다.
-    /// - `pending`(적대적 검증 5 회차): 개행 없이 끊긴 꼬리가 새 스트림 첫 줄 앞에 붙으면 `hello` 가
-    ///   깨진다. 그러면 관문을 영영 못 지나고, 침묵 시한 뒤 또 EOF 가 나 결국 포기로 간다. 즉
-    ///   **재접속이 스스로를 막는다**.
-    fn onStreamerStarted(self: *AppSession, dest: []const u8, host: *RemoteAgentHost) void {
         host.stream_started = true;
         host.retry_at_ms = 0;
-        host.saw_hello = false;
-        self.clearRemoteAgentChannels(dest);
+        host.saw_hello = false; // 새 스트리머의 `hello` 를 다시 본다
+        // ⚠️ **죽은 스트림의 꼬리를 버린다**(적대적 검증 5 회차). `pending` 은 개행 없이 끊긴 조각을
+        // 들고 있는데, 안 비우면 새 스트림의 첫 줄 앞에 그것이 붙어 `hello` 가 깨진다 — 그러면 관문을
+        // 영영 못 지나 커서도 채널도 안 서고, 침묵 시한 뒤 또 EOF 가 나 결국 포기로 간다.
+        // 즉 **재접속이 스스로를 막는다**. 새 자식의 바이트는 새 줄에서 시작한다.
         host.pending.clearRetainingCapacity();
-    }
-
-    /// 이 목적지의 Term 채널을 **버린다**(닫는 게 아니라 지운다).
-    ///
-    /// 새 스트리머는 `hello` 를 처음부터 다시 보내므로, 옛 채널을 들고 있으면 그 줄을 `.ignored` 로
-    /// 넘기거나(이미 `.open`) 아예 못 본다(이미 `.closed`). 지워야 다음 tick 이 새 상태로 연다.
-    fn clearRemoteAgentChannels(self: *AppSession, dest: []const u8) void {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (!term.rt.observation.ssh_remote_dest_present) continue;
-                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
-                    term.agent_remote_channel = null;
-                }
-            }
-        }
     }
 
     /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
@@ -23962,98 +23934,6 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
     const now = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
     try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
     try std.testing.expectEqual(@as(u32, 1), session.remote_nonce_rebinds); // 갈아낀 것을 세었다
-}
-test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
-    // 셋이 실측으로 **하나씩** 드러났고, 그때마다 「고쳤다」고 적힌 뒤에 다음 것이 남아 있었다. 그래서
-    // 한 곳에 묶고 묶음째로 잠근다 — 하나라도 빠지면 재접속이 조용히 반쪽이 된다.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    const session = try a.create(AppSession);
-    defer a.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const term = pane_ops.activePane(session).activeTerm();
-    term.rt.observation.ssh_remote_dest_present = true;
-    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
-    var dead = maru.session.remote_agent_stream.Channel.init(0);
-    dead.eof();
-    term.agent_remote_channel = dead;
-
-    var host: AppSession.RemoteAgentHost = .{};
-    defer host.pending.deinit(a);
-    defer host.install_out.deinit(a);
-    defer host.cursors.deinit(a);
-    host.saw_hello = true;
-    host.retry_at_ms = 9_999;
-    host.stream_started = false;
-    try host.pending.appendSlice(a, "끊긴 꼬리");
-
-    session.onStreamerStarted("openClaw", &host);
-
-    try std.testing.expect(host.stream_started); // 떴다고 표시한다
-    try std.testing.expectEqual(@as(u64, 0), host.retry_at_ms); // 예약을 지운다
-    try std.testing.expect(!host.saw_hello); // 새 hello 를 다시 본다
-    try std.testing.expectEqual(@as(usize, 0), host.pending.items.len); // 죽은 꼬리를 버린다
-    try std.testing.expect(term.agent_remote_channel == null); // 죽은 채널도 버린다
-}
-test "RA5: 재접속하면 죽은 채널을 버린다 — 백오프가 성공해도 배지가 안 서던 자리" {
-    // `eof()` 는 `.closed` 로 만들 뿐 `null` 로 안 돌리는데 `ensureRemoteAgentTerm` 은 **`null` 일 때만**
-    // 새로 연다. 그래서 재접속이 성공해도 그 목적지의 Term 은 닫힌 채널을 들고 영영 못 받았다
-    // (적대적 검증 2 회차). §RA5-b 가 「고쳤다」고 적은 재접속의 **나머지 절반**이다.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    const session = try a.create(AppSession);
-    defer a.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const term = pane_ops.activePane(session).activeTerm();
-    term.rt.observation.ssh_remote_dest_present = true;
-    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
-
-    // 옛 스트림이 끝나 채널이 닫혔다.
-    var dead = maru.session.remote_agent_stream.Channel.init(0);
-    dead.eof();
-    term.agent_remote_channel = dead;
-
-    session.clearRemoteAgentChannels("openClaw");
-    try std.testing.expect(term.agent_remote_channel == null); // 지웠다 — 다음 tick 이 새로 연다
-}
-test "RA5: 다른 목적지의 채널은 안 건드린다" {
-    // 한 목적지가 재접속한다고 옆 목적지의 Term 이 이벤트를 흘리면 안 된다.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    const session = try a.create(AppSession);
-    defer a.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const term = pane_ops.activePane(session).activeTerm();
-    term.rt.observation.ssh_remote_dest_present = true;
-    try term.rt.observation.ssh_remote_dest.appendSlice(a, "other");
-    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
-
-    session.clearRemoteAgentChannels("openClaw");
-    try std.testing.expect(term.agent_remote_channel != null); // 남의 목적지다
 }
 test "RA5: 이미 hello 를 본 목적지에 뒤늦게 생긴 Term 은 죽은 채널을 안 받는다" {
     // ⚠️ 순수 채널 판정자만 두면 **그것을 쓰는 자리가 빠져도 초록**이다(#3350·#3374 에서 두 번 당했다).

@@ -7630,6 +7630,66 @@ test "kitty I= image number: 번호에 id를 배정하고 같은 번호는 이�
     try std.testing.expectEqual(@as(usize, 0), core.kitty_image_numbers.items.len);
 }
 
+test "kitty relative placement(P/Q/H/V): 부모 기준으로 놓이고 부모와 수명을 같이한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [160]u8 = undefined;
+    // 부모 이미지·자식 이미지 각각 전송.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{encoded}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,q=2;{s}\x1b\\", .{encoded}));
+
+    // 부모 placement 를 3행 4열에 건다.
+    try core.write("\x1b[4;5H"); // 커서 → row 3, col 4 (0-based)
+    try core.write("\x1b_Ga=p,i=1,p=9,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(u16, 4), core.kitty_placements.items[0].anchor_col);
+
+    // 자식을 부모 기준 (H=+2, V=+1) 로 건다 — **커서 위치와 무관하게** 부모에서 풀려야 한다.
+    try core.write("\x1b[1;1H"); // 커서를 좌상단으로 옮겨도
+    try core.write("\x1b_Ga=p,i=2,p=5,P=1,Q=9,H=2,V=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+    // 렌더 뷰에서 위치가 풀린다: 부모(row 3, col 4) + (V=1, H=2) = row 4, col 6.
+    const views = core.renderSnapshot().placements;
+    try std.testing.expectEqual(@as(usize, 2), views.len);
+    var child_view: ?@TypeOf(views[0]) = null;
+    for (views) |v| {
+        if (v.image_id == 2) child_view = v;
+    }
+    try std.testing.expect(child_view != null);
+    try std.testing.expectEqual(@as(i32, 4), child_view.?.row);
+    try std.testing.expectEqual(@as(u16, 6), child_view.?.col);
+
+    // **음수 변위**도 된다(왼쪽·위) — 원점은 부모의 좌상단 셀이다.
+    try core.write("\x1b_Ga=p,i=2,p=6,P=1,Q=9,H=-1,V=-2,q=2\x1b\\");
+    const views2 = core.renderSnapshot().placements;
+    for (views2) |v| {
+        if (v.image_id == 2 and v.placement_id == 6) {
+            try std.testing.expectEqual(@as(i32, 1), v.row); // 3 - 2
+            try std.testing.expectEqual(@as(u16, 3), v.col); // 4 - 1
+        }
+    }
+
+    // 부모가 없으면 거부한다 — 그릴 자리를 못 정한다.
+    core.clearResponse();
+    try core.write("\x1b_Ga=p,i=2,p=7,P=99,Q=1\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=2,p=7;ENOENT:no such image\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // **virtual 은 relative 일 수 없다**(명세) — 둘을 함께 주면 거부한다.
+    try core.write("\x1b_Ga=p,i=2,p=8,U=1,c=2,r=2,P=1,Q=9\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=2,p=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // **부모를 지우면 자식도 함께 사라진다**(명세: 수명이 부모에 묶인다). 안 지우면 부모 없는
+    // 자식이 목록에 남아 매 frame 위치를 못 풀고 상한만 먹는다.
+    try core.write("\x1b_Ga=d,d=i,i=1,p=9,q=2\x1b\\");
+    for (core.kitty_placements.items) |p| try std.testing.expect(p.image_id != 2 or p.parent_image_id == 0);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
 test "kitty U=1 unicode placeholder: virtual placement만 등록하고 커서 자리에 그리지 않는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();

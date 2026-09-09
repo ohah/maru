@@ -377,6 +377,14 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
             'd' => if (val.len == 1) {
                 cmd.delete_what = val[0]; // 삭제 타깃 문자(a/A/i/I/z/Z/…)
             },
+            // P/Q/H/V: **relative placement** — 이 placement 를 다른 placement(parent) 기준으로 놓는다.
+            // 안 읽으면 부모 참조를 잃어 **커서 자리에 절대 배치**돼 엉뚱한 곳에 뜬다.
+            // 베이스: kitty graphics protocol "relative placements".
+            'P' => cmd.parent_image_id = std.fmt.parseInt(u32, val, 10) catch 0,
+            'Q' => cmd.parent_placement_id = std.fmt.parseInt(u32, val, 10) catch 0,
+            // H/V 는 셀 단위 변위이고 **부호가 있다**(양수=오른쪽·아래, 원점은 부모의 좌상단 셀).
+            'H' => cmd.parent_offset_x = std.fmt.parseInt(i32, val, 10) catch 0,
+            'V' => cmd.parent_offset_y = std.fmt.parseInt(i32, val, 10) catch 0,
             // q: 응답 억제(0=전부 보고·1=에러만·2=침묵). 안 읽으면 q=2를 쓴 앱에 응답을 뱉어
             // 그 바이트가 앱 입력 스트림에 섞인다.
             'q' => cmd.quiet = std.fmt.parseInt(u8, val, 10) catch 0,

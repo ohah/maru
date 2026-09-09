@@ -49,6 +49,13 @@ pub const KittyGraphicsCommand = struct {
     rows: u32 = 0, // r: 표시할 행 수(0=auto)
     z: i32 = 0, // z: z-index(부호 있음)
     no_cursor_move: bool = false, // C=1이면 표시 후 커서를 옮기지 않음
+    // P/Q: **relative placement** 의 부모(이미지 id·placement id). 0 이면 절대 배치다.
+    // H/V: 부모 좌상단 셀에서의 변위(셀 단위, 부호 있음 — 양수는 오른쪽·아래).
+    // 베이스: kitty graphics protocol "relative placements".
+    parent_image_id: u32 = 0,
+    parent_placement_id: u32 = 0,
+    parent_offset_x: i32 = 0,
+    parent_offset_y: i32 = 0,
     delete_what: u8 = 'a', // d: 삭제 타깃(a=d일 때). 기본 'a'(전체). 대문자=이미지 데이터도 free, 소문자=placement만
     // q: 응답 억제 수준(0=OK와 에러 모두, 1=에러만, 2=침묵). 베이스: kitty graphics protocol의 quiet.
     quiet: u8 = 0,
@@ -101,6 +108,14 @@ pub const StoredPlacement = struct {
     columns: u32,
     rows: u32,
     z: i32,
+    /// 부모 placement(relative placement) — 0 이면 절대 배치다. 부모가 지워지면 **이 placement 도
+    /// 함께 지워진다**(명세: "The lifetime of a relative placement is tied to the lifetime of its
+    /// parent"). 위치는 저장 시점에 굳히지 않고 **렌더 뷰를 만들 때** 부모에서 푼다 — 부모가
+    /// 움직이면 따라가야 하기 때문이다.
+    parent_image_id: u32 = 0,
+    parent_placement_id: u32 = 0,
+    parent_offset_x: i32 = 0,
+    parent_offset_y: i32 = 0,
 };
 
 /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
@@ -266,14 +281,25 @@ pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.Ki
             return &.{}; // OOM이면 placement 노출만 포기(렌더는 후속이라 영향 없음)
         };
     }
-    for (self.kitty_placements.items, 0..) |p, i| {
-        const row_i64 = @as(i64, @intCast(p.anchor_row)) - @as(i64, @intCast(top_abs));
-        self.placement_views[i] = .{
+    var out: usize = 0;
+    for (self.kitty_placements.items) |p| {
+        // relative placement 는 **여기서** 부모 위치를 푼다 — 저장 시점에 굳히면 부모가 움직여도
+        // 안 따라간다(명세는 따라가야 한다고 정한다). 부모가 없거나 virtual(화면 위치를 코어가
+        // 모른다)이면 **그리지 않는다** — 엉뚱한 자리에 놓는 것보다 낫다.
+        var anchor_row = p.anchor_row;
+        var anchor_col = p.anchor_col;
+        if (p.parent_image_id != 0) {
+            const resolved = resolveRelativeAnchor(self, p) orelse continue;
+            anchor_row = resolved.row;
+            anchor_col = resolved.col;
+        }
+        const row_i64 = @as(i64, @intCast(anchor_row)) - @as(i64, @intCast(top_abs));
+        self.placement_views[out] = .{
             .image_id = p.image_id,
             .placement_id = p.placement_id,
             // 행 오프셋은 작은 값이라 i32에 들지만, 극단값은 포화시켜 안전하게 둔다.
             .row = std.math.cast(i32, row_i64) orelse (if (row_i64 < 0) std.math.minInt(i32) else std.math.maxInt(i32)),
-            .col = p.anchor_col,
+            .col = anchor_col,
             .cell_x_offset = p.cell_x_offset,
             .cell_y_offset = p.cell_y_offset,
             .src_x = p.src_x,
@@ -284,8 +310,9 @@ pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.Ki
             .rows = p.rows,
             .z = p.z,
         };
+        out += 1;
     }
-    return self.placement_views;
+    return self.placement_views[0..out];
 }
 
 /// 저장된 kitty graphics 이미지를 KittyImageView로 빌려 재사용 버퍼에 담아 돌려준다. 이미지가 없으면 빈
@@ -468,6 +495,13 @@ fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatu
 fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     if (cmd.image_id == 0) return .einval;
     if (!self.kitty_images.map.contains(cmd.image_id)) return .enoent; // 없는 이미지는 표시 안 함
+    // **virtual 은 relative 일 수 없다**(명세: "Virtual placements created for Unicode placeholder
+    // based images cannot also be relative placements"). 반대는 된다 — relative 의 **부모**는 virtual
+    // 이어도 좋다. 둘을 함께 주면 어느 규칙을 따를지 알 수 없으므로 거부한다.
+    if (cmd.virtual and cmd.parent_image_id != 0) return .einval;
+    // relative placement 는 부모가 실재해야 위치를 풀 수 있다. 없으면 그릴 자리가 없다.
+    if (cmd.parent_image_id != 0 and findParentPlacement(self, cmd.parent_image_id, cmd.parent_placement_id) == null)
+        return .enoent;
     // U=1(unicode placeholder): 커서 자리에 그리지 않는다 — 등록만 하고, 실제 배치는 화면에 찍힌
     // placeholder 셀이 정한다. 격자(c×r)가 없으면 타일 크기를 못 정하므로 거부한다(명세상 필수).
     if (cmd.virtual) {
@@ -494,8 +528,14 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
         .columns = cmd.columns,
         .rows = cmd.rows,
         .z = cmd.z,
+        .parent_image_id = cmd.parent_image_id,
+        .parent_placement_id = cmd.parent_placement_id,
+        .parent_offset_x = cmd.parent_offset_x,
+        .parent_offset_y = cmd.parent_offset_y,
     });
-    if (!cmd.no_cursor_move) {
+    // relative placement 는 부모 자리에 그려지므로 커서를 옮기지 않는다 — 커서는 이 명령이 놓인
+    // 자리에 그대로 있어야 뒤따르는 출력이 어긋나지 않는다.
+    if (!cmd.no_cursor_move and cmd.parent_image_id == 0) {
         const rows_span = kittyAdvanceRows(self, cmd);
         if (rows_span > 0) {
             const target = @as(usize, self.screen.cursor.row) + rows_span;
@@ -578,6 +618,67 @@ fn removeVirtualPlacements(self: *TerminalCore, image_id: u32, placement_id: u32
     }
 }
 
+/// 지워진 placement 를 부모로 삼던 relative placement 들을 함께 지운다.
+///
+/// 명세: "The lifetime of a relative placement is tied to the lifetime of its parent. If its parent
+/// is deleted, it is deleted as well." 안 지우면 **부모 없는 자식이 남아** 매 frame 위치를 못 풀고
+/// 조용히 사라진 것처럼 보인다(목록에는 남아 상한만 먹는다).
+///
+/// 자식이 또 부모일 수 있으므로 **더 없을 때까지 반복**한다. 목록이 작아(≤1024) 비용은 무시할 만하다.
+fn removeOrphanedRelatives(self: *TerminalCore) void {
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var i: usize = 0;
+        while (i < self.kitty_placements.items.len) {
+            const p = self.kitty_placements.items[i];
+            if (p.parent_image_id != 0 and findParentPlacement(self, p.parent_image_id, p.parent_placement_id) == null) {
+                _ = self.kitty_placements.orderedRemove(i);
+                changed = true;
+            } else i += 1;
+        }
+    }
+}
+
+/// relative placement 의 부모를 찾는다 — 일반 placement 를 먼저, 없으면 virtual 을 본다.
+///
+/// **부모는 virtual 이어도 된다**(명세). 다만 virtual 은 화면 위치를 갖지 않고 placeholder 셀이
+/// 자리를 정하므로, 코어가 절대 anchor 를 풀 수 없다 — 그 경우 `.virtual_parent` 로 알리고
+/// 위치 해석은 **하지 않는다**(아래 resolveRelativeAnchor). 그리지 않을지언정 엉뚱한 자리에
+/// 놓지 않는다.
+const ParentKind = union(enum) { normal: StoredPlacement, virtual_parent };
+
+fn findParentPlacement(self: *TerminalCore, image_id: u32, placement_id: u32) ?ParentKind {
+    for (self.kitty_placements.items) |p| {
+        if (p.image_id == image_id and p.placement_id == placement_id) return .{ .normal = p };
+    }
+    for (self.kitty_virtual_placements.items) |vp| {
+        if (vp.image_id == image_id and vp.placement_id == placement_id) return .virtual_parent;
+    }
+    return null;
+}
+
+/// relative placement 의 절대 anchor 를 부모에서 푼다. 부모가 없거나 virtual 이면 null —
+/// 호출자가 그 placement 를 렌더 목록에서 뺀다.
+///
+/// **저장 시점에 굳히지 않고 여기서 푸는 이유**: 부모가 다시 display 되어 자리를 옮기면 자식도
+/// 따라가야 한다(명세: "the relative placement moves along with it"). 굳혀 두면 부모만 움직인다.
+fn resolveRelativeAnchor(self: *TerminalCore, p: StoredPlacement) ?struct { row: usize, col: u16 } {
+    const parent = findParentPlacement(self, p.parent_image_id, p.parent_placement_id) orelse return null;
+    const base = switch (parent) {
+        .normal => |np| np,
+        .virtual_parent => return null, // 화면 위치를 코어가 모른다(placeholder 셀 소유) — 후속
+    };
+    // 부모가 relative 면 그 부모부터 풀어야 하지만, 한 단계만 본다 — 사슬은 드물고, 순환이면
+    // 무한 재귀가 된다. 다단계는 실제 사용례가 나오면 그때 사이클 검사와 함께 넣는다.
+    if (base.parent_image_id != 0) return null;
+    const row_i = @as(i64, @intCast(base.anchor_row)) + p.parent_offset_y;
+    if (row_i < 0) return null; // 스크롤백 위로 벗어남 — 그릴 자리가 없다
+    const col_i = @as(i32, base.anchor_col) + p.parent_offset_x;
+    if (col_i < 0) return null;
+    return .{ .row = @intCast(row_i), .col = @intCast(@min(col_i, @as(i32, std.math.maxInt(u16)))) };
+}
+
 /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
 /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
 /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
@@ -614,6 +715,8 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
         'z' => deleteByZ(self, cmd.z, free_image), // z-index로
         else => return .enotsupp, // c/n/p/q/x/y/r/f는 미지원 — 셀 span·이미지번호 필요
     }
+    // 부모가 사라졌으면 그것을 기준으로 놓인 relative placement 도 함께 거둔다(명세의 수명 연동).
+    removeOrphanedRelatives(self);
     return .ok;
 }
 

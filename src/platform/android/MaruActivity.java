@@ -738,6 +738,10 @@ public class MaruActivity extends android.app.NativeActivity {
     public static void startSsh(String host, int port, String user, String fingerprint) {
         MaruActivity a = current;
         if (a == null) return;
+        // **알림 권한은 «여기서» 묻는다**(M16c — 계약 §3.3). 배경 세션을 말하는 자리가 그
+        // 서비스의 알림 하나뿐인데, 권한을 안 물으면 그 알림이 **떠 있으면서 안 보인다**.
+        // 붙는 이 순간이 알림이 뜻을 갖는 자리고, 화면에는 이미 무엇에 붙는 중인지가 있다.
+        a.askNotificationPermission();
         Intent intent = new Intent(a, MaruSshService.class);
         intent.putExtra("host", host);
         intent.putExtra("port", port);
@@ -770,6 +774,67 @@ public class MaruActivity extends android.app.NativeActivity {
             // 원래 동작을 그대로 돌려줘야 한다(안 그러면 다른 inset 처리가 통째로 죽는다).
             return v.onApplyWindowInsets(insets);
         }
+    }
+
+    /// **이 프로세스에서 이미 물었나.** 다시 묻는 정책(몇 번까지 실제로 뜨는가)은 **OS 것이다** —
+    /// 그 위에 우리 상한을 겹치면 같은 정책이 두 곳에 살고 한쪽만 낡는다. 여기 있는 것은
+    /// "한 번 붙을 때마다 또 띄우지는 않는다" 뿐이다.
+    private static boolean asked_notifications = false;
+
+    /// 알림 권한을 묻는다(M16c). **거절해도 접속은 그대로 된다** — 권한은 「보여 줄 수 있나」이지
+    /// 「붙을 수 있나」가 아니라서, 요청을 띄우고 **기다리지 않는다**.
+    ///
+    /// `requestPermissions` 는 UI 스레드의 일이고 이 함수는 네이티브 스레드에서 불린다.
+    private void askNotificationPermission() {
+        if (asked_notifications) return;
+        asked_notifications = true;
+        // **이 권한은 API 33 부터 있다**(minSdk 는 29). 그 아래에서는 알림에 권한이 필요 없고,
+        // 없는 권한을 요청하면 프레임워크가 대화상자 없이 곧바로 거절을 돌려준다 — 그러면
+        // 로그가 「거절됐다」고 남는데 실제로는 알림이 멀쩡히 뜬다. **거짓 신호를 안 남긴다.**
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            android.util.Log.i("MaruChrome", "MARU_NOTIFY permission=not_required sdk="
+                    + android.os.Build.VERSION.SDK_INT);
+            return;
+        }
+        // 이미 받았으면 아무것도 안 한다 — 뜨지도 않을 요청을 거는 것은 뜻이 없다.
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            android.util.Log.i("MaruChrome", "MARU_NOTIFY permission=already_granted");
+            return;
+        }
+        runOnUiThread(new AskNotifications(this));
+    }
+
+    /// **익명 클래스를 안 쓴다**(아래 `ShowKeyboard` 와 같은 이유 — `d8` 이 익명 내부 클래스에서 죽는다).
+    private static final class AskNotifications implements Runnable {
+        private final MaruActivity activity;
+
+        AskNotifications(MaruActivity a) {
+            this.activity = a;
+        }
+
+        @Override
+        public void run() {
+            android.util.Log.i("MaruChrome", "MARU_NOTIFY permission=asking");
+            activity.requestPermissions(
+                    new String[] { android.Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATIONS);
+        }
+    }
+
+    private static final int REQ_NOTIFICATIONS = 1;
+
+    /// **답을 로그로 남긴다.** 이 권한은 화면에 아무 표시도 안 남기므로(거절해도 앱은 그대로
+    /// 돈다) 기기에서 무슨 일이 있었는지 짚을 자리가 이 줄뿐이다.
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(code, perms, results);
+        if (code != REQ_NOTIFICATIONS) return;
+        boolean granted = results.length > 0
+                && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        android.util.Log.i("MaruChrome", "MARU_NOTIFY permission=" + (granted ? "granted" : "denied"));
+        // **지금 도는 세션의 알림을 다시 올린다.** 권한 없이 올라간 알림은 OS 가 버렸고 허용해도
+        // 되살아나지 않는다 — 사용자가 허용을 누른 이유가 바로 그 세션이다(위 서비스 주석).
+        if (granted) MaruSshService.onNotificationsAllowed();
     }
 
     /// **익명 클래스를 안 쓴다.** `d8` 8.2.2 가 익명 내부 클래스(`MaruActivity$1`)에서

@@ -16,6 +16,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- **선언만으로는 안 된다**(API 33+). 이 줄이 없으면 요청 자체가 무시되고, 이 줄만 있고
+         런타임 요청이 없으면 알림이 «떠 있으면서 안 보인다» — 실제로 그 상태였다(M16c).
+         묻는 자리는 `MaruActivity.startSsh`(계약 §3.3). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- debuggable 은 개발 빌드 전용이다 — run-as 로 앱 내부의 래스터 결과를 꺼내
          두 플랫폼 픽셀을 대조한다(tools/mobile-harness/atlas_diff.py). 배포에는 빼야 한다. -->

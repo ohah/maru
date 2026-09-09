@@ -15,6 +15,7 @@ A=src/platform/android/android_app_host.c
 J=src/platform/android/MaruActivity.java
 K=src/platform/android/MaruKeyStore.java
 V=src/platform/android/MaruSshService.java
+N=src/platform/android/AndroidManifest.xml
 
 # **틀린 것을 센다.** 예전에는 출력만 하고 항상 0 으로 끝나, 판정자가 전부 틀려도 이 스크립트를
 # 부르는 쪽은 성공으로 봤다 — 게이트가 아니라 구경거리였다.
@@ -308,6 +309,35 @@ ck "iOS 가 코어에게 PEM 을 받는다" 1 "$(sed 's,//.*,,' $I | grep -c 'ma
 # **주석은 안 센다** — 이 셋을 설명하는 주석이 바로 그 이름을 담는다(위 `FindClass` 판정자와 같다).
 ck "키 파일을 백업에서 뺀다" 1 "$(sed 's,//.*,,' $I | grep -c 'NSURLIsExcludedFromBackupKey')"
 ck "키 파일 보호 등급이 배경에서도 열린다" 1 "$(sed 's,//.*,,' $I | grep -c 'NSFileProtectionCompleteUntilFirstUserAuthentication')"
+
+echo "§3.3 알림 권한은 붙을 때 묻는다 (M16c)"
+# **선언만으로는 안 된다**(API 33+). 매니페스트에 적어 두고 런타임에 안 물어서, 배경 세션을
+# 말하는 유일한 알림이 «떠 있으면서 안 보였다»(실측 `importance=NONE`). 둘 다 있어야 한다.
+ck "매니페스트가 권한을 선언한다" 1 "$(grep -c 'POST_NOTIFICATIONS' $N)"
+ck "런타임에도 «묻는다»" 1 "$(sed 's,//.*,,' $J | grep -c 'requestPermissions(')"
+# **API 33 아래에는 이 권한이 없다**(minSdk 29). 없는 권한을 요청하면 대화상자 없이 거절이
+# 돌아오고 로그가 「거절됐다」고 남는데, 실제로는 알림이 멀쩡히 뜬다 — 거짓 신호를 안 남긴다.
+ck "옛 기기에는 안 묻는다" 1 "$(sed 's,//.*,,' $J | grep -c 'VERSION_CODES.TIRAMISU')"
+# **묻는 자리는 붙는 경로다.** 첫 실행에 물으면 그때 앱이 선 곳은 서버 «등록» 화면이라(M16a)
+# 무엇에 대한 알림인지가 화면에 없다 — Android 는 거절이 쌓이면 다시 못 묻는 자원이다.
+startSshBody() { awk '/public static void startSsh\(/{f=1} f{print} f&&/^    \}$/{exit}' "$J"; }
+# 잘라내기가 됐는지부터 단언한다(위 `onCreate` 판정자와 같은 이유).
+ck "startSsh 본문을 잘라냈다" 1 "$(startSshBody | grep -c 'startForegroundService(')"
+ck "묻는 자리가 붙는 경로다" 1 "$(startSshBody | grep -c 'askNotificationPermission()')"
+# **거절해도 접속은 그대로 된다.** 답을 기다리거나 권한으로 가지 치면 「보여 줄 수 있나」가
+# 「붙을 수 있나」가 된다 — 본문에 이른 return 은 `current == null` 하나뿐이다.
+ck "권한이 접속을 막지 않는다" 1 "$(startSshBody | grep -c 'return;')"
+# **허용은 «지금 도는 세션»에 닿아야 한다.** 권한 없이 올라간 알림을 OS 가 버리고 나중에
+# 허용해도 되살려 주지 않는다(실측: 허용 직후·5초 뒤·홈으로 나간 뒤 모두 비어 있었다) — 그런데
+# 사용자가 허용을 누른 이유가 바로 그 세션이다. 답을 받는 자리에서 다시 올린다.
+ck "허용하면 그 세션 알림을 다시 올린다" 1 "$(sed 's,//.*,,' $J | grep -c 'MaruSshService\.onNotificationsAllowed()')"
+# **없는 세션을 있다고 말하지 않는다** — 도는 서비스가 없으면 아무것도 안 올린다.
+ck "세션이 없으면 안 올린다" 1 "$(awk '/public static void onNotificationsAllowed\(\)/{f=1} f{print} f&&/^    \}$/{exit}' $V | grep -c 'if (s == null) return;')"
+# **iOS 는 안 묻는다** — 보내는 알림이 하나도 없기 때문이다. 알림을 보내게 되는 날 이 판정자가
+# 붉어지고, 그때 «그 자리에서» 묻게 된다(계약 §3.3).
+ck "iOS 는 알림을 안 보낸다" 0 "$(sed 's,//.*,,' $I | grep -c 'UNUserNotificationCenter\|requestAuthorization')"
+# 알림이 처음 «보이게» 되면서 드러난 것 — 블루투스 아이콘이 붙어 있었다.
+ck "알림 아이콘이 블루투스가 아니다" 0 "$(sed 's,//.*,,' $V | grep -c 'stat_sys_data_bluetooth')"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

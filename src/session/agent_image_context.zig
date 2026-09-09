@@ -122,8 +122,19 @@ pub fn activityLabel(raw: []const u8, is_path: bool) Label {
 pub const Block = struct {
     /// `out` 에 쓴 바이트.
     len: usize = 0,
-    /// 상한에 걸려 **뒤가 잘렸다**. 화면은 그 사실을 말한다(계약 §2.4 — 「이하 생략」).
+    /// **받는 버퍼**가 모자라 뒤가 잘렸다.
+    ///
+    /// ⚠️ **이것만으로는 「다 봤나」를 못 판정한다.** 푸는 일은 바이트를 **늘리지 않으므로**
+    /// (`\n` 둘→하나 · `\uXXXX` 여섯→넷 이하 · 나머지는 1:1), 호출자가 `out` 을 읽어 온 만큼
+    /// 잡아 주면 이 깃발은 **영원히 거짓**이다. 실제로 두 소비자가 그렇게 잡고 있었고, 그래서
+    /// 펼침의 「이하 생략」이 **한 번도 안 떴다**(적대적 2회차). 잘림을 물으려면 `complete` 를 본다.
     truncated: bool = false,
+    /// 값의 **끝(따옴표)까지 봤나.** 거짓이면 준 바이트가 값 도중에 끊긴 것이다 — 읽기 상한에
+    /// 걸렸거나 파일이 거기서 끝났거나.
+    ///
+    /// **여기가 「다 봤나」의 단일 출처다.** 소비자가 각자 「내가 상한만큼 읽었나」로 짐작하면
+    /// 규칙이 두 벌이 되고, 값이 마침 상한에 딱 맞을 때 갈린다.
+    complete: bool = false,
 };
 
 /// JSON 문자열 값의 바이트를 **여러 줄 그대로** 푼다(활동 뷰 계약 §2.4).
@@ -141,10 +152,14 @@ pub const Block = struct {
 pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
     var w: usize = 0;
     var i: usize = 0;
+    var complete = false;
     while (i < raw.len) {
         var cp_buf: [4]u8 = undefined;
         var chunk: []const u8 = undefined;
-        if (raw[i] == '"') break; // 이스케이프 안 된 따옴표 = 값의 끝
+        if (raw[i] == '"') {
+            complete = true; // 이스케이프 안 된 따옴표 = 값의 끝 — **여기까지 왔으면 다 본 것이다**
+            break;
+        }
         if (raw[i] == '\\' and i + 1 < raw.len) {
             const c = raw[i + 1];
             i += 2;
@@ -176,11 +191,37 @@ pub fn unescapeBlock(out: []u8, raw: []const u8) Block {
             if (chunk.len == 1 and chunk[0] < 0x20 and chunk[0] != '\n' and chunk[0] != '\t') continue;
         }
         // **글자 단위로만 쓴다.** 남는 자리가 이 글자보다 작으면 아예 안 쓰고 잘렸다고 말한다.
-        if (w + chunk.len > out.len) return .{ .len = w, .truncated = true };
+        if (w + chunk.len > out.len) return .{ .len = w, .truncated = true, .complete = false };
         @memcpy(out[w..][0..chunk.len], chunk);
         w += chunk.len;
     }
-    return .{ .len = w, .truncated = false };
+    return .{ .len = w, .truncated = false, .complete = complete };
+}
+
+test "unescapeBlock: 값의 끝을 봤는지 말한다 — 「다 봤나」의 단일 출처" {
+    // ⚠️ **`truncated` 로는 못 묻는다.** 푸는 일은 바이트를 늘리지 않으므로, 소비자가 읽어 온
+    // 만큼 `out` 을 잡아 주면 그 깃발은 영원히 거짓이다 — 두 소비자가 실제로 그렇게 잡고 있어
+    // 펼침의 「이하 생략」이 한 번도 안 떴다(적대적 2회차).
+    var out: [64]u8 = undefined;
+
+    // ⑴ 닫는 따옴표까지 왔다 = 다 봤다.
+    const whole = unescapeBlock(&out, "alpha\nbeta\"tail");
+    try testing.expect(whole.complete);
+    try testing.expect(!whole.truncated);
+    try testing.expectEqualStrings("alpha\nbeta", out[0..whole.len]);
+
+    // ⑵ 따옴표를 못 보고 입력이 끝났다 = **못 봤다**. 여기서 `truncated` 는 여전히 거짓이다 —
+    //    이 갈래가 정확히 상한에 걸린 조각의 모양이고, 옛 코드가 「다 봤다」로 답하던 자리다.
+    const cut = unescapeBlock(&out, "alpha beta");
+    try testing.expect(!cut.complete);
+    try testing.expect(!cut.truncated);
+    try testing.expectEqualStrings("alpha beta", out[0..cut.len]);
+
+    // ⑶ 받는 버퍼가 모자라도 「못 봤다」다.
+    var tiny: [4]u8 = undefined;
+    const small = unescapeBlock(&tiny, "alpha beta\"");
+    try testing.expect(!small.complete);
+    try testing.expect(small.truncated);
 }
 
 pub fn matches(label_text: []const u8, query: []const u8) bool {

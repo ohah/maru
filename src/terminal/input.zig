@@ -32,12 +32,19 @@ pub const Key = union(enum) {
     function: u8, // F1..F12 (1-indexed)
 };
 
+/// kitty keyboard `report_events` 의 이벤트 종류. 수치는 명세가 정한 것이라 바꾸면 안 된다.
+pub const KeyEventType = enum(u8) { press = 1, repeat = 2, release = 3 };
+
 pub const KeyEvent = struct {
     key: Key,
     modifiers: ModifierSet = .{},
     /// char 키의 unshifted base-layout codepoint(shift 미반영). kitty CSI u의 key code가 명세상
     /// base-layout key여야 해서 platform(ABI)이 채운다. null이면 Key.char codepoint를 그대로 쓴다.
     base_codepoint: ?u21 = null,
+    /// 키 이벤트의 종류. kitty keyboard 의 `report_events`(flag 2)가 켜졌을 때만 인코딩에 실린다 —
+    /// 안 켜졌으면 press 만 오고 값은 무시된다. platform 이 채운다(AppKit keyDown/keyUp·isARepeat).
+    /// 베이스: kitty keyboard protocol "Report event types"(1=press·2=repeat·3=release).
+    event_type: KeyEventType = .press,
     /// 이 키가 숫자 키패드(numpad)에서 왔는가(G10). platform(ABI)이 raw key code로 판정해 채운다 —
     /// 키패드 키의 macOS keycode 지식은 platform에 둔다. application keypad 모드(DECKPAM)면 encodeKey가
     /// SS3(`ESC O p`..)로 인코딩한다(numeric 모드면 일반 char/CR — 키패드 여부 무관).
@@ -210,9 +217,25 @@ fn keypadSs3(codepoint: u21) ?[]const u8 {
 /// 한계가 있다). escape·functional·modifier 조합은 CSI 시퀀스로, modifier 없는 텍스트/enter/tab/
 /// backspace는 legacy 바이트를 그대로 둔다(kitty spec의 명시 예외 — 모드가 안 꺼져도 shell 복구 가능).
 fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
-    _ = options; // 현재 분기는 flags!=0(켜짐)만 보고 disambiguate로 인코딩 — 세부 flag는 후속
+    // report_events(flag 2)가 켜졌으면 press 외의 이벤트도 인코딩한다. 안 켜졌으면 **release/repeat 은
+    // 아예 안 내보낸다** — 앱이 요청하지 않은 이벤트를 보내면 입력이 두 배로 들어간 것처럼 보인다.
+    const report_events = (options.kitty_flags & 0b00010) != 0;
+    if (event.event_type != .press and !report_events) return buffer[0..0];
+
     const has_ctrl_alt = event.modifiers.control or event.modifiers.option or event.modifiers.command;
     const has_any_mod = has_ctrl_alt or event.modifiers.shift;
+
+    // **legacy/텍스트로 나가는 키는 release 를 보고하지 않는다**(명세: "The Enter, Tab and Backspace
+    // keys will not have release events unless Report all keys as escape codes is also set"). 평문
+    // 텍스트 키도 UTF-8 로만 나가 event type 을 실을 자리가 없다. 그 키들의 release 는 **침묵**이다 —
+    // 안 그러면 Enter 를 뗄 때 `\r` 이 한 번 더 들어가 줄이 두 번 입력된다.
+    if (event.event_type != .press) {
+        switch (event.key) {
+            .enter, .tab, .backspace => if (!has_any_mod) return buffer[0..0],
+            .char => if (!has_ctrl_alt) return buffer[0..0],
+            else => {},
+        }
+    }
 
     switch (event.key) {
         // kitty spec: Enter/Tab/Backspace는 modifier가 "전혀" 없을 때만 legacy 바이트(\r/\t/\x7f)를
@@ -241,7 +264,7 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
         else => {},
     }
     const mods = kittyModsSeqInt(event.modifiers);
-    return encodeKittySeq(buffer, ent.code, ent.final, mods);
+    return encodeKittySeqEvent(buffer, ent.code, ent.final, mods, event.event_type, report_events);
 }
 
 const KittyEntry = struct { code: u21, final: u8 };
@@ -297,10 +320,29 @@ fn kittyModsSeqInt(mods: ModifierSet) u16 {
 /// kitty 명세 인코딩 형식: final 'u'/'~'는 CSI code[;mods]final, letter(legacy 호환 키)는 CSI[1;mods]final
 /// (code=1 생략). mods<=1이면 modifier param을 생략한다(legacy CSI A/B/C/D/H/F와 호환).
 fn encodeKittySeq(buffer: *[encoded_key_buffer_len]u8, code: u21, final: u8, mods: u16) ![]const u8 {
+    return encodeKittySeqEvent(buffer, code, final, mods, .press, false);
+}
+
+/// `report_events`(flag 2)까지 실은 형식: **event type 은 modifier 의 sub-field 다** —
+/// `CSI code ; mods : type final`. 수식자가 없어도 event type 을 실으려면 mods 자리에 `1` 을 둔다
+/// (명세: "When no modifiers are present, the modifiers field must have value 1").
+/// press(1)는 기본값이라 생략한다 — 켜지기 전과 **바이트가 같아** 기존 앱이 안 깨진다.
+fn encodeKittySeqEvent(
+    buffer: *[encoded_key_buffer_len]u8,
+    code: u21,
+    final: u8,
+    mods: u16,
+    event: KeyEventType,
+    report_events: bool,
+) ![]const u8 {
+    const with_event = report_events and event != .press;
+    const ev: u8 = @intFromEnum(event);
     if (final == 'u' or final == '~') {
+        if (with_event) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}:{d}{c}", .{ code, mods, ev, final });
         if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}{c}", .{ code, mods, final });
         return std.fmt.bufPrint(buffer, "\x1b[{d}{c}", .{ code, final });
     }
+    if (with_event) return std.fmt.bufPrint(buffer, "\x1b[1;{d}:{d}{c}", .{ mods, ev, final });
     if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[1;{d}{c}", .{ mods, final });
     return std.fmt.bufPrint(buffer, "\x1b[{c}", .{final});
 }
@@ -675,6 +717,41 @@ test "encodeKey: xterm legacy 수식자 — Ctrl+화살표가 단어 이동으�
     // Shift+Tab 은 파라미터가 아니라 전용 final(backtab).
     try eq("\x1b[Z", try encodeKey(.{ .key = .tab, .modifiers = .{ .shift = true } }, &buf, .{}));
     try eq("\t", try encodeKey(.{ .key = .tab, .modifiers = .{} }, &buf, .{}));
+}
+
+test "encodeKey kitty report_events: release/repeat 는 CSI u 키만, legacy·텍스트는 침묵" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const on: EncodeOptions = .{ .kitty_flags = 0b00011 }; // disambiguate + report_events
+    const off: EncodeOptions = .{ .kitty_flags = 0b00001 }; // disambiguate 만
+
+    // press 는 켜지기 전과 **바이트가 같다** — event type 1 은 기본값이라 생략한다(기존 앱 불변).
+    try std.testing.expectEqualStrings("\x1b[27u", try encodeKey(.{ .key = .escape }, &buf, on));
+    try std.testing.expectEqualStrings("\x1b[97;5u", try encodeKey(.{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } }, &buf, on));
+
+    // release/repeat 은 modifier 의 sub-field 로 실린다 — `CSI code ; mods : type u`.
+    try std.testing.expectEqualStrings("\x1b[27;1:3u", try encodeKey(.{ .key = .escape, .event_type = .release }, &buf, on));
+    try std.testing.expectEqualStrings("\x1b[27;1:2u", try encodeKey(.{ .key = .escape, .event_type = .repeat }, &buf, on));
+    // 수식자가 있으면 그 값 뒤에 붙는다.
+    try std.testing.expectEqualStrings("\x1b[97;5:3u", try encodeKey(.{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true }, .event_type = .release }, &buf, on));
+    // letter-final(화살표 등)도 같은 규칙 — 수식자가 없어도 mods 자리에 1 을 둔다(명세).
+    try std.testing.expectEqualStrings("\x1b[1;1:3A", try encodeKey(.{ .key = .arrow_up, .event_type = .release }, &buf, on));
+
+    // **legacy 예외 키의 release 는 침묵이다.** 안 그러면 Enter 를 뗄 때 `\r` 이 한 번 더 들어가
+    // 줄이 두 번 입력된다(명세: Enter/Tab/Backspace 는 report_all 없이는 release 가 없다).
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .enter, .event_type = .release }, &buf, on));
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .tab, .event_type = .release }, &buf, on));
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .backspace, .event_type = .release }, &buf, on));
+    // 평문 텍스트 키도 UTF-8 로만 나가므로 release 를 실을 자리가 없다 → 침묵.
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .release }, &buf, on));
+    // 단 수식자가 붙으면 그 키들도 CSI u 로 나가므로 release 가 보고된다.
+    try std.testing.expectEqualStrings("\x1b[13;2:3u", try encodeKey(.{ .key = .enter, .modifiers = .{ .shift = true }, .event_type = .release }, &buf, on));
+
+    // **flag 를 안 켜면 release/repeat 은 아예 안 나간다** — 요청하지 않은 이벤트를 보내면 앱이
+    // 입력을 두 배로 받는다.
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .escape, .event_type = .release }, &buf, off));
+    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .arrow_up, .event_type = .repeat }, &buf, off));
+    // 그때도 press 는 평소대로 나간다.
+    try std.testing.expectEqualStrings("\x1b[27u", try encodeKey(.{ .key = .escape }, &buf, off));
 }
 
 test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" {

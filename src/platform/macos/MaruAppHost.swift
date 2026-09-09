@@ -257,6 +257,23 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         return super.performKeyEquivalent(with: event)
     }
 
+    /// 키를 뗀 것을 코어에 알린다 — kitty keyboard 의 `report_events`(flag 2)를 켠 앱만 이것을 본다.
+    ///
+    /// **정책은 여기 두지 않는다.** 플래그가 꺼져 있으면 인코더(`encodeKitty`)가 조용히 버리고, 켜져
+    /// 있어도 legacy·텍스트로 나가는 키(수식자 없는 Enter/Tab/Backspace·평문 글자)의 release 는
+    /// 명세대로 침묵한다. Swift 가 미리 거르면 그 규칙이 두 곳에 갈라져 어긋난다.
+    ///
+    /// IME 경로는 타지 않는다 — 조합 확정·preedit 는 keyDown 이 소유하고, release 는 «뗐다» 는 사실만
+    /// 나르면 된다. 조합 중이면 marked text 를 건드리지 않고 그대로 흘린다.
+    override func keyUp(with event: NSEvent) {
+        guard var keyEvent = controller?.normalizedKeyEventForRelease(event) else {
+            super.keyUp(with: event)
+            return
+        }
+        keyEvent.is_release = 1
+        controller?.sendKeyEventForRelease(keyEvent)
+    }
+
     override func keyDown(with event: NSEvent) {
         controller?.cancelKeyHintHold() // 실제 키 입력 = 단축키 실행 → 보류 홀드 취소·표시 중이면 숨김(KH-4 — 깜빡임 방지)
         let m = event.modifierFlags
@@ -9125,6 +9142,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: 0,
             modifier_command: 0,
             is_repeat: 0,
+            is_release: 0,
             raw_key_code: 0
         )
         sendKeyEvent(keyEvent)
@@ -9137,6 +9155,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: 0,
             modifier_command: 0,
             is_repeat: 0,
+            is_release: 0,
             raw_key_code: 0
         )
         sendKeyEvent(enterEvent)
@@ -9171,6 +9190,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     modifier_option: 0,
                     modifier_command: 1,
                     is_repeat: 0,
+                    is_release: 0,
                     raw_key_code: 2
                 ))
             }
@@ -9194,6 +9214,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             modifier_option: 0,
                             modifier_command: 1,
                             is_repeat: 0,
+                            is_release: 0,
                             raw_key_code: 2
                         ))
                     }
@@ -9292,6 +9313,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         modifier_option: 0,
                         modifier_command: 1,
                         is_repeat: 0,
+                        is_release: 0,
                         raw_key_code: 14
                     ))
                 }
@@ -9527,6 +9549,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 modifier_option: 0,
                 modifier_command: 0,
                 is_repeat: 0,
+                is_release: 0,
                 raw_key_code: 36
             ))
         case 2:
@@ -9593,6 +9616,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 modifier_option: 0,
                 modifier_command: 0,
                 is_repeat: 0,
+                is_release: 0,
                 raw_key_code: 36
             ))
         default:
@@ -9820,6 +9844,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 modifier_option: 0,
                 modifier_command: 0,
                 is_repeat: 0,
+                is_release: 0,
                 raw_key_code: 36
             ))
             return
@@ -10102,7 +10127,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 codepoint: 0, base_codepoint: 0,
                 key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
                 modifier_shift: 0, modifier_control: 0, modifier_option: 0, modifier_command: 0,
-                is_repeat: 0, raw_key_code: 36
+                is_repeat: 0, is_release: 0, raw_key_code: 36
             ))
         default:
             break
@@ -10193,7 +10218,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 codepoint: 0, base_codepoint: 0,
                 key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
                 modifier_shift: 0, modifier_control: 0, modifier_option: 0, modifier_command: 0,
-                is_repeat: 0, raw_key_code: 36
+                is_repeat: 0, is_release: 0, raw_key_code: 36
             ))
         } else {
             DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -10265,6 +10290,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     modifier_option: 0,
                     modifier_command: 1,
                     is_repeat: 0,
+                    is_release: 0,
                     raw_key_code: 17
                 ))
             }
@@ -10344,6 +10370,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 modifier_option: 0,
                 modifier_command: 0,
                 is_repeat: 0,
+                is_release: 0,
                 raw_key_code: 53
             ))
             if let escaped = probe() {
@@ -10383,6 +10410,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             modifier_option: 1,
                             modifier_command: 1,
                             is_repeat: 0,
+                            is_release: 0,
                             raw_key_code: 17
                         ))
                     }
@@ -11048,6 +11076,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (x, y, w, h)
     }
 
+    /// keyUp 용 진입점 — `normalizedKeyEvent` 는 private 이라 view 가 직접 못 부른다.
+    func normalizedKeyEventForRelease(_ event: NSEvent) -> MaruAppHostKeyEvent? {
+        return normalizedKeyEvent(from: event)
+    }
+
+    /// keyUp 용 전송 — `sendKeyEvent` 는 private 이다. release 는 단축키·스크롤 판정을 타지 않고
+    /// 곧장 코어로 간다(그 판정은 keyDown 소유).
+    func sendKeyEventForRelease(_ event: MaruAppHostKeyEvent) {
+        sendKeyEvent(event)
+    }
+
     private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {
         var codepoint: UInt32 = 0
         var baseCodepoint: UInt32 = 0
@@ -11141,6 +11180,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: flags.contains(.option) ? 1 : 0,
             modifier_command: flags.contains(.command) ? 1 : 0,
             is_repeat: event.isARepeat ? 1 : 0,
+            is_release: 0,
             raw_key_code: UInt32(event.keyCode)
         )
     }

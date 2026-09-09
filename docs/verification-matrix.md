@@ -3394,10 +3394,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   게시한다. focused Debug·ReleaseFast gate는 role/profile/identity/digest/final-fence drift·fail-index·alias·unwind를
   닫으며, protected-tag read-only workflow의 구간별 기록 전에는 actual GitHub network 실측을 주장하지 않는다
   (`session-host-upgrade.md` §11.100g).
-  그 안의 credential-free semantic owner는 **계획**이다. `release_adapter_remote_release_semantics.zig`가
+  그 안의 credential-free semantic owner는 **구현**됐다. `release_adapter_remote_release_semantics.zig`가
   begun snapshot의 manifest/evidence exact size·SHA-256에 canonical bytes를 결속하고 context/release/3-asset/evidence/profile/
   predecessor 의미를 교차 검증한다. network·filesystem·attestation·final fence는 열지 않아 상위
-  transaction이 외부 효과 순서를 단일 소유하게 한다.
+  transaction이 외부 효과 순서를 단일 소유하게 한다. focused Debug·ReleaseFast 5개가
+  baseline/upgrade publication, metadata·role·profile·digest drift, noncanonical bytes, copied/reused upstream owner,
+  post-publication owned-byte mutation, pre-owned/aliased result·allocation fail-index unwind를 닫는다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

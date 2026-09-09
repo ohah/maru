@@ -452,6 +452,16 @@ const max_target_scan_bytes: usize = 512;
 /// 라벨은 어차피 160 B 라 더 늘려도 화면이 달라지지 않는다.
 const max_inner_scan_bytes: usize = 4096;
 
+/// 한 줄에서 **인자까지 뜯어 보는** `tools.…(` 후보의 최대 개수.
+///
+/// ⚠️ **이 못이 없으면 한 줄이 O(후보 × 창)** 이 된다. 후보마다 `firstArgString` 이 창 끝까지 갈 수
+/// 있으므로 4 KiB 창에 `tools.a(` 를 꽉 채우면 후보가 512 개까지 나오고, 한 줄에 2 MB 를 훑는다.
+/// 실측(2026-09-10): 그런 줄로만 채운 65 MB 문서가 **483 → 9 MB/s (53배)** 로 무너졌다.
+///
+/// 16 인 이유: 실측 186,135 개 입력에서 후보는 **최대 8 개**였고(9 개 이상 0.000%), 대상을 주는 첫
+/// 후보는 99.99% 가 **0 번째**였다. 관측 최대의 두 배를 두면 실데이터는 한 건도 안 잘린다.
+const max_inner_calls: usize = 16;
+
 const data_key = "\"data\":\"";
 const image_url_key = "\"image_url\":\"";
 const media_type_key = "\"media_type\":\"";
@@ -676,7 +686,16 @@ fn scanCodexToolCalls(
     const inner_limit = @min(scope.len, (if (outer_target) |t| t.start else 0) + max_inner_scan_bytes);
     const inner = if (outer_target) |t| pickCodexInnerCall(scope, t.start, inner_limit) else null;
     const name = if (inner) |v| v.name else outer_name;
-    const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
+    // ⚠️ **갈래는 바깥 이름으로 가른다.** 화면에 적을 이름은 안쪽 것이 낫지만, 갈래까지 안쪽
+    // 이름으로 가르면 `Activity.fromToolName` 이 모르는 이름(`exec_command`·`write_stdin`)이
+    // 들어와 **「실행」이 171,379 → 106 으로 무너진다**(실측 2026-09-10 · 74.6% 가 「그 밖」으로
+    // 이동). 이 슬라이스는 **무엇을 보여 주나**를 바꾸는 것이지 **어느 칸에 담기나**를 바꾸는
+    // 것이 아니다 — 그건 별개 축이다(§6).
+    //
+    // 그 축이 실제로 남아 있다: 계약 §2.1 표는 「읽기 … Codex `view_image`」라고 적는데, 바깥
+    // 이름이 `exec` 라 지금도 그 206 건이 **실행으로** 분류된다. 안쪽 이름을 쓰면 그것이 고쳐지지만
+    // 같은 변경이 위의 붕괴를 부르므로, 갈래표(`fromToolName`)를 먼저 넓혀야 한다.
+    const activity = Activity.fromToolName(scope[outer_name.start .. outer_name.start + outer_name.len]);
     const target = blk: {
         if (inner) |v| {
             // ⚠️ **빈 대상은 줄을 통째로 없앤다** — `appendActivity` 가 `target.len == 0` 이면 담지
@@ -755,18 +774,33 @@ const InnerCall = struct {
 /// **이스케이프된 원문 위에서 돈다.** 스캐너가 보는 것은 파일 바이트이므로 JS 의 `"` 는 `\"` 다 —
 /// 푸는 것은 라벨 층의 일이고(§4.2 「스캐너는 자리만 든다」), 여기서는 그 모양 그대로 센다.
 fn pickCodexInnerCall(line: []const u8, from: usize, limit: usize) ?InnerCall {
+    var examined: usize = 0;
+    return pickCodexInnerCallCounting(line, from, limit, &examined);
+}
+
+/// `pickCodexInnerCall` 과 같되 **인자를 뜯어 본 후보 수**를 돌려준다.
+///
+/// 이 수가 곧 한 줄의 일감 상한이다(`examined × 창`). 판정자가 시계 대신 이 수를 보므로 느린 CI
+/// 에서도 흔들리지 않는다 — 시계로 재면 「53배 느려짐」을 잡으려다 간헐 실패를 만든다.
+fn pickCodexInnerCallCounting(line: []const u8, from: usize, limit: usize, examined_out: *usize) ?InnerCall {
     var i = from;
     var first: ?InnerCall = null;
+    var examined: usize = 0;
+    defer examined_out.* = examined;
     while (std.mem.indexOfPos(u8, line, i, tools_prefix)) |t| {
         if (t >= limit) break;
+        if (examined >= max_inner_calls) break;
         const ns = t + tools_prefix.len;
         var ne = ns;
         while (ne < limit and isIdentByte(line[ne])) ne += 1;
         i = t + tools_prefix.len;
         if (ne == ns or ne >= limit or line[ne] != '(') continue;
+        // **인자를 뜯는 것만 센다.** `tools.` 라는 말만 있고 호출이 아닌 자리는 공짜다.
+        examined += 1;
+        var exhausted = false;
         const call: InnerCall = .{
             .name = .{ .start = ns, .len = ne - ns },
-            .target = firstArgString(line, ne, limit),
+            .target = firstArgString(line, ne, limit, &exhausted),
         };
         // **이름과 대상은 같은 호출에서 나와야 한다.** 한 스크립트가 여러 도구를 부를 수 있는데
         // (실측: `tools.get_goal({})` 다음에 `tools.exec_command({...})`), 첫 호출의 인자가 비었다고
@@ -776,6 +810,8 @@ fn pickCodexInnerCall(line: []const u8, from: usize, limit: usize) ?InnerCall {
         // 폴백이다 — 이름은 여전히 `exec` 보다 낫다.
         if (call.target != null) return call;
         if (first == null) first = call;
+        // 이 후보가 창을 다 쓰도록 값을 못 봤다 = 뒤 후보도 못 본다(같은 바이트의 뒷부분이다).
+        if (exhausted) break;
     }
     return first;
 }
@@ -794,7 +830,18 @@ fn isIdentByte(c: u8) bool {
 /// 「첫 문자열 값」이 맞는 근거도 실측이다 — 대표 필드를 실제로 뽑을 수 있던 147,581 건에서
 /// **99.99%** 가 일치했다. 빈 문자열을 건너뛰면 오히려 **63.5%** 로 떨어진다(`write_stdin` 의
 /// `chars` 는 정말 빈 값일 때가 많다 — Enter 만 보내는 것이다).
-fn firstArgString(line: []const u8, open: usize, limit: usize) ?Span {
+///
+/// 못 찾았을 때는 **왜 못 찾았는지**를 `exhausted` 로 알린다.
+///
+/// `exhausted = true` 는 「창(`limit`)을 다 쓰도록 값이 없었다」다. 이 신호가 중요한 이유는
+/// 뒤 후보들이 **같은 바이트의 뒷부분**만 보기 때문이다 — 앞 후보가 창 끝까지 훑고도 못 찾았으면
+/// 뒤 후보도 못 찾는다. 그래서 `pickCodexInnerCall` 이 거기서 멈출 수 있고, 한 줄이
+/// O(후보 × 창) 에서 O(창) 으로 내려온다(실측 9 → 483 MB/s).
+///
+/// 반대로 `exhausted = false` 는 구조를 보고 일찍 되돌아온 것이다(인자가 닫혔다·축약 프로퍼티).
+/// 그때는 뒤 후보가 아직 값을 줄 수 있으므로 멈추면 안 된다.
+fn firstArgString(line: []const u8, open: usize, limit: usize, exhausted: *bool) ?Span {
+    exhausted.* = false;
     var depth: usize = 0;
     var i = open;
     // **키와 값을 가른다.** `:` 를 본 뒤의 문자열만 값이다 — 안 가르면 `{"session_id":1,"chars":""}`
@@ -829,7 +876,10 @@ fn firstArgString(line: []const u8, open: usize, limit: usize) ?Span {
                             if (line[k + 1] == '"') break;
                             k += 1;
                         }
-                        if (k + 1 >= limit) return null;
+                        if (k + 1 >= limit) {
+                            exhausted.* = true;
+                            return null;
+                        }
                         i = k + 1;
                         continue;
                     }
@@ -837,10 +887,26 @@ fn firstArgString(line: []const u8, open: usize, limit: usize) ?Span {
                     var j = vs;
                     while (j + 1 < limit) : (j += 1) {
                         if (line[j] != '\\') continue;
-                        // `\\` 는 값 안의 백슬래시, `\"` 가 값의 끝이다.
+                        // `\"` 가 값의 끝이다.
                         if (line[j + 1] == '"') return .{ .start = vs, .len = j - vs };
+                        // 🔥 **이스케이프가 두 겹이다**(적대적 3회차 · 실측 1,625 건 = 활동 줄의 10.2%).
+                        // 파일 바이트 `\\` 는 JSON 이 감싼 **JS 소스의 백슬래시 하나**이고, 그 백슬래시는
+                        // 다시 **다음 JS 글자**를 감싼다. 그 다음 글자가 따옴표면 파일에는 `\"` 로 적히는데,
+                        // 여기서 안 건너뛰면 그것을 **값의 끝**으로 읽는다 — `rg -n \\"post-callback…` 이
+                        // 통째로 `rg -n \\` 로 잘렸다.
+                        if (line[j + 1] == '\\') {
+                            var k = j + 2; // JS 백슬래시를 지났다 — 이제 그것이 감싼 글자다
+                            if (k < limit and line[k] == '\\') k += 2 else k += 1;
+                            if (k - 1 >= limit) {
+                                exhausted.* = true; // 창 밖으로 나갔다
+                                return null;
+                            }
+                            j = k - 1; // 루프의 `j += 1` 이 `k` 로 만든다
+                            continue;
+                        }
                         j += 1;
                     }
+                    exhausted.* = true;
                     return null;
                 }
                 i += 1; // 그 밖의 이스케이프는 통째로 건너뛴다
@@ -856,13 +922,17 @@ fn firstArgString(line: []const u8, open: usize, limit: usize) ?Span {
                     }
                     if (line[j] == '\'') break;
                 }
-                if (j >= limit) return null;
+                if (j >= limit) {
+                    exhausted.* = true;
+                    return null;
+                }
                 if (seen_colon) return .{ .start = vs, .len = j - vs };
                 i = j;
             },
             else => {},
         }
     }
+    exhausted.* = true;
     return null;
 }
 
@@ -3433,6 +3503,122 @@ test "Codex 활동: 값 안에 홑따옴표와 두 겹 이스케이프가 섞인
     try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
     const target = doc[h.data_offset .. h.data_offset + h.data_len];
     try testing.expect(std.mem.startsWith(u8, target, "node --input-type=module"));
+}
+
+test "Codex 활동: 명령 안의 따옴표에서 잘리지 않는다 — 이스케이프가 두 겹이다 (적대적 3회차)" {
+    // 🔥 **실측 1,625 건(활동 줄의 10.2%)이 여기서 잘렸다.** JS 문자열의 따옴표는 파일에 `\"` 로
+    // 적히고, **그 안에서 다시 이스케이프된** 따옴표는 `\\\"` 로 적힌다(백슬래시가 JSON 한 겹 ·
+    // JS 한 겹). JS 층을 안 보면 그 `\"` 를 **값의 끝**으로 읽어 `rg -n \\` 만 남는다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_X","type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({cmd:\"rg -n \\\"needle\\\" src\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    // 따옴표를 지나 **명령 끝까지** 온다.
+    try testing.expectEqualStrings(
+        \\rg -n \\\"needle\\\" src
+    , doc[@intCast(h.data_offset)..][0..h.data_len]);
+}
+
+test "Codex 활동: 감싼 글자가 또 이스케이프면 그것까지 지난다 (적대적 3회차 · 실측 22 건)" {
+    // JS 소스의 `\\\\` 바로 뒤에 `\\"` 가 오는 자리다. 백슬래시 하나만 지나고 멈추면 그 다음
+    // `\\"` 를 **값의 끝**으로 읽는다 — 실측 300 MB 에서 22 건이 그 자리에서 잘렸다(가장 긴 것은
+    // 203 B 가 142 B 로).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_Y","type":"custom_tool_call","name":"exec","input":"await tools.exec_command({cmd:\"a\\\\\\\"b\"});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings(
+        \\a\\\\\\\"b
+    , doc[@intCast(h.data_offset)..][0..h.data_len]);
+}
+
+test "Codex 활동: 한 줄의 일감은 후보 수로 못 박힌다 (적대적 2회차 · 성능)" {
+    // 🔥 **이것이 없으면 한 줄이 O(후보 × 창) 이다.** 후보마다 `firstArgString` 이 4 KiB 창 끝까지
+    // 갈 수 있으므로, 창을 `tools.a(` 로 꽉 채우면 후보가 510 개 나오고 한 줄에 2 MB 를 훑는다.
+    // 실측(2026-09-10 · ReleaseFast): 그런 줄로만 채운 65 MB 문서가 **483 → 9 MB/s (53배)** 로
+    // 무너졌다. 못 둘을 박았다 — ① 창을 다 쓴 후보를 만나면 멈춘다(뒤 후보는 같은 바이트의
+    // 뒷부분만 본다), ② 그래도 `max_inner_calls` 로 개수를 자른다. 고친 뒤 **354 MB/s**.
+    //
+    // 시계로 재지 않는 이유: 느린 CI 에서 간헐 실패가 된다. **일감의 상한**인 후보 수를 직접 본다.
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    try line.appendSlice(testing.allocator, "{\\\"cmd\\\":\\\"ls\\\"};");
+    var k: usize = 0;
+    while (k < 510) : (k += 1) try line.appendSlice(testing.allocator, "tools.a(");
+
+    var examined: usize = 0;
+    const call = pickCodexInnerCallCounting(line.items, 0, @min(line.items.len, max_inner_scan_bytes), &examined);
+    // 값이 하나도 없으므로 첫 후보가 창을 다 쓰고, 거기서 멈춘다.
+    try testing.expectEqual(@as(usize, 1), examined);
+    try testing.expect(call != null);
+    try testing.expectEqualStrings("a", line.items[call.?.name.start .. call.?.name.start + call.?.name.len]);
+    try testing.expect(call.?.target == null);
+}
+
+test "Codex 활동: 구조상 일찍 되돌아오는 후보도 개수로 잘린다 (적대적 2회차 · 상한)" {
+    // 앞 판정자의 멈춤은 **창을 다 쓴** 후보만 잡는다. 축약 프로퍼티처럼 **구조를 보고 일찍**
+    // 되돌아오는 후보는 그 멈춤에 안 걸리므로, 그런 후보만 늘어놓으면 다시 후보 수만큼 돈다.
+    // `max_inner_calls` 가 두 번째 못이다.
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    var k: usize = 0;
+    while (k < 510) : (k += 1) try line.appendSlice(testing.allocator, "tools.a({x,y});");
+
+    var examined: usize = 0;
+    _ = pickCodexInnerCallCounting(line.items, 0, @min(line.items.len, max_inner_scan_bytes), &examined);
+    try testing.expectEqual(max_inner_calls, examined);
+}
+
+test "Codex 활동: 값이 뒤에 있으면 창을 다 써도 찾아낸다 (적대적 2회차 · 손실 없음)" {
+    // 멈춤이 **일찍 포기하는 것**이 되면 안 된다. 안 닫히는 호출이 잔뜩 앞서도, 그 첫 후보의 훑기가
+    // 뒤의 값을 그대로 지나가며 집는다 — 그래서 후보 하나로 끝난다(빠르면서 손실이 없다).
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    var k: usize = 0;
+    while (k < 200) : (k += 1) try line.appendSlice(testing.allocator, "tools.a(");
+    try line.appendSlice(testing.allocator, "tools.exec_command({\\\"cmd\\\":\\\"rg -n needle\\\"})");
+
+    var examined: usize = 0;
+    const call = pickCodexInnerCallCounting(line.items, 0, line.items.len, &examined);
+    try testing.expectEqual(@as(usize, 1), examined);
+    try testing.expect(call != null);
+    const t = call.?.target.?;
+    try testing.expectEqualStrings("rg -n needle", line.items[t.start .. t.start + t.len]);
+}
+
+test "Codex 활동: 이름은 안쪽 것이라도 **갈래는 바깥 이름**으로 가른다 (적대적 1회차)" {
+    // 🔥 **이것을 놓치면 「명령」 필터가 무너진다.** `Activity.fromToolName` 은 `exec` 를 실행으로
+    // 아는데 안쪽 이름(`exec_command`·`write_stdin`)은 모른다 — 갈래까지 안쪽 이름으로 가르면
+    // 실측 229,672 호출에서 **실행이 171,379 → 106** 으로 떨어지고 74.6% 가 「그 밖」으로 간다.
+    //
+    // 이 슬라이스는 **무엇을 보여 주나**를 바꾸는 것이지 **어느 칸에 담기나**를 바꾸는 것이 아니다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_X","type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"ls\"});\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    // 화면에 적을 이름은 **안쪽** 것이다.
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    // 갈래는 **바깥** 이름이 정한다 — 「명령」 필터가 이 줄을 계속 담아야 한다.
+    try testing.expectEqual(Activity.exec, h.activity);
 }
 
 test "Codex 활동: 껍데기를 못 벗기면 옛 동작 그대로다 (폴백)" {

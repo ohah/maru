@@ -5208,6 +5208,13 @@ expected subject name/SHA-256·repository·workflow·run·attempt·source·tag�
 directory/file identity·mode·link-count·size·digest를 다시 검증하고 같은 `Deadline.remaining()`의 fresh
 남은 시간만 child에 준다.
 
+상위 transaction은 `release_adapter_github_attestation.verifyDirectoryWith`와
+`release_adapter_remote_release_semantic_files.bindWith`를 조립한다. attestation command·certificate parser,
+descriptor reader 또는 manifest/evidence semantic parser를 다시 구현하지 않는다. 네 receipt는 해당 role의
+child가 끝난 직후에만 transaction-owned slot으로 이동하며, 그 뒤 어느 role·semantic·after-fence 단계가 실패해도
+게시된 slot만 canonical 역순으로 해제한다. `Assets`와 begun `Fence`는 caller-owned 입력이므로 실패 cleanup에서
+해제하거나 완료 상태로 위조하지 않는다.
+
 attestation 네 개가 모두 성공한 뒤 held manifest bytes를 bounded descriptor read로 복사해
 `release_manifest.parseCanonical`로 파싱한다. manifest는 protected `Context`, remote release ID/tag/source,
 그리고 remote DMG/frozen/evidence의 exact name/size/SHA-256과 교차 결속되어야 하며 manifest asset이
@@ -5232,6 +5239,9 @@ caller에 남는다. 같은 shared deadline은 첫 filesystem 검증 전과 sema
 exact 일치시켜야만 `Observation` owner를 게시한다. 성공 owner는 owned canonical manifest/evidence bytes와
 parsed value, 네 attestation receipt, completed fence·asset owner의 exact 주소를 seal에 포함하고 `revalidate`로
 전체 graph을 다시 확인한다. token, response/output scratch, raw endpoint/pathname은 결과에 보존하지 않는다.
+마지막 fence가 완료된 뒤에도 owner 게시 직전 shared deadline을 다시 확인한다. 이 최종 확인이 만료되면
+semantic owner와 네 receipt를 역순으로 해제하고 publication 0으로 닫되, 이미 완료된 caller-owned fence를
+미완료로 되돌렸다고 주장하지 않는다.
 
 result/context/fence/assets/deadline/pinned CLI/token/metadata response/attestation output의 백킹은 외부 동작 전에
 pairwise disjoint여야 한다. attestation/parse/binding/last-fence/deadline/CLI/file drift 실패는 publication 0으로

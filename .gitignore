@@ -18,3 +18,7 @@ tests/oracle/alacritty-dumper/target/
 .claude/worktrees/
 # 세션 pid·sessionId 가 든 런타임 lock. 기계마다 다르고 세션마다 바뀐다.
 .claude/scheduled_tasks.lock
+
+# 아이콘 생성기가 `.icns` 를 구울 때만 쓰는 재료다 — 구워 낸 `assets/icon/Maru.icns` 가
+# 커밋되고 그 안을 `render.py --check` 가 화소로 대조한다.
+assets/icon/Maru.iconset/

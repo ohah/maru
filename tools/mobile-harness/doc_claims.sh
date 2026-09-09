@@ -181,6 +181,10 @@ ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2
 # 판정자는 초록인데 번들에서만 키가 빠진다**. 자리가 하나면 갈릴 수가 없다.
 ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' src/platform/ios/Info.plist.in)"
 ck "하네스는 번들 템플릿 사본을 안 갖는다" 0 "$(ls tools/mobile-harness/Info.plist.in 2>/dev/null | wc -l | tr -d ' ')"
+# **없앤 파일을 문서가 계속 가리키고 있었다**(2026-09-10 에 잡았다). 위 판정자는 「그 파일이
+# 없다」를 세는데 계획서는 「지금은 거기 있다」고 적어 두어, 한 저장소가 같은 것을 두고 반대말을
+# 하고 있었다 — 그래도 아무 게이트도 안 붉었다. **자리를 옮기면 «가리키는 쪽»도 함께 옮긴다.**
+ck "문서도 그 사본을 안 가리킨다" 0 "$(grep -rl 'tools/mobile-harness/Info.plist.in' docs/ 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "§관성 — 숫자가 갈리지 않는다"
 # **관성은 코어 한 곳에서 돈다.** 본문·키바·설정이 같은 값으로 흘러야 하고(다르면 사용자는

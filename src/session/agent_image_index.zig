@@ -444,6 +444,14 @@ const arguments_key = "\"arguments\":\"";
 /// 「이 자리가 어디서 시작하는가」만 알면 되고, 전문은 펼칠 때 파일에서 다시 읽는다.
 const max_target_scan_bytes: usize = 512;
 
+/// 안쪽 호출(`tools.X(...)`)의 인자를 훑는 최대 바이트. **바깥보다 넉넉해야 한다** — 껍데기
+/// (`text(await tools.exec_command({cmd:`)가 앞에서 자리를 먹고, 값 자체도 여러 줄 명령이면 길다.
+///
+/// **실측이 값을 정했다**(2026-09-10): 이 값이 512 B 였을 때 실제 세션에서 **17 줄 중 2 줄**이
+/// 값의 닫는 따옴표를 못 봐 폴백했다(`node --input-type=module <<'JS' …`). 4 KiB 면 그 줄들이 덮이고,
+/// 라벨은 어차피 160 B 라 더 늘려도 화면이 달라지지 않는다.
+const max_inner_scan_bytes: usize = 4096;
+
 const data_key = "\"data\":\"";
 const image_url_key = "\"image_url\":\"";
 const media_type_key = "\"media_type\":\"";
@@ -655,14 +663,37 @@ fn scanCodexToolCalls(
     const next = std.mem.indexOfPos(u8, line, after + 1, codex_custom_tool_call_marker) orelse
         std.mem.indexOfPos(u8, line, after + 1, codex_function_call_marker) orelse line.len;
     const scope = line[0..next];
-    const name = findQuotedValue(scope, after, name_key) orelse return;
+    const outer_name = findQuotedValue(scope, after, name_key) orelse return;
+    const outer_target = pickCodexTarget(scope, after);
+    // **껍데기를 벗긴다**(`pickCodexInnerCall` 의 근거). 못 벗기면 옛 동작 그대로다 —
+    // 4~6 월 세션(실측 35,126 건)은 애초에 이 모양이 아니고, 그때는 폴백이 정답이다.
+    // ⚠️ **여기서는 `outer_target` 의 끝을 창으로 쓰면 안 된다.** 그 끝은 `max_target_scan_bytes`
+    // (512 B)에 잘린 자리다 — 라벨에 들어갈 몫만 알면 되기 때문이다(§4.2). 그런데 안쪽 인자는 그보다
+    // 길 때가 많아(실측: `node --input-type=module <<'JS' …` 같은 여러 줄 명령), 잘린 창 안에서는
+    // **값의 닫는 따옴표를 못 봐** 통째로 폴백했다. 실제 화면에서 절반만 벗겨진 것이 그 자국이다.
+    //
+    // 안쪽 명령도 **라벨에 들어갈 몫**만 있으면 되므로 창을 그만큼 따로 연다.
+    const inner_limit = @min(scope.len, (if (outer_target) |t| t.start else 0) + max_inner_scan_bytes);
+    const inner = if (outer_target) |t| pickCodexInnerCall(scope, t.start, inner_limit) else null;
+    const name = if (inner) |v| v.name else outer_name;
     const activity = Activity.fromToolName(scope[name.start .. name.start + name.len]);
-    const target = pickCodexTarget(scope, after) orelse name;
+    const target = blk: {
+        if (inner) |v| {
+            // ⚠️ **빈 대상은 줄을 통째로 없앤다** — `appendActivity` 가 `target.len == 0` 이면 담지
+            // 않는다. `write_stdin` 의 `chars` 는 실측상 빈 값일 때가 많아(Enter 만 보내는 것이다)
+            // 그대로 쓰면 **55,416 건이 목록에서 사라진다**. 그때는 껍데기라도 보이는 편이 낫다.
+            if (v.target) |tt| {
+                if (tt.len > 0) break :blk tt;
+            }
+        }
+        break :blk outer_target orelse name;
+    };
     // Codex 의 `call_id` 는 `type` **앞에** 올 수 있어 범위의 처음부터 찾는다(범위는 위에서 닫았다).
     const id = findQuotedValueFull(scope, 0, call_id_key);
     // Codex 의 시각은 **줄 머리**다(실측 자리 중앙·p99·최대 모두 1) — 마커 뒤에서 찾으면 못 본다.
     const time_rel = timestampKeyRel(scope, 0, codex_time_window);
-    // Codex 는 대상이 곧 명령이다(`input`/`arguments`) — 따로 들 것이 없다.
+    // **대상이 곧 명령이다** — Codex 는 사람이 읽는 설명 필드가 없다(§2.2). 안쪽 호출을 벗겼으면
+    // 그 인자의 첫 문자열 값이 곧 명령이고, 못 벗겼으면 `input` 전체가 그것을 대신한다.
     try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel, 0);
 }
 
@@ -689,6 +720,154 @@ fn pickCodexTarget(line: []const u8, from: usize) ?Span {
     if (findEscapedValue(line, from, arguments_key)) |v| return v;
     return null;
 }
+
+/// Codex 의 `exec` 는 **셸이 아니라 JavaScript 를 받는다**(2026-07 부터). 모델이 그 안에서
+/// `tools.<이름>({...})` 을 부르므로, provider 가 준 이름과 `input` 첫 줄은 **껍데기**다.
+///
+/// **실측이 이 규칙을 요구했다**(2026-09-10, 이 맥의 Codex 세션 229,634 호출):
+///
+/// | | 값 |
+/// | --- | ---: |
+/// | `tools.X(` 모양 | **74.6%**(2026-09 만 보면 **93.7%**) |
+/// | 화면의 이름 칸이 `exec` 하나 | **74.4%** |
+/// | JS 껍데기가 먹는 라벨 | 평균 **34.5 B**(상한 160 B 의 22%) |
+///
+/// 안쪽 이름은 `exec_command` 91,431 · `write_stdin` 55,416 · `apply_patch` 21,874 로 갈린다 —
+/// 「무엇을 돌렸나」가 이름 칸에서 비로소 답이 된다.
+///
+/// ⚠️ **형식이 두 달 만에 뒤집혔다.** 2026-06 까지 이 모양은 **0%** 였다. 그래서 이 규칙은 **언제나
+/// 물러날 자리를 갖는다** — 못 찾으면 옛 동작 그대로다(4~6월 세션 35,126 건이 지금도 그 길로 간다).
+///
+/// **베이스**(§11): 공개 뷰어 [codex-trace](https://github.com/PixelPaw-Labs/codex-trace)(MIT)·
+/// [codex-transcript-viewer](https://github.com/masonc15/codex-transcript-viewer)(MIT)를 확인했고
+/// **둘 다 안쪽 이름을 안 꺼낸다**(바깥 `name` 과 raw input 을 그대로 쓴다). 전문을 펼쳐 보이는 화면은
+/// 껍데기가 문제되지 않기 때문이다 — **한 줄 목록이라는 이 뷰의 제약에서만** 필요한 규칙이라 직접 세웠다.
+/// 코드 표현은 옮기지 않았고, 규칙은 위 실측이 정했다.
+const InnerCall = struct {
+    /// 안쪽 도구 이름(`exec_command` 등)의 자리.
+    name: Span,
+    /// 화면에 적을 대상 — 인자의 **첫 문자열 값**. 못 고르면 `null`(폴백).
+    target: ?Span,
+};
+
+/// `tools.<이름>(` 를 찾아 안쪽 이름과 대상을 고른다.
+///
+/// **이스케이프된 원문 위에서 돈다.** 스캐너가 보는 것은 파일 바이트이므로 JS 의 `"` 는 `\"` 다 —
+/// 푸는 것은 라벨 층의 일이고(§4.2 「스캐너는 자리만 든다」), 여기서는 그 모양 그대로 센다.
+fn pickCodexInnerCall(line: []const u8, from: usize, limit: usize) ?InnerCall {
+    var i = from;
+    var first: ?InnerCall = null;
+    while (std.mem.indexOfPos(u8, line, i, tools_prefix)) |t| {
+        if (t >= limit) break;
+        const ns = t + tools_prefix.len;
+        var ne = ns;
+        while (ne < limit and isIdentByte(line[ne])) ne += 1;
+        i = t + tools_prefix.len;
+        if (ne == ns or ne >= limit or line[ne] != '(') continue;
+        const call: InnerCall = .{
+            .name = .{ .start = ns, .len = ne - ns },
+            .target = firstArgString(line, ne, limit),
+        };
+        // **이름과 대상은 같은 호출에서 나와야 한다.** 한 스크립트가 여러 도구를 부를 수 있는데
+        // (실측: `tools.get_goal({})` 다음에 `tools.exec_command({...})`), 첫 호출의 인자가 비었다고
+        // 그 자리에 **뒤 호출의 값**을 쓰면 이름과 대상이 다른 일을 가리킨다.
+        //
+        // 그래서 **대상까지 있는 첫 호출**을 고른다. 하나도 없으면 첫 호출의 이름만 쓰고 대상은
+        // 폴백이다 — 이름은 여전히 `exec` 보다 낫다.
+        if (call.target != null) return call;
+        if (first == null) first = call;
+    }
+    return first;
+}
+
+fn isIdentByte(c: u8) bool {
+    return c == '_' or (c >= '0' and c <= '9') or
+        (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
+}
+
+/// 여는 괄호(`open`)부터 **짝이 맞는 닫는 괄호**까지가 인자다. 그 **안에서만** 첫 문자열 값을 고른다.
+///
+/// ⚠️ **범위를 안 지키면 남의 값을 집는다**(적대적 검증). `tools.get_goal({})` 처럼 인자가 비면
+/// 뒤에 이어지는 **다른 호출**의 값을 집었고, `{cmd, workdir:"…"}` 처럼 첫 키가 **축약 프로퍼티**면
+/// 그 다음 키(`workdir`)를 집어 줄마다 같은 디렉터리가 떴다. 둘 다 **폴백이 정직한** 자리다.
+///
+/// 「첫 문자열 값」이 맞는 근거도 실측이다 — 대표 필드를 실제로 뽑을 수 있던 147,581 건에서
+/// **99.99%** 가 일치했다. 빈 문자열을 건너뛰면 오히려 **63.5%** 로 떨어진다(`write_stdin` 의
+/// `chars` 는 정말 빈 값일 때가 많다 — Enter 만 보내는 것이다).
+fn firstArgString(line: []const u8, open: usize, limit: usize) ?Span {
+    var depth: usize = 0;
+    var i = open;
+    // **키와 값을 가른다.** `:` 를 본 뒤의 문자열만 값이다 — 안 가르면 `{"session_id":1,"chars":""}`
+    // 에서 키 `chars` 를 값으로 집는다(판정자가 그것을 잡았다).
+    var seen_colon = false;
+    // 첫 프로퍼티를 지났나. **축약은 첫 키에서만** 폴백 사유다(실측이 그 자리만 봤다).
+    var passed_first = false;
+    while (i < limit) : (i += 1) {
+        const c = line[i];
+        switch (c) {
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return null; // 인자가 끝났다 — 문자열 값이 없었다
+            },
+            ':' => seen_colon = true,
+            ',' => {
+                // 첫 키가 `:` 없이 끝났다 = **축약 프로퍼티**. 값이 이 줄에 없다(실측 537 건).
+                if (!seen_colon and !passed_first) return null;
+                passed_first = true;
+                seen_colon = false; // 다음은 다시 키다
+            },
+            '\\' => {
+                // 파일 바이트에서 JS 문자열의 따옴표는 `\"` 다.
+                if (i + 1 < limit and line[i + 1] == '"') {
+                    if (!seen_colon) {
+                        // 키 쪽 문자열 — 통째로 건너뛴다(그 안의 `:`·`,` 를 구조로 오해하지 않게).
+                        var k = i + 2;
+                        while (k + 1 < limit) : (k += 1) {
+                            if (line[k] != '\\') continue;
+                            if (line[k + 1] == '"') break;
+                            k += 1;
+                        }
+                        if (k + 1 >= limit) return null;
+                        i = k + 1;
+                        continue;
+                    }
+                    const vs = i + 2;
+                    var j = vs;
+                    while (j + 1 < limit) : (j += 1) {
+                        if (line[j] != '\\') continue;
+                        // `\\` 는 값 안의 백슬래시, `\"` 가 값의 끝이다.
+                        if (line[j + 1] == '"') return .{ .start = vs, .len = j - vs };
+                        j += 1;
+                    }
+                    return null;
+                }
+                i += 1; // 그 밖의 이스케이프는 통째로 건너뛴다
+            },
+            '\'' => {
+                // JS 홑따옴표 문자열 — 파일 바이트에서 이스케이프가 없다.
+                const vs = i + 1;
+                var j = vs;
+                while (j < limit) : (j += 1) {
+                    if (line[j] == '\\') {
+                        j += 1;
+                        continue;
+                    }
+                    if (line[j] == '\'') break;
+                }
+                if (j >= limit) return null;
+                if (seen_colon) return .{ .start = vs, .len = j - vs };
+                i = j;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// `tools.` — 안쪽 호출의 표지.
+const tools_prefix = "tools.";
 
 /// 이스케이프를 인지해 따옴표 값의 끝을 찾는다.
 ///
@@ -3175,6 +3354,158 @@ test "활동 결말: 본문의 자리를 든다 — 펼침이 그 바이트를 �
     // 그 자리에서 시작하는 바이트가 **본문의 첫 글자**여야 한다(파일 절대 오프셋이다).
     try testing.expect(r.body.offset > 0);
     try testing.expectEqualStrings("first", doc[r.body.offset..][0..5]);
+}
+
+test "Codex 활동: JS 껍데기를 벗겨 안쪽 도구와 명령을 든다 (2026-07 형식)" {
+    // **실측이 이 규칙을 요구했다**(2026-09-10, 이 맥의 Codex 세션 229,634 호출): `exec` 가 셸이
+    // 아니라 **JavaScript** 를 받게 되면서(2026-07 부터 · 2026-09 는 93.7%), 화면의 이름 칸은
+    // **74.4% 가 `exec` 하나**가 되고 대상 칸은 줄마다 `const r = await tools.exec_command({"cmd":"`
+    // 로 시작했다 — 「무엇을 돌렸나」를 훑는 화면인데 두 칸이 정보 0 이었다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_A","type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"rg -n foo src/\",\"workdir\":\"/tmp\"});\ntext(r);\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    // 이름은 **안쪽** 것이다 — 바깥 `exec` 는 껍데기다.
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    // 대상은 인자의 **첫 문자열 값**. 파일 바이트라 이스케이프는 그대로다(푸는 것은 라벨 층의 일).
+    try testing.expectEqualStrings("rg -n foo src/", doc[h.data_offset .. h.data_offset + h.data_len]);
+}
+
+test "Codex 활동: 실제 모양 — 맨몸 키 · 홑따옴표 · 두 겹 이스케이프 (2026-09 실측)" {
+    // **실측 그대로의 바이트다.** 키가 `\"cmd\"` 가 아니라 **맨몸 `cmd:`** 인 것이 62.6% 이고,
+    // 값 안에는 홑따옴표(`<<'JS'`)와 **두 겹 이스케이프**(`\\n`)가 섞인다. 합성 픽스처만 보면
+    // 이 셋을 다 놓친다 — 실제 화면이 안 벗겨지는 것을 보고서야 드러났다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_R","name":"exec","input":"text(await tools.exec_command({cmd:\"node --input-type=module <<'JS'\\nimport assert from 'node:assert/strict';\\nJS\",max_output_tokens:16000}));\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    const target = doc[h.data_offset .. h.data_offset + h.data_len];
+    try testing.expect(std.mem.startsWith(u8, target, "node --input-type=module"));
+    // 껍데기(`text(await tools.`)가 남아 있으면 안 벗겨진 것이다.
+    try testing.expect(std.mem.indexOf(u8, target, "tools.") == null);
+}
+
+test "Codex 활동: 실제 rollout 줄 그대로 (2026-09-05 · 경로만 가림)" {
+    // **의역하지 않는다.** 합성 픽스처는 통과하는데 실제 화면이 안 벗겨졌다 — 그 차이를 잡으려면
+    // 파일에서 그대로 떠 온 바이트여야 한다(개인 경로만 `/Users/me` 로 가렸다, 계약 §5).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"timestamp":"2026-09-05T09:39:56.951Z","ordinal":30,"type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_01e0015f0a49ad0f016a9be36aeffc87d0b40836b75d2a9258","status":"completed","call_id":"call_ihhiu7Ta2gwS1LTyLB23Glkl","name":"exec","input":"text(await tools.exec_command({cmd:\"rg -n 'hwpjs' /Users/me/.codex/memories/MEMORY.md; git status --short; rg --files js src/wasm tests/cfb; pwd\",\"max_output_tokens\":4000}));\n","internal_chat_message_metadata_passthrough":{"turn_id":"01a070f0-3dd7-73d1-809b-f525ea72fe27","create_time":1788601190.770177}}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    const target = doc[h.data_offset .. h.data_offset + h.data_len];
+    try testing.expect(std.mem.indexOf(u8, target, "tools.") == null);
+}
+
+test "Codex 활동: 값 안에 홑따옴표와 두 겹 이스케이프가 섞인 실제 줄 (2026-09-05)" {
+    // **화면에서 이 줄만 안 벗겨졌다.** 다른 줄들은 벗겨지는데 `node --input-type=module <<'JS'`
+    // 만 껍데기가 남았다 — 값 안의 **홑따옴표**와 **두 겹 이스케이프**(`\\n`)가 원인 후보다.
+    // 실제 바이트로 재야 그 차이가 잡힌다(경로만 `/Users/me` 로 가렸다).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"timestamp":"2026-09-05T09:50:40.477Z","ordinal":149,"type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_01e0015f0a49ad0f016a9be5db459c87d08bbd7dc33107372a","status":"completed","call_id":"call_00rJkvNIE09dCxmIMHxfubxo","name":"exec","input":"text(await tools.exec_command({cmd:\"node --input-type=module <<'JS'\\nimport assert from 'node:assert/strict';\\nimport {readFileSync} from 'node:fs';\\nimport {runInNewContext} from 'node:vm';\\nimport {createCfbReader} from './js/cfb.mjs';\\nimport {v4File} from './tests/cfb/contract-fixtures.mjs';\\nconst api=await createCfbReader(readFileSync('/tmp/hwpjs-boundary-rereview.rfLfUp/out/bin/hwpjs.wasm'));\\nlet searches=0, rejected=0, accepted=0;\\nconst fixture=v4File();fixture[12288]=173;\\nconst padded=new Uint8Array(fixture.length+31);padded.set(fixture,17);\\nconst foreign=runInNewContext('const a=new Uint8Array(bytes.length+31);a.set(bytes,17);a.subarray(17,17+bytes.length)',{bytes:Array.from(fixture)});\\nconst shared=new Uint8Array(new SharedArrayBuffer(fixture.length));shared.set(fixture);\\nfor(const input of [fixture,Array.from(fixture),Uint8Array.from(fixture).buffer,padded.subarray(17,17+fixture.length),foreign,shared]){const d=api.parse(input,{raw:true});assert.equal(d.FileIndex[1].content[0],173);assert.deepEqual(d.raw.header,Uint8Array.from(fixture.subarray(0,4096)));accepted++;}\\nconst saved=api.parse(fixture);const detached=Uint8Array.from(fixture).buffer;structuredClone(detached,{transfer:[detached]});\\nfor(const input of [null,undefined,{},new DataView(fixture.buffer),Uint16Array.from(fixture),new Uint8ClampedArray(fixture),[1,,3],detached,{[Symbol.toStringTag]:'ArrayBuffer',byteLength:fixture.length}]){assert.throws(()=>api.parse(input));assert.equal(api.find(saved,'\\\\ufffd'),saved.FileIndex[1]);rejected++;}\\nfor(const name of ['\\\\ufeffX','X\\\\ufeff','\\\\ufeff\\\\ufeff','\\\\ufffd','😀','한글','Straße','Σςσ','\\\\u0001Data','e\\\\u0301']){\\n const b=v4File();b.fill(0,8320,8384);const encoded=Buffer.from(name+'\\\\0','utf16le');encoded.copy(b,8320);b.writeUInt16LE(encoded.length,8384);\\n const d=api.parse(b);assert.equal(d.FileIndex[1].name,name);\\n for(let phase=0;phase<4;phase++){\\n  if(phase===1) api.parse(fixture);\\n  if(phase===2) assert.throws(()=>api.parse(new Uint8Array(0)));\\n  if(phase===3) api.close();\\n  for(const query of [name,'/'+name]){assert.equal(api.find(d,query),d.FileIndex[1],JSON.stringify({name,query,phase}));searches++;}\\n }\\n}\\napi.close();api.close();\\nconsole.log(JSON.stringify({acceptedByteVariants:accepted,rejectedInputsAndRetainedState:rejected,unicodeLifecycleSearches:searches,passed:true}));\\nJS\\n git status --short\",\"yield_time_ms\":1000,\"max_output_tokens\":1700}));\n","internal_chat_message_metadata_passthrough":{"turn_id":"01a070f8-91fa-7e12-9458-f6c6d5ea4f19","create_time":1788601809.083574}}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    const target = doc[h.data_offset .. h.data_offset + h.data_len];
+    try testing.expect(std.mem.startsWith(u8, target, "node --input-type=module"));
+}
+
+test "Codex 활동: 껍데기를 못 벗기면 옛 동작 그대로다 (폴백)" {
+    // **형식이 두 달 만에 뒤집혔다** — 2026-06 까지 `tools.X(` 는 0% 였고 그때 세션(실측 35,126 건)이
+    // 지금도 남아 있다. 규칙은 **언제나 물러날 자리**를 가져야 한다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_B","type":"custom_tool_call","name":"exec","input":"ls -la"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec", doc[h.name_rel .. h.name_rel + h.name_len]);
+    try testing.expectEqualStrings("ls -la", doc[h.data_offset .. h.data_offset + h.data_len]);
+}
+
+test "Codex 활동: 인자 범위를 벗어나 남의 값을 집지 않는다 (적대적)" {
+    // 두 결함이 같은 뿌리였다 — **인자 범위를 안 지키면** ⑴ `tools.get_goal({})` 처럼 인자가 빈
+    // 호출이 **뒤에 이어지는 다른 호출**의 값을 집고, ⑵ `{cmd, workdir:"…"}` 처럼 첫 키가
+    // **축약 프로퍼티**면 그 다음 키를 집어 줄마다 같은 디렉터리가 떴다(실측 338 건).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    // ⑴ 빈 인자 — 뒤의 `exec_command` 값을 집으면 안 된다. 이름은 안쪽 것을 쓰되 대상은 폴백이다.
+    const doc_empty =
+        \\{"payload":{"call_id":"call_C","type":"custom_tool_call","name":"exec","input":"const g = await tools.get_goal({});\nconst r = await tools.exec_command({\"cmd\":\"echo hi\"});\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc_empty, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    // **이름과 대상이 같은 호출에서** 나와야 한다. 첫 호출(`get_goal`)은 인자가 비었으므로 그 이름에
+    // 뒤 호출의 값을 붙이면 둘이 다른 일을 가리킨다 — **대상까지 있는 첫 호출**을 고른다.
+    try testing.expectEqualStrings("exec_command", doc_empty[out.items[0].name_rel..][0.."exec_command".len]);
+    try testing.expectEqualStrings("echo hi", doc_empty[out.items[0].data_offset..][0.."echo hi".len]);
+
+    // ⑵ 축약 프로퍼티 — `workdir` 을 집으면 안 된다.
+    out.clearRetainingCapacity();
+    const doc_short =
+        \\{"payload":{"call_id":"call_D","type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({cmd, workdir:\"/Users/me/repo\"});\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc_short, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqualStrings("exec_command", doc_short[out.items[0].name_rel..][0.."exec_command".len]);
+    // 대상은 **폴백**(입력 전체)이어야 한다 — `workdir` 을 집으면 줄마다 같은 디렉터리가 뜬다.
+    const t2 = doc_short[out.items[0].data_offset..][0..out.items[0].data_len];
+    try testing.expect(std.mem.startsWith(u8, t2, "const r = await"));
+}
+
+test "Codex 활동: 빈 문자열도 값이다 — 건너뛰지 않는다 (적대적)" {
+    // 「빈 값은 건너뛴다」를 넣으려다 실측이 기각했다: 일치율이 **99.99% → 63.5%** 로 떨어진다.
+    // `write_stdin` 의 `chars` 는 **정말 빈 값일 때가 많다**(Enter 만 보내는 것이다).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_E","type":"custom_tool_call","name":"exec","input":"const r = await tools.write_stdin({\"session_id\":14298,\"chars\":\"\",\"yield_time_ms\":1000});\n"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    // 이름은 안쪽 것으로 나아진다.
+    try testing.expectEqualStrings("write_stdin", doc[h.name_rel .. h.name_rel + h.name_len]);
+    // ⚠️ **대상은 폴백이다.** `chars` 가 빈 값이라 그대로 쓰면 `appendActivity` 가 이 줄을 통째로
+    // 버린다(실측 55,416 건이 사라진다) — 껍데기라도 보이는 편이 낫다. 줄이 **살아 있는 것**이
+    // 이 판정자가 지키는 것이다.
+    try testing.expect(h.data_len > 0);
+    try testing.expect(std.mem.indexOf(u8, doc[h.data_offset .. h.data_offset + h.data_len], "write_stdin") != null);
 }
 
 test "활동 결말: Codex 결과가 배열이면 자리는 여는 [ 다음이고 그 사실을 든다 (적대적 2회차)" {

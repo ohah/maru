@@ -209,6 +209,60 @@ fn decrypt(
     return scratch[0..encrypted.len];
 }
 
+/// 평문 개인키 blob 을 **적는다**(`parse` 의 역 — `openssh-key-v1`, `none`/`none`).
+///
+/// **읽는 자리와 같은 파일이다.** 형식이 두 벌이 되면 "우리가 쓴 키를 우리가 못 읽는" 날이 온다 —
+/// 그때 사용자에게 보이는 것은 「접속이 안 된다」뿐이다. 아래 왕복 테스트가 그 둘을 맞댄다.
+///
+/// **암호를 안 건다.** 이것을 쓰는 자리는 폰이고(M16b-2), 거기서는 파일을 OS 저장소가 지킨다
+/// (계약 §3.4) — 물어볼 암호가 없고, 물으면 배경에서 세션을 되살릴 때 풀 수가 없다.
+///
+/// **`checkint` 은 공개키에서 뽑는다.** OpenSSH 는 난수를 쓰지만 그 값의 쓸모는 **암호가 맞았나**
+/// 하나뿐이고(`PROTOCOL.key` §3), 암호가 없는 키에는 확인할 것이 없다. 이 층에는 난수가 없으므로
+/// (sans-io — 계약 §2) 호출자에게 씨앗을 하나 더 받는 대신 **이미 공개인 값**에서 뽑는다: 새는
+/// 것이 없고, 두 번 적는 두 사본이 같기만 하면 형식이 성립한다.
+pub fn encodePlain(secret: [64]u8, comment: []const u8, out: []u8) Error![]const u8 {
+    const public: [hostkey.key_len]u8 = secret[32..64].*;
+    // **씨앗에서 유도한 공개키와 같아야 한다.** 안 맞는 64바이트를 그대로 적으면 파일은 만들어지고
+    // 서명만 조용히 틀린다 — `parse` 가 같은 검사를 하는 이유와 같다(그쪽 주석의 실측).
+    const derived = Ed25519.KeyPair.generateDeterministic(secret[0..32].*) catch return Error.MalformedKey;
+    if (!std.mem.eql(u8, &public, &derived.public_key.toBytes())) return Error.MalformedKey;
+
+    var pub_buf: [64]u8 = undefined;
+    const pub_blob = try hostkey.encodePublicKey(&pub_buf, public);
+
+    var w = wire.Writer.init(out);
+    w.raw(magic) catch return Error.ShortBuffer;
+    w.string(cipher_none) catch return Error.ShortBuffer;
+    w.string(kdf_none) catch return Error.ShortBuffer;
+    w.string("") catch return Error.ShortBuffer;
+    w.u32be(1) catch return Error.ShortBuffer; // 키 하나 — `parse` 도 하나만 받는다
+    w.string(pub_blob) catch return Error.ShortBuffer;
+
+    // 개인키 목록은 **길이 앞머리를 가진 한 덩어리**라, 안쪽을 먼저 적고 그 길이를 앞에 붙인다.
+    const check = std.mem.readInt(u32, public[0..4], .big);
+    var inner_buf: [256]u8 = undefined;
+    var iw = wire.Writer.init(&inner_buf);
+    iw.u32be(check) catch return Error.ShortBuffer;
+    iw.u32be(check) catch return Error.ShortBuffer;
+    iw.string(hostkey.alg_name) catch return Error.ShortBuffer;
+    iw.string(&public) catch return Error.ShortBuffer;
+    iw.string(&secret) catch return Error.ShortBuffer;
+    iw.string(comment) catch return Error.ShortBuffer;
+    // 패딩은 `1, 2, 3, …` 이고 **블록 배수까지** 채운다(암호가 없으면 블록은 8이다).
+    // `parse` 가 이 값을 그대로 검사하므로 여기서 어기면 우리 키를 우리가 거절한다.
+    var pad: u8 = 1;
+    while (iw.written().len % 8 != 0) : (pad += 1) iw.byte(pad) catch return Error.ShortBuffer;
+
+    w.string(iw.written()) catch {
+        std.crypto.secureZero(u8, &inner_buf);
+        return Error.ShortBuffer;
+    };
+    // **중간 버퍼에 개인키가 남는다** — 이 함수 밖으로 나가기 전에 지운다(계약 §4 의 같은 규율).
+    std.crypto.secureZero(u8, &inner_buf);
+    return w.written();
+}
+
 fn parsePrivateSection(plain: []const u8) Error!Parsed {
     var r = wire.Reader.init(plain);
     const check1 = try r.u32be();
@@ -338,6 +392,83 @@ test "암호가 틀리면 거절한다" {
     // 맞는 암호는 통과한다 — 위가 "무조건 거절" 이 아님을 못박는다.
     var ok = try parse(&encrypted_key, vector_passphrase, &scratch, .{});
     ok.clear();
+}
+
+test "적은 것을 그대로 읽는다 — 형식이 한 벌이다 (M16b-2)" {
+    // **쓰기와 읽기가 갈리면 「우리가 쓴 키를 우리가 못 읽는다」가 된다.** 그 어긋남은 폰에서
+    // 「접속이 안 된다」로만 보이므로, 여기서 왕복을 맞댄다.
+    const seed: [32]u8 = @splat(7);
+    const pair = try Ed25519.KeyPair.generateDeterministic(seed);
+    var secret: [64]u8 = undefined;
+    @memcpy(secret[0..32], &seed);
+    @memcpy(secret[32..64], &pair.public_key.toBytes());
+
+    var out: [1024]u8 = undefined;
+    const blob = try encodePlain(secret, "maru", &out);
+
+    var scratch: [1024]u8 = undefined;
+    var parsed = try parse(blob, "", &scratch, .{});
+    defer parsed.clear();
+    try std.testing.expectEqualSlices(u8, &secret, &parsed.secret);
+    try std.testing.expectEqualSlices(u8, secret[32..64], &parsed.public);
+}
+
+test "적은 키는 «남의 파서가 보기에도» 그 형식이다 (M16b-2)" {
+    // 왕복만 재면 **둘이 같이 틀려도** 초록이다(우리 인코더가 만든 방언을 우리 파서가 받는다).
+    // 그래서 이 판정자는 바이트를 **명세로** 뜯는다 — 헤더·개수·안쪽 필드 차례가 `PROTOCOL.key`
+    // 그대로인지. `ssh-keygen` 대조는 오라클 하네스가 따로 한다.
+    const seed: [32]u8 = @splat(3);
+    const pair = try Ed25519.KeyPair.generateDeterministic(seed);
+    var secret: [64]u8 = undefined;
+    @memcpy(secret[0..32], &seed);
+    @memcpy(secret[32..64], &pair.public_key.toBytes());
+    var out: [1024]u8 = undefined;
+    const blob = try encodePlain(secret, "maru", &out);
+
+    try std.testing.expect(std.mem.startsWith(u8, blob, magic));
+    var r = wire.Reader.init(blob[magic.len..]);
+    try std.testing.expectEqualStrings(cipher_none, try r.string());
+    try std.testing.expectEqualStrings(kdf_none, try r.string());
+    try std.testing.expectEqual(@as(usize, 0), (try r.string()).len); // kdfoptions
+    try std.testing.expectEqual(@as(u32, 1), try r.u32be()); // 키 하나
+    // 바깥 공개키 blob 이 `parsePublicKey` 가 읽는 그것이다.
+    try std.testing.expectEqualSlices(u8, secret[32..64], &(try hostkey.parsePublicKey(try r.string())));
+
+    const inner = try r.string();
+    try std.testing.expectEqual(@as(usize, 0), r.rest().len); // 뒤에 군더더기가 없다
+    try std.testing.expectEqual(@as(usize, 0), inner.len % 8); // 블록 배수까지 채웠다
+    var ir = wire.Reader.init(inner);
+    const c1 = try ir.u32be();
+    try std.testing.expectEqual(c1, try ir.u32be()); // checkint 둘이 같다
+    try std.testing.expectEqualStrings(hostkey.alg_name, try ir.string());
+    try std.testing.expectEqualSlices(u8, secret[32..64], try ir.string());
+    try std.testing.expectEqualSlices(u8, &secret, try ir.string());
+    try std.testing.expectEqualStrings("maru", try ir.string());
+    for (ir.rest(), 1..) |b, i| try std.testing.expectEqual(@as(u8, @truncate(i)), b);
+}
+
+test "씨앗과 안 맞는 공개키는 «적지 않는다» (M16b-2)" {
+    // 그냥 적으면 파일은 만들어지고 **서명만 조용히 틀린다** — 서버는 `USERAUTH_FAILURE` 만 내고
+    // 사용자는 원인을 알 길이 없다. `parse` 가 같은 검사를 하는 이유와 같다.
+    const seed: [32]u8 = @splat(11);
+    const pair = try Ed25519.KeyPair.generateDeterministic(seed);
+    var secret: [64]u8 = undefined;
+    @memcpy(secret[0..32], &seed);
+    @memcpy(secret[32..64], &pair.public_key.toBytes());
+    secret[63] ^= 1; // 공개키 한 비트를 뒤집는다
+    var out: [1024]u8 = undefined;
+    try std.testing.expectError(Error.MalformedKey, encodePlain(secret, "maru", &out));
+}
+
+test "자리가 모자라면 «자르지 않고» 실패한다 (M16b-2)" {
+    // 잘린 키 파일은 다음 실행에서 **영영 못 여는** 파일이 된다(계약 §3.4 — 못 열면 새로 안 만든다).
+    const seed: [32]u8 = @splat(5);
+    const pair = try Ed25519.KeyPair.generateDeterministic(seed);
+    var secret: [64]u8 = undefined;
+    @memcpy(secret[0..32], &seed);
+    @memcpy(secret[32..64], &pair.public_key.toBytes());
+    var small: [64]u8 = undefined;
+    try std.testing.expectError(Error.ShortBuffer, encodePlain(secret, "maru", &small));
 }
 
 test "magic·개수·암호 종류를 본다" {

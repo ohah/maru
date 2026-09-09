@@ -413,6 +413,74 @@ fn writeLine(secret: [secret_key_bytes]u8, out_line: [*]u8, line_cap: u32) c_int
     return ok;
 }
 
+/// 키를 **파일에 남길 모양**으로 적는다(M16b-2 — OpenSSH 평문 PEM).
+///
+/// **왜 필요한가.** iOS 는 앱 전용 파일(`Application Support/maru/id_ed25519`)에 키를 두기로
+/// 정해져 있는데([계약 §3.4](../../../docs/mobile-platform.md) — Keychain 은 실기기 검증까지
+/// 보류), 그 파일을 **만드는 코드가 저장소에 없었다**: 읽는 자리만 있어서, 손으로 넣지 않으면
+/// iOS 는 키 인증을 아예 못 썼다.
+///
+/// **형식은 코어가 소유한다**(`private_key.encodePlain`). 껍데기(base64 + `-----BEGIN/END-----`)만
+/// 여기서 씌운다 — 벗기는 자리(`maru_mobile_ssh_load_key`)가 여기라 씌우는 자리도 여기다.
+///
+/// **자르지 않는다.** 잘린 키 파일은 다음 실행에서 영영 못 여는 파일이 되고, 그때는 계약이
+/// "못 열면 새로 만들지 않는다" 라 사용자가 접속을 통째로 잃는다.
+pub export fn maru_mobile_ssh_private_key_pem(
+    secret: [*]const u8,
+    out_pem: [*]u8,
+    pem_cap: u32,
+) c_int {
+    if (pem_cap > 0) out_pem[0] = 0;
+    var copy: [secret_key_bytes]u8 = undefined;
+    @memcpy(&copy, secret[0..secret_key_bytes]);
+    defer std.crypto.secureZero(u8, &copy);
+
+    const blob = private_key.encodePlain(copy, "maru", &key_blob) catch |e| {
+        last_load_error = @errorName(e);
+        std.crypto.secureZero(u8, &key_blob);
+        return err_bad_arg;
+    };
+    const encoder = std.base64.standard.Encoder;
+    const b64_len = encoder.calcSize(blob.len);
+    if (b64_len > key_scratch.len) {
+        last_load_error = "key_too_large";
+        std.crypto.secureZero(u8, &key_blob);
+        return err_bad_arg;
+    }
+    const b64 = encoder.encode(key_scratch[0..b64_len], blob);
+    std.crypto.secureZero(u8, &key_blob); // 개인키가 든 중간 산물은 바로 지운다
+
+    // OpenSSH 는 base64 를 **70자마다** 접는다. 접는 폭은 형식의 일부가 아니지만(파서는 줄바꿈을
+    // 그냥 버린다) 남의 도구가 뱉는 파일과 같은 모양이라야 사람이 대조할 수 있다.
+    const wrap = 70;
+    const begin = "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const end = "-----END OPENSSH PRIVATE KEY-----\n";
+    const lines = (b64.len + wrap - 1) / wrap;
+    const need = begin.len + b64.len + lines + end.len + 1; // 줄마다 개행 + 끝의 0
+    if (pem_cap < need) {
+        last_load_error = "pem_too_small";
+        std.crypto.secureZero(u8, &key_scratch);
+        return err_bad_arg;
+    }
+    var n: usize = 0;
+    @memcpy(out_pem[n..][0..begin.len], begin);
+    n += begin.len;
+    var i: usize = 0;
+    while (i < b64.len) : (i += wrap) {
+        const take = @min(wrap, b64.len - i);
+        @memcpy(out_pem[n..][0..take], b64[i..][0..take]);
+        n += take;
+        out_pem[n] = '\n';
+        n += 1;
+    }
+    @memcpy(out_pem[n..][0..end.len], end);
+    n += end.len;
+    out_pem[n] = 0;
+    std.crypto.secureZero(u8, &key_scratch);
+    last_load_error = "";
+    return ok;
+}
+
 /// **이미 있는 키의 한 줄**을 만든다(`seed ‖ public` 64바이트 → `ssh-ed25519 <base64> maru`).
 ///
 /// 만들 때(`generate_key`)만 한 줄을 내주면 **다시 켠 기기에서는 그 줄을 영영 못 본다** —

@@ -252,7 +252,7 @@ chrome-ios)
         "$IOS/ios_app_host.m" "$ROOT/src/platform/mobile_host/ssh_pump.c" \
         "$LIB_OUT/libmaru-mobile-ios-sim.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
-        -framework CoreText -framework CoreGraphics \
+        -framework CoreText -framework CoreGraphics -framework Security \
         -o "$APP/MaruChrome"
     codesign --force --sign - "$APP"
     DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')

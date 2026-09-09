@@ -765,6 +765,16 @@ int maru_mobile_ssh_generate_key(const unsigned char *entropy, unsigned char *ou
 int maru_mobile_ssh_public_key_line(const unsigned char *secret, unsigned char *out_line,
                                     unsigned int line_cap);
 
+/// **키를 파일에 남길 모양으로 적는다**(M16b-2 — OpenSSH 평문 PEM, `-----BEGIN OPENSSH PRIVATE
+/// KEY-----`). `maru_mobile_ssh_load_key` 가 그대로 되읽는 형식이다.
+///
+/// iOS 는 키를 앱 전용 파일에 두기로 정해져 있는데(계약 §3.4 — Keychain 은 실기기 검증까지
+/// 보류) 그 **파일을 만드는 수단이 없었다**: 읽는 자리만 있어서 손으로 넣지 않으면 키 인증을
+/// 아예 못 썼다. 나온 텍스트는 NUL 로 끝나고, **자리가 모자라면 자르지 않고 실패한다** — 잘린
+/// 키 파일은 다음 실행에서 영영 못 여는 파일이 된다(못 열면 새로 안 만드는 것이 계약이다).
+int maru_mobile_ssh_private_key_pem(const unsigned char *secret, unsigned char *out_pem,
+                                    unsigned int pem_cap);
+
 /// 개인키 파일 내용(PEM 텍스트)에서 `seed(32) ‖ public(32)` 를 만든다. **파일은 host 가 읽는다** —
 /// 이 층은 OS 를 모른다. 나온 64바이트를 `open` 에 넘긴 뒤 host 는 **자기 사본을 지운다**.
 /// 암호 걸린 키면 `passphrase` 를 준다(없으면 길이 0). 실패하면 `MARU_SSH_ERR_BAD_ARG` 이고

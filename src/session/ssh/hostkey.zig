@@ -61,6 +61,18 @@ pub fn parsePublicKey(blob: []const u8) Error![key_len]u8 {
     return key[0..key_len].*;
 }
 
+/// 공개키 blob 을 **적는다**(`parsePublicKey` 의 역). 형식은 `string alg ‖ string key` 다.
+///
+/// **여기 두는 이유**: 읽는 자리가 여기라 쓰는 자리도 여기여야 한다. 두 벌로 두면 한쪽만
+/// 고쳐지고, 그 어긋남은 "우리가 쓴 키를 우리가 못 읽는다" 로 나타난다 — 개인키 파일(§3.4)이
+/// 바로 이 blob 을 자기 안에 두 번 싣는다.
+pub fn encodePublicKey(out: []u8, public: [key_len]u8) Error![]const u8 {
+    var w = wire.Writer.init(out);
+    w.string(alg_name) catch return Error.ShortBuffer;
+    w.string(&public) catch return Error.ShortBuffer;
+    return w.written();
+}
+
 /// 서명 blob 에서 64바이트 서명을 꺼낸다. **여분 바이트는 거절한다**(위와 같은 이유 — 정본 인코딩).
 pub fn parseSignature(blob: []const u8) Error![sig_len]u8 {
     var r = wire.Reader.init(blob);

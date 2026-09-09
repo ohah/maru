@@ -570,12 +570,13 @@ test "헤더와 브리지의 인자 폭이 전부 같다" {
         "maru_mobile_ssh_load_key",               "maru_mobile_ssh_last_load_error",
         "maru_mobile_ssh_rekeys",                 "maru_mobile_ssh_generate_key",
         "maru_mobile_ssh_public_key_line",        "maru_mobile_ssh_password",
+        "maru_mobile_ssh_private_key_pem",
         // 컨트롤 채널(S10b-2) — 터미널과 **다른 축**이라 이름도 흐름도 따로다.
-        "maru_mobile_ssh_open_control",           "maru_mobile_ssh_write_control",
-        "maru_mobile_ssh_close_control",          "maru_mobile_ssh_control_state",
-        "maru_mobile_ssh_control_ptr",            "maru_mobile_ssh_control_len",
-        "maru_mobile_ssh_control_consume",        "maru_mobile_ssh_control_exit_status",
-        "maru_mobile_ssh_control_stderr",
+               "maru_mobile_ssh_open_control",
+        "maru_mobile_ssh_write_control",          "maru_mobile_ssh_close_control",
+        "maru_mobile_ssh_control_state",          "maru_mobile_ssh_control_ptr",
+        "maru_mobile_ssh_control_len",            "maru_mobile_ssh_control_consume",
+        "maru_mobile_ssh_control_exit_status",    "maru_mobile_ssh_control_stderr",
     };
     inline for (names) |name| {
         if (!sameShape(@TypeOf(@field(c, name)), @TypeOf(@field(ssh, name)))) {
@@ -672,6 +673,95 @@ test "기기에서 만든 키는 그 자리에서 쓸 수 있다" {
     try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &secret, &seed, "xterm", 5, 80, 24, 0, 1, &h));
     defer _ = ssh.maru_mobile_ssh_close(h);
     try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
+}
+
+test "M16b-2 만든 키를 파일 모양으로 적고, 그것을 다시 읽으면 같은 키다" {
+    // **iOS 는 키를 만드는 자리가 아예 없었다** — 읽는 자리만 있어서, 손으로 파일을 넣지 않으면
+    // 키 인증을 못 썼다. 그 파일을 만들려면 이 ABI 가 있어야 하고, **적은 것을 우리가 다시 읽을
+    // 수 있어야** 한다(못 읽으면 다음 실행에서 접속을 통째로 잃는다 — 계약 §3.4).
+    var seed: [32]u8 = @splat(0);
+    seed[0] = 9;
+    var secret: [64]u8 = @splat(0);
+    var line: [256]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &line, line.len));
+
+    var pem: [2048]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_private_key_pem(&secret, &pem, pem.len));
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(&pem)));
+
+    // **남의 도구가 보는 모양이다.** 껍데기가 다르면 사용자가 그 파일을 `ssh-keygen` 으로 확인할
+    // 수도, 다른 클라이언트로 옮길 수도 없다.
+    try testing.expect(std.mem.startsWith(u8, text, "-----BEGIN OPENSSH PRIVATE KEY-----\n"));
+    try testing.expect(std.mem.endsWith(u8, text, "-----END OPENSSH PRIVATE KEY-----\n"));
+    // base64 줄은 70자를 안 넘는다(OpenSSH 가 접는 폭).
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |ln| {
+        if (std.mem.startsWith(u8, ln, "-----")) continue;
+        try testing.expect(ln.len <= 70);
+    }
+
+    // **되읽으면 같은 64바이트다.** 이것이 이 ABI 의 존재 이유다.
+    var back: [64]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_load_key(&pem, @intCast(text.len), "", 0, &back));
+    try testing.expectEqualSlices(u8, &secret, &back);
+
+    // 그리고 그 키로 세션이 열린다 — 파일만 그럴싸하고 못 쓰는 키면 소용이 없다.
+    var h: u32 = 0;
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_open("u", 1, &back, &seed, "xterm", 5, 80, 24, 0, 1, &h));
+    defer _ = ssh.maru_mobile_ssh_close(h);
+    try testing.expect(ssh.maru_mobile_ssh_out_len(h) > 0);
+}
+
+test "M16b-2 적은 파일을 «OpenSSH 가» 읽는다 (ssh-keygen 오라클)" {
+    // **왕복만 재면 둘이 같이 틀려도 초록이다** — 우리 인코더의 방언을 우리 파서가 받는다.
+    // 그래서 아래 바이트는 **`ssh-keygen` 이 실제로 읽은 그 파일**이다(2026-09-09 실측):
+    //
+    // ```text
+    // $ ssh-keygen -y -f key
+    // ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOHvL+byEfc5mopqVf3IEe6S7H8B7hJZQtqH72WVU0mf maru
+    // $ ssh-keygen -l -f key
+    // 256 SHA256:tCV2qEvPzMumDupV/wYtuvkWqIlWkmMdo+x6klkDw/s maru (ED25519)
+    // ```
+    //
+    // 우리가 낸 공개키 줄과 **글자 하나까지 같았다**(주석까지). 여기서 이 바이트를 박아 두면,
+    // 인코더가 흔들리는 순간 이 판정자가 붉어지고 사람이 오라클을 다시 돌리게 된다 — 그 바깥은
+    // 남의 도구가 판정하는 자리라 코드로는 못 가둔다.
+    const expected =
+        \\-----BEGIN OPENSSH PRIVATE KEY-----
+        \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        \\QyNTUxOQAAACDh7y/m8hH3OZqKalX9yBHukux/Ae4SWULah+9llVNJnwAAAIjh7y/m4e8v
+        \\5gAAAAtzc2gtZWQyNTUxOQAAACDh7y/m8hH3OZqKalX9yBHukux/Ae4SWULah+9llVNJnw
+        \\AAAEAqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOHvL+byEfc5mopqVf3IEe6S
+        \\7H8B7hJZQtqH72WVU0mfAAAABG1hcnUB
+        \\-----END OPENSSH PRIVATE KEY-----
+        \\
+    ;
+    var seed: [32]u8 = @splat(0);
+    seed[0] = 42; // 오라클을 돌린 그 씨앗이다
+    var secret: [64]u8 = @splat(0);
+    var line: [256]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &line, line.len));
+    var pem: [2048]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_private_key_pem(&secret, &pem, pem.len));
+    try testing.expectEqualStrings(expected, std.mem.span(@as([*:0]const u8, @ptrCast(&pem))));
+    // 그 파일에서 `ssh-keygen -y` 가 뽑아낸 줄이 우리 줄과 같았다 — 그 줄도 함께 박는다.
+    try testing.expectEqualStrings(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOHvL+byEfc5mopqVf3IEe6S7H8B7hJZQtqH72WVU0mf maru",
+        std.mem.span(@as([*:0]const u8, @ptrCast(&line))),
+    );
+}
+
+test "M16b-2 PEM 자리가 모자라면 자르지 않고 실패한다" {
+    // **잘린 키 파일은 영영 못 여는 파일이다.** 계약이 "못 열면 새로 만들지 않는다" 이므로,
+    // 그 기기는 그 뒤로 접속을 통째로 잃는다 — 자르느니 안 쓰는 편이 낫다.
+    var seed: [32]u8 = @splat(4);
+    var secret: [64]u8 = @splat(0);
+    var line: [256]u8 = @splat(0);
+    try testing.expectEqual(ssh.ok, ssh.maru_mobile_ssh_generate_key(&seed, &secret, &line, line.len));
+    var tiny: [64]u8 = @splat(0xAB);
+    try testing.expectEqual(ssh.err_bad_arg, ssh.maru_mobile_ssh_private_key_pem(&secret, &tiny, tiny.len));
+    try testing.expectEqualStrings("pem_too_small", std.mem.span(ssh.maru_mobile_ssh_last_load_error()));
+    try testing.expectEqual(@as(u8, 0), tiny[0]); // 반쪽을 남기지 않는다
 }
 
 test "예측 가능한 씨앗으로는 키를 안 만든다" {

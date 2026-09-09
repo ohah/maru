@@ -5320,6 +5320,57 @@ network 실측이 아니다. 병합 뒤 protected `v*` tag의 job URL, run/attem
 started/completed timestamp와 제품 verifier 결과가 첫 원격 표본이다. 이 무출력 gate는 canonical pass-record
 publication이나 signed N-1→current PTY·PID·runtime U5 E2E 완료를 대신하지 않는다.
 
+#### 11.100j canonical 원격 pass record와 동일-run 보존
+
+원격 verifier의 exit 0만으로는 protected run이 끝난 뒤 무엇을 판정했는지 기계가 다시 읽을 수 없다. 다음 gate는
+`release_adapter_remote_release_pass_record.zig` 하나가 `Verdict.value()`를 입력 권위로 받아 최대 4 KiB의 exact
+`maru.session-host-release-remote-pass.v1` JSON을 만든다. canonical field 순서는 `schema`, `profile`, `result`,
+`repository`, `release`, `source_sha`, `workflow_ref`, `run_id`, `run_attempt`, `timing_artifact_id`, `duration_ms`다.
+`profile`은 `baseline_a | upgrade_b`, `result`는 `passed`만 허용한다. repository는 protected `Context`의 positive ID와
+exact `owner/name`, release는 verdict의 positive ID와 context tag를 담는다. 나머지도 context와 verdict에서만 투영하며
+argv, pathname, environment의 profile·ID·duration scalar 또는 caller boolean을 받지 않는다. writer는 canonical bytes를
+다시 bounded parse하여 context와 현재 verdict에 exact 재결속한 뒤에만 record owner를 게시한다. 따라서
+`baseline_a` record는 A 원격 경계의 성공 기록일 뿐 U5 완료가 아니고, `upgrade_b` record만 authenticated predecessor와
+signed N-1→current evidence를 포함한 B 원격 판정의 보존물이다.
+
+제품 command는 기존 closed argv에 `--pass-record <absolute-absent-path>` 하나를 추가하지 않는다. option을 뒤에 붙이면
+옛 `verify`와 새 publication의 성공 의미가 같은 command 이름 아래 갈리고, verifier 성공 뒤 파일 쓰기 실패를 이미 성공한
+것처럼 오독할 수 있다. 대신 별도 closed command
+`verify-and-record <pinned-gh> <sha256> <absent-timing-workspace> <absent-release-workspace> <absolute-absent-record>`만
+canonical publication을 연다. 세 pathname은 같은 canonical `RUNNER_TEMP` parent의 서로 다른 직계 자식이며 pairwise
+disjoint하고, record pathname은 workspace 안이나 앱 session-host 상태·candidate publication 경로일 수 없다. 기존 `verify`는
+무출력 read-only 진단으로 그대로 남긴다. final basename은 exact `session-host-release-remote-pass.json`이고 temporary basename은
+기존 `release_adapter_files.zig` SSOT가 random nonce를 포함해 만들며 caller가 따로 고르지 않는다. 제품은 세 pathname의 문자열
+prefix만 비교하지 않고 no-follow로 연 공통 parent의 device/inode와 각 direct basename을 검증한다.
+
+`verify-and-record`는 §11.100i의 한 transaction에서 final verdict를 재검증해 canonical bytes와 그 digest를 process-local
+final-address owner로 먼저 freeze한다. 이 owner는 freeze 직전 context/verdict를 다시 결속한 뒤 immutable byte copy만 소유하며
+pathname·fd·credential이나 성공 capability는 갖지 않는다. 그 다음 verdict부터 deadline까지 upstream cleanup을 모두 끝내고,
+**cleanup 성공 뒤에만** private sibling temporary leaf를 `O_CREAT|O_EXCL|O_NOFOLLOW`, 0600으로 쓴다. short write·sync·identity·mode·link-count
+검증 중 하나라도 실패하면 temporary leaf를 지우고 final record를 만들지 않는다. record는 같은 parent 안에서 absent final
+leaf로 no-replace rename하고 parent sync한 뒤 0400 regular, link-count 1, exact device/inode/size/SHA-256과 canonical parse를
+다시 확인해야 게시된다. cleanup이 실패하면 filesystem publication을 호출하지 않으므로 성공 record와 실패 exit가 공존하지 않는다.
+publication 자체의 cleanup이 실패한 경우 command는 nonzero이고 workflow는 upload를 실행하지 않으며, 남은 local pathname은 audit
+대상이지 pass record가 아니다.
+stdout, stderr, `GITHUB_OUTPUT`과 summary에는 record bytes·pathname·digest를 내지 않는다.
+
+`release.yml`의 remote verification job은 `verify-and-record`를 exact once 실행하고, 성공 뒤 같은 fixed pathname의
+regular/no-link/0400 파일 하나만 SHA-pinned `actions/upload-artifact`로 올린다. artifact 이름은
+`session-host-release-remote-pass-<run_attempt>`, archive input 이름은
+`session-host-release-remote-pass.json`, retention은 90일이다. upload step에는 `if: always()`를 두지 않아 verifier 또는
+cleanup 실패에서 partial record를 게시하지 않는다. job permission은 계속 `actions: read`, `contents: read`뿐이며 tag, Release,
+asset, attestation, environment나 다른 run을 수정하지 않는다. GitHub artifact metadata의 repository/run/head SHA와 digest 및
+record 내부 run attempt/source를 함께 보는 후속 audit가 rerun 혼입을 판정한다. artifact ID나 archive digest를 record 자신에
+넣지는 않는다. 업로드 뒤에만 생기는 값을 미리 넣으면 self-reference 또는 caller scalar가 권위가 되기 때문이다.
+
+focused Debug·ReleaseFast gate는 두 profile의 canonical encode/parse/round-trip, 모든 field drift·duplicate·unknown·missing·
+type/trailing/size 오류, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다. actual private APFS gate는
+record temp/final의 symlink·hardlink·preexist·pathname 교체, write/sync/rename/parent-sync/cleanup 각 fail-index, 성공·실패의
+FD delta와 residue를 검증한다. workflow source gate는 closed command와 세 sibling leaf, verifier 성공 뒤에만 exact-one upload,
+fixed artifact/file name, retention, 권한과 output/summary 부재를 고정한다. PR CI의 synthetic transaction과 source 검사는 실제
+GitHub artifact 발행이나 원격 실측 표본을 대신하지 않는다. 병합 뒤 첫 protected `v*` tag에서 remote verifier job과 pass artifact가
+함께 성공한 run/attempt/source만 첫 canonical 표본이며, `baseline_a` 표본만으로 U5를 완료 처리하지 않는다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -5050,6 +5050,32 @@ duration을 검사한 뒤 artifact를 게시하는지 고정한다. 이 gate는 
 GitHub API·artifact provenance·Release/attestation 또는 U5 완료를 주장하지 않는다. 그 remote transport와 final verdict 결속은
 §11.100의 후속 gate가 소유한다.
 
+#### 11.100b timing artifact의 원격 출처와 archive 결속
+
+read-only 판정 job은 current run의 workflow-artifact 목록을 `per_page=100`, `name=session-host-release-live-timing-<current
+run_attempt>`로 조회한다. GitHub artifact 응답은 `workflow_run.id`와 `head_sha`는 제공하지만 `run_attempt`를 독립 필드로 제공하지
+않으므로, metadata만으로 attempt를 증명한다고 간주하지 않는다. 대신 exact 이름의 non-expired artifact가 하나뿐이고 positive
+artifact ID·size, `sha256:<64 lowercase hex>` digest, repository ID·head repository ID, current run ID·source SHA와 canonical API/download
+URL이 모두 current protected Context에 맞아야 한다. `total_count > 100`, partial pagination, duplicate 이름/ID, missing workflow-run,
+expired artifact, foreign repository/run/SHA, noncanonical URL·digest·size는 다운로드 전에 fail-close한다.
+
+선택한 artifact ID의 ZIP은 private temporary directory에 no-follow로 내려받고 API metadata의 digest와 archive bytes SHA-256을
+먼저 비교한다. archive는 path separator·`..`·absolute path·symlink·hardlink·encrypted entry가 없고 canonical
+`session-host-release-live-timing.json` regular file 하나만 가져야 한다. GitHub artifact ZIP이 쓰는 signed data descriptor는 허용하되
+descriptor의 CRC·compressed/uncompressed size와 central header가 exact 일치해야 하며 ZIP64·multi-disk·unknown extra field는
+거부한다. uncompressed size는 §11.100a의 입력 상한 안이고 ZIP 전체 상한·compression ratio 상한을 함께 적용한다. extraction은
+caller가 고른 pathname이나 범용 unzip에 맡기지 않고 bounded reader가 CRC와 central/local/descriptor 일치를 검증해 private
+memory로 한 번 복원한다. 그 bytes를 §11.100a owner로 parse한 뒤 record의
+repository/run ID/**run attempt**/source SHA가 current Context 및 artifact 이름과 exact 일치할 때만 sealed provenance owner를
+게시한다. artifact 이름은 attempt 선택자일 뿐 독립 권위가 아니며 record 내부 attempt와의 교차검증이 재실행 혼입을 닫는다.
+
+focused Debug·ReleaseFast gate는 canonical metadata+stored/deflate archive 성공, 이름에 맞지만 record attempt가 다른 replay,
+목록 duplicate/overflow와 모든 metadata drift, ZIP slip·duplicate entry·trailing/concatenated archive·header/CRC/digest/size/ratio
+불일치, unsupported/encrypted/link entry, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다. transport executor
+gate는 pinned GitHub CLI에 closed argv로 list/get/download만 허용하고 token·response bytes·temporary pathname을 결과에 보존하지
+않는다. synthetic response/archive를 쓰는 이 gate는 실제 GitHub 호출이나 protected tag 실측을 대신하지 않으며, live workflow
+판정 job 배선과 실제 GitHub-issued artifact 표본은 다음 gate가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

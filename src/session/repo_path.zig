@@ -129,7 +129,10 @@ fn trimTrailingSlashes(root: []const u8) []const u8 {
     return r;
 }
 
-test "루트 아래면 그 아래만 남는다" {
+// **접두는 빠른 고리에서 돌기 위한 것이다**(`build.zig` 의 `test-editor` 필터). 아래 넷은 헤더
+// 밴드가 그리는 경로 규칙의 소유자인데 이름에 접두가 없어 **그 고리에서 0번 돌았고**, 그래서
+// 경계 검사·루트 밖·루트 자신 갈래를 지우는 변이가 전부 살아남았다(적대적 검증 2026-09-09).
+test "CRUMB3 루트 아래면 그 아래만 남는다" {
     try std.testing.expectEqualStrings(
         "src/session/editor/diff.zig",
         displayRelative("/Users/u/work/maru/src/session/editor/diff.zig", "/Users/u/work/maru"),
@@ -141,7 +144,7 @@ test "루트 아래면 그 아래만 남는다" {
     );
 }
 
-test "underRoot: 경계를 문자로 본다 · 루트 자신은 아래가 아니다" {
+test "CRUMB4 underRoot: 경계를 문자로 본다 · 루트 자신은 아래가 아니다" {
     try std.testing.expect(underRoot("/repo/src/a.zig", "/repo"));
     try std.testing.expect(underRoot("/repo/a.zig", "/repo/"));
     // **이 술어의 존재 이유**: 접두 비교만 하면 `/a/project/x` 가 `/a/proj` 아래로 보인다.
@@ -156,14 +159,14 @@ test "underRoot: 경계를 문자로 본다 · 루트 자신은 아래가 아니
     try std.testing.expectEqualStrings("repo", displayRelative("/repo", "/repo"));
 }
 
-test "루트 밖이면 그대로 둔다 — 특히 접두만 같은 경로" {
+test "CRUMB5 루트 밖이면 그대로 둔다 — 특히 접두만 같은 경로" {
     // **이것이 이 함수의 존재 이유 절반이다.** 접두 비교만 하면 `/a/project/x`가 `/a/proj` 아래로
     // 보여 `ect/x`가 남는다 — 아무 관계 없는 두 경로인데 화면은 그럴듯한 위치를 말한다.
     try std.testing.expectEqualStrings("/a/project/x", displayRelative("/a/project/x", "/a/proj"));
     try std.testing.expectEqualStrings("/other/x", displayRelative("/other/x", "/repo"));
 }
 
-test "루트가 없거나 경로가 루트 자신이면" {
+test "CRUMB6 루트가 없거나 경로가 루트 자신이면" {
     try std.testing.expectEqualStrings("/a/b", displayRelative("/a/b", ""));
     try std.testing.expectEqualStrings("repo", displayRelative("/x/repo", "/x/repo"));
     try std.testing.expectEqualStrings("repo", displayRelative("/x/repo/", "/x/repo"));

@@ -20779,6 +20779,43 @@ test "ES30 헤더 체인은 primary caret 을 따라간다 — 선택이 있으�
     try testing.expectEqualStrings("a.zig \u{203A} Widget \u{203A} draw", label);
 }
 
+test "CRUMB2 밴드가 그리는 것은 «경로 + 체인» 이고, 마디 경계가 함께 실린다 (§7.5 배선)" {
+    // **`headerBreadcrumb` 를 직접 부르는 판정자(ES30)로는 배선이 안 재진다.** 렌더가 그 함수를
+    // 건너뛰고 경로만 그려도, 마디 경계를 안 넘겨 클릭이 어긋나도 전부 초록이었다(적대적 검증
+    // 2026-09-09 — P9·P8 이 그렇게 살았다). 그래서 그 합성을 `bandLabelFor` 이음매로 꺼내 여기서 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n    }\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    fx.term.rt.editor_selection = editor_selection.Selection.at(std.mem.indexOf(u8, doc.file.content, "var x").?);
+
+    var entry: maru.session.dock_panel.Entry = .{ .id = 1, .path = @constCast("/repo/one/src/a.zig"), .kind = .text, .mode = .source_edit };
+    // **소유권을 건드리지 않는다.** `git_repo` 는 세션이 들고 있다가 해제하는 값이라, 리터럴을
+    // 넣고 그대로 두면 픽스처 정리에서 터진다(실측: Bus error). 잰 뒤 원래 것을 돌려 놓는다.
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast("/repo/one");
+    defer fx.session.git_repo = saved_repo;
+
+    const band = app_session_mod.bandLabelFor(fx.session, fx.term, &entry);
+    // ⑴ **경로는 저장소 기준이다** — 절대경로가 좁은 밴드를 먹지 않는다.
+    try testing.expect(std.mem.startsWith(u8, band.text, "src/a.zig"));
+    // ⑵ **그 뒤에 체인이 붙는다** — 경로만 그리면 여기서 갈린다.
+    try testing.expectEqualStrings("src/a.zig \u{203A} Widget \u{203A} draw", band.text);
+    // ⑶ **마디 경계가 함께 실린다** — 안 실으면 「그려진 것 = 클릭되는 것」이 깨진다.
+    try testing.expect(band.bounds.len >= 2);
+    try testing.expectEqual(band.bounds.len - 1, band.spans.len);
+}
+
 test "ES31 비교 뷰는 체인을 그리지 않는다 — 문서가 둘이다 (§7.5)" {
     // §7.5 저하 표의 마지막 줄. `syntaxColors` 가 같은 이유로 같은 판정을 하는데(문서가 둘이라
     // provider 도 둘이어야 한다), 그 규율이 이 함수에도 서 있는지 잰다 — 뮤테이션에서 이 분기를

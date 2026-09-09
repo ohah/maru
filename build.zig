@@ -3684,7 +3684,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -3692,6 +3692,11 @@ pub fn build(b: *std.Build) void {
     editor_test_step.dependOn(&run_editor_tests.step);
     // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.
     editor_test_step.dependOn(&run_chrome_ui_tests.step);
+    // **헤더 밴드(`BAND*`)도 이 고리에서 돈다** — 편집기 파일 Term 의 breadcrumb·심볼 체인을 재는데
+    // 이름에 등록된 접두가 없어 위 필터가 안 고르고, 그래서 **빠른 고리에서 0번 돌았다**(적대적 검증
+    // 2026-09-09 — 그 자리에 변이를 걸고서야 드러났다). `CRT*` 를 chrome 모듈째 물고 온 것과 같은
+    // 이유·같은 자리다: **필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다.**
+    editor_test_step.dependOn(&run_macos_coretext_frame_builder_tests.step);
     // **L2 순수 모듈(`session/editor/*.zig`)의 판정자도 이 바이너리에 없다.** `app_session/editor.zig`가
     // 그것들을 **부르지만**, 부르는 것과 그 파일의 `test`가 함께 실려 오는 것은 다르다 — `maru`는 별도
     // 모듈이고 `zig test`는 루트 모듈의 test만 싣는다. `LANG`을 필터에 적어 놓고 **0개를 돌았다**
@@ -3701,7 +3706,7 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
         // `CT*` 는 밴드 마디의 열 범위(`platform/cell_text.zig` — §7.5). **`maru` 모듈이라 여기서
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS" },
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB" },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));

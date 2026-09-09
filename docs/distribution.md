@@ -105,6 +105,39 @@ Android 밀도 다섯 × 둘). 손으로 맞추면 한 자리만 낡고, 그 한
 **없으면 빌드를 세운다**(macOS·Android). 조용히 빠지면 「아이콘이 왜 안 나오지」를 나중에 찾게
 된다 — 폰트 자산과 같은 규율이다.
 
+## 런치 스크린 — 켤 때 번쩍이지 않는다
+
+**아이콘을 누른 순간부터 앱이 첫 프레임을 그릴 때까지 «OS 가 대신» 띄우는 화면이다.** 앱 코드는
+아직 안 돌아서 로직을 둘 수 없고, 정지 그림 한 장이다. 흔히 말하는 스플래시와 한 가지가 다르다 —
+**앱이 붙잡을 수 없다.** 준비되는 즉시 사라지고, 일부러 늘리는 것은 iOS 심사 거절 사유다.
+
+**안 주면 시스템 기본을 따라간다 — 그게 결함이었다.** 라이트 모드에서 재 보면 이랬다:
+
+| | 손대기 전 | 지금 |
+|---|---|---|
+| iOS | 가운데 평균 RGB **244,244,245** (거의 흰색)이 약 600ms | **27,28,46** — 바로 제 색 |
+| Android | **226,224,226** 이 약 350ms. 게다가 API 31+ 가 그 흰 바탕 위에 런처 아이콘을 얹어 **앰버가 허옇게 날아갔다** | **65,66,79** 이 최고 — 흰 구간이 없다 |
+
+앱 자체는 어두운데(`#1e1e2e`) 그 앞이 희면 켤 때마다 한 번씩 번쩍인다. 다크 모드 기기에서는
+우연히 안 났다 — **시스템 테마를 따라가는 것이 결함이지 「항상 희다」가 아니었다.**
+
+| 플랫폼 | 무엇을 두나 | 어디에 |
+|---|---|---|
+| iOS | `UILaunchScreen` → `UIColorName`·`UIImageName` | `src/platform/ios/Info.plist.in` |
+| Android | 액티비티 테마의 `windowBackground` + API 31+ 의 `windowSplashScreenBackground`·`windowSplashScreenAnimatedIcon` | `src/platform/android/res/values/themes.xml` |
+
+**색을 두 번 적지 않는다.** Android 테마는 적응형 아이콘 배경과 **같은 자원**(`@color/ic_launcher_background`)
+을 가리키고, iOS 카탈로그의 색은 `render.py` 의 `GROUND` 에서 뽑힌다 — 아이콘과 런치 스크린이
+갈릴 수가 없다.
+
+**iOS 는 이름으로만 가리킬 수 있고 그 이름은 에셋 카탈로그에 있다.** 이 번들은 Xcode 프로젝트가
+없어 카탈로그가 없었다. 그래서 `render.py` 가 카탈로그(`assets/icon/ios-launch.xcassets`)를 뽑고
+하네스가 `actool` 로 구워 `Assets.car` 를 번들에 넣는다 — iOS 갈래는 이미 `xcrun clang -sdk
+iphonesimulator` 를 쓰므로 새 의존이 아니다. 아이콘 PNG 는 지금처럼 `CFBundleIconFiles` 가
+뿌리에서 이름으로 집는다. **두 길은 서로 안 건드린다.**
+
+**macOS 에는 이 자리가 없다.** 데스크톱 앱은 창이 뜨기 전 화면을 OS 가 대신 그려 주지 않는다.
+
 ## 서명·공증
 
 `.dmg` 경로(채널 2)에만 해당한다. formula 소스 빌드(채널 1)는 서명·공증이 없다.

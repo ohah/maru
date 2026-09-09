@@ -22,6 +22,7 @@
     python3 assets/icon/render.py --selftest # 작은 크기·안전 영역을 «재어» 본다
 """
 import argparse
+import json
 import os
 import sys
 
@@ -97,6 +98,22 @@ IOS = [(120, "AppIcon60x60@2x.png"), (180, "AppIcon60x60@3x.png"),
 ANDROID = [("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), ("xxxhdpi", 192)]
 # 적응형 앞면 캔버스는 108dp 이고 안전 영역은 지름 66dp — 모티프를 그 안에 넣는다.
 ADAPTIVE_MOTIF = 0.62
+
+# **런치 스크린 표식**(M11d). iOS 는 `UILaunchScreen` 이 색과 그림을 **이름으로** 가리키는데,
+# 그 이름은 에셋 카탈로그에만 있다 — 이 번들은 Xcode 프로젝트가 없어 카탈로그가 없었다.
+# 그래서 카탈로그를 여기서 **뽑는다**(하네스가 `actool` 로 굽는다). 색을 카탈로그에 손으로 적으면
+# `GROUND` 의 사본이 하나 더 생기므로, 색도 그림도 이 파일에서 나온다.
+LAUNCH_PT = 96  # 표식이 화면에서 차지할 크기(pt). 아이콘만 한 크기다.
+
+
+def launchColorset():
+    """런치 스크린 바탕색 — `GROUND` 에서 뽑는다(사본을 만들지 않는다)."""
+    r, g, b = GROUND
+    return {
+        "info": {"author": "maru", "version": 1},
+        "colors": [{"idiom": "universal", "color": {"color-space": "srgb", "components": {
+            "red": f"0x{r:02X}", "green": f"0x{g:02X}", "blue": f"0x{b:02X}", "alpha": "1.000"}}}],
+    }
 
 # **작은 크기에서 두 덩이가 붙으면 그림이 얼룩이 된다.** 제품이 싣는 **모든** 크기에서 잰다 —
 # 제일 작은 16px(macOS 메뉴막대 자리)까지. 「40px 에서도 안 뭉친다」가 이 모티프를 고른 이유라
@@ -208,7 +225,23 @@ def main():
         return selftest()
 
     want = {}
+    text_want = {}
     material = set()
+
+    # **iOS 런치 스크린 카탈로그.** 바탕은 색 자원이 깔고 표식은 «투명 위의 모티프» 다 —
+    # 둘을 겹쳐 놓으면 바탕색이 두 겹이 되어 가장자리에 테가 보인다.
+    XA = "ios-launch.xcassets"
+    text_want[os.path.join(XA, "Contents.json")] = {"info": {"author": "maru", "version": 1}}
+    text_want[os.path.join(XA, "LaunchGround.colorset", "Contents.json")] = launchColorset()
+    imgs = []
+    for scale in (1, 2, 3):
+        name = f"launch@{scale}x.png"
+        want[os.path.join(XA, "LaunchIcon.imageset", name)] = render(
+            LAUNCH_PT * scale, transparent=True
+        )
+        imgs.append({"idiom": "universal", "filename": name, "scale": f"{scale}x"})
+    text_want[os.path.join(XA, "LaunchIcon.imageset", "Contents.json")] = {
+        "info": {"author": "maru", "version": 1}, "images": imgs}
     for size, name in ICONSET:
         rel = os.path.join("Maru.iconset", name)
         want[rel] = render(size)  # `.icns` 재료 — 굽고 나면 버린다(`.gitignore`)
@@ -239,11 +272,22 @@ def main():
             continue
         os.makedirs(os.path.dirname(path), exist_ok=True)
         im.save(path)
+    for rel, obj in text_want.items():
+        path = os.path.join(a.out, rel)
+        body = json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+        if a.check:
+            if not os.path.exists(path) or open(path, encoding="utf-8").read() != body:
+                print(f"다르다: {rel}")
+                bad += 1
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w", encoding="utf-8").write(body)
+
     if a.check:
         bad += checkIcns(os.path.join(a.out, "Maru.icns"))
         print("아이콘: 규칙과 같다" if bad == 0 else f"아이콘: {bad} 건 어긋났다")
         return 1 if bad else 0
-    print(f"아이콘 {len(want)} 장을 {a.out} 에 뽑았다")
+    print(f"아이콘 {len(want)} 장과 서술 {len(text_want)} 개를 {a.out} 에 뽑았다")
     print("  macOS `.icns` 는 여기서 안 만든다 — `iconutil` 이 macOS 전용이라 아래를 손으로 돈다:")
     print(f"    iconutil -c icns {os.path.join(a.out, 'Maru.iconset')} -o {os.path.join(a.out, 'Maru.icns')}")
     return 0

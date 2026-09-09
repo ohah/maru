@@ -9,7 +9,20 @@
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSRequiresIPhoneOS</key><true/>
-  <key>UILaunchScreen</key><dict/>
+  <!-- **런치 스크린**(M11d). 아이콘을 누른 순간부터 앱이 첫 프레임을 그릴 때까지 OS 가 대신
+       띄우는 화면이다. 빈 `<dict/>` 로 두면 시스템 기본 바탕이라 라이트 모드에서 **거의 흰
+       화면**이 뜬다(실측: 가운데 평균 RGB 244,244,245 가 약 600ms) — 그 뒤에 어두운 터미널이
+       나타나니 켤 때마다 한 번씩 번쩍인다.
+
+       색과 그림은 **이름으로만** 가리킬 수 있고 그 이름은 **에셋 카탈로그**에 있다. 이 번들은
+       Xcode 프로젝트가 없어 카탈로그가 없었으므로, `assets/icon/render.py` 가 카탈로그를 뽑고
+       하네스가 `actool` 로 굽는다(그 `Assets.car` 가 번들에 든다). 아이콘 PNG 는 지금처럼
+       `CFBundleIconFiles` 가 뿌리에서 이름으로 집는다 — 두 길은 서로 안 건드린다. -->
+  <key>UILaunchScreen</key>
+  <dict>
+    <key>UIColorName</key><string>LaunchGround</string>
+    <key>UIImageName</key><string>LaunchIcon</string>
+  </dict>
   <!-- **앱 아이콘**(M11b — 앰버 커서 모티프). 이 번들은 Xcode 프로젝트 없이 손으로 만들어서
        에셋 카탈로그(`Assets.car`)가 없다 — 그래서 PNG 를 번들 뿌리에 두고 여기서 이름으로
        가리킨다. 그림은 `assets/icon/` 이 소유한다(한 생성기가 세 플랫폼 것을 함께 뽑는다).

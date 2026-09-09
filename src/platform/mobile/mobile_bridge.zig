@@ -4876,7 +4876,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key, remote_screen };
+const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key, remote_screen, diagnostics };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -5214,6 +5214,10 @@ pub fn sessionsRowCenter() struct { x: f32, y: f32 } {
 pub fn sessionsGearSize() struct { w: f32, h: f32 } {
     return .{ .w = sess_gear_rect.w, .h = sess_gear_rect.h };
 }
+
+/// 설정 목록 끝의 «진단» 줄(M15a). 스키마 줄이 아니라 화면으로 가는 자리라 따로 든다.
+var set_diag_rect: SetRect = .{};
+var set_diag_pressed = false;
 
 /// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
 var sess_gear_rect: SetRect = .{};
@@ -6627,6 +6631,84 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     pushText(maru.i18n.tIn(.ko, .mob_server_delete), @intFromFloat(del_rect.x + set_pad_x), @intFromFloat(del_rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
+/// 진단 화면(M15a) — **사용자가 줄 수 있는 것**. 뒤로 · 본문 · 복사 한 줄이 전부다.
+///
+/// **본문은 `diagnosticText` 하나에서 나온다** — 그리는 글과 복사하는 글이 갈리면 사용자가
+/// 화면에서 본 것과 붙여 넣은 것이 달라지고, 그때 어느 쪽이 진짜인지 아무도 모른다.
+/// 여기서는 그 글을 줄 단위로 잘라 그릴 뿐이다.
+var diag_back_rect: SetRect = .{};
+var diag_copy_rect: SetRect = .{};
+var diag_back_pressed = false;
+var diag_copy_pressed = false;
+/// 복사했다고 한 번 말해 주는 자리(공개키 줄과 같은 규율 — 들어올 때마다 새로).
+var diag_copied = false;
+var diag_press: gesture.Press = .{};
+
+/// 판정자·화면이 같은 버퍼를 쓴다. **한 화면 분량**이라 넉넉하되 상한이 있다(계약 §5 — 담는 것이
+/// 이름·숫자뿐이라 이보다 커질 일이 없고, 커지면 `diagnosticText` 가 거기서 멈춘다).
+var diag_text_buf: [diag_text_max]u8 = undefined;
+
+pub fn diagnosticTextNow() []const u8 {
+    return diagnosticText(&diag_text_buf);
+}
+
+fn drawDiagnostics(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
+    // ── 헤더: 뒤로 + 제목(설정·서버와 같은 모양)
+    diag_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    noteA11y(diag_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
+    if (diag_back_pressed) push(.{ .x = @intFromFloat(diag_back_rect.x), .y = @intFromFloat(diag_back_rect.y), .w = @intFromFloat(diag_back_rect.w), .h = @intFromFloat(diag_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = diag_back_rect.x + (set_head_h - 22) / 2,
+            .y = diag_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2, // arrow_left
+        };
+        quad_count += 1;
+    }
+    pushText(maru.i18n.tIn(.ko, .mob_diagnostics), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    // ── 복사 줄. **본문보다 위다** — 이 화면에 온 이유가 복사이고, 본문이 길어지면 아래 끝은
+    // 화면 밖으로 나간다(이 화면은 안 흐른다: 담는 것이 한 화면 분량이라는 것이 계약이다).
+    var y = win.y + set_head_h + 1;
+    diag_copy_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    const copy_label = maru.i18n.tIn(.ko, if (diag_copied) .mob_diag_copied else .mob_diag_copy);
+    noteA11y(diag_copy_rect, .{ .role = .button, .label = copy_label });
+    if (diag_copy_pressed) push(.{ .x = @intFromFloat(diag_copy_rect.x), .y = @intFromFloat(diag_copy_rect.y), .w = @intFromFloat(diag_copy_rect.w), .h = @intFromFloat(diag_copy_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(copy_label, @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(if (diag_copied) .accent_bar else .accent_bar));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + set_row_h - 1), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    y += set_row_h + 8;
+
+    // ── 본문. **복사하는 그 글**을 줄 단위로 그린다.
+    const text = diagnosticTextNow();
+    var it = std.mem.splitScalar(u8, text, '\n');
+    const line_h: f32 = 20;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        if (y + line_h > win.y + win.h) break; // 화면을 넘으면 멈춘다 — 복사본에는 다 들어 있다
+        pushText(line, @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 14, tk.get(.muted_fg));
+        // **읽히기도 한다.** 이 화면은 글자만 있는 화면이라 서술자가 없으면 스크린 리더
+        // 사용자에게는 「뒤로·복사」 둘뿐인 빈 화면이다(M16a 에서 겪은 그 모양).
+        noteA11y(
+            .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = line_h },
+            .{ .role = .text, .label = line },
+        );
+        y += line_h;
+    }
+}
+
 fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
@@ -6660,6 +6742,11 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     set_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
     var content: f32 = 0;
     for (0..set_items.len) |k| content += setItemH(k);
+    // **목록 끝에 진단 줄이 하나 더 붙는다**(M15a). `set_items` 는 config 스키마에서 나오는데
+    // 진단은 값이 아니라 **화면**이라 거기 낄 자리가 없다 — 대신 그리는 쪽에서 한 줄을 더한다
+    // (서버 화면이 「서버 추가」를 목록 끝에 두는 것과 같은 모양). 높이를 여기서 안 더하면
+    // 스크롤 상한이 모자라 **그 줄에 영영 못 닿는다**.
+    content += set_row_h;
     set_max_scroll = @max(0, content - set_list.h);
     set_sa.clamp(@intFromFloat(@max(0, set_max_scroll)));
 
@@ -6805,6 +6892,29 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 }
                 push(.{ .x = @intFromFloat(set_list.x + set_pad_x), .y = @intFromFloat(ry + h - 1), .w = @intFromFloat(set_list.w - 2 * set_pad_x), .h = 1 }, tk.get(.divider), 0x80, 0, 0);
             },
+        }
+    }
+
+    // ── 진단 줄(M15a). **목록 끝이다** — 값이 아니라 화면이라 스키마에 없고, 여기서 한 줄을
+    // 더한다(위 `content` 가 그 높이를 같이 센다).
+    {
+        const dy = set_list.y + oy - setScroll();
+        // **안 보이는 줄은 rect 를 안 남긴다** — 남기면 화면 밖인데 눌린다(이 목록이 겪은 그것).
+        set_diag_rect = if (dy + set_row_h < list_top or dy > list_top + list_h) .{} else .{
+            .x = set_list.x,
+            .y = dy,
+            .w = set_list.w,
+            .h = set_row_h,
+        };
+        if (set_diag_rect.w > 0) {
+            if (set_diag_pressed) push(.{ .x = @intFromFloat(set_diag_rect.x), .y = @intFromFloat(set_diag_rect.y), .w = @intFromFloat(set_diag_rect.w), .h = @intFromFloat(set_diag_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+            pushText(maru.i18n.tIn(.ko, .mob_diagnostics), @intFromFloat(set_list.x + set_pad_x), @intFromFloat(dy + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
+            if (set_open == null) noteA11yClipped(
+                set_diag_rect,
+                .{ .x = set_list.x, .y = list_top, .w = set_list.w, .h = list_h },
+                .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_diagnostics) },
+            );
+            push(.{ .x = @intFromFloat(set_list.x + set_pad_x), .y = @intFromFloat(dy + set_row_h - 1), .w = @intFromFloat(set_list.w - 2 * set_pad_x), .h = 1 }, tk.get(.divider), 0x80, 0, 0);
         }
     }
 
@@ -7097,6 +7207,52 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         }
     }
 
+    // ── 진단 화면. 두 자리뿐이다(뒤로·복사) — 본문은 글자라 안 눌린다.
+    if (screenTop() == .diagnostics) {
+        switch (phase) {
+            0 => {
+                if (routeIs(.chrome)) return 1;
+                if (!routeClaim(.chrome)) return 0;
+                diag_press.begin(x, y, time_ms, false);
+                diag_back_pressed = setHit(diag_back_rect, x, y);
+                diag_copy_pressed = !diag_back_pressed and setHit(diag_copy_rect, x, y);
+                return 1;
+            },
+            1 => {
+                if (!routeIs(.chrome)) return 0;
+                // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(다른 화면과 같은 규칙).
+                if (diag_press.move(x, y)) {
+                    diag_back_pressed = false;
+                    diag_copy_pressed = false;
+                }
+                return 1;
+            },
+            else => {
+                if (!routeIs(.chrome)) return 0;
+                const was_back = diag_back_pressed;
+                const was_copy = diag_copy_pressed;
+                diag_back_pressed = false;
+                diag_copy_pressed = false;
+                routeClear();
+                if (phase == 3) {
+                    diag_press.cancel();
+                    return 1;
+                }
+                if (diag_press.end() != .tap) return 1;
+                if (was_back) {
+                    navPop();
+                    return 1;
+                }
+                if (was_copy) {
+                    // **화면에 그린 그 글을 그대로 보낸다** — 같은 함수가 낸 것이라 갈릴 수 없다.
+                    requestCopyText(diagnosticTextNow());
+                    diag_copied = true;
+                }
+                return 1;
+            },
+        }
+    }
+
     // ── 호스트키 승인 화면. 두 줄뿐이다(승인·취소).
     if (screenTop() == .host_key) {
         switch (phase) {
@@ -7346,7 +7502,10 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             set_back_pressed = set_press.canTap() and set_open == null and setHit(set_back_rect, x, y);
             set_pressed = null;
             if (set_press.canTap() and set_open == null and !set_back_pressed) {
-                for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
+                // **진단 줄을 먼저 본다** — 스키마 줄이 아니라 그 아래 한 줄이라, 나중에 보면
+                // `set_row_rects` 가 못 맞춘 자리로 떨어져 아무 일도 안 난다.
+                set_diag_pressed = setHit(set_diag_rect, x, y);
+                if (!set_diag_pressed) for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
                     set_pressed = i;
                     break;
                 };
@@ -7364,6 +7523,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             if (set_press.move(x, y)) {
                 set_pressed = null;
                 set_back_pressed = false;
+                set_diag_pressed = false;
             }
             if (set_press.state == .pressed) return 1;
             if (set_open != null) {
@@ -7388,8 +7548,10 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             if (phase == 2 and set_touch.owner != null) return 1;
             const pressed = set_pressed;
             const back = set_back_pressed;
+            const diag = set_diag_pressed;
             set_pressed = null;
             set_back_pressed = false;
+            set_diag_pressed = false;
             if (phase == 3) {
                 set_press.cancel();
                 return 1;
@@ -7425,6 +7587,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             }
             if (back) {
                 navPop(); // pop
+                return 1;
+            }
+            if (diag) {
+                // **들어올 때마다 새로** — 지난번 「복사했습니다」가 남아 있으면 이번에 안 눌러도
+                // 복사한 것처럼 보인다(공개키 줄과 같은 규율).
+                diag_copied = false;
+                diag_press.cancel();
+                navPush(.diagnostics);
                 return 1;
             }
             if (pressed) |i| switch (set_items[i].field.kind) {
@@ -7468,6 +7638,14 @@ pub export fn maru_mobile_pop_screen() u32 {
         // **뒤로가기는 취소다** — 친 것을 지우고 화면을 거둔다(안 지우면 다음 물음에 그것이 간다).
         wipePassword();
         password_prompt = false;
+        navPop();
+        return 1;
+    }
+    if (screenTop() == .diagnostics) {
+        // **하드웨어 뒤로가기도 같은 길로 나간다** — 화면 스택만 빼면 「복사했다」 표시가 남아,
+        // 다음에 들어왔을 때 안 누른 것을 누른 것처럼 보인다(들어오는 자리와 같은 규율).
+        diag_copied = false;
+        diag_press.cancel();
         navPop();
         return 1;
     }
@@ -7518,6 +7696,7 @@ pub export fn maru_mobile_pop_screen() u32 {
     term_back_pressed = false;
     set_pressed = null;
     set_back_pressed = false;
+    set_diag_pressed = false;
     kb_pressed = null;
     set_touch.cancel();
     return 1;
@@ -7617,7 +7796,12 @@ fn copyEnabled() bool {
 /// 브리지가 못 쓴다**(§3: 여기엔 OS 호출이 없다).
 var copy_pending = false;
 /// 코어 선택이 아니라 **정해진 글자**를 복사할 때 그 글자(공개키 한 줄 등). 0 이면 선택에서 뽑는다.
-var copy_text_buf: [256]u8 = undefined;
+///
+/// **진단 한 장이 들어갈 만큼이다**(M15a — 그 전에는 256 이라 공개키 줄에만 맞았다). 크기를
+/// `diag_text_max` 에서 가져오는 것이 요점이다: 두 벌로 두면 진단이 길어졌을 때 **화면에는
+/// 보이는데 복사만 조용히 안 되는** 상태가 된다. 두 host 가 `take_copy` 에 8KiB 를 내주므로
+/// 이 값이 상한이고, 넘치면 **자르지 않고 오류로 남긴다**.
+var copy_text_buf: [diag_text_max]u8 = undefined;
 var copy_text_len: usize = 0;
 
 /// 그 글자를 클립보드로 보내 달라고 요청한다(host 가 `take_copy` 로 가져간다).
@@ -7688,10 +7872,159 @@ var last_error: [64]u8 = [_]u8{0} ** 64;
 
 /// 플랫폼이 `maru_mobile_last_error` 로 읽는 자리. 조용한 실패를 남기지 않기 위한 것이라
 /// **덮어쓰지 않는다** — 먼저 난 원인이 더 쓸모 있다.
+///
+/// **고리에는 «항상» 적는다**(M15a). 위 한 칸은 host 가 읽자마자 비우는 통로라 폰에는 아무
+/// 흔적이 안 남았고, 게다가 칸이 차 있는 동안 난 실패는 **통째로 사라졌다** — 고리는 그 둘을
+/// 다 붙든다. 규칙은 [계약 §5](../../../docs/mobile-platform.md)가 소유한다.
 fn setLastError(name: []const u8) void {
+    noteDiagError(name);
     if (last_error[0] != 0) return;
     const n = @min(name.len, last_error.len - 1);
     @memcpy(last_error[0..n], name[0..n]);
+}
+
+// ── 진단: 실패를 기억한다 (M15a) ────────────────────────────────────────────
+//
+// **담는 것은 이름·숫자뿐이다.** 오류 이름은 우리가 소스에 적은 식별자(`core_write_input` 류)라
+// 사용자 데이터가 안 섞인다 — 그래서 사용자가 통째로 복사해 붙여도 사고가 안 난다. 터미널 내용·
+// 명령어·경로·호스트명은 **여기 들어올 길이 없다**(문자열을 받는 자리가 이 함수 하나고, 부르는
+// 쪽은 전부 리터럴이다). 판정자가 그것을 지킨다.
+
+/// 이름 하나와 그 이름이 겪은 일. **시간은 프레임 순번으로 잰다** — 벽시계는 테스트에서 멈추고,
+/// 진단에서 알고 싶은 것도 "몇 시"가 아니라 "언제부터, 얼마나 자주"다.
+const DiagError = struct {
+    name: [40]u8 = @splat(0),
+    name_len: usize = 0,
+    first_frame: u64 = 0,
+    last_frame: u64 = 0,
+    count: u32 = 0,
+};
+
+/// 자리 수. 오류 **이름**은 마흔 몇 가지라 이보다 많아질 수 있다 — 그때는 아래가 버린 수를 센다.
+pub const diag_error_slots = 16;
+var diag_errors: [diag_error_slots]DiagError = @splat(.{});
+var diag_error_used: usize = 0;
+/// 자리가 없어 **못 적은** 이름의 수. 조용히 버리면 나중에 아무도 못 짚는다(아틀라스 축출에서
+/// 겪은 그 모양) — 화면이 이 수를 함께 보여 준다.
+var diag_errors_dropped: u32 = 0;
+/// 진단 한 장의 상한. **복사 버퍼도 같은 값을 쓴다** — 화면에 보인 것을 못 복사하면 이 화면의
+/// 존재 이유가 사라진다(그 둘이 갈리면 긴 진단만 조용히 복사가 안 된다).
+pub const diag_text_max = 2048;
+
+/// 진단 글이 자리에 안 들어간 적이 있나. **잘린 진단이 전부인 척하면 안 된다** — 다음 프레임의
+/// 머리글이 그 사실을 붙여 말한다(계약 §5).
+var diag_truncated = false;
+
+fn noteDiagError(name: []const u8) void {
+    const n = @min(name.len, @as(usize, 40));
+    for (diag_errors[0..diag_error_used]) |*e| {
+        if (e.name_len != n) continue;
+        if (!std.mem.eql(u8, e.name[0..n], name[0..n])) continue;
+        // **같은 이름은 묶는다.** 한 실패가 프레임마다 나는 것이 흔한 모양이라, 안 묶으면
+        // 고리가 그 하나로 차서 다른 원인이 통째로 밀려난다.
+        e.last_frame = frame_seq;
+        e.count +%= 1;
+        return;
+    }
+    if (diag_error_used == diag_errors.len) {
+        diag_errors_dropped +%= 1;
+        return;
+    }
+    var e = &diag_errors[diag_error_used];
+    @memcpy(e.name[0..n], name[0..n]);
+    e.name_len = n;
+    e.first_frame = frame_seq;
+    e.last_frame = frame_seq;
+    e.count = 1;
+    diag_error_used += 1;
+}
+
+/// 판정자·화면이 읽는 자리. **적힌 순서 그대로**다 — 처음 난 원인이 위에 온다.
+pub fn diagErrors() []const DiagError {
+    return diag_errors[0..diag_error_used];
+}
+
+pub fn diagErrorsDropped() u32 {
+    return diag_errors_dropped;
+}
+
+/// 진단 한 장. **그리는 글과 복사하는 글이 같은 함수에서 나온다** — 두 벌로 두면 사용자가 화면에서
+/// 본 것과 붙여 넣은 것이 갈리고, 그때 어느 쪽이 진짜인지 아무도 모른다(이 저장소가 렌더 쪽에서
+/// 여러 번 겪은 모양). 화면은 이 글을 줄 단위로 잘라 그린다.
+///
+/// **필드 이름은 옮기지 않는다**(ASCII 고정). 이 글의 독자는 버그 보고를 읽는 사람이고, 번역된
+/// 산문보다 `MARU_*` 로그와 같은 안정된 키가 낫다. 화면의 제목·버튼만 사람 말이다.
+///
+/// **여기 들어가는 것은 이름·숫자·상태뿐이다**(계약 §5). 터미널 내용·명령어·경로·호스트명·
+/// 사용자명·서버 이름은 안 들어간다 — 그 값들이 이 함수에 닿는 길이 없다.
+pub fn diagnosticText(buf: []u8) []const u8 {
+    var w: usize = 0;
+    const put = struct {
+        fn f(dst: []u8, at: *usize, comptime fmt: []const u8, args: anytype) void {
+            const rest = dst[@min(at.*, dst.len)..];
+            const out = std.fmt.bufPrint(rest, fmt, args) catch {
+                // **조용히 멈추지 않는다**(계약 §5). 자리는 넉넉하지만(머리글 몇 줄 + 고리
+                // 열여섯 × 이름 마흔 자) 그래도 넘치면 **잘린 진단**이 나가고, 받는 사람은
+                // 그것이 전부인 줄 안다. 다음 프레임의 머리글이 그 사실을 말한다.
+                diag_truncated = true;
+                at.* = dst.len;
+                return;
+            };
+            at.* += out.len;
+        }
+    }.f;
+
+    put(buf, &w, "maru mobile diag{s}\n", .{if (diag_truncated) " (truncated)" else ""});
+    put(buf, &w, "grid={d}x{d} scale={d}\n", .{ body_cols, body_rows, render_scale_milli });
+    put(buf, &w, "atlas cell={d}x{d} glyphs={d} color={d} miss={d}\n", .{
+        maru_mobile_atlas_cell_w(), maru_mobile_atlas_cell_h(),
+        atlas_n,                    color_n,
+        miss_n,
+    });
+    put(buf, &w, "frame target_hz={d} low_power={s} seq={d}\n", .{
+        maru_mobile_frame_target_hz(),
+        if (system_low_power orelse false) "yes" else "no",
+        frame_seq,
+    });
+    put(buf, &w, "ssh state={d} control state={d} sessions={d} servers={d}\n", .{
+        conn_state, @intFromEnum(control_client.state), control_row_count, servers().len,
+    });
+    put(buf, &w, "errors={d} dropped={d}\n", .{ diag_error_used, diag_errors_dropped });
+    for (diagErrors()) |*e| {
+        put(buf, &w, "  {s} x{d} frame {d}..{d}\n", .{
+            e.name[0..e.name_len], e.count, e.first_frame, e.last_frame,
+        });
+    }
+    return buf[0..@min(w, buf.len)];
+}
+
+/// 판정자용 — 실패 하나를 기억시킨다. **제품과 같은 문**(`setLastError`)으로 들어간다: 고리에만
+/// 넣는 뒷문을 두면 「한 칸이 차 있어도 고리에는 남는가」를 잰다고 믿으면서 다른 것을 재게 된다.
+pub fn noteErrorForTest(name: []const u8) void {
+    setLastError(name);
+}
+
+/// 판정자용 — 설정 목록 끝의 진단 줄·진단 화면의 복사 줄. **좌표를 테스트가 다시 계산하지
+/// 않는다** — 그리는 자리와 누르는 자리가 갈리면 안 된다.
+pub fn settingsDiagRectForTest() SetRect {
+    return set_diag_rect;
+}
+
+pub fn diagCopyRectForTest() SetRect {
+    return diag_copy_rect;
+}
+
+/// 판정자용 — 설정 목록 창. 「끝까지 밀면 마지막 줄이 «통째로» 보이나」를 재는 데 쓴다.
+pub fn settingsListRectForTest() SetRect {
+    return set_list;
+}
+
+/// 판정자용 — 기억한 것을 지운다(제품에는 지우는 자리가 없다: 앱이 뜨면 비어 있고 그 뒤로 쌓인다).
+pub fn resetDiagForTest() void {
+    diag_errors = @splat(.{});
+    diag_error_used = 0;
+    diag_errors_dropped = 0;
+    diag_truncated = false;
 }
 
 /// 프레임 시각(ms). **길게 누름은 시계가 있어야 판정된다** — move 핸들러에서만 보면 손가락이
@@ -7766,6 +8099,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .diagnostics => drawDiagnostics(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     sortA11yForReading();
     // **모은 것을 여기서 판정한다**(M9a). 본문을 그리고 난 뒤라야 이번 프레임에 바뀐 줄이 다

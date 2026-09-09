@@ -1189,10 +1189,13 @@ pub fn captureActivePaneGeometry(
 /// 그 pane의 활성 Term이 파일이면 헤더 밴드 rect를 준다(아니면 null). 렌더와 hit-test의 단일 출처다.
 pub fn fileHeaderBandForPane(self: *AppSession, pane: *Pane, rect: maru.session.SplitRect) ?FileHeaderBand {
     if (pane.terms.items.len == 0) return null;
-    const entry = pane.activeTerm().file_entry orelse return null;
+    // **한 번만 고른다.** 아래 `entry` 와 `term` 이 **같은 Term** 에서 나와야 밴드가 한 파일을
+    // 말한다 — 호출부가 Term 을 다시 구하면 그 둘이 갈릴 수 있다(`FileHeaderBand` doc).
+    const term = pane.activeTerm();
+    const entry = term.file_entry orelse return null;
     const bar = paneBar(self, rect, pane) orelse return null;
     if (bar.full.h == 0) return null;
-    return .{ .band = paneBandRect(bar), .entry = entry };
+    return .{ .band = paneBandRect(bar), .entry = entry, .term = term };
 }
 
 /// 활성 탭의 활성 panel을 닫는다(split이 있으면 pane을 하나씩 닫는다). 트리를 형제로

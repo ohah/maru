@@ -3636,6 +3636,25 @@ test "Codex 활동: 갈래도 **안쪽 이름**이 정한다 — 표가 그 어�
     try testing.expectEqual(Activity.exec, h.activity);
 }
 
+test "Codex 활동: 이름은 **정확히** 같아야 한다 — 접두로 새지 않는다 (적대적 3회차)" {
+    // 모델이 이름을 잘못 쓰는 일이 실제로 있다 — 실측에서 `exec_command_command` ·
+    // `exec_commandCommand` · `exec_commandrang` · `exec_commandPropertyDescriptor` ·
+    // `execRightNow` 여섯 건이 나왔다. `std.mem.eql` 이라 전부 `other` 로 간다.
+    //
+    // ⚠️ 표를 `startsWith` 로 「너그럽게」 바꾸면 그것들이 「명령」으로 새어 든다. 없는 분류를
+    // 지어내지 않는다는 규율(§2.3)이 이 경계에도 걸린다.
+    try testing.expectEqual(Activity.other, Activity.fromToolName("exec_command_command"));
+    try testing.expectEqual(Activity.other, Activity.fromToolName("exec_commandCommand"));
+    try testing.expectEqual(Activity.other, Activity.fromToolName("execRightNow"));
+    try testing.expectEqual(Activity.other, Activity.fromToolName("write_st_zzz"));
+    try testing.expectEqual(Activity.other, Activity.fromToolName(""));
+    // 그리고 아는 이름은 그대로 든다.
+    try testing.expectEqual(Activity.exec, Activity.fromToolName("exec_command"));
+    try testing.expectEqual(Activity.exec, Activity.fromToolName("write_stdin"));
+    try testing.expectEqual(Activity.read, Activity.fromToolName("view_image"));
+    try testing.expectEqual(Activity.other, Activity.fromToolName("apply_patch"));
+}
+
 test "Codex 활동: 돌고 있는 셸에 보내는 입력도 「명령」이다 — `write_stdin`" {
     // 실측 **82,027 건**으로 `exec_command` 다음이다. 이름은 「표준입력에 쓴다」지만 사용자가 묻는
     // 것은 「무엇을 돌렸나」이고, 돌고 있는 셸에 친 글자는 그 답의 일부다 — 같은 칸에 든다.

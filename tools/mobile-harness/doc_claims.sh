@@ -410,6 +410,9 @@ ck "매니페스트에 debuggable 이 없다" 0 "$(sed '/<!--/,/-->/d' $N | grep
 # 빗나갔을 때(매니페스트 문구가 바뀌면) 조용히 안 켜진 apk 가 나오고, `run-as` 가 안 되는 이유를
 # 한참 찾게 된다.
 ck "개발 빌드가 켜고, 켜졌는지 확인한다" 2 "$(grep -c 'android:debuggable' $H_RUN)"
+# **여는 태그 바로 뒤에 끼운다** — 줄 전체를 맞추면 속성이 하나만 늘어도 빗나간다(아이콘을
+# 붙이면서 실제로 겪었다. 그때는 위 확인이 멈춰 세웠지만, 애초에 안 빗나가는 편이 낫다).
+ck "치환이 속성 추가에 안 깨진다" 1 "$(grep -c 'sed .s|<application |' $H_RUN)"
 ck "원본이 아니라 사본에 쓴다" 1 "$(grep -c 'AndroidManifest.dev.xml' $H_RUN)"
 # **개인정보 선언은 제품 자리에 있고 번들에 든다.** 하네스가 자기 사본을 만들면 번들과 갈린다.
 ck "개인정보 선언이 제품 자리에 있다" 1 "$(ls $X 2>/dev/null | wc -l | tr -d ' ')"
@@ -421,6 +424,28 @@ ck "사유를 밝힐 API 없음" 1 "$(grep -c '<key>NSPrivacyAccessedAPITypes</k
 # **그리고 그것이 «사실»이어야 한다.** 하나라도 쓰기 시작하면 위 선언이 거짓이 된다 — 그때
 # 붉어져서 선언을 함께 고치게 한다(2026-09-09 실측: 전부 0건).
 ck "사유를 밝힐 API 를 안 쓴다" 0 "$(sed 's,//.*,,' $I | grep -cE 'NSUserDefaults|systemUptime|NSFileCreationDate|NSFileModificationDate|attributesOfItemAtPath|statfs|activeInputModes')"
+
+echo "§아이콘 — 한 그림이 세 플랫폼을 덮는다 (M11b)"
+G=assets/icon/render.py
+# **그리는 자리가 하나다.** 크기가 스물 몇 개라 손으로 맞추면 한 자리만 낡고, 그 한 자리는
+# 그 크기에서만 드러난다(작은 아이콘이 특히 그렇다).
+ck "그림의 단일 출처가 있다" 1 "$(ls $G 2>/dev/null | wc -l | tr -d ' ')"
+ck "macOS 아이콘이 있다" 1 "$(ls assets/icon/Maru.icns 2>/dev/null | wc -l | tr -d ' ')"
+ck "iOS 아이콘이 다 있다" 5 "$(ls assets/icon/ios/*.png 2>/dev/null | wc -l | tr -d ' ')"
+ck "Android 아이콘이 다 있다" 10 "$(ls assets/icon/android/mipmap-*/*.png 2>/dev/null | wc -l | tr -d ' ')"
+# **색은 제품에서 온다.** 여기 숫자를 새로 만들면 브랜드가 두 벌이 된다.
+ck "앰버가 브랜드 강조색이다" 1 "$(grep -ci 'AMBER = (0xDD, 0xA1, 0x5E)' $G)"
+ck "그 앰버가 제품 값이다" 1 "$(grep -ci 'accent_default = #dda15e' src/config/appearance.zig)"
+# **적응형 배경색은 두 곳에 적힌다**(XML 이 색을 요구하고 생성기는 PNG 를 굽는다) — 묶어 둔다.
+ck "적응형 배경이 생성기 바탕과 같다" 1 "$(grep -c '#1E1E2E' src/platform/android/res/values/colors.xml)"
+ck "생성기 바탕도 그 값이다" 1 "$(grep -c 'GROUND = (0x1E, 0x1E, 0x2E)' $G)"
+# **번들이 실제로 든다.** 자산만 있고 안 실으면 아무 데도 안 보인다.
+ck "macOS 번들이 싣는다" 1 "$(grep -c 'assets/icon/Maru.icns zig-out/Maru.app' build.zig)"
+ck "macOS plist 가 가리킨다" 1 "$(grep -c 'CFBundleIconFile' src/platform/macos/MaruAppHost-Info.plist.in)"
+ck "iOS plist 가 가리킨다" 1 "$(grep -c 'CFBundleIconFiles' src/platform/ios/Info.plist.in)"
+ck "iOS 번들이 싣는다" 1 "$(grep -c 'assets/icon/ios' $H_RUN)"
+ck "Android 매니페스트가 가리킨다" 1 "$(grep -c 'android:icon=' $N)"
+ck "Android 가 res 를 컴파일해 링크한다" 1 "$(grep -c 'aapt2\" compile --dir' $H_RUN)"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

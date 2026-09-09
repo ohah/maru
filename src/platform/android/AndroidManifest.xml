@@ -25,7 +25,7 @@
          그 값이 배포에 실리면 **아무나 앱 저장소를 꺼낸다** — 우리가 개인키를 봉인해 두는 바로
          그 자리다. 그래서 **기본값은 안전**이고 하네스가 개발 빌드에만 끼워 넣는다: 잊어서
          켜지는 일은 있어도 **잊어서 꺼지는 일은 없다.** -->
-    <application android:label="MaruChrome">
+    <application android:label="MaruChrome" android:icon="@mipmap/ic_launcher">
         <!-- configChanges 에 fontScale 을 넣는 이유: 안 넣으면 시스템 글자 크기를 바꿀 때
              액티비티가 **통째로 재생성**된다 — NativeActivity 라 창·스왑체인·아틀라스가 다 다시
              서고 화면이 한 번 끊긴다. 직접 받으면 onConfigurationChanged 에서 배율만 알리고

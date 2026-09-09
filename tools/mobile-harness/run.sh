@@ -245,6 +245,9 @@ chrome-ios)
     # **개인정보 선언도 번들에 든다**(M11a). 여기서 «만들지» 않고 제품 자리 것을 가져다 넣는다 —
     # 하네스가 자기 사본을 두면 번들과 제품이 갈리고, 그 차이는 심사에서야 드러난다.
     cp "$IOS/PrivacyInfo.xcprivacy" "$APP/PrivacyInfo.xcprivacy"
+    # **앱 아이콘도 번들에 든다**(M11b). 에셋 카탈로그가 없는 번들이라 PNG 를 뿌리에 두고
+    # `Info.plist` 의 `CFBundleIconFiles` 가 이름으로 가리킨다. 그림은 `assets/icon/` 이 소유한다.
+    cp "$ROOT"/assets/icon/ios/*.png "$APP/"
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
     # 굵게·기울임은 **다른 글리프**라 폰트 파일도 따로 필요하다(SGR 1/3).
     for f in Regular Bold Italic BoldItalic; do
@@ -327,17 +330,30 @@ chrome-android-app)
     for f in Regular Bold Italic BoldItalic; do
         cp "$ROOT/assets/fonts/Jetendard/Jetendard-$f.ttf" "$OUT/assets/"
     done
+    # **런처 아이콘 자원을 모아 컴파일한다**(M11b). XML(적응형 서술·색)은 제품 자리에 있고
+    # PNG 는 `assets/icon/` 이 소유한다 — 한 생성기가 세 플랫폼 것을 함께 뽑기 때문이다.
+    # 여기서 한 res 트리로 모아 `aapt2 compile` 한다(원본 두 자리를 안 건드린다).
+    RES="$OUT/res"
+    rm -rf "$RES" && mkdir -p "$RES"
+    cp -R "$ANDROID/res/." "$RES/"
+    cp -R "$ROOT/assets/icon/android/." "$RES/"
+    [ -s "$RES/mipmap-xxxhdpi/ic_launcher.png" ] || { echo "런처 아이콘이 없다 — assets/icon/render.py 로 다시 뽑는다" >&2; exit 1; }
+    "$BT/aapt2" compile --dir "$RES" -o "$OUT/res.zip"
+
     # **개발 빌드에만 `debuggable` 을 끼워 넣는다**(M11a — 계약 §3.4). 매니페스트의 기본값은
     # 안전이고(그 값이 배포에 실리면 아무나 앱 저장소를 꺼낸다) 이 하네스는 `run-as` 로 앱 안의
     # 래스터 결과를 꺼내야 하므로 여기서 켠다. **원본을 안 고친다** — 고치면 그 파일이 켜진 채로
     # 남아 다음 배포 빌드에 그대로 실린다.
     DEVMANIFEST="$OUT/AndroidManifest.dev.xml"
-    sed 's|<application android:label="MaruChrome">|<application android:label="MaruChrome" android:debuggable="true">|' \
+    # **속성 «뒤»가 아니라 여는 태그 «바로 뒤»에 끼운다.** 줄 전체를 맞추면 매니페스트에 속성이
+    # 하나만 늘어도 치환이 빗나간다 — 실제로 아이콘(`android:icon`)을 붙이자마자 그렇게 됐고,
+    # 아래 확인이 그 자리에서 멈춰 세웠다.
+    sed 's|<application |<application android:debuggable="true" |' \
         "$ANDROID/AndroidManifest.xml" > "$DEVMANIFEST"
     grep -q 'android:debuggable="true"' "$DEVMANIFEST" || { echo "개발 매니페스트에 debuggable 을 못 넣었다" >&2; exit 1; }
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
-        --manifest "$DEVMANIFEST" -A "$OUT/assets" \
+        --manifest "$DEVMANIFEST" -A "$OUT/assets" -R "$OUT/res.zip" \
         -o "$OUT/base.apk" --auto-add-overlay
     # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
     # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).

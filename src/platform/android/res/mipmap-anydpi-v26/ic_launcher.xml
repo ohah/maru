@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- **적응형 아이콘**(API 26+, M11b). 런처가 원·둥근사각 등 자기 모양으로 잘라내므로 배경과
+     앞면을 갈라 준다 — 통짜 PNG 를 주면 그 모양 밖의 모서리가 잘려 나간다.
+
+     앞면 그림은 108dp 캔버스에 그려져 있고 모티프는 안전 영역(지름 66dp) 안에 든다
+     (`assets/icon/render.py` 의 `ADAPTIVE_MOTIF`). 배경은 단색이라 XML 로 충분하다. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

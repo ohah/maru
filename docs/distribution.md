@@ -61,6 +61,30 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 - **최소 macOS는 11.0**(Big Sur, Apple Silicon 시작 버전 = arm64 하한). `build.zig`의 `default_target`
   os_version_min과 `MaruAppHost-Info.plist.in`의 `LSMinimumSystemVersion`을 함께 11.0으로 맞춘다.
 
+## 앱 아이콘 — 한 그림이 세 플랫폼을 덮는다
+
+**그림의 단일 출처는 `assets/icon/render.py` 다.** 모티프는 **앰버 커서** — 프롬프트 `❯` 와 블록
+커서다(사용자 확정 2026-09-09). 색은 새로 만들지 않는다: 앰버는 브랜드 강조색(`accent_default`
+= `#dda15e`), 바탕은 기본 다크 배경 계열(`#1e1e2e`)이다.
+
+**왜 그림 파일이 아니라 생성기인가.** 크기가 스물 몇 개다(macOS `.icns` 열 · iOS 다섯 ·
+Android 밀도 다섯 × 둘). 손으로 맞추면 한 자리만 낡고, 그 한 자리는 **그 크기에서만** 드러난다.
+한 번 그리고 전부 뽑는다.
+
+| 플랫폼 | 번들이 드는 것 | 가리키는 자리 |
+|---|---|---|
+| macOS | `Contents/Resources/Maru.icns` | `CFBundleIconFile`(`MaruAppHost-Info.plist.in`) |
+| iOS | 번들 뿌리의 `AppIcon*.png` | `CFBundleIcons`(`src/platform/ios/Info.plist.in`) — 이 번들은 Xcode 프로젝트가 없어 에셋 카탈로그가 없다 |
+| Android | `res/mipmap-*/ic_launcher*.png` + 적응형 XML | `android:icon`(`AndroidManifest.xml`) |
+
+**Android 는 앞면이 더 작다.** 런처가 자기 모양(원·둥근사각)으로 잘라내므로 모티프가 안전
+영역(지름 66/108) 안에 들어야 한다 — 통짜로 주면 모서리가 잘린다. 생성기가 그 크기를 따로 뽑는다.
+
+**iOS 는 알파를 안 쓴다** — 투명을 검게 깔고 모서리를 자기가 자른다.
+
+**없으면 빌드를 세운다**(macOS·Android). 조용히 빠지면 「아이콘이 왜 안 나오지」를 나중에 찾게
+된다 — 폰트 자산과 같은 규율이다.
+
 ## 서명·공증
 
 `.dmg` 경로(채널 2)에만 해당한다. formula 소스 빌드(채널 1)는 서명·공증이 없다.

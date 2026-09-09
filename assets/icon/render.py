@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""maru 앱 아이콘 — 한글 **「마」**를 두 커서로 쓴 그림의 단일 출처.
+"""maru 앱 아이콘 — **앰버 커서 모티프**를 그리는 단일 출처.
 
 **왜 그림 파일이 아니라 생성기인가.** 아이콘은 플랫폼마다 크기가 열 몇 개이고(macOS `.icns`
 여덟 · iOS 다섯 · Android 밀도 다섯) 손으로 맞추면 한 자리만 낡는다. 여기서 한 번 그리고
 전부 뽑는다 — 그리는 규칙이 한 곳이면 갈릴 수가 없다.
 
-**모티프**: 「마루」의 **「마」**를, 터미널이 쓰는 **두 가지 커서 모양**으로 쓴다 — `ㅁ` 자리에
-블록 커서, `ㅏ` 의 세로획 자리에 바(bar) 커서, 거기 삐침 하나. 글자로도 읽히고 터미널로도
-읽힌다(사용자 확정 2026-09-10). 앞선 판은 프롬프트 `❯` 와 블록 커서였는데, 같은 두 덩이를
-좌우만 바꿔 놓으면 「마」가 된다는 데서 왔다.
+**모티프**: 프롬프트 `❯` 와 블록 커서. 터미널이라는 것을 한눈에 말하고, 40px 에서도 두 덩이가
+안 뭉친다(대안 둘을 나란히 그려 보고 골랐다 — 커서만 두면 그냥 사각형이고, 「친 줄」을 옆에
+두면 작은 크기에서 붙어 버린다).
 
-**`ㅁ` 은 터미널 셀 비율이 아니다.** 블록 커서는 1:1.9 로 길쭉한데 그대로 두면 글자가
-「마」보다 「미」로 읽힌다 — 정사각에 가깝게(1:1.25) 눕혀야 「마」가 된다. 여섯 후보를
-나란히 그려 보고 골랐다.
+**자리는 커서가 앞이다** — 「마루」의 「마」 느낌이 나라고(사용자 확정 2026-09-10). 두 덩이는
+앞선 판과 **똑같다**: 셀 비율(1:1.9) 블록 커서와 같은 셰브론이고, 좌우만 맞바꿨다. 글자를
+또박또박 쓰지 않는 것이 요점이다 — `ㅏ` 획을 실제로 그려 봤더니 「마」는 선명해졌지만 `❯` 가
+사라져 **터미널이라는 뜻이 통째로 빠졌다**. 알아보는 사람만 알아보면 된다.
 
 **색은 제품에서 온다**: 앰버는 브랜드 강조색(`config/appearance.zig` 의 `accent_default`),
 바탕은 기본 다크 배경 계열이다. 여기 숫자를 새로 만들지 않는다.
@@ -51,22 +51,30 @@ def render(size, *, motif=1.15, ground=GROUND, transparent=False):
     im = Image.new(mode, (w, w), fill)
     d = ImageDraw.Draw(im)
 
-    ch = int(w * 0.52 * motif)          # 글자 높이 — `ㅁ` 과 `ㅏ` 가 같이 쓴다
-    cw = int(ch / 1.25)                 # `ㅁ` 너비. 셀 비율(1:1.9)이 아니다 — 위 주석 참고
+    ch = int(w * 0.52 * motif)          # 커서 높이
+    cw = int(ch / 1.9)                  # 터미널 셀 비율
     radius = max(1, int(cw * 0.18))
-    lw = max(2, int(w * 0.080 * motif))  # `ㅏ` 세로획 = 바 커서 두께
-    tick = int(w * 0.15 * motif)        # `ㅏ` 삐침 길이
+    lw = max(2, int(w * 0.080 * motif))  # 셰브론 두께
+    aw = int(w * 0.15 * motif)          # 셰브론 폭
+    ah = ch * 0.44                      # 셰브론 반높이
     gap = int(w * 0.09 * motif)
 
-    total = cw + gap + lw + tick
+    total = cw + gap + aw
     x0 = (w - total) // 2
     cy = w // 2
 
     d.rounded_rectangle([x0, cy - ch // 2, x0 + cw, cy + ch // 2], radius=radius, fill=AMBER)
-    bx = x0 + cw + gap
-    d.rounded_rectangle([bx, cy - ch // 2, bx + lw, cy + ch // 2], radius=lw // 2, fill=AMBER)
-    d.rounded_rectangle([bx + lw, cy - lw // 2, bx + lw + tick, cy + lw // 2],
-                        radius=lw // 2, fill=AMBER)
+
+    ax = x0 + cw + gap + aw // 2
+    p0 = (ax - aw // 2, cy - ah)
+    p1 = (ax + aw // 2, cy)
+    p2 = (ax - aw // 2, cy + ah)
+    d.line([p0, p1], fill=AMBER, width=lw)
+    d.line([p1, p2], fill=AMBER, width=lw)
+    # **끝을 둥글게 한다.** PIL 의 `joint` 는 이음매만 둥글리고 «끝»은 잘린 채 둔다 — 그러면
+    # 큰 크기에서 도끼로 자른 것처럼 보인다(그려 보고 알았다).
+    for p in (p0, p1, p2):
+        d.ellipse([p[0] - lw // 2, p[1] - lw // 2, p[0] + lw // 2, p[1] + lw // 2], fill=AMBER)
     return im.resize((size, size), Image.LANCZOS)
 
 
@@ -88,13 +96,12 @@ IOS = [(120, "AppIcon60x60@2x.png"), (180, "AppIcon60x60@3x.png"),
 # Android 밀도별 런처 아이콘. 적응형(앞면)은 **투명 배경 + 작은 모티프**다.
 ANDROID = [("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), ("xxxhdpi", 192)]
 # 적응형 앞면 캔버스는 108dp 이고 안전 영역은 지름 66dp — 모티프를 그 안에 넣는다.
-# **0.62 는 넘쳤다.** `ㅁ` 을 정사각에 가깝게 눕히자 제일 작은 앞면(108px)의 모서리가 원을
-# 0.6px 벗어났다 — 자기시험이 재어서 잡았다(눈으로는 안 보인다).
-ADAPTIVE_MOTIF = 0.60
+ADAPTIVE_MOTIF = 0.62
 
-# **작은 크기에서 두 덩이가 붙으면 글자가 아니라 얼룩이 된다.** 32px 아래(macOS 16 자리)는
-# 옛 모티프도 뭉갰으니 재지 않는다 — 재는 것은 제품이 실제로 «글자로» 보여 주는 크기다.
-SELFTEST_MIN = 32
+# **작은 크기에서 두 덩이가 붙으면 그림이 얼룩이 된다.** 제품이 싣는 **모든** 크기에서 잰다 —
+# 제일 작은 16px(macOS 메뉴막대 자리)까지. 「40px 에서도 안 뭉친다」가 이 모티프를 고른 이유라
+# 그 말을 그대로 계약으로 만든다.
+SELFTEST_MIN = 16
 
 # `.icns` 안에 든 PNG 토막이 덮는 크기들. `ic04`/`ic05`(16·32)는 RLE 로 눌린 ARGB 라 여기서
 # 안 읽는다 — 나머지 여덟 자리가 제품이 실제로 보여 주는 크기다.

@@ -36,6 +36,51 @@ public final class MaruKeyStore {
 
     private MaruKeyStore() {}
 
+    /** 공개키 한 줄을 담아 두는 파일. **개인키를 안 열고** 그 줄을 보여 주려고 둔다 —
+     *  다시 켤 때마다 Keystore 를 열어 봉인을 풀 이유가 없다(계약 §3.4). */
+    private static final String PUB_FILE = "id_ed25519.pub";
+
+    /** **이 기기의 키를 첫 실행에 세운다**(M16b). `.pub` 가 없으면 키를 열고(없으면 만들고)
+     *  그 한 줄을 남긴다 — 그 줄이 있어야 서버 `authorized_keys` 에 넣을 수 있고, 그래야
+     *  **등록보다 먼저** 붙을 준비가 끝난다.
+     *
+     *  **여기가 Java 인 이유**: 네이티브 스레드에서 `FindClass` 로 이 클래스를 찾으면 시스템
+     *  클래스로더를 보아 조용히 못 찾는다(실측 `cls=0x0`). 그래서 예전에는 이 일이 아예 안
+     *  일어났고, 사용자는 서버를 등록하는 화면에서 「아직 키가 없습니다」만 봤다. Java 에서
+     *  시작한 호출은 올바른 클래스로더 위에 있다.
+     *
+     *  **이미 있으면 아무것도 안 한다** — 여는 일도 쓰는 일도 없다. */
+    public static void ensureKey(Context ctx) {
+        File pub = new File(ctx.getFilesDir(), PUB_FILE);
+        if (pub.exists()) return;
+        byte[] secret = loadOrCreate(ctx);
+        if (secret == null) return; // 이유는 loadOrCreate 가 이미 남겼다
+        String line = nativeKeyLine(secret);
+        java.util.Arrays.fill(secret, (byte) 0); // 개인키 사본은 바로 지운다
+        if (line == null || line.isEmpty()) {
+            android.util.Log.i("MaruChrome", "MARU_SSH public_key_line_failed");
+            return;
+        }
+        // **임시 파일에 쓰고 바꿔치기한다**(봉인 파일과 같은 규율). 반쪽 파일이 남으면 그 뒤로
+        // 이 함수는 "있다" 고 보고 넘어가, 잘린 공개키를 화면이 보여 준다.
+        File tmp = new File(pub.getPath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write((line + "\n").getBytes("UTF-8"));
+        } catch (Exception e) {
+            android.util.Log.i("MaruChrome", "MARU_SSH pub_write_failed " + e);
+            return;
+        }
+        if (!tmp.renameTo(pub)) {
+            android.util.Log.i("MaruChrome", "MARU_SSH pub_rename_failed");
+            return;
+        }
+        android.util.Log.i("MaruChrome", "MARU_SSH public_key_ready");
+    }
+
+    /** 봉인된 키에서 `authorized_keys` 한 줄을 만든다. **형식은 코어가 소유한다**
+     *  (`maru_mobile_ssh_public_key_line`) — Java 가 조립하면 두 벌이 된다. */
+    private static native String nativeKeyLine(byte[] secret);
+
     /** 봉인된 키를 열거나, 없으면 **새로 만들어 봉인**한다. 실패하면 null. */
     public static byte[] loadOrCreate(Context ctx) {
         File file = new File(ctx.getFilesDir(), FILE);
@@ -56,7 +101,8 @@ public final class MaruKeyStore {
         return secret;
     }
 
-    /** 네이티브가 ABI 로 키를 만든다(씨앗은 OS 난수). 공개키 한 줄은 네이티브가 로그·파일로 낸다. */
+    /** 네이티브가 ABI 로 키를 만든다(씨앗은 OS 난수). **바이트만 준다** — 그 줄을 남기는 것은
+     *  위 `ensureKey` 다(경로를 아는 쪽이 쓴다). */
     private static native byte[] nativeGenerateKey();
 
     private static SecretKey wrapKey() throws Exception {

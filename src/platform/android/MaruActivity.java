@@ -717,6 +717,14 @@ public class MaruActivity extends android.app.NativeActivity {
         // 그 한 번이 눈에 띈다(그 사람이 바로 이 기능의 대상이다).
         applySystemFontScale();
         applyLowPower();
+        // **키는 «창이 서기 전에» 세운다**(M16b). 사용자는 이 기기의 공개키를 서버
+        // `authorized_keys` 에 넣어야 붙을 수 있으므로, 서버를 등록하는 화면에 닿기 전에 그
+        // 줄이 있어야 한다 — 접속할 때 처음 만들면 순서가 거꾸로다(계약 §3.4).
+        //
+        // **여기가 Java 인 것이 요점이다**: 네이티브 스레드에서는 `FindClass` 가 앱 클래스를
+        // 못 찾아 이 일이 아예 안 일어났다. 이미 있으면 아무것도 안 하므로 첫 실행에만 든다
+        // (실측: 첫 실행 16ms, 그 뒤 0ms — UI 스레드에 두어도 되는 값이다).
+        MaruKeyStore.ensureKey(this);
         // **decorView 에 붙인다.** `addContentView` 로 얹은 뷰는 insets dispatch 를 못 받는다
         // (실측: 리스너가 한 번도 안 불렸다). decorView 는 창의 뿌리라 항상 받는다.
         getWindow().getDecorView().setOnApplyWindowInsetsListener(new ImeInsets());

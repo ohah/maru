@@ -11,6 +11,10 @@ S=src/platform/mobile/mobile_ssh.zig
 H=src/platform/mobile/mobile_host_abi.h
 I=src/platform/ios/ios_app_host.m
 A=src/platform/android/android_app_host.c
+# Android 는 Java 도 host 다 — Keystore 를 여는 자리가 거기다(계약 §3.4).
+J=src/platform/android/MaruActivity.java
+K=src/platform/android/MaruKeyStore.java
+V=src/platform/android/MaruSshService.java
 
 # **틀린 것을 센다.** 예전에는 출력만 하고 항상 0 으로 끝나, 판정자가 전부 틀려도 이 스크립트를
 # 부르는 쪽은 성공으로 봤다 — 게이트가 아니라 구경거리였다.
@@ -264,6 +268,34 @@ ck "두 아틀라스 다 원본을 든다" 2 "$(grep -cE '^static uint8_t \*g_(g
 ck "컬러 원본을 놓는 자리는 다시 굽기 하나뿐" 1 "$(grep -c 'free(g_color_px)' $A)"
 ck "놓은 자리가 곧바로 새 원본을 세운다" 1 "$(grep -A1 'free(g_color_px);' $A | grep -c 'g_color_px = calloc')"
 ck "굽는 자리가 두 원본에 다 쓴다" 2 "$(grep -cE 'memcpy\(g_(glyph|color)_px' $A)"
+
+echo "§3.4 키는 첫 실행에 선다 (M16b)"
+# **네이티브 스레드는 앱 클래스를 못 찾는다.** 시스템 클래스로더를 보기 때문이다(실측:
+# `cls=0x0` + `ClassNotFoundException`) — 그래서 `dev/maru/*` 를 `FindClass` 로 찾는 자리가
+# 하나라도 생기면 그 갈래는 **조용히** 안 된다. 첫 실행에 공개키가 안 서던 원인이 그것이었다.
+# `android/*` 는 시스템 클래스라 괜찮으므로 여기서는 `dev/` 만 본다.
+#
+# **주석은 안 센다.** 이 함정을 설명하는 주석이 바로 그 문자열을 담고 있어서, 안 지우면
+# 판정자가 자기 설명에 걸린다(같은 모양의 판정자 결함을 이 저장소가 이미 겪었다).
+ck "네이티브가 앱 클래스를 안 찾는다" 0 "$(sed 's,//.*,,' $A | grep -c 'FindClass(env, "dev/')"
+# 키를 세우는 일은 **`MaruKeyStore.ensureKey` 함수 하나**가 진다. 부르는 자리는 둘이지만
+# (앱이 뜰 때·접속할 때) 하는 일은 하나여야 한다 — 자리마다 다시 적으면 한쪽만 고쳐진다.
+ck "앱이 뜰 때 한 번 부른다" 1 "$(grep -c 'MaruKeyStore\.ensureKey(' $J)"
+# **그리고 그 자리가 `onCreate` 다.** 「하나뿐」만 재면 `onResume` 으로 옮겨도 초록인데, 그러면
+# 네이티브 창(`APP_CMD_INIT_WINDOW`)보다 늦어져 첫 프레임이 키 없이 뜬다. `onCreate` 본문만
+# 잘라내 그 안에서 센다 — 본문은 4칸 들여쓰기의 닫는 괄호에서 끝난다.
+onCreateBody() { awk '/protected void onCreate\(/{f=1} f{print} f&&/^    \}$/{exit}' "$J"; }
+# **잘라내기가 됐는지부터 단언한다.** 포맷이 바뀌어 본문이 비면 아래 판정이 「없다」를 「옮겼다」로
+# 읽는다 — 이미 있는 줄 하나를 닻으로 쓴다.
+ck "onCreate 본문을 잘라냈다" 1 "$(onCreateBody | grep -c 'applyLongPressTimeout()')"
+ck "키 세우기가 onCreate 안이다" 1 "$(onCreateBody | grep -c 'MaruKeyStore\.ensureKey(')"
+# 공개키 줄의 **형식은 코어가 소유한다**(`maru_mobile_ssh_public_key_line`). host 가 조립하면
+# 두 벌이 되고, 사용자는 어느 줄을 `authorized_keys` 에 넣어야 하는지 모른다.
+ck "host 가 공개키 형식을 안 만든다" 0 "$(grep -c 'ssh-ed25519' $J $K $A $I | awk -F: '{s+=$2} END{print s+0}')"
+# **봉인된 키를 여는 두 번째 자리도 같은 함수를 먼저 부른다.** 앱이 뜰 때 Keystore 가 실패하면
+# 키는 **접속할 때 처음** 만들어지는데, 그때 한 줄을 안 남기면 봉인된 키는 있는데 화면은
+# 「아직 키가 없습니다」인 상태가 남는다. 그래서 서비스도 `ensureKey` 를 **먼저** 부른다.
+ck "서비스도 같은 함수를 먼저 부른다" 1 "$(awk '/MaruKeyStore\.ensureKey\(/{e=NR} /MaruKeyStore\.loadOrCreate\(/{l=NR} END{print (e&&l&&e<l)?1:0}' $V)"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

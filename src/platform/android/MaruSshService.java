@@ -67,6 +67,14 @@ public class MaruSshService extends Service {
             String fingerprint = intent.getStringExtra("fingerprint");
             if (host != null && user != null && fingerprint != null) {
                 // **키는 여기서 연다** — Keystore 가 봉인해 둔 것을 풀어 바로 넘기고 지운다.
+                //
+                // **공개키 한 줄이 먼저 서 있는지도 여기서 본다**(M16b). 정상 흐름에서는
+                // `MaruActivity.onCreate` 가 이미 세워 두어 이 줄은 파일이 있는지만 보고 지나간다.
+                // 그런데 그때 Keystore 가 실패했다면 키가 **여기서 처음** 만들어지는데, 그러면
+                // 봉인된 키는 있는데 화면은 「아직 키가 없습니다」라고 하는 상태가 남는다 —
+                // 사용자는 붙지도 못하고 무엇을 서버에 넣어야 할지도 모른다. **같은 함수를
+                // 부른다**: 자리가 둘이어도 하는 일은 하나여야 한다.
+                MaruKeyStore.ensureKey(this);
                 byte[] secret = MaruKeyStore.loadOrCreate(this);
                 if (secret == null) {
                     android.util.Log.i("MaruChrome", "MARU_SSH no_key — 접속하지 않는다");

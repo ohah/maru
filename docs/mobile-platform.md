@@ -248,6 +248,14 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
   `authorized_keys` 에 붙여야 처음 붙을 수 있는데, 접속할 때 키를 처음 열면 순서가 거꾸로다.
   Android 는 `id_ed25519.pub` 가 있으면 **개인키를 안 열고** 그것을 읽는다(없을 때만 Keystore 를
   열어 한 줄을 만들고 파일로 남긴다). iOS 는 앱 전용 키 파일에서 만든다.
+- **키를 여는 자리는 Java 다**(M16b — Android). 위 규칙이 **첫 실행에 안 지켜지고 있었다**:
+  키를 여는 일을 네이티브 스레드가 하고 있었는데 거기서 `FindClass("dev/maru/MaruKeyStore")` 는
+  **시스템 클래스로더**를 보아 앱 클래스를 못 찾는다(실측: `cls=0x0` + `ClassNotFoundException`,
+  그래서 `public_key_absent`). 이 함정은 같은 파일이 `g_activity_cls` 주석에 이미 적어 둔 것이다.
+  그래서 **`MaruActivity.onCreate` 가** 키를 세운다(`MaruKeyStore.ensureKey`) — Java 에서 시작한
+  호출이라 클래스로더가 맞고, 네이티브 창(`APP_CMD_INIT_WINDOW`)보다 **먼저** 끝난다.
+  네이티브 쪽은 파일 한 줄을 읽어 알리는 일만 남는다(안 되던 갈래는 지웠다 — 두 벌로 두면 어느
+  쪽이 진짜인지 아무도 모른다).
 - **키가 없어도 붙는다**(`maru_mobile_ssh_open` 의 `secret` 이 NULL, 펌프 `cfg.secret` 도 NULL).
   키가 아직 없는 기기는 코어가 `none` 으로 방법 목록만 물어 비밀번호만 여는 서버에 붙는다 —
   iOS 는 키 파일이 없으면 **접속 자체를 안 하고 있었다**.

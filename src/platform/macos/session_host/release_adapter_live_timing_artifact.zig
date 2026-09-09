@@ -61,6 +61,10 @@ pub const Provenance = struct {
     timing_record: timing.Record = .{},
     seal: [32]u8 = @splat(0),
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return provenancePristine(self);
+    }
+
     pub fn value(self: *const @This()) ?ProvenanceValue {
         const timing_value = self.timing_record.value() orelse return null;
         if (self.owner != self or self.artifact_id == 0 or self.repository_id == 0 or

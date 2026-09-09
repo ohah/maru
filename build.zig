@@ -14501,6 +14501,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-timing-artifact",
         "Bind one GitHub Actions artifact and its timing archive to the current attempt",
     );
+    const session_host_release_adapter_live_timing_transport_step = b.step(
+        "test-session-host-release-adapter-live-timing-transport",
+        "Fetch one live timing artifact through the pinned GitHub CLI and a private archive",
+    );
     const session_host_release_adapter_profile_authored_attestation_selector_step = b.step(
         "test-session-host-release-adapter-profile-authored-attestation-selector",
         "Select freshly reopened authored subjects without credentials",
@@ -15814,6 +15818,26 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_live_timing_artifact_step.dependOn(&run_live_timing_artifact_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_artifact_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             boundary_step.dependOn(&run_live_timing_artifact_tests.step);
+            const live_timing_transport_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_timing_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                .{ .name = "bounded_process", .module = bounded_mod },
+                .{ .name = "safe_open", .module = safe_open_mod },
+            } });
+            const live_timing_transport_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_live_timing_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_live_timing_transport", .module = live_timing_transport_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+                .{ .name = "bounded_process", .module = bounded_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+            } }) });
+            const run_live_timing_transport_tests = b.addRunArtifact(live_timing_transport_tests);
+            run_live_timing_transport_tests.addArg("--maru-expect-tests=12");
+            run_live_timing_transport_tests.setCwd(b.path("."));
+            session_host_release_adapter_live_timing_transport_step.dependOn(&run_live_timing_transport_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_transport_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
+            boundary_step.dependOn(&run_live_timing_transport_tests.step);
             const profile_authored_attestation_selector_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_selector.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
                 .{ .name = "release_adapter_context", .module = context_mod },
                 .{ .name = "release_manifest", .module = manifest_mod },

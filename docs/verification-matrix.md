@@ -3369,6 +3369,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   이를 한 번 실행하며 Release/asset/attestation/tag/run mutation과 pass record publication은 열지 않는다. focused Debug·ReleaseFast
   actual-process gate와 workflow source gate가 성공·실패 stdout/stderr/FD/residue 0, needs/permission/order/closed argv를 닫는다. 병합 뒤
   첫 protected `v*` tag가 실제 GitHub network 표본을 제공한다. final verdict와 U5 signed N-1→current 제품 E2E는 그 뒤 gate다.
+  다음 remote Release gate의 첫 value owner는 **구현 전**이다. current tag의 published immutable Release JSON을 protected Context와
+  결속하고 exact 네 asset(DMG, frozen host, manifest, evidence candidate)을 canonical role 순서로 seal하되 evidence filename을 profile
+  권위로 노출하지 않는다. pinned `gh` 조회·download·attestation·evidence semantic과 before/after metadata fence는 그 다음 transport가
+  소유하며, value owner만으로 실제 GitHub Release나 final verdict를 주장하지 않는다(`session-host-upgrade.md` §11.100d).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

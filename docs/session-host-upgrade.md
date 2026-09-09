@@ -5255,6 +5255,28 @@ caller에 남겨 semantic 실패가 filesystem residue 소유권을 숨기지 �
 fence 구간을 각각 기록한 행만 실측으로 인정하며, signed N-1→current U5 제품 완료는 후속 final
 verdict gate가 소유한다.
 
+#### 11.100h 원격 timing과 Release 관측의 최종 판정 결속
+
+첫 final verdict gate는 §11.100b의 credential-free `Provenance`와 §11.100g의 완료된 `Observation`을
+`release_adapter_remote_release_verdict.zig`의 final-address move-only `Verdict` 하나로 결속한다. 입력은 current protected
+`Context`, caller-owned timing provenance와 remote observation뿐이며 filesystem, clock, process, token, environment 또는 network를
+새로 열지 않는다. timing record의 repository/run ID/run attempt/source SHA와 remote observation의 attestation·manifest/evidence
+run identity가 모두 같은 `Context`에 exact 일치하고, 두 upstream owner가 각자의 seal과 전체 하위 graph를 재검증한 뒤에만 verdict를
+게시한다. artifact 이름, evidence filename, caller boolean 또는 profile scalar는 판정 입력이 아니다.
+
+`Verdict.value()`는 매번 context snapshot seal과 두 upstream owner의 `value()`를 다시 확인하고, canonical
+`baseline_a | upgrade_b`, release ID, timing artifact ID, run ID/run attempt/source SHA, positive duration을 반환한다. profile은 오직
+remote evidence semantic에서 가져오며 timing provenance는 duration과 current attempt 출처만 제공한다. copied/pre-owned verdict,
+result↔context/upstream 및 upstream 상호 storage alias, context bytes 변조, upstream deinit·이동·seal/하위 graph 변조,
+run/attempt/source/repository mismatch는 publication 전 또는 이후 `value()==null`로 fail-close한다. verdict는 upstream을 빌리기만 하므로
+실패 cleanup과 `deinit`에서 caller-owned provenance/observation을 해제하지 않으며, 자신이 소유한 secret·fd·allocation도 없다.
+
+focused Debug·ReleaseFast gate는 baseline/upgrade 성공, run/attempt/source/repository/profile 권위, copied/pre-owned/aliased owner,
+publication 전후 context·timing·remote graph drift와 terminal deinit을 검증한다. 이 순수 결속 gate는 protected workflow에서 실제
+network를 실행하거나 canonical pass record를 파일/summary/artifact로 게시하지 않으며, signed N-1→current 앱 업데이트 뒤
+PTY·PID·runtime 복구를 수행하지 않는다. 따라서 U5 완료 표시는 후속 제품 executable·read-only workflow wiring과 실제 protected-tag
+baseline/upgrade 실측이 모두 성공한 뒤에만 가능하다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

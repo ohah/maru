@@ -726,6 +726,10 @@ CI 러너는 매번 새 머신이라 이 명령이 필요 없다 — 개발 머�
 
 ## 완료 전 확인
 
+원격 release pass-record gate를 구현할 때는 canonical codec, private APFS publication, workflow source 계약을 각각
+Debug·ReleaseFast focused step으로 등록하고, 실제 GitHub artifact 표본은 병합 뒤 protected `v*` tag에서만 판정한다
+(`session-host-upgrade.md` §11.100j).
+
 코드나 빌드 설정을 바꾼 PR은 기본적으로 다음을 통과해야 한다.
 
 ```sh

@@ -3421,6 +3421,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   CLI pin·needs·permission·closed argv·upload/summary 부재를 검증한다. 병합 뒤 첫 protected `v*` tag만 실제
   GitHub network 실측이며 pass-record publication과 signed N-1→current U5 E2E는 여전히 후속이다
   (`session-host-upgrade.md` §11.100i).
+  Canonical 원격 pass record와 동일-run artifact 보존은 **미구현**이다. 다음 gate는 final verdict에서만
+  `maru.session-host-release-remote-pass.v1`을 투영하고 private APFS no-replace publication과 역순 cleanup이 모두 성공한 뒤에만
+  `session-host-release-remote-pass-<run_attempt>` artifact를 올린다. baseline record는 U5 완료가 아니며 실제 GitHub 표본은 병합 뒤
+  protected `v*` tag만 소유한다(`session-host-upgrade.md` §11.100j).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

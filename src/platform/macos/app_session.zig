@@ -78949,7 +78949,7 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
     quietActivityWorkers(session);
 }
 
-test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·재제출·경합·「다 못 봤다」 (BS1 적대적 1~5회차)" {
+test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·재제출·경합·펼침·「다 못 봤다」 (BS1 적대적 1~9회차)" {
     // 세 회차가 각각 다른 각도로 찾은 것을 한 자리에 못박는다. 셋 다 **성공 경로만 보면 안 보이는**
     // 자리다 — 「걸었고 답이 왔다」는 어느 쪽이든 통과한다.
     //
@@ -79074,6 +79074,22 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
         maru.i18n.t(.agent_activity_body_partial),
         agent_activity_ops.noticeText(session, &notice_buf),
     );
+    // ── **0 건일 때도 「없다」가 「못 봤다」를 덮지 않는다**(적대적 9회차). 0 건이야말로 그
+    //    구분이 가장 중요하다 — 뭔가 나왔으면 사용자는 그것을 보지만, 0 건이면 **「없다」를 믿고
+    //    검색을 그만둔다**. 못 본 조각에 그 검색어가 있었을 수 있는데도.
+    {
+        const saved = session.agent_activity.hits.items.len;
+        session.agent_activity.hits.clearRetainingCapacity();
+        session.agent_activity.labels.clearRetainingCapacity();
+        try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.agent_activity_body_partial),
+            agent_activity_ops.noticeText(session, &notice_buf),
+        );
+        // 되돌린다 — 다음 단계가 목록을 본다.
+        agent_activity_ops.rebuildFilter(session);
+        try std.testing.expectEqual(saved, session.agent_activity.hits.items.len);
+    }
     // 되돌리면 다시 개수다 — 문구가 «항상» 그것이면 이 판정자는 공허하다.
     session.agent_activity.body.partial = false;
     var want_buf: [agent_activity_ops.notice_buf_bytes]u8 = undefined;
@@ -79124,6 +79140,39 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     }
     try std.testing.expectEqual(@as(usize, 5), session.agent_activity.count());
     try std.testing.expectEqual(@as(usize, 4), session.agent_activity.shown_body_matches);
+
+    // ── ⓘ **본문 답이 도착해도 펼쳐 둔 줄은 제자리다**(적대적 8회차).
+    //
+    //    이 길은 검색어가 그대로인 채 목록이 **늘어나기만** 한다 — 보던 줄은 여전히 있고 자리만
+    //    밀린다. 그런데 그 자리를 안 이어 주면 **남의 줄이 펼쳐진 것처럼** 보인다(「다른 그림이
+    //    뜬다」와 같은 결의 조용한 어긋남). 스캔 수확과 `rebuildFilter` 는 이미 다루는데 이 길만
+    //    빠져 있었다.
+    {
+        // 본문 답을 지우고 라벨 층만 남긴 뒤(줄 하나) 그것을 펼친다.
+        session.agent_activity.body.matches.clearRetainingCapacity();
+        session.agent_activity.body.answered = false;
+        agent_activity_ops.rebuildFilter(session);
+        try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+        agent_activity_ops.openAt(session, 0);
+        const opened = session.agent_activity.open orelse return error.TestUnexpectedResult;
+        const want_file = session.agent_activity.hits.items[opened.hit_index].file_index;
+        const want_off = session.agent_activity.hits.items[opened.hit_index].data_offset;
+
+        // 이제 본문 답이 도착하게 한다 — 목록이 다섯으로 늘고 그 줄의 자리가 밀린다.
+        session.agent_activity.body.resubmit = true;
+        {
+            var wait = ActivityWait.start(session.io);
+            while (wait.pending() and !session.agent_activity.body.answered) _ = session.tick() catch {};
+        }
+        try std.testing.expectEqual(@as(usize, 5), session.agent_activity.count());
+        // **펼침이 살아 있고, 가리키는 것이 그 줄 그대로**여야 한다.
+        const still = session.agent_activity.open orelse return error.TestUnexpectedResult;
+        try std.testing.expect(still.hit_index < session.agent_activity.hits.items.len);
+        const now = session.agent_activity.hits.items[still.hit_index];
+        try std.testing.expectEqual(want_file, now.file_index);
+        try std.testing.expectEqual(want_off, now.data_offset);
+        session.agent_activity.dropOpen(session.allocator);
+    }
 
     // ── ⓖ **뷰를 떠났다 와도 본문 답은 남는다**(적대적 3회차). 검색어(`search.query`)는 뷰를
     //    떠나도 살아 있어 라벨 층 필터가 그대로 걸리는데, 본문 층만 버리면 사용자에게는 **자기가

@@ -998,6 +998,34 @@ fn decodeBackendPtr(self: *AppSession) ?*decode_backend.Backend {
     return null;
 }
 
+/// 펼쳐 둔 줄의 **정체**(`file_index` · `data_offset`). 타일 재연결과 **같은 키**다 — 배열이
+/// 움직여도 변하지 않는 값이라야 다시 이을 수 있다.
+const OpenKey = struct { file: u8, data_offset: u64 };
+
+fn openKey(self: *const AppSession) ?OpenKey {
+    const op = self.agent_activity.open orelse return null;
+    if (op.hit_index >= self.agent_activity.hits.items.len) return null;
+    const hit = self.agent_activity.hits.items[op.hit_index];
+    return .{ .file = hit.file_index, .data_offset = hit.data_offset };
+}
+
+/// 목록이 다시 만들어진 뒤 펼쳐 둔 줄을 **새 자리에 다시 잇는다**. 못 찾으면 닫는다.
+///
+/// **닫지 않고 잇는 이유**는 이 길이 「검색어는 그대로인데 목록이 **늘어나기만**」 하는 길이기
+/// 때문이다(본문 답이 도착). 보던 줄은 여전히 목록에 있고 자리만 밀리는데, 통째로 닫으면 읽던
+/// 것을 뺏고, **안 잇고 두면 남의 줄이 펼쳐진 것처럼 보인다** — 후자가 훨씬 나쁘다(「다른 그림이
+/// 뜬다」와 같은 결의 조용한 어긋남이다).
+fn reattachOpen(self: *AppSession, key: ?OpenKey) void {
+    if (self.agent_activity.open == null) return;
+    const k = key orelse return self.agent_activity.dropOpen(self.allocator);
+    for (self.agent_activity.hits.items, 0..) |hit, i| {
+        if (hit.file_index != k.file or hit.data_offset != k.data_offset) continue;
+        if (self.agent_activity.open) |*op| op.hit_index = i;
+        return;
+    }
+    self.agent_activity.dropOpen(self.allocator);
+}
+
 fn bodyBackendPtr(self: *AppSession) ?*body_backend.Backend {
     if (self.agent_activity_body_backend) |*b| return b;
     return null;
@@ -1116,8 +1144,15 @@ fn pollBodySearch(self: *AppSession) void {
     state.partial = result.partial;
     state.read_bytes = result.read_bytes;
     state.search_ns = result.search_ns;
+    // **목록이 새로 만들어지면 그 위에 얹힌 자리들도 낡는다**(적대적 8회차). 스캔 수확과
+    // `rebuildFilter` 는 그것을 이미 다룬다 — 이 길만 빠져 있었고, 그래서 결과가 오는 순간
+    // **펼쳐 둔 줄이 남의 자리를 가리켰다**(자리가 밀린 만큼 엉뚱한 줄이 펼쳐진 것처럼 보인다).
+    const open_key = openKey(self);
     // 목록을 다시 만든다 — 이제 본문에서 걸린 줄이 더해진다.
     self.agent_activity.applyFilter(self.allocator);
+    reattachOpen(self, open_key);
+    // 호버도 옛 자리다. 다음 마우스 이동이 다시 잡는다.
+    self.agent_activity.hovered = null;
     if (self.agent_activity.filter.holdsImages()) remapTiles(self);
     clampScroll(self);
     self.metal_dirty = true;
@@ -3507,6 +3542,15 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     if (kind_partial and (n > 0 or self.agent_activity.scanned_bytes == 0)) {
         return maru.i18n.t(.agent_activity_partial);
     }
+    // **「본문을 다 못 봤다」가 「없다」보다 먼저다**(적대적 9회차). 0 건일 때야말로 그 구분이
+    // 가장 중요하다 — 뭔가 나왔으면 사용자는 그것을 보지만, 0 건이면 **「없다」를 믿고 검색을
+    // 그만둔다**. 못 본 조각에 그 검색어가 있었을 수 있는데도 그렇다.
+    //
+    // ⚠️ 2 회차가 이 분기를 넣었는데 자리가 `n == 0` **뒤**였다. 주석은 「개수보다 먼저다」라고
+    // 적혀 있었으니 **주석이 거짓**이었고, 고치려던 혼동이 0 건일 때 고스란히 남아 있었다.
+    const body_partial = self.agent_activity.body.partial and
+        self.agent_activity.body.appliesTo(self.agent_activity.queryText());
+    if (body_partial) return maru.i18n.t(.agent_activity_body_partial);
     if (n == 0) {
         // 거르고 있는데 0 이면 「세션에 이미지가 없다」가 **아니다**. 그렇게 말하면 사용자는 검색어를
         // 지울 생각을 못 하고 갤러리가 고장났다고 읽는다.
@@ -3515,15 +3559,6 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 사용자는 갤러리가 고장난 줄 안다(계약 §2 — 「없다」와 「안 보인다」를 가르는 규율의 연장).
         if (!self.agent_activity.filter.isGrid()) return maru.i18n.t(.agent_activity_none_of_kind);
         return maru.i18n.t(.agent_activity_empty);
-    }
-    // **「본문을 다 못 봤다」가 개수보다 먼저다**(적대적 2회차). 워커가 못 연 파일이 있으면
-    // 「걸린 것이 없다」와 「못 읽었다」가 섞이는데, 이 뷰의 계약(§2 — 「없다」와 「안 보인다」를
-    // 가른다)이 금하는 바로 그 혼동이다. 스캔이 `agent_activity_partial` 로 하는 일을 본문 층도
-    // 자기 몫으로 한다.
-    if (self.agent_activity.body.partial and
-        self.agent_activity.body.appliesTo(self.agent_activity.queryText()))
-    {
-        return maru.i18n.t(.agent_activity_body_partial);
     }
     // **어디서 맞았는지 가른다**(계약 §2.1.1). 「라벨 3 · 본문 +12」 — 사용자가 「내가 친 말이
     // 이름에 있었나 본문에 있었나」를 알아야 다음 검색어를 고른다. 본문에서만 걸린 줄은 라벨에

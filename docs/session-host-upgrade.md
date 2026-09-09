@@ -5267,7 +5267,7 @@ run identity가 모두 같은 `Context`에 exact 일치하고, 두 upstream owne
 `Verdict.value()`는 매번 context snapshot seal과 두 upstream owner의 `value()`를 다시 확인하고, canonical
 `baseline_a | upgrade_b`, release ID, timing artifact ID, run ID/run attempt/source SHA, positive duration을 반환한다. profile은 오직
 remote evidence semantic에서 가져오며 timing provenance는 duration과 current attempt 출처만 제공한다. copied/pre-owned verdict,
-result↔context/upstream 및 upstream 상호 storage alias, context bytes 변조, upstream deinit·이동·seal/하위 graph 변조,
+result↔context/upstream owner 및 upstream owner 상호 storage alias, context bytes 변조, upstream deinit·이동·seal/하위 graph 변조,
 run/attempt/source/repository mismatch는 publication 전 또는 이후 `value()==null`로 fail-close한다. verdict는 upstream을 빌리기만 하므로
 실패 cleanup과 `deinit`에서 caller-owned provenance/observation을 해제하지 않으며, 자신이 소유한 secret·fd·allocation도 없다.
 

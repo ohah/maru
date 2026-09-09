@@ -3409,7 +3409,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   file pathname replacement·hardlink와 residue cleanup은 같은 gate가 재사용하는 exact-ID `Assets` 계약 행이 닫으며,
   network·attestation·final fence는
   상위 transaction에 남는다.
-  Remote timing/Release final verdict value owner는 **다음 구현 슬라이스**다. `release_adapter_remote_release_verdict.zig`가
+  Remote timing/Release final verdict value owner는 **구현**됐다. `release_adapter_remote_release_verdict.zig`가
   current protected Context, GitHub-issued timing `Provenance`, completed remote Release `Observation`의 repository/run/attempt/source와
   전체 하위 graph를 exact 교차 결속하고 evidence semantic만 profile 권위로 사용한다. focused Debug·ReleaseFast gate는
   baseline/upgrade, identity drift, copied/pre-owned/aliased owner와 post-publication revocation을 닫는다. filesystem·credential·network,

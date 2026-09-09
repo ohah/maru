@@ -20,6 +20,10 @@ pub const Cli = struct { path: [:0]const u8, pinned: *const cli_authority.Pinned
 pub const View = struct {
     profile: @import("release_evidence").Profile,
     release_id: u64,
+    repository_id: u64,
+    run_id: u64,
+    run_attempt: u64,
+    source_commit: []const u8,
 };
 
 pub const Observation = struct {
@@ -51,7 +55,14 @@ pub const Observation = struct {
                 !std.mem.eql(u8, file.name, expected.name) or !std.mem.eql(u8, file.sha256, expected.sha256) or
                 !validReceipt(receipt, expected, semantic_manifest.build.run_id, semantic_manifest.build.run_attempt)) return null;
         }
-        return .{ .profile = semantic.profile, .release_id = semantic.release_id };
+        return .{
+            .profile = semantic.profile,
+            .release_id = semantic.release_id,
+            .repository_id = semantic_manifest.repository.id,
+            .run_id = semantic_manifest.build.run_id,
+            .run_attempt = semantic_manifest.build.run_attempt,
+            .source_commit = semantic_manifest.source.commit,
+        };
     }
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) !void {

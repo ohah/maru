@@ -108,6 +108,12 @@ pub const MouseFormat = enum { x10, sgr, sgr_pixels, urxvt };
 
 /// kitty keyboard protocol(progressive enhancement) flag(packed u5). disambiguate=모호한 키만 CSI u로 명확히,
 /// report_events=key up/repeat, report_alternates=대체 키, report_all=모든 키 escape, report_associated=텍스트.
+/// `I=`(image number)에 배정하는 id 의 **천장**. 유니코드 placeholder 는 image_id 의 하위 24비트를
+/// 전경색 RGB 로, 최상위 바이트를 **셋째 diacritic** 으로 싣는다. 우리가 부르는 id 가 24비트 안이면
+/// 셋째 diacritic 을 안 쓰는 앱도 그대로 동작한다 — 배정 범위를 32비트로 벌려 얻을 것이 없다.
+/// (0xFFFF_FFFF 는 배경 이미지 예약이라 애초에 이 범위 밖이다.)
+pub const kitty_auto_id_top: u32 = 0x00FF_FFFE;
+
 /// 비트 위치(disambiguate=1·report_events=2·report_alternates=4·report_all=8·report_associated=16)는 kitty
 /// keyboard protocol 명세가 정한 progressive-enhancement 플래그 값이다. 기본 disabled(legacy 인코딩).
 pub const KittyFlags = packed struct(u5) {
@@ -491,10 +497,12 @@ pub const TerminalCore = struct {
     /// 터미널이 id 를 정하고 이 표로 기억한다 — 같은 번호로 다시 오면 **같은 id 를 재사용**해
     /// 이전 이미지를 교체한다(명세: 같은 번호는 이전 것을 대체). display/delete 도 번호로 참조한다.
     kitty_image_numbers: std.ArrayListUnmanaged(types.KittyImageNumber) = .empty,
-    /// 번호에 배정할 다음 id. **위에서부터 내려온다** — 클라이언트가 흔히 쓰는 작은 id(1,2,3…)와
-    /// 부딪히지 않게 하려는 것이고, 배경 이미지가 예약한 `0xFFFF_FFFF` 는 건너뛴다. 이미 쓰이는 id 는
-    /// 넘겨 짚는다(아래 assignImageId).
-    kitty_next_auto_id: u32 = 0xFFFF_FFFE,
+    /// 번호에 배정할 다음 id. **24비트 안에서 위에서부터 내려온다** — 클라이언트가 흔히 쓰는 작은
+    /// id(1,2,3…)와 부딪히지 않으면서, 유니코드 placeholder 가 **셋째 diacritic 없이도** 이 id 를
+    /// 실을 수 있게 한다(전경색 RGB 가 24비트다). 32비트 전역에서 고르면 placeholder 로 배치하는
+    /// 앱이 셋째 diacritic 을 쓸 때만 동작한다 — 안 쓰는 앱은 이미지가 통째로 안 뜬다.
+    /// 이미 쓰이는 id 는 넘겨 짚는다(resolveImageNumber).
+    kitty_next_auto_id: u32 = kitty_auto_id_top,
     /// renderSnapshot이 placement를 뷰포트 상대 KittyPlacement로 환산해 담는 재사용 버퍼(placement가
     /// 있을 때만 lazy 할당, viewport_cells와 같은 규율). 없으면 비어 있어 일반(placement 없는) 경로는
     /// 추가 비용이 없다.
@@ -9398,4 +9406,26 @@ test "kitty graphics delete: d=c 가 커서를 덮는 placement 만 지운다" {
     try core.write("\x1b[6;6H\x1b_Ga=d,d=C\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
     try std.testing.expect(!core.kitty_images.map.contains(1));
+}
+
+test "kitty I=: 배정하는 image id 는 24비트 안이다 (placeholder 가 셋째 diacritic 없이도 싣는다)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [160]u8 = undefined;
+
+    // **회귀 판정**: 배정 천장이 0xFFFF_FFFE 이던 시절엔 번호로 보낸 이미지의 id 가 언제나 24비트를
+    // 넘었다. 유니코드 placeholder 는 전경색 RGB(24비트)에 id 를 싣고 최상위 바이트만 셋째
+    // diacritic 으로 보내므로, 셋째를 안 쓰는 앱은 그 이미지를 **아예 못 그렸다**.
+    var n: u32 = 1;
+    while (n <= 8) : (n += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,I={d},q=2;{s}\x1b\\", .{ n, encoded }));
+    }
+    try std.testing.expectEqual(@as(usize, 8), core.kitty_image_numbers.items.len);
+    for (core.kitty_image_numbers.items) |entry| {
+        try std.testing.expect(entry.image_id != 0);
+        try std.testing.expect(entry.image_id <= 0x00FF_FFFF); // 24비트 안
+    }
 }

@@ -1083,21 +1083,32 @@ const PlaceholderCell = struct {
 /// 셀 하나를 placeholder 로 해석한다. 아니면 null.
 ///
 /// **인코딩**(명세): base 는 U+10EEEE, 뒤따르는 결합 문자 둘이 각각 tile row·column 인덱스이고,
-/// **전경색 RGB 가 image_id** 다(`38;2;r;g;b` → id = r<<16 | g<<8 | b). 열 diacritic 이 없으면
-/// 열 0 으로 본다(명세: 생략 가능). 전경색이 RGB 가 아니면 어느 이미지인지 알 수 없어 건너뛴다.
+/// **전경색 RGB 가 image_id 의 하위 24비트**다(`38;2;r;g;b` → r<<16 | g<<8 | b). 열 diacritic 이
+/// 없으면 열 0 으로 본다(명세: 생략 가능). 전경색이 RGB 가 아니면 어느 이미지인지 알 수 없어 건너뛴다.
+///
+/// **셋째 diacritic 은 image_id 의 최상위 바이트**다 — 전경색이 24비트뿐이라 그보다 큰 id 를 실을
+/// 곳이 없어서다(명세: "the most significant byte of the image id"). 안 읽으면 24비트를 넘는 id 가
+/// 통째로 어긋나 **이미지가 아예 안 뜬다**. 이 자리는 `I=`(image number)와 정면으로 얽힌다:
+/// 번호로 배정한 id 는 위에서부터 내려오므로 언제나 24비트를 넘는다.
 fn placeholderAt(cell: terminal.Cell, graphemes: []const []const u21) ?PlaceholderCell {
     if (cell.codepoint != placeholder_codepoint) return null;
     const rgb = switch (cell.style.foreground) {
         .rgb => |v| v,
         else => return null,
     };
-    const image_id = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
-    if (image_id == 0) return null;
     if (cell.grapheme_id == 0 or cell.grapheme_id > graphemes.len) return null;
     const extras = graphemes[cell.grapheme_id - 1];
     if (extras.len == 0) return null;
     const tile_row = diacriticIndex(extras[0]) orelse return null;
     const tile_col = if (extras.len > 1) (diacriticIndex(extras[1]) orelse 0) else 0;
+    // 셋째 diacritic = 최상위 바이트. 표 인덱스는 297까지 가므로 **바이트 범위를 넘으면 버린다** —
+    // 신뢰 경계 밖 값이라 그대로 shift 하면 id 가 엉뚱해진다.
+    const id_high: u32 = if (extras.len > 2) blk: {
+        const idx = diacriticIndex(extras[2]) orelse break :blk 0;
+        break :blk if (idx <= 0xFF) idx else 0;
+    } else 0;
+    const image_id = (id_high << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
+    if (image_id == 0) return null;
     return .{ .image_id = image_id, .tile_row = tile_row, .tile_col = tile_col };
 }
 
@@ -3560,4 +3571,22 @@ test "unicode placeholder 셀이 이미지 타일 quad 로 환산되고, 행 안
     const skipped = try buildGpuImages(std.testing.allocator, &.{}, &images, .{ .cols = 1, .rows = 1 }, 10, 20, &indexed_cells, &graphemes, &vps);
     defer std.testing.allocator.free(skipped);
     try std.testing.expectEqual(@as(usize, 0), skipped.len);
+}
+
+test "unicode placeholder: 세 번째 diacritic 이 image_id 의 최상위 바이트다 (24비트 초과 id)" {
+    // **회귀 판정**: 전경색 RGB 는 24비트뿐이라, 그보다 큰 image_id 는 명세가 **셋째 diacritic** 에
+    // 최상위 바이트를 싣는다. 그걸 안 읽으면 id 가 통째로 어긋나 이미지가 **아예 안 뜬다**.
+    // 이 자리는 `I=`(image number) 와 정면으로 얽힌다 — 번호로 배정한 id 는 0xFFFF_FFFE 부터
+    // 내려가 언제나 24비트를 넘으므로, 못 읽으면 그 경로 전체가 죽는다.
+    const id: u32 = 0x0100_0007; // 최상위 바이트 1, 하위 24비트 7
+    const images = [_]terminal.KittyImageView{.{ .image_id = id, .width = 10, .height = 20, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const vps = [_]terminal.KittyVirtualPlacement{.{ .image_id = id, .placement_id = 0, .columns = 1, .rows = 1 }};
+    const fg: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0, .g = 0, .b = 7 } } };
+    const g0 = [_]u21{ row_column_diacritics[0], row_column_diacritics[0], row_column_diacritics[1] }; // row 0, col 0, id 상위 바이트 1
+    const graphemes = [_][]const u21{&g0};
+    const cells = [_]terminal.Cell{.{ .codepoint = placeholder_codepoint, .style = fg, .grapheme_id = 1 }};
+    const out = try buildGpuImages(std.testing.allocator, &.{}, &images, .{ .cols = 1, .rows = 1 }, 10, 20, &cells, &graphemes, &vps);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectEqual(id, out[0].image_id);
 }

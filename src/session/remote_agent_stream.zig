@@ -201,6 +201,12 @@ pub const Channel = struct {
         return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms };
     }
 
+    /// 이 채널이 닫혔나. **왜 닫혔는지는 `closed_reason` 이 안다** — 되살릴지 말지는 부르는 쪽이
+    /// 정한다(제한 서버의 `no_hello` 는 되살리면 안 되고, 침묵으로 죽은 `silent` 는 되살려야 한다).
+    pub fn isClosed(self: *const Channel) bool {
+        return self.state == .closed;
+    }
+
     /// 한 줄을 먹인다. 돌려주는 프레임은 **`open` 일 때만** 의미가 있다.
     pub fn feed(self: *Channel, line: []const u8, now_ms: u64) Frame {
         switch (self.state) {

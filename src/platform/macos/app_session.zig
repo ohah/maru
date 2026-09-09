@@ -14752,6 +14752,19 @@ pub const AppSession = struct {
         // **설치가 끝나기 전에는 채널도 안 연다.** 열면 hello 시한 5 초가 설치 왕복과 겹쳐, 느린 링크에서
         // 「설치는 됐는데 채널은 이미 죽은」 상태가 된다.
         if (!gop.value_ptr.stream_started) return;
+        // **침묵으로 죽은 채널을 되살린다.** 하트비트는 5 초, 침묵 시한은 15 초라 세 번 놓치면 채널이
+        // `silent` 로 닫히는데 — 그것은 EOF 가 아니라 **재시작 트리거가 없고**, 아래는 `null` 일 때만
+        // 열어서 그 Term 은 스트리머가 멀쩡한데도 영영 못 받는다(적대적 검증 9 회차).
+        //
+        // **`saw_hello` 일 때만 되살린다.** `no_hello`·`noise_overflow` 는 제한 서버(`ForceCommand`)를
+        // 가리는 신호라 되살리면 5 초마다 열고 닫는 헛돌이가 된다 — 그 둘은 `saw_hello` 가 false 다.
+        // ⚠️ **값으로 먼저 묻고 나서 지운다.** `if (opt) |*ch|` 로 optional 안을 가리킨 채 그 자리에
+        // `null` 을 넣으면 자기가 보던 것을 무효화한다.
+        const channel_dead = if (gop.value_ptr.saw_hello)
+            (if (term.agent_remote_channel) |ch| ch.isClosed() else false)
+        else
+            false;
+        if (channel_dead) term.agent_remote_channel = null;
         if (term.agent_remote_channel == null) {
             // **이 목적지가 이미 `hello` 를 봤으면 그 상태로 연다.** 그 줄은 연결 시작에 한 번뿐이라,
             // 뒤늦게 여는 채널을 `waiting_hello` 로 두면 5 초 뒤 죽는다 — 그리고 죽은 채널도 분배
@@ -23962,6 +23975,83 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
     const now = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
     try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
     try std.testing.expectEqual(@as(u32, 1), session.remote_nonce_rebinds); // 갈아낀 것을 세었다
+}
+test "RA5: 침묵으로 죽은 채널은 되살린다 — 스트리머는 멀쩡한데 배지만 죽던 자리" {
+    // 하트비트 5 초 · 침묵 시한 15 초라 **세 번 놓치면** 채널이 `silent` 로 닫힌다. 그것은 EOF 가 아니라
+    // **재시작 트리거가 없고**, 채널은 `null` 일 때만 열려서 그 Term 은 영영 못 받았다(적대적 검증 9 회차).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+    var ctl = [_]u8{'/'};
+
+    const gop = try session.remote_agent_hosts.getOrPut(a, "openClaw");
+    gop.key_ptr.* = try a.dupe(u8, "openClaw");
+    gop.value_ptr.* = .{};
+    gop.value_ptr.install_done = true;
+    gop.value_ptr.stream_started = true;
+    gop.value_ptr.saw_hello = true; // 이 스트림은 hello 를 봤다 — 제한 서버가 아니다
+
+    // 열려 있던 채널이 침묵으로 죽었다.
+    var silent = maru.session.remote_agent_stream.Channel.initOpen(0);
+    silent.tick(maru.session.remote_agent_stream.silence_deadline_ms + 1);
+    try std.testing.expect(silent.isClosed());
+    term.agent_remote_channel = silent;
+
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
+
+    // 되살아났고, 바로 이벤트를 받는다.
+    var ch = &(term.agent_remote_channel orelse return error.NoChannel);
+    try std.testing.expect(!ch.isClosed());
+    try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 101) == .event);
+}
+test "RA5: 제한 서버로 죽은 채널은 안 되살린다 — 그 신호를 지우면 헛돌이가 된다" {
+    // `no_hello` 는 `ForceCommand` 같은 서버를 가리는 신호다. 되살리면 5 초마다 열고 닫으며 영원히
+    // 돈다 — 그래서 **`saw_hello` 가 true 일 때만** 되살린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+    var ctl = [_]u8{'/'};
+
+    const gop = try session.remote_agent_hosts.getOrPut(a, "openClaw");
+    gop.key_ptr.* = try a.dupe(u8, "openClaw");
+    gop.value_ptr.* = .{};
+    gop.value_ptr.install_done = true;
+    gop.value_ptr.stream_started = true;
+    gop.value_ptr.saw_hello = false; // hello 를 못 봤다 — 제한 서버일 수 있다
+
+    var dead = maru.session.remote_agent_stream.Channel.init(0);
+    dead.tick(maru.session.remote_agent_stream.hello_deadline_ms + 1);
+    try std.testing.expect(dead.isClosed());
+    term.agent_remote_channel = dead;
+
+    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
+
+    var ch = &(term.agent_remote_channel orelse return error.NoChannel);
+    try std.testing.expect(ch.isClosed()); // 죽은 채로 둔다
 }
 test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
     // 셋이 실측으로 **하나씩** 드러났고, 그때마다 「고쳤다」고 적힌 뒤에 다음 것이 남아 있었다. 그래서

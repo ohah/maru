@@ -97,10 +97,16 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     // for modifiers, application cursor mode, and platform shortcuts should not
     // force storage or parser files to change.
 
-    // **press 가 아닌 이벤트는 여기서 끝난다** — kitty 분기보다 **먼저**다.
+    // **release 는 여기서 끝난다** — kitty 분기보다 **먼저**다.
     //
-    // release/repeat 를 실을 수 있는 인코딩은 kitty `report_events`(flag 2) 하나뿐이다. legacy 경로에는
-    // 이벤트 종류를 담을 자리가 아예 없어서, 그대로 내려가면 뗄 때도 **글자가 한 번 더** 나간다.
+    // release 를 실을 수 있는 인코딩은 kitty `report_events`(flag 2) 하나뿐이다. legacy 경로에는 이벤트
+    // 종류를 담을 자리가 아예 없어서, 그대로 내려가면 뗄 때도 **글자가 한 번 더** 나간다.
+    //
+    // ⚠️ **repeat 은 버리지 않는다.** 자리가 없다는 것은 「버려라」가 아니라 「press 와 구별할 수 없다」는
+    // 뜻이고, kitty 명세도 `report_events` 가 꺼져 있으면 repeat 을 press 와 같게 보고한다. 처음에
+    // `!= .press` 로 막았다가 **키를 누르고 있어도 반복이 안 먹는** 회귀를 냈다(사용자 제보 — 백스페이스를
+    // 누르고 있어도 안 지워졌다). macOS 는 auto-repeat 을 `isARepeat` keyDown 으로 보내고 그것이
+    // `.repeat` 가 된다(`app_host_abi.zig`: `is_repeat != 0` → `.repeat`).
     //
     // 2026-09-09 실측: 한글 자모가 두 번씩 입력됐다(`다 다ㅏ르ㅡ는른`). kitty 를 안 켠 앱(대부분의
     // 셸·TUI)은 `kitty_flags == 0` 이라 아래 한 줄에서 legacy 로 빠지는데, 종류를 보는 게이트가
@@ -109,7 +115,7 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     //
     // 그러므로 게이트는 **분기보다 위**에 있어야 한다. kitty 안쪽 게이트는 그대로 둔다: 거기서는
     // 「flag 가 켜졌는가」와 「이 키가 release 를 보고하는 종류인가」를 따로 판정한다.
-    if (event.event_type != .press and options.kitty_flags == 0) return buffer[0..0];
+    if (event.event_type == .release and options.kitty_flags == 0) return buffer[0..0];
 
     // kitty keyboard protocol이 켜져 있으면(flag 스택 최상단 != 0) CSI u 인코딩으로 분기한다. 앱이
     // CSI > flags u로 켰을 때만 — 안 켜면 아래 legacy 그대로라 progressive enhancement(legacy 공존).
@@ -925,7 +931,7 @@ test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" 
     try std.testing.expectEqualStrings("\x1b", try encodeKey(.{ .key = .escape }, &buf, .{}));
 }
 
-test "encodeKey: kitty 를 안 켠 앱에서 release/repeat 는 아무것도 안 낸다 (자모 이중 입력)" {
+test "encodeKey: kitty 를 안 켠 앱에서 release 는 침묵하고 repeat 은 press 와 같다" {
     var buf: [encoded_key_buffer_len]u8 = undefined;
 
     // 2026-09-09 실측 회귀. 한글 자모가 두 번씩 들어갔다(`다 다ㅏ르ㅡ는른`). 원인은 종류 게이트가
@@ -934,7 +940,9 @@ test "encodeKey: kitty 를 안 켠 앱에서 release/repeat 는 아무것도 안
     //
     // Swift `keyUp` 핸들러가 생기기 전에는 release 가 코어에 오지 않아 드러나지 않았다. 그러니 이
     // 판정자는 **인코더가 스스로 지켜야 하는 계약**이다 — platform 이 무엇을 보내든.
-    for ([_]KeyEventType{ .release, .repeat }) |kind| {
+    // ⚠️ **`repeat` 은 여기 없다.** 처음엔 함께 넣었다가 「누르고 있어도 반복이 안 먹는」 회귀를 냈다.
+    // legacy 에 종류 자리가 없다는 것은 「버려라」가 아니라 「press 와 구별할 수 없다」는 뜻이다.
+    for ([_]KeyEventType{.release}) |kind| {
         // 평문 글자 — 이것이 두 번 나가면 사용자가 곧바로 본다.
         try std.testing.expectEqualStrings(
             "",
@@ -958,6 +966,25 @@ test "encodeKey: kitty 를 안 켠 앱에서 release/repeat 는 아무것도 안
             ),
         );
     }
+
+    // **repeat 은 press 와 같은 바이트를 낸다** — auto-repeat 이 곧 반복 입력이다. 이것이 빠지면
+    // 키를 누르고 있어도 아무 일도 안 일어난다(사용자 제보 — 백스페이스).
+    try std.testing.expectEqualStrings(
+        "a",
+        try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .repeat }, &buf, .{}),
+    );
+    try std.testing.expectEqualStrings(
+        "\x7f",
+        try encodeKey(.{ .key = .backspace, .event_type = .repeat }, &buf, .{}),
+    );
+    try std.testing.expectEqualStrings(
+        "\x1b[1;5D",
+        try encodeKey(
+            .{ .key = .arrow_left, .modifiers = .{ .control = true }, .event_type = .repeat },
+            &buf,
+            .{},
+        ),
+    );
 
     // press 는 그대로여야 한다 — 게이트가 넓으면 입력이 아예 안 들어간다.
     try std.testing.expectEqualStrings("a", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, .{}));

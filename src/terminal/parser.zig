@@ -526,16 +526,22 @@ pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
     self.appendResponse(s);
 }
 
-/// CSI 파라미터(u16)를 kitty flags로 — Maru가 실제 인코딩하는 disambiguate(bit 0)만 통과시킨다.
-/// report_events/report_alternates/report_all/report_associated는 미구현이므로 스택에 저장하지
-/// 않는다: 저장하면 query(CSI ? u)가 미구현 능력을 활성으로 거짓 보고하고(앱이 켜진 줄 알고 key
-/// release·대체키·연관텍스트를 기대), 인코딩은 disambiguate 수준만 나가 광고와 동작이 어긋난다.
-/// 지원 flag가 늘면 이 마스크를 넓힌다.
+/// CSI 파라미터(u16)를 kitty flags로. **다섯 flag 를 모두 통과시킨다** — 전부 인코딩한다.
+///
+/// 이 마스크는 «무엇을 광고하는가» 의 단일 출처다. 인코딩하지 않는 flag 를 저장하면 query(`CSI ? u`)
+/// 가 미구현 능력을 활성으로 **거짓 보고**하고, 앱은 켜진 줄 알고 오지 않을 이벤트를 기다린다.
+/// 그래서 여기 비트를 더할 때는 `input.encodeKitty` 가 그 flag 를 실제로 싣는지 먼저 확인한다.
 pub fn kittyFlagsFromParam(v: u16) core.KittyFlags {
     return .{
         .disambiguate = (v & 1) != 0,
-        // report_events(2): key up/repeat 를 CSI u 의 event sub-field 로 보고한다(구현됨).
+        // report_events(2): key up/repeat 를 CSI u 의 event sub-field 로 보고한다.
         .report_events = (v & 2) != 0,
+        // report_alternates(4): `code:shifted:layout` — shift 로 나오는 글자와 US 배열 기준 글자.
+        .report_alternates = (v & 4) != 0,
+        // report_all(8): legacy 예외(Enter/Tab/Backspace·평문 문자)를 끄고 전부 CSI u 로 보낸다.
+        .report_all = (v & 8) != 0,
+        // report_associated(16): 그 키가 만들어 내는 글자를 셋째 자리에 싣는다.
+        .report_associated = (v & 16) != 0,
     };
 }
 

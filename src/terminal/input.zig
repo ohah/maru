@@ -45,6 +45,12 @@ pub const KeyEvent = struct {
     /// 안 켜졌으면 press 만 오고 값은 무시된다. platform 이 채운다(AppKit keyDown/keyUp·isARepeat).
     /// 베이스: kitty keyboard protocol "Report event types"(1=press·2=repeat·3=release).
     event_type: KeyEventType = .press,
+    /// 이 키의 **US 배열 기준** codepoint(현재 입력 소스와 무관한 물리 위치). kitty keyboard 의
+    /// `report_alternates`(flag 4)가 켜졌을 때 «base layout key» 로 실린다 — 앱이 레이아웃과 무관하게
+    /// 물리 키를 알아보고 단축키를 매칭하게 하는 자리다(Dvorak·한글 배열에서 Ctrl+C 를 같은 키로).
+    /// platform 이 `keycode.usAsciiForKeyCode(raw_key_code)` 로 채운다. 없으면 null(안 싣는다).
+    /// 베이스: kitty keyboard protocol "Report alternate keys".
+    layout_codepoint: ?u21 = null,
     /// 이 키가 숫자 키패드(numpad)에서 왔는가(G10). platform(ABI)이 raw key code로 판정해 채운다 —
     /// 키패드 키의 macOS keycode 지식은 platform에 둔다. application keypad 모드(DECKPAM)면 encodeKey가
     /// SS3(`ESC O p`..)로 인코딩한다(numeric 모드면 일반 char/CR — 키패드 여부 무관).
@@ -225,15 +231,22 @@ fn keypadSs3(codepoint: u21) ?[]const u8 {
 }
 
 /// kitty keyboard 인코딩(progressive enhancement). encodeKey가 kitty_flags!=0일 때 분기한다.
-/// 베이스: kitty keyboard protocol spec(disambiguate 인코딩 규칙). 현재 disambiguate
-/// 수준만 — report_events/alternates/associated(release/대체키/연관텍스트)는 후속이다(Maru는 press만
-/// 전달하고, base codepoint는 Swift charactersIgnoringModifiers라 Ctrl+Shift+printable의 alternate는
-/// 한계가 있다). escape·functional·modifier 조합은 CSI 시퀀스로, modifier 없는 텍스트/enter/tab/
-/// backspace는 legacy 바이트를 그대로 둔다(kitty spec의 명시 예외 — 모드가 안 꺼져도 shell 복구 가능).
+/// 베이스: kitty keyboard protocol spec. 다섯 flag 를 모두 인코딩한다 —
+/// disambiguate(1)·report_events(2)·report_alternates(4)·report_all(8)·report_associated(16).
+///
+/// 전체 형식: `CSI code:shifted:layout ; mods:event ; text u`. 뒤쪽 빈 자리는 생략한다.
+///
+/// escape·functional·modifier 조합은 CSI 시퀀스로, modifier 없는 텍스트/enter/tab/backspace 는
+/// legacy 바이트를 그대로 둔다(kitty spec의 명시 예외 — 모드가 안 꺼져도 shell 복구 가능).
+/// **`report_all`(8)이 켜지면 그 예외가 사라진다** — 명세가 요구하는 대로 모든 키가 escape code 로
+/// 나간다. 그때는 Enter/Tab/Backspace·평문 문자의 release 도 함께 보고된다(아래 침묵 규칙 참조).
 fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
     // report_events(flag 2)가 켜졌으면 press 외의 이벤트도 인코딩한다. 안 켜졌으면 **release/repeat 은
     // 아예 안 내보낸다** — 앱이 요청하지 않은 이벤트를 보내면 입력이 두 배로 들어간 것처럼 보인다.
     const report_events = (options.kitty_flags & 0b00010) != 0;
+    const report_alternates = (options.kitty_flags & 0b00100) != 0;
+    const report_all = (options.kitty_flags & 0b01000) != 0;
+    const report_associated = (options.kitty_flags & 0b10000) != 0;
     if (event.event_type != .press and !report_events) return buffer[0..0];
 
     const has_ctrl_alt = event.modifiers.control or event.modifiers.option or event.modifiers.command;
@@ -248,7 +261,11 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
     // **같은 바이트를 다시** 보낸다 — 길게 누르면 글자가 반복되는 평범한 터미널 동작이다. 한때 여기서
     // repeat 까지 버려 **키를 길게 눌러도 한 글자만 들어갔다**(CGEvent 로 실제 키를 합성해 잡았다:
     // autorepeat 3회를 보냈는데 기록에 `a` 가 하나였다).
-    if (event.event_type == .release) {
+    //
+    // **`report_all`(8)이 켜지면 이 침묵이 사라진다** — 명세가 그 조건을 그대로 적는다("unless Report
+    // all keys as escape codes is also set"). 그때는 legacy 바이트를 안 쓰고 전부 CSI u 로 나가므로
+    // event type 을 실을 자리가 생긴다.
+    if (event.event_type == .release and !report_all) {
         switch (event.key) {
             .enter, .tab, .backspace => if (!has_any_mod) return buffer[0..0],
             .char => if (!has_ctrl_alt) return buffer[0..0],
@@ -256,7 +273,8 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
         }
     }
 
-    switch (event.key) {
+    // `report_all` 이면 legacy 예외를 통째로 건너뛴다 — 아래 switch 가 그 예외의 단일 출처다.
+    if (!report_all) switch (event.key) {
         // kitty spec: Enter/Tab/Backspace는 modifier가 "전혀" 없을 때만 legacy 바이트(\r/\t/\x7f)를
         // 보낸다(모드가 안 꺼진 채 죽어도 shell에서 reset 입력 가능). shift 포함 어떤 modifier든 있으면
         // CSI u로 — Shift+Tab=CSI 9;2u(backtab) 등. 즉 legacy 예외는 modifier가 하나도 없을 때로 한정한다.
@@ -270,7 +288,7 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
             return buffer[0..n];
         },
         else => {}, // escape·functional은 아래 CSI 시퀀스로(disambiguate)
-    }
+    };
 
     var ent = kittyEntry(event.key);
     // kitty CSI u의 key code는 base-layout key다(명세: unicode-key-code는 shift 미반영). char 키에
@@ -283,7 +301,47 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
         else => {},
     }
     const mods = kittyModsSeqInt(event.modifiers);
-    return encodeKittySeqEvent(buffer, ent.code, ent.final, mods, event.event_type, report_events);
+
+    // **대체 키**(flag 4): `code:shifted:layout`.
+    //   - shifted 는 «shift 를 눌러 나오는 글자» 다. shift 를 실제로 누르고 있고 base 와 **다를 때만**
+    //     싣는다(명세). `Key.char` 가 이미 shift 반영값(Swift charactersIgnoringModifiers)이라 그것이다.
+    //   - layout 은 «US 배열 기준 물리 위치의 글자» 다. key code 와 **다를 때만** 싣는다 — 같으면
+    //     정보가 0 이고 바이트만 늘어난다(명세도 그렇게 정한다).
+    var shifted: ?u21 = null;
+    var layout: ?u21 = null;
+    if (report_alternates) {
+        switch (event.key) {
+            .char => |cp| {
+                if (event.modifiers.shift and cp != ent.code) shifted = cp;
+                if (event.layout_codepoint) |lc| {
+                    if (lc != ent.code) layout = lc;
+                }
+            },
+            else => {}, // functional 키는 대체 키가 없다(명세의 alternate 는 텍스트 키의 것이다)
+        }
+    }
+
+    // **연관 텍스트**(flag 16): 이 키가 실제로 만들어 내는 글자. ctrl/alt/cmd 가 걸리면 텍스트가
+    // 아니라 제어 의미이므로 싣지 않는다(명세: "the text that would have been generated"). Enter/Tab
+    // 같은 제어 키도 텍스트가 아니다 — 그 자리에 `\r` 을 실으면 앱이 글자로 붙여 넣는다.
+    var text: ?u21 = null;
+    if (report_associated and !has_ctrl_alt and event.event_type != .release) {
+        switch (event.key) {
+            .char => |cp| text = cp,
+            else => {},
+        }
+    }
+
+    return encodeKittySeqFull(buffer, .{
+        .code = ent.code,
+        .final = ent.final,
+        .mods = mods,
+        .event = event.event_type,
+        .report_events = report_events,
+        .shifted = shifted,
+        .layout = layout,
+        .text = text,
+    });
 }
 
 const KittyEntry = struct { code: u21, final: u8 };
@@ -354,16 +412,71 @@ fn encodeKittySeqEvent(
     event: KeyEventType,
     report_events: bool,
 ) ![]const u8 {
-    const with_event = report_events and event != .press;
-    const ev: u8 = @intFromEnum(event);
-    if (final == 'u' or final == '~') {
-        if (with_event) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}:{d}{c}", .{ code, mods, ev, final });
-        if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}{c}", .{ code, mods, final });
-        return std.fmt.bufPrint(buffer, "\x1b[{d}{c}", .{ code, final });
+    return encodeKittySeqFull(buffer, .{
+        .code = code,
+        .final = final,
+        .mods = mods,
+        .event = event,
+        .report_events = report_events,
+    });
+}
+
+/// CSI u 한 줄의 모든 자리. 빈 자리는 «생략» 과 «비워 두기» 가 다르다 — 뒤에 실을 것이 있으면
+/// 자리를 비워서라도 남겨야 순서가 맞는다(`CSI 97;;97u` 의 가운데 빈 mods).
+const KittySeqParts = struct {
+    code: u21,
+    final: u8,
+    mods: u16,
+    event: KeyEventType,
+    report_events: bool,
+    /// flag 4: shift 로 나오는 글자(첫 자리의 둘째 sub-field).
+    shifted: ?u21 = null,
+    /// flag 4: US 배열 기준 글자(첫 자리의 셋째 sub-field).
+    layout: ?u21 = null,
+    /// flag 16: 이 키가 만들어 내는 글자(셋째 자리).
+    text: ?u21 = null,
+};
+
+/// kitty CSI u 를 조립한다 — `CSI code:shifted:layout ; mods:event ; text final`.
+///
+/// **뒤쪽 빈 자리는 생략한다**(명세). 그래서 flag 를 안 켠 앱이 받는 바이트는 켜기 전과 **같다** —
+/// 이 함수가 늘어나도 기존 경로가 안 깨지는 이유다. 반대로 가운데가 비고 뒤가 차면 자리를 비워
+/// 남긴다: 텍스트만 실을 때 `CSI 97;;97u` 처럼 mods 자리가 빈 채로 있어야 앱이 자리를 헷갈리지 않는다.
+///
+/// letter final(A/B/C/D/H/F/P/Q/S — 화살표·Home/End·F1~F4)은 legacy 호환 형식이라 code 자리가 늘 `1`
+/// 이고 대체 키·텍스트가 없다. 그 키들은 글자를 만들지 않으므로 실을 것도 없다.
+fn encodeKittySeqFull(buffer: *[encoded_key_buffer_len]u8, p: KittySeqParts) ![]const u8 {
+    const with_event = p.report_events and p.event != .press;
+    const ev: u8 = @intFromEnum(p.event);
+
+    if (p.final != 'u' and p.final != '~') {
+        if (with_event) return std.fmt.bufPrint(buffer, "\x1b[1;{d}:{d}{c}", .{ p.mods, ev, p.final });
+        if (p.mods > 1) return std.fmt.bufPrint(buffer, "\x1b[1;{d}{c}", .{ p.mods, p.final });
+        return std.fmt.bufPrint(buffer, "\x1b[{c}", .{p.final});
     }
-    if (with_event) return std.fmt.bufPrint(buffer, "\x1b[1;{d}:{d}{c}", .{ mods, ev, final });
-    if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[1;{d}{c}", .{ mods, final });
-    return std.fmt.bufPrint(buffer, "\x1b[{c}", .{final});
+
+    var len: usize = 0;
+    len += (try std.fmt.bufPrint(buffer[len..], "\x1b[{d}", .{p.code})).len;
+    // 첫 자리의 sub-field: layout 만 있고 shifted 가 없으면 **가운데를 비운다**(`code::layout`).
+    if (p.shifted) |sk| {
+        len += (try std.fmt.bufPrint(buffer[len..], ":{d}", .{sk})).len;
+    } else if (p.layout != null) {
+        len += (try std.fmt.bufPrint(buffer[len..], ":", .{})).len;
+    }
+    if (p.layout) |lk| len += (try std.fmt.bufPrint(buffer[len..], ":{d}", .{lk})).len;
+
+    // 둘째 자리(mods:event)와 셋째 자리(text). 뒤가 비면 통째로 생략한다.
+    const need_mods = p.mods > 1 or with_event;
+    if (need_mods or p.text != null) {
+        len += (try std.fmt.bufPrint(buffer[len..], ";", .{})).len;
+        if (need_mods) {
+            len += (try std.fmt.bufPrint(buffer[len..], "{d}", .{p.mods})).len;
+            if (with_event) len += (try std.fmt.bufPrint(buffer[len..], ":{d}", .{ev})).len;
+        }
+    }
+    if (p.text) |t| len += (try std.fmt.bufPrint(buffer[len..], ";{d}", .{t})).len;
+    len += (try std.fmt.bufPrint(buffer[len..], "{c}", .{p.final})).len;
+    return buffer[0..len];
 }
 
 /// F1~F12의 xterm legacy 시퀀스. F1~F4는 SS3(`ESC O P..S`), F5~F12는 CSI ~ 형식(15/17~21/23/24 —
@@ -853,4 +966,93 @@ test "encodeKey: kitty 를 안 켠 앱에서 release/repeat 는 아무것도 안
         "\x1b[1;5D",
         try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .control = true } }, &buf, .{}),
     );
+}
+
+test "encodeKey kitty report_alternates(4): shifted·layout 을 첫 자리 sub-field 로 싣는다" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const eq = std.testing.expectEqualStrings;
+    const alt: EncodeOptions = .{ .kitty_flags = 0b00101 }; // disambiguate + alternates
+    const plain: EncodeOptions = .{ .kitty_flags = 0b00001 }; // disambiguate 만
+
+    // Ctrl+Shift+A: key code 는 base 'a'(97), shifted 는 'A'(65). shift 를 누르고 있고 base 와 달라서 실린다.
+    const shift_a: KeyEvent = .{
+        .key = .{ .char = 'A' },
+        .base_codepoint = 'a',
+        .modifiers = .{ .shift = true, .control = true },
+    };
+    try eq("\x1b[97:65;6u", try encodeKey(shift_a, &buf, alt));
+    // **flag 를 안 켜면 바이트가 켜기 전과 같다** — 뒤쪽 자리를 생략하는 규칙이 지키는 계약이다.
+    try eq("\x1b[97;6u", try encodeKey(shift_a, &buf, plain));
+
+    // shift 를 안 눌렀으면 shifted 를 안 싣는다(명세: shift 를 눌렀고 다를 때만).
+    try eq("\x1b[97;5u", try encodeKey(.{
+        .key = .{ .char = 'a' },
+        .base_codepoint = 'a',
+        .modifiers = .{ .control = true },
+    }, &buf, alt));
+
+    // layout 만 있고 shifted 가 없으면 **가운데를 비운다**(`code::layout`). 한글 배열의 'ㅁ' 자리는
+    // 물리적으로 US 'a' 다 — 앱이 그 정보로 레이아웃과 무관하게 단축키를 매칭한다.
+    try eq("\x1b[12609::97;5u", try encodeKey(.{
+        .key = .{ .char = 'ㅁ' },
+        .base_codepoint = 'ㅁ',
+        .layout_codepoint = 'a',
+        .modifiers = .{ .control = true },
+    }, &buf, alt));
+
+    // layout 이 key code 와 같으면 안 싣는다 — 정보가 0 인데 바이트만 는다.
+    try eq("\x1b[97;5u", try encodeKey(.{
+        .key = .{ .char = 'a' },
+        .base_codepoint = 'a',
+        .layout_codepoint = 'a',
+        .modifiers = .{ .control = true },
+    }, &buf, alt));
+}
+
+test "encodeKey kitty report_all(8): legacy 예외가 사라지고 release 까지 나간다" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const eq = std.testing.expectEqualStrings;
+    const all: EncodeOptions = .{ .kitty_flags = 0b01011 }; // disambiguate + report_events + report_all
+    const no_all: EncodeOptions = .{ .kitty_flags = 0b00011 }; // report_all 없이
+
+    // 수식자 없는 Enter/Tab/Backspace·평문 문자는 flag 8 없이는 legacy 바이트다.
+    try eq("\r", try encodeKey(.{ .key = .enter }, &buf, no_all));
+    try eq("a", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, no_all));
+    // flag 8 이 켜지면 전부 CSI u 로 나간다.
+    try eq("\x1b[13u", try encodeKey(.{ .key = .enter }, &buf, all));
+    try eq("\x1b[9u", try encodeKey(.{ .key = .tab }, &buf, all));
+    try eq("\x1b[127u", try encodeKey(.{ .key = .backspace }, &buf, all));
+    try eq("\x1b[97u", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, all));
+
+    // **release 침묵도 함께 사라진다**(명세: "unless Report all keys as escape codes is also set").
+    // flag 8 없이는 그 키들의 release 가 침묵이다 — 안 그러면 Enter 를 뗄 때 `\r` 이 한 번 더 들어간다.
+    try eq("", try encodeKey(.{ .key = .enter, .event_type = .release }, &buf, no_all));
+    try eq("\x1b[13;1:3u", try encodeKey(.{ .key = .enter, .event_type = .release }, &buf, all));
+    try eq("\x1b[97;1:3u", try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .release }, &buf, all));
+}
+
+test "encodeKey kitty report_associated(16): 연관 텍스트를 셋째 자리에 싣는다" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const eq = std.testing.expectEqualStrings;
+    const txt: EncodeOptions = .{ .kitty_flags = 0b11011 }; // disambiguate + events + all + associated
+
+    // 평문 'a': mods 자리가 비어도 **자리는 남긴다** — `CSI 97;;97u`. 안 그러면 앱이 텍스트를 mods 로 읽는다.
+    try eq("\x1b[97;;97u", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, txt));
+    // Shift+A: mods 가 차 있으면 그대로 앞에 온다.
+    try eq("\x1b[97;2;65u", try encodeKey(.{
+        .key = .{ .char = 'A' },
+        .base_codepoint = 'a',
+        .modifiers = .{ .shift = true },
+    }, &buf, txt));
+
+    // **ctrl/alt 는 텍스트가 아니다** — 제어 의미라 실으면 앱이 글자로 붙여 넣는다.
+    try eq("\x1b[97;5u", try encodeKey(.{
+        .key = .{ .char = 'a' },
+        .base_codepoint = 'a',
+        .modifiers = .{ .control = true },
+    }, &buf, txt));
+    // release 에도 텍스트를 안 싣는다 — 뗄 때 글자가 또 들어가면 두 번 입력된다.
+    try eq("\x1b[97;1:3u", try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = .release }, &buf, txt));
+    // Enter/Tab 은 글자를 만들지 않는다.
+    try eq("\x1b[13u", try encodeKey(.{ .key = .enter }, &buf, txt));
 }

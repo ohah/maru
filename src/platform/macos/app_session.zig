@@ -79008,7 +79008,7 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
     quietActivityWorkers(session);
 }
 
-test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·재제출·「다 못 봤다」 (BS1 적대적 1~3회차)" {
+test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·재제출·경합·「다 못 봤다」 (BS1 적대적 1~5회차)" {
     // 세 회차가 각각 다른 각도로 찾은 것을 한 자리에 못박는다. 셋 다 **성공 경로만 보면 안 보이는**
     // 자리다 — 「걸었고 답이 왔다」는 어느 쪽이든 통과한다.
     //
@@ -79100,6 +79100,16 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.body.awaiting);
     try std.testing.expect(!session.agent_activity.body.resubmit);
 
+    // ── **종류를 바꿔도 본문 답은 산다**(적대적 5회차 — 판정자 공백이었다). 칩은 검색어를
+    //    안 건드리므로 두 층 다 살아야 하는데, `rebuildFilter` 가 `applyFilter` 를 다시 돌리는
+    //    길이라 여기서 본문 층을 잃으면 「칩을 눌렀더니 줄이 사라졌다」가 된다.
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.shown_body_matches);
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.body.matches.items.len);
+
     // ── ⓐ **못 걸었던 요청**을 세운다(워커가 바빠 `submit` 이 null 을 준 직후의 상태 그대로:
     //    `query` 는 있고 `answered` 는 거짓이고 `awaiting` 은 0 이다). tick 이 이것을 **다시 걸어야**
     //    한다 — 옛 게이트는 여기서 자기 자신에게 막혀 영영 안 걸었다.
@@ -79151,12 +79161,35 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_label_matches);
     try std.testing.expectEqual(@as(usize, 3), session.agent_activity.shown_body_matches);
 
+    // ── ⓗ **재스캔이 도는 요청과 겹쳐도 재질문이 안 묻힌다**(적대적 4회차).
+    //
+    //    ⓕ 는 `answered` 만 껐다. 그런데 그때 요청이 **도는 중**이면(`awaiting != 0`)
+    //    `settledFor` 가 여전히 참이라 재질문이 게이트에서 되돌아가고, 곧 도착하는 **옛 인덱스의
+    //    답**이 `answered` 를 세워 새 호출은 **영영 안 걸린다** — 3회차가 고친 결함이 경합에서
+    //    그대로 되살아난다. 본문 검색이 수백 ms 라 큰 세션에서는 겹치는 것이 보통이다.
+    //
+    //    도는 요청을 **값으로 흉내낸다**: 제품에서 이 상태(`awaiting != 0` 인 채 파일이 자람)는
+    //    실제로 생기지만, 워커를 그 순간에 붙잡아 두는 수단이 판정자에는 없다.
+    session.agent_activity.body.awaiting = 987654;
+    session.agent_activity.body.answered = false;
+    const s5 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_R5\"," ++
+        "\"name\":\"Bash\",\"input\":{\"command\":\"printf zeta\",\"description\":\"다섯째 작업\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = s1 ++ s2 ++ s3 ++ s3_result ++ s4 ++ s5 });
+    agent_activity_ops.refresh(session, true);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() != 5) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 5), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 4), session.agent_activity.shown_body_matches);
+
     // ── ⓖ **뷰를 떠났다 와도 본문 답은 남는다**(적대적 3회차). 검색어(`search.query`)는 뷰를
     //    떠나도 살아 있어 라벨 층 필터가 그대로 걸리는데, 본문 층만 버리면 사용자에게는 **자기가
     //    한 일 없이 목록이 줄어든 것**으로 보인다. 두 층은 같이 살고 같이 죽어야 한다.
     agent_activity_ops.onLeaveView(session);
     try std.testing.expect(session.agent_activity.body.answered);
-    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.body.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 4), session.agent_activity.body.matches.items.len);
     try std.testing.expectEqualStrings("zeta", session.agent_activity.body.query.items);
     // 도는 요청은 접는다 — 안 보는 뷰를 위해 디스크를 돌 이유가 없다.
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.body.awaiting);

@@ -1288,6 +1288,12 @@ pub fn poll(self: *AppSession) void {
     // 검색어가 걸려 있는 동안에만 다시 묻는다. 대가는 파일의 12% 를 한 번 더 읽는 것이고, 그
     // 길목의 스캔 자체가 이미 파일 전체를 훑은 참이다.
     if (self.agent_activity.body.query.items.len > 0) {
+        // ⚠️ **도는 요청도 함께 접는다**(적대적 4회차). `answered` 만 끄면, 그때 요청이 **도는
+        // 중**일 때(`awaiting != 0`) `settledFor` 가 여전히 참이라 재질문이 게이트에서 되돌아간다 —
+        // 그리고 곧 도착하는 **옛 인덱스의 답**이 `answered` 를 세워 새 호출은 **영영 안 걸린다**.
+        // 3회차가 고친 결함이 경합에서 그대로 되살아나는 자리이고, 본문 검색이 수백 ms 라 큰
+        // 세션에서는 재스캔과 겹치는 것이 예외가 아니라 보통이다.
+        suspendBodySearch(self);
         self.agent_activity.body.answered = false;
         self.agent_activity.body.resubmit = true;
     }

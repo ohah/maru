@@ -6652,6 +6652,30 @@ pub fn diagnosticTextNow() []const u8 {
     return diagnosticText(&diag_text_buf);
 }
 
+/// 화면이 보이고 복사하는 글 = **지금 상태 + 지난 죽음**(M15b). 둘을 한 글로 두는 이유는 하나다:
+/// 사용자가 보내 주는 것이 한 번의 복사이고, 죽은 자리는 그 안에 들어 있어야 쓸모가 있다.
+///
+/// **지난 죽음이 없으면 그 줄도 없다** — 「없음」을 적으면 매번 한 줄이 낭비되고, 있는지 없는지는
+/// 있으면 보이는 것으로 충분하다.
+var diag_screen_buf: [diag_screen_max]u8 = undefined;
+
+pub fn diagnosticScreenText() []const u8 {
+    const now_text = diagnosticTextNow();
+    if (last_crash_len == 0) return now_text;
+    var w: usize = 0;
+    const head = "-- last crash --\n";
+    // 자리는 넉넉하다(둘 다 `diag_text_max` 안이고 버퍼는 그 두 배 + 머리글). 그래도 넘치면
+    // **지금 상태만** 낸다 — 반쪽을 붙이느니 온전한 한쪽이 낫다.
+    if (now_text.len + head.len + last_crash_len > diag_screen_buf.len) return now_text;
+    @memcpy(diag_screen_buf[w..][0..now_text.len], now_text);
+    w += now_text.len;
+    @memcpy(diag_screen_buf[w..][0..head.len], head);
+    w += head.len;
+    @memcpy(diag_screen_buf[w..][0..last_crash_len], last_crash[0..last_crash_len]);
+    w += last_crash_len;
+    return diag_screen_buf[0..w];
+}
+
 fn drawDiagnostics(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
@@ -6692,7 +6716,7 @@ fn drawDiagnostics(win: SetRect, tk: *const tokens.Tokens) void {
     y += set_row_h + 8;
 
     // ── 본문. **복사하는 그 글**을 줄 단위로 그린다.
-    const text = diagnosticTextNow();
+    const text = diagnosticScreenText();
     var it = std.mem.splitScalar(u8, text, '\n');
     const line_h: f32 = 20;
     while (it.next()) |line| {
@@ -7245,7 +7269,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 }
                 if (was_copy) {
                     // **화면에 그린 그 글을 그대로 보낸다** — 같은 함수가 낸 것이라 갈릴 수 없다.
-                    requestCopyText(diagnosticTextNow());
+                    requestCopyText(diagnosticScreenText());
                     diag_copied = true;
                 }
                 return 1;
@@ -7798,10 +7822,10 @@ var copy_pending = false;
 /// 코어 선택이 아니라 **정해진 글자**를 복사할 때 그 글자(공개키 한 줄 등). 0 이면 선택에서 뽑는다.
 ///
 /// **진단 한 장이 들어갈 만큼이다**(M15a — 그 전에는 256 이라 공개키 줄에만 맞았다). 크기를
-/// `diag_text_max` 에서 가져오는 것이 요점이다: 두 벌로 두면 진단이 길어졌을 때 **화면에는
-/// 보이는데 복사만 조용히 안 되는** 상태가 된다. 두 host 가 `take_copy` 에 8KiB 를 내주므로
+/// `diag_screen_max` 에서 가져오는 것이 요점이다: 두 벌로 두면 진단이 길어졌을 때 **화면에는
+/// 보이는데 복사만 조용히 안 되는** 상태가 된다(크래시가 붙으면 글이 두 배가 된다). 두 host 가 `take_copy` 에 8KiB 를 내주므로
 /// 이 값이 상한이고, 넘치면 **자르지 않고 오류로 남긴다**.
-var copy_text_buf: [diag_text_max]u8 = undefined;
+var copy_text_buf: [diag_screen_max]u8 = undefined;
 var copy_text_len: usize = 0;
 
 /// 그 글자를 클립보드로 보내 달라고 요청한다(host 가 `take_copy` 로 가져간다).
@@ -7911,6 +7935,10 @@ var diag_errors_dropped: u32 = 0;
 /// 존재 이유가 사라진다(그 둘이 갈리면 긴 진단만 조용히 복사가 안 된다).
 pub const diag_text_max = 2048;
 
+/// 화면·복사가 쓰는 상한. **지금 상태 + 지난 죽음**이 한 글로 나가므로 그 두 배(+머리글)다.
+/// 복사 버퍼가 이 값을 쓴다 — 두 벌로 두면 크래시가 붙은 긴 진단만 조용히 복사가 안 된다.
+pub const diag_screen_max = diag_text_max * 2 + 64;
+
 /// 진단 글이 자리에 안 들어간 적이 있나. **잘린 진단이 전부인 척하면 안 된다** — 다음 프레임의
 /// 머리글이 그 사실을 붙여 말한다(계약 §5).
 var diag_truncated = false;
@@ -7996,6 +8024,40 @@ pub fn diagnosticText(buf: []u8) []const u8 {
         });
     }
     return buf[0..@min(w, buf.len)];
+}
+
+/// host 가 **프레임마다** 가져가는 진단 한 장(M15b). 죽는 순간에는 아무것도 만들 수 없으므로
+/// (신호 안에서는 `malloc`·`printf` 를 못 쓴다) host 는 이것을 자기 정적 버퍼에 미리 복사해 둔다.
+///
+/// **자르지 않는다** — 잘린 진단은 받는 사람이 전부인 줄 안다. 자리가 모자라면 0 이다.
+pub export fn maru_mobile_diag_snapshot(out: [*]u8, cap: u32) u32 {
+    const text = diagnosticTextNow();
+    if (text.len > cap) {
+        setLastError("diag_snapshot_cap");
+        return 0;
+    }
+    @memcpy(out[0..text.len], text);
+    return @intCast(text.len);
+}
+
+/// 지난 실행이 죽으며 남긴 것(M15b). host 가 뜰 때 파일을 읽어 넘긴다 — 파일도 경로도 OS 것이라
+/// 이 층은 모른다(§3). **없으면 안 부른다**(길이 0 도 같은 뜻이다).
+var last_crash: [diag_text_max]u8 = undefined;
+var last_crash_len: usize = 0;
+
+pub export fn maru_mobile_set_last_crash(ptr: [*]const u8, len: usize) void {
+    // **자르지 않는다.** 반쪽 크래시 기록은 그 자체가 오해를 만든다 — 없는 것이 낫다.
+    if (len > last_crash.len) {
+        setLastError("last_crash_too_large");
+        last_crash_len = 0;
+        return;
+    }
+    @memcpy(last_crash[0..len], ptr[0..len]);
+    last_crash_len = len;
+}
+
+pub fn lastCrash() []const u8 {
+    return last_crash[0..last_crash_len];
 }
 
 /// 판정자용 — 실패 하나를 기억시킨다. **제품과 같은 문**(`setLastError`)으로 들어간다: 고리에만

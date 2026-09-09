@@ -13,6 +13,9 @@
 // **Security 는 난수 하나 때문에 든다**(`SecRandomCopyBytes`) — 키 씨앗은 OS 난수여야 한다
 // (계약 §3.4). Keychain 보관은 아직 아니다(실기기 검증까지 보류 — 계획 S9c-2).
 #import <Security/Security.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 
 
@@ -23,6 +26,7 @@
 static void drainConfigWrite(void);
 static void startSshIfAsked(void);
 static void driveControlChannel(void);
+static void refreshCrashSnapshot(void); // M15b — 죽을 때 쓸 진단을 미리 떠 둔다
 
 static void pumpSshOnMainThread(void);
 
@@ -1396,6 +1400,8 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         }
         maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
     }
+    // **죽을 때 쓸 것을 미리 떠 둔다**(M15b) — 그 순간에는 아무것도 만들 수 없다.
+    refreshCrashSnapshot();
     // build 가 못 그린 글자를 모아 뒀다 — 그것만 구워 넣고 **다음 프레임에 보이게** 한다.
     [self growAtlas];
     const MaruQuad *quads = maru_mobile_quads();
@@ -1772,6 +1778,94 @@ static BOOL createDeviceKey(NSURL *keyFile) {
 /// **파일이 없으면 «만든다»**(M16b-2). 예전에는 읽기만 해서, 그 파일을 손으로 넣지 않은 기기는
 /// 키 인증을 **아예 못 썼다** — 저장소 어디에도 그 파일을 만드는 코드가 없었다. 화면은 「아직
 /// 키가 없습니다」라고 했고 사용자가 할 수 있는 일이 없었다(계약 §3.4 — 키는 앱이 만든다).
+// ── 크래시 보고 (M15b) ──────────────────────────────────────────────────────
+//
+// **Android 와 한 벌이다** — 같은 규율·같은 파일 모양(계약 §5). 신호 안에서는 미리 만들어 둔
+// 것만 쓴다(`malloc`·`printf`·잠금은 async-signal-safe 가 아니다). 그래서 진단 한 장은
+// 프레임마다 떠 두고 경로는 시작할 때 만들어 두며, 처리기는 `open`·`write`·`close` 만 한다.
+
+static char g_crash_snapshot[4096];
+static volatile int g_crash_snapshot_len = 0;
+static char g_crash_path[1024];
+
+/// 신호 번호를 **자릿수로** 적는다(`snprintf` 없이 — 처리기 안이다).
+static int crashHeader(char *out, int sig) {
+    int n = 0;
+    const char *p = "signal=";
+    while (*p) out[n++] = *p++;
+    if (sig >= 10) out[n++] = (char)('0' + (sig / 10) % 10);
+    out[n++] = (char)('0' + sig % 10);
+    out[n++] = '\n';
+    return n;
+}
+
+static void crashHandler(int sig) {
+    // **삼키지 않는다** — 쓰고 나서 기본 동작으로 되돌려 그 신호를 다시 올린다. 그래야 iOS 가
+    // 자기 `.ips` 를 그대로 만든다(거기에는 스택이 있고 우리 파일에는 그때의 상태가 있다).
+    if (g_crash_path[0]) {
+        int fd = open(g_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            char head[16];
+            int hn = crashHeader(head, sig);
+            ssize_t ignored = write(fd, head, (size_t)hn);
+            int len = g_crash_snapshot_len;
+            if (len > 0) ignored = write(fd, g_crash_snapshot, (size_t)len);
+            (void)ignored; // 죽는 중이다 — 실패해도 할 수 있는 일이 없다
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/// 프레임마다 진단 한 장을 떠 둔다. **죽는 순간에 만들 수 없으니 미리 만든다.**
+static void refreshCrashSnapshot(void) {
+    unsigned int n = maru_mobile_diag_snapshot((unsigned char *)g_crash_snapshot, sizeof g_crash_snapshot);
+    g_crash_snapshot_len = (int)n;
+}
+
+/// 지난 실행이 남긴 것을 읽어 브리지에 넘긴다. **안 지운다** — 다음 죽음이 덮는다.
+static void installCrashHandler(void) {
+    NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+                                                          inDomain:NSUserDomainMask
+                                                 appropriateForURL:nil
+                                                            create:YES
+                                                             error:nil];
+    if (!support) return;
+    NSURL *dir = [support URLByAppendingPathComponent:@"maru" isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *file = [dir URLByAppendingPathComponent:@"crash" isDirectory:NO];
+    snprintf(g_crash_path, sizeof g_crash_path, "%s", file.fileSystemRepresentation);
+
+    // 지난 죽음을 먼저 읽는다 — 아래에서 처리기를 걸면 그때부터는 이 파일이 덮일 수 있다.
+    {
+        static unsigned char buf[4096];
+        FILE *f = fopen(g_crash_path, "rb");
+        if (f) {
+            size_t n = fread(buf, 1, sizeof buf, f);
+            fclose(f);
+            if (n > 0) {
+                maru_mobile_set_last_crash(buf, (unsigned long)n);
+                NSLog(@"MARU_CRASH last_crash bytes=%zu", n);
+            }
+        }
+    }
+
+    // **스택이 넘쳐 죽었으면 처리기가 쓸 스택도 없다.** 따로 준다.
+    static char alt[SIGSTKSZ < 16384 ? 16384 : SIGSTKSZ];
+    stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt, .ss_flags = 0};
+    sigaltstack(&ss, NULL);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = crashHandler;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+    for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, NULL);
+    NSLog(@"MARU_CRASH handler_installed path=%s", g_crash_path);
+}
+
 static void publishPublicKey(void) {
     NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
                                                           inDomain:NSUserDomainMask
@@ -1999,6 +2093,9 @@ static void loadConfigFile(void) {
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
     // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
     // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
+    // **크래시 처리기를 가장 먼저 건다**(M15b). 아래 것들이 죽는 자리라 뒤에 걸면 정작 잡고
+    // 싶은 죽음을 놓친다. 지난 실행이 남긴 것도 그 안에서 읽어 올린다.
+    installCrashHandler();
     loadConfigFile(); // 뷰가 서기 전에 — 첫 프레임부터 그 색으로 그린다
     publishPublicKey(); // 접속 **전에** 보여 줘야 서버에 붙일 수 있다
     startSshIfAsked();

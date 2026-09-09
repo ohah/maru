@@ -129,6 +129,18 @@ unsigned int maru_mobile_max_quads(void);
 const char *maru_mobile_last_error(void);
 void maru_mobile_clear_error(void);
 
+/// **진단 한 장을 가져간다**(M15a·M15b). 이름·숫자·상태뿐이고 터미널 내용·명령어·경로·호스트명은
+/// 안 들어간다 — 사용자가 그대로 복사해 붙여도 사고가 안 나는 값이다.
+///
+/// host 는 이것을 **프레임마다** 자기 정적 버퍼에 복사해 둔다: 죽는 순간에는 아무것도 만들 수
+/// 없기 때문이다(신호 안에서는 `malloc`·`printf` 를 못 쓴다 — 계약 §5). 자리가 모자라면 **0**
+/// 이고 아무것도 안 쓴다(잘린 진단은 받는 사람이 전부인 줄 안다).
+unsigned int maru_mobile_diag_snapshot(unsigned char *out, unsigned int cap);
+
+/// **지난 실행이 죽으며 남긴 것**(M15b). host 가 뜰 때 파일을 읽어 한 번 넘긴다 — 파일도 경로도
+/// OS 것이라 코어는 모른다. 없으면 안 부른다. 다음 실행의 진단 화면이 이것을 함께 보여 준다.
+void maru_mobile_set_last_crash(const unsigned char *bytes, unsigned long len);
+
 /// 아틀라스 등록부. 플랫폼이 글리프를 굽고 그 자리를 알려 준다.
 ///
 /// `style` 은 굵게(1)·기울임(2) 비트다 — **Android `Typeface` 상수와 같은 값**이라 그쪽은

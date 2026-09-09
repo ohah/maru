@@ -9274,3 +9274,95 @@ test "M15a 복사하는 글과 화면에 그린 글이 같다" {
     bridge.resetDiagForTest();
     bridge.maru_mobile_clear_error();
 }
+
+// ── M15b 크래시 보고 ────────────────────────────────────────────────────────
+//
+// **죽는 버그는 진단 화면으로도 못 잡는다** — 죽으면 화면이 없다. host 가 그 순간을 파일로 남기고
+// 다음 실행이 여기로 올린다. 규칙은 [계약 §5](../docs/mobile-platform.md)가 소유한다.
+
+test "M15b 지난 죽음이 진단 글에 붙고, 없으면 그 줄도 없다" {
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    const empty = "";
+    bridge.maru_mobile_set_last_crash(empty, 0);
+    // 없을 때는 머리글도 없다 — 「없음」을 적으면 매번 한 줄이 낭비된다.
+    try std.testing.expect(std.mem.indexOf(u8, bridge.diagnosticScreenText(), "last crash") == null);
+
+    const rec = "signal=11\nmaru mobile diag\nframe target_hz=30 low_power=no seq=322\n";
+    bridge.maru_mobile_set_last_crash(rec, rec.len);
+    const shown = bridge.diagnosticScreenText();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "-- last crash --") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "signal=11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "seq=322") != null);
+    // **지금 상태도 함께 있다** — 죽은 자리만 보이면 지금 무엇이 다른지 알 수 없다.
+    try std.testing.expect(std.mem.indexOf(u8, shown, "errors=") != null);
+
+    bridge.maru_mobile_set_last_crash(empty, 0);
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+}
+
+test "M15b 죽음이 붙어도 «보인 것을 복사할 수 있다»" {
+    // 화면에는 보이는데 복사만 안 되면 이 화면의 존재 이유가 사라진다 — 크래시가 붙으면 글이
+    // 두 배가 되므로, 그 자리가 실제로 나가는지 재 둔다.
+    endAnyGesture();
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    var rec: [1500]u8 = @splat('x');
+    @memcpy(rec[0..10], "signal=11\n");
+    bridge.maru_mobile_set_last_crash(&rec, rec.len);
+
+    try std.testing.expect(openDiagnostics(402, 874));
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const r = bridge.diagCopyRectForTest();
+    bridge.maru_mobile_pointer(0, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+    bridge.maru_mobile_pointer(2, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+    var out: [8192]u8 = undefined;
+    const n = bridge.maru_mobile_take_copy(&out, out.len);
+    try std.testing.expect(n > 0); // 잘렸으면 `copy_text_size` 로 0 이 돌아온다
+    try std.testing.expectEqualStrings(bridge.diagnosticScreenText(), out[0..n]);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "signal=11") != null);
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    enterTerminal();
+    const empty = "";
+    bridge.maru_mobile_set_last_crash(empty, 0);
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+}
+
+test "M15b 반쪽은 안 받는다 — 자르느니 없는 것이 낫다" {
+    // 잘린 크래시 기록은 그 자체가 오해를 만든다(어디까지가 진짜인지 알 수 없다).
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    var big: [bridge.diag_text_max + 1]u8 = @splat('z');
+    bridge.maru_mobile_set_last_crash(&big, big.len);
+    try std.testing.expectEqual(@as(usize, 0), bridge.lastCrash().len);
+    try std.testing.expectEqualStrings("last_crash_too_large", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}
+
+test "M15b host 가 떠 가는 것이 «화면이 보는 그것»이다" {
+    // 두 벌이면 죽을 때 남는 글과 살아서 보는 글이 갈린다 — 그러면 크래시 기록만 조용히 다르다.
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    bridge.noteErrorForTest("snapshot_probe");
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_diag_snapshot(&out, out.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqualStrings(bridge.diagnosticTextNow(), out[0..n]);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "snapshot_probe") != null);
+
+    // **자리가 모자라면 자르지 않고 0 이다** — 잘린 진단은 받는 사람이 전부인 줄 안다.
+    // 한 칸은 위 `snapshot_probe` 가 이미 쥐고 있으므로(먼저 난 것을 지킨다) **비우고 잰다**.
+    bridge.maru_mobile_clear_error();
+    var tiny: [8]u8 = @splat(0xAB);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_diag_snapshot(&tiny, tiny.len));
+    try std.testing.expectEqualStrings("diag_snapshot_cap", std.mem.span(bridge.maru_mobile_last_error()));
+    try std.testing.expectEqual(@as(u8, 0xAB), tiny[0]); // 아무것도 안 썼다
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}

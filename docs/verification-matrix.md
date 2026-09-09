@@ -3362,12 +3362,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   재검증하며, 0700 private workspace의 no-follow 0600 held file에 archive stdout을 exact metadata size cap으로 직접 받은 뒤
   identity·digest·ZIP·record를 결속한다. `test-session-host-release-adapter-live-timing-transport`는 Debug·ReleaseFast actual process·private
   APFS에서 closed argv/clean environment/order, short·oversize·nonzero·timeout, CLI drift, 모든 성공·실패의 pathname/FD/residue 0과 cleanup 또는
-  final deadline 실패 시 provenance 철회를 검증한다. 제품 live timing verifier와 read-only workflow 배선은 **구현 전**이다.
-  다음 gate는 `maru-session-host-release-live-timing-verifier`가 protected current context에서 expected identity를 유도하고 checkout 전에
+  final deadline 실패 시 provenance 철회를 검증한다. 제품 live timing verifier와 read-only workflow 배선도 **구현**됐다.
+  `maru-session-host-release-live-timing-verifier`는 protected current context와 github-hosted macOS ARM64 runner에서 expected identity를 유도하고 checkout 전에
   고정한 CLI와 bounded `GH_TOKEN`, shared deadline, absent private workspace만 transport에 전달한 뒤 sealed provenance를 다시 context에
   결속하고 output 0으로 종료하게 한다. `release.yml`의 별도 `macos-15` job은 timing upload 뒤 `actions: read`·`contents: read`만으로
   이를 한 번 실행하며 Release/asset/attestation/tag/run mutation과 pass record publication은 열지 않는다. focused Debug·ReleaseFast
-  actual-process gate와 workflow source gate가 성공·실패 stdout/stderr/FD/residue 0, needs/permission/order/closed argv를 닫고, 병합 뒤
+  actual-process gate와 workflow source gate가 성공·실패 stdout/stderr/FD/residue 0, needs/permission/order/closed argv를 닫는다. 병합 뒤
   첫 protected `v*` tag가 실제 GitHub network 표본을 제공한다. final verdict와 U5 signed N-1→current 제품 E2E는 그 뒤 gate다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해

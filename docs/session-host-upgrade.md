@@ -5097,7 +5097,8 @@ residue/FD 0과 result publication 0을 Debug·ReleaseFast로 검증한다. synt
 제품 executable `maru-session-host-release-live-timing-verifier`의 closed command는
 `verify <checkout-before-pinned-gh-absolute-path> <lowercase-sha256> <absolute-absent-workspace>` 하나뿐이다. executable은
 `release_adapter_environment.readCurrent`가 소유한 exact GitHub context를 먼저 읽어 `protected_tag`, repository, workflow, tag,
-source SHA, run ID와 run attempt를 검증하고, 그 뒤에만 CLI pathname을 caller storage로 복사해 `PinnedExecutable`로 pin한다.
+source SHA, run ID와 run attempt를 검증하고, 기존 `RunnerAuthority`로 workflow SHA와 github-hosted macOS ARM64를 결속한 뒤에만 CLI
+pathname을 caller storage로 복사해 `PinnedExecutable`로 pin한다.
 token은 argv·stdout·파일·결과 owner에 싣지 않고 process environment의 `GH_TOKEN` 하나에서 bounded copy한 뒤 child environment에만
 전달하며 반환 전에 지운다. `GH_PROMPT_DISABLED`와 context 이름을 포함한 다른 값을 caller가 token 대신 고를 수 없다.
 
@@ -5107,7 +5108,7 @@ deinit하고 exit 0으로만 나타낸다. stdout, stderr, `GITHUB_OUTPUT`, summ
 따라서 이 gate의 성공은 실제 GitHub network와 current timing artifact의 출처·ZIP·record 결속을 증명하지만 Release/asset/attestation,
 profile, stage 1~8, signed N-1→current 복구나 U5 최종 성공을 증명하지 않는다. 실패는 nonzero, output 0, workspace residue 0이다.
 
-`release.yml`의 `session-host-release-live-timing-verdict` job은 timing upload job 뒤에만 시작하는 별도 `macos-15` read-only job이다.
+`release.yml`의 `session-host-release-live-timing-verification` job은 timing upload job 뒤에만 시작하는 별도 `macos-15` read-only job이다.
 권한은 `actions: read`, `contents: read`뿐이고, repository bytes를 받기 전에 runner-provided `gh`의 canonical pathname과 SHA-256을
 고정한다. checkout과 pinned mise 뒤 ReleaseFast verifier만 빌드하고, `RUNNER_TEMP` 직계 자식의 fixed absent workspace와 step-local
 `${{ github.token }}`을 주어 한 번 실행한다. tag, Release, asset, attestation, environment, artifact 또는 workflow run을

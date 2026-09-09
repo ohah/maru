@@ -14505,6 +14505,14 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-live-timing-transport",
         "Fetch one live timing artifact through the pinned GitHub CLI and a private archive",
     );
+    const session_host_release_adapter_live_timing_verifier_step = b.step(
+        "test-session-host-release-adapter-live-timing-verifier",
+        "Verify one current protected-run timing artifact through the product boundary",
+    );
+    const session_host_release_live_timing_verifier_product_step = b.step(
+        "session-host-release-live-timing-verifier",
+        "Build the zero-output protected-run live timing verifier",
+    );
     const session_host_release_adapter_profile_authored_attestation_selector_step = b.step(
         "test-session-host-release-adapter-profile-authored-attestation-selector",
         "Select freshly reopened authored subjects without credentials",
@@ -15838,6 +15846,55 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_live_timing_transport_step.dependOn(&run_live_timing_transport_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_transport_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
             boundary_step.dependOn(&run_live_timing_transport_tests.step);
+            const live_timing_verifier_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_live_timing_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_live_timing_transport", .module = live_timing_transport_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_deadline", .module = deadline_mod },
+            } });
+            const live_timing_verifier_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_live_timing_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_live_timing_verifier", .module = live_timing_verifier_mod },
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+            } }) });
+            const run_live_timing_verifier_tests = b.addRunArtifact(live_timing_verifier_tests);
+            run_live_timing_verifier_tests.addArg("--maru-expect-tests=5");
+            session_host_release_adapter_live_timing_verifier_step.dependOn(&run_live_timing_verifier_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_live_timing_verifier_tests.step);
+            boundary_step.dependOn(&run_live_timing_verifier_tests.step);
+            const live_timing_environment_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_environment.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_context", .module = context_mod }} });
+            const live_timing_verifier_cli_mod = b.createModule(.{ .root_source_file = b.path("tools/session-host/release_live_timing_verifier_cli.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
+                .{ .name = "release_adapter_environment", .module = live_timing_environment_mod },
+                .{ .name = "release_adapter_live_timing_artifact", .module = live_timing_artifact_mod },
+                .{ .name = "release_adapter_github_cli_authority", .module = cli_mod },
+                .{ .name = "release_adapter_live_timing_verifier", .module = live_timing_verifier_mod },
+            } });
+            const live_timing_verifier_exe = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-release-live-timing-verifier-{s}", .{@tagName(composition_optimize)}),
+                .root_module = live_timing_verifier_cli_mod,
+            });
+            if (composition_optimize == optimize) {
+                session_host_release_live_timing_verifier_product_step.dependOn(
+                    &b.addInstallArtifact(live_timing_verifier_exe, .{
+                        .dest_sub_path = "maru-session-host-release-live-timing-verifier",
+                    }).step,
+                );
+            }
+            const live_timing_verifier_process = b.addExecutable(.{
+                .name = b.fmt("session-host-release-live-timing-verifier-process-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/test_release_live_timing_verifier_process.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                }),
+            });
+            const run_live_timing_verifier_process = b.addRunArtifact(live_timing_verifier_process);
+            run_live_timing_verifier_process.addArtifactArg(live_timing_verifier_exe);
+            run_live_timing_verifier_process.setCwd(b.path("."));
+            session_host_release_adapter_live_timing_verifier_step.dependOn(&run_live_timing_verifier_process.step);
             const profile_authored_attestation_selector_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_profile_authored_attestation_selector.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{
                 .{ .name = "release_adapter_context", .module = context_mod },
                 .{ .name = "release_manifest", .module = manifest_mod },

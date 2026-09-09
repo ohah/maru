@@ -79,12 +79,12 @@ test "릴리스 워크플로: 신뢰 획득 단계가 체크아웃보다 **앞**
 
     // 단계가 하나뿐이어야 한다 — 둘이면 어느 쪽이 앞인지 아래 순서 판정이 답을 못 낸다.
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "    environment: release"));
-    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "    runs-on: macos-15"));
-    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
-    try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "        id: trusted-gh"));
-    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, pinned_checkout));
-    // release writer와 checkout 없는 read-only timing observer가 각각 runner-provided gh를 찾는다.
-    try std.testing.expectEqual(@as(usize, 2), countMatchingLines(text, "command -v gh"));
+    try std.testing.expectEqual(@as(usize, 2), countExactLines(text, "    runs-on: macos-15"));
+    try std.testing.expectEqual(@as(usize, 2), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
+    try std.testing.expectEqual(@as(usize, 2), countExactLines(text, "        id: trusted-gh"));
+    try std.testing.expectEqual(@as(usize, 2), countMatchingLines(text, pinned_checkout));
+    // release writer, checkout 없는 timing observer, read-only verifier가 각각 runner-provided gh를 찾는다.
+    try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "command -v gh"));
 
     // **이 한 줄이 이 파일의 요점이다.** 체크아웃 뒤에 `gh` 를 찾으면 그 PATH 는 방금 받아 온
     // 저장소가 건드릴 수 있는 것이라, 무엇을 붙들었는지 우리가 말할 수 없게 된다.
@@ -247,7 +247,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     const text = try readWorkflow(arena_state.allocator());
 
     try std.testing.expectEqual(@as(usize, 0), countExactLines(text, "permissions:"));
-    try std.testing.expectEqual(@as(usize, 2), countExactLines(text, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 3), countExactLines(text, "    permissions:"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      contents: write # GitHub Release 생성/업로드"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      id-token: write # artifact attestation OIDC"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      attestations: write # artifact attestation publication"));
@@ -289,7 +289,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "profile:"));
 
-    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(text, "zig build"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, "zig build"));
     try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
     const signed_block = blockUntil(text, "      - name: Build signed + notarized universal dmg", "      - name: Build session host live release executables") orelse
         return error.SignedBuildBlockMissing;
@@ -301,7 +301,8 @@ test "live 릴리스 timing job은 GitHub-issued top-level step만 read-only로 
     defer arena_state.deinit();
     const text = try readWorkflow(arena_state.allocator());
     const timing_at = std.mem.indexOf(u8, text, "  session-host-release-live-timing:") orelse return error.LiveTimingJobMissing;
-    const timing = text[timing_at..];
+    const timing = blockUntil(text[timing_at..], "  session-host-release-live-timing:", "  session-host-release-live-timing-verification:") orelse
+        return error.LiveTimingJobMissing;
 
     inline for (.{
         "    needs: universal-dmg",
@@ -327,6 +328,43 @@ test "live 릴리스 timing job은 GitHub-issued top-level step만 read-only로 
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "id-token: write"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "attestations: write"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(timing, "actions/checkout"));
+}
+
+test "live timing verifier job은 current artifact를 read-only zero-output 제품으로 검증한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const at = std.mem.indexOf(u8, text, "  session-host-release-live-timing-verification:") orelse return error.LiveTimingVerificationJobMissing;
+    const job = text[at..];
+    inline for (.{
+        "    needs: session-host-release-live-timing",
+        "    runs-on: macos-15",
+        "      actions: read",
+        "      contents: read",
+        "      - name: Capture trusted GitHub CLI before checkout",
+        pinned_checkout,
+        "jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac",
+        "mise exec -- zig build session-host-release-live-timing-verifier -Doptimize=ReleaseFast",
+        "GH_TOKEN: ${{ github.token }}",
+        "verify \"$TRUSTED_GH\" \"$TRUSTED_GH_SHA256\" \"$workspace\"",
+        "test ! -s \"$stdout\"",
+        "test ! -s \"$stderr\"",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), countMatchingLines(job, needle));
+    try std.testing.expectEqual(@as(usize, 2), countMatchingLines(job, "test ! -e \"$workspace\""));
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(job, "    permissions:"));
+    inline for (.{ "contents: write", "id-token: write", "attestations: write", "actions/upload-artifact", "gh release", "gh run", "GITHUB_OUTPUT=" }) |forbidden|
+        try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, forbidden));
+    const capture = lineOf(job, "      - name: Capture trusted GitHub CLI before checkout").?;
+    const checkout = lineOf(job, pinned_checkout).?;
+    const build = lineOf(job, "      - name: Build live timing verifier").?;
+    const verify = lineOf(job, "      - name: Verify current GitHub-issued live timing").?;
+    try std.testing.expect(capture < checkout and checkout < build and build < verify);
+    const capture_block = blockUntil(job, "      - name: Capture trusted GitHub CLI before checkout", "      - uses: actions/checkout@") orelse
+        return error.LiveTimingCaptureBlockMissing;
+    inline for (.{ "command -v gh", "/usr/bin/realpath", "/usr/bin/stat -f '%HT'", "/usr/bin/shasum -a 256", "path=%s\\n", "sha256=%s\\n" }) |needle|
+        try std.testing.expectEqual(@as(usize, 1), countMatchingLines(capture_block, needle));
+    try std.testing.expectEqual(@as(usize, 2), countMatchingLines(capture_block, "GITHUB_OUTPUT"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(capture_block, "GITHUB_ENV"));
 }
 
 test "live 릴리스 action: eight-stage SSOT order와 최소 credential을 지킨다" {

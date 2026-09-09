@@ -7683,6 +7683,16 @@ test "kitty relative placement(P/Q/H/V): 부모 기준으로 놓이고 부모와
     try std.testing.expectEqualStrings("\x1b_Gi=2,p=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
     core.clearResponse();
 
+    // **극단값이 터미널을 죽이면 안 된다.** H/V 는 APC 에서 상한 없이 오는 i32 라, 좁은 타입으로
+    // 더하면 넘친다 — 실제로 `H=2147483647` 하나로 패닉했다(적대적 검증이 라이브에서 잡았다).
+    // 범위를 벗어나면 조용히 안 그리는 것이 맞다.
+    try core.write("\x1b_Ga=p,i=2,p=20,P=1,Q=9,H=2147483647,V=2147483647,q=2\x1b\\");
+    try core.write("\x1b_Ga=p,i=2,p=21,P=1,Q=9,H=-2147483648,V=-2147483648,q=2\x1b\\");
+    _ = core.renderSnapshot(); // 여기서 위치를 푼다 — 넘치면 이 줄에서 죽는다
+    for (core.renderSnapshot().placements) |v| {
+        try std.testing.expect(v.placement_id != 20 and v.placement_id != 21); // 화면 밖이라 안 그린다
+    }
+
     // **부모를 지우면 자식도 함께 사라진다**(명세: 수명이 부모에 묶인다). 안 지우면 부모 없는
     // 자식이 목록에 남아 매 frame 위치를 못 풀고 상한만 먹는다.
     try core.write("\x1b_Ga=d,d=i,i=1,p=9,q=2\x1b\\");

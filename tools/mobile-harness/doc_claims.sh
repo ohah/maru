@@ -339,6 +339,28 @@ ck "iOS 는 알림을 안 보낸다" 0 "$(sed 's,//.*,,' $I | grep -c 'UNUserNot
 # 알림이 처음 «보이게» 되면서 드러난 것 — 블루투스 아이콘이 붙어 있었다.
 ck "알림 아이콘이 블루투스가 아니다" 0 "$(sed 's,//.*,,' $V | grep -c 'stat_sys_data_bluetooth')"
 
+echo "§5 죽으면 그 자리를 남긴다 (M15b)"
+# **두 host 가 같은 규율이다.** 한쪽만 걸면 그 플랫폼의 죽음만 미제로 남는다.
+for f in $A $I; do
+  ck "처리기를 건다 ${f##*/}" 1 "$(sed 's,//.*,,' $f | grep -c 'sa.sa_handler = crashHandler;')"
+  # **스택이 넘쳐 죽었으면 처리기가 쓸 스택도 없다** — 하필 그 갈래가 재현하기 가장 어렵다.
+  ck "따로 쓸 스택을 준다 ${f##*/}" 1 "$(sed 's,//.*,,' $f | grep -c 'sigaltstack(&ss, NULL);')"
+  # **삼키지 않는다.** 되돌려 다시 올려야 OS 가 자기 크래시 보고(tombstone·.ips)를 만든다 —
+  # 우리 파일은 그것을 대신하는 것이 아니라 «옆에» 두는 것이다.
+  ck "되돌려 다시 올린다 ${f##*/}" 1 "$(sed 's,//.*,,' $f | grep -c 'signal(sig, SIG_DFL);')"
+  ck "그 신호를 다시 올린다 ${f##*/}" 1 "$(sed 's,//.*,,' $f | grep -c 'raise(sig);')"
+  # **프레임마다 미리 뜬다** — 죽는 순간에는 아무것도 만들 수 없다.
+  ck "프레임마다 미리 뜬다 ${f##*/}" 1 "$(sed 's,//.*,,' $f | grep -c '^ *refreshCrashSnapshot();')"
+done
+# **처리기 안에서 쓸 수 있는 것은 셋뿐이다**(`open`·`write`·`close`). `malloc`·`printf`·`snprintf`·
+# 잠금은 async-signal-safe 가 아니라 죽는 자리에서 또 죽거나 매달린다 — 그러면 남는 것이 없다.
+crashBody() { awk '/^static void crashHandler\(int sig\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$1"; }
+for f in $A $I; do
+  # 잘라내기가 됐는지부터 단언한다(위 판정자들과 같은 이유).
+  ck "처리기 본문을 잘라냈다 ${f##*/}" 1 "$(crashBody $f | grep -c 'raise(sig);')"
+  ck "처리기가 안전한 것만 쓴다 ${f##*/}" 0 "$(crashBody $f | sed 's,//.*,,' | grep -cE 'malloc|printf|NSLog|pthread_mutex|fopen')"
+done
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

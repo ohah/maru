@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // **입력과 렌더가 다른 스레드다.** IME 는 Java UI 스레드에서 `InputConnection` 으로 오고
 // (실측 tid 14832), 그리는 쪽은 NativeActivity 가 만든 스레드다(tid 14850). 브리지의
@@ -135,6 +138,7 @@ static unsigned long long nowMs(void) {
 }
 
 static void drainHostKeyDecision(void);
+static void refreshCrashSnapshot(void); // M15b — 죽을 때 쓸 진단을 미리 떠 둔다
 static void noteA11yChange(void); // 서술자 묶음이 바뀌면 TalkBack 에 알린다(M9)
 static void drainA11yAnnouncement(void); // 새 출력을 소리로 알린다(M9a) — drawFrame 이 먼저다
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
@@ -765,6 +769,8 @@ static void drawFrame(void) {
             maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
         }
     }
+    // **죽을 때 쓸 것을 미리 떠 둔다**(M15b). 브리지 잠금 안이라야 그 값이 한 프레임의 것이다.
+    refreshCrashSnapshot();
     // **친 것을 원격으로 보낸다.** 브리지가 인코딩해 모아 둔 것을 가져가 펌프에 넘긴다.
     // 셸이 뜨기 전에는 **안 가져간다** — 가져가면 우리 손에서 사라지는데 펌프는 아직 못 보내
     // 그 글자가 통째로 없어진다(브리지에 두면 type-ahead 로 남는다).
@@ -2289,6 +2295,93 @@ static void drainConfigWrite(struct android_app *app) {
     LOGI("MARU_CONFIG wrote bytes=%lu path=%s", n, path);
 }
 
+// ── 크래시 보고 (M15b) ──────────────────────────────────────────────────────
+//
+// **죽는 버그는 진단 화면으로도 못 잡는다** — 죽으면 화면이 없다. 그래서 죽는 순간에 파일 한 장을
+// 남기고 다음 실행이 그것을 보여 준다(계약 §5).
+//
+// **신호 안에서는 «미리 만들어 둔 것»만 쓴다.** `malloc`·`printf`·잠금은 async-signal-safe 가
+// 아니다 — 그 안에서 부르면 죽는 자리에서 또 죽거나 매달린다. 그래서 진단 한 장도 파일 경로도
+// **프레임마다·시작할 때** 미리 만들어 두고, 처리기가 하는 일은 `open`·`write`·`close` 셋뿐이다.
+
+/// 죽을 때 그대로 쓸 진단 한 장. **프레임마다 갱신한다.**
+static char g_crash_snapshot[4096];
+static volatile int g_crash_snapshot_len = 0;
+/// 파일 경로. 시작할 때 한 번 만든다(처리기 안에서는 `snprintf` 를 못 쓴다).
+static char g_crash_path[512];
+
+/// 신호 번호를 **자릿수로** 적는다(`snprintf` 없이). 두 자리면 충분하다(SIGSEGV=11 등).
+static int crashHeader(char *out, int sig) {
+    int n = 0;
+    const char *p = "signal=";
+    while (*p) out[n++] = *p++;
+    if (sig >= 10) out[n++] = (char)('0' + (sig / 10) % 10);
+    out[n++] = (char)('0' + sig % 10);
+    out[n++] = '\n';
+    return n;
+}
+
+static void crashHandler(int sig) {
+    // **쓰고 나서 원래 죽음을 그대로 죽는다.** 삼키면 OS 의 tombstone 이 안 생기고, 그쪽에만 있는
+    // 스택을 잃는다 — 우리 파일은 그것을 대신하는 것이 아니라 **옆에** 두는 것이다.
+    if (g_crash_path[0]) {
+        int fd = open(g_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            char head[16];
+            int hn = crashHeader(head, sig);
+            ssize_t ignored = write(fd, head, (size_t)hn);
+            int len = g_crash_snapshot_len;
+            if (len > 0) ignored = write(fd, g_crash_snapshot, (size_t)len);
+            (void)ignored; // 죽는 중이다 — 실패해도 할 수 있는 일이 없다
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void installCrashHandler(struct android_app *app) {
+    if (!app || !app->activity || !app->activity->internalDataPath) return;
+    snprintf(g_crash_path, sizeof g_crash_path, "%s/crash", app->activity->internalDataPath);
+
+    // **스택이 넘쳐 죽었으면 처리기가 쓸 스택도 없다.** 따로 준다 — 안 그러면 그 한 갈래에서만
+    // 아무것도 안 남는데, 하필 그 갈래가 재현하기 가장 어렵다.
+    static char alt[SIGSTKSZ < 16384 ? 16384 : SIGSTKSZ];
+    stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt, .ss_flags = 0};
+    sigaltstack(&ss, NULL);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = crashHandler;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+    for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, NULL);
+    LOGI("MARU_CRASH handler_installed path=%s", g_crash_path);
+}
+
+/// 지난 실행이 남긴 것을 읽어 브리지에 넘긴다. **안 지운다** — 다음 죽음이 덮는다. 지우면 그
+/// 세션에 진단을 안 열어 본 사용자는 영영 못 본다.
+static void publishLastCrash(void) {
+    if (!g_crash_path[0]) return;
+    static unsigned char buf[4096];
+    FILE *f = fopen(g_crash_path, "rb");
+    if (!f) return;
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (n == 0) return;
+    pthread_mutex_lock(&g_bridge_lock);
+    maru_mobile_set_last_crash(buf, (unsigned long)n);
+    pthread_mutex_unlock(&g_bridge_lock);
+    LOGI("MARU_CRASH last_crash bytes=%zu", n);
+}
+
+/// 프레임마다 진단 한 장을 떠 둔다. **죽는 순간에 만들 수 없으니 미리 만든다.**
+static void refreshCrashSnapshot(void) {
+    unsigned int n = maru_mobile_diag_snapshot((unsigned char *)g_crash_snapshot, sizeof g_crash_snapshot);
+    g_crash_snapshot_len = (int)n;
+}
+
 static void loadConfigFile(struct android_app *app) {
     const char *dir = app->activity->internalDataPath;
     if (!dir) { LOGI("MARU_CONFIG no_data_path"); return; }
@@ -2802,6 +2895,10 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
     }
     if (cmd == APP_CMD_INIT_WINDOW && app->window && g.ready) return;  // 이미 서 있으면 그대로
     if (cmd == APP_CMD_INIT_WINDOW && app->window) {
+        // **크래시 처리기를 가장 먼저 건다.** 아래 것들(아틀라스 굽기·Vulkan)이 죽는 자리라
+        // 그 뒤에 걸면 정작 잡고 싶은 죽음을 놓친다. 지난 실행이 남긴 것도 여기서 읽어 올린다.
+        installCrashHandler(app);
+        publishLastCrash();
         loadConfigFile(app); // 첫 프레임부터 그 색으로 그린다
         publishPublicKey(app); // 접속 **전에** 보여 줘야 서버에 붙일 수 있다
         int32_t dpi = AConfiguration_getDensity(app->config);

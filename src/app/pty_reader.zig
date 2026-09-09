@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
@@ -14,6 +15,11 @@ extern "c" fn usleep(usec: c_uint) c_int;
 /// 이 확정 버그 + 사용자 승인으로 갱신 — 추가 전 상의 완료, [[no-defensive-code-without-consult]]). 값은 write_queue cap과 같다.
 pub const response_buffer_capacity: usize = 1 << 18; // 256 KiB
 const PauseState = enum(u8) { running, requested, reached, terminal };
+// Restore failure E2E의 fresh test process에서 첫 prepared reader 한 개만
+// gate 도달 전 멈춘다. 저장되는 PtyReader 상태에 fixture bit를 섞으면
+// handoff inventory와 제품 snapshot 의미가 바뀌므로 process-local one-shot이다.
+var test_block_next_prepared_reach: std.atomic.Value(bool) = .init(false);
+var test_blocked_prepared_waiting: std.atomic.Value(bool) = .init(false);
 
 /// 응답 reply를 out_buf에 적재하되, pending(미전송 = out_buf[out_head..])이 response_buffer_capacity를 넘으면 드롭한다.
 /// runProcessing의 명령 단계·read 단계 두 곳이 공유하는 단일 출처 — 게이트 로직이 둘로 갈라져 표류하지 않게 한다(상한·
@@ -763,6 +769,18 @@ pub const PtyReader = struct {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
+    pub fn blockPreparedStartReachForTest(self: *PtyReader) void {
+        if (!builtin.is_test) @compileError("prepared reader gate fault is test-only");
+        std.debug.assert(self.thread == null);
+        if (test_block_next_prepared_reach.swap(true, .acq_rel))
+            @panic("prepared reader gate fault already armed");
+    }
+
+    pub fn blockedPreparedStartWaitingForTest() bool {
+        if (!builtin.is_test) @compileError("prepared reader gate observation is test-only");
+        return test_blocked_prepared_waiting.load(.acquire);
+    }
+
     pub fn preparedStartReached(self: *const PtyReader) bool {
         return self.start_gate_reached.load(.acquire);
     }
@@ -904,7 +922,14 @@ pub const PtyReader = struct {
 
     pub fn run(self: *PtyReader) void {
         if (!self.start_released.load(.acquire)) {
-            self.start_gate_reached.store(true, .release);
+            const block_reach = builtin.is_test and
+                test_block_next_prepared_reach.swap(false, .acq_rel);
+            if (block_reach) {
+                test_blocked_prepared_waiting.store(true, .release);
+                defer test_blocked_prepared_waiting.store(false, .release);
+            } else {
+                self.start_gate_reached.store(true, .release);
+            }
             while (!self.start_released.load(.acquire)) {
                 if (self.start_aborted.load(.acquire)) return;
                 _ = usleep(1000);

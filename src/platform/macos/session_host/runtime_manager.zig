@@ -1214,6 +1214,12 @@ pub const RuntimeManager = struct {
             return true;
         }
 
+        pub fn blockedReaderWaitingForTest(self: *const PreparedRestoredGraph) bool {
+            if (!builtin.is_test) @compileError("blocked restore reader observation is test-only");
+            if (self.count == 0) return false;
+            return self.items[0].terminal.live_pty.blockedPreparedStartWaitingForTest();
+        }
+
         /// Authority commit 직전의 마지막 fallible frontier. 모든 runtime을
         /// 먼저 검증하고 이 함수 안에서는 ownership을 하나도 바꾸지 않는다.
         pub fn revalidateAll(self: *PreparedRestoredGraph) !ValidatedRestoredGraph {
@@ -1322,6 +1328,23 @@ pub const RuntimeManager = struct {
         self: *RuntimeManager,
         host: *handoff_codec.HostState,
     ) !PreparedRestoredGraph {
+        return self.prepareRestoredGraphImpl(host, false);
+    }
+
+    pub fn prepareRestoredGraphWithBlockedReaderForTest(
+        self: *RuntimeManager,
+        host: *handoff_codec.HostState,
+    ) !PreparedRestoredGraph {
+        if (!builtin.is_test) @compileError("blocked restore reader is test-only");
+        if (host.runtimes.len == 0) return error.InvalidRestoreGraph;
+        return self.prepareRestoredGraphImpl(host, true);
+    }
+
+    fn prepareRestoredGraphImpl(
+        self: *RuntimeManager,
+        host: *handoff_codec.HostState,
+        block_first_reader: bool,
+    ) !PreparedRestoredGraph {
         if (self.live_registry.count() != 0 or self.host_registry.count() != 0 or
             self.surface_runtime.links.items.len != 0 or self.next_handle != 1)
             return error.RestoreDestinationNotEmpty;
@@ -1340,7 +1363,7 @@ pub const RuntimeManager = struct {
         };
         errdefer prepared.discard();
 
-        for (host.runtimes) |*runtime| {
+        for (host.runtimes, 0..) |*runtime, runtime_index| {
             if (runtime.surface_id == 0 or runtime.surface_id >= host.next_handle)
                 return error.InvalidRestoreGraph;
             var adoption = try maru.pty.PtySession.PreparedAdoption.prepareExact(
@@ -1390,10 +1413,16 @@ pub const RuntimeManager = struct {
                 .ctx = wake,
                 .notify = OutputWake.notify,
             });
-            _ = try slot.terminal.live_pty.attachSurfacePrepared(
-                &self.surface_runtime,
-                &slot.terminal.surface,
-            );
+            _ = if (block_first_reader and runtime_index == 0 and builtin.is_test)
+                try slot.terminal.live_pty.attachSurfacePreparedWithBlockedReachForTest(
+                    &self.surface_runtime,
+                    &slot.terminal.surface,
+                )
+            else
+                try slot.terminal.live_pty.attachSurfacePrepared(
+                    &self.surface_runtime,
+                    &slot.terminal.surface,
+                );
             reader_prepared = true;
             _ = try self.host_registry.registerRestored(
                 runtime.runtime_id,

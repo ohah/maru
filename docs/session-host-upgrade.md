@@ -2361,8 +2361,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   fault 선택은 제품 공개 `RestoreInvocation`, MRSH command, ambient environment에 필드를 추가하지 않는다. 별도 test artifact만
   compile-time으로 여는 strict `--restore-activation-fault <closed-name>` prefix를 target entry에서 먼저 소비한 뒤 남은 canonical
-  restore argv를 공용 parser에 넘기고 typed enum을 `runForTest`에 전달한다. `PreparedRollbackExec`이 만드는 rollback argv에는 이 prefix와
-  fault 이름이 0개여야 하며 rollback image는 일반 strict restore entry만 실행한다. fault는 해당 product call 직전에 exact once
+  restore argv를 공용 parser에 넘기고 typed enum을 `runWithPrecommitFaultForTest`에 전달한다. `PreparedRollbackExec`이 만드는 rollback argv에는 이 prefix와
+  fault 이름이 0개여야 하며 rollback image는 일반 strict restore entry만 실행한다. fault는 해당 product call 직후 exact once
   소비되고, 주입되지 않은 전후 revalidation과 cleanup은 실제 구현을 그대로 돈다. boundary gate는
   production `run`·`runWithNotificationAdapter`가 test seam을 호출하지 않는 것, 제품 binary에 option 문자열과 fault 이름이 없는 것,
   각 enum 행의 exact-one process execution을 함께 고정한다. precommit과 postcommit은 별도 named step·artifact로 실행해 한쪽의

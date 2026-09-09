@@ -5168,6 +5168,36 @@ fail-index unwind를 검증한다. injected child를 쓰므로 실제 GitHub net
 profile도 아직 열지 않는다. 다음 하위 gate가 이 fence의 candidate 사이에서 private held-file download와 GitHub-issued attestation,
 canonical evidence semantic을 실행한다.
 
+#### 11.100f current Release asset의 exact-ID private download
+
+`release_adapter_remote_release_assets.zig`의 final-address move-only `Assets`는 완료 전 `Fence.candidate()`가 가리킨
+canonical 네 asset을 role 순서로 private held file에 내려받는다. 다운로드 선택은 tag·name이 아니라 관측된
+positive asset ID로만 하며, command는 `/absolute/gh api --method GET --hostname github.com --header
+Accept: application/octet-stream repos/ohah/maru/releases/assets/<exact-id>`를 네 번 사용한다. caller가 endpoint,
+header, ID, role 순서, pathname을 고르지 못한다. child environment는 bounded `GH_TOKEN`과 `GH_PROMPT_DISABLED=1`만
+있으며 각 child 직전·종료 직후 checkout 전 pinned CLI를 재검증하고 같은 final-address `Deadline`의 fresh
+remaining만 해당 child에 전달한다.
+
+workspace는 caller가 주어 두었던 absolute absent leaf를 no-follow parent 아래 exclusive 0700 directory로 만든다. 각 asset은
+canonical name의 `O_EXCL|O_NOFOLLOW` 0600 regular file을 열고 metadata exact size를 상한으로 child stdout을 이미
+열린 fd에 직접 받는다. EOF와 child exit 0 후 exact size·SHA-256, pathname↔held-fd device/inode, regular type,
+link-count-1을 검증하고 0400으로 봉인한 뒤 file·directory·parent를 sync한다. 모든 네 file이 서로 다른
+inode이고 candidate의 role/name/size/SHA와 일치할 때만 `Assets` owner를 게시한다. success owner는 held directory와
+네 file identity/digest를 보존하고 `revalidate` 후 role별 descriptor lease를 줄 수 있다. raw token, response bytes, asset ID
+endpoint와 child output buffer는 결과에 보존하지 않는다.
+
+입력 `Fence`, `Deadline`, `PinnedExecutable`, executable/token/workspace backing, result 메모리는 외부 동작 전에 서로
+disjoint여야 한다. fence와 deadline/pinned owner는 §11.100e가 기억한 exact 주소여야 하고 candidate는 다운로드
+전·각 child 후·owner 게시 직전에 다시 seal 검증한다. short/long output, digest/identity/CLI/fence drift,
+timeout, child/non-regular/link/mode/sync 실패는 publication 0으로 닫고 이미 만든 file을 역순으로 unlink한 뒤
+directory를 제거한다. cleanup 실패는 원래 실패로 숨기지 않고 exact residue의 retry 권위를 owner에 남긴다.
+
+focused Debug·ReleaseFast gate는 actual private APFS와 injected/actual child로 exact 네 argv·environment·role order,
+fresh decreasing deadline, metadata size cap, short/long/digest mismatch, pathname/inode 교체, hardlink·CLI·fence drift, 각 child
+실패와 cleanup retry, copied/pre-owned/aliased owner, 성공·실패 FD/residue 0을 검증한다. synthetic child의 로컬
+wall-clock 수치는 filesystem/process 비용 참고값이지 GitHub network 실측이 아니다. GitHub-issued attestation과
+evidence/manifest canonical semantic, 완료 fence, read-only workflow 배선 및 protected-tag 실측은 다음 composition이 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

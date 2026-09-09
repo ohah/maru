@@ -444,10 +444,28 @@ ck "그 비율이 문서에도 있다" 1 "$(grep -c '1:1.9' docs/distribution.md
 ck "셰브론을 그린다" 2 "$(grep -c 'd.line(\[p' $G)"
 # **여기서 실제로 돌린다** — 자산이 있는지만 세면 생성기를 고치고 다시 안 뽑아도 초록이다.
 # `.icns` 는 `iconutil`(macOS 전용)이 손으로 굽는 산출물이라 이 판정이 유일한 파수꾼이다.
-# CI(ubuntu)도 Pillow 를 쓴다(`tools/svg_to_coverage.py`) — 그래서 여기서도 돈다.
-ck "뽑아 둔 자산이 규칙과 같다" 0 "$("$PY" $G --check >/dev/null 2>&1; echo $?)"
-# **「작아도 안 뭉친다」를 눈이 아니라 자로 잰다.** 안전 원을 0.6px 넘은 것을 이게 잡았다.
-ck "작은 크기·안전 영역을 잰다" 0 "$("$PY" $G --selftest >/dev/null 2>&1; echo $?)"
+#
+# **Pillow 가 없으면 «건너뛴다고 말한다».** 처음에는 「CI 도 Pillow 를 쓴다」고 보고 그냥
+# 걸었는데 CI 에서 둘 다 붉었다 — `tools/svg_to_coverage.py` 가 PIL 을 쓰는 건 맞지만 그
+# 태스크(`check-icon-coverage`)는 `check` 의 의존 목록에도 CI 에도 **없다**. 근거 없는
+# 전제였다. 조용히 안 도는 게이트는 게이트가 아니므로 건너뛸 때는 그렇다고 찍는다. 이
+# 판정이 막으려는 사고(생성기를 고치고 자산을 다시 안 뽑음)는 **생성기를 돌릴 수 있는
+# 사람**만 낼 수 있고 그 사람에게는 Pillow 가 반드시 있다 — 거기서는 반드시 돈다.
+#
+# **출력을 버리지 않는다.** 처음 판은 `>/dev/null 2>&1` 이라 CI 에 「기대=0 실제=1」만 남고
+# 이유가 통째로 사라졌다(무엇이 다른지도, 예외 역추적도). 안 맞는 줄은 그대로 찍는다.
+if "$PY" -c 'import PIL' >/dev/null 2>&1; then
+  ICONLOG=/tmp/maru_icon.$$
+  "$PY" $G --check > "$ICONLOG" 2>&1
+  ck "뽑아 둔 자산이 규칙과 같다" 0 "$?"
+  # **「작아도 안 뭉친다」를 눈이 아니라 자로 잰다.** 안전 원을 0.6px 넘은 것을 이게 잡았다.
+  "$PY" $G --selftest >> "$ICONLOG" 2>&1
+  ck "작은 크기·안전 영역을 잰다" 0 "$?"
+  grep -vE '^아이콘: 규칙과 같다$|^그림: 재어 보니 맞다$' "$ICONLOG" || true
+  rm -f "$ICONLOG"
+else
+  printf "  건너뜀 %-40s Pillow 가 없다\n" "자산·그림 재기"
+fi
 # **재료는 커밋하지 않는다** — 그러면 생성기를 돌릴 때마다 작업 나무가 더러워진다.
 ck "iconset 은 무시한다" 1 "$(grep -c 'assets/icon/Maru.iconset/' .gitignore)"
 # **적응형 배경색은 두 곳에 적힌다**(XML 이 색을 요구하고 생성기는 PNG 를 굽는다) — 묶어 둔다.

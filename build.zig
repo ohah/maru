@@ -5196,6 +5196,24 @@ pub fn build(b: *std.Build) void {
     host_close_log_step.dependOn(&run_host_close_log.step);
     boundary_step.dependOn(&run_host_close_log.step);
 
+    const preflight_reason_step = b.step(
+        "test-preflight-reject-reason",
+        "Preflight rejection records the child exit status (eight paths shared one name)",
+    );
+    const preflight_reason_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/preflight_reject_reason_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_preflight_reason = b.addRunArtifact(preflight_reason_tests);
+    run_preflight_reason.addArg("--maru-expect-tests=1");
+    run_preflight_reason.addArg("--maru-expect-passed=1");
+    run_preflight_reason.setCwd(b.path("."));
+    preflight_reason_step.dependOn(&run_preflight_reason.step);
+    boundary_step.dependOn(&run_preflight_reason.step);
+
     const chrome_key_release_step = b.step(
         "test-chrome-key-release",
         "Key release never reaches chrome text input (it doubled every character)",

@@ -13,6 +13,7 @@ const entrypoint = @import("entrypoint.zig");
 const exec_fd_set = @import("exec_fd_set.zig");
 const upgrade_deadline = @import("upgrade_deadline.zig");
 const upgrade_product = @import("upgrade_product_coordinator.zig");
+const host_log = @import("host_log.zig");
 
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -32,18 +33,31 @@ pub const ProductPreflight = struct {
     }
 };
 
+/// 준비 단계마다 **다른 종료 코드**를 쓴다. 부모가 볼 수 있는 것은 종료 상태뿐이라, 전부 125 로
+/// 끝내면 다섯 갈래가 한 숫자로 뭉친다 — 2026-09-10 에 업그레이드가 `reason=target_invalid` 로 접혔을
+/// 때 그 다섯 중 무엇인지 알 길이 없었다.
+const exit_redirect_failed: u8 = 121;
+const exit_dup_failed: u8 = 122;
+const exit_prepare_failed: u8 = 123;
+const exit_fd_set_invalid: u8 = 124;
+const exit_exec_failed: u8 = 125;
+
 fn runPreflightChild(target_path: [:0]const u8, source_fd: c.fd_t) noreturn {
-    redirectStdioToDevNull() catch c._exit(125);
+    // **stderr 는 남긴다.** 예전에는 셋 다 `/dev/null` 로 보내, exec 뒤의 실패
+    // (`InvalidFd`·handoff 읽기·`validateExecutable`)가 찍는 «maru session host preflight failed: …»
+    // 가 **아무 데도 안 남았다**. host 의 fd 2 는 `host-<id>.log` 라, 물려받으면 그대로 기록된다.
+    // stdin·stdout 은 계속 막는다 — 자식이 채널을 읽거나 거기에 쓰면 안 된다.
+    redirectStdinStdoutToDevNull() catch c._exit(exit_redirect_failed);
     var source = source_fd;
     if (source == entrypoint.preflight_fd) {
         source = c.fcntl(source_fd, c.F.DUPFD_CLOEXEC, entrypoint.preflight_fd + 1);
-        if (source < 0) c._exit(125);
+        if (source < 0) c._exit(exit_dup_failed);
     }
     closeAllExcept(source);
     _ = c.close(entrypoint.preflight_fd);
     var prepared: exec_fd_set.PreparedSlots = .{};
-    prepared.prepare(source, entrypoint.preflight_fd) catch c._exit(125);
-    prepared.assertExactNonCloexec(&.{}) catch c._exit(125);
+    prepared.prepare(source, entrypoint.preflight_fd) catch c._exit(exit_prepare_failed);
+    prepared.assertExactNonCloexec(&.{}) catch c._exit(exit_fd_set_invalid);
     const argv = [_:null]?[*:0]const u8{
         target_path.ptr,
         entrypoint.subcommand,
@@ -51,7 +65,7 @@ fn runPreflightChild(target_path: [:0]const u8, source_fd: c.fd_t) noreturn {
         entrypoint.preflight_fd_arg,
     };
     _ = execv(target_path.ptr, &argv);
-    c._exit(125);
+    c._exit(exit_exec_failed);
 }
 
 fn closeAllExcept(kept: c.fd_t) void {
@@ -68,7 +82,26 @@ fn waitPreflight(
     var status: c_int = undefined;
     while (!deadline.expired()) {
         const waited = c.waitpid(pid, &status, c.W.NOHANG);
-        if (waited == pid) return if (status == 0) {} else error.InvalidTarget;
+        if (waited == pid) {
+            if (status == 0) return;
+            // **부모가 이미 들고 있던 값을 버리지 않는다.** 이것 하나가 여덟 갈래를
+            // `reason=target_invalid` 로 뭉갰다 — 자식의 준비 단계 다섯(121~125)과 exec 뒤의 실패
+            // 셋(`InvalidFd`·handoff 읽기·`validateExecutable`)이 부모에게는 똑같이 「0 이 아님」이다.
+            //
+            // 121~125 면 exec **이전**(자식 준비)이고, 그 밖의 값이면 exec **이후**다 — 그때는 자식이
+            // stderr 에 남긴 «maru session host preflight failed: …» 가 host 로그 같은 자리에 있다.
+            const us: u32 = @bitCast(status);
+            if (std.c.W.IFEXITED(us))
+                host_log.line("upgrade preflight rejected target: exit={d}", .{std.c.W.EXITSTATUS(us)})
+            else if (std.c.W.IFSIGNALED(us))
+                host_log.line(
+                    "upgrade preflight rejected target: signal={d}",
+                    .{@intFromEnum(std.c.W.TERMSIG(us))},
+                )
+            else
+                host_log.line("upgrade preflight rejected target: raw_status=0x{x}", .{us});
+            return error.InvalidTarget;
+        }
         if (waited < 0 and posix.errno(waited) != .INTR) {
             if (!killAndReap(pid)) return error.Failed;
             return error.Failed;
@@ -90,14 +123,15 @@ fn killAndReap(pid: c.pid_t) bool {
     }
 }
 
-fn redirectStdioToDevNull() error{ OpenFailed, DupFailed }!void {
+fn redirectStdinStdoutToDevNull() error{ OpenFailed, DupFailed }!void {
     const null_fd = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
     if (null_fd < 0) return error.OpenFailed;
     defer {
         if (null_fd > 2) _ = c.close(null_fd);
     }
+    // **fd 2 는 건드리지 않는다** — host 로그로 가야 진단이 남는다.
     var fd: c.fd_t = 0;
-    while (fd <= 2) : (fd += 1) {
+    while (fd <= 1) : (fd += 1) {
         if (c.dup2(null_fd, fd) < 0) return error.DupFailed;
         const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
         if (flags < 0 or c.fcntl(fd, c.F.SETFD, flags & ~@as(c_int, c.FD_CLOEXEC)) < 0)

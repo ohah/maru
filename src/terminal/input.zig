@@ -91,6 +91,20 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     // for modifiers, application cursor mode, and platform shortcuts should not
     // force storage or parser files to change.
 
+    // **press 가 아닌 이벤트는 여기서 끝난다** — kitty 분기보다 **먼저**다.
+    //
+    // release/repeat 를 실을 수 있는 인코딩은 kitty `report_events`(flag 2) 하나뿐이다. legacy 경로에는
+    // 이벤트 종류를 담을 자리가 아예 없어서, 그대로 내려가면 뗄 때도 **글자가 한 번 더** 나간다.
+    //
+    // 2026-09-09 실측: 한글 자모가 두 번씩 입력됐다(`다 다ㅏ르ㅡ는른`). kitty 를 안 켠 앱(대부분의
+    // 셸·TUI)은 `kitty_flags == 0` 이라 아래 한 줄에서 legacy 로 빠지는데, 종류를 보는 게이트가
+    // `encodeKitty` **안에만** 있어 그 앱들에는 걸리지 않았다. Swift `keyUp` 핸들러가 새로 생기면서
+    // (`d48712303`) release 가 처음으로 코어까지 오게 된 것이 방아쇠다 — 그 전에는 아무도 안 보냈다.
+    //
+    // 그러므로 게이트는 **분기보다 위**에 있어야 한다. kitty 안쪽 게이트는 그대로 둔다: 거기서는
+    // 「flag 가 켜졌는가」와 「이 키가 release 를 보고하는 종류인가」를 따로 판정한다.
+    if (event.event_type != .press and options.kitty_flags == 0) return buffer[0..0];
+
     // kitty keyboard protocol이 켜져 있으면(flag 스택 최상단 != 0) CSI u 인코딩으로 분기한다. 앱이
     // CSI > flags u로 켰을 때만 — 안 켜면 아래 legacy 그대로라 progressive enhancement(legacy 공존).
     if (options.kitty_flags != 0) return encodeKitty(event, buffer, options);
@@ -796,4 +810,47 @@ test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" 
     try std.testing.expectEqualStrings("\x1b[9;5u", try encodeKey(.{ .key = .tab, .modifiers = .{ .control = true } }, &buf, o));
     // flags=0(미활성)이면 legacy 그대로 — escape는 \x1b(progressive enhancement 검증).
     try std.testing.expectEqualStrings("\x1b", try encodeKey(.{ .key = .escape }, &buf, .{}));
+}
+
+test "encodeKey: kitty 를 안 켠 앱에서 release/repeat 는 아무것도 안 낸다 (자모 이중 입력)" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+
+    // 2026-09-09 실측 회귀. 한글 자모가 두 번씩 들어갔다(`다 다ㅏ르ㅡ는른`). 원인은 종류 게이트가
+    // `encodeKitty` **안에만** 있었던 것 — `kitty_flags == 0` 인 앱(대부분의 셸·TUI)은 그 위에서 legacy
+    // 로 빠져 게이트를 지나쳤고, 뗄 때도 글자가 한 번 더 나갔다.
+    //
+    // Swift `keyUp` 핸들러가 생기기 전에는 release 가 코어에 오지 않아 드러나지 않았다. 그러니 이
+    // 판정자는 **인코더가 스스로 지켜야 하는 계약**이다 — platform 이 무엇을 보내든.
+    for ([_]KeyEventType{ .release, .repeat }) |kind| {
+        // 평문 글자 — 이것이 두 번 나가면 사용자가 곧바로 본다.
+        try std.testing.expectEqualStrings(
+            "",
+            try encodeKey(.{ .key = .{ .char = 'a' }, .event_type = kind }, &buf, .{}),
+        );
+        // 한글 자모(조합 중 IME 가 흘리는 코드포인트)도 같다.
+        try std.testing.expectEqualStrings(
+            "",
+            try encodeKey(.{ .key = .{ .char = 0x3131 }, .event_type = kind }, &buf, .{}),
+        );
+        // Enter/Tab/Backspace 도 침묵이다 — 줄이 두 번 입력되던 자리.
+        for ([_]Key{ .enter, .tab, .backspace, .escape }) |key|
+            try std.testing.expectEqualStrings("", try encodeKey(.{ .key = key, .event_type = kind }, &buf, .{}));
+        // 수식자가 붙은 특수 키도 legacy 경로라 마찬가지다.
+        try std.testing.expectEqualStrings(
+            "",
+            try encodeKey(
+                .{ .key = .arrow_left, .modifiers = .{ .control = true }, .event_type = kind },
+                &buf,
+                .{},
+            ),
+        );
+    }
+
+    // press 는 그대로여야 한다 — 게이트가 넓으면 입력이 아예 안 들어간다.
+    try std.testing.expectEqualStrings("a", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, .{}));
+    try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter }, &buf, .{}));
+    try std.testing.expectEqualStrings(
+        "\x1b[1;5D",
+        try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .control = true } }, &buf, .{}),
+    );
 }

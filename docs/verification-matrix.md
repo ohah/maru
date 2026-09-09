@@ -3426,11 +3426,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `session-host-release-remote-pass-<run_attempt>` artifact를 올린다. focused codec 46개, actual APFS publication 50개,
   제품 조립 10개와 workflow source gate 14개를 Debug·ReleaseFast에서 검증한다. baseline record는 U5 완료가 아니며 실제 GitHub 표본은
   병합 뒤 protected `v*` tag만 소유한다(`session-host-upgrade.md` §11.100j).
-  동일-run pass artifact readback audit는 **미구현**이다. 다음 gate는 current run의 exact artifact metadata와 downloaded archive
-  SHA-256을 교차검증하고 canonical pass record의 repository/run/attempt/source/tag/workflow identity를 protected Context에 다시 결속한다.
-  upload action output은 권위로 쓰지 않고 API visibility의 0-result만 absolute deadline 안에서 유계 retry하며, timing/pass ZIP parser는
-  공용 SSOT로 추출한다. 별도 read-only job은 producer 성공 뒤 무출력 auditor만 실행한다. 실제 증거는 병합 뒤 protected `v*` tag의
-  producer와 audit가 같은 run에서 모두 성공해야 한다(`session-host-upgrade.md` §11.100k).
+  동일-run pass artifact readback audit는 **구현됨**이다. current run의 exact artifact metadata와 downloaded archive SHA-256을
+  교차검증하고 canonical pass record의 repository/run/attempt/source/tag/workflow identity를 protected Context에 다시 결속한다.
+  upload action output은 권위로 쓰지 않고 API visibility의 exact 0-result만
+  `release_adapter_remote_release_pass_transport.zig`의 `metadata_attempts`·`metadata_retry_ns`가 정한 상한과 absolute deadline 안에서 유계 retry하며,
+  timing/pass ZIP parser는 `release_adapter_github_artifact_archive.zig` 공용 SSOT를 쓴다. focused artifact 8개, transport 14개,
+  product auditor 5개와 fresh-process zero-output smoke 및 workflow source gate를 Debug·ReleaseFast에서 검증한다. 별도 read-only
+  `audit-session-host-remote-release-pass` job은 producer 성공 뒤 무출력 auditor만 실행한다. PR synthetic archive는 실제 GitHub 보존
+  표본이 아니며, 실제 증거는 병합 뒤 protected `v*` tag의 producer와 audit가 같은 run에서 모두 성공해야 한다
+  (`session-host-upgrade.md` §11.100k).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

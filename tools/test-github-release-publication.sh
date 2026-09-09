@@ -51,14 +51,14 @@ fi
 # an acceptable trust root. Keep the human-readable major only as a comment.
 action_uses=$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*uses:[[:space:]]*\([^#[:space:]]*\).*/\1/p' "$workflow")
 third_party_uses=$(printf '%s\n' "$action_uses" | grep -v '^\./' || true)
-test "$(printf '%s\n' "$third_party_uses" | sed '/^$/d' | wc -l | tr -d ' ')" = 9
+test "$(printf '%s\n' "$third_party_uses" | sed '/^$/d' | wc -l | tr -d ' ')" = 11
 if printf '%s\n' "$third_party_uses" | grep -Ev '^[^@[:space:]]+@[0-9a-f]{40}$' >/dev/null; then
     echo 'error: release workflow contains an unpinned third-party Action' >&2
     exit 1
 fi
-test "$(printf '%s\n' "$action_uses" | grep -Fxc 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5')" = 3
-test "$(printf '%s\n' "$action_uses" | grep -Fxc 'jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac')" = 3
+test "$(printf '%s\n' "$action_uses" | grep -Fxc 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5')" = 4
+test "$(printf '%s\n' "$action_uses" | grep -Fxc 'jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac')" = 4
 test "$(printf '%s\n' "$action_uses" | grep -Fxc 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')" = 3
-test "$(grep -c 'persist-credentials: false' "$workflow")" = 3
+test "$(grep -c 'persist-credentials: false' "$workflow")" = 4
 
 echo 'GitHub release publication contract: OK'

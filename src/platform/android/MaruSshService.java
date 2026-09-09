@@ -54,6 +54,21 @@ public class MaruSshService extends Service {
         s.stopSelf();
     }
 
+    /// **권한을 방금 받았다 — 지금 도는 세션의 알림을 다시 올린다**(M16c).
+    ///
+    /// 안 하면 그 세션은 **끝날 때까지 안 보인다.** 알림은 권한이 없을 때 올라가면 OS 가 버리고,
+    /// 나중에 허용해도 **되살려 주지 않는다**(실측: 허용 직후·5초 뒤·홈으로 나간 뒤 모두 알림
+    /// 목록이 비어 있었다). 그런데 사용자가 허용을 누른 이유가 바로 **이 세션**이고, 알림이
+    /// 필요해지는 순간은 그 직후 홈으로 나갈 때다.
+    ///
+    /// **도는 세션이 없으면 아무것도 안 한다** — 알림만 띄우면 없는 세션을 있다고 말하게 된다.
+    public static void onNotificationsAllowed() {
+        MaruSshService s = current;
+        if (s == null) return;
+        s.startForeground(NOTIFICATION_ID, s.buildNotification());
+        android.util.Log.i("MaruChrome", "MARU_NOTIFY reposted");
+    }
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         current = this;
@@ -107,7 +122,11 @@ public class MaruSshService extends Service {
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("maru")
                 .setContentText("SSH 세션 유지 중")
-                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                // **블루투스 아이콘이 붙어 있었다.** 권한을 안 물어 이 알림이 한 번도 안 보였고
+                // (M16c), 보이게 만들자마자 드러났다 — 「SSH 세션 유지 중」 옆에 블루투스 표시가
+                // 뜬다. 앱 리소스가 없으므로(res/ 없이 `android.R` 만 쓴다) 시스템 것 중에서
+                // **뜻이 맞는 것**을 고른다: 이 알림이 말하는 것은 「연결을 들고 있다」다.
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setOngoing(true)
                 .build();
     }

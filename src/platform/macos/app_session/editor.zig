@@ -1228,8 +1228,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildDiffPaneOps(
             // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
             // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             self.blink_visible,
@@ -1242,7 +1242,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1784,8 +1784,8 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
     if (!(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap)) {
         // **두 열이 같은 규칙을 쓴다.** 왼쪽만 되돌리면 창이 커졌을 때 오른쪽 열만 빈다 — 실제로
         // 비교 가로 스크롤을 붙이자마자 그 상태가 됐다(적대적 검증 2026-08-16).
-        clampOneColumn(self, &term.rt.editor_first_col, term.rt.editor_max_cols, visibleCols(self, body, term, false));
-        clampOneColumn(self, &term.rt.editor_first_col_right, term.rt.editor_max_cols_right, visibleCols(self, body, term, true));
+        clampOneColumn(self, &term.rt.editor_first_col, scrollWidthCols(self, term, false), visibleCols(self, body, term, false));
+        clampOneColumn(self, &term.rt.editor_first_col_right, scrollWidthCols(self, term, true), visibleCols(self, body, term, true));
     }
 }
 
@@ -1811,7 +1811,6 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
     const lines = if (right) rightTexts(term) else editorLines(term);
     if (lines.len == 0) return false;
     const first_col = if (right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
-    const max_cols = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
 
     // **문서 전체에서 가장 긴 줄이 상한을 정한다.** 보이는 줄만 보면 세로로 굴릴 때마다 상한이
     // 출렁여, 오른쪽 끝을 보다가 위로 굴리면 본문이 제멋대로 왼쪽으로 튄다.
@@ -1819,7 +1818,9 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
 
     const visible = visibleCols(self, body, term, right);
     if (visible == 0) return false;
-    if (max_cols.* <= visible) {
+    // **밀 수 있는 총 열 수로 판정한다** — 줄 끝 너머 몫까지 이 축의 것이다(`scrollWidthCols`).
+    const width = scrollWidthCols(self, term, right);
+    if (width <= visible) {
         // 안 넘친다 — 이 축은 탭 바가 쓴다(위 doc). 남아 있던 위치만 되돌린다.
         if (first_col.* != 0) {
             first_col.* = 0;
@@ -1829,7 +1830,7 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
     }
 
     // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
-    const max_first: u32 = @min(max_cols.* - visible, @as(u32, chrome_editor.frame.max_first_col));
+    const max_first: u32 = @min(width - visible, @as(u32, chrome_editor.frame.max_first_col));
     const current: i64 = first_col.*;
     const next = std.math.clamp(current - @as(i64, cols), 0, @as(i64, max_first));
     const clamped: u16 = @intCast(@min(next, std.math.maxInt(u16)));
@@ -2570,7 +2571,9 @@ fn revealPrimaryCaretCols(self: *AppSession, term: *Term, fallback_cols: u16, fa
     // **상한도 편집 전 것을 쓴다.** `refreshAfterEdit` 는 `max_cols` **도** 버리는데(⑷ 파생 수치),
     // 0 을 상한으로 쓰면 `max_col` 이 0 이 되어 **가로가 통째로 왼쪽 끝으로 튄다** — 스크롤한 채
     // 글자를 치면 화면이 되감기는 회귀다(실측으로 잡았다).
-    const max_cols = if (term.rt.editor_max_cols != 0) term.rt.editor_max_cols else fallback_max;
+    const counted = if (term.rt.editor_max_cols != 0) term.rt.editor_max_cols else fallback_max;
+    // **줄 끝 너머 몫을 여기서도 더한다** — 안 더하면 이 조각이 고치려는 그 한 칸이 그대로 남는다.
+    const max_cols = if (counted == 0) 0 else counted +| self.loaded_config.config.editor.scroll_beyond_last_column;
     // **모르면 안 움직인다.** 상한이 0 이면 `max_col` 도 0 이라 가로가 통째로 왼쪽 끝으로 튄다 —
     // 세로가 *"모를 때는 움직이는 쪽이 덜 나쁘다"* 로 고른 것과 **반대**다: 가로에서 모를 때
     // 움직이는 것은 「되감기」이고, 그건 사용자가 보던 자리를 잃는 것이다.
@@ -4077,8 +4080,9 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
 fn revealDiffCaretColumn(self: *AppSession, term: *Term, side: DiffSide, text: []const u8, byte: usize, map: editor_motion.ColumnMap) void {
     const right = side == .right;
     const col = map.columnOf(map.ctx, text, @min(byte, text.len));
-    const max_cols = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
-    revealCaretColumn(self, term, right, col, term.rt.editor_diff_hit_geom.content_width, max_cols);
+    // **비교도 줄 끝 너머 몫을 쓴다** — 두 뷰가 같은 규칙이라야 같은 키가 같게 움직인다(§3.5 는
+    // *"가로는 각자다"* 이므로 열마다 자기 상한에 더한다).
+    revealCaretColumn(self, term, right, col, term.rt.editor_diff_hit_geom.content_width, scrollWidthCols(self, term, right));
 }
 
 /// 한 행을 한 줄로 본 `Line`. 줄바꿈은 **`.none`** 이다 — 위 `diffMove` doc 참조.
@@ -4887,12 +4891,43 @@ pub fn ensureMaxColsForDiff(term: *Term) void {
     ensureMaxCols(term, true);
 }
 
+/// 가로로 **밀 수 있는 총 열 수** — 내용 폭에 `editor.scroll-beyond-last-column` 을 더한다.
+///
+/// **왜 내용 폭이 아닌가**: caret 은 마지막 글자보다 **한 칸 뒤**에 서므로, 상한이 내용 폭이면
+/// 가장 긴 줄의 끝에서 caret 이 화면 밖 한 칸에 남아 **안 그려진다**(`paintCarets` 의
+/// `on_screen >= content.width`. §4 「행 끝 caret 은 마지막 한 칸을 못 얻는다」가 그 한계였다).
+///
+/// **선례 그대로다** — VSCode `editor.scrollBeyondLastColumn`(기본 5)은 `viewLayout` 에서
+/// `그 값 × 글자 폭` 을 가장 긴 줄 폭에 **더해** scroll width 를 만든다. 그래서 caret 만 예외로
+/// 두는 것이 아니라 **축 전체**가 넓어지고 휠·막대도 그만큼 간다. 우리도 같은 자리에 같은 뜻으로
+/// 더하므로, 이 함수를 **네 곳이 함께** 읽는다: 그리기 직전 clamp · 휠 · caret 노출 · 막대.
+///
+/// **0 이면 "아직 안 셌다"이다 — 지어내지 않는다**(`maxColsForRender` 가 그것을 `null` 로 읽어
+/// 막대를 안 그린다). 설정이 0 이면 더하는 것이 없어 옛 동작 그대로다.
+///
+/// **그 가드를 지운 변이는 살아남는 것이 정상이다**(적대적 검증 B3 — 오늘 관측되지 않는다):
+/// 안 센 문서에서 `beyond` 만 남아도 막대는 `max_cols > 화면 폭` 을 요구해 안 뜨고(화면이 5열보다
+/// 좁을 수는 없다), clamp 와 노출은 그 값에서도 `max_col` 이 0 이라 같은 답을 낸다. 그래도 0 을
+/// 지키는 이유는 **뜻**이다 — "안 셌다"와 "폭이 5"는 다른 말이고, 다음에 이 값을 읽는 곳이
+/// 붙었을 때 지어낸 숫자를 물려주지 않는다.
+///
+/// **랩은 여기서 안 본다** — 부르는 넷이 각자 랩에서 이미 아무 일도 안 한다(`effectiveFirstCol` 이
+/// 0 을 내고, clamp·휠·노출·막대가 전부 랩 갈래를 먼저 거른다). 선례도 랩일 때는 이 값을 안 더한다.
+fn scrollWidthCols(self: *AppSession, term: *Term, right: bool) u32 {
+    const max_cols = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
+    if (max_cols == 0) return 0;
+    return max_cols +| self.loaded_config.config.editor.scroll_beyond_last_column;
+}
+
 /// 렌더에 넘길 **가장 긴 줄의 열 수**(0 = 아직 안 셌다 → 막대 없음).
 ///
 /// **비교 뷰는 열마다 각자다**(§3.5) — 왼쪽은 원본, 오른쪽은 수정본이라 가장 긴 줄이 다르고,
 /// 막대 길이도 그래서 각자여야 한다.
-fn maxColsForRender(term: *Term, right: bool) ?u32 {
-    const v = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
+fn maxColsForRender(self: *AppSession, term: *Term, right: bool) ?u32 {
+    // **막대도 밀 수 있는 만큼을 말한다.** 내용 폭만 주면 「끝까지 민 상태」인데도 막대가 끝에 안
+    // 닿고, 드래그로 갈 수 있는 자리와 휠로 갈 수 있는 자리가 갈린다(선례의 scroll width 가 같은
+    // 값을 쓰는 이유다).
+    const v = scrollWidthCols(self, term, right);
     return if (v == 0) null else v;
 }
 
@@ -8585,7 +8620,11 @@ test "가로 스크롤은 가장 긴 줄의 끝에서 멈춘다 — 빈 화면�
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null)); // 끝까지 민다
     const visible = visibleCols(fx.session, editorBodyRect(fx.session, leaf, fx.term), fx.term, false);
     try testing.expect(visible > 0);
-    try testing.expectEqual(@as(u32, long_len) - visible, @as(u32, fx.term.rt.editor_first_col));
+    // **끝은 「가장 긴 줄 + 줄 끝 너머 몫」이다**(`editor.scroll-beyond-last-column`, 기본 5 —
+    // caret 이 마지막 글자 **한 칸 뒤**에 서기 때문이다). 그 몫만큼은 일부러 빈 칸이고, 그 너머로는
+    // 여전히 못 간다 — 이 판정자가 지키는 것은 **"빈 화면으로 넘어가지 않는다"** 쪽이다.
+    const beyond = fx.session.loaded_config.config.editor.scroll_beyond_last_column;
+    try testing.expectEqual(@as(u32, long_len) + beyond - visible, @as(u32, fx.term.rt.editor_first_col));
 
     try testing.expect(scrollCols(fx.session, fx.term, leaf, 1_000_000, null)); // 되돌리면 0에서 멈춘다
     try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_first_col);
@@ -8685,7 +8724,8 @@ test "창이 넓어지면 다음 프레임이 가로 위치를 되돌린다 — 
     defer drawn.dl.deinit(allocator);
 
     const wide_visible = visibleCols(fx.session, editorBodyRect(fx.session, wide, fx.term), fx.term, false);
-    const wide_max: u32 = fx.term.rt.editor_max_cols -| wide_visible;
+    // 상한은 **밀 수 있는 총 열 수**에서 나온다 — 내용 폭 + 줄 끝 너머 몫(`scrollWidthCols`).
+    const wide_max: u32 = (fx.term.rt.editor_max_cols +| fx.session.loaded_config.config.editor.scroll_beyond_last_column) -| wide_visible;
     try testing.expect(at_end > wide_max); // 좁을 때 위치가 넓은 창의 상한을 넘는다 — 아니면 판정이 공허하다
     try testing.expectEqual(wide_max, @as(u32, fx.term.rt.editor_first_col));
 }
@@ -14618,6 +14658,39 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
     try testing.expect(found);
 }
 
+const QuadKey = struct { x: f32, y: f32, w: f32, h: f32 };
+
+/// 지금 프레임의 quad 들을 자리로만 뜬다 — 색·층은 안 본다(그리는 자리가 있는지를 묻는다).
+fn quadSnapshot(allocator: std.mem.Allocator, self: *AppSession) ![]QuadKey {
+    const out = try allocator.alloc(QuadKey, self.gpu_quads.items.len);
+    for (self.gpu_quads.items, 0..) |q, i| out[i] = .{ .x = q.x, .y = q.y, .w = q.w, .h = q.h };
+    return out;
+}
+
+/// 기준에 없던 quad 들. 같은 사각이 여럿일 수 있으므로 **하나씩 소비한다**(비교 뷰 판정자가
+/// 쓰는 것과 같은 규칙이다 — 그쪽 `extraQuads` 와 같은 자리이고, 두 모듈이라 각자 든다).
+fn quadsAddedSince(allocator: std.mem.Allocator, base: []const QuadKey, self: *AppSession) ![]QuadKey {
+    const used = try allocator.alloc(bool, base.len);
+    defer allocator.free(used);
+    @memset(used, false);
+    var list: std.ArrayList(QuadKey) = .empty;
+    errdefer list.deinit(allocator);
+    for (self.gpu_quads.items) |q| {
+        const k: QuadKey = .{ .x = q.x, .y = q.y, .w = q.w, .h = q.h };
+        var matched = false;
+        for (base, 0..) |b, i| {
+            if (used[i]) continue;
+            if (b.x == k.x and b.y == k.y and b.w == k.w and b.h == k.h) {
+                used[i] = true;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) try list.append(allocator, k);
+    }
+    return list.toOwnedSlice(allocator);
+}
+
 fn pressKey(fx: *PaneFixture, key: maru.terminal.input.Key, mods: maru.terminal.input.ModifierSet) !void {
     _ = try fx.session.handleKeyEvent(.{ .key = key, .modifiers = mods });
 }
@@ -14945,6 +15018,180 @@ test "DHS9 접어도 가로 막대가 안 사라지고 보던 열이 남는다 �
     try testing.expectEqual(col_before_unfold, term.rt.editor_first_col);
 }
 
+test "DHS10 가장 긴 줄 끝의 caret 이 실제로 그려진다 — editor.scroll-beyond-last-column (렌더 경계)" {
+    // **여기까지 와야 이 조각이 뜻이 있다.** `first_col` 만 재면 「한 칸 더 밀렸다」까지밖에 못 보고,
+    // 정작 확인하려는 것(**caret 이 화면에 그려지는가**)은 `paintCarets` 의
+    // `on_screen >= content.width` 뒤에 있다 — 그것이 §4 가 「남는 한계」로 적어 두었던 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n"); // 긴 줄을 첫 줄로 두지 않는다(두 뜻이 겹친다)
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "dhs10.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 600)) return error.FixtureWidth;
+
+    // 줄 끝으로 **키로** 간다 — 노출도 제품 경로를 탄다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    term.rt.editor_first_col = 0;
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(@as(usize, 5 + 600), term.rt.editor_selection.?.focus);
+
+    // **기준은 「깜빡임이 꺼진 같은 화면」이다.** 선택이 없는 화면을 기준으로 삼으면 현재 줄 강조·
+    // 막대 thumb 자리까지 함께 달라져 caret 이 아닌 것을 센다(실측: 2 개가 나왔다).
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    const base = try quadSnapshot(allocator, fx.session);
+    defer allocator.free(base);
+
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d1.dl.deinit(allocator);
+    const drawn_caret = try quadsAddedSince(allocator, base, fx.session);
+    defer allocator.free(drawn_caret);
+    // **한 개**여야 한다 — 0 이면 옛 한계 그대로이고, 여럿이면 다른 것을 세고 있다.
+    try testing.expectEqual(@as(usize, 1), drawn_caret.len);
+
+    // **휠도 그만큼 간다.** 계약이 *"caret 만 예외로 두지 않고 축 전체가 넓어진다"* 라고 적었는데
+    // 그것을 재는 자리가 없으면, caret 노출만 고치고 휠은 옛 상한에 멈춰 있어도 초록이다(실측:
+    // 변이 B6 이 그렇게 살았다). 끝까지 밀어 **어디서 멈추는지**를 잰다.
+    term.rt.editor_first_col = 0;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    const beyond = fx.session.loaded_config.config.editor.scroll_beyond_last_column;
+    try testing.expectEqual(@as(u16, @intCast(600 + beyond - visible)), term.rt.editor_first_col);
+
+    // **거기서 한 글자 쳐도 따라온다.** 계약이 「행 끝에서 친 글자는 여전히 못 따라간다」를 같은
+    // 한계의 짝으로 적어 두었는데, 줄 끝 너머 몫이 열리면 그 자리도 함께 풀린다 — 짐작하지 않고
+    // 잰다(편집은 `max_cols` 를 한 열 늘리고, caret 은 그보다 또 한 칸 뒤에 선다).
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var t0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    t0.dl.deinit(allocator);
+    const typed_base = try quadSnapshot(allocator, fx.session);
+    defer allocator.free(typed_base);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var t1 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    t1.dl.deinit(allocator);
+    const typed_caret = try quadsAddedSince(allocator, typed_base, fx.session);
+    defer allocator.free(typed_caret);
+    try testing.expectEqual(@as(usize, 1), typed_caret.len);
+
+    // **0 으로 끄면 옛 동작이다.** 설정이 실제로 이 축을 여는지 확인한다 — 그 배선이 죽으면
+    // 기본값만 바꾼 것과 구별되지 않는다.
+    fx.session.loaded_config.config.editor.scroll_beyond_last_column = 0;
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    term.rt.editor_first_col = 0;
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    // 위에서 한 글자 쳤으므로 줄이 601열이다 — 그 **내용 폭**에서 멈춘다(caret 의 601열은 못 얻는다).
+    try testing.expectEqual(@as(u16, @intCast(601 - visible)), term.rt.editor_first_col);
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    const off_base = try quadSnapshot(allocator, fx.session);
+    defer allocator.free(off_base);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d3.dl.deinit(allocator);
+    const none = try quadsAddedSince(allocator, off_base, fx.session);
+    defer allocator.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len); // caret 이 화면 밖 한 칸에 남는다(옛 한계)
+
+    // 그때는 **휠도** 내용 폭에서 멈춘다 — 축 전체가 같은 상한을 쓴다는 뜻이다.
+    term.rt.editor_first_col = 0;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    try testing.expectEqual(@as(u16, @intCast(601 - visible)), term.rt.editor_first_col);
+}
+
+test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기, 그리고 막대 길이 (제품 경계)" {
+    // **설정 표면은 코드 안에서 안 보인다.** 값을 읽는 자리만 재면 키 이름을 바꾸거나 기본값을
+    // 1 로 낮춰도 전부 초록이다(실측: 변이 B12·B13·B14 가 그렇게 살았다) — 그 셋은 **사용자가
+    // 만지는 면**이고, 계약(`docs/configuration.md`)이 이름·기본값·범위를 약속한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    // ⑴ **기본값은 5 다** — VSCode `editor.scrollBeyondLastColumn` 과 같은 값으로 맞춘 결정이다.
+    try testing.expectEqual(@as(u32, 5), (maru.config.theme.EditorConfig{}).scroll_beyond_last_column);
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "d11.txt", .data = doc.items });
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = rb[0..try fx.dir.dir.realPath(io, &rb)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d11.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 600)) return error.FixtureWidth;
+
+    // ⑵ **키 이름이 맞아야 값이 닿는다.** 파일에 적어 **재적재 경로**로 태운다 — 필드에 직접 넣으면
+    //    키를 바꿔도 통과한다(TAB1 이 같은 이유로 `reloadConfig` 를 탄다).
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "cfg11.toml", .data = "editor.scroll-beyond-last-column = 9\n" });
+    const cfg = try std.fs.path.join(allocator, &.{ root, "cfg11.toml" });
+    defer allocator.free(cfg);
+    const cfg_z = try allocator.dupeZ(u8, cfg);
+    defer allocator.free(cfg_z);
+    const had = std.c.getenv("MARU_CONFIG");
+    defer if (had) |old| {
+        _ = setenv("MARU_CONFIG", old, 1);
+    } else {
+        _ = unsetenv("MARU_CONFIG");
+    };
+    _ = setenv("MARU_CONFIG", cfg_z.ptr, 1);
+    settings_ops.reloadConfig(fx.session);
+    try testing.expectEqual(@as(u32, 9), fx.session.loaded_config.config.editor.scroll_beyond_last_column);
+    // 값이 **축에 닿는지**까지 본다 — 파싱만 되고 아무도 안 읽으면 뜻이 없다.
+    term.rt.editor_first_col = 0;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    try testing.expectEqual(@as(u16, @intCast(600 + 9 - visible)), term.rt.editor_first_col);
+
+    // ⑶ **0 을 받아야 한다** — 범위 하한이 1 이면 파서가 거절해 「끄기」가 없어진다. 그것은 옛
+    //    동작으로 돌아갈 유일한 길이라 계약이 `0`~`64` 로 약속한다.
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "cfg11.toml", .data = "editor.scroll-beyond-last-column = 0\n" });
+    settings_ops.reloadConfig(fx.session);
+    try testing.expectEqual(@as(u32, 0), fx.session.loaded_config.config.editor.scroll_beyond_last_column);
+    term.rt.editor_first_col = 0;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    try testing.expectEqual(@as(u16, @intCast(600 - visible)), term.rt.editor_first_col);
+
+    // ⑷ **막대도 밀 수 있는 만큼을 말한다.** 내용 폭만 쓰면 thumb 이 실제보다 넓어, 드래그로 갈 수
+    //    있는 자리와 휠로 갈 수 있는 자리가 갈린다. 같은 문서에서 몫이 늘면 thumb 은 **좁아진다**.
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    const bar_off = term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
+    fx.session.loaded_config.config.editor.scroll_beyond_last_column = 60;
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d1.dl.deinit(allocator);
+    const bar_on = term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
+    try testing.expect(bar_on.thumb_w < bar_off.thumb_w);
+}
+
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {
     // **두 뷰가 같은 규칙을 쓴다**([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
     // 「가로도 caret 을 따라간다」). 비교 뷰만 재면 그 규칙이 한쪽에서만 산다.
@@ -14973,10 +15220,14 @@ test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면�
     term.rt.editor_selection = editor_selection.Selection.at(5);
     term.rt.editor_first_col = 0;
 
-    // ⑴ **행 끝으로 가면 따라온다** — 상한(내용 폭)까지.
+    // ⑴ **행 끝으로 가면 caret 이 서는 칸까지 따라온다.**
+    //    caret 은 마지막 글자보다 **한 칸 뒤**(600열)에 서므로, 그 칸이 화면 **마지막 칸**이 되는
+    //    자리가 답이다 — `600 + 1 - 폭`. 한때는 `600 - 폭` 에서 멈췄고(상한이 내용 폭 기준이라)
+    //    그러면 caret 이 화면 밖 한 칸에 남아 **안 그려졌다**(§4 「행 끝 caret 은 마지막 한 칸을
+    //    못 얻는다」였던 한계 — `editor.scroll-beyond-last-column` 이 그 몫을 연다).
     try pressKey(&fx, .arrow_right, .{ .command = true });
     try testing.expectEqual(@as(usize, 5 + 600), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(@as(u16, @intCast(600 - visible)), term.rt.editor_first_col);
+    try testing.expectEqual(@as(u16, @intCast(600 + 1 - visible)), term.rt.editor_first_col);
 
     // ⑵ **행 머리로 돌아오면 0 이다.**
     try pressKey(&fx, .arrow_left, .{ .command = true });

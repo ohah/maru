@@ -1116,7 +1116,26 @@ pub const EditorConfig = struct {
     /// (코드 편집기 관례: VSCode·Zed·Vim의 insert 모드 모두 막대).
     cursor_shape: CursorShape = .bar,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape
+    /// 가장 긴 줄 **너머로** 몇 열까지 더 밀 수 있는가(§4 「가로도 caret 을 따라간다」).
+    ///
+    /// **왜 필요한가**: caret 은 마지막 글자보다 **한 칸 뒤**에 서는데 가로 상한이 **내용 폭**
+    /// 기준이면 그 칸까지 밀 수가 없다 — 가장 긴 줄의 끝에서 `⌘→` 를 누르면 글자 끝은 보이는데
+    /// **caret 만 안 그려진다**(`paintCarets` 의 `on_screen >= content.width`). 0 이면 그 동작 그대로다.
+    ///
+    /// **기본 5 — VSCode `editor.scrollBeyondLastColumn` 과 같은 값·같은 뜻이다**(Monaco API 문서:
+    /// *"Enable that scrolling can go beyond the last column by a number of columns."*, 기본 5).
+    /// **불리언이 아니라 열 수인 것도 선례 그대로다**: 그쪽은 `viewLayout._computeContentWidth` 에서
+    /// `scrollBeyondLastColumn × 글자 폭` 을 가장 긴 줄 폭에 **더해** scroll width 를 만든다 — 즉
+    /// caret 만 예외로 두는 것이 아니라 **축 전체**가 넓어지고 휠·막대도 그만큼 간다. 우리도 같다.
+    ///
+    /// **랩이면 뜻이 없다** — 그때는 가로 축 자체가 없다(선례도 랩 갈래에서는 이 값을 안 더한다).
+    ///
+    /// **상한 64의 근거**: 넓혔다가 좁히면 남의 설정이 깨지고 좁게 두었다가 넓히는 것은 안전하다 —
+    /// 되돌리기 쉬운 쪽으로 잡는다. 기본값의 열 배를 넘어서면 "줄 끝을 조금 지나 본다"가 아니라
+    /// **빈 화면을 본다**에 가깝고, 그 요구가 실제로 오면 그때 올린다.
+    scroll_beyond_last_column: u32 = 5,
+
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1131,6 +1150,9 @@ pub const EditorConfig = struct {
         // 필드명은 `cursor_shape`지만 키는 `editor.cursor-shape`(key_seg). `cursor.shape`와 **같은
         // enum**을 쓰므로 값 파싱·GUI dropdown이 그대로 공유된다.
         .cursor_shape = Meta{ .key_seg = "cursor-shape", .doc = .cfg_editor_cursor_shape, .widget = .dropdown, .section = .editor },
+        // 필드명은 `scroll_beyond_last_column`, 키는 `editor.scroll-beyond-last-column`(key_seg).
+        // u32라 range 메타 필수(`tab-width`와 같은 선례) — 하한 0은 **끄기**(오늘 동작)다.
+        .scroll_beyond_last_column = Meta{ .key_seg = "scroll-beyond-last-column", .doc = .cfg_editor_scroll_beyond_last_column, .range = .{ 0, 64 }, .widget = .number, .section = .editor },
     };
 };
 

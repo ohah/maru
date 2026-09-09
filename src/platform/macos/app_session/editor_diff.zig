@@ -1521,7 +1521,10 @@ test "오른쪽 열이 왼쪽보다 넓어도 상한이 자기 폭을 따른다"
     // 오른쪽 열이 실제로 쓰는 본문 폭으로 상한을 다시 계산해 대조한다.
     const m = chrome_editor.diff_frame.sideMetrics(cols.right.w, body.h -| inset * 2, 8, 16);
     const layout = chrome_editor.geometry.compute(m.total_cols, 1, .{});
-    const expect_first: u32 = @min(fx.term.rt.editor_max_cols_right -| layout.content.width, @as(u32, chrome_editor.frame.max_first_col));
+    // **상한은 밀 수 있는 총 열 수에서 나온다** — 내용 폭 + 줄 끝 너머 몫
+    // (`editor.scroll-beyond-last-column`. 열마다 **자기** 상한에 더한다 — §3.5 "가로는 각자다").
+    const beyond = fx.session.loaded_config.config.editor.scroll_beyond_last_column;
+    const expect_first: u32 = @min((fx.term.rt.editor_max_cols_right +| beyond) -| layout.content.width, @as(u32, chrome_editor.frame.max_first_col));
     // 고치기 전: 오른쪽 본문이 46열인데 pane 폭으로 102열을 잡아 198에서 멈췄다(실제 상한 254).
     try testing.expectEqual(layout.content.width, editor_ops.visibleColsForTest(fx.session, body, fx.term, true));
     try testing.expectEqual(expect_first, @as(u32, first));
@@ -3762,10 +3765,11 @@ test "DHS1: 비교 뷰에서 ⌘→ 를 누르면 가로가 따라온다 (handle
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } });
     try testing.expectEqual(@as(usize, 600), fx.term.rt.editor_diff_selection.?.sel.focus.byte);
     try testing.expect(fx.term.rt.editor_first_col_right > 0);
-    // **최소 이동이되, 내용 폭이 상한이다.** caret 은 마지막 글자보다 한 칸 뒤(600열)에 서는데
-    //    가로 상한은 `max_cols -| visible` 이라 그 칸까지 못 민다 — 계약이 「행 끝 caret 은 마지막
-    //    한 칸을 못 얻는다」로 적어 둔 남는 한계다. 여기서는 **그 상한값에 정확히 멈추는지**를 잰다.
-    try testing.expectEqual(@as(u16, @intCast(600 - visible)), fx.term.rt.editor_first_col_right);
+    // **최소 이동이되, caret 이 서는 칸까지다.** caret 은 마지막 글자보다 한 칸 뒤(600열)에 서므로
+    //    그 칸이 화면 **마지막 칸**이 되는 자리가 답이다 — `600 + 1 - 폭`. 한때는 `600 - 폭` 에서
+    //    멈췄고(상한이 내용 폭 기준이라) caret 이 화면 밖 한 칸에 남아 안 그려졌다 —
+    //    `editor.scroll-beyond-last-column`(기본 5)이 그 몫을 연다. **두 뷰가 같은 규칙이다.**
+    try testing.expectEqual(@as(u16, @intCast(600 + 1 - visible)), fx.term.rt.editor_first_col_right);
 
     // ⑵ **행 머리로 돌아오면 0 으로 돌아온다.**
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } });

@@ -5198,6 +5198,42 @@ fresh decreasing deadline, metadata size cap, short/long/digest mismatch, pathna
 wall-clock 수치는 filesystem/process 비용 참고값이지 GitHub network 실측이 아니다. GitHub-issued attestation과
 evidence/manifest canonical semantic, 완료 fence, read-only workflow 배선 및 protected-tag 실측은 다음 composition이 소유한다.
 
+#### 11.100g downloaded Release의 attested semantic transaction
+
+`release_adapter_remote_release_observation.zig`의 final-address move-only `Observation`은 §11.100e의 미완료
+`Fence`와 §11.100f의 `Assets`를 하나의 shared deadline 안에서 소비한다. 네 held file은 canonical
+role 순서(DMG, frozen host, evidence candidate, manifest)로 `gh attestation verify ./<exact-name>`에 넘겨지며,
+expected subject name/SHA-256·repository·workflow·run·attempt·source·tag는 caller scalar가 아니라 protected
+`Context`와 begun fence snapshot에서만 유도한다. 각 child 전후에 pinned CLI, fence candidate, held
+directory/file identity·mode·link-count·size·digest를 다시 검증하고 같은 `Deadline.remaining()`의 fresh
+남은 시간만 child에 준다.
+
+attestation 네 개가 모두 성공한 뒤 held manifest bytes를 bounded descriptor read로 복사해
+`release_manifest.parseCanonical`로 파싱한다. manifest는 protected `Context`, remote release ID/tag/source,
+그리고 remote DMG/frozen/evidence의 exact name/size/SHA-256과 교차 결속되어야 하며 manifest asset이
+자신을 포함하거나 remote role을 누락/교환하면 fail-close한다. 그 뒤에만 held evidence bytes를
+`release_evidence.parseCanonical`로 파싱하고 profile/role, repository/release/source/build, candidate DMG/frozen digest,
+manifest evidence name/digest/result/test UUID, upgrade predecessor identity와 designated requirement를 manifest에 교차 결속한다.
+evidence filename은 파싱된 profile과 일치해야 하지만 profile의 출처가 될 수 없다.
+filesystem·credential·process를 열지 않는 `release_adapter_remote_release_semantics.zig` value owner가 이
+manifest/evidence canonical parse·cross-binding의 단일 출처다. 상위 transaction은 held descriptor에서 읽은
+exact bytes와 begun snapshot을 이 owner에 넘기고, 자신이 JSON field를 다시 판정하지 않는다.
+
+모든 semantic·attestation 검증 후 `verifyAfterUntil`로 같은 published Release를 다시 읽어 begun snapshot과
+exact 일치시켜야만 `Observation` owner를 게시한다. 성공 owner는 owned canonical manifest/evidence bytes와
+parsed value, 네 attestation receipt, completed fence·asset owner의 exact 주소를 seal에 포함하고 `revalidate`로
+전체 graph을 다시 확인한다. token, response/output scratch, raw endpoint/pathname은 결과에 보존하지 않는다.
+
+result/context/fence/assets/deadline/pinned CLI/token/metadata response/attestation output의 백킹은 외부 동작 전에
+pairwise disjoint여야 한다. attestation/parse/binding/last-fence/deadline/CLI/file drift 실패는 publication 0으로
+닫고 이 transaction이 만든 parsed/receipt만 역순으로 해제한다. downloaded `Assets`의 cleanup 권위는
+caller에 남겨 semantic 실패가 filesystem residue 소유권을 숨기지 않게 한다. focused Debug·ReleaseFast gate는
+네 exact attestation 순서/argv/environment/fresh deadline, baseline·upgrade semantic, role/profile/identity/digest 교환,
+각 fail-index, copied/pre-owned/aliased owner, last metadata drift, allocation unwind와 success/failure output·FD publication 0을
+검증한다. actual GitHub network latency는 read-only protected-tag workflow에서 다운로드·attestation·semantic·final
+fence 구간을 각각 기록한 행만 실측으로 인정하며, signed N-1→current U5 제품 완료는 후속 final
+verdict gate가 소유한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

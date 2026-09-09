@@ -1623,6 +1623,14 @@ pub fn visibleColsForTest(self: *AppSession, body: maru.session.SplitRect, term:
 /// (`scrollCols`가 세운다) — 방어적으로만 본다.
 fn clampOneColumn(self: *AppSession, first: *u16, max_cols: u32, visible_cols: u16) void {
     if (first.* == 0) return;
+    // **`max_first_col` 은 여기서 도달하지 않는다**(그 변이가 살아남는 것이 정상이다 — 적대적 검증
+    // G5). `first_col` 을 세우는 제품 경로 셋이 **각자 같은 상한을 이미 건다**: 휠(`scrollCols`),
+    // caret 노출(`revealCaretColumn`), 막대 드래그(`setEditorHScrollFromBarPx`).
+    //
+    // **그 셋과 이 clamp 는 일부러 겹친 방어다.** 어느 한쪽을 지워도 화면 결과가 같다(G11 이 드래그
+    // 쪽을 지우고도 살아남아 그 사실을 보여 준다 — 그때는 다음 프레임이 여기서 되돌린다). 겹치는
+    // 값이라 둘 중 하나만 두면 **그 하나를 지우는 변이가 곧 결함**이 되는데, 지금은 어느 쪽도 혼자
+    // 화면을 망가뜨리지 못한다. 네 번째 경로가 붙는 날 그 경로만 상한을 잊어도 여기서 잡힌다.
     const max_col: u32 = @min(max_cols -| visible_cols, @as(u32, chrome_editor.frame.max_first_col));
     if (@as(u32, first.*) > max_col) {
         first.* = @intCast(@min(max_col, std.math.maxInt(u16)));
@@ -15118,6 +15126,74 @@ test "DHS10 가장 긴 줄 끝의 caret 이 실제로 그려진다 — editor.sc
     try testing.expectEqual(@as(u16, @intCast(601 - visible)), term.rt.editor_first_col);
 }
 
+test "DHS13 오른쪽 끝 칸의 block caret 은 본문 밖으로 안 번진다 (렌더 경계)" {
+    // **줄 끝 한 칸이 열리면서 이 자리가 생겼다.** 전에는 마지막 칸에 caret 이 아예 안 그려졌는데
+    // (`editor.scroll-beyond-last-column` 이 그 몫을 열었다), 이제 **두 칸짜리 글자 위의 block
+    // caret** 이 화면 오른쪽 끝 칸에 설 수 있다. 그때 폭을 안 자르면 이웃 pane 위로 번진다
+    // (`paintCarets` 의 `@min(cells, content.width - on_screen)` — 그 클리핑을 지운 변이 S3 이
+    // 4회차에서 살아남아 이 판정자가 없다는 것을 드러냈다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    try doc.appendNTimes(allocator, 'x', 100);
+    try doc.appendSlice(allocator, "가"); // **두 칸짜리** — 여기 block caret 을 세운다
+    try doc.appendNTimes(allocator, 'x', 100);
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "dhs13.txt", doc.items);
+    term.rt.editor_wrap = false;
+    fx.session.loaded_config.config.editor.cursor_shape = .block;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 4 and visible < 100)) return error.FixtureWidth;
+
+    // 그 글자가 **화면 마지막 칸**에 오도록 민다(열 100 = 앞의 'x' 100 개).
+    term.rt.editor_first_col = @intCast(100 + 1 - visible);
+    term.rt.editor_selection = editor_selection.Selection.at(5 + 100); // '가' 위
+
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    const base = try quadSnapshot(allocator, fx.session);
+    defer allocator.free(base);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d1.dl.deinit(allocator);
+    const caret = try quadsAddedSince(allocator, base, fx.session);
+    defer allocator.free(caret);
+    try testing.expectEqual(@as(usize, 1), caret.len);
+
+    // **한 칸으로 잘렸다.** 두 칸이면 본문 오른쪽 경계를 넘는다.
+    const cell_w: f32 = @floatFromInt(fx.session.cell_width_px);
+    try testing.expect(caret[0].w <= cell_w + 0.5);
+
+    // **자르기 전에는 두 칸이 맞다** — 같은 글자를 화면 **안쪽**에 두면 block 이 글자를 다 덮는다.
+    //     (안 그러면 위 단언이 「block 이 늘 한 칸」이어도 통과해 공허하다.)
+    term.rt.editor_first_col = @intCast(100 - visible / 2);
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    const base2 = try quadSnapshot(allocator, fx.session);
+    defer allocator.free(base2);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d3.dl.deinit(allocator);
+    const inner = try quadsAddedSince(allocator, base2, fx.session);
+    defer allocator.free(inner);
+    try testing.expectEqual(@as(usize, 1), inner.len);
+    try testing.expect(inner[0].w >= cell_w * 2 - 0.5);
+}
+
 test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기, 그리고 막대 길이 (제품 경계)" {
     // **설정 표면은 코드 안에서 안 보인다.** 값을 읽는 자리만 재면 키 이름을 바꾸거나 기본값을
     // 1 로 낮춰도 전부 초록이다(실측: 변이 B12·B13·B14 가 그렇게 살았다) — 그 셋은 **사용자가
@@ -15149,6 +15225,28 @@ test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기
     drawn.dl.deinit(allocator);
     const visible = term.rt.editor_hit_geom.content_width;
     if (!(visible > 4 and visible < 600)) return error.FixtureWidth;
+
+    // ⑴ʹ **설정 화면에 「숫자 상자」로, 「편집기」 무리에 뜬다.** 값을 읽는 자리만 재면 위젯을
+    //     토글로 바꾸거나 무리를 옮겨도 전부 초록이다(실측: 변이 G1·G2 가 **전체 스위트에서도**
+    //     살았다 — 그 둘을 재는 자리가 아무 데도 없었다). 사용자가 만지는 면이므로 여기서 잰다.
+    {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var fields: std.ArrayList(maru.config.schema.NumberField) = .empty;
+        defer fields.deinit(arena_state.allocator());
+        try maru.config.schema.appendNumberFields(arena_state.allocator(), .{}, &fields);
+        var found = false;
+        for (fields.items) |f| {
+            if (!std.mem.eql(u8, f.key, "editor.scroll-beyond-last-column")) continue;
+            found = true;
+            try testing.expectEqual(@as(f64, 5), f.value); // 기본값이 화면에도 그대로 뜬다
+            try testing.expectEqual(@as(f64, 0), f.min);
+            try testing.expectEqual(@as(f64, 64), f.max);
+            try testing.expect(f.is_int);
+            try testing.expectEqual(maru.config.theme.Section.editor, f.section orelse return error.NoSection);
+        }
+        if (!found) return error.NotInSettingsNumberFields; // 토글로 바뀌면 여기서 사라진다
+    }
 
     // ⑵ **키 이름이 맞아야 값이 닿는다.** 파일에 적어 **재적재 경로**로 태운다 — 필드에 직접 넣으면
     //    키를 바꿔도 통과한다(TAB1 이 같은 이유로 `reloadConfig` 를 탄다).
@@ -15190,6 +15288,23 @@ test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기
     d1.dl.deinit(allocator);
     const bar_on = term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
     try testing.expect(bar_on.thumb_w < bar_off.thumb_w);
+
+    // **막대와 휠이 같은 끝을 말해야 한다.** 위 비교는 「몫이 늘면 좁아진다」까지만 재므로, 막대만
+    // 몫을 더 크게 잡아도(휠보다 긴 축을 말해도) 통과한다(실측: 변이 R5 가 그렇게 살았다). 사용자가
+    // 겪는 증상으로 잰다 — **끝까지 밀면 막대도 track 끝에 닿는다**. 안 그러면 "더 갈 수 있는 것처럼
+    // 보이는데 안 가는" 화면이 된다.
+    term.rt.editor_first_col = 0;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null); // 끝까지
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    const at_end = term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
+    try testing.expect(at_end.thumb_x + at_end.thumb_w >= at_end.track_x + at_end.track_w - 1.0);
+    // 짝: 맨 왼쪽이면 thumb 도 track 머리에서 시작한다.
+    term.rt.editor_first_col = 0;
+    var d3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d3.dl.deinit(allocator);
+    const at_start = term.rt.editor_horizontal_scrollbar orelse return error.NoHorizontalScrollbar;
+    try testing.expect(at_start.thumb_x <= at_start.track_x + 1.0);
 }
 
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {

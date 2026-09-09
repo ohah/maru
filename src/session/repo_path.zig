@@ -171,6 +171,10 @@ test "CRUMB6 루트가 없거나 경로가 루트 자신이면" {
     try std.testing.expectEqualStrings("repo", displayRelative("/x/repo", "/x/repo"));
     try std.testing.expectEqualStrings("repo", displayRelative("/x/repo/", "/x/repo"));
     try std.testing.expectEqualStrings("", displayRelative("", "/x"));
+    // **길이만 같고 다른 경로는 루트 자신이 아니다.** 문자열 비교를 빼면 여기서 `two` 만 그려
+    // **남의 저장소 파일을 이 저장소 안인 것처럼** 말한다(적대적 검증 2026-09-09 Q16 이 그 변이로
+    // 살아남았다 — 길이를 재는 것과 같은 것을 가리키는 것은 다르다).
+    try std.testing.expectEqualStrings("/repo/two", displayRelative("/repo/two", "/repo/one"));
 }
 
 /// 헤더 breadcrumb를 어느 루트 기준으로 보일지 고른다(순수). 빈 문자열이면 자르지 않는다.
@@ -188,6 +192,10 @@ pub fn breadcrumbRoot(
 ) []const u8 {
     if (diff_repo.len > 0) return diff_repo;
     if (git_repo.len > 0) return git_repo;
+    // **`len > 0` 은 오늘 답을 안 바꾼다**(그 변이가 살아남는 것이 정상이다 — 적대적 검증
+    // 2026-09-09 Q8): 빈 루트를 돌려줘도 아래 `return ""` 와 같은 값이다. 그래도 적는 이유는
+    // **뜻**이다 — "루트가 하나 있는데 그것이 빈 문자열" 과 "루트가 없다" 는 다른 상태이고,
+    // 이 함수가 뒤에 「루트를 찾았나」로 갈라질 날 그 둘이 갈린다.
     if (tree_root_count == 1 and tree_root_first.len > 0) return tree_root_first;
     return "";
 }

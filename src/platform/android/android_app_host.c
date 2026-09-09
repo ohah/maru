@@ -1205,8 +1205,12 @@ static char g_ssh_fingerprint[128];
 static unsigned char g_ssh_secret[MARU_SSH_SECRET_KEY_BYTES];
 
 /// **키를 만든다**(계약 §3.4 — 키는 앱이 만든다). 씨앗은 OS 난수이고, 나온 64바이트를 Java 가
-/// 받아 Keystore 로 봉인한다. 공개키 한 줄은 여기서 로그·파일로 낸다 — 화면에 보여 주는 자리
-/// (S9c-4)가 아직 없어서인데, **공개키라 밖에 나가도 되는 값**이다.
+/// 받아 Keystore 로 봉인한다.
+///
+/// **한 줄을 여기서 파일로 안 쓴다**(M16b). 예전에는 `g_app` 으로 경로를 찾아 썼는데, 이 함수는
+/// 이제 Java 의 `onCreate` 에서도 불리고 그때 네이티브 스레드가 `g_app` 을 세웠는지는 정해져
+/// 있지 않다 — **경로를 아는 쪽**(Context 를 든 Java)이 쓴다. 로그는 남긴다: 공개키라 밖에
+/// 나가도 되는 값이고, 기기에서 이 자리를 짚을 유일한 흔적이다.
 JNIEXPORT jbyteArray JNICALL
 Java_dev_maru_MaruKeyStore_nativeGenerateKey(JNIEnv *env, jclass cls) {
     (void)cls;
@@ -1224,19 +1228,34 @@ Java_dev_maru_MaruKeyStore_nativeGenerateKey(JNIEnv *env, jclass cls) {
         return NULL;
     }
     LOGI("MARU_SSH generated_public_key %s", (const char *)line);
-    if (g_app && g_app->activity && g_app->activity->internalDataPath) {
-        char path[1024];
-        snprintf(path, sizeof path, "%s/id_ed25519.pub", g_app->activity->internalDataPath);
-        FILE *f = fopen(path, "wb");
-        if (f) {
-            fprintf(f, "%s\n", (const char *)line);
-            fclose(f);
-        }
-    }
     jbyteArray out = (*env)->NewByteArray(env, MARU_SSH_SECRET_KEY_BYTES);
     if (out) (*env)->SetByteArrayRegion(env, out, 0, MARU_SSH_SECRET_KEY_BYTES, (const jbyte *)secret);
     memset(secret, 0, sizeof secret);
     return out;
+}
+
+/// 봉인된 키에서 **`authorized_keys` 한 줄**을 만든다(M16b). 형식은 코어가 소유한다 —
+/// Java 가 조립하면 두 벌이 되고, 사용자는 어느 쪽이 진짜인지 모른다.
+///
+/// **개인키는 안 나간다.** 들어온 배열을 우리 버퍼로 복사해 쓰고 곧바로 지운다(JVM 배열은
+/// 우리가 못 지우므로 부르는 쪽이 `Arrays.fill` 로 지운다 — 계약 §3.4 의 같은 규율).
+JNIEXPORT jstring JNICALL
+Java_dev_maru_MaruKeyStore_nativeKeyLine(JNIEnv *env, jclass cls, jbyteArray sealed_secret) {
+    (void)cls;
+    if (!sealed_secret || (*env)->GetArrayLength(env, sealed_secret) != MARU_SSH_SECRET_KEY_BYTES) {
+        LOGI("MARU_SSH key_line_bad_length");
+        return NULL;
+    }
+    unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+    (*env)->GetByteArrayRegion(env, sealed_secret, 0, MARU_SSH_SECRET_KEY_BYTES, (jbyte *)secret);
+    unsigned char line[256];
+    int rc = maru_mobile_ssh_public_key_line(secret, line, sizeof line);
+    memset(secret, 0, sizeof secret);
+    if (rc != MARU_SSH_OK) {
+        LOGI("MARU_SSH key_line_failed=%s", maru_mobile_ssh_last_load_error());
+        return NULL;
+    }
+    return (*env)->NewStringUTF(env, (const char *)line);
 }
 
 JNIEXPORT void JNICALL
@@ -2209,8 +2228,8 @@ static void drainHostKeyDecision(void) {
 /// 있는데, 예전에는 키를 **접속할 때**(서비스가 뜰 때) 처음 열었다 — 그러면 붙기 전에는 볼 수
 /// 없어서 순서가 거꾸로다.
 ///
-/// 파일(`id_ed25519.pub`)이 있으면 그것을 읽는다 — **개인키를 안 연다**. 없으면 그때만 Keystore
-/// 에서 풀어 한 줄을 만들고 파일로 남긴다(다음부터는 안 연다). 공개키라 파일에 있어도 된다.
+/// 파일(`id_ed25519.pub`)을 읽는다 — **개인키를 안 연다**. 그 파일을 세우는 것은 Java 다
+/// (`MaruKeyStore.ensureKey`, `onCreate` — 아래 주석). 공개키라 파일에 있어도 된다.
 static void publishPublicKey(struct android_app *app) {
     if (!app || !app->activity || !app->activity->internalDataPath) return;
     char path[1024];
@@ -2231,38 +2250,16 @@ static void publishPublicKey(struct android_app *app) {
         }
     }
 
-    // 파일이 없다 — Keystore 를 열어 한 줄을 만들고 남긴다(그 뒤로는 위 경로만 탄다).
-    JNIEnv *env = NULL;
-    JavaVM *vm = app->activity->vm;
-    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
-    jclass cls = (*env)->FindClass(env, "dev/maru/MaruKeyStore");
-    jmethodID m = cls ? (*env)->GetStaticMethodID(env, cls, "loadOrCreate",
-                                                  "(Landroid/content/Context;)[B") : NULL;
-    jbyteArray arr = m ? (jbyteArray)(*env)->CallStaticObjectMethod(env, cls, m, app->activity->clazz) : NULL;
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    if (arr && (*env)->GetArrayLength(env, arr) == MARU_SSH_SECRET_KEY_BYTES) {
-        unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
-        (*env)->GetByteArrayRegion(env, arr, 0, MARU_SSH_SECRET_KEY_BYTES, (jbyte *)secret);
-        int rc = maru_mobile_ssh_public_key_line(secret, line, sizeof line);
-        memset(secret, 0, sizeof secret); // 개인키 사본은 바로 지운다
-        if (rc == MARU_SSH_OK) {
-            size_t n = strlen((const char *)line);
-            pthread_mutex_lock(&g_bridge_lock);
-            maru_mobile_set_public_key(line, (unsigned long)n);
-            pthread_mutex_unlock(&g_bridge_lock);
-            FILE *w = fopen(path, "wb");
-            if (w) {
-                fprintf(w, "%s\n", (const char *)line);
-                fclose(w);
-            }
-            LOGI("MARU_SSH public_key_from_keystore bytes=%zu", n);
-        } else {
-            LOGI("MARU_SSH public_key_failed=%s", maru_mobile_ssh_last_load_error());
-        }
-    } else {
-        LOGI("MARU_SSH public_key_absent");
-    }
-    (*vm)->DetachCurrentThread(vm);
+    // **여기서 Keystore 를 열지 않는다**(M16b). 예전에는 파일이 없으면 이 자리에서
+    // `FindClass("dev/maru/MaruKeyStore")` 로 Java 를 부르려 했는데, 이 함수는 **네이티브
+    // 스레드**가 부르고 거기서는 시스템 클래스로더를 보아 앱 클래스를 못 찾는다(실측:
+    // `cls=0x0` + `ClassNotFoundException`) — 그래서 첫 실행에는 **한 번도 안 되던 갈래**였다.
+    // 같은 함정이 `g_activity_cls` 주석에 이미 적혀 있다.
+    //
+    // 키를 세우는 일은 `MaruActivity.onCreate` → `MaruKeyStore.ensureKey` 가 하고, 창이 서기
+    // 전에 끝난다. 여기 남는 것은 그 결과 한 줄을 읽어 알리는 일뿐이다 — 두 벌로 두면 어느 쪽이
+    // 진짜인지 아무도 모른다.
+    LOGI("MARU_SSH public_key_absent path=%s", path);
 }
 
 /// config 파일을 읽어 브리지에 넘긴다. **자리는 앱 전용 내부 저장소**(`filesDir/config` —

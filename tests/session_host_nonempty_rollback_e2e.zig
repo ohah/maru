@@ -28,12 +28,21 @@ extern "c" fn _NSGetArgv() *[*:null]const ?[*:0]const u8;
 /// 발견했을 때만 호출한다. 오류 이름이나 test-runner 출력은 wire 권위가
 /// 아니므로 child는 성공/실패 exit status만 외부에 공개한다.
 pub export fn maru_session_host_restore_precommit_child() callconv(.c) u8 {
+    return runRestoreActivationChild();
+}
+
+pub export fn maru_session_host_restore_postcommit_child() callconv(.c) u8 {
+    return runRestoreActivationChild();
+}
+
+fn runRestoreActivationChild() u8 {
     const argc = _NSGetArgc().*;
     const argv = _NSGetArgv().*;
     if (argc < 2) return 122;
     const first = std.mem.span(argv[1] orelse return 122);
-    const prefixed = std.mem.eql(u8, first, "--restore-activation-fault");
-    const command_index: usize = if (prefixed) 3 else 1;
+    const precommit_prefixed = std.mem.eql(u8, first, "--restore-activation-fault");
+    const postcommit_prefixed = std.mem.eql(u8, first, "--restore-activation-postcommit-fault");
+    const command_index: usize = if (precommit_prefixed or postcommit_prefixed) 3 else 1;
     if (argc != @as(c_int, @intCast(command_index + 1 + sh.entrypoint.max_invocation_args)) or
         !std.mem.eql(
             u8,
@@ -48,7 +57,7 @@ pub export fn maru_session_host_restore_precommit_child() callconv(.c) u8 {
         .restore => |restore| restore,
         else => return 122,
     };
-    if (prefixed) {
+    if (precommit_prefixed) {
         const name = std.mem.span(argv[2] orelse return 122);
         const fault = parsePrecommitFault(name) orelse return 122;
         sh.restore_activation.runWithPrecommitFaultForTest(
@@ -57,6 +66,15 @@ pub export fn maru_session_host_restore_precommit_child() callconv(.c) u8 {
             invocation,
             fault,
         ) catch return 91;
+    } else if (postcommit_prefixed) {
+        const name = std.mem.span(argv[2] orelse return 122);
+        const fault = parsePostcommitFault(name) orelse return 122;
+        sh.restore_activation.runWithPostcommitFaultForTest(
+            std.heap.page_allocator,
+            std.testing.io,
+            invocation,
+            fault,
+        ) catch return 93;
     } else {
         sh.restore_activation.run(
             std.heap.page_allocator,
@@ -65,6 +83,13 @@ pub export fn maru_session_host_restore_precommit_child() callconv(.c) u8 {
         ) catch return 92;
     }
     return 0;
+}
+
+fn parsePostcommitFault(name: []const u8) ?sh.restore_activation.PostcommitFault {
+    inline for (std.meta.fields(sh.restore_activation.PostcommitFault)) |field| {
+        if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+    }
+    return null;
 }
 
 fn parsePrecommitFault(name: []const u8) ?sh.restore_activation.PrecommitFault {
@@ -204,6 +229,7 @@ test "product rollback preserves one real PTY through exit" {
             owner_path,
             evidence_pipe[1],
             null,
+            null,
             true,
         ) catch |err| {
             std.debug.print("non-empty rollback source-host failed: {s}\n", .{@errorName(err)});
@@ -267,7 +293,7 @@ test "restore precommit rollback-safe matrix preserves one real PTY and same hos
     var case_index: usize = 0;
     for (std.enums.values(sh.restore_activation.PrecommitFault)) |fault| {
         if (fault == .none or fault == .manifest_ready_poisoned) continue;
-        try runPrecommitCase(fault, case_index, false);
+        try runRestoreFaultCase(fault, null, case_index, .precommit_rollback);
         case_index += 1;
     }
     try std.testing.expectEqual(@as(usize, 10), case_index);
@@ -279,15 +305,81 @@ test "restore precommit manifest poison fails closed without recursive rollback"
         return error.SkipZigTest;
     if (!std.mem.eql(u8, std.mem.span(gate), "maru-test-only-v1"))
         return error.SkipZigTest;
-    try runPrecommitCase(.manifest_ready_poisoned, 10, true);
+    try runRestoreFaultCase(.manifest_ready_poisoned, null, 10, .precommit_poison);
 }
 
-fn runPrecommitCase(
-    fault: sh.restore_activation.PrecommitFault,
+test "restore postcommit fail-stop rows never execute rollback" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gate = c.getenv("MARU_SESSION_HOST_RESTORE_POSTCOMMIT_GATE") orelse
+        return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(gate), "maru-test-only-v1"))
+        return error.SkipZigTest;
+    try expectPostcommitVocabularyAbsentFromProduct();
+    var case_index: usize = 0;
+    for (std.enums.values(sh.restore_activation.PostcommitFault)) |fault| {
+        if (fault == .none or fault == .rollback_promotion) continue;
+        runRestoreFaultCase(null, fault, case_index, .postcommit_fail_stop) catch |err| {
+            std.debug.print("restore_postcommit_case_failed fault={s} error={s}\n", .{
+                @tagName(fault),
+                @errorName(err),
+            });
+            return err;
+        };
+        case_index += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), case_index);
+}
+
+fn expectPostcommitVocabularyAbsentFromProduct() !void {
+    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse
+        return error.TestUnexpectedResult;
+    const product = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        std.mem.span(product_raw),
+        std.testing.allocator,
+        .limited(sh.staged_image.max_staged_image_bytes),
+    );
+    defer std.testing.allocator.free(product);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        product,
+        "--restore-activation-postcommit-fault",
+    ) == null);
+    inline for (std.meta.fields(sh.restore_activation.PostcommitFault)) |field| {
+        if (comptime std.mem.eql(u8, field.name, "none")) continue;
+        try std.testing.expect(std.mem.indexOf(u8, product, field.name) == null);
+    }
+}
+
+test "restore postcommit promotion failure keeps the real PTY status-only" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gate = c.getenv("MARU_SESSION_HOST_RESTORE_POSTCOMMIT_GATE") orelse
+        return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(gate), "maru-test-only-v1"))
+        return error.SkipZigTest;
+    try runRestoreFaultCase(null, .rollback_promotion, 3, .postcommit_status_only);
+}
+
+const RestoreFaultExpectation = enum {
+    precommit_rollback,
+    precommit_poison,
+    postcommit_fail_stop,
+    postcommit_status_only,
+};
+
+fn runRestoreFaultCase(
+    precommit_fault: ?sh.restore_activation.PrecommitFault,
+    postcommit_fault: ?sh.restore_activation.PostcommitFault,
     case_index: usize,
-    expect_poisoned: bool,
+    expectation: RestoreFaultExpectation,
 ) !void {
+    var checkpoint: []const u8 = "begin";
+    errdefer |err| std.debug.print(
+        "restore_fault_checkpoint fault={s} checkpoint={s} error={s}\n",
+        .{ restoreFaultName(precommit_fault, postcommit_fault), checkpoint, @errorName(err) },
+    );
     const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    const parent_fd_before = countOpenFds();
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse
         return error.TestUnexpectedResult;
     const product_real = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -295,10 +387,12 @@ fn runPrecommitCase(
         std.mem.span(product_raw),
         std.testing.allocator,
     );
+    checkpoint = "product-realpath";
     defer std.testing.allocator.free(product_real);
     const product = try std.testing.allocator.dupeZ(u8, product_real);
     defer std.testing.allocator.free(product);
     const self_real = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
+    checkpoint = "self-realpath";
     defer std.testing.allocator.free(self_real);
     const self = try std.testing.allocator.dupeZ(u8, self_real);
     defer std.testing.allocator.free(self);
@@ -327,10 +421,11 @@ fn runPrecommitCase(
     var session_buf: [224]u8 = undefined;
     const session_dir = try std.fmt.bufPrintZ(
         &session_buf,
-        "/tmp/maru-rpf-{d}-{d}",
+        "/tmp/maru-rf-{d}-{d}",
         .{ c.getpid(), case_index },
     );
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
+    checkpoint = "session-root";
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, session_dir) catch {};
 
     const previous_root = if (c.getenv("MARU_SESSION_HOST_ROOT")) |value|
@@ -348,27 +443,36 @@ fn runPrecommitCase(
     if (setenv("MARU_SESSION_HOST_ROOT", session_dir.ptr, 1) != 0)
         return error.TestUnexpectedResult;
     try sh.short_endpoint.prepareCurrentUserNamespace();
+    checkpoint = "socket-root";
     var socket_dir_buf: [272]u8 = undefined;
     const socket_dir = try sh.short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
     defer _ = c.rmdir(socket_dir.ptr);
     try sh.host_manifest.prepareHostDirectory(session_dir, host_id);
+    checkpoint = "host-root";
     var host_dir_buf: [768]u8 = undefined;
     const host_dir = try sh.host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
     var owner_path_buf: [832]u8 = undefined;
     const owner_path = try sh.host_manifest.ownerLockPathIn(&owner_path_buf, session_dir, host_id);
+    // Postcommit rows use this test artifact as a rollback sentinel. A bug that
+    // crosses the durable ready frontier therefore re-enters the dedicated
+    // runner and exits 94 instead of being mistaken for the expected fail-stop.
+    const rollback_source = if (postcommit_fault != null) self else product;
+    const rollback_identity = if (postcommit_fault != null) self_identity else product_identity;
     var rollback = try sh.rollback_image.Authority.prepare(
         std.testing.allocator,
-        product,
-        product_identity,
+        rollback_source,
+        rollback_identity,
         host_dir,
     );
+    checkpoint = "rollback-image";
     defer rollback.deinit();
     var target = try sh.staged_image.stageExclusive(
         std.testing.allocator,
         self,
         host_dir,
-        "restore-precommit-target",
+        "restore-fault-target",
     );
+    checkpoint = "target-image";
     defer target.deinit();
     const rollback_record = rollback.record();
     const layout = sh.upgrade_product_coordinator.findAvailableLayout(40) orelse
@@ -398,6 +502,7 @@ fn runPrecommitCase(
     };
     const source_pid = c.fork();
     if (source_pid < 0) return error.TestUnexpectedResult;
+    checkpoint = "source-fork";
     if (source_pid == 0) {
         _ = c.close(evidence_pipe[0]);
         runSourceHost(
@@ -415,11 +520,12 @@ fn runPrecommitCase(
             layout,
             owner_path,
             evidence_pipe[1],
-            fault,
+            precommit_fault,
+            postcommit_fault,
             false,
         ) catch |err| {
-            std.debug.print("precommit source-host {s} failed: {s}\n", .{
-                @tagName(fault),
+            std.debug.print("restore fault source-host {s} failed: {s}\n", .{
+                restoreFaultName(precommit_fault, postcommit_fault),
                 @errorName(err),
             });
             c._exit(2);
@@ -431,6 +537,7 @@ fn runPrecommitCase(
     defer if (!source_reaped) stopChild(source_pid);
     var source_evidence: SourceEvidence = undefined;
     try readExact(evidence_pipe[0], std.mem.asBytes(&source_evidence));
+    checkpoint = "source-evidence";
     _ = c.close(evidence_pipe[0]);
     read_open = false;
     const runtime_id = (@as(u128, source_evidence.runtime_id_hi) << 64) |
@@ -438,11 +545,47 @@ fn runPrecommitCase(
     try std.testing.expect(runtime_id != 0);
     try std.testing.expect(source_evidence.child_pid > 0);
     var poisoned_runtime_gone = false;
-    defer if (expect_poisoned and !poisoned_runtime_gone) {
+    defer if ((expectation == .precommit_poison or expectation == .postcommit_fail_stop) and
+        !poisoned_runtime_gone)
+    {
         _ = c.kill(source_evidence.child_pid, posix.SIG.TERM);
     };
 
-    if (expect_poisoned) {
+    if (expectation == .postcommit_fail_stop) {
+        checkpoint = "wait-source-exit";
+        const status = try waitChildStatus(source_pid);
+        checkpoint = "source-exited";
+        source_reaped = true;
+        try std.testing.expect(c.W.IFEXITED(status));
+        try std.testing.expectEqual(@as(u8, 93), c.W.EXITSTATUS(status));
+        try std.testing.expect(c.access(socket_path.ptr, c.F_OK) != 0);
+        try std.testing.expect(c.access(activation_marker.ptr, c.F_OK) != 0);
+        try std.testing.expect(c.access(owner_path.ptr, c.F_OK) != 0);
+        try waitForProcessGone(source_evidence.child_pid);
+        checkpoint = "runtime-gone";
+        poisoned_runtime_gone = true;
+        checkpoint = "residue-audit";
+        const residue_count = try expectPostcommitResidue(
+            host_dir,
+            target.path,
+            postcommit_fault orelse return error.TestUnexpectedResult,
+        );
+        const parent_fd_after = countOpenFds();
+        try std.testing.expectEqual(parent_fd_before, parent_fd_after);
+        const finished = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        if (finished <= started) return error.TestUnexpectedResult;
+        std.debug.print(
+            "restore_postcommit_fail_stop fault={s} elapsed_ns={d} residue_entries={d} parent_fd_delta=0\n",
+            .{
+                restoreFaultName(precommit_fault, postcommit_fault),
+                finished - started,
+                residue_count,
+            },
+        );
+        return;
+    }
+
+    if (expectation == .precommit_poison) {
         const status = try waitChildStatus(source_pid);
         source_reaped = true;
         try std.testing.expect(c.W.IFEXITED(status));
@@ -504,11 +647,69 @@ fn runPrecommitCase(
         std.debug.print(
             "restore_precommit_poison fault={s} elapsed_ns={d} manifest_inode={d} owner_inode={d} residue_entries={d}\n",
             .{
-                @tagName(fault),
+                restoreFaultName(precommit_fault, postcommit_fault),
                 finished - started,
                 manifest_stat.inode,
                 owner_stat.inode,
                 entries,
+            },
+        );
+        return;
+    }
+
+    if (expectation == .postcommit_status_only) {
+        try waitForFile(activation_marker, source_pid);
+        var client = try connectExact(socket_path);
+        try std.testing.expectEqual(source_pid, try peerPid(client.fd));
+        try std.testing.expectEqual(host_id, client.host_id);
+        try std.testing.expectEqual(@as(u64, 5), client.upgrade_epoch);
+        try std.testing.expect(client.build_id != null);
+        try std.testing.expectEqualStrings(target_build_id, client.build_id.?);
+        try std.testing.expect(!client.host_exec_upgrade_v1);
+        const report = (try client.upgradeStatus(attempt_id)) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(sh.upgrade_wire.AttemptStatus.committed, report.status);
+        try std.testing.expectEqual(sh.upgrade_wire.AttemptReason.promotion_failed, report.reason);
+        try expectOnlyRuntime(&client, runtime_id);
+        try std.testing.expect(directChildPresent(source_pid, source_evidence.child_pid));
+        try std.testing.expectEqual(@as(usize, 1), directChildCount(source_pid));
+
+        var runtime_hex_buf: [32]u8 = undefined;
+        const runtime_hex = try std.fmt.bufPrint(&runtime_hex_buf, "{x:0>32}", .{runtime_id});
+        const stream_id = try attachRuntime(&client, runtime_hex);
+        var screen = sh.screen_assembler.ScreenAssembler.initForCodec(
+            std.testing.allocator,
+            client.screen_codec_version,
+        );
+        defer screen.deinit();
+        const snapshot = try client.readSnapshot(stream_id);
+        defer std.testing.allocator.free(snapshot);
+        try screen.applySnapshot(snapshot);
+        if (!screenContains(&screen, marker_before)) return error.TestUnexpectedResult;
+        try client.sendInput(stream_id, marker_after ++ "\r");
+        try waitForMarker(&client, stream_id, &screen, marker_after);
+        try client.sendInput(stream_id, marker_exit ++ "\r");
+        try waitForRuntimeGone(&client, runtime_id, source_pid, source_evidence.child_pid);
+        client.deinit();
+        try waitChild(source_pid, true);
+        source_reaped = true;
+        try std.testing.expect(c.access(socket_path.ptr, c.F_OK) != 0);
+        try std.testing.expect(c.access(owner_path.ptr, c.F_OK) != 0);
+        const residue_count = try expectPostcommitResidue(
+            host_dir,
+            target.path,
+            .rollback_promotion,
+        );
+        const parent_fd_after = countOpenFds();
+        try std.testing.expectEqual(parent_fd_before, parent_fd_after);
+        const finished = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        if (finished <= started) return error.TestUnexpectedResult;
+        std.debug.print(
+            "restore_postcommit_status_only fault={s} elapsed_ns={d} residue_entries={d} parent_fd_delta=0\n",
+            .{
+                restoreFaultName(precommit_fault, postcommit_fault),
+                finished - started,
+                residue_count,
             },
         );
         return;
@@ -552,9 +753,54 @@ fn runPrecommitCase(
     const finished = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     if (finished <= started) return error.TestUnexpectedResult;
     std.debug.print("restore_precommit_sample fault={s} elapsed_ns={d}\n", .{
-        @tagName(fault),
+        restoreFaultName(precommit_fault, postcommit_fault),
         finished - started,
     });
+}
+
+fn expectPostcommitResidue(
+    host_dir: [:0]const u8,
+    target_path: [:0]const u8,
+    fault: sh.restore_activation.PostcommitFault,
+) !usize {
+    // Every ready-committed failure has consumed the staged target pathname.
+    // An absent host directory is the exact empty inventory, not a test setup
+    // failure: normal owner/manifest cleanup removes empty registry directories.
+    try std.testing.expect(c.access(target_path.ptr, c.F_OK) != 0);
+    const expected_count: usize = if (fault == .rollback_cleanup_activation) 1 else 0;
+    var residue_dir = std.Io.Dir.openDirAbsolute(
+        std.testing.io,
+        host_dir,
+        .{ .iterate = true },
+    ) catch |err| {
+        if (err != error.FileNotFound) return err;
+        try std.testing.expectEqual(@as(usize, 0), expected_count);
+        return 0;
+    };
+    defer residue_dir.close(std.testing.io);
+    var residue_iterator = residue_dir.iterate();
+    var count: usize = 0;
+    while (try residue_iterator.next(std.testing.io)) |entry| {
+        count += 1;
+        if (fault != .rollback_cleanup_activation or
+            !std.mem.eql(u8, entry.name, "rollback-current"))
+            return error.TestUnexpectedResult;
+        std.debug.print("restore_postcommit_residue fault={s} name={s}\n", .{
+            @tagName(fault),
+            entry.name,
+        });
+    }
+    try std.testing.expectEqual(expected_count, count);
+    return count;
+}
+
+fn restoreFaultName(
+    precommit_fault: ?sh.restore_activation.PrecommitFault,
+    postcommit_fault: ?sh.restore_activation.PostcommitFault,
+) []const u8 {
+    if (precommit_fault) |fault| return @tagName(fault);
+    if (postcommit_fault) |fault| return @tagName(fault);
+    return "none";
 }
 
 fn runSourceHost(
@@ -573,6 +819,7 @@ fn runSourceHost(
     owner_path: [:0]const u8,
     evidence_fd: c.fd_t,
     fault: ?sh.restore_activation.PrecommitFault,
+    postcommit_fault: ?sh.restore_activation.PostcommitFault,
     corrupt_primary: bool,
 ) !noreturn {
     const allocator = std.heap.page_allocator;
@@ -722,6 +969,22 @@ fn runSourceHost(
         const argv = [_:null]?[*:0]const u8{
             target.path.ptr,
             "--restore-activation-fault",
+            fault_name.ptr,
+            sh.entrypoint.subcommand,
+            owned[0].ptr,
+            owned[1].ptr,
+            owned[2].ptr,
+            owned[3].ptr,
+            owned[4].ptr,
+            owned[5].ptr,
+            owned[6].ptr,
+        };
+        _ = execv(target.path.ptr, &argv);
+    } else if (postcommit_fault) |selected| {
+        const fault_name = try allocator.dupeZ(u8, @tagName(selected));
+        const argv = [_:null]?[*:0]const u8{
+            target.path.ptr,
+            "--restore-activation-postcommit-fault",
             fault_name.ptr,
             sh.entrypoint.subcommand,
             owned[0].ptr,
@@ -923,6 +1186,16 @@ fn directChildCount(parent: c.pid_t) usize {
     @memset(&children, 0);
     const count = proc_listchildpids(parent, &children, @intCast(@sizeOf(@TypeOf(children))));
     return if (count <= 0) 0 else @min(children.len, @as(usize, @intCast(count)));
+}
+
+fn countOpenFds() usize {
+    var count: usize = 0;
+    var fd: c.fd_t = 0;
+    while (fd < getdtablesize()) : (fd += 1) {
+        const rc = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
+        if (rc >= 0 or posix.errno(rc) != .BADF) count += 1;
+    }
+    return count;
 }
 
 fn peerPid(fd: c.fd_t) !c.pid_t {

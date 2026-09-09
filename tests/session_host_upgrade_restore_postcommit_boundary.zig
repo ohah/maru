@@ -5,7 +5,7 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 }
 
 fn enumBody(source: []const u8) ![]const u8 {
-    const start_marker = "pub const PrecommitFault = enum {";
+    const start_marker = "pub const PostcommitFault = enum {";
     const start = std.mem.indexOf(u8, source, start_marker) orelse
         return error.TestUnexpectedResult;
     const body_start = start + start_marker.len;
@@ -14,7 +14,7 @@ fn enumBody(source: []const u8) ![]const u8 {
     return source[body_start..end];
 }
 
-test "U5 restore precommit fault vocabulary is closed and absent from the product entrypoint" {
+test "U5 restore postcommit fault vocabulary is closed and absent from the product entrypoint" {
     const activation = try std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         "src/platform/macos/session_host/restore_activation.zig",
@@ -38,18 +38,11 @@ test "U5 restore precommit fault vocabulary is closed and absent from the produc
     defer std.testing.allocator.free(e2e);
     const runner = try std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
-        "tools/session_host_restore_precommit_test_runner.zig",
+        "tools/session_host_restore_postcommit_test_runner.zig",
         std.testing.allocator,
         .limited(16 * 1024),
     );
     defer std.testing.allocator.free(runner);
-    const entrypoint = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "src/platform/macos/session_host/entrypoint.zig",
-        std.testing.allocator,
-        .limited(32 * 1024),
-    );
-    defer std.testing.allocator.free(entrypoint);
     const build = try std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         "build.zig",
@@ -60,7 +53,7 @@ test "U5 restore precommit fault vocabulary is closed and absent from the produc
 
     try std.testing.expectEqual(
         @as(usize, 1),
-        count(activation, "pub const PrecommitFault = enum {"),
+        count(activation, "pub const PostcommitFault = enum {"),
     );
     var fields = std.mem.splitScalar(u8, try enumBody(activation), '\n');
     var fault_count: usize = 0;
@@ -70,24 +63,23 @@ test "U5 restore precommit fault vocabulary is closed and absent from the produc
         try std.testing.expect(std.ascii.isAlphabetic(name[0]));
         for (name) |byte|
             try std.testing.expect(std.ascii.isAlphanumeric(byte) or byte == '_');
-        try std.testing.expect(count(activation, name) >= 1);
         try std.testing.expect(count(main, name) == 0);
         fault_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 11), fault_count);
-    try std.testing.expect(count(activation, "runWithPrecommitFaultForTest") == 1);
-    try std.testing.expect(count(activation, "if (!builtin.is_test) @compileError") >= 1);
-    try std.testing.expect(count(activation, "if (!fault.consumed) return error.PrecommitFaultNotConsumed") == 1);
-    try std.testing.expect(count(main, "--restore-activation-fault") == 0);
-    try std.testing.expect(count(e2e, "std.enums.values(sh.restore_activation.PrecommitFault)") == 1);
-    try std.testing.expect(count(e2e, "if (fault == .none or fault == .manifest_ready_poisoned) continue;") == 1);
-    try std.testing.expect(count(e2e, "runRestoreFaultCase(.manifest_ready_poisoned, null, 10, .precommit_poison)") == 1);
-    try std.testing.expect(count(e2e, "restore precommit rollback-safe matrix preserves one real PTY and same host PID") == 1);
-    try std.testing.expect(count(e2e, "restore precommit manifest poison fails closed without recursive rollback") == 1);
-    try std.testing.expect(count(runner, "std.mem.eql(u8, first, \"--restore-activation-fault\")") == 1);
+    try std.testing.expectEqual(@as(usize, 4), fault_count);
+    try std.testing.expect(count(activation, "runWithPostcommitFaultForTest") == 1);
+    try std.testing.expect(count(activation, "if (!fault.consumed) return error.PostcommitFaultNotConsumed") == 2);
+    try std.testing.expect(count(e2e, "std.enums.values(sh.restore_activation.PostcommitFault)") == 1);
+    try std.testing.expect(count(e2e, "if (fault == .none or fault == .rollback_promotion) continue;") == 1);
+    try std.testing.expect(count(e2e, "runRestoreFaultCase(null, .rollback_promotion, 3, .postcommit_status_only)") == 1);
+    try std.testing.expect(count(e2e, "expectPostcommitVocabularyAbsentFromProduct") == 2);
+    try std.testing.expect(count(e2e, "const rollback_source = if (postcommit_fault != null) self else product;") == 1);
+    try std.testing.expect(count(e2e, "restore postcommit fail-stop rows never execute rollback") == 1);
+    try std.testing.expect(count(e2e, "restore postcommit promotion failure keeps the real PTY status-only") == 1);
+    try std.testing.expect(count(runner, "--restore-activation-postcommit-fault") == 1);
     try std.testing.expect(count(runner, "std.mem.eql(u8, first, \"__session-host\")") == 1);
-    try std.testing.expect(count(entrypoint, "pub const subcommand = \"__session-host\";") == 1);
-    try std.testing.expect(count(build, "test-session-host-upgrade-restore-precommit-failure-matrix") == 1);
-    try std.testing.expect(count(build, "run_session_host_restore_precommit_tests.addArg(\"--maru-expect-tests=2\")") == 1);
-    try std.testing.expect(count(build, "session_host_restore_precommit_step.dependOn(&run_session_host_restore_precommit_tests.step)") == 1);
+    try std.testing.expect(count(runner, "std.process.exit(94)") == 1);
+    try std.testing.expect(count(build, "test-session-host-upgrade-restore-postcommit-failure-matrix") == 1);
+    try std.testing.expect(count(build, "run_session_host_restore_postcommit_tests.addArg(\"--maru-expect-tests=2\")") == 1);
+    try std.testing.expect(count(build, "session_host_restore_postcommit_step.dependOn(&run_session_host_restore_postcommit_tests.step)") == 1);
 }

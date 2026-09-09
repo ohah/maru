@@ -136,6 +136,19 @@ pub const InheritedCloseToken = struct {
     }
 };
 
+pub const testing_api = if (@import("builtin").is_test) struct {
+    /// `closeAndVerify`가 의도한 inherited set을 닫은 뒤에도 실제 kernel fd
+    /// inventory에서 예상 밖 non-CLOEXEC descriptor를 발견하게 한다.
+    pub fn openUnexpectedInheritedFd() Error!c.fd_t {
+        var pair: [2]c.fd_t = undefined;
+        if (c.pipe(&pair) != 0) return error.DupFailed;
+        _ = c.close(pair[1]);
+        errdefer _ = c.close(pair[0]);
+        try setCloseOnExec(pair[0], false);
+        return pair[0];
+    }
+} else struct {};
+
 /// Handoff capture 전에 전체 inherited slot을 CLOEXEC placeholder로 점유해, 이후 store/preflight가 여는 fd와
 /// logical slot이 충돌하지 않게 한다. replace는 예약된 exact slot만 실제 resource로 바꾸며 rollback은 placeholder와
 /// 교체된 slot 모두를 닫는다.

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 아이콘 바탕 — 기본 다크 배경 계열(`assets/icon/render.py` 의 `GROUND` 와 같은 값).
+         **두 곳에 적힌 값이다**: 여기는 XML 이 색을 요구하고 저기는 PNG 를 굽는다. 같은 값을
+         쓰는지는 판정자가 본다. -->
+    <color name="ic_launcher_background">#1E1E2E</color>
+</resources>

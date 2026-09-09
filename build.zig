@@ -2144,6 +2144,11 @@ pub fn build(b: *std.Build) void {
                     // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
                     "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
                     "cp \"$1\" zig-out/Maru.app/Contents/Info.plist; " ++
+                    // **앱 아이콘**(M11b). `Info.plist` 의 `CFBundleIconFile` 이 이 이름을 가리킨다 —
+                    // 없으면 Finder·Dock 이 빈 문서 아이콘을 보여 준다. 폰트와 같은 규율로 **없으면
+                    // 빌드를 세운다**: 조용히 빠지면 「아이콘이 왜 안 나오지」를 나중에 찾게 된다.
+                    "[ -s assets/icon/Maru.icns ] || { echo 'error: assets/icon/Maru.icns missing — assets/icon/render.py 로 다시 뽑는다' >&2; exit 1; }; " ++
+                    "cp assets/icon/Maru.icns zig-out/Maru.app/Contents/Resources/Maru.icns; " ++
                     // **번들 코드 라이브러리의 라이선스 전문**(third-party-licenses.md §번들 코드 라이브러리).
                     // tree-sitter 코어와 grammar가 컴파일 산출물로 exe에 들어가므로 재배포 의무가 있다 —
                     // 폰트가 `Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리·같은 이유다.

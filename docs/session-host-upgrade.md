@@ -5158,7 +5158,7 @@ generic URL, caller endpoint·HTTP method·repository·tag는 받지 않는다.
 `candidate()`로 이 canonical role-ordered snapshot을 빌릴 수 있지만, 이것은 최종 성공 capability가 아니다. `verifyAfterUntil`은
 같은 endpoint를 다시 읽고 별도 metadata owner로 결속한 뒤 release ID/tag/source와 네 asset의 canonical role별
 ID/name/size/SHA-256이 첫 snapshot과 exact 일치할 때만 fence를 완료한다. lifecycle은 두 응답 모두 parser가 독립 검증한다.
-두 번째 호출, copied/pre-owned/변조 owner, 다른 context/deadline/CLI, expired deadline, response/result/context/token/executable alias,
+두 번째 호출, copied/pre-owned/변조 owner, 다른 context/deadline/CLI, expired deadline, response/result/deadline/CLI owner/context/token/executable alias,
 child·parse·CLI revalidation 실패는 completed publication 없이 fail-close한다. 첫 관측 뒤 실패한 fence는 명시적 `deinit`으로만
 철회하며 token·response bytes·deadline·CLI pathname은 결과에 보존하지 않는다.
 

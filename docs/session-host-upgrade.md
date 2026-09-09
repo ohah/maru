@@ -5117,6 +5117,35 @@ closed argv, token scope, output·upload 부재를 고정하고 focused Debug·R
 actual-process 성공·오류 output 0과 residue/FD 0을 검증한다. PR CI는 tag workflow를 실행하지 않으므로 실제 원격 표본은 이 배선이
 병합된 뒤 첫 protected `v*` tag run의 job URL, run/attempt/source와 timing duration으로만 기록한다.
 
+#### 11.100d current immutable Release metadata의 원격 권위
+
+final verdict가 다음으로 얻어야 할 값은 caller가 조립한 asset 목록이 아니라 current tag의 GitHub published Release metadata다.
+첫 하위 gate는 network와 credential을 열지 않는 `release_adapter_remote_release_metadata.zig` value owner다. 기존 GitHub JSON
+SSOT와 같은 최대 64 KiB의 complete
+GitHub Release JSON object에서 `id`, `tag_name`, `target_commitish`, `draft`, `prerelease`, `immutable`, `assets`를 bounded parse하고,
+current protected `Context`와 exact 결속한다. release ID는 positive, `tag_name`은 current tag, `target_commitish`는 current source SHA,
+`draft=false`, `prerelease=false`, `immutable=true`여야 한다. duplicate top-level/asset field와 scalar type 교환, malformed/trailing JSON,
+과대 응답, unknown field는 API가 확장 가능한 경계이므로 무시하되 위 consumed field의 duplicate는 거부한다.
+
+asset은 정확히 네 개이며 tag의 version에서 유도한 `Maru-<version>-universal.dmg`, `maru-session-host-<version>`,
+`Maru-<version>-session-host-release.json`과 `baseline-evidence.json | upgrade-evidence.json` 중 정확히 하나다. 각 asset은 positive distinct
+ID, positive bounded size, `state=uploaded`, `content_type=application/octet-stream`, `sha256:<64 lowercase hex>` digest와 canonical
+API URL `https://api.github.com/repos/ohah/maru/releases/assets/<id>`를 가져야 한다. 이름·ID 중복, 두 evidence 이름 동시 존재,
+세 고정 asset 또는 evidence candidate 누락, foreign URL/repository와 extra asset은 owner publication 전에 fail-close한다. 배열 순서는
+권위가 아니며 owner는 canonical role 순서로 id/name/size/SHA-256을 복사하고 final-address seal을 가진다.
+
+evidence asset 이름은 **다운로드 후보를 고르는 데만** 사용하며 `baseline_a | upgrade_b` 판정으로 내보내지 않는다. profile 권위는
+후속 gate가 그 asset bytes를 SHA-256·GitHub-issued attestation에 결속한 뒤 `release_evidence.parseCanonical`로 읽은 값뿐이다. 따라서
+파일 이름만 바꾸거나 두 후보 중 하나가 존재한다는 사실로 profile을 선택할 수 없다. 이 gate는 Release가 이후에도 불변이라고
+단독 주장하지 않는다. 후속 read-only transport가 같은 endpoint를 asset 다운로드·attestation 검증 전후로 다시 조회해 owner의
+release ID, lifecycle과 네 asset ID/name/size/digest/URL exact snapshot이 유지되는지 fence해야 한다.
+
+focused Debug·ReleaseFast gate는 canonical 성공과 배열 순서 독립성, baseline/upgrade evidence candidate, context/lifecycle/asset
+set·URL·digest·type drift, duplicate/unknown/trailing/size cap, copied/pre-owned/aliased owner와 allocation fail-index unwind를 검증한다.
+이 value gate는 filesystem, clock, token, process와 network를 읽지 않으며 실제 Release·attestation·profile 또는 U5 성공을 증명하지
+않는다. 다음 하위 gate가 pinned `gh` GET과 private held-file download, attestation, evidence semantic, before/after metadata fence를
+합성한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

@@ -21414,6 +21414,10 @@ test "SP11 파싱이 끝나면 프레임이 목록을 채운다 — 검색어가
 pub fn crumbSpanBuf(self: *AppSession, term: *Term, n: usize) []maru.cell_text.ColSpan {
     const buf = &term.rt.editor_crumb_spans;
     if (buf.items.len < n) {
+        // **모자라면 아무것도 안 재운다**(`&.{}`). 부분만 주면 뒤 마디의 열 범위가 **지난 프레임
+        // 값**으로 남아, 클릭이 화면에 없는 자리를 가리킨다 — 「그려진 것 = 클릭되는 것」이 깨지는
+        // 쪽이다. 그 차이는 **할당 실패에서만** 나타나 판정자가 안 잡는다(적대적 검증 2026-09-09
+        // Q13 — 실패 주입 픽스처를 이 자리에 붙이는 것은 별도 조각이다).
         buf.resize(self.allocator, n) catch return &.{};
     }
     return buf.items[0..@min(n, buf.items.len)];

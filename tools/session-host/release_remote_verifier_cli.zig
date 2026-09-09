@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn mainFallible(init: std.process.Init) !void {
-    var values: [5][]const u8 = undefined;
+    var values: [6][]const u8 = undefined;
     var count: usize = 0;
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();

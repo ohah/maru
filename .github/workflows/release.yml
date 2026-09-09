@@ -383,10 +383,12 @@ jobs:
           umask 077
           timing_workspace="$RUNNER_TEMP/maru-session-host-remote-timing-$GITHUB_RUN_ATTEMPT"
           release_workspace="$RUNNER_TEMP/maru-session-host-remote-release-$GITHUB_RUN_ATTEMPT"
+          pass_record="$RUNNER_TEMP/session-host-release-remote-pass.json"
           stdout="$RUNNER_TEMP/maru-session-host-remote-verifier.stdout"
           stderr="$RUNNER_TEMP/maru-session-host-remote-verifier.stderr"
           test ! -e "$timing_workspace"
           test ! -e "$release_workspace"
+          test ! -e "$pass_record"
           test ! -e "$stdout"
           test ! -e "$stderr"
           cleanup() {
@@ -394,8 +396,19 @@ jobs:
           }
           trap cleanup EXIT
           verifier="$GITHUB_WORKSPACE/zig-out/bin/maru-session-host-release-remote-verifier"
-          "$verifier" verify "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$timing_workspace" "$release_workspace" > "$stdout" 2> "$stderr"
+          "$verifier" verify-and-record "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$timing_workspace" "$release_workspace" "$pass_record" > "$stdout" 2> "$stderr"
           test ! -s "$stdout"
           test ! -s "$stderr"
           test ! -e "$timing_workspace"
           test ! -e "$release_workspace"
+          test "$(/usr/bin/stat -f '%HT' "$pass_record")" = 'Regular File'
+          test "$(/usr/bin/stat -f '%Lp' "$pass_record")" = '400'
+          test "$(/usr/bin/stat -f '%l' "$pass_record")" = '1'
+
+      - name: Upload canonical remote Release pass record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-release-remote-pass-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-release-remote-pass.json
+          if-no-files-found: error
+          retention-days: 90

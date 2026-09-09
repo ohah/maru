@@ -10,6 +10,14 @@ test "closed command accepts two distinct absolute workspaces" {
     try std.testing.expectEqualStrings("/tmp/release", command.release_workspace);
 }
 
+test "recording command accepts only fixed third sibling leaf" {
+    const command = try verifier.parse(&.{ "verify-and-record", "/opt/gh", sha, "/tmp/timing", "/tmp/release", "/tmp/session-host-release-remote-pass.json" });
+    try std.testing.expectEqualStrings("/tmp/session-host-release-remote-pass.json", command.record_path.?);
+    try std.testing.expectError(error.InvalidPath, verifier.parse(&.{ "verify-and-record", "/opt/gh", sha, "/tmp/timing", "/tmp/release", "/tmp/pass.json" }));
+    try std.testing.expectError(error.InvalidPath, verifier.parse(&.{ "verify-and-record", "/opt/gh", sha, "/tmp/timing", "/tmp/release", "/var/session-host-release-remote-pass.json" }));
+    try std.testing.expectError(error.InvalidArguments, verifier.parse(&.{ "verify", "/opt/gh", sha, "/tmp/timing", "/tmp/release", "/tmp/session-host-release-remote-pass.json" }));
+}
+
 test "command vocabulary and arity are closed" {
     try std.testing.expectError(error.InvalidCommand, verifier.parse(&.{ "publish", "/opt/gh", sha, "/tmp/timing", "/tmp/release" }));
     try std.testing.expectError(error.InvalidArguments, verifier.parse(&.{ "verify", "/opt/gh", sha, "/tmp/timing" }));
@@ -56,6 +64,15 @@ const Fake = struct {
     pub fn revalidateVerdict(self: *@This()) !void {
         try self.step(6);
     }
+    pub fn freezeRecord(self: *@This()) !void {
+        try self.step(7);
+    }
+    pub fn discardRecord(self: *@This()) !void {
+        try self.step(8);
+    }
+    pub fn publishRecord(self: *@This()) !void {
+        try self.step(9);
+    }
     pub fn cleanup(self: *@This(), completed: u8) !void {
         self.events[self.len] = 10 + completed;
         self.len += 1;
@@ -83,4 +100,21 @@ test "cleanup failure prevents a successful verdict" {
     var fake = Fake{ .cleanup_error = true };
     try std.testing.expectError(error.CleanupFailed, verifier.composeWith(&fake));
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 16 }, fake.events[0..fake.len]);
+}
+
+test "record composition freezes then cleans before publication" {
+    var fake = Fake{};
+    try verifier.composeAndRecordWith(&fake);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 16, 9 }, fake.events[0..fake.len]);
+}
+
+test "record composition never publishes after stage or cleanup failure" {
+    for (1..8) |fail_at| {
+        var fake = Fake{ .fail_at = @intCast(fail_at) };
+        try std.testing.expectError(error.InjectedFailure, verifier.composeAndRecordWith(&fake));
+        for (fake.events[0..fake.len]) |event| try std.testing.expect(event != 9);
+    }
+    var cleanup_failure = Fake{ .cleanup_error = true };
+    try std.testing.expectError(error.CleanupFailed, verifier.composeAndRecordWith(&cleanup_failure));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 16, 8 }, cleanup_failure.events[0..cleanup_failure.len]);
 }

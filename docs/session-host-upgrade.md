@@ -5242,6 +5242,8 @@ parsed value, 네 attestation receipt, completed fence·asset owner의 exact 주
 마지막 fence가 완료된 뒤에도 owner 게시 직전 shared deadline을 다시 확인한다. 이 최종 확인이 만료되면
 semantic owner와 네 receipt를 역순으로 해제하고 publication 0으로 닫되, 이미 완료된 caller-owned fence를
 미완료로 되돌렸다고 주장하지 않는다.
+게시 직전에는 pinned CLI도 다시 재검증하고 그 뒤 shared deadline을 확인해, final fence 반환 뒤의
+CLI 교체 역시 성공 observation과 공존하지 않게 한다.
 
 result/context/fence/assets/deadline/pinned CLI/token/metadata response/attestation output의 백킹은 외부 동작 전에
 pairwise disjoint여야 한다. attestation/parse/binding/last-fence/deadline/CLI/file drift 실패는 publication 0으로

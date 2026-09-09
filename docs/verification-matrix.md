@@ -3357,8 +3357,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   single-entry stored/deflate ZIP을 bounded memory에서 header/data descriptor/CRC까지 검증한 뒤 내부 timing record의 run attempt를
   다시 교차검증한다. `test-session-host-release-adapter-live-timing-artifact`는 Debug·ReleaseFast에서 실제 GitHub ZIP 형식과 같은 signed
   descriptor, replay·duplicate·expired·foreign metadata, digest/size/URL drift, traversal·encryption·link·unsupported method·trailing
-  archive, copied/pre-owned owner와 allocation fail-index를 닫는다. pinned GitHub CLI transport, private temporary file, live verdict job과
-  protected tag의 실제 원격 표본은 후속 gate다.
+  archive, copied/pre-owned owner와 allocation fail-index를 닫는다. Pinned GitHub CLI transport는 **구현 전**이며 exact metadata GET 뒤
+  selected archive GET만 허용하고 두 child 전후 CLI authority를 재검증하며, 0700 private workspace의 no-follow 0600 held file에 archive
+  stdout을 exact metadata size cap으로 직접 받은 뒤 identity·digest·ZIP·record를 결속해야 한다. 성공·실패의 token/buffer/pathname/FD/residue
+  0과 cleanup 또는 final deadline 실패 시 provenance 철회를 actual process·private APFS로 검증한다. live verdict job과 protected tag의 실제
+  원격 표본은 그 다음 gate다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

@@ -3660,6 +3660,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "syntax", .module = syntax_mod },
         },
     });
+    // **필터 자신을 판정 대상으로 만든다.** 아래 필터가 편집기 영역 모듈을 통째로 고르는데, 그
+    // 사실을 지키는 것이 없으면 누가 한 줄 지웠을 때 **판정자 수백 개가 조용히 0번 돈다** — 이번
+    // 세션에서 그 모양으로 세 번 물렸다. `docs/configuration.md` 를 모듈로 박아 문서 드리프트를
+    // 재는 그 수법 그대로, `build.zig` 본문을 박아 `LOOP1` 이 읽는다.
+    editor_test_module.addAnonymousImport("build_zig_src", .{ .root_source_file = b.path("build.zig") });
     if (target.result.os.tag == .macos) {
         editor_test_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
@@ -3684,7 +3689,14 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB" },
+        //
+        // **이름 접두 대신 «모듈 경로» 로 고른다**(2026-09-09). 접두는 사람이 붙이는 것이라 빠뜨리면
+        // 그 판정자가 조용히 안 돈다 — 실측으로 편집기 영역 판정자 **224개**가 그렇게 0번 돌고
+        // 있었다(`selection.zig` 는 37개 전부). 필터는 **정규화된 이름**(`app_session.editor.test.…`)
+        // 에 걸리므로 `"app_session.editor."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
+        // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
+        // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.", "app_session.editor_diff.", "session.editor." },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -3706,7 +3718,7 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
         // `CT*` 는 밴드 마디의 열 범위(`platform/cell_text.zig` — §7.5). **`maru` 모듈이라 여기서
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB" },
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "session.editor.", "platform.cell_text.", "session.repo_path." },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));

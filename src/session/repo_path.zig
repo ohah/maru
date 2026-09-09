@@ -192,13 +192,13 @@ pub fn breadcrumbRoot(
     return "";
 }
 
-test "루트 선택: 비교 > 활성 저장소 > 탐색기 루트 하나" {
+test "CRUMB7 루트 선택: 비교 > 활성 저장소 > 탐색기 루트 하나" {
     try std.testing.expectEqualStrings("/diff", breadcrumbRoot("/diff", "/git", 1, "/tree"));
     try std.testing.expectEqualStrings("/git", breadcrumbRoot("", "/git", 1, "/tree"));
     try std.testing.expectEqualStrings("/tree", breadcrumbRoot("", "", 1, "/tree"));
 }
 
-test "탐색기 루트가 여럿이면 자르지 않는다 — 다른 저장소의 위치를 말하게 된다" {
+test "CRUMB8 탐색기 루트가 여럿이면 자르지 않는다 — 다른 저장소의 위치를 말하게 된다" {
     // 잘못 고르면 화면이 그럴듯하지만 **틀린** 위치를 말한다. 자르지 않으면 길 뿐 틀리지 않는다.
     try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 2, "/tree-a"));
     try std.testing.expectEqualStrings("", breadcrumbRoot("", "", 0, ""));

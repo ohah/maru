@@ -127,6 +127,11 @@ pub fn appendEllipsizedTitleSpans(
                         spans[i] = .{ .start = c.col, .end = c.col + c.cols };
                     } else {
                         spans[i].end = @max(spans[i].end, c.col + c.cols);
+                        // **`@min` 은 오늘 값을 안 바꾼다**(그 변이가 살아남는 것이 정상이다 —
+                        // 적대적 검증 2026-09-09 Q4): `plan` 이 열을 **왼쪽에서 오른쪽으로** 내므로
+                        // 뒤 cluster 의 `col` 이 앞의 것보다 작을 수 없다. 그래도 두는 이유는 그
+                        // 순서가 이 함수의 계약이 아니어서다 — 생략이 양끝에서 들어오는 앵커가
+                        // 붙거나 RTL 이 들어오면 그날부터 이 줄이 답을 지킨다.
                         spans[i].start = @min(spans[i].start, c.col);
                     }
                     break;

@@ -786,6 +786,11 @@ const Table = struct {
     // `터미널`·`커서`·`기타`·`테마 프리셋` 은 이미 있는 `set_section_*`·`set_theme_preset` 을 **재사용**한다.
     mob_sessions: [:0]const u8,
     mob_settings: [:0]const u8,
+    /// 진단 화면(M15a). **버튼과 제목만 사람 말이다** — 본문은 안정된 ASCII 키라 옮기지 않는다
+    /// (읽는 사람이 버그 보고를 받는 사람이고, 번역된 산문보다 `MARU_*` 로그 같은 키가 낫다).
+    mob_diagnostics: [:0]const u8,
+    mob_diag_copy: [:0]const u8,
+    mob_diag_copied: [:0]const u8,
     mob_servers: [:0]const u8,
     mob_servers_empty: [:0]const u8,
     /// 원격 세션 목록(S10d-2). **"아직 모른다" 와 "없다" 를 가른다** — 같은 문구면 화면이 없는
@@ -1290,6 +1295,9 @@ const en: Table = .{
     .set_show_folder = "Show folder",
     .mob_sessions = "Sessions",
     .mob_settings = "Settings",
+    .mob_diagnostics = "Diagnostics",
+    .mob_diag_copy = "Copy diagnostics",
+    .mob_diag_copied = "Copied. Paste it into the bug report",
     .mob_servers = "Servers",
     .mob_servers_empty = "No servers added yet",
     .mob_sessions_loading = "Loading sessions...",
@@ -1928,6 +1936,9 @@ const ko: Table = .{
     .set_show_folder = "폴더 표시",
     .mob_sessions = "세션",
     .mob_settings = "설정",
+    .mob_diagnostics = "진단",
+    .mob_diag_copy = "진단 복사",
+    .mob_diag_copied = "복사했습니다. 버그 보고에 붙여 넣으세요",
     .mob_servers = "서버",
     .mob_servers_empty = "등록된 서버가 없습니다",
     .mob_sessions_loading = "세션 목록을 불러오는 중...",

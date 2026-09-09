@@ -9042,3 +9042,235 @@ test "M16a 세션 목록: 붙고 나면 «받는 중»이 여전히 있다" {
     _ = bridge.maru_mobile_take_server_connect();
     enterTerminal();
 }
+
+// ── M15a 진단 ───────────────────────────────────────────────────────────────
+//
+// **폰에서는 실패가 아무 데도 안 남았다.** `last_error` 는 한 칸이고 host 가 읽자마자 비워서
+// `logcat`·`os_log` 로만 갔는데, 폰 사용자는 그것을 꺼낼 수단이 없다. 규칙은
+// [계약 §5](../docs/mobile-platform.md)가 소유한다.
+
+/// 진단 화면으로 간다 — **손짓으로**(설정 톱니 → 목록 끝의 진단 줄). 판정자가 `setScreenForTest`
+/// 로 건너뛰면 「그 줄이 정말 눌리는가」가 안 재어진다.
+fn openDiagnostics(w: u32, h: u32) bool {
+    openSettings(w, h);
+    // 목록 끝까지 민다 — 진단 줄은 스키마 줄 **아래**라 처음에는 화면 밖이다.
+    var guard: u32 = 0;
+    while (guard < 200) : (guard += 1) {
+        const r = bridge.settingsDiagRectForTest();
+        if (r.w > 0) {
+            bridge.maru_mobile_pointer(0, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+            bridge.maru_mobile_pointer(2, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+            _ = bridge.maru_mobile_build(w, h, now());
+            if (std.mem.eql(u8, bridge.currentScreenName(), "diagnostics")) return true;
+            return false;
+        }
+        bridge.maru_mobile_wheel(-3, 0, 0, 200, 400); // 목록을 아래로 민다(제품 경로)
+        _ = bridge.maru_mobile_build(w, h, now());
+    }
+    return false;
+}
+
+test "M15a 실패를 기억한다 — 한 칸이 차 있어도, 같은 이름은 묶어서" {
+    bridge.resetDiagForTest();
+    // 한 칸(`last_error`)이 비어 있는 상태에서 시작한다.
+    bridge.maru_mobile_clear_error();
+
+    bridge.noteErrorForTest("alpha");
+    // **한 칸은 이제 차 있다** — 예전에는 여기서부터 난 실패가 통째로 사라졌다.
+    bridge.noteErrorForTest("beta");
+    bridge.noteErrorForTest("alpha");
+    bridge.noteErrorForTest("alpha");
+
+    const got = bridge.diagErrors();
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("alpha", got[0].name[0..got[0].name_len]);
+    try std.testing.expectEqual(@as(u32, 3), got[0].count); // 같은 이름은 묶는다
+    try std.testing.expectEqualStrings("beta", got[1].name[0..got[1].name_len]);
+    try std.testing.expectEqual(@as(u32, 1), got[1].count);
+    // 그리고 한 칸은 **먼저 난 것**을 그대로 든다(그 규율은 안 바뀐다).
+    try std.testing.expectEqualStrings("alpha", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}
+
+test "M15a 자리가 없으면 «버린 수»를 센다 — 조용히 덮지 않는다" {
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    // 자리 수보다 하나 많은 **서로 다른** 이름을 낸다.
+    var buf: [8]u8 = undefined;
+    for (0..bridge.diag_error_slots + 1) |i| {
+        const name = std.fmt.bufPrint(&buf, "e{d}", .{i}) catch unreachable;
+        bridge.noteErrorForTest(name);
+    }
+    try std.testing.expectEqual(bridge.diag_error_slots, bridge.diagErrors().len);
+    try std.testing.expectEqual(@as(u32, 1), bridge.diagErrorsDropped());
+    // **먼저 난 것이 남는다** — 원인은 대개 앞에 있다.
+    try std.testing.expectEqualStrings("e0", bridge.diagErrors()[0].name[0..2]);
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}
+
+test "M15a 진단에는 이름·숫자만 담긴다 — 명령어·경로·서버 이름이 안 샌다" {
+    // **이 판정자가 이 슬라이스의 존재 이유를 지킨다.** 하나라도 담기면 「진단을 보내 주세요」가
+    // 곧 유출 요청이 된다(계약 §5).
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+
+    // 사용자 데이터를 있는 대로 넣어 둔다 — 서버 이름·주소·사용자·터미널 내용.
+    const src = "ssh.server.1.name = 비밀서버\nssh.server.1.host = secret.internal\nssh.server.1.user = alice\n";
+    bridge.maru_mobile_load_config(src, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    enterTerminal();
+    const secret_line = "cat /home/alice/.aws/credentials\r\n";
+    _ = bridge.maru_mobile_term_write(secret_line.ptr, secret_line.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const text = bridge.diagnosticTextNow();
+    for ([_][]const u8{
+        "비밀서버",
+        "secret.internal",
+        "alice",
+        "credentials",
+        "/home",
+        "cat ",
+    }) |needle| {
+        if (std.mem.indexOf(u8, text, needle) != null) {
+            std.debug.print("\n진단에 샜다: {s}\n전문:\n{s}\n", .{ needle, text });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // **비어 있어서 통과한 것이 아니다** — 담기로 한 것은 실제로 들어 있다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "grid=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "atlas ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "errors=") != null);
+
+    const empty = "";
+    bridge.maru_mobile_load_config(empty, 0);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}
+
+test "M15a 기억한 오류가 진단 글에 들어간다" {
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    bridge.noteErrorForTest("zzz_probe");
+    bridge.noteErrorForTest("zzz_probe");
+    const text = bridge.diagnosticTextNow();
+    try std.testing.expect(std.mem.indexOf(u8, text, "zzz_probe x2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "errors=1") != null);
+    bridge.maru_mobile_clear_error();
+    bridge.resetDiagForTest();
+}
+
+test "M15a 설정 끝의 «진단» 줄로 그 화면이 열린다 — 손짓으로" {
+    endAnyGesture();
+    try std.testing.expect(openDiagnostics(402, 874));
+    try std.testing.expectEqualStrings("diagnostics", bridge.currentScreenName());
+    // 뒤로 가면 설정으로 돌아온다(스택이다).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_pop_screen());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("settings", bridge.currentScreenName());
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    enterTerminal();
+}
+
+test "M15a 고리가 꽉 차도 «보인 것을 복사할 수 있다»" {
+    // **화면에 보이는데 복사만 안 되면** 이 화면의 존재 이유가 사라진다. 가장 긴 경우(고리가
+    // 꽉 차고 버린 것도 있는 상태)에서 복사 요청이 실제로 서는지 본다.
+    endAnyGesture();
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+    var buf: [48]u8 = undefined;
+    for (0..bridge.diag_error_slots + 3) |i| {
+        // 이름 상한(40자)에 가까운 긴 이름으로 최악을 만든다.
+        const name = std.fmt.bufPrint(&buf, "very_long_error_name_for_diag_{d:0>8}", .{i}) catch unreachable;
+        bridge.noteErrorForTest(name);
+    }
+    const text = bridge.diagnosticTextNow();
+    try std.testing.expect(std.mem.indexOf(u8, text, "dropped=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "(truncated)") == null); // 자리가 넉넉하다
+
+    try std.testing.expect(openDiagnostics(402, 874));
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const r = bridge.diagCopyRectForTest();
+    bridge.maru_mobile_pointer(0, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+    bridge.maru_mobile_pointer(2, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+    var out: [8192]u8 = undefined;
+    const n = bridge.maru_mobile_take_copy(&out, out.len);
+    try std.testing.expect(n > 0); // 잘렸으면 `copy_text_size` 로 0 이 돌아온다
+    try std.testing.expectEqualStrings(bridge.diagnosticTextNow(), out[0..n]);
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    enterTerminal();
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+}
+
+test "M15a 목록 끝까지 밀면 진단 줄이 «통째로» 보인다" {
+    // **높이를 안 더하면 그 줄은 창 아래 끝에 걸린다** — rect 는 남아 있어 목록 밖을 눌러도
+    // 닿지만 화면에는 안 보인다(이 목록이 이미 겪은 「화면 밖인데 눌린다」 그 모양). 스크롤
+    // 상한이 그 줄의 높이를 세는지를 여기서 잰다.
+    endAnyGesture();
+    openSettings(402, 874);
+    var guard: u32 = 0;
+    while (guard < 200) : (guard += 1) {
+        bridge.maru_mobile_wheel(-3, 0, 0, 200, 400);
+        _ = bridge.maru_mobile_build(402, 874, now());
+    }
+    const list = bridge.settingsListRectForTest();
+    const r = bridge.settingsDiagRectForTest();
+    try std.testing.expect(r.w > 0); // 끝까지 밀면 나온다
+    try std.testing.expect(r.y >= list.y); // 헤더 위로 안 올라간다
+    try std.testing.expect(r.y + r.h <= list.y + list.h + 0.5); // **아래로도 안 넘친다**
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    enterTerminal();
+}
+
+test "M15a 복사하는 글과 화면에 그린 글이 같다" {
+    // **두 벌이면 사용자가 본 것과 붙여 넣은 것이 갈린다.** 화면이 낸 서술자(글자 줄)를 모아
+    // 복사본과 맞댄다 — 그리기 경로 안에서 판정한다.
+    endAnyGesture();
+    bridge.resetDiagForTest();
+    bridge.noteErrorForTest("copy_probe");
+    try std.testing.expect(openDiagnostics(402, 874));
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const r = bridge.diagCopyRectForTest();
+    try std.testing.expect(r.w > 0);
+    bridge.maru_mobile_pointer(0, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+    bridge.maru_mobile_pointer(2, 1, r.x + r.w / 2, r.y + r.h / 2, now());
+
+    var out: [4096]u8 = undefined;
+    const n = bridge.maru_mobile_take_copy(&out, out.len);
+    try std.testing.expect(n > 0);
+    const copied = out[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, copied, "copy_probe") != null);
+
+    // **같은 프레임 안에서 맞댄다.** 이 글은 살아 있는 스냅숏이라(`frame seq=` 가 매 프레임
+    // 오른다) 프레임을 넘겨 비교하면 «달라지는 것이 정상»인 값을 결함으로 읽는다. 위 탭도
+    // 이 프레임의 글을 복사했고, 아래 `diagnosticTextNow()` 도 그 프레임 그대로다(포인터는
+    // 프레임을 안 돌린다).
+    const shown = bridge.diagnosticTextNow();
+    try std.testing.expectEqualStrings(shown, copied);
+
+    // 그리고 **화면이 그린 줄**이 전부 그 글 안에 있다 — 그리기 경로 안에서 판정한다.
+    var drawn: usize = 0;
+    for (bridge.a11yNodesForTest()) |nd| {
+        if (nd.sem.role != .text) continue;
+        try std.testing.expect(std.mem.indexOf(u8, shown, nd.sem.label) != null);
+        drawn += 1;
+    }
+    try std.testing.expect(drawn >= 5); // 화면이 실제로 여러 줄을 그렸다(빈 통과 방지)
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    enterTerminal();
+    bridge.resetDiagForTest();
+    bridge.maru_mobile_clear_error();
+}

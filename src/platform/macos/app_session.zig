@@ -2353,6 +2353,33 @@ pub fn bandPathFor(self: *const AppSession, entry: *const dock_panel.Entry) []co
     return maru.session.repo_path.displayRelative(entry.path, breadcrumbRootFor(self, entry));
 }
 
+/// 헤더 밴드가 **그릴 것 전부** — 라벨 문자열과 그 안 마디 경계·마디가 그려질 열 범위 버퍼.
+///
+/// **이음매를 한 겹 더 꺼낸 이유**: `bandPathFor` 를 꺼낸 뒤에도 **그 위 합성**(경로에 심볼 체인을
+/// 얹고, 마디 경계를 함께 넘기는 두 줄)은 렌더 안에 남아 있었다 — 적대적 검증에서 그 두 줄을
+/// 되돌리는 변이(체인 없이 경로만 그린다 · 마디 경계를 안 넘긴다)가 **둘 다 살아남았다**.
+/// 렌더 안에 있으면 되돌려도 안 깨진다는 그 커밋(`fd2bc9e1d`)의 이유가 한 층 위에도 그대로 있었다.
+pub const BandLabel = struct {
+    text: []const u8,
+    /// 라벨 안 조각의 오름차순 byte 경계(체인 마디 — native-editor-ui.md §7.5).
+    bounds: []const usize,
+    /// 위 경계가 그려질 **열 범위**를 받을 버퍼(길이 = `bounds.len -| 1`).
+    spans: []maru.cell_text.ColSpan,
+};
+
+pub fn bandLabelFor(self: *AppSession, term: *Term, entry: *const dock_panel.Entry) BandLabel {
+    // **순서가 규칙이다.** `headerBreadcrumb` 이 그 프레임의 마디 경계를 **채우는** 쪽이므로
+    // (`editor_syntax.breadcrumb` 이 `crumb_bounds` 를 비우고 다시 담는다), 경계를 **먼저** 뜨면
+    // 지난 프레임 것을 넘긴다 — 이음매를 꺼내며 실제로 그렇게 썼고 `CRUMB2` 가 곧바로 잡았다.
+    const text = editor_ops.headerBreadcrumb(self, term, bandPathFor(self, entry));
+    const bounds = term.rt.editor_syntax.crumb_bounds.items;
+    return .{
+        .text = text,
+        .bounds = bounds,
+        .spans = editor_ops.crumbSpanBuf(self, term, bounds.len -| 1),
+    };
+}
+
 pub fn breadcrumbRootFor(self: *const AppSession, entry: *const dock_panel.Entry) []const u8 {
     // **정책은 `repo_path.breadcrumbRoot`가 소유한다**(순수·테스트 가능). 여기서는 상태를 모아 준다 —
     // 규칙을 이 안에 두면 탐색기 루트가 여럿인 경우 같은 분기를 실제 트리 없이 검사할 수 없다.
@@ -19049,9 +19076,10 @@ pub const AppSession = struct {
                         // **마디 열 범위를 이 프레임에 굳힌다**(§7.5) — 그리는 것과 재는 것이 같은
                         // `plan` 을 타므로 「그려진 것 = 클릭되는 것」이다.
                         const band_term = lr.leaf.activeTerm();
-                        const band_label = editor_ops.headerBreadcrumb(self, band_term, bandPathFor(self, band.entry));
-                        const seg_bounds = band_term.rt.editor_syntax.crumb_bounds.items;
-                        const seg_spans = editor_ops.crumbSpanBuf(self, band_term, seg_bounds.len -| 1);
+                        const band_text = bandLabelFor(self, band_term, band.entry);
+                        const band_label = band_text.text;
+                        const seg_bounds = band_text.bounds;
+                        const seg_spans = band_text.spans;
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
                             band_label,

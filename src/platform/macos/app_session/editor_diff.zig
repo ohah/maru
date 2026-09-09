@@ -1131,7 +1131,10 @@ test "비교 Term의 본문이 헤더 밴드와 겹치지 않는다" {
     try testing.expect(drawn.rect.y >= band_bottom);
 }
 
-test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
+test "CRUMB1 비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
+    // **접두는 빠른 고리에서 돌기 위한 것이다.** 이름에 등록된 접두가 없어 `test-editor` 필터가
+    // 안 골랐고, 그래서 `bandPathFor` 를 파일 이름·절대경로로 되돌리는 변이가 **셋 다 살아남았다**
+    // (적대적 검증 2026-09-09 — P1b·P2b·P3b). 판정자가 있는 것과 그것이 도는 것은 다르다.
     // **활성 저장소가 아니다.** 사용자가 다른 폴더로 옮겨 가도, 열려 있는 비교는 자기 저장소 기준
     // 위치를 말해야 한다 — 그러지 않으면 같은 화면이 창 상태에 따라 다른 경로를 보인다.
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
@@ -1162,6 +1165,20 @@ test "비교의 breadcrumb는 그 비교를 읽은 저장소 기준이다" {
         "/repo/one/src/app.zig",
         maru.session.repo_path.displayRelative(entry.path, app_session_mod.breadcrumbRootFor(fx.session, &entry)),
     );
+
+    // **`diff_repo` 는 비교 항목의 것이다.** 종류 가드를 지우면 비교가 아닌 파일도 그 값을 루트로
+    // 삼는데, 그 필드는 그때 남의 저장소(마지막 비교)일 수 있다 — 그러면 밴드가 **틀린 경로**를
+    // 그린다. 그 변이가 살아남아 이 단언을 세웠다(적대적 검증 2026-09-09 P14).
+    entry.kind = .text;
+    entry.diff_repo = @constCast("/repo/other");
+    try testing.expectEqualStrings("", app_session_mod.breadcrumbRootFor(fx.session, &entry));
+    entry.kind = .diff;
+
+    // **원격 미러는 저쪽 경로를 그린다**(RF6e). 미러의 실제 자리는 로컬 캐시라, 그것을 그리면
+    // 화면이 거짓말을 한다 — 사용자가 연 것은 저 기계의 파일이다. 그 우선순위를 지우는 변이가
+    // 살아남아 여기서 잰다(P6).
+    entry.remote_origin_label = @constCast("me@box:/srv/app/README.md");
+    try testing.expectEqualStrings("me@box:/srv/app/README.md", app_session_mod.bandPathFor(fx.session, &entry));
 }
 
 test "강조 계산이 어디서 할당에 실패해도 새지 않는다 — 실패 지점을 전부 주입한다" {

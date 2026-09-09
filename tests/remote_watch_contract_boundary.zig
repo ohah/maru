@@ -52,7 +52,16 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     // 그 코드 하나가 서로 다른 실패 아홉을 뭉개고 stderr 에는 한 글자도 안 남아 「이 원격은 변경을
     // 감시하지 못합니다」의 원인을 좁힐 수단이 없었다 — 그 자리에서 가설 넷이 실측에 반증됐다.
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "git_prefix.len == 0) exitUnsupportedWhy(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, poll_body, "first.state != .ok) exitUnsupportedWhy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "first.state != .ok)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "exitUnsupportedWhy(") != null);
+    // ⚠️ **사유에 «왜» 까지 실어야 한다**(2026-09-09). `first git digest read failed` 만으로는 「git 이
+    //    없다」·「저장소가 아니다」·「시한을 넘겼다」가 구별되지 않았다. 자식의 stderr 는 `/dev/null`
+    //    이라(경고가 다이제스트에 섞이면 안 된다) **종료 상태가 유일한 단서**다 — 실측에서 저장소가
+    //    아닌 루트의 git 은 128 로 끝났는데, 그 숫자가 없어 원격에서 손으로 재현하기 전까지 몰랐다.
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "git exit {d}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "killed by signal {d}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "last_exit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "last_signal") != null);
     // 사유 없는 종료가 되살아나면 빨개진다 — 그 침묵이 정확히 이 계약이 막는 것이다.
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "exitWith(exit_unsupported)") == null);
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른

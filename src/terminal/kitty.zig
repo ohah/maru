@@ -32,6 +32,9 @@ pub const KittyGraphicsCommand = struct {
     width: u32 = 0, // s: 이미지 픽셀 폭
     height: u32 = 0, // v: 이미지 픽셀 높이
     image_id: u32 = 0, // i
+    // I: client 가 정하는 image **number**. 터미널이 여기에 image id 를 배정하고 응답에 둘 다 싣는다.
+    // `i=` 가 함께 오면 그쪽이 이긴다(명세: id 가 더 구체적인 지정이다).
+    image_number: u32 = 0,
     more: bool = false, // m: 1이면 chunk가 이어짐
     compression: u8 = 0, // o: 'z'=zlib
     // --- display(placement) 키 — a=p/T에서 쓴다. 베이스: kitty graphics protocol display data. ---
@@ -404,7 +407,14 @@ fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
 /// **query(a=q)는 저장하지 않고 검증만 한다**(kitty 명세: "the terminal must not actually store
 /// the image"). 앱은 이 응답 하나로 "이 터미널이 kitty graphics를 하는가"를 판정하므로, 무응답은
 /// 곧 미지원 선언이다 — 실측(2026-09-08): terminal-browser·icat·timg가 모두 `a=q`로 감지한다.
-pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payload: []const u8) void {
+    var cmd = cmd_in;
+    // `I=`(image number)를 image id 로 푼다 — 같은 번호는 같은 id 를 재사용해 이전 이미지를 교체한다.
+    // **`i=` 가 함께 오면 그쪽이 이긴다**(id 가 더 구체적인 지정이다 — 명세). 배정에 실패하면 거부한다.
+    if (cmd.image_number != 0 and cmd.image_id == 0) {
+        cmd.image_id = resolveImageNumber(self, cmd.image_number);
+        if (cmd.image_id == 0) return kittyReply(self, cmd, .enomem);
+    }
     const status: KittyStatus = switch (cmd.action) {
         'q' => kittyTransmit(self, cmd, payload, false), // query: 검증만(저장 안 함)
         't' => kittyTransmit(self, cmd, payload, true),
@@ -430,11 +440,18 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload
 /// 그래서 앱들은 maru를 "이미지 못 그리는 터미널"로 판정해 왔다. kitty·Ghostty가 같은 자리에서
 /// 답하고 앱들이 그 응답을 전제로 만들어졌으므로, 표준 동작을 따르는 것이 맞다.
 fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatus) void {
-    if (cmd.image_id == 0) return; // 식별자 없는 명령엔 응답하지 않는다(명세)
+    if (cmd.image_id == 0 and cmd.image_number == 0) return; // 식별자(i= 또는 I=) 없는 명령엔 응답하지 않는다(명세)
     if (cmd.quiet >= 2) return; // q=2: 전부 침묵
     if (cmd.quiet == 1 and status == .ok) return; // q=1: 실패만 보고
-    var buf: [96]u8 = undefined;
-    const s = if (cmd.placement_id != 0)
+    var buf: [128]u8 = undefined;
+    // **번호로 보냈으면 응답에 `I=` 를 함께 싣는다** — 클라이언트는 그것으로 자기 요청을 짝짓고,
+    // `i=` 로 배정된 id 를 알아 이후 display/delete 에 쓴다(명세). 번호를 안 썼으면 `i=` 만.
+    const s = if (cmd.image_number != 0)
+        (if (cmd.placement_id != 0)
+            std.fmt.bufPrint(&buf, "\x1b_GI={d},i={d},p={d};{s}\x1b\\", .{ cmd.image_number, cmd.image_id, cmd.placement_id, status.text() }) catch return
+        else
+            std.fmt.bufPrint(&buf, "\x1b_GI={d},i={d};{s}\x1b\\", .{ cmd.image_number, cmd.image_id, status.text() }) catch return)
+    else if (cmd.placement_id != 0)
         std.fmt.bufPrint(&buf, "\x1b_Gi={d},p={d};{s}\x1b\\", .{ cmd.image_id, cmd.placement_id, status.text() }) catch return
     else
         std.fmt.bufPrint(&buf, "\x1b_Gi={d};{s}\x1b\\", .{ cmd.image_id, status.text() }) catch return;
@@ -488,6 +505,54 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     return .ok;
 }
 
+/// `I=`(image number)가 가리키는 image id 를 정한다 — 없으면 **새로 배정**한다.
+///
+/// 같은 번호로 다시 오면 **같은 id 를 재사용**해 이전 이미지를 교체한다(명세: 같은 번호는 이전 것을
+/// 대체). 새 번호면 안 쓰이는 id 를 위에서부터 내려오며 고른다 — 클라이언트가 흔히 쓰는 작은 id 와
+/// 부딪히지 않게. 배정에 실패하면(표가 꽉 참·OOM) 0 을 돌려주고 호출자가 거부한다.
+fn resolveImageNumber(self: *TerminalCore, number: u32) u32 {
+    for (self.kitty_image_numbers.items) |entry| {
+        if (entry.number == number) return entry.image_id;
+    }
+    // 안 쓰이는 id 를 찾는다. 이미 저장된 이미지와 다른 번호에 배정된 id 를 모두 피한다.
+    var candidate = self.kitty_next_auto_id;
+    var tries: u32 = 0;
+    while (tries < 4096) : (tries += 1) {
+        // 0 은 «없음» 이고 0xFFFF_FFFF 는 배경 이미지 예약이라 건너뛴다.
+        if (candidate == 0 or candidate == 0xFFFF_FFFF) {
+            candidate = 0xFFFF_FFFE;
+            continue;
+        }
+        if (!self.kitty_images.map.contains(candidate) and !imageIdTaken(self, candidate)) break;
+        candidate -%= 1;
+    }
+    if (tries == 4096) return 0; // 배정 실패 — 호출자가 ENOMEM 으로 거부한다
+    if (self.kitty_image_numbers.items.len >= TerminalCore.max_kitty_placements) return 0; // 폭주 방어선(placement 와 같은 한도)
+    self.kitty_image_numbers.append(self.allocator, .{ .number = number, .image_id = candidate }) catch return 0;
+    self.kitty_next_auto_id = candidate -% 1;
+    return candidate;
+}
+
+/// 이 id 가 이미 어떤 번호에 배정돼 있는가(저장소에 아직 이미지가 없어도 예약된 것으로 본다).
+fn imageIdTaken(self: *TerminalCore, id: u32) bool {
+    for (self.kitty_image_numbers.items) |entry| {
+        if (entry.image_id == id) return true;
+    }
+    return false;
+}
+
+/// 번호 배정을 지운다 — 이미지가 삭제될 때 함께 정리해 표가 무한히 자라지 않게 한다.
+fn forgetImageNumberFor(self: *TerminalCore, image_id: u32) void {
+    var i: usize = 0;
+    while (i < self.kitty_image_numbers.items.len) {
+        if (self.kitty_image_numbers.items[i].image_id == image_id) {
+            _ = self.kitty_image_numbers.orderedRemove(i);
+            return; // 한 id 는 한 번호에만 배정된다
+        }
+        i += 1;
+    }
+}
+
 /// virtual placement(U=1)를 등록한다 — 같은 `(image_id, placement_id)` 키는 교체한다(일반 placement와
 /// 같은 규칙). 상한은 일반 placement와 같은 방어선을 쓴다.
 fn addOrReplaceVirtualPlacement(self: *TerminalCore, vp: types.KittyVirtualPlacement) KittyStatus {
@@ -526,7 +591,10 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
         'a' => { // 전체
             self.kitty_placements.clearRetainingCapacity();
             self.kitty_virtual_placements.clearRetainingCapacity();
-            if (free_image) self.kitty_images.clear(self.allocator);
+            if (free_image) {
+                self.kitty_images.clear(self.allocator);
+                self.kitty_image_numbers.clearRetainingCapacity(); // 번호 배정도 함께(이미지가 없으면 무의미)
+            }
         },
         'i' => { // image_id로(+ 선택적 placement_id)
             if (cmd.image_id == 0) return .einval;
@@ -534,6 +602,7 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
                 removePlacementsForImage(self, cmd.image_id);
                 removeVirtualPlacements(self, cmd.image_id, 0);
                 self.kitty_images.remove(self.allocator, cmd.image_id);
+                forgetImageNumberFor(self, cmd.image_id); // 번호 배정도 놓아준다(표 무한 증가·stale 재사용 방지)
             } else if (cmd.placement_id != 0) {
                 removeOnePlacement(self, cmd.image_id, cmd.placement_id);
                 removeVirtualPlacements(self, cmd.image_id, cmd.placement_id);

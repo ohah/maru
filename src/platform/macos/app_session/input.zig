@@ -96,6 +96,19 @@ pub fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent
 /// pending은 의도적으로 Metal responder를 쓰므로 보존하고, overlay가 없는 stale dock owner는 native/Zig
 /// race로 판정해 workspace로 정합한다. WebView key는 dispatchWebAppAction의 surface-aware 경로를 따로 쓴다.
 pub fn handleMetalKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
+    // **키를 뗀 것은 터미널 인코더만 쓴다.** chrome — 사이드바 검색·pane 이름 바꾸기·팔레트·find·
+    // 주소창 — 에는 「뗐다」는 개념이 없다. 그대로 흘리면 **글자가 두 번 들어간다**.
+    //
+    // 이 아래 `handleKeyEvent` 는 통째로 key-down 을 전제한다(`settleKeyEventSummary` 가 종결에서
+    // `last_event_kind = key_down` 을 확정한다). 그런데 `d48712303` 이 Swift `keyUp` 핸들러를 신설하며
+    // release 를 조건 없이 코어로 보내기 시작했고, 터미널 쪽만 인코더에서 걸러졌다(#3449·#3456).
+    // chrome 은 그 게이트를 지나지 않아 남아 있었다 — 사용자 제보: 터미널은 괜찮은데 워크스페이스
+    // 입력과 pane 이름 바꾸기에서 자모가 계속 두 번씩 들어갔다.
+    //
+    // 터미널일 때는 그대로 흘린다 — kitty `report_events`(flag 2)를 켠 앱은 release 를 받아야 하고,
+    // 그 판정은 인코더 한 곳(`terminal.input.encodeKey`)이 소유한다.
+    if (event.event_type == .release and self.inputFocus() != .terminal) return keyIgnored(self);
+
     const stale_dock_owner = switch (self.focus_owner) {
         .dock_pending => self.inputFocus() == .terminal,
         .workspace, .file_tree => false,

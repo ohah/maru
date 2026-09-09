@@ -5196,6 +5196,24 @@ pub fn build(b: *std.Build) void {
     host_close_log_step.dependOn(&run_host_close_log.step);
     boundary_step.dependOn(&run_host_close_log.step);
 
+    const chrome_key_release_step = b.step(
+        "test-chrome-key-release",
+        "Key release never reaches chrome text input (it doubled every character)",
+    );
+    const chrome_key_release_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/chrome_key_release_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_chrome_key_release = b.addRunArtifact(chrome_key_release_tests);
+    run_chrome_key_release.addArg("--maru-expect-tests=1");
+    run_chrome_key_release.addArg("--maru-expect-passed=1");
+    run_chrome_key_release.setCwd(b.path("."));
+    chrome_key_release_step.dependOn(&run_chrome_key_release.step);
+    boundary_step.dependOn(&run_chrome_key_release.step);
+
     const restore_reason_step = b.step(
         "test-notification-restore-reason",
         "Activation-stage handoff rejections name the field (InvalidValue alone cost 22 sessions)",

@@ -661,6 +661,12 @@ pub const UpgradeOwner = struct {
     }
 };
 
+pub const testing_api = if (@import("builtin").is_test) struct {
+    pub fn rejectCommit(finish: *UpgradeOwner.PreparedFinish) void {
+        finish.active = false;
+    }
+} else struct {};
+
 fn reportAllowedForRole(
     role: ?RestoreRole,
     report: wire.AttemptReport,

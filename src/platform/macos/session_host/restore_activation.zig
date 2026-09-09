@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const c = std.c;
 const entrypoint = @import("entrypoint.zig");
+const exec_fd_set = @import("exec_fd_set.zig");
 const code_signature = @import("code_signature.zig");
 const host_authority = @import("host_authority.zig");
 const host_log = @import("host_log.zig");
@@ -18,6 +19,7 @@ const owner_lease = @import("owner_lease.zig");
 const protocol = @import("protocol.zig");
 const reg = @import("registry.zig");
 const rollback_image = @import("rollback_image.zig");
+const staged_image = @import("staged_image.zig");
 const runtime_manager = @import("runtime_manager.zig");
 const notification_os_delivery = @import("notification_os_delivery.zig");
 const screen_stream = @import("maru").session.screen_stream;
@@ -55,6 +57,16 @@ pub const PrecommitFault = enum {
     manifest_ready_poisoned,
 };
 
+/// Durable ready commit 뒤에는 rollback을 다시 실행할 수 없다. 이 목록은
+/// fail-stop 세 지점과 status-only 수렴 한 지점을 test artifact에만 연다.
+pub const PostcommitFault = enum {
+    none,
+    rollback_cleanup_activation,
+    inherited_fd_close,
+    rollback_promotion,
+    attempt_report,
+};
+
 const PrecommitFaultPlan = struct {
     selected: PrecommitFault,
     consumed: bool = false,
@@ -74,12 +86,23 @@ const PrecommitFaultPlan = struct {
     }
 };
 
+const PostcommitFaultPlan = struct {
+    selected: PostcommitFault,
+    consumed: bool = false,
+
+    fn consume(self: *@This(), point: PostcommitFault) bool {
+        if (self.consumed or self.selected != point) return false;
+        self.consumed = true;
+        return true;
+    }
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     invocation: entrypoint.RestoreInvocation,
 ) !void {
-    return runImpl(allocator, io, invocation, null, null);
+    return runImpl(allocator, io, invocation, null, null, null);
 }
 
 pub fn runWithNotificationAdapter(
@@ -88,7 +111,7 @@ pub fn runWithNotificationAdapter(
     invocation: entrypoint.RestoreInvocation,
     adapter: notification_os_delivery.Adapter,
 ) !void {
-    return runImpl(allocator, io, invocation, adapter, null);
+    return runImpl(allocator, io, invocation, adapter, null, null);
 }
 
 pub fn runWithPrecommitFaultForTest(
@@ -100,7 +123,19 @@ pub fn runWithPrecommitFaultForTest(
     if (!builtin.is_test) @compileError("restore activation fault injection is test-only");
     if (invocation.role != .target or fault == .none) return error.InvalidRestore;
     var plan = PrecommitFaultPlan{ .selected = fault };
-    return runImpl(allocator, io, invocation, null, &plan);
+    return runImpl(allocator, io, invocation, null, &plan, null);
+}
+
+pub fn runWithPostcommitFaultForTest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    invocation: entrypoint.RestoreInvocation,
+    fault: PostcommitFault,
+) !void {
+    if (!builtin.is_test) @compileError("restore activation fault injection is test-only");
+    if (invocation.role != .target or fault == .none) return error.InvalidRestore;
+    var plan = PostcommitFaultPlan{ .selected = fault };
+    return runImpl(allocator, io, invocation, null, null, &plan);
 }
 
 fn runImpl(
@@ -109,6 +144,7 @@ fn runImpl(
     invocation: entrypoint.RestoreInvocation,
     notification_adapter: ?notification_os_delivery.Adapter,
     precommit_fault: ?*PrecommitFaultPlan,
+    postcommit_fault: ?*PostcommitFaultPlan,
 ) !void {
     // 복원은 다섯 단계인데 실패하면 호출자에는 에러 이름 하나만 올라간다. 2026-09-05 에 3 일 넘게
     // 살아 있던 host 가 `InvalidValue` 로 죽고 세션 22 개를 잃었을 때, 남은 단서는 그 이름뿐이라 어느
@@ -168,6 +204,7 @@ fn runImpl(
         &rollback_allowed,
         notification_adapter,
         precommit_fault,
+        postcommit_fault,
     ) catch |err| {
         // `rollback_allowed` 가 여기서 결정적이다. `activateValidated` 는 authority 를 잡고 소유권을
         // 커밋하는 순간 이 플래그를 내리는데(롤백 금지선), 그 뒤의 실패는 **설계상** 롤백하지 않는다.
@@ -183,6 +220,8 @@ fn runImpl(
         // fault의 exact-one 소비를 rollback exec보다 먼저 증명한다.
         if (precommit_fault) |fault|
             if (!fault.consumed) return error.PrecommitFaultNotConsumed;
+        if (postcommit_fault) |fault|
+            if (!fault.consumed) return error.PostcommitFaultNotConsumed;
         if (rollback_allowed and err != error.AuthorityPoisoned) {
             if (rollback_exec) |*prepared|
                 prepared.execute() catch return error.RollbackExecFailed;
@@ -228,6 +267,7 @@ fn activateValidated(
     rollback_allowed: *bool,
     notification_adapter: ?notification_os_delivery.Adapter,
     precommit_fault: ?*PrecommitFaultPlan,
+    postcommit_fault: ?*PostcommitFaultPlan,
 ) !void {
     const deadline = try validated.deadline(io);
     try checkRoleDeadline(invocation.role, deadline);
@@ -507,9 +547,24 @@ fn activateValidated(
     preserve_owner_path_for_rollback = false;
 
     var committed_graph = validated_graph.commitOwnership();
+    if (postcommit_fault) |fault|
+        if (fault.consume(.rollback_cleanup_activation)) {
+            if (builtin.is_test)
+                rollback_image.testing_api.rejectCleanupActivation(&rollback_authority);
+        };
     if (!rollback_authority.activateCleanup()) {
         authority.markDraining() catch {};
         return error.PostCommitFailStop;
+    }
+    var unexpected_inherited_fd: c.fd_t = -1;
+    defer if (unexpected_inherited_fd >= 0) {
+        _ = c.close(unexpected_inherited_fd);
+    };
+    if (postcommit_fault) |fault| {
+        if (fault.consume(.inherited_fd_close)) {
+            if (builtin.is_test)
+                unexpected_inherited_fd = try exec_fd_set.testing_api.openUnexpectedInheritedFd();
+        }
     }
     inherited_close.closeAndVerify() catch {
         authority.markDraining() catch {};
@@ -519,6 +574,11 @@ fn activateValidated(
 
     if (invocation.role == .target) {
         const execution = target_execution.?;
+        const promotion_failpoint: staged_image.PromotionFailpoint =
+            if (postcommit_fault) |fault|
+                if (fault.consume(.rollback_promotion)) .before_swap else .none
+            else
+                .none;
         const promotion = rollback_authority.promoteTarget(
             stager.owner_dir,
             execution.target.artifact.path,
@@ -528,7 +588,7 @@ fn activateValidated(
                 .size = execution.target.artifact.size,
                 .sha256 = execution.target.artifact.sha256,
             },
-            .none,
+            promotion_failpoint,
         );
         const report: upgrade_wire.AttemptReport = switch (promotion) {
             .promoted => blk: {
@@ -540,6 +600,11 @@ fn activateValidated(
                 .reason = .promotion_failed,
             },
         };
+        if (postcommit_fault) |fault|
+            if (fault.consume(.attempt_report)) {
+                if (report.reason != .none) return error.PostcommitFaultNotConsumed;
+                if (builtin.is_test) upgrade_owner.testing_api.rejectCommit(&finish);
+            };
         if (!finish.commitReport(report))
             return error.PostCommitFailStop;
     } else {
@@ -547,6 +612,9 @@ fn activateValidated(
         if (attempt_owner.status(invocation.attempt_id) == null)
             return error.PostCommitFailStop;
     }
+
+    if (postcommit_fault) |fault|
+        if (!fault.consumed) return error.PostcommitFaultNotConsumed;
 
     if (next_upgrade_capable) {
         authority.installUpgradeController(attempt_owner.ops());

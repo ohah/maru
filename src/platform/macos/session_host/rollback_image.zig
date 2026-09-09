@@ -168,6 +168,12 @@ pub const Authority = struct {
     }
 };
 
+pub const testing_api = if (@import("builtin").is_test) struct {
+    pub fn rejectCleanupActivation(authority: *Authority) void {
+        authority.valid = false;
+    }
+} else struct {};
+
 pub fn validateRecord(record: attempt_record.ImageView) bool {
     var path_buf: [@import("upgrade_limits.zig").max_target_path_bytes + 1]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}", .{record.path}) catch return false;

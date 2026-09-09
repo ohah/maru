@@ -5036,6 +5036,26 @@ pub fn build(b: *std.Build) void {
     );
     boundary_step.dependOn(&run_session_host_upgrade_restore_precommit_boundary_tests.step);
 
+    const session_host_upgrade_restore_postcommit_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_upgrade_restore_postcommit_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_upgrade_restore_postcommit_boundary_tests =
+        b.addRunArtifact(session_host_upgrade_restore_postcommit_boundary_tests);
+    run_session_host_upgrade_restore_postcommit_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_upgrade_restore_postcommit_boundary_tests.setCwd(b.path("."));
+    const session_host_upgrade_restore_postcommit_boundary_step = b.step(
+        "test-session-host-upgrade-restore-postcommit-boundary",
+        "Keep the restore postcommit fault vocabulary test-only",
+    );
+    session_host_upgrade_restore_postcommit_boundary_step.dependOn(
+        &run_session_host_upgrade_restore_postcommit_boundary_tests.step,
+    );
+    boundary_step.dependOn(&run_session_host_upgrade_restore_postcommit_boundary_tests.step);
+
     const session_host_daemon_cleanup_fail_stop_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_daemon_cleanup_fail_stop_boundary.zig"),
@@ -12458,6 +12478,41 @@ pub fn build(b: *std.Build) void {
         );
         session_host_restore_precommit_step.dependOn(&run_session_host_restore_precommit_tests.step);
         run_session_host_tests.step.dependOn(session_host_restore_precommit_step);
+
+        const session_host_restore_postcommit_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_nonempty_rollback_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
+            }),
+            .filters = &.{
+                "restore postcommit fail-stop rows never execute rollback",
+                "restore postcommit promotion failure keeps the real PTY status-only",
+            },
+            .test_runner = .{
+                .path = b.path("tools/session_host_restore_postcommit_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        const run_session_host_restore_postcommit_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_restore_postcommit_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_restore_postcommit_tests.addArg(
+            "MARU_SESSION_HOST_RESTORE_POSTCOMMIT_GATE=maru-test-only-v1",
+        );
+        run_session_host_restore_postcommit_tests.addArtifactArg(session_host_restore_postcommit_tests);
+        run_session_host_restore_postcommit_tests.addArg("--maru-expect-tests=2");
+        run_session_host_restore_postcommit_tests.setCwd(b.path("."));
+        const session_host_restore_postcommit_step = b.step(
+            "test-session-host-upgrade-restore-postcommit-failure-matrix",
+            "Run postcommit restore fail-stop and status-only matrix (macOS)",
+        );
+        session_host_restore_postcommit_step.dependOn(&run_session_host_restore_postcommit_tests.step);
+        run_session_host_tests.step.dependOn(session_host_restore_postcommit_step);
 
         const daemon_cleanup_fail_stop_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

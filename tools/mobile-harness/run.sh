@@ -241,7 +241,10 @@ chrome-ios)
     mobile_lib mobile-lib-ios-sim
     APP="$OUT/MaruChrome.app"
     rm -rf "$APP" && mkdir -p "$APP"
-    sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$HARNESS/Info.plist.in" > "$APP/Info.plist"
+    sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$IOS/Info.plist.in" > "$APP/Info.plist"
+    # **개인정보 선언도 번들에 든다**(M11a). 여기서 «만들지» 않고 제품 자리 것을 가져다 넣는다 —
+    # 하네스가 자기 사본을 두면 번들과 제품이 갈리고, 그 차이는 심사에서야 드러난다.
+    cp "$IOS/PrivacyInfo.xcprivacy" "$APP/PrivacyInfo.xcprivacy"
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
     # 굵게·기울임은 **다른 글리프**라 폰트 파일도 따로 필요하다(SGR 1/3).
     for f in Regular Bold Italic BoldItalic; do
@@ -267,7 +270,7 @@ present-ios)
     # 여섯 기능 중 마지막. 오프스크린에는 "표시 시각"이 없어 앱으로만 판정된다.
     APP="$OUT/MaruPace.app"
     rm -rf "$APP" && mkdir -p "$APP"
-    sed 's/@@NAME@@/MaruPace/; s/dev.maru.poc/dev.maru.pace/' "$HARNESS/Info.plist.in" > "$APP/Info.plist"
+    sed 's/@@NAME@@/MaruPace/; s/dev.maru.poc/dev.maru.pace/' "$IOS/Info.plist.in" > "$APP/Info.plist"
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
         "$HARNESS/present_ios.m" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
@@ -324,9 +327,17 @@ chrome-android-app)
     for f in Regular Bold Italic BoldItalic; do
         cp "$ROOT/assets/fonts/Jetendard/Jetendard-$f.ttf" "$OUT/assets/"
     done
+    # **개발 빌드에만 `debuggable` 을 끼워 넣는다**(M11a — 계약 §3.4). 매니페스트의 기본값은
+    # 안전이고(그 값이 배포에 실리면 아무나 앱 저장소를 꺼낸다) 이 하네스는 `run-as` 로 앱 안의
+    # 래스터 결과를 꺼내야 하므로 여기서 켠다. **원본을 안 고친다** — 고치면 그 파일이 켜진 채로
+    # 남아 다음 배포 빌드에 그대로 실린다.
+    DEVMANIFEST="$OUT/AndroidManifest.dev.xml"
+    sed 's|<application android:label="MaruChrome">|<application android:label="MaruChrome" android:debuggable="true">|' \
+        "$ANDROID/AndroidManifest.xml" > "$DEVMANIFEST"
+    grep -q 'android:debuggable="true"' "$DEVMANIFEST" || { echo "개발 매니페스트에 debuggable 을 못 넣었다" >&2; exit 1; }
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
-        --manifest "$ANDROID/AndroidManifest.xml" -A "$OUT/assets" \
+        --manifest "$DEVMANIFEST" -A "$OUT/assets" \
         -o "$OUT/base.apk" --auto-add-overlay
     # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
     # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).

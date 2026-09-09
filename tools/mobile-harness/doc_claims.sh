@@ -11,6 +11,8 @@ S=src/platform/mobile/mobile_ssh.zig
 H=src/platform/mobile/mobile_host_abi.h
 I=src/platform/ios/ios_app_host.m
 A=src/platform/android/android_app_host.c
+# 하네스 스크립트도 계약의 일부다 — 개발 빌드에만 켜는 자리가 거기다(M11a).
+H_RUN=tools/mobile-harness/run.sh
 # Android 는 Java 도 host 다 — Keystore 를 여는 자리가 거기다(계약 §3.4).
 J=src/platform/android/MaruActivity.java
 K=src/platform/android/MaruKeyStore.java
@@ -174,7 +176,11 @@ ck "두 host 다 같은 표본 수를 쓴다" 2 "$(grep -l MARU_FRAME_PACE_SAMPL
 ck "중앙값 색인이 파생이다" 2 "$(grep -cE 'MARU_FRAME_PACE_SAMPLES / 2' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 # `Info.plist` 는 번들에 박히는 **능력 선언**이라 config 로 못 켠다. 주기를 config(M10)로
 # 열 때 이 키가 없으면 ProMotion 기기에서 조용히 60 으로 잘린다 — 그래서 미리 켜 둔다.
-ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' tools/mobile-harness/Info.plist.in)"
+# **제품 자리를 본다**(M11a). 예전에는 하네스 폴더의 템플릿을 봤는데, 그것은 번들에 박히는 앱
+# 소스라 그 폴더에 있으면 안 되고(그 폴더의 규율이다) 무엇보다 **제품 번들을 따로 만드는 순간
+# 판정자는 초록인데 번들에서만 키가 빠진다**. 자리가 하나면 갈릴 수가 없다.
+ck "주기 상한 해제가 번들 템플릿에 있다" 1 "$(grep -c 'CADisableMinimumFrameDuration' src/platform/ios/Info.plist.in)"
+ck "하네스는 번들 템플릿 사본을 안 갖는다" 0 "$(ls tools/mobile-harness/Info.plist.in 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "§관성 — 숫자가 갈리지 않는다"
 # **관성은 코어 한 곳에서 돈다.** 본문·키바·설정이 같은 값으로 흘러야 하고(다르면 사용자는
@@ -392,6 +398,29 @@ if [ "$(uname)" = "Darwin" ] && command -v swift >/dev/null 2>&1; then
 else
   printf "  건너뜀 %-40s macOS 아님\n" "자가 검사"
 fi
+
+echo "§3.4 배포 준비 (M11a)"
+N=src/platform/android/AndroidManifest.xml
+X=src/platform/ios/PrivacyInfo.xcprivacy
+# **배포 기본값은 안전이다.** 이 값이 실리면 아무나 앱 저장소를 꺼낸다 — 개인키를 봉인해 두는
+# 그 자리다(§3.4). 주석은 안 센다(그 함정을 설명하는 주석이 이 이름을 담는다).
+ck "매니페스트에 debuggable 이 없다" 0 "$(sed '/<!--/,/-->/d' $N | grep -c 'android:debuggable=')"
+# 개발 빌드는 **하네스가** 켠다. 그리고 **원본을 안 고친다** — 고치면 켜진 채 남아 다음 배포에 실린다.
+# **두 번 나온다**: 끼워 넣는 `sed` 한 줄과 **넣었는지 확인하는** 한 줄. 확인이 없으면 치환이
+# 빗나갔을 때(매니페스트 문구가 바뀌면) 조용히 안 켜진 apk 가 나오고, `run-as` 가 안 되는 이유를
+# 한참 찾게 된다.
+ck "개발 빌드가 켜고, 켜졌는지 확인한다" 2 "$(grep -c 'android:debuggable' $H_RUN)"
+ck "원본이 아니라 사본에 쓴다" 1 "$(grep -c 'AndroidManifest.dev.xml' $H_RUN)"
+# **개인정보 선언은 제품 자리에 있고 번들에 든다.** 하네스가 자기 사본을 만들면 번들과 갈린다.
+ck "개인정보 선언이 제품 자리에 있다" 1 "$(ls $X 2>/dev/null | wc -l | tr -d ' ')"
+ck "번들에 그것을 넣는다" 1 "$(grep -c 'PrivacyInfo.xcprivacy' $H_RUN)"
+# **우리 답은 전부 「없음」이다.** 배열 셋이 비어 있어야 그 선언이 참이다.
+ck "추적 안 함" 1 "$(grep -c '<key>NSPrivacyTracking</key><false/>' $X)"
+ck "수집하는 자료 없음" 1 "$(grep -c '<key>NSPrivacyCollectedDataTypes</key><array/>' $X)"
+ck "사유를 밝힐 API 없음" 1 "$(grep -c '<key>NSPrivacyAccessedAPITypes</key><array/>' $X)"
+# **그리고 그것이 «사실»이어야 한다.** 하나라도 쓰기 시작하면 위 선언이 거짓이 된다 — 그때
+# 붉어져서 선언을 함께 고치게 한다(2026-09-09 실측: 전부 0건).
+ck "사유를 밝힐 API 를 안 쓴다" 0 "$(sed 's,//.*,,' $I | grep -cE 'NSUserDefaults|systemUptime|NSFileCreationDate|NSFileModificationDate|attributesOfItemAtPath|statfs|activeInputModes')"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

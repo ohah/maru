@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- **우리 답은 전부 「없음」이다**(계약 §3.4). 이 파일은 그 사실의 «선언»이고, 그것이 계속
+     사실이도록 `tools/mobile-harness/doc_claims.sh` 가 지킨다.
+
+     - 추적 안 함: 광고·식별자·제3자 SDK 가 없다(의존 0 — 계약 §1).
+     - 수집하는 자료 없음: 진단조차 로컬이고 나가는 것은 사용자가 복사해 붙이는 것뿐이다(§5).
+     - **사유를 밝혀야 하는 API 도 안 쓴다**: `NSUserDefaults`·파일 타임스탬프·디스크 여유·
+       부팅 시각·활성 키보드 — 2026-09-09 실측으로 전부 0건이다. 그래서 이 배열이 비어 있다.
+       하나라도 늘면 판정자가 붉어지고, 그때 이 선언을 함께 고치게 된다.
+
+     자리는 **제품**이다(`src/platform/ios/`). 하네스는 이것을 가져다 번들에 넣기만 한다 —
+     그 폴더는 앱 소스를 안 갖는다는 것이 규율이고, 자리가 둘이면 한쪽만 낡는다. -->
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyTracking</key><false/>
+  <key>NSPrivacyTrackingDomains</key><array/>
+  <key>NSPrivacyCollectedDataTypes</key><array/>
+  <key>NSPrivacyAccessedAPITypes</key><array/>
+</dict>
+</plist>

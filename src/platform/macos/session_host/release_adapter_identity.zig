@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+pub const max_release_asset_bytes: u64 = 2 * 1024 * 1024 * 1024 - 1;
+
 pub fn canonicalTag(tag: []const u8) bool {
     if (tag.len < 2 or tag[0] != 'v') return false;
     const version = tag[1..];

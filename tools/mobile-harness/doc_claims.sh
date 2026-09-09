@@ -381,13 +381,16 @@ ck "그 자리에 실측값이 있다" 1 "$(grep -c '5 PASS / 1 FAIL' tools/mobi
 ck "시뮬레이터 없이 도는 자가 검사" 1 "$(grep -c 'if mode == \"selftest\"' $R)"
 # **자가 검사가 «사본»을 검사하면 아무것도 안 지킨다** — 푸는 자리가 하나여야 한다.
 ck "푸는 자리가 하나다" 1 "$(grep -c '^func solve(' $R)"
-# **여기서 실제로 돌린다** — 있는지만 세면 그 안이 깨져도 초록이다. `swift` 가 없는 자리(CI 는
-# ubuntu 다)에서는 **건너뛴다고 말한다**: 조용히 안 도는 게이트는 게이트가 아니다(이 저장소가
-# 겪은 그 모양).
-if command -v swift >/dev/null 2>&1; then
-  ck "자가 검사가 통과한다" "전부 통과" "$(swift $R selftest 2>/dev/null | tail -1 | sed 's/selftest: //')"
+# **여기서 실제로 돌린다** — 있는지만 세면 그 안이 깨져도 초록이다.
+#
+# **건너뛰는 조건은 «macOS 인가» 다.** 처음에는 `command -v swift` 로 갈랐는데, CI(ubuntu)에도
+# swift 가 있어서 **돌긴 돌고 CoreGraphics 가 없어 아무것도 안 뱉었다** — 그 빈 값이 「통과 아님」
+# 으로 붉었다(CI 가 잡았다). 이 스크립트는 CGEvent·CGWindowList 를 쓰므로 macOS 에서만 돈다.
+# 안 도는 자리에서는 **건너뛴다고 말한다**: 조용히 안 도는 게이트는 게이트가 아니다.
+if [ "$(uname)" = "Darwin" ] && command -v swift >/dev/null 2>&1; then
+  ck "자가 검사가 통과한다" "전부 통과" "$(swift $R selftest | tail -1 | sed 's/selftest: //')"
 else
-  printf "  건너뜀 %-40s swift 없음\n" "자가 검사"
+  printf "  건너뜀 %-40s macOS 아님\n" "자가 검사"
 fi
 
 echo "문서가 자기 자신과 모순되지 않는가"

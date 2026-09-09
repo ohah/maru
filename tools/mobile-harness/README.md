@@ -46,8 +46,10 @@ swift tools/mobile-harness/sim_input.swift calibrate   # 앱을 띄워 두고 �
 
 **보정은 스스로를 확인하고 나서 저장한다** — 푼 사상으로 셋째 점을 보내고 앱이 그 자리를 받았는지
 본다(2pt 안). 안 맞으면 **저장하지 않는다**: 틀린 값을 적어 두면 그 뒤 모든 손짓이 조용히 빗나간다.
-`selftest` 는 시뮬레이터 없이 도는 판정이라 `doc_claims.sh` 가 함께 돌린다(`swift` 가 없는 자리
-에서는 **건너뛴다고 말한다** — 조용히 안 도는 게이트는 게이트가 아니다).
+`selftest` 는 시뮬레이터 없이 도는 판정이라 `doc_claims.sh` 가 함께 돌린다. **macOS 가 아니면
+건너뛴다고 말한다** — 이 스크립트는 `CGEvent`·`CGWindowList` 를 쓰므로 다른 OS 에서는 안 돈다
+(처음에 `swift` 존재로 갈랐다가 CI(ubuntu)에서 붉었다: 거기도 swift 는 있고 CoreGraphics 만
+없어서 **돌긴 돌고 아무것도 안 뱉었다**). 조용히 안 도는 게이트는 게이트가 아니다.
 
 ~~**`features-ios` 는 지금 이 환경에서 멈춘다.**~~ — **다시 도는 것을 확인했다**(2026-09-09).
 `simctl spawn` 으로 다섯을 판정하고(전부 PASS) 여섯째만 FAIL 인데, 그 FAIL 은 고장이 아니라

@@ -542,8 +542,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 - **구현됨:** stable explicit tag의 `maru.host-handoff.v1`, host/runtime DTO, host-wide atomic decode,
   runtime identity/child/geometry/fd slot, compile-time serialized-field coverage, 대표적인 non-default
   `TerminalCore` parser continuation round-trip을 `test-session-host`가 검증한다. fail-every-allocation은 부분
-  candidate를 publish하거나 누수하지 않는다. 모든 logical state를 non-default로 채운 exhaustive equality fixture는
-  아직 남아 있으므로 U1 종료 gate는 열려 있다.
+  candidate를 publish하거나 누수하지 않는다. U1 종료 gate는 **유효한 fixture 집합의 합집합**이
+  `core_fields_v1`의 모든 stable tag를 적어도 한 번 기본 초기값과 다른 canonical field bytes로 만들고, 각 fixture의
+  `encode → decode → encode` 전체 envelope bytes가 exact 일치할 때 닫힌다. CSI·OSC·DCS·APC continuation처럼 한 core에
+  동시에 존재할 수 없는 parser 상태는 별도 fixture로 나누며, raw struct에 도달 불가능한 조합을 직접 써서 coverage를
+  채우지 않는다. tag 목록을 테스트에 복제하지 않고 codec의 실제 `core_fields_v1` 순회를 coverage SSOT로 사용한다.
+  현재는 대표 continuation round-trip만 있으므로 이 exhaustive equality fixture set은 아직 남아 있고 U1 종료 gate는
+  열려 있다.
 
 ### U2 — quiesce/resume
 

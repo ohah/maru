@@ -562,9 +562,9 @@ fn resolveImageNumber(self: *TerminalCore, number: u32) u32 {
     var candidate = self.kitty_next_auto_id;
     var tries: u32 = 0;
     while (tries < 4096) : (tries += 1) {
-        // 0 은 «없음» 이고 0xFFFF_FFFF 는 배경 이미지 예약이라 건너뛴다.
-        if (candidate == 0 or candidate == 0xFFFF_FFFF) {
-            candidate = 0xFFFF_FFFE;
+        // 0 은 «없음» 이라 건너뛰고, 바닥까지 내려오면 천장에서 다시 시작한다.
+        if (candidate == 0 or candidate > core.kitty_auto_id_top) {
+            candidate = core.kitty_auto_id_top;
             continue;
         }
         if (!self.kitty_images.map.contains(candidate) and !imageIdTaken(self, candidate)) break;
@@ -762,9 +762,7 @@ fn resolveRelativeAnchor(self: *TerminalCore, p: StoredPlacement) ?struct { row:
 /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
 /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index)·n/N(이미지 번호 I=)·
 /// c/C(커서를 덮는 placement). 나머지(p/q/x/y/r/f)는 ENOTSUPP 로 명시 거부한다 — 침묵하면 앱이
-/// 지워진 줄 알고 계속 그린다.
-/// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 미지원인데,
-/// **무음 무시가 아니라 `ENOTSUPP`로 답한다**(K5) — 앱이 "지웠다"고 믿고 다음 단계로 가지 않게.
+/// 지워진 줄 알고 계속 그린다 — 앱이 "지웠다"고 믿고 다음 단계로 가지 않게 한다(K5).
 fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     const c = cmd.delete_what;
     const free_image = (c >= 'A' and c <= 'Z'); // 대문자면 이미지 데이터도 free

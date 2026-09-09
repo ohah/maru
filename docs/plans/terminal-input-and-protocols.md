@@ -124,9 +124,17 @@
 `font.size` 8→22 A/B): 셀 8×18 → 13×29 로 두 경로가 **같은 값으로 함께** 움직였다.
 
 **남은 것**: in-band resize(`?2048`)와 color-scheme 통지(`?2031`)는 여전히 미구현이고 DECRQM이 0으로
-정직하게 답한다. kitty graphics의 unicode placeholder(`U=1`)는 **파싱하지 않아 즉시 커서 자리에 그린다** —
-tmux 경유(`wrapper.relayed()`)에서만 쓰이는 경로라 지금 당장 안 밟지만, 무시가 아니라 오작동이므로
-최소한 「U=1이면 그리지 않기」가 필요하다.
+정직하게 답한다.
+
+kitty graphics의 unicode placeholder(`U=1`)는 이제 **파싱해 virtual placement로 등록만 하고**, 실제
+위치는 화면에 찍힌 U+10EEEE 셀이 정한다(렌더러 `placeholderAt`/`appendPlaceholderQuads`).
+
+그 셀의 **id 인코딩은 24비트가 아니라 32비트다**: 전경색 RGB가 하위 24비트, **셋째 diacritic이
+최상위 바이트**다(명세). 셋째를 안 읽으면 24비트를 넘는 id가 통째로 어긋나 **이미지가 아예 안 뜬다**.
+이 자리는 `I=`(image number)와 정면으로 얽힌다 — 번호로 배정하는 id는 위에서부터 내려오므로, 배정
+천장이 `0xFFFF_FFFE`이던 동안은 **언제나** 24비트를 넘었다. 두 기능은 각각 초록이었고 **조합에서만**
+깨졌다. 지금은 (1) 셋째 diacritic을 읽고, (2) 배정 천장을 `core.kitty_auto_id_top`(0x00FF_FFFE)로
+낮춰 셋째를 안 쓰는 앱까지 동작하게 한다 — 둘 다 판정자로 고정했다.
 
 ## kitty graphics PNG 백로그 (고민 거리 — 미결정)
 

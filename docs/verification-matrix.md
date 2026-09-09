@@ -3352,6 +3352,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   교차검증한다. duplicate/unknown/reordered/trailing JSON, timestamp·identity·duration drift, 16 KiB 상한, input alias, copied/pre-owned owner,
   post-parse storage mutation과 allocation fail-index는 publication 0이다. 이 component는 filesystem/network/token을 읽지 않으므로 실제
   Actions artifact가 같은 run에서 왔다는 provenance와 protected release/U5 성공은 §11.100 후속 remote gate가 별도로 증명한다.
+  Timing artifact provenance는 **부분 구현**이다. `release_adapter_live_timing_artifact.zig`의 credential-free value owner가 current
+  attempt 이름의 Actions metadata 하나를 repository ID·run ID·source SHA·canonical URL·archive SHA-256에 결속하고, 64 KiB 이하
+  single-entry stored/deflate ZIP을 bounded memory에서 header/data descriptor/CRC까지 검증한 뒤 내부 timing record의 run attempt를
+  다시 교차검증한다. `test-session-host-release-adapter-live-timing-artifact`는 Debug·ReleaseFast에서 실제 GitHub ZIP 형식과 같은 signed
+  descriptor, replay·duplicate·expired·foreign metadata, digest/size/URL drift, traversal·encryption·link·unsupported method·trailing
+  archive, copied/pre-owned owner와 allocation fail-index를 닫는다. pinned GitHub CLI transport, private temporary file, live verdict job과
+  protected tag의 실제 원격 표본은 후속 gate다.
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

@@ -9,8 +9,9 @@
 > U5 제품 daemon controller·preflight·pathname exec·target/rollback restore activation을 연결했다.
 > caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
 > 하네스는 구현했지만, 저장소에는
-> 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 최대치 근처 multi-runtime 제품 restore,
-> 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
+> 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 1개·최대치 근처 multi-runtime 제품 restore와
+> precommit·postcommit 전 구간 failure injection 하네스는 구현됐지만, frozen release로 실행한 증거와 실제 앱
+> 재실행 화면의 업그레이드 결과 notice 및 장시간 soak가 없으므로
 > U5 완료는 주장하지 않는다.**
 > **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
@@ -605,7 +606,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
 - `host_exec_upgrade_v1`과 `host.upgrade.prepare`를 광고한다.
 - 앱 재실행 connect 경로가 upgrade 가능/호환 attach/upgrade busy/legacy 불가를 구분해 notice와 구조화 로그를 남긴다.
-- signed app update 전후 E2E와 soak가 통과한 뒤에만 자동 upgrade를 기본 활성화한다.
+- 자동 upgrade 시도는 기본 connect 경로에 연결하되 실패하면 기존 spawn으로 안전하게 폴백한다. signed app update
+  전후 E2E와 soak가 통과하기 전에는 이 기본 시도를 제품 migration 완료의 증거로 주장하지 않는다.
 - **구현된 opt-in signed 성공 gate:** 아래 명령은 개발 fixture가 아니라 명시적으로 전달한 두 제품 executable의
   strict code signature와 exact designated requirement를 먼저 대조한다. N-1 daemon에 종료 marker를 읽는 실제 PTY shell runtime을
   spawn/attach해 화면 marker를 확인하고 attachment를 0으로 만든 뒤 `host.upgrade.prepare`를 보낸다. 재접속 뒤에는
@@ -2248,11 +2250,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   input marker, exit-23 명령 뒤 host-owned child reap/runtime 제거를 함께 단언한다. exit status 숫자 자체는 현재 wire로
   노출하지 않으므로 이 gate의 관측 증거라고 주장하지 않는다. 따라서 non-empty PTY rollback 종료 gate도
   구현·실행됐다.
-- **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
-  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 1개·최대치 근처
-  multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
-  failure injection, 실제 앱 재실행 notice와 장시간 soak가 남아 있다(typed 업그레이드 결과는 GUI의
-  connect 경로와 one-shot notice에 연결됐지만 실제 두 앱 이미지 재실행 화면 증거는 별도다). macOS 공개 API에는 fd-based
+- **아직 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
+  N-1/current artifact를 사용한 1개·최대치 근처 multi-runtime의 제품 daemon→product restore→GUI exact reattach
+  하네스 실제 통과, 실제 앱 재실행 notice와 장시간 soak가 남아 있다. manifest/reader/socket/FD/promotion의
+  precommit·postcommit failure injection 하네스는 구현·통과했지만 frozen release 실행을 대신하지 않는다(typed
+  업그레이드 결과는 GUI의 connect 경로와 one-shot notice에 연결됐지만 실제 두 앱 이미지 재실행 화면 증거는 별도다).
+  macOS 공개 API에는 fd-based
   exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
   pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료를 주장하지 않는다.

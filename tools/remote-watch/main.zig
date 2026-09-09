@@ -27,7 +27,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 7\n";
+pub const version_line = "maru-remote-watch 8\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -758,6 +758,17 @@ const command_deadline_ms: i64 = 30_000;
 /// ⚠️ **git 을 기다리는 동안에도 stdin 을 본다**(적대적 검증 2026-09-04 17 회차 — 실측). 앞 판은
 /// 파이프를 블로킹으로 읽었는데, git 이 멈추면 그 `read` 에서 서서 **채널이 끊겨도 안 끝났다** —
 /// 남의 서버에 고아가 남는다. 이 트랙의 최악 실패다.
+/// 마지막 git 실행이 어떻게 끝났는지. **`unsupported` 문구에 실어 보내려고** 둔다 — 자식의 stderr 는
+/// `/dev/null` 이라(경고가 다이제스트에 섞이면 안 된다) 실패 사유를 그 밖으로는 알 길이 없다.
+///
+/// 2026-09-09 실측: 앱이 `first git digest read failed` 로 감시를 접었는데, 그 한 줄로는 「git 이
+/// 없다」·「저장소가 아니다」·「시한을 넘겼다」가 구별되지 않았다. 재현해 보니 저장소가 아닌 루트에서
+/// git 이 128 로 끝나는 것이었지만, 그 숫자가 로그에 없어 원격에서 손으로 재현하기 전까지 몰랐다.
+///
+/// 단일 스레드 폴링 루프라 전역 한 칸으로 충분하다.
+var last_exit: i32 = -1;
+var last_signal: i32 = -1;
+
 fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.hash.Wyhash) RunResult {
     var zargs: std.ArrayList(?[*:0]const u8) = .empty;
     defer {
@@ -831,6 +842,14 @@ fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.ha
     _ = std.c.waitpid(pid, &status, 0);
     if (outcome != .ok) return outcome;
     const us: u32 = @bitCast(status);
+    if (std.c.W.IFEXITED(us)) {
+        last_exit = @intCast(std.c.W.EXITSTATUS(us));
+        last_signal = -1;
+    } else if (std.c.W.IFSIGNALED(us)) {
+        last_exit = -1;
+        // `TERMSIG` 는 이 zig 판에서 enum 을 돌려준다 — 정수로 바꿔야 `{d}` 로 찍힌다.
+        last_signal = @intCast(@intFromEnum(std.c.W.TERMSIG(us)));
+    }
     if (!(std.c.W.IFEXITED(us) and std.c.W.EXITSTATUS(us) == 0)) return .failed;
     return .ok;
 }
@@ -872,7 +891,18 @@ fn watchPoll(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []con
     if (git_prefix.len == 0) exitUnsupportedWhy("no git prefix - polling needs one"); // 앞머리가 없으면 git 을 못 돌린다
     const first = digest(gpa, root, git_prefix);
     if (first.state == .channel_closed) return;
-    if (first.state != .ok) exitUnsupportedWhy("first git digest read failed");
+    if (first.state != .ok) {
+        // **왜 실패했는지까지 싣는다.** 자식의 stderr 는 `/dev/null` 이라 이 숫자가 유일한 단서다.
+        // git 은 저장소가 아니면 128, 실행 파일을 못 찾으면 우리가 127 로 끝낸다(`execvp` 뒤 `_exit`).
+        var buf: [96]u8 = undefined;
+        const text = if (last_signal >= 0)
+            std.fmt.bufPrint(&buf, "first git digest read failed - killed by signal {d}", .{last_signal})
+        else if (last_exit >= 0)
+            std.fmt.bufPrint(&buf, "first git digest read failed - git exit {d}", .{last_exit})
+        else
+            std.fmt.bufPrint(&buf, "first git digest read failed - no child status (spawn or deadline)", .{});
+        exitUnsupportedWhy(text catch "first git digest read failed");
+    }
     var last = first.value;
 
     var fds = [_]std.posix.pollfd{

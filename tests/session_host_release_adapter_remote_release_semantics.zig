@@ -8,10 +8,10 @@ const manifest = @import("release_manifest");
 const evidence = @import("release_evidence");
 
 const uuid = "123e4567-e89b-42d3-a456-426614174000";
-const commit = "1111111111111111111111111111111111111111";
+const commit = "0123456789abcdef0123456789abcdef01234567";
 const tree = "2222222222222222222222222222222222222222";
-const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const host_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const dmg_sha = "00cbbd0ddbda2762798f7009838ed34ca1f12b93965813c7df22943bc62166d1";
+const host_sha = "4740ae6347b0172c01254ff55bae5aff5199f4446e7f6d643d40185b3f475145";
 const predecessor_manifest_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const predecessor_dmg_sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const predecessor_host_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -54,7 +54,7 @@ test "role profile identity and digest exchanges fail before publication" {
     defer fixture.deinit();
     inline for ([_]Mutation{ .evidence_name, .dmg_digest, .manifest_digest, .release_id, .context_source }) |mutation| {
         var changed_context = context();
-        if (mutation == .context_source) changed_context.source_commit = "2111111111111111111111111111111111111111";
+        if (mutation == .context_source) changed_context.source_commit = "1123456789abcdef0123456789abcdef01234567";
         var remote: metadata.Owner = .{};
         const metadata_context = if (mutation == .context_source) changed_context else context();
         try fixture.bindRemote(std.testing.allocator, metadata_context, if (mutation == .evidence_name) "upgrade-evidence.json" else fixture.evidence_name, if (mutation == .dmg_digest) requirement_sha else dmg_sha, if (mutation == .manifest_digest) requirement_sha else &fixture.manifest_sha, if (mutation == .release_id) 89 else 88, &remote);
@@ -130,14 +130,14 @@ fn allocationPath(allocator: std.mem.Allocator) !void {
     try result.deinit(allocator);
 }
 
-const Fixture = struct {
+pub const Fixture = struct {
     evidence_bytes: []u8,
     manifest_bytes: []u8,
     evidence_sha: [64]u8,
     manifest_sha: [64]u8,
     evidence_name: []const u8,
 
-    fn init(profile: evidence.Profile) !@This() {
+    pub fn init(profile: evidence.Profile) !@This() {
         return initWith(std.testing.allocator, profile);
     }
     fn initWith(allocator: std.mem.Allocator, profile: evidence.Profile) !@This() {
@@ -150,8 +150,8 @@ const Fixture = struct {
         hash(evidence_bytes, &evidence_sha);
         const evidence_name = if (profile == .baseline_a) "baseline-evidence.json" else "upgrade-evidence.json";
         const assets = [_]manifest.Asset{
-            .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 100 },
-            .{ .role = .frozen_product_executable, .name = "maru-session-host-1.2.3", .sha256 = host_sha, .size = 101 },
+            .{ .role = .universal_dmg, .name = "Maru-1.2.3-universal.dmg", .sha256 = dmg_sha, .size = 3 },
+            .{ .role = .frozen_product_executable, .name = "maru-session-host-1.2.3", .sha256 = host_sha, .size = 4 },
             .{ .role = .evidence_summary, .name = evidence_name, .sha256 = &evidence_sha, .size = evidence_bytes.len },
         };
         const predecessor_value: ?manifest.Predecessor = if (profile == .upgrade_b) .{ .release_id = 77, .tag = "v1.2.2", .commit = "3333333333333333333333333333333333333333", .manifest_sha256 = predecessor_manifest_sha } else null;
@@ -172,7 +172,7 @@ const Fixture = struct {
         hash(manifest_bytes, &manifest_sha);
         return .{ .evidence_bytes = evidence_bytes, .manifest_bytes = manifest_bytes, .evidence_sha = evidence_sha, .manifest_sha = manifest_sha, .evidence_name = evidence_name };
     }
-    fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         self.deinitWith(std.testing.allocator);
     }
     fn deinitWith(self: *@This(), allocator: std.mem.Allocator) void {
@@ -181,8 +181,8 @@ const Fixture = struct {
     }
     fn bindRemote(self: *@This(), allocator: std.mem.Allocator, ctx: context_mod.Context, evidence_name: []const u8, remote_dmg_sha: []const u8, remote_manifest_sha: []const u8, release_id: u64, result: *metadata.Owner) !void {
         const json = try std.fmt.allocPrint(allocator, "{{\"id\":{d},\"tag_name\":\"{s}\",\"target_commitish\":\"{s}\",\"draft\":false,\"prerelease\":false,\"immutable\":true,\"assets\":[" ++
-            "{{\"id\":1000,\"name\":\"Maru-1.2.3-universal.dmg\",\"size\":100,\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1000\"}}," ++
-            "{{\"id\":1001,\"name\":\"maru-session-host-1.2.3\",\"size\":101,\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1001\"}}," ++
+            "{{\"id\":1000,\"name\":\"Maru-1.2.3-universal.dmg\",\"size\":3,\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1000\"}}," ++
+            "{{\"id\":1001,\"name\":\"maru-session-host-1.2.3\",\"size\":4,\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1001\"}}," ++
             "{{\"id\":1002,\"name\":\"{s}\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1002\"}}," ++
             "{{\"id\":1003,\"name\":\"Maru-1.2.3-session-host-release.json\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1003\"}}]}}", .{ release_id, ctx.tag, ctx.source_commit, remote_dmg_sha, host_sha, evidence_name, self.evidence_bytes.len, &self.evidence_sha, self.manifest_bytes.len, remote_manifest_sha });
         defer allocator.free(json);

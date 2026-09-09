@@ -27,6 +27,10 @@ pub const Owner = struct {
     remote_snapshot_seal: [32]u8 = @splat(0),
     seal: [32]u8 = @splat(0),
 
+    pub fn isPristineForComposition(self: *const @This()) bool {
+        return pristine(self);
+    }
+
     pub fn value(self: *const @This()) ?View {
         if (self.owner != self or !std.crypto.timing_safe.eql([32]u8, self.seal, ownerSeal(self))) return null;
         const manifest_bytes = self.manifest_bytes orelse return null;

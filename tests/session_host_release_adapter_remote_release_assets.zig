@@ -153,6 +153,7 @@ const DownloadOps = struct {
     failure: Failure = .none,
     shape_ok: bool = true,
     budgets: [4]i128 = @splat(0),
+    payloads: [4][]const u8 = contents,
 
     pub fn revalidateCli(self: *@This(), _: std.mem.Allocator, _: [:0]const u8, _: *const assets.PinnedExecutable) !void {
         self.revalidations += 1;
@@ -171,7 +172,7 @@ const DownloadOps = struct {
             std.mem.eql(u8, args[5], "--header") and std.mem.eql(u8, args[6], "Accept: application/octet-stream") and
             std.mem.eql(u8, args[7], expected_endpoint);
         if (self.failure == .child) return error.ChildFailed;
-        const expected = contents[index];
+        const expected = self.payloads[index];
         const bytes = if (self.failure == .short) expected[0 .. expected.len - 1] else expected;
         var used: usize = 0;
         while (used < bytes.len) {
@@ -200,7 +201,7 @@ const FenceOps = struct {
     }
 };
 
-const Fixture = struct {
+pub const Fixture = struct {
     tmp: std.testing.TmpDir,
     metadata: []u8,
     workspace_storage: [std.fs.max_path_bytes:0]u8,
@@ -212,14 +213,21 @@ const Fixture = struct {
     ops: DownloadOps = .{},
     result: assets.Assets = .{},
 
-    fn init(self: *@This()) !void {
+    pub fn init(self: *@This()) !void {
+        return self.initWithPayloads(contents);
+    }
+    pub fn initWithPayloads(self: *@This(), payloads: [4][]const u8) !void {
+        return self.initWithPayloadsNamed(payloads, "baseline-evidence.json");
+    }
+    pub fn initWithPayloadsNamed(self: *@This(), payloads: [4][]const u8, evidence_name: []const u8) !void {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        const metadata = try makeMetadata(std.testing.allocator);
+        const metadata = try makeMetadata(std.testing.allocator, payloads, evidence_name);
         errdefer std.testing.allocator.free(metadata);
         var workspace_storage: [std.fs.max_path_bytes:0]u8 = undefined;
         const workspace_path = try temporaryPath(&tmp, "remote-assets", &workspace_storage);
         self.* = .{ .tmp = tmp, .metadata = metadata, .workspace_storage = workspace_storage, .workspace_len = workspace_path.len };
+        self.ops.payloads = payloads;
         @memset(std.mem.asBytes(&self.pinned), 0);
         try deadline_mod.start(10 * std.time.ns_per_s, &self.deadline);
         var fence_ops = FenceOps{ .response = metadata };
@@ -234,10 +242,10 @@ const Fixture = struct {
     fn workspace(self: *@This()) [:0]const u8 {
         return self.workspace_storage[0..self.workspace_len :0];
     }
-    fn run(self: *@This()) !void {
+    pub fn run(self: *@This()) !void {
         try assets.downloadUntilWith(&self.ops, std.testing.allocator, &self.fence, self.cli(), "token", self.workspace(), &self.deadline, &self.result);
     }
-    fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         if (self.result.value() != null) self.result.deinit() catch {};
         if (self.fence.candidate() != null or self.fence.value() != null) self.fence.deinit() catch {};
         if (self.deadline.owner == &self.deadline) self.deadline.deinit() catch {};
@@ -246,13 +254,13 @@ const Fixture = struct {
     }
 };
 
-fn context() context_mod.Context {
+pub fn context() context_mod.Context {
     return .{ .repository = .{ .id = 1257870483, .owner = "ohah", .name = "maru" }, .tag = "v1.2.3", .source_commit = source, .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 333, .run_attempt = 2 }, .protected_tag = true };
 }
 
-fn makeMetadata(allocator: std.mem.Allocator) ![]u8 {
-    var sha: [contents.len][64]u8 = undefined;
-    for (contents, 0..) |bytes, index| {
+fn makeMetadata(allocator: std.mem.Allocator, payloads: [4][]const u8, evidence_name: []const u8) ![]u8 {
+    var sha: [payloads.len][64]u8 = undefined;
+    for (payloads, 0..) |bytes, index| {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         sha[index] = std.fmt.bytesToHex(digest, .lower);
@@ -260,8 +268,8 @@ fn makeMetadata(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"id\":88,\"tag_name\":\"v1.2.3\",\"target_commitish\":\"{s}\",\"draft\":false,\"prerelease\":false,\"immutable\":true,\"assets\":[" ++
         "{{\"id\":1000,\"name\":\"Maru-1.2.3-universal.dmg\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1000\"}}," ++
         "{{\"id\":1001,\"name\":\"maru-session-host-1.2.3\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1001\"}}," ++
-        "{{\"id\":1002,\"name\":\"baseline-evidence.json\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1002\"}}," ++
-        "{{\"id\":1003,\"name\":\"Maru-1.2.3-session-host-release.json\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1003\"}}]}}", .{ source, contents[0].len, &sha[0], contents[1].len, &sha[1], contents[2].len, &sha[2], contents[3].len, &sha[3] });
+        "{{\"id\":1002,\"name\":\"{s}\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1002\"}}," ++
+        "{{\"id\":1003,\"name\":\"Maru-1.2.3-session-host-release.json\",\"size\":{d},\"state\":\"uploaded\",\"digest\":\"sha256:{s}\",\"content_type\":\"application/octet-stream\",\"url\":\"https://api.github.com/repos/ohah/maru/releases/assets/1003\"}}]}}", .{ source, payloads[0].len, &sha[0], payloads[1].len, &sha[1], evidence_name, payloads[2].len, &sha[2], payloads[3].len, &sha[3] });
 }
 
 fn temporaryPath(tmp: *std.testing.TmpDir, name: []const u8, storage: *[std.fs.max_path_bytes:0]u8) ![:0]const u8 {

@@ -146,6 +146,7 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 69, .name = "notification_title" },
     .{ .tag = 70, .name = "notification_body" },
     .{ .tag = 71, .name = "agent_progress" },
+    .{ .tag = 99, .name = "saved_kitty_flags" },
     // OSC 99 조립 조각. **새 tag 는 끝에서 이어 붙인다** — 가운데에 끼우면 이미 나간 handoff 의
     // 같은 번호가 다른 뜻이 돼 업그레이드가 남의 필드를 읽는다.
     .{ .tag = 95, .name = "osc99_title" },

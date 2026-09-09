@@ -291,6 +291,13 @@ pub const TerminalCore = struct {
     /// kitty keyboard protocol flag 스택(CSI > flags u=push / < n u=pop / = flags;mode u=set로 앱이 제어).
     /// 기본 비어 있음(current=disabled) → encodeKey가 legacy 인코딩. 베이스: kitty keyboard protocol spec.
     kitty_flags: KittyFlagStack = .{},
+    /// alt 화면에 들어가며 보관해 둔 **primary 화면의** kitty flag 스택. 화면 전환이 grid·스크롤백·
+    /// 커서·pen 을 통째로 되돌리는 것과 같은 결이다 — 키보드 모드도 그 화면의 상태다.
+    ///
+    /// 전역으로 두면 TUI 가 alt 에서 `report_all`(8)을 켜고 **pop 없이 죽었을 때**(크래시·SIGKILL)
+    /// 그 flag 가 셸로 샌다. 그러면 셸에서 Ctrl+C 가 raw `^C` 가 아니라 `CSI 99;5u` 로 나가 tty 가
+    /// SIGINT 로 못 읽는다 — 사용자는 아무것도 중단할 수 없다.
+    saved_kitty_flags: KittyFlagStack = .{},
     // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
     // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
     // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
@@ -9631,4 +9638,31 @@ test "OSC 99: metadata 구분자는 콜론과 쉼표를 둘 다 받는다 (적�
     try core.write("\x1b]99;i=2,p=body;본문2\x1b\\");
     try std.testing.expectEqualStrings("쉼표", core.notification_title.items);
     try std.testing.expectEqualStrings("본문2", core.notification_body.items);
+}
+
+test "kitty keyboard: alt 화면을 떠나면 그 화면의 flags 도 함께 돌아간다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: flag 스택이 화면과 무관한 전역이었다. TUI 가 alt 화면에서 `report_all`(8)을 켜고
+    // **pop 없이 죽으면**(크래시·SIGKILL — 정상 종료 경로를 못 타는 흔한 경우) 그 flag 가 셸로 새어
+    // 나온다. 그러면 셸에서 **Ctrl+C 가 raw `^C` 가 아니라 `CSI 99;5u` 로 나가** tty 가 SIGINT 로 못
+    // 읽는다 — 사용자는 아무것도 중단할 수 없고, 무엇이 잘못됐는지 알 방법도 없다.
+    //
+    // 화면 전환이 grid·스크롤백·커서·pen 을 통째로 되돌리는 것과 같은 결이다: 키보드 모드도 그 화면의
+    // 상태다.
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
+    try core.write("\x1b[?1049h\x1b[>9u"); // alt 진입 후 disambiguate+report_all
+    try std.testing.expect(core.kitty_flags.current().report_all);
+    try core.write("\x1b[?1049l"); // 앱이 pop 없이 죽고 셸이 alt 를 빠져나온다
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
+
+    // 반대 방향도 지켜야 한다 — main 에서 켠 것은 alt 를 들렀다 와도 살아 있어야 한다.
+    try core.write("\x1b[>1u");
+    try std.testing.expect(core.kitty_flags.current().disambiguate);
+    try core.write("\x1b[?1049h");
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current()); // alt 는 자기 스택에서 시작
+    try core.write("\x1b[>27u\x1b[?1049l");
+    try std.testing.expect(core.kitty_flags.current().disambiguate);
+    try std.testing.expect(!core.kitty_flags.current().report_all);
 }

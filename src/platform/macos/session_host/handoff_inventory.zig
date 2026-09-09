@@ -133,6 +133,7 @@ pub const terminal_core_groups = [_]Group{
             "sync_esu_count",
             "sync_bsu_count",
             "kitty_flags",
+            "saved_kitty_flags",
             "grapheme_cluster_mode",
             "cursor_visible",
             "cursor_shape",

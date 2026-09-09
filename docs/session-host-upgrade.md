@@ -5091,6 +5091,31 @@ exact argv/environment/order, metadata-before-download, CLI/file replacement, ca
 residue/FD 0과 result publication 0을 Debug·ReleaseFast로 검증한다. synthetic local child를 쓰므로 실제 GitHub 호출이나 protected tag
 실측을 대신하지 않으며, live workflow 판정 job 배선과 실제 GitHub-issued artifact 표본은 다음 gate가 소유한다.
 
+#### 11.100c live timing transport의 제품 진입점과 read-only 원격 gate
+
+첫 원격 gate는 final release pass record를 성급하게 만들지 않고 §11.100b transport를 protected tag workflow에서 실제로 실행한다.
+제품 executable `maru-session-host-release-live-timing-verifier`의 closed command는
+`verify <checkout-before-pinned-gh-absolute-path> <lowercase-sha256> <absolute-absent-workspace>` 하나뿐이다. executable은
+`release_adapter_environment.readCurrent`가 소유한 exact GitHub context를 먼저 읽어 `protected_tag`, repository, workflow, tag,
+source SHA, run ID와 run attempt를 검증하고, 그 뒤에만 CLI pathname을 caller storage로 복사해 `PinnedExecutable`로 pin한다.
+token은 argv·stdout·파일·결과 owner에 싣지 않고 process environment의 `GH_TOKEN` 하나에서 bounded copy한 뒤 child environment에만
+전달하며 반환 전에 지운다. `GH_PROMPT_DISABLED`와 context 이름을 포함한 다른 값을 caller가 token 대신 고를 수 없다.
+
+제품은 context에서 `artifact.Expected`를 유도하고 하나의 shared deadline으로 `live_timing_transport.fetchUntil`을 호출한다.
+성공은 sealed provenance의 repository/run/attempt/source와 derived positive duration을 context에 다시 결속한 뒤 provenance와 token을
+deinit하고 exit 0으로만 나타낸다. stdout, stderr, `GITHUB_OUTPUT`, summary, artifact와 canonical pass record는 만들지 않는다.
+따라서 이 gate의 성공은 실제 GitHub network와 current timing artifact의 출처·ZIP·record 결속을 증명하지만 Release/asset/attestation,
+profile, stage 1~8, signed N-1→current 복구나 U5 최종 성공을 증명하지 않는다. 실패는 nonzero, output 0, workspace residue 0이다.
+
+`release.yml`의 `session-host-release-live-timing-verdict` job은 timing upload job 뒤에만 시작하는 별도 `macos-15` read-only job이다.
+권한은 `actions: read`, `contents: read`뿐이고, repository bytes를 받기 전에 runner-provided `gh`의 canonical pathname과 SHA-256을
+고정한다. checkout과 pinned mise 뒤 ReleaseFast verifier만 빌드하고, `RUNNER_TEMP` 직계 자식의 fixed absent workspace와 step-local
+`${{ github.token }}`을 주어 한 번 실행한다. tag, Release, asset, attestation, environment, artifact 또는 workflow run을
+생성·수정·삭제·재실행하는 command는 두지 않는다. workflow source gate는 needs/runner/permission/order, immutable third-party action,
+closed argv, token scope, output·upload 부재를 고정하고 focused Debug·ReleaseFast gate는 parser/context/CLI pin/token owner,
+actual-process 성공·오류 output 0과 residue/FD 0을 검증한다. PR CI는 tag workflow를 실행하지 않으므로 실제 원격 표본은 이 배선이
+병합된 뒤 첫 protected `v*` tag run의 job URL, run/attempt/source와 timing duration으로만 기록한다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

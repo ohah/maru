@@ -38,12 +38,48 @@ const upgrade_wire = @import("upgrade_wire.zig");
 const poll_timeout_ms: i32 = 200;
 extern "c" fn usleep(usec: c_uint) c_int;
 
+/// U5의 rollback 금지선 전 owner 획득 순서를 그대로 여는 닫힌 fault 목록.
+/// 제품 argv나 environment가 아니라 test compilation의 explicit value만 받는다.
+pub const PrecommitFault = enum {
+    none,
+    after_output_wake,
+    after_restored_graph,
+    after_socket_bind,
+    after_manifest_adoption,
+    after_rollback_authority,
+    after_attempt_restore,
+    after_prepared_authority,
+    reader_prepare_timeout,
+    after_graph_revalidate,
+    manifest_ready_rejected,
+    manifest_ready_poisoned,
+};
+
+const PrecommitFaultPlan = struct {
+    selected: PrecommitFault,
+    consumed: bool = false,
+
+    fn isSelected(self: *const @This(), point: PrecommitFault) bool {
+        return !self.consumed and self.selected == point;
+    }
+
+    fn consume(self: *@This(), point: PrecommitFault) bool {
+        if (!self.isSelected(point)) return false;
+        self.consumed = true;
+        return true;
+    }
+
+    fn failAfter(self: *@This(), point: PrecommitFault) !void {
+        if (self.consume(point)) return error.InjectedRestoreFailure;
+    }
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     invocation: entrypoint.RestoreInvocation,
 ) !void {
-    return runImpl(allocator, io, invocation, null);
+    return runImpl(allocator, io, invocation, null, null);
 }
 
 pub fn runWithNotificationAdapter(
@@ -52,7 +88,19 @@ pub fn runWithNotificationAdapter(
     invocation: entrypoint.RestoreInvocation,
     adapter: notification_os_delivery.Adapter,
 ) !void {
-    return runImpl(allocator, io, invocation, adapter);
+    return runImpl(allocator, io, invocation, adapter, null);
+}
+
+pub fn runWithPrecommitFaultForTest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    invocation: entrypoint.RestoreInvocation,
+    fault: PrecommitFault,
+) !void {
+    if (!builtin.is_test) @compileError("restore activation fault injection is test-only");
+    if (invocation.role != .target or fault == .none) return error.InvalidRestore;
+    var plan = PrecommitFaultPlan{ .selected = fault };
+    return runImpl(allocator, io, invocation, null, &plan);
 }
 
 fn runImpl(
@@ -60,6 +108,7 @@ fn runImpl(
     io: std.Io,
     invocation: entrypoint.RestoreInvocation,
     notification_adapter: ?notification_os_delivery.Adapter,
+    precommit_fault: ?*PrecommitFaultPlan,
 ) !void {
     // 복원은 다섯 단계인데 실패하면 호출자에는 에러 이름 하나만 올라간다. 2026-09-05 에 3 일 넘게
     // 살아 있던 host 가 `InvalidValue` 로 죽고 세션 22 개를 잃었을 때, 남은 단서는 그 이름뿐이라 어느
@@ -118,6 +167,7 @@ fn runImpl(
         &validated,
         &rollback_allowed,
         notification_adapter,
+        precommit_fault,
     ) catch |err| {
         // `rollback_allowed` 가 여기서 결정적이다. `activateValidated` 는 authority 를 잡고 소유권을
         // 커밋하는 순간 이 플래그를 내리는데(롤백 금지선), 그 뒤의 실패는 **설계상** 롤백하지 않는다.
@@ -128,6 +178,11 @@ fn runImpl(
             if (rollback_allowed) "yes" else "no",
             if (rollback_exec != null) "armed" else "none",
         });
+        // 자연 발생 오류가 선택 지점보다 먼저 나도 rollback 자체는 성공할 수 있다.
+        // 그 경우 matrix가 주입을 실행했다고 오판하지 않도록 test entry는 선택
+        // fault의 exact-one 소비를 rollback exec보다 먼저 증명한다.
+        if (precommit_fault) |fault|
+            if (!fault.consumed) return error.PrecommitFaultNotConsumed;
         if (rollback_allowed and err != error.AuthorityPoisoned) {
             if (rollback_exec) |*prepared|
                 prepared.execute() catch return error.RollbackExecFailed;
@@ -172,6 +227,7 @@ fn activateValidated(
     validated: *upgrade_bootstrap.RestoreValidated,
     rollback_allowed: *bool,
     notification_adapter: ?notification_os_delivery.Adapter,
+    precommit_fault: ?*PrecommitFaultPlan,
 ) !void {
     const deadline = try validated.deadline(io);
     try checkRoleDeadline(invocation.role, deadline);
@@ -223,8 +279,17 @@ fn activateValidated(
     defer manager.deinit();
     if (notification_adapter) |adapter| manager.installNotificationOsAdapter(adapter);
     manager.enableOutputWake() catch return error.RestoreFailed;
-    var graph = try manager.prepareRestoredGraph(&validated.state.host);
+    if (precommit_fault) |fault| try fault.failAfter(.after_output_wake);
+    const block_reader = if (precommit_fault) |fault|
+        fault.isSelected(.reader_prepare_timeout)
+    else
+        false;
+    var graph = if (block_reader and builtin.is_test)
+        try manager.prepareRestoredGraphWithBlockedReaderForTest(&validated.state.host)
+    else
+        try manager.prepareRestoredGraph(&validated.state.host);
     defer graph.discard();
+    if (precommit_fault) |fault| try fault.failAfter(.after_restored_graph);
     try checkRoleDeadline(invocation.role, deadline);
     const reader_deadline = try readerPreparationDeadline(
         io,
@@ -252,6 +317,7 @@ fn activateValidated(
         &registry,
     );
     defer server.deinit();
+    if (precommit_fault) |fault| try fault.failAfter(.after_socket_bind);
     server.admission_gate = &gate;
     server.runtime_ops = manager.runtimeOps();
     server.owner_tick_ctx = &manager;
@@ -280,6 +346,7 @@ fn activateValidated(
         invocation.socket_path,
     );
     defer adoption.deinit();
+    if (precommit_fault) |fault| try fault.failAfter(.after_manifest_adoption);
     const restoring = try adoption.get().descriptor();
 
     var rollback_authority = try rollback_image.Authority.adoptCanonical(
@@ -289,6 +356,7 @@ fn activateValidated(
         validated.state.attempt.rollbackImage(),
     );
     defer rollback_authority.deinit();
+    if (precommit_fault) |fault| try fault.failAfter(.after_rollback_authority);
 
     var host_dir_buf: [768]u8 = undefined;
     var signature_authorizer = code_signature.Authorizer{
@@ -327,6 +395,7 @@ fn activateValidated(
         .runtime_ids = validated.state.attempt.runtime_ids,
         .token = validated.token,
     });
+    if (precommit_fault) |fault| try fault.failAfter(.after_attempt_restore);
 
     const target_execution = if (invocation.role == .target)
         attempt_owner.runningExecution(invocation.attempt_id) orelse
@@ -387,6 +456,7 @@ fn activateValidated(
         2,
     ) catch return error.InvalidRestore;
     try prepared_authority.restoreAuthorityGeneration(restored_authority_generation);
+    if (precommit_fault) |fault| try fault.failAfter(.after_prepared_authority);
 
     try checkRoleDeadline(invocation.role, deadline);
     try lifetime_owner.revalidatePath(owner_path);
@@ -397,15 +467,37 @@ fn activateValidated(
     // before that publication would reject a healthy non-empty restore graph.
     // Target shares the original attempt deadline; rollback gets one bounded
     // recovery budget because that original deadline may be its trigger.
+    const force_reader_timeout = if (precommit_fault) |fault|
+        fault.consume(.reader_prepare_timeout)
+    else
+        false;
+    if (force_reader_timeout) {
+        const injected_deadline = try upgrade_deadline.Deadline.after(
+            io,
+            10 * std.time.ns_per_ms,
+        );
+        while (builtin.is_test and !graph.blockedReaderWaitingForTest()) {
+            if (injected_deadline.expired()) return error.ReaderFaultNotArmed;
+            _ = usleep(1000);
+        }
+        while (!injected_deadline.expired()) _ = usleep(1000);
+        return error.DeadlineExceeded;
+    }
     while (!graph.allReadersPrepared()) {
         if (reader_deadline.expired()) return error.DeadlineExceeded;
         _ = usleep(1000);
     }
     var validated_graph = try graph.revalidateAll();
+    if (precommit_fault) |fault| try fault.failAfter(.after_graph_revalidate);
     try adoption.get().revalidate(session_dir);
     try checkRoleDeadline(invocation.role, deadline);
 
-    var authority = prepared_authority.activateReady(&adoption) catch |err|
+    var authority = activateReadyWithPrecommitFault(
+        &prepared_authority,
+        &adoption,
+        ready,
+        precommit_fault,
+    ) catch |err|
         return if (err == error.AuthorityPoisoned)
             error.AuthorityPoisoned
         else
@@ -481,6 +573,27 @@ fn activateValidated(
         .session_dir = session_dir,
         .socket_path = socket_path,
     });
+}
+
+fn activateReadyWithPrecommitFault(
+    prepared_authority: *host_authority.HostAuthority.PreparedInit,
+    adoption: *host_manifest.PinnedAdoption,
+    ready: host_manifest.Descriptor,
+    precommit_fault: ?*PrecommitFaultPlan,
+) !host_authority.HostAuthority {
+    if (precommit_fault) |fault| {
+        if (fault.consume(.manifest_ready_rejected)) {
+            if (builtin.is_test)
+                _ = try adoption.get().commitReadyRejectedForTest(ready);
+            unreachable;
+        }
+        if (fault.consume(.manifest_ready_poisoned)) {
+            if (builtin.is_test)
+                _ = try adoption.get().commitReadyPoisonedForTest(ready);
+            unreachable;
+        }
+    }
+    return prepared_authority.activateReady(adoption);
 }
 
 fn writeTestActivationMarker(attempt_id: u128) !void {

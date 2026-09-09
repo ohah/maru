@@ -5016,6 +5016,26 @@ pub fn build(b: *std.Build) void {
     run_session_host_upgrade_failure_matrix_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_upgrade_failure_matrix_boundary_tests.step);
 
+    const session_host_upgrade_restore_precommit_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_upgrade_restore_precommit_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_upgrade_restore_precommit_boundary_tests =
+        b.addRunArtifact(session_host_upgrade_restore_precommit_boundary_tests);
+    run_session_host_upgrade_restore_precommit_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_upgrade_restore_precommit_boundary_tests.setCwd(b.path("."));
+    const session_host_upgrade_restore_precommit_boundary_step = b.step(
+        "test-session-host-upgrade-restore-precommit-boundary",
+        "Keep the restore precommit fault vocabulary test-only",
+    );
+    session_host_upgrade_restore_precommit_boundary_step.dependOn(
+        &run_session_host_upgrade_restore_precommit_boundary_tests.step,
+    );
+    boundary_step.dependOn(&run_session_host_upgrade_restore_precommit_boundary_tests.step);
+
     const session_host_daemon_cleanup_fail_stop_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_daemon_cleanup_fail_stop_boundary.zig"),
@@ -12372,7 +12392,7 @@ pub fn build(b: *std.Build) void {
 
         // U5 non-empty rollback은 codec fixture가 아니라 source-host가 직접 만든 실제 PTY의
         // parent/runtime/screen/input/exit 수명을 같은 process artifact에서 증명한다.
-        const session_host_nonempty_rollback_tests = addProjectTest(b, .{
+        const session_host_nonempty_rollback_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_nonempty_rollback_e2e.zig"),
                 .target = target,
@@ -12381,6 +12401,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
             }),
             .filters = &.{"product rollback preserves one real PTY through exit"},
+            .test_runner = .{
+                .path = b.path("tools/session_host_restore_precommit_test_runner.zig"),
+                .mode = .simple,
+            },
         });
         const run_session_host_nonempty_rollback_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_session_host_nonempty_rollback_tests.addPrefixedArtifactArg(
@@ -12399,6 +12423,41 @@ pub fn build(b: *std.Build) void {
         );
         session_host_nonempty_rollback_step.dependOn(&run_session_host_nonempty_rollback_tests.step);
         run_session_host_tests.step.dependOn(session_host_nonempty_rollback_step);
+
+        const session_host_restore_precommit_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_nonempty_rollback_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
+            }),
+            .filters = &.{
+                "restore precommit rollback-safe matrix preserves one real PTY and same host PID",
+                "restore precommit manifest poison fails closed without recursive rollback",
+            },
+            .test_runner = .{
+                .path = b.path("tools/session_host_restore_precommit_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        const run_session_host_restore_precommit_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_restore_precommit_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_restore_precommit_tests.addArg(
+            "MARU_SESSION_HOST_RESTORE_PRECOMMIT_GATE=maru-test-only-v1",
+        );
+        run_session_host_restore_precommit_tests.addArtifactArg(session_host_restore_precommit_tests);
+        run_session_host_restore_precommit_tests.addArg("--maru-expect-tests=2");
+        run_session_host_restore_precommit_tests.setCwd(b.path("."));
+        const session_host_restore_precommit_step = b.step(
+            "test-session-host-upgrade-restore-precommit-failure-matrix",
+            "Run precommit restore failure rollback and PTY matrix (macOS)",
+        );
+        session_host_restore_precommit_step.dependOn(&run_session_host_restore_precommit_tests.step);
+        run_session_host_tests.step.dependOn(session_host_restore_precommit_step);
 
         const daemon_cleanup_fail_stop_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

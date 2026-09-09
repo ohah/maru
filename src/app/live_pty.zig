@@ -254,7 +254,28 @@ pub const LivePtySession = struct {
         runtime: *runtime_mod.SurfaceRuntime,
         surface: *surface_mod.Surface,
     ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
+        return self.attachSurfacePreparedImpl(runtime, surface, false);
+    }
+
+    pub fn attachSurfacePreparedWithBlockedReachForTest(
+        self: *LivePtySession,
+        runtime: *runtime_mod.SurfaceRuntime,
+        surface: *surface_mod.Surface,
+    ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
+        if (!builtin.is_test) @compileError("prepared reader gate fault is test-only");
+        return self.attachSurfacePreparedImpl(runtime, surface, true);
+    }
+
+    fn attachSurfacePreparedImpl(
+        self: *LivePtySession,
+        runtime: *runtime_mod.SurfaceRuntime,
+        surface: *surface_mod.Surface,
+        block_reach: bool,
+    ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
         const link = try self.attachSurfaceConfigured(runtime, surface, true);
+        if (block_reach) {
+            if (builtin.is_test) self.reader.blockPreparedStartReachForTest();
+        }
         self.reader.startPrepared() catch |err| {
             runtime.detachSurface(link.surface_id);
             self.link = null;
@@ -288,6 +309,12 @@ pub const LivePtySession = struct {
 
     pub fn preparedStartReached(self: *const LivePtySession) bool {
         return self.reader.preparedStartReached();
+    }
+
+    pub fn blockedPreparedStartWaitingForTest(self: *const LivePtySession) bool {
+        if (!builtin.is_test) @compileError("prepared reader gate observation is test-only");
+        _ = self;
+        return pty_reader.PtyReader.blockedPreparedStartWaitingForTest();
     }
 
     /// Host-global graph가 전량 호출한 뒤에만 ownership commit 가능하다.

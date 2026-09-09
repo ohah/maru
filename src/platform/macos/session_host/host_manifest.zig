@@ -242,6 +242,29 @@ pub const PreparedAdoption = struct {
         return &self.publication;
     }
 
+    /// Restore activation의 process E2E가 manifest의 실제 validation/rollback
+    /// transaction을 통과하도록 하는 테스트 전용 경계다. 전역 failpoint의
+    /// 수명은 이 호출 안으로 닫아 다음 matrix row로 새지 않는다.
+    pub fn commitReadyRejectedForTest(
+        self: *PreparedAdoption,
+        ready_descriptor: Descriptor,
+    ) Error!*Published {
+        if (!builtin.is_test) @compileError("manifest ready publication fault is test-only");
+        test_failpoint = .before_commit_sync;
+        defer test_failpoint = .none;
+        return self.commitReadyPublication(ready_descriptor);
+    }
+
+    pub fn commitReadyPoisonedForTest(
+        self: *PreparedAdoption,
+        ready_descriptor: Descriptor,
+    ) Error!*Published {
+        if (!builtin.is_test) @compileError("manifest ready publication fault is test-only");
+        test_failpoint = .rollback_sync;
+        defer test_failpoint = .none;
+        return self.commitReadyPublication(ready_descriptor);
+    }
+
     pub fn discard(self: *PreparedAdoption) void {
         if (self.state != .prepared and self.state != .validated) return;
         self.publication.deinitMemory();
@@ -593,7 +616,11 @@ fn writeAtomic(
     if (c.fsync(fd) != 0) return error.SyncFailed;
     const new_identity = try fileIdentityFd(fd);
     var tmp_holds_new = true;
-    defer if (tmp_holds_new) unlinkIfIdentity(tmp_path, new_identity);
+    // rename/exchange는 transaction-owned inode의 ctime을 바꿀 수 있다. 성공적으로
+    // old generation으로 rollback한 뒤에는 inode ownership으로 임시 new를 회수해야
+    // same-PID exec가 초기화된 temp sequence와 충돌하지 않는다. Poisoned rollback은
+    // 아래에서 이 flag를 내려 불확정 residue를 그대로 보존한다.
+    defer if (tmp_holds_new) unlinkIfInode(tmp_path, new_identity);
     _ = c.close(fd);
     open = false;
     if (expected_old) |old_identity| {
@@ -609,15 +636,15 @@ fn writeAtomic(
 
     if (expected_old) |old_identity| {
         const displaced = fileIdentity(tmp_path) catch {
-            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, &tmp_holds_new);
             return error.InvalidManifest;
         };
         const installed = fileIdentity(manifest_path) catch {
-            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, &tmp_holds_new);
             return error.AuthorityPoisoned;
         };
         if (!sameInode(displaced, old_identity) or !sameInode(installed, new_identity)) {
-            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, &tmp_holds_new);
             return error.InvalidManifest;
         }
     } else {
@@ -629,7 +656,7 @@ fn writeAtomic(
         c.fsync(dir_fd) != 0)
     {
         if (expected_old != null) {
-            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, &tmp_holds_new);
         } else {
             if (!renameNoReplace(manifest_path, tmp_path))
                 return error.AuthorityPoisoned;
@@ -694,21 +721,15 @@ fn rollbackSwapTracked(
     dir_fd: c.fd_t,
     tmp_path: [:0]const u8,
     manifest_path: [:0]const u8,
-    new_identity: Published.FileIdentity,
     tmp_holds_new: *bool,
 ) Error!void {
     rollbackSwapOrPoison(dir_fd, tmp_path, manifest_path) catch |err| {
-        if (fileIdentity(tmp_path)) |identity| {
-            tmp_holds_new.* = sameInode(identity, new_identity);
-        } else |_| {}
+        // 어느 pathname이 어느 generation인지 durable하게 확정할 수 없는 상태다.
+        // 보이는 inode를 추측해 지우지 않고 recovery audit에 남긴다.
+        tmp_holds_new.* = false;
         return err;
     };
     tmp_holds_new.* = true;
-}
-
-fn unlinkIfIdentity(path: [:0]const u8, identity: Published.FileIdentity) void {
-    const current = fileIdentity(path) catch return;
-    if (sameIdentity(current, identity)) _ = c.unlink(path.ptr);
 }
 
 fn unlinkIfInode(path: [:0]const u8, identity: Published.FileIdentity) void {
@@ -1184,6 +1205,7 @@ test "host manifest transaction rolls back precommit failure and poisons indeter
     var rolled_back = try load(std.testing.allocator, dir, host_id);
     defer rolled_back.deinit();
     try std.testing.expectEqual(@as(u64, 1), rolled_back.upgrade_epoch);
+    try std.testing.expectEqual(@as(usize, 0), try countManifestTempsForTest(dir, host_id));
 
     test_failpoint = .post_commit_cleanup;
     try published.republish(descriptor);
@@ -1196,6 +1218,20 @@ test "host manifest transaction rolls back precommit failure and poisons indeter
     test_failpoint = .rollback_sync;
     try std.testing.expectError(error.AuthorityPoisoned, published.republish(descriptor));
     try std.testing.expect(published.poisoned);
+    try std.testing.expectEqual(@as(usize, 1), try countManifestTempsForTest(dir, host_id));
     test_failpoint = .none;
     try std.testing.expectError(error.AuthorityPoisoned, published.republish(descriptor));
+}
+
+fn countManifestTempsForTest(session_dir: [:0]const u8, host_id: u128) !usize {
+    var host_buf: [768]u8 = undefined;
+    const host_dir = try hostDirPathIn(&host_buf, session_dir, host_id);
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, host_dir, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, ".host.v1.json.tmp-")) count += 1;
+    }
+    return count;
 }

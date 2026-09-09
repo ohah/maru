@@ -25,6 +25,11 @@ pub const Fence = struct {
         return self.before.value();
     }
 
+    pub fn candidateFor(self: *const @This(), deadline: *const deadline_mod.Deadline, pinned: *const PinnedExecutable) ?metadata.View {
+        if (self.deadline_owner != deadline or self.pinned_owner != pinned) return null;
+        return self.candidate();
+    }
+
     pub fn value(self: *const @This()) ?metadata.View {
         if (!valid(self) or self.state != .completed) return null;
         return self.before.value();

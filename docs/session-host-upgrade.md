@@ -5374,6 +5374,49 @@ fixed artifact/file name, retention, 권한과 output/summary 부재를 고정�
 GitHub artifact 발행이나 원격 실측 표본을 대신하지 않는다. 병합 뒤 첫 protected `v*` tag에서 remote verifier job과 pass artifact가
 함께 성공한 run/attempt/source만 첫 canonical 표본이며, `baseline_a` 표본만으로 U5를 완료 처리하지 않는다.
 
+#### 11.100k 동일-run pass artifact readback audit
+
+업로드 직전의 local file 검사만으로는 GitHub가 어떤 archive를 어느 run에 보존했는지 증명하지 못한다. 다음 gate는
+`release_adapter_remote_release_pass_artifact.zig`가 current protected `Context`를 expected authority로 받아 GitHub Actions artifact
+metadata와 downloaded archive를 결속한 credential-free `Provenance` owner를 만든다. metadata는 current repository ID,
+`run_id`, `head_repository_id`, `head_sha`, exact name `session-host-release-remote-pass-<run_attempt>`, positive artifact ID/size,
+non-expired 상태, canonical API/download URL과 `sha256:<64-lower-hex>` digest를 모두 만족해야 한다. 같은 이름이 0개·2개 이상이거나
+foreign run/repository/SHA, stale attempt name, expired artifact, URL·size·digest drift면 archive download 전에 실패한다.
+
+GitHub API의 upload 직후 가시성은 즉시성을 보장하는 권위가 아니다. transport는 같은 current-run list endpoint만 absolute
+deadline 안에서 유계 재조회하며 `total_count=0`만 retry한다. malformed 응답, duplicate, foreign identity와 이미 선택한 artifact의
+drift는 retry로 숨기지 않고 즉시 실패한다. retry 횟수·간격은 transport SSOT 상수이고 caller, environment, workflow output이 고르지
+않는다. upload action의 `artifact-id`, `artifact-url`, `artifact-digest` output은 업로드 뒤 생긴 진단값일 뿐 verifier 입력 권위로
+전달하지 않는다.
+
+선택한 artifact ID의 zip endpoint를 pinned `gh`와 current job token으로 exact once 다운로드하고 metadata size와 streaming SHA-256을
+교차검증한다. archive는 최대 64 KiB, single exact entry `session-host-release-remote-pass.json`, stored 또는 deflate, encrypted/link/path
+traversal/duplicate/trailing entry 없음, bounded compression ratio와 CRC 일치를 요구한다. 이 ZIP framing은 timing artifact와 같은
+GitHub upload 형식이므로 기존 `release_adapter_live_timing_artifact.zig` 안의 parser를
+`release_adapter_github_artifact_archive.zig` 공용 SSOT로 추출하고 두 소비자가 entry 이름·plain-byte cap만 전달한다. pass 쪽에 ZIP
+parser 복제본을 만들지 않는다.
+
+plain bytes는 `release_adapter_remote_release_pass_record.parseCanonical`로 읽고 repository ID/owner/name, tag, source SHA,
+workflow ref, run ID/attempt를 current `Context`와 exact 재결속한다. `profile`은 record가 가진 closed
+`baseline_a | upgrade_b`를 보존하고 caller가 고르지 않는다. release ID, timing artifact ID와 duration은 positive intrinsic 값이어야
+하지만 이 readback만으로 그 원격 객체를 새로 관측한 척하지 않는다. 그 값의 원 판정은 §11.100i/j verifier가 소유하고, audit는
+GitHub가 보존한 exact record가 같은 protected run에서 나온 것임만 증명한다. 성공 owner는 pass artifact ID/archive digest와 parsed
+record를 함께 seal하고 pathname·fd·token·metadata JSON·archive bytes를 보존하지 않는다.
+
+`release.yml`에는 `session-host-release-remote-verification` 성공을 `needs`로 받는 별도 read-only
+`audit-session-host-remote-release-pass` job을 둔다. 권한은 `actions: read`, `contents: read`, runner는 `macos-15`이고 checkout 전에 system
+`gh` pathname/SHA-256을 붙든 뒤 checkout·mise·ReleaseFast auditor build 순서로 간다. 제품 command는 exact
+`audit <pinned-gh> <sha256> <absolute-absent-workspace>`만 받고 repository/run/attempt/source/tag/workflow ref와 token은 기존 trusted
+environment reader가 닫힌 형태로 만든다. stdout/stderr, `GITHUB_OUTPUT`, summary, 새 artifact·attestation·Release mutation은 모두 0이다.
+
+focused Debug·ReleaseFast gate는 metadata 0→1 유계 retry, duplicate/foreign/stale/expired/URL/digest 거부, exact list→download 순서,
+CLI pre/post fence, timeout·short/long download·cleanup 실패와 token zeroize를 검증한다. 공용 archive gate는 timing/pass 두 entry의
+stored/deflate 및 traversal·duplicate·encryption·link·CRC·ratio·trailing 거부를 함께 고정한다. pass provenance gate는 canonical record의
+context 결속, copied/pre-owned/aliased owner, post-publication drift와 allocation fail-index unwind를 닫는다. product/workflow source gate는
+checkout 전 CLI pin, read-only permission, exact `needs`, closed argv, zero output/mutation을 검증한다. 이 gate의 PR fixture와 synthetic
+archive는 실제 GitHub 보존 표본이 아니다. 병합 뒤 첫 protected `v*` tag에서 producer와 audit job이 같은 run/attempt/source로 모두
+성공한 경우에만 §11.100j의 첫 canonical remote pass 표본을 확인한다. `baseline_a` audit 성공은 여전히 U5 완료가 아니다.
+
 ## 12. 필수 적대적 검증
 
 - encode 중 OOM, disk full, short write, sync/rename 실패, exec 실패.

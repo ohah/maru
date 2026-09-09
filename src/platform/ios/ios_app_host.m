@@ -10,6 +10,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreText/CoreText.h>
+// **Security 는 난수 하나 때문에 든다**(`SecRandomCopyBytes`) — 키 씨앗은 OS 난수여야 한다
+// (계약 §3.4). Keychain 보관은 아직 아니다(실기기 검증까지 보류 — 계획 S9c-2).
+#import <Security/Security.h>
 
 
 
@@ -1675,10 +1678,100 @@ static void pumpSshOnMainThread(void) {
 }
 
 /// **이 기기의 공개키 한 줄을 브리지에 알린다**(화면이 보여 주고 복사한다 — S9c-4).
+/// **이 기기의 키를 만들어 파일로 남긴다**(M16b-2 — 계약 §3.4 "키는 앱이 만든다").
+///
+/// **이미 있으면 부르지 않는다**(부르는 쪽이 그 판정을 한다). 있는 파일을 못 읽는다고 새로
+/// 만들지도 않는다 — 그러면 서버에 등록해 둔 공개키가 하루아침에 안 맞게 되고, 사용자는
+/// 이유도 모른 채 못 붙는다(Android 의 `sealed_key_unreadable` 과 같은 규율).
+///
+/// **씨앗은 OS 난수다**(`SecRandomCopyBytes`) — 씨앗이 곧 개인키라 예측 가능하면 그 키로 지킬
+/// 수 있는 것이 아무것도 없다. 형식은 코어가 만든다(`maru_mobile_ssh_private_key_pem`).
+///
+/// 파일에 붙이는 것 셋:
+///   - **0600** — 다른 것이 읽을 이유가 없다.
+///   - **`NSFileProtectionCompleteUntilFirstUserAuthentication`** — 재부팅 뒤 한 번 풀면 배경에서도
+///     읽는다. `Complete` 로 두면 잠긴 화면에서 세션을 되살릴 때 못 읽어 접속이 끊긴다(Android 가
+///     잠금 화면을 요구하지 않는 것과 같은 이유).
+///   - **백업에서 뺀다**(`NSURLIsExcludedFromBackupKey`) — 계약이 "개인키가 기기 밖으로 나갈 일이
+///     없다" 이고, Application Support 는 기본으로 iCloud·iTunes 백업에 실린다.
+///
+/// **임시 파일에 쓰고 바꿔치기한다.** 덮어쓰다 죽으면 반쪽 파일이 남는데, 그 뒤로는 위 규율에
+/// 따라 새로 만들지도 않으므로 그 기기는 접속을 통째로 잃는다.
+static BOOL createDeviceKey(NSURL *keyFile) {
+    NSError *err = nil;
+    NSURL *dir = keyFile.URLByDeletingLastPathComponent;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:dir
+                               withIntermediateDirectories:YES
+                                                attributes:nil
+                                                     error:&err]) {
+        NSLog(@"MARU_SSH key_dir_failed err=%@", err.localizedDescription);
+        return NO;
+    }
+
+    unsigned char seed[MARU_SSH_ENTROPY_BYTES];
+    if (SecRandomCopyBytes(kSecRandomDefault, sizeof seed, seed) != errSecSuccess) {
+        NSLog(@"MARU_SSH entropy_failed");
+        return NO;
+    }
+    unsigned char secret[MARU_SSH_SECRET_KEY_BYTES];
+    unsigned char line[256];
+    int rc = maru_mobile_ssh_generate_key(seed, secret, line, sizeof line);
+    memset(seed, 0, sizeof seed);
+    if (rc != MARU_SSH_OK) {
+        NSLog(@"MARU_SSH generate_failed=%s", maru_mobile_ssh_last_load_error());
+        return NO;
+    }
+    static unsigned char pem[16 * 1024];
+    rc = maru_mobile_ssh_private_key_pem(secret, pem, sizeof pem);
+    memset(secret, 0, sizeof secret); // 개인키 사본은 바로 지운다
+    if (rc != MARU_SSH_OK) {
+        NSLog(@"MARU_SSH key_pem_failed=%s", maru_mobile_ssh_last_load_error());
+        return NO;
+    }
+
+    // **`NSData`·`NSString` 에 안 싣는다** — 그 바이트는 우리가 못 지우고(autorelease 라 언제
+    // 풀릴지도 모른다) 힙에 개인키가 그대로 남는다(이 파일이 읽는 쪽에서 이미 지킨 규율이다).
+    NSURL *tmp = [keyFile.URLByDeletingLastPathComponent
+        URLByAppendingPathComponent:@"id_ed25519.tmp" isDirectory:NO];
+    size_t len = strlen((const char *)pem);
+    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        NSLog(@"MARU_SSH key_write_failed path=%@ errno=%d", tmp.path, errno);
+        memset(pem, 0, sizeof pem);
+        return NO;
+    }
+    ssize_t wrote = write(fd, pem, len);
+    int closed = close(fd);
+    memset(pem, 0, sizeof pem);
+    if (wrote != (ssize_t)len || closed != 0) {
+        NSLog(@"MARU_SSH key_write_short bytes=%zd/%zu", wrote, len);
+        unlink(tmp.fileSystemRepresentation);
+        return NO;
+    }
+    // 보호 등급과 백업 제외는 **바꿔치기 전에** 붙인다 — 뒤에 붙이면 그 사이에 보호 없는
+    // 파일이 제자리에 서 있다.
+    [NSFileManager.defaultManager setAttributes:@{
+        NSFileProtectionKey : NSFileProtectionCompleteUntilFirstUserAuthentication,
+        NSFilePosixPermissions : @0600,
+    } ofItemAtPath:tmp.path error:nil];
+    NSURL *tmpUrl = tmp;
+    [tmpUrl setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    if (rename(tmp.fileSystemRepresentation, keyFile.fileSystemRepresentation) != 0) {
+        NSLog(@"MARU_SSH key_rename_failed errno=%d", errno);
+        unlink(tmp.fileSystemRepresentation);
+        return NO;
+    }
+    NSLog(@"MARU_SSH generated_public_key %s", (const char *)line);
+    return YES;
+}
+
 ///
 /// iOS 는 키를 **앱 전용 파일**로 든다(Keychain 은 실기기 검증까지 보류 — 계획 S9c-2). 그
 /// 파일에서 한 줄을 만들어 두면 사용자가 **붙기 전에** 서버 `authorized_keys` 에 넣을 수 있다.
-/// 파일이 없으면 아무것도 안 알린다 — 화면이 "아직 키가 없다" 고 말한다.
+///
+/// **파일이 없으면 «만든다»**(M16b-2). 예전에는 읽기만 해서, 그 파일을 손으로 넣지 않은 기기는
+/// 키 인증을 **아예 못 썼다** — 저장소 어디에도 그 파일을 만드는 코드가 없었다. 화면은 「아직
+/// 키가 없습니다」라고 했고 사용자가 할 수 있는 일이 없었다(계약 §3.4 — 키는 앱이 만든다).
 static void publishPublicKey(void) {
     NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
                                                           inDomain:NSUserDomainMask
@@ -1691,8 +1784,13 @@ static void publishPublicKey(void) {
     static unsigned char pem[16 * 1024];
     FILE *kf = fopen(keyFile.fileSystemRepresentation, "rb");
     if (!kf) {
-        NSLog(@"MARU_SSH public_key_absent path=%@", keyFile.path);
-        return;
+        // **없으면 여기서 만든다.** 다음 실행부터는 위 경로만 탄다.
+        if (!createDeviceKey(keyFile)) return;
+        kf = fopen(keyFile.fileSystemRepresentation, "rb");
+        if (!kf) {
+            NSLog(@"MARU_SSH public_key_absent path=%@", keyFile.path);
+            return;
+        }
     }
     size_t pem_len = fread(pem, 1, sizeof pem, kf);
     fclose(kf);

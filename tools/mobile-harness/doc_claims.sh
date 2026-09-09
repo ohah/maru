@@ -296,6 +296,18 @@ ck "host 가 공개키 형식을 안 만든다" 0 "$(grep -c 'ssh-ed25519' $J $K
 # 키는 **접속할 때 처음** 만들어지는데, 그때 한 줄을 안 남기면 봉인된 키는 있는데 화면은
 # 「아직 키가 없습니다」인 상태가 남는다. 그래서 서비스도 `ensureKey` 를 **먼저** 부른다.
 ck "서비스도 같은 함수를 먼저 부른다" 1 "$(awk '/MaruKeyStore\.ensureKey\(/{e=NR} /MaruKeyStore\.loadOrCreate\(/{l=NR} END{print (e&&l&&e<l)?1:0}' $V)"
+# **두 host 가 다 «만든다».** 한쪽만 고치면 그 플랫폼만 계약 §3.4 를 지킨다 — 실제로 그랬다
+# (Android 는 JNI 가 안 붙었고 iOS 는 만드는 코드가 아예 없었다).
+ck "iOS 도 키를 만든다" 1 "$(sed 's,//.*,,' $I | grep -c 'maru_mobile_ssh_generate_key(')"
+# **형식은 코어가 소유한다.** host 가 PEM 을 손으로 조립하면 읽는 자리와 갈리고, 그 어긋남은
+# "우리가 쓴 키를 우리가 못 읽는다" 로 나타난다.
+ck "iOS 가 PEM 을 손으로 안 만든다" 0 "$(sed 's,//.*,,' $I | grep -c 'BEGIN OPENSSH')"
+ck "iOS 가 코어에게 PEM 을 받는다" 1 "$(sed 's,//.*,,' $I | grep -c 'maru_mobile_ssh_private_key_pem(')"
+# 개인키 파일에 붙는 셋 — 자리·보호 등급·백업 제외. 하나라도 빠지면 「기기 밖으로 안 나간다」가
+# 거짓이 된다(계약 §3.4).
+# **주석은 안 센다** — 이 셋을 설명하는 주석이 바로 그 이름을 담는다(위 `FindClass` 판정자와 같다).
+ck "키 파일을 백업에서 뺀다" 1 "$(sed 's,//.*,,' $I | grep -c 'NSURLIsExcludedFromBackupKey')"
+ck "키 파일 보호 등급이 배경에서도 열린다" 1 "$(sed 's,//.*,,' $I | grep -c 'NSFileProtectionCompleteUntilFirstUserAuthentication')"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

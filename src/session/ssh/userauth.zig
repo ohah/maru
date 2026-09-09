@@ -85,10 +85,9 @@ pub fn parseServiceAccept(payload: []const u8) Error!void {
 pub fn publicKeyBlob(out: []u8, secret: [secret_key_len]u8) Error![]const u8 {
     var pair = keyPair(secret) catch return Error.BadPrivateKey;
     defer wipe(&pair);
-    var w = wire.Writer.init(out);
-    try w.string(hostkey.alg_name);
-    try w.string(&pair.public_key.toBytes());
-    return w.written();
+    // **형식은 `hostkey` 가 소유한다** — 읽는 자리(`parsePublicKey`)와 같은 파일이다. 예전에는
+    // 여기서 직접 적었는데, 그러면 같은 형식이 두 벌이 되고 한쪽만 고쳐진다.
+    return hostkey.encodePublicKey(out, pair.public_key.toBytes());
 }
 
 /// **서명 대상**(RFC 4252 §7). 요청 패킷과 **필드가 같되 앞에 `session_id` 가 붙고 서명 자체는

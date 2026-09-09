@@ -3414,6 +3414,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   전체 하위 graph를 exact 교차 결속하고 evidence semantic만 profile 권위로 사용한다. focused Debug·ReleaseFast gate는
   baseline/upgrade, identity drift, copied/pre-owned/aliased owner와 post-publication revocation을 닫는다. filesystem·credential·network,
   pass-record publication과 signed N-1→current U5 제품 E2E는 후속 경계다(`session-host-upgrade.md` §11.100h).
+  다음 제품 gate는 `maru-session-host-release-remote-verifier`가 timing transport→Release fence→exact-ID download→
+  attestation/semantic→final verdict를 하나의 protected context·CLI·deadline으로 조립하고, `release.yml`의
+  `macos-15` read-only job이 `actions: read`·`contents: read`만으로 exact once 실행한다. focused gate는
+  단계 순서·fail-stop·역순 cleanup·actual-process output/FD/workspace residue 0을, workflow source gate는 checkout 전
+  CLI pin·needs·permission·closed argv·upload/summary 부재를 검증한다. 병합 뒤 첫 protected `v*` tag만 실제
+  GitHub network 실측이며 pass-record publication과 signed N-1→current U5 E2E는 여전히 후속이다
+  (`session-host-upgrade.md` §11.100i).
   Profile-aware authored attestation은 **부분 구현**이다. `release_adapter_profile_authored_attestation_selector.zig`가 credential 없이
   fixed pathname superset을 bounded final-address storage에 복사·seal하고, canonical profile owner와 retained preparation을 fresh reopen해
   baseline evidence+manifest 또는 upgrade evidence+manifest+timing의 닫힌 projection을 만든다. upgrade profile predecessor는 held role-B

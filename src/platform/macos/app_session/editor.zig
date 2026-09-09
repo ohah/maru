@@ -5112,6 +5112,15 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     // 파싱이 끝나기 전에 접으면(큰 문서는 예산 파싱이 여러 프레임 걸린다 — §2.1a) 본문은 부분집합을
     // 그리는데 접힘 상태는 「없음」이라 화면의 행과 문서의 줄이 어긋난다. 입력은 문서 offset 을,
     // 커서는 시각 행을 쓰므로 그 어긋남이 곧 그 증상이다. `ES32` 가 그 순서를 그대로 잰다.
+    // **접기와 같은 마무리를 탄다.** 이 승격도 접힘 집합을 바꾸므로(위에서 접어 둔 것을 풀었다)
+    // `rebuildVisible` 이 파생 수치를 버린다 — 그러면 가로 상한이 0 이 되어 **막대가 사라지고**
+    // (본문 높이가 한 행 바뀐다) **보던 열이 왼쪽 끝으로 튄다**.
+    //
+    // **파싱이 끝나는 프레임마다 도는 자리라 더 잘 보인다** — 긴 줄이 있는 코드 파일을 열면
+    // 여는 프레임에 선 막대가 잠시 뒤 사라졌다. 실측으로 확인했다(2026-09-10):
+    // 승격 전 `max_cols=621 · first_col=538`, 승격 뒤 **둘 다 0**.
+    // 편집(`refreshAfterEdit`)·접기(`finishFoldChange`)에서 이미 고친 그 부류의 **세 번째 자리**다.
+    const keep = keepFoldView(term);
     rebuildVisible(self, term) catch {
         // 못 만들면 **부분집합을 그대로 두지 않는다** — 틀린 표보다 없는 편이 낫다(`rebuildVisible`
         // 자신이 실패 갈래에서 같은 판단을 한다).
@@ -5119,9 +5128,12 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
         if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
         term.rt.editor_visible_lines = &.{};
         term.rt.editor_visible_numbers = &.{};
-        invalidateFoldDerived(self, term);
+        // **여기서도 상한은 다시 센다.** 표가 없어도 문서는 그대로라 가로 축은 그대로 있다 —
+        // 안 세면 그 프레임부터 막대가 사라진다.
+        finishFoldChange(self, term, keep);
+        return;
     };
-    self.metal_dirty = true;
+    finishFoldChange(self, term, keep);
 }
 
 /// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
@@ -15024,6 +15036,82 @@ test "DHS9 접어도 가로 막대가 안 사라지고 보던 열이 남는다 �
     after_unfold.dl.deinit(allocator);
     if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByUnfold;
     try testing.expectEqual(col_before_unfold, term.rt.editor_first_col);
+}
+
+test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — 파싱이 끝나는 프레임 (렌더 경계)" {
+    // **세 번째 자리다.** 편집(`refreshAfterEdit`)·접기(`finishFoldChange`)에서 고친 그 결함이
+    // 승격 경로에 그대로 남아 있었다 — `rebuildVisible` 이 파생 수치를 버리는데 아무도 다시 세지
+    // 않았다. 실측(2026-09-10): 승격 전 `max_cols=621 · first_col=538` → 승격 뒤 **둘 다 0**.
+    //
+    // **이 자리는 파싱이 끝나는 프레임마다 돈다** — 긴 줄이 있는 코드 파일을 열면 여는 프레임에
+    // 선 막대가 잠시 뒤 사라지고 보던 열이 왼쪽 끝으로 튀었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    // **긴 줄은 접힘 «밖»(최상위)에 둔다** — 접으면 숨어 버려 가로 축이 사라지고, 그러면 이
+    // 판정자가 재려는 것(승격이 상한·열을 지키나)이 애초에 성립하지 않는다(실측으로 걸렸다).
+    try doc.appendSlice(allocator, "const s = \"");
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.appendSlice(allocator, "\";\n");
+    // **세로로도 굴릴 수 있어야 한다** — 아래 「보던 줄」 단언이 짧은 문서에서는 공허하다(변이
+    // Z4b 가 그래서 살았다: `anchor` 를 0 으로 만들어도 원래 0 이라 답이 같았다).
+    for (0..60) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "pub fn f{d}() void {{\n    _ = {d};\n}}\n", .{ i, i }));
+    }
+    const term = try undoFixture(&fx, allocator, "dhs16.zig", doc.items);
+    term.rt.editor_wrap = false;
+    const d = term.rt.editor_doc orelse return error.NoDoc;
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&term.rt.editor_syntax, d.file.content);
+    }
+    if (term.rt.editor_syntax.provider == null) return error.NoProvider;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar == null) return error.NoBarBefore;
+
+    // **승격이 실제로 돌아야 한다.** 첫 프로브는 `folds_applied` 가 이미 참이라 함수가 곧바로
+    // 돌아왔고, 그래서 「값이 유지된다」는 **공허한 측정**이었다 — 그 상태로 「문제 없다」고
+    // 결론낼 뻔했다. 그래서 되돌려 태우고, 범위가 실제로 섰는지까지 본다.
+    // **먼저 접어 둔다.** 접힌 것이 없으면 `folded_len` 이 이미 0 이라 「푼다」와 「안 푼다」가
+    // 같은 답을 낸다(변이 Z5 가 두 번 그렇게 살았다 — 픽스처가 개념을 안 가른 자리다).
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (term.rt.editor_folded_len == 0) return error.FixtureDidNotFold;
+
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    const first_before = term.rt.editor_first_col;
+    if (term.rt.editor_max_cols == 0 or first_before == 0) return error.FixtureDidNotScroll;
+    _ = scrollLines(fx.session, term, fx.leaf_rect, -12); // 몸통 줄 위에 선다
+    const top_before = topDocLine(term);
+    if (top_before == 0) return error.VerticalDidNotScroll;
+    term.rt.editor_syntax_folds_applied = false;
+    promoteFoldRangesToSyntax(fx.session, term);
+    if (!term.rt.editor_syntax_folds_applied) return error.PromotionDidNotRun;
+    if (term.rt.editor_fold_ranges.len == 0) return error.NoFoldRanges;
+
+    if (term.rt.editor_max_cols == 0) return error.PromotionThrewAwayMaxCols;
+    try testing.expectEqual(first_before, term.rt.editor_first_col);
+    // **접어 둔 것은 푼다.** 안 풀면 보이는 줄 표가 **부분집합인 채로** 「접힌 것 없음」이 되어
+    // 화면의 행과 문서의 줄이 어긋난다(2026-08-30 사용자 제보의 그 상태다 — 변이 Z5 가 살아
+    // 이 단언을 세웠다).
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    // **보던 줄도 지킨다** — 승격은 접힘 집합을 바꾸므로 행 첨자의 뜻이 달라진다.
+    const top_after = topDocLine(term);
+    if (!(top_after <= top_before and top_before - top_after <= 2)) return error.TopJumpedOnPromotion;
+
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    after.dl.deinit(allocator);
+    if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByPromotion;
+    try testing.expectEqual(first_before, term.rt.editor_first_col);
 }
 
 test "DHS10 가장 긴 줄 끝의 caret 이 실제로 그려진다 — editor.scroll-beyond-last-column (렌더 경계)" {

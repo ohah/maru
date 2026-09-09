@@ -14513,6 +14513,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-remote-release-semantics",
         "Bind downloaded immutable GitHub Release canonical semantics",
     );
+    const session_host_release_adapter_remote_release_semantic_files_step = b.step(
+        "test-session-host-release-adapter-remote-release-semantic-files",
+        "Bind held remote Release files to canonical semantics",
+    );
     const session_host_release_adapter_live_timing_artifact_step = b.step(
         "test-session-host-release-adapter-live-timing-artifact",
         "Bind one GitHub Actions artifact and its timing archive to the current attempt",
@@ -14945,6 +14949,14 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_remote_release_semantics_step.dependOn(&run_remote_release_semantics_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_semantics_tests.step);
             boundary_step.dependOn(&run_remote_release_semantics_tests.step);
+            const remote_release_semantic_files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_remote_release_semantic_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = remote_release_evidence_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod }, .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod }, .{ .name = "release_adapter_remote_release_semantics", .module = remote_release_semantics_mod } } });
+            const remote_release_semantic_files_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_remote_release_semantic_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_remote_release_semantic_files", .module = remote_release_semantic_files_mod }, .{ .name = "release_adapter_remote_release_semantics", .module = remote_release_semantics_mod }, .{ .name = "release_evidence", .module = remote_release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_remote_release_metadata", .module = remote_release_metadata_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_remote_release_fence", .module = remote_release_fence_mod }, .{ .name = "release_adapter_remote_release_assets", .module = remote_release_assets_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "bounded_process", .module = bounded_mod } } }) });
+            const run_remote_release_semantic_files_tests = b.addRunArtifact(remote_release_semantic_files_tests);
+            run_remote_release_semantic_files_tests.addArg("--maru-expect-tests=22");
+            run_remote_release_semantic_files_tests.setCwd(b.path("."));
+            session_host_release_adapter_remote_release_semantic_files_step.dependOn(&run_remote_release_semantic_files_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_remote_release_semantic_files_tests.step);
+            boundary_step.dependOn(&run_remote_release_semantic_files_tests.step);
             const tag_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_tag_authority.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_git_resolver", .module = resolver_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod } } });
             const tag_chain_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_tag_chain_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_github_git", .module = git_mod }, .{ .name = "release_adapter_github_tag_authority", .module = tag_authority_mod }, .{ .name = "release_adapter_github_transport_macos", .module = transport_macos_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
             const contract_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"), .target = target, .optimize = composition_optimize });

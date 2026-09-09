@@ -5225,7 +5225,8 @@ identity/mode/link-count/size/digest를 다시 확인하고, begun fence의 seal
 `remote_release_semantics.bind`에 넘긴다. 상위 transaction이 JSON을 다시 파싱하거나 pathname으로
 다시 열지 않는다. short/long/read error, descriptor/file/fence drift, cap 위반, input/result alias와 allocation
 fail-index는 semantic publication 0·temporary byte/descriptor cleanup으로 닫히며 downloaded `Assets`의 cleanup 권위는
-caller에 남는다.
+caller에 남는다. 같은 shared deadline은 첫 filesystem 검증 전과 semantic publication 직후 다시 관찰하며,
+마지막 관찰이 실패하면 방금 만든 semantic owner를 해제하고 publication 0으로 되돌린다.
 
 모든 semantic·attestation 검증 후 `verifyAfterUntil`로 같은 published Release를 다시 읽어 begun snapshot과
 exact 일치시켜야만 `Observation` owner를 게시한다. 성공 owner는 owned canonical manifest/evidence bytes와

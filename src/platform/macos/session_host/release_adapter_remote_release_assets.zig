@@ -92,6 +92,16 @@ pub const Assets = struct {
         return fd;
     }
 
+    pub fn metadataOwner(self: *@This()) !*const metadata.Owner {
+        _ = try self.revalidate();
+        return self.fence_owner.?.metadataOwnerFor(self.deadline_owner.?, self.pinned_owner.?) orelse error.InvalidFence;
+    }
+
+    pub fn remaining(self: *@This()) !i128 {
+        if (!validOwner(self)) return error.InvalidOwner;
+        return self.deadline_owner.?.remaining();
+    }
+
     pub fn deinit(self: *@This()) !void {
         if (!validOwner(self)) return error.InvalidOwner;
         try cleanup(self);

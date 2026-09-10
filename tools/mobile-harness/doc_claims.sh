@@ -554,6 +554,22 @@ ck "세대가 갈려도 신원은 산다" 1 "$(grep -c 'fn intentSurvivesGenerat
 # **흐르는 목록은 창으로 잘라 등록한다** — 안 자르면 헤더 밑의 안 보이는 줄이 눌린다.
 ck "목록 자리는 창으로 자른다" 1 "$(grep -c 'fn registerActionClipped(' $MB)"
 
+echo "§IME 확정 — 원격이 든 것을 맞춘다 (M2-f1)"
+IMEJ=src/platform/android/MaruActivity.java
+DOC=docs/mobile-platform.md
+# **확정 자리는 하나의 규칙만 쓴다.** 조합은 자라고 줄고 **갈아치워진다** — 추천 단어를 고르면
+# 확정 문자열이 우리가 이미 보낸 앞부분으로 **시작하지 않는다.** 「시작하면 벗기고 아니면 통째로」
+# 로 두면 그 자리에서 두 벌이 된다(기기 실측: `sent=[가]` 에 추천 `거나` → 옛 규칙이면 `가거나`).
+# 주석에 규칙이 인용되므로 **주석을 걷어내고** 센다.
+ck "확정도 맞추기를 쓴다" 1 "$(awk '/public boolean commitText\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'reconcileSent(')"
+ck "조합도 맞추기를 쓴다" 1 "$(awk '/public boolean setComposingText\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'reconcileSent(next.substring')"
+ck "즉시 확정도 맞추기를 쓴다" 1 "$(awk '/public boolean setComposingText\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'reconcileSent(next)')"
+# **접두사를 믿는 자리가 하나도 없다.** 규칙이 두 벌이면 한쪽만 낡는다 — 실제로 확정 쪽이 낡아 있었다.
+ck "접두사를 믿는 자리가 없다" 0 "$(sed 's,//.*,,' $IMEJ | grep -c 'startsWith')"
+# **문서가 그 이유를 들고 있다** — 「껐으니 추천은 안 온다」가 전제였고 그것이 틀렸다.
+ck "문서가 추천을 계약 밖으로 안 민다" 1 "$(grep -c '부탁이지 계약이 아니다' $DOC)"
+ck "옛 규칙이 문서에 안 남았다" 0 "$(grep -c '이미 내보낸 앞부분을 빼고 넘긴다' $DOC)"
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

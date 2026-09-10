@@ -359,10 +359,26 @@ fn worker(job: *Job) void {
         const file = open_file orelse continue;
 
         // 명령은 언제나 **값 하나**다 — 배열은 결과 쪽에만 온다.
-        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, .value, &result.partial) or
-            // **입력 전부**를 본다(§2.1.1). 명령 한 조각과 겹치지만, 겹침을 피하려고 자리를 쪼개면
-            // 「어느 조각에 걸렸나」를 인덱스가 알아야 하고 그것은 값의 뜻을 판정하는 일이 된다.
-            probeMatches(io, file, probe.input_offset, job.query, raw, out, &result.read_bytes, .object, &result.partial);
+        // **입력이 있으면 그것만 본다**(§2.1.1 · 적대적 1회차). `command` 도 대상도 `input` **안**에
+        // 있으므로 명령 프로브를 따로 돌면 같은 바이트를 두 번 읽는다 — 실측 Claude 1,417 MB 에서
+        // 읽는 몫이 **56.8 → 129.4 MB(2.28 배)** 로 뛰었고, 그 차이의 대부분이 그 중복이었다.
+        // 건너뛰면 **72.6 MB** 다(전 대비 +28%).
+        //
+        // ⚠️ 안전하게 건너뛸 수 있는 근거는 실측이다: `input` 은 **최대 38.1 KiB** 로 조각 상한
+        // (64 KiB)을 넘는 것이 **0 건**이라, 입력 프로브가 언제나 `command` 까지 본다. 그래도
+        // 상한에 걸린 날에는 명령 조각이라도 봐야 하므로 아래 폴백을 둔다 — 「없다」와 「못 봤다」를
+        // 섞지 않는 것이 이 뷰의 계약이다.
+        const in_command = blk: {
+            if (probe.input_offset == 0) {
+                break :blk probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, .value, &result.partial);
+            }
+            var cut = false;
+            const hit = probeMatches(io, file, probe.input_offset, job.query, raw, out, &result.read_bytes, .object, &cut);
+            if (cut) result.partial = true;
+            if (hit or !cut) break :blk hit;
+            // 입력을 다 못 봤다 — 명령 조각이라도 본다.
+            break :blk probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, .value, &result.partial);
+        };
         const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, if (probe.body_is_array) .text_array else .value, &result.partial);
         if (!in_command and !in_result) continue;
         result.matches.append(state.allocator, .{

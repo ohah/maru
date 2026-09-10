@@ -689,7 +689,12 @@ pub const Provider = struct {
     ///
     /// **시작 줄마다 하나만 남긴다**(가장 긴 것). gutter 화살표가 줄마다 하나이므로 그 축과 같아야
     /// 하고, 안 그러면 같은 줄에 후보가 여럿이라 "이 화살표가 무엇을 접는가" 가 정해지지 않는다.
-    pub fn foldSpans(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(FoldSpan)) void {
+    /// **할당 실패는 «보고»한다 — 빈 목록으로 떨어뜨리지 않는다.** 색(`spansForRange`)은 실패를
+    /// 무색으로 저하시켜도 되지만(§5 — 다음 프레임이 다시 칠한다) 접힘은 다르다: 부르는 쪽이
+    /// 빈 목록을 「접을 것이 없다」로 읽고 **다시 세지 않도록 래치**하므로, 일시적 실패가 그 문서의
+    /// 구문 접힘을 **영영** 없앤다(적대적 검증 2026-09-10 — 첫 할당을 실패시켜 실측했다).
+    /// 그래서 이 함수의 빈 목록은 **언제나 「접을 것이 없다」**이고, 못 센 것은 오류로 나온다.
+    pub fn foldSpans(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(FoldSpan)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
         const tree = self.tree orelse return;
 
@@ -711,14 +716,14 @@ pub const Provider = struct {
             const sp = c.ts_node_start_point(node);
             const ep = c.ts_node_end_point(node);
             if (ep.row > sp.row and hasKind(kinds, c.ts_node_type(node))) {
-                const gop = best.getOrPut(allocator, sp.row) catch return;
+                const gop = try best.getOrPut(allocator, sp.row);
                 if (!gop.found_existing or gop.value_ptr.* < ep.row) gop.value_ptr.* = ep.row;
             }
 
             if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
             while (true) {
                 if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
-                if (!c.ts_tree_cursor_goto_parent(&cursor)) return sortInto(allocator, &best, out);
+                if (!c.ts_tree_cursor_goto_parent(&cursor)) return try sortInto(allocator, &best, out);
             }
         }
     }
@@ -736,8 +741,8 @@ pub const Provider = struct {
         allocator: std.mem.Allocator,
         best: *std.AutoHashMapUnmanaged(u32, u32),
         out: *std.ArrayList(FoldSpan),
-    ) void {
-        out.ensureTotalCapacity(allocator, best.count()) catch return;
+    ) error{OutOfMemory}!void {
+        try out.ensureTotalCapacity(allocator, best.count());
         var it = best.iterator();
         while (it.next()) |e| out.appendAssumeCapacity(.{ .start_row = e.key_ptr.*, .end_row = e.value_ptr.* });
         std.mem.sort(FoldSpan, out.items, {}, struct {
@@ -1439,6 +1444,50 @@ test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
     try std.testing.expectEqual(@as(usize, 0), failed);
 }
 
+test "SYN28 접힘 범위는 할당 실패를 «보고»한다 — 빈 목록으로 떨어지지 않는다 (§4·§5)" {
+    // **색과 접힘은 실패의 뜻이 다르다.** 색(`spansForRange`)은 무색으로 저하돼도 다음 프레임이
+    // 다시 칠하지만, 접힘은 부르는 쪽이 빈 목록을 「접을 것이 없다」로 읽고 **다시 세지 않도록
+    // 래치**한다 — 그래서 실패를 삼키면 일시적 할당 실패가 그 문서의 구문 접힘을 **영영** 없앤다.
+    // 실측으로 잡았다(2026-09-10 — 승격의 첫 할당을 실패시키니 접힘이 사라진 채 래치했다).
+    const allocator = std.testing.allocator;
+    const src =
+        \\const items = .{
+        \\    1,
+        \\    2,
+        \\};
+        \\pub fn f() void {
+        \\    _ = 1;
+        \\}
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+
+    // **먼저 성공했을 때의 할당 수를 센다** — 그 수가 0 이면 아래 순회가 공허하다.
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var counted: std.ArrayList(Provider.FoldSpan) = .empty;
+    try prov.foldSpans(counting.allocator(), &counted);
+    const n = counting.alloc_index;
+    const spans_found = counted.items.len;
+    counted.deinit(counting.allocator());
+    try std.testing.expect(n > 0);
+    try std.testing.expect(spans_found > 0); // 픽스처가 실제로 접을 것을 준다
+
+    // **모든 할당 자리에서 실패시켜 본다** — 빈 목록이 아니라 «오류» 가 와야 한다.
+    for (0..n) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+        defer spans.deinit(failing.allocator());
+        try std.testing.expectError(error.OutOfMemory, prov.foldSpans(failing.allocator(), &spans));
+        try std.testing.expect(failing.has_induced_failure);
+    }
+
+    // **그리고 성공 경로는 그대로다** — 오류를 내게 만들면서 정상 답까지 바꾸면 안 된다.
+    var ok_spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer ok_spans.deinit(allocator);
+    try prov.foldSpans(allocator, &ok_spans);
+    try std.testing.expectEqual(spans_found, ok_spans.items.len);
+}
+
 test "SYN19 구문 접힘이 들여쓰기가 못 잡는 것을 잡는다 (§4)" {
     // §4: *"들여쓰기로는 잡히지 않는 것(여러 줄 인자 목록, 배열 리터럴)이 여기서 접힌다"*.
     // **그 문장을 값으로 고정한다** — 구조 규칙(여러 줄 노드)이 실제로 그 둘을 잡는지 본다.
@@ -1459,7 +1508,7 @@ test "SYN19 구문 접힘이 들여쓰기가 못 잡는 것을 잡는다 (§4)" 
     defer prov.deinit();
     var spans: std.ArrayList(Provider.FoldSpan) = .empty;
     defer spans.deinit(allocator);
-    prov.foldSpans(allocator, &spans);
+    try prov.foldSpans(allocator, &spans);
 
     // ⑴ 배열 리터럴(0행에서 시작해 3행까지)
     var literal = false;
@@ -1499,7 +1548,7 @@ test "SYN20 트리가 없으면 빈 목록이다 — 실패는 저하다 (§5)" 
     defer prov.deinit();
     var spans: std.ArrayList(Provider.FoldSpan) = .empty;
     defer spans.deinit(allocator);
-    prov.foldSpans(allocator, &spans);
+    try prov.foldSpans(allocator, &spans);
     try std.testing.expectEqual(@as(usize, 0), spans.items.len);
 }
 
@@ -1541,7 +1590,7 @@ test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 �
             continue;
         };
         defer prov.deinit();
-        prov.foldSpans(allocator, &spans);
+        try prov.foldSpans(allocator, &spans);
         if (spans.items.len == 0) {
             std.debug.print("'{s}' 에서 접을 범위가 0 — 종류 이름을 확인하라\n", .{@tagName(s.lang)});
             empty += 1;
@@ -1570,7 +1619,7 @@ test "SYN22 산문은 과하게 접지 않는다 — 문단·목록 항목에 �
     defer prov.deinit();
     var spans: std.ArrayList(Provider.FoldSpan) = .empty;
     defer spans.deinit(allocator);
-    prov.foldSpans(allocator, &spans);
+    try prov.foldSpans(allocator, &spans);
 
     // **문단(2행)과 두 번째 목록 항목(7행)에는 화살표가 없어야 한다.**
     //

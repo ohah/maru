@@ -127,7 +127,7 @@ pub fn appendJsonEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Al
 /// **`pane` 은 tmux pane 축이다**([계획](../../docs/plans/remote-agent-state.md) RA7). 역조회가 nonce 를
 /// 진짜 Term 신원으로 치환하고 나면 「어느 tmux pane 이었나」가 사라지는데, 한 tmux 세션에 pane 이 여럿이면
 /// 그 축이 곧 «각각 다른 에이전트» 다. nonce 에 합성하지 않고 **필드를 따로 두는 이유**는 nonce 가 Term
-/// 귀속의 유일한 잣대(`remoteNonceMatches`)라, 거기에 하위 축을 섞으면 접두 비교가 생겨 오배달 축이 하나
+/// 귀속의 잣대(`app_session/agent.zig` 의 `remoteEventIsOurs`)라, 거기에 하위 축을 섞으면 접두 비교가 생겨 오배달 축이 하나
 /// 늘기 때문이다(RA7.3 결정 3).
 ///
 /// **비면 안 싣는다.** tmux 밖이면 이 축이 없고, 구버전 로컬은 모르는 키를 무시하므로 있어도 안전하다.

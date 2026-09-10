@@ -2551,6 +2551,26 @@ fn movedOffset(
 /// **두 축을 다 본다**(2026-09-08 — 한동안 줄 축만 봤다). 한 화면보다 긴 줄에서 `⌘→` 를 누르면
 /// caret 이 화면 밖 오른쪽에 서고 뷰는 그대로였다([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
 /// 「가로도 caret 을 따라간다」).
+/// 설정한 caret 여백을 **화면에 맞게 묶는다**(§4 「caret 여백」).
+///
+/// **절반을 넘을 수 없다.** 안 묶으면 위·아래(좌·우) 요구가 **서로 모순**되어 caret 이 화면 안에
+/// 있어도 이동마다 굴린다 — 위 여백을 만들려고 올리면 아래 여백이 깨지고, 그 반대도 같다.
+/// 큰 값을 주면 이 clamp 때문에 **늘 가운데**가 되는데 그것이 Vim 에서 `scrolloff` 를 크게 잡았을
+/// 때의 동작이라, 묶는 것이 곧 선례를 따르는 것이다.
+///
+/// **보이는 것이 없으면 0 이다** — 기준이 없는데 여백을 요구하면 어디로도 못 간다.
+///
+/// **그 가드를 지운 변이는 살아남는 것이 정상이다**(적대적 검증 1회차 M3 — 오늘 도달하지 않는다):
+/// 부르는 셋이 각자 `visible == 0` 을 **먼저** 거른다 — 가로는 함수 머리의 `if (visible == 0) return`,
+/// 세로는 `rows == 0` 갈래가 앞에서 빠져나가 `drawn >= 1` 이고(편집 갈래도 `fallback_rows == 0` 을
+/// 먼저 돌려보낸다), 비교 뷰는 `diffPageRows` 가 `@max(1, …)` 다. 그래도 두는 이유는 **뜻**이다 —
+/// 다음에 이 함수를 부르는 곳이 붙었을 때 0 으로 나누는 식(`(visible - 1) / 2`)에 0 을 물려주지
+/// 않는다. `scrollWidthCols` 의 `0 → null` 가드가 같은 근거로 서 있다.
+fn caretMargin(want: u32, visible: usize) usize {
+    if (visible == 0) return 0;
+    return @min(@as(usize, want), (visible - 1) / 2);
+}
+
 fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
     revealPrimaryCaretRows(self, term, 0);
     revealPrimaryCaretCols(self, term, 0, 0);
@@ -2601,12 +2621,16 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
     const slot = if (right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
     const first: u32 = slot.*;
 
+    // **여백만큼 더 본다**(§4 「caret 여백」 — `editor.cursor-surrounding-columns`, 기본 0).
+    // 기본값에서 `m` 은 0 이라 아래 셋은 **이 조각 이전과 완전히 같은 식**이다.
+    const m: u32 = @intCast(caretMargin(self.loaded_config.config.editor.cursor_surrounding_columns, visible));
+
     // **왼쪽으로 나가면 그 열, 오른쪽으로 나가면 그 열이 마지막 칸.** 둘 다 안 걸리면 이미 보인다.
     var want: u32 = first;
-    if (col < first) {
-        want = col;
-    } else if (col >= first + visible) {
-        want = col + 1 - visible;
+    if (col -| m < first) {
+        want = col -| m;
+    } else if (col +| m >= first + visible) {
+        want = (col +| m) + 1 - visible;
     } else return;
 
     const max_col: u32 = @min(max_cols -| visible, @as(u32, chrome_editor.frame.max_first_col));
@@ -2643,12 +2667,37 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
     if (rows == 0) {
         // 스냅숏이 없다. **편집 전 행 수를 알면 그것으로 최소 스크롤**을 하고, 그것도 없으면
         // (정말 한 프레임도 안 그렸다) 맨 위에 둔다.
+        //
+        // **여백은 여기에도 걸린다**(§4 「caret 여백」). 이 갈래는 **편집 직후**에 탄다 —
+        // `refreshAfterEdit` 가 렌더 스냅숏을 비우고 편집 **전** 행 수를 넘기는 그 자리다. 안 걸면
+        // 화면 아래쪽 가장자리에서 타이핑하는 동안 **글자마다 caret 이 마지막 줄에 붙고**, 다음
+        // 화살표가 와야 여백이 돌아온다 — 같은 노출이 경로에 따라 다른 답을 내는 것이라 계약이
+        // 말하는 「이동 뒤 노출」의 뜻이 갈린다.
+        //
+        // **행 수를 모르면(`fallback_rows == 0`) 여백도 없다** — `caretMargin` 이 그때 0 을 내는 것과
+        // 같은 근거다: 기준이 없는데 여백을 요구하면 어디로도 못 간다.
         if (fallback_rows == 0) {
             setEditorTop(self, term, row);
             return;
         }
-        const top0: u32 = @intCast(term.rt.editor_first_line);
-        if (row < top0) setEditorTop(self, term, row) else if (row >= top0 + fallback_rows) setEditorTop(self, term, row -| (@as(u32, @intCast(fallback_rows)) -| 1));
+        const top0: usize = term.rt.editor_first_line;
+        const m0 = caretMargin(self.loaded_config.config.editor.cursor_surrounding_lines, fallback_rows);
+        const lo = @as(usize, row) -| m0;
+        const hi = @as(usize, row) +| m0;
+        var want0: usize = top0;
+        // **`<` 을 `<=` 로 바꾼 변이는 살아남는 것이 정상이다**(적대적 검증 4회차 Q1): `lo == top0`
+        // 이면 여백이 **딱 맞는** 자리라 어느 갈래로 가든 답이 `top0` 이다. 아래 갈래가 대신
+        // 걸릴 수도 없다 — 절반 clamp 가 `2 * m0 <= fallback_rows - 1` 을 보장하므로
+        // `hi = top0 + 2 * m0` 이 `top0 + fallback_rows` 에 닿지 못한다. 그래서 이 경계는
+        // **판정할 수 없고**, 그럼에도 `<` 인 이유는 뜻이다 — 「모자랄 때만 민다」.
+        if (lo < top0) {
+            want0 = lo;
+        } else if (hi >= top0 + fallback_rows) {
+            want0 = (hi + 1) -| fallback_rows;
+        } else return;
+        // **아래 갈래와 같은 상한을 쓴다** — 여백 때문에 문서 밖을 보여 주지 않는다.
+        want0 = @min(want0, maxFirstLine(editorLines(term).len, fallback_rows, term));
+        if (want0 != top0) setEditorTop(self, term, want0);
         return;
     }
 
@@ -2661,20 +2710,43 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
         geom.cell_w_px == self.cell_width_px and
         geom.cell_h_px == self.cell_height_px;
 
-    if (!unfolded and snapshot_is_current) {
-        for (term.rt.editor_hit_lines[0..rows]) |drawn| {
-            if (drawn == doc_line) return; // 이미 보인다 — 굴리면 화면만 튄다
-        }
-    }
+    // **그려진 논리 줄은 `[top, top + drawn - 1]` 이다.** 접힘 반영 줄 인덱스는 문서 줄에 1:1 로
+    // 대응하므로 그 구간이 곧 `editor_hit_lines` 가 든 집합이고, 그래서 「그려졌나」를 배열로 훑는
+    // 대신 산술로 답할 수 있다 — **여백을 세려면 훑기로는 모자란다**(가장자리에 붙은 caret 도
+    // 「그려졌다」로 나온다).
+    //
+    // **단위는 논리 줄이다 — 시각 행이 아니다.** 랩에서 시각 행으로 세면 과대 계수라 필요 이상으로
+    // 굴러간다(아래로 나갔을 때 `drawnDocLines` 를 쓰던 그 근거 그대로다).
+    const drawn = drawnDocLines(term);
+    const top = term.rt.editor_first_line;
+    const margin = caretMargin(self.loaded_config.config.editor.cursor_surrounding_lines, drawn);
+    const lower = row -| margin; // 이 줄이 맨 위보다 위에 있어야 위 여백이 선다
+    const upper = row +| margin; // 이 줄이 마지막보다 위에 있어야 아래 여백이 선다
 
-    // 밖이다. **어느 쪽으로 나갔는지**에 따라 가장자리에 붙인다.
-    if (row < term.rt.editor_first_line) {
-        setEditorTop(self, term, row);
-    } else {
-        // 아래로 나갔다 — 그 줄이 **마지막 줄**이 되도록 민다. 논리 줄 수로 센다(시각 행 수로
-        // 세면 랩에서 과대 계수라 필요 이상으로 굴러간다 — 가운데 배치가 같은 이유로 논리 줄을 쓴다).
-        setEditorTop(self, term, row -| (drawnDocLines(term) -| 1));
-    }
+    var want: usize = top;
+    if (lower < top) {
+        // 위로 나갔다(또는 위 여백이 모자라다). **문서 맨 위에서는 요구하지 않는다** — `-|` 가
+        // 0 에서 포화하므로 맨 위에 붙는 것이 곧 그 면제다.
+        want = lower;
+    } else if (upper >= top +| drawn or unfolded or !snapshot_is_current) {
+        // 아래로 나갔다 — 그 줄이 **여백만큼 위**가 되도록 민다.
+        //
+        // **스냅숏을 못 믿으면 여기로 온다.** 방금 폈거나(`unfolded`) 그 사이 접힘·랩·탭 폭·폰트가
+        // 바뀌었으면 위 구간이 지금 화면을 설명하지 못한다 — 그때는 *"모를 때는 움직이는 쪽이 덜
+        // 나쁘다"* 는 이 함수의 규율대로 묻지 않고 민다.
+        //
+        // **`unfolded` 만 지운 변이는 살아남는 것이 정상이다**(적대적 검증 3회차 N3b): 펴면 보이는
+        // 줄 배열이 **반드시 길어지므로** `snapshot_is_current` 의 `geom.visible_len == editorLines(term).len`
+        // 이 그 자리에서 이미 거짓이다. 그럼에도 둘 다 적는 이유는 **뜻**이다 — 「방금 폈다」는
+        // 이 함수가 직접 한 일이라 다른 항의 부작용으로 숨겨 두면, 그 항이 바뀌는 날 조용히 사라진다.
+        want = (upper + 1) -| drawn;
+    } else return; // 여백까지 확보된 채 보인다 — 굴리면 화면만 튄다
+
+    // **여백 때문에 문서 밖을 보여 주지 않는다.** 안 묶으면 문서 끝에서 이동마다 「썼다가 그리기
+    // 직전 `clampScrollToGeometry` 가 되돌리는」 왕복이 남는다 — 자리는 안정적이지만 매 이동이
+    // 프레임을 깨운다. 상한은 `scrollLines`·`clampScrollToGeometry` 가 쓰는 `maxFirstLine` **하나**다.
+    want = @min(want, maxFirstLine(editorLines(term).len, drawn, term));
+    if (want != top) setEditorTop(self, term, want);
 }
 
 pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) bool {
@@ -4121,11 +4193,16 @@ fn diffPageRows(term: *Term, side: DiffSide) usize {
 /// 깨지는 날 **여기가 먼저 틀리지 않게** 하기 위해서다.
 fn scrollDiffCaretIntoView(self: *AppSession, term: *Term, row: usize, total: usize, visible: usize) void {
     const first = term.rt.editor_first_line;
+    // **여백은 단일 편집기와 같은 값이다**(§4 「caret 여백」) — 비교 뷰는 좌우가 **함께** 구르므로
+    // 축이 하나이고, 그래서 세로에서는 두 뷰가 갈릴 이유가 없다.
+    const margin = caretMargin(self.loaded_config.config.editor.cursor_surrounding_lines, visible);
+    const lower = row -| margin;
+    const upper = row +| margin;
     var want = first;
-    if (row < first) {
-        want = row;
-    } else if (row >= first + visible) {
-        want = row + 1 - visible;
+    if (lower < first) {
+        want = lower;
+    } else if (upper >= first + visible) {
+        want = (upper + 1) -| visible;
     }
     const max_first = maxFirstLine(total, visible, term);
     want = @min(want, max_first);
@@ -14812,6 +14889,11 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     // 공허하다(`first_line` 이 어차피 0 이라 버리든 말든 같다).
     for (0..60) |_| try doc.appendSlice(allocator, "tail\n");
     const term = try undoFixture(&fx, allocator, "dhs8.txt", doc.items);
+    // **caret 여백을 끈다 — 이 판정자의 주제가 아니다.** 여백(기본 5)이 편집 경로에도 걸리므로
+    // (§4 「caret 여백」) 여기 세로 단언이 재는 것이 「편집 뒤 따라온다」가 아니라 「따라온다 +
+    // 여백」이 되어, 두 규칙 중 어느 것이 깨져도 같은 자리에서 실패한다. 여백은 `SOFF1`~`SOFF9`
+    // 가 소유한다.
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 0;
     term.rt.editor_wrap = false;
 
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
@@ -15112,6 +15194,472 @@ test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — �
     after.dl.deinit(allocator);
     if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByPromotion;
     try testing.expectEqual(first_before, term.rt.editor_first_col);
+}
+
+/// caret 여백 판정자들이 함께 쓰는 픽스처 — **짧은 줄 200개**(랩·가로 축이 끼어들지 않는다).
+fn marginFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8) !*Term {
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..200) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line{d}\n", .{i}));
+    }
+    const term = try undoFixture(fx, allocator, name, doc.items);
+    term.rt.editor_wrap = false;
+    return term;
+}
+
+fn lineStart(term: *Term, idx: usize) usize {
+    return term.rt.editor_doc.?.file.lines.line(idx).?.start;
+}
+
+test "SOFF1 세로 여백이 실제로 남는다 — caret 이 바닥에 붙기 전에 굴러간다 (제품 경계)" {
+    // **「보인다」와 「여백까지 있다」는 다른 말이다.** 옛 판정은 `editor_hit_lines` 를 훑어 caret 줄이
+    // 그려졌는지만 봤고, 그러면 **가장자리에 딱 붙은 caret 도 「보인다」**로 나온다. 이 판정자가
+    // 가르는 것이 그 둘이다 — 여백 5 에서는 바닥까지 다섯 줄 남은 자리에서 **이미** 굴러야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff1.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    // **픽스처가 두 뜻을 갈라야 한다** — 화면이 여백의 두 배보다 좁으면 절반 clamp 가 먼저 걸려
+    // 「여백이 걸렸다」와 「가운데로 갔다」가 겹친다. 그리고 문서가 화면보다 훨씬 길어야 한다.
+    if (!(d > m * 2 + 4 and d + m + 4 < 200)) return error.FixtureViewport;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+
+    // **여백 하나를 남긴 자리까지는 안 움직인다.** `d - 1 - m` 이 「아래 여백이 딱 맞는」 마지막 줄이다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, d - 2 - m));
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line); // 아직 여백이 산다
+
+    // **한 줄 더 내려가면 굴러간다 — 바닥에 닿기 `m` 줄 전이다.**
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_first_line);
+
+    // **그리고 caret 아래로 정확히 `m` 줄이 남는다.** 굴러간 사실만 재면 「한 줄 더 굴렸다」 같은
+    // 변이가 산다.
+    const row = visibleRowOfDocLine(term, @intCast(term.rt.editor_doc.?.file.lines.lineAt(term.rt.editor_selection.?.focus))) orelse return error.NoRow;
+    const last_visible = term.rt.editor_first_line + drawnDocLines(term) - 1;
+    try testing.expectEqual(m, last_visible - row);
+}
+
+test "SOFF2 위로 올라갈 때도 여백이 남는다 — 두 방향이 같은 값을 쓴다 (제품 경계)" {
+    // **한 방향만 재면 반쪽이다.** 위쪽 가지에서 여백을 빼먹은 변이는 아래쪽만 재는 판정자를
+    // 통과한다(§3.2 의 「열이 둘이어도 규칙은 하나다」와 같은 부류).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff2.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    if (drawnDocLines(term) <= m * 2 + 4) return error.FixtureViewport;
+
+    // **제품 경로로 굴린다** — 값을 심으면 clamp 가 무엇을 되돌리는지 못 본다.
+    // **양수가 「문서 앞쪽」이다**(터미널 스크롤백과 같은 방향 규약) — 아래로 굴리려면 음수다.
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -40)) return error.ScrollRejected;
+    var again = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    again.dl.deinit(allocator);
+    const top = term.rt.editor_first_line;
+    if (top < m + 4) return error.FixtureDidNotScroll;
+
+    // 위 여백이 딱 맞는 줄 → 한 줄 더 올라가면 굴러야 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, top + m + 1));
+    if (!moveCarets(fx.session, term, .line_up, false)) return error.MoveRejected;
+    try testing.expectEqual(top, term.rt.editor_first_line); // 아직 여백이 산다
+    if (!moveCarets(fx.session, term, .line_up, false)) return error.MoveRejected;
+    try testing.expectEqual(top - 1, term.rt.editor_first_line);
+}
+
+test "SOFF3 0 이면 옛 동작 그대로다 — 가장자리에 붙는다 (제품 경계)" {
+    // **끄기가 진짜로 옛 동작이어야 한다.** 기본값을 바꾸는 것은 남의 화면을 바꾸는 일이라,
+    // 「0 이면 이 조각 이전과 완전히 같다」가 계약이다(`docs/configuration.md`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff3.txt");
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 0;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    if (!(d > 8 and d + 8 < 200)) return error.FixtureViewport;
+
+    // 기본값(5)이었다면 벌써 굴렀을 자리 — 0 에서는 **꿈쩍도 안 한다**.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, d - 4));
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+
+    // 마지막 줄까지 가야 비로소 한 줄 구른다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, d - 1));
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_first_line);
+}
+
+test "SOFF4 여백 때문에 문서 밖을 보여 주지 않는다 — 끝에서는 요구하지 않는다 (렌더 경계)" {
+    // **여백을 무조건 만들면 문서 끝에서 빈 화면이 열린다.** 그리고 clamp 를 노출 밖(그리기 직전)에만
+    // 두면 이동마다 「썼다가 되돌리는」 왕복이 남는다 — 그래서 노출 **안**에서 묶는다. 이 판정자는
+    // 프레임까지 그려 **그린 뒤에도 값이 그대로인지**(=왕복이 없는지) 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff4.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (drawnDocLines(term) < 8) return error.FixtureViewport;
+
+    // 마지막 줄로 간다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, 198));
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    const after_move = term.rt.editor_first_line;
+
+    var f2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f2.dl.deinit(allocator);
+    // **그리기 직전 clamp 가 되돌릴 것이 없어야 한다** — 있으면 노출이 문서 밖을 요구한 것이다.
+    try testing.expectEqual(after_move, term.rt.editor_first_line);
+
+    // 그리고 마지막 줄은 실제로 화면에 있다.
+    const last = term.rt.editor_first_line + drawnDocLines(term);
+    try testing.expect(last > 198);
+}
+
+test "SOFF5 여백은 화면 절반을 넘을 수 없다 — 큰 값은 늘 가운데다 (제품 경계)" {
+    // **안 묶으면 위·아래 요구가 서로 모순된다** — caret 이 화면 안에 있어도 이동마다 굴러 화면이
+    // 요동친다. Vim 에서 큰 `scrolloff` 가 「늘 가운데」가 되는 것이 이 clamp 의 선례다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff5.txt");
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 1000;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    if (!(d >= 5 and d + 10 < 200)) return error.FixtureViewport;
+
+    // 화면 한가운데보다 아래 어딘가로 간다 — 절반 clamp 가 걸리면 **caret 이 가운데**로 온다.
+    const target: usize = d + 10;
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, target));
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+
+    const m = (d - 1) / 2; // 실효 여백 = 절반
+    // **`.line_down` 은 심은 줄이 아니라 그 다음 줄에 선다** — 도착한 자리로 센다.
+    const landed = target + 1;
+    try testing.expectEqual((landed + 1 + m) -| d, term.rt.editor_first_line);
+
+    // **그리고 그 자리에서 한 줄 더 가면 딱 한 줄만 구른다** — 모순 상태면 여기서 값이 튄다.
+    const before = term.rt.editor_first_line;
+    if (!moveCarets(fx.session, term, .line_down, false)) return error.MoveRejected;
+    try testing.expectEqual(before + 1, term.rt.editor_first_line);
+}
+
+test "SOFF6 가로 여백은 기본이 0 이고, 켜면 열이 남는다 (제품 경계)" {
+    // **가로는 선례가 없어 기본이 0 이다**(§4 「caret 여백」) — 그래서 이 판정자는 두 가지를 함께
+    // 잰다: 기본값에서 **아무것도 안 바뀐 것**과, 켰을 때 **실제로 열이 남는 것**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n"); // 긴 줄을 첫 줄로 두지 않는다
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.append(allocator, '\n');
+    // **더 긴 줄을 하나 둔다 — 픽스처가 두 뜻을 갈라야 한다.** 600 열 줄이 문서에서 가장 길면
+    // 그 줄 끝의 caret 은 **이미 가로 상한**이라 여백이 들어갈 자리가 없고, 「여백을 안 더한다」와
+    // 「상한에 막혔다」가 겹쳐 변이가 산다(실측: 켠 값 8 인데 4 만 밀렸다).
+    try doc.appendNTimes(allocator, 'y', 900);
+    try doc.append(allocator, '\n');
+    for (0..40) |_| try doc.appendSlice(allocator, "tail\n");
+    const term = try undoFixture(&fx, allocator, "soff6.txt", doc.items);
+    term.rt.editor_wrap = false;
+
+    // ⑴ **기본값은 0 이다.**
+    try testing.expectEqual(@as(u32, 0), (maru.config.theme.EditorConfig{}).cursor_surrounding_columns);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const visible = term.rt.editor_hit_geom.content_width;
+    if (!(visible > 16 and visible < 300)) return error.FixtureWidth;
+
+    // ⑵ **기본(0)에서 줄 끝으로 가면 caret 이 마지막 칸이다** — 옛 동작 그대로.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
+    const zero_first = term.rt.editor_first_col;
+    if (zero_first == 0) return error.HorizontalDidNotFollow;
+
+    // ⑶ **켜면 그만큼 더 민다.** 같은 이동을 여백만 바꿔 다시 시킨다.
+    term.rt.editor_first_col = 0;
+    fx.session.loaded_config.config.editor.cursor_surrounding_columns = 8;
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
+    try testing.expectEqual(zero_first + 8, term.rt.editor_first_col);
+
+    // ⑷ **왼쪽으로 나갈 때도 같은 값을 쓴다.** 오른쪽만 재면 왼쪽 가지를 지운 변이가 산다
+    //    (적대적 검증 1회차 M10 이 그렇게 살아남았다).
+    {
+        // 오른쪽 끝까지 민 상태에서 줄 머리로 간다 — 왼쪽 가지가 여백만큼 **더** 밀어야 한다.
+        const before_left = term.rt.editor_first_col;
+        if (before_left == 0) return error.FixtureNotScrolledRight;
+        // 줄 머리보다 여백만큼 **뒤**에 caret 을 두면, 왼쪽 여백을 만들려고 그만큼 더 민다.
+        const long_line = term.rt.editor_doc.?.file.lines.line(1).?;
+        term.rt.editor_selection = editor_selection.Selection.at(long_line.start + 40);
+        if (!moveCarets(fx.session, term, .char_left, false)) return error.MoveRejected;
+        // caret 열은 39 다(0-based) — 여백 8 이면 31 열이 왼쪽 끝이 된다.
+        try testing.expectEqual(@as(u16, 39 - 8), term.rt.editor_first_col);
+    }
+
+    // ⑸ **랩이면 아무 일도 안 한다** — 가로 축 자체가 없다.
+    term.rt.editor_wrap = true;
+    term.rt.editor_first_col = 0;
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
+    try testing.expectEqual(@as(u16, 0), term.rt.editor_first_col);
+}
+
+test "SOFF7 휠은 여백에 안 걸린다 — 사용자가 직접 미는 축이다 (제품 경계)" {
+    // **여백은 「이동 뒤 노출」에만 걸린다**(§4 「caret 여백」). 휠·막대에도 걸면 끌리는 자리와
+    // 놓이는 자리가 갈린다 — 선례도 같다(VSCode `cursorSurroundingLinesStyle` 기본값이 「키보드
+    // 이동 때만」, Zed 의 세로 설명이 "with the keyboard").
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff7.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (drawnDocLines(term) < 8) return error.FixtureViewport;
+
+    // caret 은 맨 위에 둔 채 휠만 굴린다 — 여백이 휠에 걸리면 caret 을 따라 되돌아온다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -30)) return error.ScrollRejected;
+    try testing.expectEqual(@as(usize, 30), term.rt.editor_first_line);
+
+    var f2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f2.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 30), term.rt.editor_first_line); // 그려도 안 되돌아온다
+}
+
+test "SOFF9 편집 경로도 여백을 지킨다 — 스냅숏이 비어 있는 갈래 (제품 경계)" {
+    // **같은 노출인데 경로에 따라 답이 갈리면 안 된다.** 편집은 렌더 스냅숏을 비우므로
+    // (`refreshAfterEdit`) 노출이 **편집 전 행 수**로 도는 별도 갈래를 탄다 — 거기에 여백을 안 걸면
+    // 화면 아래쪽에서 타이핑하는 동안 **글자마다 caret 이 마지막 줄에 붙고**, 다음 화살표가 와야
+    // 여백이 돌아온다. 판정자 여덟이 전부 초록인 채로 그 상태였다(2026-09-10 — 소스를 다시 읽어 찾았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff9.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    if (!(d > m * 2 + 6 and d + m + 6 < 200)) return error.FixtureViewport;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+
+    // **줄을 늘리는 편집으로 caret 을 아래 여백 안으로 밀어 넣는다.** 제자리 타이핑은 caret 줄이
+    // 그대로라 이 갈래가 「굴릴 이유 없음」으로 끝나 두 뜻이 겹친다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, d - 2 - m));
+    if (!insertText(fx.session, term, "\n\n\n")) return error.InsertRejected;
+
+    // 스냅숏은 실제로 비어 있다 — 이 판정자가 겨냥한 갈래를 탔다는 뜻이다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_hit_rows_len);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_first_line);
+
+    // **그리고 다음 프레임이 그것을 되돌리지 않는다.**
+    var f2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f2.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_first_line);
+
+    // **경계도 잰다** — 여백이 «딱 맞는» 자리(`hi == top + fallback_rows`)에서 굴러야 한다. 경계를
+    // `>` 로 밀면 그 한 줄에서만 안 구르고 나머지는 같은 답이라, 위 단언만으로는 안 잡힌다(3회차 P3).
+    if (!scrollLines(fx.session, term, fx.leaf_rect, 1000)) return error.ScrollRejected; // 맨 위로
+    var fb = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    fb.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    const db = drawnDocLines(term);
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, db - m - 2));
+    if (!insertText(fx.session, term, "\n\n")) return error.InsertRejected;
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_first_line);
+
+    // **위쪽 가지도 같은 값을 쓴다** — 아래쪽만 재면 위 가지를 지운 변이가 산다(1회차 M17).
+    // 굴려 둔 자리에서 위 여백 안으로 들어가는 편집(줄 지우기)을 한다.
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -40)) return error.ScrollRejected;
+    var f3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f3.dl.deinit(allocator);
+    const top = term.rt.editor_first_line;
+    if (top < m + 4) return error.FixtureDidNotScroll;
+    // **`top + m` 은 여백이 «딱 맞는» 자리다** — 한 줄 더 위여야 모자라다. 경계를 한 칸 잘못
+    // 잡으면 「여백을 안 본다」와 「경계가 하나 밀렸다」가 겹친다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, top + m - 1));
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(top - 1, term.rt.editor_first_line);
+
+    // **문서 끝에서는 여백 때문에 문서 밖을 보여 주지 않는다**(1회차 M16). 마지막 줄에서 편집하면
+    // 아래 여백을 만들 수 없고, 그때 `maxFirstLine` 이 묶는다.
+    // **그리기 «전에» 잰다.** 그린 뒤에 재면 그리기 직전 `clampScrollToGeometry` 가 되돌려 주므로
+    // 「노출이 문서 밖을 안 요구했다」와 「clamp 가 뒤에서 고쳤다」가 겹친다 — 실제로 그렇게 쟀더니
+    // 상한을 지운 변이가 살아남았다(적대적 검증 2회차 M16b).
+    // **프레임을 다시 굳힌 뒤에 센다.** 바로 위 편집이 스냅숏을 비워 뒀으므로 여기서 그냥 세면
+    // `drawnDocLines` 가 0 을 내고, 그러면 이 판정자가 제품이 쓸 `fallback_rows` 와 **다른 수**로
+    // 기대값을 만든다.
+    var f4 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f4.dl.deinit(allocator);
+    const d2 = drawnDocLines(term); // 편집 뒤 노출이 쓸 `fallback_rows` — 제품과 같은 함수다
+    const lines_now = editorLines(term).len;
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, lines_now - 1));
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_hit_rows_len); // 그 갈래를 탔다
+    try testing.expectEqual(editorLines(term).len -| d2, term.rt.editor_first_line);
+}
+
+test "SOFF12 한 프레임도 안 그렸으면 여백도 없다 — 편집 갈래의 기준 없음 (제품 경계)" {
+    // **기준이 없는데 여백을 요구하면 어디로도 못 간다.** 행 수를 모르는 채 `row -| margin` 을 쓰면
+    // 문서 첫 화면이 **여백만큼 위**를 가리키는데 그런 자리는 없다 — 그리고 그 상태가 첫 프레임의
+    // 시작점이 된다. 판정자가 없어 그 변이가 살아남았다(적대적 검증 3회차 P2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff12.txt");
+
+    // **프레임을 한 번도 안 그린다** — 이 판정자가 겨냥한 갈래가 그 상태다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_hit_rows_len);
+
+    // 문서 한가운데에서 편집한다. 여백을 요구하면 `row - margin` 으로 떨어진다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, 60));
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(@as(usize, 60), term.rt.editor_first_line);
+}
+
+test "SOFF10 스냅숏을 못 믿으면 여백을 따지지 않고 민다 (제품 경계)" {
+    // **모를 때는 움직이는 쪽이 덜 나쁘다** — `revealPrimaryCaretRows` 가 오래 든 규율이다. 여백을
+    // 넣으면서 그 갈래를 「보인다」로 바꿔 버리면, 접힘·랩·탭 폭·폰트가 바뀐 뒤 caret 이 화면 밖에
+    // 남는데도 아무 일이 안 일어난다. 판정자가 없어 그 변이가 살아남았다(적대적 검증 2회차 M7b).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff10.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    if (!(d > m * 2 + 6 and d + m + 6 < 200)) return error.FixtureViewport;
+
+    // **맨 위가 아니어야 갈린다.** `top == 0` 이면 밀어 봐야 포화 뺄셈이 0 을 내 「안 밀었다」와
+    // 답이 같다(§4.1g 가 같은 부류의 겹침을 여러 번 잡았다).
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -40)) return error.ScrollRejected;
+    var f2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f2.dl.deinit(allocator);
+    const top = term.rt.editor_first_line;
+    if (top < m + 4) return error.FixtureDidNotScroll;
+
+    // 여백까지 확보된 **한가운데**에 caret 을 둔다 — 스냅숏이 성하면 아무 일도 안 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, top + d / 2));
+    revealPrimaryCaret(fx.session, term);
+    try testing.expectEqual(top, term.rt.editor_first_line);
+
+    // **스냅숏을 낡게 만든다** — 탭 폭이 갈리면 굳혀 둔 기하가 지금 화면을 설명하지 못한다.
+    term.rt.editor_tab_width += 1;
+    revealPrimaryCaret(fx.session, term);
+    try testing.expect(term.rt.editor_first_line != top);
+
+    // **위 여백이 «딱 맞는» 자리에서도 민다.** 그 자리는 성한 스냅숏에서는 「보인다」로 끝나지만,
+    // 낡은 스냅숏에서는 밀기 갈래로 가야 한다 — 위쪽 경계를 `<=` 로 밀면 **거기서만** 첫 갈래가
+    // 대신 걸려 아무 일도 안 일어난다(적대적 검증 5회차 Q2b). 그 한 줄을 여기서 잰다.
+    if (!scrollLines(fx.session, term, fx.leaf_rect, 1000)) return error.ScrollRejected;
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -40)) return error.ScrollRejected;
+    var f3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f3.dl.deinit(allocator);
+    const top2 = term.rt.editor_first_line;
+    const d2 = drawnDocLines(term);
+    const m2 = @min(m, (d2 -| 1) / 2);
+    if (top2 < m2 + 4 or 2 * m2 + 1 >= d2) return error.FixtureViewport;
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, top2 + m2));
+    revealPrimaryCaret(fx.session, term);
+    try testing.expectEqual(top2, term.rt.editor_first_line); // 성한 스냅숏 — 보인다
+
+    term.rt.editor_tab_width += 1; // 낡게 만든다
+    revealPrimaryCaret(fx.session, term);
+    try testing.expectEqual(top2 + 2 * m2 + 1 - d2, term.rt.editor_first_line);
+}
+
+test "SOFF11 굴릴 이유가 없으면 세로 위치를 «쓰지도» 않는다 (제품 경계)" {
+    // **같은 값을 다시 쓰는 것은 무해하지 않다.** `setEditorTop` 은 줄과 함께 **조각 offset 을 0 으로**
+    // 놓고(§4.1d — 랩에서 긴 줄 중간을 보다가 caret 을 옮기면 줄 머리로 튄다) `metal_dirty` 를
+    // 세운다. 판정자가 없어 그 변이가 두 회차를 살아남았다(N5·N5b).
+    //
+    // **닿는 자리가 좁다 — 픽스처가 거기를 정확히 겨냥해야 한다.** 「이미 보인다」 갈래는 `return`
+    // 이라 그 줄에 닿지 않으므로, **밀기 갈래가 지금과 같은 값을 계산하는** 자리를 만들어야 한다:
+    // 스냅숏을 낡게 해 밀기 갈래로 보내고, caret 을 `want == top` 이 나오는 줄에 둔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try marginFixture(&fx, allocator, "soff11.txt");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const d = drawnDocLines(term);
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    if (!(d > m * 2 + 6 and d + m + 6 < 200)) return error.FixtureViewport;
+
+    if (!scrollLines(fx.session, term, fx.leaf_rect, -40)) return error.ScrollRejected;
+    var f2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    f2.dl.deinit(allocator);
+    const top = term.rt.editor_first_line;
+    if (top < m + 4) return error.FixtureDidNotScroll;
+
+    // `want = row + m + 1 - drawn` 이 `top` 이 되는 줄.
+    term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, top + d - m - 1));
+    term.rt.editor_tab_width += 1; // 스냅숏을 낡게 만들어 **밀기 갈래**로 보낸다
+    fx.session.metal_dirty = false;
+    revealPrimaryCaret(fx.session, term);
+    try testing.expectEqual(top, term.rt.editor_first_line);
+    // **자리가 그대로면 프레임을 깨우지도 않는다.**
+    try testing.expect(!fx.session.metal_dirty);
+}
+
+test "SOFF8 세로 여백 기본값은 5 이고 설정 표면에 뜬다 (제품 경계)" {
+    // **설정 표면은 코드 안에서 안 보인다** — 값을 읽는 자리만 재면 키 이름을 바꾸거나 기본값을
+    // 낮춰도 전부 초록이다(`DHS11` 이 같은 이유로 선 판정자다).
+    try testing.expectEqual(@as(u32, 5), (maru.config.theme.EditorConfig{}).cursor_surrounding_lines);
+    const meta_lines = maru.config.theme.EditorConfig.schema.cursor_surrounding_lines;
+    const meta_cols = maru.config.theme.EditorConfig.schema.cursor_surrounding_columns;
+    try testing.expectEqualStrings("cursor-surrounding-lines", meta_lines.key_seg.?);
+    try testing.expectEqualStrings("cursor-surrounding-columns", meta_cols.key_seg.?);
+    try testing.expectEqual(@as(u32, 0), meta_lines.range.?[0]);
+    try testing.expectEqual(@as(u32, 64), meta_lines.range.?[1]);
+    try testing.expectEqual(@as(u32, 0), meta_cols.range.?[0]);
+    try testing.expectEqual(@as(u32, 64), meta_cols.range.?[1]);
+    // **위젯과 무리도 사용자가 만지는 면이다** — 범위만 재면 숫자 상자를 토글로 바꿔도 초록이다
+    // (적대적 검증 2회차 N10 이 그렇게 살아남았다. `DHS11` 이 같은 이유로 이미 재는 축이다).
+    try testing.expectEqual(maru.config.theme.Widget.number, meta_lines.widget);
+    try testing.expectEqual(maru.config.theme.Widget.number, meta_cols.widget);
+    try testing.expectEqual(maru.config.theme.Section.editor, meta_lines.section);
+    try testing.expectEqual(maru.config.theme.Section.editor, meta_cols.section);
+    // **설정 화면에 뜨는 문장도 사용자가 만지는 면이다** — 두 축의 문장을 뒤바꿔도 초록이었다
+    // (적대적 검증 3회차 P4). 양쪽 언어를 다 본다: 한쪽만 재면 다른 쪽이 조용히 갈린다.
+    try testing.expectEqualStrings("Lines to keep above and below the cursor", maru.i18n.tIn(.en, .cfg_editor_cursor_surrounding_lines));
+    try testing.expectEqualStrings("Columns to keep left and right of the cursor", maru.i18n.tIn(.en, .cfg_editor_cursor_surrounding_columns));
+    try testing.expectEqualStrings("커서 위·아래로 남길 줄 수", maru.i18n.tIn(.ko, .cfg_editor_cursor_surrounding_lines));
+    try testing.expectEqualStrings("커서 좌·우로 남길 칸 수", maru.i18n.tIn(.ko, .cfg_editor_cursor_surrounding_columns));
 }
 
 test "DHS10 가장 긴 줄 끝의 caret 이 실제로 그려진다 — editor.scroll-beyond-last-column (렌더 경계)" {
@@ -17436,6 +17984,11 @@ test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 �
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
     }
     const term = try undoFixture(&fx, allocator, "edit8.txt", doc.items);
+    // **caret 여백을 끈다 — 이 판정자의 주제가 아니다.** 여백(기본 5)이 편집 경로에도 걸리므로
+    // (§4 「caret 여백」) 여기 세로 단언이 재는 것이 「편집 뒤 따라온다」가 아니라 「따라온다 +
+    // 여백」이 되어, 두 규칙 중 어느 것이 깨져도 같은 자리에서 실패한다. 여백은 `SOFF1`~`SOFF9`
+    // 가 소유한다.
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 0;
 
     fx.session.gpu_quads.clearRetainingCapacity();
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
@@ -17669,6 +18222,10 @@ test "MOV6 커서가 화면 밖으로 나가면 스크롤이 따라간다 (§5.2
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
     }
     const term = try undoFixture(&fx, allocator, "mov6.txt", doc.items);
+    // **caret 여백을 끈다 — 이 판정자의 주제가 아니다.** 여백(기본 5)이 켜져 있으면 여기 단언이
+    // 재는 것이 「최소 스크롤」이 아니라 「최소 스크롤 + 여백」이 되어, 두 규칙 중 어느 것이
+    // 깨져도 같은 자리에서 실패한다. 여백 자체는 `SOFF1`~`SOFF8` 이 소유한다(§4 「caret 여백」).
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 0;
 
     // **프레임을 한 번 굳힌다.** 안 그러면 `editor_hit_rows_len == 0`이라 노출이 "아직 안 그렸다"
     // 갈래로만 돌고, **최소 스크롤과 "이미 보이면 두라"가 아예 실행되지 않는다** — 그 상태로

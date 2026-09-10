@@ -2487,6 +2487,11 @@ test "DCARET6: caret 이 화면 밖으로 나가면 뷰가 따라간다" {
     try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
 
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    // **caret 여백을 끈다 — 이 판정자의 주제가 아니다.** 여백(기본 5)이 켜져 있으면 여기 단언이
+    // 재는 것이 「최소 스크롤」이 아니라 「최소 스크롤 + 여백」이 되어, 두 규칙 중 어느 것이
+    // 깨져도 같은 자리에서 실패한다. 여백 자체는 `SOFF1`~`SOFF8` 이 소유한다(§4 「caret 여백」).
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 0;
+
     const visible = fx.term.rt.editor_diff_hit_len_right;
     try testing.expect(visible > 1); // 판정이 성립할 만큼은 그렸다
 
@@ -2500,6 +2505,53 @@ test "DCARET6: caret 이 화면 밖으로 나가면 뷰가 따라간다" {
     // **⌘↑ 로 돌아오면 위로 따라온다.**
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
     try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+}
+
+test "DCARET6b: 비교 뷰 세로도 caret 여백을 쓴다 — 좌우가 함께 구른다 (제품 경계)" {
+    // **DCARET6 은 여백을 끄고 「최소 스크롤」만 잰다** — 그래서 비교 뷰가 여백을 통째로 무시해도
+    // 초록이었다(적대적 검증 1회차 M11 이 살아남아 그 구멍을 가리켰다). 계약은 세로에서 두 뷰가
+    // **같은 값**을 쓴다고 적는다(§4 「caret 여백」) — 비교 뷰는 좌우가 함께 구르므로 축이 하나다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..200) |i| {
+        w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    }
+    const text = buf[0..w];
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    const visible = fx.term.rt.editor_diff_hit_len_right;
+    const m: usize = fx.session.loaded_config.config.editor.cursor_surrounding_lines;
+    // **픽스처가 두 뜻을 갈라야 한다** — 화면이 여백의 두 배보다 좁으면 절반 clamp 가 먼저 걸려
+    // 「여백이 걸렸다」와 「가운데로 갔다」가 겹친다.
+    if (visible <= m * 2 + 2) return error.FixtureViewport;
+
+    // **여백이 딱 맞는 행까지는 안 굴린다** — 마지막 행이 아니라 그보다 `m` 행 위다.
+    for (0..visible - 1 - m) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+
+    // **한 행 더 내려가면 굴러간다.** 여백이 없으면 여기서 `m` 번 더 눌러야 움직인다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_first_line);
+
+    // **위쪽도 같은 값을 쓴다.** 아래쪽만 재면 위 가지를 지운 변이가 산다.
+    for (0..visible) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    const top = fx.term.rt.editor_first_line;
+    if (top < m + 2 or visible < 3 * m + 2) return error.FixtureDidNotScroll;
+    // 굴린 직후 caret 은 **아래 여백 자리**(`top + visible - 1 - m`)에 있다. 위 여백이 딱 맞는
+    // 자리(`top + m`)까지 올라오려면 그만큼 눌러야 하고, 거기서는 아직 안 구른다.
+    for (0..visible - 1 - 2 * m) |_| _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+    try testing.expectEqual(top, fx.term.rt.editor_first_line); // 아직 여백이 산다
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+    try testing.expectEqual(top - 1, fx.term.rt.editor_first_line);
 }
 
 test "DCARET7: PageDown 은 렌더가 굳힌 행 수만큼 간다" {

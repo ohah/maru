@@ -14586,6 +14586,9 @@ pub const AppSession = struct {
         ///
         /// 커서가 host 소유라 관문도 여기 둔다. 다시 띄울 때마다 새 스트리머의 `hello` 를 다시 본다.
         saw_hello: bool = false,
+        /// 이 목적지에서 **줄이 마지막으로 온 시각**. 침묵은 host 축이라 여기서 잰다 — 채널 단위로
+        /// 재면 Term 마다 따로 죽고, 아직 채널이 없는 Term 은 아예 못 잰다(적대적 검증 13 회차).
+        last_line_ms: u64 = 0,
         /// 로그 이름별 이어읽기 위치(RA5-a 의 로컬 절반). 다시 띄울 때 `--resume=` 으로 돌려준다.
         ///
         /// **메모리에만 둔다.** 앱과 함께 죽어야 「앱을 새로 켰다 = 처음부터(배지를 세운다)」와
@@ -14940,7 +14943,7 @@ pub const AppSession = struct {
         // 하트비트 사이에 몇 초씩 아무것도 안 보내므로 그 멈춤이 곧 UI 정지다.
         setNonBlockingFd(stream.out_fd);
         host.stream = stream;
-        self.onStreamerStarted(dest, host);
+        self.onStreamerStarted(dest, host, self.awakeMs());
     }
 
     /// 새 스트리머가 떴을 때 **함께 비워야 하는 것들**. 한 곳에 묶는 이유는 하나라도 빠지면 재접속이
@@ -14954,8 +14957,9 @@ pub const AppSession = struct {
     /// - `pending`(적대적 검증 5 회차): 개행 없이 끊긴 꼬리가 새 스트림 첫 줄 앞에 붙으면 `hello` 가
     ///   깨진다. 그러면 관문을 영영 못 지나고, 침묵 시한 뒤 또 EOF 가 나 결국 포기로 간다. 즉
     ///   **재접속이 스스로를 막는다**.
-    fn onStreamerStarted(self: *AppSession, dest: []const u8, host: *RemoteAgentHost) void {
+    fn onStreamerStarted(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
         host.stream_started = true;
+        host.last_line_ms = now_ms; // 침묵은 **이제부터** 잰다
         host.retry_at_ms = 0;
         host.saw_hello = false;
         self.clearRemoteAgentChannels(dest);
@@ -15096,6 +15100,7 @@ pub const AppSession = struct {
             // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
             host.retries = 0;
             // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
+            host.last_line_ms = now_ms; // 하트비트도 줄이다 — 살아 있다는 증거다
             self.recordRemoteCursors(host, lines[0..count], now_ms);
             self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
         }
@@ -15111,6 +15116,20 @@ pub const AppSession = struct {
         // 계획이 «사망 감지는 하트비트로만 한다» 로 못박은 자리가 여기다.
         if (!eof) {
             self.tickRemoteAgentTerms(dest, now_ms);
+            // **조용하면 스트림이 죽은 것으로 본다**(적대적 검증 13 회차). 하트비트는 5 초마다 오므로
+            // 시한을 넘긴 침묵은 정상이 아니다. 그런데 자식이 **좀비**면 `read` 가 0 을 안 줘 EOF 가 영영
+            // 안 나고, 그때 채널만 되살리면 15 초마다 죽었다 살아나는 **조용한 헛돌이**가 된다.
+            //
+            // 다시 띄우는 것이 옳다: 좀비가 죽고, `onStreamerStarted` 가 채널을 다 버려 새 `hello` 를 보고,
+            // **`--resume=` 이 그 사이 스풀에 쌓인 것까지 받는다** — 되살리기로는 못 하는 일이다.
+            const silence = maru.session.remote_agent_stream.silence_deadline_ms;
+            if (host.last_line_ms != 0 and now_ms -| host.last_line_ms >= silence) {
+                ssh_upload.stopAgentEvents(host.stream);
+                host.stream = .{ .pid = 0, .out_fd = -1 };
+                host.stream_started = false;
+                host.last_line_ms = 0;
+                self.scheduleStreamerRetry(dest, host, "원격 이벤트가 조용하다");
+            }
             return;
         }
         // **EOF 는 조용하지 않다.** 채널을 닫으면 다음 `agentHookMode` 가 관측 모드로 강등한다(§1.2) —
@@ -24028,6 +24047,45 @@ test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 �
             try std.testing.expect(now.isClosed());
         }
     }
+    // ── 같은 축의 나머지 절반: 채널만 되살리면 좀비 스트림에서 **조용한 헛돌이**가 된다 ──
+    //
+    // 자식이 좀비면 `read` 가 0 을 안 줘 EOF 가 영영 안 나고, 채널은 15 초마다 죽었다 살아난다. 다시
+    // 띄워야 `--resume=` 이 그 사이 쌓인 것까지 받는다(적대적 검증 13 회차). **한 판정자에 두는 이유**는
+    // 둘이 같은 신호(침묵)를 서로 다른 층에서 다루기 때문이다 — 따로 두면 절반만 고친 채로 초록이 된다.
+    {
+        const silence = ras.silence_deadline_ms;
+        const session = try a.create(AppSession);
+        defer a.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+
+        var host: AppSession.RemoteAgentHost = .{};
+        defer host.pending.deinit(a);
+        defer host.install_out.deinit(a);
+        defer host.cursors.deinit(a);
+        host.install_done = true;
+        host.stream_started = true;
+        host.saw_hello = true;
+        host.last_line_ms = 1_000;
+
+        // 시한 안이면 가만히 둔다.
+        session.drainRemoteAgentHost("openClaw", &host, 1_000 + silence - 1);
+        try std.testing.expect(host.stream_started);
+        try std.testing.expectEqual(@as(u8, 0), host.retries);
+
+        // 넘기면 좀비를 접고 다시 띄울 것을 예약한다.
+        session.drainRemoteAgentHost("openClaw", &host, 1_000 + silence);
+        try std.testing.expect(!host.stream_started);
+        try std.testing.expectEqual(@as(u8, 1), host.retries);
+        try std.testing.expect(host.retry_at_ms > 0);
+        try std.testing.expect(!host.stopped); // 굳히지는 않았다
+    }
 }
 test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
     // 셋이 실측으로 **하나씩** 드러났고, 그때마다 「고쳤다」고 적힌 뒤에 다음 것이 남아 있었다. 그래서
@@ -24061,13 +24119,14 @@ test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
     host.stream_started = false;
     try host.pending.appendSlice(a, "끊긴 꼬리");
 
-    session.onStreamerStarted("openClaw", &host);
+    session.onStreamerStarted("openClaw", &host, 5_000);
 
     try std.testing.expect(host.stream_started); // 떴다고 표시한다
     try std.testing.expectEqual(@as(u64, 0), host.retry_at_ms); // 예약을 지운다
     try std.testing.expect(!host.saw_hello); // 새 hello 를 다시 본다
     try std.testing.expectEqual(@as(usize, 0), host.pending.items.len); // 죽은 꼬리를 버린다
     try std.testing.expect(term.agent_remote_channel == null); // 죽은 채널도 버린다
+    try std.testing.expectEqual(@as(u64, 5_000), host.last_line_ms); // 침묵은 이제부터 잰다
 }
 test "RA5: 재접속하면 죽은 채널을 버린다 — 백오프가 성공해도 배지가 안 서던 자리" {
     // `eof()` 는 `.closed` 로 만들 뿐 `null` 로 안 돌리는데 `ensureRemoteAgentTerm` 은 **`null` 일 때만**

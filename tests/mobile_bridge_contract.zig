@@ -4343,6 +4343,32 @@ test "U1 튕기는 동안에도 스크롤바 손잡이는 트랙 안에 있다" 
     const th = bridge.sessScrollbarThumb();
     try T.expect(th.y >= list.y - 0.5);
     try T.expect(th.y + th.h <= list.y + list.h + 0.5);
+
+    // **설정 화면도 같은 자리다** — 같은 결함이 거기에도 있었다(적대적 3회차: 고쳐 놓고
+    // 판정자는 세션 쪽만 봤다). 화면마다 따로 세지 않으면 한쪽만 고쳐진 채로 남는다.
+    bridge.setScreenForTest("settings");
+    advanceFrame(402, 500, 16); // 짧은 창이라 설정 55줄이 반드시 넘친다
+    bridge.maru_mobile_pointer(0, 1, 200, 400, now());
+    var s2: u32 = 0;
+    while (s2 < 20) : (s2 += 1) bridge.maru_mobile_pointer(1, 1, 200, 400 - @as(f32, @floatFromInt(s2 + 1)) * 80, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 0, now());
+    advanceFrame(402, 500, 16);
+    try T.expect(bridge.setOvershootPx() != 0);
+    const slist = bridge.setListRect();
+    const sth = bridge.setScrollbarThumb();
+    try T.expect(sth.y >= slist.y - 0.5);
+    try T.expect(sth.y + sth.h <= slist.y + slist.h + 0.5);
+
+    // **뒷정리** — 튕김과 스크롤을 두고 나가면 뒤 판정자가 밀린 자리에서 시작한다(실제로
+    // 서술자 판정자 둘이 그렇게 깨졌다). 두 목록 다 가라앉히고 처음으로 되돌린다.
+    bridge.maru_mobile_pointer(3, 1, 200, 0, now());
+    var s3: u32 = 0;
+    while (s3 < 600 and (bridge.setOvershootPx() != 0 or bridge.sessOvershootPx() != 0)) : (s3 += 1) {
+        advanceFrame(402, 500, 16);
+    }
+    bridge.resetScrollForTest();
+    bridge.setScreenForTest("terminal");
+    advanceFrame(402, 874, 16);
 }
 
 test "U1 끝에서 튕긴다 — 넘어갔다 되돌아온다" {

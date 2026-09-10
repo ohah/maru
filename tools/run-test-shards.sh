@@ -9,8 +9,25 @@
 # 출력: 각 샤드의 줄 앞에 `[shard i/n] ` 를 붙여 stderr 로 흘린다(살아 있는 진행이 보이고, 멈춘 샤드가 드러난다).
 # 종료: 샤드 하나라도 0 이 아니면 1. 러너의 가드(빈 샤드·필터 오타)는 그대로 샤드 종료 코드로 올라온다.
 #
+# ⚠️ **끝나고 묵은 픽스처를 쓸어 낸다**(아래 `sweep_stale_fixtures`). 테스트 216 곳이
+# `/tmp/maru-<태그>-<pid>` 를 만드는데 `deleteTree` 로 치우는 곳은 **18 곳**뿐이라, 나머지가
+# 그대로 쌓인다 — 실측 2026-09-10 에 **32,762 개 · 47.4 GB** 였다. pid 는 돌고 도므로 남은
+# 디렉터리가 다음 실행과 **이름이 겹쳐** 간헐 실패까지 만든다(`/tmp` 픽스처 오염).
+#
+# 각 자리에서 치우게 고치는 것이 옳지만 216 곳이고, 그중 다수는 **자식 프로세스가 죽는 경로**라
+# `defer` 가 안 돈다. 그래서 「만든 자리가 치운다」 대신 **러너가 한 번 쓸어 낸다** — 도는 것을
+# 안 건드리도록 **하루 넘은 것만** 지운다.
+#
 # usage: run-test-shards.sh <n> <test-binary> [args...]
 set -u
+
+# 하루 넘은 `/tmp/maru-*` 를 지운다. 실패해도 테스트를 막지 않는다(청소는 곁일이다).
+sweep_stale_fixtures() {
+    # `/tmp` 는 macOS 에서 `/private/tmp` 로의 심볼릭 링크라 `find` 가 안 따라간다.
+    root=/tmp
+    [ -d /private/tmp ] && root=/private/tmp
+    find "$root" -maxdepth 1 -name 'maru-*' -mtime +1 -exec rm -rf {} + 2>/dev/null || :
+}
 n=$1
 bin=$2
 shift 2
@@ -30,6 +47,7 @@ while [ "$i" -lt "$n" ]; do
     i=$((i + 1))
 done
 wait
+sweep_stale_fixtures
 rc=0
 i=0
 while [ "$i" -lt "$n" ]; do

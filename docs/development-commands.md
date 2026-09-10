@@ -17,6 +17,13 @@ Maru 작업에서 사용하는 기본 명령이다.
 
 - runner는 `builtin.test_functions` 전체를 실행하고, 테스트별 testing allocator 누수·error log·실패를 exit code로 반환한다. 예외 하나: `MARU_TEST_SKIP_PREFIX`(CSV, 이름 머리 일치)가 걸린 테스트는 `FILTERED`로 찍고 실행하지 않는다 — `MARU_TEST_KEEP_PREFIX`가 그 예외의 예외다. `MARU_TEST_KEEP_ONLY_PREFIX`(CSV)는 반대로 그것으로 시작하는 테스트만 돌린다 — 루트만 다른 바이너리가 다른 바이너리의 테스트를 통째로 다시 도는 번짐을 자기 몫만 남기고 끊는 용도(예: `client_external_rx_read_test_support`). macOS 전용이고, argv가 아니라 env인 이유는 fixture 판정자들이 `_NSGetArgc()`로 «fixture 게이트인가»를 판단하기 때문(`tools/simple_test_runner.zig` 주석이 단일 출처). 현재 유일한 사용처는 `file explorer` 잡의 app-host-abi 바이너리 — `session_host.*` 판정자는 `session host macOS (Debug)` 잡이 모듈 그래프째 이미 돈다. 따라서 `zig build test`의 의존 artifact 범위, test filter, 실패 판정은 줄지 않는다.
 - `MARU_TEST_SHARD="i/n"`(macOS 전용)은 컴파일된 테스트를 **인덱스 mod n**으로 나눠 이 프로세스는 자기 몫만 돌린다. 같은 바이너리를 n번 띄우는 용도라 컴파일은 한 번이고, 러너의 pid 루트 격리가 샤드마다 다른 session-host 네임스페이스를 준다. prefix 필터 뒤에 적용되므로 `kept`·`filtered` 가드와 `--maru-expect-tests`(컴파일 수)는 샤드와 무관하다. 다른 샤드의 몫은 줄을 찍지 않고 끝에 `shard i/n: N tests belong to other shards.`로 요약한다. 샤드가 하나도 안 돌리면 빨개진다. `--maru-expect-passed`와는 함께 쓰지 않는다(그쪽은 한 프로세스가 다 돌았다는 전제). `test-macos-app-host-abi`가 4샤드로 돈다(`build.zig`의 `macos_app_host_abi_shards` — CI 실측 4샤드 172초, 3샤드 249~272초; 부하에 약하던 반복 횟수 대기는 벽시계 마감으로 바꿨다). 샤드 넷은 **run 스텝 하나 안에서** `tools/run-test-shards.sh`가 동시에 띄운다 — Zig 0.16 빌드 러너는 stdio를 물려받는 run 스텝을 stderr 잠금으로 전역 직렬로 돌리므로(run 스텝 넷은 차례로 돈다) 병렬은 스텝 안에서 해야 한다. 각 샤드 줄에는 `[shard i/n] ` 접두가 붙는다.
+
+  ⚠️ **러너가 끝에 묵은 `/tmp/maru-*` 를 쓸어 낸다**(`sweep_stale_fixtures`). 테스트 **216 곳**이
+  `/tmp/maru-<태그>-<pid>` 를 만드는데 `deleteTree` 로 치우는 곳은 **18 곳**뿐이라 나머지가 쌓인다 —
+  실측 2026-09-10 에 **32,762 개 · 47.4 GB** 였다. pid 는 돌고 도므로 남은 디렉터리가 다음 실행과
+  **이름이 겹쳐** 간헐 실패도 만든다. 각 자리에서 치우는 것이 옳지만 216 곳이고 다수가 **자식이 죽는
+  경로**라 `defer` 가 안 돈다 — 그래서 러너가 한 번 쓸어 내되 **하루 넘은 것만** 지운다(도는 테스트를
+  안 건드린다).
 - 제품 artifact 경로를 전달해야 하는 전용 테스트는 `/usr/bin/env` wrapper로 test binary를 직접 실행하고 exit code `0`을 요구한다. 이 경로도 `enableTestRunnerMode()`를 호출하지 않아 IPC listener를 다시 도입하지 않는다.
 - 이 설정은 fuzz server protocol을 대체하지 않는다. Maru의 기본 test graph에는 fuzz test가 없으며, fuzz를 도입하면 server-mode runner 지원을 별도 gate로 추가해야 한다.
 - Zig를 올리거나 upstream IPC 경로를 재검증할 때는 custom runner를 제거한 상태의 `zig build test`와 CI를 먼저 green으로 만든 뒤에만 이 우회를 삭제한다.

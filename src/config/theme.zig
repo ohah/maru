@@ -1135,7 +1135,34 @@ pub const EditorConfig = struct {
     /// **빈 화면을 본다**에 가깝고, 그 요구가 실제로 오면 그때 올린다.
     scroll_beyond_last_column: u32 = 5,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column
+    /// caret 위·아래로 **남겨 두는 줄 수**(§4 「caret 여백」). 이동으로 caret 이 옮겨진 뒤 뷰가
+    /// 따라갈 때, 화면 가장자리에 딱 붙이지 않고 이만큼을 남긴다.
+    ///
+    /// **기본 5 — 관례가 그 값으로 수렴한다.** 표면적으로는 Vim `scrolloff` 가 `0` 이지만
+    /// **`defaults.vim` 이 5 로 켜므로** vimrc 없는 사용자가 실제로 받는 값이 5 이고, Helix
+    /// `scrolloff` 도 5 다(Zed `vertical_scroll_margin` 은 3, VSCode
+    /// `editor.cursorSurroundingLines` 와 Emacs `scroll-margin` 은 0).
+    ///
+    /// **0 이면 끈다** — 가장자리에 붙는 옛 동작 그대로다. 「모른다」가 아니라 값이다.
+    ///
+    /// **상한 64 의 근거는 `scroll_beyond_last_column` 과 같다** — 되돌리기 쉬운 쪽으로 잡는다.
+    /// 그리고 이 값이 화면 절반을 넘으면 위·아래 요구가 모순되므로, 소비처가
+    /// `@min(설정, (보이는 수 -| 1) / 2)` 로 묶는다(그것이 Vim 에서 큰 `scrolloff` 가 「늘 가운데」가
+    /// 되는 동작이다).
+    cursor_surrounding_lines: u32 = 5,
+
+    /// caret 좌·우로 **남겨 두는 열 수**(§4 「caret 여백」). 세로의 짝이다.
+    ///
+    /// **기본 0 인 이유는 「선례가 없다」이다.** 가로 여백을 가진 것은 Zed
+    /// `horizontal_scroll_margin`(5) 하나인데 **그 문서가 「마우스 스크롤용」이라고 적는다** — 우리가
+    /// 여는 자리는 키보드 이동 뒤 노출이라 축이 다르다. Vim `sidescrolloff` 는 0 이고 VSCode·Emacs·
+    /// Sublime 에는 그 설정이 아예 없다. 그래서 **값을 지어내지 않고 자리만 연다**: 0 이면 이 조각
+    /// 이전의 동작(최소 이동)과 완전히 같다.
+    ///
+    /// **랩이면 뜻이 없다** — 그때는 가로 축 자체가 없다(`scroll_beyond_last_column` 과 같다).
+    cursor_surrounding_columns: u32 = 0,
+
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1153,6 +1180,11 @@ pub const EditorConfig = struct {
         // 필드명은 `scroll_beyond_last_column`, 키는 `editor.scroll-beyond-last-column`(key_seg).
         // u32라 range 메타 필수(`tab-width`와 같은 선례) — 하한 0은 **끄기**(오늘 동작)다.
         .scroll_beyond_last_column = Meta{ .key_seg = "scroll-beyond-last-column", .doc = .cfg_editor_scroll_beyond_last_column, .range = .{ 0, 64 }, .widget = .number, .section = .editor },
+        // 필드명은 `cursor_surrounding_lines`/`_columns`, 키는 `editor.cursor-surrounding-lines`/
+        // `-columns`(key_seg). 위 셋과 같은 이유로 range 메타 필수이고, **하한 0 은 끄기**다.
+        // 두 축을 한 쌍으로 두는 것은 Vim 의 `scrolloff`/`sidescrolloff` 짝과 같은 모양이다.
+        .cursor_surrounding_lines = Meta{ .key_seg = "cursor-surrounding-lines", .doc = .cfg_editor_cursor_surrounding_lines, .range = .{ 0, 64 }, .widget = .number, .section = .editor },
+        .cursor_surrounding_columns = Meta{ .key_seg = "cursor-surrounding-columns", .doc = .cfg_editor_cursor_surrounding_columns, .range = .{ 0, 64 }, .widget = .number, .section = .editor },
     };
 };
 

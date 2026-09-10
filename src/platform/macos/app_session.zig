@@ -1755,6 +1755,23 @@ const TermRuntime = struct {
     /// 같다(§4.1f). 접힘이 바뀔 때만 다시 만들고 프레임마다는 읽기만 한다.
     editor_visible_lines: []const []const u8 = &.{},
     editor_visible_numbers: []const ?u32 = &.{},
+    /// **줄별 표시 폭 캐시**(L2 — [layering](../../../docs/native-editor-layering.md) §2).
+    /// `editor_lines`와 **같은 첨자**이고, 문서 내용과 탭 폭만의 함수다.
+    ///
+    /// **접힘으로 죽지 않는다 — 그것이 이 캐시의 전부다.** 접기·펼치기는 *보이는 줄*을 바꿀 뿐
+    /// 줄의 폭을 바꾸지 않으므로, 가로 상한을 다시 구하는 일이 **문자 스캔이 아니라 정수 max** 가
+    /// 된다. 실측(ReleaseFast): `app_session.zig`(5.4MB·85k줄) 펼치기가 30.3ms 였고 그중 재계수가
+    /// 29~30ms 였다([시각 매핑](../../../docs/native-editor-visual-mapping.md) §4.1c 트리거 ⑷).
+    ///
+    /// **낡음 판정은 둘로 한다** — 길이가 `editor_lines`와 다르거나 `editor_line_cols_tab`이 지금
+    /// 탭 폭과 다르면 낡은 것이다. 줄 수가 그대로인 편집은 그 둘로 안 걸리므로 **줄 배열을 갈아
+    /// 끼우는 자리가 직접 버린다**(`dropLineCols`).
+    editor_line_cols: []u32 = &.{},
+    /// 위 캐시를 채울 때 쓴 탭 폭. 다르면 캐시는 낡은 것이다.
+    editor_line_cols_tab: u8 = 0,
+    /// **전체 훑기가 실제로 몇 번 돌았는가**(판정 전용 관측점). 「접힘 토글이 다시 안 훑는다」는
+    /// 값으로는 볼 수 없다 — 답이 같기 때문이다. 이 수가 그 차이를 판정 가능하게 만든다.
+    editor_line_cols_scans: u32 = 0,
     /// 그리는 줄마다의 **접힘 표식**(gutter 화살표). 줄 배열과 같은 축이고, 접힘이 바뀔 때만 다시
     /// 채운다 — 렌더는 읽기만 한다.
     ///

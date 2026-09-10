@@ -1468,7 +1468,11 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     rebuildVisible(self, term) catch {};
     // **가장 긴 줄도 여기서 센다** — 가로 스크롤바가 첫 프레임부터 서야 사용자가 그 축이 있다는
     // 것을 안다(굴려 보기 전에는 알 길이 없다. 2026-08-18 사용자 지적). 접힘 화살표와 같은 이유·
-    // 같은 시점이다. 할당하지 않으므로 실패 지점이 없다.
+    // 같은 시점이다.
+    //
+    // **줄별 폭 캐시도 여기서 채운다**(L2 — §2). 여는 순간 어차피 전 문서를 한 번 훑으므로 그
+    // 결과를 버리지 않고 든다 — 뒤이은 접기·펼치기가 그 덕에 정수 max 로 끝난다(§4.1c 트리거 ⑷).
+    ensureLineCols(self, term);
     ensureMaxCols(term, false);
 }
 
@@ -5051,11 +5055,83 @@ fn maxColsForRender(self: *AppSession, term: *Term, right: bool) ?u32 {
 ///
 /// **읽기 값은 하한이다** — 하니스가 방금 쓴 파일을 바로 읽어 OS 페이지 캐시가 따뜻하다. 콜드 읽기는
 /// 권한 없이 잴 수 없다. 다만 그 값이 커져도 이 셈이 사라지지는 않는다.
+/// 줄별 표시 폭 캐시를 채운다(L2 — §2). **문서 줄 전체를 한 번 훑는다.**
+///
+/// **부르는 자리는 「비싼 셈을 곧 하려는 곳」이다** — 여는 경로와 접힘 마무리(`finishFoldChange`).
+/// 그 밖에서는 캐시가 없으면 `ensureMaxCols` 가 옛 경로(직접 훑기)로 답하므로, 이 함수를 안 불러도
+/// **답은 같고 비용만 다르다**. 그것이 이 조각을 작게 만드는 규율이다.
+///
+/// **실패하면 그냥 돌아간다** — 캐시는 최적화이고, 없으면 옛 경로가 같은 답을 낸다.
+fn ensureLineCols(self: *AppSession, term: *Term) void {
+    const lines = term.rt.editor_lines;
+    if (lines.len == 0) return;
+    if (lineColsFresh(term)) return;
+
+    const buf = if (term.rt.editor_line_cols.len == lines.len)
+        term.rt.editor_line_cols
+    else blk: {
+        const grown = self.allocator.alloc(u32, lines.len) catch return;
+        if (term.rt.editor_line_cols.len > 0) self.allocator.free(term.rt.editor_line_cols);
+        break :blk grown;
+    };
+
+    // **렌더가 쓰는 그 값**(`editor_tab_width` — 단일 출처). `ensureMaxCols` 가 같은 근거로 같은
+    // 값을 읽는다.
+    const tab_width = term.rt.editor_tab_width;
+    const limit = chrome_editor.frame.max_cols_count_limit;
+    for (lines, 0..) |line, i| buf[i] = chrome_editor.content.lineColumnsUpTo(line, tab_width, limit);
+
+    term.rt.editor_line_cols = buf;
+    term.rt.editor_line_cols_tab = tab_width;
+    term.rt.editor_line_cols_scans +|= 1;
+}
+
+/// 캐시가 지금 문서·지금 탭 폭의 것인가.
+///
+/// **길이와 탭 폭 둘로 본다.** 줄 수가 바뀌는 편집은 길이가 잡고, 탭 폭 변경은 그 값이 잡는다.
+/// **줄 수가 그대로인 편집은 이 둘로 안 걸리므로** 줄 배열을 갈아 끼우는 자리가 직접 버린다
+/// (`dropLineCols`) — 그 자리를 빠뜨리면 캐시가 옛 폭을 든 채 살아남는다.
+fn lineColsFresh(term: *const Term) bool {
+    return term.rt.editor_line_cols.len == term.rt.editor_lines.len and
+        term.rt.editor_line_cols.len > 0 and
+        term.rt.editor_line_cols_tab == term.rt.editor_tab_width;
+}
+
+/// 줄별 폭 캐시를 버린다. **줄 배열을 갈아 끼우거나 놓는 자리가 부른다.**
+fn dropLineCols(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_line_cols.len > 0) self.allocator.free(term.rt.editor_line_cols);
+    term.rt.editor_line_cols = &.{};
+    term.rt.editor_line_cols_tab = 0;
+}
+
 fn ensureMaxCols(term: *Term, right: bool) void {
     const cache = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
     if (cache.* != 0) return;
     const lines = if (right) rightTexts(term) else editorLines(term);
     if (lines.len == 0) return;
+
+    // **캐시가 성하면 정수 max 로 끝난다**(L2 폭 합 — §2). 비교 뷰는 문서가 둘이라 이 캐시의 축
+    // (`editor_lines` 첨자)이 성립하지 않으므로 옛 경로로 간다.
+    // **`editor_diff == null` 을 지운 변이는 살아남는다**(적대적 검증 L7): 비교 뷰는 문서 줄
+    // 배열을 안 들어 `lineColsFresh` 가 이미 거짓이다. 그래도 명시하는 이유는 **뜻**이다 —
+    // 이 캐시의 첨자는 「문서 하나」이고 비교 뷰에는 문서가 둘이다. `L2C4` 가 그 불변식을
+    // 못박아, 깨지는 날 이 가드가 진짜 일을 시작한다.
+    if (!right and term.rt.editor_diff == null and lineColsFresh(term)) {
+        const cols = term.rt.editor_line_cols;
+        var max_cached: u32 = 0;
+        if (term.rt.editor_visible_numbers.len > 0) {
+            // 접혀 있다 — **보이는 줄만** 고른다. gutter 번호가 1-based 라 하나 뺀다.
+            for (term.rt.editor_visible_numbers) |maybe| {
+                const num = maybe orelse continue; // 꼬리를 채운 빈 행
+                const idx = num - 1;
+                if (idx < cols.len) max_cached = @max(max_cached, cols[idx]);
+            }
+        } else {
+            for (cols) |c| max_cached = @max(max_cached, c);
+        }
+        cache.* = max_cached;
+        return;
+    }
 
     // **렌더가 쓰는 그 값**(`editor_tab_width` — 단일 출처). 상수를 읽으면 필드가 기본값이 아닐 때
     // 가로 막대 상한이 화면과 갈린다: 실측으로 탭 폭 8인 문서에서 상한이 20열로 나왔고 실제 가장 긴
@@ -5299,6 +5375,9 @@ fn keepFoldView(term: *Term) FoldViewKeep {
 /// 안 따라온다.
 fn finishFoldChange(self: *AppSession, term: *Term, keep: FoldViewKeep) void {
     restoreTop(term, keep.anchor);
+    // **여기서 캐시를 채운다** — 곧 부를 `ensureMaxCols` 가 비싼 셈을 하려는 자리다. 접힘은 줄의
+    // 폭을 안 바꾸므로 한 번 채우면 이후 토글은 정수 max 로 끝난다(§4.1c 트리거 ⑷ 실측).
+    ensureLineCols(self, term);
     term.rt.editor_first_col = keep.col;
     term.rt.editor_first_col_right = keep.col_right;
     ensureMaxCols(term, false);
@@ -7203,6 +7282,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     const lines = self.allocator.alloc([]const u8, n) catch |err| {
         if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
         term.rt.editor_lines = &.{};
+        dropLineCols(self, term);
         // 보이는 줄도 같은 버퍼를 빌린다 — 함께 놓는다.
         dropFoldState(self, term);
         return err;
@@ -7210,6 +7290,8 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     for (0..n) |i| lines[i] = doc.file.lineText(i) orelse "";
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = lines;
+    // **폭 캐시는 여기서 죽는다** — 줄 수가 그대로인 편집은 길이·탭 폭 판정에 안 걸린다.
+    dropLineCols(self, term);
 
     // ⑵⑶ 접힘 층과 보이는 줄.
     dropFoldState(self, term);
@@ -7457,6 +7539,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_syntax.deinit(self.allocator);
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
+    dropLineCols(self, term);
     // 체인 마디의 열 범위도 문서와 함께 죽는다(§7.5) — 렌더가 채우는 파생값이라 문서가 없으면
     // 가리킬 것이 없다. `SP18` 이 이 자리를 잡았다(픽스처가 심은 값이 누수로 드러났다).
     term.rt.editor_crumb_spans.deinit(self.allocator);
@@ -15266,6 +15349,162 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
         }
     }
     // 누수는 `testing.allocator` 가 시험 끝에서 잡는다 — 되돌림이 하나라도 빠지면 여기서 터진다.
+}
+
+/// L2 폭 캐시 판정자들이 함께 쓰는 픽스처 — **접히는 블록 안에 «긴 줄»** 을 둔다.
+///
+/// 긴 줄이 접힘 **안**에 있어야 「접으면 상한이 준다」와 「안 준다」가 갈린다(`DHS9` 가 같은 이유로
+/// 같은 모양을 쓴다). 그리고 최상위에도 중간 길이 줄을 둬 접은 뒤의 상한이 0 이 아니게 한다.
+fn lineColsFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8) !*Term {
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "const mid = \"");
+    try doc.appendNTimes(allocator, 'm', 120);
+    try doc.appendSlice(allocator, "\";\n");
+    for (0..40) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "pub fn f{d}() void {{\n", .{i}));
+        if (i == 3) {
+            try doc.appendSlice(allocator, "    const long = \"");
+            try doc.appendNTimes(allocator, 'x', 600); // 접힘 **안**의 긴 줄
+            try doc.appendSlice(allocator, "\";\n");
+        }
+        try doc.appendSlice(allocator, "    _ = 1;\n}\n");
+    }
+    const term = try undoFixture(fx, allocator, name, doc.items);
+    term.rt.editor_wrap = false;
+    return term;
+}
+
+test "L2C1 접힘 토글은 문서를 다시 «훑지 않는다» — 줄별 폭 캐시 (제품 경계)" {
+    // **값으로는 못 본다.** 캐시가 있든 없든 상한의 «답» 은 같다 — 다른 것은 비용뿐이다. 그래서
+    // 전체 훑기 횟수(`editor_line_cols_scans`)를 관측점으로 둔다. 실측(ReleaseFast,
+    // `app_session.zig` 5.4MB·85k줄): 펼치기 30.3ms → **1.29ms**, 훑기 1회 그대로(§4.1c 트리거 ⑷).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "l2c1.zig");
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    // 여는 경로가 이미 채웠다 — 그것이 이 조각의 설계다(어차피 한 번 훑는 자리).
+    const scans = term.rt.editor_line_cols_scans;
+    if (scans == 0) return error.OpenPathDidNotFill;
+    const wide = term.rt.editor_max_cols;
+    if (wide < 600) return error.FixtureNotWide;
+
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    // **접으면 상한이 준다** — 긴 줄이 접힘 안에 숨었다.
+    const folded_max = term.rt.editor_max_cols;
+    try testing.expect(folded_max > 0 and folded_max < wide);
+    if (!unfoldAll(fx.session)) return error.UnfoldRejected;
+    // **펼치면 돌아온다.**
+    try testing.expectEqual(wide, term.rt.editor_max_cols);
+
+    // **그리고 그동안 문서를 다시 훑지 않았다.**
+    try testing.expectEqual(scans, term.rt.editor_line_cols_scans);
+}
+
+test "L2C5 가장 긴 줄이 «마지막» 이어도 상한이 맞다 — 캐시가 끝을 빠뜨리지 않는다 (제품 경계)" {
+    // **끝을 빠뜨려도 대개 안 걸린다.** 상한을 정하는 줄이 가운데 있으면 마지막 줄의 값이 0 이어도
+    // 답이 같기 때문이다(`L2C1` 의 픽스처가 그 모양이라 그 변이가 살아남았다 — 적대적 검증 L10).
+    // 그래서 **가장 긴 줄을 문서 끝에 둔다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "const a{d} = {d};\n", .{ i, i }));
+    }
+    try doc.appendSlice(allocator, "const last = \"");
+    try doc.appendNTimes(allocator, 'z', 600);
+    try doc.appendSlice(allocator, "\";"); // **끝 개행 없이** — 마지막 줄이 곧 가장 긴 줄이다
+    const term = try undoFixture(&fx, allocator, "l2c5.zig", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    // 픽스처가 개념을 가른다 — 마지막 줄이 실제로 가장 길어야 한다.
+    const cols = term.rt.editor_line_cols;
+    if (cols.len < 2) return error.CacheNotFilled;
+    for (cols[0 .. cols.len - 1]) |c| if (c >= cols[cols.len - 1]) return error.FixtureLastNotLongest;
+
+    try testing.expect(term.rt.editor_max_cols >= 600);
+    try testing.expectEqual(cols[cols.len - 1], term.rt.editor_max_cols);
+}
+
+test "L2C6 캐시도 §3.8 상한에서 멈춘다 — 초장문 줄을 끝까지 세지 않는다 (제품 경계)" {
+    // §3.8: *"초장문·극단 입력에서 기능을 줄인다"*. 옛 경로는 `max_cols_count_limit` 에서 멈추는데,
+    // 캐시가 그 상한을 안 걸면 **같은 문서에서 두 경로가 다른 답**을 낸다 — 그리고 그 셈이
+    // 무한정 길어진다(적대적 검증 L11).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const limit = chrome_editor.frame.max_cols_count_limit;
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "const head = 1;\n");
+    try doc.appendNTimes(allocator, 'x', limit + 5_000); // 상한을 확실히 넘긴다
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "l2c6.zig", doc.items);
+    term.rt.editor_wrap = false;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (term.rt.editor_line_cols.len == 0) return error.CacheNotFilled;
+    // 캐시값도, 그것으로 구한 상한도 **정확히 상한에서 멈춘다**.
+    try testing.expectEqual(limit, term.rt.editor_line_cols[1]);
+    try testing.expectEqual(limit, term.rt.editor_max_cols);
+}
+
+test "L2C2 편집은 폭 캐시를 버린다 — 줄 수가 그대로여도 (제품 경계)" {
+    // **길이·탭 폭 판정으로는 안 걸린다.** 줄 수가 그대로인 편집은 두 값이 다 같아서, 줄 배열을
+    // 갈아 끼우는 자리가 직접 버리지 않으면 **캐시가 옛 폭을 든 채 살아남는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "l2c2.zig");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const lines_before = term.rt.editor_lines.len;
+    if (term.rt.editor_line_cols.len != lines_before) return error.CacheNotFilled;
+
+    // 첫 줄(중간 길이)에 한 글자 — **줄 수는 그대로다**.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(lines_before, term.rt.editor_lines.len); // 줄 수 불변 — 픽스처가 개념을 가른다
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len); // 그래도 버렸다
+}
+
+test "L2C3 탭 폭이 바뀌면 폭 캐시가 낡는다 (제품 경계)" {
+    // 폭은 탭스톱에 달렸다 — 탭 폭이 바뀌면 줄별 폭이 전부 다른 값이다(§2 — 문서 내용 **과 탭 폭**의
+    // 함수). 안 버리면 상한이 화면과 갈린다(같은 부류를 12차 적대적 검증이 8열 모자람으로 잡았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "l2c3.zig");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (term.rt.editor_line_cols.len == 0) return error.CacheNotFilled;
+
+    const before = term.rt.editor_line_cols_tab;
+    setEditorTabWidth(fx.session, term, before + 4);
+    // 배열은 남아 있어도 **낡은 것으로 판정**되어야 한다 — 다음 셈이 그것을 안 쓴다.
+    try testing.expect(!lineColsFresh(term));
+    // 그리고 다시 채우면 그때의 탭 폭을 든다.
+    ensureLineCols(fx.session, term);
+    try testing.expectEqual(term.rt.editor_tab_width, term.rt.editor_line_cols_tab);
+    try testing.expect(lineColsFresh(term));
 }
 
 test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 래치다 (제품 경계)" {

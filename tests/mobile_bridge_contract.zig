@@ -4388,6 +4388,8 @@ test "U1-f1 서버 화면의 머리는 «본문 뒤» 에 그린다 — 걸친 �
     _ = bridge.maru_mobile_build(402, 320, now());
 
     try T.expect(bridge.serversHeaderQuadIndex() > bridge.serversRowsQuadBegin());
+    // **자기 배경이 있어야 덮는다** — 순서만 맞고 배경이 없으면 걸친 줄이 그대로 비친다.
+    try T.expect(bridge.serversHeaderBgDrawn());
     _ = bridge.maru_mobile_pop_screen();
 }
 

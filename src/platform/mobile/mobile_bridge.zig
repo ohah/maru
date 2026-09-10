@@ -5455,6 +5455,7 @@ pub fn sessListRect() SetRect {
 /// 걸친 줄이 머리를 덮는다(U1-f1).
 var srv_rows_quad_begin: usize = 0;
 var srv_header_quad_i: usize = 0;
+var srv_header_bg_drawn: bool = false;
 
 pub fn serversHeaderQuadIndex() usize {
     return srv_header_quad_i;
@@ -5462,6 +5463,11 @@ pub fn serversHeaderQuadIndex() usize {
 
 pub fn serversRowsQuadBegin() usize {
     return srv_rows_quad_begin;
+}
+
+/// 머리가 **자기 배경**을 그렸나. 없으면 덮을 것이 없어 걸친 줄이 그대로 비친다.
+pub fn serversHeaderBgDrawn() bool {
+    return srv_header_bg_drawn;
 }
 
 pub fn setListRect() SetRect {
@@ -5591,6 +5597,9 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     // **걸친 것도 그리고 헤더가 그 위를 덮는다.** 그래서 헤더는 자기 배경을 갖는다.
     srv_header_quad_i = quad_count;
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    // **배경이 실제로 나갔나** — 순번만 보면 배경을 지워도 초록이다(변이 M2). `push` 의
+    // 결과에서 끌어내야 그 자리와 묶인다.
+    srv_header_bg_drawn = quad_count > srv_header_quad_i;
     pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
     noteA11y(sess_gear_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_settings) });

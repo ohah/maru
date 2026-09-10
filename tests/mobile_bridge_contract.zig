@@ -4302,7 +4302,13 @@ test "U1 넘어간 뒤에도 손가락만큼 안 따라간다 — 저항이 걸�
     try T.expect(over > 0);
     try T.expect(over < push);
 
-    bridge.maru_mobile_pointer(3, 1, 200, 200 - push, now());
+    // **되미는 쪽에는 저항이 없다.** 넘긴 만큼 손가락으로 되끌면 그대로 0 이 돼야 한다 —
+    // 여기까지 절반으로 줄이면 「돌아오질 않는다」로 느껴진다(변이 M6 이 이 축을 드러냈다).
+    bridge.maru_mobile_pointer(1, 1, 200, 200 - push + over, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    try T.expectEqual(@as(i32, 0), bridge.serverOvershootPx());
+
+    bridge.maru_mobile_pointer(3, 1, 200, 200 - push + over, now());
     _ = bridge.maru_mobile_build(402, h, now());
     _ = bridge.maru_mobile_pop_screen();
 }

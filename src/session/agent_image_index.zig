@@ -152,6 +152,20 @@ pub const Hit = struct {
     /// 수 있다, **그래서 펼치면 언제나 명령 전문이 먼저 나온다**」. 그 약속을 지키려면 명령의 자리를
     /// 따로 들어야 한다.
     cmd_rel: u32 = 0,
+    /// **호출 입력(`input`) 객체**의 자리 — 줄 시작 상대. **0 이면 없다**(줄은 `{` 로 시작하므로
+    /// 0 은 값의 자리가 될 수 없다).
+    ///
+    /// ⚠️ **`cmd_rel` 과 가르는 이유는 소비자가 다르기 때문이다.** 펼침(§2.4)은 **명령 전문**을
+    /// 보여 주어야 하고, 검색(§2.1.1)은 **입력 전부**를 봐야 한다. 둘을 한 자리로 합치면 한쪽이
+    /// 진다 — 합치면 `Bash` 를 펼쳤을 때 명령 대신 `{"command":…,"description":…}` 이 뜬다.
+    ///
+    /// **왜 필요한가**: 검색이 보는 자리는 라벨이 고른 **한 조각**뿐이라 같은 `input` 안의 다른
+    /// 필드가 두 층 어디에도 안 걸린다. 실측(2026-09-10 · Claude tool_use 130,247): `input`
+    /// 85.5 MB 중 **26.2%(11.2 MB)** 가 그 사각이고, 그중 큰 것이 `Write.content` **7.56 MB**
+    /// (2,552 호출)와 `Edit` 의 `new_string`·`old_string` 2.72 MB 다.
+    ///
+    /// Codex 는 `input` 이 **문자열**이라 대상·명령이 이미 그 안이다 — 이 자리는 0 이다.
+    input_rel: u32 = 0,
     /// 이 호출이 적힌 **시각**의 자리 — `"timestamp":"` **키**의 줄 시작 상대 오프셋(AV2b).
     /// **0 이면 모른다**(줄은 `{` 로 시작하므로 0 은 키의 자리가 될 수 없다).
     ///
@@ -452,6 +466,8 @@ const description_key = "\"description\":\"";
 const file_path_key = "\"file_path\":\"";
 const command_key = "\"command\":\"";
 const input_key = "\"input\":\"";
+/// Claude 의 `input` 은 **객체**다(Codex 는 문자열이라 위 키를 쓴다).
+const claude_input_key = "\"input\":";
 const arguments_key = "\"arguments\":\"";
 
 /// 대상 문자열의 끝을 찾을 때 훑는 최대 바이트. 라벨 상한(160 B)의 3.2 배다 — 라벨에 들어갈 몫과
@@ -665,7 +681,15 @@ fn scanClaudeToolUses(
         const id = findQuotedValueFull(scope, after, id_key);
         // Claude 의 시각은 **마커 뒤**다(실측 40,676/40,676 · 중앙 1,454 · 최대 38,753).
         const time_rel = timestampKeyRel(scope, after, claude_time_window);
-        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id, time_rel, cmd_rel);
+        // **입력 전체의 자리**(§2.1.1 · `Hit.input_rel`). Claude 는 `"input":{…}` 로 **객체**다 —
+        // 여는 `{` 를 가리킨다.
+        const input_rel: u32 = blk: {
+            const k = std.mem.indexOfPos(u8, scope, after, claude_input_key) orelse break :blk 0;
+            const at = k + claude_input_key.len;
+            if (at > std.math.maxInt(u32)) break :blk 0;
+            break :blk @intCast(at);
+        };
+        try appendActivity(allocator, out, line_offset, target, name, .claude_tool_use, activity, id, time_rel, cmd_rel, input_rel);
         if (end == line.len) break;
     }
 }
@@ -752,7 +776,8 @@ fn scanCodexToolCalls(
     const time_rel = timestampKeyRel(scope, 0, codex_time_window);
     // **대상이 곧 명령이다** — Codex 는 사람이 읽는 설명 필드가 없다(§2.2). 안쪽 호출을 벗겼으면
     // 그 인자의 첫 문자열 값이 곧 명령이고, 못 벗겼으면 `input` 전체가 그것을 대신한다.
-    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel, 0);
+    // Codex 의 `input` 은 **문자열**이라 대상·명령이 이미 그 안이다 — 입력 자리는 0 이다.
+    try appendActivity(allocator, out, line_offset, target, name, .codex_tool_call, activity, id, time_rel, 0, 0);
 }
 
 /// 화면에 적을 **대상**의 자리를 고른다. 순서가 계약이다(§2.2) — 실측이 정한 순서다:
@@ -1038,6 +1063,7 @@ fn appendActivity(
     time_rel: u32,
     /// 펼침이 보여 줄 명령의 자리(AV3). 0 이면 대상이 곧 명령이다.
     cmd_rel: u32,
+    input_rel: u32,
 ) !void {
     if (target.len == 0) return;
     if (target.len > std.math.maxInt(u32)) return;
@@ -1055,6 +1081,7 @@ fn appendActivity(
         .line_offset = line_offset,
         .time_rel = time_rel,
         .cmd_rel = cmd_rel,
+        .input_rel = input_rel,
         .data_offset = line_offset + target.start,
         .data_len = @intCast(target.len),
         .kind = kind,
@@ -3754,6 +3781,45 @@ test "Codex 활동: 모르는 안쪽 이름은 **바깥으로 안 돌아간다**
     try scanDocForTest(allocator, doc, &out);
     try testing.expectEqual(@as(usize, 1), out.items.len);
     try testing.expectEqual(Activity.other, out.items[0].activity);
+}
+
+test "Claude 활동: 입력 객체의 자리를 든다 — 검색이 `content` 까지 닿는다" {
+    // 🔥 **`Write` 의 `content` 7.56 MB(2,552 호출)가 두 층 어디에도 안 걸렸다.** 라벨이
+    // 고르는 것은 `file_path` 한 조각이고 `command` 도 없어 `cmd_rel` 이 0 이다.
+    //
+    // ⚠️ `cmd_rel` 과 **가른다**: 펼침은 명령 전문을, 검색은 입력 전부를 봐야 한다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01W","name":"Write","input":{"file_path":"/tmp/a.zig","content":"const needle = 1;"}}]}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    // 라벨 대상은 그대로 경로다.
+    try testing.expectEqualStrings("/tmp/a.zig", doc[@intCast(h.data_offset)..][0..h.data_len]);
+    // `Write` 에는 명령이 없으므로 `cmd_rel` 은 0 이다.
+    try testing.expectEqual(@as(u32, 0), h.cmd_rel);
+    // 그러나 **입력 자리**는 든다 — 여는 `{` 를 가리킨다.
+    try testing.expect(h.input_rel != 0);
+    try testing.expectEqual(@as(u8, '{'), doc[h.input_rel]);
+    // 그 자리부터가 입력 전부다 — `content` 가 그 안에 든다(푸는 것은 라벨 층의 일이다 §4.2).
+    try testing.expect(std.mem.indexOf(u8, doc[h.input_rel..], "const needle = 1;") != null);
+}
+
+test "Codex 활동: 입력 자리를 안 든다 — `input` 이 문자열이라 이미 그 안이다" {
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_C","type":"custom_tool_call","name":"exec_command","input":"{\"cmd\":\"ls\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 0), out.items[0].input_rel);
 }
 
 test "Codex 옛 형식: `input` 이 JSON 이면 껍데기를 벗긴다 — 첫 문자열 값이 대상이다" {

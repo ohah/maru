@@ -1330,6 +1330,12 @@ pub const RemoteTermBackend = struct {
     /// 만드는 테스트만을 위한 것이다 — 이유는 `initialNotificationConfigGeneration` 주석에 적었다.
     notification_config_generation: u64 = 1,
     notifications_osc: bool = false,
+    /// 알림 설정 RPC 를 **왜** 보냈는지 세는 카운터(진단 전용 — 동작에 영향 없음).
+    /// 분류의 의미는 아래 `notificationRpcCounters` 주석에 있다.
+    notify_rpc_label_changed: u64 = 0,
+    notify_rpc_generation_stale: u64 = 0,
+    notify_rpc_failed: u64 = 0,
+    notify_rpc_last_error: ?[]const u8 = null,
 
     const vtable = term_backend.VTable{
         .input_owner = &input_vtable,
@@ -1475,6 +1481,31 @@ pub const RemoteTermBackend = struct {
         };
     }
 
+    /// **알림 설정 RPC 를 «왜» 보냈는지 센다.** 2026-09-10, 프레임 루프의 33% 가 이 경로였는데
+    /// (가중 프로파일) 두 가지가 구분되지 않았다.
+    ///
+    ///   - `label_changed`  : GUI 라벨이 실제로 바뀌어 보냄 — 정상 동작이지만, 한 번의 변경이 **공유**
+    ///                        세대를 올려 나머지 runtime 을 전부 stale 로 만든다(아래 `generation_stale`).
+    ///   - `generation_stale`: 자기 라벨은 그대로인데 세대가 뒤처져서 보냄 — 위 증폭의 결과다.
+    ///   - `failed`         : RPC 가 실패했다. 실패는 아직 target 세대에 못 간 entry 를 **전부** 0 으로
+    ///                        되돌리므로, 지속되면 매 프레임 전원 재전송이 된다.
+    ///
+    /// 세기만 하고 **여기서 로그를 찍지 않는다** — 호출자(`app_session`)가 주기적으로 한 줄 남긴다.
+    /// 위 카운터의 현재 값. 호출자가 델타를 내어 «초당 몇 건»을 만든다.
+    pub fn notificationRpcCounters(self: *const RemoteTermBackend) struct {
+        label_changed: u64,
+        generation_stale: u64,
+        failed: u64,
+        last_error: ?[]const u8,
+    } {
+        return .{
+            .label_changed = self.notify_rpc_label_changed,
+            .generation_stale = self.notify_rpc_generation_stale,
+            .failed = self.notify_rpc_failed,
+            .last_error = self.notify_rpc_last_error,
+        };
+    }
+
     pub fn configureNotifications(self: *RemoteTermBackend, enabled: bool) client_mod.ClientError!void {
         if (self.notifications_osc != enabled) {
             const next_generation = std.math.add(u64, self.notification_config_generation, 1) catch
@@ -1485,11 +1516,14 @@ pub const RemoteTermBackend = struct {
         var values = self.runtimes.valueIterator();
         while (values.next()) |entry| {
             if (entry.notification_config_applied_generation == self.notification_config_generation) continue;
+            self.notify_rpc_generation_stale +%= 1;
             entry.runtime.updateNotificationConfig(
                 self.notification_config_generation,
                 self.notifications_osc,
                 entry.notificationDisplayLabel(),
             ) catch |err| {
+                self.notify_rpc_failed +%= 1;
+                self.notify_rpc_last_error = @errorName(err);
                 // Multi-runtime RPC는 분산 원자 commit이 아니다. 이미 적용된 entry는 완전본이고 그대로 두되,
                 // 아직 target generation에 도달하지 못한 entry를 retryable 0으로 표시한다. AppSession의 매-frame
                 // binding sync가 같은 label까지 포함한 완전본을 개별 재전송하므로 보상 RPC 자체가 실패해도
@@ -1520,7 +1554,12 @@ pub const RemoteTermBackend = struct {
             entry.notification_config_applied_generation != 0) return;
         const next_generation = std.math.add(u64, self.notification_config_generation, 1) catch
             return error.ProtocolError;
-        try entry.runtime.updateNotificationConfig(next_generation, self.notifications_osc, bounded);
+        self.notify_rpc_label_changed +%= 1;
+        entry.runtime.updateNotificationConfig(next_generation, self.notifications_osc, bounded) catch |err| {
+            self.notify_rpc_failed +%= 1;
+            self.notify_rpc_last_error = @errorName(err);
+            return err;
+        };
         self.notification_config_generation = next_generation;
         @memset(&entry.notification_display_label, 0);
         @memcpy(entry.notification_display_label[0..bounded.len], bounded);

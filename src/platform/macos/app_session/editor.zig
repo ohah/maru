@@ -5146,10 +5146,15 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
 
     var spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
     defer spans.deinit(self.allocator);
-    prov.foldSpans(self.allocator, &spans);
+    // **못 센 것은 「접을 것이 없다」가 아니다.** 이 함수가 실패를 삼켜 빈 목록을 내던 때는 그
+    // 둘이 구별되지 않아, 일시적 할당 실패가 아래 래치를 세워 **그 문서의 구문 접힘이 영영
+    // 사라졌다**(적대적 검증 2026-09-10 — 첫 할당을 실패시켜 실측했다). 지금은 오류로 오므로
+    // **래치하지 않고 돌아간다** — 다음 프레임이 다시 시도한다.
+    prov.foldSpans(self.allocator, &spans) catch return;
     // **머리 한 줄짜리는 만들지 않는다**(§4.1f — 접어도 줄어드는 것이 없다). `foldSpans`가 두 줄
     // 이상만 내므로 여기서 다시 거를 것은 없지만, 그 계약이 갈리면 아래 변환이 빈 범위를 만든다.
     if (spans.items.len == 0) {
+        // **이제 이 빈 목록은 「접을 것이 없다」뿐이다** — 못 센 경우는 위에서 갈라져 나갔다.
         term.rt.editor_syntax_folds_applied = true; // 접을 것이 없다 — 다시 세지 않는다
         return;
     }
@@ -15149,10 +15154,10 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
     // 는 `folded_buf[0..folded_len]` 이라 그때 비어 있다 — `rebuildVisible` 의 그 갈래는 **할당을
     // 하나도 안 한다**. 그러므로 그 `catch` 는 원리상 닿지 않는다. ⑵ 가 그것을 **재서** 적는다.
     //
-    // **`foldSpans` 의 OOM 은 「접을 것이 없다」와 구별되지 않는다**(실측 — 첫 할당을 실패시키면
-    // 빈 목록이 오고 승격이 `syntax_folds_applied = true` 로 래치한다). 계약이 *"실패는 저하다"*
-    // (§5)라 들여쓰기 접힘은 남지만, **일시적 실패에 래치가 걸린다**는 점은 이 판정자가 그대로
-    // 고정한다 — 바꾸려면 `foldSpans` 가 실패를 «보고»해야 하고 그것은 별도 결정이다.
+    // **어느 할당에서 실패하든 래치하지 않는다.** 한때 `foldSpans` 가 OOM 을 삼켜 빈 목록을 냈고,
+    // 그것이 「접을 것이 없다」와 구별되지 않아 **일시적 실패가 그 문서의 구문 접힘을 영영
+    // 없앴다**(이 판정자가 실측으로 잡았다 — 2026-09-10). 지금은 그 함수가 실패를 보고하므로
+    // 승격이 래치 없이 돌아가고, 다음 프레임이 다시 시도한다. ⑷ 가 **모든** 실패 자리에서 그것을 잰다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -15215,15 +15220,13 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
     var ranges_before = term.rt.editor_fold_ranges.ptr;
     if (first_before == 0 or max_before == 0 or top_before == 0) return error.FixtureDidNotScroll;
 
-    // **`foldSpans` 가 잡는 할당 수를 따로 센다.** 그 구간에서 실패하면 빈 목록이 와서 승격이
-    // 「접을 것이 없다」로 읽고 래치한다(위 머리말). **그 뒤 구간에서는 래치하면 안 된다** — 거기서
-    // 실패한 것은 「못 셌다」이고 다음 프레임이 다시 시도해야 한다. 경계를 세지 않으면 두 뜻이
-    // 밖에서 구별되지 않아 「`ranges` 실패에도 표식을 세운다」는 변이가 산다(실측 W3).
+    // **`foldSpans` 가 실제로 할당을 잡는지 확인한다** — 그 구간이 0 이면 아래 순회가 그 함수의
+    // 실패 갈래를 한 번도 안 타고, 「래치하지 않는다」가 공허해진다.
     const spans_allocs = blk: {
         var prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
         var probe_spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
         var sc = std.testing.FailingAllocator.init(allocator, .{});
-        prov.foldSpans(sc.allocator(), &probe_spans);
+        prov.foldSpans(sc.allocator(), &probe_spans) catch return error.ProbeFailed;
         probe_spans.deinit(sc.allocator());
         break :blk sc.alloc_index;
     };
@@ -15240,8 +15243,9 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
 
         // **어느 갈래로 갔든 뷰는 성하다.** 되돌림이 하나라도 빠지면 여기서 갈린다.
         try testing.expect(failing.has_induced_failure);
-        // **`foldSpans` 구간 밖에서 실패했으면 래치하지 않는다** — 다음 프레임이 다시 시도한다.
-        if (idx >= spans_allocs) try testing.expect(!term.rt.editor_syntax_folds_applied);
+        // **어느 자리에서 실패했든 래치하지 않는다** — 다음 프레임이 다시 시도한다. 한때
+        // `foldSpans` 구간에서만 래치가 걸렸고, 그것이 이 조각이 고친 결함이다.
+        try testing.expect(!term.rt.editor_syntax_folds_applied);
         try testing.expectEqual(max_before, term.rt.editor_max_cols);
         try testing.expectEqual(first_before, term.rt.editor_first_col);
         try testing.expectEqual(top_before, topDocLine(term));
@@ -15299,7 +15303,7 @@ test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 
         var prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
         var spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
         defer spans.deinit(allocator);
-        prov.foldSpans(allocator, &spans);
+        try prov.foldSpans(allocator, &spans);
         if (spans.items.len != 0) return error.FixtureHasFolds;
     }
 

@@ -7,6 +7,7 @@
 //! 모듈만 daemon에 잘못 연결해 restore consumer 없는 argv로 old image를 잃을 수 없다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const entrypoint = @import("entrypoint.zig");
@@ -41,6 +42,45 @@ const exit_dup_failed: u8 = 122;
 const exit_prepare_failed: u8 = 123;
 const exit_fd_set_invalid: u8 = 124;
 const exit_exec_failed: u8 = 125;
+
+/// **자식이 스스로 남긴다 — 물려받은 fd 가 아니라 자기가 연 파일에.**
+///
+/// exec 뒤의 실패(`InvalidFd`·handoff 읽기·`validateExecutable`)는 stderr 로 나가는데, 그 fd 를 정하는
+/// 것은 **부모**다. 그리고 원인을 알아야 하는 순간의 부모는 **항상 옛 빌드**다 — 새 빌드를 깔아야
+/// 업그레이드가 일어나고, 그때 fork 하는 쪽은 아직 옛 이미지이기 때문이다. 2026-09-10 에 그 옛 부모가
+/// stderr 를 `/dev/null` 로 보내고 있어서, `reason=target_invalid` 의 실제 이유가 **아무 데도** 남지
+/// 않았다. 부모에 넣은 진단(`waitPreflight`)이 그 상황에서 영영 안 찍히는 것도 같은 이유다.
+///
+/// **자식은 새 빌드다.** 그래서 이 한 줄만은 부모가 무엇이든 남는다.
+///
+/// **성공도 적는다.** 「preflight 는 통과했는데 업그레이드는 `target_invalid`」이면 범인은 preflight 가
+/// 아니라 `beginExecution` 의 `verify` 다(`upgrade_target.verifyOpaque`). 실패만 적으면 그 둘이 「로그
+/// 없음」으로 똑같아 보인다 — 정확히 그래서 한 번 헛짚었다.
+pub fn noteChildOutcome(ok: bool, detail: []const u8) void {
+    if (builtin.is_test) return;
+    var path_buf: [128]u8 = undefined;
+    const path = std.fmt.bufPrintZ(
+        &path_buf,
+        "/tmp/maru-{d}/session-host/preflight.log",
+        .{c.getuid()},
+    ) catch return;
+    const fd = c.open(
+        path.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fd < 0) return;
+    defer _ = c.close(fd);
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(.REALTIME, &ts);
+    var line_buf: [320]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &line_buf,
+        "preflight child: pid={d} at_unix={d} result={s} detail={s}\n",
+        .{ c.getpid(), ts.sec, if (ok) "ok" else "failed", detail },
+    ) catch return;
+    _ = c.write(fd, text.ptr, text.len);
+}
 
 fn runPreflightChild(target_path: [:0]const u8, source_fd: c.fd_t) noreturn {
     // **stderr 는 남긴다.** 예전에는 셋 다 `/dev/null` 로 보내, exec 뒤의 실패

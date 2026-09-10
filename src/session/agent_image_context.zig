@@ -348,15 +348,20 @@ fn foldChunks(buf: []u8) FoldedChunks {
 
         const blob = buf[rel..end];
         if (chunkExitCode(blob)) |code| exit_code = code;
-        if (findChunkOutput(blob)) |value| {
+        // ⚠️ **벗겨서 아무것도 안 남으면 벗기지 않는다**(적대적 1회차 · 실측 21,340 개 · chunk 의
+        // **28.5%**). `output` 이 **빈 문자열**인 chunk 는 「기다렸는데 출력이 없었다」는 뜻이고
+        // (빈 것의 `wall_time_seconds` 가 30 초 7,352 · 5 초 4,498 · 10 초 745), 그것을 벗기면
+        // 화면이 **통째로 빈다** — 「없다」와 「못 읽었다」가 구분되지 않는다(계약 §2 가 금한다).
+        const value = findChunkOutput(blob);
+        if (value != null and value.?.len > 0) {
             // 값은 **또 한 겹** 이스케이프돼 있다 — 여기서 푼다. 제자리에서 왼쪽으로 쓴다.
-            const src_start = rel + value.start;
-            const run = unescapeValueInPlace(buf, w, src_start, value.len);
+            const src_start = rel + value.?.start;
+            const run = unescapeValueInPlace(buf, w, src_start, value.?.len);
             w += run;
         } else {
-            // ⚠️ **`output` 이 없으면 그대로 둔다**(실측 640 개 · chunk 의 0.9%). 벗길 것이 없는데
-            // 껍데기를 없애면 그것은 **지우는 일**이고 §2.3 이 금한다 — 「받은 것 그대로」가
-            // 깨진다. 기존 판정자가 정확히 이 자리를 잡았다.
+            // **`output` 이 없거나(640 개 · 0.9%) 비었으면(21,340 개 · 28.5%) 그대로 둔다.**
+            // 벗길 것이 없는데 껍데기를 없애면 그것은 **지우는 일**이고 §2.3 이 금한다 — 「받은 것
+            // 그대로」가 깨진다. 기존 판정자가 없는 쪽을 잡았고, 빈 쪽은 적대적 1회차가 잡았다.
             if (w != rel) std.mem.copyForwards(u8, buf[w..][0..blob.len], blob);
             w += blob.len;
         }
@@ -598,6 +603,45 @@ test "chunk 껍데기: 값 안의 `}` 에서 안 잘린다 (적대적 1회차)" 
     try testing.expect(r.complete);
     try testing.expectEqualStrings("12:    }\n13:}\n", out[0..r.len]);
     try testing.expectEqual(@as(?i32, 1), r.exit_code);
+}
+
+test "chunk 껍데기: `output` 이 **비었으면** 그대로 둔다 (적대적 1회차)" {
+    // 🔥 **실측 21,340 개(chunk 의 28.5%)가 이 모양이다.** `output` 이 빈 문자열인 chunk 는
+    // 「기다렸는데 출력이 없었다」는 뜻이고(빈 것의 `wall_time_seconds` 가 30 초 7,352 ·
+    // 5 초 4,498 · 10 초 745), 벗기면 화면이 **통째로 빈다** — 「없다」와 「못 읽었다」가
+    // 구분되지 않는다(계약 §2 가 금한다).
+    var out: [256]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"" ++
+        "{\\\"chunk_id\\\":\\\"e08139\\\",\\\"wall_time_seconds\\\":30.0," ++
+        "\\\"output\\\":\\\"\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    // 껍데기가 그대로 남아 「30 초 기다렸다」가 화면에 있다.
+    try testing.expect(std.mem.indexOf(u8, out[0..r.len], "wall_time_seconds") != null);
+    try testing.expect(r.len > 0);
+}
+
+test "chunk 껍데기: 제자리로 줄여도 값이 안 깨진다 — 한글·이스케이프·여러 chunk (적대적 2회차)" {
+    // ⚠️ **겹치는 버퍼에서 왼쪽으로 쓴다.** 안전한 근거는 불변식 하나다 — 쓰는 자리(`w`)가 읽는
+    // 자리보다 **언제나 앞**이다(껍데기 머리가 값보다 먼저 오고, 푸는 일은 바이트를 안 늘린다).
+    // 그 불변식이 깨지면 **값이 자기 꼬리를 덮어쓴다** — 성공 경로만 보면 안 보이는 자리라
+    // 한글(3 바이트)·이스케이프·chunk 여럿을 한 픽스처에 섞는다.
+    var out: [1024]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"" ++
+        "{\\\"chunk_id\\\":\\\"a\\\",\\\"wall_time_seconds\\\":1.5," ++
+        "\\\"output\\\":\\\"첫째 줄: 한글과 \\\\\\\"따옴표\\\\\\\"\\\\n\\\"}" ++
+        "{\\\"chunk_id\\\":\\\"b\\\",\\\"exit_code\\\":0," ++
+        "\\\"output\\\":\\\"둘째 줄: tab\\\\t끝\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    const got = out[0..r.len];
+    // 두 chunk 가 순서대로 이어지고, **한 글자도 깨지지 않는다**.
+    try testing.expectEqualStrings("첫째 줄: 한글과 \"따옴표\"\n둘째 줄: tab\t끝", got);
+    try testing.expectEqual(@as(?i32, 0), r.exit_code);
+    // 그리고 **UTF-8 이 온전하다** — 반쪽 글자가 남으면 렌더러가 깨진 글자를 그린다.
+    try testing.expect(std.unicode.utf8ValidateSlice(got));
 }
 
 test "chunk 껍데기: `output` 이 없으면 **그대로 둔다** — 벗기기는 지우기가 아니다 (§2.3)" {

@@ -4622,6 +4622,25 @@ pub fn build(b: *std.Build) void {
     // 그래서 하위 스텝을 스텝으로 의존하지 않고 그 안의 run 을 `if (<loop>_optimize == optimize)` 로 걸러 붙인다.
     // 단일 모드(`.optimize = optimize`) 아티팩트는 그대로 붙인다. 가족의 전용 스텝 자체는 여전히 두 모드를 돈다.
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
+    const session_host_handoff_exhaustive_step = b.step(
+        "test-session-host-handoff-exhaustive",
+        "Verify every stable handoff core field with valid non-default canonical round trips",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |handoff_optimize| {
+        const handoff_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_codec.zig"),
+                .target = target,
+                .optimize = handoff_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"handoff v1 exhaustive valid fixtures"},
+        });
+        const run_handoff_tests = b.addRunArtifact(handoff_tests);
+        run_handoff_tests.addArg("--maru-expect-tests=1");
+        session_host_handoff_exhaustive_step.dependOn(&run_handoff_tests.step);
+        if (handoff_optimize == optimize) session_host_step.dependOn(&run_handoff_tests.step);
+    }
     const session_host_kernel_cwd_k1_step = b.step(
         "test-session-host-kernel-cwd-k1",
         "Verify K1 paired cwd authority wire ownership without enabling kernel cwd parity",

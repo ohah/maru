@@ -2253,7 +2253,7 @@ pub export fn maru_macos_app_session_frame_rate_hz(session: ?*AppSession) u32 {
 
 test "frame_rate_hz ABI getter: null default and session config clamp" {
     try std.testing.expectEqual(maru.config.theme.render_frame_rate_default, maru_macos_app_session_frame_rate_hz(null));
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = maru.config.theme.render_frame_rate_default;
     try std.testing.expectEqual(@as(u32, 60), maru_macos_app_session_frame_rate_hz(&session));
@@ -4543,7 +4543,7 @@ test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_f
 }
 
 test "maru_macos_app_session_bridge_dispatch export: size query + fill and insufficient cap" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     const hello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}";
     const needed = maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, null, 0);
     try std.testing.expect(needed > 0);

@@ -673,6 +673,64 @@ jobs:
 
   # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
+  editor-macos-releasefast:
+    name: editor macOS (ReleaseFast)
+    needs: changes
+    # **PR 에서는 안 돈다 — main push 전용이다.** ReleaseFast 를 PR 게이트로 두지 않는 것은 2026-08-17
+    # 결정이고(`session host macOS (ReleaseFast)` 주석), 무거운 macOS 게이트를 main 으로 옮긴 것은
+    # 2026-08-31 결정이다(`session-host-bundled-cli-macos` 주석 — 러너 부하가 무관한 PR 을 막아 왔다).
+    # 이 잡은 그 둘을 **둘 다 지키면서** 지금까지 아무 데서도 안 지켜지던 축을 자동으로 잡는다.
+    #
+    # **무엇을 잡는가**: `mise run check` 는 Debug 뿐이고, CI 의 ReleaseFast 는 `test-session-host`
+    # 계열 둘뿐이라 **편집기·앱세션 테스트는 출하 체제에서 한 번도 안 돈다**. 그 사이에 실제 결함이
+    # 하나 있었다 — `app_session.zig` 의 오버레이 배타 테스트가 ReleaseFast 에서만 실패했고, 원인은
+    # `var session: AppSession = undefined` 로 두고 **읽히는 필드를 손으로 관리**하는 구조였다(그 파일에
+    # 69개가 같은 모양이다). Debug 의 `0xaa` 패턴에서 우연히 통과하던 읽기가 ReleaseFast 에서는 진짜
+    # 미초기화라, 읽기 전용 코드를 한 줄 더하는 것만으로 「망가진 필드」의 정체가 바뀌었다(실측).
+    #
+    # **되돌리려면** 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다 — 그때는 PR 마다
+    # 찬 캐시 재빌드를 치른다(PR 은 캐시를 읽기만 하고 저장하지 않는다).
+    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    runs-on: macos-15
+    # 실측(로컬 M-series, 웜 캐시): Debug 87s · ReleaseFast 97s. 콜드 러너는 그보다 훨씬 크므로
+    # 이웃 macOS 잡들과 같은 여유를 둔다.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # **복원은 항상, 저장은 main push 에서만** — 이웃 잡들과 같은 규율이다. 모드가 달라 Debug 캐시를
+      # 나눠 쓸 수 없으므로 이 잡만의 키 공간을 쓴다.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: zig-cache
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-editor-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-editor-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-editor-releasefast-
+      # 앱 번들을 안 만든다 — 이 잡이 재는 것은 **테스트가 출하 체제에서도 성립하는가** 하나다.
+      - name: 편집기·앱세션 테스트를 출하 체제로 돌린다
+        run: zig build test-editor -Doptimize=ReleaseFast
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
+      - name: Save Zig cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-editor-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
   session-host-slow-observer-macos:
     name: session host slow observer macOS
     needs: changes

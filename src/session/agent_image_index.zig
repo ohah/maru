@@ -891,7 +891,21 @@ fn firstArgString(line: []const u8, open: usize, limit: usize, exhausted: *bool)
     while (i < limit) : (i += 1) {
         const c = line[i];
         switch (c) {
-            '(', '[', '{' => depth += 1,
+            '(' => depth += 1,
+            '[', '{' => {
+                depth += 1;
+                // 🔥 **객체·배열이 열리면 앞선 `:` 는 끝났다**(적대적 1회차 · 실측 392 건).
+                // 안 리셋하면 `{"plan":[{"step":"…"}]}` 에서 `plan:` 의 콜론이 살아 있는 채로
+                // 중첩 객체의 **첫 키**를 값으로 집는다 — 라벨이 계획이 아니라 `step` 이라는
+                // **키 이름**으로 떴다(실측 40 개 세션에서 270 줄). 껍데기보다 나쁘다.
+                //
+                // ⚠️ **`(` 는 리셋하지 않는다.** JSON 에는 `(` 가 없지만 JS 에는 있고, 거기서는
+                // 값이 **함수 호출 안**에 있을 수 있다 — `{cmd: load(\"maxLengthFocusedCmd\")}`.
+                // `(` 까지 리셋하면 그 값을 못 찾아 후보가 밀리고, 실측 51 줄에서 이름과 대상이
+                // 통째로 딴 호출로 갈아탔다(`exec_command` + 깔끔한 값 → `write_stdin` +
+                // 껍데기 통째). 두 문법의 차이가 여기 한 줄에 있다.
+                seen_colon = false;
+            },
             ')', ']', '}' => {
                 if (depth == 0) return null;
                 depth -= 1;
@@ -3759,6 +3773,42 @@ test "Codex 옛 형식: `input` 이 JSON 이면 껍데기를 벗긴다 — 첫 �
     try testing.expectEqualStrings(
         \\sed -n '1,220p' docs/project-rules.md
     , doc[@intCast(h.data_offset)..][0..h.data_len]);
+}
+
+test "Codex 옛 형식: 중첩 객체의 첫 키를 값으로 집지 않는다 (적대적 1회차)" {
+    // 🔥 **라벨이 `step` 이라는 키 이름으로 떴다** — 실측 40 개 세션에서 270 줄.
+    // `{"plan":[{"step":"…"}]}` 에서 `plan:` 의 콜론이 살아 있으면 중첩 객체의 첫 키가 값이
+    // 된다. 객체·배열이 열리면 앞선 `:` 는 끝난 것이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_P","type":"custom_tool_call","name":"update_plan","input":"{\"plan\":[{\"step\":\"회귀 테스트를 먼저 세운다\",\"status\":\"in_progress\"}],\"explanation\":\"x\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const t = doc[@intCast(out.items[0].data_offset)..][0..out.items[0].data_len];
+    try testing.expectEqualStrings("회귀 테스트를 먼저 세운다", t);
+}
+
+test "Codex JS: `(` 는 스코프를 리셋하지 않는다 — 값이 함수 호출 안에 있다 (적대적 1회차)" {
+    // ⚠️ **두 문법의 차이가 여기에 있다.** JSON 에는 `(` 가 없지만 JS 에는 있고, 거기서는
+    // 값이 함수 호출 안에 올 수 있다 — `{cmd: load(\\"…\\")}`. `(` 까지 리셋하면 그 값을
+    // 못 찾아 후보가 밀리고, 실측 51 줄에서 **이름과 대상이 통째로 딴 호출로 갈아탔다**
+    // (`exec_command` + 깔끔한 값 → `write_stdin` + 껍데기 통째).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_F","type":"custom_tool_call","name":"exec","input":"await tools.exec_command({cmd:load(\"maxLengthFocusedCmd\")});"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    try testing.expectEqualStrings("maxLengthFocusedCmd", doc[@intCast(h.data_offset)..][0..h.data_len]);
 }
 
 test "Codex 옛 형식: 숫자 키는 값이 아니다 — `session_id` 를 지나 `chars` 를 집는다" {

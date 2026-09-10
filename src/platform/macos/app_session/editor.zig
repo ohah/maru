@@ -5211,6 +5211,11 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     // 승격 전 `max_cols=621 · first_col=538`, 승격 뒤 **둘 다 0**.
     // 편집(`refreshAfterEdit`)·접기(`finishFoldChange`)에서 이미 고친 그 부류의 **세 번째 자리**다.
     const keep = keepFoldView(term);
+    // **아래 `catch` 는 오늘 닿지 않는다 — 그 변이가 살아남는 것이 정상이다**(적대적 검증 W5·W5b).
+    // 바로 위에서 `folded_len = 0` 으로 놓았고 `foldedHeads` 는 `folded_buf[0..folded_len]` 이라,
+    // `rebuildVisible` 은 「접힌 것이 없다」 갈래로 가 **할당을 하나도 안 한다**(`PROMO1` ⑵ 가 그
+    // 할당 수가 0 임을 잰다). 그럼에도 갈래를 적어 두는 이유는 **뜻**이다 — 위 순서가 바뀌어
+    // 접힌 채로 이 함수를 부르게 되는 날, 실패가 「부분집합을 그대로 둔 화면」을 남기지 않는다.
     rebuildVisible(self, term) catch {
         // 못 만들면 **부분집합을 그대로 두지 않는다** — 틀린 표보다 없는 편이 낫다(`rebuildVisible`
         // 자신이 실패 갈래에서 같은 판단을 한다).
@@ -15131,6 +15136,184 @@ test "DHS9 접어도 가로 막대가 안 사라지고 보던 열이 남는다 �
     after_unfold.dl.deinit(allocator);
     if (term.rt.editor_horizontal_scrollbar == null) return error.BarVanishedByUnfold;
     try testing.expectEqual(col_before_unfold, term.rt.editor_first_col);
+}
+
+test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그리고 마무리 갈래는 «닿을 수 없다» (제품 경계)" {
+    // **`DHS16` 은 성공 경로만 잰다.** 승격에는 `rebuildVisible` **앞**에 실패할 수 있는 할당이
+    // 넷 있고(`spans` 성장 · `ranges` · `folded` · `folded_prev`) 그 셋은 각자 손으로 되돌린 뒤
+    // `return` 한다 — 그 되돌림이 틀리면 **접힘 상태가 반쯤 갈린 채로 남는다**(같은 자리의 이중
+    // 해제를 이 저장소가 세 번 잡았다 — layering §2.0a).
+    //
+    // **그리고 「실패 갈래가 마무리를 건너뛴다」는 변이는 살아남는 것이 정상이다**(적대적 검증
+    // Z3): 승격은 `rebuildVisible` 을 부르기 **직전에** `folded_len = 0` 으로 놓고, `foldedHeads`
+    // 는 `folded_buf[0..folded_len]` 이라 그때 비어 있다 — `rebuildVisible` 의 그 갈래는 **할당을
+    // 하나도 안 한다**. 그러므로 그 `catch` 는 원리상 닿지 않는다. ⑵ 가 그것을 **재서** 적는다.
+    //
+    // **`foldSpans` 의 OOM 은 「접을 것이 없다」와 구별되지 않는다**(실측 — 첫 할당을 실패시키면
+    // 빈 목록이 오고 승격이 `syntax_folds_applied = true` 로 래치한다). 계약이 *"실패는 저하다"*
+    // (§5)라 들여쓰기 접힘은 남지만, **일시적 실패에 래치가 걸린다**는 점은 이 판정자가 그대로
+    // 고정한다 — 바꾸려면 `foldSpans` 가 실패를 «보고»해야 하고 그것은 별도 결정이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "const s = \"");
+    try doc.appendNTimes(allocator, 'x', 600);
+    try doc.appendSlice(allocator, "\";\n");
+    for (0..60) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "pub fn f{d}() void {{\n    _ = {d};\n}}\n", .{ i, i }));
+    }
+    const term = try undoFixture(&fx, allocator, "promo1.zig", doc.items);
+    term.rt.editor_wrap = false;
+    const d = term.rt.editor_doc orelse return error.NoDoc;
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&term.rt.editor_syntax, d.file.content);
+    }
+    if (term.rt.editor_syntax.provider == null) return error.NoProvider;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    // ⑴ **먼저 실패 없이 돌려 승격이 잡는 할당 수를 센다.**
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (term.rt.editor_folded_len == 0) return error.FixtureDidNotFold;
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    fx.session.allocator = counting.allocator();
+    term.rt.editor_syntax_folds_applied = false;
+    promoteFoldRangesToSyntax(fx.session, term);
+    fx.session.allocator = allocator;
+    if (!term.rt.editor_syntax_folds_applied) return error.PromotionDidNotRun;
+    const n_allocs = counting.alloc_index;
+    if (n_allocs == 0) return error.PromotionDidNotAllocate;
+
+    // ⑵ **승격 뒤의 `rebuildVisible` 은 할당하지 않는다.** 이것이 위 머리말이 적은 「마무리 갈래는
+    //    닿을 수 없다」의 **측정**이다 — 접힌 것이 없으면 그 함수는 놓기만 한다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    var probe = std.testing.FailingAllocator.init(allocator, .{});
+    fx.session.allocator = probe.allocator();
+    rebuildVisible(fx.session, term) catch return error.RebuildFailedWithoutFolds;
+    fx.session.allocator = allocator;
+    try testing.expectEqual(@as(usize, 0), probe.alloc_index);
+
+    // ⑶ **자리를 다시 세운다** — 접고 두 축으로 굴려 「지켜야 할 것」이 0 이 아니게 한다.
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (term.rt.editor_folded_len == 0) return error.FixtureDidNotRefold;
+    _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+    _ = scrollLines(fx.session, term, fx.leaf_rect, -12);
+    const first_before = term.rt.editor_first_col;
+    const max_before = term.rt.editor_max_cols;
+    const top_before = topDocLine(term);
+    var folded_before = term.rt.editor_folded_len;
+    var ranges_before = term.rt.editor_fold_ranges.ptr;
+    if (first_before == 0 or max_before == 0 or top_before == 0) return error.FixtureDidNotScroll;
+
+    // **`foldSpans` 가 잡는 할당 수를 따로 센다.** 그 구간에서 실패하면 빈 목록이 와서 승격이
+    // 「접을 것이 없다」로 읽고 래치한다(위 머리말). **그 뒤 구간에서는 래치하면 안 된다** — 거기서
+    // 실패한 것은 「못 셌다」이고 다음 프레임이 다시 시도해야 한다. 경계를 세지 않으면 두 뜻이
+    // 밖에서 구별되지 않아 「`ranges` 실패에도 표식을 세운다」는 변이가 산다(실측 W3).
+    const spans_allocs = blk: {
+        var prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
+        var probe_spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
+        var sc = std.testing.FailingAllocator.init(allocator, .{});
+        prov.foldSpans(sc.allocator(), &probe_spans);
+        probe_spans.deinit(sc.allocator());
+        break :blk sc.alloc_index;
+    };
+    if (!(spans_allocs > 0 and spans_allocs < n_allocs)) return error.FixtureSpanBoundary;
+
+    // ⑷ **모든 할당 자리에서 실패시켜 본다.** `fail_index < n_allocs` 면 승격은 **반드시** 실패하므로
+    //    상태가 그대로 남고, 그래서 회차마다 같은 조건에서 다시 잰다.
+    for (0..n_allocs) |idx| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = idx });
+        fx.session.allocator = failing.allocator();
+        term.rt.editor_syntax_folds_applied = false;
+        promoteFoldRangesToSyntax(fx.session, term);
+        fx.session.allocator = allocator;
+
+        // **어느 갈래로 갔든 뷰는 성하다.** 되돌림이 하나라도 빠지면 여기서 갈린다.
+        try testing.expect(failing.has_induced_failure);
+        // **`foldSpans` 구간 밖에서 실패했으면 래치하지 않는다** — 다음 프레임이 다시 시도한다.
+        if (idx >= spans_allocs) try testing.expect(!term.rt.editor_syntax_folds_applied);
+        try testing.expectEqual(max_before, term.rt.editor_max_cols);
+        try testing.expectEqual(first_before, term.rt.editor_first_col);
+        try testing.expectEqual(top_before, topDocLine(term));
+
+        // **접힘 상태가 «반쯤» 갈리지 않는다** — 범위를 갈아 끼웠으면 반드시 풀었고(`folded_len == 0`),
+        // 안 갈아 끼웠으면 접힌 채 그대로다. 그 사이 상태(새 범위인데 옛 접힘)가 바로 화면의 행과
+        // 문서의 줄이 어긋나는 그 상태다(2026-08-30 사용자 제보).
+        if (term.rt.editor_fold_ranges.ptr == ranges_before) {
+            try testing.expectEqual(folded_before, term.rt.editor_folded_len);
+        } else {
+            try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+            // 갈아 끼웠으면 다음 회차를 위해 자리를 다시 세운다.
+            if (!foldAll(fx.session)) return error.FoldRejected;
+            _ = scrollCols(fx.session, term, fx.leaf_rect, -100_000, null);
+            _ = scrollLines(fx.session, term, fx.leaf_rect, -12);
+            ranges_before = term.rt.editor_fold_ranges.ptr;
+            folded_before = term.rt.editor_folded_len;
+        }
+    }
+    // 누수는 `testing.allocator` 가 시험 끝에서 잡는다 — 되돌림이 하나라도 빠지면 여기서 터진다.
+}
+
+test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 래치다 (제품 경계)" {
+    // **표식을 안 세우면 승격이 매 프레임 돈다.** 그 함수는 트리에서 span 을 긁고 줄마다 대조하는
+    // 일이라, 접을 것이 없는 문서에서 그것을 프레임마다 하면 그냥 낭비다. 판정자가 없어 그 변이가
+    // 살아남았다(실측 W6).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **접을 것이 없는 zig 문서** — 최상위 선언만 있고 블록이 없다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "const a{d} = {d};\n", .{ i, i }));
+    }
+    const term = try undoFixture(&fx, allocator, "promo2.zig", doc.items);
+    term.rt.editor_wrap = false;
+    const d = term.rt.editor_doc orelse return error.NoDoc;
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&term.rt.editor_syntax, d.file.content);
+    }
+    if (term.rt.editor_syntax.provider == null) return error.NoProvider;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    // **픽스처가 개념을 갈라야 한다** — 접을 것이 실제로 없어야 이 판정자가 그 갈래를 잰다.
+    {
+        var prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
+        var spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
+        defer spans.deinit(allocator);
+        prov.foldSpans(allocator, &spans);
+        if (spans.items.len != 0) return error.FixtureHasFolds;
+    }
+
+    term.rt.editor_syntax_folds_applied = false;
+    promoteFoldRangesToSyntax(fx.session, term);
+    // **표식이 선다 — 다시 세지 않는다.**
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+
+    // 그리고 **한 번 더 불러도 아무 일이 없다**(할당 0). 표식이 실제로 막는지 재는 자리다.
+    var probe = std.testing.FailingAllocator.init(allocator, .{});
+    fx.session.allocator = probe.allocator();
+    promoteFoldRangesToSyntax(fx.session, term);
+    fx.session.allocator = allocator;
+    try testing.expectEqual(@as(usize, 0), probe.alloc_index);
 }
 
 test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — 파싱이 끝나는 프레임 (렌더 경계)" {

@@ -45730,26 +45730,18 @@ test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(�
 }
 
 test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫고 notice가 최우선(IME 무시)·toggle이 notice를 닫음" {
-    // 경량 — show/toggle·inputFocus·IME 헬퍼만 탄다(CoreText/PTY 불필요). undefined 세션은 이들이 읽는 필드만 초기화.
-    var session: AppSession = undefined;
-    session.allocator = std.testing.allocator;
-    session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
-    session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
-    session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
-    session.sidebar_search_active = false;
-    session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
-    session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
-    // **검색 목록은 둘이다**(§5.1). `clearAllFindMatches`가 편집기 쪽도 비우므로 이 필드가
-    // undefined면 `0xaaaa…`를 역참조해 **세그폴트**가 난다 — 실제로 났고, `FAIL`만 찾던 눈이
-    // "Segmentation fault"를 놓쳐 한 커밋이 그대로 밀렸다([[devsession-undefined-test-field-trap]]).
-    session.editor_find_matches = .empty;
-    session.editor_find_source = 0;
-    session.find_nav = false; // `clearAllFindMatches`가 내린다 — undefined면 그 대입이 의미를 잃는다
-    session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
-    session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
-    session.metal_dirty = false;
-    session.ime_terminal_target_id = null; // IME 라우팅이 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
-    session.file_content_menu = null; // showNotice→closeContextMenu가 읽음([[devsession-undefined-test-field-trap]])
+    // **`undefined` 를 쓰지 않는다.** 예전에는 세션을 `undefined` 로 두고 「읽힐 것 같은 필드」만
+    // 손으로 채웠는데, 읽는 쪽이 늘 때마다 그 목록이 조용히 낡아 **출하 체제(ReleaseFast)에서 UB**
+    // 였다(2026-09-10 — `inputFocus` 에 뒤늦게 붙은 술어 셋이 목록에 없었고, Debug 의 `0xaa` 패턴에서
+    // 우연히 거짓이라 통과하고 있었다. 읽기만 하는 코드 두 줄을 더하면 「망가진 필드」의 정체가
+    // 바뀌는 것으로 확인했다).
+    //
+    // **`.{}` 로 전부 채운다.** `AppSession` 664 개 필드 중 기본값이 없는 것은 `allocator` 와 `io`
+    // 둘뿐이라, 이 한 줄이 나머지에 **선언된 기본값**을 준다. `std.mem.zeroInit` 이 막혔던 이유도
+    // 여기서 갈린다 — 널 불가 포인터 셋(`surface_ids`·`live_registry`·`runtime`)은 「0 으로 채우기」는
+    // 안 되지만 **기본값은 갖고 있다**.
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+
     defer {
         session.chrome_host.deinit(std.testing.allocator);
         session.find_matches.deinit(std.testing.allocator);

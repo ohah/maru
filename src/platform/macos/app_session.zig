@@ -23976,82 +23976,58 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
     try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
     try std.testing.expectEqual(@as(u32, 1), session.remote_nonce_rebinds); // 갈아낀 것을 세었다
 }
-test "RA5: 침묵으로 죽은 채널은 되살린다 — 스트리머는 멀쩡한데 배지만 죽던 자리" {
+test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 것은 그대로 둔다" {
     // 하트비트 5 초 · 침묵 시한 15 초라 **세 번 놓치면** 채널이 `silent` 로 닫힌다. 그것은 EOF 가 아니라
     // **재시작 트리거가 없고**, 채널은 `null` 일 때만 열려서 그 Term 은 영영 못 받았다(적대적 검증 9 회차).
+    //
+    // 되살리면 **안 되는** 것도 있다. `no_hello`·`noise_overflow` 는 제한 서버(`ForceCommand`)를 가리는
+    // 신호라 되살리면 5 초마다 열고 닫는 헛돌이가 된다 — 그 둘은 마침 `saw_hello` 가 false 라 조건
+    // 하나로 갈린다. **둘을 한 판정자에 두는 이유가 그것이다**: 갈림이 한 줄이라 따로 두면 절반만 잠긴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try a.create(AppSession);
-    defer a.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
+    const ras = maru.session.remote_agent_stream;
 
-    const term = pane_ops.activePane(session).activeTerm();
-    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
-    var ctl = [_]u8{'/'};
+    for ([_]bool{ true, false }) |saw_hello| {
+        const session = try a.create(AppSession);
+        defer a.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
 
-    const gop = try session.remote_agent_hosts.getOrPut(a, "openClaw");
-    gop.key_ptr.* = try a.dupe(u8, "openClaw");
-    gop.value_ptr.* = .{};
-    gop.value_ptr.install_done = true;
-    gop.value_ptr.stream_started = true;
-    gop.value_ptr.saw_hello = true; // 이 스트림은 hello 를 봤다 — 제한 서버가 아니다
+        const term = pane_ops.activePane(session).activeTerm();
+        var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
+        var ctl = [_]u8{'/'};
 
-    // 열려 있던 채널이 침묵으로 죽었다.
-    var silent = maru.session.remote_agent_stream.Channel.initOpen(0);
-    silent.tick(maru.session.remote_agent_stream.silence_deadline_ms + 1);
-    try std.testing.expect(silent.isClosed());
-    term.agent_remote_channel = silent;
+        const gop = try session.remote_agent_hosts.getOrPut(a, "openClaw");
+        gop.key_ptr.* = try a.dupe(u8, "openClaw");
+        gop.value_ptr.* = .{};
+        gop.value_ptr.install_done = true;
+        gop.value_ptr.stream_started = true;
+        gop.value_ptr.saw_hello = saw_hello;
 
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
+        // 죽은 채널을 물린다 — `hello` 를 본 쪽은 침묵으로, 못 본 쪽은 시한으로.
+        var ch = if (saw_hello) ras.Channel.initOpen(0) else ras.Channel.init(0);
+        ch.tick(if (saw_hello) ras.silence_deadline_ms + 1 else ras.hello_deadline_ms + 1);
+        try std.testing.expect(ch.isClosed());
+        term.agent_remote_channel = ch;
 
-    // 되살아났고, 바로 이벤트를 받는다.
-    var ch = &(term.agent_remote_channel orelse return error.NoChannel);
-    try std.testing.expect(!ch.isClosed());
-    try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 101) == .event);
-}
-test "RA5: 제한 서버로 죽은 채널은 안 되살린다 — 그 신호를 지우면 헛돌이가 된다" {
-    // `no_hello` 는 `ForceCommand` 같은 서버를 가리는 신호다. 되살리면 5 초마다 열고 닫으며 영원히
-    // 돈다 — 그래서 **`saw_hello` 가 true 일 때만** 되살린다.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    const session = try a.create(AppSession);
-    defer a.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
+        session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
 
-    const term = pane_ops.activePane(session).activeTerm();
-    var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
-    var ctl = [_]u8{'/'};
-
-    const gop = try session.remote_agent_hosts.getOrPut(a, "openClaw");
-    gop.key_ptr.* = try a.dupe(u8, "openClaw");
-    gop.value_ptr.* = .{};
-    gop.value_ptr.install_done = true;
-    gop.value_ptr.stream_started = true;
-    gop.value_ptr.saw_hello = false; // hello 를 못 봤다 — 제한 서버일 수 있다
-
-    var dead = maru.session.remote_agent_stream.Channel.init(0);
-    dead.tick(maru.session.remote_agent_stream.hello_deadline_ms + 1);
-    try std.testing.expect(dead.isClosed());
-    term.agent_remote_channel = dead;
-
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
-
-    var ch = &(term.agent_remote_channel orelse return error.NoChannel);
-    try std.testing.expect(ch.isClosed()); // 죽은 채로 둔다
+        var now = &(term.agent_remote_channel orelse return error.NoChannel);
+        if (saw_hello) {
+            // 되살아났고 바로 이벤트를 받는다.
+            try std.testing.expect(!now.isClosed());
+            try std.testing.expect(now.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 101) == .event);
+        } else {
+            // 제한 서버 신호는 지우지 않는다.
+            try std.testing.expect(now.isClosed());
+        }
+    }
 }
 test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
     // 셋이 실측으로 **하나씩** 드러났고, 그때마다 「고쳤다」고 적힌 뒤에 다음 것이 남아 있었다. 그래서
@@ -39509,6 +39485,11 @@ fn runC3B6DetachAppQuit(comptime verification: C3B6AppQuitVerification) !void {
 
         var up = false;
         var w: usize = 0;
+        // ⚠️ **이 5 초(250 × 20 ms)는 shard 배정에 취약하다.** 2026-09-10 에 판정자 둘이 늘어 배정이
+        // 바뀌자 여기서 두 번 죽었고, **CI(깨끗한 러너)와 로컬이 같은 자리였다** — 부하가 아니라 배정이
+        // 문제다. 시한을 15 초로 늘려 봤더니 **더 나빠졌다**(아홉이 죽었다): 오래 기다리는 동안 실
+        // 데몬이 쌓인다. 그래서 고칠 축은 시한이 아니라 **프로세스 스모크의 동시성**이다. 같은 벽을
+        // 만나면 판정자 수를 바꿔 피하지 말고 그 축을 보라 — 피하면 다음 사람이 또 만난다.
         while (w < 250) : (w += 1) {
             if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;

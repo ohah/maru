@@ -2565,6 +2565,43 @@ test "DCARET6b: 비교 뷰 세로도 caret 여백을 쓴다 — 좌우가 함께
     try testing.expectEqual((row + 1 + half) -| visible, fx.term.rt.editor_first_line);
 }
 
+test "L2C4: 비교 뷰는 줄별 폭 캐시 축이 «성립하지 않는다» — 문서가 둘이다 (제품 경계)" {
+    // **캐시의 첨자는 `editor_lines`(문서 하나)다.** 비교 뷰의 상한은 `left_texts`/`right_texts` 에서
+    // 나오므로 그 축이 성립하지 않는다. `ensureMaxCols` 는 `editor_diff == null` 을 명시로 확인하는데,
+    // **그 가드를 지운 변이는 살아남는다**(적대적 검증 L7) — 비교 뷰에서는 `editor_lines` 가 비어
+    // `lineColsFresh` 가 이미 거짓이기 때문이다.
+    //
+    // **그래서 이 판정자는 가드가 아니라 «그 불변식» 을 못박는다.** 불변식이 깨지는 날(비교 뷰가
+    // 문서 줄 배열을 함께 들게 되는 날) 여기가 먼저 울리고, 그때 그 가드가 진짜 일을 하기 시작한다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+
+    var buf: [4096]u8 = undefined;
+    var w: usize = 0;
+    for (0..40) |i| w += (try std.fmt.bufPrint(buf[w..], "line{d}\n", .{i})).len;
+    const text = buf[0..w];
+    var tail: [4096]u8 = undefined;
+    @memcpy(tail[0..w], text);
+    tail[w - 2] = 'X';
+    var entry = testEntry(text, tail[0..w]);
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+
+    const term = fx.term;
+    const st = term.rt.editor_diff orelse return error.NoDiff;
+    if (st.view != .compare) return error.NotCompare;
+
+    // ⑴ **불변식**: 비교 뷰는 문서 줄 배열을 안 든다 — 그래서 캐시 축이 성립할 수 없다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_lines.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len);
+
+    // ⑵ 그리고 상한은 실제 왼쪽 본문에서 나온다 — `line0`~`line39` 라 여섯 열 남짓이다.
+    term.rt.editor_max_cols = 0;
+    editor_ops.ensureMaxColsForDiff(term);
+    try testing.expect(term.rt.editor_max_cols > 0);
+    try testing.expect(term.rt.editor_max_cols < 100);
+}
+
 test "DCARET7: PageDown 은 렌더가 굳힌 행 수만큼 간다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);

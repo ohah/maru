@@ -506,6 +506,12 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     // 이어도 좋다. 둘을 함께 주면 어느 규칙을 따를지 알 수 없으므로 거부한다.
     if (cmd.virtual and cmd.parent_image_id != 0) return .einval;
     // relative placement 는 부모가 실재해야 위치를 풀 수 있다. 없으면 그릴 자리가 없다.
+    // 부모가 없으면 거부한다. 명세대로이기도 하지만, **이 거부가 `removeOrphanedRelatives` 의 비용
+    // 상한을 지탱한다** — 부모가 언제나 자식보다 먼저 등록되므로 배열에서도 앞에 오고, 그래서 고아
+    // 연쇄가 **한 패스에** 다 걷힌다(O(n²)). 여기서 관대해지면 자식이 부모보다 앞에 놓일 수 있고,
+    // 그러면 패스마다 하나씩만 걷혀 O(n³)이 된다. 실측(2026-09-10, 사슬 1024): 거부하면 3 ms,
+    // 거부를 빼면 **1094 ms** — 몇 KB 의 escape 로 터미널이 1초 넘게 멈춘다.
+    // 이 결합은 눈에 안 보이므로 판정자로 고정해 두었다("부모 없는 relative placement 는 ENOENT").
     if (cmd.parent_image_id != 0 and findParentPlacement(self, cmd.parent_image_id, cmd.parent_placement_id) == null)
         return .enoent;
     // U=1(unicode placeholder): 커서 자리에 그리지 않는다 — 등록만 하고, 실제 배치는 화면에 찍힌
@@ -638,6 +644,9 @@ fn removeVirtualPlacements(self: *TerminalCore, image_id: u32, placement_id: u32
 /// 조용히 사라진 것처럼 보인다(목록에는 남아 상한만 먹는다).
 ///
 /// 자식이 또 부모일 수 있으므로 **더 없을 때까지 반복**한다. 목록이 작아(≤1024) 비용은 무시할 만하다.
+/// **비용 상한은 여기 없다 — `kittyDisplay` 의 부모 검증이 지탱한다.** 부모가 언제나 자식보다 먼저
+/// 등록되므로 배열에서도 앞에 오고, 그래서 연쇄가 한 패스에 다 걷힌다. 자식이 앞에 놓일 수 있게 되면
+/// 패스마다 하나씩만 걷혀 세제곱이 된다(실측: 3 ms → 1094 ms).
 fn removeOrphanedRelatives(self: *TerminalCore) void {
     var changed = true;
     while (changed) {

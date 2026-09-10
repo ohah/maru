@@ -5042,6 +5042,9 @@ const UiIntent = union(enum) {
     /// 편집 화면의 «몇 번째 줄» — 칸 다섯 + 공개키 + 저장 + 삭제. 화면이 고정이라 순번으로
     /// 충분하다(목록이 아니라 서식이다).
     server_edit_row: usize,
+    settings_back,
+    settings_diag,
+    settings_row: usize,
 };
 
 const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
@@ -5155,8 +5158,6 @@ var set_reveal: ?struct { idx: usize, win_h: f32 } = null;
 /// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 행을 안 누른다.
 var set_touch: scroll_area.Touch = .{};
 var set_max_scroll: f32 = 0;
-var set_pressed: ?usize = null;
-var set_back_pressed: bool = false;
 var set_open: ?usize = null; // 팝업이 열린 행
 /// **가장 긴 목록에 맞춘다 — 숫자를 손으로 적지 않는다.** 예전에는 8이었고 프리셋 목록도 손으로
 /// 적은 8개라 **우연히** 맞았다(그 자리 주석이 예고해 뒀다). 목록을 스키마·enum 에서 만들자
@@ -5337,7 +5338,6 @@ pub fn sessionsGearSize() struct { w: f32, h: f32 } {
 
 /// 설정 목록 끝의 «진단» 줄(M15a). 스키마 줄이 아니라 화면으로 가는 자리라 따로 든다.
 var set_diag_rect: SetRect = .{};
-var set_diag_pressed = false;
 
 /// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
 var sess_gear_rect: SetRect = .{};
@@ -6864,7 +6864,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     set_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h }; // 44 이상 정사각
     // 팝업이 열려 있으면 **뒤로가기도 안 눌린다**(포인터가 「항목 아니면 닫기」로 먼저 먹는다).
     if (set_open == null) noteA11y(set_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (set_back_pressed) push(.{ .x = @intFromFloat(set_back_rect.x), .y = @intFromFloat(set_back_rect.y), .w = @intFromFloat(set_back_rect.w), .h = @intFromFloat(set_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (uiPressed(registerAction(set_back_rect, .settings_back))) push(.{ .x = @intFromFloat(set_back_rect.x), .y = @intFromFloat(set_back_rect.y), .w = @intFromFloat(set_back_rect.w), .h = @intFromFloat(set_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
@@ -6988,7 +6988,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
                 const vis_y = @max(ry, list_top);
                 const vis_b = @min(ry + h, list_top + list_h);
                 set_row_rects[i] = .{ .x = set_list.x, .y = vis_y, .w = set_list.w, .h = @max(0, vis_b - vis_y) };
-                if (set_pressed != null and set_pressed.? == i)
+                if (uiPressed(registerAction(set_row_rects[i], .{ .settings_row = i })))
                     push(.{ .x = @intFromFloat(set_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(set_list.w), .h = @intFromFloat(h) }, tk.get(.row_hover_bg), 0xFF, 0, 0);
                 pushText(row.label, @intFromFloat(set_list.x + set_pad_x), @intFromFloat(ry + (h - 15) / 2), 15, tk.get(.surface_fg));
                 const right = set_list.x + set_list.w - set_pad_x;
@@ -7055,7 +7055,7 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
             .h = set_row_h,
         };
         if (set_diag_rect.w > 0) {
-            if (set_diag_pressed) push(.{ .x = @intFromFloat(set_diag_rect.x), .y = @intFromFloat(set_diag_rect.y), .w = @intFromFloat(set_diag_rect.w), .h = @intFromFloat(set_diag_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+            if (uiPressed(registerAction(set_diag_rect, .settings_diag))) push(.{ .x = @intFromFloat(set_diag_rect.x), .y = @intFromFloat(set_diag_rect.y), .w = @intFromFloat(set_diag_rect.w), .h = @intFromFloat(set_diag_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
             pushText(maru.i18n.tIn(.ko, .mob_diagnostics), @intFromFloat(set_list.x + set_pad_x), @intFromFloat(dy + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
             if (set_open == null) noteA11yClipped(
                 set_diag_rect,
@@ -7620,16 +7620,16 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             // **팝업이 열려 있으면 뒤로가기도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
             // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
             // 손가락에게 거짓말**이 된다. 행 눌림을 같은 이유로 막고 있었는데 여기만 빠졌다.
-            set_back_pressed = set_press.canTap() and set_open == null and setHit(set_back_rect, x, y);
-            set_pressed = null;
-            if (set_press.canTap() and set_open == null and !set_back_pressed) {
-                // **진단 줄을 먼저 본다** — 스키마 줄이 아니라 그 아래 한 줄이라, 나중에 보면
-                // `set_row_rects` 가 못 맞춘 자리로 떨어져 아무 일도 안 난다.
-                set_diag_pressed = setHit(set_diag_rect, x, y);
-                if (!set_diag_pressed) for (set_row_rects, 0..) |r, i| if (setHit(r, x, y)) {
-                    set_pressed = i;
-                    break;
-                };
+            // **팝업이 열려 있으면 아무것도 안 눌린 것이다.** 그 상태의 첫 탭은 어디를 짚든
+            // 팝업을 닫는 것뿐인데(아래 up), 표시만 눌린 것으로 두면 **뒤로 갈 줄 알고 누른
+            // 손가락에게 거짓말**이 된다.
+            ui_pressed = null;
+            if (set_press.canTap() and set_open == null) {
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                    }
+                }
             }
         },
         1 => {
@@ -7641,11 +7641,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             set_last_y = y;
             // **임계를 넘기 전에는 스크롤도 안 한다** — 살짝 민 손짓이 화면도 움직이고
             // 값도 바꾸면 같은 손짓이 어떨 때는 스크롤, 어떨 때는 입력으로 보인다.
-            if (set_press.move(x, y)) {
-                set_pressed = null;
-                set_back_pressed = false;
-                set_diag_pressed = false;
-            }
+            if (set_press.move(x, y)) ui_pressed = null;
             if (set_press.state == .pressed) return 1;
             if (set_open != null) {
                 // **팝업이 열려 있으면 팝업을 민다.** 안 그러면 목록 16개짜리 팝업에서 아래
@@ -7667,12 +7663,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             // 둔다. 표시를 먼저 지우고 빠져나갔더니 **첫 손가락을 떼도 아무 일이 안 났다**
             // (둘째 손가락이 잠깐 닿았다 떨어진 것만으로 누르던 줄이 죽었다).
             if (phase == 2 and set_touch.owner != null) return 1;
-            const pressed = set_pressed;
-            const back = set_back_pressed;
-            const diag = set_diag_pressed;
-            set_pressed = null;
-            set_back_pressed = false;
-            set_diag_pressed = false;
+            const intent = takeUiIntent();
+            const pressed: ?usize = switch (intent orelse UiIntent.settings_back) {
+                .settings_row => |i| i,
+                else => null,
+            };
+            const back = intent != null and intent.? == .settings_back;
+            const diag = intent != null and intent.? == .settings_diag;
             if (phase == 3) {
                 set_press.cancel();
                 return 1;
@@ -7815,9 +7812,7 @@ pub export fn maru_mobile_pop_screen() u32 {
     srv_edit_press.cancel();
     term_press.cancel();
     term_back_pressed = false;
-    set_pressed = null;
-    set_back_pressed = false;
-    set_diag_pressed = false;
+    ui_pressed = null;
     kb_pressed = null;
     set_touch.cancel();
     return 1;

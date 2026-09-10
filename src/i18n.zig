@@ -377,6 +377,8 @@ const Table = struct {
     agent_activity_detail_truncated: [:0]const u8,
     /// 펼침의 결과 칸 머리. 명령 전문과 결과 전문 사이를 가른다.
     agent_activity_detail_result: [:0]const u8,
+    /// 펼침의 「결과」 머리에 붙는 종료 코드 — `{0}` 하나를 받는다.
+    agent_activity_detail_exit: [:0]const u8,
     agent_activity_partial: [:0]const u8,
     /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
     agent_activity_scanning: [:0]const u8,
@@ -1465,6 +1467,7 @@ const en: Table = .{
     .agent_activity_result_image = "image",
     .agent_activity_detail_truncated = "… truncated",
     .agent_activity_detail_result = "Result",
+    .agent_activity_detail_exit = "Result · exit {0}",
     .agent_activity_shown_of = "{0} of {1} images",
     .agent_activity_open_failed = "Could not open this image",
     .agent_activity_search_prompt = "Filter: ",
@@ -2113,6 +2116,7 @@ const ko: Table = .{
     .agent_activity_result_image = "이미지",
     .agent_activity_detail_truncated = "… 이하 생략",
     .agent_activity_detail_result = "결과",
+    .agent_activity_detail_exit = "결과 · 종료 {0}",
     .agent_activity_shown_of = "{1}장 중 {0}장",
     .agent_activity_open_failed = "이 이미지를 열 수 없습니다",
     .agent_activity_search_prompt = "거르기: ",

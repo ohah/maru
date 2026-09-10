@@ -602,6 +602,11 @@ pub const Detail = struct {
     result: []u8 = &.{},
     command_truncated: bool = false,
     result_truncated: bool = false,
+    /// chunk 껍데기에서 읽은 **종료 코드**. 없으면 null — 실측 chunk 의 33.9% 에만 있다.
+    ///
+    /// ⚠️ **이 값이 없으면 벗기기가 정보를 지운 것이 된다**(§6). `exit_code` 는 chunk JSON
+    /// **안**에만 있어서, 껍데기를 벗기면 함께 사라진다.
+    result_exit_code: ?i32 = null,
     has_result: bool = false,
 
     pub fn deinit(self: *Detail, allocator: std.mem.Allocator) void {
@@ -1771,7 +1776,7 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
     const cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset;
     // 명령은 언제나 **값 하나**다(배열이 아니다) — Codex 는 `input` 이 문자열이고, Claude 는
     // 라벨이 고른 값 하나를 가리킨다.
-    op.detail.command = readDetailPart(self, file, cmd_offset, false, &op.detail.command_truncated);
+    op.detail.command = readDetailPart(self, file, cmd_offset, false, &op.detail.command_truncated, null);
     if (hit.result.found) {
         op.detail.has_result = true;
         // **본문이 없는 그림 결과는 「이미지」라고 적는다.** Claude 는 `content` 가 이미지 블록만
@@ -1789,6 +1794,7 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
                 hit.result.body.offset,
                 hit.result.body.is_array,
                 &op.detail.result_truncated,
+                &op.detail.result_exit_code,
             );
         }
     }
@@ -1800,7 +1806,15 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
 /// `is_array` 면 값 하나가 아니라 **배열 안 `text` 들을 순서대로 잇는다**(Codex `output`). 그 규칙은
 /// 순수 모듈이 소유하고, 여기서는 어느 쪽인지만 고른다 — 「무엇이 배열인가」의 판정은 스캐너가 이미
 /// 했고(`ResultSummary.body_is_array`), 여기서 바이트를 보고 다시 짐작하면 규칙이 두 벌이 된다.
-fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, is_array: bool, truncated: *bool) []u8 {
+fn readDetailPart(
+    self: *AppSession,
+    file: std.Io.File,
+    offset: u64,
+    is_array: bool,
+    truncated: *bool,
+    /// chunk 껍데기에서 읽은 종료 코드를 여기에 든다(없으면 건드리지 않는다).
+    exit_code: ?*?i32,
+) []u8 {
     if (offset == 0) return &.{};
     const raw = self.allocator.alloc(u8, max_detail_bytes) catch return &.{};
     defer self.allocator.free(raw);
@@ -1821,6 +1835,7 @@ fn readDetailPart(self: *AppSession, file: std.Io.File, offset: u64, is_array: b
     // 거짓이다 — `out` 을 읽어 온 만큼 잡아 주는데 푸는 일은 바이트를 늘리지 않기 때문이다.
     // 그래서 8 KiB 를 넘는 명령·결과가 **잘렸다는 말 없이** 잘려 있었다(계약 §2.4 위반).
     truncated.* = block.truncated or !block.complete;
+    if (exit_code) |slot| slot.* = block.exit_code;
     if (block.len == 0) return &.{};
     // ⚠️ **정확한 길이로 새로 잡아 복사한다.** `realloc` 이 실패했을 때 `out[0..len]` 을 돌려주면
     // **할당 길이와 다른 슬라이스**가 밖으로 나가고, 그것을 `free` 하는 순간 할당자가 죽는다
@@ -3504,7 +3519,15 @@ pub fn collectOpenDetail(
     if (!op.detail.has_result) return;
     if (row + 1 >= rows_fit) return;
     row += 1; // 빈 줄 하나로 가른다
-    draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_detail_result), dim);
+    // **종료 코드가 있으면 머리에 붙인다**(§6 — 벗기면서 잃지 않는다). 없으면 그냥 「결과」다:
+    // 실측 chunk 의 **66.1%** 에는 코드가 없고, 없는 것을 `0` 으로 지어내면 「실패했나」가 거짓말이
+    // 된다.
+    var head_buf: [64]u8 = undefined;
+    const head = if (op.detail.result_exit_code) |code|
+        maru.i18n.format(&head_buf, maru.i18n.t(.agent_activity_detail_exit), &.{.{ .d = code }})
+    else
+        maru.i18n.t(.agent_activity_detail_result);
+    draw(self, collected, builder, colors, area, row_h, row, cols, head, dim);
     row += 1;
     var rit = std.mem.splitScalar(u8, op.detail.result, '\n');
     while (rit.next()) |line| {

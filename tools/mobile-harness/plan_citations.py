@@ -16,7 +16,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 plan = (ROOT / "docs/plans/mobile-platform.md").read_text(encoding="utf-8")
-rows = set(re.findall(r"^\|\s*\*{0,2}(M[0-9]+[a-z0-9.]*|U[0-9]+)\*{0,2}\s*\|", plan, re.M))
+# **취소선 행도 행이다.** 끝난·물러난 슬라이스를 `~~U3~~` 로 적는 관례가 있는데, 그 표기를
+# 안 벗기면 **그 행을 가리키는 문서가 전부 「없는 인용」으로 붉어진다** — 실제로 U1 의 히트
+# 항목을 정정하며 U3 를 가리키자 그렇게 됐다(2026-09-10). 지나간 일을 가리키는 것은 정상이다.
+rows = set(re.findall(r"^\|\s*[~*]{0,4}(M[0-9]+[a-z0-9.]*|U[0-9]+)[~*]{0,4}\s*\|", plan, re.M))
 
 # **여기를 넓히지 말 것.** `verification-matrix.md` 도 `plans/mobile-platform.md` 를 가리키지만
 # 그 문서의 M/U 토큰은 **다른 이니셔티브의 축**이다(M0a·M2a·M3d·U3… 은 모바일 계획에 없다).

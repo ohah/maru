@@ -4493,14 +4493,16 @@ pub const AppSession = struct {
     // 재사용하지 않는다. per-session이 아니라 앱 전역이라 멀티 창에서도 id가 유일하다(MARU_PANE_ID 포함 — 창별
     // 충돌로 에이전트 트랜스크립트 경로가 겹치던 잠재 문제도 해소). 기본값이 공유 coordinator 필드 주소라 init의
     // `self.* = .{...}`·reset 경로가 모두 같은 allocator를 가리킨다. **주의**: `var session: AppSession = undefined`
-    // 테스트는 이 포인터가 0xaa가 되므로 createTerm을 타면 이 필드를 명시 초기화해야 한다([[devsession-undefined-test-field-trap]]).
+    // 테스트는 이 포인터가 0xaa가 됐다 — **그런 테스트는 이제 없다**(2026-09-10: 전부
+    // `= .{ .allocator, .io }` 로 옮겼다. 그 시작 상태가 출하 체제에서 UB 였다). 기본값이 여기
+    // 있으므로 그 테스트들이 이 포인터를 그냥 받는다([[devsession-undefined-test-field-trap]]).
     surface_ids: *maru.session.SurfaceIdAllocator = &app_runtime.surface_ids,
     // 앱 전역 live surface 소유자(M3a — app_runtime.live_registry 공유). createTerm이 여기 `create`로 `LiveSurface` 번들
     // (surface + live_pty) 슬롯을 소유시키고 Term은 그 두 필드의 안정 포인터를 든다. destroyTerm/close/deinit이 `remove`로
     // teardown(번들 deinit=reader join + surface.deinit + 슬롯 해제). 기본값이 공유 coordinator 필드 주소라 init의
     // `self.* = .{...}`·reset 경로가 모두 같은 registry를 가리킨다(surface_ids 패턴과 동형). **주의**:
-    // `var session: AppSession = undefined` 테스트가 createTerm을 타면 이 포인터도 명시 초기화해야 한다
-    // ([[devsession-undefined-test-field-trap]]) — 단 그런 테스트는 init을 먼저 부르므로 기본값이 채워진다.
+    // 예전에는 `var session: AppSession = undefined` 테스트가 이 포인터도 명시 초기화해야 했다
+    // ([[devsession-undefined-test-field-trap]]) — **그런 테스트는 이제 없다**(2026-09-10).
     live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_runtime.live_registry,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
@@ -4520,7 +4522,8 @@ pub const AppSession = struct {
     // 표를 조회한다(docs/window-surface-mobility.md §8A.2). 창이 닫혀도 이 표를 deinit하지 않는다(다른 창 링크가 살아
     // 있음) — 그 창의 링크만 per-Term `closeAndDetach`로 detach한다. 기본값이 공유 coordinator 필드 주소라 init의
     // `self.* = .{...}`·reset이 모두 같은 표를 가리킨다(surface_ids/live_registry 패턴과 동형). **주의**:
-    // `var session: AppSession = undefined` 테스트가 라우팅을 타면 이 포인터를 명시 초기화해야 한다(attachTestRuntime).
+    // 예전에는 `var session: AppSession = undefined` 테스트가 라우팅을 탈 때 이 포인터를 명시
+    // 초기화해야 했다(attachTestRuntime) — **그런 테스트는 이제 없다**(2026-09-10).
     runtime: *app.SurfaceRuntime = &app_runtime.routing,
     // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime의 수명·입출력·관측을 opaque handle 기반
     // 계약으로 다루는 in-process backend. GUI(Term.rt)는 `*LivePtySession`을 직접 안 들고 `termBackend()`가 돌려주는
@@ -13700,9 +13703,10 @@ pub const AppSession = struct {
         } else if (anim_delta_ns >= std.time.ns_per_ms) {
             // **상한을 둔다.** 두 가지를 한 번에 막는다 — ① 기계가 오래 잠들었다 깨면 delta 가 거대해져
             // 애니메이션이 수천 프레임을 순간에 감는다(사용자는 깜빡임만 본다). ② 이 함수는 필드가
-            // `undefined` 인 세션에서도 불린다(판정자들이 `var session: AppSession = undefined` 로
-            // 만든다) — 그때 baseline 이 쓰레기라 delta 가 u64 를 넘고, 상한이 없으면 `@intCast` 가
-            // 그 자리에서 패닉한다(실측: 커서 깜빡임 판정자 셋이 이 패닉을 잡았다).
+            // `undefined` 인 세션에서도 불렸다 — 그때 baseline 이 쓰레기라 delta 가 u64 를 넘고,
+            // 상한이 없으면 `@intCast` 가 그 자리에서 패닉했다(실측: 커서 깜빡임 판정자 셋이 그
+            // 패닉을 잡았다). **그 입력은 2026-09-10 에 사라졌다**(테스트가 기본값에서 시작한다) —
+            // 그래도 상한은 ① 때문에 그대로 필요하다.
             const max_advance_ms: i128 = 1000;
             const capped = @min(@divTrunc(anim_delta_ns, std.time.ns_per_ms), max_advance_ms);
             const anim_elapsed_ms: u64 = @intCast(capped);
@@ -22976,7 +22980,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -23037,7 +23041,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
     // config는 같은 hook-off fixture를 그대로 쓴다 — 검사 대상은 provider 경로 계산이지 config 위치가 아니다.
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
-    var fallback_session: AppSession = undefined;
+    var fallback_session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try fallback_session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -23158,7 +23162,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     agent_ops.test_allow_log_cleanup = true;
     defer agent_ops.test_allow_log_cleanup = false;
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -23186,7 +23190,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         agent_ops.hook_logs_cleaned = false;
         agent_ops.test_allow_log_cleanup = false; // 밝히지 않았다
         try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/876543.ndjson", .data = "claude\t{}\n" });
-        var guarded: AppSession = undefined;
+        var guarded: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try guarded.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -23266,7 +23270,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         // 그것이 살아남는지 본다(`hook_logs_cleaned`를 여기서는 되돌리지 않는다 — 그게 실제 두 번째 창의 상태다).
         try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/5.ndjson", .data = "claude\t{}\n" });
 
-        var again: AppSession = undefined;
+        var again: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try again.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -23311,7 +23315,7 @@ test "원격 pane 은 로그 파일 없이도 훅 모드로 선다 — 채널이
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23347,7 +23351,7 @@ test "원격 이벤트가 배지·알림을 로컬과 같은 자리에 쓴다 �
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23399,7 +23403,7 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23498,7 +23502,7 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23543,7 +23547,7 @@ test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23600,7 +23604,7 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -23698,7 +23702,7 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     // - `agent_arbiter` 의 연속 셈이 남으면 지난 프로세스의 관측으로 새 프로세스를 **접는다**
     const io = std.Io.Threaded.global_single_threaded.io();
     const a = std.testing.allocator;
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -24627,7 +24631,7 @@ test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상�
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -24698,7 +24702,7 @@ test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -24741,7 +24745,7 @@ test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -24788,7 +24792,7 @@ test "원격 nonce 는 로컬 훅 이름과 같은 두 값에서 나온다 — �
     const io = std.Io.Threaded.global_single_threaded.io();
     const a = std.testing.allocator;
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -24855,7 +24859,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -26116,7 +26120,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
     test_config_text = agent_hooks_on_config; // 게이트 on
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -26760,7 +26764,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
     // ① 켠다 — 두 provider 에 설치된다.
     test_config_text = agent_hooks_on_config;
     {
-        var on: AppSession = undefined;
+        var on: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try on.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -26784,7 +26788,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
     test_config_text = agent_hooks_off_config;
     defer test_config_text = "";
     {
-        var off: AppSession = undefined;
+        var off: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try off.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -26822,7 +26826,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
 
     // 다시 꺼도 아무 일이 없다 — 판정이 개수에만 달려 있어(`ours > 0`) 무동작이다.
     {
-        var again: AppSession = undefined;
+        var again: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try again.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -26894,7 +26898,7 @@ test "agent hooks install into codex and record trust without touching existing 
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -26977,7 +26981,7 @@ test "agent hooks install into codex and record trust without touching existing 
     {
         try tmp.dir.deleteFile(io, "codex/hooks.json");
         try tmp.dir.deleteFile(io, "codex/config.toml");
-        var fresh_both: AppSession = undefined;
+        var fresh_both: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try fresh_both.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27003,7 +27007,7 @@ test "agent hooks install into codex and record trust without touching existing 
 
     {
         try tmp.dir.deleteFile(io, "codex/config.toml");
-        var fresh_session: AppSession = undefined;
+        var fresh_session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try fresh_session.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27036,7 +27040,7 @@ test "agent hooks install into codex and record trust without touching existing 
         defer a.free(stale_json);
         try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = stale_json });
 
-        var refreshed: AppSession = undefined;
+        var refreshed: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try refreshed.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27069,7 +27073,7 @@ test "agent hooks install into codex and record trust without touching existing 
 
     // **다시 띄워도 신뢰 항목이 늘지 않는다.** 같은 테이블을 두 번 적으면 codex 가 config 를 통째로 못 읽는다.
     {
-        var again: AppSession = undefined;
+        var again: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try again.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27131,7 +27135,7 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
 
     // ① 한 번 설치한다 — 이 시점의 값은 **맞다**(설치가 방금 계산한 값이다).
     {
-        var first: AppSession = undefined;
+        var first: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try first.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27165,7 +27169,7 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
     try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
 
     // ③ 다시 뜬다. 훅 파일은 그대로라 설치는 «할 것 없음» 이고, 그 경로에서 **고친다**.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -27283,7 +27287,7 @@ test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
     { // 한 번 설치해 두고
-        var first: AppSession = undefined;
+        var first: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try first.init(io, a, .{
             .abi_version = abi_version,
             .cols = 40,
@@ -27313,7 +27317,7 @@ test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(codex.ptr, 0o555));
     defer _ = std.c.chmod(codex.ptr, 0o755); // tmp 정리가 지울 수 있게 되돌린다
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -27373,7 +27377,7 @@ test "agent hooks stay out of provider files while the gate is off" {
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -27459,7 +27463,7 @@ test "statusline hook is removed on startup — the wrapped original comes back 
         .data = sl.marker_header ++ "\nwrapped 1 " ++ "36" ++ "\n" ++ user_command,
     });
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -27529,7 +27533,7 @@ test "statusline removal leaves someone else's statusLine alone" {
     try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.script_name, .data = "#!/bin/sh\nexit 0\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.marker_name, .data = sl.marker_header ++ "\nwrapped 0 0\n" });
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -34242,7 +34246,7 @@ test "P4(음성): 고정 탭을 그룹 뒤로 드래그해도 그룹에 흡수 �
 }
 
 test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(마스킹 회귀 가드)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty;
     session.pointer_gesture_owner = .none;
@@ -34321,7 +34325,7 @@ test "마우스 리포팅: 누른 적 없는 버튼의 뗌·끌기는 앱에 보
     // **게이트마다 짝을 맞추는 대신 리포트 직전 한 자리에서 막는다** — `mouse()`에는 `kind == 1`에서만
     // 삼키는 게이트가 여럿이고(상태바·팔레트·모달), 링크만 100% 재현된 것은 그것이 터미널 pane 안이라
     // up이 여기까지 닿기 때문이지 나머지가 안전해서가 아니다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null;
     session.tabs = .empty;
     session.pointer_gesture_owner = .none;
@@ -36424,7 +36428,7 @@ test "setWebNavState: upsert + 옛 url free + 조회 + 없는 surface null (7e-1
     // setWebNavState/webNavState는 self.allocator·self.web_nav_states만 만지므로 minimal init로 충분하다
     // (undefined session의 나머지 필드는 안 읽음 — [[devsession-undefined-test-field-trap]] 범위 밖). testing.allocator가
     // upsert의 옛 url free 누락(누수)·이중 free(UAF)를 검출한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.web_nav_states = .empty;
     defer {
@@ -36453,7 +36457,7 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     // ([[devsession-undefined-test-field-trap]]). **dropAddrEditIfSurface(step 6)가 읽는 pending 필드 전부**를 초기화한다 —
     // web_nav_action_pending도 그중 하나라 초기화하지 않으면 undefined read(UB)다(리뷰 [6]; 옛 주석 "나머지 필드 안 읽음"은
     // 틀렸음). 시각(metal_dirty·blink)은 순수 코어 밖(handleKeyEvent 래퍼/클릭 핸들러)이라 여기서 안 탄다 = 헤드리스 검증 가능.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator; // TextField(addr_field)가 self.allocator를 쓴다(text/preedit 동적)
     session.addr_field = .{};
     defer session.addr_field.deinit(std.testing.allocator);
@@ -36527,7 +36531,7 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
 
 test "슬라이스 4: 주소창 키보드 편집 — 화살표·shift 선택·단어·⌘A (handleAddrEditKey 배선)" {
     // handleAddrEditKey는 addr_field(TextField)만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_field = .{};
     defer session.addr_field.deinit(std.testing.allocator);
@@ -36575,7 +36579,7 @@ test "리뷰: 주소창 편집 중 ⌘A(select_all 액션)는 터미널이 아�
     // dispatchAppAction으로 온다(제보: 주소창서 ⌘A 안 먹음 — 옛 코드가 addr_edit 무시하고 터미널만 선택). addr_edit
     // 활성이면 터미널 코어(enqueueCoreCommand·activeSurface)로 안 새고 addr_field.selectAll만 만지므로 runtime/
     // activeSurface/chrome_host 없이 minimal init로 충분하다([[devsession-undefined-test-field-trap]]).
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.metal_dirty = false;
     session.addr_edit = 1; // 편집 활성 → select_all이 필드 분기(터미널 경로 안 탐)
@@ -36595,7 +36599,7 @@ test "리뷰: 주소창 편집 중 ⌘A(select_all 액션)는 터미널이 아�
 test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C), pasteText는 caret 삽입·개행 strip(⌘V)" {
     // copyText/pasteText는 addr_edit 분기에서 addr_field만 만진다(터미널 경로 안 탐). minimal init로 충분하되
     // surface_initialized·copy_buffer는 명시 초기화([[devsession-undefined-test-field-trap]]).
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.surface_initialized = true;
     session.copy_buffer = &.{};
@@ -36679,7 +36683,7 @@ test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존
 
 test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + teardown 정리 (7e-3 헤드리스)" {
     // web_nav_action_pending/code만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null;
     session.addr_focus_pull_pending = null;
@@ -36718,7 +36722,7 @@ test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + t
 test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7e-4 키보드 공유 정책, 헤드리스)" {
     // web_nav_states(활성 판정) + web_nav_action_pending/code/metal_dirty만 만지므로 minimal init로 충분
     // ([[devsession-undefined-test-field-trap]]). testing.allocator가 url 누수를 검출한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.web_nav_states = .empty;
     session.web_nav_action_pending = null;
@@ -36765,7 +36769,7 @@ test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7
 test "setWebNavState: 값이 바뀔 때만 metal_dirty (링크 이동 주소창 재렌더, 7e-4 후속 헤드리스)" {
     // web_nav_states + metal_dirty만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
     // testing.allocator가 url 누수를 검출한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.web_nav_states = .empty;
     session.metal_dirty = false;
@@ -36830,7 +36834,7 @@ test "P4 C3b staged Window construction mutation은 publish enable 전 revision�
         .retry_max_ns = 30_000_000_000,
     }, false);
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.workspace_checkpoint_mutations_enabled = false;
     session.workspaceChanged(.topology);
     try std.testing.expectEqual(@as(u64, 0), app_runtime.workspace_checkpoint.change_revision);
@@ -36841,7 +36845,7 @@ test "P4 C3b staged Window construction mutation은 publish enable 전 revision�
 
 test "setHoveredNavButton: surface_id·버튼이 바뀔 때만 metal_dirty (dedup, 7e-4 헤드리스)" {
     // hovered_nav_button/metal_dirty만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.hovered_nav_button = null;
     session.metal_dirty = false;
@@ -37084,7 +37088,7 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
     );
     defer a.free(script);
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -37168,7 +37172,7 @@ test "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — �
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -37266,7 +37270,7 @@ test "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 G
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -39984,7 +39988,7 @@ test "persistent session quit policy: setting off terminates instead of detachin
         app_quit_end_all = previous_end_all;
     }
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     // 이 순수 정책 테스트가 읽는 AppSession 필드는 is_quick 하나다. ReleaseFast에서 undefined
     // 값을 읽으면 UB 최적화로 분기가 비결정적이므로 필요한 projection을 명시적으로 초기화한다.
     session.is_quick = false;
@@ -40041,7 +40045,7 @@ test "persistent session quit policy: cancelled late preflight clears accepted l
         app_quit_end_all = previous_end_all;
     }
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     app_quitting = true;
     app_quit_keep_alive = true;
     app_quit_end_all = true;
@@ -40861,7 +40865,7 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
     // 호출되므로 일반 타이핑 경로를 망가뜨리면 안 된다. 실제 preedit commit 경로는 아래의
     // initialized AppSession 테스트가 non-blocking/exactly-once 불변식으로 고정한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.focus_owner = .workspace;
@@ -40885,7 +40889,7 @@ test "sidebarSearchLine: 넘치면 tail 창(선두 …)으로 caret을 입력 �
     // 사이드바 검색바도 긴 검색어면 head 정렬은 앞부분만 보이고 caret('|')이 우측 아이콘 영역으로 잘려 안 보였다.
     // sidebarSearchLine이 넘침 시 선두 "…" + 뒤쪽으로 오른쪽 정렬해 caret을 max_col 안에 둔다(find·palette와 같은 규칙).
     // sidebarSearchLine은 self.sidebar_search_input만 읽으므로([[devsession-undefined-test-field-trap]]) 그 필드만 초기화한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.sidebar_search_input = .{};
     defer session.sidebar_search_input.deinit(std.testing.allocator);
 
@@ -41200,7 +41204,7 @@ test "제보: 주소창 IME 한글 — conjoining 자모 마크드/커밋이 완
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -41224,7 +41228,7 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 }
 
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
@@ -41290,7 +41294,7 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 }
 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
@@ -41375,7 +41379,7 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     // 옛날엔 tick마다 한 줄이라 기본이 30→60Hz로 오르며 자동 스크롤이 2배(120Hz면 4배) 빨라졌다. 이제 경과 ms로
     // 게이트해, 같은 호출 횟수라도 고프레임일수록 호출당 적게 스크롤한다(120Hz: msPerTick=8, step=33 → ~4콜당 한 줄).
     // 8콜이면 옛 모델은 8줄(과속)이지만 ms 게이트는 1~2줄에 그친다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.pointer_gesture_owner = .none;
     // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
@@ -41420,7 +41424,7 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
 }
 
 test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tick 환산" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
 
@@ -41483,7 +41487,7 @@ fn testAdvanceBlinkHalves(session: *AppSession, halves: i128) void {
 }
 
 test "cursor blink 위상: tick 수가 아니라 wall-clock 경과로 진행한다" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null;
     session.focus_owner = .workspace;
@@ -41536,7 +41540,7 @@ test "cursor blink 위상: tick 수가 아니라 wall-clock 경과로 진행한�
 }
 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.focus_owner = .workspace;
@@ -41615,7 +41619,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
 // ① 앱 DECSCUSR blink 요청(기본 `CSI 1 SP q` 상태)을 config가 덮는가, ② 텍스트 blink(SGR 5)로 위상이 도는 동안에도
 // 커서 suffix가 페이드되지 않는가(옛 코드는 위상이 돌면 주인과 무관하게 무조건 커서를 페이드했다).
 test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 커서를 고정(텍스트 blink 위상 중에도)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null;
     session.focus_owner = .workspace;
@@ -41675,7 +41679,7 @@ test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 �
 // **멤버 순서가 다르다**. 숫자 재해석(@intFromEnum)으로 옮기면 bar↔underline이 조용히 뒤바뀌어, `cursor.shape = bar`가
 // underline으로 그려진다(테스트 없이는 "그려지긴 하니까" 통과해 보이는 종류의 버그). 세 값을 전수 고정한다.
 test "configCursorShape: config↔terminal CursorShape 멤버 순서가 달라도 값이 보존된다" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.appearance.cursor.shape = .block;
     try std.testing.expectEqual(terminal.CursorShape.block, settings_ops.configCursorShape(&session));
     session.appearance.cursor.shape = .bar;
@@ -41714,7 +41718,7 @@ test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000�
 }
 
 test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투명도를 램프(중간값 존재)·램프 중 매 틱 generation↑·재빌드 없음" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.focus_owner = .workspace;
@@ -45787,7 +45791,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
 
 test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조합/확정 텍스트가 검색줄로(터미널로 안 샘)" {
     // 경량 — inputFocus/IME preedit·compose만 탄다(CoreText/PTY 불필요). undefined 세션은 이들이 읽는 필드만 초기화.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 settings/notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음
@@ -45823,7 +45827,7 @@ test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조�
 }
 
 test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 뒤 터미널 스크롤백을 보존(#4)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
@@ -52930,7 +52934,7 @@ test "premultipliedRgba premultiplies rgb by alpha" {
 // PaneGeometry가 leaf 하나에서 bar/body/grid를 한 번만 투영하는지 — focus border(body)와 terminal 좌표(grid)가
 // 같은 원본을 쓰고, tiny/minimal/과대 padding에서도 보수 관계와 body containment를 잃지 않는 SSOT 회귀다.
 test "paneGeometry owns bar body and contained grid for normal tiny minimal and oversized padding" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     // paneBarHeightPx → buildChromeTokens가 appearance(theme)를 읽으므로 undefined 세션에 명시 초기화한다
     // (undefined 필드 읽기 UB로 0xaa 우연 green이 나는 것을 막는다).
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
@@ -56935,7 +56939,7 @@ test "resume 셸 명령: exec 접두와 토큰별 작은따옴표 인용" {
 }
 
 test "urlModifierHeld: config url-click-modifier가 mods 비트와 매칭 (F1-5)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     // command(기본): cmd 비트(32)만 활성. 다른 수식키 동반(cmd+shift)도 cmd 포함이면 활성.
     session.loaded_config.config.input.url_click_modifier = .command;
     try std.testing.expect(session.urlModifierHeld(32));
@@ -64835,7 +64839,7 @@ test "C3-3b5 AppSession은 stale remove와 backend absence를 구분해 dangling
 }
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
@@ -65732,7 +65736,7 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
 }
 
 test "scrollbarAlpha: host frame-loop cadence에 따라 fade tick 수만 바뀌고 alpha 곡선은 유지" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
 
@@ -65807,7 +65811,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
 }
 
 test "configPath caches the resolved config path (single alloc, freed in deinit)" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.config_path_buffer = null;
     defer if (session.config_path_buffer) |b| std.testing.allocator.free(b);
@@ -65819,7 +65823,7 @@ test "configPath caches the resolved config path (single alloc, freed in deinit)
 }
 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // imeCursorRect가 커서를 lockCore 아래 읽음(P4-3)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
@@ -65871,7 +65875,7 @@ test "readActiveSnapshot: 활성 코어 sync/커서/위치를 단일 lock 값 �
     // §12 P4-2: tick당 흩어진 활성 코어 read(sync 게이트 D·커서 blink B·커서 위치)를 한 lock으로 통합한 값 스냅샷.
     // 이 테스트는 그 스냅샷이 코어 상태(sync_output·bsu/esu·커서 row/col)를 정확히 뜨는지, need_blink_scan 게이트로
     // viewportHasBlink 스캔을 조건화하는지 고정한다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
@@ -65903,7 +65907,7 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
     // 활성 panel은 자기 rect origin에서 그려지므로, 스크린 픽셀에서 origin(x,y)을 뺀 뒤에야 그 panel의
     // 열/행이 된다(단일 panel이면 origin = (사이드바 폭, 0)이라 기존과 동일). 안 빼면 선택/클릭 블록이
     // origin만큼 어긋난다(라이브 제보 회귀). split이면 origin은 서브-rect의 좌상단이다.
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = std.testing.allocator;
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();
@@ -76218,7 +76222,7 @@ test "CR0b GUI current first는 managed adapter 전에 process owner를 한 번 
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const publisher = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
     const timestamp = try incident_publication_port.publicationTimestampReceipt();
@@ -76252,7 +76256,7 @@ test "CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다" {
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try std.testing.expectEqual(AppSession.RestoreHostOutcome.ready, session.ensureRestoreHostAdapter(0xA001));
     const restored = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
     session.ensureRemoteBackend();
@@ -76268,8 +76272,8 @@ test "CR0b GUI multiple window와 adapter는 process owner를 재사용한다" {
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var first_window: AppSession = undefined;
-    var second_window: AppSession = undefined;
+    var first_window: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var second_window: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     first_window.ensureRemoteBackend();
     const first = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(AppSession.RestoreHostOutcome.ready, second_window.ensureRestoreHostAdapter(0xA002));
@@ -76289,7 +76293,7 @@ test "CR0b bootstrap 4 GUI child는 실제 bootstrap transcript를 게시한다"
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const publisher = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
     const runtime = publisher.runtime;
@@ -76318,7 +76322,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
         IncidentOwnerTerminationOutcome.inactive,
         shutdownProcessIncidentOwner(),
     );
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(std.testing.io, std.testing.allocator, .{
         .abi_version = abi_version,
         .cols = 40,
@@ -76448,7 +76452,7 @@ test "CR0b AppHost incident ABI prerequisite는 runtime 오류를 degraded outco
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     try AppSession.markProcessIncidentWriterFailedForTest();
     try std.testing.expectEqual(
@@ -76468,7 +76472,7 @@ test "CR0b AppHost incident ABI prerequisite는 active lease timeout을 detached
     defer _ = std.c.close(directory.fd);
     try AppSession.beginIncidentBootstrapTest(directory.fd);
     defer AppSession.endIncidentBootstrapTest();
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const runtime = app_process_incident_owner.runtime.?;
     var lease: session_host.incident_publisher_registry.IncidentPublisherLease = .{};
@@ -76883,7 +76887,7 @@ test "CR6a-1 AppSession은 recovered projection을 app-global primary owner 하�
     }
     app_keep_alive_after_quit = true;
 
-    var primary: AppSession = undefined;
+    var primary: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     primary.is_quick = false;
     const runtimes = [_]maru.session.runtime_reconcile.Runtime{.{ .runtime_id = 9 }};
     const hosts = [_]maru.session.runtime_reconcile.HostInventory{.{ .complete = .{
@@ -76901,7 +76905,7 @@ test "CR6a-1 AppSession은 recovered projection을 app-global primary owner 하�
     try std.testing.expectEqual(@as(usize, 1), primary.recoveredSessionsRows(true).len);
     try std.testing.expectEqual(@as(usize, 0), primary.recoveredSessionsRows(false).len);
 
-    var secondary: AppSession = undefined;
+    var secondary: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     secondary.is_quick = false;
     const before_generation = app_recovered_sessions_projection.generation;
     try secondary.replaceRecoveredSessionsProjection(.{ .windows = &.{} }, &.{}, false, 2);
@@ -83859,7 +83863,7 @@ test "원격 커서는 hello 뒤의 줄만 믿는다 — 제한 서버 출력으
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -83911,7 +83915,7 @@ test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물�
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try session.init(io, a, .{
         .abi_version = abi_version,
         .cols = 20,

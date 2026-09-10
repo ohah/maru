@@ -3306,7 +3306,7 @@ test "낙관적 반영: 그 행만 옮기고 개수·증감·동작은 낙관하
     // 낙관 없이는 원래 자리다.
     try testing.expectEqualStrings("moving.zig", items[3].file.name);
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = testing.allocator;
     session.scm_pending = .{ .path = try testing.allocator.dupe(u8, "moving.zig"), .from = .changes };
     defer testing.allocator.free(session.scm_pending.?.path);
@@ -3341,7 +3341,7 @@ test "낙관적 반영: 도착 그룹이 화면에 없으면 옮기지 않는다
         item.* = scm_items.itemFor(row, 0, index, null, @splat(false));
     }
 
-    var session: AppSession = undefined;
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.allocator = testing.allocator;
     session.scm_pending = .{ .path = try testing.allocator.dupe(u8, "only.zig"), .from = .changes };
     defer testing.allocator.free(session.scm_pending.?.path);

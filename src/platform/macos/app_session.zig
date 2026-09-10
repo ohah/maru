@@ -80253,7 +80253,16 @@ test "활동 뷰: Codex 결과 배열은 원소를 이어 보여 주고, 거기�
     try std.testing.expect(session.agent_activity.body.matches.items[0].in_result);
 
     // ── ⓓ **머리말에만 있는 말도 여전히 걸린다** — 잘라 낸 것이 아니라 이어 붙인 것이다.
-    //    (`Script completed` 를 알아보고 건너뛰는 것은 계약 §2.3 에 어긋난다.)
+    //
+    //    ⚠️ **이 판정자가 실제로 사람을 막았다**(2026-09-10). 머리말 세 줄이 펼침 화면 위를 늘
+    //    차지해서(실측 70.3% · 12.1 MB) 접는 슬라이스를 만들었는데, 여기가 빨개져서 멈췄다.
+    //    되돌린 이유는 계약 §2.3 의 경계다 — **구조는 벗기고 글자는 안 알아본다**. chunk 봉투는
+    //    괄호를 따라가 벗기지만 `Script completed` 는 **문자열**이고, 그것을 알아보면 이 말로
+    //    **검색이 안 되게** 된다(`Script failed` 1,969 건).
+    //
+    //    ⚠️ 그때 그 결정은 **이 주석에만** 있었고 계약에는 없었다 — 규칙의 단일 출처가 어긋나
+    //    「코드가 사람을 막는」 순서가 됐다. 지금은 계약 §2.3·§6 이 그것을 들고 있고, 이 주석은
+    //    거기를 가리킨다.
     session.agent_activity.search_active = true;
     session.agent_activity.search.clear();
     agent_activity_ops.cancelBodySearch(session);

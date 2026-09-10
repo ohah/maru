@@ -720,6 +720,30 @@ fn scanCodexToolCalls(
                 if (tt.len > 0) break :blk tt;
             }
         }
+        // **옛 형식은 `input` 이 JSON 문자열로 감싼 JSON 이다.** JS 껍데기가 없던 시절(2026-06
+        // 까지)과 지금도 일부 도구는 `"input":"{\"cmd\":\"…\"}"` 로 온다 — 값 통째가 대상이 되어
+        // 화면에 `{"cmd":"nl -ba packages/core/…` 처럼 **껍데기가 먼저** 뜬다.
+        //
+        // 그 안의 **첫 문자열 값**이 사람이 보고 싶은 것이다. 실측(2026-09-10 · 안쪽 호출이 없는
+        // 117,413 건 중 **106,336(90.6%)** 이 `{` 로 시작): `exec_command`→`cmd` 41,505 ·
+        // `write_stdin`→`chars` 22,231 · `wait`→`cell_id` 20,480 · `send_message`→`target` 7,323 ·
+        // `followup_task`→`target` 4,740 · `update_plan`→`explanation` · `spawn_agent`→`task_name`.
+        // 숫자 키(`session_id`·`timeout_ms`)는 문자열이 아니라 저절로 건너뛴다.
+        //
+        // **JS 안쪽 인자와 같은 함수를 쓴다** — 모양이 같기 때문이다(두 겹 이스케이프 · 키와 값을
+        // `:` 로 가르기 · 빈 문자열도 값). 규칙을 두 벌로 만들면 한쪽만 고쳐지는 날이 온다.
+        if (outer_target) |t| {
+            if (t.len > 0 and scope[t.start] == '{') {
+                // 창은 안쪽 호출과 같은 몫이다(512 B 면 긴 명령의 닫는 따옴표를 못 본다 — 실측
+                // 첫 값이 512 B 를 넘는 것이 1,627 건).
+                const json_limit = @min(scope.len, t.start + max_inner_scan_bytes);
+                var exhausted = false;
+                if (firstArgString(scope, t.start, json_limit, &exhausted)) |vv| {
+                    // ⚠️ 빈 대상은 줄을 통째로 없앤다 — 위와 같은 이유로 껍데기라도 보인다.
+                    if (vv.len > 0) break :blk vv;
+                }
+            }
+        }
         break :blk outer_target orelse name;
     };
     // Codex 의 `call_id` 는 `type` **앞에** 올 수 있어 범위의 처음부터 찾는다(범위는 위에서 닫았다).
@@ -3716,6 +3740,95 @@ test "Codex 활동: 모르는 안쪽 이름은 **바깥으로 안 돌아간다**
     try scanDocForTest(allocator, doc, &out);
     try testing.expectEqual(@as(usize, 1), out.items.len);
     try testing.expectEqual(Activity.other, out.items[0].activity);
+}
+
+test "Codex 옛 형식: `input` 이 JSON 이면 껍데기를 벗긴다 — 첫 문자열 값이 대상이다" {
+    // 🔥 **실측 19,015 줄(옛 형식 세션의 74.4%)이 껍데기로 보였다.** `"input":"{\\"cmd\\":…"`
+    // 라 값 통째가 대상이 되어 화면에 `{"cmd":"sed -n '1,220p' docs/…` 처럼 떴다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_J","type":"custom_tool_call","name":"exec_command","input":"{\"cmd\":\"sed -n '1,220p' docs/project-rules.md\",\"workdir\":\"/Users/me/repo\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("exec_command", doc[h.name_rel .. h.name_rel + h.name_len]);
+    try testing.expectEqualStrings(
+        \\sed -n '1,220p' docs/project-rules.md
+    , doc[@intCast(h.data_offset)..][0..h.data_len]);
+}
+
+test "Codex 옛 형식: 숫자 키는 값이 아니다 — `session_id` 를 지나 `chars` 를 집는다" {
+    // `{"session_id":1,"chars":"y\\n"}` — 첫 **문자열** 값을 고르므로 숫자 키는 저절로 지나간다.
+    // 실측 22,231 건이 이 모양이다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_S","type":"custom_tool_call","name":"write_stdin","input":"{\"session_id\":1,\"chars\":\"make test\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const h = out.items[0];
+    try testing.expectEqualStrings("make test", doc[@intCast(h.data_offset)..][0..h.data_len]);
+}
+
+test "Codex 옛 형식: 첫 값이 512 B 를 넘어도 끝까지 본다 — 창을 따로 연다" {
+    // ⚠️ 대상 창(`max_target_scan_bytes` 512 B)을 그대로 쓰면 **값의 닫는 따옴표를 못 봐**
+    // 통째로 폴백한다 — 실측 1,627 건의 첫 값이 512 B 를 넘는다. 안쪽 호출과 같은 몫
+    // (`max_inner_scan_bytes` 4 KiB)을 연다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_L","type":"custom_tool_call","name":"exec_command","input":"{\"cmd\":\"rg -n xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"workdir\":\"/tmp\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const t = doc[@intCast(out.items[0].data_offset)..][0..out.items[0].data_len];
+    // 껍데기가 아니라 **명령**이고, 끝까지 왔다.
+    try testing.expect(std.mem.startsWith(u8, t, "rg -n "));
+    try testing.expectEqual(@as(usize, 606), t.len);
+}
+
+test "Codex 옛 형식: 빈 값이면 껍데기라도 보인다 — 줄이 사라지지 않는다" {
+    // ⚠️ `appendActivity` 가 `target.len == 0` 을 안 담는다. `write_stdin` 의 `chars` 는 정말
+    // 빈 값일 때가 많아(Enter 만 보내는 것) — 실측 40 개 세션에서 **5,049 줄**이 그 모양이다.
+    // 벗기다 줄을 없애느니 껍데기를 보인다(§2.2 와 같은 규율).
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_E","type":"custom_tool_call","name":"write_stdin","input":"{\"session_id\":1,\"chars\":\"\"}"}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const t = doc[@intCast(out.items[0].data_offset)..][0..out.items[0].data_len];
+    try testing.expect(t.len > 0);
+    try testing.expect(std.mem.startsWith(u8, t, "{"));
+}
+
+test "Codex 옛 형식: JSON 이 아니면 손대지 않는다 — `apply_patch` 본문" {
+    // 🔥 `{` 검사가 이 자리를 지킨다. patch 본문에는 **JSON 조각**이 흔히 들어가는데
+    // (`package.json` 수정 등), 검사를 빼면 `firstArgString` 이 그 조각의 값을 대상으로 집는다 —
+    // 라벨이 「무엇을 고쳤나」가 아니라 **패치 안에 우연히 있던 문자열**이 된다.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const doc =
+        \\{"payload":{"call_id":"call_A","type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: package.json\n+  \"name\": \"안 집혀야 한다\","}}
+        \\
+    ;
+    try scanDocForTest(allocator, doc, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    const t = doc[@intCast(out.items[0].data_offset)..][0..out.items[0].data_len];
+    try testing.expect(std.mem.startsWith(u8, t, "*** Begin Patch"));
 }
 
 test "Codex 활동: 옛 형식은 **바깥 이름**이 같은 어휘다 — 표 하나로 둘 다 든다" {

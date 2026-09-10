@@ -1389,7 +1389,10 @@ pub fn build(b: *std.Build) void {
     // 이 그것들을 import 해 딸려오지만, 여기서 다시 돌 이유가 없다 — 실행만 건너뛰어 file-explorer 잡 시간을
     // 던다(컴파일 수는 그대로라 «골라졌는가» 계약은 불변). shutdown_admin_connector 만 예외: `test-session-host`
     run_macos_app_host_abi_shards.setEnvironmentVariable("MARU_TEST_SKIP_PREFIX", "session_host.");
-    run_macos_app_host_abi_shards.setEnvironmentVariable("MARU_TEST_KEEP_PREFIX", "session_host.shutdown_admin_connector");
+    // ⚠️ **샤드 안에서 안 돌린다**(2026-09-10). `shutdown_admin_connector` 는 실 프로세스를 띄우고
+    // (`runActualTerminate`), 샤드 넷이 **동시에** 도는 동안 다른 데몬 스모크와 겹치면 5 초 안에 못 뜬다.
+    // 배정이 `index % n` 이라 **테스트 하나가 늘 때마다 조합이 바뀌고**, 그래서 2026-09-10 에 세 번 터졌는데
+    // 매번 다른 테스트였다(`C3-3b6` 둘, 이것 하나). 아래 fresh 체인에서 **혼자** 돌린다.
     // 에 없고 여기서만 도는 유일한 session_host 모듈이라 남긴다(실측 2026-09-06).
     run_macos_app_host_abi_shards.setEnvironmentVariable(
         "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
@@ -1731,7 +1734,15 @@ pub fn build(b: *std.Build) void {
     run_macos_upgrade_multifd_fresh_tests.step.dependOn(&run_macos_attach_resolver_fresh_tests.step);
     run_macos_event_release_fresh_tests.step.dependOn(&run_macos_upgrade_multifd_fresh_tests.step);
     run_macos_chrome_face_cache_fresh_tests.step.dependOn(&run_macos_event_release_fresh_tests.step);
-    test_macos_app_host_abi_step.dependOn(&run_macos_chrome_face_cache_fresh_tests.step);
+    // `shutdown_admin_connector` 는 `test-session-host` 에 없어 **여기서만** 돈다(위 샤드 주석). 샤드 밖에서
+    // 혼자 돌려 실 프로세스 스모크가 서로 안 부딪치게 한다.
+    const run_macos_shutdown_admin_fresh_tests = b.addRunArtifact(macos_app_host_abi_tests);
+    run_macos_shutdown_admin_fresh_tests.setEnvironmentVariable(
+        "MARU_TEST_KEEP_ONLY_PREFIX",
+        "session_host.shutdown_admin_connector.",
+    );
+    run_macos_shutdown_admin_fresh_tests.step.dependOn(&run_macos_chrome_face_cache_fresh_tests.step);
+    test_macos_app_host_abi_step.dependOn(&run_macos_shutdown_admin_fresh_tests.step);
 
     const macos_app_host_abi_lib_step = b.step("macos-app-host-abi-lib", "Build the Zig static library exported to the Swift macOS app host");
     macos_app_host_abi_lib_step.dependOn(&install_macos_app_host_abi_lib.step);

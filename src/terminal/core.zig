@@ -7727,8 +7727,20 @@ test "kitty relative placement(P/Q/H/V): 부모 기준으로 놓이고 부모와
 
     // **부모를 지우면 자식도 함께 사라진다**(명세: 수명이 부모에 묶인다). 안 지우면 부모 없는
     // 자식이 목록에 남아 매 frame 위치를 못 풀고 상한만 먹는다.
+    //
+    // 삭제 **전**에 부모와 자식이 실제로 둘 다 있는지 먼저 센다 — 안 그러면 아래 「0개」 단언이
+    // 「애초에 아무것도 없었다」로도 통과한다(공허 통과). 한때 여기서 빈 목록을 훑는 루프가
+    // 검사처럼 서 있었다(적대적 검증 실측: 그 시점 목록 길이가 0이었다).
+    var parent_before = false;
+    var child_before = false;
+    for (core.kitty_placements.items) |p| {
+        if (p.image_id == 1 and p.placement_id == 9) parent_before = true;
+        if (p.image_id == 2 and p.parent_image_id == 1) child_before = true;
+    }
+    try std.testing.expect(parent_before);
+    try std.testing.expect(child_before);
+
     try core.write("\x1b_Ga=d,d=i,i=1,p=9,q=2\x1b\\");
-    for (core.kitty_placements.items) |p| try std.testing.expect(p.image_id != 2 or p.parent_image_id == 0);
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
 }
 
@@ -8069,6 +8081,18 @@ test "kitty graphics display: 없는 이미지/ i=0은 placement를 만들지 �
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
     try core.write("\x1b_Ga=p\x1b\\"); // i 없음(0)
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+
+    // **양성 대조.** 위 둘은 「안 생긴다」만 재므로, `a=p` 가 통째로 죽어도 초록이다 — 부정 판정자는
+    // 그 기능이 **살아 있음**을 같은 자리에서 함께 증명해야 뜻이 있다. 같은 core 에 제대로 된
+    // 이미지를 넣고 표시하면 placement 가 생겨야 한다.
+    var raw = [_]u8{ 1, 2, 3, 255 } ** 4;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=5,q=2;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=5,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(u32, 5), core.kitty_placements.items[0].image_id);
 }
 
 test "kitty graphics placement: (image_id,placement_id) 같으면 교체, 다르면 별개 (K1)" {

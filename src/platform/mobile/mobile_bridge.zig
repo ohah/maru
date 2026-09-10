@@ -6456,7 +6456,6 @@ fn serverLabel(srv: mobile_config.Server, buf: []u8) []const u8 {
 fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
-
     srv_rows_quad_begin = quad_count;
     srv_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
     const list = servers();

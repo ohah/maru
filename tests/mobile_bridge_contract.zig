@@ -4263,6 +4263,50 @@ fn sixteenServers(buf: []u8) []const u8 {
     return buf[0..w];
 }
 
+test "U1 넘어간 뒤에도 손가락만큼 안 따라간다 — 저항이 걸린다" {
+    // **그대로 따라가면 목록이 화면 밖으로 사라진다**(UX §5.7). 상한만으로는 부족하다 —
+    // 상한에 닿기 전 구간에서 손가락과 1:1 로 움직이면 「끝이 없는 목록」처럼 느껴진다.
+    // 변이 검사가 이 축을 초록으로 드러냈다(저항을 1.0 으로 바꿔도 안 잡혔다).
+    const T = std.testing;
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const h: u32 = 320;
+    openServers(402, h);
+
+    // 먼저 끝까지 간다(넘치지 않게 한 번에 조금씩, 관성 없이 취소로 끝낸다).
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 30) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 30, now());
+    bridge.maru_mobile_pointer(3, 1, 200, 0, now());
+    // **가라앉기를 기다린다** — 손가락 취소는 넘침을 «즉시» 안 지운다(프레임마다 되돌린다).
+    // 화면이 바뀔 때 거두는 것(`cancelWith`)과 다른 자리다.
+    var s0: u32 = 0;
+    _ = bridge.maru_mobile_build(402, h, now());
+    while (s0 < 600 and bridge.serverOvershootPx() != 0) : (s0 += 1) _ = bridge.maru_mobile_build(402, h, now());
+    try T.expectEqual(@as(i32, 0), bridge.serverOvershootPx());
+    const at_end = bridge.serverScrollBoundedY();
+
+    // 끝에서 **40px 만** 더 민다.
+    const push: f32 = 40;
+    bridge.maru_mobile_pointer(0, 1, 200, 200, now());
+    bridge.maru_mobile_pointer(1, 1, 200, 200 - push, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    // 유계 값은 그대로(이미 끝이다).
+    try T.expectEqual(at_end, bridge.serverScrollBoundedY());
+    // **넘침은 «생기되» 민 만큼보다 적다** — 저항이 걸린 것이다.
+    const over: f32 = @floatFromInt(bridge.serverOvershootPx());
+    try T.expect(over > 0);
+    try T.expect(over < push);
+
+    bridge.maru_mobile_pointer(3, 1, 200, 200 - push, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
 test "U1 끝에서 튕긴다 — 넘어갔다 되돌아온다" {
     // 규칙은 [UX §5.7]. 없으면 「목록이 끝났다」와 「스크롤이 죽었다」가 손가락에 똑같이 느껴진다.
     const T = std.testing;

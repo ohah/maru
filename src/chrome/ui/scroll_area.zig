@@ -545,10 +545,15 @@ pub const Touch = struct {
         // 넘침이 0 이 되어야 한다 — 안 그러면 손가락이 반대로 가는데 목록이 먼저 흐른다.
         const want: i64 = @intFromFloat(whole);
         var rest = want;
-        if (self.overshootPending(state)) |_| {
+        if (state.overshoot_px != 0) {
             const cur: f32 = @floatFromInt(state.overshoot_px);
-            const next = cur + @as(f32, @floatFromInt(want));
+            const raw = @as(f32, @floatFromInt(want));
+            // **되미는 쪽은 저항이 없다.** 넘긴 채 반대로 끌면 손가락만큼 곧바로 따라와야
+            // 한다 — 거기까지 절반으로 줄이면 「돌아오질 않는다」로 느껴진다.
+            const pulling_back = (cur > 0 and raw < 0) or (cur < 0 and raw > 0);
+            const next = cur + if (pulling_back) raw else raw * overshoot_resist;
             if ((cur < 0 and next >= 0) or (cur > 0 and next <= 0)) {
+                // 0 을 지나쳤다 — 남은 만큼은 목록을 움직인다.
                 state.overshoot_px = 0;
                 rest = @intFromFloat(next);
             } else {
@@ -566,11 +571,6 @@ pub const Touch = struct {
         if (lost == 0) return;
         const add = @as(f32, @floatFromInt(lost)) * overshoot_resist;
         state.overshoot_px = @intFromFloat(clampOvershoot(@as(f32, @floatFromInt(state.overshoot_px)) + add));
-    }
-
-    /// 넘침이 살아 있나(0 이 아니면 그것부터 되민다).
-    fn overshootPending(_: *Touch, state: *State) ?void {
-        return if (state.overshoot_px != 0) {} else null;
     }
 
     fn clampOvershoot(v: f32) f32 {

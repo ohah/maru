@@ -4128,6 +4128,26 @@ test "M12a 누르고 뗀 사이에 목록이 바뀌면 그 누름은 아무 일�
     _ = bridge.maru_mobile_pop_screen();
 }
 
+test "M12a 손가락을 놓으면 강조도 놓는다 — 취소에도" {
+    // **뗀 뒤에도 누름이 남으면 강조가 안 꺼진다.** 화면은 그대로인데 한 줄이 계속 눌린 것처럼
+    // 보이고, 사용자는 그것을 「눌렀는데 안 열린다」로 읽는다. 취소(배경 전환)도 같은 자리다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    const base = bridge.maru_mobile_build(402, 874, now());
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, y, now());
+    // 누르면 그 줄에 강조 quad 가 하나 더 선다.
+    try std.testing.expectEqual(base + 1, bridge.maru_mobile_build(402, 874, now()));
+
+    // **취소로 놓는다** — 화면은 그대로라 세는 기준이 안 흔들린다.
+    bridge.maru_mobile_pointer(3, 1, 200, y, now());
+    try std.testing.expectEqual(base, bridge.maru_mobile_build(402, 874, now()));
+    _ = bridge.maru_mobile_pop_screen();
+}
+
 test "M12a 목록이 그대로면 누름은 그대로 산다 — 세대는 프레임마다 오르지 않는다" {
     // 위 판정만 있으면 **세대를 매 프레임 올려도 초록**이다(그러면 아무것도 못 누른다).
     // 그리는 쪽에서 올리지 않는다는 것을 여기서 못 박는다.

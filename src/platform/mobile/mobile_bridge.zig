@@ -905,7 +905,8 @@ pub fn terminalChromeHitAt(x: f32, y: f32) bool {
 
 /// 그 뒤로가기가 지금 눌린 것으로 그려지나(테스트용 — 눌림은 색만 바꿔 quad 수로 안 잡힌다).
 pub fn terminalBackPressed() bool {
-    return term_back_pressed;
+    const pr = ui_pressed orelse return false;
+    return pr.intent == .term_back;
 }
 
 pub fn settingsRows() []const mobile_config.Row {
@@ -2687,7 +2688,6 @@ const edge_w: f32 = 26.0;
 var term_copy_rect: SetRect = .{};
 /// 키보드를 다시 올리는 자리(앱 바). **늘 있다** — 없으면 한 번 내린 키보드를 못 올린다.
 var term_kb_rect: SetRect = .{};
-var term_kb_pressed = false;
 
 /// 그 자리 한가운데(테스트용).
 pub fn terminalKeyboardCenter() ?struct { x: f32, y: f32 } {
@@ -2701,7 +2701,6 @@ pub fn terminalKeyboardCenter() ?struct { x: f32, y: f32 } {
 /// **파괴적이지 않다.** 우리가 놓는 것은 SSH 연결이지 원격의 작업이 아니다 — tmux 를 쓰면
 /// 세션은 서버에 그대로 남고 다시 붙으면 이어진다. 그래서 되묻지 않는다.
 var term_disc_rect: SetRect = .{};
-var term_disc_pressed = false;
 
 /// 그 자리 한가운데(테스트용).
 pub fn terminalDisconnectCenter() ?struct { x: f32, y: f32 } {
@@ -2720,7 +2719,6 @@ pub export fn maru_mobile_take_disconnect() u32 {
 /// 배너가 먹은 높이(0 이면 없다). **본문을 밀지 않는다** — 코어 격자를 줄이면 원격이 믿는
 /// 크기와 갈리고, 배너는 잠깐 뜨는 것이라 그 값이 오르내리면 원격에 resize 가 쏟아진다.
 var term_banner_h: f32 = 0;
-var term_copy_pressed = false;
 
 /// 그 자리 한가운데(테스트용). 선택이 없으면 null — **없는 버튼을 누르는 테스트**를 막는다.
 pub fn terminalCopyCenter() ?struct { x: f32, y: f32 } {
@@ -2744,7 +2742,6 @@ var term_back_rect: SetRect = .{};
 /// 판정도 안 선다(터미널 바와 같은 규칙).
 var remote_back_rect: SetRect = .{};
 /// 그 뒤로가기가 지금 눌려 있나.
-var term_back_pressed: bool = false;
 /// 터미널 앱 바의 제스처. 다른 표면과 같은 규칙을 쓴다(§3.1).
 var term_press: gesture.Press = .{};
 /// 레이아웃 트리에서 앱 바를 가리키는 id. 키바 id 대역과 안 겹치게 둔다.
@@ -2852,7 +2849,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     // **44 이상 정사각**(§5.1 — 작게 그리고 넓게 받는다). 설정 화면과 같은 자리·같은 크기다.
     term_back_rect = .{ .x = term_bar_rect.x, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
     noteA11y(term_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (term_back_pressed) push(.{
+    if (uiPressed(registerAction(term_back_rect, .term_back))) push(.{
         .x = @intFromFloat(term_back_rect.x),
         .y = @intFromFloat(term_back_rect.y),
         .w = @intFromFloat(term_back_rect.w),
@@ -2887,7 +2884,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     // (스와이프·⌘K) 다시 올릴 길이 없었다 — 설정 칸을 누르는 것 말고는(사용자 요청).
     term_kb_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 2, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
     noteA11y(term_kb_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_keyboard) });
-    if (term_kb_pressed) push(.{
+    if (uiPressed(registerAction(term_kb_rect, .term_keyboard))) push(.{
         .x = @intFromFloat(term_kb_rect.x),
         .y = @intFromFloat(term_kb_rect.y),
         .w = @intFromFloat(term_kb_rect.w),
@@ -2908,7 +2905,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
     // (조건부 버튼이 다른 버튼을 밀면 손가락이 겨눈 자리가 바뀐다).
     term_disc_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 3, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
     noteA11y(term_disc_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_disconnect) });
-    if (term_disc_pressed) push(.{
+    if (uiPressed(registerAction(term_disc_rect, .term_disconnect))) push(.{
         .x = @intFromFloat(term_disc_rect.x),
         .y = @intFromFloat(term_disc_rect.y),
         .w = @intFromFloat(term_disc_rect.w),
@@ -2945,7 +2942,7 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
             .label = maru.i18n.tIn(.ko, .mob_copy),
             .value = copy_value,
         });
-        if (term_copy_pressed) push(.{
+        if (uiPressed(registerAction(term_copy_rect, .term_copy))) push(.{
             .x = @intFromFloat(term_copy_rect.x),
             .y = @intFromFloat(term_copy_rect.y),
             .w = @intFromFloat(term_copy_rect.w),
@@ -5045,6 +5042,11 @@ const UiIntent = union(enum) {
     settings_back,
     settings_diag,
     settings_row: usize,
+    term_back,
+    term_keyboard,
+    term_disconnect,
+    term_copy,
+    remote_back,
 };
 
 const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
@@ -5781,6 +5783,7 @@ fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
     // 들어오면 앱을 죽이는 것 말고는 나갈 수 없었다(실기 2026-09-04 — 시뮬레이터에서 헤더 여러
     // 지점을 눌러도 아무 일이 없었다). 자리와 크기는 터미널 바의 뒤로가기와 같다(§5.1 — 44 이상).
     remote_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    _ = registerAction(remote_back_rect, .remote_back);
     // **나갈 길이 없으면 갇힌다.** 이 화면은 읽기 전용이라 누를 것이 뒤로가기 하나뿐인데, 그것을
     // 안 내면 스크린 리더 사용자는 들어온 뒤 **아무것도 못 한다**(적대적 검증 7회차).
     noteA11y(remote_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
@@ -7191,8 +7194,11 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
     // 하나만 누른다 — 그것이 「덮개」로 세션을 바꾸는 길이다.
     if (screenTop() == .remote_screen) {
         if (phase != 0) return 0;
-        if (remote_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
-        if (!setHit(remote_back_rect, x, y)) return 0;
+        // 표는 그 프레임에 그린 것만 들고 있으므로 「안 그려졌으면 누를 것도 없다」가 저절로
+        // 지켜진다. **이 화면은 누르는 즉시 나간다** — 뗄 때까지 기다릴 것이 없다(자리가 하나다).
+        const hit = hitAction(x, y) orelse return 0;
+        const it = ui_table.resolve(hit, ui_generation) orelse return 0;
+        if (it != .remote_back) return 0;
         // **하드웨어 뒤로가기와 «같은 길»로 나간다.** 여기서 `navPop()` 만 부르면 화면은
         // 목록으로 돌아오는데 뜻은 `.screen` 그대로라, 그 서버에서 `attach` 가 계속 돌고
         // 맥은 폰이 선언한 폭에 계속 눌려 있다(실기 2026-09-04 — 나온 뒤에도 host 가
@@ -7205,51 +7211,28 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1; // 둘째 손가락은 이 표면의 제스처를 안 건드린다
                 // **복사가 먼저다** — 뒤로가기와 자리가 다르지만, 판정 순서를 고정해 둬야
                 // 나중에 자리가 겹칠 때 조용히 한쪽이 죽지 않는다.
-                if (term_kb_rect.w > 0 and setHit(term_kb_rect, x, y)) {
-                    if (!routeClaim(.chrome)) return 0;
-                    term_press.begin(x, y, time_ms, false);
-                    term_kb_pressed = true;
-                    return 1;
-                }
-                if (term_disc_rect.w > 0 and setHit(term_disc_rect, x, y)) {
-                    if (!routeClaim(.chrome)) return 0;
-                    term_press.begin(x, y, time_ms, false);
-                    term_disc_pressed = true;
-                    return 1;
-                }
-                if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) {
-                    if (!routeClaim(.chrome)) return 0;
-                    term_press.begin(x, y, time_ms, false);
-                    term_copy_pressed = true;
-                    return 1;
-                }
-                if (term_back_rect.w <= 0) return 0; // 안 그려졌으면 누를 것도 없다
-                if (!setHit(term_back_rect, x, y)) return 0;
+                // **띠 밖이면 이 표면의 것이 아니다** — 0 을 내야 본문·키바가 받는다. 표는
+                // 그 프레임에 그린 것만 들고 있으므로 「안 그려졌으면 누를 것도 없다」가
+                // 저절로 지켜진다(옛 `rect.w > 0` 가드가 하던 일이다).
+                const hit = hitAction(x, y) orelse return 0;
+                const it = ui_table.resolve(hit, ui_generation) orelse return 0;
                 if (!routeClaim(.chrome)) return 0;
                 term_press.begin(x, y, time_ms, false); // 이 띠에는 흐르는 것이 없다
-                term_back_pressed = true;
+                ui_pressed = .{ .id = hit, .gen = ui_generation, .intent = it };
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(다른 화면과 같은 규칙).
-                if (term_press.move(x, y)) {
-                    term_back_pressed = false;
-                    term_copy_pressed = false;
-                    term_kb_pressed = false;
-                    term_disc_pressed = false;
-                }
+                if (term_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was_copy = term_copy_pressed;
-                const was_kb = term_kb_pressed;
-                const was_disc = term_disc_pressed;
-                term_back_pressed = false;
-                term_copy_pressed = false;
-                term_kb_pressed = false;
-                term_disc_pressed = false;
+                const intent = takeUiIntent();
+                const was_copy = intent != null and intent.? == .term_copy;
+                const was_kb = intent != null and intent.? == .term_keyboard;
+                const was_disc = intent != null and intent.? == .term_disconnect;
                 routeClear(); // 이 띠는 한 손가락 자리다 — 뗀 순간 끝이다
                 if (phase == 3) {
                     term_press.cancel();
@@ -7811,7 +7794,7 @@ pub export fn maru_mobile_pop_screen() u32 {
     srv_press.cancel();
     srv_edit_press.cancel();
     term_press.cancel();
-    term_back_pressed = false;
+    ui_pressed = null;
     ui_pressed = null;
     kb_pressed = null;
     set_touch.cancel();

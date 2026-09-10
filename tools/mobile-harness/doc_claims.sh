@@ -536,6 +536,24 @@ ck "Android 가 프레임마다 본다" 1 "$(sed -n '/frame_changed = maru_mobil
 # **붙어 있어 못 열 때도 «말한다»** — 조용히 버리면 사용자에게는 고장으로 보인다(§5).
 ck "붙어 있어 못 열면 남긴다" 1 "$(grep -c 'connect_ignored_busy' $IOSH)"
 
+echo "§3.1 누름은 한 벌로 나른다 (M12c)"
+MB=src/platform/mobile/mobile_bridge.zig
+# **화면마다 누름 상태를 따로 들지 않는다.** 옛 방식은 화면이 늘 때마다 `*_pressed` 가 늘고,
+# 그때마다 「밀면 거둔다」·「취소하면 거둔다」·「세대가 갈리면 버린다」를 **손으로 다시** 지켜야
+# 했다 — 하나만 빠져도 조용히 어긋난다. 지금은 `ui_pressed` 하나뿐이다.
+# **`kb_pressed` 는 예외다** — 키바는 격자(밀면 스크롤, 떼면 그 키)라 누름-동작 표가 아니다.
+ck "누름 상태는 둘뿐이다" 2 "$(grep -cE '^var [a-z_]+_pressed' $MB | tr -d ' ')"
+ck "그 하나가 ui_pressed 다" 1 "$(grep -c '^var ui_pressed' $MB)"
+ck "키바만 예외다" 1 "$(grep -c '^var kb_pressed' $MB)"
+# **누르는 자리는 표에 등록해서 맞힌다.** 남은 `setHit` 은 전부 «조회» 이거나 표 자신이다 —
+# 자리를 맞히는 유일한 자리는 `hitAction` 이고, 그 밖에서 좌표로 버튼을 고르면 안 된다.
+ck "맞히는 자리는 하나다" 1 "$(sed 's,//.*,,' $MB | grep -c 'setHit(ui_rects\[i\]')"
+# **뜻은 누를 때 잡는다**(M12b 가 배운 것) — `id` 는 프레임 순번이라 뗄 때 되물으면 재사용된다.
+ck "뜻을 누를 때 잡는다" 1 "$(grep -c 'gen: u64, intent: UiIntent' $MB)"
+ck "세대가 갈려도 신원은 산다" 1 "$(grep -c 'fn intentSurvivesGeneration' $MB)"
+# **흐르는 목록은 창으로 잘라 등록한다** — 안 자르면 헤더 밑의 안 보이는 줄이 눌린다.
+ck "목록 자리는 창으로 자른다" 1 "$(grep -c 'fn registerActionClipped' $MB)"
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

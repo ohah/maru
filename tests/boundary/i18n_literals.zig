@@ -110,6 +110,9 @@ const inventory = [_]Entry{
     // 그리고 기동 자체가 실패했을 때다. **사용자에게 보이는 한 줄은 따로 있다** — 포기 시점의 notice 는
     // `i18n` 키(`agent_remote_channel_gave_up`)라 이 원장과 무관하다. 그 둘을 가르는 것이 §7 의 규칙이다.
     //
+    // 35 = 34 + **꼬리가 같은 짝임을 알리는 꼬리표 하나**(2026-09-10). `mine` 에 event 의 꼬리가
+    // 있는데도 엉뚱한 Term 이 남던 자리를 가른다 — 표시가 아니라 진단이다.
+    //
     // 34 = 33 + **침묵으로 스트리머를 다시 띄운다는 사유 하나**(2026-09-10). 좀비 자식은 EOF 를 안 줘
     // 재시작 트리거가 없었다 — 그 자리를 알리는 로그다(표시 아님).
     //
@@ -120,7 +123,7 @@ const inventory = [_]Entry{
     // 31 = 29 + **재시도 경로의 영구 실패 둘**(적대적 검증). `HOME` 이 없을 때와 control socket 경로를
     // 못 만들 때다 — 설치 경로에 이미 있던 같은 문장의 짝이다. 사유 없이 빠져나가면 **매 tick 조용히
     // 다시 시도하는 막다른 길**이 되기 때문에 넣었다(§1.2 · 계약이 금지하는 그 모양).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 34 },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 35 },
     // 캡처 훅이 240 tick 안에 못 열었을 때 **왜** 못 열었는지 뱉는 한 줄이 늘었다(2026-09-01).
     // 표시가 아니라 **하니스 진단**이다 — 사용자는 이 문장을 볼 일이 없고, 조용히 포기하면
     // 틀린 그림이 PR 의 증거가 되기 때문에 넣었다(§7 셋째 갈래).
@@ -256,7 +259,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 220;
+const header_total = 221;
 const header_config_total = 54;
 
 comptime {

@@ -5448,6 +5448,22 @@ pub fn sessListRect() SetRect {
     return sess_list;
 }
 
+/// 서버 화면에서 **머리를 그릴 때의 quad 순번**과 **줄을 그리기 전 순번**(테스트용).
+///
+/// 「머리가 본문 «뒤» 에 그려지는가」는 **순서**가 계약이라 순서로 잰다 — 그려진 그림을 보면
+/// 머리가 덮고 있어 둘 다 「머리가 보인다」로 같다(painter's algorithm). 순서가 뒤집히면
+/// 걸친 줄이 머리를 덮는다(U1-f1).
+var srv_rows_quad_begin: usize = 0;
+var srv_header_quad_i: usize = 0;
+
+pub fn serversHeaderQuadIndex() usize {
+    return srv_header_quad_i;
+}
+
+pub fn serversRowsQuadBegin() usize {
+    return srv_rows_quad_begin;
+}
+
 pub fn setListRect() SetRect {
     return set_list;
 }
@@ -5573,6 +5589,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     // 그려져 헤더 자리로 올라온다(사용자가 화면으로 잡았다: 첫 줄 글자가 「세션」 아래 물렸다).
     // 완전히 들어온 줄만 그리면 창 위에 **한 행짜리 빈 구멍**이 생기므로(UX §키바가 겪은 그것),
     // **걸친 것도 그리고 헤더가 그 위를 덮는다.** 그래서 헤더는 자기 배경을 갖는다.
+    srv_header_quad_i = quad_count;
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
@@ -6430,32 +6447,8 @@ fn serverLabel(srv: mobile_config.Server, buf: []u8) []const u8 {
 fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
 
-    // ── 헤더: 뒤로 + 제목(설정 화면과 같은 모양 — 두 화면이 다르게 굴면 매번 시험해 봐야 한다)
-    srv_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
-    const srv_back_id = registerAction(srv_back_rect, .servers_back);
-    noteA11y(srv_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (uiPressed(srv_back_id)) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
-    if (reserveQuad()) {
-        const rgb = tk.get(.surface_fg);
-        quad_buf[quad_count] = .{
-            .x = srv_back_rect.x + (set_head_h - 22) / 2,
-            .y = srv_back_rect.y + (set_head_h - 22) / 2,
-            .w = 22,
-            .h = 22,
-            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
-            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
-            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
-            .a = 1.0,
-            .radius = 0,
-            .kind = 2,
-            .cell_x = 0,
-            .cell_y = arrow_slot_base + 2, // arrow_left
-        };
-        quad_count += 1;
-    }
-    pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
-    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 
+    srv_rows_quad_begin = quad_count;
     srv_list = .{ .x = win.x, .y = win.y + set_head_h + 1, .w = win.w, .h = win.h - set_head_h - 1 };
     const list = servers();
     srv_max_scroll = @max(0, @as(f32, @floatFromInt(list.len)) * srv_row_h - srv_list.h);
@@ -6565,6 +6558,38 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
             .value = label,
         });
     }
+
+    // ── 헤더는 **본문 «뒤» 에 그린다**(세션 화면과 같은 규칙 — U1-f1).
+    //
+    // 먼저 그렸더니 목록이 흐를 때 **걸친 줄이 머리 위로 올라왔다**(실기 2026-09-10: 「서버1」
+    // 글자와 그 주소·「편집」이 「← 서버」를 통째로 덮었다). 완전히 들어온 줄만 그리면 창 위에
+    // 한 행짜리 빈 구멍이 생기므로 **걸친 것도 그리고 머리가 그 위를 덮는다** — 그래서 머리는
+    // 자기 배경을 갖는다.
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    srv_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    const srv_back_id = registerAction(srv_back_rect, .servers_back);
+    noteA11y(srv_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
+    if (uiPressed(srv_back_id)) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (reserveQuad()) {
+        const rgb = tk.get(.surface_fg);
+        quad_buf[quad_count] = .{
+            .x = srv_back_rect.x + (set_head_h - 22) / 2,
+            .y = srv_back_rect.y + (set_head_h - 22) / 2,
+            .w = 22,
+            .h = 22,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = arrow_slot_base + 2, // arrow_left
+        };
+        quad_count += 1;
+    }
+    pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
 
 /// 편집 화면. **설정 화면과 같은 줄 모양**이다(라벨 왼쪽, 값 오른쪽, 눌러서 편집) — 두 화면이

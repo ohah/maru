@@ -229,6 +229,7 @@ pub fn runPreflight(
     io: std.Io,
     handoff_fd: c.fd_t,
 ) Error!void {
+    clearDetail();
     exec_fd_set.assertExactOpen(&.{handoff_fd}) catch return error.InvalidFd;
     var validated = try readValidated(allocator, handoff_fd);
     defer validated.deinit();
@@ -272,6 +273,7 @@ fn decodeValidated(
     errdefer host.deinit();
     const record_bytes = host.attempt_record orelse {
         hostLogLine("handoff decode failed: attempt_record absent bytes={d}", .{bytes.len});
+        noteDetail("attempt_record_absent");
         return error.InvalidState;
     };
     var attempt = upgrade_attempt_record.decode(allocator, record_bytes) catch |err| {
@@ -294,6 +296,7 @@ fn decodeValidated(
                 attempt.epoch_before,            attempt.runtime_ids.len,
             },
         );
+        noteDetail("authority_mismatch");
         return error.InvalidState;
     }
 
@@ -305,6 +308,7 @@ fn decodeValidated(
     std.mem.sort(u128, ids[0..host.runtimes.len], {}, std.sort.asc(u128));
     if (!std.mem.eql(u128, ids[0..host.runtimes.len], attempt.runtime_ids)) {
         hostLogLine("handoff runtime set mismatch: count={d}", .{host.runtimes.len});
+        noteDetail("runtime_set_mismatch");
         return error.InvalidState;
     }
     return .{ .host = host, .attempt = attempt };
@@ -496,9 +500,14 @@ fn readBounded(allocator: std.mem.Allocator, fd: c.fd_t) Error![]u8 {
     if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
         (stat.mode & 0o777) != 0o600 or stat.nlink != 0 or stat.size <= 0)
         return error.InvalidFd;
-    const len = std.math.cast(usize, stat.size) orelse return error.InvalidState;
-    if (len > handoff_codec.max_total_bytes or len > upgrade_limits.max_handoff_commit_bytes)
+    const len = std.math.cast(usize, stat.size) orelse {
+        noteDetail("handoff_size_uncastable");
         return error.InvalidState;
+    };
+    if (len > handoff_codec.max_total_bytes or len > upgrade_limits.max_handoff_commit_bytes) {
+        noteDetail("handoff_too_large");
+        return error.InvalidState;
+    }
     const bytes = allocator.alloc(u8, len) catch return error.OutOfMemory;
     errdefer allocator.free(bytes);
     var offset: usize = 0;
@@ -531,7 +540,34 @@ fn validateIgnoredHandoffFd(fd: c.fd_t) Error!void {
         return error.InvalidFd;
 }
 
+/// **이름을 잃지 않는다.** `mapDecodeError` 는 디코드 실패 **전부**를 `InvalidState` 하나로 접는다.
+/// 그 이름은 `hostLogLine` 이 stderr 로 찍는데, **원인을 알아야 하는 순간의 부모는 항상 옛 빌드**이고
+/// 그 옛 부모가 stderr 를 `/dev/null` 로 보낸다(`upgrade_preflight.noteChildOutcome` 의 주석). 그래서
+/// 2026-09-10 에 `reason=target_invalid` 한 줄만 남고, 실제 이유(`MissingRequiredField`)에 닿는 데
+/// 하루가 걸렸다. 여기 남겨 두면 자식이 **자기 파일**에 그 이름을 함께 적는다.
+var last_detail_buf: [64]u8 = undefined;
+var last_detail_len: usize = 0;
+
+/// 마지막으로 접힌 실패의 이름. 비어 있으면 접힌 적이 없다는 뜻이다.
+pub fn lastDetail() []const u8 {
+    return last_detail_buf[0..last_detail_len];
+}
+
+/// `InvalidState` 로 접기 **직전에** 이름을 남긴다. 직접 `return error.InvalidState` 하는 자리들도
+/// 각자 자기 이름을 넘겨, 다섯 갈래가 한 숫자로 뭉치지 않게 한다.
+fn noteDetail(name: []const u8) void {
+    const n = @min(name.len, last_detail_buf.len);
+    @memcpy(last_detail_buf[0..n], name[0..n]);
+    last_detail_len = n;
+}
+
+/// 한 preflight 안에서 **앞선 실행의 이름이 남아 오해를 만들지 않게** 시작에서 지운다.
+pub fn clearDetail() void {
+    last_detail_len = 0;
+}
+
 fn mapDecodeError(err: anyerror) Error {
+    noteDetail(@errorName(err));
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidState,

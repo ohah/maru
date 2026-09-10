@@ -80,6 +80,8 @@ esctest는 black-box로 응답을 *질의해 추론*하지만, Maru는 white-box
 | DSR `CSI 5 n` | `CSI 0 n`(OK) | ECMA-48 8.3.35 (DSR) |
 | CPR `CSI 6 n` | `CSI row ; col R`(1-indexed) | ECMA-48 8.3.14 (CPR) |
 | DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`(Pm 0/1/2) | DEC STD 070, xterm ctlseqs (DECRQM/DECRPM) |
+| **ANSI 모드 질의 `CSI Ps $ p`**(마커 없음) | `CSI Ps ; Pm $ y` — `setAnsiModes` 가 아는 모드(IRM=4)만 1/2, 나머지 0 | DEC STD 070 (ANSI mode report) |
+| **DSR-DEC `CSI ? Ps n`** | `?6`=DECXCPR `CSI ? row ; col ; 1 R` · `?15`→`CSI ? 13 n`(프린터 없음) · `?25`→`CSI ? 21 n`(UDK 잠김) · `?26`→`CSI ? 27 ; 1 ; 0 ; 0 n`(북미) | xterm ctlseqs (DSR, DEC-specific) |
 
 DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. **`setPrivateModes`가 구현한
 모드는 전부** 현재 상태(1/2)를, 모르는 모드만 0을 답한다 — 앱이 mode 지원을 감지하고 켤 수 있게.
@@ -99,6 +101,13 @@ DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. 
 >
 > `1048` 은 상태를 되읽을 수 없는 **동작** 모드라(켜고 끄는 것이 아니라 저장/복원 명령이다) 1/2 대신
 > **영구 reset(4)** 으로 답한다 — DECRPM 이 정의한 값이고, «안다, 다만 토글이 아니다» 라는 뜻이다.
+
+> **같은 훑기에서 두 축을 더 찾았다**(2026-09-10). ① **ANSI 모드 질의**(`CSI Ps $ p`, 마커 없음)는
+> 아무 응답도 없었다 — private 축만 답하고 이쪽을 비워 두면 구현한 IRM(4)을 「모른다」고 말하는 것이다.
+> ② **DSR-DEC**(`CSI ? Ps n`)도 무응답이었다. 이쪽은 더 나쁘다: **질의는 「보내고 기다린다」라 침묵이
+> 「미지원」으로 읽히지 않는다** — 블로킹 read 를 하는 앱은 그 자리에서 굳는다(DECRQM 의 0 이 «없다» 는
+> 적극적 선언인 것과 대비된다). 둘 다 답하게 했고, ANSI 축의 목록도 **처음부터 소스에서 뽑는다**
+> (`parseAnsiModeCases`) — private 축에서 손 목록이 낸 사고를 되풀이하지 않으려는 것이다.
 
 XTWINOPS(`CSI Ps t`)는 **보고형만** 답한다 — 14=텍스트 영역 픽셀(`CSI 4;h;w t`), 16=셀 픽셀
 (`CSI 6;h;w t`), 18=문자 단위(`CSI 8;rows;cols t`). 셀 픽셀은 platform이 `setCellMetrics`로 주입한

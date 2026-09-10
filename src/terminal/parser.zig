@@ -492,6 +492,50 @@ pub fn deviceStatusReport(self: *TerminalCore) void {
     }
 }
 
+/// DSR-DEC(`CSI ? Ps n`) 응답. private 마커가 붙은 device status 질의다.
+///
+/// **답하지 않으면 앱이 멈춘다.** 질의는 「보내고 기다린다」라 침묵이 「미지원」으로 읽히지 않는다 —
+/// 그냥 응답이 안 오는 것이고, 블로킹 read 를 하는 앱은 그 자리에서 굳는다.
+///
+/// - `?6n` DECXCPR(확장 커서 위치): `CSI ? row ; col ; page R`. maru 는 페이지가 하나라 page=1 고정이다.
+/// - `?15n` 프린터 상태: 프린터가 없다(`CSI ? 13 n`) — xterm 이 정한 「프린터 없음」 값이다.
+/// - `?25n` UDK 상태: 잠김(`CSI ? 21 n`) — 사용자 정의 키를 구현하지 않는다.
+/// - `?26n` 키보드 상태: 북미 배열(`CSI ? 27 ; 1 ; 0 ; 0 n`).
+///
+/// 그 밖의 Ps 는 답하지 않는다 — 모르는 질의에 지어낸 값을 주면 앱이 없는 기능을 켠다.
+/// 베이스: xterm ctlseqs "DSR, DEC-specific".
+pub fn decDeviceStatusReport(self: *TerminalCore) void {
+    var buf: [48]u8 = undefined;
+    const s = switch (self.csiRawParam(0)) {
+        6 => std.fmt.bufPrint(&buf, "\x1b[?{d};{d};1R", .{
+            self.screen.cursor.row + 1,
+            self.screen.cursor.col + 1,
+        }) catch return,
+        15 => "\x1b[?13n", // 프린터 없음
+        25 => "\x1b[?21n", // UDK 잠김
+        26 => "\x1b[?27;1;0;0n", // 북미 키보드
+        else => return,
+    };
+    self.appendResponse(s);
+}
+
+/// ANSI 모드 질의(`CSI Ps $ p`, private 마커 없음) 응답 — `CSI Ps ; Pm $ y`.
+///
+/// private 축(DECRQM)만 답하고 이쪽을 비워 두면, **구현한 모드를 「모른다」고 말하는 것**이 된다.
+/// `?1048` 이 그래서 미인식으로 답하던 것과 같은 결이다(2026-09-10 적대적 검증).
+///
+/// Pm 의미는 DECRPM 과 같다: 0=미인식, 1=set, 2=reset. `setAnsiModes` 가 구현한 모드만 상태를 답하고
+/// 나머지는 0 이다 — **두 목록은 함께 움직여야 한다**(판정자가 소스에서 뽑아 고정한다).
+pub fn reportAnsiMode(self: *TerminalCore, mode: u16) void {
+    const state: u8 = switch (mode) {
+        4 => if (self.insert_mode) 1 else 2, // IRM(G6): insert/replace
+        else => 0, // 미인식 — 앱이 보수적으로 폴백
+    };
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}$y", .{ mode, state }) catch return;
+    self.appendResponse(s);
+}
+
 /// DECRQM(CSI ? Ps $ p) 응답 — DECRPM(CSI ? Ps ; Pm $ y). Pm: 0=미인식, 1=set, 2=reset,
 /// 3=영구 set, 4=영구 reset. 우리가 추적하는 모드는 현재 상태(1/2)를 알려 앱이 지원을 감지하고
 /// 켤 수 있게 한다(특히 mode 2027). 모르는 모드는 0(미인식)으로 답해 앱이 폴백하게 둔다.
@@ -800,7 +844,12 @@ fn dispatchCsi(self: *TerminalCore, final: u8) void {
                 // DECRQM(CSI ? Ps $ p): private mode 상태 질의. 앱(terminal-unicode-core 등)이
                 // mode 2027 지원 여부를 이걸로 먼저 묻고, "지원함"이면 DECSET 2027로 켠다. 응답이
                 // 없으면 미지원으로 보고 안 켜므로, 우리가 아는 모드는 현재 상태를 보고한다.
-                'p' => if (self.csi_marker == '?') reportPrivateMode(self, self.csiRawParam(0)),
+                // 마커가 있으면 private(DECRQM), 없으면 **ANSI 모드**(SM/RM 축)다. 둘은 번호 공간이
+                // 달라 같은 숫자가 다른 뜻이다 — 한쪽만 답하면 앱은 다른 쪽을 «미인식» 으로 읽는다.
+                'p' => if (self.csi_marker == '?')
+                    reportPrivateMode(self, self.csiRawParam(0))
+                else
+                    reportAnsiMode(self, self.csiRawParam(0)),
                 else => {},
             },
             else => {}, // `$r`(DECCARA) 등 미지원 조합은 무시
@@ -818,6 +867,10 @@ fn dispatchCsi(self: *TerminalCore, final: u8) void {
                 // kitty keyboard(CSI ? u): 현재 flag 스택 최상단을 CSI ? flags u로 보고. 앱이 지원
                 // 여부·현재 모드를 감지한다(flags=0이면 비활성). 베이스: kitty keyboard protocol query.
                 'u' => reportKittyFlags(self),
+                // DSR-DEC(CSI ? Ps n). **답하지 않으면 앱이 블로킹 read 에서 멈춘다** — 질의는
+                // 「보내고 기다린다」라, 모르는 척 침묵하면 그 앱이 그 자리에서 굳는다(실측 2026-09-10:
+                // `CSI ?6n` 에 응답이 없었다).
+                'n' => decDeviceStatusReport(self),
                 else => {},
             },
             '>' => switch (final) {

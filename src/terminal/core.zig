@@ -7498,11 +7498,30 @@ test "DECRQM reports mode 2027 state so apps can detect support" {
 /// 손으로 적은 목록은 **한쪽만 고치는 사고**를 못 막는다 — 그 사고가 실제로 났다(1048). 소스를
 /// 읽으면 목록이 코드와 같은 것에서 나온다. 파싱은 보수적이다: 함수 본문 안에서 «줄 시작의 숫자
 /// 목록 뒤 `=>`» 만 모으고, 그 외는 무시한다(주석의 숫자·중첩 switch 에 안 걸린다).
+/// `setAnsiModes` 의 case 라벨도 같은 방식으로 뽑는다 — private 축에서 «손 목록» 이 사고를 냈으니
+/// 이쪽은 처음부터 소스에서 유도한다. 파서는 아래 `privateModeCaseIterator` 와 같고 시작 marker 만 다르다.
+fn parseAnsiModeCases() [countAnsiModeCases()]u16 {
+    @setEvalBranchQuota(200_000);
+    var out: [countAnsiModeCases()]u16 = undefined;
+    var n: usize = 0;
+    var it = modeCaseIterator("pub fn setAnsiModes(self: *TerminalCore, set: bool) void {");
+    while (it.next()) |m| : (n += 1) out[n] = m;
+    return out;
+}
+
+fn countAnsiModeCases() usize {
+    @setEvalBranchQuota(200_000);
+    var n: usize = 0;
+    var it = modeCaseIterator("pub fn setAnsiModes(self: *TerminalCore, set: bool) void {");
+    while (it.next()) |_| n += 1;
+    return n;
+}
+
 fn parsePrivateModeCases() [countPrivateModeCases()]u16 {
     @setEvalBranchQuota(200_000);
     var out: [countPrivateModeCases()]u16 = undefined;
     var n: usize = 0;
-    var it = privateModeCaseIterator();
+    var it = modeCaseIterator("pub fn setPrivateModes(self: *TerminalCore, set: bool) void {");
     while (it.next()) |m| : (n += 1) out[n] = m;
     return out;
 }
@@ -7510,7 +7529,7 @@ fn parsePrivateModeCases() [countPrivateModeCases()]u16 {
 fn countPrivateModeCases() usize {
     @setEvalBranchQuota(200_000);
     var n: usize = 0;
-    var it = privateModeCaseIterator();
+    var it = modeCaseIterator("pub fn setPrivateModes(self: *TerminalCore, set: bool) void {");
     while (it.next()) |_| n += 1;
     return n;
 }
@@ -7518,7 +7537,7 @@ fn countPrivateModeCases() usize {
 const private_modes_src = @embedFile("parser.zig");
 
 /// `setPrivateModes` 본문의 case 라벨을 하나씩 낸다(`47, 1047, 1049 =>` 처럼 한 case 에 여럿이면 각각).
-fn privateModeCaseIterator() struct {
+fn modeCaseIterator(marker: []const u8) struct {
     rest: []const u8,
     pending: []const u8 = "",
 
@@ -7543,7 +7562,6 @@ fn privateModeCaseIterator() struct {
         }
     }
 } {
-    const marker = "pub fn setPrivateModes(self: *TerminalCore, set: bool) void {";
     const start = std.mem.indexOf(u8, private_modes_src, marker).? + marker.len;
     return .{ .rest = private_modes_src[start..] };
 }
@@ -9935,4 +9953,67 @@ test "OSC 99: 질의(p=?)에 답하지 않는다 — 확정 못 한 형식으로
     // 위 «0 바이트» 는 통과하기 때문이다(적대적 검증에서 이 모양을 훑다 나온 자리다).
     try core.write("\x1b[6n"); // CPR
     try std.testing.expect(core.pendingResponse().len > 0);
+}
+
+test "ANSI 모드 질의(CSI Ps $p)가 setAnsiModes 가 아는 모드를 전부 답한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+
+    // **회귀 판정**: private 축(DECRQM)만 답하고 이쪽은 **아무 응답도 없었다**. 구현한 모드(IRM)를
+    // 「모른다」고 말하는 것이고, 질의는 「보내고 기다린다」라 침묵이 앱을 멈추게도 한다.
+    // 목록은 `parser.zig` 소스에서 뽑는다 — private 축에서 손 목록이 사고를 냈으니 처음부터 유도한다.
+    const known = comptime parseAnsiModeCases();
+    comptime std.debug.assert(known.len >= 1);
+    try std.testing.expect(std.mem.indexOfScalar(u16, &known, 4) != null); // IRM — 이 회귀의 당사자
+
+    for (known) |m| {
+        core.clearResponse();
+        var buf: [32]u8 = undefined;
+        try core.write(try std.fmt.bufPrint(&buf, "\x1b[{d}$p", .{m}));
+        const r = core.pendingResponse();
+        try std.testing.expect(r.len > 0); // 침묵 금지
+        try std.testing.expect(std.mem.indexOf(u8, r, ";0$y") == null); // 미인식 금지
+    }
+
+    // 상태를 실제로 따라간다 — set/reset 이 응답에 반영돼야 「안다」가 참이다.
+    core.clearResponse();
+    try core.write("\x1b[4h\x1b[4$p");
+    try std.testing.expectEqualStrings("\x1b[4;1$y", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[4l\x1b[4$p");
+    try std.testing.expectEqualStrings("\x1b[4;2$y", core.pendingResponse());
+    core.clearResponse();
+    // 모르는 모드는 0 이다 — 게이트가 넓어 아무 번호에나 답하면 앱이 없는 기능을 켠다.
+    try core.write("\x1b[20$p");
+    try std.testing.expectEqualStrings("\x1b[20;0$y", core.pendingResponse());
+}
+
+test "DSR-DEC(CSI ? Ps n): 확장 커서 위치·프린터·UDK·키보드에 답한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // **회귀 판정**: `CSI ?6n`(DECXCPR)에 응답이 없었다. 질의는 「보내고 기다린다」라, 침묵은
+    // 「미지원」으로 읽히지 않고 그냥 **앱이 그 자리에서 굳는다**(블로킹 read).
+    try core.write("\x1b[3;5H\x1b[?6n");
+    try std.testing.expectEqualStrings("\x1b[?3;5;1R", core.pendingResponse()); // row;col;page(1 고정)
+    core.clearResponse();
+
+    // 비-private CPR 은 그대로다 — 새 갈래가 기존 응답을 덮지 않는지 같은 자리에서 본다.
+    try core.write("\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[3;5R", core.pendingResponse());
+    core.clearResponse();
+
+    try core.write("\x1b[?15n");
+    try std.testing.expectEqualStrings("\x1b[?13n", core.pendingResponse()); // 프린터 없음
+    core.clearResponse();
+    try core.write("\x1b[?25n");
+    try std.testing.expectEqualStrings("\x1b[?21n", core.pendingResponse()); // UDK 잠김
+    core.clearResponse();
+    try core.write("\x1b[?26n");
+    try std.testing.expectEqualStrings("\x1b[?27;1;0;0n", core.pendingResponse()); // 북미 키보드
+    core.clearResponse();
+
+    // 모르는 Ps 에는 답하지 않는다 — 지어낸 값을 주면 앱이 없는 기능을 켠다.
+    try core.write("\x1b[?99n");
+    try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
 }

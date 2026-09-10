@@ -522,6 +522,12 @@ pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
         2004 => if (self.bracketed_paste) 1 else 2,
         2026 => if (self.sync_output) 1 else 2,
         2027 => if (self.grapheme_cluster_mode) 1 else 2,
+        // 1048: DECSC/DECRC 와 같은 커서 슬롯을 쓰는 저장/복원. **상태를 되읽을 수 없는 «동작» 모드**라
+        // set/reset 이 없다 — `?1048h` 는 저장, `?1048l` 은 복원이고 «지금 켜져 있다» 는 상태가 없다.
+        // 그래서 상태 대신 **영구 reset(4)** 으로 답한다(DECRPM 이 정의한 값): «이 모드를 안다, 다만
+        // 켜고 끄는 것이 아니다». 0(미인식)으로 답하면 앱이 «maru 는 1048 을 모른다» 고 믿고 안 쓴다 —
+        // 1016 이 그래서 픽셀 마우스를 잃었던 것과 같은 사고다(적대적 검증 실측 2026-09-10).
+        1048 => 4,
         else => 0, // 미인식 — 앱이 보수적으로 폴백
     };
     var buf: [32]u8 = undefined;

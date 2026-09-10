@@ -4263,6 +4263,42 @@ fn sixteenServers(buf: []u8) []const u8 {
     return buf[0..w];
 }
 
+test "U1 끝에서 튕긴다 — 넘어갔다 되돌아온다" {
+    // 규칙은 [UX §5.7]. 없으면 「목록이 끝났다」와 「스크롤이 죽었다」가 손가락에 똑같이 느껴진다.
+    const T = std.testing;
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    const h: u32 = 320;
+    openServers(402, h);
+
+    // 끝까지 세게 민다.
+    bridge.maru_mobile_pointer(0, 1, 200, 300, now());
+    var step: u32 = 0;
+    while (step < 20) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 300 - @as(f32, @floatFromInt(step + 1)) * 60, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 0, now());
+    _ = bridge.maru_mobile_build(402, h, now());
+
+    // ① 넘어갔다 — 그리는 값이 유계 값보다 크다.
+    try T.expect(bridge.serverOvershootPx() > 0);
+    try T.expect(bridge.serverScrollY() > bridge.serverScrollBoundedY());
+    // ② 그래도 유계 값은 범위 안이다 — 인덱스·`@intCast` 자리가 여기에 기댄다.
+    const content: f32 = 16 * 64;
+    const list_h: f32 = @as(f32, @floatFromInt(h)) - 52 - 1;
+    try T.expect(bridge.serverScrollBoundedY() <= content - list_h + 0.5);
+    // ③ 넘침에도 상한이 있다 — 목록이 화면 밖으로 사라지지 않는다.
+    try T.expect(@as(f32, @floatFromInt(bridge.serverOvershootPx())) <= bridge.overshootCapPx());
+
+    // ④ 손을 놓았으니 되돌아온다.
+    var settle: u32 = 0;
+    while (settle < 600 and bridge.serverOvershootPx() != 0) : (settle += 1) _ = bridge.maru_mobile_build(402, h, now());
+    try T.expectEqual(@as(i32, 0), bridge.serverOvershootPx());
+    try T.expectEqual(bridge.serverScrollBoundedY(), bridge.serverScrollY());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
 test "끝을 지나 밀어도 목록이 빈 자리로 안 넘어간다" {
     // 한계를 안 잡으면 손가락만큼 계속 흘러 **아무것도 없는 화면**이 된다 — 사용자는 목록이
     // 사라졌다고 읽는다(돌아올 방법도 스크롤뿐이다).
@@ -4283,7 +4319,14 @@ test "끝을 지나 밀어도 목록이 빈 자리로 안 넘어간다" {
     // 내용 높이(16*64) - 목록 높이보다 더 내려가지 않는다.
     const content: f32 = 16 * 64;
     const list_h: f32 = @as(f32, @floatFromInt(h)) - 52 - 1;
-    try std.testing.expect(bridge.serverScrollY() <= content - list_h + 0.5);
+    // **유계 좌표는 절대 그 밖으로 안 나간다.** 이것이 이 판정자가 지키던 계약이고, 인덱스
+    // 나눗셈·`@intCast` 를 쓰는 자리들이 여기에 기댄다(UX §5.7).
+    try std.testing.expect(bridge.serverScrollBoundedY() <= content - list_h + 0.5);
+    // **그리는 값은 튕기는 동안 «잠깐» 그 밖이다** — 다만 그 양도 유계다(bounce 를 들이며
+    // 이 줄을 더했다: 예전에는 그리는 값이 곧 유계 값이라 한 줄로 족했다).
+    const bounce_cap: f32 = bridge.overshootCapPx();
+    try std.testing.expect(bridge.serverScrollY() <= content - list_h + bounce_cap + 0.5);
+    try std.testing.expect(@abs(bridge.serverOvershootPx()) <= @as(i32, @intFromFloat(bounce_cap)));
     try std.testing.expect(bridge.serverRowCount() > 0); // 화면에 줄이 남아 있다
     _ = bridge.maru_mobile_pop_screen();
 }
@@ -8073,7 +8116,15 @@ test "M9 서술자: 밀어도 번호는 «있는 줄» 의 번호다" {
     bridge.maru_mobile_pointer(0, 1, 200, 800, now());
     bridge.maru_mobile_pointer(1, 1, 200, 500, now());
     bridge.maru_mobile_pointer(2, 1, 200, 500, now());
+    // **튕김이 가라앉기를 기다린다**(bounce 를 들이며 더했다 — UX §5.7). 이 판정자가 보는 것은
+    // 「같은 줄이 같은 번호로 읽히나」이고, 튕기는 동안에는 그 줄이 잠깐 창 밖으로 밀린다.
+    //
+    // **먼저 한 프레임을 돌린다** — 넘침은 손을 뗀 «뒤» 에 생긴다(관성이 끝에 부딪힌다).
+    // 그 전에 검사하면 0 을 보고 그냥 지나간다(실제로 그렇게 헛돌았다).
+    var settle: u32 = 0;
     advanceFrame(402, 874, 16);
+    while (settle < 240 and bridge.sessOvershootPx() != 0) : (settle += 1) advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessOvershootPx() == 0); // 되돌아왔다
     try T.expect(bridge.sessScrollForTest() > 0);
 
     // 같은 이름의 줄은 **같은 번호**로 읽힌다.

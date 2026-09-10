@@ -1892,7 +1892,7 @@ pub export fn maru_mobile_control_reset() void {
     control_row_count = 0;
     // 목록이 통째로 사라졌다 — 밀어 둔 자리를 남기면 다음 목록이 엉뚱한 데서 시작한다.
     sess_sa.reset();
-    sess_touch.cancel();
+    sess_touch.cancelWith(&sess_sa);
     control_req_len = 0;
     control_listed = false;
 }
@@ -5200,8 +5200,15 @@ var set_press: gesture.Press = .{};
 var set_last_y: f32 = 0;
 
 /// 지금 스크롤 위치(px). 컴포넌트가 정수로 들고 있으므로 그리는 쪽만 f32 로 받는다.
+///
+/// **넘친 양을 여기서 더한다**(UX §5.7). 유계 좌표는 그대로 두고 **그리는 자리에서만** 넘침을
+/// 얹는다 — 히트 판정·인덱스는 유계 값을 봐야 한다(음수가 들어가면 죽는 자리가 있다).
+fn scrollWithBounce(sa: *const scroll_area.State) f32 {
+    return @as(f32, @floatFromInt(sa.offset_y_px)) + @as(f32, @floatFromInt(sa.overshoot_px));
+}
+
 fn setScroll() f32 {
-    return @floatFromInt(set_sa.offset_y_px);
+    return scrollWithBounce(&set_sa);
 }
 
 fn stepSetFling() void {
@@ -5316,6 +5323,26 @@ pub fn serverScrollY() f32 {
     return srvScroll();
 }
 
+/// **유계 좌표**(넘침을 뺀 값). 판정자가 「절대 범위를 안 벗어난다」를 이것으로 단언한다 —
+/// 그리는 값(`serverScrollY`)은 튕기는 동안 잠깐 그 밖이다(UX §5.7).
+pub fn serverScrollBoundedY() f32 {
+    return @floatFromInt(srv_sa.offset_y_px);
+}
+
+/// 지금 넘친 양(px). 0 이면 안 튕기는 중이다.
+pub fn serverOvershootPx() i32 {
+    return srv_sa.overshoot_px;
+}
+
+pub fn sessOvershootPx() i32 {
+    return sess_sa.overshoot_px;
+}
+
+/// 넘침의 상한(px). **컴포넌트가 소유한다** — 판정자가 여기 숫자를 새로 적으면 두 벌이 된다.
+pub fn overshootCapPx() f32 {
+    return scroll_area.Touch.overshoot_max_px;
+}
+
 /// 서버 화면에 실제로 **그려진** 줄 수. 목록 길이가 아니라 rect 를 센다 — 화면 밖 줄이 rect 를
 /// 들고 있으면 "안 보이는데 눌린다" 가 되므로, 그 둘이 같은지도 이 값으로 본다.
 pub fn serverRowCount() usize {
@@ -5390,7 +5417,7 @@ var sess_max_scroll: f32 = 0;
 
 /// 지금 스크롤 위치(px).
 fn sessScroll() f32 {
-    return @floatFromInt(sess_sa.offset_y_px);
+    return scrollWithBounce(&sess_sa);
 }
 
 /// 판정용 — 지금 그려진 「서버」 줄의 한가운데 y. 안 보이면 `null`.
@@ -6346,7 +6373,7 @@ var srv_press: gesture.Press = .{};
 var srv_last_y: f32 = 0;
 
 fn srvScroll() f32 {
-    return @floatFromInt(srv_sa.offset_y_px);
+    return scrollWithBounce(&srv_sa);
 }
 
 /// 목록에 보일 이름. **비면 `user@host` 다** — 이름을 안 적었다고 빈 줄을 보이면 누를 것이
@@ -7333,14 +7360,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     .sessions_gear => {
                         navPush(.settings);
                         set_sa.reset();
-                        set_touch.cancel();
+                        set_touch.cancelWith(&set_sa);
                     },
                     .sessions_terminal => navPush(.terminal),
                     .remote_open => |id| openRemoteRow(id),
                     .sessions_servers => {
                         navPush(.servers);
                         srv_sa.reset();
-                        srv_touch.cancel();
+                        srv_touch.cancelWith(&srv_sa);
                     },
                     // 이 화면에 없는 뜻은 여기 올 수 없다 — 표가 그 프레임에 그린 것만 낸다.
                     else => {},
@@ -7656,7 +7683,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
         else => {
             // **뗄 때 관성이 시작된다.** 취소(3)는 관성도 안 남긴다 — 화면이 바뀌는데 목록이
             // 계속 흐르면 돌아왔을 때 보던 자리가 아니다.
-            if (phase == 3) set_touch.cancel() else set_touch.end(pointer_id, frame_dt_ms);
+            if (phase == 3) set_touch.cancelWith(&set_sa) else set_touch.end(pointer_id, frame_dt_ms);
             // 마지막 손가락이면 목적지를 놓는다(계약 §3.1).
             if (phase == 3 or set_touch.owner == null) routeClear();
             // **비소유자가 떼는 것은 이 제스처를 안 끝낸다**(계약 §3.1) — 눌림 표시도 그대로
@@ -7814,7 +7841,7 @@ pub export fn maru_mobile_pop_screen() u32 {
     ui_pressed = null;
     ui_pressed = null;
     kb_pressed = null;
-    set_touch.cancel();
+    set_touch.cancelWith(&set_sa);
     return 1;
 }
 

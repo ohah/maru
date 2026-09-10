@@ -4106,6 +4106,29 @@ test "서버 목록 화면이 config 의 서버를 보인다" {
     _ = bridge.maru_mobile_pop_screen();
 }
 
+test "U1 누르는 자리는 모든 화면에서 44 이상이다" {
+    // **계약이 정한 손가락 히트 영역**(UX §5.4 — Apple HIG 44pt · Material 48dp 중 작은 쪽).
+    // 예전에는 화면마다 사각형을 따로 들어서 「전부 44 이상인가」를 물을 자리가 없었다 —
+    // M12c 가 누르는 자리를 `registerAction` 한 곳으로 모아서 이제 잴 수 있다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+
+    const screens = [_][]const u8{ "terminal", "sessions", "servers", "settings", "diagnostics" };
+    for (screens) |name| {
+        bridge.setScreenForTest(name);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        const h = bridge.uiMinActionHeight();
+        // `0` 은 누를 자리가 없는 화면이다 — 그 자체는 규율 위반이 아니다.
+        if (h == 0) continue;
+        if (h < 44) {
+            std.debug.print("화면 {s}: 가장 작은 누름 높이 {d}pt\n", .{ name, h });
+            return error.TestUnexpectedResult;
+        }
+    }
+    bridge.setScreenForTest("terminal");
+}
+
 test "M12a 누르고 뗀 사이에 목록이 바뀌면 그 누름은 아무 일도 안 한다" {
     // **이 슬라이스의 전부가 이 판정이다.** 좌표나 순번을 들고 down→up 을 건너면 그 사이에
     // 목록이 바뀌었을 때 **엉뚱한 서버에 붙는다**. 표의 세대가 그것을 거절해야 한다.

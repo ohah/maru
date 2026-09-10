@@ -5062,6 +5062,13 @@ var ui_rects: [ui_action_cap]SetRect = @splat(.{});
 /// 데스크톱이 함께 세워야 했던 「다시 그리기」는 여기서 공짜다: `maru_mobile_build` 가 매
 /// 프레임 돌아 표가 반드시 다음 프레임에 다시 발행된다.
 var ui_generation: u64 = 1;
+/// 이 프레임에 등록된 **안 잘린** 자리 중 가장 작은 높이(pt). `0` 이면 등록된 것이 없다.
+///
+/// **히트 44 규율을 여기서 잰다**(U1). M12c 가 누르는 자리를 한 곳으로 모으기 전에는 화면마다
+/// 사각형을 따로 들어서 「전부 44 이상인가」를 물을 자리가 없었다 — 이제 한 자리를 지난다.
+/// **잘린 자리는 안 센다**: 흐르는 목록의 줄은 창 밖으로 나가며 높이가 줄고, 그것은 규율 위반이
+/// 아니라 「보이는 만큼만 눌린다」다(줄 자체의 크기는 그 화면의 상수가 정한다).
+var ui_min_action_h: f32 = 0;
 /// 지금 눌려 있는 자리. **뜻을 «누를 때» 잡는다**(M12b 가 바로잡았다).
 ///
 /// 처음에는 id 만 잡고 뗄 때 `resolve` 했는데, `id` 는 **프레임마다 다시 발급되는 순번**이라
@@ -5082,12 +5089,19 @@ fn bumpUiGeneration() void {
 fn resetUiActions() void {
     ui_table = UiTable.init(&ui_entries);
     ui_rects = @splat(.{});
+    ui_min_action_h = 0;
+}
+
+/// 이 프레임의 가장 작은 «안 잘린» 누름 높이(테스트용). `0` 이면 누를 자리가 없는 화면이다.
+pub fn uiMinActionHeight() f32 {
+    return ui_min_action_h;
 }
 
 /// 누를 수 있는 자리 하나를 등록하고 그 id 를 준다. **빈 사각형은 등록하지 않는다** — 화면
 /// 밖인데 눌리는 것을 막는다(설정 목록에서 겪은 결함과 같은 자리).
 fn registerAction(r: SetRect, intent: UiIntent) u64 {
     if (r.w <= 0 or r.h <= 0) return 0;
+    if (ui_min_action_h == 0 or r.h < ui_min_action_h) ui_min_action_h = r.h;
     const act = ui_table.append(ui_generation, intent, true) catch {
         // **조용히 흘리지 않는다.** 자리가 모자라면 그 화면의 일부가 «안 눌리는» 채로 남고,
         // 사용자에게는 고장으로 보인다 — 진단이 그 이름을 들고 있어야 찾을 수 있다.
@@ -5106,6 +5120,9 @@ fn registerActionClipped(r: SetRect, clip: SetRect, intent: UiIntent) u64 {
     const top = @max(r.y, clip.y);
     const bottom = @min(r.y + r.h, clip.y + clip.h);
     if (bottom <= top) return 0;
+    // **잘린 높이는 규율 판정에 안 넣는다**(위 `ui_min_action_h` 주석).
+    const keep = ui_min_action_h;
+    defer ui_min_action_h = keep;
     return registerAction(.{ .x = r.x, .y = top, .w = r.w, .h = bottom - top }, intent);
 }
 

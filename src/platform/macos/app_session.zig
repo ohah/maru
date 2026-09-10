@@ -24275,6 +24275,48 @@ test "RA5: 아직 hello 전인 목적지에는 예전대로 기다리는 채널�
     var ch = &(term.agent_remote_channel orelse return error.NoChannelOpened);
     try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 2) == .ignored);
 }
+test "RG1: host 세대가 달라도 같은 pane 이면 우리 것이다" {
+    // 2026-09-10 실측. 한 `dest` 에서 instance 가 **둘** 관측됐다 — 원격 pane 의 env 는 그 pane 이
+    // 만들어질 때 심긴 값이고 앱은 지금 값을 쓴다. 함께 비교하면 host 가 한 번 새로 시작한 뒤 그 pane 의
+    // 이벤트를 **영영 못 받는다**(그 세션만 배지가 안 뜬다).
+    const ev = "host_863d3d7e560aa5f3b4b1d2aec6ab02ec_051c73ccfe837237ad404ea76df937e1";
+    const mine = "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1";
+    try std.testing.expect(agent_ops.remoteEventIsOurs(ev, mine));
+}
+test "RG1: pane 이 다르면 남의 것이다 — 세대만 맞아도 안 된다" {
+    const a = "host_863d3d7e560aa5f3b4b1d2aec6ab02ec_051c73ccfe837237ad404ea76df937e1";
+    const b = "host_863d3d7e560aa5f3b4b1d2aec6ab02ec_80cd49e798787538517aeac0cca1f3b2";
+    try std.testing.expect(!agent_ops.remoteEventIsOurs(a, b));
+}
+test "RG1: GUI 소유는 전체를 본다 — surface_id 는 프로세스 로컬이다" {
+    // `<pid>_<surface_id>` 에서 instance 칸을 버리면 **다른 앱 인스턴스의 Term** 과 부딪친다. 그 칸이
+    // 필요한 쪽은 이쪽이라, host 소유에만 pane 규칙을 준다.
+    try std.testing.expect(agent_ops.remoteEventIsOurs("4331_7", "4331_7"));
+    try std.testing.expect(!agent_ops.remoteEventIsOurs("9002_7", "4331_7")); // 같은 surface, 다른 pid
+}
+test "RG1: 한쪽만 host 소유면 섞지 않는다" {
+    const host_owned = "host_863d3d7e560aa5f3b4b1d2aec6ab02ec_051c73ccfe837237ad404ea76df937e1";
+    try std.testing.expect(!agent_ops.remoteEventIsOurs(host_owned, "4331_7"));
+    try std.testing.expect(!agent_ops.remoteEventIsOurs("4331_7", host_owned));
+}
+test "RG1: pane 폭이 32 hex 가 아니면 pane 규칙을 안 쓴다" {
+    // 그 폭이 곧 `runtime_id` 라는 증거다. 짧은 값까지 pane 으로 접으면 다른 조립기가 만든 값과
+    // 부딪쳐 **오배달** 축이 는다.
+    try std.testing.expect(!agent_ops.remoteEventIsOurs(
+        "host_863d3d7e560aa5f3b4b1d2aec6ab02ec_7",
+        "host_f377d61ed8ebb82f727c12c4d2cfedaf_7",
+    ));
+}
+test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
+    try std.testing.expect(!agent_ops.remoteEventIsOurs(
+        "host_863d3d7e560aa5f3b4b1d2aec6ab02ec",
+        "host_f377d61ed8ebb82f727c12c4d2cfedaf",
+    ));
+    try std.testing.expect(!agent_ops.remoteEventIsOurs(
+        "t36",
+        "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
+    ));
+}
 test "RF5: 꼬리가 같은 짝을 우선 남긴다 — 엉뚱한 Term 이 덮지 않는다" {
     // 2026-09-10 실측에서 `mine` 에 event 의 꼬리가 분명히 있는데도 `term=` 은 엉뚱한 Term 이었다.
     // 담는 칸이 하나뿐이라 마지막이 이겼기 때문이다 — 그 로그로는 **어디가 갈렸는지 모른다**.

@@ -1852,6 +1852,43 @@ const turn_open_warn_ms: i96 = 10 * std.time.ms_per_s * 60; // 10 분
 ///
 /// **파일을 안 읽는다.** 원격 로그는 저쪽 기계에 있고, 이 함수는 이미 도착한 바이트만 본다. 채널을
 /// 채우는 것(자식 프로세스 읽기)은 이 함수 밖이다 — 그래야 이 소비 규칙을 파일도 소켓도 없이 시험할 수 있다.
+/// 이 이벤트가 이 Term 의 것인가.
+///
+/// **host 소유는 pane 칸만으로 귀속한다.** `runtime_id` 는 랜덤 128 비트라 전역 유일하므로 pane 만으로
+/// 「어느 Term 인가」가 정해진다. 반면 instance 칸(`host_<host_id>`)은 **세대마다 바뀐다** — 원격 pane 의
+/// env 는 **그 pane 이 만들어질 때** 심긴 값이고, 앱은 **지금의** `host_id` 를 쓴다. 둘을 함께 보면 host 가
+/// 한 번 새로 시작한 뒤 그 pane 의 이벤트를 **영영 못 받는다**.
+///
+/// 2026-09-10 실측이 그 모양이다 — 한 `dest` 에서 instance 가 **둘** 관측됐다:
+///
+///     event=host_863d3d7e…_051c73ccfe837237ad404ea76df937e1   ← 원격이 실어 보낸 값(옛 세대)
+///     term =host_f377d61e…_…                                  ← 앱이 지금 아는 값
+///     mine =[… 6df937e1 …]                                    ← 그 pane 은 앱에 분명히 있었다
+///
+/// **GUI 소유(`<pid>_<surface_id>`)는 그대로 전체를 본다** — `surface_id` 는 프로세스 로컬이라 instance
+/// 칸이 없으면 다른 앱 인스턴스의 Term 과 부딪친다. 그 칸이 필요한 쪽은 이쪽이다.
+pub fn remoteEventIsOurs(event_nonce: []const u8, term_nonce: []const u8) bool {
+    if (std.mem.eql(u8, event_nonce, term_nonce)) return true;
+
+    const hc = maru.session.agent_hook_command;
+    // ⚠️ **실효 가드는 아래 폭 검사다** — GUI 소유 pane 은 `formatSurfacePane` 이 십진(`{d}`)으로 만들어
+    // 32 자가 될 수 없다. 그래서 이 두 줄만 지워도 테스트는 초록이다(mutation 으로 확인). 그래도 남기는
+    // 이유는 «host 소유에만 주는 규칙» 이 이 함수의 계약이라서다 — 폭이 우연히 겹치는 날이 오면 이 줄이
+    // 먼저 막는다.
+    const prefix = hc.host_instance_prefix;
+    if (!std.mem.startsWith(u8, event_nonce, prefix)) return false;
+    if (!std.mem.startsWith(u8, term_nonce, prefix)) return false;
+
+    const ea = std.mem.lastIndexOfScalar(u8, event_nonce, '_') orelse return false;
+    const ta = std.mem.lastIndexOfScalar(u8, term_nonce, '_') orelse return false;
+    const ep = event_nonce[ea + 1 ..];
+    const tp = term_nonce[ta + 1 ..];
+    // **32 hex 일 때만 판정한다.** 그 폭이 곧 `runtime_id` 라는 증거다 — 짧으면 다른 조립기가 만든
+    // 값이고, 그것까지 pane 으로 접으면 오배달 축이 는다.
+    if (ep.len != hc.pane_token_max or tp.len != hc.pane_token_max) return false;
+    return std.mem.eql(u8, ep, tp);
+}
+
 pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []const u8, now_ms: u64) void {
     const ras = maru.session.remote_agent_stream;
     var ch = &(term.agent_remote_channel orelse return);
@@ -1866,7 +1903,7 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                 // **우리 pane 의 것만 먹는다.** 채널은 host 당 하나라(RA4) 여러 pane 이 섞여 온다.
                 // 형태 검증(경로 문자·대문자 등)은 채널이 이미 했다(`parseFrame`). 여기서는 **우리
                 // 것인가**만 본다 — 발급할 때 쓴 값과 바이트가 같아야 한다.
-                if (nonce.len == 0 or !std.mem.eql(u8, e.nonce, nonce)) {
+                if (nonce.len == 0 or !remoteEventIsOurs(e.nonce, nonce)) {
                     // **주인을 못 찾은 이벤트를 기록한다**(진단 전용 — 판정에는 안 쓴다).
                     // 스풀·스트리머·분배까지 다 정상인데 여기서 조용히 버려지면, 배지는 안 뜨고
                     // 이유는 어디에도 없다. 2026-09-07 에 그 벽에 세 번 부딪혔다.

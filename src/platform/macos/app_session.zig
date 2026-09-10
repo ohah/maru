@@ -6444,6 +6444,14 @@ pub const AppSession = struct {
     sync_diag_last_bsu: u64 = 0,
     sync_diag_last_esu: u64 = 0,
     sync_diag_last_active: bool = false,
+    /// 알림 바인딩 RPC 진단의 직전 스냅샷·틱 카운터. **완화가 아니라 관측**이다 — 프레임 루프의 33% 가
+    /// 이 경로였는데(2026-09-10 가중 프로파일) 「실패가 반복돼서」인지 「라벨 변경이 공유 세대를 올려
+    /// 나머지가 stale 이 돼서」인지 구분할 수단이 없었다. 원인을 모르는 채로 백오프를 넣으면 그 둘 중
+    /// 하나에만 듣고, 어느 쪽인지도 영영 모른다.
+    notify_diag_tick: u32 = 0,
+    notify_diag_last_label_changed: u64 = 0,
+    notify_diag_last_generation_stale: u64 = 0,
+    notify_diag_last_failed: u64 = 0,
     // frametime_diag(logFrameTime) 1초 창 누적(MARU_DEBUG 관측 전용) — 실효 rate·mean/max·단계 비중 요약용.
     // release에선 logFrameTime을 호출부 ft_on 게이트로 아예 진입 안 해 이 필드는 안 쓰인다(초기값 유지).
     ft_window_start: i128 = 0,
@@ -18055,6 +18063,9 @@ pub const AppSession = struct {
     /// host-backed runtime의 daemon-owned 표시 라벨을 현재 workspace/Term binding과 맞춘다. notificationLocation이
     /// foreground GUI 알림과 같은 `workspace › term` 해석 SSOT이고, backend가 동일 값·256-byte UTF-8 상한·generation을
     /// 소유한다. 매 tick 비교는 값이 같으면 RPC 0이며, attach/restore/rename/OSC title 변경을 별도 호출처 없이 모두 덮는다.
+    /// 진단 로그 주기(틱). 60fps 기준 약 5초.
+    const notify_diag_interval_ticks: u32 = 300;
+
     fn syncRemoteNotificationBindings(self: *AppSession) void {
         if (!is_macos) return;
         const rb = if (app_remote_backend) |*backend| backend else return;
@@ -18071,6 +18082,35 @@ pub const AppSession = struct {
                 }
             }
         }
+        self.logNotificationRpcDiag(rb);
+    }
+
+    /// 이 경로가 **초당 몇 건의 RPC 를 왜 보내는지** 주기적으로 한 줄 남긴다.
+    ///
+    /// 매 틱 찍으면 로그가 원인을 덮으므로 `notify_diag_interval_ticks` 마다, 그리고 **보낸 것이 있을
+    /// 때만** 찍는다. 조용한 상태에서는 한 줄도 안 나온다 — 그 침묵 자체가 「정상이면 RPC 0」이라는
+    /// 호출부 주석이 참이라는 증거가 된다.
+    fn logNotificationRpcDiag(self: *AppSession, rb: anytype) void {
+        self.notify_diag_tick +%= 1;
+        if (self.notify_diag_tick % notify_diag_interval_ticks != 0) return;
+        const now = rb.notificationRpcCounters();
+        const label = now.label_changed -% self.notify_diag_last_label_changed;
+        const stale = now.generation_stale -% self.notify_diag_last_generation_stale;
+        const failed = now.failed -% self.notify_diag_last_failed;
+        self.notify_diag_last_label_changed = now.label_changed;
+        self.notify_diag_last_generation_stale = now.generation_stale;
+        self.notify_diag_last_failed = now.failed;
+        if (label == 0 and stale == 0 and failed == 0) return;
+        std.log.info(
+            "notification rpc: ticks={d} label_changed={d} generation_stale={d} failed={d} err={s}",
+            .{
+                notify_diag_interval_ticks,
+                label,
+                stale,
+                failed,
+                if (now.last_error) |e| e else "-",
+            },
+        );
     }
 
     /// synchronized output(2026) 게이트의 tick별 상태를 sync_diag(.sync)로 한 줄 찍는다(MARU_DEBUG 관측 전용, release는

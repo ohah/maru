@@ -1799,6 +1799,12 @@ pub const TerminalCore = struct {
 
     /// 그리드 크기 변경. 본문(reflow·스크롤백 push)은 screen.resize가 소유 — 외부(app/runtime·host·
     /// live_pty)가 core.resize를 점-호출하므로 facade 메서드로 남긴다(Zig dot-call 계약).
+    /// kitty 애니메이션을 실경과 ms 만큼 진행한다. **코어는 시계를 갖지 않는다** — platform tick 이
+    /// 넣어 준다(커서 깜빡임과 같은 결). 프레임이 넘어갔으면 true 를 돌려 화면을 다시 그리게 한다.
+    pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
+        return kitty.advanceAnimations(self, elapsed_ms);
+    }
+
     pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         return screen.resize(self, cols_in, rows_in);
     }
@@ -7676,9 +7682,13 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     try core.write("\x1b_Ga=p,i=7\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
-    // 애니메이션(a=a)은 미구현 — 침묵 대신 명시 거부.
+    // 애니메이션 제어(a=a)는 구현됐다 — 있는 프레임을 가리키면 OK 다.
     try core.write("\x1b_Ga=a,i=7,r=1\x1b\\");
-    try std.testing.expectEqualStrings("\x1b_Gi=7;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 없는 프레임을 가리키면 ENOENT — 지어내지 않는다.
+    try core.write("\x1b_Ga=a,i=7,r=99\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=7;ENOENT:no such image\x1b\\", core.pendingResponse());
     core.clearResponse();
     // 식별자(i=)가 없으면 어느 명령의 응답인지 못 가리므로 보내지 않는다(명세).
     try core.write("\x1b_Ga=t,f=32,s=2,v=2;AAAA\x1b\\");
@@ -9911,15 +9921,8 @@ test "kitty graphics: 문서가 미지원이라 적은 갈래는 전부 ENOTSUPP
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     core.clearResponse();
 
-    // **문서는 셋을 약속하는데 판정자는 하나만 재고 있었다**(적대적 검증에서 발견). 애니메이션은
-    // `a=f`(프레임 전송)·`a=a`(애니메이트)·`a=c`(합성) 셋인데 `a=a` 만 덮여 있었다. 하나가 조용히
-    // `.ok` 를 돌려주게 되면 앱은 애니메이션이 도는 줄 알고 다음 프레임을 계속 보낸다.
-    const expected = "\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\";
-    for ([_][]const u8{ "\x1b_Ga=f,i=1\x1b\\", "\x1b_Ga=a,i=1\x1b\\", "\x1b_Ga=c,i=1\x1b\\" }) |cmd| {
-        try core.write(cmd);
-        try std.testing.expectEqualStrings(expected, core.pendingResponse());
-        core.clearResponse();
-    }
+    // 애니메이션 셋(`a=f`·`a=a`·`a=c`)은 **구현됐다** — 여기서는 「미지원 갈래」 목록에서 빠졌고,
+    // 각자의 판정자가 따로 있다(`kitty 애니메이션: …`). 남은 미지원은 전송 매체뿐이다.
 
     // 전송 매체도 같다 — `t=d`(direct)만 구현하고 `f`(파일)·`t`(임시파일)·`s`(공유메모리)는 거부한다.
     // 안 거부하면 payload 의 **경로 문자열을 픽셀로 오인**해 쓰레기를 디코드한다.
@@ -10016,4 +10019,137 @@ test "DSR-DEC(CSI ? Ps n): 확장 커서 위치·프린터·UDK·키보드에 �
     // 모르는 Ps 에는 답하지 않는다 — 지어낸 값을 주면 앱이 없는 기능을 켠다.
     try core.write("\x1b[?99n");
     try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
+}
+
+test "kitty 애니메이션: a=f 로 프레임을 쌓고 a=a 로 재생하면 시간에 따라 프레임이 넘어간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+
+    // 2x2 RGBA 루트(빨강) — 프레임 1.
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.frameCount());
+
+    // 프레임 2(초록), 프레임 3(파랑)을 덧붙인다. z= 로 gap 을 준다.
+    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    const blue = [_]u8{ 0, 0, 255, 255 } ** 4;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &blue)}));
+    try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.frameCount());
+
+    // 루트 gap 도 정하고 재생을 켠다(s=3).
+    try core.write("\x1b_Ga=a,i=1,r=1,z=100,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,q=2\x1b\\");
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
+
+    // **시간이 흐르기 전에는 안 넘어간다** — 코어는 시계를 갖지 않는다.
+    try std.testing.expect(!core.advanceAnimations(0));
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
+
+    const gen_before = core.kitty_images.map.get(1).?.generation;
+    try std.testing.expect(core.advanceAnimations(100));
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.current_frame);
+    // **generation 이 올라가야 렌더러가 텍스처를 다시 올린다** — 이게 없으면 화면이 안 바뀐다.
+    try std.testing.expect(core.kitty_images.map.get(1).?.generation > gen_before);
+
+    // 뷰가 현재 프레임 픽셀을 낸다 — 프레임 2 는 초록이다.
+    const views = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u8, 0), views.framePixels(2)[0]);
+    try std.testing.expectEqual(@as(u8, 255), views.framePixels(2)[1]);
+
+    // 한 바퀴 돌아 1 로 되돌아온다(v 미지정 = 무한 반복).
+    try std.testing.expect(core.advanceAnimations(100));
+    try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expect(core.advanceAnimations(100));
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
+
+    // 정지하면 시간이 흘러도 안 넘어간다.
+    try core.write("\x1b_Ga=a,i=1,s=1,q=2\x1b\\");
+    try std.testing.expect(!core.advanceAnimations(1000));
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
+}
+
+test "kitty 애니메이션: 반복 수가 다 되면 멈춘다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=a,i=1,r=1,z=10,q=2\x1b\\");
+
+    // v=2 — 두 바퀴만 돈다.
+    try core.write("\x1b_Ga=a,i=1,s=3,v=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.loops_left);
+    _ = core.advanceAnimations(10); // 1 → 2
+    _ = core.advanceAnimations(10); // 2 → 1 (한 바퀴, loops 2→1)
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.loops_left);
+    _ = core.advanceAnimations(10); // 1 → 2
+    _ = core.advanceAnimations(10); // 두 바퀴째 끝 — 멈춘다
+    try std.testing.expectEqual(@as(u32, 0), core.kitty_images.map.get(1).?.loops_left);
+    _ = core.advanceAnimations(1000);
+    // 멈춘 뒤에는 시간이 아무리 흘러도 안 움직인다.
+    const at_stop = core.kitty_images.map.get(1).?.current_frame;
+    _ = core.advanceAnimations(1000);
+    try std.testing.expectEqual(at_stop, core.kitty_images.map.get(1).?.current_frame);
+}
+
+test "kitty 애니메이션: 적대적 입력에 죽지 않고 총량 회계가 프레임을 센다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    const bytes_root = core.kitty_images.total_bytes;
+
+    // **총량 회계가 프레임을 세야 한다** — 안 세면 애니메이션 하나가 320MB 상한을 우회한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try std.testing.expectEqual(bytes_root * 2, core.kitty_images.total_bytes);
+
+    // 없는 이미지·없는 프레임·자기 자신 합성·잘못된 형식은 전부 graceful 하게 거부된다.
+    const hostile = [_][]const u8{
+        "\x1b_Ga=f,f=32,s=2,v=2,i=99;AAAA\x1b\\", // 없는 이미지
+        "\x1b_Ga=f,f=24,s=2,v=2,i=1;AAAA\x1b\\", // 루트와 다른 bpp
+        "\x1b_Ga=f,f=32,s=2,v=2,i=1,r=99;AAAA\x1b\\", // 없는 프레임 교체
+        "\x1b_Ga=a,i=1,s=9\x1b\\", // 알 수 없는 상태
+        "\x1b_Ga=a,i=1,c=99\x1b\\", // 없는 프레임을 현재로
+        "\x1b_Ga=c,i=1,r=1,c=1\x1b\\", // 자기 자신에 합성
+        "\x1b_Ga=c,i=1,r=1,c=99\x1b\\", // 없는 원본
+        "\x1b_Ga=f,f=32,s=4294967295,v=4294967295,i=1;AAAA\x1b\\", // 곱 오버플로
+        "\x1b_Ga=f,f=32,s=2,v=2,i=1,x=4294967295,y=4294967295;AAAA\x1b\\", // 범위 밖 좌표
+    };
+    for (hostile) |h| try core.write(h);
+    // 파서가 살아 있고 프레임 수도 안 늘었다(거부는 상태를 안 만든다).
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.frameCount());
+    try core.write("ok");
+    try std.testing.expectEqual(@as(u21, 'o'), core.screen.cells[0].codepoint);
+
+    // 이미지를 지우면 프레임 바이트까지 회수된다 — 안 그러면 회계가 새어 상한이 조금씩 닫힌다.
+    try core.write("\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+}
+
+test "kitty 애니메이션: a=c 가 프레임을 합성한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
+
+    // 프레임 2(초록)를 프레임 1(빨강) 위에 덮어쓴다(X=1).
+    const gen_before = core.kitty_images.map.get(1).?.generation;
+    try core.write("\x1b_Ga=c,i=1,r=1,c=2,X=1,q=2\x1b\\");
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u8, 0), img.framePixels(1)[0]); // R=0
+    try std.testing.expectEqual(@as(u8, 255), img.framePixels(1)[1]); // G=255
+    try std.testing.expect(img.generation > gen_before); // 렌더러가 다시 올리도록
 }

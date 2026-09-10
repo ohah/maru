@@ -5038,6 +5038,10 @@ const UiIntent = union(enum) {
     host_key_cancel,
     password_ok,
     password_cancel,
+    server_edit_back,
+    /// 편집 화면의 «몇 번째 줄» — 칸 다섯 + 공개키 + 저장 + 삭제. 화면이 고정이라 순번으로
+    /// 충분하다(목록이 아니라 서식이다).
+    server_edit_row: usize,
 };
 
 const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
@@ -6188,9 +6192,7 @@ var srv_draft: ServerDraft = .{};
 /// 편집 중인 서버의 목록 번호. null 이면 **새로 만드는 중**이다(저장할 때 끝에 붙는다).
 var srv_edit_index: ?usize = null;
 var srv_edit_rects: [server_field_n + 3]SetRect = @splat(.{}); // 칸 다섯 + 공개키 + 저장 + 삭제
-var srv_edit_pressed: ?usize = null;
 var srv_edit_back_rect: SetRect = .{};
-var srv_edit_back_pressed = false;
 var srv_edit_press: gesture.Press = .{};
 
 /// 그 서버를 편집 화면으로 연다(`null` 이면 새로 만든다).
@@ -6649,7 +6651,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
 
     srv_edit_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
     noteA11y(srv_edit_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (srv_edit_back_pressed) push(.{ .x = @intFromFloat(srv_edit_back_rect.x), .y = @intFromFloat(srv_edit_back_rect.y), .w = @intFromFloat(srv_edit_back_rect.w), .h = @intFromFloat(srv_edit_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (uiPressed(registerAction(srv_edit_back_rect, .server_edit_back))) push(.{ .x = @intFromFloat(srv_edit_back_rect.x), .y = @intFromFloat(srv_edit_back_rect.y), .w = @intFromFloat(srv_edit_back_rect.w), .h = @intFromFloat(srv_edit_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
@@ -6677,7 +6679,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
         const field: ServerField = @enumFromInt(f.value);
         const rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
         srv_edit_rects[i] = rect;
-        if (srv_edit_pressed == i) push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y), .w = @intFromFloat(rect.w), .h = @intFromFloat(rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        if (uiPressed(registerAction(rect, .{ .server_edit_row = i }))) push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y), .w = @intFromFloat(rect.w), .h = @intFromFloat(rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
         const label = maru.i18n.tIn(.ko, switch (field) {
             .name => .mob_server_name,
             .host => .mob_server_host,
@@ -6721,7 +6723,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     const key_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n] = key_rect;
     noteA11y(key_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, if (pubkey_copied) .mob_pubkey_copied else .mob_pubkey) });
-    if (srv_edit_pressed == server_field_n) push(.{ .x = @intFromFloat(key_rect.x), .y = @intFromFloat(key_rect.y), .w = @intFromFloat(key_rect.w), .h = @intFromFloat(key_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(key_rect, .{ .server_edit_row = server_field_n }))) push(.{ .x = @intFromFloat(key_rect.x), .y = @intFromFloat(key_rect.y), .w = @intFromFloat(key_rect.w), .h = @intFromFloat(key_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     const key_label = maru.i18n.tIn(.ko, if (pubkey_copied) .mob_pubkey_copied else .mob_pubkey);
     pushText(key_label, @intFromFloat(key_rect.x + set_pad_x), @intFromFloat(key_rect.y + (set_row_h - 16) / 2), 16, tk.get(if (pubkey_copied) .accent_bar else .surface_fg));
     {
@@ -6743,7 +6745,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     const save_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n + 1] = save_rect;
     noteA11y(save_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_server_save) });
-    if (srv_edit_pressed == server_field_n + 1) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(save_rect, .{ .server_edit_row = server_field_n + 1 }))) push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y), .w = @intFromFloat(save_rect.w), .h = @intFromFloat(save_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_save), @intFromFloat(save_rect.x + set_pad_x), @intFromFloat(save_rect.y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     push(.{ .x = @intFromFloat(save_rect.x), .y = @intFromFloat(save_rect.y + set_row_h - 1), .w = @intFromFloat(save_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     y += set_row_h;
@@ -6751,7 +6753,7 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
     const del_rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     srv_edit_rects[server_field_n + 2] = del_rect;
     noteA11y(del_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_server_delete) });
-    if (srv_edit_pressed == server_field_n + 2) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(del_rect, .{ .server_edit_row = server_field_n + 2 }))) push(.{ .x = @intFromFloat(del_rect.x), .y = @intFromFloat(del_rect.y), .w = @intFromFloat(del_rect.w), .h = @intFromFloat(del_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_server_delete), @intFromFloat(del_rect.x + set_pad_x), @intFromFloat(del_rect.y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
@@ -7482,39 +7484,34 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 srv_edit_press.begin(x, y, time_ms, false);
-                srv_edit_back_pressed = setHit(srv_edit_back_rect, x, y);
-                srv_edit_pressed = null;
-                if (!srv_edit_back_pressed) {
-                    for (srv_edit_rects, 0..) |r, i| {
-                        if (setHit(r, x, y)) {
-                            srv_edit_pressed = i;
-                            break;
-                        }
+                ui_pressed = null;
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
                     }
                 }
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                if (srv_edit_press.move(x, y)) {
-                    srv_edit_pressed = null;
-                    srv_edit_back_pressed = false;
-                }
+                if (srv_edit_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was_back = srv_edit_back_pressed;
-                const was = srv_edit_pressed;
-                srv_edit_back_pressed = false;
-                srv_edit_pressed = null;
+                const intent = takeUiIntent();
                 routeClear();
                 if (phase == 3) {
                     srv_edit_press.cancel();
                     return 1;
                 }
                 if (srv_edit_press.end() != .tap) return 1;
-                if (was_back) {
+                const was: ?usize = switch (intent orelse return 1) {
+                    .server_edit_row => |i| i,
+                    .server_edit_back => null,
+                    else => return 1,
+                };
+                if (was == null) {
                     // **나가면 안 저장한다** — 저장은 누르는 일이다(설정의 즉시 적용과 다른 이유:
                     // 서버 한 줄은 값 다섯이 함께 맞아야 뜻이 있다).
                     edit_target = .none;

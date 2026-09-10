@@ -11,8 +11,11 @@
 <resources>
     <style name="Theme.Maru" parent="@android:style/Theme.DeviceDefault.NoActionBar">
         <item name="android:windowBackground">@color/ic_launcher_background</item>
-        <!-- **API 31+ 의 스플래시.** 아래 두 값은 그 이전 판에서는 «모르는 속성»이라 조용히
-             무시된다 — 그래서 자격자(`values-v31`)로 가르지 않고 한자리에 둔다. minSdk 는 29 다. -->
+        <!-- **API 31+ 의 스플래시.** 자격자 폴더(`values-v31`)로 손수 가르지 않는다 —
+             **`aapt2` 가 알아서 가른다.** 구운 APK 를 뜯어 확인했다(적대적 검증 10회차):
+             기본 설정에는 `windowBackground` 하나만 들어가고(`size=1`), `v31` 설정에만 셋이
+             들어간다(`size=3`). 즉 옛 판은 이 두 값을 «무시»하는 것이 아니라 **아예 안 받는다.**
+             minSdk 는 29 다. -->
         <item name="android:windowSplashScreenBackground">@color/ic_launcher_background</item>
         <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
     </style>

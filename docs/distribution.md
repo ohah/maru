@@ -124,7 +124,7 @@ Android 밀도 다섯 × 둘). 손으로 맞추면 한 자리만 낡고, 그 한
 | 플랫폼 | 무엇을 두나 | 어디에 |
 |---|---|---|
 | iOS | `UILaunchScreen` → `UIColorName`·`UIImageName` | `src/platform/ios/Info.plist.in` |
-| Android | 액티비티 테마의 `windowBackground` + API 31+ 의 `windowSplashScreenBackground`·`windowSplashScreenAnimatedIcon` | `src/platform/android/res/values/themes.xml` |
+| Android | 액티비티 테마의 `windowBackground` + API 31+ 의 `windowSplashScreenBackground`·`windowSplashScreenAnimatedIcon`. **자격자 폴더로 손수 가르지 않는다 — `aapt2` 가 가른다**(구운 APK 실측: 기본 설정 `size=1`, `v31` 설정 `size=3`) | `src/platform/android/res/values/themes.xml` |
 
 **색을 두 번 적지 않는다.** Android 테마는 적응형 아이콘 배경과 **같은 자원**(`@color/ic_launcher_background`)
 을 가리키고, iOS 카탈로그의 색은 `render.py` 의 `GROUND` 에서 뽑힌다 — 아이콘과 런치 스크린이

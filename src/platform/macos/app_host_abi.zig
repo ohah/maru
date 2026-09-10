@@ -139,6 +139,24 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
+test "BI1: 실행 파일 경로를 읽어 낸다 — 빌드 신원의 출처다" {
+    // `app.log` 는 append 라 앱을 재시작하지 않으면 **옛 바이너리가 계속 쓴다**. 2026-09-10 에 그 때문에
+    // 「고쳤는데 그대로다」를 두 번 겪었고, 옛 로그 위에 새 가설을 세울 뻔했다.
+    //
+    // mtime 값 자체는 파일시스템이 정하므로 잠글 수 없다. 여기서 잠그는 것은 **경로를 읽어 낸다**는 것 —
+    // 그것이 실패하면 로그 줄이 통째로 안 나가고, 그러면 이 축이 조용히 없어진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var path_buf: [1024]u8 = undefined;
+    var size: u32 = path_buf.len;
+    try std.testing.expectEqual(@as(c_int, 0), _NSGetExecutablePath(&path_buf, &size));
+    const path: [*:0]const u8 = @ptrCast(&path_buf);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    var st: std.posix.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fstat(fd, &st));
+}
+
 test "ABI v182 session config bootstrap observation and notification cold route values match the C header" {
     try std.testing.expectEqual(@as(u32, 182), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
@@ -1027,12 +1045,41 @@ fn installExitDiagnostics() void {
     _ = atexit(exitAtexitHandler);
 }
 
+/// 이 프로세스가 어느 바이너리인지 한 줄로 남긴다.
+///
+/// `app.log` 는 append 라 앱을 재시작하지 않으면 **옛 바이너리가 계속 쓴다**. 그래서 「고쳤는데 로그가
+/// 그대로다」가 나오는데, 그것이 코드 탓인지 재시작을 안 한 탓인지 구분할 길이 없었다(2026-09-10 에
+/// 두 번 겪었다). 시작 줄 하나가 그 구분을 준다.
+extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
+
+fn logBuildIdentity() void {
+    // **바이너리의 mtime 을 말한다.** 커밋 해시가 더 좋지만 그것은 빌드 옵션이라 `maru` 모듈 일곱 곳에
+    // 배선을 넣어야 하고(cross-target 검사가 각자 모듈을 만든다), 목적에는 mtime 으로 충분하다 —
+    // 「지금 보는 로그가 **방금 빌드한** 바이너리의 것인가」만 답하면 된다.
+    var path_buf: [1024]u8 = undefined;
+    var size: u32 = path_buf.len;
+    if (_NSGetExecutablePath(&path_buf, &size) != 0) return;
+    const path: [*:0]const u8 = @ptrCast(&path_buf);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    var st: std.posix.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return;
+    std.log.scoped(.app).warn(
+        "maru build: mtime={d} pid={d}",
+        .{ st.mtime().sec, std.c.getpid() },
+    );
+}
+
 pub export fn maru_macos_app_session_create(
     config: ?*const AppSessionConfig,
     out_session: ?*?*AppSession,
 ) c_int {
     // 앱의 가장 이른 Zig 진입점이다. 여기서 걸어야 config 경고를 포함한 시작 단계 진단이 전부 남는다.
     redirectStderrToAppLog();
+    // **어느 바이너리인지 먼저 말한다.** 로그를 리다이렉트한 **직후**여야 이 줄도 `app.log` 에 남는다 —
+    // 그 파일은 누적이라, 이 줄이 없으면 「지금 보는 로그가 방금 빌드한 것인가」를 매번 추측하게 된다.
+    logBuildIdentity();
     // 종료 마커는 시작 마커와 짝이어야 의미가 있으므로 같은 자리에서 건다.
     installExitDiagnostics();
     const raw_config = (config orelse return @intFromEnum(Status.null_out)).*;

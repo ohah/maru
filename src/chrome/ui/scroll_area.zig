@@ -20,6 +20,17 @@ pub const State = struct {
     /// 발행되는 값은 언제나 정수 backing pixel이다 — tree rect와 GPU draw rect가 정수여야 셀 경계에서
     /// 흔들리지 않는다.
     offset_y_px: u32 = 0,
+    /// **끝을 넘어선 양**(px). 위로 넘치면 음수, 아래로 넘치면 양수. 규칙은
+    /// [UX §5.7](../../../docs/mobile-ux.md)이 소유한다.
+    ///
+    /// **유계 좌표(`offset_y_px`)를 안 넓힌 이유가 이 필드다.** 그 값의 소비처가 제품 코드에만
+    /// 117곳이고(2026-09-10 실측) 그중 **여섯이 「음수가 아니다」에 기댄다** — 인덱스 나눗셈 넷과
+    /// `-@as(i32, @intCast(...))` 둘. `@intCast` 는 런타임 범위 검사라 **컴파일은 통과하고
+    /// 실행에서 패닉**한다. 여기 별도 축으로 두면 **기본이 0 이라 그 117곳이 한 줄도 안 바뀐다.**
+    ///
+    /// **터치에서만 생긴다** — `Touch.applyDelta` 한 자리다. 데스크톱의 휠·키·스크롤바는
+    /// `scrollByWheel`·`applyKeyStep`·`setOffsetPx` 를 지나므로 이 값이 0 을 벗어나지 않는다.
+    overshoot_px: i32 = 0,
     /// 아직 1픽셀을 못 채운 분수 wheel 입력. 여기 남아 있다가 다음 틱과 합쳐져 정수가 되면 소비된다.
     /// **이 값은 밖으로 나가지 않는다** — 발행·hit-test는 `offset_y_px`만 본다.
     wheel_residue_px: f64 = 0,
@@ -38,7 +49,12 @@ pub const State = struct {
     }
 
     pub fn clamp(self: *State, max_offset_px: u32) void {
+        const before = self.offset_y_px;
         self.offset_y_px = @min(self.offset_y_px, max_offset_px);
+        // **내용이 줄어 잘렸으면 넘침도 거둔다**(UX §5.7). 발밑이 바뀐 것이라 튕길 근거가
+        // 없다 — 남기면 목록이 짧아진 뒤에도 밀린 자리에서 시작한다. **안 잘렸으면 안
+        // 건드린다**: 이 함수는 매 프레임 도므로 늘 거두면 튕김이 한 프레임도 못 산다.
+        if (self.offset_y_px != before) self.overshoot_px = 0;
     }
 
     /// 유지 중인 offset을 wheel 입력과 **같은** 유계 좌표계로만 교체한다. refresh/resize anchor는
@@ -53,6 +69,7 @@ pub const State = struct {
     }
 
     pub fn reset(self: *State) void {
+        self.overshoot_px = 0;
         self.* = .{};
     }
 
@@ -369,6 +386,14 @@ pub const Touch = struct {
     pub const stop_below: f32 = 0.03;
     /// **속도 상한(px/ms).** 튄 이벤트 하나가 목록을 날리지 않게 한다(≈8000dp/s).
     pub const max_velocity: f32 = 8;
+
+    /// 넘어간 델타를 얼마나 따라가나. **그대로 따라가면 목록이 화면 밖으로 사라진다**(UX §5.7).
+    pub const overshoot_resist: f32 = 0.5;
+    /// 넘침의 총량 상한(px). 이 위로는 아무리 밀어도 안 간다.
+    pub const overshoot_max_px: f32 = 120;
+    /// 손을 놓은 뒤 넘침이 0 으로 돌아오는 비율(ms 당). 관성 감쇠보다 **빨라야** 한다 —
+    /// 되돌아오는 것이 느리면 「끌려간 채로 멈췄다」로 보인다.
+    pub const overshoot_return_per_ms: f32 = 0.97;
     /// **손가락이 가만히 있다고 보는 폭.** 이보다 크면 밀려던 것이지 누르려던 것이 아니다.
     pub const slop_px: f32 = 10;
 
@@ -462,6 +487,13 @@ pub const Touch = struct {
         self.residue = 0;
     }
 
+    /// 취소하면서 **넘침도 거둔다**. 화면이 바뀌는데 튕긴 채로 남으면 다음에 들어왔을 때
+    /// 목록이 밀린 자리에서 시작한다 — `cancel` 만 부르는 자리가 여럿이라 갈라 둔다.
+    pub fn cancelWith(self: *Touch, state: *State) void {
+        self.cancel();
+        state.overshoot_px = 0;
+    }
+
     /// 매 프레임 한 번. `dt_ms` 는 **직전 프레임과의 간격**이다(host 가 주는 프레임 시각의 차).
     ///
     /// 손가락이 닿아 있으면 미끄러뜨리지 않고 **이번 프레임의 속도만 잰다** — 떼는 순간 그
@@ -477,6 +509,17 @@ pub const Touch = struct {
                 s.travel = 0;
             }
             return false;
+        }
+        // **넘침을 되돌린다 — 관성과 «같은 자리»에서**(UX §5.7). 두 자리에 두면 한쪽이 죽어도
+        // 안 드러난다. 손가락이 없을 때만 돈다(위에서 이미 걸렀다).
+        if (state.overshoot_px != 0) {
+            // 넘친 채로 관성이 남아 있으면 그 관성은 끝에 부딪힌 것이다 — 죽인다.
+            self.fling = 0;
+            self.residue = 0;
+            const cur: f32 = @floatFromInt(state.overshoot_px);
+            const next = cur * std.math.pow(f32, overshoot_return_per_ms, dt);
+            state.overshoot_px = if (@abs(next) < 1) 0 else @intFromFloat(next);
+            return true;
         }
         if (self.fling == 0) return false;
         const before = state.offset_y_px;
@@ -498,7 +541,40 @@ pub const Touch = struct {
         const whole = @trunc(total);
         self.residue = total - whole;
         if (whole == 0) return;
-        _ = state.scrollByPx(@intFromFloat(whole), max_offset_px);
+        // **넘침이 있으면 먼저 그것을 되민다.** 위로 넘긴 채 아래로 끌면 목록이 움직이기 전에
+        // 넘침이 0 이 되어야 한다 — 안 그러면 손가락이 반대로 가는데 목록이 먼저 흐른다.
+        const want: i64 = @intFromFloat(whole);
+        var rest = want;
+        if (self.overshootPending(state)) |_| {
+            const cur: f32 = @floatFromInt(state.overshoot_px);
+            const next = cur + @as(f32, @floatFromInt(want));
+            if ((cur < 0 and next >= 0) or (cur > 0 and next <= 0)) {
+                state.overshoot_px = 0;
+                rest = @intFromFloat(next);
+            } else {
+                state.overshoot_px = @intFromFloat(clampOvershoot(next));
+                return;
+            }
+        }
+        if (rest == 0) return;
+        const before = state.offset_y_px;
+        _ = state.scrollByPx(rest, max_offset_px);
+        // **자리에서 잘린 만큼이 넘침이다.** `scrollByPx` 는 유계라 넘친 양을 안 남긴다 —
+        // 여기서 「원한 것 − 간 것」으로 재고 저항을 걸어 담는다(UX §5.7).
+        const moved: i64 = @as(i64, state.offset_y_px) - @as(i64, before);
+        const lost = rest - moved;
+        if (lost == 0) return;
+        const add = @as(f32, @floatFromInt(lost)) * overshoot_resist;
+        state.overshoot_px = @intFromFloat(clampOvershoot(@as(f32, @floatFromInt(state.overshoot_px)) + add));
+    }
+
+    /// 넘침이 살아 있나(0 이 아니면 그것부터 되민다).
+    fn overshootPending(_: *Touch, state: *State) ?void {
+        return if (state.overshoot_px != 0) {} else null;
+    }
+
+    fn clampOvershoot(v: f32) f32 {
+        return std.math.clamp(v, -overshoot_max_px, overshoot_max_px);
     }
 };
 

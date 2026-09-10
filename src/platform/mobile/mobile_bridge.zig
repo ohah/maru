@@ -5448,6 +5448,25 @@ pub fn sessListRect() SetRect {
     return sess_list;
 }
 
+pub fn setListRect() SetRect {
+    return set_list;
+}
+
+pub fn setOvershootPx() i32 {
+    return set_sa.overshoot_px;
+}
+
+/// 세 목록의 스크롤을 처음으로 되돌린다(테스트 뒷정리). **튕김과 스크롤을 두고 나가면 뒤
+/// 판정자가 밀린 자리에서 시작한다** — 전역이라 한 판정자의 잔재가 다음을 깬다.
+pub fn resetScrollForTest() void {
+    set_sa.reset();
+    sess_sa.reset();
+    srv_sa.reset();
+    set_touch.cancelWith(&set_sa);
+    sess_touch.cancelWith(&sess_sa);
+    srv_touch.cancelWith(&srv_sa);
+}
+
 pub fn sessScrollbarDrawn() bool {
     return sess_scrollbar_drawn;
 }

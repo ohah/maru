@@ -13721,14 +13721,18 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                 return;
             },
             .preflight => {
+                // 결과를 **자식이 직접 연 파일에도** 남긴다. stderr 의 행선지는 부모가 정하는데, 원인을
+                // 알아야 하는 순간의 부모는 항상 옛 빌드다(`upgrade_preflight.noteChildOutcome`).
                 session_host.upgrade_bootstrap.runPreflight(
                     allocator,
                     io,
                     session_host_entrypoint.preflight_fd,
                 ) catch |err| {
+                    session_host.upgrade_preflight.noteChildOutcome(false, @errorName(err));
                     try stderr.print("maru session host preflight failed: {s}\n", .{@errorName(err)});
                     return error.UnknownCommand;
                 };
+                session_host.upgrade_preflight.noteChildOutcome(true, "-");
                 return;
             },
             .restore => |restore| {

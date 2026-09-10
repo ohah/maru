@@ -5214,6 +5214,24 @@ pub fn build(b: *std.Build) void {
     preflight_reason_step.dependOn(&run_preflight_reason.step);
     boundary_step.dependOn(&run_preflight_reason.step);
 
+    const preflight_child_report_step = b.step(
+        "test-preflight-child-report",
+        "Preflight child records its own outcome (the parent is always the old build)",
+    );
+    const preflight_child_report_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/preflight_child_report_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_preflight_child_report = b.addRunArtifact(preflight_child_report_tests);
+    run_preflight_child_report.addArg("--maru-expect-tests=2");
+    run_preflight_child_report.addArg("--maru-expect-passed=2");
+    run_preflight_child_report.setCwd(b.path("."));
+    preflight_child_report_step.dependOn(&run_preflight_child_report.step);
+    boundary_step.dependOn(&run_preflight_child_report.step);
+
     const keybinding_release_step = b.step(
         "test-keybinding-release",
         "Every chord-comparing resolver drops key release (macros fired twice)",

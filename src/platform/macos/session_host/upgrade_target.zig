@@ -11,6 +11,7 @@ const handoff_codec = @import("handoff_codec.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 const attempt_record = @import("upgrade_attempt_record.zig");
 const wire = @import("upgrade_wire.zig");
+const host_log = @import("host_log.zig");
 
 pub const Authorizer = struct {
     ctx: *anyopaque,
@@ -180,6 +181,12 @@ pub const Stager = struct {
         artifact.* = undefined;
     }
 
+    /// **거절 이유를 남긴다.** 이 `false` 는 `beginExecution` 에서 곧장
+    /// `status=resumed reason=target_invalid` 로 접히는데(`upgrade_owner.beginExecution`), 그 이름은
+    /// **preflight 자식이 non-zero 로 죽은 것과 똑같다**. 2026-09-10 에 업그레이드가 그 이름으로
+    /// 실패했을 때, 넷 중 무엇이 틀어졌는지는커녕 **preflight 를 돌기는 했는지조차** 가릴 수 없었다.
+    ///
+    /// 넷을 따로 적는다 — 고정 fd 가 딴 것을 가리키는 것과, 경로가 사라진 것은 원인이 전혀 다르다.
     fn verifyOpaque(_: *anyopaque, target: upgrade_owner.VerifiedTarget) bool {
         const expected: staged_image.Identity = .{
             .dev = target.artifact.dev,
@@ -187,10 +194,32 @@ pub const Stager = struct {
             .size = target.artifact.size,
             .sha256 = target.artifact.sha256,
         };
-        const pinned = staged_image.inspectFd(target.artifact.exec_fd) catch return false;
-        if (!staged_image.identityEqual(expected, pinned)) return false;
-        const path = staged_image.inspect(target.artifact.path) catch return false;
-        return staged_image.identityEqual(expected, path);
+        const pinned = staged_image.inspectFd(target.artifact.exec_fd) catch |err| {
+            host_log.line("upgrade target verify failed: at=pinned_fd err={s} fd={d}", .{
+                @errorName(err),
+                target.artifact.exec_fd,
+            });
+            return false;
+        };
+        if (!staged_image.identityEqual(expected, pinned)) {
+            host_log.line("upgrade target verify failed: at=pinned_identity size={d}/{d} ino={d}/{d}", .{
+                expected.size, pinned.size,
+                expected.ino,  pinned.ino,
+            });
+            return false;
+        }
+        const path = staged_image.inspect(target.artifact.path) catch |err| {
+            host_log.line("upgrade target verify failed: at=path_open err={s}", .{@errorName(err)});
+            return false;
+        };
+        if (!staged_image.identityEqual(expected, path)) {
+            host_log.line("upgrade target verify failed: at=path_identity size={d}/{d} ino={d}/{d}", .{
+                expected.size, path.size,
+                expected.ino,  path.ino,
+            });
+            return false;
+        }
+        return true;
     }
 };
 

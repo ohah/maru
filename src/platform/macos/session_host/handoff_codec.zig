@@ -1245,6 +1245,203 @@ fn expectCoreContinuation(prefix: []const u8, suffix: []const u8) !void {
     try std.testing.expectEqual(uninterrupted.screen.cursor, restored.screen.cursor);
 }
 
+/// U1의 exhaustive fixture가 codec의 stable-tag 표를 두 번째 목록으로 복사하지 않게 한다. 각 필드의
+/// canonical encoding을 같은 크기의 fresh core와 비교하므로 pointer/allocator 같은 native 표현이 아니라 실제
+/// handoff wire에서 관측되는 logical value가 달라야 coverage로 센다.
+fn observeNonDefaultCoreFields(
+    coverage: *[core_fields_v1.len]bool,
+    baseline: *const TerminalCore,
+    candidate: *const TerminalCore,
+) !void {
+    inline for (core_fields_v1, 0..) |spec, index| {
+        var baseline_writer: Writer = .{ .allocator = std.testing.allocator };
+        defer baseline_writer.deinit();
+        const Field = @TypeOf(@field(baseline.*, spec.name));
+        try encodeValue(&baseline_writer, Field, &@field(baseline.*, spec.name));
+
+        var candidate_writer: Writer = .{ .allocator = std.testing.allocator };
+        defer candidate_writer.deinit();
+        try encodeValue(&candidate_writer, Field, &@field(candidate.*, spec.name));
+        coverage[index] = coverage[index] or
+            !std.mem.eql(u8, baseline_writer.bytes.items, candidate_writer.bytes.items);
+    }
+}
+
+fn expectCanonicalCoreRoundTrip(core: *const TerminalCore) !void {
+    const allocator = std.testing.allocator;
+    const encoded = try encodeCore(allocator, core);
+    defer allocator.free(encoded);
+    var restored = try decodeCore(allocator, encoded);
+    defer restored.deinit();
+    const reencoded = try encodeCore(allocator, &restored);
+    defer allocator.free(reencoded);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+}
+
+fn observeWriteFixture(coverage: *[core_fields_v1.len]bool, prefix: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var seed = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer seed.deinit();
+    const seed_bytes = try encodeCore(allocator, &seed);
+    defer allocator.free(seed_bytes);
+    var baseline = try decodeCore(allocator, seed_bytes);
+    defer baseline.deinit();
+    var candidate = try decodeCore(allocator, seed_bytes);
+    defer candidate.deinit();
+    try candidate.write(prefix);
+    try observeNonDefaultCoreFields(coverage, &baseline, &candidate);
+    try expectCanonicalCoreRoundTrip(&candidate);
+}
+
+const OomParserFixture = enum { osc52, notification, apc };
+
+/// 제품 parser가 사용하는 allocator의 다음 grow를 실패시켜, 수십~수백 MiB를 실제로 채우지 않고도
+/// 정상적으로 도달 가능한 bounded-overflow 상태를 만든다. FailingAllocator는 같은 backing allocator로
+/// free/realloc을 전달하므로 기존 buffer ownership은 바뀌지 않는다.
+fn observeOomParserFixture(
+    coverage: *[core_fields_v1.len]bool,
+    kind: OomParserFixture,
+) !void {
+    const allocator = std.testing.allocator;
+    var seed = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer seed.deinit();
+    const seed_bytes = try encodeCore(allocator, &seed);
+    defer allocator.free(seed_bytes);
+    var baseline = try decodeCore(allocator, seed_bytes);
+    defer baseline.deinit();
+    var candidate = try decodeCore(allocator, seed_bytes);
+    defer candidate.deinit();
+
+    switch (kind) {
+        .osc52 => try candidate.write("\x1b]52;" ++ "a" ** 2048),
+        .notification => try candidate.write("\x1b]777;notify;title;body"),
+        .apc => try candidate.write("\x1b_Gpartial"),
+    }
+    const used, const capacity = switch (kind) {
+        .osc52, .notification => .{ candidate.osc_buffer.items.len, candidate.osc_buffer.capacity },
+        .apc => .{ candidate.apc_buffer.items.len, candidate.apc_buffer.capacity },
+    };
+    const grow_len = capacity - used + 1;
+    const grow = try allocator.alloc(u8, grow_len);
+    defer allocator.free(grow);
+    @memset(grow, 'x');
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    candidate.allocator = failing.allocator();
+    errdefer candidate.allocator = allocator;
+    try candidate.write(grow);
+    candidate.allocator = allocator;
+
+    // OSC52의 large latch와 각 parser overflow는 terminator 전에 존재하는 실제 handoff state다.
+    try observeNonDefaultCoreFields(coverage, &baseline, &candidate);
+    try expectCanonicalCoreRoundTrip(&candidate);
+    if (kind != .apc) {
+        try candidate.write("\x07");
+        try observeNonDefaultCoreFields(coverage, &baseline, &candidate);
+        try expectCanonicalCoreRoundTrip(&candidate);
+    }
+}
+
+test "handoff v1 exhaustive valid fixtures cover every stable core field and reencode canonically" {
+    const allocator = std.testing.allocator;
+    var coverage: [core_fields_v1.len]bool = .{false} ** core_fields_v1.len;
+
+    var seed = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer seed.deinit();
+    const seed_bytes = try encodeCore(allocator, &seed);
+    defer allocator.free(seed_bytes);
+    // 두 비교 객체를 같은 canonical bytes에서 만들어 `undefined`인 고정 버퍼의 사용하지 않는 tail이
+    // 서로 다른 우연한 값을 가져 coverage를 위조하지 못하게 한다.
+    var baseline = try decodeCore(allocator, seed_bytes);
+    defer baseline.deinit();
+    var candidate = try decodeCore(allocator, seed_bytes);
+    defer candidate.deinit();
+    // 이 fixture는 제품이 사용하는 공개 VT 입력과 config 주입 경로만으로 만든다. 한 core에서 동시에
+    // 존재할 수 없는 parser continuation은 아래의 독립 fixture들로 나눈다.
+    try candidate.resize(24, 5);
+    candidate.ambiguous_wide = true; // set_ambiguous_wide core command의 제품 적용과 같은 mutation.
+    candidate.emoji_wide = true; // set_emoji_wide core command의 제품 적용과 같은 mutation.
+    candidate.setCellMetrics(8, 16);
+    candidate.setDefaultColors(.{ .r = 1, .g = 2, .b = 3 }, .{ .r = 4, .g = 5, .b = 6 });
+    var config_palette: [16]?maru.terminal.Rgb = .{null} ** 16;
+    config_palette[1] = .{ .r = 7, .g = 8, .b = 9 };
+    candidate.setConfigPalette(config_palette);
+    candidate.setDefaultCursorShape(.bar);
+    try candidate.write(
+        "line0\r\nline1\r\nline2\r\nline3\r\nline4\r\nline5" ++
+            "\x1b[2;3r\x1b[?6h" ++
+            "\x1b[?1h\x1b=\x1b[?1007l\x1b[?2004h\x1b[?1004h" ++
+            "\x1b[?1003h\x1b[?1016h\x1b[?2026h\x1b[?2026l\x1b[?2027h" ++
+            "\x1b[?25l\x1b[6 q\x1b[4h\x1b[?7l\x1b[?5h\x1b[>3u" ++
+            "\x1b]8;;https://example.com\x07e\xcc\x81\x1b]8;;\x07" ++
+            "\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;17\x07\x1b]133;A\x07" ++
+            "\x1b]52;c;aGVsbG8=\x07\x1b]52;p;?\x07" ++
+            "\x1b]777;notify;handoff;body\x07\x1b]9;4;1;42\x07" ++
+            "\x1b(0\x1b)0\x0e\x07\x1bH" ++
+            "\x1b]7;file://build-box/srv/app\x07" ++
+            "\x1b]5379;ssh;me@build-box\x07\x1b]7;file://build-box/srv/app\x07" ++
+            "\x1b]2;handoff title\x07" ++
+            "\x1b]10;#112233\x07\x1b]11;#445566\x07\x1b]4;2;#778899\x07",
+    );
+    candidate.scrollViewport(2);
+    candidate.selectionStart(0, 0);
+    candidate.selectionExtend(1, 3);
+    candidate.setSelectionBlock(true);
+    // OSC 8를 닫지 않은 pen 상태도 실제 parser 도달 상태이며, 화면 cell의 link_store와는 별도 필드다.
+    try candidate.write("\x1b]8;;https://active.example\x07");
+    // OSC 99의 d=0 조각은 알림을 발사하지 않고 제품 조립 상태 네 필드를 모두 유지한다.
+    try candidate.write("\x1b]99;i=build:d=0;빌드\x1b\\");
+    try candidate.write("\x1b]99;i=build:d=0:p=body;4174개\x1b\\");
+    try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
+    try expectCanonicalCoreRoundTrip(&candidate);
+
+    const rgba = [_]u8{ 9, 8, 7, 255 } ** 4;
+    var b64: [64]u8 = undefined;
+    const encoded_rgba = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var kitty_seq: [192]u8 = undefined;
+    try candidate.write(try std.fmt.bufPrint(
+        &kitty_seq,
+        "\x1b_Ga=T,f=32,s=2,v=2,I=42,U=1,c=2,r=2;{s}\x1b\\",
+        .{encoded_rgba},
+    ));
+    candidate.clearResponse(); // PTY-bound reply는 quiesce가 flush하며 U1 logical core payload에는 넣지 않는다.
+    try candidate.write("\x1b_Ga=p,I=42,p=7,c=2,r=2,C=1\x1b\\");
+    candidate.clearResponse();
+    // alt 화면은 primary 전체를 saved_screen으로 옮기는 공개 DECSET 경로라 두 필드를 함께 검증한다.
+    try candidate.write("\x1b[?1049halt-screen");
+    // shell event queue의 공개 producer가 cap에 닿으면 마지막 event 대신 overflow latch를 보존한다.
+    for (0..4097) |_| try candidate.write("\x1b]133;A\x07");
+    try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
+    try expectCanonicalCoreRoundTrip(&candidate);
+
+    // parser state는 상호배타적이므로 각 continuation을 독립 core로 만든다.
+    try observeWriteFixture(&coverage, &.{ 0xED, 0x95 });
+    try observeWriteFixture(&coverage, "\x1b[?12:34 $");
+    try observeWriteFixture(&coverage, "\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;");
+    try observeWriteFixture(&coverage, "\x1b[?2026h");
+    try observeWriteFixture(&coverage, "\x1b]2;partial");
+    try observeWriteFixture(&coverage, "\x1bP" ++ "q" ** 65);
+    try observeWriteFixture(&coverage, "\x1b_Ga=t,f=32,s=1,v=1,i=7,m=1;AAAA\x1b\\");
+    try observeWriteFixture(&coverage, "\x1b_Gpartial");
+    try observeOomParserFixture(&coverage, .osc52);
+    try observeOomParserFixture(&coverage, .notification);
+    try observeOomParserFixture(&coverage, .apc);
+
+    var missing: [core_fields_v1.len]usize = undefined;
+    var missing_count: usize = 0;
+    inline for (core_fields_v1, 0..) |spec, index| {
+        if (!coverage[index]) {
+            _ = spec;
+            missing[missing_count] = index;
+            missing_count += 1;
+        }
+    }
+    for (missing[0..missing_count]) |index| {
+        const spec = core_fields_v1[index];
+        std.debug.print("missing non-default handoff field: {s} (tag {d})\n", .{ spec.name, spec.tag });
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing_count);
+}
+
 test "handoff v1 round-trips partial UTF-8 and escape parser continuations" {
     try expectCoreContinuation(&.{ 0xED, 0x95 }, &.{0x9C}); // 한 UTF-8 split
     try expectCoreContinuation("\x1b[31", "mred");

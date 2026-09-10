@@ -59,6 +59,8 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "deinitValue", .expression = "@field(Tag,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "encodeCoreFields", .expression = "@field(core.*,spec.name)", .count = 2 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "replaceCoreField", .expression = "@field(core.*,spec.name)", .count = 3 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "observeNonDefaultCoreFields", .expression = "@field(baseline.*,spec.name)", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "observeNonDefaultCoreFields", .expression = "@field(candidate.*,spec.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,primary_field)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,cleanup_field)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,addr_field)", .count = 1 },

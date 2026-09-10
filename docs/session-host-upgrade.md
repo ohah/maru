@@ -547,8 +547,10 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `encode → decode → encode` 전체 envelope bytes가 exact 일치할 때 닫힌다. CSI·OSC·DCS·APC continuation처럼 한 core에
   동시에 존재할 수 없는 parser 상태는 별도 fixture로 나누며, raw struct에 도달 불가능한 조합을 직접 써서 coverage를
   채우지 않는다. tag 목록을 테스트에 복제하지 않고 codec의 실제 `core_fields_v1` 순회를 coverage SSOT로 사용한다.
-  현재는 대표 continuation round-trip만 있으므로 이 exhaustive equality fixture set은 아직 남아 있고 U1 종료 gate는
-  열려 있다.
+  **종료 gate 구현됨:** `test-session-host-handoff-exhaustive`가 제품 VT 입력·config 주입과 parser allocation-failure
+  경로로 만든 유효 fixture 집합을 Debug·ReleaseFast에서 실행한다. 이 집합은 모든 stable tag의 non-default canonical
+  bytes와 fixture별 전체 envelope exact equality를 검증하며, 새 tag가 추가됐는데 도달 fixture가 없으면 missing tag
+  이름과 번호를 모두 출력하고 실패한다.
 
 ### U2 — quiesce/resume
 

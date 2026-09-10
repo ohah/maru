@@ -778,6 +778,43 @@ test "project walks heights instead of dividing by a uniform item height" {
     try std.testing.expectEqual(@as(i32, -10), result.first_origin_y_px);
 }
 
+test "끝을 넘겨 밀면 넘침이 생기고, 유계 좌표는 범위 안에 남는다" {
+    // **판정자가 모바일 층에만 있으면 이 컴포넌트를 혼자 고치는 사람은 못 본다**(적대적 5회차).
+    // 규칙의 주인이 여기이므로 여기서도 잰다. 계약은 [UX §5.7](../../../docs/mobile-ux.md).
+    var st: State = .{};
+    var t: Touch = .{};
+    const max: u32 = 100;
+    _ = t.begin(1, 500);
+    t.move(&st, 1, 500 - 300, max); // 300px 위로 — 100 만 갈 수 있다
+    try std.testing.expectEqual(@as(u32, max), st.offset_y_px); // 유계는 범위 안
+    try std.testing.expect(st.overshoot_px > 0); // 넘쳤다
+    try std.testing.expect(@as(f32, @floatFromInt(st.overshoot_px)) <= Touch.overshoot_max_px);
+    // **저항이 걸린다** — 잘린 200px 를 그대로 담지 않는다.
+    try std.testing.expect(st.overshoot_px < 200);
+}
+
+test "되미는 쪽에는 저항이 없고, 손을 놓으면 0 으로 돌아온다" {
+    var st: State = .{};
+    var t: Touch = .{};
+    const max: u32 = 100;
+    _ = t.begin(1, 500);
+    t.move(&st, 1, 200, max); // 300px — max 가 100 이라 200 이 잘린다
+    const over = st.overshoot_px;
+    try std.testing.expect(over > 0);
+    // 되끌면 그만큼 곧바로 준다.
+    t.move(&st, 1, 200 + @as(f32, @floatFromInt(over)), max);
+    try std.testing.expectEqual(@as(i32, 0), st.overshoot_px);
+
+    // 다시 넘기고 손을 놓으면 프레임마다 0 으로 간다.
+    t.move(&st, 1, -200, max);
+    try std.testing.expect(st.overshoot_px > 0);
+    t.end(1, 16);
+    var n: u32 = 0;
+    while (n < 600 and st.overshoot_px != 0) : (n += 1) _ = t.step(&st, max, 16);
+    try std.testing.expectEqual(@as(i32, 0), st.overshoot_px);
+    try std.testing.expectEqual(@as(u32, max), st.offset_y_px); // 유계는 그대로 끝이다
+}
+
 test "scroll state clamps each backing pixel boundary" {
     var state = State{};
     try std.testing.expect(state.scrollByPx(1, 9));

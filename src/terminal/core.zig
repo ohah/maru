@@ -9728,3 +9728,31 @@ test "kitty graphics: 실제 앱(terminal-browser)이 내보내는 바이트를 
     try std.testing.expectEqual(@as(u21, 'k'), core.screen.cells[1].codepoint);
     try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
 }
+
+test "kitty graphics: 부모 없는 relative placement 는 ENOENT — 그 거부가 고아 정리 비용의 상한이다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [200]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+
+    // **회귀 판정**: 이 거부는 명세 준수이면서 동시에 **성능 방어선**이다. 부모가 언제나 자식보다
+    // 먼저 등록되므로 배열에서도 앞에 오고, 그래서 `removeOrphanedRelatives` 의 연쇄가 한 패스에 다
+    // 걷힌다. 여기서 관대해지면(«부모는 나중에 와도 된다») 자식이 앞에 놓여 패스마다 하나씩만
+    // 걷히고, 실측으로 사슬 1024 를 지우는 데 3 ms 대신 **1094 ms** 가 걸린다 — 몇 KB 의 escape 로
+    // 터미널이 1초 넘게 멈춘다. 그 결합은 코드만 봐서는 안 보이므로 여기서 고정한다.
+    try core.write("\x1b_Ga=p,i=1,p=2,P=1,Q=99,H=1,c=1,r=1\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1,p=2;ENOENT:no such image\x1b\\", core.pendingResponse());
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    core.clearResponse();
+
+    // 부모를 먼저 만들면 받아들인다 — 게이트가 넓어 정상 경로까지 막지 않는지.
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=p,i=1,p=2,P=1,Q=1,H=1,c=1,r=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+    // 그리고 부모가 자식보다 **앞에** 있다 — 한 패스 걷힘의 전제다.
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_placements.items[0].placement_id);
+    try std.testing.expectEqual(@as(u32, 0), core.kitty_placements.items[0].parent_image_id);
+}

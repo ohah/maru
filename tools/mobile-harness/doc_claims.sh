@@ -550,9 +550,9 @@ ck "키바만 예외다" 1 "$(grep -c '^var kb_pressed' $MB)"
 ck "맞히는 자리는 하나다" 1 "$(sed 's,//.*,,' $MB | grep -c 'setHit(ui_rects\[i\]')"
 # **뜻은 누를 때 잡는다**(M12b 가 배운 것) — `id` 는 프레임 순번이라 뗄 때 되물으면 재사용된다.
 ck "뜻을 누를 때 잡는다" 1 "$(grep -c 'gen: u64, intent: UiIntent' $MB)"
-ck "세대가 갈려도 신원은 산다" 1 "$(grep -c 'fn intentSurvivesGeneration' $MB)"
+ck "세대가 갈려도 신원은 산다" 1 "$(grep -c 'fn intentSurvivesGeneration(' $MB)"
 # **흐르는 목록은 창으로 잘라 등록한다** — 안 자르면 헤더 밑의 안 보이는 줄이 눌린다.
-ck "목록 자리는 창으로 자른다" 1 "$(grep -c 'fn registerActionClipped' $MB)"
+ck "목록 자리는 창으로 자른다" 1 "$(grep -c 'fn registerActionClipped(' $MB)"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

@@ -79380,6 +79380,157 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
     quietActivityWorkers(session);
 }
 
+test "활동 뷰: 입력을 다 못 보면 **명령 조각이라도** 본다 (적대적 3회차 · 폴백)" {
+    // 🔥 **이 폴백이 없으면 상한을 넘는 입력에서 명령이 통째로 안 걸린다.**
+    //
+    // 입력 프로브가 명령 프로브를 **삼킨 것**이 앞선 최적화다(같은 바이트를 두 번 읽지 않으려고 —
+    // 실측 56.8 MB 중복). 그 근거는 「`input` 이 상한을 넘는 것이 실측 0 건」인데, **0 건은 미래를
+    // 약속하지 않는다**. 넘는 날에는 명령이 상한 밖으로 밀려나므로 조각 프로브로 물러나야 한다.
+    //
+    // 실데이터로는 못 재는 자리라(0 건) **일부러 만든다** — 이 스택은 「실측 0 건이라 안 재고 둔」
+    // 코드가 죽어 있던 것을 이미 두 번 겪었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // `content` 가 상한을 넘고, **그 뒤에** `command` 가 온다 — 입력 프로브는 명령까지 못 간다.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(allocator);
+    try big.appendSlice(allocator,
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B2\"," ++
+        "\"name\":\"Bash\",\"input\":{\"description\":\"큰 입력\",\"content\":\"");
+    var i: usize = 0;
+    while (i < agent_body_search_backend.max_probe_bytes + 4096) : (i += 1) try big.append(allocator, 'x');
+    try big.appendSlice(allocator, "\",\"command\":\"grep -rn zeta src/\"}}]}}\n");
+    try tmp.dir.writeFile(io, .{ .sub_path = "fb.jsonl", .data = big.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/fb.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+
+    // 라벨은 `description`(「큰 입력」)이라 `zeta` 가 없다.
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+
+    // `Enter` — 입력은 상한에 걸려 못 보지만 **명령 조각**이 답한다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.body.awaiting != 0) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_body_matches);
+}
+
+test "활동 뷰: 입력이 조각 상한을 넘으면 「없다」가 아니라 「다 못 봤다」다 (적대적 3회차)" {
+    // ⚠️ **이 폴백은 실측 0 건이라 한 번도 안 돈다** — `input` 은 최대 38.1 KiB 로 조각 상한
+    // (64 KiB)을 넘는 것이 없다. 그래서 **죽은 채로 있기 쉬운 자리**다: 이 스택은 이미 같은
+    // 모양으로 데었다(`unescapeBlock.truncated` 가 참이 될 수 없어 §2.4 의 「이하 생략」이 한 번도
+    // 안 떴다 · BS1 적대적 2회차).
+    //
+    // 그래서 상한을 넘는 입력을 **일부러 만들어** 두 가지를 못박는다:
+    //   ⓐ 상한 **밖**에 있는 말은 못 찾는다(그것이 사실이다).
+    //   ⓑ 그때 화면은 **「다 못 봤다」**를 든다 — 「없다」로 뭉개지 않는 것이 이 뷰의 계약이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // `content` 를 조각 상한보다 길게 만들고 **끝에** 검색어를 둔다.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(allocator);
+    try big.appendSlice(allocator,
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B1\"," ++
+        "\"name\":\"Write\",\"input\":{\"file_path\":\"/tmp/big.zig\",\"content\":\"");
+    var i: usize = 0;
+    while (i < agent_body_search_backend.max_probe_bytes + 4096) : (i += 1) try big.append(allocator, 'x');
+    try big.appendSlice(allocator, "zeta\"}}]}}\n");
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.jsonl", .data = big.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/big.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.body.awaiting != 0) _ = session.tick() catch {};
+    }
+
+    // ⓐ 상한 밖이라 못 찾는다.
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+    // ⓑ 그러나 **「없다」가 아니다** — 다 못 본 조각이 있었다는 사실을 든다.
+    try std.testing.expect(session.agent_activity.body.partial);
+}
+
 test "활동 뷰: `Enter` 가 **입력의 나머지 필드**까지 넓힌다 — `Write` 의 content (§2.1.1)" {
     // 🔥 **실측 `input` 85.5 MB 중 26.2%(11.2 MB)가 두 층 어디에도 안 걸렸다**(2026-09-10 ·
     // Claude tool_use 130,247). 그중 큰 것이 `Write.content` **7.56 MB**(2,552 호출)와 `Edit` 의

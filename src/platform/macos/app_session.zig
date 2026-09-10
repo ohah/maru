@@ -79399,8 +79399,7 @@ test "활동 뷰: 입력을 다 못 보면 **명령 조각이라도** 본다 (�
     // `content` 가 상한을 넘고, **그 뒤에** `command` 가 온다 — 입력 프로브는 명령까지 못 간다.
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(allocator);
-    try big.appendSlice(allocator,
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B2\"," ++
+    try big.appendSlice(allocator, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B2\"," ++
         "\"name\":\"Bash\",\"input\":{\"description\":\"큰 입력\",\"content\":\"");
     var i: usize = 0;
     while (i < agent_body_search_backend.max_probe_bytes + 4096) : (i += 1) try big.append(allocator, 'x');
@@ -79475,8 +79474,7 @@ test "활동 뷰: 입력이 조각 상한을 넘으면 「없다」가 아니라
     // `content` 를 조각 상한보다 길게 만들고 **끝에** 검색어를 둔다.
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(allocator);
-    try big.appendSlice(allocator,
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B1\"," ++
+    try big.appendSlice(allocator, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_B1\"," ++
         "\"name\":\"Write\",\"input\":{\"file_path\":\"/tmp/big.zig\",\"content\":\"");
     var i: usize = 0;
     while (i < agent_body_search_backend.max_probe_bytes + 4096) : (i += 1) try big.append(allocator, 'x');

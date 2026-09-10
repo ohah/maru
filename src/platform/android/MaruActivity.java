@@ -415,13 +415,13 @@ public class MaruActivity extends android.app.NativeActivity {
             // **`sendKeyEvent` 를 대신 통과시키는 방법은 안 된다** — 그 글자가 키로 한 번 나가고,
             // 나중에 조합이 확정되며 `commitText` 로 **또** 나가 중복이 된다.
             if (!next.isEmpty() && (nativeArmedMods() != 0 || isAsciiOnly(next))) {
-                // **이미 내보낸 앞부분은 빼고 넘긴다** — 안 빼면 그 글자가 두 번 나간다.
-                String t = next;
-                if (!sent.isEmpty() && t.startsWith(sent)) t = t.substring(sent.length());
+                // **원격이 든 것을 이 문자열과 맞춘다** — 확정 자리는 전부 같은 규칙을 쓴다
+                // (`commitText` 주석 참조). 그냥 넘기면 이미 보낸 앞부분이 두 번 나가고,
+                // 「이미 보낸 것으로 시작하면 벗긴다」로는 갈아치우는 경우를 못 본다.
+                reconcileSent(next);
                 composing = "";
                 sent = ""; // 아래 `restartInput` 이 조합을 끊는다 — 접두사도 함께 버린다
                 nativeComposing("");
-                if (!t.isEmpty()) nativeCommit(t);
                 // **IME 의 조합도 끊는다.** 우리가 가로채 커밋해도 프레임워크의 Editable 은 여전히
                 // 조합 중이라, 다음 글자가 **이어붙는다** — `Ctrl+B` 뒤에 `m` 을 치면 tmux 로
                 // 가야 할 `m` 이 `bm` 조합으로 쌓여 한 덩어리로 왔다(기기 실측: `commit_bytes=3`).
@@ -468,14 +468,24 @@ public class MaruActivity extends android.app.NativeActivity {
         public boolean commitText(CharSequence text, int newCursorPosition) {
             // **조합을 먼저 비운다.** 이 호출 자체가 확정이므로, 안 비우면 뒤따라오는
             // `finishComposingText` 가 같은 글자를 **한 번 더** 넣는다(IME 마다 순서가 다르다).
-            String t = text == null ? "" : text.toString();
-            // **이미 내보낸 앞부분은 빼고 넘긴다.** 확정 문자열은 조합 전체로 오는데, 그중 앞부분은
-            // `setComposingText` 에서 이미 나갔다 — 안 빼면 그 글자들이 두 번 나간다.
-            if (!sent.isEmpty() && t.startsWith(sent)) t = t.substring(sent.length());
+            final String t = text == null ? "" : text.toString();
+            // **확정 문자열이 «이미 보낸 것으로 시작한다»고 믿지 않는다.**
+            //
+            // 예전에는 `t.startsWith(sent)` 일 때만 앞부분을 벗기고, 아니면 **통째로** 보냈다.
+            // 그러면 원격에는 이미 `sent` 가 있는데 그 위에 `t` 가 얹혀 **두 벌이 된다.**
+            //
+            // 삼성 키보드의 자동완성이 정확히 그 자리다(사용자 보고 2026-09-10: 클로드 TUI 안에서
+            // 지우고 쓰기를 반복하면 **키보드가 띄운 추천 단어가 갑자기 들어간다**). 추천은 조합을
+            // **갈아치우는** 것이라 우리가 보낸 앞부분으로 시작하지 않는다 — `가나` 를 보낸 뒤
+            // 추천 `감사합니다` 가 확정되면 원격은 `가나감사합니다` 가 된다.
+            //
+            // **`setComposingText` 는 이 경우를 이미 옳게 다룬다** — `reconcileSent` 가 공통
+            // 접두사까지만 두고 넘치는 만큼 지우고 모자라는 만큼 보낸다. 확정도 같은 자리를 쓴다:
+            // 규칙이 두 벌이면 한쪽만 낡는다.
+            reconcileSent(t);
             composing = "";
             sent = "";
             nativeComposing("");
-            nativeCommit(t);
             return true;
         }
 

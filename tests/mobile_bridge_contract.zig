@@ -4313,6 +4313,38 @@ test "U1 넘어간 뒤에도 손가락만큼 안 따라간다 — 저항이 걸�
     _ = bridge.maru_mobile_pop_screen();
 }
 
+test "U1 튕기는 동안에도 스크롤바 손잡이는 트랙 안에 있다" {
+    // **적대적 검증 1회차가 잡은 결함이다.** 손잡이 자리는 `scroll / max` 인데 그 분자에 넘침을
+    // 넣으면 `t` 가 `[0,1]` 을 벗어나 **손잡이가 트랙 밖으로 나간다**. 「내용 속 어디쯤인가」를
+    // 묻는 자리는 유계 값을 봐야 한다(UX §5.7). 그 축을 보는 판정자가 하나도 없어서 조용히 지나갔다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const wire = try sessionListWire(T.allocator, 30);
+    defer T.allocator.free(wire);
+    _ = feedControl(wire);
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessScrollbarDrawn());
+
+    // 끝까지 세게 밀어 넘긴다.
+    bridge.maru_mobile_pointer(0, 1, 200, 800, now());
+    var step: u32 = 0;
+    while (step < 20) : (step += 1) bridge.maru_mobile_pointer(1, 1, 200, 800 - @as(f32, @floatFromInt(step + 1)) * 80, now());
+    bridge.maru_mobile_pointer(2, 1, 200, 0, now());
+    advanceFrame(402, 874, 16);
+    try T.expect(bridge.sessOvershootPx() != 0); // 정말 튕기는 중이다
+
+    // **손잡이는 트랙 안이다** — 위로도 아래로도.
+    const list = bridge.sessListRect();
+    const th = bridge.sessScrollbarThumb();
+    try T.expect(th.y >= list.y - 0.5);
+    try T.expect(th.y + th.h <= list.y + list.h + 0.5);
+}
+
 test "U1 끝에서 튕긴다 — 넘어갔다 되돌아온다" {
     // 규칙은 [UX §5.7]. 없으면 「목록이 끝났다」와 「스크롤이 죽었다」가 손가락에 똑같이 느껴진다.
     const T = std.testing;

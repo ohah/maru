@@ -5207,6 +5207,13 @@ fn scrollWithBounce(sa: *const scroll_area.State) f32 {
     return @as(f32, @floatFromInt(sa.offset_y_px)) + @as(f32, @floatFromInt(sa.overshoot_px));
 }
 
+/// 넘침을 뺀 위치. **「내용 속 어디쯤인가」를 묻는 자리는 이것을 본다** — 스크롤바 손잡이가
+/// 그렇다. 넘친 값으로 비율을 내면 `t` 가 `[0,1]` 을 벗어나 **손잡이가 트랙 밖으로 나간다**
+/// (적대적 검증 1회차가 잡았다). 그리는 자리만 `scrollWithBounce` 를 쓴다.
+fn scrollBounded(sa: *const scroll_area.State) f32 {
+    return @floatFromInt(sa.offset_y_px);
+}
+
 fn setScroll() f32 {
     return scrollWithBounce(&set_sa);
 }
@@ -5424,6 +5431,23 @@ fn sessScroll() f32 {
 /// 이번 프레임에 스크롤바를 그렸나. **판정용** — 「밀 수 있을 때만」이 규칙이라 그 조건을 잰다.
 var sess_scrollbar_drawn: bool = false;
 
+/// 마지막으로 그린 스크롤바 손잡이(테스트용). **자리를 볼 자리가 없어서 손잡이가 트랙 밖으로
+/// 나가는 결함이 조용히 지나갔다**(적대적 검증 1·2회차) — 그 축을 연다.
+var sess_thumb: SetRect = .{};
+var set_thumb: SetRect = .{};
+
+pub fn sessScrollbarThumb() SetRect {
+    return sess_thumb;
+}
+
+pub fn setScrollbarThumb() SetRect {
+    return set_thumb;
+}
+
+pub fn sessListRect() SetRect {
+    return sess_list;
+}
+
 pub fn sessScrollbarDrawn() bool {
     return sess_scrollbar_drawn;
 }
@@ -5515,8 +5539,9 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     sess_scrollbar_drawn = sess_max_scroll > 0;
     if (sess_scrollbar_drawn) {
         const thumb_h = @max(28.0, sess_list.h * (sess_list.h / content));
-        const t = sessScroll() / sess_max_scroll;
+        const t = scrollBounded(&sess_sa) / sess_max_scroll;
         const bar_w: f32 = 3;
+        sess_thumb = .{ .x = sess_list.x + sess_list.w - bar_w - 2, .y = sess_list.y + t * (sess_list.h - thumb_h), .w = bar_w, .h = thumb_h };
         push(.{
             .x = @intFromFloat(sess_list.x + sess_list.w - bar_w - 2),
             .y = @intFromFloat(sess_list.y + t * (sess_list.h - thumb_h)),
@@ -7118,9 +7143,10 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     if (set_max_scroll > 0) {
         const track_h = list_h;
         const thumb_h = @max(28.0, track_h * (track_h / content));
-        const t = setScroll() / set_max_scroll;
+        const t = scrollBounded(&set_sa) / set_max_scroll;
         const thumb_y = list_top + t * (track_h - thumb_h);
         const bar_w: f32 = 3;
+        set_thumb = .{ .x = set_list.x + set_list.w - bar_w - 2, .y = thumb_y, .w = bar_w, .h = thumb_h };
         push(.{
             .x = @intFromFloat(set_list.x + set_list.w - bar_w - 2),
             .y = @intFromFloat(thumb_y),

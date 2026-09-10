@@ -5251,6 +5251,24 @@ pub fn build(b: *std.Build) void {
     preflight_child_report_step.dependOn(&run_preflight_child_report.step);
     boundary_step.dependOn(&run_preflight_child_report.step);
 
+    const key_repeat_step = b.step(
+        "test-key-repeat",
+        "Key repeat survives both encoders (holding a key typed once)",
+    );
+    const key_repeat_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/key_repeat_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_key_repeat = b.addRunArtifact(key_repeat_tests);
+    run_key_repeat.addArg("--maru-expect-tests=1");
+    run_key_repeat.addArg("--maru-expect-passed=1");
+    run_key_repeat.setCwd(b.path("."));
+    key_repeat_step.dependOn(&run_key_repeat.step);
+    boundary_step.dependOn(&run_key_repeat.step);
+
     const keybinding_release_step = b.step(
         "test-keybinding-release",
         "Every chord-comparing resolver drops key release (macros fired twice)",

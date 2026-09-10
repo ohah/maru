@@ -4371,6 +4371,26 @@ test "U1 튕기는 동안에도 스크롤바 손잡이는 트랙 안에 있다" 
     advanceFrame(402, 874, 16);
 }
 
+test "U1-f1 서버 화면의 머리는 «본문 뒤» 에 그린다 — 걸친 줄이 덮지 못한다" {
+    // **실기에서 잡았다**(2026-09-10): 목록이 흐르면 「서버1」 글자와 그 주소·「편집」이
+    // 「← 서버」를 통째로 덮었다. 세션 화면은 같은 문제를 「머리를 본문 뒤에」로 이미 풀었는데
+    // 서버 화면만 먼저 그리고 있었다.
+    //
+    // **순서가 계약이라 순서로 잰다.** 그려진 그림으로는 못 가른다 — 어느 쪽이든 나중에 그린
+    // 것이 이기므로 「머리가 보인다」는 같은 말이 된다.
+    const T = std.testing;
+    var text: [1 << 12]u8 = undefined;
+    const src = sixteenServers(&text);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(src.ptr, src.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 320);
+    _ = bridge.maru_mobile_build(402, 320, now());
+
+    try T.expect(bridge.serversHeaderQuadIndex() > bridge.serversRowsQuadBegin());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
 test "U1 끝에서 튕긴다 — 넘어갔다 되돌아온다" {
     // 규칙은 [UX §5.7]. 없으면 「목록이 끝났다」와 「스크롤이 죽었다」가 손가락에 똑같이 느껴진다.
     const T = std.testing;

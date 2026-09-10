@@ -4900,15 +4900,14 @@ var nav: [4]Screen = .{ .sessions, .terminal, .terminal, .terminal };
 var nav_len: usize = 2;
 
 /// 누른 원격 줄을 연다. **누를 때 잡아 두는 것은 «그 세션의 id» 다** — 자리(좌표)도 순번(index)도
-/// 아니다.
+/// 아니다. 그 id 는 이제 표의 **뜻**으로 실린다(M12b) — 누름을 나르는 자리가 한 벌이 됐고,
+/// 신원으로 다시 푸는 규칙은 그대로다.
 ///
 /// 좌표가 안 되는 것은 분명하다(그 사이 목록이 흐르거나 갱신되면 다른 줄이 그 자리에 온다).
 /// **순번도 안 된다** — `absorbFrame` 이 줄을 갈아 끼우면 5번이 다른 세션이 된다(적대적 검증
 /// 3회차). 누름과 뗌 사이는 짧지만, 목록은 그 서버가 바뀔 때마다 갱신되므로 **그 창이 실제로
 /// 열린다.** id 로 잡으면 갱신돼도 사용자가 누른 그것을 열고, 사라졌으면 아무것도 안 연다.
-fn openRemoteRow() void {
-    const id = remote_pressed_id orelse return;
-    remote_pressed_id = null;
+fn openRemoteRow(id: [32]u8) void {
     // 그 id 가 아직 목록에 있나 — 없으면 그 세션은 사라졌다.
     for (control_rows[0..control_row_count]) |*row| {
         if (!row.has_runtime) continue;
@@ -4919,27 +4918,6 @@ fn openRemoteRow() void {
     }
 }
 
-/// 그 좌표에 있는 **누를 수 있는** 원격 줄. 붙을 수 없는 줄은 null 이다 — 눌리는 것처럼 보이고
-/// 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
-fn remoteRowAt(x: f32, y: f32) ?usize {
-    if (remote_rows_drawn == 0 or remote_row0.h <= 0) return null;
-    // **목록 창 밖은 어느 줄도 아니다**(적대적 검증 2회차). 목록이 흐르면서 `remote_row0.y` 가
-    // 음수가 될 수 있는데, 그러면 아래 「첫 줄보다 위인가」 가드가 무력해져 **고정 헤더의 빈
-    // 자리를 눌러도 그 밑으로 지나간 줄이 열린다** — UX 계약이 「붙임 헤더 밑을 눌러 안 보이는
-    // 값이 바뀌는 것」을 막으라고 적어 둔 바로 그 모양이다.
-    if (y < sess_list.y or y > sess_list.y + sess_list.h) return null;
-    if (x < remote_row0.x or x > remote_row0.x + remote_row0.w) return null;
-    if (y < remote_row0.y) return null;
-    const rel = y - remote_row0.y;
-    const pitch = remote_row0.h + 1;
-    const idx_f = @floor(rel / pitch);
-    if (idx_f < 0) return null;
-    const idx: usize = @intFromFloat(idx_f);
-    if (idx >= remote_rows_drawn or idx >= control_row_count) return null;
-    // 줄 사이 divider 를 누른 것은 어느 줄도 아니다.
-    if (rel - idx_f * pitch > remote_row0.h) return null;
-    return if (control_rows[idx].has_runtime) idx else null;
-}
 
 /// 앱이 설 자리를 **한 번** 고른다(M16a). 규칙은 [UX §3](../../../docs/mobile-ux.md)이 소유한다.
 ///
@@ -5047,6 +5025,14 @@ const UiIntent = union(enum) {
     server_open: usize,
     server_edit: usize,
     server_add,
+    sessions_gear,
+    sessions_terminal,
+    sessions_servers,
+    /// **원격 줄의 뜻은 순번이 아니라 «그 세션의 id» 다**(M12b). 순번을 실으면 뗄 때까지
+    /// 사이에 목록이 갱신됐을 때 5번이 다른 세션이 된다 — 판정자 「누른 줄과 열리는 세션이
+    /// 같다」가 그것을 못 박고 있고, 세대로 «거절» 하는 것으로는 그 계약을 못 지킨다(거절하면
+    /// 그 세션이 아직 있는데도 아무것도 안 열린다). 뜻이 곧 신원이면 둘 다 지켜진다.
+    remote_open: [32]u8,
 };
 
 const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
@@ -5062,7 +5048,16 @@ var ui_rects: [ui_action_cap]SetRect = @splat(.{});
 /// 데스크톱이 함께 세워야 했던 「다시 그리기」는 여기서 공짜다: `maru_mobile_build` 가 매
 /// 프레임 돌아 표가 반드시 다음 프레임에 다시 발행된다.
 var ui_generation: u64 = 1;
-var ui_pressed: ?struct { id: u64, gen: u64 } = null;
+/// 지금 눌려 있는 자리. **뜻을 «누를 때» 잡는다**(M12b 가 바로잡았다).
+///
+/// 처음에는 id 만 잡고 뗄 때 `resolve` 했는데, `id` 는 **프레임마다 다시 발급되는 순번**이라
+/// 그 사이 목록이 갈리면 같은 번호가 다른 것을 가리킨다 — 세대로 거절하면 「그 세션이 아직
+/// 있는데 아무것도 안 열리고」, 안 거절하면 「엉뚱한 세션이 열린다」. 둘 다 계약 위반이다
+/// (판정자 「누른 줄과 열리는 세션이 같다」가 잡았다).
+///
+/// 누를 때 잡으면 순번 재사용이 **구조적으로** 못 일어난다. 세대는 그 위의 둘째 그물이다 —
+/// 뜻이 «순번» 이면(예: 서버 목록의 번호) 세대가 갈린 뒤엔 못 믿으므로 버린다.
+var ui_pressed: ?struct { id: u64, gen: u64, intent: UiIntent } = null;
 
 fn bumpUiGeneration() void {
     ui_generation +%= 1;
@@ -5089,6 +5084,17 @@ fn registerAction(r: SetRect, intent: UiIntent) u64 {
     return act.id;
 }
 
+/// 흐르는 목록 안의 자리는 **그 창으로 잘라서** 등록한다. 자르지 않으면 위로 지나간 줄이
+/// 고정 헤더 «밑» 에서 그대로 눌린다 — 안 보이는 줄이 열리는 것이고, 적대적 검증 2회차가
+/// 그 결함을 잡아 옛 히트 판정에 창 가드를 넣었던 자리다. 서술자(`noteA11yClipped`)와
+/// **같은 규칙**이다: 보이는 만큼만 있는 것이다.
+fn registerActionClipped(r: SetRect, clip: SetRect, intent: UiIntent) u64 {
+    const top = @max(r.y, clip.y);
+    const bottom = @min(r.y + r.h, clip.y + clip.h);
+    if (bottom <= top) return 0;
+    return registerAction(.{ .x = r.x, .y = top, .w = r.w, .h = bottom - top }, intent);
+}
+
 /// 그 좌표의 자리. **나중에 등록된 것이 이긴다** — 나중에 그린 것이 위에 있다.
 fn hitAction(x: f32, y: f32) ?u64 {
     var i = ui_table.slice().len;
@@ -5107,11 +5113,22 @@ fn uiPressed(id: u64) bool {
     return pr.id == id and pr.gen == ui_generation;
 }
 
-/// 뗄 때 그 누름의 뜻을 되돌린다. 세대가 어긋났거나 그 사이 자리가 사라졌으면 `null` 이다.
+/// 그 뜻이 **세대가 갈려도 살아남는가**. 신원(그 세션의 id)은 살아남는다 — 목록이 갱신돼도
+/// 사용자가 가리킨 것은 그 세션이고, 여는 자리가 신원으로 다시 푼다. **순번은 못 살아남는다** —
+/// 3번이 다른 것이 되었을 수 있고, 그때는 잘못 실행하느니 아무 일도 안 한다(계약 §3.1).
+fn intentSurvivesGeneration(intent: UiIntent) bool {
+    return switch (intent) {
+        .remote_open => true,
+        else => false,
+    };
+}
+
+/// 뗄 때 그 누름의 뜻을 되돌린다. 없거나, 세대가 갈렸는데 살아남지 못하는 뜻이면 `null` 이다.
 fn takeUiIntent() ?UiIntent {
     const pr = ui_pressed orelse return null;
     ui_pressed = null;
-    return ui_table.resolve(pr.id, pr.gen);
+    if (pr.gen == ui_generation) return pr.intent;
+    return if (intentSurvivesGeneration(pr.intent)) pr.intent else null;
 }
 
 var set_row_rects: [set_items.len]SetRect = @splat(.{});
@@ -5316,11 +5333,9 @@ var set_diag_pressed = false;
 /// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
 var sess_gear_rect: SetRect = .{};
 var sess_row_rect: SetRect = .{};
-var sess_pressed: enum { none, gear, row, servers, remote_row } = .none;
 /// 누른 원격 줄의 index(누름 판정과 뗌 판정이 **같은 줄**을 봐야 한다 — 그 사이 목록이 갱신되면
 /// 좌표로 다시 찾은 줄은 다른 세션일 수 있다).
 /// 누른 원격 줄의 **id**(순번이 아니다 — 위 `openRemoteRow` 주석).
-var remote_pressed_id: ?[32]u8 = null;
 /// 서버 목록으로 들어가는 줄. **여기서 들어간다** — UX 계약(§2.1)은 서버 목록을 세션 목록
 /// *위*에 두지만, 뿌리를 바꾸면 앱이 뜨는 자리와 뒤로가기 스택이 함께 움직인다(그 재배치는
 /// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다. **첫 실행만 예외로 앱이 그
@@ -5423,7 +5438,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
         .set_size = sessSetSize(),
     });
     if (sess_row_rect.w > 0) {
-        if (sess_pressed == .row) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        if (uiPressed(registerAction(sess_row_rect, .sessions_terminal))) push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y), .w = @intFromFloat(sess_row_rect.w), .h = @intFromFloat(sess_row_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
         pushText(session_title, @intFromFloat(win.x + 16), @intFromFloat(top + (row_h - 17) / 2), 17, tk.get(.surface_fg));
         push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(top + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     }
@@ -5463,7 +5478,7 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     pushText(maru.i18n.tIn(.ko, .mob_sessions), @intFromFloat(win.x + 16), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
     sess_gear_rect = .{ .x = win.x + win.w - set_head_h, .y = win.y, .w = set_head_h, .h = set_head_h };
     noteA11y(sess_gear_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_settings) });
-    if (sess_pressed == .gear) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (uiPressed(registerAction(sess_gear_rect, .sessions_gear))) push(.{ .x = @intFromFloat(sess_gear_rect.x), .y = @intFromFloat(sess_gear_rect.y), .w = @intFromFloat(sess_gear_rect.w), .h = @intFromFloat(sess_gear_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
@@ -5644,8 +5659,19 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) f32 {
         // **안 보이는 줄은 안 그린다 — 그래도 «센다».** 예전에는 창을 넘는 순간 `return` 해서
         // 그 아래 세션이 통째로 사라졌다(맥에 탭이 열둘쯤 넘으면 닿을 수가 없었다). 지금은
         // 목록이 흐르므로 위로 지나간 줄도 아래로 남은 줄도 높이에 들어가야 상한이 맞는다.
-        if (sessVisible(y, row_h)) drawSessionRow(win, tk, row, y, row_h, remote_rows_drawn);
-        // **센 것은 «있는 줄» 이지 그린 줄이 아니다.** 이 수는 히트 판정(`remoteRowAt`)과
+        if (sessVisible(y, row_h)) {
+            drawSessionRow(win, tk, row, y, row_h, remote_rows_drawn);
+            // **붙을 수 없는 줄은 등록하지 않는다** — 눌리는 것처럼 보이고 아무 일도 안 나면
+            // 사용자는 고장으로 읽는다(옛 히트 판정이 `has_runtime` 으로 지키던 규칙).
+            if (row.has_runtime) {
+                _ = registerActionClipped(
+                    .{ .x = win.x, .y = y, .w = win.w, .h = row_h },
+                    sess_list,
+                    .{ .remote_open = row.runtime_id },
+                );
+            }
+        }
+        // **센 것은 «있는 줄» 이지 그린 줄이 아니다.** 이 수는 서술자·판정자가 쓰는데
         // 판정자가 쓰는데, 화면 밖 줄을 빼면 스크롤한 뒤 인덱스가 어긋난다.
         remote_rows_drawn += 1;
         y += row_h + 1;
@@ -5989,7 +6015,7 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32, y: f32) 
         return;
     }
     sess_servers_rect = .{ .x = win.x, .y = y, .w = win.w, .h = row_h };
-    if (sess_pressed == .servers) push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y), .w = @intFromFloat(sess_servers_rect.w), .h = @intFromFloat(sess_servers_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(sess_servers_rect, .sessions_servers))) push(.{ .x = @intFromFloat(sess_servers_rect.x), .y = @intFromFloat(sess_servers_rect.y), .w = @intFromFloat(sess_servers_rect.w), .h = @intFromFloat(sess_servers_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_servers), @intFromFloat(sess_servers_rect.x + 16), @intFromFloat(sess_servers_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     var cnt: [8]u8 = undefined;
     const cnt_text = std.fmt.bufPrint(&cnt, "{d}", .{servers().len}) catch "?";
@@ -7271,34 +7297,28 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 // **흐르는 목록을 세우려 짚었으면 줄을 안 누른다**(서버 목록·설정과 같은 규율).
                 const stopped = sess_touch.begin(pointer_id, y);
                 sess_press.begin(x, y, time_ms, stopped);
-                if (stopped) {
-                    sess_pressed = .none;
-                    remote_pressed_id = null;
-                    return 1;
+                ui_pressed = null;
+                if (stopped) return 1;
+                // **자리를 손으로 세지 않는다**(M12b). 뜻은 뗄 때 표가 되돌린다. 원격 줄은
+                // 그 뜻이 곧 **그 세션의 id** 이고(§4a), 붙을 수 없는 줄은 아예 등록되지
+                // 않으므로 여기서 다시 거를 것이 없다.
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                    }
                 }
-                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else blk: {
-                    // **원격 줄은 눌러서 그 화면을 연다**(§4a). 붙을 수 없는 줄(runtime id 가
-                    // 없는 것 — in-process Term)은 누름 표시도 안 준다: 눌리는 것처럼 보이고
-                    // 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
-                    remote_pressed_id = if (remoteRowAt(x, y)) |i| control_rows[i].runtime_id else null;
-                    break :blk if (remote_pressed_id != null) .remote_row else .none;
-                };
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(목록·키바와 같은 규칙).
-                if (sess_press.move(x, y)) {
-                    sess_pressed = .none;
-                    remote_pressed_id = null;
-                }
+                if (sess_press.move(x, y)) ui_pressed = null;
                 sess_touch.move(&sess_sa, pointer_id, y, @intFromFloat(@max(0, sess_max_scroll)));
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was = sess_pressed;
-                sess_pressed = .none;
+                const intent = takeUiIntent();
                 sess_touch.end(pointer_id, frame_dt_ms);
                 routeClear(); // 세션 목록은 한 손가락 화면이다 — 뗀 순간 끝이다
                 if (phase == 3) {
@@ -7306,20 +7326,21 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     return 1;
                 }
                 if (sess_press.end() != .tap) return 1;
-                switch (was) {
-                    .gear => {
+                switch (intent orelse return 1) {
+                    .sessions_gear => {
                         navPush(.settings);
                         set_sa.reset();
                         set_touch.cancel();
                     },
-                    .row => navPush(.terminal),
-                    .remote_row => openRemoteRow(),
-                    .servers => {
+                    .sessions_terminal => navPush(.terminal),
+                    .remote_open => |id| openRemoteRow(id),
+                    .sessions_servers => {
                         navPush(.servers);
                         srv_sa.reset();
                         srv_touch.cancel();
                     },
-                    .none => {},
+                    // 이 화면에 없는 뜻은 여기 올 수 없다 — 표가 그 프레임에 그린 것만 낸다.
+                    else => {},
                 }
                 return 1;
             },
@@ -7536,8 +7557,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 // 흐르던 목록을 세우려 짚은 손가락은 아무것도 안 누른 것이다(위 `stopped`).
                 // 다만 **머리의 「뒤로」는 목록 밖**이라 그 규율에 안 걸린다.
                 if (hitAction(x, y)) |id| {
-                    const is_back = if (ui_table.resolve(id, ui_generation)) |it| it == .servers_back else false;
-                    if (is_back or !stopped) ui_pressed = .{ .id = id, .gen = ui_generation };
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        // 흐르던 목록을 세우려 짚은 손가락은 아무것도 안 누른 것이다(위
+                        // `stopped`). 다만 **머리의 「뒤로」는 목록 밖**이라 그 규율에 안 걸린다.
+                        if (it == .servers_back or !stopped) {
+                            ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                        }
+                    }
                 }
                 return 1;
             },
@@ -7565,6 +7591,8 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     .server_edit => |i| openServerEdit(i),
                     .server_add => openServerEdit(null),
                     .server_open => |i| connectToServer(i),
+                    // 이 화면에 없는 뜻은 여기 올 수 없다 — 표가 그 프레임에 그린 것만 낸다.
+                    else => {},
                 }
                 return 1;
             },

@@ -9780,3 +9780,93 @@ test "kitty graphics: 부모 없는 relative placement 는 ENOENT — 그 거부
     try std.testing.expectEqual(@as(u32, 1), core.kitty_placements.items[0].placement_id);
     try std.testing.expectEqual(@as(u32, 0), core.kitty_placements.items[0].parent_image_id);
 }
+
+test "kitty relative placement: 부모가 virtual 이면 저장은 하되 그리지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [200]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,q=2;{s}\x1b\\", .{enc}));
+
+    // **판정자가 없던 갈래**(적대적 검증에서 발견). `ParentKind` 는 `normal` 과 `virtual_parent` 둘인데
+    // 뒤쪽 갈래를 아무도 안 재고 있었다. 가상 placement 는 화면 위치를 **코어가 모른다** — 위치는
+    // 화면에 찍힌 U+10EEEE placeholder 셀이 정한다. 그래서 그 자식의 절대 위치를 풀 수 없고,
+    // **엉뚱한 자리에 놓는 것보다 안 그리는 쪽**을 고른다.
+    //
+    // 이 갈래가 «부모 없음»(ENOENT 거부)과 다르다는 것이 핵심이다: 부모는 **있다**. 그래서 placement 는
+    // 저장되고(나중에 부모가 일반 placement 로 바뀌면 살아난다) 렌더 목록에서만 빠진다.
+    try core.write("\x1b_Ga=p,i=1,p=5,U=1,c=1,r=1,q=2\x1b\\"); // 가상 부모
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len); // 양성 대조
+    try core.write("\x1b_Ga=p,i=2,p=6,P=1,Q=5,H=1,q=2\x1b\\"); // 그 자식
+
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 저장은 된다(거부가 아니다)
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].image_id);
+    try std.testing.expectEqual(@as(usize, 0), core.renderSnapshot().placements.len); // 그리지는 않는다
+
+    // **양성 대조**: 부모가 일반 placement 면 같은 자식이 그려진다 — 게이트가 넓어 relative 를
+    // 통째로 못 그리게 만든 것이 아님을 같은 자리에서 증명한다.
+    try core.write("\x1b_Ga=p,i=1,p=7,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=p,i=2,p=8,P=1,Q=7,H=1,q=2\x1b\\");
+    var drawn_child = false;
+    for (core.renderSnapshot().placements) |v| {
+        if (v.placement_id == 8) drawn_child = true;
+    }
+    try std.testing.expect(drawn_child);
+}
+
+test "kitty graphics: 문서가 미지원이라 적은 갈래는 전부 ENOTSUPP 로 답한다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [200]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    core.clearResponse();
+
+    // **문서는 셋을 약속하는데 판정자는 하나만 재고 있었다**(적대적 검증에서 발견). 애니메이션은
+    // `a=f`(프레임 전송)·`a=a`(애니메이트)·`a=c`(합성) 셋인데 `a=a` 만 덮여 있었다. 하나가 조용히
+    // `.ok` 를 돌려주게 되면 앱은 애니메이션이 도는 줄 알고 다음 프레임을 계속 보낸다.
+    const expected = "\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\";
+    for ([_][]const u8{ "\x1b_Ga=f,i=1\x1b\\", "\x1b_Ga=a,i=1\x1b\\", "\x1b_Ga=c,i=1\x1b\\" }) |cmd| {
+        try core.write(cmd);
+        try std.testing.expectEqualStrings(expected, core.pendingResponse());
+        core.clearResponse();
+    }
+
+    // 전송 매체도 같다 — `t=d`(direct)만 구현하고 `f`(파일)·`t`(임시파일)·`s`(공유메모리)는 거부한다.
+    // 안 거부하면 payload 의 **경로 문자열을 픽셀로 오인**해 쓰레기를 디코드한다.
+    for ([_]u8{ 'f', 't', 's' }, [_]u32{ 300, 301, 302 }) |medium, id| {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gi={d},a=q,t={c},f=32,s=1,v=1;AAAA\x1b\\", .{ id, medium }));
+        try std.testing.expectEqualStrings(
+            try std.fmt.bufPrint(&b64, "\x1b_Gi={d};ENOTSUPP:unsupported graphics feature\x1b\\", .{id}),
+            core.pendingResponse(),
+        );
+        core.clearResponse();
+    }
+
+    // **양성 대조**: `t=d` 는 받아들인다 — 위 거부가 «전송을 통째로 막은 것» 이 아님을 증명한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gi=303,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\", .{}));
+    try std.testing.expectEqualStrings("\x1b_Gi=303;OK\x1b\\", core.pendingResponse());
+}
+
+test "OSC 99: 질의(p=?)에 답하지 않는다 — 확정 못 한 형식으로 답하지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 문서는 «답하지 않는다» 고 적어 두었는데 그것을 재는 판정자가 없었다. 응답 형식을 명세로
+    // 확정하지 못했고, 틀린 형식으로 답하면 앱이 없는 능력을 켠다 — 이 프로토콜에서 무응답은
+    // «지원 안 함» 의 정의된 신호라 침묵이 안전하다. 나중에 누가 «답이라도 주자» 며 아무 바이트나
+    // 흘리면 그 바이트가 셸 입력에 섞인다.
+    try core.write("\x1b]99;i=9:p=?;\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
+    try std.testing.expect(!core.notification_pending);
+
+    // **양성 대조**: 같은 core 가 응답을 낼 수 있다는 것을 증명한다 — 응답 경로가 통째로 죽어 있어도
+    // 위 «0 바이트» 는 통과하기 때문이다(적대적 검증에서 이 모양을 훑다 나온 자리다).
+    try core.write("\x1b[6n"); // CPR
+    try std.testing.expect(core.pendingResponse().len > 0);
+}

@@ -164,6 +164,10 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },
     .{ .path = "src/platform/macos/glyph_text_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/metal_smoke.zig", .count = 1 },
+    // `@compileError` 두 조각. **표시가 아니라 개발자용 컴파일 진단**이라 번역 대상이 아니다 —
+    // 이 저장소의 다른 `@compileError` 도 한국어다. 늦게 추가한 handoff tag 를 필수로 두면
+    // 업그레이드가 통째로 막히는데(2026-09-10 실측), 그 규칙을 주석이 아니라 컴파일 오류로 옮긴 자리다.
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .count = 2 },
     .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .count = 1 },
     .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 3 },
     .{ .path = "src/platform/macos/session_host/remote_screen.zig", .count = 2 },
@@ -259,7 +263,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 221;
+const header_total = 223;
 const header_config_total = 54;
 
 comptime {

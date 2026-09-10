@@ -1217,6 +1217,19 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     var seq: [96]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
 
+    // **유니코드 placeholder(U=1) 축도 태운다.** `virtual_placements` 는 parity 비교 목록에 있었지만
+    // 픽스처가 하나도 안 만들어 «0 == 0» 으로 헛통과하고 있었다(적대적 검증 실측). 원격 wire 가
+    // 가상 placement 를 통째로 안 실어도 parity 가 초록이던 자리다.
+    //
+    // 이미지 id 를 **24비트보다 크게** 잡는다(0x0100_0007). placeholder 는 하위 24비트를 전경색 RGB 로,
+    // **최상위 바이트를 셋째 diacritic** 으로 싣는다 — 그 셋째가 원격 경로에서 유실되면 id 가 어긋나
+    // 이미지가 아예 안 뜬다. `I=`(image number)로 배정되는 id 가 늘 이 대역이라 실제 경로다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=16777223,q=2;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=16777223,U=1,c=1,r=1,q=2\x1b\\");
+    // placeholder 셀: 전경색 = 하위 24비트(0,0,7), 결합 문자 셋 = 타일 행 0 · 열 0 · id 상위 바이트 1.
+    // 0x0305 는 diacritic 표의 0번, 0x030D 는 1번이다(renderer `row_column_diacritics`).
+    try core.write("\r\n\x1b[38;2;0;0;7m\u{10EEEE}\u{0305}\u{0305}\u{030D}\x1b[0m");
+
     // 원격 파이프라인: 투영 → 조립 → 격자.
     const p = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 7 });
     defer allocator.free(p);
@@ -1237,6 +1250,12 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     // 링크 축도 같은 이유로 non-empty를 보장한다 — 원격이 링크를 통째로 안 실어도 "둘 다 0개"로 헛통과하면
     // 이 회귀(host-backed에서 밑줄 무동작)를 parity가 못 잡는다.
     try testing.expect(grid.renderSnapshot().links.len > 0);
+    // 같은 이유로 **가상 placement 와 다중 결합 문자**도 non-empty 를 보장한다 — 이 둘이 비면
+    // 아래 parity 는 「둘 다 0개」로 헛통과한다(이 판정자가 실제로 그 상태였다).
+    try testing.expect(local.virtual_placements.len > 0);
+    var max_extras: usize = 0;
+    for (local.graphemes) |g| max_extras = @max(max_extras, g.len);
+    try testing.expect(max_extras >= 3); // placeholder 의 행·열·id 상위 바이트 셋
     try expectSnapshotParity(&core, local, grid.renderSnapshot());
 }
 

@@ -247,13 +247,23 @@ fn keypadSs3(codepoint: u21) ?[]const u8 {
 /// **`report_all`(8)이 켜지면 그 예외가 사라진다** — 명세가 요구하는 대로 모든 키가 escape code 로
 /// 나간다. 그때는 Enter/Tab/Backspace·평문 문자의 release 도 함께 보고된다(아래 침묵 규칙 참조).
 fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
-    // report_events(flag 2)가 켜졌으면 press 외의 이벤트도 인코딩한다. 안 켜졌으면 **release/repeat 은
-    // 아예 안 내보낸다** — 앱이 요청하지 않은 이벤트를 보내면 입력이 두 배로 들어간 것처럼 보인다.
+    // report_events(flag 2)가 켜졌으면 press 외의 이벤트도 인코딩한다. 안 켜졌으면 **release 만**
+    // 안 내보낸다 — 앱이 요청하지 않은 이벤트를 보내면 입력이 두 배로 들어간 것처럼 보인다.
+    //
+    // ⚠️ **repeat 은 버리지 않는다.** 명세가 그 자리를 그대로 적는다 — *"Normally only key press events
+    // are reported and key repeat events are treated as key press events."* 즉 flag 2 가 꺼져 있을 때
+    // repeat 의 답은 「침묵」이 아니라 **「press 와 같은 바이트」** 다. 아래 `encodeKittySeqFull` 의
+    // `with_event = report_events and event != .press` 가 sub-field 를 flag 2 에서만 붙이므로, 여기서
+    // 통과시키기만 하면 바이트가 저절로 press 와 같아진다.
+    //
+    // 여기서 `!= .press` 로 막았을 때 **kitty 를 켠 앱에서 키를 누르고 있어도 한 번만 먹었다**(사용자
+    // 제보: 백스페이스를 누르고 있는데 한 글자만 지워짐). legacy 경로는 같은 규칙을 이미 지키고 있어
+    // (위 `encodeKey` 의 release 게이트 주석) 원격 pane 에서는 멀쩡했고, 그래서 증상이 로컬에만 났다.
     const report_events = (options.kitty_flags & 0b00010) != 0;
     const report_alternates = (options.kitty_flags & 0b00100) != 0;
     const report_all = (options.kitty_flags & 0b01000) != 0;
     const report_associated = (options.kitty_flags & 0b10000) != 0;
-    if (event.event_type != .press and !report_events) return buffer[0..0];
+    if (event.event_type == .release and !report_events) return buffer[0..0];
 
     const has_ctrl_alt = event.modifiers.control or event.modifiers.option or event.modifiers.command;
     const has_any_mod = has_ctrl_alt or event.modifiers.shift;
@@ -859,6 +869,8 @@ test "encodeKey: xterm legacy 수식자 — Ctrl+화살표가 단어 이동으�
 
 test "encodeKey kitty report_events: release/repeat 는 CSI u 키만, legacy·텍스트는 침묵" {
     var buf: [encoded_key_buffer_len]u8 = undefined;
+    // press 와 repeat 을 같은 호출 안에서 비교하려면 버퍼가 둘이어야 한다(둘째 호출이 첫 결과를 덮는다).
+    var buf2: [encoded_key_buffer_len]u8 = undefined;
     const on: EncodeOptions = .{ .kitty_flags = 0b00011 }; // disambiguate + report_events
     const off: EncodeOptions = .{ .kitty_flags = 0b00001 }; // disambiguate 만
 
@@ -889,10 +901,16 @@ test "encodeKey kitty report_events: release/repeat 는 CSI u 키만, legacy·�
     // 단 수식자가 붙으면 그 키들도 CSI u 로 나가므로 release 가 보고된다.
     try std.testing.expectEqualStrings("\x1b[13;2:3u", try encodeKey(.{ .key = .enter, .modifiers = .{ .shift = true }, .event_type = .release }, &buf, on));
 
-    // **flag 를 안 켜면 release/repeat 은 아예 안 나간다** — 요청하지 않은 이벤트를 보내면 앱이
-    // 입력을 두 배로 받는다.
+    // **flag 를 안 켜면 release 는 아예 안 나간다** — 요청하지 않은 이벤트를 보내면 앱이 입력을 두 배로
+    // 받는다.
     try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .escape, .event_type = .release }, &buf, off));
-    try std.testing.expectEqualStrings("", try encodeKey(.{ .key = .arrow_up, .event_type = .repeat }, &buf, off));
+    // **그러나 repeat 은 press 와 같은 바이트로 나간다**(명세: "key repeat events are treated as key press
+    // events"). 여기서 침묵시키면 kitty 를 켠 앱에서 키를 누르고 있어도 한 번만 먹는다.
+    try std.testing.expectEqualStrings(
+        try encodeKey(.{ .key = .arrow_up }, &buf2, off),
+        try encodeKey(.{ .key = .arrow_up, .event_type = .repeat }, &buf, off),
+    );
+    try std.testing.expectEqualStrings("\x7f", try encodeKey(.{ .key = .backspace, .event_type = .repeat }, &buf, off));
     // 그때도 press 는 평소대로 나간다.
     try std.testing.expectEqualStrings("\x1b[27u", try encodeKey(.{ .key = .escape }, &buf, off));
 }

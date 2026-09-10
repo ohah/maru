@@ -2572,6 +2572,10 @@ fn caretMargin(want: u32, visible: usize) usize {
 }
 
 fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
+    // **순서를 바꾼 변이는 살아남는 것이 정상이다**(7회차 T6): 두 축이 서로의 값을 안 읽는다 —
+    // 가로는 렌더가 굳힌 `content_width` 와 `max_cols` 를, 세로는 줄 배열과 `first_line` 을 본다.
+    // 그래도 세로를 먼저 적는 이유는 뜻이다 — 접힌 줄을 펴는 쪽이 세로이고, 그것이 「어느 줄이
+    // 보이는가」를 바꾼다. 가로가 그 결과를 읽게 되는 날 순서가 규칙이 된다.
     revealPrimaryCaretRows(self, term, 0);
     revealPrimaryCaretCols(self, term, 0, 0);
 }
@@ -2696,6 +2700,12 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
             want0 = (hi + 1) -| fallback_rows;
         } else return;
         // **아래 갈래와 같은 상한을 쓴다** — 여백 때문에 문서 밖을 보여 주지 않는다.
+        // **이 상한을 무엇으로 재든 답이 같은 것이 정상이다**(7회차 T2 — 문서 줄 수로 바꿔도
+        // 살아남는다): 절반 clamp 가 `m0 <= (fallback_rows - 1) / 2` 를 보장하므로
+        // `want0 = row + m0 + 1 - fallback_rows <= row` 이고, 어느 상한도 `row` 보다 크다.
+        // 그래도 접힘 반영 길이를 쓰는 이유는 **출처**다 — `first_line` 은 보이는 배열의
+        // 첨자이고(`scrollLines` 가 같은 근거로 같은 값을 쓴다), 문서 줄 수를 쓰면 접힌
+        // 문서에서 이 값이 배열 밖을 가리키는 날이 온다.
         want0 = @min(want0, maxFirstLine(editorLines(term).len, fallback_rows, term));
         if (want0 != top0) setEditorTop(self, term, want0);
         return;
@@ -2721,6 +2731,9 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
     const top = term.rt.editor_first_line;
     const margin = caretMargin(self.loaded_config.config.editor.cursor_surrounding_lines, drawn);
     const lower = row -| margin; // 이 줄이 맨 위보다 위에 있어야 위 여백이 선다
+    // **포화 덧셈을 보통 덧셈으로 바꾼 변이는 살아남는 것이 정상이다**(7회차 T1): `row` 는 줄
+    // 인덱스이고 `margin` 은 설정 상한 64 이하라 `usize` 에서 넘길 수 없다. 그럼에도 `+|` 인
+    // 이유는 뜻이다 — 이 식은 「화면 밖으로 나갔나」를 묻는 것이라 넘칠 때도 답이 「나갔다」다.
     const upper = row +| margin; // 이 줄이 마지막보다 위에 있어야 아래 여백이 선다
 
     var want: usize = top;
@@ -15421,7 +15434,33 @@ test "SOFF6 가로 여백은 기본이 0 이고, 켜면 열이 남는다 (제품
         try testing.expectEqual(@as(u16, 39 - 8), term.rt.editor_first_col);
     }
 
-    // ⑸ **랩이면 아무 일도 안 한다** — 가로 축 자체가 없다.
+    // ⑸ **절반 clamp 의 기준은 «지금 화면 폭» 이다.** 고정 수로 묶으면 화면이 좁을 때 여백이
+    //    화면을 넘어 caret 이 화면 밖으로 밀린다 — 픽스처의 화면이 늘 넉넉하면 두 답이 같아
+    //    변이가 산다(적대적 검증 7회차 T5). 큰 값을 줘 **가운데**가 나오는지로 기준을 잰다.
+    {
+        fx.session.loaded_config.config.editor.cursor_surrounding_columns = 1000;
+        term.rt.editor_first_col = 0;
+        term.rt.editor_selection = editor_selection.Selection.at(5);
+        if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
+        const half: u32 = (@as(u32, visible) - 1) / 2;
+        const scroll_w = term.rt.editor_max_cols + fx.session.loaded_config.config.editor.scroll_beyond_last_column;
+        const max_col = @min(scroll_w -| @as(u32, visible), @as(u32, chrome_editor.frame.max_first_col));
+        // caret 은 600 열 줄 끝이라 표시 열이 600 이다(0-based 로 그 칸).
+        const want = @min(600 + half + 1 - @as(u32, visible), max_col);
+        try testing.expectEqual(@as(u16, @intCast(want)), term.rt.editor_first_col);
+
+        // **왼쪽 가지도 같은 clamp 을 받는다.** 오른쪽에서만 재면 왼쪽이 설정값을 날것으로 쓰는
+        // 변이가 산다(적대적 검증 9회차 V4) — 그러면 좁은 화면에서 왼쪽으로 갈 때마다 맨 앞으로
+        // 튄다. 여백 8·화면 88 열에서는 `min(8, 43) = 8` 이라 두 답이 같아 안 갈린다.
+        const long_line2 = term.rt.editor_doc.?.file.lines.line(1).?;
+        term.rt.editor_selection = editor_selection.Selection.at(long_line2.start + 400);
+        if (!moveCarets(fx.session, term, .char_left, false)) return error.MoveRejected;
+        try testing.expectEqual(@as(u16, @intCast(399 - half)), term.rt.editor_first_col);
+
+        fx.session.loaded_config.config.editor.cursor_surrounding_columns = 8;
+    }
+
+    // ⑹ **랩이면 아무 일도 안 한다** — 가로 축 자체가 없다.
     term.rt.editor_wrap = true;
     term.rt.editor_first_col = 0;
     term.rt.editor_selection = editor_selection.Selection.at(5);
@@ -15495,6 +15534,26 @@ test "SOFF9 편집 경로도 여백을 지킨다 — 스냅숏이 비어 있는 
     term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, db - m - 2));
     if (!insertText(fx.session, term, "\n\n")) return error.InsertRejected;
     try testing.expectEqual(@as(usize, 1), term.rt.editor_first_line);
+
+    // **절반 clamp 의 기준은 «편집 전 행 수» 다.** 고정 수로 묶으면 좁은 화면에서 여백이 화면을
+    // 넘어 caret 이 밖으로 밀린다 — 기본값 5 와 이 픽스처의 화면(34행)에서는 `(34-1)/2 = 16 >= 5`
+    // 라 두 답이 같아 변이가 산다(적대적 검증 8회차 U3). 큰 값을 줘 **가운데**가 나오는지로 잰다.
+    {
+        var fc = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        fc.dl.deinit(allocator);
+        const rows_before = drawnDocLines(term);
+        const half = (rows_before -| 1) / 2;
+        if (half <= m) return error.FixtureViewport; // 두 답이 겹치면 못 가른다
+        fx.session.loaded_config.config.editor.cursor_surrounding_lines = 1000;
+        term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, term.rt.editor_first_line + rows_before - 2));
+        if (!insertText(fx.session, term, "\n\n\n")) return error.InsertRejected;
+        // **caret 행은 세지 말고 읽는다** — 다시 세면 그것이 판정자의 두 번째 출처가 된다.
+        const dl: u32 = @intCast(term.rt.editor_doc.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
+        const row = visibleRowOfDocLine(term, dl) orelse return error.NoRow;
+        const want = @min((@as(usize, row) + 1 + half) -| rows_before, maxFirstLine(editorLines(term).len, rows_before, term));
+        try testing.expectEqual(want, term.rt.editor_first_line);
+        fx.session.loaded_config.config.editor.cursor_surrounding_lines = @intCast(m);
+    }
 
     // **위쪽 가지도 같은 값을 쓴다** — 아래쪽만 재면 위 가지를 지운 변이가 산다(1회차 M17).
     // 굴려 둔 자리에서 위 여백 안으로 들어가는 편집(줄 지우기)을 한다.

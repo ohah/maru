@@ -699,6 +699,11 @@ pub const Provider = struct {
         const tree = self.tree orelse return;
 
         // **접을 종류가 없으면 여기서 끝난다** — 그 언어는 들여쓰기 층이 그대로 산다(§4.1f).
+        //
+        // **「없음」은 오류가 아니다** — 위 `tree == null` 과 같은 부류다(`SYN20`). 그리고 이 갈래를
+        // 오류로 바꾼 변이는 **살아남는 것이 정상이다**(적대적 검증 Y4b): 번들한 열여덟이 전부
+        // 종류를 갖고 있어 오늘 닿지 않는다. 그 상태를 지키는 것은 `SYN21` 이다 — 종류 없는 언어를
+        // 더하면 그 판정자가 먼저 깨진다.
         const kinds = self.slot.fold_kinds;
         if (kinds.len == 0) return;
 
@@ -717,6 +722,13 @@ pub const Provider = struct {
             const ep = c.ts_node_end_point(node);
             if (ep.row > sp.row and hasKind(kinds, c.ts_node_type(node))) {
                 const gop = try best.getOrPut(allocator, sp.row);
+                // **비교를 지우고 「첫 후보만」으로 바꾼 변이는 살아남는 것이 정상이다**
+                // (적대적 검증 Y8e): 이 순회가 **전위**라 조상을 먼저 보고, 같은 줄에서
+                // 시작하는 두 여러-줄 노드는 **반드시 조상–자손**이다(형제라면 앞 형제가 그
+                // 줄에서 끝나야 하고 그러면 한 줄짜리라 후보가 아니다). 조상의 끝 줄이 늘
+                // 자손 이상이므로 「첫 후보」와 「가장 긴 것」이 같은 답이다. 그래도 «가장
+                // 긴 것»으로 적는 이유는 뜻이다 — 순회 방식이 바뀌어도(질의 기반 등) 규칙이
+                // 그대로 서고, 그때 이 줄을 다시 생각할 필요가 없다.
                 if (!gop.found_existing or gop.value_ptr.* < ep.row) gop.value_ptr.* = ep.row;
             }
 
@@ -1442,6 +1454,42 @@ test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "SYN29 같은 줄에서 시작하면 «가장 긴 것» 하나만 남는다 (§4.1f)" {
+    // **gutter 화살표는 줄마다 하나다.** 그래서 시작 줄마다 후보가 하나여야 하고, 여럿이면
+    // "이 화살표가 무엇을 접는가"가 정해지지 않는다 — 이 함수의 머리말이 그 근거를 적는다.
+    // **어느 것을 남기느냐가 규칙이다**: 짧은 쪽을 남기면 화살표를 눌러도 바깥 블록이 안 접혀
+    // 「접었는데 그대로」로 보인다. 판정자가 없어 그 변이가 살아남았다(적대적 검증 Y8).
+    const allocator = std.testing.allocator;
+    // **바깥과 안쪽이 «같은 줄에서» 시작하고 «다른 줄에서» 끝나야 두 뜻이 갈린다** — 끝이 같으면
+    // 긴 쪽과 짧은 쪽의 답이 같아 픽스처가 개념을 안 가른다. 처음에 `} };` 로 닫는 세 줄짜리를
+    // 썼다가 실측으로 걸렸다: 안쪽과 바깥이 **같은 줄에서 끝나** 스팬이 `(0,2)` 하나뿐이었고,
+    // 「짧은 쪽을 남긴다」 변이가 그대로 살아남았다. 바깥이 안쪽보다 **더 내려가야** 한다.
+    const src =
+        \\const a = .{ .x = .{
+        \\    1,
+        \\},
+        \\    .y = 2,
+        \\};
+        \\const b = 3;
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer spans.deinit(allocator);
+    try prov.foldSpans(allocator, &spans);
+
+    // 0행에서 시작하는 것은 **하나**이고, 그것이 **바깥**(4행까지)이다 — 안쪽은 2행에서 끝난다.
+    var found: usize = 0;
+    var end_row: u32 = 0;
+    for (spans.items) |sp| {
+        if (sp.start_row != 0) continue;
+        found += 1;
+        end_row = sp.end_row;
+    }
+    try std.testing.expectEqual(@as(usize, 1), found);
+    try std.testing.expectEqual(@as(u32, 4), end_row); // 안쪽(2행)이 아니라 바깥이다
 }
 
 test "SYN28 접힘 범위는 할당 실패를 «보고»한다 — 빈 목록으로 떨어지지 않는다 (§4·§5)" {

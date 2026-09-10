@@ -5121,6 +5121,12 @@ fn ensureMaxCols(term: *Term, right: bool) void {
         var max_cached: u32 = 0;
         if (term.rt.editor_visible_numbers.len > 0) {
             // 접혀 있다 — **보이는 줄만** 고른다. gutter 번호가 1-based 라 하나 뺀다.
+            // **아래 둘은 방어이지 판정할 수 없다**(적대적 검증 N4·N5 — 둘 다 살아남는 것이
+            // 정상이다): 번호가 `null` 인 꼬리 행과 범위 밖 번호는 `rebuildVisible` 이 **구간 합과
+            // 실제가 어긋날 때만** 만드는 것이라(그 함수가 "상태와 범위가 잠시 갈릴 때"라고 적었다)
+            // 오늘 관측되지 않는다. 그래도 두는 이유는 그 어긋남이 **조용한 오답이 아니라 아무
+            // 일도 아니게** 만들기 위해서다 — 빈 행을 1번 줄로 읽으면 상한이 엉뚱한 줄에서 나오고,
+            // 범위를 안 묶으면 배열 밖을 읽는다.
             for (term.rt.editor_visible_numbers) |maybe| {
                 const num = maybe orelse continue; // 꼬리를 채운 빈 행
                 const idx = num - 1;

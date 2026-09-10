@@ -483,6 +483,18 @@ fn connectToServer(i: usize) void {
 }
 
 /// 지금 들고 있는 서버 목록. config 를 안 읽었으면 빈 목록이다.
+/// 파싱된 config 를 화면이 보는 값으로 갈아 끼운다.
+///
+/// **이 한 자리를 지나야 한다.** 목록이 바뀌는데 세대가 안 오르면 늦게 도착한 손가락이 엉뚱한
+/// 줄을 연다(M12a). 대입을 **세 자리가 각자** 하고 있었고, 세대를 `writeServers` 에만 달았더니
+/// **`load_config` 로 목록이 통째로 바뀌는 길이 그대로 뚫려 있었다** — 판정자가 그것을 잡았다.
+/// 데스크톱이 같은 짝을 호출 규약에 맡겼다가 겪은 일과 같은 모양이라, 대입 자체를 길목으로 만든다.
+fn applyParsedConfig(next: mobile_config.Parsed) void {
+    if (cfg_parsed) |*old| old.deinit();
+    cfg_parsed = next;
+    bumpUiGeneration();
+}
+
 fn servers() []const mobile_config.Server {
     // **포인터로 잡는다.** 값으로 캡처하면 `Parsed` 를 통째로 스택에 복사하고, 돌려주는
     // 슬라이스가 **그 복사본**을 가리킨다 — 함수가 끝나면 사라지는 자리다. 값 하나만 읽을
@@ -497,8 +509,7 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
         setLastError("config_parse");
         return;
     };
-    if (cfg_parsed) |*old| old.deinit();
-    cfg_parsed = next;
+    applyParsedConfig(next);
     // **원격 세션이 없을 때만 온전한 첫 서버를 자동으로 요청한다**(임시 — S9b-2b 가 이 자리를
     // 화면 탭으로 바꾼다). 두 조건이 다 필요하다.
     //
@@ -782,8 +793,7 @@ fn settingChangedText(row: mobile_config.Row, text: []const u8) void {
         setLastError("config_parse");
         return;
     };
-    if (cfg_parsed) |*old_parsed| old_parsed.deinit();
-    cfg_parsed = parsed;
+    applyParsedConfig(parsed);
     if (term_core) |*core| applyConfigToCore(core);
     if (cfg_write.len > 0) term_allocator.free(cfg_write);
     cfg_write = term_allocator.dupe(u8, cfg_source) catch blk: {
@@ -4964,6 +4974,9 @@ fn screenTop() Screen {
 
 /// 화면을 민다. 스택이 꽉 차면 안 민다(그럴 일은 없지만 조용히 덮어쓰는 것보다 낫다).
 fn navPush(s: Screen) void {
+    // 화면이 바뀌면 누를 자리가 통째로 바뀐다 — 앞 화면을 보고 누른 손가락이 뒤 화면의 명령을
+    // 실행하면 안 된다(M12a).
+    bumpUiGeneration();
     if (nav_len >= nav.len) return;
     nav[nav_len] = s;
     nav_len += 1;
@@ -4972,6 +4985,7 @@ fn navPush(s: Screen) void {
 
 /// 한 장 뺀다. **뿌리는 안 뺀다** — 스택이 비면 그릴 화면이 없다.
 fn navPop() void {
+    bumpUiGeneration();
     if (nav_len > 1) nav_len -= 1;
     syncKeyboardForScreen();
 }
@@ -5018,6 +5032,86 @@ fn setItemH(i: usize) f32 {
 const SetRect = struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 };
 fn setHit(r: SetRect, x: f32, y: f32) bool {
     return r.w > 0 and r.h > 0 and x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h;
+}
+
+// ── 누름은 표를 지난다 (M12a) ────────────────────────────────────────────────
+//
+// **누를 수 있는 자리는 «무엇을 하는지» 로 등록한다** — 좌표도 순번도 아니다. 그리는 순서대로
+// `append` 해서 id 를 받고, 뗄 때 `resolve(id, 세대)` 가 그 뜻을 되돌린다. 세대가 안 맞으면
+// `null` 이라 **옛 화면을 보고 누른 손가락이 새 명령을 실행하지 못한다**(계약 §3.1).
+//
+// **표는 chrome 것을 그대로 쓴다** — `chrome/ui/intent_table.zig`. 같은 일을 두 벌로 하지 않는
+// 것이 이 슬라이스의 전부다. 브리지가 더 보태는 것은 「사각형 → id」 등록부 하나뿐이다.
+const UiIntent = union(enum) {
+    servers_back,
+    server_open: usize,
+    server_edit: usize,
+    server_add,
+};
+
+const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
+/// 한 화면이 동시에 내놓는 누를 자리의 상한. 목록이 길어도 **보이는 줄만** 등록하므로
+/// 화면에 들어가는 수가 상한이다.
+const ui_action_cap = 64;
+var ui_entries: [ui_action_cap]UiTable.Entry = undefined;
+var ui_table = UiTable.init(&ui_entries);
+var ui_rects: [ui_action_cap]SetRect = @splat(.{});
+
+/// **세대는 «내용이 바뀔 때» 만 오른다.** 그리면서 올리면 그 프레임의 누름이 전부 거부된다 —
+/// 데스크톱이 같은 자리에서 값을 치렀고 그 지식이 `bumpScmDockGeneration` 주석에 남아 있다.
+/// 데스크톱이 함께 세워야 했던 「다시 그리기」는 여기서 공짜다: `maru_mobile_build` 가 매
+/// 프레임 돌아 표가 반드시 다음 프레임에 다시 발행된다.
+var ui_generation: u64 = 1;
+var ui_pressed: ?struct { id: u64, gen: u64 } = null;
+
+fn bumpUiGeneration() void {
+    ui_generation +%= 1;
+    if (ui_generation == 0) ui_generation = 1;
+}
+
+/// 그 프레임의 등록을 비운다. 그리기 **전에** 부른다.
+fn resetUiActions() void {
+    ui_table = UiTable.init(&ui_entries);
+    ui_rects = @splat(.{});
+}
+
+/// 누를 수 있는 자리 하나를 등록하고 그 id 를 준다. **빈 사각형은 등록하지 않는다** — 화면
+/// 밖인데 눌리는 것을 막는다(설정 목록에서 겪은 결함과 같은 자리).
+fn registerAction(r: SetRect, intent: UiIntent) u64 {
+    if (r.w <= 0 or r.h <= 0) return 0;
+    const act = ui_table.append(ui_generation, intent, true) catch {
+        // **조용히 흘리지 않는다.** 자리가 모자라면 그 화면의 일부가 «안 눌리는» 채로 남고,
+        // 사용자에게는 고장으로 보인다 — 진단이 그 이름을 들고 있어야 찾을 수 있다.
+        setLastError("ui_action_table_full");
+        return 0;
+    };
+    ui_rects[act.id - 1] = r;
+    return act.id;
+}
+
+/// 그 좌표의 자리. **나중에 등록된 것이 이긴다** — 나중에 그린 것이 위에 있다.
+fn hitAction(x: f32, y: f32) ?u64 {
+    var i = ui_table.slice().len;
+    while (i > 0) {
+        i -= 1;
+        if (setHit(ui_rects[i], x, y)) return @as(u64, i) + 1;
+    }
+    return null;
+}
+
+/// 지금 눌려 있는 자리인가(그릴 때 강조를 켜는 판정). **세대가 다르면 아니다** — 내용이
+/// 바뀐 뒤에도 강조가 남으면 사용자는 엉뚱한 줄이 눌린 줄로 읽는다.
+fn uiPressed(id: u64) bool {
+    if (id == 0) return false;
+    const pr = ui_pressed orelse return false;
+    return pr.id == id and pr.gen == ui_generation;
+}
+
+/// 뗄 때 그 누름의 뜻을 되돌린다. 세대가 어긋났거나 그 사이 자리가 사라졌으면 `null` 이다.
+fn takeUiIntent() ?UiIntent {
+    const pr = ui_pressed orelse return null;
+    ui_pressed = null;
+    return ui_table.resolve(pr.id, pr.gen);
 }
 
 var set_row_rects: [set_items.len]SetRect = @splat(.{});
@@ -6135,6 +6229,8 @@ fn deleteServerDraft() void {
 }
 
 /// 목록을 파일 본문에 반영하고 저장 요청을 세운다(설정 값 저장과 같은 순서).
+///
+/// 세대는 여기서 안 올린다 — 아래가 `applyParsedConfig` 를 지나고 **그 자리가 주인**이다(M12a).
 fn writeServers(list: []const mobile_config.Server) void {
     const next = mobile_config.withServers(term_allocator, cfg_source, list) catch {
         setLastError("config_write_build");
@@ -6147,8 +6243,7 @@ fn writeServers(list: []const mobile_config.Server) void {
         setLastError("config_parse");
         return;
     };
-    if (cfg_parsed) |*old_parsed| old_parsed.deinit();
-    cfg_parsed = parsed;
+    applyParsedConfig(parsed);
     if (cfg_write.len > 0) term_allocator.free(cfg_write);
     cfg_write = term_allocator.dupe(u8, cfg_source) catch blk: {
         setLastError("config_write_alloc");
@@ -6189,15 +6284,11 @@ var srv_sa: scroll_area.State = .{};
 var srv_touch: scroll_area.Touch = .{};
 var srv_max_scroll: f32 = 0;
 var srv_back_rect: SetRect = .{};
-var srv_back_pressed = false;
 var srv_row_rects: [mobile_config.max_servers]SetRect = @splat(.{});
 /// 줄 오른쪽의 **편집** 자리(목록 화면). 접속과 편집을 같은 탭에 얹으면 하나는 못 쓴다.
 var srv_edit_rects_in_list: [mobile_config.max_servers]SetRect = @splat(.{});
 var srv_add_rect: SetRect = .{};
-var srv_add_pressed = false;
 /// 이번 짚음이 닿은 **편집** 자리(목록 화면).
-var srv_edit_hit: ?usize = null;
-var srv_pressed: ?usize = null;
 var srv_press: gesture.Press = .{};
 var srv_last_y: f32 = 0;
 
@@ -6217,8 +6308,9 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
 
     // ── 헤더: 뒤로 + 제목(설정 화면과 같은 모양 — 두 화면이 다르게 굴면 매번 시험해 봐야 한다)
     srv_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
+    const srv_back_id = registerAction(srv_back_rect, .servers_back);
     noteA11y(srv_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (srv_back_pressed) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (uiPressed(srv_back_id)) push(.{ .x = @intFromFloat(srv_back_rect.x), .y = @intFromFloat(srv_back_rect.y), .w = @intFromFloat(srv_back_rect.w), .h = @intFromFloat(srv_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
@@ -6272,7 +6364,7 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
                     .role = .button,
                     .label = maru.i18n.tIn(.ko, .mob_server_add),
                 });
-                if (srv_add_pressed) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry_add), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+                if (uiPressed(registerAction(srv_add_rect, .server_add))) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry_add), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
                 pushText(maru.i18n.tIn(.ko, .mob_server_add), @intFromFloat(srv_list.x + set_pad_x), @intFromFloat(ry_add + (srv_row_h - 17) / 2), 17, tk.get(.accent_bar));
             } else srv_add_rect = .{};
             break;
@@ -6282,7 +6374,9 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         // **안 보이는 행은 rect 를 안 남긴다** — 남기면 화면 밖인데 눌린다(설정 목록에서 겪었다).
         if (ry + srv_row_h < srv_list.y or ry > srv_list.y + srv_list.h) continue;
         srv_row_rects[i] = .{ .x = srv_list.x, .y = ry, .w = srv_list.w, .h = srv_row_h };
-        if (srv_pressed == i) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+        // **줄을 먼저, 편집을 나중에 등록한다** — 나중에 등록된 것이 이기므로 줄 위에 얹힌
+        // 편집 자리가 먼저 잡힌다(옛 코드가 «편집을 먼저 본다» 로 지키던 것과 같은 뜻이다).
+        if (uiPressed(registerAction(srv_row_rects[i], .{ .server_open = i }))) push(.{ .x = @intFromFloat(srv_list.x), .y = @intFromFloat(ry), .w = @intFromFloat(srv_list.w), .h = @intFromFloat(srv_row_h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
 
         var name_buf: [96]u8 = undefined;
         const label = serverLabel(srv, &name_buf);
@@ -6295,6 +6389,7 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
         // **줄 오른쪽은 편집이다.** 탭이 접속인 자리에서 편집까지 같은 탭에 얹으면 둘 중
         // 하나는 못 쓴다 — 길게 누르기는 발견하기 어려워(숨은 기능) 눈에 보이는 자리를 준다.
         srv_edit_rects_in_list[i] = .{ .x = srv_list.x + srv_list.w - 88, .y = ry, .w = 88, .h = srv_row_h };
+        _ = registerAction(srv_edit_rects_in_list[i], .{ .server_edit = i });
         pushText(maru.i18n.tIn(.ko, .mob_server_edit_short), @intFromFloat(srv_list.x + srv_list.w - 88 + 16), @intFromFloat(ry + (srv_row_h - 15) / 2), 15, tk.get(.accent_bar));
 
         // **지문이 없는 것은 오류가 아니다** — 처음 붙는 서버다(누르면 지문을 보여 주고 묻는다).
@@ -7435,52 +7530,27 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 // 흐르는 목록을 세우려 짚었는데 그 자리 서버에 붙으면 안 된다(키바·설정과 같은 규율).
                 const stopped = srv_touch.begin(pointer_id, y);
                 srv_press.begin(x, y, time_ms, stopped);
-                srv_back_pressed = setHit(srv_back_rect, x, y);
-                srv_pressed = null;
-                srv_edit_hit = null;
-                srv_add_pressed = false;
-                if (!srv_back_pressed and !stopped) {
-                    // **편집 자리를 먼저 본다** — 줄 전체가 접속이라 나중에 보면 영영 안 걸린다.
-                    for (srv_edit_rects_in_list, 0..) |r, i| {
-                        if (setHit(r, x, y)) {
-                            srv_edit_hit = i;
-                            break;
-                        }
-                    }
-                    if (srv_edit_hit == null) {
-                        for (srv_row_rects, 0..) |r, i| {
-                            if (setHit(r, x, y)) {
-                                srv_pressed = i;
-                                break;
-                            }
-                        }
-                    }
-                    if (srv_edit_hit == null and srv_pressed == null) srv_add_pressed = setHit(srv_add_rect, x, y);
+                // **자리를 손으로 세지 않는다**(M12a). 표가 발급한 id 하나를 잡고, 뜻은 뗄 때
+                // `resolve` 가 되돌린다 — 그 사이 내용이 바뀌면 세대가 어긋나 아무 일도 안 한다.
+                ui_pressed = null;
+                // 흐르던 목록을 세우려 짚은 손가락은 아무것도 안 누른 것이다(위 `stopped`).
+                // 다만 **머리의 「뒤로」는 목록 밖**이라 그 규율에 안 걸린다.
+                if (hitAction(x, y)) |id| {
+                    const is_back = if (ui_table.resolve(id, ui_generation)) |it| it == .servers_back else false;
+                    if (is_back or !stopped) ui_pressed = .{ .id = id, .gen = ui_generation };
                 }
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                if (srv_press.move(x, y)) { // 임계를 넘으면 밀려던 것이다
-                    srv_pressed = null;
-                    srv_back_pressed = false;
-                    srv_edit_hit = null;
-                    srv_add_pressed = false;
-                }
+                if (srv_press.move(x, y)) ui_pressed = null; // 임계를 넘으면 밀려던 것이다
                 srv_touch.move(&srv_sa, pointer_id, y, @intFromFloat(@max(0, srv_max_scroll)));
                 srv_last_y = y;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was_back = srv_back_pressed;
-                const was_row = srv_pressed;
-                const was_edit = srv_edit_hit;
-                const was_add = srv_add_pressed;
-                srv_back_pressed = false;
-                srv_pressed = null;
-                srv_edit_hit = null;
-                srv_add_pressed = false;
+                const intent = takeUiIntent();
                 srv_touch.end(pointer_id, frame_dt_ms);
                 routeClear();
                 if (phase == 3) {
@@ -7488,19 +7558,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     return 1;
                 }
                 if (srv_press.end() != .tap) return 1;
-                if (was_back) {
-                    navPop();
-                    return 1;
+                // **뜻이 없으면 아무 일도 안 한다** — 세대가 어긋났거나(그 사이 목록이 바뀌었다)
+                // 그 자리가 사라진 것이다. 잘못 실행하느니 아무 일도 안 한다(계약 §3.1).
+                switch (intent orelse return 1) {
+                    .servers_back => navPop(),
+                    .server_edit => |i| openServerEdit(i),
+                    .server_add => openServerEdit(null),
+                    .server_open => |i| connectToServer(i),
                 }
-                if (was_edit) |i| {
-                    openServerEdit(i);
-                    return 1;
-                }
-                if (was_add) {
-                    openServerEdit(null);
-                    return 1;
-                }
-                if (was_row) |i| connectToServer(i);
                 return 1;
             },
         }
@@ -8118,6 +8183,9 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // `Touch.step` 이 하한으로 자른다.
     frame_dt_ms = if (frame_ms == 0 or time_ms < frame_ms) 0 else @floatFromInt(time_ms - frame_ms);
     frame_ms = time_ms;
+    // **그리기 전에 등록을 비운다**(M12a). 표는 그리는 순서대로 다시 채워지고, 세대는 여기서
+    // 안 올린다 — 올리면 그 프레임의 누름이 전부 거부된다.
+    resetUiActions();
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;

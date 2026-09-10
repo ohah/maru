@@ -3985,6 +3985,13 @@ test "칸이 넘치면 조용히 버리지 않는다" {
 
 // ── 등록한 서버 목록 (S9b-2a) ────────────────────────────────────────────────
 
+/// M12a 판정자용 — 누르고 뗀 사이에 목록이 «바뀌었다» 를 만드는 다른 목록.
+const one_server =
+    \\ssh.server.1.host = only.example.com
+    \\ssh.server.1.user = solo
+    \\ssh.server.1.fingerprint = SHA256:zzz
+;
+
 const two_servers =
     \\ssh.server.1.name = 집
     \\ssh.server.1.host = 10.0.0.5
@@ -4096,6 +4103,47 @@ test "서버 목록 화면이 config 의 서버를 보인다" {
     bridge.maru_mobile_load_config("", 0);
     openServers(402, 874);
     try std.testing.expectEqual(@as(usize, 0), bridge.serverRowCount());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12a 누르고 뗀 사이에 목록이 바뀌면 그 누름은 아무 일도 안 한다" {
+    // **이 슬라이스의 전부가 이 판정이다.** 좌표나 순번을 들고 down→up 을 건너면 그 사이에
+    // 목록이 바뀌었을 때 **엉뚱한 서버에 붙는다**. 표의 세대가 그것을 거절해야 한다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, y, now()); // 누른다 — 둘째 줄
+    // 그 사이에 목록이 통째로 바뀐다(다른 서버 하나만 남는다).
+    bridge.maru_mobile_load_config(one_server, one_server.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    _ = bridge.maru_mobile_build(402, 874, now()); // 표가 새 세대로 다시 발행된다
+    bridge.maru_mobile_pointer(2, 1, 200, y, now()); // 뗀다
+
+    // **아무 일도 안 일어난다** — 붙어 달라는 요청도, 화면 이동도 없다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12a 목록이 그대로면 누름은 그대로 산다 — 세대는 프레임마다 오르지 않는다" {
+    // 위 판정만 있으면 **세대를 매 프레임 올려도 초록**이다(그러면 아무것도 못 누른다).
+    // 그리는 쪽에서 올리지 않는다는 것을 여기서 못 박는다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, 200, y, now());
+    // 목록은 그대로 두고 프레임만 여러 번 돈다.
+    for (0..5) |_| _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_pointer(2, 1, 200, y, now());
+
+    // **1-기반 번호다** — 둘째 줄을 눌렀으니 2 다(엉뚱한 서버에 붙는 것도 여기서 걸린다).
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect());
     _ = bridge.maru_mobile_pop_screen();
 }
 

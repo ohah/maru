@@ -2552,6 +2552,17 @@ test "DCARET6b: 비교 뷰 세로도 caret 여백을 쓴다 — 좌우가 함께
     try testing.expectEqual(top, fx.term.rt.editor_first_line); // 아직 여백이 산다
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
     try testing.expectEqual(top - 1, fx.term.rt.editor_first_line);
+
+    // **절반 clamp 의 기준은 «지금 그린 행 수» 다.** 고정 수로 묶으면 좁은 비교 뷰에서 여백이
+    // 화면을 넘어 caret 이 밖으로 밀린다 — 픽스처의 화면이 늘 넉넉하면 두 답이 같아 변이가
+    // 산다(적대적 검증 7회차 T4). 큰 값을 줘 **가운데**가 나오는지로 기준을 잰다.
+    fx.session.loaded_config.config.editor.cursor_surrounding_lines = 1000;
+    const half = (visible - 1) / 2;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    // **caret 행은 세지 말고 읽는다.** 여기까지 오는 동안 몇 번을 눌렀는지 다시 세면 그 산수가
+    // 판정자의 두 번째 출처가 되고, 실제로 한 번 어긋났다(계산 19 대 실제 16).
+    const row = fx.term.rt.editor_diff_selection.?.sel.focus.row;
+    try testing.expectEqual((row + 1 + half) -| visible, fx.term.rt.editor_first_line);
 }
 
 test "DCARET7: PageDown 은 렌더가 굳힌 행 수만큼 간다" {

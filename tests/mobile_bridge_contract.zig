@@ -6569,6 +6569,39 @@ test "스크롤한 목록: 고정 헤더 밑을 눌러도 «안 보이는 줄» 
     try T.expectEqual(std.meta.Tag(bridge.ControlWant).sessions, bridge.controlWantKind());
 }
 
+test "M12b 세대가 갈려도 신원은 살아남는다 — 그 세션이 아직 있으면 열린다" {
+    // **뜻이 «순번» 이면 세대가 갈린 뒤엔 못 믿고 버린다.** 그런데 원격 줄의 뜻은 신원이라
+    // 살아남아야 한다 — 목록이 갱신되든 config 를 다시 읽든, 사용자가 가리킨 것은 그 세션이다.
+    // 위 판정자만으로는 이 갈래가 **아예 안 돈다**(목록 갱신은 세대를 안 올린다) — 변이 검사가
+    // 그것을 초록으로 드러냈다.
+    const T = std.testing;
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_control_tick(1, 0, 1000);
+    _ = feedControl(hello_wire);
+    const first = try sessionListWire(T.allocator, 5);
+    defer T.allocator.free(first);
+    _ = feedControl(first);
+    advanceFrame(402, 874, 16);
+
+    const row = bridge.remoteRowCenter(2) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, row.x, row.y, now());
+
+    // **세대를 올린다** — config 를 다시 읽는 것이 그 자리다(배경에서 돌아올 때마다 일어난다).
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    advanceFrame(402, 874, 16);
+
+    bridge.maru_mobile_pointer(2, 1, row.x, row.y, now());
+    advanceFrame(402, 874, 16);
+    try T.expectEqual(std.meta.Tag(bridge.ControlWant).screen, bridge.controlWantKind());
+    try T.expect(bridge.wantsScreen("00000000000000000000000000000003".*));
+}
+
 test "누른 줄과 열리는 세션이 같다 — 사이에 목록이 갱신돼도" {
     // **적대적 검증 3회차가 잡았다.** 그 자리 주석은 「누를 때 잡아 둔 index 를 쓴다 — 좌표로
     // 다시 찾으면 목록이 갱신됐을 때 다른 세션을 연다」였는데, **순번도 같은 문제를 갖는다** —

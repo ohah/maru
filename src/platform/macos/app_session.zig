@@ -13709,6 +13709,11 @@ pub const AppSession = struct {
             // 소비한 만큼만 전진시킨다 — 나머지를 남겨야 gap 이 실시간에 drift 없이 고정된다.
             self.kitty_anim_ns = anim_base + @as(i128, anim_elapsed_ms) * std.time.ns_per_ms;
             for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                // **원격 surface 는 건너뛴다.** 그쪽은 host 가 터미널을 소유하고 이 `core` 는 비어 있다 —
+                // 여기서 돌려 봐야 no-op 이고, 「원격에서도 도는 것처럼」 읽히면 안 된다.
+                // 원격 애니메이션은 host tick 이 진행해야 하고, 그때 **delta 가 프레임마다 이미지
+                // blob 을 다시 싣는다**(generation 이 바뀌므로) — 대역폭 설계가 먼저다.
+                if (term.surface.remote != null) continue;
                 if (term.surface.core.advanceAnimations(anim_elapsed_ms)) self.metal_dirty = true;
             };
         }

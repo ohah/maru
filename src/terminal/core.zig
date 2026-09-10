@@ -10039,7 +10039,9 @@ test "kitty 애니메이션: a=f 로 프레임을 쌓고 a=a 로 재생하면 �
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &blue)}));
     try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.frameCount());
 
-    // 루트 gap 도 정하고 재생을 켠다(s=3).
+    // 루트 gap 도 정하고 **화면에 건 뒤** 재생을 켠다(s=3). 화면에 없는 이미지는 진행하지 않는다 —
+    // 아무도 못 보는 프레임에 CPU 를 쓰지 않고 evict 순서도 안 뒤집기 위해서다.
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\");
     try core.write("\x1b_Ga=a,i=1,r=1,z=100,q=2\x1b\\");
     try core.write("\x1b_Ga=a,i=1,s=3,q=2\x1b\\");
     try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
@@ -10081,6 +10083,7 @@ test "kitty 애니메이션: 반복 수가 다 되면 멈춘다" {
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b_Ga=a,i=1,r=1,z=10,q=2\x1b\\");
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\"); // 화면에 걸어야 진행한다
 
     // v=2 — 두 바퀴만 돈다.
     try core.write("\x1b_Ga=a,i=1,s=3,v=2,q=2\x1b\\");
@@ -10152,4 +10155,63 @@ test "kitty 애니메이션: a=c 가 프레임을 합성한다" {
     try std.testing.expectEqual(@as(u8, 0), img.framePixels(1)[0]); // R=0
     try std.testing.expectEqual(@as(u8, 255), img.framePixels(1)[1]); // G=255
     try std.testing.expect(img.generation > gen_before); // 렌더러가 다시 올리도록
+}
+
+test "kitty 애니메이션: 프레임도 총량 한도를 지킨다 — 회계만으로는 못 막는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_images.limit = 64; // 작게 잡아 경계를 결정적으로 본다(2x2 RGBA = 16B)
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+
+    // **회귀 판정**: `a=f` 는 총량을 **세기만 하고 한도를 강제하지 않았다**. 프레임 수 상한(512)은
+    // 이걸 못 막는다 — 프레임 크기가 이미지 크기를 따라가므로 큰 이미지면 512 장이 수십 GB 다.
+    // 320MB 예산이 애니메이션 하나로 통째로 우회됐다.
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    }
+    try std.testing.expect(core.kitty_images.total_bytes <= core.kitty_images.limit);
+    // 한도 안에서 받을 수 있는 만큼은 실제로 받았다 — 게이트가 넓어 전부 거부하면 애니메이션이 죽는다.
+    try std.testing.expect(core.kitty_images.map.get(1).?.frameCount() > 1);
+
+    // 한도를 넘긴 요청은 **거부를 알린다**(무음 폐기 금지) — 앱이 다음 프레임을 계속 보내지 않게.
+    core.clearResponse();
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1;{s}\x1b\\", .{enc}));
+    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOMEM:image storage full\x1b\\", core.pendingResponse());
+}
+
+test "kitty 애니메이션: 화면에 없는 이미지는 진행하지 않는다 — evict 순서를 뒤집는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+
+    // **회귀 판정**: evict 는 최저 `generation` 을 고르는데, 애니메이션은 매 tick generation 을 올린다.
+    // 화면에 없는(= placement 가 없는) 애니메이션 이미지는 그래서 **영원히 「가장 새것」** 으로 보여
+    // evict 대상에서 빠지고, 정작 쓸모 있는 정지 이미지가 먼저 밀려난다 — LRU 의도가 뒤집힌다.
+    // 게다가 아무도 못 보는 프레임에 CPU 를 쓴다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=a,i=1,r=1,z=10,s=3,q=2\x1b\\");
+
+    // placement 가 없다 — 아무도 이 이미지를 보고 있지 않다.
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    const gen_before = core.kitty_images.map.get(1).?.generation;
+    try std.testing.expect(!core.advanceAnimations(1000)); // 진행하지 않는다
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expectEqual(gen_before, core.kitty_images.map.get(1).?.generation); // generation 도 그대로
+
+    // **양성 대조**: 화면에 걸면 곧바로 돈다 — 게이트가 넓어 애니메이션을 통째로 죽인 게 아님을 본다.
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\");
+    try std.testing.expect(core.advanceAnimations(10));
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expect(core.kitty_images.map.get(1).?.generation > gen_before);
 }

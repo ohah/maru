@@ -6295,6 +6295,7 @@ pub const AppSession = struct {
     remote_nonce_matched: usize = 0,
     remote_nonce_rebinds: u32 = 0,
     rebind_logs: u32 = 0,
+    unmatched_is_near: bool = false,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -15224,6 +15225,22 @@ pub const AppSession = struct {
     ///
     /// **둘을 나란히 찍는다** — 온 nonce 와 Term 이 들고 있던 nonce. 하나만으로는 어디서 갈렸는지
     /// 모른다(앱 인스턴스 부분이 다른지, pane 부분이 다른지, 아예 비었는지).
+    /// 두 nonce 의 **pane 꼬리 8 자**가 같은가. 같으면 같은 runtime 을 가리키면서 어딘가 다르다는
+    /// 뜻이라, 그 짝이 원인에 가장 가깝다(랜덤 128 비트에서 하위 32 비트가 겹칠 일은 없다).
+    fn tailsMatch(a: []const u8, b: []const u8) bool {
+        if (a.len == 0 or b.len == 0) return false;
+        const ta = paneTail8(a);
+        const tb = paneTail8(b);
+        return ta.len == 8 and tb.len == 8 and std.mem.eql(u8, ta, tb);
+    }
+
+    /// pane 칸의 뒤 8 자(짧으면 있는 만큼).
+    fn paneTail8(nonce: []const u8) []const u8 {
+        const at = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse 0;
+        const pane = if (at == 0) nonce else nonce[at + 1 ..];
+        return pane[pane.len -| 8..];
+    }
+
     /// 스트리머가 역조회에 실패해 **파일 이름을 그대로** 실어 보낸 nonce 인가([계획](../../../docs/plans/remote-agent-state.md)
     /// §RA6). tmux 안에서는 그 이름에 `_t<pane>` 칸이 붙고, 그것은 **어느 Term 의 nonce 와도 안 맞는 것이
     /// 설계다** — detached 안에서 도는 에이전트는 귀속할 Term 이 없어 버리기로 결정했다. 그러니 이 모양은
@@ -15258,17 +15275,19 @@ pub const AppSession = struct {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
         if (self.remote_nonce_matched > 0) {
             self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
+            self.unmatched_is_near = false;
             return;
         }
         if (self.unmatched_event_nonce_len == 0) return;
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s} term={s} ({d} terms fed, {d} with nonce, none matched) mine=[{s}]",
+            "orphan agent nonce: dest={s} event={s} term={s}{s} ({d} terms fed, {d} with nonce, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
                 if (self.unmatched_term_nonce_len == 0) "(empty)" else self.unmatched_term_nonce[0..self.unmatched_term_nonce_len],
+                if (self.unmatched_is_near) " ← 꼬리가 같다(같은 runtime, 앞이 갈렸다)" else "",
                 fed,
                 with_nonce,
                 mine,
@@ -15282,6 +15301,15 @@ pub const AppSession = struct {
         // 진짜 미매칭을 덮으면 그 tick 은 통째로 조용해진다. detached 는 버리는 것이 계약이니(§RA6)
         // 아예 안 담아, **마지막 «진짜» 미매칭이 살아남게** 한다.
         if (nonceIsUnresolvedSpoolName(event_nonce)) return;
+        // **가장 가까운 짝을 남긴다.** 담는 칸이 하나뿐이라 그냥 마지막을 담으면 「아무 Term 이나」가
+        // 남고, 그것으로는 어디가 갈렸는지 모른다 — 2026-09-10 실측에서 `mine` 에 event 의 꼬리가
+        // 분명히 있는데도 `term=` 은 엉뚱한 Term 이었다.
+        //
+        // **꼬리(pane 뒤 8 자)가 같은 짝이 원인에 가장 가깝다**: 같은 runtime 을 가리키면서 어딘가
+        // 다르다는 뜻이고, 그 「어딘가」가 앞의 instance 칸인지 pane 앞부분인지가 곧 답이다.
+        const near = tailsMatch(event_nonce, term_nonce);
+        if (self.unmatched_is_near and !near) return;
+        self.unmatched_is_near = near;
         const en = @min(event_nonce.len, self.unmatched_event_nonce.len);
         @memcpy(self.unmatched_event_nonce[0..en], event_nonce[0..en]);
         self.unmatched_event_nonce_len = @intCast(en);
@@ -24246,6 +24274,56 @@ test "RA5: 아직 hello 전인 목적지에는 예전대로 기다리는 채널�
 
     var ch = &(term.agent_remote_channel orelse return error.NoChannelOpened);
     try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 2) == .ignored);
+}
+test "RF5: 꼬리가 같은 짝을 우선 남긴다 — 엉뚱한 Term 이 덮지 않는다" {
+    // 2026-09-10 실측에서 `mine` 에 event 의 꼬리가 분명히 있는데도 `term=` 은 엉뚱한 Term 이었다.
+    // 담는 칸이 하나뿐이라 마지막이 이겼기 때문이다 — 그 로그로는 **어디가 갈렸는지 모른다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const ev = "host_aaaa_0123456789abcdef";
+    session.noteUnmatchedRemoteNonce(ev, "host_bbbb_ffffffff89abcdef"); // 꼬리가 같다 — 가깝다
+    session.noteUnmatchedRemoteNonce(ev, "host_cccc_1111111111111111"); // 그 뒤 엉뚱한 것
+
+    try std.testing.expect(session.unmatched_is_near);
+    try std.testing.expectEqualStrings(
+        "host_bbbb_ffffffff89abcdef",
+        session.unmatched_term_nonce[0..session.unmatched_term_nonce_len],
+    );
+}
+test "RF5: 가까운 짝이 없으면 예전대로 마지막을 남긴다" {
+    // 갈라 준 것이지 없앤 것이 아니다 — 꼬리가 다 다르면 여전히 무언가는 남아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.noteUnmatchedRemoteNonce("host_aaaa_0123456789abcdef", "host_bbbb_1111111111111111");
+    session.noteUnmatchedRemoteNonce("host_aaaa_0123456789abcdef", "host_cccc_2222222222222222");
+
+    try std.testing.expect(!session.unmatched_is_near);
+    try std.testing.expectEqualStrings(
+        "host_cccc_2222222222222222",
+        session.unmatched_term_nonce[0..session.unmatched_term_nonce_len],
+    );
 }
 test "RF4: orphan 은 앱이 들고 있던 신원 목록도 함께 남긴다" {
     // 2026-09-07·09 에 세 번, 「내가 뭘 들고 있었나」가 없어 원격에서 손으로 대조했다. 마지막 미매칭

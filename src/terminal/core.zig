@@ -7493,6 +7493,61 @@ test "DECRQM reports mode 2027 state so apps can detect support" {
     try std.testing.expectEqualStrings("\x1b[?9999;0$y", core.pendingResponse());
 }
 
+/// `parser.zig` 의 `setPrivateModes` switch 에서 case 라벨(모드 번호)을 comptime 에 뽑는다.
+///
+/// 손으로 적은 목록은 **한쪽만 고치는 사고**를 못 막는다 — 그 사고가 실제로 났다(1048). 소스를
+/// 읽으면 목록이 코드와 같은 것에서 나온다. 파싱은 보수적이다: 함수 본문 안에서 «줄 시작의 숫자
+/// 목록 뒤 `=>`» 만 모으고, 그 외는 무시한다(주석의 숫자·중첩 switch 에 안 걸린다).
+fn parsePrivateModeCases() [countPrivateModeCases()]u16 {
+    @setEvalBranchQuota(200_000);
+    var out: [countPrivateModeCases()]u16 = undefined;
+    var n: usize = 0;
+    var it = privateModeCaseIterator();
+    while (it.next()) |m| : (n += 1) out[n] = m;
+    return out;
+}
+
+fn countPrivateModeCases() usize {
+    @setEvalBranchQuota(200_000);
+    var n: usize = 0;
+    var it = privateModeCaseIterator();
+    while (it.next()) |_| n += 1;
+    return n;
+}
+
+const private_modes_src = @embedFile("parser.zig");
+
+/// `setPrivateModes` 본문의 case 라벨을 하나씩 낸다(`47, 1047, 1049 =>` 처럼 한 case 에 여럿이면 각각).
+fn privateModeCaseIterator() struct {
+    rest: []const u8,
+    pending: []const u8 = "",
+
+    fn next(self: *@This()) ?u16 {
+        while (true) {
+            // 같은 case 에 남은 번호를 먼저 낸다.
+            if (self.pending.len > 0) {
+                const comma = std.mem.indexOfScalar(u8, self.pending, ',');
+                const tok = std.mem.trim(u8, if (comma) |c| self.pending[0..c] else self.pending, " ");
+                self.pending = if (comma) |c| self.pending[c + 1 ..] else "";
+                if (std.fmt.parseInt(u16, tok, 10)) |v| return v else |_| {}
+                continue;
+            }
+            const line_end = std.mem.indexOfScalar(u8, self.rest, 0x0A) orelse return null;
+            const line = self.rest[0..line_end];
+            self.rest = self.rest[line_end + 1 ..];
+            if (std.mem.indexOf(u8, line, "}") != null and std.mem.trim(u8, line, " ").len == 1) return null; // 함수 끝
+            const arrow = std.mem.indexOf(u8, line, "=>") orelse continue;
+            const label = std.mem.trim(u8, line[0..arrow], " ");
+            if (label.len == 0 or (label[0] < '0' or label[0] > '9')) continue; // else/식별자 case 는 건너뛴다
+            self.pending = label;
+        }
+    }
+} {
+    const marker = "pub fn setPrivateModes(self: *TerminalCore, set: bool) void {";
+    const start = std.mem.indexOf(u8, private_modes_src, marker).? + marker.len;
+    return .{ .rest = private_modes_src[start..] };
+}
+
 test "DECRQM answers every private mode setPrivateModes implements (1016 was reported unsupported)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
@@ -7518,7 +7573,18 @@ test "DECRQM answers every private mode setPrivateModes implements (1016 was rep
     try core.write("\x1b[?1049l");
     core.clearResponse();
     // **setPrivateModes가 아는 모드는 하나도 0(미인식)이면 안 된다** — 한쪽에만 모드를 더하는 사고를 막는다.
-    const known = [_]u16{ 1, 5, 6, 7, 9, 25, 47, 1000, 1002, 1003, 1004, 1006, 1007, 1015, 1016, 1047, 1049, 2004, 2026, 2027 };
+    // **목록을 손으로 적지 않는다.** 예전엔 여기 리터럴이 있었고, `setPrivateModes` 에 `1048` 을 더한
+    // 뒤에도 이 목록엔 안 들어가서 **이 판정자가 막으려던 바로 그 사고를 스스로 통과시켰다**
+    // (적대적 검증 실측 2026-09-10: `?1048$p` 가 `;0$y` = 미인식을 답했다).
+    //
+    // 그래서 `parser.zig` 소스에서 `setPrivateModes` 의 case 라벨을 직접 뽑는다 — 한쪽에만 모드를
+    // 더하면 이 판정자가 **자동으로** 그 모드를 묻고 실패한다. 손 목록은 더는 없다.
+    const known = comptime parsePrivateModeCases();
+    // **뽑은 목록이 비면 이 판정자는 공허하다.** 소스 파싱이 조용히 실패하는 경우(함수 이름이 바뀌거나
+    // 서식이 달라지면)를 여기서 잡는다 — 「0개를 다 확인했다」로 통과하면 안 된다.
+    comptime std.debug.assert(known.len >= 15);
+    try std.testing.expect(std.mem.indexOfScalar(u16, &known, 1048) != null); // 이 회귀의 당사자
+    try std.testing.expect(std.mem.indexOfScalar(u16, &known, 1016) != null); // 원래 회귀의 당사자
     for (known) |mode| {
         var buf: [24]u8 = undefined;
         try core.write(try std.fmt.bufPrint(&buf, "\x1b[?{d}$p", .{mode}));

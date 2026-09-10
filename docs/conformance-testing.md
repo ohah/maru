@@ -90,6 +90,15 @@ DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. 
 > terminal-browser가 `CSI ?1016$p`로 픽셀 마우스를 묻고 0을 받아 셀 단위 좌표로 폴백했다(브라우저
 > 클릭이 어긋남). 두 목록은 `parser.zig`에서 1:1로 붙어 있어야 하고, 판정자가 그것을 고정한다
 > (`DECRQM answers every private mode setPrivateModes implements`).
+>
+> **그 판정자도 한 번 같은 사고를 통과시켰다**(2026-09-10). 검사 목록이 **손으로 적은 리터럴**이라,
+> `setPrivateModes` 에 `?1048`(커서 저장/복원)을 더한 뒤에도 목록엔 안 들어갔고 `?1048$p` 가 `;0$y`
+> (미인식)를 답하고 있었다 — 1016 과 똑같은 모양이다. 이제 목록을 **`parser.zig` 소스에서 comptime 에
+> 뽑는다**(`parsePrivateModeCases`): 한쪽에만 모드를 더하면 판정자가 자동으로 그 모드를 묻고 실패한다.
+> 파싱이 조용히 실패해 빈 목록이 되는 것도 함께 막는다(개수 하한 + 1016·1048 포함 단언).
+>
+> `1048` 은 상태를 되읽을 수 없는 **동작** 모드라(켜고 끄는 것이 아니라 저장/복원 명령이다) 1/2 대신
+> **영구 reset(4)** 으로 답한다 — DECRPM 이 정의한 값이고, «안다, 다만 토글이 아니다» 라는 뜻이다.
 
 XTWINOPS(`CSI Ps t`)는 **보고형만** 답한다 — 14=텍스트 영역 픽셀(`CSI 4;h;w t`), 16=셀 픽셀
 (`CSI 6;h;w t`), 18=문자 단위(`CSI 8;rows;cols t`). 셀 픽셀은 platform이 `setCellMetrics`로 주입한

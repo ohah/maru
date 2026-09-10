@@ -476,6 +476,17 @@ pub const KeyBindingResolver = struct {
         // encodeKey에만 적용된다 — 모드는 TerminalCore가 추적하고 호출자가 매 키마다 읽어 넘긴다.
         encode_options: terminal.input.EncodeOptions,
     ) !ResolvedKey {
+        // **키를 뗀 것은 바인딩을 다시 쏘지 않는다.** chord 는 key+modifier 만 보므로 keyUp 도 keyDown
+        // 과 똑같이 매칭된다 — 매크로(`Option+Left` = `ESC b`, `Cmd+Left` = `\x01`)가 두 번 나가
+        // **단어 이동이 두 칸씩** 갔다(사용자 제보 2026-09-10, 로컬·원격·순수 zsh 모두).
+        //
+        // `encodeKey` 의 release 게이트는 아래 fallback 에만 있어 이 경로를 못 막는다 — 매크로는
+        // 인코더를 아예 거치지 않는다.
+        //
+        // **repeat 은 막지 않는다.** 키를 누르고 있으면 매크로도 반복되는 것이 맞다(`Option+Left` 를
+        // 누르고 있으면 단어 단위로 계속 이동). release 하나만 걸러낸다.
+        if (event.event_type == .release) return .ignored;
+
         const chord = KeyChord.fromKeyEvent(event) orelse return .ignored;
 
         for (self.app_bindings) |binding| {
@@ -526,6 +537,9 @@ pub const KeyBindingResolver = struct {
     /// project tree context는 셸 바이트를 절대 내보내지 않는다. 사용자 app binding이 최우선이고, terminal macro나
     /// explicit unbind는 chord를 소비해 tree 기본키도 막는다. 둘 다 없을 때 built-in app action, 그 다음 tree 기본키다.
     pub fn resolveFileTree(self: KeyBindingResolver, event: terminal.KeyEvent, is_tree_default: bool) FileTreeResolution {
+        // `resolve` 와 같은 이유로 release 를 여기서 끊는다(그 자리의 주석이 뿌리를 적는다).
+        // **`.consumed` 다** — `.tree_default` 로 흘리면 키를 뗄 때 트리 선택이 한 칸 더 움직인다.
+        if (event.event_type == .release) return .consumed;
         const chord = KeyChord.fromKeyEvent(event) orelse return .consumed;
         for (self.app_bindings) |binding| {
             if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
@@ -596,6 +610,9 @@ pub const KeyBindingResolver = struct {
 
     /// 위 doc 의 순서를 **여기 하나에서** 구현한다 — `resolveEditor` 는 이것을 뭉개 준다.
     pub fn resolveEditorDetailed(self: KeyBindingResolver, event: terminal.KeyEvent, is_diff: bool) EditorResolutionDetailed {
+        // release 를 여기서 끊는다(뿌리는 `resolve` 의 주석). **`.consumed` 이지 `.editor` 가 아니다** —
+        // `.editor` 로 흘리면 편집기가 키를 두 번 받아 캐럿이 두 칸 가고 글자가 두 번 들어간다.
+        if (event.event_type == .release) return .consumed;
         // 이 `orelse` 는 **오늘 도달하지 않는다**(`.consumed` 로 바꿔도 판정자가 안 잡는 것이 정상) —
         // `keyNameFromTerminalKey` 가 `terminal.Key` 를 남김없이 덮어 `null` 을 안 낸다. 네 resolver 가
         // 같은 관용구를 쓰고 갈래마다 값이 다른 것도 그래서다. 편집기의 몫은 `.editor` 다 — 못 읽은 키를
@@ -646,6 +663,11 @@ pub const KeyBindingResolver = struct {
     }
 
     fn resolveWebDetailed(self: KeyBindingResolver, event: terminal.KeyEvent, editable: bool) WebResolution {
+        // release 를 여기서 끊는다(뿌리는 `resolve` 의 주석). **여기만 `.pass_through` 다** — 웹은
+        // 우리가 아니라 WebKit 이 그린다. `.consume_unbound` 로 삼키면 DOM 이 `keyup` 을 영영 못 받아
+        // 키 상태를 추적하는 페이지가 「키가 눌린 채」로 굳는다. 우리가 안 쓰는 것과 남이 못 받게 하는
+        // 것은 다르다 — 앱 액션·매크로만 비키고 이벤트 자체는 그대로 흘려보낸다.
+        if (event.event_type == .release) return .pass_through;
         const chord = KeyChord.fromKeyEvent(event) orelse return .pass_through;
         for (self.app_bindings) |binding| {
             if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
@@ -1776,4 +1798,74 @@ test "FKB3 config 표기로 왕복한다 — 세팅 GUI 의 keybind recorder 가
         const parsed = try KeyChord.parse(text);
         try std.testing.expect(parsed.eql(c));
     }
+}
+
+test "resolve: 키를 뗄 때 매크로 바인딩이 다시 나가지 않는다 (단어 이동이 두 칸)" {
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+
+    // 2026-09-10 실측 회귀. `Option+Left` 는 빌트인 매크로 `ESC b`(단어 왼쪽)다. chord 는 key+modifier
+    // 만 보므로 keyUp 도 keyDown 과 똑같이 매칭돼 **두 번** 나갔고, 셸에서 단어가 두 칸씩 움직였다.
+    // `encodeKey` 의 release 게이트는 fallback 에만 있어 이 경로를 못 막는다 — 매크로는 인코더를 아예
+    // 거치지 않는다. 로컬·원격·순수 zsh 를 가리지 않았던 이유다.
+    const press = terminal.KeyEvent{ .key = .arrow_left, .modifiers = .{ .option = true } };
+    switch (try resolver.resolve(press, &buf, .{})) {
+        .terminal_input => |bytes| try std.testing.expectEqualStrings("\x1bb", bytes),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // 뗄 때는 아무것도 안 나간다.
+    var release = press;
+    release.event_type = .release;
+    try std.testing.expect(try resolver.resolve(release, &buf, .{}) == .ignored);
+
+    // `Cmd+Left`(줄 시작 `\x01`)도 같다 — 두 번 나가면 커서가 두 번 튄다.
+    const cmd_press = terminal.KeyEvent{ .key = .arrow_left, .modifiers = .{ .command = true } };
+    switch (try resolver.resolve(cmd_press, &buf, .{})) {
+        .terminal_input => |bytes| try std.testing.expectEqualStrings("\x01", bytes),
+        else => return error.TestUnexpectedResult,
+    }
+    var cmd_release = cmd_press;
+    cmd_release.event_type = .release;
+    try std.testing.expect(try resolver.resolve(cmd_release, &buf, .{}) == .ignored);
+
+    // **repeat 은 그대로 나간다** — 누르고 있으면 단어 단위로 계속 이동하는 것이 맞다. 여기서 막으면
+    // #3456 과 같은 회귀가 된다(누르고 있어도 한 번만 먹음).
+    var repeat = press;
+    repeat.event_type = .repeat;
+    switch (try resolver.resolve(repeat, &buf, .{})) {
+        .terminal_input => |bytes| try std.testing.expectEqualStrings("\x1bb", bytes),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "resolveFileTree/Editor/Web: 키를 뗄 때 어떤 resolver 도 두 번 발화하지 않는다" {
+    // `resolve` 만 막으면 나머지 넷이 남는다 — 같은 `KeyChord` 비교를 쓰고 종류를 안 보기 때문이다.
+    // 다섯 진입점 중 `resolveEditor`·`resolveWeb`·`resolveWebAppAction` 은 위임이라, 아래 셋을 막으면
+    // 다섯이 다 닫힌다. **repeat 은 전부 press 와 같아야 한다**(#3456 회귀 방지).
+    const resolver = KeyBindingResolver{};
+
+    // ⌘D — 전역 표(split)와 편집기 컨텍스트 표(add_next_occurrence) 양쪽에 있는 chord다.
+    const press = terminal.KeyEvent{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } };
+    var release = press;
+    release.event_type = .release;
+    var repeat = press;
+    repeat.event_type = .repeat;
+
+    // 파일 트리 — 뗄 때 `.tree_default` 가 나가면 선택이 한 칸 더 움직인다.
+    try std.testing.expect(resolver.resolveFileTree(release, true) == .consumed);
+    try std.testing.expect(resolver.resolveFileTree(press, true) != .consumed);
+    try std.testing.expect(resolver.resolveFileTree(repeat, true) != .consumed);
+
+    // 편집기 — 뗄 때 `.editor` 가 나가면 캐럿이 두 칸 간다.
+    try std.testing.expect(resolver.resolveEditorDetailed(release, false) == .consumed);
+    try std.testing.expect(resolver.resolveEditor(release, false) == .consumed);
+    try std.testing.expect(resolver.resolveEditorDetailed(press, false) != .consumed);
+    try std.testing.expect(resolver.resolveEditorDetailed(repeat, false) != .consumed);
+
+    // 웹 — 여기만 `.pass_through` 다. 삼키면 DOM 이 keyup 을 못 받는다.
+    try std.testing.expect(resolver.resolveWeb(release, false) == .pass_through);
+    try std.testing.expect(resolver.resolveWebAppAction(release, false) == null);
+    try std.testing.expect(resolver.resolveWebAppAction(press, false) != null);
+    try std.testing.expect(resolver.resolveWebAppAction(repeat, false) != null);
 }

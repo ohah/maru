@@ -5214,6 +5214,24 @@ pub fn build(b: *std.Build) void {
     preflight_reason_step.dependOn(&run_preflight_reason.step);
     boundary_step.dependOn(&run_preflight_reason.step);
 
+    const keybinding_release_step = b.step(
+        "test-keybinding-release",
+        "Every chord-comparing resolver drops key release (macros fired twice)",
+    );
+    const keybinding_release_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/keybinding_release_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_keybinding_release = b.addRunArtifact(keybinding_release_tests);
+    run_keybinding_release.addArg("--maru-expect-tests=1");
+    run_keybinding_release.addArg("--maru-expect-passed=1");
+    run_keybinding_release.setCwd(b.path("."));
+    keybinding_release_step.dependOn(&run_keybinding_release.step);
+    boundary_step.dependOn(&run_keybinding_release.step);
+
     const chrome_key_release_step = b.step(
         "test-chrome-key-release",
         "Key release never reaches chrome text input (it doubled every character)",

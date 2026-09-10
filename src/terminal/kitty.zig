@@ -1036,10 +1036,21 @@ fn frameGapFromZ(z: i32) FrameGap {
     return .{ .ms = @intCast(@min(z, std.math.maxInt(u32))), .skip = false };
 }
 
+/// **프레임은 evict 하지 않는다.** 루트 이미지는 한도를 넘으면 LRU evict 로 자리를 만들지만(K4b),
+/// 프레임은 그럴 수 없다 — 한 애니메이션의 프레임을 골라 버리면 그 애니메이션이 **조용히 이상해진다**
+/// (프레임이 빠진 채 돈다). 거부하면 앱이 ENOMEM 을 보고 줄이거나 포기할 수 있다.
+///
 /// 한 이미지가 가질 수 있는 프레임 수 상한. `a=f` 만 반복하는 스트림 방어선이다(총량 한계와 같은 결).
 pub const max_animation_frames: usize = 512;
 
 fn appendFrame(self: *TerminalCore, img: *KittyImage, buf: []u8, gap: FrameGap) KittyStatus {
+    // **한도를 강제한다.** 세기만 하면 예산이 지켜지지 않는다 — 프레임 수 상한(512)은 이걸 못 막는다.
+    // 프레임 크기가 이미지 크기를 따라가므로 큰 이미지면 512 장이 수십 GB 다(적대적 검증 실측:
+    // 320MB 예산이 애니메이션 하나로 통째로 우회됐다). 여기서 evict 하지 않는 이유는 아래 참조.
+    if (self.kitty_images.total_bytes + buf.len > self.kitty_images.limit) {
+        self.allocator.free(buf);
+        return .enomem;
+    }
     const grown = self.allocator.realloc(img.frames, img.frames.len + 1) catch {
         self.allocator.free(buf);
         return .enomem;
@@ -1054,6 +1065,12 @@ fn replaceFrame(self: *TerminalCore, img: *KittyImage, n: u32, buf: []u8, gap: F
     if (n > img.frameCount()) { // 없는 프레임 번호 — 지어내지 않는다
         self.allocator.free(buf);
         return .enoent;
+    }
+    // 교체도 한도를 본다 — 작은 프레임을 큰 것으로 바꾸는 것도 예산을 늘리는 일이다.
+    const old_len = if (n <= 1) img.data.len else img.frames[n - 2].data.len;
+    if (self.kitty_images.total_bytes - old_len + buf.len > self.kitty_images.limit) {
+        self.allocator.free(buf);
+        return .enomem;
     }
     if (n <= 1) { // 루트 교체
         self.kitty_images.total_bytes -= img.data.len;
@@ -1159,6 +1176,11 @@ pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
     var it = self.kitty_images.map.valueIterator();
     while (it.next()) |img| {
         if (img.anim_state != .running or img.frameCount() < 2) continue;
+        // **화면에 없으면 진행하지 않는다.** 두 가지를 함께 막는다 — ① 아무도 못 보는 프레임에 CPU 를
+        // 쓴다. ② evict 는 최저 `generation` 을 고르는데 애니메이션이 매 tick 그것을 올리므로, 숨은
+        // 애니메이션 이미지가 **영원히 「가장 새것」** 이 되어 evict 순서가 뒤집힌다(정작 쓸모 있는
+        // 정지 이미지가 먼저 밀려난다). 다시 화면에 걸리면 그 자리에서 이어 돈다 — 상태는 남는다.
+        if (!kittyImageHasPlacement(self, img.id)) continue;
         img.elapsed_ms += elapsed_ms;
         var guard: u32 = 0; // 아주 긴 elapsed 나 gap=0 에서도 유한하게 끝난다
         while (guard < 1024) : (guard += 1) {

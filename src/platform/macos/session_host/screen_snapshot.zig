@@ -683,6 +683,11 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
     for (snap.images) |img| {
         const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
+        // ⚠️ **애니메이션과 만나면 여기가 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
+        // `generation` 을 올리므로, host 가 애니메이션을 진행하기 시작하면 이 조건이 **매 프레임 참**이
+        // 되어 이미지 blob 전체가 다시 나간다(예: 400x300 RGBA, 25fps → 12MB/s). 그래서 지금은
+        // 애니메이션을 **로컬 전용**으로 두었다(host tick 이 `advanceAnimations` 를 안 부른다).
+        // 원격 애니메이션을 켜려면 여기 프레임 델타/재사용 설계가 먼저다.
         if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
     }
     // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).

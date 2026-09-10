@@ -5032,6 +5032,12 @@ const UiIntent = union(enum) {
     /// 같다」가 그것을 못 박고 있고, 세대로 «거절» 하는 것으로는 그 계약을 못 지킨다(거절하면
     /// 그 세션이 아직 있는데도 아무것도 안 열린다). 뜻이 곧 신원이면 둘 다 지켜진다.
     remote_open: [32]u8,
+    diag_back,
+    diag_copy,
+    host_key_ok,
+    host_key_cancel,
+    password_ok,
+    password_cancel,
 };
 
 const UiTable = chrome.ui.intent_table.IntentTable(UiIntent);
@@ -6499,12 +6505,12 @@ fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
 
     hk_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     noteA11y(hk_ok_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_hostkey_ok) });
-    if (hk_pressed == .ok) push(.{ .x = @intFromFloat(hk_ok_rect.x), .y = @intFromFloat(hk_ok_rect.y), .w = @intFromFloat(hk_ok_rect.w), .h = @intFromFloat(hk_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(hk_ok_rect, .host_key_ok))) push(.{ .x = @intFromFloat(hk_ok_rect.x), .y = @intFromFloat(hk_ok_rect.y), .w = @intFromFloat(hk_ok_rect.w), .h = @intFromFloat(hk_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     y += set_row_h;
     hk_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     noteA11y(hk_cancel_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_hostkey_cancel) });
-    if (hk_pressed == .cancel) push(.{ .x = @intFromFloat(hk_cancel_rect.x), .y = @intFromFloat(hk_cancel_rect.y), .w = @intFromFloat(hk_cancel_rect.w), .h = @intFromFloat(hk_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(hk_cancel_rect, .host_key_cancel))) push(.{ .x = @intFromFloat(hk_cancel_rect.x), .y = @intFromFloat(hk_cancel_rect.y), .w = @intFromFloat(hk_cancel_rect.w), .h = @intFromFloat(hk_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
@@ -6515,7 +6521,6 @@ pub fn hostKeyFingerprintRectForTest() SetRect {
 }
 var hk_ok_rect: SetRect = .{};
 var hk_cancel_rect: SetRect = .{};
-var hk_pressed: enum { none, ok, cancel } = .none;
 var hk_press: gesture.Press = .{};
 
 /// 두 버튼 한가운데(테스트용).
@@ -6601,12 +6606,12 @@ fn drawPasswordPrompt(win: SetRect, tk: *const tokens.Tokens) void {
 
     pw_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     noteA11y(pw_ok_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_password_ok) });
-    if (pw_pressed == .ok) push(.{ .x = @intFromFloat(pw_ok_rect.x), .y = @intFromFloat(pw_ok_rect.y), .w = @intFromFloat(pw_ok_rect.w), .h = @intFromFloat(pw_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(pw_ok_rect, .password_ok))) push(.{ .x = @intFromFloat(pw_ok_rect.x), .y = @intFromFloat(pw_ok_rect.y), .w = @intFromFloat(pw_ok_rect.w), .h = @intFromFloat(pw_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_password_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
     y += set_row_h;
     pw_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     noteA11y(pw_cancel_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_password_cancel) });
-    if (pw_pressed == .cancel) push(.{ .x = @intFromFloat(pw_cancel_rect.x), .y = @intFromFloat(pw_cancel_rect.y), .w = @intFromFloat(pw_cancel_rect.w), .h = @intFromFloat(pw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(pw_cancel_rect, .password_cancel))) push(.{ .x = @intFromFloat(pw_cancel_rect.x), .y = @intFromFloat(pw_cancel_rect.y), .w = @intFromFloat(pw_cancel_rect.w), .h = @intFromFloat(pw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_password_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
 }
 
@@ -6626,7 +6631,6 @@ pub fn passwordCancelCenter() struct { x: f32, y: f32 } {
 
 var pw_ok_rect: SetRect = .{};
 var pw_cancel_rect: SetRect = .{};
-var pw_pressed: enum { none, ok, cancel } = .none;
 var pw_press: gesture.Press = .{};
 
 /// 친 것을 확정한다 — host 가 `maru_mobile_take_password` 로 가져간다.
@@ -6758,8 +6762,6 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
 /// 여기서는 그 글을 줄 단위로 잘라 그릴 뿐이다.
 var diag_back_rect: SetRect = .{};
 var diag_copy_rect: SetRect = .{};
-var diag_back_pressed = false;
-var diag_copy_pressed = false;
 /// 복사했다고 한 번 말해 주는 자리(공개키 줄과 같은 규율 — 들어올 때마다 새로).
 var diag_copied = false;
 var diag_press: gesture.Press = .{};
@@ -6802,7 +6804,7 @@ fn drawDiagnostics(win: SetRect, tk: *const tokens.Tokens) void {
     // ── 헤더: 뒤로 + 제목(설정·서버와 같은 모양)
     diag_back_rect = .{ .x = win.x, .y = win.y, .w = set_head_h, .h = set_head_h };
     noteA11y(diag_back_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_a11y_back) });
-    if (diag_back_pressed) push(.{ .x = @intFromFloat(diag_back_rect.x), .y = @intFromFloat(diag_back_rect.y), .w = @intFromFloat(diag_back_rect.w), .h = @intFromFloat(diag_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    if (uiPressed(registerAction(diag_back_rect, .diag_back))) push(.{ .x = @intFromFloat(diag_back_rect.x), .y = @intFromFloat(diag_back_rect.y), .w = @intFromFloat(diag_back_rect.w), .h = @intFromFloat(diag_back_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
     if (reserveQuad()) {
         const rgb = tk.get(.surface_fg);
         quad_buf[quad_count] = .{
@@ -6830,7 +6832,7 @@ fn drawDiagnostics(win: SetRect, tk: *const tokens.Tokens) void {
     diag_copy_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
     const copy_label = maru.i18n.tIn(.ko, if (diag_copied) .mob_diag_copied else .mob_diag_copy);
     noteA11y(diag_copy_rect, .{ .role = .button, .label = copy_label });
-    if (diag_copy_pressed) push(.{ .x = @intFromFloat(diag_copy_rect.x), .y = @intFromFloat(diag_copy_rect.y), .w = @intFromFloat(diag_copy_rect.w), .h = @intFromFloat(diag_copy_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    if (uiPressed(registerAction(diag_copy_rect, .diag_copy))) push(.{ .x = @intFromFloat(diag_copy_rect.x), .y = @intFromFloat(diag_copy_rect.y), .w = @intFromFloat(diag_copy_rect.w), .h = @intFromFloat(diag_copy_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
     pushText(copy_label, @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(if (diag_copied) .accent_bar else .accent_bar));
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + set_row_h - 1), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     y += set_row_h + 8;
@@ -7353,39 +7355,37 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 diag_press.begin(x, y, time_ms, false);
-                diag_back_pressed = setHit(diag_back_rect, x, y);
-                diag_copy_pressed = !diag_back_pressed and setHit(diag_copy_rect, x, y);
+                ui_pressed = null;
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                    }
+                }
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
                 // 임계를 넘으면 밀려던 것이다 — 눌림 표시를 거둔다(다른 화면과 같은 규칙).
-                if (diag_press.move(x, y)) {
-                    diag_back_pressed = false;
-                    diag_copy_pressed = false;
-                }
+                if (diag_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was_back = diag_back_pressed;
-                const was_copy = diag_copy_pressed;
-                diag_back_pressed = false;
-                diag_copy_pressed = false;
+                const intent = takeUiIntent();
                 routeClear();
                 if (phase == 3) {
                     diag_press.cancel();
                     return 1;
                 }
                 if (diag_press.end() != .tap) return 1;
-                if (was_back) {
-                    navPop();
-                    return 1;
-                }
-                if (was_copy) {
-                    // **화면에 그린 그 글을 그대로 보낸다** — 같은 함수가 낸 것이라 갈릴 수 없다.
-                    requestCopyText(diagnosticScreenText());
-                    diag_copied = true;
+                switch (intent orelse return 1) {
+                    .diag_back => navPop(),
+                    .diag_copy => {
+                        // **화면에 그린 그 글을 그대로 보낸다** — 같은 함수가 낸 것이라 갈릴 수 없다.
+                        requestCopyText(diagnosticScreenText());
+                        diag_copied = true;
+                    },
+                    else => {},
                 }
                 return 1;
             },
@@ -7399,28 +7399,32 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 hk_press.begin(x, y, time_ms, false);
-                hk_pressed = if (setHit(hk_ok_rect, x, y)) .ok else if (setHit(hk_cancel_rect, x, y)) .cancel else .none;
+                ui_pressed = null;
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                    }
+                }
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                if (hk_press.move(x, y)) hk_pressed = .none;
+                if (hk_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was = hk_pressed;
-                hk_pressed = .none;
+                const intent = takeUiIntent();
                 routeClear();
                 if (phase == 3) {
                     hk_press.cancel();
                     return 1;
                 }
                 if (hk_press.end() != .tap) return 1;
-                switch (was) {
-                    .ok => acceptHostKey(),
-                    .cancel => rejectHostKey(),
-                    .none => {},
+                switch (intent orelse return 1) {
+                    .host_key_ok => acceptHostKey(),
+                    .host_key_cancel => rejectHostKey(),
+                    else => {},
                 }
                 return 1;
             },
@@ -7434,33 +7438,37 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 pw_press.begin(x, y, time_ms, false);
-                pw_pressed = if (setHit(pw_ok_rect, x, y)) .ok else if (setHit(pw_cancel_rect, x, y)) .cancel else .none;
+                ui_pressed = null;
+                if (hitAction(x, y)) |id| {
+                    if (ui_table.resolve(id, ui_generation)) |it| {
+                        ui_pressed = .{ .id = id, .gen = ui_generation, .intent = it };
+                    }
+                }
                 return 1;
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                if (pw_press.move(x, y)) pw_pressed = .none;
+                if (pw_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
                 if (!routeIs(.chrome)) return 0;
-                const was = pw_pressed;
-                pw_pressed = .none;
+                const intent = takeUiIntent();
                 routeClear();
                 if (phase == 3) {
                     pw_press.cancel();
                     return 1;
                 }
                 if (pw_press.end() != .tap) return 1;
-                switch (was) {
-                    .ok => commitPassword(),
+                switch (intent orelse return 1) {
+                    .password_ok => commitPassword(),
                     // **취소는 친 것을 지운다** — 화면만 닫고 값을 남기면 다음 물음에 그것이 간다.
-                    .cancel => {
+                    .password_cancel => {
                         wipePassword();
                         password_prompt = false;
                         navPop();
                     },
-                    .none => {},
+                    else => {},
                 }
                 return 1;
             },

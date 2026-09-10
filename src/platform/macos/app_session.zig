@@ -79497,6 +79497,85 @@ test "활동 뷰: 입력을 다 못 보면 **명령 조각이라도** 본다 (�
     try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_body_matches);
 }
 
+test "활동 뷰 펼침: chunk 껍데기를 벗기고 **종료 코드**를 머리에 든다 (§2.4 · §6)" {
+    // 🔥 **실측 191.5 MB(Codex 결과의 16.73%)가 껍데기 안에 갇혀 있었다** — 펼치면
+    // `{"chunk_id":"003f2e",…}` 가 먼저 뜨고 보려던 출력이 묻혔다.
+    //
+    // ⚠️ 그리고 `exit_code` 는 그 껍데기 **안에만** 있다(실측 chunk 의 33.9%). 벗기기만 하면
+    // 「실패했나」를 잃는다 — 계약 §6 이 「그때도 `exit_code` 는 보여야 한다」고 못박은 자리다.
+    // 이 판정자가 **둘을 한 줄로 묶는다**: 벗겼고, 잃지 않았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const call =
+        "{\"timestamp\":\"2026-09-05T09:00:00.000Z\",\"type\":\"response_item\",\"payload\":" ++
+        "{\"type\":\"custom_tool_call\",\"call_id\":\"call_K\",\"name\":\"exec_command\"," ++
+        "\"input\":\"{\\\"cmd\\\":\\\"zig build test\\\"}\"}}\n";
+    // 결과는 배열이고, `text` 안에 chunk JSON 이 **한 겹 더** 이스케이프되어 있다.
+    const result =
+        "{\"timestamp\":\"2026-09-05T09:00:01.000Z\",\"type\":\"response_item\",\"payload\":" ++
+        "{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_K\",\"output\":[" ++
+        "{\"type\":\"input_text\",\"text\":\"Script completed\\nOutput:\\n" ++
+        "{\\\"chunk_id\\\":\\\"003f2e\\\",\\\"wall_time_seconds\\\":0.1,\\\"exit_code\\\":130," ++
+        "\\\"output\\\":\\\"import { readFileSync } from 'fs'\\\\ndone\\\\n\\\"}\"}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.jsonl", .data = call ++ result });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/c.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+
+    agent_activity_ops.openAt(session, 0);
+    const op = session.agent_activity.open orelse return error.TestUnexpectedResult;
+    try std.testing.expect(op.detail.has_result);
+
+    // ⓐ **껍데기가 없다** — `chunk_id` 도 `wall_time_seconds` 도 화면에 안 남는다.
+    try std.testing.expect(std.mem.indexOf(u8, op.detail.result, "chunk_id") == null);
+    try std.testing.expect(std.mem.indexOf(u8, op.detail.result, "wall_time_seconds") == null);
+    // ⓑ **실제 출력이 보인다** — 값 안의 `}` 에서 안 잘린다(적대적 1회차).
+    try std.testing.expect(std.mem.indexOf(u8, op.detail.result, "import { readFileSync } from 'fs'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, op.detail.result, "done") != null);
+    // ⓒ **머리말은 그대로다** — 벗기는 것이지 지우는 것이 아니다(§2.3).
+    try std.testing.expect(std.mem.indexOf(u8, op.detail.result, "Script completed") != null);
+    // ⓓ **종료 코드를 잃지 않았다**(§6).
+    try std.testing.expectEqual(@as(?i32, 130), op.detail.result_exit_code);
+
+    session.agent_activity.dropOpen(session.allocator);
+    quietActivityWorkers(session);
+}
+
 test "활동 뷰: 입력이 조각 상한을 넘으면 「없다」가 아니라 「다 못 봤다」다 (적대적 3회차)" {
     // ⚠️ **이 폴백은 실측 0 건이라 한 번도 안 돈다** — `input` 은 최대 38.1 KiB 로 조각 상한
     // (64 KiB)을 넘는 것이 없다. 그래서 **죽은 채로 있기 쉬운 자리**다: 이 스택은 이미 같은

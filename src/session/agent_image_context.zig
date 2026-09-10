@@ -129,6 +129,13 @@ pub const Block = struct {
     /// 잡아 주면 이 깃발은 **영원히 거짓**이다. 실제로 두 소비자가 그렇게 잡고 있었고, 그래서
     /// 펼침의 「이하 생략」이 **한 번도 안 떴다**(적대적 2회차). 잘림을 물으려면 `complete` 를 본다.
     truncated: bool = false,
+    /// chunk 껍데기에서 읽은 **종료 코드**. 없으면 null.
+    ///
+    /// **왜 여기서 드나**: `exit_code` 는 chunk JSON **안**에만 있어서(실측 chunk 의 **33.9%**)
+    /// 껍데기를 벗기면 함께 사라진다 — 계약 §6 이 「그때도 `exit_code` 는 보여야 한다」고 못박은
+    /// 자리다. 스캐너가 찾게 하면 결과를 **한 번 더 훑어야** 하는데(§4.2 「자리만 든다」), 푸는
+    /// 층은 어차피 그 바이트를 지나가므로 **공짜로** 얻는다.
+    exit_code: ?i32 = null,
     /// 값의 **끝(따옴표)까지 봤나.** 거짓이면 준 바이트가 값 도중에 끊긴 것이다 — 읽기 상한에
     /// 걸렸거나 파일이 거기서 끝났거나.
     ///
@@ -305,13 +312,197 @@ pub fn unescapeObjectValues(out: []u8, raw: []const u8) Block {
     return .{ .len = w }; // 닫는 `}` 를 못 보고 창이 끝났다
 }
 
+/// chunk 껍데기를 벗긴 뒤의 결과.
+const FoldedChunks = struct {
+    /// 벗긴 뒤의 길이.
+    len: usize,
+    /// 마지막으로 본 `exit_code`. **없으면 null** — 실측 chunk 의 33.9% 에만 있다.
+    exit_code: ?i32 = null,
+};
+
+/// **`{"chunk_id":…}` 껍데기를 벗기고 그 안의 `output` 만 남긴다** — 제자리에서 줄인다.
+///
+/// **왜 벗기나**: Codex 는 결과를 chunk 로 잘라 보내는데, 실제 출력이 그 JSON 의 `output` 값
+/// **안에** 있다. 그래서 펼치면 `{"chunk_id":"003f2e","wall_time_seconds":0.10,…}` 가 먼저 뜨고
+/// 사용자가 보려던 출력은 그 뒤에 묻힌다. 실측(2026-09-10 · Codex 결과 266,470 · 1,144.9 MB):
+/// chunk JSON **74,980 개** · 껍데기 14.4 MB(1.26%) · **그 안에 갇힌 실제 출력 191.5 MB(16.73%)**.
+///
+/// ⚠️ **지우는 것이 아니라 벗기는 것이다**(§2.3). 앞선 두 슬라이스(Codex JS 껍데기 · 옛 형식
+/// `input` JSON)와 같은 축이고, 여기는 이스케이프가 **한 겹 더** 있다 — 파일 JSON 한 겹을 이미
+/// 푼 자리에서 chunk 의 `output` 값을 또 푼다.
+///
+/// **제자리에서 줄여도 안전한 이유**: 푸는 일은 바이트를 안 늘리고, 쓰는 자리(`w`)가 읽는 자리
+/// 보다 **언제나 앞**이다(껍데기 머리가 값보다 먼저다).
+fn foldChunks(buf: []u8) FoldedChunks {
+    const needle = "{\"chunk_id\":";
+    var exit_code: ?i32 = null;
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < buf.len) {
+        const rel = std.mem.indexOfPos(u8, buf, i, needle) orelse break;
+        const end = balancedObjectEnd(buf, rel) orelse break; // 안 닫혔다 — 그대로 둔다
+        // 껍데기 앞의 바이트는 그대로 옮긴다(머리말 등).
+        const keep = buf[i..rel];
+        if (w != i) std.mem.copyForwards(u8, buf[w..][0..keep.len], keep);
+        w += keep.len;
+
+        const blob = buf[rel..end];
+        if (chunkExitCode(blob)) |code| exit_code = code;
+        if (findChunkOutput(blob)) |value| {
+            // 값은 **또 한 겹** 이스케이프돼 있다 — 여기서 푼다. 제자리에서 왼쪽으로 쓴다.
+            const src_start = rel + value.start;
+            const run = unescapeValueInPlace(buf, w, src_start, value.len);
+            w += run;
+        } else {
+            // ⚠️ **`output` 이 없으면 그대로 둔다**(실측 640 개 · chunk 의 0.9%). 벗길 것이 없는데
+            // 껍데기를 없애면 그것은 **지우는 일**이고 §2.3 이 금한다 — 「받은 것 그대로」가
+            // 깨진다. 기존 판정자가 정확히 이 자리를 잡았다.
+            if (w != rel) std.mem.copyForwards(u8, buf[w..][0..blob.len], blob);
+            w += blob.len;
+        }
+        i = end;
+    }
+    const rest = buf[i..];
+    if (w != i) std.mem.copyForwards(u8, buf[w..][0..rest.len], rest);
+    w += rest.len;
+    return .{ .len = w, .exit_code = exit_code };
+}
+
+/// `at` 의 `{` 와 짝이 맞는 `}` **다음**. 문자열 안의 괄호는 안 센다. 못 닫으면 null.
+///
+/// ⚠️ **정규식으로 `[^}]*` 를 쓰면 안 된다**(적대적 1회차). 실측 chunk 의 **12.8%(9,572 개)** 가
+/// `output` 값 안에 `}` 를 갖는다(코드·JSON 을 출력한 자리다) — 거기서 잘려 진짜 출력을 껍데기로
+/// 세면 측정이 **136 → 191.5 MB** 만큼 틀린다.
+///
+/// ⚠️ **지금 실데이터에서는 `depth` 세기가 문자열 건너뛰기와 등가다** — chunk 의 키가 전부
+/// 스칼라라(`chunk_id`·`wall_time_seconds`·`original_token_count`·`output`·`session_id`·
+/// `exit_code`) 중첩 객체가 없기 때문이다. 뮤테이션으로 확인했다(`depth` 를 버리고 첫 `}` 에서
+/// 닫아도 판정자가 안 빨개진다). **그래도 둔다** — 진짜 방어는 문자열 건너뛰기이고, `depth` 는
+/// 형식에 중첩이 들어오는 날의 몫이다. 없애면 그날 조용히 잘린다.
+fn balancedObjectEnd(buf: []const u8, at: usize) ?usize {
+    var depth: usize = 0;
+    var i = at;
+    while (i < buf.len) {
+        switch (buf[i]) {
+            '"' => {
+                i += 1;
+                while (i < buf.len) : (i += 1) {
+                    if (buf[i] == '\\') {
+                        i += 1;
+                        continue;
+                    }
+                    if (buf[i] == '"') break;
+                }
+            },
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return null;
+}
+
+/// chunk 안 `"output":"…"` 값의 자리(`blob` 상대). 없으면 null(실측 0.9%).
+const ChunkValue = struct { start: usize, len: usize };
+
+fn findChunkOutput(blob: []const u8) ?ChunkValue {
+    const key = "\"output\":\"";
+    const k = std.mem.indexOf(u8, blob, key) orelse return null;
+    const start = k + key.len;
+    var i = start;
+    while (i < blob.len) : (i += 1) {
+        if (blob[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (blob[i] == '"') return .{ .start = start, .len = i - start };
+    }
+    return null;
+}
+
+/// chunk 안 `"exit_code":N`. 없으면 null — 실측 **33.9%** 에만 있다.
+fn chunkExitCode(blob: []const u8) ?i32 {
+    const key = "\"exit_code\":";
+    const k = std.mem.indexOf(u8, blob, key) orelse return null;
+    var i = k + key.len;
+    while (i < blob.len and blob[i] == ' ') i += 1;
+    var neg = false;
+    if (i < blob.len and blob[i] == '-') {
+        neg = true;
+        i += 1;
+    }
+    var value: i64 = 0;
+    var seen = false;
+    while (i < blob.len and blob[i] >= '0' and blob[i] <= '9') : (i += 1) {
+        seen = true;
+        value = value * 10 + (blob[i] - '0');
+        if (value > std.math.maxInt(i32)) return null;
+    }
+    if (!seen) return null;
+    return @intCast(if (neg) -value else value);
+}
+
+/// `src` 구간을 풀어 `dst` 자리에 쓴다 — **같은 버퍼 안에서** 왼쪽으로만 옮긴다.
+/// 쓴 바이트를 돌려준다.
+fn unescapeValueInPlace(buf: []u8, dst: usize, src: usize, len: usize) usize {
+    var w = dst;
+    var i = src;
+    const stop = src + len;
+    while (i < stop) {
+        var cp_buf: [4]u8 = undefined;
+        var chunk: []const u8 = undefined;
+        if (buf[i] == '\\' and i + 1 < stop) {
+            const c = buf[i + 1];
+            i += 2;
+            switch (c) {
+                'n' => chunk = "\n",
+                't' => chunk = "\t",
+                'r', 'b', 'f' => continue,
+                'u' => {
+                    const cp = parseHex4(buf, i) orelse continue;
+                    i += 4;
+                    if (cp < 0x20) continue;
+                    const n = std.unicode.utf8Encode(@intCast(cp), &cp_buf) catch continue;
+                    chunk = cp_buf[0..n];
+                },
+                else => {
+                    cp_buf[0] = c;
+                    chunk = cp_buf[0..1];
+                },
+            }
+        } else {
+            const n = std.unicode.utf8ByteSequenceLength(buf[i]) catch {
+                i += 1;
+                continue;
+            };
+            if (i + n > stop) break;
+            // ⚠️ 겹치는 복사라 **먼저 읽고** 쓴다.
+            var keep: [4]u8 = undefined;
+            @memcpy(keep[0..n], buf[i..][0..n]);
+            i += n;
+            if (n == 1 and keep[0] < 0x20 and keep[0] != '\n' and keep[0] != '\t') continue;
+            @memcpy(buf[w..][0..n], keep[0..n]);
+            w += n;
+            continue;
+        }
+        @memcpy(buf[w..][0..chunk.len], chunk);
+        w += chunk.len;
+    }
+    return w - dst;
+}
+
 pub fn unescapeTextArray(out: []u8, raw: []const u8) Block {
     var w: usize = 0;
     var i: usize = 0;
+    var exit_code: ?i32 = null;
     while (i < raw.len) {
         switch (raw[i]) {
             // 문자열 **밖**의 `]` = 배열의 끝 = 다 봤다.
-            ']' => return .{ .len = w, .complete = true },
+            ']' => return .{ .len = w, .complete = true, .exit_code = exit_code },
             '"' => {},
             else => {
                 i += 1;
@@ -319,7 +510,7 @@ pub fn unescapeTextArray(out: []u8, raw: []const u8) Block {
             },
         }
         // 문자열 하나를 지난다. 그것이 `text` 키였고 뒤에 `:` 와 값이 오면 **그 값을 잇는다**.
-        const key = scanString(raw, i) orelse return .{ .len = w };
+        const key = scanString(raw, i) orelse return .{ .len = w, .exit_code = exit_code };
         i = key.end;
         if (!std.mem.eql(u8, raw[key.start..key.stop], "text")) continue;
         var j = i;
@@ -337,18 +528,23 @@ pub fn unescapeTextArray(out: []u8, raw: []const u8) Block {
         const sep_at = w;
         var wrote_sep = false;
         if (w > 0 and out[w - 1] != '\n') {
-            if (w + 1 > out.len) return .{ .len = w, .truncated = true };
+            if (w + 1 > out.len) return .{ .len = w, .truncated = true, .exit_code = exit_code };
             out[w] = '\n';
             w += 1;
             wrote_sep = true;
         }
         const run = unescapeValue(out[w..], raw[j + 1 ..]);
-        if (wrote_sep and run.written == 0) w = sep_at else w += run.written;
-        if (run.truncated) return .{ .len = w, .truncated = true };
-        if (!run.closed) return .{ .len = w }; // 창이 값 도중에 끝났다 — 다 못 봤다
+        // **chunk 껍데기를 여기서 벗긴다**(§2.4). 방금 푼 조각 안에 `{"chunk_id":…}` 가 있으면
+        // 그 `output` 만 남긴다 — 실측 191.5 MB(결과의 16.73%)가 그 안에 갇혀 있다.
+        const folded = foldChunks(out[w..][0..run.written]);
+        if (folded.exit_code) |code| exit_code = code;
+        const written = folded.len;
+        if (wrote_sep and written == 0) w = sep_at else w += written;
+        if (run.truncated) return .{ .len = w, .truncated = true, .exit_code = exit_code };
+        if (!run.closed) return .{ .len = w, .exit_code = exit_code }; // 창이 값 도중에 끝났다
         i = j + 1 + run.consumed;
     }
-    return .{ .len = w }; // `]` 를 못 보고 창이 끝났다
+    return .{ .len = w, .exit_code = exit_code }; // `]` 를 못 보고 창이 끝났다
 }
 
 /// `raw[at]` 의 여는 따옴표부터 문자열 하나를 지난다. `start`/`stop` 은 **내용**(따옴표 제외),
@@ -366,6 +562,80 @@ fn scanString(raw: []const u8, at: usize) ?StringSpan {
         i += 1;
     }
     return null;
+}
+
+test "chunk 껍데기: `output` 만 남기고 종료 코드를 든다 (§2.4)" {
+    // 🔥 **실측 191.5 MB(Codex 결과의 16.73%)가 껍데기 안에 갇혀 있었다**(2026-09-10 ·
+    // 결과 266,470 · 1,144.9 MB · chunk JSON 74,980 개 · 껍데기 자체는 14.4 MB 뿐).
+    // 펼치면 `{"chunk_id":"003f2e","wall_time_seconds":0.10,…}` 가 먼저 뜨고 보려던 출력은 묻혔다.
+    var out: [512]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"Script completed\\nOutput:\\n" ++
+        "{\\\"chunk_id\\\":\\\"003f2e\\\",\\\"wall_time_seconds\\\":0.1,\\\"exit_code\\\":0," ++
+        "\\\"output\\\":\\\"1:import fs\\\\n2:done\\\\n\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    // 머리말은 그대로, 껍데기 자리에는 **출력만** 남는다.
+    try testing.expectEqualStrings("Script completed\nOutput:\n1:import fs\n2:done\n", out[0..r.len]);
+    // 껍데기에서 읽은 종료 코드를 든다 — 벗기면서 잃지 않는다(§6).
+    try testing.expectEqual(@as(?i32, 0), r.exit_code);
+}
+
+test "chunk 껍데기: 값 안의 `}` 에서 안 잘린다 (적대적 1회차)" {
+    // 🔥 **정규식 `[^}]*` 로 잡으면 여기서 잘린다.** 실측 chunk 의 **12.8%(9,572 개)** 가
+    // `output` 값 안에 `}` 를 갖는다 — 코드나 JSON 을 출력한 자리다. 잘리면 진짜 출력이
+    // 껍데기로 세어져 측정이 **136 → 191.5 MB** 만큼 틀린다(내 첫 측정이 그랬다).
+    //
+    // ⚠️ **짝이 안 맞는 `}` 를 쓴다.** `{ … }` 처럼 짝이 맞으면 괄호만 세도 우연히 통과해
+    // **문자열 건너뛰기가 재이지 않는다** — 첫 픽스처가 그랬고 뮤테이션 둘이 안 잡혔다.
+    // 코드 출력에서 닫는 괄호만 있는 줄은 흔하다.
+    var out: [512]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"" ++
+        "{\\\"chunk_id\\\":\\\"4ac65d\\\",\\\"exit_code\\\":1," ++
+        "\\\"output\\\":\\\"12:    }\\\\n13:}\\\\n\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    try testing.expectEqualStrings("12:    }\n13:}\n", out[0..r.len]);
+    try testing.expectEqual(@as(?i32, 1), r.exit_code);
+}
+
+test "chunk 껍데기: `output` 이 없으면 **그대로 둔다** — 벗기기는 지우기가 아니다 (§2.3)" {
+    // 실측 **640 개(chunk 의 0.9%)** 가 `output` 없이 온다. 벗길 것이 없는데 껍데기를 없애면
+    // 그것은 **지우는 일**이다 — 「받은 것 그대로」가 깨진다.
+    var out: [256]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"{\\\"chunk_id\\\":\\\"eb14a3\\\",\\\"exit_code\\\":7}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    try testing.expectEqualStrings("{\"chunk_id\":\"eb14a3\",\"exit_code\":7}", out[0..r.len]);
+    // 그래도 종료 코드는 읽는다.
+    try testing.expectEqual(@as(?i32, 7), r.exit_code);
+}
+
+test "chunk 껍데기: 여럿이면 순서대로 잇고 **마지막** 종료 코드를 든다" {
+    // 실측: 한 결과에 chunk 가 2 개 4,086 건 · 3 개 626 건 · 6 개 이상 46 건.
+    var out: [512]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"" ++
+        "{\\\"chunk_id\\\":\\\"a\\\",\\\"exit_code\\\":0,\\\"output\\\":\\\"first\\\\n\\\"}" ++
+        "{\\\"chunk_id\\\":\\\"b\\\",\\\"exit_code\\\":130,\\\"output\\\":\\\"second\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    try testing.expectEqualStrings("first\nsecond", out[0..r.len]);
+    // **마지막**이 그 호출의 결말이다.
+    try testing.expectEqual(@as(?i32, 130), r.exit_code);
+}
+
+test "chunk 껍데기: 종료 코드가 없으면 null — 실측 66.1% 가 그렇다" {
+    var out: [256]u8 = undefined;
+    const raw =
+        "{\"type\":\"input_text\",\"text\":\"" ++
+        "{\\\"chunk_id\\\":\\\"c\\\",\\\"output\\\":\\\"plain\\\"}\"}]";
+    const r = unescapeTextArray(&out, raw);
+    try testing.expect(r.complete);
+    try testing.expectEqualStrings("plain", out[0..r.len]);
+    try testing.expectEqual(@as(?i32, null), r.exit_code);
 }
 
 test "펼침 본문: 배열이면 원소들의 text 를 순서대로 잇는다 (Codex 결과)" {

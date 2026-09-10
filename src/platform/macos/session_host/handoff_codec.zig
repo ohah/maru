@@ -146,13 +146,18 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 69, .name = "notification_title" },
     .{ .tag = 70, .name = "notification_body" },
     .{ .tag = 71, .name = "agent_progress" },
-    .{ .tag = 99, .name = "saved_kitty_flags" },
+    .{ .tag = 99, .name = "saved_kitty_flags", .optional = true },
     // OSC 99 조립 조각. **새 tag 는 끝에서 이어 붙인다** — 가운데에 끼우면 이미 나간 handoff 의
     // 같은 번호가 다른 뜻이 돼 업그레이드가 남의 필드를 읽는다.
-    .{ .tag = 95, .name = "osc99_title" },
-    .{ .tag = 96, .name = "osc99_body" },
-    .{ .tag = 97, .name = "osc99_id" },
-    .{ .tag = 98, .name = "osc99_active" },
+    //
+    // **95~99 는 전부 `optional` 이다.** 2026-09-10 에 99(`saved_kitty_flags`)를 필수로 넣었다가, 그
+    // tag 를 모르는 구 host 가 쓴 레코드가 `MissingRequiredField` 로 거부돼 **업그레이드가 통째로
+    // 막혔다** — 새 빌드를 깔 때마다 host 가 하나씩 늘고 세션이 옛 host 에 갇혔다. `FieldSpec.optional`
+    // 의 주석이 그 결과를 미리 적어 두었는데도 그랬다. 같은 날 들어온 95~98 도 같은 잠복 상태였다.
+    .{ .tag = 95, .name = "osc99_title", .optional = true },
+    .{ .tag = 96, .name = "osc99_body", .optional = true },
+    .{ .tag = 97, .name = "osc99_id", .optional = true },
+    .{ .tag = 98, .name = "osc99_active", .optional = true },
     .{ .tag = 72, .name = "charset_g0" },
     .{ .tag = 73, .name = "charset_g1" },
     .{ .tag = 74, .name = "charset_gl" },
@@ -190,6 +195,29 @@ const core_fields_v1 = [_]FieldSpec{
     // means false; new writers preserve it rather than losing the bounded drop at same-PID exec.
     .{ .tag = 91, .name = "notification_write_rejected", .optional = true },
 };
+
+/// v1 표가 처음 나갈 때(2026-07-25~27) 쓰인 마지막 tag. **이보다 큰 번호는 전부 「뒤늦게 추가」다.**
+const v1_initial_last_tag: u32 = 89;
+
+// **뒤늦게 추가된 tag 는 반드시 `optional` 이어야 한다 — 컴파일이 막는다.**
+//
+// 필수로 두면 그 tag 를 모르는 N-1 host 가 쓴 레코드가 `MissingRequiredField` 로 거부되고,
+// `mapDecodeError` 가 그것을 `InvalidState` 로 접어 `reason=target_invalid` 한 줄만 남긴다. 그러면
+// **실행 중 업그레이드가 통째로 막히고**, 새 빌드를 깔 때마다 host 가 하나씩 늘며 세션이 옛 host 에
+// 갇힌다. 2026-09-10 에 tag 99 로 실제로 그렇게 됐다(같은 날 들어온 95~98 도 같은 잠복 상태였다).
+//
+// `FieldSpec.optional` 의 주석이 이 결과를 이미 문장으로 적어 두었는데도 두 번 어겼다. 그래서 규칙을
+// 글이 아니라 **컴파일 오류**로 옮긴다 — 다음 사람은 잊을 수가 없다.
+comptime {
+    for (core_fields_v1) |spec| {
+        if (spec.tag > v1_initial_last_tag and !spec.optional) {
+            @compileError(
+                "handoff tag " ++ spec.name ++ " 는 v1 이후에 추가됐으므로 `.optional = true` 여야 한다 — " ++
+                    "필수로 두면 구 host 의 레코드가 MissingRequiredField 로 거부돼 업그레이드가 막힌다",
+            );
+        }
+    }
+}
 
 comptime {
     @setEvalBranchQuota(100_000);

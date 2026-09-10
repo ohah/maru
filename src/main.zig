@@ -13728,7 +13728,15 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                     io,
                     session_host_entrypoint.preflight_fd,
                 ) catch |err| {
-                    session_host.upgrade_preflight.noteChildOutcome(false, @errorName(err));
+                    // **접힌 이름을 함께 적는다.** `InvalidState` 는 디코드 실패 전부와 직접 반환 넷을
+                    // 한 이름으로 덮는다 — 그 안쪽 이름이 없으면 다섯 갈래가 구분되지 않는다.
+                    var detail_buf: [96]u8 = undefined;
+                    const inner = session_host.upgrade_bootstrap.lastDetail();
+                    const detail = if (inner.len == 0)
+                        @errorName(err)
+                    else
+                        std.fmt.bufPrint(&detail_buf, "{s}({s})", .{ @errorName(err), inner }) catch @errorName(err);
+                    session_host.upgrade_preflight.noteChildOutcome(false, detail);
                     try stderr.print("maru session host preflight failed: {s}\n", .{@errorName(err)});
                     return error.UnknownCommand;
                 };

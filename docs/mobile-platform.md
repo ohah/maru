@@ -1087,8 +1087,8 @@ Enter 한 번이다).
 실제로 일어나는 일이다. 계약은 이것뿐이다: **뗄 때 그 누름이 여전히 같은 것을 가리키는지
 다시 확인하고, 아니면 아무 일도 안 한다**(잘못 실행하느니 아무 일도 안 한다).
 
-**지금 그것을 지키는 방법은 chrome 과 다르다**(2026-09-10 코드 대조로 정정 — 예전에는 이 자리가
-「모바일도 그 경로를 쓴다」고 적혀 있었는데 브리지는 `UiActionId` 를 **한 번도 안 쓴다**).
+**지금 그것을 지키는 방법은 chrome 과 다르다**(2026-09-10 코드 대조로 정정 — 예전에는 이 자리가 chrome 의
+경로를 모바일도 탄다고 적어 두었는데, 브리지는 `UiActionId` 를 **한 번도 안 쓴다**).
 chrome 은 `UiActionId` + `snapshot_generation` 의 intent table 로 푼다([chrome 상호작용
 이관](chrome-interaction-migration.md)) — generation 이 다르면 `resolve` 가 null 을 낸다.
 모바일은 **누를 때 그 세션의 `runtime_id` 를 잡고 뗄 때 목록에서 다시 푼다**(`openRemoteRow`);

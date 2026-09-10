@@ -82,8 +82,15 @@ test "preflight 자식은 자기가 연 파일에 결과를 남긴다 (부모가
     defer a.free(main_raw);
     const main_src = try stripComments(a, main_raw);
     defer a.free(main_src);
-    try std.testing.expect(has(main_src, "noteChildOutcome(false, @errorName(err))"));
+    try std.testing.expect(has(main_src, "noteChildOutcome(false,"));
     try std.testing.expect(has(main_src, "noteChildOutcome(true,"));
+
+    // ⑥ **접힌 이름까지 실어야 한다.** 바깥 이름만 적으면 `InvalidState` 하나가 다섯 갈래를 덮는다 —
+    //    `mapDecodeError` 가 디코드 실패 전부를 그 이름으로 접고, 직접 반환하는 자리도 넷이다.
+    //    2026-09-10 에 `detail=InvalidState` 까지는 나왔는데 **그 안쪽을 몰라** 원인 확정이 하루 늦었다.
+    //    실제 이름은 `MissingRequiredField` 였다(늦게 추가한 handoff tag 가 필수였다).
+    try std.testing.expect(has(main_src, "upgrade_bootstrap.lastDetail()"));
+    try std.testing.expect(has(main_src, "@errorName(err)"));
 }
 
 test "target verify 는 넷 중 어디서 접혔는지 남긴다" {

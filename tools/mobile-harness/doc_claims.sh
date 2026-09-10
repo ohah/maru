@@ -521,6 +521,21 @@ ck "하네스가 카탈로그를 굽는다" 1 "$(grep -c 'xcrun actool' $H_RUN)"
 ck "구운 것이 있는지 본다" 1 "$(grep -c 'Assets.car' $H_RUN)"
 ck "뽑아 둔 카탈로그가 있다" 3 "$(ls assets/icon/ios-launch.xcassets/LaunchIcon.imageset/*.png 2>/dev/null | wc -l | tr -d ' ')"
 
+echo "§3.0 붙어 달라는 요청 — 누른 그때 집는다 (M12-f1)"
+IOSH=src/platform/ios/ios_app_host.m
+ANDH=src/platform/android/android_app_host.c
+# **요청을 «먼저» 가져간다.** iOS 는 `is_running` 을 먼저 보고 돌아서서 요청을 남겼고, 그것이
+# 다음 foreground 에 터져 **한참 전에 누른 서버로 뒤늦게 붙었다**. 순서가 계약이므로 순서를 센다:
+# `take_server_connect` 가 나오는 줄이 `pump_is_running` 이 나오는 줄보다 «앞» 이어야 한다.
+ck "iOS 가 요청을 먼저 가져간다" 1 "$(awk '/^static void startSshIfAsked/,/^}/' $IOSH | grep -n 'take_server_connect\|pump_is_running' | head -1 | grep -c take_server_connect)"
+ck "Android 도 먼저 가져간다" 1 "$(awk '/^static void startSshIfAsked/,/^}/' $ANDH | grep -n 'take_server_connect\|pump_is_running' | head -1 | grep -c take_server_connect)"
+# **프레임마다 본다.** 앱이 뜰 때와 배경 복귀에서만 부르면 «누른 그때» 는 아무 일도 안 난다.
+# 두 host 의 프레임 루프에 각각 한 자리씩 있어야 한다.
+ck "iOS 가 프레임마다 본다" 1 "$(sed -n '/^- (void)tick/,/^}/p' $IOSH | grep -c 'startSshIfAsked()')"
+ck "Android 가 프레임마다 본다" 1 "$(sed -n '/frame_changed = maru_mobile_frame_changed/,/^}/p' $ANDH | grep -c 'startSshIfAsked()')"
+# **붙어 있어 못 열 때도 «말한다»** — 조용히 버리면 사용자에게는 고장으로 보인다(§5).
+ck "붙어 있어 못 열면 남긴다" 1 "$(grep -c 'connect_ignored_busy' $IOSH)"
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

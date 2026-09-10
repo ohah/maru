@@ -1268,6 +1268,13 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **원격과 주고받는 것은 그리기와 무관하다.** 아래 `nextDrawable` 이 nil 이면 이 함수는
     // 곧바로 돌아가는데(창이 바뀌는 순간 등) 그 자리에 두면 **친 글자가 그동안 안 나간다** —
     // 그리기가 잠깐 막힌 것과 입력이 막히는 것은 사용자에게 전혀 다른 일이다.
+    // **붙어 달라는 요청은 프레임마다 본다**(M12-f1). 예전에는 이 함수를 앱이 뜰 때와 배경에서
+    // 돌아올 때 **딱 두 자리**에서만 불렀다 — 그래서 목록에서 줄을 눌러도 **누른 그때는 아무도
+    // 그 요청을 안 집었다**(실측: `MARU_TOUCH` 만 있고 `MARU_SSH start` 가 없다). Android 는
+    // 자기 프레임 루프에서 이미 매번 부르고 있었다. 요청이 없으면 곧바로 돌아가므로 값이 싸다.
+    //
+    // **`pumpSshOnMainThread` 안에 못 둔다** — 그 함수는 펌프가 안 돌면 첫 줄에서 돌아선다.
+    startSshIfAsked();
     pumpSshOnMainThread();
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
@@ -1967,9 +1974,20 @@ static void driveControlChannel(void) {
 }
 
 static void startSshIfAsked(void) {
-    if (maru_ssh_pump_is_running()) return;
+    // **요청을 «먼저» 가져간다.** 예전에는 `is_running` 을 먼저 보고 돌아섰는데, 그러면 요청이
+    // 소비되지 않고 남아 **다음 foreground 에 터진다** — 사용자가 한참 전에 누른 서버로 뒤늦게
+    // 붙었다(실측: `MARU_LIFECYCLE background` 뒤에 `MARU_SSH start host=…`). 브리지가 세대로
+    // 막는 「늦게 도착한 누름」이 host 에 그대로 남아 있던 셈이다(M12-f1).
+    //
+    // Android 는 처음부터 이 순서였다 — 두 host 가 갈려 있었고 iOS 만 틀렸다.
     unsigned int req = maru_mobile_take_server_connect();
     if (!req) return;
+    // 붙어 있으면 두 번째 세션을 열지 않는다(두 번 붙으면 세션이 둘 생긴다). **다만 요청은
+    // 이미 가져갔다** — 남겨 두면 위의 「뒤늦게」가 돌아온다.
+    if (maru_ssh_pump_is_running()) {
+        NSLog(@"MARU_SSH connect_ignored_busy index=%u", req - 1);
+        return;
+    }
     unsigned int idx = req - 1;
 
     unsigned char host[256], user[MARU_SSH_MAX_USER], fp[128];

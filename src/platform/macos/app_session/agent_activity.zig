@@ -1098,6 +1098,9 @@ pub fn submitBodySearch(self: *AppSession) void {
         probes.appendAssumeCapacity(.{
             .data_offset = hit.data_offset,
             .cmd_offset = cmd_offset,
+            // **입력 전부**(§2.1.1). Claude 만 든다 — Codex 는 `input` 이 문자열이라 대상·명령이
+            // 이미 그 안이다.
+            .input_offset = if (hit.input_rel != 0) hit.line_offset +| hit.input_rel else 0,
             .body_offset = if (hit.result.found) hit.result.body.offset else 0,
             .body_is_array = hit.result.body.is_array,
             .file = hit.file_index,

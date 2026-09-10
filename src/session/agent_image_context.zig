@@ -240,6 +240,71 @@ fn unescapeValue(out: []u8, raw: []const u8) ValueRun {
 /// 이스케이프되지 않으므로(JSON) 문자열 안팎을 실제로 따라가야 한다. 그것이 이 함수가 있는 이유고,
 /// 스캐너가 이 일을 안 하는 이유이기도 하다(3.2 GB 를 한 패스 더 지나는 값이 없다 — 소비자는 창
 /// 하나만 본다).
+/// 객체 안의 **모든 문자열 값**을 이어 푼다 — 호출 입력(`input`) 전용.
+///
+/// **왜 필요한가**: 검색이 보는 자리는 라벨이 고른 **한 조각**(`description` → `file_path` →
+/// 명령)뿐이라, 같은 `input` 안의 다른 필드가 두 층 어디에도 안 걸린다. 실측(2026-09-10 ·
+/// Claude tool_use 130,247): `input` 85.5 MB 중 **26.2%(11.2 MB)** 가 그 사각이고, 그중 큰 것이
+/// `Write.content` **7.56 MB**(2,552 호출)와 `Edit` 의 `new_string`·`old_string` 2.72 MB 다.
+/// 「내가 그때 뭘 써 넣었나」가 정확히 그 물음이다.
+///
+/// **키는 빼고 값만 잇는다.** 문자열 뒤에 `:` 가 오면 키다 — 키 이름으로 검색이 걸리면
+/// `content` 라는 글자가 든 모든 `Write` 가 뜬다.
+///
+/// 이음매는 `unescapeTextArray` 와 **같은 규율**이다(개행 하나 · 아무것도 안 쓴 값 앞에서는
+/// 되돌린다). 두 함수가 갈리면 「배열에서는 붙고 객체에서는 안 붙는」 결과가 나온다.
+pub fn unescapeObjectValues(out: []u8, raw: []const u8) Block {
+    var w: usize = 0;
+    var i: usize = 0;
+    // 여는 `{` 를 지난다. 없으면 이 자리는 객체가 아니다.
+    while (i < raw.len and raw[i] != '{') : (i += 1) {}
+    if (i >= raw.len) return .{ .len = 0 };
+    i += 1;
+    var depth: usize = 1;
+    while (i < raw.len) {
+        switch (raw[i]) {
+            '{', '[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            },
+            '}', ']' => {
+                depth -= 1;
+                if (depth == 0) return .{ .len = w, .complete = true };
+                i += 1;
+                continue;
+            },
+            '"' => {},
+            else => {
+                i += 1;
+                continue;
+            },
+        }
+        const str = scanString(raw, i) orelse return .{ .len = w };
+        // 뒤에 `:` 가 오면 **키**다 — 값이 아니므로 안 잇는다.
+        var j = str.end;
+        while (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
+        if (j < raw.len and raw[j] == ':') {
+            i = str.end;
+            continue;
+        }
+        const sep_at = w;
+        var wrote_sep = false;
+        if (w > 0 and out[w - 1] != '\n') {
+            if (w + 1 > out.len) return .{ .len = w, .truncated = true };
+            out[w] = '\n';
+            w += 1;
+            wrote_sep = true;
+        }
+        const run = unescapeValue(out[w..], raw[str.start..]);
+        if (wrote_sep and run.written == 0) w = sep_at else w += run.written;
+        if (run.truncated) return .{ .len = w, .truncated = true };
+        if (!run.closed) return .{ .len = w }; // 창이 값 도중에 끝났다 — 다 못 봤다
+        i = str.start + run.consumed;
+    }
+    return .{ .len = w }; // 닫는 `}` 를 못 보고 창이 끝났다
+}
+
 pub fn unescapeTextArray(out: []u8, raw: []const u8) Block {
     var w: usize = 0;
     var i: usize = 0;
@@ -1312,6 +1377,47 @@ test "활동 줄 자리: 좁아지면 시각부터, 그다음 요약, 대상은 
         try testing.expectEqual(@as(u16, 0), s.time_cols);
         try testing.expectEqual(@as(u16, 20), s.label_cols);
     }
+}
+
+test "입력 전부: 객체의 **모든 문자열 값**을 잇는다 — 키는 빼고" {
+    // 🔥 실측 `input` 85.5 MB 중 **26.2%(11.2 MB)** 가 두 층 어디에도 안 걸렸다.
+    // 그중 큰 것이 `Write.content` 7.56 MB 다.
+    var out: [256]u8 = undefined;
+    const raw =
+        \\{"file_path":"/tmp/a.zig","content":"const x = 1;"}, {"type":"text"}
+    ;
+    const b = unescapeObjectValues(&out, raw);
+    try testing.expect(b.complete);
+    // 키(`file_path`·`content`)는 안 들어가고 **값 둘**이 개행으로 이어진다.
+    try testing.expectEqualStrings("/tmp/a.zig\nconst x = 1;", out[0..b.len]);
+}
+
+test "입력 전부: 중첩 객체·배열 안의 값도 잇는다" {
+    // `Edit` 의 `edits` 처럼 배열 안에 객체가 오는 도구가 있다 — 깊이로 가르지 않는다.
+    var out: [256]u8 = undefined;
+    const raw =
+        \\{"todos":[{"content":"첫 일","status":"done"}],"note":"끝"}
+    ;
+    const b = unescapeObjectValues(&out, raw);
+    try testing.expect(b.complete);
+    try testing.expectEqualStrings("첫 일\ndone\n끝", out[0..b.len]);
+}
+
+test "입력 전부: 값 안의 이스케이프를 풀고, 창이 값 도중에 끝나면 「다 못 봤다」" {
+    var out: [256]u8 = undefined;
+    const raw =
+        \\{"content":"줄1\n줄2","tail":"x"}
+    ;
+    const b = unescapeObjectValues(&out, raw);
+    try testing.expect(b.complete);
+    try testing.expectEqualStrings("줄1\n줄2\nx", out[0..b.len]);
+
+    // 닫는 `}` 를 못 보면 complete 가 거짓이다 — 「없다」와 「못 봤다」를 가른다.
+    const cut =
+        \\{"content":"긴 값이 여기서 끊긴다
+    ;
+    const c = unescapeObjectValues(&out, cut);
+    try testing.expect(!c.complete);
 }
 
 test "펼침 본문: 줄바꿈을 살리고, 값의 끝에서 멈추고, 제어문자를 버린다 (AV3)" {

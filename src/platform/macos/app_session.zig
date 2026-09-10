@@ -79380,6 +79380,85 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
     quietActivityWorkers(session);
 }
 
+test "활동 뷰: `Enter` 가 **입력의 나머지 필드**까지 넓힌다 — `Write` 의 content (§2.1.1)" {
+    // 🔥 **실측 `input` 85.5 MB 중 26.2%(11.2 MB)가 두 층 어디에도 안 걸렸다**(2026-09-10 ·
+    // Claude tool_use 130,247). 그중 큰 것이 `Write.content` **7.56 MB**(2,552 호출)와 `Edit` 의
+    // `new_string`·`old_string` 2.72 MB 다 — 「내가 그때 뭘 써 넣었나」가 정확히 그 물음이다.
+    //
+    // 라벨이 고르는 것은 `file_path` 한 조각이고 `Write` 에는 `command` 도 없어 명령 프로브가
+    // 대상과 같은 자리를 본다. 그래서 **입력 자리를 따로 들지 않으면** 이 판정자가 0 건이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 검색어 `zeta` 는 **`content` 안에만** 있다 — 라벨(경로)에도, 결과에도 없다.
+    const w1 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_W1\"," ++
+        "\"name\":\"Write\",\"input\":{\"file_path\":\"/tmp/a.zig\"," ++
+        "\"content\":\"const alpha = 1;\\nconst zeta = 2;\\n\"}}]}}\n";
+    // 대조군: 같은 `Write` 인데 `content` 에 그 글자가 없다.
+    const w2 =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_W2\"," ++
+        "\"name\":\"Write\",\"input\":{\"file_path\":\"/tmp/b.zig\"," ++
+        "\"content\":\"const beta = 3;\\n\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "w.jsonl", .data = w1 ++ w2 });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/w.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
+
+    // ── ① 라벨 층만으로는 **0 건**이다 — `zeta` 는 경로에 없다.
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
+
+    // ── ② `Enter` 가 입력 전부까지 넓힌다 — **하나**가 걸린다(대조군은 안 걸린다).
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.body.awaiting != 0) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.shown_label_matches);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.shown_body_matches);
+
+    // ── ③ 걸린 줄은 **`content` 를 가진 그 줄**이다(대상은 경로다).
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.hits.items.len);
+}
+
 test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 명령·결과에서 걸린다 (BS1 · §2.1.1)" {
     // **라벨만 보는 검색은 세션의 2.9% 만 본다**(실측 2026-09-09 · 최근 60 세션 · 호출 61,429:
     // 라벨 3.1 MB · 명령 전문 58.4 MB · 결과 전문 45.3 MB). 명령의 69.3% 가 라벨 상한을 넘고
@@ -79468,7 +79547,13 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
     try std.testing.expectEqual(@as(usize, 2), session.agent_activity.shown_body_matches);
 
     // ── ③ **어디서 걸렸는지**를 값으로 든다. 하나는 명령에서, 하나는 결과에서다.
-    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.body.matches.items.len);
+    //
+    // ⚠️ **셋이다**(2026-09-10 · `input` 나머지 필드). 워커가 **입력 전부**도 보므로, 라벨에
+    // 이미 걸린 S1(`description` 에 `zeta`)이 입력 프로브에도 잡힌다. **화면 수치는 안 바뀐다** —
+    // 위 `shown_*` 가 「라벨이 먼저다」로 세기 때문이다(두 층 다 걸린 줄은 라벨로 센다).
+    // 워커가 라벨 여부를 모르는 것은 설계다 — 알려면 라벨을 워커에 넘겨야 하고, 그러면
+    // 「라벨은 즉시」라는 층 분리가 깨진다.
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.body.matches.items.len);
     var saw_command = false;
     var saw_result = false;
     for (session.agent_activity.body.matches.items) |m| {
@@ -79601,7 +79686,8 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     try std.testing.expectEqual(@as(usize, 2), session.agent_activity.shown_body_matches);
     agent_activity_ops.setFilter(session, .execs);
     try std.testing.expectEqual(@as(usize, 3), session.agent_activity.count());
-    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.body.matches.items.len);
+    // 위와 같은 이유로 셋이다(입력 전부를 보므로 라벨에 걸린 줄도 워커가 잡는다).
+    try std.testing.expectEqual(@as(usize, 3), session.agent_activity.body.matches.items.len);
 
     // ── ⓐ **못 걸었던 요청**을 세운다(워커가 바빠 `submit` 이 null 을 준 직후의 상태 그대로:
     //    `query` 는 있고 `answered` 는 거짓이고 `awaiting` 은 0 이다). tick 이 이것을 **다시 걸어야**
@@ -79731,7 +79817,9 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     //    한 일 없이 목록이 줄어든 것**으로 보인다. 두 층은 같이 살고 같이 죽어야 한다.
     agent_activity_ops.onLeaveView(session);
     try std.testing.expect(session.agent_activity.body.answered);
-    try std.testing.expectEqual(@as(usize, 4), session.agent_activity.body.matches.items.len);
+    // ⚠️ 다섯이다(2026-09-10 · `input` 나머지 필드) — 워커가 **입력 전부**도 보므로 라벨에 이미
+    // 걸린 줄도 잡는다. 화면 수치(`shown_*`)는 「라벨이 먼저다」로 세므로 안 바뀐다.
+    try std.testing.expectEqual(@as(usize, 5), session.agent_activity.body.matches.items.len);
     try std.testing.expectEqualStrings("zeta", session.agent_activity.body.query.items);
     // 도는 요청은 접는다 — 안 보는 뷰를 위해 디스크를 돌 이유가 없다.
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.body.awaiting);

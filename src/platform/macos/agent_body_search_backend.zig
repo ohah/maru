@@ -39,6 +39,12 @@ pub const Probe = struct {
     data_offset: u64,
     /// 명령 전문의 시작(파일 절대). 0 이면 읽지 않는다.
     cmd_offset: u64 = 0,
+    /// **호출 입력(`input`) 객체**의 자리(§2.1.1). 0 이면 없다.
+    ///
+    /// `cmd_offset` 이 보는 것은 라벨이 고른 **한 조각**이라 같은 `input` 안의 다른 필드가 두 층
+    /// 어디에도 안 걸린다 — 실측 `input` 85.5 MB 중 **26.2%(11.2 MB)** 가 그 사각이었고 그중
+    /// `Write.content` 가 7.56 MB 다.
+    input_offset: u64 = 0,
     /// 결과 본문의 시작(파일 절대). 0 이면 읽지 않는다.
     body_offset: u64 = 0,
     /// 그 본문이 **배열**인가(Codex `output`) — 참이면 원소들의 `text` 를 이어 읽는다.
@@ -251,6 +257,16 @@ fn finish(state: *State, result: ?Result) void {
 /// 있는데, 날것으로 대조하면 사용자가 친 「a b」가 `a\nb` 에 안 걸리고 `\u` 로 적힌 글자는 통째로
 /// 어긋난다. 푸는 규칙은 펼침(`unescapeBlock`)과 **같은 하나**를 쓴다 — 두 벌이 되면 「검색에는
 /// 걸리는데 펼치면 없는」 자리가 생긴다.
+/// 프로브가 가리키는 자리의 **모양**. 세 가지가 각각 다른 푸는 규칙을 쓴다.
+const ProbeShape = enum {
+    /// 값 하나(`"…"`) — 명령·대상.
+    value,
+    /// 배열 안 `text` 들을 이어 읽는다(Codex `output`).
+    text_array,
+    /// 객체 안 **모든 문자열 값**을 이어 읽는다(호출 입력 `input`).
+    object,
+};
+
 fn probeMatches(
     io: std.Io,
     file: std.Io.File,
@@ -259,8 +275,8 @@ fn probeMatches(
     raw: []u8,
     out: []u8,
     read_bytes: *u64,
-    /// 값 하나가 아니라 **배열 안 `text` 들을 이어** 읽어야 하나(Codex `output`).
-    is_array: bool,
+    /// 이 자리를 **어떻게 읽나**.
+    shape: ProbeShape,
     /// 상한(`max_probe_bytes`)에 걸려 **끝까지 못 본** 조각이 있었나. 실측상 0 건이지만(최대
     /// 46.8 KB < 64 KiB) 그 사실을 안 들면 화면이 「없다」와 「못 봤다」를 섞는다 — 이 뷰의 계약
     /// §2 가 금하는 바로 그 혼동이고, 여기가 그것을 아는 유일한 자리다(적대적 2회차).
@@ -275,10 +291,11 @@ fn probeMatches(
     }
     if (got == 0) return false;
     read_bytes.* +|= got;
-    const block = if (is_array)
-        context.unescapeTextArray(out, raw[0..got])
-    else
-        context.unescapeBlock(out, raw[0..got]);
+    const block = switch (shape) {
+        .value => context.unescapeBlock(out, raw[0..got]),
+        .text_array => context.unescapeTextArray(out, raw[0..got]),
+        .object => context.unescapeObjectValues(out, raw[0..got]),
+    };
     // 값의 끝을 못 봤다 = 이 조각은 **끝까지 안 봤다**. 뒤에 검색어가 있었을 수 있다.
     if (!block.complete) truncated.* = true;
     if (block.len == 0) return false;
@@ -342,8 +359,11 @@ fn worker(job: *Job) void {
         const file = open_file orelse continue;
 
         // 명령은 언제나 **값 하나**다 — 배열은 결과 쪽에만 온다.
-        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, false, &result.partial);
-        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, probe.body_is_array, &result.partial);
+        const in_command = probeMatches(io, file, probe.cmd_offset, job.query, raw, out, &result.read_bytes, .value, &result.partial) or
+            // **입력 전부**를 본다(§2.1.1). 명령 한 조각과 겹치지만, 겹침을 피하려고 자리를 쪼개면
+            // 「어느 조각에 걸렸나」를 인덱스가 알아야 하고 그것은 값의 뜻을 판정하는 일이 된다.
+            probeMatches(io, file, probe.input_offset, job.query, raw, out, &result.read_bytes, .object, &result.partial);
+        const in_result = probeMatches(io, file, probe.body_offset, job.query, raw, out, &result.read_bytes, if (probe.body_is_array) .text_array else .value, &result.partial);
         if (!in_command and !in_result) continue;
         result.matches.append(state.allocator, .{
             .data_offset = probe.data_offset,

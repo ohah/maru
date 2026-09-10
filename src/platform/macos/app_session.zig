@@ -6370,6 +6370,9 @@ pub const AppSession = struct {
     debug_diff_caret_keys_done: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
+    /// kitty 애니메이션 진행의 baseline(실경과 기준). 커서 깜빡임과 같은 결로 **실경과 ms** 를 코어에
+    /// 넣어 준다 — tick rate 가 흔들려도 애니메이션 속도가 앱이 지정한 gap 을 지킨다.
+    kitty_anim_ns: ?i128 = null,
     // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
     // (agent_spin_last_ns 이후 실경과 ms)로 agent_spin_frame을 진행한다(mod spinner_wave.len=14) — tick 카운트가 아니라
     // 실시간 기준이라 tick rate가 떨어져도(무거운 tick) 위상이 실시간을 따라가 부드럽고, stall 후엔 여러 프레임 catch-up
@@ -13679,6 +13682,36 @@ pub const AppSession = struct {
         const interval_ms = @max(self.appearance.cursor.blink_interval_ms, 1);
         const interval_ns: i128 = @as(i128, interval_ms) * std.time.ns_per_ms;
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        // **kitty 애니메이션 진행.** 코어는 시계를 갖지 않으므로(테스트가 결정적이어야 한다) 여기서
+        // 실경과 ms 를 넣어 준다 — 커서 깜빡임이 실경과로 위상을 재는 것과 같은 결이다. 프레임이
+        // 넘어가면 이미지 generation 이 올라가고, 렌더러 텍스처 캐시가 그 키로 무효화된다.
+        // baseline 은 **optional 이다** — `0` 을 «아직 없음» 의 표시로 쓰면 시계가 실제로 0 을 주는
+        // 환경(테스트의 주입 시계)에서 영원히 첫 tick 으로 남는다.
+        const anim_base = self.kitty_anim_ns orelse blk: {
+            self.kitty_anim_ns = now_ns;
+            break :blk now_ns;
+        };
+        // **시계는 뒤로 갈 수 있다.** 음수 delta 를 부호 없는 타입으로 받으면 그 자리에서 패닉한다
+        // (실측: 주입 시계를 쓰는 커서 깜빡임 판정자들이 이 패닉을 잡았다). 뒤로 갔으면 baseline 만
+        // 다시 잡고 이번 tick 은 건너뛴다 — 시간이 흐르지 않은 것으로 본다.
+        const anim_delta_ns: i128 = now_ns - anim_base;
+        if (anim_delta_ns < 0) {
+            self.kitty_anim_ns = now_ns;
+        } else if (anim_delta_ns >= std.time.ns_per_ms) {
+            // **상한을 둔다.** 두 가지를 한 번에 막는다 — ① 기계가 오래 잠들었다 깨면 delta 가 거대해져
+            // 애니메이션이 수천 프레임을 순간에 감는다(사용자는 깜빡임만 본다). ② 이 함수는 필드가
+            // `undefined` 인 세션에서도 불린다(판정자들이 `var session: AppSession = undefined` 로
+            // 만든다) — 그때 baseline 이 쓰레기라 delta 가 u64 를 넘고, 상한이 없으면 `@intCast` 가
+            // 그 자리에서 패닉한다(실측: 커서 깜빡임 판정자 셋이 이 패닉을 잡았다).
+            const max_advance_ms: i128 = 1000;
+            const capped = @min(@divTrunc(anim_delta_ns, std.time.ns_per_ms), max_advance_ms);
+            const anim_elapsed_ms: u64 = @intCast(capped);
+            // 소비한 만큼만 전진시킨다 — 나머지를 남겨야 gap 이 실시간에 drift 없이 고정된다.
+            self.kitty_anim_ns = anim_base + @as(i128, anim_elapsed_ms) * std.time.ns_per_ms;
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                if (term.surface.core.advanceAnimations(anim_elapsed_ms)) self.metal_dirty = true;
+            };
+        }
         if (self.blink_phase_ns == 0) self.blink_phase_ns = now_ns; // 첫 tick — baseline만 잡고 위상 불변
         const elapsed_ns = now_ns - self.blink_phase_ns;
         if (elapsed_ns >= interval_ns) {

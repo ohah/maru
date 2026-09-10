@@ -121,20 +121,85 @@ pub const StoredPlacement = struct {
 /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
 /// (재)transmit마다 단조 증가로 찍어 주는 업로드 캐시 무효화 키다(렌더러가 image_id별 텍스처를
 /// 이 값이 바뀔 때만 다시 업로드 — K2d).
-const KittyImage = struct {
+/// 애니메이션 프레임 하나. **완전한 픽셀을 굳혀 담는다** — 「베이스 프레임 + 델타」로 두면 매 frame
+/// 마다 합성을 다시 해야 하고, 그 합성이 렌더 경로에 들어온다. kitty 도 프레임을 합성해 굳힌다.
+const KittyFrame = struct {
+    data: []u8,
+    /// 이 프레임을 보여 줄 시간(ms). 0 이면 기본값(`default_frame_gap_ms`)을 쓴다 — 명세가 `z=0` 을
+    /// 「기본」으로 정한다. **음수 gap(`z<0`)은 「건너뛴다」**는 뜻이라 여기서는 `skip` 으로 표현한다.
+    gap_ms: u32 = 0,
+    /// 이 프레임을 재생에서 건너뛰는가(`z<0`). 지우는 것과 다르다 — 번호는 유지되고 합성 베이스로는
+    /// 여전히 쓸 수 있다.
+    skip: bool = false,
+};
+
+/// `z=0`(또는 미지정) 프레임이 머무는 기본 시간. 명세가 값을 정하지 않아 kitty 의 관례를 따른다.
+pub const default_frame_gap_ms: u32 = 40;
+
+/// 애니메이션 재생 상태(`a=a` 의 `s=`). 1=정지, 2=로딩(프레임을 더 기다림), 3=재생.
+const KittyAnimState = enum(u8) { stopped = 1, loading = 2, running = 3 };
+
+pub const KittyImage = struct {
     id: u32,
     width: u32,
     height: u32,
     bpp: u8,
+    /// **프레임 1(루트)의 픽셀.** 애니메이션이 없으면 이것이 전부다.
     data: []u8,
     generation: u64 = 0, // KittyImageStorage.add가 채운다
+    /// 프레임 2..N. 비어 있으면 정지 이미지다 — 그 경우 아래 애니메이션 필드는 전부 무의미하다.
+    frames: []KittyFrame = &.{},
+    /// 프레임 1 의 gap/skip(프레임 2..N 은 `frames` 가 들고 있다).
+    root_gap_ms: u32 = 0,
+    root_skip: bool = false,
+    anim_state: KittyAnimState = .stopped,
+    /// 지금 보여 주는 프레임(**1-based**). 명세가 프레임 번호를 1 부터 센다.
+    current_frame: u32 = 1,
+    /// 남은 반복 수. 0 이면 무한이다(명세: `v=0` 이 기본이자 무한).
+    loops_left: u32 = 0,
+    /// 현재 프레임에 머문 시간(ms). `advanceAnimations` 가 쌓고 gap 을 넘으면 다음으로 넘긴다.
+    elapsed_ms: u64 = 0,
+
+    /// 프레임 개수(루트 포함).
+    pub fn frameCount(self: KittyImage) u32 {
+        return 1 + @as(u32, @intCast(self.frames.len));
+    }
+
+    /// 1-based 프레임 번호의 픽셀. 범위 밖이면 루트를 준다 — 렌더가 빈 화면이 되는 것보다 낫다.
+    pub fn framePixels(self: KittyImage, n: u32) []const u8 {
+        if (n <= 1 or n > self.frameCount()) return self.data;
+        return self.frames[n - 2].data;
+    }
+
+    pub fn frameGapMs(self: KittyImage, n: u32) u32 {
+        const raw = if (n <= 1 or n > self.frameCount()) self.root_gap_ms else self.frames[n - 2].gap_ms;
+        return if (raw == 0) default_frame_gap_ms else raw;
+    }
+
+    pub fn frameSkipped(self: KittyImage, n: u32) bool {
+        if (n <= 1 or n > self.frameCount()) return self.root_skip;
+        return self.frames[n - 2].skip;
+    }
+
+    /// 이 이미지가 차지하는 바이트(루트 + 모든 프레임). 총량 회계·evict 가 이 값을 쓴다 — 프레임을
+    /// 빼먹으면 애니메이션 하나가 상한을 우회해 메모리를 무한히 먹는다.
+    pub fn totalBytes(self: KittyImage) usize {
+        var n = self.data.len;
+        for (self.frames) |f| n += f.data.len;
+        return n;
+    }
+
+    fn freeAll(self: KittyImage, alloc: std.mem.Allocator) void {
+        for (self.frames) |f| alloc.free(f.data);
+        if (self.frames.len > 0) alloc.free(self.frames);
+        alloc.free(self.data);
+    }
 };
 
 /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
 /// 같은 id 교체 + 총량 한계. 한계 초과 시 거부가 아니라 LRU evict(generation 기준, placement 없는·
 /// 오래된 것 우선)를 `addKittyImageEvicting`가 수행한다(K4b 완료). 베이스: kitty graphics protocol
 /// image storage. struct 자체는 map + total_bytes만 담고 evict 결정·placement는 바깥(kitty.zig)이다.
-/// 애니메이션 프레임(a=a/c/f)은 미지원(Ghostty도 미구현 — 후속).
 pub const KittyImageStorage = struct {
     map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
     total_bytes: usize = 0,
@@ -150,39 +215,39 @@ pub const KittyImageStorage = struct {
 
     pub fn deinit(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
         var it = self.map.valueIterator();
-        while (it.next()) |img| alloc.free(img.data);
+        while (it.next()) |img| img.freeAll(alloc);
         self.map.deinit(alloc);
     }
     pub fn clear(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
         var it = self.map.valueIterator();
-        while (it.next()) |img| alloc.free(img.data);
+        while (it.next()) |img| img.freeAll(alloc);
         self.map.clearRetainingCapacity();
         self.total_bytes = 0;
     }
     /// 이미지를 저장한다 — img.data의 소유권을 가져간다(성공=map 보관, 거부/실패=즉시 free).
     /// 성공 시 새 generation을 찍어(같은 id 교체도 새 값) 렌더러 업로드 캐시를 무효화한다.
     fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
-        if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free)
-            self.total_bytes -= old.value.data.len;
-            alloc.free(old.value.data);
+        if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free — 프레임까지)
+            self.total_bytes -= old.value.totalBytes();
+            old.value.freeAll(alloc);
         }
-        if (self.total_bytes + img.data.len > self.limit) { // 한계 초과면 거부
-            alloc.free(img.data);
+        if (self.total_bytes + img.totalBytes() > self.limit) { // 한계 초과면 거부
+            img.freeAll(alloc);
             return;
         }
         var stored = img;
         self.gen_counter += 1;
         stored.generation = self.gen_counter;
         self.map.put(alloc, stored.id, stored) catch {
-            alloc.free(stored.data);
+            stored.freeAll(alloc);
             return;
         };
-        self.total_bytes += stored.data.len;
+        self.total_bytes += stored.totalBytes();
     }
     fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
         if (self.map.fetchRemove(id)) |old| {
-            self.total_bytes -= old.value.data.len;
-            alloc.free(old.value.data);
+            self.total_bytes -= old.value.totalBytes();
+            old.value.freeAll(alloc);
         }
     }
 };
@@ -337,7 +402,9 @@ pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
             .height = img.height,
             .bpp = img.bpp,
             .generation = img.generation,
-            .pixels = img.data,
+            // **현재 프레임의 픽셀**을 노출한다 — 애니메이션은 여기서 프레임을 갈아 끼우고
+            // `generation` 을 올리는 것으로 끝난다(렌더러 텍스처 캐시가 그 키로 무효화된다).
+            .pixels = img.framePixels(img.current_frame),
         };
     }
     return self.image_views[0..i];
@@ -458,7 +525,10 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
         },
         'p' => kittyDisplay(self, cmd), // 기존 이미지를 placement로 표시
         'd' => kittyDelete(self, cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
-        else => .enotsupp, // 애니메이션(a=a/c/f)은 미구현 — 침묵 대신 명시 거부
+        'f' => kittyTransmitFrame(self, cmd, payload), // 애니메이션 프레임 전송
+        'a' => kittyAnimate(self, cmd), // 애니메이션 제어(재생/정지/반복/현재 프레임/gap)
+        'c' => kittyCompose(self, cmd), // 프레임 합성
+        else => .enotsupp, // 그 밖의 action 은 명세에 없다 — 침묵 대신 명시 거부
     };
     kittyReply(self, cmd, status);
 }
@@ -831,6 +901,330 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
 /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
 /// `store=false`면 **검증만 하고 저장하지 않는다**(a=q query) — 픽셀을 끝까지 디코드해 같은 판정을
 /// 내리고 버린다. 그래야 query가 "이 이미지를 실제로 받을 수 있다"를 증명한다(kitty 명세).
+/// ── 애니메이션(a=f / a=a / a=c) ────────────────────────────────────────────────────────────────
+///
+/// 모델: 이미지 하나가 프레임 1..N 을 갖는다. 프레임 1 은 `data`(루트)이고 2..N 은 `frames` 다.
+/// **각 프레임은 완전한 픽셀을 굳혀 담는다** — 「베이스 + 델타」로 두면 합성이 렌더 경로에 들어온다.
+///
+/// 렌더러는 손대지 않는다: `buildImageViews` 가 **현재 프레임의 픽셀**을 노출하고, 프레임이 넘어갈 때
+/// `generation` 을 올린다. 그러면 기존 텍스처 캐시 무효화(generation 키)가 그대로 애니메이션이 된다.
+/// 베이스: kitty graphics protocol "Animation".
+/// 한 사각형을 프레임 버퍼에 합성한다. `overwrite` 면 그대로 덮고, 아니면 알파 블렌드(source-over).
+/// 범위를 벗어나는 행·열은 **잘라 낸다** — APC 좌표는 신뢰 경계 밖이라 그대로 인덱스하면 죽는다.
+fn compositeRect(
+    dst: []u8,
+    dst_w: u32,
+    dst_h: u32,
+    bpp: u8,
+    src: []const u8,
+    src_w: u32,
+    src_h: u32,
+    at_x: u32,
+    at_y: u32,
+    overwrite: bool,
+) void {
+    if (bpp == 0 or src_w == 0 or src_h == 0) return;
+    var y: u32 = 0;
+    while (y < src_h) : (y += 1) {
+        const dy = at_y + y;
+        if (dy >= dst_h) break;
+        var x: u32 = 0;
+        while (x < src_w) : (x += 1) {
+            const dx = at_x + x;
+            if (dx >= dst_w) break;
+            const si = (@as(usize, y) * src_w + x) * bpp;
+            const di = (@as(usize, dy) * dst_w + dx) * bpp;
+            if (si + bpp > src.len or di + bpp > dst.len) return;
+            if (overwrite or bpp < 4) {
+                @memcpy(dst[di..][0..bpp], src[si..][0..bpp]);
+                continue;
+            }
+            // source-over 알파 블렌드. 정수 산술로 하되 반올림을 위해 128 을 더한다.
+            const a: u32 = src[si + 3];
+            if (a == 255) {
+                @memcpy(dst[di..][0..bpp], src[si..][0..bpp]);
+                continue;
+            }
+            if (a == 0) continue;
+            var c: usize = 0;
+            while (c < 3) : (c += 1) {
+                const sv: u32 = src[si + c];
+                const dv: u32 = dst[di + c];
+                dst[di + c] = @intCast((sv * a + dv * (255 - a) + 128) / 255);
+            }
+            const da: u32 = dst[di + 3];
+            dst[di + 3] = @intCast(a + da * (255 - a) / 255);
+        }
+    }
+}
+
+/// `a=f` — 프레임을 전송한다.
+///
+/// 키: `r`=대상 프레임 번호(0/미지정이면 **새 프레임을 덧붙인다**), `c`=합성 베이스 프레임(없으면 배경),
+/// `x`/`y`=이 데이터를 놓을 좌상단, `z`=gap(ms, 음수면 건너뛰는 프레임), `X`=합성 모드(1=덮어쓰기),
+/// `Y`=베이스가 없을 때 채울 배경색(0xRRGGBBAA). `s`/`v` 는 **전송하는 사각형**의 크기이고
+/// 프레임 자체는 언제나 이미지 전체 크기다.
+fn kittyTransmitFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) KittyStatus {
+    if (cmd.medium != 'd') return .enotsupp; // 파일·공유메모리 매체는 transmit 과 같은 이유로 거부
+    if (cmd.format == 100) return .enotsupp; // PNG 프레임은 후속(루트 이미지는 지원)
+    if (cmd.image_id == 0) return .einval;
+    const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
+    const bpp: u8 = switch (cmd.format) {
+        24 => 3,
+        32 => 4,
+        else => return .einval,
+    };
+    if (bpp != img.bpp) return .einval; // 프레임은 루트와 같은 픽셀 형식이어야 합성이 성립한다
+    const rect_w = if (cmd.width == 0) img.width else cmd.width;
+    const rect_h = if (cmd.height == 0) img.height else cmd.height;
+    if (rect_w == 0 or rect_h == 0) return .einval;
+    const rect_px = std.math.mul(usize, rect_w, rect_h) catch return .einval;
+    const expected = std.math.mul(usize, rect_px, bpp) catch return .einval;
+    const frame_bytes = img.data.len;
+
+    // 프레임 수 상한 — `a=f` 만 반복하는 스트림이 메모리를 무한히 먹지 못하게 한다(총량 한계와 같은 결).
+    if (cmd.rows == 0 and img.frames.len >= max_animation_frames) return .enomem;
+
+    const src = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
+        error.OutOfMemory => .enomem,
+        else => .einval,
+    };
+    defer self.allocator.free(src);
+
+    // 대상 프레임 버퍼를 만든다: 베이스 프레임 복사, 없으면 `Y` 배경색으로 채운다.
+    const buf = self.allocator.alloc(u8, frame_bytes) catch return .enomem;
+    if (cmd.columns != 0) { // c=<base frame>
+        const base = img.framePixels(cmd.columns);
+        if (base.len != frame_bytes) {
+            self.allocator.free(buf);
+            return .einval;
+        }
+        @memcpy(buf, base);
+    } else fillBackground(buf, bpp, cmd.cell_y_offset); // Y=0xRRGGBBAA(미지정이면 투명/검정)
+
+    compositeRect(buf, img.width, img.height, bpp, src, rect_w, rect_h, cmd.src_x, cmd.src_y, cmd.cell_x_offset == 1);
+
+    const gap = frameGapFromZ(cmd.z);
+    if (cmd.rows == 0) return appendFrame(self, img, buf, gap); // r 미지정 → 덧붙이기
+    return replaceFrame(self, img, cmd.rows, buf, gap);
+}
+
+/// `Y=` 배경색(0xRRGGBBAA)으로 프레임을 채운다. 0 이면 투명(RGBA) 또는 검정(RGB)이다.
+fn fillBackground(buf: []u8, bpp: u8, rgba: u32) void {
+    if (rgba == 0) {
+        @memset(buf, 0);
+        return;
+    }
+    const r: u8 = @intCast((rgba >> 24) & 0xFF);
+    const g: u8 = @intCast((rgba >> 16) & 0xFF);
+    const b: u8 = @intCast((rgba >> 8) & 0xFF);
+    const a: u8 = @intCast(rgba & 0xFF);
+    var i: usize = 0;
+    while (i + bpp <= buf.len) : (i += bpp) {
+        buf[i] = r;
+        buf[i + 1] = g;
+        buf[i + 2] = b;
+        if (bpp >= 4) buf[i + 3] = a;
+    }
+}
+
+/// `z` → (gap_ms, skip). **음수는 「건너뛴다」**는 뜻이고 지우는 것이 아니다(명세).
+const FrameGap = struct { ms: u32, skip: bool };
+
+fn frameGapFromZ(z: i32) FrameGap {
+    if (z < 0) return .{ .ms = 0, .skip = true };
+    return .{ .ms = @intCast(@min(z, std.math.maxInt(u32))), .skip = false };
+}
+
+/// 한 이미지가 가질 수 있는 프레임 수 상한. `a=f` 만 반복하는 스트림 방어선이다(총량 한계와 같은 결).
+pub const max_animation_frames: usize = 512;
+
+fn appendFrame(self: *TerminalCore, img: *KittyImage, buf: []u8, gap: FrameGap) KittyStatus {
+    const grown = self.allocator.realloc(img.frames, img.frames.len + 1) catch {
+        self.allocator.free(buf);
+        return .enomem;
+    };
+    grown[grown.len - 1] = .{ .data = buf, .gap_ms = gap.ms, .skip = gap.skip };
+    img.frames = grown;
+    self.kitty_images.total_bytes += buf.len;
+    return .ok;
+}
+
+fn replaceFrame(self: *TerminalCore, img: *KittyImage, n: u32, buf: []u8, gap: FrameGap) KittyStatus {
+    if (n > img.frameCount()) { // 없는 프레임 번호 — 지어내지 않는다
+        self.allocator.free(buf);
+        return .enoent;
+    }
+    if (n <= 1) { // 루트 교체
+        self.kitty_images.total_bytes -= img.data.len;
+        self.allocator.free(img.data);
+        img.data = buf;
+        img.root_gap_ms = gap.ms;
+        img.root_skip = gap.skip;
+        self.kitty_images.total_bytes += buf.len;
+    } else {
+        const f = &img.frames[n - 2];
+        self.kitty_images.total_bytes -= f.data.len;
+        self.allocator.free(f.data);
+        f.* = .{ .data = buf, .gap_ms = gap.ms, .skip = gap.skip };
+        self.kitty_images.total_bytes += buf.len;
+    }
+    bumpGeneration(self, img);
+    return .ok;
+}
+
+/// 프레임이 바뀌었음을 렌더러에 알린다 — `generation` 이 텍스처 캐시 무효화 키다.
+fn bumpGeneration(self: *TerminalCore, img: *KittyImage) void {
+    self.kitty_images.gen_counter += 1;
+    img.generation = self.kitty_images.gen_counter;
+}
+
+/// `a=a` — 애니메이션 제어. `s`=상태(1 정지·2 로딩·3 재생), `v`=반복 수(0=무한),
+/// `r`=편집할 프레임, `z`=그 프레임의 gap, `c`=지금 보여 줄 프레임.
+fn kittyAnimate(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
+    if (cmd.image_id == 0) return .einval;
+    const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
+
+    if (cmd.rows != 0) { // r= 프레임의 gap 편집
+        if (cmd.rows > img.frameCount()) return .enoent;
+        const gap = frameGapFromZ(cmd.z);
+        if (cmd.rows <= 1) {
+            img.root_gap_ms = gap.ms;
+            img.root_skip = gap.skip;
+        } else {
+            img.frames[cmd.rows - 2].gap_ms = gap.ms;
+            img.frames[cmd.rows - 2].skip = gap.skip;
+        }
+    }
+    if (cmd.columns != 0) { // c= 현재 프레임 지정
+        if (cmd.columns > img.frameCount()) return .enoent;
+        img.current_frame = cmd.columns;
+        img.elapsed_ms = 0;
+        bumpGeneration(self, img);
+    }
+    if (cmd.height != 0) img.loops_left = cmd.height; // v= 반복 수(0=무한이라 «미지정»과 같다)
+    if (cmd.width != 0) { // s= 상태
+        img.anim_state = switch (cmd.width) {
+            1 => .stopped,
+            2 => .loading,
+            3 => .running,
+            else => return .einval,
+        };
+        img.elapsed_ms = 0;
+    }
+    return .ok;
+}
+
+/// `a=c` — 프레임 합성. `r`=대상 프레임, `c`=원본 프레임, `x`/`y`=대상 안의 좌상단,
+/// `w`/`h`=원본에서 잘라 올 사각형(0=전체), `X`=합성 모드(1=덮어쓰기).
+fn kittyCompose(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
+    if (cmd.image_id == 0) return .einval;
+    const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
+    const dst_n = if (cmd.rows == 0) img.current_frame else cmd.rows;
+    if (dst_n > img.frameCount() or cmd.columns == 0 or cmd.columns > img.frameCount()) return .enoent;
+    if (dst_n == cmd.columns) return .einval; // 자기 자신에 겹쳐 쓰면 결과가 정의되지 않는다
+
+    const w = if (cmd.src_width == 0) img.width else cmd.src_width;
+    const h = if (cmd.src_height == 0) img.height else cmd.src_height;
+    if (w == 0 or h == 0 or w > img.width or h > img.height) return .einval;
+
+    // 원본에서 사각형을 떼어 낸다(대상과 겹치지 않는 임시 버퍼 — 별칭 문제를 원천 차단).
+    const px = std.math.mul(usize, w, h) catch return .einval;
+    const bytes = std.math.mul(usize, px, img.bpp) catch return .einval;
+    const tmp = self.allocator.alloc(u8, bytes) catch return .enomem;
+    defer self.allocator.free(tmp);
+    const src = img.framePixels(cmd.columns);
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        const so = (@as(usize, row) * img.width) * img.bpp;
+        const to = (@as(usize, row) * w) * img.bpp;
+        const n = @as(usize, w) * img.bpp;
+        if (so + n > src.len or to + n > tmp.len) return .einval;
+        @memcpy(tmp[to..][0..n], src[so..][0..n]);
+    }
+
+    const dst: []u8 = if (dst_n <= 1) img.data else img.frames[dst_n - 2].data;
+    compositeRect(dst, img.width, img.height, img.bpp, tmp, w, h, cmd.src_x, cmd.src_y, cmd.cell_x_offset == 1);
+    bumpGeneration(self, img);
+    return .ok;
+}
+
+/// 벽시계가 흐른 만큼 애니메이션을 진행한다. platform tick 이 매 frame 부른다 — 커서 깜빡임
+/// (`blink_phase_ns`)과 같은 결이다. **코어는 시계를 갖지 않는다**(테스트가 결정적이어야 한다).
+///
+/// 넘어갈 프레임이 없으면(정지·로딩·프레임 하나) 아무 일도 안 한다. 반복 수가 다 되면 정지한다.
+pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
+    if (elapsed_ms == 0) return false;
+    var changed = false;
+    var it = self.kitty_images.map.valueIterator();
+    while (it.next()) |img| {
+        if (img.anim_state != .running or img.frameCount() < 2) continue;
+        img.elapsed_ms += elapsed_ms;
+        var guard: u32 = 0; // 아주 긴 elapsed 나 gap=0 에서도 유한하게 끝난다
+        while (guard < 1024) : (guard += 1) {
+            const gap = img.frameGapMs(img.current_frame);
+            if (img.elapsed_ms < gap) break;
+            img.elapsed_ms -= gap;
+            var next = img.current_frame + 1;
+            if (next > img.frameCount()) {
+                // 한 바퀴 돌았다 — 반복 수가 정해져 있으면 하나 깎고, 다 되면 멈춘다.
+                if (img.loops_left > 0) {
+                    img.loops_left -= 1;
+                    if (img.loops_left == 0) {
+                        img.anim_state = .stopped;
+                        break;
+                    }
+                }
+                next = 1;
+            }
+            img.current_frame = next;
+            changed = true;
+            if (!img.frameSkipped(next)) break; // 건너뛰는 프레임이면 곧바로 다음으로
+            img.elapsed_ms = img.frameGapMs(next); // skip 은 시간을 쓰지 않는다
+        }
+        if (changed) bumpGeneration(self, img);
+    }
+    return changed;
+}
+
+/// base64 payload 를 **정확히 `expected` 바이트**의 픽셀로 푼다. transmit(`a=t`)과 프레임 전송(`a=f`)이
+/// 같은 규칙을 쓰므로 한 곳에 둔다 — 규칙이 갈리면 프레임만 다르게 검증되는 사고가 난다.
+///
+/// 비압축은 디코드 크기가 곧 선언 크기여야 하고(early reject), `o=z` 는 zlib inflate 하되 `expected` 로
+/// 바운드해 zlib bomb 을 막는다. 어느 쪽이든 **길이가 정확히 맞지 않으면 거부**한다.
+fn decodeDirectPixels(
+    self: *TerminalCore,
+    compression: u8,
+    payload: []const u8,
+    expected: usize,
+) error{ OutOfMemory, Invalid }![]u8 {
+    const dec = std.base64.standard.Decoder;
+    const decoded_len = dec.calcSizeForSlice(payload) catch return error.Invalid;
+    if (decoded_len == 0) return error.Invalid;
+    if (compression == 0 and decoded_len != expected) return error.Invalid;
+    const raw = self.allocator.alloc(u8, decoded_len) catch return error.OutOfMemory;
+    dec.decode(raw, payload) catch {
+        self.allocator.free(raw);
+        return error.Invalid;
+    };
+    const data: []u8 = switch (compression) {
+        0 => raw,
+        'z' => blk: {
+            defer self.allocator.free(raw);
+            break :blk png.inflateExact(self.allocator, raw, expected) catch return error.Invalid;
+        },
+        else => {
+            self.allocator.free(raw);
+            return error.Invalid;
+        },
+    };
+    if (data.len != expected) {
+        self.allocator.free(data);
+        return error.Invalid;
+    }
+    return data;
+}
+
 fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
     // 전송 매체: direct(base64 픽셀)만 구현한다. f/t/s는 payload가 경로·이름이라 픽셀로 오인하면
     // 쓰레기를 디코드한다 — 명시 거부해야 앱이 direct로 폴백한다.
@@ -848,34 +1242,10 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
     const wh = std.math.mul(usize, cmd.width, cmd.height) catch return .einval;
     const expected = std.math.mul(usize, wh, bpp) catch return .einval;
 
-    // base64 디코드 → raw 바이트(압축이면 압축 데이터, 아니면 곧 픽셀).
-    const dec = std.base64.standard.Decoder;
-    const decoded_len = dec.calcSizeForSlice(payload) catch return .einval; // 잘못된 base64
-    if (decoded_len == 0) return .einval;
-    if (cmd.compression == 0 and decoded_len != expected) return .einval; // 비압축은 디코드 크기 = 선언 크기여야(early reject)
-    const raw = self.allocator.alloc(u8, decoded_len) catch return .enomem;
-    dec.decode(raw, payload) catch {
-        self.allocator.free(raw);
-        return .einval;
+    const data = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
+        error.OutOfMemory => .enomem,
+        else => .einval,
     };
-
-    // 압축 해제. o=z(zlib)만 지원, 그 외 압축은 거부. 없으면 raw가 곧 픽셀.
-    const data: []u8 = switch (cmd.compression) {
-        0 => raw,
-        'z' => blk: {
-            defer self.allocator.free(raw); // 압축 입력은 inflate 후 불필요
-            // PNG IDAT 경로와 같은 exact-inflate 공유(중복 제거) — expected로 바운드하고 over-long 거부.
-            break :blk png.inflateExact(self.allocator, raw, expected) catch return .einval;
-        },
-        else => {
-            self.allocator.free(raw); // 알 수 없는 압축
-            return .einval;
-        },
-    };
-    if (data.len != expected) { // 선언 크기 ≠ 실제 픽셀(inflate가 보장하지만 비압축 경로 가드)
-        self.allocator.free(data);
-        return .einval;
-    }
     if (!store) { // query: 여기까지 왔으면 받을 수 있다는 뜻이고, 저장은 하지 않는다
         self.allocator.free(data);
         return .ok;

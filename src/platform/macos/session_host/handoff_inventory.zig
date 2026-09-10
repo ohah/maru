@@ -308,8 +308,15 @@ pub const kitty_image_storage_groups = [_]Group{
 pub const kitty_image_groups = [_]Group{
     .{
         .disposition = .serialized,
-        .fields = &.{ "id", "width", "height", "bpp", "data", "generation" },
-        .why = "image identity, geometry, pixels, and renderer cache generation are logical state",
+        .fields = &.{
+            "id",         "width",       "height",    "bpp",        "data",          "generation",
+            // 애니메이션(a=f/a/c). 프레임 픽셀과 재생 상태 전부가 논리 상태다 — exec 로 넘어가며
+            // 버리면 돌던 애니메이션이 첫 프레임에서 멈추고, 앱은 자기가 보낸 프레임이 사라진 것을
+            // 알 방법이 없다(다시 보내지 않는다).
+            "frames",     "root_gap_ms", "root_skip", "anim_state", "current_frame", "loops_left",
+            "elapsed_ms",
+        },
+        .why = "image identity, geometry, pixels, renderer cache generation, and animation frames/playback are logical state",
     },
 };
 

@@ -43,7 +43,18 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     try std.testing.expectEqual(@as(usize, 1), count(wrapper, "run-test-shards: shard $i/$n exited with $r"));
     // 단일 프로세스 실행도, run 스텝 n 개 배선도 더 이상 없다.
     try std.testing.expectEqual(@as(usize, 0), count(build, "run_macos_app_host_abi_tests"));
-    try std.testing.expectEqual(@as(usize, 0), count(build, "b.addRunArtifact(macos_app_host_abi_tests)"));
+    // **필터로 한 모듈만 돌리는 스텝 하나는 예외다**(2026-09-10). `shutdown_admin_connector` 는 실 프로세스를
+    // 띄우는데(`runActualTerminate`) 샤드 넷이 **동시에** 도는 동안 다른 데몬 스모크와 겹치면 5 초 안에 못 뜬다.
+    // 배정이 `index % n` 이라 **테스트 하나가 늘 때마다 조합이 바뀌고**, 그래서 그날 세 번 터졌는데 매번 다른
+    // 테스트였다(`C3-3b6` 둘, 이것 하나). 그 스텝은 여섯 개만 돌아 **355 초 임계 경로를 되살리지 않는다** —
+    // 이 계약이 막으려던 것은 바이너리를 **통째로** 다시 돌리는 배선이다. 그래서 개수와 함께 **필터가 걸려
+    // 있는지**도 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(build, "b.addRunArtifact(macos_app_host_abi_tests)"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "\"session_host.shutdown_admin_connector.\","));
+    // 그 모듈은 샤드 안에서 **안** 돈다 — 옛 `MARU_TEST_KEEP_PREFIX` 배선이 돌아오면 겹침이 되살아난다.
+    try std.testing.expectEqual(@as(usize, 0), count(build, "MARU_TEST_KEEP_PREFIX"));
+    // fresh 사슬의 꼬리가 그 스텝이고, top-level 은 그것을 기다린다.
+    try std.testing.expectEqual(@as(usize, 1), count(build, "test_macos_app_host_abi_step.dependOn(&run_macos_shutdown_admin_fresh_tests.step);"));
 
     // 러너: 선택 규칙은 전역 인덱스 mod n 이고, 빈 샤드는 빨개진다. 문서도 같은 이름을 안다.
     try std.testing.expectEqual(@as(usize, 1), count(runner, "index % s.count == s.index"));

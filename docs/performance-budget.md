@@ -417,6 +417,22 @@ CR6e-c3c v2의 2026-09-11 로컬 ReleaseFast 5회 baseline은 98.559/99.356/99.7
 median 99.716ms, 최대 120.345ms였다. 이 분포는 marker 관찰 뒤 한 번 더 강제한 제품 draw를 포함하는 보수적
 상한이며 첫 visible pixel 분포가 아니다. 단일 기기 5회만으로 hard cap이나 기기 등급을 정하지 않는다.
 
+### CR6e-c3c key→screen 반복 sample-set 계약
+
+`mise run session-host-cr6e-c3c-sample-set`은 기본 `check` 밖의 opt-in 제품 계측이다. 한 번
+빌드한 같은 ReleaseFast app/product executable로 actual AppKit CR6e-c3c v2 gate를 **20회 순차
+실행**한다. 각 행은 별도 `0700` HOME·session-host root와 raw v2 artifact를 쓰며, 사용자
+HOME·기본 session-host registry·workspace restore를 읽거나 지우지 않는다. 한 행이라도 v2 strict
+validator의 identity·continuity·sibling authority·frame·cleanup 계약을 통과하지 못하면
+sample-set을 발행하지 않는다.
+
+최종 `maru.session-host-cr6e-c3c-sample-set.v1` artifact는 `kern.osrelease`, `hw.model`,
+`hw.logicalcpu`, app/product executable SHA-256, 정확히 20개의 index·raw v2 결과와 input-frame latency를
+소유한다. 실행 전·후 executable hash가 다르거나, index가 비어 있거나 중복되거나,
+latency가 raw v2와 다르면 실패한다. 이 artifact는 분포를 수집하는 계약이지 hard cap이
+아니다. hard cap은 이 sample-set의 반복 실측이 runner noise와 최악값을 구분할 수 있을 때
+별도 doc-first 변경으로 숫자·근거·소유 상수를 확정한다.
+
 ### L1 macOS 앱 시작 baseline
 
 L1 artifact는 `maru.macos-app-launch-first-drawable.v1` strict JSON이다. envelope은 OS release·machine model·logical CPU와

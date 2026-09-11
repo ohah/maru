@@ -6474,6 +6474,10 @@ pub const AppSession = struct {
     obs_diag_last_digest_bytes: u64 = 0,
     obs_diag_last_seals: u64 = 0,
     obs_diag_last_raw_digest_bytes: u64 = 0,
+    digest_site_last_calls: [session_host.remote_runtime.RemoteRuntime.digest_site_count]u64 =
+        [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count,
+    digest_site_last_bytes: [session_host.remote_runtime.RemoteRuntime.digest_site_count]u64 =
+        [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count,
     notify_diag_last_label_changed: u64 = 0,
     notify_diag_last_generation_stale: u64 = 0,
     notify_diag_last_failed: u64 = 0,
@@ -18175,6 +18179,50 @@ pub const AppSession = struct {
                 raw_bytes,
             },
         );
+        self.logDigestSiteDiag();
+    }
+
+    /// **어느 자리가 해싱 대역폭을 쓰는가.** 총량(`raw_digest_bytes`)만으로는 못 고친다 — 자리마다
+    /// 성격이 달라 줄이는 방법이 정반대다(불변 구조체 재해싱 vs 검증용 재계산 vs DTO 내용).
+    ///
+    /// 2026-09-11 실측: 드레인 2,032 회/초에 다이제스트 944 회·6.51 MB/초인데 실제 이벤트는 20 회/초다.
+    /// `sealInput` 이 5,816 B × 0.197 회/드레인 = 1,146 B 인데 실측은 3,359 B/드레인 —
+    /// **나머지 2,200 B 의 출처를 모른다.** 자리별로 세지 않으면 추측이 된다.
+    ///
+    /// 바이트가 큰 순으로 상위 넷만 낸다. 열 자리를 전부 찍으면 로그가 원인을 덮는다.
+    fn logDigestSiteDiag(self: *AppSession) void {
+        const rb = session_host.remote_runtime.RemoteRuntime;
+        var now: [rb.digest_site_count]rb.DigestSiteSample = undefined;
+        rb.digestSiteSamples(&now);
+        var deltas: [rb.digest_site_count]struct { name: []const u8, calls: u64, bytes: u64 } = undefined;
+        var any = false;
+        for (now, 0..) |sample, i| {
+            deltas[i] = .{
+                .name = sample.name,
+                .calls = sample.calls -% self.digest_site_last_calls[i],
+                .bytes = sample.bytes -% self.digest_site_last_bytes[i],
+            };
+            if (deltas[i].calls != 0) any = true;
+            self.digest_site_last_calls[i] = sample.calls;
+            self.digest_site_last_bytes[i] = sample.bytes;
+        }
+        if (!any) return;
+        // 바이트 내림차순으로 상위 넷.
+        for (0..@min(4, deltas.len)) |slot| {
+            var best = slot;
+            for (slot + 1..deltas.len) |k| if (deltas[k].bytes > deltas[best].bytes) {
+                best = k;
+            };
+            const tmp = deltas[slot];
+            deltas[slot] = deltas[best];
+            deltas[best] = tmp;
+            if (deltas[slot].calls == 0) break;
+            std.log.info("digest site: name={s} calls={d} bytes={d}", .{
+                deltas[slot].name,
+                deltas[slot].calls,
+                deltas[slot].bytes,
+            });
+        }
     }
 
     /// 이 경로가 **초당 몇 건의 RPC 를 왜 보내는지** 주기적으로 한 줄 남긴다.

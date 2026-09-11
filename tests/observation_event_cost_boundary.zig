@@ -94,7 +94,10 @@ test "관측 이벤트 비용 계측: 단일 지점에서 원자적으로 세고
     try std.testing.expect(has(prep, "@atomicRmw(u64, &seal_calls, .Add"));
     try std.testing.expect(has(prep, "@atomicRmw(u64, &seal_raw_digest_bytes, .Add, bytes.len"));
     // 세는 자리가 `rawDigest` 안이어야 한다 — 호출자마다 세면 자리가 늘 때 샌다.
-    const raw_at = std.mem.indexOf(u8, prep, "fn rawDigest(domain: []const u8, bytes: []const u8)") orelse
+    // **시그니처를 통째로 잠그지 않는다.** 2026-09-11: 자리별 귀속을 위해 `site` 인자를 더했더니 이
+    // 판정자가 리터럴 불일치로 개선을 막았다(`RawDigestFunnelMissing`). 여기서 고정할 의도는
+    // 「이름이 `rawDigest` 인 함수가 하나 있고, 그 안에서 바이트를 센다」이지 인자 목록이 아니다.
+    const raw_at = std.mem.indexOf(u8, prep, "fn rawDigest(") orelse
         return error.RawDigestFunnelMissing;
     const raw_end = std.mem.indexOfPos(u8, prep, raw_at, "\n}\n") orelse prep.len;
     try std.testing.expect(has(prep[raw_at..raw_end], "seal_raw_digest_bytes"));

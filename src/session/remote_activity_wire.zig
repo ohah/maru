@@ -68,9 +68,15 @@ pub const max_error_bytes: usize = 512;
 /// 한 왕복 wire 전체의 상한(바이트). **전송이 이 값으로 읽기를 자른다** — 넘친 답은 꼬리를 잃어
 /// 파서가 **잘림**으로 읽는다(§6.1).
 ///
-/// 근거: 레코드 하나가 최악 `A ` + 10 진 19 개(각 ≤ 20 자 + 공백) + 라벨 160 B + 개행 ≈ 590 B 이고,
-/// `max_records` 를 곱하면 19.3 MB 다. 실측은 그보다 훨씬 작지만(261.5 MB 파일이 2.69 MB) 상한은
-/// **주장할 수 있는 최악**을 덮어야 한다 — 안 그러면 정상 답이 잘린다.
+/// 근거는 **주장할 수 있는 최악**이다(실측이 아니라) — 안 그러면 정상 답이 잘린다. 레코드 하나가
+/// 최악 `A ` + 10 진 24 개(오프셋 넷이 u64 라 20 자까지) + 라벨 160 B + 개행 ≈ 400 B 이고,
+/// `max_records`(20,480)를 곱하면 **8.2 MB** 다. 24 MiB 는 그 세 배 여유다.
+///
+/// 실측(적대적 D2 — 실 코퍼스 24 파일 78,213 건 왕복): 레코드 최대 **277 B**, 한 파일 wire 최대
+/// **3,576,643 B**(3.41 MB). 즉 현실은 상한의 **1/7** 이다.
+///
+/// ⚠️ **헬퍼가 이만큼을 잡아야 한다는 뜻이 아니다.** 이것은 **받는 쪽**이 읽기를 자르는 값이고,
+/// 내는 쪽은 청크로 흘려도 된다(그때 버퍼가 차면 위 `appendRecord` 의 규율대로 **멈춘다**).
 pub const max_wire_bytes: usize = 24 << 20;
 
 /// 스캔 한 번의 결말. 플래그 셋은 [스캐너](agent_image_index.zig)의 그것과 1:1 이고, 「비었다」와
@@ -86,6 +92,20 @@ pub const ScanFlags = struct {
 /// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
 /// 손으로 만들 때 쓰고, 값이 틀리면 「필드 수」 판정자가 먼저 죽는다.
 pub const record_fields: usize = 24;
+
+// **필드 수를 바꾸면 판도 올려야 한다**(적대적 E1). 안 올리면 옛 파서가 새 줄에서 자리가 밀린 값을
+// 읽는데, 대개는 `Malformed` 로 걸리지만 **보장이 없다** — 새 필드 값이 우연히 라벨 길이로 말이
+// 되면 그만큼을 라벨로 읽고 지나간다. 머리말 대조가 그 갈림을 막는 유일한 수단이므로, 여기서 둘을
+// 묶어 **한쪽만 고치면 컴파일이 깨지게** 한다.
+comptime {
+    const expected_fields_for_version = [_]usize{ 0, 24 }; // [판] = 필드 수
+    if (wire_version >= expected_fields_for_version.len or
+        expected_fields_for_version[wire_version] != record_fields)
+    {
+        @compileError("remote_activity_wire: 필드 수와 wire_version 이 어긋난다 — 필드를 바꿨으면 " ++
+            "`wire_version` 과 `header_line` 을 올리고 이 표에 새 판의 필드 수를 더해라");
+    }
+}
 
 // ── 필드 커버리지 가드 — **자리가 늘면 여기서 컴파일이 깨진다** ────────────────────────────────
 //
@@ -212,7 +232,20 @@ fn packResultFlags(r: index.ResultSummary) u8 {
     return f;
 }
 
-/// 활동·이미지 한 건. 라벨이 상한을 넘으면 null — 호출자가 그 건을 건너뛰고 개수에서 뺀다.
+/// 활동·이미지 한 건.
+///
+/// 🔥 **null 이면 호출자는 «멈춘다» — 건너뛰지 않는다**(적대적 D1). 초안 주석은 목록 wire 를 따라
+/// 「그 건을 건너뛰고 개수에서 뺀다」고 적었는데, 이 코덱에서 그것은 **조용한 유실**이다: 버퍼가 차서
+/// 못 실은 건을 개수에서 빼면 **꼬리 count 가 맞아** 파서가 «완결» 로 읽는다 — §6.1 이 막으려던 바로
+/// 그 상황이 꼬리를 **가진 채로** 생긴다.
+///
+/// 목록 wire 에서 그 지시가 옳았던 이유는 null 의 뜻이 달라서다. 그쪽은 「이름이 상한을 넘는다」가
+/// 정상 흐름(readdir 이 그런 이름을 준다)이고 버퍼 부족은 꼬리를 못 써서 저절로 드러난다. 여기서는
+/// 라벨이 **타입으로 유계**라(`Label.buf` 가 160 B) 상한 초과는 우리 쪽 버그일 때만 나고, 남는 뜻은
+/// 사실상 **버퍼 부족** 하나다.
+///
+/// 그래서 호출자는 null 을 보면 **꼬리를 쓰지 말고 그대로 끝낸다** — 꼬리 없는 wire 를 파서가
+/// 잘림으로 읽는 것이 이 층의 정직한 결말이다.
 ///
 /// ⚠️ **필드 순서가 계약이다.** 여기와 `parseRecord` 가 같은 순서를 봐야 하고, 그 대조는 왕복
 /// 테스트가 한다(한쪽만 고치면 값이 **자리를 옮겨** 조용히 엉뚱한 뜻이 된다).
@@ -735,6 +768,27 @@ test "버퍼가 모자라면 null — 잘린 레코드를 절대 만들지 않�
     var mid: [64]u8 = undefined;
     const n = appendHeader(&mid, 0).?;
     try testing.expectEqual(@as(?usize, null), appendRecord(&mid, n, .{ .hit = sampleHit() }));
+}
+
+test "버퍼가 차면 꼬리를 안 쓴다 — 그 wire 는 «완결» 이 아니다" {
+    // 적대적 D1: 못 실은 건을 개수에서 빼고 꼬리를 쓰면, count 가 맞아 파서가 «완결» 로 읽는다.
+    // 호출자의 규율은 **멈추는 것**이고, 이 판정자가 그 결말을 못박는다.
+    var buf: [320]u8 = undefined; // 레코드 하나는 들어가고 둘째에서 찬다
+    var n = appendHeader(&buf, 0).?;
+    var written: u64 = 0;
+    while (appendRecord(&buf, n, .{ .hit = sampleHit() })) |next| {
+        n = next;
+        written += 1;
+    }
+    try testing.expect(written >= 1); // 적어도 하나는 실렸다
+    try testing.expectEqual(@as(?usize, null), appendRecord(&buf, n, .{ .hit = sampleHit() }));
+
+    // **꼬리를 쓰지 않는다.** 그래서 받는 쪽이 잘림으로 읽는다.
+    var p = Parser.init(buf[0..n]);
+    var seen: u64 = 0;
+    while (try p.next()) |_| seen += 1;
+    try testing.expectEqual(written, seen);
+    try testing.expect(!p.complete());
 }
 
 test "체인 상한을 넘는 파일 수는 거부한다" {

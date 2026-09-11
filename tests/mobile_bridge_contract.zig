@@ -4084,6 +4084,94 @@ test "M3c 사용자가 끊으면 배경에 다녀와도 다시 안 붙는다" {
     while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
 }
 
+test "M3c 안 시킨 끊김이면 «물러나며» 다시 붙는다" {
+    // 쓰다가 끊기면 다시 붙는 길이 **없었다** — 줄을 누르거나 배경에 다녀와야만 붙었다.
+    // 잠깐 끊긴 망에서 사용자가 앱을 나갔다 와야 하는 것은 고장에 가깝다(계약 §3.0).
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    clearReconnectNotice();
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_report_focus(1);
+    bridge.maru_mobile_set_input_sink(1);
+    bridge.maru_mobile_set_ssh_status(11, "", 0); // 붙었다
+
+    // **끊긴다**(사용자가 끊은 것이 아니다).
+    bridge.maru_mobile_set_ssh_status(12, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+
+    // 곧바로는 안 붙는다 — 물러난다.
+    _ = bridge.maru_mobile_build(402, 874, 1_000);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    // 1초 뒤에는 붙는다.
+    _ = bridge.maru_mobile_build(402, 874, 2_100);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+
+    // **또 실패하면 더 물러난다** — 다음은 2초다. **1.2초 자리에서 0 이어야** 「늘 1초」와 갈린다
+    // (그 자리를 안 재면 「물러남이 안 자란다」 변이가 그대로 통과한다 — 실제로 그랬다).
+    bridge.maru_mobile_set_ssh_status(12, "", 0);
+    _ = bridge.maru_mobile_build(402, 874, 2_200);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    _ = bridge.maru_mobile_build(402, 874, 3_400); // 1.2초 뒤 — 1초짜리였다면 여기서 붙는다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    _ = bridge.maru_mobile_build(402, 874, 4_400); // 2.2초 뒤 — 여기서 붙는다
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+    clearReconnectNotice();
+}
+
+test "M3c 사용자가 끊었으면 «물러나지도» 않는다 — 그리고 배경에서는 안 돈다" {
+    // **대조군 둘.** 없으면 「언제나 다시 붙는다」로 바꿔도 위가 초록이다.
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    clearReconnectNotice();
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_report_focus(1);
+
+    // ① 사용자가 끊었다 — 끊기를 제품 손짓으로 누른다.
+    bridge.setScreenForTest("terminal");
+    bridge.maru_mobile_set_input_sink(1);
+    _ = bridge.maru_mobile_build(402, 874, 10_000);
+    const disc = bridge.terminalDisconnectCenter() orelse return error.TestUnexpectedResult;
+    tapAt(disc.x, disc.y);
+    _ = bridge.maru_mobile_take_disconnect();
+    bridge.maru_mobile_set_ssh_status(12, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+    // **두 프레임을 돌린다.** 첫 프레임은 「끊겼다」를 보고 예약만 할 수도 있어, 한 번만 돌리면
+    // 「사용자가 끊어도 다시 붙는다」 변이가 그대로 통과한다(실제로 그랬다).
+    _ = bridge.maru_mobile_build(402, 874, 60_000);
+    _ = bridge.maru_mobile_build(402, 874, 75_000);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+    // ② 배경에서는 안 돈다 — 다시 고른 뒤 끊기고, 뒤로 가 있는 동안은 조용하다.
+    openServers(402, 874);
+    const y = bridge.serverRowCenterY(0) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, 61_000);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_set_input_sink(1);
+    bridge.maru_mobile_set_ssh_status(11, "", 0);
+    bridge.maru_mobile_set_ssh_status(12, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_report_focus(0); // 배경으로
+    _ = bridge.maru_mobile_build(402, 874, 120_000);
+    _ = bridge.maru_mobile_build(402, 874, 135_000); // 예약이 익을 만큼 지나도
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    // 돌아오면 그 자리에서 붙는다.
+    bridge.maru_mobile_report_focus(1);
+    _ = bridge.maru_mobile_build(402, 874, 121_000);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+    clearReconnectNotice();
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
 test "M3c 안 시킨 재접속은 화면이 말하고, 치면 사라진다" {
     // 배경에서 OS 가 소켓을 거둬 가면 돌아왔을 때 **새 셸**이 선다. 그 전에는 `Last login` 이 옛
     // 화면 아래에 경계 없이 붙을 뿐이라 **사용자는 자기 셸이 죽은 줄 몰랐다**(계약 §3.3).

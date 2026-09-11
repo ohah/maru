@@ -710,12 +710,33 @@ pub fn lineColumns(bytes: []const u8, tab_width: u16) u32 {
 /// **`out` 이 차면 멈춘다** — 호출자가 준 만큼만 적는다. 모자라면 그 너머는 옛 경로(처음부터 걷기)로
 /// 떨어질 뿐이고 **답은 같다**.
 pub fn columnCheckpoints(bytes: []const u8, tab_width: u16, every: u32, out: []Seek) usize {
+    var budget: usize = std.math.maxInt(usize);
+    return columnCheckpointsFrom(bytes, tab_width, every, .{ .byte = 0, .col = 0 }, out, &budget);
+}
+
+/// 위와 같되 **중간에서 이어서** 적고 **걸음 예산**을 받는다(§2.1 점진 계수와 같은 결).
+///
+/// **재개점은 「마지막으로 적은 마크」다.** 그 값이 byte·열 둘 다 정확하므로 이어 걷는 데 다른
+/// 상태가 필요 없다 — 그것이 이 자료구조를 점진으로 만들 수 있는 이유다.
+///
+/// `budget` 은 **`stepColumn` 호출 수**로 센다(시간이 아니라). 소진되면 거기까지만 적고 돌아가며,
+/// 호출자가 다음 프레임에 그 자리에서 다시 부른다. **덜 적어도 답은 같다** — 마크가 없는 구간은
+/// 전개가 처음부터(또는 더 앞 마크에서) 걸을 뿐이다.
+pub fn columnCheckpointsFrom(
+    bytes: []const u8,
+    tab_width: u16,
+    every: u32,
+    from: Seek,
+    out: []Seek,
+    budget: *usize,
+) usize {
     if (every == 0 or out.len == 0) return 0;
     var n: usize = 0;
-    var col: u32 = 0;
-    var i: usize = 0;
-    var next_mark: u32 = every;
-    while (i < bytes.len and n < out.len) {
+    var col: u32 = from.col;
+    var i: usize = @min(from.byte, bytes.len);
+    var next_mark: u32 = ((col / every) + 1) * every;
+    while (i < bytes.len and n < out.len and budget.* > 0) {
+        budget.* -= 1;
         const s = stepColumn(bytes, i, col, tab_width);
         // **경계를 «넘은 뒤» 의 자리를 적는다.** 탭은 한 걸음에 여러 열을 먹으므로 정확히 그 열에서
         // 끝나는 자리가 없을 수 있다 — 그때는 넘어선 자리를 적고, 소비자는 `col <= start` 만 보면 된다.

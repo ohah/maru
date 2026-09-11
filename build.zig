@@ -17753,7 +17753,7 @@ pub fn build(b: *std.Build) void {
                 .filters = &.{"P4 C"},
             });
             const run_checkpoint_file_tests = b.addRunArtifact(checkpoint_file_tests);
-            run_checkpoint_file_tests.addArg("--maru-expect-tests=9");
+            run_checkpoint_file_tests.addArg("--maru-expect-tests=10");
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);

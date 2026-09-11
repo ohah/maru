@@ -72,7 +72,79 @@ pub fn publish(parent_path: [:0]const u8, snapshot: []const u8) Result {
 pub fn publishFinal(parent_path: [:0]const u8, snapshot: []const u8, preserve_previous: bool) Result {
     if (snapshot.len == 0) return .invalid_snapshot;
     if (preserve_previous and ensureBackup(parent_path) != .committed) return .backup_failed;
+    // **덮기 직전의 내용을 타임스탬프 사본으로 남긴다.** create-once `.bak` 은 「가장 완전한 첫 사본」을
+    // 지키는 장치라 두 번째 final-quit 부터는 갱신되지 않는다 — 의도된 설계지만, 그래서 **오늘 덮이는
+    // 내용에 대한 안전망은 없다.**
+    //
+    // 2026-09-11 실측: 원격 runtime detach 13 개가 `ConnectionClosed` 로 실패해 restore-incomplete 로
+    // 종료했고, final-quit 저장이 사용자의 레이아웃을 **343 바이트**로 덮었다. `.bak` 은 7 주 전
+    // 사본이라 아무 도움이 되지 않았고, 그 뒤 재실행마다 한 겹씩 더 깎였다(1514 → 1190 B). 안내 문구는
+    // 「이전 체크포인트를 .bak 으로 남기고 저장합니다」라고 약속하는데, 실제로는 남기지 않는다.
+    //
+    // 실패해도 저장을 막지 않는다. 이건 **안전망**이지 전제 조건이 아니다 — 여기서 fail-close 하면
+    // 2026-08-27 의 「권한 한 비트가 종료를 막는다」를 다시 만든다.
+    if (preserve_previous) _ = snapshotAside(parent_path);
     return publish(parent_path, snapshot);
+}
+
+const aside_prefix: []const u8 = "workspace.v1.prequit-";
+
+/// 현재 완전본을 `workspace.v1.prequit-<unix>` 로 복사한다. 이름이 매번 달라 **연속된 나쁜 저장이
+/// 서로를 덮지 않는다** — `.bak` 을 매번 갱신하는 쪽으로 고치면 바로 그 성질을 잃는다.
+fn snapshotAside(parent_path: [:0]const u8) Result {
+    const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (parent_fd < 0) return .backup_failed;
+    defer _ = c.close(parent_fd);
+
+    const source_fd = c.openat(parent_fd, final_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (source_fd < 0) return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
+    defer _ = c.close(source_fd);
+    var source_stat: posix.Stat = undefined;
+    if (c.fstat(source_fd, &source_stat) != 0 or !posix.S.ISREG(source_stat.mode) or
+        source_stat.uid != c.getuid()) return .backup_failed;
+    // 빈 파일을 남겨 봐야 복구에 쓸 수 없고, 이름만 늘어난다.
+    if (source_stat.size == 0) return .committed;
+
+    var leaf_buf: [64]u8 = undefined;
+    // **덮이는 파일 자신의 mtime 으로 이름 짓는다.** 사본 이름이 「어느 시점의 레이아웃인지」를 그대로
+    // 가리키고, 별도 시계 의존도 없다. 같은 초에 두 번 덮이면 `O_EXCL` 이 두 번째를 거절하는데, 그때
+    // 남아 있는 것이 **더 이른 쪽**(더 온전한 쪽)이라 그대로 옳다.
+    const leaf = std.fmt.bufPrintZ(&leaf_buf, "{s}{d}", .{ aside_prefix, source_stat.mtimespec.sec }) catch
+        return .backup_failed;
+    const aside_fd = c.openat(parent_fd, leaf.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
+    if (aside_fd < 0) return .backup_failed;
+    var keep = false;
+    defer {
+        _ = c.close(aside_fd);
+        if (!keep) _ = c.unlinkat(parent_fd, leaf.ptr, 0);
+    }
+    if (c.fchmod(aside_fd, 0o600) != 0) return .backup_failed;
+    var buffer: [16 * 1024]u8 = undefined;
+    var copied: i64 = 0;
+    while (true) {
+        const read_count = c.read(source_fd, &buffer, buffer.len);
+        if (read_count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return .backup_failed;
+        }
+        if (read_count == 0) break;
+        var offset: usize = 0;
+        const count: usize = @intCast(read_count);
+        while (offset < count) {
+            const written = c.write(aside_fd, buffer[offset..count].ptr, count - offset);
+            if (written < 0) {
+                if (posix.errno(-1) == .INTR) continue;
+                return .backup_failed;
+            }
+            if (written == 0) return .backup_failed;
+            offset += @intCast(written);
+        }
+        copied += read_count;
+    }
+    // **잘린 사본은 없는 것보다 나쁘다** — 있다고 믿게 만든다.
+    if (copied != source_stat.size) return .backup_failed;
+    keep = true;
+    return .committed;
 }
 
 const backup_leaf: [:0]const u8 = "workspace.v1.bak";

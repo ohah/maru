@@ -256,6 +256,50 @@ test "P4 C4 final publisher creates secure backup once before replacing current"
     try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
 }
 
+// 이 테스트가 증명하는 것: create-once `.bak` 이 이미 있어 **갱신되지 않는 상황에서도**, 이번에 덮이는
+// 내용이 타임스탬프 사본으로 남는다.
+//
+// 2026-09-11 실측 — 원격 runtime detach 13 개가 `ConnectionClosed` 로 실패해 restore-incomplete 로
+// 종료했고, final-quit 저장이 사용자의 레이아웃을 343 바이트로 덮었다. `.bak` 은 7 주 전 사본이라
+// 아무 도움이 안 됐고, 그 뒤 재실행마다 한 겹씩 더 깎였다(1514 → 1190 B). 복구할 수 있는 사본이
+// **하나도 없었다.**
+//
+// `.bak` 을 매번 갱신하는 쪽으로 고치면 안 된다 — 그러면 연속된 나쁜 저장이 서로를 덮어 「가장 완전한
+// 첫 사본」 보호가 사라진다. 이름이 매번 다른 사본이 두 성질을 동시에 만족하는 유일한 모양이다.
+test "P4 C4 stale backup still leaves a timestamped copy of what gets overwritten" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "rich-layout" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1.bak", .data = "ancient" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publishFinal(parent, "tiny", true));
+
+    var read_buf: [64]u8 = undefined;
+    // 저장은 진행되고, 오래된 `.bak` 은 설계대로 그대로다.
+    try std.testing.expectEqualStrings("tiny", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectEqualStrings("ancient", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+
+    // 그리고 덮인 내용이 어딘가 남아 있다 — 이게 오늘 없었던 것이다.
+    var found: ?[]const u8 = null;
+    var walker = tmp.dir.iterate();
+    var name_buf: [128]u8 = undefined;
+    var body_buf: [64]u8 = undefined;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "workspace.v1.prequit-")) continue;
+        const copied = std.fmt.bufPrint(&name_buf, "{s}", .{entry.name}) catch continue;
+        found = try readLeaf(&tmp, copied, &body_buf);
+        break;
+    }
+    if (found) |body| {
+        try std.testing.expectEqualStrings("rich-layout", body);
+    } else {
+        std.debug.print("덮인 내용의 사본이 없다 — 복구할 것이 남지 않는다\n", .{});
+        return error.OverwrittenContentNotPreserved;
+    }
+}
+
 test "P4 C4 hostile backup leaf fails closed and preserves current" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

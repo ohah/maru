@@ -139,22 +139,23 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "BI1: 실행 파일 경로를 읽어 낸다 — 빌드 신원의 출처다" {
+test "BI1: 실행 파일 mtime 을 읽어 낸다 — 빌드 신원의 출처다" {
     // `app.log` 는 append 라 앱을 재시작하지 않으면 **옛 바이너리가 계속 쓴다**. 2026-09-10 에 그 때문에
     // 「고쳤는데 그대로다」를 두 번 겪었고, 옛 로그 위에 새 가설을 세울 뻔했다.
     //
     // mtime 값 자체는 파일시스템이 정하므로 잠글 수 없다. 여기서 잠그는 것은 **경로를 읽어 낸다**는 것 —
     // 그것이 실패하면 로그 줄이 통째로 안 나가고, 그러면 이 축이 조용히 없어진다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    var path_buf: [1024]u8 = undefined;
-    var size: u32 = path_buf.len;
-    try std.testing.expectEqual(@as(c_int, 0), _NSGetExecutablePath(&path_buf, &size));
-    const path: [*:0]const u8 = @ptrCast(&path_buf);
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
-    try std.testing.expect(fd >= 0);
-    defer _ = std.c.close(fd);
-    var st: std.posix.Stat = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.fstat(fd, &st));
+    const mtime = exeMtimeSeconds() orelse return error.ExeMtimeUnavailable;
+    try std.testing.expect(mtime > 0);
+}
+test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들면 안 된다" {
+    // 줄이 **아예 없으면** 「옛 빌드다」와 「stat 이 실패했다」를 구분할 수 없다(§1.2 조용한 폴백 금지).
+    // 그 구분을 위해 넣은 줄이 자기 부재로 같은 혼동을 만드는 셈이라, **두 갈래를 둘 다** 잠근다
+    // (적대적 검증 1 회차).
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("maru build: mtime=1789094876 pid=42", buildIdentityLine(&buf, 1789094876, 42));
+    try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
 test "ABI v182 session config bootstrap observation and notification cold route values match the C header" {
@@ -1052,23 +1053,40 @@ fn installExitDiagnostics() void {
 /// 두 번 겪었다). 시작 줄 하나가 그 구분을 준다.
 extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
 
-fn logBuildIdentity() void {
-    // **바이너리의 mtime 을 말한다.** 커밋 해시가 더 좋지만 그것은 빌드 옵션이라 `maru` 모듈 일곱 곳에
-    // 배선을 넣어야 하고(cross-target 검사가 각자 모듈을 만든다), 목적에는 mtime 으로 충분하다 —
-    // 「지금 보는 로그가 **방금 빌드한** 바이너리의 것인가」만 답하면 된다.
+/// 이 실행 파일의 mtime(초). 못 읽으면 `null`.
+///
+/// **바이너리의 mtime 을 쓰는 이유.** 커밋 해시가 더 좋지만 그것은 빌드 옵션이라 `maru` 모듈 일곱 곳에
+/// 배선을 넣어야 하고(cross-target 검사가 타겟마다 제 모듈을 만든다), 목적에는 mtime 으로 충분하다 —
+/// 「지금 보는 로그가 **방금 빌드한** 바이너리의 것인가」만 답하면 된다. `stat -f %m <바이너리>` 와 그대로
+/// 비교되므로 epoch 초가 오히려 읽기 쉽다.
+fn exeMtimeSeconds() ?i64 {
     var path_buf: [1024]u8 = undefined;
     var size: u32 = path_buf.len;
-    if (_NSGetExecutablePath(&path_buf, &size) != 0) return;
+    if (_NSGetExecutablePath(&path_buf, &size) != 0) return null;
     const path: [*:0]const u8 = @ptrCast(&path_buf);
     const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return;
+    if (fd < 0) return null;
     defer _ = std.c.close(fd);
     var st: std.posix.Stat = undefined;
-    if (std.c.fstat(fd, &st) != 0) return;
-    std.log.scoped(.app).warn(
-        "maru build: mtime={d} pid={d}",
-        .{ st.mtime().sec, std.c.getpid() },
-    );
+    if (std.c.fstat(fd, &st) != 0) return null;
+    return st.mtime().sec;
+}
+
+/// 시작 줄을 만든다. **못 읽어도 줄은 만든다**(§1.2 조용한 폴백 금지).
+///
+/// 줄이 **아예 없으면** 「옛 빌드다」와 「stat 이 실패했다」를 구분할 수 없고, 그러면 이 진단이 답하려던
+/// 질문이 그대로 되살아난다 — 그 구분을 위해 넣은 줄이 **자기 부재로 같은 혼동**을 만드는 셈이다
+/// (적대적 검증 1 회차). 부작용을 떼어 둔 이유도 그것이다: 두 갈래를 판정자가 **둘 다** 잰다.
+fn buildIdentityLine(buf: []u8, mtime: ?i64, pid: i32) []const u8 {
+    if (mtime) |m| {
+        return std.fmt.bufPrint(buf, "maru build: mtime={d} pid={d}", .{ m, pid }) catch "maru build: (overflow)";
+    }
+    return std.fmt.bufPrint(buf, "maru build: mtime=unknown pid={d}", .{pid}) catch "maru build: (overflow)";
+}
+
+fn logBuildIdentity() void {
+    var buf: [128]u8 = undefined;
+    std.log.scoped(.app).warn("{s}", .{buildIdentityLine(&buf, exeMtimeSeconds(), std.c.getpid())});
 }
 
 pub export fn maru_macos_app_session_create(

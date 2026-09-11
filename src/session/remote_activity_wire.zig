@@ -44,6 +44,7 @@
 const std = @import("std");
 const index = @import("agent_image_index.zig");
 const context = @import("agent_image_context.zig");
+const transcript = @import("agent_transcript.zig");
 
 // ── 헬퍼가 이 모듈 **하나만** 물게 하는 재수출 ──────────────────────────────────────────────────
 //
@@ -58,6 +59,24 @@ pub const Source = context.Source;
 pub const activityLabel = context.activityLabel;
 pub const timestampSeconds = context.timestampSeconds;
 pub const time_window_bytes = context.timestamp_window_bytes;
+
+// ── 체인 풀기(RAV4) ────────────────────────────────────────────────────────────────────────────
+//
+// Codex 재개 세션은 부모 rollout 까지 훑어야 한다(계약 §3.3) — `compacted` 를 건너뛰는 규칙이
+// 「원본이 같은 파일 앞쪽에 있다」를 전제하는데, 재개 세션에서는 그 원본이 **부모 파일**에 있다.
+// 실측 90 파일 중 20 개(22%)에서 42 장을 잃고, 최악은 살아 있는 것이 0 장이었다.
+//
+// **저쪽에서 풀어야 한다.** 로컬 `buildChain` 은 `~/.codex/sessions` 를 이쪽 디렉터리로 훑으므로
+// 원격 경로에 대고 부르면 이쪽 파일을 뒤진다(계약 §2.1). 헬퍼가 같은 조각으로 저쪽을 훑는다.
+pub const parseCodexParentId = transcript.parseCodexParentId;
+pub const findCodexByThreadId = transcript.findCodexByThreadId;
+pub const isCodexRolloutOf = transcript.isCodexRolloutOf;
+pub const max_chain = index.max_chain;
+
+/// `session_meta` 첫 줄이 들어갈 창 — **실측이 크기를 정한다**: 중앙 18,994 B · 최대 22,079 B 이고
+/// 296 개 중 292 개가 8 KiB 를 넘는다. 8 KiB 였을 때 부모 키가 창 안에 든 것은 **운**이었다.
+/// 최대의 3 배로 잡는다(로컬 `readCodexParentId` 와 같은 값·같은 근거).
+pub const codex_meta_window_bytes: usize = 64 * 1024;
 
 pub const wire_version: u32 = 1;
 pub const header_line = "maru-rav 1";

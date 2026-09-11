@@ -210,3 +210,113 @@ test "헬퍼 activity: 없는 파일도 사유를 남긴다" {
     try std.testing.expect(said_why);
     try std.testing.expect(parser.complete());
 }
+
+// ── RAV4: 체인 ──────────────────────────────────────────────────────────────────────────────────
+
+const parent_id = "01a06c6f-f62e-7122-a3ee-fb6ed992f2d1";
+const child_id = "01a070f0-3d4d-7ca3-8fcc-509b99ed18f0";
+
+/// 부모 rollout — 활동 하나가 여기 있고, **자식에는 없다**. 체인이 안 풀리면 이 활동이 통째로 사라진다.
+const parent_lines =
+    \\{"timestamp":"2026-09-11T01:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"session_id":"01a06c6f-f62e-7122-a3ee-fb6ed992f2d1","id":"01a06c6f-f62e-7122-a3ee-fb6ed992f2d1"}}
+    \\{"timestamp":"2026-09-11T01:00:01.000Z","type":"function_call","name":"shell","call_id":"call_parent","arguments":"{\"command\":\"부모에서 돌린 것\"}"}
+;
+
+/// 자식 rollout — `session_meta` 가 부모를 가리킨다(실측 모양: `forked_from_id` 와 `parent_thread_id`
+/// 가 같은 값으로 함께 온다).
+const child_lines =
+    \\{"timestamp":"2026-09-11T02:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"session_id":"01a070f0-3d4d-7ca3-8fcc-509b99ed18f0","forked_from_id":"01a06c6f-f62e-7122-a3ee-fb6ed992f2d1","parent_thread_id":"01a06c6f-f62e-7122-a3ee-fb6ed992f2d1"}}
+    \\{"timestamp":"2026-09-11T02:00:01.000Z","type":"function_call","name":"shell","call_id":"call_child","arguments":"{\"command\":\"자식에서 돌린 것\"}"}
+;
+
+fn writeRollout(io: std.Io, dir: std.Io.Dir, name: []const u8, body: []const u8) !void {
+    const f = try dir.createFile(io, name, .{ .truncate = true });
+    defer f.close(io);
+    var at: u64 = 0;
+    at += try f.writePositional(io, &.{body}, at);
+    _ = try f.writePositional(io, &.{"\n"}, at);
+}
+
+test "헬퍼 activity: 재개 세션은 부모 rollout 까지 훑는다 (RAV4)" {
+    // **체인이 안 풀리면 부모의 활동이 통째로 사라진다**(계약 §3.3 — 로컬에서 실측 90 파일 중 20 개가
+    // 그랬다). 저쪽 파일시스템을 훑는 일이라 **헬퍼가** 푼다 — 로컬 `buildChain` 을 원격 경로에 대고
+    // 부르면 이쪽 디렉터리를 뒤진다(계약 §2.1).
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    // 헬퍼는 `$HOME/.codex/sessions` 를 본다 — 가짜 HOME 을 준다.
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "/tmp/maru-rav4.{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+
+    var day_buf: [96]u8 = undefined;
+    const day = try std.fmt.bufPrint(&day_buf, "{s}/.codex/sessions/2026/09/11", .{home});
+    try std.Io.Dir.cwd().createDirPath(io, day);
+    var dir = try std.Io.Dir.cwd().openDir(io, day, .{});
+    defer dir.close(io);
+
+    var parent_name_buf: [128]u8 = undefined;
+    const parent_name = try std.fmt.bufPrint(&parent_name_buf, "rollout-2026-09-11T01-00-00-{s}.jsonl", .{parent_id});
+    try writeRollout(io, dir, parent_name, parent_lines);
+
+    var child_name_buf: [128]u8 = undefined;
+    const child_name = try std.fmt.bufPrint(&child_name_buf, "rollout-2026-09-11T02-00-00-{s}.jsonl", .{child_id});
+    try writeRollout(io, dir, child_name, child_lines);
+
+    var child_path_buf: [256]u8 = undefined;
+    const child_path = try std.fmt.bufPrint(&child_path_buf, "{s}/{s}", .{ day, child_name });
+
+    // `HOME` 을 갈아 끼워 헬퍼를 돌린다.
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    const out = try std.process.run(gpa, io, .{
+        .argv = &.{ bin, "activity", child_path },
+        .stdout_limit = .limited(wire.max_wire_bytes),
+        .environ_map = &env,
+    });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+
+    var parser = wire.Parser.init(out.stdout);
+    var files: usize = 0;
+    var saw_parent_file = false;
+    var saw_parent_activity = false;
+    var saw_child_activity = false;
+    while (try parser.next()) |ev| switch (ev) {
+        .file => |cf| {
+            files += 1;
+            if (std.mem.endsWith(u8, cf.path, parent_name)) {
+                saw_parent_file = true;
+                // **자리 번호가 곧 `file_index` 다** — 머리가 0, 부모가 1 이어야 한다.
+                try std.testing.expectEqual(@as(u8, 1), cf.index);
+            }
+        },
+        .record => |rec| {
+            if (std.mem.eql(u8, rec.label.text(), "부모에서 돌린 것")) {
+                saw_parent_activity = true;
+                // 부모의 활동은 **부모 자리**를 가리켜야 한다. 첫 파일로 고정하면 소비자가 엉뚱한
+                // 바이트를 읽는다.
+                try std.testing.expectEqual(@as(u8, 1), rec.hit.file_index);
+            }
+            if (std.mem.eql(u8, rec.label.text(), "자식에서 돌린 것")) {
+                saw_child_activity = true;
+                try std.testing.expectEqual(@as(u8, 0), rec.hit.file_index);
+            }
+        },
+        .remote_error => |msg| {
+            std.debug.print("원격이 실패를 보고했다: {s}\n", .{msg});
+            return error.TestUnexpectedResult;
+        },
+        else => {},
+    };
+
+    try std.testing.expect(parser.complete());
+    try std.testing.expectEqual(@as(usize, 2), files);
+    try std.testing.expect(saw_parent_file);
+    try std.testing.expect(saw_child_activity);
+    try std.testing.expect(saw_parent_activity);
+}

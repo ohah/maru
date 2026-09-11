@@ -9078,7 +9078,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3b R2b cleanup"},
         });
         const run_cr3b_r2b_runtime_tests = b.addRunArtifact(cr3b_r2b_runtime_tests);
-        run_cr3b_r2b_runtime_tests.addArg("--maru-expect-tests=3");
+        // Zig 0.16은 `maru` import의 matching ClientSlot test도 이 filter에 포함한다.
+        // 세 RemoteRuntime 행과 stateless receipt 한 행이 함께 컴파일되는 것이 현재 원장이다.
+        run_cr3b_r2b_runtime_tests.addArg("--maru-expect-tests=4");
         run_cr3b_r2b_runtime_tests.setCwd(b.path("."));
         session_host_cr3b_r2b_step.dependOn(&run_cr3b_r2b_runtime_tests.step);
 
@@ -9383,7 +9385,9 @@ pub fn build(b: *std.Build) void {
 
         const cr4a_catchup_cell_accounting_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/session_host/screen_stream.zig"),
+                // S11-3에서 screen codec의 소유권이 OS-neutral `src/session`으로 이동했다.
+                // 옛 macOS 경로를 남기면 warm cache에서는 숨고 fresh CR4a gate만 FileNotFound로 깨진다.
+                .root_source_file = b.path("src/session/screen_stream.zig"),
                 .target = target,
                 .optimize = cr4a_optimize,
             }),

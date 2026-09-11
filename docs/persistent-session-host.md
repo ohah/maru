@@ -6189,8 +6189,8 @@ R2a core/ABI/source-order fixture까지 구현됐다. 8의 R2b는 core/wire와 s
 connection과 분리된 ephemeral inventory collector, launch-before-terminal 제품 coordinator 및 primary의 inert
 `Recovered Sessions` projection과 CR6b의 explicit click/검색 Enter one-item adopt, fresh bounded revalidation 및
 orphan-tab/ended-slot publication까지 구현됐다. canonical GUI connection을 유지한 채 별도 ephemeral inventory를 동시에
-처리하는 제품 scheduling/process fixture는 T0b2b에서 구현됐다. 실제 제품 process에서 기존 checkpoint file 무변경을
-관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
+처리하는 제품 scheduling/process fixture는 T0b2b에서 구현됐다. 실제 제품 process에서 기존 checkpoint file이
+변하지 않는지는 P4 R2a 제품 E2E가 관측한다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
 write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
@@ -6204,7 +6204,7 @@ host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). �
 primary는 notice가 보이는 명시적 default-shell fallback + `restore incomplete`; 종료 시 `.bak` 1회 보존 후 현재 모델 저장).
 orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row 채택은 각각 CR6a-2/CR6b 계약을 따른다.
 
-**실패 원인 분류(부분 구현).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
+**실패 원인 분류.** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
 그 판정에 쓸 구분을 attach 경로가 먼저 만든다. 오분류 비용이 비대칭이기 때문이다 — 영구를 일시로 보면 창 복원이 한 번
 실패할 뿐이지만, **일시를 영구로 보면 살아 있는 runtime이 placeholder로 굳어** 복구 권위를 잃는다. CR6a-2의
 `Recovered Sessions` projection 자체는 채택 권위가 아니며, CR6b action이 fresh host/runtime evidence를 재검증한
@@ -7533,7 +7533,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   성공 attach 경로에서 throwaway runtime을 0개로 유지한다. signed `.app` 전체 종료·재실행 artifact와 crash 직전
   incremental checkpoint는 P4 gate다.
 
-- **P3-e4(runtime metadata parity) 🟨 부분 구현**: screen과 분리된 backend-neutral observation snapshot을 단일 출처로 둔다.
+- **P3-e4(runtime metadata parity)**: screen과 분리된 backend-neutral observation snapshot을 단일 출처로 둔다.
   - **P3-e4a(model/wire) ✅**: attach 응답의 초기 full metadata와 이후 `event` full-state update에 subscription별 단조 revision을
     둔다. 최소 필드는 cwd, window title, semantic state, grid size, alternate-screen/DECCKM/alternate-scroll mode
     (현재 PageUp/wheel 특례 소비),

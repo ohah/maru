@@ -86,7 +86,7 @@ macOS 로컬 shell 1개 surface
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR2a~CR2e·CR3a·CR3b R1·R2a·R2b·R2c·R3 완료)
+## Session host 실행 중 transport reconnect (CR0a~CR6f 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와

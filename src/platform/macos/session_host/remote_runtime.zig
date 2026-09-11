@@ -8349,6 +8349,11 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     runtime.currentGeneration().attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
     runtime.currentGeneration().event_generation_tracking = .tracked;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    // selected_text 요청은 두 client-local 선택 의도를 JSON bool로 직렬화한다. 이 fixture는
+    // `RemoteRuntime = undefined`에서 시작하므로 제품 constructor의 기본값을 명시하지 않으면
+    // ReleaseFast가 미초기화 비트를 읽어 비결정적인 malformed request를 만들 수 있다.
+    runtime.selection_all = false;
+    runtime.selection_host_authoritative = false;
     runtime.currentGeneration().resize_generation = 0;
     runtime.currentGeneration().resize_baseline_present = false;
     runtime.currentGeneration().observation = .{};
@@ -15180,12 +15185,18 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fds: [2]c.fd_t = undefined;
     try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const PeerState = struct {
+        method_matches: bool = false,
+        response_sent: bool = false,
+    };
     const Peer = struct {
-        fn run(fd: c.fd_t, expected_method: []const u8, response_payload: []const u8) void {
+        fn run(fd: c.fd_t, expected_method: []const u8, response_payload: []const u8, state: *PeerState) void {
             defer _ = c.close(fd);
             const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
             defer std.heap.page_allocator.free(request.payload);
-            if (std.mem.indexOf(u8, request.payload, expected_method) == null) return;
+            state.method_matches = std.mem.indexOf(u8, request.payload, expected_method) != null;
+            // 요청 오라클 실패를 EOF/ProtocolError로 위장하지 않는다. 응답은 끝까지 보내고
+            // caller가 join 뒤 method와 response completion을 서로 독립적으로 판정한다.
             const response = framing.encodeFrame(
                 std.heap.page_allocator,
                 .{ .kind = .response, .request_id = request.header.request_id },
@@ -15193,6 +15204,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
             ) catch return;
             defer std.heap.page_allocator.free(response);
             socket_server.writeAll(fd, response) catch return;
+            state.response_sent = true;
         }
     };
     const response_payload: []const u8 = switch (tag) {
@@ -15208,11 +15220,26 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .core_command, .report_mouse, .terminate, .detach => "{}",
         .spawn_full, .attach_controller, .attach_observer => unreachable,
     };
+    var peer_state: PeerState = .{};
     var peer = try std.Thread.spawn(.{}, Peer.run, .{
         fds[1],
         generation_contract.requestMethod(tag),
         response_payload,
+        &peer_state,
     });
+    var peer_joined = false;
+    defer if (!peer_joined) peer.join();
+    errdefer {
+        if (!peer_joined) {
+            peer.join();
+            peer_joined = true;
+        }
+        std.debug.print("2c3e C2 peer failure tag={s} method_matches={} response_sent={}\n", .{
+            @tagName(tag),
+            peer_state.method_matches,
+            peer_state.response_sent,
+        });
+    }
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
@@ -15273,6 +15300,9 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .spawn_full, .attach_controller, .attach_observer => unreachable,
     }
     peer.join();
+    peer_joined = true;
+    try testing.expect(peer_state.method_matches);
+    try testing.expect(peer_state.response_sent);
     try testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
 }
 

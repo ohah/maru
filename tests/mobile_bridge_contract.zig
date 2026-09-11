@@ -4035,6 +4035,106 @@ test "자리가 모자라면 자르지 않고 0 이다" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_server_port(9)); // 붙을 수 없는 포트
 }
 
+/// 앞 판정자가 남긴 재접속 배너를 **제품 손짓으로** 지운다 — 「치면 사라진다」가 그 손짓이다.
+/// 도우미가 상태를 직접 끄면 그 규칙을 빼는 변이가 안 잡힌다(빗장을 대신 걸지 않는다).
+fn clearReconnectNotice() void {
+    bridge.setScreenForTest("terminal");
+    _ = bridge.maru_mobile_input(" ", 1);
+}
+
+test "M3c 사용자가 끊으면 배경에 다녀와도 다시 안 붙는다" {
+    // 끊기는 `CLOSED` 를 부르고 host 는 그때 목적지를 로컬로 되돌린다. 그 뒤 배경 복귀의 config
+    // 재로드가 그것을 「붙을 데가 없다」로 읽으면 **끊어 둔 세션이 홈 버튼 한 번에 다시 선다** —
+    // 사용자가 시킨 것이 조용히 되돌아가는 것이다(계약 §3.0).
+    // **전제부터 단언한다** — 재접속 배너는 앱이 사는 동안 남으므로 앞 판정자에서 샌다.
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    clearReconnectNotice();
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+
+    // 붙은 상태에서 「끊기」를 두드린다 — 제품 손짓으로 간다(도우미가 빗장을 대신 걸면 그 빗장을
+    // 빼는 변이가 안 잡힌다).
+    bridge.setScreenForTest("terminal");
+    bridge.maru_mobile_set_input_sink(1);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const disc = bridge.terminalDisconnectCenter() orelse return error.TestUnexpectedResult;
+    tapAt(disc.x, disc.y);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_disconnect());
+
+    // host 가 세션을 내렸고, 배경에 다녀왔다.
+    bridge.maru_mobile_set_ssh_status(12, "", 0); // CLOSED
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+    // **다시 고르면 그때는 붙는다** — 그것이 시킨 일이다. 그리고 이 줄이 **뒤 판정자들의 전제를
+    // 되돌린다**: 사용자가 끊어 둔 상태는 앱이 사는 동안 남으므로 파일 전체로 샌다. 그래서 이
+    // 판정자가 재접속 판정자들보다 **앞에** 있어야 한다(순서를 바꿔 보고 알았다 — 뒤에 두자
+    // 재접속 판정이 「안 붙는다」로 붉어졌다).
+    openServers(402, 874);
+    const y = bridge.serverRowCenterY(0) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M3c 안 시킨 재접속은 화면이 말하고, 치면 사라진다" {
+    // 배경에서 OS 가 소켓을 거둬 가면 돌아왔을 때 **새 셸**이 선다. 그 전에는 `Last login` 이 옛
+    // 화면 아래에 경계 없이 붙을 뿐이라 **사용자는 자기 셸이 죽은 줄 몰랐다**(계약 §3.3).
+    // **전제부터 단언한다** — 재접속 배너는 앱이 사는 동안 남으므로 앞 판정자에서 샌다.
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    clearReconnectNotice();
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_set_input_sink(1);
+    bridge.maru_mobile_set_ssh_status(11, "", 0); // READY — 붙었다
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+
+    // OS 가 끊었다(사용자가 끊은 것이 «아니다») → 돌아와서 config 를 다시 읽는다.
+    bridge.maru_mobile_set_ssh_status(12, "", 0); // CLOSED
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_server_connect());
+
+    // 붙고 나면 **말한다**.
+    bridge.maru_mobile_set_input_sink(1);
+    bridge.maru_mobile_set_ssh_status(11, "", 0);
+    const msg = bridge.connectionMessageNow() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "다시 연결") != null);
+
+    // **치면 사라진다** — 한 글자라도 쳤으면 이미 본 것이다.
+    _ = bridge.maru_mobile_input("a", 1);
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    bridge.maru_mobile_set_input_sink(0);
+}
+
+test "M3c 첫 실행은 «다시 연결했다» 고 말하지 않는다" {
+    // **대조군.** 이것이 없으면 「언제나 말한다」로 바꿔도 위 판정이 초록이다. 붙은 적이 없으면
+    // 재접속이 아니다 — `ssh_connecting` 이 있다는 것은 「붙자고 했다」지 「붙었다」가 아니다.
+    // **전제부터 단언한다** — 재접속 배너는 앱이 사는 동안 남으므로 앞 판정자에서 샌다.
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    clearReconnectNotice();
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+    bridge.maru_mobile_set_ssh_status(0, "", 0); // IDLE — 아무 일도 없었다
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    bridge.maru_mobile_set_input_sink(1);
+    bridge.maru_mobile_set_ssh_status(11, "", 0);
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+    bridge.maru_mobile_set_input_sink(0);
+}
+
 test "붙어 있는 동안은 다시 요청하지 않는다 — 끊기면 다시 한다" {
     // 두 번 붙으면 **세션이 둘** 생긴다. config 는 배경에서 돌아올 때마다 다시 읽으므로
     // (계약 §7) 그 자리가 곧 재접속 자리다 — 붙어 있으면 조용하고, 끊겨 있으면 다시 붙는다.

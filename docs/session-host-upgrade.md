@@ -1913,7 +1913,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   **P5d-R2a** outer-owned absent workspace·bounded child/process-group·post-exit cleanup authority와 하니스 workspace 주입
   (**구현**) →
   **P5d-R2b** mounted/private-extracted candidate CLI final-address authority·실제 P5d 하니스 실행·candidate 재검증과
-  leaf publication → **P5d-R3** A/B 공통
+  leaf publication(**구현**) → **P5d-R3** A/B 공통
   `candidate_gates` aggregate·attestation·live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
   synthetic/product gate는 R4를 대신하지 않으며, R4 전에는 P5d phase 완료라고 쓰지 않는다.
   R1 writer는 staging 포맷을 canonical하게 만드는 도구일 뿐 실행 성공 권위가 아니다. R2a와 R2b를 모두 통과해야
@@ -1927,7 +1927,10 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   최종 재검증 -> detach/private staging cleanup`으로 닫는다. execute와 publish는 별도 callback이라서 자식 성공이
   candidate 재검증을 건너뛰거나 writer를 직접 호출할 수 없고, 어느 callback·재검증·게시 단계가 실패해도 detach와
   private staging cleanup을 먼저 정산한 뒤 실패한다. CLI pathname은 이 살아 있는 mount에서만 빌려 주며 callback이
-  보존할 수 있는 권위로 반환하지 않는다.
+  보존할 수 있는 권위로 반환하지 않는다. 구현은 held CLI fd에서 private `0500` executable을 배타 생성하고 원본과
+  추출본의 inode·mode·SHA-256을 execute 뒤와 publication 뒤에 다시 검증한다. 하니스에는 이 private executable과
+  별도의 mounted app root를 전달하므로 실행 CLI를 ordinary mount pathname으로 다시 열지 않는다. cleanup은 private
+  pathname이 held inode와 같을 때만 unlink하며, foreign replacement는 삭제하지 않고 cleanup failure로 보존한다.
 
   default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
   명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와

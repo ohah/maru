@@ -86,6 +86,14 @@ pub const ChromeHost = struct {
     /// 가르지 않는다(project-rules.md §구조와 파일 분리). 오버레이당 배관은 `modalInputRole` 한 줄이다.
     symbol_picker: palette.State = .{},
     context_menu: context_menu.State = .{},
+    /// 편집기 선택 헬퍼(NSH — docs/send-selection-to-agent.md §6.2). **같은 컴포넌트, 다른 State**
+    /// (symbol_picker 선례) — 한 줄짜리 메뉴라 박스·clamp·hit-test 가 그대로 맞고, 새 팝업 UI 를
+    /// 만들지 않는다는 규칙(native-editor-ui.md §8 규칙 4)도 지킨다.
+    ///
+    /// **모달이 아니다.** 선택을 마쳤을 뿐인 사용자에게서 키를 뺏으면 이어서 타이핑을 못 한다 —
+    /// 그래서 `handleInput` 에 분기가 없고(키는 편집기로 그대로 간다) platform 은 이것을
+    /// `modalInputRole` 에 `.not_an_overlay` 로 등재한다. 누르는 것만 platform 이 `itemAt` 으로 받는다.
+    send_helper: context_menu.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
     /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, 홀드 머신(keyhint_hold)이 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
@@ -168,6 +176,21 @@ pub const ChromeHost = struct {
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
         try context_menu.view(&self.context_menu, items, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = context_menu.layer, .ops = ops.items });
+    }
+
+    /// 편집기 선택 헬퍼 — **같은 컴포넌트, 다른 State**(위 필드). 항목은 한 줄이고 platform 이
+    /// 그 라벨을 만든다(보내기 머리글과 같은 문구 — 두 자리가 다른 말을 하지 않게).
+    pub fn collectSendHelperDraws(
+        self: *ChromeHost,
+        items: []const []const u8,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try context_menu.view(&self.send_helper, items, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = context_menu.layer, .ops = ops.items });
     }
 

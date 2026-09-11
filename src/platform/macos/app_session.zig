@@ -2257,6 +2257,10 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .symbol_picker => .{ .routes_text = .symbol_picker },
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
+        // **헬퍼는 입력을 안 막는다**(NSH — §6.2). 선택을 마쳤을 뿐인 사용자에게서 키를 뺏으면
+        // 이어서 타이핑을 못 한다. 누르는 것만 `sendHelperClick` 이 좌표로 받고, 키·IME·단축키는
+        // 편집기 것 그대로다. `key_hints`(패시브 HUD)와 같은 자리다.
+        .send_helper => .not_an_overlay,
         .notice => .{ .transient_toast = .notice },
     };
 }
@@ -5276,6 +5280,17 @@ pub const AppSession = struct {
     agent_target_label_buf: [max_agent_targets][256]u8 = undefined,
     /// 보내기 머리글을 조립할 자리. 잘린 수(`8/12`)와 멀티 커서 경고가 붙어 고정 문구가 아니다.
     agent_send_header_buf: [160]u8 = undefined,
+    /// 선택 헬퍼(NSH — docs/send-selection-to-agent.md §6.2)가 붙어 있는 **편집기 Term**.
+    ///
+    /// **surface id 다** — `editor_context_menu` 가 포인터 대신 id 를 드는 것과 같은 이유이고,
+    /// 여기서는 더 필요하다: 헬퍼는 뜬 채로 사용자가 다른 pane 을 만질 수 있고 그 사이 이 Term 이
+    /// 닫힐 수 있다. 못 찾으면 그냥 안 보낸다.
+    send_helper_source: u64 = 0,
+    /// 헬퍼 한 줄의 라벨. **열 때 굳힌다** — 매 프레임 다시 만들면 대상 열거(cwd·브랜치 조회)가
+    /// 프레임마다 돌고, 그 값이 프레임 사이에 바뀌면 상자 폭이 흔들린다.
+    send_helper_label_buf: [160]u8 = undefined,
+    /// 위 버퍼를 가리키는 항목 배열(컴포넌트는 `[]const []const u8` 을 받는다). 한 줄뿐이다.
+    send_helper_items: [1][]const u8 = .{""},
     /// 편집기 본문 우클릭 메뉴(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
     /// native-editor-ui.md §8.1). 다른 메뉴들과 `chrome_host.context_menu` 를 공유하되 이 값이
     /// non-null 이면 그 분기다.
@@ -12067,6 +12082,10 @@ pub const AppSession = struct {
         if (self.surface_initialized) {
             const active = pane_ops.activePane(self).activeTerm();
             if (active.kind == .editor) {
+                // **`Esc` 는 선택 헬퍼를 내린다**(NSH — docs/send-selection-to-agent.md §6.2).
+                // 키를 **소비하지는 않는다** — 헬퍼는 모달이 아니므로 `Esc` 의 원래 뜻(있다면)을
+                // 뺏지 않는다. 나머지 닫힘은 `refreshSendHelper` 가 프레임마다 스스로 판정한다.
+                if (key_event.key == .escape) editor_ops.hideSendHelper(self);
                 // **편집기 Term 컨텍스트가 판정한다**(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
                 // 전역 `resolve` 를 쓰면 편집기 전용 기본키(`⌥Z` 등)가 안 보인다 — 그 표는 전역에 못
                 // 넣는 것들이라 이 컨텍스트 안에만 있다.
@@ -12254,6 +12273,19 @@ pub const AppSession = struct {
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
         return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.settings.open;
+    }
+
+    /// 오버레이 frame 을 **그려야** 하는가. `anyOverlayOpen` 과 갈리는 이유는 **패시브 표면**이다 —
+    /// 단축키 힌트 HUD 와 편집기 선택 헬퍼는 입력을 안 막으므로 그 집합에 없지만(커서 blink·
+    /// keyEquivalent 양보 불변) **그려지기는 해야 한다**. 그래서 빌드 게이트에만 더한다.
+    ///
+    /// **함수로 가른 이유는 판정자다.** 이 조건이 프레임 빌드 안에 인라인으로 있던 동안, 헬퍼를
+    /// 여기 안 더한 상태가 **모든 판정자를 통과했다** — 그리기 판정자가 `buildChromeOverlayPrep` 을
+    /// 직접 불러 이 게이트를 건너뛰었기 때문이다(제품에서는 상자가 영영 안 뜬다). 이름이 생기면
+    /// 판정자가 **제품이 묻는 그 질문**을 그대로 물을 수 있다.
+    pub fn overlayFrameNeeded(self: *const AppSession) bool {
+        return self.anyOverlayOpen() or self.chrome_host.key_hints.visible or
+            self.chrome_host.send_helper.open;
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -12865,6 +12897,13 @@ pub const AppSession = struct {
         // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
         // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
         if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
+        // **편집기 선택 헬퍼**(NSH — docs/send-selection-to-agent.md §6.2). 모달 분기를 전부 지난
+        // 자리다: 헬퍼는 모달이 아니므로 위 오버레이들이 먼저 가져가고, 여기부터가 본문 좌표다.
+        //
+        // 상자 **위**면 보내기가 돌고 클릭은 여기서 끝난다. 상자 **밖**이면 상자를 내리고 `false` 라
+        // 아래 pane 라우팅으로 그대로 흘러간다 — 옆을 눌렀는데 캐럿이 안 옮겨지면, 상자를 없애려고
+        // 두 번 눌러야 한다.
+        if (kind == 1 and button == 0 and editor_ops.sendHelperClick(self, x_px, y_px)) return;
         // SessionDock has no platform row arithmetic. While its capture is live, drag/up stays
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
@@ -19141,7 +19180,7 @@ pub const AppSession = struct {
             if (builtin.os.tag == .macos) {
                 // 단축키 힌트 HUD(key_hints.visible)는 패시브라 anyOverlayOpen이 아니다(커서 blink·keyEquivalent 양보 불변) —
                 // 빌드 게이트에만 더해 오버레이 frame을 그린다. 모달이 같이 열리면 collectKeyHintsDraws가 내부에서 억제해 단일 오버레이 유지.
-                if (self.anyOverlayOpen() or self.chrome_host.key_hints.visible) {
+                if (self.overlayFrameNeeded()) {
                     // 통합 수집: prep만 만들고 collect(.overlay) — placeAndDistribute가 overlay_frame(PaneFrame)을 조립한다.
                     if (self.buildChromeOverlayPrep()) |maybe| {
                         if (maybe) |prep| self.collectShaped(&collected, prep.dl, prep.builder, .{ .overlay = prep.placement });
@@ -22026,7 +22065,10 @@ pub const AppSession = struct {
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
-    fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
+    /// **`pub` 인 이유는 판정자다** — 편집기 선택 헬퍼(NSH)가 이 프레임에 실리는지는 다른 파일의
+    /// 픽스처(`app_session/editor.zig`)에서만 잴 수 있고, 못 재면 "상자를 영영 안 그린다" 는 변이가
+    /// 판정자 전부를 통과한다(실측으로 통과했다).
+    pub fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
         // 오버레이는 터미널과 같은 셀·폰트(1×)로 그린다 — buildChromeProps도 같은 셀을 컴포넌트에 준다. 1.3× 확대는
         // 사용자 요청으로 제거(스케일 불일치로 한글이 약간 잘리던 문제도 함께 사라짐 — 셀=글리프 font size 일치).
         const cw = self.cell_width_px;
@@ -22083,6 +22125,13 @@ pub const AppSession = struct {
             // 있어 host가 다시 계산하면 두 벌이 갈린다. 발행은 오버레이 lowering **뒤**여야 하므로
             // (배경과 같은 over 버킷, SV5b 주석) 여기서 값만 기억하고 아래에서 낸다.
             self.settings_scroll_view = chrome.components.settings.scrollView(&self.chrome_host.settings, labels, fields, props, &tokens);
+        }
+        // 편집기 선택 헬퍼(NSH — 비모달). **다른 오버레이가 낼 것이 있으면 안 낸다** — 이 프레임의
+        // raster 는 bounding box 하나라(단일 오버레이 가정) 둘을 함께 내면 두 상자 **사이의 빈 칸까지**
+        // 오버레이 배경으로 칠해진다. 그리지 못하는 프레임에는 상자가 "없는" 것이 맞지만 상태까지
+        // 지우지는 않는다 — 모달이 닫히면 고른 것이 그대로 있으므로 다시 떠야 한다.
+        if (draws.items.len == 0 and editor_ops.refreshSendHelper(self)) {
+            try self.chrome_host.collectSendHelperDraws(editor_ops.sendHelperItems(self), props, &tokens, arena, &draws);
         }
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
         // (한 박스 HUD가 아니라 요소별 배지 — 사용자 요청). 모달이 열렸으면(위에서 draws 채워짐) 배지는 억제(모달 우선).

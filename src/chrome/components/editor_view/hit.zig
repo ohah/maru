@@ -217,3 +217,147 @@ test "줄 표가 범위를 벗어나면 안 받는다" {
     const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
     try testing.expect(bodyPoint(g, rows, &row_lines, &lines, 0, 0) == null);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 역방향: (논리 줄, 줄 안 byte) → 화면 좌표
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 문서의 한 자리가 화면 어디에 그려졌나. `bodyPoint` 와 **같은 굳힌 값**을 받는다 — 다른 프레임의
+/// 기하로 풀면 실제로 그려진 자리와 어긋난다(위 계약).
+pub const Anchor = struct {
+    /// 몇 번째 시각 행인가(0-based, 화면 기준).
+    row: usize,
+    /// 그 자리 **셀의 왼쪽 위**(창 좌표·px). 아래에 무언가를 띄우려면 호출자가 `cell_h_px` 를 더한다.
+    x_px: i32,
+    y_px: i32,
+};
+
+/// 문서 자리를 화면 좌표로 되돌린다. `null` 이면 **그 자리가 이 프레임에 안 그려졌다** — 스크롤로
+/// 벗어났거나 접혀 있다. 부르는 쪽은 그것을 "띄우지 않는다"로 읽어야 한다: 없는 자리에 띄우면
+/// 상자가 엉뚱한 줄 옆에 선다.
+///
+/// **`bodyPoint` 의 역이지 근사가 아니다** — 열 계산은 `content.columnsAtOffsets` 하나가 하고
+/// (`frame.columnOfOffset` 과 같은 함수다), 가로 원점도 그쪽이 쓰는 `start_col` 을 그대로 쓴다.
+/// 여기서 다시 세면 탭스톱 규칙이 세 번째로 생긴다.
+///
+/// **랩된 줄은 조각이 여럿이다.** 그 줄의 행 중 `start_byte` 가 이 byte 를 넘지 않는 **마지막**
+/// 행이 그 자리를 담은 행이다. 조각 경계에 정확히 걸친 byte 는 **뒤 조각**에 속한다 — 렌더가
+/// 그 조각의 0 열에 그리므로 앞 조각의 오른쪽 끝에 띄우면 화면과 한 행 어긋난다.
+///
+/// 가로로는 **본문 사각 안에 묶는다**. 가로 스크롤로 왼쪽/오른쪽 밖에 있는 자리는 그 변에 붙는다 —
+/// 사각 밖 좌표를 그대로 내면 호출자가 화면 밖에 상자를 띄운다.
+pub fn bodyAnchor(
+    geom: Geometry,
+    rows: []const visual_map.VisualRow,
+    row_lines: []const u32,
+    lines: []const []const u8,
+    line: usize,
+    byte_in_line: usize,
+) ?Anchor {
+    if (rows.len == 0) return null;
+    if (row_lines.len < rows.len) return null; // 두 축이 갈린 상태 — `bodyPoint` 와 같은 거절
+    if (line >= lines.len) return null;
+    if (line > std.math.maxInt(u32)) return null; // 아래 대조가 u32 축이다
+
+    // 그 줄의 행 중 이 byte 를 담은 행. 랩이면 여럿이고, 없으면 화면 밖이다.
+    var row_i: ?usize = null;
+    for (rows, 0..) |v, i| {
+        if (row_lines[i] != @as(u32, @intCast(line))) continue;
+        if (row_i == null) {
+            row_i = i; // 그 줄의 첫 조각 — byte 가 그보다 앞이면(있을 수 없다) 여기다
+            if (v.start_byte == 0) continue;
+        }
+        if (v.start_byte <= byte_in_line) row_i = i;
+    }
+    const idx = row_i orelse return null;
+    const v = rows[idx];
+
+    const text = lines[line];
+    var one = [_]u32{@intCast(@min(byte_in_line, text.len))};
+    var out = [_]u32{0};
+    content.columnsAtOffsets(text, geom.tab_width, &one, &out, std.math.maxInt(u32));
+    const col = out[0];
+
+    // 행 안에서 몇 칸째인가. 앞 조각/가로 스크롤 밖이면 0 칸(왼쪽 변).
+    const in_row: u32 = if (col > v.start_col) col - v.start_col else 0;
+    const max_col: u32 = if (geom.content_width > 0) geom.content_width - 1 else 0;
+    const clamped: u32 = @min(in_row, max_col);
+
+    return .{
+        .row = idx,
+        .x_px = geom.body_x + @as(i32, @intCast(geom.content_left_px)) +
+            @as(i32, @intCast(clamped * geom.cell_w_px)),
+        .y_px = geom.body_y + @as(i32, @intCast(idx)) * @as(i32, geom.cell_h_px),
+    };
+}
+
+test "bodyAnchor: bodyPoint 의 역 — 같은 기하에서 찍은 자리로 돌아온다" {
+    var buf: [8]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(3, &buf);
+    const row_lines = [_]u32{ 0, 1, 2 };
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cccc" };
+    const g = Geometry{ .body_x = 10, .body_y = 20, .content_left_px = 40, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
+
+    const a = bodyAnchor(g, rows, &row_lines, &lines, 1, 2) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), a.row);
+    // 그 좌표를 다시 찍으면 같은 자리다.
+    const p = bodyPoint(g, rows, &row_lines, &lines, @floatFromInt(a.x_px), @floatFromInt(a.y_px)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), p.line);
+    try testing.expectEqual(@as(usize, 2), p.byte_in_line);
+}
+
+test "bodyAnchor: 안 그려진 줄은 null — 스크롤로 벗어난 자리에 띄우지 않는다" {
+    var buf: [8]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(2, &buf);
+    const row_lines = [_]u32{ 10, 11 }; // 화면은 10·11 줄만 그렸다
+    var lines_buf: [20][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = "filler";
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
+    try testing.expect(bodyAnchor(g, rows, &row_lines, &lines_buf, 3, 0) == null);
+    try testing.expect(bodyAnchor(g, rows, &row_lines, &lines_buf, 11, 0) != null);
+    // 줄 표 밖(문서에 없는 줄)도 거절이다.
+    try testing.expect(bodyAnchor(g, rows, &row_lines, &lines_buf, 999, 0) == null);
+}
+
+test "bodyAnchor: 탭은 탭스톱까지 센다 — 열 계산이 한 곳이라는 것" {
+    var buf: [8]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(1, &buf);
+    const row_lines = [_]u32{0};
+    const lines = [_][]const u8{"\tx"};
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 80, .cell_w_px = 10, .cell_h_px = 19, .tab_width = 4 };
+    // 탭 하나 뒤의 `x` 는 4 열이다(탭 폭 4). 셀 폭 10 이므로 40px.
+    const a = bodyAnchor(g, rows, &row_lines, &lines, 0, 1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 40), a.x_px);
+}
+
+test "bodyAnchor: 랩된 줄은 byte 를 담은 조각의 행이다" {
+    var buf: [8]visual_map.VisualRow = undefined;
+    // 한 논리 줄이 조각 셋으로 랩됐다(각 4 byte).
+    buf[0] = .{ .line = 0, .piece = 0, .start_col = 0, .start_byte = 0, .start_byte_col = 0 };
+    buf[1] = .{ .line = 0, .piece = 1, .start_col = 4, .start_byte = 4, .start_byte_col = 4 };
+    buf[2] = .{ .line = 0, .piece = 2, .start_col = 8, .start_byte = 8, .start_byte_col = 8 };
+    const rows = buf[0..3];
+    const row_lines = [_]u32{ 0, 0, 0 };
+    const lines = [_][]const u8{"abcdefghijkl"};
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 4, .cell_w_px = 10, .cell_h_px = 19, .tab_width = 4 };
+
+    try testing.expectEqual(@as(usize, 0), bodyAnchor(g, rows, &row_lines, &lines, 0, 1).?.row);
+    // **조각 경계의 byte 는 뒤 조각이다** — 앞 조각 오른쪽 끝에 띄우면 화면과 한 행 어긋난다.
+    const b = bodyAnchor(g, rows, &row_lines, &lines, 0, 4) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), b.row);
+    try testing.expectEqual(@as(i32, 0), b.x_px); // 그 조각의 0 열
+    try testing.expectEqual(@as(usize, 2), bodyAnchor(g, rows, &row_lines, &lines, 0, 9).?.row);
+}
+
+test "bodyAnchor: 가로로 사각 밖이면 변에 묶는다" {
+    var buf: [8]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(1, &buf);
+    const row_lines = [_]u32{0};
+    var long: [200]u8 = undefined;
+    @memset(&long, 'z');
+    const lines = [_][]const u8{&long};
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 10, .cell_w_px = 10, .cell_h_px = 19, .tab_width = 4 };
+    // 190 열은 폭 10 칸 밖이다 — 오른쪽 변(9 칸)에 붙는다.
+    const a = bodyAnchor(g, rows, &row_lines, &lines, 0, 190) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 90), a.x_px);
+}

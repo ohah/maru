@@ -1475,17 +1475,7 @@ pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
 ///
 /// 자리에 안 들어가면 **덧말을 버리고 기본 문구**로 떨어진다. 잘린 머리글은 다른 말로 읽히므로
 /// 자르지 않는다(`writeLabel` 이 라벨에 쓰는 그 규율과 같다).
-/// 판정자용 진입점 — 위 머리글 조립을 제품 경로 그대로 부른다. 판정자가 이 함수를 못 부르면
-/// 「잘린 수를 말한다」는 계약을 잴 수 없고, 잴 수 없는 계약은 계약이 아니라 우연이다.
-pub fn testSendSelectionHeader(
-    self: *AppSession,
-    source: *app_session_mod.Term,
-    collected: term_ops.AgentTargets,
-) []const u8 {
-    return sendSelectionHeader(self, source, collected);
-}
-
-fn sendSelectionHeader(
+pub fn sendSelectionHeader(
     self: *AppSession,
     source: *app_session_mod.Term,
     collected: term_ops.AgentTargets,

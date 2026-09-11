@@ -1490,11 +1490,10 @@ pub const RemoteTermBackend = struct {
     /// **알림 설정 RPC 를 «왜» 보냈는지 센다.** 2026-09-10, 프레임 루프의 33% 가 이 경로였는데
     /// (가중 프로파일) 두 가지가 구분되지 않았다.
     ///
-    ///   - `label_changed`  : GUI 라벨이 실제로 바뀌어 보냄 — 정상 동작이지만, 한 번의 변경이 **공유**
-    ///                        세대를 올려 나머지 runtime 을 전부 stale 로 만든다(아래 `generation_stale`).
-    ///   - `generation_stale`: 자기 라벨은 그대로인데 세대가 뒤처져서 보냄 — 위 증폭의 결과다.
-    ///   - `failed`         : RPC 가 실패했다. 실패는 아직 target 세대에 못 간 entry 를 **전부** 0 으로
-    ///                        되돌리므로, 지속되면 매 프레임 전원 재전송이 된다.
+    ///   - `label_changed`  : GUI 라벨이 실제로 바뀌어 그 runtime 완전본을 보냄.
+    ///   - `generation_stale`: 전역 OSC 토글 세대를 아직 반영하지 못한 runtime 완전본을 보냄.
+    ///   - `failed`         : RPC 가 실패했다. 성공하지 못한 entry 의 OSC 적용 축만 retryable 0 으로
+    ///                        남겨 다음 frame 의 완전본 전송이 수렴시킨다.
     ///
     /// 세기만 하고 **여기서 로그를 찍지 않는다** — 호출자(`app_session`)가 주기적으로 한 줄 남긴다.
     /// 위 카운터의 현재 값. 호출자가 델타를 내어 «초당 몇 건»을 만든다.
@@ -4248,8 +4247,10 @@ pub const RemoteTermBackend = struct {
         // checkpoint 를 덮어써 배치까지 잃었다. controller_generation 은 attach 로 오르고 rollback/revoke 로
         // 내려가므로 왕복 중 어긋나는 것은 CAS 실패와 같은 정상 경합이고, 재시도해도 로컬 값이 갱신되지
         // 않아 수렴하지 않는다. 그래서 「거절되면 label 만 포기한다」가 맞는 처리다.
+        var notification_config_applied = true;
         rr.updateNotificationConfig(self.notification_config_generation, self.notifications_osc, "") catch |err| {
             if (err == error.OutOfMemory) return err;
+            notification_config_applied = false;
             std.log.warn("attach kept despite notification config fallback failure: error={s}", .{@errorName(err)});
         };
         try self.runtimes.put(self.allocator, handle, .{
@@ -4260,7 +4261,14 @@ pub const RemoteTermBackend = struct {
             else
                 0,
             .runtime_generation = try self.issueRuntimeGeneration(),
-            .notification_config_applied_generation = self.notification_config_generation,
+            .notification_config_applied_generation = if (notification_config_applied)
+                self.notification_config_generation
+            else
+                0,
+            .notification_osc_applied_generation = if (notification_config_applied)
+                self.notification_config_generation
+            else
+                0,
         });
         self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
@@ -4448,6 +4456,7 @@ pub const RemoteTermBackend = struct {
                 0,
             .runtime_generation = try self.issueRuntimeGeneration(),
             .notification_config_applied_generation = self.notification_config_generation,
+            .notification_osc_applied_generation = self.notification_config_generation,
         });
         self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
@@ -8066,6 +8075,15 @@ test "P4 N2b1 remote backend binding은 실제 host runtime의 stable notificati
         .queue_capacity = 16,
     }));
     const existing_runtime_id = be_impl.runtimeIdFor(1).?;
+    const spawned_entry = be_impl.runtimes.get(1).?;
+    try testing.expectEqual(
+        be_impl.notification_config_generation,
+        spawned_entry.notification_config_applied_generation,
+    );
+    try testing.expectEqual(
+        be_impl.notification_config_generation,
+        spawned_entry.notification_osc_applied_generation,
+    );
     try testing.expect(be_impl.runtimes.get(1).?.runtime.usesGenerationAttachment());
     try testing.expectError(
         error.RuntimeAlreadyRegistered,
@@ -8086,7 +8104,18 @@ test "P4 N2b1 remote backend binding은 실제 host runtime의 stable notificati
     // AppSession tick이 쓰는 backend API 그대로 현재 workspace/Term binding을 완전 snapshot으로 갱신한다. 이후 OSC가
     // 발화 시점의 owned label을 stable event에 싣는지 실제 PTY→host core→journal→GUI pull 왕복으로 증명한다.
     try be_impl.configureNotifications(true);
+    const toggle_generation = be_impl.notification_config_generation;
+    const after_toggle = be_impl.runtimes.get(1).?;
+    try testing.expectEqual(toggle_generation, after_toggle.notification_config_applied_generation);
+    try testing.expectEqual(toggle_generation, after_toggle.notification_osc_applied_generation);
+    const stale_after_toggle = be_impl.notificationRpcCounters().generation_stale;
     try be_impl.configureNotificationBinding(1, "workspace › cat");
+    const after_label = be_impl.runtimes.get(1).?;
+    try testing.expectEqual(toggle_generation, be_impl.notification_config_generation);
+    try testing.expectEqual(toggle_generation + 1, after_label.notification_config_applied_generation);
+    try testing.expectEqual(toggle_generation, after_label.notification_osc_applied_generation);
+    try be_impl.configureNotifications(true);
+    try testing.expectEqual(stale_after_toggle, be_impl.notificationRpcCounters().generation_stale);
     try surface_runtime.writeInput(1, .{ .bytes = "\x1b]777;notify;Build;done\x1b\\\n" });
     var notification: ?remote_runtime.Notification = null;
     var attempts: usize = 0;
@@ -8130,6 +8159,41 @@ test "P4 N2b1 remote backend binding은 실제 host runtime의 stable notificati
 
     // resize도 hot path(self.runtime.resize)로 원격 PtyIo→resize RPC에 도달한다(에러 없이 위임).
     try surface_runtime.resize(1, .{ .cols = 80, .rows = 24 }, io);
+
+    // 두 runtime이 같은 backend의 전역 OSC 토글 축을 공유해도 라벨 세대는 서로 독립이다. sibling을 실제
+    // daemon에 띄운 뒤 handle 1의 라벨만 바꾸고, handle 3의 두 세대와 다음 tick RPC 수가 그대로인지 잰다.
+    _ = try be.spawn(.{
+        .handle = 3,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    });
+    _ = try be.attach(3, true);
+    const sibling_before = be_impl.runtimes.get(3).?;
+    const global_before_label = be_impl.notification_config_generation;
+    const stale_before_label = be_impl.notificationRpcCounters().generation_stale;
+    try be_impl.configureNotificationBinding(1, "workspace › renamed");
+    const sibling_after = be_impl.runtimes.get(3).?;
+    try testing.expectEqual(global_before_label, be_impl.notification_config_generation);
+    try testing.expectEqual(
+        sibling_before.notification_config_applied_generation,
+        sibling_after.notification_config_applied_generation,
+    );
+    try testing.expectEqual(
+        sibling_before.notification_osc_applied_generation,
+        sibling_after.notification_osc_applied_generation,
+    );
+    try be_impl.configureNotifications(true);
+    try testing.expectEqual(stale_before_label, be_impl.notificationRpcCounters().generation_stale);
+
+    // 이 fixture의 다음 절은 handle 1을 끊었다 같은 host/runtime에 재attach하는 시나리오다. sibling을
+    // runtime 종료하면 shared connection terminalization이라는 별도 수명 축을 섞으므로 GUI 쪽만 detach한다.
+    // host-owned PTY는 fixture daemon을 내릴 때 회수된다.
+    surface_runtime.detachSurface(3);
+    const detached_sibling = be_impl.runtimes.fetchRemove(3).?;
+    detached_sibling.value.runtime.detachClientSide();
+    allocator.destroy(detached_sibling.value.runtime);
+    pool.release(host_id);
 
     // 앱 quit의 client-side detach를 축약해 같은 host runtime을 살려 둔 뒤 재attach한다. 새 backend entry publication 전에
     // 현재 `notifications_osc=true` 완전 snapshot이 적용돼, 실제 binding label sync 전에도 발화가 켜지고 runtime-ID

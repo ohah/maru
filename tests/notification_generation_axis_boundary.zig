@@ -98,4 +98,15 @@ test "라벨 변경은 전역 세대를 올리지 않는다 (전원 재전송 �
         cfg,
         "retry_entry.notification_osc_applied_generation = 0;",
     ) != null);
+
+    // ⑤ spawn/attach가 이미 보낸 완전본은 두 축 모두 적용된 상태로 게시해야 한다. 새 축의 기본값 0을
+    //    그대로 두면 runtime마다 첫 frame에 불필요한 RPC가 한 번씩 생긴다.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, src, ".notification_osc_applied_generation = self.notification_config_generation,"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, src, ".notification_osc_applied_generation = if (notification_config_applied)"),
+    );
 }

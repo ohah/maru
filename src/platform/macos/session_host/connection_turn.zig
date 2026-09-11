@@ -152,11 +152,25 @@ const SubscriptionAdoption = enum {
 /// 정합성을 파고 있었는데 **전부 헛짚었다** — 그 자리에서는 한 줄도 안 찍혔다.
 ///
 /// 프레임 수를 함께 낸다. 「예산에 걸렸다」면 그 수가 크고, 「검증에 걸렸다」면 작아도 난다.
+/// `rejected` 를 낸 **여덟 자리 중 어디인가.**
+///
+/// 2026-09-11 실측: 복구 세션 하나가 `adoption=rejected frames=11` 로 끝내 안 붙었다. `rejected` 는
+/// 영구라 재시도로는 안 되고, 프레임이 11 개뿐이라 **예산이 아니라 검증**이다. 그런데 그 여덟 자리는
+/// 고칠 곳이 전부 다르다 — 배치 검증·슬롯 조회·트래커 부재·화면 상태 조회·무효화 중 delta 혼입·
+/// resync enqueue OOM·resync stale·일반 enqueue 실패.
+///
+/// 이 축에서 추측으로 세 번 틀렸다(수신 한도·프레임 경계·턴 예산). 자리 이름 없이 또 고치면 네 번째다.
+var adoption_reject_site: []const u8 = "none";
+
+fn notePreparedAttachRejected(site: []const u8) void {
+    adoption_reject_site = site;
+}
+
 fn noteAttachAdoption(adopted: SubscriptionAdoption, frames: usize) void {
     if (builtin.is_test) return;
     host_log.line(
-        "session host attach not admitted: adoption={s} frames={d}",
-        .{ @tagName(adopted), frames },
+        "session host attach not admitted: adoption={s} site={s} frames={d}",
+        .{ @tagName(adopted), adoption_reject_site, frames },
     );
 }
 
@@ -801,20 +815,24 @@ pub const Client = struct {
             !self.validatePreparedCatchup(stream, prepared_catchup))
         {
             for (frames) |bytes| self.allocator.free(bytes);
+            notePreparedAttachRejected("batch_validation");
             _ = self.closeAndReject(.protocol_error);
             return .rejected;
         }
         const slot = self.reactor.get(self.admission) catch {
+            notePreparedAttachRejected("slot_lookup");
             _ = self.closeAndReject(.socket_error);
             return .rejected;
         };
         const tracker = self.trackers.get(stream) orelse {
             for (frames) |bytes| self.allocator.free(bytes);
+            notePreparedAttachRejected("tracker_missing");
             _ = self.closeAndReject(.socket_error);
             return .rejected;
         };
         const state = slot.screenState(tracker) catch {
             for (frames) |bytes| self.allocator.free(bytes);
+            notePreparedAttachRejected("screen_state");
             _ = self.closeAndReject(.socket_error);
             return .rejected;
         };
@@ -827,6 +845,7 @@ pub const Client = struct {
                     .subscription => |output| {
                         if (output.kind == .delta) {
                             for (frames) |owned| self.allocator.free(owned);
+                            notePreparedAttachRejected("delta_while_invalidated");
                             _ = self.closeAndReject(.protocol_error);
                             return .rejected;
                         }
@@ -845,10 +864,12 @@ pub const Client = struct {
             slot.enqueueOwnedResyncSnapshot(tracker, frames) catch |err| switch (err) {
                 error.SlotLimit, error.GlobalLimit, error.ChunkLimit => return .deferred_resync,
                 error.OutOfMemory => {
+                    notePreparedAttachRejected("resync_enqueue_oom");
                     _ = self.closeAndReject(.resource_exhausted);
                     return .rejected;
                 },
                 error.Stale, error.ScreenInvalidated => {
+                    notePreparedAttachRejected("resync_stale");
                     _ = self.closeAndReject(.socket_error);
                     return .rejected;
                 },
@@ -866,10 +887,9 @@ pub const Client = struct {
                     if (ops.reclaim(ops.ctx, self.admission.key, total)) {
                         slot.enqueueOwnedScreenBatch(tracker, frames) catch |retry_err| {
                             for (frames) |bytes| self.allocator.free(bytes);
-                            return if (retry_err == error.GlobalLimit)
-                                .deferred_global_pressure
-                            else
-                                .rejected;
+                            if (retry_err == error.GlobalLimit) return .deferred_global_pressure;
+                            notePreparedAttachRejected("reclaim_retry_failed");
+                            return .rejected;
                         };
                         self.consumePreparedCatchup(prepared_catchup);
                         return .admitted;
@@ -879,6 +899,7 @@ pub const Client = struct {
                 return .deferred_global_pressure;
             }
             for (frames) |bytes| self.allocator.free(bytes);
+            notePreparedAttachRejected("screen_batch_enqueue");
             return .rejected;
         };
         self.consumePreparedCatchup(prepared_catchup);

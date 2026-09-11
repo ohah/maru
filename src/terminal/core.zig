@@ -10215,3 +10215,64 @@ test "kitty 애니메이션: 화면에 없는 이미지는 진행하지 않는�
     try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.current_frame);
     try std.testing.expect(core.kitty_images.map.get(1).?.generation > gen_before);
 }
+
+test "kitty 애니메이션: 프레임 전환이 렌더 뷰까지 도달한다 — 이음매를 꿴다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=50,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,r=1,z=50,s=3,q=2\x1b\\");
+
+    // **끝에서 끝까지 꿴다.** 코어 판정자는 「generation 이 오른다」를, 렌더러 판정자는 「generation 이
+    // 바뀌면 재업로드한다」를 각각 재고 있었다. 그런데 **그 둘을 잇는 자리**(렌더 뷰가 바뀐 generation
+    // 과 새 프레임 픽셀을 싣는가)는 아무도 안 쟀다 — 여기가 끊기면 코어는 프레임을 넘기는데 화면은
+    // 첫 프레임에 멈춘 채 양쪽 판정자가 모두 초록이다.
+    const v0 = core.renderSnapshot().images;
+    try std.testing.expectEqual(@as(usize, 1), v0.len);
+    const gen0 = v0[0].generation;
+    try std.testing.expectEqualSlices(u8, &red, v0[0].pixels);
+
+    try std.testing.expect(core.advanceAnimations(50));
+
+    const v1 = core.renderSnapshot().images;
+    try std.testing.expectEqual(@as(usize, 1), v1.len);
+    try std.testing.expect(v1[0].generation > gen0); // 렌더러가 재업로드하는 유일한 신호
+    try std.testing.expectEqualSlices(u8, &green, v1[0].pixels); // 그리고 실제로 새 프레임이다
+    // 크기·id 는 그대로여야 한다 — 프레임이 바뀐 것이지 다른 이미지가 된 게 아니다.
+    try std.testing.expectEqual(v0[0].image_id, v1[0].image_id);
+    try std.testing.expectEqual(v0[0].width, v1[0].width);
+    try std.testing.expectEqual(v0[0].height, v1[0].height);
+}
+
+test "kitty 애니메이션: PNG 프레임은 ENOTSUPP 다 (문서가 약속했는데 판정자가 없었다)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    core.clearResponse();
+
+    // #3505 가 「PNG 프레임은 ENOTSUPP(루트 이미지는 지원)」이라고 적어 두고 재지 않았다.
+    // 조용히 `.ok` 를 돌려주게 되면 앱은 프레임이 들어간 줄 알고 애니메이션을 켠다.
+    try core.write("\x1b_Ga=f,f=100,i=1;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 전송 매체도 같다 — 프레임 경로가 루트와 같은 거부를 한다.
+    try core.write("\x1b_Ga=f,f=32,s=2,v=2,t=f,i=1;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // **양성 대조**: raw 프레임은 받아들인다 — 거부가 `a=f` 를 통째로 막은 게 아님을 증명한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1;{s}\x1b\\", .{enc}));
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.frameCount());
+}

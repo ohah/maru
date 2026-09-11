@@ -982,25 +982,18 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         return;
     }
 
-    const file = std.Io.Dir.cwd().openFile(io, file_path, .{
-        .mode = .read_only,
-        .follow_symlinks = false,
-        .allow_directory = false,
-    }) catch |err| {
-        var buf: [96]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "open failed: {s}", .{@errorName(err)}) catch "open failed";
-        putRemoteError(msg);
-        return;
-    };
-    defer file.close(io);
-
-    // **체인 자리 0 이다.** 부모 rollout 까지 잇는 것은 RAV4 의 일이고, 그때도 자리는 **번호로**
-    // 실린다(순서가 아니다 — 계획 §11.3 G1).
-    const at_file = activity_wire.appendFile(&line, 0, 0, file_path) orelse {
+    // **재개/fork 면 부모까지 잇는다**(RAV4 — 계약 §3.3). 저쪽 파일시스템을 훑는 일이라 여기서 한다.
+    const chain = resolveChain(io, file_path);
+    if (chain.len == 0) {
         putRemoteError("path too long");
         return;
-    };
-    if (!putAll(line[0..at_file])) return;
+    }
+
+    // **자리를 번호로 싣는다**(계획 §11.3 G1). 못 연 파일이 있어도 뒤가 안 밀린다.
+    for (chain.slots[0..chain.len], 0..) |*slot, at| {
+        const n = activity_wire.appendFile(&line, 0, @intCast(at), slot.path()) orelse continue;
+        if (!putAll(line[0..n])) return;
+    }
 
     var scanner: activity_wire.Scanner = .{};
     defer scanner.deinit(gpa);
@@ -1018,25 +1011,37 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
 
     var offset: u64 = 0;
     var truncated = false;
-    while (true) {
-        // 🔥 **스캔 구간은 출력이 없다 — 그래서 채널이 끊긴 것을 여기서 봐야 한다**(적대적 M1).
-        //
-        // 이 모드를 `list` 를 따라 「한 번 답하고 죽으니 stdin 규율이 필요 없다」고 적었는데 **틀렸다**:
-        // `list` 는 readdir 이라 밀리초지만 활동 스캔은 **초 단위**다(실측 3.82 GB → 6.3 초, 느린
-        // 서버면 더). 그 사이 받는 쪽이 죽어도 `putAll` 을 안 하므로 EPIPE 가 안 나고, 남의 서버는
-        // 아무도 안 받을 일에 CPU 를 계속 태운다. 감시 모드가 겪고 고친 바로 그 결함이다(머리말
-        // 「고아를 남기지 않는다」 · 적대적 검증 17 회차).
-        if (watch_channel and stdinSpeaks()) return;
-        const n = file.readPositional(io, &.{chunk}, offset) catch {
+    var opened: [activity_wire.max_chain]?std.Io.File = .{null} ** activity_wire.max_chain;
+    defer for (&opened) |*maybe| {
+        if (maybe.*) |f| f.close(io);
+    };
+
+    // **파일마다 처음부터 다시 센다.** 오프셋은 파일 절대값이고, 어느 파일인지는 `Hit.file_index` 가
+    // 든다 — 그 둘을 섞으면 소비자가 엉뚱한 바이트를 읽는다(로컬 스캔 워커와 같은 규율).
+    for (chain.slots[0..chain.len], 0..) |*slot, at| {
+        const file = std.Io.Dir.cwd().openFile(io, slot.path(), .{
+            .mode = .read_only,
+            .follow_symlinks = false,
+            .allow_directory = false,
+        }) catch {
+            // **그 파일만 건너뛴다**(부모가 지워졌을 수 있다) — 번호는 그대로다. 머리(자리 0)를
+            // 못 열었으면 사유를 남긴다: 그것은 「부분」이 아니라 「못 읽었다」다.
+            if (at == 0) {
+                putRemoteError("open failed");
+                return;
+            }
             truncated = true;
-            break;
+            continue;
         };
-        if (n == 0) break;
-        offset += n;
-        scanner.feed(gpa, chunk[0..n], &hits) catch {
+        opened[at] = file;
+
+        // 파일이 바뀌면 이월 버퍼도 새로 시작해야 한다 — 앞 파일의 잘린 꼬리가 다음 파일 첫 줄에
+        // 이어 붙으면 없던 활동이 생긴다.
+        scanner.deinit(gpa);
+        scanner = .{ .file_index = @intCast(at) };
+        if (scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset)) |_| {} else |_| {
             truncated = true;
-            break;
-        };
+        }
     }
 
     {
@@ -1055,6 +1060,14 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
     // 라벨을 여기서 만드는 이유는 계약 §2.4 — 저쪽 오프셋을 이쪽이 읽을 수 없기 때문이다.
     var written: u64 = 0;
     for (hits.items) |hit| {
+        // **그 자리의 파일에서 읽는다.** 체인이 여럿이면 `file_index` 가 유일한 답이다 — 첫 파일로
+        // 고정하면 부모의 활동을 현재 파일에서 읽어 엉뚱한 바이트가 라벨이 된다(RAV4).
+        const file = (if (hit.file_index < opened.len) opened[hit.file_index] else null) orelse {
+            const at = activity_wire.appendRecord(&line, 0, .{ .hit = hit, .label = .{} }) orelse return;
+            if (!putAll(line[0..at])) return;
+            written += 1;
+            continue;
+        };
         var label: activity_wire.Label = .{};
         if (hit.activity != .none and hit.data_len > 0) {
             // 로컬과 같이 **전량**을 읽는다. 앞부분만 읽으면 읽기(`read`) 활동의 basename 이 달라진다.
@@ -1119,4 +1132,131 @@ fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, at: u64) bool {
         got += n;
     }
     return true;
+}
+
+/// 파일 하나를 스캐너에 먹인다. **채널이 끊기면 곧바로 접는다**(적대적 M1).
+///
+/// 🔥 **스캔 구간은 출력이 없다 — 그래서 채널이 끊긴 것을 여기서 봐야 한다.** 이 모드를 `list` 를
+/// 따라 「한 번 답하고 죽으니 stdin 규율이 필요 없다」고 적었는데 **틀렸다**: `list` 는 readdir 이라
+/// 밀리초지만 활동 스캔은 **초 단위**다(실측 3.82 GB → 6.3 초). 그 사이 받는 쪽이 죽어도 `putAll` 을
+/// 안 하므로 EPIPE 가 안 나고, 남의 서버는 아무도 안 받을 일에 CPU 를 계속 태운다.
+fn scanOne(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    file: std.Io.File,
+    chunk: []u8,
+    scanner: *activity_wire.Scanner,
+    hits: *std.ArrayList(activity_wire.Hit),
+    watch_channel: bool,
+    total: *u64,
+) error{ Truncated, ChannelGone }!void {
+    var offset: u64 = 0;
+    while (true) {
+        if (watch_channel and stdinSpeaks()) return error.ChannelGone;
+        const n = file.readPositional(io, &.{chunk}, offset) catch return error.Truncated;
+        if (n == 0) break;
+        offset += n;
+        total.* += n;
+        scanner.feed(gpa, chunk[0..n], hits) catch return error.Truncated;
+    }
+}
+
+/// 체인 한 자리 — 경로 사본과 그 길이.
+const ChainSlot = struct {
+    buf: [activity_wire.max_path_bytes]u8 = undefined,
+    len: usize = 0,
+
+    fn path(self: *const ChainSlot) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn set(self: *ChainSlot, value: []const u8) bool {
+        if (value.len == 0 or value.len > self.buf.len) return false;
+        @memcpy(self.buf[0..value.len], value);
+        self.len = value.len;
+        return true;
+    }
+};
+
+const Chain = struct {
+    slots: [activity_wire.max_chain]ChainSlot = [_]ChainSlot{.{}} ** activity_wire.max_chain,
+    len: usize = 0,
+
+    fn append(self: *Chain, value: []const u8) bool {
+        if (self.len >= self.slots.len) return false;
+        // **이미 담긴 경로면 안 더한다** — 부모가 자기 자신을 가리키는 기록이 오면 같은 파일을 두 번
+        // 훑고 활동이 두 배로 뜬다(로컬 `Chain.append` 와 같은 규율).
+        for (self.slots[0..self.len]) |*s| {
+            if (std.mem.eql(u8, s.path(), value)) return false;
+        }
+        if (!self.slots[self.len].set(value)) return false;
+        self.len += 1;
+        return true;
+    }
+};
+
+/// 재개/fork 면 **부모까지** 잇는다(RAV4 — 계약 §3.3).
+///
+/// 로컬 `buildChain` 과 같은 절차다: 파일 머리에서 부모 id 를 읽고, `$HOME/.codex/sessions` 아래를
+/// 훑어 그 id 의 rollout 을 찾고, 상한까지 반복한다. **다른 것은 「어느 기계의 파일시스템인가」뿐이다** —
+/// 그래서 여기(저쪽)에서 돈다.
+///
+/// codex 전용이다 — claude 는 `/clear` 가 새 파일을 만들 뿐 이전 대화를 압축해 싣지 않으므로 잃는
+/// 것이 없고, 부모를 가리키는 기록도 없다.
+fn resolveChain(io: std.Io, head: []const u8) Chain {
+    var chain: Chain = .{};
+    if (!chain.append(head)) return chain;
+
+    const home_z = std.c.getenv("HOME") orelse return chain;
+    const home = std.mem.span(home_z);
+    if (home.len == 0) return chain;
+
+    var root_buf: [activity_wire.max_path_bytes]u8 = undefined;
+    const root_path = std.fmt.bufPrint(&root_buf, "{s}/.codex/sessions", .{home}) catch return chain;
+    // head 가 codex rollout 이 아니면 볼 것이 없다(claude 는 부모 개념이 없다).
+    if (!std.mem.startsWith(u8, head, root_path)) return chain;
+
+    var cur_buf: [activity_wire.max_path_bytes]u8 = undefined;
+    var cur: []const u8 = head;
+    while (chain.len < activity_wire.max_chain) {
+        var id_buf: [128]u8 = undefined;
+        const parent_id = readCodexParentId(io, cur, &id_buf);
+        if (parent_id.len == 0) break;
+
+        var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch break;
+        defer root.close(io);
+
+        var rel_buf: [activity_wire.max_path_bytes]u8 = undefined;
+        var suffix_buf: [160]u8 = undefined;
+        const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{parent_id}) catch break;
+        const rel = activity_wire.findCodexByThreadId(io, root, suffix, &rel_buf) orelse break;
+        // **`findCodexByThreadId` 는 단순 `endsWith` 다.** 그대로 믿으면 `…-Xparent-id.jsonl` 이
+        // `parent-id` 의 것으로 잡힌다 — 찾은 이름을 한 번 더 본다(로컬과 같은 가드).
+        const base = if (std.mem.lastIndexOfScalar(u8, rel, '/')) |at| rel[at + 1 ..] else rel;
+        if (!activity_wire.isCodexRolloutOf(base, parent_id)) break;
+
+        var abs_buf: [activity_wire.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ root_path, rel }) catch break;
+        if (!chain.append(abs)) break; // 상한이거나 이미 담긴 경로
+
+        // 다음 바퀴를 위해 방금 담은 경로를 들고 간다(`abs_buf` 는 이 반복에서 죽는다).
+        if (abs.len > cur_buf.len) break;
+        @memcpy(cur_buf[0..abs.len], abs);
+        cur = cur_buf[0..abs.len];
+    }
+    return chain;
+}
+
+/// 그 파일이 밝히는 부모 id. 못 읽으면 빈 값이다.
+fn readCodexParentId(io: std.Io, path: []const u8, out: []u8) []const u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return "";
+    defer file.close(io);
+    var head: [activity_wire.codex_meta_window_bytes]u8 = undefined;
+    const n = file.readPositional(io, &.{&head}, 0) catch return "";
+    if (n == 0) return "";
+    return activity_wire.parseCodexParentId(head[0..n], out);
 }

@@ -1052,3 +1052,199 @@ test "상한 상수는 스캐너·라벨에서 온다 — 두 벌을 만들지 �
     try testing.expectEqual(index.max_chain, max_files);
     try testing.expectEqual(index.max_activity_hits_per_file + index.max_hits_per_file, max_records);
 }
+
+// ── 범위 읽기 wire(RAV5) ───────────────────────────────────────────────────────────────────────
+//
+// 펼침(계약 §2.4)과 본문 검색(§2.1.1)이 읽는 명령·결과 전문, 그리고 이미지 픽셀(RAV6)은 **바이트**라
+// 활동 wire 에 실을 수 없다(§2.4 — 그것이 「본문은 안 싣는다」의 뜻이다). 대신 **자리를 알고 있으니**
+// 그 구간만 요청형으로 당겨온다.
+//
+// **활동 wire 와 형식을 나눈다.** 저쪽은 「목록 하나」이고 이쪽은 「바이트 한 덩이」다 — 한 파서에
+// 섞으면 `Event` 가 두 세계를 들고 소비자의 switch 가 의미 없이 넓어진다. 머리말이 다르므로 잘못 온
+// 답은 `UnsupportedVersion` 으로 끊긴다.
+
+pub const range_header_line = "maru-ravr 1";
+
+/// 한 번에 당겨올 수 있는 최대 바이트. **이미지가 이 값을 정한다**(RAV6) — RF4 가 원격 파일 열기에
+/// 정한 4 MiB 와 같은 값·같은 이유다. 펼침은 8 KiB, 문맥 창은 64 KiB 라 한참 아래다.
+pub const max_range_bytes: usize = 4 << 20;
+
+/// 범위 읽기 답 전체의 상한. 바이트 + 머리말·길이 접두·꼬리의 여유.
+pub const max_range_wire_bytes: usize = max_range_bytes + 4096;
+
+pub const RangeEvent = union(enum) {
+    /// 읽은 바이트. **요청한 길이보다 짧을 수 있다**(파일 끝) — 그것은 오류가 아니다.
+    bytes: []const u8,
+    /// 원격이 보고한 실패. 이것으로 끝난 답도 **완결**이다(계약 §2.2).
+    remote_error: []const u8,
+};
+
+pub fn appendRangeHeader(out: []u8, at: usize) ?usize {
+    var n = appendBytes(out, at, range_header_line) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+/// 읽은 바이트를 싣는다. **길이 접두**라 개행·NUL 이 들어도 안 깨진다.
+pub fn appendRangeBytes(out: []u8, at: usize, bytes: []const u8) ?usize {
+    if (bytes.len > max_range_bytes) return null;
+    var n = appendBytes(out, at, "B ") orelse return null;
+    n = appendField(out, n, bytes.len) orelse return null;
+    n = appendBytes(out, n, bytes) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+pub fn appendRangeError(out: []u8, at: usize, message: []const u8) ?usize {
+    const clamped = message[0..@min(message.len, max_error_bytes)];
+    var n = appendBytes(out, at, "! ") orelse return null;
+    n = appendField(out, n, clamped.len) orelse return null;
+    n = appendBytes(out, n, clamped) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+pub fn appendRangeTail(out: []u8, at: usize) ?usize {
+    var n = appendBytes(out, at, "X") orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+/// 범위 읽기 답의 파서. 활동 파서와 **같은 규율**이다 — 꼬리를 못 보면 잘린 것이고, 그때 소비자는
+/// 「못 읽었다」로 말해야 한다(계약 §2.2 · §6.1).
+pub const RangeParser = struct {
+    rest: []const u8,
+    saw_header: bool = false,
+    saw_bytes: bool = false,
+    terminated: bool = false,
+
+    pub fn init(bytes: []const u8) RangeParser {
+        return .{ .rest = bytes };
+    }
+
+    pub fn complete(self: *const RangeParser) bool {
+        return self.terminated and self.rest.len == 0;
+    }
+
+    pub fn next(self: *RangeParser) ParseError!?RangeEvent {
+        if (self.rest.len == 0) return null;
+        if (self.terminated) return ParseError.TrailingData;
+
+        if (!self.saw_header) {
+            const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse return ParseError.Malformed;
+            const line = self.rest[0..nl];
+            if (!std.mem.eql(u8, line, range_header_line)) return ParseError.UnsupportedVersion;
+            self.rest = self.rest[nl + 1 ..];
+            self.saw_header = true;
+            if (self.rest.len == 0) return null;
+        }
+
+        switch (self.rest[0]) {
+            'B' => {
+                // **바이트 덩이는 한 번뿐이다.** 둘이 오면 어느 것이 그 자리인지 정의가 없다.
+                if (self.saw_bytes) return ParseError.Malformed;
+                if (self.rest.len < 2 or self.rest[1] != ' ') return ParseError.Malformed;
+                self.rest = self.rest[2..];
+                var p = Parser{ .rest = self.rest };
+                const bytes = try p.takeLenPrefixed(max_range_bytes);
+                self.rest = p.rest;
+                self.saw_bytes = true;
+                return .{ .bytes = bytes };
+            },
+            '!' => {
+                if (self.rest.len < 2 or self.rest[1] != ' ') return ParseError.Malformed;
+                self.rest = self.rest[2..];
+                var p = Parser{ .rest = self.rest };
+                const msg = try p.takeLenPrefixed(max_error_bytes);
+                self.rest = p.rest;
+                self.terminated = true;
+                return .{ .remote_error = msg };
+            },
+            'X' => {
+                if (self.rest.len < 2 or self.rest[1] != '\n') return ParseError.Malformed;
+                self.rest = self.rest[2..];
+                self.terminated = true;
+                return null;
+            },
+            else => return ParseError.Malformed,
+        }
+    }
+};
+
+test "범위 왕복: 바이트가 그대로 돌아온다" {
+    var buf: [1024]u8 = undefined;
+    const payload = "line one\nline two\x00binary";
+    var n = appendRangeHeader(&buf, 0).?;
+    n = appendRangeBytes(&buf, n, payload).?;
+    n = appendRangeTail(&buf, n).?;
+
+    var p = RangeParser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqualStrings(payload, ev.bytes);
+    try testing.expectEqual(@as(?RangeEvent, null), try p.next());
+    try testing.expect(p.complete());
+}
+
+test "범위: 꼬리가 없으면 완결이 아니다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendRangeHeader(&buf, 0).?;
+    n = appendRangeBytes(&buf, n, "abc").?;
+
+    var p = RangeParser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectEqual(@as(?RangeEvent, null), try p.next());
+    try testing.expect(!p.complete());
+}
+
+test "범위: 원격 오류도 완결이다 — 「못 읽었다」와 「빈 구간」을 가른다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendRangeHeader(&buf, 0).?;
+    n = appendRangeError(&buf, n, "seek failed").?;
+
+    var p = RangeParser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqualStrings("seek failed", ev.remote_error);
+    try testing.expect(p.complete());
+}
+
+test "범위: 활동 wire 를 범위 파서에 먹이면 거부한다 — 형식이 갈려 있다" {
+    var buf: [1024]u8 = undefined;
+    const n = appendHeader(&buf, 0).?; // `maru-rav 1`
+    var p = RangeParser.init(buf[0..n]);
+    try testing.expectError(ParseError.UnsupportedVersion, p.next());
+}
+
+test "범위: 바이트 덩이가 둘이면 거부한다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendRangeHeader(&buf, 0).?;
+    n = appendRangeBytes(&buf, n, "a").?;
+    n = appendRangeBytes(&buf, n, "b").?;
+
+    var p = RangeParser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectError(ParseError.Malformed, p.next());
+}
+
+test "범위: 길이가 상한을 넘는다고 주장하면 거부한다" {
+    var buf: [256]u8 = undefined;
+    const h = appendRangeHeader(&buf, 0).?;
+    var line: [128]u8 = undefined;
+    const bad = std.fmt.bufPrint(&line, "B {d} x\n", .{max_range_bytes + 1}) catch unreachable;
+    @memcpy(buf[h..][0..bad.len], bad);
+
+    var p = RangeParser.init(buf[0 .. h + bad.len]);
+    try testing.expectError(ParseError.TooLong, p.next());
+}
+
+test "범위: 빈 구간도 답이다 — 파일 끝을 「못 읽었다」로 읽지 않는다" {
+    var buf: [256]u8 = undefined;
+    var n = appendRangeHeader(&buf, 0).?;
+    n = appendRangeBytes(&buf, n, "").?;
+    n = appendRangeTail(&buf, n).?;
+
+    var p = RangeParser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqual(@as(usize, 0), ev.bytes.len);
+    try testing.expectEqual(@as(?RangeEvent, null), try p.next()); // 꼬리
+    try testing.expect(p.complete());
+}

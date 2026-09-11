@@ -30,6 +30,7 @@
 const std = @import("std");
 
 const backend_path = "src/platform/macos/agent_image_scan_backend.zig";
+const decode_path = "src/platform/macos/agent_image_decode_backend.zig";
 const activity_path = "src/platform/macos/app_session/agent_activity.zig";
 
 fn readSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -192,6 +193,37 @@ test "RAV5b §6.3: 원격 펼침 워커도 로컬 파일시스템을 안 만진�
     // **못 당겨온 것을 「빈 명령」으로 그리지 않는다**(계약 §2.2).
     if (std.mem.indexOf(u8, activity_src, "if (op.detail.remote_failed and row < rows_fit)") == null) {
         std.debug.print("🔥 원격 펼침 실패가 「빈 명령」으로 보인다(계약 §2.2).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "RAV6 §6.3: 원격 그림도 로컬 파일을 안 연다" {
+    const gpa = std.testing.allocator;
+    const decode_src = try readSource(gpa, std.testing.io, decode_path);
+    defer gpa.free(decode_src);
+
+    // 디코드 워커는 **원격이면 구간을 당겨온다**. 그 갈래 안에 로컬 파일 열기가 생기면 저쪽 오프셋이
+    // 이쪽 그림을 디코드한다 — §13.6 N1 이 잡은 그 사고가 픽셀 축에서 되살아난다.
+    const body = bodyOf(decode_src, "fn fetchRemoteBase64(") orelse {
+        std.debug.print("원격 그림 갈래를 못 찾았다 — 갈래가 사라졌거나 이름이 바뀌었다.\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    for (local_fs_tokens) |token| {
+        if (std.mem.indexOf(u8, body, token) != null) {
+            std.debug.print("🔥 `fetchRemoteBase64` 안에 로컬 파일시스템 토큰 `{s}` 가 있다(계약 §2.1).\n", .{token});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // **잘린 payload 를 디코드하지 않는다.** 잘린 base64 는 깨진 그림이거나 더 나쁘게는 다른 그림이다.
+    if (std.mem.indexOf(u8, decode_src, "if (bytes.len != len) return null;") == null) {
+        std.debug.print("🔥 짧게 온 그림 payload 를 그대로 디코드한다(RF4 의 「잘린 내용이 온전한 척」 규율 위반).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+
+    // **워커가 갈린다** — 원격이면 `openFile` 을 지나지 않는다.
+    if (std.mem.indexOf(u8, decode_src, "const b64 = if (job.remote) |r|") == null) {
+        std.debug.print("🔥 디코드 워커에 원격 갈래가 없다 — 원격 그림이 로컬 경로로 간다.\n", .{});
         return error.TestUnexpectedResult;
     }
 }

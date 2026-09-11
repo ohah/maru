@@ -1316,7 +1316,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    않으며, EOF/broken read end는 host owner를 fail-close한다. fresh spawn과 same-PID restore가 각각 새 process-local pipe와
    notifier를 만들고 handoff inventory는 notifier/fd를 직렬화하지 않는다. 실제 forkpty `/bin/cat` input→valid delta artifact가
    구조적 20ms floor 제거와 hard latency cap, 250ms idle wake/CPU, active notifier/write/drain, fd·child cleanup을 증명한다.
-   실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡고, 장시간 idle은 운영 soak 범위다.
+   실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡는다. **CR6f-idle-soak(구현·실측 완료)**은
+   동일 ReleaseFast host·forkpty child를 600초 유지하며 10초 단위 60개 창의 identity, output-wake/observation/projector
+   무작업, CPU·FD와 종료 회수를 전수 판정하고 마지막 actual marker wake를 요구한다. 임의 `0700` session root만 사용해
+   사용자의 HOME·기본 registry/manifest/socket을 읽거나 지우지 않는 opt-in 제품 gate다. strict artifact·validator와 실제
+   1회 통과를 완료 조건으로 삼는다. 2026-09-11 실측은 60창/601.05초 동안 host·child identity와 FD 20을 유지했고,
+   idle wake·observation·projector 증분 0, RSS 시작/끝/최대 동일, 창별 CPU 최대 0.656ms, 마지막 marker exact 1과
+   child/host/socket/directory cleanup을 strict validator로 통과했다.
 
    **P3-e4d-1 metadata isolation·reattach gate:** 별도 실제 daemon, 하나의 generation-backed GUI
    connection, 두 forkpty runtime으로 metadata event의 stream/runtime 격리와 detach 중 변경된

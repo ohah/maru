@@ -4749,6 +4749,27 @@ pub fn build(b: *std.Build) void {
         notification_generation_axis_step.dependOn(&run_axis_tests.step);
         boundary_step.dependOn(&run_axis_tests.step);
     }
+    // 스크롤백 바이트 예산 게이트. 자른 handoff 가 **디코드되는지**를 잰다 — 포맷을 안 바꾸는 것이
+    // 이 설계의 전제이므로, 그 전제가 깨지면 여기서 빨개진다.
+    const handoff_scrollback_budget_step = b.step(
+        "test-handoff-scrollback-budget",
+        "Trimmed scrollback still decodes as a valid ring (byte budget handoff)",
+    );
+    {
+        const budget_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_codec.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "스크롤백 바이트 예산", "전제 검증" },
+        });
+        const run_budget_tests = b.addRunArtifact(budget_tests);
+        run_budget_tests.addArg("--maru-expect-tests=5");
+        handoff_scrollback_budget_step.dependOn(&run_budget_tests.step);
+        boundary_step.dependOn(&run_budget_tests.step);
+    }
 
     const session_host_kernel_cwd_k1_step = b.step(
         "test-session-host-kernel-cwd-k1",

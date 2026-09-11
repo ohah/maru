@@ -58,6 +58,11 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "deinitValue", .expression = "@field(value.*,field.name)", .count = 2 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "deinitValue", .expression = "@field(Tag,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "encodeCoreFields", .expression = "@field(core.*,spec.name)", .count = 2 },
+    // 크기 분해 진단(2026-09-11). `state_too_large` 로 업그레이드가 막혔을 때 **무엇이 64 MiB 를
+    // 채웠는지** 가르려고 태그별로 재는 자리다 — footprint 를 직렬화 크기로 오해해 엉뚱한 곳
+    // (스크롤백)을 고칠 뻔했다. 기존 `encodeCoreFields` 와 **같은 표(core_fields_v1)를 같은 방식으로**
+    // 훑으므로 계약이 넓어지지 않는다.
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "runtimeSizeBreakdown", .expression = "@field(view.core.*,spec.name)", .count = 2 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "replaceCoreField", .expression = "@field(core.*,spec.name)", .count = 3 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "observeNonDefaultCoreFields", .expression = "@field(baseline.*,spec.name)", .count = 2 },
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "observeNonDefaultCoreFields", .expression = "@field(candidate.*,spec.name)", .count = 1 },

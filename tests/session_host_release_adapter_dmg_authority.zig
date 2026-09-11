@@ -142,6 +142,7 @@ const Gate = struct {
     fail_execute: bool = false,
     fail_publish: bool = false,
     mutate_extracted_cli: bool = false,
+    replace_extracted_cli: bool = false,
     rolled_back: bool = false,
 
     pub fn execute(self: *@This(), view: authority.MountedCandidate) !void {
@@ -154,6 +155,12 @@ const Gate = struct {
         if (self.fail_execute) return error.GateFailed;
         if (self.mutate_extracted_cli) {
             try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(view.cli_path.ptr, 0o700));
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = view.cli_path, .data = "foreign-cli" });
+        }
+        if (self.replace_extracted_cli) {
+            const moved = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}.moved", .{view.cli_path}, 0);
+            defer std.testing.allocator.free(moved);
+            try std.testing.expectEqual(@as(c_int, 0), std.c.rename(view.cli_path.ptr, moved.ptr));
             try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = view.cli_path, .data = "foreign-cli" });
         }
     }
@@ -379,6 +386,34 @@ test "DMG authority rolls publication back after publish failure" {
     ));
     try std.testing.expect(gate.rolled_back);
     try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+}
+
+test "DMG authority preserves a foreign private CLI pathname during cleanup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    var gate = Gate{ .replace_extracted_cli = true };
+    try std.testing.expectError(error.CleanupFailed, authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    ));
+    const foreign = try tmp.dir.readFileAlloc(std.testing.io, "private-work/candidate-cli", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(foreign);
+    try std.testing.expectEqualStrings("foreign-cli", foreign);
 }
 
 test "DMG authority rolls published gate back when detach fails" {

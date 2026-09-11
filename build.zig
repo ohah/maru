@@ -17772,7 +17772,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_dmg_authority_tests = b.addRunArtifact(dmg_authority_tests);
-        run_dmg_authority_tests.addArg("--maru-expect-tests=15");
+        run_dmg_authority_tests.addArg("--maru-expect-tests=16");
         run_dmg_authority_tests.setCwd(b.path("."));
         session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_tests.step);
 

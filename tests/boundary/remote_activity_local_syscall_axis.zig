@@ -149,9 +149,49 @@ test "RAV3 §6.3: 경로를 주는 한 곳이 원격을 막는다 — 네 소비
         count += 1;
         at = found + 1;
     }
-    if (count != 1) {
-        std.debug.print("🔥 `chain.get(` 호출이 {d} 곳이다 — 하나여야 한다(`pathForIndex`).\n" ++
-            "  다른 자리는 원격 가드를 **우회한다**.\n", .{count});
+    // **두 문만 허용한다**: `pathForIndex`(로컬 open 으로 가는 값) · `remotePathForIndex`(ssh argv 로
+    // 가는 값). 둘은 같은 문자열을 주지만 **가는 곳이 반대**라 합치면 안 된다 — 그 판단을 호출자에게
+    // 맡기는 순간 한 번의 실수가 남의 파일을 연다.
+    if (count != 2) {
+        std.debug.print("🔥 `chain.get(` 호출이 {d} 곳이다 — 둘이어야 한다" ++
+            "(`pathForIndex` 와 `remotePathForIndex`).\n  다른 자리는 두 문을 **우회한다**.\n", .{count});
+        return error.TestUnexpectedResult;
+    }
+    if (std.mem.indexOf(u8, activity_src, "fn remotePathForIndex(self: *const AppSession, file_index: u8) ?[]const u8 {\n" ++
+        "    if (!self.agent_activity.source_remote) return null;") == null)
+    {
+        std.debug.print("🔥 저쪽 경로를 주는 문(`remotePathForIndex`)이 로컬을 안 막는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "RAV5b §6.3: 원격 펼침 워커도 로컬 파일시스템을 안 만진다" {
+    const gpa = std.testing.allocator;
+    const activity_src = try readSource(gpa, std.testing.io, activity_path);
+    defer gpa.free(activity_src);
+
+    // 원격 펼침은 **저쪽 구간을 당겨온다**(RAV5b). 그 워커 안에 로컬 파일 열기가 생기면 저쪽
+    // 오프셋이 이쪽 파일에 닿는다 — §13.6 N1 이 잡은 그 사고가 새 워커에서 되살아난다.
+    const body = bodyOf(activity_src, "fn remoteDetailWorker(") orelse {
+        std.debug.print("원격 펼침 워커를 못 찾았다 — 갈래가 사라졌거나 이름이 바뀌었다.\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    for (local_fs_tokens) |token| {
+        if (std.mem.indexOf(u8, body, token) != null) {
+            std.debug.print("🔥 `remoteDetailWorker` 안에 로컬 파일시스템 토큰 `{s}` 가 있다(계약 §2.1).\n", .{token});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // **로컬과 같은 규칙으로 푼다** — 푸는 함수가 하나여야 원격 펼침이 로컬과 같은 글자를 보여 준다.
+    if (std.mem.indexOf(u8, activity_src, "op.detail.command = decodeDetailPart(self, outcome.command") == null) {
+        std.debug.print("🔥 원격 펼침이 `decodeDetailPart`(단일 출처)를 안 지난다(계약 §2.3).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+
+    // **못 당겨온 것을 「빈 명령」으로 그리지 않는다**(계약 §2.2).
+    if (std.mem.indexOf(u8, activity_src, "if (op.detail.remote_failed and row < rows_fit)") == null) {
+        std.debug.print("🔥 원격 펼침 실패가 「빈 명령」으로 보인다(계약 §2.2).\n", .{});
         return error.TestUnexpectedResult;
     }
 }

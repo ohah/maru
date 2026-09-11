@@ -5660,6 +5660,43 @@ test "hello 를 받으면 축이 서고 목록 요청이 만들어진다" {
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
 }
 
+/// 지금 나갈 컨트롤 요청이 `sessions.list` 인가(있으면 가져가 버린다).
+fn tookSessionsRequest() bool {
+    var out: [256]u8 = undefined;
+    const n = bridge.maru_mobile_take_control_request(&out, out.len);
+    return n > 0 and std.mem.indexOf(u8, out[0..n], "sessions.list") != null;
+}
+
+test "M3c 목록은 «볼 때» 다시 받는다 — 한 번 받고 끝이 아니다" {
+    // 한 연결 안에서 한 번만 받으면 그 목록은 **그 순간부터 낡는다** — 맥에서 세션을 열고 닫아도
+    // 폰은 모르고, Android 는 세션이 배경에서도 살아남아(§3.3) 몇 시간 전 목록으로 고르게 된다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    try std.testing.expect(tookSessionsRequest()); // 축이 서면 한 번
+    try std.testing.expect(!tookSessionsRequest()); // 가만히 있으면 더 안 묻는다(폴링 안 한다)
+
+    // **다른 화면에 갔다 돌아오면 다시 묻는다.**
+    bridge.setScreenForTest("sessions");
+    bridge.setScreenForTest("settings");
+    try std.testing.expect(!tookSessionsRequest()); // 설정 화면에서는 안 묻는다
+    bridge.setScreenForTest("sessions");
+    _ = bridge.maru_mobile_control_tick(1, 2, 0); // 프레임이 한 번 돈다 — 요청은 여기서 난다
+    try std.testing.expect(tookSessionsRequest());
+
+    // **배경에서 돌아왔는데 그 화면이 떠 있어도 다시 묻는다** — 화면이 안 바뀌므로 위 자리는 안 지난다.
+    try std.testing.expect(!tookSessionsRequest());
+    bridge.maru_mobile_report_focus(1);
+    _ = bridge.maru_mobile_control_tick(1, 2, 0); // 프레임이 한 번 돈다 — 요청은 여기서 난다
+    try std.testing.expect(tookSessionsRequest());
+
+    // **대조군: 목록이 아닌 화면에서 돌아오면 안 묻는다.**
+    bridge.setScreenForTest("terminal");
+    _ = tookSessionsRequest(); // 남아 있으면 비운다
+    bridge.maru_mobile_report_focus(1);
+    _ = bridge.maru_mobile_control_tick(1, 2, 0); // 프레임이 한 번 돈다 — 요청은 여기서 난다
+    try std.testing.expect(!tookSessionsRequest());
+}
+
 test "목록 응답이 세션으로 들어온다" {
     bridge.maru_mobile_control_reset();
     _ = feedControl(hello_wire);

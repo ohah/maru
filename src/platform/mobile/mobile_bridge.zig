@@ -823,6 +823,9 @@ pub export fn maru_mobile_take_keyboard_hide() u32 {
 /// 나머지 화면은 **누르면 올라온다**(설정 줄·서버 칸이 `kb_raise_req` 를 세운다). 미리 띄워 둘
 /// 이유가 없고, 띄워 두면 목록을 고르는데 화면 절반이 자판이다.
 fn syncKeyboardForScreen() void {
+    // **화면이 바뀌는 자리가 여기 하나다** — `navPush`·`navPop` 이 둘 다 지난다. 목록을 다시
+    // 받자는 뜻도 같은 자리에서 세운다(계약 §3.0).
+    noteScreenForListRefresh();
     switch (screenTop()) {
         .terminal, .password => kb_raise_req = true,
         else => kb_hide_req = true,
@@ -1263,6 +1266,20 @@ var control_req_len: usize = 0;
 /// 와 "아직 모른다" 를 갈라 말해야 한다.
 var control_listed: bool = false;
 
+/// **목록을 다시 받아야 한다**(계약 §3.0 — M3c). `control_listed` 는 「한 번 받았다」는 래치라,
+/// 그것만 보면 한 연결 안에서 목록이 **영영 안 갱신된다** — 맥에서 세션을 열고 닫아도 폰은 모르고,
+/// Android 는 세션이 배경에서도 살아남으므로(§3.3) **몇 시간 전 목록**으로 고르게 된다.
+///
+/// **폴링은 안 한다**(§3.2). 대신 **보는 순간**에 세운다 — 목록 화면이 맨 위가 될 때와, 배경에서
+/// 돌아왔는데 그 화면이 떠 있을 때. 받는 동안 옛 줄은 그대로 둔다(비우면 들어갈 때마다 깜빡인다).
+var sessions_refresh_req: bool = false;
+
+/// 목록 화면이 맨 위가 되면 **다시 받자고 한다.** 들어갈 때도 뒤로 나와 돌아올 때도 같은 자리를
+/// 지나므로(`navPush`·`navPop` 이 둘 다 `syncKeyboardForScreen` 을 부른다) 여기 하나면 된다.
+fn noteScreenForListRefresh() void {
+    if (screenTop() == .sessions) sessions_refresh_req = true;
+}
+
 /// 컨트롤 채널이 돌릴 **원격 명령의 종류**. 채널은 하나뿐이고(SSH 코어가 `control` 을 한 자리만
 /// 든다) 화면마다 원하는 명령이 다르므로, 축은 "열렸나" 가 아니라 **"무엇을 원하나"** 로
 /// 판정한다(계약 §4a "한 채널, 여러 명령").
@@ -1539,6 +1556,15 @@ var control_opened_at_ms: ?u64 = null;
 ///
 /// **닫기가 먼저다**(§4a — 한 번에 control 하나). 열기는 채널이 비었을 때만 나간다.
 pub export fn maru_mobile_control_tick(ssh_ready: c_int, channel_state: u32, now_ms: u64) c_int {
+    // **다시 받자는 뜻은 여기서 낸다** — 들어오는 바이트가 있을 때가 아니라(M3c).
+    //
+    // 처음엔 `control_feed` 의 루프에 얹었는데, 그 루프는 **서버가 무언가 보냈을 때만** 돈다.
+    // 목록을 다시 보는 순간의 연결은 대개 **조용하므로**, 그 자리에 두면 영영 안 묻는다 —
+    // 바로 이 슬라이스가 고치려던 상태가 그대로 남는 것이다(판정자가 잡았다).
+    if (sessions_refresh_req and control_client.state == .ready and control_req_len == 0) {
+        sessions_refresh_req = false;
+        requestSessions();
+    }
     // 답을 기다리다 시한을 넘겼나 — 행동과 무관하게 매 tick 본다.
     if (control_opened_at_ms) |opened| {
         if (control_client.state == .waiting_hello and
@@ -2025,6 +2051,8 @@ pub export fn maru_mobile_control_reset() void {
     // 곧바로 「포기」로 접힌다.
     control_retry_since_ms = null;
     control_opened_at_ms = null;
+    // 새 연결이면 「다시 받자」도 처음부터다 — 아래 `control_listed` 가 0 이라 어차피 한 번 받는다.
+    sessions_refresh_req = false;
     dropRemoteScreen();
     // **들고 있던 세션도 전부 놓는다**(U2a). 새 연결은 다른 기계일 수 있고, 그러면 그 화면들은
     // 남의 것이다 — runtime id 가 같아도 같은 세션이라는 보장이 없다.
@@ -3413,6 +3441,10 @@ pub export fn maru_mobile_view_offset() u32 {
 /// 포커스 변화를 코어에 알린다(DEC 1004). 켜져 있으면 `CSI I`/`CSI O` 가 흐르고 vim 의
 /// FocusGained/Lost 가 그걸 본다 — 모바일은 배경↔복귀가 데스크톱보다 훨씬 잦다.
 pub export fn maru_mobile_report_focus(focused: c_int) void {
+    // **돌아왔는데 목록을 보고 있으면 다시 받는다**(계약 §3.0 — M3c). 화면이 안 바뀌었으므로
+    // 위의 `syncKeyboardForScreen` 은 안 지난다 — 배경에 나가 있는 동안 맥에서 세션이 바뀌었을
+    // 수 있고, Android 는 세션이 살아남아 그 낡은 목록을 그대로 보여 준다(§3.3).
+    if (focused != 0) noteScreenForListRefresh();
     const core = &(term_core orelse return);
     core.reportFocus(focused != 0);
     drainUnconsumed(core);

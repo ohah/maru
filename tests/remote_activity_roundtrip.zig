@@ -320,3 +320,65 @@ test "헬퍼 activity: 재개 세션은 부모 rollout 까지 훑는다 (RAV4)" 
     try std.testing.expect(saw_child_activity);
     try std.testing.expect(saw_parent_activity);
 }
+
+test "헬퍼 activity: 부모 id 로 «끝나기만» 하는 파일에는 안 속는다 (RAV4)" {
+    // 🔥 `findCodexByThreadId` 는 단순 `endsWith` 다. 그대로 믿으면 `…-Xparent-id.jsonl` 이
+    // `parent-id` 의 것으로 잡혀 **엉뚱한 파일이 부모가 된다** — 헬퍼 주석이 그 위험을 적어 두었는데
+    // 판정자가 그 상황을 **안 만들고 있었다**(적대적 O1: 가드를 없애도 4/4 가 통과했다).
+    //
+    // 여기서는 **진짜 부모를 안 만든다.** 함정만 둔다 — 가드가 있으면 체인이 안 늘고(`F` 하나),
+    // 없으면 함정을 부모로 잡는다(`F` 둘).
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "/tmp/maru-rav4t.{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+
+    var day_buf: [96]u8 = undefined;
+    const day = try std.fmt.bufPrint(&day_buf, "{s}/.codex/sessions/2026/09/11", .{home});
+    try std.Io.Dir.cwd().createDirPath(io, day);
+    var dir = try std.Io.Dir.cwd().openDir(io, day, .{});
+    defer dir.close(io);
+
+    // **구분자가 아닌 글자**가 부모 id 앞에 붙은 함정. `endsWith` 만으로는 못 가린다.
+    var trap_buf: [128]u8 = undefined;
+    const trap_name = try std.fmt.bufPrint(&trap_buf, "rollout-2026-09-11T00-00-00-X{s}.jsonl", .{parent_id});
+    try writeRollout(io, dir, trap_name, parent_lines);
+
+    var child_name_buf: [128]u8 = undefined;
+    const child_name = try std.fmt.bufPrint(&child_name_buf, "rollout-2026-09-11T02-00-00-{s}.jsonl", .{child_id});
+    try writeRollout(io, dir, child_name, child_lines);
+
+    var child_path_buf: [256]u8 = undefined;
+    const child_path = try std.fmt.bufPrint(&child_path_buf, "{s}/{s}", .{ day, child_name });
+
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    const out = try std.process.run(gpa, io, .{
+        .argv = &.{ bin, "activity", child_path },
+        .stdout_limit = .limited(wire.max_wire_bytes),
+        .environ_map = &env,
+    });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+
+    var parser = wire.Parser.init(out.stdout);
+    var files: usize = 0;
+    var saw_trap = false;
+    while (try parser.next()) |ev| switch (ev) {
+        .file => |cf| {
+            files += 1;
+            if (std.mem.endsWith(u8, cf.path, trap_name)) saw_trap = true;
+        },
+        else => {},
+    };
+
+    try std.testing.expect(parser.complete());
+    try std.testing.expect(!saw_trap);
+    try std.testing.expectEqual(@as(usize, 1), files); // 머리 하나 — 함정은 부모가 아니다
+}

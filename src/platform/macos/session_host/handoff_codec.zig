@@ -35,6 +35,21 @@ const magic = [8]u8{ 'M', 'R', 'U', 'H', 'O', 'F', '0', '1' };
 const envelope_header_len = 64;
 const tlv_header_len = 16;
 const flag_optional: u16 = 1;
+
+/// GUI 가 소유하는 **불투명** 레이아웃 조각의 런타임당 상한.
+///
+/// host 는 이 바이트를 **해석하지 않는다.** 저장하고 handoff 로 나르기만 한다 — 그래야 「런타임 사실은
+/// host, 표현은 GUI」라는 소유권이 안 깨진다. 한 host 에 여러 GUI 창이 붙을 수 있으므로 host 가 레이아웃을
+/// 해석하기 시작하면 작성자가 둘이 되고 충돌 해소 문제가 새로 생긴다.
+///
+/// **왜 필요한가**: 2026-09-11 실측 — 복원이 불완전한 채 종료하면서 `workspace.v1` 이 343 B 로 덮였고,
+/// 탭 이름·분할·순서가 전부 사라졌다. 세션 23 개는 host 에 멀쩡히 살아 있었지만 **어느 탭이었는지는
+/// 어디에도 없어서** 복구가 「새 탭 23 개」로 끝났다. 워크스페이스 파일이 그 정보의 **단일 실패점**이다.
+///
+/// 4 KiB 는 탭 이름 + pane 경로 + 창 식별자에 넉넉하고, 23 개 런타임이면 92 KiB —
+/// `max_handoff_commit_bytes`(64 MiB)의 0.14 % 다. 오늘 `state_too_large` 로 업그레이드가 막힌 적이
+/// 있으므로 상한은 반드시 둔다.
+const max_layout_blob_bytes: usize = 4 * 1024;
 const section_terminal_core: u32 = 1;
 const section_host_meta: u32 = 2;
 const section_runtime: u32 = 3;
@@ -960,6 +975,8 @@ pub const RuntimeView = struct {
     pty_ino: u64,
     pty_rdev: i64,
     core: *const TerminalCore,
+    /// GUI 소유 불투명 바이트. 비어 있으면 인코딩하지 않는다 — 구 host 가 만든 레코드와 구분되지 않는다.
+    layout_blob: []const u8 = "",
 };
 
 /// 한 runtime 이 **무엇 때문에 큰지**를 태그별로 나눈 값(순수 계산 — 로그도 부작용도 없다).
@@ -1050,8 +1067,13 @@ pub const RuntimeState = struct {
     pty_ino: u64,
     pty_rdev: i64,
     core: TerminalCore,
+    /// 디코드된 GUI 소유 불투명 바이트. 태그가 없던 레코드(구 host)는 빈 슬라이스다.
+    layout_blob: []u8 = &.{},
 
     fn deinit(self: *RuntimeState) void {
+        // **blob 도 해제한다.** `core` 만 놓아 주면 런타임마다 최대 4 KiB 가 샌다 — host 는 업그레이드마다
+        // 전 런타임을 디코드하므로 누수가 반복 누적된다.
+        if (self.layout_blob.len != 0) self.core.allocator.free(self.layout_blob);
         self.core.deinit();
         self.* = undefined;
     }
@@ -1182,6 +1204,15 @@ pub fn encodeHostWithMaxBytes(
         try encodeTaggedValue(&writer, 9, i64, &runtime.pty_dev);
         try encodeTaggedValue(&writer, 10, u64, &runtime.pty_ino);
         try encodeTaggedValue(&writer, 11, i64, &runtime.pty_rdev);
+        // 태그 12 는 **반드시 optional** 이다. 구 host 의 디코더는 모르는 태그를 optional 일 때만
+        // 건너뛴다 — 필수로 두면 신 host 가 쓴 레코드를 구 host 가 `UnknownRequiredField` 로 거부해
+        // **롤백이 막힌다**(#3488 이 tag 99 로 겪은 그대로).
+        if (runtime.layout_blob.len != 0) {
+            if (runtime.layout_blob.len > max_layout_blob_bytes) return error.LimitExceeded;
+            const layout_start = try writer.beginTlv(12, flag_optional);
+            try writer.append(runtime.layout_blob);
+            try writer.endTlv(layout_start);
+        }
         try writer.endTlv(runtime_start);
         if (writer.bytes.items.len - runtime_start > max_runtime_section_bytes) return error.LimitExceeded;
     }
@@ -1247,7 +1278,10 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
     var result: RuntimeState = undefined;
     var seen: [11]bool = .{false} ** 11;
     var core_initialized = false;
+    var layout_blob: []u8 = &.{};
+    var layout_seen = false;
     errdefer if (core_initialized) result.core.deinit();
+    errdefer if (layout_blob.len != 0) allocator.free(layout_blob);
     while (section.pos < section.bytes.len) {
         const tag = try section.integer(u32);
         const flags = try section.integer(u16);
@@ -1255,6 +1289,18 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
         const raw_len = try section.integer(u64);
         if (raw_len > max_single_blob_bytes) return error.LimitExceeded;
         var field = try section.sub(std.math.cast(usize, raw_len) orelse return error.LimitExceeded);
+        if (tag == 12) {
+            // **`seen` 에 넣지 않는다.** 그 배열은 「1..11 은 전부 있어야 한다」를 강제하는데, 태그 12 는
+            // 구 host 의 레코드에 아예 없다 — 필수로 세면 업그레이드가 통째로 막힌다.
+            if (flags & flag_optional == 0) return error.UnknownRequiredField;
+            if (layout_seen) return error.DuplicateField;
+            layout_seen = true;
+            if (field.bytes.len > max_layout_blob_bytes) return error.LimitExceeded;
+            if (field.bytes.len != 0)
+                layout_blob = allocator.dupe(u8, field.bytes) catch return error.OutOfMemory;
+            field.pos = field.bytes.len;
+            continue;
+        }
         if (tag < 1 or tag > 11) {
             if (flags & flag_optional == 0) return error.UnknownRequiredField;
             continue;
@@ -1282,6 +1328,7 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
         }
     }
     for (seen) |present| if (!present) return error.MissingRequiredField;
+    result.layout_blob = layout_blob;
     if (result.child_pid <= 0 or result.cols < 2 or result.rows < 1 or result.fd_slot < 3 or
         result.core.size.cols != result.cols or result.core.size.rows != result.rows) return error.InvalidValue;
     return result;
@@ -1943,6 +1990,189 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
     try std.testing.expectEqual(@as(u16, 41), decoded.runtimes[1].fd_slot);
     try std.testing.expectEqual(second.parser, decoded.runtimes[1].core.parser);
     try std.testing.expectEqualStrings("attempt-v1", decoded.attempt_record.?);
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 세션은 host 에 살아남는데 **어느 탭이었는지**는
+// `workspace.v1` 에만 있어, 그 파일이 상하면 복구가 「새 탭 N 개」로 끝난다. 2026-09-11 실측 — 복원이
+// 불완전한 채 종료하면서 그 파일이 343 B 로 덮였고 탭 이름·분할·순서가 전부 사라졌다. 세션 23 개는
+// 멀쩡했지만 배치는 복원할 근거가 없었다.
+//
+// host 가 **해석하지 않는 불투명 바이트**로 그 조각을 함께 나르면 단일 실패점이 사라진다. host 는
+// 저장·운반만 하므로 「런타임 사실은 host, 표현은 GUI」소유권이 안 깨진다.
+test "handoff v1 은 GUI 소유 불투명 레이아웃 조각을 런타임마다 그대로 나른다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    var bare = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer bare.deinit();
+    const blob = "tab=3;pane=0/1;name=\xed\x83\xad";
+    const views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core, .layout_blob = blob },
+        // 두 번째는 **비어 있다** — 구 host 가 만든 레코드와 바이트가 구분되지 않아야 한다.
+        .{ .runtime_id = 2, .surface_id = 2, .child_pid = 102, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 41, .pty_dev = 4, .pty_ino = 5, .pty_rdev = 6, .core = &bare },
+    };
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 0xCAFE,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &views,
+    });
+    defer allocator.free(encoded);
+    var decoded = try decodeHost(allocator, encoded);
+    defer decoded.deinit();
+
+    try std.testing.expectEqualStrings(blob, decoded.runtimes[0].layout_blob);
+    try std.testing.expectEqual(@as(usize, 0), decoded.runtimes[1].layout_blob.len);
+
+    // **빈 blob 은 바이트를 한 개도 안 쓴다.** 구 host 가 만든 레코드와 구분되지 않아야 하기 때문이다.
+    // 헤더만이라도 쓰면 「blob 없음」과 「빈 blob」이 서로 다른 바이트가 되고, 그 차이가 업그레이드
+    // 경로의 크기 비교·해시에 조용히 섞인다. 한 바이트짜리 blob 과의 **차이가 정확히 헤더+1** 인지로
+    // 고정한다 — 빈 쪽이 헤더를 쓰면 이 차이가 1 로 줄어 빨개진다.
+    var solo = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer solo.deinit();
+    const empty_views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &solo },
+    };
+    const one_views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &solo, .layout_blob = "x" },
+    };
+    const host_base: HostView = .{
+        .host_id = 1,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &empty_views,
+    };
+    const without = try encodeHost(allocator, host_base);
+    defer allocator.free(without);
+    var with_host = host_base;
+    with_host.runtimes = &one_views;
+    const with_one = try encodeHost(allocator, with_host);
+    defer allocator.free(with_one);
+    try std.testing.expectEqual(tlv_header_len + @as(usize, 1), with_one.len - without.len);
+}
+
+// handoff 바이트는 디스크를 거쳐 오고 구/신 host 가 서로의 레코드를 읽는다. 길이 필드가 손상되면
+// 디코더가 그걸 그대로 믿어선 안 된다.
+//
+// **이 테스트가 증명하지 «않는» 것**: 디코더의 `max_layout_blob_bytes` 검사 자체. 길이만 키우면 본문이
+// 섹션을 넘어 **절단 오류가 먼저** 나므로 상한 검사에 닿지 않는다 — 그 검사를 지워도 이 테스트는
+// 통과한다(적대적 검증 S3 생존). 정상 경로로는 과대 레코드를 만들 수 없어 여기서는 더 못 간다.
+// 그 검사와 중복 태그 가드는 `tests/handoff_layout_blob_boundary.zig` 가 **소스 수준으로** 고정한다.
+test "handoff v1 은 레이아웃 조각의 길이 필드가 손상된 레코드를 거절한다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    const views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core, .layout_blob = "ab" },
+    };
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &views,
+    });
+    defer allocator.free(encoded);
+
+    // 태그 12 TLV 를 찾는다: tag(u32=12) + flags(u16=1) + reserved(u16) + len(u64=2).
+    // 이 코덱은 **빅엔디안**으로 쓴다(`Writer.integer`). 리틀로 찾으면 못 찾고 조용히 통과한다.
+    var header: [tlv_header_len]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], 12, .big);
+    std.mem.writeInt(u16, header[4..6], flag_optional, .big);
+    std.mem.writeInt(u16, header[6..8], 0, .big);
+    std.mem.writeInt(u64, header[8..16], 2, .big);
+    const at = std.mem.indexOf(u8, encoded, &header) orelse {
+        std.debug.print("태그 12 TLV 를 못 찾았다 — 헤더 형식이 바뀌었으면 이 테스트가 무의미해진다\n", .{});
+        return error.LayoutTagHeaderNotFound;
+    };
+
+    const tampered = try allocator.dupe(u8, encoded);
+    defer allocator.free(tampered);
+    // 길이만 상한 너머로 키운다 — 디코더가 자기 상한으로 거절해야 한다.
+    std.mem.writeInt(u64, tampered[at + 8 ..][0..8], max_layout_blob_bytes + 1, .big);
+    if (decodeHost(allocator, tampered)) |ok| {
+        var mutable = ok;
+        mutable.deinit();
+        std.debug.print("상한을 넘는 레이아웃 조각이 디코딩을 통과했다 — 런타임당 무제한 할당\n", .{});
+        return error.OversizedLayoutBlobAccepted;
+    } else |err| {
+        // 어떤 거절이든 좋다 — **통과만 안 하면 된다.** 길이를 키웠으므로 상한·절단 어느 쪽으로도 걸린다.
+        try std.testing.expect(err != error.OutOfMemory);
+    }
+}
+
+// **구 host 의 레코드에는 태그 12 가 아예 없다.** 그것을 신 host 가 읽지 못하면 업그레이드가 통째로
+// 막힌다 — #3488 이 tag 99 를 필수로 두어 겪은 그대로(업그레이드가 몇 시간 막혔고 설치마다 host 가
+// 하나씩 쌓였다). 없으면 빈 슬라이스여야 하고, 나머지 필드는 전부 정상이어야 한다.
+test "handoff v1 은 태그 12 가 없는 구 writer 레코드를 그대로 받는다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    const views = [_]RuntimeView{
+        .{ .runtime_id = 7, .surface_id = 3, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core },
+    };
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &views,
+    });
+    defer allocator.free(encoded);
+    // 빈 blob 은 인코딩되지 않으므로 이 바이트열에는 태그 12 가 **없다**.
+    var decoded = try decodeHost(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), decoded.runtimes.len);
+    try std.testing.expectEqual(@as(u128, 7), decoded.runtimes[0].runtime_id);
+    try std.testing.expectEqual(@as(usize, 0), decoded.runtimes[0].layout_blob.len);
+}
+
+// 상한이 없으면 한 GUI 가 host 의 handoff 예산을 통째로 먹을 수 있다. 오늘 `state_too_large` 로
+// 업그레이드가 막힌 적이 있으므로(#3527) 상한은 **인코딩 시점에** 거절해야 한다 — 디코드까지 가면
+// 이미 쓴 뒤다.
+test "handoff v1 은 상한을 넘는 레이아웃 조각을 인코딩에서 거절한다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    const oversized = try allocator.alloc(u8, max_layout_blob_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 'x');
+    const views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core, .layout_blob = oversized },
+    };
+    try std.testing.expectError(error.LimitExceeded, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &views,
+    }));
+    // 상한 **정확히** 는 통과해야 한다 — off-by-one 이면 경계 크기 레이아웃이 조용히 못 실린다.
+    const exact = try allocator.alloc(u8, max_layout_blob_bytes);
+    defer allocator.free(exact);
+    @memset(exact, 'y');
+    const ok_views = [_]RuntimeView{
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core, .layout_blob = exact },
+    };
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 1,
+        .authority_generation = 1,
+        .membership_generation = 1,
+        .next_handle = 9,
+        .runtimes = &ok_views,
+    });
+    defer allocator.free(encoded);
+    var decoded = try decodeHost(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(max_layout_blob_bytes, decoded.runtimes[0].layout_blob.len);
 }
 
 test "handoff v1 host DTO rejects duplicate inherited slots without publishing any runtime" {

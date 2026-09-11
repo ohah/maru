@@ -17,6 +17,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$source_root/Maru.app/Contents/MacOS"
 printf '%s\n' fixture-plist > "$source_root/Maru.app/Contents/Info.plist"
 printf '%s\n' frozen-product > "$source_root/Maru.app/Contents/MacOS/maru-macos-app"
+printf '%s\n' candidate-cli > "$source_root/Maru.app/Contents/MacOS/maru"
 hdiutil create -quiet -fs HFS+ -format UDZO -srcfolder "$source_root" "$dmg"
 
 MARU_DMG_AUTHORITY_CANDIDATE="$dmg" \

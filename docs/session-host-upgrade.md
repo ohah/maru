@@ -1922,7 +1922,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `EXIT` trap은 자기 sshd만 종료하고 workspace 삭제 권한을 갖지 않는다. outer owner만 process-group을 reap한 뒤 held
   directory에서 자식 산출물을 제거하고, root identity를 다시 확인한 다음 parent-bound pathname absence를 판정한다.
   R2b는 제품 writer 호출을 이 outer execution owner의 post-exit cleanup 및 candidate revalidation 성공 suffix 한 곳으로
-  제한하고 source-boundary gate로 caller inventory를 고정한다.
+  제한하고 source-boundary gate로 caller inventory를 고정한다. DMG authority가 mount·app/main/CLI held inode를 함께
+  소유하며 순서를 `P5d execute/reap/workspace cleanup -> mount와 세 inode 재검증 -> leaf 배타 게시 -> mount와 세 inode
+  최종 재검증 -> detach/private staging cleanup`으로 닫는다. execute와 publish는 별도 callback이라서 자식 성공이
+  candidate 재검증을 건너뛰거나 writer를 직접 호출할 수 없고, 어느 callback·재검증·게시 단계가 실패해도 detach와
+  private staging cleanup을 먼저 정산한 뒤 실패한다. CLI pathname은 이 살아 있는 mount에서만 빌려 주며 callback이
+  보존할 수 있는 권위로 반환하지 않는다.
 
   default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
   명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와

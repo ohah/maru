@@ -121,6 +121,7 @@ fn makeProductTree(mount_dir: []const u8) !void {
     try std.Io.Dir.cwd().createDir(std.testing.io, macos, .default_dir);
     var plist_buf: [std.fs.max_path_bytes]u8 = undefined;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cli_buf: [std.fs.max_path_bytes]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
         .sub_path = try std.fmt.bufPrint(&plist_buf, "{s}/Info.plist", .{contents}),
         .data = "plist",
@@ -129,7 +130,39 @@ fn makeProductTree(mount_dir: []const u8) !void {
         .sub_path = try std.fmt.bufPrint(&exe_buf, "{s}/maru-macos-app", .{macos}),
         .data = "frozen-product",
     });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = try std.fmt.bufPrint(&cli_buf, "{s}/maru", .{macos}),
+        .data = "candidate-cli",
+    });
 }
+
+const Gate = struct {
+    calls: [2]u8 = @splat(0),
+    count: usize = 0,
+    fail_execute: bool = false,
+    fail_publish: bool = false,
+    rolled_back: bool = false,
+
+    pub fn execute(self: *@This(), view: authority.MountedCandidate) !void {
+        try std.testing.expect(std.mem.endsWith(u8, view.cli_path, "/Maru.app/Contents/MacOS/maru"));
+        try std.testing.expectEqual(@as(usize, 64), view.main_sha256.len);
+        try std.testing.expectEqual(@as(usize, 64), view.cli_sha256.len);
+        self.calls[self.count] = 1;
+        self.count += 1;
+        if (self.fail_execute) return error.GateFailed;
+    }
+
+    pub fn publish(self: *@This(), view: authority.MountedCandidate) !void {
+        try std.testing.expectEqual(@as(usize, 64), view.designated_requirement_sha256.len);
+        self.calls[self.count] = 2;
+        self.count += 1;
+        if (self.fail_publish) return error.PublishFailed;
+    }
+
+    pub fn rollbackPublished(self: *@This()) !void {
+        self.rolled_back = true;
+    }
+};
 
 const FakeApple = struct {
     call: usize = 0,
@@ -227,6 +260,115 @@ test "DMG authority stages, observes, detaches, and removes all private residue"
     try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
     try std.testing.expectEqual(@as(usize, 8), apple.call);
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private-work", .{}));
+}
+
+test "DMG authority keeps mounted CLI authority across execute revalidation and publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    var gate = Gate{};
+    var observed = try authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    );
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, gate.calls[0..gate.count]);
+    try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private-work", .{}));
+}
+
+test "DMG authority publishes nothing after gate execution failure and still detaches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    var gate = Gate{ .fail_execute = true };
+    try std.testing.expectError(error.GateFailed, authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    ));
+    try std.testing.expectEqualSlices(u8, &.{1}, gate.calls[0..gate.count]);
+    try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+}
+
+test "DMG authority rolls publication back after publish failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    var gate = Gate{ .fail_publish = true };
+    try std.testing.expectError(error.PublishFailed, authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    ));
+    try std.testing.expect(gate.rolled_back);
+    try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+}
+
+test "DMG authority rolls published gate back when detach fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{ .fail_detach = true };
+    var apple = FakeApple{};
+    var gate = Gate{};
+    try std.testing.expectError(error.DetachFailed, authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    ));
+    try std.testing.expect(gate.rolled_back);
 }
 
 test "deadline-aware DMG authority refreshes every admission and reserves detach cleanup" {

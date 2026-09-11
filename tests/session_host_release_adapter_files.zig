@@ -149,6 +149,37 @@ test "held published evidence reads exact bytes and rejects pathname replacement
     try std.testing.expectEqualStrings("foreign", replacement);
 }
 
+test "held publication rollback removes only its exact inode" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "rollback.json", &path_buf);
+    var published: files.PinnedReleaseFile = .{};
+    try files.publishSummaryOwnedExclusive(&published, path, "passed\n");
+    try published.remove(path);
+    try std.testing.expect(published.value() == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "rollback.json", .{}));
+}
+
+test "held publication rollback preserves a foreign replacement and retry authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var moved_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try absolute(&tmp, "rollback.json", &path_buf);
+    const moved = try absolute(&tmp, "held.json", &moved_buf);
+    var published: files.PinnedReleaseFile = .{};
+    try files.publishSummaryOwnedExclusive(&published, path, "passed\n");
+    defer published.deinit() catch {};
+    if (std.c.rename(path.ptr, moved.ptr) != 0) return error.FixtureFailed;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "rollback.json", .data = "foreign" });
+    try std.testing.expectError(error.FileChanged, published.remove(path));
+    try std.testing.expect(published.value() != null);
+    const foreign = try tmp.dir.readFileAlloc(std.testing.io, "rollback.json", std.testing.allocator, .limited(16));
+    defer std.testing.allocator.free(foreign);
+    try std.testing.expectEqualStrings("foreign", foreign);
+}
+
 fn readHeldAllocationCase(allocator: std.mem.Allocator) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

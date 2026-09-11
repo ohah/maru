@@ -4125,7 +4125,9 @@ test "M12-f2 붙어 있는데 다른 서버를 누르면 «묻는다»" {
     // **요청은 아직 안 냈다.** 여기서 내면 host 가 펌프가 살아 있어 버리고, 버린 요청이
     // 「뒤늦게」로 돌아온다(§3.0 ①).
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
-    try std.testing.expectEqual(@as(?usize, 1), bridge.pendingSwitchForTest());
+    try std.testing.expectEqual(@as(?usize, 1), bridge.switchTargetForTest());
+    // **누르기 전에는 «기다리는 뜻» 이 없다** — 있으면 화면을 그냥 떠나도 나중에 붙는다.
+    try std.testing.expectEqual(@as(?usize, null), bridge.pendingSwitchForTest());
 
     _ = bridge.maru_mobile_pop_screen();
     _ = bridge.maru_mobile_pop_screen();
@@ -4188,12 +4190,142 @@ test "M12-f2 취소하면 «뜻»도 버린다 — 뒤로가기도 같은 길이
             _ = bridge.maru_mobile_build(402, 874, now());
         }
         try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+        try std.testing.expectEqual(@as(?usize, null), bridge.switchTargetForTest());
         try std.testing.expectEqual(@as(?usize, null), bridge.pendingSwitchForTest());
         // 끊으라고도 안 했고, 세션이 내려가도 붙지 않는다.
         try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
         bridge.maru_mobile_set_input_sink(0);
         _ = bridge.maru_mobile_build(402, 874, now());
         try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+        var pops: u32 = 0;
+        while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    }
+}
+
+/// 두 줄이 **같은 기계**인 설정(이름만 다르다).
+const same_machine =
+    \\ssh.server.1.name = 하나
+    \\ssh.server.1.host = 10.0.0.9
+    \\ssh.server.1.port = 22
+    \\ssh.server.1.user = me
+    \\ssh.server.2.name = 둘
+    \\ssh.server.2.host = 10.0.0.9
+    \\ssh.server.2.port = 22
+    \\ssh.server.2.user = me
+;
+
+/// 두 줄이 **다른 기계**인 설정.
+const other_machine =
+    \\ssh.server.1.name = 하나
+    \\ssh.server.1.host = 10.0.0.9
+    \\ssh.server.1.port = 22
+    \\ssh.server.1.user = me
+    \\ssh.server.2.name = 둘
+    \\ssh.server.2.host = 10.0.0.10
+    \\ssh.server.2.port = 22
+    \\ssh.server.2.user = me
+;
+
+/// 갈아타기를 끝까지 몬다 — 줄을 누르고, 확인하고, 세션이 내려간 것까지 본다.
+fn switchToRow(row: usize) void {
+    const y = bridge.serverRowCenterY(row) orelse return;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const ok = bridge.switchOkCenter();
+    tapAt(ok.x, ok.y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_take_disconnect();
+    bridge.maru_mobile_set_input_sink(0); // host 가 세션을 내렸다
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+test "M12-f3 다른 기계로 가면 화면이 처음으로 돌아간다" {
+    // 갈아탄 뒤 옛 서버의 글 위에 새 세션의 글이 경계 없이 붙으면, 화면 하나가 두 기계의 말을
+    // 섞어 보인다(기기 실측: `Last login` 이 두 번 쌓였다). 계약 §3.0 ④.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(other_machine, other_machine.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    // 옛 서버가 화면을 채웠다.
+    var i: usize = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_term_write("old\r\n", 5);
+    try std.testing.expect(bridge.scrollbackLenForTest() > 0);
+
+    switchToRow(1);
+    try std.testing.expectEqual(@as(usize, 0), bridge.scrollbackLenForTest());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect());
+
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12-f3 같은 기계로 다시 붙으면 화면이 남는다" {
+    // **대조군이자 규칙 자체다.** 그 글은 내 것이었고, 원격이 죽기 직전에 찍은 것이 왜 끊겼는지를
+    // 말해 줄 수 있다 — 지우면 그 단서가 사라진다. 판정이 없으면 「언제나 지운다」로 바꿔도 초록이다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(same_machine, same_machine.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    var i: usize = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_term_write("mine\r\n", 6);
+    const before = bridge.scrollbackLenForTest();
+    try std.testing.expect(before > 0);
+
+    switchToRow(1); // 이름은 다르지만 **같은 기계**다
+    try std.testing.expectEqual(before, bridge.scrollbackLenForTest());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect());
+
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12-f3 «다른 기계» 는 세 축 전부다 — 주소·포트·사용자" {
+    // 변이 검사가 잡았다: 주소만 재면 **포트나 사용자만 다른 줄**이 같은 기계로 통과한다.
+    // 같은 호스트의 다른 포트는 다른 sshd 이고(컨테이너·VM), 다른 사용자는 다른 홈·다른 셸이다.
+    const cases = [_][]const u8{
+        \\ssh.server.1.host = 10.0.0.9
+        \\ssh.server.1.port = 22
+        \\ssh.server.1.user = me
+        \\ssh.server.2.host = 10.0.0.10
+        \\ssh.server.2.port = 22
+        \\ssh.server.2.user = me
+        ,
+        \\ssh.server.1.host = 10.0.0.9
+        \\ssh.server.1.port = 22
+        \\ssh.server.1.user = me
+        \\ssh.server.2.host = 10.0.0.9
+        \\ssh.server.2.port = 2222
+        \\ssh.server.2.user = me
+        ,
+        \\ssh.server.1.host = 10.0.0.9
+        \\ssh.server.1.port = 22
+        \\ssh.server.1.user = me
+        \\ssh.server.2.host = 10.0.0.9
+        \\ssh.server.2.port = 22
+        \\ssh.server.2.user = you
+        ,
+    };
+    for (cases) |cfg| {
+        bridge.maru_mobile_set_input_sink(0);
+        bridge.maru_mobile_load_config(cfg.ptr, cfg.len);
+        _ = bridge.maru_mobile_take_server_connect();
+        openServers(402, 874);
+        bridge.maru_mobile_set_input_sink(1);
+
+        var i: usize = 0;
+        while (i < 80) : (i += 1) _ = bridge.maru_mobile_term_write("old\r\n", 5);
+        try std.testing.expect(bridge.scrollbackLenForTest() > 0);
+
+        switchToRow(1);
+        try std.testing.expectEqual(@as(usize, 0), bridge.scrollbackLenForTest());
+        _ = bridge.maru_mobile_take_server_connect();
 
         var pops: u32 = 0;
         while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
@@ -7491,9 +7623,16 @@ test "덮인 터미널은 스크롤도 안 된다 — 게이트에 판정자가 
     bridge.setScreenForTest("terminal");
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_scroll_to_bottom();
-    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    // **스크롤백은 «출력» 으로 만든다.** 예전에는 `maru_mobile_input` 으로 만드는 시늉을 했는데,
+    // 그 경로는 개행을 **Enter 키**로 바꿔 CR(`0d`) 한 바이트만 코어에 넣는다 — 줄이 한 줄도 안
+    // 생긴다(실측). 그런데도 초록이었던 것은 **앞 테스트가 흘려 놓은 스크롤백**(실측 379줄)을
+    // 쓰고 있었기 때문이다. 즉 이 판정자는 제 전제를 스스로 세운 적이 없다(M12-f3 에서 드러났다:
+    // 새 세션이 화면을 되돌리자 남의 스크롤백이 사라지며 붉어졌다).
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7);
     var i: usize = 0;
-    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6); // 스크롤백을 만든다
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_term_write("line\r\n", 6);
+    // **전제부터 단언한다** — 스크롤백이 실제로 생겼나(안 생겼으면 아래 판정은 뜻이 없다).
+    try std.testing.expect(bridge.scrollbackLenForTest() > 0);
     _ = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
 

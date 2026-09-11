@@ -1542,7 +1542,7 @@ test "오른쪽 열이 왼쪽보다 넓어도 상한이 자기 폭을 따른다"
     // **상한은 밀 수 있는 총 열 수에서 나온다** — 내용 폭 + 줄 끝 너머 몫
     // (`editor.scroll-beyond-last-column`. 열마다 **자기** 상한에 더한다 — §3.5 "가로는 각자다").
     const beyond = fx.session.loaded_config.config.editor.scroll_beyond_last_column;
-    const expect_first: u32 = @min((fx.term.rt.editor_max_cols_right +| beyond) -| layout.content.width, @as(u32, chrome_editor.frame.max_first_col));
+    const expect_first: u32 = (fx.term.rt.editor_max_cols_right +| beyond) -| layout.content.width;
     // 고치기 전: 오른쪽 본문이 46열인데 pane 폭으로 102열을 잡아 198에서 멈췄다(실제 상한 254).
     try testing.expectEqual(layout.content.width, editor_ops.visibleColsForTest(fx.session, body, fx.term, true));
     try testing.expectEqual(expect_first, @as(u32, first));
@@ -4162,10 +4162,10 @@ test "DHS6: `max_first_col` 을 넘는 줄에서는 그 상한에서 멈춘다" 
     var fx = try Fixture.init(allocator);
     defer fx.deinit(allocator);
 
-    // **10,000열을 넘겨야 한다.** 그보다 짧으면 `max_first_col` 이 상한에 안 걸려, 그것을 뺀
-    //    변이와 답이 같다(2회차 H10·H19). 그 상한은 열↔byte 인덱스가 없어서 있는 것이다(§4.1c).
-    const limit: usize = maru.chrome.components.editor_view.frame.max_first_col;
-    const len = limit + 600;
+    // **예전에는 10,000열을 넘겨야 했다** — `max_first_col` 이 거기서 걸려야 그것을 뺀 변이와 답이
+    //    갈렸다(2회차 H10·H19). 그 상한은 열↔byte 인덱스가 없어서 있었고, 인덱스가 들어오며
+    //    없어졌다(§4.1c). 지금은 상한이 **문서 폭** 이므로 긴 줄이기만 하면 된다.
+    const len: usize = 50_000;
     var long: std.ArrayList(u8) = .empty;
     defer long.deinit(allocator);
     try long.appendSlice(allocator, "keep\n");
@@ -4186,13 +4186,22 @@ test "DHS6: `max_first_col` 을 넘는 줄에서는 그 상한에서 멈춘다" 
     const r = row orelse return error.NoLongRow;
     const visible = fx.term.rt.editor_diff_hit_geom.content_width;
     try testing.expect(visible > 0);
-    // 픽스처 자기 검증 — 내용 상한이 `max_first_col` 보다 크다(안 그러면 이 판정자가 공허하다).
-    try testing.expect(fx.term.rt.editor_max_cols_right -| visible > limit);
+    // 픽스처 자기 검증 — 갈 수 있는 거리가 **옛 상한(10,000)보다 크다**(안 그러면 이 판정자가
+    // 공허하다 — 그 상한이 없어진 것을 여기서 확인하는 셈이기도 하다).
+    try testing.expect(fx.term.rt.editor_max_cols_right -| visible > 10_000);
 
     fx.term.rt.editor_first_col_right = 0;
     fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = r, .byte = 0 }) };
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false));
 
-    // **`max_first_col` 에서 멈춘다** — 그것을 빼면 더 간다(그리고 u16 을 넘겨 캐스트가 죽는다).
-    try testing.expectEqual(@as(u16, @intCast(limit)), fx.term.rt.editor_first_col_right);
+    // **줄 끝이 화면에 든다** — 예전에는 `max_first_col`(10,000)에서 멈춰 5만열 줄의 끝에 못 닿았다.
+    //
+    // **수식을 여기서 다시 쓰지 않는다.** `first_col` 의 정확한 값은 caret 여백·`scroll-beyond` 가
+    // 함께 정하고, 그것들은 각자 판정자가 있다(`SOFF*`). 여기서 재는 것은 **닿는가**이다.
+    const at_end = fx.term.rt.editor_first_col_right;
+    try testing.expect(at_end > 10_000); // 옛 상한은 없어졌다
+    try testing.expect(at_end + visible >= fx.term.rt.editor_max_cols_right); // 끝이 화면에 있다
+    // 그리고 더 가려 해도 그 자리다.
+    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false) or true);
+    try testing.expectEqual(at_end, fx.term.rt.editor_first_col_right);
 }

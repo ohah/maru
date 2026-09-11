@@ -429,7 +429,7 @@ pub fn buildPaneOps(
     total_lines: usize,
     first_line: usize,
     first_piece: u32,
-    first_col: u16,
+    first_col: u32,
     /// 문서에서 **가장 긴 줄**의 표시 폭(열). 가로 스크롤바가 이 값으로 막대를 그리고, 그 막대가
     /// 자리를 먹으므로 본문 높이도 여기서 갈린다(§4.1a). `null`이면 막대가 없다.
     content_max_cols: ?u32,
@@ -448,6 +448,9 @@ pub fn buildPaneOps(
     /// 줄별 **구문 강조 색**(§5.3 1층). `lines`와 같은 축이고, 비어 있으면 무색이다 —
     /// grammar가 없거나 아직 안 판 문서가 그렇다.
     line_colors: []const []const chrome_editor.content.ColorSpan,
+    /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축). 가로로 민 상태에서 전개가 앞을 다시 걷지
+    /// 않게 한다 — 비어 있으면 처음부터 걷고 **답은 같다**.
+    line_seeks: []const ?chrome_editor.content.Seek,
     /// 논리 줄마다의 **커서 자리**(줄 안 byte offset, 오름차순). `null`이면 커서가 없다.
     carets: ?[]const []const u32,
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다.
@@ -474,7 +477,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .carets = carets },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -666,11 +669,11 @@ pub fn formatDiffCursor(buf: []u8, pos: DiffCursor) ?[]const u8 {
 /// caret이 있으면 그 길이에 비례하는 일이 렌더 루프에 들어온다 — 1MB 한 줄에서 ASCII 기준 프레임당
 /// **6.5~9.5ms**(ReleaseFast/M4 Max, 부하가 있는 머신에서 잰 값이라 **상한**이다). 60fps 예산
 /// 16.7ms의 절반쯤을 한 줄이 먹는다. 더블·트리플 클릭 한 번이면 focus가 줄 끝으로 가므로 도달도
-/// 쉽다. 같은 파일군이 이 부류를 이미 두 번 잡아 상한을 박았다(`frame.max_first_col` — 60,000열
+/// 쉽다. 같은 파일군이 이 부류를 이미 두 번 잡아 상한을 박았다(`frame.max_cols_count_limit` — 60,000열
 /// 한 줄에서 프레임당 498ms/Debug, `frame.max_cols_count_limit`).
 ///
-/// **`max_first_col`이 아니라 `max_cols_count_limit`을 쓴다.** 앞은 **가장 왼쪽 열**의 상한이라
-/// 최대 스크롤에서도 화면 오른쪽 끝은 `max_first_col + 보이는 열`이다 — 그 값으로 묶으면 **화면에
+/// **`max_cols_count_limit` 을 쓴다.** 가로 위치의 상한은 이제 그 값에서 파생되고(셈이 거기서
+/// 멈추므로), 화면 오른쪽 끝은 `first_col + 보이는 열`이다 — 더 작은 값으로 묶으면 **화면에
 /// 실제로 보이고 클릭도 되는** 글자를 상태바가 못 세고 `+`가 "그 너머는 볼 수 없다"는 거짓을 말한다.
 /// 뒤는 그 여유(4,096열)를 이미 품은 값이라 화면에 오를 수 있는 열을 전부 덮는다.
 ///
@@ -1221,7 +1224,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1242,7 +1245,14 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else blk: {
+        // **가로로 민 만큼 전개가 앞을 다시 걷지 않게 한다**(§4.1c). 안 밀었으면 `buildLineSeeks` 가
+        // 곧바로 0 을 내므로 이 배열은 비고, 그때 렌더는 예전과 **같은 길**로 간다.
+        var seek_buf: [512]?chrome_editor.content.Seek = undefined;
+        const fc = effectiveFirstCol(wrap, term, false);
+        const seek_n = buildLineSeeks(self, term, draw_lines.len, term.rt.editor_first_line, fc, &seek_buf);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    };
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1625,9 +1635,9 @@ pub fn visibleColsForTest(self: *AppSession, body: maru.session.SplitRect, term:
 
 /// 한 열의 가로 위치를 상한 안으로 되돌린다. **최대 열은 위치가 0이 아닌 이상 이미 세어져 있다**
 /// (`scrollCols`가 세운다) — 방어적으로만 본다.
-fn clampOneColumn(self: *AppSession, first: *u16, max_cols: u32, visible_cols: u16) void {
+fn clampOneColumn(self: *AppSession, first: *u32, max_cols: u32, visible_cols: u16) void {
     if (first.* == 0) return;
-    // **`max_first_col` 은 여기서 도달하지 않는다**(그 변이가 살아남는 것이 정상이다 — 적대적 검증
+    // **상한은 이제 「셈이 멈춘 자리」 하나다**(적대적 검증
     // G5). `first_col` 을 세우는 제품 경로 셋이 **각자 같은 상한을 이미 건다**: 휠(`scrollCols`),
     // caret 노출(`revealCaretColumn`), 막대 드래그(`setEditorHScrollFromBarPx`).
     //
@@ -1635,7 +1645,7 @@ fn clampOneColumn(self: *AppSession, first: *u16, max_cols: u32, visible_cols: u
     // 쪽을 지우고도 살아남아 그 사실을 보여 준다 — 그때는 다음 프레임이 여기서 되돌린다). 겹치는
     // 값이라 둘 중 하나만 두면 **그 하나를 지우는 변이가 곧 결함**이 되는데, 지금은 어느 쪽도 혼자
     // 화면을 망가뜨리지 못한다. 네 번째 경로가 붙는 날 그 경로만 상한을 잊어도 여기서 잡힌다.
-    const max_col: u32 = @min(max_cols -| visible_cols, @as(u32, chrome_editor.frame.max_first_col));
+    const max_col: u32 = max_cols -| visible_cols;
     if (@as(u32, first.*) > max_col) {
         first.* = @intCast(@min(max_col, std.math.maxInt(u16)));
         self.metal_dirty = true;
@@ -1648,7 +1658,7 @@ fn effectiveFirstPiece(wrap: bool, term: *Term) u32 {
     return if (wrap) term.rt.editor_first_piece else 0;
 }
 
-fn effectiveFirstCol(wrap: bool, term: *Term, right: bool) u16 {
+fn effectiveFirstCol(wrap: bool, term: *Term, right: bool) u32 {
     // **열이 둘이어도 규칙은 하나다.** 오른쪽에 `if (wrap) 0 else …`를 다시 쓰면, 이 함수를 고칠 때
     // 한쪽만 따라온다 — 이 세션에서 같은 냄새로 세 번 물렸다(적대적 검증 2026-08-16).
     if (wrap) return 0;
@@ -1841,11 +1851,14 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
         return false;
     }
 
-    // **상한이 하나 더 있다**(§3.8 — `frame.max_first_col`). 렌더 비용이 밀린 거리에 비례해서다.
-    const max_first: u32 = @min(width - visible, @as(u32, chrome_editor.frame.max_first_col));
+    // **상한은 셈이 멈춘 자리 하나다**(§3.8 — `frame.max_cols_count_limit`). 예전에는 렌더 비용이
+    // 밀린 거리에 비례해 `max_first_col` 이 따로 있었는데, 체크포인트가 그 비례를 없앴다.
+    const max_first: u32 = width - visible;
     const current: i64 = first_col.*;
     const next = std.math.clamp(current - @as(i64, cols), 0, @as(i64, max_first));
-    const clamped: u16 = @intCast(@min(next, std.math.maxInt(u16)));
+    // **u32 다.** 예전에는 u16 으로 좁혔고, `max_first_col`(10,000)이 그 아래라 안 드러났다 —
+    // 상한을 지우자 곧바로 65,535 에서 포화했다(판정자 `HSEEK1` 이 그것을 잡았다).
+    const clamped: u32 = @intCast(@min(next, @as(i64, std.math.maxInt(u32))));
     if (clamped != first_col.*) {
         first_col.* = clamped;
         self.metal_dirty = true;
@@ -2641,11 +2654,11 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
         want = (col +| m) + 1 - visible;
     } else return;
 
-    const max_col: u32 = @min(max_cols -| visible, @as(u32, chrome_editor.frame.max_first_col));
+    const max_col: u32 = max_cols -| visible;
     want = @min(want, max_col);
     // **아래 넷은 방어이지 판정할 수 없다**(변이 1~4회차 H11·H19·H20·H22·H23).
     //  · `want == first` 조기 반환: 같은 값을 다시 써도 상태가 안 바뀐다.
-    //  · `u16` 포화: 위 `max_col` 이 이미 `max_first_col`(10,000)로 묶어 65,535 를 넘을 수 없다.
+    //  · 포화: 위 `max_col` 이 이미 `max_cols` 로 묶이고 그 값은 `max_cols_count_limit` 에서 멈춘다.
     //  · `metal_dirty`: 부르는 쪽(`moveCarets`·`diffMove`)이 곧바로 세운다 — `clampOneColumn` 이
     //    같은 이유로 같은 줄을 갖고 있고, 그 관례를 여기서만 깨지 않는다.
     //  · caret byte 자르기(단일의 `contentEnd()`·비교의 `text.len`): 이동이 그 밖에 caret 을 두지
@@ -4949,8 +4962,9 @@ pub fn setEditorHScrollFromBarPx(self: *AppSession, offset_px: u32) void {
     if (term.kind != .editor) return;
     const cell_w: u32 = @intCast(self.cell_width_px);
     if (cell_w == 0) return;
-    const col_u32 = @min(offset_px / cell_w, @as(u32, chrome_editor.frame.max_first_col));
-    const col: u16 = @intCast(col_u32);
+    // **막대가 갈 수 있는 끝은 셈이 멈춘 자리다**(§3.8 — `max_cols_count_limit`). 아래 `clampOneColumn`
+    // 이 실제 문서 폭으로 한 번 더 조이므로 여기서는 넘치지만 않으면 된다.
+    const col: u32 = @min(offset_px / cell_w, chrome_editor.frame.max_cols_count_limit);
     // **잡은 막대의 열에 간다**(§3.5 — 가로는 각자다). 비교 뷰가 아니면 늘 왼쪽이다.
     const slot = if (self.editor_hscroll_right) &term.rt.editor_first_col_right else &term.rt.editor_first_col;
     if (col == slot.*) return;
@@ -5039,7 +5053,7 @@ fn maxColsForRender(self: *AppSession, term: *Term, right: bool) ?u32 {
 /// 전에는 값이 0이라 **가로 스크롤바가 뜨지 않아** 사용자가 그 축이 있는지도 모른다(2026-08-18
 /// 사용자 지적으로 드러난 자리다 — 접힘 화살표가 같은 이유로 여는 경로에서 계산된다).
 ///
-/// **셈에도 상한이 있다**(`max_cols_count_limit`) — 그 너머는 `max_first_col` 때문에 어차피 못 가므로
+/// **셈에도 상한이 있다**(`max_cols_count_limit`) — 가로 위치가 그 값에서 멈추므로 그 너머는 못 가고
 /// 세면 낭비다. 5MB짜리 한 줄에서 첫 가로 휠이 149ms였다(적대적 검증 2026-08-16).
 ///
 /// **줄이 많을 때는 점진으로 나누지 않는다**(2026-08-18 결정). 세로 축은 같은 부류의 전 문서 훑기를
@@ -5084,6 +5098,135 @@ fn ensureLineCols(self: *AppSession, term: *Term) void {
     term.rt.editor_line_cols = buf;
     term.rt.editor_line_cols_tab = tab_width;
     term.rt.editor_line_cols_scans +|= 1;
+}
+
+/// 그릴 줄마다 **전개 시작 힌트**를 채운다. 채운 길이를 돌려준다(0 = 힌트 없음).
+///
+/// **가로로 밀지 않았으면 아무것도 안 한다** — 건너뛸 것이 없고, 체크포인트를 세울 이유도 없다.
+/// 그래서 평범한 사용에서는 이 조각이 **비용을 하나도 안 더한다**.
+///
+/// **축을 건넌다**: 그리는 배열은 접히면 「보이는 줄」이고 체크포인트는 「문서 줄」 첨자다. 그 사이를
+/// `editor_visible_numbers`(1-based gutter 번호)가 잇는다 — `maxColsFromCache` 가 같은 표를 같은
+/// 이유로 읽는다.
+fn buildLineSeeks(
+    self: *AppSession,
+    term: *Term,
+    draw_len: usize,
+    first_line: usize,
+    first_col: u32,
+    out: []?chrome_editor.content.Seek,
+) usize {
+    if (first_col == 0 or draw_len == 0) return 0;
+    if (term.rt.editor_diff != null) return 0; // 비교 뷰는 축이 둘이다
+    ensureColMarks(self, term);
+    if (!colMarksFresh(term)) return 0;
+
+    const numbers = term.rt.editor_visible_numbers;
+    const n = @min(draw_len, out.len);
+    for (0..n) |k| {
+        const row = first_line + k;
+        const doc_line: usize = if (numbers.len > 0) blk: {
+            if (row >= numbers.len) break :blk std.math.maxInt(usize);
+            const num = numbers[row] orelse break :blk std.math.maxInt(usize);
+            break :blk num - 1;
+        } else row;
+        out[k] = if (doc_line == std.math.maxInt(usize)) null else seekFor(term, doc_line, first_col);
+    }
+    return n;
+}
+
+/// 체크포인트가 지금 문서·지금 탭 폭의 것인가.
+///
+/// **폭 합 캐시가 성한 것에 얹혀 있다** — 그쪽이 줄 수와 내용의 최신성을 이미 판정하므로 여기서는
+/// 자기 길이와 탭 폭만 더 본다.
+fn colMarksFresh(term: *const Term) bool {
+    return term.rt.editor_col_mark_off.len == term.rt.editor_lines.len + 1 and
+        term.rt.editor_lines.len > 0 and
+        term.rt.editor_col_marks_tab == term.rt.editor_tab_width;
+}
+
+/// 줄마다 열→byte 체크포인트를 세운다(이미 있으면 그대로). **가로로 밀 때만 부른다** — 안 민
+/// 상태에서는 전개가 건너뛸 것이 없어 만들 이유가 없다.
+///
+/// **긴 줄만 만든다**(`col_mark_min_cols`). 짧은 줄은 처음부터 걸어도 화면 폭 수준이고, 그래서 이
+/// 배열의 크기는 줄 수가 아니라 **문서 전체 열 수 ÷ `col_mark_every`** 에 비례한다 — 5MB 한 줄
+/// 짜리에서도 39KB 다.
+///
+/// **폭 합 캐시를 먼저 채운다** — 어느 줄이 긴지를 그 값으로 판정하므로, 없으면 여기서 다시 세는
+/// 수밖에 없고 그러면 같은 훑기가 두 벌이 된다.
+///
+/// **실패하면 그냥 돌아간다** — 힌트는 최적화이고, 없으면 전개가 처음부터 걸어 **같은 답**을 낸다.
+fn ensureColMarks(self: *AppSession, term: *Term) void {
+    const lines = term.rt.editor_lines;
+    if (lines.len == 0) return;
+    if (colMarksFresh(term)) return;
+    ensureLineCols(self, term);
+    if (!lineColsFresh(term)) return; // 길이를 모르면 어느 줄이 긴지도 모른다
+
+    const cols = term.rt.editor_line_cols;
+    const every = chrome_editor.frame.col_mark_every;
+    const min_cols = chrome_editor.frame.col_mark_min_cols;
+
+    // ⑴ 몫을 먼저 센다 — CSR 이라 한 번에 잡아야 경계가 맞는다.
+    var total: usize = 0;
+    for (cols) |c| {
+        if (c >= min_cols) total += @as(usize, c) / every + 1;
+    }
+
+    const off = self.allocator.alloc(u32, lines.len + 1) catch return;
+    const marks = self.allocator.alloc(chrome_editor.content.Seek, total) catch {
+        self.allocator.free(off);
+        return;
+    };
+
+    // ⑵ 채운다. `columnCheckpoints` 가 `stepColumn` 을 쓰므로 열의 정의가 폭 합 캐시와 같다.
+    const tab_width = term.rt.editor_line_cols_tab;
+    var used: usize = 0;
+    for (lines, 0..) |line, i| {
+        off[i] = @intCast(used);
+        if (cols[i] >= min_cols and used < marks.len) {
+            // **줄마다 «제 몫» 만 쓴다.** 안 막으면 `columnCheckpoints` 가 `out` 이 찰 때까지 채워
+            // 앞 줄들이 예산을 다 먹고 뒤 줄은 힌트가 아예 없다 — 실측으로 83줄 중 26줄만 붙었다.
+            //
+            // 몫은 위에서 센 것과 같은 식이고, 그 식이 **상한 걸린 폭**(`max_cols_count_limit`)을 쓰는
+            // 것이 맞다: 그 너머 열은 셈이 멈춰 **어차피 못 가므로** 체크포인트도 필요 없다.
+            const room = @min(marks.len - used, @as(usize, cols[i]) / every + 1);
+            used += chrome_editor.content.columnCheckpoints(line, tab_width, every, marks[used..][0..room]);
+        }
+    }
+    off[lines.len] = @intCast(used);
+
+    dropColMarks(self, term);
+    term.rt.editor_col_marks = marks;
+    term.rt.editor_col_mark_off = off;
+    term.rt.editor_col_marks_tab = tab_width;
+    term.rt.editor_col_marks_scans +|= 1;
+}
+
+/// 체크포인트를 버린다. **줄 배열이 바뀌거나 편집이 오면 부른다.**
+fn dropColMarks(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_col_marks.len > 0) self.allocator.free(term.rt.editor_col_marks);
+    if (term.rt.editor_col_mark_off.len > 0) self.allocator.free(term.rt.editor_col_mark_off);
+    term.rt.editor_col_marks = &.{};
+    term.rt.editor_col_mark_off = &.{};
+    term.rt.editor_col_marks_tab = 0;
+}
+
+/// i 번 줄에서 `col` **이하인 마지막** 체크포인트. 없으면 `null`(처음부터 걷는다).
+///
+/// **이분 탐색이다** — 5MB 한 줄이면 몫이 4,883개라 훑으면 그 자체가 비용이 된다.
+fn seekFor(term: *const Term, line: usize, col: u32) ?chrome_editor.content.Seek {
+    const off = term.rt.editor_col_mark_off;
+    if (line + 1 >= off.len) return null;
+    const marks = term.rt.editor_col_marks[off[line]..off[line + 1]];
+    if (marks.len == 0 or marks[0].col > col) return null;
+    var lo: usize = 0;
+    var hi: usize = marks.len; // exclusive
+    while (lo + 1 < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (marks[mid].col <= col) lo = mid else hi = mid;
+    }
+    return marks[lo];
 }
 
 /// 캐시가 지금 문서·지금 탭 폭의 것인가.
@@ -5191,6 +5334,8 @@ fn applyLineColsPatch(self: *AppSession, term: *Term, p: LineColsPatch) bool {
 
 /// 줄별 폭 캐시를 버린다. **줄 배열을 갈아 끼우거나 놓는 자리가 부른다.**
 fn dropLineCols(self: *AppSession, term: *Term) void {
+    // **체크포인트는 폭 합 캐시에 얹혀 있다** — 어느 줄이 긴지를 그 값으로 판정하므로 함께 죽는다.
+    dropColMarks(self, term);
     if (term.rt.editor_line_cols.len > 0) self.allocator.free(term.rt.editor_line_cols);
     term.rt.editor_line_cols = &.{};
     term.rt.editor_line_cols_tab = 0;
@@ -5457,7 +5602,7 @@ pub fn foldLevel(self: *AppSession, level: u16) bool {
 /// **`rebuildVisible` 이 그 셋을 다 버린다**(`invalidateFoldDerived`). 세로는 예전부터
 /// `restoreTop` 으로 되찾고 있었고, 가로는 안 되찾고 있었다 — 그래서 블록 하나를 접었을 뿐인데
 /// **보던 열이 왼쪽 끝으로 튀었다**.
-const FoldViewKeep = struct { anchor: usize, col: u16, col_right: u16 };
+const FoldViewKeep = struct { anchor: usize, col: u32, col_right: u32 };
 
 fn keepFoldView(term: *Term) FoldViewKeep {
     return .{
@@ -7493,6 +7638,10 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // 다시 센다(한 글자를 치면 한 줄이다). 범위를 모르거나(되돌리기) 밀기가 안 잡히면 버린다 —
     // 줄 수가 그대로인 편집은 길이·탭 폭 판정에 **안 걸리므로** 여기서 직접 버려야 캐시가 옛 폭을
     // 든 채 살아남지 않는다.
+    // **체크포인트는 편집을 못 건넌다.** 폭 합은 줄의 «합» 이라 꼬리를 밀면 되지만, 체크포인트는
+    // 줄 **안** 의 byte 자리라 편집이 그 앞에 오면 전부 밀린다 — 따라가다 틀리면 전개가 엉뚱한 열에서
+    // 시작하는 **조용한 오답**이다. 가로로 민 채 타이핑하는 흐름은 드무니 버리고, 필요할 때 다시 센다.
+    dropColMarks(self, term);
     if (cols_patch == null or !applyLineColsPatch(self, term, cols_patch.?)) dropLineCols(self, term);
 
     // ⑵⑶ 접힘 층과 보이는 줄.
@@ -7741,7 +7890,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_syntax.deinit(self.allocator);
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
-    dropLineCols(self, term);
+    dropLineCols(self, term); // 체크포인트도 함께 놓는다
     // 체인 마디의 열 범위도 문서와 함께 죽는다(§7.5) — 렌더가 채우는 파생값이라 문서가 없으면
     // 가리킬 것이 없다. `SP18` 이 이 자리를 잡았다(픽스처가 심은 값이 누수로 드러났다).
     term.rt.editor_crumb_spans.deinit(self.allocator);
@@ -9333,11 +9482,11 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
     // **최대 열을 세워 두지 않으면 clamp가 매번 0으로 되돌린다** — 그러면 네 측정이 전부 같은
     // 조건이 되어 "평평하다"는 오판이 나온다(실제로 한 번 그렇게 읽을 뻔했다).
     _ = scrollCols(fx.session, fx.term, leaf, -1, null);
-    // 셈이 상한(`max_cols_count_limit`)에서 멈추므로 줄 길이(20만)가 아니라 그 값이 나온다 —
-    // 갈 수 있는 거리는 그것으로 충분하다.
-    try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
+    // **줄 길이 그대로 센다.** 예전에는 셈 상한(14,096)에서 멈춰 그 값이 나왔다 — 지금은 상한이
+    // 100만이라 20만 줄은 안 걸린다. 그래서 갈 수 있는 거리도 옛 상한(10,000)의 훨씬 너머다.
+    try testing.expectEqual(@as(u32, 200_000 - 1), fx.term.rt.editor_max_cols);
 
-    for ([_]u16{ 0, 20_000, 60_000 }) |col| {
+    for ([_]u32{ 0, 20_000, 60_000, 150_000 }) |col| {
         fx.term.rt.editor_first_col = col;
         // 한 번 그려 캐시·경로를 덥힌 뒤 잰다.
         var warm = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
@@ -9352,6 +9501,10 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
         const t1 = monotonicMsForTest();
         std.debug.print("\n[측정] first_col={d}(그린 값 {d}): 4프레임 {d}ms\n", .{ col, fx.term.rt.editor_first_col, t1 - t0 });
         // 고치기 전 60,000열은 4프레임에 **약 2초**였다. 재앙 감지선이지 예산이 아니다.
+        //
+        // **지금은 평평해야 한다**(§4.1c 체크포인트). 실측(ReleaseFast, 화면을 20만열 줄로 채운 판):
+        // `first_col` 0 에서 0.22ms, 60,000 에서 0.68ms — 같은 자릿수다. 그래서 감지선을 그대로 두고도
+        // 15만 열을 하나 더 잰다(옛 상한 10,000 의 열다섯 배 — 그 상수가 살아 있으면 여기 못 온다).
         try testing.expect(t1 - t0 < 500);
     }
 }
@@ -9367,19 +9520,25 @@ test "가로 스크롤에 §3.8 상한이 있다 — 무한히 밀리지 않는�
 
     const saved = fx.term.rt.editor_lines;
     defer fx.term.rt.editor_lines = saved;
-    // 상한보다 **훨씬** 긴 줄 — 아니면 상한이 걸리는지 알 수 없다.
-    const lines = try hscrollFixtureLines(allocator, &fx, @as(usize, chrome_editor.frame.max_first_col) * 5);
+    // **예전 상한(10,000)보다 훨씬 긴 줄** — 그 상수가 정말 없어졌는지 보려면 그 너머로 가 봐야 한다.
+    const long_cols: usize = 50_000;
+    const lines = try hscrollFixtureLines(allocator, &fx, long_cols);
     const long_buf = lines[1];
     defer allocator.free(long_buf);
     defer allocator.free(lines);
 
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null));
-    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+    const at_end = fx.term.rt.editor_first_col;
+    // **옛 상한을 넘어섰다** — 그 상수가 살아 있으면 여기서 10,000 에 멈춘다.
+    try testing.expect(at_end > 10_000);
+    // **그리고 문서 폭에서 멈춘다** — 무한히 밀리지 않는다는 것이 이 판정자의 주제다.
+    try testing.expect(at_end <= long_cols);
+    try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null) == false or fx.term.rt.editor_first_col == at_end);
 
-    // 그리기 직전 되돌림도 같은 상한을 쓴다 — 두 곳이 갈리면 프레임마다 값이 튄다.
+    // 그리기 직전 되돌림도 **같은 규칙**을 쓴다 — 두 곳이 갈리면 프레임마다 값이 튄다.
     var drawn = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
-    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+    try testing.expectEqual(at_end, fx.term.rt.editor_first_col);
 }
 
 test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
@@ -9412,9 +9571,11 @@ test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
     try testing.expect(chrome_editor.content.total_steps <= chrome_editor.frame.max_cols_count_limit + 1);
     try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
 
-    // **상한에 걸려도 갈 수 있는 거리는 그대로다.** 셈을 줄인 것이 도달 범위를 줄이면 안 된다.
+    // **셈이 멈춘 자리까지는 간다.** 셈을 줄인 것이 도달 범위를 줄이면 안 된다 — 이제 그 두 값이
+    // 같은 상수에서 나온다(`max_cols_count_limit` 하나가 §3.8 의 유일한 자리다).
     try testing.expect(scrollCols(fx.session, fx.term, leaf, -1_000_000, null));
-    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+    try testing.expect(fx.term.rt.editor_first_col > 10_000); // 옛 상한(10,000)은 없어졌다
+    try testing.expect(fx.term.rt.editor_first_col <= chrome_editor.frame.max_cols_count_limit);
 }
 
 test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프레임이 죽지 않는다" {
@@ -9495,9 +9656,12 @@ test "한 줄짜리 문서도 조각으로 움직인다 — 예전엔 전혀 못
 }
 
 test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이지 않는다" {
-    // 최대 열 셈은 `max_cols_count_limit`에서 멈춘다. 그 값이 `max_first_col`과 같으면(여유분이
-    // 없으면) 좁은 창에서 센 뒤 창을 넓혔을 때 `max_cols - visible`이 상한보다 작아져 **갈 수 있는
-    // 거리가 줄어든다**. 여유분 4,096이 그것을 막는다 — 그 이유를 지키는 테스트가 없었다.
+    // **옛 이유는 없어졌다.** 예전에는 스크롤 상한(`max_first_col`)이 따로 있어, 셈 상한이 그와
+    // 같으면 창을 넓혔을 때 `max_cols - visible` 이 상한보다 작아져 갈 수 있는 거리가 줄었다 —
+    // 여유분 4,096이 그것을 막았다. 지금은 상한이 **셈 하나**뿐이라 그 갈림 자체가 없다.
+    //
+    // **그래서 재는 것을 바꾼다**: 창 폭이 달라져도 **줄 끝에는 늘 닿는다**. 그것이 옛 판정자가
+    // 지키려던 것이고(「도달 거리가 줄지 않는다」), 상한 없이도 성립해야 하는 성질이다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -9505,7 +9669,8 @@ test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이�
 
     const saved = fx.term.rt.editor_lines;
     defer fx.term.rt.editor_lines = saved;
-    const lines = try hscrollFixtureLines(allocator, &fx, @as(usize, chrome_editor.frame.max_first_col) * 10);
+    const long_cols: usize = 50_000; // 옛 상한(10,000)보다 훨씬 길다
+    const lines = try hscrollFixtureLines(allocator, &fx, long_cols);
     const long_buf = lines[1];
     defer allocator.free(long_buf);
     defer allocator.free(lines);
@@ -9514,12 +9679,16 @@ test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이�
     const narrow: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 400 };
     _ = scrollCols(fx.session, fx.term, narrow, -1, null);
     const counted = fx.term.rt.editor_max_cols;
-    try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, counted);
+    try testing.expect(counted >= long_cols); // 상한에 안 걸렸다 — 줄 폭 그대로 셌다
+    try testing.expect(scrollCols(fx.session, fx.term, narrow, -1_000_000, null));
+    const narrow_end = fx.term.rt.editor_first_col;
+    try testing.expect(narrow_end > 10_000); // **옛 상한은 없어졌다**
 
-    // **창이 아주 넓어졌다.** 셈은 다시 하지 않는다(캐시) — 그래도 상한까지 갈 수 있어야 한다.
+    // **창이 아주 넓어졌다.** 셈은 다시 하지 않는다(캐시). 보이는 열이 늘었으니 `first_col` 은
+    // 그만큼 **작아지는 것이 맞다** — 그래도 줄 끝에는 닿아야 한다.
     const wide: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 4000, .h = 400 };
     try testing.expect(scrollCols(fx.session, fx.term, wide, -1_000_000, null));
-    try testing.expectEqual(chrome_editor.frame.max_first_col, fx.term.rt.editor_first_col);
+    try testing.expect(fx.term.rt.editor_first_col < narrow_end);
     try testing.expectEqual(counted, fx.term.rt.editor_max_cols); // 다시 세지 않았다
 }
 
@@ -11984,7 +12153,7 @@ fn byteAtColumnProto(bytes: []const u8, tab_width: u16, target_col: u32) usize {
 
 test "[측정] 열→byte 역방향 — 클릭 지점까지 훑는 비용" {
     // **역방향(`hitTestBody`)의 뼈대 비용이다.** 클릭한 픽셀은 열이 되고, 열은 byte가 되어야 selection이
-    // 그것을 든다. 이 방향이 거리에 비례하면 §4.1c의 `max_first_col` 상한과 **같은 성질의 상한**이
+    // 그것을 든다. 이 방향이 거리에 비례하면 §4.1c가 지웠던 그 상한과 **같은 성질의 상한**이
     // 클릭에도 필요해진다 — 그 판단의 근거를 여기서 만든다.
     //
     // **정방향(`columnOfByte`)과 나란히 잰다.** 둘이 같은 비용이면 "역방향이 특별히 비싸다"는 말은
@@ -12579,7 +12748,7 @@ test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자"
 
     var checked: usize = 0;
     var mismatch: usize = 0;
-    var first_bad: ?struct { col: u16, want: u21, got: u21, fc: u16 } = null;
+    var first_bad: ?struct { col: u16, want: u21, got: u21, fc: u32 } = null;
 
     for ([_]u16{ 0, 7, 33, 60 }) |fc| {
         term.rt.editor_wrap = false;
@@ -15257,10 +15426,11 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
 
     // **clamp 는 여전히 자기 일을 한다** — 상한 밖으로 밀어 두면 그리기 직전에 되돌린다. 되감기를
     // 막는다고 clamp 를 통째로 재우면 이 단언이 잡는다.
-    term.rt.editor_first_col = chrome_editor.frame.max_first_col; // 상한 밖으로 밀어 둔다
+    const pushed: u32 = term.rt.editor_max_cols + 10_000; // 문서 폭 «밖» 으로 밀어 둔다
+    term.rt.editor_first_col = pushed;
     var after2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     after2.dl.deinit(allocator);
-    try testing.expect(term.rt.editor_first_col < chrome_editor.frame.max_first_col);
+    try testing.expect(term.rt.editor_first_col < pushed);
 
     // **짧은 줄에 쳐도 상한이 줄지 않는다.** caret 줄의 폭으로 **덮어쓰면** 긴 줄이 그대로인데도
     // 상한이 몇 열로 주저앉아 막대가 거짓이 되고 가로 축이 사라진다 — `@max` 가 그 자리다.
@@ -16243,6 +16413,169 @@ test "MAXC3 상한이 0 이어도 캐시가 성하면 «답이 있다» — 판�
     try testing.expect(maxColsForRender(fx.session, term, false) != null); // 막대가 안 사라진다
 }
 
+test "HSEEK1 가로 스크롤이 옛 상한(10,000)을 «넘어간다» (제품 경계)" {
+    // **이 조각의 전부가 이 단언이다.** `max_first_col = 10,000` 은 *"렌더 비용이 밀린 거리에
+    // 비례한다"* 는 이유로 서 있었고(§4.1c), 줄마다 열→byte 체크포인트가 그 비례를 없애면서 지웠다.
+    // 이제 상한은 **문서 폭** 하나이고, 그 위에 §3.8 의 셈 가드(`max_cols_count_limit`)만 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // **탭·전각을 섞는다** — ASCII 만 넣으면 전개의 빠른 경로가 걸려 걷는 루프를 안 지난다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    for (0..12_000) |_| try doc.appendSlice(allocator, "a\tb한글"); // 약 10만 열
+    try doc.append(allocator, '\n');
+    try doc.appendSlice(allocator, "tail\n");
+    const term = try undoFixture(&fx, allocator, "hseek1.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (term.rt.editor_max_cols < 50_000) return error.FixtureNotWide;
+
+    // 끝까지 민다.
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+    const at_end = term.rt.editor_first_col;
+    try testing.expect(at_end > 10_000); // **옛 상한을 넘었다**
+    try testing.expect(at_end + 1_000 >= term.rt.editor_max_cols); // 줄 끝이 화면에 든다
+
+    // 그리고 그 자리에서 프레임이 선다 — 체크포인트가 붙었는지 관측점으로 확인한다.
+    var far = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    far.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_col_marks.len > 0);
+    try testing.expect(term.rt.editor_col_marks_scans >= 1);
+}
+
+test "HSEEK3 멀리 밀어도 «훑는 양» 이 안 늘어난다 — 평평함이 상한을 지운 근거다 (제품 경계)" {
+    // **답이 아니라 비용이 이 조각의 주제다.** 체크포인트를 안 쓰거나 잘못 골라도 화면은 똑같고,
+    // 느려질 뿐이다 — 적대적 검증 1회차에서 그런 변이 셋이 전부 살아남았다(C3·C4·C5). 시간으로
+    // 재면 러너 부하와 안 갈리므로 **훑은 걸음 수**(`content.total_steps`)로 잰다. 이 파일이 5MB
+    // 한 줄 판정자에서 같은 이유로 같은 축을 이미 쓴다.
+    //
+    // **재는 것은 절대값이 아니라 「멀리 밀어도 안 늘어난다」** 이다 — 그것이 `max_first_col` 을
+    // 지운 유일한 근거다(§4.1c).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // 화면을 **긴 줄로 가득** 채운다 — 비용은 보이는 줄마다 든다. 한 줄만 길면 최악이 안 나온다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |_| {
+        for (0..12_000) |_| try doc.appendSlice(allocator, "a\tb한글"); // 약 10만 열
+        try doc.append(allocator, '\n');
+    }
+    const term = try undoFixture(&fx, allocator, "hseek3.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var warm0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    warm0.dl.deinit(allocator);
+    if (term.rt.editor_max_cols < 50_000) return error.FixtureNotWide;
+
+    // **가까운 자리**와 **아주 먼 자리**에서 각각 잰다. 체크포인트는 미리 세워 둔다 — 그 구축은
+    // 한 번 치르는 값이고 여기서 재려는 것이 아니다.
+    var near: usize = 0;
+    var far: usize = 0;
+    for ([_]u32{ 1_000, 90_000 }, 0..) |col, k| {
+        term.rt.editor_first_col = col;
+        var w = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        w.dl.deinit(allocator);
+        chrome_editor.content.total_steps = 0;
+        chrome_editor.content.expand_steps = 0;
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        // **두 축을 함께 센다** — 전개의 자기 걷기는 `stepColumn` 을 안 쓴다(적대적 검증 C7).
+        const steps = chrome_editor.content.total_steps + chrome_editor.content.expand_steps;
+        if (k == 0) near = steps else far = steps;
+    }
+
+    // **픽스처 공허 방지** — 걸음이 0이면 아무것도 안 잰 것이다.
+    if (near == 0 or far == 0) return error.NoStepsCounted;
+    // **90배 멀리 갔는데 걸음은 몇 배 안이어야 한다.** 힌트가 없으면 90배 가까이 는다.
+    if (far > near * 4) {
+        std.debug.print("HSEEK3: 가까이 {d} 걸음, 멀리 {d} 걸음 — 비용이 거리에 비례한다\n", .{ near, far });
+        return error.StepsGrewWithDistance;
+    }
+}
+
+test "HSEEK4 체크포인트 메모리는 «줄 수» 가 아니라 열 수에 비례한다 (제품 경계)" {
+    // **긴 줄만 만든다**(`col_mark_min_cols`). 짧은 줄은 처음부터 걸어도 화면 폭 수준이라 만들 몫이
+    // 없고, 만들면 **대부분의 줄에 빈 몫만 늘어난다** — 그러면 이 배열이 줄 수에 비례해 커져 8만 줄
+    // 소스 파일에서 근거 없이 메모리를 먹는다.
+    //
+    // **답도 걸음 수도 같아서 다른 판정자가 못 잡는다**(적대적 검증 D4 — 문턱을 없앤 변이가
+    // `SEEK1`·`HSEEK3` 을 전부 통과했다). 그래서 **크기 자체**를 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    // **짧은 줄 5,000개 + 긴 줄 하나.** 문턱이 없으면 몫이 5,000개 넘게 붙는다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..5_000) |_| try doc.appendSlice(allocator, "short line here\n");
+    for (0..2_000) |_| try doc.appendSlice(allocator, "a\tb한글"); // 약 1.6만 열 — 문턱을 넘는다
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "hseek4.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+    var far = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    far.dl.deinit(allocator);
+
+    const marks = term.rt.editor_col_marks.len;
+    if (marks == 0) return error.MarksNotBuilt; // 픽스처 공허 방지 — 긴 줄 몫은 있어야 한다
+    // **줄 수(5,001)보다 훨씬 적다.** 긴 줄 하나의 몫(약 1.6만 열 ÷ 1,024 ≈ 16개)뿐이어야 한다.
+    if (marks > 100) {
+        std.debug.print("HSEEK4: 마크 {d}개 — 줄 수({d})에 비례한다\n", .{ marks, term.rt.editor_lines.len });
+        return error.MarksScaleWithLineCount;
+    }
+}
+
+test "HSEEK2 체크포인트는 편집을 건너지 않는다 — 그리고 다시 세운다 (제품 경계)" {
+    // 폭 합 캐시는 편집을 건너 살아남지만(§4.1c) **체크포인트는 줄 «안» 의 byte 자리**라 편집이 그
+    // 앞에 오면 전부 밀린다. 따라가다 틀리면 전개가 엉뚱한 열에서 시작하는 **조용한 오답**이므로
+    // 버리고, 필요할 때 다시 센다. 「버린다」와 「다시 선다」를 함께 재야 그 계약이 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    for (0..12_000) |_| try doc.appendSlice(allocator, "a\tb한글");
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "hseek2.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+    var far = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    far.dl.deinit(allocator);
+    if (term.rt.editor_col_marks.len == 0) return error.MarksNotBuilt;
+    const scans = term.rt.editor_col_marks_scans;
+
+    // 편집 — **버린다**.
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_col_marks.len);
+    try testing.expect(lineColsFresh(term)); // **폭 합은 살아 있다** — 둘의 축이 다르다는 것이 요점이다
+
+    // 다시 밀면 **다시 선다**.
+    var again = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    again.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_col_marks.len > 0);
+    try testing.expect(term.rt.editor_col_marks_scans > scans);
+}
+
 test "L2C3 탭 폭이 바뀌면 폭 캐시가 «새 폭으로» 다시 선다 (제품 경계)" {
     // 폭은 탭스톱에 달렸다 — 탭 폭이 바뀌면 줄별 폭이 전부 다른 값이다(§2 — 문서 내용 **과 탭 폭**의
     // 함수). 옛 값을 그대로 들면 상한이 화면과 갈린다(같은 부류를 12차 적대적 검증이 8열 모자람으로
@@ -16638,10 +16971,10 @@ test "SOFF6 가로 여백은 기본이 0 이고, 켜면 열이 남는다 (제품
         if (!moveCarets(fx.session, term, .line_end, false)) return error.MoveRejected;
         const half: u32 = (@as(u32, visible) - 1) / 2;
         const scroll_w = term.rt.editor_max_cols + fx.session.loaded_config.config.editor.scroll_beyond_last_column;
-        const max_col = @min(scroll_w -| @as(u32, visible), @as(u32, chrome_editor.frame.max_first_col));
+        const max_col = scroll_w -| @as(u32, visible);
         // caret 은 600 열 줄 끝이라 표시 열이 600 이다(0-based 로 그 칸).
         const want = @min(600 + half + 1 - @as(u32, visible), max_col);
-        try testing.expectEqual(@as(u16, @intCast(want)), term.rt.editor_first_col);
+        try testing.expectEqual(want, term.rt.editor_first_col);
 
         // **왼쪽 가지도 같은 clamp 을 받는다.** 오른쪽에서만 재면 왼쪽이 설정값을 날것으로 쓰는
         // 변이가 산다(적대적 검증 9회차 V4) — 그러면 좁은 화면에서 왼쪽으로 갈 때마다 맨 앞으로

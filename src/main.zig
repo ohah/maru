@@ -4299,7 +4299,7 @@ fn openFileFor(
         // **표시 폭이다**(바이트 수가 아니다) — 한글·CJK 는 두 칸이라 바이트로 세면 막대가 거짓말을
         // 한다. 폭 규약은 중립이 소유한다(`overlay_input.displayCols`).
         // **여기까지만 센다** — 상한도 중립이 소유한다(`frame.max_cols_count_limit`: 그 너머는
-        // `max_first_col` 때문에 어차피 못 가므로 세는 것이 낭비다). 1 MB 짜리 한 줄 파일이 와도
+        // `max_cols_count_limit` 에서 셈이 멈추므로 그 너머는 세는 것이 낭비다). 1 MB 짜리 한 줄 파일이 와도
         // 여는 데 드는 값이 이 상한에 묶인다.
         const limit = maru.chrome.components.editor_view.frame.max_cols_count_limit;
         widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(l)));
@@ -11575,7 +11575,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // thumb 이 트랙 오른쪽에 **안 닿았다**(`thumb_right=310 track_right=342`).
                 of.hmax_col = if (be.written.horizontal_scrollbar) |b|
                     @intCast(@min(
-                        @as(u32, maru.chrome.components.editor_view.frame.max_first_col),
+                        maru.chrome.components.editor_view.frame.max_cols_count_limit,
                         b.max_offset_px / @max(1, cell_w),
                     ))
                 else

@@ -1054,6 +1054,33 @@ test "encodeKey kitty report_alternates(4): shifted·layout 을 첫 자리 sub-f
     }, &buf, alt));
 }
 
+test "encodeKey kitty report_alternates(4): shift 를 안 눌렀으면 shifted 를 안 싣는다 (적대적 검증 스윕)" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const eq = std.testing.expectEqualStrings;
+    const alt: EncodeOptions = .{ .kitty_flags = 0b00101 }; // disambiguate + alternates
+
+    // **방어선 스윕에서 나온 자리**(2026-09-12). `shifted` 는 «shift 를 눌렀고 base 와 다를 때만» 싣는데,
+    // 기존 픽스처는 그 둘이 언제나 함께였다 — 「글자가 base 와 다른데 shift 는 안 눌린」 경우가 없어서
+    // shift 조건을 지워도 아무도 몰랐다.
+    //
+    // 그 조합은 실재한다: **Caps Lock** 이 켜져 있으면 `A` 가 오는데 shift modifier 는 없다.
+    // 그때 `CSI 97:65u` 를 보내면 앱은 「shift 를 눌렀다」고 읽는다 — 명세는 shift 를 눌렀을 때만
+    // 싣는다고 정한다.
+    try eq("\x1b[97;5u", try encodeKey(.{
+        .key = .{ .char = 'A' }, // Caps Lock 으로 대문자가 왔다
+        .base_codepoint = 'a',
+        .modifiers = .{ .control = true }, // shift 는 없다
+    }, &buf, alt));
+
+    // **양성 대조**: 같은 글자에 shift 를 실제로 누르면 싣는다 — 게이트가 넓어 alternates 를 통째로
+    // 막은 게 아님을 같은 자리에서 증명한다.
+    try eq("\x1b[97:65;6u", try encodeKey(.{
+        .key = .{ .char = 'A' },
+        .base_codepoint = 'a',
+        .modifiers = .{ .shift = true, .control = true },
+    }, &buf, alt));
+}
+
 test "encodeKey kitty report_all(8): legacy 예외가 사라지고 release 까지 나간다" {
     var buf: [encoded_key_buffer_len]u8 = undefined;
     const eq = std.testing.expectEqualStrings;

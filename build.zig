@@ -5345,6 +5345,26 @@ pub fn build(b: *std.Build) void {
     host_close_log_step.dependOn(&run_host_close_log.step);
     boundary_step.dependOn(&run_host_close_log.step);
 
+    // 업그레이드가 `runtime_changed` 로 접혔을 때 **어느 갈래였는지** 남기는가. 일곱 자리가 한 wire
+    // reason 으로 접히던 것을 끊은 계약이라, 조용한 산출 지점이 새로 늘면 여기서 빨개진다.
+    const upgrade_runtime_changed_stage_step = b.step(
+        "test-upgrade-runtime-changed-stage",
+        "Every runtime_changed site must record which branch it was (seven paths shared one name)",
+    );
+    const upgrade_runtime_changed_stage_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/upgrade_runtime_changed_stage_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_upgrade_runtime_changed_stage = b.addRunArtifact(upgrade_runtime_changed_stage_tests);
+    run_upgrade_runtime_changed_stage.addArg("--maru-expect-tests=1");
+    run_upgrade_runtime_changed_stage.addArg("--maru-expect-passed=1");
+    run_upgrade_runtime_changed_stage.setCwd(b.path("."));
+    upgrade_runtime_changed_stage_step.dependOn(&run_upgrade_runtime_changed_stage.step);
+    boundary_step.dependOn(&run_upgrade_runtime_changed_stage.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

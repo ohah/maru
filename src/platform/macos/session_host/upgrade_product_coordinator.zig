@@ -417,11 +417,13 @@ fn processArmedWithDeadlineHooks(
         });
 
     const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
-    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
+    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready) {
+        noteUpgradeStage("ready_authority_not_ready");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .runtime_changed,
         });
+    }
 
     const preview = ctx.manager.previewUpgradeHandoff(
         ctx.allocator,
@@ -521,8 +523,10 @@ fn processBudgetReserved(
     };
     defer reservation.rollback();
     const frozen_authority = ctx.authority.snapshot(ctx.authority.ctx);
-    if (!std.meta.eql(frozen_authority, ready_authority))
+    if (!std.meta.eql(frozen_authority, ready_authority)) {
+        noteUpgradeStage("authority_changed_across_freeze");
         return resumeAndFinish(ctx, &frozen, attempt_id, .{ .status = .resumed, .reason = .runtime_changed }, deadline);
+    }
 
     var capture = frozen.prepareCapture(
         ctx.allocator,
@@ -551,10 +555,13 @@ fn processBudgetReserved(
         capture.membership_generation,
         runtime_ids,
         handoff_bytes.len,
-    )) return resumeAndFinish(ctx, &frozen, attempt_id, .{
-        .status = .resumed,
-        .reason = .runtime_changed,
-    }, deadline);
+    )) {
+        noteUpgradeStage("budget_reservation_mismatch");
+        return resumeAndFinish(ctx, &frozen, attempt_id, .{
+            .status = .resumed,
+            .reason = .runtime_changed,
+        }, deadline);
+    }
 
     var pair = budget_reservation.commit(
         ctx.allocator,
@@ -603,11 +610,13 @@ fn processBudgetReserved(
             .reason = .handoff_failed,
         }, deadline);
     }
-    ctx.manager.revalidateQuiescedCapture(&capture) catch
+    ctx.manager.revalidateQuiescedCapture(&capture) catch |err| {
+        noteUpgradeStageErr("capture_revalidate_post_handoff", err);
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .runtime_changed,
         }, deadline);
+    };
 
     switch (ctx.authority.begin_restoring(ctx.authority.ctx, ready_authority)) {
         .applied => {},
@@ -653,8 +662,10 @@ fn processBudgetReserved(
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .deadline_exceeded, deadline);
     // Manifest republish와 FD replacement 사이에도 child/fd graph는 변할 수 있다. pathname exec 바로 전 같은 capture를
     // 다시 대조하고 달라졌으면 restoring authority를 rollback한 뒤 old graph만 재개한다.
-    ctx.manager.revalidateQuiescedCapture(&capture) catch
+    ctx.manager.revalidateQuiescedCapture(&capture) catch |err| {
+        noteUpgradeStageErr("capture_revalidate_pre_exec", err);
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .runtime_changed, deadline);
+    };
     if (!ctx.rollback_image.revalidate())
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
 
@@ -844,6 +855,12 @@ fn noteUpgradeStage(stage: []const u8) void {
     host_log.line("session host upgrade stage failed: stage={s}", .{stage});
 }
 
+/// `else =>` 로 뭉쳐 삼킨 에러의 **정체**까지 남긴다. wire reason 하나로 접히기 전의 마지막 구분자다.
+fn noteUpgradeStageErr(stage: []const u8, err: anyerror) void {
+    if (builtin.is_test) return;
+    host_log.line("session host upgrade stage failed: stage={s} err={s}", .{ stage, @errorName(err) });
+}
+
 /// upgrade 가 **왜 되돌려졌는지** host 로그에 남긴다.
 ///
 /// 이 파일에는 `std.log` 가 한 줄도 없었다. 그래서 `redirectStderrToHostLog` 가 만든
@@ -985,7 +1002,10 @@ fn reportForFreezeError(err: upgrade_attempt.Error) upgrade_wire.AttemptReport {
         error.ResumeFailed => .{ .status = .failed_nonretryable, .reason = .runtime_resume_failed },
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.TooManyRuntimes, error.LimitExceeded => .{ .status = .resumed, .reason = .state_too_large },
-        else => .{ .status = .resumed, .reason = .runtime_changed },
+        else => blk: {
+            noteUpgradeStageErr("freeze_error", err);
+            break :blk .{ .status = .resumed, .reason = .runtime_changed };
+        },
     };
 }
 
@@ -998,7 +1018,10 @@ fn reportForCaptureError(
             noteUpgradeStage("exec_prepare_out_of_memory");
             break :blk .{ .status = .resumed, .reason = .handoff_failed };
         },
-        else => .{ .status = .resumed, .reason = .runtime_changed },
+        else => blk: {
+            noteUpgradeStageErr("capture_error", err);
+            break :blk .{ .status = .resumed, .reason = .runtime_changed };
+        },
     };
 }
 

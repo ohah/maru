@@ -689,6 +689,13 @@ pub const PreparationFrame = struct {
     source_lease_mirror: PendingEventSourceLease,
     snapshot: RuntimeSemanticSnapshot,
     recipe: event_preparation.EventPreparationRecipe,
+    /// **실험 전용(debug·test 에서만 읽는다).** `recipe` 가 프레임 생성 후 실제로 바뀌는지 재려고 생성
+    /// 시점의 다이제스트를 남긴다. 씰에는 **쓰지 않는다** — 이 PR 은 계약을 조금도 바꾸지 않는다.
+    ///
+    /// #3557 은 `snapshot` 과 `recipe` 를 **함께** 캐시했다가 debug 대조가 `fatalIntegrity` 로 잡았는데,
+    /// 둘을 묶어 검사해 **어느 쪽이 바뀌는지는 안 갈렸다.** `recipe` 는 `sealInput` 해싱의 **51 %**(2,944 B)
+    /// 라, 그것만 불변이면 절반이 안전하게 사라진다. 아니면 그 길은 완전히 닫힌다.
+    recipe_digest_probe: cleanup.Digest,
     scratch: PreparationScratch,
     dto_content_digest: cleanup.Digest,
     transfer_projection_mask: u8,
@@ -731,6 +738,17 @@ pub const PreparationFrame = struct {
         if (!self.validate()) process_seal.fatalIntegrity(.invalid_preparation_frame);
     }
 
+    /// **매번 계산한 값을 그대로 돌려준다** — 씰 계약은 한 비트도 안 바뀐다. debug·test 에서만 생성 시점의
+    /// 탐침과 대조해, `recipe` 가 정말 불변인지 **증거로** 남긴다. ReleaseFast 에는 대조가 없다.
+    fn recipeDigestChecked(self: *const PreparationFrame) cleanup.Digest {
+        const now = rawDigest(.seal_recipe, recipe_digest_domain, std.mem.asBytes(&self.recipe));
+        if (builtin.mode == .Debug or builtin.is_test) {
+            if (!std.crypto.timing_safe.eql(cleanup.Digest, now, self.recipe_digest_probe))
+                process_seal.fatalIntegrity(.callback_drift);
+        }
+        return now;
+    }
+
     fn sealInput(self: *const PreparationFrame) cleanup.PendingPreparationFrameSealInput {
         return .{
             .frame_addr = self.self_addr,
@@ -746,7 +764,7 @@ pub const PreparationFrame = struct {
             .source_receipt = receiptInput(self.source_receipt),
             .source_lease = sourceLeaseInput(self.source_lease_mirror),
             .snapshot_digest = rawDigest(.seal_snapshot, "maru.pending-frame.snapshot.v1", std.mem.asBytes(&self.snapshot)),
-            .recipe_digest = rawDigest(.seal_recipe, "maru.pending-frame.recipe.v1", std.mem.asBytes(&self.recipe)),
+            .recipe_digest = self.recipeDigestChecked(),
             .scratch_graph_digest = rawDigest(.seal_scratch, "maru.pending-frame.scratch.v1", std.mem.asBytes(&self.scratch)),
             .dto_content_digest = self.dto_content_digest,
             .transfer_projection_mask = self.transfer_projection_mask,
@@ -790,6 +808,7 @@ pub fn initFrameInPlace(frame: *PreparationFrame, input: FrameInitInput, runtime
     frame.source_lease_mirror = .{};
     frame.snapshot = input.snapshot;
     frame.recipe = input.recipe;
+    frame.recipe_digest_probe = rawDigest(.recipe_probe, recipe_digest_domain, std.mem.asBytes(&frame.recipe));
     frame.scratch = .{};
     frame.dto_content_digest = [_]u8{0} ** 32;
     frame.transfer_projection_mask = 0;
@@ -1562,6 +1581,9 @@ const DigestSite = enum {
     obs_transfer_verify,
     obs_snapshot,
     obs_transfer_store,
+    /// 탐침 전용. `seal_recipe` 와 **같은 이름을 쓰면 내역이 뭉친다** — 탐침은 프레임당 1 회, 씰은
+    /// 프레임당 수십 회라 섞이면 「recipe 가 51 %」라는 수치 자체가 흐려진다.
+    recipe_probe,
 };
 
 var digest_site_calls = [_]u64{0} ** @typeInfo(DigestSite).@"enum".fields.len;
@@ -1605,6 +1627,9 @@ pub fn sealCounters() SealCounters {
         .raw_digest_bytes = @atomicLoad(u64, &seal_raw_digest_bytes, .monotonic),
     };
 }
+
+/// 탐침과 `sealInput` 이 **같은 도메인**을 쓰게 한 자리에 둔다.
+const recipe_digest_domain = "maru.pending-frame.recipe.v1";
 
 fn rawDigest(site: DigestSite, domain: []const u8, bytes: []const u8) cleanup.Digest {
     _ = @atomicRmw(u64, &seal_raw_digest_calls, .Add, 1, .monotonic);

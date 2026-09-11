@@ -189,7 +189,7 @@ pub const KittyImage = struct {
         return n;
     }
 
-    fn freeAll(self: KittyImage, alloc: std.mem.Allocator) void {
+    pub fn freeAll(self: KittyImage, alloc: std.mem.Allocator) void {
         for (self.frames) |f| alloc.free(f.data);
         if (self.frames.len > 0) alloc.free(self.frames);
         alloc.free(self.data);

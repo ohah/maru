@@ -480,9 +480,13 @@ fn decodeKittyStorage(reader: *Reader, allocator: std.mem.Allocator) Error!Kitty
     var actual_total: usize = 0;
     for (0..count) |_| {
         const image = try decodeValue(reader, KittyImage, allocator);
-        errdefer allocator.free(image.data);
+        // **프레임까지 놓아준다.** `data` 만 free 하면 애니메이션 프레임이 통째로 샌다.
+        errdefer image.freeAll(allocator);
         if (result.map.contains(image.id)) return error.DuplicateField;
-        actual_total = std.math.add(usize, actual_total, image.data.len) catch return error.IntegerOverflow;
+        // **회계는 프레임을 포함한다.** 코덱은 저장소와 **독립으로** 합계를 다시 세어 대조하는데,
+        // 그 계산이 `data.len` 만 보고 있었다 — 애니메이션이 있는 세션의 handoff 가 합계 불일치로
+        // **통째로 거부됐다**(`InvalidValue`). 프레임 하나만 있어도 exec 가 실패한다(적대적 검증 실측).
+        actual_total = std.math.add(usize, actual_total, image.totalBytes()) catch return error.IntegerOverflow;
         if (actual_total > declared_total or actual_total > limit) return error.LimitExceeded;
         try result.map.put(allocator, image.id, image);
     }
@@ -1930,4 +1934,47 @@ test "handoff v1 host DTO allocation failure never publishes a partial runtime s
         break;
     }
     try std.testing.expect(saw_success);
+}
+
+test "handoff v1 이 애니메이션 프레임과 재생 상태를 나른다 (적대적 검증)" {
+    // #3505 본문에 «reflection 코덱이 중첩 슬라이스를 그대로 나른다» 고 **적어 놓고 재지 않았다**.
+    // 프레임은 `[]KittyFrame` 이고 그 안에 또 `[]u8` 이 있다 — 코덱이 이 중첩을 못 다루면 exec 를
+    // 넘어가며 돌던 애니메이션이 첫 프레임에서 멈추고, 앱은 자기가 보낸 프레임이 사라진 것을 모른다
+    // (다시 보내지 않는다).
+    const allocator = std.testing.allocator;
+    var before = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer before.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+    try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=70,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
+    try before.write("\x1b_Ga=p,i=1,q=2\x1b\\");
+    try before.write("\x1b_Ga=a,i=1,r=1,z=70,s=3,v=5,q=2\x1b\\");
+    _ = before.advanceAnimations(70); // 프레임 2 로 넘어간 상태로 exec 를 넘긴다
+
+    const img_before = before.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), img_before.frameCount());
+    try std.testing.expectEqual(@as(u32, 2), img_before.current_frame);
+
+    const bytes = try encodeCore(allocator, &before);
+    defer allocator.free(bytes);
+    var after = try decodeCore(allocator, bytes);
+    defer after.deinit();
+
+    const img = after.kitty_images.map.get(1) orelse return error.TestUnexpectedResult;
+    // 프레임 픽셀이 살아 있다 — 중첩 슬라이스가 온전히 건너왔는가.
+    try std.testing.expectEqual(@as(u32, 2), img.frameCount());
+    try std.testing.expectEqualSlices(u8, &red, img.framePixels(1));
+    try std.testing.expectEqualSlices(u8, &green, img.framePixels(2));
+    // 재생 상태도 살아 있다 — 이게 없으면 복원 뒤 애니메이션이 처음부터 다시 돈다.
+    try std.testing.expectEqual(@as(u32, 2), img.current_frame);
+    try std.testing.expectEqual(@as(u32, 5), img.loops_left);
+    try std.testing.expectEqual(@as(u32, 70), img.frameGapMs(1));
+    // 회계도 프레임을 포함한 채 복원돼야 한다 — 안 그러면 예산이 어긋난 채 이어진다.
+    try std.testing.expectEqual(before.kitty_images.total_bytes, after.kitty_images.total_bytes);
+    // 복원된 코어에서 **이어서 돈다**(상태만 있고 안 돌면 반쪽이다).
+    try std.testing.expect(after.advanceAnimations(70));
+    try std.testing.expectEqual(@as(u32, 1), after.kitty_images.map.get(1).?.current_frame);
 }

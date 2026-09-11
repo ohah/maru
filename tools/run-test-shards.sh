@@ -21,26 +21,28 @@
 # usage: run-test-shards.sh <n> <test-binary> [args...]
 set -u
 
-# 하루 넘은 `/tmp/maru-*` **테스트 픽스처**를 지운다. 실패해도 테스트를 막지 않는다(청소는 곁일이다).
+# 끝나고 **묵은 테스트 픽스처를 거둔다** — 일은 `tools/clean-tmp-fixtures.sh` 가 한다.
 #
-# 🔥 **`/tmp/maru-<uid>` 는 건드리면 안 된다.** 그것은 테스트 픽스처가 아니라 **제품**의 session
-# host 소켓 뿌리다(`short_endpoint.zig` — 그 아래 `sh/<host>.sock` 과 `session-host/` 가 산다).
-# host 가 하루 넘게 조용하면 디렉터리 mtime 이 안 바뀌므로, 이름으로 안 가르면 **살아 있는
-# 소켓을 지우고** keep-alive 터미널이 재접속을 잃는다(적대적 1회차에 잡았다 — 실측으로 그때
-# `/private/tmp/maru-501` 아래에 `sh/` 39 개 · `session-host/` 52 개가 있었다).
+# ⚠️ **로직을 여기 다시 쓰지 않는다.** 그 도구가 이미 있고 더 정교하다(적대적 3회차에 그것을 모르고
+# 중복 구현했다가 되돌렸다):
+#   · `maru-<숫자>` 는 **실 세션 host 루트**(uid)라 절대 안 건드린다 — 지우면 사용자의 살아 있는
+#     keep-alive 세션이 통째로 사라진다.
+#   · 이름 끝 pid 가 **살아 있으면 남긴다**(`kill -0`) — 지금 돌고 있는 테스트의 자리일 수 있다.
+#   · pid 를 **앞에서부터** 찾는다 — 뒤에서 찾으면 `maru-cr6a2-launch-86495-0` 의 `0` 을 pid 로 읽고
+#     `kill -0 0` 은 프로세스 그룹 질의라 언제나 성공해 그 자리가 영영 안 지워진다.
 #
-# 가르는 법: **`maru-` 뒤가 숫자뿐이면 제품**(uid)이고, 그 밖은 테스트 픽스처다
-# (`maru-<태그>-<pid>` · `maru-t<pid>`).
+# 여기서 하는 일은 **부르는 것**뿐이다. 그 도구는 「개발 머신용」으로 만들어졌는데 아무도 안 불러
+# 실측 2026-09-10 에 **32,762 개 · 47.4 GB** 가 쌓여 있었다 — 자동 호출이 빠진 조각이었다.
 sweep_stale_fixtures() {
-    # `/tmp` 는 macOS 에서 `/private/tmp` 로의 심볼릭 링크라 `find` 가 안 따라간다.
-    root=/tmp
-    [ -d /private/tmp ] && root=/private/tmp
-    find "$root" -maxdepth 1 -name 'maru-*' -mtime +1 2>/dev/null | while IFS= read -r d; do
-        case "${d##*/maru-}" in
-            *[!0-9]*) rm -rf "$d" ;;
-        esac
-    done
-    :
+    cleaner=$(dirname "$0")/clean-tmp-fixtures.sh
+    if [ -f "$cleaner" ]; then
+        # 청소는 곁일이다 — 실패해도 테스트를 막지 않는다.
+        sh "$cleaner" >&2 2>&1 || :
+    else
+        # ⚠️ **조용히 넘어가지 않는다.** 못 찾은 채로 지나가면 「돌았는데 아무것도 없었다」와
+        # 「아예 안 돌았다」가 구분되지 않는다.
+        echo "run-test-shards: clean-tmp-fixtures.sh 를 못 찾아 픽스처를 안 거뒀다 ($cleaner)" >&2
+    fi
 }
 n=$1
 bin=$2

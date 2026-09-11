@@ -5146,6 +5146,39 @@ fn dropLineCols(self: *AppSession, term: *Term) void {
     term.rt.editor_line_cols_tab = 0;
 }
 
+/// 폭 캐시로 **가장 긴 줄의 열 수**를 정확히 낸다. `null` = 이 캐시의 축이 성립하지 않는다(옛 경로로).
+///
+/// **정수 max 다** — 문자 스캔이 아니라 이미 센 `u32` 들을 훑는다. 접혀 있으면 **보이는 줄만** 고른다:
+/// 숨은 긴 줄을 세면 갈 수 없는 열까지 밀 수 있고, 그것이 §4.1c 가 「접힘 무효화는 옳다」고 적은 이유다.
+///
+/// **비교 뷰는 제외한다.** 문서가 둘이라 이 캐시의 첨자(`editor_lines`)가 성립하지 않는다.
+/// **`editor_diff == null` 을 지운 변이는 살아남는다**(적대적 검증 L7): 비교 뷰는 문서 줄 배열을
+/// 안 들어 `lineColsFresh` 가 이미 거짓이다. 그래도 명시하는 이유는 **뜻**이고, `L2C4` 가 그 불변식을
+/// 못박아 깨지는 날 이 가드가 진짜 일을 시작한다.
+fn maxColsFromCache(term: *const Term) ?u32 {
+    if (term.rt.editor_diff != null) return null;
+    if (!lineColsFresh(term)) return null;
+    const cols = term.rt.editor_line_cols;
+    var max_cached: u32 = 0;
+    if (term.rt.editor_visible_numbers.len > 0) {
+        // 접혀 있다 — gutter 번호가 1-based 라 하나 뺀다.
+        // **아래 둘은 방어이지 판정할 수 없다**(적대적 검증 N4·N5 — 둘 다 살아남는 것이 정상이다):
+        // 번호가 `null` 인 꼬리 행과 범위 밖 번호는 `rebuildVisible` 이 **구간 합과 실제가 어긋날
+        // 때만** 만드는 것이라(그 함수가 "상태와 범위가 잠시 갈릴 때"라고 적었다) 오늘 관측되지
+        // 않는다. 그래도 두는 이유는 그 어긋남을 **조용한 오답이 아니라 아무 일도 아니게** 만들기
+        // 위해서다 — 빈 행을 1번 줄로 읽으면 상한이 엉뚱한 줄에서 나오고, 범위를 안 묶으면 배열
+        // 밖을 읽는다.
+        for (term.rt.editor_visible_numbers) |maybe| {
+            const num = maybe orelse continue; // 꼬리를 채운 빈 행
+            const idx = num - 1;
+            if (idx < cols.len) max_cached = @max(max_cached, cols[idx]);
+        }
+    } else {
+        for (cols) |c| max_cached = @max(max_cached, c);
+    }
+    return max_cached;
+}
+
 fn ensureMaxCols(term: *Term, right: bool) void {
     const cache = if (right) &term.rt.editor_max_cols_right else &term.rt.editor_max_cols;
     if (cache.* != 0) return;
@@ -5158,27 +5191,11 @@ fn ensureMaxCols(term: *Term, right: bool) void {
     // 배열을 안 들어 `lineColsFresh` 가 이미 거짓이다. 그래도 명시하는 이유는 **뜻**이다 —
     // 이 캐시의 첨자는 「문서 하나」이고 비교 뷰에는 문서가 둘이다. `L2C4` 가 그 불변식을
     // 못박아, 깨지는 날 이 가드가 진짜 일을 시작한다.
-    if (!right and term.rt.editor_diff == null and lineColsFresh(term)) {
-        const cols = term.rt.editor_line_cols;
-        var max_cached: u32 = 0;
-        if (term.rt.editor_visible_numbers.len > 0) {
-            // 접혀 있다 — **보이는 줄만** 고른다. gutter 번호가 1-based 라 하나 뺀다.
-            // **아래 둘은 방어이지 판정할 수 없다**(적대적 검증 N4·N5 — 둘 다 살아남는 것이
-            // 정상이다): 번호가 `null` 인 꼬리 행과 범위 밖 번호는 `rebuildVisible` 이 **구간 합과
-            // 실제가 어긋날 때만** 만드는 것이라(그 함수가 "상태와 범위가 잠시 갈릴 때"라고 적었다)
-            // 오늘 관측되지 않는다. 그래도 두는 이유는 그 어긋남이 **조용한 오답이 아니라 아무
-            // 일도 아니게** 만들기 위해서다 — 빈 행을 1번 줄로 읽으면 상한이 엉뚱한 줄에서 나오고,
-            // 범위를 안 묶으면 배열 밖을 읽는다.
-            for (term.rt.editor_visible_numbers) |maybe| {
-                const num = maybe orelse continue; // 꼬리를 채운 빈 행
-                const idx = num - 1;
-                if (idx < cols.len) max_cached = @max(max_cached, cols[idx]);
-            }
-        } else {
-            for (cols) |c| max_cached = @max(max_cached, c);
+    if (!right) {
+        if (maxColsFromCache(term)) |v| {
+            cache.* = v;
+            return;
         }
-        cache.* = max_cached;
-        return;
     }
 
     // **렌더가 쓰는 그 값**(`editor_tab_width` — 단일 출처). 상수를 읽으면 필드가 기본값이 아닐 때
@@ -7209,17 +7226,23 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 /// 여기서 또 손대면 그 매핑을 덮어쓴다.
 /// 편집 뒤의 가로 상한 — **편집 전 값에 방금 건드린 줄만 더 센다**.
 ///
-/// **전부 다시 세지 않는다.** `ensureMaxCols` 는 문서 전체를 훑고 2만 줄(2.1MB)에서 **24ms** 다
-/// (그 함수의 실측 주석) — 글자 하나마다 그것을 치르면 타이핑이 끊긴다. 반대로 0 으로 버리면 위
-/// `refreshAfterEdit` 머리의 두 가지가 무너진다. 그래서 **자란 쪽만 정확히** 따라간다: caret 이 있는
-/// 줄들은 방금 바뀐 줄이므로, 그것만 다시 세면 「긴 줄이 더 길어졌다」가 즉시 반영된다.
+/// **캐시가 성하면 정확히 센다**(2026-09-11). 예전에는 「자란 쪽만」 따라갔다 — `ensureMaxCols` 가
+/// 문서 전체를 **문자 스캔** 하는 것이 유일한 정확한 길이었고 그것이 2만 줄(2.1MB)에서 24ms 라,
+/// 글자 하나마다 치르면 타이핑이 끊겼기 때문이다. **그 전제가 사라졌다**: 폭 캐시가 편집을 건너
+/// 살아남게 되면서(`editedLineRange`) 정확한 상한이 **이미 센 `u32` 들의 정수 max** 가 됐다.
+/// 실측(ReleaseFast, `app_session.zig` 85,092줄): 그 max 가 **21.9µs** 이고 같은 문서에서 글자 하나를
+/// 치는 전체 비용이 4.1ms 다 — **0.5%** 라 글자당 치러도 안 보인다.
 ///
-/// **줄어든 쪽은 늦게 따라온다**(의도한 절충). 가장 긴 줄에서 글자를 지우면 상한이 잠깐 실제보다
-/// 크고, 그만큼 오른쪽 빈 곳으로 밀 수 있다 — 다음 접힘 변경·탭 폭 변경·재적재가 0 으로 버리고
-/// 다시 세면 정확해진다. 반대(상한을 버리는 쪽)의 대가는 **매 글자마다 화면이 되감기고 막대가
-/// 사라지는 것**이라, 이 방향이 덜 나쁘다.
+/// **그래서 「줄어든 쪽은 늦게 따라온다」가 없어졌다.** 가장 긴 줄에서 글자를 지우면 상한이 잠깐
+/// 실제보다 크고 그만큼 **오른쪽 빈 곳으로 밀 수 있었다** — 다음 접힘 변경·탭 폭 변경·재적재를
+/// 기다려야 정확해졌다. 지금은 같은 프레임에 맞는다(`MAXC1`).
+///
+/// **캐시가 없으면 옛 절충이 그대로다** — 줄 수가 바뀌는 편집과 되돌리기는 캐시를 버리므로
+/// (그쪽 근거는 `editedLineRange`) 거기서는 여전히 자란 쪽만 따라간다. 그때 0 으로 버리면 위
+/// `refreshAfterEdit` 머리의 두 가지가 무너진다.
 ///
 /// `kept == 0` 이면 애초에 **안 센 것**이라 0 을 그대로 둔다 — 여기서 지어내면 막대 길이가 거짓이 된다.
+/// **캐시 판정이 그보다 앞이다**: 캐시가 성하면 「안 센 것」이 아니라 **전부 센 것**이라 답이 있다.
 ///
 /// **아래 셋은 살아남는 것이 정상인 변이다**(적대적 검증 4회차 — 값이 같아서다. 읽고 확인했다):
 ///  · `maxColsForRender` 의 `0 → null` 을 지워도 같다 — `frame.showsHorizontalBar` 가 `max_cols >
@@ -7230,6 +7253,7 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 ///  · `max_cols_right` 까지 같이 되살려도 같다 — 오른쪽 열은 **비교 뷰**의 것이고 비교는 읽기
 ///    전용이라 이 함수를 부르는 편집 경로가 그 Term 에는 없다.
 fn maxColsAfterEdit(term: *Term, kept: u32) u32 {
+    if (maxColsFromCache(term)) |exact| return exact;
     if (kept == 0) return 0;
     const doc = term.rt.editor_doc orelse return kept;
     const limit = chrome_editor.frame.max_cols_count_limit;
@@ -15759,6 +15783,108 @@ test "L2C11 «여러 줄» 을 한 번에 고쳐도 그 줄이 전부 다시 세
     try testing.expect(term.rt.editor_line_cols[lines_before - 1] > last_before);
     try testing.expectEqual(@as(?usize, null), lineColsMismatch(term)); // 가운데 줄들도 전부
     try testing.expectEqual(scans, term.rt.editor_line_cols_scans); // 그리고 다시 안 훑었다
+}
+
+test "MAXC1 가장 긴 줄이 «짧아지면» 상한도 준다 — 같은 프레임에 (제품 경계)" {
+    // **오래 「늦게 따라온다」였다.** 상한을 자란 쪽만 따라가게 두면 가장 긴 줄을 지운 뒤에도 값이
+    // 커서, 가로 막대가 실제보다 길고 **오른쪽 빈 곳으로 밀 수 있다**. 그 절충의 근거는 *"정확히
+    // 세려면 문서 전체를 문자 스캔해야 하고 그것이 24ms"* 였는데, 폭 캐시가 편집을 건너 살아남게
+    // 되면서 **정확한 답이 정수 max** 가 됐다(실측 21.9µs — 타이핑 한 번의 0.5%).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "maxc1.zig");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const before = term.rt.editor_max_cols;
+    if (before < 600) return error.FixtureNotWide;
+
+    // **가장 긴 줄의 끝에서 지운다** — 그 줄이 상한을 정하므로 값이 실제로 줄어야 한다.
+    const content = term.rt.editor_doc.?.file.content;
+    const xs = std.mem.indexOf(u8, content, "xxxxxxxxxx") orelse return error.FixtureMissingLongLine;
+    var at = xs;
+    while (at < content.len and content[at] == 'x') at += 1;
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(at - 10, at);
+    if (!deleteText(fx.session, term, true)) return error.DeleteRejected;
+
+    // **같은 프레임에 정확하다** — 접힘 변경·탭 폭 변경·재적재를 안 기다린다.
+    try testing.expectEqual(before - 10, term.rt.editor_max_cols);
+    // 그리고 그 값은 캐시가 낸 것과 같다(단일 출처).
+    try testing.expectEqual(@as(?u32, before - 10), maxColsFromCache(term));
+}
+
+test "MAXC2 캐시가 없으면 «자란 쪽만» 따라간다 — 옛 절충이 그대로다 (제품 경계)" {
+    // **줄 수가 바뀌는 편집은 캐시를 버린다**(`L2C8`). 그때는 정확한 답이 다시 비싸지므로 옛 절충으로
+    // 돌아간다 — 여기서 0 으로 버리면 가로 위치가 되감기고 막대가 사라진다(2026-09-08 캡처가 그 둘을
+    // 한 화면에서 보여 줬다). **판정 순서가 이 갈림을 만든다**: 캐시를 먼저 보고, 없을 때만 `kept`.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "maxc2.zig");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const before = term.rt.editor_max_cols;
+    if (before < 600) return error.FixtureNotWide;
+
+    // 가장 긴 줄 **한가운데에 개행**을 넣는다 — 그 줄이 둘로 갈려 상한이 실제로는 절반쯤이 되지만,
+    // 줄 수가 바뀌어 캐시가 죽으므로 **상한은 안 준다**. 그것이 의도한 절충이다.
+    const content = term.rt.editor_doc.?.file.content;
+    const xs = std.mem.indexOf(u8, content, "xxxxxxxxxx") orelse return error.FixtureMissingLongLine;
+    term.rt.editor_selection = editor_selection.Selection.at(xs + 300);
+    if (!insertText(fx.session, term, "\n")) return error.InsertRejected;
+
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len); // 캐시는 죽었고
+    try testing.expectEqual(@as(?u32, null), maxColsFromCache(term));
+    try testing.expect(term.rt.editor_max_cols >= before); // 상한은 **안 준다**(0 으로도 안 간다)
+}
+
+test "MAXC3 상한이 0 이어도 캐시가 성하면 «답이 있다» — 판정 순서 (제품 경계)" {
+    // **「안 센 것」과 「전부 센 것」은 다르다.** `kept == 0` 은 *상한을* 아직 안 셌다는 뜻이지
+    // *줄 폭을* 모른다는 뜻이 아니다 — 폭 캐시가 성하면 정확한 답이 이미 손에 있다. 순서를 뒤집어
+    // `kept == 0` 을 먼저 보면 그 상태에서 0 을 내고, 그러면 **가로 막대가 사라지고**(`maxColsForRender`
+    // 가 `0` 에 `null` 을 낸다) 본문 높이가 출렁이며 가로 위치가 왼쪽 끝으로 되감긴다 — 2026-09-08
+    // 캡처가 한 화면에서 보여 준 그 둘이다.
+    //
+    // **그 상태는 제품에서 닿는다 — 다만 편집으로는 아니다.** 편집은 `refreshAfterEdit` 이
+    // `dropFoldState` 로 접힘을 **먼저 풀어 버려** 펼칠 것이 남지 않는다(그 전제로 처음 쓴 픽스처는
+    // 공허했다 — 실제로 「펼쳐지지 않았다」로 걸렸다). 닿는 길은 **⌘F 로 접힘 «안» 의 일치로 가는
+    // 것**이다: `revealCurrentFindMatch` → `revealFoldedLine` → `rebuildVisible` 이
+    // `invalidateFoldDerived` 로 상한을 0 으로 만들면서 **폭 캐시는 안 버린다**(버릴 이유가 없다 —
+    // 접힘은 줄 폭을 안 바꾼다). 그래서 **그 다음 글자**가 이 갈림에 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineColsFixture(&fx, allocator, "maxc3.zig");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const wide = term.rt.editor_max_cols;
+    if (wide < 600) return error.FixtureNotWide;
+
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (!(term.rt.editor_max_cols > 0 and term.rt.editor_max_cols < wide)) return error.FoldDidNotHideLongLine;
+
+    // 접힘 **안** 의 긴 줄로 간다 — 그 줄에만 있는 문자열을 찾는다.
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "xxxxxxxxxx", .{}, &fx.session.editor_find_matches);
+    if (fx.session.editor_find_matches.items.len == 0) return error.FixtureMissingLongLine;
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true; // 출처 검사를 지난다(EM9 가 그 검사를 잰다)
+    fx.session.editor_find_source = term.surfaceId();
+    revealCurrentFindMatch(fx.session, term);
+
+    // 폈고, 그 바람에 상한이 0 이 됐다 — **그런데 폭 캐시는 성하다**. 픽스처가 개념을 가르는 자리다.
+    if (term.rt.editor_max_cols != 0) return error.RevealDidNotClearMaxCols;
+    if (!lineColsFresh(term)) return error.CacheDidNotSurviveReveal;
+
+    // **그 다음 글자.** 캐시를 먼저 보면 정확한 답이 서고, `kept == 0` 을 먼저 보면 0 이 나온다.
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "q")) return error.InsertRejected;
+    try testing.expectEqual(wide, term.rt.editor_max_cols); // 긴 줄은 안 건드렸으니 그 값 그대로
+    try testing.expect(maxColsForRender(fx.session, term, false) != null); // 막대가 안 사라진다
 }
 
 test "L2C3 탭 폭이 바뀌면 폭 캐시가 낡는다 (제품 경계)" {

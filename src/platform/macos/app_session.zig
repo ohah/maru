@@ -4511,6 +4511,22 @@ pub const AppSession = struct {
     // 새 탭(Cmd+T)이 첫 탭과 같은 종류의 셸을 띄우도록 spawn 파라미터를 보관한다. zdotdir(ZDOTDIR
     // 셸 통합 디렉터리)는 새 탭 spawn에도 필요하므로 init 끝에 free하지 않고 여기에 들고 deinit에서 푼다.
     // term은 loaded_config.config.term(arena 소유)에서 매번 읽는다.
+    // **이 아래 상태 객체 열다섯은 `.{}` 로 만들 수 없다 — 재시도하지 말 것**(2026-09-10 실측).
+    //
+    // 테스트가 `undefined` 세션을 쓰던 것을 걷어내면서(#3511) *"기본값이 `= undefined` 인 필드
+    // 55 개도 `.{}` 로 바꾸면 되지 않나"* 를 시험했다. **전부 되돌아갔다** — 컴파일러가 매번
+    // 「필수 필드가 없다」로 거절했고, 그 필드들이 한결같다:
+    //
+    //   new_tab_config → size·queue_capacity   app_window → tabs      appearance → font
+    //   term_backend·frame_loop·dock·file_tree → allocator            loaded_config → arena
+    //   renderer_state → backend               remote_explorer → tree  백엔드 넷 → state
+    //
+    // 즉 **기본값을 깜빡한 것이 아니라 소유자·allocator·부모를 요구하는 타입**이다. 그런 타입에
+    // `undefined` + `init()` 은 **옳은 패턴**이고, 바꾸려면 그 타입들에 「주인 없는 빈 상태」라는
+    // 새 뜻을 만들어야 한다 — 그것은 이 파일이 아니라 각 타입이 정할 일이다.
+    //
+    // **그래서 남은 위험은 이렇게 다룬다**: 이 필드들을 읽는 테스트는 `init()` 을 부른다(그러면
+    // 결정적이다). 안 부르고 읽으면 UB 이고, `editor macOS (ReleaseFast)` 잡이 그것을 잡는다.
     new_tab_config: NormalizedConfig = undefined,
     new_tab_zdotdir: ?[]const u8 = null,
     // opt-in ssh 라우팅(`shell-integration.ssh`)이 켜졌을 때 현재 maru 실행 파일 경로(owned). 새 탭 spawn에도

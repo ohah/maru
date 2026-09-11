@@ -212,6 +212,12 @@ pub const State = struct {
     ///
     /// `source_remote` 와 달리 **스캔 결과의 성질**이라 `clear` 가 지운다.
     remote_failed: bool = false,
+    /// **지금 들고 있는 목록이 원격 것인가.** `source_remote` 와 달리 **이미 지은 것**의 성질이다.
+    ///
+    /// 🔥 둘이 갈리는 순간이 곧 「pane 이 ssh 로 들어갔다(또는 나왔다)」이고, 그때 목록은 **통째로
+    /// 다른 기계의 것**이 된다. 이 값이 없으면 `refresh` 가 「같은 경로 · 이미 지었음」으로 보고
+    /// 물러나 **로컬 목록이 원격 세션 이름표 밑에 그대로 남는다**(CI 가 잡은 결함).
+    built_remote: bool = false,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -1204,7 +1210,10 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 짚었다: 이 자리에 신선도 검사를 두어도 `pollFreshness` 가 `force` 로 부르므로 **test 가
     // 지키지 못하는 코드**가 된다. 뷰에 다시 들어오면 다음 tick 의 `pollFreshness` 가 곧바로 잡는다
     // (첫 검사는 스로틀에 안 걸린다).
-    if (!force and same and (self.agent_activity.built or self.agent_activity.scanning())) return;
+    // **원격 여부가 갈리면 경로가 같아도 다시 건다.** 같은 문자열이라도 한쪽은 이쪽 파일이고
+    // 다른 쪽은 저쪽 파일이다 — 「같은 경로」가 「같은 소스」를 뜻하지 않는 유일한 자리다.
+    const remote_changed = self.agent_activity.source_remote != self.agent_activity.built_remote;
+    if (!force and same and !remote_changed and (self.agent_activity.built or self.agent_activity.scanning())) return;
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
@@ -1217,7 +1226,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
     self.agent_activity.pendingClear();
     // **보던 자리도 옛 세션의 것이다.** 오프셋은 픽셀이라 새 목록에서는 아무 뜻이 없고, 남겨 두면
     // 짧은 목록에서 끝을 넘어 화면이 빈다(적대적 검증 H2). 필터 전환이 같은 이유로 같은 일을 한다.
-    if (!same) self.agent_activity.scroll.offset_y_px = 0;
+    if (!same or remote_changed) self.agent_activity.scroll.offset_y_px = 0;
 
     // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
     // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
@@ -1225,7 +1234,10 @@ pub fn refresh(self: *AppSession, force: bool) void {
     //
     // 결과가 오면 `poll` 이 목록을 통째로 바꾸고 그 위에 쌓인 것(타일·크게보기·호버)도 그때 버린다.
     // 그때까지는 조금 낡은 목록이 보인다 — 빈 화면보다 정직하다. 검색어도 자연히 남는다.
-    if (!same) self.agent_activity.clear(self.allocator);
+    // **원격 여부가 갈렸으면 비운다** — 경로가 같아도 **다른 기계의 목록**이다. 안 비우면 로컬에서
+    // 본 활동이 원격 세션 이름표 밑에 남는다(그 반대도 마찬가지다).
+    if (!same or remote_changed) self.agent_activity.clear(self.allocator);
+    self.agent_activity.built_remote = self.agent_activity.source_remote;
     // **원격 체인은 자리 하나다.** `buildChain` 은 `~/.codex/sessions` 를 **로컬** 디렉터리로 훑으므로
     // (부모 rollout 탐색) 원격 경로에 대고 부르면 이쪽 파일을 뒤진다 — §2.1 이 금하는 바로 그것이다.
     // 저쪽에서 체인을 푸는 것은 RAV4 다.
@@ -1549,7 +1561,9 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
         // 「전체」 목록에서는 그림 있는 줄이 **60 줄에 한 줄**이다(실측 중앙 1.7%) — 여기서 물러나면
         // 첫 번째 그림 없는 줄에서 멈춰 뒤쪽 그림을 영영 안 건다.
         const src = thumbSource(hit) orelse continue;
-        const path = self.agent_activity.chain.get(src.file_index) orelse continue;
+        // **`pathFor` 와 같은 판정을 지난다**(원격이면 null — 위 주석). 여기서 `chain.get` 을 직접
+        // 부르면 그 가드를 우회해 원격 오프셋이 로컬 디코드로 간다.
+        const path = pathForIndex(self, src.file_index) orelse continue;
         if (backend.submit(
             path,
             src.offset,
@@ -2324,10 +2338,27 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     return true;
 }
 
-/// 그 hit 의 오프셋이 가리키는 **파일**. 체인이 여럿이면 `file_index` 가 유일한 답이다 —
+/// 그 hit 의 오프셋이 가리키는 **로컬 파일**. 체인이 여럿이면 `file_index` 가 유일한 답이다 —
 /// 첫 파일로 고정하면 부모 이미지를 현재 파일에서 읽어 엉뚱한 바이트를 디코드한다.
+///
+/// 🔥 **원격 소스면 null 이다**(계약 §2.1 · 적대적 N1). 이 함수가 주는 경로는 곧바로
+/// `Dir.cwd().openFile` 로 간다(디코드 워커 · 본문 검색 워커 · 펼침 · 썸네일 — 계획 §6.3 이 말한
+/// 「네 소비자」가 그것이다). 원격 오프셋을 그 자리에 대면 **같은 모양의 이쪽 파일이 실제로 열려**
+/// 남의 대화 바이트를 디코드한다 — 갤러리 §4.1.2 가 막으려던 바로 그 사고다.
+///
+/// **판정을 여기 한 곳에 둔다.** 소비자마다 가드를 두면 넷 중 하나를 잊고, 그 하나가 조용히 남의
+/// 파일을 연다(이 저장소가 「여섯 곳이 옛 축에 남아 있었다」로 이미 겪은 모양).
+///
+/// 저쪽 바이트를 **요청형으로 당겨오는 것**은 RAV5·RAV6 이다. 그때까지 원격 pane 은 목록과 라벨만
+/// 보이고 펼침·썸네일은 비어 있다 — 그 사실은 §13.5 가 한계로 적어 둔다.
 fn pathFor(self: *const AppSession, hit: index.Hit) ?[]const u8 {
-    return self.agent_activity.chain.get(hit.file_index);
+    return pathForIndex(self, hit.file_index);
+}
+
+/// `pathFor` 의 알맹이 — 체인 자리 번호로 직접 묻는다(썸네일은 `ResultSummary.image_file` 을 쓴다).
+fn pathForIndex(self: *const AppSession, file_index: u8) ?[]const u8 {
+    if (self.agent_activity.source_remote) return null;
+    return self.agent_activity.chain.get(file_index);
 }
 
 /// 그 칸의 라벨. **스캔 워커가 이미 만들어 뒀다** — 예전에는 타일이 생길 때 파일을 열어 읽었는데,

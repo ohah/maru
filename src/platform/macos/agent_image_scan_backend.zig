@@ -189,6 +189,9 @@ pub const Backend = struct {
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
+            // **원격 사본도 여기서 푼다**(적대적 N2). 워커가 안 떴으므로 그 `defer` 가 안 돈다 —
+            // 로컬 갈래에는 없던 자리이고, job 이 값만 들던 시절의 `destroy` 하나로는 모자란다.
+            if (job.remote) |*r| r.deinit(state.allocator);
             state.allocator.destroy(job);
             finish(state, null);
             return null;
@@ -490,6 +493,13 @@ fn worker(job: *Job) void {
 ///
 /// **여기는 백그라운드 스레드다** — `std.Io` 를 안 만지고(`ssh_upload` 규율) **로컬 파일시스템도 안
 /// 만진다**. 이 함수 안에 open/stat 이 생기면 그것이 계약 §2.1 위반이고, 경계 게이트가 그 자리를 센다.
+///
+/// ⚠️ **취소를 못 본다 — 로컬과의 비대칭**(적대적 N3). 로컬 워커는 청크마다 `cancelled_upto` 를
+/// 읽어 3.6 초짜리를 곧바로 접지만, 이쪽은 `runRemoteCapped` 한 번에 갇힌다(전송이 블로킹이다).
+/// 그래서 pane 을 옮겨도 **왕복이 끝날 때까지 새 스캔이 안 걸린다**(`inflight` 가 하나다).
+///
+/// **정확성은 안 깨진다** — 늦게 온 결과는 `generation` 대조에서 버려진다. 잃는 것은 **지연**뿐이고
+/// (실측 3.82 GB 에서 6.3 초), 그 대가로 전송 층을 안 건드린다. 취소 가능한 전송은 RAV7 의 일이다.
 fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRemote, generation: u64) Result {
     if (comptime builtin.os.tag != .macos) unreachable; // submit 이 이미 막는다
 

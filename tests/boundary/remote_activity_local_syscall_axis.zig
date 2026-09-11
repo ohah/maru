@@ -16,6 +16,14 @@
 //! 이 게이트는 **원격 갈래가 로컬 파일을 여는 자리를 지나지 않는다**를 소스에서 센다 — 원격 워커
 //! (`remoteScan`·`remoteResultFromWire`)가 파일 열기·stat 토큰을 **하나도** 안 들어야 한다.
 //!
+//! 🔥 **처음에는 워커만 셌고 그것이 결함이었다**(적대적 N1). 계약 §6.3 은 「대상은 **넷**」이라고
+//! 적어 두었는데 — 디코드 워커 · 본문 검색 워커 · 펼침 · 썸네일 — 그 넷은 **결과를 소비하는 쪽**이라
+//! 워커 밖에 있다. 원격 `Hit` 을 그대로 받아 `chain.get(file_index)` → `Dir.cwd().openFile` 로 가고
+//! 있었다. 게이트가 자기가 덮는다고 적은 범위를 **실제로는 안 덮고** 있었던 것이다.
+//!
+//! 그래서 이제 **경로를 주는 한 곳**(`pathFor`/`pathForIndex`)에 원격 가드가 있는지, 그리고 그 가드를
+//! **우회하는 `chain.get` 직접 호출이 없는지**를 함께 센다.
+//!
 //! ⚠️ **빈 재고를 못 박는 게이트는 아무것도 안 잡는다.** 그래서 「원격 갈래가 존재한다」도 함께
 //! 단언한다 — 갈래가 사라지면(누가 로컬로 되돌리면) 이 게이트가 먼저 빨개진다.
 
@@ -115,6 +123,35 @@ test "RAV3: 원격 실패를 「없다」로 말하지 않는다" {
     const marker = "if (self.agent_activity.remote_failed) return maru.i18n.t(.agent_activity_remote_unsupported);";
     if (std.mem.indexOf(u8, activity_src, marker) == null) {
         std.debug.print("🔥 원격 왕복 실패가 「활동이 없습니다」로 보인다(계약 §2.2).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "RAV3 §6.3: 경로를 주는 한 곳이 원격을 막는다 — 네 소비자가 그 문을 지난다" {
+    const gpa = std.testing.allocator;
+    const activity_src = try readSource(gpa, std.testing.io, activity_path);
+    defer gpa.free(activity_src);
+
+    // 🔥 적대적 N1: 디코드·본문 검색·펼침·썸네일이 **원격 `Hit` 으로 로컬 파일을 열고** 있었다.
+    // 소비자마다 가드를 두면 넷 중 하나를 잊고, 그 하나가 조용히 남의 파일을 연다.
+    const guard = "fn pathForIndex(self: *const AppSession, file_index: u8) ?[]const u8 {\n" ++
+        "    if (self.agent_activity.source_remote) return null;";
+    if (std.mem.indexOf(u8, activity_src, guard) == null) {
+        std.debug.print("🔥 경로를 주는 한 곳(`pathForIndex`)에 원격 가드가 없다.\n" ++
+            "  그 경로는 곧바로 `Dir.cwd().openFile` 로 간다(계획 §6.3 의 네 소비자).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+
+    // **그 문을 우회하는 자리가 없어야 한다.** `chain.get` 직접 호출은 `pathForIndex` 안의 하나뿐이다.
+    var count: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, activity_src, at, "chain.get(")) |found| {
+        count += 1;
+        at = found + 1;
+    }
+    if (count != 1) {
+        std.debug.print("🔥 `chain.get(` 호출이 {d} 곳이다 — 하나여야 한다(`pathForIndex`).\n" ++
+            "  다른 자리는 원격 가드를 **우회한다**.\n", .{count});
         return error.TestUnexpectedResult;
     }
 }

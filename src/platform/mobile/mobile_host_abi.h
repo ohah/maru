@@ -694,6 +694,10 @@ int maru_mobile_ssh_write(unsigned int handle, const unsigned char *bytes, unsig
                           unsigned int *sent);
 /// 창 크기가 바뀌었다(`window-change`).
 int maru_mobile_ssh_resize(unsigned int handle, unsigned int cols, unsigned int rows);
+/// **살아 있나 묻는다**(`keepalive@openssh.com`, `want_reply`=1 — SSH 계약 §4.1).
+/// 답이 `CHANNEL_SUCCESS` 든 `FAILURE` 든 **왔다는 사실**이 증거다. **언제 부를지는 host 가
+/// 정한다** — 코어에는 시계가 없다.
+int maru_mobile_ssh_keepalive(unsigned int handle);
 /// 더 보낼 것이 없다(`CHANNEL_EOF`).
 int maru_mobile_ssh_eof(unsigned int handle);
 

@@ -668,6 +668,20 @@ pub export fn maru_mobile_ssh_resize(handle: u32, cols: u32, rows: u32) c_int {
     return ok;
 }
 
+/// **살아 있나 묻는다**(SSH 계약 §4.1). 조용한 연결이 죽은 연결과 구별되지 않는 것을 막는다.
+///
+/// **언제 부를지는 host 가 정한다** — 코어에는 시계가 없고, 적당한 간격은 기기와 망이 안다.
+/// 여기는 그 물음을 바이트로 만들어 나갈 자리에 얹기만 한다.
+pub export fn maru_mobile_ssh_keepalive(handle: u32) c_int {
+    const s = slotOf(handle) orelse return err_bad_handle;
+    const wire = s.cl.keepalive(outFree(s)) catch |e| {
+        setError(s, @errorName(e));
+        return statusOf(e);
+    };
+    s.out_len += wire.len;
+    return ok;
+}
+
 pub export fn maru_mobile_ssh_eof(handle: u32) c_int {
     const s = slotOf(handle) orelse return err_bad_handle;
     const wire = s.cl.eof(outFree(s)) catch |e| {

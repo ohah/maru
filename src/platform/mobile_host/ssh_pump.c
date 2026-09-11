@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -50,6 +51,16 @@
 #define PUMP_RESPONSE_CAP 256
 /// 소켓 읽기 타임아웃(초). **멈춤을 알아채는 주기**이기도 하다 — 이 값마다 정지 표시를 본다.
 #define PUMP_READ_TIMEOUT_S 2
+/// **살아 있나 묻는 주기와 마감**(사용자 확정 2026-09-11 — SSH 계약 §4.1).
+///
+/// 조용한 지 15초면 묻고, 답이 45초 없으면 죽은 것으로 본다(= 세 번 놓침). **한 번 놓쳤다고 안
+/// 죽이는 이유**: 전환 직후나 깊은 잠에서 답이 늦을 수 있고, 재접속은 **새 세션**이라(SSH 에
+/// 재개가 없다) 오판의 대가가 크다 — 돌던 셸이 사라진다.
+///
+/// **값이 여기 있는 이유**: 코어에는 시계가 없고 적당한 간격도 모른다(폰과 데스크톱이 다르다).
+/// 코어는 인코딩만 하고 언제 보낼지는 부르는 쪽이 정한다(계약 §4.1).
+#define PUMP_KEEPALIVE_IDLE_S 15
+#define PUMP_KEEPALIVE_DEADLINE_S 45
 /// 펌프 스레드 스택. **기본값으로는 죽는다 — 실측이다.**
 ///
 /// 코어는 패킷 상한(256KiB)짜리 버퍼를 **스택에** 잡는다(`client.emit` 의 `max_packet + 64`,
@@ -120,6 +131,18 @@ static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /// 상대가 끊었을 때의 이름을 정한다(정의는 아래 — `flush_out` 이 먼저 부른다).
 static void set_closed_error(void);
+
+/// **단조 시계(초).** 벽시계를 쓰면 사용자가 시간을 고치거나 시간대가 바뀔 때 마감이 튄다.
+static long long pump_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec;
+}
+
+/// 마지막으로 **상대에게서 무언가 온** 시각. 조용함을 재는 기준이다.
+static long long g_last_rx_s;
+/// 살아 있나 물어 놓고 **답을 기다리기 시작한** 시각(0 이면 안 묻고 있다).
+static long long g_keepalive_sent_s;
 
 static void set_error(const char *name) {
     // **먼저 난 실패를 남긴다** — 뒤에 난 것으로 덮으면 원인이 결과에 가린다.
@@ -544,6 +567,10 @@ static void *pump_main(void *unused) {
 
     unsigned int password_waited_ms = 0;
     unsigned int host_key_waited_ms = 0;
+    // **조용함은 «지금부터» 잰다.** 0 으로 두면 첫 루프에서 곧바로 묻는다 — 방금 붙은 연결에
+    // 대고 살아 있냐고 묻는 꼴이고, 그 답을 기다리는 동안 마감이 돌기 시작한다.
+    g_last_rx_s = pump_now_s();
+    g_keepalive_sent_s = 0;
     while (!g_stop) {
         pthread_mutex_lock(&g_session_lock);
         int bad = flush_out();
@@ -651,6 +678,29 @@ static void *pump_main(void *unused) {
             set_error("read_failed");
             break;
         }
+        // **조용한 동안 살아 있나 묻는다**(SSH 계약 §4.1). `poll` 이 타임아웃마다 여기 오므로
+        // 따로 깨울 필요가 없다 — 바쁜 연결에서는 아래 `read` 가 시각을 갱신해 아예 안 묻는다.
+        {
+            const long long now = pump_now_s();
+            if (g_keepalive_sent_s != 0) {
+                // **답을 기다리는 중**이다. 마감을 넘겼으면 죽은 것으로 본다 — 그 전에는 안 죽인다
+                // (한 번 놓친 것과 죽은 것은 다르다).
+                if (now - g_keepalive_sent_s >= PUMP_KEEPALIVE_DEADLINE_S) {
+                    set_error("keepalive_timeout");
+                    break;
+                }
+            } else if (now - g_last_rx_s >= PUMP_KEEPALIVE_IDLE_S) {
+                // **자물쇠 안에서 묻는다.** 이 루프의 다른 코어 호출은 전부 `g_session_lock`
+                // 안인데 여기만 밖에 두었더니 앱 스레드(입력·크기·컨트롤 열기)와 겹쳐
+                // **멀쩡한 연결이 16초 만에 죽었다**(기기 실측: `state=12 error=NotReady`).
+                pthread_mutex_lock(&g_session_lock);
+                int asked = (g_handle != 0 && maru_mobile_ssh_keepalive(g_handle) == 0);
+                int bad_flush = asked ? flush_out() : 0;
+                pthread_mutex_unlock(&g_session_lock);
+                if (asked) g_keepalive_sent_s = now;
+                if (bad_flush != 0) break;
+            }
+        }
         // 타임아웃은 실패가 아니다 — 머리로 돌아가 정지 표시를 보고, 쌓인 것이 있으면 민다.
         if (pr == 0) continue;
         if (g_wake_r >= 0 && (pfds[1].revents & POLLIN)) pump_wake_drain();
@@ -677,6 +727,11 @@ static void *pump_main(void *unused) {
             break;
         }
         g_in_len += (unsigned long)n;
+        // **무엇이 왔든 살아 있다는 증거다.** 우리 물음의 답(`CHANNEL_SUCCESS`/`FAILURE`)만
+        // 세면 그 답을 코어가 삼키는 자리마다 갈고리를 달아야 하고, 서버가 보낸 다른 것이 와도
+        // 죽었다고 하게 된다 — 둘 다 틀리다(계약 §4.1: 답이 «왔다는 사실» 이 증거다).
+        g_last_rx_s = pump_now_s();
+        g_keepalive_sent_s = 0;
         if (feed_buffered() != 0) break;
     }
 

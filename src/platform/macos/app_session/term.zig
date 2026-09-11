@@ -1084,6 +1084,27 @@ pub const AgentTargets = struct {
     eligible: usize,
 };
 
+/// 이 창에 **보낼 수 있는 대상이 하나라도 있는가.** `collectAgentTargets` 와 **같은 조건**을 쓰되
+/// 라벨을 안 만든다 — 그쪽은 후보마다 cwd 표시와 git 브랜치를 조회하므로 **매 프레임 부를 것이
+/// 아니다**. 헬퍼(NSH)의 프레임별 자가 판정이 이것을 쓴다.
+///
+/// **조건이 둘로 갈리면 안 된다**: 여기서 참인데 저기서 0 이면 상자가 떠 있는데 누르면 메뉴가
+/// 빈다. 그래서 조건식은 아래 열거와 글자 그대로 같아야 한다(둘 다 이 파일에 붙여 둔 이유다).
+pub fn hasAgentTarget(self: *AppSession) bool {
+    // 탭이 없는 창(merge/이동으로 비워진 뒤 Swift 가 닫기 전 tick)은 활성 pane 자체가 없다 —
+    // `handleDroppedFiles` 가 같은 상태를 같은 이유로 먼저 거른다. 이 함수는 프레임 경로에서
+    // 불리므로 그 tick 을 실제로 만난다.
+    if (self.tabs.items.len == 0) return false;
+    const tab = self.tabs.items[self.app_window.active_tab];
+    for (tab.panes.items) |pane| {
+        for (pane.terms.items) |term| {
+            if (term.kind != .terminal or term.rt.ended_placeholder) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn collectAgentTargets(
     self: *AppSession,
     out: []maru.session.agent_selection.Candidate,
@@ -1095,7 +1116,13 @@ pub fn collectAgentTargets(
     const tab = self.tabs.items[self.app_window.active_tab];
     for (tab.panes.items) |pane| {
         for (pane.terms.items) |term| {
-            if (term.kind != .terminal) continue;
+            // **§7 종료 placeholder 는 후보가 아니다**(적대적 7회차 2026-09-12). 묘비는 `kind` 가
+            // 계속 `.terminal` 이지만 **붙일 PTY 가 없다** — 보내면 바이트가 조용히 사라진다.
+            // `routeDropAtPoint` 가 파일 드롭을 같은 이유로 거절하는 그 상태다. 헬퍼(NSH)가 이
+            // 구멍을 크게 만든다: 창에 살아 있는 터미널이 없고 묘비만 있으면 «후보가 하나» 라
+            // **메뉴도 없이 그 허공으로 바로 보낸다**. `eligible` 에도 안 센다 — 고를 수 없는
+            // 것은 "자리를 넘겨 잘린" 것이 아니라 애초에 대상이 아니다.
+            if (term.kind != .terminal or term.rt.ended_placeholder) continue;
             // **자격은 자리와 무관하게 센다** — 잘린 수를 말하려면 넘친 것도 세야 한다.
             eligible += 1;
             if (n >= out.len or n >= folder_bufs.len) continue;

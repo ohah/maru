@@ -275,7 +275,13 @@ pub fn bodyAnchor(
     const text = lines[line];
     var one = [_]u32{@intCast(@min(byte_in_line, text.len))};
     var out = [_]u32{0};
-    content.columnsAtOffsets(text, geom.tab_width, &one, &out, std.math.maxInt(u32));
+    // **화면 오른쪽 끝에서 멈춘다.** 이 함수는 프레임마다 불리고(상자가 떠 있는 동안), 걸음은
+    // `offset` 에 비례한다 — 한 줄이 수 MB 인 minified 파일에서 끝 쪽을 고르면 **매 프레임 그
+    // 줄을 통째로 훑는다**. 상한을 주어도 답이 안 바뀌는 이유는 아래 clamp 다: 오른쪽 변 너머는
+    // 어차피 변에 묶이므로, 그 너머의 정확한 열을 알 필요가 없다(`columnsAtOffsets` 는 멈춘 열을
+    // 남은 자리에 채운다). `expandTabs` 가 같은 이유로 같은 상한을 쓴다.
+    const stop_col: u32 = v.start_col +| @as(u32, geom.content_width) +| 1;
+    content.columnsAtOffsets(text, geom.tab_width, &one, &out, stop_col);
     const col = out[0];
 
     // 행 안에서 몇 칸째인가. 앞 조각/가로 스크롤 밖이면 0 칸(왼쪽 변).
@@ -360,4 +366,46 @@ test "bodyAnchor: 가로로 사각 밖이면 변에 묶는다" {
     // 190 열은 폭 10 칸 밖이다 — 오른쪽 변(9 칸)에 붙는다.
     const a = bodyAnchor(g, rows, &row_lines, &lines, 0, 190) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i32, 90), a.x_px);
+}
+
+test "bodyAnchor: 가로로 굴린 화면에서도 보이는 자리를 가리킨다 (적대적 3회차)" {
+    // **`start_col` 이 가로 스크롤을 함께 담는다**(랩이 꺼지면 조각이 하나이고 그 값이 곧 `first_col`
+    // 이다 — `frame.paintBands` 가 같은 값을 같은 이유로 쓴다). 그 뺄셈이 빠지면 오른쪽으로 굴린
+    // 화면에서 상자가 **굴린 칸 수만큼** 오른쪽으로 밀린다.
+    var buf: [8]visual_map.VisualRow = undefined;
+    buf[0] = .{ .line = 0, .piece = 0, .start_col = 10, .start_byte = 10, .start_byte_col = 10 };
+    const rows = buf[0..1];
+    const row_lines = [_]u32{0};
+    var long: [40]u8 = undefined;
+    @memset(&long, 'x');
+    const lines = [_][]const u8{&long};
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 20, .cell_w_px = 10, .cell_h_px = 19, .tab_width = 4 };
+
+    // 12 열은 화면의 **2 번째 칸**이다(10 열부터 보인다).
+    const a = bodyAnchor(g, rows, &row_lines, &lines, 0, 12) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 20), a.x_px);
+    // 굴린 자리보다 **앞**은 왼쪽 변에 붙는다(화면 밖을 가리키지 않는다).
+    const before = bodyAnchor(g, rows, &row_lines, &lines, 0, 3) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 0), before.x_px);
+}
+
+test "bodyAnchor: 긴 줄에서도 답이 같다 — 상한은 걸음만 줄인다 (적대적 5회차)" {
+    // 이 함수는 상자가 떠 있는 **매 프레임** 불리고 걸음은 `offset` 에 비례한다. 화면 오른쪽 끝에서
+    // 멈추게 해도 답이 안 바뀌어야 그 상한이 정당하다 — 바뀌면 그것은 최적화가 아니라 결함이다.
+    var buf: [8]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(1, &buf);
+    const row_lines = [_]u32{0};
+    var long: [200_000]u8 = undefined;
+    @memset(&long, 'q');
+    const lines = [_][]const u8{&long};
+    const g = Geometry{ .body_x = 7, .body_y = 3, .content_left_px = 40, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
+
+    // 화면 **안**: 정확한 열이어야 한다(상한이 여기까지 오면 안 된다).
+    const inside = bodyAnchor(g, rows, &row_lines, &lines, 0, 30) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 7 + 40 + 30 * 9), inside.x_px);
+    // 화면 **밖**: 어느 쪽이든 오른쪽 변이다(79 칸).
+    const far = bodyAnchor(g, rows, &row_lines, &lines, 0, 199_999) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 7 + 40 + 79 * 9), far.x_px);
+    const nearer = bodyAnchor(g, rows, &row_lines, &lines, 0, 500) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(far.x_px, nearer.x_px); // 변 너머는 전부 같은 답이다
 }

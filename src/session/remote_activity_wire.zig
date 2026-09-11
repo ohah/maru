@@ -351,6 +351,8 @@ pub const ParseError = error{
     DuplicateFile,
     /// 레코드가 **안 온 체인 파일**을 가리킨다 — 그 오프셋은 읽을 자리가 없다.
     UnknownFile,
+    /// 꼬리는 왔는데 스캔 플래그(`S`)가 없다 — 「다 봤나」를 모르는 채 완결로 읽을 수 없다.
+    MissingFlags,
     /// 열거값이 이 판이 아는 범위 밖이다 — 새 판의 헬퍼가 보낸 것이거나 오염이다. **`other` 로
     /// 뭉개지 않는다**: 뭉개면 「모르는 것을 아는 척」이 되고, 그 값이 필터·접기의 갈림을 정한다.
     UnknownEnum,
@@ -583,6 +585,13 @@ pub const Parser = struct {
 
     fn parseTail(self: *Parser) ParseError!void {
         _ = try self.expectPrefix("X ");
+        // 🔥 **플래그를 못 봤으면 답이 아니다**(적대적 L1). 플래그의 기본값은 전부 거짓 =
+        // 「다 봤다」이므로, 빠진 답을 완결로 읽으면 **「못 봤다」가 「다 봤다」로 뒤집힌다** —
+        // 계약 §2.2 가 가장 크게 여기는 갈림이 조용히 무너진다.
+        //
+        // `!`(원격 오류)로 끝난 답은 면제다 — 그쪽은 스캔을 시작도 못 한 경우이고, 그 사실을
+        // 오류 자체가 말한다.
+        if (!self.saw_flags) return ParseError.MissingFlags;
         const count = try self.takeDecimalLine();
         if (count != self.records_seen) return ParseError.CountMismatch;
     }
@@ -592,13 +601,15 @@ pub const Parser = struct {
 
 const testing = std.testing;
 
-/// 판정자 공용 머리 — 머리말 + `sampleHit` 이 가리키는 체인 자리(2).
+/// 판정자 공용 머리 — 머리말 + `sampleHit` 이 가리키는 체인 자리(2) + 스캔 플래그.
 ///
-/// 레코드가 **안 온 파일을 가리키면 거부**하므로(적대적 H1) 이 자리를 안 채우면 판정자가 `UnknownFile`
-/// 로 죽는다. 그 가드를 세우자 기존 판정자 넷이 곧바로 빨개졌다 — **가드가 실제로 문다는 증거다.**
+/// 레코드가 **안 온 파일을 가리키면 거부**하고(적대적 H1) **플래그 없이 꼬리가 오면 거부**하므로
+/// (적대적 L1) 이 둘을 안 채우면 판정자가 그 가드에서 죽는다. 두 가드를 세울 때마다 기존 판정자
+/// 넷·셋이 곧바로 빨개졌다 — **가드가 실제로 문다는 증거다.**
 fn headerWithChain(buf: []u8) usize {
-    const n = appendHeader(buf, 0).?;
-    return appendFile(buf, n, 2, "/a/b.jsonl").?;
+    var n = appendHeader(buf, 0).?;
+    n = appendFile(buf, n, 2, "/a/b.jsonl").?;
+    return appendFlags(buf, n, .{}).?;
 }
 
 fn sampleHit() index.Hit {
@@ -672,6 +683,7 @@ test "꼬리가 없으면 완결이 아니다 — 잘림을 온전한 척 읽지
 
     var p = Parser.init(buf[0..n]);
     _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 스캔 플래그
     _ = try p.next(); // 레코드
     try testing.expectEqual(@as(?Event, null), try p.next());
     try testing.expect(!p.complete());
@@ -685,6 +697,7 @@ test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다"
 
     var p = Parser.init(buf[0..n]);
     _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 스캔 플래그
     _ = try p.next(); // 레코드
     try testing.expectError(ParseError.CountMismatch, p.next());
 }
@@ -709,10 +722,12 @@ test "원격 오류도 완결이다 — 「못 읽는다」와 「비었다」�
 test "꼬리 뒤의 바이트는 응답 두 개가 섞인 것이다" {
     var buf: [1024]u8 = undefined;
     var n = appendHeader(&buf, 0).?;
+    n = appendFlags(&buf, n, .{}).?;
     n = appendTail(&buf, n, 0).?;
     n = appendBytes(&buf, n, "X 0\n").?;
 
     var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 스캔 플래그
     try testing.expectEqual(@as(?Event, null), try p.next());
     try testing.expectError(ParseError.TrailingData, p.next());
 }
@@ -743,6 +758,34 @@ fn pollutedRecord(buf: []u8, at: usize, field: usize, value: u64, label: []const
     return buf[0..n];
 }
 
+/// 머리(머리말·체인·플래그)를 **전부 삼키고** 그 뒤에서 오류를 기대한다.
+///
+/// 판정자가 「`next()` 를 몇 번 부르는가」에 묶이면 머리가 늘 때마다 **엉뚱한 이유로** 깨진다 —
+/// 체인 자리를 더할 때(G1) 한 번, 플래그를 필수로 할 때(L1) 또 한 번 그렇게 깨졌다. 여기서는
+/// **레코드가 아닌 것은 전부 흘려보내고** 오류만 본다.
+fn expectRecordError(bytes: []const u8, want: ParseError) !void {
+    var p = Parser.init(bytes);
+    while (true) {
+        const ev = p.next() catch |e| {
+            try testing.expectEqual(want, e);
+            return;
+        } orelse break;
+        // 오염된 레코드가 **통과하면** 그것이 결함이다.
+        if (ev == .record) return error.TestUnexpectedResult;
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// 머리를 삼키고 **첫 레코드**를 돌려준다. 위 `expectRecordError` 와 같은 이유 — 판정자를
+/// 「`next()` 를 몇 번 부르는가」에 안 묶는다.
+fn firstRecord(bytes: []const u8) !Record {
+    var p = Parser.init(bytes);
+    while (try p.next()) |ev| {
+        if (ev == .record) return ev.record;
+    }
+    return error.TestUnexpectedResult;
+}
+
 /// 자리 번호(0 부터) — `appendRecord` 의 순서와 같아야 한다.
 const f_kind: usize = 4;
 const f_result_flags: usize = 15;
@@ -765,9 +808,7 @@ test "라벨 길이가 상한을 넘는다고 주장하면 거부한다" {
     const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_label_len, max_label_bytes + 1, "x");
 
-    var p = Parser.init(bytes);
-    _ = try p.next(); // 체인 파일
-    try testing.expectError(ParseError.TooLong, p.next());
+    try expectRecordError(bytes, ParseError.TooLong);
 }
 
 test "모르는 열거값은 뭉개지 않고 거부한다" {
@@ -775,9 +816,7 @@ test "모르는 열거값은 뭉개지 않고 거부한다" {
     const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_kind, 99, "");
 
-    var p = Parser.init(bytes);
-    _ = try p.next(); // 체인 파일
-    try testing.expectError(ParseError.UnknownEnum, p.next());
+    try expectRecordError(bytes, ParseError.UnknownEnum);
 }
 
 test "모르는 라벨 출처도 거부한다 — 새 판의 헬퍼다" {
@@ -785,9 +824,7 @@ test "모르는 라벨 출처도 거부한다 — 새 판의 헬퍼다" {
     const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_source, 99, "");
 
-    var p = Parser.init(bytes);
-    _ = try p.next(); // 체인 파일
-    try testing.expectError(ParseError.UnknownEnum, p.next());
+    try expectRecordError(bytes, ParseError.UnknownEnum);
 }
 
 test "모르는 결과 비트는 새 판이다 — 조용히 버리지 않는다" {
@@ -796,9 +833,7 @@ test "모르는 결과 비트는 새 판이다 — 조용히 버리지 않는다
     // 아는 넷(0b1111) 밖의 비트.
     const bytes = pollutedRecord(&buf, h, f_result_flags, 16, "");
 
-    var p = Parser.init(bytes);
-    _ = try p.next(); // 체인 파일
-    try testing.expectError(ParseError.UnknownEnum, p.next());
+    try expectRecordError(bytes, ParseError.UnknownEnum);
 }
 
 test "부호·밑줄이 든 수를 거부한다 — 꼬리 count 방어가 뚫리지 않게" {
@@ -812,6 +847,7 @@ test "부호·밑줄이 든 수를 거부한다 — 꼬리 count 방어가 뚫�
 
     var p = Parser.init(buf[0 .. n + bad.len]);
     _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 스캔 플래그
     _ = try p.next(); // 레코드
     try testing.expectError(ParseError.Malformed, p.next());
 }
@@ -835,10 +871,8 @@ test "라벨 출처가 그대로 돌아온다 — 화면이 「어디서 온 그
     }).?;
     n = appendTail(&buf, n, 1).?;
 
-    var p = Parser.init(buf[0..n]);
-    _ = try p.next(); // 체인 파일
-    const ev = (try p.next()).?;
-    try testing.expectEqual(context.Source.codex_wrapper_path, ev.record.label.source);
+    const rec = try firstRecord(buf[0..n]);
+    try testing.expectEqual(context.Source.codex_wrapper_path, rec.label.source);
 }
 
 test "버퍼가 모자라면 null — 잘린 레코드를 절대 만들지 않는다" {
@@ -873,6 +907,31 @@ test "버퍼가 차면 꼬리를 안 쓴다 — 그 wire 는 «완결» 이 아�
     try testing.expect(!p.complete());
 }
 
+test "플래그 없이 꼬리만 오면 거부한다 — 「못 봤다」가 「다 봤다」로 뒤집히지 않게" {
+    // 적대적 L1: `ScanFlags` 의 기본값은 전부 거짓(= 다 봤다)이다. 플래그가 빠진 답을 완결로
+    // 읽으면 상한에 잘린 세션이 **온전한 것처럼** 뜬다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 0, "/a/b.jsonl").?;
+    n = appendTail(&buf, n, 0).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 체인 파일
+    try testing.expectError(ParseError.MissingFlags, p.next());
+}
+
+test "원격 오류로 끝난 답은 플래그가 없어도 완결이다" {
+    // 스캔을 시작도 못 한 경우다 — 그 사실을 오류 자체가 말한다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRemoteError(&buf, n, "open failed: FileNotFound").?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqualStrings("open failed: FileNotFound", ev.remote_error);
+    try testing.expect(p.complete());
+}
+
 test "안 온 체인 파일을 가리키는 레코드는 거부한다" {
     // 적대적 H1: 안 보면 소비자가 체인 밖 인덱스로 파일을 열려다 조용히 건너뛰고, 그 활동은
     // 「없는 것」이 된다.
@@ -894,9 +953,7 @@ test "결과 이미지의 파일 번호도 같은 검사를 받는다" {
     h.result.image_file = 1; // 안 온 자리
     n = appendRecord(&buf, n, .{ .hit = h }).?;
 
-    var p = Parser.init(buf[0..n]);
-    _ = try p.next(); // 체인 파일
-    try testing.expectError(ParseError.UnknownFile, p.next());
+    try expectRecordError(buf[0..n], ParseError.UnknownFile);
 }
 
 test "같은 체인 자리를 두 번 주장하면 거부한다" {
@@ -966,10 +1023,8 @@ test "음수 시각도 그대로 돌아온다" {
     n = appendRecord(&buf, n, .{ .hit = sampleHit(), .label = .{ .time_s = -1 } }).?;
     n = appendTail(&buf, n, 1).?;
 
-    var p = Parser.init(buf[0..n]);
-    _ = try p.next(); // 체인 파일
-    const ev = (try p.next()).?;
-    try testing.expectEqual(@as(i64, -1), ev.record.label.time_s);
+    const rec = try firstRecord(buf[0..n]);
+    try testing.expectEqual(@as(i64, -1), rec.label.time_s);
 }
 
 test "상한 상수는 스캐너·라벨에서 온다 — 두 벌을 만들지 않는다" {

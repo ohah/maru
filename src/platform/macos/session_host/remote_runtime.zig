@@ -5723,6 +5723,15 @@ pub const RemoteRuntime = struct {
         raw_digest_bytes: u64,
     };
 
+    /// 자리별 해싱 내역. 총량만으로는 「무엇을 줄일 수 있는가」가 안 갈린다 — 불변 구조체 재해싱과
+    /// 검증용 재계산은 고칠 방향이 정반대다.
+    pub const DigestSiteSample = pending_event_preparation_mod.DigestSiteSample;
+    pub const digest_site_count = pending_event_preparation_mod.digest_site_count;
+
+    pub fn digestSiteSamples(out: *[digest_site_count]DigestSiteSample) void {
+        pending_event_preparation_mod.digestSiteSamples(out);
+    }
+
     pub fn observationEventCounters() ObservationEventCounters {
         const seal = pending_event_preparation_mod.observationDigestCounters();
         const frame_seal = pending_event_preparation_mod.sealCounters();

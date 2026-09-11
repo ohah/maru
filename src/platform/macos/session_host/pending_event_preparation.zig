@@ -745,18 +745,18 @@ pub const PreparationFrame = struct {
             .operation_identity = self.operation_lease.identity(),
             .source_receipt = receiptInput(self.source_receipt),
             .source_lease = sourceLeaseInput(self.source_lease_mirror),
-            .snapshot_digest = rawDigest("maru.pending-frame.snapshot.v1", std.mem.asBytes(&self.snapshot)),
-            .recipe_digest = rawDigest("maru.pending-frame.recipe.v1", std.mem.asBytes(&self.recipe)),
-            .scratch_graph_digest = rawDigest("maru.pending-frame.scratch.v1", std.mem.asBytes(&self.scratch)),
+            .snapshot_digest = rawDigest(.seal_snapshot, "maru.pending-frame.snapshot.v1", std.mem.asBytes(&self.snapshot)),
+            .recipe_digest = rawDigest(.seal_recipe, "maru.pending-frame.recipe.v1", std.mem.asBytes(&self.recipe)),
+            .scratch_graph_digest = rawDigest(.seal_scratch, "maru.pending-frame.scratch.v1", std.mem.asBytes(&self.scratch)),
             .dto_content_digest = self.dto_content_digest,
             .transfer_projection_mask = self.transfer_projection_mask,
             .transfer_observation_digest = self.transfer_observation_digest,
             .transcript_mirror = self.transcript_mirror,
             .progress_mirror = self.progress_mirror,
             .cleanup_descriptor = self.cleanup_descriptor,
-            .protected_ranges_digest = rawDigest("maru.pending-frame.ranges.v1", std.mem.asBytes(&self.protected_ranges)),
+            .protected_ranges_digest = rawDigest(.seal_ranges, "maru.pending-frame.ranges.v1", std.mem.asBytes(&self.protected_ranges)),
             .allocator_context_addr = @intFromPtr(&self.allocator_context),
-            .allocator_context_projection_digest = rawDigest("maru.pending-frame.allocator-context.v1", std.mem.asBytes(&self.allocator_context)),
+            .allocator_context_projection_digest = rawDigest(.seal_alloc_ctx, "maru.pending-frame.allocator-context.v1", std.mem.asBytes(&self.allocator_context)),
         };
     }
 
@@ -882,6 +882,7 @@ fn validateDtoContent(frame: *const PreparationFrame) void {
         descriptor.length_bytes != frame.scratch.dto_backing.items.len)
         process_seal.fatalIntegrity(.callback_drift);
     const current = rawDigest(
+        .dto_verify,
         "maru.pending-frame.dto-content.v1",
         frame.scratch.dto_backing.items,
     );
@@ -896,6 +897,12 @@ pub const ObservationDigestCounters = cleanup.ObservationDigestCounters;
 
 pub fn observationDigestCounters() ObservationDigestCounters {
     return cleanup.observationDigestCounters();
+}
+
+/// `.obs_snapshot` 자리를 세면서 같은 값을 낸다 — 호출부에 카운터를 흩뿌리지 않는다.
+fn observationSnapshotDigest(input: cleanup.ObservationCleanupDigestInput) cleanup.Digest {
+    noteDigestSite(.obs_snapshot, 0);
+    return cleanup.observationCleanupDigest(input);
 }
 
 fn observationDigestOrFatal(observation: *const RuntimeObservation, allocator: std.mem.Allocator) cleanup.Digest {
@@ -921,6 +928,7 @@ fn validateTransferProjection(frame: *const PreparationFrame) void {
     if (frame.scratch.live_mask & allocated_observation_mask != allocated_observation_mask or
         frame.scratch.tombstone_mask & allocated_observation_mask != 0)
         process_seal.fatalIntegrity(.callback_drift);
+    noteDigestSite(.obs_transfer_verify, 0);
     const current = observationDigestOrFatal(&frame.scratch.next_observation, frame.context.allocator);
     if (!std.crypto.timing_safe.eql(cleanup.Digest, current, frame.transfer_observation_digest))
         process_seal.fatalIntegrity(.callback_drift);
@@ -982,7 +990,7 @@ fn cleanupTranscriptInput(frame: *const PreparationFrame) cleanup.CleanupTranscr
         .observation_revision = frame.snapshot.observation.revision,
         .observer_generation = frame.snapshot.observation.observer_generation,
         .title_generation = frame.snapshot.observation.title_generation,
-        .observation_digest = cleanup.observationCleanupDigest(frame.snapshot.observation),
+        .observation_digest = observationSnapshotDigest(frame.snapshot.observation),
         .preparation_attempt = frame.source_lease_mirror.attempt,
         .pending_lifecycle = .preparing,
         .plan = .{ .preparation = .{
@@ -1364,6 +1372,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
         &processes,
     ) catch process_seal.fatalIntegrity(.invalid_source_authority);
     frame.dto_content_digest = rawDigest(
+        .dto_content,
         "maru.pending-frame.dto-content.v1",
         frame.scratch.dto_backing.items,
     );
@@ -1439,6 +1448,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     // Project reverse-cleanup completion without changing physical ownership. Observation roles
     // stay live and protected until PendingEventOwner has completed the no-fail move.
     frame.transfer_projection_mask = 0xfe;
+    noteDigestSite(.obs_transfer_store, 0);
     frame.transfer_observation_digest = observationDigestOrFatal(next, frame.context.allocator);
     refreshCleanupEvidence(frame);
     validateCallbackAuthorities(frame);
@@ -1532,6 +1542,56 @@ var seal_raw_digest_calls: u64 = 0;
 var seal_raw_digest_bytes: u64 = 0;
 var seal_calls: u64 = 0;
 
+/// **어느 자리가 해싱 대역폭을 쓰는가.**
+///
+/// 2026-09-11 실측: 드레인 2,032 회/초 동안 다이제스트 944 회·**6.51 MB/초**를 해싱하는데, 실제
+/// 이벤트는 **20 회/초**뿐이다 — 비용이 이벤트가 아니라 **드레인 빈도**를 따라간다. `sealInput` 이
+/// 한 번에 5,816 B 인데 씰은 드레인당 0.197 회라 1,146 B/드레인, 그런데 실측은 **3,359 B/드레인** 이다.
+/// **나머지 2,200 B 가 어디서 나오는지 모른다.**
+///
+/// 총량만으로는 못 고친다 — 자리마다 성격이 다르다(불변 구조체 재해싱·검증용 재계산·DTO 내용).
+/// 총량 하나로는 「무엇을 줄일 수 있는가」가 안 갈린다.
+const DigestSite = enum {
+    seal_snapshot,
+    seal_recipe,
+    seal_scratch,
+    seal_ranges,
+    seal_alloc_ctx,
+    dto_verify,
+    dto_content,
+    obs_transfer_verify,
+    obs_snapshot,
+    obs_transfer_store,
+};
+
+var digest_site_calls = [_]u64{0} ** @typeInfo(DigestSite).@"enum".fields.len;
+var digest_site_bytes = [_]u64{0} ** @typeInfo(DigestSite).@"enum".fields.len;
+
+fn noteDigestSite(site: DigestSite, bytes: usize) void {
+    const index = @intFromEnum(site);
+    _ = @atomicRmw(u64, &digest_site_calls[index], .Add, 1, .monotonic);
+    _ = @atomicRmw(u64, &digest_site_bytes[index], .Add, bytes, .monotonic);
+}
+
+pub const DigestSiteSample = struct {
+    name: []const u8,
+    calls: u64,
+    bytes: u64,
+};
+
+/// 자리별 누적을 그대로 낸다(차분은 호출부가 낸다 — 여기서 상태를 더 들면 소유자가 둘이 된다).
+pub const digest_site_count = @typeInfo(DigestSite).@"enum".fields.len;
+
+pub fn digestSiteSamples(out: *[digest_site_count]DigestSiteSample) void {
+    inline for (@typeInfo(DigestSite).@"enum".fields, 0..) |field, i| {
+        out[i] = .{
+            .name = field.name,
+            .calls = @atomicLoad(u64, &digest_site_calls[i], .monotonic),
+            .bytes = @atomicLoad(u64, &digest_site_bytes[i], .monotonic),
+        };
+    }
+}
+
 pub const SealCounters = struct {
     seals: u64,
     raw_digests: u64,
@@ -1546,9 +1606,10 @@ pub fn sealCounters() SealCounters {
     };
 }
 
-fn rawDigest(domain: []const u8, bytes: []const u8) cleanup.Digest {
+fn rawDigest(site: DigestSite, domain: []const u8, bytes: []const u8) cleanup.Digest {
     _ = @atomicRmw(u64, &seal_raw_digest_calls, .Add, 1, .monotonic);
     _ = @atomicRmw(u64, &seal_raw_digest_bytes, .Add, bytes.len, .monotonic);
+    noteDigestSite(site, bytes.len);
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(domain);
     hasher.update(bytes);
@@ -1609,7 +1670,7 @@ test "C3-3b2b3 preparation byte snapshot binds descriptor and content" {
     // not evidence that role 0 must be live.
     var empty_frame: PreparationFrame = undefined;
     empty_frame.scratch = .{};
-    empty_frame.dto_content_digest = rawDigest("maru.pending-frame.dto-content.v1", "");
+    empty_frame.dto_content_digest = rawDigest(.dto_content, "maru.pending-frame.dto-content.v1", "");
     try std.testing.expect(!std.mem.allEqual(u8, &empty_frame.dto_content_digest, 0));
     validateDtoContent(&empty_frame);
 }

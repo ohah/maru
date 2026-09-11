@@ -70,5 +70,16 @@ for title, rows, name in (
         print(f"  잉여   머리말 「{title[4:]}」이 {rid} 를 드는데 그 행의 상태는 «{name}» 이 아니다")
         bad += 1
 
+# **「여기까지」와 「열린 것」이 어긋나지 않게 한다.** 멈춤을 적어 둔 채 열린 행이 늘면 그 절이
+# 곧 거짓이 된다 — 다시 열 때 사람이 제일 먼저 읽는 자리라 거기가 낡으면 판단이 통째로 틀린다.
+# 재개(=행을 더 여는 일)는 그 절을 함께 고치게 만든다.
+PARKED = "## 여기까지 — 모바일은 멈춘다"
+if PARKED in text:
+    parked_at = len(open_rows) + len(blocked_rows)
+    if parked_at != 4:
+        print(f"  멈춤   「여기까지」를 적어 둔 채 열림+막힘이 {parked_at} 개다(멈출 때는 4) — "
+              "다시 여는 중이면 그 절을 함께 고쳐라")
+        bad += 1
+
 print(f"열림 {len(open_rows)}개 / 막힘 {len(blocked_rows)}개 / 어긋남 {bad}개")
 sys.exit(1 if bad else 0)

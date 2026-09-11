@@ -7,6 +7,9 @@ const std = @import("std");
 pub const c3c = @import("session_host_cr6e_c3c_validator.zig");
 
 pub const sample_count: usize = 20;
+pub const sample_set_p95_cap_ns: u64 = 30 * std.time.ns_per_ms;
+pub const sample_set_hang_cap_ns: u64 = 100 * std.time.ns_per_ms;
+const sample_set_p95_index = (sample_count * 95 + 99) / 100 - 1;
 
 const Row = struct {
     index: u32,
@@ -39,12 +42,19 @@ fn validateArtifact(artifact: Artifact) !void {
         !canonicalSha256(artifact.app_executable_sha256) or
         !canonicalSha256(artifact.product_executable_sha256))
         return error.InvalidEnvelope;
+    var latencies: [sample_count]u64 = undefined;
     for (artifact.rows, 0..) |row, index| {
         if (row.index != index) return error.InvalidRowIndex;
         try c3c.validateArtifact(row.raw);
         if (row.latency_ns == 0 or row.latency_ns != row.raw.input_frame.latency_ns)
             return error.InvalidLatencyProjection;
+        if (row.latency_ns > sample_set_hang_cap_ns)
+            return error.SampleHangBudgetExceeded;
+        latencies[index] = row.latency_ns;
     }
+    std.mem.sort(u64, &latencies, {}, std.sort.asc(u64));
+    if (latencies[sample_set_p95_index] > sample_set_p95_cap_ns)
+        return error.SampleSetP95BudgetExceeded;
 }
 
 pub fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
@@ -86,6 +96,30 @@ test "CR6e-c3c sample-set rejects environment fingerprint and raw projection dri
     artifact = goodArtifact();
     artifact.rows[11].raw.cleanup.clients = 1;
     try std.testing.expectError(error.CleanupIncomplete, validateArtifact(artifact));
+}
+
+test "CR6e-c3c sample-set rejects sustained p95 regression and one hung frame" {
+    var artifact = goodArtifact();
+    setLatency(&artifact.rows[19], sample_set_p95_cap_ns + 1);
+    try validateArtifact(artifact);
+
+    artifact = goodArtifact();
+    setLatency(&artifact.rows[18], sample_set_p95_cap_ns);
+    setLatency(&artifact.rows[19], sample_set_p95_cap_ns);
+    try validateArtifact(artifact);
+
+    artifact = goodArtifact();
+    setLatency(&artifact.rows[18], sample_set_p95_cap_ns + 1);
+    setLatency(&artifact.rows[19], sample_set_p95_cap_ns + 1);
+    try std.testing.expectError(error.SampleSetP95BudgetExceeded, validateArtifact(artifact));
+
+    artifact = goodArtifact();
+    setLatency(&artifact.rows[19], sample_set_hang_cap_ns);
+    try validateArtifact(artifact);
+
+    artifact = goodArtifact();
+    setLatency(&artifact.rows[19], sample_set_hang_cap_ns + 1);
+    try std.testing.expectError(error.SampleHangBudgetExceeded, validateArtifact(artifact));
 }
 
 test "CR6e-c3c sample-set JSON rejects unknown duplicate and missing fields" {
@@ -145,4 +179,10 @@ fn goodArtifact() Artifact {
         .product_executable_sha256 = "1111111111111111111111111111111111111111111111111111111111111111",
         .rows = rows,
     };
+}
+
+fn setLatency(row: *Row, latency_ns: u64) void {
+    row.latency_ns = latency_ns;
+    row.raw.input_frame.submit_ns = row.raw.input_frame.dispatch_ns + latency_ns;
+    row.raw.input_frame.latency_ns = latency_ns;
 }

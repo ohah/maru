@@ -1461,13 +1461,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1
    launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다.
    `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**도 CR6f-idle-soak로
-   구현·실측했다. 남은 비릴리스 성능 작업은 CR6e-c3c key→screen hard cap validator 배선이다.
+   구현·실측했다. CR6e-c3c key→screen hard cap validator 배선까지 완료되어 남은 비릴리스 성능 작업은 없다.
    **CR6e-c3c-sample-set은 구현·반복 실측 완료**했으며, 같은
    ReleaseFast executable·OS·machine 지문을 결속한 20회 actual-AppKit raw v2 표본을 순차 수집하고,
    각 행의 기존 strict validator와 격리·cleanup을 재사용한다. 이 sample-set 자체는 hard cap을
    임의로 만들지 않는다. 동일 환경·동일 executable의 독립 3묶음 60회에서 전체 p95 22.199ms와
-   단발 max 73.833ms를 관측했으므로, 후속 TDD 슬라이스는 20회 묶음의 nearest-rank p95 30ms와
-   개별 hang 100ms를 기존 strict validator에 배선한다. 이는 새 기능 구현 잔여가 아니라 후속 계측이다.
+   단발 max 73.833ms를 관측했고, 20회 묶음의 nearest-rank p95 30ms와 개별 hang 100ms를
+   기존 strict validator에 배선했다. 이는 다른 기기 등급을 주장하지 않는 현재 제품 경로의 회귀 예산이다.
    G3은 출하 뒤 기본값을 다시 바꿀 때만
    여는 별도 백로그이고 P6은 선택 확장 범위다.
 

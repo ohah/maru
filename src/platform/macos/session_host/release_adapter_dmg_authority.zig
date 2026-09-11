@@ -54,6 +54,7 @@ pub const Plan = struct {
 /// Borrowed only while the read-only DMG mount and all three product fds remain held.
 pub const MountedCandidate = struct {
     cli_path: [:0]const u8,
+    app_bundle_path: [:0]const u8,
     main_sha256: []const u8,
     cli_sha256: []const u8,
     designated_requirement_sha256: []const u8,
@@ -218,11 +219,10 @@ pub fn observeWithGate(
         return err;
     };
     const cli_hex: [64]u8 = std.fmt.bytesToHex(cli_digest, .lower);
-    var app_path_buf: [max_path_bytes]u8 = undefined;
+    var app_path_buf: [max_path_bytes:0]u8 = undefined;
     var plist_path_buf: [max_path_bytes]u8 = undefined;
     var executable_path_buf: [max_path_bytes]u8 = undefined;
-    var cli_path_buf: [max_path_bytes:0]u8 = undefined;
-    const app_path = std.fmt.bufPrint(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}) catch {
+    const app_path = std.fmt.bufPrintZ(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -237,13 +237,6 @@ pub fn observeWithGate(
         return error.InvalidPath;
     };
     const executable_path = std.fmt.bufPrint(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}) catch {
-        product.close();
-        product_open = false;
-        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
-        cleanup_needed = false;
-        return error.InvalidPath;
-    };
-    const cli_path = std.fmt.bufPrintZ(&cli_path_buf, "{s}/Maru.app/Contents/MacOS/maru", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -290,8 +283,16 @@ pub fn observeWithGate(
         return err;
     };
     errdefer observed.deinit(allocator);
+    staged.extractCli(product.cli_fd, &cli_hex) catch |err| {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return err;
+    };
     const mounted: MountedCandidate = .{
-        .cli_path = cli_path,
+        .cli_path = staged.extractedCliPath(),
+        .app_bundle_path = app_path,
         .main_sha256 = &executable_hex,
         .cli_sha256 = &cli_hex,
         .designated_requirement_sha256 = observed.signing().designated_requirement_sha256,
@@ -310,7 +311,7 @@ pub fn observeWithGate(
         cleanup_needed = false;
         return error.MountChanged;
     };
-    if (!sameFilesystem(after_attach, after_execute) or !product.revalidate()) {
+    if (!sameFilesystem(after_attach, after_execute) or !product.revalidate() or !staged.revalidateExtracted(&cli_hex)) {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -335,7 +336,7 @@ pub fn observeWithGate(
         if (cleanup_error) |cleanup_err| return cleanup_err;
         return error.MountChanged;
     };
-    if (!sameFilesystem(after_attach, after_publish) or !product.revalidate()) {
+    if (!sameFilesystem(after_attach, after_publish) or !product.revalidate() or !staged.revalidateExtracted(&cli_hex)) {
         product.close();
         product_open = false;
         const cleanup_error: ?anyerror = if (detachAndCleanup(ops, &staged, device, baseline, budget_ns)) null else |cleanup_err| cleanup_err;
@@ -510,6 +511,10 @@ const Staged = struct {
     cleanup_started: bool,
     private_len: usize,
     mount_len: usize,
+    extracted_buf: [max_path_bytes:0]u8,
+    extracted_len: usize,
+    extracted_fd: c.fd_t,
+    extracted_stat: posix.Stat,
     private_buf: [max_path_bytes:0]u8,
     mount_buf: [max_path_bytes:0]u8,
 
@@ -615,6 +620,8 @@ const Staged = struct {
             return error.InvalidPath).len;
         result.mount_len = (std.fmt.bufPrintZ(&result.mount_buf, "{s}/mount", .{work}) catch
             return error.InvalidPath).len;
+        result.extracted_len = 0;
+        result.extracted_fd = -1;
         work_created = false;
         return result;
     }
@@ -627,11 +634,86 @@ const Staged = struct {
         return self.mount_buf[0..self.mount_len :0];
     }
 
+    fn extractedCliPath(self: *const Staged) [:0]const u8 {
+        return self.extracted_buf[0..self.extracted_len :0];
+    }
+
+    fn extractCli(self: *Staged, source_fd: c.fd_t, expected_sha256: *const [64]u8) Error!void {
+        if (self.extracted_fd >= 0 or self.extracted_len != 0) return error.InvalidProduct;
+        var source_before: posix.Stat = undefined;
+        if (c.fstat(source_fd, &source_before) != 0 or !posix.S.ISREG(source_before.mode) or source_before.size < 0)
+            return error.InvalidProduct;
+        const fd = c.openat(self.work_fd, "candidate-cli", .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .EXCL = true,
+            .CLOEXEC = true,
+            .NOFOLLOW = true,
+        }, @as(c.mode_t, 0o500));
+        if (fd < 0) return error.CreateFailed;
+        var open = true;
+        errdefer {
+            if (open) _ = c.close(fd);
+            _ = c.unlinkat(self.work_fd, "candidate-cli", 0);
+        }
+        var copied: usize = 0;
+        var buffer: [64 * 1024]u8 = undefined;
+        while (copied < @as(usize, @intCast(source_before.size))) {
+            const wanted = @min(buffer.len, @as(usize, @intCast(source_before.size)) - copied);
+            const read_count = c.pread(source_fd, &buffer, wanted, @intCast(copied));
+            if (read_count < 0 and posix.errno(-1) == .INTR) continue;
+            if (read_count <= 0) return error.CopyFailed;
+            var written: usize = 0;
+            const count: usize = @intCast(read_count);
+            while (written < count) {
+                const n = c.write(fd, buffer[written..count].ptr, count - written);
+                if (n < 0 and posix.errno(-1) == .INTR) continue;
+                if (n <= 0) return error.CopyFailed;
+                written += @intCast(n);
+            }
+            copied += count;
+        }
+        if (c.fchmod(fd, 0o500) != 0 or c.fsync(fd) != 0 or c.close(fd) != 0) return error.SyncFailed;
+        open = false;
+        const held = c.openat(self.work_fd, "candidate-cli", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (held < 0) return error.InvalidProduct;
+        errdefer _ = c.close(held);
+        var held_stat: posix.Stat = undefined;
+        var source_after: posix.Stat = undefined;
+        if (c.fstat(held, &held_stat) != 0 or !posix.S.ISREG(held_stat.mode) or held_stat.nlink != 1 or
+            held_stat.mode & 0o777 != 0o500 or held_stat.size != source_before.size or
+            c.fstat(source_fd, &source_after) != 0 or !sameStat(source_before, source_after)) return error.SourceChanged;
+        var digest: [32]u8 = undefined;
+        hashFd(held, &digest) catch return error.CopyFailed;
+        const actual: [64]u8 = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &actual, expected_sha256)) return error.SourceMismatch;
+        self.extracted_len = (std.fmt.bufPrintZ(&self.extracted_buf, "{s}/candidate-cli", .{self.mount_buf[0 .. self.mount_len - "/mount".len]}) catch return error.InvalidPath).len;
+        self.extracted_fd = held;
+        self.extracted_stat = held_stat;
+    }
+
+    fn revalidateExtracted(self: *const Staged, expected_sha256: *const [64]u8) bool {
+        if (self.extracted_fd < 0) return false;
+        var current: posix.Stat = undefined;
+        if (c.fstat(self.extracted_fd, &current) != 0 or !sameStat(self.extracted_stat, current)) return false;
+        var digest: [32]u8 = undefined;
+        hashFd(self.extracted_fd, &digest) catch return false;
+        const actual: [64]u8 = std.fmt.bytesToHex(digest, .lower);
+        return std.mem.eql(u8, &actual, expected_sha256);
+    }
+
     fn cleanup(self: *Staged, require_empty_mount: bool) Error!void {
         _ = require_empty_mount;
         if (self.cleanup_started) return error.CleanupFailed;
         self.cleanup_started = true;
         var failed = false;
+        if (self.extracted_fd >= 0) {
+            var current: posix.Stat = undefined;
+            if (c.fstat(self.extracted_fd, &current) != 0 or !sameStat(self.extracted_stat, current)) failed = true;
+            _ = c.close(self.extracted_fd);
+            self.extracted_fd = -1;
+            if (c.unlinkat(self.work_fd, "candidate-cli", 0) != 0) failed = true;
+        }
         if (c.unlinkat(self.work_fd, "candidate.dmg", 0) != 0) failed = true;
         var mount_now: posix.Stat = undefined;
         if (c.fstatat(self.work_fd, "mount", &mount_now, posix.AT.SYMLINK_NOFOLLOW) != 0 or

@@ -123,6 +123,7 @@ pub const Gate = struct {
             .workspace_path = self.inputs.workspacePath(),
             .harness = self.inputs.harnessPath(),
             .candidate_cli = view.cli_path,
+            .candidate_app_bundle = view.app_bundle_path,
             .attach_product_test = self.inputs.attachPath(),
             .upload_product_test = self.inputs.uploadPath(),
             .require_developer_id = self.inputs.require_developer_id,
@@ -191,7 +192,7 @@ pub const Gate = struct {
     }
 
     fn matchCandidate(self: *@This(), view: dmg.MountedCandidate, require_cli_snapshot: bool) !void {
-        if (!absolute(view.cli_path) or view.main_sha256.len != 64 or view.cli_sha256.len != 64 or
+        if (!absolute(view.cli_path) or !absolute(view.app_bundle_path) or view.main_sha256.len != 64 or view.cli_sha256.len != 64 or
             view.designated_requirement_sha256.len != 64 or
             !std.mem.eql(u8, view.main_sha256, &self.inputs.candidate_executable_sha256) or
             !std.mem.eql(u8, view.designated_requirement_sha256, &self.inputs.designated_requirement_sha256) or

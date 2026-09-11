@@ -15,6 +15,7 @@ const FakeRunner = struct {
     pub fn run(self: *@This(), _: std.Io, execution: anytype, child_inputs: anytype, output: []u8) ![]const u8 {
         self.calls += 1;
         try std.testing.expectEqualStrings("/candidate/Maru.app/Contents/MacOS/maru", child_inputs.candidate_cli);
+        try std.testing.expectEqualStrings("/candidate/Maru.app", child_inputs.candidate_app_bundle);
         try std.testing.expectEqualStrings("/repo/tools/session-host/p5d_ssh_smoke.sh", child_inputs.harness);
         try std.testing.expect(child_inputs.require_developer_id);
         try std.testing.expect(execution.owner == null);
@@ -43,6 +44,7 @@ fn inputs(output_path: [:0]const u8) subject.Inputs {
 fn view() dmg.MountedCandidate {
     return .{
         .cli_path = "/candidate/Maru.app/Contents/MacOS/maru",
+        .app_bundle_path = "/candidate/Maru.app",
         .main_sha256 = digest_b,
         .cli_sha256 = digest_c,
         .designated_requirement_sha256 = digest_c,
@@ -75,7 +77,7 @@ test "candidate gate rejects candidate drift before child or publication" {
     var gate: subject.Gate = .{};
     var capture: [128]u8 = undefined;
     var fake = FakeRunner{};
-    const bad = dmg.MountedCandidate{ .cli_path = "/candidate/Maru.app/Contents/MacOS/maru", .main_sha256 = digest_a, .cli_sha256 = digest_c, .designated_requirement_sha256 = digest_c };
+    const bad = dmg.MountedCandidate{ .cli_path = "/candidate/Maru.app/Contents/MacOS/maru", .app_bundle_path = "/candidate/Maru.app", .main_sha256 = digest_a, .cli_sha256 = digest_c, .designated_requirement_sha256 = digest_c };
     try gate.init(std.testing.allocator, std.testing.io, inputs("/tmp/unused-leaf"), &capture);
     try std.testing.expectError(error.CandidateChanged, gate.executeWith(&fake, bad));
     try std.testing.expectEqual(@as(usize, 0), fake.calls);
@@ -114,7 +116,7 @@ test "candidate gate rejects CLI drift after execution before publication" {
     var fake = FakeRunner{};
     try gate.init(std.testing.allocator, std.testing.io, inputs("/tmp/unused-leaf"), &capture);
     try gate.executeWith(&fake, view());
-    const drifted = dmg.MountedCandidate{ .cli_path = "/candidate/Maru.app/Contents/MacOS/maru", .main_sha256 = digest_b, .cli_sha256 = digest_a, .designated_requirement_sha256 = digest_c };
+    const drifted = dmg.MountedCandidate{ .cli_path = "/candidate/Maru.app/Contents/MacOS/maru", .app_bundle_path = "/candidate/Maru.app", .main_sha256 = digest_b, .cli_sha256 = digest_a, .designated_requirement_sha256 = digest_c };
     try std.testing.expectError(error.CandidateChanged, gate.publish(drifted));
 }
 

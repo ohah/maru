@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const host_log = @import("host_log.zig");
 const c = std.c;
 const posix = std.posix;
 const framing = @import("framing.zig");
@@ -42,6 +43,25 @@ pub const ArmedUpgrade = struct {
     /// `upgrade_attempt.freezePreclosed` is mandatory for this marker.
     gate_preclosed: bool = true,
 };
+
+/// **어느 자리에서 몇 바이트로 한도에 걸렸는지** 남긴다.
+///
+/// `resource_exhausted` 는 네 자리에서 나는데(스트림 목록 할당 실패·턴 게이트·bounded push·파서 OOM)
+/// 고칠 곳이 전부 다르다. 그런데 닫힘 로그에는 `why=resource_exhausted` 한 줄만 남아 갈리지 않는다.
+///
+/// 2026-09-11 실측: 복구 세션 23 개 중 21 개는 붙었고 **2 개만** 이 경로로 GUI 연결을 끊었다
+/// (`client poison: reason=connection_eof` → `transport_read_failure`). 둘 다 `runtime.get` 응답이
+/// 성공한 21 개와 구별되지 않아(필드 6 개, 272×72, 리스 없음) **내용 크기 말고는 후보가 없는데**,
+/// 실제 바이트 수가 안 남아 확정할 수 없었다. 한 줄이면 「최대 프레임이 cap 과 같아져 걸리는가」가
+/// 즉시 갈린다 — cap 은 `header_size + max_binary_chunk` 라 최대 프레임 하나가 정확히 들어가는 크기고,
+/// 검사는 `>=` 다.
+fn noteResidentCap(site: []const u8, buffered: usize) void {
+    if (builtin.is_test) return;
+    host_log.line(
+        "session host inbound cap: site={s} buffered={d} cap={d}",
+        .{ site, buffered, inbound_resident_cap },
+    );
+}
 
 pub const inbound_resident_cap: usize =
     protocol.header_size + protocol.max_binary_chunk;
@@ -443,8 +463,10 @@ pub const Client = struct {
         while (budget.read_bytes < slot_mod.turn_bytes and
             budget.read_frames < slot_mod.turn_frames)
         {
-            if (self.parser.bufferedBytes() >= inbound_resident_cap)
+            if (self.parser.bufferedBytes() >= inbound_resident_cap) {
+                noteResidentCap("turn_gate", self.parser.bufferedBytes());
                 return self.beginClose(.resource_exhausted);
+            }
             const turn_remaining = slot_mod.turn_bytes - budget.read_bytes;
             const resident_remaining = inbound_resident_cap - self.parser.bufferedBytes();
             const rc = c.recv(
@@ -468,8 +490,10 @@ pub const Client = struct {
             const bytes = buf[0..@intCast(rc)];
             self.last_activity_ns = now_ns;
             if (!budget.allowRead(bytes.len, 0)) return;
-            self.parser.pushBounded(bytes, inbound_resident_cap) catch
+            self.parser.pushBounded(bytes, inbound_resident_cap) catch {
+                noteResidentCap("push_bounded", self.parser.bufferedBytes() + bytes.len);
                 return self.beginClose(.resource_exhausted);
+            };
             if (self.drainBuffered(&budget, now_ns, true)) return;
         }
     }

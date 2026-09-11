@@ -701,6 +701,7 @@ pub const PreparationFrame = struct {
     frame_seal: cleanup.CleanupSeal,
 
     pub fn seal(self: *PreparationFrame) void {
+        _ = @atomicRmw(u64, &seal_calls, .Add, 1, .monotonic);
         if (self.self_addr != @intFromPtr(self) or
             self.allocator_context.self_addr != @intFromPtr(&self.allocator_context) or
             !sourceLeaseFrameValid(self.source_lease_mirror))
@@ -886,6 +887,15 @@ fn validateDtoContent(frame: *const PreparationFrame) void {
     );
     if (!std.crypto.timing_safe.eql(cleanup.Digest, current, frame.dto_content_digest))
         process_seal.fatalIntegrity(.callback_drift);
+}
+
+/// 관측 다이제스트 계측을 **여기서** 재노출한다. `event_cleanup_seal.zig` 를 import 할 수 있는 파일은
+/// 닫힌 세계로 고정돼 있고(`session_host_2c3d_c3_3b2b1_boundary`), 진단 한 줄 때문에 그 집합을 넓히면
+/// 계약이 약해진다. 이 모듈은 이미 그 import 를 가지고 있으므로 경유해도 아무것도 넓어지지 않는다.
+pub const ObservationDigestCounters = cleanup.ObservationDigestCounters;
+
+pub fn observationDigestCounters() ObservationDigestCounters {
+    return cleanup.observationDigestCounters();
 }
 
 fn observationDigestOrFatal(observation: *const RuntimeObservation, allocator: std.mem.Allocator) cleanup.Digest {
@@ -1512,7 +1522,33 @@ pub fn runSealedCallback(frame: *PreparationFrame, callback: Callback) void {
     frame.seal();
 }
 
+/// **씰 기계가 초당 몇 바이트를 해싱하는가.** `sealInput` 이 고정 크기 구조체를 통째로 넘기는
+/// 자리라, 여기 바이트를 세면 「실제 내용이 아니라 구조체 크기만큼」 드는 비용이 그대로 보인다.
+///
+/// 2026-09-11 실측: BLAKE3 진입 799 샘플을 부모별로 가르니 `PreparationFrame.sealInput` 이 312
+/// (39 %) 로 1 위였고, `observationCleanupDigest` 는 34 (4 %) 뿐이었다 — **최종 다이제스트가 아니라
+/// 이 구조체 해싱이 주범**이다. 계측 지점을 최종 다이제스트에만 두면 비용의 96 % 를 놓친다.
+var seal_raw_digest_calls: u64 = 0;
+var seal_raw_digest_bytes: u64 = 0;
+var seal_calls: u64 = 0;
+
+pub const SealCounters = struct {
+    seals: u64,
+    raw_digests: u64,
+    raw_digest_bytes: u64,
+};
+
+pub fn sealCounters() SealCounters {
+    return .{
+        .seals = @atomicLoad(u64, &seal_calls, .monotonic),
+        .raw_digests = @atomicLoad(u64, &seal_raw_digest_calls, .monotonic),
+        .raw_digest_bytes = @atomicLoad(u64, &seal_raw_digest_bytes, .monotonic),
+    };
+}
+
 fn rawDigest(domain: []const u8, bytes: []const u8) cleanup.Digest {
+    _ = @atomicRmw(u64, &seal_raw_digest_calls, .Add, 1, .monotonic);
+    _ = @atomicRmw(u64, &seal_raw_digest_bytes, .Add, bytes.len, .monotonic);
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(domain);
     hasher.update(bytes);

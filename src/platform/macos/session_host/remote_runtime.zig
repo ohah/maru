@@ -5698,6 +5698,45 @@ pub const RemoteRuntime = struct {
         return .screen;
     }
 
+    /// **틱당 관측 이벤트가 몇 개인가.** 이 비(= settled / drain_calls)가 이벤트 병합의 이득을 그대로
+    /// 결정한다 — 1 이면 병합해도 줄어드는 게 없고, 5 면 이벤트당 비용의 80 % 가 사라진다.
+    ///
+    /// 2026-09-11 실측으로 「브라우저 렌더링 중 주 스레드 작업의 54 % 가 이벤트당 정규 투영 + BLAKE3」
+    /// 까지는 나왔지만, 이 비를 몰라 **줄일 수 있는 비용인지 아닌지** 를 판단할 수 없었다. 추정으로
+    /// 병합을 먼저 붙이면 이득 0 인 복잡도만 남는다.
+    var observation_drain_calls: u64 = 0;
+    var observation_events_settled: u64 = 0;
+
+    pub const ObservationEventCounters = struct {
+        drain_calls: u64,
+        events_settled: u64,
+        /// 이벤트당 다이제스트 횟수·바이트. 세는 자리는 `event_cleanup_seal`(모든 관측 다이제스트가
+        /// 통과하는 단일 지점)이고, `pending_event_preparation` 을 경유해 읽는다 — 그 모듈은 이미 seal
+        /// 을 import 하므로 **닫힌 import 집합이 넓어지지 않는다**. GUI 에 새 session_host 심볼을
+        /// 노출하지 않으려고 여기서 함께 낸다 — 진단 한 줄을 위해 client 표면을 넓히지 않는다.
+        digest_calls: u64,
+        digest_input_bytes: u64,
+        /// 씰 기계의 **구조체 통째 해싱**. 실측에서 이쪽이 BLAKE3 의 39 % 로 최대였고 최종
+        /// 다이제스트는 4 % 였다 — 둘을 갈라 놓지 않으면 어느 쪽을 고쳐야 하는지 안 보인다.
+        seals: u64,
+        raw_digests: u64,
+        raw_digest_bytes: u64,
+    };
+
+    pub fn observationEventCounters() ObservationEventCounters {
+        const seal = pending_event_preparation_mod.observationDigestCounters();
+        const frame_seal = pending_event_preparation_mod.sealCounters();
+        return .{
+            .drain_calls = @atomicLoad(u64, &observation_drain_calls, .monotonic),
+            .events_settled = @atomicLoad(u64, &observation_events_settled, .monotonic),
+            .digest_calls = seal.calls,
+            .digest_input_bytes = seal.input_bytes,
+            .seals = frame_seal.seals,
+            .raw_digests = frame_seal.raw_digests,
+            .raw_digest_bytes = frame_seal.raw_digest_bytes,
+        };
+    }
+
     const EventDrain = struct {
         metadata: bool = false,
         ended: bool = false,
@@ -5717,6 +5756,7 @@ pub const RemoteRuntime = struct {
     ) GenerationDrainHookDecision;
 
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
+        _ = @atomicRmw(u64, &observation_drain_calls, .Add, 1, .monotonic);
         return switch (self.currentGeneration().attachment) {
             .legacy => self.drainLegacyObservationEvents(),
             .generation => self.drainGenerationObservationEvents(),
@@ -5844,6 +5884,7 @@ pub const RemoteRuntime = struct {
         stage: GenerationDrainHookStage,
         comptime hook: ?GenerationDrainHook,
     ) client_mod.ClientError!void {
+        _ = @atomicRmw(u64, &observation_events_settled, .Add, 1, .monotonic);
         const borrowed = self.pending_event_owner.borrowPrepared() catch
             return error.ProtocolError;
         if (borrowed.observation_probe_nonce != 0 and

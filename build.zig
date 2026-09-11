@@ -5365,6 +5365,26 @@ pub fn build(b: *std.Build) void {
     upgrade_runtime_changed_stage_step.dependOn(&run_upgrade_runtime_changed_stage.step);
     boundary_step.dependOn(&run_upgrade_runtime_changed_stage.step);
 
+    // 관측 이벤트당 비용을 **줄일 수 있는지** 판단할 두 비(events/drain, digests/event)가 계속
+    // 나오는가. 이 계측이 사라지면 최적화 판단이 다시 추측이 된다.
+    const observation_event_cost_step = b.step(
+        "test-observation-event-cost",
+        "Observation cost counters stay at the single digest funnel and emit both ratios",
+    );
+    const observation_event_cost_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/observation_event_cost_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_observation_event_cost = b.addRunArtifact(observation_event_cost_tests);
+    run_observation_event_cost.addArg("--maru-expect-tests=1");
+    run_observation_event_cost.addArg("--maru-expect-passed=1");
+    run_observation_event_cost.setCwd(b.path("."));
+    observation_event_cost_step.dependOn(&run_observation_event_cost.step);
+    boundary_step.dependOn(&run_observation_event_cost.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

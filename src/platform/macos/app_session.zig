@@ -6449,6 +6449,13 @@ pub const AppSession = struct {
     /// 나머지가 stale 이 돼서」인지 구분할 수단이 없었다. 원인을 모르는 채로 백오프를 넣으면 그 둘 중
     /// 하나에만 듣고, 어느 쪽인지도 영영 모른다.
     notify_diag_tick: u32 = 0,
+    obs_diag_tick: u32 = 0,
+    obs_diag_last_drain_calls: u64 = 0,
+    obs_diag_last_events: u64 = 0,
+    obs_diag_last_digest_calls: u64 = 0,
+    obs_diag_last_digest_bytes: u64 = 0,
+    obs_diag_last_seals: u64 = 0,
+    obs_diag_last_raw_digest_bytes: u64 = 0,
     notify_diag_last_label_changed: u64 = 0,
     notify_diag_last_generation_stale: u64 = 0,
     notify_diag_last_failed: u64 = 0,
@@ -18096,6 +18103,57 @@ pub const AppSession = struct {
             }
         }
         self.logNotificationRpcDiag(rb);
+        self.logObservationEventDiag();
+    }
+
+    /// **이벤트당 비용을 줄일 수 있는가** 를 가르는 두 숫자를 주기적으로 한 줄 남긴다.
+    ///
+    /// 2026-09-11 실측: 브라우저가 렌더링하는 동안 maru 주 스레드 작업의 **54 %** 가 관측 이벤트당
+    /// 정규 투영 + BLAKE3 였다(`memcpy` 23 %, BLAKE3 24 %, 제로화 7 %). 그런데 그 비용을 **병합으로
+    /// 줄일 수 있는지** 는 「드레인 한 번에 이벤트가 몇 개 오는가」에 전적으로 달려 있다 — 1 이면
+    /// 병합의 이득은 0 이고, 복잡도만 남는다. 그 비를 모르는 채 최적화를 붙이면 추측이 된다.
+    ///
+    /// `digest/event` 도 함께 낸다. 생산 경로가 셋(씰 저장·재계산 비교·스냅샷)이라 이벤트당 2~3 이
+    /// 예상되는데, 그보다 크면 같은 관측을 중복 해싱하고 있다는 뜻이라 그 자체가 줄일 거리가 된다.
+    ///
+    /// `notify_diag_interval_ticks` 마다, 그리고 **이벤트가 있었을 때만** 찍는다 — 조용하면 한 줄도
+    /// 안 나오므로 로그가 원인을 덮지 않는다.
+    fn logObservationEventDiag(self: *AppSession) void {
+        self.obs_diag_tick +%= 1;
+        if (self.obs_diag_tick % notify_diag_interval_ticks != 0) return;
+        const ev = session_host.remote_runtime.RemoteRuntime.observationEventCounters();
+        const drains = ev.drain_calls -% self.obs_diag_last_drain_calls;
+        const events = ev.events_settled -% self.obs_diag_last_events;
+        const digests = ev.digest_calls -% self.obs_diag_last_digest_calls;
+        const bytes = ev.digest_input_bytes -% self.obs_diag_last_digest_bytes;
+        self.obs_diag_last_drain_calls = ev.drain_calls;
+        self.obs_diag_last_events = ev.events_settled;
+        self.obs_diag_last_digest_calls = ev.digest_calls;
+        self.obs_diag_last_digest_bytes = ev.digest_input_bytes;
+        const seals = ev.seals -% self.obs_diag_last_seals;
+        const raw_bytes = ev.raw_digest_bytes -% self.obs_diag_last_raw_digest_bytes;
+        self.obs_diag_last_seals = ev.seals;
+        self.obs_diag_last_raw_digest_bytes = ev.raw_digest_bytes;
+        if (events == 0) return;
+        const per_drain_x100 = if (drains == 0) 0 else events * 100 / drains;
+        const digest_per_event_x100 = events_digest: {
+            break :events_digest if (events == 0) 0 else digests * 100 / events;
+        };
+        std.log.info(
+            "observation cost: ticks={d} drains={d} events={d} events_per_drain_x100={d} digests={d} digests_per_event_x100={d} digest_bytes={d} seals={d} seals_per_event_x100={d} raw_digest_bytes={d}",
+            .{
+                notify_diag_interval_ticks,
+                drains,
+                events,
+                per_drain_x100,
+                digests,
+                digest_per_event_x100,
+                bytes,
+                seals,
+                if (events == 0) 0 else seals * 100 / events,
+                raw_bytes,
+            },
+        );
     }
 
     /// 이 경로가 **초당 몇 건의 RPC 를 왜 보내는지** 주기적으로 한 줄 남긴다.

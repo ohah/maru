@@ -10571,3 +10571,39 @@ test "kitty 애니메이션: 프레임 수 상한과 compose 검증 셋 (적대�
     try core.write("\x1b_Ga=c,i=1,r=2,c=3\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
 }
+
+test "OSC 52: 상한 초과와 빈 데이터 두 방어선 (적대적 검증 스윕)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+
+    // **방어선 스윕에서 나온 두 자리**(2026-09-11). OSC 가드 여섯을 하나씩 지워 보니 이 둘만
+    // 안 잡혔다 — 코드에는 있는데 그것을 겨눈 판정자가 없었다.
+
+    // (1) 빈 데이터는 아무 일도 안 한다. 이 가드를 지우면 `decoded_len == 0` 이 그대로 흘러
+    // **빈 쓰기가 이전 클립보드 내용을 지운다** — 사용자가 복사해 둔 것이 조용히 사라진다.
+    try core.write("\x1b]52;c;SGVsbG8=\x1b\\"); // "Hello"
+    try std.testing.expectEqualStrings("Hello", core.clipboard_write.items);
+    try core.write("\x1b]52;c;\x1b\\"); // 빈 데이터
+    try std.testing.expectEqualStrings("Hello", core.clipboard_write.items); // 그대로다
+    try std.testing.expect(!core.takeClipboardWriteRejected()); // 거부도 아니다(no-op)
+
+    // (2) 상한 초과는 **무음 폐기가 아니라 거부로 표면화**한다 — platform 이 그걸 drain 해 알린다.
+    // 이 가드를 지우면 거대한 base64 가 그대로 resize 를 태워 메모리를 먹는다.
+    const saved_limit = core.clipboard_write.items.len;
+    _ = saved_limit;
+    var big: std.ArrayListUnmanaged(u8) = .empty;
+    defer big.deinit(std.testing.allocator);
+    try big.appendSlice(std.testing.allocator, "\x1b]52;c;");
+    // base64 4/3 비율이라 상한보다 조금 넘는 길이를 만든다. 실제 디코드 크기가 상한을 넘어야 한다.
+    const b64_len = (osc.max_clipboard_bytes / 3 + 8) * 4;
+    try big.ensureUnusedCapacity(std.testing.allocator, b64_len + 4);
+    var i: usize = 0;
+    while (i < b64_len) : (i += 1) try big.append(std.testing.allocator, 'A');
+    try big.appendSlice(std.testing.allocator, "\x1b\\");
+    core.osc_large_ok = true; // 클립보드는 대용량이 정당하다(파서가 세우는 latch)
+    try core.write(big.items);
+    // 상한을 넘겼으니 쓰기는 안 되고 **거부가 표면화**된다. (파서 수집 상한에 먼저 걸려도 같은 래치다.)
+    try std.testing.expect(core.takeClipboardWriteRejected());
+    try std.testing.expect(!core.takeClipboardWriteRejected()); // 1회성이다
+    try std.testing.expectEqualStrings("Hello", core.clipboard_write.items); // 이전 내용은 보존
+}

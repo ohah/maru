@@ -273,6 +273,27 @@ pub const PinnedReleaseFile = struct {
         _ = c.close(self.parent_fd);
         self.* = .{};
     }
+
+    /// Removes a publication only while the supplied absolute pathname still denotes this held
+    /// inode under the same held parent. Failure retains the owner so the caller can retry without
+    /// ever deleting a foreign replacement.
+    pub fn remove(self: *@This(), path: [:0]const u8) Error!void {
+        if (self.value() == null) return error.InvalidOwner;
+        var path_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(path, &path_digest, .{});
+        if (path.len != self.path_len or !std.mem.eql(u8, &path_digest, &self.path_sha256)) return error.FileChanged;
+        const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.UnsafePath;
+        const leaf = path[slash + 1 ..];
+        if (leaf.len == 0 or leaf.len > std.fs.max_name_bytes or std.mem.indexOfScalar(u8, leaf, 0) != null) return error.UnsafePath;
+        var leaf_buf: [std.fs.max_name_bytes:0]u8 = undefined;
+        @memcpy(leaf_buf[0..leaf.len], leaf);
+        leaf_buf[leaf.len] = 0;
+        if (!unlinkHeldLeaf(self.parent_fd, leaf_buf[0..leaf.len :0], self.fd)) return error.FileChanged;
+        if (c.fsync(self.parent_fd) != 0) return error.SyncFailed;
+        _ = c.close(self.fd);
+        _ = c.close(self.parent_fd);
+        self.* = .{};
+    }
 };
 
 pub fn pinReleaseFileObserved(result: *PinnedReleaseFile, path: [:0]const u8, require_executable: bool, max_bytes: u64) Error!void {

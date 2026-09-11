@@ -51,6 +51,20 @@ pub const Plan = struct {
     args: []const []const u8,
 };
 
+/// Borrowed only while the read-only DMG mount and all three product fds remain held.
+pub const MountedCandidate = struct {
+    cli_path: [:0]const u8,
+    main_sha256: []const u8,
+    cli_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
+};
+
+const NoopGate = struct {
+    fn execute(_: *@This(), _: MountedCandidate) !void {}
+    fn publish(_: *@This(), _: MountedCandidate) !void {}
+    fn rollbackPublished(_: *@This()) !void {}
+};
+
 pub const Error = error{
     InvalidExpected,
     InvalidPath,
@@ -97,6 +111,25 @@ pub fn observeWith(
     io: std.Io,
     ops: anytype,
     apple_runner: anytype,
+    candidate_path: [:0]const u8,
+    work_path: [:0]const u8,
+    expected: ExpectedDmg,
+    expected_version: []const u8,
+    apple_storage: *apple_transport.Storage,
+    budget_ns: i128,
+) !apple_product.Observed {
+    var gate = NoopGate{};
+    return observeWithGate(allocator, io, ops, apple_runner, &gate, candidate_path, work_path, expected, expected_version, apple_storage, budget_ns);
+}
+
+/// Extends the same DMG authority lifetime through an execute/revalidate/publish/revalidate gate.
+/// The gate receives borrowed values only and must not retain them after either callback.
+pub fn observeWithGate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ops: anytype,
+    apple_runner: anytype,
+    gate: anytype,
     candidate_path: [:0]const u8,
     work_path: [:0]const u8,
     expected: ExpectedDmg,
@@ -176,9 +209,19 @@ pub fn observeWith(
         return err;
     };
     const executable_hex: [64]u8 = std.fmt.bytesToHex(executable_digest, .lower);
+    var cli_digest: [32]u8 = undefined;
+    hashFd(product.cli_fd, &cli_digest) catch |err| {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return err;
+    };
+    const cli_hex: [64]u8 = std.fmt.bytesToHex(cli_digest, .lower);
     var app_path_buf: [max_path_bytes]u8 = undefined;
     var plist_path_buf: [max_path_bytes]u8 = undefined;
     var executable_path_buf: [max_path_bytes]u8 = undefined;
+    var cli_path_buf: [max_path_bytes:0]u8 = undefined;
     const app_path = std.fmt.bufPrint(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
@@ -194,6 +237,13 @@ pub fn observeWith(
         return error.InvalidPath;
     };
     const executable_path = std.fmt.bufPrint(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}) catch {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return error.InvalidPath;
+    };
+    const cli_path = std.fmt.bufPrintZ(&cli_path_buf, "{s}/Maru.app/Contents/MacOS/maru", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -240,9 +290,66 @@ pub fn observeWith(
         return err;
     };
     errdefer observed.deinit(allocator);
+    const mounted: MountedCandidate = .{
+        .cli_path = cli_path,
+        .main_sha256 = &executable_hex,
+        .cli_sha256 = &cli_hex,
+        .designated_requirement_sha256 = observed.signing().designated_requirement_sha256,
+    };
+    gate.execute(mounted) catch |err| {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return err;
+    };
+    const after_execute = ops.probe(staged.mountPath()) catch {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return error.MountChanged;
+    };
+    if (!sameFilesystem(after_attach, after_execute) or !product.revalidate()) {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return error.MountChanged;
+    }
+    gate.publish(mounted) catch |err| {
+        product.close();
+        product_open = false;
+        const cleanup_error: ?anyerror = if (detachAndCleanup(ops, &staged, device, baseline, budget_ns)) null else |cleanup_err| cleanup_err;
+        if (cleanup_error == null) cleanup_needed = false;
+        gate.rollbackPublished() catch return error.CleanupFailed;
+        if (cleanup_error) |cleanup_err| return cleanup_err;
+        return err;
+    };
+    const after_publish = ops.probe(staged.mountPath()) catch {
+        product.close();
+        product_open = false;
+        const cleanup_error: ?anyerror = if (detachAndCleanup(ops, &staged, device, baseline, budget_ns)) null else |cleanup_err| cleanup_err;
+        if (cleanup_error == null) cleanup_needed = false;
+        gate.rollbackPublished() catch return error.CleanupFailed;
+        if (cleanup_error) |cleanup_err| return cleanup_err;
+        return error.MountChanged;
+    };
+    if (!sameFilesystem(after_attach, after_publish) or !product.revalidate()) {
+        product.close();
+        product_open = false;
+        const cleanup_error: ?anyerror = if (detachAndCleanup(ops, &staged, device, baseline, budget_ns)) null else |cleanup_err| cleanup_err;
+        if (cleanup_error == null) cleanup_needed = false;
+        gate.rollbackPublished() catch return error.CleanupFailed;
+        if (cleanup_error) |cleanup_err| return cleanup_err;
+        return error.MountChanged;
+    }
     product.close();
     product_open = false;
-    detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |err| return err;
+    detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |err| {
+        gate.rollbackPublished() catch return error.CleanupFailed;
+        return err;
+    };
     cleanup_needed = false;
     return observed;
 }
@@ -271,6 +378,23 @@ pub fn observe(
         apple_storage,
         budget_ns,
     );
+}
+
+/// Production entry for a gate that must execute while the private DMG mount is still alive.
+pub fn observeWithMountedGate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gate: anytype,
+    candidate_path: [:0]const u8,
+    work_path: [:0]const u8,
+    expected: ExpectedDmg,
+    expected_version: []const u8,
+    apple_storage: *apple_transport.Storage,
+    budget_ns: i128,
+) !apple_product.Observed {
+    var ops = SystemOps{ .io = io };
+    var apple_runner = AppleRunner{ .io = io };
+    return observeWithGate(allocator, io, &ops, &apple_runner, gate, candidate_path, work_path, expected, expected_version, apple_storage, budget_ns);
 }
 
 /// Runs product-admission commands against one absolute phase deadline. Once a mount exists,
@@ -530,9 +654,11 @@ const Product = struct {
     app_fd: c.fd_t,
     plist_fd: c.fd_t,
     executable_fd: c.fd_t,
+    cli_fd: c.fd_t,
     app_stat: posix.Stat,
     plist_stat: posix.Stat,
     executable_stat: posix.Stat,
+    cli_stat: posix.Stat,
     fn open(mount_path: []const u8) Error!Product {
         var mount_buf: [max_path_bytes:0]u8 = undefined;
         const mount_z = std.fmt.bufPrintZ(&mount_buf, "{s}", .{mount_path}) catch return error.InvalidPath;
@@ -550,14 +676,19 @@ const Product = struct {
         errdefer _ = c.close(plist_fd);
         const executable_fd = openFileAt(macos_fd, "maru-macos-app") catch return error.InvalidProduct;
         errdefer _ = c.close(executable_fd);
+        const cli_fd = openFileAt(macos_fd, "maru") catch return error.InvalidProduct;
+        errdefer _ = c.close(cli_fd);
         var result: Product = undefined;
         result.app_fd = app_fd;
         result.plist_fd = plist_fd;
         result.executable_fd = executable_fd;
+        result.cli_fd = cli_fd;
         if (c.fstat(app_fd, &result.app_stat) != 0 or c.fstat(plist_fd, &result.plist_stat) != 0 or
-            c.fstat(executable_fd, &result.executable_stat) != 0 or
+            c.fstat(executable_fd, &result.executable_stat) != 0 or c.fstat(cli_fd, &result.cli_stat) != 0 or
             result.app_stat.dev != root_stat.dev or result.plist_stat.dev != root_stat.dev or
-            result.executable_stat.dev != root_stat.dev or result.executable_stat.nlink != 1)
+            result.executable_stat.dev != root_stat.dev or result.cli_stat.dev != root_stat.dev or
+            result.executable_stat.nlink != 1 or result.cli_stat.nlink != 1 or
+            (result.executable_stat.dev == result.cli_stat.dev and result.executable_stat.ino == result.cli_stat.ino))
             return error.InvalidProduct;
         return result;
     }
@@ -566,12 +697,14 @@ const Product = struct {
         var app: posix.Stat = undefined;
         var plist: posix.Stat = undefined;
         var executable: posix.Stat = undefined;
+        var cli: posix.Stat = undefined;
         return c.fstat(self.app_fd, &app) == 0 and c.fstat(self.plist_fd, &plist) == 0 and
-            c.fstat(self.executable_fd, &executable) == 0 and sameStat(self.app_stat, app) and
-            sameStat(self.plist_stat, plist) and sameStat(self.executable_stat, executable);
+            c.fstat(self.executable_fd, &executable) == 0 and c.fstat(self.cli_fd, &cli) == 0 and sameStat(self.app_stat, app) and
+            sameStat(self.plist_stat, plist) and sameStat(self.executable_stat, executable) and sameStat(self.cli_stat, cli);
     }
 
     fn close(self: *Product) void {
+        _ = c.close(self.cli_fd);
         _ = c.close(self.executable_fd);
         _ = c.close(self.plist_fd);
         _ = c.close(self.app_fd);

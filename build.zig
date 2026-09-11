@@ -16455,6 +16455,25 @@ pub fn build(b: *std.Build) void {
             run_p5d_runner_tests.addArg("--maru-expect-tests=6");
             run_p5d_runner_tests.setCwd(b.path("."));
             session_host_release_adapter_p5d_runner_step.dependOn(&run_p5d_runner_tests.step);
+            const p5d_release_evidence_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_evidence.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_manifest", .module = manifest_mod }} });
+            const p5d_candidate_gate_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_p5d_runner", .module = p5d_runner_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_evidence", .module = p5d_release_evidence_mod } } });
+            const p5d_candidate_gate_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_evidence", .module = p5d_release_evidence_mod } } }) });
+            const run_p5d_candidate_gate_tests = b.addRunArtifact(p5d_candidate_gate_tests);
+            run_p5d_candidate_gate_tests.addArg("--maru-expect-tests=6");
+            run_p5d_candidate_gate_tests.setCwd(b.path("."));
+            session_host_release_adapter_p5d_runner_step.dependOn(&run_p5d_candidate_gate_tests.step);
+            test_step.dependOn(&run_p5d_candidate_gate_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_p5d_candidate_gate_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_p5d_candidate_gate_tests.step);
+            const p5d_candidate_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_candidate_product.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod } } });
+            const p5d_candidate_product_boundary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_candidate_product_boundary.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_p5d_candidate_product", .module = p5d_candidate_product_mod }} }) });
+            const run_p5d_candidate_product_boundary_tests = b.addRunArtifact(p5d_candidate_product_boundary_tests);
+            run_p5d_candidate_product_boundary_tests.addArg("--maru-expect-tests=1");
+            run_p5d_candidate_product_boundary_tests.setCwd(b.path("."));
+            session_host_release_adapter_p5d_runner_step.dependOn(&run_p5d_candidate_product_boundary_tests.step);
+            test_step.dependOn(&run_p5d_candidate_product_boundary_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_p5d_candidate_product_boundary_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_p5d_candidate_product_boundary_tests.step);
             const candidate_upgrade_workspace_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_upgrade_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = baseline_workspace_root_mod }} });
             const candidate_upgrade_workspace_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_upgrade_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_candidate_upgrade_workspace", .module = candidate_upgrade_workspace_mod }} }) });
             const run_candidate_upgrade_workspace_tests = b.addRunArtifact(candidate_upgrade_workspace_tests);
@@ -17753,7 +17772,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_dmg_authority_tests = b.addRunArtifact(dmg_authority_tests);
-        run_dmg_authority_tests.addArg("--maru-expect-tests=10");
+        run_dmg_authority_tests.addArg("--maru-expect-tests=14");
         run_dmg_authority_tests.setCwd(b.path("."));
         session_host_release_adapter_dmg_authority_step.dependOn(&run_dmg_authority_tests.step);
 
@@ -17924,7 +17943,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_files_tests = b.addRunArtifact(release_adapter_files_tests);
-        run_release_adapter_files_tests.addArg("--maru-expect-tests=8");
+        run_release_adapter_files_tests.addArg("--maru-expect-tests=10");
         run_release_adapter_files_tests.setCwd(b.path("."));
         session_host_release_adapter_files_step.dependOn(&run_release_adapter_files_tests.step);
         const frozen_executable_tests = addProjectTest(b, .{

@@ -71,6 +71,14 @@ fn scanLocally(gpa: std.mem.Allocator, io: std.Io, path: []const u8, out: *std.A
     }
 }
 
+/// ⚠️ **여기의 stdin 이 곧 제품 전송의 모양이다.** `std.process.run` 은 자식에게 stdin 을 안 준다
+/// (`/dev/null` 상당). 이 축의 전송(`ssh_upload.runArgvCapped`)도 자식의 fd 0 을 **닫는다** — 그래서
+/// 「stdin 이 말하면 채널이 끊긴 것」으로 읽는 순진한 구현은 **정상 호출에서 레코드를 0 개** 낸다
+/// (적대적 M2 · 리눅스 실측 3.6 MB → 33 B). 아래 `expectEqual(local.items.len, i)` 가 그 회귀를 잡는다.
+///
+/// ⚠️ **그런데 macOS 에서는 안 잡힌다**(적대적 M3): 이 플랫폼의 `/dev/null` 은 `POLL.IN` 을 안 세워
+/// 오탐이 애초에 안 난다. **이 게이트의 그 단언은 리눅스 CI 에서만 문다** — 로컬 초록을 「봤다」로
+/// 읽지 말 것.
 fn runHelper(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const u8) !std.process.RunResult {
     return std.process.run(gpa, io, .{
         .argv = &.{ bin, "activity", path },

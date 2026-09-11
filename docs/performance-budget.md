@@ -404,7 +404,7 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 | 영역 | 이유 | 예정 측정 |
 | --- | --- | --- |
 | 앱 시작 시간 | L1은 별도 parent가 ReleaseFast `.app` executable의 시작 시각을 닫힌 자식 환경에 게시하기 직전에 찍은 monotonic 시각부터, 일반 제품 시작 경로의 첫 `maru_metal_renderer_draw` 성공 직후까지를 잰다. 시각의 10진수 변환·환경 entry 게시·`fork/exec` 준비도 포함하는 보수적 상한이다. 전용 관측 모드는 `smokeMode`를 켜지 않으며 측정 완료 뒤 종료만 예약한다. 첫 표본은 baseline이고 임의 hard cap을 두지 않는다. | parent timestamp publication -> fork/exec -> first successful Metal drawable submit |
-| 입력 지연 | CR6f는 controller wire input→실제 PTY→observer screen delta를 재고, CR6e-c3c v2는 실제 AppKit keyDown dispatch→host-backed 화면 marker 확인 뒤 보장된 Metal submit까지의 보수적 상한을 raw ns로 남긴다. c3c는 현재 baseline 계측이며 표본 없이 임의 hard cap을 두지 않는다. | AppKit input dispatch -> remote PTY/output -> marker-observed subsequent Metal submit |
+| 입력 지연 | CR6f는 controller wire input→실제 PTY→observer screen delta를 재고, CR6e-c3c v2는 실제 AppKit keyDown dispatch→host-backed 화면 marker 확인 뒤 보장된 Metal submit까지의 보수적 상한을 raw ns로 남긴다. c3c의 20회 sample-set은 nearest-rank p95 ≤30ms와 개별 hang cap ≤100ms를 함께 판정한다. | AppKit input dispatch -> remote PTY/output -> marker-observed subsequent Metal submit |
 | frame budget | DrawList 빌드(락-보유 구간)는 위 `render_build_*` 예산으로 재지만, snapshot -> GPU frame submit 전체 frame 예산은 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
 | font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증, CoreText smoke의 제품 후보 `coretext_raster.zig` wrapper + smoke native bridge raster bytes 검증, Metal smoke의 제품 `GlyphRasterFrame.uploads/pixels` CoreText bytes -> Metal atlas upload/readback -> shader sampling 검증은 있지만, 제품 renderer의 CoreText raster·atlas grow/eviction/upload **성능** 예산은 아직 없다. 현재 제품 경계는 `GlyphCacheKey -> AtlasSlot -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame` 도메인 계약이다. 기본 성능 경로의 `GlyphRasterFrame`은 test rasterizer로 upload byte/skip/sample contract를 고정하고, macOS CoreText/Metal smoke만 native bridge를 주입하므로 제품 CoreText raster 성능을 아직 측정하지 않는다. 경계 밖 slot은 byte buffer를 만들지 않고 skip해 oversized 입력의 메모리 증폭을 막는다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas grow count, atlas upload bytes, raster upload bytes, raster skip count, font size 변경 후 첫 frame |
 | control-plane dispatch/backpressure | live pump와 4/32 MiB byte budget은 구현됐고 tick당 최대 1 action·512 KiB, watermark pause/resume를 헤드리스로 고정한다. 실제 ReleaseSafe WKWebView smoke도 pump p95≤0.5 ms/max≤1.0 ms를 수집해 실패 gate로 사용한다. app/WebContent RSS와 bridge/frame-deadline 귀속 artifact는 별도 Track 5 완료 gate에 남아 있다. | JSON-RPC parse/dispatch latency, per-tick processed request count, capture/executeScript chunk copy time, `result_serialized_bytes`, `result_chunk_count`, `result_transfer_ticks`, `result_peak_owned_bytes`, app/WebContent RSS delta, tick당 pump bytes/time, reserved/queued bytes, outbound queue drop/coalesce count, `subscribeOutput` queue latency, slow subscriber disconnect count |
@@ -430,13 +430,21 @@ sample-set을 발행하지 않는다.
 최종 `maru.session-host-cr6e-c3c-sample-set.v1` artifact는 `kern.osrelease`, `hw.model`,
 `hw.logicalcpu`, app/product executable SHA-256, 정확히 20개의 index·raw v2 결과와 input-frame latency를
 소유한다. 실행 전·후 executable hash가 다르거나, index가 비어 있거나 중복되거나,
-latency가 raw v2와 다르면 실패한다. 이 artifact는 분포를 수집하는 계약이지 hard cap이
-아니다. hard cap은 이 sample-set의 반복 실측이 runner noise와 최악값을 구분할 수 있을 때
-별도 doc-first 변경으로 숫자·근거·소유 상수를 확정한다.
+latency가 raw v2와 다르면 실패한다. validator는 20개 latency를 정렬해 nearest-rank p95
+(0-based index 18)가 `sample_set_p95_cap_ns`의 **30ms** 이하이고, max가
+`sample_set_hang_cap_ns`의 **100ms** 이하인지 함께 판정한다. p95 gate는 지속적인 경로 회귀를,
+개별 hang gate는 분포에 숨은 단일 정지를 소유한다. median이나 단일 max만으로 둘을 대신하지 않는다.
 
 2026-09-11 로컬 `Mac16,9`·macOS `25.5.0`·16 logical CPU의 첫 ReleaseFast 20회
 sample-set은 min/median/max **19.869/20.792/22.612ms**였고, 20행 모두 raw v2 strict 계약과
 cleanup을 통과했다. 이 한 sample-set은 수집 경로의 동작 증거이며 hard cap 근거로 단독 승격하지 않는다.
+
+같은 날 동일 OS·machine·logical CPU와 동일 app/product SHA-256로 추가 수집한 독립 3묶음 60회는
+묶음별 median **20.604~21.272ms**, p95 **21.509~22.236ms**, 전체 p95 **22.199ms**였다.
+단발 max는 **73.833ms**까지 올라 median과 tail의 책임을 하나의 max로 합치면 runner hiccup을 구조
+회귀로 오판한다. 따라서 p95 30ms는 관측 전체 p95 위 약 35% 여유이면서 median 2배급 회귀 전에
+닫히고, 개별 100ms는 관측 max 위 약 35% 여유를 두면서 실제 정지는 별도로 거부한다. 다른 환경의
+성능 등급을 주장하는 값은 아니며, 이 gate는 현재 제품 경로의 회귀 예산이다.
 
 ### L1 macOS 앱 시작 baseline
 

@@ -206,6 +206,12 @@ pub const State = struct {
     /// `clear` 는 건드리지 않는다 — 스캔 결과가 아니라 pane 의 성질이다. 문구가 「없다」와
     /// 「못 읽는다」를 가르는 데 쓴다.
     source_remote: bool = false,
+    /// **이번 원격 왕복이 실패했나**(RAV3). 「비었다」와 「못 읽었다」를 가르는 마지막 조각이다 —
+    /// 원격 스캔이 실패하면 자리가 0 개로 오는데, 그것을 그냥 그리면 화면이 **「활동이 없습니다」**
+    /// 라고 **거짓말**한다(계약 §2.2 가 금하는 그것).
+    ///
+    /// `source_remote` 와 달리 **스캔 결과의 성질**이라 `clear` 가 지운다.
+    remote_failed: bool = false,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -367,6 +373,7 @@ pub const State = struct {
         self.all_labels.clearAndFree(allocator);
         self.search.clear();
         self.search_active = false;
+        self.remote_failed = false;
         // **소스가 갈리면 본문 결과는 남의 파일 것이다.** 오프셋은 파일 절대값이라 그대로 두면
         // 새 세션의 엉뚱한 호출이 「본문에서 맞았다」로 선다.
         self.body.reset(allocator);
@@ -907,15 +914,16 @@ pub const activity_open_image_id: u32 = activity_image_id_base +| 0x10000;
 fn activeSourcePath(self: *AppSession) ?[]const u8 {
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();
-    // **원격 pane 의 대화는 읽지 않는다.** 훅이 준 `transcript_path` 는 **저쪽 기계**의 경로인데
-    // 스캐너·디코더는 `Dir.cwd().openFile` 로 **로컬**을 연다. 같은 모양의 홈 경로가 로컬에 있으면
-    // (양쪽 macOS·같은 사용자 이름) 그 파일이 **실제로 열려** 다른 대화의 이미지가 이 세션 이름표
-    // 밑에 뜬다. `Source.set` 의 「추측한 경로로 남의 파일을 읽지 않는다」와 같은 규율이다.
+    // **이 pane 이 원격인가**(계약 §4.1.2 · RAV3). 훅이 준 `transcript_path` 는 **저쪽 기계**의
+    // 경로다 — 그것을 로컬 `Dir.cwd().openFile` 에 넘기면 같은 모양의 홈 경로가 이쪽에도 있을 때
+    // (양쪽 macOS·같은 사용자 이름) **남의 대화가 열린다**. 그래서 예전에는 여기서 통째로 막았다.
+    //
+    // 이제는 **막는 대신 저쪽에서 훑는다**(RAV3): 경로는 그대로 돌려주되 `source_remote` 가 서면
+    // 스캔이 원격 왕복으로 간다(`refresh` → `scan_backend.submit(chain, remote)`). 로컬 syscall 로
+    // 새는 자리가 0 인지는 §6.3 의 게이트가 센다.
     //
     // **판정은 여기 한 곳이다.** 채택하는 쪽에도 두면 둘이 갈린다(바로 아래 `refresh` 주석의 그 이유).
-    // 한 곳이라서 ssh **이전**에 담아 둔 로컬 소스가 남아 있는 경우까지 같이 막힌다.
     self.agent_activity.source_remote = agent_ops.isRemoteAgentPane(term);
-    if (self.agent_activity.source_remote) return null;
     // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
     // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
     agent_ops.adoptFallbackImageSource(self, term);
@@ -1218,17 +1226,51 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 결과가 오면 `poll` 이 목록을 통째로 바꾸고 그 위에 쌓인 것(타일·크게보기·호버)도 그때 버린다.
     // 그때까지는 조금 낡은 목록이 보인다 — 빈 화면보다 정직하다. 검색어도 자연히 남는다.
     if (!same) self.agent_activity.clear(self.allocator);
-    self.agent_activity.chain = buildChain(self, path);
+    // **원격 체인은 자리 하나다.** `buildChain` 은 `~/.codex/sessions` 를 **로컬** 디렉터리로 훑으므로
+    // (부모 rollout 탐색) 원격 경로에 대고 부르면 이쪽 파일을 뒤진다 — §2.1 이 금하는 바로 그것이다.
+    // 저쪽에서 체인을 푸는 것은 RAV4 다.
+    self.agent_activity.chain = if (self.agent_activity.source_remote)
+        remoteHeadChain(path)
+    else
+        buildChain(self, path);
     self.metal_dirty = true;
 
     // **훑기 직전의 자국을 찍는다.** 훑은 뒤에 찍으면 그 사이 붙은 줄을 「이미 봤다」로 오해한다.
-    self.agent_activity.head_stamp = stampOf(self, path);
-    if (backend.submit(self.agent_activity.chain)) |generation| {
+    //
+    // ⚠️ 원격은 자국이 없다 — `stampOf` 는 로컬 `stat` 이다(§2.1). 그래서 원격 세션은 신선도 폴링이
+    // 안 걸리고 **뷰에 다시 들어올 때** 다시 훑는다. 저쪽 크기를 묻는 일은 별개 왕복이라 RAV7 이다.
+    self.agent_activity.head_stamp = if (self.agent_activity.source_remote) .{} else stampOf(self, path);
+
+    // 원격 목적지는 **활성 Term 의 관측**에서 온다(업로드·SCM 과 같은 출처 — 두 벌을 만들지 않는다).
+    const active_term = pane_ops.activePane(self).activeTerm();
+    const remote_ctx = if (self.agent_activity.source_remote) self.remoteUploadContextFor(active_term) else null;
+    defer if (remote_ctx) |ctx| ctx.deinit(self.allocator);
+    const remote: ?scan_backend.RemoteTarget = if (remote_ctx) |ctx|
+        .{ .ctl = ctx.ctl, .dest = ctx.dest }
+    else
+        null;
+    // **원격인데 목적지를 못 얻으면 안 건다.** 그 pane 은 곧 「못 읽는다」로 뜬다 — 로컬로 떨어뜨리면
+    // 저쪽 경로를 이쪽에서 열게 된다(§2.1).
+    if (self.agent_activity.source_remote and remote == null) {
+        self.agent_activity.resubmit = false;
+        self.agent_activity.remote_failed = true;
+        self.metal_dirty = true;
+        return;
+    }
+
+    if (backend.submit(self.agent_activity.chain, remote)) |generation| {
         self.agent_activity.awaiting = generation;
     } else {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
         self.agent_activity.resubmit = true;
     }
+}
+
+/// 원격 소스의 체인 — **머리 하나**다(RAV3 · 위 `refresh` 의 그 이유).
+fn remoteHeadChain(path: []const u8) index.Chain {
+    var chain: index.Chain = .{};
+    _ = chain.append(path);
+    return chain;
 }
 
 /// **포커스가 다른 pane 으로 가면 그 pane 의 세션으로 갈아탄다**(계약 §2.1 — 「포커스가 다른 pane 으로
@@ -1282,7 +1324,7 @@ pub fn poll(self: *AppSession) void {
     const backend = backendPtr(self) orelse return;
 
     if (self.agent_activity.resubmit and !self.agent_activity.chain.isEmpty()) {
-        if (backend.submit(self.agent_activity.chain)) |generation| {
+        if (backend.submit(self.agent_activity.chain, null)) |generation| {
             self.agent_activity.awaiting = generation;
             self.agent_activity.resubmit = false;
         }
@@ -1373,6 +1415,14 @@ pub fn poll(self: *AppSession) void {
     self.agent_activity.activity_partial = result.activity_partial;
     self.agent_activity.scanned_bytes = result.scanned_bytes;
     self.agent_activity.scan_ns = result.scan_ns;
+    // **원격 왕복이 통째로 실패했나**(RAV3). 저쪽에서 아무 바이트도 못 읽고 자리도 0 이면 그것은
+    // 「활동이 없다」가 아니라 **「못 읽었다」**다 — 헬퍼가 없거나(exit 127) 채널이 끊긴 것이고,
+    // 그 둘을 화면이 가려야 한다(계약 §2.2).
+    //
+    // ⚠️ **`partial` 만으로는 못 가른다.** 상한에 잘린 정상 스캔도 `partial` 이다. 「한 바이트도
+    // 못 봤고 자리도 없다」가 실패의 모양이다.
+    self.agent_activity.remote_failed = self.agent_activity.source_remote and
+        result.partial and result.scanned_bytes == 0 and result.hits.items.len == 0;
     self.agent_activity.built = true;
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
@@ -3555,10 +3605,13 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 도는 것이 없는데 픽셀도 없다 = 못 풀었다. 조용히 닫으면 클릭이 안 먹은 것처럼 보인다.
         if (op.decoding == 0) return maru.i18n.t(.agent_activity_open_failed);
     }
+    // **원격에서 못 읽은 것을 「없다」로 말하지 않는다**(계약 §2.2 · RAV3). 왕복이 실패하면 자리가
+    // 0 개로 오는데, 그것을 그냥 그리면 화면이 「활동이 없습니다」라고 **거짓말**한다 — 사용자는
+    // 에이전트가 아무것도 안 한 줄 안다. 헬퍼가 없거나(exit 127) 채널이 끊긴 것이다.
+    if (self.agent_activity.remote_failed) return maru.i18n.t(.agent_activity_remote_unsupported);
     if (self.agent_activity.chain.isEmpty()) {
         // **「없다」와 「못 읽는다」는 다르다.** 원격 pane 에는 에이전트가 **있는데도**(사이드바 배지가
-        // 그것을 보여준다) 갤러리가 그 파일을 못 연다. 거기에 「에이전트가 없습니다」라고 하면
-        // 사용자는 훅이 깨진 줄 알고 설치부터 다시 훑는다 — 실제로 그 길을 걸어 본 뒤에 나눈다.
+        // 그것을 보여준다) 아직 소스를 못 정했을 수 있다.
         if (self.agent_activity.source_remote) return maru.i18n.t(.agent_activity_remote_unsupported);
         return maru.i18n.t(.agent_activity_no_agent);
     }

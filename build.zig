@@ -4329,6 +4329,20 @@ pub fn build(b: *std.Build) void {
     const run_remote_cursor_axis_boundary_tests = b.addRunArtifact(remote_cursor_axis_boundary_tests);
     run_remote_cursor_axis_boundary_tests.setCwd(b.path("."));
 
+    // **원격 활동의 오프셋이 로컬 syscall 로 새는 자리가 0 인가**(RAV3 — docs/plans/remote-agent-activity.md
+    // §6.3). 산문으로 두면 반드시 샌다: 원격 경로가 로컬에도 같은 모양으로 있으면 `openFile` 이
+    // **성공해서** 남의 대화가 뜬다(갤러리 §4.1.2 가 실제로 낸 결함). 원격 파일 트리가 같은 축에서
+    // 같은 게이트를 세웠다.
+    const remote_activity_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/remote_activity_local_syscall_axis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_activity_axis_boundary_tests = b.addRunArtifact(remote_activity_axis_boundary_tests);
+    run_remote_activity_axis_boundary_tests.setCwd(b.path("."));
+
     // `fstat` 축(`file_tree.ScanIdentity`)을 만들거나 벗기는 자리를 재고로 고정한다. Zig 는 필드
     // 프라이버시가 없어 타입만으로는 `.{ .value = 아무거나 }` 를 막지 못한다 — 언어가 못 하는 봉인을
     // 이 소스 스캔이 대신한다(2026-08-21: 축을 섞어 탐색기 안내가 끊이지 않던 결함).
@@ -6914,6 +6928,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
     boundary_step.dependOn(&run_remote_cursor_axis_boundary_tests.step);
     boundary_step.dependOn(&run_scan_identity_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_remote_activity_axis_boundary_tests.step);
     boundary_step.dependOn(&run_file_tree_publish_axis_boundary_tests.step);
     boundary_step.dependOn(&run_detached_worker_quiesce_axis_boundary_tests.step);
     boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);

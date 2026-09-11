@@ -14634,10 +14634,13 @@ pub const AppSession = struct {
     /// HOME으로 controlSocketPath를 계산한다. 로컬 세션(sshRemoteDest
     /// 없음)·HOME 없음/빈 문자열·경로 계산 실패면 null(호출자가 각자 폴백). dest/ctl은 owned라 호출자가 deinit으로
     /// 해제한다(startUpload/startUploadBytes는 빌려 dupe한다).
-    const RemoteUpload = struct {
+    /// 이 Term 의 **원격 목적지와 컨트롤 소켓**. 이름은 드롭 업로드에서 왔지만 쓰임은 그것만이
+    /// 아니다 — 원격 활동 스캔(RAV3)도 같은 관측(`ssh_remote_dest`)에서 같은 쌍을 얻어야 하고,
+    /// 두 벌을 만들면 「업로드는 되는데 활동은 안 되는」 호스트가 생긴다.
+    pub const RemoteUpload = struct {
         dest: []u8,
         ctl: []u8,
-        fn deinit(self: RemoteUpload, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: RemoteUpload, allocator: std.mem.Allocator) void {
             allocator.free(self.dest);
             allocator.free(self.ctl);
         }
@@ -15563,7 +15566,7 @@ pub const AppSession = struct {
         self.allocator.free(entry.key);
     }
 
-    fn remoteUploadContextFor(self: *AppSession, term: *Term) ?RemoteUpload {
+    pub fn remoteUploadContextFor(self: *AppSession, term: *Term) ?RemoteUpload {
         if (term.kind != .terminal or term.rt.observation.availability != .current) return null;
         const dest: ?[]u8 = if (term.rt.observation.ssh_remote_dest_present)
             (self.allocator.dupe(u8, term.rt.observation.ssh_remote_dest.items) catch null)

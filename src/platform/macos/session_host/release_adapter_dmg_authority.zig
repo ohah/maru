@@ -709,10 +709,15 @@ const Staged = struct {
         var failed = false;
         if (self.extracted_fd >= 0) {
             var current: posix.Stat = undefined;
+            var pathname: posix.Stat = undefined;
             if (c.fstat(self.extracted_fd, &current) != 0 or !sameStat(self.extracted_stat, current)) failed = true;
             _ = c.close(self.extracted_fd);
             self.extracted_fd = -1;
-            if (c.unlinkat(self.work_fd, "candidate-cli", 0) != 0) failed = true;
+            if (c.fstatat(self.work_fd, "candidate-cli", &pathname, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+                pathname.dev != self.extracted_stat.dev or pathname.ino != self.extracted_stat.ino)
+            {
+                failed = true;
+            } else if (c.unlinkat(self.work_fd, "candidate-cli", 0) != 0) failed = true;
         }
         if (c.unlinkat(self.work_fd, "candidate.dmg", 0) != 0) failed = true;
         var mount_now: posix.Stat = undefined;

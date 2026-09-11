@@ -143,6 +143,23 @@ const SubscriptionAdoption = enum {
     rejected,
 };
 
+/// **attach 가 왜 거절됐는지** 남긴다. 이 네 값은 성격이 정반대인데 호출부가 `!= .admitted` 하나로 묶어
+/// **연결 전체를 끊는다** — `deferred_*` 는 이름 그대로 「지금은 안 됨, 나중에」이고 `rejected` 는 영구다.
+///
+/// 2026-09-11 실측: `terminal-browser-pane` 세션 하나가 복구 목록에서 붙지 않았다. host 는
+/// `why=resource_exhausted` 만 남겼고, 그 반환 주소를 `atos` 로 풀어서야 이 자리로 좁혀졌다
+/// (`adoptPreparedAttach+228`). 그 전까지는 수신 한도(`inbound_resident_cap`)를 의심해 상수 세 개의
+/// 정합성을 파고 있었는데 **전부 헛짚었다** — 그 자리에서는 한 줄도 안 찍혔다.
+///
+/// 프레임 수를 함께 낸다. 「예산에 걸렸다」면 그 수가 크고, 「검증에 걸렸다」면 작아도 난다.
+fn noteAttachAdoption(adopted: SubscriptionAdoption, frames: usize) void {
+    if (builtin.is_test) return;
+    host_log.line(
+        "session host attach not admitted: adoption={s} frames={d}",
+        .{ @tagName(adopted), frames },
+    );
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
@@ -1083,12 +1100,14 @@ pub const Client = struct {
             self.connection.rollbackPreparedAttach(stream);
             return error.OutOfMemory;
         };
+        const frame_count = prepared.output.frames.len;
         const adopted = self.tryAdoptSubscriptionTurn(
             stream,
             prepared.output.takeFrames(),
             null,
         );
         if (adopted != .admitted) {
+            noteAttachAdoption(adopted, frame_count);
             prepared.output.rollback(&self.connection);
             self.connection.rollbackPreparedAttach(stream);
             return self.beginClose(.resource_exhausted);

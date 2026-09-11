@@ -1787,6 +1787,11 @@ const TermRuntime = struct {
     editor_col_mark_off: []u32 = &.{},
     /// 체크포인트를 만들 때 쓴 탭 폭. 다르면 낡은 것이다.
     editor_col_marks_tab: u8 = 0,
+    /// **점진 구축의 자리**(§2.1). 여기까지의 줄은 몫이 다 찼고, 이 줄은 `editor_col_marks_used`
+    /// 까지 찼다. `editor_lines.len` 과 같아지면 끝난 것이다.
+    editor_col_marks_line: u32 = 0,
+    /// 지금까지 적은 마크 수(위 줄의 진행점이기도 하다).
+    editor_col_marks_used: u32 = 0,
     /// **전체 훑기가 몇 번 돌았는가**(판정 전용 관측점 — `editor_line_cols_scans` 와 같은 몫).
     editor_col_marks_scans: u32 = 0,
     /// 그리는 줄마다의 **접힘 표식**(gutter 화살표). 줄 배열과 같은 축이고, 접힘이 바뀔 때만 다시

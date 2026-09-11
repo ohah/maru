@@ -5159,7 +5159,6 @@ fn colMarksFresh(term: *const Term) bool {
 fn ensureColMarks(self: *AppSession, term: *Term) void {
     const lines = term.rt.editor_lines;
     if (lines.len == 0) return;
-    if (colMarksFresh(term)) return;
     ensureLineCols(self, term);
     if (!lineColsFresh(term)) return; // 길이를 모르면 어느 줄이 긴지도 모른다
 
@@ -5167,40 +5166,75 @@ fn ensureColMarks(self: *AppSession, term: *Term) void {
     const every = chrome_editor.frame.col_mark_every;
     const min_cols = chrome_editor.frame.col_mark_min_cols;
 
-    // ⑴ 몫을 먼저 센다 — CSR 이라 한 번에 잡아야 경계가 맞는다.
-    var total: usize = 0;
-    for (cols) |c| {
-        if (c >= min_cols) total += @as(usize, c) / every + 1;
+    // ⑴ **자리를 한 번에 잡는다.** CSR 이라 경계가 맞아야 하고, 그 몫은 `u32` 배열을 한 번 훑어
+    //    세므로 싸다(문자 스캔이 아니다). 나누는 것은 **채우는 일**이다.
+    if (!colMarksFresh(term)) {
+        var total: usize = 0;
+        for (cols) |c| {
+            if (c >= min_cols) total += @as(usize, c) / every + 1;
+        }
+        const off = self.allocator.alloc(u32, lines.len + 1) catch return;
+        const marks = self.allocator.alloc(chrome_editor.content.Seek, total) catch {
+            self.allocator.free(off);
+            return;
+        };
+        @memset(off, 0);
+        dropColMarks(self, term);
+        term.rt.editor_col_marks = marks;
+        term.rt.editor_col_mark_off = off;
+        term.rt.editor_col_marks_tab = term.rt.editor_line_cols_tab;
+        term.rt.editor_col_marks_line = 0;
+        term.rt.editor_col_marks_used = 0;
+        term.rt.editor_col_marks_scans +|= 1;
     }
+    // **이미 다 찼으면 나간다.** 이 줄은 **동치이고 그것이 정상이다**(적대적 검증 G3 — 지운 변이가
+    // 살아남는다): 다 찬 뒤에는 `li == lines.len` 이라 아래 `while` 이 곧바로 거짓이고 뒤따르는
+    // 대입도 같은 값을 다시 쓴다. 그래도 두는 이유는 **뜻**이다 — 「끝났다」를 이 자리에서 말한다.
+    if (term.rt.editor_col_marks_line >= lines.len) return;
 
-    const off = self.allocator.alloc(u32, lines.len + 1) catch return;
-    const marks = self.allocator.alloc(chrome_editor.content.Seek, total) catch {
-        self.allocator.free(off);
-        return;
-    };
+    // ⑵ **이번 프레임 몫만 채운다**(§2.1 점진 계수). 줄 **중간에서 이어 걷는다** — 이 조각이
+    //    겨냥하는 최악이 줄 하나가 수백만 열인 경우라 줄로 쪼개면 안 나뉜다.
+    const tab_width = term.rt.editor_col_marks_tab;
+    const marks = term.rt.editor_col_marks;
+    const off = term.rt.editor_col_mark_off;
+    var budget: usize = chrome_editor.frame.col_mark_chunk_steps;
+    var li: usize = term.rt.editor_col_marks_line;
+    var used: usize = term.rt.editor_col_marks_used;
 
-    // ⑵ 채운다. `columnCheckpoints` 가 `stepColumn` 을 쓰므로 열의 정의가 폭 합 캐시와 같다.
-    const tab_width = term.rt.editor_line_cols_tab;
-    var used: usize = 0;
-    for (lines, 0..) |line, i| {
-        off[i] = @intCast(used);
-        if (cols[i] >= min_cols and used < marks.len) {
-            // **줄마다 «제 몫» 만 쓴다.** 안 막으면 `columnCheckpoints` 가 `out` 이 찰 때까지 채워
-            // 앞 줄들이 예산을 다 먹고 뒤 줄은 힌트가 아예 없다 — 실측으로 83줄 중 26줄만 붙었다.
-            //
-            // 몫은 위에서 센 것과 같은 식이고, 그 식이 **상한 걸린 폭**(`max_cols_count_limit`)을 쓰는
-            // 것이 맞다: 그 너머 열은 셈이 멈춰 **어차피 못 가므로** 체크포인트도 필요 없다.
-            const room = @min(marks.len - used, @as(usize, cols[i]) / every + 1);
-            used += chrome_editor.content.columnCheckpoints(line, tab_width, every, marks[used..][0..room]);
+    while (li < lines.len and budget > 0) {
+        // 이 줄의 몫과 시작점. **재개점은 이 줄에 이미 적은 마지막 마크**다(없으면 줄 머리).
+        const quota = if (cols[li] >= min_cols) @min(marks.len -| off[li], @as(usize, cols[li]) / every + 1) else 0;
+        const done_here = used - off[li];
+        if (quota == 0 or done_here >= quota) {
+            li += 1;
+            if (li < off.len) off[li] = @intCast(used);
+            continue;
+        }
+        const from: chrome_editor.content.Seek = if (done_here > 0) marks[used - 1] else .{ .byte = 0, .col = 0 };
+        const wrote = chrome_editor.content.columnCheckpointsFrom(
+            lines[li],
+            tab_width,
+            every,
+            from,
+            marks[used..][0 .. quota - done_here],
+            &budget,
+        );
+        used += wrote;
+        if (wrote == 0 and budget > 0) {
+            // 줄이 끝났다(예산이 남았는데 더 못 적었다).
+            li += 1;
+            if (li < off.len) off[li] = @intCast(used);
         }
     }
-    off[lines.len] = @intCast(used);
-
-    dropColMarks(self, term);
-    term.rt.editor_col_marks = marks;
-    term.rt.editor_col_mark_off = off;
-    term.rt.editor_col_marks_tab = tab_width;
-    term.rt.editor_col_marks_scans +|= 1;
+    term.rt.editor_col_marks_line = @intCast(li);
+    term.rt.editor_col_marks_used = @intCast(used);
+    if (li < lines.len) {
+        // **다 채울 때까지 다음 프레임을 부른다** — `RowCache` 의 점진 계수가 같은 자리에서 같은 일을
+        // 한다(idle skip 때문에 이것이 없으면 화면이 멈춘 채 영영 안 정확해진다).
+        self.metal_dirty = true;
+    } else {
+        off[lines.len] = @intCast(used);
+    }
 }
 
 /// 체크포인트를 버린다. **줄 배열이 바뀌거나 편집이 오면 부른다.**
@@ -5218,7 +5252,22 @@ fn dropColMarks(self: *AppSession, term: *Term) void {
 fn seekFor(term: *const Term, line: usize, col: u32) ?chrome_editor.content.Seek {
     const off = term.rt.editor_col_mark_off;
     if (line + 1 >= off.len) return null;
-    const marks = term.rt.editor_col_marks[off[line]..off[line + 1]];
+
+    // **점진 구축 중에는 경계가 아직 없다**(§2.1). 끝난 줄은 `off[line+1]` 이, **지금 채우는 줄**은
+    // 진행점(`editor_col_marks_used`)이 끝이고, 그 너머 줄은 아직 몫이 없다.
+    //
+    // **덜 찬 줄도 «있는 만큼» 쓴다** — 절반만 세운 줄에서도 그 앞 구간은 정확하므로 힌트가 된다.
+    // 이 조각이 겨냥하는 최악이 줄 **하나**가 수백만 열인 경우라, 끝난 줄만 섬기면 그 한 줄이 다
+    // 세워질 때까지 아무 이득이 없다.
+    const done_line = term.rt.editor_col_marks_line;
+    const end: usize = if (line < done_line)
+        off[line + 1]
+    else if (line == done_line)
+        term.rt.editor_col_marks_used
+    else
+        return null;
+    if (end <= off[line]) return null;
+    const marks = term.rt.editor_col_marks[off[line]..end];
     if (marks.len == 0 or marks[0].col > col) return null;
     var lo: usize = 0;
     var hi: usize = marks.len; // exclusive
@@ -16482,8 +16531,15 @@ test "HSEEK3 멀리 밀어도 «훑는 양» 이 안 늘어난다 — 평평함�
     var far: usize = 0;
     for ([_]u32{ 1_000, 90_000 }, 0..) |col, k| {
         term.rt.editor_first_col = col;
-        var w = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
-        w.dl.deinit(allocator);
+        // **점진 구축을 먼저 끝낸다**(§2.1). 체크포인트는 프레임에 나눠 세우므로 예열 한 번으로는
+        // 안 끝나고, 덜 선 상태에서 재면 「비례한다」가 나온다 — 그것은 **전이 구간**이지 정상
+        // 상태가 아니다(그 구간의 비용은 `col_mark_chunk_steps` 가 따로 묶는다).
+        var drain: usize = 0;
+        while (drain < 500) : (drain += 1) {
+            var w = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+            w.dl.deinit(allocator);
+            if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) break;
+        }
         chrome_editor.content.total_steps = 0;
         chrome_editor.content.expand_steps = 0;
         var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
@@ -16500,6 +16556,219 @@ test "HSEEK3 멀리 밀어도 «훑는 양» 이 안 늘어난다 — 평평함�
         std.debug.print("HSEEK3: 가까이 {d} 걸음, 멀리 {d} 걸음 — 비용이 거리에 비례한다\n", .{ near, far });
         return error.StepsGrewWithDistance;
     }
+}
+
+test "HSEEK5 체크포인트는 «프레임에 나눠» 선다 — 한 프레임을 통째로 먹지 않는다 (제품 경계)" {
+    // **줄 하나가 수백만 열인 파일이 이 조각의 이유다.** 그 줄의 체크포인트를 한 번에 세우면 첫
+    // 밀린 프레임이 통째로 멈춘다(§3.8 상한을 4,000,000 으로 올려 봤을 때 226ms — 재앙 감지선 밖).
+    // §2.1 의 점진 계수와 같은 결로 **걸음 예산**을 두고 나눈다.
+    //
+    // **줄 단위로는 못 나눈다** — 최악이 줄 «하나» 라 줄로 쪼개면 안 나뉜다. 그래서 줄 **중간에서
+    // 이어 걷고**(`columnCheckpointsFrom`), 재개점은 **마지막으로 적은 마크**다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    // **걸음 수가 열 수보다 적다**(원자 하나가 5걸음에 약 9열). 청크는 걸음으로 세므로 열이 아니라
+    // **걸음**이 청크를 넘어야 한다 — 48만 열로 잡았다가 한 프레임에 끝나 픽스처가 공허했다.
+    //
+    // **그리고 줄 하나로는 모자란다.** 한 줄의 몫은 §3.8 셈 상한에서 멈추므로(`max_cols_count_limit`
+    // ÷ `col_mark_every` ≈ 977개 ≈ 55만 걸음) 두 청크면 끝난다 — 그러면 「덜 찼으니 다음 프레임을
+    // 부른다」 갈래를 **한 번밖에 못 지나** 그 변이가 살아남았다(적대적 검증 E1c). 줄을 넷 둔다.
+    for (0..4) |_| {
+        for (0..200_000) |_| try doc.appendSlice(allocator, "a\tb한글");
+        try doc.append(allocator, '\n');
+    }
+    const term = try undoFixture(&fx, allocator, "hseek5.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var warm = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    warm.dl.deinit(allocator);
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+
+    // **첫 프레임이 다 안 세운다** — 그것이 「나눠 선다」의 뜻이다.
+    var first = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    first.dl.deinit(allocator);
+    const after_first = term.rt.editor_col_marks_used;
+    if (after_first == 0) return error.NothingBuilt;
+    if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) return error.FinishedInOneFrame;
+    // **그리고 다음 프레임을 요청한다** — 안 그러면 idle skip 때문에 영영 안 정확해진다.
+    //
+    // **직전에 내리고 «이 함수만» 부른다.** 그냥 보면 항진명제다 — 렌더·스크롤 경로가 이미 세워
+    // 두므로 `ensureColMarks` 가 안 세워도 참이다(적대적 검증 E1 이 그 변이로 통과했다).
+    fx.session.metal_dirty = false;
+    ensureColMarks(fx.session, term);
+    // **계약은 「덜 찼으면 부른다」이다** — 끝내는 호출에서는 안 세우는 것이 맞다. 그 갈림을 안
+    // 가르면 픽스처 크기에 따라 판정자가 흔들린다(상한을 낮췄더니 그 호출이 build 를 끝내 버렸다).
+    try testing.expectEqual(term.rt.editor_col_marks_line < term.rt.editor_lines.len, fx.session.metal_dirty);
+
+    // **프레임을 거듭하면 «수렴한다»** — 그리고 진행은 단조다.
+    var prev = after_first;
+    var n: usize = 0;
+    while (n < 200) : (n += 1) {
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        try testing.expect(term.rt.editor_col_marks_used >= prev); // 뒤로 가지 않는다
+        prev = term.rt.editor_col_marks_used;
+        if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) break;
+    }
+    if (n >= 200) return error.DidNotConverge;
+
+    // **다 선 뒤의 답이 옳다** — 나눠 세운 것이 값을 바꾸면 안 된다.
+    try testing.expectEqual(@as(?usize, null), lineColsMismatch(term));
+    const sk = seekFor(term, 1, term.rt.editor_first_col) orelse return error.NoSeekAtEnd;
+    try testing.expect(sk.col <= term.rt.editor_first_col);
+    try testing.expect(sk.col + chrome_editor.frame.col_mark_every > term.rt.editor_first_col);
+}
+
+test "HSEEK6 덜 세운 줄도 «있는 만큼» 섬긴다 — 전이 구간의 비용 (제품 경계)" {
+    // **끝난 줄만 섬기면 그 한 줄이 다 세워질 때까지 아무 이득이 없다.** 이 조각이 겨냥하는 최악이
+    // 줄 **하나**가 수백만 열인 minified 파일이라, 그 한 줄이 전부다.
+    //
+    // **답은 같고 전이 구간만 느려지는 축**이라 다른 판정자가 못 잡는다(적대적 검증 E3). 그래서
+    // 「다 세우기 전」의 **걸음 수**를 본다 — 시간이 아니라(러너 부하와 안 갈린다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "head\n");
+    for (0..200_000) |_| try doc.appendSlice(allocator, "a\tb한글"); // 약 100만 걸음 — 청크 둘 이상
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "hseek6.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var warm = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    warm.dl.deinit(allocator);
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+
+    // **첫 프레임**: 아직 다 안 섰다 — 여기까지가 전이 구간의 시작이다.
+    var first = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    first.dl.deinit(allocator);
+    if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) return error.FinishedInOneFrame;
+    if (term.rt.editor_col_marks_used == 0) return error.NothingBuilt;
+
+    // **두 번째 프레임의 걸음 수**를 잰다. 덜 세운 줄을 섬기면 전개가 그 마크에서 시작하고,
+    // 안 섬기면 **줄 머리부터** 걷는다 — 그 차이가 여기서 값으로 갈린다.
+    chrome_editor.content.total_steps = 0;
+    chrome_editor.content.expand_steps = 0;
+    var second = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    second.dl.deinit(allocator);
+    const steps = chrome_editor.content.total_steps + chrome_editor.content.expand_steps;
+
+    // 한 청크 몫(체크포인트 구축)에 화면 몫이 더해질 뿐이어야 한다. 안 섬기면 **밀린 거리**만큼
+    // 더 걷는다 — `first_col` 이 수십만이라 자릿수가 다르다.
+    const budget = chrome_editor.frame.col_mark_chunk_steps;
+    if (steps > budget * 2) {
+        std.debug.print("HSEEK6: 전이 프레임이 {d} 걸음 (청크 {d}) — 덜 세운 줄을 안 섬긴다\n", .{ steps, budget });
+        return error.TransitionWalksFromLineStart;
+    }
+}
+
+test "HSEEK7 긴 줄이 «여럿» 이어도 전부 선다 — 예산이 한 줄에 갇히지 않는다 (제품 경계)" {
+    // **줄 하나짜리 픽스처로는 못 본다.** 한 줄이 끝난 뒤 다음 줄로 안 넘어가는 변이가 그 픽스처를
+    // 통과했다(적대적 검증 F3 — 줄이 하나뿐이라 넘어갈 곳이 없었다). 최악은 한 줄이지만 **흔한 것은
+    // 여러 줄**이고(minified CSS·번들의 여러 청크), 그때 예산이 한 줄에 갇히면 뒤 줄은 영영 힌트가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    const long_lines = 6;
+    for (0..long_lines) |_| {
+        for (0..20_000) |_| try doc.appendSlice(allocator, "a\tb한글"); // 줄마다 약 10만 걸음
+        try doc.append(allocator, '\n');
+    }
+    const term = try undoFixture(&fx, allocator, "hseek7.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var warm = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    warm.dl.deinit(allocator);
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+
+    // 다 설 때까지 프레임을 돌린다.
+    var n: usize = 0;
+    while (n < 200) : (n += 1) {
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) break;
+    }
+    if (n >= 200) return error.DidNotConverge;
+
+    // **긴 줄이 전부 몫을 가졌다** — 하나라도 비면 예산이 한 줄에 갇힌 것이다.
+    const off = term.rt.editor_col_mark_off;
+    var with_marks: usize = 0;
+    for (0..long_lines) |i| {
+        if (off[i + 1] > off[i]) with_marks += 1;
+    }
+    if (with_marks != long_lines) {
+        std.debug.print("HSEEK7: 긴 줄 {d} 중 {d} 줄만 몫을 가졌다\n", .{ long_lines, with_marks });
+        return error.SomeLongLinesHaveNoMarks;
+    }
+    // 그리고 **마지막 긴 줄**도 실제로 힌트를 낸다.
+    const sk = seekFor(term, long_lines - 1, term.rt.editor_first_col) orelse return error.NoSeekOnLastLine;
+    try testing.expect(sk.col <= term.rt.editor_first_col);
+}
+
+test "HSEEK8 짧은 줄이 «사이에» 끼어도 CSR 경계가 맞다 — 마지막 줄까지 (제품 경계)" {
+    // **픽스처의 배치가 축이다.** 짧은 줄을 늘 «앞» 에만 두면 경계를 안 적는 변이가 통과하고
+    // (그때는 `used` 가 아직 0 이라 안 적어도 같다), 마지막 줄이 늘 빈 줄이면 마지막 경계를 안
+    // 닫는 변이가 통과한다(그 줄은 몫이 없으니 아무도 안 읽는다). 적대적 검증 G1·G2 가 그렇게
+    // 살아남았다.
+    //
+    // 그래서 **긴 · 짧은 · 긴 · 긴(마지막)** 으로 두고, 마지막 줄이 실제로 힌트를 내는지까지 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    const long_at = [_]usize{ 0, 2, 3 };
+    for (0..4) |i| {
+        if (i == 1) {
+            try doc.appendSlice(allocator, "short\n"); // **사이에** 끼운 짧은 줄
+        } else {
+            for (0..20_000) |_| try doc.appendSlice(allocator, "a\tb한글");
+            if (i != 3) try doc.append(allocator, '\n'); // **마지막 줄은 개행 없이** — 빈 꼬리 줄을 안 만든다
+        }
+    }
+    const term = try undoFixture(&fx, allocator, "hseek8.txt", doc.items);
+    term.rt.editor_wrap = false;
+    var warm = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    warm.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 픽스처 자기 검증
+    _ = scrollCols(fx.session, term, leaf, -1_000_000, null);
+
+    var n: usize = 0;
+    while (n < 200) : (n += 1) {
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        if (term.rt.editor_col_marks_line >= term.rt.editor_lines.len) break;
+    }
+    if (n >= 200) return error.DidNotConverge;
+
+    // **긴 줄 셋이 전부 몫을 갖고, 경계가 오름차순이다.**
+    const off = term.rt.editor_col_mark_off;
+    for (0..off.len - 1) |i| try testing.expect(off[i] <= off[i + 1]);
+    for (long_at) |i| {
+        if (off[i + 1] <= off[i]) {
+            std.debug.print("HSEEK8: {d}번 긴 줄의 몫이 비었다(off {d}..{d})\n", .{ i, off[i], off[i + 1] });
+            return error.LongLineHasNoMarks;
+        }
+    }
+    // **마지막 줄도 힌트를 낸다** — 마지막 경계를 안 닫으면 여기서 빈다.
+    const sk = seekFor(term, 3, term.rt.editor_first_col) orelse return error.NoSeekOnLastLine;
+    try testing.expect(sk.col <= term.rt.editor_first_col);
 }
 
 test "HSEEK4 체크포인트 메모리는 «줄 수» 가 아니라 열 수에 비례한다 (제품 경계)" {

@@ -42,7 +42,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
 ///
 /// 판 9: `activity` 서브커맨드(RAV2 — 원격 에이전트 활동). 같은 이유다.
-pub const version_line = "maru-remote-watch 9\n";
+///
+/// 판 10: `read` 서브커맨드(RAV5 — 펼침·이미지가 읽을 **구간**). 활동 wire 는 자리만 싣고 바이트는
+/// 안 싣는다(계약 §2.4) — 그 바이트를 요청형으로 당겨오는 문이다.
+pub const version_line = "maru-remote-watch 10\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -90,6 +93,15 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, root, "activity")) {
         const file_path = args.next() orelse return exitWith(exit_unsupported);
         return runActivity(io, init.gpa, file_path);
+    }
+
+    // **구간 읽기 모드**(RAV5). `activity` 가 준 자리로 그 바이트만 돌려준다 — 펼침(계약 §2.4)과
+    // 이미지(RAV6)가 쓴다. `list`·`activity` 와 같이 한 번 답하고 죽는다.
+    if (std.mem.eql(u8, root, "read")) {
+        const file_path = args.next() orelse return exitWith(exit_unsupported);
+        const off_text = args.next() orelse return exitWith(exit_unsupported);
+        const len_text = args.next() orelse return exitWith(exit_unsupported);
+        return runRead(io, init.gpa, file_path, off_text, len_text);
     }
 
     // **이름 변경 모드**(RF6a — [계획](../../docs/plans/remote-file-tree.md) §2.3 ⑶). 인자는
@@ -1267,4 +1279,101 @@ fn readCodexParentId(io: std.Io, path: []const u8, out: []u8) []const u8 {
     const n = file.readPositional(io, &.{&head}, 0) catch return "";
     if (n == 0) return "";
     return activity_wire.parseCodexParentId(head[0..n], out);
+}
+
+// ── 구간 읽기 모드(RAV5) ────────────────────────────────────────────────────────────────────────
+
+/// 그 파일의 `[offset, offset+len)` 을 돌려준다.
+///
+/// **길이는 요청보다 짧을 수 있다**(파일 끝) — 그것은 오류가 아니라 사실이고, 받는 쪽은 그 차이로
+/// 「그새 잘렸다」를 안다. 못 읽은 것(열기 실패·상한 초과·숫자 아님)은 `!` 로 **사유를 남긴다**.
+fn runRead(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, off_text: []const u8, len_text: []const u8) void {
+    var line: [128]u8 = undefined;
+    const head = activity_wire.appendRangeHeader(&line, 0) orelse return;
+    if (!putAll(line[0..head])) return;
+
+    // 절대경로만 — `activity` 와 같은 규율(상대는 로그인 셸의 cwd 에 걸려 **다른 파일**을 연다).
+    if (file_path.len == 0 or file_path[0] != '/') {
+        putRangeError("path is not absolute");
+        return;
+    }
+
+    const offset = parseU64(off_text) orelse {
+        putRangeError("offset is not a number");
+        return;
+    };
+    const want = parseU64(len_text) orelse {
+        putRangeError("length is not a number");
+        return;
+    };
+    // **상한은 받는 쪽이 읽기를 자르는 값과 같다**(`max_range_bytes`). 넘는 요청은 **거절한다** —
+    // 잘라서 주면 받는 쪽이 「파일 끝」과 구분하지 못한다.
+    if (want > activity_wire.max_range_bytes) {
+        putRangeError("length above limit");
+        return;
+    }
+
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch |err| {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "open failed: {s}", .{@errorName(err)}) catch "open failed";
+        putRangeError(msg);
+        return;
+    };
+    defer file.close(io);
+
+    const buf = gpa.alloc(u8, @intCast(want)) catch {
+        putRangeError("out of memory");
+        return;
+    };
+    defer gpa.free(buf);
+
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = file.readPositional(io, &.{buf[got..]}, offset + got) catch {
+            putRangeError("read failed");
+            return;
+        };
+        if (n == 0) break; // 파일 끝 — 짧은 답은 오류가 아니다
+        got += n;
+    }
+
+    // **바이트는 길이 접두로 간다** — 개행·NUL 이 들어도 안 깨진다(`appendRangeBytes`).
+    if (!putRangeBytes(buf[0..got])) return;
+    const tail = activity_wire.appendRangeTail(&line, 0) orelse return;
+    _ = putAll(line[0..tail]);
+}
+
+/// 10 진수만 받는다. `std.fmt.parseInt` 는 `+5`·`5_0` 을 받아들여 관대하고, 이 값은 선 위에서 온다
+/// (활동 코덱이 같은 이유로 같은 규율을 쓴다 — 적대적 A1).
+fn parseU64(text: []const u8) ?u64 {
+    if (text.len == 0) return null;
+    var v: u64 = 0;
+    for (text) |c| {
+        if (c < '0' or c > '9') return null;
+        v = std.math.mul(u64, v, 10) catch return null;
+        v = std.math.add(u64, v, c - '0') catch return null;
+    }
+    return v;
+}
+
+/// `B <len> <바이트>\n` 를 흘린다. **바이트를 버퍼에 담지 않는다** — 최대 4 MiB 이고, 머리와 꼬리만
+/// 작은 줄 버퍼로 짓는다(`activity` 의 「wire 를 통째로 안 담는다」와 같은 규율).
+fn putRangeBytes(bytes: []const u8) bool {
+    var head: [64]u8 = undefined;
+    const h = std.fmt.bufPrint(&head, "B {d} ", .{bytes.len}) catch return false;
+    if (!putAll(h)) return false;
+    if (bytes.len > 0 and !putAll(bytes)) return false;
+    return putAll("\n");
+}
+
+fn putRangeError(msg: []const u8) void {
+    var head: [64]u8 = undefined;
+    const h = std.fmt.bufPrint(&head, "! {d} ", .{msg.len}) catch return;
+    if (!putAll(h)) return;
+    if (!putAll(msg)) return;
+    _ = putAll("\n");
 }

@@ -382,3 +382,110 @@ test "헬퍼 activity: 부모 id 로 «끝나기만» 하는 파일에는 안 �
     try std.testing.expect(!saw_trap);
     try std.testing.expectEqual(@as(usize, 1), files); // 머리 하나 — 함정은 부모가 아니다
 }
+
+// ── RAV5: 구간 읽기 ─────────────────────────────────────────────────────────────────────────────
+
+fn runRead(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const u8, off: u64, len: u64) !std.process.RunResult {
+    var off_buf: [24]u8 = undefined;
+    var len_buf: [24]u8 = undefined;
+    return std.process.run(gpa, io, .{
+        .argv = &.{
+            bin,
+            "read",
+            path,
+            try std.fmt.bufPrint(&off_buf, "{d}", .{off}),
+            try std.fmt.bufPrint(&len_buf, "{d}", .{len}),
+        },
+        .stdout_limit = .limited(wire.max_range_wire_bytes),
+    });
+}
+
+/// 범위 답에서 바이트를 꺼낸다. 완결이 아니면 null — 잘린 답을 온전한 척 읽지 않는다.
+fn rangeBytes(out: []const u8) ??[]const u8 {
+    var p = wire.RangeParser.init(out);
+    var found: ?[]const u8 = null;
+    while (p.next() catch return null) |ev| switch (ev) {
+        .bytes => |b| found = b,
+        .remote_error => return @as(??[]const u8, null),
+    };
+    if (!p.complete()) return null;
+    return found;
+}
+
+test "헬퍼 read: 그 구간의 바이트만 돌려준다 (RAV5)" {
+    // 활동 wire 는 **자리만** 싣는다(계약 §2.4) — 펼침이 보여 줄 바이트는 이 문으로 당겨온다.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav5.{d}.txt", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // **개행과 NUL 을 넣는다** — 길이 접두가 그것을 견디는지가 이 wire 의 존재 이유다.
+    const body = "0123456789\nabc\x00def";
+    {
+        const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{body}, 0);
+    }
+
+    {
+        const out = try runRead(gpa, io, bin, path, 11, 7); // "abc\x00def"의 앞 7 바이트
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        const got = rangeBytes(out.stdout) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("abc\x00def", got.?);
+    }
+
+    // **요청보다 짧은 답은 오류가 아니다** — 파일 끝이다. 그 차이로 받는 쪽이 「그새 잘렸다」를 안다.
+    {
+        const out = try runRead(gpa, io, bin, path, 11, 9999);
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        const got = rangeBytes(out.stdout) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 7), got.?.len);
+    }
+
+    // **파일 끝 뒤를 물으면 빈 답이다** — 「없다」이지 「못 읽었다」가 아니다.
+    {
+        const out = try runRead(gpa, io, bin, path, 9999, 8);
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        const got = rangeBytes(out.stdout) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 0), got.?.len);
+    }
+}
+
+test "헬퍼 read: 못 읽는 것은 사유를 남긴다 (RAV5)" {
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var missing_buf: [64]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buf, "/tmp/maru-rav5-none.{d}", .{std.c.getpid()});
+
+    const cases = [_]struct { path: []const u8, off: u64, len: u64, want: []const u8 }{
+        // 상대경로 — 저쪽 cwd 의 **다른 파일**을 안 연다(`activity` 와 같은 규율).
+        .{ .path = "rel.txt", .off = 0, .len = 4, .want = "path is not absolute" },
+        // 상한 초과는 **거절한다** — 잘라서 주면 받는 쪽이 「파일 끝」과 구분하지 못한다.
+        .{ .path = "/etc/hosts", .off = 0, .len = wire.max_range_bytes + 1, .want = "length above limit" },
+        .{ .path = missing, .off = 0, .len = 4, .want = "open failed: FileNotFound" },
+    };
+
+    for (cases) |c| {
+        const out = try runRead(gpa, io, bin, c.path, c.off, c.len);
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+
+        var p = wire.RangeParser.init(out.stdout);
+        var why: ?[]const u8 = null;
+        while (try p.next()) |ev| switch (ev) {
+            .remote_error => |msg| why = msg,
+            .bytes => return error.TestUnexpectedResult, // 못 읽는데 바이트를 주면 안 된다
+        };
+        try std.testing.expect(why != null);
+        try std.testing.expectEqualStrings(c.want, why.?);
+        try std.testing.expect(p.complete());
+    }
+}

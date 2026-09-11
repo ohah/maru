@@ -432,6 +432,10 @@ pub const create_script = remote_shell.path_assign ++ "exec \"" ++ watch_install
 /// 조용히 비는 대신 고아 방지만 꺼진다(적대적 M2 가 그 갈림을 만들었다).
 pub const activity_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" activity \"$1\"";
 
+/// **구간 읽기 스크립트**(RAV5). `$1`=원격 절대 경로 · `$2`=오프셋 · `$3`=길이. 펼침(계약 §2.4)과
+/// 이미지(RAV6)가 그 자리의 바이트만 당겨온다 — 활동 wire 는 자리만 싣기 때문이다.
+pub const activity_read_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" read \"$1\" \"$2\" \"$3\"";
+
 pub const Stream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout. 호출자가 읽고 **닫는다**.

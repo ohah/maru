@@ -1446,7 +1446,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. 이는 새 기능 구현 잔여가 아니라 release provenance gate다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·soak도 별도 release gate다. release와 무관한 다음 후보는
-   `performance-budget.md`의 launch→first drawable, key→screen E2E, 장시간 연속 soak 계측이다. G3은 출하 뒤 기본값을
+   `performance-budget.md`의 launch→first drawable(L1: 일반 제품 시작 경로를 보존한 strict baseline), key→screen E2E,
+   장시간 연속 soak 계측이다. G3은 출하 뒤 기본값을
    다시 바꿀 때만 여는 별도 백로그이고 P6은 선택 확장 범위다.
 
    **G1 config loader provenance:** opt-in 설정의 의도를 보존하기 위해 config loader가 resolved bool과 별도로

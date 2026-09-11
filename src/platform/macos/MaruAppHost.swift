@@ -3857,6 +3857,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var artifactDirectory: String {
         URL(fileURLWithPath: summaryPath).deletingLastPathComponent().path
     }
+    // L1은 일반 제품 시작 경로를 그대로 재므로 MARU_MACOS_APP_SMOKE_MS와 분리한다. parent가
+    // 닫힌 자식 환경을 만든 뒤 fork/exec 직전에 찍은 같은 monotonic clock 값을 넘기고, Swift는 첫 성공 draw 뒤의
+    // 종점만 기록한다. token 없이 timestamp만 주입해도 제품 수명에는 영향이 없다.
+    private let appLaunchFirstDrawableArmed =
+        ProcessInfo.processInfo.environment["MARU_APP_LAUNCH_FIRST_DRAWABLE"] == "1"
+    private let appLaunchFirstDrawableStartNs: UInt64 = {
+        guard let raw = ProcessInfo.processInfo.environment["MARU_APP_LAUNCH_FIRST_DRAWABLE_START_NS"],
+              let value = UInt64(raw), value > 0 else { return 0 }
+        return value
+    }()
+    private var appLaunchFirstDrawableSubmitNs: UInt64 = 0
+    private var appLaunchFirstDrawableTerminationScheduled = false
     private var capabilities = MaruAppHostCapabilities()
     // 이 controller는 pre-AppKit lease 획득 성공 뒤에만 생성된다. startup loser는 이 상태에 도달하지 않는다.
     private let appInstanceLeaseStatus = UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED)
@@ -4467,6 +4479,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let smokeDuration = smokeDurationMs()
         smokeMode = smokeDuration != nil
 
+        // 잘못 무장된 하니스가 0 기반 헛 latency를 쓰거나 일반 앱을 붙잡지 않게 renderer 구성 전에 닫는다.
+        if appLaunchFirstDrawableArmed && appLaunchFirstDrawableStartNs == 0 {
+            exitCode = 1
+            writeSummary(visibleUI: false, abiReady: false, smokeDurationMs: smokeDuration)
+            NSApp.terminate(nil)
+            return
+        }
+
         if !abiReady {
             exitCode = 1
             writeSummary(visibleUI: false, abiReady: false, smokeDurationMs: smokeDuration)
@@ -4659,7 +4679,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
-        if smokeMode { return .terminateNow } // smoke 자동 종료는 무인이라 모달에 막히면 hang
+        if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
         if bypassQuitConfirm {
             // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
             // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.
@@ -5628,6 +5648,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             lastDrawnGeneration = frame.generation
             metalNeedsRedraw = false
             metalFramesDrawn += 1
+            if appLaunchFirstDrawableArmed && !appLaunchFirstDrawableTerminationScheduled {
+                let submit = DispatchTime.now().uptimeNanoseconds
+                guard submit > appLaunchFirstDrawableStartNs else {
+                    exitCode = 1
+                    appLaunchFirstDrawableTerminationScheduled = true
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                    return
+                }
+                appLaunchFirstDrawableSubmitNs = submit
+                appLaunchFirstDrawableTerminationScheduled = true
+                // renderer 호출 안에서 teardown하지 않는다. 성공 frame bookkeeping을 끝낸 다음
+                // run-loop turn에서 종료해야 summary가 exact frame=1을 관찰한다.
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
         } else {
             // 렌더러가 false(오버레이 drawable pool starvation으로 모달·닫힘 clear를 드롭 등)를 반환하면 재시도가
             // 필요하다. tick 게이트(tickAppSession)는 lastSeenMetalGeneration을 이미 전진시켜 두므로 generation
@@ -12037,6 +12071,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
         metal_renderer_created=\(metalRendererCreated)
         metal_frames_drawn=\(metalFramesDrawn)
+        app_launch_first_drawable_armed=\(appLaunchFirstDrawableArmed)
+        app_launch_first_drawable_smoke_mode=\(smokeMode)
+        app_launch_first_drawable_start_ns=\(appLaunchFirstDrawableStartNs)
+        app_launch_first_drawable_submit_ns=\(appLaunchFirstDrawableSubmitNs)
+        app_launch_first_drawable_latency_ns=\(appLaunchFirstDrawableSubmitNs > appLaunchFirstDrawableStartNs ? appLaunchFirstDrawableSubmitNs - appLaunchFirstDrawableStartNs : 0)
         app_session_status=\(appSessionStatus)
         frame_loop_ticks=\(latestFrameSummary.frame_loop_ticks)
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)

@@ -122,7 +122,7 @@ test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backen
     const appkit_gate = between(
         build,
         "const session_host_cr6e_c3c_appkit_step = b.step(",
-        "\n        const macos_app_smoke_step = b.step(",
+        "\n        const app_launch_first_drawable_step = b.step(",
     ) orelse return error.MissingStrictArtifactGate;
     try std.testing.expectEqual(@as(usize, 2), count(appkit_gate, "tools/perf/session_host_cr6e_c3c_validator.zig"));
     try std.testing.expectEqual(@as(usize, 1), count(appkit_gate, "--maru-expect-tests=2"));

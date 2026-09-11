@@ -1179,13 +1179,18 @@ Enter 한 번이다).
 «밑» 에서 그대로 눌린다 — 안 보이는 줄이 열리는 것이다. 서술자와 같은 규칙이다: 보이는
 만큼만 있는 것이다.
 
-**지금 그것을 지키는 방법은 chrome 과 다르다**(2026-09-10 코드 대조로 정정 — 예전에는 이 자리가 chrome 의
-경로를 모바일도 탄다고 적어 두었는데, 브리지는 `UiActionId` 를 **한 번도 안 쓴다**).
-chrome 은 `UiActionId` + `snapshot_generation` 의 intent table 로 푼다([chrome 상호작용
-이관](chrome-interaction-migration.md)) — generation 이 다르면 `resolve` 가 null 을 낸다.
-모바일은 **누를 때 그 세션의 `runtime_id` 를 잡고 뗄 때 목록에서 다시 푼다**(`openRemoteRow`);
-사라졌으면 아무것도 안 연다. **같은 불변을 다른 기법으로 지킨다.** 한 벌로 모으는 일은
-[M12](plans/mobile-platform.md) 가 갖고 있고, 그 근거는 「지금이 틀렸다」가 아니라 **중복**이다.
+**모바일도 chrome 과 «같은 기계»를 쓴다**(M12a~c 로 이관 완료). 브리지가
+`chrome/ui/intent_table.zig` 의 `IntentTable(Intent)` 를 그대로 세우고, 그릴 때 누를 자리를
+`registerAction(rect, intent)` 으로 등록한 뒤 `hitAction` 이 **역순으로**(나중에 그린 것이 이긴다)
+맞힌다. generation 이 갈리면 `resolve` 가 null 을 낸다 — chrome 과 같은 계약이다.
+
+**다른 것은 뜻의 «모양» 이다.** chrome 은 id 를 뗄 때 되물어도 되지만 모바일은 **누를 때** 뜻을
+잡는다(위 문단). 그리고 목록의 뜻은 순번이 아니라 **신원**(`runtime_id`)이라, 세대가 갈려도
+여는 자리가 그것을 다시 푼다(`openRemoteRow`).
+
+**좌표로 버튼을 고르는 자리는 둘뿐이다** — 표 자신(`hitAction`)과 **선택 팝업**(위 예외). 그
+밖에 남은 `setHit` 은 전부 **조회**다(판정자가 쓰는 `settingsRowAt`·`terminalChromeHitAt`) —
+제품의 포인터 경로는 그것들을 안 부른다.
 
 **`maru_mobile_hit_cell` 은 본문 전용으로 남는다.** "어느 셀을 만졌나" 는 터미널 의미(텍스트
 선택)라 그 자리가 맞다. 탭·사이드바·아이콘까지 이 함수로 넓히면 위 계약을 우회하게 된다.

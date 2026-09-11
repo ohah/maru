@@ -246,6 +246,15 @@ comptime {
 const Writer = struct {
     allocator: std.mem.Allocator,
     max_bytes: u64 = max_total_bytes,
+    /// **스크롤백 하나가 쓸 수 있는 바이트 상한**(null = 무제한 = 종전 동작).
+    ///
+    /// 줄 수가 아니라 바이트로 자르는 이유: 줄 하나의 인코딩 크기가 내용에 따라 19 배까지 벌어진다
+    /// (197 칸이 색까지 꽉 찬 줄 ≈ 3.8 KB, 프롬프트만 있는 줄 ≈ 0.2 KB). 「최근 300 줄」로 자르면 총량이
+    /// 1.2 MB 일 수도 23 MB 일 수도 있어, 상한을 넘기거나 여유를 버린다. 바이트로 자르면 **세션이 몇 개든
+    /// 총량이 예산으로 고정**되고, 가벼운 세션은 같은 예산에 훨씬 많은 과거를 지킨다.
+    ///
+    /// 이 필드는 생성기 경로(`encodeValue`)가 그대로 들고 다니므로 시그니처를 안 바꾸고 닿는다.
+    scrollback_budget: ?u64 = null,
     bytes: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Writer) void {
@@ -401,24 +410,66 @@ fn encodeLength(writer: *Writer, len: usize, elem_size: usize) Error!void {
     try writer.integer(u64, @intCast(len));
 }
 
+fn encodeScrollbackRow(writer: *Writer, sb: *const Scrollback, index: usize) Error!void {
+    const row = sb.row(index) orelse return error.InvalidValue;
+    try encodeLength(writer, row.len, @sizeOf(Cell));
+    for (row) |cell| try encodeValue(writer, Cell, &cell);
+    try writer.byte(@intFromBool(sb.rowWrapped(index)));
+    const prompt = sb.rowPrompt(index);
+    try encodeValue(writer, @TypeOf(prompt), &prompt);
+}
+
+/// 한 줄의 **인코딩 후** 크기. 필드 구성(색 union·grapheme·link)에 따라 달라지므로 계산으로 못 내고
+/// 실제로 한 번 써 봐야 안다. 버리는 버퍼에 쓰고 길이만 취한다.
+fn measureScrollbackRow(parent: *Writer, sb: *const Scrollback, index: usize) Error!u64 {
+    var probe: Writer = .{ .allocator = parent.allocator };
+    defer probe.deinit();
+    try encodeScrollbackRow(&probe, sb, index);
+    return @intCast(probe.bytes.items.len);
+}
+
+/// **예산 안에 드는 「최신 K 줄」을 고른다.** 새 줄부터 거꾸로 담다가 예산이 차면 멈춘다.
+fn scrollbackKeepCount(writer: *Writer, sb: *const Scrollback, budget: u64) Error!usize {
+    var keep: usize = 0;
+    var used: u64 = 0;
+    var index = sb.count;
+    while (index > 0) {
+        index -= 1;
+        const size = try measureScrollbackRow(writer, sb, index);
+        const next = std.math.add(u64, used, size) catch return error.IntegerOverflow;
+        if (next > budget) break;
+        used = next;
+        keep += 1;
+    }
+    return keep;
+}
+
 fn encodeScrollback(writer: *Writer, sb: *const Scrollback) Error!void {
     if (sb.cap > max_scrollback_rows or sb.count > max_scrollback_rows or sb.count > sb.cap)
         return error.LimitExceeded;
     if (sb.pushed_abs != std.math.add(usize, sb.evicted_abs, sb.count) catch return error.IntegerOverflow)
         return error.InvalidValue;
+
+    // **자르기는 「앞줄이 밀려났다」로 표현한다 — 포맷을 안 바꾼다.**
+    //
+    // 스크롤백은 링 버퍼이고 `evicted_abs` 가 「앞에서 몇 줄이 밀려났나」다. 최신 K 줄만 실으면서
+    // `evicted_abs = pushed_abs - K` 로 적으면 `pushed_abs == evicted_abs + count` 불변식이 그대로
+    // 성립한다. 즉 **잘린 handoff 도 온전한 스크롤백**이라, 새 tag 도 스키마 변경도 필요 없고 구
+    // reader 가 그대로 읽는다(2026-09-10 에 tag 99 를 필수로 추가했다가 업그레이드가 전멸한 것과
+    // 정반대의 성질이다 — 여기엔 그 위험이 구조적으로 없다).
+    const keep = if (writer.scrollback_budget) |budget|
+        try scrollbackKeepCount(writer, sb, budget)
+    else
+        sb.count;
+    const dropped = sb.count - keep;
+    const evicted = std.math.add(usize, sb.evicted_abs, dropped) catch return error.IntegerOverflow;
+
     try writer.integer(usize, sb.cap);
-    try writer.integer(usize, sb.evicted_abs);
+    try writer.integer(usize, evicted);
     try writer.integer(usize, sb.pushed_abs);
     try writer.byte(@intFromBool(sb.rewrap_pending));
-    try writer.integer(usize, sb.count);
-    for (0..sb.count) |index| {
-        const row = sb.row(index) orelse return error.InvalidValue;
-        try encodeLength(writer, row.len, @sizeOf(Cell));
-        for (row) |cell| try encodeValue(writer, Cell, &cell);
-        try writer.byte(@intFromBool(sb.rowWrapped(index)));
-        const prompt = sb.rowPrompt(index);
-        try encodeValue(writer, @TypeOf(prompt), &prompt);
-    }
+    try writer.integer(usize, keep);
+    for (dropped..sb.count) |index| try encodeScrollbackRow(writer, sb, index);
 }
 
 fn decodeScrollback(reader: *Reader, allocator: std.mem.Allocator) Error!Scrollback {
@@ -821,8 +872,22 @@ fn rebuildAndValidate(core: *TerminalCore, allocator: std.mem.Allocator) Error!v
 
 /// A complete v1 envelope containing one required TerminalCore section.
 pub fn encodeCore(allocator: std.mem.Allocator, core: *const TerminalCore) Error![]u8 {
+    return encodeCoreWithScrollbackBudget(allocator, core, null);
+}
+
+/// 스크롤백을 **바이트 예산 안에서만** 싣는 인코더. `budget == null` 이면 `encodeCore` 와 byte-identical 이다.
+///
+/// 업그레이드 handoff 는 셸을 멈춘 채 5 초 안에 두 벌을 durable 하게 써야 해서 64 MiB 상한이 있다
+/// (`upgrade_limits`). 세션이 쌓이면 그 상한을 넘겨 **업그레이드 자체가 거절**되고(`state_too_large`),
+/// 그러면 새 host 가 떠 세션이 두 host 로 갈린다 — 2026-09-10 에 그렇게 갈린 pane 하나를 실제로 잃었다.
+/// 「과거 몇천 줄」과 「세션 자체」 중 후자를 지키는 선택이다.
+pub fn encodeCoreWithScrollbackBudget(
+    allocator: std.mem.Allocator,
+    core: *const TerminalCore,
+    scrollback_budget: ?u64,
+) Error![]u8 {
     if (core.response.items.len != 0) return error.InvalidValue;
-    var writer: Writer = .{ .allocator = allocator };
+    var writer: Writer = .{ .allocator = allocator, .scrollback_budget = scrollback_budget };
     errdefer writer.deinit();
     try writer.append(&([_]u8{0} ** envelope_header_len));
     const section_start = try writer.beginTlv(section_terminal_core, 0);
@@ -896,6 +961,66 @@ pub const RuntimeView = struct {
     pty_rdev: i64,
     core: *const TerminalCore,
 };
+
+/// 한 runtime 이 **무엇 때문에 큰지**를 태그별로 나눈 값(순수 계산 — 로그도 부작용도 없다).
+///
+/// 2026-09-11: 사용자 host 가 `state_too_large` 로 업그레이드에 실패했는데, **무엇이 64 MiB 를
+/// 채웠는지 알 방법이 없었다.** footprint(62.2 MB)를 직렬화 크기로 오해해 「스크롤백이 93%」라고
+/// 진단했다가, 실측해 보니 평범한 세션의 직렬화는 **1.64 MB/세션**(20 개 = 33 MB)으로 상한의 절반에
+/// 불과했다 — 즉 **스크롤백은 주범이 아니었다.** 남은 후보(이미지·store·saved_screen)를 가르려면
+/// 태그별로 재는 수밖에 없다.
+///
+/// 원인을 모르는 채로 업그레이드 경로를 고치지 않기 위해, **재는 것을 먼저 만든다.**
+pub const RuntimeSizeBreakdown = struct {
+    runtime_id: u128,
+    total: usize,
+    /// 화면 + 스크롤백(tag 2·31). 대개 여기가 가장 크다.
+    screens: usize,
+    /// kitty 이미지와 배치(tag 81·82·92·93·94). peak 639 MB 를 만든 축이라 1 순위 용의자다.
+    images: usize,
+    /// grapheme·link store(tag 43·45). 줄을 잘라도 **안 줄어드는** 몫이다(실측: 줄 98% 제거에 크기는 86% 감소).
+    stores: usize,
+    /// 나머지 전부.
+    other: usize,
+};
+
+/// 각 runtime 을 **따로** 인코딩해 크기를 잰다. 태그별 몫은 해당 필드만 담은 코어를 다시 인코딩하는
+/// 대신, 전체에서 그 필드를 뺀 차이로 구한다 — 코어를 복제하지 않으므로 pause 중에도 안전하다.
+pub fn runtimeSizeBreakdown(
+    allocator: std.mem.Allocator,
+    view: RuntimeView,
+) Error!RuntimeSizeBreakdown {
+    const total_bytes = try encodeCore(allocator, view.core);
+    defer allocator.free(total_bytes);
+
+    var screens: usize = 0;
+    var images: usize = 0;
+    var stores: usize = 0;
+    var writer: Writer = .{ .allocator = allocator };
+    defer writer.deinit();
+    inline for (core_fields_v1) |spec| {
+        const before = writer.bytes.items.len;
+        const Field = @TypeOf(@field(view.core.*, spec.name));
+        try encodeValue(&writer, Field, &@field(view.core.*, spec.name));
+        const size = writer.bytes.items.len - before;
+        if (std.mem.eql(u8, spec.name, "screen") or std.mem.eql(u8, spec.name, "saved_screen")) {
+            screens += size;
+        } else if (std.mem.startsWith(u8, spec.name, "kitty_")) {
+            images += size;
+        } else if (std.mem.endsWith(u8, spec.name, "_store")) {
+            stores += size;
+        }
+    }
+    const counted = screens + images + stores;
+    return .{
+        .runtime_id = view.runtime_id,
+        .total = total_bytes.len,
+        .screens = screens,
+        .images = images,
+        .stores = stores,
+        .other = if (total_bytes.len > counted) total_bytes.len - counted else 0,
+    };
+}
 
 pub const HostView = struct {
     host_id: u128,
@@ -1977,4 +2102,216 @@ test "handoff v1 이 애니메이션 프레임과 재생 상태를 나른다 (�
     // 복원된 코어에서 **이어서 돈다**(상태만 있고 안 돌면 반쪽이다).
     try std.testing.expect(after.advanceAnimations(70));
     try std.testing.expectEqual(@as(u32, 1), after.kitty_images.map.get(1).?.current_frame);
+}
+
+test "스크롤백 바이트 예산: 최신 줄만 남고 잘린 결과도 온전한 스크롤백이다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+
+    // 화면 2 줄짜리에 40 줄을 써서 38 줄을 스크롤백으로 밀어 올린다.
+    for (0..40) |i| {
+        var line_buf: [24]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buf, "line{d:0>3}\r\n", .{i});
+        try core.write(line);
+    }
+    const full_rows = core.screen.sb.count;
+    try std.testing.expect(full_rows > 10);
+
+    // 예산 없음 = 종전과 동일해야 한다(byte-identical).
+    const unbounded = try encodeCore(allocator, &core);
+    defer allocator.free(unbounded);
+    const explicit_null = try encodeCoreWithScrollbackBudget(allocator, &core, null);
+    defer allocator.free(explicit_null);
+    try std.testing.expectEqualSlices(u8, unbounded, explicit_null);
+
+    // 한 줄 크기를 재서, 다섯 줄만 들어갈 예산을 만든다.
+    var probe: Writer = .{ .allocator = allocator };
+    defer probe.deinit();
+    try encodeScrollbackRow(&probe, &core.screen.sb, full_rows - 1);
+    const row_bytes: u64 = @intCast(probe.bytes.items.len);
+    const budget = row_bytes * 5;
+
+    const trimmed_bytes = try encodeCoreWithScrollbackBudget(allocator, &core, budget);
+    defer allocator.free(trimmed_bytes);
+    try std.testing.expect(trimmed_bytes.len < unbounded.len);
+
+    // **디코드가 통과해야 한다** — 자르기를 「앞줄이 밀려났다」로 표현하므로 포맷은 그대로다.
+    var trimmed = try decodeCore(allocator, trimmed_bytes);
+    defer trimmed.deinit();
+
+    const sb = &trimmed.screen.sb;
+    try std.testing.expect(sb.count <= 5);
+    try std.testing.expect(sb.count > 0);
+    // 불변식: pushed_abs == evicted_abs + count. 깨지면 decode 가 이미 거절했겠지만 값으로도 못 박는다.
+    try std.testing.expectEqual(sb.pushed_abs, sb.evicted_abs + sb.count);
+    // 총 줄 수(pushed_abs)는 보존된다 — 「몇 줄이 흘러갔는가」는 잘라도 사실이 바뀌지 않는다.
+    try std.testing.expectEqual(core.screen.sb.pushed_abs, sb.pushed_abs);
+    // 남은 것은 **최신** 쪽이어야 한다.
+    const newest_original = core.screen.sb.row(full_rows - 1).?;
+    const newest_trimmed = sb.row(sb.count - 1).?;
+    try std.testing.expectEqual(newest_original.len, newest_trimmed.len);
+    for (newest_original, newest_trimmed) |a, b| try std.testing.expectEqual(a.codepoint, b.codepoint);
+
+    // 예산이 한 줄도 못 담을 만큼 작으면 스크롤백은 비고, 그래도 온전해야 한다.
+    const starved = try encodeCoreWithScrollbackBudget(allocator, &core, 1);
+    defer allocator.free(starved);
+    var empty = try decodeCore(allocator, starved);
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.screen.sb.count);
+    try std.testing.expectEqual(empty.screen.sb.pushed_abs, empty.screen.sb.evicted_abs);
+}
+
+fn nowNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+test "스크롤백 바이트 예산: 측정 비용이 pause 예산을 위협하지 않는다 (실측)" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 197, .rows = 60 });
+    defer core.deinit();
+    // 실사용 규모: 세션 하나의 스크롤백 약 800 줄.
+    for (0..900) |i| {
+        var buf: [220]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "row{d:0>4} " ++ ("x" ** 180) ++ "\r\n", .{i});
+        try core.write(line);
+    }
+    const rows = core.screen.sb.count;
+    try std.testing.expect(rows > 500);
+
+    const plain_start = nowNs();
+    const plain = try encodeCore(allocator, &core);
+    defer allocator.free(plain);
+    const plain_ns = nowNs() - plain_start;
+
+    // 예산을 «전부 담을 만큼» 크게 주면 모든 줄을 재게 된다 — 최악의 경우다.
+    const worst_start = nowNs();
+    const worst = try encodeCoreWithScrollbackBudget(allocator, &core, std.math.maxInt(u32));
+    defer allocator.free(worst);
+    const worst_ns = nowNs() - worst_start;
+
+    std.debug.print(
+        "\n  줄 {d} | 예산없음 {d:.1} ms | 최악(전량 측정) {d:.1} ms | 배수 {d:.2}x\n",
+        .{ rows, @as(f64, @floatFromInt(plain_ns)) / 1e6, @as(f64, @floatFromInt(worst_ns)) / 1e6, @as(f64, @floatFromInt(worst_ns)) / @as(f64, @floatFromInt(plain_ns)) },
+    );
+    // 전량 측정이어도 결과는 같아야 한다(예산이 충분하므로 아무것도 안 잘림).
+    try std.testing.expectEqualSlices(u8, plain, worst);
+}
+
+test "스크롤백 바이트 예산: store 는 안 잘려 절감이 덜 된다 (한계 실측)" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 60, .rows = 2 });
+    defer core.deinit();
+    // grapheme cluster(결합 문자)와 OSC 8 링크를 섞어 store 를 채운다.
+    for (0..300) |i| {
+        var buf: [256]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &buf,
+            "\x1b]8;;https://example.com/{d}\x1b\\링크\u{0301}{d}\x1b]8;;\x1b\\ 가\u{0301}나\u{0301}다\u{0301}\r\n",
+            .{ i, i },
+        );
+        try core.write(line);
+    }
+    const full = try encodeCore(allocator, &core);
+    defer allocator.free(full);
+    // 최신 5 줄만 남기는 예산.
+    var probe: Writer = .{ .allocator = allocator };
+    defer probe.deinit();
+    try encodeScrollbackRow(&probe, &core.screen.sb, core.screen.sb.count - 1);
+    const budget: u64 = @as(u64, @intCast(probe.bytes.items.len)) * 5;
+    const trimmed = try encodeCoreWithScrollbackBudget(allocator, &core, budget);
+    defer allocator.free(trimmed);
+
+    const kept_ratio = @as(f64, @floatFromInt(trimmed.len)) / @as(f64, @floatFromInt(full.len));
+    std.debug.print(
+        "\n  줄 {d}→5 로 잘랐는데 크기는 {d}B→{d}B ({d:.1}% 남음) — store 가 안 잘린 몫\n",
+        .{ core.screen.sb.count, full.len, trimmed.len, kept_ratio * 100 },
+    );
+    try std.testing.expect(trimmed.len < full.len);
+    var decoded = try decodeCore(allocator, trimmed);
+    defer decoded.deinit();
+    try std.testing.expect(decoded.screen.sb.count <= 5);
+}
+
+test "전제 검증: 실사용 규모 세션의 «직렬화» 크기는 얼마인가" {
+    const allocator = std.testing.allocator;
+    // 사용자 환경 실측값: 197x60, 스크롤백 약 800 줄.
+    var core = try TerminalCore.init(allocator, .{ .cols = 197, .rows = 60 });
+    defer core.deinit();
+    for (0..900) |i| {
+        var buf: [220]u8 = undefined;
+        // 평범한 로그성 출력(색·결합문자·링크 없음) — 가장 흔한 모양.
+        const line = try std.fmt.bufPrint(&buf, "[{d:0>5}] build step completed in 12ms, artifacts written to dist/\r\n", .{i});
+        try core.write(line);
+    }
+    const bytes = try encodeCore(allocator, &core);
+    defer allocator.free(bytes);
+    const rows = core.screen.sb.count;
+    const per_mb = @as(f64, @floatFromInt(bytes.len)) / 1048576.0;
+    std.debug.print(
+        "\n  Cell {d} B | 스크롤백 {d} 줄 | 직렬화 {d:.2} MB/세션 → 20 세션 {d:.1} MB (상한 64 MB)\n",
+        .{ @sizeOf(Cell), rows, per_mb, per_mb * 20 },
+    );
+    try std.testing.expect(bytes.len > 0);
+}
+
+test "전제 검증: 크기 분해가 «무엇이 큰지» 를 실제로 가른다" {
+    const allocator = std.testing.allocator;
+
+    // (1) 평범한 로그 세션 — 화면·스크롤백이 지배해야 한다.
+    var plain = try TerminalCore.init(allocator, .{ .cols = 197, .rows = 60 });
+    defer plain.deinit();
+    for (0..400) |i| {
+        var buf: [220]u8 = undefined;
+        try plain.write(try std.fmt.bufPrint(&buf, "[{d:0>5}] build step completed\r\n", .{i}));
+    }
+    const plain_view: RuntimeView = .{
+        .runtime_id = 1,
+        .surface_id = 1,
+        .child_pid = 1,
+        .cols = 197,
+        .rows = 60,
+        .resize_generation = 1,
+        .fd_slot = 40,
+        .pty_dev = 1,
+        .pty_ino = 1,
+        .pty_rdev = 1,
+        .core = &plain,
+    };
+    const a = try runtimeSizeBreakdown(allocator, plain_view);
+
+    // (2) 결합문자·링크가 많은 세션 — store 몫이 눈에 띄게 커야 한다.
+    var rich = try TerminalCore.init(allocator, .{ .cols = 197, .rows = 60 });
+    defer rich.deinit();
+    for (0..400) |i| {
+        var buf: [256]u8 = undefined;
+        try rich.write(try std.fmt.bufPrint(
+            &buf,
+            "\x1b]8;;https://example.com/{d}\x1b\\가\u{0301}나\u{0301}다\u{0301}\x1b]8;;\x1b\\\r\n",
+            .{i},
+        ));
+    }
+    var rich_view = plain_view;
+    rich_view.runtime_id = 2;
+    rich_view.core = &rich;
+    const b = try runtimeSizeBreakdown(allocator, rich_view);
+
+    const kb = struct {
+        fn f(v: usize) f64 {
+            return @as(f64, @floatFromInt(v)) / 1024.0;
+        }
+    }.f;
+    std.debug.print(
+        "\n  평범 : total {d:.0} KB | screens {d:.0} | images {d:.0} | stores {d:.0} | other {d:.0}" ++
+            "\n  결합 : total {d:.0} KB | screens {d:.0} | images {d:.0} | stores {d:.0} | other {d:.0}\n",
+        .{ kb(a.total), kb(a.screens), kb(a.images), kb(a.stores), kb(a.other), kb(b.total), kb(b.screens), kb(b.images), kb(b.stores), kb(b.other) },
+    );
+
+    // 평범한 세션은 화면이 지배한다.
+    try std.testing.expect(a.screens > a.images);
+    try std.testing.expect(a.screens > a.stores);
+    // **가르는 힘이 있는가** — 결합문자 세션의 store 몫이 평범한 쪽보다 확실히 커야 한다.
+    try std.testing.expect(b.stores > a.stores);
 }

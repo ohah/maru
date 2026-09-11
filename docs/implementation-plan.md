@@ -1442,6 +1442,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    journal row가 이미 회수됐다는 이유로 attach를 거부하지 않는다. route 없는 local/app-owned 알림만 기존 `wt`/`sid`
    process-local 클릭 경로를 유지한다.
 
+   **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 로컬/일반 CI 구현과 ad-hoc 제품 gate는 완료.** P4의 actual
+   Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
+   재실행이 phase 완료 증거로 남아 있다. 이는 새 기능 구현 잔여가 아니라 release provenance gate다. 실행 중 업그레이드
+   U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·soak도 별도 release gate다. release와 무관한 다음 후보는
+   `performance-budget.md`의 launch→first drawable, key→screen E2E, 장시간 연속 soak 계측이다. G3은 출하 뒤 기본값을
+   다시 바꿀 때만 여는 별도 백로그이고 P6은 선택 확장 범위다.
+
    **G1 config loader provenance:** opt-in 설정의 의도를 보존하기 위해 config loader가 resolved bool과 별도로
    `session.keep-alive-after-quit`의 source를 `absent | explicit_valid | explicit_invalid`로 보존한다.
    같은 적용 축에서 마지막 syntactic occurrence가 provenance를 소유하므로 `true` 뒤 invalid는
@@ -1449,14 +1456,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    provenance를 바꾸되 앞서 적용된 resolved bool을 덮지 않는다. 주석·다른 key·다른 OS 전용 줄은 이 축을
    바꾸지 않으며, 현재 OS suffix가 적용되는 경우에는 generic key와 같은 파일 순서 규칙 및 occurrence 집합을
    사용한다. 파일 I/O 결과도 `missing | readable | unreadable | oversize`의 닫힌 상태로
-   보존하고, unreadable/oversize를 missing으로 축소하지 않는다. G1은 관측만 추가하며 default=false,
+   보존하고, unreadable/oversize를 missing으로 축소하지 않는다. G1은 관측만 추가하며 built-in default,
    파일 write/materialization, notice, app-global bootstrap 정책은 바꾸지 않는다. pure parser의 duplicate/invalid/
    OS-suffix matrix와 실제 file의 missing/readable/unreadable/1 MiB exact/cap+1을 Debug·ReleaseFast에서 검증한다.
    G2만 이 provenance를 소비해 explicit override materialization·Reset retention을 소유한다.
 
    **G2 explicit override materialization·retention:** L0 lease 직후 AppKit/첫 AppSession 전에 app-global owner가 G1의
-   resolved bool·keep-alive provenance·file provenance를 scalar snapshot으로 exact once seal한다. release A default는
-   `false`로 유지하고 bootstrap 자체는 파일/notice를 만들지 않는다. 모든 Window는 이 snapshot을 빌리며 Workspace
+   resolved bool·keep-alive provenance·file provenance를 scalar snapshot으로 exact once seal한다. bootstrap 자체는
+   파일/notice를 만들지 않는다. 모든 Window는 이 snapshot을 빌리며 Workspace
    토글·외부 reload만 새 snapshot을 게시한다. whole Reset은 `absent`면 줄을 만들지 않고 explicit valid/invalid면 Reset
    직전 live bool을 기본값과 같아도 canonical explicit override로 같은 atomic replace에 보존한다. row Reset/Backspace는
    값·snapshot·write-back queue mutation 0 + 수동 Workspace 토글 notice다. lease 없는/중복 bootstrap, 실제 atomic replace

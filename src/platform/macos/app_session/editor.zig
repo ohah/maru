@@ -4811,6 +4811,9 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                     toggleCursorAt(self, owner.term, self.editor_drag_down_offset);
                 }
             }
+            // **고르기를 마친 자리**가 헬퍼가 뜨는 유일한 자리다(NSH — §6.2). 더블·트리플 클릭도
+            // 여기로 온다(그 둘이 드래그를 이어서 arm 하므로) — 세 제스처에 한 자리다.
+            showSendHelper(self, owner.term);
             self.finishPointerGesture();
             return true;
         },
@@ -6697,6 +6700,201 @@ pub fn buildSelectionPayload(
         .end_line = @intCast(line_hi + 1),
         .text = text,
     }, .{ .bracketed_paste = bracketed }, out);
+}
+
+// ── 선택 헬퍼(NSH — docs/send-selection-to-agent.md §6.2) ─────────────────────
+//
+// 우클릭을 **몰라도** 보낼 수 있게 하는 방아쇠다. 고르고 손을 떼면 그 자리 바로 아래에 한 줄짜리
+// 상자가 뜨고, 누르면 NS5 의 보내기가 그대로 돈다 — 페이로드·상한·bracketed 판정은 이 코드가
+// 손대지 않는다(§4 의 안전 계약이 한 자리에만 있어야 한다).
+
+/// 헬퍼가 지금 이 Term 에서 뜰 수 있는가 — **보낼 수 있는 조건과 같다**(`buildSelectionPayload` 가
+/// 거절하는 상태에서 상자를 띄우면, 눌러도 아무 일 없는 줄이 된다).
+///
+/// **선택이 비면 안 뜬다**(§6.2). 보내기 자체는 선택이 없으면 caret 줄을 보내지만(§3), 그 규칙을
+/// 여기까지 끌고 오면 **편집하려고 누른 클릭마다** 상자가 떠서 다음 글자를 가린다. 고른 뒤에만
+/// 뜨는 것이 "고른 것을 보낸다" 는 이 기능의 흐름과도 맞는다.
+fn sendHelperEligible(term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 "그 파일의 그 줄" 이 안 정해진다(§3)
+    if (term.rt.editor_doc == null) return false;
+    if (term.rt.editor_path == null) return false; // 핀된 경로가 없으면 참조를 못 만든다
+    const sel = term.rt.editor_selection orelse return false;
+    return !sel.isEmpty();
+}
+
+/// 헬퍼를 그 Term 의 선택 끝(focus) **한 줄 아래**에 띄운다. 조건이 안 맞으면 조용히 안 띄운다 —
+/// 이 함수는 포인터 제스처가 끝날 때마다 불리므로 거절이 정상 경로다.
+///
+/// **앵커는 focus 다**(§8 규칙 1 — caret 또는 포인터). 마우스를 뗀 자리가 아니라 caret 을 쓰는
+/// 이유는 더블·트리플 클릭에도 같은 자리가 나오기 때문이다: 포인터를 쓰면 세 제스처가 상자를
+/// 서로 다른 곳에 띄운다.
+///
+/// **안 그려진 자리면 안 띄운다** — `bodyAnchor` 가 `null` 이면 그 줄이 화면에 없다는 뜻이고,
+/// 그때 억지로 띄우면 상자가 엉뚱한 줄 옆에 선다.
+pub fn showSendHelper(self: *AppSession, term: *Term) void {
+    if (!sendHelperEligible(term)) return;
+    const doc = term.rt.editor_doc orelse return;
+    const sel = term.rt.editor_selection orelse return;
+
+    // **보낼 곳이 없으면 안 띄운다**(§5 — 후보 0 이면 메뉴 항목도 비활성이다). 눌러도 아무 일
+    // 없는 상자를 만들지 않는다.
+    var target_buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folder_bufs: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(self, &target_buf, &folder_bufs);
+    if (collected.items.len == 0) return;
+
+    // 라벨은 **메뉴 머리글과 같은 문구**다(잘린 대상 수·주 선택만 감까지) — 같은 동작을 두 자리가
+    // 다르게 부르지 않는다.
+    const header = settings_ops.sendSelectionHeader(self, term, collected);
+    const n = @min(header.len, self.send_helper_label_buf.len);
+    @memcpy(self.send_helper_label_buf[0..n], header[0..n]);
+    self.send_helper_items[0] = self.send_helper_label_buf[0..n];
+
+    const anchor = sendHelperAnchor(term, doc, sel) orelse return;
+    self.chrome_host.send_helper.show(anchor.x, anchor.y, 1);
+    self.send_helper_source = term.surface.id;
+    self.metal_dirty = true;
+}
+
+/// 선택 focus 가 그려진 자리 **바로 아래**(px, 창 좌표). 그 줄이 화면에 없으면 `null`.
+fn sendHelperAnchor(
+    term: *Term,
+    doc: Opened,
+    sel: maru.session.editor.selection.Selection,
+) ?struct { x: i32, y: i32 } {
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null; // 아직 안 그렸다 — 그 프레임에는 좌표가 없다
+    const geom = term.rt.editor_hit_geom;
+    const off = @min(sel.focus, doc.file.content.len);
+    const line_idx = doc.file.lines.lineAt(off);
+    const line = doc.file.lines.line(line_idx) orelse return null;
+    const a = chrome_editor.hit.bodyAnchor(
+        .{
+            .body_x = geom.body_x,
+            .body_y = geom.body_y,
+            .content_left_px = geom.content_left_px,
+            .content_width = geom.content_width,
+            .cell_w_px = geom.cell_w_px,
+            .cell_h_px = geom.cell_h_px,
+            .tab_width = geom.tab_width,
+        },
+        term.rt.editor_hit_rows[0..rows_len],
+        term.rt.editor_hit_lines[0..rows_len],
+        term.rt.editor_lines,
+        line_idx,
+        off -| line.start,
+    ) orelse return null;
+    // **한 줄 아래**에 띄운다 — caret 줄 위에 겹치면 방금 고른 글자를 가린다. 화면 아래 끝이면
+    // 컴포넌트의 `menuRect` 가 위로 당긴다(가장자리 clamp 는 그쪽 단일 출처다).
+    return .{ .x = a.x_px, .y = a.y_px + @as(i32, geom.cell_h_px) };
+}
+
+/// 헬퍼를 내린다. 열려 있지 않았으면 무동작(다시 그리지도 않는다).
+///
+/// **부르는 자리가 많다** — 키 입력·스크롤·포커스 이동·탭 전환·모달. 공통점은 "상자가 가리키던
+/// 자리가 더는 그 자리가 아니다" 이고, 하나라도 빠지면 상자가 남의 줄 옆에 떠 있게 된다.
+pub fn hideSendHelper(self: *AppSession) void {
+    if (!self.chrome_host.send_helper.open) return;
+    self.chrome_host.send_helper.hide();
+    self.send_helper_source = 0;
+    self.metal_dirty = true;
+}
+
+/// 헬퍼가 그릴 항목(한 줄). 닫혀 있으면 빈 슬라이스다.
+pub fn sendHelperItems(self: *const AppSession) []const []const u8 {
+    if (!self.chrome_host.send_helper.open) return &.{};
+    return self.send_helper_items[0..1];
+}
+
+/// 헬퍼가 붙어 있는 Term. **보이는 자리에 있을 때만** 준다 — 닫혔거나, 다른 워크스페이스 탭에
+/// 있거나, 그 pane 에서 다른 Term 이 앞에 와 있으면 `null` 이다.
+///
+/// 이 세 조건이 여기 있는 이유: 상자는 창 하나에 하나뿐인데 그것이 가리키는 문서는 pane 안에
+/// 있다. 가려진 문서의 상자가 남으면 **다른 문서 위에 떠 있는 버튼**이 되고, 누르면 화면에 없는
+/// 선택이 나간다.
+fn sendHelperTerm(self: *AppSession) ?*Term {
+    if (!self.chrome_host.send_helper.open) return null;
+    const loc = term_ops.findTermWhere(self, self.send_helper_source, struct {
+        fn pred(want: u64, t: *Term) bool {
+            return t.kind == .editor and t.surface.id == want;
+        }
+    }.pred) orelse return null;
+    if (loc.tab_index != self.app_window.active_tab) return null;
+    const term = loc.pane.terms.items[loc.term_index];
+    if (loc.pane.activeTerm() != term) return null;
+    return term;
+}
+
+/// **매 프레임 다시 묻는다** — 상자가 여전히 설 자리가 있는가. 없으면 스스로 내려간다.
+///
+/// 이 함수가 «닫는 자리» 전수를 대신한다. 키·스크롤·접기·리사이즈·탭 전환·문서 교체가 전부
+/// 같은 질문 하나로 떨어지기 때문이다: *"그 선택이 아직 있고, 그 줄이 아직 화면에 그려졌는가."*
+/// 경로마다 `hide` 를 심으면 반드시 새는 문이 남고(이 저장소가 여러 번 겪은 그 부류), 그때 상자는
+/// **남의 줄 옆에** 떠 있는다.
+///
+/// 살아 있으면 앵커를 그 프레임의 좌표로 **갱신한다** — pane 을 넓히거나 한 줄 굴러도 상자가
+/// 고른 자리를 계속 따라간다.
+pub fn refreshSendHelper(self: *AppSession) bool {
+    if (!self.chrome_host.send_helper.open) return false;
+    const term = sendHelperTerm(self) orelse {
+        hideSendHelper(self);
+        return false;
+    };
+    if (!sendHelperEligible(term)) {
+        hideSendHelper(self);
+        return false;
+    }
+    const doc = term.rt.editor_doc orelse {
+        hideSendHelper(self);
+        return false;
+    };
+    const sel = term.rt.editor_selection orelse {
+        hideSendHelper(self);
+        return false;
+    };
+    const anchor = sendHelperAnchor(term, doc, sel) orelse {
+        hideSendHelper(self); // 그 줄이 화면 밖으로 굴러갔다
+        return false;
+    };
+    self.chrome_host.send_helper.anchor_x = anchor.x;
+    self.chrome_host.send_helper.anchor_y = anchor.y;
+    return true;
+}
+
+/// 헬퍼 위 클릭인가. 맞으면 보내기를 실행(또는 대상 메뉴를 열고) `true` — 그 클릭은 편집기로
+/// 안 내려간다. 상자 **밖**이면 헬퍼를 내리고 `false` 를 준다: 그 클릭은 원래 하려던 일(캐럿
+/// 옮기기·새 선택)을 그대로 해야 한다.
+pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
+    if (!self.chrome_host.send_helper.open) return false;
+    const items = sendHelperItems(self);
+    const props = self.buildChromeProps();
+    if (chrome.components.context_menu.itemAt(&self.chrome_host.send_helper, items, props, x_px, y_px) == null) {
+        hideSendHelper(self);
+        return false;
+    }
+    const term = sendHelperTerm(self) orelse {
+        hideSendHelper(self); // 그 Term 이 닫혔다 — 보낼 원본이 없다
+        return true; // 상자 위 클릭은 그래도 소비한다(아래 문서에 캐럿이 찍히면 더 놀랍다)
+    };
+    const anchor_x: f64 = @floatFromInt(self.chrome_host.send_helper.anchor_x);
+    const anchor_y: f64 = @floatFromInt(self.chrome_host.send_helper.anchor_y);
+    hideSendHelper(self); // 무엇을 하든 상자는 내린다 — 메뉴가 그 위에 겹쳐 뜨지 않게
+
+    // **후보가 하나면 묻지 않는다**(§5). 여럿이면 그 자리에서 기존 편집기 메뉴를 연다 —
+    // 보내기 구획이 맨 위라 대상 목록이 곧바로 보인다(§5.1).
+    var target_buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folder_bufs: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(self, &target_buf, &folder_bufs);
+    if (collected.items.len == 1 and collected.eligible == 1) {
+        if (sendSelectionToAgent(self, term, collected.items[0].surface_id)) {
+            self.last_agent_target = collected.items[0].surface_id; // 메뉴 경로와 같은 규율
+        }
+        return true;
+    }
+    _ = settings_ops.showEditorContextMenu(self, term, anchor_x, anchor_y);
+    self.metal_dirty = true;
+    return true;
 }
 
 pub fn cutSelection(self: *AppSession, term: *Term) bool {
@@ -23222,7 +23420,7 @@ test "NS8 멀티 커서면 주 선택만 간다고 말한다 — 나머지가 �
 
     // 커서 하나면 그 말을 안 한다 — 늘 붙이면 경고가 소음이 된다.
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    const single = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    const single = settings_ops.sendSelectionHeader(fx.session, fx.term, collected);
     try testing.expect(std.mem.indexOf(u8, single, maru.i18n.t(.ctx_send_selection_primary_only)) == null);
 
     // 커서가 여럿이면 말한다.
@@ -23232,7 +23430,7 @@ test "NS8 멀티 커서면 주 선택만 간다고 말한다 — 나머지가 �
         fx.term.rt.editor_extra_selections = &.{};
     }
     fx.term.rt.editor_extra_selections[0] = editor_selection.Selection.at(1);
-    const multi = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    const multi = settings_ops.sendSelectionHeader(fx.session, fx.term, collected);
     try testing.expect(std.mem.indexOf(u8, multi, maru.i18n.t(.ctx_send_selection_primary_only)) != null);
 }
 
@@ -23256,7 +23454,7 @@ test "NS7 자리를 넘긴 대상은 조용히 사라지지 않는다 — 머리
     // **자격은 자리와 무관하게 센다** — 이게 0 이면 아래 판정이 아무것도 안 잰다.
     try testing.expect(collected.eligible > collected.items.len);
 
-    const header = settings_ops.testSendSelectionHeader(fx.session, fx.term, collected);
+    const header = settings_ops.sendSelectionHeader(fx.session, fx.term, collected);
     // 기본 문구로 끝나면 잘린 사실을 안 말한 것이다.
     try testing.expect(!std.mem.eql(u8, header, maru.i18n.t(.ctx_send_selection)));
     try testing.expect(std.mem.startsWith(u8, header, maru.i18n.t(.ctx_send_selection)));
@@ -24767,4 +24965,275 @@ fn setSiblingPrompt(self: *AppSession, sym_idx: usize) void {
         return;
     };
     self.chrome_host.symbol_picker.prompt = buf.items;
+}
+
+// ── NSH: 선택 헬퍼(docs/send-selection-to-agent.md §6.2) ──────────────────────
+
+/// 헬퍼가 실제로 그려질 상자 안의 한 점을 **컴포넌트에게 물어** 찾는다.
+///
+/// 앵커를 그대로 쓰지 않는 이유: `menuRect` 가 사이드바 오른쪽·창 가장자리로 상자를 당기므로
+/// 앵커가 상자 안이라는 보장이 없다. 그 clamp 규칙을 테스트가 베끼면 **두 번째 출처**가 되고,
+/// 컴포넌트가 규칙을 바꾸는 날 판정자만 초록으로 남는다.
+fn helperHitPoint(session: *AppSession) ?struct { x: f64, y: f64 } {
+    const props = session.buildChromeProps();
+    const items = sendHelperItems(session);
+    var y: f64 = 0;
+    while (y < @as(f64, @floatFromInt(session.backing_height_px))) : (y += 3) {
+        var x: f64 = 0;
+        while (x < @as(f64, @floatFromInt(session.backing_width_px))) : (x += 3) {
+            if (chrome.components.context_menu.itemAt(&session.chrome_host.send_helper, items, props, x, y) != null) {
+                return .{ .x = x, .y = y };
+            }
+        }
+    }
+    return null;
+}
+
+fn helperFixture(allocator: std.mem.Allocator) !struct { fx: PaneFixture, drawn: PaneDraw } {
+    var fx = try PaneFixture.init(allocator);
+    errdefer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    // **한 프레임을 실제로 그린다** — 헬퍼 앵커는 그 프레임이 굳힌 행 배열·기하에서 나온다.
+    // 안 그리면 `editor_hit_rows_len == 0` 이라 좌표가 없고, 판정자가 재는 것은 "안 뜬다" 뿐이 된다.
+    const drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    return .{ .fx = fx, .drawn = drawn };
+}
+
+test "NSH 고른 뒤에만 뜬다 — caret 만 있는 클릭에는 안 뜬다" {
+    // **매 클릭마다 뜨면 다음 글자를 가린다.** 보내기 자체는 선택이 없으면 caret 줄을 보내지만(§3),
+    // 그 규칙을 방아쇠까지 끌고 오면 편집하려고 누른 클릭이 전부 상자를 띄운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = editor_selection.Selection.at(0); // caret 만
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+    try testing.expectEqual(h.fx.term.surface.id, h.fx.session.send_helper_source);
+}
+
+test "NSH 앵커는 고른 끝의 **한 줄 아래**다 — 방금 고른 글자를 안 가린다" {
+    // 겹쳐 뜨면 상자가 고른 자리를 덮는다. 그리고 좌표는 **그 프레임이 굳힌 기하**에서 나와야
+    // 한다(클릭 경로와 같은 계약) — live 값으로 다시 구하면 보이는 자리와 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    // 첫 줄 `const a = 1;` 의 5 번 byte — 0 번 행, 5 열이다(탭 없음).
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    const geom = h.fx.term.rt.editor_hit_geom;
+    const want_x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + 5 * @as(i32, geom.cell_w_px);
+    const want_y = geom.body_y + @as(i32, geom.cell_h_px); // 0 번 행 + 한 줄
+    try testing.expectEqual(want_x, h.fx.session.chrome_host.send_helper.anchor_x);
+    try testing.expectEqual(want_y, h.fx.session.chrome_host.send_helper.anchor_y);
+}
+
+test "NSH 보낼 곳이 없으면 안 뜬다 — 눌러도 아무 일 없는 상자를 만들지 않는다" {
+    // §5 는 후보 0 이면 메뉴 항목을 **비활성**으로 두라고 정했다. 상자에는 비활성 상태가 없으므로
+    // (한 줄뿐이다) 그 규칙은 여기서 "안 띄운다" 가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    // 이 창의 터미널 Term 을 전부 편집기로 바꿔 후보를 0 으로 만든다(문서는 안 건드린다 —
+    // `collectAgentTargets` 가 보는 것은 `kind` 하나다).
+    var changed: usize = 0;
+    for (h.fx.session.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| {
+                if (t.kind == .terminal) {
+                    t.kind = .editor;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    try testing.expect(changed > 0); // 0 이면 이 판정자는 아무것도 안 잰다
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+}
+
+test "NSH 핀된 경로가 없으면 안 뜬다 — 참조를 못 만드는 상태다" {
+    // `buildSelectionPayload` 가 거절하는 상태에서 상자를 띄우면 눌러도 아무 일이 없다. 두 판정이
+    // **같은 조건**을 봐야 그 짝이 어긋나지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    const saved = h.fx.term.rt.editor_path;
+    h.fx.term.rt.editor_path = null;
+    defer h.fx.term.rt.editor_path = saved;
+
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+    var buf: [4096]u8 = undefined;
+    try testing.expect(buildSelectionPayload(h.fx.session, h.fx.term, true, &buf) == null); // 같은 조건
+}
+
+test "NSH 설 자리가 없어지면 스스로 내려간다 — 남의 줄 옆에 안 떠 있는다" {
+    // 닫는 자리를 경로마다 심으면 반드시 새는 문이 남는다. 그래서 «그 선택이 아직 있고 그 줄이
+    // 아직 그려졌는가» 하나로 프레임마다 다시 묻는다. 두 축을 **따로** 잰다 — 하나만 보면 다른
+    // 하나를 지운 뮤턴트가 산다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    // ⑴ 선택이 사라지면.
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(refreshSendHelper(h.fx.session)); // 아직은 산다
+    h.fx.term.rt.editor_selection = editor_selection.Selection.at(0); // caret 으로 접힘
+    try testing.expect(!refreshSendHelper(h.fx.session));
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+
+    // ⑵ 그 줄이 화면에서 사라지면(스크롤·접힘·문서 교체가 전부 이 모양이다).
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+    const saved_len = h.fx.term.rt.editor_hit_rows_len;
+    h.fx.term.rt.editor_hit_rows_len = 0; // 이 프레임에는 그 줄이 없다
+    defer h.fx.term.rt.editor_hit_rows_len = saved_len;
+    try testing.expect(!refreshSendHelper(h.fx.session));
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+}
+
+test "NSH 상자 밖 클릭은 내리고 **흘려보낸다**, 상자 위 클릭은 보낸다" {
+    // 밖을 눌렀는데 그 클릭까지 먹으면, 상자를 없애려고 두 번 눌러야 한다. 그리고 상자 위 클릭은
+    // 편집기로 내려가면 안 된다 — 내려가면 캐럿이 상자 뒤 글자로 옮겨진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    const inside = helperHitPoint(h.fx.session) orelse return error.HelperNotOnScreen;
+
+    // ⑴ 밖(상자가 닿지 않는 좌표) — 소비하지 않고 내려간다.
+    try testing.expect(chrome.components.context_menu.itemAt(
+        &h.fx.session.chrome_host.send_helper,
+        sendHelperItems(h.fx.session),
+        h.fx.session.buildChromeProps(),
+        inside.x,
+        inside.y + 4000,
+    ) == null);
+    try testing.expect(!sendHelperClick(h.fx.session, inside.x, inside.y + 4000));
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+
+    // ⑵ 위 — 소비하고, 후보가 하나면 그대로 보낸다(§5 "후보가 하나면 묻지 않는다").
+    showSendHelper(h.fx.session, h.fx.term);
+    const on = helperHitPoint(h.fx.session) orelse return error.HelperNotOnScreen;
+    var target_buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folder_bufs: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const collected = term_ops.collectAgentTargets(h.fx.session, &target_buf, &folder_bufs);
+    try testing.expectEqual(@as(usize, 1), collected.items.len); // 이 픽스처의 전제
+    h.fx.session.last_agent_target = null;
+    try testing.expect(sendHelperClick(h.fx.session, on.x, on.y));
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open); // 상자는 내려갔다
+    try testing.expectEqual(collected.items[0].surface_id, h.fx.session.last_agent_target.?);
+}
+
+test "NSH 제품 경로 — 드래그로 고르고 떼면 뜨고, 그 상자를 누르면 보낸다" {
+    // **여기가 「값은 맞는데 닿는 자리가 틀림」을 막는 판정자다.** 위 판정자들은 `showSendHelper` 와
+    // `sendHelperClick` 을 직접 부르므로, 배선(선택 제스처의 뗌·`mouse` 의 라우팅 순서)이 통째로
+    // 빠져도 전부 초록이다. 이 하나가 **사용자가 실제로 하는 일**을 그대로 태운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    // **라우팅이 쓰는 사각으로 그린다** — 픽스처의 `leaf_rect` 로 그리면 클릭이 도착하는 pane 과
+    // 스냅숏이 설명하는 화면이 다른 프레임의 것이 된다(굳힌 값 계약).
+    var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer rects.deinit(allocator);
+    try tab_ops.activeTabLeafRects(fx.session, allocator, fx.session.termRect(), &rects);
+    const active = pane_ops.activePane(fx.session);
+    var leaf: ?maru.session.SplitRect = null;
+    for (rects.items) |lr| {
+        if (lr.leaf == active) leaf = lr.rect;
+    }
+    var drawn = appendPaneFrame(fx.session, leaf orelse return error.NoActiveLeaf, fx.term) orelse
+        return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const geom = fx.term.rt.editor_hit_geom;
+    const cw: f64 = @floatFromInt(geom.cell_w_px);
+    const ch: f64 = @floatFromInt(geom.cell_h_px);
+    const x0 = @as(f64, @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)))) + cw / 2;
+    const y0 = @as(f64, @floatFromInt(geom.body_y)) + ch / 2;
+
+    // 첫 줄에서 다섯 칸을 끈다 — 짧은 줄이라 오른쪽 끝을 넘으면 양 끝이 같은 byte 로 묶여
+    // **빈 선택**이 되고, 그러면 이 판정자는 아무것도 안 잰다(아래 단언이 그것을 막는다).
+    fx.session.mouse(1, x0, y0, 0, 0);
+    fx.session.mouse(2, x0 + 5 * cw, y0, 0, 0);
+    fx.session.mouse(3, x0 + 5 * cw, y0, 0, 0);
+    const sel = fx.term.rt.editor_selection orelse return error.NoSelection;
+    try testing.expect(!sel.isEmpty()); // 전제: 실제로 골라졌다
+    try testing.expect(fx.session.chrome_host.send_helper.open);
+
+    // 그 상자를 **마우스로** 누른다 — `mouse` 의 분기 순서가 헬퍼를 편집기보다 먼저 봐야 한다.
+    const on = helperHitPoint(fx.session) orelse return error.HelperNotOnScreen;
+    fx.session.last_agent_target = null;
+    const caret_before = fx.term.rt.editor_selection.?.focus;
+    fx.session.mouse(1, on.x, on.y, 0, 0);
+    try testing.expect(!fx.session.chrome_host.send_helper.open);
+    try testing.expect(fx.session.last_agent_target != null); // 보냈다
+    // **캐럿이 안 움직였다** — 상자 위 클릭이 편집기로 내려갔으면 그 뒤 글자로 옮겨졌을 것이다.
+    try testing.expectEqual(caret_before, fx.term.rt.editor_selection.?.focus);
+}
+
+test "NSH 상자는 실제로 프레임에 실린다 — 안 그리면 아무 판정자도 안 운다" {
+    // **이 판정자가 없으면 「그리기 수집」 세 줄을 지운 변이가 전부 초록이다**(실측). 상태는 서고
+    // 클릭도 먹는데 화면에는 아무것도 없는 상태 — 사용자에게는 기능이 없는 것과 같다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    // ⑴ 아무 오버레이도 없으면 프레임 자체가 없다 — 아래 ⑵ 가 무엇을 잰 것인지 가르는 대조군이다.
+    {
+        try testing.expect(!h.fx.session.overlayFrameNeeded());
+        const none = try h.fx.session.buildChromeOverlayPrep();
+        try testing.expect(none == null);
+    }
+
+    // ⑵ 헬퍼가 열리면 그 프레임이 선다.
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+    // **제품이 묻는 그 질문을 그대로 묻는다.** 프레임 빌드는 이 게이트가 참일 때만 오버레이를
+    // 만든다 — 헬퍼가 여기 없으면 아래 `prep` 은 초록인데 화면에는 영영 안 뜬다(실제로 그랬다).
+    try testing.expect(h.fx.session.overlayFrameNeeded());
+    var prep = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.HelperNotDrawn;
+    defer prep.dl.deinit(allocator);
+    try testing.expect(prep.dl.cells.len > 0); // 상자만 있고 글자가 없으면 라벨이 안 실린 것이다
 }

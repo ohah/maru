@@ -4730,6 +4730,26 @@ pub fn build(b: *std.Build) void {
         session_host_handoff_exhaustive_step.dependOn(&run_handoff_tests.step);
         if (handoff_optimize == optimize) session_host_step.dependOn(&run_handoff_tests.step);
     }
+    // 라벨 변경이 나머지 runtime 을 stale 로 만들지 않는가(세대 축 분리). 실측 증폭 16 배를 끊은 계약이다.
+    const notification_generation_axis_step = b.step(
+        "test-notification-generation-axis",
+        "A label change must not bump the shared generation (it resent to every runtime)",
+    );
+    {
+        const axis_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/notification_generation_axis_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_axis_tests = b.addRunArtifact(axis_tests);
+        run_axis_tests.addArg("--maru-expect-tests=1");
+        run_axis_tests.setCwd(b.path("."));
+        notification_generation_axis_step.dependOn(&run_axis_tests.step);
+        boundary_step.dependOn(&run_axis_tests.step);
+    }
+
     const session_host_kernel_cwd_k1_step = b.step(
         "test-session-host-kernel-cwd-k1",
         "Verify K1 paired cwd authority wire ownership without enabling kernel cwd parity",

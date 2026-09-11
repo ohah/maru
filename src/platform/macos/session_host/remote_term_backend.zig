@@ -1280,7 +1280,13 @@ pub const RemoteTermBackend = struct {
         host_id: u128,
         host_adapter_generation: u64 = 0,
         runtime_generation: u64,
+        /// **이 runtime 에 마지막으로 보낸 세대.** host 는 `records.getPtr(runtime_id)` 로 꺼낸 **그 runtime
+        /// 레코드하고만** 비교한다(`notification_delivery`: `next.config_generation <= record.config_generation`
+        /// → `stale_config`). 즉 세대는 **runtime 별 축**이면 충분하다.
         notification_config_applied_generation: u64 = 0,
+        /// 전역 토글(`notifications.osc`)을 **어느 세대까지 반영했나**. 라벨 변경은 이 값을 안 건드린다 —
+        /// 그것이 증폭을 끊는 지점이다.
+        notification_osc_applied_generation: u64 = 0,
         notification_display_label: [notification_delivery.max_display_label_bytes]u8 =
             [_]u8{0} ** notification_delivery.max_display_label_bytes,
         notification_display_label_len: u16 = 0,
@@ -1515,10 +1521,17 @@ pub const RemoteTermBackend = struct {
         }
         var values = self.runtimes.valueIterator();
         while (values.next()) |entry| {
-            if (entry.notification_config_applied_generation == self.notification_config_generation) continue;
+            // **토글 축으로 비교한다.** 예전에는 라벨 전송 때도 움직이는 값을 전역 카운터와 비교해서,
+            // 라벨 하나가 바뀌면 나머지 전원이 stale 이 됐다(실측 2026-09-11: `label_changed=41` 에
+            // `generation_stale=646` — 약 16 배가 불필요한 재전송이었다).
+            if (entry.notification_osc_applied_generation == self.notification_config_generation) continue;
             self.notify_rpc_generation_stale +%= 1;
+            // 보내는 세대는 **그 runtime 의 다음 값**이다. host 가 runtime 별로 비교하므로 이걸로 충분하고,
+            // 전역 카운터를 올리지 않으니 남의 entry 를 stale 로 만들지 않는다.
+            const next_for_entry = std.math.add(u64, entry.notification_config_applied_generation, 1) catch
+                return error.ProtocolError;
             entry.runtime.updateNotificationConfig(
-                self.notification_config_generation,
+                next_for_entry,
                 self.notifications_osc,
                 entry.notificationDisplayLabel(),
             ) catch |err| {
@@ -1530,12 +1543,15 @@ pub const RemoteTermBackend = struct {
                 // daemon 정책이 영구히 갈라지지 않는다.
                 var retry_values = self.runtimes.valueIterator();
                 while (retry_values.next()) |retry_entry| {
-                    if (retry_entry.notification_config_applied_generation != self.notification_config_generation)
-                        retry_entry.notification_config_applied_generation = 0;
+                    // **토글 축만** 되돌린다. 라벨 세대를 0 으로 낮추면 host 의 단조 검사에 걸려
+                    // 다음 전송이 `stale_config` 로 거절된다.
+                    if (retry_entry.notification_osc_applied_generation != self.notification_config_generation)
+                        retry_entry.notification_osc_applied_generation = 0;
                 }
                 return err;
             };
-            entry.notification_config_applied_generation = self.notification_config_generation;
+            entry.notification_config_applied_generation = next_for_entry;
+            entry.notification_osc_applied_generation = self.notification_config_generation;
         }
     }
 
@@ -1552,7 +1568,9 @@ pub const RemoteTermBackend = struct {
         const bounded = boundedNotificationLabel(display_label);
         if (std.mem.eql(u8, entry.notificationDisplayLabel(), bounded) and
             entry.notification_config_applied_generation != 0) return;
-        const next_generation = std.math.add(u64, self.notification_config_generation, 1) catch
+        // **전역 카운터를 올리지 않는다.** 이 runtime 의 세대만 전진시킨다 — 올리면 나머지 N-1 개가
+        // stale 이 돼 다음 틱에 전원 재전송된다. 그것이 증폭의 원인이었다.
+        const next_generation = std.math.add(u64, entry.notification_config_applied_generation, 1) catch
             return error.ProtocolError;
         self.notify_rpc_label_changed +%= 1;
         entry.runtime.updateNotificationConfig(next_generation, self.notifications_osc, bounded) catch |err| {
@@ -1560,7 +1578,6 @@ pub const RemoteTermBackend = struct {
             self.notify_rpc_last_error = @errorName(err);
             return err;
         };
-        self.notification_config_generation = next_generation;
         @memset(&entry.notification_display_label, 0);
         @memcpy(entry.notification_display_label[0..bounded.len], bounded);
         entry.notification_display_label_len = @intCast(bounded.len);

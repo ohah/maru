@@ -1,0 +1,766 @@
+//! **원격 활동 wire**(RAV1 — [계획](../../docs/plans/remote-agent-activity.md) §2.4·§6.1).
+//!
+//! 원격 헬퍼(`maru-remote-watch` 를 넓힌 것, RAV2)가 저쪽에서 트랜스크립트를 훑어 **내고**, GUI 의
+//! 활동 뷰 백엔드가 **읽는** 한 벌의 코덱이다. [목록 wire](remote_file_listing.zig)와 같은 모양이고
+//! 같은 이유로 양방향 API(append·Parser)를 한 모듈에 둔다 — 반대편을 손으로 미러하면 드리프트가 난다.
+//!
+//! ## 왜 파일이 아니라 이것을 보내나
+//!
+//! 계획 §3 이 실측으로 판정했다. 이 맥의 Codex 세션 최대가 **3.88 GB** 인데, 같은 파일의 활동
+//! 인덱스는 **3.31 MB**(1,175:1)다. 그리고 실서버 왕복(§8.1)에서 261.5 MB 파일이 **2,824,264 B**
+//! 로 왔다 — **파일 크기가 아니라 히트 수가 wire 를 정한다.**
+//!
+//! ## 「자리만 든다」가 국경에서 깨진다 — 라벨이 같이 온다
+//!
+//! 스캐너 규율([갤러리 §4.2](../../docs/agent-image-gallery.md))은 「`Hit` 은 자리만 들고 바이트는
+//! 소비자가 읽는다」인데, 그 전제는 **소비자가 그 파일을 열 수 있다**는 것이고 국경 너머에서는
+//! 거짓이다. 그래서 라벨(`agent_image_context.Label`)과 시각을 **저쪽에서 만들어** 함께 싣는다.
+//!
+//! ⚠️ 라벨의 **원자재**(대상 바이트)를 싣는 것이 초안이었고 틀렸다(계획 §10 A1): `Hit.data_len` 은
+//! 상한이 없어 wire 에 천장이 안 선다. 라벨은 `max_label_bytes`(160 B)로 유계라 천장이 **하드**하다.
+//!
+//! ## wire v1 (줄 지향 + 길이 접두 라벨)
+//!
+//! ```text
+//! maru-rav 1\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
+//! F <len> <경로>\n                 체인의 파일 하나. **적힌 순서가 `Hit.file_index`** 다
+//! S <p> <ip> <ap> <scanned>\n      스캔 플래그 셋(partial·image_partial·activity_partial)과 읽은 바이트
+//! A <필드 19 개> <len> <라벨>\n     활동·이미지 한 건(아래)
+//! ! <len> <메시지>\n               원격 오류. 이것으로 끝난 답도 **완결**이다(계획 §2.2)
+//! X <count>\n                     꼬리 — 없으면 **잘린 것**이다(§6.1)
+//! ```
+//!
+//! `A` 의 필드는 [`Hit`](agent_image_index.zig) 의 자리들과 1:1 이고 순서가 계약이다:
+//! `file_index line_offset data_offset data_len kind mime activity name_rel name_len id_rel id_len
+//! cmd_rel input_rel time_rel fold_owner result_flags result_lines result_body_offset
+//! result_image_offset` — 그 뒤에 `time_s`, 라벨 길이, 라벨 바이트가 온다.
+//!
+//! **10 진수로 적는다.** 바이너리 고정폭이 26% 작지만(계산), 목록 wire 가 이미 이 모양이고 사람이
+//! 읽을 수 있으면 왕복 게이트가 깨졌을 때 **눈으로 본다**. 26% 는 천장(4.5 MB)을 위협하지 않는다.
+//!
+//! **여기는 순수 계층이다** — 바이트를 만들고 해석할 뿐, 파일도 소켓도 열지 않는다. Linux 타깃으로
+//! 컴파일·테스트되므로 원격 헬퍼(정적 musl)가 그대로 문다.
+
+const std = @import("std");
+const index = @import("agent_image_index.zig");
+const context = @import("agent_image_context.zig");
+
+pub const wire_version: u32 = 1;
+pub const header_line = "maru-rav 1";
+
+/// 한 wire 가 실을 수 있는 활동·이미지 수. 스캐너의 상한들이 이 값을 정한다 — 그보다 큰 수를
+/// 주장하는 wire 는 저쪽이 오염됐다는 뜻이라 파서가 거기서 멈춘다.
+pub const max_records: usize = index.max_activity_hits_per_file + index.max_hits_per_file;
+
+/// 체인 파일 수 상한 — [`Chain.max_chain`](agent_image_index.zig) 이 SSOT 다.
+pub const max_files: usize = index.max_chain;
+
+/// 경로 하나의 상한 — [`max_source_path_bytes`](agent_image_index.zig) 가 SSOT 다.
+pub const max_path_bytes: usize = index.max_source_path_bytes;
+
+/// 라벨 하나의 상한 — [`max_label_bytes`](agent_image_context.zig) 가 SSOT 다. **이 값이 wire 의
+/// 천장을 만든다**(머리말).
+pub const max_label_bytes: usize = context.max_label_bytes;
+
+/// 원격 오류 메시지 상한. 목록 wire 와 같은 값·같은 이유(표시용 한 줄, 원격이 주는 값이라 유계).
+pub const max_error_bytes: usize = 512;
+
+/// 한 왕복 wire 전체의 상한(바이트). **전송이 이 값으로 읽기를 자른다** — 넘친 답은 꼬리를 잃어
+/// 파서가 **잘림**으로 읽는다(§6.1).
+///
+/// 근거: 레코드 하나가 최악 `A ` + 10 진 19 개(각 ≤ 20 자 + 공백) + 라벨 160 B + 개행 ≈ 590 B 이고,
+/// `max_records` 를 곱하면 19.3 MB 다. 실측은 그보다 훨씬 작지만(261.5 MB 파일이 2.69 MB) 상한은
+/// **주장할 수 있는 최악**을 덮어야 한다 — 안 그러면 정상 답이 잘린다.
+pub const max_wire_bytes: usize = 24 << 20;
+
+/// 스캔 한 번의 결말. 플래그 셋은 [스캐너](agent_image_index.zig)의 그것과 1:1 이고, 「비었다」와
+/// 「못 봤다」를 가르는 계약(계획 §2.2)이 이 값으로 국경을 건넌다.
+pub const ScanFlags = struct {
+    partial: bool = false,
+    image_partial: bool = false,
+    activity_partial: bool = false,
+    /// 저쪽이 실제로 읽은 바이트. 화면이 쓰지는 않지만 **진단이 이 값으로 「정말 훑었나」를 본다**.
+    scanned_bytes: u64 = 0,
+};
+
+/// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
+/// 손으로 만들 때 쓰고, 값이 틀리면 「필드 수」 판정자가 먼저 죽는다.
+pub const record_fields: usize = 24;
+
+// ── 필드 커버리지 가드 — **자리가 늘면 여기서 컴파일이 깨진다** ────────────────────────────────
+//
+// ⚠️ 적대적 검증 A2 가 만든 것이다. 가드가 없을 때 `Hit` 에 필드를 하나 더해 봤더니 **판정자 177 개가
+// 전부 통과했다** — wire 는 그 자리를 안 싣고, 왕복 판정자는 양쪽의 기본값(0)을 비교하므로 통과한다.
+// 그러면 원격은 그 값을 **영영 0 으로 본다**. 이 스택에서 `Hit` 이 실제로 88 → 96 바이트로 늘었고
+// (`input_rel`), 그때 이 가드가 없었다면 「원격에서만 검색이 덜 걸린다」가 조용히 생겼을 것이다.
+//
+// 렌더 parity 가드(`remote_screen.expectSnapshotParity`)가 같은 수법으로 화면 축을 지키고 있다 —
+// 분류를 **강제**하되 무엇을 안 싣는지는 사람이 정한다.
+fn assertCovered(comptime T: type, comptime carried: []const []const u8, comptime derived: []const []const u8) void {
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        comptime var seen = false;
+        inline for (carried ++ derived) |name| {
+            if (comptime std.mem.eql(u8, f.name, name)) seen = true;
+        }
+        if (!seen) @compileError("remote_activity_wire: " ++ @typeName(T) ++ "." ++ f.name ++
+            " 를 싣는지 정하지 않았다 — `appendRecord`/`parseRecord` 에 더하고 carried 에 적거나, 왜 안 싣는지 derived 에 적어라");
+    }
+}
+
+comptime {
+    assertCovered(index.Hit, &.{
+        "line_offset", "data_offset", "data_len",   "kind",   "mime",    "activity",
+        "name_rel",    "name_len",    "id_rel",     "id_len", "cmd_rel", "input_rel",
+        "time_rel",    "file_index",  "fold_owner", "result",
+    }, &.{});
+
+    assertCovered(index.ResultSummary, &.{
+        "found", "failed", "lines", "image", "image_offset", "image_len", "image_file", "body",
+    }, &.{});
+
+    assertCovered(index.ResultBody, &.{ "offset", "is_array" }, &.{});
+
+    assertCovered(context.Label, &.{ "buf", "len", "source", "time_s" }, &.{
+        // **갤러리가 스캔 뒤에 채운다**(`agent_activity` 의 순번 패스) — 라벨을 만드는 쪽은 이웃
+        // 히트를 못 보므로 저쪽에서도 못 채운다. 실어 봐야 언제나 0 이다.
+        "seq", "seq_total",
+    });
+}
+
+/// wire 한 건 — `Hit` 과 그 라벨·시각.
+///
+/// **라벨을 `Hit` 안에 넣지 않는다.** `Hit` 은 스캐너가 소유하는 순수한 자리 묶음이고, 라벨은 그
+/// 자리에서 **읽어 만든 것**이다. 합치면 스캐너가 라벨을 아는 모듈이 된다.
+pub const Record = struct {
+    hit: index.Hit,
+    label: context.Label = .{},
+};
+
+pub const Event = union(enum) {
+    /// 체인 파일 하나. **오는 순서가 `Hit.file_index`** 다(0 부터).
+    file: []const u8,
+    flags: ScanFlags,
+    record: Record,
+    /// 원격이 보고한 실패(표시용 텍스트). 이것으로 끝난 답도 **완결된 답**이다 — 「못 읽는다」는
+    /// 「비었다」와 다르고, 그 사실이 화면까지 가야 한다(계획 §2.2).
+    remote_error: []const u8,
+};
+
+// ── 인코더 — 헬퍼(원격)와 테스트가 쓴다 ─────────────────────────────────────────────────────────
+//
+// 목록 wire 와 같은 버퍼-append 꼴이다: 할당이 없어 헬퍼 바이너리(ReleaseSmall)가 그대로 쓸 수 있고,
+// 넘치면 null 로 실패해 **잘린 레코드를 절대 만들지 않는다**.
+
+fn appendBytes(out: []u8, at: usize, bytes: []const u8) ?usize {
+    if (at > out.len or out.len - at < bytes.len) return null;
+    @memcpy(out[at..][0..bytes.len], bytes);
+    return at + bytes.len;
+}
+
+fn appendDecimal(out: []u8, at: usize, value: u64) ?usize {
+    var buf: [20]u8 = undefined; // u64 최대 20 자리
+    const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+    return appendBytes(out, at, s);
+}
+
+fn appendField(out: []u8, at: usize, value: u64) ?usize {
+    const n = appendDecimal(out, at, value) orelse return null;
+    return appendBytes(out, n, " ");
+}
+
+pub fn appendHeader(out: []u8, at: usize) ?usize {
+    var n = appendBytes(out, at, header_line) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+/// 체인 파일 하나. 경로가 비거나 상한을 넘으면 null — **안 싣는다**(자른 경로는 없는 파일이거나,
+/// 더 나쁘게는 다른 파일이다 — `Source.set` 과 같은 규율).
+pub fn appendFile(out: []u8, at: usize, path: []const u8) ?usize {
+    if (path.len == 0 or path.len > max_path_bytes) return null;
+    var n = appendBytes(out, at, "F ") orelse return null;
+    n = appendField(out, n, path.len) orelse return null;
+    n = appendBytes(out, n, path) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+pub fn appendFlags(out: []u8, at: usize, flags: ScanFlags) ?usize {
+    var n = appendBytes(out, at, "S ") orelse return null;
+    n = appendField(out, n, @intFromBool(flags.partial)) orelse return null;
+    n = appendField(out, n, @intFromBool(flags.image_partial)) orelse return null;
+    n = appendField(out, n, @intFromBool(flags.activity_partial)) orelse return null;
+    n = appendDecimal(out, n, flags.scanned_bytes) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+/// `ResultSummary` 의 불리언 넷을 한 수로 접는다. 필드마다 칸을 주면 `A` 줄이 네 개 더 길어지는데,
+/// 그 넷은 **함께 읽히므로** 묶어도 「하나만 읽고 나머지를 잊는」 결함이 안 생긴다(`ResultBody` 를
+/// 묶은 것과 같은 판단).
+const result_found: u8 = 1 << 0;
+const result_failed: u8 = 1 << 1;
+const result_image: u8 = 1 << 2;
+const result_body_is_array: u8 = 1 << 3;
+
+fn packResultFlags(r: index.ResultSummary) u8 {
+    var f: u8 = 0;
+    if (r.found) f |= result_found;
+    if (r.failed) f |= result_failed;
+    if (r.image) f |= result_image;
+    if (r.body.is_array) f |= result_body_is_array;
+    return f;
+}
+
+/// 활동·이미지 한 건. 라벨이 상한을 넘으면 null — 호출자가 그 건을 건너뛰고 개수에서 뺀다.
+///
+/// ⚠️ **필드 순서가 계약이다.** 여기와 `parseRecord` 가 같은 순서를 봐야 하고, 그 대조는 왕복
+/// 테스트가 한다(한쪽만 고치면 값이 **자리를 옮겨** 조용히 엉뚱한 뜻이 된다).
+pub fn appendRecord(out: []u8, at: usize, rec: Record) ?usize {
+    if (rec.label.len > max_label_bytes) return null;
+    const h = rec.hit;
+    var n = appendBytes(out, at, "A ") orelse return null;
+    n = appendField(out, n, h.file_index) orelse return null;
+    n = appendField(out, n, h.line_offset) orelse return null;
+    n = appendField(out, n, h.data_offset) orelse return null;
+    n = appendField(out, n, h.data_len) orelse return null;
+    n = appendField(out, n, @intFromEnum(h.kind)) orelse return null;
+    n = appendField(out, n, @intFromEnum(h.mime)) orelse return null;
+    n = appendField(out, n, @intFromEnum(h.activity)) orelse return null;
+    n = appendField(out, n, h.name_rel) orelse return null;
+    n = appendField(out, n, h.name_len) orelse return null;
+    n = appendField(out, n, h.id_rel) orelse return null;
+    n = appendField(out, n, h.id_len) orelse return null;
+    n = appendField(out, n, h.cmd_rel) orelse return null;
+    n = appendField(out, n, h.input_rel) orelse return null;
+    n = appendField(out, n, h.time_rel) orelse return null;
+    n = appendField(out, n, h.fold_owner) orelse return null;
+    n = appendField(out, n, packResultFlags(h.result)) orelse return null;
+    n = appendField(out, n, h.result.lines) orelse return null;
+    n = appendField(out, n, h.result.body.offset) orelse return null;
+    n = appendField(out, n, h.result.image_offset) orelse return null;
+    n = appendField(out, n, h.result.image_len) orelse return null;
+    n = appendField(out, n, h.result.image_file) orelse return null;
+    // 시각은 음수일 수 있다(1970 이전은 안 오지만 `i64` 다) — 부호를 비트로 옮겨 10 진으로 싣는다.
+    n = appendField(out, n, @as(u64, @bitCast(rec.label.time_s))) orelse return null;
+    n = appendField(out, n, @intFromEnum(rec.label.source)) orelse return null;
+    n = appendField(out, n, rec.label.len) orelse return null;
+    n = appendBytes(out, n, rec.label.text()) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+pub fn appendRemoteError(out: []u8, at: usize, message: []const u8) ?usize {
+    // ⚠️ 자름은 바이트 경계다 — errno 문자열(ASCII)을 전제한다(목록 wire 와 같은 한계·같은 자리).
+    const clamped = message[0..@min(message.len, max_error_bytes)];
+    var n = appendBytes(out, at, "! ") orelse return null;
+    n = appendField(out, n, clamped.len) orelse return null;
+    n = appendBytes(out, n, clamped) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+pub fn appendTail(out: []u8, at: usize, count: u64) ?usize {
+    var n = appendBytes(out, at, "X ") orelse return null;
+    n = appendDecimal(out, n, count) orelse return null;
+    n = appendBytes(out, n, "\n") orelse return null;
+    return n;
+}
+
+// ── 파서 — GUI 백엔드가 쓴다 ────────────────────────────────────────────────────────────────────
+
+pub const ParseError = error{
+    /// 머리가 없거나 판이 다르다 — 구 GUI ↔ 신 헬퍼(또는 그 반대)의 조용한 오독을 여기서 끊는다.
+    UnsupportedVersion,
+    /// 레코드 형태가 계약과 다르다.
+    Malformed,
+    /// 라벨·경로·메시지 길이가 상한을 넘는다고 주장한다 — 원격이 주는 값이므로 믿지 않는다.
+    TooLong,
+    /// 레코드 수가 상한을 넘는다.
+    TooManyRecords,
+    /// 체인 파일 수가 상한을 넘는다.
+    TooManyFiles,
+    /// 열거값이 이 판이 아는 범위 밖이다 — 새 판의 헬퍼가 보낸 것이거나 오염이다. **`other` 로
+    /// 뭉개지 않는다**: 뭉개면 「모르는 것을 아는 척」이 되고, 그 값이 필터·접기의 갈림을 정한다.
+    UnknownEnum,
+    /// 꼬리의 count 가 실제 레코드 수와 다르다 — 중간 유실을 잡는다.
+    CountMismatch,
+    /// 경로가 절대경로가 아니다 — 소비처가 이 값으로 **범위 읽기를 요청**하므로(RAV5) 상대경로는
+    /// 저쪽 cwd 에 매달린 다른 파일을 가리킨다.
+    UnsafePath,
+    /// 꼬리(또는 오류 레코드) 뒤에 바이트가 더 있다 — 응답 두 개가 섞였다는 뜻이다.
+    TrailingData,
+};
+
+/// 스트리밍이 아니라 **완결된 바이트**를 받는 파서다 — 전송이 상한까지 읽어 통째로 준다.
+/// `next()` 를 끝까지 돌린 뒤 `complete()` 가 참일 때만 결과를 믿는다: 꼬리를 못 봤으면 **잘린
+/// 것**이고(§6.1), 잘린 목록을 그대로 그리면 「없어진 것처럼 보이는」 활동이 생긴다.
+pub const Parser = struct {
+    rest: []const u8,
+    saw_header: bool = false,
+    records_seen: u64 = 0,
+    files_seen: u64 = 0,
+    /// 꼬리(`X`) 또는 오류(`!`)를 봤다 — 이 뒤에 오는 바이트는 전부 `TrailingData` 다.
+    terminated: bool = false,
+
+    pub fn init(bytes: []const u8) Parser {
+        return .{ .rest = bytes };
+    }
+
+    /// 완결됐는가. `!`(원격 실패)도 완결이다 — 침묵과 실패를 가르는 것이 이 wire 의 존재 이유다.
+    pub fn complete(self: *const Parser) bool {
+        return self.terminated and self.rest.len == 0;
+    }
+
+    pub fn next(self: *Parser) ParseError!?Event {
+        if (self.rest.len == 0) return null;
+        if (self.terminated) return ParseError.TrailingData;
+
+        if (!self.saw_header) {
+            const line = try self.takeLine();
+            if (!std.mem.eql(u8, line, header_line)) return ParseError.UnsupportedVersion;
+            self.saw_header = true;
+            if (self.rest.len == 0) return null;
+        }
+
+        const kind = self.rest[0];
+        switch (kind) {
+            'F' => return .{ .file = try self.parseFile() },
+            'S' => return .{ .flags = try self.parseFlags() },
+            'A' => return .{ .record = try self.parseRecord() },
+            '!' => {
+                const msg = try self.parseRemoteError();
+                self.terminated = true;
+                return .{ .remote_error = msg };
+            },
+            'X' => {
+                try self.parseTail();
+                self.terminated = true;
+                return null;
+            },
+            else => return ParseError.Malformed,
+        }
+    }
+
+    fn takeLine(self: *Parser) ParseError![]const u8 {
+        const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse return ParseError.Malformed;
+        const line = self.rest[0..nl];
+        self.rest = self.rest[nl + 1 ..];
+        return line;
+    }
+
+    /// `<prefix> ` 를 떼고 나머지를 돌려준다.
+    fn expectPrefix(self: *Parser, prefix: []const u8) ParseError![]const u8 {
+        if (self.rest.len < prefix.len or !std.mem.startsWith(u8, self.rest, prefix)) {
+            return ParseError.Malformed;
+        }
+        self.rest = self.rest[prefix.len..];
+        return self.rest;
+    }
+
+    /// 10 진수 하나를 먹는다. `term` 이 그 끝(공백 또는 개행)이다.
+    ///
+    /// **`std.fmt.parseInt` 를 쓰지 않는 이유**는 그것이 관대하기 때문이다 — 실측으로 `"+5"` 를 5 로,
+    /// `"5_0"` 을 50 으로 읽는다. 원격이 주는 바이트라 관대할 이유가 없고, 관대하면 꼬리 count 대조
+    /// (§6.1 의 방어)가 `X 1_5` 같은 값에 **뚫린다**.
+    ///
+    /// ⚠️ 이 규율을 처음에는 여기만 지키고 `parseFlags`·`parseTail` 은 `parseInt` 를 썼다 — 한 파일
+    /// 안에서 규율이 두 벌이었다(적대적 A1). 그래서 **줄 끝을 먹는 판도 이 함수가 든다.**
+    fn takeUntil(self: *Parser, term: u8) ParseError!u64 {
+        var i: usize = 0;
+        var v: u64 = 0;
+        while (i < self.rest.len and self.rest[i] != term) : (i += 1) {
+            const c = self.rest[i];
+            if (c < '0' or c > '9') return ParseError.Malformed;
+            v = std.math.mul(u64, v, 10) catch return ParseError.Malformed;
+            v = std.math.add(u64, v, c - '0') catch return ParseError.Malformed;
+        }
+        if (i == 0 or i >= self.rest.len) return ParseError.Malformed;
+        self.rest = self.rest[i + 1 ..]; // 구분자까지 먹는다
+        return v;
+    }
+
+    /// 공백으로 끝나는 10 진수 하나.
+    fn takeDecimal(self: *Parser) ParseError!u64 {
+        return self.takeUntil(' ');
+    }
+
+    /// 개행으로 끝나는 10 진수 하나(줄의 마지막 값).
+    fn takeDecimalLine(self: *Parser) ParseError!u64 {
+        return self.takeUntil('\n');
+    }
+
+    fn takeInt(self: *Parser, comptime T: type) ParseError!T {
+        const v = try self.takeDecimal();
+        return std.math.cast(T, v) orelse ParseError.Malformed;
+    }
+
+    fn takeEnum(self: *Parser, comptime E: type) ParseError!E {
+        const v = try self.takeDecimal();
+        const fields = @typeInfo(E).@"enum".fields;
+        if (v >= fields.len) return ParseError.UnknownEnum;
+        return @enumFromInt(v);
+    }
+
+    /// 길이 접두 바이트열. 상한을 **호출자가** 준다 — 원격이 주장하는 길이를 믿지 않는다.
+    fn takeLenPrefixed(self: *Parser, limit: usize) ParseError![]const u8 {
+        const len = try self.takeDecimal();
+        if (len > limit) return ParseError.TooLong;
+        const n: usize = @intCast(len);
+        if (self.rest.len < n + 1 or self.rest[n] != '\n') return ParseError.Malformed;
+        const bytes = self.rest[0..n];
+        self.rest = self.rest[n + 1 ..];
+        return bytes;
+    }
+
+    fn parseFile(self: *Parser) ParseError![]const u8 {
+        _ = try self.expectPrefix("F ");
+        const path = try self.takeLenPrefixed(max_path_bytes);
+        if (path.len == 0 or path[0] != '/') return ParseError.UnsafePath;
+        self.files_seen += 1;
+        if (self.files_seen > max_files) return ParseError.TooManyFiles;
+        return path;
+    }
+
+    fn parseFlags(self: *Parser) ParseError!ScanFlags {
+        _ = try self.expectPrefix("S ");
+        const p = try self.takeDecimal();
+        const ip = try self.takeDecimal();
+        const ap = try self.takeDecimal();
+        if (p > 1 or ip > 1 or ap > 1) return ParseError.Malformed;
+        const scanned = try self.takeDecimalLine();
+        return .{
+            .partial = p == 1,
+            .image_partial = ip == 1,
+            .activity_partial = ap == 1,
+            .scanned_bytes = scanned,
+        };
+    }
+
+    fn parseRecord(self: *Parser) ParseError!Record {
+        _ = try self.expectPrefix("A ");
+        var h: index.Hit = .{ .line_offset = 0, .data_offset = 0, .data_len = 0, .kind = .claude_image, .mime = .unknown };
+        h.file_index = try self.takeInt(u8);
+        h.line_offset = try self.takeDecimal();
+        h.data_offset = try self.takeDecimal();
+        h.data_len = try self.takeInt(u32);
+        h.kind = try self.takeEnum(index.Kind);
+        h.mime = try self.takeEnum(index.Mime);
+        h.activity = try self.takeEnum(index.Activity);
+        h.name_rel = try self.takeInt(u32);
+        h.name_len = try self.takeInt(u16);
+        h.id_rel = try self.takeInt(u32);
+        h.id_len = try self.takeInt(u8);
+        h.cmd_rel = try self.takeInt(u32);
+        h.input_rel = try self.takeInt(u32);
+        h.time_rel = try self.takeInt(u32);
+        h.fold_owner = try self.takeInt(u32);
+        const rflags = try self.takeInt(u8);
+        // 모르는 비트가 서 있으면 **새 판**이다 — 조용히 버리면 그 사실이 화면까지 안 간다.
+        const known = result_found | result_failed | result_image | result_body_is_array;
+        if (rflags & ~known != 0) return ParseError.UnknownEnum;
+        h.result.found = rflags & result_found != 0;
+        h.result.failed = rflags & result_failed != 0;
+        h.result.image = rflags & result_image != 0;
+        h.result.body.is_array = rflags & result_body_is_array != 0;
+        h.result.lines = try self.takeInt(u32);
+        h.result.body.offset = try self.takeDecimal();
+        h.result.image_offset = try self.takeDecimal();
+        h.result.image_len = try self.takeInt(u32);
+        h.result.image_file = try self.takeInt(u8);
+        const time_bits = try self.takeDecimal();
+        const source = try self.takeEnum(context.Source);
+
+        var label: context.Label = .{ .time_s = @bitCast(time_bits), .source = source };
+        const text = try self.takeLenPrefixed(max_label_bytes);
+        @memcpy(label.buf[0..text.len], text);
+        label.len = text.len;
+
+        self.records_seen += 1;
+        if (self.records_seen > max_records) return ParseError.TooManyRecords;
+        return .{ .hit = h, .label = label };
+    }
+
+    fn parseRemoteError(self: *Parser) ParseError![]const u8 {
+        _ = try self.expectPrefix("! ");
+        return self.takeLenPrefixed(max_error_bytes);
+    }
+
+    fn parseTail(self: *Parser) ParseError!void {
+        _ = try self.expectPrefix("X ");
+        const count = try self.takeDecimalLine();
+        if (count != self.records_seen) return ParseError.CountMismatch;
+    }
+};
+
+// ── 판정자 ──────────────────────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn sampleHit() index.Hit {
+    return .{
+        .line_offset = 1_234_567_890,
+        .data_offset = 1_234_567_950,
+        .data_len = 4096,
+        .kind = .claude_tool_use,
+        .mime = .unknown,
+        .activity = .exec,
+        .name_rel = 120,
+        .name_len = 4,
+        .id_rel = 64,
+        .id_len = 24,
+        .cmd_rel = 200,
+        .input_rel = 180,
+        .time_rel = 30,
+        .file_index = 2,
+        .fold_owner = index.no_fold,
+        .result = .{
+            .found = true,
+            .failed = true,
+            .lines = 747,
+            .image = false,
+            .image_offset = 0,
+            .image_len = 0,
+            .image_file = 0,
+            .body = .{ .offset = 1_234_568_000, .is_array = true },
+        },
+    };
+}
+
+test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아온다" {
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, "/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl").?;
+    n = appendFlags(&buf, n, .{ .activity_partial = true, .scanned_bytes = 261_533_353 }).?;
+
+    var label: context.Label = .{ .time_s = 1_757_500_000 };
+    const text = "zig build test";
+    @memcpy(label.buf[0..text.len], text);
+    label.len = text.len;
+
+    n = appendRecord(&buf, n, .{ .hit = sampleHit(), .label = label }).?;
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev_file = (try p.next()).?;
+    try testing.expectEqualStrings("/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl", ev_file.file);
+
+    const ev_flags = (try p.next()).?;
+    try testing.expect(ev_flags.flags.activity_partial);
+    try testing.expect(!ev_flags.flags.partial);
+    try testing.expectEqual(@as(u64, 261_533_353), ev_flags.flags.scanned_bytes);
+
+    const ev_rec = (try p.next()).?;
+    try testing.expectEqual(sampleHit(), ev_rec.record.hit);
+    try testing.expectEqualStrings(text, ev_rec.record.label.text());
+    try testing.expectEqual(@as(i64, 1_757_500_000), ev_rec.record.label.time_s);
+
+    try testing.expectEqual(@as(?Event, null), try p.next());
+    try testing.expect(p.complete());
+}
+
+test "꼬리가 없으면 완결이 아니다 — 잘림을 온전한 척 읽지 않는다" {
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
+    // 꼬리를 안 붙인다(전송이 상한에서 잘린 모양).
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectEqual(@as(?Event, null), try p.next());
+    try testing.expect(!p.complete());
+}
+
+test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다" {
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
+    n = appendTail(&buf, n, 2).?; // 실제로는 1 건
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectError(ParseError.CountMismatch, p.next());
+}
+
+test "판이 다르면 즉시 거부한다" {
+    const bytes = "maru-rav 2\nX 0\n";
+    var p = Parser.init(bytes);
+    try testing.expectError(ParseError.UnsupportedVersion, p.next());
+}
+
+test "원격 오류도 완결이다 — 「못 읽는다」와 「비었다」를 가른다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRemoteError(&buf, n, "open: No such file or directory").?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqualStrings("open: No such file or directory", ev.remote_error);
+    try testing.expect(p.complete());
+}
+
+test "꼬리 뒤의 바이트는 응답 두 개가 섞인 것이다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendTail(&buf, n, 0).?;
+    n = appendBytes(&buf, n, "X 0\n").?;
+
+    var p = Parser.init(buf[0..n]);
+    try testing.expectEqual(@as(?Event, null), try p.next());
+    try testing.expectError(ParseError.TrailingData, p.next());
+}
+
+test "상대경로는 거부한다 — 저쪽 cwd 에 매달린 다른 파일이다" {
+    var buf: [1024]u8 = undefined;
+    const n = appendHeader(&buf, 0).?;
+    // `appendFile` 은 절대경로만 내므로 손으로 만든다(오염된 원격의 모양).
+    const bad = "F 12 relative.txt\n";
+    @memcpy(buf[n..][0..bad.len], bad);
+
+    var p = Parser.init(buf[0 .. n + bad.len]);
+    try testing.expectError(ParseError.UnsafePath, p.next());
+}
+
+/// 오염된 `A` 줄을 손으로 짓는다 — **필드 수에 안 묶이게** 한 자리만 바꾼다.
+///
+/// 처음에는 숫자를 줄에 그대로 나열했는데, 라벨 출처를 싣게 되자(적대적 C1) 자리가 하나 밀려
+/// 판정자 셋이 **엉뚱한 이유로** 죽었다. 값을 자리 번호로 주면 그 취약함이 사라진다.
+fn pollutedRecord(buf: []u8, at: usize, field: usize, value: u64, label: []const u8) []const u8 {
+    var n = appendBytes(buf, at, "A ").?;
+    for (0..record_fields) |i| {
+        const v: u64 = if (i == field) value else if (i == record_fields - 1) label.len else 0;
+        n = appendField(buf, n, v).?;
+    }
+    n = appendBytes(buf, n, label).?;
+    n = appendBytes(buf, n, "\n").?;
+    return buf[0..n];
+}
+
+/// 자리 번호(0 부터) — `appendRecord` 의 순서와 같아야 한다.
+const f_kind: usize = 4;
+const f_result_flags: usize = 15;
+const f_source: usize = 22;
+const f_label_len: usize = 23;
+
+test "필드 수가 계약과 맞다 — 판정자의 오염 줄이 자리를 안 밀리게" {
+    var buf: [1024]u8 = undefined;
+    const n = appendRecord(&buf, 0, .{ .hit = sampleHit() }).?;
+    // `A ` 뒤의 공백 수 = 10 진 필드 수(라벨이 비어 마지막 공백까지 센다).
+    var spaces: usize = 0;
+    for (buf[2..n]) |c| {
+        if (c == ' ') spaces += 1;
+    }
+    try testing.expectEqual(record_fields, spaces);
+}
+
+test "라벨 길이가 상한을 넘는다고 주장하면 거부한다" {
+    var buf: [1024]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    const bytes = pollutedRecord(&buf, h, f_label_len, max_label_bytes + 1, "x");
+
+    var p = Parser.init(bytes);
+    try testing.expectError(ParseError.TooLong, p.next());
+}
+
+test "모르는 열거값은 뭉개지 않고 거부한다" {
+    var buf: [1024]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    const bytes = pollutedRecord(&buf, h, f_kind, 99, "");
+
+    var p = Parser.init(bytes);
+    try testing.expectError(ParseError.UnknownEnum, p.next());
+}
+
+test "모르는 라벨 출처도 거부한다 — 새 판의 헬퍼다" {
+    var buf: [1024]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    const bytes = pollutedRecord(&buf, h, f_source, 99, "");
+
+    var p = Parser.init(bytes);
+    try testing.expectError(ParseError.UnknownEnum, p.next());
+}
+
+test "모르는 결과 비트는 새 판이다 — 조용히 버리지 않는다" {
+    var buf: [1024]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    // 아는 넷(0b1111) 밖의 비트.
+    const bytes = pollutedRecord(&buf, h, f_result_flags, 16, "");
+
+    var p = Parser.init(bytes);
+    try testing.expectError(ParseError.UnknownEnum, p.next());
+}
+
+test "부호·밑줄이 든 수를 거부한다 — 꼬리 count 방어가 뚫리지 않게" {
+    // `std.fmt.parseInt` 는 실측으로 `+5` 를 5 로, `5_0` 을 50 으로 읽는다(적대적 A1). 그것을
+    // 꼬리·플래그에 쓰고 있었고, 그러면 `X 1_5` 가 15 로 통과해 중간 유실을 못 잡는다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
+    const bad = "X +1\n";
+    @memcpy(buf[n..][0..bad.len], bad);
+
+    var p = Parser.init(buf[0 .. n + bad.len]);
+    _ = try p.next();
+    try testing.expectError(ParseError.Malformed, p.next());
+}
+
+test "스캔 바이트에도 같은 규율이 선다" {
+    var buf: [1024]u8 = undefined;
+    const n = appendHeader(&buf, 0).?;
+    const bad = "S 0 0 0 1_0\n";
+    @memcpy(buf[n..][0..bad.len], bad);
+
+    var p = Parser.init(buf[0 .. n + bad.len]);
+    try testing.expectError(ParseError.Malformed, p.next());
+}
+
+test "라벨 출처가 그대로 돌아온다 — 화면이 「어디서 온 그림인가」를 그린다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRecord(&buf, n, .{
+        .hit = sampleHit(),
+        .label = .{ .source = .codex_wrapper_path },
+    }).?;
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqual(context.Source.codex_wrapper_path, ev.record.label.source);
+}
+
+test "버퍼가 모자라면 null — 잘린 레코드를 절대 만들지 않는다" {
+    var small: [8]u8 = undefined;
+    try testing.expectEqual(@as(?usize, null), appendHeader(&small, 0));
+
+    var mid: [64]u8 = undefined;
+    const n = appendHeader(&mid, 0).?;
+    try testing.expectEqual(@as(?usize, null), appendRecord(&mid, n, .{ .hit = sampleHit() }));
+}
+
+test "체인 상한을 넘는 파일 수는 거부한다" {
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    for (0..max_files + 1) |_| n = appendFile(&buf, n, "/a/b.jsonl").?;
+
+    var p = Parser.init(buf[0..n]);
+    for (0..max_files) |_| _ = try p.next();
+    try testing.expectError(ParseError.TooManyFiles, p.next());
+}
+
+test "음수 시각도 그대로 돌아온다" {
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendRecord(&buf, n, .{ .hit = sampleHit(), .label = .{ .time_s = -1 } }).?;
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqual(@as(i64, -1), ev.record.label.time_s);
+}
+
+test "상한 상수는 스캐너·라벨에서 온다 — 두 벌을 만들지 않는다" {
+    try testing.expectEqual(index.max_source_path_bytes, max_path_bytes);
+    try testing.expectEqual(context.max_label_bytes, max_label_bytes);
+    try testing.expectEqual(index.max_chain, max_files);
+    try testing.expectEqual(index.max_activity_hits_per_file + index.max_hits_per_file, max_records);
+}

@@ -442,25 +442,41 @@ pub fn parseCodexTail(allocator: std.mem.Allocator, tail: []const u8, out: *Owne
 ///
 /// 신원(`CODEX_THREAD_ID`)을 아는 경우의 경로다 — 후보를 열어 `session_meta`를 파싱할 필요도, mtime을 비교할
 /// 필요도 없다. 상대 경로를 `out`에 쓰고 반환한다. 없으면 null(아직 파일이 안 생겼거나 다른 기계의 세션).
+/// 🔥 **하위 디렉터리도 `.iterate = true` 로 열어야 한다.** 안 주면 리눅스에서 `iterate()` 가 빈 손으로
+/// 돌아와 **순회가 통째로 실패한다** — macOS 는 관대해서 그냥 도므로 **로컬에서는 영영 안 드러난다**.
+/// RAV4 의 체인 판정자가 리눅스 CI 에서만 빨개져 잡혔다(colima 로 재현).
+///
+/// 🔥 **`d_type` 을 안 주는 파일시스템이 있다.** 리눅스의 `getdents` 는 ext2/ext3·일부 오버레이에서
+/// `DT_UNKNOWN` 을 주고, 그때 `kind` 는 `.unknown` 이다 — `!= .directory` 로 거르면 **디렉터리 순회가
+/// 통째로 빈다**. macOS(APFS)는 언제나 채워 주므로 로컬에서는 안 드러나고 **리눅스 CI 에서만** 빨개진다
+/// (실제로 RAV4 의 체인 판정자가 그렇게 걸렸다 · colima ext2/ext3 로 재현).
+///
+/// 이 저장소는 같은 부류의 함정을 이미 겪었다 — `nftw` 의 `FTW_D` 가 libc 마다 달라 원격 감시자가
+/// watch 를 하나도 안 걸던 판(build.zig 의 그 주석). 그래서 **열어 보고 판정한다**: `.unknown` 은
+/// 「아닐 수도 있다」가 아니라 「모른다」이고, 아래 `openDir` 이 실패하면 자연히 걸러진다.
+fn mayBeDir(kind: std.Io.File.Kind) bool {
+    return kind == .directory or kind == .unknown;
+}
+
 pub fn findCodexByThreadId(io: std.Io, root: std.Io.Dir, suffix: []const u8, out: []u8) ?[]const u8 {
     var years = root.iterate();
     while ((years.next(io) catch return null)) |y| {
-        if (y.kind != .directory) continue;
-        var ydir = root.openDir(io, y.name, .{}) catch continue;
+        if (!mayBeDir(y.kind)) continue;
+        var ydir = root.openDir(io, y.name, .{ .iterate = true }) catch continue;
         defer ydir.close(io);
         var months = ydir.iterate();
         while ((months.next(io) catch break)) |mo| {
-            if (mo.kind != .directory) continue;
-            var mdir = ydir.openDir(io, mo.name, .{}) catch continue;
+            if (!mayBeDir(mo.kind)) continue;
+            var mdir = ydir.openDir(io, mo.name, .{ .iterate = true }) catch continue;
             defer mdir.close(io);
             var days = mdir.iterate();
             while ((days.next(io) catch break)) |d| {
-                if (d.kind != .directory) continue;
-                var ddir = mdir.openDir(io, d.name, .{}) catch continue;
+                if (!mayBeDir(d.kind)) continue;
+                var ddir = mdir.openDir(io, d.name, .{ .iterate = true }) catch continue;
                 defer ddir.close(io);
                 var files = ddir.iterate();
                 while ((files.next(io) catch break)) |f| {
-                    if (f.kind != .file) continue;
+                    if (f.kind != .file and f.kind != .unknown) continue;
                     if (!std.mem.endsWith(u8, f.name, suffix)) continue;
                     const written = std.fmt.bufPrint(out, "{s}/{s}/{s}/{s}", .{ y.name, mo.name, d.name, f.name }) catch return null;
                     return written;

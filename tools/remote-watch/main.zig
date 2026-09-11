@@ -982,6 +982,13 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         return;
     }
 
+    // **시작할 때 한 번 재서 래치한다**(아래 `channelWatchable` — 그 이유가 거기 있다).
+    //
+    // ⚠️ **체인 풀기보다 먼저 잰다**(적대적 O2). 뒤에 두면 `resolveChain` 이 도는 동안 래치가 없어
+    // 그 구간의 끊김을 영영 못 본다. 실측으로 그 구간은 짧지만(세션 303 개에 1.5 ms) **공백을 남길
+    // 이유가 없다**.
+    const watch_channel = channelWatchable();
+
     // **재개/fork 면 부모까지 잇는다**(RAV4 — 계약 §3.3). 저쪽 파일시스템을 훑는 일이라 여기서 한다.
     const chain = resolveChain(io, file_path);
     if (chain.len == 0) {
@@ -1005,9 +1012,6 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         return;
     };
     defer gpa.free(chunk);
-
-    // **시작할 때 한 번 재서 래치한다**(위 `channelWatchable` — 그 이유가 거기 있다).
-    const watch_channel = channelWatchable();
 
     var offset: u64 = 0;
     var truncated = false;
@@ -1039,9 +1043,13 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         // 이어 붙으면 없던 활동이 생긴다.
         scanner.deinit(gpa);
         scanner = .{ .file_index = @intCast(at) };
-        if (scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset)) |_| {} else |_| {
-            truncated = true;
-        }
+        scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset) catch |err| switch (err) {
+            // 🔥 **채널이 끊겼으면 곧바로 접는다 — 다음 파일로 안 간다**(적대적 O2). 여기서 `truncated`
+            // 로 뭉개면 M1 의 고침이 체인에서 **깨진다**: 받는 이가 없는데 부모 rollout(실측 최대
+            // 1.8 GB)을 계속 훑어 남의 서버 CPU 를 태운다.
+            error.ChannelGone => return,
+            error.Truncated => truncated = true,
+        };
     }
 
     {

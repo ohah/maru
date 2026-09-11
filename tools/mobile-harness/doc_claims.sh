@@ -566,9 +566,34 @@ ck "조합도 맞추기를 쓴다" 1 "$(awk '/public boolean setComposingText\(/
 ck "즉시 확정도 맞추기를 쓴다" 1 "$(awk '/public boolean setComposingText\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'reconcileSent(next)')"
 # **접두사를 믿는 자리가 하나도 없다.** 규칙이 두 벌이면 한쪽만 낡는다 — 실제로 확정 쪽이 낡아 있었다.
 ck "접두사를 믿는 자리가 없다" 0 "$(sed 's,//.*,,' $IMEJ | grep -c 'startsWith')"
+# **틀린 «모양» 이 아니라 나가는 «자리» 를 문다.** 위 `startsWith` 판정자는 적대적 검증에서
+# 두 번 샜다 — `indexOf(sent) != 0` 으로 갈라 통째로 보내도, `commitCompletion` 이라는 네 번째
+# 출구를 새로 파도 전부 통과했다(둘 다 그 결함 그대로다). 모양은 무한히 갈아입을 수 있다.
+#
+# 원격으로 나가는 바이트는 **두 자리에서만** 난다: `reconcileSent`(맞추기)와
+# `finishComposingText`(조합 확정 — 그 글자는 preedit 이라 아직 안 나갔으므로 맞출 것이 없다).
+# 세 번째가 생기면 그것이 곧 새 사본이다.
+ck "원격으로 나가는 자리는 둘" 2 "$(sed 's,//.*,,' $IMEJ | grep 'nativeCommit(' | grep -v 'native void' | wc -l | tr -d ' ')"
+ck "그 하나는 reconcileSent" 1 "$(awk '/private void reconcileSent\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'nativeCommit(')"
+ck "그 하나는 finishComposingText" 1 "$(awk '/public boolean finishComposingText\(/,/^        }$/' $IMEJ | sed 's,//.*,,' | grep -c 'nativeCommit(')"
+# **지우는 자리도 센다.** 백스페이스를 내는 곳은 `reconcileSent` 와 `deleteSurroundingText` 둘이다.
+# **알려진 구멍**: `deleteSurroundingText`·`sendKeyEvent(KEYCODE_DEL)` 는 원격에서 글자를 지우면서
+# `sent` 를 안 줄인다 — `sent != ""` 인 채 불리면 다음 맞추기가 이미 없는 글자까지 지운다.
+# Gboard 로는 닿는 경로를 못 만들었다(조합이 언제나 먼저 비워진다). 세 번째 자리가 생기면
+# 그때는 반드시 `sent` 를 함께 봐야 하므로, 수를 박아 조용히 늘지 못하게 한다.
+ck "백스페이스를 내는 자리는 둘" 2 "$(sed 's,//.*,,' $IMEJ | grep -c 'KEYCODE_DEL, 0, 0)')"
 # **문서가 그 이유를 들고 있다** — 「껐으니 추천은 안 온다」가 전제였고 그것이 틀렸다.
 ck "문서가 추천을 계약 밖으로 안 민다" 1 "$(grep -c '부탁이지 계약이 아니다' $DOC)"
 ck "옛 규칙이 문서에 안 남았다" 0 "$(grep -c '이미 내보낸 앞부분을 빼고 넘긴다' $DOC)"
+# **판정자만 아는 계약이 없게 한다.** 적대적 3회차에서 「즉시 확정도 맞추기를 쓴다」가 코드와
+# 판정자에만 있고 **어느 문서도 안 적고 있었다** — 그러면 그 규칙은 대화에만 있는 것과 같다.
+# 위 세 코드 판정자 각각에 대해 문서가 그 자리를 말하는지 함께 센다.
+ck "문서가 모든 확정 자리를 묶는다" 1 "$(grep -c '확정으로 나가는 자리는 전부 같은 맞추기를 쓴다' $DOC)"
+ck "문서가 즉시 확정도 말한다" 1 "$(grep -c '즉시 확정도 위의 맞추기를 쓴다' $DOC)"
+ck "문서가 예외를 말한다" 1 "$(grep -c '맞출 것이 없다' $DOC)"
+# **알려진 구멍도 문서가 든다.** 판정자가 수를 박아 두었으니(위 「백스페이스를 내는 자리는 둘」)
+# 그 수가 왜 둘인지, 무엇이 아직 안 맞는지는 계약이 말해야 한다.
+ck "문서가 지우는 쪽 구멍을 든다" 1 "$(grep -c '지우는 쪽은 아직 맞추기 밖에 있다' $DOC)"
 
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한

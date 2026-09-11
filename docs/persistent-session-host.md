@@ -46,8 +46,9 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > barrier가 `기존 input → core command → 새 input`의 순서를 보존한다. scrolled
 > `imeBegin`은 응답 없는 async scroll frame만 admission하며 동기 RPC로 fallback하지 않는다.
 > focus report와 설정·prompt core command는 host reader까지 전달되고, 일반 key의 DECCKM/DECKPAM/kitty keyboard 인코딩은
-> runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll 등 input-mode/command
-> parity 전체가 완료됐다는 뜻은 아니다.
+> runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 고빈도 DECSET 1003 motion과
+> selection autoscroll까지 P4 input parity micro-gate가 host reader의 실제 PTY write 및 authoritative
+> selection state로 검증한다(`zig build test-session-host-input-parity`).
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다(값은 위 단일 출처를 본다).
 > 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
 > `runtime-handle + runtime-state="ended"`를 owned 상태로 반복 저장하고, 두 번째 이후 재실행에서 host

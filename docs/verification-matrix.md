@@ -2940,6 +2940,39 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **남은 OS gate:** provisioned signed runner에서 GUI 0 OSC 발화→실제 배너 클릭→cold launch와 GUI-live 발화→Quit→기존
   배너 클릭이 모두 원래 `host_id:runtime_id` 및 child PID 불변으로 attach하는 구조화 artifact가 필요하다. synthetic
   `UNNotificationResponse`나 source fixture는 이 Notification Center gate를 대체하지 않는다.
+- **N3-R1 strict evidence (구현):** `release_evidence.zig`의 `maru.session-host-notification-center.v1` leaf
+  bounded canonical parser/writer가 공통 `test_uuid`, candidate DMG/executable SHA-256, Developer ID designated
+  requirement SHA-256과 `authorized` permission observation을 소유한다. `gui_zero`와 `gui_live_then_quit` 두 행은
+  각각 exact lowercase 32-hex `host_id`/`runtime_id`, nonzero `event_id`, canonical request identifier,
+  daemon/child PID before·after, OS-delivered·actual-click·exact-attach·screen-before-preserved·screen-after-writable을
+  싣는다. 두 행의 event/request identity는 달라야 하지만 같은 host/runtime의 두 수명 상태를 재사용할 수 있다. PID가
+  바뀌거나 candidate digest drift가 있으면 `passed`를 만들지 않는다. leaf의 permission/source 문자열·bool이나 designated
+  requirement digest 자체는 실제 Developer ID 서명·OS click 권위가 아니며, 그 provenance는 R2의 pinned process graph와
+  callback/UI event 결속만 소유한다.
+  각 행은 UUID에서 유도한 비밀이 아닌 visible nonce와 submit/deliver/click/callback/attach timestamp도 싣는다. 모든
+  process는 같은 시스템 `mach_continuous_time`을 nanosecond로 변환한 단위를 사용하고, `deliver`는 helper가 exact nonce의
+  AX notification 요소를 처음 관측한 시점이다. R1은 순서 역전을 거부하고, absolute deadline 값과 초과 판정은 OS 실행을
+  소유하는 R2 상수가 단일 소유한다. unknown/duplicate/missing/noncanonical/oversize와 allocation failure는 부분 observation
+  없이 fail-close한다. `test-session-host-release-evidence`가 Debug·ReleaseFast에서 canonical round-trip, candidate/stable
+  identity·PID·nonce·timestamp·outcome drift와 전 allocation fail-index를 검증한다. 이 leaf writer의 green은 실제 OS click이나
+  signed candidate 실행 증거가 아니며 R2 없이 완료로 승격하지 않는다.
+- **N3-R2 provisioned product runner (미착수):** 로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
+  read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
+  TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미
+  `authorized`인 Notification Center와 고정 automation helper identity의 Accessibility 권한, unlocked Aqua session을
+  읽기만 하며 prompt·수동 클릭·synthetic response로 우회하지 않는다. 다른 알림과 구별되는 exact visible nonce를 가진
+  실제 배너만 absolute deadline 안에 UI automation으로 클릭하고, 앱 callback의 canonical request identifier와 UI event를
+  같은 monotonic transaction에 결속한다. 앱의 일반 cold/live
+  route가 같은 host/runtime과 기존 child PID에 붙어 before marker를 보존하고 새 input/output을 왕복한 뒤에만 R1 leaf를
+  배타 게시한다. permission/UI session/배너/클릭/attach/cleanup 실패는 skip/pass가 아니라 typed `not_provisioned` 또는
+  failed artifact이며, 사용자 workspace·session-host registry를 읽거나 지우지 않는다. Notification Center 정리는 전체
+  삭제가 아니라 이번 UUID의 exact request identifier 두 개만 대상으로 하고, 외부 알림을 열거 결과에 기록하지 않는다.
+- **N3-R3 protected workflow binding (미착수):** tag release의 signed candidate를 별도
+  `Session host product` environment와 고정 self-hosted macOS label을 가진 job으로 전달한다. job은 R2를 실행하고
+  attempt-scoped artifact attestation을 게시한다. 최종 release evidence는 exact run/attempt/job/deployment와 candidate
+  identity, R1 leaf digest를 교차검증해야 하며, hosted runner·다른 ref·다른 candidate·재실행의 옛 artifact를 섞지 않는다.
+  repository environment의 이름만 존재하거나 job이 `skipped`인 상태는 protection 통과가 아니다. R1~R3와 실제
+  provisioned run이 모두 green이 되기 전에는 P4 notification 또는 영속 세션 호스트 전체 완료를 주장하지 않는다.
 
 ### Session default G1 config provenance
 

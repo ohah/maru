@@ -13,6 +13,7 @@ pub const canonicalReleaseTestUuid = upgrade_limits.canonicalReleaseTestUuid;
 pub const schema = "maru.session-host-release-evidence.v1";
 pub const default_false_leaf_schema = upgrade_limits.default_false_leaf_schema;
 pub const signed_app_quit_leaf_schema = upgrade_limits.signed_app_quit_leaf_schema;
+pub const notification_center_leaf_schema = upgrade_limits.notification_center_leaf_schema;
 pub const signed_upgrade_leaf_schema = upgrade_limits.signed_upgrade_leaf_schema;
 pub const signed_cli_ssh_leaf_schema = "maru.session-host-signed-cli-ssh.v1";
 pub const max_evidence_bytes = manifest.max_evidence_bytes;
@@ -142,6 +143,54 @@ pub const SignedCliSshGate = struct {
     candidate_executable_sha256: []const u8,
     candidate_cli_sha256: []const u8,
     designated_requirement_sha256: []const u8,
+};
+
+pub const NotificationPermission = enum { authorized };
+
+pub const NotificationCenterScenarioInput = struct {
+    host_id: []const u8,
+    runtime_id: []const u8,
+    event_id: u64,
+    request_identifier: []const u8,
+    visible_nonce: []const u8,
+    daemon_pid_before: u64,
+    daemon_pid_after: u64,
+    child_pid_before: u64,
+    child_pid_after: u64,
+    submitted_at_ns: u64,
+    delivered_at_ns: u64,
+    clicked_at_ns: u64,
+    callback_at_ns: u64,
+    attached_at_ns: u64,
+    os_delivered: bool,
+    actual_click: bool,
+    exact_attach: bool,
+    screen_before_preserved: bool,
+    screen_after_writable: bool,
+};
+
+pub const NotificationCenterInput = struct {
+    test_uuid: []const u8,
+    candidate_dmg_sha256: []const u8,
+    candidate_executable_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
+    permission: NotificationPermission,
+    gui_zero: NotificationCenterScenarioInput,
+    gui_live_then_quit: NotificationCenterScenarioInput,
+    cleanup_complete: bool,
+};
+
+pub const NotificationCenterGate = struct {
+    schema: []const u8,
+    test_uuid: []const u8,
+    result: Result,
+    candidate_dmg_sha256: []const u8,
+    candidate_executable_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
+    permission: NotificationPermission,
+    gui_zero: NotificationCenterScenarioInput,
+    gui_live_then_quit: NotificationCenterScenarioInput,
+    cleanup_complete: bool,
 };
 
 pub const BaselineGates = struct {
@@ -403,6 +452,36 @@ pub fn parseSignedCliSshLeaf(
     return parsed;
 }
 
+pub fn writeNotificationCenterLeaf(
+    allocator: std.mem.Allocator,
+    input: NotificationCenterInput,
+) Error![]u8 {
+    const gate = NotificationCenterGate{
+        .schema = notification_center_leaf_schema,
+        .test_uuid = input.test_uuid,
+        .result = .passed,
+        .candidate_dmg_sha256 = input.candidate_dmg_sha256,
+        .candidate_executable_sha256 = input.candidate_executable_sha256,
+        .designated_requirement_sha256 = input.designated_requirement_sha256,
+        .permission = input.permission,
+        .gui_zero = input.gui_zero,
+        .gui_live_then_quit = input.gui_live_then_quit,
+        .cleanup_complete = input.cleanup_complete,
+    };
+    try validateNotificationCenterLeaf(gate);
+    return writeJson(allocator, gate);
+}
+
+pub fn parseNotificationCenterLeaf(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) Error!std.json.Parsed(NotificationCenterGate) {
+    var parsed = try parseLeaf(NotificationCenterGate, allocator, bytes);
+    errdefer parsed.deinit();
+    try validateNotificationCenterLeaf(parsed.value);
+    return parsed;
+}
+
 pub fn bind(value: Value, expected: Expected) Error!void {
     switch (value) {
         .baseline_a => |actual| switch (expected) {
@@ -578,6 +657,47 @@ fn validateSignedCliSshLeaf(leaf: SignedCliSshGate) Error!void {
         !lowerHex(leaf.candidate_executable_sha256, 64) or
         !lowerHex(leaf.candidate_cli_sha256, 64) or
         !lowerHex(leaf.designated_requirement_sha256, 64)) return error.InvalidLeaf;
+}
+
+fn validateNotificationCenterLeaf(leaf: NotificationCenterGate) Error!void {
+    if (!std.mem.eql(u8, leaf.schema, notification_center_leaf_schema) or leaf.result != .passed or
+        !canonicalUuidV4(leaf.test_uuid) or !lowerHex(leaf.candidate_dmg_sha256, 64) or
+        !lowerHex(leaf.candidate_executable_sha256, 64) or
+        !lowerHex(leaf.designated_requirement_sha256, 64) or leaf.permission != .authorized or
+        !leaf.cleanup_complete) return error.InvalidLeaf;
+    try validateNotificationScenario(leaf.test_uuid, "gui-zero", leaf.gui_zero);
+    try validateNotificationScenario(leaf.test_uuid, "gui-live-then-quit", leaf.gui_live_then_quit);
+    if (std.mem.eql(u8, leaf.gui_zero.request_identifier, leaf.gui_live_then_quit.request_identifier))
+        return error.LeafMismatch;
+}
+
+fn validateNotificationScenario(
+    test_uuid: []const u8,
+    comptime nonce_suffix: []const u8,
+    scenario: NotificationCenterScenarioInput,
+) Error!void {
+    try scalar(scenario.request_identifier);
+    try scalar(scenario.visible_nonce);
+    if (!lowerHex(scenario.host_id, 32) or !lowerHex(scenario.runtime_id, 32) or scenario.event_id == 0 or
+        scenario.daemon_pid_before == 0 or scenario.daemon_pid_before > std.math.maxInt(i32) or
+        scenario.daemon_pid_after != scenario.daemon_pid_before or scenario.child_pid_before == 0 or
+        scenario.child_pid_before > std.math.maxInt(i32) or scenario.child_pid_after != scenario.child_pid_before or
+        scenario.submitted_at_ns == 0 or scenario.delivered_at_ns <= scenario.submitted_at_ns or
+        scenario.clicked_at_ns <= scenario.delivered_at_ns or scenario.callback_at_ns <= scenario.clicked_at_ns or
+        scenario.attached_at_ns <= scenario.callback_at_ns or !scenario.os_delivered or !scenario.actual_click or
+        !scenario.exact_attach or !scenario.screen_before_preserved or !scenario.screen_after_writable)
+        return error.InvalidLeaf;
+    var request_buf: [128]u8 = undefined;
+    const expected_request = std.fmt.bufPrint(
+        &request_buf,
+        "maru-{s}-{s}-{d}",
+        .{ scenario.host_id, scenario.runtime_id, scenario.event_id },
+    ) catch return error.InvalidLeaf;
+    if (!std.mem.eql(u8, scenario.request_identifier, expected_request)) return error.InvalidLeaf;
+    var nonce_buf: [96]u8 = undefined;
+    const expected_nonce = std.fmt.bufPrint(&nonce_buf, "{s}-{s}", .{ test_uuid, nonce_suffix }) catch
+        return error.InvalidLeaf;
+    if (!std.mem.eql(u8, scenario.visible_nonce, expected_nonce)) return error.InvalidLeaf;
 }
 
 fn bindCandidateGate(common: Common, leaf: SignedCliSshGate) Error!void {

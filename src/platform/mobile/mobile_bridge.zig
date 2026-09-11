@@ -306,6 +306,11 @@ var conn_err_len: usize = 0;
 
 /// host 가 세션 상태와 실패 이름을 알린다(`state` 는 `MARU_SSH_STATE_*`).
 pub export fn maru_mobile_set_ssh_status(state: u32, err: [*]const u8, len: usize) void {
+    // **붙었으면 물러남을 처음으로 되돌린다** — 다음 끊김은 1초부터 센다.
+    if (state == 11) { // MARU_SSH_STATE_READY
+        retry_at_ms = null;
+        retry_step = 0;
+    }
     conn_state = state;
     const n = @min(len, conn_err.len);
     @memcpy(conn_err[0..n], err[0..n]);
@@ -483,6 +488,61 @@ pub fn firstComplete(list: []const mobile_config.Server) ?usize {
 ///
 /// **온전하지 않은 줄은 요청하지 않는다.** 화면이 그 줄을 "접속할 수 없다" 고 이미 말하고
 /// 있으므로, 눌렀을 때 조용히 아무 일도 안 하는 대신 그 자리에 머문다.
+/// **앱이 앞에 있나.** 물러나며 다시 붙는 일은 앞에 있을 때만 돈다(계약 §3.0) — 배경에서는
+/// 그릴 것도 없고 배터리만 쓴다. 돌아오면 config 재로드가 그 자리를 이어받는다.
+var app_focused: bool = true;
+
+/// **다음에 다시 붙어 볼 시각**(없으면 안 붙는다).
+var retry_at_ms: ?u64 = null;
+/// 몇 번째 물러남인가 — 1 → 2 → 4 → 8 → 16 → 30초에서 멈춘다.
+var retry_step: u32 = 0;
+
+/// 그 걸음의 기다림(ms). **상한이 있다** — 없으면 오래 끊긴 뒤 영영 안 붙는 것과 같아진다.
+fn retryDelayMs(step: u32) u64 {
+    const capped: u6 = @intCast(@min(step, 5));
+    const secs: u64 = @as(u64, 1) << capped; // 1·2·4·8·16·32
+    // **곱하기 전에 넓힌다.** `@min(secs, 30)` 은 상수 30 에 맞춰 타입을 `u5` 로 좁히고,
+    // 그 폭으로 1000 을 곱하면 컴파일이 막는다(그 자리에서 잡혔다).
+    const secs_capped: u64 = @min(secs, 30);
+    return secs_capped * 1000; // 30 초에서 멈춘다
+}
+
+/// **안 시킨 끊김이면 다시 붙을 시각을 잡는다**(계약 §3.0). 사용자가 끊었으면 안 잡는다 —
+/// 그 기억이 이 자리의 유일한 갈림길이다.
+/// 물러남을 처음으로 — **사용자가 골랐을 때만** 부른다.
+fn resetRetryBackoff() void {
+    retry_at_ms = null;
+    retry_step = 0;
+}
+
+fn noteDroppedForRetry(now_ms: u64) void {
+    if (user_disconnected) return;
+    if (ssh_connecting == null) return; // 붙어 본 적이 없다 — 돌아갈 자리가 없다
+    retry_at_ms = now_ms + retryDelayMs(retry_step);
+    retry_step +|= 1;
+}
+
+/// 때가 됐으면 다시 붙는다. **프레임마다 본다** — 없으면 곧바로 돌아간다.
+fn driveRetry(now_ms: u64) void {
+    const at = retry_at_ms orelse return;
+    if (!app_focused) return; // 배경에서는 안 돈다(계약 §3.0)
+    if (input_sink != 0) { // 어느새 붙었다 — 물러남을 처음으로
+        retry_at_ms = null;
+        retry_step = 0;
+        return;
+    }
+    if (now_ms < at) return;
+    const i = ssh_connecting orelse {
+        retry_at_ms = null;
+        return;
+    };
+    retry_at_ms = now_ms + retryDelayMs(retry_step);
+    retry_step +|= 1;
+    // **안 시킨 재접속이다** — 붙으면 띠가 그렇게 말한다(§3.3).
+    reconnect_notice = true;
+    requestConnect(i);
+}
+
 /// **사용자가 「끊기」로 끊었다.** 그러면 자동으로 다시 붙지 않는다(계약 §3.0).
 ///
 /// 안 기억하면 **끊은 것이 되돌아간다** — 배경에 다녀오면 host 가 config 를 다시 읽고, 그 자리가
@@ -546,6 +606,9 @@ fn requestConnect(i: usize) void {
     // **다시 고른 것이 곧 「붙어라」다** — 끊어 뒀다는 기억을 여기서 푼다(계약 §3.0). 자동 접속은
     // 이 함수에 닿기 전에 그 기억을 보고 돌아서므로, 여기 오는 것은 언제나 «시킨» 접속이다.
     user_disconnected = false;
+    // **물러남은 여기서 안 건드린다.** 이 함수는 사용자 경로와 **재시도 경로가 함께** 쓰는 자리라,
+    // 여기서 초기화하면 재시도가 스스로 물러남을 지워 **늘 1초**가 된다(판정자가 잡았다).
+    // 초기화는 「사용자가 골랐다」는 뜻이 분명한 자리에서 한다(`connectToServer`·`drivePendingSwitch`).
     // **남의 화면은 안 남긴다**(계약 §3.0 ④). 같은 기계로 다시 붙을 때는 남긴다 — 그 글은 내
     // 것이었고, 원격이 죽기 직전에 찍은 것이 왜 끊겼는지를 말해 줄 수 있다.
     const list = servers();
@@ -577,6 +640,7 @@ fn connectToServer(i: usize) void {
         navPush(.switch_confirm);
         return;
     }
+    resetRetryBackoff(); // 사용자가 골랐다 — 그 전의 실패는 이 뜻과 무관하다
     requestConnect(i);
     goToTerminal();
 }
@@ -604,6 +668,7 @@ fn drivePendingSwitch() void {
     const i = pending_switch orelse return;
     if (input_sink != 0) return; // 아직 안 내려갔다
     pending_switch = null;
+    resetRetryBackoff(); // 사용자가 고른 갈아타기다
     requestConnect(i);
 }
 
@@ -3444,6 +3509,7 @@ pub export fn maru_mobile_report_focus(focused: c_int) void {
     // **돌아왔는데 목록을 보고 있으면 다시 받는다**(계약 §3.0 — M3c). 화면이 안 바뀌었으므로
     // 위의 `syncKeyboardForScreen` 은 안 지난다 — 배경에 나가 있는 동안 맥에서 세션이 바뀌었을
     // 수 있고, Android 는 세션이 살아남아 그 낡은 목록을 그대로 보여 준다(§3.3).
+    app_focused = focused != 0;
     if (focused != 0) noteScreenForListRefresh();
     const core = &(term_core orelse return);
     core.reportFocus(focused != 0);
@@ -8615,6 +8681,10 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // **갈아탈 것이 있으면 세션이 내려갔는지 본다**(계약 §3.0 ③). 없으면 곧바로 돌아가므로
     // 매 프레임 보는 값이 싸다 — host 가 요청을 프레임마다 가져가는 것과 같은 규율이다.
     drivePendingSwitch();
+    // **끊겼으면 물러나며 다시 붙는다**(계약 §3.0). 끊김 자체는 host 가 상태로 알리는데, 그
+    // 자리에는 시계가 없다 — 프레임이 시각을 들고 오므로 여기서 잡고 여기서 돈다.
+    if (conn_state == 12 and input_sink == 0 and retry_at_ms == null) noteDroppedForRetry(time_ms);
+    driveRetry(time_ms);
     // 판정은 여기서 한 번에 한다 — 화면 전환 경로마다 갈고리를 달면 하나를 빠뜨린다.
     if (screenTop() != .sessions) noteControlScreen(false);
     a11y_top_layer = true; // 여기부터는 «맨 위» 화면이다

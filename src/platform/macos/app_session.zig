@@ -6360,6 +6360,11 @@ pub const AppSession = struct {
     remote_nonce_rebinds: u32 = 0,
     rebind_logs: u32 = 0,
     unmatched_is_near: bool = false,
+    /// **원본** 길이. 진단 버퍼는 `remote_pane_nonce_max`(70)인데 스트리머가 싣는 값은
+    /// `remote_log_name_max`(82)까지 올 수 있어, 잘린 값이 「완전히 같아」 보일 수 있다 — 그러면 진단이
+    /// 거짓말을 한다(2026-09-12).
+    unmatched_event_nonce_raw_len: usize = 0,
+    unmatched_term_nonce_raw_len: usize = 0,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -15411,11 +15416,13 @@ pub const AppSession = struct {
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s} term={s}{s} ({d} fed, {d} with nonce, {d} open, saw_hello={}, none matched) mine=[{s}]",
+            "orphan agent nonce: dest={s} event={s}({d}) term={s}({d}){s} ({d} fed, {d} with nonce, {d} open, saw_hello={}, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
+                self.unmatched_event_nonce_raw_len,
                 if (self.unmatched_term_nonce_len == 0) "(empty)" else self.unmatched_term_nonce[0..self.unmatched_term_nonce_len],
+                self.unmatched_term_nonce_raw_len,
                 if (self.unmatched_is_near) " ← 꼬리가 같다(같은 runtime, 앞이 갈렸다)" else "",
                 fed,
                 with_nonce,
@@ -15441,6 +15448,8 @@ pub const AppSession = struct {
         const near = tailsMatch(event_nonce, term_nonce);
         if (self.unmatched_is_near and !near) return;
         self.unmatched_is_near = near;
+        self.unmatched_event_nonce_raw_len = event_nonce.len;
+        self.unmatched_term_nonce_raw_len = term_nonce.len;
         const en = @min(event_nonce.len, self.unmatched_event_nonce.len);
         @memcpy(self.unmatched_event_nonce[0..en], event_nonce[0..en]);
         self.unmatched_event_nonce_len = @intCast(en);
@@ -24593,6 +24602,41 @@ test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
         "t36",
         "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
     ));
+}
+test "RF6: 잘린 값이 「같아」 보이지 않게 원본 길이를 남긴다" {
+    // 진단 버퍼는 `remote_pane_nonce_max`(70)인데 스트리머가 싣는 값은 `remote_log_name_max`(82)까지
+    // 올 수 있다. 그러면 잘린 값이 로그에서 **완전히 같아 보이고**, 실제 비교는 전체로 하니 false 가 된다
+    // — 진단이 거짓말을 한다(2026-09-12 에 그 벽에 부딪혔다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const hc = maru.session.agent_hook_command;
+    // 버퍼보다 긴 값 — 앞 70 자는 Term 것과 같지만 뒤가 더 있다.
+    var long: [hc.remote_pane_nonce_max + 4]u8 = undefined;
+    @memset(&long, 'a');
+    @memcpy(long[0..5], "host_");
+    const term_nonce = long[0..hc.remote_pane_nonce_max];
+
+    session.noteUnmatchedRemoteNonce(&long, term_nonce);
+
+    // 담긴 값은 잘려서 **같아 보이지만**, 원본 길이는 다르다 — 그 차이가 로그에 남아야 한다.
+    try std.testing.expectEqualStrings(
+        session.unmatched_event_nonce[0..session.unmatched_event_nonce_len],
+        session.unmatched_term_nonce[0..session.unmatched_term_nonce_len],
+    );
+    try std.testing.expectEqual(long.len, session.unmatched_event_nonce_raw_len);
+    try std.testing.expectEqual(term_nonce.len, session.unmatched_term_nonce_raw_len);
+    try std.testing.expect(session.unmatched_event_nonce_raw_len != session.unmatched_term_nonce_raw_len);
 }
 test "RF5: 꼬리가 같은 짝을 우선 남긴다 — 엉뚱한 Term 이 덮지 않는다" {
     // 2026-09-10 실측에서 `mine` 에 event 의 꼬리가 분명히 있는데도 `term=` 은 엉뚱한 Term 이었다.

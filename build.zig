@@ -5644,6 +5644,26 @@ pub fn build(b: *std.Build) void {
     inbound_cap_diag_step.dependOn(&run_inbound_cap_diag.step);
     boundary_step.dependOn(&run_inbound_cap_diag.step);
 
+    // attach 가 왜 거절됐는지 남기는가. `deferred_*`(일시)와 `rejected`(영구)가 한 `!= .admitted` 로
+    // 뭉쳐 연결을 끊고 있어, 고칠 방향조차 못 정했다.
+    const attach_adoption_step = b.step(
+        "test-attach-adoption-reason",
+        "A refused attach records which adoption verdict and how many frames",
+    );
+    const attach_adoption_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/attach_adoption_reason_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_attach_adoption = b.addRunArtifact(attach_adoption_tests);
+    run_attach_adoption.addArg("--maru-expect-tests=1");
+    run_attach_adoption.addArg("--maru-expect-passed=1");
+    run_attach_adoption.setCwd(b.path("."));
+    attach_adoption_step.dependOn(&run_attach_adoption.step);
+    boundary_step.dependOn(&run_attach_adoption.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

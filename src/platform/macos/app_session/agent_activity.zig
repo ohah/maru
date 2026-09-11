@@ -1569,15 +1569,21 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
         // 「전체」 목록에서는 그림 있는 줄이 **60 줄에 한 줄**이다(실측 중앙 1.7%) — 여기서 물러나면
         // 첫 번째 그림 없는 줄에서 멈춰 뒤쪽 그림을 영영 안 건다.
         const src = thumbSource(hit) orelse continue;
-        // **`pathFor` 와 같은 판정을 지난다**(원격이면 null — 위 주석). 여기서 `chain.get` 을 직접
-        // 부르면 그 가드를 우회해 원격 오프셋이 로컬 디코드로 간다.
-        const path = pathForIndex(self, src.file_index) orelse continue;
+        // **두 문 중 하나를 지난다**(§6.3): 로컬이면 `pathForIndex`, 원격이면 `remotePathForIndex` 다.
+        // 여기서 `chain.get` 을 직접 부르면 그 갈림을 우회해 원격 오프셋이 로컬 디코드로 간다.
+        const remote = decodeRemoteTarget(self);
+        defer if (remote) |r| self.allocator.free(r.owned);
+        const path = (if (remote != null)
+            remotePathForIndex(self, src.file_index)
+        else
+            pathForIndex(self, src.file_index)) orelse continue;
         if (backend.submit(
             path,
             src.offset,
             src.len,
             thumbnail_side,
             next,
+            if (remote) |r| r.target else null,
         )) |generation| {
             self.agent_activity.pendingAdd(generation, next);
         } else break; // 상한에 닿았다 — 다음 틱이 이어 건다
@@ -2031,13 +2037,19 @@ pub fn ensureOpen(self: *AppSession) void {
     };
 
     const hit = self.agent_activity.hits.items[op.hit_index];
-    const path = pathFor(self, hit) orelse return;
+    const remote = decodeRemoteTarget(self);
+    defer if (remote) |r| self.allocator.free(r.owned);
+    const path = (if (remote != null)
+        remotePathForIndex(self, hit.file_index)
+    else
+        pathFor(self, hit)) orelse return;
     if (backend.submit(
         path,
         hit.data_offset,
         hit.data_len,
         target,
         op.hit_index,
+        if (remote) |r| r.target else null,
     )) |generation| {
         op.decoding = generation;
         op.upgrading = want_full;
@@ -3996,4 +4008,24 @@ pub fn finishRemoteDetail(self: *AppSession, outcome: RemoteDetailOutcome) void 
     }
     op.detail.remote_failed = false;
     self.metal_dirty = true;
+}
+
+/// 지금 pane 이 원격이면 디코드 워커에 넘길 목적지(RAV6). 로컬이면 null.
+///
+/// **문자열 하나를 잡아 둘로 쪼갠다** — `RemoteUpload` 는 조각을 따로 잡으므로 호출자가 둘을 다
+/// 해제해야 하는데, 그 규율이 갈리면 한쪽이 샌다(스캔 백엔드가 같은 자리에서 그 결함을 냈다 — N2).
+/// 여기서는 **한 덩이**를 잡고 `owned` 하나만 풀면 된다.
+fn decodeRemoteTarget(self: *AppSession) ?struct { owned: []u8, target: decode_backend.Backend.RemoteTarget } {
+    if (!self.agent_activity.source_remote) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    const ctx = self.remoteUploadContextFor(term) orelse return null;
+    defer ctx.deinit(self.allocator);
+
+    const owned = self.allocator.alloc(u8, ctx.ctl.len + ctx.dest.len) catch return null;
+    @memcpy(owned[0..ctx.ctl.len], ctx.ctl);
+    @memcpy(owned[ctx.ctl.len..], ctx.dest);
+    return .{
+        .owned = owned,
+        .target = .{ .ctl = owned[0..ctx.ctl.len], .dest = owned[ctx.ctl.len..] },
+    };
 }

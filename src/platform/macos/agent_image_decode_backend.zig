@@ -13,6 +13,8 @@
 
 const std = @import("std");
 const maru = @import("maru");
+const ssh_upload = @import("ssh_upload.zig"); // RAV6: 원격 그림을 구간으로 당겨온다
+const wire = maru.session.remote_activity_wire;
 
 const image_decode = @import("image_decode.zig");
 const image_scale = maru.session.image_scale;
@@ -115,6 +117,19 @@ const Job = struct {
     target_side: u32,
     hit_index: usize,
     generation: u64,
+    /// 원격이면 그 목적지(RAV6). **null 이 로컬이다** — 이 하나가 워커의 갈림을 정한다.
+    remote: ?OwnedRemote = null,
+};
+
+/// job 이 **소유하는** 원격 목적지 사본. 세션이 먼저 죽어도 워커가 안전하게 읽는다.
+const OwnedRemote = struct {
+    ctl: []u8,
+    dest: []u8,
+
+    fn deinit(self: *OwnedRemote, allocator: std.mem.Allocator) void {
+        allocator.free(self.ctl);
+        allocator.free(self.dest);
+    }
 };
 
 pub const Backend = struct {
@@ -148,6 +163,10 @@ pub const Backend = struct {
 
     /// 한 장을 풀라고 건다. 상한(`max_inflight`)에 닿았으면 `null` — 호출자가 다음 tick 에 다시 건다.
     /// **취소를 걸지 않는다**(스캔과 다른 점): 도는 장은 어차피 곧 끝나고, 그 결과도 쓸모가 있다.
+    /// 원격 세션의 왕복에 필요한 것(RAV6) — `agent_image_scan_backend.RemoteTarget` 과 같은 모양이다.
+    /// **null 이 로컬이다.**
+    pub const RemoteTarget = struct { ctl: []const u8, dest: []const u8 };
+
     pub fn submit(
         self: *Backend,
         path: []const u8,
@@ -155,6 +174,7 @@ pub const Backend = struct {
         data_len: u32,
         target_side: u32,
         hit_index: usize,
+        remote: ?RemoteTarget,
     ) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
@@ -189,6 +209,23 @@ pub const Backend = struct {
             finish(state, null);
             return null;
         };
+        var owned_remote: ?OwnedRemote = null;
+        if (remote) |r| {
+            const ctl = state.allocator.dupe(u8, r.ctl) catch {
+                state.allocator.free(owned);
+                state.allocator.destroy(job);
+                finish(state, null);
+                return null;
+            };
+            const dest = state.allocator.dupe(u8, r.dest) catch {
+                state.allocator.free(ctl);
+                state.allocator.free(owned);
+                state.allocator.destroy(job);
+                finish(state, null);
+                return null;
+            };
+            owned_remote = .{ .ctl = ctl, .dest = dest };
+        }
         job.* = .{
             .state = state,
             .path = owned,
@@ -198,10 +235,14 @@ pub const Backend = struct {
             .hit_index = hit_index,
             .generation = generation,
             .slot = slot.?,
+            .remote = owned_remote,
         };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
+            // **원격 사본도 여기서 푼다** — 워커가 안 떴으므로 그 자리의 해제가 안 돈다
+            // (스캔 백엔드가 같은 자리에서 같은 결함을 냈다 — 적대적 N2).
+            if (job.remote) |*r| r.deinit(state.allocator);
             state.allocator.free(owned);
             state.allocator.destroy(job);
             finish(state, null);
@@ -253,6 +294,7 @@ fn worker(job: *Job) void {
     const state = job.state;
     defer {
         state.allocator.free(job.path);
+        if (job.remote) |*r| r.deinit(state.allocator);
         state.allocator.destroy(job);
         // **«끝났다» 를 `release` 보다 먼저 세운다.** main actor 는 이것을 보고 join 하므로 도는
         // 스레드를 join 해 프레임이 멈추는 일이 없다. 순서가 중요하다 — `release` 는 마지막
@@ -271,21 +313,35 @@ fn worker(job: *Job) void {
     var result: Result = .{ .hit_index = job.hit_index, .generation = job.generation };
     decode: {
         const io = state.io;
-        const file = std.Io.Dir.cwd().openFile(io, job.path, .{
-            .mode = .read_only,
-            .follow_symlinks = false,
-            .allow_directory = false,
-        }) catch break :decode;
-        defer file.close(io);
 
-        const b64 = state.allocator.alloc(u8, job.data_len) catch break :decode;
+        // **원격이면 구간을 당겨온다**(RAV6 — 계약 §2.4). 저쪽 오프셋을 이쪽 `openFile` 에 넘기면
+        // 같은 모양의 로컬 경로가 열려 **남의 그림**이 뜬다(§13.6 N1 이 잡은 그 사고).
+        const b64 = if (job.remote) |r|
+            (fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len) orelse break :decode)
+        else blk: {
+            const file = std.Io.Dir.cwd().openFile(io, job.path, .{
+                .mode = .read_only,
+                .follow_symlinks = false,
+                .allow_directory = false,
+            }) catch break :decode;
+            defer file.close(io);
+
+            const buf = state.allocator.alloc(u8, job.data_len) catch break :decode;
+            var got: usize = 0;
+            while (got < buf.len) {
+                const n = file.readPositional(io, &.{buf[got..]}, job.data_offset + got) catch {
+                    state.allocator.free(buf);
+                    break :decode;
+                };
+                if (n == 0) { // 파일이 그 사이 잘렸다
+                    state.allocator.free(buf);
+                    break :decode;
+                }
+                got += n;
+            }
+            break :blk buf;
+        };
         defer state.allocator.free(b64);
-        var got: usize = 0;
-        while (got < b64.len) {
-            const n = file.readPositional(io, &.{b64[got..]}, job.data_offset + got) catch break :decode;
-            if (n == 0) break :decode; // 파일이 그 사이 잘렸다
-            got += n;
-        }
 
         const dec = std.base64.standard.Decoder;
         const raw_len = dec.calcSizeForSlice(b64) catch break :decode;
@@ -309,4 +365,53 @@ fn worker(job: *Job) void {
         result.pixels = img.pixels; // 소유 이동
     }
     finish(state, result);
+}
+
+/// 원격에서 그 구간(base64 payload)을 당겨온다(RAV6). 못 읽으면 null — **빈 구간과 다른 사실이다**.
+///
+/// **여기는 백그라운드 스레드다** — `std.Io` 도 로컬 파일시스템도 안 만진다(`ssh_upload` 규율 ·
+/// 계약 §2.1). 펼침(RAV5b)이 쓰는 그 문(`activity_read_script`)을 그대로 재사용한다.
+///
+/// ⚠️ **상한을 넘으면 안 푼다.** 실측(코퍼스 24 파일 · 이미지 966 장)에서 최대가 2,373,220 B 라
+/// `max_range_bytes`(4 MiB)의 절반이지만, 넘는 그림이 오면 **잘라서 디코드하지 않는다** — 잘린
+/// base64 는 깨진 그림이거나 더 나쁘게는 **다른 그림**이다(RF4 가 「잘린 내용이 온전한 척 뜨는 것이
+/// 최악」으로 정한 그 규율).
+fn fetchRemoteBase64(
+    allocator: std.mem.Allocator,
+    remote: OwnedRemote,
+    path: []const u8,
+    offset: u64,
+    len: u32,
+) ?[]u8 {
+    if (len == 0 or len > wire.max_range_bytes) return null;
+    var off_buf: [24]u8 = undefined;
+    var len_buf: [24]u8 = undefined;
+    const off_text = std.fmt.bufPrint(&off_buf, "{d}", .{offset}) catch return null;
+    const len_text = std.fmt.bufPrint(&len_buf, "{d}", .{len}) catch return null;
+
+    var out: []u8 = &.{};
+    const code = ssh_upload.runRemoteCapped(
+        allocator,
+        remote.ctl,
+        remote.dest,
+        ssh_upload.activity_read_script,
+        &.{ path, off_text, len_text },
+        wire.max_range_wire_bytes,
+        &out,
+    ) catch return null;
+    defer allocator.free(out);
+    if (code != 0) return null;
+
+    var parser = wire.RangeParser.init(out);
+    var got: ?[]const u8 = null;
+    while (parser.next() catch return null) |ev| switch (ev) {
+        .bytes => |b| got = b,
+        .remote_error => return null,
+    };
+    // **꼬리를 못 봤으면 잘린 것이다**(§6.1) — 잘린 base64 를 디코드하면 깨진 그림이 뜬다.
+    if (!parser.complete()) return null;
+    const bytes = got orelse return null;
+    // **짧게 온 것도 안 푼다.** 그 자리가 그새 잘렸다는 뜻이고, 잘린 payload 는 온전한 그림이 아니다.
+    if (bytes.len != len) return null;
+    return allocator.dupe(u8, bytes) catch null;
 }

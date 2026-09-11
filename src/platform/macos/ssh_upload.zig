@@ -423,6 +423,15 @@ pub const delete_script = remote_shell.path_assign ++ "exec \"" ++ watch_install
 /// **만들기 스크립트**(RF6d). 같은 자리·같은 규율.
 pub const create_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" mk \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"";
 
+/// **활동 스크립트**(RAV2/RAV3 — [계획](../../../docs/plans/remote-agent-activity.md) §5). `$1`=원격
+/// 트랜스크립트 절대 경로. `list_script` 와 같은 자리·같은 규율 — 설치 계약이 소유한 경로의 **판 9**
+/// 바이너리를 exec 한다(판 9 가 `activity` 를 보증한다).
+///
+/// ⚠️ **이 축은 stdin 을 안 닫는다**(헬퍼의 `channelWatchable` 래치가 그것으로 「살아 있는 채널」을
+/// 판정한다). 전송이 fd 0 을 닫아도 헬퍼는 그것을 「채널이 아니다」로 읽고 **그냥 완주한다** —
+/// 조용히 비는 대신 고아 방지만 꺼진다(적대적 M2 가 그 갈림을 만들었다).
+pub const activity_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" activity \"$1\"";
+
 pub const Stream = struct {
     pid: std.c.pid_t,
     /// 자식 stdout. 호출자가 읽고 **닫는다**.

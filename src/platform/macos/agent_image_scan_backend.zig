@@ -12,10 +12,21 @@
 //! 세션이 먼저 죽어도 use-after-free 가 나지 않는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
+const ssh_upload = @import("ssh_upload.zig");
 
 const index = maru.session.agent_image_index;
 const context = maru.session.agent_image_context;
+const wire = maru.session.remote_activity_wire;
+
+/// 원격 세션의 왕복에 필요한 것 — ControlMaster 소켓과 ssh 목적지(RAV3).
+///
+/// **문자열은 호출자가 소유하고 job 수명 동안 살아 있어야 한다.** 워커가 백그라운드에서 읽는다.
+pub const RemoteTarget = struct {
+    ctl: []const u8,
+    dest: []const u8,
+};
 
 /// worker 가 만들어 main actor 로 넘기는 완료본. **소유가 통째로 이동한다** — 받은 쪽이 푼다.
 pub const Result = struct {
@@ -75,7 +86,25 @@ const State = struct {
 /// 워커가 훑을 **파일 묶음**. 재개 세션이면 부모까지다(계약 §3.3).
 ///
 /// 경로 사본을 든다 — 워커는 `AppSession` 을 모른다. `Chain` 은 고정 배열이라 그대로 복사한다.
-const Job = struct { state: *State, chain: index.Chain, generation: u64 };
+const Job = struct {
+    state: *State,
+    chain: index.Chain,
+    generation: u64,
+    /// 원격이면 그 목적지. **null 이 로컬이다** — 이 하나가 워커의 갈림을 정한다.
+    remote: ?OwnedRemote = null,
+};
+
+/// job 이 **소유하는** 원격 목적지 사본. 세션이 먼저 죽어도 워커가 안전하게 읽는다(이 파일의
+/// 머리말 규율 — worker 는 `AppSession` 을 모른다).
+const OwnedRemote = struct {
+    ctl: []u8,
+    dest: []u8,
+
+    fn deinit(self: *OwnedRemote, allocator: std.mem.Allocator) void {
+        allocator.free(self.ctl);
+        allocator.free(self.dest);
+    }
+};
 
 pub const Backend = struct {
     state: *State,
@@ -110,7 +139,11 @@ pub const Backend = struct {
     ///
     /// 이미 도는 job 이 있으면 새로 띄우지 않고 취소만 걸고 `null` 을 돌려준다 — 3.6 초짜리를 둘 돌리면
     /// CPU 만 두 배 먹는다. 호출자는 다음 tick 에 다시 건다.
-    pub fn submit(self: *Backend, chain: index.Chain) ?u64 {
+    /// 원격 스캔을 건다 — `remote` 가 null 이면 로컬이다(RAV3).
+    ///
+    /// ⚠️ **슬롯은 로컬과 같은 하나를 쓴다.** 계획 §6.2·열린 질문 ④ 가 정한 「자기 상한 1」이 이
+    /// 구조에서 저절로 선다 — `inflight` 가 하나라 원격 왕복이 도는 동안 새 job 이 안 뜬다.
+    pub fn submit(self: *Backend, chain: index.Chain, remote: ?RemoteTarget) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
 
@@ -137,7 +170,22 @@ pub const Backend = struct {
             finish(state, null);
             return null;
         };
-        job.* = .{ .state = state, .chain = chain, .generation = generation };
+        var owned: ?OwnedRemote = null;
+        if (remote) |r| {
+            const ctl = state.allocator.dupe(u8, r.ctl) catch {
+                state.allocator.destroy(job);
+                finish(state, null);
+                return null;
+            };
+            const dest = state.allocator.dupe(u8, r.dest) catch {
+                state.allocator.free(ctl);
+                state.allocator.destroy(job);
+                finish(state, null);
+                return null;
+            };
+            owned = .{ .ctl = ctl, .dest = dest };
+        }
+        job.* = .{ .state = state, .chain = chain, .generation = generation, .remote = owned };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
@@ -313,8 +361,17 @@ fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) bool {
 fn worker(job: *Job) void {
     const state = job.state;
     defer {
+        if (job.remote) |*r| r.deinit(state.allocator);
         state.allocator.destroy(job);
         state.release();
+    }
+
+    // **원격은 저쪽이 훑는다**(RAV3). 자리도 라벨도 wire 로 오므로 이 아래의 로컬 스캔·라벨 패스를
+    // 통째로 지나친다 — §2.1 의 「저쪽 오프셋은 이쪽 syscall 에 안 간다」가 여기서 지켜진다.
+    if (job.remote) |r| {
+        const result = remoteScan(state.allocator, job.chain, r, job.generation);
+        finish(state, result);
+        return;
     }
 
     var result: Result = .{ .generation = job.generation };
@@ -422,4 +479,188 @@ fn worker(job: *Job) void {
         return;
     }
     finish(state, result);
+}
+
+// ── 원격 스캔(RAV3) ─────────────────────────────────────────────────────────────────────────────
+//
+// **전송과 매핑을 가른다**(RF2b 가 세운 그 모양). 전송은 얇은 껍데기가 하고, wire→`Result` 매핑은
+// 순수 함수라 ssh 없이 단위로 겨눈다.
+
+/// 원격에서 헬퍼를 돌려 wire 를 받아 `Result` 로 옮긴다.
+///
+/// **여기는 백그라운드 스레드다** — `std.Io` 를 안 만지고(`ssh_upload` 규율) **로컬 파일시스템도 안
+/// 만진다**. 이 함수 안에 open/stat 이 생기면 그것이 계약 §2.1 위반이고, 경계 게이트가 그 자리를 센다.
+fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRemote, generation: u64) Result {
+    if (comptime builtin.os.tag != .macos) unreachable; // submit 이 이미 막는다
+
+    // 체인의 **첫 파일**만 본다 — 부모 rollout 을 저쪽에서 푸는 것은 RAV4 다.
+    const head = chain.head();
+    if (head.len == 0) return .{ .generation = generation, .partial = true };
+
+    var out: []u8 = &.{};
+    const code = ssh_upload.runRemoteCapped(
+        allocator,
+        remote.ctl,
+        remote.dest,
+        ssh_upload.activity_script,
+        &.{head},
+        wire.max_wire_bytes,
+        &out,
+    ) catch {
+        // 전송 자체를 못 세웠다(fork/pipe). wire 가 없으니 매핑도 없다 — 「못 봤다」로 돌려준다.
+        return .{ .generation = generation, .partial = true };
+    };
+    defer allocator.free(out);
+    return remoteResultFromWire(allocator, out, code, generation);
+}
+
+/// wire 바이트 → `Result` 의 **순수 매핑**(RAV3). OS 중립이라 어느 호스트에서든 단위로 돈다.
+///
+/// 「다 봤다」는 **완결된 정상 답**일 때만이다: 파서가 꼬리까지 봤고(`complete`), 원격 오류가 없고,
+/// 종료 코드가 0 일 때. 그 밖은 전부 `partial` 이다 — 원격 오류·비정상 종료(127 = 헬퍼가 없다)·
+/// 잘림·오독. 「비었다」와 「못 봤다」를 가르는 것이 계약 §2.2 이고, 그 갈림이 여기서 정해진다.
+///
+/// ⚠️ **부분성 플래그는 원격이 준 것을 그대로 싣되 `or` 로만 더한다.** 원격이 「다 봤다」고 해도
+/// 전송이 잘렸으면 우리는 못 본 것이다.
+fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_code: c_int, generation: u64) Result {
+    var result: Result = .{ .generation = generation };
+    var parser = wire.Parser.init(bytes);
+    var malformed = false;
+    var said_error = false;
+
+    while (parser.next() catch blk: {
+        malformed = true;
+        break :blk null;
+    }) |event| switch (event) {
+        .file => {},
+        .flags => |flags| {
+            result.partial = result.partial or flags.partial;
+            result.image_partial = result.image_partial or flags.image_partial;
+            result.activity_partial = result.activity_partial or flags.activity_partial;
+            result.scanned_bytes = flags.scanned_bytes;
+        },
+        .record => |rec| {
+            result.hits.append(allocator, rec.hit) catch {
+                malformed = true;
+                break;
+            };
+            result.labels.append(allocator, rec.label) catch {
+                // **길이가 어긋나면 라벨이 남의 활동에 붙는다**(`Result` 주석) — 방금 넣은 자리를 뺀다.
+                _ = result.hits.pop();
+                malformed = true;
+                break;
+            };
+        },
+        .remote_error => said_error = true,
+    };
+
+    if (malformed or said_error or exit_code != 0 or !parser.complete()) result.partial = true;
+    return result;
+}
+
+const testing = std.testing;
+
+/// 판정자용 wire 를 짓는다 — 헬퍼가 내는 것과 같은 순서(머리말·파일·플래그·레코드·꼬리).
+fn buildWire(buf: []u8, flags: wire.ScanFlags, records: []const wire.Record) []const u8 {
+    var n = wire.appendHeader(buf, 0).?;
+    n = wire.appendFile(buf, n, 0, "/home/u/.claude/projects/p/s.jsonl").?;
+    n = wire.appendFlags(buf, n, flags).?;
+    for (records) |rec| n = wire.appendRecord(buf, n, rec).?;
+    n = wire.appendTail(buf, n, records.len).?;
+    return buf[0..n];
+}
+
+fn sampleRecord() wire.Record {
+    var label: wire.Label = .{ .time_s = 1_757_500_000 };
+    const text = "zig build test";
+    @memcpy(label.buf[0..text.len], text);
+    label.len = text.len;
+    return .{
+        .hit = .{
+            .line_offset = 4096,
+            .data_offset = 4196,
+            .data_len = 14,
+            .kind = .claude_tool_use,
+            .mime = .unknown,
+            .activity = .exec,
+            .file_index = 0,
+        },
+        .label = label,
+    };
+}
+
+test "원격 매핑: 완결된 답은 자리와 라벨을 그대로 싣고 「다 봤다」로 둔다" {
+    var buf: [4096]u8 = undefined;
+    const bytes = buildWire(&buf, .{ .scanned_bytes = 261_533_353 }, &.{sampleRecord()});
+
+    var result = remoteResultFromWire(testing.allocator, bytes, 0, 7);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u64, 7), result.generation);
+    try testing.expectEqual(@as(usize, 1), result.hits.items.len);
+    try testing.expectEqual(@as(usize, 1), result.labels.items.len);
+    try testing.expectEqualStrings("zig build test", result.labels.items[0].text());
+    try testing.expectEqual(@as(i64, 1_757_500_000), result.labels.items[0].time_s);
+    try testing.expectEqual(@as(u64, 261_533_353), result.scanned_bytes);
+    try testing.expect(!result.partial);
+}
+
+test "원격 매핑: 원격이 「다 못 봤다」고 하면 그대로 전한다" {
+    var buf: [4096]u8 = undefined;
+    const bytes = buildWire(&buf, .{ .activity_partial = true }, &.{sampleRecord()});
+
+    var result = remoteResultFromWire(testing.allocator, bytes, 0, 1);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.activity_partial);
+    try testing.expect(!result.image_partial);
+}
+
+test "원격 매핑: 종료 코드가 0 이 아니면 「못 봤다」다 — 127 은 헬퍼가 없다는 뜻이다" {
+    var buf: [4096]u8 = undefined;
+    const bytes = buildWire(&buf, .{}, &.{sampleRecord()});
+
+    var result = remoteResultFromWire(testing.allocator, bytes, 127, 1);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.partial);
+}
+
+test "원격 매핑: 꼬리가 없으면 「못 봤다」다 — 잘린 답을 온전한 척 읽지 않는다" {
+    var buf: [4096]u8 = undefined;
+    var n = wire.appendHeader(&buf, 0).?;
+    n = wire.appendFile(&buf, n, 0, "/a/b.jsonl").?;
+    n = wire.appendFlags(&buf, n, .{}).?;
+    n = wire.appendRecord(&buf, n, sampleRecord()).?;
+    // 꼬리를 안 붙인다(전송 상한에서 잘린 모양).
+
+    var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.partial);
+    try testing.expectEqual(@as(usize, 1), result.hits.items.len); // 본 것은 남긴다
+}
+
+test "원격 매핑: 원격 오류는 「비었다」가 아니라 「못 봤다」다" {
+    var buf: [1024]u8 = undefined;
+    var n = wire.appendHeader(&buf, 0).?;
+    n = wire.appendRemoteError(&buf, n, "open failed: FileNotFound").?;
+
+    var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.partial);
+    try testing.expectEqual(@as(usize, 0), result.hits.items.len);
+}
+
+test "원격 매핑: 자리와 라벨의 길이는 언제나 같다" {
+    var buf: [8192]u8 = undefined;
+    const recs = [_]wire.Record{ sampleRecord(), sampleRecord(), sampleRecord() };
+    const bytes = buildWire(&buf, .{}, &recs);
+
+    var result = remoteResultFromWire(testing.allocator, bytes, 0, 1);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(result.hits.items.len, result.labels.items.len);
+    try testing.expectEqual(@as(usize, 3), result.hits.items.len);
 }

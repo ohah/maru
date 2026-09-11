@@ -361,6 +361,8 @@ const Table = struct {
     agent_activity_no_agent: [:0]const u8,
     /// 원격 pane 이라 **읽을 수 없다** — 「없다」와 다르다. 에이전트는 거기서 돌고 있고(사이드바 배지가
     /// 그 증거다) 대화 파일만 저쪽 기계에 있다. 「없습니다」로 접으면 사용자가 훅 설치부터 다시 훑는다.
+    /// 원격 활동을 **이번에 못 읽었다**(RAV3). 예전에는 「아직 원격을 못 읽는다」(미구현)였는데,
+    /// 이제는 읽으므로 뜻이 바뀌었다 — 헬퍼를 못 심었거나 채널이 끊겼거나 목적지를 못 얻은 경우다.
     agent_activity_remote_unsupported: [:0]const u8,
     agent_activity_empty: [:0]const u8,
     agent_activity_none_of_kind: [:0]const u8,
@@ -1466,7 +1468,7 @@ const en: Table = .{
     .cfg_sidebar_show_folder = "Show folder path on sidebar cards",
     .cfg_sidebar_agent_hooks = "Install provider hooks for agent state, notifications and turns",
     .agent_activity_no_agent = "No agent session in this pane",
-    .agent_activity_remote_unsupported = "Remote session — activity cannot be read yet",
+    .agent_activity_remote_unsupported = "Could not read activity on the remote — the helper may be missing or the channel dropped",
     .agent_activity_empty = "No images in this session",
     .agent_activity_none_of_kind = "Nothing of this kind in this session",
     .agent_activity_partial = "Could not read the whole session",
@@ -2121,7 +2123,7 @@ const ko: Table = .{
     .cfg_sidebar_show_folder = "사이드바 카드에 폴더 경로 표시",
     .cfg_sidebar_agent_hooks = "에이전트 상태·알림·턴을 받는 provider 훅 설치",
     .agent_activity_no_agent = "이 pane에 에이전트 세션이 없습니다",
-    .agent_activity_remote_unsupported = "원격 세션입니다 — 활동은 아직 원격을 읽지 못합니다",
+    .agent_activity_remote_unsupported = "원격에서 활동을 못 읽었습니다 — 헬퍼가 없거나 채널이 끊겼습니다",
     .agent_activity_empty = "이 세션에는 이미지가 없습니다",
     .agent_activity_none_of_kind = "이 세션에는 이 종류가 없습니다",
     .agent_activity_partial = "세션을 다 읽지 못했습니다",

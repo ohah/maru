@@ -10379,13 +10379,23 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     core.setCellMetrics(10, 20);
     core.kitty_images.limit = 8192; // 작게 잡아 한도 경계도 자주 밟게 한다
 
-    var prng = std.Random.DefaultPrng.init(0x6b69747479); // "kitty"
+    // **seed 를 env 로 바꿀 수 있다.** 고정 seed 는 한 경로만 파므로, 버그 사냥을 할 때는
+    // `MARU_FUZZ_SEED=<n>` 으로 수백 개를 훑는다(2026-09-11: 확장 생성기로 400 개를 훑어 전부
+    // 통과). CI 는 기본 seed 하나만 돌려 결정적이고 빠르다 — 재현 가능성과 탐색을 둘 다 갖는다.
+    const seed: u64 = if (std.c.getenv("MARU_FUZZ_SEED")) |e|
+        (std.fmt.parseInt(u64, std.mem.span(e), 10) catch 0x6b69747479)
+    else
+        0x6b69747479;
+    var prng = std.Random.DefaultPrng.init(seed);
     const rnd = prng.random();
     const px16 = "AAAAAAAAAAAAAAAAAAAAAA=="; // 16B = 2x2 RGBA — 유효 전송의 payload
     const actions = [_]u8{ 't', 'T', 'q', 'p', 'd', 'f', 'a', 'c', 'x' };
     const keys = [_]u8{ 'f', 's', 'v', 'i', 'I', 'm', 'o', 'p', 'x', 'y', 'w', 'h', 'X', 'Y', 'c', 'r', 'z', 'C', 'd', 'P', 'Q', 'H', 'V', 'q', 't', 'U' };
     const values = [_][]const u8{ "0", "1", "2", "3", "24", "32", "100", "4294967295", "2147483647", "-2147483648", "-1", "999999", "d", "f", "z", "a", "", "x1y", "00000000000000000000" };
-    const payloads = [_][]const u8{ "", "AAAA", px16, "!!!!", "QUJDRA==" };
+    // 더 깊은 곳을 밟게 payload 를 넓힌다 — 큰 프레임(4x4=64B), RGB(3B/px), 잘린 base64.
+    const px64 = "A" ** 84 ++ "=="; // 64B 근처 — 4x4 RGBA
+    const px12 = "AAAAAAAAAAAAAAAA"; // 12B — 2x2 RGB(f=24)
+    const payloads = [_][]const u8{ "", "AAAA", px16, px64, px12, "!!!!", "QUJDRA==", "A" ** 400 };
 
     var seq: std.ArrayListUnmanaged(u8) = .empty;
     defer seq.deinit(std.testing.allocator);
@@ -10443,6 +10453,12 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
         }
         try seq.appendSlice(std.testing.allocator, "\x1b\\");
         try core.write(seq.items);
+        // chunked 전송(m=1)도 가끔 섞는다 — 이어붙이기 상태 기계를 흔든다.
+        if (rnd.intRangeAtMost(u8, 0, 9) == 0) {
+            try core.write("\x1b_Ga=t,f=32,s=2,v=2,i=1,m=1,q=2;AAAA\x1b\\");
+            if (rnd.boolean()) try core.write("\x1b_Gm=1;AAAA\x1b\\");
+            if (rnd.boolean()) try core.write("\x1b_Gm=0;AAAAAAAAAAAAAAAA\x1b\\");
+        }
         core.clearResponse();
         if (n % 7 == 0) _ = core.advanceAnimations(rnd.intRangeAtMost(u64, 0, 5000));
         _ = core.renderSnapshot(); // 렌더 뷰 조립까지 태운다

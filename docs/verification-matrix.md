@@ -2970,8 +2970,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 
 ### Session default G3 frozen-release migration
 
-- **상태: 별도 release 백로그, P1~P5 완료 조건 밖.** 현재 제품은 `default=false` opt-in을 유지한다. 사용자가 default-on을
-  다시 승인하기 전에는 아래 trust 결정이나 제품 config 구현을 시작하지 않으며, component 선결조건의 기존 자동 gate만 보존한다.
+- **상태: 별도 release 백로그, P1~P5 완료 조건 밖.** 현재 제품 기본값은 첫 릴리스 전에 이미 `true`로 전환됐다.
+  따라서 G3은 그 전환에 소급 적용하지 않으며, 출하 뒤 기본값을 다시 바꾸는 별도 migration을 사용자가 승인할 때만
+  아래 trust 결정과 제품 config 구현을 시작한다. 그전에는 component 선결조건의 기존 자동 gate만 보존한다.
 - **확정한 trust 결속:** environment 설정 REST나 deployment의 `sha/ref/environment`만으로 protection 통과를 주장하지 않는다.
   attempt-scoped jobs의 exact current `run_id/run_attempt/job` URL과 deployment status의 같은 job URL을 결속하고,
   관리자 bypass 불가, 공식 `pending` 이력과 exact-one `in_progress`를 environment의 recognized protection rule과 함께 요구한다.

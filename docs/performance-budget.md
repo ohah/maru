@@ -379,7 +379,7 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 | 영역 | 이유 | 예정 측정 |
 | --- | --- | --- |
 | 앱 시작 시간 | macOS host는 있지만 launch → first drawable을 재는 하니스가 아직 없다. | app launch -> first drawable time |
-| 입력 지연 | PTY·GUI input path는 있지만 왕복 지연을 재는 하니스가 아직 없다. | key event -> PTY write, PTY output -> snapshot update |
+| 입력 지연 | CR6f는 controller wire input→실제 PTY→observer screen delta를 재고, CR6e-c3c v2는 실제 AppKit keyDown dispatch→host-backed 화면 marker 확인 뒤 보장된 Metal submit까지의 보수적 상한을 raw ns로 남긴다. c3c는 현재 baseline 계측이며 표본 없이 임의 hard cap을 두지 않는다. | AppKit input dispatch -> remote PTY/output -> marker-observed subsequent Metal submit |
 | frame budget | DrawList 빌드(락-보유 구간)는 위 `render_build_*` 예산으로 재지만, snapshot -> GPU frame submit 전체 frame 예산은 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
 | font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증, CoreText smoke의 제품 후보 `coretext_raster.zig` wrapper + smoke native bridge raster bytes 검증, Metal smoke의 제품 `GlyphRasterFrame.uploads/pixels` CoreText bytes -> Metal atlas upload/readback -> shader sampling 검증은 있지만, 제품 renderer의 CoreText raster·atlas grow/eviction/upload **성능** 예산은 아직 없다. 현재 제품 경계는 `GlyphCacheKey -> AtlasSlot -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame` 도메인 계약이다. 기본 성능 경로의 `GlyphRasterFrame`은 test rasterizer로 upload byte/skip/sample contract를 고정하고, macOS CoreText/Metal smoke만 native bridge를 주입하므로 제품 CoreText raster 성능을 아직 측정하지 않는다. 경계 밖 slot은 byte buffer를 만들지 않고 skip해 oversized 입력의 메모리 증폭을 막는다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas grow count, atlas upload bytes, raster upload bytes, raster skip count, font size 변경 후 첫 frame |
 | control-plane dispatch/backpressure | live pump와 4/32 MiB byte budget은 구현됐고 tick당 최대 1 action·512 KiB, watermark pause/resume를 헤드리스로 고정한다. 실제 ReleaseSafe WKWebView smoke도 pump p95≤0.5 ms/max≤1.0 ms를 수집해 실패 gate로 사용한다. app/WebContent RSS와 bridge/frame-deadline 귀속 artifact는 별도 Track 5 완료 gate에 남아 있다. | JSON-RPC parse/dispatch latency, per-tick processed request count, capture/executeScript chunk copy time, `result_serialized_bytes`, `result_chunk_count`, `result_transfer_ticks`, `result_peak_owned_bytes`, app/WebContent RSS delta, tick당 pump bytes/time, reserved/queued bytes, outbound queue drop/coalesce count, `subscribeOutput` queue latency, slow subscriber disconnect count |
@@ -387,6 +387,10 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
 | session-host slow observer | P5b2b1은 매 owner turn의 logical queue/base/global ledger가 compile-time hard cap을 넘지 않아야 한다. P5b2b2는 독립 ReleaseFast host의 warm baseline 대비 반복-sample run peak와 post-drain RSS를 `session-host-slow-observer-macos.json`에 기록한다. 판정식은 `max(0, run_peak-baseline) <= (peak_ledger_resident - baseline_ledger_resident) + 2 * base_update_max_bytes + 64 MiB`, `max(0, post_median-baseline) <= 같은 analytic cap`이고 validator가 raw sample에서 다시 계산한다. allocator의 즉시 OS 반환이나 post≤pressure peak는 가정하지 않고 논리 회수는 final ledger 0으로 별도 판정한다. | in-process test runner RSS, `ru_maxrss`, `RUSAGE_CHILDREN`, FakeRuntimeOps input 성공만으로 PTY/RSS isolation을 완료 처리하지 않는다. |
 | PTY backpressure | opt-in correctness stress는 있지만 대량 stdout 성능 예산은 아직 없다. | large stdout producer -> queue drain latency, UI responsiveness |
+
+CR6e-c3c v2의 2026-09-11 로컬 ReleaseFast 5회 baseline은 98.559/99.356/99.716/100.517/120.345ms,
+median 99.716ms, 최대 120.345ms였다. 이 분포는 marker 관찰 뒤 한 번 더 강제한 제품 draw를 포함하는 보수적
+상한이며 첫 visible pixel 분포가 아니다. 단일 기기 5회만으로 hard cap이나 기기 등급을 정하지 않는다.
 
 ## Micro-slice 성능 운영
 

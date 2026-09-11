@@ -68,7 +68,7 @@ const SignedCandidateSet = struct {
 };
 
 const AutoReconnectArtifact = struct {
-    schema: []const u8 = "maru.session-host-cr6e-c3c-appkit.v1",
+    schema: []const u8 = "maru.session-host-cr6e-c3c-appkit.v2",
     build_mode: []const u8,
     identity: struct {
         host_id_before: []const u8,
@@ -98,6 +98,11 @@ const AutoReconnectArtifact = struct {
     frame: struct {
         blocking_operations: u32,
         max_stall_ns: u64,
+    },
+    input_frame: struct {
+        dispatch_ns: u64,
+        submit_ns: u64,
+        latency_ns: u64,
     },
     cleanup: struct {
         worker: u32,
@@ -686,6 +691,11 @@ pub fn main(init: std.process.Init) !void {
             .frame = .{
                 .blocking_operations = try summaryU32(summary, "session_host_reconnect_blocking_operations"),
                 .max_stall_ns = try summaryU64(summary, "session_host_reconnect_tick_max_elapsed_ns"),
+            },
+            .input_frame = .{
+                .dispatch_ns = try summaryU64(summary, "session_host_auto_reconnect_input_dispatch_ns"),
+                .submit_ns = try summaryU64(summary, "session_host_auto_reconnect_frame_submit_ns"),
+                .latency_ns = try summaryU64(summary, "session_host_auto_reconnect_input_frame_latency_ns"),
             },
             .cleanup = .{
                 .worker = try summaryU32(summary, "session_host_reconnect_final_worker"),

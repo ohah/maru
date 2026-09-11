@@ -35,6 +35,12 @@ const Frame = struct {
     max_stall_ns: u64,
 };
 
+const InputFrame = struct {
+    dispatch_ns: u64,
+    submit_ns: u64,
+    latency_ns: u64,
+};
+
 const Cleanup = struct {
     worker: u32,
     jobs: u32,
@@ -60,6 +66,7 @@ const Artifact = struct {
     continuity: Continuity,
     sibling: Sibling,
     frame: Frame,
+    input_frame: InputFrame,
     cleanup: Cleanup,
 };
 
@@ -70,7 +77,7 @@ fn canonicalId(text: []const u8) bool {
 }
 
 fn validateArtifact(artifact: Artifact) !void {
-    if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-c3c-appkit.v1") or
+    if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-c3c-appkit.v2") or
         !std.mem.eql(u8, artifact.build_mode, "ReleaseFast"))
         return error.InvalidEnvelope;
     const identity = artifact.identity;
@@ -94,6 +101,10 @@ fn validateArtifact(artifact: Artifact) !void {
         return error.SiblingAuthorityDrift;
     if (artifact.frame.blocking_operations != 0 or artifact.frame.max_stall_ns == 0)
         return error.FrameStall;
+    const input_frame = artifact.input_frame;
+    if (input_frame.dispatch_ns == 0 or input_frame.submit_ns <= input_frame.dispatch_ns or
+        input_frame.latency_ns != input_frame.submit_ns - input_frame.dispatch_ns)
+        return error.InvalidInputFrameLatency;
     const cleanup = artifact.cleanup;
     if (cleanup.worker != 0 or cleanup.jobs != 0 or cleanup.completion != 0 or
         cleanup.cr5_jobs != 0 or cleanup.admissions != 0 or cleanup.resident_leases != 0 or
@@ -140,29 +151,41 @@ test "CR6e-c3c validator rejects identity continuity sibling frame and cleanup d
     artifact.frame.blocking_operations = 1;
     try std.testing.expectError(error.FrameStall, validateArtifact(artifact));
     artifact = validFixture();
+    artifact.input_frame.latency_ns += 1;
+    try std.testing.expectError(error.InvalidInputFrameLatency, validateArtifact(artifact));
+    artifact = validFixture();
+    artifact.input_frame.dispatch_ns = 0;
+    try std.testing.expectError(error.InvalidInputFrameLatency, validateArtifact(artifact));
+    artifact = validFixture();
+    artifact.input_frame.submit_ns = artifact.input_frame.dispatch_ns;
+    try std.testing.expectError(error.InvalidInputFrameLatency, validateArtifact(artifact));
+    artifact = validFixture();
     artifact.cleanup.clients = 1;
     try std.testing.expectError(error.CleanupIncomplete, validateArtifact(artifact));
 }
 
 test "CR6e-c3c validator rejects unknown duplicate and missing JSON fields" {
     const valid =
-        \\{"schema":"maru.session-host-cr6e-c3c-appkit.v1","build_mode":"ReleaseFast","identity":{"host_id_before":"00000000000000000000000000000001","host_id_after":"00000000000000000000000000000001","runtime_id_before":"00000000000000000000000000000002","runtime_id_after":"00000000000000000000000000000002","host_pid_before":10,"host_pid_after":10,"child_pid_before":11,"child_pid_after":11},"continuity":{"historical_before_count":1,"historical_after_count":1,"disconnect_after_count":1,"input_count":1,"copy_count":1,"resize_count":1},"sibling":{"runtime_id":"00000000000000000000000000000003","live_before":true,"live_after":true,"controller_before":true,"controller_after":true},"frame":{"blocking_operations":0,"max_stall_ns":1},"cleanup":{"worker":0,"jobs":0,"completion":0,"cr5_jobs":0,"admissions":0,"resident_leases":0,"backend_runtimes":0,"clients":0,"fds":0,"fd_before":4,"fd_after":4,"child_processes_remaining":0,"daemon_reaped":true,"socket_removed":true,"host_artifacts_removed":true}}
+        \\{"schema":"maru.session-host-cr6e-c3c-appkit.v2","build_mode":"ReleaseFast","identity":{"host_id_before":"00000000000000000000000000000001","host_id_after":"00000000000000000000000000000001","runtime_id_before":"00000000000000000000000000000002","runtime_id_after":"00000000000000000000000000000002","host_pid_before":10,"host_pid_after":10,"child_pid_before":11,"child_pid_after":11},"continuity":{"historical_before_count":1,"historical_after_count":1,"disconnect_after_count":1,"input_count":1,"copy_count":1,"resize_count":1},"sibling":{"runtime_id":"00000000000000000000000000000003","live_before":true,"live_after":true,"controller_before":true,"controller_after":true},"frame":{"blocking_operations":0,"max_stall_ns":1},"input_frame":{"dispatch_ns":10,"submit_ns":20,"latency_ns":10},"cleanup":{"worker":0,"jobs":0,"completion":0,"cr5_jobs":0,"admissions":0,"resident_leases":0,"backend_runtimes":0,"clients":0,"fds":0,"fd_before":4,"fd_after":4,"child_processes_remaining":0,"daemon_reaped":true,"socket_removed":true,"host_artifacts_removed":true}}
     ;
     try validateBytes(std.testing.allocator, valid);
     const unknown = try std.mem.replaceOwned(u8, std.testing.allocator, valid, "\"build_mode\":", "\"unknown\":0,\"build_mode\":");
     defer std.testing.allocator.free(unknown);
     try std.testing.expectError(error.InvalidJsonSchema, validateBytes(std.testing.allocator, unknown));
-    const duplicate = try std.mem.replaceOwned(u8, std.testing.allocator, valid, "\"schema\":", "\"schema\":\"maru.session-host-cr6e-c3c-appkit.v1\",\"schema\":");
+    const duplicate = try std.mem.replaceOwned(u8, std.testing.allocator, valid, "\"schema\":", "\"schema\":\"maru.session-host-cr6e-c3c-appkit.v2\",\"schema\":");
     defer std.testing.allocator.free(duplicate);
     try std.testing.expectError(error.InvalidJsonSchema, validateBytes(std.testing.allocator, duplicate));
     const missing = try std.mem.replaceOwned(u8, std.testing.allocator, valid, "\"copy_count\":1,", "");
     defer std.testing.allocator.free(missing);
     try std.testing.expectError(error.InvalidJsonSchema, validateBytes(std.testing.allocator, missing));
+    const missing_input_frame = try std.mem.replaceOwned(u8, std.testing.allocator, valid, "\"input_frame\":{\"dispatch_ns\":10,\"submit_ns\":20,\"latency_ns\":10},", "");
+    defer std.testing.allocator.free(missing_input_frame);
+    try std.testing.expectError(error.InvalidJsonSchema, validateBytes(std.testing.allocator, missing_input_frame));
 }
 
 fn validFixture() Artifact {
     return .{
-        .schema = "maru.session-host-cr6e-c3c-appkit.v1",
+        .schema = "maru.session-host-cr6e-c3c-appkit.v2",
         .build_mode = "ReleaseFast",
         .identity = .{
             .host_id_before = "00000000000000000000000000000001",
@@ -190,6 +213,7 @@ fn validFixture() Artifact {
             .controller_after = true,
         },
         .frame = .{ .blocking_operations = 0, .max_stall_ns = 1 },
+        .input_frame = .{ .dispatch_ns = 10, .submit_ns = 20, .latency_ns = 10 },
         .cleanup = .{
             .worker = 0,
             .jobs = 0,

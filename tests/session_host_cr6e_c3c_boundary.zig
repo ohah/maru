@@ -128,7 +128,7 @@ test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backen
     try std.testing.expectEqual(@as(usize, 1), count(appkit_gate, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 3), count(appkit_gate, "cr6e-c3c-appkit.json"));
     try std.testing.expectEqual(@as(usize, 0), count(appkit_gate, "/usr/bin/grep"));
-    try std.testing.expectEqual(@as(usize, 1), count(harness, "maru.session-host-cr6e-c3c-appkit.v1"));
+    try std.testing.expectEqual(@as(usize, 1), count(harness, "maru.session-host-cr6e-c3c-appkit.v2"));
     try std.testing.expectEqual(@as(usize, 1), count(harness, "MARU_SESSION_HOST_CR6E_C3C_PRIMARY_RUNTIME_ID"));
     try std.testing.expectEqual(@as(usize, 1), count(harness, "MARU_SESSION_HOST_CR6E_C3C_SIBLING_RUNTIME_ID"));
     try std.testing.expectEqual(@as(usize, 0), count(harness, "Deliberately remains RED"));
@@ -154,6 +154,9 @@ test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backen
         "session_host_auto_reconnect_sibling_live_after=",
         "session_host_auto_reconnect_sibling_controller_before=",
         "session_host_auto_reconnect_sibling_controller_after=",
+        "session_host_auto_reconnect_input_dispatch_ns=",
+        "session_host_auto_reconnect_frame_submit_ns=",
+        "session_host_auto_reconnect_input_frame_latency_ns=",
     }) |field| try std.testing.expectEqual(@as(usize, 1), count(swift, field));
     const auto_smoke = between(
         swift,
@@ -161,6 +164,15 @@ test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backen
         "\n    private func sendSessionHostAutoReconnectInput(",
     ) orelse return error.MissingStrictArtifactGate;
     try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "window.setContentSize("));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "surface.metalNeedsRedraw = true"));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "surface.metalFramesDrawn > sessionHostAutoReconnectMarkerFrameBaseline"));
+    // The fixture's intentionally different build identity publishes an upgrade-busy notice.
+    // Prove the second recovered-row click cannot be silently spent dismissing that notice.
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "if anyOverlayOpen {"));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "maru_macos_app_session_terminal_owns_input(session) == 0"));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "unexpected-overlay"));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "keyCode: 53, characters: \"\\u{1b}\""));
+    try std.testing.expectEqual(@as(usize, 1), count(auto_smoke, "upgrade-notice-dismiss"));
     try std.testing.expectEqual(@as(usize, 2), count(auto_smoke, "dispatchSessionHostAutoReconnectCommand("));
     try std.testing.expectEqual(@as(usize, 0), count(auto_smoke, "copySelectionToPasteboard("));
     const command_dispatch = between(

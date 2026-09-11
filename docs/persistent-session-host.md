@@ -6128,16 +6128,21 @@ host/runtime/child PID와 단절 전후 누적 output, input/copy/resize, siblin
 그리고 App Quit 뒤 worker/fd/client/job/completion/admission/resident lease final 0을 strict artifact로 판정한다. 직접
 coordinator·candidate adoption·test-only release를 호출하거나 기본값/G3 migration을 바꾸는 fixture는 성공 증거가 아니다.
 
-artifact schema는 `maru.session-host-cr6e-c3c-appkit.v1`이며 unknown/duplicate/missing field를 모두
+artifact schema는 `maru.session-host-cr6e-c3c-appkit.v2`이며 unknown/duplicate/missing field를 모두
 거부한다. identity는 before/after의 canonical 32-hex host/runtime ID와 positive host/child PID를 각각
 싣고 exact equality를 요구한다. continuity는 historical-before 마커와 disconnect-after 마커가
 둘 다 최종 화면에 정확히 한 번, 실제 key input·copy action·resize가 각각 정확히 한 번
 관찰되어야 한다. sibling은 별도 runtime ID, 단절 전후 live, controller 권위 불변을
-싣는다. frame blocking operation 0은 reconnect main-owner turn의 connect/hello/backoff/wait/join 호출 0을 source
+싣는다. fixture host와 앱의 의도적인 build identity 차이가 내는 `upgrade_busy` notice는 첫 복구 뒤 실제 AppKit
+Escape 경로로 닫아야 하며, 다음 recovered-row 클릭을 notice dismiss로 조용히 소비해 통과시키지 않는다.
+frame blocking operation 0은 reconnect main-owner turn의 connect/hello/backoff/wait/join 호출 0을 source
 boundary로 고정하고 artifact에 `blocking_operations=0`을 싣어 판정한다. 단일 turn의
 `max_elapsed_ns`도 실측하지만, [성능 예산](performance-budget.md)에 snapshot→submit 전체 frame
 예산이 아직 없으므로 16ms를 즉석 hard gate로 만들지 않는다. wall-clock 표본은 OS
-스케줄링을 포함하므로 blocking 호출 존재의 대체 oracle가 아니다. cleanup은 App Quit 직후 coordinator worker/job/
+스케줄링을 포함하므로 blocking 호출 존재의 대체 oracle가 아니다. `input_frame`은 첫 AppKit 입력 dispatch와,
+그 marker가 remote screen에 존재함을 확인한 뒤 강제한 다음 일반 Metal draw의 성공 submit 시각 및 exact 차이를
+monotonic ns로 싣는다. 따라서 첫 visible pixel의 정확한 시각이 아니라 안전하게 늦게 잡은 end-to-end 상한이며,
+반복 baseline 없이 hard cap으로 해석하지 않는다. cleanup은 App Quit 직후 coordinator worker/job/
 completion/CR5/admission/resident/backend runtime/client/fd가 전부 0이고, harness daemon reap 뒤 fd는
 baseline과 같고 child 0, socket/host artifact 제거를 요구한다. 성공 상태를 shell grep로
 재구성하지 않고 독립 Zig validator가 strict JSON을 유일하게 판정한다.

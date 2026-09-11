@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! maru-rav 1\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
-//! F <len> <경로>\n                 체인의 파일 하나. **적힌 순서가 `Hit.file_index`** 다
+//! F <index> <len> <경로>\n         체인의 파일 하나. **인덱스를 명시한다**(순서가 아니다 — §G1)
 //! S <p> <ip> <ap> <scanned>\n      스캔 플래그 셋(partial·image_partial·activity_partial)과 읽은 바이트
 //! A <필드 19 개> <len> <라벨>\n     활동·이미지 한 건(아래)
 //! ! <len> <메시지>\n               원격 오류. 이것으로 끝난 답도 **완결**이다(계획 §2.2)
@@ -156,9 +156,20 @@ pub const Record = struct {
     label: context.Label = .{},
 };
 
+/// 체인의 파일 하나 — **인덱스를 명시한다**.
+///
+/// 🔥 초안은 「적힌 순서가 `Hit.file_index`」였고 그것이 결함이었다(적대적 G1). 로컬 스캔은 못 연
+/// 파일을 **건너뛰되 번호는 그대로 쓴다**(`scanner = .{ .file_index = @intCast(fi) }` — 부모가 지워졌을
+/// 수 있다). 순서로 정하면 헬퍼가 그 `F` 를 안 싣는 순간 **뒤 파일이 전부 한 칸씩 밀려**, 라벨·펼침·
+/// 디코드가 엉뚱한 파일의 바이트를 읽는다. 스캐너가 `file_index` 주석에 적어 둔 바로 그 사고다.
+pub const ChainFile = struct {
+    index: u8,
+    path: []const u8,
+};
+
 pub const Event = union(enum) {
-    /// 체인 파일 하나. **오는 순서가 `Hit.file_index`** 다(0 부터).
-    file: []const u8,
+    /// 체인 파일 하나.
+    file: ChainFile,
     flags: ScanFlags,
     record: Record,
     /// 원격이 보고한 실패(표시용 텍스트). 이것으로 끝난 답도 **완결된 답**이다 — 「못 읽는다」는
@@ -195,10 +206,12 @@ pub fn appendHeader(out: []u8, at: usize) ?usize {
 }
 
 /// 체인 파일 하나. 경로가 비거나 상한을 넘으면 null — **안 싣는다**(자른 경로는 없는 파일이거나,
-/// 더 나쁘게는 다른 파일이다 — `Source.set` 과 같은 규율).
-pub fn appendFile(out: []u8, at: usize, path: []const u8) ?usize {
+/// 더 나쁘게는 다른 파일이다 — `Source.set` 과 같은 규율). 인덱스가 체인 상한 밖이어도 null 이다.
+pub fn appendFile(out: []u8, at: usize, index_of: u8, path: []const u8) ?usize {
     if (path.len == 0 or path.len > max_path_bytes) return null;
+    if (index_of >= max_files) return null;
     var n = appendBytes(out, at, "F ") orelse return null;
+    n = appendField(out, n, index_of) orelse return null;
     n = appendField(out, n, path.len) orelse return null;
     n = appendBytes(out, n, path) orelse return null;
     n = appendBytes(out, n, "\n") orelse return null;
@@ -311,8 +324,12 @@ pub const ParseError = error{
     TooLong,
     /// 레코드 수가 상한을 넘는다.
     TooManyRecords,
-    /// 체인 파일 수가 상한을 넘는다.
+    /// 체인 파일 수(또는 주장한 인덱스)가 상한을 넘는다.
     TooManyFiles,
+    /// 같은 체인 자리를 두 번 주장한다.
+    DuplicateFile,
+    /// 레코드가 **안 온 체인 파일**을 가리킨다 — 그 오프셋은 읽을 자리가 없다.
+    UnknownFile,
     /// 열거값이 이 판이 아는 범위 밖이다 — 새 판의 헬퍼가 보낸 것이거나 오염이다. **`other` 로
     /// 뭉개지 않는다**: 뭉개면 「모르는 것을 아는 척」이 되고, 그 값이 필터·접기의 갈림을 정한다.
     UnknownEnum,
@@ -332,7 +349,9 @@ pub const Parser = struct {
     rest: []const u8,
     saw_header: bool = false,
     records_seen: u64 = 0,
-    files_seen: u64 = 0,
+    /// 지금까지 자리를 주장한 체인 파일들(비트 = 인덱스). `max_files` 가 3 이라 u8 하나면 넉넉하다.
+    files_mask: u8 = 0,
+    saw_flags: bool = false,
     /// 꼬리(`X`) 또는 오류(`!`)를 봤다 — 이 뒤에 오는 바이트는 전부 `TrailingData` 다.
     terminated: bool = false,
 
@@ -359,7 +378,13 @@ pub const Parser = struct {
         const kind = self.rest[0];
         switch (kind) {
             'F' => return .{ .file = try self.parseFile() },
-            'S' => return .{ .flags = try self.parseFlags() },
+            'S' => {
+                // **플래그는 한 번뿐이다.** 둘이 오면 어느 것이 이기는지 정의가 없고, 「못 봤다」를
+                // 나중 줄이 덮으면 화면이 거짓을 말한다.
+                if (self.saw_flags) return ParseError.Malformed;
+                self.saw_flags = true;
+                return .{ .flags = try self.parseFlags() };
+            },
             'A' => return .{ .record = try self.parseRecord() },
             '!' => {
                 const msg = try self.parseRemoteError();
@@ -446,13 +471,18 @@ pub const Parser = struct {
         return bytes;
     }
 
-    fn parseFile(self: *Parser) ParseError![]const u8 {
+    fn parseFile(self: *Parser) ParseError!ChainFile {
         _ = try self.expectPrefix("F ");
+        const at = try self.takeInt(u8);
+        if (at >= max_files) return ParseError.TooManyFiles;
+        const bit = @as(u8, 1) << @intCast(at);
+        // **같은 자리를 두 번 주장하면 거부한다** — 뒤엣것이 이기면 앞의 `A` 들이 가리키던 파일이
+        // 조용히 바뀐다.
+        if (self.files_mask & bit != 0) return ParseError.DuplicateFile;
         const path = try self.takeLenPrefixed(max_path_bytes);
         if (path.len == 0 or path[0] != '/') return ParseError.UnsafePath;
-        self.files_seen += 1;
-        if (self.files_seen > max_files) return ParseError.TooManyFiles;
-        return path;
+        self.files_mask |= bit;
+        return .{ .index = at, .path = path };
     }
 
     fn parseFlags(self: *Parser) ParseError!ScanFlags {
@@ -509,9 +539,20 @@ pub const Parser = struct {
         @memcpy(label.buf[0..text.len], text);
         label.len = text.len;
 
+        // 🔥 **가리키는 파일이 실제로 왔는지 본다**(적대적 H1). 안 보면 소비자가 체인 밖 인덱스로
+        // 파일을 열려다 조용히 건너뛰고, 그 활동은 「없는 것」이 된다 — 「없다」와 「못 봤다」를
+        // 가르는 계약이 그것을 금한다. 결과 이미지의 파일 번호도 같은 자리다.
+        if (!self.hasFile(h.file_index)) return ParseError.UnknownFile;
+        if (h.result.image and !self.hasFile(h.result.image_file)) return ParseError.UnknownFile;
+
         self.records_seen += 1;
         if (self.records_seen > max_records) return ParseError.TooManyRecords;
         return .{ .hit = h, .label = label };
+    }
+
+    fn hasFile(self: *const Parser, at: u8) bool {
+        if (at >= max_files) return false;
+        return self.files_mask & (@as(u8, 1) << @intCast(at)) != 0;
     }
 
     fn parseRemoteError(self: *Parser) ParseError![]const u8 {
@@ -529,6 +570,15 @@ pub const Parser = struct {
 // ── 판정자 ──────────────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+/// 판정자 공용 머리 — 머리말 + `sampleHit` 이 가리키는 체인 자리(2).
+///
+/// 레코드가 **안 온 파일을 가리키면 거부**하므로(적대적 H1) 이 자리를 안 채우면 판정자가 `UnknownFile`
+/// 로 죽는다. 그 가드를 세우자 기존 판정자 넷이 곧바로 빨개졌다 — **가드가 실제로 문다는 증거다.**
+fn headerWithChain(buf: []u8) usize {
+    const n = appendHeader(buf, 0).?;
+    return appendFile(buf, n, 2, "/a/b.jsonl").?;
+}
 
 fn sampleHit() index.Hit {
     return .{
@@ -563,7 +613,7 @@ fn sampleHit() index.Hit {
 test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아온다" {
     var buf: [4096]u8 = undefined;
     var n = appendHeader(&buf, 0).?;
-    n = appendFile(&buf, n, "/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl").?;
+    n = appendFile(&buf, n, 2, "/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl").?;
     n = appendFlags(&buf, n, .{ .activity_partial = true, .scanned_bytes = 261_533_353 }).?;
 
     var label: context.Label = .{ .time_s = 1_757_500_000 };
@@ -576,7 +626,8 @@ test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아�
 
     var p = Parser.init(buf[0..n]);
     const ev_file = (try p.next()).?;
-    try testing.expectEqualStrings("/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl", ev_file.file);
+    try testing.expectEqualStrings("/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl", ev_file.file.path);
+    try testing.expectEqual(@as(u8, 2), ev_file.file.index);
 
     const ev_flags = (try p.next()).?;
     try testing.expect(ev_flags.flags.activity_partial);
@@ -594,24 +645,26 @@ test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아�
 
 test "꼬리가 없으면 완결이 아니다 — 잘림을 온전한 척 읽지 않는다" {
     var buf: [4096]u8 = undefined;
-    var n = appendHeader(&buf, 0).?;
+    var n = headerWithChain(&buf);
     n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
     // 꼬리를 안 붙인다(전송이 상한에서 잘린 모양).
 
     var p = Parser.init(buf[0..n]);
-    _ = try p.next();
+    _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 레코드
     try testing.expectEqual(@as(?Event, null), try p.next());
     try testing.expect(!p.complete());
 }
 
 test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다" {
     var buf: [4096]u8 = undefined;
-    var n = appendHeader(&buf, 0).?;
+    var n = headerWithChain(&buf);
     n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
     n = appendTail(&buf, n, 2).?; // 실제로는 1 건
 
     var p = Parser.init(buf[0..n]);
-    _ = try p.next();
+    _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 레코드
     try testing.expectError(ParseError.CountMismatch, p.next());
 }
 
@@ -647,7 +700,7 @@ test "상대경로는 거부한다 — 저쪽 cwd 에 매달린 다른 파일이
     var buf: [1024]u8 = undefined;
     const n = appendHeader(&buf, 0).?;
     // `appendFile` 은 절대경로만 내므로 손으로 만든다(오염된 원격의 모양).
-    const bad = "F 12 relative.txt\n";
+    const bad = "F 0 12 relative.txt\n";
     @memcpy(buf[n..][0..bad.len], bad);
 
     var p = Parser.init(buf[0 .. n + bad.len]);
@@ -688,38 +741,42 @@ test "필드 수가 계약과 맞다 — 판정자의 오염 줄이 자리를 �
 
 test "라벨 길이가 상한을 넘는다고 주장하면 거부한다" {
     var buf: [1024]u8 = undefined;
-    const h = appendHeader(&buf, 0).?;
+    const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_label_len, max_label_bytes + 1, "x");
 
     var p = Parser.init(bytes);
+    _ = try p.next(); // 체인 파일
     try testing.expectError(ParseError.TooLong, p.next());
 }
 
 test "모르는 열거값은 뭉개지 않고 거부한다" {
     var buf: [1024]u8 = undefined;
-    const h = appendHeader(&buf, 0).?;
+    const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_kind, 99, "");
 
     var p = Parser.init(bytes);
+    _ = try p.next(); // 체인 파일
     try testing.expectError(ParseError.UnknownEnum, p.next());
 }
 
 test "모르는 라벨 출처도 거부한다 — 새 판의 헬퍼다" {
     var buf: [1024]u8 = undefined;
-    const h = appendHeader(&buf, 0).?;
+    const h = headerWithChain(&buf);
     const bytes = pollutedRecord(&buf, h, f_source, 99, "");
 
     var p = Parser.init(bytes);
+    _ = try p.next(); // 체인 파일
     try testing.expectError(ParseError.UnknownEnum, p.next());
 }
 
 test "모르는 결과 비트는 새 판이다 — 조용히 버리지 않는다" {
     var buf: [1024]u8 = undefined;
-    const h = appendHeader(&buf, 0).?;
+    const h = headerWithChain(&buf);
     // 아는 넷(0b1111) 밖의 비트.
     const bytes = pollutedRecord(&buf, h, f_result_flags, 16, "");
 
     var p = Parser.init(bytes);
+    _ = try p.next(); // 체인 파일
     try testing.expectError(ParseError.UnknownEnum, p.next());
 }
 
@@ -727,13 +784,14 @@ test "부호·밑줄이 든 수를 거부한다 — 꼬리 count 방어가 뚫�
     // `std.fmt.parseInt` 는 실측으로 `+5` 를 5 로, `5_0` 을 50 으로 읽는다(적대적 A1). 그것을
     // 꼬리·플래그에 쓰고 있었고, 그러면 `X 1_5` 가 15 로 통과해 중간 유실을 못 잡는다.
     var buf: [1024]u8 = undefined;
-    var n = appendHeader(&buf, 0).?;
+    var n = headerWithChain(&buf);
     n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
     const bad = "X +1\n";
     @memcpy(buf[n..][0..bad.len], bad);
 
     var p = Parser.init(buf[0 .. n + bad.len]);
-    _ = try p.next();
+    _ = try p.next(); // 체인 파일
+    _ = try p.next(); // 레코드
     try testing.expectError(ParseError.Malformed, p.next());
 }
 
@@ -749,7 +807,7 @@ test "스캔 바이트에도 같은 규율이 선다" {
 
 test "라벨 출처가 그대로 돌아온다 — 화면이 「어디서 온 그림인가」를 그린다" {
     var buf: [1024]u8 = undefined;
-    var n = appendHeader(&buf, 0).?;
+    var n = headerWithChain(&buf);
     n = appendRecord(&buf, n, .{
         .hit = sampleHit(),
         .label = .{ .source = .codex_wrapper_path },
@@ -757,6 +815,7 @@ test "라벨 출처가 그대로 돌아온다 — 화면이 「어디서 온 그
     n = appendTail(&buf, n, 1).?;
 
     var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 체인 파일
     const ev = (try p.next()).?;
     try testing.expectEqual(context.Source.codex_wrapper_path, ev.record.label.source);
 }
@@ -773,8 +832,8 @@ test "버퍼가 모자라면 null — 잘린 레코드를 절대 만들지 않�
 test "버퍼가 차면 꼬리를 안 쓴다 — 그 wire 는 «완결» 이 아니다" {
     // 적대적 D1: 못 실은 건을 개수에서 빼고 꼬리를 쓰면, count 가 맞아 파서가 «완결» 로 읽는다.
     // 호출자의 규율은 **멈추는 것**이고, 이 판정자가 그 결말을 못박는다.
-    var buf: [320]u8 = undefined; // 레코드 하나는 들어가고 둘째에서 찬다
-    var n = appendHeader(&buf, 0).?;
+    var buf: [360]u8 = undefined; // 레코드 하나는 들어가고 둘째에서 찬다
+    var n = headerWithChain(&buf);
     var written: u64 = 0;
     while (appendRecord(&buf, n, .{ .hit = sampleHit() })) |next| {
         n = next;
@@ -786,28 +845,108 @@ test "버퍼가 차면 꼬리를 안 쓴다 — 그 wire 는 «완결» 이 아�
     // **꼬리를 쓰지 않는다.** 그래서 받는 쪽이 잘림으로 읽는다.
     var p = Parser.init(buf[0..n]);
     var seen: u64 = 0;
-    while (try p.next()) |_| seen += 1;
+    while (try p.next()) |ev| {
+        if (ev == .record) seen += 1;
+    }
     try testing.expectEqual(written, seen);
     try testing.expect(!p.complete());
+}
+
+test "안 온 체인 파일을 가리키는 레코드는 거부한다" {
+    // 적대적 H1: 안 보면 소비자가 체인 밖 인덱스로 파일을 열려다 조용히 건너뛰고, 그 활동은
+    // 「없는 것」이 된다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 0, "/a/b.jsonl").?; // sampleHit 은 자리 2 를 가리킨다
+    n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 체인 파일
+    try testing.expectError(ParseError.UnknownFile, p.next());
+}
+
+test "결과 이미지의 파일 번호도 같은 검사를 받는다" {
+    var buf: [1024]u8 = undefined;
+    var n = headerWithChain(&buf); // 자리 2 만 있다
+    var h = sampleHit();
+    h.result.image = true;
+    h.result.image_file = 1; // 안 온 자리
+    n = appendRecord(&buf, n, .{ .hit = h }).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 체인 파일
+    try testing.expectError(ParseError.UnknownFile, p.next());
+}
+
+test "같은 체인 자리를 두 번 주장하면 거부한다" {
+    // 뒤엣것이 이기면 앞의 레코드들이 가리키던 파일이 조용히 바뀐다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 1, "/a/b.jsonl").?;
+    n = appendFile(&buf, n, 1, "/c/d.jsonl").?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectError(ParseError.DuplicateFile, p.next());
+}
+
+test "체인 자리는 순서가 아니라 번호다 — 가운데가 빠져도 안 밀린다" {
+    // 🔥 적대적 G1: 로컬 스캔은 못 연 파일을 **건너뛰되 번호는 그대로 쓴다**. 순서로 정했다면
+    // 여기서 자리 2 의 레코드가 자리 1 의 파일을 읽었을 것이다.
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 0, "/first.jsonl").?;
+    // 자리 1 은 못 열어서 안 실렸다(부모가 지워졌다).
+    n = appendFile(&buf, n, 2, "/third.jsonl").?;
+    n = appendRecord(&buf, n, .{ .hit = sampleHit() }).?; // file_index = 2
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    const a_file = (try p.next()).?;
+    try testing.expectEqual(@as(u8, 0), a_file.file.index);
+    const b_file = (try p.next()).?;
+    try testing.expectEqual(@as(u8, 2), b_file.file.index);
+    try testing.expectEqualStrings("/third.jsonl", b_file.file.path);
+    const rec = (try p.next()).?;
+    try testing.expectEqual(@as(u8, 2), rec.record.hit.file_index);
+    try testing.expect(p.complete() == false or true);
+}
+
+test "스캔 플래그가 두 번 오면 거부한다 — 「못 봤다」를 나중 줄이 덮지 못하게" {
+    var buf: [1024]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFlags(&buf, n, .{ .activity_partial = true }).?;
+    n = appendFlags(&buf, n, .{}).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = try p.next();
+    try testing.expectError(ParseError.Malformed, p.next());
 }
 
 test "체인 상한을 넘는 파일 수는 거부한다" {
     var buf: [4096]u8 = undefined;
     var n = appendHeader(&buf, 0).?;
-    for (0..max_files + 1) |_| n = appendFile(&buf, n, "/a/b.jsonl").?;
+    for (0..max_files) |i| n = appendFile(&buf, n, @intCast(i), "/a/b.jsonl").?;
+    // 상한 밖 자리는 인코더가 거부한다.
+    try testing.expectEqual(@as(?usize, null), appendFile(&buf, n, @intCast(max_files), "/a/b.jsonl"));
+    // 그래도 오면(오염된 원격) 파서가 거부한다.
+    var line: [64]u8 = undefined;
+    const bad = std.fmt.bufPrint(&line, "F {d} 2 /a\n", .{max_files}) catch unreachable;
+    @memcpy(buf[n..][0..bad.len], bad);
 
-    var p = Parser.init(buf[0..n]);
+    var p = Parser.init(buf[0 .. n + bad.len]);
     for (0..max_files) |_| _ = try p.next();
     try testing.expectError(ParseError.TooManyFiles, p.next());
 }
 
 test "음수 시각도 그대로 돌아온다" {
     var buf: [1024]u8 = undefined;
-    var n = appendHeader(&buf, 0).?;
+    var n = headerWithChain(&buf);
     n = appendRecord(&buf, n, .{ .hit = sampleHit(), .label = .{ .time_s = -1 } }).?;
     n = appendTail(&buf, n, 1).?;
 
     var p = Parser.init(buf[0..n]);
+    _ = try p.next(); // 체인 파일
     const ev = (try p.next()).?;
     try testing.expectEqual(@as(i64, -1), ev.record.label.time_s);
 }

@@ -186,11 +186,11 @@ const inventory = [_]Entry{
     .{ .path = "src/session/agent_selection.zig", .count = 1 },
     .{ .path = "src/session/agent_statusline.zig", .count = 5 },
     .{ .path = "src/session/control_bridge.zig", .count = 1 },
-    // `remote_activity_wire.zig` 2 — **`@compileError` 둘**이다(`src/cli/ssh.zig` 와 같은 성격).
+    // `remote_activity_wire.zig` 3 — **`@compileError` 둘**이다(한쪽이 줄 둘로 나뉘어 리터럴은 셋)(`src/cli/ssh.zig` 와 같은 성격).
     // 필드 커버리지 가드가 「이 자리를 싣는지 안 정했다」고, 판 가드가 「필드를 바꿨으면 판도 올려라」
     // 고 말하면서 무엇을 해야 하는지 알려 주는 개발자 메시지다 — 컴파일 시점에만 나오므로 사용자
     // 화면에 닿지 않는다.
-    .{ .path = "src/session/remote_activity_wire.zig", .count = 2 },
+    .{ .path = "src/session/remote_activity_wire.zig", .count = 3 },
 };
 
 fn isHangulLead(b: u8) bool {
@@ -268,7 +268,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 225;
+const header_total = 226;
 const header_config_total = 54;
 
 comptime {

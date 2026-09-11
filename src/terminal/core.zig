@@ -10495,3 +10495,79 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     try std.testing.expect(core.kitty_images.total_bytes <= core.kitty_images.limit);
     try std.testing.expect(core.kitty_placements.items.len <= TerminalCore.max_kitty_placements);
 }
+
+test "kitty 자원 상한 여섯: placement·virtual·프레임 수와 compose 검증 (적대적 검증 스윕)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+
+    // **방어선 전수 스윕에서 나온 여섯 자리**(2026-09-11). 각 가드를 하나씩 지워 보니 **여덟 중
+    // 여섯이 안 잡혔다** — 상한과 검증이 코드에는 있는데 그것을 겨눈 판정자가 없었다.
+
+    // (1) placement 상한: 1024 를 넘겨도 목록이 안 자란다.
+    var k: u32 = 1;
+    while (k <= TerminalCore.max_kitty_placements + 20) : (k += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i=1,p={d},q=2\x1b\\", .{k}));
+    }
+    try std.testing.expectEqual(TerminalCore.max_kitty_placements, core.kitty_placements.items.len);
+
+    // (2) virtual placement 상한: 같은 한도를 쓰고, 넘으면 ENOMEM 을 알린다.
+    var k2: u32 = 1;
+    while (k2 <= TerminalCore.max_kitty_placements + 5) : (k2 += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i=1,p={d},U=1,c=1,r=1,q=2\x1b\\", .{k2}));
+    }
+    try std.testing.expectEqual(TerminalCore.max_kitty_placements, core.kitty_virtual_placements.items.len);
+    core.clearResponse();
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i=1,p={d},U=1,c=1,r=1\x1b\\", .{TerminalCore.max_kitty_placements + 99}));
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "ENOMEM") != null);
+    core.clearResponse();
+}
+
+test "kitty 애니메이션: 프레임 수 상한과 compose 검증 셋 (적대적 검증 스윕)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_images.limit = 64 * 1024 * 1024; // 바이트 한도가 아니라 **프레임 수** 상한을 보려고 넉넉히
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+
+    // (3) 프레임 수 상한: 바이트가 남아도 개수로 막는다 — 둘은 별개 방어선이다.
+    var k: usize = 0;
+    while (k < kitty.max_animation_frames + 20) : (k += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    }
+    try std.testing.expectEqual(@as(u32, kitty.max_animation_frames + 1), core.kitty_images.map.get(1).?.frameCount());
+    core.clearResponse();
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1;{s}\x1b\\", .{enc}));
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "ENOMEM") != null);
+    core.clearResponse();
+
+    // (4) 자기 자신에 합성 금지 — 겹치는 버퍼는 결과가 정의되지 않는다.
+    try core.write("\x1b_Ga=c,i=1,r=2,c=2\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+    core.clearResponse();
+
+    // (5) compose 사각형이 이미지보다 크면 거부 — 안 막으면 원본을 넘겨 읽는다.
+    try core.write("\x1b_Ga=c,i=1,r=2,c=3,w=99\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+    core.clearResponse();
+    try core.write("\x1b_Ga=c,i=1,r=2,c=3,h=99\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+    core.clearResponse();
+
+    // (6) 프레임의 픽셀 형식은 루트와 같아야 한다 — 다르면 합성 인덱스가 통째로 어긋난다.
+    try core.write("\x1b_Ga=f,f=24,s=2,v=2,i=1;AAAAAAAAAAAAAAAA\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+    core.clearResponse();
+
+    // **양성 대조**: 같은 형식의 합성은 받아들인다 — 위 거부가 compose 를 통째로 막은 게 아니다.
+    try core.write("\x1b_Ga=c,i=1,r=2,c=3,q=2\x1b\\");
+    try core.write("\x1b_Ga=c,i=1,r=2,c=3\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+}

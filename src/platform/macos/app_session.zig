@@ -1772,6 +1772,23 @@ const TermRuntime = struct {
     /// **전체 훑기가 실제로 몇 번 돌았는가**(판정 전용 관측점). 「접힘 토글이 다시 안 훑는다」는
     /// 값으로는 볼 수 없다 — 답이 같기 때문이다. 이 수가 그 차이를 판정 가능하게 만든다.
     editor_line_cols_scans: u32 = 0,
+
+    /// **줄마다의 열→byte 체크포인트**(CSR). `editor_col_mark_off[i] .. [i+1]` 이 i 번 줄의 몫이다.
+    ///
+    /// 가로로 민 상태에서 전개가 **앞을 다시 걷지 않게** 한다(§4.1c — 그 비용은 화면 폭이 아니라
+    /// 밀린 거리에 비례한다). 짧은 줄은 몫이 비고, 그래서 메모리는 줄 수가 아니라 **문서 전체 열 수를
+    /// `frame.col_mark_every` 로 나눈 값**에 비례한다.
+    ///
+    /// **폭 합 캐시와 다른 축이다** — 그쪽은 편집을 건너 살아남지만 이쪽은 **편집마다 버린다**.
+    /// 체크포인트를 밀려면 줄 «안» 의 byte 자리까지 따라가야 하는데, 그 실수는 조용한 오답(전개가
+    /// 엉뚱한 열에서 시작한다)이고 가로로 민 채 타이핑하는 흐름은 드물다. 필요해지면 다시 세운다.
+    editor_col_marks: []maru.chrome.components.editor_view.content.Seek = &.{},
+    /// 위 배열의 줄별 경계(길이 = 줄 수 + 1). 비어 있으면 체크포인트가 없다.
+    editor_col_mark_off: []u32 = &.{},
+    /// 체크포인트를 만들 때 쓴 탭 폭. 다르면 낡은 것이다.
+    editor_col_marks_tab: u8 = 0,
+    /// **전체 훑기가 몇 번 돌았는가**(판정 전용 관측점 — `editor_line_cols_scans` 와 같은 몫).
+    editor_col_marks_scans: u32 = 0,
     /// 그리는 줄마다의 **접힘 표식**(gutter 화살표). 줄 배열과 같은 축이고, 접힘이 바뀔 때만 다시
     /// 채운다 — 렌더는 읽기만 한다.
     ///
@@ -2106,12 +2123,12 @@ const TermRuntime = struct {
     /// 비교 뷰 **오른쪽 열**의 가로 위치. 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구하므로
     /// (editor-surface-dock §3.5) 좌우가 각자 든다 — 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
     /// 다른 쪽이 엉뚱한 곳을 본다. 단일 파일 편집기는 이 값을 쓰지 않는다(§4.1e).
-    editor_first_col_right: u16 = 0,
+    editor_first_col_right: u32 = 0,
     /// 오른쪽 열의 최대 열 수 캐시(`editor_max_cols`의 짝).
     editor_max_cols_right: u32 = 0,
     /// 화면 맨 왼쪽에 올 **열**. 랩이 켜져 있으면 넘칠 것이 없으므로 늘 0이다.
     /// 비교 뷰에서는 **왼쪽 열**의 값이다(오른쪽은 `editor_first_col_right`).
-    editor_first_col: u16 = 0,
+    editor_first_col: u32 = 0,
     /// 문서에서 가장 긴 줄의 **열 수**(0 = 아직 안 셌다). 가로 스크롤 상한이 여기서 나온다.
     ///
     /// **캐시다.** 매 휠마다 문서 전체를 세면 큰 파일에서 프레임이 죽는다 — 내용이 갈릴 때
@@ -4997,6 +5014,7 @@ pub const AppSession = struct {
     // 가장 최근 RenderFrame의 Metal 투영을 retain하는 owned 버퍼. metalFrame()이 이걸 가리키는
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
+    probe_frame_timing: bool = false,
     metal_dirty: bool = true,
     // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
     // metal_dirty(전체 dirty)와 별개다 — grid가 hold로 막힌 tick에도 chrome_dirty면 사이드바만 부분 투영한다

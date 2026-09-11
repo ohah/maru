@@ -50,6 +50,10 @@ pub const Row = struct {
     /// **열 기준이다**(byte가 아니다) — `colors`와 같은 축이다. 이 모듈이 보는 본문은 탭이 전개된
     /// 사본이라 원본 byte offset이 안 맞는다.
     caret_cols: []const u32 = &.{},
+    /// **이 줄의 전개를 여기서 시작해도 된다**(`null` = 처음부터). 호출자가 줄마다 캐시해 둔
+    /// 열→byte 체크포인트 중 `first_col` 이하인 마지막 것이다 — 그래야 전개 비용이 **밀린 거리가
+    /// 아니라 화면 폭**에 비례한다. 규칙과 조건은 `Seek` 가 소유한다.
+    seek: ?Seek = null,
 };
 
 /// 한 색 구간. `end_col`은 **배타적**이다.
@@ -72,7 +76,7 @@ pub const Props = struct {
     /// 그것을 강제하지 않는다 — §4가 정한 대로 **범위 clamp가 처리할 몫**이고(랩이면 최대 범위가
     /// 0이 되어 위치가 0으로 눌린다) 그 clamp는 스크롤바 슬라이스에 속한다. 여기서 따로 0을 박으면
     /// 규칙이 두 곳에 생긴다.
-    first_col: u16 = 0,
+    first_col: u32 = 0,
     /// **첫 논리 줄에서 건너뛸 조각 수** — 랩된 줄의 *중간 행*부터 화면이 시작할 때 쓴다.
     ///
     /// 세로 스크롤이 시각 행 단위이려면 이것이 있어야 한다(`visual_map.RowIndex.resolve`가 주는
@@ -252,7 +256,10 @@ pub fn build(
 
         // **전개는 실패하지 않는다.** 저장소가 모자라면 거기까지만 만들고 `truncated`로 알린다 —
         // 긴 줄 하나가 프레임 전체를 지우던 결함(#2086)이 랩에서 되살아나지 않게 하는 자리다.
-        const r = expandTabs(row.bytes, props.tab_width, text_scratch[scratch_used..], .{ .start = props.first_col, .count = expand_cols });
+        // **랩에서는 힌트를 안 쓴다** — 랩은 `first_col` 이 0 이라 건너뛸 것이 없고, 조각 나누기가
+        // 줄 처음부터의 누적에 기대기 때문이다.
+        const seek = if (props.wrap) null else row.seek;
+        const r = expandTabs(row.bytes, props.tab_width, text_scratch[scratch_used..], .{ .start = props.first_col, .count = expand_cols, .seek = seek });
         const expanded = r.text;
         // **탭이 없으면 scratch를 쓰지 않았다.** 그때도 길이를 더하면 저장소가 실제보다 빨리 차서
         // 아래쪽 줄이 근거 없이 OutOfSpace로 죽고, 호출자에게 보고하는 `bytes`도 과대해진다.
@@ -292,8 +299,17 @@ pub fn build(
         // 넘칠 것을 없애 가로 축을 지운다 — §4), 랩이 꺼지면 조각이 하나라 이 값이 그대로 남는다.
         // 그래서 두 경우가 같은 식으로 처리된다.
         var start_col: u32 = props.first_col;
+        // **여기도 `seek` 가 먹는다.** 아래 걷기는 「화면 시작 열까지 byte 를 따라간다」인데, 전개와
+        // **같은 규칙·같은 출발점**이라 같은 체크포인트를 쓸 수 있다. 이것을 안 건너뛰면 전개만
+        // 고쳐도 비용이 그대로다 — 실측으로 그렇게 드러났다(전개 0.28ms 인데 `content.build` 25ms).
         var src_i: usize = 0;
         var src_col: u32 = 0;
+        if (seek) |sk| {
+            if (sk.byte <= row.bytes.len) {
+                src_i = sk.byte;
+                src_col = sk.col;
+            }
+        }
 
         while (it.next()) |piece| : (piece_idx += 1) {
             // **원본을 이 조각의 시작 열까지 전진시킨다 — 걸친 cluster는 렌더가 하는 대로 따른다.**
@@ -605,6 +621,10 @@ pub const Step = struct { next_byte: usize, next_col: u32 };
 pub var slow_path_steps: usize = 0;
 /// `stepColumn`이 불린 총 횟수. **훑은 양**을 재는 축이다 — 셈이 상한에서 멈추는지 여기서 보인다.
 pub var total_steps: usize = 0;
+/// `expandTabs` 의 **자기 걷기**가 몇 번 돌았는가. 그 루프는 빠르려고 `stepColumn` 을 안 쓰므로
+/// 위 축에 안 잡힌다 — 그래서 **거리에 비례하는 비용**을 재려면 둘을 함께 봐야 한다(적대적 검증
+/// C7: `seek` 를 무시하는 변이가 `total_steps` 만 보는 판정자를 통과했다).
+pub var expand_steps: usize = 0;
 
 pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
     total_steps += 1;
@@ -682,6 +702,34 @@ pub fn lineColumns(bytes: []const u8, tab_width: u16) u32 {
 
 /// 같은 값을 세되 **`limit`에 닿으면 멈춘다**(마지막 cluster만큼 넘길 수 있다). 호출자가 상한 너머를
 /// 쓰지 않는다면 줄 끝까지 셀 이유가 없다 — 5MB짜리 한 줄에서 그 차이가 149ms였다.
+/// 줄을 한 번 훑으며 **`every` 열마다 체크포인트**를 적는다. 채운 개수를 돌려준다.
+///
+/// **규칙은 `stepColumn` 하나다** — `lineColumnsUpTo`(폭 합 캐시를 채우는 그 함수)와 같은 출처를 쓴다.
+/// 여기서 따로 세면 열의 정의가 세 벌이 되고, 이 파일은 그 갈림을 이미 두 번 겪었다(§4.1c).
+///
+/// **`out` 이 차면 멈춘다** — 호출자가 준 만큼만 적는다. 모자라면 그 너머는 옛 경로(처음부터 걷기)로
+/// 떨어질 뿐이고 **답은 같다**.
+pub fn columnCheckpoints(bytes: []const u8, tab_width: u16, every: u32, out: []Seek) usize {
+    if (every == 0 or out.len == 0) return 0;
+    var n: usize = 0;
+    var col: u32 = 0;
+    var i: usize = 0;
+    var next_mark: u32 = every;
+    while (i < bytes.len and n < out.len) {
+        const s = stepColumn(bytes, i, col, tab_width);
+        // **경계를 «넘은 뒤» 의 자리를 적는다.** 탭은 한 걸음에 여러 열을 먹으므로 정확히 그 열에서
+        // 끝나는 자리가 없을 수 있다 — 그때는 넘어선 자리를 적고, 소비자는 `col <= start` 만 보면 된다.
+        if (s.next_col >= next_mark) {
+            out[n] = .{ .byte = @intCast(s.next_byte), .col = s.next_col };
+            n += 1;
+            next_mark = ((s.next_col / every) + 1) * every;
+        }
+        i = s.next_byte;
+        col = s.next_col;
+    }
+    return n;
+}
+
 pub fn lineColumnsUpTo(bytes: []const u8, tab_width: u16, limit: u32) u32 {
     var col: u32 = 0;
     var i: usize = 0;
@@ -786,9 +834,26 @@ pub const Expanded = struct {
 /// 경계를 지킨다 — 화면에 덜 나오는 것과 편집기가 안 그려지는 것 중 전자를 고른다(§3.8이 "초장문·극단
 /// 입력에서 기능을 줄인다"고 허용한 범위다).
 /// 그릴 열 구간. `start`는 **가로 스크롤 위치**(§4)이고, 랩이 켜지면 계약상 늘 0이다.
+/// **걷기를 건너뛸 수 있는 자리**(`ColRange.seek`). `byte` 가 **정확히** `col` 열에서 시작한다는
+/// 것을 호출자가 보장한다 — cluster 경계이고, 그 앞의 탭·§3.8 표기가 남긴 상태가 없다.
+///
+/// 이것이 있어야 전개 비용이 **밀린 거리가 아니라 화면 폭**에 비례한다. 없으면 `first_col` 까지
+/// 글자를 하나씩 지나야 하고, 실측(ReleaseFast, 화면을 20만열 줄로 채운 판): `first_col` 10,000 에서
+/// 프레임당 7.5ms, 60,000 에서 45ms 다.
+pub const Seek = struct {
+    byte: u32,
+    col: u32,
+};
+
 pub const ColRange = struct {
     /// 이 열 앞은 만들지 않는다.
-    start: u16 = 0,
+    ///
+    /// **u32다.** 예전에는 u16 이었고 그것이 `frame.max_first_col` 위에 얹힌 **두 번째 천장**이었다 —
+    /// 65,535 열. 상한을 걷어내려면 이쪽도 함께 넓혀야 한다.
+    start: u32 = 0,
+    /// **여기서부터 걸어도 된다**(`null` = 처음부터). `col <= start` 여야 하고, 그 조건을 못 지키면
+    /// 무시한다 — 넘겨 짚어 앞을 건너뛰면 **탭스톱이 어긋나** 조용한 오답이 된다.
+    seek: ?Seek = null,
     /// 이 열수만큼 만든다.
     ///
     /// **u32다.** 화면 폭은 u16이면 충분하지만 `rowCount`가 **줄 전체**를 요구하고, u16이면
@@ -844,7 +909,18 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
     var col: usize = 0;
     var i: usize = 0;
 
+    // **호출자가 준 자리에서 시작한다**(`seek`). 아래 루프가 하는 일은 「`start` 까지 지나가고 그
+    // 뒤를 만든다」인데, 지나가는 부분은 **아무것도 내보내지 않으므로** 그 자리를 이미 아는 호출자는
+    // 건너뛰어도 된다. 조건 둘을 여기서 **다시 확인한다** — 넘겨 짚으면 탭스톱이 어긋난다.
+    if (range.seek) |sk| {
+        if (sk.col <= range.start and sk.byte <= bytes.len) {
+            i = sk.byte;
+            col = sk.col;
+        }
+    }
+
     while (i < bytes.len) {
+        expand_steps += 1;
         // **보이지 않을 부분은 만들지 않는다.** 렌더러가 `max_cols`로 자르므로 그 너머는 화면에
         // 닿지 않는다 — 여기서 멈추면 비용이 **줄 길이가 아니라 화면 폭에 비례**한다.
         //
@@ -2835,4 +2911,72 @@ test "HL16 줄 끝 토큰의 색도 실린다 — 꼬리 run 이 무색이 되�
     const last = rs[n - 1];
     try testing.expectEqual(tokens.ColorRole.syntax_number, last.role.?);
     try testing.expectEqualStrings("1;", last.text);
+}
+
+test "SEEK1 건너뛴 전개가 처음부터 걸은 것과 «같은 글자» 를 낸다 (무작위 대조)" {
+    // **이 조각의 전부가 이 단언이다.** `seek` 는 「앞을 안 걸어도 된다」는 말인데, 그것이 틀리면
+    // 탭스톱이 어긋나거나 cluster 가 반쪽으로 잘려 **조용한 오답**이 된다 — 화면에 글자가 한 칸
+    // 밀려 서는 식이라 눈으로는 잘 안 보인다.
+    //
+    // 말뭉치에 **탭·전각·§3.8 위험 문자**를 넣는다. ASCII 만 넣으면 빠른 경로가 걸려 걷는 루프
+    // 자체를 안 지난다 — 이 파일이 이미 그 함정을 적어 두었다(열의 정의는 표기 글자 수다).
+    var prng = std.Random.DefaultPrng.init(0x5EEC);
+    const rand = prng.random();
+    const atoms = [_][]const u8{ "a", "b", "\t", "가", "😀", "\u{202E}", "\u{200B}", " ", "z" };
+
+    var line_buf: [4096]u8 = undefined;
+    var marks: [64]Seek = undefined;
+    var out_a: [4096]u8 = undefined;
+    var out_b: [4096]u8 = undefined;
+
+    var round: usize = 0;
+    var compared: usize = 0;
+    while (round < 300) : (round += 1) {
+        var len: usize = 0;
+        while (len + 8 < line_buf.len) {
+            const a = atoms[rand.uintLessThan(usize, atoms.len)];
+            @memcpy(line_buf[len..][0..a.len], a);
+            len += a.len;
+        }
+        const line = line_buf[0..len];
+        const tab_width: u16 = @intCast(1 + rand.uintLessThan(u32, 8));
+        const every: u32 = 1 + rand.uintLessThan(u32, 32);
+        const n = columnCheckpoints(line, tab_width, every, &marks);
+        if (n == 0) continue;
+
+        const start: u32 = rand.uintLessThan(u32, marks[n - 1].col + 1);
+        const count: u32 = 1 + rand.uintLessThan(u32, 80);
+
+        // **`start` 이하인 마지막 체크포인트**를 고른다 — 소비자가 해야 하는 그 판정이다.
+        var pick: ?Seek = null;
+        for (marks[0..n]) |m| {
+            if (m.col <= start) pick = m else break;
+        }
+        if (pick == null) continue;
+
+        const plain = expandTabs(line, tab_width, &out_a, .{ .start = start, .count = count });
+        const sought = expandTabs(line, tab_width, &out_b, .{ .start = start, .count = count, .seek = pick });
+        try testing.expectEqualStrings(plain.text, sought.text);
+        try testing.expectEqual(plain.truncated, sought.truncated);
+        compared += 1;
+    }
+    // **픽스처 공허 방지** — 한 번도 대조 못 했다면 이 판정자는 아무것도 안 본 것이다.
+    try testing.expect(compared >= 100);
+}
+
+test "SEEK2 못 믿을 체크포인트는 «무시한다» — 조용한 오답보다 느린 편이 낫다" {
+    // `seek` 는 호출자의 약속이고, 약속이 깨지면 앞을 건너뛴 만큼 탭스톱이 어긋난다. 그래서
+    // 함수가 **두 조건을 스스로 다시 본다**: `col <= start` 이고 `byte <= bytes.len`.
+    var out_a: [256]u8 = undefined;
+    var out_b: [256]u8 = undefined;
+    const line = "ab\tcd\tef가나다";
+    const plain = expandTabs(line, 4, &out_a, .{ .start = 3, .count = 40 });
+
+    // ⑴ `col` 이 `start` 보다 크다 — 무시해야 한다.
+    const too_far = expandTabs(line, 4, &out_b, .{ .start = 3, .count = 40, .seek = .{ .byte = 6, .col = 9 } });
+    try testing.expectEqualStrings(plain.text, too_far.text);
+
+    // ⑵ `byte` 가 줄 밖이다 — 무시해야 한다.
+    const past_end = expandTabs(line, 4, &out_b, .{ .start = 3, .count = 40, .seek = .{ .byte = 999, .col = 0 } });
+    try testing.expectEqualStrings(plain.text, past_end.text);
 }

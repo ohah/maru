@@ -52,12 +52,15 @@ pub const Side = struct {
     /// 없는 줄은 무색이다. **단일 편집기만 채운다**(비교 뷰는 문서가 둘이라 provider도 둘이고,
     /// 그 축을 가르는 것은 좌우 히트테스트가 선 뒤의 일이다 — `search_marks`와 같은 이유).
     line_colors: []const []const frame.content.ColorSpan = &.{},
+    /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축, 짧아도 된다). 비교 뷰는 안 쓴다 — 문서가
+    /// 둘이라 체크포인트의 축(문서 줄 첨자)이 성립하지 않는다(폭 합 캐시와 같은 이유다).
+    line_seeks: []const ?frame.content.Seek = &.{},
     /// gutter 자릿수를 정하는 **문서** 줄 수(행 수가 아니다). `null`이면 `lines.len`.
     total_lines: ?usize = null,
     /// 행마다의 줄 번호(`null` 항목 = 짝을 맞추려 넣은 빈 행). `null`이면 순차 번호.
     numbers: ?[]const ?u32 = null,
     /// 가로 스크롤(열). **각자다** — 공유하면 반대쪽이 엉뚱한 곳을 본다.
-    first_col: u16 = 0,
+    first_col: u32 = 0,
     /// 행마다 추가/삭제/없음. **왼쪽은 삭제만, 오른쪽은 추가만** 담는 것이 §3.5의 배치 계약이다 —
     /// 한쪽에 둘 다 담으면 좌우를 나눈 이유가 사라진다.
     bands: ?[]const frame.RowBand = null,
@@ -256,6 +259,7 @@ pub fn buildSide(
     const m = sideMetricsWith(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
     return frame.build(.{
         .line_colors = side.line_colors,
+        .line_seeks = side.line_seeks,
         .lines = side.lines,
         .first_line = shared.first_line,
         .first_piece = shared.first_piece,

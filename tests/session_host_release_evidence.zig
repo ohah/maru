@@ -351,3 +351,121 @@ fn signedCliSshRoundTripAlloc(allocator: std.mem.Allocator) !void {
 test "signed CLI SSH leaf unwinds every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, signedCliSshRoundTripAlloc, .{});
 }
+
+fn notificationScenario(
+    host_id: []const u8,
+    runtime_id: []const u8,
+    event_id: u64,
+    request_identifier: []const u8,
+    visible_nonce: []const u8,
+    base_ns: u64,
+) evidence.NotificationCenterScenarioInput {
+    return .{
+        .host_id = host_id,
+        .runtime_id = runtime_id,
+        .event_id = event_id,
+        .request_identifier = request_identifier,
+        .visible_nonce = visible_nonce,
+        .daemon_pid_before = 101,
+        .daemon_pid_after = 101,
+        .child_pid_before = 202,
+        .child_pid_after = 202,
+        .submitted_at_ns = base_ns,
+        .delivered_at_ns = base_ns + 1,
+        .clicked_at_ns = base_ns + 2,
+        .callback_at_ns = base_ns + 3,
+        .attached_at_ns = base_ns + 4,
+        .os_delivered = true,
+        .actual_click = true,
+        .exact_attach = true,
+        .screen_before_preserved = true,
+        .screen_after_writable = true,
+    };
+}
+
+fn notificationInput() evidence.NotificationCenterInput {
+    return .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .designated_requirement_sha256 = sha_f,
+        .permission = .authorized,
+        .gui_zero = notificationScenario(
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+            7,
+            "maru-11111111111111111111111111111111-22222222222222222222222222222222-7",
+            uuid ++ "-gui-zero",
+            10,
+        ),
+        .gui_live_then_quit = notificationScenario(
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+            8,
+            "maru-11111111111111111111111111111111-22222222222222222222222222222222-8",
+            uuid ++ "-gui-live-then-quit",
+            20,
+        ),
+        .cleanup_complete = true,
+    };
+}
+
+test "notification center leaf writer and parser preserve exact product observations" {
+    const bytes = try evidence.writeNotificationCenterLeaf(std.testing.allocator, notificationInput());
+    defer std.testing.allocator.free(bytes);
+    var parsed = try evidence.parseNotificationCenterLeaf(std.testing.allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(evidence.notification_center_leaf_schema, parsed.value.schema);
+    try std.testing.expectEqual(evidence.Result.passed, parsed.value.result);
+    try std.testing.expectEqual(evidence.NotificationPermission.authorized, parsed.value.permission);
+    try std.testing.expectEqual(@as(u64, 7), parsed.value.gui_zero.event_id);
+    try std.testing.expectEqual(@as(u64, 8), parsed.value.gui_live_then_quit.event_id);
+}
+
+test "notification center leaf rejects identity PID and event replay drift" {
+    var input = notificationInput();
+    input.gui_zero.child_pid_after += 1;
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    input = notificationInput();
+    input.gui_live_then_quit.event_id = input.gui_zero.event_id;
+    input.gui_live_then_quit.request_identifier = input.gui_zero.request_identifier;
+    try std.testing.expectError(error.LeafMismatch, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    input = notificationInput();
+    input.gui_zero.request_identifier = "maru-wrong";
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    input = notificationInput();
+    input.gui_zero.daemon_pid_before = @as(u64, std.math.maxInt(i32)) + 1;
+    input.gui_zero.daemon_pid_after = input.gui_zero.daemon_pid_before;
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    input = notificationInput();
+    input.gui_zero.visible_nonce = uuid ++ "-wrong";
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    input = notificationInput();
+    input.gui_zero.callback_at_ns = input.gui_zero.clicked_at_ns;
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+}
+
+test "notification center leaf rejects false outcomes malformed and noncanonical JSON" {
+    var input = notificationInput();
+    input.gui_zero.actual_click = false;
+    try std.testing.expectError(error.InvalidLeaf, evidence.writeNotificationCenterLeaf(std.testing.allocator, input));
+    const bytes = try evidence.writeNotificationCenterLeaf(std.testing.allocator, notificationInput());
+    defer std.testing.allocator.free(bytes);
+    const unknown = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "{\"schema\":", "{\"unknown\":true,\"schema\":");
+    defer std.testing.allocator.free(unknown);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseNotificationCenterLeaf(std.testing.allocator, unknown));
+    const spaced = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, ":", ": ");
+    defer std.testing.allocator.free(spaced);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseNotificationCenterLeaf(std.testing.allocator, spaced));
+}
+
+fn notificationCenterRoundTripAlloc(allocator: std.mem.Allocator) !void {
+    const bytes = try evidence.writeNotificationCenterLeaf(allocator, notificationInput());
+    defer allocator.free(bytes);
+    var parsed = try evidence.parseNotificationCenterLeaf(allocator, bytes);
+    defer parsed.deinit();
+}
+
+test "notification center leaf unwinds every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, notificationCenterRoundTripAlloc, .{});
+}

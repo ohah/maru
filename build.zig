@@ -13907,7 +13907,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_evidence_tests = b.addRunArtifact(release_evidence_tests);
-        run_release_evidence_tests.addArg("--maru-expect-tests=14");
+        run_release_evidence_tests.addArg("--maru-expect-tests=18");
         run_release_evidence_tests.setCwd(b.path("."));
         session_host_release_evidence_step.dependOn(&run_release_evidence_tests.step);
         if (evidence_optimize == optimize) session_host_step.dependOn(&run_release_evidence_tests.step); // test-session-host 는 잡의 -Doptimize 모드만

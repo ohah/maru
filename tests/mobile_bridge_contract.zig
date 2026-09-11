@@ -4582,6 +4582,45 @@ test "M12-f2 안 붙어 있으면 «묻지 않는다» — 그대로 붙는다" 
     while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
 }
 
+test "M5 넓은 화면: 읽는 화면만 폭을 제한하고 가운데로 둔다" {
+    // 태블릿에서는 아무것도 안 깨지고 **안 쓸 뿐**이다 — 목록 줄이 화면을 가로지르고 글자가
+    // 왼쪽 끝에 붙는다(2026-09-11 실측 2000×1200). 읽는 화면만 좁히고 가운데로 둔다(UX §2.5).
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+
+    // **폰은 한 줄도 안 바뀐다** — 상한보다 좁으므로 창이 곧 화면이다.
+    bridge.setScreenForTest("sessions");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const phone = bridge.readingWindowDrawn();
+    try std.testing.expectEqual(@as(f32, 0), phone.x);
+    try std.testing.expectEqual(@as(f32, 402), phone.w);
+
+    // **넓으면 좁히고 가운데로.**
+    _ = bridge.maru_mobile_build(1400, 900, now());
+    const tablet = bridge.readingWindowDrawn();
+    try std.testing.expect(tablet.w < 1400);
+    try std.testing.expect(tablet.x > 0);
+    // 좌우 여백이 같다(가운데다).
+    try std.testing.expectApproxEqAbs(tablet.x, 1400 - (tablet.x + tablet.w), 1.0);
+
+    // **터미널은 그 창을 «안 쓴다»** — 넓을수록 좋다(열이 그만큼 는다).
+    //
+    // **열 수만 재면 안 된다.** 열은 레이아웃이 정하지 `readingWin` 이 정하는 것이 아니라,
+    // 터미널에 그 창을 물려도 열은 그대로다 — 그 변이가 그대로 통과했다(적대적 검증).
+    // 「그 창을 썼나」를 직접 잰다: 썼으면 기록이 갱신된다.
+    bridge.setScreenForTest("sessions");
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const before = bridge.readingWindowDrawn();
+    bridge.setScreenForTest("terminal");
+    const narrow_cols = bridge.maru_mobile_term_cols();
+    _ = bridge.maru_mobile_build(1400, 900, now());
+    try std.testing.expectEqual(before.w, bridge.readingWindowDrawn().w); // 안 건드렸다
+    try std.testing.expect(bridge.maru_mobile_term_cols() > narrow_cols); // 그리고 넓게 쓴다
+
+    bridge.setScreenForTest("sessions");
+}
+
 test "U1 누르는 자리는 모든 화면에서 44 이상이다" {
     // **계약이 정한 손가락 히트 영역**(UX §5.4 — Apple HIG 44pt · Material 48dp 중 작은 쪽).
     // 예전에는 화면마다 사각형을 따로 들어서 「전부 44 이상인가」를 물을 자리가 없었다 —

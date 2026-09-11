@@ -8405,6 +8405,36 @@ pub fn bodyGridOverflowPx() f32 {
     return @max(0, drawn - body_rect.h);
 }
 
+/// **읽는 화면의 폭 상한**(논리 pt). 폰은 이 값보다 좁아 그대로 통과하고(한 줄도 안 바뀐다),
+/// 태블릿에서만 일이 난다. 값은 「한 줄이 눈으로 훑기에 너무 길지 않은 폭」에서 왔다 — 폰 가로
+/// (약 400) 의 한 배 반쯤이고, 그보다 넓어지면 왼쪽 글자와 오른쪽 값이 너무 멀어진다.
+const reading_max_w: f32 = 560;
+
+/// 좁힌 창을 주면서 **바깥을 같은 바탕으로 칠한다.** 안 칠하면 옆이 뚫려 뒤 화면이 비친다
+/// (좁히기 전에는 창이 곧 화면이라 그럴 일이 없었다).
+fn readingWin(width: u32, height: u32, tk: *const tokens.Tokens) SetRect {
+    const win = readingWindow(width, height);
+    if (win.x > 0) {
+        push(.{ .x = 0, .y = 0, .w = @intCast(width), .h = @intCast(height) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    }
+    reading_win_drawn = win;
+    return win;
+}
+
+/// 읽는 화면이 쓸 창. 넓으면 **가운데로** 놓는다(UX §2.5).
+fn readingWindow(width: u32, height: u32) SetRect {
+    const w: f32 = @floatFromInt(width);
+    const capped = @min(w, reading_max_w);
+    return .{ .x = @floor((w - capped) / 2), .y = 0, .w = capped, .h = @floatFromInt(height) };
+}
+
+/// 지난 프레임에 **그 화면이 실제로 쓴** 창(판정자용). 다시 계산하지 않고 그린 자리가 적어 둔
+/// 값을 답한다 — 다시 계산하면 「그렇게 그렸나」가 아니라 「그렇게 계산되나」를 재게 된다.
+var reading_win_drawn: SetRect = .{};
+pub fn readingWindowDrawn() SetRect {
+    return reading_win_drawn;
+}
+
 /// 지금 **그려진** 키바의 줄 수(0 이면 안 그려졌다). 폭에서 다시 계산하지 않고 그리는 자리가
 /// 적어 둔 값을 답한다 — 다시 계산하면 「그렇게 그렸나」가 아니라 「그렇게 계산되나」를 재게 된다.
 pub fn keybarRowsDrawn() usize {
@@ -8690,15 +8720,15 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     a11y_top_layer = true; // 여기부터는 «맨 위» 화면이다
     switch (screenTop()) {
         .terminal => {},
-        .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
-        .settings => drawSettings(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
-        .servers => drawServers(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
-        .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .sessions => drawSessions(readingWin(width, height, &tk), &tk),
+        .settings => drawSettings(readingWin(width, height, &tk), &tk),
+        .servers => drawServers(readingWin(width, height, &tk), &tk),
+        .server_edit => drawServerEdit(readingWin(width, height, &tk), &tk),
         .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .switch_confirm => drawSwitchConfirm(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
-        .diagnostics => drawDiagnostics(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .diagnostics => drawDiagnostics(readingWin(width, height, &tk), &tk),
     }
     sortA11yForReading();
     // **모은 것을 여기서 판정한다**(M9a). 본문을 그리고 난 뒤라야 이번 프레임에 바뀐 줄이 다

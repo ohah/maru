@@ -3089,6 +3089,73 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator.step);
         session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator_tests.step);
 
+        const app_launch_first_drawable_step = b.step(
+            "macos-app-launch-first-drawable",
+            "Measure the actual-AppKit product launch to first successful Metal drawable baseline",
+        );
+        const app_launch_root = "zig-out/maru-macos-app/launch-first-drawable";
+        const app_launch_artifact = "tests/artifacts/perf/macos-app-launch-first-drawable.json";
+        const app_launch_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "umask 077; root=zig-out/maru-macos-app/launch-first-drawable; " ++
+                "rm -rf \"$root\"; mkdir -m 700 -p \"$root\" tests/artifacts/perf; " ++
+                "i=0; while [ \"$i\" -lt 5 ]; do " ++
+                "run=\"$root/run-$i\"; mkdir -m 700 -p \"$run/home/.config/maru\" \"$run/cache\" " ++
+                "\"$run/config\" \"$run/codex\" \"$run/claude\" \"$run/tmp\"; " ++
+                ": > \"$run/home/.config/maru/config\"; chmod 600 \"$run/home/.config/maru/config\"; i=$((i+1)); done; " ++
+                "rm -f tests/artifacts/perf/macos-app-launch-first-drawable.json",
+        });
+        app_launch_fixture.setCwd(b.path("."));
+        const app_launch_harness = b.addExecutable(.{
+            .name = "maru-app-launch-first-drawable",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_launch_first_drawable.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        const run_app_launch_harness = b.addRunArtifact(app_launch_harness);
+        run_app_launch_harness.setCwd(b.path("."));
+        run_app_launch_harness.setEnvironmentVariable(
+            "MARU_APP_LAUNCH_FIRST_DRAWABLE_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_app_launch_harness.setEnvironmentVariable(
+            "MARU_APP_LAUNCH_FIRST_DRAWABLE_ROOT",
+            b.pathFromRoot(app_launch_root),
+        );
+        run_app_launch_harness.setEnvironmentVariable(
+            "MARU_APP_LAUNCH_FIRST_DRAWABLE_ARTIFACT",
+            b.pathFromRoot(app_launch_artifact),
+        );
+        run_app_launch_harness.step.dependOn(&macos_app_bundle.step);
+        run_app_launch_harness.step.dependOn(&file_panel_web_build.step);
+        run_app_launch_harness.step.dependOn(&app_launch_fixture.step);
+        const app_launch_validator = b.addExecutable(.{
+            .name = "maru-app-launch-first-drawable-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/macos_app_launch_first_drawable_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const app_launch_validator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/macos_app_launch_first_drawable_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_app_launch_validator_tests = b.addRunArtifact(app_launch_validator_tests);
+        run_app_launch_validator_tests.addArg("--maru-expect-tests=2");
+        const run_app_launch_validator = b.addRunArtifact(app_launch_validator);
+        run_app_launch_validator.setCwd(b.path("."));
+        run_app_launch_validator.addArg(app_launch_artifact);
+        run_app_launch_validator.step.dependOn(&run_app_launch_harness.step);
+        app_launch_first_drawable_step.dependOn(&run_app_launch_validator.step);
+        app_launch_first_drawable_step.dependOn(&run_app_launch_validator_tests.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -4369,6 +4436,17 @@ pub fn build(b: *std.Build) void {
     run_session_host_cr6e_boundary_tests.addArg("--maru-expect-tests=2");
     run_session_host_cr6e_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6e_boundary_tests.step);
+    const app_launch_first_drawable_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/macos_app_launch_first_drawable_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_app_launch_first_drawable_boundary_tests = b.addRunArtifact(app_launch_first_drawable_boundary_tests);
+    run_app_launch_first_drawable_boundary_tests.addArg("--maru-expect-tests=1");
+    run_app_launch_first_drawable_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_app_launch_first_drawable_boundary_tests.step);
     const macos_app_host_abi_shards_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/macos_app_host_abi_shards_boundary.zig"),

@@ -378,7 +378,7 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 
 | 영역 | 이유 | 예정 측정 |
 | --- | --- | --- |
-| 앱 시작 시간 | macOS host는 있지만 launch → first drawable을 재는 하니스가 아직 없다. | app launch -> first drawable time |
+| 앱 시작 시간 | L1은 별도 parent가 ReleaseFast `.app` executable의 시작 시각을 닫힌 자식 환경에 게시하기 직전에 찍은 monotonic 시각부터, 일반 제품 시작 경로의 첫 `maru_metal_renderer_draw` 성공 직후까지를 잰다. 시각의 10진수 변환·환경 entry 게시·`fork/exec` 준비도 포함하는 보수적 상한이다. 전용 관측 모드는 `smokeMode`를 켜지 않으며 측정 완료 뒤 종료만 예약한다. 첫 표본은 baseline이고 임의 hard cap을 두지 않는다. | parent timestamp publication -> fork/exec -> first successful Metal drawable submit |
 | 입력 지연 | CR6f는 controller wire input→실제 PTY→observer screen delta를 재고, CR6e-c3c v2는 실제 AppKit keyDown dispatch→host-backed 화면 marker 확인 뒤 보장된 Metal submit까지의 보수적 상한을 raw ns로 남긴다. c3c는 현재 baseline 계측이며 표본 없이 임의 hard cap을 두지 않는다. | AppKit input dispatch -> remote PTY/output -> marker-observed subsequent Metal submit |
 | frame budget | DrawList 빌드(락-보유 구간)는 위 `render_build_*` 예산으로 재지만, snapshot -> GPU frame submit 전체 frame 예산은 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
 | font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증, CoreText smoke의 제품 후보 `coretext_raster.zig` wrapper + smoke native bridge raster bytes 검증, Metal smoke의 제품 `GlyphRasterFrame.uploads/pixels` CoreText bytes -> Metal atlas upload/readback -> shader sampling 검증은 있지만, 제품 renderer의 CoreText raster·atlas grow/eviction/upload **성능** 예산은 아직 없다. 현재 제품 경계는 `GlyphCacheKey -> AtlasSlot -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame` 도메인 계약이다. 기본 성능 경로의 `GlyphRasterFrame`은 test rasterizer로 upload byte/skip/sample contract를 고정하고, macOS CoreText/Metal smoke만 native bridge를 주입하므로 제품 CoreText raster 성능을 아직 측정하지 않는다. 경계 밖 slot은 byte buffer를 만들지 않고 skip해 oversized 입력의 메모리 증폭을 막는다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas grow count, atlas upload bytes, raster upload bytes, raster skip count, font size 변경 후 첫 frame |
@@ -391,6 +391,32 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 CR6e-c3c v2의 2026-09-11 로컬 ReleaseFast 5회 baseline은 98.559/99.356/99.716/100.517/120.345ms,
 median 99.716ms, 최대 120.345ms였다. 이 분포는 marker 관찰 뒤 한 번 더 강제한 제품 draw를 포함하는 보수적
 상한이며 첫 visible pixel 분포가 아니다. 단일 기기 5회만으로 hard cap이나 기기 등급을 정하지 않는다.
+
+### L1 macOS 앱 시작 baseline
+
+L1 artifact는 `maru.macos-app-launch-first-drawable.v1` strict JSON이다. envelope은 OS release·machine model·logical CPU와
+실행 전후 같은 경로에서 안정적으로 읽은 앱 executable의 SHA-256을 고정한다. 이 hash는 표본의 binary drift를 검출하지만
+배포 provenance나 공격자에 대한 실행 identity 증명은 아니다. 각 행은 parent의 `pre_fork_ns`,
+Swift가 환경에서 되읽은 같은 `start_ns`, 첫 성공 draw 뒤의 `submit_ns`, exact subtraction인 `latency_ns`,
+그리고 `metal_frames_drawn=1`을 보존한다. 시작점은 shell·`open`·build 시간을 섞지 않으며 timestamp의 10진수 변환과
+환경 게시 직전이다. 따라서 그 뒤의 환경 entry 구성·`fork/exec` 준비 비용까지 포함하는 보수적 상한이고,
+종점은 drawable 획득과 command encoding·commit·present 예약이 성공해 renderer가 `true`를 돌려준 직후다.
+GPU completion이나 WindowServer의 첫 visible pixel, 첫 terminal content readiness를 주장하지 않는다.
+
+하니스는 상속 환경을 비운 뒤 기본 시스템 PATH와 독립 HOME·XDG config/cache·Codex/Claude config·TMPDIR·Maru config·session-host root·summary path,
+측정 토큰만 닫힌 집합으로 구성한다. 각 경로는 매 실행 새로 만들고 workspace restore를 환경 변수로 끄지 않는다. 빈 profile의 일반 제품 시작 경로(secure discovery, deferred initial surface,
+메뉴·resize·global hotkey·control server 포함)를 그대로 통과한다. 전용 env token은 계측과 첫 draw 뒤 종료만
+허용하며 기존 `MARU_MACOS_APP_SMOKE_MS`를 설정하지 않는다. 따라서 테스트가 사용자의 workspace나 실제 session-host
+registry를 읽거나 지울 수 없다. validator는 환경·바이너리 지문, 5행, strict schema, monotonic 순서, parent/Swift 시작값 일치,
+exact subtraction, 양수 timestamp와 frame exact 1을 판정한다. 이 단계는 baseline만 수집하고, 여러 머신·반복
+표본이 모이기 전 hard cap이나 앱 시작 성능 완료를 주장하지 않는다.
+
+2026-09-11 `Mac16,9`·Darwin `25.5.0`·16 logical CPU의 첫 5행은
+`607.482/180.699/198.218/191.078/186.094ms`였다(전체 median `191.078ms`, max `607.482ms`).
+첫 행과 뒤 네 행의 차이가 크지만 하니스는 OS의 dyld/Metal 캐시를 flush하지 않으므로 이를 곧바로 cold/warm
+원인으로 이름 붙이지 않는다. 뒤 네 행만의 median은 `188.586ms`이고 범위는 `180.699~198.218ms`다.
+이 분리는 첫 행을 버리기 위한 것이 아니라 실행 순서 의존성을 숨기지 않기 위한 것이다. 같은 환경에서 여러
+batch와 재부팅 전후 표본을 모으기 전에는 상한을 정하지 않는다.
 
 ## Micro-slice 성능 운영
 

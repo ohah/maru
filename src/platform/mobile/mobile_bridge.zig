@@ -6666,10 +6666,15 @@ fn drawSwitchConfirm(win: SetRect, tk: *const tokens.Tokens) void {
 
     var y = win.y + set_head_h + 1 + 14;
     const list = servers();
-    // **지금 붙어 있는 서버**. 그 줄은 마지막으로 붙자고 한 줄이다(`ssh_connecting`) — 화면이
-    // 이름을 모르면 무엇을 끊는지 못 보인다.
-    const now_name: []const u8 = if (ssh_connecting) |ci| (if (ci < list.len) list[ci].host else "") else "";
-    const to_name: []const u8 = if (pending_switch) |pi| (if (pi < list.len) list[pi].host else "") else "";
+    // **목록이 보인 그 이름을 그대로 보인다** — `serverLabel` 은 목록과 같은 함수다. 주소를
+    // 따로 보이면 **사용자가 방금 본 신원과 갈린다**: 이름이 다른 두 줄이 같은 주소를 쓸 수
+    // 있고(포트·사용자만 다른 서버), 그러면 이 화면이 같은 줄 둘을 보여 준다 — 기기에서 실제로
+    // 그랬다(둘 다 `127.0.0.1`). 무엇을 끊고 어디로 가는지가 이 화면의 존재 이유다.
+    var now_buf: [128]u8 = undefined;
+    var to_buf: [128]u8 = undefined;
+    // 지금 붙어 있는 줄은 마지막으로 붙자고 한 줄이다(`ssh_connecting`).
+    const now_name: []const u8 = if (ssh_connecting) |ci| (if (ci < list.len) serverLabel(list[ci], &now_buf) else "") else "";
+    const to_name: []const u8 = if (pending_switch) |pi| (if (pi < list.len) serverLabel(list[pi], &to_buf) else "") else "";
 
     sw_now_rect = .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = 40 };
     pushText(maru.i18n.tIn(.ko, .mob_switch_now), @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 14, tk.get(.muted_fg));

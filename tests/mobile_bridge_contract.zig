@@ -4200,6 +4200,50 @@ test "M12-f2 취소하면 «뜻»도 버린다 — 뒤로가기도 같은 길이
     }
 }
 
+test "M12-f2 확인 화면은 «목록이 보인 그 이름» 을 보인다" {
+    // 기기에서 잡았다 — 주소를 보이고 있어서 이름이 다른 두 줄이 **둘 다 `127.0.0.1`** 로
+    // 나왔다(포트·사용자만 다른 서버는 흔하다). 무엇을 끊고 어디로 가는지가 이 화면의 존재
+    // 이유라 신원이 갈리면 화면이 쓸모를 잃는다. 목록과 **같은 함수**(`serverLabel`)를 쓴다.
+    const named =
+        \\ssh.server.1.name = 하나
+        \\ssh.server.1.host = 10.0.0.9
+        \\ssh.server.1.port = 22
+        \\ssh.server.1.user = me
+        \\ssh.server.2.name = 둘
+        \\ssh.server.2.host = 10.0.0.9
+        \\ssh.server.2.port = 22
+        \\ssh.server.2.user = me
+    ;
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(named, named.len);
+    _ = bridge.maru_mobile_take_server_connect(); // 자동 요청이 1번을 골랐다
+    openServers(402, 874);
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("switch_confirm", bridge.currentScreenName());
+
+    // 읽히는 값 둘이 **서로 다르고**, 목록이 보인 이름과 같다.
+    var seen_now = false;
+    var seen_to = false;
+    var i: u32 = 0;
+    while (i < bridge.maru_mobile_a11y_count()) : (i += 1) {
+        var vb: [128]u8 = undefined;
+        const n = bridge.maru_mobile_a11y_value(i, &vb, vb.len);
+        if (n == 0) continue;
+        if (std.mem.eql(u8, vb[0..n], "하나")) seen_now = true;
+        if (std.mem.eql(u8, vb[0..n], "둘")) seen_to = true;
+    }
+    try std.testing.expect(seen_now);
+    try std.testing.expect(seen_to);
+
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
 test "M12-f2 안 붙어 있으면 «묻지 않는다» — 그대로 붙는다" {
     // **대조군.** 이 판정이 없으면 「항상 묻는다」로 바꿔도 위 셋이 전부 초록이다.
     bridge.maru_mobile_set_input_sink(0);

@@ -201,6 +201,14 @@ pub const Channel = struct {
         return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms };
     }
 
+    /// 이 채널이 **이벤트를 낼 수 있나**(`hello` 관문을 지났고 아직 안 닫혔다).
+    ///
+    /// `isClosed` 의 반대가 아니다 — `waiting_hello` 는 닫히지도 않았고 이벤트도 못 낸다. 진단이
+    /// 「몇이 실제로 먹을 수 있나」를 세려면 그 상태를 따로 봐야 한다.
+    pub fn isOpen(self: *const Channel) bool {
+        return self.state == .open;
+    }
+
     /// 이 채널이 닫혔나. **왜 닫혔는지는 `closed_reason` 이 안다** — 되살릴지 말지는 부르는 쪽이
     /// 정한다(제한 서버의 `no_hello` 는 되살리면 안 되고, 침묵으로 죽은 `silent` 는 되살려야 한다).
     pub fn isClosed(self: *const Channel) bool {
@@ -258,6 +266,23 @@ pub fn hookEventFrom(unescaped: []const u8) ?hook_event.Event {
 }
 
 const testing = std.testing;
+
+test "RA5: isOpen 은 「먹을 수 있나」다 — 닫힘의 반대가 아니다" {
+    // `waiting_hello` 는 **닫히지도 않았고 이벤트도 못 낸다**. 진단이 「몇이 실제로 먹을 수 있나」를
+    // 세려면 그 상태를 따로 봐야 한다 — `!isClosed()` 로 세면 관문 앞에서 기다리는 채널까지 세어
+    // 「열을 다 먹였는데 하나도 안 맞는다」의 원인을 가리게 된다(2026-09-11).
+    var waiting = Channel.init(0);
+    try std.testing.expect(!waiting.isClosed());
+    try std.testing.expect(!waiting.isOpen()); // 닫히지 않았지만 열리지도 않았다
+
+    var open = Channel.initOpen(0);
+    try std.testing.expect(open.isOpen());
+    try std.testing.expect(!open.isClosed());
+
+    open.eof();
+    try std.testing.expect(open.isClosed());
+    try std.testing.expect(!open.isOpen());
+}
 
 test "RA5: 이미 hello 를 본 스트림에 뒤늦게 붙는 채널은 바로 이벤트를 낸다" {
     // 스트리머는 `hello` 를 **연결 시작에 한 번만** 보낸다. 그 뒤에 연 채널이 `waiting_hello` 로 남으면

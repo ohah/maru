@@ -1854,13 +1854,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   | scope | 필수 필드 | 불변식 |
   | --- | --- | --- |
-  | root | `schema`, `profile`, `role`, `test_uuid`, `repository`, `release`, `source`, `build`, `candidate`, `gates`, `result` | `baseline_a↔role=a`, `upgrade_b↔role=b`; B만 `predecessor` 추가 |
+  | root | `schema`, `profile`, `role`, `test_uuid`, `repository`, `release`, `source`, `build`, `candidate`, `candidate_gates`, `gates`, `result` | `baseline_a↔role=a`, `upgrade_b↔role=b`; B만 `predecessor` 추가 |
   | `test_uuid` | canonical lowercase RFC 4122 UUID v4 string | trusted run이 candidate attestation과 draft 생성 뒤 한 번 만들고 모든 gate에 전달하는 correlation일 뿐 권위가 아님 |
   | `repository` | `id`, `owner`, `name` | manifest 및 GitHub API observation과 exact 일치 |
   | `release` | `id`, `tag`, `version` | 이미 만든 exact draft와 manifest release에 결속 |
   | `source` | `commit`, `tree` | manifest source와 exact 일치 |
   | `build` | `workflow_ref`, `run_id`, `run_attempt` | 현재 trusted tag run 및 aggregate attestation과 exact 일치 |
-  | `candidate` | `dmg_sha256`, `executable_sha256` | manifest의 exact universal DMG와 frozen product executable asset에 결속 |
+  | `candidate` | `dmg_sha256`, `executable_sha256`, `cli_sha256`, `designated_requirement_sha256` | DMG·frozen product executable·requirement는 manifest와 exact 일치. CLI digest는 그 exact DMG에서 추출해 final-address 관측한 bytes에 결속 |
+  | 공통 `candidate_gates` | `signed_cli_ssh` | A/B 어느 profile도 우회할 수 없는 exact candidate gate. 추출한 CLI의 TeamIdentifier·hardened runtime·universal slice, install-cli/PATH, harness-owned localhost sshd의 attach/input/detach/reattach·observer/takeover 및 final cleanup을 모두 exact `passed`로 보존 |
   | B 전용 `predecessor` | `release_id`, `tag`, `commit`, `manifest_sha256`, `dmg_sha256`, `executable_sha256` | published immutable A manifest/release/asset과 exact 일치; current/old swap 거부 |
   | A `gates` | `default_false_baseline`, `signed_app_quit_reattach` | 둘 다 같은 A candidate와 `test_uuid`를 관측하고 exact `passed` |
   | B `gates` | `signed_upgrade_one`, `signed_upgrade_near_max` | 둘 다 같은 A predecessor/B candidate와 `test_uuid`; runtime count는 각각 exact 1과 `max_runtime_count - 1` |
@@ -1891,6 +1892,28 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `maru.session-host-signed-app-quit-reattach.v1` leaf를 absent output에 mode `0600`으로 배타 게시한다. pathname·host/runtime 내부 ID,
   duration과 AppKit 진단용 summary는 release leaf에 넣지 않는다. 이 leaf는 candidate file의 GitHub attestation이나 draft release
   provenance를 독자적으로 승인하지 않으며, baseline aggregate owner가 같은 candidate authority에 다시 결속한다.
+
+  **P5d signed CLI/SSH release evidence는 공통 candidate gate다.** 배포 스크립트가 DMG 생성 전에 임시 universal
+  app에 대해 실행하는 `test-session-host-p5d-artifact`는 서명·SSH 제품 회귀를 잡지만, 사용자가 받는 DMG에서 추출된
+  bytes를 실행했다는 release evidence는 아니다. live release transaction은 candidate DMG를 read-only mount한 product
+  authority가 고정한 `Maru.app/Contents/MacOS/maru`의 fd·inode·SHA-256·designated requirement를 final-address 실행
+  owner로 옮기고, mount 또는 그 owner가 만든 read-only private extraction을 자식 종료 뒤 재검증할 때까지 보존한다.
+  ordinary pathname을 다시 열거나 mount를 먼저 해제한 뒤 같은 이름의 파일을 실행하지 않는다. leaf schema는
+  `maru.session-host-signed-cli-ssh.v1`이며 trusted run의 같은 `test_uuid`, candidate
+  DMG/main/CLI digest, designated requirement digest와 `result=passed`를 가진다. 세부 성공 bool을 caller가 조립하지 않고
+  기존 P5d 하니스가 bundle/PATH, fake-PATH 음성 행, harness-owned localhost sshd, controller/observer/takeover, exact input,
+  detach 뒤 runtime 생존과 재attach를 모두 통과한 뒤 정상 종료해야 한다. 현재 셸 하니스의 process/socket/temp cleanup은
+  `EXIT` trap에서 일어나므로 그 자식은 자기 cleanup 완료를 증명하거나 leaf를 게시할 수 없다. 바깥 실행 owner가 exact
+  harness 전용 workspace를 absent 상태에서 만들고 자식을 기다려 reap한 다음, 그 workspace의 process/fd/socket/path
+  ledger final-zero와 candidate authority 불변을 직접 재검증한다. 그 검증까지 성공한 뒤에만 owner가 absent 0600 leaf를
+  배타 게시한다. 실패 시 partial leaf는 없고 residue가 있으면 성공으로 축소하지 않는다. candidate의 CLI와 designated
+  requirement 값은 manifest signing/asset SSOT에서 유도해 leaf와 aggregate가 복사·결속할 뿐, 별도 정책 SSOT를 만들지 않는다.
+
+  구현 순서는 **P5d-R1** strict leaf type·canonical parser/writer와 digest/UUID/result fail-close → **P5d-R2** mounted/
+  private-extracted candidate CLI final-address authority·outer-owned bounded child/workspace·실제 P5d 하니스 실행과
+  post-exit cleanup 검증 → **P5d-R3** A/B 공통
+  `candidate_gates` aggregate·attestation·live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
+  synthetic/product gate는 R4를 대신하지 않으며, R4 전에는 P5d phase 완료라고 쓰지 않는다.
 
   default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
   명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와

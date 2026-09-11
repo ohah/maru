@@ -16154,6 +16154,11 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
   fail-close한다. 따라서 **P5d 구현·ad-hoc 제품 gate는 완료**, phase 완료 증거와 signed 배포 호환 판정은 실제
   provisioned release workflow가 green일 때까지 보류한다.
 
+  release 증거 배선은 [업그레이드 문서의 P5d-R1~R4](session-host-upgrade.md#u5--제품-활성화)로
+  닫는다. 현재 배포 스크립트의 P5d 실행 대상은 DMG 생성 전 임시 universal app이므로, DMG에서 추출한 exact CLI를
+  실행했다는 durable evidence로 승격하지 않는다. A/B profile 공통 candidate gate가 추출 CLI digest·designated
+  requirement와 실제 localhost SSH 결과를 결속하고 protected tag에서 보존되기 전까지 이 행은 미완료다.
+
 P5a1→P5d는 각각 이전 slice gate를 재실행하는 독립 PR이며 한 PR에서 묶어 완료 처리하지 않는다.
 
 종료 gate: 두 connection이 같은 runtime에 local stream 1로 붙어도 global subscription이 충돌하지 않는 process test,

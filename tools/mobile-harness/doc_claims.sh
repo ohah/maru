@@ -555,6 +555,20 @@ ck "Android 도 그 자리에서 막는다" 1 "$(awk '/^static void startSshIfAs
 ck "계약이 ③을 든다" 1 "$(grep -c '이미 붙어 있으면 «묻고 갈아탄다»' docs/mobile-platform.md)"
 ck "UX 가 그 화면을 든다" 1 "$(grep -c '전환 확인' docs/mobile-ux.md)"
 
+echo "§3.0 ④ 다른 기계로 가면 화면을 되돌린다 (M12-f3)"
+# **되돌리는 것은 터미널 제 계약이다**(RIS). 사용자가 부르는 지우기(`clearScreen`)를 쓰면
+# 프롬프트를 보존하고 alt 화면에서는 아무것도 안 한다 — `vim` 을 띄운 채 갈아타면 남의 화면이
+# 그대로 남는다. 두 규칙은 이름이 비슷해 섞이기 쉬우므로 자리를 박는다.
+ck "새 세션은 RIS 로 되돌린다" 1 "$(sed 's,//.*,,' $SWB | grep -c 'x1bc')"
+ck "사용자 지우기를 안 쓴다" 0 "$(sed 's,//.*,,' $SWB | grep -c 'clearScreen()')"
+# **판정은 신원이다 — 줄 번호가 아니다.** 설정을 고치면 번호는 움직이는데 기계는 그대로다.
+ck "신원으로 가른다" 1 "$(sed 's,//.*,,' $SWB | grep -c 'fn sameMachine(')"
+ck "세 축을 다 본다" 3 "$(awk '/^fn sameMachine\(/,/^}$/' $SWB | sed 's,//.*,,' | grep -cE 'a\.port == b\.port|a\.host, b\.host|a\.user, b\.user')"
+# **계약이 그 규칙을 든다**(코드·판정자에만 있으면 대화에만 있는 것과 같다).
+ck "계약이 ④를 든다" 1 "$(grep -c '다른 기계로 가면 화면을 처음으로 되돌린다' docs/mobile-platform.md)"
+ck "계약이 «남기는» 쪽도 든다" 1 "$(grep -c '같은 기계로 다시 붙을 때는 남긴다' docs/mobile-platform.md)"
+ck "UX 가 그 규칙을 든다" 1 "$(grep -c '갈아타면 화면이 새로 시작한다' docs/mobile-ux.md)"
+
 echo "§3.1 누름은 한 벌로 나른다 (M12c)"
 MB=src/platform/mobile/mobile_bridge.zig
 # **화면마다 누름 상태를 따로 들지 않는다.** 옛 방식은 화면이 늘 때마다 `*_pressed` 가 늘고,

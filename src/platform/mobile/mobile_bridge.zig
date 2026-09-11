@@ -473,7 +473,15 @@ pub fn firstComplete(list: []const mobile_config.Server) ?usize {
 ///
 /// **온전하지 않은 줄은 요청하지 않는다.** 화면이 그 줄을 "접속할 수 없다" 고 이미 말하고
 /// 있으므로, 눌렀을 때 조용히 아무 일도 안 하는 대신 그 자리에 머문다.
-/// 붙어 있는데 다른 서버를 눌렀다 — **갈아탈 대상**. 확인을 지나 세션이 내려갈 때까지 산다.
+/// **확인 화면이 묻고 있는 대상.** 화면이 살아 있는 동안만 뜻이 있다 — 이름표 둘을 여기서 읽는다.
+var switch_target: ?usize = null;
+
+/// **확인을 누른 뒤, 세션이 내려가기를 기다리는 대상.**
+///
+/// **묻는 것과 기다리는 것을 «두 변수로 가른다».** 하나로 두면 확인 화면을 «누르지 않고» 떠난
+/// 경우에도 뜻이 살아남아, 한참 뒤 세션이 끊기는 순간 **사용자가 고르지 않은 서버로 붙는다.**
+/// 판정자가 그것을 잡았다(뒤에 오는 프레임에서 엉뚱한 요청이 났다). 뜻을 «누름» 에만 실으면
+/// 화면을 어떻게 떠나든 그 사고가 구조적으로 안 난다.
 ///
 /// **이것을 `ssh_connect_req` 로 미리 세워 두면 안 된다**(계약 §3.0 ③). host 는 요청을 «먼저»
 /// 가져가고 펌프가 살아 있으면 버리므로, 미리 세운 요청은 그냥 사라지거나 — 더 나쁘게 —
@@ -482,7 +490,44 @@ var pending_switch: ?usize = null;
 
 /// 붙어 달라는 요청을 세우는 **유일한 자리**. 누름 경로가 둘(바로 붙기·갈아타기)이어도 하는 일은
 /// 하나여야 한다 — 두 벌로 두면 한쪽만 낡는다(M2-f2 가 IME 에서 같은 값을 치렀다).
+/// 두 줄이 **같은 기계**인가. 신원으로 본다 — 줄 번호가 아니다(설정을 고치면 번호는 움직이는데
+/// 기계는 그대로다). 이름은 안 본다: 같은 기계에 다른 이름을 붙일 수 있다.
+fn sameMachine(a: mobile_config.Server, b: mobile_config.Server) bool {
+    return a.port == b.port and
+        std.mem.eql(u8, a.host, b.host) and
+        std.mem.eql(u8, a.user, b.user);
+}
+
+/// **다른 기계로 가니 화면을 처음으로 되돌린다**(계약 §3.0 ④).
+///
+/// 되돌리는 것은 터미널 제 계약(RIS)이다 — 화면·스크롤백·선택·모드·pen 이 한꺼번에 간다.
+/// **사용자가 부르는 지우기(`clearScreen`)를 쓰면 안 된다**: 그쪽은 프롬프트를 보존하고 alt
+/// 화면에서는 아무것도 안 한다(`vim` 을 띄운 채 갈아타면 남의 화면이 그대로 남는다).
+fn resetTerminalForNewMachine() void {
+    // **`&(term_core orelse return)` 을 쓰면 안 된다.** 그것은 옵셔널의 payload 를 «복사» 한
+    // 임시값의 주소라, 고치는 것은 사본이고 — 더 나쁘게 — 그 사본의 `fullReset` 이 진짜 코어와
+    // **같은 포인터를 풀어** 버린다. 그 뒤로는 쓰기가 조용히 아무 일도 안 했다(판정자가 잡았다:
+    // 80줄을 써도 스크롤백이 0 이었다). 읽기만 하는 자리들은 사본이어도 티가 안 나서 그 모양이
+    // 파일 곳곳에 남아 있다 — **고치는 자리는 반드시 `if (…) |*core|` 다.**
+    if (term_core) |*core| {
+        // **RIS 를 «보통의 바이트 경로» 로 보낸다.** 터미널이 이미 그 뜻을 아는 시퀀스이고
+        // (`ESC c` — 화면·스크롤백·선택·모드·pen 이 한꺼번에 처음으로 간다), 그 길로 보내면
+        // 원격이 스스로 보냈을 때와 **같은 자리**를 지난다 — 리셋 규칙이 두 벌이 되지 않는다.
+        core.write("\x1bc") catch setLastError("term_reset_failed");
+    }
+    // **반 줄쯤 남아 있던 스크롤도 버린다.** 남기면 새 세션의 첫 프레임이 옛 손짓의 나머지만큼
+    // 밀린 채 시작한다. 화면을 되돌리는 것은 위가 했다 — 여기는 «손짓의 잔재» 다.
+}
+
 fn requestConnect(i: usize) void {
+    // **남의 화면은 안 남긴다**(계약 §3.0 ④). 같은 기계로 다시 붙을 때는 남긴다 — 그 글은 내
+    // 것이었고, 원격이 죽기 직전에 찍은 것이 왜 끊겼는지를 말해 줄 수 있다.
+    const list = servers();
+    if (ssh_connecting) |prev| {
+        if (prev < list.len and i < list.len and !sameMachine(list[prev], list[i])) {
+            resetTerminalForNewMachine();
+        }
+    }
     ssh_connect_req = @intCast(i + 1);
     ssh_connecting = i; // 승인한 지문을 이 줄에 적는다
 }
@@ -502,7 +547,7 @@ fn connectToServer(i: usize) void {
     // **「붙어 있나」는 입력 목적지로 본다** — host 의 펌프 상태를 따로 묻지 않는다(§3.0).
     // 같은 사실을 두 번 세면 갈린다.
     if (input_sink != 0) {
-        pending_switch = i;
+        switch_target = i;
         navPush(.switch_confirm);
         return;
     }
@@ -512,7 +557,10 @@ fn connectToServer(i: usize) void {
 
 /// 전환을 확인했다 — **끊으라고만 말하고 요청은 아직 안 낸다**(위 `pending_switch` 참조).
 fn acceptSwitch() void {
-    if (pending_switch == null) return;
+    // **여기서만 뜻이 «기다리는 것» 으로 넘어간다** — 화면을 떠나는 다른 길로는 안 넘어간다.
+    const i = switch_target orelse return;
+    switch_target = null;
+    pending_switch = i;
     disconnect_req = true;
     if (screenTop() == .switch_confirm) navPop();
     goToTerminal(); // 목록 → 터미널. 끊고 붙는 동안 볼 자리다
@@ -521,7 +569,7 @@ fn acceptSwitch() void {
 /// 전환을 그만뒀다. **뒤로가기도 여기로 온다** — 화면만 닫고 대상을 안 버리면, 나중에 세션이
 /// 끊기는 순간 **사용자가 취소한 서버로 붙는다.**
 fn cancelSwitch() void {
-    pending_switch = null;
+    switch_target = null;
     if (screenTop() == .switch_confirm) navPop();
 }
 
@@ -6674,7 +6722,7 @@ fn drawSwitchConfirm(win: SetRect, tk: *const tokens.Tokens) void {
     var to_buf: [128]u8 = undefined;
     // 지금 붙어 있는 줄은 마지막으로 붙자고 한 줄이다(`ssh_connecting`).
     const now_name: []const u8 = if (ssh_connecting) |ci| (if (ci < list.len) serverLabel(list[ci], &now_buf) else "") else "";
-    const to_name: []const u8 = if (pending_switch) |pi| (if (pi < list.len) serverLabel(list[pi], &to_buf) else "") else "";
+    const to_name: []const u8 = if (switch_target) |pi| (if (pi < list.len) serverLabel(list[pi], &to_buf) else "") else "";
 
     sw_now_rect = .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = 40 };
     pushText(maru.i18n.tIn(.ko, .mob_switch_now), @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 14, tk.get(.muted_fg));
@@ -6711,7 +6759,18 @@ pub fn switchOkCenter() struct { x: f32, y: f32 } {
 pub fn switchCancelCenter() struct { x: f32, y: f32 } {
     return .{ .x = sw_cancel_rect.x + sw_cancel_rect.w / 2, .y = sw_cancel_rect.y + sw_cancel_rect.h / 2 };
 }
-/// 갈아탈 대상이 있나(테스트용) — 화면을 닫아도 뜻이 남아 있으면 나중에 엉뚱한 서버로 붙는다.
+/// 지금 쌓인 스크롤백 줄 수(테스트용). **판정자가 제 전제를 스스로 세웠는지** 재는 데 쓴다 —
+/// 앞 테스트가 흘린 것을 쓰고 있으면 그 판정은 자기 것이 아니다(M12-f3 에서 실제로 그랬다).
+pub fn scrollbackLenForTest() usize {
+    if (term_core) |*c| return c.scrollbackLen();
+    return 0;
+}
+
+/// 화면이 묻고 있는 대상(테스트용).
+pub fn switchTargetForTest() ?usize {
+    return switch_target;
+}
+/// **누름이 실린 뜻**(테스트용) — 화면을 닫아도 이것이 남아 있으면 나중에 엉뚱한 서버로 붙는다.
 pub fn pendingSwitchForTest() ?usize {
     return pending_switch;
 }

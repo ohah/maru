@@ -2754,12 +2754,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   AppSession의 terminal core mutation은 `enqueueCoreCommandForTerm` 또는 `enqueueCoreCommandForSurface`에서 exact Term backend를
   선택하며, scroll/focus/mouse/selection/find/config/reset이 host-backed placeholder core로 새는 제품 경로는 source boundary 0이다.
   direct in-process enqueue는 같은 helper의 active local O(1) fallback 하나만 허용한다.
-- **CR6e-c3c 반복 sample-set: 계획.** 기존 v2 한 행에는 환경·binary 지문이 없으므로 현재 5회 숫자만
+- **CR6e-c3c 반복 sample-set: 구현·환경 의존 1차 실측 완료.** 기존 v2 한 행에는 환경·binary 지문이 없으므로 현재 5회 숫자만
   hard cap으로 승격하지 않는다. opt-in 제품 gate가 한 번 빌드한 동일 ReleaseFast app/product executable로
-  actual-AppKit v2를 20회 순차 실행하고, 실행별 0700 HOME·session-host root와 raw artifact를 분리한다.
+  actual-AppKit v2를 20회 순차 실행하고, 실행마다 제품 허용 경로의 0700 HOME을 새로 만들며
+  session-host root와 raw artifact를 분리한다.
   최종 strict artifact는 OS release·machine model·logical CPU·두 executable SHA-256과 20개 raw v2를
   함께 봉인하고 실행 전후 hash·index·latency 일치를 검증한다. 각 raw v2의 기존 identity·continuity·
   sibling authority·frame·cleanup validator를 먼저 통과하지 못하면 sample-set을 발행하지 않는다.
+  2026-09-11 `Mac16,9`·macOS `25.5.0`·16 logical CPU의 첫 20회 ReleaseFast 표본은
+  min/median/max 19.869/20.792/22.612ms였고 모든 raw strict/cleanup 판정을 통과했다.
   이 단계는 분포 수집만 소유하며 hard cap 숫자는 반복 sample-set 실측 뒤 별도 doc-first 단계가 정한다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
   않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking

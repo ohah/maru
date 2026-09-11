@@ -5,9 +5,9 @@
 //! terminates after the first successful Metal draw.
 
 const std = @import("std");
+const measurement_fingerprint = @import("measurement_fingerprint.zig");
 
 extern "c" fn usleep(useconds: c_uint) c_int;
-extern "c" fn sysctlbyname(name: [*:0]const u8, oldp: ?*anyopaque, oldlenp: *usize, newp: ?*anyopaque, newlen: usize) c_int;
 
 const sample_count = 5;
 
@@ -44,16 +44,14 @@ pub fn main(init: std.process.Init) !void {
     const final_artifact_path = try allocator.dupe(u8, std.mem.span(artifact_path));
     defer allocator.free(final_artifact_path);
     if (!std.fs.path.isAbsolute(app_path) or !std.fs.path.isAbsolute(root_path)) return error.InvalidHarnessPath;
-    const os_release = try sysctlString(allocator, "kern.osrelease");
-    defer allocator.free(os_release);
-    const machine_model = try sysctlString(allocator, "hw.model");
-    defer allocator.free(machine_model);
-    const executable_digest = try sha256File(app_path.ptr);
+    var environment = try measurement_fingerprint.Environment.capture(allocator);
+    defer environment.deinit(allocator);
+    const executable_digest = try measurement_fingerprint.sha256File(app_path.ptr);
     const executable_hex = std.fmt.bytesToHex(executable_digest, .lower);
     var artifact: Artifact = .{
-        .os_release = os_release,
-        .machine_model = machine_model,
-        .logical_cpu_count = try sysctlU32("hw.logicalcpu"),
+        .os_release = environment.os_release,
+        .machine_model = environment.machine_model,
+        .logical_cpu_count = environment.logical_cpu_count,
         .executable_sha256 = &executable_hex,
         .rows = undefined,
     };
@@ -124,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
             return error.InvalidAppSummary;
         artifact.rows[index] = row;
     }
-    const executable_digest_after = try sha256File(app_path.ptr);
+    const executable_digest_after = try measurement_fingerprint.sha256File(app_path.ptr);
     if (!std.mem.eql(u8, &executable_digest, &executable_digest_after)) return error.ExecutableChanged;
     try writeArtifact(allocator, io, final_artifact_path, artifact);
 }
@@ -136,58 +134,6 @@ fn envPair(allocator: std.mem.Allocator, comptime name: []const u8, value: []con
 fn monotonicNow(io: std.Io) u64 {
     const ns = std.Io.Clock.awake.now(io).nanoseconds;
     return if (ns <= 0) 0 else @intCast(ns);
-}
-
-fn sysctlString(allocator: std.mem.Allocator, comptime name: [:0]const u8) ![]u8 {
-    var len: usize = 0;
-    if (sysctlbyname(name.ptr, null, &len, null, 0) != 0 or len <= 1 or len > 4096)
-        return error.SysctlUnavailable;
-    const bytes = try allocator.alloc(u8, len - 1);
-    errdefer allocator.free(bytes);
-    var actual = len;
-    if (sysctlbyname(name.ptr, bytes.ptr, &actual, null, 0) != 0 or actual != len)
-        return error.SysctlUnavailable;
-    return bytes;
-}
-
-fn sysctlU32(comptime name: [:0]const u8) !u32 {
-    var value: u32 = 0;
-    var len: usize = @sizeOf(u32);
-    if (sysctlbyname(name.ptr, &value, &len, null, 0) != 0 or len != @sizeOf(u32) or value == 0)
-        return error.SysctlUnavailable;
-    return value;
-}
-
-fn sha256File(path: [*:0]const u8) ![32]u8 {
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
-    if (fd < 0) return error.ExecutableOpenFailed;
-    defer _ = std.c.close(fd);
-    var stat: std.posix.Stat = undefined;
-    if (std.c.fstat(fd, &stat) != 0 or !std.posix.S.ISREG(stat.mode) or stat.size <= 0)
-        return error.InvalidExecutable;
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var offset: usize = 0;
-    var buffer: [64 * 1024]u8 = undefined;
-    while (true) {
-        const count = std.c.pread(fd, &buffer, buffer.len, @intCast(offset));
-        if (count < 0) {
-            if (std.posix.errno(count) == .INTR) continue;
-            return error.ExecutableReadFailed;
-        }
-        if (count == 0) break;
-        const chunk = buffer[0..@intCast(count)];
-        hasher.update(chunk);
-        offset = std.math.add(usize, offset, chunk.len) catch return error.InvalidExecutable;
-    }
-    var after: std.posix.Stat = undefined;
-    if (std.c.fstat(fd, &after) != 0 or offset != @as(usize, @intCast(stat.size)) or
-        stat.dev != after.dev or stat.ino != after.ino or stat.size != after.size or
-        stat.mtimespec.sec != after.mtimespec.sec or stat.mtimespec.nsec != after.mtimespec.nsec or
-        stat.ctimespec.sec != after.ctimespec.sec or stat.ctimespec.nsec != after.ctimespec.nsec)
-        return error.ExecutableChanged;
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
 }
 
 fn waitForExactExit(pid: c_int, timeout_ms: usize) !void {

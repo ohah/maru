@@ -3100,6 +3100,149 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator.step);
         session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator_tests.step);
 
+        const c3c_sample_set_step = b.step(
+            "macos-session-host-cr6e-c3c-sample-set",
+            "Collect twenty fingerprint-bound CR6e-c3c actual-AppKit samples",
+        );
+        const c3c_sample_base = "zig-out/maru-macos-app/cr6e-c3c-sample-set";
+        const c3c_sample_artifact = "tests/artifacts/perf/session-host-cr6e-c3c-sample-set.json";
+        const c3c_sample_fingerprint_path = b.fmt("{s}/fingerprint.json", .{c3c_sample_base});
+        const c3c_sample_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "umask 077; base=zig-out/maru-macos-app/cr6e-c3c-sample-set; " ++
+                "rm -rf \"$base\"; mkdir -m 700 -p \"$base/raw\" tests/artifacts/perf; " ++
+                "rm -f tests/artifacts/perf/session-host-cr6e-c3c-sample-set.json",
+        });
+        c3c_sample_fixture.setCwd(b.path("."));
+        const c3c_sample_fingerprint = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-c3c-sample-set-fingerprint",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6e_c3c_sample_set_fingerprint.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "measurement_fingerprint",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/measurement_fingerprint.zig"),
+                        .target = target,
+                        .optimize = .ReleaseFast,
+                        .link_libc = true,
+                    }),
+                }},
+            }),
+        });
+        const run_c3c_sample_fingerprint = b.addRunArtifact(c3c_sample_fingerprint);
+        run_c3c_sample_fingerprint.setCwd(b.path("."));
+        run_c3c_sample_fingerprint.addArg(c3c_sample_fingerprint_path);
+        run_c3c_sample_fingerprint.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
+        run_c3c_sample_fingerprint.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"));
+        run_c3c_sample_fingerprint.step.dependOn(&macos_app_bundle.step);
+        run_c3c_sample_fingerprint.step.dependOn(&file_panel_web_build.step);
+        run_c3c_sample_fingerprint.step.dependOn(&c3c_sample_fixture.step);
+
+        var c3c_sample_previous: *std.Build.Step = &run_c3c_sample_fingerprint.step;
+        for (0..20) |sample_index| {
+            const raw_path = b.fmt("{s}/raw/run-{d}.json", .{ c3c_sample_base, sample_index });
+            const home_path = "zig-out/maru-macos-app/session-host-cr6e-c3c-home";
+            const prepare_sample = b.addSystemCommand(&.{
+                "sh", "-eu", "-c",
+                "umask 077; home=zig-out/maru-macos-app/session-host-cr6e-c3c-home; " ++
+                    "rm -rf \"$home\"; mkdir -m 700 -p \"$home/captures\" \"$home/.config/maru\"; " ++
+                    "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$home/.config/maru/config\"; " ++
+                    "chmod 600 \"$home/.config/maru/config\"; " ++
+                    "rm -f zig-out/maru-macos-app/app.summary.txt",
+            });
+            prepare_sample.setCwd(b.path("."));
+            prepare_sample.step.dependOn(c3c_sample_previous);
+            const run_sample = b.addRunArtifact(session_host_cr6e_recovery_harness);
+            run_sample.setCwd(b.path("."));
+            run_sample.setEnvironmentVariable(
+                "MARU_SESSION_HOST_CR6C_APP_EXE",
+                b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            );
+            run_sample.setEnvironmentVariable(
+                "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+                b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            );
+            run_sample.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+            run_sample.setEnvironmentVariable(
+                "MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT",
+                b.pathFromRoot(raw_path),
+            );
+            run_sample.setEnvironmentVariable(
+                "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+                b.pathFromRoot(home_path),
+            );
+            run_sample.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+            run_sample.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+            isolateMacosProductTest(
+                b,
+                run_sample,
+                b.pathFromRoot(home_path),
+                b.fmt("cr6e-c3c-sample-{d}", .{sample_index}),
+            );
+            run_sample.setEnvironmentVariable(
+                "MARU_CONFIG",
+                b.pathFromRoot(b.fmt("{s}/.config/maru/config", .{home_path})),
+            );
+            run_sample.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+            run_sample.step.dependOn(&prepare_sample.step);
+            const validate_sample = b.addRunArtifact(session_host_cr6e_c3c_validator);
+            validate_sample.setCwd(b.path("."));
+            validate_sample.addArg(raw_path);
+            validate_sample.step.dependOn(&run_sample.step);
+            c3c_sample_previous = &validate_sample.step;
+        }
+
+        const c3c_sample_validator_mod = b.createModule(.{
+            .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_sample_set_validator.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        });
+        const c3c_sample_collector = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-c3c-sample-set",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6e_c3c_sample_set.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "sample_set_validator", .module = c3c_sample_validator_mod },
+                    .{
+                        .name = "measurement_fingerprint",
+                        .module = b.createModule(.{
+                            .root_source_file = b.path("src/platform/macos/measurement_fingerprint.zig"),
+                            .target = target,
+                            .optimize = .ReleaseFast,
+                            .link_libc = true,
+                        }),
+                    },
+                },
+            }),
+        });
+        const run_c3c_sample_collector = b.addRunArtifact(c3c_sample_collector);
+        run_c3c_sample_collector.setCwd(b.path("."));
+        run_c3c_sample_collector.addArg(c3c_sample_artifact);
+        run_c3c_sample_collector.addArg(c3c_sample_fingerprint_path);
+        run_c3c_sample_collector.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
+        run_c3c_sample_collector.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"));
+        for (0..20) |sample_index| {
+            run_c3c_sample_collector.addArg(
+                b.fmt("{s}/raw/run-{d}.json", .{ c3c_sample_base, sample_index }),
+            );
+        }
+        run_c3c_sample_collector.step.dependOn(c3c_sample_previous);
+        const c3c_sample_validator = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-c3c-sample-set-validator",
+            .root_module = c3c_sample_validator_mod,
+        });
+        const run_c3c_sample_validator = b.addRunArtifact(c3c_sample_validator);
+        run_c3c_sample_validator.setCwd(b.path("."));
+        run_c3c_sample_validator.addArg(c3c_sample_artifact);
+        run_c3c_sample_validator.step.dependOn(&run_c3c_sample_collector.step);
+        c3c_sample_set_step.dependOn(&run_c3c_sample_validator.step);
+
         const app_launch_first_drawable_step = b.step(
             "macos-app-launch-first-drawable",
             "Measure the actual-AppKit product launch to first successful Metal drawable baseline",
@@ -6467,6 +6610,33 @@ pub fn build(b: *std.Build) void {
     run_session_host_cr6f_idle_soak_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_cr6f_idle_soak_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6f_idle_soak_boundary_tests.step);
+    const session_host_cr6e_c3c_sample_set_validator_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_sample_set_validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6e-c3c sample-set"},
+    });
+    const run_session_host_cr6e_c3c_sample_set_validator_tests = b.addRunArtifact(
+        session_host_cr6e_c3c_sample_set_validator_tests,
+    );
+    run_session_host_cr6e_c3c_sample_set_validator_tests.addArg("--maru-expect-tests=3");
+    boundary_step.dependOn(&run_session_host_cr6e_c3c_sample_set_validator_tests.step);
+    const session_host_cr6e_c3c_sample_set_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6e_c3c_sample_set_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6e-c3c sample-set keeps"},
+    });
+    const run_session_host_cr6e_c3c_sample_set_boundary_tests = b.addRunArtifact(
+        session_host_cr6e_c3c_sample_set_boundary_tests,
+    );
+    run_session_host_cr6e_c3c_sample_set_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_cr6e_c3c_sample_set_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_cr6e_c3c_sample_set_boundary_tests.step);
     const session_host_cr6e_c1_step = b.step(
         "test-session-host-cr6e-c1",
         "Verify the bounded CR6e-c1 reconnect worker handoff owner",

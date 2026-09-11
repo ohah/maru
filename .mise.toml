@@ -227,6 +227,10 @@ run = "zig build test-session-host-slow-observer-macos -Doptimize=ReleaseFast"
 description = "Run the CR6f 600-second continuous actual-host idle soak"
 run = "zig build test-session-host-cr6f-idle-soak-macos -Doptimize=ReleaseFast"
 
+[tasks.session-host-cr6e-c3c-sample-set]
+description = "Collect and validate twenty fingerprint-bound CR6e-c3c actual-AppKit samples"
+run = "zig build macos-session-host-cr6e-c3c-sample-set -Doptimize=ReleaseFast"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

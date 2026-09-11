@@ -421,7 +421,8 @@ median 99.716ms, 최대 120.345ms였다. 이 분포는 marker 관찰 뒤 한 번
 
 `mise run session-host-cr6e-c3c-sample-set`은 기본 `check` 밖의 opt-in 제품 계측이다. 한 번
 빌드한 같은 ReleaseFast app/product executable로 actual AppKit CR6e-c3c v2 gate를 **20회 순차
-실행**한다. 각 행은 별도 `0700` HOME·session-host root와 raw v2 artifact를 쓰며, 사용자
+실행**한다. 각 행은 정확한 제품 허용 경로에 새로 만든 `0700` HOME·별도 session-host root와
+분리된 raw v2 artifact를 쓰며, 사용자
 HOME·기본 session-host registry·workspace restore를 읽거나 지우지 않는다. 한 행이라도 v2 strict
 validator의 identity·continuity·sibling authority·frame·cleanup 계약을 통과하지 못하면
 sample-set을 발행하지 않는다.
@@ -432,6 +433,10 @@ sample-set을 발행하지 않는다.
 latency가 raw v2와 다르면 실패한다. 이 artifact는 분포를 수집하는 계약이지 hard cap이
 아니다. hard cap은 이 sample-set의 반복 실측이 runner noise와 최악값을 구분할 수 있을 때
 별도 doc-first 변경으로 숫자·근거·소유 상수를 확정한다.
+
+2026-09-11 로컬 `Mac16,9`·macOS `25.5.0`·16 logical CPU의 첫 ReleaseFast 20회
+sample-set은 min/median/max **19.869/20.792/22.612ms**였고, 20행 모두 raw v2 strict 계약과
+cleanup을 통과했다. 이 한 sample-set은 수집 경로의 동작 증거이며 hard cap 근거로 단독 승격하지 않는다.
 
 ### L1 macOS 앱 시작 baseline
 

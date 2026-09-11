@@ -1799,6 +1799,17 @@ static void startSshIfAsked(void) {
     }
     pthread_mutex_unlock(&g_bridge_lock);
     if (!req) return;
+    // **붙어 있으면 두 번째 세션을 열지 않는다 — 그리고 «여기서» 막는다**(계약 §3.0 ③).
+    // 빗장은 전에도 있었지만 한 층 아래(`nativeSshStart` → `already_running`)라, 거기 닿기
+    // 전에 **포그라운드 서비스가 다시 뜨고 알림 권한을 다시 물었다.** iOS 는 이 자리에서
+    // 막고 있었고 — **두 host 가 같은 누름에 다르게 굴었다.** 이름도 같이 맞춘다:
+    // 갈리면 같은 일을 두 번 찾게 된다.
+    //
+    // **요청은 이미 가져갔다**(①) — 남겨 두면 「뒤늦게」가 돌아온다.
+    if (maru_ssh_pump_is_running()) {
+        LOGI("MARU_SSH connect_ignored_busy index=%u", req - 1);
+        return;
+    }
     // **비어 있으면 안 붙는다.** 브리지가 온전한 줄만 요청하지만, 버퍼가 모자라도 0 이 오므로
     // (자르지 않는 계약) 여기서도 본다 — 반쪽 주소로 붙으면 실패가 오타처럼 보인다.
     //

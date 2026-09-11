@@ -4106,6 +4106,118 @@ test "서버 목록 화면이 config 의 서버를 보인다" {
     _ = bridge.maru_mobile_pop_screen();
 }
 
+test "M12-f2 붙어 있는데 다른 서버를 누르면 «묻는다»" {
+    // 그 전에는 **아무 일도 안 일어났다** — 화면이 조용해서 사용자에게는 고장으로 보였다
+    // (계약 §3.0 ③). 누른 뜻은 「그 서버로 가고 싶다」이므로 묻고 갈아탄다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    // **붙어 있는 상태**를 만든다 — 「붙어 있나」는 입력 목적지가 아는 사실이다(§3.0).
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("switch_confirm", bridge.currentScreenName());
+    // **요청은 아직 안 냈다.** 여기서 내면 host 가 펌프가 살아 있어 버리고, 버린 요청이
+    // 「뒤늦게」로 돌아온다(§3.0 ①).
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    try std.testing.expectEqual(@as(?usize, 1), bridge.pendingSwitchForTest());
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12-f2 확인하면 «끊긴 것을 보고» 붙는다 — 그 전에는 요청이 없다" {
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const ok = bridge.switchOkCenter();
+    tapAt(ok.x, ok.y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // 끊으라고 **말은 했다**.
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_disconnect());
+    // **아직 세션이 살아 있으면 요청은 없다** — 여기가 이 슬라이스의 핵심이다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+    // host 가 세션을 내리면(목적지가 로컬로) 그때 요청이 난다.
+    bridge.maru_mobile_set_input_sink(0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect()); // 둘째 서버(번호+1)
+    try std.testing.expectEqual(@as(?usize, null), bridge.pendingSwitchForTest());
+
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+    _ = bridge.maru_mobile_pop_screen();
+}
+
+test "M12-f2 취소하면 «뜻»도 버린다 — 뒤로가기도 같은 길이다" {
+    // **화면만 닫고 대상을 남기면**, 나중에 세션이 끊기는 순간 사용자가 취소한 서버로 붙는다.
+    // 「나가는 자리가 둘이면 하는 일도 하나」 — 버튼과 뒤로가기를 각각 잰다.
+    for ([_]bool{ true, false }) |use_back| {
+        bridge.maru_mobile_set_input_sink(0);
+        bridge.maru_mobile_load_config(two_servers, two_servers.len);
+        _ = bridge.maru_mobile_take_server_connect();
+        openServers(402, 874);
+        bridge.maru_mobile_set_input_sink(1);
+
+        const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+        tapAt(200, y);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqualStrings("switch_confirm", bridge.currentScreenName());
+
+        if (use_back) {
+            _ = bridge.maru_mobile_pop_screen();
+        } else {
+            const c = bridge.switchCancelCenter();
+            tapAt(c.x, c.y);
+            _ = bridge.maru_mobile_build(402, 874, now());
+        }
+        try std.testing.expectEqualStrings("servers", bridge.currentScreenName());
+        try std.testing.expectEqual(@as(?usize, null), bridge.pendingSwitchForTest());
+        // 끊으라고도 안 했고, 세션이 내려가도 붙지 않는다.
+        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
+        bridge.maru_mobile_set_input_sink(0);
+        _ = bridge.maru_mobile_build(402, 874, now());
+        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_server_connect());
+
+        var pops: u32 = 0;
+        while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+    }
+}
+
+test "M12-f2 안 붙어 있으면 «묻지 않는다» — 그대로 붙는다" {
+    // **대조군.** 이 판정이 없으면 「항상 묻는다」로 바꿔도 위 셋이 전부 초록이다.
+    bridge.maru_mobile_set_input_sink(0);
+    bridge.maru_mobile_load_config(two_servers, two_servers.len);
+    _ = bridge.maru_mobile_take_server_connect();
+    openServers(402, 874);
+
+    const y = bridge.serverRowCenterY(1) orelse return error.TestUnexpectedResult;
+    tapAt(200, y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_take_server_connect());
+    try std.testing.expectEqual(@as(?usize, null), bridge.pendingSwitchForTest());
+
+    var pops: u32 = 0;
+    while (pops < 4) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
+}
+
 test "U1 누르는 자리는 모든 화면에서 44 이상이다" {
     // **계약이 정한 손가락 히트 영역**(UX §5.4 — Apple HIG 44pt · Material 48dp 중 작은 쪽).
     // 예전에는 화면마다 사각형을 따로 들어서 「전부 44 이상인가」를 물을 자리가 없었다 —
@@ -4114,7 +4226,7 @@ test "U1 누르는 자리는 모든 화면에서 44 이상이다" {
     bridge.maru_mobile_load_config(two_servers, two_servers.len);
     _ = bridge.maru_mobile_take_server_connect();
 
-    const screens = [_][]const u8{ "terminal", "sessions", "servers", "settings", "diagnostics" };
+    const screens = [_][]const u8{ "terminal", "sessions", "servers", "settings", "diagnostics", "switch_confirm" };
     for (screens) |name| {
         bridge.setScreenForTest(name);
         _ = bridge.maru_mobile_build(402, 874, now());

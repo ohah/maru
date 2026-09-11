@@ -54,6 +54,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 턴 변경분 단계 계획](plans/agent-turn-changes.md)
 - [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
 - [에이전트 활동 뷰 구현 계획](plans/agent-activity-view.md)
+- [원격 에이전트 활동 뷰(RAV1~RAV8 — ssh 너머 세션의 활동을 여기서 읽는다)](plans/remote-agent-activity.md) — **설계, 사용자 결정 넷이 열려 있다**
 - [에이전트 이미지 갤러리 구현 계획](plans/agent-image-gallery.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)

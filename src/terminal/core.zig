@@ -10363,3 +10363,107 @@ test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 �
     try std.testing.expectEqual(@as(u32, 1), img.current_frame);
     try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
 }
+
+test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌아온다 (적대적 검증)" {
+    // 지금까지의 적대적 입력은 전부 **손으로 고른 것**이었다 — 내가 생각한 문장만 덮는다.
+    // 여기서는 kitty control 키 공간을 무작위로 조합해 수천 개를 먹인다. seed 는 고정이라 실패가
+    // 재현된다(결정적 fuzz).
+    //
+    // **문법을 알아야 한다.** 처음엔 완전 무작위로 짰더니 이미지가 **한 장도 안 만들어졌다**
+    // (`images=0 frames=0`) — 무작위 조합은 `f`/`s`/`v`/`i`/payload 가 동시에 들어맞는 유효 전송을
+    // 거의 못 만들어서, 4000 개가 전부 **거부 경로**만 밟았다. 합성·재생 코드는 한 번도 안 돌았다.
+    // 그래서 (1) 유효한 상태를 먼저 심고 (2) 절반은 «유효 골격 + 한두 필드 교란», 절반은 완전
+    // 무작위로 섞는다. 아래 커버리지 단언이 그 전제를 지킨다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 5 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    core.kitty_images.limit = 8192; // 작게 잡아 한도 경계도 자주 밟게 한다
+
+    var prng = std.Random.DefaultPrng.init(0x6b69747479); // "kitty"
+    const rnd = prng.random();
+    const px16 = "AAAAAAAAAAAAAAAAAAAAAA=="; // 16B = 2x2 RGBA — 유효 전송의 payload
+    const actions = [_]u8{ 't', 'T', 'q', 'p', 'd', 'f', 'a', 'c', 'x' };
+    const keys = [_]u8{ 'f', 's', 'v', 'i', 'I', 'm', 'o', 'p', 'x', 'y', 'w', 'h', 'X', 'Y', 'c', 'r', 'z', 'C', 'd', 'P', 'Q', 'H', 'V', 'q', 't', 'U' };
+    const values = [_][]const u8{ "0", "1", "2", "3", "24", "32", "100", "4294967295", "2147483647", "-2147483648", "-1", "999999", "d", "f", "z", "a", "", "x1y", "00000000000000000000" };
+    const payloads = [_][]const u8{ "", "AAAA", px16, "!!!!", "QUJDRA==" };
+
+    var seq: std.ArrayListUnmanaged(u8) = .empty;
+    defer seq.deinit(std.testing.allocator);
+
+    // 유효 상태를 심는다 — 이미지·프레임 둘·표시·재생.
+    const seed_cmds = [_][]const u8{
+        "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;" ++ px16 ++ "\x1b\\",
+        "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;" ++ px16 ++ "\x1b\\",
+        "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;" ++ px16 ++ "\x1b\\",
+        "\x1b_Ga=p,i=1,q=2\x1b\\",
+        "\x1b_Ga=a,i=1,r=1,z=10,s=3,q=2\x1b\\",
+    };
+    for (seed_cmds) |c| try core.write(c);
+
+    var saw_frames = false;
+    var saw_running = false;
+    var n: usize = 0;
+    while (n < 4000) : (n += 1) {
+        if (n % 200 == 0) for (seed_cmds) |c| try core.write(c); // 지워졌으면 다시 심는다
+        seq.clearRetainingCapacity();
+        if (rnd.boolean()) {
+            // 유효 골격 + 한두 필드 교란 — 여기가 합성·재생 코드를 실제로 밟는다.
+            const skeletons = [_][]const u8{
+                "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2",
+                "\x1b_Ga=f,f=32,s=1,v=1,i=1,c=1,q=2",
+                "\x1b_Ga=a,i=1,q=2",
+                "\x1b_Ga=c,i=1,r=1,c=2,q=2",
+                "\x1b_Ga=p,i=1,q=2",
+                "\x1b_Ga=d,d=n,I=1,q=2",
+            };
+            try seq.appendSlice(std.testing.allocator, skeletons[rnd.intRangeLessThan(usize, 0, skeletons.len)]);
+            const extra = rnd.intRangeAtMost(usize, 0, 2);
+            var e: usize = 0;
+            while (e < extra) : (e += 1) {
+                try seq.append(std.testing.allocator, ',');
+                try seq.append(std.testing.allocator, keys[rnd.intRangeLessThan(usize, 0, keys.len)]);
+                try seq.append(std.testing.allocator, '=');
+                try seq.appendSlice(std.testing.allocator, values[rnd.intRangeLessThan(usize, 0, values.len)]);
+            }
+            try seq.append(std.testing.allocator, ';');
+            try seq.appendSlice(std.testing.allocator, if (rnd.boolean()) px16 else payloads[rnd.intRangeLessThan(usize, 0, payloads.len)]);
+        } else {
+            try seq.appendSlice(std.testing.allocator, "\x1b_Ga=");
+            try seq.append(std.testing.allocator, actions[rnd.intRangeLessThan(usize, 0, actions.len)]);
+            const nkeys = rnd.intRangeAtMost(usize, 0, 6);
+            var k: usize = 0;
+            while (k < nkeys) : (k += 1) {
+                try seq.append(std.testing.allocator, ',');
+                try seq.append(std.testing.allocator, keys[rnd.intRangeLessThan(usize, 0, keys.len)]);
+                try seq.append(std.testing.allocator, '=');
+                try seq.appendSlice(std.testing.allocator, values[rnd.intRangeLessThan(usize, 0, values.len)]);
+            }
+            try seq.append(std.testing.allocator, ';');
+            try seq.appendSlice(std.testing.allocator, payloads[rnd.intRangeLessThan(usize, 0, payloads.len)]);
+        }
+        try seq.appendSlice(std.testing.allocator, "\x1b\\");
+        try core.write(seq.items);
+        core.clearResponse();
+        if (n % 7 == 0) _ = core.advanceAnimations(rnd.intRangeAtMost(u64, 0, 5000));
+        _ = core.renderSnapshot(); // 렌더 뷰 조립까지 태운다
+
+        var it = core.kitty_images.map.valueIterator();
+        while (it.next()) |im| {
+            if (im.frameCount() > 1) saw_frames = true;
+            if (im.anim_state == .running) saw_running = true;
+        }
+    }
+
+    // **fuzz 가 실제로 그 코드를 밟았는가.** 이 단언이 없으면 「4000 개를 먹였다」가 「거부 경로를
+    // 4000 번 밟았다」일 수 있다 — 실제로 처음 판정자가 그 상태였다(images=0, frames=0).
+    try std.testing.expect(saw_frames);
+    try std.testing.expect(saw_running);
+
+    // 파서가 ground 로 돌아와 평범한 텍스트를 정상으로 받는다 — 여기가 깨지면 화면이 통째로 죽는다.
+    try core.write("\x1b[2J\x1b[Hok");
+    try std.testing.expectEqual(@as(u21, 'o'), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'k'), core.screen.cells[1].codepoint);
+    // 자원 회계가 한도를 지킨다 — 4000 개를 먹인 뒤에도.
+    try std.testing.expect(core.kitty_images.total_bytes <= core.kitty_images.limit);
+    try std.testing.expect(core.kitty_placements.items.len <= TerminalCore.max_kitty_placements);
+}

@@ -1389,7 +1389,34 @@ fn observationCleanupDigestUnchecked(input: ObservationCleanupDigestInput) Diges
     return finish(&hasher);
 }
 
+/// **이 경로가 초당 몇 번, 몇 바이트를 해싱하는가.** 모든 관측 다이제스트가 이 한 함수를 통과하므로
+/// 여기 하나만 세면 전수가 잡힌다.
+///
+/// 2026-09-11 실측: 브라우저가 렌더링하는 동안 maru 주 스레드 작업의 **54%** 가 이 경로였다 —
+/// BLAKE3 24%, 정규 투영 `memcpy` 23%, 제로화 7%. 그런데 「이벤트당 몇 번인지」를 몰라 **병합으로
+/// 얼마나 줄어드는지 계산할 수 없었다.** 틱당 이벤트가 1 이면 병합의 이득은 0 이다. 이 두 숫자가
+/// 그 판단을 대신할 수 없는 유일한 입력이다.
+///
+/// 진단 전용이라 정확도보다 **경로 비용이 0 에 가까울 것**이 중요하다. `.monotonic` 은 배리어가
+/// 없어 재정렬만 허용할 뿐 자료 경합(UB)을 막는다 — 이 함수는 여러 스레드에서 불린다.
+var observation_digest_calls: u64 = 0;
+var observation_digest_input_bytes: u64 = 0;
+
+pub const ObservationDigestCounters = struct {
+    calls: u64,
+    input_bytes: u64,
+};
+
+pub fn observationDigestCounters() ObservationDigestCounters {
+    return .{
+        .calls = @atomicLoad(u64, &observation_digest_calls, .monotonic),
+        .input_bytes = @atomicLoad(u64, &observation_digest_input_bytes, .monotonic),
+    };
+}
+
 pub fn observationCleanupDigest(input: ObservationCleanupDigestInput) Digest {
+    _ = @atomicRmw(u64, &observation_digest_calls, .Add, 1, .monotonic);
+    _ = @atomicRmw(u64, &observation_digest_input_bytes, .Add, @sizeOf(ObservationCleanupDigestInput), .monotonic);
     if (!observationCleanupInputCanonical(input)) fatalNonCanonical();
     return observationCleanupDigestUnchecked(input);
 }

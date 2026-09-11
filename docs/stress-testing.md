@@ -16,6 +16,9 @@
 - 반복적으로 resize 후 write를 수행한다.
 - 최종 screen, structured snapshot, summary artifact를 `tests/artifacts/stress/` 아래에 남긴다.
 - macOS opt-in PTY 경로(`mise run pty`)에서 대량 stdout이 `PtyReader -> PtyEventQueue(capacity=1) -> RuntimeEventPump -> SurfaceRuntime`을 지나도 drop되지 않는지 검증한다.
+- session-host의 장시간 idle은 core `stress-soak`와 섞지 않는다. `mise run session-host-cr6f-idle-soak`이 격리된
+  ReleaseFast actual-host/forkpty 제품 경로를 연속 600초 유지하고, 성능 예산 문서가 소유하는 10초 창별 무작업·CPU·FD와
+  마지막 output wake·종료 회수를 판정한다. 로그인된 macOS runner가 필요한 opt-in gate다.
 
 ## 의도적으로 아직 하지 않는 것
 

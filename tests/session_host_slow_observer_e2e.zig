@@ -34,6 +34,9 @@ const post_sample_count = 10;
 /// 꼬리를 `max` 대신 p95 로 재려면 표본이 그만큼 필요하다.
 const wake_sample_count = 40;
 const idle_wake_observation_ms: u64 = 1_000;
+const idle_soak_window_ms: u64 = 10_000;
+const idle_soak_window_count: usize = 60;
+const idle_soak_deadline_ms: u64 = 15 * 60 * 1_000;
 const target_interval_us: c_uint = 20_000;
 const deadline_ms: u64 = 30_000;
 const sol_local: c_int = 0;
@@ -220,6 +223,62 @@ const Artifact = struct {
     directory_removed: bool,
 };
 
+const IdleSoakWindow = struct {
+    index: u32,
+    started_ns: u64,
+    ended_ns: u64,
+    host_pid: u32,
+    host_start_abstime: u64,
+    child_pid: u32,
+    child_start_tvsec: u64,
+    child_start_tvusec: u32,
+    wake_notify_delta: u64,
+    wake_published_delta: u64,
+    wake_coalesced_delta: u64,
+    wake_drain_delta: u64,
+    observation_materialization_delta: u64,
+    observation_core_lock_delta: u64,
+    metadata_producer_visit_delta: u64,
+    screen_snapshot_delta: u64,
+    screen_delta_delta: u64,
+    screen_allocation_delta: u64,
+    screen_core_lock_delta: u64,
+    cpu_before: struct { user_ns: u64, system_ns: u64 },
+    cpu_after: struct { user_ns: u64, system_ns: u64 },
+    cpu_total_delta_ns: u64,
+    fd_count: u32,
+    resident_bytes: u64,
+    footprint_bytes: u64,
+};
+
+const IdleSoakArtifact = struct {
+    schema: []const u8,
+    scenario: []const u8,
+    build_mode: []const u8,
+    sample_api: []const u8,
+    run_nonce_hex: []const u8,
+    session_root_kind: []const u8,
+    session_root_mode: u16,
+    host_pid: u32,
+    host_start_abstime: u64,
+    child_pid: u32,
+    child_start_tvsec: u64,
+    child_start_tvusec: u32,
+    baseline_fd_count: u32,
+    windows: []const IdleSoakWindow,
+    final_marker_exact_count: u32,
+    final_marker_visible: bool,
+    final_wake_notify_delta: u64,
+    final_wake_published_delta: u64,
+    final_wake_drain_delta: u64,
+    final_active_clients: u32,
+    child_reaped: bool,
+    host_graceful_stop: bool,
+    host_reaped: bool,
+    socket_removed: bool,
+    directory_removed: bool,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     var stage: []const u8 = "arguments";
@@ -232,11 +291,18 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const host_exe_raw = args.next() orelse return error.MissingHostExecutable;
     const artifact_path = args.next() orelse return error.MissingArtifactPath;
+    const mode = args.next();
+    const idle_soak = if (mode) |value|
+        std.mem.eql(u8, value, "--idle-soak")
+    else
+        false;
+    if (mode != null and !idle_soak) return error.UnexpectedArgument;
     if (args.next() != null) return error.UnexpectedArgument;
     try invalidateArtifact(allocator, artifact_path);
 
     const started_ns = monotonicNow(init.io);
-    const deadline_ns = started_ns + deadline_ms * std.time.ns_per_ms;
+    const run_deadline_ms: u64 = if (idle_soak) idle_soak_deadline_ms else deadline_ms;
+    const deadline_ns = started_ns + run_deadline_ms * std.time.ns_per_ms;
     var nonce_bytes: [16]u8 = undefined;
     arc4random_buf(&nonce_bytes, nonce_bytes.len);
     const nonce_hex = std.fmt.bytesToHex(nonce_bytes, .lower);
@@ -479,25 +545,77 @@ pub fn main(init: std.process.Init) !void {
     if (!settled) return error.ObservationSourceDidNotSettle;
 
     stage = "output wake idle observation";
+    var idle_soak_windows: [idle_soak_window_count]IdleSoakWindow = undefined;
+    var idle_soak_windows_written: usize = 0;
+    const idle_soak_baseline_fd_count = try countProcessFds(host_pid);
     const idle_cpu_before = try takeIdleCpuSample(host_identity, init.io);
     const idle_wake_before = settle_before;
     const idle_wake_started_at = monotonicNow(init.io);
-    _ = usleep(@intCast(idle_wake_observation_ms * std.time.us_per_ms));
-    const idle_wake_after = try probe(
-        command_pair[0],
-        report_pair[0],
-        &sequence,
-        .snapshot,
-        deadline_ns,
-        init.io,
-    );
-    const idle_cpu_after = try takeIdleCpuSample(host_identity, init.io);
+    var window_before = idle_wake_before;
+    var idle_wake_after = idle_wake_before;
+    var idle_cpu_after = idle_cpu_before;
+    const wanted_idle_windows: usize = if (idle_soak) idle_soak_window_count else 1;
+    for (0..wanted_idle_windows) |window_index| {
+        stage = if (idle_soak) "output wake long idle window" else "output wake idle observation";
+        const window_cpu_before = try takeIdleCpuSample(host_identity, init.io);
+        const window_started_at = monotonicNow(init.io);
+        _ = usleep(@intCast((if (idle_soak) idle_soak_window_ms else idle_wake_observation_ms) * std.time.us_per_ms));
+        idle_wake_after = try probe(
+            command_pair[0],
+            report_pair[0],
+            &sequence,
+            .snapshot,
+            deadline_ns,
+            init.io,
+        );
+        idle_cpu_after = try takeIdleCpuSample(host_identity, init.io);
+        const window_ended_at = monotonicNow(init.io);
+        const resource = try takeSample(host_identity, init.io);
+        const child_now = try processIdentity(pty_pid, false);
+        if (!sameProcessIdentity(pty_identity, child_now)) return error.PtyChildIdentityMismatch;
+        const fd_count = try countProcessFds(host_pid);
+        if (fd_count != idle_soak_baseline_fd_count) return error.HostFdCountChanged;
+        if (idle_wake_after.output_wake_notify_attempts != window_before.output_wake_notify_attempts or
+            idle_wake_after.output_wake_published_writes != window_before.output_wake_published_writes or
+            idle_wake_after.output_wake_coalesced_writes != window_before.output_wake_coalesced_writes or
+            idle_wake_after.output_wake_drain_turns != window_before.output_wake_drain_turns)
+            return error.IdleOutputWakeStorm;
+        if (idle_soak) {
+            idle_soak_windows[window_index] = .{
+                .index = @intCast(window_index),
+                .started_ns = window_started_at,
+                .ended_ns = window_ended_at,
+                .host_pid = @intCast(host_pid),
+                .host_start_abstime = host_identity.start_abstime,
+                .child_pid = @intCast(pty_pid),
+                .child_start_tvsec = pty_identity.start_tvsec,
+                .child_start_tvusec = pty_identity.start_tvusec,
+                .wake_notify_delta = idle_wake_after.output_wake_notify_attempts - window_before.output_wake_notify_attempts,
+                .wake_published_delta = idle_wake_after.output_wake_published_writes - window_before.output_wake_published_writes,
+                .wake_coalesced_delta = idle_wake_after.output_wake_coalesced_writes - window_before.output_wake_coalesced_writes,
+                .wake_drain_delta = idle_wake_after.output_wake_drain_turns - window_before.output_wake_drain_turns,
+                .observation_materialization_delta = idle_wake_after.observation_materializations - window_before.observation_materializations,
+                .observation_core_lock_delta = idle_wake_after.observation_core_lock_acquisitions - window_before.observation_core_lock_acquisitions,
+                .metadata_producer_visit_delta = idle_wake_after.metadata_producer_visits - window_before.metadata_producer_visits,
+                .screen_snapshot_delta = idle_wake_after.screen_snapshot_calls - window_before.screen_snapshot_calls,
+                .screen_delta_delta = idle_wake_after.screen_delta_calls - window_before.screen_delta_calls,
+                .screen_allocation_delta = idle_wake_after.screen_owned_allocations - window_before.screen_owned_allocations,
+                .screen_core_lock_delta = idle_wake_after.screen_core_lock_acquisitions - window_before.screen_core_lock_acquisitions,
+                .cpu_before = .{ .user_ns = window_cpu_before.user_time_ns, .system_ns = window_cpu_before.system_time_ns },
+                .cpu_after = .{ .user_ns = idle_cpu_after.user_time_ns, .system_ns = idle_cpu_after.system_time_ns },
+                .cpu_total_delta_ns = (idle_cpu_after.user_time_ns - window_cpu_before.user_time_ns) +
+                    (idle_cpu_after.system_time_ns - window_cpu_before.system_time_ns),
+                .fd_count = fd_count,
+                .resident_bytes = resource.ri_resident_size,
+                .footprint_bytes = resource.ri_phys_footprint,
+            };
+            idle_soak_windows_written += 1;
+        }
+        window_before = idle_wake_after;
+    }
     const idle_wake_ended_at = monotonicNow(init.io);
-    if (idle_wake_after.output_wake_notify_attempts != idle_wake_before.output_wake_notify_attempts or
-        idle_wake_after.output_wake_published_writes != idle_wake_before.output_wake_published_writes or
-        idle_wake_after.output_wake_coalesced_writes != idle_wake_before.output_wake_coalesced_writes or
-        idle_wake_after.output_wake_drain_turns != idle_wake_before.output_wake_drain_turns)
-        return error.IdleOutputWakeStorm;
+    if (idle_soak and idle_soak_windows_written != idle_soak_window_count)
+        return error.MissingIdleSoakWindow;
 
     var scale_samples: [3]ScreenIdleScaleSample = undefined;
     scale_samples[0] = .{
@@ -717,6 +835,16 @@ pub fn main(init: std.process.Init) !void {
         active_wake_after.output_wake_published_writes < idle_wake_after.output_wake_published_writes + 1 or
         active_wake_after.output_wake_drain_turns < idle_wake_after.output_wake_drain_turns + 1)
         return error.OutputWakeEvidenceMissing;
+    var soak_final_marker_buf: [96]u8 = undefined;
+    const soak_final_marker = try std.fmt.bufPrint(
+        &soak_final_marker_buf,
+        "MARU_CR6F_WAKE_{d}_{d}",
+        .{ c.getpid(), wake_sample_count - 1 },
+    );
+    // 뒤의 pressure 출력은 이 행을 scrollback 밖으로 밀 수 있다. 실제 waitForMarker가
+    // 성공한 바로 이 시점에서 exact-count를 봉인해야 종료 뒤 화면을 증거로 오인하지 않는다.
+    const soak_final_marker_exact_count = screenCount(&healthy_screen, soak_final_marker);
+    const soak_final_marker_visible = soak_final_marker_exact_count == 1;
     var wake_latencies: [wake_sample_count]u64 = undefined;
     for (wake_samples, 0..) |sample, index|
         wake_latencies[index] = sample.delivery_latency_ns;
@@ -1000,6 +1128,41 @@ pub fn main(init: std.process.Init) !void {
     const ledger_delta = marker_report.peak_resident_bytes -| baseline_ledger;
     const analytic_cap = ledger_delta + projection_transient + allocator_slack;
     const elapsed_ms = (monotonicNow(init.io) - started_ns) / std.time.ns_per_ms;
+    if (idle_soak) {
+        const idle_soak_artifact: IdleSoakArtifact = .{
+            .schema = "maru.session-host-cr6f-idle-soak.v1",
+            .scenario = "output-wake-continuous-idle",
+            .build_mode = build_mode,
+            .sample_api = sample_api,
+            .run_nonce_hex = nonce_hex[0..],
+            .session_root_kind = "fixture_nonce_0700",
+            .session_root_mode = 0o700,
+            .host_pid = @intCast(host_pid),
+            .host_start_abstime = host_identity.start_abstime,
+            .child_pid = @intCast(pty_pid),
+            .child_start_tvsec = pty_identity.start_tvsec,
+            .child_start_tvusec = pty_identity.start_tvusec,
+            .baseline_fd_count = idle_soak_baseline_fd_count,
+            .windows = idle_soak_windows[0..idle_soak_windows_written],
+            .final_marker_exact_count = soak_final_marker_exact_count,
+            .final_marker_visible = soak_final_marker_visible,
+            .final_wake_notify_delta = active_wake_after.output_wake_notify_attempts -
+                idle_wake_after.output_wake_notify_attempts,
+            .final_wake_published_delta = active_wake_after.output_wake_published_writes -
+                idle_wake_after.output_wake_published_writes,
+            .final_wake_drain_delta = active_wake_after.output_wake_drain_turns -
+                idle_wake_after.output_wake_drain_turns,
+            .final_active_clients = @intCast(final_report.active_clients),
+            .child_reaped = child_report.reaped_children != 0,
+            .host_graceful_stop = true,
+            .host_reaped = host_reaped,
+            .socket_removed = socket_removed,
+            .directory_removed = !directory_exists,
+        };
+        stage = "idle soak artifact write";
+        try writeArtifactAtomic(allocator, init.io, artifact_path, idle_soak_artifact);
+        return;
+    }
     const artifact: Artifact = .{
         .schema = schema_name,
         .scenario = scenario_name,
@@ -1124,7 +1287,7 @@ pub fn main(init: std.process.Init) !void {
         .final_ledger_shared_bytes = final_report.shared_bytes,
         .final_ledger_prepared_base_bytes = final_report.prepared_base_bytes,
         .final_ledger_prepared_reclaim_bytes = final_report.prepared_reclaim_bytes,
-        .deadline_ms = deadline_ms,
+        .deadline_ms = run_deadline_ms,
         .elapsed_ms = elapsed_ms,
         .child_reaped = child_report.reaped_children != 0,
         .child_exit_status = child_report.last_child_exit_status,
@@ -1313,6 +1476,32 @@ fn screenContains(
     return false;
 }
 
+fn screenCount(
+    assembler: *const session_host.screen_assembler.ScreenAssembler,
+    marker: []const u8,
+) u32 {
+    var total: u32 = 0;
+    var row: u16 = 0;
+    while (row < assembler.rows_count) : (row += 1) {
+        var bytes: [4096]u8 = undefined;
+        var used: usize = 0;
+        for (assembler.rowRuns(row)) |cell_run| {
+            var repeat: u32 = 0;
+            while (repeat < cell_run.count) : (repeat += 1) {
+                if (cell_run.grapheme.len > bytes.len - used) break;
+                @memcpy(bytes[used..][0..cell_run.grapheme.len], cell_run.grapheme);
+                used += cell_run.grapheme.len;
+            }
+        }
+        var rest = bytes[0..used];
+        while (std.mem.indexOf(u8, rest, marker)) |at| {
+            total += 1;
+            rest = rest[at + marker.len ..];
+        }
+    }
+    return total;
+}
+
 fn probe(
     command_fd: c.fd_t,
     report_fd: c.fd_t,
@@ -1477,6 +1666,21 @@ fn takeIdleCpuSample(identity: ProcessIdentity, io: std.Io) !IdleCpuSample {
         .user_time_ns = usage.ri_user_time,
         .system_time_ns = usage.ri_system_time,
     };
+}
+
+fn countProcessFds(pid: c.pid_t) !u32 {
+    var entries: [256]mac.struct_proc_fdinfo = undefined;
+    const bytes = mac.proc_pidinfo(
+        pid,
+        mac.PROC_PIDLISTFDS,
+        0,
+        &entries,
+        @sizeOf(@TypeOf(entries)),
+    );
+    if (bytes <= 0 or @rem(bytes, @sizeOf(mac.struct_proc_fdinfo)) != 0)
+        return error.FdInventoryUnavailable;
+    if (bytes == @sizeOf(@TypeOf(entries))) return error.FdInventoryOverflow;
+    return @intCast(@divExact(bytes, @sizeOf(mac.struct_proc_fdinfo)));
 }
 
 fn maybeSample(
@@ -1661,7 +1865,7 @@ fn writeArtifactAtomic(
     allocator: std.mem.Allocator,
     io: std.Io,
     path: []const u8,
-    artifact: Artifact,
+    artifact: anytype,
 ) !void {
     if (std.fs.path.dirname(path)) |parent| {
         if (!std.fs.path.isAbsolute(parent))

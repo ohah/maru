@@ -170,7 +170,32 @@ slow-observer/RSS pressure 전에 512×256으로 resize한다. 대형 화면 pro
 delta 1 이상이어야 하므로 우연히 20ms cadence에 걸린 빠른 표본을 wake 성공으로 세지 않는다. 실제 pipe 포화 `EAGAIN`,
 `EINTR` 분기, broken read-end `SIGPIPE`, drain 뒤 idle readiness와 restore graph의 새 process-local notifier는
 `runtime_manager.zig` 단위/process 테스트가 별도로 소유한다. 이 숫자를 바꾸려면 같은 runner의 raw artifact와 validator
-상수·이 절을 함께 갱신한다. 이 1초 제품 gate는 장시간 idle soak를 대체하지 않는다.
+상수·이 절을 함께 갱신한다. 이 1초 제품 gate는 아래 장시간 idle soak를 대체하지 않는다.
+
+### CR6f 장시간 idle soak 계약
+
+`mise run session-host-cr6f-idle-soak`은 기본 `check` 밖의 opt-in 제품 gate다. ReleaseFast의 동일
+session-host PID와 실제 forkpty `/bin/cat` child를 **600초 이상 연속 유지**하고, 준비가 끝난 뒤 서로 겹치지 않는
+**10초 창 60개**를 raw artifact에 남긴다. 각 창은 monotonic 시작·끝, host/child process identity,
+`RuntimeManager.OutputWakeEvidence` 전후값, `proc_pid_rusage:RUSAGE_INFO_V4` user/system CPU 전후값, host FD 수와
+resident/physical-footprint 표본을 가진다. 시간과 표본 수의 hard contract는 validator의
+`idle_soak_window_ns`·`idle_soak_window_count`가 소유한다. runner에는 실제 sleep/배열 크기 상수가 중복되므로 validator와
+source-boundary가 10초·60개 exact 값을 독립적으로 대조하며, 어느 한쪽만 바꾸면 기본 gate가 실패한다.
+
+validator는 모든 창을 개별 판정한다. 창 사이 identity가 바뀌거나 시간이 겹치거나 빠진 창, idle
+notify/published/coalesced/drain·observation materialization·core-lock·metadata producer visit·screen projector 작업의
+증분이 하나라도 0이 아니거나, FD가 기준선에서 변하거나, CPU가 창 길이의 2.5%를 넘으면 실패한다. RSS와 footprint는
+초기값 대비 양의 기울기와 최종 회수 여부를 함께 남기되, 동일 runner 반복 baseline 없이 임의 byte cap을 만들지 않는다.
+마지막 창 뒤에는 구분 가능한 marker 하나를 controller wire로 보내 healthy observer의 valid screen delta와 notifier/write/drain
+증가를 확인한다. 이어 client exact close, host graceful stop, child/host reap, socket·directory 제거와 artifact atomic write를
+검증한다. 따라서 600초 동안 아무것도 하지 않은 결과만으로 성공할 수 없다.
+
+gate는 실행마다 임의 nonce를 포함한 mode `0700` 임시 session root를 직접 만들며 사용자 `HOME`, 기본
+`MARU_SESSION_HOST_ROOT`, 실제 registry/manifest/socket을 읽거나 지우지 않는다. strict artifact는 비밀 경로 대신 닫힌
+`fixture_nonce_0700` root 종류만 기록하고, source boundary가 기본 root/HOME 조회 0을 별도로 고정한다. artifact 경로만 저장소의
+`tests/artifacts/perf/` 아래로 제한한다. 환경 불일치·표본 누락·중간 종료는 skip/pass가 아니라 typed failure이고,
+시작할 때 이전 artifact를 먼저 무효화한다. 실패는 stderr의 현재 stage와 typed error를 남기므로 이전 성공 artifact를
+현재 결과로 오인할 수 없다.
 
 ## P4 E2 runtime-shared observation cache 예산
 

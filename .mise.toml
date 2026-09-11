@@ -223,6 +223,10 @@ run = "zig build macos-app-launch-first-drawable -Doptimize=ReleaseFast"
 description = "Measure and validate the CR6f real-PTY output wake latency artifact"
 run = "zig build test-session-host-slow-observer-macos -Doptimize=ReleaseFast"
 
+[tasks.session-host-cr6f-idle-soak]
+description = "Run the CR6f 600-second continuous actual-host idle soak"
+run = "zig build test-session-host-cr6f-idle-soak-macos -Doptimize=ReleaseFast"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

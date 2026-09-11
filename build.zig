@@ -6398,6 +6398,31 @@ pub fn build(b: *std.Build) void {
     const run_session_host_cr6e_soak_validator_tests = b.addRunArtifact(session_host_cr6e_soak_validator_tests);
     run_session_host_cr6e_soak_validator_tests.addArg("--maru-expect-tests=1");
     boundary_step.dependOn(&run_session_host_cr6e_soak_validator_tests.step);
+    const session_host_cr6f_idle_soak_validator_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/session_host_cr6f_idle_soak_validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6f idle soak"},
+    });
+    const run_session_host_cr6f_idle_soak_validator_tests = b.addRunArtifact(session_host_cr6f_idle_soak_validator_tests);
+    run_session_host_cr6f_idle_soak_validator_tests.addArg("--maru-expect-tests=4");
+    boundary_step.dependOn(&run_session_host_cr6f_idle_soak_validator_tests.step);
+    const session_host_cr6f_idle_soak_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6f_idle_soak_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6f idle soak is continuous"},
+    });
+    const run_session_host_cr6f_idle_soak_boundary_tests = b.addRunArtifact(
+        session_host_cr6f_idle_soak_boundary_tests,
+    );
+    run_session_host_cr6f_idle_soak_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_cr6f_idle_soak_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_cr6f_idle_soak_boundary_tests.step);
     const session_host_cr6e_c1_step = b.step(
         "test-session-host-cr6e-c1",
         "Verify the bounded CR6e-c1 reconnect worker handoff owner",
@@ -13396,6 +13421,33 @@ pub fn build(b: *std.Build) void {
         slow_observer_step.dependOn(&run_session_host_slow_observer_validator_tests.step);
         slow_observer_step.dependOn(&run_slow_observer_probe_tests.step);
         slow_observer_step.dependOn(&run_slow_observer_e2e_tests.step);
+
+        const run_cr6f_idle_soak = b.addRunArtifact(slow_observer_e2e);
+        run_cr6f_idle_soak.addArtifactArg(slow_observer_host);
+        run_cr6f_idle_soak.addArgs(&.{
+            "tests/artifacts/perf/session-host-cr6f-idle-soak.json",
+            "--idle-soak",
+        });
+        run_cr6f_idle_soak.setCwd(b.path("."));
+        run_cr6f_idle_soak.has_side_effects = true;
+        const cr6f_idle_soak_validator = b.addExecutable(.{
+            .name = "maru-session-host-cr6f-idle-soak-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6f_idle_soak_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_cr6f_idle_soak_validator = b.addRunArtifact(cr6f_idle_soak_validator);
+        run_cr6f_idle_soak_validator.addArg("tests/artifacts/perf/session-host-cr6f-idle-soak.json");
+        run_cr6f_idle_soak_validator.setCwd(b.path("."));
+        run_cr6f_idle_soak_validator.has_side_effects = true;
+        run_cr6f_idle_soak_validator.step.dependOn(&run_cr6f_idle_soak.step);
+        const cr6f_idle_soak_step = b.step(
+            "test-session-host-cr6f-idle-soak-macos",
+            "Run the 600-second ReleaseFast CR6f actual-host idle soak",
+        );
+        cr6f_idle_soak_step.dependOn(&run_cr6f_idle_soak_validator.step);
 
         const cr6e_baseline = b.addExecutable(.{
             .name = "maru-session-host-cr6e-baseline",

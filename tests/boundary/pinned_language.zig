@@ -182,7 +182,9 @@ const inventory = [_]Entry{
     // (버그 보고를 받는 사람에게는 번역된 산문보다 `MARU_*` 로그 같은 키가 낫다).
     // 89 → 98: 전환 확인 화면(M12-f2)이 제목·두 이름표·두 버튼을 낸다. **이 화면만 런타임
     // 조회를 쓰면 그 화면만 다른 말을 한다** — 모바일 표면 전체가 아직 `ko` 로 굳어 있다(위 참조).
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 98 },
+    // 98 → 99: 「연결이 끊겨 다시 연결했습니다」 띠(M3c). 같은 연결 띠의 다른 문구들과 **한 줄에서**
+    // 갈리므로 그 자리만 다른 해상도를 쓸 수 없다.
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 99 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     // 9: `sectionOf` 가 namespace 마다 화면 헤더를 답하는데, 그 목록도 같은 comptime 테이블에서
     // 쓰인다 — `system_theme`(M13 시스템 다크/라이트)이 늘면서 한 줄이 늘었다. **줄이 아니라

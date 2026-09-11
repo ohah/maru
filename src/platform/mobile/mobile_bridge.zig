@@ -322,7 +322,17 @@ fn connectionMessage() ?[]const u8 {
     // 기기에서 실제로 그랬다 — 컨트롤 채널이 세션 준비 전에 지면서 남긴 `not_running` 이 세션
     // 내내 배너로 떠 있었다. 그 이름이 애초에 안 오게 축을 갈랐지만(ssh_pump.c 의 두 슬롯),
     // 순서를 그대로 두면 **다음에 어떤 이름이 새든 같은 사고가 다시 난다.**
-    if (conn_state == 11) return null; // MARU_SSH_STATE_READY
+    if (conn_state == 11) {
+        // **안 시킨 재접속은 붙은 뒤에도 말한다**(계약 §3.3). 「붙은 뒤에는 아무 말도 안 한다」를
+        // 한 칸만 늦춘 것이다 — 사용자가 그 화면을 보기 전까지 남아야 뜻이 있고, 한 글자라도 치면
+        // 이미 본 것이다(`sendInput` 이 끈다).
+        //
+        // **READY 「안」이어야 한다.** 이 검사를 앞에 두면 재접속이 **실패했을 때도** 「다시
+        // 연결했습니다」가 떠서, 끊긴 화면 위에 붙었다는 거짓말이 남는다(판정자가 잡았다 —
+        // 실패 문구 판정이 이 배너에 가려 붉어졌다). 붙은 것이 사실일 때만 말한다.
+        if (reconnect_notice) return maru.i18n.tIn(.ko, .mob_conn_reconnected);
+        return null; // MARU_SSH_STATE_READY
+    }
     const err = conn_err[0..conn_err_len];
     if (err.len > 0) {
         const key: maru.i18n.Key = if (std.mem.eql(u8, err, "connect_failed") or std.mem.eql(u8, err, "resolve_failed"))
@@ -473,6 +483,19 @@ pub fn firstComplete(list: []const mobile_config.Server) ?usize {
 ///
 /// **온전하지 않은 줄은 요청하지 않는다.** 화면이 그 줄을 "접속할 수 없다" 고 이미 말하고
 /// 있으므로, 눌렀을 때 조용히 아무 일도 안 하는 대신 그 자리에 머문다.
+/// **사용자가 「끊기」로 끊었다.** 그러면 자동으로 다시 붙지 않는다(계약 §3.0).
+///
+/// 안 기억하면 **끊은 것이 되돌아간다** — 배경에 다녀오면 host 가 config 를 다시 읽고, 그 자리가
+/// 곧 재접속 자리다. 끊기는 `CLOSED` 를 부르고 host 는 그때 목적지를 로컬로 되돌리므로, 다음
+/// 재로드가 그것을 「붙을 데가 없다」로 읽는다 — **홈 버튼 한 번에 끊어 둔 세션이 다시 선다.**
+/// **OS 가 끊은 것과 사용자가 끊은 것은 다른 일이다**: 앞은 다시 붙어야 하고 뒤는 붙으면 안 된다.
+var user_disconnected: bool = false;
+
+/// **안 시킨 재접속이 일어났다** — 화면이 그 사실을 말해야 한다(계약 §3.3, 사용자 확정).
+/// 배경에서 OS 가 소켓을 거둬 간 뒤 돌아오면 새 셸이 서는데, 그 전에는 `Last login` 이 옛 화면
+/// 아래에 경계 없이 붙을 뿐이라 **사용자는 자기 셸이 죽은 줄 몰랐다.**
+var reconnect_notice: bool = false;
+
 /// **확인 화면이 묻고 있는 대상.** 화면이 살아 있는 동안만 뜻이 있다 — 이름표 둘을 여기서 읽는다.
 var switch_target: ?usize = null;
 
@@ -520,6 +543,9 @@ fn resetTerminalForNewMachine() void {
 }
 
 fn requestConnect(i: usize) void {
+    // **다시 고른 것이 곧 「붙어라」다** — 끊어 뒀다는 기억을 여기서 푼다(계약 §3.0). 자동 접속은
+    // 이 함수에 닿기 전에 그 기억을 보고 돌아서므로, 여기 오는 것은 언제나 «시킨» 접속이다.
+    user_disconnected = false;
     // **남의 화면은 안 남긴다**(계약 §3.0 ④). 같은 기계로 다시 붙을 때는 남긴다 — 그 글은 내
     // 것이었고, 원격이 죽기 직전에 찍은 것이 왜 끊겼는지를 말해 줄 수 있다.
     const list = servers();
@@ -619,10 +645,27 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     //
     // "원격 세션이 있나" 는 **입력 목적지가 이미 아는 사실**이다(host 가 상태로 세운다) — 그
     // 사실을 두 번 세면 갈린다.
-    if (input_sink == 0) {
+    // **사용자가 끊었으면 다시 안 붙는다**(계약 §3.0 — M3c). 이 자리는 배경에서 돌아올 때마다
+    // 지나가므로, 안 보면 **끊어 둔 세션이 홈 버튼 한 번에 다시 선다.**
+    if (input_sink == 0 and !user_disconnected) {
         // **여기도 같은 함수를 부른다**(M12-f2) — 전에는 두 줄을 복사해 두었다. 요청을 세우는
         // 규칙이 늘면(승인한 지문을 적을 줄을 고르는 일이 그렇다) 한쪽만 고쳐진다.
-        if (firstComplete(next.servers[0..next.server_count])) |i| requestConnect(i);
+        if (firstComplete(next.servers[0..next.server_count])) |i| {
+            // **안 시킨 재접속인가.** 둘이 다 맞아야 한다:
+            // ① host 가 **세션이 닫혔다**고 알린 뒤일 것(`CLOSED`). `ssh_connecting` 이 있다는 것은
+            //    「붙자고 했다」지 「붙었다」가 아니라, 첫 접속이 실패한 뒤의 재시도까지 재접속으로
+            //    부르게 된다(판정자가 잡았다 — config 를 두 번 읽는 테스트마다 배너가 떴다).
+            // ② 직전에 붙자고 한 것이 **같은 기계**일 것. 다른 기계면 그것은 갈아타기다.
+            const list = servers();
+            if (conn_state == 12) { // MARU_SSH_STATE_CLOSED
+                if (ssh_connecting) |prev| {
+                    if (prev < list.len and i < list.len and sameMachine(list[prev], list[i])) {
+                        reconnect_notice = true;
+                    }
+                }
+            }
+            requestConnect(i);
+        }
     }
     if (cfg_source.len > 0) term_allocator.free(cfg_source);
     cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {
@@ -2155,6 +2198,9 @@ fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
     // **여기가 그 자리인 이유**: 이 함수가 「모든 입력 경로가 지나는 한 곳」이라 — 조각마다
     // 갈고리를 달면 언젠가 한 곳을 빠뜨리고, 그 경로로 친 글자만 두 번 들린다.
     dropAnnounce();
+    // **한 글자라도 쳤으면 이미 봤다**(계약 §3.3). 여기가 그 자리인 이유는 `dropAnnounce` 와 같다 —
+    // 모든 입력 경로가 지나는 한 곳이라, 조각마다 갈고리를 달면 언젠가 한 곳을 빠뜨린다.
+    reconnect_notice = false;
     if (input_sink == 0) {
         core.write(bytes) catch setLastError("core_write_input");
         return;
@@ -7549,6 +7595,8 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     // 일이라, 뜻이 분명한 여기서만 한다.
                     if (term_press.end() == .tap) {
                         disconnect_req = true;
+                        // **사용자가 끊었다** — 배경에 다녀와도 다시 안 붙는다(계약 §3.0).
+                        user_disconnected = true;
                         navPop();
                     }
                     return 1;

@@ -14,6 +14,7 @@ pub const Inputs = struct {
     workspace_path: [:0]const u8,
     harness: [:0]const u8,
     candidate_cli: [:0]const u8,
+    candidate_app_bundle: [:0]const u8,
     attach_product_test: [:0]const u8,
     upload_product_test: [:0]const u8,
     require_developer_id: bool,
@@ -22,7 +23,7 @@ pub const Inputs = struct {
 
 pub const CommandStorage = struct {
     workspace_environment: ["MARU_P5D_WORKSPACE=".len + std.fs.max_path_bytes:0]u8 = undefined,
-    args: [5][:0]const u8 = undefined,
+    args: [6][:0]const u8 = undefined,
     environment: [3][:0]const u8 = undefined,
 };
 
@@ -82,14 +83,14 @@ pub fn run(io: std.Io, execution: *Execution, inputs: Inputs, output: []u8) ![]c
 
 fn commandPlan(inputs: Inputs, storage: *CommandStorage) !CommandPlan {
     if (inputs.budget_ns <= 0 or !absolute(inputs.workspace_path) or !absolute(inputs.harness) or
-        !absolute(inputs.candidate_cli) or !absolute(inputs.attach_product_test) or
+        !absolute(inputs.candidate_cli) or !absolute(inputs.candidate_app_bundle) or !absolute(inputs.attach_product_test) or
         !absolute(inputs.upload_product_test)) return error.InvalidCommand;
     const workspace_environment = std.fmt.bufPrintZ(
         &storage.workspace_environment,
         "MARU_P5D_WORKSPACE={s}",
         .{inputs.workspace_path},
     ) catch return error.InvalidCommand;
-    storage.args = .{ shell, inputs.harness, inputs.candidate_cli, inputs.attach_product_test, inputs.upload_product_test };
+    storage.args = .{ shell, inputs.harness, inputs.candidate_cli, inputs.candidate_app_bundle, inputs.attach_product_test, inputs.upload_product_test };
     storage.environment = .{
         path_entry,
         if (inputs.require_developer_id) "MARU_P5D_REQUIRE_DEVELOPER_ID=1" else "MARU_P5D_REQUIRE_DEVELOPER_ID=0",
@@ -112,7 +113,7 @@ fn pristine(execution: *const Execution) bool {
 }
 
 fn aliasesInputs(bytes: []const u8, inputs: Inputs) bool {
-    inline for (.{ inputs.workspace_path, inputs.harness, inputs.candidate_cli, inputs.attach_product_test, inputs.upload_product_test }) |value|
+    inline for (.{ inputs.workspace_path, inputs.harness, inputs.candidate_cli, inputs.candidate_app_bundle, inputs.attach_product_test, inputs.upload_product_test }) |value|
         if (overlaps(bytes, value)) return true;
     return false;
 }

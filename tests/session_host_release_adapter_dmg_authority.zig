@@ -141,15 +141,21 @@ const Gate = struct {
     count: usize = 0,
     fail_execute: bool = false,
     fail_publish: bool = false,
+    mutate_extracted_cli: bool = false,
     rolled_back: bool = false,
 
     pub fn execute(self: *@This(), view: authority.MountedCandidate) !void {
-        try std.testing.expect(std.mem.endsWith(u8, view.cli_path, "/Maru.app/Contents/MacOS/maru"));
+        try std.testing.expect(std.mem.endsWith(u8, view.cli_path, "/candidate-cli"));
+        try std.testing.expect(std.mem.endsWith(u8, view.app_bundle_path, "/Maru.app"));
         try std.testing.expectEqual(@as(usize, 64), view.main_sha256.len);
         try std.testing.expectEqual(@as(usize, 64), view.cli_sha256.len);
         self.calls[self.count] = 1;
         self.count += 1;
         if (self.fail_execute) return error.GateFailed;
+        if (self.mutate_extracted_cli) {
+            try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(view.cli_path.ptr, 0o700));
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = view.cli_path, .data = "foreign-cli" });
+        }
     }
 
     pub fn publish(self: *@This(), view: authority.MountedCandidate) !void {
@@ -316,6 +322,36 @@ test "DMG authority publishes nothing after gate execution failure and still det
     ));
     try std.testing.expectEqualSlices(u8, &.{1}, gate.calls[0..gate.count]);
     try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+}
+
+test "DMG authority rejects private CLI byte drift after execution before publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.dmg", .data = candidate_bytes });
+    var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var storage: apple_transport.Storage = undefined;
+    var ops = FakeOps{};
+    var apple = FakeApple{};
+    var gate = Gate{ .mutate_extracted_cli = true };
+    // The byte drift is detected, and the stronger cleanup-integrity failure wins because the
+    // private executable's sealed stat changed as well.
+    try std.testing.expectError(error.CleanupFailed, authority.observeWithGate(
+        std.testing.allocator,
+        std.testing.io,
+        &ops,
+        &apple,
+        &gate,
+        try absolute(&tmp, "candidate.dmg", &candidate_buf),
+        try absolute(&tmp, "private-work", &work_buf),
+        expected(),
+        expected_version,
+        &storage,
+        5 * std.time.ns_per_s,
+    ));
+    try std.testing.expectEqualSlices(u8, &.{1}, gate.calls[0..gate.count]);
+    try std.testing.expectEqual(@as(usize, 1), ops.detach_calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "private-work", .{}));
 }
 
 test "DMG authority rolls publication back after publish failure" {

@@ -31,7 +31,7 @@ const Fixture = struct {
 };
 
 fn inputs(fixture: *Fixture, budget_ns: i128) runner.Inputs {
-    return .{ .workspace_path = fixture.workspace(), .harness = fixture.script(), .candidate_cli = "/usr/bin/true", .attach_product_test = "/usr/bin/true", .upload_product_test = "/usr/bin/true", .require_developer_id = true, .budget_ns = budget_ns };
+    return .{ .workspace_path = fixture.workspace(), .harness = fixture.script(), .candidate_cli = "/usr/bin/true", .candidate_app_bundle = "/Applications/Maru.app", .attach_product_test = "/usr/bin/true", .upload_product_test = "/usr/bin/true", .require_developer_id = true, .budget_ns = budget_ns };
 }
 
 test "command plan has one absolute shell argv and closed environment" {
@@ -40,8 +40,9 @@ test "command plan has one absolute shell argv and closed environment" {
     var storage: runner.CommandStorage = .{};
     const plan = try runner.commandPlanForTest(inputs(&fixture, std.time.ns_per_s), &storage);
     try std.testing.expectEqualStrings("/bin/sh", plan.executable);
-    try std.testing.expectEqual(@as(usize, 5), plan.args.len);
+    try std.testing.expectEqual(@as(usize, 6), plan.args.len);
     try std.testing.expectEqualStrings(fixture.script(), plan.args[1]);
+    try std.testing.expectEqualStrings("/Applications/Maru.app", plan.args[3]);
     try std.testing.expectEqual(@as(usize, 3), plan.environment.len);
     try std.testing.expectEqualStrings("PATH=/usr/bin:/bin", plan.environment[0]);
     try std.testing.expectEqualStrings("MARU_P5D_REQUIRE_DEVELOPER_ID=1", plan.environment[1]);

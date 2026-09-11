@@ -3,14 +3,16 @@
 # drives the existing current-product PTY oracle through `/usr/bin/ssh -tt`.
 set -eu
 
-if [ "$#" -ne 3 ]; then
-	echo "usage: $0 <bundle-cli> <attach-product-e2e-test> <ssh-upload-product-e2e-test>" >&2
+if [ "$#" -ne 4 ]; then
+	echo "usage: $0 <private-bundle-cli> <mounted-app-root> <attach-product-e2e-test> <ssh-upload-product-e2e-test>" >&2
 	exit 2
 fi
 
 BUNDLE_CLI=$1
 PRODUCT_TEST=$2
-UPLOAD_TEST=$3
+APP_ROOT=$2
+PRODUCT_TEST=$3
+UPLOAD_TEST=$4
 SSHD=/usr/sbin/sshd
 SSH=/usr/bin/ssh
 SSH_KEYGEN=/usr/bin/ssh-keygen
@@ -28,7 +30,8 @@ PRODUCT_TEST=$(CDPATH= cd -- "$(dirname -- "$PRODUCT_TEST")" && pwd)/$(basename 
 UPLOAD_TEST=$(CDPATH= cd -- "$(dirname -- "$UPLOAD_TEST")" && pwd)/$(basename -- "$UPLOAD_TEST")
 [ -x "$UPLOAD_TEST" ] || { echo "p5d: SSH upload product E2E driver is not executable" >&2; exit 1; }
 
-APP_ROOT=$(CDPATH= cd -- "$(dirname -- "$BUNDLE_CLI")/../.." && pwd)
+[ -d "$APP_ROOT" ] && [ ! -L "$APP_ROOT" ] || { echo "p5d: mounted app root is not a real directory" >&2; exit 1; }
+APP_ROOT=$(CDPATH= cd -- "$APP_ROOT" && pwd -P)
 /usr/bin/codesign --verify --strict "$BUNDLE_CLI"
 /usr/bin/codesign --verify --strict --deep "$APP_ROOT"
 

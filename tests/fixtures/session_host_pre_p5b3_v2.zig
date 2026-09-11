@@ -13,6 +13,8 @@ const header_len = 32;
 const runtime_get = "runtime.get";
 const runtime_attach = "runtime.attach";
 const runtime_detach = "runtime.detach";
+const runtime_select_op = "runtime.select_op";
+const runtime_selected_text = "runtime.selected_text";
 const controller_takeover = "controller.takeover";
 
 const Frame = struct {
@@ -168,6 +170,29 @@ fn serveConnection(
             try writeFrame(fd, 4, 0, frame.request_id, 0, body);
             try writeFrame(fd, 6, 1, 0, 1, snapshot);
             try appendReport(report, if (observer) "runtime.attach.observer\n" else "runtime.attach.controller\n");
+        } else if (std.mem.indexOf(u8, frame.payload, runtime_select_op) != null) {
+            // This is the pre-additive contract: the old host understands only stream/op/row/col.
+            // Its JSON object parser ignores members it does not know, so the response preserves
+            // the old whitespace-only boundary for `foo.bar` instead of disconnecting.
+            if (std.mem.indexOf(u8, frame.payload, "\"stream_id\":1") == null or
+                std.mem.indexOf(u8, frame.payload, "\"op\":\"word\"") == null or
+                std.mem.indexOf(u8, frame.payload, "\"row\":0") == null or
+                std.mem.indexOf(u8, frame.payload, "\"col\":0") == null)
+                return error.InvalidLegacySelectOp;
+            try writeFrame(fd, 4, 0, frame.request_id, 0, "{\"result\":{\"sel\":true,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":6,\"block\":false}}");
+            try appendReport(report, "runtime.select_op.legacy\n");
+        } else if (std.mem.indexOf(u8, frame.payload, runtime_selected_text) != null) {
+            // The old host extracts only the supplied span. Unknown additive intent does not
+            // change that interpretation and must not poison the same-major connection.
+            if (std.mem.indexOf(u8, frame.payload, "\"stream_id\":1") == null or
+                std.mem.indexOf(u8, frame.payload, "\"sr\":0") == null or
+                std.mem.indexOf(u8, frame.payload, "\"sc\":0") == null or
+                std.mem.indexOf(u8, frame.payload, "\"er\":0") == null or
+                std.mem.indexOf(u8, frame.payload, "\"ec\":0") == null or
+                std.mem.indexOf(u8, frame.payload, "\"block\":false") == null)
+                return error.InvalidLegacySelectedText;
+            try writeFrame(fd, 4, 0, frame.request_id, 0, "{\"result\":{\"text\":\"x\"}}");
+            try appendReport(report, "runtime.selected_text.legacy\n");
         } else if (std.mem.indexOf(u8, frame.payload, runtime_detach) != null) {
             try writeFrame(fd, 4, 0, frame.request_id, 0, "{\"result\":{\"detached\":true}}");
             try appendReport(report, "runtime.detach\n");

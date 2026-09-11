@@ -40,6 +40,12 @@ test "p5c3d compatibility fixture is frozen source with provenance and a product
 
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, fixture, "@import(\"maru\")"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, fixture, "@import(\"session_host\")"));
+    // The frozen peer must not know either future additive field by name. Compatibility is proved
+    // by the old object decoder ignoring them, not by teaching the fixture a special-case shim.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, fixture, "separators_hex"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, fixture, "\\\"all\\\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fixture, "runtime.select_op.legacy\\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fixture, "runtime.selected_text.legacy\\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, provenance, "pub const source_revision ="));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, provenance, "pub const source_sha256 ="));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, provenance, "pub const expected_fingerprint ="));

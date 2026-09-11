@@ -2874,8 +2874,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **자동 검증:** `test-session-host`가 fixed request/raw decode, 64-byte cap, odd/invalid hex, invalid UTF-8,
   server field routing을 검증한다. fresh-process 독립 host E2E가 `foo.bar`에 구분자 `.`를 적용해
   `foo`만 선택·복사함을 검증한다.
-- **남은 gate:** additive field를 모르는 same-major 구 host는 기본 공백 경계로 degraded된다.
-  frozen 구 binary 재접속 행은 아직 별도 자동 gate가 아니다.
+- **구 host 호환 gate:** P5c3d frozen same-major binary E2E가 additive field 이름을 전혀 모르는
+  구 host에 `separators_hex`를 보내도 연결을 유지하고 기본 공백 경계로 degraded되는지 검증한다.
+  이어지는 기존 controller 입력도 성공해 요청 이후 connection 생존을 고정한다.
 
 ### 영속 host 전체 선택
 
@@ -2884,8 +2885,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   host lock 아래 `selectAll → extractSelection → clear`를 원자 실행한다.
 - **자동 검증:** `test-session-host`가 typed request의 `all` discriminator fail-close, server additive field
   routing과 transient host selection clear, 실제 host의 viewport보다 긴 scrollback 전체 선택·복사를 검증한다.
-- **호환 한계:** `all` op를 모르는 same-major 구 host는 `{sel:false}`를 반환해 새 client가 절대 좌표를
-  추측하지 않고 현재 viewport 선택으로만 degraded된다. frozen 구 binary 재접속 행은 별도 자동 gate가 아니다.
+- **구 host 호환 gate:** `all` field를 모르는 same-major 구 host는 새 client의 additive intent를 무시하고
+  기존 span 기반 텍스트만 반환한다. P5c3d frozen binary E2E가 응답과 후속 controller 입력 생존을 검증해,
+  새 client가 절대 좌표나 구 host의 미지원 권위를 추측하지 않는 degraded 경계를 고정한다.
 
 ### P4 N1 bounded notification journal
 

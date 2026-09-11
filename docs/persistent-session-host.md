@@ -4,7 +4,7 @@
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
 
-> **상태: P3 core 구현, P4/P5 미완료.** 기본값은 [설정](configuration.md)의 `session.keep-alive-after-quit` 행이 단일 출처다(여기 다시 적지 않는다 — 그 서술이 낡아 실제로 오독을 냈다). 그 값이 `true`면
+> 기본값은 [설정](configuration.md)의 `session.keep-alive-after-quit` 행이 단일 출처다(여기 다시 적지 않는다 — 그 서술이 낡아 실제로 오독을 냈다). 그 값이 `true`면
 > 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 **정상 GUI Quit 뒤** 살아남고 재실행 시
 > 재접속한다 — 호스트 프로세스, `runtime-handle`(=`host_id:runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
 > (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·기본 드래그 선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
@@ -8094,7 +8094,7 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
     limits, runtime membership과 전량 검증한 candidate를 final manager에 결합한 뒤에만 publish한다. 손상·중복 key·cap 초과,
     foreign host, allocation failure는 부분 restore나 ID reset 없이 upgrade 전체를 fail-close한다. N1 이전 writer의 section
     부재는 빈 journal로 호환되지만, section을 광고한 writer의 손상은 조용히 버리지 않는다.
-- durable tombstone과 typed config provenance/explicit override retention은 default `false` opt-in 제품 계약으로 유지한다.
+- durable tombstone과 typed config provenance/explicit override retention은 현재 default `true` 제품 계약으로 유지한다.
 - 자동 default-on은 현재 제품 완료 뒤에도 자동 착수하지 않는다. 별도 G3 백로그에서 사용자 재승인, immutable predecessor와
   provisioned release runner가 모두 준비된 경우에만 독립 release initiative로 연다.
 
@@ -16145,7 +16145,8 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
   배포 스크립트는 Developer ID inside-out 서명 직후
   `test-session-host-p5d-artifact`를 실행해 동일 TeamIdentifier·hardened runtime·universal CLI를 확인하고 같은 SSH
   제품 gate를 재실행한다. 자격증명 없는 ad-hoc 경로에 `MARU_P5D_REQUIRE_DEVELOPER_ID=1`을 주면 authority 검사에서
-  fail-close하며, 실제 provisioned release workflow green 전까지 P5d 상태는 부분 구현이다.
+  fail-close한다. 따라서 **P5d 구현·ad-hoc 제품 gate는 완료**, phase 완료 증거와 signed 배포 호환 판정은 실제
+  provisioned release workflow가 green일 때까지 보류한다.
 
 P5a1→P5d는 각각 이전 slice gate를 재실행하는 독립 PR이며 한 PR에서 묶어 완료 처리하지 않는다.
 

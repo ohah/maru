@@ -38,6 +38,17 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     try std.testing.expect(std.mem.indexOf(u8, verification, "Session default G1 config provenance") != null);
     try expectOne(commands, "`zig build test-session-host-config-provenance`");
 
+    // The session-host status is a current gate inventory, not a historical phase headline.
+    // Keep the default and the locally-runnable versus provisioned-release boundary aligned
+    // across the two normative documents so a closed slice cannot return to the backlog.
+    try std.testing.expectEqual(@as(usize, 0), count(persistent, "현재 판정(2026-09-11 코드·gate 대조)"));
+    try expectOne(plan, "현재 판정(2026-09-11 코드·gate 대조)");
+    try expectOne(plan, "P1~P5의 로컬/일반 CI 구현과 ad-hoc 제품 gate는 완료");
+    try expectOne(verification, "P1~P5의 로컬/일반 CI 구현과 ad-hoc 제품 gate는 완료");
+    try std.testing.expectEqual(@as(usize, 0), count(persistent, "상태: P3 core 구현, P4/P5 미완료"));
+    try std.testing.expectEqual(@as(usize, 0), count(persistent, "default `false` opt-in 제품 계약"));
+    try std.testing.expectEqual(@as(usize, 0), count(verification, "설정은 아직 기본 `false`다"));
+
     // G2 deliberately opens these projections in app_session/settings, plus the read-only v181
     // release baseline classifier. Exact counts include same-file tests; another product reader
     // must update this SSOT boundary rather than silently becoming another policy owner.

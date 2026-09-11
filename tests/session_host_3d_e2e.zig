@@ -110,6 +110,26 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     defer allocator.free(legacy_snapshot);
     try legacy.sendInput(1, "before");
 
+    // The current client sends additive selection fields to a same-major host built before those
+    // fields existed. The frozen host must ignore the unknown members, keep the connection live,
+    // and answer with its old semantics: whitespace-only word boundaries and span-based copy.
+    const legacy_word = try legacy.call(
+        "runtime.select_op",
+        "{\"stream_id\":1,\"op\":\"word\",\"row\":0,\"col\":0,\"separators_hex\":\"2e\"}",
+    );
+    defer allocator.free(legacy_word);
+    try std.testing.expect(std.mem.indexOf(u8, legacy_word, "\"sel\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, legacy_word, "\"sc\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, legacy_word, "\"ec\":6") != null);
+
+    const legacy_select_all = try legacy.call(
+        "runtime.selected_text",
+        "{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":0,\"block\":false,\"all\":true}",
+    );
+    defer allocator.free(legacy_select_all);
+    try std.testing.expect(std.mem.indexOf(u8, legacy_select_all, "\"text\":\"x\"") != null);
+    try legacy.sendInput(1, "after-selection");
+
     var discovered = session_host.recovery_discovery.discover(allocator, session_dir);
     defer discovered.deinit(allocator);
     switch (discovered) {
@@ -190,10 +210,12 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     const takeover = try runProductAttach(product, base, runtime_text, .takeover);
     try std.testing.expectEqual(@as(c_int, 5), takeover.exit_code);
     try legacy.sendInput(1, "after");
-    try waitForCount(report_path, "input\n", 2);
+    try waitForCount(report_path, "input\n", 3);
     const report = try readFile(allocator, report_path, 64 * 1024);
     defer allocator.free(report);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report, "runtime.attach.observer\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report, "runtime.select_op.legacy\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report, "runtime.selected_text.legacy\n"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, report, "controller.takeover.UNEXPECTED\n"));
 }
 

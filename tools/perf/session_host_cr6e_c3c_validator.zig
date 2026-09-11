@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const Identity = struct {
+pub const Identity = struct {
     host_id_before: []const u8,
     host_id_after: []const u8,
     runtime_id_before: []const u8,
@@ -13,7 +13,7 @@ const Identity = struct {
     child_pid_after: i32,
 };
 
-const Continuity = struct {
+pub const Continuity = struct {
     historical_before_count: u32,
     historical_after_count: u32,
     disconnect_after_count: u32,
@@ -22,7 +22,7 @@ const Continuity = struct {
     resize_count: u32,
 };
 
-const Sibling = struct {
+pub const Sibling = struct {
     runtime_id: []const u8,
     live_before: bool,
     live_after: bool,
@@ -30,18 +30,18 @@ const Sibling = struct {
     controller_after: bool,
 };
 
-const Frame = struct {
+pub const Frame = struct {
     blocking_operations: u32,
     max_stall_ns: u64,
 };
 
-const InputFrame = struct {
+pub const InputFrame = struct {
     dispatch_ns: u64,
     submit_ns: u64,
     latency_ns: u64,
 };
 
-const Cleanup = struct {
+pub const Cleanup = struct {
     worker: u32,
     jobs: u32,
     completion: u32,
@@ -59,7 +59,7 @@ const Cleanup = struct {
     host_artifacts_removed: bool,
 };
 
-const Artifact = struct {
+pub const Artifact = struct {
     schema: []const u8,
     build_mode: []const u8,
     identity: Identity,
@@ -76,7 +76,7 @@ fn canonicalId(text: []const u8) bool {
     return true;
 }
 
-fn validateArtifact(artifact: Artifact) !void {
+pub fn validateArtifact(artifact: Artifact) !void {
     if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-c3c-appkit.v2") or
         !std.mem.eql(u8, artifact.build_mode, "ReleaseFast"))
         return error.InvalidEnvelope;
@@ -183,7 +183,7 @@ test "CR6e-c3c validator rejects unknown duplicate and missing JSON fields" {
     try std.testing.expectError(error.InvalidJsonSchema, validateBytes(std.testing.allocator, missing_input_frame));
 }
 
-fn validFixture() Artifact {
+pub fn validFixture() Artifact {
     return .{
         .schema = "maru.session-host-cr6e-c3c-appkit.v2",
         .build_mode = "ReleaseFast",

@@ -39,6 +39,10 @@ fn upgradeLeaf(allocator: std.mem.Allocator, count: u64) ![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, predecessor_exe_sha, current_exe_sha, requirement_sha, count, set_sha });
 }
 
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ current_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ current_exe_sha ++ "\",\"candidate_cli_sha256\":\"" ++ set_many_sha ++ "\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
+}
+
 fn assetFor(role: manifest.AssetRole, name: []const u8, digest: []const u8, size: u64) manifest.Asset {
     return .{ .role = role, .name = name, .sha256 = digest, .size = size };
 }
@@ -101,7 +105,7 @@ const Fixture = struct {
 
         var expected = predecessor_expected;
         expected.manifest_sha256 = &self.predecessor_manifest_sha;
-        self.summary_bytes = try evidence.assembleUpgrade(allocator, common(), expected, one, many);
+        self.summary_bytes = try evidence.assembleUpgrade(allocator, common(), expected, cliLeaf(), one, many);
         self.summary_sha = sha256(self.summary_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence.json", .data = self.summary_bytes });
         _ = try absolute(&self.tmp, "evidence.json", &self.summary_path);

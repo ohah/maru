@@ -57,6 +57,7 @@ const Paths = struct {
     dmg_bundle: StoredPath = .{},
     frozen_bundle: StoredPath = .{},
     dmg_work: StoredPath = .{},
+    signed_cli_ssh: StoredPath = .{},
     manifest: StoredPath = .{},
     source_root: StoredPath = .{},
     zig: StoredPath = .{},
@@ -262,6 +263,7 @@ const Product = struct {
             .files = &self.execution.prerequisite.files,
             .product = &self.execution.prerequisite.product,
             .candidate_paths = .{ .dmg = self.execution.paths.dmg.value(), .frozen_executable = self.execution.paths.frozen.value(), .dmg_work = self.execution.paths.dmg_work.value() },
+            .signed_cli_ssh = self.execution.paths.signed_cli_ssh.value(),
             .source = &self.execution.prerequisite.source,
             .workspace = &self.execution.upgrade_workspace,
             .toolchain = &self.execution.toolchain,
@@ -384,6 +386,7 @@ fn copyPaths(paths: *Paths, command: bootstrap_mod.PrepareProfileCandidate) !voi
     try paths.dmg_bundle.set(command.candidate_dmg_bundle);
     try paths.frozen_bundle.set(command.candidate_frozen_bundle);
     try paths.dmg_work.set(command.dmg_work);
+    try paths.signed_cli_ssh.set(command.signed_cli_ssh);
     try paths.manifest.set(command.manifest);
     try paths.source_root.set(command.source_root);
     try paths.zig.set(command.zig);
@@ -404,12 +407,12 @@ fn validateBuffers(execution: *Execution, bootstrap: *Bootstrap, environment: En
 fn validateAliases(execution: *Execution, view: bootstrap_mod.View, command: bootstrap_mod.PrepareProfileCandidate, token: []const u8, buffers: Buffers) !void {
     const protected = [_][]const u8{ std.mem.asBytes(execution), token, buffers.github_response, buffers.manifest_download, buffers.attestation_response };
     const borrowed = [_][]const u8{
-        view.context.repository.owner,   view.context.repository.name, view.context.tag,              view.context.source_commit,
-        view.context.build.workflow_ref, view.github_cli,              command.repo,                  command.tag,
-        command.test_uuid,               command.dmg,                  command.frozen_executable,     command.candidate_dmg_bundle,
-        command.candidate_frozen_bundle, command.dmg_work,             command.manifest,              command.source_root,
-        command.zig,                     command.zig_sha256,           command.predecessor_workspace, command.upgrade_workspace,
-        command.durable_preparation,     command.timing_output,
+        view.context.repository.owner,   view.context.repository.name, view.context.tag,          view.context.source_commit,
+        view.context.build.workflow_ref, view.github_cli,              command.repo,              command.tag,
+        command.test_uuid,               command.dmg,                  command.frozen_executable, command.candidate_dmg_bundle,
+        command.candidate_frozen_bundle, command.dmg_work,             command.signed_cli_ssh,    command.manifest,
+        command.source_root,             command.zig,                  command.zig_sha256,        command.predecessor_workspace,
+        command.upgrade_workspace,       command.durable_preparation,  command.timing_output,
     };
     for (borrowed, 0..) |value, index| {
         for (protected) |region| if (overlaps(value, region)) return error.InvalidOwner;
@@ -423,6 +426,7 @@ fn pathsDigest(paths: *const Paths) ![32]u8 {
     try hashPath(&hash, &paths.dmg_bundle);
     try hashPath(&hash, &paths.frozen_bundle);
     try hashPath(&hash, &paths.dmg_work);
+    try hashPath(&hash, &paths.signed_cli_ssh);
     try hashPath(&hash, &paths.manifest);
     try hashPath(&hash, &paths.source_root);
     try hashPath(&hash, &paths.zig);
@@ -507,7 +511,7 @@ fn validScalar(value: []const u8, max: usize) bool {
 fn pathsPristine(paths: *const Paths) bool {
     return pathPristine(&paths.dmg) and pathPristine(&paths.frozen) and
         pathPristine(&paths.dmg_bundle) and pathPristine(&paths.frozen_bundle) and
-        pathPristine(&paths.dmg_work) and pathPristine(&paths.manifest) and
+        pathPristine(&paths.dmg_work) and pathPristine(&paths.signed_cli_ssh) and pathPristine(&paths.manifest) and
         pathPristine(&paths.source_root) and pathPristine(&paths.zig) and
         pathPristine(&paths.predecessor_workspace) and pathPristine(&paths.upgrade_workspace) and
         pathPristine(&paths.durable) and pathPristine(&paths.timing);

@@ -30,6 +30,7 @@ pub const Inputs = struct {
     files: *const candidate_files.CandidateFiles,
     product: *const candidate_product.CandidateProduct,
     candidate_paths: candidate_product.Paths,
+    signed_cli_ssh: [:0]const u8,
     source: *const source_tree.SourceTreeAuthority,
     workspace: *runner_workspace.Workspace,
     toolchain: *const zig_toolchain.ZigToolchainAuthority,
@@ -176,6 +177,7 @@ const Product = struct {
             .files = self.inputs.files,
             .product = self.inputs.product,
             .candidate_paths = self.inputs.candidate_paths,
+            .signed_cli_ssh = self.inputs.signed_cli_ssh,
             .source = self.inputs.source,
             .predecessor = &predecessor.identity,
             .authenticated = manifest_view.authenticated,
@@ -236,6 +238,7 @@ fn validateInputs(inputs: Inputs, result: *const ProfileUpgradeExecution) !void 
         inputs.context.tag,                            inputs.context.source_commit,
         inputs.context.build.workflow_ref,             inputs.candidate_paths.dmg,
         inputs.candidate_paths.frozen_executable,      inputs.candidate_paths.dmg_work,
+        inputs.signed_cli_ssh,
     };
     if (overlaps(result_bytes, inputs.response)) return error.InvalidOwner;
     for (borrowed) |other| {

@@ -68,23 +68,23 @@ test "release adapter parses exact predecessor command" {
     try std.testing.expectEqualStrings("/tmp/download", parsed.verify_predecessor.work_dir);
 }
 
-fn candidateArgs() [37][]const u8 {
+fn candidateArgs() [39][]const u8 {
     return .{
-        "publish-candidate",                        "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                                                     "/usr/local/bin/gh",                                "--github-cli-sha256",                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3",                           "--dmg-work",                                       "/tmp/dmg-work",                         "--baseline-workspace",
-        "/tmp/baseline-work",                       "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                         "/tmp/candidate",
-        "--zig",                                    "/usr/local/bin/zig",                   "--zig-size",                                            "123456",                                  "--zig-sha256",                                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--candidate-dmg-bundle",                           "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
-        "/tmp/attest/candidate-frozen.bundle.json",
+        "publish-candidate",                     "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                           "/usr/local/bin/gh",            "--github-cli-sha256",                                              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--test-uuid",                           "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3", "--dmg-work",                   "/tmp/dmg-work",                                                    "--baseline-workspace",
+        "/tmp/baseline-work",                    "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--signed-cli-ssh",                       "/tmp/p5d/signed-cli-ssh.json", "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json",
+        "--source-root",                         "/tmp/candidate",                       "--zig",                                                 "/usr/local/bin/zig",                      "--zig-size",                                  "123456",                                 "--zig-sha256",                 "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--candidate-dmg-bundle",
+        "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",            "/tmp/attest/candidate-frozen.bundle.json",
     };
 }
 
-fn profileStage3Args() [39][]const u8 {
+fn profileStage3Args() [41][]const u8 {
     return .{
-        "prepare-profile-candidate",                "--repo",                               "ohah/maru",                        "--tag",                                                            "v1.2.3",                                           "--github-cli",                           "/usr/local/bin/gh",      "--github-cli-sha256",                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                            "/tmp/candidate/Maru-1.2.3-universal.dmg",                          "--frozen-executable",                              "/tmp/candidate/maru-session-host-1.2.3", "--candidate-dmg-bundle", "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
-        "/tmp/attest/candidate-frozen.bundle.json", "--dmg-work",                           "/tmp/dmg-work",                    "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                          "/tmp/source",            "--zig",                                 "/usr/local/bin/zig",
-        "--zig-size",                               "123456",                               "--zig-sha256",                     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--predecessor-workspace",                          "/tmp/predecessor-work",                  "--upgrade-workspace",    "/tmp/upgrade-work",                     "--durable-preparation",
-        "/tmp/handoff/profile-stage3",              "--timing-output",                      "/tmp/timing/profile-upgrade.json",
+        "prepare-profile-candidate",                "--repo",                               "ohah/maru",                   "--tag",                                   "v1.2.3",                           "--github-cli",                                                     "/usr/local/bin/gh",                                "--github-cli-sha256",                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                       "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",              "/tmp/candidate/maru-session-host-1.2.3",                           "--candidate-dmg-bundle",                           "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
+        "/tmp/attest/candidate-frozen.bundle.json", "--dmg-work",                           "/tmp/dmg-work",               "--signed-cli-ssh",                        "/tmp/p5d/signed-cli-ssh.json",     "--manifest",                                                       "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                         "/tmp/source",
+        "--zig",                                    "/usr/local/bin/zig",                   "--zig-size",                  "123456",                                  "--zig-sha256",                     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "--predecessor-workspace",                          "/tmp/predecessor-work",                 "--upgrade-workspace",
+        "/tmp/upgrade-work",                        "--durable-preparation",                "/tmp/handoff/profile-stage3", "--timing-output",                         "/tmp/timing/profile-upgrade.json",
     };
 }
 
@@ -96,6 +96,7 @@ test "release adapter parses exact profile stage3 bootstrap command" {
     try std.testing.expectEqualStrings("/tmp/upgrade-work", value.upgrade_workspace);
     try std.testing.expectEqualStrings("/tmp/handoff/profile-stage3", value.durable_preparation);
     try std.testing.expectEqualStrings("/tmp/timing/profile-upgrade.json", value.timing_output);
+    try std.testing.expectEqualStrings("/tmp/p5d/signed-cli-ssh.json", value.signed_cli_ssh);
     try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "profile"));
     try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "predecessor_release_id"));
     try std.testing.expect(!@hasField(adapter.PrepareProfileCandidate, "timing"));
@@ -105,6 +106,8 @@ test "release adapter parses exact profile stage3 bootstrap command" {
 test "profile stage3 bootstrap rejects missing injection and nested authority paths" {
     const exact = profileStage3Args();
     try std.testing.expectError(error.MissingOption, adapter.parseArgs(exact[0 .. exact.len - 2]));
+    const missing_cli_gate = withoutOption(exact, "--signed-cli-ssh");
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(&missing_cli_gate));
 
     inline for (.{ "--profile", "--predecessor-release-id", "--predecessor-tag", "--predecessor-commit", "--predecessor-manifest-sha256", "--evidence", "--manifest-role", "--signer-requirement", "--timing", "--success" }) |forbidden| {
         var injected = exact;
@@ -115,14 +118,17 @@ test "profile stage3 bootstrap rejects missing injection and nested authority pa
     var nested = exact;
     nested[nested.len - 1] = "/tmp/handoff/profile-stage3/timing.json";
     try std.testing.expectError(error.PathAlias, adapter.parseArgs(&nested));
+    var aliased_cli_gate = exact;
+    setOption(&aliased_cli_gate, "--signed-cli-ssh", "/tmp/dmg-work");
+    try std.testing.expectError(error.PathAlias, adapter.parseArgs(&aliased_cli_gate));
 
     var wrong_manifest = exact;
-    wrong_manifest[22] = "/tmp/output/Maru-1.2.4-session-host-release.json";
+    setOption(&wrong_manifest, "--manifest", "/tmp/output/Maru-1.2.4-session-host-release.json");
     try std.testing.expectError(error.InvalidManifestAssetName, adapter.parseArgs(&wrong_manifest));
 }
 
 test "stage3 source root contains only immutable candidate products" {
-    var baseline: [39][]const u8 = undefined;
+    var baseline: [41][]const u8 = undefined;
     const publish = candidateArgs();
     @memcpy(baseline[0..publish.len], &publish);
     baseline[0] = "prepare-candidate";
@@ -150,6 +156,21 @@ fn setOption(args: [][]const u8, option: []const u8, value: []const u8) void {
         }
     }
     unreachable;
+}
+
+fn withoutOption(args: anytype, option: []const u8) [args.len - 2][]const u8 {
+    var result: [args.len - 2][]const u8 = undefined;
+    result[0] = args[0];
+    var out: usize = 1;
+    var index: usize = 1;
+    while (index + 1 < args.len) : (index += 2) {
+        if (std.mem.eql(u8, args[index], option)) continue;
+        result[out] = args[index];
+        result[out + 1] = args[index + 1];
+        out += 2;
+    }
+    std.debug.assert(out == result.len);
+    return result;
 }
 
 fn prepareAggregateArgs() [21][]const u8 {
@@ -317,26 +338,29 @@ test "release adapter parses exact publish-candidate command and permits source 
     try std.testing.expectEqualStrings("/tmp/output/Maru-1.2.3-session-host-release.json", parsed.publish_candidate.manifest);
     try std.testing.expectEqualStrings("/tmp/attest/candidate-dmg.bundle.json", parsed.publish_candidate.candidate_dmg_bundle);
     try std.testing.expectEqualStrings("/tmp/attest/candidate-frozen.bundle.json", parsed.publish_candidate.candidate_frozen_bundle);
+    try std.testing.expectEqualStrings("/tmp/p5d/signed-cli-ssh.json", parsed.publish_candidate.signed_cli_ssh);
+    const missing_cli_gate = withoutOption(candidateArgs(), "--signed-cli-ssh");
+    try std.testing.expectError(error.MissingOption, adapter.parseArgs(&missing_cli_gate));
 }
 
 test "release adapter rejects malformed candidate UUID Zig authority and local paths" {
     var args = candidateArgs();
-    args[10] = "123e4567-e89b-12d3-a456-426614174000";
+    setOption(&args, "--test-uuid", "123e4567-e89b-12d3-a456-426614174000");
     try std.testing.expectError(error.InvalidTestUuid, adapter.parseArgs(&args));
     args = candidateArgs();
-    args[30] = "0123";
+    setOption(&args, "--zig-size", "0123");
     try std.testing.expectError(error.InvalidZigSize, adapter.parseArgs(&args));
     args = candidateArgs();
-    args[30] = "01";
+    setOption(&args, "--zig-size", "01");
     try std.testing.expectError(error.InvalidZigSize, adapter.parseArgs(&args));
     args = candidateArgs();
-    args[32] = "ABC";
+    setOption(&args, "--zig-sha256", "ABC");
     try std.testing.expectError(error.InvalidZigSha256, adapter.parseArgs(&args));
     args = candidateArgs();
-    args[20] = "relative/maru";
+    setOption(&args, "--app-cli-executable", "relative/maru");
     try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
     args = candidateArgs();
-    args[24] = "Maru-1.2.3-session-host-release.json";
+    setOption(&args, "--manifest", "Maru-1.2.3-session-host-release.json");
     try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&args));
     args = candidateArgs();
     args[16] = "/tmp/candidate/Maru.app";
@@ -349,7 +373,7 @@ test "release adapter rejects malformed candidate UUID Zig authority and local p
     const missing_bundle = candidateArgs();
     try std.testing.expectError(error.MissingOption, adapter.parseArgs(missing_bundle[0..35]));
     var noncanonical_bundle = candidateArgs();
-    noncanonical_bundle[34] = "/tmp/attest/../candidate-dmg.bundle.json";
+    setOption(&noncanonical_bundle, "--candidate-dmg-bundle", "/tmp/attest/../candidate-dmg.bundle.json");
     try std.testing.expectError(error.InvalidCandidatePath, adapter.parseArgs(&noncanonical_bundle));
 }
 

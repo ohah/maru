@@ -9,7 +9,7 @@ const command_process = @import("release_adapter_live_workflow_command_process")
 const profile = @import("release_adapter_profile_endorsement");
 const c = std.c;
 
-pub const profiled_option_count: usize = 22;
+pub const profiled_option_count: usize = 23;
 const max_run_arguments: usize = 3 + contract.max_command_args;
 pub const max_arguments: usize = 3 + 2 * profiled_option_count;
 pub const Error = owner.Error || context.Error || profile.Error || contract.Error || error{
@@ -83,10 +83,10 @@ const ProfiledExecution = struct {
 };
 
 const profiled_options = [_][]const u8{
-    "--repo",                "--tag",                   "--github-cli",              "--github-cli-sha256", "--test-uuid",          "--dmg",
-    "--frozen-executable",   "--candidate-dmg-bundle",  "--candidate-frozen-bundle", "--dmg-work",          "--baseline-workspace", "--app-main-executable",
-    "--app-cli-executable",  "--manifest",              "--source-root",             "--zig",               "--zig-size",           "--zig-sha256",
-    "--durable-preparation", "--predecessor-workspace", "--upgrade-workspace",       "--timing-output",
+    "--repo",               "--tag",                  "--github-cli",              "--github-cli-sha256", "--test-uuid",          "--dmg",
+    "--frozen-executable",  "--candidate-dmg-bundle", "--candidate-frozen-bundle", "--dmg-work",          "--baseline-workspace", "--app-main-executable",
+    "--app-cli-executable", "--signed-cli-ssh",       "--manifest",                "--source-root",       "--zig",                "--zig-size",
+    "--zig-sha256",         "--durable-preparation",  "--predecessor-workspace",   "--upgrade-workspace", "--timing-output",
 };
 
 pub const Command = struct {
@@ -132,8 +132,8 @@ pub fn parseProfiled(args: []const []const u8) Error!ProfiledCommand {
         .baseline_args = undefined,
         .profile_args = undefined,
     };
-    result.baseline_args = commandArgs("prepare-candidate", &values, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 });
-    result.profile_args = commandArgs("prepare-profile-candidate", &values, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 19, 20, 18, 21 });
+    result.baseline_args = commandArgs("prepare-candidate", &values, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 });
+    result.profile_args = commandArgs("prepare-profile-candidate", &values, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 20, 21, 19, 22 });
     const baseline = switch (try contract.parseArgs(&result.baseline_args)) {
         .prepare_candidate => |value| value,
         else => unreachable,

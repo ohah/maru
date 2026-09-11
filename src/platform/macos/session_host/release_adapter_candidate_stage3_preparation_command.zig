@@ -41,6 +41,7 @@ const Paths = struct {
     baseline: StoredPath = .{},
     app_main: StoredPath = .{},
     app_cli: StoredPath = .{},
+    signed_cli_ssh: StoredPath = .{},
     manifest: StoredPath = .{},
     zig: StoredPath = .{},
     durable: StoredPath = .{},
@@ -154,6 +155,7 @@ pub fn run(
     try paths.baseline.set(command.baseline_workspace);
     try paths.app_main.set(command.app_main_executable);
     try paths.app_cli.set(command.app_cli_executable);
+    try paths.signed_cli_ssh.set(command.signed_cli_ssh);
     try paths.manifest.set(command.manifest);
     try paths.zig.set(command.zig);
     try paths.durable.set(command.durable_preparation);
@@ -231,6 +233,7 @@ fn runActive(execution: *Execution, view: bootstrap_mod.View, command: bootstrap
                 .main_executable = execution.paths.app_main.value(),
                 .cli_executable = execution.paths.app_cli.value(),
             },
+            .signed_cli_ssh = execution.paths.signed_cli_ssh.value(),
             .toolchain = &execution.toolchain,
             .source_directory_fd = source.fd,
         },
@@ -262,8 +265,8 @@ fn validateAliases(execution: *Execution, bootstrap: *Bootstrap, view: bootstrap
         view.context.repository.owner, view.context.repository.name, view.context.tag,                view.context.source_commit, view.context.build.workflow_ref,
         view.github_cli,               command.repo,                 command.tag,                     command.test_uuid,          command.dmg,
         command.frozen_executable,     command.candidate_dmg_bundle, command.candidate_frozen_bundle, command.dmg_work,           command.baseline_workspace,
-        command.app_main_executable,   command.app_cli_executable,   command.manifest,                command.source_root,        command.zig,
-        command.zig_sha256,            command.durable_preparation,
+        command.app_main_executable,   command.app_cli_executable,   command.signed_cli_ssh,          command.manifest,           command.source_root,
+        command.zig,                   command.zig_sha256,           command.durable_preparation,
     };
     for (values, 0..) |value, index| {
         if (overlaps(owner, value) or overlaps(token, value) or overlaps(scratch, value)) return error.InvalidOwner;
@@ -287,6 +290,7 @@ fn pathsDigest(paths: *const Paths) ![32]u8 {
     try hashPath(&hash, &paths.baseline);
     try hashPath(&hash, &paths.app_main);
     try hashPath(&hash, &paths.app_cli);
+    try hashPath(&hash, &paths.signed_cli_ssh);
     try hashPath(&hash, &paths.manifest);
     try hashPath(&hash, &paths.zig);
     try hashPath(&hash, &paths.durable);
@@ -345,6 +349,7 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
             hashSlice(&hash, command.baseline_workspace);
             hashSlice(&hash, command.app_main_executable);
             hashSlice(&hash, command.app_cli_executable);
+            hashSlice(&hash, command.signed_cli_ssh);
             hashSlice(&hash, command.manifest);
             hashSlice(&hash, command.source_root);
             hashSlice(&hash, command.zig);
@@ -380,7 +385,7 @@ fn pathsPristine(paths: *const Paths) bool {
     return pathPristine(&paths.dmg) and pathPristine(&paths.frozen) and
         pathPristine(&paths.candidate_dmg_bundle) and pathPristine(&paths.candidate_frozen_bundle) and
         pathPristine(&paths.dmg_work) and pathPristine(&paths.baseline) and
-        pathPristine(&paths.app_main) and pathPristine(&paths.app_cli) and
+        pathPristine(&paths.app_main) and pathPristine(&paths.app_cli) and pathPristine(&paths.signed_cli_ssh) and
         pathPristine(&paths.manifest) and pathPristine(&paths.zig) and pathPristine(&paths.durable);
 }
 

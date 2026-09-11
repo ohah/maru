@@ -30,6 +30,7 @@ pub const Inputs = struct {
     files: *const candidate_files.CandidateFiles,
     product: *const candidate_product.CandidateProduct,
     candidate_paths: candidate_product.Paths,
+    signed_cli_ssh: [:0]const u8,
     source: *const source_tree.SourceTreeAuthority,
     predecessor: *const predecessor_identity.PredecessorEvidenceIdentity,
     authenticated: *const authenticated_manifest.AuthenticatedManifest,
@@ -195,7 +196,7 @@ const Steps = struct {
     pub fn publishEvidence(self: *@This(), deadline: *deadline_mod.Deadline) !void {
         _ = try deadline.remaining();
         const paths = try self.inputs.workspace.value();
-        try evidence_mod.publish(self.allocator, self.inputs.context, self.inputs.candidate, self.inputs.files, self.inputs.product, self.inputs.candidate_paths, self.inputs.source, self.inputs.predecessor, self.inputs.authenticated, self.inputs.held_manifest, self.inputs.assets, .{ .signed_upgrade_one = paths.signed_one_leaf, .signed_upgrade_near_max = paths.signed_near_max_leaf, .output = paths.evidence }, &self.result.evidence);
+        try evidence_mod.publish(self.allocator, self.inputs.context, self.inputs.candidate, self.inputs.files, self.inputs.product, self.inputs.candidate_paths, self.inputs.source, self.inputs.predecessor, self.inputs.authenticated, self.inputs.held_manifest, self.inputs.assets, .{ .signed_cli_ssh = self.inputs.signed_cli_ssh, .signed_upgrade_one = paths.signed_one_leaf, .signed_upgrade_near_max = paths.signed_near_max_leaf, .output = paths.evidence }, &self.result.evidence);
     }
     pub fn validateFinalAuthorities(self: *@This(), deadline: *deadline_mod.Deadline) !void {
         try self.validateAll(deadline);
@@ -386,6 +387,7 @@ fn validatePristine(inputs: Inputs, result: *const Execution) !void {
         inputs.context.tag,                       inputs.context.source_commit,
         inputs.context.build.workflow_ref,        inputs.candidate_paths.dmg,
         inputs.candidate_paths.frozen_executable, inputs.candidate_paths.dmg_work,
+        inputs.signed_cli_ssh,
     }) |other|
         if (rangesOverlap(bytes, other)) return error.InvalidOwner;
 }

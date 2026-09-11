@@ -464,13 +464,20 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
         release: evidence_mod.Release,
         source: evidence_mod.Source,
         build: evidence_mod.Build,
-        candidate: evidence_mod.Candidate,
+        candidate: evidence_mod.AggregateCandidate,
     };
     const common: EvidenceCommon = switch (parsed_evidence.value()) {
         .baseline_a => |value| blk: {
             if (value.role != .a or value.result != .passed or authored.role != .a or authored.predecessor != null)
                 return error.InvalidBinding;
-            break :blk .{ .test_uuid = value.test_uuid, .repository = value.repository, .release = value.release, .source = value.source, .build = value.build, .candidate = value.candidate };
+            break :blk .{
+                .test_uuid = value.test_uuid,
+                .repository = value.repository,
+                .release = value.release,
+                .source = value.source,
+                .build = value.build,
+                .candidate = value.candidate,
+            };
         },
         .upgrade_b => |value| blk: {
             const predecessor = authored.predecessor orelse return error.InvalidBinding;
@@ -482,14 +489,23 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
                 !std.mem.eql(u8, authored.signing.designated_requirement_sha256, value.gates.signed_upgrade_one.signer_requirement_sha256) or
                 !std.mem.eql(u8, authored.signing.designated_requirement_sha256, value.gates.signed_upgrade_near_max.signer_requirement_sha256))
                 return error.InvalidBinding;
-            break :blk .{ .test_uuid = value.test_uuid, .repository = value.repository, .release = value.release, .source = value.source, .build = value.build, .candidate = value.candidate };
+            break :blk .{
+                .test_uuid = value.test_uuid,
+                .repository = value.repository,
+                .release = value.release,
+                .source = value.source,
+                .build = value.build,
+                .candidate = value.candidate,
+            };
         },
     };
     if (!std.mem.eql(u8, authored.evidence.result, "passed") or !sameRepository(common.repository, authored.repository) or
         !sameRelease(common.release, authored.release) or !sameSource(common.source, authored.source) or
         !sameBuild(common.build, authored.build) or !std.mem.eql(u8, common.test_uuid, authored.evidence.test_uuid) or
         !std.mem.eql(u8, authored.evidence.summary_name, expected_name) or
-        !std.mem.eql(u8, authored.evidence.summary_sha256, &observations[0].sha256)) return error.InvalidBinding;
+        !std.mem.eql(u8, authored.evidence.summary_sha256, &observations[0].sha256) or
+        !std.mem.eql(u8, authored.signing.designated_requirement_sha256, common.candidate.designated_requirement_sha256))
+        return error.InvalidBinding;
     var evidence_asset: ?manifest_mod.Asset = null;
     var dmg_asset: ?manifest_mod.Asset = null;
     var frozen_asset: ?manifest_mod.Asset = null;

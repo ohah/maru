@@ -17,6 +17,7 @@ pub const ZigToolchainAuthority = baseline.ZigToolchainAuthority;
 pub const BaselineInputs = struct {
     workspace_root: [:0]const u8,
     app_paths: baseline.AppPaths,
+    signed_cli_ssh: [:0]const u8,
     toolchain: *const ZigToolchainAuthority,
     source_directory_fd: std.c.fd_t,
 };
@@ -141,6 +142,7 @@ const ConcreteSteps = struct {
             .product_paths = value.prerequisite.paths,
             .source = &self.execution.prerequisite.source,
             .app_paths = value.baseline.app_paths,
+            .signed_cli_ssh = value.baseline.signed_cli_ssh,
             .toolchain = value.baseline.toolchain,
             .source_directory_fd = value.baseline.source_directory_fd,
         }, value.baseline.workspace_root, deadline, &self.execution.baseline);
@@ -220,7 +222,8 @@ fn validatePaths(value: Inputs) !void {
         value.prerequisite.paths.dmg_work,        value.prerequisite.bundles.dmg_bundle,
         value.prerequisite.bundles.frozen_bundle, value.baseline.workspace_root,
         value.baseline.app_paths.main_executable, value.baseline.app_paths.cli_executable,
-        value.manifest,                           value.durable_preparation,
+        value.baseline.signed_cli_ssh,            value.manifest,
+        value.durable_preparation,
     };
     for (paths) |path| if (!canonicalAbsolute(path)) return error.InvalidPath;
     for (paths, 0..) |left, index| for (paths[index + 1 ..]) |right|
@@ -242,9 +245,9 @@ fn aliases(execution: *Execution, value: Inputs, token: []const u8, scratch: []c
         value.prerequisite.paths.dmg_work,              value.prerequisite.cli.path,
         value.prerequisite.bundles.dmg_bundle,          value.prerequisite.bundles.frozen_bundle,
         value.baseline.workspace_root,                  value.baseline.app_paths.main_executable,
-        value.baseline.app_paths.cli_executable,        value.manifest,
-        value.durable_preparation,                      token,
-        scratch,
+        value.baseline.app_paths.cli_executable,        value.baseline.signed_cli_ssh,
+        value.manifest,                                 value.durable_preparation,
+        token,                                          scratch,
     };
     for (values) |bytes| if (overlaps(owner, bytes)) return true;
     for (values, 0..) |left, index| for (values[index + 1 ..]) |right| if (overlaps(left, right)) return true;

@@ -19,6 +19,7 @@ pub const Deadline = deadline_mod.Deadline;
 pub const BaselineInputs = struct {
     workspace_root: [:0]const u8,
     app_paths: baseline.AppPaths,
+    signed_cli_ssh: [:0]const u8,
     toolchain: *const ZigToolchainAuthority,
     source_directory_fd: std.c.fd_t,
 };
@@ -250,6 +251,7 @@ fn baselineInputs(value: Inputs, execution: *Execution) baseline.Inputs {
         .product_paths = value.prerequisite.paths,
         .source = &execution.prerequisite.source,
         .app_paths = value.baseline.app_paths,
+        .signed_cli_ssh = value.baseline.signed_cli_ssh,
         .toolchain = value.baseline.toolchain,
         .source_directory_fd = value.baseline.source_directory_fd,
     };
@@ -343,6 +345,7 @@ fn validatePaths(value: Inputs) !void {
         value.baseline.workspace_root,
         value.baseline.app_paths.main_executable,
         value.baseline.app_paths.cli_executable,
+        value.baseline.signed_cli_ssh,
         value.publication.manifest,
     };
     for (paths) |path| if (!std.fs.path.isAbsolute(path)) return error.InvalidPath;
@@ -366,8 +369,9 @@ fn validateAliases(value: Inputs, token: []const u8, scratch: []u8, execution: *
         value.prerequisite.paths.dmg_work,              value.prerequisite.cli.path,
         value.prerequisite.bundles.dmg_bundle,          value.prerequisite.bundles.frozen_bundle,
         value.baseline.workspace_root,                  value.baseline.app_paths.main_executable,
-        value.baseline.app_paths.cli_executable,        value.publication.manifest,
-        token,                                          scratch,
+        value.baseline.app_paths.cli_executable,        value.baseline.signed_cli_ssh,
+        value.publication.manifest,                     token,
+        scratch,
     };
     for (regions, 0..) |region, index| {
         if (overlaps(owner, region)) return error.InvalidOwner;

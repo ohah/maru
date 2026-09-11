@@ -71,6 +71,7 @@ fn authorFromAuthority(allocator: std.mem.Allocator, authority: anytype, held_ev
     const first = try authority.revalidate(first_evidence.profile(), observation(first_input), paths);
     try validateBundleAliases(result_bytes, first);
     try evidence.bind(first_evidence.value(), first.expected);
+    try validateEvidenceManifestBinding(first_evidence.value(), first);
     try validateAuthorityBinding(first);
     try validateBinding(first.value, first_evidence.profile(), first_input, paths);
     const snapshot = try manifest.writeCanonical(allocator, first.value);
@@ -87,6 +88,7 @@ fn authorFromAuthority(allocator: std.mem.Allocator, authority: anytype, held_ev
     const second = authority.revalidate(second_evidence.profile(), observation(second_input), paths) catch return error.AuthorityChanged;
     try validateBundleAliases(result_bytes, second);
     evidence.bind(second_evidence.value(), second.expected) catch return error.AuthorityChanged;
+    validateEvidenceManifestBinding(second_evidence.value(), second) catch return error.AuthorityChanged;
     validateAuthorityBinding(second) catch return error.AuthorityChanged;
     validateBinding(second.value, second_evidence.profile(), second_input, paths) catch return error.AuthorityChanged;
     const current = manifest.writeCanonical(allocator, second.value) catch |err| return switch (err) {
@@ -101,6 +103,7 @@ fn authorFromAuthority(allocator: std.mem.Allocator, authority: anytype, held_ev
     const final = authority.revalidate(second_evidence.profile(), before_final, paths) catch return error.AuthorityChanged;
     try validateBundleAliases(result_bytes, final);
     evidence.bind(second_evidence.value(), final.expected) catch return error.AuthorityChanged;
+    validateEvidenceManifestBinding(second_evidence.value(), final) catch return error.AuthorityChanged;
     validateAuthorityBinding(final) catch return error.AuthorityChanged;
     validateBinding(final.value, second_evidence.profile(), second_input, paths) catch return error.AuthorityChanged;
     if (!sameManifest(self_parsed.value().*, final.value)) return error.AuthorityChanged;
@@ -188,6 +191,7 @@ pub fn validateAuthoredSnapshot(authority: *Authority, context: context_mod.Cont
     try context_mod.bindManifest(context, parsed_manifest.value().*);
     const bundle = try authority.revalidate(parsed_evidence.profile(), evidence_observation, paths);
     try evidence.bind(parsed_evidence.value(), bundle.expected);
+    try validateEvidenceManifestBinding(parsed_evidence.value(), bundle);
     try validateAuthorityBinding(bundle);
     try validateBinding(bundle.value, parsed_evidence.profile(), evidence_observation, paths);
     if (!sameManifest(parsed_manifest.value().*, bundle.value)) return error.BindingMismatch;
@@ -221,6 +225,16 @@ fn validateAuthorityBinding(bundle: Bundle) !void {
                 !eql(bundle.designated_requirement_sha256, expected.designated_requirement_sha256)) return error.BindingMismatch;
         },
     }
+}
+
+fn validateEvidenceManifestBinding(parsed: evidence.Value, bundle: Bundle) !void {
+    const candidate = switch (parsed) {
+        .baseline_a => |value| value.candidate,
+        .upgrade_b => |value| value.candidate,
+    };
+    if (!eql(candidate.designated_requirement_sha256, bundle.designated_requirement_sha256) or
+        !eql(candidate.designated_requirement_sha256, bundle.value.signing.designated_requirement_sha256))
+        return error.BindingMismatch;
 }
 
 fn validateBundleAliases(result_bytes: []const u8, bundle: Bundle) !void {

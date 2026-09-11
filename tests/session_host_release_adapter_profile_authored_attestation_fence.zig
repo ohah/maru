@@ -101,6 +101,10 @@ fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
 }
 
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"candidate_cli_sha256\":\"" ++ predecessor_manifest_sha ++ "\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
+}
+
 fn upgradeLeaf(comptime count: u64) []const u8 {
     return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, predecessor_exe_sha, exe_sha, requirement_sha, count, if (count == 1) requirement_sha else predecessor_manifest_sha });
 }
@@ -122,7 +126,7 @@ const BaselineFixture = struct {
     fn init(self: *@This()) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
         for ([_][]const u8{ "evidence", "manifest", "durable", "bundles" }) |name| try self.tmp.dir.createDir(std.testing.io, name, .default_dir);
-        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
         defer std.testing.allocator.free(evidence_bytes);
         if (c.fchmodat(self.tmp.dir.handle, "durable", 0o700, 0) != 0) return error.FixtureFailed;
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence/baseline-evidence.json", .data = evidence_bytes });
@@ -182,7 +186,7 @@ const BaselineFixture = struct {
             .dmg_sha256 = predecessor_dmg_sha,
             .executable_sha256 = predecessor_exe_sha,
         };
-        const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
+        const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, cliLeaf(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
         defer std.testing.allocator.free(evidence_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence/upgrade-evidence.json", .data = evidence_bytes });
         _ = try absolute(&self.tmp, "evidence/upgrade-evidence.json", &self.sources[0]);

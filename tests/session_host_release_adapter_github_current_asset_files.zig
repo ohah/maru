@@ -84,7 +84,15 @@ const Fixture = struct {
         defer allocator.free(one);
         const many = try upgradeLeaf(allocator, evidence_mod.near_max_runtime_count, &self.frozen_sha);
         defer allocator.free(many);
-        const summary_bytes = try evidence_mod.assembleUpgrade(allocator, common, predecessor, one, many);
+        const cli = try evidence_mod.writeSignedCliSshLeaf(allocator, .{
+            .test_uuid = uuid,
+            .candidate_dmg_sha256 = &self.dmg_sha,
+            .candidate_executable_sha256 = &self.frozen_sha,
+            .candidate_cli_sha256 = predecessor_manifest_sha,
+            .designated_requirement_sha256 = requirement_sha,
+        });
+        defer allocator.free(cli);
+        const summary_bytes = try evidence_mod.assembleUpgrade(allocator, common, predecessor, cli, one, many);
         defer allocator.free(summary_bytes);
         self.summary_sha = sha256(summary_bytes);
 

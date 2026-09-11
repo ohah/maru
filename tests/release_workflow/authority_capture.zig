@@ -275,6 +275,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
         "session-host-release-validator",
         "session-host-release-workflow-bootstrap",
         "session-host-release-workflow-candidate-inputs",
+        "session-host-release-p5d-candidate",
         "session-host-release-workflow-checkpoint",
         "session-host-release-workflow-command",
         "session-host-release-workflow-authored-selector",
@@ -542,6 +543,7 @@ test "live 릴리스 action: fixed roots paths와 bundle closed fan-out을 사�
         "steps.session-host-candidate-attestation.outputs.dmg-bundle-path",
         "steps.session-host-candidate-attestation.outputs.frozen-bundle-path",
     }) |needle| try std.testing.expectEqual(@as(usize, 2), countMatchingLines(text, needle));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(text, "steps.session-host-candidate-attestation.outputs.signed-cli-ssh-path"));
     inline for (.{
         "steps.session-host-authored-attestation.outputs.evidence-bundle-path",
         "steps.session-host-authored-attestation.outputs.manifest-bundle-path",
@@ -563,11 +565,11 @@ test "live 릴리스 action: command 단계마다 closed argv와 credential 위�
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "prepare-profile-candidate "));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "baseline_a"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(draft, "upgrade_b"));
-    try expectClosedOptions(draft, 22, &.{
-        "--repo ",                "--tag ",                   "--github-cli ",              "--github-cli-sha256 ", "--test-uuid ",          "--dmg ",
-        "--frozen-executable ",   "--candidate-dmg-bundle ",  "--candidate-frozen-bundle ", "--dmg-work ",          "--baseline-workspace ", "--app-main-executable ",
-        "--app-cli-executable ",  "--manifest ",              "--source-root ",             "--zig ",               "--zig-size ",           "--zig-sha256 ",
-        "--durable-preparation ", "--predecessor-workspace ", "--upgrade-workspace ",       "--timing-output ",
+    try expectClosedOptions(draft, 23, &.{
+        "--repo ",               "--tag ",                  "--github-cli ",              "--github-cli-sha256 ", "--test-uuid ",          "--dmg ",
+        "--frozen-executable ",  "--candidate-dmg-bundle ", "--candidate-frozen-bundle ", "--dmg-work ",          "--baseline-workspace ", "--app-main-executable ",
+        "--app-cli-executable ", "--signed-cli-ssh ",       "--manifest ",                "--source-root ",       "--zig ",                "--zig-size ",
+        "--zig-sha256 ",         "--durable-preparation ",  "--predecessor-workspace ",   "--upgrade-workspace ", "--timing-output ",
     });
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(draft, "GH_TOKEN: ${{ github.token }}"));
 

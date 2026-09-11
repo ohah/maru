@@ -14,7 +14,7 @@ test "wrapper argv leaves stage selection inside validator argv" {
 }
 
 test "wrapper accepts the validator contract bound and rejects one more" {
-    var values: [3 + 39 + 1][]const u8 = @splat("x");
+    var values: [3 + 41 + 1][]const u8 = @splat("x");
     values[0] = "run";
     values[1] = "/private/tmp/checkpoint";
     values[2] = root_token;
@@ -27,8 +27,8 @@ test "profiled stage3 argv validates the superset and projects exact closed comm
     var parsed = try cli.parseProfiled(&args);
     const baseline = parsed.validatorArgs(.baseline_a);
     const upgrade = parsed.validatorArgs(.upgrade_b);
-    try std.testing.expectEqual(@as(usize, 39), baseline.len);
-    try std.testing.expectEqual(@as(usize, 39), upgrade.len);
+    try std.testing.expectEqual(@as(usize, 41), baseline.len);
+    try std.testing.expectEqual(@as(usize, 41), upgrade.len);
     try std.testing.expectEqualStrings("prepare-candidate", baseline[0]);
     try std.testing.expectEqualStrings("prepare-profile-candidate", upgrade[0]);
     try std.testing.expectEqual(@as(usize, 0), countArg(baseline, "--predecessor-workspace"));
@@ -98,7 +98,8 @@ fn profiledArgs() [cli.max_arguments][]const u8 {
         "123456",                                           "--zig-sha256",                                                     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
         "--durable-preparation",                            "/tmp/preparation",                                                 "--predecessor-workspace",
         "/tmp/predecessor",                                 "--upgrade-workspace",                                              "/tmp/upgrade",
-        "--timing-output",                                  "/tmp/timing/profile-upgrade.json",
+        "--timing-output",                                  "/tmp/timing/profile-upgrade.json",                                 "--signed-cli-ssh",
+        "/tmp/p5d/signed-cli-ssh.json",
     };
 }
 

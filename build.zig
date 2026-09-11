@@ -13903,7 +13903,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_evidence_tests = b.addRunArtifact(release_evidence_tests);
-        run_release_evidence_tests.addArg("--maru-expect-tests=13");
+        run_release_evidence_tests.addArg("--maru-expect-tests=14");
         run_release_evidence_tests.setCwd(b.path("."));
         session_host_release_evidence_step.dependOn(&run_release_evidence_tests.step);
         if (evidence_optimize == optimize) session_host_step.dependOn(&run_release_evidence_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
@@ -14870,9 +14870,9 @@ pub fn build(b: *std.Build) void {
         // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
         // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_macos_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
         //
-        // 646 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+        // 647 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
         // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-        const ra_mac_expected_tests: usize = 646;
+        const ra_mac_expected_tests: usize = 647;
         const ra_mac_step = b.step(
             "test-session-host-release-adapter-macos-all",
             "Run the macos session-host release adapter judges from one binary per optimize mode",
@@ -15501,6 +15501,14 @@ pub fn build(b: *std.Build) void {
     const session_host_release_workflow_candidate_inputs_product_step = b.step(
         "session-host-release-workflow-candidate-inputs",
         "Build the signed candidate input pinning executable",
+    );
+    const session_host_release_p5d_candidate_product_step = b.step(
+        "session-host-release-p5d-candidate",
+        "Build the final-DMG P5d candidate evidence executable and product drivers",
+    );
+    const session_host_release_p5d_candidate_cli_step = b.step(
+        "test-session-host-release-p5d-candidate-cli",
+        "Validate the final-DMG P5d candidate product CLI contract",
     );
     const session_host_release_workflow_command_cli_step = b.step(
         "test-session-host-release-workflow-command-cli",
@@ -16466,6 +16474,33 @@ pub fn build(b: *std.Build) void {
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_p5d_candidate_gate_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_p5d_candidate_gate_tests.step);
             const p5d_candidate_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_candidate_product.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod } } });
+            const p5d_candidate_cli = b.addExecutable(.{
+                .name = b.fmt("maru-session-host-release-p5d-candidate-{s}", .{@tagName(composition_optimize)}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/session-host/release_p5d_candidate_cli.zig"),
+                    .target = target,
+                    .optimize = composition_optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "release_adapter_environment", .module = workflow_checkpoint_environment_mod },
+                        .{ .name = "release_adapter_files", .module = files_mod },
+                        .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod },
+                        .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod },
+                        .{ .name = "release_adapter_p5d_candidate_product", .module = p5d_candidate_product_mod },
+                        .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod },
+                    },
+                }),
+            });
+            const p5d_candidate_cli_tests = addProjectTest(b, .{ .root_module = p5d_candidate_cli.root_module });
+            const run_p5d_candidate_cli_tests = b.addRunArtifact(p5d_candidate_cli_tests);
+            run_p5d_candidate_cli_tests.addArg("--maru-expect-tests=4");
+            run_p5d_candidate_cli_tests.setCwd(b.path("."));
+            session_host_release_p5d_candidate_cli_step.dependOn(&run_p5d_candidate_cli_tests.step);
+            if (composition_optimize == optimize) {
+                session_host_release_p5d_candidate_product_step.dependOn(
+                    &b.addInstallArtifact(p5d_candidate_cli, .{ .dest_sub_path = "maru-session-host-release-p5d-candidate" }).step,
+                );
+            }
             const p5d_candidate_product_boundary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_candidate_product_boundary.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_p5d_candidate_product", .module = p5d_candidate_product_mod }} }) });
             const run_p5d_candidate_product_boundary_tests = b.addRunArtifact(p5d_candidate_product_boundary_tests);
             run_p5d_candidate_product_boundary_tests.addArg("--maru-expect-tests=1");
@@ -16539,7 +16574,7 @@ pub fn build(b: *std.Build) void {
             const candidate_preparation_handoff_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_preparation_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
             const candidate_preparation_handoff_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_preparation_handoff.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_preparation_handoff", .module = candidate_preparation_handoff_mod } } }) });
             const run_candidate_preparation_handoff_tests = b.addRunArtifact(candidate_preparation_handoff_tests);
-            run_candidate_preparation_handoff_tests.addArg("--maru-expect-tests=12");
+            run_candidate_preparation_handoff_tests.addArg("--maru-expect-tests=13");
             run_candidate_preparation_handoff_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_preparation_handoff_step.dependOn(&run_candidate_preparation_handoff_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_candidate_preparation_handoff_tests.step); // test-session-host 는 잡의 -Doptimize 모드만
@@ -16631,7 +16666,7 @@ pub fn build(b: *std.Build) void {
             const candidate_manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod }, .{ .name = "release_adapter_candidate_evidence_identity", .module = candidate_evidence_identity_mod }, .{ .name = "release_adapter_github_source_tree", .module = source_tree_mod }, .{ .name = "release_adapter_candidate_compatibility", .module = candidate_compatibility_mod }, .{ .name = "release_adapter_predecessor_evidence_identity", .module = predecessor_evidence_identity_mod }, .{ .name = "release_adapter_github_manifest_attestation", .module = authenticated_manifest_mod }, .{ .name = "release_adapter_github_manifest_file", .module = manifest_file_mod }, .{ .name = "release_adapter_github_predecessor_assets", .module = composition_mod } } });
             const candidate_manifest_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_manifest.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_manifest", .module = candidate_manifest_mod } } }) });
             const run_candidate_manifest_tests = b.addRunArtifact(candidate_manifest_tests);
-            run_candidate_manifest_tests.addArg("--maru-expect-tests=8");
+            run_candidate_manifest_tests.addArg("--maru-expect-tests=9");
             run_candidate_manifest_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_manifest_step.dependOn(&run_candidate_manifest_tests.step);
             const candidate_authored_attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_authored_attestation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_evidence", .module = release_evidence_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_candidate_manifest", .module = candidate_manifest_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod } } });
@@ -18895,6 +18930,16 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
         });
+        session_host_release_p5d_candidate_product_step.dependOn(
+            &b.addInstallArtifact(session_host_3d_product_e2e_tests, .{
+                .dest_sub_path = "maru-session-host-p5d-attach-product-test",
+            }).step,
+        );
+        session_host_release_p5d_candidate_product_step.dependOn(
+            &b.addInstallArtifact(session_host_ssh_upload_product_tests, .{
+                .dest_sub_path = "maru-session-host-p5d-upload-product-test",
+            }).step,
+        );
         run_session_host_p5d.addArtifactArg(session_host_ssh_upload_product_tests);
         run_session_host_p5d.expectExitCode(0);
         run_session_host_p5d.setCwd(b.path("."));

@@ -70,6 +70,10 @@ runs:
         printf 'predecessor-workspace=%s/predecessor-workspace\n' "$MARU_LIVE_ROOT"
         printf 'upgrade-workspace=%s/upgrade-workspace\n' "$MARU_LIVE_ROOT"
         printf 'timing-output=%s/profile-upgrade-timing.json\n' "$MARU_LIVE_ROOT"
+        printf 'p5d-preflight-work=%s/p5d-preflight-work\n' "$MARU_LIVE_ROOT"
+        printf 'p5d-dmg-work=%s/p5d-dmg-work\n' "$MARU_LIVE_ROOT"
+        printf 'p5d-workspace=%s/p5d-workspace\n' "$MARU_LIVE_ROOT"
+        printf 'signed-cli-ssh=%s/signed-cli-ssh.json\n' "$MARU_LIVE_ROOT"
         printf 'manifest=%s\n' "$MARU_MANIFEST"
         printf 'preparation=%s/durable-preparation\n' "$MARU_LIVE_ROOT"
         printf 'evidence=%s\n' "$MARU_EVIDENCE"
@@ -100,6 +104,11 @@ runs:
       frozen-name: ${{ steps.setup.outputs.frozen-name }}
       checkpoint-root: ${{ steps.setup.outputs.checkpoint-root }}
       checkpoint-root-identity: ${{ steps.setup.outputs.checkpoint-root-identity }}
+      test-uuid: ${{ steps.setup.outputs.test-uuid }}
+      preflight-dmg-work: ${{ steps.setup.outputs.p5d-preflight-work }}
+      p5d-dmg-work: ${{ steps.setup.outputs.p5d-dmg-work }}
+      p5d-workspace: ${{ steps.setup.outputs.p5d-workspace }}
+      signed-cli-ssh: ${{ steps.setup.outputs.signed-cli-ssh }}
 
   - name: Author profile-selected evidence and draft
     id: session-host-draft-authoring
@@ -122,6 +131,7 @@ runs:
       MARU_TIMING_OUTPUT: ${{ steps.setup.outputs.timing-output }}
       MARU_APP_MAIN: ${{ steps.setup.outputs.app-main }}
       MARU_APP_CLI: ${{ steps.setup.outputs.app-cli }}
+      MARU_SIGNED_CLI_SSH: ${{ steps.session-host-candidate-attestation.outputs.signed-cli-ssh-path }}
       MARU_MANIFEST: ${{ steps.setup.outputs.manifest }}
       MARU_SOURCE_ROOT: ${{ github.workspace }}
       MARU_ZIG: ${{ inputs.zig-path }}
@@ -139,6 +149,7 @@ runs:
         --candidate-dmg-bundle "$MARU_DMG_BUNDLE" --candidate-frozen-bundle "$MARU_FROZEN_BUNDLE" \
         --dmg-work "$MARU_DMG_WORK" --baseline-workspace "$MARU_BASELINE_WORKSPACE" \
         --app-main-executable "$MARU_APP_MAIN" --app-cli-executable "$MARU_APP_CLI" \
+        --signed-cli-ssh "$MARU_SIGNED_CLI_SSH" \
         --manifest "$MARU_MANIFEST" --source-root "$MARU_SOURCE_ROOT" \
         --zig "$MARU_ZIG" --zig-size "$MARU_ZIG_SIZE" --zig-sha256 "$MARU_ZIG_SHA256" \
         --durable-preparation "$MARU_PREPARATION" \

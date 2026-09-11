@@ -35,6 +35,7 @@ fn inputs(cli: *const product.PinnedCli, toolchain: *const product.ZigToolchainA
                 .main_executable = "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app",
                 .cli_executable = "/tmp/candidate/Maru.app/Contents/MacOS/maru",
             },
+            .signed_cli_ssh = "/tmp/p5d/signed-cli-ssh.json",
             .toolchain = toolchain,
             .source_directory_fd = 0,
         },

@@ -28,6 +28,10 @@ fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ executable_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
 }
 
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ executable_sha ++ "\",\"candidate_cli_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
+}
+
 const Authority = struct {
     owner: ?*@This() = null,
     calls: usize = 0,
@@ -50,14 +54,17 @@ const Authority = struct {
 
 const Fixture = struct {
     tmp: std.testing.TmpDir,
+    cli_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
     default_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
     quit_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
     output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
 
     fn init(self: *@This()) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+        _ = try absolute(&self.tmp, "cli.json", &self.cli_path);
         _ = try absolute(&self.tmp, "default.json", &self.default_path);
         _ = try absolute(&self.tmp, "quit.json", &self.quit_path);
         _ = try absolute(&self.tmp, "evidence.json", &self.output_path);
@@ -69,6 +76,7 @@ const Fixture = struct {
 
     fn paths(self: *@This()) baseline.Paths {
         return .{
+            .signed_cli_ssh = std.mem.sliceTo(&self.cli_path, 0),
             .default_false = std.mem.sliceTo(&self.default_path, 0),
             .signed_app_quit = std.mem.sliceTo(&self.quit_path, 0),
             .output = std.mem.sliceTo(&self.output_path, 0),

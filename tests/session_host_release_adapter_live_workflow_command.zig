@@ -14,7 +14,7 @@ test "validator argv selects the five stages and preserves both stage three prof
 
     var forbidden = prepareArgs();
     forbidden[0] = "publish-candidate";
-    try std.testing.expectError(error.InvalidCommand, command.select(forbidden[0..37]));
+    try std.testing.expectError(error.InvalidCommand, command.select(forbidden[0..39]));
     var malformed = prepareArgs();
     malformed[1] = "--tag";
     try std.testing.expectError(error.InvalidArguments, command.select(&malformed));
@@ -107,23 +107,23 @@ fn expectResult(expected: phase.Result, selection: command.Selection, code: u8, 
     }));
 }
 
-fn prepareArgs() [39][]const u8 {
+fn prepareArgs() [41][]const u8 {
     return .{
         "prepare-candidate",       "--repo",                               "ohah/maru",                                             "--tag",                                   "v1.2.3",                                      "--github-cli",                           "/usr/bin/gh",                                      "--github-cli-sha256",  hex64,
         "--test-uuid",             "123e4567-e89b-42d3-a456-426614174000", "--dmg",                                                 "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                         "/tmp/candidate/maru-session-host-1.2.3", "--dmg-work",                                       "/tmp/dmg-work",        "--baseline-workspace",
         "/tmp/baseline",           "--app-main-executable",                "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app", "--app-cli-executable",                    "/tmp/candidate/Maru.app/Contents/MacOS/maru", "--manifest",                             "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",        "/tmp/source",
         "--zig",                   "/usr/bin/zig",                         "--zig-size",                                            "123456",                                  "--zig-sha256",                                hex64,                                    "--candidate-dmg-bundle",                           "/tmp/attest/dmg.json", "--candidate-frozen-bundle",
-        "/tmp/attest/frozen.json", "--durable-preparation",                "/tmp/preparation",
+        "/tmp/attest/frozen.json", "--signed-cli-ssh",                     "/tmp/p5d/signed-cli-ssh.json",                          "--durable-preparation",                   "/tmp/preparation",
     };
 }
 
-fn profileStage3Args() [39][]const u8 {
+fn profileStage3Args() [41][]const u8 {
     return .{
         "prepare-profile-candidate",                "--repo",                               "ohah/maru",                        "--tag",                                   "v1.2.3",                                           "--github-cli",                           "/usr/bin/gh",            "--github-cli-sha256",                   hex64,
         "--test-uuid",                              "123e4567-e89b-42d3-a456-426614174000", "--dmg",                            "/tmp/candidate/Maru-1.2.3-universal.dmg", "--frozen-executable",                              "/tmp/candidate/maru-session-host-1.2.3", "--candidate-dmg-bundle", "/tmp/attest/candidate-dmg.bundle.json", "--candidate-frozen-bundle",
         "/tmp/attest/candidate-frozen.bundle.json", "--dmg-work",                           "/tmp/dmg-work",                    "--manifest",                              "/tmp/output/Maru-1.2.3-session-host-release.json", "--source-root",                          "/tmp/source",            "--zig",                                 "/usr/bin/zig",
         "--zig-size",                               "123456",                               "--zig-sha256",                     hex64,                                     "--predecessor-workspace",                          "/tmp/predecessor-work",                  "--upgrade-workspace",    "/tmp/upgrade-work",                     "--durable-preparation",
-        "/tmp/handoff/profile-stage3",              "--timing-output",                      "/tmp/timing/profile-upgrade.json",
+        "/tmp/handoff/profile-stage3",              "--timing-output",                      "/tmp/timing/profile-upgrade.json", "--signed-cli-ssh",                        "/tmp/p5d/signed-cli-ssh.json",
     };
 }
 

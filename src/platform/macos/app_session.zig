@@ -15346,7 +15346,7 @@ pub const AppSession = struct {
         );
     }
 
-    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, mine: []const u8) void {
+    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, open_channels: usize, mine: []const u8) void {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
         if (self.remote_nonce_matched > 0) {
             self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
@@ -15357,7 +15357,7 @@ pub const AppSession = struct {
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s} term={s}{s} ({d} terms fed, {d} with nonce, none matched) mine=[{s}]",
+            "orphan agent nonce: dest={s} event={s} term={s}{s} ({d} fed, {d} with nonce, {d} open, saw_hello={}, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
@@ -15365,6 +15365,8 @@ pub const AppSession = struct {
                 if (self.unmatched_is_near) " ← 꼬리가 같다(같은 runtime, 앞이 갈렸다)" else "",
                 fed,
                 with_nonce,
+                open_channels,
+                if (self.remote_agent_hosts.get(dest)) |h| h.saw_hello else false,
                 mine,
             },
         );
@@ -15438,13 +15440,17 @@ pub const AppSession = struct {
         self.remote_nonce_matched = 0;
         var fed: usize = 0;
         var with_nonce: usize = 0;
+        // **몇이 실제로 먹을 수 있나.** `fed` 는 「분배 후보였다」일 뿐이고, 채널이 `hello` 관문을 못
+        // 지났거나 닫혔으면 그 Term 은 이벤트를 **아예 못 본다** — 그러면 미매칭 기록조차 안 남아
+        // 「열을 다 먹였는데 하나도 안 맞는다」로만 보인다(2026-09-11 실측).
+        var open_channels: usize = 0;
         var mine_buf: [term_nonce_tail_buf]u8 = undefined;
         var mine_len: usize = 0;
         var no_channel: usize = 0;
         var no_dest: usize = 0;
         var other_dest: usize = 0;
         defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
-        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce, mine_buf[0..mine_len]);
+        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce, open_channels, mine_buf[0..mine_len]);
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -15461,6 +15467,9 @@ pub const AppSession = struct {
                         continue;
                     }
                     fed += 1;
+                    if (term.agent_remote_channel) |ch| {
+                        if (ch.isOpen()) open_channels += 1;
+                    }
                     if (term.agent_remote_nonce_len != 0) {
                         with_nonce += 1;
                         // **앱이 든 신원을 모은다.** orphan 이 뜰 때 「내가 뭘 들고 있었나」가 없으면

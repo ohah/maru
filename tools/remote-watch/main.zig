@@ -14,8 +14,21 @@
 //! 쌓는 것이 이 트랙의 최악 실패이므로, **stdin 을 감시 대기와 같은 자리에 넣고 EOF 면 종료한다.**
 //!
 //! ⚠️ 그래서 호출자는 **채널의 stdin 을 열어 둬야 한다.** 닫힌 채로 띄우면 뜨자마자 죽는다.
+//!
+//! ## 「`std` 만 임포트한다」를 **활동 축에서만** 깬다
+//!
+//! 목록·변경 wire 는 인코더의 **사본**을 손으로 든다(아래 `rfls_header` 계열) — 크기와 자기완결
+//! 때문이고, 드리프트는 실물 왕복 게이트가 막는다. **활동 축(RAV2)은 그럴 수 없다.**
+//! 스캐너(`agent_image_index`)는 2,800 줄에 판정자 163 개이고, 계약의 벗기기 규칙(Codex `exec` 의
+//! JavaScript 껍데기, 옛 형식 JSON 두 겹, chunk 봉투)이 전부 그 안에 있다. 사본을 들면 **원격과
+//! 로컬이 다른 것을 보여 준다** — 이 뷰에서 그것이 최악의 실패다.
+//!
+//! 그래서 활동 축은 `remote_activity_wire` 모듈 하나를 문다(그것이 스캐너·라벨을 함께 끌어온다).
+//! 비용은 쟀다: **+19,072 B(+8.6%)** — 계획 [원격 에이전트 활동 뷰](../../docs/plans/remote-agent-activity.md) §2.3.
+//! 방향은 한 쪽이다 — 헬퍼가 세션 모듈을 물고, 그 반대는 없다.
 
 const std = @import("std");
+const activity_wire = @import("remote_activity_wire");
 const builtin = @import("builtin");
 
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
@@ -27,7 +40,9 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 3: `list` 서브커맨드(RF2 — 원격 파일 트리 목록). 판을 올리는 이유가 정확히 이것이다 —
 /// GUI 가 `list` 를 보내려면 원격 바이너리에 그것이 **있어야** 하고, 판이 그 사실을 보증한다.
-pub const version_line = "maru-remote-watch 8\n";
+///
+/// 판 9: `activity` 서브커맨드(RAV2 — 원격 에이전트 활동). 같은 이유다.
+pub const version_line = "maru-remote-watch 9\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -66,6 +81,15 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, root, "list")) {
         const dir_path = args.next() orelse return exitWith(exit_unsupported);
         return runList(io, dir_path);
+    }
+
+    // **활동 모드**(RAV2 — [계획](../../docs/plans/remote-agent-activity.md) §5). 트랜스크립트 하나를
+    // 훑어 `maru-rav 1` wire 를 stdout 에 내고 끝난다 — `list` 와 같이 **한 번 답하고 죽는** 모드다.
+    //
+    // 목록 wire 와 달리 인코더를 **손으로 안 든다** — 위 머리말이 적은 대로 모듈을 문다.
+    if (std.mem.eql(u8, root, "activity")) {
+        const file_path = args.next() orelse return exitWith(exit_unsupported);
+        return runActivity(io, init.gpa, file_path);
     }
 
     // **이름 변경 모드**(RF6a — [계획](../../docs/plans/remote-file-tree.md) §2.3 ⑶). 인자는
@@ -922,4 +946,139 @@ fn watchPoll(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []con
         last = now.value;
         if (!announce()) return;
     }
+}
+
+// ── 활동 모드(RAV2) ─────────────────────────────────────────────────────────────────────────────
+
+/// 한 줄 버퍼 — 레코드 하나가 최악 400 B 다(계획 §8 의 계산, 실측 최대 277 B).
+///
+/// **wire 를 통째로 담지 않는다.** 받는 쪽 상한은 24 MiB 지만 그것은 **읽기를 자르는 값**이지
+/// 내는 쪽이 잡아야 할 메모리가 아니다 — 남의 서버에서 24 MiB 를 붙들 이유가 없다. 레코드마다 이
+/// 버퍼에 쓰고 곧바로 흘린다.
+const activity_line_bytes: usize = 1024;
+
+// **이 버퍼는 못 찬다** — 그 사실을 여기서 못박는다(적대적 J2). `appendRecord` 의 계약은 「버퍼가
+// 모자라면 멈춘다(개수에서 빼지 않는다)」인데, 버퍼가 최악을 덮으면 그 경로가 **도달 불가**가 된다.
+// 도달 불가가 아니면 판정자가 그것을 못 만들고, 못 만드는 경로는 조용히 썩는다.
+comptime {
+    if (activity_line_bytes < activity_wire.max_record_bytes) {
+        @compileError("remote-watch: activity_line_bytes 가 레코드 최악을 못 덮는다 — 늘리거나, 「버퍼가 차면 멈춘다」 경로를 판정자가 만들 수 있게 하라");
+    }
+}
+
+/// 스캐너에 먹이는 청크. 제품 스캔 워커와 같은 값이다.
+const activity_chunk_bytes: usize = 64 * 1024;
+
+fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
+    var line: [activity_line_bytes]u8 = undefined;
+
+    // 머리말부터 낸다 — 그 뒤에 무엇이 실패하든 받는 쪽은 **판을 확인할 수 있다**.
+    const head = activity_wire.appendHeader(&line, 0) orelse return;
+    if (!putAll(line[0..head])) return;
+
+    // 절대경로만 — 상대는 로그인 셸의 cwd(홈)에 걸려 **다른 파일**을 연다(`list` 와 같은 규율).
+    if (file_path.len == 0 or file_path[0] != '/') {
+        putRemoteError("path is not absolute");
+        return;
+    }
+
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch |err| {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "open failed: {s}", .{@errorName(err)}) catch "open failed";
+        putRemoteError(msg);
+        return;
+    };
+    defer file.close(io);
+
+    // **체인 자리 0 이다.** 부모 rollout 까지 잇는 것은 RAV4 의 일이고, 그때도 자리는 **번호로**
+    // 실린다(순서가 아니다 — 계획 §11.3 G1).
+    const at_file = activity_wire.appendFile(&line, 0, 0, file_path) orelse {
+        putRemoteError("path too long");
+        return;
+    };
+    if (!putAll(line[0..at_file])) return;
+
+    var scanner: activity_wire.Scanner = .{};
+    defer scanner.deinit(gpa);
+    var hits: std.ArrayList(activity_wire.Hit) = .empty;
+    defer hits.deinit(gpa);
+
+    const chunk = gpa.alloc(u8, activity_chunk_bytes) catch {
+        putRemoteError("out of memory");
+        return;
+    };
+    defer gpa.free(chunk);
+
+    var offset: u64 = 0;
+    var truncated = false;
+    while (true) {
+        const n = file.readPositional(io, &.{chunk}, offset) catch {
+            truncated = true;
+            break;
+        };
+        if (n == 0) break;
+        offset += n;
+        scanner.feed(gpa, chunk[0..n], &hits) catch {
+            truncated = true;
+            break;
+        };
+    }
+
+    {
+        const at = activity_wire.appendFlags(&line, 0, .{
+            // 읽다 멈춘 것도 「다 못 봤다」다 — 제품 스캔 워커가 같은 자리에서 `partial` 을 세운다.
+            .partial = scanner.partial or truncated,
+            .image_partial = scanner.image_partial,
+            .activity_partial = scanner.activity_partial,
+            .scanned_bytes = offset,
+        }) orelse return;
+        if (!putAll(line[0..at])) return;
+    }
+
+    // ── 라벨 패스 ───────────────────────────────────────────────────────────────────────────
+    // 제품 스캔 워커와 **같은 모양**이다: 파일을 열어 둔 채 positional read 로 그 자리만 읽는다.
+    // 라벨을 여기서 만드는 이유는 계약 §2.4 — 저쪽 오프셋을 이쪽이 읽을 수 없기 때문이다.
+    var written: u64 = 0;
+    for (hits.items) |hit| {
+        var label: activity_wire.Label = .{};
+        if (hit.activity != .none and hit.data_len > 0) {
+            // 로컬과 같이 **전량**을 읽는다. 앞부분만 읽으면 읽기(`read`) 활동의 basename 이 달라진다.
+            if (gpa.alloc(u8, hit.data_len)) |raw| {
+                defer gpa.free(raw);
+                if (readAllAt(io, file, raw, hit.data_offset)) {
+                    label = activity_wire.activityLabel(raw, hit.activity == .read);
+                }
+            } else |_| {}
+        }
+        if (hit.time_rel != 0) {
+            var tbuf: [activity_wire.time_window_bytes]u8 = undefined;
+            const n = file.readPositional(io, &.{&tbuf}, hit.line_offset + hit.time_rel) catch 0;
+            if (n > 0) label.time_s = activity_wire.timestampSeconds(tbuf[0..n]);
+        }
+
+        // **버퍼가 모자라면 멈춘다 — 개수에서 빼지 않는다**(`appendRecord` 의 계약). 빼면 꼬리
+        // count 가 맞아 받는 쪽이 「완결」로 읽고, 못 실은 활동이 조용히 사라진다.
+        const at = activity_wire.appendRecord(&line, 0, .{ .hit = hit, .label = label }) orelse return;
+        if (!putAll(line[0..at])) return;
+        written += 1;
+    }
+
+    const at_tail = activity_wire.appendTail(&line, 0, written) orelse return;
+    _ = putAll(line[0..at_tail]);
+}
+
+/// 그 자리를 **다 읽었을 때만** 참. 짧게 읽고 라벨을 만들면 잘린 텍스트가 온전한 척 뜬다
+/// (제품 스캔 워커의 `readAllAt` 과 같은 규율).
+fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, at: u64) bool {
+    var got: usize = 0;
+    while (got < dest.len) {
+        const n = file.readPositional(io, &.{dest[got..]}, at + got) catch return false;
+        if (n == 0) return false;
+        got += n;
+    }
+    return true;
 }

@@ -64,8 +64,8 @@
 > open-file-description이며 `O_NONBLOCK|FD_CLOEXEC`이고 inherited stdout status flags는
 > init/deinit 전후 byte-for-byte 불변이며 전용 fd만 닫힘을 증명한다. injected failure matrix는
 > path/flags/open/세 fstat/character-device/identity drift에서 publication 0과 opened fd exact close를
-> 증명한다. 이 완료 표시는 3a1 primitive에만 해당하며 3a2가 아래에서 별도 완료됐어도 3b 제품 loop와
-> P5c3d E2E는 미완료다.
+> 증명한다. 이 완료 표시는 3a1 primitive에만 해당한다. 3a2·3b 제품 loop·P5c3d E2E는 각각 아래의
+> 독립 gate로 완료 상태를 증명한다.
 
 > **P5c3c-3a2 완료 증거:** `test-session-host-3a2`가 3a1과 P5c3c-2b3을 상속하고
 > prepared TTY inspection, final-address `PreRawOwner`, dormant-product boundary를 Debug·ReleaseFast로
@@ -2612,7 +2612,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   prefix 0과 base/frontier/pending mutation 0이고 admission 뒤 동일 request nonce retry는 projection/queue/frontier commit exact1,
   target 불변, spent replay mutation 0이다. 실제 fork child는 inherited mutex 접근 전 OS PID/process seal mismatch로 거부한다.
   client prerequisite의 첫 slice는 raw fd reader 0과 negotiated capability, 기존 Client demux를 통한 sibling screen/barrier 보존, absolute deadline과 exact identity 소비를 제품 테스트로 고정한다. 이어지는 `GenerationAttachment` slice는 catch-up 전용 batch 64개/encoded 16 MiB/decoded cell 1,048,576개 상한을 일반 inbox cap과 분리한다. target exact equality와 gap/malformed/batch·cell cap+1/missing barrier의 receipt 0을 제품 socket에서 검증하고 byte cap leaf도 apply 전 mutation 0으로 닫는다. actual `connectExistingHostUntil` E2E, backend-owned Client job, same-adapter replacement, observer candidate/staged receipt와 allocator fail-index/final ledger 0까지 구현돼 CR4a를 완료로 센다.
-- CR4c C1+C2는 부분 구현이다. C1 Debug·ReleaseFast actual backend job이 CR4b의 `controller_evidenced` receipt만 소비해 observer
+- CR4c C1+C2는 구현 완료다. C1 Debug·ReleaseFast actual backend job이 CR4b의 `controller_evidenced` receipt만 소비해 observer
   cleanup registry RPC identity, transport binding과 attachment-local role을 동일 controller generation으로 승격한다.
   final-address preflight/no-fail owner chain과 외부 product caller 0을 boundary로 고정하고, success 뒤 stable shell unavailable,
   mutation seal 불변, candidate active, public input Unauthorized와 generation publication·forced resize·reclaim 0을 확인한다.

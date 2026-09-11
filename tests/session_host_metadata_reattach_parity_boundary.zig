@@ -26,6 +26,8 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     defer allocator.free(ssot);
     const matrix = try read(allocator, "docs/verification-matrix.md", 2 * 1024 * 1024);
     defer allocator.free(matrix);
+    const plan = try read(allocator, "docs/implementation-plan.md", 2 * 1024 * 1024);
+    defer allocator.free(plan);
 
     const marker = "test \"P3-e4d-1 actual metadata events stay isolated and reattach starts current\"";
     const start = std.mem.indexOf(u8, runtime, marker) orelse return error.MissingProductGate;
@@ -38,6 +40,13 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     try std.testing.expectEqual(@as(usize, 1), count(build, "P3-e4d-1 actual metadata events stay isolated"));
     try std.testing.expectEqual(@as(usize, 1), count(ssot, "P3-e4d-1은 multi-runtime event 격리"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "P3-e4d-1 metadata isolation·reattach parity"));
+    // 하위 parity gate가 모두 닫힌 뒤 상위 스펙 제목만 부분 구현으로 남는 상태 드리프트를 막는다.
+    try std.testing.expectEqual(@as(usize, 0), count(ssot, "P3-e4(runtime metadata parity) 🟨 부분 구현"));
+    try std.testing.expectEqual(@as(usize, 1), count(ssot, "P3-e4(runtime metadata parity)"));
+    try std.testing.expectEqual(@as(usize, 0), count(ssot, "실패 원인 분류(부분 구현)"));
+    try std.testing.expectEqual(@as(usize, 0), count(ssot, "실제 제품 process에서 기존 checkpoint file 무변경을\n관측하는 E2E는 남아 있다"));
+    try std.testing.expectEqual(@as(usize, 1), count(ssot, "실제 제품 process에서 기존 checkpoint file이\n변하지 않는지는 P4 R2a 제품 E2E가 관측한다"));
+    try std.testing.expectEqual(@as(usize, 1), count(plan, "Session host 실행 중 transport reconnect (CR0a~CR6f 완료)"));
 
     try std.testing.expect(std.mem.indexOf(u8, body, "daemon.runSessionHost") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "HostAdapter.initInPlace") != null);

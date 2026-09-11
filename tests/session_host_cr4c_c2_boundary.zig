@@ -16,6 +16,8 @@ test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered recl
     defer allocator.free(backend);
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
+    const matrix = try readSource(allocator, "docs/verification-matrix.md");
+    defer allocator.free(matrix);
 
     const resize = functionSlice(
         attachment,
@@ -93,6 +95,9 @@ test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered recl
         "test \"CR4c C2 publication suffix authority drift는",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR4c C2 actual socket forced resize는"));
+    // C1+C2 actual socket/publication gate와 상충하는 옛 진행 표식이 되살아나지 않게 한다.
+    try std.testing.expectEqual(@as(usize, 0), count(matrix, "CR4c C1+C2는 부분 구현이다"));
+    try std.testing.expectEqual(@as(usize, 1), count(matrix, "CR4c C1+C2는 구현 완료다"));
 
     // CR5 follows CR4c in the build graph; keep this inherited inventory scoped to CR4c itself.
     const gate = functionSlice(build, "const session_host_cr4c_c2_step =", "const session_host_cr5a_step =");

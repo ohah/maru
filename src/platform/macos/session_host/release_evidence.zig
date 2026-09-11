@@ -14,6 +14,7 @@ pub const schema = "maru.session-host-release-evidence.v1";
 pub const default_false_leaf_schema = upgrade_limits.default_false_leaf_schema;
 pub const signed_app_quit_leaf_schema = upgrade_limits.signed_app_quit_leaf_schema;
 pub const signed_upgrade_leaf_schema = upgrade_limits.signed_upgrade_leaf_schema;
+pub const signed_cli_ssh_leaf_schema = "maru.session-host-signed-cli-ssh.v1";
 pub const max_evidence_bytes = manifest.max_evidence_bytes;
 pub const max_scalar_string_bytes = manifest.max_scalar_string_bytes;
 pub const near_max_runtime_count: u64 = upgrade_limits.max_runtime_count - 1;
@@ -116,6 +117,24 @@ pub const SignedUpgradeGate = struct {
     upgrade_capability_preserved: bool,
     epoch_before: u64,
     epoch_after: u64,
+};
+
+pub const SignedCliSshInput = struct {
+    test_uuid: []const u8,
+    candidate_dmg_sha256: []const u8,
+    candidate_executable_sha256: []const u8,
+    candidate_cli_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
+};
+
+pub const SignedCliSshGate = struct {
+    schema: []const u8,
+    test_uuid: []const u8,
+    result: Result,
+    candidate_dmg_sha256: []const u8,
+    candidate_executable_sha256: []const u8,
+    candidate_cli_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
 };
 
 pub const BaselineGates = struct {
@@ -330,6 +349,33 @@ pub fn parseCanonical(allocator: std.mem.Allocator, bytes: []const u8) Error!Par
     };
 }
 
+pub fn writeSignedCliSshLeaf(allocator: std.mem.Allocator, input: SignedCliSshInput) Error![]u8 {
+    if (!canonicalUuidV4(input.test_uuid) or
+        !lowerHex(input.candidate_dmg_sha256, 64) or
+        !lowerHex(input.candidate_executable_sha256, 64) or
+        !lowerHex(input.candidate_cli_sha256, 64) or
+        !lowerHex(input.designated_requirement_sha256, 64)) return error.InvalidIdentity;
+    return writeJson(allocator, SignedCliSshGate{
+        .schema = signed_cli_ssh_leaf_schema,
+        .test_uuid = input.test_uuid,
+        .result = .passed,
+        .candidate_dmg_sha256 = input.candidate_dmg_sha256,
+        .candidate_executable_sha256 = input.candidate_executable_sha256,
+        .candidate_cli_sha256 = input.candidate_cli_sha256,
+        .designated_requirement_sha256 = input.designated_requirement_sha256,
+    });
+}
+
+pub fn parseSignedCliSshLeaf(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) Error!std.json.Parsed(SignedCliSshGate) {
+    var parsed = try parseLeaf(SignedCliSshGate, allocator, bytes);
+    errdefer parsed.deinit();
+    try validateSignedCliSshLeaf(parsed.value);
+    return parsed;
+}
+
 pub fn bind(value: Value, expected: Expected) Error!void {
     switch (value) {
         .baseline_a => |actual| switch (expected) {
@@ -490,6 +536,14 @@ fn validateUpgradeLeaf(leaf: SignedUpgradeGate) Error!void {
         !leaf.runtime_reaped_after_exit or leaf.runtime_inventory_absent_observations != 2 or
         !leaf.status_committed or leaf.status_reason != .none or !leaf.upgrade_capability_preserved or
         leaf.epoch_before == 0 or leaf.epoch_after != next_epoch) return error.InvalidLeaf;
+}
+
+fn validateSignedCliSshLeaf(leaf: SignedCliSshGate) Error!void {
+    if (!std.mem.eql(u8, leaf.schema, signed_cli_ssh_leaf_schema) or leaf.result != .passed or
+        !canonicalUuidV4(leaf.test_uuid) or !lowerHex(leaf.candidate_dmg_sha256, 64) or
+        !lowerHex(leaf.candidate_executable_sha256, 64) or
+        !lowerHex(leaf.candidate_cli_sha256, 64) or
+        !lowerHex(leaf.designated_requirement_sha256, 64)) return error.InvalidLeaf;
 }
 
 fn bindBaselineLeaves(common: Common, default_leaf: DefaultFalseGate, quit_leaf: SignedAppQuitGate) Error!void {

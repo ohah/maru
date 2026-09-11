@@ -1909,11 +1909,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   배타 게시한다. 실패 시 partial leaf는 없고 residue가 있으면 성공으로 축소하지 않는다. candidate의 CLI와 designated
   requirement 값은 manifest signing/asset SSOT에서 유도해 leaf와 aggregate가 복사·결속할 뿐, 별도 정책 SSOT를 만들지 않는다.
 
-  구현 순서는 **P5d-R1** strict leaf type·canonical parser/writer와 digest/UUID/result fail-close → **P5d-R2** mounted/
+  구현 순서는 **P5d-R1** strict leaf type·canonical parser/writer와 digest/UUID/result fail-close(**구현**) → **P5d-R2** mounted/
   private-extracted candidate CLI final-address authority·outer-owned bounded child/workspace·실제 P5d 하니스 실행과
   post-exit cleanup 검증 → **P5d-R3** A/B 공통
   `candidate_gates` aggregate·attestation·live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
   synthetic/product gate는 R4를 대신하지 않으며, R4 전에는 P5d phase 완료라고 쓰지 않는다.
+  R1 writer는 staging 포맷을 canonical하게 만드는 도구일 뿐 실행 성공 권위가 아니다. R2는 제품 호출을 outer
+  execution owner의 post-exit cleanup 성공 suffix 한 곳으로 제한하고 source-boundary gate로 그 caller inventory를 고정한다.
 
   default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
   명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와

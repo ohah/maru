@@ -232,3 +232,84 @@ fn assembleUpgradeAlloc(allocator: std.mem.Allocator) !void {
 test "upgrade aggregate unwinds every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, assembleUpgradeAlloc, .{});
 }
+
+test "signed CLI SSH leaf writer and parser preserve exact candidate identity" {
+    const bytes = try evidence.writeSignedCliSshLeaf(std.testing.allocator, .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .candidate_cli_sha256 = sha_c,
+        .designated_requirement_sha256 = sha_d,
+    });
+    defer std.testing.allocator.free(bytes);
+    var parsed = try evidence.parseSignedCliSshLeaf(std.testing.allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(evidence.signed_cli_ssh_leaf_schema, parsed.value.schema);
+    try std.testing.expectEqual(evidence.Result.passed, parsed.value.result);
+    try std.testing.expectEqualStrings(sha_c, parsed.value.candidate_cli_sha256);
+    try std.testing.expectEqualStrings(sha_d, parsed.value.designated_requirement_sha256);
+}
+
+test "signed CLI SSH leaf rejects malformed identity and noncanonical bytes" {
+    const bytes = try evidence.writeSignedCliSshLeaf(std.testing.allocator, .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .candidate_cli_sha256 = sha_c,
+        .designated_requirement_sha256 = sha_d,
+    });
+    defer std.testing.allocator.free(bytes);
+    const duplicate = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "{\"schema\":", "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"schema\":");
+    defer std.testing.allocator.free(duplicate);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, duplicate));
+    const spaced = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, ":", ": ");
+    defer std.testing.allocator.free(spaced);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, spaced));
+    try std.testing.expectError(error.InvalidIdentity, evidence.writeSignedCliSshLeaf(std.testing.allocator, .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .candidate_cli_sha256 = "ABC",
+        .designated_requirement_sha256 = sha_d,
+    }));
+}
+
+test "signed CLI SSH leaf rejects missing unknown trailing and failed result" {
+    const bytes = try evidence.writeSignedCliSshLeaf(std.testing.allocator, .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .candidate_cli_sha256 = sha_c,
+        .designated_requirement_sha256 = sha_d,
+    });
+    defer std.testing.allocator.free(bytes);
+    const missing = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, std.fmt.comptimePrint(",\"candidate_cli_sha256\":\"{s}\"", .{sha_c}), "");
+    defer std.testing.allocator.free(missing);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, missing));
+    const unknown = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "{\"schema\":", "{\"unknown\":true,\"schema\":");
+    defer std.testing.allocator.free(unknown);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, unknown));
+    const trailing = try std.mem.concat(std.testing.allocator, u8, &.{ bytes, "{}" });
+    defer std.testing.allocator.free(trailing);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, trailing));
+    const failed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"passed\"", "\"failed\"");
+    defer std.testing.allocator.free(failed);
+    try std.testing.expectError(error.InvalidLeaf, evidence.parseSignedCliSshLeaf(std.testing.allocator, failed));
+}
+
+fn signedCliSshRoundTripAlloc(allocator: std.mem.Allocator) !void {
+    const bytes = try evidence.writeSignedCliSshLeaf(allocator, .{
+        .test_uuid = uuid,
+        .candidate_dmg_sha256 = sha_a,
+        .candidate_executable_sha256 = sha_b,
+        .candidate_cli_sha256 = sha_c,
+        .designated_requirement_sha256 = sha_d,
+    });
+    defer allocator.free(bytes);
+    var parsed = try evidence.parseSignedCliSshLeaf(allocator, bytes);
+    defer parsed.deinit();
+}
+
+test "signed CLI SSH leaf unwinds every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, signedCliSshRoundTripAlloc, .{});
+}

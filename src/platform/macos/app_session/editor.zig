@@ -5899,6 +5899,31 @@ pub fn redoEdit(self: *AppSession, term: *Term) bool {
     return stepHistory(self, term, false);
 }
 
+/// 한 되돌리기 묶음이 건드린 범위. `null` = 모른다(전체를 다시 판다).
+///
+/// 근거는 `stepHistory` 안의 주석이다 — **앞은 최솟값, 뒤는 꼬리 길이**. 여기서는 그 둘을 세 값으로
+/// 옮기기만 한다. `u32` 를 넘으면 포기한다(`spanFromInverse` 가 같은 자리에서 같은 판단을 한다).
+fn undoGroupSpan(term: *Term, len_before: usize, lo: usize, suffix: usize, known: bool) ?syntax_color.EditSpan {
+    // **`null` 은 「빈 범위」가 아니라 「전체를 다시 파라」다.** 빈 범위를 주면 트리가 **안 바뀐 것으로
+    // 알고** 옛 색을 그대로 든다 — 조용한 오답이다.
+    //
+    // **이 갈래는 판정할 수 없다**(적대적 검증 Z6 — 살아남는 것이 정상이다): `known` 이 거짓이 되려면
+    // `spanFromInverse` 가 `null` 을 내야 하는데, 그것은 역연산이 비었거나 끝이 시작보다 앞이거나
+    // `u32` 를 넘을 때다. `file.apply` 가 성공한 되돌리기에서 그 셋 중 어느 것도 오늘 오지 않는다.
+    // 그래도 두는 이유는 **뜻**이고, 오면 「전체를 다시 판다」로 떨어져 답이 같다(비용만 다르다).
+    if (!known or lo == std.math.maxInt(usize)) return null;
+    const len_after = (term.rt.editor_doc orelse return null).file.content.len;
+    if (suffix > len_before or suffix > len_after) return null; // 꼬리가 양쪽에 다 있어야 한다
+    const old_end = len_before - suffix;
+    const new_end = len_after - suffix;
+    if (old_end < lo or new_end < lo) return null; // 앞뒤가 뒤집혔다 — 모른다고 답한다
+    return .{
+        .start = std.math.cast(u32, lo) orelse return null,
+        .old_end = std.math.cast(u32, old_end) orelse return null,
+        .new_end = std.math.cast(u32, new_end) orelse return null,
+    };
+}
+
 fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
@@ -5913,6 +5938,27 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     const group = from.*[from_len.* - 1].group;
     var restored: ?struct { items: []editor_selection.Selection, primary: usize } = null;
     var did_any = false;
+
+    // **한 묶음의 범위를 합친다**(2026-09-11). 오래 여기서 범위를 안 넘겼다 — *"각 적용이 그 뒤
+    // offset 을 밀어 범위를 합치면 어긋난다"*. 그 말은 **가운데**에 대해서는 맞지만 **양끝**은
+    // 밀림에 안 흔들린다:
+    //
+    //  · **앞** — `min` 이 걸린 그 자리 앞의 byte 는 **어느 적용도 안 건드렸으므로** 한 번도 안
+    //    밀렸다(귀납: k 번째까지의 최솟값 앞이 성하면, k+1 번째가 그보다 앞을 건드릴 때만 최솟값이
+    //    내려가고 그때도 그 앞은 성하다). 그래서 각자 자기 시점에서 잰 `start` 의 최솟값이 **최종
+    //    문서에서도 유효**하다.
+    //  · **뒤** — 자리가 아니라 **꼬리의 «길이»** 로 잡는다. 안 건드린 꼬리의 길이는 밀림에
+    //    불변이고, 여러 적용이 남긴 꼬리의 교집합이 곧 그 길이들의 최솟값이다.
+    //
+    // 그 둘이면 세 값이 다 나온다: `start = lo`, `old_end = 묶음 «전» 길이 - suffix`,
+    // `new_end = 묶음 «뒤» 길이 - suffix`. 꼬리 길이가 양쪽에서 같은 것이 `old_end` 의 근거다.
+    //
+    // **하나라도 범위를 모르면 통째로 포기한다** — 넓게 잡는 것은 비용이지만 **틀리게 잡는 것은
+    // 오답**이다(`spanFromInverse` 가 `null` 을 내는 갈래가 그것이다).
+    const len_before_group = term.rt.editor_doc.?.file.content.len;
+    var span_lo: usize = std.math.maxInt(usize);
+    var span_suffix: usize = std.math.maxInt(usize);
+    var span_known = true;
 
     // **같은 묶음을 연속으로 꺼낸다** — 그것이 "연속 타이핑은 undo 하나"의 구현이다.
     while (from_len.* > 0 and from.*[from_len.* - 1].group == group) {
@@ -5931,6 +5977,16 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         };
         self.allocator.free(sels.items);
         did_any = true;
+
+        // **이 적용의 범위를 지금 문서 좌표로 읽어 합친다.** `back` 은 방금 적용한 것의 역이므로
+        // `spanFromInverse` 가 **적용 «뒤»** 문서의 span 을 낸다 — 위 주석의 그 좌표계다.
+        if (span_known) {
+            if (syntax_color.spanFromInverse(back.changes)) |sp| {
+                const len_now = term.rt.editor_doc.?.file.content.len;
+                span_lo = @min(span_lo, @as(usize, sp.start));
+                span_suffix = @min(span_suffix, len_now -| @as(usize, sp.new_end));
+            } else span_known = false;
+        }
 
         // 반대편 스택에 **같은 묶음 번호로** 쌓는다 — redo도 한 번에 돌아간다.
         // 그때의 "편집 전 커서"는 지금 항목이 든 것이다.
@@ -5980,9 +6036,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         }
     }
     breakUndoGroup(term); // 되돌린 뒤 친 글자는 새 묶음이다
-    // **undo·redo는 범위를 안 넘긴다 — 전체를 다시 판다.** 한 번에 항목 여럿을
-    // 되돌리는데 각 적용이 그 뒤 offset을 밀어, 범위를 합치면 어긋난 통지가 된다.
-    refreshAfterEdit(self, term, null) catch {};
+    refreshAfterEdit(self, term, undoGroupSpan(term, len_before_group, span_lo, span_suffix, span_known)) catch {};
     return true;
 }
 
@@ -15713,10 +15767,14 @@ test "L2C8 줄 수가 바뀌어도 캐시가 산다 — 꼬리를 «민다» (�
     try testing.expectEqual(scans, term.rt.editor_line_cols_scans);
 }
 
-test "L2C9 되돌리기는 범위를 모른다 — 캐시를 버린다 (제품 경계)" {
-    // `refreshAfterEdit` 은 undo/redo 에서 `edit == null` 로 불린다. 그것은 「안 바뀌었다」가 아니라
-    // **「어디가 바뀌었는지 모른다」** 이다 — 구문 트리가 같은 이유로 전체 재파싱을 고르는 자리다.
-    // `null` 을 「안 바뀌었다」로 읽어 캐시를 살리면 **되돌린 줄이 옛 폭을 든 채 남는다**.
+test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬리 (제품 경계)" {
+    // **오래 「모른다」였다.** 되돌리기는 한 묶음의 항목을 **여럿** 적용하는데 각 적용이 그 뒤
+    // offset 을 밀어, 범위를 나이브하게 합치면 어긋난다 — 그래서 `null` 을 넘기고 캐시도 구문
+    // 트리도 통째로 버렸다. 그런데 밀림에 안 흔들리는 두 값이 있다: **앞끝의 최솟값**과 **꼬리의
+    // 길이**(`undoGroupSpan` 의 주석이 그 근거를 든다).
+    //
+    // **여러 항목 묶음이어야 개념이 갈린다** — 한 항목만 되돌리면 합치기가 자명해 틀린 합치기도
+    // 산다. 그래서 연속 타이핑으로 한 묶음에 여러 항목을 쌓는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -15724,20 +15782,193 @@ test "L2C9 되돌리기는 범위를 모른다 — 캐시를 버린다 (제품 �
     const term = try lineColsFixture(&fx, allocator, "l2c9.zig");
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
+    const lines_before = term.rt.editor_lines.len;
+    const undo_before = term.rt.editor_undo_len;
 
-    // 줄 수를 안 바꾸는 편집 — 여기까지는 캐시가 산다.
-    breakUndoGroup(term);
-    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // **한 묶음 안에 항목 여럿** — 묶음을 안 끊고 문서의 **서로 다른 자리**를 친다. 그래야 각
+    // 적용이 그 뒤를 밀고, 나이브한 합치기가 어긋난다.
+    const content_len = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = editor_selection.Selection.at(content_len - 2);
     if (!insertText(fx.session, term, "WWWW")) return error.InsertRejected;
-    if (!lineColsFresh(term)) return error.PatchDidNotSurvive;
-    const typed = term.rt.editor_line_cols[0];
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "VVV")) return error.InsertRejected;
+    if (term.rt.editor_undo_len < undo_before + 2) return error.FixtureNotOneGroup; // 항목이 여럿이어야 한다
+    const typed_first = term.rt.editor_line_cols[0];
 
-    // 되돌리면 첫 줄이 4열 짧아진다. 캐시를 안 버렸다면 그 값이 안 줄어든다.
+    // 되돌린다 — 한 번에 그 묶음 전부.
     if (!undoEdit(fx.session, term)) return error.UndoRejected;
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len);
-    ensureLineCols(fx.session, term);
-    try testing.expectEqual(typed - 4, term.rt.editor_line_cols[0]);
+    try testing.expectEqual(lines_before, term.rt.editor_lines.len);
+    try testing.expect(lineColsFresh(term)); // **캐시가 산다**
+    try testing.expectEqual(typed_first - 3, term.rt.editor_line_cols[0]); // 첫 줄이 3열 짧아졌다
+    try testing.expectEqual(@as(?usize, null), lineColsMismatch(term)); // 그리고 전 줄이 맞다
+
+    // 다시 하기도 같다.
+    if (!redoEdit(fx.session, term)) return error.RedoRejected;
+    try testing.expect(lineColsFresh(term));
     try testing.expectEqual(@as(?usize, null), lineColsMismatch(term));
+}
+
+/// 지금 화면의 구문 색을 **전부 한 문자열로** 굳힌다 — 두 시점을 대조하기 위한 오라클.
+fn colorDigest(self: *AppSession, term: *Term, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    out.clearRetainingCapacity();
+    const rows = syntaxColors(self, term);
+    for (rows, 0..) |row, i| {
+        var buf: [64]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d}:", .{i}));
+        for (row) |sp| try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d};", .{ sp.start_col, sp.end_col, @intFromEnum(sp.role) }));
+        try out.append(allocator, '\n');
+    }
+}
+
+test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색을 낸다 (제품 경계)" {
+    // **이 조각의 진짜 위험이 여기다.** 되돌리기는 오래 `reparse`(전체 재파싱)로 갔고, 이제 합친
+    // 범위를 실어 **증분**으로 간다. 범위가 조금이라도 좁으면 tree-sitter 는 **틀린 트리**를 들고,
+    // 그것은 「색이 조금 이상하다」로 나타나 눈에 잘 안 띈다 — 판정자가 없으면 조용히 넘어간다.
+    //
+    // 기준은 **같은 문서를 전체 재파싱한 것**이다. `reparse` 를 부른 뒤 같은 자리의 색을 다시 떠
+    // 문자열로 대조한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // **구문이 실제로 갈리는 문서여야 한다** — 주석·문자열·키워드가 서로를 먹는 자리를 넣는다.
+    const term = try undoFixture(&fx, allocator, "synu1.zig",
+        \\const std = @import("std");
+        \\// 주석 안의 "따옴표" 와 const 는 색이 달라야 한다
+        \\pub fn main() void {
+        \\    const msg = "hello // not a comment";
+        \\    _ = msg;
+        \\}
+        \\
+    );
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    var before: std.ArrayList(u8) = .empty;
+    defer before.deinit(allocator);
+    var after: std.ArrayList(u8) = .empty;
+    defer after.deinit(allocator);
+    var truth: std.ArrayList(u8) = .empty;
+    defer truth.deinit(allocator);
+
+    try colorDigest(fx.session, term, &before, allocator);
+    if (before.items.len == 0) return error.NoColors;
+
+    // **한 묶음 안에 항목 여럿** — 서로 다른 자리를 연속으로 친다(묶음을 안 끊는다). 그래야 각
+    // 적용이 그 뒤를 밀고, 합치기가 틀리면 트리가 어긋난다.
+    // **뒤따르는 넓은 영역의 파싱을 바꾸는 편집이어야 한다.** 짝이 맞는 따옴표처럼 국소적인 편집은
+    // 트리를 거의 안 흔들어, `old_end` 를 틀리게 준 변이도 **같은 색을 낸다**(적대적 검증 Z4 가 그렇게
+    // 살아남았다). 그래서 **짝이 안 맞는 따옴표**를 넣는다 — 그 뒤가 통째로 문자열로 읽히므로,
+    // 되돌릴 때 무효화 범위가 조금만 좁아도 옛 해석이 남는다.
+    const len0 = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = editor_selection.Selection.at(len0 - 1);
+    if (!insertText(fx.session, term, "\n// 꼬리 주석\n")) return error.InsertRejected;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "// 머리 주석\n")) return error.InsertRejected;
+    term.rt.editor_selection = editor_selection.Selection.at(30);
+    if (!insertText(fx.session, term, "\"")) return error.InsertRejected;
+
+    // 되돌린다 — 증분 통지로 간다.
+    if (!undoEdit(fx.session, term)) return error.UndoRejected;
+    try colorDigest(fx.session, term, &after, allocator);
+
+    // **기준: 같은 문서를 통째로 다시 판 것.**
+    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+    try colorDigest(fx.session, term, &truth, allocator);
+
+    try testing.expectEqualStrings(truth.items, after.items);
+    // **픽스처 공허 방지** — 되돌리기가 색을 실제로 바꿨어야 대조가 뜻을 갖는다.
+    if (std.mem.eql(u8, before.items, truth.items)) return error.UndoDidNotChangeColors;
+
+    // 다시 하기도 같은 자리를 지난다.
+    if (!redoEdit(fx.session, term)) return error.RedoRejected;
+    try colorDigest(fx.session, term, &after, allocator);
+    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+    try colorDigest(fx.session, term, &truth, allocator);
+    try testing.expectEqualStrings(truth.items, after.items);
+}
+
+test "SYNU2 되돌리기를 섞어도 색이 전체 재파싱과 같다 (상태 기계 퍼즈)" {
+    // **손으로 적은 사례가 `old_end` 를 못 갈랐다**(적대적 검증 Z4 — 그 값을 틀리게 준 변이가
+    // `SYNU1` 을 통과했다). 그 값은 tree-sitter 의 **무효화 범위**라 틀리면 옛 해석이 남는 식으로
+    // 드러나는데, 어느 편집에서 드러나는지를 손으로 고르는 것은 짐작이다. 그래서 이 저장소가 같은
+    // 자리에서 쓴 방법을 따른다 — **무작위로 돌리고 매번 전체 재파싱과 대조한다**(§5.3 의 행·열
+    // 근사도 "무작위 편집 180회, 불일치 0" 으로 판정했다).
+    //
+    // 이 판정자가 **초록이면 그것도 결론이다**: 그 값의 차이가 우리 소비처(색 span)로는 관측되지
+    // 않는다는 뜻이고, 그때 Z4 는 동치 변이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "synu2.zig",
+        \\const std = @import("std");
+        \\pub fn main() void {
+        \\    const a = "one";
+        \\    // 주석
+        \\    const b = 'c';
+        \\    _ = .{ a, b };
+        \\}
+        \\
+    );
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    if (term.rt.editor_syntax.provider == null) return error.NoProvider;
+
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(allocator);
+    var truth: std.ArrayList(u8) = .empty;
+    defer truth.deinit(allocator);
+
+    var prng = std.Random.DefaultPrng.init(0x5A17);
+    const rand = prng.random();
+    var steps_back: usize = 0; // **되돌리기·다시하기가 실제로 성사된 횟수** — 0이면 공허하다
+
+    var step: usize = 0;
+    while (step < 120) : (step += 1) {
+        const len = term.rt.editor_doc.?.file.content.len;
+        switch (rand.uintLessThan(u8, 10)) {
+            // **구조를 흔드는 글자를 넣는다** — 짝이 안 맞는 따옴표·괄호·주석 여는 표시는 그 뒤를
+            // 통째로 다르게 읽게 만든다. 평범한 글자만 넣으면 트리가 거의 안 흔들려 못 가른다.
+            0...5 => {
+                breakUndoGroup(term);
+                for (0..1 + rand.uintLessThan(usize, 3)) |_| {
+                    const at = rand.uintAtMost(usize, term.rt.editor_doc.?.file.content.len);
+                    term.rt.editor_selection = editor_selection.Selection.at(at);
+                    const texts = [_][]const u8{ "\"", "'", "//", "{", "}", "x", "\n", ")" };
+                    _ = insertText(fx.session, term, texts[rand.uintLessThan(usize, texts.len)]);
+                }
+            },
+            6 => {
+                if (len > 1) {
+                    breakUndoGroup(term);
+                    term.rt.editor_selection = editor_selection.Selection.at(1 + rand.uintLessThan(usize, len - 1));
+                    _ = deleteText(fx.session, term, true);
+                }
+            },
+            7, 8 => if (undoEdit(fx.session, term)) {
+                steps_back += 1;
+            },
+            else => if (redoEdit(fx.session, term)) {
+                steps_back += 1;
+            },
+        }
+
+        // **매 단계 대조한다.** 증분으로 온 색과, 같은 문서를 통째로 다시 판 색.
+        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+        try colorDigest(fx.session, term, &got, allocator);
+        syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+        try colorDigest(fx.session, term, &truth, allocator);
+        if (!std.mem.eql(u8, truth.items, got.items)) {
+            std.debug.print("SYNU2 step {d}: 증분과 재파싱의 색이 갈린다\n", .{step});
+            return error.ColorsDiverged;
+        }
+    }
+    if (steps_back < 20) {
+        std.debug.print("SYNU2: 되돌리기·다시하기가 {d} 번뿐이다 — 퍼즈가 그 경로를 안 지난다\n", .{steps_back});
+        return error.UndoPathNotExercised;
+    }
 }
 
 test "L2C10 편집을 섞어도 폭 캐시가 전체 재훑기와 같다 (상태 기계 퍼즈)" {
@@ -15891,12 +16122,13 @@ test "MAXC1 가장 긴 줄이 «짧아지면» 상한도 준다 — 같은 프�
 }
 
 test "MAXC2 캐시가 없으면 «자란 쪽만» 따라간다 — 옛 절충이 그대로다 (제품 경계)" {
-    // **캐시가 없을 때의 동작은 여전히 필요하다.** 되돌리기는 `edit == null` 로 와서 범위를 모르므로
-    // 캐시를 버린다(`L2C9`). 그 상태에서 상한을 0 으로 버리면 가로 위치가 되감기고 막대가 사라진다
-    // (2026-09-08 캡처가 그 둘을 한 화면에서 보여 줬다) — 그래서 근사가 0 보다 낫다.
+    // **캐시가 없을 때의 동작은 여전히 필요하다.** 그때 상한을 0 으로 버리면 가로 위치가 되감기고
+    // 막대가 사라진다(2026-09-08 캡처가 그 둘을 한 화면에서 보여 줬다) — 근사가 0 보다 낫다.
     //
-    // **이 판정자의 방아쇠가 바뀌었다.** 예전에는 「줄 수가 바뀌는 편집」으로 캐시를 죽였는데, 그
-    // 편집은 이제 꼬리를 밀어 캐시를 **살린다**(`L2C8`). 남은 방아쇠가 되돌리기다.
+    // **이 판정자의 방아쇠가 두 번 바뀌었다.** 처음엔 「줄 수가 바뀌는 편집」이었는데 그 편집은 이제
+    // 꼬리를 밀어 캐시를 살리고(`L2C8`), 다음엔 「되돌리기」였는데 그것도 이제 범위를 안다(`L2C9`).
+    // 남은 방아쇠는 **탭 폭 변경**이다 — 줄별 폭이 전부 다른 값이 되므로 캐시가 낡는다(§2 의 L2
+    // 계약: 「문서 내용 **과 탭 폭**의 함수」). 방아쇠가 바뀌어도 **지켜야 할 것은 같다.**
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -15904,16 +16136,17 @@ test "MAXC2 캐시가 없으면 «자란 쪽만» 따라간다 — 옛 절충이
     const term = try lineColsFixture(&fx, allocator, "maxc2.zig");
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
-    const before = term.rt.editor_max_cols;
-    if (before < 600) return error.FixtureNotWide;
 
-    // 되돌릴 것을 하나 만들고 되돌린다 — 그 순간 캐시가 죽는다.
-    breakUndoGroup(term);
-    term.rt.editor_selection = editor_selection.Selection.at(0);
-    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
-    if (!undoEdit(fx.session, term)) return error.UndoRejected;
+    // 탭 폭을 바꾼다 — 캐시가 낡고 상한도 버려진다.
+    setEditorTabWidth(fx.session, term, term.rt.editor_tab_width + 4);
     if (lineColsFresh(term)) return error.CacheDidNotDie;
     try testing.expectEqual(@as(?u32, null), maxColsFromCache(term));
+    // **가로 휠로** 상한을 옛 경로에서 다시 세운다 — 프레임을 그리면 구문 접힘 승격이
+    // `finishFoldChange` 를 지나며 **캐시를 도로 채워** 이 픽스처가 개념을 못 가른다(실제로 걸렸다).
+    if (!scrollCols(fx.session, term, fx.leaf_rect, 1, null)) return error.ScrollRejected;
+    const before = term.rt.editor_max_cols;
+    if (before < 600) return error.MaxNotRecounted;
+    if (lineColsFresh(term)) return error.CacheRefilledUnexpectedly;
 
     // **그 상태에서 가장 긴 줄을 짧게 만든다.** 캐시가 없으니 정확히 셀 길이 없고, 상한은 안 준다.
     const content = term.rt.editor_doc.?.file.content;

@@ -536,6 +536,25 @@ ck "Android 가 프레임마다 본다" 1 "$(sed -n '/frame_changed = maru_mobil
 # **붙어 있어 못 열 때도 «말한다»** — 조용히 버리면 사용자에게는 고장으로 보인다(§5).
 ck "붙어 있어 못 열면 남긴다" 1 "$(grep -c 'connect_ignored_busy' $IOSH)"
 
+echo "§3.0 ③ 붙어 있으면 묻고 갈아탄다 (M12-f2)"
+SWB=src/platform/mobile/mobile_bridge.zig
+# **요청을 세우는 자리는 하나다.** 경로가 셋이었다(자동 접속·줄 누르기·갈아타기) — 처음에는
+# 자동 접속이 두 줄을 복사해 들고 있었고, 그 사실을 적대적으로 세어 보고서야 알았다.
+# 「승인한 지문을 어느 줄에 적나」 같은 규칙이 늘면 복사본만 낡는다.
+ck "요청을 세우는 자리는 하나" 1 "$(sed 's,//.*,,' $SWB | grep -c 'ssh_connect_req = @intCast')"
+# **끊긴 것을 «보고» 낸다.** 확인하자마자 세우면 host 가 버리고, 버린 요청이 「뒤늦게」로 돌아온다.
+ck "확인은 끊으라고만 한다" 0 "$(awk '/^fn acceptSwitch\(/,/^}$/' $SWB | sed 's,//.*,,' | grep -c 'ssh_connect_req\|requestConnect')"
+ck "요청은 세션이 내려간 뒤" 1 "$(awk '/^fn drivePendingSwitch\(/,/^}$/' $SWB | sed 's,//.*,,' | grep -c 'input_sink != 0')"
+# **나가는 자리가 둘이면 하는 일도 하나** — 「취소」 버튼과 뒤로가기가 같은 함수를 부른다.
+ck "취소 출구는 같은 함수다" 2 "$(sed 's,//.*,,' $SWB | grep 'cancelSwitch()' | grep -v 'fn cancelSwitch' | wc -l | tr -d ' ')"
+# **두 host 가 같은 자리에서 같은 이름으로 막는다.** 전에는 iOS 만 `startSshIfAsked` 에서 막았고
+# Android 는 한 층 아래(`nativeSshStart`)라, 거기 닿기 전에 서비스가 다시 뜨고 알림 권한을 다시 물었다.
+ck "iOS 가 그 자리에서 막는다" 1 "$(awk '/^static void startSshIfAsked\(void\) \{/,/^}/' $IOSH | grep -c 'connect_ignored_busy')"
+ck "Android 도 그 자리에서 막는다" 1 "$(awk '/^static void startSshIfAsked\(void\) \{/,/^}/' $ANDH | grep -c 'connect_ignored_busy')"
+# **계약이 그 규칙을 든다** — 코드·판정자에만 있으면 대화에만 있는 것과 같다(M2-f2 가 배운 것).
+ck "계약이 ③을 든다" 1 "$(grep -c '이미 붙어 있으면 «묻고 갈아탄다»' docs/mobile-platform.md)"
+ck "UX 가 그 화면을 든다" 1 "$(grep -c '전환 확인' docs/mobile-ux.md)"
+
 echo "§3.1 누름은 한 벌로 나른다 (M12c)"
 MB=src/platform/mobile/mobile_bridge.zig
 # **화면마다 누름 상태를 따로 들지 않는다.** 옛 방식은 화면이 늘 때마다 `*_pressed` 가 늘고,

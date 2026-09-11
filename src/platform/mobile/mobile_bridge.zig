@@ -473,13 +473,64 @@ pub fn firstComplete(list: []const mobile_config.Server) ?usize {
 ///
 /// **온전하지 않은 줄은 요청하지 않는다.** 화면이 그 줄을 "접속할 수 없다" 고 이미 말하고
 /// 있으므로, 눌렀을 때 조용히 아무 일도 안 하는 대신 그 자리에 머문다.
+/// 붙어 있는데 다른 서버를 눌렀다 — **갈아탈 대상**. 확인을 지나 세션이 내려갈 때까지 산다.
+///
+/// **이것을 `ssh_connect_req` 로 미리 세워 두면 안 된다**(계약 §3.0 ③). host 는 요청을 «먼저»
+/// 가져가고 펌프가 살아 있으면 버리므로, 미리 세운 요청은 그냥 사라지거나 — 더 나쁘게 —
+/// ①이 막으려던 「뒤늦게 붙는다」로 돌아온다. 목적지가 로컬로 돌아온 것을 **보고** 낸다.
+var pending_switch: ?usize = null;
+
+/// 붙어 달라는 요청을 세우는 **유일한 자리**. 누름 경로가 둘(바로 붙기·갈아타기)이어도 하는 일은
+/// 하나여야 한다 — 두 벌로 두면 한쪽만 낡는다(M2-f2 가 IME 에서 같은 값을 치렀다).
+fn requestConnect(i: usize) void {
+    ssh_connect_req = @intCast(i + 1);
+    ssh_connecting = i; // 승인한 지문을 이 줄에 적는다
+}
+
+/// 목록 자리를 터미널로 갈아 끼운다. 붙는 동안 사용자가 보는 자리는 한 곳이다.
+fn goToTerminal() void {
+    navPop();
+    navPush(.terminal);
+}
+
 fn connectToServer(i: usize) void {
     const list = servers();
     if (i >= list.len or !list[i].isComplete()) return;
-    ssh_connect_req = @intCast(i + 1);
-    ssh_connecting = i; // 승인한 지문을 이 줄에 적는다
-    navPop(); // 목록 → 세션 목록
-    navPush(.terminal);
+    // **이미 붙어 있으면 묻는다**(계약 §3.0 ③, 사용자 결정 2026-09-11). 누른 뜻은 「그 서버로
+    // 가고 싶다」라 아무 일도 안 일어나면 고장으로 보이고, 말없이 끊으면 살아 있는 셸이 사라진다.
+    //
+    // **「붙어 있나」는 입력 목적지로 본다** — host 의 펌프 상태를 따로 묻지 않는다(§3.0).
+    // 같은 사실을 두 번 세면 갈린다.
+    if (input_sink != 0) {
+        pending_switch = i;
+        navPush(.switch_confirm);
+        return;
+    }
+    requestConnect(i);
+    goToTerminal();
+}
+
+/// 전환을 확인했다 — **끊으라고만 말하고 요청은 아직 안 낸다**(위 `pending_switch` 참조).
+fn acceptSwitch() void {
+    if (pending_switch == null) return;
+    disconnect_req = true;
+    if (screenTop() == .switch_confirm) navPop();
+    goToTerminal(); // 목록 → 터미널. 끊고 붙는 동안 볼 자리다
+}
+
+/// 전환을 그만뒀다. **뒤로가기도 여기로 온다** — 화면만 닫고 대상을 안 버리면, 나중에 세션이
+/// 끊기는 순간 **사용자가 취소한 서버로 붙는다.**
+fn cancelSwitch() void {
+    pending_switch = null;
+    if (screenTop() == .switch_confirm) navPop();
+}
+
+/// 세션이 내려갔으면 그때 요청을 낸다(프레임마다 본다 — 없으면 곧바로 돌아간다).
+fn drivePendingSwitch() void {
+    const i = pending_switch orelse return;
+    if (input_sink != 0) return; // 아직 안 내려갔다
+    pending_switch = null;
+    requestConnect(i);
 }
 
 /// 지금 들고 있는 서버 목록. config 를 안 읽었으면 빈 목록이다.
@@ -4883,7 +4934,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key, remote_screen, diagnostics };
+const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key, switch_confirm, remote_screen, diagnostics };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -5031,6 +5082,8 @@ const UiIntent = union(enum) {
     remote_open: [32]u8,
     diag_back,
     diag_copy,
+    switch_ok,
+    switch_cancel,
     host_key_ok,
     host_key_cancel,
     password_ok,
@@ -6604,6 +6657,61 @@ fn drawServers(win: SetRect, tk: *const tokens.Tokens) void {
 /// 다르게 굴면 사용자가 어느 쪽이 먹는지 매번 시험해 봐야 한다.
 /// 호스트키 승인 화면. **지문을 크게 보인다** — 사용자가 다른 경로로 받은 값과 눈으로 맞대야
 /// 하는 유일한 자리다(그래서 줄여 쓰지 않는다).
+/// 전환 확인 화면. **두 이름을 나란히 보인다** — 「끊고 전환」만 있으면 무엇을 끊는지가 안
+/// 보이고, 서버가 여럿인 사람에게는 그 한 줄이 이 화면의 존재 이유다(호스트키 화면이 지문을
+/// 통째로 보이는 것과 같은 규율. UX §2.1).
+fn drawSwitchConfirm(win: SetRect, tk: *const tokens.Tokens) void {
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_switch_title), @intFromFloat(win.x + set_pad_x), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+
+    var y = win.y + set_head_h + 1 + 14;
+    const list = servers();
+    // **지금 붙어 있는 서버**. 그 줄은 마지막으로 붙자고 한 줄이다(`ssh_connecting`) — 화면이
+    // 이름을 모르면 무엇을 끊는지 못 보인다.
+    const now_name: []const u8 = if (ssh_connecting) |ci| (if (ci < list.len) list[ci].host else "") else "";
+    const to_name: []const u8 = if (pending_switch) |pi| (if (pi < list.len) list[pi].host else "") else "";
+
+    sw_now_rect = .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = 40 };
+    pushText(maru.i18n.tIn(.ko, .mob_switch_now), @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 14, tk.get(.muted_fg));
+    pushText(now_name, @intFromFloat(win.x + set_pad_x), @intFromFloat(y + 20), 15, tk.get(.surface_fg));
+    noteA11y(sw_now_rect, .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_switch_now), .value = now_name });
+    y += 52;
+
+    sw_to_rect = .{ .x = win.x + set_pad_x, .y = y, .w = win.w - set_pad_x * 2, .h = 40 };
+    pushText(maru.i18n.tIn(.ko, .mob_switch_to), @intFromFloat(win.x + set_pad_x), @intFromFloat(y), 14, tk.get(.muted_fg));
+    pushText(to_name, @intFromFloat(win.x + set_pad_x), @intFromFloat(y + 20), 15, tk.get(.accent_bar));
+    noteA11y(sw_to_rect, .{ .role = .text, .label = maru.i18n.tIn(.ko, .mob_switch_to), .value = to_name });
+    y += 58;
+
+    sw_ok_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(sw_ok_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_switch_ok) });
+    if (uiPressed(registerAction(sw_ok_rect, .switch_ok))) push(.{ .x = @intFromFloat(sw_ok_rect.x), .y = @intFromFloat(sw_ok_rect.y), .w = @intFromFloat(sw_ok_rect.w), .h = @intFromFloat(sw_ok_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_switch_ok), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.accent_bar));
+    y += set_row_h;
+    sw_cancel_rect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
+    noteA11y(sw_cancel_rect, .{ .role = .button, .label = maru.i18n.tIn(.ko, .mob_switch_cancel) });
+    if (uiPressed(registerAction(sw_cancel_rect, .switch_cancel))) push(.{ .x = @intFromFloat(sw_cancel_rect.x), .y = @intFromFloat(sw_cancel_rect.y), .w = @intFromFloat(sw_cancel_rect.w), .h = @intFromFloat(sw_cancel_rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_switch_cancel), @intFromFloat(win.x + set_pad_x), @intFromFloat(y + (set_row_h - 16) / 2), 16, tk.get(.surface_fg));
+}
+
+var sw_now_rect: SetRect = .{};
+var sw_to_rect: SetRect = .{};
+var sw_ok_rect: SetRect = .{};
+var sw_cancel_rect: SetRect = .{};
+
+/// 두 버튼 한가운데(테스트용 — 호스트키 화면과 같은 자리).
+pub fn switchOkCenter() struct { x: f32, y: f32 } {
+    return .{ .x = sw_ok_rect.x + sw_ok_rect.w / 2, .y = sw_ok_rect.y + sw_ok_rect.h / 2 };
+}
+pub fn switchCancelCenter() struct { x: f32, y: f32 } {
+    return .{ .x = sw_cancel_rect.x + sw_cancel_rect.w / 2, .y = sw_cancel_rect.y + sw_cancel_rect.h / 2 };
+}
+/// 갈아탈 대상이 있나(테스트용) — 화면을 닫아도 뜻이 남아 있으면 나중에 엉뚱한 서버로 붙는다.
+pub fn pendingSwitchForTest() ?usize {
+    return pending_switch;
+}
+
 fn drawHostKeyPrompt(win: SetRect, tk: *const tokens.Tokens) void {
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_hostkey_title), @intFromFloat(win.x + set_pad_x), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
@@ -6647,7 +6755,8 @@ pub fn hostKeyFingerprintRectForTest() SetRect {
 }
 var hk_ok_rect: SetRect = .{};
 var hk_cancel_rect: SetRect = .{};
-var hk_press: gesture.Press = .{};
+/// 확인 화면(호스트키·전환)의 누름. **한 번에 하나만 서므로 한 벌이면 된다.**
+var confirm_press: gesture.Press = .{};
 
 /// 두 버튼 한가운데(테스트용).
 pub fn hostKeyOkCenter() struct { x: f32, y: f32 } {
@@ -7500,12 +7609,14 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
     }
 
     // ── 호스트키 승인 화면. 두 줄뿐이다(승인·취소).
-    if (screenTop() == .host_key) {
+    // ── 확인 화면 둘(호스트키·전환). **모양이 같으므로 블록도 하나다** — 복사해 두면
+    // 「누름을 거둔다」·「밀면 취소」 같은 규칙을 두 곳에서 지켜야 하고 한쪽이 낡는다.
+    if (screenTop() == .host_key or screenTop() == .switch_confirm) {
         switch (phase) {
             0 => {
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
-                hk_press.begin(x, y, time_ms, false);
+                confirm_press.begin(x, y, time_ms, false);
                 ui_pressed = null;
                 if (hitAction(x, y)) |id| {
                     if (ui_table.resolve(id, ui_generation)) |it| {
@@ -7516,7 +7627,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
             },
             1 => {
                 if (!routeIs(.chrome)) return 0;
-                if (hk_press.move(x, y)) ui_pressed = null;
+                if (confirm_press.move(x, y)) ui_pressed = null;
                 return 1;
             },
             else => {
@@ -7524,11 +7635,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 const intent = takeUiIntent();
                 routeClear();
                 if (phase == 3) {
-                    hk_press.cancel();
+                    confirm_press.cancel();
                     return 1;
                 }
-                if (hk_press.end() != .tap) return 1;
+                if (confirm_press.end() != .tap) return 1;
                 switch (intent orelse return 1) {
+                    .switch_ok => acceptSwitch(),
+                    .switch_cancel => cancelSwitch(),
                     .host_key_ok => acceptHostKey(),
                     .host_key_cancel => rejectHostKey(),
                     else => {},
@@ -7855,6 +7968,12 @@ pub export fn maru_mobile_pop_screen() u32 {
     if (screenTop() == .host_key) {
         // **뒤로가기는 거절이다.** 화면만 닫고 답을 안 주면 펌프가 2분을 기다린다.
         rejectHostKey();
+        return 1;
+    }
+    if (screenTop() == .switch_confirm) {
+        // **뒤로가기는 취소다 — 「취소」 버튼과 «같은 함수» 로 나간다.** 화면만 빼면 갈아탈
+        // 대상이 남아, 나중에 세션이 끊기는 순간 사용자가 취소한 서버로 붙는다.
+        cancelSwitch();
         return 1;
     }
     if (screenTop() == .password) {
@@ -8349,6 +8468,9 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 코어 격자·아틀라스가 계속 살아 있어야 돌아왔을 때 화면이 그대로이고, 키바 사각형이
     // 서 있어야 `key_bar_ready` 가 거짓말을 안 한다.
     // **목록 자리를 벗어났으면 닫는다.** 여는 판정은 `drawRemoteSessions` 가 하고, 나가는
+    // **갈아탈 것이 있으면 세션이 내려갔는지 본다**(계약 §3.0 ③). 없으면 곧바로 돌아가므로
+    // 매 프레임 보는 값이 싸다 — host 가 요청을 프레임마다 가져가는 것과 같은 규율이다.
+    drivePendingSwitch();
     // 판정은 여기서 한 번에 한다 — 화면 전환 경로마다 갈고리를 달면 하나를 빠뜨린다.
     if (screenTop() != .sessions) noteControlScreen(false);
     a11y_top_layer = true; // 여기부터는 «맨 위» 화면이다
@@ -8360,6 +8482,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .switch_confirm => drawSwitchConfirm(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .diagnostics => drawDiagnostics(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }

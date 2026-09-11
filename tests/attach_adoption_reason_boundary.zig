@@ -49,11 +49,10 @@ test "attach 거절은 어느 판정이었는지와 프레임 수를 남긴다" 
 
     // ① 네 값을 **이름으로** 낸다. 숫자나 bool 로 접으면 `deferred_*` 와 `rejected` 가 다시 뭉친다.
     try std.testing.expect(std.mem.indexOf(u8, src, "@tagName(adopted)") != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        src,
-        "session host attach not admitted: adoption={s} frames={d}",
-    ) != null);
+    // 포맷을 통째로 잠그지 않는다 — 자리(`site`)를 더하자 이 단언이 개선을 막았다(2026-09-11, 같은 날
+    // 두 번째). 고정할 의도는 「한 줄에 판정과 프레임 수가 함께 나온다」이지 문자열 전체가 아니다.
+    try std.testing.expect(std.mem.indexOf(u8, src, "attach not admitted: adoption={s}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "frames={d}") != null);
 
     // ② **연결을 끊기 «전에»** 남긴다. 뒤에 두면 끊김 경로가 먼저 돌아 안 찍힐 수 있다.
     const note_at = std.mem.indexOf(u8, src, "noteAttachAdoption(adopted, frame_count);") orelse
@@ -69,7 +68,38 @@ test "attach 거절은 어느 판정이었는지와 프레임 수를 남긴다" 
         return error.TakeFramesMissing;
     try std.testing.expect(count_at < take_at);
 
-    // ④ 조용한 옛 모습이 되살아나면 빨개진다.
+    // ④ **`rejected` 여덟 자리가 저마다 다른 이름으로 세어진다.**
+    //
+    //    2026-09-11 실측으로 `adoption=rejected frames=11` 까지는 나왔다 — 영구이고, 프레임이 11 개뿐이라
+    //    예산이 아니라 검증이다. 그런데 그 여덟은 고칠 곳이 전부 다르다(배치 검증·슬롯·트래커·화면 상태·
+    //    무효화 중 delta·resync OOM·resync stale·일반 enqueue). 이름이 없으면 또 추측하게 된다 —
+    //    이 축에서 이미 세 번 틀렸다.
+    for ([_][]const u8{
+        "\"batch_validation\"",
+        "\"slot_lookup\"",
+        "\"tracker_missing\"",
+        "\"screen_state\"",
+        "\"delta_while_invalidated\"",
+        "\"resync_enqueue_oom\"",
+        "\"resync_stale\"",
+        "\"screen_batch_enqueue\"",
+    }) |site| {
+        var seen: usize = 0;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, src, at, site)) |found| : (at = found + site.len) seen += 1;
+        if (seen != 1) {
+            std.debug.print("자리 «{s}» 가 {d} 번 — 정확히 1 번이어야 갈린다\n", .{ site, seen });
+            return error.RejectSiteNotUnique;
+        }
+    }
+    // ⑤ 로그가 자리를 **함께** 낸다. 판정만으로는 여덟이 뭉친다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        src,
+        "session host attach not admitted: adoption={s} site={s} frames={d}",
+    ) != null);
+
+    // ⑥ 조용한 옛 모습이 되살아나면 빨개진다.
     try std.testing.expect(std.mem.indexOf(
         u8,
         src,

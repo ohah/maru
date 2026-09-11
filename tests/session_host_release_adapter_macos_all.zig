@@ -1,4 +1,4 @@
-//! session-host release adapter 판정자 73 개를 **한 바이너리로** 모은다 — macOS 에서만(`if (target.result.os.tag == .macos)` 안 — 이 가족들은 원래 그 가드 안에 있었다)에서 이 파일이 쓰인다.
+//! session-host release adapter 판정자 75 개를 **한 바이너리로** 모은다 — macOS 에서만(`if (target.result.os.tag == .macos)` 안 — 이 가족들은 원래 그 가드 안에 있었다)에서 이 파일이 쓰인다.
 //! 각 가족의 전용 스텝(`test-session-host-release-adapter-*`)과 `test-session-host` 는 그대로 자기 바이너리를 갖는다.
 //!
 //! 왜: 가족마다 바이너리를 만들면 같은 product 모듈 그래프를 그 수만큼 다시 컴파일한다(2026-09-05 CI 로그 실측:
@@ -84,6 +84,8 @@ test {
     _ = @import("session_host_release_adapter_candidate_published_cleanup_command.zig");
     _ = @import("session_host_release_adapter_pre_publish_product.zig");
     _ = @import("session_host_release_adapter_pre_publish_workspace.zig");
+    _ = @import("session_host_release_adapter_p5d_workspace.zig");
+    _ = @import("session_host_release_adapter_p5d_runner.zig");
     _ = @import("session_host_release_adapter_predecessor_evidence_identity.zig");
     _ = @import("session_host_release_adapter_summary.zig");
     _ = @import("session_host_release_adapter_summary_publication.zig");

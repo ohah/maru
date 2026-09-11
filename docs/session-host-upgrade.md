@@ -1909,13 +1909,20 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   배타 게시한다. 실패 시 partial leaf는 없고 residue가 있으면 성공으로 축소하지 않는다. candidate의 CLI와 designated
   requirement 값은 manifest signing/asset SSOT에서 유도해 leaf와 aggregate가 복사·결속할 뿐, 별도 정책 SSOT를 만들지 않는다.
 
-  구현 순서는 **P5d-R1** strict leaf type·canonical parser/writer와 digest/UUID/result fail-close(**구현**) → **P5d-R2** mounted/
-  private-extracted candidate CLI final-address authority·outer-owned bounded child/workspace·실제 P5d 하니스 실행과
-  post-exit cleanup 검증 → **P5d-R3** A/B 공통
+  구현 순서는 **P5d-R1** strict leaf type·canonical parser/writer와 digest/UUID/result fail-close(**구현**) →
+  **P5d-R2a** outer-owned absent workspace·bounded child/process-group·post-exit cleanup authority와 하니스 workspace 주입
+  (**구현**) →
+  **P5d-R2b** mounted/private-extracted candidate CLI final-address authority·실제 P5d 하니스 실행·candidate 재검증과
+  leaf publication → **P5d-R3** A/B 공통
   `candidate_gates` aggregate·attestation·live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
   synthetic/product gate는 R4를 대신하지 않으며, R4 전에는 P5d phase 완료라고 쓰지 않는다.
-  R1 writer는 staging 포맷을 canonical하게 만드는 도구일 뿐 실행 성공 권위가 아니다. R2는 제품 호출을 outer
-  execution owner의 post-exit cleanup 성공 suffix 한 곳으로 제한하고 source-boundary gate로 그 caller inventory를 고정한다.
+  R1 writer는 staging 포맷을 canonical하게 만드는 도구일 뿐 실행 성공 권위가 아니다. R2a와 R2b를 모두 통과해야
+  R2 완료다. R2a는 기존 ad-hoc gate의 자체 `mktemp` fallback을 보존하되 release mode에서는 caller가 준 exact absolute
+  workspace만 사용하게 하고, 시작 시 absent·생성 직후 owner/mode/identity를 검증한다. release mode 자식의
+  `EXIT` trap은 자기 sshd만 종료하고 workspace 삭제 권한을 갖지 않는다. outer owner만 process-group을 reap한 뒤 held
+  directory에서 자식 산출물을 제거하고, root identity를 다시 확인한 다음 parent-bound pathname absence를 판정한다.
+  R2b는 제품 writer 호출을 이 outer execution owner의 post-exit cleanup 및 candidate revalidation 성공 suffix 한 곳으로
+  제한하고 source-boundary gate로 caller inventory를 고정한다.
 
   default-false 제품 E2E는 trusted release run이 만든 같은 형식의 UUID와 candidate DMG·frozen executable pathname을
   명시 입력받는다. 하네스는 stale output을 먼저 제거하고 두 candidate file과 실행할 app executable을 signed-app-quit gate와

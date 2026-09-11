@@ -6693,7 +6693,7 @@ pub fn build(b: *std.Build) void {
     const run_session_host_cr6e_c3c_sample_set_validator_tests = b.addRunArtifact(
         session_host_cr6e_c3c_sample_set_validator_tests,
     );
-    run_session_host_cr6e_c3c_sample_set_validator_tests.addArg("--maru-expect-tests=3");
+    run_session_host_cr6e_c3c_sample_set_validator_tests.addArg("--maru-expect-tests=4");
     boundary_step.dependOn(&run_session_host_cr6e_c3c_sample_set_validator_tests.step);
     const session_host_cr6e_c3c_sample_set_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

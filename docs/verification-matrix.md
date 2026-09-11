@@ -2754,7 +2754,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   AppSession의 terminal core mutation은 `enqueueCoreCommandForTerm` 또는 `enqueueCoreCommandForSurface`에서 exact Term backend를
   선택하며, scroll/focus/mouse/selection/find/config/reset이 host-backed placeholder core로 새는 제품 경로는 source boundary 0이다.
   direct in-process enqueue는 같은 helper의 active local O(1) fallback 하나만 허용한다.
-- **CR6e-c3c 반복 sample-set: 구현·환경 의존 반복 실측 완료, hard cap validator 계획.** 기존 v2 한 행에는 환경·binary 지문이 없으므로 현재 5회 숫자만
+- **CR6e-c3c 반복 sample-set과 hard cap: 구현·환경 의존 반복 실측 완료.** 기존 v2 한 행에는 환경·binary 지문이 없으므로 현재 5회 숫자만
   hard cap으로 승격하지 않는다. opt-in 제품 gate가 한 번 빌드한 동일 ReleaseFast app/product executable로
   actual-AppKit v2를 20회 순차 실행하고, 실행마다 제품 허용 경로의 0700 HOME을 새로 만들며
   session-host root와 raw artifact를 분리한다.
@@ -2763,9 +2763,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   sibling authority·frame·cleanup validator를 먼저 통과하지 못하면 sample-set을 발행하지 않는다.
   2026-09-11 `Mac16,9`·macOS `25.5.0`·16 logical CPU와 동일 app/product SHA-256의 독립 3묶음
   60회는 묶음별 median 20.604~21.272ms, p95 21.509~22.236ms, 전체 p95 22.199ms였고 모든 raw
-  strict/cleanup 판정을 통과했다. 단발 max 73.833ms를 구조 회귀와 분리하기 위해 후속 validator는
+  strict/cleanup 판정을 통과했다. 단발 max 73.833ms를 구조 회귀와 분리하기 위해 validator는
   20회 nearest-rank p95 ≤30ms와 개별 hang ≤100ms를 함께 판정한다. 두 상수는
   `sample_set_p95_cap_ns`·`sample_set_hang_cap_ns`가 소유한다.
+  boundary test는 하나의 30ms 초과 tail은 통과하고 두 개의 초과는 p95 실패가 되며, 두 cap의 exact 값은
+  통과하고 cap+1은 typed failure가 되는 경계를 고정한다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
   않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking
   CLOEXEC self-pipe를 만들고, reader는 write end에 byte만 coalesce하며 `poll_owner.Owner`만 read end와 runtime event queue를

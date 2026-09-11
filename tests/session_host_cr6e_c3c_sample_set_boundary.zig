@@ -34,6 +34,10 @@ test "CR6e-c3c sample-set keeps twenty sequential isolated product runs and one 
         "maru.session-host-cr6e-c3c-sample-set.v1",
         "try c3c.validateArtifact(row.raw)",
         "row.latency_ns != row.raw.input_frame.latency_ns",
+        "sample_set_p95_cap_ns",
+        "sample_set_hang_cap_ns",
+        "SampleSetP95BudgetExceeded",
+        "SampleHangBudgetExceeded",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, validator, needle) != null);
     for ([_][]const u8{
         "measurement_fingerprint.sha256File(app_path.ptr)",

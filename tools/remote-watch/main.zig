@@ -1013,9 +1013,20 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
     };
     defer gpa.free(chunk);
 
+    // **시작할 때 한 번 재서 래치한다**(위 `channelWatchable` — 그 이유가 거기 있다).
+    const watch_channel = channelWatchable();
+
     var offset: u64 = 0;
     var truncated = false;
     while (true) {
+        // 🔥 **스캔 구간은 출력이 없다 — 그래서 채널이 끊긴 것을 여기서 봐야 한다**(적대적 M1).
+        //
+        // 이 모드를 `list` 를 따라 「한 번 답하고 죽으니 stdin 규율이 필요 없다」고 적었는데 **틀렸다**:
+        // `list` 는 readdir 이라 밀리초지만 활동 스캔은 **초 단위**다(실측 3.82 GB → 6.3 초, 느린
+        // 서버면 더). 그 사이 받는 쪽이 죽어도 `putAll` 을 안 하므로 EPIPE 가 안 나고, 남의 서버는
+        // 아무도 안 받을 일에 CPU 를 계속 태운다. 감시 모드가 겪고 고친 바로 그 결함이다(머리말
+        // 「고아를 남기지 않는다」 · 적대적 검증 17 회차).
+        if (watch_channel and stdinSpeaks()) return;
         const n = file.readPositional(io, &.{chunk}, offset) catch {
             truncated = true;
             break;
@@ -1069,6 +1080,33 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
 
     const at_tail = activity_wire.appendTail(&line, 0, written) orelse return;
     _ = putAll(line[0..at_tail]);
+}
+
+/// stdin 이 **지금 무언가를 내놓을 수 있나**(EOF 포함) — 기다리지 않고 본다(timeout 0).
+///
+/// **`events = POLL.IN` 이어야 한다.** `events = 0` 으로 두면 파이프의 쓰는 쪽이 닫혀도 아무것도 안
+/// 걸린다(실측: 4.1 GB 파일에서 조기 종료가 **안 났다**). 감시 모드가 stdin 을 거는 방식이 곧
+/// 정답이었다(`.{ .fd = 0, .events = POLL.IN }`) — 그것을 안 보고 새로 지었다가 한 번 틀렸다.
+fn stdinSpeaks() bool {
+    var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+    const n = std.posix.poll(&fds, 0) catch return false;
+    if (n == 0) return false;
+    // `POLLNVAL` = fd 0 이 아예 없다. 그것도 「말한다」로 센다 — 아래 래치가 그런 호출을 감시 밖으로
+    // 돌린다.
+    return fds[0].revents != 0;
+}
+
+/// 이 호출의 stdin 이 **살아 있는 채널인가** — 시작할 때 **한 번** 재서 래치한다.
+///
+/// 🔥 **래치가 없으면 정상 호출에서 활동이 통째로 빈다**(적대적 M2 · 실측). 리눅스에서 `/dev/null`
+/// 이나 닫힌 fd 0 은 `POLL.IN` 이 **즉시** 서므로(읽으면 EOF) 첫 청크에서 「끊겼다」로 읽힌다 —
+/// 실측 3.6 MB 가 나와야 할 자리에 **33 B**(머리말과 `F` 뿐)가 나왔다. 그리고 이 축의 전송
+/// (`ssh_upload.runArgvCapped`)은 자식의 **stdin 을 닫는다**(`close(0)`) — 즉 그 조합이 곧 제품 경로다.
+///
+/// 그래서 가른다: **시작 시점에 이미 말하면 그것은 채널이 아니다**(`/dev/null`·닫힘·리다이렉트).
+/// 살아 있는 ssh 채널은 우리가 stdin 을 안 쓰므로 조용하고, 그 조용함이 깨지는 순간이 곧 끊김이다.
+fn channelWatchable() bool {
+    return !stdinSpeaks();
 }
 
 /// 그 자리를 **다 읽었을 때만** 참. 짧게 읽고 라벨을 만들면 잘린 텍스트가 온전한 척 뜬다

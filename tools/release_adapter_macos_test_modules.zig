@@ -1,4 +1,4 @@
-//! `zig build test` 가 release adapter 판정자 75 개를 한 바이너리로 모을 때 쓰는 **모듈 표** — build.zig 의
+//! `zig build test` 가 release adapter 판정자 77 개를 한 바이너리로 모을 때 쓰는 **모듈 표** — build.zig 의
 //! `ra_mac` 블록이 `@import` 한다. build.zig 에 두지 않는 이유: build.zig 는 이미 1 MiB 에 근접해 있고,
 //! 그 파일을 1 MiB 상한으로 읽는 판정자가 셋 있다(`kernel_cleanup_faults` 등). 표를 거기 더하면 그 판정자들이
 //! `StreamTooLong` 으로 죽는다(실측 2026-09-06).
@@ -55,6 +55,8 @@ pub const rows = [_]Row{
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_authored_attestation.zig", .names = &.{"release_adapter_candidate_authored_attestation"}, .deps = &.{ "release_adapter_candidate_manifest", "release_adapter_context", "release_adapter_deadline", "release_adapter_files", "release_adapter_github_attestation", "release_adapter_github_cli_authority", "release_evidence", "release_manifest" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_baseline_app.zig", .names = &.{"release_adapter_candidate_baseline_app"}, .deps = &.{ "bounded_process", "release_adapter_candidate_files", "release_adapter_candidate_product", "release_adapter_files" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_pre_publish_workspace.zig", .names = &.{"release_adapter_pre_publish_workspace"}, .deps = &.{"safe_open"} },
+    .{ .root = "src/platform/macos/session_host/release_adapter_p5d_workspace.zig", .names = &.{"release_adapter_p5d_workspace"}, .deps = &.{"release_adapter_pre_publish_workspace"} },
+    .{ .root = "src/platform/macos/session_host/release_adapter_p5d_runner.zig", .names = &.{"release_adapter_p5d_runner"}, .deps = &.{ "bounded_process", "release_adapter_p5d_workspace" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_baseline_workspace.zig", .names = &.{"release_adapter_candidate_baseline_workspace"}, .deps = &.{"release_adapter_pre_publish_workspace"} },
     .{ .root = "src/platform/macos/session_host/release_adapter_zig_toolchain_authority.zig", .names = &.{"release_adapter_zig_toolchain_authority"}, .deps = &.{ "release_adapter_context", "release_adapter_files", "release_adapter_github_cli_authority" } },
     .{ .root = "src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig", .names = &.{"release_adapter_candidate_baseline_child"}, .deps = &.{ "bounded_process", "release_adapter_candidate_baseline_app", "release_adapter_candidate_baseline_workspace", "release_adapter_candidate_evidence_identity", "release_adapter_candidate_files", "release_adapter_candidate_product", "release_adapter_context", "release_adapter_github_source_tree", "release_adapter_zig_toolchain_authority" } },

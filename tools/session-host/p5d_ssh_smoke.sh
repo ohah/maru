@@ -78,11 +78,38 @@ else
 	echo "p5d: signed release artifact gate=not_provisioned"
 fi
 
-RUN_DIR=$(mktemp -d /tmp/maru-p5d.XXXXXX)
-case "$RUN_DIR" in
-	/tmp/maru-p5d.*) ;;
-	*) echo "p5d: unsafe temporary directory: $RUN_DIR" >&2; exit 1 ;;
-esac
+EXTERNAL_RUN_DIR=${MARU_P5D_WORKSPACE:-}
+RUN_DIR_OWNED=0
+if [ -n "$EXTERNAL_RUN_DIR" ]; then
+	case "$EXTERNAL_RUN_DIR" in
+		/*) ;;
+		*) echo "p5d: external workspace must be absolute" >&2; exit 1 ;;
+	esac
+	[ ! -L "$EXTERNAL_RUN_DIR" ] && [ -d "$EXTERNAL_RUN_DIR" ] || {
+		echo "p5d: external workspace is not a real directory" >&2
+		exit 1
+	}
+	[ "$(/usr/bin/stat -f %u "$EXTERNAL_RUN_DIR")" = "$(/usr/bin/id -u)" ] || {
+		echo "p5d: external workspace owner differs" >&2
+		exit 1
+	}
+	[ "$(/usr/bin/stat -f %Lp "$EXTERNAL_RUN_DIR")" = 700 ] || {
+		echo "p5d: external workspace is not private" >&2
+		exit 1
+	}
+	[ -z "$(/usr/bin/find "$EXTERNAL_RUN_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ] || {
+		echo "p5d: external workspace is not empty" >&2
+		exit 1
+	}
+	RUN_DIR=$EXTERNAL_RUN_DIR
+else
+	RUN_DIR=$(mktemp -d /tmp/maru-p5d.XXXXXX)
+	case "$RUN_DIR" in
+		/tmp/maru-p5d.*) ;;
+		*) echo "p5d: unsafe temporary directory: $RUN_DIR" >&2; exit 1 ;;
+	esac
+	RUN_DIR_OWNED=1
+fi
 SSHD_PID=""
 kill_tree() {
 	_parent=$1
@@ -101,9 +128,13 @@ cleanup() {
 		done
 		kill -9 "$SSHD_PID" 2>/dev/null || true
 	fi
-	rm -rf -- "$RUN_DIR"
+	if [ "$RUN_DIR_OWNED" = 1 ]; then
+		rm -rf -- "$RUN_DIR"
+	fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 HOME_DIR=$RUN_DIR/home
 BIN_DIR=$HOME_DIR/.local/bin

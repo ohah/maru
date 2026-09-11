@@ -115,8 +115,10 @@ fn matchesPrefix(name: []const u8, csv: ?[]const u8) bool {
     return false;
 }
 
-/// `MARU_TEST_SHARD="i/n"`: 컴파일된 테스트를 **인덱스 mod n** 으로 n 개 프로세스에 나눠, 이 프로세스는 자기 몫
-/// (index % n == i)만 돌린다. 같은 바이너리를 n 번 띄우면 되므로 컴파일은 한 번이고, 러너의 pid 루트 격리
+/// `MARU_TEST_SHARD="i/n"`: 컴파일된 테스트를 **이름 해시 mod n** 으로 n 개 프로세스에 나눠, 이 프로세스는 자기 몫
+/// (`hash(name) % n == i`)만 돌린다. **인덱스가 아니라 이름**인 이유는 테스트가 하나 늘 때 남의 배정이
+/// 밀리지 않게 하는 것이다(실측 2026-09-10: 밀린 배정이 실 프로세스 스모크를 한 샤드에 몰아 CI 를 세 번
+/// 막았다). 같은 바이너리를 n 번 띄우면 되므로 컴파일은 한 번이고, 러너의 pid 루트 격리
 /// (`isolateSessionHostRoot`)가 샤드마다 다른 네임스페이스를 준다. **왜 인덱스인가**: 이름 접두로 나누면 한 모듈
 /// (app_session 1,127개·237초)이 한 샤드에 몰린다. 인덱스는 모듈 안에서도 고르게 섞인다(실측 2026-09-06, CI
 /// macos-15 3 vCPU: 4,557개 355초 직렬 → 4샤드 시뮬레이션 94초). prefix 필터 **뒤에** 적용하므로 `kept`·`filtered`
@@ -186,7 +188,15 @@ pub fn main(init: std.process.Init.Minimal) void {
     for (test_functions, 0..) |test_fn, index| {
         // 다른 샤드의 몫은 FILTERED 줄도 찍지 않는다 — 샤드 n 개가 같은 줄을 n 번 찍으면 로그를 못 읽는다. 다만
         // `filtered`·`kept` 는 샤드와 무관하게 세어 아래 가드가 어느 샤드에서나 같은 답을 내게 한다.
-        const mine = if (shard) |s| index % s.count == s.index else true;
+        // **이름 해시로 나눈다** — 인덱스 순차(`index % n`)면 테스트 **하나가 늘 때 그 뒤 전부 밀려**,
+        // 실 프로세스를 띄우는 스모크가 한 샤드에 몰릴 수 있다. 2026-09-10 에 그것이 세 번 CI 를 막았고
+        // **매번 다른 테스트**였다(`C3-3b6` 둘, `runActualTerminate` 하나) — CI 와 로컬이 같은 자리였으니
+        // 부하가 아니라 배정이다. 해시는 **이름에만** 달려 있어 새 테스트가 남의 배정을 흔들지 않는다.
+        //
+        // ⚠️ 이것은 **재발을 줄이지 보장하지는 않는다.** 해시는 안정적일 뿐 균등하지 않고, 실 프로세스
+        // 스모크가 우연히 한 샤드에 모이는 것을 막지 못한다 — 그 보장은 「그 테스트들을 샤드 밖으로」
+        // (#3494 가 하나를 그렇게 뺐다)나 락으로 직렬화하는 별개 축이다.
+        const mine = if (shard) |s| std.hash.Wyhash.hash(0, test_fn.name) % s.count == s.index else true;
         if (keep_only_prefixes != null and !matchesPrefix(test_fn.name, keep_only_prefixes)) {
             filtered += 1;
             if (!have_tty and mine) std.debug.print("{d}/{d} {s}...FILTERED\n", .{ index + 1, test_functions.len, test_fn.name });

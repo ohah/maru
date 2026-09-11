@@ -56,8 +56,13 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     // fresh 사슬의 꼬리가 그 스텝이고, top-level 은 그것을 기다린다.
     try std.testing.expectEqual(@as(usize, 1), count(build, "test_macos_app_host_abi_step.dependOn(&run_macos_shutdown_admin_fresh_tests.step);"));
 
-    // 러너: 선택 규칙은 전역 인덱스 mod n 이고, 빈 샤드는 빨개진다. 문서도 같은 이름을 안다.
-    try std.testing.expectEqual(@as(usize, 1), count(runner, "index % s.count == s.index"));
+    // 러너: 선택 규칙은 **이름 해시** mod n 이고, 빈 샤드는 빨개진다. 문서도 같은 이름을 안다.
+    //
+    // **인덱스가 아니라 이름**인 이유(2026-09-10): 인덱스 순차면 테스트 하나가 늘 때 **그 뒤 전부 밀려**
+    // 실 프로세스 스모크가 한 샤드에 몰린다. 그날 세 번 CI 를 막았고 매번 다른 테스트였다 — CI 와 로컬이
+    // 같은 자리였으니 부하가 아니라 배정이다. 되돌리면 그 룰렛이 돌아온다.
+    try std.testing.expectEqual(@as(usize, 1), count(runner, "std.hash.Wyhash.hash(0, test_fn.name) % s.count == s.index"));
+    try std.testing.expectEqual(@as(usize, 0), count(runner, "index % s.count == s.index"));
     try std.testing.expectEqual(@as(usize, 1), count(runner, "shard ran no tests"));
     try std.testing.expect(count(runner, "MARU_TEST_SHARD") >= 2);
     try std.testing.expect(count(docs, "MARU_TEST_SHARD") >= 1);

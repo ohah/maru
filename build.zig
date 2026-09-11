@@ -4938,6 +4938,44 @@ pub fn build(b: *std.Build) void {
     }
     // 스크롤백 바이트 예산 게이트. 자른 handoff 가 **디코드되는지**를 잰다 — 포맷을 안 바꾸는 것이
     // 이 설계의 전제이므로, 그 전제가 깨지면 여기서 빨개진다.
+    // GUI 소유 불투명 레이아웃 조각이 런타임마다 그대로 실리는가. **호환성이 핵심이다** — 태그 12 를
+    // 필수로 쓰면 구 host 가 신 레코드를 거부해 롤백이 막힌다(#3488 이 tag 99 로 겪은 그대로).
+    const handoff_layout_blob_step = b.step(
+        "test-handoff-layout-blob",
+        "Opaque per-runtime layout bytes survive handoff and stay backward compatible",
+    );
+    {
+        const layout_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_codec.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "불투명 레이아웃", "태그 12", "상한을 넘는 레이아웃", "손상된 레코드" },
+        });
+        const run_layout_tests = b.addRunArtifact(layout_tests);
+        run_layout_tests.addArg("--maru-expect-tests=4");
+        run_layout_tests.addArg("--maru-expect-passed=4");
+        handoff_layout_blob_step.dependOn(&run_layout_tests.step);
+        boundary_step.dependOn(&run_layout_tests.step);
+
+        // 런타임 테스트가 못 닿는 두 방어(디코더 상한·중복 가드)를 소스로 고정한다.
+        const layout_boundary = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/handoff_layout_blob_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_layout_boundary = b.addRunArtifact(layout_boundary);
+        run_layout_boundary.addArg("--maru-expect-tests=1");
+        run_layout_boundary.addArg("--maru-expect-passed=1");
+        run_layout_boundary.setCwd(b.path("."));
+        handoff_layout_blob_step.dependOn(&run_layout_boundary.step);
+        boundary_step.dependOn(&run_layout_boundary.step);
+    }
+
     const handoff_scrollback_budget_step = b.step(
         "test-handoff-scrollback-budget",
         "Trimmed scrollback still decodes as a valid ring (byte budget handoff)",

@@ -1459,9 +1459,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. 이는 새 기능 구현 잔여가 아니라 release provenance gate다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1
-   launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다. 따라서 다음 비릴리스 후보는
-   `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**이다. G3은 출하 뒤 기본값을
-   다시 바꿀 때만 여는 별도 백로그이고 P6은 선택 확장 범위다.
+   launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다.
+   `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**도 CR6f-idle-soak로
+   구현·실측했다. 남은 비릴리스 성능 후보는 동일 환경의 반복 표본이 충분할 때만 여는
+   CR6e-c3c key→screen hard cap 확정이다. 이는 새 기능 구현 잔여가 아니라 baseline을
+   환경별 예산으로 승격하는 후속 계측이다. G3은 출하 뒤 기본값을 다시 바꿀 때만
+   여는 별도 백로그이고 P6은 선택 확장 범위다.
 
    **G1 config loader provenance:** opt-in 설정의 의도를 보존하기 위해 config loader가 resolved bool과 별도로
    `session.keep-alive-after-quit`의 source를 `absent | explicit_valid | explicit_invalid`로 보존한다.

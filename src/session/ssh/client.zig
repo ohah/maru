@@ -327,6 +327,11 @@ pub const Client = struct {
     /// `write` 가 `NotReady` 를 내면 **호출자가 재키잉을 알아야** 한다 — 알 필요가 없어야 한다.
     /// 그래서 "쓸 수 있는 세션인가"(이 값)와 "지금 보낼 수 있나"(윈도·§7.1)를 가른다.
     shell_ready: bool = false,
+    /// **답을 기다리는 「살아 있나」 물음의 수.** 서버는 이 요청 이름을 모르므로 대개
+    /// `CHANNEL_FAILURE` 로 답하는데 **그것이 정상**이다(계약 §4.1: 답이 «왔다는 사실» 이 증거다).
+    /// 이 수를 안 들면 그 답이 「요청이 실패했다」로 읽혀 **세션이 죽는다**(기기 실측: 붙은 지
+    /// 16초에 `RequestFailed`). 셸이 선 뒤에만 묻으므로, 0 보다 클 때 오는 성공/실패는 우리 것이다.
+    keepalive_pending: u32 = 0,
 
     pub fn init(opts: Options, rand: std.Random) Client {
         var c: Client = .{ .opts = opts, .rand = rand };
@@ -524,6 +529,37 @@ pub const Client = struct {
         var w: Out = .{ .buf = wire_out };
         try self.emit(&w, payload);
         return w.written();
+    }
+
+    /// **살아 있나 묻는다**(계약 §4.1). 조용한 연결이 죽은 연결과 구별되지 않는 것을 막는다 —
+    /// 모바일에서 셀룰러↔Wi-Fi 전환은 FIN 도 RST 도 없이 소켓을 반쪽으로 남긴다.
+    ///
+    /// **언제 보낼지는 여기가 안 정한다.** 코어에는 시계가 없고 적당한 간격도 모른다(폰과
+    /// 데스크톱이 다르다) — 주기·마감은 **부르는 쪽**의 값이다. 여기는 인코딩만 한다.
+    pub fn keepalive(self: *Client, wire_out: []u8) Error![]const u8 {
+        // **아직(또는 이미) 물을 자리가 아니면 «아무 일도 안 한다» — 오류가 아니다.**
+        // `eof` 와 같은 규율이다. 오류로 올리면 그 이름이 슬롯에 남고 host 가 그것을 세션의
+        // 끝으로 읽는다 — 기기에서 그렇게 **멀쩡한 연결이 16초 만에 죽었다**(`NotReady`).
+        // 부르는 쪽은 시계만 보고 주기적으로 부르므로, 「지금은 때가 아니다」가 정상 경로다.
+        if (!self.shell_ready) return wire_out[0..0];
+        if (!self.t.canSendChannelMessages()) return wire_out[0..0];
+        // 채널이 닫히는 중이면 보낼 것이 없다 — `eof` 와 같은 규율(오류가 아니다).
+        if (self.ch.state != .open and self.ch.state != .eof_sent) return wire_out[0..0];
+        var buf: [128]u8 = undefined;
+        const payload = try self.ch.writeKeepalive(&buf);
+        var w: Out = .{ .buf = wire_out };
+        try self.emit(&w, payload);
+        self.keepalive_pending +|= 1;
+        return w.written();
+    }
+
+    /// 기다리던 「살아 있나」 답이 하나 왔다 — 우리 것이면 참(그리고 하나 줄인다).
+    ///
+    /// **판정을 한 자리에 둔다.** 성공·실패 두 갈래가 각자 세면 한쪽만 낡는다.
+    fn takeKeepaliveReply(self: *Client) bool {
+        if (self.keepalive_pending == 0) return false;
+        self.keepalive_pending -= 1;
+        return true;
     }
 
     /// 터미널 크기가 바뀌었다(§6.7).
@@ -1114,7 +1150,7 @@ pub const Client = struct {
                 }
             },
             .open_failed => return Error.ChannelRefused,
-            .request_success => switch (self.state) {
+            .request_success => if (self.takeKeepaliveReply()) {} else switch (self.state) {
                 .requesting_pty => {
                     try self.emit(w, try self.ch.writeShell(&buf));
                     self.state = .starting_shell;
@@ -1125,7 +1161,9 @@ pub const Client = struct {
                 },
                 else => {},
             },
-            .request_failure => return Error.RequestFailed,
+            // **우리 물음의 답이면 삼킨다.** 서버가 이름을 몰라 `FAILURE` 로 답하는 것이 정상이고,
+            // 그것을 요청 실패로 읽으면 살아 있는지 물을 때마다 세션이 죽는다(기기 실측).
+            .request_failure => if (!self.takeKeepaliveReply()) return Error.RequestFailed,
             .data => |d| try s.append(d),
             .extended_data => |x| try s.append(x.data),
             .exit_status => |code| self.exit_status = code,
@@ -1504,6 +1542,54 @@ test "모르는 채널 요청에 want_reply 면 답한다" {
     // 답이 나갔다 — `CHANNEL_FAILURE`(100) 이고 상대 채널 번호로 간다.
     const dec = try packet.read(step.wire);
     try testing.expectEqual(channel.msg_channel_failure, dec.payload[0]);
+}
+
+test "살아 있나 묻는 요청은 want_reply 를 켠다 — 안 켜면 답할 의무가 없다" {
+    // 조용한 연결과 죽은 연결을 가르는 것이 이 요청의 존재 이유다. `want_reply` 가 거짓이면
+    // 상대가 답할 의무가 없어(§5.4) **아무것도 안 와도 정상**이 된다 — 물음이 뜻을 잃는다.
+    var c = readyClient();
+    var out: [256]u8 = undefined;
+    const w = try c.keepalive(&out);
+    try testing.expect(w.len > 0);
+
+    const dec = try packet.read(w);
+    try testing.expectEqual(channel.msg_channel_request, dec.payload[0]);
+    // 이름 뒤에 오는 바이트가 `want_reply` 다.
+    const name = "keepalive@openssh.com";
+    const at = std.mem.indexOf(u8, dec.payload, name) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u8, 1), dec.payload[at + name.len]);
+}
+
+test "살아 있나 물었으면 그 «실패» 답은 정상이다 — 세션을 안 죽인다" {
+    // 서버는 `keepalive@openssh.com` 을 모르므로 대개 `CHANNEL_FAILURE` 로 답한다. 그것을 요청
+    // 실패로 읽으면 **물을 때마다 세션이 죽는다**(기기 실측: 붙은 지 16초에 `RequestFailed`).
+    var c = readyClient();
+    var out: [256]u8 = undefined;
+    _ = try c.keepalive(&out);
+
+    var w: [8192]u8 = undefined;
+    var scr: [64 * 1024]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var wr = wire.Writer.init(&buf);
+    try wr.byte(channel.msg_channel_failure);
+    try wr.u32be(0);
+    _ = try feedChannel(&c, wr.written(), &w, &scr); // 오류가 아니다
+
+    // **안 물었으면 그대로 오류다** — 삼키는 것은 «우리 물음의 답» 뿐이다.
+    var wr2 = wire.Writer.init(&buf);
+    try wr2.byte(channel.msg_channel_failure);
+    try wr2.u32be(0);
+    try testing.expectError(Error.RequestFailed, feedChannel(&c, wr2.written(), &w, &scr));
+}
+
+test "셸이 아직 없으면 살아 있나 묻지 «않고», 오류도 아니다" {
+    // 부르는 쪽은 시계만 보고 주기적으로 부른다 — 「지금은 때가 아니다」가 정상 경로다.
+    // 오류로 올리면 그 이름이 슬롯에 남고 host 가 세션의 끝으로 읽는다(기기에서 실제로 죽었다).
+    var c = readyClient();
+    c.shell_ready = false;
+    var out: [256]u8 = undefined;
+    const w = try c.keepalive(&out);
+    try testing.expectEqual(@as(usize, 0), w.len);
 }
 
 test "want_reply 가 거짓이면 답하지 않는다" {

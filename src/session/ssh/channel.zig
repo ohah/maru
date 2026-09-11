@@ -46,6 +46,9 @@ pub const channel_type_session = "session";
 pub const request_pty = "pty-req";
 pub const request_shell = "shell";
 pub const request_exec = "exec";
+/// 살아 있나 묻는 요청 이름. **OpenSSH 의 것을 그대로 쓴다** — 새 이름을 지으면 상대가
+/// 모르는 것은 같지만(답은 온다) 로그에서 남의 것과 구별이 안 되는 이름이 하나 더 는다.
+const request_keepalive = "keepalive@openssh.com";
 pub const request_window_change = "window-change";
 pub const request_exit_status = "exit-status";
 pub const request_exit_signal = "exit-signal";
@@ -322,6 +325,22 @@ pub const Channel = struct {
 
     /// `window-change` 를 쓴다(§6.7). **`want_reply` 는 거짓이어야 한다** — 명세가 그렇게 못박고
     /// ("A response SHOULD NOT be sent"), 켜면 오지 않을 답을 기다리게 된다.
+    /// **살아 있나 묻는다**(SSH 계약 §4.1). 상대가 이 요청 이름을 몰라도 §5.4 가 답을 요구하므로
+    /// (`CHANNEL_SUCCESS` 든 `FAILURE` 든) **답이 왔다는 사실 자체**가 증거다 — 내용은 안 본다.
+    /// OpenSSH 가 우리에게 쓰는 것과 같은 수단이고, 우리는 그 답을 이미 낸다.
+    ///
+    /// **`want_reply` 가 참이어야 한다.** 거짓이면 상대가 답할 의무가 없어(§5.4) 조용한 연결과
+    /// 죽은 연결이 **구별이 안 된다** — 이 요청의 존재 이유가 사라진다.
+    pub fn writeKeepalive(self: *Channel, out: []u8) Error![]const u8 {
+        if (self.state != .open and self.state != .eof_sent) return Error.UnexpectedMessage;
+        var w = wire.Writer.init(out);
+        try w.byte(msg_channel_request);
+        try w.u32be(self.remote_id);
+        try w.string(request_keepalive);
+        try w.boolean(true);
+        return w.written();
+    }
+
     pub fn writeWindowChange(self: *Channel, out: []u8, size: TerminalSize) Error![]const u8 {
         if (self.state != .open and self.state != .eof_sent) return Error.UnexpectedMessage;
         var w = wire.Writer.init(out);

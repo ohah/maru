@@ -572,10 +572,9 @@ pub export fn maru_mobile_load_config(ptr: [*]const u8, len: usize) void {
     // "원격 세션이 있나" 는 **입력 목적지가 이미 아는 사실**이다(host 가 상태로 세운다) — 그
     // 사실을 두 번 세면 갈린다.
     if (input_sink == 0) {
-        if (firstComplete(next.servers[0..next.server_count])) |i| {
-            ssh_connect_req = @intCast(i + 1);
-            ssh_connecting = i;
-        }
+        // **여기도 같은 함수를 부른다**(M12-f2) — 전에는 두 줄을 복사해 두었다. 요청을 세우는
+        // 규칙이 늘면(승인한 지문을 적을 줄을 고르는 일이 그렇다) 한쪽만 고쳐진다.
+        if (firstComplete(next.servers[0..next.server_count])) |i| requestConnect(i);
     }
     if (cfg_source.len > 0) term_allocator.free(cfg_source);
     cfg_source = term_allocator.dupe(u8, ptr[0..len]) catch blk: {

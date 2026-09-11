@@ -5385,6 +5385,26 @@ pub fn build(b: *std.Build) void {
     observation_event_cost_step.dependOn(&run_observation_event_cost.step);
     boundary_step.dependOn(&run_observation_event_cost.step);
 
+    // 수신 한도로 연결을 끊을 때 **어느 자리에서 몇 바이트였는지** 남기는가. 네 자리가 한
+    // `why=resource_exhausted` 로 뭉쳐 복구 세션 하나가 왜 안 붙는지 확정할 수 없었다.
+    const inbound_cap_diag_step = b.step(
+        "test-inbound-resident-cap-diag",
+        "Inbound cap closes record the site and the actual byte count",
+    );
+    const inbound_cap_diag_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/inbound_resident_cap_diag_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_inbound_cap_diag = b.addRunArtifact(inbound_cap_diag_tests);
+    run_inbound_cap_diag.addArg("--maru-expect-tests=1");
+    run_inbound_cap_diag.addArg("--maru-expect-passed=1");
+    run_inbound_cap_diag.setCwd(b.path("."));
+    inbound_cap_diag_step.dependOn(&run_inbound_cap_diag.step);
+    boundary_step.dependOn(&run_inbound_cap_diag.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

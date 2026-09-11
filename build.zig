@@ -15276,6 +15276,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-candidate-baseline-product",
         "Validate baseline signed product ownership and cleanup",
     );
+    const session_host_release_adapter_notification_product_step = b.step(
+        "test-session-host-notification-product",
+        "Validate Notification Center product transaction ownership and cleanup",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -15721,6 +15725,31 @@ pub fn build(b: *std.Build) void {
         run_baseline_product_tests.addArg("--maru-expect-tests=6");
         run_baseline_product_tests.setCwd(b.path("."));
         session_host_release_adapter_candidate_baseline_product_step.dependOn(&run_baseline_product_tests.step);
+
+        const notification_phase_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_phase.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_product_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_product.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{.{ .name = "release_adapter_notification_phase", .module = notification_phase_mod }},
+        });
+        const notification_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_product.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_notification_product", .module = notification_product_mod }},
+            }),
+        });
+        const run_notification_product_tests = b.addRunArtifact(notification_product_tests);
+        run_notification_product_tests.addArg("--maru-expect-tests=4");
+        run_notification_product_tests.setCwd(b.path("."));
+        session_host_release_adapter_notification_product_step.dependOn(&run_notification_product_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_product_tests.step);
     }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",

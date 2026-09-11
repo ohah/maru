@@ -348,22 +348,47 @@ const runtime_touch_interval_ms: u64 = 60 * 60 * 1000;
 /// 마지막 runtime이 사라진 직후 곧바로 죽으면, 그 순간 재접속하려던 GUI가 endpoint를 잃고 새 host를 띄우게 된다.
 const natural_exit_idle_ticks: usize = 25;
 
+/// **runtime 을 한 번도 못 받은 host** 의 자연 종료 유예 — `poll_timeout_ms`(200ms) × 이 횟수(= 30초).
+///
+/// `natural_exit_idle_ticks`(5초)보다 길게 두는 이유는 이 host 가 **막 spawn 된 host 와 구분되지 않기
+/// 때문**이다. GUI 의 첫 client 가 붙었다 떨어진 뒤 실제 사용 연결이 오기까지의 간격을 넉넉히 덮어야,
+/// 「띄우자마자 스스로 죽어 endpoint 를 잃는」 회귀를 만들지 않는다. 빈 host 누적은 build_id 가 바뀔
+/// 때만 생기므로 30초를 기다려도 사용자가 체감하는 손해가 없다.
+const empty_host_exit_idle_ticks: usize = 150;
+
 /// 지금 host가 스스로 물러나도 되는가. 순수 판정이라 실 daemon 없이 경계를 테스트로 고정한다.
 ///
-/// 세 조건을 **모두** 요구한다.
-///   - `served_any_runtime`: runtime을 한 번이라도 서빙했어야 한다. 없으면 방금 뜬 host가 GUI의 첫 spawn을
-///     받기도 전에 자신을 종료해, 그 host를 띄운 GUI가 endpoint를 잃는다.
+/// 「지금 비어 있다」는 두 조건은 언제나 필수다.
 ///   - `runtime_count == 0`: detach된 keep-alive 세션이 하나라도 있으면 살아남아야 한다 — 그게 이 host의
 ///     존재 이유다(문서: "runtime이 하나라도 살아 있으면 구 host를 종료하지 않는다").
 ///   - `client_count == 0`: 붙어 있는 GUI가 곧 spawn할 수 있으므로 끊지 않는다.
+///
+/// 남는 것은 「**시작 창이 닫혔는가**」 — 방금 뜬 host가 GUI의 첫 spawn을 받기도 전에 자신을 종료해,
+/// 그 host를 띄운 GUI가 endpoint를 잃는 일만 막으면 된다. 그 근거를 두 가지로 나눠 받는다.
+///   - `served_any_runtime`: runtime 을 한 번이라도 서빙했다. 시작 창은 확실히 닫혔다 → 5초 유예.
+///   - `served_any_client`: runtime 은 못 받았지만 client 가 한 번은 붙었다 → 30초 유예.
+///
+/// **두 번째 갈래가 이 판정의 존재 이유다.** 원래는 `served_any_runtime` 하나만 요구했는데, 그 조건은
+/// `registry.count() != 0` 에서만 참이 되므로 **자식 0개인 host 는 영원히 거짓**이었다 — 이 판정이 고치려던
+/// 바로 그 대상(「build_id 가 바뀔 때마다 하나씩 쌓이는 빈 host」)이 가드에 의해 불사신이 됐다.
+///
+/// 2026-09-11 실측: 업그레이드가 `runtime_changed` 로 실패하면 `host_connect` 가 구 host 를 살려 둔 채
+/// 새 host 를 띄우는데(설계된 폴백), 사용자의 패널은 전부 구 host 에 있으므로 새 host 는 자식 0개로 태어난다.
+/// 그 빈 host 는 죽지 못하면서 **설치본과 같은 build_id 로 manifest 를 publish** 하므로, 다음 실행부터
+/// `findCurrentManifestHost` 가 그것을 먼저 집어 업그레이드 스캔 자체를 건너뛴다(로그 `upgrade scan skipped`
+/// 6회). 즉 한 번의 실패가 자기 자신을 영구화했다. 그 빈 host 를 죽이자 다음 실행에서 즉시 `result=upgraded`.
 fn shouldExitNaturally(
     served_any_runtime: bool,
+    served_any_client: bool,
     runtime_count: usize,
     client_count: usize,
     empty_idle_ticks: usize,
 ) bool {
-    if (!served_any_runtime or runtime_count != 0 or client_count != 0) return false;
-    return empty_idle_ticks >= natural_exit_idle_ticks;
+    if (runtime_count != 0 or client_count != 0) return false;
+    if (served_any_runtime) return empty_idle_ticks >= natural_exit_idle_ticks;
+    if (served_any_client) return empty_idle_ticks >= empty_host_exit_idle_ticks;
+    // client 조차 못 본 host 는 아직 spawn 한 GUI 를 기다리는 중이다. 절대 죽지 않는다.
+    return false;
 }
 
 /// 지금 `/tmp` 정리 회피 touch를 할 차례인가. **벽시계 기준**이라 tick이 얼마나 빨리 도는지와 무관하다.
@@ -792,9 +817,12 @@ fn runSessionHostImpl(
     // 이 지점 이전에는 ready를 보내지 않는다. owner lease, incident owner, runtime manager, bound socket,
     // ready manifest/authority와 실제 poll owner가 모두 살아 있어야 부모가 connect retry를 시작해도 된다.
     if (startup_notifier) |notifier| notifier.ready();
-    // 자연 종료 판정 상태. `served_any_runtime`이 없으면 **방금 뜬 host**(아직 GUI가 첫 runtime을 만들기 전)가
-    // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다.
+    // 자연 종료 판정 상태. 둘 중 하나라도 서지 않으면 **방금 뜬 host**(아직 GUI가 첫 runtime을 만들기 전)가
+    // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다. `served_any_runtime` 하나만으로는
+    // **자식을 영영 못 받는 host**(업그레이드 실패 폴백으로 태어난 빈 host)가 불사신이 되므로, client 를 한 번
+    // 봤다는 사실도 시작 창이 닫혔다는 증거로 받는다(→ `shouldExitNaturally`).
     var served_any_runtime = false;
+    var served_any_client = false;
     var empty_idle_ticks: usize = 0;
     var last_touch_ms: ?u64 = null;
     while (true) {
@@ -813,6 +841,7 @@ fn runSessionHostImpl(
             last_touch_ms = now_ms;
         }
         if (registry.count() != 0) served_any_runtime = true;
+        if (fd_owner.activeCount() != 0) served_any_client = true;
         switch (fd_owner.pollOnce(poll_timeout_ms) catch return error.OutOfMemory) {
             .upgrade_ready => {
                 const marker = fd_owner.takeArmedUpgrade() orelse return error.ManifestFailed;
@@ -853,15 +882,17 @@ fn runSessionHostImpl(
                 // 않아 고아 host가 영구히 남았다 — 실측에서 자식 0개인 host가 계속 살아 있어 수동으로 죽여야
                 // 했고, build_id가 바뀔 때마다 그런 host가 하나씩 쌓였다.
                 //
-                // 세 조건을 **모두** 요구한다. runtime을 한 번이라도 서빙했어야 하고(신생 host 보호), 지금
-                // runtime이 0이어야 하며(detach된 keep-alive 세션이 있으면 살아남는다), 붙어 있는 client도
-                // 없어야 한다(곧 spawn할 GUI를 끊지 않는다).
-                if (served_any_runtime and registry.count() == 0 and fd_owner.activeCount() == 0)
+                // 지금 runtime이 0이어야 하고(detach된 keep-alive 세션이 있으면 살아남는다), 붙어 있는
+                // client도 없어야 하며(곧 spawn할 GUI를 끊지 않는다), 시작 창이 닫혔다는 증거 — runtime을
+                // 서빙했거나(5초 유예) 최소한 client가 한 번 붙었거나(30초 유예) — 가 있어야 한다.
+                if ((served_any_runtime or served_any_client) and
+                    registry.count() == 0 and fd_owner.activeCount() == 0)
                     empty_idle_ticks += 1
                 else
                     empty_idle_ticks = 0;
                 if (shouldExitNaturally(
                     served_any_runtime,
+                    served_any_client,
                     registry.count(),
                     fd_owner.activeCount(),
                     empty_idle_ticks,
@@ -1121,22 +1152,51 @@ test "daemon stale sweep product path removes valid residue and disables only up
 // 계약하는데 그 경로가 구현되지 않아, 자식이 0개인 host가 계속 남아 build_id가 바뀔 때마다 하나씩 쌓였다(실측:
 // 4개까지 누적, 전부 수동으로 죽여야 했다). 반대로 성급하게 죽이면 더 나쁘다 — 방금 뜬 host가 첫 spawn을 받기
 // 전에 자신을 종료하면 그 host를 띄운 GUI가 endpoint를 잃고, detach된 keep-alive 세션이 남아 있는데 죽으면
-// 사용자의 셸이 통째로 사라진다. 그래서 "한 번 서빙했고, 지금 runtime 0이고, 붙은 client도 0"이라는 세 조건과
-// 유예 tick을 전부 요구한다. 순수 판정이라 실 daemon·소켓 없이 이 경계를 고정한다.
-test "daemon 자연 종료: 서빙 이력·runtime 0·client 0·유예를 모두 만족할 때만 물러난다" {
+// 사용자의 셸이 통째로 사라진다.
+//
+// **그리고 첫 수정은 그 목적을 달성하지 못했다.** 유일한 시작-창 증거였던 `served_any_runtime` 은
+// `registry.count() != 0` 에서만 참이 되므로, 「자식 0개로 쌓이는 host」는 정의상 영원히 거짓 — 고치려던
+// 대상이 가드에 의해 불사신이 됐다. 2026-09-11 실측으로 그 대가가 드러났다: 업그레이드 실패 폴백으로 태어난
+// 빈 host 가 설치본과 같은 build_id 로 manifest 를 publish 해, 다음 실행부터 `findCurrentManifestHost` 가
+// 그것을 먼저 집고 업그레이드 스캔을 통째로 건너뛰었다(`upgrade scan skipped` 6회). 세션 19개를 쥔 구 host 는
+// 다시는 스캔되지 않았고, 그 빈 host 를 죽이자 다음 실행에서 즉시 `result=upgraded` 가 났다.
+//
+// 그래서 시작-창 증거를 두 갈래로 받는다. runtime 을 서빙했으면 5초, client 만 봤으면 30초 — 후자를 길게 두는
+// 이유는 그 host 가 「막 spawn 돼 첫 연결을 기다리는 host」와 구분되지 않기 때문이다. 순수 판정이라 실
+// daemon·소켓 없이 이 경계를 고정한다.
+test "daemon 자연 종료: 시작 창이 닫혔고·runtime 0·client 0·유예를 모두 만족할 때만 물러난다" {
     const enough = natural_exit_idle_ticks;
-    // 정상 종료 조건.
-    try testing.expect(shouldExitNaturally(true, 0, 0, enough));
+    const empty_enough = empty_host_exit_idle_ticks;
 
-    // 신생 host 보호 — 아직 아무 runtime도 서빙하지 않았으면 절대 죽지 않는다.
-    try testing.expect(!shouldExitNaturally(false, 0, 0, enough));
+    // 정상 종료 조건 — runtime 을 서빙한 이력이 있으면 짧은 유예로 물러난다.
+    try testing.expect(shouldExitNaturally(true, false, 0, 0, enough));
+    try testing.expect(shouldExitNaturally(true, true, 0, 0, enough));
+
+    // 신생 host 보호 — client 조차 못 봤으면 유예가 아무리 차도 절대 죽지 않는다.
+    try testing.expect(!shouldExitNaturally(false, false, 0, 0, enough));
+    try testing.expect(!shouldExitNaturally(false, false, 0, 0, empty_enough));
+    try testing.expect(!shouldExitNaturally(false, false, 0, 0, std.math.maxInt(usize)));
+
     // 살아 있는 keep-alive 세션이 있으면 남는다. 여기서 죽으면 사용자의 셸이 사라진다.
-    try testing.expect(!shouldExitNaturally(true, 1, 0, enough));
+    try testing.expect(!shouldExitNaturally(true, true, 1, 0, enough));
+    try testing.expect(!shouldExitNaturally(false, true, 1, 0, empty_enough));
     // 붙어 있는 GUI가 곧 spawn할 수 있으므로 끊지 않는다.
-    try testing.expect(!shouldExitNaturally(true, 0, 1, enough));
+    try testing.expect(!shouldExitNaturally(true, true, 0, 1, enough));
+    try testing.expect(!shouldExitNaturally(false, true, 0, 1, empty_enough));
+
     // 유예가 차기 전에는 물러나지 않는다 — 마지막 runtime 소멸 직후 재접속하려는 GUI를 위한 창이다.
-    try testing.expect(!shouldExitNaturally(true, 0, 0, enough - 1));
-    try testing.expect(!shouldExitNaturally(true, 0, 0, 0));
+    try testing.expect(!shouldExitNaturally(true, false, 0, 0, enough - 1));
+    try testing.expect(!shouldExitNaturally(true, false, 0, 0, 0));
+
+    // **빈 host 갈래**: client 를 봤지만 runtime 은 못 받은 host 도 결국 물러난다. 이 단언이 깨지면
+    // 업그레이드 실패 폴백으로 태어난 host 가 다시 불사신이 되고, 업그레이드가 영구히 막힌다.
+    try testing.expect(shouldExitNaturally(false, true, 0, 0, empty_enough));
+    try testing.expect(shouldExitNaturally(false, true, 0, 0, empty_enough + 1));
+
+    // 그 갈래는 **더 긴 유예**를 쓴다 — 짧은 쪽을 그대로 쓰면 막 spawn 된 host 가 첫 사용 연결 전에 죽는다.
+    try testing.expect(empty_enough > enough);
+    try testing.expect(!shouldExitNaturally(false, true, 0, 0, enough));
+    try testing.expect(!shouldExitNaturally(false, true, 0, 0, empty_enough - 1));
 }
 
 test "CR0b daemon incident bootstrap prerequisite는 실제 daemon process owner domain을 발급한다" {

@@ -5097,46 +5097,96 @@ fn lineColsFresh(term: *const Term) bool {
         term.rt.editor_line_cols_tab == term.rt.editor_tab_width;
 }
 
-/// 편집이 건드린 **줄 범위**(0-based, 양끝 포함). `null` = 캐시를 못 살린다, 버려라.
+/// 편집이 건드린 **줄 범위와 첨자 이동**. `null` = 캐시를 못 살린다, 버려라.
 ///
-/// **줄 수가 그대로면 그 범위 밖은 손댈 것이 없다.** 바뀐 byte 는 전부 `[start, new_end)` 안에
-/// 있으니 그 구간에 걸치지 않은 줄은 **내용이 같고**, 줄이 늘지도 줄지도 않았으니 **첨자도 안
-/// 밀린다**. L2 가 「문서 내용과 탭 폭만의 함수」(§2)라는 말이 여기서 값을 한다 — 두 입력 중
-/// 바뀐 쪽이 몇 줄뿐이면 다시 셀 것도 그 몇 줄뿐이다.
+/// **문서는 셋으로 갈린다.** 바뀐 byte 가 전부 `[start, new_end)` 안에 있으므로:
+///  · `[0, lo)` — **앞**. 내용도 첨자도 그대로다.
+///  · `[lo, hi]` — **바뀐 구간**. 다시 센다(한 글자를 치면 한 줄이다).
+///  · `(hi, new_count)` — **꼬리**. 내용은 같고 **첨자만 `delta = new_count - old_count` 만큼 밀린다**.
 ///
-/// **줄 수가 바뀌면 안 된다.** 그때는 뒤쪽 줄이 통째로 밀려 첨자 i 가 다른 줄을 가리킨다. 밀기를
-/// 구현할 수도 있지만(memmove + 구간 재계산) 그 경로의 실수는 **조용한 오답**이라 — 폭 캐시가
-/// 엉뚱한 줄의 값을 들어 가로 막대와 화면이 갈린다 — 값을 버리는 쪽을 고른다.
+/// 꼬리 대응이 `hi_old = hi - delta` 인 근거: `new_end` 뒤는 `old_end` 뒤와 **byte 가 같으므로**
+/// 꼬리의 줄 수가 양쪽에서 같다(`new_count - hi - 1 == old_count - hi_old - 1`). L2 가 「문서 내용과
+/// 탭 폭만의 함수」(§2)라는 말이 여기서 값을 한다 — 내용이 같은 줄은 폭도 같다.
 ///
-/// **`edit == null` 도 버린다.** 그것은 "안 바뀌었다"가 아니라 **"범위를 모른다"** 이다
+/// **`edit == null` 은 버린다.** 그것은 "안 바뀌었다"가 아니라 **"범위를 모른다"** 이다
 /// (`refreshAfterEdit` 가 구문 트리에 대해 같은 판단을 한다).
+const LineColsPatch = struct {
+    /// 다시 셀 첫 줄(편집 **뒤** 문서의 첨자).
+    lo: usize,
+    /// 다시 셀 마지막 줄(포함, 편집 **뒤** 문서의 첨자).
+    hi: usize,
+    old_count: usize,
+    new_count: usize,
+
+    /// 꼬리의 **옛** 시작 첨자. `hi + 1 - delta` 를 usize 안에서 언더플로 없이 쓴 것이다.
+    fn oldTailStart(self: LineColsPatch) usize {
+        return self.hi + 1 + self.old_count - self.new_count;
+    }
+};
+
 fn editedLineRange(
     edit: ?syntax_color.EditSpan,
     index: maru.session.editor.line_index.LineIndex,
     old_count: usize,
     new_count: usize,
-) ?struct { lo: usize, hi: usize } {
+) ?LineColsPatch {
     const e = edit orelse return null;
-    if (old_count != new_count or new_count == 0) return null;
+    if (new_count == 0 or old_count == 0) return null;
     // **`new_end` 는 편집 «뒤» 문서의 offset이다** — 그래서 지금의 `index` 로 재는 것이 맞다
     // (`old_end` 는 이미 없는 문서를 가리킨다). 지우기만 한 편집은 `new_end == start` 다.
-    const lo = index.lineAt(index.clampOffset(e.start));
-    const hi = index.lineAt(index.clampOffset(@max(e.start, e.new_end)));
-    return .{ .lo = @min(lo, new_count - 1), .hi = @min(@max(lo, hi), new_count - 1) };
+    const lo_raw = index.lineAt(index.clampOffset(e.start));
+    const hi_raw = index.lineAt(index.clampOffset(@max(e.start, e.new_end)));
+    const lo = @min(lo_raw, new_count - 1);
+    const hi = @min(@max(lo, hi_raw), new_count - 1);
+
+    // **꼬리가 양쪽 문서 안에 있어야 밀 수 있다.** 줄이 늘었다면 그 늘어난 만큼이 `[lo, hi]` 안에
+    // 들어 있어야 `hi - delta >= lo` 다 — 편집 구간이 그 줄바꿈들을 담고 있으니 참이다.
+    //
+    // **아래 둘은 방어이지 판정할 수 없다**(적대적 검증 Y5 — 살아남는 것이 정상이다). `spanFromInverse`
+    // 가 변경들의 **외곽**을 내므로 새로 생긴 줄바꿈은 전부 `[start, new_end)` 안에 있고, 따라서
+    // 부등식이 깨지는 입력이 오늘은 없다. 그래도 두는 이유는 어긋남을 **조용한 오답이 아니라 아무
+    // 일도 아니게** 만들기 위해서다 — 확인 없이 밀면 꼬리를 엉뚱한 자리에서 긁어 가로 막대가 다른
+    // 줄의 폭을 말하는데, 여기서 거절하면 캐시를 버릴 뿐이고 **답은 같다**(비용만 다르다).
+    // `ensureMaxCols` 의 접힘 갈래가 같은 부류의 방어를 같은 근거로 들고 있다.
+    if (new_count > old_count and hi - lo < new_count - old_count) return null;
+    if (hi + 1 + old_count < new_count) return null;
+    return .{ .lo = lo, .hi = hi, .old_count = old_count, .new_count = new_count };
 }
 
-/// 줄별 폭 캐시에서 **[lo, hi] 만** 다시 센다(`editedLineRange` 가 고른 구간).
+/// 줄별 폭 캐시를 새 문서에 맞춘다 — **앞은 그대로, 꼬리는 밀고, 바뀐 구간만 다시 센다**.
+/// 실패하면 `false`(호출자가 버린다 — 버려도 답은 같고 비용만 다르다).
 ///
-/// 부르는 쪽이 캐시 길이 == 줄 수를 이미 보장한다(`editedLineRange` 가 `old_count == new_count`
-/// 를 요구하고, 그 `old_count` 는 캐시가 성했을 때의 길이다).
-fn recountLineCols(term: *Term, lo: usize, hi: usize) void {
+/// **줄 수가 그대로면 할당이 없다.** 그때는 밀 것도 없어 `[lo, hi]` 만 제자리에서 고친다(한 글자를
+/// 치는 흔한 경우다). 줄 수가 바뀌면 **새 버퍼를 잡는다** — 같은 버퍼 안에서 겹치는 구간을 옮기는
+/// 것보다 앞·꼬리를 각각 `@memcpy` 하는 편이 겹침 위험이 없고, `editor_lines` 자신이 이미 편집마다
+/// 같은 크기의 배열을 새로 잡으므로 비용의 차수도 그대로다.
+fn applyLineColsPatch(self: *AppSession, term: *Term, p: LineColsPatch) bool {
     const lines = term.rt.editor_lines;
-    const buf = term.rt.editor_line_cols;
-    std.debug.assert(buf.len == lines.len);
+    const old = term.rt.editor_line_cols;
+    std.debug.assert(lines.len == p.new_count);
+    std.debug.assert(old.len == p.old_count);
+
+    const buf = if (p.old_count == p.new_count) old else blk: {
+        const grown = self.allocator.alloc(u32, p.new_count) catch return false;
+        @memcpy(grown[0..p.lo], old[0..p.lo]); // 앞 — 첨자가 안 밀린다
+        break :blk grown;
+    };
+    if (buf.ptr != old.ptr and p.hi + 1 < p.new_count) {
+        const src = p.oldTailStart();
+        std.debug.assert(src >= p.lo and src <= p.old_count);
+        @memcpy(buf[p.hi + 1 ..], old[src..]); // 꼬리 — 내용은 같고 첨자만 밀렸다
+    }
+
     // `ensureLineCols` 와 **같은 두 값**을 쓴다 — 다른 값을 쓰면 같은 배열 안에 두 시점이 섞인다.
     const tab_width = term.rt.editor_line_cols_tab;
     const limit = chrome_editor.frame.max_cols_count_limit;
-    for (lo..hi + 1) |i| buf[i] = chrome_editor.content.lineColumnsUpTo(lines[i], tab_width, limit);
+    for (p.lo..p.hi + 1) |i| buf[i] = chrome_editor.content.lineColumnsUpTo(lines[i], tab_width, limit);
+
+    if (buf.ptr != old.ptr) {
+        if (old.len > 0) self.allocator.free(old);
+        term.rt.editor_line_cols = buf;
+    }
+    return true;
 }
 
 /// 줄별 폭 캐시를 버린다. **줄 배열을 갈아 끼우거나 놓는 자리가 부른다.**
@@ -7368,10 +7418,11 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     for (0..n) |i| lines[i] = doc.file.lineText(i) orelse "";
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = lines;
-    // **폭 캐시: 살리거나 버리거나.** 편집 구간을 알고 줄 수가 그대로면 **그 줄만** 다시 센다
-    // (한 글자를 치면 한 줄이다). 아니면 버린다 — 줄 수가 그대로인 편집은 길이·탭 폭 판정에
-    // 안 걸리므로 **여기서 직접 버려야** 캐시가 옛 폭을 든 채 살아남지 않는다.
-    if (cols_patch) |r| recountLineCols(term, r.lo, r.hi) else dropLineCols(self, term);
+    // **폭 캐시: 살리거나 버리거나.** 편집 구간을 알면 **앞은 그대로 두고 꼬리는 밀고 바뀐 구간만**
+    // 다시 센다(한 글자를 치면 한 줄이다). 범위를 모르거나(되돌리기) 밀기가 안 잡히면 버린다 —
+    // 줄 수가 그대로인 편집은 길이·탭 폭 판정에 **안 걸리므로** 여기서 직접 버려야 캐시가 옛 폭을
+    // 든 채 살아남지 않는다.
+    if (cols_patch == null or !applyLineColsPatch(self, term, cols_patch.?)) dropLineCols(self, term);
 
     // ⑵⑶ 접힘 층과 보이는 줄.
     dropFoldState(self, term);
@@ -15625,9 +15676,12 @@ test "L2C7 편집 뒤 첫 접힘도 문서를 다시 «훑지 않는다» (제�
     try testing.expectEqual(scans, term.rt.editor_line_cols_scans); // **훑기는 한 번도 안 늘었다**
 }
 
-test "L2C8 줄 수가 바뀌는 편집은 캐시를 버린다 — 첨자가 밀린다 (제품 경계)" {
-    // **여기가 「살린다」의 경계다.** 줄이 하나 늘면 그 뒤의 줄은 통째로 밀려 첨자 i 가 다른 줄을
-    // 가리킨다. 그대로 두면 상한이 **엉뚱한 줄의 폭**을 말한다 — 조용한 오답이다.
+test "L2C8 줄 수가 바뀌어도 캐시가 산다 — 꼬리를 «민다» (제품 경계)" {
+    // **첨자가 밀리는 것이 이 조각의 어려운 쪽이다.** 앞에서 줄이 하나 늘면 뒤쪽 줄이 통째로 밀려
+    // 첨자 i 가 다른 줄을 가리킨다 — 그대로 두면 가로 상한이 **엉뚱한 줄의 폭**을 말한다.
+    // 그래서 꼬리를 `delta` 만큼 밀어 옮기고 바뀐 구간만 다시 센다.
+    //
+    // **끝이 아니라 «앞» 에서 늘린다** — 끝에서 늘리면 밀릴 꼬리가 없어 개념이 안 갈린다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -15637,22 +15691,26 @@ test "L2C8 줄 수가 바뀌는 편집은 캐시를 버린다 — 첨자가 밀�
     drawn.dl.deinit(allocator);
     const lines_before = term.rt.editor_lines.len;
     if (term.rt.editor_line_cols.len != lines_before) return error.CacheNotFilled;
+    const scans = term.rt.editor_line_cols_scans;
+    const wide = term.rt.editor_max_cols;
+    if (wide < 600) return error.FixtureNotWide;
 
-    // **문서 «앞» 에서 줄을 늘린다** — 뒤쪽이 전부 밀려야 개념이 갈린다(끝에서 늘리면 밀릴 것이 없다).
+    // 문서 **앞** 에 줄을 하나 넣는다 — 뒤쪽 첨자가 전부 1 씩 밀린다.
     term.rt.editor_selection = editor_selection.Selection.at(0);
     if (!insertText(fx.session, term, "\n")) return error.InsertRejected;
     try testing.expectEqual(lines_before + 1, term.rt.editor_lines.len);
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len); // 버렸다
+    try testing.expect(lineColsFresh(term)); // 살았고
+    try testing.expectEqual(@as(?usize, null), lineColsMismatch(term)); // **밀린 자리가 전부 맞다**
+    try testing.expectEqual(scans, term.rt.editor_line_cols_scans); // 다시 안 훑었다
 
-    // 지워서 줄을 되돌릴 때도 마찬가지다.
-    var again = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
-    again.dl.deinit(allocator);
-    ensureLineCols(fx.session, term);
-    if (!lineColsFresh(term)) return error.CacheNotRefilled;
+    // 지워서 줄을 되돌릴 때도 마찬가지다(꼬리가 **반대로** 밀린다).
+    breakUndoGroup(term);
     term.rt.editor_selection = editor_selection.Selection.at(1);
     if (!deleteText(fx.session, term, true)) return error.DeleteRejected;
     try testing.expectEqual(lines_before, term.rt.editor_lines.len);
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len);
+    try testing.expect(lineColsFresh(term));
+    try testing.expectEqual(@as(?usize, null), lineColsMismatch(term));
+    try testing.expectEqual(scans, term.rt.editor_line_cols_scans);
 }
 
 test "L2C9 되돌리기는 범위를 모른다 — 캐시를 버린다 (제품 경계)" {
@@ -15702,16 +15760,23 @@ test "L2C10 편집을 섞어도 폭 캐시가 전체 재훑기와 같다 (상태
 
     var prng = std.Random.DefaultPrng.init(0x1E2C);
     const rand = prng.random();
-    var patched: usize = 0; // **캐시가 살아남은 횟수** — 0이면 이 판정자는 아무것도 안 본 것이다
+    // **축마다 따로 센다.** 「많이 돌렸다」가 「모든 모양을 만들었다」가 아니다 — 한 줄 편집만 만들면
+    // `lo == hi` 로 겹쳐 구간 로직이, 줄 수가 안 바뀌면 **첨자 밀기가** 통째로 가려진다. 실제로
+    // 앞 회차에서 그 둘 때문에 변이가 살아남았다.
+    var same: usize = 0; // 줄 수 불변
+    var grew: usize = 0; // 줄이 늘었다 — 꼬리를 **오른쪽**으로 민다
+    var shrank: usize = 0; // 줄이 줄었다 — 꼬리를 **왼쪽**으로 민다
 
     var step: usize = 0;
     while (step < 400) : (step += 1) {
         const len = term.rt.editor_doc.?.file.content.len;
+        const rows_before = term.rt.editor_lines.len;
+        const was_fresh = lineColsFresh(term);
         breakUndoGroup(term);
-        switch (rand.uintLessThan(u8, 10)) {
+        switch (rand.uintLessThan(u8, 12)) {
             0...5 => {
                 term.rt.editor_selection = editor_selection.Selection.at(rand.uintAtMost(usize, len));
-                const texts = [_][]const u8{ "x", "\t", "한", "ab\tc", "\n", "가나다" };
+                const texts = [_][]const u8{ "x", "\t", "한", "ab\tc", "\n", "가나다", "p\nq\nr" };
                 _ = insertText(fx.session, term, texts[rand.uintLessThan(usize, texts.len)]);
             },
             6, 7 => {
@@ -15720,12 +15785,23 @@ test "L2C10 편집을 섞어도 폭 캐시가 전체 재훑기와 같다 (상태
                     _ = deleteText(fx.session, term, true);
                 }
             },
-            8 => _ = undoEdit(fx.session, term),
+            8, 9 => {
+                // **여러 줄을 한 번에 — 줄 수는 그대로**(`toggleLineComment`). 이 모양이 없으면
+                // `lo`·`hi` 가 겹쳐 구간 로직이 안 보인다(`L2C11` 이 같은 축을 손으로 잡는다).
+                const a = rand.uintAtMost(usize, len);
+                const b = rand.uintAtMost(usize, len);
+                term.rt.editor_selection = editor_selection.Selection.fromPoints(@min(a, b), @max(a, b));
+                _ = toggleLineComment(fx.session, term);
+            },
+            10 => _ = undoEdit(fx.session, term),
             else => _ = redoEdit(fx.session, term),
         }
 
+        const rows_after = term.rt.editor_lines.len;
         if (lineColsFresh(term)) {
-            patched += 1;
+            if (was_fresh) {
+                if (rows_after > rows_before) grew += 1 else if (rows_after < rows_before) shrank += 1 else same += 1;
+            }
             if (lineColsMismatch(term)) |i| {
                 std.debug.print("L2C10 step {d}: 줄 {d} 이 안 맞는다\n", .{ step, i });
                 return error.LineColsDiverged;
@@ -15735,11 +15811,11 @@ test "L2C10 편집을 섞어도 폭 캐시가 전체 재훑기와 같다 (상태
             ensureLineCols(fx.session, term);
         }
     }
-    // **픽스처 공허 방지** — 전부 버리기만 했다면 위의 대조가 한 번도 안 돈 것이다.
-    if (patched < 50) {
-        std.debug.print("L2C10: 캐시가 산 단계가 {d} 번뿐이다 — 픽스처가 구간 패치를 안 지난다\n", .{patched});
-        return error.PatchPathNotExercised;
-    }
+    // **픽스처 공허 방지 — 축마다 따로 본다.** 합계만 보면 한 축이 0 이어도 초록이다.
+    std.debug.print("L2C10 축: 불변={d} 늘어남={d} 줄어듦={d}\n", .{ same, grew, shrank });
+    if (same < 30) return error.SameCountPathNotExercised;
+    if (grew < 10) return error.GrowPathNotExercised; // 꼬리를 오른쪽으로 미는 갈래
+    if (shrank < 10) return error.ShrinkPathNotExercised; // 왼쪽으로 미는 갈래
 }
 
 test "L2C11 «여러 줄» 을 한 번에 고쳐도 그 줄이 전부 다시 세어진다 — 주석 토글 (제품 경계)" {
@@ -15815,9 +15891,12 @@ test "MAXC1 가장 긴 줄이 «짧아지면» 상한도 준다 — 같은 프�
 }
 
 test "MAXC2 캐시가 없으면 «자란 쪽만» 따라간다 — 옛 절충이 그대로다 (제품 경계)" {
-    // **줄 수가 바뀌는 편집은 캐시를 버린다**(`L2C8`). 그때는 정확한 답이 다시 비싸지므로 옛 절충으로
-    // 돌아간다 — 여기서 0 으로 버리면 가로 위치가 되감기고 막대가 사라진다(2026-09-08 캡처가 그 둘을
-    // 한 화면에서 보여 줬다). **판정 순서가 이 갈림을 만든다**: 캐시를 먼저 보고, 없을 때만 `kept`.
+    // **캐시가 없을 때의 동작은 여전히 필요하다.** 되돌리기는 `edit == null` 로 와서 범위를 모르므로
+    // 캐시를 버린다(`L2C9`). 그 상태에서 상한을 0 으로 버리면 가로 위치가 되감기고 막대가 사라진다
+    // (2026-09-08 캡처가 그 둘을 한 화면에서 보여 줬다) — 그래서 근사가 0 보다 낫다.
+    //
+    // **이 판정자의 방아쇠가 바뀌었다.** 예전에는 「줄 수가 바뀌는 편집」으로 캐시를 죽였는데, 그
+    // 편집은 이제 꼬리를 밀어 캐시를 **살린다**(`L2C8`). 남은 방아쇠가 되돌리기다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -15828,16 +15907,25 @@ test "MAXC2 캐시가 없으면 «자란 쪽만» 따라간다 — 옛 절충이
     const before = term.rt.editor_max_cols;
     if (before < 600) return error.FixtureNotWide;
 
-    // 가장 긴 줄 **한가운데에 개행**을 넣는다 — 그 줄이 둘로 갈려 상한이 실제로는 절반쯤이 되지만,
-    // 줄 수가 바뀌어 캐시가 죽으므로 **상한은 안 준다**. 그것이 의도한 절충이다.
+    // 되돌릴 것을 하나 만들고 되돌린다 — 그 순간 캐시가 죽는다.
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
+    if (!undoEdit(fx.session, term)) return error.UndoRejected;
+    if (lineColsFresh(term)) return error.CacheDidNotDie;
+    try testing.expectEqual(@as(?u32, null), maxColsFromCache(term));
+
+    // **그 상태에서 가장 긴 줄을 짧게 만든다.** 캐시가 없으니 정확히 셀 길이 없고, 상한은 안 준다.
     const content = term.rt.editor_doc.?.file.content;
     const xs = std.mem.indexOf(u8, content, "xxxxxxxxxx") orelse return error.FixtureMissingLongLine;
-    term.rt.editor_selection = editor_selection.Selection.at(xs + 300);
-    if (!insertText(fx.session, term, "\n")) return error.InsertRejected;
+    var at = xs;
+    while (at < content.len and content[at] == 'x') at += 1;
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(at - 10, at);
+    if (!deleteText(fx.session, term, true)) return error.DeleteRejected;
 
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_line_cols.len); // 캐시는 죽었고
-    try testing.expectEqual(@as(?u32, null), maxColsFromCache(term));
-    try testing.expect(term.rt.editor_max_cols >= before); // 상한은 **안 준다**(0 으로도 안 간다)
+    try testing.expectEqual(before, term.rt.editor_max_cols); // **안 준다** — 그리고 0 으로도 안 간다
+    try testing.expect(maxColsForRender(fx.session, term, false) != null); // 막대도 안 사라진다
 }
 
 test "MAXC3 상한이 0 이어도 캐시가 성하면 «답이 있다» — 판정 순서 (제품 경계)" {

@@ -10377,7 +10377,11 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 5 });
     defer core.deinit();
     core.setCellMetrics(10, 20);
-    core.kitty_images.limit = 8192; // 작게 잡아 한도 경계도 자주 밟게 한다
+    // **한도를 실제로 넘기게 잡는다.** 처음엔 8192 로 뒀는데 fuzz 가 도달한 최대치가 240B 였다
+    // (한도의 3%) — `total_bytes <= limit` 단언이 **한 번도 시험되지 않은 채** 초록이었다.
+    // 자원 방어선을 지워도 fuzz 가 못 잡는다는 뜻이다(실측: #3510 이 고친 그 결함을 되돌려도
+    // 20 개 seed 가 전부 통과했다). 한도를 프레임 몇 장 크기로 낮춰 **거부 경로를 반복해 밟게** 한다.
+    core.kitty_images.limit = 160; // 2x2 RGBA 10 장 — 루트+프레임 몇 장이면 곧 넘는다
 
     // **seed 를 env 로 바꿀 수 있다.** 고정 seed 는 한 경로만 파므로, 버그 사냥을 할 때는
     // `MARU_FUZZ_SEED=<n>` 으로 수백 개를 훑는다(2026-09-11: 확장 생성기로 400 개를 훑어 전부
@@ -10410,6 +10414,7 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     };
     for (seed_cmds) |c| try core.write(c);
 
+    var max_bytes_seen: usize = 0;
     var saw_frames = false;
     var saw_running = false;
     var n: usize = 0;
@@ -10418,7 +10423,10 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
         seq.clearRetainingCapacity();
         if (rnd.boolean()) {
             // 유효 골격 + 한두 필드 교란 — 여기가 합성·재생 코드를 실제로 밟는다.
+            // `a=f` 를 두 번 넣어 **유효 프레임 추가 비중을 높인다** — 그래야 총량이 한도까지 올라가
+            // 거부 경로(ENOMEM)와 회계 단언이 실제로 시험된다.
             const skeletons = [_][]const u8{
+                "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2",
                 "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2",
                 "\x1b_Ga=f,f=32,s=1,v=1,i=1,c=1,q=2",
                 "\x1b_Ga=a,i=1,q=2",
@@ -10468,10 +10476,14 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
             if (im.frameCount() > 1) saw_frames = true;
             if (im.anim_state == .running) saw_running = true;
         }
+        if (core.kitty_images.total_bytes > max_bytes_seen) max_bytes_seen = core.kitty_images.total_bytes;
     }
 
     // **fuzz 가 실제로 그 코드를 밟았는가.** 이 단언이 없으면 「4000 개를 먹였다」가 「거부 경로를
     // 4000 번 밟았다」일 수 있다 — 실제로 처음 판정자가 그 상태였다(images=0, frames=0).
+    // **fuzz 가 자원 한도를 실제로 밀었는가.** 이 단언이 없으면 `total_bytes <= limit` 는
+    // 「한 번도 근처에 안 갔다」로 초록이 된다 — 방어선을 지워도 못 잡는다(실측).
+    try std.testing.expect(max_bytes_seen * 2 >= core.kitty_images.limit);
     try std.testing.expect(saw_frames);
     try std.testing.expect(saw_running);
 

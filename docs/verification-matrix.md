@@ -2763,7 +2763,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 제품 gate는 1초 idle wake delta 0과 CPU
   cap, actual 1·10·100 runtime screen projector exact-zero, 7 active marker의 notifier/write/drain 증가를 소유하며,
-  장시간 idle soak는 운영 백로그로 남긴다. E3b metadata visit 제거는 별도 E3b 제품·artifact gate에서 구현·검증됐다.
+  CR6f-idle-soak는 동일 ReleaseFast host/PTY를 600초·60창 유지해 창별 wake·observation·projector
+  delta 0, CPU·FD·RSS, 마지막 actual marker와 cleanup을 strict artifact로 검증한다. 2026-09-11
+  로컬 제품 실측도 통과했다. E3b metadata visit 제거는 별도 E3b 제품·artifact gate에서 구현·검증됐다.
 - **K1 cwd authority model/wire: 구현, 제품 kernel cwd parity 미완.** MRSH v2 metadata의 optional `cwd_host`는
   부재를 legacy unknown authority로 정규화하며, non-empty authority는 non-empty cwd와 같은 observation transaction에서만
   소유·교체한다. type/duplicate/authority-without-cwd는 fail-close하고 server·wire·owning DTO·prepared reducer·GUI projection의

@@ -4086,6 +4086,70 @@ pub fn build(b: *std.Build) void {
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
     // 경로를 걸지 않는다 — un-gate는 Linux 호스트 검증 후 후속). maru 모듈(1a control_plane)을 import한다.
     if (target.result.os.tag == .macos) {
+        const notification_center_helper_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        notification_center_helper_compile.addFileArg(
+            b.path("tools/session-host/notification-center-helper.swift"),
+        );
+        notification_center_helper_compile.addArgs(&.{
+            "-framework", "AppKit",
+            "-framework", "ApplicationServices",
+            "-framework", "CoreGraphics",
+            "-o",
+        });
+        const notification_center_helper_bin = notification_center_helper_compile.addOutputFileArg(
+            "maru-session-host-notification-center-helper",
+        );
+        const notification_center_helper_boundary = b.addSystemCommand(&.{"sh"});
+        notification_center_helper_boundary.addFileArg(
+            b.path("tests/session-host-notification-helper-boundary.sh"),
+        );
+        notification_center_helper_boundary.addFileArg(
+            b.path("tools/session-host/notification-center-helper.swift"),
+        );
+        notification_center_helper_boundary.addFileArg(notification_center_helper_bin);
+        const notification_center_helper_policy_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-D",
+            "MARU_HELPER_TEST",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        notification_center_helper_policy_compile.addFileArg(
+            b.path("tools/session-host/notification-center-helper.swift"),
+        );
+        notification_center_helper_policy_compile.addFileArg(
+            b.path("tests/macos_notification_center_helper_policy.swift"),
+        );
+        notification_center_helper_policy_compile.addArgs(&.{
+            "-framework", "AppKit",
+            "-framework", "ApplicationServices",
+            "-framework", "CoreGraphics",
+            "-o",
+        });
+        const notification_center_helper_policy_bin = notification_center_helper_policy_compile.addOutputFileArg(
+            "maru-session-host-notification-center-helper-policy-tests",
+        );
+        const run_notification_center_helper_policy = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_notification_center_helper_policy.addFileArg(notification_center_helper_policy_bin);
+        const notification_center_helper_step = b.step(
+            "test-session-host-notification-helper",
+            "Compile the AX Notification Center helper and validate its fail-closed boundary",
+        );
+        notification_center_helper_step.dependOn(&notification_center_helper_boundary.step);
+        notification_center_helper_step.dependOn(&run_notification_center_helper_policy.step);
+        test_step.dependOn(&notification_center_helper_compile.step);
+        macos_only_test_step.dependOn(&notification_center_helper_compile.step);
+        test_step.dependOn(&run_notification_center_helper_policy.step);
+        macos_only_test_step.dependOn(&run_notification_center_helper_policy.step);
+
         const file_panel_termination_policy_tests = b.addSystemCommand(&.{
             "xcrun",
             "swiftc",

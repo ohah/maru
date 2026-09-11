@@ -2956,18 +2956,26 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   없이 fail-close한다. `test-session-host-release-evidence`가 Debug·ReleaseFast에서 canonical round-trip, candidate/stable
   identity·PID·nonce·timestamp·outcome drift와 전 allocation fail-index를 검증한다. 이 leaf writer의 green은 실제 OS click이나
   signed candidate 실행 증거가 아니며 R2 없이 완료로 승격하지 않는다.
-- **N3-R2 provisioned product runner (R2a 구현, R2b/R2c 미착수):** R2a transaction owner는 candidate·app·helper·Aqua/permission
+- **N3-R2 provisioned product runner (R2a·R2b1 구현, R2b2/R2c 미착수):** R2a transaction owner는 candidate·app·helper·Aqua/permission
   authority를 실행 전에 결속하고, 하나의 absolute deadline 아래 `gui_zero` 실행→전 권위 재검증→`gui_live_then_quit`
   실행→전 권위 재검증→두 exact request 역순 cleanup·부재 재검증→R1 leaf 배타 게시→최종 재검증 순서를 고정한다. 각 child attempt는 호출 전에 기록하며 실패 시
   leaf→live→zero 역순으로 이번 UUID의 소유물만 정리한다. cleanup 실패는 성공이나 원래 오류로 덮지 않고 exact retry
   authority를 남긴다. copied/pre-owned execution, 단계별 실패, 복수 cleanup 실패와 재시도는 Debug·ReleaseFast
-  `test-session-host-notification-product`가 검증한다. R2b concrete macOS adapter와 고정 helper, R2c mounted candidate
-  composition은 이 owner를 통과해야 한다.
+  `test-session-host-notification-product`가 검증한다. R2b1의 별도 signable
+  `notification-center-helper.swift`는 공개 `CGSessionCopyCurrentDictionary`의 on-console/login-complete와
+  `AXIsProcessTrustedWithOptions(prompt=false)`만 preflight하고, `com.apple.notificationcenterui`의 bounded AX tree에서 exact
+  visible nonce와 결속된 유일한 press target만 `AXUIElementPerformAction(kAXPressAction)`으로 누른다. 다른 알림 text를
+  stdout/stderr에 싣지 않고, fixed schema·nonce·strict observed/click timestamp만 성공 stdout으로 낸다. 두 canonical nonce
+  suffix, UUID v4/variant/lowercase, invalid argv, prompt/synthetic/private-lock-key 금지는
+  `test-session-host-notification-helper`가 compile+runtime/source boundary로 검증한다. R2b2 concrete adapter와 앱 scenario mode,
+  R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미
-  `authorized`인 Notification Center와 고정 automation helper identity의 Accessibility 권한, unlocked Aqua session을
-  읽기만 하며 prompt·수동 클릭·synthetic response로 우회하지 않는다. 다른 알림과 구별되는 exact visible nonce를 가진
+  `authorized`인 Notification Center와 고정 automation helper identity의 Accessibility 권한을 읽기만 한다. 공개
+  `CGSessionCopyCurrentDictionary`의 on-console/login-complete Aqua preflight와 deadline 안의 실제 AX 요소 발견·`AXPress`
+  성공을 함께 요구해 상호작용 가능한 세션을 증명하며, 비공개 screen-lock key를 이름으로 읽지 않는다. prompt·수동 클릭·synthetic
+  response로 우회하지 않는다. 다른 알림과 구별되는 exact visible nonce를 가진
   실제 배너만 absolute deadline 안에 UI automation으로 클릭하고, 앱 callback의 canonical request identifier와 UI event를
   같은 monotonic transaction에 결속한다. 앱의 일반 cold/live
   route가 같은 host/runtime과 기존 child PID에 붙어 before marker를 보존하고 새 input/output을 왕복한 뒤에만 R1 leaf를

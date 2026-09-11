@@ -33,6 +33,7 @@ const FileTreeReloadAction = AppSession.FileTreeReloadAction;
 const FileTreeTrashOutcome = app_session_mod.FileTreeTrashOutcome;
 const PendingFileTreeRootValidation = app_session_mod.PendingFileTreeRootValidation;
 const headerIconRasterExtentPx = app_session_mod.headerIconRasterExtentPx;
+const agent_activity_ops = @import("agent_activity.zig"); // RAV5b: 원격 펼침 결말 드레인
 const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
@@ -828,6 +829,16 @@ pub fn updateFileTree(self: *AppSession) !void {
         self.remote_file_outcome = null;
         self.remote_file_mutex.unlock(self.io);
         if (got) |outcome| finishRemoteFileOpen(self, outcome);
+    }
+
+    // 원격 펼침 결말(RAV5b) — 활동 뷰가 당겨 온 구간을 tick 이 가져간다. 같은 자리에 두는 이유는
+    // **워커 결말은 전부 여기서 드레인한다**는 규율이다(따로 두면 새 워커가 생길 때마다 자리가 갈린다).
+    {
+        self.remote_detail_mutex.lockUncancelable(self.io);
+        const got = self.remote_detail_outcome;
+        self.remote_detail_outcome = null;
+        self.remote_detail_mutex.unlock(self.io);
+        if (got) |outcome| agent_activity_ops.finishRemoteDetail(self, outcome);
     }
 
     // follow 가 펌프보다 **먼저다**(적대적 검증 3 회차): 적용이 이번 tick 의 ctl·스캔 요청을 세우고

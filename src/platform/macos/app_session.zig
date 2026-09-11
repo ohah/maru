@@ -5391,6 +5391,11 @@ pub const AppSession = struct {
     remote_file_open_inflight: bool = false,
     remote_file_mutex: std.Io.Mutex = .init,
     remote_file_outcome: ?file_panel_ops.RemoteFileOutcome = null,
+    /// 원격 펼침(RAV5b) — 단발 워커의 in-flight 표식과 결과 슬롯. 활동 뷰가 펼칠 때 저쪽 구간을
+    /// 당겨온다(활동 wire 는 자리만 싣는다 — 계약 §2.4).
+    remote_detail_inflight: bool = false,
+    remote_detail_mutex: std.Io.Mutex = .init,
+    remote_detail_outcome: ?agent_activity_ops.RemoteDetailOutcome = null,
     /// 원격 이름 변경(RF6b) — 단발 워커. 로컬 변경 백엔드를 안 탄다(§2.4).
     remote_rename_inflight: bool = false,
     remote_rename_mutex: std.Io.Mutex = .init,
@@ -22299,6 +22304,18 @@ pub const AppSession = struct {
             self.allocator.free(outcome.path);
             self.allocator.free(outcome.bytes);
             self.remote_file_outcome = null;
+        }
+        // 원격 펼침 워커도 같은 가드다(RAV5b) — detach 스레드가 self.remote_detail_* 을 건드린다.
+        while (true) {
+            self.remote_detail_mutex.lockUncancelable(self.io);
+            const still_running = self.remote_detail_inflight and self.remote_detail_outcome == null;
+            self.remote_detail_mutex.unlock(self.io);
+            if (!still_running) break;
+            std.atomic.spinLoopHint();
+        }
+        if (self.remote_detail_outcome) |outcome| {
+            outcome.deinit(self.allocator);
+            self.remote_detail_outcome = null;
         }
         // 원격 이름 변경 워커도 같은 가드다(RF6b) — detach 스레드가 self.remote_rename_* 을 건드린다.
         while (true) {
@@ -81602,6 +81619,87 @@ test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3
     // ── ③ **이 test 의 요점.** 지금 기본값이 무엇인지 못 박는다. 뒤집는 커밋은 이 한 줄을 반드시
     //    함께 고쳐야 하므로 전환이 **리뷰 diff 에 보인다** — 조용한 뒤집기를 막는 유일한 자리다.
     try std.testing.expect((config_mod.Config{}).session.keep_alive_after_quit == true);
+}
+
+test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린다 (RAV5b)" {
+    // **전송 없이 태우는 수직이다** — 워커의 결말(`finishRemoteDetail`)은 제품 드레인 그 자체라
+    // test-only 표식이 필요 없다(RF4 의 `finishRemoteFileOpen` 과 같은 결).
+    //
+    // 재는 것은 하나다: 원격이 당겨 온 **날 바이트**가 로컬 펼침과 **같은 규칙**으로 풀리는가
+    // (계약 §2.3 — 원격과 로컬이 다른 것을 보여 주는 것이 이 뷰의 최악 실패다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 펼쳐 둔 항목 하나를 손으로 세운다(스캔 없이 결말만 태운다).
+    try session.agent_activity.hits.append(allocator, .{
+        .line_offset = 0,
+        .data_offset = 0,
+        .data_len = 0,
+        .kind = .claude_tool_use,
+        .mime = .unknown,
+        .activity = .exec,
+        .result = .{ .found = true, .body = .{ .offset = 100, .is_array = false } },
+    });
+    try session.agent_activity.labels.append(allocator, .{});
+    session.agent_activity.open = .{ .hit_index = 0 };
+    defer session.agent_activity.dropOpen(allocator);
+
+    // ── ① 정상: 저쪽이 준 바이트가 **이스케이프까지 풀려** 화면 텍스트가 된다.
+    {
+        // ⚠️ **오프셋 규약을 닮아야 한다**: 스캐너는 값의 **첫 바이트**를 가리킨다(여는 따옴표
+        // **다음**) — 닫는 따옴표가 끝을 말한다. 픽스처가 그 모양을 안 닮으면 판정자가 푸는 규칙을
+        // 못 본다(합성 픽스처가 눈을 감긴 J0 와 같은 부류다).
+        const cmd = try allocator.dupe(u8, "zig build test\\n두 번째 줄\"");
+        const body = try allocator.dupe(u8, "boom\"");
+        agent_activity_ops.finishRemoteDetail(session, .{
+            .hit_index = 0,
+            .generation = session.agent_activity.detail_generation,
+            .command = cmd,
+            .body = body,
+        });
+        const op = session.agent_activity.open.?;
+        try std.testing.expect(!op.detail.remote_failed);
+        // `unescapeBlock` 이 `\n` 을 실제 줄바꿈으로 푼다 — 로컬 펼침과 **같은 함수**다.
+        try std.testing.expectEqualStrings("zig build test\n두 번째 줄", op.detail.command);
+        try std.testing.expect(op.detail.has_result);
+        try std.testing.expectEqualStrings("boom", op.detail.result);
+    }
+
+    // ── ② 못 읽었으면 **그렇게 말한다** — 「빈 명령」이 아니다(계약 §2.2).
+    {
+        agent_activity_ops.finishRemoteDetail(session, .{
+            .hit_index = 0,
+            .generation = session.agent_activity.detail_generation,
+            .failed = true,
+        });
+        try std.testing.expect(session.agent_activity.open.?.detail.remote_failed);
+    }
+
+    // ── ③ **늦게 온 답은 버린다.** 그 사이 다른 것을 열었으면 남의 명령이 뜬다.
+    {
+        session.agent_activity.detail_generation +%= 1;
+        const stale = try allocator.dupe(u8, "\"남의 명령\"");
+        agent_activity_ops.finishRemoteDetail(session, .{
+            .hit_index = 0,
+            .generation = session.agent_activity.detail_generation -% 1,
+            .command = stale,
+        });
+        const op = session.agent_activity.open.?;
+        try std.testing.expect(op.detail.remote_failed); // ② 의 상태 그대로
+        try std.testing.expectEqual(@as(usize, 0), op.detail.command.len);
+    }
 }
 
 test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는다 (IG-원격)" {

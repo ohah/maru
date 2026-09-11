@@ -19,6 +19,8 @@ const agent_ops = @import("agent.zig");
 const chrome = maru.chrome;
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
+const ssh_upload = @import("../ssh_upload.zig"); // RAV5b: 원격 펼침이 구간을 당겨온다
+const wire = maru.session.remote_activity_wire;
 const body_backend = @import("../agent_body_search_backend.zig");
 const image_decode = @import("../image_decode.zig");
 const decode_backend = @import("../agent_image_decode_backend.zig");
@@ -218,6 +220,9 @@ pub const State = struct {
     /// 다른 기계의 것**이 된다. 이 값이 없으면 `refresh` 가 「같은 경로 · 이미 지었음」으로 보고
     /// 물러나 **로컬 목록이 원격 세션 이름표 밑에 그대로 남는다**(CI 가 잡은 결함).
     built_remote: bool = false,
+    /// 펼침 요청의 세대(RAV5b). 다른 것을 열거나 소스가 갈리면 올라가고, **늦게 온 원격 답**은
+    /// 여기서 버려진다 — 안 버리면 남의 명령이 뜬다.
+    detail_generation: u64 = 0,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -621,6 +626,9 @@ pub const Detail = struct {
     /// **안**에만 있어서, 껍데기를 벗기면 함께 사라진다.
     result_exit_code: ?i32 = null,
     has_result: bool = false,
+    /// **원격에서 이 조각을 못 당겨왔다**(RAV5b). 「명령이 비었다」와 다른 사실이다 — 빈 채로 그리면
+    /// 화면이 「에이전트가 빈 명령을 돌렸다」고 거짓말한다(계약 §2.2 의 그 갈림).
+    remote_failed: bool = false,
 
     pub fn deinit(self: *Detail, allocator: std.mem.Allocator) void {
         allocator.free(self.command);
@@ -1826,6 +1834,17 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
     const op = if (self.agent_activity.open) |*o| o else return;
     if (n >= self.agent_activity.hits.items.len) return;
     const hit = self.agent_activity.hits.items[n];
+
+    // **원격이면 저쪽에서 당겨온다**(RAV5b). `pathFor` 는 원격에서 null 이라(§13.6 N1) 여기서
+    // 갈리지 않으면 펼침이 영영 빈다 — 그 가드의 뜻은 「이쪽 파일을 안 연다」이지 「못 보여 준다」가
+    // 아니다.
+    if (self.agent_activity.source_remote) {
+        op.detail.deinit(self.allocator);
+        self.agent_activity.detail_generation +%= 1;
+        beginRemoteDetail(self, n, hit);
+        return;
+    }
+
     const path = pathFor(self, hit) orelse return;
     const file = std.Io.Dir.cwd().openFile(self.io, path, .{
         .mode = .read_only,
@@ -1888,6 +1907,23 @@ fn readDetailPart(
         if (got == 0) break;
         read += got;
     }
+    if (read == 0) return &.{};
+    return decodeDetailPart(self, raw[0..read], is_array, truncated, exit_code);
+}
+
+/// 받은 바이트를 **펼침이 그릴 텍스트**로 푼다 — 이스케이프·배열 잇기·chunk 봉투 벗기기.
+///
+/// 🔥 **로컬과 원격이 이 함수 하나를 지난다**(RAV5b). 읽는 방법만 다르고(positional read vs 원격
+/// 구간 왕복) **푸는 규칙은 같아야 한다** — 두 벌이면 원격 펼침이 로컬과 다른 글자를 보여 주고,
+/// 그것이 이 뷰의 최악 실패다(계약 §2.3).
+fn decodeDetailPart(
+    self: *AppSession,
+    raw: []const u8,
+    is_array: bool,
+    truncated: *bool,
+    exit_code: ?*?i32,
+) []u8 {
+    const read = raw.len;
     if (read == 0) return &.{};
     const out = self.allocator.alloc(u8, read) catch return &.{};
     defer self.allocator.free(out);
@@ -2358,6 +2394,19 @@ fn pathFor(self: *const AppSession, hit: index.Hit) ?[]const u8 {
 /// `pathFor` 의 알맹이 — 체인 자리 번호로 직접 묻는다(썸네일은 `ResultSummary.image_file` 을 쓴다).
 fn pathForIndex(self: *const AppSession, file_index: u8) ?[]const u8 {
     if (self.agent_activity.source_remote) return null;
+    return self.agent_activity.chain.get(file_index);
+}
+
+/// **저쪽** 경로 — 원격 왕복에 실어 보낼 값이다(RAV5b). 로컬이면 null.
+///
+/// 🔥 **`pathForIndex` 와 뚜렷이 가른다.** 둘은 같은 문자열을 주지만 **가는 곳이 반대**다: 저쪽 것은
+/// ssh argv 로 가고 이쪽 것은 `Dir.cwd().openFile` 로 간다. 한 함수로 합치면 「어디로 가는 값인가」를
+/// 호출자가 판단하게 되고, 그 판단이 한 번만 틀려도 **남의 파일이 열린다**(§13.6 N1 이 잡은 그 사고).
+///
+/// §6.3 게이트가 `chain.get` 호출을 **이 둘로만** 못 박는다 — 실제로 이 함수가 없던 동안 그 게이트가
+/// 빨개져서 이 갈림을 만들게 했다.
+fn remotePathForIndex(self: *const AppSession, file_index: u8) ?[]const u8 {
+    if (!self.agent_activity.source_remote) return null;
     return self.agent_activity.chain.get(file_index);
 }
 
@@ -3616,6 +3665,12 @@ pub fn collectOpenDetail(
         draw(self, collected, builder, colors, area, row_h, row, cols, line, fg);
         row += 1;
     }
+    // **원격에서 못 당겨왔으면 그렇게 말한다**(RAV5b). 빈 채로 그리면 화면이 「에이전트가 빈 명령을
+    // 돌렸다」고 거짓말한다 — 계약 §2.2 의 그 갈림이 펼침에도 선다.
+    if (op.detail.remote_failed and row < rows_fit) {
+        draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_remote_unsupported), dim);
+        return;
+    }
     if (op.detail.result_truncated and row < rows_fit) {
         draw(self, collected, builder, colors, area, row_h, row, cols, maru.i18n.t(.agent_activity_detail_truncated), dim);
     }
@@ -3736,4 +3791,209 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
 /// `formatImageTime` 의 test 창구. 순수 함수라 화면 없이 표기를 짚을 수 있다.
 pub fn testFormatImageTime(buf: []u8, at_s: i64, at_off: i64, now_s: i64, now_off: i64) []const u8 {
     return formatImageTime(buf, at_s, at_off, now_s, now_off);
+}
+
+// ── 원격 펼침(RAV5b) ────────────────────────────────────────────────────────────────────────────
+
+/// 원격 펼침 워커의 결말. **소유가 통째로 이동한다** — 드레인이 푼다.
+pub const RemoteDetailOutcome = struct {
+    /// 어느 항목의 것인가. 그 사이 다른 것을 열었으면 드레인이 버린다.
+    hit_index: usize,
+    /// 이 결말을 만든 요청. 소스가 갈리면(`/clear`·pane 이동) 옛 답을 버린다.
+    generation: u64,
+    command: []u8 = &.{},
+    body: []u8 = &.{},
+    /// 못 읽었다 — 「빈 명령」과 다른 사실이다(계약 §2.2).
+    failed: bool = false,
+
+    pub fn deinit(self: RemoteDetailOutcome, allocator: std.mem.Allocator) void {
+        allocator.free(self.command);
+        allocator.free(self.body);
+    }
+};
+
+const RemoteDetailJob = struct {
+    session: *AppSession,
+    ctl: []u8,
+    dest: []u8,
+    path: []u8,
+    hit_index: usize,
+    generation: u64,
+    cmd_offset: u64,
+    body_offset: u64,
+    body_wanted: bool,
+};
+
+/// 원격 펼침을 건다. **tick 을 막지 않는다** — ssh 왕복은 수백 ms 이고 그동안 UI 가 멈추면 그것이 곧
+/// 「maru 가 원격에 붙을 때 뻗는다」다(RF4 가 같은 자리에서 같은 판단을 했다).
+///
+/// 이미 도는 것이 있으면 **안 건다**. 다음 tick 이 다시 온다 — 펼침은 사람이 클릭하는 일이라 한
+/// 왕복이 도는 동안 또 걸 이유가 없다(계획 §6.2 의 슬롯 규율과 같은 결).
+fn beginRemoteDetail(self: *AppSession, n: usize, hit: index.Hit) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.remote_detail_inflight) return;
+
+    const term = pane_ops.activePane(self).activeTerm();
+    const ctx = self.remoteUploadContextFor(term) orelse {
+        // 목적지를 못 얻었다 — 그 사실이 곧 「못 읽었다」다(계약 §2.2 · §13.3 과 같은 갈림).
+        markRemoteDetailFailed(self, n);
+        return;
+    };
+    defer ctx.deinit(self.allocator);
+
+    const path = remotePathForIndex(self, hit.file_index) orelse {
+        markRemoteDetailFailed(self, n);
+        return;
+    };
+
+    const job = self.allocator.create(RemoteDetailJob) catch return;
+    job.* = .{
+        .session = self,
+        .ctl = self.allocator.dupe(u8, ctx.ctl) catch {
+            self.allocator.destroy(job);
+            return;
+        },
+        .dest = undefined,
+        .path = undefined,
+        .hit_index = n,
+        .generation = self.agent_activity.detail_generation,
+        // **명령 전문이 먼저다**(계약 §2.2) — 라벨의 대상은 대개 모델이 쓴 요약이라 그것을 다시
+        // 보여 주면 명령은 영영 안 보인다.
+        .cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset,
+        .body_offset = hit.result.body.offset,
+        .body_wanted = hit.result.found and hit.result.body.offset != 0,
+    };
+    job.dest = self.allocator.dupe(u8, ctx.dest) catch {
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        return;
+    };
+    job.path = self.allocator.dupe(u8, path) catch {
+        self.allocator.free(job.dest);
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        return;
+    };
+
+    self.remote_detail_inflight = true;
+    const thread = std.Thread.spawn(.{}, remoteDetailWorker, .{job}) catch {
+        self.remote_detail_inflight = false;
+        self.allocator.free(job.path);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        markRemoteDetailFailed(self, n);
+        return;
+    };
+    thread.detach();
+}
+
+fn markRemoteDetailFailed(self: *AppSession, n: usize) void {
+    const op = if (self.agent_activity.open) |*o| o else return;
+    if (op.hit_index != n) return;
+    op.detail.remote_failed = true;
+    self.metal_dirty = true;
+}
+
+/// 백그라운드: 두 구간을 당겨 결과 슬롯에 둔다. **`std.Io` 를 안 만진다**(`ssh_upload` 규율).
+///
+/// ⚠️ **로컬 파일시스템도 안 만진다** — 저쪽 오프셋이 이쪽 syscall 로 가는 순간 §2.1 위반이고, 그것이
+/// 이 축에서 가장 조용한 사고다(§13.6 N1).
+fn remoteDetailWorker(job: *RemoteDetailJob) void {
+    const self = job.session;
+    const allocator = self.allocator;
+    defer {
+        allocator.free(job.path);
+        allocator.free(job.dest);
+        allocator.free(job.ctl);
+        allocator.destroy(job);
+    }
+
+    var outcome: RemoteDetailOutcome = .{ .hit_index = job.hit_index, .generation = job.generation };
+    outcome.command = fetchRange(allocator, job, job.cmd_offset) orelse blk: {
+        outcome.failed = true;
+        break :blk &.{};
+    };
+    if (job.body_wanted and !outcome.failed) {
+        outcome.body = fetchRange(allocator, job, job.body_offset) orelse blk: {
+            outcome.failed = true;
+            break :blk &.{};
+        };
+    }
+
+    self.remote_detail_mutex.lockUncancelable(self.io);
+    if (self.remote_detail_outcome) |old| old.deinit(allocator); // 늦게 온 것이 있으면 버린다
+    self.remote_detail_outcome = outcome;
+    self.remote_detail_mutex.unlock(self.io);
+}
+
+/// 그 자리의 구간을 당겨온다. 못 읽으면 null — **빈 구간과 다른 사실이다**.
+fn fetchRange(allocator: std.mem.Allocator, job: *RemoteDetailJob, offset: u64) ?[]u8 {
+    if (offset == 0) return allocator.alloc(u8, 0) catch null;
+    var off_buf: [24]u8 = undefined;
+    var len_buf: [24]u8 = undefined;
+    const off_text = std.fmt.bufPrint(&off_buf, "{d}", .{offset}) catch return null;
+    const len_text = std.fmt.bufPrint(&len_buf, "{d}", .{max_detail_bytes}) catch return null;
+
+    var out: []u8 = &.{};
+    const code = ssh_upload.runRemoteCapped(
+        allocator,
+        job.ctl,
+        job.dest,
+        ssh_upload.activity_read_script,
+        &.{ job.path, off_text, len_text },
+        wire.max_range_wire_bytes,
+        &out,
+    ) catch return null;
+    defer allocator.free(out);
+    if (code != 0) return null;
+
+    var parser = wire.RangeParser.init(out);
+    var got: ?[]const u8 = null;
+    while (parser.next() catch return null) |ev| switch (ev) {
+        .bytes => |b| got = b,
+        .remote_error => return null,
+    };
+    // **꼬리를 못 봤으면 잘린 것이다**(§6.1) — 잘린 바이트를 온전한 척 그리지 않는다.
+    if (!parser.complete()) return null;
+    const bytes = got orelse return null;
+    return allocator.dupe(u8, bytes) catch null;
+}
+
+/// tick 이 워커의 결말을 낸다(드레인). **판정자가 직접 부르는 제품 함수**이기도 하다 — 전송 없이
+/// 「결말 → 푸는 규칙 → 화면 텍스트」 수직을 실물로 태운다(RF4 의 `finishRemoteFileOpen` 과 같은 결).
+pub fn finishRemoteDetail(self: *AppSession, outcome: RemoteDetailOutcome) void {
+    defer outcome.deinit(self.allocator);
+    self.remote_detail_inflight = false;
+
+    const op = if (self.agent_activity.open) |*o| o else return;
+    // **그 사이 다른 것을 열었거나 소스가 갈렸으면 버린다.** 늦게 온 답을 그리면 남의 명령이 뜬다.
+    if (op.hit_index != outcome.hit_index) return;
+    if (outcome.generation != self.agent_activity.detail_generation) return;
+
+    if (outcome.failed) {
+        // **옛 내용을 지운다.** 안 지우면 「못 읽었습니다」라고 말하면서 **직전 항목의 명령**을 같이
+        // 그린다 — 판정자가 그것을 잡았다(늦게 온 답 축을 재다가 드러났다).
+        op.detail.deinit(self.allocator);
+        op.detail.remote_failed = true;
+        self.metal_dirty = true;
+        return;
+    }
+
+    // **로컬과 같은 규칙으로 푼다**(`decodeDetailPart` — 그 함수가 단일 출처다).
+    op.detail.deinit(self.allocator);
+    op.detail.command = decodeDetailPart(self, outcome.command, false, &op.detail.command_truncated, null);
+    if (outcome.body.len > 0) {
+        const hit = self.agent_activity.hits.items[outcome.hit_index];
+        op.detail.has_result = true;
+        op.detail.result = decodeDetailPart(
+            self,
+            outcome.body,
+            hit.result.body.is_array,
+            &op.detail.result_truncated,
+            &op.detail.result_exit_code,
+        );
+    }
+    op.detail.remote_failed = false;
+    self.metal_dirty = true;
 }

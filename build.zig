@@ -3588,6 +3588,35 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
         });
+        // 원격 활동 **수직** 판정자(RAV3~RAV5b) — app_session 전체를 12 분 돌리지 않고 이 축만 잰다.
+        // ⚠️ 이 이름이 필요했던 이유: 전체 `zig build test` 가 이 스위트를 **캐시로 건너뛰어** 새
+        // 판정자가 돌았는지 개수로 확인할 수 없었다(로컬 초록이 덜 말하는 자리다).
+        const remote_activity_vertical_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{ "원격 펼침", "IG-원격" },
+        });
+        remote_activity_vertical_tests.root_module.link_libc = true;
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+            remote_activity_vertical_tests.root_module.linkFramework(fw, .{});
+        }
+        remote_activity_vertical_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_remote_activity_vertical = b.addRunArtifact(remote_activity_vertical_tests);
+        // 이름 있는 둘 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
+        run_remote_activity_vertical.addArg("--maru-expect-tests=5");
+        run_remote_activity_vertical.setCwd(b.path("."));
+        b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
+
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
         run_remote_explorer_tests.addArg("--maru-expect-tests=11"); // 이름 있는 8 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));

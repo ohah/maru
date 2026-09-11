@@ -142,8 +142,8 @@ pub const Fixture = struct {
     }
     fn initWith(allocator: std.mem.Allocator, profile: evidence.Profile) !@This() {
         const evidence_bytes = switch (profile) {
-            .baseline_a => try evidence.assembleBaseline(allocator, common(), defaultLeaf(), quitLeaf()),
-            .upgrade_b => try evidence.assembleUpgrade(allocator, common(), predecessor(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count)),
+            .baseline_a => try evidence.assembleBaseline(allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf()),
+            .upgrade_b => try evidence.assembleUpgrade(allocator, common(), predecessor(), cliLeaf(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count)),
         };
         errdefer allocator.free(evidence_bytes);
         var evidence_sha: [64]u8 = undefined;
@@ -204,6 +204,9 @@ fn defaultLeaf() []const u8 {
 }
 fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"123e4567-e89b-42d3-a456-426614174000\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ host_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+}
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ host_sha ++ "\",\"candidate_cli_sha256\":\"" ++ predecessor_manifest_sha ++ "\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
 }
 fn upgradeLeaf(comptime count: u64) []const u8 {
     return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, predecessor_host_sha, host_sha, requirement_sha, count, predecessor_manifest_sha });

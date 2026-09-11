@@ -158,6 +158,7 @@ jobs:
             session-host-release-validator \
             session-host-release-workflow-bootstrap \
             session-host-release-workflow-candidate-inputs \
+            session-host-release-p5d-candidate \
             session-host-release-workflow-checkpoint \
             session-host-release-workflow-command \
             session-host-release-workflow-authored-selector \

@@ -20,7 +20,7 @@ fn productInputs(cli: *const product.PinnedCli, toolchain: *const product.ZigToo
             .bundles = .{ .dmg_bundle = "/tmp/dmg.bundle.json", .frozen_bundle = "/tmp/host.bundle.json" },
             .cli = .{ .path = "/usr/bin/gh", .pinned = cli },
         },
-        .baseline = .{ .workspace_root = "/tmp/baseline", .app_paths = .{ .main_executable = "/tmp/maru-app", .cli_executable = "/tmp/maru-cli" }, .toolchain = toolchain, .source_directory_fd = 0 },
+        .baseline = .{ .workspace_root = "/tmp/baseline", .app_paths = .{ .main_executable = "/tmp/maru-app", .cli_executable = "/tmp/maru-cli" }, .signed_cli_ssh = "/tmp/signed-cli-ssh.json", .toolchain = toolchain, .source_directory_fd = 0 },
         .manifest = "/tmp/manifest/Maru-1.2.3-session-host-release.json",
         .durable_preparation = "/tmp/durable/stage3",
     };
@@ -308,7 +308,8 @@ const PerfFixture = struct {
         const common: evidence.Common = .{ .test_uuid = uuid, .repository = .{ .id = 1, .owner = "ohah", .name = "maru" }, .release = .{ .id = 2, .tag = "v1.2.3", .version = "1.2.3" }, .source = .{ .commit = commit, .tree = "1111111111111111111111111111111111111111" }, .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 3, .run_attempt = 1 }, .candidate = .{ .dmg_sha256 = dmg_sha, .executable_sha256 = exe_sha } };
         const default_leaf = "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n";
         const quit_leaf = "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
-        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common, default_leaf, quit_leaf);
+        const cli_leaf = "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"candidate_cli_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"designated_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}\n";
+        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common, cli_leaf, default_leaf, quit_leaf);
         defer std.testing.allocator.free(evidence_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence/baseline-evidence.json", .data = evidence_bytes });
         const evidence_path = try perfAbsolute(&self.tmp, "evidence/baseline-evidence.json", &self.evidence_path);

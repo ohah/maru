@@ -35,6 +35,10 @@ fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ sha_a ++ "\",\"candidate_executable_sha256\":\"" ++ sha_b ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
 }
 
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ sha_a ++ "\",\"candidate_executable_sha256\":\"" ++ sha_b ++ "\",\"candidate_cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"}\n";
+}
+
 fn upgradeLeaf(comptime count: u64) []const u8 {
     const runtime_set = if (count == 1) sha_f else sha_c;
     return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, sha_e, sha_b, sha_f, count, runtime_set });
@@ -55,12 +59,15 @@ test "baseline leaves publish one rebound canonical aggregate" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     var published: evidence_files.PublishedEvidence = .{};
     try evidence_files.publishBaselineOwned(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "default.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
@@ -80,8 +87,10 @@ test "upgrade leaves publish exact one and near-max roles" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "one.json", .data = upgradeLeaf(1) });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "near.json", .data = upgradeLeaf(evidence.near_max_runtime_count) });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     var wrong_predecessor = predecessor();
     wrong_predecessor.executable_sha256 = sha_b;
@@ -89,6 +98,7 @@ test "upgrade leaves publish exact one and near-max roles" {
         .common = common(),
         .predecessor = wrong_predecessor,
         .designated_requirement_sha256 = sha_f,
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .one_path = try absolute(&tmp, "one.json", &a),
         .near_max_path = try absolute(&tmp, "near.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
@@ -99,6 +109,7 @@ test "upgrade leaves publish exact one and near-max roles" {
         .common = common(),
         .predecessor = predecessor(),
         .designated_requirement_sha256 = sha_f,
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .one_path = try absolute(&tmp, "one.json", &a),
         .near_max_path = try absolute(&tmp, "near.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),
@@ -120,12 +131,15 @@ test "symlink and hardlink leaf aliases publish nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "leaf.json", .data = defaultLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     try tmp.dir.symLink(std.testing.io, "leaf.json", "linked.json", .{});
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     try std.testing.expectError(error.UnsafePath, evidence_files.publishBaseline(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "linked.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "leaf.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -135,6 +149,7 @@ test "symlink and hardlink leaf aliases publish nothing" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.linkat(tmp.dir.handle, "leaf.json", tmp.dir.handle, "alias.json", 0));
     try std.testing.expectError(error.PathAlias, evidence_files.publishBaseline(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "leaf.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "alias.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -147,11 +162,14 @@ test "malformed and identity-drift leaves publish nothing" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.json", .data = "{}\n" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     try std.testing.expectError(error.InvalidLeaf, evidence_files.publishBaseline(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "bad.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -163,6 +181,7 @@ test "malformed and identity-drift leaves publish nothing" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.json", .data = drift });
     try std.testing.expectError(error.LeafMismatch, evidence_files.publishBaseline(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "bad.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -175,12 +194,15 @@ test "existing output is preserved exactly" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out.json", .data = "existing" });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     try std.testing.expectError(error.DestinationExists, evidence_files.publishBaseline(std.testing.allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "default.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -195,11 +217,14 @@ fn publishAllocation(allocator: std.mem.Allocator) !void {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     evidence_files.publishBaseline(allocator, .{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "default.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "out.json", &out),
@@ -218,11 +243,14 @@ test "owned publication rejects preowned and identity-aliased result before file
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "default.json", .data = defaultLeaf() });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "quit.json", .data = quitLeaf() });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
     var a: [std.fs.max_path_bytes:0]u8 = undefined;
     var b: [std.fs.max_path_bytes:0]u8 = undefined;
+    var c: [std.fs.max_path_bytes:0]u8 = undefined;
     var out: [std.fs.max_path_bytes:0]u8 = undefined;
     const request = evidence_files.BaselineRequest{
         .common = common(),
+        .signed_cli_ssh_path = try absolute(&tmp, "cli.json", &c),
         .default_false_path = try absolute(&tmp, "default.json", &a),
         .signed_app_quit_path = try absolute(&tmp, "quit.json", &b),
         .output_path = try absolute(&tmp, "evidence.json", &out),

@@ -31,6 +31,7 @@ fn inputs(
             .main_executable = "/tmp/candidate/Maru.app/Contents/MacOS/maru-macos-app",
             .cli_executable = "/tmp/candidate/Maru.app/Contents/MacOS/maru",
         },
+        .signed_cli_ssh = "/tmp/signed-cli-ssh.json",
         .toolchain = toolchain,
         .source_directory_fd = 0,
     };

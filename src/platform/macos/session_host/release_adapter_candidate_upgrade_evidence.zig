@@ -17,7 +17,7 @@ const predecessor_assets = @import("release_adapter_github_predecessor_assets");
 
 pub const PublishedEvidence = evidence_files.PublishedEvidence;
 pub const IdentityView = struct { common: evidence.Common, designated_requirement_sha256: []const u8, predecessor: evidence.Predecessor };
-pub const Paths = struct { signed_upgrade_one: [:0]const u8, signed_upgrade_near_max: [:0]const u8, output: [:0]const u8 };
+pub const Paths = struct { signed_cli_ssh: [:0]const u8, signed_upgrade_one: [:0]const u8, signed_upgrade_near_max: [:0]const u8, output: [:0]const u8 };
 
 pub fn publish(allocator: std.mem.Allocator, context: context_mod.Context, candidate: *const candidate_identity.CandidateEvidenceIdentity, files: *const candidate_files.CandidateFiles, product: *const candidate_product.CandidateProduct, candidate_paths: candidate_product.Paths, source: *const source_tree.SourceTreeAuthority, predecessor: *const predecessor_identity.PredecessorEvidenceIdentity, authenticated: *const authenticated_manifest.AuthenticatedManifest, held_manifest: *const manifest_file.ManifestFile, assets: *const predecessor_assets.AuthenticatedPredecessorAssets, paths: Paths, result: *PublishedEvidence) !void {
     const result_bytes = std.mem.asBytes(result);
@@ -35,14 +35,14 @@ pub fn publishWith(allocator: std.mem.Allocator, authority: anytype, paths: Path
 fn publishFromAuthority(allocator: std.mem.Allocator, authority: anytype, paths: Paths, result: *PublishedEvidence) !void {
     if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
     const result_bytes = std.mem.asBytes(result);
-    inline for (.{ std.mem.asBytes(authority), paths.signed_upgrade_one, paths.signed_upgrade_near_max, paths.output }) |value|
+    inline for (.{ std.mem.asBytes(authority), paths.signed_cli_ssh, paths.signed_upgrade_one, paths.signed_upgrade_near_max, paths.output }) |value|
         if (overlaps(result_bytes, value)) return error.InvalidOwner;
     const initial = try authority.revalidate();
     try validateViewAliases(result_bytes, initial);
     var snapshot: Snapshot = .{};
     try snapshot.capture(initial);
     var validator = Validator(@TypeOf(authority)){ .authority = authority, .expected = &snapshot, .result_bytes = result_bytes };
-    try evidence_files.publishUpgradeOwnedValidated(allocator, .{ .common = snapshot.candidate.common(), .predecessor = snapshot.predecessor.value(), .designated_requirement_sha256 = &snapshot.candidate.designated_requirement_sha256, .one_path = paths.signed_upgrade_one, .near_max_path = paths.signed_upgrade_near_max, .output_path = paths.output }, &validator, result);
+    try evidence_files.publishUpgradeOwnedValidated(allocator, .{ .common = snapshot.candidate.common(), .predecessor = snapshot.predecessor.value(), .designated_requirement_sha256 = &snapshot.candidate.designated_requirement_sha256, .signed_cli_ssh_path = paths.signed_cli_ssh, .one_path = paths.signed_upgrade_one, .near_max_path = paths.signed_upgrade_near_max, .output_path = paths.output }, &validator, result);
 }
 
 const Authority = struct {

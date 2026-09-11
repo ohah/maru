@@ -52,6 +52,13 @@ pub const Candidate = struct {
     executable_sha256: []const u8,
 };
 
+pub const AggregateCandidate = struct {
+    dmg_sha256: []const u8,
+    executable_sha256: []const u8,
+    cli_sha256: []const u8,
+    designated_requirement_sha256: []const u8,
+};
+
 pub const Common = struct {
     test_uuid: []const u8,
     repository: Repository,
@@ -142,6 +149,10 @@ pub const BaselineGates = struct {
     signed_app_quit_reattach: SignedAppQuitGate,
 };
 
+pub const CandidateGates = struct {
+    signed_cli_ssh: SignedCliSshGate,
+};
+
 pub const UpgradeGates = struct {
     signed_upgrade_one: SignedUpgradeGate,
     signed_upgrade_near_max: SignedUpgradeGate,
@@ -156,7 +167,8 @@ pub const BaselineRoot = struct {
     release: Release,
     source: Source,
     build: Build,
-    candidate: Candidate,
+    candidate: AggregateCandidate,
+    candidate_gates: CandidateGates,
     gates: BaselineGates,
     result: Result,
 };
@@ -170,7 +182,8 @@ pub const UpgradeRoot = struct {
     release: Release,
     source: Source,
     build: Build,
-    candidate: Candidate,
+    candidate: AggregateCandidate,
+    candidate_gates: CandidateGates,
     predecessor: Predecessor,
     gates: UpgradeGates,
     result: Result,
@@ -246,16 +259,21 @@ const Header = struct {
 pub fn assembleBaseline(
     allocator: std.mem.Allocator,
     common: Common,
+    cli_leaf_bytes: []const u8,
     default_leaf_bytes: []const u8,
     quit_leaf_bytes: []const u8,
 ) Error![]u8 {
     try validateCommon(common);
+    var cli_leaf = try parseLeaf(SignedCliSshGate, allocator, cli_leaf_bytes);
+    defer cli_leaf.deinit();
     var default_leaf = try parseLeaf(DefaultFalseGate, allocator, default_leaf_bytes);
     defer default_leaf.deinit();
     var quit_leaf = try parseLeaf(SignedAppQuitGate, allocator, quit_leaf_bytes);
     defer quit_leaf.deinit();
     try validateDefaultLeaf(default_leaf.value);
     try validateQuitLeaf(quit_leaf.value);
+    try validateSignedCliSshLeaf(cli_leaf.value);
+    try bindCandidateGate(common, cli_leaf.value);
     try bindBaselineLeaves(common, default_leaf.value, quit_leaf.value);
     return writeBaseline(allocator, .{
         .schema = schema,
@@ -266,7 +284,8 @@ pub fn assembleBaseline(
         .release = common.release,
         .source = common.source,
         .build = common.build,
-        .candidate = common.candidate,
+        .candidate = aggregateCandidate(common, cli_leaf.value),
+        .candidate_gates = .{ .signed_cli_ssh = cli_leaf.value },
         .gates = .{
             .default_false_baseline = default_leaf.value,
             .signed_app_quit_reattach = quit_leaf.value,
@@ -279,22 +298,29 @@ pub fn assembleUpgrade(
     allocator: std.mem.Allocator,
     common: Common,
     predecessor: Predecessor,
+    cli_leaf_bytes: []const u8,
     one_leaf_bytes: []const u8,
     near_max_leaf_bytes: []const u8,
 ) Error![]u8 {
     try validateCommon(common);
     try validatePredecessor(predecessor);
+    var cli_leaf = try parseLeaf(SignedCliSshGate, allocator, cli_leaf_bytes);
+    defer cli_leaf.deinit();
     var one = try parseLeaf(SignedUpgradeGate, allocator, one_leaf_bytes);
     defer one.deinit();
     var near_max = try parseLeaf(SignedUpgradeGate, allocator, near_max_leaf_bytes);
     defer near_max.deinit();
     try validateUpgradeLeaf(one.value);
     try validateUpgradeLeaf(near_max.value);
+    try validateSignedCliSshLeaf(cli_leaf.value);
+    try bindCandidateGate(common, cli_leaf.value);
     if (one.value.runtime_count != 1 or near_max.value.runtime_count != near_max_runtime_count)
         return error.InvalidRuntimeCount;
     try bindUpgradeLeaf(common, predecessor, one.value);
     try bindUpgradeLeaf(common, predecessor, near_max.value);
     if (!std.mem.eql(u8, one.value.signer_requirement_sha256, near_max.value.signer_requirement_sha256))
+        return error.LeafMismatch;
+    if (!std.mem.eql(u8, one.value.signer_requirement_sha256, cli_leaf.value.designated_requirement_sha256))
         return error.LeafMismatch;
     return writeUpgrade(allocator, .{
         .schema = schema,
@@ -305,7 +331,8 @@ pub fn assembleUpgrade(
         .release = common.release,
         .source = common.source,
         .build = common.build,
-        .candidate = common.candidate,
+        .candidate = aggregateCandidate(common, cli_leaf.value),
+        .candidate_gates = .{ .signed_cli_ssh = cli_leaf.value },
         .predecessor = predecessor,
         .gates = .{
             .signed_upgrade_one = one.value,
@@ -386,6 +413,7 @@ pub fn bind(value: Value, expected: Expected) Error!void {
             .upgrade_b => |wanted| if (!equalCommon(rootCommon(actual.*), wanted.common) or
                 !equalPredecessor(actual.predecessor, wanted.predecessor) or
                 !lowerHex(wanted.designated_requirement_sha256, 64) or
+                !std.mem.eql(u8, actual.candidate.designated_requirement_sha256, wanted.designated_requirement_sha256) or
                 !std.mem.eql(u8, actual.gates.signed_upgrade_one.signer_requirement_sha256, wanted.designated_requirement_sha256) or
                 !std.mem.eql(u8, actual.gates.signed_upgrade_near_max.signer_requirement_sha256, wanted.designated_requirement_sha256)) return error.BindingMismatch,
             else => return error.BindingMismatch,
@@ -456,6 +484,8 @@ fn validateBaseline(root: BaselineRoot) Error!void {
         return error.InvalidProfile;
     const common = rootCommon(root);
     try validateCommon(common);
+    try validateSignedCliSshLeaf(root.candidate_gates.signed_cli_ssh);
+    try bindAggregateCandidate(root.candidate, common, root.candidate_gates.signed_cli_ssh);
     try validateDefaultLeaf(root.gates.default_false_baseline);
     try validateQuitLeaf(root.gates.signed_app_quit_reattach);
     try bindBaselineLeaves(common, root.gates.default_false_baseline, root.gates.signed_app_quit_reattach);
@@ -468,6 +498,8 @@ fn validateUpgrade(root: UpgradeRoot) Error!void {
     const common = rootCommon(root);
     try validateCommon(common);
     try validatePredecessor(root.predecessor);
+    try validateSignedCliSshLeaf(root.candidate_gates.signed_cli_ssh);
+    try bindAggregateCandidate(root.candidate, common, root.candidate_gates.signed_cli_ssh);
     try validateUpgradeLeaf(root.gates.signed_upgrade_one);
     try validateUpgradeLeaf(root.gates.signed_upgrade_near_max);
     if (root.gates.signed_upgrade_one.runtime_count != 1 or
@@ -480,6 +512,8 @@ fn validateUpgrade(root: UpgradeRoot) Error!void {
         root.gates.signed_upgrade_one.signer_requirement_sha256,
         root.gates.signed_upgrade_near_max.signer_requirement_sha256,
     )) return error.LeafMismatch;
+    if (!std.mem.eql(u8, root.gates.signed_upgrade_one.signer_requirement_sha256, root.candidate.designated_requirement_sha256))
+        return error.LeafMismatch;
 }
 
 pub fn validateCommon(common: Common) Error!void {
@@ -546,6 +580,33 @@ fn validateSignedCliSshLeaf(leaf: SignedCliSshGate) Error!void {
         !lowerHex(leaf.designated_requirement_sha256, 64)) return error.InvalidLeaf;
 }
 
+fn bindCandidateGate(common: Common, leaf: SignedCliSshGate) Error!void {
+    if (!std.mem.eql(u8, common.test_uuid, leaf.test_uuid) or
+        !std.mem.eql(u8, common.candidate.dmg_sha256, leaf.candidate_dmg_sha256) or
+        !std.mem.eql(u8, common.candidate.executable_sha256, leaf.candidate_executable_sha256) or
+        !lowerHex(leaf.candidate_cli_sha256, 64) or
+        !lowerHex(leaf.designated_requirement_sha256, 64))
+        return error.LeafMismatch;
+}
+
+fn bindAggregateCandidate(candidate: AggregateCandidate, common: Common, leaf: SignedCliSshGate) Error!void {
+    try bindCandidateGate(common, leaf);
+    if (!std.mem.eql(u8, candidate.dmg_sha256, common.candidate.dmg_sha256) or
+        !std.mem.eql(u8, candidate.executable_sha256, common.candidate.executable_sha256) or
+        !std.mem.eql(u8, candidate.cli_sha256, leaf.candidate_cli_sha256) or
+        !std.mem.eql(u8, candidate.designated_requirement_sha256, leaf.designated_requirement_sha256))
+        return error.LeafMismatch;
+}
+
+fn aggregateCandidate(common: Common, leaf: SignedCliSshGate) AggregateCandidate {
+    return .{
+        .dmg_sha256 = common.candidate.dmg_sha256,
+        .executable_sha256 = common.candidate.executable_sha256,
+        .cli_sha256 = leaf.candidate_cli_sha256,
+        .designated_requirement_sha256 = leaf.designated_requirement_sha256,
+    };
+}
+
 fn bindBaselineLeaves(common: Common, default_leaf: DefaultFalseGate, quit_leaf: SignedAppQuitGate) Error!void {
     if (!std.mem.eql(u8, common.test_uuid, default_leaf.test_uuid) or
         !std.mem.eql(u8, common.test_uuid, quit_leaf.test_uuid) or
@@ -570,7 +631,10 @@ fn rootCommon(root: anytype) Common {
         .release = root.release,
         .source = root.source,
         .build = root.build,
-        .candidate = root.candidate,
+        .candidate = .{
+            .dmg_sha256 = root.candidate.dmg_sha256,
+            .executable_sha256 = root.candidate.executable_sha256,
+        },
     };
 }
 

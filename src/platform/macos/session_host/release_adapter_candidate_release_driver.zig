@@ -41,6 +41,7 @@ const Paths = struct {
     baseline: StoredPath = .{},
     app_main: StoredPath = .{},
     app_cli: StoredPath = .{},
+    signed_cli_ssh: StoredPath = .{},
     manifest: StoredPath = .{},
     zig: StoredPath = .{},
 };
@@ -134,6 +135,7 @@ pub fn run(
     try paths.baseline.set(command.baseline_workspace);
     try paths.app_main.set(command.app_main_executable);
     try paths.app_cli.set(command.app_cli_executable);
+    try paths.signed_cli_ssh.set(command.signed_cli_ssh);
     try paths.manifest.set(command.manifest);
     try paths.zig.set(command.zig);
     const bootstrap_sha256 = bootstrapDigest(view);
@@ -230,6 +232,7 @@ const ConcreteSteps = struct {
                     .main_executable = execution.paths.app_main.value(),
                     .cli_executable = execution.paths.app_cli.value(),
                 },
+                .signed_cli_ssh = execution.paths.signed_cli_ssh.value(),
                 .toolchain = &execution.toolchain,
                 .source_directory_fd = source.fd,
             },
@@ -347,8 +350,8 @@ fn validateAliases(
         command.tag,                   command.test_uuid,               command.dmg,
         command.frozen_executable,     command.candidate_dmg_bundle,    command.candidate_frozen_bundle,
         command.dmg_work,              command.baseline_workspace,      command.app_main_executable,
-        command.app_cli_executable,    command.manifest,                command.source_root,
-        command.zig,                   command.zig_sha256,
+        command.app_cli_executable,    command.signed_cli_ssh,          command.manifest,
+        command.source_root,           command.zig,                     command.zig_sha256,
     };
     for (values, 0..) |value, index| {
         if (overlaps(result, value) or overlaps(token, value) or overlaps(scratch, value)) return error.InvalidOwner;
@@ -431,6 +434,7 @@ fn bootstrapDigest(view: bootstrap_mod.View) [32]u8 {
             hashSlice(&hash, command.baseline_workspace);
             hashSlice(&hash, command.app_main_executable);
             hashSlice(&hash, command.app_cli_executable);
+            hashSlice(&hash, command.signed_cli_ssh);
             hashSlice(&hash, command.manifest);
             hashSlice(&hash, command.source_root);
             hashSlice(&hash, command.zig);

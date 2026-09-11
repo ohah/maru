@@ -13,6 +13,7 @@ const source_tree = @import("release_adapter_github_source_tree");
 pub const PublishedEvidence = evidence_files.PublishedEvidence;
 pub const IdentityView = candidate_identity.View;
 pub const Paths = struct {
+    signed_cli_ssh: [:0]const u8,
     default_false: [:0]const u8,
     signed_app_quit: [:0]const u8,
     output: [:0]const u8,
@@ -57,6 +58,7 @@ fn publishFromAuthority(allocator: std.mem.Allocator, authority: anytype, paths:
     };
     try evidence_files.publishBaselineOwnedValidated(allocator, .{
         .common = snapshot.common(),
+        .signed_cli_ssh_path = paths.signed_cli_ssh,
         .default_false_path = paths.default_false,
         .signed_app_quit_path = paths.signed_app_quit,
         .output_path = paths.output,
@@ -176,6 +178,7 @@ fn validateInputs(authority: anytype, paths: Paths, result: *const PublishedEvid
     if (result.owner != null or result.fd >= 0 or result.parent_fd >= 0) return error.InvalidOwner;
     const result_bytes = std.mem.asBytes(result);
     if (overlaps(result_bytes, std.mem.asBytes(authority)) or
+        overlaps(result_bytes, paths.signed_cli_ssh) or
         overlaps(result_bytes, paths.default_false) or
         overlaps(result_bytes, paths.signed_app_quit) or
         overlaps(result_bytes, paths.output))

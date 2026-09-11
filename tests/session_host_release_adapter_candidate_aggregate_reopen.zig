@@ -47,6 +47,12 @@ fn sha256Hex(bytes: []const u8) [64]u8 {
 const evidence_uuid = "123e4567-e89b-42d3-a456-426614174000";
 const evidence_dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const evidence_exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const evidence_cli_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const evidence_requirement_sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ evidence_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ evidence_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ evidence_exe_sha ++ "\",\"candidate_cli_sha256\":\"" ++ evidence_cli_sha ++ "\",\"designated_requirement_sha256\":\"" ++ evidence_requirement_sha ++ "\"}\n";
+}
 
 fn evidenceCommon() evidence.Common {
     return .{
@@ -62,7 +68,7 @@ fn evidenceCommon() evidence.Common {
 fn baselineEvidence() ![]u8 {
     const default_leaf = "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"" ++ evidence_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ evidence_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ evidence_exe_sha ++ "\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n";
     const quit_leaf = "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ evidence_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ evidence_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ evidence_exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
-    return evidence.assembleBaseline(std.testing.allocator, evidenceCommon(), default_leaf, quit_leaf);
+    return evidence.assembleBaseline(std.testing.allocator, evidenceCommon(), cliLeaf(), default_leaf, quit_leaf);
 }
 
 fn upgradeLeaf(comptime count: u64) []const u8 {
@@ -78,7 +84,7 @@ fn upgradeEvidence() ![]u8 {
         .dmg_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         .executable_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     };
-    return evidence.assembleUpgrade(std.testing.allocator, evidenceCommon(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
+    return evidence.assembleUpgrade(std.testing.allocator, evidenceCommon(), predecessor, cliLeaf(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
 }
 
 fn canonicalManifest(dmg_name: []const u8, evidence_bytes: []const u8, profile: evidence.Profile) ![]u8 {

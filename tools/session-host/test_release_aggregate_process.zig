@@ -12,6 +12,7 @@ const source_sha = "0123456789abcdef0123456789abcdef01234567";
 const test_uuid = "123e4567-e89b-42d3-a456-426614174000";
 const candidate_dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const candidate_exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const signed_cli_leaf = "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ candidate_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"candidate_cli_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"designated_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}\n";
 const Profile = enum { baseline_a, upgrade_b };
 
 fn baselineEvidence(allocator: std.mem.Allocator) ![]u8 {
@@ -25,7 +26,7 @@ fn baselineEvidence(allocator: std.mem.Allocator) ![]u8 {
     };
     const default_leaf = "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ candidate_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n";
     const quit_leaf = "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ candidate_dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
-    return evidence_mod.assembleBaseline(allocator, common, default_leaf, quit_leaf);
+    return evidence_mod.assembleBaseline(allocator, common, signed_cli_leaf, default_leaf, quit_leaf);
 }
 
 fn upgradeEvidence(allocator: std.mem.Allocator) ![]u8 {
@@ -40,7 +41,7 @@ fn upgradeEvidence(allocator: std.mem.Allocator) ![]u8 {
     const predecessor: evidence_mod.Predecessor = .{ .release_id = 455, .tag = "v1.2.2", .commit = "2222222222222222222222222222222222222222", .manifest_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .dmg_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", .executable_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" };
     const one = "{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"signer_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"runtime_count\":1,\"runtime_set_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}\n";
     const near = "{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"" ++ test_uuid ++ "\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"candidate_executable_sha256\":\"" ++ candidate_exe_sha ++ "\",\"signer_requirement_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"runtime_count\":255,\"runtime_set_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}\n";
-    return evidence_mod.assembleUpgrade(allocator, common, predecessor, one, near);
+    return evidence_mod.assembleUpgrade(allocator, common, predecessor, signed_cli_leaf, one, near);
 }
 
 const Times = report_mod.Times;

@@ -10,12 +10,12 @@ const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const commit = "0123456789abcdef0123456789abcdef01234567";
 
 const args = [_][]const u8{
-    "prepare-candidate",                         "--repo",                 "ohah/maru",             "--tag",                                "v1.2.3",               "--github-cli",       "/usr/bin/gh",
-    "--github-cli-sha256",                       sha,                      "--test-uuid",           "123e4567-e89b-42d3-a456-426614174000", "--dmg",                "/tmp/candidate.dmg", "--frozen-executable",
-    "/tmp/frozen",                               "--candidate-dmg-bundle", "/tmp/dmg.bundle",       "--candidate-frozen-bundle",            "/tmp/frozen.bundle",   "--dmg-work",         "/tmp/dmg-work",
-    "--baseline-workspace",                      "/tmp/baseline",          "--app-main-executable", "/tmp/app-main",                        "--app-cli-executable", "/tmp/app-cli",       "--manifest",
-    "/tmp/Maru-1.2.3-session-host-release.json", "--source-root",          "/tmp/source",           "--zig",                                "/tmp/zig",             "--zig-size",         "123",
-    "--zig-sha256",                              sha,                      "--durable-preparation", "/tmp/durable-stage3",
+    "prepare-candidate",            "--repo",                 "ohah/maru",                                 "--tag",                                "v1.2.3",                "--github-cli",        "/usr/bin/gh",
+    "--github-cli-sha256",          sha,                      "--test-uuid",                               "123e4567-e89b-42d3-a456-426614174000", "--dmg",                 "/tmp/candidate.dmg",  "--frozen-executable",
+    "/tmp/frozen",                  "--candidate-dmg-bundle", "/tmp/dmg.bundle",                           "--candidate-frozen-bundle",            "/tmp/frozen.bundle",    "--dmg-work",          "/tmp/dmg-work",
+    "--baseline-workspace",         "/tmp/baseline",          "--app-main-executable",                     "/tmp/app-main",                        "--app-cli-executable",  "/tmp/app-cli",        "--signed-cli-ssh",
+    "/tmp/p5d/signed-cli-ssh.json", "--manifest",             "/tmp/Maru-1.2.3-session-host-release.json", "--source-root",                        "/tmp/source",           "--zig",               "/tmp/zig",
+    "--zig-size",                   "123",                    "--zig-sha256",                              sha,                                    "--durable-preparation", "/tmp/durable-stage3",
 };
 
 test "contract accepts exact stage3 command and exports the real argv bound" {

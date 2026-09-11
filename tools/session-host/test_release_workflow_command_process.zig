@@ -291,7 +291,7 @@ fn runWrapperExpectFailure(io: std.Io, allocator: std.mem.Allocator, wrapper: []
 }
 
 fn invokeWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !std.process.RunResult {
-    var argv: [1 + 3 + 39][]const u8 = undefined;
+    var argv: [1 + 3 + 41][]const u8 = undefined;
     argv[0] = wrapper;
     argv[1] = "run";
     argv[2] = root;
@@ -301,7 +301,7 @@ fn invokeWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, 
 }
 
 fn runProfiledWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !u64 {
-    var argv: [1 + 3 + 44][]const u8 = undefined;
+    var argv: [1 + 3 + 46][]const u8 = undefined;
     argv[0] = wrapper;
     argv[1] = "run-profiled-stage3";
     argv[2] = root;
@@ -321,7 +321,7 @@ fn runProfiledWrapper(io: std.Io, allocator: std.mem.Allocator, wrapper: []const
 }
 
 fn runProfiledWrapperExpectFailure(io: std.Io, allocator: std.mem.Allocator, wrapper: []const u8, root: []const u8, token: []const u8, args: []const []const u8, environment: *const std.process.Environ.Map) !void {
-    var argv: [1 + 3 + 44][]const u8 = undefined;
+    var argv: [1 + 3 + 46][]const u8 = undefined;
     argv[0] = wrapper;
     argv[1] = "run-profiled-stage3";
     argv[2] = root;
@@ -362,6 +362,7 @@ const Workspace = struct {
     predecessor_workspace: []u8,
     upgrade_workspace: []u8,
     timing_output: []u8,
+    signed_cli_ssh: []u8,
     validator_sha: [64]u8,
     token_storage: [checkpoint.max_root_identity_token_bytes:0]u8 = @splat(0),
     token_len: usize = 0,
@@ -432,6 +433,8 @@ const Workspace = struct {
         errdefer allocator.free(upgrade_workspace);
         const timing_output = try std.fmt.allocPrint(allocator, "{s}/work/profile-timing.json", .{root});
         errdefer allocator.free(timing_output);
+        const signed_cli_ssh = try std.fmt.allocPrint(allocator, "{s}/work/signed-cli-ssh.json", .{root});
+        errdefer allocator.free(signed_cli_ssh);
         return .{
             .allocator = allocator,
             .root = root,
@@ -457,12 +460,14 @@ const Workspace = struct {
             .predecessor_workspace = predecessor_workspace,
             .upgrade_workspace = upgrade_workspace,
             .timing_output = timing_output,
+            .signed_cli_ssh = signed_cli_ssh,
             .validator_sha = std.fmt.bytesToHex(digest, .lower),
         };
     }
 
     fn deinit(self: *Workspace, io: std.Io) void {
         if (!self.removed) std.Io.Dir.cwd().deleteTree(io, self.root) catch {};
+        self.allocator.free(self.signed_cli_ssh);
         self.allocator.free(self.timing_output);
         self.allocator.free(self.upgrade_workspace);
         self.allocator.free(self.predecessor_workspace);
@@ -510,6 +515,10 @@ const Workspace = struct {
 
     fn manifestPath(self: *Workspace) []const u8 {
         return self.manifest;
+    }
+
+    fn signedCliSshPath(self: *Workspace) []const u8 {
+        return self.signed_cli_ssh;
     }
 
     fn bootstrap(self: *Workspace, io: std.Io, allocator: std.mem.Allocator) ![:0]const u8 {
@@ -599,27 +608,27 @@ const Workspace = struct {
         try std.testing.expectEqualStrings(expected, bytes[0..separator]);
     }
 
-    fn prepareArgs(self: *Workspace) [39][]const u8 {
+    fn prepareArgs(self: *Workspace) [41][]const u8 {
         return .{
-            "prepare-candidate",          "--repo",                               "ohah/maru",              "--tag",                "v1.2.3",                "--github-cli",         self.validator,           "--github-cli-sha256",     &self.validator_sha,
-            "--test-uuid",                "123e4567-e89b-42d3-a456-426614174000", "--dmg",                  self.dmg,               "--frozen-executable",   self.frozen_executable, "--dmg-work",             self.dmg_work,             "--baseline-workspace",
-            self.baseline_workspace,      "--app-main-executable",                self.app_main_executable, "--app-cli-executable", self.app_cli_executable, "--manifest",           self.manifestPath(),      "--source-root",           self.source_root,
-            "--zig",                      self.zig_path,                          "--zig-size",             "1",                    "--zig-sha256",          &self.validator_sha,    "--candidate-dmg-bundle", self.candidate_dmg_bundle, "--candidate-frozen-bundle",
-            self.candidate_frozen_bundle, "--durable-preparation",                self.preparationPath(),
+            "prepare-candidate",          "--repo",                               "ohah/maru",              "--tag",                 "v1.2.3",                "--github-cli",         self.validator,           "--github-cli-sha256",     &self.validator_sha,
+            "--test-uuid",                "123e4567-e89b-42d3-a456-426614174000", "--dmg",                  self.dmg,                "--frozen-executable",   self.frozen_executable, "--dmg-work",             self.dmg_work,             "--baseline-workspace",
+            self.baseline_workspace,      "--app-main-executable",                self.app_main_executable, "--app-cli-executable",  self.app_cli_executable, "--manifest",           self.manifestPath(),      "--source-root",           self.source_root,
+            "--zig",                      self.zig_path,                          "--zig-size",             "1",                     "--zig-sha256",          &self.validator_sha,    "--candidate-dmg-bundle", self.candidate_dmg_bundle, "--candidate-frozen-bundle",
+            self.candidate_frozen_bundle, "--signed-cli-ssh",                     self.signedCliSshPath(),  "--durable-preparation", self.preparationPath(),
         };
     }
 
-    fn profilePrepareArgs(self: *Workspace) [39][]const u8 {
+    fn profilePrepareArgs(self: *Workspace) [41][]const u8 {
         return .{
             "prepare-profile-candidate",  "--repo",                               "ohah/maru",        "--tag",             "v1.2.3",                  "--github-cli",             self.validator,           "--github-cli-sha256",     &self.validator_sha,
             "--test-uuid",                "123e4567-e89b-42d3-a456-426614174000", "--dmg",            self.dmg,            "--frozen-executable",     self.frozen_executable,     "--candidate-dmg-bundle", self.candidate_dmg_bundle, "--candidate-frozen-bundle",
             self.candidate_frozen_bundle, "--dmg-work",                           self.dmg_work,      "--manifest",        self.manifestPath(),       "--source-root",            self.source_root,         "--zig",                   self.zig_path,
             "--zig-size",                 "1",                                    "--zig-sha256",     &self.validator_sha, "--predecessor-workspace", self.predecessor_workspace, "--upgrade-workspace",    self.upgrade_workspace,    "--durable-preparation",
-            self.preparationPath(),       "--timing-output",                      self.timing_output,
+            self.preparationPath(),       "--timing-output",                      self.timing_output, "--signed-cli-ssh",  self.signedCliSshPath(),
         };
     }
 
-    fn profiledArgs(self: *Workspace) [44][]const u8 {
+    fn profiledArgs(self: *Workspace) [46][]const u8 {
         return .{
             "--repo",                "ohah/maru",             "--tag",                   "v1.2.3",                               "--github-cli",              self.validator,
             "--github-cli-sha256",   &self.validator_sha,     "--test-uuid",             "123e4567-e89b-42d3-a456-426614174000", "--dmg",                     self.dmg,
@@ -628,7 +637,7 @@ const Workspace = struct {
             "--app-cli-executable",  self.app_cli_executable, "--manifest",              self.manifestPath(),                    "--source-root",             self.source_root,
             "--zig",                 self.zig_path,           "--zig-size",              "1",                                    "--zig-sha256",              &self.validator_sha,
             "--durable-preparation", self.preparationPath(),  "--predecessor-workspace", self.predecessor_workspace,             "--upgrade-workspace",       self.upgrade_workspace,
-            "--timing-output",       self.timing_output,
+            "--timing-output",       self.timing_output,      "--signed-cli-ssh",        self.signedCliSshPath(),
         };
     }
 

@@ -32,6 +32,7 @@ pub const Inputs = struct {
     source: *const source_tree.SourceTreeAuthority,
     app: *const app_mod.CandidateApp,
     app_paths: app_mod.Paths,
+    signed_cli_ssh: [:0]const u8,
     workspace: *workspace_mod.Workspace,
     toolchain: *const zig_toolchain.ZigToolchainAuthority,
     source_directory_fd: c.fd_t,
@@ -219,6 +220,7 @@ const ConcreteSteps = struct {
         const value = try self.inputs();
         const paths = try value.workspace.value();
         try evidence_mod.publish(self.execution.allocator, value.context, value.identity, value.files, value.product, value.product_paths, value.source, .{
+            .signed_cli_ssh = value.signed_cli_ssh,
             .default_false = paths.default_false_leaf,
             .signed_app_quit = paths.signed_app_quit_leaf,
             .output = paths.evidence,
@@ -379,7 +381,7 @@ fn aliasesExecution(execution: *Execution, inputs: Inputs) bool {
         std.mem.asBytes(inputs.toolchain), inputs.context.repository.owner,        inputs.context.repository.name,
         inputs.context.tag,                inputs.context.source_commit,           inputs.context.build.workflow_ref,
         inputs.product_paths.dmg,          inputs.product_paths.frozen_executable, inputs.product_paths.dmg_work,
-        inputs.app_paths.main_executable,  inputs.app_paths.cli_executable,
+        inputs.app_paths.main_executable,  inputs.app_paths.cli_executable,        inputs.signed_cli_ssh,
     };
     for (values) |value| if (overlaps(bytes, value)) return true;
     return false;

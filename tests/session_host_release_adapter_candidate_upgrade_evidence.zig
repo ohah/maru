@@ -21,6 +21,9 @@ fn predecessor() evidence.Predecessor {
 fn leaf(comptime count: u64) []const u8 {
     return std.fmt.comptimePrint("{{\"schema\":\"maru.session-host-signed-upgrade-e2e.v2\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"predecessor_executable_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"signer_requirement_sha256\":\"{s}\",\"runtime_count\":{d},\"runtime_set_sha256\":\"{s}\",\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"gui_exact_reattach\":true,\"runtime_reaped_after_exit\":true,\"runtime_inventory_absent_observations\":2,\"status_committed\":true,\"status_reason\":\"none\",\"upgrade_capability_preserved\":true,\"epoch_before\":3,\"epoch_after\":4}}\n", .{ uuid, sha_e, sha_b, sha_f, count, if (count == 1) sha_f else sha_c });
 }
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ sha_a ++ "\",\"candidate_executable_sha256\":\"" ++ sha_b ++ "\",\"candidate_cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"}\n";
+}
 
 const Authority = struct {
     owner: ?*@This() = null,
@@ -45,13 +48,16 @@ const Authority = struct {
 };
 const Fixture = struct {
     tmp: std.testing.TmpDir,
+    cli: [std.fs.max_path_bytes:0]u8 = @splat(0),
     one: [std.fs.max_path_bytes:0]u8 = @splat(0),
     many: [std.fs.max_path_bytes:0]u8 = @splat(0),
     output: [std.fs.max_path_bytes:0]u8 = @splat(0),
     fn init(self: *@This()) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cli.json", .data = cliLeaf() });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "one.json", .data = leaf(1) });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "many.json", .data = leaf(evidence.near_max_runtime_count) });
+        _ = try absolute(&self.tmp, "cli.json", &self.cli);
         _ = try absolute(&self.tmp, "one.json", &self.one);
         _ = try absolute(&self.tmp, "many.json", &self.many);
         _ = try absolute(&self.tmp, "evidence.json", &self.output);
@@ -60,7 +66,7 @@ const Fixture = struct {
         self.tmp.cleanup();
     }
     fn paths(self: *@This()) upgrade.Paths {
-        return .{ .signed_upgrade_one = std.mem.sliceTo(&self.one, 0), .signed_upgrade_near_max = std.mem.sliceTo(&self.many, 0), .output = std.mem.sliceTo(&self.output, 0) };
+        return .{ .signed_cli_ssh = std.mem.sliceTo(&self.cli, 0), .signed_upgrade_one = std.mem.sliceTo(&self.one, 0), .signed_upgrade_near_max = std.mem.sliceTo(&self.many, 0), .output = std.mem.sliceTo(&self.output, 0) };
     }
 };
 fn absolute(tmp: *std.testing.TmpDir, leaf_name: []const u8, out: []u8) ![:0]const u8 {

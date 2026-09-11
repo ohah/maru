@@ -11,6 +11,7 @@ const predecessor_manifest_sha = "cccccccccccccccccccccccccccccccccccccccccccccc
 const predecessor_dmg_sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const predecessor_exe_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const requirement_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const foreign_requirement_sha = "9999999999999999999999999999999999999999999999999999999999999999";
 
 fn common() evidence.Common {
     return .{ .test_uuid = uuid, .repository = .{ .id = 123, .owner = "ohah", .name = "maru" }, .release = .{ .id = 456, .tag = "v1.2.3", .version = "1.2.3" }, .source = .{ .commit = "1111111111111111111111111111111111111111", .tree = "2222222222222222222222222222222222222222" }, .build = .{ .workflow_ref = "ohah/maru/.github/workflows/release.yml@refs/tags/v1.2.3", .run_id = 789, .run_attempt = 2 }, .candidate = .{ .dmg_sha256 = dmg_sha, .executable_sha256 = exe_sha } };
@@ -20,6 +21,12 @@ fn defaultLeaf() []const u8 {
 }
 fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+}
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"candidate_cli_sha256\":\"" ++ predecessor_manifest_sha ++ "\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
+}
+fn cliLeafFor(allocator: std.mem.Allocator, requirement: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"candidate_cli_sha256\":\"{s}\",\"designated_requirement_sha256\":\"{s}\"}}\n", .{ uuid, dmg_sha, exe_sha, predecessor_manifest_sha, requirement });
 }
 fn predecessor() evidence.Predecessor {
     return .{ .release_id = 400, .tag = "v1.2.2", .commit = "3333333333333333333333333333333333333333", .manifest_sha256 = predecessor_manifest_sha, .dmg_sha256 = predecessor_dmg_sha, .executable_sha256 = predecessor_exe_sha };
@@ -63,9 +70,9 @@ const Fixture = struct {
     fn init(self: *@This(), role_b: bool) !void {
         self.* = .{ .tmp = std.testing.tmpDir(.{}) };
         const bytes = if (role_b)
-            try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count))
+            try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor(), cliLeaf(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count))
         else
-            try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+            try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
         defer std.testing.allocator.free(bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence.json", .data = bytes });
         var root: [std.fs.max_path_bytes]u8 = undefined;
@@ -120,6 +127,24 @@ test "role B is inferred from held evidence and binds predecessor" {
     defer parsed.deinit();
     try std.testing.expectEqual(manifest.Role.b, parsed.value().role);
     try std.testing.expectEqual(predecessor().release_id, parsed.value().predecessor.?.release_id);
+}
+
+test "internally consistent foreign CLI signer evidence cannot author baseline manifest" {
+    var f: Fixture = undefined;
+    try f.init(false);
+    defer f.deinit();
+    const leaf = try cliLeafFor(std.testing.allocator, foreign_requirement_sha);
+    defer std.testing.allocator.free(leaf);
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), leaf, defaultLeaf(), quitLeaf());
+    defer std.testing.allocator.free(bytes);
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence.json", .data = bytes });
+    var held: files.PinnedReleaseFile = .{};
+    try files.pinReleaseFileObserved(&held, f.paths().evidence, false, evidence.max_evidence_bytes);
+    defer held.deinit() catch {};
+    var authority: Authority = .{};
+    var result: files.PinnedReleaseFile = .{};
+    try std.testing.expectError(error.BindingMismatch, candidate_manifest.authorWith(std.testing.allocator, &authority, &held, f.paths(), &result));
+    try std.testing.expect(result.value() == null);
 }
 
 test "authority drift publishes nothing" {

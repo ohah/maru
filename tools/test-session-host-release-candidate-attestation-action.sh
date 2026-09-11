@@ -47,16 +47,30 @@ done
 for input in checkpoint-root checkpoint-root-identity; do
     test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
 done
+for input in test-uuid preflight-dmg-work p5d-dmg-work p5d-workspace signed-cli-ssh; do
+    test "$(grep -Fxc "  $input:" "$live_action")" -eq 1
+done
 test "$(grep -Fxc "    uses: $payload_action" "$live_action")" -eq 1
 test "$(grep -Fc 'uses: actions/attest@' "$live_action")" -eq 0
 test "$(grep -Fc '/zig-out/bin/maru-session-host-release-workflow-checkpoint' "$live_action")" -eq 2
 admit_line=$(grep -nF 'name: Admit candidate attestation checkpoint' "$live_action" | cut -d: -f1)
 live_payload_line=$(grep -nF 'name: Attest candidate pair payload' "$live_action" | cut -d: -f1)
+p5d_line=$(grep -nF 'name: Run final-DMG P5d candidate payload' "$live_action" | cut -d: -f1)
 commit_line=$(grep -nF 'name: Commit candidate attestation checkpoint' "$live_action" | cut -d: -f1)
 test "$admit_line" -lt "$live_payload_line"
-test "$live_payload_line" -lt "$commit_line"
-test "$(grep -Fxc '    continue-on-error: true' "$live_action")" -eq 1
+test "$live_payload_line" -lt "$p5d_line"
+test "$p5d_line" -lt "$commit_line"
+test "$(grep -Fxc '    continue-on-error: true' "$live_action")" -eq 2
+test "$(grep -Fxc "    if: steps.payload.outcome == 'success'" "$live_action")" -eq 1
 test "$(grep -Fxc '    if: always()' "$live_action")" -eq 1
+test "$(grep -Fxc '      MARU_P5D_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-p5d-candidate' "$live_action")" -eq 1
+test "$(grep -Fxc '      MARU_P5D_HARNESS: ${{ github.workspace }}/tools/session-host/p5d_ssh_smoke.sh' "$live_action")" -eq 1
+test "$(grep -Fxc '      MARU_ATTACH_PRODUCT_TEST: ${{ github.workspace }}/zig-out/bin/maru-session-host-p5d-attach-product-test' "$live_action")" -eq 1
+test "$(grep -Fxc '      MARU_UPLOAD_PRODUCT_TEST: ${{ github.workspace }}/zig-out/bin/maru-session-host-p5d-upload-product-test' "$live_action")" -eq 1
+test "$(sed -n '/name: Run final-DMG P5d candidate payload/,/name: Commit candidate attestation checkpoint/p' "$live_action" | grep -Ec 'GH_TOKEN|APPLE_ID|APPLE_TEAM_ID|APPLE_APP_SPECIFIC_PASSWORD')" -eq 0
+for option in test-uuid dmg frozen-executable preflight-dmg-work p5d-dmg-work p5d-workspace harness attach-product-test upload-product-test output; do
+    test "$(sed -n '/name: Run final-DMG P5d candidate payload/,/name: Commit candidate attestation checkpoint/p' "$live_action" | grep -Fc -- "--$option ")" -eq 1
+done
 bundle_guard_line=$(grep -nF '[[ -n "$MARU_DMG_BUNDLE"' "$live_action" | cut -d: -f1)
 success_commit_line=$(grep -nF 'candidate_attestation succeeded' "$live_action" | cut -d: -f1)
 output_line=$(grep -nF "printf 'dmg-bundle-path=" "$live_action" | cut -d: -f1)
@@ -66,6 +80,7 @@ test "$(grep -Fxc '          "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROO
 test "$(grep -Fxc '        *) exit 1 ;;' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.dmg-bundle-path }}' "$live_action")" -eq 1
 test "$(grep -Fxc '    value: ${{ steps.commit.outputs.frozen-bundle-path }}' "$live_action")" -eq 1
+test "$(grep -Fxc '    value: ${{ steps.commit.outputs.signed-cli-ssh-path }}' "$live_action")" -eq 1
 
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/maru-candidate-attest-action.XXXXXX")
 fixture_root=$(cd "$fixture_root" && pwd -P)

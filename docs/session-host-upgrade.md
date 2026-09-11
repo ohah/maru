@@ -1913,9 +1913,36 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   **P5d-R2a** outer-owned absent workspace·bounded child/process-group·post-exit cleanup authority와 하니스 workspace 주입
   (**구현**) →
   **P5d-R2b** mounted/private-extracted candidate CLI final-address authority·실제 P5d 하니스 실행·candidate 재검증과
-  leaf publication(**구현**) → **P5d-R3** A/B 공통
-  `candidate_gates` aggregate·attestation·live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
+  leaf publication(**구현**) → **P5d-R3a** A/B canonical aggregate의 공통
+  `candidate_gates.signed_cli_ssh`와 candidate CLI/requirement 결속 → **P5d-R3b** profile authoring·aggregate attestation의
+  P5d product leaf 소비 → **P5d-R3c** live workflow 배선 → **P5d-R4** protected tag의 actual pass artifact다. R1~R3의
   synthetic/product gate는 R4를 대신하지 않으며, R4 전에는 P5d phase 완료라고 쓰지 않는다.
+
+  P5d-R3c는 여덟 checkpoint stage를 아홉 개로 늘리지 않는다. 기존 `candidate_attestation` stage의 payload가 candidate
+  DMG/frozen GitHub attestation과 final-DMG P5d product를 각각 실행하고, commit owner는 두 payload outcome과 두 attestation
+  bundle pathname 및 canonical signed CLI leaf pathname을 모두 받은 경우에만 `candidate_attestation=succeeded`를 기록한다.
+  P5d executable은 token-free fresh process이며 protected context, 같은 `test_uuid`, candidate DMG/frozen pathname, 서로 겹치지
+  않는 private mount/workspace, 고정 P5d harness와 두 제품 test executable, absent leaf output만 받는다. 먼저 no-follow로 고정한
+  DMG/frozen pair에서 DMG digest·크기와 frozen digest를 얻고 read-only preflight product observation으로 version·main digest·Apple
+  designated requirement를 유도한다. 이어 같은 held pair를 재검증한 뒤 P5d-R2b product가 별도 read-only mount와 private extracted
+  CLI final address에서 실제 하니스를 실행한다. preflight 값은 성공 권위가 아니라 R2b의 expected input이며, R2b 뒤 manifest
+  authoring이 같은 candidate product를 다시 관측하고 aggregate/manifest binding이 exact requirement를 교차 검증한다.
+
+```mermaid
+flowchart TD
+    A["candidate_attestation admit"] --> B["candidate DMG/frozen attest"]
+    B --> C["P5d fresh product process"]
+    C --> D["final DMG read-only mount"]
+    D --> E["private extracted CLI + localhost SSH harness"]
+    E --> F["candidate and cleanup revalidation"]
+    F --> G["signed CLI leaf exclusive publish"]
+    G --> H["candidate_attestation commit"]
+    H --> I["profile-selected stage 3 consumes exact leaf"]
+```
+
+  attestation 또는 P5d 중 하나라도 실패하거나 leaf가 비어 있거나 제어 문자를 포함하거나 expected fixed output pathname과 다르면
+  commit은 `failed`이고 stage 3은 실행되지 않는다. top-level live action은 leaf를 새 `--signed-cli-ssh` exact option으로 baseline-A와
+  upgrade-B projection 모두에 전달한다. GitHub Release/tag 생성과 protected actual pass 판정은 계속 마지막 P5d-R4만 소유한다.
   R1 writer는 staging 포맷을 canonical하게 만드는 도구일 뿐 실행 성공 권위가 아니다. R2a와 R2b를 모두 통과해야
   R2 완료다. R2a는 기존 ad-hoc gate의 자체 `mktemp` fallback을 보존하되 release mode에서는 caller가 준 exact absolute
   workspace만 사용하게 하고, 시작 시 absent·생성 직후 owner/mode/identity를 검증한다. release mode 자식의
@@ -4387,7 +4414,9 @@ push job에서만 열린다.
 workflow는 signed universal build 뒤 다음 ReleaseFast 제품 executable을 explicit build step 하나에서 고정
 `zig-out/bin`에 설치한다: `maru-session-host-release-validator`, `maru-session-host-release-workflow-bootstrap`,
 `maru-session-host-release-workflow-candidate-inputs`, `maru-session-host-release-workflow-checkpoint`,
-`maru-session-host-release-workflow-command`. composite action은 다른 executable pathname, `zig build` 또는 source-file 실행을
+`maru-session-host-release-workflow-command`, `maru-session-host-release-p5d-candidate`와 그 실행기만 소비하는
+`maru-session-host-p5d-attach-product-test`, `maru-session-host-p5d-upload-product-test`. composite action은 다른 executable pathname,
+`zig build` 또는 source-file 실행을
 선택하지 않는다. candidate directory와 그 세 product pathname은 `GITHUB_WORKSPACE`, protected tag와
 `dist/session-host-candidate-<version>` fixed layout에서 유도한다. checkpoint root와 live work root는 `RUNNER_TEMP` 직계 자식의
 서로 다른 absent pathname을 action이 배타 `0700`으로 만들고, bootstrap이 반환한 exact one-line `maru-root-v1` token만 이후

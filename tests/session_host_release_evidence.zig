@@ -65,6 +65,10 @@ fn quitLeaf() []const u8 {
     return json ++ "\n";
 }
 
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ sha_a ++ "\",\"candidate_executable_sha256\":\"" ++ sha_b ++ "\",\"candidate_cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"}\n";
+}
+
 fn upgradeLeaf(comptime count: u64) []const u8 {
     const runtime_set = if (count == 1) sha_f else sha_c;
     return std.fmt.comptimePrint(
@@ -74,12 +78,40 @@ fn upgradeLeaf(comptime count: u64) []const u8 {
 }
 
 test "baseline A leaves assemble into a canonical bound aggregate" {
-    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
     defer parsed.deinit();
     try evidence.bind(parsed.value(), .{ .baseline_a = common() });
     try std.testing.expectEqualStrings(evidence.schema, parsed.schema());
+    try std.testing.expectEqualStrings(sha_c, parsed.value().baseline_a.candidate.cli_sha256);
+    try std.testing.expectEqualStrings(sha_f, parsed.value().baseline_a.candidate.designated_requirement_sha256);
+    try std.testing.expectEqualStrings(sha_c, parsed.value().baseline_a.candidate_gates.signed_cli_ssh.candidate_cli_sha256);
+}
+
+test "aggregate candidate cannot drift from its signed CLI gate" {
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
+    defer std.testing.allocator.free(bytes);
+
+    const cli_drift = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        bytes,
+        "\"cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"",
+        "\"cli_sha256\":\"" ++ sha_d ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"",
+    );
+    defer std.testing.allocator.free(cli_drift);
+    try std.testing.expectError(error.LeafMismatch, evidence.parseCanonical(std.testing.allocator, cli_drift));
+
+    const requirement_drift = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        bytes,
+        "\"cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_f ++ "\"",
+        "\"cli_sha256\":\"" ++ sha_c ++ "\",\"designated_requirement_sha256\":\"" ++ sha_d ++ "\"",
+    );
+    defer std.testing.allocator.free(requirement_drift);
+    try std.testing.expectError(error.LeafMismatch, evidence.parseCanonical(std.testing.allocator, requirement_drift));
 }
 
 test "upgrade B leaves assemble one and near-max without swapping identities" {
@@ -87,6 +119,7 @@ test "upgrade B leaves assemble one and near-max without swapping identities" {
         std.testing.allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         upgradeLeaf(1),
         upgradeLeaf(evidence.near_max_runtime_count),
     );
@@ -102,6 +135,7 @@ test "upgrade B rejects two leaves that agree on a foreign signer requirement" {
         std.testing.allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         upgradeLeaf(1),
         upgradeLeaf(evidence.near_max_runtime_count),
     );
@@ -115,7 +149,7 @@ test "upgrade B rejects two leaves that agree on a foreign signer requirement" {
 }
 
 test "aggregate parser rejects duplicate unknown missing trailing and noncanonical bytes" {
-    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
     defer std.testing.allocator.free(bytes);
     const duplicate = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "{\"schema\":", "{\"schema\":\"maru.session-host-release-evidence.v1\",\"schema\":");
     defer std.testing.allocator.free(duplicate);
@@ -138,12 +172,12 @@ test "aggregate parser rejects duplicate unknown missing trailing and noncanonic
 test "UUID profile role predecessor and result policy fail closed" {
     var bad = common();
     bad.test_uuid = "123e4567-e89b-12d3-a456-426614174000";
-    try std.testing.expectError(error.InvalidUuid, evidence.assembleBaseline(std.testing.allocator, bad, defaultLeaf(), quitLeaf()));
+    try std.testing.expectError(error.InvalidUuid, evidence.assembleBaseline(std.testing.allocator, bad, cliLeaf(), defaultLeaf(), quitLeaf()));
     const failed = try std.mem.replaceOwned(u8, std.testing.allocator, defaultLeaf(), "\"passed\"", "\"failed\"");
     defer std.testing.allocator.free(failed);
-    try std.testing.expectError(error.InvalidLeaf, evidence.assembleBaseline(std.testing.allocator, common(), failed, quitLeaf()));
+    try std.testing.expectError(error.InvalidLeaf, evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), failed, quitLeaf()));
 
-    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
     defer std.testing.allocator.free(bytes);
     var parsed = try evidence.parseCanonical(std.testing.allocator, bytes);
     defer parsed.deinit();
@@ -155,13 +189,13 @@ test "UUID profile role predecessor and result policy fail closed" {
 test "leaf parser rejects replay duplicate unknown and candidate drift" {
     const replay = try std.mem.replaceOwned(u8, std.testing.allocator, defaultLeaf(), uuid, "123e4567-e89b-42d3-a456-426614174001");
     defer std.testing.allocator.free(replay);
-    try std.testing.expectError(error.LeafMismatch, evidence.assembleBaseline(std.testing.allocator, common(), replay, quitLeaf()));
+    try std.testing.expectError(error.LeafMismatch, evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), replay, quitLeaf()));
     const duplicate = try std.mem.replaceOwned(u8, std.testing.allocator, quitLeaf(), "{\"schema\":", "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"schema\":");
     defer std.testing.allocator.free(duplicate);
-    try std.testing.expectError(error.InvalidLeaf, evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), duplicate));
+    try std.testing.expectError(error.InvalidLeaf, evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), duplicate));
     const drift = try std.mem.replaceOwned(u8, std.testing.allocator, quitLeaf(), sha_b, sha_c);
     defer std.testing.allocator.free(drift);
-    try std.testing.expectError(error.LeafMismatch, evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), drift));
+    try std.testing.expectError(error.LeafMismatch, evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), drift));
 }
 
 test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
@@ -169,6 +203,7 @@ test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
         std.testing.allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         upgradeLeaf(evidence.near_max_runtime_count),
         upgradeLeaf(1),
     ));
@@ -178,6 +213,7 @@ test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
         std.testing.allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         swapped,
         upgradeLeaf(evidence.near_max_runtime_count),
     ));
@@ -186,6 +222,7 @@ test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
         std.testing.allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         upgradeLeaf(1),
         upgradeLeaf(evidence.near_max_runtime_count),
     );
@@ -206,9 +243,9 @@ test "evidence and scalar caps reject before publication" {
     try std.testing.expectError(error.EvidenceTooLarge, evidence.parseCanonical(std.testing.allocator, oversized));
     var bad = common();
     bad.repository.owner = "x" ** (evidence.max_scalar_string_bytes + 1);
-    try std.testing.expectError(error.ScalarTooLarge, evidence.assembleBaseline(std.testing.allocator, bad, defaultLeaf(), quitLeaf()));
+    try std.testing.expectError(error.ScalarTooLarge, evidence.assembleBaseline(std.testing.allocator, bad, cliLeaf(), defaultLeaf(), quitLeaf()));
 
-    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
     defer std.testing.allocator.free(bytes);
     const long_owner = "x" ** (evidence.max_scalar_string_bytes + 1);
     const oversized_scalar = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "ohah", long_owner);
@@ -221,6 +258,7 @@ fn assembleUpgradeAlloc(allocator: std.mem.Allocator) !void {
         allocator,
         common(),
         predecessor(),
+        cliLeaf(),
         upgradeLeaf(1),
         upgradeLeaf(evidence.near_max_runtime_count),
     );

@@ -13,6 +13,7 @@ const uuid = "123e4567-e89b-42d3-a456-426614174000";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const exe_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const requirement_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const foreign_requirement_sha = "9999999999999999999999999999999999999999999999999999999999999999";
 const predecessor_manifest_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const predecessor_dmg_sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const predecessor_exe_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -27,6 +28,13 @@ fn defaultLeaf() []const u8 {
 
 fn quitLeaf() []const u8 {
     return "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n";
+}
+
+fn cliLeaf() []const u8 {
+    return "{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"" ++ uuid ++ "\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"" ++ dmg_sha ++ "\",\"candidate_executable_sha256\":\"" ++ exe_sha ++ "\",\"candidate_cli_sha256\":\"" ++ predecessor_manifest_sha ++ "\",\"designated_requirement_sha256\":\"" ++ requirement_sha ++ "\"}\n";
+}
+fn cliLeafFor(allocator: std.mem.Allocator, requirement: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"schema\":\"maru.session-host-signed-cli-ssh.v1\",\"test_uuid\":\"{s}\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"{s}\",\"candidate_executable_sha256\":\"{s}\",\"candidate_cli_sha256\":\"{s}\",\"designated_requirement_sha256\":\"{s}\"}}\n", .{ uuid, dmg_sha, exe_sha, predecessor_manifest_sha, requirement });
 }
 
 fn upgradeLeaf(comptime count: u64) []const u8 {
@@ -47,7 +55,7 @@ const Fixture = struct {
         try self.tmp.dir.createDir(std.testing.io, "evidence-root", .default_dir);
         try self.tmp.dir.createDir(std.testing.io, "manifest-root", .default_dir);
         try self.tmp.dir.createDir(std.testing.io, "durable", .default_dir);
-        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common(), defaultLeaf(), quitLeaf());
+        const evidence_bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
         defer std.testing.allocator.free(evidence_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence-root/baseline-evidence.json", .data = evidence_bytes });
         _ = try absolute(&self.tmp, "evidence-root", &self.evidence_root);
@@ -121,7 +129,7 @@ const Fixture = struct {
             .dmg_sha256 = predecessor_dmg_sha,
             .executable_sha256 = predecessor_exe_sha,
         };
-        const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
+        const evidence_bytes = try evidence.assembleUpgrade(std.testing.allocator, common(), predecessor, cliLeaf(), upgradeLeaf(1), upgradeLeaf(evidence.near_max_runtime_count));
         defer std.testing.allocator.free(evidence_bytes);
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence-root/" ++ handoff.upgrade_evidence_name, .data = evidence_bytes });
         const evidence_path = try absolute(&self.tmp, "evidence-root/" ++ handoff.upgrade_evidence_name, &self.evidence_path);
@@ -195,6 +203,20 @@ test "upgrade B signer mismatch cannot publish a durable preparation" {
     try fixture.init();
     defer fixture.deinit();
     try fixture.replaceWithUpgrade(predecessor_manifest_sha);
+    var durable: handoff.DurablePreparation = .{};
+    try std.testing.expectError(error.InvalidBinding, handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable));
+    try std.testing.expect(durable.value() == null);
+}
+
+test "internally consistent foreign CLI signer evidence cannot cross baseline handoff" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const leaf = try cliLeafFor(std.testing.allocator, foreign_requirement_sha);
+    defer std.testing.allocator.free(leaf);
+    const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), leaf, defaultLeaf(), quitLeaf());
+    defer std.testing.allocator.free(bytes);
+    try replaceHeld(&fixture.owners[0], fixture.evidencePath(), bytes, evidence.max_evidence_bytes);
     var durable: handoff.DurablePreparation = .{};
     try std.testing.expectError(error.InvalidBinding, handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable));
     try std.testing.expect(durable.value() == null);

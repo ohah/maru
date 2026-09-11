@@ -15,7 +15,7 @@ pub const repository_name = "ohah/maru";
 pub const max_cli_value_bytes: usize = 4 * 1024;
 pub const max_manifest_asset_name_bytes: usize = 255;
 /// Largest reviewed command, excluding argv[0]: command plus 19 option/value pairs.
-pub const max_command_args: usize = 39;
+pub const max_command_args: usize = 41;
 
 pub const PrePublish = struct {
     repo: []const u8,
@@ -54,6 +54,7 @@ pub const PublishCandidate = struct {
     baseline_workspace: []const u8,
     app_main_executable: []const u8,
     app_cli_executable: []const u8,
+    signed_cli_ssh: []const u8,
     manifest: []const u8,
     source_root: []const u8,
     zig: []const u8,
@@ -75,6 +76,7 @@ pub const PrepareCandidate = struct {
     baseline_workspace: []const u8,
     app_main_executable: []const u8,
     app_cli_executable: []const u8,
+    signed_cli_ssh: []const u8,
     manifest: []const u8,
     source_root: []const u8,
     zig: []const u8,
@@ -94,6 +96,7 @@ pub const PrepareProfileCandidate = struct {
     candidate_dmg_bundle: []const u8,
     candidate_frozen_bundle: []const u8,
     dmg_work: []const u8,
+    signed_cli_ssh: []const u8,
     manifest: []const u8,
     source_root: []const u8,
     zig: []const u8,
@@ -206,6 +209,7 @@ const Values = struct {
     baseline_workspace: ?[]const u8 = null,
     app_main_executable: ?[]const u8 = null,
     app_cli_executable: ?[]const u8 = null,
+    signed_cli_ssh: ?[]const u8 = null,
     source_root: ?[]const u8 = null,
     zig: ?[]const u8 = null,
     zig_size: ?[]const u8 = null,
@@ -333,6 +337,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const baseline_workspace = try candidatePath(values.baseline_workspace);
             const app_main_executable = try candidatePath(values.app_main_executable);
             const app_cli_executable = try candidatePath(values.app_cli_executable);
+            const signed_cli_ssh = try candidatePath(values.signed_cli_ssh);
             const candidate_manifest = try candidatePath(values.manifest);
             try validateManifestAssetPath(candidate_manifest, tag[1..]);
             const source_root = try candidatePath(values.source_root);
@@ -342,7 +347,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             if (!lowerHexSha256(zig_sha256)) return error.InvalidZigSha256;
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, signed_cli_ssh, github_cli.path, zig });
             break :blk .{ .publish_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -357,6 +362,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .baseline_workspace = baseline_workspace,
                 .app_main_executable = app_main_executable,
                 .app_cli_executable = app_cli_executable,
+                .signed_cli_ssh = signed_cli_ssh,
                 .manifest = candidate_manifest,
                 .source_root = source_root,
                 .zig = zig,
@@ -375,6 +381,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const baseline_workspace = try candidatePath(values.baseline_workspace);
             const app_main_executable = try candidatePath(values.app_main_executable);
             const app_cli_executable = try candidatePath(values.app_cli_executable);
+            const signed_cli_ssh = try candidatePath(values.signed_cli_ssh);
             const candidate_manifest = try candidatePath(values.manifest);
             try validateManifestAssetPath(candidate_manifest, tag[1..]);
             const source_root = try candidatePath(values.source_root);
@@ -385,8 +392,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const durable_preparation = try candidatePath(values.durable_preparation);
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, github_cli.path, zig, durable_preparation });
-            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable, app_main_executable, app_cli_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, github_cli.path, zig, durable_preparation });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, app_main_executable, app_cli_executable, signed_cli_ssh, github_cli.path, zig, durable_preparation });
+            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable, app_main_executable, app_cli_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, baseline_workspace, signed_cli_ssh, github_cli.path, zig, durable_preparation });
             break :blk .{ .prepare_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -401,6 +408,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .baseline_workspace = baseline_workspace,
                 .app_main_executable = app_main_executable,
                 .app_cli_executable = app_cli_executable,
+                .signed_cli_ssh = signed_cli_ssh,
                 .manifest = candidate_manifest,
                 .source_root = source_root,
                 .zig = zig,
@@ -417,6 +425,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const candidate_dmg_bundle = try candidatePath(values.candidate_dmg_bundle);
             const candidate_frozen_bundle = try candidatePath(values.candidate_frozen_bundle);
             const dmg_work = try candidatePath(values.dmg_work);
+            const signed_cli_ssh = try candidatePath(values.signed_cli_ssh);
             const candidate_manifest = try candidatePath(values.manifest);
             try validateManifestAssetPath(candidate_manifest, tag[1..]);
             const source_root = try candidatePath(values.source_root);
@@ -430,8 +439,8 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
             const timing_output = try candidatePath(values.timing_output);
             const github_cli = try githubCli(&values);
             if (!canonicalAbsoluteLeaf(github_cli.path)) return error.InvalidCandidatePath;
-            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
-            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
+            try disjointPaths(&.{ candidate_manifest, dmg, frozen_executable, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, signed_cli_ssh, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
+            try validateSourceRootProducts(source_root, &.{ dmg, frozen_executable }, &.{ candidate_manifest, candidate_dmg_bundle, candidate_frozen_bundle, dmg_work, signed_cli_ssh, github_cli.path, zig, predecessor_workspace, upgrade_workspace, durable_preparation, timing_output });
             break :blk .{ .prepare_profile_candidate = .{
                 .repo = repo,
                 .tag = tag,
@@ -443,6 +452,7 @@ pub fn parseArgs(args: []const []const u8) Error!Command {
                 .candidate_dmg_bundle = candidate_dmg_bundle,
                 .candidate_frozen_bundle = candidate_frozen_bundle,
                 .dmg_work = dmg_work,
+                .signed_cli_ssh = signed_cli_ssh,
                 .manifest = candidate_manifest,
                 .source_root = source_root,
                 .zig = zig,
@@ -620,6 +630,8 @@ fn optionDestination(
             &values.app_main_executable
         else if (std.mem.eql(u8, option, "--app-cli-executable"))
             &values.app_cli_executable
+        else if (std.mem.eql(u8, option, "--signed-cli-ssh"))
+            &values.signed_cli_ssh
         else if (std.mem.eql(u8, option, "--source-root"))
             &values.source_root
         else if (std.mem.eql(u8, option, "--zig"))

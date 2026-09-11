@@ -13,6 +13,7 @@ pub const PublishedEvidence = files.PinnedReleaseFile;
 
 pub const BaselineRequest = struct {
     common: evidence.Common,
+    signed_cli_ssh_path: [:0]const u8,
     default_false_path: [:0]const u8,
     signed_app_quit_path: [:0]const u8,
     output_path: [:0]const u8,
@@ -22,6 +23,7 @@ pub const UpgradeRequest = struct {
     common: evidence.Common,
     predecessor: evidence.Predecessor,
     designated_requirement_sha256: []const u8,
+    signed_cli_ssh_path: [:0]const u8,
     one_path: [:0]const u8,
     near_max_path: [:0]const u8,
     output_path: [:0]const u8,
@@ -42,16 +44,19 @@ pub fn publishBaselineOwned(allocator: std.mem.Allocator, request: BaselineReque
 /// opened. Publication itself does not allocate, so an orchestration owner can close allocator
 /// reentrancy without moving filesystem ownership out of this module.
 pub fn publishBaselineOwnedValidated(allocator: std.mem.Allocator, request: BaselineRequest, validator: anytype, result: *PublishedEvidence) !void {
-    try validateResult(result, request.common, &.{ request.default_false_path, request.signed_app_quit_path, request.output_path });
+    try validateResult(result, request.common, &.{ request.signed_cli_ssh_path, request.default_false_path, request.signed_app_quit_path, request.output_path });
+    var signed_cli_ssh = try files.readInputAlloc(allocator, request.signed_cli_ssh_path, evidence.max_evidence_bytes);
+    defer signed_cli_ssh.deinit(allocator);
     var default_false = try files.readInputAlloc(allocator, request.default_false_path, evidence.max_evidence_bytes);
     defer default_false.deinit(allocator);
     var signed_app_quit = try files.readInputAlloc(allocator, request.signed_app_quit_path, evidence.max_evidence_bytes);
     defer signed_app_quit.deinit(allocator);
-    try files.requireDistinct(&.{ default_false.identity, signed_app_quit.identity });
+    try files.requireDistinct(&.{ signed_cli_ssh.identity, default_false.identity, signed_app_quit.identity });
 
     const aggregate = try evidence.assembleBaseline(
         allocator,
         request.common,
+        signed_cli_ssh.bytes,
         default_false.bytes,
         signed_app_quit.bytes,
     );
@@ -82,20 +87,24 @@ pub fn publishUpgradeOwnedValidated(allocator: std.mem.Allocator, request: Upgra
         request.predecessor.dmg_sha256,
         request.predecessor.executable_sha256,
         request.designated_requirement_sha256,
+        request.signed_cli_ssh_path,
         request.one_path,
         request.near_max_path,
         request.output_path,
     });
+    var signed_cli_ssh = try files.readInputAlloc(allocator, request.signed_cli_ssh_path, evidence.max_evidence_bytes);
+    defer signed_cli_ssh.deinit(allocator);
     var one = try files.readInputAlloc(allocator, request.one_path, evidence.max_evidence_bytes);
     defer one.deinit(allocator);
     var near_max = try files.readInputAlloc(allocator, request.near_max_path, evidence.max_evidence_bytes);
     defer near_max.deinit(allocator);
-    try files.requireDistinct(&.{ one.identity, near_max.identity });
+    try files.requireDistinct(&.{ signed_cli_ssh.identity, one.identity, near_max.identity });
 
     const aggregate = try evidence.assembleUpgrade(
         allocator,
         request.common,
         request.predecessor,
+        signed_cli_ssh.bytes,
         one.bytes,
         near_max.bytes,
     );

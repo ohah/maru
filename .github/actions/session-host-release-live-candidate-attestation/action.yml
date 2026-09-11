@@ -20,12 +20,29 @@ inputs:
   checkpoint-root-identity:
     description: Sealed maru-root-v1 identity token for the checkpoint root
     required: true
+  test-uuid:
+    description: Canonical release transaction UUID shared by every candidate gate
+    required: true
+  preflight-dmg-work:
+    description: Absent private pathname for read-only candidate preflight
+    required: true
+  p5d-dmg-work:
+    description: Absent private pathname for final-address P5d DMG execution
+    required: true
+  p5d-workspace:
+    description: Absent private pathname owned by the outer P5d runner
+    required: true
+  signed-cli-ssh:
+    description: Absent exact output pathname for the canonical P5d leaf
+    required: true
 
 outputs:
   dmg-bundle-path:
     value: ${{ steps.commit.outputs.dmg-bundle-path }}
   frozen-bundle-path:
     value: ${{ steps.commit.outputs.frozen-bundle-path }}
+  signed-cli-ssh-path:
+    value: ${{ steps.commit.outputs.signed-cli-ssh-path }}
 
 runs:
   using: composite
@@ -50,6 +67,37 @@ runs:
       frozen-path: ${{ inputs.frozen-path }}
       frozen-name: ${{ inputs.frozen-name }}
 
+  - name: Run final-DMG P5d candidate payload
+    id: p5d
+    if: steps.payload.outcome == 'success'
+    continue-on-error: true
+    shell: bash
+    env:
+      MARU_P5D_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-p5d-candidate
+      MARU_TEST_UUID: ${{ inputs.test-uuid }}
+      MARU_DMG: ${{ inputs.dmg-path }}
+      MARU_FROZEN: ${{ inputs.frozen-path }}
+      MARU_PREFLIGHT_DMG_WORK: ${{ inputs.preflight-dmg-work }}
+      MARU_P5D_DMG_WORK: ${{ inputs.p5d-dmg-work }}
+      MARU_P5D_WORKSPACE: ${{ inputs.p5d-workspace }}
+      MARU_P5D_OUTPUT: ${{ inputs.signed-cli-ssh }}
+      MARU_P5D_HARNESS: ${{ github.workspace }}/tools/session-host/p5d_ssh_smoke.sh
+      MARU_ATTACH_PRODUCT_TEST: ${{ github.workspace }}/zig-out/bin/maru-session-host-p5d-attach-product-test
+      MARU_UPLOAD_PRODUCT_TEST: ${{ github.workspace }}/zig-out/bin/maru-session-host-p5d-upload-product-test
+    run: |
+      set -euo pipefail
+      "$MARU_P5D_EXE" run \
+        --test-uuid "$MARU_TEST_UUID" \
+        --dmg "$MARU_DMG" \
+        --frozen-executable "$MARU_FROZEN" \
+        --preflight-dmg-work "$MARU_PREFLIGHT_DMG_WORK" \
+        --p5d-dmg-work "$MARU_P5D_DMG_WORK" \
+        --p5d-workspace "$MARU_P5D_WORKSPACE" \
+        --harness "$MARU_P5D_HARNESS" \
+        --attach-product-test "$MARU_ATTACH_PRODUCT_TEST" \
+        --upload-product-test "$MARU_UPLOAD_PRODUCT_TEST" \
+        --output "$MARU_P5D_OUTPUT"
+
   - name: Commit candidate attestation checkpoint
     id: commit
     if: always()
@@ -59,18 +107,21 @@ runs:
       MARU_CHECKPOINT_ROOT_IDENTITY: ${{ inputs.checkpoint-root-identity }}
       MARU_CHECKPOINT_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-workflow-checkpoint
       MARU_PAYLOAD_OUTCOME: ${{ steps.payload.outcome }}
+      MARU_P5D_OUTCOME: ${{ steps.p5d.outcome }}
       MARU_DMG_BUNDLE: ${{ steps.payload.outputs.dmg-bundle-path }}
       MARU_FROZEN_BUNDLE: ${{ steps.payload.outputs.frozen-bundle-path }}
+      MARU_SIGNED_CLI_SSH: ${{ inputs.signed-cli-ssh }}
     run: |
       set -euo pipefail
-      case "$MARU_PAYLOAD_OUTCOME" in
-        success)
+      case "$MARU_PAYLOAD_OUTCOME:$MARU_P5D_OUTCOME" in
+        success:success)
           [[ -n "$MARU_DMG_BUNDLE" && "$MARU_DMG_BUNDLE" != *$'\n'* && "$MARU_DMG_BUNDLE" != *$'\r'* ]]
           [[ -n "$MARU_FROZEN_BUNDLE" && "$MARU_FROZEN_BUNDLE" != *$'\n'* && "$MARU_FROZEN_BUNDLE" != *$'\r'* ]]
+          [[ -n "$MARU_SIGNED_CLI_SSH" && "$MARU_SIGNED_CLI_SSH" != *$'\n'* && "$MARU_SIGNED_CLI_SSH" != *$'\r'* ]]
           "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation succeeded
-          printf 'dmg-bundle-path=%s\nfrozen-bundle-path=%s\n' "$MARU_DMG_BUNDLE" "$MARU_FROZEN_BUNDLE" >> "$GITHUB_OUTPUT"
+          printf 'dmg-bundle-path=%s\nfrozen-bundle-path=%s\nsigned-cli-ssh-path=%s\n' "$MARU_DMG_BUNDLE" "$MARU_FROZEN_BUNDLE" "$MARU_SIGNED_CLI_SSH" >> "$GITHUB_OUTPUT"
           ;;
-        failure)
+        failure:*|*:failure)
           "$MARU_CHECKPOINT_EXE" commit "$MARU_CHECKPOINT_ROOT" "$MARU_CHECKPOINT_ROOT_IDENTITY" candidate_attestation failed
           exit 1
           ;;

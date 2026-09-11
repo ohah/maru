@@ -31,6 +31,7 @@ pub const Inputs = struct {
     product_paths: candidate_product.Paths,
     source: *const SourceTreeAuthority,
     app_paths: app_mod.Paths,
+    signed_cli_ssh: [:0]const u8,
     toolchain: *const ZigToolchainAuthority,
     source_directory_fd: std.c.fd_t,
 };
@@ -167,6 +168,7 @@ const ConcreteSteps = struct {
             .source = value.source,
             .app = &self.execution.app,
             .app_paths = value.app_paths,
+            .signed_cli_ssh = value.signed_cli_ssh,
             .workspace = &self.execution.workspace,
             .toolchain = value.toolchain,
             .source_directory_fd = value.source_directory_fd,
@@ -231,6 +233,7 @@ fn aliases(execution: *Execution, inputs_value: Inputs, workspace_root: []const 
     const paths = [_][]const u8{
         workspace_root,                      inputs_value.product_paths.dmg,         inputs_value.product_paths.frozen_executable,
         inputs_value.product_paths.dmg_work, inputs_value.app_paths.main_executable, inputs_value.app_paths.cli_executable,
+        inputs_value.signed_cli_ssh,
     };
     for (objects, 0..) |left, index| {
         for (objects[index + 1 ..]) |right| if (overlaps(left, right)) return true;

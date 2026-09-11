@@ -2886,8 +2886,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `runtime.notification` consume과 same-PID outer optional handoff에 연결됐다. N2b1의 product config/label metadata,
   controller-bound `config.update`, stable-key GUI wire가 연결됐다. 실제 daemon/socket/PTY gate는 live on/off와 label 변경,
   detach→재attach 뒤 현재 config와 runtime-ID fallback 재설치, capability-aware typed HostAdapter의 exact
-  `delivery_version:1` selector를 Debug·ReleaseFast에서 검증한다. partial multi-runtime 전파/보상 실패는 미적용 entry로
-  남겨 frame binding 완전본이 재시도한다. daemon-internal macOS sink는 N2b2에서 fresh/restore daemon owner에 연결됐고,
+  `delivery_version:1` selector를 Debug·ReleaseFast에서 검증한다. GUI는 runtime별 단조 config 세대와 전역 OSC 토글 적용
+  세대를 분리한다. 라벨 변경은 해당 runtime 세대만 전진시키며 다른 runtime을 stale로 만들지 않고, spawn/attach의 성공한
+  완전본은 두 축을 함께 게시해 첫 frame 재전송도 만들지 않는다. partial multi-runtime 전파/보상 실패는 OSC 적용 축만
+  미적용으로 남겨 frame binding 완전본이 재시도한다. daemon-internal macOS sink는 N2b2에서 fresh/restore daemon owner에 연결됐고,
   N2b3의 GUI history/OS stable-key 투영도 연결됐으며 Swift type-check와 실제 `Maru.app` 링크까지 통과한다.
 - **N2a 자동 검증:** `zig build test-session-host-notification-admission`이 Debug·ReleaseFast에서 generation-CAS
   admission의 OOM/rejection rollback, 일반 OSC 2 KiB overflow one-shot 계수와 runtime 공정성, UTF-8/control-sequence

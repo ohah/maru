@@ -5367,6 +5367,26 @@ pub fn build(b: *std.Build) void {
 
     // 관측 이벤트당 비용을 **줄일 수 있는지** 판단할 두 비(events/drain, digests/event)가 계속
     // 나오는가. 이 계측이 사라지면 최적화 판단이 다시 추측이 된다.
+    // 캐시한 씰 다이제스트가 **상하지 않는가.** 캐싱 자체보다 이 가드가 중요하다 — 캐시가 상하면
+    // 드리프트를 잡으라고 있는 씰이 드리프트를 감춘다.
+    const seal_immutable_digest_step = b.step(
+        "test-seal-immutable-digest",
+        "Cached seal digests stay valid: single assignment plus a debug recompute check",
+    );
+    const seal_immutable_digest_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/seal_immutable_digest_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_seal_immutable_digest = b.addRunArtifact(seal_immutable_digest_tests);
+    run_seal_immutable_digest.addArg("--maru-expect-tests=1");
+    run_seal_immutable_digest.addArg("--maru-expect-passed=1");
+    run_seal_immutable_digest.setCwd(b.path("."));
+    seal_immutable_digest_step.dependOn(&run_seal_immutable_digest.step);
+    boundary_step.dependOn(&run_seal_immutable_digest.step);
+
     const observation_event_cost_step = b.step(
         "test-observation-event-cost",
         "Observation cost counters stay at the single digest funnel and emit both ratios",

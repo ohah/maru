@@ -689,6 +689,20 @@ pub const PreparationFrame = struct {
     source_lease_mirror: PendingEventSourceLease,
     snapshot: RuntimeSemanticSnapshot,
     recipe: event_preparation.EventPreparationRecipe,
+    /// `snapshot`·`recipe` 의 다이제스트. **프레임 생성 시 한 번 계산해 두고 매 `seal()` 에서 재사용한다.**
+    ///
+    /// 두 필드는 `beginPreparationFrame` 에서 딱 한 번 대입된 뒤 읽기만 하므로(그 사실을
+    /// `tests/seal_immutable_digest_boundary.zig` 가 소스로 못 박는다), 다시 해싱해도 **결과가 같다**.
+    /// 씰이 덮는 바이트는 완전히 동일하고, 바뀔 수 없는 값을 재계산하지 않을 뿐이다.
+    ///
+    /// 2026-09-11 실측: `sealInput` 이 BLAKE3 진입 799 샘플 중 312 (39 %) 로 1 위였고, 한 번 불릴 때마다
+    /// 고정 크기 구조체 5,816 B 를 통째로 해싱했다 — 그중 `recipe` 2,944 B + `snapshot` 1,152 B =
+    /// **4,096 B (70 %) 가 바뀔 수 없는 값**이었다. `seal()` 은 준비 경로 9 곳에서 불린다.
+    ///
+    /// **위험은 성능이 아니라 정합성이다.** 나중에 누가 `snapshot`·`recipe` 를 변경하면 캐시가 상해
+    /// 씰이 엉뚱한 바이트를 덮는다. 그래서 소스 판정자와 debug/test 빌드의 재계산 대조를 함께 둔다.
+    snapshot_digest_cache: cleanup.Digest,
+    recipe_digest_cache: cleanup.Digest,
     scratch: PreparationScratch,
     dto_content_digest: cleanup.Digest,
     transfer_projection_mask: u8,
@@ -731,6 +745,30 @@ pub const PreparationFrame = struct {
         if (!self.validate()) process_seal.fatalIntegrity(.invalid_preparation_frame);
     }
 
+    /// 캐시를 돌려주되, **debug·test 빌드에서는 실제로 다시 계산해 대조한다.**
+    ///
+    /// 캐싱의 유일한 위험은 「`snapshot` 이 사실은 바뀌었는데 캐시가 옛 값」이다. 소스 판정자가
+    /// 대입이 한 번뿐임을 못 박지만, 그건 **문법적 대입**만 본다 — `@memcpy` 나 포인터 경유 변경은
+    /// 못 본다. 여기서 값 자체를 대조하면 그 구멍이 닫힌다. ReleaseFast 에는 남지 않으므로 이 fix 가
+    /// 없애려던 비용이 되살아나지 않는다.
+    fn cachedSnapshotDigest(self: *const PreparationFrame) cleanup.Digest {
+        if (builtin.mode == .Debug or builtin.is_test) {
+            const recomputed = rawDigest(snapshot_digest_domain, std.mem.asBytes(&self.snapshot));
+            if (!std.crypto.timing_safe.eql(cleanup.Digest, recomputed, self.snapshot_digest_cache))
+                process_seal.fatalIntegrity(.callback_drift);
+        }
+        return self.snapshot_digest_cache;
+    }
+
+    fn cachedRecipeDigest(self: *const PreparationFrame) cleanup.Digest {
+        if (builtin.mode == .Debug or builtin.is_test) {
+            const recomputed = rawDigest(recipe_digest_domain, std.mem.asBytes(&self.recipe));
+            if (!std.crypto.timing_safe.eql(cleanup.Digest, recomputed, self.recipe_digest_cache))
+                process_seal.fatalIntegrity(.callback_drift);
+        }
+        return self.recipe_digest_cache;
+    }
+
     fn sealInput(self: *const PreparationFrame) cleanup.PendingPreparationFrameSealInput {
         return .{
             .frame_addr = self.self_addr,
@@ -745,8 +783,8 @@ pub const PreparationFrame = struct {
             .operation_identity = self.operation_lease.identity(),
             .source_receipt = receiptInput(self.source_receipt),
             .source_lease = sourceLeaseInput(self.source_lease_mirror),
-            .snapshot_digest = rawDigest("maru.pending-frame.snapshot.v1", std.mem.asBytes(&self.snapshot)),
-            .recipe_digest = rawDigest("maru.pending-frame.recipe.v1", std.mem.asBytes(&self.recipe)),
+            .snapshot_digest = self.cachedSnapshotDigest(),
+            .recipe_digest = self.cachedRecipeDigest(),
             .scratch_graph_digest = rawDigest("maru.pending-frame.scratch.v1", std.mem.asBytes(&self.scratch)),
             .dto_content_digest = self.dto_content_digest,
             .transfer_projection_mask = self.transfer_projection_mask,
@@ -790,6 +828,8 @@ pub fn initFrameInPlace(frame: *PreparationFrame, input: FrameInitInput, runtime
     frame.source_lease_mirror = .{};
     frame.snapshot = input.snapshot;
     frame.recipe = input.recipe;
+    frame.snapshot_digest_cache = rawDigest(snapshot_digest_domain, std.mem.asBytes(&frame.snapshot));
+    frame.recipe_digest_cache = rawDigest(recipe_digest_domain, std.mem.asBytes(&frame.recipe));
     frame.scratch = .{};
     frame.dto_content_digest = [_]u8{0} ** 32;
     frame.transfer_projection_mask = 0;
@@ -1545,6 +1585,11 @@ pub fn sealCounters() SealCounters {
         .raw_digest_bytes = @atomicLoad(u64, &seal_raw_digest_bytes, .monotonic),
     };
 }
+
+/// 캐시와 debug 대조가 **같은 도메인**을 쓰도록 리터럴을 한 자리에 둔다 — 두 곳에 흩어지면
+/// 한쪽만 바꿨을 때 조용히 어긋난다.
+const snapshot_digest_domain = "maru.pending-frame.snapshot.v1";
+const recipe_digest_domain = "maru.pending-frame.recipe.v1";
 
 fn rawDigest(domain: []const u8, bytes: []const u8) cleanup.Digest {
     _ = @atomicRmw(u64, &seal_raw_digest_calls, .Add, 1, .monotonic);

@@ -45,6 +45,20 @@ const std = @import("std");
 const index = @import("agent_image_index.zig");
 const context = @import("agent_image_context.zig");
 
+// ── 헬퍼가 이 모듈 **하나만** 물게 하는 재수출 ──────────────────────────────────────────────────
+//
+// 원격 헬퍼(RAV2)는 스캐너·라벨·wire 셋을 다 써야 하는데, 셋을 각각 물리면 `tools/remote-watch` 의
+// 빌드가 세션 트리의 파일 셋을 이름으로 알게 된다. **한 문만 연다** — 계약 §2.3 의 「방향은 한 쪽」
+// 이 그 뜻이다. 여기 없는 것은 헬퍼가 쓸 수 없다.
+
+pub const Scanner = index.StreamScanner;
+pub const Hit = index.Hit;
+pub const Label = context.Label;
+pub const Source = context.Source;
+pub const activityLabel = context.activityLabel;
+pub const timestampSeconds = context.timestampSeconds;
+pub const time_window_bytes = context.timestamp_window_bytes;
+
 pub const wire_version: u32 = 1;
 pub const header_line = "maru-rav 1";
 
@@ -64,6 +78,13 @@ pub const max_label_bytes: usize = context.max_label_bytes;
 
 /// 원격 오류 메시지 상한. 목록 wire 와 같은 값·같은 이유(표시용 한 줄, 원격이 주는 값이라 유계).
 pub const max_error_bytes: usize = 512;
+
+/// 레코드 한 줄이 **주장할 수 있는 최악** 바이트.
+///
+/// `A ` + 10 진 24 개(각 최악 20 자 + 공백) + 라벨 160 B + 개행. 내는 쪽이 줄 버퍼를 이만큼 잡으면
+/// **`appendRecord` 가 버퍼 부족으로 null 을 낼 수 없다** — 그 사실을 comptime 으로 못박으면 「버퍼가
+/// 차면 멈춘다」 규율이 도달 불가 방어가 되고, 판정자가 못 만드는 경로를 안 남긴다(적대적 J2).
+pub const max_record_bytes: usize = 2 + record_fields * 21 + max_label_bytes + 1;
 
 /// 한 왕복 wire 전체의 상한(바이트). **전송이 이 값으로 읽기를 자른다** — 넘친 답은 꼬리를 잃어
 /// 파서가 **잘림**으로 읽는다(§6.1).

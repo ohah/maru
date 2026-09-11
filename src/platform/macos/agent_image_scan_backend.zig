@@ -221,8 +221,9 @@ fn readActivityTime(io: std.Io, file: std.Io.File, hit: index.Hit) i64 {
     return context.timestampSeconds(buf[0..got]);
 }
 
-/// 시각 값 하나가 들어갈 창. `"timestamp":"2026-09-07T01:13:13.040Z"` 가 37 B 라 그 1.7 배다.
-const activity_time_window: usize = 64;
+/// 시각 값 하나가 들어갈 창 — **단일 출처는 `agent_image_context`** 다(원격 헬퍼가 같은 값을 써야
+/// 한다. 두 벌이면 한쪽만 늘었을 때 시각이 조용히 사라진다).
+const activity_time_window: usize = context.timestamp_window_bytes;
 
 fn readLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.Allocator) context.Label {
     const prefix_len: usize = @intCast(@min(

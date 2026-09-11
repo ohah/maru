@@ -626,13 +626,24 @@ pub fn build(b: *std.Build) void {
         .{ .cpu_arch = .x86_64, .os_tag = .macos },
     };
     for (remote_watch_targets) |query| {
+        const watch_target = b.resolveTargetQuery(query);
+        // **활동 축만 세션 모듈을 문다**(RAV2 — tools/remote-watch/main.zig 머리말). 목록·변경 wire 는
+        // 사본을 손으로 들지만 스캐너는 그럴 수 없다(2,800 줄 · 판정자 163 개 · 계약의 벗기기 규칙
+        // 전부). 문 하나만 연다 — `remote_activity_wire` 가 스캐너·라벨을 함께 끌어온다.
+        // 비용 실측: +19,072 B(+8.6%), ReleaseSmall.
+        const watch_activity_mod = b.createModule(.{
+            .root_source_file = b.path("src/session/remote_activity_wire.zig"),
+            .target = watch_target,
+            .optimize = .ReleaseSmall,
+        });
         const watch_exe = b.addExecutable(.{
             .name = "maru-remote-watch",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/remote-watch/main.zig"),
-                .target = b.resolveTargetQuery(query),
+                .target = watch_target,
                 .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
                 .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
+                .imports = &.{.{ .name = "remote_activity_wire", .module = watch_activity_mod }},
             }),
         });
         // **이름을 손으로 적는 자리다**(RW2b) — `Variant.assetName` 과 어긋나면 앱이 빌드가 만들지
@@ -3445,6 +3456,11 @@ pub fn build(b: *std.Build) void {
     // 코덱 파서로 되읽는다 — RW 의 version_line 문자열 대조보다 강한, 바이트 수준 드리프트 방어다.
     // POSIX 전용(픽스처가 sh·심링크·개행 이름을 쓴다) — Windows 호스트는 시끄럽게 건너뛴다.
     if (builtin.os.tag != .windows) {
+        const native_activity_mod = b.createModule(.{
+            .root_source_file = b.path("src/session/remote_activity_wire.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        });
         const native_remote_watch = b.addExecutable(.{
             .name = "maru-remote-watch-native",
             .root_module = b.createModule(.{
@@ -3452,6 +3468,7 @@ pub fn build(b: *std.Build) void {
                 .target = b.graph.host,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{.{ .name = "remote_activity_wire", .module = native_activity_mod }},
             }),
         });
         const install_native_watch = b.addInstallArtifact(native_remote_watch, .{
@@ -3481,6 +3498,33 @@ pub fn build(b: *std.Build) void {
             "test-remote-file-listing",
             "Run the built remote-watch helper's list mode and re-read it with the session codec",
         ).dependOn(&run_listing_roundtrip.step);
+
+        // **헬퍼 `activity` ↔ 활동 코덱 왕복 게이트**(RAV2 — docs/plans/remote-agent-activity.md §5).
+        // 위 목록 게이트와 막는 것이 다르다: 활동 축은 헬퍼가 인코더를 **물므로** 드리프트가 원리적으로
+        // 없고, 대신 **배선**이 잡힌다 — 라벨 패스를 빠뜨리거나 절대경로 가드를 빼도 컴파일은 통과하고
+        // 화면만 조용히 빈다. 그래서 같은 픽스처를 로컬 스캐너로도 훑어 **같은 결과인지** 맞댄다.
+        const activity_roundtrip_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/remote_activity_roundtrip.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_activity_roundtrip = b.addRunArtifact(activity_roundtrip_tests);
+        run_activity_roundtrip.addArg("--maru-expect-tests=3");
+        run_activity_roundtrip.addArg("--maru-expect-passed=3"); // env 가 빠지면 조용히 초록이 된다
+        run_activity_roundtrip.setCwd(b.path("."));
+        run_activity_roundtrip.step.dependOn(&install_native_watch.step);
+        run_activity_roundtrip.setEnvironmentVariable(
+            "MARU_REMOTE_WATCH_BIN",
+            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
+        );
+        test_step.dependOn(&run_activity_roundtrip.step);
+        b.step(
+            "test-remote-activity",
+            "Run the built remote-watch helper's activity mode and re-read it with the session codec",
+        ).dependOn(&run_activity_roundtrip.step);
 
         // **헬퍼 `mv` ↔ 변경 코덱 왕복 게이트**(RF6a). 같은 실물 바이너리를 돌려 결말 wire 를 되읽고,
         // 계약(신원 재확인·비대체 rename)이 **실제로 지켜지는지**까지 잰다 — 셸 조합으로는 못 만드는

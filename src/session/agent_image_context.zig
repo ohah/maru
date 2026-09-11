@@ -49,6 +49,13 @@ const std = @import("std");
 /// 라벨 상한. 도크 한 줄에 들어갈 길이면 충분하고, 렌더러가 다시 줄인다(ellipsize).
 pub const max_label_bytes: usize = 160;
 
+/// 시각 값 하나가 들어갈 창. `"timestamp":"2026-09-07T01:13:13.040Z"` 가 37 B 라 그 1.7 배다.
+///
+/// **여기가 단일 출처다** — `timestampSeconds` 가 읽을 바이트의 크기이므로 그 함수와 같은 모듈에
+/// 산다. 스캔 워커(macOS)와 원격 헬퍼가 각자 64 를 적으면 한쪽만 늘었을 때 **시각이 조용히
+/// 사라진다**(로컬은 뜨는데 원격은 안 뜨는 모양).
+pub const timestamp_window_bytes: usize = 64;
+
 /// 이미지 줄에서 이 바이트까지만 본다. `tool_use_id` 는 레코드 머리에 있으므로(실측 100%) 넉넉하다.
 pub const max_prefix_bytes: usize = 64 * 1024;
 

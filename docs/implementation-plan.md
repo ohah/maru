@@ -1422,10 +1422,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    같은 `maru-{hid:032x}-{rid:032x}-{eid}` canonical 형식이며 userInfo에도 문자열 `hid`/`rid`와 숫자 `eid`를 싣는다.
    in-process·hook·앱 자체 알림은 route가 없으므로 기존 UUID identifier와 window-token/surface route를 유지한다. 표시 문자열을
    stable key로 역파싱하지 않으며 GUI는 `.os` bit를 내리지 않는다. N3는 그 route의 response를 cold-launch exact attach로
-   소비하는 별도 slice다. Debug·ReleaseFast 집중 gate와 AppHost ABI 4,070-test aggregate, Swift type-check 및 실제
+   소비한다. Debug·ReleaseFast 집중 gate와 AppHost ABI 4,070-test aggregate, Swift type-check 및 실제
    `Maru.app` 링크가 이 투영을 검증한다. 실제 Notification Center 게시·replace는 위 provisioned 제품 gate에 남긴다.
 
-   **N3 cold-launch notification route:** Notification Center response의 `userInfo`는 저장된 OS 입력이라 권위가 아니다.
+   **N3 cold-launch notification route (자동 구현·검증 완료, 실제 OS gate 미완료):** Notification Center response의 `userInfo`는 저장된 OS 입력이라 권위가 아니다.
    Swift는 문자열 `hid`/`rid`를 정확히 32자의 lowercase hex, `eid`를 0이 아닌 정수로 읽고, 세 값으로 shared C
    formatter가 만든 canonical request identifier가 실제 request identifier와 byte-for-byte 같을 때만 stable route를
    admit한다. stable route가 있으면 process-local `wt`/`sid`는 새 앱 epoch에서 재사용될 수 있으므로 attach 권위나
@@ -1443,12 +1443,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    journal row가 이미 회수됐다는 이유로 attach를 거부하지 않는다. route 없는 local/app-owned 알림만 기존 `wt`/`sid`
    process-local 클릭 경로를 유지한다.
 
+   제품 구현은 shared C formatter/parser, AppKit delegate의 `app.run()` 전 설치, 최대 8개의 exact-key launch queue,
+   main-actor one-shot drain과 AppSession의 `probe_bound | activate_bound | adopt_recovered` 경로를 사용한다. 자동 gate는
+   malformed/incoherent/overflow route, stable-key-shaped 입력의 local fallback 금지, cross-Window duplicate,
+   projection/config-off 상태의 secure registry exact attach, 재응답의 중복 attach 0을 검증한다. 실제
+   Notification Center 배너 클릭은 provisioned signed runner가 필요한 별도 release gate다.
+
    **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 로컬/일반 CI 구현과 ad-hoc 제품 gate는 완료.** P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. 이는 새 기능 구현 잔여가 아니라 release provenance gate다. 실행 중 업그레이드
-   U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·soak도 별도 release gate다. release와 무관한 다음 후보는
-   `performance-budget.md`의 launch→first drawable(L1: 일반 제품 시작 경로를 보존한 strict baseline), key→screen E2E,
-   장시간 연속 soak 계측이다. G3은 출하 뒤 기본값을
+   U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1
+   launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다. 따라서 다음 비릴리스 후보는
+   `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**이다. G3은 출하 뒤 기본값을
    다시 바꿀 때만 여는 별도 백로그이고 P6은 선택 확장 범위다.
 
    **G1 config loader provenance:** opt-in 설정의 의도를 보존하기 위해 config loader가 resolved bool과 별도로

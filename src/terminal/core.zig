@@ -10276,3 +10276,90 @@ test "kitty 애니메이션: PNG 프레임은 ENOTSUPP 다 (문서가 약속했�
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.frameCount());
 }
+
+test "kitty 애니메이션: 합성 네 경로 — x/y 오프셋·알파 블렌드·베이스 프레임·Y 배경색 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [128]u8 = undefined;
+    var seq: [256]u8 = undefined;
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4; // 2x2 빨강 불투명
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+
+    // **네 경로 모두 판정자가 한 번도 안 탔다**(적대적 검증에서 발견). 동작은 맞았지만 그물이
+    // 없어서, 합성 산술이 조용히 틀어져도 아무도 모른다 — 애니메이션은 「색이 이상하다」로만 보인다.
+
+    // (1) x/y 오프셋 + 베이스 프레임: 1x1 파랑을 (1,1)에 놓고 나머지는 베이스(빨강)를 물려받는다.
+    const blue1 = [_]u8{ 0, 0, 255, 255 };
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=1,v=1,i=1,c=1,x=1,y=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &blue1)}));
+    const f2 = core.kitty_images.map.get(1).?.framePixels(2);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, f2[0..4]); // (0,0) 베이스 그대로
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, f2[12..16]); // (1,1) 새 픽셀
+
+    // (2) 알파 블렌드(X 미지정 = source-over): 반투명 초록을 프레임 2 위에 얹는다.
+    // (0,0)은 빨강(255,0,0,255) 위에 (0,255,0,128) → R=255*127/255=127, G=255*128/255=128, A=255.
+    const halfgreen = [_]u8{ 0, 255, 0, 128 } ** 4;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,c=2,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &halfgreen)}));
+    const f3 = core.kitty_images.map.get(1).?.framePixels(3);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 127, 128, 0, 255 }, f3[0..4]);
+
+    // (3) X=1 은 덮어쓴다 — 같은 입력이 블렌드 없이 그대로 들어간다(두 모드가 실제로 갈리는지).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,c=2,X=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &halfgreen)}));
+    const f4 = core.kitty_images.map.get(1).?.framePixels(4);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 128 }, f4[0..4]);
+
+    // (4) Y= 배경색(0xRRGGBBAA): 베이스 없이 배경만 채우고 그 위에 1x1 을 (0,0)에 놓는다.
+    // 0xFF00FF00 → r=255 g=0 b=255 a=0. (1,1)은 손대지 않았으니 배경 그대로여야 한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=1,v=1,i=1,Y=4278255360,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &blue1)}));
+    const f5 = core.kitty_images.map.get(1).?.framePixels(5);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 255, 0 }, f5[12..16]);
+}
+
+test "kitty 애니메이션: z<0 프레임은 재생에서 건너뛴다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    var k: usize = 0;
+    while (k < 3) : (k += 1) try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,r=1,z=10,q=2\x1b\\");
+
+    // **음수 gap 은 「지운다」가 아니라 「건너뛴다」다**(명세). 번호는 유지되고 합성 베이스로는 여전히
+    // 쓸 수 있어야 한다 — 지워 버리면 뒤 프레임의 베이스 참조가 어긋난다.
+    try core.write("\x1b_Ga=a,i=1,r=3,z=-1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(u32, 4), core.kitty_images.map.get(1).?.frameCount()); // 번호 유지
+
+    try core.write("\x1b_Ga=a,i=1,c=2,s=3,q=2\x1b\\");
+    _ = core.advanceAnimations(10);
+    try std.testing.expectEqual(@as(u32, 4), core.kitty_images.map.get(1).?.current_frame); // 3 을 건너뛰었다
+
+    // **양성 대조**: 건너뛰기를 풀면 3 에 선다 — 게이트가 넓어 프레임을 잃은 게 아님을 증명한다.
+    try core.write("\x1b_Ga=a,i=1,r=3,z=10,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,c=2,s=3,q=2\x1b\\");
+    _ = core.advanceAnimations(10);
+    try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.current_frame);
+}
+
+test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=a,i=1,s=3,c=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 32), core.kitty_images.total_bytes);
+
+    // 같은 id 로 다시 전송하면 이미지가 통째로 교체된다 — **프레임 바이트도 회수되고 재생 상태도
+    // 처음으로 돌아가야 한다**. 안 그러면 회계가 새고, 없어진 프레임을 가리키는 current_frame 이 남는다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 1), img.frameCount());
+    try std.testing.expectEqual(@as(u32, 1), img.current_frame);
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+}

@@ -21,12 +21,26 @@
 # usage: run-test-shards.sh <n> <test-binary> [args...]
 set -u
 
-# 하루 넘은 `/tmp/maru-*` 를 지운다. 실패해도 테스트를 막지 않는다(청소는 곁일이다).
+# 하루 넘은 `/tmp/maru-*` **테스트 픽스처**를 지운다. 실패해도 테스트를 막지 않는다(청소는 곁일이다).
+#
+# 🔥 **`/tmp/maru-<uid>` 는 건드리면 안 된다.** 그것은 테스트 픽스처가 아니라 **제품**의 session
+# host 소켓 뿌리다(`short_endpoint.zig` — 그 아래 `sh/<host>.sock` 과 `session-host/` 가 산다).
+# host 가 하루 넘게 조용하면 디렉터리 mtime 이 안 바뀌므로, 이름으로 안 가르면 **살아 있는
+# 소켓을 지우고** keep-alive 터미널이 재접속을 잃는다(적대적 1회차에 잡았다 — 실측으로 그때
+# `/private/tmp/maru-501` 아래에 `sh/` 39 개 · `session-host/` 52 개가 있었다).
+#
+# 가르는 법: **`maru-` 뒤가 숫자뿐이면 제품**(uid)이고, 그 밖은 테스트 픽스처다
+# (`maru-<태그>-<pid>` · `maru-t<pid>`).
 sweep_stale_fixtures() {
     # `/tmp` 는 macOS 에서 `/private/tmp` 로의 심볼릭 링크라 `find` 가 안 따라간다.
     root=/tmp
     [ -d /private/tmp ] && root=/private/tmp
-    find "$root" -maxdepth 1 -name 'maru-*' -mtime +1 -exec rm -rf {} + 2>/dev/null || :
+    find "$root" -maxdepth 1 -name 'maru-*' -mtime +1 2>/dev/null | while IFS= read -r d; do
+        case "${d##*/maru-}" in
+            *[!0-9]*) rm -rf "$d" ;;
+        esac
+    done
+    :
 }
 n=$1
 bin=$2

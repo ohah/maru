@@ -16245,11 +16245,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "release_adapter_notification_concrete", .module = notification_concrete_mod },
                     .{ .name = "release_adapter_notification_workspace", .module = notification_workspace_mod },
+                    .{ .name = "release_adapter_files", .module = notification_app_receipt_files_mod },
                 },
             }),
         });
         const run_notification_concrete_tests = b.addRunArtifact(notification_concrete_tests);
-        run_notification_concrete_tests.addArg("--maru-expect-tests=3");
+        run_notification_concrete_tests.addArg("--maru-expect-tests=4");
         run_notification_concrete_tests.setCwd(b.path("."));
         session_host_notification_concrete_step.dependOn(&run_notification_concrete_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_concrete_tests.step);

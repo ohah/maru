@@ -59,6 +59,14 @@ pub fn retryCleanup(io: std.Io, allocator: std.mem.Allocator, inputs: Inputs, ex
     try owner.retryCleanupWith(&steps, &execution.owner);
 }
 
+/// Consumes the one durable scenario receipt after the outer R2 transaction has derived its
+/// final evidence. A failed unlink keeps the exact held-file authority retryable.
+pub fn finishSuccessful(output_path: [:0]const u8, execution: *Execution) !void {
+    if (!execution.owner.ownsReceipt() or execution.receipt.value() == null) return error.InvalidOwner;
+    try execution.receipt.remove(output_path);
+    execution.* = .{};
+}
+
 const Steps = struct {
     io: std.Io,
     allocator: std.mem.Allocator,

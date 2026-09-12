@@ -3699,8 +3699,8 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_activity_roundtrip = b.addRunArtifact(activity_roundtrip_tests);
-        run_activity_roundtrip.addArg("--maru-expect-tests=9");
-        run_activity_roundtrip.addArg("--maru-expect-passed=9"); // env 가 빠지면 조용히 초록이 된다
+        run_activity_roundtrip.addArg("--maru-expect-tests=12");
+        run_activity_roundtrip.addArg("--maru-expect-passed=12"); // env 가 빠지면 조용히 초록이 된다
         run_activity_roundtrip.setCwd(b.path("."));
         run_activity_roundtrip.step.dependOn(&install_native_watch.step);
         run_activity_roundtrip.setEnvironmentVariable(

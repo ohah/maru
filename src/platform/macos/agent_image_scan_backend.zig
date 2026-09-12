@@ -54,8 +54,14 @@ pub const Result = struct {
     /// `scanned_bytes`(체인 전체의 합)와 **다른 값이다**.
     remote_head_bytes: u64 = 0,
     /// **이어읽기 자국**(판 2 · RAV7b · 계획 §19.2). 머리 파일의 이 자리부터 다시 훑으면 같은 결과를
-    /// 얻는다. RAV7b-3 이 쓴다 — 지금은 싣고 두기만 한다.
+    /// 얻는다.
     remote_resume_offset: u64 = 0,
+    /// **저쪽이 실제로 어디부터 읽었나**(판 3 · RAV7b-3). 0 이면 처음부터 — 요청을 안 했거나 저쪽이
+    /// **못 지킨** 것이다(파일이 그새 잘렸다).
+    ///
+    /// 🔥 소비자는 이 값으로 「이어읽기가 먹혔나」를 안다. 안 보고 지난 히트에 이어 붙이면, 저쪽이
+    /// 처음부터 훑어 보낸 **전체 목록**이 앞부분과 겹쳐 **같은 활동이 두 번** 뜬다.
+    remote_resumed_from: u64 = 0,
     scan_ns: u64 = 0,
     /// 이 결과를 만든 요청. main actor 가 「지금 보고 있는 것」과 대조해 늦게 온 것을 버린다.
     generation: u64 = 0,
@@ -571,6 +577,7 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_co
             result.scanned_bytes = flags.scanned_bytes;
             result.remote_head_bytes = flags.head_bytes;
             result.remote_resume_offset = flags.resume_offset;
+            result.remote_resumed_from = flags.resumed_from;
         },
         .record => |rec| {
             result.hits.append(allocator, rec.hit) catch {
@@ -719,14 +726,17 @@ test "원격 매핑: 체인이 여럿이어도 머리 자국을 쓴다 — 합�
         .scanned_bytes = 1_000_000, // 체인 전체
         .head_bytes = 4_096, // 머리만
         .resume_offset = 2_048, // 미결 호출까지 되돌린 자리
+        .resumed_from = 1_024, // 이번에 읽기 시작한 자리
     }).?;
     n = wire.appendTail(&buf, n, 0).?;
 
     var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
     defer result.deinit(testing.allocator);
+    // **넷이 서로 다른 수로 도착한다** — 한 자리라도 섞이면 여기서 죽는다.
     try testing.expectEqual(@as(u64, 1_000_000), result.scanned_bytes);
     try testing.expectEqual(@as(u64, 4_096), result.remote_head_bytes);
     try testing.expectEqual(@as(u64, 2_048), result.remote_resume_offset);
+    try testing.expectEqual(@as(u64, 1_024), result.remote_resumed_from);
     try testing.expectEqual(@as(u8, 2), result.remote_file_count);
 }
 

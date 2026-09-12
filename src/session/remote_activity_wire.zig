@@ -279,6 +279,10 @@ pub fn appendFile(out: []u8, at: usize, index_of: u8, path: []const u8) ?usize {
 }
 
 pub fn appendFlags(out: []u8, at: usize, flags: ScanFlags) ?usize {
+    // **내는 쪽도 불변식을 지킨다**(적대적 B1 · 판 2). 파서만 거부하면 헬퍼 버그가 **답 전체**를
+    // `Malformed` 로 만들어 「활동이 0」이 아니라 「못 읽었다」로 뜬다 — 맞는 결말이지만, 애초에
+    // 깨진 줄을 **안 만드는** 것이 이 인코더의 규율이다(`appendRangeBytes` 가 상한에서 그러듯).
+    if (flags.resume_offset > flags.head_bytes) return null;
     var n = appendBytes(out, at, "S ") orelse return null;
     n = appendField(out, n, @intFromBool(flags.partial)) orelse return null;
     n = appendField(out, n, @intFromBool(flags.image_partial)) orelse return null;
@@ -743,6 +747,17 @@ test "자국이 읽은 바이트를 넘는다고 주장하면 거부한다 (RAV7
 
     var p = Parser.init(buf[0 .. h + bad.len]);
     try testing.expectError(ParseError.Malformed, p.next());
+}
+
+test "인코더도 자국 불변식을 지킨다 — 깨진 줄을 애초에 안 만든다 (RAV7b)" {
+    // 🔥 적대적 B1: 파서만 거부하면 헬퍼 버그가 **답 전체**를 `Malformed` 로 만든다. 맞는 결말이긴
+    // 하지만, 이 인코더의 규율은 「잘린·깨진 것을 **안 만든다**」이다(`appendRecord`·
+    // `appendRangeBytes` 가 같은 자리에서 같은 판단을 한다).
+    var buf: [256]u8 = undefined;
+    const n = appendHeader(&buf, 0).?;
+    try testing.expectEqual(@as(?usize, null), appendFlags(&buf, n, .{ .head_bytes = 40, .resume_offset = 41 }));
+    // 같은 값은 받는다 — 미결 호출이 없으면 자국이 곧 읽은 데까지다.
+    try testing.expect(appendFlags(&buf, n, .{ .head_bytes = 40, .resume_offset = 40 }) != null);
 }
 
 test "자국이 읽은 바이트와 같은 것은 받는다 — 미결 호출이 없으면 그 자리다 (RAV7b)" {

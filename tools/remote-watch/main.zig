@@ -1063,16 +1063,25 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         scanner.deinit(gpa);
         scanner = .{ .file_index = @intCast(at) };
         const before = offset;
+        var head_broke = false;
         scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset) catch |err| switch (err) {
             // 🔥 **채널이 끊겼으면 곧바로 접는다 — 다음 파일로 안 간다**(적대적 O2). 여기서 `truncated`
             // 로 뭉개면 M1 의 고침이 체인에서 **깨진다**: 받는 이가 없는데 부모 rollout(실측 최대
             // 1.8 GB)을 계속 훑어 남의 서버 CPU 를 태운다.
             error.ChannelGone => return,
-            error.Truncated => truncated = true,
+            error.Truncated => {
+                truncated = true;
+                head_broke = at == 0;
+            },
         };
         // **머리 파일의 것만 찍는다**(RAV7b). 자라는 것은 머리뿐이고(부모 rollout 은 재개 시점에
         // 끝난 파일이다), 이어읽기도 거기서만 일어난다 — 계획 §19.1.
-        if (at == 0) {
+        //
+        // 🔥 **읽다 죽었으면 안 찍는다**(적대적 A1). 그때 「읽은 바이트」는 파일 끝이 아니라 **멈춘
+        // 자리**다 — 신선도가 그 자리에서 1 바이트를 청하면 **언제나 바이트가 오고**, 그것을
+        // 「자랐다」로 읽어 **매 주기마다 통째로 다시 훑는다**(이 슬라이스가 없애려던 바로 그것).
+        // 0 이면 신선도가 꺼져 재진입마다 훑는다 — 뷰를 떠나면 멈추므로 **덜 아는 쪽**이 덜 나쁘다.
+        if (at == 0 and !head_broke) {
             head_bytes = offset - before;
             resume_offset = scanner.resumeOffset(hits.items);
         }

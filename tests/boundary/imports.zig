@@ -7569,7 +7569,12 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
     var pending_pair = false;
     var it = std.mem.splitScalar(u8, source, '\n');
     while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null and
+        // 🔥 **두 조건을 다 본다**(RAV7b 적대적 E2). macOS 전용 블록은 `target.result`(만들 대상)로도
+        // `builtin`(빌드를 도는 기계)으로도 열린다 — 한쪽만 보면 **다른 쪽 블록 전체가 이 게이트의
+        // 눈 밖**이고, 그 안의 스텝은 어디에도 안 붙은 채 통과한다. 실제로 그랬다: 원격 활동 수직
+        // 판정자가 `builtin` 블록 안에 있어 CI 어느 job 도 안 불렀고, 짝 게이트는 초록이었다.
+        if ((std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null or
+            std.mem.indexOf(u8, line, "builtin.os.tag == .macos") != null) and
             std.mem.indexOf(u8, line, "if (") != null)
         {
             in_macos = depth + 1;

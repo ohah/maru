@@ -3625,6 +3625,12 @@ pub fn build(b: *std.Build) void {
         run_remote_activity_vertical.addArg("--maru-expect-tests=18");
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
+        // 🔥 **CI 에도 건다**(적대적 E2). 판정자의 **실행**은 `test-macos-app-host-abi` 가 4,781 개를
+        // 필터 없이 돌려 이미 덮지만(실측), **개수 가드는 이 스텝에만 있다** — 전수 스위트는 판정자가
+        // 조용히 사라져도(4781 → 4780) 아무도 안 센다. 필터가 아무것도 안 고르는 회귀는 실제로 한 번
+        // CI 를 통과했다(2026-08-31, 위 `test-macos-only` 주석).
+        test_step.dependOn(&run_remote_activity_vertical.step);
+        macos_only_test_step.dependOn(&run_remote_activity_vertical.step);
 
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
         run_remote_explorer_tests.addArg("--maru-expect-tests=11"); // 이름 있는 8 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
@@ -3693,8 +3699,8 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_activity_roundtrip = b.addRunArtifact(activity_roundtrip_tests);
-        run_activity_roundtrip.addArg("--maru-expect-tests=7");
-        run_activity_roundtrip.addArg("--maru-expect-passed=7"); // env 가 빠지면 조용히 초록이 된다
+        run_activity_roundtrip.addArg("--maru-expect-tests=9");
+        run_activity_roundtrip.addArg("--maru-expect-passed=9"); // env 가 빠지면 조용히 초록이 된다
         run_activity_roundtrip.setCwd(b.path("."));
         run_activity_roundtrip.step.dependOn(&install_native_watch.step);
         run_activity_roundtrip.setEnvironmentVariable(
@@ -5976,8 +5982,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_remote_watch_contract = b.addRunArtifact(remote_watch_contract_tests);
-    run_remote_watch_contract.addArg("--maru-expect-tests=3");
-    run_remote_watch_contract.addArg("--maru-expect-passed=3");
+    run_remote_watch_contract.addArg("--maru-expect-tests=4");
+    run_remote_watch_contract.addArg("--maru-expect-passed=4");
     run_remote_watch_contract.setCwd(b.path("."));
     remote_watch_contract_step.dependOn(&run_remote_watch_contract.step);
     boundary_step.dependOn(&run_remote_watch_contract.step);

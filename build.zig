@@ -15435,6 +15435,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-app-receipt",
         "Validate canonical Notification Center app receipt parsing and publication",
     );
+    const session_host_notification_continuity_receipt_step = b.step(
+        "test-session-host-notification-continuity-receipt",
+        "Validate product-derived Notification Center PID and screen continuity receipts",
+    );
     const session_host_notification_process_owner_step = b.step(
         "test-session-host-notification-process-owner",
         "Validate single-owner Notification Center app/helper process composition",
@@ -15965,6 +15969,45 @@ pub fn build(b: *std.Build) void {
         run_notification_app_receipt_tests.setCwd(b.path("."));
         session_host_notification_app_receipt_step.dependOn(&run_notification_app_receipt_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_app_receipt_tests.step);
+        const notification_continuity_helper_receipt_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_helper_receipt.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_continuity_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_continuity_evidence_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_evidence.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{.{ .name = "release_manifest", .module = notification_continuity_manifest_mod }},
+        });
+        const notification_continuity_receipt_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_continuity_receipt.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{
+                .{ .name = "release_evidence", .module = notification_continuity_evidence_mod },
+                .{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod },
+                .{ .name = "release_adapter_notification_helper_receipt", .module = notification_continuity_helper_receipt_mod },
+            },
+        });
+        const notification_continuity_receipt_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_continuity_receipt.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_notification_continuity_receipt", .module = notification_continuity_receipt_mod }},
+            }),
+        });
+        const run_notification_continuity_receipt_tests = b.addRunArtifact(notification_continuity_receipt_tests);
+        run_notification_continuity_receipt_tests.addArg("--maru-expect-tests=4");
+        run_notification_continuity_receipt_tests.setCwd(b.path("."));
+        session_host_notification_continuity_receipt_step.dependOn(&run_notification_continuity_receipt_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_continuity_receipt_tests.step);
         const notification_process_owner_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_process_owner.zig"),
             .target = target,

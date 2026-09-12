@@ -209,6 +209,14 @@ pub const ScenarioId = enum {
     /// 배경으로 칠하지만 Lab 에는 그 경로가 없다. **랩의 한계이지 제품 결함이 아니다**(토큰을 확인했다 —
     /// `tab_active_bg` 는 `surface_bg` 와 다른 색이다). 선택 자리는 제품 테스트가 잰다.
     context_menu_send,
+    /// **선택 헬퍼 한 줄**(NSH — send-selection-to-agent.md §6.2). 고르고 손을 떼면 caret 아래 뜨는
+    /// 그 상자다. 같은 `context_menu.view` 를 **항목 하나**로 부르는 것이 제품과 같은 경로이며,
+    /// 이 캡처가 답하는 것은 «한 줄짜리 상자가 라벨을 담고 테두리가 닿지 않는가» 다 — 한글이
+    /// EAW Wide 라 폭 계산이 틀리면 여기서 곧바로 드러난다.
+    ///
+    /// **자리(캐럿 한 줄 아래)는 이 캡처가 답하지 않는다** — Lab 은 앵커를 고정값으로 주고, 그
+    /// 계산은 `bodyAnchor` 판정자와 제품 경로 판정자가 잰다.
+    context_menu_send_helper,
     /// 같은 메뉴에서 **둘 다 꺼진** 상태. 예전에는 `checked_mask == 0` 이 "체크 열 없음"과 같은 뜻이라
     /// 이 상태에서 라벨이 두 칸 왼쪽으로 튀었다 — 위 캡처와 **같은 폭**이어야 한다는 것이 계약이다.
     context_menu_unchecked,
@@ -348,7 +356,7 @@ pub fn buildFrame(
         .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
-        .context_menu_checked, .context_menu_unchecked, .context_menu_send => buildContextMenuFrame(scenario, tokens, buffers),
+        .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
@@ -1150,7 +1158,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1240,10 +1248,20 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
         maru.i18n.t(.ctx_paste),
         maru.i18n.t(.ctx_select_all),
     };
-    const items: []const []const u8 = if (scenario.id == .context_menu_send) &send_items else &view_items;
+    // 헬퍼는 **머리글 한 줄뿐**이다(§6.2) — 제품이 `sendSelectionHeader` 로 만드는 그 문구이고,
+    // 여기서도 같은 i18n 키를 읽는다(리터럴을 새로 지으면 캡처 폭이 제품과 갈린다).
+    const helper_items = [_][]const u8{maru.i18n.t(.ctx_send_selection)};
+    const items: []const []const u8 = switch (scenario.id) {
+        .context_menu_send => &send_items,
+        .context_menu_send_helper => &helper_items,
+        else => &view_items,
+    };
 
     var state: chrome.components.context_menu.State = .{};
-    if (scenario.id == .context_menu_send) {
+    if (scenario.id == .context_menu_send_helper) {
+        // 머리글이 아니라 **고를 수 있는 한 줄**이다 — 누르면 보내기가 돈다. 그래서 `show` 다.
+        state.show(context_menu_fixture_anchor_x, context_menu_fixture_anchor_y, items.len);
+    } else if (scenario.id == .context_menu_send) {
         // 머리글 한 줄만 고를 수 없다. 선택은 **둘째 대상**에 둔다 — "마지막으로 보낸 대상이
         // 기본 선택" 을 그림으로 보이려면 첫 줄이 아니어야 하고(첫 줄은 기본값과 구별이 안 된다),
         // 머리글에 강조가 안 붙는 것도 같은 캡처에서 보인다.

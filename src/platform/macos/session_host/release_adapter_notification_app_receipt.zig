@@ -24,7 +24,7 @@ pub const Scenario = enum {
     gui_zero,
     gui_live_then_quit,
 
-    fn wire(self: @This()) []const u8 {
+    pub fn wire(self: @This()) []const u8 {
         return switch (self) {
             .gui_zero => "gui-zero",
             .gui_live_then_quit => "gui-live-then-quit",
@@ -177,7 +177,7 @@ const FilesystemPublisher = struct {
     }
 };
 
-fn validateExpected(expected: Expected) Error!void {
+pub fn validateExpected(expected: Expected) Error!void {
     if (!lowerHex(expected.host_id, 32) or !lowerHex(expected.runtime_id, 32) or
         allZero(expected.host_id) or allZero(expected.runtime_id) or
         expected.event_id == 0 or expected.clicked_at_ns == 0 or

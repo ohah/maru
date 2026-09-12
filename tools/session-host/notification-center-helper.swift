@@ -154,7 +154,7 @@ private struct NotificationCenterHelper {
                           AXUIElementPerformAction(target, kAXPressAction as CFString) == .success
                     else { fail(.pressFailed) }
                     let clicked = continuousNanoseconds()
-                    guard clicked > observed, clicked <= deadline else { fail(.pressFailed) }
+                    guard clicked > observed, clicked < deadline else { fail(.pressFailed) }
                     writeResult(nonce: nonce, observedNs: observed, clickedNs: clicked)
                     return
                 }

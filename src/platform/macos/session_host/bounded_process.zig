@@ -19,6 +19,7 @@ pub const Error = error{
     InvalidDirectoryFd,
     InvalidInputFd,
     InvalidOutputFd,
+    InvalidOwner,
     InvalidExpectedSize,
     InvalidBudget,
     AliasedOutput,
@@ -32,6 +33,107 @@ pub const Error = error{
     WaitFailed,
     ChildFailed,
 };
+
+/// A process group whose one intentionally inherited write descriptor is read separately from
+/// process lifetime. GUI scenarios may publish a receipt and remain alive until the runner asks
+/// them to quit, so the ordinary run-and-reap capture boundary cannot represent this lifecycle.
+pub const InheritedPipeChild = struct {
+    owner: ?*InheritedPipeChild = null,
+    pid: c.pid_t = -1,
+    read_fd: c.fd_t = -1,
+    receipt_complete: bool = false,
+    receipt_failed: bool = false,
+
+    pub fn readReceipt(self: *@This(), io: std.Io, output: []u8, budget_ns: i128) Error![]const u8 {
+        if (self.owner != self or self.pid <= 0 or self.read_fd < 0 or self.receipt_failed) return error.InvalidOwner;
+        if (output.len == 0 or budget_ns <= 0) return error.InvalidBudget;
+        return self.readReceiptOnce(io, output, budget_ns) catch |err| {
+            self.receipt_failed = true;
+            return err;
+        };
+    }
+
+    fn readReceiptOnce(self: *@This(), io: std.Io, output: []u8, budget_ns: i128) Error![]const u8 {
+        var used: usize = 0;
+        const start = std.Io.Clock.awake.now(io).nanoseconds;
+        const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
+        while (true) {
+            const now = std.Io.Clock.awake.now(io).nanoseconds;
+            if (now >= deadline) return error.TimedOut;
+            const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+            const wait_ms: c_int = @intCast(@min(remaining_ms, poll_quantum_ms));
+            var descriptor = [_]c.pollfd{.{ .fd = self.read_fd, .events = c.POLL.IN, .revents = 0 }};
+            const rc = c.poll(&descriptor, 1, wait_ms);
+            if (rc < 0) {
+                if (posix.errno(rc) == .INTR) continue;
+                return error.CaptureFailed;
+            }
+            if (rc == 0) continue;
+            if (descriptor[0].revents & (c.POLL.ERR | c.POLL.NVAL) != 0) return error.CaptureFailed;
+            if (descriptor[0].revents & (c.POLL.IN | c.POLL.HUP) == 0) continue;
+            var overflow: [1]u8 = undefined;
+            const destination = if (used == output.len) overflow[0..] else output[used..];
+            const count = c.read(self.read_fd, destination.ptr, destination.len);
+            if (count < 0) {
+                if (posix.errno(count) == .INTR) continue;
+                return error.CaptureFailed;
+            }
+            if (count == 0) {
+                _ = c.close(self.read_fd);
+                self.read_fd = -1;
+                self.receipt_complete = true;
+                return output[0..used];
+            }
+            if (used == output.len) return error.OutputTooLarge;
+            used += @intCast(count);
+        }
+    }
+
+    /// Terminates and reaps only this child's process group, then revokes the receipt descriptor.
+    pub fn terminate(self: *@This()) Error!void {
+        if (self.owner != self or self.pid <= 0 or
+            (self.read_fd < 0 and !self.receipt_complete and !self.receipt_failed))
+            return error.InvalidOwner;
+        terminateGroup(self.pid);
+        if (!reapChild(self.pid, null)) return error.WaitFailed;
+        if (self.read_fd >= 0) _ = c.close(self.read_fd);
+        self.* = .{};
+    }
+};
+
+/// Starts a child with a closed environment and exactly one extra descriptor at fd 3. Standard
+/// input/output/error are `/dev/null`; protocol bytes can leave only through the inherited pipe.
+pub fn spawnEnvironmentInheritedPipe(
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    result: *InheritedPipeChild,
+) Error!void {
+    if (result.owner != null or result.pid != -1 or result.read_fd != -1 or result.receipt_complete or result.receipt_failed)
+        return error.InvalidOwner;
+    if (executable.len < 2 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null)
+        return error.InvalidExecutable;
+    var receipt_pipe: [2]c.fd_t = undefined;
+    if (!openPipe(&receipt_pipe)) return error.PipeFailed;
+    errdefer closePipe(&receipt_pipe);
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) return error.SpawnSetupFailed;
+    defer _ = c.close(dev_null);
+    const max_fd = getdtablesize();
+    if (max_fd <= 4) return error.SpawnSetupFailed;
+    const pid = c.fork();
+    if (pid < 0) return error.SpawnFailed;
+    if (pid == 0) childExecInheritedPipe(executable, argv, environment, receipt_pipe, dev_null, max_fd);
+    _ = c.close(receipt_pipe[1]);
+    receipt_pipe[1] = -1;
+    if (!establishProcessGroup(pid)) {
+        terminateGroup(pid);
+        _ = reapChild(pid, null);
+        return error.ProcessGroupFailed;
+    }
+    result.* = .{ .owner = result, .pid = pid, .read_fd = receipt_pipe[0] };
+    receipt_pipe[0] = -1;
+}
 
 pub const Digest = struct { size: u64, sha256: [64]u8 };
 
@@ -656,6 +758,25 @@ fn childExec(
     } else {
         _ = execv(executable.ptr, argv);
     }
+    c._exit(126);
+}
+
+fn childExecInheritedPipe(
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    receipt_pipe: [2]c.fd_t,
+    dev_null: c.fd_t,
+    max_fd: c_int,
+) noreturn {
+    const receipt_fd: c.fd_t = 3;
+    if (c.setpgid(0, 0) != 0 or
+        c.dup2(dev_null, 0) < 0 or c.dup2(dev_null, 1) < 0 or c.dup2(dev_null, 2) < 0 or
+        c.dup2(receipt_pipe[1], receipt_fd) < 0 or
+        c.fcntl(receipt_fd, c.F.SETFD, @as(c_int, 0)) != 0) c._exit(126);
+    var inherited_fd: c_int = 4;
+    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
+    _ = execve(executable.ptr, argv, environment);
     c._exit(126);
 }
 

@@ -288,6 +288,63 @@ test "bounded process keeps the child status when a low descriptor limit opens t
     }
 }
 
+test "bounded inherited pipe reads a receipt before terminating a still-live GUI child" {
+    const before = try countOpenFds();
+    const environment = [_:null]?[*:0]const u8{"RECEIPT_FD=3"};
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf receipt >&$RECEIPT_FD; exec 3>&-; sleep 10" };
+    var child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("receipt", try child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidOwner, child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try child.terminate();
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
+test "bounded inherited pipe preserves cleanup authority after timeout and overflow" {
+    const environment = [_:null]?[*:0]const u8{};
+    const timeout_argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "sleep 10" };
+    var timeout_child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &timeout_argv, &environment, &timeout_child);
+    var output: [4]u8 = undefined;
+    try std.testing.expectError(error.TimedOut, timeout_child.readReceipt(std.testing.io, &output, 50 * std.time.ns_per_ms));
+    try std.testing.expectError(error.InvalidOwner, timeout_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try timeout_child.terminate();
+
+    const overflow_argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde >&3" };
+    var overflow_child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &overflow_argv, &environment, &overflow_child);
+    try std.testing.expectError(error.OutputTooLarge, overflow_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidOwner, overflow_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try overflow_child.terminate();
+}
+
+test "bounded inherited pipe rejects copied owners and closes every ambient descriptor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ambient-inherited", .data = "secret" });
+    var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
+    const path = try temporaryPath(&tmp, "ambient-inherited", &path_storage);
+    const opened_fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = false }, @as(c.mode_t, 0));
+    try std.testing.expect(opened_fd >= 0);
+    const ambient_fd = c.fcntl(opened_fd, c.F.DUPFD, @as(c_int, 4));
+    _ = c.close(opened_fd);
+    try std.testing.expect(ambient_fd >= 4);
+    defer _ = c.close(ambient_fd);
+    var fd_storage: [32]u8 = undefined;
+    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked >&3; else printf closed >&3; fi" };
+    var child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
+    var copied = child;
+    var output: [8]u8 = undefined;
+    try std.testing.expectError(error.InvalidOwner, copied.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectEqualStrings("closed", try child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try child.terminate();
+    try std.testing.expectError(error.InvalidOwner, copied.terminate());
+}
+
 test "bounded observation separates stdout and stderr and preserves nonzero exit" {
     var stdout: [4]u8 = undefined;
     var stderr: [4]u8 = undefined;

@@ -69,7 +69,19 @@ test "캐시한 recipe 다이제스트: 대입은 한 번뿐이고 debug 가 값
     try std.testing.expect(countOutsideTests(src, "self.recipe = ") == 0);
 
     // ② 캐시는 생성 지점에서 채워진다.
-    try std.testing.expect(std.mem.indexOf(u8, src, "frame.recipe_digest_cache = rawDigest(") != null);
+    const fill = "frame.recipe_digest_cache = rawDigest(";
+    const fill_at = std.mem.indexOf(u8, src, fill) orelse return error.CacheNeverFilled;
+
+    // ⚠️ **채우는 «순서»까지 본다**(적대적 검증 2026-09-12). 대입보다 먼저 채우면 `frame.recipe` 가
+    //    아직 `undefined` 라 캐시가 쓰레기값이 되는데, 「채우는 줄이 있다」만 보던 판정자는 그 바꿔치기를
+    //    통과시켰다. debug 대조가 런타임에 잡지만 그것은 ReleaseFast 에 없다 — 제품이 조용히 거짓 씰을
+    //    낸다.
+    const assign = "frame.recipe = input.recipe;";
+    const assign_at = std.mem.indexOf(u8, src, assign) orelse return error.RecipeAssignMissing;
+    if (assign_at > fill_at) {
+        std.debug.print("캐시를 recipe 대입보다 먼저 채운다 — undefined 를 해싱한다\n", .{});
+        return error.CacheFilledBeforeAssign;
+    }
 
     // ③ `sealInput` 은 **다시 해싱하지 않는다** — 이 최적화가 되살아나면 빨개진다.
     const seal_at = std.mem.indexOf(u8, src, "fn sealInput(self: *const PreparationFrame)") orelse
@@ -78,6 +90,22 @@ test "캐시한 recipe 다이제스트: 대입은 한 번뿐이고 debug 가 값
     const seal_body = src[seal_at..seal_end];
     try std.testing.expect(std.mem.indexOf(u8, seal_body, "std.mem.asBytes(&self.recipe)") == null);
     try std.testing.expect(std.mem.indexOf(u8, seal_body, "self.recipeDigestChecked()") != null);
+
+    // ⚠️ **캐시를 «실제로 돌려주는지»까지 본다**(적대적 검증 2026-09-12). `recipeDigestChecked` 가
+    //    debug 가드 밖에서 다시 해싱해 돌려주면 이 PR 의 존재 이유가 통째로 사라지는데, 그 바꿔치기가
+    //    판정자를 그대로 통과했다. 고정할 의도는 「그 함수가 저장된 값을 돌려준다」이다.
+    const checked_at = std.mem.indexOf(u8, src, "fn recipeDigestChecked(") orelse
+        return error.CheckedAccessorMissing;
+    const checked_end = std.mem.indexOfPos(u8, src, checked_at, "\n    }\n") orelse src.len;
+    const checked = src[checked_at..checked_end];
+    const guard_end = std.mem.indexOf(u8, checked, "fatalIntegrity(.callback_drift);") orelse
+        return error.DriftCheckMissing;
+    const after_guard = checked[guard_end..];
+    if (std.mem.indexOf(u8, after_guard, "rawDigest(") != null) {
+        std.debug.print("가드 밖에서 다시 해싱한다 — 캐시가 무의미해진다\n", .{});
+        return error.CacheNotReturned;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, after_guard, "return self.recipe_digest_cache;") != null);
 
     // ④ **debug·test 는 값으로 대조한다.** ①은 문법적 대입만 보므로 `@memcpy`·포인터 경유 변경을 못 본다.
     const fn_at = std.mem.indexOf(u8, src, "fn recipeDigestChecked(") orelse return error.AccessorMissing;

@@ -376,6 +376,9 @@ const Table = struct {
     /// 그 호출의 **결과가 그림이었다**(§2.2.1). 줄 수 대신 이것을 적는다 — 그림에 「1줄」은 사실이
     /// 아니라 base64 한 덩이를 센 값이다.
     agent_activity_result_image: [:0]const u8,
+    /// 그 호출이 **끝났는데 본문을 못 읽었다**(계획 §29). 결과 레코드는 왔으므로 자리를 비우면
+    /// 「결말을 못 봤다」는 거짓이 되고, 줄 수를 모르므로 「0줄」도 거짓이다 — 아는 것만 적는다.
+    agent_activity_result_done: [:0]const u8,
     /// 펼침(AV3)이 상한에서 잘렸다. **「없다」와 「안 보인다」를 가르는** 그 규율이다 — 잘린 것을
     /// 말하지 않으면 사용자가 그것을 전부로 읽는다.
     agent_activity_detail_truncated: [:0]const u8,
@@ -1487,6 +1490,7 @@ const en: Table = .{
     .agent_activity_result_lines_suffix = " lines",
     .agent_activity_result_failed = "failed",
     .agent_activity_result_image = "image",
+    .agent_activity_result_done = "done",
     .agent_activity_detail_truncated = "… truncated",
     .agent_activity_detail_result = "Result",
     .agent_activity_detail_exit = "Result · exit {0}",
@@ -2147,6 +2151,7 @@ const ko: Table = .{
     .agent_activity_result_lines_suffix = "줄",
     .agent_activity_result_failed = "실패",
     .agent_activity_result_image = "이미지",
+    .agent_activity_result_done = "완료",
     .agent_activity_detail_truncated = "… 이하 생략",
     .agent_activity_detail_result = "결과",
     .agent_activity_detail_exit = "결과 · 종료 {0}",

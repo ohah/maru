@@ -1042,6 +1042,30 @@ test "본문 검색 비트가 왕복한다 — 「걸렸다」와 「끝까지 �
     try testing.expect(p.complete());
 }
 
+test "«결말은 왔고 본문은 모른다»가 왕복한다 — 원격도 로컬과 같은 것을 본다 (계획 §29)" {
+    // 🔥 그 사실은 **비트가 아니라 자리 0** 이 든다(필드를 안 늘린 이유다). 왕복이 그 0 을 지키지
+    // 않으면 원격만 「결말을 못 봤다」로 남아 **같은 파일이 로컬과 원격에서 갈린다**(계약 §2.3).
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 2, "/home/u/s.jsonl").?;
+    n = appendFlags(&buf, n, .{ .head_bytes = 10, .resume_offset = 10 }).?;
+    var hit = sampleHit();
+    hit.result = .{ .found = true }; // 결말은 왔다 · 자리도 줄 수도 모른다
+    n = appendRecord(&buf, n, .{ .hit = hit }).?;
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = (try p.next()).?; // 체인 파일
+    _ = (try p.next()).?; // 스캔 플래그
+    const ev_rec = (try p.next()).?;
+    try testing.expect(ev_rec.record.hit.result.found);
+    try testing.expectEqual(@as(u64, 0), ev_rec.record.hit.result.body.offset);
+    try testing.expectEqual(@as(u32, 0), ev_rec.record.hit.result.lines);
+    try testing.expect(!ev_rec.record.hit.result.image);
+    try testing.expectEqual(@as(?Event, null), try p.next());
+    try testing.expect(p.complete());
+}
+
 test "본문 검색 비트는 «아는 비트»만 받는다 — 형식이 갈리면 거부한다 (RAV8b)" {
     // 그 밖의 수는 자리가 밀렸다는 뜻이다. 뭉개면 **엉뚱한 줄이 「걸렸다」로 뜬다**.
     var buf: [1024]u8 = undefined;

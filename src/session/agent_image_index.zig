@@ -221,6 +221,11 @@ pub const ResultBody = struct {
 pub const ResultSummary = struct {
     /// 결과 레코드를 실제로 찾았나. 못 찾은 호출(취소·아직 안 끝난 것)은 false 이고, 그때 화면은 요약
     /// 자리를 **비운다** — 「모른다」를 「0 줄」로 적지 않는다.
+    ///
+    /// ⚠️ **「결말이 왔다」와 「본문을 읽었다」는 다른 사실이다**(계획 §29). 결과 레코드는 왔는데 본문을
+    /// 못 읽는 형태가 실제로 있다(Claude `content` 가 `text` 없는 배열 — 실측 153/66,942). 그때도
+    /// 이 값은 **참**이고, 모르는 것은 `body.offset` 이 **0** 으로 말한다. 예전 판은 그 경우 결과
+    /// 레코드를 통째로 버려 그 호출이 영영 「못 봤다」로 남았고, 자국이 이어읽기까지 붙잡았다.
     found: bool = false,
     /// provider 가 **실패라고 적었나.** 우리가 명령이나 출력을 해석해 판정하지 않는다(계약 §2.3).
     /// 근거는 둘뿐이다 — Claude `"is_error":true`(실측 714/40,424), Codex 결과 첫 줄의 `Exit code: N`·
@@ -1149,10 +1154,16 @@ pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?Resu
         const id = findQuotedValueFull(line, 0, tool_use_id_key) orelse return null;
         const body = claudeBody(line, m + claude_tool_result_marker.len);
         if (!body.parsed) {
-            // 본문을 못 읽었으면 「모른다」다 — 0 줄이라 적지 않는다. **다만 이미지 결과는 다르다**:
-            // 본문이 없는 것이 아니라 본문이 **그림**이고, 그 사실은 이미 알고 있다.
-            if (!has_image) return null;
-            return .{ .id = id, .summary = .{ .found = true, .image = true } };
+            // 🔥 **결말은 왔다.** 본문을 못 읽는 것과 결말이 없는 것은 **다른 사실**이다(계약 §2.2).
+            // 예전 판은 여기서 `null` 을 돌려 **결과 레코드를 통째로 버렸고**, 그러면 그 호출은 영영
+            // 「결말을 못 봤다」로 남는다 — 그 자국이 이어읽기까지 붙잡았다(계획 §29).
+            //
+            // 실측이 그 대가를 말한다: 코퍼스 66,942 건 중 **153 건**이 `content` 가 `text` 없는
+            // 배열(`tool_reference`)이고, 그 153 건이 **파일 끝까지 남은 미결의 83%**(24 중 20)였다.
+            //
+            // 본문이 **그림**이면 그 사실을 함께 적는다(아래) — 없는 것이 아니라 읽을 자리가 없다.
+            // 그 밖에는 `body.offset` 이 0 으로 남고, 그 0 이 「자리를 모른다」의 단일 표현이다.
+            return .{ .id = id, .summary = .{ .found = true, .image = has_image } };
         }
         return .{
             .id = id,
@@ -1172,8 +1183,7 @@ pub fn scanResultLine(line: []const u8, line_offset: u64, has_image: bool) ?Resu
         const id = findQuotedValueFull(line, 0, call_id_key) orelse return null;
         const body = codexBody(line, m);
         if (!body.parsed) {
-            if (!has_image) return null; // 위와 같은 이유
-            return .{ .id = id, .summary = .{ .found = true, .image = true } };
+            return .{ .id = id, .summary = .{ .found = true, .image = has_image } }; // 위와 같은 이유
         }
         return .{ .id = id, .summary = .{
             .found = true,
@@ -3063,6 +3073,45 @@ test "이어읽기 자국: 미결 호출이 있으면 그 줄까지 되돌린다
     try testing.expectEqual(open_at, scanner.resumeOffset(hits.items));
 }
 
+test "본문이 «text 없는 배열»이어도 결말은 붙는다 (계획 §29)" {
+    // 🔥 **실측이 이 형태를 강제했다**(2026-09-12, 110 파일 7.2 GB): `ToolSearch` 의 결과는
+    // `content` 가 `[{"type":"tool_reference",…}]` 라 `"text":` 가 없다. 예전 판은 그때
+    // `scanResultLine` 이 null 을 돌려 **결과 레코드를 통째로 버렸고**, 그 호출은 파일 끝까지
+    // 「결말을 못 봤다」로 남았다 — 코퍼스 66,942 건 중 153 건이 이 형태다.
+    const allocator = testing.allocator;
+    const call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_ref","name":"ToolSearch","input":{"query":"select:CronList"}}]}}
+    ;
+    // 실측 그대로다 — 본문이 배열인데 그 안에 `text` 가 없다.
+    const result =
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ref","content":[{"type":"tool_reference","tool_name":"CronList"}]}]}}
+    ;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for ([_][]const u8{ call, result }) |line| {
+        try text.appendSlice(allocator, line);
+        try text.append(allocator, '\n');
+    }
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    try scanner.feed(allocator, text.items, &hits);
+
+    try testing.expectEqual(@as(usize, 1), hits.items.len);
+    const r = hits.items[0].result;
+    // **결말은 왔다.**
+    try testing.expect(r.found);
+    // **본문은 모른다** — 그 사실은 자리 0 이 말한다. 「0 줄」이 아니다.
+    try testing.expectEqual(@as(u64, 0), r.body.offset);
+    try testing.expect(!r.image);
+    // 결말이 붙었으므로 **자국이 안 붙잡힌다** — 이어읽기가 매번 이 파일을 다시 훑지 않는다.
+    try testing.expectEqual(scanner.consumed, scanner.resumeOffset(hits.items));
+    try testing.expectEqual(@as(usize, 0), scanner.pending_live);
+}
+
 test "이어읽기 자국: 결말이 다 붙었으면 읽은 데까지다 (RAV7b)" {
     // **되돌릴 이유가 없으면 안 되돌린다.** 늘 되돌리면 이어읽기가 매번 같은 구간을 다시 훑는다.
     const allocator = testing.allocator;
@@ -3720,6 +3769,12 @@ test "활동 결말: 줄 수를 모르면 「0 줄」이라고 적지 않는다 
     // ⚠️ **그중 이미지 쪽은 §2.2.1 이 답을 바꿨다.** 그때는 「모른다(`found=false`)」로 두는 것이
     // 유일한 정직한 답이었는데, 지금은 **「이미지」라고 말할 수 있다** — 그러면 접기도 서고 요약도
     // 거짓이 아니다. 이 판정자가 지키던 성질(「0 줄」이라고 적지 않는다)은 그대로 지킨다.
+    //
+    // 🔥 **나머지 절반도 같은 이유로 뒤집혔다**(계획 §29). 참조 블록을 `found=false` 로 둔 근거는
+    // 「`found` 가 서면 화면이 「0줄」이라고 적는다」였는데, 그것은 **그때 화면에 그 갈래밖에
+    // 없었기 때문**이다. 이제 「완료」가 있으므로 그 전제가 사라졌다 — 그리고 안 뒤집은 대가가
+    // 실측으로 드러났다: 코퍼스 153 건이 영영 「결말을 못 봤다」로 남았고, 파일 끝까지 남은
+    // 미결의 **83%** 가 그것이라 **이어읽기 자국까지 붙잡았다**.
     const allocator = testing.allocator;
     var out: std.ArrayList(Hit) = .empty;
     defer out.deinit(allocator);
@@ -3746,10 +3801,14 @@ test "활동 결말: 줄 수를 모르면 「0 줄」이라고 적지 않는다 
     // 화면이 「0줄」이라고 적지 않는 근거가 이 값이다(`formatResultSummary` 가 이것으로 갈린다).
     try testing.expect(image_call.?.result.image);
 
-    // ── ② **이미지도 아니고 본문도 못 읽으면 여전히 「모른다」다.** 참조 블록이 그 경우다 —
-    //    여기서 `found` 가 서면 화면이 「0줄」이라고 거짓말한다(이 판정자의 원래 물음).
+    // ── ② **이미지도 아니고 본문도 못 읽어도 「결말은 왔다」**(계획 §29). 참조 블록이 그 경우다.
+    //    모르는 것은 **줄 수와 자리**뿐이고, 그 사실은 `body.offset == 0` 이 든다 —
+    //    화면은 그것으로 갈려 「0줄」이 아니라 **「완료」**를 적는다.
     try testing.expect(ref_call != null);
-    try testing.expect(!ref_call.?.result.found);
+    try testing.expect(ref_call.?.result.found);
+    try testing.expectEqual(@as(u32, 0), ref_call.?.result.lines);
+    try testing.expectEqual(@as(u64, 0), ref_call.?.result.body.offset);
+    try testing.expect(!ref_call.?.result.image);
 }
 
 test "활동 결말: 빈 결과는 «0 줄» 이라는 사실이다 (AV2)" {

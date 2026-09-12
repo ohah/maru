@@ -293,6 +293,40 @@ fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnm
 }
 
 /// 이전 placement 집합(wire)과 현재(core)가 다른가 — 순서·개수·모든 필드 비교. 다르면 delta에 clear+set를 낸다.
+/// delta용 virtual placement(U=1) 방출. `image_place` 와 같은 규율 — **clear 센티넬(image_id=0)** 뒤에
+/// 현재 전체를 싣는다. 집합이 비게 바뀐 경우도 센티넬만으로 표현된다.
+///
+/// **이게 없으면 attach 이후에 등록된 U=1 격자가 client 에 영영 안 닿는다.** `image_virtual` 은 레코드
+/// 정의가 「full-replace 라 snapshot·delta 공용」이라고 선언하는데도 delta 로는 한 번도 나가지 않았고,
+/// client 의 `applyDelta` 에도 분기가 없었다. 그 결과 placeholder 셀이 타일 크기를 못 정해 이미지가
+/// 아예 안 뜨고 **두부 글리프로** 그려졌다(적대적 검증 7회차, 라이브 실측).
+fn appendImageVirtualDelta(
+    allocator: std.mem.Allocator,
+    stream: *std.ArrayListUnmanaged(u8),
+    generation: u64,
+    vps: []const terminal.KittyVirtualPlacement,
+) screen_stream.DecodeError!void {
+    const clear = try screen_stream.encodeImageVirtual(allocator, .{ .kind = .image_virtual, .generation = generation }, .{
+        .image_id = 0,
+        .placement_id = 0,
+        .columns = 0,
+        .rows = 0,
+        .z = 0,
+    });
+    defer allocator.free(clear);
+    try appendProjectedRecord(stream, allocator, clear);
+    for (vps) |vp| try appendImageVirtualRecord(allocator, stream, generation, vp);
+}
+
+fn virtualsChanged(prev: []const screen_stream.ImageVirtualPlacement, cur: []const terminal.KittyVirtualPlacement) bool {
+    if (prev.len != cur.len) return true;
+    for (prev, cur) |a, b| {
+        if (a.image_id != b.image_id or a.placement_id != b.placement_id or
+            a.columns != b.columns or a.rows != b.rows or a.z != b.z) return true;
+    }
+    return false;
+}
+
 fn placementsChanged(prev: []const screen_stream.ImagePlacement, cur: []const terminal.KittyPlacement) bool {
     if (prev.len != cur.len) return true;
     for (prev, cur) |a, b| {
@@ -592,6 +626,8 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     // 이미지 delta 계산용 prev 상태(#1 I4b): 이전 snapshot의 placement 집합과 image_id→generation(client가 이미 가진 것).
     var prev_placements: std.ArrayListUnmanaged(screen_stream.ImagePlacement) = .empty;
     defer prev_placements.deinit(allocator);
+    var prev_virtuals: std.ArrayListUnmanaged(screen_stream.ImageVirtualPlacement) = .empty;
+    defer prev_virtuals.deinit(allocator);
     var prev_image_gens: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer prev_image_gens.deinit(allocator);
     var prev_pm: ?screen_stream.PromptMarks = null;
@@ -611,6 +647,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
                 }
             },
             .image_placement => prev_placements.append(allocator, try screen_stream.decodeImagePlacement(s.body)) catch return error.OutOfMemory,
+            .image_virtual => prev_virtuals.append(allocator, try screen_stream.decodeImageVirtual(s.body)) catch return error.OutOfMemory,
             .image_blob => {
                 const blob = try screen_stream.decodeImageBlob(s.body);
                 prev_image_gens.put(allocator, blob.image_id, blob.generation) catch return error.OutOfMemory;
@@ -683,11 +720,16 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
     for (snap.images) |img| {
         const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
-        // ⚠️ **애니메이션과 만나면 여기가 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
-        // `generation` 을 올리므로, host 가 애니메이션을 진행하기 시작하면 이 조건이 **매 프레임 참**이
-        // 되어 이미지 blob 전체가 다시 나간다(예: 400x300 RGBA, 25fps → 12MB/s). 그래서 지금은
-        // 애니메이션을 **로컬 전용**으로 두었다(host tick 이 `advanceAnimations` 를 안 부른다).
-        // 원격 애니메이션을 켜려면 여기 프레임 델타/재사용 설계가 먼저다.
+        // ⚠️ **여기가 애니메이션의 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
+        // `generation` 을 올리므로 이 조건이 **매 프레임 참**이 되어 이미지 blob 전체가 다시 나간다
+        // (실측: 64x64 RGBA 한 프레임에 16,441 바이트 — `screen delta: generation 이 바뀐 이미지는
+        // blob 전체가 다시 실린다` 판정자가 그 숫자를 고정한다).
+        //
+        // host tick 이 `advanceAnimations` 를 부른다(#3623). 지금 감당할 수 있는 이유는 host 와 app 이
+        // 같은 기계의 유닉스 소켓으로 붙어 있고, **안 보이는 애니메이션은 아예 안 돌기** 때문이다
+        // (뷰포트 밖·다른 화면·placeholder 없음 → `kittyImageVisibleInViewport` 가 막는다).
+        // host 가 원격 기계로 가면 이 계약 위에 그대로 둘 수 없다 — 프레임을 미리 보내고 인덱스만
+        // 나르는 레코드가 먼저다(docs/persistent-session-host.md §12).
         if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
     }
     // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).
@@ -708,6 +750,9 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     }
     if (placementsChanged(prev_placements.items, snap.placements)) {
         try appendImagePlaceDelta(allocator, &delta, opts.generation, snap.placements);
+    }
+    if (virtualsChanged(prev_virtuals.items, snap.virtual_placements)) {
+        try appendImageVirtualDelta(allocator, &delta, opts.generation, snap.virtual_placements);
     }
     // prompt_marks: snapshot(base)엔 있을 때만, delta엔 바뀌었을 때만(clear 전달 위해 skip_if_none=false로 full-replace).
     try appendPromptMarks(allocator, &snapshot, opts.generation, snap, true);
@@ -1482,4 +1527,65 @@ test "screen delta: generation 이 바뀐 이미지는 blob 전체가 다시 실
     // 그래서 원격 애니메이션은 이 계약 위에 **그대로 얹을 수 없다** — 프레임을 미리 보내고 「지금 몇 번
     // 프레임」만 나르는 레코드가 먼저 필요하다. 이 판정자는 그 전제(지금은 통째로 실린다)를 고정한다.
     try std.testing.expect(res.delta.len >= px.len);
+}
+
+// **attach 이후에 등록된 U=1 격자가 client 에 닿는가.**
+//
+// 이 판정자가 생긴 이유(적대적 검증 7회차): 라이브에서 placeholder 이미지가 **두부 글리프로** 떴다.
+// 코어는 정확했고(codepoint 0x10EEEE·grapheme·rgb 전부 맞음) 렌더러의 placeholder 판정자도 초록인데
+// 제품에서만 안 됐다. 원인은 그 사이 — `image_virtual` 은 레코드 정의가 「full-replace 라 snapshot·delta
+// 공용」이라고 **선언해 두고** delta 로는 한 번도 안 나갔고, client 의 `applyDelta` 에도 분기가 없었다.
+// 그래서 attach 시점 snapshot 에 없던 격자는 영영 안 들어오고, placeholder 셀은 타일 크기를 못 정한다.
+//
+// 기존 U=1 패리티 판정자는 **snapshot 경로만** 태워서 이 구멍을 못 봤다. 실제 셸은 attach 뒤에 이미지를
+// 띄우므로 delta 경로가 진짜 경로다.
+test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 닿는다 (적대적 검증)" {
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    // ① attach 시점: 이미지도 격자도 없다.
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(base);
+    try std.testing.expectEqual(@as(usize, 0), asm_.imageVirtualPlacements().len);
+
+    // ② 셸이 그 뒤에 이미지를 띄운다 — U=1 등록 + placeholder 셀.
+    var b64: [32]u8 = undefined;
+    var seq: [96]u8 = undefined;
+    const raw = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7,q=2;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=7,U=1,c=2,r=1,q=2\x1b\\");
+    try core.write("\r\n\x1b[38;2;0;0;7m\u{10EEEE}\u{0305}\u{0305}\x1b[0m");
+
+    var res = try computeDelta(allocator, base, &core, .{ .generation = 1, .sequence = 1 });
+    defer res.deinit(allocator);
+    try asm_.applyDelta(res.delta);
+
+    // client 가 격자를 받았는가 — 이게 없으면 placeholder 는 타일 크기를 못 정하고 글리프로 떨어진다.
+    const vps = asm_.imageVirtualPlacements();
+    try std.testing.expectEqual(@as(usize, 1), vps.len);
+    try std.testing.expectEqual(@as(u32, 7), vps[0].image_id);
+    try std.testing.expectEqual(@as(u32, 2), vps[0].columns);
+    try std.testing.expectEqual(@as(u32, 1), vps[0].rows);
+
+    // ③ 격자가 사라지면(a=d) client 도 비워야 한다 — clear 센티넬이 그 일을 한다.
+    try core.write("\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+    var res2 = try computeDelta(allocator, res.snapshot, &core, .{ .generation = 1, .sequence = 2 });
+    defer res2.deinit(allocator);
+    try asm_.applyDelta(res2.delta);
+    try std.testing.expectEqual(@as(usize, 0), asm_.imageVirtualPlacements().len);
+
+    // ④ **안 바뀌면 안 싣는다** — 매 tick 격자를 다시 보내면 조용한 화면이 계속 바이트를 쓴다.
+    var res3 = try computeDelta(allocator, res2.snapshot, &core, .{ .generation = 1, .sequence = 3 });
+    defer res3.deinit(allocator);
+    var rs = screen_stream.RecordStream{ .bytes = res3.delta };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        try std.testing.expect(s.header.kind != .image_virtual);
+    }
 }

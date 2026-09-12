@@ -428,6 +428,17 @@ pub const ScreenAssembler = struct {
                     if (s.header.generation != self.generation) return error.GenerationGap;
                     try self.handleImageBlob(s.header, s.body);
                 },
+                // U=1 격자는 full-replace 다 — clear 센티넬(image_id=0)이 목록을 비우고 뒤따르는
+                // 레코드가 현재 전체를 채운다(`image_place` 와 같은 규율). 이 분기가 없으면 attach
+                // 이후 등록된 placeholder 격자가 영영 안 들어와 이미지가 두부로 그려진다.
+                .image_virtual => {
+                    const vp = try screen_stream.decodeImageVirtual(s.body);
+                    if (vp.image_id == 0) {
+                        self.virtual_placement_list.clearRetainingCapacity();
+                    } else {
+                        self.virtual_placement_list.append(self.allocator, vp) catch return error.OutOfMemory;
+                    }
+                },
                 .image_place => {
                     if (s.header.generation != self.generation) return error.GenerationGap;
                     const p = try screen_stream.decodeImagePlacement(s.body);

@@ -86,6 +86,49 @@ fn runHelper(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const 
     });
 }
 
+/// **이어읽기 요청**(RAV7b-3 · 판 12) — 그 자리부터 머리 파일만 훑는다.
+fn runHelperFrom(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const u8, from: u64) !std.process.RunResult {
+    var buf: [24]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{d}", .{from});
+    return std.process.run(gpa, io, .{
+        .argv = &.{ bin, "activity", path, "--from", text },
+        .stdout_limit = .limited(wire.max_wire_bytes),
+    });
+}
+
+/// wire 를 통째로 되읽어 자리·라벨·플래그를 모은다. 이어읽기 판정자들이 **두 답을 맞대기** 위해 쓴다.
+const Parsed = struct {
+    hits: std.ArrayList(wire.Hit) = .empty,
+    labels: std.ArrayList(wire.Label) = .empty,
+    flags: wire.ScanFlags = .{},
+    files: usize = 0,
+
+    fn deinit(self: *Parsed, gpa: std.mem.Allocator) void {
+        self.hits.deinit(gpa);
+        self.labels.deinit(gpa);
+    }
+};
+
+fn parseAll(gpa: std.mem.Allocator, bytes: []const u8) !Parsed {
+    var out: Parsed = .{};
+    errdefer out.deinit(gpa);
+    var parser = wire.Parser.init(bytes);
+    while (try parser.next()) |ev| switch (ev) {
+        .file => out.files += 1,
+        .flags => |fl| out.flags = fl,
+        .record => |rec| {
+            try out.hits.append(gpa, rec.hit);
+            try out.labels.append(gpa, rec.label);
+        },
+        .remote_error => |msg| {
+            std.debug.print("원격이 실패를 보고했다: {s}\n", .{msg});
+            return error.TestUnexpectedResult;
+        },
+    };
+    if (!parser.complete()) return error.TestUnexpectedResult;
+    return out;
+}
+
 test "헬퍼 activity 왕복: 저쪽이 훑은 자리·라벨·결말이 파서로 그대로 되읽힌다" {
     const bin = helperBin() orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -256,6 +299,133 @@ test "헬퍼 activity: 미완 줄은 자국 밖이다 — 반쪽 줄을 활동�
     // **읽기는 파일 끝까지 갔지만** 자국은 개행 다음에서 멈춘다.
     try std.testing.expectEqual(@as(u64, complete.len + 1 + half.len), flags.head_bytes);
     try std.testing.expectEqual(@as(u64, complete.len + 1), flags.resume_offset);
+}
+
+test "헬퍼 activity --from: 이어읽은 자리가 통째로 훑은 것과 «바이트까지» 같다 (RAV7b-3)" {
+    // 🔥 **이 슬라이스의 핵심 계약이다.** 이어읽기가 통째 스캔과 다른 자리를 내면 펼침이 엉뚱한
+    // 바이트를 읽고 그림이 깨진다(계약 §2.1 — 오프셋은 파일 절대값이다). 같은 파일을 두 번 물어
+    // **자국 뒤의 히트가 바이트까지 일치**하는지 본다.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b3-eq.{d}.jsonl", .{std.c.getpid()});
+    try writeFixture(io, path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // ── ① 통째로 훑어 기준선을 만든다.
+    const full_out = try runHelper(gpa, io, bin, path);
+    defer gpa.free(full_out.stdout);
+    defer gpa.free(full_out.stderr);
+    var full = try parseAll(gpa, full_out.stdout);
+    defer full.deinit(gpa);
+    try std.testing.expect(full.hits.items.len >= 3);
+    try std.testing.expectEqual(@as(u64, 0), full.flags.resumed_from); // 처음부터 읽었다
+
+    // ── ② 첫 히트의 줄 자리부터 이어 읽는다. 그 앞은 안 읽으므로 히트가 **하나 이상 줄어야** 한다.
+    const from = full.hits.items[1].line_offset;
+    const part_out = try runHelperFrom(gpa, io, bin, path, from);
+    defer gpa.free(part_out.stdout);
+    defer gpa.free(part_out.stderr);
+    var part = try parseAll(gpa, part_out.stdout);
+    defer part.deinit(gpa);
+
+    // **요청을 지켰다.**
+    try std.testing.expectEqual(from, part.flags.resumed_from);
+    // **체인 줄은 그대로 전부 낸다**(§20.2) — 안 그러면 부모 히트의 `file_index` 가 갈 곳을 잃는다.
+    try std.testing.expectEqual(full.files, part.files);
+    // **머리 파일 크기는 같다** — 시작점을 더해야 신선도(RAV7a)가 산다.
+    try std.testing.expectEqual(full.flags.head_bytes, part.flags.head_bytes);
+    // **읽은 바이트는 줄었다** — 그것이 이 슬라이스의 값이다.
+    try std.testing.expect(part.flags.scanned_bytes < full.flags.scanned_bytes);
+
+    // ── ③ 🔥 **자국 뒤의 히트가 바이트까지 같다.**
+    try std.testing.expectEqual(full.hits.items.len - 1, part.hits.items.len);
+    for (part.hits.items, 0..) |h, i| {
+        try std.testing.expectEqual(full.hits.items[i + 1], h);
+        try std.testing.expectEqualStrings(full.labels.items[i + 1].text(), part.labels.items[i].text());
+    }
+}
+
+test "헬퍼 activity --from: 파일보다 뒤를 청하면 처음부터 훑는다 — 빈 목록을 만들지 않는다 (RAV7b-3)" {
+    // 🔥 적대적: 저쪽에서 파일이 잘리면 자국이 파일보다 커진다. 그 자리에서 읽으면 **0 바이트**이고
+    // 받는 쪽은 그것을 「활동이 없다」로 읽어 **화면이 빈 목록**이 된다(계약 §2.2 가 금지하는 거짓).
+    // 헬퍼가 요청을 **거절하고** 처음부터 훑어야 하며, `resumed_from = 0` 이 그 사실을 말한다.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b3-past.{d}.jsonl", .{std.c.getpid()});
+    try writeFixture(io, path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const size = (try std.Io.Dir.cwd().statFile(io, path, .{})).size;
+    const out = try runHelperFrom(gpa, io, bin, path, size + 4096);
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    var got = try parseAll(gpa, out.stdout);
+    defer got.deinit(gpa);
+
+    try std.testing.expectEqual(@as(u64, 0), got.flags.resumed_from); // 거절했다
+    try std.testing.expect(got.hits.items.len >= 3); // 그래서 목록이 비지 않는다
+    try std.testing.expectEqual(size, got.flags.head_bytes);
+}
+
+test "헬퍼 activity --from: 이어읽기는 부모를 안 연다 — 그래도 체인 줄은 전부 낸다 (RAV7b-3)" {
+    // **이득의 절반이 여기 있다**(부모 크기 중앙 338 MB · 최대 1.8 GB). 그런데 `F` 줄까지 빼면
+    // 받는 쪽의 체인이 부모를 잃고 **부모 히트의 `file_index` 가 가리킬 자리가 없어진다**(§20.2).
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "/tmp/maru-rav7b3.{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+
+    var day_buf: [96]u8 = undefined;
+    const day = try std.fmt.bufPrint(&day_buf, "{s}/.codex/sessions/2026/09/11", .{home});
+    try std.Io.Dir.cwd().createDirPath(io, day);
+    var dir = try std.Io.Dir.cwd().openDir(io, day, .{});
+    defer dir.close(io);
+
+    var parent_name_buf: [128]u8 = undefined;
+    const parent_name = try std.fmt.bufPrint(&parent_name_buf, "rollout-2026-09-11T01-00-00-{s}.jsonl", .{parent_id});
+    try writeRollout(io, dir, parent_name, parent_lines);
+    var child_name_buf: [128]u8 = undefined;
+    const child_name = try std.fmt.bufPrint(&child_name_buf, "rollout-2026-09-11T02-00-00-{s}.jsonl", .{child_id});
+    try writeRollout(io, dir, child_name, child_lines);
+
+    var child_path_buf: [256]u8 = undefined;
+    const child_path = try std.fmt.bufPrint(&child_path_buf, "{s}/{s}", .{ day, child_name });
+
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+
+    const out = try std.process.run(gpa, io, .{
+        .argv = &.{ bin, "activity", child_path, "--from", "1" },
+        .stdout_limit = .limited(wire.max_wire_bytes),
+        .environ_map = &env,
+    });
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    var got = try parseAll(gpa, out.stdout);
+    defer got.deinit(gpa);
+
+    // **체인 줄 둘은 그대로 온다.**
+    try std.testing.expectEqual(@as(usize, 2), got.files);
+    try std.testing.expectEqual(@as(u64, 1), got.flags.resumed_from);
+    // **부모 자리(1)의 히트는 하나도 없다** — 안 열었으니까.
+    for (got.hits.items) |h| try std.testing.expectEqual(@as(u8, 0), h.file_index);
+    // **`scanned_bytes` 는 자식만큼이다** — 부모를 훑었으면 그보다 컸다.
+    const child_size = (try std.Io.Dir.cwd().statFile(io, child_path, .{})).size;
+    try std.testing.expect(got.flags.scanned_bytes < child_size);
+    // 머리 크기는 여전히 자식 파일 전체다(신선도가 그것으로 판정한다).
+    try std.testing.expectEqual(child_size, got.flags.head_bytes);
 }
 
 test "헬퍼 activity: 상대경로는 원격이 거부한다 — 저쪽 cwd 의 다른 파일을 안 연다" {

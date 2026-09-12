@@ -22,7 +22,7 @@
 //! ## wire v1 (줄 지향 + 길이 접두 라벨)
 //!
 //! ```text
-//! maru-rav 2\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
+//! maru-rav 3\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
 //! F <index> <len> <경로>\n         체인의 파일 하나. **인덱스를 명시한다**(순서가 아니다 — §G1)
 //! S <p> <ip> <ap> <scanned>\n      스캔 플래그 셋(partial·image_partial·activity_partial)과 읽은 바이트
 //! A <필드 19 개> <len> <라벨>\n     활동·이미지 한 건(아래)
@@ -78,8 +78,8 @@ pub const max_chain = index.max_chain;
 /// 최대의 3 배로 잡는다(로컬 `readCodexParentId` 와 같은 값·같은 근거).
 pub const codex_meta_window_bytes: usize = 64 * 1024;
 
-pub const wire_version: u32 = 2;
-pub const header_line = "maru-rav 2";
+pub const wire_version: u32 = 3;
+pub const header_line = "maru-rav 3";
 
 /// 한 wire 가 실을 수 있는 활동·이미지 수. 스캐너의 상한들이 이 값을 정한다 — 그보다 큰 수를
 /// 주장하는 wire 는 저쪽이 오염됐다는 뜻이라 파서가 거기서 멈춘다.
@@ -139,6 +139,14 @@ pub const ScanFlags = struct {
     /// 🔥 `head_bytes` 와 **다른 값이다**: 저쪽은 「읽은 데까지」, 이쪽은 「결말이 다 붙은 데까지」다.
     /// 둘을 섞으면 이어읽기 구간의 결과 줄이 주인을 못 찾아 「진행중」이 영영 남는다.
     resume_offset: u64 = 0,
+    /// **저쪽이 실제로 어디부터 읽었나**(판 3 · RAV7b-3). `--from` 을 안 줬거나 **못 지켰으면 0** 이고,
+    /// 그때 답은 파일 **처음부터**의 것이다.
+    ///
+    /// 🔥 **이 칸이 없으면 못 가른다.** `--from` 이 파일보다 크면(저쪽에서 잘렸다) 그 자리에서 읽어
+    /// 봐야 0 바이트이고, 받는 쪽은 그것을 **「활동이 없다」**로 읽어 화면이 **빈 목록**이 된다.
+    /// 추론(`scanned_bytes < head_bytes`)으로는 안 된다 — 체인이 여럿이면 그 값은 **합**이라 뜻이
+    /// 갈린다(계획 §20.3).
+    resumed_from: u64 = 0,
 };
 
 /// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
@@ -150,7 +158,7 @@ pub const record_fields: usize = 24;
 // 되면 그만큼을 라벨로 읽고 지나간다. 머리말 대조가 그 갈림을 막는 유일한 수단이므로, 여기서 둘을
 // 묶어 **한쪽만 고치면 컴파일이 깨지게** 한다.
 comptime {
-    const expected_fields_for_version = [_]usize{ 0, 24, 24 }; // [판] = 필드 수
+    const expected_fields_for_version = [_]usize{ 0, 24, 24, 24 }; // [판] = 필드 수
     if (wire_version >= expected_fields_for_version.len or
         expected_fields_for_version[wire_version] != record_fields)
     {
@@ -203,7 +211,9 @@ comptime {
     // 맞추므로, 필드를 더하고 한쪽을 잊으면 그 값은 **영영 기본값**이다 — `Hit` 이 겪은 그것
     // (적대적 A2)과 정확히 같은 모양이라 같은 못을 박는다.
     assertCovered(ScanFlags, &.{
-        "partial", "image_partial", "activity_partial", "scanned_bytes", "head_bytes", "resume_offset",
+        "partial",    "image_partial", "activity_partial",
+        "scanned_bytes", "head_bytes",  "resume_offset",
+        "resumed_from",
     }, &.{});
 }
 
@@ -283,13 +293,16 @@ pub fn appendFlags(out: []u8, at: usize, flags: ScanFlags) ?usize {
     // `Malformed` 로 만들어 「활동이 0」이 아니라 「못 읽었다」로 뜬다 — 맞는 결말이지만, 애초에
     // 깨진 줄을 **안 만드는** 것이 이 인코더의 규율이다(`appendRangeBytes` 가 상한에서 그러듯).
     if (flags.resume_offset > flags.head_bytes) return null;
+    if (flags.resumed_from > flags.head_bytes) return null;
+    if (flags.resume_offset < flags.resumed_from) return null;
     var n = appendBytes(out, at, "S ") orelse return null;
     n = appendField(out, n, @intFromBool(flags.partial)) orelse return null;
     n = appendField(out, n, @intFromBool(flags.image_partial)) orelse return null;
     n = appendField(out, n, @intFromBool(flags.activity_partial)) orelse return null;
     n = appendField(out, n, flags.scanned_bytes) orelse return null;
     n = appendField(out, n, flags.head_bytes) orelse return null;
-    n = appendDecimal(out, n, flags.resume_offset) orelse return null;
+    n = appendField(out, n, flags.resume_offset) orelse return null;
+    n = appendDecimal(out, n, flags.resumed_from) orelse return null;
     n = appendBytes(out, n, "\n") orelse return null;
     return n;
 }
@@ -561,10 +574,16 @@ pub const Parser = struct {
         if (p > 1 or ip > 1 or ap > 1) return ParseError.Malformed;
         const scanned = try self.takeDecimal();
         const head = try self.takeDecimal();
-        const resume_at = try self.takeDecimalLine();
+        const resume_at = try self.takeDecimal();
+        const from = try self.takeDecimalLine();
         // **자국이 읽은 바이트를 넘을 수는 없다.** 넘으면 그 자리에서 이어 읽을 때 저쪽이 안 읽은
         // 구간을 「이미 봤다」로 치게 된다 — 그 사이 활동이 통째로 사라진다(계약 §2.2).
         if (resume_at > head) return ParseError.Malformed;
+        // **읽기 시작점도 같은 규율이다**(판 3). 시작이 끝보다 뒤면 그 답은 앞뒤가 안 맞는다.
+        if (from > head) return ParseError.Malformed;
+        // **자국은 읽기 시작점보다 앞설 수 없다.** 앞선다면 그 앞 구간은 이번에 **안 본** 자리인데
+        // 「거기부터 다시 보면 된다」고 말하는 셈이라, 다음 회차가 그 사이를 영영 건너뛴다.
+        if (resume_at < from) return ParseError.Malformed;
         return .{
             .partial = p == 1,
             .image_partial = ip == 1,
@@ -572,6 +591,7 @@ pub const Parser = struct {
             .scanned_bytes = scanned,
             .head_bytes = head,
             .resume_offset = resume_at,
+            .resumed_from = from,
         };
     }
 
@@ -749,6 +769,49 @@ test "자국이 읽은 바이트를 넘는다고 주장하면 거부한다 (RAV7
     try testing.expectError(ParseError.Malformed, p.next());
 }
 
+test "읽기 시작점도 자국과 같은 규율이다 (RAV7b-3)" {
+    // 🔥 **셋의 순서가 정해져 있다**: `resumed_from ≤ resume_offset ≤ head_bytes`.
+    //
+    // - 자국이 **시작점보다 앞서면** 그 앞 구간은 이번에 **안 본** 자리인데 「거기부터 다시 보면
+    //   된다」고 말하는 셈이고, 다음 회차가 그 사이를 영영 건너뛴다.
+    // - 시작점이 **끝보다 뒤면** 그 답은 앞뒤가 안 맞는다.
+    var buf: [256]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    var line: [128]u8 = undefined;
+
+    // 자국(40) < 시작점(50)
+    {
+        const bad = std.fmt.bufPrint(&line, "S 0 0 0 100 100 40 50\n", .{}) catch unreachable;
+        @memcpy(buf[h..][0..bad.len], bad);
+        var p = Parser.init(buf[0 .. h + bad.len]);
+        try testing.expectError(ParseError.Malformed, p.next());
+    }
+    // 시작점(120) > 머리 크기(100)
+    {
+        const bad = std.fmt.bufPrint(&line, "S 0 0 0 100 100 120 120\n", .{}) catch unreachable;
+        @memcpy(buf[h..][0..bad.len], bad);
+        var p = Parser.init(buf[0 .. h + bad.len]);
+        try testing.expectError(ParseError.Malformed, p.next());
+    }
+    // **내는 쪽도 같은 규율**이다 — 깨진 줄을 애초에 안 만든다.
+    try testing.expectEqual(@as(?usize, null), appendFlags(&buf, h, .{
+        .head_bytes = 100,
+        .resume_offset = 40,
+        .resumed_from = 50,
+    }));
+    try testing.expectEqual(@as(?usize, null), appendFlags(&buf, h, .{
+        .head_bytes = 100,
+        .resume_offset = 120,
+        .resumed_from = 120,
+    }));
+    // 순서가 맞으면 받는다.
+    try testing.expect(appendFlags(&buf, h, .{
+        .head_bytes = 100,
+        .resume_offset = 80,
+        .resumed_from = 50,
+    }) != null);
+}
+
 test "인코더도 자국 불변식을 지킨다 — 깨진 줄을 애초에 안 만든다 (RAV7b)" {
     // 🔥 적대적 B1: 파서만 거부하면 헬퍼 버그가 **답 전체**를 `Malformed` 로 만든다. 맞는 결말이긴
     // 하지만, 이 인코더의 규율은 「잘린·깨진 것을 **안 만든다**」이다(`appendRecord`·
@@ -801,14 +864,14 @@ test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다"
 test "판이 다르면 즉시 거부한다 — 앞판도 뒷판도" {
     // **뒷판**(우리보다 새 헬퍼).
     {
-        var p = Parser.init("maru-rav 3\nX 0\n");
+        var p = Parser.init("maru-rav 4\nX 0\n");
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
-    // 🔥 **앞판**(옛 헬퍼가 아직 깔려 있는 실제 경우 — RAV7b 가 판 1 → 2 로 올렸다). 여기서 안
-    // 걸리면 `S` 줄의 자리가 밀린 값을 읽어 **자국이 엉뚱한 수**가 되고, 이어읽기가 안 읽은 구간을
+    // 🔥 **앞판**(옛 헬퍼가 아직 깔려 있는 실제 경우 — 이 스택이 판 1 → 2 → 3 으로 올렸다). 여기서
+    // 안 걸리면 `S` 줄의 자리가 밀린 값을 읽어 **자국이 엉뚱한 수**가 되고, 이어읽기가 안 읽은 구간을
     // 「이미 봤다」로 친다.
-    {
-        var p = Parser.init("maru-rav 1\nX 0\n");
+    for ([_][]const u8{ "maru-rav 1\nX 0\n", "maru-rav 2\nX 0\n" }) |bytes| {
+        var p = Parser.init(bytes);
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
 }
@@ -1295,7 +1358,7 @@ test "범위: 원격 오류도 완결이다 — 「못 읽었다」와 「빈 �
 
 test "범위: 활동 wire 를 범위 파서에 먹이면 거부한다 — 형식이 갈려 있다" {
     var buf: [1024]u8 = undefined;
-    const n = appendHeader(&buf, 0).?; // `maru-rav 2`
+    const n = appendHeader(&buf, 0).?; // `maru-rav 3`
     var p = RangeParser.init(buf[0..n]);
     try testing.expectError(ParseError.UnsupportedVersion, p.next());
 }

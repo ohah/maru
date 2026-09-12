@@ -48,7 +48,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 11: 활동 wire **판 2**(RAV7b — `head_bytes` · `resume_offset`). 받는 쪽이 「머리 파일이
 /// 자랐나」를 체인에서도 묻고, 다음 회차가 **어디부터** 훑을지 안다.
-pub const version_line = "maru-remote-watch 11\n";
+///
+/// 판 12: `activity <path> --from <offset>`(RAV7b-3 — 이어읽기). 그 자리부터 머리 파일만 훑고
+/// **부모는 안 연다**. 활동 wire 도 **판 3**(`resumed_from` — 요청을 지켰는지)으로 올랐다.
+pub const version_line = "maru-remote-watch 12\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -90,12 +93,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // **활동 모드**(RAV2 — [계획](../../docs/plans/remote-agent-activity.md) §5). 트랜스크립트 하나를
-    // 훑어 `maru-rav 2` wire 를 stdout 에 내고 끝난다 — `list` 와 같이 **한 번 답하고 죽는** 모드다.
+    // 훑어 `maru-rav 3` wire 를 stdout 에 내고 끝난다 — `list` 와 같이 **한 번 답하고 죽는** 모드다.
     //
     // 목록 wire 와 달리 인코더를 **손으로 안 든다** — 위 머리말이 적은 대로 모듈을 문다.
     if (std.mem.eql(u8, root, "activity")) {
         const file_path = args.next() orelse return exitWith(exit_unsupported);
-        return runActivity(io, init.gpa, file_path);
+        // **이어읽기 요청**(RAV7b-3 · 판 12). `--from <offset>` 이면 머리 파일을 그 자리부터 훑고
+        // **부모는 아예 안 연다** — 부모 rollout 은 재개 시점에 끝난 파일이라 안 자란다(§19.1).
+        // 안 주면 0 = 처음부터, 그것이 판 11 까지의 유일한 모양이다.
+        var from: u64 = 0;
+        if (args.next()) |flag| {
+            if (!std.mem.eql(u8, flag, "--from")) return exitWith(exit_unsupported);
+            const text = args.next() orelse return exitWith(exit_unsupported);
+            from = parseU64(text) orelse return exitWith(exit_unsupported);
+        }
+        return runActivity(io, init.gpa, file_path, from);
     }
 
     // **구간 읽기 모드**(RAV5). `activity` 가 준 자리로 그 바이트만 돌려준다 — 펼침(계약 §2.4)과
@@ -984,7 +996,7 @@ comptime {
 /// 스캐너에 먹이는 청크. 제품 스캔 워커와 같은 값이다.
 const activity_chunk_bytes: usize = 64 * 1024;
 
-fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
+fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_from: u64) void {
     var line: [activity_line_bytes]u8 = undefined;
 
     // 머리말부터 낸다 — 그 뒤에 무엇이 실패하든 받는 쪽은 **판을 확인할 수 있다**.
@@ -1012,6 +1024,10 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
     }
 
     // **자리를 번호로 싣는다**(계획 §11.3 G1). 못 연 파일이 있어도 뒤가 안 밀린다.
+    //
+    // 🔥 **이어읽기여도 체인 줄은 전부 낸다**(계획 §20.2). 부모를 안 훑는다고 `F` 줄까지 빼면 받는
+    // 쪽의 체인이 부모를 잃고, **부모 히트의 `file_index` 가 가리킬 자리가 없어져** 펼침·라벨·그림이
+    // 통째로 깨진다. 체인 풀기는 실측 1.5 ms/303 세션이라 아깝지 않다.
     for (chain.slots[0..chain.len], 0..) |*slot, at| {
         const n = activity_wire.appendFile(&line, 0, @intCast(at), slot.path()) orelse continue;
         if (!putAll(line[0..n])) return;
@@ -1034,6 +1050,9 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
     // 이어읽기도 그 값으로는 성립하지 않는다 — 머리 것만 따로 든다.
     var head_bytes: u64 = 0;
     var resume_offset: u64 = 0;
+    // **실제로 어디부터 읽었나**(판 3 · 계획 §20.3). 요청을 못 지키면 0 이고, 그때 답은 파일
+    // 처음부터의 것이다 — 받는 쪽이 그 차이로 「이어읽기가 먹혔나」를 안다.
+    var resumed_from: u64 = 0;
     var opened: [activity_wire.max_chain]?std.Io.File = .{null} ** activity_wire.max_chain;
     defer for (&opened) |*maybe| {
         if (maybe.*) |f| f.close(io);
@@ -1042,6 +1061,9 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
     // **파일마다 처음부터 다시 센다.** 오프셋은 파일 절대값이고, 어느 파일인지는 `Hit.file_index` 가
     // 든다 — 그 둘을 섞으면 소비자가 엉뚱한 바이트를 읽는다(로컬 스캔 워커와 같은 규율).
     for (chain.slots[0..chain.len], 0..) |*slot, at| {
+        // 🔥 **이어읽기면 부모를 아예 안 연다**(계획 §19.1). 자라는 것은 머리뿐이라 부모의 히트는
+        // 받는 쪽이 지난 결과에서 그대로 쓴다 — 실측 부모 크기 중앙 338 MB · 최대 1.8 GB 다.
+        if (resumed_from != 0 and at != 0) continue;
         const file = std.Io.Dir.cwd().openFile(io, slot.path(), .{
             .mode = .read_only,
             .follow_symlinks = false,
@@ -1058,13 +1080,26 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         };
         opened[at] = file;
 
+        // **머리 파일이면 이어읽기를 시도한다**(판 12). 요청이 파일보다 뒤면 그 자리에서 읽어 봐야
+        // 0 바이트이고 받는 쪽은 그것을 「활동이 없다」로 읽는다 — **처음부터로 되돌린다**(§20.3).
+        if (at == 0 and want_from != 0) {
+            const size = file.stat(io) catch null;
+            if (size) |st| {
+                if (want_from <= st.size) resumed_from = want_from;
+            }
+        }
+
         // 파일이 바뀌면 이월 버퍼도 새로 시작해야 한다 — 앞 파일의 잘린 꼬리가 다음 파일 첫 줄에
         // 이어 붙으면 없던 활동이 생긴다.
+        //
+        // 🔥 **이어읽기는 `consumed` 로 시작한다.** `feed` 가 오프셋을 그 값 기준으로 찍으므로
+        // (`const base = self.consumed`), 이것만으로 히트 오프셋이 **파일 절대값**으로 맞는다 —
+        // 계약 §2.1 이 요구하는 그것이고, 새 코드가 거의 필요 없는 이유다(계획 §20.1).
         scanner.deinit(gpa);
-        scanner = .{ .file_index = @intCast(at) };
+        scanner = .{ .file_index = @intCast(at), .consumed = if (at == 0) resumed_from else 0 };
         const before = offset;
         var head_broke = false;
-        scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset) catch |err| switch (err) {
+        scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset, if (at == 0) resumed_from else 0) catch |err| switch (err) {
             // 🔥 **채널이 끊겼으면 곧바로 접는다 — 다음 파일로 안 간다**(적대적 O2). 여기서 `truncated`
             // 로 뭉개면 M1 의 고침이 체인에서 **깨진다**: 받는 이가 없는데 부모 rollout(실측 최대
             // 1.8 GB)을 계속 훑어 남의 서버 CPU 를 태운다.
@@ -1082,7 +1117,9 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         // 「자랐다」로 읽어 **매 주기마다 통째로 다시 훑는다**(이 슬라이스가 없애려던 바로 그것).
         // 0 이면 신선도가 꺼져 재진입마다 훑는다 — 뷰를 떠나면 멈추므로 **덜 아는 쪽**이 덜 나쁘다.
         if (at == 0 and !head_broke) {
-            head_bytes = offset - before;
+            // **이어읽기여도 「머리 파일이 읽힌 바이트」다** — 시작점을 더해야 파일 크기가 되고,
+            // 그래야 신선도(RAV7a)가 그 자리에서 1 바이트를 청해 판정할 수 있다.
+            head_bytes = resumed_from + (offset - before);
             resume_offset = scanner.resumeOffset(hits.items);
         }
     }
@@ -1096,6 +1133,7 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
             .scanned_bytes = offset,
             .head_bytes = head_bytes,
             .resume_offset = resume_offset,
+            .resumed_from = resumed_from,
         }) orelse return;
         if (!putAll(line[0..at])) return;
     }
@@ -1194,11 +1232,13 @@ fn scanOne(
     hits: *std.ArrayList(activity_wire.Hit),
     watch_channel: bool,
     total: *u64,
+    /// **어디부터 읽나**(RAV7b-3). 0 이면 처음부터 — 판 11 까지의 유일한 모양이다.
+    from: u64,
 ) error{ Truncated, ChannelGone }!void {
     var offset: u64 = 0;
     while (true) {
         if (watch_channel and stdinSpeaks()) return error.ChannelGone;
-        const n = file.readPositional(io, &.{chunk}, offset) catch return error.Truncated;
+        const n = file.readPositional(io, &.{chunk}, from + offset) catch return error.Truncated;
         if (n == 0) break;
         offset += n;
         total.* += n;

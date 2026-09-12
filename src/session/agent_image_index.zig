@@ -1498,6 +1498,73 @@ const PendingCall = struct {
 /// 반쪽을 세거나, 다음 회차가 같은 것을 또 센다(§4.2 의 `last_offset` 규율과 같은 이유).
 ///
 /// I/O 를 모른다 — 호출자가 읽어서 `feed` 한다. 그래서 경계 처리를 파일 없이 시험할 수 있다.
+/// **이어읽기 병합의 결말**(RAV7b-3b · 계획 §21.2). `null` 이면 **물러난다** — 통째로 다시 훑어야
+/// 한다는 뜻이고, 그것이 「틀린 목록을 보여 주는 것」보다 언제나 낫다.
+pub const MergeOutcome = struct {
+    /// 합친 배열(파일 순서). 호출자가 소유를 가져간다.
+    hits: std.ArrayList(Hit),
+    /// 지난 결과에서 **살아남은 개수** — 라벨을 같은 자리에서 자르기 위해 든다.
+    kept: usize,
+};
+
+/// 지난 히트에 **이어읽기 결과를 붙인다** — 순수 함수다(계획 §21.2).
+///
+/// 🔥 **부수효과가 없는 이유**: 이 결정을 `poll` 안에 두면 판정자가 겨눌 것이 「화면이 안 바뀌었다」
+/// 뿐인데, 그 하네스에서는 **원래 아무 일도 안 일어난다**(RAV7a 적대적 T4 가 그 함정을 실제로
+/// 밟았다). 값으로 내면 판정자가 그 값을 직접 본다.
+///
+/// **무엇을 남기나**: 지난 히트 중 ⑴ **부모 파일**(`file_index != 0`)의 것 전부와 ⑵ 머리 파일의
+/// **자국 이전** 것. 그 뒤에 새 히트를 잇는다. 부모는 안 자라므로(§19.1) 그대로 쓰는 것이 맞다.
+///
+/// ⚠️ **`fold_owner` 를 민다.** 그 값은 배열의 **인덱스**라 이어읽기 결과의 것은 「이어읽기 배열
+/// 기준」이다 — 앞 길이만큼 안 밀면 접힌 이미지가 **엉뚱한 호출로 접히거나** 「전체」에서 통째로
+/// 사라진다(§20.6 9 회차가 실 리눅스 실측으로 고정했다).
+///
+/// **`null` 을 내는 조건**(§21.2): 자국이 0(저쪽이 처음부터 훑었다) · 합이 상한을 넘음(퇴출 규칙을
+/// 두 벌로 안 만든다). 나머지 둘(체인 갈림 · 부분성)은 호출자가 먼저 본다 — 이 함수는 배열만 안다.
+pub fn mergeResumed(
+    allocator: std.mem.Allocator,
+    prior: []const Hit,
+    fresh: []const Hit,
+    resumed_from: u64,
+) ?MergeOutcome {
+    // **저쪽이 처음부터 훑었으면 이어 붙이지 않는다** — 그러면 같은 활동이 두 번 뜬다.
+    if (resumed_from == 0) return null;
+
+    var out: std.ArrayList(Hit) = .empty;
+    errdefer out.deinit(allocator);
+
+    var kept: usize = 0;
+    for (prior) |h| {
+        // 부모는 이번에 안 훑었다 — 그대로 쓴다.
+        const keep = if (h.file_index != 0) true else h.line_offset < resumed_from;
+        if (!keep) continue;
+        out.append(allocator, h) catch {
+            out.deinit(allocator);
+            return null;
+        };
+        kept += 1;
+    }
+
+    // **상한을 넘으면 물러난다.** 퇴출 규칙(오래된 1/8 · 접기 remap · 대기 링 remap)은 스캐너 안에
+    // 있고, 그것을 여기서 다시 쓰면 **원격과 로컬이 다른 것을 보여 준다**(계약 §2.3).
+    if (kept + fresh.len > max_activity_hits_per_file) {
+        out.deinit(allocator);
+        return null;
+    }
+
+    for (fresh) |src| {
+        var h = src;
+        // 🔥 **접기 주인을 민다**(§20.6 9 회차). 이어읽기 배열 기준 → 합친 배열 기준.
+        if (h.fold_owner != no_fold) h.fold_owner +|= @intCast(kept);
+        out.append(allocator, h) catch {
+            out.deinit(allocator);
+            return null;
+        };
+    }
+    return .{ .hits = out, .kept = kept };
+}
+
 pub const StreamScanner = struct {
     /// 개행을 못 만난 꼬리. 다음 청크 앞에 붙는다.
     carry: std.ArrayList(u8) = .empty,
@@ -2730,6 +2797,109 @@ test "활동: Codex custom_tool_call 은 input 이 대상이고 결과 레코드
     try testing.expectEqual(Kind.codex_tool_call, hits.items[0].kind);
     try testing.expectEqual(Activity.exec, hits.items[0].activity);
     try testing.expectEqualStrings("sed -n '1,20p' src/main.zig", activityAt(&hits, 0, call));
+}
+
+/// 병합 판정자용 최소 `Hit`. **자리와 파일만** 뜻이 있고 나머지는 병합이 안 건드린다.
+fn mk(line_offset: u64, file_index: u8) Hit {
+    return .{
+        .line_offset = line_offset,
+        .data_offset = line_offset,
+        .data_len = 1,
+        .kind = .claude_tool_use,
+        .mime = .png,
+        .file_index = file_index,
+    };
+}
+
+test "이어읽기 병합: 자국 이전은 남기고 뒤는 새 것으로 간다 (RAV7b-3b)" {
+    const allocator = testing.allocator;
+    // 지난 결과: 머리 파일 셋(100 · 200 · 300) + 부모 하나.
+    const prior = [_]Hit{
+        mk(100, 0),
+        mk(200, 0),
+        mk(300, 0),
+        // 🔥 **부모의 오프셋을 자국보다 «크게» 둔다.** 부모는 다른 파일이라 그 값이 머리 파일의
+        // 자국과 아무 관계가 없고(실측 부모 중앙 338 MB), 작게 두면 판정자가 「파일로 가르는가」와
+        // 「오프셋으로 가르는가」를 **구별하지 못한다** — 뮤테이션이 그 빈틈을 드러냈다.
+        mk(900, 1), // 부모 — 이번에 안 훑었다
+    };
+    // 이어읽기(자국 250)가 낸 것: 250 뒤의 둘.
+    const fresh = [_]Hit{
+        mk(260, 0),
+        mk(400, 0),
+    };
+
+    var got = mergeResumed(allocator, &prior, &fresh, 250).?;
+    defer got.hits.deinit(allocator);
+
+    // 100 · 200 은 자국 이전이라 남고, 300 은 **버린다**(이어읽기가 그 구간을 다시 봤다).
+    // 부모(50)는 안 훑었으므로 그대로.
+    try testing.expectEqual(@as(usize, 3), got.kept);
+    try testing.expectEqual(@as(usize, 5), got.hits.items.len);
+    try testing.expectEqual(@as(u64, 100), got.hits.items[0].line_offset);
+    try testing.expectEqual(@as(u64, 200), got.hits.items[1].line_offset);
+    try testing.expectEqual(@as(u8, 1), got.hits.items[2].file_index); // 부모
+    try testing.expectEqual(@as(u64, 900), got.hits.items[2].line_offset); // 자국보다 «뒤»인데도 남는다
+    try testing.expectEqual(@as(u64, 260), got.hits.items[3].line_offset);
+    try testing.expectEqual(@as(u64, 400), got.hits.items[4].line_offset);
+}
+
+test "이어읽기 병합: 접기 주인을 앞 길이만큼 민다 (RAV7b-3b)" {
+    // 🔥 §20.6 9 회차가 실 리눅스로 고정한 것: `fold_owner` 는 **배열 인덱스**라 이어읽기 결과의
+    // 값은 「이어읽기 배열 기준」이다. 안 밀면 접힌 이미지가 **엉뚱한 호출로 접히거나** 「전체」에서
+    // 통째로 사라진다.
+    const allocator = testing.allocator;
+    const prior = [_]Hit{
+        mk(100, 0),
+        mk(200, 0),
+    };
+    // 이어읽기 결과: 자리 0 이 호출, 자리 1 이 그 호출에 접힌 이미지.
+    const fresh = [_]Hit{
+        mk(300, 0),
+        blk: {
+            var img = mk(400, 0);
+            img.kind = .claude_image;
+            img.fold_owner = 0;
+            break :blk img;
+        },
+    };
+
+    var got = mergeResumed(allocator, &prior, &fresh, 250).?;
+    defer got.hits.deinit(allocator);
+
+    // 앞에 둘이 남았으므로 주인은 0 → **2** 로 밀린다.
+    try testing.expectEqual(@as(usize, 2), got.kept);
+    try testing.expectEqual(@as(u32, 2), got.hits.items[3].fold_owner);
+    // 그 자리가 실제로 그 호출이다.
+    try testing.expectEqual(@as(u64, 300), got.hits.items[2].line_offset);
+    // **접기가 없는 것은 안 건드린다** — `no_fold` 에 더하면 엉뚱한 자리를 가리킨다.
+    try testing.expectEqual(no_fold, got.hits.items[2].fold_owner);
+}
+
+test "이어읽기 병합: 자국이 0 이면 «물러난다» — 같은 활동이 두 번 뜨지 않게 (RAV7b-3b)" {
+    // 저쪽이 처음부터 훑았다는 뜻이다(요청을 거절했거나 읽다 죽었다 — §20.3 · 적대적 13).
+    // 그때 앞 히트에 이어 붙이면 **같은 활동이 두 번** 뜬다.
+    const allocator = testing.allocator;
+    const prior = [_]Hit{mk(100, 0)};
+    const fresh = [_]Hit{mk(100, 0)};
+    try testing.expectEqual(@as(?MergeOutcome, null), mergeResumed(allocator, &prior, &fresh, 0));
+}
+
+test "이어읽기 병합: 상한을 넘으면 «물러난다» — 퇴출 규칙을 두 벌로 안 만든다 (RAV7b-3b)" {
+    // 퇴출(오래된 1/8 버리기 · 접기 주인 remap · 대기 링 remap)은 **스캐너 안**에 있다. 소비자가
+    // 다시 구현하면 **원격과 로컬이 다른 것을 보여 준다**(계약 §2.3). 한 번 헛왕복이 드리프트보다 싸다.
+    const allocator = testing.allocator;
+    var prior: std.ArrayList(Hit) = .empty;
+    defer prior.deinit(allocator);
+    for (0..max_activity_hits_per_file) |i| {
+        try prior.append(allocator, mk(@intCast(i), 0));
+    }
+    const fresh = [_]Hit{mk(max_activity_hits_per_file + 1, 0)};
+    // 자국을 끝에 둬 **전부 남기고** 하나를 더하면 상한을 넘는다.
+    try testing.expectEqual(
+        @as(?MergeOutcome, null),
+        mergeResumed(allocator, prior.items, &fresh, max_activity_hits_per_file),
+    );
 }
 
 test "이어읽기 자국: 미결 호출이 있으면 그 줄까지 되돌린다 (RAV7b)" {

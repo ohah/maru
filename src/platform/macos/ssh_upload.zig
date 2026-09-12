@@ -430,7 +430,12 @@ pub const create_script = remote_shell.path_assign ++ "exec \"" ++ watch_install
 /// ⚠️ **이 축은 stdin 을 안 닫는다**(헬퍼의 `channelWatchable` 래치가 그것으로 「살아 있는 채널」을
 /// 판정한다). 전송이 fd 0 을 닫아도 헬퍼는 그것을 「채널이 아니다」로 읽고 **그냥 완주한다** —
 /// 조용히 비는 대신 고아 방지만 꺼진다(적대적 M2 가 그 갈림을 만들었다).
-pub const activity_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" activity \"$1\"";
+/// 🔥 **`"$@"` 다 — `"$1"` 이 아니다**(RAV7b-3b 적대적 P1). 이어읽기는 인자를 셋 보내는데
+/// (`<path> --from <off>`) `"$1"` 만 넘기면 나머지가 **조용히 무시**된다: 저쪽은 통째로 훑고 받는
+/// 쪽은 이어읽은 줄 알아 **같은 활동이 두 번** 뜬다. `watch_script` 가 같은 이유로 같은 모양이다.
+///
+/// (2 차 방어로 wire 가 `resumed_from` 을 싣는다 — 그것이 0 이면 소비자가 이어 붙이지 않는다.)
+pub const activity_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" activity \"$@\"";
 
 /// **구간 읽기 스크립트**(RAV5). `$1`=원격 절대 경로 · `$2`=오프셋 · `$3`=길이. 펼침(계약 §2.4)과
 /// 이미지(RAV6)가 그 자리의 바이트만 당겨온다 — 활동 wire 는 자리만 싣기 때문이다.

@@ -2956,7 +2956,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   없이 fail-close한다. `test-session-host-release-evidence`가 Debug·ReleaseFast에서 canonical round-trip, candidate/stable
   identity·PID·nonce·timestamp·outcome drift와 전 allocation fail-index를 검증한다. 이 leaf writer의 green은 실제 OS click이나
   signed candidate 실행 증거가 아니며 R2 없이 완료로 승격하지 않는다.
-- **N3-R2 provisioned product runner (R2a·R2b1 구현, R2b2 진행, R2c 미착수):** R2a transaction owner는 candidate·app·helper·Aqua/permission
+- **N3-R2 provisioned product runner (R2a·R2b1·R2b2 구현, R2b3 진행, R2c 미착수):** R2a transaction owner는 candidate·app·helper·Aqua/permission
   authority를 실행 전에 결속하고, 하나의 absolute deadline 아래 `gui_zero` 실행→전 권위 재검증→`gui_live_then_quit`
   실행→전 권위 재검증→두 exact request 역순 cleanup·부재 재검증→R1 leaf 배타 게시→최종 재검증 순서를 고정한다. 각 child attempt는 호출 전에 기록하며 실패 시
   leaf→live→zero 역순으로 이번 UUID의 소유물만 정리한다. cleanup 실패는 성공이나 원래 오류로 덮지 않고 exact retry
@@ -2999,7 +2999,18 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   framed duplex child control은 exact request에 결속된 cleanup command를 받은 앱이 같은 제품 leaf를 호출하고 pending/delivered
   부재를 deadline 안에 재검사한 뒤 canonical receipt를 보내고 정상 종료할 때만 완료된다. transport와 Swift runtime 배선은
   구현됐다. R2b2 concrete adapter도 이 child 경계를 process owner에 연결해 입력의 단일 absolute deadline과 UUID-derived `0700` root 수명을 결속한다. app child의 cleanup acknowledgement는 알림 부재 확인 뒤 기존 `Quit and End All Sessions` 상태머신을 시작하며, 부모가 정상 app exit를 관측한 뒤에만 daemon/runtime이 끝난 exact `/s`·`/h`를 descriptor-owned 역순으로 정리한다. 성공 receipt는 root 밖 final address에 held-inode 권위로 남기고, 예상 밖 root sibling은 삭제하지 않고 fail-close한다. 살아 있는 daemon 위로 root를 재귀 삭제하거나 PID를 pathname에서 추측하지 않는다. `test-session-host-notification-concrete`가 실제 child 진입점 컴파일, 선검증, root exact cleanup을 Debug·ReleaseFast에서 검증한다. 앱
-  scenario mode와 concrete adapter, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
+  scenario mode와 concrete adapter는 callback과 attach 완료까지만 증명하며 최종 R1 leaf의 PID·screen 항목을 caller boolean으로
+  채우지 않는다. **R2b3 product continuity receipt**는 같은 app child가 attach 직전 host/runtime observation에서 exact
+  `host_pid`·`child_pid`와 before marker를 캡처하고, attach 뒤 같은 generation에서 fresh observation·before marker 보존·runner가
+  발급한 after marker의 실제 PTY input→screen 왕복을 확인한 뒤에만 fixed canonical receipt를 추가로 보낸다. 두 관측의
+  host/runtime/generation과 PID가 다르거나 marker가 선행 출력에 이미 있거나, 입력·screen deadline이 끝나거나, app attach receipt와
+  continuity receipt의 request/route/attach timestamp가 다르면 둘 다 최종 scenario proof가 아니다. parent는 inherited framed socket의
+  app receipt 다음 exact 두 번째 frame만 받고 두 receipt와 helper click을 하나의 final-address scenario proof로 결속한다.
+  **R2b3a strict receipt owner는 구현됐고**, `test-session-host-notification-continuity-receipt`가 canonical second frame,
+  app/helper 원문 재검증, generation/PID/marker/timeline drift, caller outcome field와 전 allocation fail-index를 Debug·ReleaseFast에서
+  검증한다. 남은 R2b3b는 이 frame을 실제 app attach 전후 관측과 child transport에 연결한다. 테스트가
+  boolean·PID·screen 결과를 직접 주입해 `passed`를 만드는 seam과 제품 외 caller는 금지한다. R2b3b가 green인 뒤 R2c mounted candidate
+  composition이 두 scenario proof를 R2a owner 순서로 실행한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

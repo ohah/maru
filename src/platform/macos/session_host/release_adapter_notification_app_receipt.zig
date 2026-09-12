@@ -43,7 +43,7 @@ pub const AttachKind = enum {
     bound,
     recovered,
 
-    fn wire(self: @This()) []const u8 {
+    pub fn wire(self: @This()) []const u8 {
         return switch (self) {
             .bound => "bound",
             .recovered => "recovered",

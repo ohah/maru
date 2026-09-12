@@ -25760,3 +25760,169 @@ test "NSH split 에서 상자가 옆 pane 위로 나와도 그 클릭은 상자 
     try testing.expect(other_pane != pane_ops.activePane(fx.session));
     settings_ops.closeContextMenu(fx.session);
 }
+
+/// 그 대상 큐에 **실제로 실린 바이트**. `offset` 은 이미 흘려보낸 자리일 뿐이고 버퍼는 남으므로,
+/// 무엇을 어떤 모양으로 인코딩했는지 여기서 읽을 수 있다. NS5 가 «주입은 관측이 안 된다» 고 적어
+/// 조립을 갈라 두었는데, **이 자리로는 보인다** — 그래서 §4 의 사슬 끝을 바이트로 잰다.
+fn injectedBytes(session: *AppSession, target_id: u64) []const u8 {
+    const q = session.pending_pastes.get(target_id) orelse return &.{};
+    return q.buf.items;
+}
+
+/// 큐에 **잔여가 남을 만큼** 큰 여러 줄 payload. 작은 것은 한 번에 다 나가고 `resetPasteQueue` 가
+/// 버퍼를 비워 버려 아무것도 못 본다(첫 판이 그래서 빈 슬라이스를 봤다). 실제 선택 페이로드는 §4
+/// 상한(8 KiB) 안이라 이만큼 크지 않지만, **인코딩 결정은 크기와 무관**하므로 같은 코드를 잰다.
+fn bigMultilinePayload(buf: []u8) []const u8 {
+    var i: usize = 0;
+    while (i + 2 <= buf.len) : (i += 2) {
+        buf[i] = 'a';
+        buf[i + 1] = '\n';
+    }
+    return buf[0..i];
+}
+
+fn firstLocalTerminal(session: *AppSession) ?*Term {
+    for (pane_ops.activePane(session).terms.items) |t| {
+        if (t.kind == .terminal and t.surface.remote == null) return t;
+    }
+    return null;
+}
+
+test "NSH 빚은 모드가 **바이트**까지 간다 — 감싸거나 안 감싸거나 (적대적 15회차)" {
+    // R10 의 판정자는 확인 모달을 대리 지표로 썼다. 큐 버퍼가 흘려보낸 뒤에도 남는다는 것을 알았으니
+    // **인코딩한 바이트 자체**를 본다 — §4 의 사슬은 여기서 끝나고, 여기까지 재야 「감싸였나」가
+    // 추측이 아니다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var payload_buf: [256 * 1024]u8 = undefined;
+    const multi = bigMultilinePayload(&payload_buf);
+
+    { // ⑴ 코어는 꺼짐. **켜짐으로 빚었다고 넘기면** 감싸여 나간다.
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = firstLocalTerminal(fx.session) orelse return error.SkipZigTest;
+        term_ops.submitPasteShaped(fx.session, multi, true, term.surface.id, true);
+        try testing.expect(std.mem.indexOf(u8, injectedBytes(fx.session, term.surface.id), "\x1b[200~") != null);
+    }
+    { // ⑵ 같은 코어·같은 payload 인데 **꺼짐으로 빚었다면** 안 감싼다(대조군 — ⑴ 이 항등식이 아니다).
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = firstLocalTerminal(fx.session) orelse return error.SkipZigTest;
+        term_ops.submitPasteShaped(fx.session, multi, true, term.surface.id, false);
+        try testing.expect(std.mem.indexOf(u8, injectedBytes(fx.session, term.surface.id), "\x1b[200~") == null);
+    }
+}
+
+test "NSH 확인 모달을 거쳐도 빚은 모드가 산다 (적대적 15회차 — 창이 사람 시간만큼 넓다)" {
+    // **여기가 가장 넓은 창이다.** 모달이 떠 있는 동안 사용자가 읽고 고르는 몇 초 사이에 대상의
+    // 2004 가 꺼질 수 있다(에이전트 CLI 종료). 확정 시 모드를 **다시 읽으면** 여러 줄 인용이
+    // 감싸이지 않은 채 셸로 들어간다 — §4 가 막으려는 그 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = firstLocalTerminal(fx.session) orelse return error.SkipZigTest;
+
+    // bracketed 여도 위험하다고 보게 해 **모달을 강제**한다(코어는 계속 꺼짐 상태다).
+    fx.session.loaded_config.config.input.paste_protection = true;
+    fx.session.loaded_config.config.input.bracketed_paste_is_safe = false;
+
+    var payload_buf: [256 * 1024]u8 = undefined;
+    term_ops.submitPasteShaped(fx.session, bigMultilinePayload(&payload_buf), false, term.surface.id, true);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(@as(?bool, true), fx.session.pending_paste_shaped); // payload 와 한 단위로 보관
+    try testing.expect(injectedBytes(fx.session, term.surface.id).len == 0); // 아직 아무것도 안 나갔다
+
+    // 사용자가 «붙여넣기» 를 고른다 — **제품 경로(키)로** 누른다. 내부 dispatcher 를 직접 부르면
+    // 확인 모달의 키 라우팅이 빠져 «모달을 거쳤다» 는 전제가 절반만 재진다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+
+    // **빚은 모드로 감싸여 나갔다** — 여기서 코어를 다시 읽었다면 꺼짐이라 안 감싸였을 것이다.
+    try testing.expect(std.mem.indexOf(u8, injectedBytes(fx.session, term.surface.id), "\x1b[200~") != null);
+    try testing.expect(fx.session.pending_paste_shaped == null); // payload 와 함께 비웠다
+}
+
+test "NSH 상자가 뜬 채로 세션이 죽어도 남는 것이 없다 (적대적 16회차 — 수명)" {
+    // 지금 헬퍼 상태는 고정 버퍼뿐이라 놓을 것이 없다. **그 사실을 잠근다** — 뒷날 라벨을 heap 에
+    // 담거나(긴 대상 이름) 후보 목록을 들고 있게 되면 이 판정자가 `testing.allocator` 의 누수
+    // 검사로 그것을 잡는다. 상자를 **연 채로** 픽스처를 해제하는 것이 이 판정자의 전부다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator); // ← 상자가 열린 채로 죽는다
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+}
+
+test "NSH 연달아 보내도 매번 간다 (적대적 16회차 — 두 번째가 조용히 안 가던 부류)" {
+    // 한 번 보내고 나면 `last_agent_target` 이 서고 상자는 내려간다. 그 뒤 다시 고르면 **처음과
+    // 같아야** 한다 — 첫 호출에서만 서는 상태(빈 라벨·소비된 항목 배열)가 있으면 두 번째가
+    // 조용히 안 간다. 표본을 둘 두는 규율(pr-checklist 「합류 규율」)이 여기에도 걸린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 + round };
+        showSendHelper(h.fx.session, h.fx.term);
+        try testing.expect(h.fx.session.chrome_host.send_helper.open);
+        try testing.expect(sendHelperItems(h.fx.session)[0].len > 0); // 라벨이 매번 선다
+        const on = helperHitPoint(h.fx.session) orelse return error.HelperNotOnScreen;
+        h.fx.session.last_agent_target = null;
+        try testing.expect(sendHelperClick(h.fx.session, on.x, on.y));
+        try testing.expect(h.fx.session.last_agent_target != null);
+    }
+}
+
+test "NSH 셀 크기가 바뀌어도 상자가 제 자리를 지킨다 (적대적 17회차 — 메트릭)" {
+    // `⌘+` 로 글자를 키우면 셀 크기가 바뀐다. 앵커는 **그 프레임이 굳힌 기하**에서 나오므로, 새
+    // 프레임을 그리기 전까지는 옛 기하로 선 자리에 머물러야 하고(클릭 경로와 같은 계약), 새로
+    // 그리면 새 자리로 옮겨야 한다. 둘 중 어느 쪽도 «화면 밖» 이면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    const before = h.fx.session.chrome_host.send_helper.anchor_x;
+
+    // 셀을 키운다(렌더는 아직 안 했다) — 굳힌 기하를 쓰므로 자리가 안 흔들린다.
+    h.fx.session.cell_width_px = 16;
+    h.fx.session.cell_height_px = 32;
+    try testing.expect(refreshSendHelper(h.fx.session));
+    try testing.expectEqual(before, h.fx.session.chrome_host.send_helper.anchor_x);
+
+    // 새 기하로 다시 그리면 그 프레임의 자리로 옮긴다.
+    var redrawn = appendPaneFrame(h.fx.session, h.fx.leaf_rect, h.fx.term) orelse
+        return error.EditorPaneDidNotDraw;
+    defer redrawn.dl.deinit(allocator);
+    try testing.expect(refreshSendHelper(h.fx.session));
+    const geom = h.fx.term.rt.editor_hit_geom;
+    try testing.expectEqual(@as(u16, 16), geom.cell_w_px); // 전제: 새 기하로 그렸다
+    const want = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + 5 * @as(i32, geom.cell_w_px);
+    try testing.expectEqual(want, h.fx.session.chrome_host.send_helper.anchor_x);
+}
+
+test "NSH 라벨은 제품 i18n 키에서 온다 — 리터럴을 새로 짓지 않는다 (적대적 18회차)" {
+    // Lab 캡처도, 우클릭 메뉴도, 이 상자도 **같은 키**를 읽어야 한다. 한 자리가 리터럴을 들면
+    // 문구를 바꿀 때 그 자리만 옛말로 남고, 같은 동작이 화면마다 다른 이름으로 불린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    const label = sendHelperItems(h.fx.session)[0];
+    // 머리글은 덧말(잘린 수·주 선택만)이 붙을 수 있으므로 **그 키로 시작**하는 것까지가 계약이다.
+    try testing.expect(std.mem.startsWith(u8, label, maru.i18n.t(.ctx_send_selection)));
+}

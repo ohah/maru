@@ -206,6 +206,13 @@ pub const Client = struct {
     state: State = .open,
     /// `beginClose` 를 부른 지점(0 = 아직 안 닫음). 사유가 같은 호출부가 여럿이라 사유만으론 못 좁힌다.
     close_ra: usize = 0,
+    /// **어느 «줄»이 닫았는가.** `close_ra` 는 주소라 사람이 풀어야 하는데, 2026-09-13 에 그것을
+    /// 역어셈블로 풀다가 명령이 넘긴 사유 값과 로그의 사유가 어긋나 **거기서 막혔다.** 사유만으로는
+    /// 애초에 못 좁힌다 — `socket_error` 29 곳, `resource_exhausted` 18 곳이다.
+    ///
+    /// `attach not admitted` 가 여덟 자리를 한 사유로 뭉치던 것을 자리 이름으로 끝낸 것과 같은
+    /// 방식이다(#3577·#3603 → #3610). 전부에 붙이지 않고 **실제로 막힌 경로부터** 붙인다.
+    close_site: []const u8 = "-",
     close_after_flush: ?CloseReason = null,
     pending_upgrade: ?u128 = null,
     upgrade_gate_closed: bool = false,
@@ -418,6 +425,12 @@ pub const Client = struct {
     /// 못 읽는다).
     pub fn closeReturnAddress(self: *const Client) usize {
         return self.close_ra;
+    }
+
+    /// 닫은 «줄»의 이름. 안 붙인 자리는 `"-"` 라, 로그만 보고도 「아직 이름이 없는 자리」와
+    /// 「이름이 붙은 그 자리」가 갈린다.
+    pub fn closeSite(self: *const Client) []const u8 {
+        return self.close_site;
     }
 
     pub fn isUpgradeDraining(self: *const Client) bool {
@@ -669,7 +682,7 @@ pub const Client = struct {
         if (self.close_after_flush != null) return;
         var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse return else null;
         defer if (lease) |*held| held.release();
-        slot.beginDispatch() catch return self.beginClose(.resource_exhausted);
+        slot.beginDispatch() catch return self.beginCloseAt("tick_begin_dispatch", .resource_exhausted);
         defer slot.endDispatch() catch unreachable;
         self.connection.expireCatchups(now_ns);
         if (self.producer_streams.len == 0 and self.trackers.count() != 0)
@@ -722,7 +735,7 @@ pub const Client = struct {
                     return;
                 },
                 error.OutOfMemory => {
-                    self.beginClose(.resource_exhausted);
+                    self.beginCloseAt("tick_collect_oom", .resource_exhausted);
                     return;
                 },
             }
@@ -732,7 +745,7 @@ pub const Client = struct {
         // into the readiness owner immediately so poll_owner destroys the fd and all attachment
         // authority instead of treating `null` as an idle cadence forever.
         if (self.connection.isClosed())
-            return self.beginClose(.resource_exhausted);
+            return self.beginCloseAt("tick_connection_self_closed", .resource_exhausted);
         if (maybe_output) |*output| {
             const prepared_catchup = if (output.prepared_catchup) |*prepared| blk: {
                 const identity = self.process_identity orelse {
@@ -990,14 +1003,14 @@ pub const Client = struct {
         tracker: slot_mod.ScreenTrackerKey,
     ) void {
         const slot = self.reactor.get(self.admission) catch
-            return self.beginClose(.socket_error);
+            return self.beginCloseAt("invalidate_slot_lookup", .socket_error);
         slot.invalidateAndPurgeScreenTracker(tracker) catch
-            return self.beginClose(.socket_error);
+            return self.beginCloseAt("invalidate_purge_tracker", .socket_error);
         self.connection.markSubscriptionOutputInvalidated(stream);
         const notice = self.connection.snapshotInvalidatedFrame(stream) catch
-            return self.beginClose(.resource_exhausted);
+            return self.beginCloseAt("invalidate_notice_build", .resource_exhausted);
         self.adoptControl(notice) catch
-            return self.beginClose(.resource_exhausted);
+            return self.beginCloseAt("invalidate_notice_adopt", .resource_exhausted);
     }
 
     fn dispatch(self: *Client, frame: framing.Frame, now_ns: u64) error{OutOfMemory}!void {
@@ -1475,6 +1488,15 @@ pub const Client = struct {
 
     /// `noinline` 인 이유는 `@returnAddress()` 다. 인라인되면 이 함수가 돌려주는 주소는 **닫기로 한
     /// 지점이 아니라 그 위 프레임**이 되어, 사유와 지점이 어긋난 채 로그에 남는다.
+    /// 자리 이름을 남기고 닫는다. `beginClose` 는 **첫 호출이 이긴다** — 이름도 같이 이겨야 사유와
+    /// 짝이 맞으므로, 이름을 «먼저» 두고 그 안에서 닫는다.
+    noinline fn beginCloseAt(self: *Client, site: []const u8, reason: CloseReason) void {
+        if (self.isClosing()) return;
+        self.close_site = site;
+        self.state = .{ .closing = reason };
+        self.close_ra = @returnAddress();
+    }
+
     noinline fn beginClose(self: *Client, reason: CloseReason) void {
         if (self.isClosing()) return;
         self.state = .{ .closing = reason };

@@ -15276,19 +15276,21 @@ pub const AppSession = struct {
         self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 끝났다");
     }
 
-    /// pane 칸을 **통째로** 담는 상한 — `<32 자> ` 스물넷 + 여유.
+    /// **nonce 를 통째로** 담는 상한 — `<70 자> ` 열둘 + 여유.
     ///
     /// 뒤 8 자만 담았더니 벽에 부딪혔다(2026-09-11): `mine` 에 event 의 꼬리가 분명히 있는데 「가까운 짝」이
     /// 안 잡혔다. 꼬리가 같으면 앞도 같아야 하는데(`runtime_id` 는 랜덤 128 비트) 그렇지 않았고, **자른
     /// 값으로는 어디가 갈렸는지 못 본다** — 그래서 통째로 남긴다.
-    const term_nonce_tail_buf: usize = 33 * 24;
+    const term_nonce_tail_buf: usize = 71 * 12;
 
-    /// pane 칸을 **통째로** 이어 붙인다. 앞 32 자(인스턴스)는 열이 대개 같아 자리만 먹지만, pane 은
-    /// 자르면 안 된다 — 자른 값이 같아 보여도 전체가 다를 수 있고, 그것이 2026-09-11 의 벽이었다.
-    /// 넘치면 **조용히 자른다**(진단이 판정을 밀어내면 안 된다).
+    /// **nonce 를 통째로** 이어 붙인다(인스턴스 칸 포함).
+    ///
+    /// pane 만 담았더니 벽에 부딪혔다(2026-09-12): `mine` 에 event 의 pane 이 **글자 그대로** 있는데도
+    /// 안 맞고, #3484 의 「가까운 짝」 꼬리표마저 안 붙었다. 그 둘이 동시에 참이려면 그 Term 에서
+    /// 비교 자체가 안 일어나야 하는데, `fed` 에 들었고 채널도 열려 있다 — **인스턴스 칸을 못 보는 것이
+    /// 마지막 눈가림이었다.** 넘치면 조용히 자른다(진단이 판정을 밀어내면 안 된다).
     fn appendTermNonceTail(buf: *[term_nonce_tail_buf]u8, len: *usize, nonce: []const u8) void {
-        const at = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse 0;
-        const tail = if (at == 0) nonce else nonce[at + 1 ..];
+        const tail = nonce;
         const need = tail.len + @intFromBool(len.* != 0);
         if (len.* + need > buf.len) return;
         if (len.* != 0) {
@@ -24696,15 +24698,18 @@ test "RF4: orphan 은 앱이 들고 있던 신원 목록도 함께 남긴다" {
     // **pane 을 통째로** 담는다. 자른 값이 같아 보여도 전체가 다를 수 있고, 그것이 2026-09-11 의
     // 벽이었다 — `mine` 에 event 의 꼬리가 분명히 있는데 「가까운 짝」이 안 잡혔다.
     AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_0123456789abcdef");
-    AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_fedcba9876543210");
-    try std.testing.expectEqualStrings("0123456789abcdef fedcba9876543210", buf[0..len]);
+    AppSession.appendTermNonceTail(&buf, &len, "host_bbbb_fedcba9876543210");
+    try std.testing.expectEqualStrings(
+        "host_aaaa_0123456789abcdef host_bbbb_fedcba9876543210",
+        buf[0..len],
+    );
 
-    // 짧은 pane 도 그대로.
+    // 짧은 것도 그대로.
     len = 0;
     AppSession.appendTermNonceTail(&buf, &len, "host_aaaa_abc");
-    try std.testing.expectEqualStrings("abc", buf[0..len]);
+    try std.testing.expectEqualStrings("host_aaaa_abc", buf[0..len]);
 
-    // `_` 가 없으면 통째로 본다(로컬 신원이 섞여 든 경우도 보여야 한다).
+    // 로컬 신원이나 스풀 이름이 섞여 들어도 통째로 보인다.
     len = 0;
     AppSession.appendTermNonceTail(&buf, &len, "t36");
     try std.testing.expectEqualStrings("t36", buf[0..len]);

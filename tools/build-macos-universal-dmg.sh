@@ -47,6 +47,7 @@ cp -R "$work/arm.app" "$work/Maru.app"
 app="$work/Maru.app"
 helper_rel="Contents/Helpers/MaruMermaidRenderer.app"
 helper_bin_rel="$helper_rel/Contents/MacOS/maru-mermaid-renderer"
+notification_helper_rel="Contents/Helpers/maru-session-host-notification-center-helper"
 for bin in maru-macos-app maru; do
     lipo -create \
         "$work/arm.app/Contents/MacOS/$bin" \
@@ -62,12 +63,17 @@ lipo -create \
     "$work/arm.app/$helper_bin_rel" \
     "$work/x86.app/$helper_bin_rel" \
     -output "$app/$helper_bin_rel"
+lipo -create \
+    "$work/arm.app/$notification_helper_rel" \
+    "$work/x86.app/$notification_helper_rel" \
+    -output "$app/$notification_helper_rel"
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
 echo "    universal archs: $(lipo -archs "$app/Contents/MacOS/maru-macos-app")"
 for universal_bin in \
     "$app/Contents/MacOS/maru-macos-app" \
     "$app/Contents/MacOS/maru" \
-    "$app/$helper_bin_rel"
+    "$app/$helper_bin_rel" \
+    "$app/$notification_helper_rel"
 do
     archs=$(lipo -archs "$universal_bin")
     case "$archs" in
@@ -83,6 +89,7 @@ echo "==> codesign (Developer ID, hardened runtime, timestamp)"
 codesign --force --options runtime --timestamp \
     --entitlements src/platform/macos/MaruMermaidRenderer.entitlements \
     --sign "$SIGN_ID" "$app/$helper_rel"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/$notification_helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
 # RW2b 감시자(Resources/remote-watch/<variant>/maru-remote-watch). **번들 서명은 이들을 봉인만 하고

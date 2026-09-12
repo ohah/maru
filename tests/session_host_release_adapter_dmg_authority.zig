@@ -26,7 +26,7 @@ fn expected() authority.ExpectedDmg {
 }
 
 const FakeOps = struct {
-    const ProductFault = enum { none, executable_symlink, executable_hardlink };
+    const ProductFault = enum { none, executable_symlink, executable_hardlink, helper_symlink, helper_hardlink };
 
     mounted: bool = false,
     attach_calls: usize = 0,
@@ -98,6 +98,8 @@ fn applyProductFault(mount_dir: []const u8, fault: FakeOps.ProductFault) !void {
     var sibling_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     const executable = try std.fmt.bufPrintZ(&executable_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{mount_dir});
     const sibling = try std.fmt.bufPrintZ(&sibling_buf, "{s}/Maru.app/Contents/MacOS/product-sibling", .{mount_dir});
+    var helper_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const helper = try std.fmt.bufPrintZ(&helper_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{mount_dir});
     switch (fault) {
         .none => unreachable,
         .executable_symlink => {
@@ -106,6 +108,14 @@ fn applyProductFault(mount_dir: []const u8, fault: FakeOps.ProductFault) !void {
             try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = sibling, .data = "replacement" });
         },
         .executable_hardlink => try std.testing.expectEqual(@as(c_int, 0), std.c.link(executable.ptr, sibling.ptr)),
+        .helper_symlink => {
+            try std.Io.Dir.cwd().deleteFile(std.testing.io, helper);
+            try std.Io.Dir.cwd().symLink(std.testing.io, "../MacOS/maru", helper, .{});
+        },
+        .helper_hardlink => {
+            try std.Io.Dir.cwd().deleteFile(std.testing.io, helper);
+            try std.testing.expectEqual(@as(c_int, 0), std.c.link(executable.ptr, helper.ptr));
+        },
     }
 }
 
@@ -113,15 +123,19 @@ fn makeProductTree(mount_dir: []const u8) !void {
     var app_buf: [std.fs.max_path_bytes]u8 = undefined;
     var contents_buf: [std.fs.max_path_bytes]u8 = undefined;
     var macos_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var helpers_buf: [std.fs.max_path_bytes]u8 = undefined;
     const app = try std.fmt.bufPrint(&app_buf, "{s}/Maru.app", .{mount_dir});
     const contents = try std.fmt.bufPrint(&contents_buf, "{s}/Contents", .{app});
     const macos = try std.fmt.bufPrint(&macos_buf, "{s}/MacOS", .{contents});
+    const helpers = try std.fmt.bufPrint(&helpers_buf, "{s}/Helpers", .{contents});
     try std.Io.Dir.cwd().createDir(std.testing.io, app, .default_dir);
     try std.Io.Dir.cwd().createDir(std.testing.io, contents, .default_dir);
     try std.Io.Dir.cwd().createDir(std.testing.io, macos, .default_dir);
+    try std.Io.Dir.cwd().createDir(std.testing.io, helpers, .default_dir);
     var plist_buf: [std.fs.max_path_bytes]u8 = undefined;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cli_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
         .sub_path = try std.fmt.bufPrint(&plist_buf, "{s}/Info.plist", .{contents}),
         .data = "plist",
@@ -133,6 +147,10 @@ fn makeProductTree(mount_dir: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
         .sub_path = try std.fmt.bufPrint(&cli_buf, "{s}/maru", .{macos}),
         .data = "candidate-cli",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = try std.fmt.bufPrint(&helper_buf, "{s}/maru-session-host-notification-center-helper", .{helpers}),
+        .data = "notification-helper",
     });
 }
 
@@ -150,6 +168,11 @@ const Gate = struct {
         try std.testing.expect(std.mem.endsWith(u8, view.app_bundle_path, "/Maru.app"));
         try std.testing.expectEqual(@as(usize, 64), view.main_sha256.len);
         try std.testing.expectEqual(@as(usize, 64), view.cli_sha256.len);
+        try std.testing.expect(std.mem.endsWith(u8, view.main_path, "/Maru.app/Contents/MacOS/maru-macos-app"));
+        try std.testing.expect(std.mem.endsWith(u8, view.mounted_cli_path, "/Maru.app/Contents/MacOS/maru"));
+        try std.testing.expect(std.mem.endsWith(u8, view.helper_path, "/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper"));
+        try std.testing.expectEqual(@as(usize, 64), view.helper_sha256.len);
+        try std.testing.expectEqualStrings("ABCDEFGHIJ", view.team_id);
         self.calls[self.count] = 1;
         self.count += 1;
         if (self.fail_execute) return error.GateFailed;
@@ -539,7 +562,7 @@ test "DMG authority rejects a symlink candidate before attach" {
 }
 
 test "DMG authority rejects symlink and hardlink product executables and detaches" {
-    for ([_]FakeOps.ProductFault{ .executable_symlink, .executable_hardlink }) |fault| {
+    for ([_]FakeOps.ProductFault{ .executable_symlink, .executable_hardlink, .helper_symlink, .helper_hardlink }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var ops = FakeOps{ .product_fault = fault };

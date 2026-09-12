@@ -1532,18 +1532,35 @@ pub fn mergeResumed(
     if (resumed_from == 0) return null;
 
     var out: std.ArrayList(Hit) = .empty;
-    errdefer out.deinit(allocator);
+
+    // **옛 자리 → 새 자리.** 남기기는 **제자리 압축**이라 살아남은 항목의 자리가 앞으로 당겨지고,
+    // 그러면 `fold_owner` 가 전부 무효가 된다 — 퇴출이 같은 이유로 `remapFoldsAfterEvict` 를 둔다.
+    // 🔥 **적대적 Q5 가 그것을 잡았다**: 자국 뒤의 머리 히트가 버려지면 그 **뒤에 오는 부모**가
+    // 당겨지는데, 부모 안에서 접힌 이미지의 주인이 옛 자리를 가리킨 채 남는다.
+    var remap: std.ArrayList(u32) = .empty;
+    defer remap.deinit(allocator);
+    remap.ensureTotalCapacity(allocator, prior.len) catch {
+        out.deinit(allocator);
+        return null;
+    };
 
     var kept: usize = 0;
     for (prior) |h| {
         // 부모는 이번에 안 훑었다 — 그대로 쓴다.
         const keep = if (h.file_index != 0) true else h.line_offset < resumed_from;
+        remap.appendAssumeCapacity(if (keep) @intCast(kept) else no_fold);
         if (!keep) continue;
         out.append(allocator, h) catch {
             out.deinit(allocator);
             return null;
         };
         kept += 1;
+    }
+    // **살아남은 것들의 주인을 새 자리로 옮긴다.** 주인이 버려졌으면 **접기를 푼다** — 그때 그
+    // 이미지는 더 이상 남의 줄과 겹치지 않으므로 「전체」에 제 줄로 서는 것이 맞다(퇴출과 같은 규율).
+    for (out.items) |*h| {
+        if (h.fold_owner == no_fold) continue;
+        h.fold_owner = if (h.fold_owner < remap.items.len) remap.items[h.fold_owner] else no_fold;
     }
 
     // **상한을 넘으면 물러난다.** 퇴출 규칙(오래된 1/8 · 접기 remap · 대기 링 remap)은 스캐너 안에
@@ -2874,6 +2891,53 @@ test "이어읽기 병합: 접기 주인을 앞 길이만큼 민다 (RAV7b-3b)" 
     try testing.expectEqual(@as(u64, 300), got.hits.items[2].line_offset);
     // **접기가 없는 것은 안 건드린다** — `no_fold` 에 더하면 엉뚱한 자리를 가리킨다.
     try testing.expectEqual(no_fold, got.hits.items[2].fold_owner);
+}
+
+test "이어읽기 병합: 남긴 것의 주인도 새 자리로 옮긴다 (RAV7b-3b · 적대적 Q5)" {
+    // 🔥 남기기는 **제자리 압축**이라 살아남은 항목의 자리가 앞으로 당겨진다. 자국 뒤의 머리
+    // 히트가 버려지면 그 **뒤에 오는 부모**가 당겨지는데, 부모 안에서 접힌 이미지의 주인이 **옛
+    // 자리**를 가리킨 채 남으면 그 이미지가 엉뚱한 호출로 접힌다(퇴출이 같은 이유로
+    // `remapFoldsAfterEvict` 를 둔다).
+    const allocator = testing.allocator;
+    var prior = [_]Hit{
+        mk(100, 0), // 자리 0 — 남는다
+        mk(300, 0), // 자리 1 — 자국 뒤라 **버려진다**
+        mk(900, 1), // 자리 2 — 부모 호출, 남는다 → 새 자리 **1**
+        mk(950, 1), // 자리 3 — 부모 이미지, 주인이 자리 2 다
+    };
+    prior[3].kind = .claude_image;
+    prior[3].fold_owner = 2;
+
+    const fresh = [_]Hit{mk(400, 0)};
+    var got = mergeResumed(allocator, &prior, &fresh, 250).?;
+    defer got.hits.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 3), got.kept);
+    // 부모 호출이 자리 **1** 로 당겨졌다.
+    try testing.expectEqual(@as(u64, 900), got.hits.items[1].line_offset);
+    // **주인도 따라왔다** — 2 → 1.
+    try testing.expectEqual(@as(u32, 1), got.hits.items[2].fold_owner);
+    try testing.expectEqual(@as(u64, 950), got.hits.items[2].line_offset);
+}
+
+test "이어읽기 병합: 주인이 버려지면 접기를 «푼다» (RAV7b-3b · 적대적 Q5)" {
+    // 주인을 잃은 이미지는 더 이상 남의 줄과 겹치지 않으므로 「전체」에 **제 줄로 서는 것**이 맞다.
+    // 옛 자리를 그대로 두면 **엉뚱한 호출**로 접히고, 그것이 더 나쁘다(퇴출과 같은 판단).
+    const allocator = testing.allocator;
+    var prior = [_]Hit{
+        mk(100, 0), // 자리 0 — 남는다
+        mk(300, 0), // 자리 1 — **버려진다**(주인이 이것이다)
+        mk(900, 1), // 자리 2 — 부모 이미지, 주인이 자리 1
+    };
+    prior[2].kind = .claude_image;
+    prior[2].fold_owner = 1;
+
+    const fresh = [_]Hit{mk(400, 0)};
+    var got = mergeResumed(allocator, &prior, &fresh, 250).?;
+    defer got.hits.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), got.kept);
+    try testing.expectEqual(no_fold, got.hits.items[1].fold_owner); // 접기가 풀렸다
 }
 
 test "이어읽기 병합: 자국이 0 이면 «물러난다» — 같은 활동이 두 번 뜨지 않게 (RAV7b-3b)" {

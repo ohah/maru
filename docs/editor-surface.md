@@ -101,7 +101,8 @@
 - control socket 최대 frame은 1 MiB다. 브리지 응답도 현재 fixed 8 KiB라 큰 문서 전송 경로로 사용할 수 없다.
 - **file-panel 진행 상태(2026-07-31 코드 대조)**: 이 문서가 "미래형"으로 적었던 전제 대부분이 **이미 현재형**이다.
   - **FP16 구조가 현재 계약이다**([file-panel.md](file-panel.md) 머리말): 파일 콘텐츠는 도크가 아니라 **워크스페이스
-    `Term`**(`kind = .web` + 파일 entry)에 살고, 창 레벨 **도크는 `right` 고정 · 탐색기 전용**으로 축소됐다
+    `Term`**(`kind = .web` + 파일 entry)에 살고, 창 레벨 **도크는 `right` 고정이며 파일 콘텐츠는 탐색기 view에만**
+    남는다(AI 세션 기록 view는 별도 [에이전트 세션 기록 도크](agent-session-list.md)가 소유한다)
     (`dock_panel.Side = enum { right, bottom }`이지만 배치는 right 고정). **따라서 이 문서 §3의 "도크 콘텐츠 rect에
     diff를 얹는다"는 전제는 더 이상 성립하지 않는다** — 아래 §3에서 재작성했다.
   - **CM6는 코드에 있고 제품에 출하돼 있다**(`web/src/editor.ts` — `@codemirror/{state,view,commands,lang-markdown}`).

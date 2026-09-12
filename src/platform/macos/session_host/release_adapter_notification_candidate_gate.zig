@@ -353,6 +353,7 @@ fn captureScenario(allocator: std.mem.Allocator, source: concrete.Inputs) !concr
     return .{
         .app_executable = try allocator.dupeZ(u8, source.app_executable),
         .helper_executable = try allocator.dupeZ(u8, source.helper_executable),
+        .runtime_preparation_executable = if (source.runtime_preparation_executable) |value| try allocator.dupeZ(u8, value) else null,
         .runner_nonce = try allocator.dupe(u8, source.runner_nonce),
         .runner_root = try allocator.dupeZ(u8, source.runner_root),
         .output_path = try allocator.dupeZ(u8, source.output_path),
@@ -384,7 +385,7 @@ fn validateInputs(inputs: Inputs) !void {
         zero_deadline != inputs.gui_live_then_quit.helper_expected.deadline_ns or
         inputs.gui_zero.app_expected.scenario != .gui_zero or
         inputs.gui_live_then_quit.app_expected.scenario != .gui_live_then_quit or
-        std.mem.eql(u8, inputs.gui_zero.app_expected.request_identifier, inputs.gui_live_then_quit.app_expected.request_identifier) or
+        invalidPreparationPair(inputs.gui_zero, inputs.gui_live_then_quit) or
         std.mem.eql(u8, inputs.gui_zero.output_path, inputs.gui_live_then_quit.output_path) or
         std.mem.eql(u8, inputs.output_path, inputs.gui_zero.output_path) or
         std.mem.eql(u8, inputs.output_path, inputs.gui_live_then_quit.output_path) or
@@ -394,13 +395,26 @@ fn validateInputs(inputs: Inputs) !void {
     _ = std.math.cast(i128, zero_deadline) orelse return error.InvalidInput;
 }
 
+fn invalidPreparationPair(zero: concrete.Inputs, live: concrete.Inputs) bool {
+    const prepared = zero.runtime_preparation_executable != null or live.runtime_preparation_executable != null;
+    if (!prepared) return std.mem.eql(u8, zero.app_expected.request_identifier, live.app_expected.request_identifier);
+    return zero.runtime_preparation_executable == null or live.runtime_preparation_executable == null or
+        zero.app_expected.request_identifier.len != 0 or live.app_expected.request_identifier.len != 0 or
+        zero.app_expected.host_id.len != 0 or live.app_expected.host_id.len != 0 or
+        zero.app_expected.runtime_id.len != 0 or live.app_expected.runtime_id.len != 0 or
+        zero.app_expected.event_id != 0 or live.app_expected.event_id != 0;
+}
+
 fn matchCandidateInputs(inputs: Inputs, candidate: dmg.MountedCandidate) !void {
     if (!std.mem.eql(u8, inputs.candidate_executable_sha256, candidate.main_sha256) or
         !std.mem.eql(u8, inputs.designated_requirement_sha256, candidate.designated_requirement_sha256) or
         !std.mem.eql(u8, inputs.gui_zero.app_executable, candidate.main_path) or
         !std.mem.eql(u8, inputs.gui_live_then_quit.app_executable, candidate.main_path) or
         !std.mem.eql(u8, inputs.gui_zero.helper_executable, candidate.helper_path) or
-        !std.mem.eql(u8, inputs.gui_live_then_quit.helper_executable, candidate.helper_path)) return error.CandidateChanged;
+        !std.mem.eql(u8, inputs.gui_live_then_quit.helper_executable, candidate.helper_path) or
+        (inputs.gui_zero.runtime_preparation_executable != null and
+            (!std.mem.eql(u8, inputs.gui_zero.runtime_preparation_executable.?, candidate.mounted_cli_path) or
+                !std.mem.eql(u8, inputs.gui_live_then_quit.runtime_preparation_executable.?, candidate.mounted_cli_path)))) return error.CandidateChanged;
 }
 
 fn remaining(io: std.Io, deadline_ns: i128) !i128 {

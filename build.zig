@@ -15541,6 +15541,31 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-process-owner",
         "Validate single-owner Notification Center app/helper process composition",
     );
+    const session_host_notification_runtime_preparation_step = b.step(
+        "test-session-host-notification-runtime-preparation",
+        "Validate isolated mounted-candidate host and runtime preparation",
+    );
+    if (target.result.os.tag == .macos) {
+        const runtime_smoke_bounded_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const runtime_product_smoke = b.addExecutable(.{
+            .name = "session-host-notification-runtime-product-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_runtime_product_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "bounded_process", .module = runtime_smoke_bounded_mod }},
+            }),
+        });
+        const run_runtime_product_smoke = b.addRunArtifact(runtime_product_smoke);
+        run_runtime_product_smoke.addArtifactArg(exe);
+        run_runtime_product_smoke.setCwd(b.path("."));
+        session_host_notification_runtime_preparation_step.dependOn(&run_runtime_product_smoke.step);
+    }
     const session_host_notification_app_child_step = b.step(
         "test-session-host-notification-app-child",
         "Validate the closed framed-socket Notification Center app child",
@@ -16264,6 +16289,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = notification_workspace_base_mod }},
         });
+        const notification_runtime_preparation_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_runtime_preparation.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "bounded_process", .module = notification_app_child_bounded_mod }},
+        });
         const notification_concrete_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_concrete.zig"),
             .target = target,
@@ -16275,6 +16307,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "release_adapter_notification_continuity_receipt", .module = notification_continuity_receipt_mod },
                 .{ .name = "release_adapter_notification_helper_child", .module = notification_helper_child_mod },
                 .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
+                .{ .name = "release_adapter_notification_runtime_preparation", .module = notification_runtime_preparation_mod },
                 .{ .name = "release_adapter_notification_workspace", .module = notification_workspace_mod },
                 .{ .name = "release_adapter_files", .module = notification_app_receipt_files_mod },
             },
@@ -17029,7 +17062,16 @@ pub fn build(b: *std.Build) void {
             const nc_continuity_receipt_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_continuity_receipt.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_notification_helper_receipt", .module = nc_helper_receipt_mod } } });
             const nc_workspace_base_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_pre_publish_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }} });
             const nc_workspace_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = nc_workspace_base_mod }} });
-            const nc_concrete_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_concrete.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_notification_process_owner", .module = nc_process_owner_mod }, .{ .name = "release_adapter_notification_app_child", .module = nc_app_child_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_notification_continuity_receipt", .module = nc_continuity_receipt_mod }, .{ .name = "release_adapter_notification_helper_child", .module = nc_helper_child_mod }, .{ .name = "release_adapter_notification_helper_receipt", .module = nc_helper_receipt_mod }, .{ .name = "release_adapter_notification_workspace", .module = nc_workspace_mod }, .{ .name = "release_adapter_files", .module = files_mod } } });
+            const nc_runtime_preparation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_runtime_preparation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "bounded_process", .module = bounded_mod }} });
+            const nc_runtime_preparation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_runtime_preparation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_notification_runtime_preparation", .module = nc_runtime_preparation_mod }} }) });
+            const run_nc_runtime_preparation_tests = b.addRunArtifact(nc_runtime_preparation_tests);
+            run_nc_runtime_preparation_tests.addArg("--maru-expect-tests=3");
+            run_nc_runtime_preparation_tests.setCwd(b.path("."));
+            session_host_notification_runtime_preparation_step.dependOn(&run_nc_runtime_preparation_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_nc_runtime_preparation_tests.step);
+            test_step.dependOn(&run_nc_runtime_preparation_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_nc_runtime_preparation_tests.step);
+            const nc_concrete_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_concrete.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_notification_process_owner", .module = nc_process_owner_mod }, .{ .name = "release_adapter_notification_app_child", .module = nc_app_child_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_notification_continuity_receipt", .module = nc_continuity_receipt_mod }, .{ .name = "release_adapter_notification_helper_child", .module = nc_helper_child_mod }, .{ .name = "release_adapter_notification_helper_receipt", .module = nc_helper_receipt_mod }, .{ .name = "release_adapter_notification_runtime_preparation", .module = nc_runtime_preparation_mod }, .{ .name = "release_adapter_notification_workspace", .module = nc_workspace_mod }, .{ .name = "release_adapter_files", .module = files_mod } } });
             const nc_phase_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_phase.zig"), .target = target, .optimize = composition_optimize });
             const nc_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_product.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_notification_phase", .module = nc_phase_mod }} });
             const notification_candidate_gate_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_notification_candidate_identity", .module = notification_candidate_identity_mod }, .{ .name = "release_adapter_notification_concrete", .module = nc_concrete_mod }, .{ .name = "release_adapter_notification_product", .module = nc_product_mod }, .{ .name = "release_adapter_notification_helper_child", .module = nc_helper_child_mod }, .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_files", .module = files_mod } } });

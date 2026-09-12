@@ -189,13 +189,21 @@ fn captureScenario(allocator: std.mem.Allocator, source: Scenario) !Scenario {
 }
 
 fn scenario(input: Scenario, candidate: dmg.MountedCandidate) concrete.Inputs {
+    var expected = input.app_expected;
+    // Host/runtime/event identity is created only after the private root exists. Discard any
+    // caller value here so the mounted product path cannot accidentally trust a guessed route.
+    expected.request_identifier = "";
+    expected.host_id = "";
+    expected.runtime_id = "";
+    expected.event_id = 0;
     return .{
         .app_executable = candidate.main_path,
         .helper_executable = candidate.helper_path,
+        .runtime_preparation_executable = candidate.mounted_cli_path,
         .runner_nonce = input.runner_nonce,
         .runner_root = input.runner_root,
         .output_path = input.output_path,
-        .app_expected = input.app_expected,
+        .app_expected = expected,
         .helper_expected = input.helper_expected,
         .submitted_at_ns = input.submitted_at_ns,
         .before_marker = input.before_marker,

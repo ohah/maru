@@ -22343,7 +22343,10 @@ pub const AppSession = struct {
             if (!still_running) break;
             std.atomic.spinLoopHint();
         }
-        self.remote_fresh_outcome = null;
+        if (self.remote_fresh_outcome) |outcome| {
+            outcome.deinit(self.allocator);
+            self.remote_fresh_outcome = null;
+        }
         // 원격 이름 변경 워커도 같은 가드다(RF6b) — detach 스레드가 self.remote_rename_* 을 건드린다.
         while (true) {
             self.remote_rename_mutex.lockUncancelable(self.io);
@@ -81684,8 +81687,9 @@ test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3
 }
 
 test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는다 (RAV7)" {
-    // **이 판정자가 재는 것**: 왕복 하나로 「안 자랐다」를 확인하고 **물러나는가**. 그 전에는 뷰에
-    // 들어올 때마다 통째로 다시 훑었다(원격은 로컬 stat 자국을 못 쓴다 — §13.2).
+    // **재는 것**: 어떤 답이 재스캔을 부르는가. 🔥 **결정을 값으로 본다** — 부수효과(`refresh`)는 이
+    // 하네스에 스캔 백엔드가 없어 **아무 자국도 안 남기고**, 그래서 처음에는 가드를 없애도 판정자가
+    // 안 죽었다(적대적 T4 · 뮤테이션이 그 빈틈을 드러냈다).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
@@ -81701,26 +81705,62 @@ test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는�
     });
     defer session.deinit();
 
+    const head = "/home/u/s.jsonl";
     session.agent_activity.source_remote = true;
     session.agent_activity.remote_scanned_bytes = 4096;
     session.agent_activity.built = true;
+    _ = session.agent_activity.chain.append(head);
+    session.dock.view = .agent_activity;
+    // 도크가 「보이는」 상태여야 ④의 뷰 가드가 뜻을 갖는다(`dockVisible` 의 네 조건).
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
 
-    // ── ① 안 자랐으면 **아무것도 안 한다**. `built` 가 그대로면 재스캔이 안 걸린 것이다.
-    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 4096, .grew = false });
-    try std.testing.expect(session.agent_activity.built);
-    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.awaiting);
+    const mk = struct {
+        fn out(alloc: std.mem.Allocator, stamp: u64, path: []const u8, grew: bool) agent_activity_ops.RemoteFreshOutcome {
+            return .{ .stamp = stamp, .path = alloc.dupe(u8, path) catch &.{}, .grew = grew };
+        }
+    }.out;
+    const wants = struct {
+        fn f(sess: *AppSession, alloc: std.mem.Allocator, stamp: u64, path: []const u8, grew: bool) bool {
+            const o = mk(alloc, stamp, path, grew);
+            defer o.deinit(alloc);
+            return agent_activity_ops.remoteFreshnessWantsRescan(sess, o);
+        }
+    }.f;
 
-    // ── ② **옛 자국의 답은 버린다.** 그 사이 다시 훑었으면 이 답은 지난 파일 크기의 것이다 —
-    //    안 버리면 자라지도 않았는데 스캔이 걸리거나, 그 반대로 자란 것을 놓친다.
-    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 1234, .grew = true });
-    try std.testing.expect(session.agent_activity.built);
-    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.awaiting);
+    // ── ① **자랐을 때만** 부른다.
+    try std.testing.expect(wants(session, allocator, 4096, head, true));
+    try std.testing.expect(!wants(session, allocator, 4096, head, false));
 
-    // ── ③ **로컬 pane 의 답은 무시한다.** pane 이 그새 로컬로 바뀌었는데 원격 답을 쓰면 저쪽
-    //    크기로 이쪽 파일을 판정하게 된다.
+    // ── ② **옛 자국의 답은 버린다.** 그 사이 다시 훑었으면 지난 크기의 답이다.
+    try std.testing.expect(!wants(session, allocator, 1234, head, true));
+
+    // ── ③ **다른 파일의 답은 버린다**(적대적 T3). 자국은 크기라 다른 세션과 우연히 같을 수 있다 —
+    //    경로를 안 보면 **남의 pane** 을 재스캔한다.
+    try std.testing.expect(!wants(session, allocator, 4096, "/home/u/other.jsonl", true));
+
+    // ── ④ **뷰를 떠났으면 안 부른다**(적대적 T2 · 계약 §7③). 왕복이 도는 사이 떠날 수 있고, 그때
+    //    재스캔을 걸면 아무도 안 보는 목록을 위해 남의 서버가 최악 6.3 초를 태운다.
+    session.dock.view = .explorer;
+    try std.testing.expect(!wants(session, allocator, 4096, head, true));
+    session.dock.view = .agent_activity;
+
+    // ── ⑤ **자국이 0 이면 신선도가 꺼져 있다**(체인이 여럿이라 못 찍었다 — 적대적 S1).
+    session.agent_activity.remote_scanned_bytes = 0;
+    try std.testing.expect(!wants(session, allocator, 0, head, true));
+    session.agent_activity.remote_scanned_bytes = 4096;
+
+    // ── ⑥ **로컬 pane 의 답은 무시한다.** 저쪽 크기로 이쪽 파일을 판정하지 않는다.
     session.agent_activity.source_remote = false;
-    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 4096, .grew = true });
-    try std.testing.expect(session.agent_activity.built);
+    try std.testing.expect(!wants(session, allocator, 4096, head, true));
+    session.agent_activity.source_remote = true;
+
+    // ── ⑦ **소스가 갈리면 자국도 지운다**(적대적 T1). 안 지우면 신선도가 **새 파일**의 옛 자리를
+    //    묻고, 새 파일이 더 작으면 영영 빈 답이라 **자라도 갱신이 안 된다**.
+    session.agent_activity.clear(allocator);
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.remote_scanned_bytes);
 }
 
 test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린다 (RAV5b)" {

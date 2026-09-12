@@ -41,6 +41,13 @@ pub const Result = struct {
     image_partial: bool = false,
     activity_partial: bool = false,
     scanned_bytes: u64 = 0,
+    /// 원격이 실은 **체인 파일 수**(RAV7a 적대적 S1). 신선도 자국은 `scanned_bytes` 를 쓰는데 그것은
+    /// **체인 전체의 합**이라, 파일이 둘 이상이면 머리 파일의 크기가 아니다 — 그 자리에서 1 바이트를
+    /// 청하면 **영영 빈 답**이고 신선도가 죽는다(Codex 재개는 실측 58%).
+    ///
+    /// 그래서 **하나일 때만** 자국으로 쓴다. 여럿일 때의 올바른 자국은 「머리 파일이 읽힌 바이트」인데
+    /// 그것을 실으려면 wire 판을 올려야 한다 — RAV7b 의 일이다.
+    remote_file_count: u8 = 0,
     scan_ns: u64 = 0,
     /// 이 결과를 만든 요청. main actor 가 「지금 보고 있는 것」과 대조해 늦게 온 것을 버린다.
     generation: u64 = 0,
@@ -372,7 +379,13 @@ fn worker(job: *Job) void {
     // **원격은 저쪽이 훑는다**(RAV3). 자리도 라벨도 wire 로 오므로 이 아래의 로컬 스캔·라벨 패스를
     // 통째로 지나친다 — §2.1 의 「저쪽 오프셋은 이쪽 syscall 에 안 간다」가 여기서 지켜진다.
     if (job.remote) |r| {
-        const result = remoteScan(state.allocator, job.chain, r, job.generation);
+        // 🔥 **원격도 비용을 잰다**(적대적 S2). `scan_ns` 가 0 이면 신선도 폴링이 「직전 스캔이 쌌다」로
+        // 읽어 **가장 짧은 주기**로 돈다 — 원격 왕복은 로컬 스캔보다 비싼데(실측 6.3 초 + 네트워크)
+        // 그 규율이 꺼져 있었다. 로컬이 「9 초 스캔이면 그만큼 쉰다」로 지키는 그것이다.
+        const started: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
+        var result = remoteScan(state.allocator, job.chain, r, job.generation);
+        const ended: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
+        result.scan_ns = @intCast(@max(0, ended - started));
         finish(state, result);
         return;
     }
@@ -542,7 +555,7 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_co
         malformed = true;
         break :blk null;
     }) |event| switch (event) {
-        .file => {},
+        .file => result.remote_file_count +|= 1,
         .flags => |flags| {
             result.partial = result.partial or flags.partial;
             result.image_partial = result.image_partial or flags.image_partial;
@@ -661,6 +674,30 @@ test "원격 매핑: 원격 오류는 「비었다」가 아니라 「못 봤다
 
     try testing.expect(result.partial);
     try testing.expectEqual(@as(usize, 0), result.hits.items.len);
+}
+
+test "원격 매핑: 체인 파일 수를 센다 — 신선도 자국이 그 값에 달려 있다" {
+    // 🔥 적대적 S1: `scanned_bytes` 는 **체인 전체의 합**이다. 파일이 둘 이상이면 그것은 머리 파일의
+    // 크기가 아니라서, 그 자리에서 1 바이트를 청하는 신선도 판정이 **영영 빈 답**을 받는다.
+    // 소비자가 「하나일 때만」을 가릴 수 있게 개수를 싣는다.
+    var buf: [8192]u8 = undefined;
+    {
+        const bytes = buildWire(&buf, .{}, &.{sampleRecord()});
+        var result = remoteResultFromWire(testing.allocator, bytes, 0, 1);
+        defer result.deinit(testing.allocator);
+        try testing.expectEqual(@as(u8, 1), result.remote_file_count);
+    }
+    {
+        // 체인 둘(자식 + 부모).
+        var n = wire.appendHeader(&buf, 0).?;
+        n = wire.appendFile(&buf, n, 0, "/home/u/child.jsonl").?;
+        n = wire.appendFile(&buf, n, 1, "/home/u/parent.jsonl").?;
+        n = wire.appendFlags(&buf, n, .{ .scanned_bytes = 999 }).?;
+        n = wire.appendTail(&buf, n, 0).?;
+        var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+        defer result.deinit(testing.allocator);
+        try testing.expectEqual(@as(u8, 2), result.remote_file_count);
+    }
 }
 
 test "원격 매핑: 자리와 라벨의 길이는 언제나 같다" {

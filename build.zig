@@ -5877,6 +5877,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // 재동기화 sweep 이 «무엇에» 막혔는가. 여섯 갈래가 전부 조용히 빠져, 멈춤과 정상이 같아 보였다.
+    const sweep_blocker_step = b.step(
+        "test-resync-sweep-blocker",
+        "A stalled resync sweep records which of the six branches blocked it",
+    );
+    const sweep_blocker_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/resync_sweep_blocker_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_sweep_blocker = b.addRunArtifact(sweep_blocker_tests);
+    run_sweep_blocker.addArg("--maru-expect-tests=1");
+    run_sweep_blocker.addArg("--maru-expect-passed=1");
+    run_sweep_blocker.setCwd(b.path("."));
+    sweep_blocker_step.dependOn(&run_sweep_blocker.step);
+    boundary_step.dependOn(&run_sweep_blocker.step);
+
     // 연결을 «어느 줄이» 닫았는가. 사유는 29·18 곳이 공유하고, 주소 풀이는 2026-09-13 에 어긋나 막혔다.
     const close_site_step = b.step(
         "test-close-site-name",

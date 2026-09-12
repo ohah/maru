@@ -86257,6 +86257,10 @@ test "활동 뷰 요약 칸: 크기는 언제나, 실패는 provider 가 적었�
         try std.testing.expect(std.mem.indexOfScalar(u8, out, '0') == null);
     }
     // ⑥ 그 경우에도 **실패는 삼키지 않는다**(계약 §2.3 — provider 가 적은 유일한 근거다).
+    //
+    //    ⚠️ **지금 스캐너는 이 조합을 안 만든다**(적대적 EB3): 본문의 끝을 모르면 `"is_error":true`
+    //    를 안전하게 못 찾아 `failed` 를 안 채운다(계획 §29.8). 그래도 이 갈래를 못박는 이유는
+    //    **화면이 근거를 삼키지 않게** 하려는 것이다 — 그 한계가 풀리는 날 화면이 먼저 준비돼 있다.
     {
         const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 0 });
         try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_failed)) != null);

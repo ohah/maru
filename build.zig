@@ -983,6 +983,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -1821,6 +1822,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -4149,6 +4151,33 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&notification_center_helper_compile.step);
         test_step.dependOn(&run_notification_center_helper_policy.step);
         macos_only_test_step.dependOn(&run_notification_center_helper_policy.step);
+
+        const notification_scenario_receipt_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        notification_scenario_receipt_tests.addFileArg(
+            b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"),
+        );
+        notification_scenario_receipt_tests.addFileArg(
+            b.path("tests/macos_notification_release_scenario_receipt.swift"),
+        );
+        notification_scenario_receipt_tests.addArg("-o");
+        const notification_scenario_receipt_test_bin = notification_scenario_receipt_tests.addOutputFileArg(
+            "maru-notification-release-scenario-receipt-tests",
+        );
+        const run_notification_scenario_receipt_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_notification_scenario_receipt_tests.addFileArg(notification_scenario_receipt_test_bin);
+        const notification_scenario_receipt_step = b.step(
+            "test-session-host-notification-scenario-receipt",
+            "Validate exact callback and attach binding for the notification release scenario",
+        );
+        notification_scenario_receipt_step.dependOn(&run_notification_scenario_receipt_tests.step);
+        test_step.dependOn(&run_notification_scenario_receipt_tests.step);
+        macos_only_test_step.dependOn(&run_notification_scenario_receipt_tests.step);
 
         const file_panel_termination_policy_tests = b.addSystemCommand(&.{
             "xcrun",

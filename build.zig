@@ -3622,7 +3622,7 @@ pub fn build(b: *std.Build) void {
         // 무관하게 컴파일된다). ⚠️ 매핑을 여기 넣은 이유: `agent_image_scan_backend` 는 `maru` 모듈
         // 의존이 있어 **단독 `zig test` 로 안 돌고**, 전체 `zig build test` 는 캐시로 건너뛴다 —
         // 그러면 새 매핑 판정자가 「돌았는지」를 개수로 확인할 데가 아예 없다.
-        run_remote_activity_vertical.addArg("--maru-expect-tests=22");
+        run_remote_activity_vertical.addArg("--maru-expect-tests=25");
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
         // 🔥 **CI 에도 건다**(적대적 E2). 판정자의 **실행**은 `test-macos-app-host-abi` 가 4,781 개를

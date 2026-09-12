@@ -165,6 +165,7 @@ var adoption_reject_site: []const u8 = "none";
 fn notePreparedAttachRejected(site: []const u8) void {
     adoption_reject_site = site;
     adoption_reject_error = "-";
+    adoption_reject_bytes = 0;
 }
 
 /// 자리가 **여러 오류를 한 이름으로 묶는** 경우의 마지막 구분자.
@@ -176,16 +177,21 @@ fn notePreparedAttachRejected(site: []const u8) void {
 /// 이 축에서 네 번 추측으로 틀렸다. 이름 하나면 끝난다.
 var adoption_reject_error: []const u8 = "-";
 
-fn notePreparedAttachRejectedErr(site: []const u8, err: anyerror) void {
+/// 거부 배치의 합계 바이트. `ScreenInvalidated` 는 **연성 상한 초과**와 **길이 0 청크** 둘에서 나오고
+/// 고칠 곳이 다르다. 숫자가 있으면 그 구분도, 17 MiB 재동기화 차선에 담기는 크기인지도 한 번에 끝난다.
+var adoption_reject_bytes: usize = 0;
+
+fn notePreparedAttachRejectedErr(site: []const u8, err: anyerror, batch_bytes: usize) void {
     adoption_reject_site = site;
     adoption_reject_error = @errorName(err);
+    adoption_reject_bytes = batch_bytes;
 }
 
 fn noteAttachAdoption(adopted: SubscriptionAdoption, frames: usize) void {
     if (builtin.is_test) return;
     host_log.line(
-        "session host attach not admitted: adoption={s} site={s} err={s} frames={d}",
-        .{ @tagName(adopted), adoption_reject_site, adoption_reject_error, frames },
+        "session host attach not admitted: adoption={s} site={s} err={s} bytes={d} frames={d}",
+        .{ @tagName(adopted), adoption_reject_site, adoption_reject_error, adoption_reject_bytes, frames },
     );
 }
 
@@ -903,7 +909,7 @@ pub const Client = struct {
                         slot.enqueueOwnedScreenBatch(tracker, frames) catch |retry_err| {
                             for (frames) |bytes| self.allocator.free(bytes);
                             if (retry_err == error.GlobalLimit) return .deferred_global_pressure;
-                            notePreparedAttachRejectedErr("reclaim_retry_failed", retry_err);
+                            notePreparedAttachRejectedErr("reclaim_retry_failed", retry_err, total);
                             return .rejected;
                         };
                         self.consumePreparedCatchup(prepared_catchup);
@@ -913,8 +919,10 @@ pub const Client = struct {
                 for (frames) |bytes| self.allocator.free(bytes);
                 return .deferred_global_pressure;
             }
+            var batch_bytes: usize = 0;
+            for (frames) |bytes| batch_bytes +|= bytes.len;
             for (frames) |bytes| self.allocator.free(bytes);
-            notePreparedAttachRejectedErr("screen_batch_enqueue", err);
+            notePreparedAttachRejectedErr("screen_batch_enqueue", err, batch_bytes);
             return .rejected;
         };
         self.consumePreparedCatchup(prepared_catchup);
@@ -1145,8 +1153,25 @@ pub const Client = struct {
         if (adopted != .admitted) {
             noteAttachAdoption(adopted, frame_count);
             prepared.output.rollback(&self.connection);
-            self.connection.rollbackPreparedAttach(stream);
-            return self.beginClose(.resource_exhausted);
+            // **여기서 연결을 닫으면 그 세션은 영영 못 붙는다.** 평상시 턴은 똑같은 결과를 받고도
+            // 스트림을 무효화해 클라이언트에게 `snapshot.invalidated` 를 알리고, 클라이언트가
+            // `runtime.resync` 로 되물어 `resync_batch_bytes`(17 MiB) 차선으로 전체 스냅샷을 받는다.
+            // prepared attach 만 그 복구를 통째로 건너뛰고 `resource_exhausted` 로 닫았다.
+            //
+            // 그래서 첫 화면이 연성 상한(`screen_soft_bytes`, 8 MiB)을 넘는 세션은 고리에 갇힌다:
+            // 붙을 때마다 트래커가 `.valid` 로 새로 나 8 MiB 차선만 타고, 같은 자리에서 무효화되고,
+            // 연결이 끊긴다. 17 MiB 차선은 `.invalidated` 에서만 열리므로 **영영 닿지 못한다**.
+            // (실측 2026-09-12: 터미널 브라우저 세션이 이 고리에 갇혀, 누를 때마다 GUI 가 끊겼다.)
+            //
+            // 전송 자체가 깨진 게 아니므로 닫을 이유가 없다. attach 를 되돌리는 대신 **스트림을
+            // 살려 둔 채 무효화**해, 평상시 경로와 같은 복구를 받게 한다. 되돌리면 구동부가 훑는
+            // `localStreams` 에서 빠져 재동기화를 돌릴 주체가 사라진다.
+            const tracker = self.trackers.get(stream) orelse {
+                self.connection.rollbackPreparedAttach(stream);
+                return self.beginClose(.resource_exhausted);
+            };
+            self.invalidateSubscriptionOutput(stream, tracker);
+            return;
         }
         prepared.output.commit(&self.connection);
     }

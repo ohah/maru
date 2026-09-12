@@ -5841,8 +5841,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_attach_adoption = b.addRunArtifact(attach_adoption_tests);
-    run_attach_adoption.addArg("--maru-expect-tests=1");
-    run_attach_adoption.addArg("--maru-expect-passed=1");
+    run_attach_adoption.addArg("--maru-expect-tests=2");
+    run_attach_adoption.addArg("--maru-expect-passed=2");
     run_attach_adoption.setCwd(b.path("."));
     attach_adoption_step.dependOn(&run_attach_adoption.step);
     boundary_step.dependOn(&run_attach_adoption.step);

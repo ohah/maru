@@ -2986,8 +2986,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   초과·identity/time/kind drift와 기존 destination은 부분 publication 없이 실패해야 한다. 그 위 process composition이
   helper/app child와 exact notification/root cleanup을 단일 소유한다. **이 receipt final-address leaf는 구현됐고**
   `test-session-host-notification-app-receipt`가 Debug·ReleaseFast canonical/hostile parse, 전 allocation fail-index, 실제 absent `0600`
-  publication과 file-SSOT source boundary를 검증한다. 남은 R2b2 process composition은 helper/app child와 exact cleanup을 이 leaf에
-  결속해야 한다. R2b2 concrete adapter와 앱
+  publication과 file-SSOT source boundary를 검증한다. process composition의 단일 deadline, child/OS 시도 선기록,
+  성공한 exclusive receipt만의 소유권, receipt→request→helper→app→root 역순 cleanup과 실패한 authority만 남기는 exact retry owner도 구현됐고
+  `test-session-host-notification-process-owner`가 Debug·ReleaseFast에서 검증한다. 남은 R2b2 concrete adapter는 이 owner에
+  실제 helper/app child spawn·pipe와 exact notification/root syscall을 결속해야 한다. R2b2 concrete adapter와 앱
   scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일

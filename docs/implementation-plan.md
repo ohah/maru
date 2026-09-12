@@ -1455,9 +1455,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    projection/config-off 상태의 secure registry exact attach, 재응답의 중복 attach 0을 검증한다. 실제
    Notification Center 배너 클릭은 provisioned signed runner가 필요한 별도 release gate다.
 
-   **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 로컬/일반 CI 구현과 ad-hoc 제품 gate는 완료.** P4의 actual
+   **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 일반 제품 경로와 ad-hoc gate는 완료했지만,
+   provisioned product transaction 자체는 N3-R2b2/R2c와 R3가 미완료다.** R2b1의 별도 signable AX helper까지만
+   구현됐으며, 앱 callback/attach receipt owner와 helper·앱 child를 실행하는 concrete adapter, mounted signed candidate
+   composition 및 protected workflow binding을 이어서 구현한다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
-   재실행이 phase 완료 증거로 남아 있다. 이는 새 기능 구현 잔여가 아니라 release provenance gate다. 실행 중 업그레이드
+   재실행이 phase 완료 증거로 남아 있다. N3-R2b2/R2c는 구현 잔여이고, 그 구현이 닫힌 뒤 실제 Developer ID 실행만
+   release provenance gate로 남는다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1
    launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다.
    `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**도 CR6f-idle-soak로

@@ -211,8 +211,8 @@ comptime {
     // 맞추므로, 필드를 더하고 한쪽을 잊으면 그 값은 **영영 기본값**이다 — `Hit` 이 겪은 그것
     // (적대적 A2)과 정확히 같은 모양이라 같은 못을 박는다.
     assertCovered(ScanFlags, &.{
-        "partial",    "image_partial", "activity_partial",
-        "scanned_bytes", "head_bytes",  "resume_offset",
+        "partial",       "image_partial", "activity_partial",
+        "scanned_bytes", "head_bytes",    "resume_offset",
         "resumed_from",
     }, &.{});
 }

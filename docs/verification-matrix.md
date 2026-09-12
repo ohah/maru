@@ -3022,7 +3022,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mounted executable authority와 세 실행파일의 strict codesign·유일한 동일 `TeamIdentifier`·`CodeDirectory`
   `runtime` flag 결속은 구현됐고, Debug·ReleaseFast `test-session-host-notification-candidate-identity`가 path
   substitution, signer/runtime drift, bind 후 byte drift를 fail-close하는지 검증한다. 다음은 이 authority를 R2a owner의
-  두 scenario·최종 leaf 순서에 연결하는 composition이다.
+  두 scenario·최종 leaf 순서에 연결하는 composition이다. 각 scenario의 성공 receipt는 상위 transaction이 관측값을
+  소비한 뒤 exact held pathname으로 한 번만 제거하며, 제거 실패에는 같은 retry authority를 보존한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

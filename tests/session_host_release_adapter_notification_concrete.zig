@@ -1,6 +1,7 @@
 const std = @import("std");
 const concrete = @import("release_adapter_notification_concrete");
 const workspace = @import("release_adapter_notification_workspace");
+const files = @import("release_adapter_files");
 
 const nonce = "123e4567-e89b-42d3-a456-426614174000";
 const host = "00000000000000000000000000000001";
@@ -73,4 +74,24 @@ test "R2b2 workspace fails closed on an unexpected sibling" {
     const bytes = try tmp.dir.readFileAlloc(std.testing.io, "scenario/foreign", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("keep", bytes);
+}
+
+test "R2c successful scenario receipt is consumed exactly once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes:0]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    const suffix = try std.fmt.bufPrintZ(path[len..], "/receipt.json", .{});
+    const absolute = path[0 .. len + suffix.len :0];
+
+    var execution: concrete.Execution = .{};
+    try files.publishSummaryOwnedExclusive(&execution.receipt, absolute, "receipt");
+    execution.owner.owner = &execution.owner;
+    execution.owner.receipt_attempted = true;
+    execution.owner.successful = true;
+
+    try concrete.finishSuccessful(absolute, &execution);
+    try std.testing.expect(execution.owner.owner == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "receipt.json", .{}));
+    try std.testing.expectError(error.InvalidOwner, concrete.finishSuccessful(absolute, &execution));
 }

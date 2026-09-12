@@ -1116,11 +1116,21 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_f
         // 자리**다 — 신선도가 그 자리에서 1 바이트를 청하면 **언제나 바이트가 오고**, 그것을
         // 「자랐다」로 읽어 **매 주기마다 통째로 다시 훑는다**(이 슬라이스가 없애려던 바로 그것).
         // 0 이면 신선도가 꺼져 재진입마다 훑는다 — 뷰를 떠나면 멈추므로 **덜 아는 쪽**이 덜 나쁘다.
-        if (at == 0 and !head_broke) {
-            // **이어읽기여도 「머리 파일이 읽힌 바이트」다** — 시작점을 더해야 파일 크기가 되고,
-            // 그래야 신선도(RAV7a)가 그 자리에서 1 바이트를 청해 판정할 수 있다.
-            head_bytes = resumed_from + (offset - before);
-            resume_offset = scanner.resumeOffset(hits.items);
+        if (at == 0) {
+            if (head_broke) {
+                // 🔥 **셋을 함께 되돌린다**(적대적 13). `resumed_from` 만 남기면 `head_bytes` 가 0 인
+                // 채로 「105 부터 읽었다」를 주장하게 되고, 인코더의 순서 가드(`from ≤ head`)가 걸려
+                // **`S` 줄 자체가 안 나간다** — 「부분적으로 봤다」가 「형식이 깨졌다」로 뜬다.
+                //
+                // 0 으로 되돌리면 받는 쪽은 「이어읽기가 안 먹었다」로 읽어 앞 히트를 버리고 새
+                // 목록으로 간다. 부분 결과를 앞에 이어 붙이지 않는 것이 맞다.
+                resumed_from = 0;
+            } else {
+                // **이어읽기여도 「머리 파일이 읽힌 바이트」다** — 시작점을 더해야 파일 크기가 되고,
+                // 그래야 신선도(RAV7a)가 그 자리에서 1 바이트를 청해 판정할 수 있다.
+                head_bytes = resumed_from + (offset - before);
+                resume_offset = scanner.resumeOffset(hits.items);
+            }
         }
     }
 

@@ -230,15 +230,22 @@ test "읽다 죽은 파일에는 자국을 안 찍는다 (RAV7b · 적대적 A1)
     const code = try stripComments(allocator, src);
     defer allocator.free(code);
 
-    // ⑴ 자국을 찍는 가드가 **읽기 실패를 본다**. `at == 0` 만 보면 위 결함이 그대로 산다.
-    try std.testing.expect(std.mem.indexOf(u8, code, "if (at == 0 and !head_broke)") != null);
+    // ⑴ 자국을 찍는 자리가 **읽기 실패를 본다**. `at == 0` 만 보면 위 결함이 그대로 산다.
+    try std.testing.expect(std.mem.indexOf(u8, code, "if (head_broke)") != null);
     // ⑵ 그 깃발이 **머리 파일의** 실패에서만 선다 — 부모가 깨졌다고 머리 자국을 버리면 신선도가
     //    쓸데없이 꺼진다(부모는 어차피 안 자란다).
     try std.testing.expect(std.mem.indexOf(u8, code, "head_broke = at == 0;") != null);
-    // ⑶ 자국 둘이 **같은 가드 아래** 있다. 하나만 지키면 다른 하나가 거짓으로 국경을 건넌다.
-    const guarded = try bodyOf(code, "if (at == 0 and !head_broke)", "\n        }", 512);
-    try std.testing.expect(std.mem.indexOf(u8, guarded, "head_bytes =") != null);
-    try std.testing.expect(std.mem.indexOf(u8, guarded, "resume_offset =") != null);
+    // ⑶ 자국 **셋이 함께** 움직인다(RAV7b-3 적대적 13). 깨졌을 때 `resumed_from` 만 남기면
+    //    `head_bytes` 가 0 인 채 「거기부터 읽었다」를 주장하게 되고, 인코더의 순서 가드가 걸려
+    //    **`S` 줄 자체가 안 나간다** — 「부분적으로 봤다」가 「형식이 깨졌다」로 뜬다.
+    //
+    // ⚠️ needle 은 **유일해야 한다**. `if (at == 0)` 은 이 파일에 셋이라(머리를 못 열었을 때 ·
+    // 이어읽기 판정 · 자국) `bodyOf` 가 첫 매치를 잡아 **엉뚱한 본문**을 읽는다 — 실제로 한 번
+    // 그렇게 빨갰다(RAV7a 적대적 T4 의 뮤테이션이 겪은 그 함정과 같은 모양이다).
+    const guarded = try bodyOf(code, "if (head_broke)", "\n        }\n    }", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, guarded, "resumed_from = 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guarded, "head_bytes = resumed_from +") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guarded, "resume_offset = scanner.resumeOffset") != null);
 }
 
 /// 줄 주석(`//`)을 벗긴다. 문자열 안의 `//` 는 이 소스에 없다 — 생기면 이 헬퍼부터 고쳐야 한다.

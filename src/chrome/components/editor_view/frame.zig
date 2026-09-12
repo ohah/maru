@@ -119,6 +119,12 @@ pub const Props = struct {
     /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축, 짧아도 된다). 가로로 민 상태에서 전개가
     /// 앞을 다시 걷지 않게 한다 — 그 비용은 화면 폭이 아니라 **밀린 거리**에 비례한다.
     line_seeks: []const ?content.Seek = &.{},
+    /// 줄 **위**에 세울 위젯 행(논리 줄 인덱스로 읽는다. 짧은 배열·`null` 항목 = 위젯 없음).
+    /// S1.5 — docs/editor-merge-conflicts.md §5. 지금 소비자는 병합 충돌 마커(S2)다.
+    ///
+    /// **세로 축 전체가 이 표를 본다** — 총 행 수·스크롤 상한·막대 위치·`RowCache` 가 전부 여기서
+    /// 위젯 몫을 더한다. 한 곳만 빠뜨리면 문서 끝에서 그만큼 못 내려간다.
+    line_widgets: []const ?content.Widget = &.{},
     /// **문서 전체의 논리 줄들.** 화면 몫만 잘라 넘기면 안 된다 — 스크롤바 길이가 문서 전체의
     /// 시각 행 수에서 나오는데(§4.1a), 잘린 배열로는 그것을 셀 수 없어 막대가 실제보다 짧아진다
     /// (골든 `editor-scrollbar-wrapped-range`가 그 회귀를 잡았다).
@@ -339,6 +345,14 @@ pub const RowCache = struct {
     /// 재사용하면 주소가 같고 길이만 달라질 수 있다(그 반대도 마찬가지다).
     lines_ptr: usize = 0,
     lines_len: usize = 0,
+    /// 위젯 표(`line_widgets`)의 **주소와 길이**(S1.5). 위젯이 있는 줄은 한 행을 더 쓰므로 이 표가
+    /// 갈리면 접두합이 통째로 틀린다 — 줄 배열과 **같은 규율**로 주소와 길이를 둘 다 본다.
+    ///
+    /// **표의 내용이 제자리에서 바뀌는 경우는 키가 못 잡는다.** 호출자는 위젯 집합이 바뀌면 다른
+    /// 슬라이스를 주거나(그러면 주소·길이가 갈린다) 캐시를 무효로 만들어야 한다 — `lines` 가 이미
+    /// 지고 있는 것과 같은 계약이고, 그래서 여기에 같은 문장을 남긴다.
+    widgets_ptr: usize = 0,
+    widgets_len: usize = 0,
     /// 본문이 쓰는 **열 수**. 창 리사이즈·gutter 자릿수 변화가 여기로 들어온다 — 랩이 갈리는 값이라
     /// 이것이 바뀌면 모든 줄의 행 수가 바뀔 수 있다.
     content_width: u16 = 0,
@@ -391,15 +405,20 @@ pub const RowCache = struct {
     /// **랩이 꺼져 있으면 저하가 아니다**: 그때는 한 줄이 정확히 한 행이라 근사가 곧 정답이다.
     /// 판정을 여기 두는 이유는 그 사실(근사의 조건)이 계수 규칙과 같은 자리에 있어야 하기 때문이다 —
     /// 상태바가 자기 식으로 다시 재면 "세는 중"이라고 말하면서 화면은 이미 정확할 수 있다.
+    /// **위젯이 있으면 랩이 꺼져 있어도 저하다**(S1.5). 그 전에는 *"랩이 꺼져 있으면 한 줄이 정확히
+    /// 한 행이라 근사가 곧 정답"* 이었는데, 위젯이 붙은 줄은 랩과 무관하게 **두 행**이다 — 안 센
+    /// 구간을 한 행으로 치면 그만큼 짧다.
     pub fn countingIncomplete(self: *const RowCache) bool {
-        return self.wrap and self.filled and self.filled_upto < self.lines_len;
+        return (self.wrap or self.widgets_len > 0) and self.filled and self.filled_upto < self.lines_len;
     }
 
     /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
-    fn hits(self: *const RowCache, lines: []const []const u8, width: u16, wrap: bool, tab_width: u8) bool {
+    fn hits(self: *const RowCache, lines: []const []const u8, widgets: []const ?content.Widget, width: u16, wrap: bool, tab_width: u8) bool {
         return self.filled and
             self.lines_ptr == @intFromPtr(lines.ptr) and
             self.lines_len == lines.len and
+            self.widgets_ptr == @intFromPtr(widgets.ptr) and
+            self.widgets_len == widgets.len and
             self.content_width == width and
             self.wrap == wrap and
             self.tab_width == tab_width and
@@ -439,6 +458,29 @@ pub const Written = struct {
 };
 
 /// 한 프레임을 조립해 `scratch.ops` 앞쪽을 채운다. 반환한 `ops` 개수만큼이 유효하다.
+/// 그 논리 줄에 붙은 위젯(없으면 `null`). **짧은 배열을 허용한다** — 표가 문서보다 짧으면 그 뒤는
+/// 위젯이 없다(`line_colors`·`line_seeks`와 같은 규율).
+fn widgetAt(props: Props, line: usize) ?content.Widget {
+    if (line >= props.line_widgets.len) return null;
+    return props.line_widgets[line];
+}
+
+/// 그 줄이 **몇 행**을 차지하는가 — 글자 조각 + 위젯 행.
+///
+/// **세로 축의 모든 계산이 이 함수 하나를 지난다**(총 행 수·`RowCache` 채움·막대 위치·스크롤 상한).
+/// `content.rowCount`를 직접 부르면 위젯을 빠뜨리기 쉽고, 빠뜨린 자리는 **문서 끝에서 그만큼 못
+/// 내려가는** 것으로만 드러난다 — 화면에서 바로 안 보이는 종류다.
+fn rowsOfLine(props: Props, layout: geometry.Layout, line: usize, scratch: []u8) content.RowCount {
+    return content.rowCount(
+        props.lines[line],
+        props.tab_width,
+        layout.content.width,
+        props.wrap,
+        if (widgetAt(props, line) != null) 1 else 0,
+        scratch,
+    );
+}
+
 pub fn build(props: Props, scratch: Scratch) Written {
     const layout = geometry.compute(props.total_cols, props.total_lines, .{});
 
@@ -457,6 +499,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .bytes = props.lines[li],
             // **짧은 배열을 허용한다** — 없으면 힌트 없이 처음부터 걷는다(답은 같고 비용만 다르다).
             .seek = if (li < props.line_seeks.len) props.line_seeks[li] else null,
+            // **짧은 배열을 허용한다** — 없는 줄은 위젯이 없다(위 `line_widgets` 계약).
+            .widget = widgetAt(props, li),
             // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
             .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
             .caret_cols = caretColsFor(props, scratch.caret_cols, &caret_cols_used, li),
@@ -527,7 +571,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const cache: ?*RowCache = blk: {
         const c = props.row_cache orelse break :blk null;
         if (c.prefix.len <= props.lines.len) break :blk null;
-        if (!c.hits(props.lines, layout.content.width, props.wrap, props.tab_width)) {
+        if (!c.hits(props.lines, props.line_widgets, layout.content.width, props.wrap, props.tab_width)) {
             // **저하**: 드래그 중이면 옛 값을 그대로 쓴다(§2.1). 단 **줄 배열이 그대로일 때만**이다 —
             // 저하가 겨냥하는 것은 폭이 바뀌는 드래그이고, 그동안 문서의 줄 집합은 변하지 않는다.
             // 줄이 바뀌었는데 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 **다른 문서의 값**이다.
@@ -539,6 +583,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // 처음부터 다시 시작해 영영 끝나지 않는다).
             c.lines_ptr = @intFromPtr(props.lines.ptr);
             c.lines_len = props.lines.len;
+            c.widgets_ptr = @intFromPtr(props.line_widgets.ptr);
+            c.widgets_len = props.line_widgets.len;
             c.content_width = layout.content.width;
             c.wrap = props.wrap;
             c.tab_width = props.tab_width;
@@ -553,7 +599,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             var sum: u32 = c.prefix[c.filled_upto];
             var i: usize = c.filled_upto;
             while (i < end) : (i += 1) {
-                sum +|= content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
+                sum +|= rowsOfLine(props, layout, i, scratch.count_scratch).rows;
                 c.prefix[i + 1] = sum;
             }
             c.filled_upto = end;
@@ -565,13 +611,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         var sum: u32 = 0;
         var counted: usize = 0;
         while (counted < props.lines.len and counted < scratch.row_counts.len) : (counted += 1) {
-            const c = content.rowCount(
-                props.lines[counted],
-                props.tab_width,
-                layout.content.width,
-                props.wrap,
-                scratch.count_scratch,
-            );
+            const c = rowsOfLine(props, layout, counted, scratch.count_scratch);
             scratch.row_counts[counted] = c.rows;
             sum +|= c.rows;
         }
@@ -599,7 +639,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             prefix +|= if (i < counted_rows)
                 scratch.row_counts[i]
             else
-                content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows;
+                rowsOfLine(props, layout, i, scratch.count_scratch).rows;
         }
         first_visual = prefix;
     }
@@ -630,17 +670,11 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // **아직 안 센 줄은 캐시가 모른다** — 그 구간은 직접 센다. 이 훑기는 마지막 한 화면분뿐이라
             // 점진 중에도 싸다.
             const rows: u32 = if (cache) |c|
-                (c.rowsOf(i) orelse content.rowCount(props.lines[i], props.tab_width, layout.content.width, props.wrap, scratch.count_scratch).rows)
+                (c.rowsOf(i) orelse rowsOfLine(props, layout, i, scratch.count_scratch).rows)
             else if (i < counted_rows)
                 scratch.row_counts[i]
             else
-                content.rowCount(
-                    props.lines[i],
-                    props.tab_width,
-                    layout.content.width,
-                    props.wrap,
-                    scratch.count_scratch,
-                ).rows;
+                rowsOfLine(props, layout, i, scratch.count_scratch).rows;
             if (rows >= need) break :blk .{ .line = i, .piece = rows - need };
             need -= rows;
         }
@@ -764,6 +798,10 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
     var n: usize = 0;
     for (visual, 0..) |v, i| {
         if (n + 2 > out.len) break; // 줄 배경 + 띠 = 둘씩 든다
+        // **위젯 행에는 아무것도 안 얹는다**(S1.5) — 문서 줄이 아니므로 그 줄의 강조·선택·검색
+        // 표식을 여기 그리면 **없는 글자 위에** 색을 칠한다. 행마다 이 한 줄이 필요한 이유는
+        // 위젯 행이 앵커 줄의 `line` 을 들고 있기 때문이다(그 값이 유효한 것이 이 설계의 값이다).
+        if (v.kind != .text) continue;
         const idx = v.docIndex(props.first_line);
         if (idx >= bands.len) continue;
         const role: tokens.ColorRole = switch (bands[idx]) {
@@ -873,6 +911,10 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
     var n: usize = 0;
     for (visual, 0..) |v, i| {
         if (n >= out.len) break;
+        // **위젯 행에는 아무것도 안 얹는다**(S1.5) — 문서 줄이 아니므로 그 줄의 강조·선택·검색
+        // 표식을 여기 그리면 **없는 글자 위에** 색을 칠한다. 행마다 이 한 줄이 필요한 이유는
+        // 위젯 행이 앵커 줄의 `line` 을 들고 있기 때문이다(그 값이 유효한 것이 이 설계의 값이다).
+        if (v.kind != .text) continue;
         const idx = v.docIndex(props.first_line);
         if (idx >= sel.len or idx >= props.lines.len) continue;
         if (sel[idx].len == 0) continue;
@@ -911,6 +953,7 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
 
     var n: usize = 0;
     for (visual, 0..) |row, i| {
+        if (row.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
         // **`v.line` 은 뷰포트 첫 줄로부터의 상대 인덱스다**(그 필드 doc). `carets`·`lines` 는 절대
         // 배열이므로 `first_line` 을 더해야 한다 — 이 파일의 띠·검색·마크가 전부 그렇게 인덱싱한다
         // (`props.first_line + v.line`). caret 만 그 덧셈이 빠져 있었고, 그래서 **스크롤된 화면에서
@@ -1036,6 +1079,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     if (props.search_current) |cur| {
         for (visual, 0..) |v, i| {
             if (n >= out.len) break;
+            if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
             const idx = v.docIndex(props.first_line);
             if (idx != cur.line or idx >= rows.len or idx >= props.lines.len) continue;
             const marks = rows[idx];
@@ -1059,6 +1103,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     // 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
     for (visual, 0..) |v, i| {
         if (n >= out.len) break;
+        if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
         const marks = rows[idx];
@@ -1169,6 +1214,359 @@ fn testProps(lines: []const []const u8, wrap: bool) Props {
         .scrollbar_gutter_px = 16,
         .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
     };
+}
+
+// ── 인라인 위젯 행(S1.5 — docs/editor-merge-conflicts.md §5) ────────────────────────────────
+//
+// **이 조각은 혼자서는 소비자가 없다** — 마커를 읽어 위젯을 만드는 것은 S2 다. 그래서 여기가 지금
+// 존재하는 **전부의 경계**이고, 판정자도 여기 선다. 아래 넷이 계약의 관측점 ⑴⑷⑸를 든다.
+
+test "WID1 위젯 행은 번호를 안 가져가고, 아래 글자 행의 번호가 «건너뛰지 않는다»" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "one", "two", "three" };
+    var props = testProps(&lines, false);
+    // **가운데 줄에만** 붙인다 — 첫 줄에 붙이면 「위젯이 있는 줄」과 「문서의 첫 줄」이 겹쳐,
+    // 번호를 앵커가 아니라 행 순번에서 내는 뮤턴트가 살아남는다.
+    const widgets = [_]?content.Widget{ null, .{ .text = "골라라" }, null };
+    props.line_widgets = &widgets;
+
+    const w = build(props, bufs.scratch());
+    // 행이 하나 늘었다 — 위젯이 자리를 **실제로** 차지한다.
+    try std.testing.expectEqual(@as(usize, 4), w.visual_rows);
+    const rows = bufs.visual_rows[0..w.visual_rows];
+    try std.testing.expect(rows[0].kind == .text);
+    try std.testing.expect(rows[1].kind == .widget);
+    try std.testing.expect(rows[2].kind == .text);
+
+    // 위젯 행은 **앵커 줄**을 든다(`line` 을 옵셔널로 안 만든 이유) — 그 값이 유효해야
+    // 스크롤·검색 표식이 지금까지의 코드로 계속 돈다.
+    try std.testing.expectEqual(@as(u32, 1), rows[1].line);
+    try std.testing.expect(!rows[1].showsLineNumber());
+    // 그리고 **그 아래 글자 행은 번호를 낸다** — 위젯이 `piece` 축을 먹었다면 여기가 false 다.
+    try std.testing.expect(rows[2].showsLineNumber());
+
+    // gutter 가 실제로 내는 번호: 1 · (없음) · 2 · 3.
+    var gbuf: [8]gutter.Row = undefined;
+    const grows = gutter.rowsForVisual(rows, 0, null, null, &gbuf);
+    try std.testing.expectEqual(@as(?usize, 1), grows[0].number);
+    try std.testing.expectEqual(@as(?usize, null), grows[1].number);
+    try std.testing.expectEqual(@as(?usize, 2), grows[2].number);
+    try std.testing.expectEqual(@as(?usize, 3), grows[3].number);
+}
+
+test "WID2 세로 계산이 위젯을 «센다» — 안 세면 문서 끝이 그만큼 잘린다" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var props = testProps(&lines, false);
+    props.visible_rows = 3; // 문서가 화면보다 길다 — 상한이 의미를 갖는다
+
+    const plain = build(props, bufs.scratch());
+    const widgets = [_]?content.Widget{ null, .{ .text = "w" }, null, .{ .text = "w" }, null, null };
+    props.line_widgets = &widgets;
+    const withw = build(props, bufs.scratch());
+
+    // 총 행 수가 위젯 둘만큼 늘었다.
+    try std.testing.expectEqual(plain.total_visual_rows + 2, withw.total_visual_rows);
+    // **스크롤 상한도 함께 올라간다** — 안 올라가면 마지막 두 행에 영영 못 닿는다. 이것이
+    // 「한 곳만 위젯을 안 세면」의 실제 증상이고, 화면에서는 바로 안 보인다.
+    try std.testing.expect(withw.max_top_line > plain.max_top_line or
+        (withw.max_top_line == plain.max_top_line and withw.max_top_piece > plain.max_top_piece));
+}
+
+test "WID2w 랩이 켜져도 위젯을 «센다» — 계수 길이 셋이고 셋 다 지나야 한다" {
+    // **`rowCount` 의 갈래가 셋이다**: 랩 꺼짐(한 행) · 랩 + 탭도 위험문자도 없는 **빠른 길**(전개를
+    // 안 쓴다) · 랩 + 전개 길. 랩을 끈 판정자(WID2)만 두면 **뒤의 둘이 무판정**으로 남고, 실제로
+    // 적대적 검증 1회차에서 그 둘을 지운 변이가 **살아남았다**.
+    var bufs: TestBuffers = .{};
+    const plain_long = "x" ** 200; // 탭도 위험문자도 없다 → 빠른 길
+    const tabbed_long = "\t" ++ ("y" ** 200); // 탭이 있다 → 전개 길
+    const lines = [_][]const u8{ plain_long, tabbed_long, "tail" };
+    var props = testProps(&lines, true);
+    props.visible_rows = 4;
+
+    const plain = build(props, bufs.scratch());
+    const widgets = [_]?content.Widget{ .{ .text = "w0" }, .{ .text = "w1" }, null };
+    props.line_widgets = &widgets;
+    const withw = build(props, bufs.scratch());
+
+    // **둘 다 한 행씩 늘어야 한다** — 한 갈래만 세면 여기가 +1 에서 멈춘다.
+    try std.testing.expectEqual(plain.total_visual_rows + 2, withw.total_visual_rows);
+    // 상한도 함께 올라간다(안 올라가면 문서 끝 두 행에 못 닿는다).
+    try std.testing.expect(withw.max_top_line > plain.max_top_line or
+        (withw.max_top_line == plain.max_top_line and withw.max_top_piece > plain.max_top_piece));
+}
+
+test "WID3 랩과 섞여도 위젯이 «맨 앞»이고 건너뛰기가 그 몫을 센다" {
+    var bufs: TestBuffers = .{};
+    const long = "x" ** 200; // 여러 조각으로 접힌다
+    const lines = [_][]const u8{ long, "tail" };
+    var props = testProps(&lines, true);
+    const widgets = [_]?content.Widget{.{ .text = "위" }};
+    props.line_widgets = &widgets;
+
+    const w = build(props, bufs.scratch());
+    const rows = bufs.visual_rows[0..w.visual_rows];
+    try std.testing.expect(rows[0].kind == .widget); // 글자 조각보다 먼저
+    try std.testing.expect(rows[1].kind == .text);
+    try std.testing.expectEqual(@as(u32, 0), rows[1].piece); // 첫 조각이 그대로 첫 조각이다
+
+    // **`first_piece` 는 위젯을 포함해 센다.** 1 이면 위젯만 건너뛰고 글자 조각 0 이 맨 위에 온다 —
+    // 여기서 조각 1 이 오면 한 조각을 더 건너뛴 것이고, 화면이 문서의 다른 곳으로 튄다.
+    props.first_piece = 1;
+    const skipped = build(props, bufs.scratch());
+    const srows = bufs.visual_rows[0..skipped.visual_rows];
+    try std.testing.expect(srows[0].kind == .text);
+    try std.testing.expectEqual(@as(u32, 0), srows[0].piece);
+
+    // 2 면 위젯 + 첫 조각을 건너뛴다.
+    props.first_piece = 2;
+    const skipped2 = build(props, bufs.scratch());
+    try std.testing.expectEqual(@as(u32, 1), bufs.visual_rows[0].piece);
+    _ = skipped2;
+}
+
+test "WID5f 강조·선택은 위젯 행에 «안 얹힌다» — 없는 글자 위에 색을 칠하지 않는다" {
+    // 위젯 행이 앵커 줄의 `line` 을 들고 있기 때문에, 줄 단위로 도는 칠하기 루프들은 **가만두면**
+    // 그 행에도 같은 색을 얹는다(그것이 `line` 을 유효하게 둔 대가다). 다섯 루프 전부가 `kind` 를
+    // 봐야 하고, 한 곳만 빠뜨리면 「선택하지 않은 자리가 파랗게 보이는」 상태가 된다.
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cccc" };
+    const marks = [_]Mark{.{ .start = 0, .len = 4 }};
+    const sel = [_][]const Mark{ &.{}, &marks, &.{} };
+    var props = testProps(&lines, false);
+    props.selection_marks = &sel;
+
+    const plain = build(props, bufs.scratch());
+    var plain_quads: usize = 0;
+    for (bufs.ops[0..plain.ops]) |op| if (op == .quad) {
+        plain_quads += 1;
+    };
+
+    // **같은 줄에 위젯을 붙인다** — 선택된 그 줄이라야 「위젯에도 칠하는가」가 관측된다.
+    const widgets = [_]?content.Widget{ null, .{ .text = "골라라" }, null };
+    props.line_widgets = &widgets;
+    const withw = build(props, bufs.scratch());
+    var widget_quads: usize = 0;
+    for (bufs.ops[0..withw.ops]) |op| if (op == .quad) {
+        widget_quads += 1;
+    };
+
+    // 행은 하나 늘었는데 **선택 quad 는 안 늘었다**.
+    try std.testing.expectEqual(plain.visual_rows + 1, withw.visual_rows);
+    try std.testing.expectEqual(plain_quads, widget_quads);
+}
+
+test "WID6 칠하기 **넷 전부**가 위젯 행을 건너뛴다 — 한 곳만 빠뜨려도 없는 글자에 색이 얹힌다" {
+    // **`WID5f` 는 선택 하나만 봤다.** 적대적 검증 2회차에서 diff 밴드·검색 표식·caret 의 가드를
+    // 지운 변이 셋이 **전부 살아남았다** — 루프가 넷인데 판정자가 하나였다. 넷을 **같은 프레임에**
+    // 켜고, 위젯을 붙이기 전후의 quad 수가 같은지 본다.
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cccc" };
+    const marks = [_]Mark{.{ .start = 0, .len = 4 }};
+    const sel = [_][]const Mark{ &.{}, &marks, &.{} };
+    // **검색 표식은 둘이어야 한다.** 하나뿐이고 그것이 곧 현재 매치면 「나머지 표식」 루프가
+    // 아예 안 돌아, 그 루프의 가드를 지운 변이가 **살아남는다**(적대적 검증 2회차에서 그랬다).
+    const search_marks_two = [_]Mark{ .{ .start = 0, .len = 1 }, .{ .start = 2, .len = 2 } };
+    const search = [_][]const Mark{ &.{}, &search_marks_two, &.{} };
+    const bands = [_]RowBand{ .none, .removed, .none };
+    const caret_row = [_]u32{2};
+    const carets = [_][]const u32{ &.{}, &caret_row, &.{} };
+
+    var props = testProps(&lines, false);
+    props.selection_marks = &sel;
+    props.search_marks = &search;
+    props.search_current = .{ .line = 1, .start = 0 };
+    props.row_bands = &bands;
+    props.carets = &carets;
+    props.caret_shape = .block;
+
+    const plain = build(props, bufs.scratch());
+    var plain_quads: usize = 0;
+    for (bufs.ops[0..plain.ops]) |op| if (op == .quad) {
+        plain_quads += 1;
+    };
+    // **픽스처 공허 방지** — 넷이 실제로 무언가 그렸어야 이 판정이 의미를 갖는다.
+    try std.testing.expect(plain_quads > 3);
+
+    // 칠해지는 **바로 그 줄**(1)에 위젯을 붙인다.
+    const widgets = [_]?content.Widget{ null, .{ .text = "골라라" }, null };
+    props.line_widgets = &widgets;
+    const withw = build(props, bufs.scratch());
+    var widget_quads: usize = 0;
+    for (bufs.ops[0..withw.ops]) |op| if (op == .quad) {
+        widget_quads += 1;
+    };
+
+    try std.testing.expectEqual(plain.visual_rows + 1, withw.visual_rows); // 행은 늘었고
+    try std.testing.expectEqual(plain_quads, widget_quads); // 색은 안 늘었다
+}
+
+test "WID7 위젯이 마지막 자리를 써도 안 넘치고, 빈 위젯은 op 을 안 낸다" {
+    // **예산 경계**. 뷰포트가 딱 찬 상태에서 위젯이 마지막 행을 가져가면 글자 조각은 자리가 없다 —
+    // 그 상태에서 배열 밖을 쓰면 안 된다(행 저장소는 호출자 것이다).
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "aaaa", "bbbb" };
+    var props = testProps(&lines, false);
+    props.visible_rows = 2; // 행 둘뿐 — 위젯 하나 + 글자 하나면 꽉 찬다
+    const widgets = [_]?content.Widget{ .{ .text = "w" }, null };
+    props.line_widgets = &widgets;
+
+    const w = build(props, bufs.scratch());
+    try std.testing.expect(w.visual_rows <= 2); // 예산을 안 넘겼다
+    try std.testing.expect(bufs.visual_rows[0].kind == .widget);
+
+    // **빈 위젯은 자리는 들되 글자는 안 낸다.** 빈 run 을 렌더로 보내면 어느 경로도 확실히
+    // 통과하지 못한다(`Writer.icon` 이 같은 이유를 적어 둔 자리).
+    var props2 = testProps(&lines, false);
+    const empty = [_]?content.Widget{ .{ .text = "" }, null };
+    props2.line_widgets = &empty;
+    const with_empty = build(props2, bufs.scratch());
+    const none = [_]?content.Widget{ null, null };
+    props2.line_widgets = &none;
+    const without = build(props2, bufs.scratch());
+
+    try std.testing.expectEqual(without.visual_rows + 1, with_empty.visual_rows); // 자리는 든다
+    try std.testing.expectEqual(without.ops, with_empty.ops); // 그런데 op 은 안 는다
+}
+
+test "WID8 문서가 «행 수 버퍼보다 길면» 막대 위치도 위젯을 센다 — 폴백 갈래" {
+    // **닿을 수 있는지부터 재라.** 막대 위치를 내는 식에는 갈래가 둘인데(이미 센 `row_counts` 조회 ·
+    // 그 버퍼를 넘어선 줄을 **직접 세는 폴백**), 작은 픽스처는 늘 앞쪽만 탄다 — 적대적 검증 3회차에서
+    // 폴백만 망가뜨린 변이가 **살아남았다**. 문서를 버퍼보다 길게 만들어야 그 갈래에 닿는다.
+    const gpa = std.testing.allocator;
+    const n = 80; // `TestBuffers.row_counts` 는 64 — 그 뒤가 폴백이다
+    const lines = try gpa.alloc([]const u8, n);
+    defer gpa.free(lines);
+    for (lines) |*l| l.* = "line";
+    const widgets = try gpa.alloc(?content.Widget, n);
+    defer gpa.free(widgets);
+    @memset(widgets, null);
+
+    var bufs = try gpa.create(TestBuffers);
+    defer gpa.destroy(bufs);
+    bufs.* = .{};
+    var props = testProps(lines, false);
+    props.first_line = 74; // 폴백 구간(64..74)을 지나 온다
+    props.visible_rows = 4;
+    const plain = build(props, bufs.scratch());
+
+    // **폴백 구간에만** 위젯을 둔다 — 앞쪽(캐시된 구간)에 두면 다른 갈래가 답을 내 준다.
+    for (64..70) |i| widgets[i] = .{ .text = "w" };
+    props.line_widgets = widgets;
+    const withw = build(props, bufs.scratch());
+
+    // 막대 위치가 **움직여야 한다**(그 위젯 여섯 행만큼 위에서 더 내려온 자리다).
+    const a = plain.scrollbar orelse return error.NoScrollbar;
+    const b = withw.scrollbar orelse return error.NoScrollbar;
+    try std.testing.expect(b.thumb_y != a.thumb_y);
+}
+
+test "WID9 캐시가 «아직 안 센 구간»을 직접 셀 때도 위젯을 센다 — 상한 폴백" {
+    // 스크롤 상한은 문서 **끝에서 거꾸로** 훑는데, 캐시는 **앞에서부터** 채워진다. 그래서 큰 문서의
+    // 뒤쪽은 `rowsOf` 가 `null` 을 내고 그 자리에서 직접 센다 — 그 폴백이 위젯을 빠뜨리면 문서
+    // 끝 몇 행에 영영 못 닿는다(같은 부류를 랩에서 이미 겪었다: 5000줄에서 마지막 17줄).
+    const gpa = std.testing.allocator;
+    const n = count_chunk_lines + 200; // 한 프레임에 다 못 센다 → 뒤쪽이 폴백
+    const lines = try gpa.alloc([]const u8, n);
+    defer gpa.free(lines);
+    for (lines) |*l| l.* = "line";
+    const widgets = try gpa.alloc(?content.Widget, n);
+    defer gpa.free(widgets);
+    @memset(widgets, null);
+    const prefix = try gpa.alloc(u32, n + 1);
+    defer gpa.free(prefix);
+
+    var bufs = try gpa.create(TestBuffers);
+    defer gpa.destroy(bufs);
+    bufs.* = .{};
+    var cache: RowCache = .{ .prefix = prefix };
+    var props = testProps(lines, false);
+    props.row_cache = &cache;
+    props.visible_rows = 4;
+
+    const plain = build(props, bufs.scratch());
+    try std.testing.expect(cache.filled_upto < n); // **폴백에 닿는다**(안 닿으면 이 판정은 공허하다)
+
+    // 아직 안 센 구간(문서 끝)에 위젯을 둔다 — 상한 훑기가 지나는 바로 그 자리다.
+    for (n - 6..n) |i| widgets[i] = .{ .text = "w" };
+    props.line_widgets = widgets;
+    cache = .{ .prefix = prefix }; // 표가 갈렸으므로 새 캐시(제품도 키가 갈리면 다시 센다)
+    const withw = build(props, bufs.scratch());
+
+    // **상한이 문서 끝 쪽으로 내려간다.** 끝의 줄들이 두 행씩이 되었으니 같은 한 화면을 채우는 데
+    // 드는 **줄 수가 줄고**, 그래서 마지막 화면이 시작하는 줄이 뒤로 간다. 폴백이 위젯을 빠뜨리면
+    // 그 값이 위젯 없을 때와 **똑같이** 나오고, 사용자는 문서 끝 몇 행에 영영 못 닿는다.
+    try std.testing.expect(withw.max_top_line > plain.max_top_line);
+}
+
+test "WID10 위젯의 `piece` 는 0 이고, 글자는 본문 폭에서 잘리고, 줄마다 건너뛰기가 독립이다" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cccc" };
+    var props = testProps(&lines, false);
+    const widgets = [_]?content.Widget{ .{ .text = "w0" }, .{ .text = "w1" }, null };
+    props.line_widgets = &widgets;
+
+    // ⑴ **`piece` 는 글자 조각의 축이다** — 위젯은 그 축에 안 들어가므로 0 이다. 아무도 안 읽는
+    //    값이라 주석만 두면 다음 사람이 그 뜻을 바꿔도 아무 일이 안 일어난다(3회차 실측).
+    const w = build(props, bufs.scratch());
+    try std.testing.expect(bufs.visual_rows[0].kind == .widget);
+    try std.testing.expectEqual(@as(u32, 0), bufs.visual_rows[0].piece);
+
+    // ⑵ **건너뛰기는 첫 줄에만 적용된다.** `first_piece` 는 「화면 맨 위 줄의 몇 번째 행부터」이지
+    //    모든 줄에 거는 값이 아니다 — 줄마다 걸면 아래 줄들의 위젯이 통째로 사라진다.
+    props.first_piece = 1; // 첫 줄의 위젯만 건너뛴다
+    const skipped = build(props, bufs.scratch());
+    var widget_rows: usize = 0;
+    for (bufs.visual_rows[0..skipped.visual_rows]) |v| {
+        if (v.kind == .widget) widget_rows += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), widget_rows); // 둘째 줄 위젯은 그대로 있다
+    _ = w;
+
+    // ⑶ **위젯 글자도 본문 폭에서 잘린다.** 안 자르면 랩이 꺼진 화면에서 gutter 옆 창 밖까지 그려진다
+    //    (글자 행이 `max_cols` 로 막아 둔 그 자리다).
+    var wide = testProps(&lines, false);
+    const long_widget = [_]?content.Widget{.{ .text = "x" ** 300 }};
+    wide.line_widgets = &long_widget;
+    const drawn = build(wide, bufs.scratch());
+    //    **위젯 op 을 글자로 찾는다.** 처음에는 `max_cols` 로 걸렀는데, 그 필터가 **지우려던 변이를
+    //    그대로 걸러내** 판정자가 초록이었다(3회차 실측 — 판정자 자신의 결함이었다). 픽스처의 문서
+    //    줄은 `aaaa`·`bbbb`·`cccc` 뿐이라 `x` 로 시작하는 run 은 위젯의 것뿐이다.
+    var saw_widget = false;
+    for (bufs.ops[0..drawn.ops]) |op| switch (op) {
+        .text => |t| {
+            if (t.runs.len == 0 or t.runs[0].text.len == 0 or t.runs[0].text[0] != 'x') continue;
+            saw_widget = true;
+            try std.testing.expect(t.max_cols <= wide.total_cols);
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_widget);
+}
+
+test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 다른 문서의 값이다" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "a", "b", "c" };
+    var prefix: [8]u32 = @splat(0);
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(&lines, false);
+    props.row_cache = &cache;
+
+    const before = build(props, bufs.scratch());
+    const widgets = [_]?content.Widget{ null, .{ .text = "w" }, null };
+    props.line_widgets = &widgets;
+    const after = build(props, bufs.scratch());
+
+    // 캐시를 그대로 썼다면 총 행 수가 안 변한다 — 그 상태는 **조용히** 틀린다(막대 길이만 어긋난다).
+    try std.testing.expectEqual(before.total_visual_rows + 1, after.total_visual_rows);
+    // 그리고 **랩이 꺼져 있어도** 점진 계수는 이제 저하다(한 줄 = 한 행이 아니다).
+    cache.filled = true;
+    cache.filled_upto = 1;
+    cache.lines_len = 3;
+    cache.wrap = false;
+    try std.testing.expect(cache.countingIncomplete());
+    cache.widgets_len = 0;
+    try std.testing.expect(!cache.countingIncomplete());
 }
 
 // ── `RowCache` — 줄별 행 수를 프레임 사이에 살려 두는 캐시(§2.1) ──────────────────────────────

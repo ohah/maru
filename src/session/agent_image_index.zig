@@ -1516,8 +1516,21 @@ const PendingCall = struct {
 pub const MergeOutcome = struct {
     /// 합친 배열(파일 순서). 호출자가 소유를 가져간다.
     hits: std.ArrayList(Hit),
-    /// 지난 결과에서 **살아남은 개수** — 라벨을 같은 자리에서 자르기 위해 든다.
+    /// 지난 결과에서 **살아남은 개수**.
     kept: usize,
+    /// 🔥 **살아남은 것이 지난 배열의 어느 자리였나**(적대적 T1). 호출자가 **라벨을 같은 규칙으로
+    /// 자르기 위해** 든다 — 남긴 것이 **연속이 아니라**(자국 이전 머리 + 부모, 그 사이가 빈다)
+    /// 개수만으로는 못 자르고, 그러면 「히트와 라벨의 길이는 언제나 같다」가 깨져 **라벨이 남의
+    /// 활동에 붙는다**.
+    ///
+    /// 라벨 타입(`agent_image_context.Label`)은 이 모듈이 모르므로 **자리만 돌려준다** — 모듈
+    /// 경계를 넘지 않는 대신 호출자가 같은 표로 자른다.
+    kept_src: std.ArrayList(u32),
+
+    pub fn deinit(self: *MergeOutcome, allocator: std.mem.Allocator) void {
+        self.hits.deinit(allocator);
+        self.kept_src.deinit(allocator);
+    }
 };
 
 /// 지난 히트에 **이어읽기 결과를 붙인다** — 순수 함수다(계획 §21.2).
@@ -1552,21 +1565,29 @@ pub fn mergeResumed(
     // 당겨지는데, 부모 안에서 접힌 이미지의 주인이 옛 자리를 가리킨 채 남는다.
     var remap: std.ArrayList(u32) = .empty;
     defer remap.deinit(allocator);
+    var kept_src: std.ArrayList(u32) = .empty;
+    errdefer kept_src.deinit(allocator);
     remap.ensureTotalCapacity(allocator, prior.len) catch {
+        out.deinit(allocator);
+        return null;
+    };
+    kept_src.ensureTotalCapacity(allocator, prior.len) catch {
         out.deinit(allocator);
         return null;
     };
 
     var kept: usize = 0;
-    for (prior) |h| {
+    for (prior, 0..) |h, i| {
         // 부모는 이번에 안 훑었다 — 그대로 쓴다.
         const keep = if (h.file_index != 0) true else h.line_offset < resumed_from;
         remap.appendAssumeCapacity(if (keep) @intCast(kept) else no_fold);
         if (!keep) continue;
         out.append(allocator, h) catch {
             out.deinit(allocator);
+            kept_src.deinit(allocator);
             return null;
         };
+        kept_src.appendAssumeCapacity(@intCast(i));
         kept += 1;
     }
     // **살아남은 것들의 주인을 새 자리로 옮긴다.** 주인이 버려졌으면 **접기를 푼다** — 그때 그
@@ -1580,6 +1601,7 @@ pub fn mergeResumed(
     // 있고, 그것을 여기서 다시 쓰면 **원격과 로컬이 다른 것을 보여 준다**(계약 §2.3).
     if (kept + fresh.len > max_activity_hits_per_file) {
         out.deinit(allocator);
+        kept_src.deinit(allocator);
         return null;
     }
 
@@ -1589,10 +1611,11 @@ pub fn mergeResumed(
         if (h.fold_owner != no_fold) h.fold_owner +|= @intCast(kept);
         out.append(allocator, h) catch {
             out.deinit(allocator);
+            kept_src.deinit(allocator);
             return null;
         };
     }
-    return .{ .hits = out, .kept = kept };
+    return .{ .hits = out, .kept = kept, .kept_src = kept_src };
 }
 
 pub const StreamScanner = struct {
@@ -2860,7 +2883,7 @@ test "이어읽기 병합: 자국 이전은 남기고 뒤는 새 것으로 간�
     };
 
     var got = mergeResumed(allocator, &prior, &fresh, 250).?;
-    defer got.hits.deinit(allocator);
+    defer got.deinit(allocator);
 
     // 100 · 200 은 자국 이전이라 남고, 300 은 **버린다**(이어읽기가 그 구간을 다시 봤다).
     // 부모(50)는 안 훑었으므로 그대로.
@@ -2895,7 +2918,7 @@ test "이어읽기 병합: 접기 주인을 앞 길이만큼 민다 (RAV7b-3b)" 
     };
 
     var got = mergeResumed(allocator, &prior, &fresh, 250).?;
-    defer got.hits.deinit(allocator);
+    defer got.deinit(allocator);
 
     // 앞에 둘이 남았으므로 주인은 0 → **2** 로 밀린다.
     try testing.expectEqual(@as(usize, 2), got.kept);
@@ -2923,7 +2946,7 @@ test "이어읽기 병합: 남긴 것의 주인도 새 자리로 옮긴다 (RAV7
 
     const fresh = [_]Hit{mk(400, 0)};
     var got = mergeResumed(allocator, &prior, &fresh, 250).?;
-    defer got.hits.deinit(allocator);
+    defer got.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 3), got.kept);
     // 부모 호출이 자리 **1** 로 당겨졌다.
@@ -2947,10 +2970,32 @@ test "이어읽기 병합: 주인이 버려지면 접기를 «푼다» (RAV7b-3b
 
     const fresh = [_]Hit{mk(400, 0)};
     var got = mergeResumed(allocator, &prior, &fresh, 250).?;
-    defer got.hits.deinit(allocator);
+    defer got.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 2), got.kept);
     try testing.expectEqual(no_fold, got.hits.items[1].fold_owner); // 접기가 풀렸다
+}
+
+test "이어읽기 병합: 살아남은 자리를 돌려준다 — 라벨이 같은 규칙으로 잘린다 (RAV7b-3b · 적대적 T1)" {
+    // 🔥 남긴 것이 **연속이 아니다**(자국 이전 머리 + 부모, 그 사이가 빈다) — `kept` 개수로 라벨을
+    // 자르면 **남의 활동에 붙는다**. 「히트와 라벨의 길이는 언제나 같다」가 이 배열 쌍의 계약이다.
+    const allocator = testing.allocator;
+    const prior = [_]Hit{
+        mk(100, 0), // 자리 0 — 남는다
+        mk(300, 0), // 자리 1 — 자국 뒤라 버려진다
+        mk(900, 1), // 자리 2 — 부모, 남는다
+    };
+    const fresh = [_]Hit{mk(400, 0)};
+
+    var got = mergeResumed(allocator, &prior, &fresh, 250).?;
+    defer got.deinit(allocator);
+
+    // **자리 0 과 2 가 살아남았다** — 그 사이(1)가 빈다.
+    try testing.expectEqual(@as(usize, 2), got.kept_src.items.len);
+    try testing.expectEqual(@as(u32, 0), got.kept_src.items[0]);
+    try testing.expectEqual(@as(u32, 2), got.kept_src.items[1]);
+    // 표의 길이가 곧 `kept` 다 — 둘이 갈리면 라벨 길이가 히트와 어긋난다.
+    try testing.expectEqual(got.kept, got.kept_src.items.len);
 }
 
 test "이어읽기 병합: 자국이 0 이면 «물러난다» — 같은 활동이 두 번 뜨지 않게 (RAV7b-3b)" {

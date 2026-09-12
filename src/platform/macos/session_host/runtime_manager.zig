@@ -32,6 +32,7 @@ const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const protocol = @import("protocol.zig");
 const handoff_codec = @import("handoff_codec.zig");
+const host_log = @import("host_log.zig");
 const notification_admission = @import("notification_admission.zig");
 const notification_journal = @import("notification_journal.zig");
 const notification_delivery = @import("notification_delivery.zig");
@@ -684,6 +685,49 @@ pub const RuntimeManager = struct {
         }
     };
 
+    /// 한도를 넘겨 업그레이드가 거절될 때 **무엇이 그 크기를 만들었는지** 남긴다.
+    ///
+    /// 2026-09-11 과 2026-09-12, 사용자 host 가 두 번 `state_too_large` 로 막혔는데 로그에는 그 이름
+    /// 한 줄뿐이었다. `runtimeSizeBreakdown`(screens·images·stores·other)은 그때 만들어 두고도
+    /// **제품 코드에서 아무도 부르지 않았다** — 호출자가 테스트 둘뿐이었다. 자를 만들고 실패 자리에
+    /// 잇지 않으면 다음에도 같은 한 줄만 남는다.
+    ///
+    /// 업그레이드는 설치할 때만 도는 드문 사건이라 여기서 줄이 몇 개 나가는 것은 소음이 아니다.
+    /// 대신 **큰 것부터 여덟 개**만 낸다 — 23 개를 다 내면 정작 범인이 스크롤에 묻힌다.
+    fn logHandoffSizeBreakdown(
+        allocator: std.mem.Allocator,
+        views: []const handoff_codec.RuntimeView,
+    ) void {
+        if (builtin.is_test) return;
+        const max_lines = 8;
+        var rows: [upgrade_limits.max_runtime_count]handoff_codec.RuntimeSizeBreakdown = undefined;
+        var n: usize = 0;
+        var total: usize = 0;
+        for (views) |view| {
+            // 한 runtime 을 못 재도 **나머지는 낸다** — 재는 도중의 실패가 진단 전체를 없애면
+            // 정확히 알고 싶은 순간에 다시 빈손이 된다.
+            const row = handoff_codec.runtimeSizeBreakdown(allocator, view) catch continue;
+            rows[n] = row;
+            n += 1;
+            total +|= row.total;
+        }
+        host_log.line(
+            "session host handoff too large: limit={d} measured_total={d} runtimes={d} measured={d}",
+            .{ upgrade_limits.max_handoff_commit_bytes, total, views.len, n },
+        );
+        std.mem.sort(handoff_codec.RuntimeSizeBreakdown, rows[0..n], {}, struct {
+            fn greater(_: void, a: handoff_codec.RuntimeSizeBreakdown, b: handoff_codec.RuntimeSizeBreakdown) bool {
+                return a.total > b.total;
+            }
+        }.greater);
+        for (rows[0..@min(n, max_lines)]) |row| {
+            host_log.line(
+                "session host handoff runtime: id={x} total={d} screens={d} images={d} stores={d} other={d}",
+                .{ row.runtime_id, row.total, row.screens, row.images, row.stores, row.other },
+            );
+        }
+    }
+
     /// U5 pre-quiesce admission preview. This is a read-only encode of the current graph: it does
     /// not request a reader pause, adopt an fd, or mutate admission. The authoritative encode still
     /// happens after quiesce and must fit the resulting reservation.
@@ -758,7 +802,7 @@ pub const RuntimeManager = struct {
             };
         }
         std.mem.sort(u128, preview.runtime_ids[0..count], {}, std.sort.asc(u128));
-        const encoded = try handoff_codec.encodeHostWithMaxBytes(allocator, .{
+        const encoded = handoff_codec.encodeHostWithMaxBytes(allocator, .{
             .host_id = host_id,
             .upgrade_epoch = upgrade_epoch,
             .authority_generation = authority_generation,
@@ -767,7 +811,16 @@ pub const RuntimeManager = struct {
             .runtimes = views[0..count],
             .notification_handoff = notification_handoff,
             .notification_metadata_handoff = notification_metadata_handoff,
-        }, upgrade_limits.max_handoff_commit_bytes);
+        }, upgrade_limits.max_handoff_commit_bytes) catch |err| {
+            // **여기가 `state_too_large` 의 실제 자리다.** 한도는 이 호출의 인자라 초과는 여기서
+            // 나고, 그래서 `encoded_bytes_without_attempt` 는 채워지지도 않는다 — 나중 자리에서
+            // 재려던 계획은 애초에 닿지 못한다.
+            //
+            // ⚠️ **코어가 잠긴 지금 아니면 못 잰다.** 이 함수의 `defer` 가 나가면서 전부 푼다.
+            // 호출자에게 넘겨 거기서 재게 하면 그때는 이미 늦다.
+            if (err == error.LimitExceeded) logHandoffSizeBreakdown(allocator, views[0..count]);
+            return err;
+        };
         defer allocator.free(encoded);
         preview.encoded_bytes_without_attempt = encoded.len;
         return preview;

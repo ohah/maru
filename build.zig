@@ -5854,6 +5854,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // 한도로 막힌 업그레이드가 «무엇이 컸는지» 남기는가. 재는 도구는 있었는데 아무도 안 불렀다.
+    const handoff_size_step = b.step(
+        "test-handoff-size-breakdown",
+        "A handoff refused by the size limit records which axis filled it",
+    );
+    const handoff_size_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/handoff_size_breakdown_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_handoff_size = b.addRunArtifact(handoff_size_tests);
+    run_handoff_size.addArg("--maru-expect-tests=1");
+    run_handoff_size.addArg("--maru-expect-passed=1");
+    run_handoff_size.setCwd(b.path("."));
+    handoff_size_step.dependOn(&run_handoff_size.step);
+    boundary_step.dependOn(&run_handoff_size.step);
+
     // 해싱 대역폭을 어느 자리가 쓰는지 갈리는가. 총량만으로는 줄이는 방법이 정반대인 셋이 뭉친다.
     const digest_site_step = b.step(
         "test-digest-site-attribution",

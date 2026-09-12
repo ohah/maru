@@ -84,9 +84,21 @@ pub fn bind(io: std.Io, candidate: dmg.MountedCandidate, result: *Authority, bud
 /// Binds signer and file authority against the caller's transaction-wide absolute deadline.
 pub fn bindUntil(io: std.Io, candidate: dmg.MountedCandidate, result: *Authority, deadline_ns: i128) !void {
     var observer = RealObserver{ .io = io, .deadline_ns = deadline_ns };
+    try bindObservedUntil(&observer, candidate, result);
+}
+
+pub fn bindUntilWith(observer: anytype, candidate: dmg.MountedCandidate, result: *Authority) !void {
+    if (!@import("builtin").is_test) @compileError("test-only candidate identity observer seam");
+    try bindObservedUntil(observer, candidate, result);
+}
+
+fn bindObservedUntil(observer: anytype, candidate: dmg.MountedCandidate, result: *Authority) !void {
     _ = try observer.remaining();
-    try bindWith(&observer, candidate, result);
-    _ = try observer.remaining();
+    try bindWith(observer, candidate, result);
+    _ = observer.remaining() catch |err| {
+        result.deinit() catch return error.CleanupFailed;
+        return err;
+    };
 }
 
 pub fn bindWith(observer: anytype, candidate: dmg.MountedCandidate, result: *Authority) !void {

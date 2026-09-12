@@ -16972,7 +16972,7 @@ pub fn build(b: *std.Build) void {
             const notification_candidate_identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_candidate_identity.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
             const notification_candidate_identity_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_candidate_identity.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_notification_candidate_identity", .module = notification_candidate_identity_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod } } }) });
             const run_notification_candidate_identity_tests = b.addRunArtifact(notification_candidate_identity_tests);
-            run_notification_candidate_identity_tests.addArg("--maru-expect-tests=6");
+            run_notification_candidate_identity_tests.addArg("--maru-expect-tests=7");
             run_notification_candidate_identity_tests.setCwd(b.path("."));
             session_host_notification_candidate_identity_step.dependOn(&run_notification_candidate_identity_tests.step);
             if (composition_optimize == optimize) session_host_step.dependOn(&run_notification_candidate_identity_tests.step);

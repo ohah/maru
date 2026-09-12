@@ -29,6 +29,23 @@ const Observer = struct {
     }
 };
 
+const DeadlineObserver = struct {
+    inner: Observer = .{},
+    remaining_calls: usize = 0,
+
+    pub fn remaining(self: *@This()) !i128 {
+        self.remaining_calls += 1;
+        if (self.remaining_calls == 2) return error.TimedOut;
+        return std.time.ns_per_s;
+    }
+    pub fn pin(self: *@This(), path: [:0]const u8, result: *files.PinnedReleaseFile) !void {
+        try self.inner.pin(path, result);
+    }
+    pub fn signature(self: *@This(), role: identity.Role, path: [:0]const u8) !identity.Signature {
+        return self.inner.signature(role, path);
+    }
+};
+
 const Fixture = struct {
     tmp: std.testing.TmpDir,
     app: [std.fs.max_path_bytes:0]u8 = @splat(0),
@@ -104,6 +121,17 @@ test "R2c production bind rejects an expired caller deadline before observation"
     var expired: identity.Authority = .{};
     try std.testing.expectError(error.TimedOut, identity.bindUntil(std.testing.io, fixture.view(), &expired, now));
     try std.testing.expect(expired.value() == null);
+}
+
+test "R2c deadline expiry after bind releases every held executable authority" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var observer: DeadlineObserver = .{};
+    var authority: identity.Authority = .{};
+    try std.testing.expectError(error.TimedOut, identity.bindUntilWith(&observer, fixture.view(), &authority));
+    try std.testing.expect(authority.value() == null);
+    try std.testing.expectEqual(@as(usize, 2), observer.remaining_calls);
 }
 
 test "R2c foreign signer and missing hardened runtime publish no authority" {

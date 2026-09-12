@@ -1584,6 +1584,59 @@ pub fn openDiffForScmRow(self: *AppSession, repo_override: ?[]const u8, row: scm
     openDiffTerm(self, repo, abs, row.path, row.orig_path, base);
 }
 
+/// 그 충돌 행의 파일을 **편집 가능하게** 연다(S1 — docs/editor-merge-conflicts.md §5).
+///
+/// **비교를 여는 길(`openDiffForScmRow`)은 그대로다.** 「무엇이 충돌했나」를 보는 것과 「고치는 것」은
+/// 다른 일이라 행에 길이 둘이고, 기본 클릭은 지금까지대로 비교를 연다 — 충돌 행에서만 뜨는 동작
+/// 버튼이 이쪽이다. 뺏으면 「훑어본다」가 사라진다(그 결정은 그 문서 §7 ①이 든다).
+///
+/// **새 문서 모델을 만들지 않는다.** 작업트리의 평범한 파일이므로 탐색기가 파일을 여는 그 함수
+/// (`file_panel_ops.openFilePanelPathAs`)를 그대로 탄다 — 절대경로 검사·`stat`·중복 Term 재사용·
+/// 프로젝트 트리 기록이 이미 거기 있고, 여기서 다시 적으면 그 중 하나가 조용히 빠진다.
+///
+/// **다만 종류는 `.text`로 못박는다**(실측 2026-09-12). 확장자 분류를 그대로 쓰면 `.md`·`.svg`가 기본
+/// 모드 `.read`로 열려 **렌더된 화면**이 되는데, 거기에는 `<<<<<<<` 마커가 **아예 안 보인다** — 고치러
+/// 연 화면이 고칠 것을 감춘다. 충돌 해결은 언제나 원문을 본다.
+///
+/// **앞쪽 두 거부는 비교 경로와 같은 판정이다**(루트 밖 경로·하위 모듈). 같은 행의 두 길이 서로 다른
+/// 것을 막으면, 한쪽으로 막힌 파일이 다른 쪽으로 열린다.
+pub fn openEditorForScmRow(self: *AppSession, repo_override: ?[]const u8, row: scm_view.FileRow) void {
+    if (!maru.session.repo_path.isSafeRelative(row.path)) {
+        self.showNoticeKey(.git_path_outside_repo);
+        return;
+    }
+    // 하위 모듈은 디렉터리다 — 열면 `stat`이 `.file`이 아니라 조용히 실패한다. 이유를 말한다.
+    if (row.submodule) {
+        self.showNoticeKey(.git_submodule_no_diff);
+        return;
+    }
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = repo_override orelse self.git_repo orelse (gitRepoRoot(self, &repo_buf) orelse return);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, row.path }) catch return;
+    // **글로 못 고치는 것은 열지 않는다.** 이진 확장자(분류가 `null`)와 이미지·미디어·PDF는 열어 봐야
+    // 편집이 없는 뷰어이고, 그 화면은 「해결하러 왔는데 아무것도 못 한다」가 된다 — 이유를 말한다.
+    // 나머지(텍스트·마크다운·SVG·HTML)는 전부 **원문**으로 연다.
+    const classified = maru.session.file_panel_bridge.openKindForPath(abs) orelse {
+        self.showNoticeKey(.git_conflict_not_editable);
+        return;
+    };
+    switch (classified) {
+        .text, .markdown, .svg, .html => {},
+        .image, .media, .pdf => {
+            self.showNoticeKey(.git_conflict_not_editable);
+            return;
+        },
+    }
+    // **둘을 가른다**(§3.8 규율 — 저하는 말한다). 여기 오는 `.unsupported`는 위에서 이미 걸러졌으므로
+    // 남는 것은 "열지 못했다"뿐이지만, 갈래를 지워 두면 분류가 바뀌는 날 조용히 아무 말도 안 하게 된다.
+    switch (file_panel_ops.openFilePanelPathAs(self, abs, .text)) {
+        .opened => {},
+        .unsupported => self.showNoticeKey(.git_conflict_not_editable),
+        .failed => self.showNoticeKey(.git_conflict_open_failed),
+    }
+}
+
 /// 히스토리에서 고른 **커밋 하나의 파일** 비교를 연다(P4b). 커밋 OID까지 유일성 키에 넣어야 다른
 /// 커밋의 같은 파일이 서로를 덮지 않는다.
 pub fn openCommitDiffTerm(

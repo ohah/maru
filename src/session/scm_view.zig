@@ -48,8 +48,17 @@ pub const RowAction = enum {
     stage,
     /// `git restore --staged` — `스테이지된 변경`의 행.
     unstage,
-    /// 동작을 붙이지 않는다. 병합 충돌은 스테이지 여부의 문제가 아니라 **해결되지 않은 상태**이고, 여기에
-    /// `+`를 두면 누르는 순간 충돌 표시가 든 파일이 "해결됨"으로 커밋된다(§3.5 경계 상태표).
+    /// 병합 충돌 행 — **편집 가능한 편집기로 그 파일을 연다**(S1 — docs/editor-merge-conflicts.md §5).
+    ///
+    /// **이것은 git 쓰기가 아니다.** 위 둘은 index를 바꾸지만 이쪽은 아무것도 바꾸지 않는다 — 그래서
+    /// `git_write_command.kindForRow`가 여기서 `null`을 내고, 섹션 머리 줄의 일괄 동작도 이 값을
+    /// 세지 않는다(「모두 해결」은 없는 동작이다).
+    ///
+    /// **`+`를 두지 않는 이유는 그대로다**: 충돌은 스테이지 여부의 문제가 아니라 **해결되지 않은
+    /// 상태**이고, 여기에 `+`를 두면 누르는 순간 충돌 표시가 든 파일이 "해결됨"으로 커밋된다
+    /// (§3.5 경계 상태표). 금지된 것은 `+`이고, **해결하러 가는 길**은 금지된 적이 없다.
+    resolve,
+    /// 동작을 붙이지 않는다.
     none,
 };
 
@@ -302,20 +311,28 @@ fn countFor(status_text: []const u8, section: Section) usize {
     return count;
 }
 
-/// 섹션 헤더의 일괄 동작. 그 섹션에 **동작을 붙일 수 있는 행이 하나도 없으면**(전부 충돌) `.none`이다 —
+/// 섹션 헤더의 일괄 동작. 그 섹션에 **일괄로 걸 수 있는 행이 하나도 없으면**(전부 충돌) `.none`이다 —
 /// 눌러도 아무 일 없는 컨트롤을 두지 않는다.
+///
+/// **`.resolve`는 세지 않는다.** 「모두 해결」은 없는 동작이다 — 해결은 파일마다 사람이 고르는 일이고,
+/// 여기서 `.none`이 아닌 것을 통째로 받으면 전부 충돌인 섹션의 머리 줄에 **누르면 파일 하나를 여는
+/// 일괄 버튼**이 선다(무엇을 열지 말할 수 없다). 그래서 스테이지 어휘 둘만 받는다.
 fn sectionAction(status_text: []const u8, section: Section) RowAction {
     var it = git_status.iterate(status_text);
     while (it.next()) |entry| {
         if (!belongs(entry, section)) continue;
-        const action = rowAction(entry, section);
-        if (action != .none) return action;
+        switch (rowAction(entry, section)) {
+            .stage => return .stage,
+            .unstage => return .unstage,
+            .resolve, .none => {},
+        }
     }
     return .none;
 }
 
 fn rowAction(entry: git_status.Entry, section: Section) RowAction {
-    if (entry.isConflicted()) return .none;
+    // **충돌은 스테이지 어휘를 안 탄다** — 그 행의 동작은 「편집기에서 해결」이다(S1).
+    if (entry.isConflicted()) return .resolve;
     return switch (section) {
         .staged => .unstage,
         .changes => .stage,
@@ -448,19 +465,46 @@ test "행의 상태 문자는 그 행이 선 섹션의 축을 말한다" {
     try testing.expectEqual(Section.changes, model.rows[3].file.section);
 }
 
-test "충돌에는 동작을 붙이지 않고 변경 사항에만 든다" {
+test "충돌 행은 스테이지가 아니라 «해결»이고 변경 사항에만 든다" {
     // 충돌은 스테이지 여부의 문제가 아니라 해결되지 않은 상태다. `+`를 두면 누르는 순간 충돌 표시가 든 파일이
-    // "해결됨"으로 커밋된다.
+    // "해결됨"으로 커밋된다 — 그래서 그 행의 동작은 스테이지 어휘가 **아니고**(S1), 해결하러 가는 길이다.
     var out: [16]Row = undefined;
     var scratch: [256]u8 = undefined;
     const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n";
     const model = build(status, "", "0\t0\tf.txt\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
     try testing.expectEqual(Section.changes, model.rows[0].section.section); // 스테이지 그룹에는 안 든다
-    try testing.expectEqual(RowAction.none, model.rows[0].section.action); // 일괄 동작도 없다
+    // **머리 줄은 그대로 `.none`이다.** 「모두 해결」은 없는 동작이라 `.resolve`가 여기로 새면 안 된다 —
+    // 전부 충돌인 섹션에 **무엇을 열지 말할 수 없는 일괄 버튼**이 선다.
+    try testing.expectEqual(RowAction.none, model.rows[0].section.action);
     try testing.expect(model.rows[1].file.conflicted);
-    try testing.expectEqual(RowAction.none, model.rows[1].file.action);
+    try testing.expectEqual(RowAction.resolve, model.rows[1].file.action);
+    // **`.stage`가 아니다**를 따로 못박는다 — 위 단언이 어느 날 `.stage`로 갈리면 그것이 `git add`다.
+    try testing.expect(model.rows[1].file.action != .stage);
     try testing.expect(model.rows[1].file.unknown_delta); // `+0 -0`을 쓰지 않는다
     try testing.expectEqual(@as(u8, 'U'), model.rows[1].file.letter);
+}
+
+test "충돌과 평범한 변경이 섞인 섹션 — 머리 줄은 `+`, 충돌 행만 «해결»" {
+    // **픽스처가 두 개념을 갈라야 한다**: 전부 충돌인 섹션만 쓰면 `sectionAction`이 `.resolve`를 걸러내는지와
+    // 「걸 수 있는 행이 없다」가 겹친다. 섞어 두면 머리 줄이 `.stage`를 내야 하고 충돌 행만 `.resolve`다.
+    var out: [16]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc c.txt\n1 .M N... 100644 100644 100644 aaa bbb m.txt\n";
+    const model = build(status, "", "1\t1\tm.txt\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.stage, model.rows[0].section.action); // 걸 수 있는 행이 하나 있다
+    var saw_conflict = false;
+    var saw_plain = false;
+    for (model.rows) |row| switch (row) {
+        .file => |f| if (f.conflicted) {
+            saw_conflict = true;
+            try testing.expectEqual(RowAction.resolve, f.action);
+        } else {
+            saw_plain = true;
+            try testing.expectEqual(RowAction.stage, f.action);
+        },
+        .section, .more, .notice => {},
+    };
+    try testing.expect(saw_conflict and saw_plain);
 }
 
 test "하위 모듈은 숫자를 비운다(커밋 포인터라 줄 수가 의미 없다)" {

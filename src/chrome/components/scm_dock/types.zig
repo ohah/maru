@@ -20,7 +20,10 @@ pub const Section = enum { staged, changes };
 pub const Tab = enum { changes, history, agent };
 
 /// 행에 붙는 주 동작. 호버할 때만 보이는 컨트롤이다(§3.5.2).
-pub const RowAction = enum { stage, unstage, none };
+///
+/// `resolve`는 **git 쓰기가 아니다** — 병합 충돌 행에서 그 파일을 편집 가능한 편집기로 여는 길이다
+/// (docs/editor-merge-conflicts.md §5 S1). component는 그 차이를 모르고 글리프만 가른다.
+pub const RowAction = enum { stage, unstage, resolve, none };
 
 /// 상태 문자의 **의미**. 색을 고르는 것은 view이고, 여기서는 어떤 종류인지만 말한다 —
 /// 색 결정이 platform으로 새면 테마마다 두 곳을 고쳐야 한다.
@@ -29,7 +32,8 @@ pub const StatusKind = enum {
     /// 새로 생긴 것(`A`)과 추적되지 않은 것(`U`)은 같은 계열로 본다(VS Code 관례).
     added,
     deleted,
-    /// 병합 충돌. 색은 위험 계열이지만 **동작이 없다**는 점이 더 중요하다(§3.5.2).
+    /// 병합 충돌. 색은 위험 계열이다. **스테이지 동작이 없다**는 점이 더 중요하다(§3.5.2) —
+    /// 그 자리에 오는 것은 `RowAction.resolve`(편집기에서 열기)뿐이다.
     conflicted,
 };
 

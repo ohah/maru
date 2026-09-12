@@ -59,6 +59,11 @@ const stage_all_icon = icons.utf8Fit(.plus, .standard);
 // 행 동작은 글자 하나다 — `+`/`−`는 어떤 폰트에도 있고, 아이콘 슬롯을 하나 더 등록하지 않아도 된다.
 const stage_glyph = "+";
 const unstage_glyph = "−";
+/// 충돌 행의 「편집기에서 열기」(S1). **여기만 아이콘인 이유**: `+`/`−`는 「그 행이 다른 그룹으로
+/// 옮겨 간다」를 뜻하고, 이 동작은 **아무 그룹도 안 바꾼다**(탭이 하나 열린다). 그 차이를 같은 글자
+/// 어휘로 적으면 누르는 사람이 스테이지로 읽는다 — 그래서 **다른 종류의 표식**을 쓴다.
+/// 이미 등록·래스터된 자산이라(`icon_coverage_data`) 새 자산도, 폰트 커버리지 도박도 없다.
+const resolve_icon = icons.utf8Fit(.arrow_right, .standard);
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -312,12 +317,18 @@ pub fn view(
         if (frame.tree.find(build.NodeIds.itemAction(index))) |action_index| {
             const action_rect = frame.tree.entries[action_index];
             if (isHovered(state, row.id) or isHovered(state, action_rect.id)) {
-                const glyph = switch (actionOf(item)) {
-                    .stage => stage_glyph,
-                    .unstage => unstage_glyph,
-                    .none => "",
-                };
-                if (glyph.len > 0) try writer.centered(action_rect, glyph, .surface_fg, .control);
+                switch (actionOf(item)) {
+                    .stage => try writer.centered(action_rect, stage_glyph, .surface_fg, .control),
+                    .unstage => try writer.centered(action_rect, unstage_glyph, .surface_fg, .control),
+                    // **아이콘은 `centered`로 못 놓는다** — PUA 바이트는 셰이핑되지 않으므로 글자
+                    // 경로로 보내면 아무것도 안 그려진다(`Writer.icon`의 머리말). 가로 중앙은 여기서
+                    // 낸다(그 함수는 세로만 중앙에 둔다).
+                    .resolve => {
+                        const slack = action_rect.rect.width - @as(f32, @floatFromInt(m.icon_extent));
+                        try writer.icon(action_rect, @max(slack, 0) / 2, resolve_icon, m.icon_extent, .surface_fg);
+                    },
+                    .none => {},
+                }
             }
         }
     }

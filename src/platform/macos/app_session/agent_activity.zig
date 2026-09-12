@@ -1299,7 +1299,9 @@ pub fn refresh(self: *AppSession, force: bool) void {
         return;
     }
 
-    if (backend.submit(self.agent_activity.chain, remote)) |generation| {
+    // **자국이 있으면 그 자리부터 청한다**(RAV7b-3b-2). 소스가 갈렸으면 위 `clear` 가 이미 0 으로
+    // 만들어 놨으므로 여기서 분기를 새로 안 만든다(적대적 T3).
+    if (backend.submit(self.agent_activity.chain, remote, self.agent_activity.remote_resume_offset)) |generation| {
         self.agent_activity.awaiting = generation;
     } else {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
@@ -1365,7 +1367,7 @@ pub fn poll(self: *AppSession) void {
     const backend = backendPtr(self) orelse return;
 
     if (self.agent_activity.resubmit and !self.agent_activity.chain.isEmpty()) {
-        if (backend.submit(self.agent_activity.chain, null)) |generation| {
+        if (backend.submit(self.agent_activity.chain, null, 0)) |generation| {
             self.agent_activity.awaiting = generation;
             self.agent_activity.resubmit = false;
         }
@@ -1380,6 +1382,18 @@ pub fn poll(self: *AppSession) void {
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
     if (result.generation != self.agent_activity.awaiting) {
         result.deinit(self.allocator);
+        return;
+    }
+    // **이어읽은 답이면 앞 히트에 잇는다**(RAV7b-3b-2 · 계획 §23.2).
+    //
+    // 🔥 **못 이으면 그 답을 «버린다»**(적대적 U8). 이어읽은 답은 **자국 뒤만** 든 목록이라 그대로
+    // 쓰면 **앞 활동이 화면에서 통째로 사라진다** — 목록은 그대로 두고 자국을 0 으로 만들어 다음
+    // tick 이 **통째로** 다시 훑게 한다(§21.2 의 「물러난다」가 뜻하는 그것).
+    if (!mergeResumedInto(self, &result)) {
+        result.deinit(self.allocator);
+        self.agent_activity.remote_resume_offset = 0;
+        self.agent_activity.awaiting = 0;
+        self.agent_activity.resubmit = true;
         return;
     }
     self.agent_activity.all_hits.deinit(self.allocator);
@@ -4062,6 +4076,84 @@ fn decodeRemoteTarget(self: *AppSession) ?struct { owned: []u8, target: decode_b
 }
 
 // ── 원격 신선도(RAV7) ───────────────────────────────────────────────────────────────────────────
+
+/// **이어읽은 답을 지난 목록에 잇는다**(RAV7b-3b-2 · 계획 §23.2). 성공하면 `result` 의 배열이
+/// 합친 것으로 **갈아 끼워진다**.
+///
+/// **물러나는 조건 넷**(§21.2): 저쪽이 처음부터 훑었다(`resumed_from == 0`) · 체인 경로가 갈렸다 ·
+/// 합이 상한을 넘는다(`mergeResumed` 가 null) · 저쪽이 다 못 봤다(`partial`). 하나라도 걸리면
+/// **통째 재스캔의 답을 그대로 쓴다** — 틀린 목록을 보여 주는 것보다 한 번 더 훑는 편이 낫다.
+///
+/// ⚠️ **지난 목록은 뒤집혀 있다**(최신 우선). 병합은 **파일 순서**를 전제하므로 되돌린 뒤 합치고,
+/// `poll` 의 기존 `reverse` 가 다시 뒤집는다(적대적 T2).
+///
+/// **판정자가 직접 부르는 제품 함수다** — 부수효과를 `poll` 안에 묻으면 판정자가 겨눌 것이 「화면이
+/// 안 바뀌었다」뿐이고, 그 하네스에서는 **원래 아무 일도 안 일어난다**(RAV7a 적대적 T4).
+pub fn mergeResumedInto(self: *AppSession, result: *scan_backend.Result) bool {
+    // **이어읽은 답이 아니면 할 일이 없다** — 저쪽이 통째로 보냈으므로 그대로 쓰면 된다.
+    if (!self.agent_activity.source_remote) return true;
+    if (result.remote_resumed_from == 0) return true;
+
+    // 🔥 **여기부터는 «부분 답»이다**(적대적 U8). 이 아래에서 물러나면 `result` 는 **자국 뒤만** 든
+    // 목록이라, 그대로 쓰면 **앞 활동이 화면에서 통째로 사라진다**. 그래서 `false` 를 내고 호출자가
+    // 그 답을 **버리게** 한다 — 「틀린 목록을 보여 주는 것보다 한 번 더 훑는 편이 낫다」(§21.2).
+    if (result.partial) return false;
+    // **체인이 갈렸으면 앞 목록은 남의 세션 것이다**(§21.2 ②).
+    if (!std.mem.eql(u8, result.remote_chain.head(), self.agent_activity.chain.head())) return false;
+
+    const prior_hits = self.agent_activity.all_hits.items;
+    const prior_labels = self.agent_activity.all_labels.items;
+    // 앞이 비었으면 이을 것이 없다 — 부분 답만으로는 목록이 안 된다.
+    if (prior_hits.len == 0) return false;
+    // 길이가 어긋난 목록은 애초에 라벨을 못 잇는다.
+    if (prior_labels.len != prior_hits.len) return false;
+
+    // ── 파일 순서로 되돌린다(적대적 T2) ──────────────────────────────────────────────────────
+    std.mem.reverse(index.Hit, prior_hits);
+    reverseFoldOwners(prior_hits);
+    std.mem.reverse(context.Label, prior_labels);
+    // 실패하면 **원래대로 돌려놓는다** — 이 함수는 아무 자국도 안 남기고 물러난다.
+    var restore = true;
+    defer if (restore) {
+        std.mem.reverse(index.Hit, prior_hits);
+        reverseFoldOwners(prior_hits);
+        std.mem.reverse(context.Label, prior_labels);
+    };
+
+    var merged = index.mergeResumed(
+        self.allocator,
+        prior_hits,
+        result.hits.items,
+        result.remote_resumed_from,
+    ) orelse return false;
+    defer merged.deinit(self.allocator);
+
+    // **라벨을 같은 표로 자른다**(적대적 T1). 남긴 것이 연속이 아니라 개수로는 못 자른다.
+    var labels: std.ArrayList(context.Label) = .empty;
+    labels.ensureTotalCapacity(self.allocator, merged.hits.items.len) catch return false;
+    for (merged.kept_src.items) |src| {
+        if (src >= prior_labels.len) {
+            labels.deinit(self.allocator);
+            return false;
+        }
+        labels.appendAssumeCapacity(prior_labels[src]);
+    }
+    for (result.labels.items) |l| labels.appendAssumeCapacity(l);
+    // 여기서 어긋나면 라벨이 남의 활동에 붙는다 — 그 전에 멈춘다.
+    if (labels.items.len != merged.hits.items.len) {
+        labels.deinit(self.allocator);
+        return false;
+    }
+
+    // ── 갈아 끼운다. 여기서부터 되돌리지 않는다 ──────────────────────────────────────────────
+    restore = false;
+    result.hits.deinit(self.allocator);
+    result.labels.deinit(self.allocator);
+    result.hits = merged.hits;
+    result.labels = labels;
+    merged.hits = .empty; // 소유가 `result` 로 갔다
+    return true;
+}
 
 /// 원격 스캔이 낸 **자국 둘**을 받아 둔다. **판정자가 직접 부르는 제품 함수**다 — 부수효과를 겨눈
 /// 판정자가 실은 아무것도 안 재고 있던 일(RAV7a 적대적 T4)을 겪고 나서 이 스택은 결정을 값으로,

@@ -82569,6 +82569,168 @@ test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는�
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.remote_resume_offset);
 }
 
+test "활동 뷰: 원격 신선도 — 이어읽은 답이 앞 목록에 이어 붙는다 (RAV7b-3b-2)" {
+    // 🔥 **이 슬라이스에서 화면이 실제로 빨라진다.** 저쪽이 자국 뒤만 보내면 앞 히트는 지난 것을
+    // 그대로 쓰고 새 것만 잇는다 — 실 코퍼스에서 **98.2%** 를 안 읽는다(§19.9).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const head = "/home/u/s.jsonl";
+    session.agent_activity.source_remote = true;
+    _ = session.agent_activity.chain.append(head);
+
+    // 지난 목록 — `poll` 이 남긴 모양 그대로 **뒤집혀 있다**(최신 우선).
+    const mk = struct {
+        fn f(line_offset: u64, file_index: u8) maru.session.agent_image_index.Hit {
+            return .{
+                .line_offset = line_offset,
+                .data_offset = line_offset,
+                .data_len = 1,
+                .kind = .claude_tool_use,
+                .mime = .png,
+                .file_index = file_index,
+            };
+        }
+    }.f;
+    try session.agent_activity.all_hits.append(allocator, mk(300, 0)); // 최신
+    try session.agent_activity.all_hits.append(allocator, mk(100, 0));
+    try session.agent_activity.all_labels.append(allocator, .{});
+    try session.agent_activity.all_labels.append(allocator, .{});
+
+    // 저쪽이 자국 250 뒤만 보냈다.
+    var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
+    defer result.deinit(allocator);
+    _ = result.remote_chain.setAt(0, head);
+    try result.hits.append(allocator, mk(400, 0));
+    try result.labels.append(allocator, .{});
+
+    try std.testing.expect(agent_activity_ops.mergeResumedInto(session, &result));
+
+    // **100 은 남고**(자국 이전) **300 은 버려지고**(이어읽기가 그 구간을 다시 봤다) 400 이 붙는다.
+    try std.testing.expectEqual(@as(usize, 2), result.hits.items.len);
+    try std.testing.expectEqual(@as(u64, 100), result.hits.items[0].line_offset);
+    try std.testing.expectEqual(@as(u64, 400), result.hits.items[1].line_offset);
+    // **길이가 언제나 같다** — 어긋나면 라벨이 남의 활동에 붙는다(적대적 T1).
+    try std.testing.expectEqual(result.hits.items.len, result.labels.items.len);
+}
+
+test "활동 뷰: 원격 신선도 — 병합이 물러나면 그 답도 버린다 (RAV7b-3b-2 · 적대적 U8)" {
+    // 🔥 상한 초과·라벨 길이 어긋남으로 `mergeResumed` 가 `null` 을 내면, `result` 는 **자국 뒤만**
+    // 든 부분 목록이다 — 그대로 쓰면 **앞 활동이 화면에서 통째로 사라진다**. 「물러난다」는 「부분을
+    // 보여 준다」가 아니라 **「그 답을 버리고 통째로 다시 훑는다」**다(§21.2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const head = "/home/u/s.jsonl";
+    session.agent_activity.source_remote = true;
+    _ = session.agent_activity.chain.append(head);
+
+    const mk = struct {
+        fn f(line_offset: u64) maru.session.agent_image_index.Hit {
+            return .{
+                .line_offset = line_offset,
+                .data_offset = line_offset,
+                .data_len = 1,
+                .kind = .claude_tool_use,
+                .mime = .png,
+                .file_index = 0,
+            };
+        }
+    }.f;
+    // **라벨 길이를 일부러 어긋내** 병합이 물러나게 한다(상한 초과와 같은 갈래다).
+    try session.agent_activity.all_hits.append(allocator, mk(100));
+    try session.agent_activity.all_hits.append(allocator, mk(200));
+    try session.agent_activity.all_labels.append(allocator, .{}); // 하나뿐 — 길이가 어긋난다
+
+    var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
+    defer result.deinit(allocator);
+    _ = result.remote_chain.setAt(0, head);
+    try result.hits.append(allocator, mk(400));
+    try result.labels.append(allocator, .{});
+
+    // **false** — 이 답을 쓰면 100·200 이 사라진다.
+    try std.testing.expect(!agent_activity_ops.mergeResumedInto(session, &result));
+    // 앞 목록은 **그대로**다(순서까지) — 물러날 때 자국을 안 남긴다.
+    try std.testing.expectEqual(@as(usize, 2), session.agent_activity.all_hits.items.len);
+    try std.testing.expectEqual(@as(u64, 100), session.agent_activity.all_hits.items[0].line_offset);
+    try std.testing.expectEqual(@as(u64, 200), session.agent_activity.all_hits.items[1].line_offset);
+}
+
+test "활동 뷰: 원격 신선도 — 체인이 갈리면 이어 붙이지 않는다 (RAV7b-3b-2)" {
+    // 앞 목록이 **남의 세션 것**이면 이어 붙이는 순간 두 세션이 한 화면에 섞인다(§21.2 ②).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    _ = session.agent_activity.chain.append("/home/u/mine.jsonl");
+    const mk = struct {
+        fn f(line_offset: u64) maru.session.agent_image_index.Hit {
+            return .{
+                .line_offset = line_offset,
+                .data_offset = line_offset,
+                .data_len = 1,
+                .kind = .claude_tool_use,
+                .mime = .png,
+                .file_index = 0,
+            };
+        }
+    }.f;
+    try session.agent_activity.all_hits.append(allocator, mk(100));
+    try session.agent_activity.all_labels.append(allocator, .{});
+
+    var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
+    defer result.deinit(allocator);
+    _ = result.remote_chain.setAt(0, "/home/u/other.jsonl"); // **다른 세션**
+    try result.hits.append(allocator, mk(400));
+    try result.labels.append(allocator, .{});
+
+    // 🔥 **«false» 다** — 이 답은 자국 뒤만 든 부분 목록이라 그대로 쓰면 앞 활동이 사라진다
+    //    (적대적 U8). 호출자가 버리고 다음 tick 이 통째로 다시 훑는다.
+    try std.testing.expect(!agent_activity_ops.mergeResumedInto(session, &result));
+
+    // 답은 손대지 않았다.
+    try std.testing.expectEqual(@as(usize, 1), result.hits.items.len);
+    try std.testing.expectEqual(@as(u64, 400), result.hits.items[0].line_offset);
+    // **지난 목록은 원래 순서로 돌아와 있다** — 물러날 때 자국을 안 남긴다.
+    try std.testing.expectEqual(@as(u64, 100), session.agent_activity.all_hits.items[0].line_offset);
+}
+
 test "활동 뷰: 원격 신선도 — 부모 경로가 소비자까지 온다 (RAV4b)" {
     // 🔥 **기존 결함의 고침**(계획 §21.6). `refresh` 는 `remoteHeadChain` 으로 **머리 하나**만
     // 세우는데 헬퍼는 부모까지 훑어 `file_index = 1` 히트를 보낸다 — 그 경로를 안 받으면

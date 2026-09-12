@@ -121,6 +121,8 @@ const Job = struct {
     generation: u64,
     /// 원격이면 그 목적지. **null 이 로컬이다** — 이 하나가 워커의 갈림을 정한다.
     remote: ?OwnedRemote = null,
+    /// **이어읽기 자국**(RAV7b-3b-2). 0 이면 처음부터 — 로컬 갈래는 안 본다.
+    resume_from: u64 = 0,
 };
 
 /// job 이 **소유하는** 원격 목적지 사본. 세션이 먼저 죽어도 워커가 안전하게 읽는다(이 파일의
@@ -172,7 +174,8 @@ pub const Backend = struct {
     ///
     /// ⚠️ **슬롯은 로컬과 같은 하나를 쓴다.** 계획 §6.2·열린 질문 ④ 가 정한 「자기 상한 1」이 이
     /// 구조에서 저절로 선다 — `inflight` 가 하나라 원격 왕복이 도는 동안 새 job 이 안 뜬다.
-    pub fn submit(self: *Backend, chain: index.Chain, remote: ?RemoteTarget) ?u64 {
+    /// `resume_from` 은 **이어읽기 자국**(RAV7b-3b-2). 0 이면 처음부터 — 로컬은 언제나 0 이다.
+    pub fn submit(self: *Backend, chain: index.Chain, remote: ?RemoteTarget, resume_from: u64) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
 
@@ -214,7 +217,7 @@ pub const Backend = struct {
             };
             owned = .{ .ctl = ctl, .dest = dest };
         }
-        job.* = .{ .state = state, .chain = chain, .generation = generation, .remote = owned };
+        job.* = .{ .state = state, .chain = chain, .generation = generation, .remote = owned, .resume_from = resume_from };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
@@ -405,7 +408,7 @@ fn worker(job: *Job) void {
         // 읽어 **가장 짧은 주기**로 돈다 — 원격 왕복은 로컬 스캔보다 비싼데(실측 6.3 초 + 네트워크)
         // 그 규율이 꺼져 있었다. 로컬이 「9 초 스캔이면 그만큼 쉰다」로 지키는 그것이다.
         const started: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
-        var result = remoteScan(state.allocator, job.chain, r, job.generation);
+        var result = remoteScan(state.allocator, job.chain, r, job.generation, job.resume_from);
         const ended: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
         result.scan_ns = @intCast(@max(0, ended - started));
         finish(state, result);
@@ -535,12 +538,15 @@ fn worker(job: *Job) void {
 ///
 /// **정확성은 안 깨진다** — 늦게 온 결과는 `generation` 대조에서 버려진다. 잃는 것은 **지연**뿐이고
 /// (실측 3.82 GB 에서 6.3 초), 그 대가로 전송 층을 안 건드린다. 취소 가능한 전송은 RAV7 의 일이다.
-fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRemote, generation: u64) Result {
+fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRemote, generation: u64, resume_from: u64) Result {
     if (comptime builtin.os.tag != .macos) unreachable; // submit 이 이미 막는다
 
     // 체인의 **첫 파일**만 본다 — 부모 rollout 을 저쪽에서 푸는 것은 RAV4 다.
     const head = chain.head();
     if (head.len == 0) return .{ .generation = generation, .partial = true };
+
+    var from_buf: [24]u8 = undefined;
+    const from_text = std.fmt.bufPrint(&from_buf, "{d}", .{resume_from}) catch "0";
 
     var out: []u8 = &.{};
     const code = ssh_upload.runRemoteCapped(
@@ -548,7 +554,9 @@ fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRem
         remote.ctl,
         remote.dest,
         ssh_upload.activity_script,
-        &.{head},
+        // **자국이 있으면 그 자리부터 청한다**(RAV7b-3b-2). 저쪽이 못 지키면 `resumed_from = 0` 으로
+        // 알려 오고, 받는 쪽은 그때 이어 붙이지 않는다(§20.3).
+        if (resume_from == 0) &.{head} else &.{ head, "--from", from_text },
         wire.max_wire_bytes,
         &out,
     ) catch {

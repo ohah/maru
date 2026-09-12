@@ -5877,6 +5877,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // 연결을 «어느 줄이» 닫았는가. 사유는 29·18 곳이 공유하고, 주소 풀이는 2026-09-13 에 어긋나 막혔다.
+    const close_site_step = b.step(
+        "test-close-site-name",
+        "A closed connection records which call site closed it, not just the reason",
+    );
+    const close_site_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/close_site_name_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_close_site = b.addRunArtifact(close_site_tests);
+    run_close_site.addArg("--maru-expect-tests=1");
+    run_close_site.addArg("--maru-expect-passed=1");
+    run_close_site.setCwd(b.path("."));
+    close_site_step.dependOn(&run_close_site.step);
+    boundary_step.dependOn(&run_close_site.step);
+
     // 한도로 막힌 업그레이드가 «무엇이 컸는지» 남기는가. 재는 도구는 있었는데 아무도 안 불렀다.
     const handoff_size_step = b.step(
         "test-handoff-size-breakdown",

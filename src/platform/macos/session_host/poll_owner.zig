@@ -458,16 +458,20 @@ pub const Owner = struct {
         // 닫기로 했나」다. `client_closing` 하나가 열 가지를 뭉개던 자리가 여기다(2026-09-08).
         var why: []const u8 = "gone";
         var why_ra: usize = 0;
+        // **어느 줄이 닫았는가.** 사유는 `socket_error` 29 곳·`resource_exhausted` 18 곳이 공유하고,
+        // 주소는 사람이 풀어야 하는데 2026-09-13 에 그 풀이가 어긋나 막혔다. 이름이 그 자리를 끝낸다.
+        var site: []const u8 = "-";
         if (self.clients[index]) |client| {
             why = if (client.closeReason()) |r| @tagName(r) else "open";
             why_ra = client.closeReturnAddress();
+            site = client.closeSite();
         }
         // 슬라이드가 있어야 앱이 다시 뜬 뒤에도 `atos -o <바이너리> -l <slide> <why_ra>` 로 풀린다.
         // 근거는 `client.zig` 의 `logPoisonCallSite` 주석과 같다.
         const slide: usize = @intCast(std.c._dyld_get_image_vmaddr_slide(0));
         host_log.line(
-            "session host closed client connection: slot={d} reason={s} why={s} why_ra=0x{x} slide=0x{x} pending_out={d} clients={d}",
-            .{ index, @tagName(reason), why, why_ra, slide, self.producer_remaining[index], self.activeCount() },
+            "session host closed client connection: slot={d} reason={s} why={s} site={s} why_ra=0x{x} slide=0x{x} pending_out={d} clients={d}",
+            .{ index, @tagName(reason), why, site, why_ra, slide, self.producer_remaining[index], self.activeCount() },
         );
     }
 

@@ -188,6 +188,17 @@ pub const VisualRow = struct {
 
     /// 이 행에 줄 번호를 그리는가. **랩된 줄의 두 번째 이후에는 비운다**(§4) — 안 그러면 같은
     /// 번호가 연달아 보인다(VSCode 관례).
+    /// **줄 배열을 인덱싱할 절대 자리.** `line` 은 뷰포트 첫 줄로부터의 **상대** 값인데 `lines`·
+    /// `carets`·`row_marks` 는 문서 처음부터의 **절대** 배열이라, 그 둘을 잇는 덧셈이 소비처마다
+    /// 손으로 적혀 있었다 — 다섯 자리 중 **하나가 그 덧셈을 빠뜨려** 스크롤된 화면에서 caret 이
+    /// 엉뚱한 행에, 다른 줄의 글자를 기준으로 그려졌다(사용자 제보 2026-09-12).
+    ///
+    /// 그래서 **이름을 붙인다.** 값은 그대로지만 부르는 이름이 생기면 「무슨 축인가」가 호출부에서
+    /// 보이고, 빠뜨린 자리는 `v.line` 을 그대로 쓴 모양으로 눈에 띈다.
+    pub fn docIndex(self: VisualRow, first_line: usize) usize {
+        return first_line + self.line;
+    }
+
     pub fn showsLineNumber(self: VisualRow) bool {
         return self.piece == 0;
     }

@@ -527,6 +527,26 @@ pub fn buildPaneOps(
 ///
 /// 세로 밖은 첫/마지막 **보이는 행**으로 clamp한다. 드래그는 pane을 벗어나는 것이 정상이고, 그때
 /// `null`을 주면 호출자가 분기를 하나 더 져야 한다(§10이 *"항상 유효한 offset"*이라 정한 것과 같은 결).
+/// 굳힌 hit 스냅숏이 **아직 안 그린 상태 변화**를 담고 있는가(= 화면보다 «앞선» 상태가 있는가).
+///
+/// **이것은 «틀렸다» 가 아니다.** 스냅숏은 곧 **화면에 보이는 것**이고, 아직 안 그린 변화는 화면에도
+/// 없다 — 그래서 클릭은 스냅숏으로 답하는 것이 옳다(`ADV3-F`·`ADV3-H` 가 그 계약을 굳혔다: *"어느
+/// 쪽 기준으로도 틀린 답"* 이 되는 것은 두 프레임을 **섞을** 때다). 이 값이 말하는 것은 «다음
+/// 프레임에 화면이 바뀐다» 뿐이고, 쓰임은 **진단**이다.
+///
+/// 검색 reveal 경로가 쓰는 대조(`snapshot_is_current`)와 **같은 식**을 여기 하나로 둔다 — 판정이
+/// 두 벌이면 진단이 제품과 다른 것을 재게 된다.
+pub fn hitSnapshotStale(self: *AppSession, term: *Term) bool {
+    const geom = term.rt.editor_hit_geom;
+    return geom.top_line != term.rt.editor_first_line or
+        geom.top_piece != term.rt.editor_first_piece or
+        geom.visible_len != editorLines(term).len or
+        geom.wrap != (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) or
+        geom.tab_width != term.rt.editor_tab_width or
+        geom.cell_w_px != self.cell_width_px or
+        geom.cell_h_px != self.cell_height_px;
+}
+
 pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
@@ -946,6 +966,10 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         term.rt.editor_hit_lines[i] = @intCast(@min(source, std.math.maxInt(u32)));
     }
     term.rt.editor_hit_rows_len = rows.len;
+    // **이번에 그린 줄 수를 기억한다** — 편집이 위 길이를 비워도 이 값은 남아, 폴백이 «안 그렸다» 로
+    // 오해하지 않는다(`editor_drawn_doc_lines` doc). 여기서 세는 이유는 **그린 것이 곧 그 수**이기
+    // 때문이다 — 다른 자리에서 다시 세면 두 번째 출처가 된다.
+    term.rt.editor_drawn_doc_lines = drawnDocLines(term);
 
     // **기하도 같은 순간에 굳힌다**(`editor_hit_geom` doc). ①(픽셀 → 행·열)과 ④(행 폭)가 클릭
     // 시점에 다시 계산하면 행 배열과 다른 프레임의 값이 된다.
@@ -2404,7 +2428,7 @@ fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: 
     const moved = maru.session.editor.delta.mapOffset(d, a.off);
     const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(moved, doc.file.content.len)));
     const row = visibleRowOfDocLine(term, doc_line) orelse return;
-    if (row != term.rt.editor_first_line) setEditorTop(self, term, row);
+    if (row != term.rt.editor_first_line) setEditorTop(self, term, row, "sel-follow");
 }
 
 /// 랩이 켜졌을 때 **한 시각 행** 위/아래로 옮긴 offset. 랩이 꺼졌거나 조립할 수 없으면 `null`.
@@ -2728,7 +2752,7 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
         // **행 수를 모르면(`fallback_rows == 0`) 여백도 없다** — `caretMargin` 이 그때 0 을 내는 것과
         // 같은 근거다: 기준이 없는데 여백을 요구하면 어디로도 못 간다.
         if (fallback_rows == 0) {
-            setEditorTop(self, term, row);
+            setEditorTop(self, term, row, "reveal-no-fallback");
             return;
         }
         const top0: usize = term.rt.editor_first_line;
@@ -2754,7 +2778,7 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
         // 첨자이고(`scrollLines` 가 같은 근거로 같은 값을 쓴다), 문서 줄 수를 쓰면 접힌
         // 문서에서 이 값이 배열 밖을 가리키는 날이 온다.
         want0 = @min(want0, maxFirstLine(editorLines(term).len, fallback_rows, term));
-        if (want0 != top0) setEditorTop(self, term, want0);
+        if (want0 != top0) setEditorTop(self, term, want0, "reveal-fallback");
         return;
     }
 
@@ -2806,7 +2830,7 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
     // 직전 `clampScrollToGeometry` 가 되돌리는」 왕복이 남는다 — 자리는 안정적이지만 매 이동이
     // 프레임을 깨운다. 상한은 `scrollLines`·`clampScrollToGeometry` 가 쓰는 `maxFirstLine` **하나**다.
     want = @min(want, maxFirstLine(editorLines(term).len, drawn, term));
-    if (want != top) setEditorTop(self, term, want);
+    if (want != top) setEditorTop(self, term, want, "reveal-snapshot");
 }
 
 pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) bool {
@@ -3476,7 +3500,7 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // 마지막 프레임과 다른 값이 나올 수 있고, 그러면 "보인다"는 판정이 화면과 갈린다.
     const rows = term.rt.editor_hit_rows_len;
     if (rows == 0) { // 아직 한 프레임도 안 그렸다 — 맨 위에 둔다
-        setEditorTop(self, term, row);
+        setEditorTop(self, term, row, "find-reveal");
         return;
     }
 
@@ -3528,7 +3552,7 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // **논리 줄 수로 나눈다 — 시각 행 수가 아니다.** 랩에서 한 줄이 세 행을 먹으면 시각 행의
     // 절반은 논리 줄 여럿을 지나쳐, 매치를 가운데가 아니라 **화면 아래로 밀어낸다**.
     //
-    setEditorTop(self, term, row -| drawnDocLines(term) / 2);
+    setEditorTop(self, term, row -| drawnDocLines(term) / 2, "center");
 
     // **낡은 채로 놓았으면 다음 프레임 뒤에 한 번 더 잡는다.**
     //
@@ -3562,7 +3586,9 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
 /// 커지므로(같은 줄의 조각들이 이어 붙는다), **값이 바뀌는 횟수**가 곧 줄 수다.
 fn drawnDocLines(term: *const Term) usize {
     const n = term.rt.editor_hit_rows_len;
-    if (n == 0) return 0;
+    // **편집이 비운 스냅숏은 «안 그렸다» 가 아니다.** 뷰포트 크기는 편집으로 안 바뀌므로 직전 값이
+    // 그대로 유효하다 — 그 구분이 없어서 프레임 사이에 편집이 둘 오면 화면이 떨었다(위 필드 doc).
+    if (n == 0) return term.rt.editor_drawn_doc_lines;
     // **길이를 배열로 좁힌다.** 스냅숏의 두 값(`len`과 배열)이 어긋난 상태가 존재한다 —
     // 판정자가 "렌더가 굳혀 둔 상태"를 흉내 낼 때 길이만 세우고(`EDIT6`), 제품에서도
     // `storeHitRows`가 실패하면 그 사이가 벌어질 수 있다. 좁히지 않으면 **읽다가 죽는다**
@@ -3586,7 +3612,19 @@ fn drawnDocLines(term: *const Term) usize {
 ///
 /// **접힘 경로는 우연히 안전했다**(`rebuildVisible`이 부르는 `invalidateFoldDerived`가 0을 놓는다).
 /// 우연에 기대지 않으려고 여기서 명시한다.
-fn setEditorTop(self: *AppSession, term: *Term, line: usize) void {
+fn setEditorTop(self: *AppSession, term: *Term, line: usize, reason: []const u8) void {
+    // **누가 화면을 굴렸나**(제보 조사 2026-09-12 — 입력할 때마다 스크롤된다). 스크롤은 여러
+    // 경로가 세우므로, 값만 봐서는 «타이핑이 굴렸는지» 를 못 가른다.
+    if (diag_gate.maruDebugEnabled() and term.rt.editor_first_line != line) {
+        editor_diag.debug("top {d} -> {d} why={s} wrap={any} rows={d} visible={d}", .{
+            term.rt.editor_first_line,
+            line,
+            reason,
+            term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap,
+            term.rt.editor_hit_rows_len,
+            editorLines(term).len,
+        });
+    }
     term.rt.editor_first_line = line;
     term.rt.editor_first_piece = 0;
     self.metal_dirty = true;
@@ -3826,6 +3864,13 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
 
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
+    // **누른 뒤 캐럿이 실제로 어디 섰나**(제보 조사 2026-09-12). `hit` 은 «좌표를 어떻게 읽었나» 만
+    // 말하고, 그 뒤 누가 캐럿을 옮겨도 안 보인다. 둘을 나란히 찍어야 «읽기» 와 «세우기» 가 갈린다.
+    if (diag_gate.maruDebugEnabled()) {
+        if (cursorPosition(term)) |cp| {
+            editor_diag.debug("caret set line={d} col={d} off={d} extras={d}", .{ cp.line, cp.column, off, term.rt.editor_extra_selections.len });
+        }
+    }
     return true;
 }
 
@@ -3847,15 +3892,7 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
 fn logHitSnapshotDiag(self: *AppSession, term: *Term, y_px: f64, off: usize) void {
     if (!diag_gate.maruDebugEnabled()) return;
     const geom = term.rt.editor_hit_geom;
-    // 검색 reveal 경로가 쓰는 것과 **같은 대조**다(`snapshot_is_current`) — 판정을 새로 적으면
-    // 두 벌이 되고, 진단이 제품과 다른 것을 재게 된다.
-    const stale = geom.top_line != term.rt.editor_first_line or
-        geom.top_piece != term.rt.editor_first_piece or
-        geom.visible_len != editorLines(term).len or
-        geom.wrap != (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) or
-        geom.tab_width != term.rt.editor_tab_width or
-        geom.cell_w_px != self.cell_width_px or
-        geom.cell_h_px != self.cell_height_px;
+    const stale = hitSnapshotStale(self, term);
     const doc = term.rt.editor_doc;
     const line = if (doc) |d| d.file.lines.lineAt(@min(off, d.file.content.len)) else 0;
     const row: i64 = if (geom.cell_h_px == 0) -1 else blk: {
@@ -6369,6 +6406,11 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
 ///
 /// **역연산을 아직 어디에도 안 쌓는다** — undo 스택은 다음 조각이다. 지금은 받아서 버린다.
 pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
+    if (diag_gate.maruDebugEnabled()) {
+        if (cursorPosition(term)) |cp| {
+            editor_diag.debug("insert at line={d} col={d} bytes={d} extras={d} preedit={d}@{d} top={d}", .{ cp.line, cp.column, text.len, term.rt.editor_extra_selections.len, term.rt.editor_preedit.len, term.rt.editor_preedit_at, term.rt.editor_first_line });
+        }
+    }
     if (term.kind != .editor or text.len == 0) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 원본이 없다
     const doc = term.rt.editor_doc orelse return false;
@@ -6901,6 +6943,7 @@ pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
         hideSendHelper(self);
         return false;
     }
+    if (diag_gate.maruDebugEnabled()) editor_diag.debug("helper ate click x={d:.1} y={d:.1}", .{ x_px, y_px });
     const term = sendHelperTerm(self) orelse {
         hideSendHelper(self); // 그 Term 이 닫혔다 — 보낼 원본이 없다
         return true; // 상자 위 클릭은 그래도 소비한다(아래 문서에 캐럿이 찍히면 더 놀랍다)
@@ -7902,7 +7945,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
 
         // ⑹ 스크롤이 문서 끝을 넘었을 수 있다(줄이 지워졌다면).
         if (term.rt.editor_first_line >= term.rt.editor_lines.len) {
-            setEditorTop(self, term, term.rt.editor_lines.len -| 1);
+            setEditorTop(self, term, term.rt.editor_lines.len -| 1, "clamp-end");
         }
         self.metal_dirty = true;
     }
@@ -15784,7 +15827,7 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     clearExtraSelections(fx.session, term);
     var scrolled_v = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     scrolled_v.dl.deinit(allocator);
-    setEditorTop(fx.session, term, 20);
+    setEditorTop(fx.session, term, 20, "test");
     const kept_line = term.rt.editor_first_line;
     if (kept_line == 0) return error.VerticalDidNotScroll;
     const visible_line = term.rt.editor_doc.?.file.lines.line(kept_line + 1).?;
@@ -16362,6 +16405,15 @@ test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색�
     term.rt.editor_selection = editor_selection.Selection.at(30);
     if (!insertText(fx.session, term, "\"")) return error.InsertRejected;
 
+    // **편집이 색을 실제로 바꿨는가**(공허 방지). 예전에는 이것을 `before` vs `truth`(되돌린 뒤)로
+    // 쟀는데, 그 둘이 다른 진짜 이유는 **편집 뒤 화면이 튀어 digest 창이 달라진 것**이었다 — 즉
+    // 가드가 결함에 기대 초록이었다(2026-09-12 그 결함을 고치자 드러났다). 되돌리기가 온전하면
+    // `before == truth` 가 **맞는** 답이므로, 재려던 것은 여기서 잰다: 편집이 색을 바꿨는가.
+    var edited: std.ArrayList(u8) = .empty;
+    defer edited.deinit(allocator);
+    try colorDigest(fx.session, term, &edited, allocator);
+    if (std.mem.eql(u8, before.items, edited.items)) return error.EditDidNotChangeColors;
+
     // 되돌린다 — 증분 통지로 간다.
     if (!undoEdit(fx.session, term)) return error.UndoRejected;
     try colorDigest(fx.session, term, &after, allocator);
@@ -16371,8 +16423,9 @@ test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색�
     try colorDigest(fx.session, term, &truth, allocator);
 
     try testing.expectEqualStrings(truth.items, after.items);
-    // **픽스처 공허 방지** — 되돌리기가 색을 실제로 바꿨어야 대조가 뜻을 갖는다.
-    if (std.mem.eql(u8, before.items, truth.items)) return error.UndoDidNotChangeColors;
+    // **되돌리기가 편집을 실제로 되물렸는가** — 색이 편집 상태 그대로면 되돌리기가 통지만 하고
+    // 트리를 안 고친 것이다(그 상태에서도 위 `truth == after` 는 통과한다 — 둘 다 틀린 채 같다).
+    if (std.mem.eql(u8, edited.items, truth.items)) return error.UndoDidNotRestoreColors;
 
     // 다시 하기도 같은 자리를 지난다.
     if (!redoEdit(fx.session, term)) return error.RedoRejected;
@@ -20180,19 +20233,19 @@ test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 �
     drawn.dl.deinit(allocator);
 
     // 화면을 아래로 굴려 두고, **위쪽 줄**에 커서를 둔 채 편집한다.
-    setEditorTop(fx.session, term, 100);
+    setEditorTop(fx.session, term, 100, "test");
     term.rt.editor_selection = editor_selection.Selection.at(0);
 
     try testing.expect(insertText(fx.session, term, "X"));
     try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line); // **따라왔다**
 
     // 붙여넣기도 같다.
-    setEditorTop(fx.session, term, 100);
+    setEditorTop(fx.session, term, 100, "test");
     try testing.expect(pasteText(fx.session, term, "Y"));
     try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line);
 
     // 삭제도 같다.
-    setEditorTop(fx.session, term, 100);
+    setEditorTop(fx.session, term, 100, "test");
     try testing.expect(deleteText(fx.session, term, true));
     try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line);
 
@@ -20205,7 +20258,7 @@ test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 �
     fx.session.gpu_quads.clearRetainingCapacity();
     var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     d2.dl.deinit(allocator);
-    setEditorTop(fx.session, term, 50);
+    setEditorTop(fx.session, term, 50, "test");
     fx.session.gpu_quads.clearRetainingCapacity();
     var d3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     d3.dl.deinit(allocator);
@@ -20240,7 +20293,7 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     const term = try undoFixture(&fx, allocator, "edit7.txt", doc.items);
 
     // 아래로 굴려 뷰포트를 문서 중간에 둔다.
-    setEditorTop(fx.session, term, 40);
+    setEditorTop(fx.session, term, 40, "test");
     const lines = term.rt.editor_doc.?.file.lines;
     const top_line = lines.line(40).?;
     const top_text = try allocator.dupe(u8, term.rt.editor_doc.?.file.content[top_line.start .. top_line.start + 7]);
@@ -20550,7 +20603,7 @@ fn fuzzRound(
             4 => _ = unfoldAll(session),
             5 => { // 굴린다
                 const line = rand.uintLessThan(usize, 100);
-                setEditorTop(session, term, line);
+                setEditorTop(session, term, line, "test");
             },
             else => _ = copySelection(session), // 복사
         }
@@ -22810,7 +22863,7 @@ test "ES18 화면의 여러 행이 칠해진다 — 한 셀만 보고 통과하�
 
     // **끝 가까이로 굴려도** 마찬가지여야 한다 — 0번부터만 묻거나 예산이 작으면 여기가 빈다.
     rows.clearRetainingCapacity();
-    setEditorTop(fx.session, fx.term, fx.term.rt.editor_lines.len - 20);
+    setEditorTop(fx.session, fx.term, fx.term.rt.editor_lines.len - 20, "test");
     try coloredRows(fx.session, fx.term, &rows);
     try testing.expect(rows.count() >= 5);
 
@@ -22842,7 +22895,7 @@ test "ES14 창보다 긴 문서를 굴려도 그 화면에 색이 붙는다 — 
     try testing.expect(total > 300);
 
     // **끝 가까이로 굴린다** — 0번부터 256줄만 물으면 여기는 무색이 된다.
-    setEditorTop(fx.session, fx.term, total - 10);
+    setEditorTop(fx.session, fx.term, total - 10, "test");
     try testing.expect(drawnSyntaxRoles(fx.session, fx.term) > 0);
 }
 
@@ -23139,7 +23192,7 @@ test "ES20 화면 맨 윗줄도 칠해진다 — 한 줄 어긋남을 잡는다"
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     var i: usize = 0;
     while (i < 400) : (i += 1) _ = insertText(fx.session, fx.term, "const q = 7;\n");
-    setEditorTop(fx.session, fx.term, 100);
+    setEditorTop(fx.session, fx.term, 100, "test");
 
     var rows = std.AutoHashMap(i32, void).init(allocator);
     defer rows.deinit();
@@ -26214,4 +26267,190 @@ test "EM-RT 그린 자리를 누르면 그 자리가 나온다 — 좌표 왕복
         }
     }
     try testing.expect(checked > 0); // 공허하게 통과하지 않는다
+}
+
+/// 큰 문서로 연 편집기 — 제보(캐럿 튐) 조사용. `PaneFixture` 는 3 줄이라 스크롤·랩이 아예 안
+/// 걸리고, 그 상태로 왕복을 훑으면 **한 화면 안**만 본다.
+const BigEditorFixture = struct {
+    session: *AppSession,
+    term: *Term,
+    dir: testing.TmpDir,
+    leaf_rect: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 },
+
+    const Kind = enum { code, json, long_line };
+
+    fn init(allocator: std.mem.Allocator, lines: usize, kind: Kind) !BigEditorFixture {
+        const io = std.testing.io;
+        var dir = testing.tmpDir(.{});
+        errdefer dir.cleanup();
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(allocator);
+        var i: usize = 0;
+        while (i < lines) : (i += 1) {
+            var line_buf: [512]u8 = undefined;
+            switch (kind) {
+                .code => try body.appendSlice(allocator, try std.fmt.bufPrint(&line_buf, "const v{d} = \"값 {d}\"; // 주석 {d}\n", .{ i, i, i })),
+                .json => try body.appendSlice(allocator, try std.fmt.bufPrint(&line_buf, "  \"key{d}\": {{ \"a\": {d}, \"b\": \"한글 {d}\" }},\n", .{ i, i, i })),
+                .long_line => {
+                    try body.appendSlice(allocator, try std.fmt.bufPrint(&line_buf, "{d}:", .{i}));
+                    var c: usize = 0;
+                    while (c < 200) : (c += 1) try body.append(allocator, 'x');
+                    try body.append(allocator, '\n');
+                },
+            }
+        }
+        try dir.dir.writeFile(io, .{ .sub_path = "big.zig", .data = body.items });
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+        const path = try std.fs.path.join(allocator, &.{ root, "big.zig" });
+        defer allocator.free(path);
+
+        const session = try allocator.create(AppSession);
+        errdefer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = app_session_mod.abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        });
+        errdefer session.deinit();
+        session.cell_width_px = 8;
+        session.cell_height_px = 16;
+        session.window_padding_px = .{ .left = 6, .top = 4, .right = 6, .bottom = 4 };
+        session.surface_initialized = true;
+        session.backing_width_px = 1200;
+        session.backing_height_px = 800;
+        const term = try openPathInActivePane(session, path);
+        return .{ .session = session, .term = term, .dir = dir };
+    }
+
+    fn deinit(self: *BigEditorFixture, allocator: std.mem.Allocator) void {
+        self.session.deinit();
+        allocator.destroy(self.session);
+        self.dir.cleanup();
+    }
+};
+
+test "EM-RT2 그린 자리를 누르면 그 자리가 나온다 — 큰 문서·스크롤·랩 전수 (제보 조사)" {
+    // **사용자 제보(2026-09-12)**: 드래그·클릭을 하다 보면 캐럿이 엉뚱한 데로 간다(파일 종류 무관).
+    // 왕복 불변식 ①(§4.1g)은 한 점으로만 재고 있었다 — 여기서는 **그린 행 × 열 전수**를 파일 종류
+    // 셋 × 랩 on/off × 스크롤 다섯 자리에서 훑는다. 이 축에서 어긋남은 **0 건**이고(실측), 그래서
+    // 제보의 원인은 **정적 좌표 변환이 아니다**. 그 사실 자체가 다음 조사의 출발점이라 남긴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var checked_total: usize = 0;
+    for ([_]BigEditorFixture.Kind{ .code, .json, .long_line }) |kind| {
+        var fx = try BigEditorFixture.init(allocator, 400, kind);
+        defer fx.deinit(allocator);
+        for ([_]bool{ false, true }) |wrap| {
+            fx.term.rt.editor_wrap = wrap;
+            for ([_]usize{ 0, 1, 7, 50, 399 }) |top| {
+                fx.term.rt.editor_first_line = top;
+                var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse continue;
+                defer drawn.dl.deinit(allocator);
+                const geom = fx.term.rt.editor_hit_geom;
+                const rows_len = fx.term.rt.editor_hit_rows_len;
+                var r: usize = 0;
+                while (r < rows_len) : (r += 1) {
+                    var c: u32 = 0;
+                    while (c < 40) : (c += 4) {
+                        const x = @as(f64, @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)))) +
+                            (@as(f64, @floatFromInt(c)) + 0.5) * @as(f64, @floatFromInt(geom.cell_w_px));
+                        const y = @as(f64, @floatFromInt(geom.body_y)) + (@as(f64, @floatFromInt(r)) + 0.5) * @as(f64, @floatFromInt(geom.cell_h_px));
+                        const off = hitTestBody(fx.term, x, y) orelse continue;
+                        const doc = fx.term.rt.editor_doc.?;
+                        const line_idx = doc.file.lines.lineAt(doc.file.lines.clampOffset(off));
+                        const line = doc.file.lines.line(line_idx) orelse continue;
+                        const a = chrome_editor.hit.bodyAnchor(.{
+                            .body_x = geom.body_x,
+                            .body_y = geom.body_y,
+                            .content_left_px = geom.content_left_px,
+                            .content_width = geom.content_width,
+                            .cell_w_px = geom.cell_w_px,
+                            .cell_h_px = geom.cell_h_px,
+                            .tab_width = geom.tab_width,
+                        }, fx.term.rt.editor_hit_rows[0..rows_len], fx.term.rt.editor_hit_lines[0..rows_len], fx.term.rt.editor_lines, line_idx, off -| line.start) orelse
+                            return error.AnchorLost;
+                        try testing.expectEqual(r, a.row); // 누른 행 = 답한 행
+                        checked_total += 1;
+                    }
+                }
+            }
+        }
+    }
+    try testing.expect(checked_total > 1000); // 공허하게 통과하지 않는다
+}
+
+test "EM-SNAP 스크롤·랩이 바뀌고 **아직 안 그렸으면** 화면에 보이는 것으로 답한다 (§4.1g)" {
+    // `ADV3-F`(셀 크기)·`ADV3-H`(탭 폭)가 굳힌 계약의 **남은 두 축**이다. 스냅숏은 곧 화면이므로,
+    // 상태만 바뀌고 아직 안 그린 창에서는 **옛 화면 기준**으로 답해야 한다 — 사용자는 그 화면을
+    // 보고 눌렀기 때문이다. 「낡았으니 거절한다」로 바꾸려다 위 둘이 깨져서 되돌린 자리이고
+    // (2026-09-12), 그 판정이 여기 스크롤·랩 축에도 있어야 다음에 같은 시도가 조용히 안 지나간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try BigEditorFixture.init(allocator, 400, .code);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_first_line = 0;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    const geom = fx.term.rt.editor_hit_geom;
+    const x = @as(f64, @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)))) + 4;
+    const y = @as(f64, @floatFromInt(geom.body_y)) + 5.5 * @as(f64, @floatFromInt(geom.cell_h_px));
+    const doc = fx.term.rt.editor_doc.?;
+    const drawn_line = doc.file.lines.lineAt(hitTestBody(fx.term, x, y).?);
+
+    // 스크롤만 하고 안 그린다 — 화면은 아직 옛 자리다.
+    fx.term.rt.editor_first_line = 50;
+    try testing.expect(hitSnapshotStale(fx.session, fx.term)); // 다음 프레임에 화면이 바뀐다
+    try testing.expectEqual(drawn_line, doc.file.lines.lineAt(hitTestBody(fx.term, x, y).?));
+
+    // 랩 토글도 같다.
+    fx.term.rt.editor_first_line = 0;
+    fx.term.rt.editor_wrap = !(fx.term.rt.editor_wrap orelse false);
+    try testing.expectEqual(drawn_line, doc.file.lines.lineAt(hitTestBody(fx.term, x, y).?));
+
+    // 그리고 **다시 그리면** 새 자리로 답한다 — 화면이 바뀌었으니 답도 바뀐다.
+    fx.term.rt.editor_wrap = false;
+    fx.term.rt.editor_first_line = 50;
+    var redrawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer redrawn.dl.deinit(allocator);
+    try testing.expect(!hitSnapshotStale(fx.session, fx.term));
+    try testing.expectEqual(drawn_line + 50, doc.file.lines.lineAt(hitTestBody(fx.term, x, y).?));
+}
+
+test "SCRL1 프레임 사이에 편집이 둘 와도 화면이 안 떨린다 (사용자 제보 2026-09-12)" {
+    // **제보**: 입력할 때마다 화면이 한 칸(실측 5 줄) 위아래로 떤다. 로그가 두 갈래를 잡았다 —
+    // `reveal-fallback` 이 여백만큼 내리고 `reveal-no-fallback` 이 커서 줄을 맨 위로 끌어올린다.
+    //
+    // 갈림은 `fallback_rows` 다. `drawnDocLines` 는 **스냅숏이 비면 0** 을 주는데, 편집은 스스로
+    // 스냅숏을 비운다(`refreshAfterEdit`). 그래서 **프레임 사이에 편집이 둘** 오면(프레임보다 빠른
+    // 타이핑 — 흔한 일이다) 두 번째가 *"정말 한 프레임도 안 그렸다"* 갈래로 빠진다. 그 갈래는
+    // 「맨 위에 둔다」라 커서 줄을 화면 첫 줄로 올리고, 다음 편집이 여백으로 다시 내린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try BigEditorFixture.init(allocator, 200, .code);
+    defer fx.deinit(allocator);
+
+    // 화면을 굴려 두고 한 프레임 그린다(스냅숏이 선다).
+    fx.term.rt.editor_first_line = 14;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_hit_rows_len > 0);
+
+    const doc = fx.term.rt.editor_doc.?;
+    const line20 = doc.file.lines.line(20) orelse return error.NoLine;
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line20.contentEnd());
+
+    // 첫 편집 — 스냅숏이 있으므로 정상 경로다.
+    try testing.expect(insertText(fx.session, fx.term, "a"));
+    const after_first = fx.term.rt.editor_first_line;
+
+    // **다시 그리지 않고** 둘째 편집 — 프레임보다 빠른 타이핑이 만드는 상태다.
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_hit_rows_len); // 전제: 스냅숏이 비었다
+    try testing.expect(insertText(fx.session, fx.term, "b"));
+
+    // **화면이 그대로여야 한다.** 같은 줄에 글자 하나를 더했을 뿐인데 화면이 움직이면 그것이 떨림이다.
+    try testing.expectEqual(after_first, fx.term.rt.editor_first_line);
 }

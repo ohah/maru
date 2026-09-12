@@ -51,7 +51,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 12: `activity <path> --from <offset>`(RAV7b-3 — 이어읽기). 그 자리부터 머리 파일만 훑고
 /// **부모는 안 연다**. 활동 wire 도 **판 3**(`resumed_from` — 요청을 지켰는지)으로 올랐다.
-pub const version_line = "maru-remote-watch 12\n";
+///
+/// 판 13: `activity … --search <q>`(RAV8b — 본문 검색). 자리를 저쪽에 보낼 수 없어(최악 270 KB)
+/// **스캔하면서 이미 아는** 그 자리를 그때 읽는다. wire 는 **판 4**(레코드에 본문 비트 둘).
+pub const version_line = "maru-remote-watch 13\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -102,12 +105,17 @@ pub fn main(init: std.process.Init) !void {
         // **부모는 아예 안 연다** — 부모 rollout 은 재개 시점에 끝난 파일이라 안 자란다(§19.1).
         // 안 주면 0 = 처음부터, 그것이 판 11 까지의 유일한 모양이다.
         var from: u64 = 0;
-        if (args.next()) |flag| {
-            if (!std.mem.eql(u8, flag, "--from")) return exitWith(exit_unsupported);
-            const text = args.next() orelse return exitWith(exit_unsupported);
-            from = parseU64(text) orelse return exitWith(exit_unsupported);
+        var search: []const u8 = &.{};
+        // **플래그는 순서에 안 매인다** — `--from` 만, `--search` 만, 둘 다 올 수 있다.
+        while (args.next()) |flag| {
+            if (std.mem.eql(u8, flag, "--from")) {
+                const text = args.next() orelse return exitWith(exit_unsupported);
+                from = parseU64(text) orelse return exitWith(exit_unsupported);
+            } else if (std.mem.eql(u8, flag, "--search")) {
+                search = args.next() orelse return exitWith(exit_unsupported);
+            } else return exitWith(exit_unsupported);
         }
-        return runActivity(io, init.gpa, file_path, from);
+        return runActivity(io, init.gpa, file_path, from, search);
     }
 
     // **구간 읽기 모드**(RAV5). `activity` 가 준 자리로 그 바이트만 돌려준다 — 펼침(계약 §2.4)과
@@ -996,7 +1004,7 @@ comptime {
 /// 스캐너에 먹이는 청크. 제품 스캔 워커와 같은 값이다.
 const activity_chunk_bytes: usize = 64 * 1024;
 
-fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_from: u64) void {
+fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_from: u64, search: []const u8) void {
     var line: [activity_line_bytes]u8 = undefined;
 
     // 머리말부터 낸다 — 그 뒤에 무엇이 실패하든 받는 쪽은 **판을 확인할 수 있다**.
@@ -1177,9 +1185,19 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_f
             if (n > 0) label.time_s = activity_wire.timestampSeconds(tbuf[0..n]);
         }
 
+        // **본문도 여기서 본다**(RAV8b). 자리를 이쪽으로 가져올 수도(계약 §2.1) 저쪽에 보낼 수도
+        // (최악 270 KB — 적대적 Y5) 없으므로, **스캔하면서 이미 아는** 그 자리를 지금 읽는다.
+        // 로컬과 **같은 함수**(`unescape*` → `bodyMatches`)를 쓴다 — 다르면 「원격에서만 안 걸리는
+        // 줄」이 생기고 사용자가 화면만 보고는 못 가린다(계약 §2.3).
+        const body_flags = if (search.len == 0) 0 else bodySearchFlags(io, gpa, file, hit, search);
+
         // **버퍼가 모자라면 멈춘다 — 개수에서 빼지 않는다**(`appendRecord` 의 계약). 빼면 꼬리
         // count 가 맞아 받는 쪽이 「완결」로 읽고, 못 실은 활동이 조용히 사라진다.
-        const at = activity_wire.appendRecord(&line, 0, .{ .hit = hit, .label = label }) orelse return;
+        const at = activity_wire.appendRecord(&line, 0, .{
+            .hit = hit,
+            .label = label,
+            .body_flags = body_flags,
+        }) orelse return;
         if (!putAll(line[0..at])) return;
         written += 1;
     }
@@ -1233,6 +1251,54 @@ fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, at: u64) bool {
 /// 따라 「한 번 답하고 죽으니 stdin 규율이 필요 없다」고 적었는데 **틀렸다**: `list` 는 readdir 이라
 /// 밀리초지만 활동 스캔은 **초 단위**다(실측 3.82 GB → 6.3 초). 그 사이 받는 쪽이 죽어도 `putAll` 을
 /// 안 하므로 EPIPE 가 안 나고, 남의 서버는 아무도 안 받을 일에 CPU 를 계속 태운다.
+/// **이 활동의 본문에 검색어가 있나**(RAV8b · 계획 §26.2).
+///
+/// 🔥 **로컬과 같은 함수를 쓴다**(계약 §2.3). 로컬 워커는 조각을 읽어 `unescape*` 로 **JSON
+/// 이스케이프를 푼 뒤** `matches`(ASCII 대소문자 무시)로 비교한다 — 저쪽이 다른 규칙을 쓰면
+/// 「원격에서만 안 걸리는 줄」이 생기고, 그것은 사용자가 **화면만 보고는 못 가리는** 종류다.
+///
+/// 돌려주는 것은 **비트마스크**다. 「걸렸다」와 「끝까지 못 봤다」는 함께 참일 수 있다 — 앞에서
+/// 걸렸지만 상한(`max_probe_bytes`)에 잘려 뒤를 못 본 경우다(적대적 Y4).
+fn bodySearchFlags(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    file: std.Io.File,
+    hit: activity_wire.Hit,
+    query: []const u8,
+) u8 {
+    // 명령 전문과 결과 전문 **둘 다** 본다 — 로컬 probe 가 그 둘을 각각 거는 것과 같은 범위다.
+    const cmd_offset = if (hit.cmd_rel != 0) hit.line_offset +| hit.cmd_rel else hit.data_offset;
+    var flags: u8 = 0;
+    for ([_]struct { off: u64, arr: bool }{
+        .{ .off = cmd_offset, .arr = false },
+        .{ .off = if (hit.result.found) hit.result.body.offset else 0, .arr = hit.result.body.is_array },
+    }) |probe| {
+        if (probe.off == 0) continue;
+        const raw = gpa.alloc(u8, activity_wire.max_probe_bytes) catch continue;
+        defer gpa.free(raw);
+        const out = gpa.alloc(u8, activity_wire.max_probe_bytes) catch continue;
+        defer gpa.free(out);
+
+        var got: usize = 0;
+        while (got < raw.len) {
+            const n = file.readPositional(io, &.{raw[got..]}, probe.off + got) catch break;
+            if (n == 0) break;
+            got += n;
+        }
+        if (got == 0) continue;
+        const block = if (probe.arr)
+            activity_wire.unescapeTextArray(out, raw[0..got])
+        else
+            activity_wire.unescapeBlock(out, raw[0..got]);
+        // 값의 끝을 못 봤다 = 이 조각은 **끝까지 안 봤다**. 뒤에 검색어가 있었을 수 있다.
+        if (!block.complete) flags |= activity_wire.body_truncated_bit;
+        if (block.len != 0 and activity_wire.bodyMatches(out[0..block.len], query)) {
+            flags |= activity_wire.body_matched_bit;
+        }
+    }
+    return flags;
+}
+
 fn scanOne(
     io: std.Io,
     gpa: std.mem.Allocator,

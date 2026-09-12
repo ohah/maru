@@ -22,7 +22,7 @@
 //! ## wire v1 (줄 지향 + 길이 접두 라벨)
 //!
 //! ```text
-//! maru-rav 3\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
+//! maru-rav 4\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
 //! F <index> <len> <경로>\n         체인의 파일 하나. **인덱스를 명시한다**(순서가 아니다 — §G1)
 //! S <p> <ip> <ap> <scanned>\n      스캔 플래그 셋(partial·image_partial·activity_partial)과 읽은 바이트
 //! A <필드 19 개> <len> <라벨>\n     활동·이미지 한 건(아래)
@@ -60,6 +60,23 @@ pub const activityLabel = context.activityLabel;
 pub const timestampSeconds = context.timestampSeconds;
 pub const time_window_bytes = context.timestamp_window_bytes;
 
+// ── 본문 검색(RAV8b) ───────────────────────────────────────────────────────────────────────────
+//
+// 🔥 **같은 답을 내려면 같은 함수를 써야 한다**(계약 §2.3). 로컬 워커는 조각을 읽어
+// `unescapeBlock`/`unescapeTextArray`/`unescapeObjectValues` 로 **JSON 이스케이프를 푼 뒤**
+// `matches`(ASCII 대소문자 무시)로 비교한다 — 저쪽이 다른 규칙을 쓰면 「원격에서만 안 걸리는 줄」이
+// 생기고, 그것은 사용자가 **화면만 보고는 못 가리는** 종류다.
+//
+// 헬퍼가 이미 이 모듈을 물고 있으므로(라벨·시각) **재수출만으로 공짜**다 — 적대적 Y1 이 그것을
+// 확인했고, 그래서 이 슬라이스가 작아졌다.
+pub const unescapeBlock = context.unescapeBlock;
+pub const unescapeTextArray = context.unescapeTextArray;
+pub const unescapeObjectValues = context.unescapeObjectValues;
+pub const bodyMatches = context.matches;
+/// 조각 하나를 읽는 상한. **로컬과 같은 값이어야 한다** — 다르면 「끝까지 못 봤다」의 경계가 갈려
+/// 같은 파일에서 다른 답이 나온다(적대적 Y3).
+pub const max_probe_bytes: usize = 64 * 1024;
+
 // ── 체인 풀기(RAV4) ────────────────────────────────────────────────────────────────────────────
 //
 // Codex 재개 세션은 부모 rollout 까지 훑어야 한다(계약 §3.3) — `compacted` 를 건너뛰는 규칙이
@@ -78,8 +95,8 @@ pub const max_chain = index.max_chain;
 /// 최대의 3 배로 잡는다(로컬 `readCodexParentId` 와 같은 값·같은 근거).
 pub const codex_meta_window_bytes: usize = 64 * 1024;
 
-pub const wire_version: u32 = 3;
-pub const header_line = "maru-rav 3";
+pub const wire_version: u32 = 4;
+pub const header_line = "maru-rav 4";
 
 /// 한 wire 가 실을 수 있는 활동·이미지 수. 스캐너의 상한들이 이 값을 정한다 — 그보다 큰 수를
 /// 주장하는 wire 는 저쪽이 오염됐다는 뜻이라 파서가 거기서 멈춘다.
@@ -153,14 +170,14 @@ pub const ScanFlags = struct {
 
 /// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
 /// 손으로 만들 때 쓰고, 값이 틀리면 「필드 수」 판정자가 먼저 죽는다.
-pub const record_fields: usize = 24;
+pub const record_fields: usize = 25;
 
 // **필드 수를 바꾸면 판도 올려야 한다**(적대적 E1). 안 올리면 옛 파서가 새 줄에서 자리가 밀린 값을
 // 읽는데, 대개는 `Malformed` 로 걸리지만 **보장이 없다** — 새 필드 값이 우연히 라벨 길이로 말이
 // 되면 그만큼을 라벨로 읽고 지나간다. 머리말 대조가 그 갈림을 막는 유일한 수단이므로, 여기서 둘을
 // 묶어 **한쪽만 고치면 컴파일이 깨지게** 한다.
 comptime {
-    const expected_fields_for_version = [_]usize{ 0, 24, 24, 24 }; // [판] = 필드 수
+    const expected_fields_for_version = [_]usize{ 0, 24, 24, 24, 25 }; // [판] = 필드 수
     if (wire_version >= expected_fields_for_version.len or
         expected_fields_for_version[wire_version] != record_fields)
     {
@@ -226,6 +243,22 @@ comptime {
 pub const Record = struct {
     hit: index.Hit,
     label: context.Label = .{},
+    /// **본문 검색의 결말**(판 4 · RAV8b) — 비트마스크다. 검색어를 안 보냈으면 0 이다.
+    ///
+    /// 🔥 **비트가 둘인 이유**: 「걸렸다」와 「끝까지 못 봤다」는 **함께 참일 수 있다**(앞에서 걸렸지만
+    /// 상한에 잘려 뒤를 못 봤다). 하나로 뭉개면 화면이 「없다」와 「못 봤다」를 섞는다(계약 §2.2 ·
+    /// 적대적 Y4) — 0 건일 때 그 구분이 가장 중요하다.
+    ///
+    /// 🔥 **저쪽이 판정한다.** 자리를 이쪽으로 가져와 읽을 수 없고(계약 §2.1) 자리를 저쪽에 보낼
+    /// 수도 없다(최악 270 KB — 적대적 Y5) — 헬퍼가 **스캔하면서 이미 아는** 그 자리를 그때 읽는다.
+    body_flags: u8 = 0,
+
+    pub fn bodyMatched(self: Record) bool {
+        return self.body_flags & body_matched_bit != 0;
+    }
+    pub fn bodyTruncated(self: Record) bool {
+        return self.body_flags & body_truncated_bit != 0;
+    }
 };
 
 /// 체인의 파일 하나 — **인덱스를 명시한다**.
@@ -312,6 +345,11 @@ pub fn appendFlags(out: []u8, at: usize, flags: ScanFlags) ?usize {
 /// `ResultSummary` 의 불리언 넷을 한 수로 접는다. 필드마다 칸을 주면 `A` 줄이 네 개 더 길어지는데,
 /// 그 넷은 **함께 읽히므로** 묶어도 「하나만 읽고 나머지를 잊는」 결함이 안 생긴다(`ResultBody` 를
 /// 묶은 것과 같은 판단).
+/// 본문 검색 비트(판 4 · RAV8b). **둘은 함께 설 수 있다**.
+pub const body_matched_bit: u8 = 1 << 0;
+pub const body_truncated_bit: u8 = 1 << 1;
+const body_flags_known: u8 = body_matched_bit | body_truncated_bit;
+
 const result_found: u8 = 1 << 0;
 const result_failed: u8 = 1 << 1;
 const result_image: u8 = 1 << 2;
@@ -371,6 +409,8 @@ pub fn appendRecord(out: []u8, at: usize, rec: Record) ?usize {
     // 시각은 음수일 수 있다(1970 이전은 안 오지만 `i64` 다) — 부호를 비트로 옮겨 10 진으로 싣는다.
     n = appendField(out, n, @as(u64, @bitCast(rec.label.time_s))) orelse return null;
     n = appendField(out, n, @intFromEnum(rec.label.source)) orelse return null;
+    // **본문에 걸렸나**(판 4 · RAV8b). 라벨 길이 **앞**이다 — 길이 칸이 마지막이라야 그 뒤가 바이트다.
+    n = appendField(out, n, rec.body_flags) orelse return null;
     n = appendField(out, n, rec.label.len) orelse return null;
     n = appendBytes(out, n, rec.label.text()) orelse return null;
     n = appendBytes(out, n, "\n") orelse return null;
@@ -630,6 +670,11 @@ pub const Parser = struct {
         h.result.image_file = try self.takeInt(u8);
         const time_bits = try self.takeDecimal();
         const source = try self.takeEnum(context.Source);
+        // **본문에 걸렸나**(판 4 · RAV8b). 0/1 만 받는다 — 그 밖의 수는 형식이 갈렸다는 뜻이다.
+        const body_flags = try self.takeInt(u8);
+        // **모르는 비트는 뭉개지 않는다** — 형식이 갈렸다는 뜻이고, 그때 「걸렸다」를 지어내면 엉뚱한
+        // 줄이 검색 결과로 뜬다.
+        if (body_flags & ~body_flags_known != 0) return ParseError.UnknownEnum;
 
         var label: context.Label = .{ .time_s = @bitCast(time_bits), .source = source };
         const text = try self.takeLenPrefixed(max_label_bytes);
@@ -644,7 +689,7 @@ pub const Parser = struct {
 
         self.records_seen += 1;
         if (self.records_seen > max_records) return ParseError.TooManyRecords;
-        return .{ .hit = h, .label = label };
+        return .{ .hit = h, .label = label, .body_flags = body_flags };
     }
 
     fn hasFile(self: *const Parser, at: u8) bool {
@@ -866,13 +911,13 @@ test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다"
 test "판이 다르면 즉시 거부한다 — 앞판도 뒷판도" {
     // **뒷판**(우리보다 새 헬퍼).
     {
-        var p = Parser.init("maru-rav 4\nX 0\n");
+        var p = Parser.init("maru-rav 5\nX 0\n");
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
     // 🔥 **앞판**(옛 헬퍼가 아직 깔려 있는 실제 경우 — 이 스택이 판 1 → 2 → 3 으로 올렸다). 여기서
     // 안 걸리면 `S` 줄의 자리가 밀린 값을 읽어 **자국이 엉뚱한 수**가 되고, 이어읽기가 안 읽은 구간을
     // 「이미 봤다」로 친다.
-    for ([_][]const u8{ "maru-rav 1\nX 0\n", "maru-rav 2\nX 0\n" }) |bytes| {
+    for ([_][]const u8{ "maru-rav 1\nX 0\n", "maru-rav 2\nX 0\n", "maru-rav 3\nX 0\n" }) |bytes| {
         var p = Parser.init(bytes);
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
@@ -960,7 +1005,9 @@ fn firstRecord(bytes: []const u8) !Record {
 const f_kind: usize = 4;
 const f_result_flags: usize = 15;
 const f_source: usize = 22;
-const f_label_len: usize = 23;
+/// 판 4 가 `source` 와 라벨 길이 **사이**에 「본문에 걸렸다」를 끼웠다(RAV8b).
+const f_body_matched: usize = 23;
+const f_label_len: usize = 24;
 
 test "필드 수가 계약과 맞다 — 판정자의 오염 줄이 자리를 안 밀리게" {
     var buf: [1024]u8 = undefined;
@@ -971,6 +1018,37 @@ test "필드 수가 계약과 맞다 — 판정자의 오염 줄이 자리를 �
         if (c == ' ') spaces += 1;
     }
     try testing.expectEqual(record_fields, spaces);
+}
+
+test "본문 검색 비트가 왕복한다 — 「걸렸다」와 「끝까지 못 봤다」 (RAV8b)" {
+    var buf: [4096]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFile(&buf, n, 2, "/home/u/s.jsonl").?;
+    n = appendFlags(&buf, n, .{ .head_bytes = 10, .resume_offset = 10 }).?;
+    // 🔥 **둘이 함께 선다** — 앞에서 걸렸지만 상한에 잘려 뒤를 못 봤다(적대적 Y4).
+    n = appendRecord(&buf, n, .{
+        .hit = sampleHit(),
+        .body_flags = body_matched_bit | body_truncated_bit,
+    }).?;
+    n = appendTail(&buf, n, 1).?;
+
+    var p = Parser.init(buf[0..n]);
+    _ = (try p.next()).?; // 체인 파일
+    _ = (try p.next()).?; // 스캔 플래그
+    const ev_rec = (try p.next()).?;
+    try testing.expect(ev_rec.record.bodyMatched());
+    try testing.expect(ev_rec.record.bodyTruncated());
+    try testing.expectEqual(@as(?Event, null), try p.next()); // 꼬리를 읽어야 완결이다
+    try testing.expect(p.complete());
+}
+
+test "본문 검색 비트는 «아는 비트»만 받는다 — 형식이 갈리면 거부한다 (RAV8b)" {
+    // 그 밖의 수는 자리가 밀렸다는 뜻이다. 뭉개면 **엉뚱한 줄이 「걸렸다」로 뜬다**.
+    var buf: [1024]u8 = undefined;
+    const h = headerWithChain(&buf);
+    // 모르는 비트(4)는 형식이 갈렸다는 뜻이다 — 뭉개면 엉뚱한 줄이 검색 결과로 뜬다.
+    const bytes = pollutedRecord(&buf, h, f_body_matched, 4, "");
+    try expectRecordError(bytes, ParseError.UnknownEnum);
 }
 
 test "라벨 길이가 상한을 넘는다고 주장하면 거부한다" {
@@ -1360,7 +1438,7 @@ test "범위: 원격 오류도 완결이다 — 「못 읽었다」와 「빈 �
 
 test "범위: 활동 wire 를 범위 파서에 먹이면 거부한다 — 형식이 갈려 있다" {
     var buf: [1024]u8 = undefined;
-    const n = appendHeader(&buf, 0).?; // `maru-rav 3`
+    const n = appendHeader(&buf, 0).?; // `maru-rav 4`
     var p = RangeParser.init(buf[0..n]);
     try testing.expectError(ParseError.UnsupportedVersion, p.next());
 }

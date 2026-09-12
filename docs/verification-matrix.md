@@ -3047,13 +3047,19 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   배타 게시한다. permission/UI session/배너/클릭/attach/cleanup 실패는 skip/pass가 아니라 typed `not_provisioned` 또는
   failed artifact이며, 사용자 workspace·session-host registry를 읽거나 지우지 않는다. Notification Center 정리는 전체
   삭제가 아니라 이번 UUID의 exact request identifier 두 개만 대상으로 하고, 외부 알림을 열거 결과에 기록하지 않는다.
-- **N3-R3 protected workflow binding (R3a 구현, R3b 미착수):** R3a는 기존 release 전용 protected-deployment
+- **N3-R3 protected workflow binding (R3a·R3b1 구현, R3b2 미착수):** R3a는 기존 release 전용 protected-deployment
   verifier의 의미를 바꾸지 않고 reviewed policy로 environment/workflow/job identity를 결속해, `release` signing job과
-  Notification 전용 job이 같은 strict run/attempt/job/deployment 알고리즘을 공유하게 한다. R3b는 tag release의 signed candidate를 별도
+  Notification 전용 job이 같은 strict run/attempt/job/deployment 알고리즘을 공유하게 한다. R3b1의
+  `release_adapter_notification_candidate_product.zig`는 runner 입력을 owned snapshot으로 만든 뒤, caller가 추측한
+  mount 경로가 아니라 DMG authority가 read-only mount 수명 안에서 발급한 `MountedCandidate`의 app/helper 경로만 두 R2c
+  scenario에 주입한다. 전역 source inventory는 P5d와 Notification product가 `observeWithMountedGate`를 각각 한 번만 호출하고
+  둘 다 GitHub credential/workflow를 import하지 않음을 고정한다. R3b2는 격리 runtime과 실제 notification을 준비하는
+  token-free 제품 CLI 및 tag release의 signed candidate를 별도
   `Session host product` environment와 고정 self-hosted macOS label을 가진 job으로 전달한다. job은 R2를 실행하고
   attempt-scoped artifact attestation을 게시한다. 최종 release evidence는 exact run/attempt/job/deployment와 candidate
   identity, R1 leaf digest를 교차검증해야 하며, hosted runner·다른 ref·다른 candidate·재실행의 옛 artifact를 섞지 않는다.
-  repository environment의 이름만 존재하거나 job이 `skipped`인 상태는 protection 통과가 아니다. R1~R3와 실제
+  R3b1 component만으로는 실행 가능한 workflow나 제품 artifact가 아니다. repository environment의 이름만 존재하거나
+  job이 `skipped`인 상태는 protection 통과가 아니다. R1~R3와 실제
   provisioned run이 모두 green이 되기 전에는 P4 notification 또는 영속 세션 호스트 전체 완료를 주장하지 않는다.
 
 ### Session default G1 config provenance

@@ -1466,7 +1466,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    attach 전 screen·attach 후 실제 PTY input→screen 왕복을 증명하는 R2b3a strict continuity receipt owner까지 구현됐다. 다음은
    R2b3b1의 exact remote generation/PID product observation과 R2b3b2의 app-owned attach 전후 screen/input 상태머신,
    두 번째 framed receipt 및 parent strict composition까지 구현됐다. mounted signed candidate R2c composition도 구현되어
-   canonical leaf publication과 rollback까지 Debug·ReleaseFast gate가 닫혔다. 다음은 protected workflow binding R3를 구현한다. P4의 actual
+   canonical leaf publication과 rollback까지 Debug·ReleaseFast gate가 닫혔다. R3a의 닫힌 protected-deployment profile과
+   R3b1의 token-free mounted-DMG product bridge도 구현됐다. 다음은 격리 runtime/notification 준비를 포함한 제품 CLI와
+   protected workflow/artifact binding인 R3b2다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1

@@ -224,6 +224,43 @@ test "RAV7b-4: 접은 전송은 «성공 코드»를 안 낸다" {
     }
 }
 
+test "RAV8a §6.3: 체인을 «통째로 받는» 워커는 원격에서 안 걸린다" {
+    // 🔥 **게이트 자신의 구멍이었다**(계획 §25.2). 이 축은 `agent_activity.zig` 의 `chain.get(`
+    // 호출 수로 「경로를 주는 문은 둘뿐」을 지키는데, **본문 검색 워커는 `chain` 을 통째로 받아**
+    // 자기 안에서 `get` 하고 `Dir.cwd().openFile` 로 연다 — **두 문을 우회하는 세 번째 문**이고
+    // 게이트의 눈 밖이었다.
+    //
+    // 그래서 원격 pane 에서 본문을 검색하면 **저쪽 경로를 이쪽에서 열었다**: 양쪽이 macOS 이고
+    // 사용자 이름이 같으면 같은 모양의 홈 경로가 이쪽에도 있어 **남의 대화를 읽는다**(계약 §2.1).
+    const gpa = std.testing.allocator;
+    const activity_src = try readSource(gpa, std.testing.io, activity_path);
+    defer gpa.free(activity_src);
+    const code = try stripComments(gpa, activity_src);
+    defer gpa.free(code);
+
+    // **원격이면 안 건다.** 이 가드가 없으면 워커가 원격 경로를 로컬에서 연다.
+    if (std.mem.indexOf(u8, code, "if (self.agent_activity.source_remote) {\n        const body_remote") == null) {
+        std.debug.print("🔥 본문 검색이 원격에서도 걸린다 — 워커가 저쪽 경로를 이쪽에서 연다(계약 §2.1).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // **「없다」가 아니라 「아직 못 한다」로 답한다**(§2.2). 조용한 0 건은 「본문에 없다」로 읽힌다.
+    if (std.mem.indexOf(u8, code, "remote_unsupported = true;") == null) {
+        std.debug.print("🔥 원격 본문 검색이 조용히 0 건을 낸다 — 「없다」와 「못 했다」가 안 갈린다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // 그리고 **화면이 그것을 말한다** — ⚠️ 문자열이 **있는지**가 아니라 그 분기가 **서는지**를 센다.
+    // `if (false) return t(.…)` 도 그 이름을 포함하므로, 조건까지 붙여야 뮤테이션이 죽는다.
+    if (std.mem.indexOf(u8, code, "if (body_remote) return maru.i18n.t(.agent_activity_body_remote_unsupported);") == null) {
+        std.debug.print("🔥 화면이 「아직 못 한다」를 안 말한다 — 그 분기가 서지 않는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // 그 조건이 **검색어에 딸려 있어야** 한다 — 안 그러면 옛 답의 문구가 새 검색어에 남는다.
+    if (std.mem.indexOf(u8, code, "self.agent_activity.body.remote_unsupported and") == null) {
+        std.debug.print("🔥 「아직 못 한다」가 검색어와 안 묶여 있다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "RAV7b-4 §6.3: 취소 훅이 로컬 파일시스템을 안 만진다" {
     // 취소 훅은 **전송이 도는 동안** 백그라운드 스레드에서 반복 호출된다(50 ms 마다). 거기서
     // `std.Io` 나 로컬 파일을 만지면 그 자리가 곧 계약 §2.1 위반이고, **읽기 루프 안**이라 가장

@@ -10343,6 +10343,53 @@ test "kitty 애니메이션: z<0 프레임은 재생에서 건너뛴다 (적대�
     try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.current_frame);
 }
 
+// **밀린 시간은 은행에 쌓이지 않는다.** 이 함수는 호출 한 번에 *보이는* 프레임을 한 장만 넘긴다
+// (skip 프레임만 연달아 지난다). 그래서 남은 시간을 그대로 두면, 늦은 tick 하나가 그 뒤 수십 tick 을
+// 「밀려 나오는 프레임」으로 채운다 — 사용자가 보는 것은 애니메이션이 아니라 빨리 감기다.
+//
+// 실측(이 판정자를 쓰게 만든 값): 2 초가 밀린 뒤 1ms 짜리 tick 100 회에서 프레임 **27 장**이 나왔다.
+// 실시간이라면 100ms 동안 2~3 장이다. 늦은 프레임은 **버리는** 것이 옳다(영상의 frame drop 과 같다).
+test "kitty 애니메이션: 밀린 시간은 한 프레임분만 남는다 — 늦은 tick 이 빨리 감기가 되지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    var k: usize = 0;
+    while (k < 3) : (k += 1) try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\"); // 기본 gap 40ms, 프레임 넷, 무한
+
+    // 2 초가 밀렸다. 이 호출은 한 장만 넘기고 **나머지 1960ms 를 들고 있으면 안 된다**.
+    try std.testing.expect(core.advanceAnimations(2000));
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), img.current_frame);
+    try std.testing.expect(img.elapsed_ms <= img.frameGapMs(img.current_frame));
+
+    // 그 뒤 1ms 짜리 tick 을 100 번 = **실시간 100ms**. gap 이 40ms 이므로 나올 수 있는 프레임은
+    // 밀려 있던 한 장 + 100/40 두 장 = **셋**이다. 상한이 없던 코드에서는 같은 구간에 **27 장**이
+    // 쏟아졌다(실측). 이 숫자가 이 판정자의 전부다.
+    var moved: usize = 0;
+    for (0..100) |_| {
+        if (core.advanceAnimations(1)) moved += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), moved);
+
+    // **gap 이 tick 보다 짧아도 은행이 자라지 않는다.** host cadence 는 20ms 인데 gap 10ms 를 요구하면
+    // 재생은 cadence 속도로 묶인다(그건 정상이다) — 문제는 남는 10ms 가 매 tick 쌓이는 것이다.
+    // 200 tick 이면 2 초어치가 은행에 고이고, 이미지를 잠깐 숨겼다 다시 걸면 그게 통째로 쏟아진다.
+    var n: usize = 1;
+    while (n <= 4) : (n += 1) {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=a,i=1,r={d},z=10,q=2\x1b\\", .{n}));
+    }
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    for (0..200) |_| _ = core.advanceAnimations(20);
+    const after = core.kitty_images.map.get(1).?;
+    try std.testing.expect(after.elapsed_ms <= after.frameGapMs(after.current_frame));
+}
+
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();

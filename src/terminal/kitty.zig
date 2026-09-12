@@ -1210,6 +1210,14 @@ pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
             if (!img.frameSkipped(next)) break; // 건너뛰는 프레임이면 곧바로 다음으로
             img.elapsed_ms = img.frameGapMs(next); // skip 은 시간을 쓰지 않는다
         }
+        // **밀린 시간을 쌓아 두지 않는다.** 위 루프는 호출 한 번에 *보이는* 프레임을 한 장만 넘긴다
+        // (skip 프레임만 연달아 지난다). 그래서 남은 시간을 그대로 들고 있으면 두 가지가 생긴다 —
+        // ① 늦은 tick 하나가 그 뒤 수십 tick 을 「밀려 나오는 프레임」으로 채운다(실측: 2 초가 밀리면
+        // 1ms tick 100 회에서 27 장이 나왔다. 실시간이면 2~3 장이다). ② gap 이 tick 간격보다 짧으면
+        // 남는 시간이 **매 tick 쌓여**, 이미지를 숨겼다 다시 걸 때 그 은행이 통째로 쏟아진다.
+        // 늦은 프레임은 쌓지 말고 **버린다** — 영상의 frame drop 과 같은 선택이다.
+        const owed = img.frameGapMs(img.current_frame);
+        if (img.elapsed_ms > owed) img.elapsed_ms = owed;
         if (img_changed) bumpGeneration(self, img);
     }
     return changed;

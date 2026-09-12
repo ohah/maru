@@ -16399,8 +16399,15 @@ test "MAXC2 폭 캐시를 못 잡아도 상한이 «0 으로 안 간다» — �
 
     // **어느 할당이 실패해야 이 자리에 닿는지 모른다** — 그래서 차례로 실패시키며 훑는다(이 파일의
     // 다른 실패-경로 판정자들이 쓰는 그 방식이다).
+    //
+    // **훑는 폭이 「기회를 늘리는 값」이 아니라 「어긋남을 견디는 여유」다**(실측 2026-09-12). 이 판정자가
+    // CI 에서 `FailurePathNotReached` 로 한 번 빨개졌고, 같은 작업을 다시 돌리니 통과했다 — 재현이
+    // 안 되는 실패였다. 재 보니 **200 단계를 훑어도 닿는 step 은 정확히 하나**(내 기계에서 14)다.
+    // 즉 폭을 늘려도 적중 수는 안 늘고, 늘어나는 것은 **그 하나가 어디로 밀려도 잡히는 범위**뿐이다.
+    // 준비 단계(`PaneFixture.init`·`appendPaneFrame`)의 할당 수는 환경에 따라 흔들리므로 40 은
+    // 그 하나가 창 밖으로 나가기에 충분히 좁았다. 비용은 헛도는 반복이라 싸다.
     var step: usize = 0;
-    while (step < 40) : (step += 1) {
+    while (step < 200) : (step += 1) {
         var fa = std.testing.FailingAllocator.init(backing, .{});
         const alloc = fa.allocator();
         var fx = PaneFixture.init(alloc) catch continue;

@@ -128,6 +128,12 @@ const inventory = [_]Entry{
     // 표시가 아니라 **하니스 진단**이다 — 사용자는 이 문장을 볼 일이 없고, 조용히 포기하면
     // 틀린 그림이 PR 의 증거가 되기 때문에 넣었다(§7 셋째 갈래).
     .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 4 },
+    // **표시 문자열이 아니라 판정자의 «문서 내용» 이다**(§7 "표시가 아니면 그 사실을 적고 원장을
+    // 올린다"). 캐럿 튐·스크롤 떨림 제보를 조사하며 만든 큰 문서 픽스처가 **한글이 섞인 코드·JSON**
+    // 을 만든다(`"값 {d}"`·`"한글 {d}"`) — 한글은 EAW Wide 라 **열 계산이 ASCII 와 다르고**, 제보가
+    // 파일 종류와 무관하다고 했으므로 그 축을 픽스처가 실제로 담아야 한다. 화면에 나가는 문구가
+    // 아니라 **디스크에 쓰는 테스트 파일의 내용**이다.
+    .{ .path = "src/platform/macos/app_session/editor.zig", .count = 2 },
     // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
     // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
     // 수 있게 한 줄 찍는다 — 실패했을 때만 나오고 화면에는 영영 안 간다.
@@ -268,7 +274,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 226;
+const header_total = 228; // +2: 편집기 판정자의 큰 문서 픽스처(한글 섞인 코드·JSON — 위 등재 주석)
 const header_config_total = 54;
 
 comptime {

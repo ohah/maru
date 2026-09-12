@@ -764,7 +764,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
     var n: usize = 0;
     for (visual, 0..) |v, i| {
         if (n + 2 > out.len) break; // 줄 배경 + 띠 = 둘씩 든다
-        const idx = props.first_line + v.line;
+        const idx = v.docIndex(props.first_line);
         if (idx >= bands.len) continue;
         const role: tokens.ColorRole = switch (bands[idx]) {
             .none => continue,
@@ -873,7 +873,7 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
     var n: usize = 0;
     for (visual, 0..) |v, i| {
         if (n >= out.len) break;
-        const idx = props.first_line + v.line;
+        const idx = v.docIndex(props.first_line);
         if (idx >= sel.len or idx >= props.lines.len) continue;
         if (sel[idx].len == 0) continue;
         n += paintRowMarks(props, layout, .{
@@ -911,10 +911,18 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
 
     var n: usize = 0;
     for (visual, 0..) |row, i| {
-        if (row.line >= rows.len) continue;
-        const offsets = rows[row.line];
+        // **`v.line` 은 뷰포트 첫 줄로부터의 상대 인덱스다**(그 필드 doc). `carets`·`lines` 는 절대
+        // 배열이므로 `first_line` 을 더해야 한다 — 이 파일의 띠·검색·마크가 전부 그렇게 인덱싱한다
+        // (`props.first_line + v.line`). caret 만 그 덧셈이 빠져 있었고, 그래서 **스크롤된 화면에서
+        // 커서가 `first_line` 만큼 아래 행에, 다른 줄의 글자를 기준으로 그려졌다**(사용자 제보
+        // 2026-09-12, 그리고 2026-08-31 의 «클릭하면 캐럿이 몇 줄 아래로 간다» 가 같은 것이다).
+        // 기존 caret 판정자는 전부 `first_line = 0` 이라 이 축을 한 번도 안 밟았다 — `CRT7` 이 그
+        // 자리를 잡는다.
+        const idx = row.docIndex(props.first_line);
+        if (idx >= rows.len) continue;
+        const offsets = rows[idx];
         if (offsets.len == 0) continue;
-        const line = if (row.line < props.lines.len) props.lines[row.line] else continue;
+        const line = if (idx < props.lines.len) props.lines[idx] else continue;
 
         // **행의 y는 `visual` 배열 인덱스로 센다** — `paintSelection`이 쓰는 것과 같은 산술이다.
         // `row.screen_row`가 아닌 이유는 그 값이 이 배열의 인덱스와 다를 수 있어서다.
@@ -1028,7 +1036,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     if (props.search_current) |cur| {
         for (visual, 0..) |v, i| {
             if (n >= out.len) break;
-            const idx = props.first_line + v.line;
+            const idx = v.docIndex(props.first_line);
             if (idx != cur.line or idx >= rows.len or idx >= props.lines.len) continue;
             const marks = rows[idx];
             const k = for (marks, 0..) |m, mi| {
@@ -1051,7 +1059,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     // 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
     for (visual, 0..) |v, i| {
         if (n >= out.len) break;
-        const idx = props.first_line + v.line;
+        const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
         const marks = rows[idx];
         if (marks.len == 0) continue;
@@ -3204,4 +3212,138 @@ test "SRCH4 현재 매치가 **아래쪽 행**에 있어도 예산에 안 밀린
     // 판정이 성립하려면 **실제로 마르되 검색 층이 죽지는 않아야** 한다.
     try std.testing.expect(normal > 0);
     try std.testing.expect(normal < row_marks.len * lines_buf.len - 1);
+}
+
+test "CRT7 스크롤된 화면에서도 caret 은 제 줄·제 열에 선다 (사용자 제보 2026-09-12)" {
+    // **제보**: 드래그·입력을 하다 보면 커서가 엉뚱한 데로 간다. 문서 모델은 정상이었고(실측 로그:
+    // `caret set`·`insert at` 이 전부 맞는 줄·열을 말한다) 남은 것은 **그리는 자리**였다.
+    //
+    // 이 파일은 같은 배열을 **두 가지로** 인덱싱한다: 띠·검색·마크는 `props.first_line + v.line`,
+    // caret 만 `v.line`. `VisualRow.line` 은 **뷰포트 첫 줄로부터의 상대 인덱스**이고(그 필드 doc)
+    // `carets`·`lines` 는 **절대** 배열이므로, 스크롤되면 caret 이 **다른 줄의 자료**로 그려진다.
+    //
+    // 기존 caret 판정자(CRT1~CRT6)는 전부 `first_line = 0` 이라 이 축을 한 번도 안 밟았다.
+    var ops: [256]draw.Op = undefined;
+    var text: [2048]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [32]content.Row = undefined;
+    var visual_rows: [32]visual_map.VisualRow = undefined;
+    var gutter_rows: [32]gutter.Row = undefined;
+    var counts: [32]u32 = undefined;
+    var count_scratch: [1024]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
+
+    // 다섯 줄 문서. **셋째 줄(index 2)에만** caret 이 있고, 화면은 그 줄부터 그린다.
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cc-caret-here", "dddd", "eeee" };
+    const none = [_]u32{};
+    const on_third = [_]u32{2}; // 셋째 줄의 2 번 byte
+    const carets = [_][]const u32{ &none, &none, &on_third, &none, &none };
+    const total_cols: u16 = 40;
+    const first_line: usize = 2; // **스크롤된 상태** — 화면 첫 행이 문서 셋째 줄이다
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = first_line,
+        .total_lines = lines.len,
+        .carets = &carets,
+        .caret_visible = true,
+        .visible_rows = 3,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 48 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
+    });
+
+    var carets_drawn: usize = 0;
+    var caret_y: i32 = -1;
+    var caret_x: i32 = -1;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .cursor) continue;
+        carets_drawn += 1;
+        caret_y = op.quad.rect.y;
+        caret_x = op.quad.rect.x;
+    }
+    // **caret 은 정확히 하나**여야 한다 — 화면 첫 행(문서 셋째 줄)에.
+    try std.testing.expectEqual(@as(usize, 1), carets_drawn);
+    try std.testing.expectEqual(@as(i32, 0), caret_y); // 화면 첫 행
+    // 열 2 = gutter 뒤 2 칸. gutter 폭은 layout 이 정하므로 **0 보다 크고** 3 칸 이내인 것만 본다.
+    try std.testing.expect(caret_x > 0);
+}
+
+test "CRT8 랩과 스크롤이 함께 걸려도 caret 은 한 번만, 제 조각에 선다 (적대적 3회차)" {
+    // `CRT3` 은 랩을, `CRT7` 은 스크롤을 각각 본다 — **둘이 겹친 자리**는 아무도 안 봤다. 랩이
+    // 걸리면 한 논리 줄이 조각 여럿이고 그 조각들은 `line` 이 **같다**. 절대 인덱스를 잘못 잡으면
+    // 그 줄 전체가 caret 후보가 되어 **조각마다 하나씩** 서거나, 엉뚱한 조각에 선다.
+    var ops: [256]draw.Op = undefined;
+    var text: [2048]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [32]content.Row = undefined;
+    var visual_rows: [32]visual_map.VisualRow = undefined;
+    var gutter_rows: [32]gutter.Row = undefined;
+    var counts: [32]u32 = undefined;
+    var count_scratch: [1024]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
+
+    // 넷째 줄(index 3)이 길어 랩된다. caret 은 그 줄의 **뒤쪽**(둘째 조각에 걸리는 자리)에 있다.
+    const long = "0123456789abcdefghij0123456789"; // 30 자 — 폭 10 이면 조각 셋
+    const lines = [_][]const u8{ "aa", "bb", "cc", long, "dd" };
+    const none = [_]u32{};
+    const on_long = [_]u32{15}; // 15 번 byte → 둘째 조각(10~19)
+    const carets = [_][]const u32{ &none, &none, &none, &on_long, &none };
+    const total_cols: u16 = 24; // gutter 가 먹고 남는 본문이 10 칸 안팎이 되게
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 3, // **스크롤** — 화면 첫 줄이 그 긴 줄이다
+        .total_lines = lines.len,
+        .carets = &carets,
+        .caret_visible = true,
+        .visible_rows = 4,
+        .wrap = true, // **랩**
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
+    });
+
+    var n: usize = 0;
+    var y: i32 = -1;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .cursor) continue;
+        n += 1;
+        y = op.quad.rect.y;
+    }
+    // **정확히 하나** — 조각마다 서면 그 줄이 통째로 커서가 된다.
+    try std.testing.expectEqual(@as(usize, 1), n);
+    // 그리고 **둘째 조각**(화면 둘째 행)에 선다 — 첫 조각에 서면 10 칸 앞이다.
+    try std.testing.expectEqual(@as(i32, 16), y);
 }
